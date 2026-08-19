@@ -1,13 +1,15 @@
 """[Phase4C §4-§6] Formal Current Review history binding (P0-B) 单元测试。
 
 验证：
-- _build_scope_history 将 canonical history lineage 过滤条件
-  (required_history_contract_version / required_taxonomy_compatibility_key /
-  required_source_history_run_id) 透传给 load_metric_history；
 - source run id 由 canonical readiness contract 动态解析，禁止硬编码生产 run id；
-- market scope 的 taxonomy_compatibility_key 可为 None（canonical market series）。
+- market scope 的 taxonomy_compatibility_key 可为 None（canonical market series）；
+- MarketReviewRun ↔ canonical HistoryRun 绑定生命周期（禁止 A→B 漂移，fail closed）。
 
-不连接真实数据库（mock load_metric_history），属于 modified-scope unit test。
+[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] legacy ``_build_scope_history`` 与
+``_compute_scope_metrics_phase`` 已物理删除（P/Q/U/C/V metric history 不再被
+Review canonical runtime 消费），故不再有"legacy history lineage 透传"测试。
+
+不连接真实数据库，属于 modified-scope unit test。
 """
 from __future__ import annotations
 
@@ -18,107 +20,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.services.review_orchestrator_service import (
-    ScopeDefinition,
+    ReviewOrchestratorError,
     _bind_or_reuse_canonical_history_source,
-    _build_scope_history,
-    _compute_scope_metrics_phase,
     _resolve_canonical_history_source,
 )
-
-
-class TestHistoryBindingForwarding:
-    async def test_build_scope_history_forwards_required_lineage(self):
-        scope = ScopeDefinition(
-            scope_type="market",
-            scope_key="ALL_A_SHARE",
-            scope_name="全市场",
-            taxonomy_version="canonical-market-v1",
-            taxonomy_compatibility_key=None,
-            membership_version=None,
-        )
-        load = AsyncMock(return_value=(None, None, None))
-        with patch(
-            "app.services.review_metric_observation_service.load_metric_history",
-            load,
-        ):
-            await _build_scope_history(
-                AsyncMock(),
-                scope=scope,
-                trade_date=date(2026, 8, 7),
-                algorithm_version="review-v1",
-                baseline_window=120,
-                required_history_contract_version="review-history-v2",
-                required_taxonomy_compatibility_key=None,
-                required_source_history_run_id=uuid.uuid4(),
-            )
-        assert load.await_count == 1
-        kwargs = load.call_args.kwargs
-        assert kwargs["required_history_contract_version"] == "review-history-v2"
-        assert kwargs["required_taxonomy_compatibility_key"] is None
-        assert kwargs["required_source_history_run_id"] is not None
-        assert kwargs["scope_type"] == "market"
-        assert kwargs["trade_date"] == date(2026, 8, 7)
-
-    async def test_compute_scope_phase_passes_taxonomy_key(self):
-        scope = ScopeDefinition(
-            scope_type="market",
-            scope_key="ALL_A_SHARE",
-            scope_name="全市场",
-            taxonomy_version="canonical-market-v1",
-            taxonomy_compatibility_key=None,
-            membership_version=None,
-        )
-        # _compute_scope_metrics_phase 会调用很多下游服务；这里只断言它把
-        # scope.taxonomy_compatibility_key 透传给了 _build_scope_history。
-        captured = {}
-
-        async def fake_build(*args, **kwargs):
-            captured.update(kwargs)
-            return (None, None, None, None)
-
-        run = type(
-            "R",
-            (),
-            {
-                "id": uuid.uuid4(),
-                "trade_date": date(2026, 8, 7),
-                "algorithm_version": "review-v1",
-                "baseline_window": 120,
-                "source_core_run_id": uuid.uuid4(),
-            },
-        )()
-
-        class _Snap:
-            pass
-
-        with patch(
-            "app.services.review_orchestrator_service._build_scope_history",
-            fake_build,
-        ), patch(
-            "app.services.review_orchestrator_service._resolve_all_discovery_scopes",
-            AsyncMock(return_value=[scope]),
-        ), patch(
-            "app.services.review_orchestrator_service.resolve_scope_members",
-            AsyncMock(return_value=([uuid.uuid4()], "全市场")),
-        ), patch(
-            "app.services.review_orchestrator_service.fetch_member_flat_list",
-            AsyncMock(return_value=[]),
-        ), patch(
-            "app.services.review_orchestrator_service.compute_scope_metrics",
-            AsyncMock(return_value=_Snap()),
-        ), patch(
-            "app.services.review_orchestrator_service._upsert_run_item",
-            AsyncMock(),
-        ):
-            await _compute_scope_metrics_phase(
-                AsyncMock(),
-                run,
-                scope,
-                required_history_contract_version="review-history-v2",
-                required_source_history_run_id=uuid.uuid4(),
-            )
-        assert captured["required_taxonomy_compatibility_key"] is None
-        assert captured["required_history_contract_version"] == "review-history-v2"
 
 
 class TestCanonicalSourceResolver:
@@ -259,7 +164,7 @@ class TestRunBoundHistoryLifecycle:
             "app.services.review_orchestrator_service.validate_canonical_history_run_readiness",
             AsyncMock(return_value={"status": "rejected", "reason": "contract mismatch"}),
         ):
-            with pytest.raises(Exception):  # ReviewOrchestratorError
+            with pytest.raises(ReviewOrchestratorError):
                 await _bind_or_reuse_canonical_history_source(session, run)
 
     async def test_bound_source_missing_fail_closed(self):
@@ -277,5 +182,5 @@ class TestRunBoundHistoryLifecycle:
             "app.services.review_orchestrator_service.validate_canonical_history_run_readiness",
             AsyncMock(return_value={"status": "missing", "reason": "run not found"}),
         ):
-            with pytest.raises(Exception):
+            with pytest.raises(ReviewOrchestratorError):
                 await _bind_or_reuse_canonical_history_source(session, run)

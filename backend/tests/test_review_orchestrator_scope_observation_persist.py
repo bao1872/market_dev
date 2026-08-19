@@ -33,6 +33,9 @@ def _make_run() -> object:
     run = type("Run", (), {})()
     run.trade_date = date(2026, 8, 12)
     run.algorithm_version = "review-v2.3"
+    # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] composition 将 per-scope readiness
+    # 写入 run.metadata_json，因此 mock run 必须提供可变 metadata_json。
+    run.metadata_json = {}
     return run
 
 
@@ -100,7 +103,13 @@ OBSERVATION = {
 
 @pytest.mark.asyncio
 async def test_activated_scope_persists_fact():
-    """industry_l2 activated scope：从 batch map 取 prep → compute → invariant → save。"""
+    """industry_l2 activated scope：从 batch map 取 prep → compute → invariant → save。
+
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 落库后还会计算 canonical 六键
+    composition（internal_structure / member_attribution 由它们各自的 canonical
+    owner 产出；这里 mock 其输出，placeholder member 不满足真实 member attribution
+    的字段契约）。返回 composition dict，且 composition_readiness 写入 run metadata。
+    """
     run = _make_run()
     scope = _scope("industry_l2", "sw_electronics")
     fake_prep = _prep("industry_l2", "sw_electronics")
@@ -111,8 +120,12 @@ async def test_activated_scope_persists_fact():
         orch, "check_observation_invariants", return_value=[{"ok": True, "name": "x"}],
     ) as mock_check, patch.object(
         orch, "save_scope_observation_fact", AsyncMock(return_value=object()),
-    ) as mock_save:
-        await orch._persist_canonical_scope_observation(
+    ) as mock_save, patch.object(
+        orch, "compute_internal_structure", return_value={"status": "ready", "x": 1},
+    ), patch.object(
+        orch, "compute_member_attribution", return_value={"status": "ready", "y": 1},
+    ):
+        result = await orch._persist_canonical_scope_observation(
             _mock_session(), run, scope,  # type: ignore[arg-type]
             prepared_observations={"sw_electronics": fake_prep},
         )
@@ -125,6 +138,17 @@ async def test_activated_scope_persists_fact():
     assert args[1] is fake_prep
     assert args[2] is OBSERVATION
     assert kwargs["algorithm_version"] == "review-v2.3"
+    # canonical composition 已产出：六键固定契约 + readiness=ready + 已写入 run metadata
+    assert result is not None
+    assert result["composition_readiness"] == "ready"
+    assert {k for k in ("scope_observation", "historical_dynamics",
+                        "internal_structure_facts", "leadership", "member_attribution")
+            if k in result} == {"scope_observation", "historical_dynamics",
+                                "internal_structure_facts", "leadership", "member_attribution"}
+    assert (
+        run.metadata_json["canonical_composition_readiness"]["sw_electronics"]
+        == "ready"
+    )
 
 
 @pytest.mark.asyncio
@@ -189,9 +213,10 @@ async def test_unavailable_scope_returns_without_persist():
 
 
 @pytest.mark.asyncio
-async def test_scope_missing_from_batch_map_returns_without_persist():
-    """[REVIEW-EXECUTION-PATH-CONSOLIDATION] batch prepare 未包含该 scope
-    （如 batch prepare 失败被隔离）：直接跳过，不写表、不抛错。"""
+async def test_activated_scope_missing_from_batch_map_fails_closed():
+    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] ACTIVATED family whose batch prep
+    is missing must FAIL CLOSED (raise), and must NOT silently skip or fall back
+    to any legacy result.  This replaces the old idle-skip contract. """
     run = _make_run()
     scope = _scope("industry_l1", "sw_electronics")
 
@@ -200,9 +225,32 @@ async def test_scope_missing_from_batch_map_returns_without_persist():
     ), patch.object(
         orch, "save_scope_observation_fact", AsyncMock(),
     ) as mock_save:
+        with pytest.raises(ValueError, match="canonical batch prepare missing"):
+            await orch._persist_canonical_scope_observation(
+                _mock_session(), run, scope,  # type: ignore[arg-type]
+                prepared_observations={},
+            )
+
+    mock_save.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_activated_family_skips_without_persist():
+    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] market (non-activated family) is a
+    LEGAL SKIP by ScopeCapability regardless of whether its PIT membership
+    resolves — it must never reach save_scope_observation_fact, never raise for
+    a missing batch map, and never fall back to legacy."""
+    run = _make_run()
+    scope = _scope("market", "market")
+
+    with patch.object(
+        orch, "compute_scope_observation", return_value=OBSERVATION,
+    ), patch.object(
+        orch, "save_scope_observation_fact", AsyncMock(),
+    ) as mock_save:
         await orch._persist_canonical_scope_observation(
             _mock_session(), run, scope,  # type: ignore[arg-type]
-            prepared_observations={},
+            prepared_observations={},  # even if prep absent, market is a legal skip
         )
 
     mock_save.assert_not_awaited()

@@ -283,7 +283,7 @@ async def test_t7_resume_run_only_pending_skips_succeeded_scopes():
         patch.object(ros, "load_day_fact_maps", AsyncMock(return_value={})),
         patch.object(ros, "_resolve_all_discovery_scopes", AsyncMock(return_value=[])),
         patch.object(
-            ros, "_compute_scope_metrics_phase", AsyncMock(return_value=(None, None)),
+            ros, "_compute_canonical_composition_phase", AsyncMock(return_value=None),
         ) as m_metrics,
         patch.object(
             ros, "evaluate_all_active_trackings", AsyncMock(return_value=0),
@@ -334,7 +334,7 @@ async def test_t7_resume_run_only_pending_false_includes_succeeded():
         patch.object(ros, "load_day_fact_maps", AsyncMock(return_value={})),
         patch.object(ros, "_resolve_all_discovery_scopes", AsyncMock(return_value=[])),
         patch.object(
-            ros, "_compute_scope_metrics_phase", AsyncMock(return_value=(None, None)),
+            ros, "_compute_canonical_composition_phase", AsyncMock(return_value=None),
         ) as m_metrics,
         patch.object(
             ros, "evaluate_all_active_trackings", AsyncMock(return_value=0),

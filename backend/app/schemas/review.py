@@ -231,39 +231,38 @@ class ReviewOverviewResponse(BaseModel):
 # =============================================================================
 
 
-class ReviewScopeMetricsResponse(BaseModel):
-    """GET /api/v1/review/{trade_date}/scopes 单条记录。
+class ReviewCanonicalScopeResponse(BaseModel):
+    """GET /api/v1/review/{trade_date}/scopes 单条记录（canonical）。
 
-    返回每个范围的 P/Q/U/C/V、变化、历史分位和命中数量（PRD §14.3）。
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 该端点不再返回 legacy P/Q/U/C/V
+    （MarketReviewScopeSnapshot 已退役），改读 canonical ReviewScopeObservationFact
+    + run.metadata_json["canonical_composition_readiness"/"canonical_coverage"]。
+
+    readiness 为 canonical composition readiness（唯一发布判断依据）；status 为
+    fact 级 PIT 状态；observation 透传 Canonical Observation Core 的客观事实 payload
+    （PRD §7.2-§7.7，前端只展示、不重算）。
     """
 
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
-    id: str = Field(..., description="快照 ID（UUID）")
-    reviewRunId: str = Field(..., description="复盘 run ID")
-    tradeDate: str = Field(..., description="业务交易日")
-    scopeType: str = Field(..., description="范围类型（market/major_index/...）")
+    scopeType: str = Field(..., description="范围类型（industry_l1/l2/l3/concept）")
     scopeKey: str = Field(..., description="范围标识")
-    scopeName: str = Field(..., description="范围名称")
-    parentScopeType: str | None = Field(None, description="父范围类型")
-    parentScopeKey: str | None = Field(None, description="父范围标识")
-    eligibleCount: int = Field(..., description="范围成员总数")
-    readyCount: int = Field(..., description="有效成员数")
-    coverageRatio: float = Field(..., description="覆盖率")
-    status: str = Field(..., description="快照状态")
-    p: ReviewMetricPayloadDTO | None = Field(None, description="P 价格表现强度")
-    q: ReviewMetricPayloadDTO | None = Field(None, description="Q 内部结构质量")
-    u: ReviewMetricPayloadDTO | None = Field(None, description="U 参与范围")
-    c: ReviewMetricPayloadDTO | None = Field(None, description="C 集中程度")
-    v: ReviewMetricPayloadDTO | None = Field(None, description="V 成交活跃与效率")
-    dataQuality: dict[str, Any] | None = Field(None, description="数据质量明细")
+    scopeName: str | None = Field(None, description="范围名称")
+    readiness: str = Field(..., description="canonical composition readiness")
+    status: str = Field(..., description="fact 级 PIT 状态")
+    eligibleCount: int = Field(0, description="PIT(T) 成员数（分母）")
+    providedCount: int = Field(0, description="实际提供成员观察数")
+    coverageRatio: float | None = Field(None, description="provided/eligible 覆盖率")
+    observation: dict[str, Any] | None = Field(
+        None, description="Canonical Observation Core 客观事实 payload",
+    )
     signalCount: int = Field(0, description="该范围命中信号数（API 层注入）")
 
 
 class ReviewScopeListResponse(BaseModel):
-    """GET /api/v1/review/{trade_date}/scopes 分页响应。"""
+    """GET /api/v1/review/{trade_date}/scopes 分页响应（canonical facts）。"""
 
-    items: list[ReviewScopeMetricsResponse] = Field(default_factory=list)
+    items: list[ReviewCanonicalScopeResponse] = Field(default_factory=list)
     total: int = Field(0, description="总数")
     page: int = Field(1, description="当前页码")
     page_size: int = Field(20, description="每页大小")

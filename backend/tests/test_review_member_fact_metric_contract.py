@@ -67,7 +67,11 @@ def _fact() -> dict[str, object]:
             "swing_bias": "sideways",
             "internal_bias": "sideways",
             "momentum_direction": "flat",
-            "momentum_change": "flat",
+            # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 当前 previous_state_to_flat 只消费
+            # sqzmom_delta（numeric）映射 fp_momentum_change；0 → FLAT。旧 key
+            # "momentum_change": "flat" 不产生 fp_momentum_change（None 被增强覆盖率
+            # 跳过），导致 day-over-day 增强断言失真，故 fixture 使用当前 SSOT key。
+            "sqzmom_delta": 0,
         },
     )
     return fact.to_metric_input()
@@ -145,9 +149,10 @@ def test_component_evidence_includes_weight_mode_and_registry_has_no_segment_ret
 async def test_orchestrator_runs_canonical_single_pass_no_legacy_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 每 scope 只走一次 canonical
-    Scope Observation（_compute_scope_metrics_phase），legacy cross-section /
-    signal / attribution pipeline 不再进入 orchestrator 主链，也绝不再被调用。
+    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 每 scope 只走一次 canonical
+    Scope Observation（_compute_canonical_composition_phase），legacy
+    cross-section / signal / attribution pipeline 不再进入 orchestrator 主链，
+    也绝不再被调用。
     """
     calls: list[str] = []
     scopes = [
@@ -187,7 +192,7 @@ async def test_orchestrator_runs_canonical_single_pass_no_legacy_signal(
     monkeypatch.setattr(
         orchestrator, "prepare_current_scope_observations_batch", _prepare,
     )
-    monkeypatch.setattr(orchestrator, "_compute_scope_metrics_phase", _metrics)
+    monkeypatch.setattr(orchestrator, "_compute_canonical_composition_phase", _metrics)
     monkeypatch.setattr(orchestrator, "evaluate_all_active_trackings", _zero)
     monkeypatch.setattr(orchestrator, "_aggregate_run_data_coverage", _coverage)
 

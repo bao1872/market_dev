@@ -1,19 +1,20 @@
-"""[REVIEW-OPTIONAL-SCOPE-TERMINALIZATION-01 2026-08-10] Optional scope 终态化契约测试。
+"""[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] Canonical composition 终态化契约测试。
 
-背景（root cause）：
-``_compute_scope_metrics_phase`` 先把 metrics run item 置为 RUNNING，随后调用
-``resolve_scope_members``。当 optional scope（major_index / style / industry_l1）的
-PIT membership 合法不可用时，旧实现抛出泛型 ``ScopeSnapshotError`` 逃逸到外层
-``except Exception``，item 永远停留在 RUNNING —— 而 ``evaluate_publish_gate`` 把
-running 视为硬 blocker，导致 Review 永久无法发布。
+旧 ``_compute_scope_metrics_phase``（含 P/Q/U/C/V snapshot 写入）已物理删除；
+唯一 per-scope runtime owner 是 ``_compute_canonical_composition_phase``。
+本文件锁定新的终态化契约：
 
-本文件锁定的契约：
-- optional scope PIT 不可用 → typed ``OptionalScopeUnavailableError``
-  → metrics item 终态化为 ``skipped`` + ``completed_at`` 非空 + 无异常逃逸；
-- market 的真实错误 → 不得 SKIP；
-- scope_type mismatch / 非法 UUID 等编码错误 → 不得 SKIP；
-- resume 路径与 compute 路径共享同一 ownership point（不分别 patch 两套流程）；
-- 已 succeeded / skipped 的 item 不被 resume 重算。
+- 非激活家族（market / major_index / style）：ScopeCapability 合法跳过 →
+  RUNNING → SKIPPED（结构化 reason），不抛错、不写 legacy snapshot；
+- activated 家族（industry_l1/l2/l3/concept）当日无观察（PIT(T) unavailable /
+  空成员）→ RUNNING → SKIPPED；
+- activated 家族 batch prepare 缺失 → FAIL-CLOSED raise（绝不 silent skip /
+  legacy fallback），由外层 scope loop 标记 FAILED；
+- invariant / canonical DB 失败 → 异常向上传播（绝不 SKIP）；
+- resume 与 compute 共享同一 owner（``_compute_canonical_composition_phase``），
+  RUNNING 残留永不阻塞发布门禁；
+- 已 succeeded / skipped 的 item 不被 resume 重算；
+- ``resolve_scope_members`` 的 typed 转换契约（optional scope）保持不变。
 
 纯单元测试（mock DB 与下游服务），不连接真实数据库。
 
@@ -36,7 +37,7 @@ from app.services.review_orchestrator_service import (
     ITEM_SUCCEEDED,
     PHASE_METRICS,
     ScopeDefinition,
-    _compute_scope_metrics_phase,
+    _compute_canonical_composition_phase,
     resume_run,
 )
 from app.services.review_scope_service import (
@@ -61,7 +62,7 @@ def _make_run() -> object:
         {
             "id": uuid.uuid4(),
             "trade_date": TRADE_DATE,
-            "algorithm_version": "review-v1",
+            "algorithm_version": "review-v2.3",
             "baseline_window": 120,
             "source_core_run_id": uuid.uuid4(),
         },
@@ -94,163 +95,157 @@ class _UpsertRecorder:
         return matching[-1]
 
 
-async def _run_metrics_phase(scope: ScopeDefinition, resolve_side_effect):
-    """在完全 mock 的下游环境中执行 _compute_scope_metrics_phase。"""
+async def _run_composition_phase(
+    scope: ScopeDefinition,
+    *,
+    persist_result: dict | None = None,
+    persist_error: Exception | None = None,
+) -> tuple[dict | None, _UpsertRecorder]:
+    """在完全 mock 的下游环境中执行 _compute_canonical_composition_phase。
+
+    ``_persist_canonical_scope_observation`` 是唯一事实来源：返回 None 表示
+    合法跳过（非激活家族 / 当日无观察），返回 dict 表示已落库 canonical fact，
+    抛错表示 activated 家族 fail-closed 或真实执行异常。
+    """
     recorder = _UpsertRecorder()
     run = _make_run()
+    persist = AsyncMock(return_value=persist_result)
+    if persist_error is not None:
+        persist.side_effect = persist_error
     with patch.object(
-        orch, "resolve_scope_members", AsyncMock(side_effect=resolve_side_effect),
-    ), patch.object(
         orch, "_upsert_run_item", recorder,
     ), patch.object(
-        orch, "_build_scope_history", AsyncMock(return_value=(None, None, None)),
-    ), patch.object(
-        orch, "_fetch_pyramid_v2_for_scope", AsyncMock(return_value=None),
-    ), patch.object(
-        orch, "compute_scope_metrics", AsyncMock(return_value=(object(), None)),
-    ), patch.object(
-        orch, "fetch_member_flat_list", AsyncMock(return_value=[]),
+        orch, "_persist_canonical_scope_observation", persist,
     ):
-        # [FIX 5] _compute_scope_metrics_phase 统一返回 (snapshot, history_maps) 二元组，
-        # OptionalScopeUnavailableError / 空范围分支返回 (None, None)。
-        snapshot, _history = await _compute_scope_metrics_phase(
+        result = await _compute_canonical_composition_phase(
             AsyncMock(),
             run,
             scope,
-            required_history_contract_version="review-history-v2",
-            required_source_history_run_id=uuid.uuid4(),
-            day_fact_map={},
+            prepared_observations={} if persist_result is None else {"k": object()},
         )
-    return snapshot, recorder
+    return result, recorder
 
 
 # =============================================================================
-# A / B / C. optional scope 不可用 → RUNNING → SKIPPED 终态
+# A. 合法跳过：非激活家族 / 当日无观察 → RUNNING → SKIPPED 终态
 # =============================================================================
 
 
-class TestOptionalScopeTerminalizesToSkipped:
+class TestLegalSkipTerminalizesToSkipped:
     @pytest.mark.parametrize(
-        ("scope_type", "scope_key", "population_status"),
-        [
-            # A. major_index population blocked_external_population（生产实况）
-            ("major_index", "csi300", "blocked_external_population"),
-            ("major_index", "csi500", "blocked_external_population"),
-            # B. style（生产实况同为 blocked_external_population）
-            ("style", "large_cap_style", "blocked_external_population"),
-            ("style", "small_cap_style", "blocked_external_population"),
-            # C. industry_l1 bootstrap unavailable（publication contract 同为 optional）
-            ("industry_l1", str(uuid.uuid4()), "bootstrap_unavailable"),
-        ],
+        "scope_type",
+        ["market", "major_index", "style"],
     )
-    async def test_population_not_ready_becomes_skipped(
-        self, scope_type: str, scope_key: str, population_status: str,
+    async def test_non_activated_family_is_legal_skip(
+        self, scope_type: str,
     ):
-        exc = OptionalScopeUnavailableError(
-            reason="population_not_ready",
-            scope_type=scope_type,
-            scope_key=scope_key,
-            population_status=population_status,
-            trade_date=TRADE_DATE,
-        )
-        snapshot, recorder = await _run_metrics_phase(
-            _scope(scope_type, scope_key), exc,
+        """A. 非激活家族按 ScopeCapability 合法跳过 → RUNNING → SKIPPED。"""
+        result, recorder = await _run_composition_phase(
+            _scope(scope_type, "market" if scope_type == "market" else "k"),
+            persist_result=None,
         )
 
-        # 无异常逃逸
-        assert snapshot is None
-        # RUNNING → SKIPPED 的确定性终态迁移
+        assert result is None
+        # RUNNING → SKIPPED 的确定性终态迁移（无 RUNNING 残留）
         assert recorder.statuses() == [ITEM_RUNNING, ITEM_SKIPPED]
         last = recorder.last()
         assert last["status"] == ITEM_SKIPPED
         # completed_at 必须回填，否则仍是非终态残留
         assert last["completed_at"] is not None
         assert isinstance(last["completed_at"], datetime)
-        # last_error 记录稳定的结构化 reason，而非空
-        assert "optional_scope_unavailable" in last["last_error"]
-        assert population_status in last["last_error"]
+        # last_error 记录稳定的结构化 reason，且绝不回退 legacy P/Q/U/C/V
+        assert "legal skip" in last["last_error"]
+        assert "fallback" not in last["last_error"]
 
-    async def test_pit_membership_unavailable_becomes_skipped(self):
-        """B'. PITMembershipUnavailableError 路径同样终态化。"""
-        exc = OptionalScopeUnavailableError(
-            reason="pit_membership_unavailable",
-            scope_type="style",
-            scope_key="large_cap_style",
-            trade_date=TRADE_DATE,
+    async def test_no_observation_today_is_legal_skip(self):
+        """A'. activated 家族当日无观察（PIT(T) unavailable / 空成员）→ SKIPPED。"""
+        result, recorder = await _run_composition_phase(
+            _scope("industry_l1", str(uuid.uuid4())),
+            persist_result=None,
         )
-        snapshot, recorder = await _run_metrics_phase(
-            _scope("style", "large_cap_style"), exc,
-        )
-        assert snapshot is None
+        assert result is None
         assert recorder.statuses() == [ITEM_RUNNING, ITEM_SKIPPED]
         assert recorder.last()["completed_at"] is not None
-        assert "pit_membership_unavailable" in recorder.last()["last_error"]
 
 
 # =============================================================================
-# D / E. 真实失败不得被静默 SKIP
+# B. 已落库 canonical fact → RUNNING → SUCCEEDED
+# =============================================================================
+
+
+class TestPersistedCompositionSucceeds:
+    async def test_persisted_fact_sets_succeeded(self):
+        """B. activated 家族持久化 canonical fact → item SUCCEEDED。"""
+        composition = {"composition_readiness": "ready", "scope_key": "k"}
+        result, recorder = await _run_composition_phase(
+            _scope("concept", "k"),
+            persist_result=composition,
+        )
+        assert result is composition
+        assert recorder.statuses() == [ITEM_RUNNING, ITEM_SUCCEEDED]
+        assert recorder.last()["completed_at"] is not None
+
+
+# =============================================================================
+# C. 真实失败不得被静默 SKIP
 # =============================================================================
 
 
 class TestGenuineFailuresAreNotSkipped:
-    async def test_market_genuine_error_is_not_skipped(self):
-        """D. market scope 的真实错误必须传播，不得 SKIP。"""
-        scope = _scope("market", "ALL_A_SHARE")
+    async def test_activated_missing_prep_fails_closed(self):
+        """C. activated 家族 batch prepare 缺失 → FAIL-CLOSED raise，绝不 SKIP。"""
         recorder = _UpsertRecorder()
         run = _make_run()
+        scope = _scope("industry_l1", str(uuid.uuid4()))
         with patch.object(
             orch,
-            "resolve_scope_members",
-            AsyncMock(side_effect=ScopeSnapshotError("market membership 解析失败")),
+            "_persist_canonical_scope_observation",
+            AsyncMock(side_effect=ValueError("canonical batch prepare missing")),
         ), patch.object(orch, "_upsert_run_item", recorder):
-            with pytest.raises(ScopeSnapshotError):
-                await _compute_scope_metrics_phase(
-                    AsyncMock(), run, scope, day_fact_map={},
+            with pytest.raises(ValueError, match="canonical batch prepare missing"):
+                await _compute_canonical_composition_phase(
+                    AsyncMock(), run, scope, prepared_observations={},
                 )
         assert ITEM_SKIPPED not in recorder.statuses()
 
-    async def test_market_unavailable_is_not_optional(self):
-        """D'. market 不在 optional 集合内 —— 契约级断言。"""
-        assert "market" not in OPTIONAL_UNAVAILABLE_SCOPE_TYPES
-        assert OPTIONAL_UNAVAILABLE_SCOPE_TYPES == frozenset(
-            {"major_index", "style", "industry_l1"},
-        )
-
-    async def test_coding_error_is_not_skipped(self):
-        """E. scope_type mismatch 等编码错误必须 FAILED，不得 SKIP。"""
+    async def test_invariant_failure_is_not_skipped(self):
+        """C'. invariant 失败必须传播（绝不回退 legacy，绝不 SKIP）。"""
         recorder = _UpsertRecorder()
         run = _make_run()
-        scope = _scope("major_index", "csi300")
+        scope = _scope("industry_l3", str(uuid.uuid4()))
         with patch.object(
             orch,
-            "resolve_scope_members",
-            AsyncMock(
-                side_effect=ScopeSnapshotError(
-                    "scope_type mismatch: major_index key=csi300 universe_type=style",
-                ),
-            ),
+            "_persist_canonical_scope_observation",
+            AsyncMock(side_effect=ValueError("scope observation invariant failed")),
         ), patch.object(orch, "_upsert_run_item", recorder):
-            with pytest.raises(ScopeSnapshotError):
-                await _compute_scope_metrics_phase(
-                    AsyncMock(), run, scope, day_fact_map={},
+            with pytest.raises(ValueError, match="invariant"):
+                await _compute_canonical_composition_phase(
+                    AsyncMock(), run, scope, prepared_observations={"k": object()},
                 )
         assert ITEM_SKIPPED not in recorder.statuses()
 
     async def test_unexpected_exception_is_not_skipped(self):
-        """E'. 未预期异常（非 ScopeSnapshotError）必须传播。"""
+        """C''. 未预期异常（DB/其他）必须传播，绝不 SKIP。"""
         recorder = _UpsertRecorder()
         run = _make_run()
         scope = _scope("style", "large_cap_style")
         with patch.object(
             orch,
-            "resolve_scope_members",
+            "_persist_canonical_scope_observation",
             AsyncMock(side_effect=RuntimeError("unexpected DB error")),
         ), patch.object(orch, "_upsert_run_item", recorder):
             with pytest.raises(RuntimeError):
-                await _compute_scope_metrics_phase(
-                    AsyncMock(), run, scope, day_fact_map={},
+                await _compute_canonical_composition_phase(
+                    AsyncMock(), run, scope, prepared_observations={},
                 )
         assert ITEM_SKIPPED not in recorder.statuses()
+
+    async def test_market_not_in_optional_set(self):
+        """C'''. market 不在 legacy optional 集合内 —— 契约级断言。"""
+        assert "market" not in OPTIONAL_UNAVAILABLE_SCOPE_TYPES
+        assert OPTIONAL_UNAVAILABLE_SCOPE_TYPES == frozenset(
+            {"major_index", "style", "industry_l1", "industry_l2", "industry_l3", "concept"},
+        )
 
 
 # =============================================================================
@@ -317,8 +312,9 @@ class TestResolveScopeMembersTypedContract:
             )
         assert not isinstance(ei.value, OptionalScopeUnavailableError)
 
-    async def test_non_optional_board_scope_stays_plain_failure(self):
-        """concept / industry_l2 不在 optional 集合 —— 不可用仍是 failure。"""
+    async def test_optional_board_scope_pit_unavailable_is_typed(self):
+        """C'''. concept 属于 optional 集合 —— PIT 不可用是 typed 合法跳过，
+        而非普通 failure。"""
         board_id = str(uuid.uuid4())
         board = type("B", (), {"type": "concept", "hierarchyLevel": None, "name": "n"})()
         session = AsyncMock()
@@ -329,22 +325,20 @@ class TestResolveScopeMembersTypedContract:
             "app.services.review_scope_service.resolve_board_membership_at",
             AsyncMock(side_effect=PITMembershipUnavailableError("no PIT version")),
         ):
-            with pytest.raises(ScopeSnapshotError) as ei:
+            with pytest.raises(OptionalScopeUnavailableError) as ei:
                 await resolve_scope_members(
-                    AsyncMock(**{
-                        "execute.return_value": type(
-                            "R", (), {"scalar_one_or_none": lambda self=None: board},
-                        )(),
-                    }),
+                    session,
                     "concept",
                     board_id,
                     trade_date=TRADE_DATE,
                 )
-        assert not isinstance(ei.value, OptionalScopeUnavailableError)
+        assert ei.value.reason == "pit_membership_unavailable"
+        assert ei.value.scope_type == "concept"
+        assert isinstance(ei.value, ScopeSnapshotError)
 
 
 # =============================================================================
-# F / G. resume 生命周期
+# D. resume 生命周期
 # =============================================================================
 
 
@@ -372,7 +366,7 @@ class TestResumeLifecycle:
         """在 mock 环境下运行 resume_run，返回 (result, 被重算的 scope 列表)。"""
         redone: list[tuple[str, str]] = []
 
-        async def fake_metrics(_session, _run, scope, **_kwargs):
+        async def fake_composition(_session, _run, scope, **_kwargs):
             redone.append((scope.scope_type, scope.scope_key))
             return None
 
@@ -405,7 +399,7 @@ class TestResumeLifecycle:
         ), patch.object(
             orch, "load_day_fact_maps", AsyncMock(return_value={}),
         ), patch.object(
-            orch, "_compute_scope_metrics_phase", fake_metrics,
+            orch, "_compute_canonical_composition_phase", fake_composition,
         ), patch.object(
             orch, "_resolve_all_discovery_scopes",
             AsyncMock(return_value=[]),
@@ -420,15 +414,14 @@ class TestResumeLifecycle:
             result = await resume_run(session, run, only_pending=True)
         return result, redone
 
-    async def test_stale_optional_running_items_are_selected(self):
-        """F. resume 精确选中 4 个 stale optional RUNNING，不含其他。"""
+    async def test_stale_running_items_are_selected(self):
+        """D. resume 精确选中 stale RUNNING（非激活家族），不含已终态 item。"""
         items = [
-            # 生产实况：lease_expires_at=NULL, attempt_count=1
             _FakeItem("major_index", "csi300", ITEM_RUNNING),
             _FakeItem("major_index", "csi500", ITEM_RUNNING),
             _FakeItem("style", "large_cap_style", ITEM_RUNNING),
             _FakeItem("style", "small_cap_style", ITEM_RUNNING),
-            # G. 已 succeeded / skipped 不得重算
+            # 已 succeeded / skipped 不得重算
             _FakeItem("market", "ALL_A_SHARE", ITEM_SUCCEEDED),
             _FakeItem("industry_l1", "board-a", ITEM_SUCCEEDED),
             _FakeItem("industry_l1", "board-b", ITEM_SKIPPED),
@@ -443,27 +436,18 @@ class TestResumeLifecycle:
                 ("style", "small_cap_style"),
             ],
         )
-        # G. succeeded / skipped 严格不在重算集合内
+        # succeeded / skipped 严格不在重算集合内
         assert ("market", "ALL_A_SHARE") not in redone
         assert ("industry_l1", "board-a") not in redone
         assert ("industry_l1", "board-b") not in redone
 
     async def test_resume_leaves_no_running_residue(self):
-        """F'. resume 走同一 ownership point，optional 不可用被终态化。
-
-        _compute_scope_pipeline → _compute_scope_metrics_phase 是唯一 owner，
-        因此 resume 与 compute 共享 SKIPPED 行为（不分别 patch 两套流程）。
-        """
-        scope = _scope("major_index", "csi300")
-        exc = OptionalScopeUnavailableError(
-            reason="population_not_ready",
-            scope_type="major_index",
-            scope_key="csi300",
-            population_status="blocked_external_population",
-            trade_date=TRADE_DATE,
+        """D'. resume 与 compute 共享同一 owner，合法跳过被终态化为 SKIPPED。"""
+        result, recorder = await _run_composition_phase(
+            _scope("major_index", "csi300"),
+            persist_result=None,
         )
-        snapshot, recorder = await _run_metrics_phase(scope, exc)
-        assert snapshot is None
+        assert result is None
         # 终态非 RUNNING
         assert recorder.statuses()[-1] == ITEM_SKIPPED
         assert ITEM_RUNNING not in recorder.statuses()[-1:]

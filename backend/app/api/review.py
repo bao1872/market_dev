@@ -32,6 +32,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
@@ -40,16 +41,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
 from app.models.market_review import (
     MarketReviewRun,
-    MarketReviewScopeSnapshot,
     MarketReviewSignal,
     MarketReviewSignalAttribution,
     MarketReviewSignalInstrument,
     MarketReviewTracking,
     MarketReviewTrackingEvaluation,
+    ReviewScopeObservationFact,
 )
 from app.schemas.review import (
     ReviewAttributionListResponse,
     ReviewAttributionResponse,
+    ReviewCanonicalScopeResponse,
     ReviewChipCoverageDTO,
     ReviewDatesResponse,
     ReviewDiscoveryDetailResponse,
@@ -61,7 +63,6 @@ from app.schemas.review import (
     ReviewOverviewResponse,
     ReviewOverviewSignalSummaryDTO,
     ReviewScopeListResponse,
-    ReviewScopeMetricsResponse,
     ReviewSignalListResponse,
     ReviewSignalResponse,
     ReviewTrackingCreateRequest,
@@ -81,11 +82,13 @@ from app.services.review_attribution_service import (
     list_attributions,
     list_instruments,
 )
+from app.services.review_observation_persistence_service import (
+    list_scope_observation_facts,
+)
 from app.services.review_publication_service import (
     get_published_review_run_id,
     list_published_review_dates,
 )
-from app.services.review_scope_service import list_scope_snapshots
 from app.services.review_signal_service import (
     count_signals_by_status,
     get_signal,
@@ -192,31 +195,33 @@ async def _load_signal_or_404(
     return signal
 
 
-def _scope_snapshot_to_dto(
-    snap: MarketReviewScopeSnapshot,
+def _canonical_scope_fact_to_dto(
+    fact: ReviewScopeObservationFact,
     *,
+    composition_readiness: dict[str, str] | None = None,
+    canonical_coverage: dict[str, dict[str, Any]] | None = None,
     signal_count: int = 0,
-) -> ReviewScopeMetricsResponse:
-    """scope snapshot ORM → DTO。"""
-    return ReviewScopeMetricsResponse(
-        id=str(snap.id),
-        reviewRunId=str(snap.review_run_id),
-        tradeDate=snap.trade_date.isoformat(),
-        scopeType=snap.scope_type,
-        scopeKey=snap.scope_key,
-        scopeName=snap.scope_name,
-        parentScopeType=snap.parent_scope_type,
-        parentScopeKey=snap.parent_scope_key,
-        eligibleCount=snap.eligible_count,
-        readyCount=snap.ready_count,
-        coverageRatio=float(snap.coverage_ratio),
-        status=snap.status,
-        p=snap.p_payload,
-        q=snap.q_payload,
-        u=snap.u_payload,
-        c=snap.c_payload,
-        v=snap.v_payload,
-        dataQuality=snap.data_quality_json,
+) -> ReviewCanonicalScopeResponse:
+    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] canonical fact → DTO。
+
+    readiness 优先取 run metadata 中的 canonical composition readiness（唯一发布
+    判断依据），缺失时回落 fact.readiness；coverage 取 metadata canonical_coverage
+    的 provided/eligible（由唯一 composition owner 记录），缺失时用 fact 列派生。
+    """
+    coverage = (canonical_coverage or {}).get(fact.scope_key) or {}
+    eligible = int(coverage.get("eligible", fact.pit_member_count) or 0)
+    provided = int(coverage.get("provided", fact.provided_member_count) or 0)
+    readiness = (composition_readiness or {}).get(fact.scope_key, fact.readiness)
+    return ReviewCanonicalScopeResponse(
+        scopeType=fact.scope_type,
+        scopeKey=fact.scope_key,
+        scopeName=fact.scope_name,
+        readiness=readiness,
+        status=fact.pit_status_t,
+        eligibleCount=eligible,
+        providedCount=provided,
+        coverageRatio=float(provided / eligible) if eligible > 0 else None,
+        observation=fact.observation_payload,
         signalCount=signal_count,
     )
 
@@ -460,25 +465,34 @@ async def get_review_overview(
         db, td, include_partial=include_partial,
     )
 
-    # 计算 coverage 明细
-    coverage = ReviewOverviewCoverageDTO()
-    scopes = await list_scope_snapshots(db, run.id)
-    market_snaps = [s for s in scopes if s.scope_type == "market"]
-    index_snaps = [s for s in scopes if s.scope_type == "major_index"]
-    style_snaps = [s for s in scopes if s.scope_type == "style"]
-    industry_snaps = [s for s in scopes if s.scope_type == "industry_l1"]
+    # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] coverage 明细从 legacy
+    # MarketReviewScopeSnapshot 聚合切换为 canonical ReviewScopeObservationFact
+    # （按 scope_type 聚合 provided/pit_member_count）。market/major_index/style 为
+    # 未激活家族（ScopeCapability.persistence_activated=False），不产生 canonical
+    # fact，其覆盖率为 None（合法跳过，绝不回退 legacy P/Q/U/C/V）。
+    facts = await list_scope_observation_facts(
+        db, from_date=run.trade_date, to_date=run.trade_date,
+    )
+    facts_by_type: dict[str, list[ReviewScopeObservationFact]] = {}
+    for fact in facts:
+        facts_by_type.setdefault(fact.scope_type, []).append(fact)
 
-    if market_snaps:
-        coverage.market = float(market_snaps[0].coverage_ratio)
-    if index_snaps:
-        ready = sum(1 for s in index_snaps if s.status == "ready")
-        coverage.indices = ready / len(index_snaps) if index_snaps else None
-    if style_snaps:
-        ready = sum(1 for s in style_snaps if s.status == "ready")
-        coverage.styles = ready / len(style_snaps) if style_snaps else None
-    if industry_snaps:
-        ready = sum(1 for s in industry_snaps if s.status == "ready")
-        coverage.industryL1 = ready / len(industry_snaps) if industry_snaps else None
+    def _family_ratio(scope_type: str) -> float | None:
+        rows = facts_by_type.get(scope_type) or []
+        if not rows:
+            return None
+        eligible = sum(f.pit_member_count for f in rows)
+        provided = sum(f.provided_member_count or 0 for f in rows)
+        if eligible <= 0:
+            return None
+        return provided / eligible
+
+    coverage = ReviewOverviewCoverageDTO(
+        market=None,
+        indices=None,
+        styles=None,
+        industryL1=_family_ratio("industry_l1"),
+    )
 
     # 信号汇总
     status_counts = await count_signals_by_status(db, run.id)
@@ -529,15 +543,20 @@ async def get_review_overview(
 async def list_review_scopes(
     trade_date: str,
     scope_type: str | None = Query(None, description="范围类型过滤"),
-    parent_scope_type: str | None = Query(None, description="父范围类型过滤"),
-    parent_scope_key: str | None = Query(None, description="父范围标识过滤"),
     include_partial: bool = Query(False, description="admin 调试用"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
 ) -> ReviewScopeListResponse:
-    """市场扫描 - 列出指定交易日的所有范围 P/Q/U/C/V。"""
+    """市场扫描 - 列出指定交易日的 canonical Scope Observation facts。
+
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 不再返回 legacy P/Q/U/C/V
+    （MarketReviewScopeSnapshot 已退役）；改读 canonical ReviewScopeObservationFact
+    （仅 activated 家族 industry_l1/l2/l3/concept 有事实；market/major_index/style
+    为未激活家族，无 canonical fact，其过滤结果为空是当前 capability 的如实呈现，
+    绝不回退 legacy P/Q/U/C/V）。
+    """
     if include_partial and not ctx.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -546,19 +565,28 @@ async def list_review_scopes(
 
     td = _parse_date_or_422(trade_date)
     run = await _get_published_run(db, td, include_partial=include_partial)
+    metadata = run.metadata_json or {}
+    readiness = metadata.get("canonical_composition_readiness") or {}
+    canonical_coverage = metadata.get("canonical_coverage") or {}
 
-    scopes = await list_scope_snapshots(
+    facts = await list_scope_observation_facts(
         db,
-        run.id,
         scope_type=scope_type,
-        parent_scope_type=parent_scope_type,
-        parent_scope_key=parent_scope_key,
+        from_date=run.trade_date,
+        to_date=run.trade_date,
     )
 
-    total = len(scopes)
+    total = len(facts)
     offset = (page - 1) * page_size
-    paged = scopes[offset:offset + page_size]
-    items = [_scope_snapshot_to_dto(s) for s in paged]
+    paged = facts[offset:offset + page_size]
+    items = [
+        _canonical_scope_fact_to_dto(
+            fact,
+            composition_readiness=readiness,
+            canonical_coverage=canonical_coverage,
+        )
+        for fact in paged
+    ]
 
     return ReviewScopeListResponse(
         items=items,

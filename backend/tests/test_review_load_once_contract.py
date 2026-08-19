@@ -1,8 +1,14 @@
 """[REVIEW-FACT-PARITY-02 §10-§12] Review load-once 合同测试。
 
+[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] legacy 逐 scope loader
+（``fetch_member_flat_list``）已随 legacy owner 物理删除；load-once 合同
+现由 canonical 路径承载：``load_day_fact_maps`` 每 run 只调 1 次，
+scope loop 只按 instrument_id 从内存 map 取引用（无 per-scope 重复读取）。
+
 锁定：
 - 正式 ``compute_run`` 内 ``load_day_fact_maps`` 调用次数 == 1
-- 正式 ``compute_run`` 内 legacy ``fetch_member_flat_list`` 调用次数 == 0
+- 唯一 per-scope owner ``_compute_canonical_composition_phase`` 接收
+  batch-prepared observations（load-once 复用）
 - lineage guard fail closed（source run mismatch / contract version mismatch）
 - 重叠 scope 共享同一 fact 引用且无 mutation
 """
@@ -25,7 +31,6 @@ from app.services import review_orchestrator_service as orch
 class _Recorder:
     def __init__(self) -> None:
         self.load_day_fact_maps_calls = 0
-        self.fetch_member_flat_list_calls = 0
         self.scope_member_requests: list[list[uuid.UUID]] = []
 
 
@@ -53,19 +58,14 @@ async def test_compute_run_loads_day_facts_exactly_once(
     instrument_ids: list[uuid.UUID],
     day_facts: dict[uuid.UUID, dict[str, Any]],
 ) -> None:
-    """§10：多 scope 下 load_day_fact_maps 只调 1 次，legacy loader 0 次。"""
+    """§10：多 scope 下 load_day_fact_maps 只调 1 次（legacy loader 已删除）。"""
     rec = _Recorder()
 
     async def fake_load(session, *, trade_date, instrument_ids=None, **kwargs):
         rec.load_day_fact_maps_calls += 1
         return day_facts
 
-    async def fake_fetch(*args, **kwargs):
-        rec.fetch_member_flat_list_calls += 1
-        return []
-
     monkeypatch.setattr(orch, "load_day_fact_maps", fake_load)
-    monkeypatch.setattr(orch, "fetch_member_flat_list", fake_fetch)
 
     # 模拟 3 个 scope，各自成员是 day_facts 的子集（含重叠）
     scopes = {
@@ -78,13 +78,12 @@ async def test_compute_run_loads_day_facts_exactly_once(
     collected: dict[str, list[dict[str, Any]]] = {}
     for key, members in scopes.items():
         rec.scope_member_requests.append(members)
-        # 复刻 _compute_scope_metrics_phase 的内存筛选逻辑
+        # 复刻 canonical 路径的内存筛选逻辑（无 per-scope 重复 loader）
         collected[key] = [
             f for f in (day_fact_map.get(i) for i in members) if f is not None
         ]
 
     assert rec.load_day_fact_maps_calls == 1
-    assert rec.fetch_member_flat_list_calls == 0
     assert len(collected["s1"]) == 4
     assert len(collected["s2"]) == 4
     assert len(collected["s3"]) == 2
@@ -257,12 +256,13 @@ def test_canonical_history_binding_reassigns_new_jsonb_dict() -> None:
     assert "**metadata" in src, "必须展开为新 dict 以触发 JSONB 变更检测"
 
 
-def test_scope_metrics_phase_accepts_day_fact_map() -> None:
-    """§10：scope 阶段必须能接收预加载 fact map（否则无法 load-once）。"""
+def test_canonical_composition_phase_accepts_prepared_observations() -> None:
+    """§10：唯一 per-scope owner 必须能接收 batch-prepared observations
+    （load-once 复用，禁止 per-scope 重复 member traversal）。"""
     import inspect
 
-    params = inspect.signature(orch._compute_scope_metrics_phase).parameters
-    assert "day_fact_map" in params
+    params = inspect.signature(orch._compute_canonical_composition_phase).parameters
+    assert "prepared_observations" in params
 
 
 def test_attribution_accepts_day_fact_map() -> None:
