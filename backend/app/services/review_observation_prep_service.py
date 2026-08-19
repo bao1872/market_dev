@@ -9,7 +9,9 @@ PIT membership resolution per scope family, and First Pyramid / bar loading.
 The pure semantic mapping lives in ``app.services.observation_prep``; the Core
 (``scope_observation.py``) stays untouched.
 
-Shadow only: this service is never wired into Filter / Discovery / publication.
+CANONICAL: this is the single preparation owner consumed by the orchestrator
+(``prepare_current_scope_observations_batch``) and by the historical reconstruction
+(``prepare_scopes_from_union``).  It is NOT a shadow path.
 """
 
 from __future__ import annotations

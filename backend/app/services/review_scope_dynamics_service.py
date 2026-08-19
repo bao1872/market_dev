@@ -29,10 +29,11 @@ any mismatch raises ``CurrentStaticDynamicsSourceContractError`` so a
 historical-PIT source can never silently replace the current-static application
 path.
 
-This is a SHADOW application path: NO API / publication / orchestrator /
-scheduler / materialization / cache / persistence / runtime activation.  It does
-NOT query the trading calendar — ``trade_dates`` is the caller-provided canonical
-A-share trading-date axis (non-empty, strictly ascending, unique, every date
+This is an EXPERIMENT / NOT_RUNTIME application path: not yet wired into the
+orchestrator (no API / publication / scheduler / materialization / cache /
+persistence / runtime activation).  It does NOT query the trading calendar —
+``trade_dates`` is the caller-provided canonical A-share trading-date axis
+(non-empty, strictly ascending, unique, every date
 <= analysis_asof_date; no silent sort / dedupe).
 """
 
@@ -133,7 +134,7 @@ async def compute_current_static_scope_dynamics_batch(
     analysis_asof_date: date,
     union_member_cap: int = 4096,
 ) -> list[dict[str, Any]]:
-    """Compose current-static Scope Dynamics for a batch of scopes (shadow).
+    """Compose current-static Scope Dynamics for a batch of scopes (not-runtime-yet).
 
     VEC-1B: routes through ``reconstruct_scope_series_batch`` so the member x
     date window is loaded ONCE across all scopes that share a member (PERF-2)
@@ -198,7 +199,7 @@ def _compose_scope_dynamics_from_reconstruction(
     """Shared composition: reconstruction source -> ObservationSeries -> Dynamics.
 
     The single owner that turns one current-static reconstruction (either a
-    single-scope series or one entry of a shared batch) into the shadow
+    single-scope series or one entry of a shared batch) into the NOT_RUNTIME
     ObservationSeries + Scope Dynamics result.  Both application entry points
     delegate here so there is exactly one composition implementation.
 
