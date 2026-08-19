@@ -8,10 +8,10 @@
   preparation：PreparedScope 一律由 compute_run / resume_run 通过唯一 owner
   ``prepare_current_scope_observations_batch`` 一次 batch prepare 后传入。
 - market / major_index / style：PreparedScope.pit_status_t == unavailable 时
-  直接 return，不写表（双轨并存，本轮不破坏 legacy Discovery）
+  直接 return，不写表（owner C 兼容生产）
 - batch prepare 未包含该 scope（missing key）时直接跳过
 - invariant 失败时抛 ValueError（上层 _compute_scope_metrics_phase 的
-  try/except 仅 warning，不破坏 legacy signal）
+  try/except 以 warning 记录）
 
 全部为纯单元/mock 测试，不连库（PURE_UNIT_TEST=1）。
 """

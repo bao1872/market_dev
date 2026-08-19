@@ -147,7 +147,7 @@ async def compute_current_static_scope_dynamics_batch(
     phase is reported once via ``batch_reconstruction_ms`` / ``batch_total_ms``
     on every result (identical across the batch, labelled ``batch_*``).
 
-    SHADOW ONLY: never wired into API / orchestrator / persistence / frontend.
+    EXPERIMENT / NOT_RUNTIME: not wired into API / orchestrator / persistence / frontend yet.
     """
     _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
     if not scope_keys:

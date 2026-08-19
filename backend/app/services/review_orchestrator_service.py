@@ -45,11 +45,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.filter_definitions import REVIEW_FILTER_VERSION
 
-# [2026-08-13 双轨并存] 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）。
-# 以下三者在 shadow 路径已被真实数据验证契约/invariant/readiness；
-# 此处仅把它们接入 compute 主流程写入 ReviewScopeObservationFact，
-# 供 EvidenceDrawer / scope_evidence_service 消费。Discovery/筛选器/信号管线
-# 仍走 legacy P/Q/U/C/V（本轮不动），二者双轨并存。
+# [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 规范 Scope Observation 事实层
+# （PRD §7.2-§7.17 v2.3）是 orchestrator 的**唯一强制主链**：compute_run /
+# resume_run 只执行 canonical Scope Observation 计算与落库。legacy
+# P/Q/U/C/V→Filter→Signal→Attribution pipeline（owner A，已被 canonical
+# 覆盖）已物理移除出主链，不再作为 mandatory path。
 #
 # [REVIEW-EXECUTION-PATH-CONSOLIDATION] 规范事实层唯一 preparation owner =
 # ``prepare_current_scope_observations_batch``（一次解析 memberships + union facts +
@@ -72,10 +72,6 @@ from app.models.market_review import (
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 from app.services.observation_prep import check_observation_invariants
-from app.services.review_attribution_service import (
-    compute_signal_attributions,
-    compute_signal_instruments,
-)
 from app.services.review_bootstrap_service import (
     validate_canonical_history_run_readiness,
 )
@@ -98,17 +94,10 @@ from app.services.review_scope_service import (
     OptionalScopeUnavailableError,
     ScopeDefinition,
     ScopeSnapshotError,
-    apply_cross_section_percentiles,
     compute_scope_metrics,
     fetch_member_flat_list,
     load_day_fact_maps,
     resolve_scope_members,
-)
-from app.services.review_signal_service import (
-    SignalGenerationError,
-    find_previous_signals,
-    generate_signals_for_scope,
-    update_run_signal_count,
 )
 from app.services.review_tracking_service import evaluate_all_active_trackings
 
@@ -133,8 +122,6 @@ RUN_STATUS_CANCELLED = "cancelled"
 
 # Item phase 枚举（与迁移 check constraint 一致）
 PHASE_METRICS = "metrics"
-PHASE_SIGNALS = "signals"
-PHASE_ATTRIBUTION = "attribution"
 PHASE_TRACKING = "tracking"
 
 # Item status 枚举
@@ -727,51 +714,45 @@ async def compute_run(
     )
 
     # === 规范 Scope Observation 事实层 batch prepare（PRD §7.2-§7.17 v2.3）===
-    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] 唯一 preparation owner =
+    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 唯一 preparation owner =
     # prepare_current_scope_observations_batch：一次解析 PIT(T)/PIT(T-1) memberships、
     # 一次加载 union member facts、slice 成各 Scope PreparedScope。scope 循环只从
-    # 该 map SELECT 结果。双写失败（batch prepare 或落库）隔离在 try/except 内，
-    # 不影响 legacy metrics/signal 主链；这是错误隔离，不是回退到旧路径。
-    prepared_observations: dict[str, Any] | None = None
-    try:
-        eligible_specs = [
-            ScopeReplaySpec(
-                scope_type=s.scope_type,
-                scope_key=s.scope_key,
-                scope_name=s.scope_name,
-                member_ids=(),
-            )
-            for s in scopes
-            if not is_scope_observation_persistence_excluded(
-                scope_type=s.scope_type,
-                scope_name=s.scope_name,
-            )
-        ]
-        if eligible_specs:
-            prepared_observations = await prepare_current_scope_observations_batch(
-                session, run.trade_date, eligible_specs
-            )
-            logger.info(
-                "[ReviewOrchestrator] 规范事实层 batch prepare: scopes=%d prepared=%d",
-                len(eligible_specs), len(prepared_observations),
-            )
-    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
-        prepared_observations = None
-        logger.warning(
-            "[ReviewOrchestrator] 规范事实层 batch prepare 失败（不影响 legacy signal）: %s",
-            exc,
+    # 该 map SELECT 结果。此 batch prepare 是 orchestrator 的**强制主链前置步骤**，
+    # 失败直接 fail closed，不再被隔离为可回退到 legacy 的 sidecar。
+    eligible_specs = [
+        ScopeReplaySpec(
+            scope_type=s.scope_type,
+            scope_key=s.scope_key,
+            scope_name=s.scope_name,
+            member_ids=(),
+        )
+        for s in scopes
+        if not is_scope_observation_persistence_excluded(
+            scope_type=s.scope_type,
+            scope_name=s.scope_name,
+        )
+    ]
+    prepared_observations: dict[str, Any] = {}
+    if eligible_specs:
+        prepared_observations = await prepare_current_scope_observations_batch(
+            session, run.trade_date, eligible_specs
+        )
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层 batch prepare: scopes=%d prepared=%d",
+            len(eligible_specs), len(prepared_observations),
         )
 
     succeeded = 0
     failed = 0
-    signals_total = 0
 
-    metric_results: list[tuple[ScopeDefinition, MarketReviewScopeSnapshot, dict[str, dict[str, list[float]]] | None]] = []
-
-    # 2. 第一遍：全部 scope 只计算 raw/normalized metrics。
+    # 2. [LEGACY-BUSINESS-PATH-RETIREMENT] 每 scope 执行 canonical Scope Observation
+    # 计算并落库（_compute_scope_metrics_phase 内部强制 persist canonical fact），
+    # 同时保留 MarketReviewScopeSnapshot 写作为 owner C 兼容生产（publish gate /
+    # /signals / scope-snapshot API 仍消费它）。signal/attribution pipeline（owner A，
+    # 已被 canonical Scope Observation 覆盖）已物理移除出 orchestrator 主链。
     for scope in scopes:
         try:
-            snapshot, history_maps = await _compute_scope_metrics_phase(
+            await _compute_scope_metrics_phase(
                 session,
                 run,
                 scope,
@@ -781,8 +762,6 @@ async def compute_run(
                 prepared_observations=prepared_observations,
             )
             succeeded += 1
-            if snapshot is not None:
-                metric_results.append((scope, snapshot, history_maps))
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
@@ -800,42 +779,21 @@ async def compute_run(
                 last_error=str(exc)[:500],
             )
 
-    # 3. 第二遍：同日同 family 横截面分位，完成后才能评估 signal。
-    await apply_cross_section_percentiles(session, run.id)
-    for scope, snapshot, history_maps in metric_results:
-        try:
-            signals_total += await _compute_scope_signal_pipeline(
-                session, run, scope, snapshot,
-                day_fact_map=day_fact_map,
-                history_maps=history_maps,
-            )
-        except Exception as exc:  # noqa: BLE001
-            succeeded -= 1
-            failed += 1
-            logger.exception(
-                "[ReviewOrchestrator] signal/attribution 失败: %s/%s err=%s",
-                scope.scope_type,
-                scope.scope_name,
-                exc,
-            )
-
-    # 4. 评估所有 active 追踪（即使有 scope 失败也执行）
+    # 3. 评估所有 active 追踪（即使有 scope 失败也执行）
     try:
         eval_count = await evaluate_all_active_trackings(session, run)
     except Exception as exc:  # noqa: BLE001
         eval_count = 0
         logger.exception("[ReviewOrchestrator] tracking 评估失败: %s", exc)
 
-    # 5. 更新 run 状态
+    # 4. 更新 run 状态。retirement 后 signal pipeline 不再计算，run 不再以
+    # signals_ready 为成功终态；改用 canonical observation 事实就绪语义。
     run.succeeded_scope_count = succeeded
     run.failed_scope_count = failed
     run.completed_at = datetime.now(UTC)
     # [AUD-06 2026-08-07] coverage_ratio 表达真实有效样本覆盖率（数据口径），
     # 不再是 scope 执行成功率；执行率由 succeeded/expected 两列独立表达。
     run.coverage_ratio = await _aggregate_run_data_coverage(session, run.id)
-
-    # 更新 signal_count（从 DB 实际统计）
-    actual_signal_count = await update_run_signal_count(session, run)
 
     if failed == 0 and succeeded > 0:
         run.status = RUN_STATUS_SIGNALS_READY
@@ -855,7 +813,7 @@ async def compute_run(
         "expected_scope_count": run.expected_scope_count,
         "succeeded_scope_count": succeeded,
         "failed_scope_count": failed,
-        "signal_count": actual_signal_count,
+        "signal_count": 0,
         "tracking_evaluations": eval_count,
         # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),
@@ -1478,12 +1436,12 @@ async def _compute_scope_metrics_phase(
     if history_maps is not None and date_indexed is not None:
         history_maps["_date_indexed"] = date_indexed  # type: ignore[assignment]
 
-    # === 规范 Scope Observation 事实层双写（PRD §7.2-§7.17 v2.3）===
-    # [2026-08-13 双轨并存] 不替换 legacy P/Q/U/C/V：Discovery/筛选器/信号管线
-    # 仍消费 MarketReviewScopeSnapshot（本轮不动）。此处仅把七段 Canonical
-    # Observation 写入 ReviewScopeObservationFact，供 EvidenceDrawer /
-    # scope_evidence_service 消费。双写失败不得影响 legacy metrics/signal，
-    # 故隔离在 try/except 内，仅记录 diagnostic。
+    # === 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）===
+    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] canonical Scope Observation 是
+    # 主链唯一计算体。MarketReviewScopeSnapshot（compute_scope_metrics 写入）仍保留，
+    # 但仅作为 owner C 兼容生产（publish gate / /signals / scope-snapshot API 仍消费它，
+    # 尚无 canonical 等价 owner，按报告 A/B/C 判定为 BLOCK 而非 DELETE）。legacy
+    # P/Q/U/C/V→Filter→Signal→Attribution pipeline 已移出主链，不再计算 signal。
     # 仅 industry_l1/l2/l3 + concept（activated scope）会实际写入（market/
     # major_index/style 自动跳过）。
     # [REVIEW-EXECUTION-PATH-CONSOLIDATION] ``prepared_observations`` 由
@@ -1493,10 +1451,9 @@ async def _compute_scope_metrics_phase(
         await _persist_canonical_scope_observation(
             session, run, scope, prepared_observations=prepared_observations
         )
-    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
+    except Exception as exc:  # noqa: BLE001 - canonical 写入 fail 在 savepoint 内回滚并以 warning 记录
         logger.warning(
-            "[ReviewOrchestrator] 规范事实层双写失败（不影响 legacy signal）: "
-            "%s/%s trade_date=%s err=%s",
+            "[ReviewOrchestrator] 规范事实层写入失败: %s/%s trade_date=%s err=%s",
             scope.scope_type, scope.scope_key, run.trade_date, exc,
         )
 
@@ -1597,304 +1554,6 @@ async def _persist_canonical_scope_observation(
         )
 
 
-def _build_history_extras(
-    snapshot: MarketReviewScopeSnapshot,
-    history_maps: dict[str, dict[str, list[float]]] | None,
-) -> dict[str, float | int]:
-    """[CR-01] 从历史序列构建 filter engine 所需的 history_extras。
-
-    CR01-D true date alignment:
-    - history_maps["_date_indexed"] = {trade_date: {metric_code: {component_name: raw_value}}}
-    - P-Q 仅在 P 和 Q 同时存在的 trade_date 计算
-    - structure_breakdown 比较当前 snapshot vs 最近 canonical trade_date
-    """
-    extras: dict[str, float | int] = {}
-
-    if history_maps is None:
-        return extras
-
-    date_indexed = history_maps.get("_date_indexed")
-
-    # CR01-A: Q/U/V delta1d historical percentile — true date-aligned
-    for metric_code, key in [("Q", "_q_delta1d_history_pct"),
-                               ("U", "_u_delta1d_history_pct"),
-                               ("V", "_v_delta1d_history_pct")]:
-        payload = getattr(snapshot, f"{metric_code.lower()}_payload") or {}
-        delta = payload.get("delta1d")
-        if not isinstance(delta, (int, float)):
-            continue
-        # Use date_indexed for true 1D deltas (only adjacent canonical dates with data)
-        delta_series = _extract_date_aligned_delta_series(date_indexed, metric_code)
-        if delta_series:
-            extras[key] = _percentile_rank(delta, delta_series)
-
-    # CR01-B: P-Q date-aligned — only on trade_dates where both P and Q exist
-    if isinstance(date_indexed, dict):
-        pq_diffs = []
-        for td in sorted(date_indexed.keys()):
-            entry = date_indexed[td]
-            p_entry = entry.get("P", {})
-            q_entry = entry.get("Q", {})
-            p_val = p_entry.get("_metric_value")
-            q_val = q_entry.get("_metric_value")
-            if p_val is not None and q_val is not None:
-                pq_diffs.append(p_val - q_val)
-        if pq_diffs:
-            p_payload = snapshot.p_payload or {}
-            q_payload = snapshot.q_payload or {}
-            p_val = p_payload.get("value")
-            q_val = q_payload.get("value")
-            if isinstance(p_val, (int, float)) and isinstance(q_val, (int, float)):
-                extras["_pq_diff_history_pct"] = _percentile_rank(p_val - q_val, pq_diffs)
-
-    # CR01-C: structure_breakdown — current snapshot vs most recent canonical trade_date
-    extras["_structure_breakdown_not_rising"] = (
-        _check_structure_breakdown_vs_previous(snapshot, date_indexed)
-    )
-
-    # CR01-D: C context — use existing historyPercentile120d
-    c_payload = snapshot.c_payload or {}
-    c_delta1d = c_payload.get("delta1d")
-    extras["_c_rising"] = 1 if isinstance(c_delta1d, (int, float)) and c_delta1d > 0 else 0
-    c_history_pct = c_payload.get("historyPercentile120d")
-    extras["_c_high_anomaly"] = (
-        1 if isinstance(c_history_pct, (int, float)) and c_history_pct >= 80 else 0
-    )
-
-    return extras
-
-
-def _get_metric_value_series(
-    history_maps: dict[str, dict[str, list[float]]],
-    metric_code: str,
-) -> list[float] | None:
-    components = history_maps.get(metric_code)
-    if not components:
-        return None
-    return components.get("_metric_value")
-
-
-def _extract_delta_series_from_metric_value(
-    history_maps: dict[str, dict[str, list[float]]],
-    metric_code: str,
-) -> list[float] | None:
-    values = _get_metric_value_series(history_maps, metric_code)
-    if values is None or len(values) < 2:
-        return None
-    return [values[i] - values[i - 1] for i in range(1, len(values))]
-
-
-def _extract_date_aligned_delta_series(
-    date_indexed: dict | None,
-    metric_code: str,
-) -> list[float] | None:
-    """从 date_indexed 计算真正的日期对齐 1D delta 序列。
-
-    只在相邻 canonical trade_dates 且两天都有 _metric_value 时才计算。
-    """
-    if not isinstance(date_indexed, dict):
-        return None
-    dates = sorted(date_indexed.keys())
-    deltas = []
-    for i in range(1, len(dates)):
-        prev_entry = date_indexed.get(dates[i - 1], {})
-        curr_entry = date_indexed.get(dates[i], {})
-        prev_val = prev_entry.get(metric_code, {}).get("_metric_value")
-        curr_val = curr_entry.get(metric_code, {}).get("_metric_value")
-        if prev_val is not None and curr_val is not None:
-            deltas.append(curr_val - prev_val)
-    return deltas if deltas else None
-
-
-def _percentile_rank(value: float, series: list[float]) -> float:
-    if not series:
-        return 0.0
-    below = sum(1 for v in series if v < value)
-    return round(below / len(series) * 100, 1)
-
-
-def _check_structure_breakdown_vs_previous(
-    snapshot: MarketReviewScopeSnapshot,
-    date_indexed: dict | None,
-) -> int:
-    """CR01-C: 比较当前 snapshot structure_breakdown_diffusion vs 最近 canonical trade_date。
-
-    使用 date_indexed 获取最近 trade_date 的 Q.structure_breakdown_diffusion 值。
-    """
-    # Get current value from snapshot Q payload components
-    q_payload = snapshot.q_payload or {}
-    components = q_payload.get("components", [])
-    current = None
-    if isinstance(components, list):
-        for c in components:
-            if isinstance(c, dict) and c.get("name") == "structure_breakdown_diffusion":
-                current = c.get("rawValue")
-                if isinstance(current, (int, float)):
-                    current = float(current)
-                break
-
-    if current is None:
-        return 0
-
-    # Get previous value from date_indexed
-    if isinstance(date_indexed, dict) and date_indexed:
-        most_recent_date = max(date_indexed.keys())
-        entry = date_indexed[most_recent_date]
-        q_entry = entry.get("Q", {})
-        prev = q_entry.get("structure_breakdown_diffusion")
-        if isinstance(prev, (int, float)):
-            return 1 if current <= prev else 0
-
-    return 0
-
-
-async def _compute_scope_signal_pipeline(
-    session: AsyncSession,
-    run: MarketReviewRun,
-    scope: ScopeDefinition,
-    snapshot: MarketReviewScopeSnapshot,
-    *,
-    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
-    history_maps: dict[str, dict[str, list[float]]] | None = None,
-) -> int:
-    """Evaluate signals and attribution after the cross-section pass is complete.
-
-    [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 透传给 attribution，
-    使 signal × child_scope 归因不再重复加载当日 facts。
-
-    [CR-01] ``history_maps`` 用于构建 history_extras 注入 filter evaluation。
-    """
-
-    # === signals phase ===
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_SIGNALS,
-        status=ITEM_RUNNING,
-        started_at=datetime.now(UTC),
-    )
-
-    try:
-        # [CR-01] 从历史序列构建 filter 所需的 history_extras
-        history_extras = _build_history_extras(snapshot, history_maps)
-
-        previous_signals = await find_previous_signals(
-            session,
-            scope_type=scope.scope_type,
-            scope_key=scope.scope_key,
-            before_trade_date=run.trade_date,
-            algorithm_version=run.algorithm_version,
-        )
-        signals = await generate_signals_for_scope(
-            session,
-            run=run,
-            snapshot=snapshot,
-            previous_signals=previous_signals,
-            history_extras=history_extras,
-        )
-    except SignalGenerationError as exc:
-        await _upsert_run_item(
-            session,
-            run_id=run.id,
-            scope_type=scope.scope_type,
-            scope_key=scope.scope_key,
-            phase=PHASE_SIGNALS,
-            status=ITEM_FAILED,
-            last_error=str(exc)[:500],
-            completed_at=datetime.now(UTC),
-        )
-        raise
-
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_SIGNALS,
-        status=ITEM_SUCCEEDED,
-        completed_at=datetime.now(UTC),
-    )
-
-    # === attribution phase（仅对命中信号） ===
-    if not signals:
-        await _upsert_run_item(
-            session,
-            run_id=run.id,
-            scope_type=scope.scope_type,
-            scope_key=scope.scope_key,
-            phase=PHASE_ATTRIBUTION,
-            status=ITEM_SKIPPED,
-            last_error="无命中信号",
-            completed_at=datetime.now(UTC),
-        )
-        return 0
-
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_ATTRIBUTION,
-        status=ITEM_RUNNING,
-        started_at=datetime.now(UTC),
-    )
-
-    parent_metrics = {
-        "P": snapshot.p_payload or {},
-        "Q": snapshot.q_payload or {},
-        "U": snapshot.u_payload or {},
-        "C": snapshot.c_payload or {},
-        "V": snapshot.v_payload or {},
-    }
-    parent_ready_count = snapshot.ready_count
-
-    attribution_errors: list[str] = []
-    for signal in signals:
-        try:
-            await compute_signal_attributions(
-                session,
-                signal,
-                parent_metrics=parent_metrics,
-                parent_ready_count=parent_ready_count,
-                source_core_run_id=run.source_core_run_id,
-                source_board_run_id=run.source_board_run_id,
-                day_fact_map=day_fact_map,
-            )
-            await compute_signal_instruments(
-                session,
-                signal,
-                parent_metrics=parent_metrics,
-                parent_ready_count=parent_ready_count,
-                source_core_run_id=run.source_core_run_id,
-                day_fact_map=day_fact_map,
-            )
-        except Exception as exc:  # noqa: BLE001
-            attribution_errors.append(f"{signal.signal_type}: {exc}")
-            logger.exception(
-                "[ReviewOrchestrator] 归因失败: signal=%s err=%s",
-                signal.id, exc,
-            )
-
-    status_final = (
-        ITEM_FAILED if attribution_errors and len(attribution_errors) == len(signals)
-        else ITEM_SUCCEEDED
-    )
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_ATTRIBUTION,
-        status=status_final,
-        last_error="; ".join(attribution_errors)[:500] if attribution_errors else None,
-        completed_at=datetime.now(UTC),
-    )
-
-    return len(signals)
-
-
 async def _compute_scope_pipeline(
     session: AsyncSession,
     run: MarketReviewRun,
@@ -1903,61 +1562,33 @@ async def _compute_scope_pipeline(
     day_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] | None = None,
     prepared_observations: dict[str, Any] | None = None,
 ) -> int:
-    """Resume-compatible single-scope pipeline using the same two ordered phases.
+    """Resume 用单 scope 路径：执行 canonical Scope Observation 计算并落库。
 
-    [Phase4C 2026-08-09 P0-B] resume 必须复用 run 已绑定的 canonical history source，
-    绝不重新解析 latest ready run（防止 A→B lineage 漂移）。
-
-    [REVIEW-FACT-PARITY-02 §10] ``day_fact_cache`` 是 ``resume_run`` 传入的跨 scope
-    可变缓存：当日 facts 只在第一个 scope 处加载一次，后续 scope 直接复用同一份
-    内存 map（共享引用，无 copy）。为 None 时（独立调用）不启用 load-once。
+    [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] resume 已与主路径一致：唯一执行体是
+    canonical Scope Observation 持久化（``_persist_canonical_scope_observation``）。
+    legacy metrics（P/Q/U/C/V）与 signal/attribution pipeline 不再进入 resume 主链。
+    ``day_fact_cache`` 参数保留仅为兼容既有调用方签名，canonical 持久化不再消费
+    legacy day-fact map。
     """
-    canonical_source_run_id, canonical_contract_version = (
-        await _bind_or_reuse_canonical_history_source(session, run)
-    )
-    # [REVIEW-FACT-PARITY-02 §10] resume load-once：facts 只在首个 scope 加载一次。
-    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None
-    if day_fact_cache is not None:
-        if "facts" not in day_fact_cache:
-            day_fact_cache["facts"] = await load_day_fact_maps(
-                session,
-                trade_date=run.trade_date,
-                source_core_run_id=run.source_core_run_id,
-                required_source_history_run_id=canonical_source_run_id,
-                required_history_contract_version=canonical_contract_version,
-            )
-            logger.info(
-                "[ReviewOrchestrator] resume load_day_fact_maps once: "
-                "trade_date=%s facts=%d source_history_run_id=%s",
-                run.trade_date,
-                len(day_fact_cache["facts"]),
-                canonical_source_run_id,
-            )
-        day_fact_map = day_fact_cache["facts"]
-
     # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的 ScopeDefinition 缺此字段）
     resolved = await _resolve_all_discovery_scopes(session, run)
     full_scope = next(
         (s for s in resolved if s.scope_type == scope.scope_type and s.scope_key == scope.scope_key),
         scope,
     )
-    snapshot, history_maps = await _compute_scope_metrics_phase(
-        session,
-        run,
-        full_scope,
-        required_history_contract_version=canonical_contract_version,
-        required_source_history_run_id=canonical_source_run_id,
-        day_fact_map=day_fact_map,
-        prepared_observations=prepared_observations,
+    # 身份校验：batch prepare 必含该 scope，否则 fail closed（不得回退 legacy）。
+    if (
+        prepared_observations is None
+        or full_scope.scope_key not in prepared_observations
+    ):
+        raise ValueError(
+            f"resume scope {full_scope.scope_type}/{full_scope.scope_key} 不在 "
+            f"canonical batch prepare 结果中；retirement 后禁止回退 legacy pipeline"
+        )
+    await _persist_canonical_scope_observation(
+        session, run, full_scope, prepared_observations=prepared_observations,
     )
-    if snapshot is None:
-        return 0
-    await apply_cross_section_percentiles(session, run.id)
-    return await _compute_scope_signal_pipeline(
-        session, run, full_scope, snapshot,
-        day_fact_map=day_fact_map,
-        history_maps=history_maps,
-    )
+    return 0
 
 
 # =============================================================================
@@ -2014,42 +1645,35 @@ async def resume_run(
         key = (item.scope_type, item.scope_key)
         scopes_to_redo.setdefault(key, set()).add(item.phase)
 
-    # [REVIEW-FACT-PARITY-02 §10] resume 同样 load-once：当日 facts 只在第一个
+    # [REVIEW-FACT-PARITY-02 §10] resume load-once：当日 facts 只在第一个
     # scope 处惰性加载一次，之后所有待重算 scope 共享同一份内存 map。
     # 用可变 cache 传入，避免在此重复调用 _bind_or_reuse_canonical_history_source
     # （binding 已在 _compute_scope_pipeline 内完成，重复调用会多做一次 DB 解析）。
     resume_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] = {}
 
-    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] 规范事实层同样只走唯一 batch owner：
-    # 对待重算 scope 集合一次 batch prepare，_compute_scope_pipeline 按 scope_key
-    # SELECT。失败隔离（不影响 legacy resume 主链），不是回退到旧路径。
-    prepared_observations: dict[str, Any] | None = None
-    try:
-        redo_specs = [
-            ScopeReplaySpec(
-                scope_type=scope_type,
-                scope_key=scope_key,
-                scope_name=scope_key,
-                member_ids=(),
-            )
-            for scope_type, scope_key in scopes_to_redo
-            if not is_scope_observation_persistence_excluded(
-                scope_type=scope_type,
-                scope_name=scope_key,
-            )
-        ]
-        if redo_specs:
-            prepared_observations = await prepare_current_scope_observations_batch(
-                session, run.trade_date, redo_specs
-            )
-    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
-        prepared_observations = None
-        logger.warning(
-            "[ReviewOrchestrator] resume 规范事实层 batch prepare 失败（不影响 legacy signal）: %s",
-            exc,
+    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 规范事实层唯一 batch owner：
+    # 对待重算 scope 集合一次 batch prepare。这是 resume 的强制主链前置步骤，
+    # 失败 fail closed（不隔离、不回退 legacy）。
+    redo_specs = [
+        ScopeReplaySpec(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            scope_name=scope_key,
+            member_ids=(),
+        )
+        for scope_type, scope_key in scopes_to_redo
+        if not is_scope_observation_persistence_excluded(
+            scope_type=scope_type,
+            scope_name=scope_key,
+        )
+    ]
+    prepared_observations: dict[str, Any] = {}
+    if redo_specs:
+        prepared_observations = await prepare_current_scope_observations_batch(
+            session, run.trade_date, redo_specs
         )
 
-    # 对每个需要重处理的 scope，重新执行 pipeline
+    # 对每个需要重处理的 scope，重新执行 canonical pipeline
     succeeded = 0
     failed = 0
     for (scope_type, scope_key), _phases in scopes_to_redo.items():
@@ -2080,7 +1704,6 @@ async def resume_run(
 
     # 更新 run 状态
     run.completed_at = datetime.now(UTC)
-    actual_signal_count = await update_run_signal_count(session, run)
 
     # 重新统计 succeeded/failed scope（基于 item 状态）
     final_succeeded, final_failed = await _count_scope_status(session, run.id)
@@ -2106,7 +1729,7 @@ async def resume_run(
         "resumed_scopes": len(scopes_to_redo),
         "succeeded": succeeded,
         "failed": failed,
-        "signal_count": actual_signal_count,
+        "signal_count": 0,
         "tracking_evaluations": eval_count,
         # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),

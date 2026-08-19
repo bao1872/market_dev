@@ -17,7 +17,6 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.models.market_review import MarketReviewScopeSnapshot
 from app.services.review_orchestrator_service import (
     ScopeDefinition,
     _bind_or_reuse_canonical_history_source,
@@ -107,12 +106,6 @@ class TestHistoryBindingForwarding:
         ), patch(
             "app.services.review_orchestrator_service.compute_scope_metrics",
             AsyncMock(return_value=_Snap()),
-        ), patch(
-            "app.services.review_orchestrator_service.apply_cross_section_percentiles",
-            AsyncMock(),
-        ), patch(
-            "app.services.review_orchestrator_service._compute_scope_signal_pipeline",
-            AsyncMock(return_value=0),
         ), patch(
             "app.services.review_orchestrator_service._upsert_run_item",
             AsyncMock(),
@@ -286,129 +279,3 @@ class TestRunBoundHistoryLifecycle:
         ):
             with pytest.raises(Exception):
                 await _bind_or_reuse_canonical_history_source(session, run)
-
-
-# =============================================================================
-# [CR-01] history_extras pipeline — production observation shape
-# =============================================================================
-
-
-class TestBuildHistoryExtras:
-    """[CR-01] 验证 _build_history_extras 使用真实 production observation contract。"""
-
-    @staticmethod
-    def _make_snapshot(
-        p_val=60.0, q_val=50.0, u_val=70.0, c_val=30.0, v_val=40.0,
-        p_delta=2.0, q_delta=1.0, u_delta=5.0, c_delta=-1.0, v_delta=3.0,
-        c_history_pct=40.0, breakdown_diffusion=0.15,
-    ):
-        return MarketReviewScopeSnapshot(
-            p_payload={"value": p_val, "delta1d": p_delta, "historyPercentile120d": 70.0},
-            q_payload={
-                "value": q_val, "delta1d": q_delta, "historyPercentile120d": 60.0,
-                "components": [
-                    {"name": "structure_breakdown_diffusion", "rawValue": breakdown_diffusion},
-                ],
-            },
-            u_payload={"value": u_val, "delta1d": u_delta, "historyPercentile120d": 80.0},
-            c_payload={"value": c_val, "delta1d": c_delta, "historyPercentile120d": c_history_pct},
-            v_payload={"value": v_val, "delta1d": v_delta, "historyPercentile120d": 55.0},
-        )
-
-    @staticmethod
-    def _make_production_history():
-        """Production-shaped history with _date_indexed."""
-        from datetime import date
-        return {
-            "P": {"_metric_value": [55.0, 56.0, 57.0, 58.0, 59.0, 60.0, 58.0, 57.0, 56.0, 58.0]},
-            "Q": {
-                "_metric_value": [45.0, 46.0, 47.0, 48.0, 49.0, 50.0, 48.0, 47.0, 46.0, 48.0],
-            },
-            "U": {"_metric_value": [60.0, 61.0, 62.0, 63.0, 64.0, 65.0, 63.0, 62.0, 61.0, 63.0]},
-            "C": {"_metric_value": [25.0, 26.0, 27.0, 28.0, 29.0, 30.0, 28.0, 27.0, 26.0, 28.0]},
-            "V": {"_metric_value": [35.0, 36.0, 37.0, 38.0, 39.0, 40.0, 38.0, 37.0, 36.0, 38.0]},
-            "_date_indexed": {
-                date(2026, 7, 20): {
-                    "P": {"_metric_value": 55.0},
-                    "Q": {"_metric_value": 45.0, "structure_breakdown_diffusion": 0.20},
-                    "U": {"_metric_value": 60.0},
-                    "V": {"_metric_value": 35.0},
-                },
-                date(2026, 7, 30): {
-                    "P": {"_metric_value": 58.0},
-                    "Q": {"_metric_value": 48.0, "structure_breakdown_diffusion": 0.10},
-                    "U": {"_metric_value": 63.0},
-                    "V": {"_metric_value": 38.0},
-                },
-            },
-        }
-
-    def test_history_extras_empty_when_no_history(self):
-        from app.services.review_orchestrator_service import _build_history_extras
-        extras = _build_history_extras(self._make_snapshot(), None)
-        assert extras == {}
-
-    def test_pq_diff_uses_metric_value_series(self):
-        """CR01-B: P-Q diff 使用 _metric_value 对齐序列。"""
-        from app.services.review_orchestrator_service import _build_history_extras
-        snapshot = self._make_snapshot(p_val=0.6, q_val=0.5)
-        extras = _build_history_extras(snapshot, self._make_production_history())
-        assert "_pq_diff_history_pct" in extras
-        assert 0 <= extras["_pq_diff_history_pct"] <= 100
-
-    def test_delta1d_percentiles_use_metric_value(self):
-        """CR01-A: Q/U/V delta1d percentile 使用 _metric_value。"""
-        from app.services.review_orchestrator_service import _build_history_extras
-        snapshot = self._make_snapshot(q_delta=1.0, u_delta=5.0, v_delta=3.0)
-        extras = _build_history_extras(snapshot, self._make_production_history())
-        for key in ["_q_delta1d_history_pct", "_u_delta1d_history_pct", "_v_delta1d_history_pct"]:
-            assert key in extras, f"{key} missing"
-            assert 0 <= extras[key] <= 100, f"{key}={extras[key]}"
-
-    def test_structure_breakdown_uses_q_diffusion(self):
-        """CR01-C: structure_breakdown compares current snapshot vs date_indexed previous。"""
-        from app.services.review_orchestrator_service import _build_history_extras
-        # current breakdown=0.15, date_indexed most_recent=0.10 → 0.15 > 0.10 → rising = 0
-        snapshot = self._make_snapshot(breakdown_diffusion=0.15)
-        history = self._make_production_history()
-        extras = _build_history_extras(snapshot, history)
-        assert extras["_structure_breakdown_not_rising"] == 0
-
-        # current=0.05, date_indexed most_recent=0.10 → not rising = 1
-        snapshot2 = self._make_snapshot(breakdown_diffusion=0.05)
-        extras2 = _build_history_extras(snapshot2, history)
-        assert extras2["_structure_breakdown_not_rising"] == 1
-
-    def test_c_rising_from_delta(self):
-        from app.services.review_orchestrator_service import _build_history_extras
-        snapshot = self._make_snapshot(c_delta=-1.0)
-        assert _build_history_extras(snapshot, {})["_c_rising"] == 0
-        snapshot2 = self._make_snapshot(c_delta=5.0)
-        assert _build_history_extras(snapshot2, {})["_c_rising"] == 1
-
-    def test_c_high_anomaly_uses_history_percentile(self):
-        """CR01-D: _c_high_anomaly 使用已计算的 historyPercentile120d。"""
-        from app.services.review_orchestrator_service import _build_history_extras
-        # historyPercentile120d=85 → anomaly
-        snapshot = self._make_snapshot(c_history_pct=85.0)
-        extras = _build_history_extras(snapshot, {})
-        assert extras["_c_high_anomaly"] == 1
-
-        # historyPercentile120d=40 → not anomaly
-        snapshot2 = self._make_snapshot(c_history_pct=40.0)
-        extras2 = _build_history_extras(snapshot2, {})
-        assert extras2["_c_high_anomaly"] == 0
-
-    def test_history_extras_in_filter_context(self):
-        """CR-01 字段进入 build_filter_context 后正确传递。"""
-        from app.services.review_orchestrator_service import _build_history_extras
-        from app.services.review_signal_service import build_filter_context
-        snapshot = self._make_snapshot()
-        snapshot.coverage_ratio = 1.0
-        snapshot.ready_count = 10
-        extras = _build_history_extras(snapshot, self._make_production_history())
-        context = build_filter_context(snapshot, history_extras=extras)
-        for key in ["_pq_diff_history_pct", "_q_delta1d_history_pct",
-                     "_u_delta1d_history_pct", "_v_delta1d_history_pct",
-                     "_structure_breakdown_not_rising", "_c_rising", "_c_high_anomaly"]:
-            assert key in context, f"{key} missing from filter context"

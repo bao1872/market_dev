@@ -20,7 +20,7 @@ and the member x date window is loaded ONCE through the shared union prep owner
 routes through this SAME batch owner with a batch size of one — there is no
 second single-scope implementation.
 
-Shadow only: not wired into Filter / Discovery / publication / orchestrator.
+EXPERIMENT / NOT_RUNTIME: not wired into orchestrator / API / publication / persistence yet.
 """
 
 from __future__ import annotations

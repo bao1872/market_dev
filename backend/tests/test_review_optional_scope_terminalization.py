@@ -394,11 +394,11 @@ class TestResumeLifecycle:
         with patch.object(
             orch, "list_run_items", AsyncMock(return_value=items),
         ), patch.object(
+            orch, "prepare_current_scope_observations_batch", AsyncMock(return_value={}),
+        ), patch.object(
             orch, "_compute_scope_pipeline", fake_pipeline,
         ), patch.object(
             orch, "evaluate_all_active_trackings", AsyncMock(return_value=0),
-        ), patch.object(
-            orch, "update_run_signal_count", AsyncMock(return_value=0),
         ), patch.object(
             orch, "_count_scope_status", AsyncMock(return_value=(len(items), 0)),
         ), patch.object(

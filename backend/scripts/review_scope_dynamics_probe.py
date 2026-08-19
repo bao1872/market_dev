@@ -1344,11 +1344,11 @@ async def _capacity_benchmark(
     """capacity-benchmark：只调用 optimized batch owner（shadow, production-bound path）
     ``compute_current_static_scope_dynamics_batch()``。
 
-    注意：``compute_current_static_scope_dynamics_batch()`` 当前标记 SHADOW ONLY，
-    尚未 wired 到 API / orchestrator / persistence / frontend —— 它是 production-code-
-    quality 的 optimized batch owner / candidate execution path，不是线上 orchestrator
-    已实际调用的 production execution path。因此本 benchmark 测量的是该 optimized
-    batch owner 的容量，不代表"线上 Review 当前就是此耗时"。
+    注意：``compute_current_static_scope_dynamics_batch()`` 当前标记 EXPERIMENT /
+    NOT_RUNTIME，尚未 wired 到 API / orchestrator / persistence / frontend —— 它是
+    production-code-quality 的 optimized batch owner / candidate execution path，
+    不是线上 orchestrator 已实际调用的 production execution path。因此本 benchmark
+    测量的是该 optimized batch owner 的容量，不代表"线上 Review 当前就是此耗时"。
 
     不跑 legacy A/B（Git 历史已永久保存 PERF-1/PERF-2/PERF-VEC-1 证据）；不做任何
     union 加载、scope 切分、member 构造或 single dynamics —— 全部委托给 batch owner。

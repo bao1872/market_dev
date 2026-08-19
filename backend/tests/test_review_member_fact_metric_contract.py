@@ -142,40 +142,54 @@ def test_component_evidence_includes_weight_mode_and_registry_has_no_segment_ret
 
 
 @pytest.mark.asyncio
-async def test_orchestrator_finishes_cross_section_before_any_signal(
+async def test_orchestrator_runs_canonical_single_pass_no_legacy_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """[REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 每 scope 只走一次 canonical
+    Scope Observation（_compute_scope_metrics_phase），legacy cross-section /
+    signal / attribution pipeline 不再进入 orchestrator 主链，也绝不再被调用。
+    """
     calls: list[str] = []
     scopes = [
         ScopeDefinition("style", "one", "风格一"),
         ScopeDefinition("style", "two", "风格二"),
     ]
-    snapshots = [SimpleNamespace(id=uuid.uuid4()), SimpleNamespace(id=uuid.uuid4())]
 
     async def _scopes(*_args: Any, **_kwargs: Any) -> list[ScopeDefinition]:
         return scopes
 
-    async def _metrics(_session: Any, _run: Any, scope: ScopeDefinition) -> Any:
+    async def _metrics(
+        _session: Any, _run: Any, scope: ScopeDefinition, **_kwargs: Any
+    ) -> Any:
         calls.append(f"metrics:{scope.scope_key}")
-        return snapshots[len(calls) - 1]
+        return None
 
-    async def _cross(*_args: Any, **_kwargs: Any) -> int:
-        calls.append("cross")
-        return 2
+    async def _prepare(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        calls.append("prepare")
+        return {}
 
-    async def _signals(_session: Any, _run: Any, scope: ScopeDefinition, _snapshot: Any) -> int:
-        calls.append(f"signals:{scope.scope_key}")
-        return 1
+    async def _source(*_args: Any, **_kwargs: Any) -> tuple[Any, str]:
+        return uuid.uuid4(), "h-v2"
+
+    async def _load_facts(*_args: Any, **_kwargs: Any) -> dict[Any, Any]:
+        calls.append("load_facts")
+        return {}
+
+    async def _coverage(*_args: Any, **_kwargs: Any) -> float:
+        return 1.0
 
     async def _zero(*_args: Any, **_kwargs: Any) -> int:
         return 0
 
     monkeypatch.setattr(orchestrator, "_resolve_all_discovery_scopes", _scopes)
+    monkeypatch.setattr(orchestrator, "_bind_or_reuse_canonical_history_source", _source)
+    monkeypatch.setattr(orchestrator, "load_day_fact_maps", _load_facts)
+    monkeypatch.setattr(
+        orchestrator, "prepare_current_scope_observations_batch", _prepare,
+    )
     monkeypatch.setattr(orchestrator, "_compute_scope_metrics_phase", _metrics)
-    monkeypatch.setattr(orchestrator, "apply_cross_section_percentiles", _cross)
-    monkeypatch.setattr(orchestrator, "_compute_scope_signal_pipeline", _signals)
     monkeypatch.setattr(orchestrator, "evaluate_all_active_trackings", _zero)
-    monkeypatch.setattr(orchestrator, "update_run_signal_count", _zero)
+    monkeypatch.setattr(orchestrator, "_aggregate_run_data_coverage", _coverage)
 
     class Session:
         async def flush(self) -> None:
@@ -184,6 +198,8 @@ async def test_orchestrator_finishes_cross_section_before_any_signal(
     run = SimpleNamespace(
         id=uuid.uuid4(),
         trade_date=date(2026, 7, 31),
+        source_core_run_id=uuid.uuid4(),
+        source_board_run_id=uuid.uuid4(),
         expected_scope_count=0,
         succeeded_scope_count=0,
         failed_scope_count=0,
@@ -193,12 +209,13 @@ async def test_orchestrator_finishes_cross_section_before_any_signal(
         completed_at=None,
     )
     await orchestrator.compute_run(Session(), run)
+    # 单遍 canonical：load facts → batch prepare → 每个 scope 一次 metrics；
+    # 无 cross / signals / attribution。
     assert calls == [
+        "load_facts",
+        "prepare",
         "metrics:one",
         "metrics:two",
-        "cross",
-        "signals:one",
-        "signals:two",
     ]
 
 
