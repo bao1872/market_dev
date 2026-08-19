@@ -8968,6 +8968,8 @@ def _run_internal_structure_type_semantic_validation(
 #   threshold_freeze_eligible=false。
 # ===========================================================================
 _IST_MC_STUDY = "INTERNAL-STRUCTURE-TYPE-MULTIVARIATE-MAPPING-CLOSURE"
+# Closure A1 audit-correction 审计基准：独立审查确认的实现 SHA。
+_IST_MC_IMPLEMENTATION_SHA = "78ada3262232d1e01ecdada660df02133e0cf105"
 _IST_MC_QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90)
 # 参考 / 工作阈值（E3/E4/E5 用；E6 评估稳定区，不冻结）。
 _IST_MC_REFERENCE = {"HIGH": 0.80, "LOW": 0.20, "MID": 0.50}
@@ -9839,6 +9841,19 @@ def _mc_conflict_classification(
         "distinguishing_fields": list(distinguish),
     }
     overlap_rate = len(inter) / min(len(A), len(B)) if min(len(A), len(B)) else 0.0
+    if not inter:
+        # E4 审计修正：overlap=0 通常是规则构造互斥的结果（如 Rotating
+        # LCR>=0.85 vs Fragmenting LCR<0.85），只能证明规则不冲突，不能证明
+        # 自然边界已被数据独立验证。不得写成 C 层级。
+        out["classification"] = "NO_OVERLAP_BY_RULE_CONSTRUCTION"
+        out["overlap_over_smaller"] = 0.0
+        out["avg_position"] = None
+        out["evidence_note"] = (
+            "两规则集交集为空：互斥由规则构造直接决定（如 Rotating LCR>=0.85 vs "
+            "Fragmenting LCR<0.85）。仅证明规则不冲突；边界（如 LCR=0.85）保持 "
+            "candidate boundary，未被数据独立验证，不冻结。"
+        )
+        return out
     if overlap_rate >= overlap_definition_threshold:
         out["classification"] = "A_definition_conflict_candidate"
         out["overlap_over_smaller"] = round(overlap_rate, 6)
@@ -10509,12 +10524,108 @@ def _mc_broad_profile(
     return out
 
 
+def _mc_frame_marginals(frame: list[dict]) -> dict:
+    """Full-frame category marginal counts (denominators for conditional drift)."""
+    return {
+        "scope_type": _mc_categorical_distribution(
+            frame, list(range(len(frame))), "scope_type"
+        ),
+        "size_bucket": _mc_categorical_distribution(
+            frame, list(range(len(frame))), "size_bucket"
+        ),
+    }
+
+
+def _mc_drift_summary(drifts: list[float]) -> dict | None:
+    """max / median / count of a conditional-drift sample (None-safe)."""
+    if not drifts:
+        return None
+    return {
+        "count": len(drifts),
+        "max": round(max(drifts), 6),
+        "median": _mc_median([float(x) for x in drifts]),
+    }
+
+
+def _mc_conditional_drift(
+    base: dict[str, dict],
+    broad: dict[str, dict],
+    base_marginals: dict[str, dict],
+    broad_marginals: dict[str, dict],
+) -> dict:
+    """E8 A1: P(TypeHit|Family) / P(TypeHit|SizeBucket) base→broad drift.
+
+    旧 family_drift = P(Family|TypeHit) 被采样权重机械驱动，不能判 family
+    stability。真实稳定性比较同一条件子群内的命中率条件概率漂移：
+        P(TypeHit | Family=f) base vs broad
+        P(TypeHit | SizeBucket=s) base vs broad
+    不在更广 universe 上重选规则 / threshold，只报告候选是否在子群内稳定。
+    """
+    out: dict[str, dict] = {}
+    all_drifts: dict[str, list[float]] = {"scope_type": [], "size_bucket": []}
+    for t, b in base.items():
+        g = broad.get(t)
+        if g is None:
+            out[t] = {"preferred_family": b["preferred_family"], "broad_missing": True}
+            continue
+        detail: dict[str, dict] = {}
+        for dim_key, dist_key in (
+            ("scope_type", "family_distribution"),
+            ("size_bucket", "size_distribution"),
+        ):
+            bm = base_marginals.get(dim_key, {})
+            gm = broad_marginals.get(dim_key, {})
+            bdist = b.get(dist_key, {})
+            gdist = g.get(dist_key, {})
+            cats = set(bm) | set(gm) | set(bdist) | set(gdist)
+            per_cat: dict[str, dict] = {}
+            for cat in sorted(cats):
+                nb = bm.get(cat, {}).get("count", 0)
+                ng = gm.get(cat, {}).get("count", 0)
+                hb = bdist.get(cat, {}).get("count", 0)
+                hg = gdist.get(cat, {}).get("count", 0)
+                pb = hb / nb if nb else None
+                pg = hg / ng if ng else None
+                drift = (
+                    round(abs(pb - pg), 6)
+                    if pb is not None and pg is not None
+                    else None
+                )
+                per_cat[cat] = {
+                    "n_base": nb,
+                    "n_broad": ng,
+                    "p_hit_base": round(pb, 6) if pb is not None else None,
+                    "p_hit_broad": round(pg, 6) if pg is not None else None,
+                    "conditional_drift": drift,
+                }
+                if drift is not None:
+                    all_drifts[dim_key].append(drift)
+            detail[dist_key] = per_cat
+        out[t] = {"preferred_family": b["preferred_family"], "conditional": detail}
+    return {
+        "per_type": out,
+        "summary": {
+            "scope_type": _mc_drift_summary(all_drifts["scope_type"]),
+            "size_bucket": _mc_drift_summary(all_drifts["size_bucket"]),
+        },
+    }
+
+
 def _mc_drift_report(
     base: dict[str, dict],
     broad: dict[str, dict],
     drift_warning: float = _IST_MC_DRIFT_WARNING,
+    base_marginals: dict[str, dict] | None = None,
+    broad_marginals: dict[str, dict] | None = None,
 ) -> dict:
-    """E8: preferred-family reference drift 40-scope vs 285-scope."""
+    """E8: preferred-family reference drift 40-scope vs 285-scope.
+
+    A1 修正：旧 ``family_drift`` = P(Family|TypeHit)，在 family-balanced
+    40-scope 与 population-weighted 285-scope 之间被采样权重机械驱动，不能作
+    为 family stability 指标 —— 已重命名 ``hit_composition_drift``（仅描述 hit
+    组合构成差异）。真实稳定性由 ``conditional_drift``（P(TypeHit|Family) /
+    P(TypeHit|SizeBucket) 的 base→broad 条件漂移）承担，需提供 marginals。
+    """
     out: dict[str, dict] = {}
     for t, b in base.items():
         g = broad.get(t)
@@ -10531,10 +10642,19 @@ def _mc_drift_report(
             "hit_rate_base": b["hit_rate"],
             "hit_rate_broad": g["hit_rate"],
             "hit_rate_drift": hit_drift,
-            "family_drift": _mc_dist_drift(
+            "hit_composition_drift": _mc_dist_drift(
                 b["family_distribution"], g["family_distribution"]
             ),
-            "size_drift": _mc_dist_drift(b["size_distribution"], g["size_distribution"]),
+            "hit_composition_drift_note": (
+                "P(Family|TypeHit) 差异；base(40) family-balanced vs broad(285) "
+                "population-weighted，机械受采样权重驱动，不作 family stability 判定。"
+            ),
+            "size_composition_drift": _mc_dist_drift(
+                b["size_distribution"], g["size_distribution"]
+            ),
+            "size_composition_drift_note": (
+                "P(Size|TypeHit) 差异，同样受采样权重驱动，不作 size stability 判定。"
+            ),
             "conflict_rate_base": b["conflict_rate"],
             "conflict_rate_broad": g["conflict_rate"],
             "conflict_drift": (
@@ -10565,7 +10685,25 @@ def _mc_drift_report(
         if r.get("hit_rate_drift") is not None
         and r["hit_rate_drift"] >= drift_warning
     ]
-    return {"per_type_drift": out, "drift_warnings": warnings}
+    result: dict = {"per_type_drift": out, "drift_warnings": warnings}
+    if base_marginals is not None and broad_marginals is not None:
+        cond = _mc_conditional_drift(base, broad, base_marginals, broad_marginals)
+        result["conditional_drift"] = cond
+        for t, cd in cond.get("per_type", {}).items():
+            for dim_key in ("scope_type", "size_bucket"):
+                for cat, st in cd.get("conditional", {}).get(
+                    "family_distribution"
+                    if dim_key == "scope_type"
+                    else "size_distribution",
+                    {},
+                ).items():
+                    dr = st.get("conditional_drift")
+                    if dr is not None and dr >= drift_warning:
+                        warnings.append(
+                            f"{t} P(Hit|{dim_key}={cat}) conditional_drift={dr} "
+                            f">= {drift_warning}"
+                        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -10679,7 +10817,17 @@ def _mc_balanced_recommendation(models: dict) -> dict:
             "默认推荐 C（Balanced + Unclassified）：既不夸大显式 Balanced，"
             "也不把全部 else 塞进 Balanced。"
         )
-    return {"models": summary, "recommended": rec, "rationale": rationale}
+    return {
+        "models": summary,
+        "recommended": rec,
+        "rationale": rationale,
+        "policy_status": "PREFERRED_POLICY_CANDIDATE",
+        "heuristic_note": (
+            "推荐阈值（Model C Unclassified 率 >= 25%）是研究 heuristic，不是实验"
+            "发现的自然阈值；60.5% Unclassified 是事实。Balanced policy 仍是候选，"
+            "不冻结，需人工复核后生效。"
+        ),
+    }
 
 
 _MC_TYPE_SEMANTIC = {
@@ -10725,6 +10873,7 @@ def _mc_contract_candidate(
     families_by_type = _mc_rule_families()
 
     per_type: dict[str, dict] = {}
+    threshold_status: dict[str, str] = {}
     for t in ("Broadening", "Core-led", "Rotating", "Fragmenting"):
         pref = preferred.get(t)
         family = pref.get("family") if pref else None
@@ -10744,6 +10893,10 @@ def _mc_contract_candidate(
             threshold_region[slot] = (
                 containing[0] if containing else (bands[0] if bands else None)
             )
+        # A1 修正：任何 slot 存在稳定区 → SUPPORTED，否则 UNRESOLVED（诚实上报，
+        # 不得自动换 family / 调阈值 / 搜索新规则）。
+        threshold_ok = any(bool(bands) for bands in stable.values())
+        threshold_status[t] = "PASS" if threshold_ok else "UNRESOLVED"
         pair_conflicts = [
             c for pair, c in conflict_class.items() if t in pair.split("↔")
         ]
@@ -10755,6 +10908,15 @@ def _mc_contract_candidate(
             "preferred_family": family,
             "preferred_conditions": fam_def["conditions"] if fam_def else None,
             "threshold_region": threshold_region,
+            "threshold_robustness": threshold_status[t],
+            "threshold_robustness_note": (
+                None
+                if threshold_ok
+                else (
+                    "stable_regions 为空：threshold robustness=UNRESOLVED；"
+                    "不得自动换 family / 调阈值 / 搜索新规则，待人工复核。"
+                )
+            ),
             "conflict_notes": [
                 {
                     "pair": c.get("pair"),
@@ -10770,22 +10932,102 @@ def _mc_contract_candidate(
             ],
         }
 
+    # ---- E6 gate（数据驱动）----
+    e6_gate = {
+        "status": "PARTIAL",
+        "per_type": dict(threshold_status),
+        "note": (
+            "Core-led C1 无稳定阈值区 → UNRESOLVED；Broadening/Rotating/Fragmenting "
+            "存在稳定区 → PASS。不得为了让 Gate PASS 自动换 C2 / 调阈值 / 搜索新规则。"
+        ),
+    }
+
+    # ---- E7 gate（数据驱动，judgment 未完成不得 PASS）----
+    e7_validation_status = (
+        e7.get("semantic_validation", {}).get("status")
+        or "PENDING_SEMANTIC_REVIEW"
+    )
+    e7_gate = {
+        "dataset_generation": "PASS",
+        "semantic_validation": e7_validation_status,
+        "note": (
+            "07_blind_semantic_replay.json 仅为 blind dataset（evidence-only，"
+            "无 type/candidate label）；human_judgment 未完成，禁止用 candidate rules "
+            "自动填充。judgment 完成后 Gate 才能转 PASS。"
+        ),
+    }
+
+    # ---- E8 gate（数据驱动）----
+    e8_gate: dict = {"overall_rate_validation": "PASS"}
+    drift = (e8 or {}).get("drift_report", {})
+    per_type_drift = drift.get("per_type_drift", {})
+    rate_gaps = [
+        (t, key, r.get(key))
+        for t, r in per_type_drift.items()
+        for key in (
+            "hit_rate_drift",
+            "conflict_drift",
+            "unclassified_drift",
+            "threshold_sensitivity_drift",
+        )
+    ]
+    if any(g is not None and g >= _IST_MC_DRIFT_WARNING for _, _, g in rate_gaps):
+        e8_gate["overall_rate_validation"] = "NEEDS_REVIEW"
+    cond = drift.get("conditional_drift", {})
+    cond_summary = cond.get("summary", {})
+    family_size_status: str = "PASS"
+    for dim_key in ("scope_type", "size_bucket"):
+        s = cond_summary.get(dim_key) or {}
+        mx = s.get("max")
+        if mx is not None and mx >= _IST_MC_DRIFT_WARNING:
+            family_size_status = "NEEDS_REVIEW"
+    e8_gate["family_size_stability"] = {
+        "status": family_size_status,
+        "metric_corrected": (
+            "旧 family_drift=P(Family|TypeHit) 受采样权重机械驱动，已改名 "
+            "hit_composition_drift（仅描述）；真实稳定性由 conditional_drift "
+            "P(TypeHit|Family)/P(TypeHit|SizeBucket) 判定（见 08 JSON）。"
+        ),
+        "conditional_drift_summary": cond_summary,
+    }
+
     return {
         "study": _IST_MC_STUDY,
         "contract_status": "CANDIDATE_NOT_FROZEN",
         "threshold_freeze_eligible": False,
         "membership_semantics": "current_static_research_proxy",
+        "multivariate_closure_status": "CONDITIONAL_PASS",
+        "closed_sha": None,
+        "pre_freeze": "BLOCKED",
+        "implementation_sha": _IST_MC_IMPLEMENTATION_SHA,
+        "audit_correction": "MULTIVARIATE-MAPPING-CLOSURE-A1-AUDIT-CORRECTION",
+        "gate_matrix": {
+            "E1_structural_dimension_audit": "PASS",
+            "E2_prototype_anchor_generation": "PASS",
+            "E3_rule_family_experiment": "PASS",
+            "E4_conflict_experiment": "PASS_WITH_INTERPRETATION_CAVEAT",
+            "E5_balanced_model_comparison": "PASS_AS_CANDIDATE",
+            "E6_threshold_robustness": e6_gate,
+            "E7_blind_replay_dataset": "PASS",
+            "E7_blind_semantic_validation": e7_gate,
+            "E8_overall_rate_validation": e8_gate["overall_rate_validation"],
+            "E8_family_size_stability": e8_gate["family_size_stability"],
+        },
         "dimension_map": dim_map,
         "types": per_type,
         "balanced_policy": {
+            "policy_status": "PREFERRED_POLICY_CANDIDATE",
             "recommended_model": balanced_rec.get("recommended"),
             "rationale": balanced_rec.get("rationale"),
+            "heuristic_note": balanced_rec.get("heuristic_note"),
             "model_comparison": balanced_rec.get("models"),
         },
         "conflict_policy": {
             "note": (
-                "E4 归因（A 规则重构 / B 合理过渡 / C 层级）为研究建议；正式 "
-                "Conflict policy 需人工复核后确定，当前禁止 if/elif priority 自动落库。"
+                "E4 归因（A 规则重构 / B 合理过渡 / C 层级 / NO_OVERLAP_BY_RULE_"
+                "CONSTRUCTION）为研究建议；正式 Conflict policy 需人工复核后确定，"
+                "当前禁止 if/elif priority 自动落库。overlap=0 只说明规则构造互斥，"
+                "不代表自然边界已被数据独立验证。"
             ),
             "classifications": conflict_class,
         },
@@ -10797,7 +11039,7 @@ def _mc_contract_candidate(
             "cross_sectional": "DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED",
             "future_leak": "不使用未来收益；hist_pct/delta5d 只消费当前及历史观测",
         },
-        "e8_broader_validation": (e8 or {}).get("drift_report"),
+        "e8_broader_validation": drift,
         "unresolved_issues_overall": [
             f"{c.get('pair')} → {c.get('classification')}"
             for c in conflict_class.values()
@@ -11001,10 +11243,25 @@ def _run_internal_structure_type_multivariate(
         "study": _IST_MC_STUDY,
         "case_count": blind["case_count"],
         "cases": blind["cases"],
+        "semantic_validation": {
+            "status": "PENDING_SEMANTIC_REVIEW",
+            "note": (
+                "本文件仅为 blind review dataset（100 cases，evidence-only，"
+                "无 type/candidate/old label）。human_judgment 尚未完成：先只看事实"
+                "判断结构，再揭晓候选（对照在独立文件 07b_blind_replay_reveal.json）。"
+                "禁止用 candidate rules 自动填充 judgment；Gate 在 judgment 完成前"
+                "保持 PENDING_SEMANTIC_REVIEW。"
+            ),
+            "judgments": None,
+        },
     }
     e7_reveal = {
         "study": _IST_MC_STUDY,
-        "note": "盲审揭晓对照（独立文件，避免先看到 type 再找理由）。",
+        "note": (
+            "盲审揭晓对照（独立文件，避免先看到 type 再找理由）。"
+            "A1 修正：blind 文件与 reveal 文件完全分离；揭晓仅供 ChatGPT/人工"
+            "semantic audit 在记录 judgment 之后对照。"
+        ),
         "reveal": blind["reveal"],
     }
 
@@ -11057,7 +11314,11 @@ def _run_internal_structure_type_multivariate(
             frame, families_by_type, preferred, slot_qs, dists,
             universe_len, assignments, box_by_index,
         )
-        drift_report = _mc_drift_report(base_profile, broad_profile)
+        drift_report = _mc_drift_report(
+            base_profile, broad_profile,
+            base_marginals=_mc_frame_marginals(frame),
+            broad_marginals=_mc_frame_marginals(broad_frame),
+        )
         e8 = {
             "study": _IST_MC_STUDY,
             "base_scope_count": len(set(str(r.get("scope_key")) for r in rows)),
@@ -11148,7 +11409,7 @@ def _run_internal_structure_type_multivariate(
             print(
                 f"  {t}: hit_rate {d.get('hit_rate_base')} -> "
                 f"{d.get('hit_rate_broad')} (drift={d.get('hit_rate_drift')}) "
-                f"family_drift={d.get('family_drift')} "
+                f"hit_composition_drift={d.get('hit_composition_drift')} "
                 f"conflict_drift={d.get('conflict_drift')}"
             )
         if e8["drift_report"]["drift_warnings"]:

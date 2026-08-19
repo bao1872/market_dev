@@ -43,11 +43,15 @@ from scripts.review_scope_dynamics_probe import (
     _mc_correlation_map,
     _mc_dimension_map,
     _mc_dist_drift,
+    _mc_conditional_drift,
+    _mc_drift_report,
+    _mc_drift_summary,
     _mc_eval_conditions,
     _mc_eval_family_hits,
     _mc_evidence,
     _mc_family_slots,
     _mc_feature_distributions,
+    _mc_frame_marginals,
     _mc_in_balanced_box,
     _mc_label_distribution_bias,
     _mc_label_metrics,
@@ -65,6 +69,7 @@ from scripts.review_scope_dynamics_probe import (
     _mc_stable_region_detection,
     _mc_threshold_robustness,
     _mc_threshold_sensitivity,
+    _mc_drift_summary,
 )
 
 
@@ -384,12 +389,49 @@ def test_mc_conflict_classification_definition_conflict(frame, dists, slot_qs):
         frame, assignments, "Rotating↔Fragmenting",
         ("lcr", "migration_hist_pct"),
     )
-    assert cl["classification"] in (
-        "A_definition_conflict_candidate",
-        "B_legitimate_transition_candidate",
-        "C_interpretation_hierarchy_candidate",
-    )
+    # A1 审计修正：Rotating (LCR>=0.85) 与 Fragmenting (LCR<0.85) 在合成 frame 中
+    # 无交集，互斥由规则构造直接决定 → NO_OVERLAP_BY_RULE_CONSTRUCTION，
+    # 不得再输出 C 层级（C 表示 overlap 存在且偏向某侧）。
+    assert cl["classification"] == "NO_OVERLAP_BY_RULE_CONSTRUCTION"
+    assert cl["overlap_n"] == 0
     assert "overlap_over_smaller" in cl
+    assert "candidate boundary" in cl["evidence_note"]
+
+
+def test_mc_conflict_classification_overlap_nonzero_not_rule_construction(frame, dists, slot_qs):
+    """overlap>0 的 pair 不得被标成 NO_OVERLAP_BY_RULE_CONSTRUCTION。
+
+    合成 frame 中（HIGH=0.80 / LOW=0.20 / MID=0.50）只有 Core-led↔Fragmenting
+    存在真实 overlap（"O" 行同时命中 C1 与 F1/F2），其余 pair 在合成数据里
+    恰好无交集。overlap=0 统一归因为规则构造互斥。
+    """
+    fams = _mc_rule_families()
+    assignments = {}
+    for t, fams_of_type in fams.items():
+        idx = set()
+        for f in fams_of_type:
+            idx |= set(_mc_eval_family_hits(frame, f["conditions"], slot_qs, dists))
+        assignments[t] = idx
+    pair = _mc_pairwise_conflicts(assignments, len(frame))
+    overlap_pairs = [k for k, st in pair.items() if st["intersection"] > 0]
+    no_overlap_pairs = [k for k, st in pair.items() if st["intersection"] == 0]
+    assert "Core-led↔Fragmenting" in overlap_pairs
+    for k in no_overlap_pairs:
+        cl = _mc_conflict_classification(
+            frame, assignments, k, ("lcr", "migration_hist_pct")
+        )
+        assert cl["classification"] == "NO_OVERLAP_BY_RULE_CONSTRUCTION"
+        assert cl["overlap_n"] == 0
+    for k in overlap_pairs:
+        cl = _mc_conflict_classification(
+            frame, assignments, k, ("lcr", "migration_hist_pct")
+        )
+        assert cl["classification"] != "NO_OVERLAP_BY_RULE_CONSTRUCTION"
+        assert cl["classification"] in (
+            "A_definition_conflict_candidate",
+            "B_legitimate_transition_candidate",
+            "C_interpretation_hierarchy_candidate",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -492,6 +534,10 @@ def test_mc_balanced_recommendation_prefers_c_on_high_unclassified():
     }
     rec = _mc_balanced_recommendation(models)
     assert rec["recommended"] == "Model C"
+    # A1 E5：Balanced policy 是 candidate，不是 frozen policy
+    assert rec["policy_status"] == "PREFERRED_POLICY_CANDIDATE"
+    assert "heuristic_note" in rec
+    assert "heuristic" in rec["heuristic_note"]
 
 
 def test_mc_balanced_recommendation_defaults_to_c():
@@ -671,6 +717,112 @@ def test_mc_slot_abs_resolves_all_core_keys(frame, dists):
             assert f in abs_[slot]
 
 
+def test_mc_frame_marginals_shape(frame):
+    """A1 E8: 全 frame 类别边际计数（conditional drift 的分母）。"""
+    m = _mc_frame_marginals(frame)
+    assert set(m) == {"scope_type", "size_bucket"}
+    for dim, dist in m.items():
+        assert sum(c["count"] for c in dist.values()) == len(frame)
+        assert all({"count", "rate"} <= set(c) for c in dist.values())
+
+
+def test_mc_drift_summary_none_safe():
+    assert _mc_drift_summary([]) is None
+    assert _mc_drift_summary([0.1, 0.3, 0.5]) == {
+        "count": 3, "max": 0.5, "median": 0.3,
+    }
+
+
+def test_mc_conditional_drift_identical_subgroup_rates():
+    """A1 E8: 同一条件子群 P(TypeHit|Family/Size) 相同 → conditional drift = 0。"""
+    base = {
+        "Broadening": {
+            "preferred_family": "B1",
+            "family_distribution": {"concept": {"count": 5}},
+            "size_distribution": {"small": {"count": 5}},
+        }
+    }
+    broad = {
+        "Broadening": {
+            "preferred_family": "B1",
+            "family_distribution": {"concept": {"count": 50}},
+            "size_distribution": {"small": {"count": 50}},
+        }
+    }
+    base_marg = {
+        "scope_type": {"concept": {"count": 10}},
+        "size_bucket": {"small": {"count": 10}},
+    }
+    broad_marg = {
+        "scope_type": {"concept": {"count": 100}},
+        "size_bucket": {"small": {"count": 100}},
+    }
+    out = _mc_conditional_drift(base, broad, base_marg, broad_marg)
+    st = out["per_type"]["Broadening"]["conditional"]
+    assert st["family_distribution"]["concept"]["p_hit_base"] == 0.5
+    assert st["family_distribution"]["concept"]["p_hit_broad"] == 0.5
+    assert st["family_distribution"]["concept"]["conditional_drift"] == 0.0
+    assert st["size_distribution"]["small"]["conditional_drift"] == 0.0
+    assert out["summary"]["scope_type"] == {"count": 1, "max": 0.0, "median": 0.0}
+    assert out["summary"]["size_bucket"] == {"count": 1, "max": 0.0, "median": 0.0}
+
+
+def test_mc_drift_report_includes_conditional_when_marginals():
+    """A1 E8: 提供 marginals 时 drift_report 必须包含 conditional_drift；
+    hit_composition_drift 保留但仅描述，不得再以 family_drift 名义判稳定性。"""
+    base = {
+        "Broadening": {
+            "preferred_family": "B1",
+            "hit_rate": 0.2,
+            "family_distribution": {"concept": {"count": 5}},
+            "size_distribution": {"small": {"count": 5}},
+            "conflict_rate": 0.1,
+            "unclassified_rate": 0.5,
+            "threshold_sensitivity": 0.05,
+        }
+    }
+    broad = {
+        "Broadening": {
+            "preferred_family": "B1",
+            "hit_rate": 0.2,
+            "family_distribution": {"concept": {"count": 50}},
+            "size_distribution": {"small": {"count": 50}},
+            "conflict_rate": 0.1,
+            "unclassified_rate": 0.5,
+            "threshold_sensitivity": 0.05,
+        }
+    }
+    base_marg = {
+        "scope_type": {"concept": {"count": 10}},
+        "size_bucket": {"small": {"count": 10}},
+    }
+    broad_marg = {
+        "scope_type": {"concept": {"count": 100}},
+        "size_bucket": {"small": {"count": 100}},
+    }
+    rep = _mc_drift_report(
+        base, broad, base_marginals=base_marg, broad_marginals=broad_marg
+    )
+    pt = rep["per_type_drift"]["Broadening"]
+    assert "hit_composition_drift" in pt
+    assert "hit_composition_drift_note" in pt
+    assert "family_drift" not in pt
+    assert "conditional_drift" in rep
+    assert rep["conditional_drift"]["per_type"]["Broadening"][
+        "conditional"
+    ]["family_distribution"]["concept"]["conditional_drift"] == 0.0
+
+
+def test_mc_drift_report_conditional_missing_without_marginals():
+    """A1 E8: 未提供 marginals 时不得注入 conditional_drift（数据缺失诚实上报）。"""
+    base = {"Broadening": {"preferred_family": "B1", "hit_rate": 0.2,
+                           "family_distribution": {}, "size_distribution": {},
+                           "conflict_rate": 0.0, "unclassified_rate": 0.5,
+                           "threshold_sensitivity": 0.0}}
+    rep = _mc_drift_report(base, base)
+    assert "conditional_drift" not in rep
+
+
 # ---------------------------------------------------------------------------
 # contract candidate
 # ---------------------------------------------------------------------------
@@ -711,10 +863,26 @@ def test_mc_contract_candidate_status_and_structure(frame, dists, slot_qs):
     contract = _mc_contract_candidate(e1, e2, e3, e4, e5, e6, e7, None)
     assert contract["contract_status"] == "CANDIDATE_NOT_FROZEN"
     assert contract["threshold_freeze_eligible"] is False
+    assert contract["multivariate_closure_status"] == "CONDITIONAL_PASS"
+    assert contract["pre_freeze"] == "BLOCKED"
     assert set(contract["types"]) == {"Broadening", "Core-led", "Rotating", "Fragmenting"}
     assert contract["balanced_policy"]["recommended_model"] == "C"
+    assert contract["balanced_policy"]["policy_status"] == "PREFERRED_POLICY_CANDIDATE"
     assert "conflict_policy" in contract
     assert "availability_policy" in contract
+    # A1 E4：Rotating↔Fragmenting 必须按规则构造互斥归因
+    assert contract["conflict_policy"]["classifications"][
+        "Rotating↔Fragmenting"]["classification"] == "NO_OVERLAP_BY_RULE_CONSTRUCTION"
+    # A1 E6：无 stable region 数据时（e6 为空）必须 UNRESOLVED，不得假装 PASS
+    gm = contract["gate_matrix"]
+    assert gm["E6_threshold_robustness"]["status"] == "PARTIAL"
+    assert set(gm["E6_threshold_robustness"]["per_type"].values()) == {"UNRESOLVED"}
+    # A1 E7：judgment 缺失时 gate 保持 PENDING_SEMANTIC_REVIEW
+    assert gm["E7_blind_semantic_validation"]["semantic_validation"] == (
+        "PENDING_SEMANTIC_REVIEW"
+    )
+    assert gm["E8_overall_rate_validation"] == "PASS"
+    assert "metric_corrected" in gm["E8_family_size_stability"]
     for t in ("Broadening", "Core-led", "Rotating", "Fragmenting"):
         assert "semantic_definition" in contract["types"][t]
         assert "preferred_family" in contract["types"][t]
