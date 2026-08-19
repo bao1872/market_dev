@@ -786,8 +786,14 @@ async def compute_run(
         eval_count = 0
         logger.exception("[ReviewOrchestrator] tracking 评估失败: %s", exc)
 
-    # 4. 更新 run 状态。retirement 后 signal pipeline 不再计算，run 不再以
-    # signals_ready 为成功终态；改用 canonical observation 事实就绪语义。
+    # 4. 更新 run 状态。retirement 后 signal pipeline 不再计算；run 状态名
+    # ``signals_ready`` 保留为 PUBLICATION_CONTRACT 的历史兼容状态 token：publication
+    # gate（review_publication_service.evaluate_publish_gate）仍以 signals_ready /
+    # published 作为可发布前提，且 market 尚无 canonical owner 导致无法切换到
+    # canonical readiness 命名。改名必须先迁移 publication gate + market canonical
+    # owner（[REVIEW-ATOMIC-BUSINESS-CUTOVER] publication 项 BLOCK，不在此伪造完成）。
+    # 业务语义：signal pipeline 已退出主链，run 成功终态现在只反映 canonical
+    # scope observation +（owner C 兼容）snapshot 就绪。
     run.succeeded_scope_count = succeeded
     run.failed_scope_count = failed
     run.completed_at = datetime.now(UTC)
@@ -1436,26 +1442,21 @@ async def _compute_scope_metrics_phase(
     if history_maps is not None and date_indexed is not None:
         history_maps["_date_indexed"] = date_indexed  # type: ignore[assignment]
 
-    # === 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）===
-    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] canonical Scope Observation 是
-    # 主链唯一计算体。MarketReviewScopeSnapshot（compute_scope_metrics 写入）仍保留，
-    # 但仅作为 owner C 兼容生产（publish gate / /signals / scope-snapshot API 仍消费它，
-    # 尚无 canonical 等价 owner，按报告 A/B/C 判定为 BLOCK 而非 DELETE）。legacy
-    # P/Q/U/C/V→Filter→Signal→Attribution pipeline 已移出主链，不再计算 signal。
-    # 仅 industry_l1/l2/l3 + concept（activated scope）会实际写入（market/
-    # major_index/style 自动跳过）。
-    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] ``prepared_observations`` 由
-    # compute_run / resume_run 一次 batch prepare 后传入，本函数只按 scope_key
-    # SELECT 对应 PreparedScope，不再逐 scope 调用任何 single-scope preparation。
-    try:
-        await _persist_canonical_scope_observation(
-            session, run, scope, prepared_observations=prepared_observations
-        )
-    except Exception as exc:  # noqa: BLE001 - canonical 写入 fail 在 savepoint 内回滚并以 warning 记录
-        logger.warning(
-            "[ReviewOrchestrator] 规范事实层写入失败: %s/%s trade_date=%s err=%s",
-            scope.scope_type, scope.scope_key, run.trade_date, exc,
-        )
+    # [REVIEW-ATOMIC-BUSINESS-CUTOVER / FAIL-CLOSED] canonical Scope Observation
+    # 是主链必需事实层。activated scope（industry_l1/l2/l3 + concept）的 canonical
+    # write 真实失败必须 FAIL 该 scope，绝不 warning 后继续用 legacy snapshot 冒充
+    # 成功（禁止结果污染）。market/major_index/style 由
+    # ``_persist_canonical_scope_observation`` 内部按
+    # ``is_scope_observation_persistence_excluded`` 提前 return（合法非失败），
+    # 不受影响。
+    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] MarketReviewScopeSnapshot
+    # （compute_scope_metrics 写入）仍保留，但仅作为 owner C 兼容生产（publish
+    # gate / /signals / scope-snapshot API 仍消费它，尚无 canonical 等价 owner，
+    # 按报告 A/B/C 判定为 BLOCK 而非 DELETE）。legacy P/Q/U/C/V→Filter→Signal→
+    # Attribution pipeline 已移出主链。
+    await _persist_canonical_scope_observation(
+        session, run, scope, prepared_observations=prepared_observations
+    )
 
     return snapshot, history_maps
 
@@ -1554,43 +1555,6 @@ async def _persist_canonical_scope_observation(
         )
 
 
-async def _compute_scope_pipeline(
-    session: AsyncSession,
-    run: MarketReviewRun,
-    scope: ScopeDefinition,
-    *,
-    day_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] | None = None,
-    prepared_observations: dict[str, Any] | None = None,
-) -> int:
-    """Resume 用单 scope 路径：执行 canonical Scope Observation 计算并落库。
-
-    [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] resume 已与主路径一致：唯一执行体是
-    canonical Scope Observation 持久化（``_persist_canonical_scope_observation``）。
-    legacy metrics（P/Q/U/C/V）与 signal/attribution pipeline 不再进入 resume 主链。
-    ``day_fact_cache`` 参数保留仅为兼容既有调用方签名，canonical 持久化不再消费
-    legacy day-fact map。
-    """
-    # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的 ScopeDefinition 缺此字段）
-    resolved = await _resolve_all_discovery_scopes(session, run)
-    full_scope = next(
-        (s for s in resolved if s.scope_type == scope.scope_type and s.scope_key == scope.scope_key),
-        scope,
-    )
-    # 身份校验：batch prepare 必含该 scope，否则 fail closed（不得回退 legacy）。
-    if (
-        prepared_observations is None
-        or full_scope.scope_key not in prepared_observations
-    ):
-        raise ValueError(
-            f"resume scope {full_scope.scope_type}/{full_scope.scope_key} 不在 "
-            f"canonical batch prepare 结果中；retirement 后禁止回退 legacy pipeline"
-        )
-    await _persist_canonical_scope_observation(
-        session, run, full_scope, prepared_observations=prepared_observations,
-    )
-    return 0
-
-
 # =============================================================================
 # Resume
 # =============================================================================
@@ -1645,12 +1609,6 @@ async def resume_run(
         key = (item.scope_type, item.scope_key)
         scopes_to_redo.setdefault(key, set()).add(item.phase)
 
-    # [REVIEW-FACT-PARITY-02 §10] resume load-once：当日 facts 只在第一个
-    # scope 处惰性加载一次，之后所有待重算 scope 共享同一份内存 map。
-    # 用可变 cache 传入，避免在此重复调用 _bind_or_reuse_canonical_history_source
-    # （binding 已在 _compute_scope_pipeline 内完成，重复调用会多做一次 DB 解析）。
-    resume_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] = {}
-
     # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 规范事实层唯一 batch owner：
     # 对待重算 scope 集合一次 batch prepare。这是 resume 的强制主链前置步骤，
     # 失败 fail closed（不隔离、不回退 legacy）。
@@ -1673,7 +1631,26 @@ async def resume_run(
             session, run.trade_date, redo_specs
         )
 
-    # 对每个需要重处理的 scope，重新执行 canonical pipeline
+    # [REVIEW-ATOMIC-BUSINESS-CUTOVER / UNIFY] resume 与 compute_run 必须调用
+    # SAME per-scope owner（_compute_scope_metrics_phase），绝不保留第二套
+    # per-scope 业务结果。绑定 canonical history source（绑定已存在则复用，
+    # 绝不重新解析 latest）并像 compute_run 一样 load-once day facts，使 resume
+    # 重算的 scope 与主路径产生完全一致的事实集合。
+    (
+        resume_canonical_source_run_id,
+        resume_canonical_contract_version,
+    ) = await _bind_or_reuse_canonical_history_source(session, run)
+    resume_day_fact_map = await load_day_fact_maps(
+        session,
+        trade_date=run.trade_date,
+        source_core_run_id=run.source_core_run_id,
+        required_source_history_run_id=resume_canonical_source_run_id,
+        required_history_contract_version=resume_canonical_contract_version,
+    )
+
+    # 对每个需要重处理的 scope，执行与 compute_run 完全相同的 per-scope owner。
+    # 正式 scope 解析一次（补全 taxonomy_compatibility_key），供整段 resume 复用。
+    resolved = await _resolve_all_discovery_scopes(session, run)
     succeeded = 0
     failed = 0
     for (scope_type, scope_key), _phases in scopes_to_redo.items():
@@ -1682,17 +1659,33 @@ async def resume_run(
             scope_key=scope_key,
             scope_name=scope_key,
         )
+        # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的
+        # ScopeDefinition 缺此字段）。
+        full_scope = next(
+            (
+                s
+                for s in resolved
+                if s.scope_type == scope.scope_type
+                and s.scope_key == scope.scope_key
+            ),
+            scope,
+        )
         try:
-            await _compute_scope_pipeline(
-                session, run, scope, day_fact_cache=resume_fact_cache,
+            await _compute_scope_metrics_phase(
+                session,
+                run,
+                full_scope,
+                required_history_contract_version=resume_canonical_contract_version,
+                required_source_history_run_id=resume_canonical_source_run_id,
+                day_fact_map=resume_day_fact_map,
                 prepared_observations=prepared_observations,
             )
             succeeded += 1
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
-                "[ReviewOrchestrator] resume scope 失败: %s err=%s",
-                scope_type, exc,
+                "[ReviewOrchestrator] resume scope 失败: %s/%s err=%s",
+                scope_type, scope_key, exc,
             )
 
     # 评估 active 追踪

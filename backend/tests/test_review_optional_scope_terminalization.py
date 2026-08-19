@@ -372,9 +372,12 @@ class TestResumeLifecycle:
         """在 mock 环境下运行 resume_run，返回 (result, 被重算的 scope 列表)。"""
         redone: list[tuple[str, str]] = []
 
-        async def fake_pipeline(_session, _run, scope, **_kwargs):
+        async def fake_metrics(_session, _run, scope, **_kwargs):
             redone.append((scope.scope_type, scope.scope_key))
-            return 0
+            return None
+
+        async def fake_source(_session, _run):
+            return uuid.uuid4(), "h-v2"
 
         run = type(
             "R",
@@ -388,6 +391,8 @@ class TestResumeLifecycle:
                 "failed_scope_count": 0,
                 "coverage_ratio": 0,
                 "expected_scope_count": len(items),
+                "source_core_run_id": uuid.uuid4(),
+                "source_board_run_id": uuid.uuid4(),
             },
         )()
 
@@ -396,7 +401,14 @@ class TestResumeLifecycle:
         ), patch.object(
             orch, "prepare_current_scope_observations_batch", AsyncMock(return_value={}),
         ), patch.object(
-            orch, "_compute_scope_pipeline", fake_pipeline,
+            orch, "_bind_or_reuse_canonical_history_source", fake_source,
+        ), patch.object(
+            orch, "load_day_fact_maps", AsyncMock(return_value={}),
+        ), patch.object(
+            orch, "_compute_scope_metrics_phase", fake_metrics,
+        ), patch.object(
+            orch, "_resolve_all_discovery_scopes",
+            AsyncMock(return_value=[]),
         ), patch.object(
             orch, "evaluate_all_active_trackings", AsyncMock(return_value=0),
         ), patch.object(
