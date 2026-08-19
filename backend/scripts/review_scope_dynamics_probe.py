@@ -1147,6 +1147,7 @@ def _parse_args() -> argparse.Namespace:
             "internal-structure-type-selection",
             "internal-structure-type-fragmenting-redesign",
             "internal-structure-type-semantic-validation",
+            "internal-structure-type-multivariate",
             "leadership-research",
             "export-dataset",
             "dataset-validate",
@@ -1232,6 +1233,19 @@ def _parse_args() -> argparse.Namespace:
             "Commit 2 candidate results --dataset-dir，join Commit 1 mapping 取 leadership "
             "counts，写 review-isdtype-semval-<sha12>-v1/{semantic_validation_summary.json, "
             "representative_replay.json, manifest.json}；"
+            "internal-structure-type-multivariate: INTERNAL-STRUCTURE-TYPE-MULTIVARIATE-"
+            "MAPPING-CLOSURE — research-only 一次跑完 E1 Structural Dimension Map / E2 "
+            "Prototype Anchor / E3 Multivariate Rule-Family / E4 Full Conflict Matrix / "
+            "E5 Balanced-Unclassified Model Comparison / E6 Threshold Robustness / E7 "
+            "Blind Semantic Replay / E8 Broader-Universe Validation，读 40-scope mapping "
+            "--dataset-dir（E8 需 --broad-dataset-dir 传 285-scope broad mapping），写 "
+            "review-isdtype-mc-<sha12>-v1/{01_structural_dimension_map.json, "
+            "02_prototype_anchor_analysis.json, 03_rule_family_experiments.json, "
+            "04_full_conflict_matrix.json, 05_balanced_model_comparison.json, "
+            "06_threshold_robustness.json, 07_blind_semantic_replay.json, "
+            "07b_blind_replay_reveal.json, 08_broader_universe_validation.json, "
+            "internal_structure_type_contract_candidate.json, manifest.json}；不写 "
+            "production、不改 PRD、不冻结 threshold（CANDIDATE_NOT_FROZEN）；"
             "export-dataset: 服务器一次性只读导出 Review Source Dataset（Full Corpus，"
             "禁 scope-type/scope-key 参数）；"
             "dataset-validate: 本地校验 manifest + 完整性 KPI + jsonl.gz → parquet + 生成 views；"
@@ -1246,12 +1260,20 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--view", type=str, default="representative_sample",
         help="replay-l1 / rtm 模式的数据集 view：dev_500 / capacity_4096 / representative_sample "
-             "（或传单个 board_id UUID 直接指定 scope）",
+             "（或传单个 board_id UUID 直接指定 scope）；internal-structure-type-sample 模式："
+             "stratified（默认）或 capacity_4096（broad universe，E8 用）；"
+             "internal-structure-type-export 模式：映射 sample view 名 "
+             "（internal_structure_type_mapping_sample / _broad）",
     )
     p.add_argument(
         "--dataset-dir", type=str, default=None,
         help="export-dataset / dataset-validate 模式的数据集目录（服务器 /tmp 或本地 "
              "backend/.perfdata/review/<name>）",
+    )
+    p.add_argument(
+        "--broad-dataset-dir", type=str, default=None,
+        help="internal-structure-type-multivariate 模式：E8 broader-universe validation 用的 "
+             "285-scope broad mapping 数据集目录（可选；缺省则跳过 E8）",
     )
     p.add_argument(
         "--asof-lock", type=str, default=None,
@@ -5347,32 +5369,155 @@ def build_internal_structure_type_mapping_sample(
     return sample
 
 
+def _broad_sample_from_view(dataset_dir: str, view_name: str) -> dict:
+    """Build the broad mapping sample from an existing source view (e.g. capacity_4096).
+
+    Selects ALL non-empty-member scopes listed in the source view (no stratified
+    quota); family cutpoints / size buckets are computed over the SELECTED broad
+    universe (deterministic, same percentiles as the core sample).  Used by E8
+    broader-universe validation (capacity_4096 ≈ 285 scopes, current-static proxy).
+    """
+    vpath = os.path.join(dataset_dir, "views", f"{view_name}.json")
+    if not os.path.exists(vpath):
+        raise RuntimeError(f"[ist-mapping] 源 view 不存在: {vpath}")
+    with open(vpath, "r", encoding="utf-8") as fh:
+        view = json.load(fh)
+    selected_keys = {str(b) for b in (view.get("scope_keys") or [])}
+
+    boards = _load_parquet_rows(dataset_dir, "boards")
+    memberships = _load_parquet_rows(
+        dataset_dir, "board_memberships_current_snapshot"
+    )
+    by_board: dict[str, list[str]] = {}
+    for m in memberships:
+        by_board.setdefault(str(m.get("board_id")), []).append(
+            str(m.get("instrument_id"))
+        )
+
+    excluded = 0
+    excluded_by_family: dict[str, int] = {}
+    candidates: list[dict] = []
+    for b in boards:
+        bid = str(b.get("id"))
+        if bid not in selected_keys:
+            continue
+        family = _board_to_family(b)
+        members = by_board.get(bid, [])
+        count = len(members)
+        if count == 0:
+            excluded += 1
+            excluded_by_family[family] = excluded_by_family.get(family, 0) + 1
+            continue
+        candidates.append(
+            {
+                "scope_key": bid,
+                "scope_name": str(b.get("name") or bid),
+                "scope_family": family,
+                "member_count": count,
+                "external_code": str(b.get("external_code") or ""),
+            }
+        )
+
+    by_family: dict[str, list[dict]] = {}
+    for c in candidates:
+        by_family.setdefault(c["scope_family"], []).append(c)
+
+    family_cutpoints: dict[str, dict[str, float]] = {}
+    for fam, cands in by_family.items():
+        counts = sorted(float(c["member_count"]) for c in cands)
+        family_cutpoints[fam] = {
+            "small_upper": _percentile_sorted(counts, 1 / 3),
+            "medium_upper": _percentile_sorted(counts, 2 / 3),
+        }
+        for c in cands:
+            c["size_bucket"] = _size_bucket_for_count(
+                c["member_count"],
+                family_cutpoints[fam]["small_upper"],
+                family_cutpoints[fam]["medium_upper"],
+            )
+
+    family_bucket_counts: dict[str, dict[str, int]] = {}
+    family_candidate_counts: dict[str, dict[str, int]] = {}
+    for fam in sorted(by_family):
+        family_candidate_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
+        family_bucket_counts[fam] = {b: 0 for b in _IST_MAPPING_BUCKET_ORDER}
+        for c in by_family[fam]:
+            family_candidate_counts[fam][c["size_bucket"]] += 1
+            family_bucket_counts[fam][c["size_bucket"]] += 1
+
+    candidates.sort(
+        key=lambda c: (-c["member_count"], c["external_code"], c["scope_key"])
+    )
+    union_ids: set[str] = set()
+    for m in memberships:
+        if str(m.get("board_id")) in selected_keys:
+            union_ids.add(str(m.get("instrument_id")))
+    return {
+        "scopes": candidates,
+        "family_cutpoints": family_cutpoints,
+        "family_bucket_counts": family_bucket_counts,
+        "family_candidate_counts": family_candidate_counts,
+        "excluded_zero_member_count": {
+            "total": excluded,
+            "by_family": excluded_by_family,
+        },
+        "target_per_family": None,
+        "union_instrument_count": len(union_ids),
+        "union_instrument_ids": sorted(union_ids),
+        "source_view": view_name,
+    }
+
+
 def _run_internal_structure_type_sample(
     dataset_dir: str,
     *,
     target_per_family: int = 10,
     seed: int = 20260817,
+    view: str = "stratified",
     dry_run: bool = False,
 ) -> int:
-    """TYPE-MAPPING Stage 1 — build + persist the mapping core sample view."""
+    """TYPE-MAPPING Stage 1 — build + persist the mapping core sample view.
+
+    ``view`` = "stratified"（默认，family×bucket 分层样本）或 "capacity_4096"
+    （broad universe：选中源 view 内全部非空 scope，用于 E8 broader validation）。
+    """
     if dry_run:
         print(
             f"[dry-run] internal-structure-type-sample dataset_dir={dataset_dir} "
-            f"target_per_family={target_per_family} seed={seed} OK"
+            f"target_per_family={target_per_family} seed={seed} view={view} OK"
         )
         return 0
 
-    sample = build_internal_structure_type_mapping_sample(
-        dataset_dir, target_per_family=target_per_family, seed=seed
-    )
+    if view == "capacity_4096":
+        sample = _broad_sample_from_view(dataset_dir, "capacity_4096")
+        view_id = "internal_structure_type_mapping_sample_broad"
+        selection_policy = (
+            "capacity_4096 broad universe（全部非空 scope，≈285 scopes，"
+            "current-static research proxy，仅 E8 broader-universe stability "
+            "validation；cross-sectional DEFERRED）"
+        )
+    else:
+        sample = build_internal_structure_type_mapping_sample(
+            dataset_dir, target_per_family=target_per_family, seed=seed
+        )
+        view_id = "internal_structure_type_mapping_sample"
+        selection_policy = (
+            "family × member_count bucket 分层样本（current-static research proxy，"
+            "仅 exploratory mapping；cross-sectional DEFERRED）"
+        )
     cutpoints = sample["family_cutpoints"]
     selected_counts = sample["family_bucket_counts"]
     candidate_counts = sample["family_candidate_counts"]
     excluded = sample["excluded_zero_member_count"]
 
     print("=== internal-structure-type-sample (mapping core sample) ===")
-    print(f"target_per_family           : {target_per_family}")
-    print(f"seed                        : {seed}")
+    print(f"view_id                     : {view_id}")
+    if sample.get("target_per_family") is not None:
+        print(f"target_per_family           : {sample['target_per_family']}")
+        print(f"seed                        : {seed}")
+    else:
+        print(f"target_per_family           : all (broad universe)")
+        print(f"seed                        : {seed} (unused for broad)")
     print(f"selected scopes             : {len(sample['scopes'])}")
     print(f"union_instrument_count      : {sample['union_instrument_count']}")
     print(
@@ -5402,15 +5547,10 @@ def _run_internal_structure_type_sample(
 
     views_dir = os.path.join(dataset_dir, "views")
     os.makedirs(views_dir, exist_ok=True)
-    view_path = os.path.join(
-        views_dir, "internal_structure_type_mapping_sample.json"
-    )
+    view_path = os.path.join(views_dir, f"{view_id}.json")
     view = {
-        "view_id": "internal_structure_type_mapping_sample",
-        "selection_policy": (
-            "family × member_count bucket 分层样本（current-static research proxy，"
-            "仅 exploratory mapping；cross-sectional DEFERRED）"
-        ),
+        "view_id": view_id,
+        "selection_policy": selection_policy,
         "selection_algorithm_version": VIEW_ALGORITHM_VERSION,
         "scope_keys": sorted(c["scope_key"] for c in sample["scopes"]),
         "derived_instrument_ids": sample["union_instrument_ids"],
@@ -5419,7 +5559,8 @@ def _run_internal_structure_type_sample(
         "membership_semantics": "current_static_research_proxy",
         "sample": {
             "seed": seed,
-            "target_per_family": target_per_family,
+            "target_per_family": sample["target_per_family"],
+            "source_view": sample.get("source_view"),
             "family_cutpoints": sample["family_cutpoints"],
             "family_bucket_counts": sample["family_bucket_counts"],
             "union_instrument_count": sample["union_instrument_count"],
@@ -5732,6 +5873,8 @@ def _run_internal_structure_type_export(
     *,
     history: int = 120,
     asof_lock: str | None = None,
+    view_name: str = "internal_structure_type_mapping_sample",
+    out_suffix: str = "",
     dry_run: bool = False,
 ) -> int:
     """TYPE-MAPPING Stage 1 — export per-scope×date mapping dataset.
@@ -5739,12 +5882,17 @@ def _run_internal_structure_type_export(
     Consumes the shared production chain (PreparedScope -> canonical L1 ->
     InternalStructure + Leadership Snapshot -> Migration) exactly like the e2e,
     then attaches probe-only research features (hist_pct / delta5d).  Rows are
-    written as parquet + manifest under ``review-isdtype-map-<sha12>-v1``.
+    written as parquet + manifest under ``review-isdtype-map{out_suffix}-<sha12>-v1``.
+
+    ``view_name`` 选择 sample view（默认分层样本；broad 用
+    ``internal_structure_type_mapping_sample_broad``）；``out_suffix="-broad"``
+    用于 E8 的 285-scope broad dataset，避免覆盖 40-scope 核心样本。
     """
     if dry_run:
         print(
             f"[dry-run] internal-structure-type-export dataset_dir={dataset_dir} "
-            f"history={history} asof={asof_lock} OK"
+            f"history={history} asof={asof_lock} view={view_name} "
+            f"out_suffix={out_suffix!r} OK"
         )
         return 0
 
@@ -5769,7 +5917,6 @@ def _run_internal_structure_type_export(
             return 2
         sel_asof = date.fromisoformat(declared)
 
-    view_name = "internal_structure_type_mapping_sample"
     view_path = os.path.join(dataset_dir, "views", f"{view_name}.json")
     if not os.path.exists(view_path):
         logger.error(
@@ -5962,7 +6109,7 @@ def _run_internal_structure_type_export(
     if not capture_sha:
         logger.error("[ist-export] source manifest 缺 capture_git_sha")
         return 2
-    out_dir_name = f"review-isdtype-map-{capture_sha[:12]}-v1"
+    out_dir_name = f"review-isdtype-map{out_suffix}-{capture_sha[:12]}-v1"
     out_dir = os.path.join(os.path.dirname(os.path.normpath(dataset_dir)), out_dir_name)
     os.makedirs(out_dir, exist_ok=True)
     parquet_path = os.path.join(out_dir, "internal_structure_type_mapping.parquet")
@@ -5972,10 +6119,11 @@ def _run_internal_structure_type_export(
         return 1
 
     manifest = {
-        "dataset_id": f"review-isdtype-map-{capture_sha[:12]}-v1",
+        "dataset_id": f"review-isdtype-map{out_suffix}-{capture_sha[:12]}-v1",
         "dataset_dir_name": out_dir_name,
         "dataset_schema_version": 1,
         "source_dataset": os.path.basename(os.path.normpath(dataset_dir)),
+        "source_view": view_name,
         "source_closed_sha": _IST_MAPPING_SOURCE_CLOSED_SHA,
         "capture_git_sha": capture_sha,
         "asof": sel_asof.isoformat(),
@@ -8809,6 +8957,2207 @@ def _run_internal_structure_type_semantic_validation(
     return 0
 
 
+# ===========================================================================
+# TYPE-MAPPING MULTIVARIATE CLOSURE（E1–E8, research-only）
+#   prompt.md → INTERNAL-STRUCTURE-TYPE-MULTIVARIATE-MAPPING-CLOSURE
+#   一次规划 / 一次实现 / 一次跑完；输出 01..08 + contract_candidate.json。
+#   硬约束：只消费已有 canonical/research facts；不新增 composite score 作为
+#   type 决策；不用旧 research_candidate_* 当 ground truth（仅 replay 附注
+#   对照）；不使用未来收益；不做 ML classifier；不做 sample 内 fake
+#   cross-sectional percentile；current_static_research_proxy；
+#   threshold_freeze_eligible=false。
+# ===========================================================================
+_IST_MC_STUDY = "INTERNAL-STRUCTURE-TYPE-MULTIVARIATE-MAPPING-CLOSURE"
+_IST_MC_QUANTILES = (0.10, 0.25, 0.50, 0.75, 0.90)
+# 参考 / 工作阈值（E3/E4/E5 用；E6 评估稳定区，不冻结）。
+_IST_MC_REFERENCE = {"HIGH": 0.80, "LOW": 0.20, "MID": 0.50}
+# E6 密度网格（包含 prompt 的 p70/80/90、p30/20/10、p40/50/60，并加密检测稳定区）。
+_IST_MC_GRID = {
+    "HIGH": (0.70, 0.75, 0.80, 0.85, 0.90),
+    "LOW": (0.30, 0.25, 0.20, 0.15, 0.10),
+    "MID": (0.40, 0.45, 0.50, 0.55, 0.60),
+}
+# LCR 研究参数（语义带，非冻结）：preserved >= 0.85，contraction < 0.85，
+# Balanced 中性带 0.90–1.10。
+_IST_MC_LCR_PRESERVED = 0.85
+_IST_MC_LCR_CONTRACTION = 0.85
+_IST_MC_LCR_NEUTRAL_LO = 0.90
+_IST_MC_LCR_NEUTRAL_HI = 1.10
+# E2 prototype / hard-negative 数量。
+_IST_MC_PROTO_PER_TYPE = 15
+_IST_MC_HARD_NEG_PER_TYPE = 10
+# E7 blind replay 数量。
+_IST_MC_BLIND_PER_TYPE = 15
+_IST_MC_BLIND_CONFLICT = 25
+# E1 redundancy 判定阈值（|rho| >= 该值视为重复表达）。
+_IST_MC_REDUNDANCY_ABS = 0.85
+# E1 分层条件用 migration 三分位。
+_IST_MC_MIGRATION_LEVELS = (1 / 3, 2 / 3)
+# E3 命中率下限（低于该值视为样本太少，不适合作为 preferred）。
+_IST_MC_HIT_FLOOR = 0.02
+# E6 稳定区判定参数。
+_IST_MC_STABLE_HIT_DELTA = 0.015
+_IST_MC_STABLE_MIN_POINTS = 3
+
+# 核心变量 → 结构维度 / 角色（E1 输入与输出契约）。
+_MC_DIMENSION_OF = {
+    "aligned_breadth_hist_pct": "Participation",
+    "aligned_breadth_delta5d": "Participation",
+    "advance_ratio_hist_pct": "Participation",
+    "advance_ratio_delta5d": "Participation",
+    "price_hhi_hist_pct": "Core Concentration",
+    "price_hhi_delta5d": "Core Concentration",
+    "aligned_tilt_hist_pct": "Core Concentration",
+    "migration_hist_pct": "Leadership Turnover",
+    "jaccard_stability": "Leadership Turnover",
+    "previous_retention": "Leadership Turnover",
+    "lcr": "Leadership Capacity",
+    "leader_fraction_hist_pct": "Leadership Capacity",
+    "exit_minus_entrant": "Leadership Capacity(research)",
+    "replacement_coverage": "Leadership Capacity(research)",
+}
+# E1 correlation 主键（primary/corroborating/dynamic；research-only 键并列）。
+_MC_CORE_KEYS = (
+    "aligned_breadth_hist_pct",
+    "aligned_breadth_delta5d",
+    "advance_ratio_hist_pct",
+    "advance_ratio_delta5d",
+    "price_hhi_hist_pct",
+    "price_hhi_delta5d",
+    "aligned_tilt_hist_pct",
+    "migration_hist_pct",
+    "jaccard_stability",
+    "previous_retention",
+    "lcr",
+    "leader_fraction_hist_pct",
+    "exit_minus_entrant",
+    "replacement_coverage",
+)
+# replay / prototype evidence 投影字段（E2/E7 共用；不含任何 type label）。
+_MC_EVIDENCE_FIELDS = (
+    "scope_type", "scope_key", "scope_name", "trade_date", "size_bucket",
+    "member_count", "leadership_status",
+    "aligned_breadth", "aligned_breadth_hist_pct", "aligned_breadth_delta5d",
+    "price_hhi", "price_hhi_hist_pct", "price_hhi_delta5d",
+    "aligned_tilt", "aligned_tilt_hist_pct",
+    "migration", "migration_hist_pct", "jaccard_stability",
+    "previous_retention",
+    "previous_leader_count", "current_leader_count", "lcr",
+    "leader_fraction_hist_pct",
+)
+
+
+def _mc_build_frame(mapping_rows: list[dict]) -> list[dict]:
+    """Enrich mapping rows into the multivariate-closure analysis frame.
+
+    Per-scope, date-ascending; derives direction-aligned features, historical
+    percentiles / delta5d (same semantics as Commit 1/2), and leadership
+    capacity ratios.  Pure domain: no DB, no future-leak, no composite score.
+    """
+    by_scope: dict[str, list[dict]] = {}
+    for r in mapping_rows:
+        by_scope.setdefault(str(r.get("scope_key")), []).append(r)
+    out: list[dict] = []
+    for sk in sorted(by_scope):
+        sr = by_scope[sk]
+        sr.sort(key=lambda r: str(r.get("trade_date")))
+        aligned = _compute_aligned_features(sr)
+        for i, r in enumerate(sr):
+            nr = dict(r)
+            for k, v in aligned[i].items():
+                nr[k] = v
+            nr["lcr"] = _leader_count_preservation(r)
+            nr["exit_minus_entrant"] = _exit_minus_entrant(r)
+            nr["replacement_coverage"] = _replacement_coverage(r)
+            # 别名：mapping 行命名带 leadership_ 前缀；E1–E8 分析层使用短名。
+            nr["jaccard_stability"] = _to_fin(r.get("leadership_jaccard_stability"))
+            nr["previous_retention"] = _to_fin(r.get("leadership_previous_retention"))
+            out.append(nr)
+    out.sort(key=lambda r: (str(r.get("scope_key")), str(r.get("trade_date"))))
+    return out
+
+
+def _mc_feature_distributions(frame: list[dict], keys) -> dict[str, list[float]]:
+    """Per-feature sorted finite-value list (used for quantile thresholds)."""
+    dists: dict[str, list[float]] = {}
+    for k in keys:
+        dists[k] = sorted(
+            v for v in (_to_fin(r.get(k)) for r in frame) if v is not None
+        )
+    return dists
+
+
+def _rank_mean(values: list[float]) -> list[float]:
+    """Mean-rank transform (ties averaged) — pure, no scipy."""
+    order = sorted(range(len(values)), key=lambda i: values[i])
+    ranks = [0.0] * len(values)
+    i = 0
+    while i < len(order):
+        j = i
+        while j + 1 < len(order) and values[order[j + 1]] == values[order[i]]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        for k in range(i, j + 1):
+            ranks[order[k]] = avg
+        i = j + 1
+    return ranks
+
+
+def _mc_spearman(xs: list, ys: list) -> dict:
+    """Spearman rho over paired finite values.  None/NaN filtered pairwise."""
+    pairs = []
+    for x, y in zip(xs, ys):
+        xf, yf = _to_fin(x), _to_fin(y)
+        if xf is None or yf is None:
+            continue
+        pairs.append((xf, yf))
+    n = len(pairs)
+    if n < 3:
+        return {"rho": None, "n": n}
+    rx = _rank_mean([p[0] for p in pairs])
+    ry = _rank_mean([p[1] for p in pairs])
+    mx = sum(rx) / n
+    my = sum(ry) / n
+    num = sum((a - mx) * (b - my) for a, b in zip(rx, ry))
+    dx = math.sqrt(sum((a - mx) ** 2 for a in rx))
+    dy = math.sqrt(sum((b - my) ** 2 for b in ry))
+    if dx == 0 or dy == 0:
+        return {"rho": None, "n": n}
+    return {"rho": num / (dx * dy), "n": n}
+
+
+def _mc_correlation_map(frame: list[dict], keys) -> dict:
+    """{key_i: {key_j: {rho, n}}} pairwise Spearman (upper-triangle semantics)."""
+    out: dict[str, dict] = {}
+    for a in keys:
+        out[a] = {}
+        xs = [_to_fin(r.get(a)) for r in frame]
+        for b in keys:
+            if a == b:
+                out[a][b] = {"rho": 1.0, "n": len(frame)}
+                continue
+            if b in out and a in out[b]:
+                out[a][b] = out[b][a]
+                continue
+            ys = [_to_fin(r.get(b)) for r in frame]
+            out[a][b] = _mc_spearman(xs, ys)
+    return out
+
+
+def _mc_stratified_correlation(
+    frame: list[dict], keys, group_key: str, group_values
+) -> dict:
+    """Correlation map computed within each stratum of a categorical key."""
+    out: dict[str, dict] = {}
+    for g in group_values:
+        sub = [r for r in frame if str(r.get(group_key)) == g]
+        out[str(g)] = {
+            "n": len(sub),
+            "corr": _mc_correlation_map(sub, keys),
+        }
+    return out
+
+
+def _mc_migration_levels(frame: list[dict]) -> dict[int, str | None]:
+    """low/mid/high Migration level by migration_hist_pct terciles."""
+    vals = sorted(
+        v for v in (_to_fin(r.get("migration_hist_pct")) for r in frame)
+        if v is not None
+    )
+    lo = _percentile_sorted(vals, _IST_MC_MIGRATION_LEVELS[0]) if vals else None
+    hi = _percentile_sorted(vals, _IST_MC_MIGRATION_LEVELS[1]) if vals else None
+    out: dict[int, str | None] = {}
+    for i, r in enumerate(frame):
+        v = _to_fin(r.get("migration_hist_pct"))
+        if v is None:
+            out[i] = None
+        elif lo is not None and v < lo:
+            out[i] = "low"
+        elif hi is not None and v >= hi:
+            out[i] = "high"
+        else:
+            out[i] = "mid"
+    return out
+
+
+def _mc_redundancy_analysis(corr: dict, keys, abs_threshold: float) -> list[dict]:
+    """Flag near-duplicate evidence pairs |rho| >= abs_threshold.
+
+    Not a composite score: only marks repeated-expression candidates so the
+    analysis keeps the more direct / interpretable variable.
+    """
+    redundant: list[dict] = []
+    for a in keys:
+        for b in keys:
+            if a >= b:
+                continue
+            rho = corr.get(a, {}).get(b, {}).get("rho")
+            if rho is None:
+                continue
+            if abs(rho) >= abs_threshold:
+                redundant.append(
+                    {
+                        "var_a": a,
+                        "var_b": b,
+                        "dim_a": _MC_DIMENSION_OF.get(a, "?"),
+                        "dim_b": _MC_DIMENSION_OF.get(b, "?"),
+                        "rho": round(rho, 4),
+                        "abs_rho": round(abs(rho), 4),
+                    }
+                )
+    redundant.sort(key=lambda x: -x["abs_rho"])
+    return redundant
+
+
+def _mc_conditional_distribution(
+    frame: list[dict],
+    given_key: str,
+    bands: tuple[float, float],
+    targets,
+    quantiles=_IST_MC_QUANTILES,
+) -> dict:
+    """Quantile profile of target keys within given_key quantile bins.
+
+    ``bands`` = interior cutpoints (e.g. (1/3, 2/3) → 3 bins: low/mid/high).
+    """
+    vals = sorted(
+        v for v in (_to_fin(r.get(given_key)) for r in frame) if v is not None
+    )
+    if not vals:
+        return {}
+    cuts = [_percentile_sorted(vals, q) for q in bands]
+    labels = ["low", "mid", "high"] if len(cuts) == 2 else [
+        f"bin{i}" for i in range(len(cuts) + 1)
+    ]
+    buckets: dict[str, list[dict]] = {lab: [] for lab in labels}
+    for r in frame:
+        v = _to_fin(r.get(given_key))
+        if v is None:
+            continue
+        if v < cuts[0]:
+            buckets[labels[0]].append(r)
+        elif v > cuts[-1]:
+            buckets[labels[-1]].append(r)
+        else:
+            for i in range(1, len(cuts)):
+                if v <= cuts[i]:
+                    buckets[labels[i]].append(r)
+                    break
+    out: dict[str, dict] = {}
+    for lab, sub in buckets.items():
+        prof = {}
+        for t in targets:
+            prof[t] = _quantile_profile(
+                [_to_fin(r.get(t)) for r in sub], quantiles
+            )
+        out[lab] = {"n": len(sub), "targets": prof}
+    return out
+
+
+def _mc_ist_cond_met(feat_val, op: str, bound: float) -> bool:
+    """Local comparator (>=/<=/>/<).  None/non-finite feature -> False."""
+    feat = _to_fin(feat_val)
+    if feat is None:
+        return False
+    if op == ">=":
+        return feat >= bound
+    if op == "<=":
+        return feat <= bound
+    if op == ">":
+        return feat > bound
+    if op == "<":
+        return feat < bound
+    raise ValueError(f"unsupported op={op!r}")
+
+
+def _mc_resolve_condition_bound(
+    feature: str, bound, slot_qs: dict[str, float], dists: dict[str, list[float]]
+) -> float | None:
+    """Resolve a condition bound: str slot -> empirical quantile of feature."""
+    if isinstance(bound, str):
+        q = slot_qs[bound]
+        vals = dists.get(feature, [])
+        if not vals:
+            return None
+        return _percentile_sorted(vals, q)
+    return float(bound)
+
+
+def _mc_eval_conditions(
+    row: dict, conditions, slot_qs: dict[str, float], dists: dict[str, list[float]]
+) -> bool:
+    """Deterministic AND-of-conditions hit test over the analysis frame."""
+    for feature, op, bound in conditions:
+        if feature not in dists and not isinstance(bound, (int, float)):
+            raise KeyError(f"unknown threshold feature {feature!r}")
+        th = _mc_resolve_condition_bound(feature, bound, slot_qs, dists)
+        if th is None:
+            return False
+        if not _mc_ist_cond_met(row.get(feature), op, th):
+            return False
+    return True
+
+
+def _mc_eval_family_hits(
+    frame: list[dict], conditions, slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+) -> list[int]:
+    """Row indexes of the frame that hit a rule-family condition set."""
+    return [
+        i
+        for i, r in enumerate(frame)
+        if _mc_eval_conditions(r, conditions, slot_qs, dists)
+    ]
+
+
+def _mc_categorical_distribution(frame: list[dict], indexes: list[int], key: str) -> dict:
+    """{category: {count, rate}} over the indexed rows."""
+    total = len(indexes)
+    counts: dict[str, int] = {}
+    for i in indexes:
+        k = str(frame[i].get(key) or "None")
+        counts[k] = counts.get(k, 0) + 1
+    return {
+        k: {"count": c, "rate": round(c / total, 6) if total else None}
+        for k, c in sorted(counts.items())
+    }
+
+
+def _mc_hit_stats(frame: list[dict], indexes: list[int], denom: int | None = None) -> dict:
+    """Hit-rate (denom = rule-universe size, else len(frame)) + family/size dist."""
+    total = len(frame) if denom is None else denom
+    return {
+        "hit_count": len(indexes),
+        "hit_rate": round(len(indexes) / total, 6) if total else None,
+        "family_distribution": _mc_categorical_distribution(
+            frame, indexes, "scope_type"
+        ),
+        "size_distribution": _mc_categorical_distribution(
+            frame, indexes, "size_bucket"
+        ),
+    }
+
+
+def _mc_rule_universe(frame: list[dict], features) -> list[int]:
+    """Row indexes where every referenced feature is finite (evaluable)."""
+    return [
+        i
+        for i, r in enumerate(frame)
+        if all(_to_fin(r.get(f)) is not None for f in features)
+    ]
+
+
+def _mc_evidence(r: dict, fields=_MC_EVIDENCE_FIELDS) -> dict:
+    """Project a row to evidence fields (never includes a type label)."""
+    return {f: r.get(f) for f in fields}
+
+
+def _mc_old_candidate_note(r: dict) -> str | None:
+    """Replay-only old-candidate annotation (never used as ground truth)."""
+    keys = [
+        "research_candidate_Broadening",
+        "research_candidate_Core-led",
+        "research_candidate_Rotating",
+        "research_candidate_Fragmenting",
+    ]
+    hits = [k.removeprefix("research_candidate_") for k in keys if r.get(k)]
+    if not hits:
+        return "old_unmatched"
+    if len(hits) == 1:
+        return f"old_{hits[0].lower().replace('-', '_')}"
+    return "old_" + "_".join(h.lower().replace("-", "_") for h in hits)
+
+
+# ---------------------------------------------------------------------------
+# E1 / E2 shared spec tables
+# ---------------------------------------------------------------------------
+
+def _mc_rule_families() -> dict[str, list[dict]]:
+    """E3 rule-family definitions（每类 2–3 套，research parameters, not frozen）.
+
+    条件 bound：str 为 percentile slot（HIGH/LOW/MID，按特征经验分布分位解析），
+    float 为字面阈值（delta 0.0 / LCR 语义带）。
+    """
+    return {
+        "Broadening": [
+            {
+                "family": "B1",
+                "conditions": (
+                    ("aligned_breadth_hist_pct", ">=", "HIGH"),
+                    ("price_hhi_hist_pct", "<=", "MID"),
+                ),
+            },
+            {
+                "family": "B2",
+                "conditions": (
+                    ("aligned_breadth_hist_pct", ">=", "HIGH"),
+                    ("aligned_breadth_delta5d", ">=", 0.0),
+                    ("price_hhi_delta5d", "<=", 0.0),
+                ),
+            },
+        ],
+        "Core-led": [
+            {
+                "family": "C1",
+                "conditions": (
+                    ("price_hhi_hist_pct", ">=", "HIGH"),
+                    ("aligned_tilt_hist_pct", ">=", "HIGH"),
+                ),
+            },
+            {
+                "family": "C2",
+                "conditions": (
+                    ("price_hhi_hist_pct", ">=", "HIGH"),
+                    ("aligned_tilt_hist_pct", ">=", "HIGH"),
+                    ("migration_hist_pct", "<=", "LOW"),
+                ),
+            },
+        ],
+        "Rotating": [
+            {
+                "family": "R1",
+                "conditions": (
+                    ("migration_hist_pct", ">=", "HIGH"),
+                    ("lcr", ">=", _IST_MC_LCR_PRESERVED),
+                ),
+            },
+            {
+                "family": "R2",
+                "conditions": (
+                    ("migration_hist_pct", ">=", "HIGH"),
+                    ("lcr", ">=", _IST_MC_LCR_PRESERVED),
+                    ("aligned_breadth_hist_pct", ">=", "LOW"),
+                    ("price_hhi_hist_pct", ">=", "LOW"),
+                ),
+            },
+        ],
+        "Fragmenting": [
+            {
+                "family": "F1",
+                "conditions": (
+                    ("migration_hist_pct", ">=", "HIGH"),
+                    ("lcr", "<", _IST_MC_LCR_CONTRACTION),
+                ),
+            },
+            {
+                "family": "F2",
+                "conditions": (
+                    ("migration_hist_pct", ">=", "HIGH"),
+                    ("lcr", "<", _IST_MC_LCR_CONTRACTION),
+                    ("price_hhi_delta5d", "<=", 0.0),
+                    ("aligned_tilt_hist_pct", "<=", "MID"),
+                ),
+            },
+            {
+                "family": "F3",
+                "conditions": (
+                    ("migration_hist_pct", ">=", "HIGH"),
+                    ("lcr", "<", _IST_MC_LCR_CONTRACTION),
+                    ("aligned_breadth_hist_pct", "<=", "LOW"),
+                ),
+            },
+        ],
+    }
+
+
+def _mc_anchor_specs() -> dict[str, dict]:
+    """E2 prototype-anchor selection specs（research parameters, not frozen）.
+
+    pred = 强原型条件；hard_pred = 硬负例近失条件；rank 用单一主特征排序
+    （lexicographic，无 composite score）；Balanced 用 rank_center 就近中性。
+    """
+    return {
+        "Broadening": {
+            "rank_field": "aligned_breadth_hist_pct",
+            "desc": True,
+            "pred": (
+                ("aligned_breadth_hist_pct", ">=", "HIGH"),
+                ("price_hhi_hist_pct", "<=", "MID"),
+                ("aligned_breadth_delta5d", ">=", 0.0),
+            ),
+            "hard_pred": (
+                ("aligned_breadth_hist_pct", ">=", "HIGH"),
+                ("price_hhi_hist_pct", ">", "MID"),
+            ),
+        },
+        "Core-led": {
+            "rank_field": "price_hhi_hist_pct",
+            "desc": True,
+            "pred": (
+                ("price_hhi_hist_pct", ">=", "HIGH"),
+                ("aligned_tilt_hist_pct", ">=", "HIGH"),
+                ("migration_hist_pct", "<=", "MID"),
+            ),
+            "hard_pred": (
+                ("price_hhi_hist_pct", ">=", "HIGH"),
+                ("aligned_tilt_hist_pct", "<=", "MID"),
+            ),
+        },
+        "Rotating": {
+            "rank_field": "migration_hist_pct",
+            "desc": True,
+            "pred": (
+                ("migration_hist_pct", ">=", "HIGH"),
+                ("lcr", ">=", _IST_MC_LCR_PRESERVED),
+            ),
+            "hard_pred": (
+                ("migration_hist_pct", ">=", "HIGH"),
+                ("lcr", "<", _IST_MC_LCR_CONTRACTION),
+            ),
+        },
+        "Fragmenting": {
+            "rank_field": "migration_hist_pct",
+            "desc": True,
+            "pred": (
+                ("migration_hist_pct", ">=", "HIGH"),
+                ("lcr", "<", _IST_MC_LCR_CONTRACTION),
+            ),
+            "hard_pred": (
+                ("migration_hist_pct", ">=", "HIGH"),
+                ("lcr", "<", _IST_MC_LCR_CONTRACTION),
+                ("price_hhi_delta5d", ">", 0.0),
+                ("aligned_tilt_hist_pct", ">=", "HIGH"),
+            ),
+        },
+        "Balanced": {
+            "rank_field": "migration_hist_pct",
+            "rank_center": 0.5,
+            "desc": False,
+            "pred": (
+                ("aligned_breadth_hist_pct", ">=", "LOW"),
+                ("aligned_breadth_hist_pct", "<=", "HIGH"),
+                ("price_hhi_hist_pct", ">=", "LOW"),
+                ("price_hhi_hist_pct", "<=", "HIGH"),
+                ("migration_hist_pct", ">=", "LOW"),
+                ("migration_hist_pct", "<=", "HIGH"),
+                ("lcr", ">=", _IST_MC_LCR_NEUTRAL_LO),
+                ("lcr", "<=", _IST_MC_LCR_NEUTRAL_HI),
+            ),
+            "hard_pred": None,
+        },
+    }
+
+
+def _mc_rank_value(r: dict, field: str, center: float | None, descending: bool) -> float:
+    """Single-feature rank value for prototype ordering (no composite)."""
+    v = _to_fin(r.get(field))
+    if v is None:
+        return float("-inf") if (center is None and descending) else float("inf")
+    if center is not None:
+        return abs(v - center)
+    return v
+
+
+def _mc_almost_balanced(
+    r: dict, slot_qs: dict[str, float], dists: dict[str, list[float]]
+) -> bool:
+    """Balanced hard-negative: exactly 3 of 4 structural dims in neutral box."""
+    keys = (
+        "aligned_breadth_hist_pct",
+        "price_hhi_hist_pct",
+        "migration_hist_pct",
+        "leader_fraction_hist_pct",
+    )
+    in_box = 0
+    for k in keys:
+        v = _to_fin(r.get(k))
+        if v is None:
+            return False
+        lo = _mc_resolve_condition_bound(k, "LOW", slot_qs, dists)
+        hi = _mc_resolve_condition_bound(k, "HIGH", slot_qs, dists)
+        if lo is None or hi is None:
+            return False
+        if lo <= v <= hi:
+            in_box += 1
+    return in_box == 3
+
+
+def _mc_select_anchors(
+    frame: list[dict],
+    specs: dict[str, dict],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    n_proto: int = _IST_MC_PROTO_PER_TYPE,
+    n_hard: int = _IST_MC_HARD_NEG_PER_TYPE,
+) -> dict[str, dict]:
+    """Deterministic prototype + hard-negative selection per type (E2).
+
+    Prototypes: rows matching ``pred``, ranked by the single primary feature
+    (ties → scope_key/trade_date).  Hard negatives: rows matching
+    ``hard_pred`` (or near-box for Balanced), excluding selected prototypes.
+    """
+    out: dict[str, dict] = {}
+    for tname, spec in specs.items():
+        pred = spec["pred"]
+        hard_pred = spec.get("hard_pred")
+        rank_field = spec["rank_field"]
+        center = spec.get("rank_center")
+        descending = spec.get("desc", True)
+        matched = [
+            i for i, r in enumerate(frame)
+            if _mc_eval_conditions(r, pred, slot_qs, dists)
+        ]
+        key = lambda i: (  # noqa: E731
+            _mc_rank_value(frame[i], rank_field, center, descending),
+            str(frame[i].get("scope_key")),
+            str(frame[i].get("trade_date")),
+        )
+        matched.sort(key=key, reverse=(center is None and descending))
+        protos = matched[:n_proto]
+        proto_set = set(protos)
+        hard: list[int] = []
+        for i, r in enumerate(frame):
+            if i in proto_set:
+                continue
+            if hard_pred is not None and _mc_eval_conditions(
+                r, hard_pred, slot_qs, dists
+            ):
+                hard.append(i)
+            elif hard_pred is None and _mc_almost_balanced(r, slot_qs, dists):
+                hard.append(i)
+            if len(hard) >= n_hard:
+                break
+        out[tname] = {
+            "matched_count": len(matched),
+            "prototype_indexes": protos,
+            "hard_negative_indexes": hard,
+        }
+    return out
+
+
+# ---------------------------------------------------------------------------
+# E3 — Multivariate Rule-Family Experiment
+# ---------------------------------------------------------------------------
+
+def _mc_family_slots(family: dict) -> tuple[str, ...]:
+    """Percentile slots referenced by a family's conditions (order-preserved)."""
+    slots: list[str] = []
+    for _f, _op, bound in family["conditions"]:
+        if isinstance(bound, str) and bound not in slots:
+            slots.append(bound)
+    return tuple(slots)
+
+
+def _mc_family_sweep(
+    frame: list[dict],
+    family: dict,
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    slot_grid: dict[str, tuple[float, ...]],
+    denom: int | None = None,
+) -> list[dict]:
+    """Sweep each percentile slot over its grid, others stay at reference."""
+    slots = _mc_family_slots(family)
+    base_qs = dict(slot_qs)
+    results: list[dict] = [
+        {
+            "combo": "reference",
+            "slot_values": {s: base_qs[s] for s in slots},
+            "stats": _mc_hit_stats(
+                frame, _mc_eval_family_hits(frame, family["conditions"], base_qs, dists),
+                denom,
+            ),
+        }
+    ]
+    for slot in slots:
+        for v in slot_grid.get(slot, ()):
+            qs = dict(base_qs)
+            qs[slot] = v
+            idx = _mc_eval_family_hits(frame, family["conditions"], qs, dists)
+            results.append(
+                {
+                    "combo": f"{slot}={v}",
+                    "slot_values": dict(qs),
+                    "stats": _mc_hit_stats(frame, idx, denom),
+                }
+            )
+    return results
+
+
+def _mc_assignments_by_type(
+    frame: list[dict],
+    families_by_type: dict[str, list[dict]],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+) -> dict[str, set[int]]:
+    """Working per-type assignment = union of the type's family hits (reference).
+
+    Research-only working set for conflict / balanced analysis.  Old
+    research_candidate_* labels are never used here (P0).
+    """
+    out: dict[str, set[int]] = {}
+    for t, fams in families_by_type.items():
+        idx: set[int] = set()
+        for f in fams:
+            idx |= set(_mc_eval_family_hits(frame, f["conditions"], slot_qs, dists))
+        out[t] = idx
+    return out
+
+
+def _mc_preferred_families(
+    frame: list[dict],
+    families_by_type: dict[str, list[dict]],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    universe_len: int,
+    hit_floor: float = _IST_MC_HIT_FLOOR,
+) -> dict[str, dict]:
+    """Pick the preferred family per type (research meta, NOT a type composite).
+
+    All types' families are evaluated at reference; per-type working assignment
+    = union of its families' hits.  For each type, preferred = family with the
+    lowest conflict rate vs. OTHER types' working assignments (reference hit
+    rate >= floor), tie-break by higher hit rate, then family id.
+    """
+    family_hits: dict[str, dict[str, set[int]]] = {}
+    for t, fams in families_by_type.items():
+        family_hits[t] = {
+            f["family"]: set(
+                _mc_eval_family_hits(frame, f["conditions"], slot_qs, dists)
+            )
+            for f in fams
+        }
+    assignments = {
+        t: set().union(*family_hits[t].values()) if family_hits[t] else set()
+        for t in families_by_type
+    }
+    preferred: dict[str, dict] = {}
+    for t, fams in families_by_type.items():
+        cands = []
+        for f in fams:
+            fid = f["family"]
+            idx = family_hits[t][fid]
+            hr = len(idx) / universe_len if universe_len else 0.0
+            if hr < hit_floor:
+                continue
+            other_union: set[int] = set()
+            for ot, oset in assignments.items():
+                if ot != t:
+                    other_union |= oset
+            conflict = len(idx & other_union)
+            conflict_rate = conflict / len(idx) if idx else None
+            cands.append(
+                {
+                    "family": fid,
+                    "hit_rate": round(hr, 6),
+                    "conflict_count": conflict,
+                    "conflict_rate": round(conflict_rate, 6)
+                    if conflict_rate is not None else None,
+                }
+            )
+        cands.sort(
+            key=lambda c: (
+                (c["conflict_rate"] if c["conflict_rate"] is not None else 1.0),
+                -c["hit_rate"],
+                c["family"],
+            )
+        )
+        if cands:
+            best = cands[0]
+            preferred[t] = {
+                "family": best["family"],
+                "selection_evidence": best,
+                "candidates": cands,
+            }
+    return preferred
+
+
+# ---------------------------------------------------------------------------
+# E4 — Full Conflict Matrix
+# ---------------------------------------------------------------------------
+
+# 每对类型的判别维度（用于 overlap 中间态 / 层级判定证据）。
+_MC_PAIR_DISTINGUISH = {
+    ("Broadening", "Core-led"): ("price_hhi_hist_pct", "aligned_breadth_hist_pct"),
+    ("Broadening", "Rotating"): ("aligned_breadth_hist_pct", "migration_hist_pct"),
+    ("Broadening", "Fragmenting"): ("lcr", "aligned_breadth_hist_pct"),
+    ("Core-led", "Rotating"): ("migration_hist_pct", "price_hhi_hist_pct"),
+    ("Core-led", "Fragmenting"): ("lcr", "price_hhi_hist_pct"),
+    ("Rotating", "Fragmenting"): ("lcr", "migration_hist_pct"),
+}
+
+
+def _mc_pairwise_conflicts(
+    assignments: dict[str, set[int]], universe_len: int
+) -> dict[str, dict]:
+    """All 6 pairwise conflict statistics over the working assignments."""
+    types = list(assignments)
+    out: dict[str, dict] = {}
+    for i in range(len(types)):
+        for j in range(i + 1, len(types)):
+            tA, tB = types[i], types[j]
+            A, B = assignments[tA], assignments[tB]
+            inter = len(A & B)
+            smaller = min(len(A), len(B))
+            union = len(A | B)
+            out[f"{tA}↔{tB}"] = {
+                "pair": f"{tA}↔{tB}",
+                "type_a": tA,
+                "type_b": tB,
+                "count_a": len(A),
+                "count_b": len(B),
+                "intersection": inter,
+                "intersection_over_smaller": round(inter / smaller, 6)
+                if smaller else None,
+                "jaccard": round(inter / union, 6) if union else None,
+                "universe_rate": round(inter / universe_len, 6)
+                if universe_len else None,
+            }
+    return out
+
+
+def _mc_median(values: list[float]) -> float | None:
+    vals = sorted(v for v in values if v is not None)
+    if not vals:
+        return None
+    return _percentile_sorted(vals, 0.5)
+
+
+def _mc_conflict_classification(
+    frame: list[dict],
+    assignments: dict[str, set[int]],
+    pair_key: str,
+    distinguish: tuple[str, str],
+    overlap_definition_threshold: float = 0.5,
+) -> dict:
+    """Classify a conflict pair as A/B/C with structural evidence (human-final).
+
+    A. definition_conflict_candidate：overlap 占较小类 >= 50%，规则结构高度重叠；
+    B. legitimate_transition_candidate：overlap 行在判别维度上位于两纯类的中间；
+    C. interpretation_hierarchy_candidate：overlap 行在判别维度上偏向某一侧。
+    """
+    tA, tB = pair_key.split("↔")
+    A, B = assignments[tA], assignments[tB]
+    inter = A & B
+    pure_a = A - B
+    pure_b = B - A
+    out = {
+        "pair": pair_key,
+        "overlap_n": len(inter),
+        "pure_a_n": len(pure_a),
+        "pure_b_n": len(pure_b),
+        "distinguishing_fields": list(distinguish),
+    }
+    overlap_rate = len(inter) / min(len(A), len(B)) if min(len(A), len(B)) else 0.0
+    if overlap_rate >= overlap_definition_threshold:
+        out["classification"] = "A_definition_conflict_candidate"
+        out["overlap_over_smaller"] = round(overlap_rate, 6)
+        out["evidence_note"] = (
+            "overlap 占较小类比例过高，规则结构高度重叠，需要规则重构（人工复核）。"
+        )
+    else:
+        medians = {}
+        for f in distinguish:
+            medians[f] = {
+                "pure_a": _mc_median([_to_fin(frame[i].get(f)) for i in pure_a]),
+                "pure_b": _mc_median([_to_fin(frame[i].get(f)) for i in pure_b]),
+                "overlap": _mc_median([_to_fin(frame[i].get(f)) for i in inter]),
+            }
+        out["medians"] = medians
+        # 综合判别：overlap 相对两纯类的位置
+        positions = []
+        for f in distinguish:
+            pa = medians[f]["pure_a"]
+            pb = medians[f]["pure_b"]
+            po = medians[f]["overlap"]
+            if pa is None or pb is None or po is None or pa == pb:
+                continue
+            pos = (po - min(pa, pb)) / (max(pa, pb) - min(pa, pb))
+            positions.append(pos)
+        if positions:
+            avg_pos = sum(positions) / len(positions)
+            if 0.30 < avg_pos < 0.70:
+                out["classification"] = "B_legitimate_transition_candidate"
+            else:
+                out["classification"] = "C_interpretation_hierarchy_candidate"
+        else:
+            out["classification"] = "C_interpretation_hierarchy_candidate"
+        out["overlap_over_smaller"] = round(overlap_rate, 6)
+        out["avg_position"] = round(avg_pos, 4) if positions else None
+    return out
+
+
+def _mc_conflict_duration(
+    frame: list[dict], assignments: dict[str, set[int]], pair_key: str
+) -> dict:
+    """Per-scope consecutive-day runs where the pair overlaps."""
+    tA, tB = pair_key.split("↔")
+    inter = assignments[tA] & assignments[tB]
+    inter_set = set(inter)
+    by_scope: dict[str, list[int]] = {}
+    for i, r in enumerate(frame):
+        by_scope.setdefault(str(r.get("scope_key")), []).append(i)
+    runs: list[int] = []
+    for sk in sorted(by_scope):
+        idxs = by_scope[sk]
+        idxs.sort(key=lambda i: str(frame[i].get("trade_date")))
+        cur = 0
+        for i in idxs:
+            if i in inter_set:
+                cur += 1
+            elif cur:
+                runs.append(cur)
+                cur = 0
+        if cur:
+            runs.append(cur)
+    return {
+        "overlap_rows": len(inter),
+        "runs": runs,
+        "run_count": len(runs),
+        "median_run_length": _mc_median([float(x) for x in runs]),
+        "one_day_run_rate": round(sum(1 for x in runs if x == 1) / len(runs), 6)
+        if runs else None,
+    }
+
+
+# ---------------------------------------------------------------------------
+# E5 — Balanced / Unclassified model comparison
+# ---------------------------------------------------------------------------
+
+def _mc_balanced_box_conditions() -> tuple:
+    """Explicit Balanced box conditions（与 E2 Balanced anchor 同一语义）。"""
+    return _mc_anchor_specs()["Balanced"]["pred"]
+
+
+def _mc_in_balanced_box(
+    r: dict, slot_qs: dict[str, float], dists: dict[str, list[float]]
+) -> bool:
+    return _mc_eval_conditions(r, _mc_balanced_box_conditions(), slot_qs, dists)
+
+
+def _mc_model_label(
+    index: int,
+    types: set[str],
+    in_box: bool,
+    model: str,
+) -> str | None:
+    """Primary label for one row under model A/B/C (see docstring in caller)."""
+    if len(types) == 1:
+        return next(iter(types))
+    if len(types) >= 2:
+        return "conflict"
+    if in_box:
+        return "Balanced"
+    if model == "B":
+        return "Balanced"
+    if model == "C":
+        return "Unclassified"
+    return None  # model A: remainder is unlabeled
+
+
+def _mc_label_runs(frame: list[dict], label_by_index: dict[int, str | None]) -> list:
+    """Per-scope consecutive-run lengths of the primary label (date-ordered)."""
+    by_scope: dict[str, list[int]] = {}
+    for i, r in enumerate(frame):
+        by_scope.setdefault(str(r.get("scope_key")), []).append(i)
+    runs: list[tuple[str, int]] = []
+    for sk in sorted(by_scope):
+        idxs = by_scope[sk]
+        idxs.sort(key=lambda i: str(frame[i].get("trade_date")))
+        cur = None
+        ln = 0
+        for i in idxs:
+            lab = label_by_index.get(i)
+            if lab is not None and lab == cur:
+                ln += 1
+            else:
+                if cur is not None and ln > 0:
+                    runs.append((cur, ln))
+                cur = lab
+                ln = 1 if lab is not None else 0
+        if cur is not None and ln > 0:
+            runs.append((cur, ln))
+    return runs
+
+
+def _mc_label_metrics(frame: list[dict], label_by_index: dict[int, str | None]) -> dict:
+    """Coverage, per-label rates, run persistence, transition stability."""
+    total = len(frame)
+    labels = [label_by_index.get(i) for i in range(total)]
+    labeled = [l for l in labels if l is not None]
+    counts: dict[str, int] = {}
+    for l in labeled:
+        counts[l] = counts.get(l, 0) + 1
+    runs = _mc_label_runs(frame, label_by_index)
+    run_lengths = [ln for _lab, ln in runs]
+    # transition stability: adjacent labeled pairs within scope unchanged.
+    by_scope: dict[str, list[int]] = {}
+    for i, r in enumerate(frame):
+        by_scope.setdefault(str(r.get("scope_key")), []).append(i)
+    stable = 0
+    pairs = 0
+    for sk in sorted(by_scope):
+        idxs = by_scope[sk]
+        idxs.sort(key=lambda i: str(frame[i].get("trade_date")))
+        for a, b in zip(idxs, idxs[1:]):
+            la = label_by_index.get(a)
+            lb = label_by_index.get(b)
+            if la is None or lb is None:
+                continue
+            pairs += 1
+            if la == lb:
+                stable += 1
+    per_label = {}
+    for lab in sorted(counts):
+        lens = [ln for l, ln in runs if l == lab]
+        per_label[lab] = {
+            "count": counts[lab],
+            "rate": round(counts[lab] / total, 6) if total else None,
+            "median_run_length": _mc_median([float(x) for x in lens]),
+            "one_day_only_rate": round(
+                sum(1 for x in lens if x == 1) / len(lens), 6
+            ) if lens else None,
+        }
+    return {
+        "evaluable_rows": total,
+        "labeled_rows": len(labeled),
+        "coverage": round(len(labeled) / total, 6) if total else None,
+        "unlabeled_rate": round((total - len(labeled)) / total, 6)
+        if total else None,
+        "per_label": per_label,
+        "overall": {
+            "median_run_length": _mc_median([float(x) for x in run_lengths]),
+            "one_day_only_rate": round(
+                sum(1 for x in run_lengths if x == 1) / len(run_lengths), 6
+            ) if run_lengths else None,
+            "transition_stability": round(stable / pairs, 6) if pairs else None,
+        },
+    }
+
+
+def _mc_compare_balanced_models(
+    frame: list[dict],
+    assignments: dict[str, set[int]],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+) -> dict[str, dict]:
+    """Run models A/B/C over the working assignments and return per-model metrics."""
+    box_by_index = {
+        i: _mc_in_balanced_box(r, slot_qs, dists) for i, r in enumerate(frame)
+    }
+    types_by_index: dict[int, set[str]] = {}
+    for t, idx in assignments.items():
+        for i in idx:
+            types_by_index.setdefault(i, set()).add(t)
+    out: dict[str, dict] = {}
+    for model in ("A", "B", "C"):
+        label_by_index = {
+            i: _mc_model_label(
+                i, types_by_index.get(i, set()), box_by_index[i], model
+            )
+            for i in range(len(frame))
+        }
+        out[f"Model {model}"] = {
+            "model": model,
+            "policy": {
+                "A": "explicit_balanced",
+                "B": "residual_balanced",
+                "C": "balanced_plus_unclassified",
+            }[model],
+            "metrics": _mc_label_metrics(frame, label_by_index),
+            # 标签行相对全样本 family/size 分布的 taxicab 漂移（偏置越小越平衡）。
+            "family_bias": _mc_label_distribution_bias(
+                frame, label_by_index, "scope_type"
+            ),
+            "size_bias": _mc_label_distribution_bias(
+                frame, label_by_index, "size_bucket"
+            ),
+        }
+    return out
+
+
+def _mc_label_distribution_bias(
+    frame: list[dict], label_by_index: dict[int, str | None], key: str
+) -> float | None:
+    """Taxicab drift between labeled rows' and the whole frame's category dist."""
+    labeled = [i for i in range(len(frame)) if label_by_index.get(i) is not None]
+    overall = _mc_categorical_distribution(frame, list(range(len(frame))), key)
+    lab = _mc_categorical_distribution(frame, labeled, key)
+    return _mc_dist_drift(overall, lab)
+
+
+# ---------------------------------------------------------------------------
+# E6 — Threshold & Robustness
+# ---------------------------------------------------------------------------
+# E6 确定性种子 / E8 drift 警告阈值。
+_IST_MC_SEED = 20260818
+_IST_MC_DRIFT_WARNING = 0.05
+
+
+def _mc_dist_drift(dist_a: dict, dist_b: dict) -> float | None:
+    """Taxicab drift between two {category: {rate}} distributions (None-safe)."""
+    keys = set(dist_a) | set(dist_b)
+    if not keys:
+        return None
+    total = 0.0
+    for k in keys:
+        ra = dist_a.get(k, {}).get("rate")
+        rb = dist_b.get(k, {}).get("rate")
+        total += abs((ra if ra is not None else 0.0) - (rb if rb is not None else 0.0))
+    return round(total, 6)
+
+
+def _mc_hit_run_median(frame: list[dict], indexes: set[int]) -> float | None:
+    """Median per-scope consecutive-hit run length (date-ordered)."""
+    by_scope: dict[str, list[int]] = {}
+    for i, r in enumerate(frame):
+        by_scope.setdefault(str(r.get("scope_key")), []).append(i)
+    runs: list[int] = []
+    for sk in sorted(by_scope):
+        idxs = sorted(by_scope[sk], key=lambda i: str(frame[i].get("trade_date")))
+        cur = 0
+        for i in idxs:
+            if i in indexes:
+                cur += 1
+            elif cur:
+                runs.append(cur)
+                cur = 0
+        if cur:
+            runs.append(cur)
+    return _mc_median([float(x) for x in runs])
+
+
+def _mc_hit_conflict_rate(
+    idx: set[int], assignments: dict[str, set[int]], family_type: str
+) -> float | None:
+    """Rate of a hit-set overlapping the union of OTHER types' assignments."""
+    if not idx:
+        return None
+    other: set[int] = set()
+    for t, oset in assignments.items():
+        if t != family_type:
+            other |= oset
+    if not other:
+        return None
+    return round(len(idx & other) / len(idx), 6)
+
+
+def _mc_model_c_unclassified_rate(
+    frame: list[dict],
+    assignments: dict[str, set[int]],
+    family_type: str,
+    family_idx: set[int],
+    box_by_index: dict[int, bool],
+) -> float | None:
+    """Model-C unclassified rate when ``family_idx`` represents ``family_type``.
+
+    统计：既不属于该 family、也不属于其它类型、且不在 Balanced box 的行占比。
+    """
+    n = len(frame)
+    if not n:
+        return None
+    other_types = [t for t in assignments if t != family_type]
+    count = 0
+    for i in range(n):
+        if i in family_idx:
+            continue
+        if any(i in assignments[t] for t in other_types):
+            continue
+        if not box_by_index[i]:
+            count += 1
+    return round(count / n, 6)
+
+
+def _mc_family_robustness_sweep(
+    frame: list[dict],
+    family: dict,
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    slot_grid: dict[str, tuple[float, ...]],
+    denom: int,
+    assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+    family_type: str,
+) -> dict:
+    """E6 per-family robustness sweep: reference + single-slot grid points."""
+    slots = _mc_family_slots(family)
+    base_qs = dict(slot_qs)
+    ref_idx = set(_mc_eval_family_hits(frame, family["conditions"], base_qs, dists))
+    ref_stats = _mc_hit_stats(frame, ref_idx, denom)
+
+    def _point(idx: set[int], label: str) -> dict:
+        stats = _mc_hit_stats(frame, idx, denom)
+        return {
+            "combo": label,
+            "slot_values": {s: base_qs[s] for s in slots},
+            "hit_count": len(idx),
+            "hit_rate": stats["hit_rate"],
+            "family_distribution": stats["family_distribution"],
+            "size_distribution": stats["size_distribution"],
+            "run_persistence": _mc_hit_run_median(frame, idx),
+            "conflict_rate": _mc_hit_conflict_rate(idx, assignments, family_type),
+            "unclassified_rate": _mc_model_c_unclassified_rate(
+                frame, assignments, family_type, idx, box_by_index
+            ),
+        }
+
+    reference = _point(ref_idx, "reference")
+    sweeps: dict[str, list[dict]] = {}
+    for slot in slots:
+        points: list[dict] = []
+        for v in slot_grid.get(slot, ()):
+            qs = dict(base_qs)
+            qs[slot] = v
+            idx = set(_mc_eval_family_hits(frame, family["conditions"], qs, dists))
+            p = _point(idx, f"{slot}={v}")
+            p["slot_values"] = dict(qs)
+            p["threshold_perturbation"] = (
+                round(abs(len(idx) - len(ref_idx)) / denom, 6) if denom else None
+            )
+            p["family_drift_vs_ref"] = _mc_dist_drift(
+                ref_stats["family_distribution"], p["family_distribution"]
+            )
+            p["size_drift_vs_ref"] = _mc_dist_drift(
+                ref_stats["size_distribution"], p["size_distribution"]
+            )
+            points.append(p)
+        sweeps[slot] = points
+    return {
+        "type": family_type,
+        "family": family["family"],
+        "conditions": family["conditions"],
+        "reference": reference,
+        "sweeps": sweeps,
+    }
+
+
+def _mc_stable_region_detection(
+    points: list[dict],
+    key: str = "hit_rate",
+    delta: float = _IST_MC_STABLE_HIT_DELTA,
+    min_points: int = _IST_MC_STABLE_MIN_POINTS,
+) -> list[dict]:
+    """Maximal contiguous threshold bands with |consecutive hit-rate delta| <= delta.
+
+    ``points`` 按 ``value`` 升序；None hit_rate 视为断点。返回的稳定带至少
+    ``min_points`` 个网格点，供 E6 输出"稳定区域"而非单点。
+    """
+    pts = sorted(points, key=lambda p: p["value"])
+    bands: list[dict] = []
+    if not pts:
+        return bands
+    start = 0
+    for i in range(1, len(pts) + 1):
+        if i < len(pts):
+            a = pts[i - 1].get(key)
+            b = pts[i].get(key)
+            if a is not None and b is not None and abs(a - b) <= delta:
+                continue
+        band = pts[start:i]
+        if len(band) >= min_points:
+            vals = [p[key] for p in band if p.get(key) is not None]
+            bands.append(
+                {
+                    "start": band[0]["value"],
+                    "end": band[-1]["value"],
+                    "points": len(band),
+                    "hit_rate_min": min(vals) if vals else None,
+                    "hit_rate_max": max(vals) if vals else None,
+                    "hit_rate_range": round(max(vals) - min(vals), 6) if vals else None,
+                }
+            )
+        start = i
+    return bands
+
+
+def _mc_threshold_robustness(
+    frame: list[dict],
+    families_by_type: dict[str, list[dict]],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    slot_grid: dict[str, tuple[float, ...]],
+    denom: int,
+    assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+) -> dict:
+    """E6 full per-family robustness map (reference + grid + stable regions)."""
+    out: dict[str, dict] = {}
+    for t, fams in families_by_type.items():
+        for f in fams:
+            sweep = _mc_family_robustness_sweep(
+                frame, f, slot_qs, dists, slot_grid, denom,
+                assignments, box_by_index, t,
+            )
+            sweep["stable_regions"] = {
+                s: _mc_stable_region_detection(
+                    [
+                        {
+                            "value": p["slot_values"][s],
+                            "hit_rate": p["hit_rate"],
+                        }
+                        for p in sweep["sweeps"].get(s, [])
+                        if s in p.get("slot_values", {})
+                    ]
+                )
+                for s in sweep["sweeps"]
+            }
+            out[f"{t}:{f['family']}"] = sweep
+    return out
+
+
+# ---------------------------------------------------------------------------
+# E7 — Blind Semantic Replay
+# ---------------------------------------------------------------------------
+
+def _mc_blind_replay(
+    frame: list[dict],
+    assignments: dict[str, set[int]],
+    anchors: dict[str, dict],
+    seed: int = _IST_MC_SEED,
+    per_type: int = _IST_MC_BLIND_PER_TYPE,
+    conflict_n: int = _IST_MC_BLIND_CONFLICT,
+) -> dict:
+    """E7: ~100 blinded representative cases (15/type prototypes + 25 conflict).
+
+    Blind cases carry ONLY structural evidence (no type label / candidate rule /
+    old candidate).  The reveal block is returned separately so the blind review
+    is honest: judge structure in plain language first, then compare the answer.
+    """
+    rng = random.Random(seed)
+    cases: list[dict] = []
+    reveal: list[dict] = []
+    case_no = 0
+    for tname, an in anchors.items():
+        protos = list(an["prototype_indexes"])
+        rng.shuffle(protos)
+        picked = protos[:per_type]
+        for i in picked:
+            case_no += 1
+            cid = f"case-{case_no:03d}"
+            cases.append({"case_id": cid, "evidence": _mc_evidence(frame[i])})
+            reveal.append(
+                {
+                    "case_id": cid,
+                    "bucket": "prototype",
+                    "type_group": tname,
+                    "old_candidate_note": _mc_old_candidate_note(frame[i]),
+                }
+            )
+    conflict_idx = sorted(
+        i for i, r in enumerate(frame)
+        if sum(1 for idx in assignments.values() if i in idx) >= 2
+    )
+    picked_conflicts = conflict_idx[:conflict_n]
+    for i in picked_conflicts:
+        case_no += 1
+        cid = f"case-{case_no:03d}"
+        hit_types = sorted(t for t, idx in assignments.items() if i in idx)
+        cases.append({"case_id": cid, "evidence": _mc_evidence(frame[i])})
+        reveal.append(
+            {
+                "case_id": cid,
+                "bucket": "conflict/boundary",
+                "type_group": None,
+                "hit_types": hit_types,
+                "old_candidate_note": _mc_old_candidate_note(frame[i]),
+            }
+        )
+    return {
+        "case_count": len(cases),
+        "per_type": per_type,
+        "conflict_n": len(picked_conflicts),
+        "cases": cases,
+        "reveal": reveal,
+    }
+
+
+# ---------------------------------------------------------------------------
+# E8 — Broader-Universe Validation
+# ---------------------------------------------------------------------------
+
+def _mc_abs_conditions(
+    conditions, slot_abs: dict[str, dict[str, float]]
+) -> list | None:
+    """Materialize str percentile slots into absolute thresholds (None unresolvable)."""
+    out = []
+    for feature, op, bound in conditions:
+        if isinstance(bound, str):
+            th = slot_abs.get(bound, {}).get(feature)
+            if th is None:
+                return None
+            out.append((feature, op, float(th)))
+        else:
+            out.append((feature, op, float(bound)))
+    return out
+
+
+def _mc_slot_abs(
+    slot_qs: dict[str, float], dists: dict[str, list[float]]
+) -> dict[str, dict[str, float]]:
+    """Resolve percentile slots to absolute feature thresholds from the BASE frame.
+
+    E8 约束：规则阈值由 40-scope 决定并绝对化；285-scope 上禁止重新取分位，
+    否则等于换了另一套规则。
+    """
+    return {
+        slot: {f: _percentile_sorted(vals, q) for f, vals in dists.items() if vals}
+        for slot, q in slot_qs.items()
+    }
+
+
+def _mc_threshold_sensitivity(
+    frame: list[dict],
+    family: dict,
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    slot_grid: dict[str, tuple[float, ...]],
+    denom: int,
+) -> float | None:
+    """Max |hit_rate(grid point) - hit_rate(reference)| across the slot grid."""
+    if not denom:
+        return None
+    ref = set(_mc_eval_family_hits(frame, family["conditions"], slot_qs, dists))
+    ref_rate = len(ref) / denom
+    max_swing = 0.0
+    for slot in _mc_family_slots(family):
+        for v in slot_grid.get(slot, ()):
+            qs = dict(slot_qs)
+            qs[slot] = v
+            idx = set(_mc_eval_family_hits(frame, family["conditions"], qs, dists))
+            max_swing = max(max_swing, abs(len(idx) / denom - ref_rate))
+    return round(max_swing, 6)
+
+
+def _mc_reference_profile(
+    frame: list[dict],
+    families_by_type: dict[str, list[dict]],
+    preferred: dict[str, dict],
+    slot_qs: dict[str, float],
+    dists: dict[str, list[float]],
+    universe_len: int,
+    assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+) -> dict:
+    """Per-type preferred-family reference profile (E8 drift input, base frame)."""
+    out: dict[str, dict] = {}
+    for t, p in preferred.items():
+        fam_def = next(
+            (f for f in families_by_type.get(t, []) if f["family"] == p["family"]),
+            None,
+        )
+        if fam_def is None:
+            continue
+        idx = set(_mc_eval_family_hits(frame, fam_def["conditions"], slot_qs, dists))
+        stats = _mc_hit_stats(frame, idx, universe_len)
+        out[t] = {
+            "preferred_family": p["family"],
+            "hit_count": len(idx),
+            "hit_rate": stats["hit_rate"],
+            "family_distribution": stats["family_distribution"],
+            "size_distribution": stats["size_distribution"],
+            "conflict_rate": _mc_hit_conflict_rate(idx, assignments, t),
+            "unclassified_rate": _mc_model_c_unclassified_rate(
+                frame, assignments, t, idx, box_by_index
+            ),
+            "run_persistence": _mc_hit_run_median(frame, idx),
+            "threshold_sensitivity": _mc_threshold_sensitivity(
+                frame, fam_def, slot_qs, dists, _IST_MC_GRID, universe_len
+            ),
+        }
+    return out
+
+
+def _mc_broad_profile(
+    broad_frame: list[dict],
+    abs_families: dict[str, list[dict]],
+    preferred: dict[str, dict],
+    broad_assignments: dict[str, set[int]],
+    box_by_index: dict[int, bool],
+    sensitivity_families: dict[str, list[dict]],
+    broad_dists: dict[str, list[float]],
+    universe_len: int,
+) -> dict:
+    """Per-type preferred-family profile on the 285-scope frame.
+
+    Hits use BASE-absolute thresholds (abs_conditions); threshold sensitivity
+    re-sweeps percentile slots against the broad frame's own distribution to
+    measure "阈值敏感度是否在更广样本上漂移"。
+    """
+    out: dict[str, dict] = {}
+    for t, p in preferred.items():
+        fam_def = next(
+            (f for f in abs_families.get(t, []) if f["family"] == p["family"]),
+            None,
+        )
+        if fam_def is None or fam_def.get("abs_conditions") is None:
+            continue
+        idx = set(_mc_eval_family_hits(broad_frame, fam_def["abs_conditions"], {}, {}))
+        stats = _mc_hit_stats(broad_frame, idx, universe_len)
+        sens_fam = next(
+            (f for f in sensitivity_families.get(t, []) if f["family"] == p["family"]),
+            None,
+        )
+        sens = None
+        if sens_fam is not None:
+            sens = _mc_threshold_sensitivity(
+                broad_frame, sens_fam, dict(_IST_MC_REFERENCE),
+                broad_dists, _IST_MC_GRID, universe_len,
+            )
+        out[t] = {
+            "preferred_family": p["family"],
+            "hit_count": len(idx),
+            "hit_rate": stats["hit_rate"],
+            "family_distribution": stats["family_distribution"],
+            "size_distribution": stats["size_distribution"],
+            "conflict_rate": _mc_hit_conflict_rate(idx, broad_assignments, t),
+            "unclassified_rate": _mc_model_c_unclassified_rate(
+                broad_frame, broad_assignments, t, idx, box_by_index
+            ),
+            "run_persistence": _mc_hit_run_median(broad_frame, idx),
+            "threshold_sensitivity": sens,
+        }
+    return out
+
+
+def _mc_drift_report(
+    base: dict[str, dict],
+    broad: dict[str, dict],
+    drift_warning: float = _IST_MC_DRIFT_WARNING,
+) -> dict:
+    """E8: preferred-family reference drift 40-scope vs 285-scope."""
+    out: dict[str, dict] = {}
+    for t, b in base.items():
+        g = broad.get(t)
+        if g is None:
+            out[t] = {"preferred_family": b["preferred_family"], "broad_missing": True}
+            continue
+        hit_drift = (
+            round(abs(b["hit_rate"] - g["hit_rate"]), 6)
+            if b["hit_rate"] is not None and g["hit_rate"] is not None
+            else None
+        )
+        out[t] = {
+            "preferred_family": b["preferred_family"],
+            "hit_rate_base": b["hit_rate"],
+            "hit_rate_broad": g["hit_rate"],
+            "hit_rate_drift": hit_drift,
+            "family_drift": _mc_dist_drift(
+                b["family_distribution"], g["family_distribution"]
+            ),
+            "size_drift": _mc_dist_drift(b["size_distribution"], g["size_distribution"]),
+            "conflict_rate_base": b["conflict_rate"],
+            "conflict_rate_broad": g["conflict_rate"],
+            "conflict_drift": (
+                round(abs(b["conflict_rate"] - g["conflict_rate"]), 6)
+                if b["conflict_rate"] is not None and g["conflict_rate"] is not None
+                else None
+            ),
+            "unclassified_rate_base": b["unclassified_rate"],
+            "unclassified_rate_broad": g["unclassified_rate"],
+            "unclassified_drift": (
+                round(abs(b["unclassified_rate"] - g["unclassified_rate"]), 6)
+                if b["unclassified_rate"] is not None
+                and g["unclassified_rate"] is not None
+                else None
+            ),
+            "threshold_sensitivity_base": b["threshold_sensitivity"],
+            "threshold_sensitivity_broad": g["threshold_sensitivity"],
+            "threshold_sensitivity_drift": (
+                round(abs(b["threshold_sensitivity"] - g["threshold_sensitivity"]), 6)
+                if b["threshold_sensitivity"] is not None
+                and g["threshold_sensitivity"] is not None
+                else None
+            ),
+        }
+    warnings = [
+        f"{t} hit_rate_drift={r.get('hit_rate_drift')} >= {drift_warning}"
+        for t, r in out.items()
+        if r.get("hit_rate_drift") is not None
+        and r["hit_rate_drift"] >= drift_warning
+    ]
+    return {"per_type_drift": out, "drift_warnings": warnings}
+
+
+# ---------------------------------------------------------------------------
+# E1 dimension map + E5 balanced recommendation + contract candidate
+# ---------------------------------------------------------------------------
+
+_MC_DIMENSION_ROLES = {
+    "Participation": {
+        "primary": "aligned_breadth_hist_pct",
+        "dynamic": "aligned_breadth_delta5d",
+        "corroborating": ("advance_ratio_hist_pct", "advance_ratio_delta5d"),
+    },
+    "Core Concentration": {
+        "primary": "price_hhi_hist_pct",
+        "dynamic": "price_hhi_delta5d",
+        "corroborating": ("aligned_tilt_hist_pct",),
+    },
+    "Leadership Turnover": {
+        "primary": "migration_hist_pct",
+        "corroborating": ("jaccard_stability", "previous_retention"),
+    },
+    "Leadership Capacity": {
+        "primary": "lcr",
+        "corroborating": ("leader_fraction_hist_pct",),
+        "research_only": ("exit_minus_entrant", "replacement_coverage"),
+    },
+}
+
+
+def _mc_dimension_map(corr: dict, redundant: list[dict]) -> dict:
+    """E1 final structural dimension map (primary/dynamic/corroborating + evidence).
+
+    Dimension roles 来自本轮输入表（prompt.md §一）；冗余证据由实测 Spearman
+    |rho| 驱动，用于裁决"重复表达"。
+    """
+    dims: dict[str, dict] = {}
+    for dim, roles in _MC_DIMENSION_ROLES.items():
+        primary = roles["primary"]
+        primary_row: dict[str, float | None] = {}
+        for k in roles.get("corroborating", ()):
+            rho = corr.get(primary, {}).get(k, {}).get("rho")
+            primary_row[k] = round(rho, 4) if rho is not None else None
+        dynamic = roles.get("dynamic")
+        dynamic_rho = None
+        if dynamic:
+            rho = corr.get(primary, {}).get(dynamic, {}).get("rho")
+            dynamic_rho = round(rho, 4) if rho is not None else None
+        within = [
+            r for r in redundant if r["dim_a"] == dim and r["dim_b"] == dim
+        ]
+        dims[dim] = {
+            "primary": primary,
+            "dynamic": dynamic,
+            "corroborating": list(roles.get("corroborating", ())),
+            "research_only": list(roles.get("research_only", ())),
+            "primary_rho_to_dynamic": dynamic_rho,
+            "primary_rho_to_corroborating": primary_row,
+            "within_dim_redundant_pairs": within,
+        }
+    cross = [r for r in redundant if r["dim_a"] != r["dim_b"]]
+    return {"dimensions": dims, "cross_dimension_redundant_pairs": cross}
+
+
+def _mc_balanced_recommendation(models: dict) -> dict:
+    """Deterministic data-driven recommendation among Model A/B/C (human-final).
+
+    A = explicit Balanced；B = residual Balanced；C = Balanced + Unclassified。
+    文档化规则：
+      - C 的 Unclassified 率 >= 0.25 → 推荐 C（诚实给出 unclassified，避免硬塞）。
+      - 否则 A 的 coverage >= 0.85 且显式 Balanced 中位 run >= 2 → 推荐 A。
+      - 否则 B 的 Balanced 中位 run < 2（一日游 / 语义空洞）→ 推荐 C 而非 B。
+      - 默认推荐 C。
+    """
+    summary: dict[str, dict] = {}
+    for name, data in models.items():
+        met = data["metrics"]
+        bal = met["per_label"].get("Balanced", {})
+        uncl = met["per_label"].get("Unclassified", {})
+        summary[name] = {
+            "policy": data["policy"],
+            "coverage": met["coverage"],
+            "balanced_rate": bal.get("rate"),
+            "balanced_median_run": bal.get("median_run_length"),
+            "balanced_one_day_only_rate": bal.get("one_day_only_rate"),
+            "unclassified_rate": uncl.get("rate"),
+            "family_bias": data["family_bias"],
+            "size_bias": data["size_bias"],
+            "transition_stability": met["overall"]["transition_stability"],
+        }
+    unclass_c = summary["Model C"]["unclassified_rate"] or 0.0
+    cov_a = summary["Model A"]["coverage"] or 0.0
+    bal_run_a = summary["Model A"]["balanced_median_run"]
+    bal_run_b = summary["Model B"]["balanced_median_run"]
+    if unclass_c >= 0.25:
+        rec, rationale = "Model C", (
+            "C 的 Unclassified 率 >= 0.25：大量行既非四类又非真正中性，"
+            "必须诚实输出 Unclassified，而不是硬塞 Balanced。"
+        )
+    elif cov_a >= 0.85 and bal_run_a is not None and bal_run_a >= 2:
+        rec, rationale = "Model A", (
+            "A 的 coverage >= 0.85 且显式 Balanced 有持续 run（中位 >= 2）："
+            "存在可定义的中心结构群体，显式 Balanced 成立。"
+        )
+    elif bal_run_b is not None and bal_run_b < 2:
+        rec, rationale = "Model C", (
+            "B（residual Balanced）中位 run < 2，Balanced 多为一日游、语义空洞；"
+            "采用 C，只把真正中性的标 Balanced，其余 Unclassified。"
+        )
+    else:
+        rec, rationale = "Model C", (
+            "默认推荐 C（Balanced + Unclassified）：既不夸大显式 Balanced，"
+            "也不把全部 else 塞进 Balanced。"
+        )
+    return {"models": summary, "recommended": rec, "rationale": rationale}
+
+
+_MC_TYPE_SEMANTIC = {
+    "Broadening": (
+        "Participation 高且正在扩大（Aligned Breadth high + 上升）、集中度未强化 —— "
+        "越来越多成员共同参与扩散行情。"
+    ),
+    "Core-led": (
+        "集中度高（Price HHI high）+ Aligned Tilt 高 + Leadership 换手稳定 —— "
+        "少数清晰核心在驱动，大资金强化当前方向。"
+    ),
+    "Rotating": (
+        "Leadership 换手高（Migration high）+ Leadership capacity 保持（LCR 未收缩）"
+        "—— 换帅但核心组织完整，可能是轮动接力。"
+    ),
+    "Fragmenting": (
+        "Leadership 换手高 + Leadership capacity 收缩（LCR < 0.85），且无新的 coherent "
+        "concentration / 宽度失序 —— 结构真正散掉，而非资金重新集中到新龙头。"
+    ),
+}
+
+
+def _mc_contract_candidate(
+    e1: dict,
+    e2: dict,
+    e3: dict,
+    e4: dict,
+    e5: dict,
+    e6: dict,
+    e7: dict,
+    e8: dict | None,
+) -> dict:
+    """Synthesize the unique five-type algorithm contract candidate (research-only).
+
+    ``contract_status = CANDIDATE_NOT_FROZEN`` / ``threshold_freeze_eligible = false``
+    —— 只收口研究结论，不冻结最终 threshold。
+    """
+    dim_map = e1.get("dimension_map", {})
+    preferred = e3.get("preferred_families", {})
+    conflict_class = e4.get("classifications", {})
+    balanced_rec = e5.get("recommendation", {})
+    robustness = e6.get("per_family_robustness", {})
+    families_by_type = _mc_rule_families()
+
+    per_type: dict[str, dict] = {}
+    for t in ("Broadening", "Core-led", "Rotating", "Fragmenting"):
+        pref = preferred.get(t)
+        family = pref.get("family") if pref else None
+        fam_def = None
+        for f in families_by_type.get(t, []):
+            if f["family"] == family:
+                fam_def = f
+        rob = robustness.get(f"{t}:{family}", {}) if family else {}
+        stable = rob.get("stable_regions", {})
+        threshold_region: dict[str, dict | None] = {}
+        for slot, bands in stable.items():
+            ref_q = _IST_MC_REFERENCE.get(slot)
+            containing = [
+                b for b in bands
+                if ref_q is not None and b["start"] <= ref_q <= b["end"]
+            ]
+            threshold_region[slot] = (
+                containing[0] if containing else (bands[0] if bands else None)
+            )
+        pair_conflicts = [
+            c for pair, c in conflict_class.items() if t in pair.split("↔")
+        ]
+        per_type[t] = {
+            "semantic_definition": _MC_TYPE_SEMANTIC[t],
+            "prototype_matched_count": (
+                e2.get("prototype_anchors", {}).get(t, {}).get("matched_count")
+            ),
+            "preferred_family": family,
+            "preferred_conditions": fam_def["conditions"] if fam_def else None,
+            "threshold_region": threshold_region,
+            "conflict_notes": [
+                {
+                    "pair": c.get("pair"),
+                    "classification": c.get("classification"),
+                    "overlap_over_smaller": c.get("overlap_over_smaller"),
+                    "evidence_note": c.get("evidence_note"),
+                }
+                for c in pair_conflicts
+            ],
+            "unresolved_issues": [
+                f"{c.get('pair')} → {c.get('classification')}"
+                for c in pair_conflicts
+            ],
+        }
+
+    return {
+        "study": _IST_MC_STUDY,
+        "contract_status": "CANDIDATE_NOT_FROZEN",
+        "threshold_freeze_eligible": False,
+        "membership_semantics": "current_static_research_proxy",
+        "dimension_map": dim_map,
+        "types": per_type,
+        "balanced_policy": {
+            "recommended_model": balanced_rec.get("recommended"),
+            "rationale": balanced_rec.get("rationale"),
+            "model_comparison": balanced_rec.get("models"),
+        },
+        "conflict_policy": {
+            "note": (
+                "E4 归因（A 规则重构 / B 合理过渡 / C 层级）为研究建议；正式 "
+                "Conflict policy 需人工复核后确定，当前禁止 if/elif priority 自动落库。"
+            ),
+            "classifications": conflict_class,
+        },
+        "availability_policy": {
+            "membership": "current_static_research_proxy",
+            "unavailable": (
+                "任何结构维度值缺失 → 该行不可分类（None），禁止用 0 替代"
+            ),
+            "cross_sectional": "DEFERRED_FULL_FAMILY_UNIVERSE_REQUIRED",
+            "future_leak": "不使用未来收益；hist_pct/delta5d 只消费当前及历史观测",
+        },
+        "e8_broader_validation": (e8 or {}).get("drift_report"),
+        "unresolved_issues_overall": [
+            f"{c.get('pair')} → {c.get('classification')}"
+            for c in conflict_class.values()
+        ],
+    }
+
+
+# ---------------------------------------------------------------------------
+# INTERNAL-STRUCTURE-TYPE-MULTIVARIATE-MAPPING-CLOSURE orchestration
+# ---------------------------------------------------------------------------
+
+def _run_internal_structure_type_multivariate(
+    dataset_dir: str,
+    broad_dataset_dir: str | None = None,
+    *,
+    seed: int = _IST_MC_SEED,
+    dry_run: bool = False,
+) -> int:
+    """E1–E8 closure（research-only，一次跑完）。
+
+    40-scope mapping 上完成 E1–E7；capacity_4096（≈285 scopes）上完成 E8
+    broader validation。输出 01..08 + internal_structure_type_contract_candidate.json，
+    全部 CANDIDATE_NOT_FROZEN / threshold_freeze_eligible=false。
+    """
+    if dry_run:
+        print(
+            f"[dry-run] internal-structure-type-multivariate "
+            f"dataset_dir={dataset_dir} broad_dataset_dir={broad_dataset_dir} "
+            f"seed={seed} OK"
+        )
+        return 0
+
+    import pyarrow.parquet as pq
+
+    mpath = os.path.join(dataset_dir, "manifest.json")
+    if not os.path.exists(mpath):
+        logger.error("[ist-mc] %s 非 mapping 输出目录（缺 manifest.json）", dataset_dir)
+        return 2
+    with open(mpath, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    ppath = os.path.join(dataset_dir, "internal_structure_type_mapping.parquet")
+    if not os.path.exists(ppath):
+        logger.error("[ist-mc] 缺 internal_structure_type_mapping.parquet")
+        return 2
+    rows = pq.read_table(ppath).to_pylist()
+    if not rows:
+        logger.error("[ist-mc] mapping dataset 空")
+        return 2
+    sha12 = str(manifest.get("capture_git_sha") or "")[:12]
+    out_dir = os.path.join(
+        os.path.dirname(os.path.normpath(dataset_dir)),
+        f"review-isdtype-mc-{sha12}-v1",
+    )
+
+    frame = _mc_build_frame(rows)
+    n = len(frame)
+    keys = list(_MC_CORE_KEYS)
+    dists = _mc_feature_distributions(frame, keys)
+    slot_qs = dict(_IST_MC_REFERENCE)
+    universe_len = n
+
+    # ---- E1 ----
+    corr_all = _mc_correlation_map(frame, keys)
+    corr_by_family = _mc_stratified_correlation(
+        frame, keys, "scope_type",
+        sorted({str(r.get("scope_type")) for r in frame}),
+    )
+    corr_by_size = _mc_stratified_correlation(
+        frame, keys, "size_bucket",
+        sorted({str(r.get("size_bucket")) for r in frame}),
+    )
+    mig_levels = _mc_migration_levels(frame)
+    corr_by_migration: dict[str, dict] = {}
+    for level in ("low", "mid", "high"):
+        sub = [r for i, r in enumerate(frame) if mig_levels.get(i) == level]
+        corr_by_migration[level] = {
+            "n": len(sub),
+            "corr": _mc_correlation_map(sub, keys),
+        }
+    redundant = _mc_redundancy_analysis(corr_all, keys, _IST_MC_REDUNDANCY_ABS)
+    conditional = _mc_conditional_distribution(
+        frame, "migration_hist_pct", _IST_MC_MIGRATION_LEVELS, targets=keys
+    )
+    e1 = {
+        "study": _IST_MC_STUDY,
+        "correlation_overall": corr_all,
+        "correlation_by_family": corr_by_family,
+        "correlation_by_size": corr_by_size,
+        "correlation_by_migration_level": corr_by_migration,
+        "conditional_distributions_by_migration": conditional,
+        "redundancy_pairs": redundant,
+        "redundancy_abs_threshold": _IST_MC_REDUNDANCY_ABS,
+        "dimension_map": _mc_dimension_map(corr_all, redundant),
+    }
+
+    # ---- E2 ----
+    specs = _mc_anchor_specs()
+    anchors = _mc_select_anchors(frame, specs, slot_qs, dists)
+    e2 = {
+        "study": _IST_MC_STUDY,
+        "n_proto_per_type": _IST_MC_PROTO_PER_TYPE,
+        "n_hard_negative_per_type": _IST_MC_HARD_NEG_PER_TYPE,
+        "prototype_anchors": {
+            t: {
+                "matched_count": a["matched_count"],
+                "prototype_count": len(a["prototype_indexes"]),
+                "hard_negative_count": len(a["hard_negative_indexes"]),
+                "prototypes": [
+                    _mc_evidence(frame[i]) for i in a["prototype_indexes"]
+                ],
+                "hard_negatives": [
+                    _mc_evidence(frame[i]) for i in a["hard_negative_indexes"]
+                ],
+            }
+            for t, a in anchors.items()
+        },
+        "note": (
+            "原型直接取自多变量空间极端结构（E2 spec），不使用旧 "
+            "research_candidate_* label；evidence 投影不含任何 type label。"
+        ),
+    }
+
+    # ---- E3 ----
+    families_by_type = _mc_rule_families()
+    assignments = _mc_assignments_by_type(frame, families_by_type, slot_qs, dists)
+    preferred = _mc_preferred_families(
+        frame, families_by_type, slot_qs, dists, universe_len
+    )
+    family_sweep = {
+        f"{t}:{f['family']}": _mc_family_sweep(
+            frame, f, slot_qs, dists, _IST_MC_GRID, universe_len
+        )
+        for t, fams in families_by_type.items()
+        for f in fams
+    }
+    e3 = {
+        "study": _IST_MC_STUDY,
+        "rule_families": families_by_type,
+        "family_sweep": family_sweep,
+        "preferred_families": preferred,
+        "hit_floor": _IST_MC_HIT_FLOOR,
+    }
+
+    # ---- E4 ----
+    pair_stats = _mc_pairwise_conflicts(assignments, universe_len)
+    classifications: dict[str, dict] = {}
+    durations: dict[str, dict] = {}
+    for pair in pair_stats:
+        tA, tB = pair.split("↔")
+        dist_key = (tA, tB) if (tA, tB) in _MC_PAIR_DISTINGUISH else (tB, tA)
+        dist = _MC_PAIR_DISTINGUISH.get(dist_key, ("lcr", "migration_hist_pct"))
+        classifications[pair] = _mc_conflict_classification(
+            frame, assignments, pair, dist
+        )
+        durations[pair] = _mc_conflict_duration(frame, assignments, pair)
+    e4 = {
+        "study": _IST_MC_STUDY,
+        "pairwise_conflicts": pair_stats,
+        "classifications": classifications,
+        "durations": durations,
+        "note": (
+            "冲突归因 A（规则重构）/ B（合理过渡）/ C（层级）为研究建议，需人工复核；"
+            "禁止 if/elif priority 自动落库。"
+        ),
+    }
+
+    # ---- E5 ----
+    models = _mc_compare_balanced_models(frame, assignments, slot_qs, dists)
+    balanced_rec = _mc_balanced_recommendation(models)
+    e5 = {
+        "study": _IST_MC_STUDY,
+        "models": models,
+        "recommendation": balanced_rec,
+        "note": (
+            "三模型统一比较 coverage / family bias / size bias / run persistence / "
+            "one-day / transition；推荐为研究建议，人工确认后生效。"
+        ),
+    }
+
+    # ---- E6 ----
+    box_by_index = {
+        i: _mc_in_balanced_box(r, slot_qs, dists) for i, r in enumerate(frame)
+    }
+    robustness = _mc_threshold_robustness(
+        frame, families_by_type, slot_qs, dists, _IST_MC_GRID,
+        universe_len, assignments, box_by_index,
+    )
+    e6 = {
+        "study": _IST_MC_STUDY,
+        "grid": _IST_MC_GRID,
+        "stable_params": {
+            "hit_delta": _IST_MC_STABLE_HIT_DELTA,
+            "min_points": _IST_MC_STABLE_MIN_POINTS,
+        },
+        "per_family_robustness": robustness,
+    }
+
+    # ---- E7 ----
+    blind = _mc_blind_replay(frame, assignments, anchors, seed=seed)
+    e7 = {
+        "study": _IST_MC_STUDY,
+        "case_count": blind["case_count"],
+        "cases": blind["cases"],
+    }
+    e7_reveal = {
+        "study": _IST_MC_STUDY,
+        "note": "盲审揭晓对照（独立文件，避免先看到 type 再找理由）。",
+        "reveal": blind["reveal"],
+    }
+
+    # ---- E8 ----
+    e8: dict | None = None
+    if broad_dataset_dir:
+        bpath = os.path.join(
+            broad_dataset_dir, "internal_structure_type_mapping.parquet"
+        )
+        if not os.path.exists(bpath):
+            logger.error("[ist-mc] broad dataset 缺 mapping parquet: %s", bpath)
+            return 2
+        broad_rows = pq.read_table(bpath).to_pylist()
+        if not broad_rows:
+            logger.error("[ist-mc] broad dataset 空")
+            return 2
+        broad_frame = _mc_build_frame(broad_rows)
+        broad_n = len(broad_frame)
+        broad_dists = _mc_feature_distributions(broad_frame, keys)
+        # 阈值按 base（40-scope）绝对化，禁止在 broad universe 上重选 percentile。
+        slot_abs = _mc_slot_abs(slot_qs, dists)
+        abs_families = {
+            t: [
+                {**f, "abs_conditions": _mc_abs_conditions(f["conditions"], slot_abs)}
+                for f in fams
+            ]
+            for t, fams in families_by_type.items()
+        }
+        broad_assignments: dict[str, set[int]] = {}
+        for t, fams in abs_families.items():
+            idx: set[int] = set()
+            for f in fams:
+                if f["abs_conditions"] is None:
+                    continue
+                idx |= set(_mc_eval_family_hits(broad_frame, f["abs_conditions"], {}, {}))
+            broad_assignments[t] = idx
+        abs_box = _mc_abs_conditions(_mc_balanced_box_conditions(), slot_abs)
+        broad_box = {
+            i: (
+                abs_box is not None
+                and _mc_eval_conditions(r, abs_box, {}, {})
+            )
+            for i, r in enumerate(broad_frame)
+        }
+        broad_profile = _mc_broad_profile(
+            broad_frame, abs_families, preferred, broad_assignments, broad_box,
+            families_by_type, broad_dists, broad_n,
+        )
+        base_profile = _mc_reference_profile(
+            frame, families_by_type, preferred, slot_qs, dists,
+            universe_len, assignments, box_by_index,
+        )
+        drift_report = _mc_drift_report(base_profile, broad_profile)
+        e8 = {
+            "study": _IST_MC_STUDY,
+            "base_scope_count": len(set(str(r.get("scope_key")) for r in rows)),
+            "broad_scope_count": len(set(str(r.get("scope_key")) for r in broad_rows)),
+            "base_rows": n,
+            "broad_rows": broad_n,
+            "base_profile": base_profile,
+            "broad_profile": broad_profile,
+            "drift_report": drift_report,
+            "note": (
+                "285-scope 仍是 current-static research proxy；E8 只判断候选是否稳定，"
+                "禁止根据 broader 结果重新选规则 / 冻结 threshold。"
+            ),
+        }
+
+    # ---- contract candidate ----
+    contract = _mc_contract_candidate(e1, e2, e3, e4, e5, e6, e7, e8)
+
+    # ---- write outputs ----
+    os.makedirs(out_dir, exist_ok=True)
+    outputs = {
+        "01_structural_dimension_map.json": e1,
+        "02_prototype_anchor_analysis.json": e2,
+        "03_rule_family_experiments.json": e3,
+        "04_full_conflict_matrix.json": e4,
+        "05_balanced_model_comparison.json": e5,
+        "06_threshold_robustness.json": e6,
+        "07_blind_semantic_replay.json": e7,
+        "07b_blind_replay_reveal.json": e7_reveal,
+        "08_broader_universe_validation.json": e8,
+        "internal_structure_type_contract_candidate.json": contract,
+    }
+    for fname, payload in outputs.items():
+        with open(os.path.join(out_dir, fname), "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    mc_manifest = {
+        "dataset_id": f"review-isdtype-mc-{sha12}-v1",
+        "source_dataset": os.path.basename(os.path.normpath(dataset_dir)),
+        "broad_dataset": (
+            os.path.basename(os.path.normpath(broad_dataset_dir))
+            if broad_dataset_dir else None
+        ),
+        "capture_git_sha": manifest.get("capture_git_sha"),
+        "membership_semantics": "current_static_research_proxy",
+        "contract_status": "CANDIDATE_NOT_FROZEN",
+        "threshold_freeze_eligible": False,
+        "study": _IST_MC_STUDY,
+        "row_counts": {"base": n, "broad": (e8 or {}).get("broad_rows")},
+        "generated_at_utc": datetime.now(UTC).isoformat(),
+    }
+    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as fh:
+        json.dump(mc_manifest, fh, ensure_ascii=False, indent=2, default=_json_default)
+
+    # ---- console summary ----
+    print(f"[internal-structure-type-multivariate] out_dir={out_dir}")
+    print(
+        f"base rows={n} scopes="
+        f"{len(set(r.get('scope_key') for r in rows))}"
+    )
+    print("--- E1 dimension map ---")
+    for dim, info in e1["dimension_map"]["dimensions"].items():
+        print(
+            f"  {dim}: primary={info['primary']} dynamic={info['dynamic']} "
+            f"within_redundant={len(info['within_dim_redundant_pairs'])}"
+        )
+    print("--- E3 preferred families ---")
+    for t, p in preferred.items():
+        print(
+            f"  {t}: preferred={p['family']} "
+            f"hit_rate={p.get('selection_evidence', {}).get('hit_rate')} "
+            f"conflict_rate={p.get('selection_evidence', {}).get('conflict_rate')}"
+        )
+    print("--- E4 conflict classifications ---")
+    for pair, c in classifications.items():
+        print(
+            f"  {pair}: {c['classification']} "
+            f"overlap_over_smaller={c.get('overlap_over_smaller')}"
+        )
+    print("--- E5 balanced recommendation ---")
+    print(
+        f"  recommended={balanced_rec.get('recommended')} "
+        f"rationale={balanced_rec.get('rationale')}"
+    )
+    if e8:
+        print("--- E8 broader validation drift ---")
+        for t, d in e8["drift_report"]["per_type_drift"].items():
+            print(
+                f"  {t}: hit_rate {d.get('hit_rate_base')} -> "
+                f"{d.get('hit_rate_broad')} (drift={d.get('hit_rate_drift')}) "
+                f"family_drift={d.get('family_drift')} "
+                f"conflict_drift={d.get('conflict_drift')}"
+            )
+        if e8["drift_report"]["drift_warnings"]:
+            print("  DRIFT WARNINGS:")
+            for w in e8["drift_report"]["drift_warnings"]:
+                print(f"    {w}")
+    return 0
+
+
 def _run_replay_l1(
     dataset_dir: str,
     view_name: str,
@@ -9777,6 +12126,7 @@ async def _run(args: argparse.Namespace) -> int:
             args.dataset_dir,
             target_per_family=args.target_per_family,
             seed=args.seed,
+            view=args.view,
             dry_run=args.dry_run,
         )
     if args.mode == "internal-structure-type-export":
@@ -9786,10 +12136,22 @@ async def _run(args: argparse.Namespace) -> int:
         if args.scope_type or args.scope_key:
             logger.error("[internal-structure-type-export] 禁 --scope-type/--scope-key")
             return 2
+        view_name = args.view
+        if view_name == "representative_sample" or view_name in (
+            "dev_500", "capacity_4096", "all_concepts", "all_industries",
+        ):
+            # backward-compat：未显式指定映射 view 时默认分层样本。
+            view_name = "internal_structure_type_mapping_sample"
+        out_suffix = (
+            "-broad" if view_name == "internal_structure_type_mapping_sample_broad"
+            else ""
+        )
         return _run_internal_structure_type_export(
             args.dataset_dir,
             history=args.history or _DEFAULT_HISTORY_DAYS,
             asof_lock=args.asof_lock,
+            view_name=view_name,
+            out_suffix=out_suffix,
             dry_run=args.dry_run,
         )
     if args.mode == "internal-structure-type-distribution":
@@ -9863,6 +12225,23 @@ async def _run(args: argparse.Namespace) -> int:
             return 2
         return _run_internal_structure_type_semantic_validation(
             args.dataset_dir,
+            dry_run=args.dry_run,
+        )
+    if args.mode == "internal-structure-type-multivariate":
+        if not args.dataset_dir:
+            logger.error(
+                "[internal-structure-type-multivariate] --dataset-dir 为必填"
+            )
+            return 2
+        if args.scope_type or args.scope_key:
+            logger.error(
+                "[internal-structure-type-multivariate] 禁 --scope-type/--scope-key"
+            )
+            return 2
+        return _run_internal_structure_type_multivariate(
+            args.dataset_dir,
+            broad_dataset_dir=args.broad_dataset_dir,
+            seed=_IST_MC_SEED,
             dry_run=args.dry_run,
         )
     # ---- replay-l1 / rtm / semantic-matrix / explore1：纯本地 Dataset corpus 回放（不连 DB）----
