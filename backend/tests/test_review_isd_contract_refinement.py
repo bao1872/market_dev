@@ -37,10 +37,11 @@ from scripts.review_scope_dynamics_probe import (
     _cr_policy_label,
     _cr_prefreeze_validation,
     _cr_rotating_fragmenting_boundary,
-    _cr_run_stats,
+    _cr_run_summary_from_canonical,
     _cr_semantic_contract_lock,
     _cr_side_conflict,
     _cr_window_split,
+    _cr_temporal_validation,
     _mc_abs_conditions,
     _mc_assignments_by_type,
     _mc_balanced_box_conditions,
@@ -49,6 +50,7 @@ from scripts.review_scope_dynamics_probe import (
     _mc_in_balanced_box,
     _mc_preferred_families,
     _mc_rule_families,
+    _mc_scope_hit_runs,
     _mc_slot_abs,
 )
 
@@ -228,6 +230,35 @@ def test_cr_core_led_surface_36_cells(frame, dists, slot_qs):
     assert r3["stable_plateau"]["status"] in ("PASS", "PARTIAL", "UNRESOLVED")
 
 
+def test_cr_plateau_detection_rejects_family_drift():
+    """A1-2：R3 stable cell 必须额外消费 P(TypeHit|Family) / P(TypeHit|Size) 稳定性。
+
+    hit/conflict 完全平坦，但 family_conditional 在邻域内漂移（> _CR_PLATEAU_FAMILY_TOL）
+    → 该 cell 局部不稳定，稳定区域不应把它全算进去。构造一个目前会因 family drift
+    而不稳定的 cell，验证 plateau 不会把它当作稳定核心（PANELL）。"""
+    from scripts.review_scope_dynamics_probe import _CR_PLATEAU_FAMILY_TOL
+    hit = 0.2
+    conf = 0.1
+    base = {
+        "hit_rate": hit, "conflict_rate": conf,
+        "family_conditional": {"concept": 0.5},
+        "size_conditional": {"small": 1.0},
+    }
+    grid = {}
+    for i, h in enumerate([0.65, 0.70, 0.75]):
+        for j, t in enumerate([0.65, 0.70, 0.75]):
+            drift = 0.0 if (i == 1 and j == 1) else (2 * _CR_PLATEAU_FAMILY_TOL)
+            cell = dict(base)
+            cell["family_conditional"] = {"concept": 0.5 + drift}
+            grid[f"{h:.2f}|{t:.2f}"] = cell
+    plateau = _cr_plateau_detection(grid)
+    # 中央 cell 因 family drift 不稳定，周边 8 格相对中心也 drif 超限 → 稳定区域应无大块。
+    # 至少不应出现 3×3 全稳定。
+    best_cells = (plateau["stable_regions"][0]["cell_count"]
+                  if plateau["stable_regions"] else 0)
+    assert best_cells < 9
+
+
 def test_cr_plateau_detection_connected_region():
     grid = {}
     for i, h in enumerate([0.65, 0.70, 0.75]):
@@ -260,6 +291,43 @@ def test_cr_rotating_boundary_cutoffs_and_three_segment(frame, dists, slot_qs):
     ts = r4["three_segment_support"]
     assert ts["status"] in ("PASS", "PARTIAL", "INSUFFICIENT_DATA")
     assert set(ts["counts"]) == {"strong_contraction", "transition", "capacity_preserved"}
+    # A1-3：R4 拆两层结论，capacity axis 与 natural three-segment 必须都有。
+    assert "capacity_axis_evidence" in r4
+    assert "natural_three_segment_evidence" in r4
+    assert r4["capacity_axis_evidence"]["status"] in ("PASS", "PARTIAL")
+    assert r4["natural_three_segment_evidence"]["status"] in (
+        "PASS", "PARTIAL", "INSUFFICIENT_DATA",
+    )
+
+
+def test_cr_r4_trivial_persistence_does_not_pass_three_segment():
+    """A1-3：禁止 ``1.0>=1.0>=1.0`` trivial persistence monotonicity 直接 PASS。
+
+    三段需要真实结构分离（breadth_weak / coherent-core gap >= _CR_THREE_SEGMENT_GAP）。
+    构造三段在结构上完全同构（breadth/hhi/tilt 全部一致，仅 LCR 归段差异）→
+    即使 persistence 单调且 axis_ok=True，``natural_three_segment_evidence`` 也不得 PASS
+    （应只 PARTIAL，因为 structurally_separated=False）。用 min_segment=0 免除大样本。
+    """
+    rows = []
+    date = 0
+    for lcr in (0.50, 0.80, 1.00):  # SC / TR / CP 每段各 2 行，结构完全相同
+        for k in range(2):
+            date += 1
+            rows.append(_row(
+                f"S{lcr},{k}", f"2026-{date // 28 + 1:02d}-{date % 28 + 1:02d}",
+                breadth=0.05, hhi=0.95, tilt=0.95, migration=0.95, lcr=lcr,
+            ))
+    frame_r4 = rows
+    dists = _mc_feature_distributions(frame_r4, list(_MC_CORE_KEYS))
+    slot_qs = dict(_IST_MC_REFERENCE)
+    assignments = _mc_assignments_by_type(frame_r4, _mc_rule_families(), slot_qs, dists)
+    r4 = _cr_rotating_fragmenting_boundary(
+        frame_r4, dists, slot_qs, assignments, min_segment=0,
+    )
+    ts = r4["natural_three_segment_evidence"]
+    # 结构同构 → 无法证明自然三段 → 不得 PASS，只能 PARTIAL。
+    assert ts["status"] == "PARTIAL"
+    assert ts["structural_separation"]["separated"] is False
 
 
 def test_cr_monotone_nondecreasing():
@@ -336,12 +404,36 @@ def test_cr_label_churn_identical_and_flipped():
     assert churn["churn_rate"] == pytest.approx(1 / 3)
 
 
+def test_cr_temporal_validation_splits_prevalence_and_semantic_gate(frame, dists, slot_qs):
+    """A1-6：temporal_state_prevalence 只描述不判定；只有 temporal_semantic_stability
+    作为 Freeze Gate。二者分离，且 prevalence 明确标记 descriptive_only。"""
+    fams = _mc_rule_families()
+    abs_fams = _cr_candidate_abs_families(
+        fams, slot_qs, dists,
+        core_led_hhi_q=0.8, core_led_tilt_q=0.8, lcr_cut=0.85,
+    )
+    slot_abs = _mc_slot_abs(slot_qs, dists)
+    abs_box = _mc_abs_conditions(_mc_balanced_box_conditions(), slot_abs)
+    temporal = _cr_temporal_validation(frame, abs_fams, abs_box)
+    # 两个独立输出
+    assert "temporal_state_prevalence" in temporal
+    assert "temporal_semantic_stability" in temporal
+    prev = temporal["temporal_state_prevalence"]
+    assert prev["descriptive_only"] is True
+    assert set(prev["per_window"]) == {"early", "middle", "late"}
+    sem = temporal["temporal_semantic_stability"]
+    assert set(sem["per_type"]) <= {"Broadening", "Core-led", "Rotating", "Fragmenting"}
+    assert sem["status"] in ("PASS", "NEEDS_REVIEW", "UNRESOLVED")
+    # Gate 状态来自 semantic_stability 而非 prevalence 漂移
+    assert temporal["status"] == sem["status"]
+
+
 def test_cr_data_sufficiency_three_options():
-    # blocker → NOT_FREEZE_READY
+    # blocker（temporal semantic stability 失败 / broader drift / boundary churn）→ NOT_FREEZE_READY
     d1 = _cr_data_sufficiency_decision(
         membership_semantics="current_static_research_proxy",
         threshold_freeze_eligible=False, has_pit_membership=False,
-        broader_status="NEEDS_REVIEW", temporal_status="PASS",
+        broader_status="NEEDS_REVIEW", temporal_semantic_status="PASS",
         boundary_status="PASS",
     )
     assert d1["decision"] == "NOT_FREEZE_READY"
@@ -351,7 +443,8 @@ def test_cr_data_sufficiency_three_options():
     d2 = _cr_data_sufficiency_decision(
         membership_semantics="current_static_research_proxy",
         threshold_freeze_eligible=False, has_pit_membership=False,
-        broader_status="PASS", temporal_status="PASS", boundary_status="PASS",
+        broader_status="PASS", temporal_semantic_status="PASS",
+        boundary_status="PASS",
     )
     assert d2["decision"] == "SEMANTIC_FREEZE_ONLY"
     assert d2["freeze_level"] == "SEMANTIC"
@@ -364,11 +457,27 @@ def test_cr_data_sufficiency_three_options():
     d3 = _cr_data_sufficiency_decision(
         membership_semantics="pit", threshold_freeze_eligible=True,
         has_pit_membership=True,
-        broader_status="PASS", temporal_status="PASS", boundary_status="PASS",
+        broader_status="PASS", temporal_semantic_status="PASS",
+        boundary_status="PASS",
     )
     assert d3["decision"] == "FULL_FREEZE_READY"
     assert d3["threshold_freeze_eligible"] is True
     assert "numerical_thresholds" in d3["allowed_to_freeze"]
+
+
+def test_cr_data_sufficiency_temporal_only_semantic_gate():
+    """A1-6：Temporal 只由 semantic stability 阻塞；Type 频率漂移（prevalence）不阻塞。
+    Boundary BORDERLINE_PASS 不阻塞（A1-7）。"""
+    d = _cr_data_sufficiency_decision(
+        membership_semantics="current_static_research_proxy",
+        threshold_freeze_eligible=False, has_pit_membership=False,
+        broader_status="PASS", temporal_semantic_status="NEEDS_REVIEW",
+        boundary_status="BORDERLINE_PASS",
+    )
+    assert d["decision"] == "NOT_FREEZE_READY"
+    assert any("temporal semantic stability" in b for b in d["blockers"])
+    # boundary BORDERLINE_PASS 不应进入 blockers
+    assert not any("boundary" in b for b in d["blockers"])
 
 
 def test_cr_prefreeze_validation_structure(frame, dists, slot_qs):
@@ -383,8 +492,12 @@ def test_cr_prefreeze_validation_structure(frame, dists, slot_qs):
         "leakage_audit", "d_data_sufficiency",
     }
     assert r6["a_40_285_stability"]["status"] in ("PASS", "NEEDS_REVIEW")
-    assert r6["b_temporal_robustness"]["status"] in ("PASS", "NEEDS_REVIEW")
-    assert r6["c_boundary_perturbation"]["status"] in ("PASS", "NEEDS_REVIEW")
+    assert r6["b_temporal_robustness"]["status"] in (
+        "PASS", "NEEDS_REVIEW", "UNRESOLVED", "INSUFFICIENT",
+    )
+    assert r6["c_boundary_perturbation"]["status"] in (
+        "PASS", "NEEDS_REVIEW", "BORDERLINE_PASS",
+    )
     assert r6["d_data_sufficiency"]["decision"] in (
         "FULL_FREEZE_READY", "SEMANTIC_FREEZE_ONLY", "NOT_FREEZE_READY",
     )
@@ -433,7 +546,11 @@ def _minimal_r6(sufficiency_decision: str) -> dict:
                "max_gap": 0.01}
     return {
         "a_40_285_stability": broader,
-        "b_temporal_robustness": {"status": "PASS", "max_rate_deviation": 0.01},
+        "b_temporal_robustness": {
+            "status": "PASS",
+            "temporal_state_prevalence": {"descriptive_only": True},
+            "temporal_semantic_stability": {"status": "PASS", "max_drift": 0.01},
+        },
         "c_boundary_perturbation": {"status": "PASS", "max_label_churn": 0.01},
         "leakage_audit": {"status": "PASS"},
         "d_data_sufficiency": sufficiency,
@@ -488,10 +605,41 @@ def test_cr_high_pct_and_run_stats(frame, dists):
     assert v is not None
     idx = [i for i, r in enumerate(frame)
            if r.get("price_hhi_hist_pct", 0) >= 0.95]
-    stats = _cr_run_stats(frame, idx)
+    runs = _mc_scope_hit_runs(frame, set(idx))
+    stats = _cr_run_summary_from_canonical(runs)
     assert stats["run_count"] == 2  # C 和 O 各一段连续 run
     assert stats["median_run_length"] == 4.0
     assert stats["one_day_only_rate"] == 0.0
+
+
+def test_cr_run_gap_case_two_single_day_runs():
+    """A1-1：T1 hit / T2 miss / T3 hit ⇒ 两个 length=1 runs，绝不能合并成 length=2。
+
+    旧的 ``_cr_run_stats`` 只比较日期大小（新日期 > 旧日期 即连续），会把 T1/T3
+    误并成长度 2；canonical ``_mc_scope_hit_runs`` 遍历完整时间序列，遇 miss 断开。
+    """
+    frame = [
+        _row("S1", "2026-01-01", hhi=0.95),  # hit
+        _row("S1", "2026-01-02", hhi=0.1),   # miss（T2 不在命中集合）
+        _row("S1", "2026-01-03", hhi=0.95),  # hit
+    ]
+    runs = _mc_scope_hit_runs(frame, {0, 2})
+    assert runs == [1, 1]
+    stats = _cr_run_summary_from_canonical(runs)
+    assert stats["run_count"] == 2
+    assert stats["median_run_length"] == 1.0
+    assert stats["one_day_only_rate"] == 1.0
+
+
+def test_cr_run_summary_from_canonical_empty_and_contiguous():
+    assert _cr_run_summary_from_canonical([]) == {
+        "run_count": 0, "median_run_length": None, "one_day_only_rate": None,
+    }
+    contiguous = [4]
+    s = _cr_run_summary_from_canonical(contiguous)
+    assert s["run_count"] == 1
+    assert s["median_run_length"] == 4.0
+    assert s["one_day_only_rate"] == 0.0
 
 
 def test_cr_side_conflict():
