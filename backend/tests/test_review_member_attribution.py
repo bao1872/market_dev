@@ -7,10 +7,14 @@ Locks the deterministic decomposition + reconciliation contract:
   exact 0-weight for members outside each canonical universe.
 - Breadth member sets == canonical advance/decline/unchanged counts AND ratios.
 - Concentration member ``weight^2`` sum == canonical raw HHI (price + amount).
-- Leadership expands canonical retained/entrant/exit verbatim (None != [], empty
-  leader set is ready).
+- Leadership consumes canonical entrant/exit ids verbatim; retained = prev ∩
+  current validated against retained_count.  A legitimately empty leader set is
+  NOT a snapshot problem: the group is unavailable(empty_leader_set) but the
+  member sets still reconcile.
 - Availability: missing/NaN/negative never coerced to 0.
 - Determinism: member order / set iteration never affects output.
+- Raw-vs-display precision (A1-1): reconciliation sums RAW values with
+  math.fsum; ranking sorts RAW values; rounding happens only at display time.
 
 All payloads come from the REAL canonical producer
 ``compute_scope_observation`` — no hand-distorted fake payloads.
@@ -308,7 +312,66 @@ def test_determinism_float_aggregation_order_independent() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Leadership - expand canonical migration verbatim
+# A1-2 Large-N golden + raw-value ranking (precision lock)
+# ---------------------------------------------------------------------------
+
+
+def test_large_n_4096_equal_members_reconcile() -> None:
+    # A1-2 golden: with N=4096 equal members each weight is 1/4096 and each
+    # contribution is tiny.  Rounding each to 6 decimals before summing would
+    # collapse the HHI sum to 0 while canonical raw HHI = 1/4096 ~ 2.44e-4 — a
+    # guaranteed FAIL on any round-then-sum implementation.  Raw math.fsum must
+    # reproduce the canonical facts exactly.
+    n = 4096
+    members = [_m(f"m{i:05d}", return_1d=0.001, amount=1.0) for i in range(n)]
+    out = compute_member_attribution(
+        members=members, observation=_run(members, scope_key="large4096")
+    )
+    rec = out["reconciliation"]
+    assert rec["violation_count"] == 0
+    for key in ("direction", "capital_tilt", "concentration_price", "concentration_amount"):
+        assert rec["checks"][key]["resolved"] == "matched", key
+    # Direction: AW == each member return == 0.001.
+    assert out["direction"]["sum_contribution"] == pytest.approx(0.001, abs=RECONCILIATION_TOLERANCE)
+    # Tilt: AW == EW -> 0.
+    assert out["capital_tilt"]["sum_tilt_contribution"] == pytest.approx(0.0, abs=RECONCILIATION_TOLERANCE)
+    # HHI: sum of (1/4096)^2 over 4096 members == 1/4096.
+    assert out["concentration"]["price"]["sum_hhi"] == pytest.approx(1 / 4096, abs=RECONCILIATION_TOLERANCE)
+    assert out["concentration"]["amount"]["sum_hhi"] == pytest.approx(1 / 4096, abs=RECONCILIATION_TOLERANCE)
+    # Each member's displayed hhi contribution ~5.96e-8 rounds to 0.000000, but
+    # that display must never feed the reconciliation sum.
+    assert out["concentration"]["price"]["members"][0]["hhi_contribution"] == 0.0
+    # Large-N determinism: the displayed reconciliation abs_diff must be
+    # order-stable even though the canonical amount_share owner sums in input
+    # order (residue ~1e-16 << 6-decimal display resolution).
+    rev = compute_member_attribution(
+        members=list(reversed(members)), observation=_run(members, scope_key="large4096")
+    )
+    assert rev["determinism_checksum"] == out["determinism_checksum"]
+
+
+def test_near_equal_raw_contributions_ranked_by_raw_not_rounded() -> None:
+    # A1-2: two members whose RAW contributions differ only below the display
+    # resolution (both round to 0.000000 at 6 decimals).  Ranking must use the
+    # raw values, so the higher-raw member comes first even though its id sorts
+    # later; a rounded-value ranking would tie them and put the smaller id first.
+    # aw_weight is 0.5 for each; raw contribution = 0.5 * return.
+    members = [
+        _m("z", return_1d=0.00000005, amount=1.0),  # raw 2.5e-8
+        _m("a", return_1d=0.00000004, amount=1.0),  # raw 2.0e-8
+    ]
+    out = compute_member_attribution(
+        members=members, observation=_run(members, scope_key="near_equal")
+    )
+    assert out["reconciliation"]["violation_count"] == 0
+    ids = [e["member_id"] for e in out["direction"]["positive"]]
+    assert ids == ["z", "a"]
+    # Both display as 0.000000 (below resolution) but ranking still separated them.
+    assert all(e["contribution"] == 0.0 for e in out["direction"]["positive"])
+
+
+# ---------------------------------------------------------------------------
+# Leadership - consume canonical migration verbatim
 # ---------------------------------------------------------------------------
 
 
@@ -336,6 +399,51 @@ def test_leadership_not_provided_is_skipped_not_failed() -> None:
     out = _nominal_a1()
     assert out["leadership"]["status"] == "unavailable"
     assert out["reconciliation"]["checks"]["leadership"]["pass"] is None
+    assert out["reconciliation"]["violation_count"] == 0
+
+
+def test_leadership_empty_leader_set_reconciles_sets() -> None:
+    # A1-4: both snapshots ready but the previous leader set is legitimately
+    # empty.  Canonical migration status = unavailable(empty_leader_set) with
+    # set facts preserved.  Attribution mirrors the metric AND still reconciles
+    # retained/entrant/exit — only unavailable_snapshot skips reconciliation.
+    prev_snap = _snapshot([], direction=1)  # legitimately empty previous leaders
+    curr_snap = _snapshot([("a", 1.0)], direction=1)
+    mig = compute_leadership_migration(previous_snapshot=prev_snap, current_snapshot=curr_snap)
+    assert mig.status == "unavailable" and mig.reason == "empty_leader_set"
+    assert mig.entrant_ids == ("a",) and mig.retained_count == 0
+    current = [_m("a", return_1d=2.0, amount=100.0)]
+    out = compute_member_attribution(
+        members=current, observation=_run(current), leadership_migration=mig
+    )
+    assert out["leadership"]["status"] == "unavailable"
+    assert out["leadership"]["reason"] == "empty_leader_set"
+    assert sorted(e["member_id"] for e in out["leadership"]["entrants"]) == ["a"]
+    ck = out["reconciliation"]["checks"]["leadership"]
+    assert ck["resolved"] == "matched" and ck["pass"] is True
+    assert out["reconciliation"]["violation_count"] == 0
+
+
+def test_leadership_unavailable_snapshot_skips_transition() -> None:
+    # A1-4: one side's snapshot is unavailable -> transition cannot be verified,
+    # reconciliation is skipped (never a false PASS), never a violation.
+    prev_snap = _snapshot([("a", 1.0)], direction=1)
+    curr_snap = LeadershipSnapshot(
+        trade_date=TRADE_DATE.isoformat(),
+        status="unavailable",
+        reason="unavailable_snapshot",
+        direction=None,
+        rankable_count=None,
+        leader_set=(),
+    )
+    mig = compute_leadership_migration(previous_snapshot=prev_snap, current_snapshot=curr_snap)
+    assert mig.status == "unavailable" and mig.reason == "unavailable_snapshot"
+    current = [_m("a", return_1d=2.0, amount=100.0)]
+    out = compute_member_attribution(
+        members=current, observation=_run(current), leadership_migration=mig
+    )
+    ck = out["reconciliation"]["checks"]["leadership"]
+    assert ck["resolved"] == "skipped" and ck["pass"] is None
     assert out["reconciliation"]["violation_count"] == 0
 
 

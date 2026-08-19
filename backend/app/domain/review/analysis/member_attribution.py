@@ -38,21 +38,38 @@ Contract (M1) — five Attribution groups, ONE unified member evidence schema:
    the canonical amount-share owner over the amount-valid universe.  Sum of
    ``weight_i^2`` == raw HHI (price / amount).  Sorting: hhi DESC, member_id ASC.
 
-5. ``leadership``     - Canonical fact: Leadership Migration (retained /
-   entrant / exit).  Directly expands canonical leader sets; no new formula.
-   Sorting: aligned contribution DESC (fallback member_id ASC).
+5. ``leadership``     - Canonical fact: Leadership Migration.  Consumes
+   ``migration.entrant_ids`` / ``migration.exit_ids`` VERBATIM (single owner,
+   no recompute).  ``retained = previous ∩ current`` is derived ONLY because the
+   canonical contract exposes no ``retained_ids``, and it is validated against
+   ``migration.retained_count``.  Sorting: aligned contribution DESC (fallback
+   canonical contribution, member_id ASC).
 
 Ownership boundary (single-owner + NO-MIGRATION):
 
-- It does NOT recompute ``amount_share`` — consumed from the single canonical
-  owner ``compute_member_amount_contributions``.
-- It does NOT recompute the canonical leadership contribution — consumed from
-  ``compute_member_leadership_contributions``.
-- It does NOT recompute EW / AW / HHI scope numbers as *facts*; it recomputes
-  them ONLY as a member-level *decomposition* and reconciles the member sum to
-  the canonical published value passed in via the L1 ``observation``.
-- It does NOT re-derive leader sets — ``leadership_migration`` is consumed
-  verbatim.
+- It does NOT create a second canonical aggregate owner.  EW / AW / HHI /
+  Breadth / Leadership Migration stay owned by their single canonical producers.
+- It constructs deterministic *member-level decomposition components* inside
+  Attribution (aw_weight / ew_weight / hhi weight / breadth membership) and
+  reconciles the member sum back to the single canonical aggregate — a
+  projection of the canonical aggregate, not a new aggregate formula.
+- ``amount_share`` consumed from the single canonical owner
+  ``compute_member_amount_contributions``; leadership ``contribution`` consumed
+  from ``compute_member_leadership_contributions``.
+- Leadership ``entrant_ids`` / ``exit_ids`` are consumed verbatim from the
+  canonical ``LeadershipMigrationFacts``; only ``retained`` is derived
+  (previous ∩ current) because canonical exposes no ``retained_ids``, and it is
+  validated against ``migration.retained_count``.
+
+Raw vs display precision (A1-1):
+- Every decomposition component is kept in FULL precision internally
+  (``raw_contribution`` / ``raw_tilt`` / ``raw_price_hhi`` / ``raw_amount_hhi``).
+- Reconciliation sums RAW values with ``math.fsum`` over a member_id-sorted
+  sequence; ranking sorts RAW values.
+- ``_quant()`` (6 decimals) is applied ONLY at serialization/display time, never
+  before summation or ranking.  The audit sequence is
+  ``raw -> {sum -> reconcile, sort -> rank, round -> display}`` — never
+  ``raw -> round -> sum -> reconcile``.
 
 Availability semantics (canonical, reused verbatim):
 
@@ -62,8 +79,14 @@ Availability semantics (canonical, reused verbatim):
 - amount missing / non-finite / negative -> ``amount_share``/``aw_weight`` None
   -> contribution None (excluded from AW / direction); amount HHI excludes.
 - ``amount == 0`` (total > 0) -> legal zero share.
-- Leadership ``None != []``; a legitimately empty leader set is ``ready`` with
-  empty member lists, never "unavailable".
+- Leadership ``None != []``.  A legitimately empty leader set is NOT a snapshot
+  problem: canonical migration still reports ``status=unavailable`` with
+  ``reason=empty_leader_set`` (only jaccard / retention / migration are
+  unavailable) while ``retained`` / ``entrant`` / ``exit`` set facts stay valid.
+  Attribution mirrors that: group ``status=unavailable`` but the member sets are
+  populated and their reconciliation still RUNS.
+- ``unavailable_snapshot`` (one side's leader ids unknown) -> transition
+  reconciliation is skipped (cannot be verified), never a false PASS.
 
 Determinism (M2): every sort uses ``(primary_key, member_id ASC)``.  Database /
 set iteration ordering never affects output.  Same input -> same output always;
@@ -267,7 +290,12 @@ def compute_member_attribution(
         else:
             unchanged.append(m)
 
-    # ---- per-member unified evidence -------------------------------------------
+    # ---- per-member unified evidence + raw components --------------------------
+    # RAW vs DISPLAY (A1-1): full-precision component values are kept in separate
+    # raw maps for reconciliation + ranking; ``_evidence`` emits only the
+    # quantized display row.  Never sum/rank from a rounded value.
+    raw_contribution: dict[str, float] = {}
+    raw_tilt: dict[str, float] = {}
     evidence_by: dict[str, dict[str, Any]] = {}
     for m in member_list:
         r = _finite(m.return_1d)
@@ -284,6 +312,10 @@ def compute_member_attribution(
             tilt = ((aw_w if aw_w is not None else 0.0) - (ew_w if ew_w is not None else 0.0)) * r
         else:
             tilt = None
+        if dir_contrib is not None:
+            raw_contribution[m.member_id] = dir_contrib
+        if tilt is not None:
+            raw_tilt[m.member_id] = tilt
         evidence_by[m.member_id] = _evidence(
             m,
             member_name_by_id=names,
@@ -298,19 +330,24 @@ def compute_member_attribution(
         )
 
     # ---- Direction group -------------------------------------------------------
-    direction_rankable = [e for e in evidence_by.values() if e["contribution"] is not None]
-    direction_positive = sorted(
-        (e for e in direction_rankable if e["contribution"] > 0),
-        key=lambda e: (-e["contribution"], e["member_id"]),
-    )
-    direction_negative = sorted(
-        (e for e in direction_rankable if e["contribution"] < 0),
-        key=lambda e: (e["contribution"], e["member_id"]),
-    )
-    # Deterministic summation: float addition is non-associative, so sum over a
-    # member_id-ordered sequence (never input-order dependent).
+    direction_rankable = sorted(raw_contribution)
+    direction_positive = [
+        evidence_by[mid]
+        for mid in sorted(
+            (mid for mid, c in raw_contribution.items() if c > 0),
+            key=lambda mid: (-raw_contribution[mid], mid),
+        )
+    ]
+    direction_negative = [
+        evidence_by[mid]
+        for mid in sorted(
+            (mid for mid, c in raw_contribution.items() if c < 0),
+            key=lambda mid: (raw_contribution[mid], mid),
+        )
+    ]
+    # RAW sum (A1-1): full precision + member_id-sorted input to math.fsum.
     direction_sum = (
-        sum(e["contribution"] for e in sorted(direction_rankable, key=lambda e: e["member_id"]))
+        math.fsum(raw_contribution[mid] for mid in direction_rankable)
         if direction_rankable
         else None
     )
@@ -320,23 +357,30 @@ def compute_member_attribution(
     # available (canonical semantics).  Otherwise the tilt group is unavailable
     # and its reconciliation is both_unavailable (never a mismatch).
     tilt_available = canonical_aw is not None and canonical_ew is not None
-    tilt_rankable = [e for e in evidence_by.values() if e["tilt_contribution"] is not None]
-    tilt_positive = sorted(
-        (e for e in tilt_rankable if e["tilt_contribution"] > 0),
-        key=lambda e: (-e["tilt_contribution"], e["member_id"]),
-    )
-    tilt_negative = sorted(
-        (e for e in tilt_rankable if e["tilt_contribution"] < 0),
-        key=lambda e: (e["tilt_contribution"], e["member_id"]),
-    )
+    tilt_rankable = sorted(raw_tilt)
+    tilt_positive = [
+        evidence_by[mid]
+        for mid in sorted(
+            (mid for mid, t in raw_tilt.items() if t > 0),
+            key=lambda mid: (-raw_tilt[mid], mid),
+        )
+    ]
+    tilt_negative = [
+        evidence_by[mid]
+        for mid in sorted(
+            (mid for mid, t in raw_tilt.items() if t < 0),
+            key=lambda mid: (raw_tilt[mid], mid),
+        )
+    ]
     tilt_sum = (
-        sum(e["tilt_contribution"] for e in sorted(tilt_rankable, key=lambda e: e["member_id"]))
+        math.fsum(raw_tilt[mid] for mid in tilt_rankable)
         if (tilt_rankable and tilt_available)
         else None
     )
 
     # ---- Concentration group ----------------------------------------------------
     price_hhi_members: list[dict[str, Any]] = []
+    raw_price_hhi: dict[str, float] = {}
     # Deterministic abs-return total: iterate member_id-sorted sequence so the
     # shares and their squares are supplier-order independent.
     price_abs: list[tuple[str, float]] = []
@@ -344,34 +388,54 @@ def compute_member_attribution(
         r = _finite(m.return_1d)
         if m.price_candidate and r is not None:
             price_abs.append((m.member_id, abs(r)))
-    abs_total = sum(v for _, v in sorted(price_abs, key=lambda x: x[0]))
+    abs_total = math.fsum(v for _, v in sorted(price_abs, key=lambda x: x[0]))
     if abs_total > _EPSILON:
         for mid, r_abs in sorted(price_abs, key=lambda x: x[0]):
-            if mid in evidence_by:
-                row = dict(evidence_by[mid])
-                share = r_abs / abs_total
-                row["concentration_weight"] = _quant(share)
-                row["hhi_contribution"] = _quant(share * share)
-                price_hhi_members.append(row)
-    price_hhi_members.sort(key=lambda e: (-e["hhi_contribution"], e["member_id"]))
+            share = r_abs / abs_total
+            raw_price_hhi[mid] = share * share
+            row = dict(evidence_by[mid])
+            row["concentration_weight"] = _quant(share)
+            row["hhi_contribution"] = _quant(share * share)
+            price_hhi_members.append(row)
+    # Rank by RAW hhi (never the rounded display value); sum = raw fsum.
+    price_hhi_members.sort(key=lambda e: (-raw_price_hhi[e["member_id"]], e["member_id"]))
     sum_price_hhi = (
-        sum(e["hhi_contribution"] for e in price_hhi_members) if price_hhi_members else None
+        math.fsum(raw_price_hhi[mid] for mid in sorted(raw_price_hhi))
+        if raw_price_hhi
+        else None
     )
 
     amount_hhi_members: list[dict[str, Any]] = []
-    for mid, sh in amount_share_by.items():
+    raw_amount_hhi: dict[str, float] = {}
+    for mid in sorted(amount_share_by):
+        sh = amount_share_by[mid]
         if sh is not None:
+            raw_amount_hhi[mid] = sh * sh
             row = dict(evidence_by[mid])
             row["concentration_weight"] = _quant(sh)
             row["hhi_contribution"] = _quant(sh * sh)
             amount_hhi_members.append(row)
-    amount_hhi_members.sort(key=lambda e: (-e["hhi_contribution"], e["member_id"]))
+    amount_hhi_members.sort(key=lambda e: (-raw_amount_hhi[e["member_id"]], e["member_id"]))
     sum_amount_hhi = (
-        sum(e["hhi_contribution"] for e in amount_hhi_members) if amount_hhi_members else None
+        math.fsum(raw_amount_hhi[mid] for mid in sorted(raw_amount_hhi))
+        if raw_amount_hhi
+        else None
     )
 
-    # ---- Leadership group (expand canonical migration verbatim) ----------------
+    # ---- Leadership group (consume canonical migration verbatim) ----------------
+    # A1-4 availability split:
+    #   - unavailable_snapshot (one side's leader ids unknown) -> no transition
+    #     evidence; transition reconciliation is skipped (cannot be verified).
+    #   - empty_leader_set (both snapshots ready, either set legitimately empty)
+    #     -> migration metric unavailable BUT retained/entrant/exit set facts stay
+    #     valid and their reconciliation still RUNS.
     leadership: dict[str, Any]
+    prev_ids: tuple[str, ...] | None = None
+    curr_ids: tuple[str, ...] | None = None
+    retained_ids: list[str] = []
+    entrant_ids: list[str] = []
+    exit_ids: list[str] = []
+    leadership_transition_available = False
     if leadership_migration is None:
         leadership = {
             "status": "unavailable",
@@ -384,15 +448,31 @@ def compute_member_attribution(
         mig = leadership_migration
         prev_ids = mig.previous_leader_ids
         curr_ids = mig.current_leader_ids
+        # A1-3: entrant/exit consumed DIRECTLY from canonical migration ids;
+        # only retained is derived (previous ∩ current) because canonical exposes
+        # no retained_ids, and it is validated against migration.retained_count.
         if prev_ids is None or curr_ids is None:
-            retained_ids = entrant_ids = exit_ids = []
+            # unavailable_snapshot: one side unknown -> no transition evidence.
+            retained_ids = []
+            entrant_ids = list(mig.entrant_ids) if mig.entrant_ids is not None else []
+            exit_ids = list(mig.exit_ids) if mig.exit_ids is not None else []
         else:
             prev_set, curr_set = set(prev_ids), set(curr_ids)
             retained_ids = sorted(prev_set & curr_set)
-            entrant_ids = sorted(curr_set - prev_set)
-            exit_ids = sorted(prev_set - curr_set)
+            entrant_ids = list(mig.entrant_ids) if mig.entrant_ids is not None else []
+            exit_ids = list(mig.exit_ids) if mig.exit_ids is not None else []
+            leadership_transition_available = True
 
         dir_sign = mig.current_direction
+
+        def _aligned_raw(mid: str) -> float:
+            """Raw aligned contribution for ranking (never the rounded value)."""
+            canon = canon_contrib_by.get(mid)
+            if canon is not None and dir_sign is not None:
+                return canon * dir_sign
+            if canon is not None:
+                return canon
+            return 0.0
 
         def _leader_rows(ids: Sequence[str]) -> list[dict[str, Any]]:
             rows: list[dict[str, Any]] = []
@@ -412,10 +492,13 @@ def compute_member_attribution(
                 base.setdefault("in_aw_universe", False)
                 canon = canon_contrib_by.get(mid)
                 base["aligned_contribution"] = _quant(
-                    (canon * dir_sign) if (canon is not None and dir_sign is not None) else None
+                    (canon * dir_sign)
+                    if (canon is not None and dir_sign is not None)
+                    else (canon if canon is not None else None)
                 )
                 rows.append(base)
-            rows.sort(key=lambda e: (-(e["aligned_contribution"] or 0.0), e["member_id"]))
+            # rank by RAW aligned contribution DESC; member_id ASC tie-break.
+            rows.sort(key=lambda e: (-_aligned_raw(e["member_id"]), e["member_id"]))
             return rows
 
         leadership = {
@@ -442,8 +525,13 @@ def compute_member_attribution(
         elif dsum is None or dcan is None:
             chk["pass"], chk["resolved"] = False, "mismatch"
         else:
-            chk["abs_diff"] = abs(dsum - dcan)
-            chk["pass"] = chk["abs_diff"] <= tolerance
+            # PASS/FAIL is decided on the RAW difference (full precision); the
+            # displayed abs_diff is quantized like every other display field.
+            # This keeps the output order-stable even when the canonical
+            # amount_share owner sums in input order (residue ~1e-16, far below
+            # the 6-decimal display resolution).
+            chk["abs_diff"] = _quant(abs(dsum - dcan))
+            chk["pass"] = abs(dsum - dcan) <= tolerance
             chk["resolved"] = "matched" if chk["pass"] else "mismatch"
         checks[key] = chk
 
@@ -485,31 +573,54 @@ def compute_member_attribution(
         checks["leadership"] = {
             "kind": "set", "resolved": "skipped", "note": "leadership not provided", "pass": None,
         }
-    elif leadership_migration.status == "unavailable":
+    elif not leadership_transition_available:
+        # unavailable_snapshot (or partial ids): transition cannot be verified.
         checks["leadership"] = {
             "kind": "set", "resolved": "skipped",
-            "note": f"leadership unavailable ({leadership_migration.reason})", "pass": None,
+            "note": "leadership snapshot unavailable; transition cannot be verified",
+            "pass": None,
         }
     else:
-        rprev = set(leadership_migration.previous_leader_ids or ())
-        rcurr = set(leadership_migration.current_leader_ids or ())
-        rretained = rprev & rcurr
-        rentrants = rcurr - rprev
-        rexits = rprev - rcurr
+        # A1-3: entrant/exit ids ARE the canonical migration ids (no self-derived
+        # algebra to re-prove); only retained is derived and is validated against
+        # the canonical retained_count.  Set algebra is checked against the
+        # CANONICAL leader sets, not against self-recomputed sets.
+        can_entrants = set(leadership_migration.entrant_ids or ())
+        can_exits = set(leadership_migration.exit_ids or ())
+        prev_set = set(prev_ids or ())
+        curr_set = set(curr_ids or ())
+        retained = set(retained_ids)
+        entrants = set(entrant_ids)
+        exits = set(exit_ids)
+        entrant_ids_ok = entrants == can_entrants
+        exit_ids_ok = exits == can_exits
+        retained_count_ok = len(retained) == leadership_migration.retained_count
+        entrant_count_ok = len(entrants) == leadership_migration.entrant_count
+        exit_count_ok = len(exits) == leadership_migration.exit_count
+        union_current_ok = (retained | entrants) == curr_set
+        union_prev_ok = (retained | exits) == prev_set
         pairwise_disjoint = (
-            rretained.isdisjoint(rentrants)
-            and rretained.isdisjoint(rexits)
-            and rentrants.isdisjoint(rexits)
+            retained.isdisjoint(entrants)
+            and retained.isdisjoint(exits)
+            and entrants.isdisjoint(exits)
         )
-        retained_ok = (rretained | rentrants) == rcurr
-        rexits_ok = (rretained | rexits) == rprev
+        passed = (
+            entrant_ids_ok and exit_ids_ok and retained_count_ok
+            and entrant_count_ok and exit_count_ok
+            and union_current_ok and union_prev_ok and pairwise_disjoint
+        )
         checks["leadership"] = {
             "kind": "set",
+            "entrant_ids_match_canonical": entrant_ids_ok,
+            "exit_ids_match_canonical": exit_ids_ok,
+            "retained_count_matches_canonical": retained_count_ok,
+            "entrant_count_matches_canonical": entrant_count_ok,
+            "exit_count_matches_canonical": exit_count_ok,
+            "retained_union_entrant_eq_current": union_current_ok,
+            "retained_union_exit_eq_previous": union_prev_ok,
             "pairwise_disjoint": pairwise_disjoint,
-            "retained_union_entrant_eq_current": retained_ok,
-            "retained_union_exit_eq_previous": rexits_ok,
-            "pass": pairwise_disjoint and retained_ok and rexits_ok,
-            "resolved": "matched" if (pairwise_disjoint and retained_ok and rexits_ok) else "mismatch",
+            "pass": passed,
+            "resolved": "matched" if passed else "mismatch",
         }
 
     violation_count = sum(1 for chk in checks.values() if chk.get("pass") is False)
