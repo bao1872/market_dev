@@ -1,0 +1,40 @@
+{
+  "dataset_dir": "/Users/zhenbao/Desktop/coding/market_dev/backend/.perfdata/review/review-source-c5c686e-v1",
+  "target_dates": [
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-10"
+  ],
+  "history": 120,
+  "activated_families": [
+    "industry_l1",
+    "industry_l2",
+    "industry_l3",
+    "concept"
+  ],
+  "membership": {
+    "mode": "current_static",
+    "research_proxy": "RESEARCH_PROXY_CURRENT_STATIC_MEMBERSHIP"
+  },
+  "sfs_overlay_used": false,
+  "sfs_overlay_note": "canonical review pipeline consumes first_pyramid_daily_state/events/bars from base dataset only; SFS overlay is NOT consumed by these owners.",
+  "output_files": [
+    "canonical_compositions.jsonl",
+    "scope_observation.csv",
+    "internal_structure.csv",
+    "historical_dynamics.csv",
+    "leadership.csv",
+    "member_attribution.jsonl"
+  ],
+  "checksums": {
+    "canonical_compositions.jsonl": "1888df090c8c111304524fefdf3c7c59d5f170358c81f0f18c641733884af429",
+    "scope_observation.csv": "18c20c0be7e3f0a7ec3c06fb6502a3c04f6a807e7d53249fd6ce78f354f9c26f",
+    "internal_structure.csv": "6b9966cfbc6b1ff18a6445a3f2e6c696c10fbf701acf93b49c4c06dfc92aa9ec",
+    "historical_dynamics.csv": "9af941d85f26754d46dd0633a8a3223ff1c0d002fd59214f87ed8231a4729a50",
+    "leadership.csv": "e4f9ee254a14f9c2da684bc95c32589357b650ace86f0a6ae0656df637bb49e6",
+    "member_attribution.jsonl": "b7d2084122ee2663523574a56c0603d5283cb0c8778b7e665ed23aa21857cef8"
+  }
+}

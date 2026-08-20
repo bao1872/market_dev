@@ -1,0 +1,29 @@
+{
+  "code_sha": "workspace checked",
+  "dataset_dir": "/Users/zhenbao/Desktop/coding/market_dev/backend/.perfdata/review/review-source-c5c686e-v1",
+  "target_dates": [
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-10"
+  ],
+  "history": 120,
+  "requested_scope_count": 767,
+  "requested_scope_date_count": 4602,
+  "computed": 4602,
+  "ready": 4602,
+  "insufficient_history": 0,
+  "unavailable_current": 0,
+  "exceptions": 0,
+  "elapsed_sec": 5544.0,
+  "per_date_sec": [
+    523.8,
+    579.2,
+    1027.7,
+    1070.0,
+    1161.7,
+    1144.3
+  ]
+}

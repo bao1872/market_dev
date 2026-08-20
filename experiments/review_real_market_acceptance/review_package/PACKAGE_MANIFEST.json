@@ -1,0 +1,63 @@
+{
+  "package_root": "/Users/zhenbao/Desktop/coding/market_dev/experiments/review_real_market_acceptance/review_package",
+  "sampling_rule": "For each (trade_date, scope_type): order scopes by scope_key (lexicographic); include the first 5, the last 5, and 5 scopes around the median pit_member_count (ties broken by scope_key); deduplicate by (trade_date, scope_type, scope_key). Size-reduction only - never based on performance/return/dynamics/leadership.",
+  "sample_projection": "Field-level size reduction on each selected row: time-series dict-lists (elements carry trade_date) keep count + last (target-date) element; member-level dict-lists (elements carry member_id) keep count + first 3 elements; all scalar/aggregate fields kept verbatim. Existing values only.",
+  "statement": "NO BUSINESS METRIC WAS RECOMPUTED",
+  "files": {
+    "execution_summary.json": {
+      "source": "execution_summary.json",
+      "output_row_count": 29,
+      "sha256": "b718fe169194bb02ca78ba8526b5187968fd8da1dba17462ccd3dce635e55e78"
+    },
+    "run_manifest.json": {
+      "source": "run_manifest.json",
+      "output_row_count": 40,
+      "sha256": "8a6849db856c38d49970071c997d9414525d3af2d793413592e2595ef305be76"
+    },
+    "scope_observation_review.csv": {
+      "source": "scope_observation.csv",
+      "output_row_count": 4602,
+      "sha256": "18c20c0be7e3f0a7ec3c06fb6502a3c04f6a807e7d53249fd6ce78f354f9c26f"
+    },
+    "internal_structure_review.csv": {
+      "source": "internal_structure.csv",
+      "output_row_count": 4602,
+      "sha256": "6b9966cfbc6b1ff18a6445a3f2e6c696c10fbf701acf93b49c4c06dfc92aa9ec"
+    },
+    "historical_dynamics_review.csv": {
+      "source": "historical_dynamics.csv",
+      "output_row_count": 4602,
+      "sha256": "9af941d85f26754d46dd0633a8a3223ff1c0d002fd59214f87ed8231a4729a50"
+    },
+    "leadership_review.csv": {
+      "source": "leadership.csv",
+      "output_row_count": 4602,
+      "sha256": "e4f9ee254a14f9c2da684bc95c32589357b650ace86f0a6ae0656df637bb49e6"
+    },
+    "member_attribution_review.csv": {
+      "source": "member_attribution.jsonl",
+      "output_row_count": 4602,
+      "sha256": "a32ad763d967bc0a28b967ab9855fb71ff3a373a3f4a9ac6dfa5271a91fff04c"
+    },
+    "representative_canonical_samples.jsonl": {
+      "source": "canonical_compositions.jsonl",
+      "output_row_count": 354,
+      "sha256": "fc3dd50e2ac7cacce692431604dad14b8bfc0f39ef2091af1f1f8d5b8d2c4bcd"
+    }
+  },
+  "source_row_counts": {
+    "canonical_compositions.jsonl": 4602,
+    "member_attribution.jsonl": 4602
+  },
+  "sources": [
+    "canonical_compositions.jsonl",
+    "member_attribution.jsonl",
+    "scope_observation.csv",
+    "internal_structure.csv",
+    "historical_dynamics.csv",
+    "leadership.csv",
+    "execution_summary.json",
+    "run_manifest.json"
+  ],
+  "_self_note": "PACKAGE_MANIFEST.json's own SHA256 is measured post-write and reported in the delivery report (a file cannot self-reference its own hash)."
+}
