@@ -185,8 +185,13 @@ def _median(values: Sequence[float | None]) -> float | None:
 
 
 def _sum(values: Sequence[float | None]) -> float | None:
-    """Sum of a finite subsequence (PRD §7.2 Total rule). None when empty."""
-    finite = [v for v in values if v is not None and math.isfinite(v)]
+    """Sum of a finite subsequence (PRD §7.2 Total rule). None when empty.
+
+    [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] Sorts the finite subsequence before
+    summing so the result is independent of supplier (DB fetch / scope-member)
+    order — float non-associativity can never change the total.
+    """
+    finite = sorted(v for v in values if v is not None and math.isfinite(v))
     if not finite:
         return None
     return sum(finite)
@@ -197,7 +202,7 @@ def _stdev(values: Sequence[float]) -> float | None:
 
     Returns ``None`` when fewer than 2 finite values (no dispersion space).
     """
-    finite = [v for v in values if v is not None and math.isfinite(v)]
+    finite = sorted(v for v in values if v is not None and math.isfinite(v))
     n = len(finite)
     if n < 2:
         return None
@@ -250,7 +255,7 @@ def _return_distribution(returns: Sequence[float]) -> dict[str, Any]:
             "p90": None,
             "valid_count": 0,
         }
-    mean = sum(returns) / len(returns)
+    mean = sum(sorted(returns)) / len(returns)
     ordered = sorted(returns)
     return {
         "mean": mean,
@@ -280,7 +285,7 @@ def _price_breadth(returns: Sequence[float], denominator: int) -> dict[str, Any]
 
 
 def _raw_hhi(shares: Sequence[float]) -> float:
-    return sum(share * share for share in shares)
+    return sum(share * share for share in sorted(shares))
 
 
 def _normalized_hhi(
@@ -336,7 +341,7 @@ def _price_concentration(returns: Sequence[float]) -> dict[str, Any]:
     ``member_count = len(returns)`` (all price-valid members), NOT the
     positive-return count.
     """
-    abs_returns = [abs(r) for r in returns]
+    abs_returns = sorted(abs(r) for r in returns)
     member_count = len(returns)
     total = sum(abs_returns)
 
@@ -411,7 +416,11 @@ def compute_member_amount_contributions(
             continue
         valid.append((member.member_id, amount))
 
-    total_amount = sum(amount for _, amount in valid)
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] Determinism fix: sum over a
+    # member_id-sorted sequence so float non-associativity can never depend on
+    # supplier (DB fetch / scope-member) order. Same formula, deterministic total.
+    valid_sorted = sorted(valid, key=lambda x: x[0])
+    total_amount = sum(amount for _, amount in valid_sorted)
 
     if total_amount <= _EPSILON:
         contributions = tuple(
@@ -855,15 +864,20 @@ def compute_scope_observation(
     #   return_1d finite  AND  amount finite >= 0.
     # Weights are renormalized INSIDE the joint universe (never the amount-HHI
     # universe).  Equal-weight return uses the price-valid universe above.
-    aw_pairs: list[tuple[float, float]] = []
+    aw_pairs: list[tuple[str, float, float]] = []
     for m in member_list:
         r = _finite_or_none(m.return_1d)
         a = _finite_or_none(m.amount)
         if r is not None and a is not None and a >= 0.0:
-            aw_pairs.append((r, a))
-    aw_total_amount = sum(a for _, a in aw_pairs)
-    if aw_total_amount > _EPSILON and aw_pairs:
-        aw_return = sum(r * a for r, a in aw_pairs) / aw_total_amount
+            aw_pairs.append((m.member_id, r, a))
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] sort by member_id so the AW-return
+    # weighted sum is independent of supplier order.
+    aw_pairs_sorted = sorted(aw_pairs, key=lambda x: x[0])
+    aw_total_amount = sum(a for _, _, a in aw_pairs_sorted)
+    if aw_total_amount > _EPSILON and aw_pairs_sorted:
+        aw_return = (
+            sum(r * a for _, r, a in aw_pairs_sorted) / aw_total_amount
+        )
     else:
         aw_return = None
 

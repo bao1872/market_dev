@@ -1,0 +1,130 @@
+{
+  "config": {
+    "per_scope_members": 60,
+    "scope_counts": [
+      32,
+      128,
+      512,
+      1024,
+      4096
+    ],
+    "member_total_pool": 4000
+  },
+  "results": [
+    {
+      "n_scopes": 32,
+      "per_scope_members": 60,
+      "union_member_pool": 4000,
+      "total_member_facts": 1920,
+      "order": "original",
+      "wall_s": 0.7263,
+      "cpu_s": 0.7066,
+      "peak_rss_mb": 5.31,
+      "throughput_scopes_per_s": 44.06,
+      "stages": {
+        "scope_observation": 0.0528,
+        "internal_structure": 0.0005,
+        "leadership": 0.0344,
+        "member_attribution": 0.4509,
+        "composition": 0.0023
+      },
+      "checksums": [
+        2306811213740776732,
+        7538431210290561888,
+        1047812934565288780
+      ]
+    },
+    {
+      "n_scopes": 128,
+      "per_scope_members": 60,
+      "union_member_pool": 4000,
+      "total_member_facts": 7680,
+      "order": "original",
+      "wall_s": 2.8173,
+      "cpu_s": 2.7995,
+      "peak_rss_mb": 18.93,
+      "throughput_scopes_per_s": 45.43,
+      "stages": {
+        "scope_observation": 0.2001,
+        "internal_structure": 0.0017,
+        "leadership": 0.1325,
+        "member_attribution": 1.7365,
+        "composition": 0.0072
+      },
+      "checksums": [
+        2306811213740776732,
+        7538431210290561888,
+        1047812934565288780
+      ]
+    },
+    {
+      "n_scopes": 512,
+      "per_scope_members": 60,
+      "union_member_pool": 4000,
+      "total_member_facts": 30720,
+      "order": "original",
+      "wall_s": 12.6547,
+      "cpu_s": 11.7854,
+      "peak_rss_mb": 73.47,
+      "throughput_scopes_per_s": 40.46,
+      "stages": {
+        "scope_observation": 0.8929,
+        "internal_structure": 0.0084,
+        "leadership": 0.609,
+        "member_attribution": 7.8286,
+        "composition": 0.0344
+      },
+      "checksums": [
+        2306811213740776732,
+        7538431210290561888,
+        1047812934565288780
+      ]
+    },
+    {
+      "n_scopes": 1024,
+      "per_scope_members": 60,
+      "union_member_pool": 4000,
+      "total_member_facts": 61440,
+      "order": "original",
+      "wall_s": 24.3151,
+      "cpu_s": 23.9448,
+      "peak_rss_mb": 146.27,
+      "throughput_scopes_per_s": 42.11,
+      "stages": {
+        "scope_observation": 1.7099,
+        "internal_structure": 0.0142,
+        "leadership": 1.1506,
+        "member_attribution": 14.6935,
+        "composition": 0.066
+      },
+      "checksums": [
+        2306811213740776732,
+        7538431210290561888,
+        1047812934565288780
+      ]
+    },
+    {
+      "n_scopes": 4096,
+      "per_scope_members": 60,
+      "union_member_pool": 4000,
+      "total_member_facts": 245760,
+      "order": "original",
+      "wall_s": 111.5557,
+      "cpu_s": 105.376,
+      "peak_rss_mb": 583.02,
+      "throughput_scopes_per_s": 36.72,
+      "stages": {
+        "scope_observation": 7.5197,
+        "internal_structure": 0.0768,
+        "leadership": 5.2468,
+        "member_attribution": 66.1126,
+        "composition": 0.3027
+      },
+      "checksums": [
+        2306811213740776732,
+        7538431210290561888,
+        1047812934565288780
+      ]
+    }
+  ]
+}

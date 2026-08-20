@@ -881,9 +881,9 @@ async def load_day_fact_maps(
     # （历史 state < T 即接受），故不传 required_trade_date（见 FIX 4）。
     # 该 readiness 校验仅用于**形式 Review（stock_core 来源）**；history_state 回放
     # 路径读的是 canonical source 自身（CURRENT T 状态即权威），由调用方负责可信源，不在此连 DB 校验。
-    # 延迟导入避免与 review_bootstrap_service 形成循环依赖。
+    # 延迟导入避免循环依赖。
     if required_source_history_run_id is not None and current_source == "stock_core":
-        from app.services.review_bootstrap_service import (
+        from app.services.review_history_readiness_service import (
             validate_canonical_history_run_readiness,
         )
         readiness = await validate_canonical_history_run_readiness(
@@ -990,6 +990,148 @@ async def load_day_fact_maps(
         del chunk_bars_by_instrument
 
     return facts_by_instrument
+
+
+async def validate_review_lineage_guard(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    source_core_run_id: uuid.UUID | None = None,
+    required_source_history_run_id: uuid.UUID | None = None,
+    required_history_contract_version: str | None = None,
+    current_source: str = "stock_core",
+    instrument_ids: list[uuid.UUID] | None = None,
+) -> None:
+    """[REVIEW-BACKEND-FINAL-CLOSURE Phase 6] 轻量 lineage fail-closed 守卫。
+
+    从 ``load_day_fact_maps`` 抽离：只执行 REVIEW-FACT-PARITY-02 §11 lineage 校验，
+    **不做** 任何 member fact 物化（current flat 查询 / 400 日 bar 窗口 /
+    ``ReviewMemberFact.build``）。物化结果在 canonical runtime 中由
+    ``prepare_current_scope_observations_batch`` 单独负责，``compute_run`` /
+    ``resume_run`` 原有的 ``day_fact_map`` 返回值从未被 composition 消费，属死代码。
+
+    fail-closed 语义与原 ``load_day_fact_maps`` 内联校验**完全一致**：
+
+    - history_state 模式：CURRENT(T) 与 PREVIOUS(<T) 的 ``source_history_run_id``
+      必须相等，且 contract version 必须匹配 ``required_history_contract_version``。
+    - stock_core 模式：每个 PREVIOUS(<T) 状态的 ``source_history_run_id`` 必须 ==
+      ``required_source_history_run_id`` 且 contract version 匹配；并调用
+      ``validate_canonical_history_run_readiness`` 二次确认 canonical history source 就绪。
+
+    校验失败一律 ``raise ValueError``（fail closed，禁止退回旧源）。
+    """
+    _required_version = (
+        required_history_contract_version or _REVIEW_HISTORY_CONTRACT_VERSION
+    )
+
+    # [P1-D1 FIX] HISTORY FP state 查询必须 bounded（同 load_day_fact_maps 内联校验）。
+    if current_source == "history_state":
+        current_hist_stmt = (
+            select(FirstPyramidHistoryDailyState)
+            .where(
+                FirstPyramidHistoryDailyState.trade_date == trade_date,
+                FirstPyramidHistoryDailyState.algorithm_version
+                == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            )
+        )
+        if instrument_ids is not None:
+            current_hist_stmt = current_hist_stmt.where(
+                FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            )
+        current_hist_states = list(
+            (await session.execute(current_hist_stmt)).scalars()
+        )
+        latest_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {
+            s.instrument_id: s for s in current_hist_states
+        }
+    else:
+        latest_by_instrument = {}
+
+    previous_hist_stmt = (
+        select(FirstPyramidHistoryDailyState)
+        .where(
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        )
+        .order_by(
+            FirstPyramidHistoryDailyState.instrument_id.asc(),
+            FirstPyramidHistoryDailyState.trade_date.desc(),
+        )
+        .distinct(FirstPyramidHistoryDailyState.instrument_id)
+    )
+    if instrument_ids is not None:
+        previous_hist_stmt = previous_hist_stmt.where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+        )
+    previous_hist_rows = list((await session.execute(previous_hist_stmt)).scalars())
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {}
+    for _s in previous_hist_rows:
+        if _s.instrument_id not in previous_by_instrument:
+            previous_by_instrument[_s.instrument_id] = _s
+
+    if current_source == "history_state":
+        for _iid, _cur in latest_by_instrument.items():
+            _cur_run = getattr(_cur, "source_history_run_id", None)
+            if (
+                required_source_history_run_id is not None
+                and _cur_run != required_source_history_run_id
+            ):
+                raise ValueError(
+                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={_iid} "
+                    f"required={required_source_history_run_id!r} got={_cur_run!r}"
+                )
+            _prev = previous_by_instrument.get(_iid)
+            if _prev is not None:
+                _prev_run = getattr(_prev, "source_history_run_id", None)
+                if _prev_run != _cur_run:
+                    raise ValueError(
+                        f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={_iid} "
+                        f"current={_cur_run!r} previous={_prev_run!r} "
+                        f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
+                    )
+                if getattr(_prev, "history_contract_version", None) != _required_version:
+                    raise ValueError(
+                        f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={_iid} "
+                        f"current={_required_version!r} previous="
+                        f"{getattr(_prev, 'history_contract_version', None)!r}"
+                    )
+    else:
+        # [REVIEW-FACT-PARITY-02 §11] stock_core 模式：previous 必须匹配绑定 canonical source。
+        if required_source_history_run_id is not None:
+            for _iid, _prev in previous_by_instrument.items():
+                _prev_run = getattr(_prev, "source_history_run_id", None)
+                if _prev_run != required_source_history_run_id:
+                    raise ValueError(
+                        f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
+                        f"{required_source_history_run_id!r} got={_prev_run!r} "
+                        f"for instrument={_iid} trade_date={trade_date}"
+                    )
+                _ver = getattr(_prev, "history_contract_version", None) or (
+                    _prev.state_payload or {}
+                ).get("history_contract_version")
+                if _ver != _required_version:
+                    raise ValueError(
+                        f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
+                        f"expected={_required_version} got={_ver!r} "
+                        f"for trade_date={trade_date}"
+                    )
+        # stock_core 模式二次确认 canonical history source 就绪（fail closed）。
+        if required_source_history_run_id is not None and current_source == "stock_core":
+            from app.services.review_history_readiness_service import (
+                validate_canonical_history_run_readiness,
+            )
+            readiness = await validate_canonical_history_run_readiness(
+                session,
+                required_source_history_run_id,
+                _required_version,
+            )
+            if readiness.get("status") != "ok":
+                raise ValueError(
+                    f"CANONICAL_HISTORY_SOURCE_NOT_READY: source="
+                    f"{required_source_history_run_id} contract={_required_version} "
+                    f"未就绪（{readiness.get('reason')}）；fail closed，禁止退回旧源。"
+                )
 
 
 if __name__ == "__main__":

@@ -3,34 +3,28 @@
 端点：
 - GET  /v1/review/dates: 已发布复盘交易日列表
 - GET  /v1/review/latest: 最新已发布复盘 run 信息
-- GET  /v1/review/{trade_date}/overview: 复盘总览（覆盖率+信号汇总）
-- GET  /v1/review/{trade_date}/scopes: 市场扫描（P/Q/U/C/V）
-- GET  /v1/review/{trade_date}/signals: 信号列表
-- GET  /v1/review/signals/{signal_id}: 信号详情
-- GET  /v1/review/signals/{signal_id}/attributions: 子范围归因
-- GET  /v1/review/signals/{signal_id}/instruments: 个股归因
-- GET  /v1/review/trackings: 用户追踪列表
-- POST /v1/review/trackings: 创建追踪（幂等）
-- PATCH /v1/review/trackings/{id}: 更新追踪（幂等）
-- DELETE /v1/review/trackings/{id}: 关闭追踪（幂等，不物理删除）
-- GET  /v1/review/trackings/{id}/evaluations: 追踪逐日评估
+- GET  /v1/review/{trade_date}/overview: 复盘总览（覆盖率）
+- GET  /v1/review/{trade_date}/scopes: 市场扫描（Scope Observation 六键 summary）
+- GET  /v1/review/{trade_date}/scopes/{scope_type}/{scope_key}: Scope Composition 详情
 
 权限（PRD §3.2）：
 - 所有读取接口：require_capability("research_replay")（admin 自动豁免）
-- 追踪写接口：require_capability("research_replay")
 - 普通用户只能看到已发布 run（published pointer）；
   admin 可通过 include_partial=true 查看 partial 结果。
 
 设计要点：
 - 用户侧路由不触发计算，只读 DB
-- 写操作（追踪）要求 idempotency_key（PRD §12.6）
 - 失败返回 4xx/5xx，不静默返回空数据
+
+遗留（REVIEW-BACKEND-FINAL-CLOSURE Phase 5 已退休）：
+- legacy Signal / Discovery / Tracking 可达 API 路径已物理删除，返回 404。
+- 底层 review_signal_service / review_discovery_service / review_tracking_service
+  均已物理删除。历史 ORM 表（MarketReviewSignal 等）保留不 DROP。
 """
 
 from __future__ import annotations
 
 import logging
-import uuid
 from datetime import date
 from typing import Any
 
@@ -41,67 +35,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
 from app.models.market_review import (
     MarketReviewRun,
-    MarketReviewSignal,
-    MarketReviewSignalAttribution,
-    MarketReviewSignalInstrument,
-    MarketReviewTracking,
-    MarketReviewTrackingEvaluation,
     ReviewScopeObservationFact,
 )
 from app.schemas.review import (
-    ReviewAttributionListResponse,
-    ReviewAttributionResponse,
     ReviewCanonicalScopeResponse,
     ReviewChipCoverageDTO,
     ReviewDatesResponse,
-    ReviewDiscoveryDetailResponse,
-    ReviewDiscoveryListResponse,
-    ReviewInstrumentListResponse,
-    ReviewInstrumentResponse,
     ReviewLatestResponse,
     ReviewOverviewCoverageDTO,
     ReviewOverviewResponse,
-    ReviewOverviewSignalSummaryDTO,
+    ReviewScopeCompositionDetailResponse,
     ReviewScopeListResponse,
-    ReviewSignalListResponse,
-    ReviewSignalResponse,
-    ReviewTrackingCreateRequest,
-    ReviewTrackingEvaluationListResponse,
-    ReviewTrackingEvaluationResponse,
-    ReviewTrackingListResponse,
-    ReviewTrackingPatchRequest,
-    ReviewTrackingResponse,
 )
-from app.services import review_discovery_service
 from app.services.access_control_service import (
     AccessContext,
     require_admin,
     require_capability,
 )
-from app.services.review_attribution_service import (
-    list_attributions,
-    list_instruments,
-)
 from app.services.review_observation_persistence_service import (
+    get_scope_composition_snapshot,
+    get_scope_observation_fact_by_run,
     list_scope_observation_facts,
+    list_scope_observation_facts_by_run,
 )
 from app.services.review_publication_service import (
     get_published_review_run_id,
     list_published_review_dates,
-)
-from app.services.review_signal_service import (
-    count_signals_by_status,
-    get_signal,
-    list_signals,
-)
-from app.services.review_tracking_service import (
-    TrackingError,
-    close_tracking,
-    create_tracking,
-    get_tracking_for_user,
-    list_evaluations,
-    list_trackings,
-    update_tracking,
 )
 
 logger = logging.getLogger("api.review")
@@ -181,20 +140,6 @@ async def _get_published_run_or_404(
         return None
 
 
-async def _load_signal_or_404(
-    session: AsyncSession,
-    signal_id: uuid.UUID,
-) -> MarketReviewSignal:
-    """加载信号，不存在抛 404。"""
-    signal = await get_signal(session, signal_id)
-    if signal is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"信号不存在: signal_id={signal_id}",
-        )
-    return signal
-
-
 def _canonical_scope_fact_to_dto(
     fact: ReviewScopeObservationFact,
     *,
@@ -223,137 +168,6 @@ def _canonical_scope_fact_to_dto(
         coverageRatio=float(provided / eligible) if eligible > 0 else None,
         observation=fact.observation_payload,
         signalCount=signal_count,
-    )
-
-
-def _signal_to_dto(sig: MarketReviewSignal) -> ReviewSignalResponse:
-    """signal ORM → DTO（含 durationDays 注入）。"""
-    duration_days = 0
-    if sig.first_seen_date and sig.trade_date:
-        duration_days = (sig.trade_date - sig.first_seen_date).days
-    return ReviewSignalResponse(
-        id=str(sig.id),
-        reviewRunId=str(sig.review_run_id),
-        tradeDate=sig.trade_date.isoformat(),
-        filterFamily=sig.filter_family,
-        signalType=sig.signal_type,
-        scopeType=sig.scope_type,
-        scopeKey=sig.scope_key,
-        scopeName=sig.scope_name,
-        status=sig.status,
-        firstSeenDate=sig.first_seen_date.isoformat(),
-        previousSignalId=str(sig.previous_signal_id) if sig.previous_signal_id else None,
-        transformedToSignalId=(
-            str(sig.transformed_to_signal_id)
-            if sig.transformed_to_signal_id else None
-        ),
-        triggerPayload=sig.trigger_payload or {},
-        baselinePayload=sig.baseline_payload or {},
-        evidencePayload=sig.evidence_payload or {},
-        confirmationRule=sig.confirmation_rule or {},
-        invalidationRule=sig.invalidation_rule or {},
-        coverageRatio=float(sig.coverage_ratio) if sig.coverage_ratio else None,
-        rankKey=sig.rank_key or {},
-        durationDays=duration_days,
-        createdAt=sig.created_at.isoformat() if sig.created_at else None,
-    )
-
-
-def _attribution_to_dto(attr: MarketReviewSignalAttribution) -> ReviewAttributionResponse:
-    """attribution ORM → DTO。"""
-    return ReviewAttributionResponse(
-        id=str(attr.id),
-        signalId=str(attr.signal_id),
-        childScopeType=attr.child_scope_type,
-        childScopeKey=attr.child_scope_key,
-        childScopeName=attr.child_scope_name,
-        relationType=attr.relation_type,
-        contributionValue=(
-            float(attr.contribution_value) if attr.contribution_value is not None else None
-        ),
-        contributionRank=attr.contribution_rank,
-        metricsPayload=attr.metrics_payload or {},
-        evidencePayload=attr.evidence_payload or {},
-        coverageRatio=(
-            float(attr.coverage_ratio) if attr.coverage_ratio is not None else None
-        ),
-        sourceBoardSnapshotId=(
-            str(attr.source_board_snapshot_id)
-            if attr.source_board_snapshot_id else None
-        ),
-        taxonomyVersion=attr.taxonomy_version,
-        taxonomyCompatibilityKey=attr.taxonomy_compatibility_key,
-        membershipVersion=attr.membership_version,
-        eligibleCount=attr.eligible_count,
-        readyCount=attr.ready_count,
-        dataQuality=attr.data_quality_json or {},
-        createdAt=attr.created_at.isoformat() if attr.created_at else None,
-    )
-
-
-def _instrument_to_dto(inst: MarketReviewSignalInstrument) -> ReviewInstrumentResponse:
-    """instrument ORM → DTO。"""
-    return ReviewInstrumentResponse(
-        id=str(inst.id),
-        signalId=str(inst.signal_id),
-        instrumentId=str(inst.instrument_id),
-        symbol=inst.symbol,
-        name=inst.name,
-        boardRole=inst.board_role,
-        relationToScope=inst.relation_to_scope,
-        contributionValue=(
-            float(inst.contribution_value)
-            if inst.contribution_value is not None else None
-        ),
-        contributionRank=inst.contribution_rank,
-        firstPyramidPayload=inst.first_pyramid_payload or {},
-        freshEventsPayload=inst.fresh_events_payload or {},
-        contributionPayload=inst.contribution_payload or {},
-        roleEvidence=inst.role_evidence or {},
-        sourceSnapshotId=(
-            str(inst.source_snapshot_id) if inst.source_snapshot_id else None
-        ),
-        createdAt=inst.created_at.isoformat() if inst.created_at else None,
-    )
-
-
-def _tracking_to_dto(tracking: MarketReviewTracking) -> ReviewTrackingResponse:
-    """tracking ORM → DTO。"""
-    return ReviewTrackingResponse(
-        id=str(tracking.id),
-        userId=str(tracking.user_id),
-        sourceSignalId=(
-            str(tracking.source_signal_id) if tracking.source_signal_id else None
-        ),
-        trackingType=tracking.tracking_type,
-        scopeType=tracking.scope_type,
-        scopeKey=tracking.scope_key,
-        instrumentId=(
-            str(tracking.instrument_id) if tracking.instrument_id else None
-        ),
-        discoveryId=tracking.discovery_id,
-        status=tracking.status,
-        confirmationConditions=tracking.confirmation_conditions or {},
-        invalidationConditions=tracking.invalidation_conditions or {},
-        note=tracking.note,
-        createdAt=tracking.created_at.isoformat() if tracking.created_at else "",
-        closedAt=tracking.closed_at.isoformat() if tracking.closed_at else None,
-    )
-
-
-def _evaluation_to_dto(
-    evaluation: MarketReviewTrackingEvaluation,
-) -> ReviewTrackingEvaluationResponse:
-    """evaluation ORM → DTO。"""
-    return ReviewTrackingEvaluationResponse(
-        id=str(evaluation.id),
-        trackingId=str(evaluation.tracking_id),
-        reviewRunId=str(evaluation.review_run_id),
-        tradeDate=evaluation.trade_date.isoformat(),
-        previousState=evaluation.previous_state,
-        currentState=evaluation.current_state,
-        evaluationPayload=evaluation.evaluation_payload or {},
-        createdAt=evaluation.created_at.isoformat() if evaluation.created_at else "",
     )
 
 
@@ -494,16 +308,8 @@ async def get_review_overview(
         industryL1=_family_ratio("industry_l1"),
     )
 
-    # 信号汇总
-    status_counts = await count_signals_by_status(db, run.id)
-    signal_summary = ReviewOverviewSignalSummaryDTO(
-        new=status_counts.get("new", 0),
-        continuing=status_counts.get("continuing", 0),
-        confirmed=status_counts.get("confirmed", 0),
-        weakened=status_counts.get("weakened", 0),
-        invalidated=status_counts.get("invalidated", 0),
-        transformed=status_counts.get("transformed", 0),
-    )
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] signal summary 已退休：
+    # legacy Signal pipeline 不再计算，overview 不再含 signalSummary 字段。
 
     return ReviewOverviewResponse(
         reviewRunId=str(run.id),
@@ -522,7 +328,6 @@ async def get_review_overview(
         filterVersion=run.filter_version,
         baselineWindow=run.baseline_window,
         coverage=coverage,
-        signalSummary=signal_summary,
         coverageRatio=float(run.coverage_ratio) if run.coverage_ratio else None,
         expectedScopeCount=run.expected_scope_count,
         succeededScopeCount=run.succeeded_scope_count,
@@ -569,11 +374,12 @@ async def list_review_scopes(
     readiness = metadata.get("canonical_composition_readiness") or {}
     canonical_coverage = metadata.get("canonical_coverage") or {}
 
-    facts = await list_scope_observation_facts(
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 按 review_run_id 查询（grain 含
+    # review_run_id），避免同日双 run 的 Observation lineage 污染（Phase 7 Gate A）。
+    facts = await list_scope_observation_facts_by_run(
         db,
+        review_run_id=run.id,
         scope_type=scope_type,
-        from_date=run.trade_date,
-        to_date=run.trade_date,
     )
 
     total = len(facts)
@@ -597,28 +403,28 @@ async def list_review_scopes(
     )
 
 
-# =============================================================================
-# 12.3 信号
-# =============================================================================
-
-
-@router.get("/{trade_date}/signals", response_model=ReviewSignalListResponse)
-async def list_review_signals(
+@router.get(
+    "/{trade_date}/scopes/{scope_type}/{scope_key}",
+    response_model=ReviewScopeCompositionDetailResponse,
+)
+async def get_review_scope_composition(
     trade_date: str,
-    filter_family: str | None = Query(None, description="筛选器族 A/B/C/D"),
-    signal_type: str | None = Query(None, description="信号类型"),
-    signal_status: str | None = Query(
-        None, alias="status", description="生命周期状态",
-    ),
-    scope_type: str | None = Query(None, description="范围类型"),
-    scope_key: str | None = Query(None, description="范围标识"),
+    scope_type: str,
+    scope_key: str,
     include_partial: bool = Query(False, description="admin 调试用"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewSignalListResponse:
-    """信号列表 - 指定交易日的命中信号（可过滤）。"""
+) -> ReviewScopeCompositionDetailResponse:
+    """市场扫描 - 单个范围完整 Canonical Composition。
+
+    [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 返回单个 scope 的完整 Composition
+    （Dynamics / Internal Structure / Leadership / Member Attribution / Objective
+    Observation），数据来自 ReviewScopeCompositionSnapshot 薄表（grain =
+    review_run_id + scope_type + scope_key）。按 published ReviewRun 的
+    review_run_id 查询，避免同日双 run lineage 污染。
+
+    端点路径与 scope list 路由分离，``{scope_type}`` 动态段不会捕获其它子路径。
+    """
     if include_partial and not ctx.is_admin:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -628,545 +434,53 @@ async def list_review_signals(
     td = _parse_date_or_422(trade_date)
     run = await _get_published_run(db, td, include_partial=include_partial)
 
-    # 校验 filter_family
-    if filter_family is not None and filter_family not in ("A", "B", "C", "D"):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid filter_family: {filter_family}; must be A/B/C/D",
-        )
-
-    signals, total = await list_signals(
+    snapshot = await get_scope_composition_snapshot(
         db,
-        run.id,
-        filter_family=filter_family,
-        signal_type=signal_type,
-        status=signal_status,
+        review_run_id=run.id,
         scope_type=scope_type,
         scope_key=scope_key,
-        page=page,
-        page_size=page_size,
     )
-    items = [_signal_to_dto(s) for s in signals]
-    return ReviewSignalListResponse(
-        items=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=(page * page_size) < total,
-    )
-
-
-@router.get("/signals/{signal_id}", response_model=ReviewSignalResponse)
-async def get_review_signal(
-    signal_id: uuid.UUID,
-    include_partial: bool = Query(False, description="admin 调试用"),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewSignalResponse:
-    """信号详情。"""
-    if include_partial and not ctx.is_admin:
+    if snapshot is None:
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="include_partial 仅管理员可用",
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到 Composition: scope_type={scope_type} scope_key={scope_key}",
         )
 
-    signal = await _load_signal_or_404(db, signal_id)
-
-    # 非 include_partial 模式下，校验信号所在 run 已发布
-    if not include_partial:
-        run_id = await get_published_review_run_id(db, signal.trade_date)
-        if run_id is None or run_id != signal.review_run_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"信号 {signal_id} 所在 run 未发布",
-            )
-
-    return _signal_to_dto(signal)
-
-
-# =============================================================================
-# 12.4 归因与个股
-# =============================================================================
-
-
-@router.get(
-    "/signals/{signal_id}/attributions",
-    response_model=ReviewAttributionListResponse,
-)
-async def list_signal_attributions(
-    signal_id: uuid.UUID,
-    include_partial: bool = Query(False, description="admin 调试用"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewAttributionListResponse:
-    """子范围归因列表（按 contribution_rank 升序）。"""
-    if include_partial and not ctx.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="include_partial 仅管理员可用",
-        )
-
-    signal = await _load_signal_or_404(db, signal_id)
-    if not include_partial:
-        run_id = await get_published_review_run_id(db, signal.trade_date)
-        if run_id is None or run_id != signal.review_run_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"信号 {signal_id} 所在 run 未发布",
-            )
-
-    attrs, total = await list_attributions(
-        db, signal_id, page=page, page_size=page_size,
-    )
-    items = [_attribution_to_dto(a) for a in attrs]
-    return ReviewAttributionListResponse(
-        items=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=(page * page_size) < total,
-    )
-
-
-@router.get(
-    "/signals/{signal_id}/instruments",
-    response_model=ReviewInstrumentListResponse,
-)
-async def list_signal_instruments(
-    signal_id: uuid.UUID,
-    board_role: str | None = Query(None, description="板块角色过滤"),
-    relation_to_scope: str | None = Query(None, description="与板块关系过滤"),
-    include_partial: bool = Query(False, description="admin 调试用"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewInstrumentListResponse:
-    """个股归因列表（按 contribution_rank 升序）。"""
-    if include_partial and not ctx.is_admin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="include_partial 仅管理员可用",
-        )
-
-    signal = await _load_signal_or_404(db, signal_id)
-    if not include_partial:
-        run_id = await get_published_review_run_id(db, signal.trade_date)
-        if run_id is None or run_id != signal.review_run_id:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"信号 {signal_id} 所在 run 未发布",
-            )
-
-    instruments, total = await list_instruments(
+    # observation 与 fact 共享（fact 存客观事实，composition 存完整六键）
+    fact = await get_scope_observation_fact_by_run(
         db,
-        signal_id,
-        board_role=board_role,
-        relation_to_scope=relation_to_scope,
-        page=page,
-        page_size=page_size,
+        review_run_id=run.id,
+        scope_type=scope_type,
+        scope_key=scope_key,
     )
-    items = [_instrument_to_dto(i) for i in instruments]
-    return ReviewInstrumentListResponse(
-        items=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=(page * page_size) < total,
+
+    return ReviewScopeCompositionDetailResponse(
+        reviewRunId=str(run.id),
+        tradeDate=run.trade_date.isoformat(),
+        scopeType=snapshot.scope_type,
+        scopeKey=snapshot.scope_key,
+        scopeName=(fact.scope_name if fact is not None else None),
+        algorithmVersion=snapshot.algorithm_version,
+        composition=snapshot.composition_payload,
+        observation=(fact.observation_payload if fact is not None else None),
     )
 
 
 # =============================================================================
-# 12.5 追踪
+# 12.3 信号 / 12.4 归因与个股 / 12.5 追踪 - 已退休
+# (REVIEW-BACKEND-FINAL-CLOSURE Phase 5)
+# Legacy Signal / Discovery / Tracking 可达 API 路径已物理删除，返回 404
+# （非 410 deprecated）。底层 review_signal_service / review_discovery_service /
+# review_tracking_service 均已物理删除。历史 ORM 表（MarketReviewSignal 等）保留不 DROP。
 # =============================================================================
 
 
-@router.get("/trackings", response_model=ReviewTrackingListResponse)
-async def list_my_trackings(
-    tracking_type: str | None = Query(None, description="追踪类型过滤"),
-    tracking_status: str | None = Query(
-        None, alias="status", description="状态过滤",
-    ),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewTrackingListResponse:
-    """当前用户的追踪列表。"""
-    user_id = uuid.UUID(ctx.user_id)
-    trackings, total = await list_trackings(
-        db,
-        user_id,
-        status=tracking_status,
-        tracking_type=tracking_type,
-        page=page,
-        page_size=page_size,
-    )
-    items = [_tracking_to_dto(t) for t in trackings]
-    return ReviewTrackingListResponse(
-        items=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=(page * page_size) < total,
-    )
 
-
-@router.post(
-    "/trackings",
-    response_model=ReviewTrackingResponse,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_my_tracking(
-    payload: ReviewTrackingCreateRequest,
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewTrackingResponse:
-    """创建追踪（幂等：相同 idempotency_key 不重复创建）。"""
-    user_id = uuid.UUID(ctx.user_id)
-
-    # 解析可选字段
-    source_signal_id = (
-        uuid.UUID(payload.source_signal_id) if payload.source_signal_id else None
-    )
-    instrument_id = (
-        uuid.UUID(payload.instrument_id) if payload.instrument_id else None
-    )
-
-    try:
-        tracking = await create_tracking(
-            db,
-            user_id=user_id,
-            tracking_type=payload.tracking_type,
-            source_signal_id=source_signal_id,
-            scope_type=payload.scope_type,
-            scope_key=payload.scope_key,
-            instrument_id=instrument_id,
-            discovery_id=payload.discovery_id,
-            confirmation_conditions=payload.confirmation_conditions or None,
-            invalidation_conditions=payload.invalidation_conditions or None,
-            note=payload.note,
-            idempotency_key=payload.idempotency_key,
-        )
-        await db.commit()
-        await db.refresh(tracking)
-    except TrackingError as exc:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Review] 创建追踪失败: user=%s", ctx.user_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"创建追踪失败: {exc}",
-        ) from exc
-
-    return _tracking_to_dto(tracking)
-
-
-@router.patch(
-    "/trackings/{tracking_id}",
-    response_model=ReviewTrackingResponse,
-)
-async def update_my_tracking(
-    tracking_id: uuid.UUID,
-    payload: ReviewTrackingPatchRequest,
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewTrackingResponse:
-    """更新追踪字段（幂等键必须提供）。"""
-    user_id = uuid.UUID(ctx.user_id)
-    tracking = await get_tracking_for_user(db, tracking_id, user_id)
-    if tracking is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"追踪不存在或无权访问: tracking_id={tracking_id}",
-        )
-
-    try:
-        tracking = await update_tracking(
-            db,
-            tracking,
-            status=payload.status,
-            confirmation_conditions=payload.confirmation_conditions,
-            invalidation_conditions=payload.invalidation_conditions,
-            note=payload.note,
-        )
-        await db.commit()
-        await db.refresh(tracking)
-    except TrackingError as exc:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Review] 更新追踪失败: id=%s", tracking_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"更新追踪失败: {exc}",
-        ) from exc
-
-    return _tracking_to_dto(tracking)
-
-
-@router.delete(
-    "/trackings/{tracking_id}",
-    response_model=ReviewTrackingResponse,
-)
-async def close_my_tracking(
-    tracking_id: uuid.UUID,
-    idempotency_key: str = Query(..., description="幂等键"),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewTrackingResponse:
-    """关闭追踪（status=closed，不物理删除）。"""
-    _ = idempotency_key  # 幂等键记录在请求日志，由调用方保证
-    user_id = uuid.UUID(ctx.user_id)
-    tracking = await get_tracking_for_user(db, tracking_id, user_id)
-    if tracking is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"追踪不存在或无权访问: tracking_id={tracking_id}",
-        )
-
-    try:
-        tracking = await close_tracking(db, tracking)
-        await db.commit()
-        await db.refresh(tracking)
-    except TrackingError as exc:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Review] 关闭追踪失败: id=%s", tracking_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"关闭追踪失败: {exc}",
-        ) from exc
-
-    return _tracking_to_dto(tracking)
-
-
-@router.get(
-    "/trackings/{tracking_id}/evaluations",
-    response_model=ReviewTrackingEvaluationListResponse,
-)
-async def list_tracking_evaluations(
-    tracking_id: uuid.UUID,
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewTrackingEvaluationListResponse:
-    """追踪的逐日评估记录（按 trade_date 降序）。"""
-    user_id = uuid.UUID(ctx.user_id)
-    # 权限校验：追踪必须属于当前用户
-    tracking = await get_tracking_for_user(db, tracking_id, user_id)
-    if tracking is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"追踪不存在或无权访问: tracking_id={tracking_id}",
-        )
-
-    evaluations, total = await list_evaluations(
-        db, tracking_id, page=page, page_size=page_size,
-    )
-    items = [_evaluation_to_dto(e) for e in evaluations]
-    return ReviewTrackingEvaluationListResponse(
-        items=items,
-        total=total,
-        page=page,
-        page_size=page_size,
-        has_more=(page * page_size) < total,
-    )
 
 
 # =============================================================================
 # 管理员辅助接口（include_partial 用，路径在 admin_review.py 中定义主流程）
 # =============================================================================
-
-
-# =============================================================================
-# [V2] Discovery endpoints
-# =============================================================================
-
-
-@router.get(
-    "/{trade_date}/discoveries",
-    response_model=ReviewDiscoveryListResponse,
-)
-async def list_discoveries(
-    trade_date: date,
-    scope_type: str | None = Query(None, description="范围类型过滤"),
-    scope_family: str | None = Query(None, description="范围族过滤"),
-    lifecycle_status: str | None = Query(None, alias="status", description="生命周期状态过滤"),
-    sort: str | None = Query(None, description="排序方式（仅支持 rank）"),
-    include_partial: bool = Query(False, description="admin 调试用"),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewDiscoveryListResponse:
-    """[V2] Discovery 列表（primary user-level finding endpoint）。
-
-    全量 rank → paginate。
-    """
-    if include_partial and not ctx.is_admin:
-        raise HTTPException(status_code=403, detail="include_partial 仅管理员可用")
-
-    run = await _get_published_run_or_404(db, trade_date)
-    if run is None:
-        return ReviewDiscoveryListResponse(
-            trade_date=trade_date.isoformat(),
-            total=0, page=page, page_size=page_size, has_more=False, items=[],
-        )
-
-    # Unified read model assembly
-    ranked, relations, _ = await review_discovery_service.build_ranked_read_model(db, run)
-
-    if scope_type:
-        ranked = [d for d in ranked if d.scope_type == scope_type]
-    if scope_family:
-        ranked = [d for d in ranked if d.scope_type.startswith(scope_family)]
-    if lifecycle_status:
-        ranked = [d for d in ranked if d.status == lifecycle_status]
-    if sort and sort != "rank":
-        raise HTTPException(status_code=400, detail=f"不支持的 sort 值: {sort}（仅支持 rank）")
-
-    total = len(ranked)
-    start = (page - 1) * page_size
-    end = start + page_size
-    items = [d.to_dict() for d in ranked[start:end]]
-
-    return ReviewDiscoveryListResponse(
-        trade_date=trade_date.isoformat(),
-        total=total, page=page, page_size=page_size, has_more=end < total, items=items,
-    )
-
-
-@router.get(
-    "/discoveries/{discovery_id}",
-    response_model=ReviewDiscoveryDetailResponse,
-)
-async def get_discovery_detail(
-    discovery_id: str,
-    trade_date: date | None = Query(None, description="交易日（可选，默认最新）"),
-    include_partial: bool = Query(False, description="admin 调试用"),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-) -> ReviewDiscoveryDetailResponse:
-    """[V2] Discovery 详情。"""
-    if include_partial and not ctx.is_admin:
-        raise HTTPException(status_code=403, detail="include_partial 仅管理员可用")
-
-    # Try to resolve the run for this discovery
-    if trade_date:
-        run = await _get_published_run_or_404(db, trade_date)
-    else:
-        run_stmt = select(MarketReviewRun).where(
-            MarketReviewRun.status == "published",
-        ).order_by(MarketReviewRun.trade_date.desc()).limit(1)
-        run = (await db.execute(run_stmt)).scalar_one_or_none()
-
-    if run is None:
-        raise HTTPException(status_code=404, detail="无已发布的 Review Run")
-
-    # Use unified read model to get consistent rankKey/lifecycle/relations
-    _, _, discovery_by_id = await review_discovery_service.build_ranked_read_model(db, run)
-    discovery = discovery_by_id.get(discovery_id)
-    if discovery is None:
-        raise HTTPException(status_code=404, detail=f"Discovery {discovery_id} 未找到")
-
-    return ReviewDiscoveryDetailResponse(
-        trade_date=discovery.trade_date, discovery=discovery.to_dict(),
-    )
-
-
-@router.get("/discoveries/{discovery_id}/attributions")
-async def list_discovery_attributions(
-    discovery_id: str,
-    trade_date: date | None = Query(None),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-):
-    discovery = await review_discovery_service.get_discovery_by_id(db, discovery_id, trade_date=trade_date)
-    if discovery is None:
-        raise HTTPException(status_code=404, detail="Discovery 未找到")
-
-    items, total = await review_discovery_service.list_discovery_attributions(
-        db, discovery.supporting_signal_ids, page=page, page_size=page_size,
-    )
-    return {
-        "discoveryId": discovery_id,
-        "total": total,
-        "page": page,
-        "pageSize": page_size,
-        "items": [_attribution_to_dict(a) for a in items],
-    }
-
-
-@router.get("/discoveries/{discovery_id}/instruments")
-async def list_discovery_instruments(
-    discovery_id: str,
-    trade_date: date | None = Query(None),
-    page: int = Query(1, ge=1),
-    page_size: int = Query(20, ge=1, le=100),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
-):
-    discovery = await review_discovery_service.get_discovery_by_id(db, discovery_id, trade_date=trade_date)
-    if discovery is None:
-        raise HTTPException(status_code=404, detail="Discovery 未找到")
-
-    items, total = await review_discovery_service.list_discovery_instruments(
-        db, discovery.supporting_signal_ids, page=page, page_size=page_size,
-    )
-    return {
-        "discoveryId": discovery_id,
-        "total": total,
-        "page": page,
-        "pageSize": page_size,
-        "items": [_instrument_to_dict(i) for i in items],
-    }
-
-
-def _attribution_to_dict(a: MarketReviewSignalAttribution) -> dict:
-    return {
-        "id": str(a.id),
-        "signalId": str(a.signal_id),
-        "childScopeType": a.child_scope_type,
-        "childScopeKey": a.child_scope_key,
-        "childScopeName": a.child_scope_name,
-        "relationType": a.relation_type,
-        "contributionValue": float(a.contribution_value) if a.contribution_value else None,
-        "contributionRank": a.contribution_rank,
-    }
-
-
-def _instrument_to_dict(i: MarketReviewSignalInstrument) -> dict:
-    return {
-        "id": str(i.id),
-        "signalId": str(i.signal_id),
-        "instrumentId": str(i.instrument_id),
-        "boardRole": i.board_role,
-        "relationToScope": i.relation_to_scope,
-        "contributionValue": float(i.contribution_value) if i.contribution_value else None,
-        "contributionRank": i.contribution_rank,
-        "contributionPayload": i.contribution_payload,
-        "roleEvidence": i.role_evidence,
-    }
 
 
 # 注意：admin 路由统一在 admin_review.py 中定义；

@@ -397,14 +397,14 @@ class TestResumeLifecycle:
         ), patch.object(
             orch, "_bind_or_reuse_canonical_history_source", fake_source,
         ), patch.object(
-            orch, "load_day_fact_maps", AsyncMock(return_value={}),
+            orch, "validate_review_lineage_guard", AsyncMock(),
         ), patch.object(
             orch, "_compute_canonical_composition_phase", fake_composition,
         ), patch.object(
             orch, "_resolve_all_discovery_scopes",
             AsyncMock(return_value=[]),
         ), patch.object(
-            orch, "evaluate_all_active_trackings", AsyncMock(return_value=0),
+            orch, "_compute_family_dynamics_maps", AsyncMock(return_value={}),
         ), patch.object(
             orch, "_count_scope_status", AsyncMock(return_value=(len(items), 0)),
         ), patch.object(

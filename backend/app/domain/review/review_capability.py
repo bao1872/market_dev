@@ -60,19 +60,15 @@ MARKET_HISTORICAL_MEMBERSHIP_PIT_GAP_REASON = (
     "historical Dynamics / Persistence for market is unavailable until an exact-T "
     "market member source is implemented"
 )
-# Historical Dynamics runtime wiring status.  ``compute_scope_dynamics_analysis``
-# is a frozen pure-domain owner, but the orchestrator runtime does NOT integrate
-# the Current-Static Reconstruction -> ObservationSeries -> Dynamics application
-# chain in this round (deferred to the next implementation; SCALE GATE required).
-# Until that chain is wired, ``historical_dynamics_runtime_wired=False`` for EVERY
-# family so composition readiness never falsely requires a layer the runtime does
-# not produce.  It flips per-family (board families first) when the series
-# integration lands.  This is honest exploration-state, not a permanent switch.
-HISTORICAL_DYNAMICS_NOT_RUNTIME_WIRED_REASON = (
-    "historical_dynamics_not_runtime_wired: the orchestrator canonical composition "
-    "phase does not yet integrate the ObservationSeries -> Scope Dynamics chain; "
-    "Historical Dynamics is explicitly unavailable_current (not a legacy fallback)"
-)
+# [REVIEW-BACKEND-FINAL-CLOSURE] Historical Dynamics + Leadership ARE wired into
+# the orchestrator canonical composition phase for all ACTIVATED families
+# (industry_l1/l2/l3/concept) via the single batch owners
+# (compute_current_static_scope_dynamics_batch / compute_leadership_migration).
+# The frozen pure-domain owners were always complete; only the runtime integration
+# landed in this closure.  ``historical_dynamics_runtime_wired`` /
+# ``leadership_runtime_wired`` now reflect that (flipped True for activated
+# families).  No NOT_RUNTIME_WIRED reason placeholder remains — capability is the
+# single source of which layers are required, not a hardcoded reason string.
 
 
 @dataclass(frozen=True)
@@ -94,9 +90,10 @@ class ScopeCapability:
     historical_dynamics_runtime_wired:
         True iff the orchestrator canonical composition phase actually integrates
         the ObservationSeries -> Scope Dynamics computation for this family in
-        the CURRENT runtime.  False this round for every family (deferred, SCALE
-        GATE required) — so composition readiness never demands a layer the
-        runtime does not produce.
+        the CURRENT runtime.  Flipped True for all ACTIVATED families in
+        REVIEW-BACKEND-FINAL-CLOSURE (single batch owner
+        compute_current_static_scope_dynamics_batch); False for non-activated
+        families (market/major_index/style) which do not produce this layer.
     canonical_observation_available:
         ``persistence_activated and current_membership_available``.
     historical_dynamics_available:
@@ -116,6 +113,7 @@ class ScopeCapability:
     current_membership_available: bool
     historical_membership_available: bool
     historical_dynamics_runtime_wired: bool = False
+    leadership_runtime_wired: bool = False
     member_attribution_available: bool = False
     reason: str | None = None
     reasons: tuple[str, ...] = field(default_factory=tuple)
@@ -131,6 +129,11 @@ class ScopeCapability:
             and self.historical_membership_available
             and self.historical_dynamics_runtime_wired
         )
+
+    @property
+    def leadership_available(self) -> bool:
+        """Leadership is available iff the runtime actually wires it for this family."""
+        return self.leadership_runtime_wired and self.current_membership_available
 
 
 def _scope_reason(scope_type: str) -> tuple[str, ...]:
@@ -162,17 +165,19 @@ def resolve_scope_capability(*, scope_type: str, scope_name: str) -> ScopeCapabi
     current_membership_available = True
     historical_membership_available = scope_type != "market"
     member_attribution_available = current_membership_available and persistence_activated
-    # Historical Dynamics is NOT wired into the orchestrator runtime this round
-    # for any family (ObservationSeries -> Dynamics chain deferred, SCALE GATE).
-    historical_dynamics_runtime_wired = False
+    # [REVIEW-BACKEND-FINAL-CLOSURE] Historical Dynamics + Leadership ARE wired
+    # into the canonical composition phase for all ACTIVATED families via the
+    # single batch owners.  For non-activated families (market/major_index/style)
+    # these layers are not produced, so the flag stays False and composition
+    # readiness must not require them.
+    historical_dynamics_runtime_wired = persistence_activated
+    leadership_runtime_wired = persistence_activated
 
     reasons = list(_scope_reason(scope_type))
     if not persistence_activated:
         reasons.append(
             PERSISTENCE_NOT_ACTIVATED_REASON.format(scope_type=scope_type)
         )
-    if not historical_dynamics_runtime_wired:
-        reasons.append(HISTORICAL_DYNAMICS_NOT_RUNTIME_WIRED_REASON)
 
     return ScopeCapability(
         scope_type=scope_type,
@@ -181,6 +186,7 @@ def resolve_scope_capability(*, scope_type: str, scope_name: str) -> ScopeCapabi
         current_membership_available=current_membership_available,
         historical_membership_available=historical_membership_available,
         historical_dynamics_runtime_wired=historical_dynamics_runtime_wired,
+        leadership_runtime_wired=leadership_runtime_wired,
         member_attribution_available=member_attribution_available,
         reason=reasons[0] if reasons else None,
         reasons=tuple(reasons),
@@ -208,7 +214,6 @@ __all__ = [
     "ALL_SCOPE_FAMILIES",
     "SCOPE_OBSERVATION_PERSISTENCE_ACTIVATED_TYPES",
     "MARKET_HISTORICAL_MEMBERSHIP_PIT_GAP_REASON",
-    "HISTORICAL_DYNAMICS_NOT_RUNTIME_WIRED_REASON",
     "PERSISTENCE_NOT_ACTIVATED_REASON",
     "ScopeCapability",
     "is_scope_observation_persistence_activated",

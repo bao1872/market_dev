@@ -1204,9 +1204,19 @@ async def prepare_current_scope_observations_batch(
     session: AsyncSession,
     trade_date: date,
     scope_specs: Sequence[ScopeReplaySpec],
-) -> dict[str, PreparedScope]:
+    *,
+    trade_dates: list[date] | None = None,
+) -> dict[str, PreparedScope] | dict[str, list[PreparedScope]]:
     """Batch-prepare current-day (L1 PIT) Canonical Scope Observations — the
     SINGLE current-day preparation owner.
+
+    When ``trade_dates`` is provided (e.g. ``[T-1, T]``), the union fact load and
+    ``build_prepared_scopes_from_union`` operate on that multi-date axis and the
+    function returns the per-scope SERIES (``dict[str, list[PreparedScope]]``),
+    keyed/ordered by ``trade_dates``. This is the family-batch path used by
+    Leadership T-1→T reconstruction (no per-scope N+1, no second algorithm).
+    With the default (``None``) the behaviour is unchanged: single ``trade_date``,
+    returned unwrapped as ``dict[str, PreparedScope]``.
 
     The one DB entry point for the orchestrator's current-day canonical
     observation double-write.  It:
@@ -1230,6 +1240,7 @@ async def prepare_current_scope_observations_batch(
     """
     if not scope_specs:
         return {}
+    effective_dates = trade_dates if trade_dates is not None else [trade_date]
     t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
 
     # ---- Resolve PIT(T) / PIT(T-1) per scope (single owner: resolve_scope_members).
@@ -1367,18 +1378,18 @@ async def prepare_current_scope_observations_batch(
                 seen.add(mid)
                 union_members.append(mid)
 
-    union_ctx = await prepare_union_fact_context(session, [trade_date], union_members)
+    union_ctx = await prepare_union_fact_context(session, effective_dates, union_members)
     # Current-only snapshot facts at exact T (str-keyed, same shape as the
     # current-only loader consumes).
     current_only_facts = await _load_current_only_snapshot_facts(
-        session, union_members, trade_date
+        session, union_members, effective_dates
     )
     coverage_by_date = await _load_batch_backfill_event_coverage(
-        session, union_members, [trade_date]
+        session, union_members, effective_dates
     )
 
     prepared_map = build_prepared_scopes_from_union(
-        trade_dates=[trade_date],
+        trade_dates=effective_dates,
         scope_specs=resolved_specs,
         union_ctx=union_ctx,
         membership_t1_by_scope=membership_t1_by_scope,
@@ -1389,9 +1400,12 @@ async def prepare_current_scope_observations_batch(
         t1_membership_available_by_scope=t1_membership_available_by_scope,
         diagnostics_by_scope=diagnostics_by_scope,
     )
-    # ``build_prepared_scopes_from_union`` returns per-scope SERIES (lists); this
-    # current-day owner is always called with a single trade_date, so each scope
-    # key holds exactly one PreparedScope — unwrap it to honour the documented
-    # ``dict[str, PreparedScope]`` contract consumed by the orchestrator.
-    prepared_single = {key: scopes[0] for key, scopes in prepared_map.items()}
-    return {**terminal, **prepared_single}
+    if len(effective_dates) == 1:
+        # Single-date (current-day) owner contract: unwrap the per-scope series
+        # to ``dict[str, PreparedScope]`` consumed by the orchestrator.
+        prepared_single = {key: scopes[0] for key, scopes in prepared_map.items()}
+        return {**terminal, **prepared_single}
+    # Multi-date axis (e.g. [T-1, T] for Leadership T-1→T): return the per-scope
+    # SERIES keyed/ordered by ``effective_dates``. No unwrap — the caller slices
+    # the dates it needs (Leadership reads [T-1] and [T]).
+    return {**terminal, **prepared_map}

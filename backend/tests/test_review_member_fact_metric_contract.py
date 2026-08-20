@@ -186,15 +186,30 @@ async def test_orchestrator_runs_canonical_single_pass_no_legacy_signal(
     async def _zero(*_args: Any, **_kwargs: Any) -> int:
         return 0
 
+    async def _dynamics(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        # [REVIEW-BACKEND-FINAL-CLOSURE] Historical Dynamics 在单独的 family-batch
+        # 阶段计算并注入 _compute_canonical_composition_phase；本测试只验证
+        # single-pass canonical 不含 legacy signal/attribution，故返回空 map。
+        return {}
+
     monkeypatch.setattr(orchestrator, "_resolve_all_discovery_scopes", _scopes)
     monkeypatch.setattr(orchestrator, "_bind_or_reuse_canonical_history_source", _source)
-    monkeypatch.setattr(orchestrator, "load_day_fact_maps", _load_facts)
+    monkeypatch.setattr(orchestrator, "validate_review_lineage_guard", _load_facts)
     monkeypatch.setattr(
         orchestrator, "prepare_current_scope_observations_batch", _prepare,
     )
     monkeypatch.setattr(orchestrator, "_compute_canonical_composition_phase", _metrics)
-    monkeypatch.setattr(orchestrator, "evaluate_all_active_trackings", _zero)
+    monkeypatch.setattr(orchestrator, "_compute_family_dynamics_maps", _dynamics)
     monkeypatch.setattr(orchestrator, "_aggregate_run_data_coverage", _coverage)
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5.5] Leadership 现在由真实 family-batch
+    # owner 计算（需真实 session/calendar）。本测试只验证 single-pass canonical
+    # 不含 legacy signal/attribution，故将 batch 短路为 {}，不触真实日历。
+    async def _empty_leadership(*_a: Any, **_k: Any) -> dict:
+        return {}
+
+    monkeypatch.setattr(
+        orchestrator, "compute_scope_leadership_batch", _empty_leadership,
+    )
 
     class Session:
         async def flush(self) -> None:

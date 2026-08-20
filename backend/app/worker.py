@@ -1538,12 +1538,11 @@ async def run_after_close_orchestrator_worker() -> None:
     - Chip co-process 独立 while 循环、共享 _shutdown、异常隔离在 co-process 内。
     - SIGTERM 时 mandatory 与三个 co-process（Auction / Chip / ReviewBootstrap）统一 drain。
 
-    [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2] Review bootstrap 独立 co-process：
-    - 本进程同时启动 Review bootstrap co-process（_bootstrap_co_process_task），复用已有
-      run_review_bootstrap_worker（其内部每轮调用 _review_bootstrap_poll_once）。
-    - mandatory 主循环不再串行 fallback 到 _review_bootstrap_poll_once，
-      因此长时 bootstrap 回填不占用 mandatory after-close / Review executor。
-    - 与 Chip 相同的 executor-level execution isolation 语义。
+    [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] Review bootstrap 独立 co-process 已退休：
+    - run_review_bootstrap_worker / _review_bootstrap_poll_once 已物理删除，本进程不再启动
+      bootstrap co-process；历史回填由 canonical history replay（prepare_scope / canonical
+      history run）接管，不再有独立的 bootstrap worker 入口。
+    - mandatory 主循环只领取/执行 after_close_orchestrator；Chip 为独立 co-process。
 
     [SIGTERM drain] - 优雅退出（不强制中断当前 run，drain 到当前业务 item terminal）：
     - SIGTERM/SIGINT 由 _handle_shutdown 设置 _shutdown=True（全局标志）
@@ -1578,14 +1577,8 @@ async def run_after_close_orchestrator_worker() -> None:
         "[AfterCloseWorker] Chip consensus co-process 已启动（独立执行 loop，不阻塞 mandatory orchestrator）",
     )
 
-    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
-    # 启动 Review bootstrap 独立 co-process（复用 run_review_bootstrap_worker）。
-    # mandatory 主循环不再串行 fallback 到 _review_bootstrap_poll_once，
-    # 长时 bootstrap 回填不占用 mandatory after-close / Review executor。
-    _bootstrap_co_process_task = asyncio.create_task(run_review_bootstrap_worker())
-    logger.info(
-        "[AfterCloseWorker] Review bootstrap co-process 已启动（独立执行 loop，不阻塞 mandatory orchestrator）",
-    )
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] Review bootstrap co-process 已退休：
+    # run_review_bootstrap_worker / _review_bootstrap_poll_once 物理删除，不再启动。
 
     # 启动恢复：清理上次崩溃残留的 running 任务 + 自动恢复 interrupted 任务
     try:
@@ -1626,7 +1619,6 @@ async def run_after_close_orchestrator_worker() -> None:
         # 各 co-process 检查共享 _shutdown 后在当前 item 完成后退出循环。
         await _drain_co_process(_auction_co_process_task, "Auction")
         await _drain_co_process(_chip_co_process_task, "Chip")
-        await _drain_co_process(_bootstrap_co_process_task, "ReviewBootstrap")
 
     # [SIGTERM drain complete] - 当前 item 已完成，worker 正常退出（退出码 0）
     logger.info("[AfterCloseWorker] SIGTERM drain complete, finished current item")
@@ -2080,163 +2072,15 @@ async def run_chip_consensus_worker() -> None:
 
 
 # =============================================================================
-# Review Bootstrap Worker - Review 历史回填（admin API 提交，Worker 执行）
+# Review Bootstrap Worker - 已退休（REVIEW-BACKEND-FINAL-CLOSURE Phase 5）
+# 历史回填 bootstrap 的可达代码路径已物理删除；SchedulerJobRun 槽位保留为
+# 历史兼容（不 DROP），但不再有 Worker 领取或执行 review bootstrap 任务。
 # =============================================================================
 
 
-async def _review_bootstrap_poll_once() -> bool:
-    """[ReviewBootstrapWorker] - 单次轮询：领取并执行一个 queued review bootstrap 任务。
-
-    为什么需要独立 Worker：120 交易日 × 全 scope 的历史回填耗时远超 HTTP
-    超时，admin API 只创建 status=queued 的 SchedulerJobRun，真正计算在这里。
-
-    使用 FOR UPDATE SKIP LOCKED 领取 + lease_epoch fencing + heartbeat，
-    与 chip consensus worker 同构：失去租约后禁止写终态，避免僵尸 Worker
-    覆盖已被 watchdog 转交的任务。
-
-    dry_run 任务在 service 层严格零业务写入（execute_bootstrap_job 显式 rollback）。
-
-    Returns:
-        True 如果领取到任务（无论执行成功与否），False 如果无可领取任务。
-    """
-    from app.services.fenced_job_run_service import (
-        FencedJobHeartbeat,
-        JobLeaseLostError,
-        claim_next_job_run,
-        finalize_job_run,
-    )
-    from app.services.review_bootstrap_job_service import (
-        REVIEW_BOOTSTRAP_JOB_NAME,
-        REVIEW_BOOTSTRAP_LEASE_SECONDS,
-        build_job_metadata_updates,
-        execute_bootstrap_job,
-    )
-
-    async with AsyncSessionLocal() as db:
-        claim = await claim_next_job_run(
-            db,
-            job_name=REVIEW_BOOTSTRAP_JOB_NAME,
-            worker_instance_id=_WORKER_INSTANCE_ID,
-            lease_seconds=REVIEW_BOOTSTRAP_LEASE_SECONDS,
-        )
-        if claim is None:
-            await db.rollback()
-            return False
-        await db.commit()
-
-    lease_token = claim.token
-    meta = claim.metadata
-    job_run_id = lease_token.job_run_id
-    dry_run = bool(meta.get("dry_run", True))
-
-    logger.info(
-        "[ReviewBootstrapWorker] 领取任务: job_run_id=%s prev_status=%s "
-        "dry_run=%s end_date=%s days_back=%s operator=%s",
-        job_run_id, claim.previous_status, dry_run,
-        meta.get("end_date"), meta.get("days_back"), meta.get("operator"),
-    )
-
-    # bootstrap 单次执行时间长（全量可达数十分钟），心跳间隔沿用 30s
-    heartbeat = FencedJobHeartbeat(lease_token, interval_seconds=30.0)
-    await heartbeat.start()
-
-    try:
-        heartbeat.ensure_owned()
-        async with AsyncSessionLocal() as db:
-            result = await execute_bootstrap_job(db, job_metadata=meta)
-        heartbeat.ensure_owned()
-
-        summary_counts = result.get("scope_counts", {})
-        failed_scopes = int(summary_counts.get("failed", 0))
-        # 只有"全部日期都没算出来"才算任务级失败：
-        # 单个 scope 的 unavailable 是 PIT 数据事实，不是任务故障。
-        processed = int(result.get("processed", 0))
-        main_status = "succeeded" if processed > 0 else "failed"
-
-        finalized = await finalize_job_run(
-            lease_token,
-            status=main_status,
-            metadata_updates=build_job_metadata_updates(result),
-            total_count=int(result.get("eligible_dates", 0)),
-            succeeded_count=int(result.get("written", 0)),
-            failed_count=failed_scopes,
-            error_code=None if main_status == "succeeded" else "BOOTSTRAP_NO_ELIGIBLE_DATES",
-            error_message=(
-                None if main_status == "succeeded"
-                else f"无可回填交易日: status={result.get('status')}"
-            ),
-        )
-        if not finalized:
-            raise JobLeaseLostError(
-                f"review bootstrap terminal update fenced: job_run_id={job_run_id}",
-            )
-
-        logger.info(
-            "[ReviewBootstrapWorker] 执行完成: job_run_id=%s status=%s dry_run=%s "
-            "eligible=%s processed=%s written=%s scope_counts=%s",
-            job_run_id, main_status, dry_run,
-            result.get("eligible_dates"), processed,
-            result.get("written"), summary_counts,
-        )
-    except JobLeaseLostError as exc:
-        logger.warning(
-            "[ReviewBootstrapWorker] 已失去租约，禁止终态或后续写入: "
-            "job_run_id=%s error=%s",
-            job_run_id, exc,
-        )
-        return True
-    except Exception as exc:
-        logger.exception(
-            "[ReviewBootstrapWorker] 执行异常: job_run_id=%s error=%s", job_run_id, exc,
-        )
-        await finalize_job_run(
-            lease_token,
-            status="failed",
-            metadata_updates={"bootstrap_status": "failed"},
-            total_count=0,
-            succeeded_count=0,
-            failed_count=1,
-            error_code="BOOTSTRAP_EXECUTION_FAILED",
-            error_message=f"review bootstrap 执行异常: {exc}"[:500],
-        )
-        return True
-    finally:
-        await heartbeat.stop()
-
-    return True
-
-
-async def run_review_bootstrap_worker() -> None:
-    """[ReviewBootstrapWorker] - Review 历史回填 Worker：领取 queued 任务并执行。
-
-    不新增常驻容器：与 chip consensus 一致，生产由
-    run_after_close_orchestrator_worker 在 after-close 容器内轮询
-    （_review_bootstrap_poll_once，最低优先级）。
-
-    本函数仅在 WORKER_TYPE=review_bootstrap 时作为独立 worker 启动，
-    用于调试或独立部署；WORKER_TYPE=all 不启动，避免与 after-close 循环
-    重复领取同一批任务。
-
-    每个轮询周期：
-    1. _review_bootstrap_poll_once 领取并执行一个 queued/resume_queued 任务
-    2. sleep WORKER_INTERVAL 后继续轮询
-
-    [SIGTERM drain] 与其它 Worker 一致：当前任务执行完才退出。
-    """
-    logger.info("[ReviewBootstrapWorker] 启动（间隔=%ds）", WORKER_INTERVAL)
-
-    while not _shutdown:
-        try:
-            await _review_bootstrap_poll_once()
-        except Exception as exc:
-            # poll_once 内部已捕获执行异常，此处仅捕获领取阶段的意外异常
-            logger.exception("[ReviewBootstrapWorker] 轮询异常: %s", exc)
-        if _shutdown:
-            logger.info("[ReviewBootstrapWorker] SIGTERM drain: 不再领取新任务，准备退出")
-            break
-        await asyncio.sleep(WORKER_INTERVAL)
-
-    logger.info("[ReviewBootstrapWorker] SIGTERM drain complete, finished current item")
+# [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] Review bootstrap Worker 已退休。
+# run_review_bootstrap_worker / _review_bootstrap_poll_once 物理删除，
+# 不再有 Worker 领取或执行 review bootstrap 任务（SchedulerJobRun 槽位保留不 DROP）。
 
 
 # =============================================================================
@@ -2564,10 +2408,8 @@ async def main() -> None:
     # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
     # WORKER_TYPE=after_close_orchestrator 在 run_after_close_orchestrator_worker 内
     # 同时启动 Chip / Review bootstrap 独立 co-process（复用各自 worker loop），
-    # mandatory 主循环不再串行 fallback，避免 long-running secondary job 阻塞 mandatory。
-    # WORKER_TYPE=review_bootstrap 仅用于调试/独立部署，避免与 after-close 重复领取。
-    if WORKER_TYPE == "review_bootstrap":
-        tasks.append(asyncio.create_task(run_review_bootstrap_worker()))
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] WORKER_TYPE=review_bootstrap 已退休：
+    # Review bootstrap Worker 物理删除，不再注册或领取任务。
 
     # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动
     if WORKER_TYPE in ("watchdog", "all"):
@@ -2601,8 +2443,6 @@ if __name__ == "__main__":
     assert callable(run_after_close_orchestrator_worker), "run_after_close_orchestrator_worker 应可调用"
     assert callable(run_chip_consensus_worker), "run_chip_consensus_worker 应可调用"
     assert callable(run_auction_scheduler_worker), "run_auction_scheduler_worker 应可调用"
-    assert callable(run_review_bootstrap_worker), "run_review_bootstrap_worker 应可调用"
-    assert callable(_review_bootstrap_poll_once), "_review_bootstrap_poll_once 应可调用"
     assert callable(_recovery_watchdog_loop), "_recovery_watchdog_loop 应可调用"
     print("OK: 配置验证通过")
     asyncio.run(main())

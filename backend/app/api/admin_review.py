@@ -5,9 +5,6 @@
 - POST /v1/admin/review/runs/{id}/resume: 重启 run（处理 pending/failed）
 - POST /v1/admin/review/runs/{id}/publish: 发布 run
 - GET  /v1/admin/review/runs/{id}/status: 查询 run 状态（含 items + 发布门禁）
-- POST /v1/admin/review/bootstrap: 提交历史回填任务（202，dry-run 默认）
-- GET  /v1/admin/review/bootstrap/{job_run_id}: 查询回填进度（summary + 分页明细）
-- POST /v1/admin/review/bootstrap/{job_run_id}/resume: 恢复失败/中断的回填任务
 
 权限（PRD §3.2）：
 - 所有端点需要 admin 身份（require_admin）
@@ -16,8 +13,10 @@
 - 所有写操作要求 idempotency_key（PRD §12.6）
 - 失败返回 4xx/5xx，错误信息含原因
 - 不自动发布；publish 需要单独调用
-- bootstrap 是长任务：API 只提交 queued 任务并返回 202 + job_run_id，
-  计算由 Worker 领取执行，禁止在单个 HTTP 请求内同步跑完 120 日全量回填
+
+遗留（REVIEW-BACKEND-FINAL-CLOSURE Phase 5 已退休）：
+- 历史 bootstrap 可达 API 路径已物理删除（/v1/admin/review/bootstrap* 返回 404）。
+- 底层 review_bootstrap_job_service / review_bootstrap_service 已删除。SchedulerJobRun 槽位保留不 DROP。
 """
 
 from __future__ import annotations
@@ -26,7 +25,7 @@ import logging
 import uuid
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.routing import APIRoute
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -35,9 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db
 from app.models.market_review import MarketReviewRun, MarketReviewRunItem
 from app.schemas.review import (
-    ReviewBootstrapRequest,
-    ReviewBootstrapStatusResponse,
-    ReviewBootstrapSubmitResponse,
     ReviewChipCoverageDTO,
     ReviewRunCreateRequest,
     ReviewRunPublishRequest,
@@ -47,15 +43,6 @@ from app.schemas.review import (
     ReviewRunStatusResponse,
 )
 from app.services.access_control_service import AccessContext, require_admin
-from app.services.review_bootstrap_job_service import (
-    DEFAULT_DETAIL_PAGE_SIZE,
-    MAX_DETAIL_PAGE_SIZE,
-    ReviewBootstrapJobError,
-    build_status_payload,
-    get_bootstrap_job,
-    resume_bootstrap_job,
-    submit_bootstrap_job,
-)
 from app.services.review_orchestrator_service import (
     DEFAULT_BASELINE_WINDOW,
     REVIEW_ALGORITHM_VERSION,
@@ -414,193 +401,10 @@ async def get_review_run_status(
 
 
 # =============================================================================
-# Review 历史 bootstrap（正式 admin 入口）
+# Review 历史 bootstrap - 已退休（REVIEW-BACKEND-FINAL-CLOSURE Phase 5）
+# bootstrap 可达代码路径已物理删除（review_bootstrap_job_service 删除），
+# admin 端点不再存在（返回 404，非 202/410 deprecated）。SchedulerJobRun 槽位保留不 DROP。
 # =============================================================================
-
-
-@router.post(
-    "/bootstrap",
-    response_model=ReviewBootstrapSubmitResponse,
-    status_code=status.HTTP_202_ACCEPTED,
-)
-async def submit_review_bootstrap(
-    payload: ReviewBootstrapRequest,
-    response: Response,
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_admin),
-) -> ReviewBootstrapSubmitResponse:
-    """[Admin] 提交 Review 历史回填任务（异步，202 Accepted）。
-
-    为什么是异步：120 交易日 × 全 scope 的回填耗时远超 HTTP 超时，
-    单请求同步执行会导致连接中断后任务状态不可知。本端点只创建
-    status=queued 的 SchedulerJobRun 并立即返回 job_run_id，
-    实际计算由 review_bootstrap worker 通过 FOR UPDATE SKIP LOCKED 领取。
-
-    安全默认：
-    - ``dry_run`` 默认 True，且 dry-run 路径**零业务写入**
-      （不创建 MarketReviewRun、不写 observations、不切 pointer）；
-    - ``operator`` / ``reason`` 必填，写入任务审计元数据；
-    - ``end_date`` 为空时解析为最近一个完整 A 股交易日，不使用自然日 today；
-    - 幂等：同 (输入范围, dry_run) 已有 queued/running 任务时复用，
-      返回 ``is_new=False``。
-
-    进度查询：``GET /v1/admin/review/bootstrap/{job_run_id}``。
-    """
-    from datetime import date as date_cls
-
-    end_date = None
-    if payload.end_date:
-        try:
-            end_date = date_cls.fromisoformat(payload.end_date)
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"end_date 格式错误（需 YYYY-MM-DD）: {payload.end_date}",
-            ) from exc
-
-    try:
-        job_run, is_new, resolved = await submit_bootstrap_job(
-            db,
-            operator=payload.operator,
-            reason=payload.reason,
-            end_date=end_date,
-            days_back=payload.days_back,
-            algorithm_version=payload.algorithm_version,
-            dry_run=payload.dry_run,
-        )
-        await db.commit()
-        await db.refresh(job_run)
-    except ReviewBootstrapJobError as exc:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Admin] 提交 review bootstrap 失败")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"提交 bootstrap 失败: {exc}",
-        ) from exc
-
-    # 复用既有任务时返回 200，避免调用方误以为新建了任务
-    if not is_new:
-        response.status_code = status.HTTP_200_OK
-
-    logger.info(
-        "[Admin] review bootstrap 已提交: job_run_id=%s is_new=%s dry_run=%s "
-        "operator=%s admin=%s",
-        job_run.id, is_new, payload.dry_run, payload.operator, ctx.user_id,
-    )
-
-    return ReviewBootstrapSubmitResponse(
-        job_run_id=str(job_run.id),
-        status=job_run.status,
-        is_new=is_new,
-        dry_run=payload.dry_run,
-        end_date=str(resolved["end_date"]),
-        days_back=int(resolved["days_back"]),
-        algorithm_version=str(resolved["algorithm_version"]),
-        operator=payload.operator,
-        reason=payload.reason,
-        input_hash=str(resolved["input_hash"]),
-        message=(
-            f"bootstrap 任务已加入队列（dry_run={payload.dry_run}）: "
-            f"job_run_id={job_run.id}"
-            if is_new
-            else f"复用已有活跃 bootstrap 任务: job_run_id={job_run.id}"
-        ),
-    )
-
-
-@router.get(
-    "/bootstrap/{job_run_id}",
-    response_model=ReviewBootstrapStatusResponse,
-)
-async def get_review_bootstrap_status(
-    job_run_id: uuid.UUID,
-    offset: int = Query(default=0, ge=0, description="scope 明细分页偏移"),
-    limit: int = Query(
-        default=DEFAULT_DETAIL_PAGE_SIZE,
-        ge=1,
-        le=MAX_DETAIL_PAGE_SIZE,
-        description="scope 明细单页条数",
-    ),
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_admin),
-) -> ReviewBootstrapStatusResponse:
-    """[Admin] 查询 bootstrap 任务状态。
-
-    返回全局 summary（含 succeeded/skipped/unavailable/failed 四类计数与
-    reason_codes）+ 按 (trade_date, scope_type, scope_key) 的分页明细。
-    明细分页而非全量返回：120 日 × 全 scope 可达上万行。
-    """
-    _ = ctx
-    try:
-        job_run = await get_bootstrap_job(db, job_run_id)
-    except ReviewBootstrapJobError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
-
-    payload = build_status_payload(job_run, offset=offset, limit=limit)
-    return ReviewBootstrapStatusResponse(**payload)
-
-
-@router.post(
-    "/bootstrap/{job_run_id}/resume",
-    response_model=ReviewBootstrapSubmitResponse,
-)
-async def resume_review_bootstrap(
-    job_run_id: uuid.UUID,
-    db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_admin),
-) -> ReviewBootstrapSubmitResponse:
-    """[Admin] 恢复失败 / 中断的 bootstrap 任务（重置为 queued 由 Worker 领取）。
-
-    bootstrap 本身按交易日幂等（已写入日期复用既有 run），
-    因此恢复只补齐未完成部分，不会重复写入。
-    """
-    try:
-        job_run = await resume_bootstrap_job(db, job_run_id)
-        await db.commit()
-        await db.refresh(job_run)
-    except ReviewBootstrapJobError as exc:
-        await db.rollback()
-        message = str(exc)
-        code = (
-            status.HTTP_404_NOT_FOUND if "不存在" in message
-            else status.HTTP_409_CONFLICT
-        )
-        raise HTTPException(status_code=code, detail=message) from exc
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Admin] 恢复 review bootstrap 失败: job_run_id=%s", job_run_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"恢复 bootstrap 失败: {exc}",
-        ) from exc
-
-    payload = build_status_payload(job_run, offset=0, limit=1)
-    logger.info(
-        "[Admin] review bootstrap 已恢复: job_run_id=%s admin=%s",
-        job_run.id, ctx.user_id,
-    )
-    return ReviewBootstrapSubmitResponse(
-        job_run_id=str(job_run.id),
-        status=job_run.status,
-        is_new=False,
-        dry_run=bool(payload["dry_run"]),
-        end_date=str(payload.get("end_date") or ""),
-        days_back=int(payload.get("days_back") or 0),
-        algorithm_version=str(payload.get("algorithm_version") or ""),
-        operator=str(payload.get("operator") or ""),
-        reason=str(payload.get("reason") or ""),
-        input_hash=str(payload.get("input_hash") or ""),
-        message=f"bootstrap 任务已重新入队: job_run_id={job_run.id}",
-    )
 
 
 class ReviewRunTimelineResponse(BaseModel):
@@ -728,21 +532,5 @@ if __name__ == "__main__":
     print(f"REVIEW_ALGORITHM_VERSION = {REVIEW_ALGORITHM_VERSION}")
     print(f"DEFAULT_BASELINE_WINDOW = {DEFAULT_BASELINE_WINDOW}")
 
-    # bootstrap 正式入口必须存在且归属 admin 路由
-    path_set = set(paths)
-    assert "/v1/admin/review/bootstrap" in path_set, "缺少 bootstrap 提交端点"
-    assert "/v1/admin/review/bootstrap/{job_run_id}" in path_set, "缺少 bootstrap status 端点"
-    assert (
-        "/v1/admin/review/bootstrap/{job_run_id}/resume" in path_set
-    ), "缺少 bootstrap resume 端点"
-    assert router.prefix.startswith("/v1/admin/"), "bootstrap 必须归属 admin 路由"
-
-    # 提交端点必须是 202（异步提交），不得同步执行全量回填
-    submit_route = next(
-        r for r in router.routes
-        if isinstance(r, APIRoute) and r.path == "/v1/admin/review/bootstrap"
-    )
-    assert submit_route.status_code == 202, (
-        f"bootstrap 提交端点应返回 202 Accepted，实际 {submit_route.status_code}"
-    )
-    print("OK: bootstrap admin 端点验证通过")
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] bootstrap 端点已退休（物理删除，
+    # 返回 404），此处不再断言其存在。保留 admin review run 端点验证。

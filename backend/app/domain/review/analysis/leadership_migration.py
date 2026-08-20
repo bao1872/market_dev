@@ -44,8 +44,9 @@ Pure + deterministic + non-mutating.  No DB, no T+1 (future-leak = 0).
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Sequence
+from collections.abc import Sequence
+from dataclasses import dataclass
+from typing import Any
 
 from app.domain.review.analysis.leadership_contribution import (
     LeadershipContributionFacts,
@@ -369,6 +370,41 @@ def compute_leadership_migration(
     )
 
 
+def serialize_leadership_migration(facts: LeadershipMigrationFacts) -> dict[str, Any]:
+    """Single application serialization boundary for Leadership migration.
+
+    The ``LeadershipMigrationFacts`` dataclass is the domain owner output and MUST
+    stay a dataclass (Member Attribution consumes it directly).  This function is
+    the ONLY place the facts are turned into a ``Mapping[str, Any]`` for
+    Composition / persistence / API consumption.  Do NOT add a second serializer
+    or make the dataclass itself dict-like — that would split the boundary.
+    """
+    return {
+        "status": facts.status,
+        "coverage": facts.coverage,
+        "previous_direction": facts.previous_direction,
+        "current_direction": facts.current_direction,
+        "previous_rankable_count": facts.previous_rankable_count,
+        "current_rankable_count": facts.current_rankable_count,
+        "previous_leader_count": facts.previous_leader_count,
+        "current_leader_count": facts.current_leader_count,
+        "retained_count": facts.retained_count,
+        "entrant_count": facts.entrant_count,
+        "exit_count": facts.exit_count,
+        "previous_retention": facts.previous_retention,
+        "jaccard_stability": facts.jaccard_stability,
+        "migration": facts.migration,
+        "previous_leader_ids": list(facts.previous_leader_ids)
+        if facts.previous_leader_ids is not None else None,
+        "current_leader_ids": list(facts.current_leader_ids)
+        if facts.current_leader_ids is not None else None,
+        "entrant_ids": list(facts.entrant_ids)
+        if facts.entrant_ids is not None else None,
+        "exit_ids": list(facts.exit_ids)
+        if facts.exit_ids is not None else None,
+    }
+
+
 __all__ = [
     "LEADERSHIP_COVERAGE",
     "AlignedLeadership",
@@ -376,4 +412,5 @@ __all__ = [
     "LeadershipMigrationFacts",
     "build_leadership_snapshot",
     "compute_leadership_migration",
+    "serialize_leadership_migration",
 ]

@@ -564,7 +564,7 @@ class TestTargetDateReadiness:
         A–H 顺序：run → item group-by → skip reasons → missing-state count；
         predicate I 追加：eligible count → state count → missing → extra。
         """
-        from app.services.review_bootstrap_service import (
+        from app.services.review_history_readiness_service import (
             validate_canonical_history_run_readiness,
         )
 
@@ -657,11 +657,9 @@ class TestFormalReviewEventDependency:
         "review_orchestrator_service.py",
         "review_scope_service.py",
         "review_metric_observation_service.py",
-        "review_signal_service.py",
         "review_attribution_service.py",
-        "review_tracking_service.py",
         "review_publication_service.py",
-        "review_bootstrap_service.py",
+        "review_history_readiness_service.py",
         "metric_engine.py",
         "metric_registry.py",
     ]

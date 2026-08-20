@@ -58,17 +58,6 @@ COMPOSITION_LAYER_KEYS = (
     "member_attribution",
 )
 
-# Leadership is a frozen pure-domain owner (LeadershipMigration), but the
-# orchestrator runtime does not yet compute LeadershipContributionFacts /
-# previous-snapshot -> migration this round, so it is carried as a structured
-# unavailable_current layer (never a legacy fallback).
-LEADERSHIP_NOT_RUNTIME_WIRED_REASON = (
-    "leadership_not_runtime_wired: the orchestrator canonical composition phase "
-    "does not yet compute LeadershipContributionFacts / LeadershipMigration in "
-    "the runtime; Leadership is explicitly unavailable_current"
-)
-
-
 class ReviewCompositionError(RuntimeError):
     """A required composition layer is absent/failed and must not be faked."""
 
@@ -110,21 +99,26 @@ def _required_layers(capability: ScopeCapability) -> frozenset[str]:
     """Layers required for a ready composition given this scope's capability.
 
     - scope_observation is always required (the primary canonical fact).
-    - historical_dynamics is required only when the family can resolve
+    - historical_dynamics is required when the family supports it
+      (``historical_dynamics_available`` folds in both a resolvable historical
       current-static membership x historical member facts AND the orchestrator
-      runtime actually wires the ObservationSeries -> Dynamics chain
-      (``historical_dynamics_available`` folds in
-      ``historical_dynamics_runtime_wired``).  This round it is not wired for
-      any family, so dynamics is propagated as a present-but-unavailable layer
-      and never falsely gates readiness.
+      runtime actually wiring the ObservationSeries -> Dynamics chain
+      (``historical_dynamics_runtime_wired``)).  Activated families now wire it,
+      so dynamics readiness is genuinely required.
+    - leadership is required when the runtime wires it
+      (``leadership_available`` folds in ``leadership_runtime_wired``).  Activated
+      families now wire it via compute_leadership_migration; readiness requires
+      it and the orchestrator injects the real migration result.
     - member_attribution is required when the family is persistence-activated
       (attribution consumes canonical scope aggregate + members).
-    - internal_structure_facts / leadership stay present-only (propagated when
-      provided); the report does not gate readiness on them.
+    - internal_structure_facts stays present-only (propagated when provided); the
+      report does not gate readiness on it.
     """
     required = {"scope_observation"}
     if capability.historical_dynamics_available:
         required.add("historical_dynamics")
+    if capability.leadership_available:
+        required.add("leadership")
     if capability.member_attribution_available:
         required.add("member_attribution")
     return frozenset(required)
@@ -201,6 +195,7 @@ def compose_canonical_review_scope(
             "scope_type": capability.scope_type,
             "persistence_activated": capability.persistence_activated,
             "historical_dynamics_available": capability.historical_dynamics_available,
+            "leadership_available": capability.leadership_available,
             "member_attribution_available": capability.member_attribution_available,
             "reason": capability.reason,
         },
@@ -215,7 +210,6 @@ def compose_canonical_review_scope(
 
 __all__ = [
     "COMPOSITION_LAYER_KEYS",
-    "LEADERSHIP_NOT_RUNTIME_WIRED_REASON",
     "STATUS_READY",
     "STATUS_INSUFFICIENT",
     "STATUS_UNAVAILABLE",

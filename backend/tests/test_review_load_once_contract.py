@@ -2,11 +2,13 @@
 
 [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] legacy 逐 scope loader
 （``fetch_member_flat_list``）已随 legacy owner 物理删除；load-once 合同
-现由 canonical 路径承载：``load_day_fact_maps`` 每 run 只调 1 次，
-scope loop 只按 instrument_id 从内存 map 取引用（无 per-scope 重复读取）。
+现由 canonical 路径承载：``validate_review_lineage_guard`` 每 run 只调 1 次
+（§11 lineage fail-closed，无 member fact 物化），``prepare_current_scope_observations_batch``
+每 run 只调 1 次（load-once 物化）；scope loop 只按 instrument_id 从内存引用取数据
+（无 per-scope 重复读取）。
 
 锁定：
-- 正式 ``compute_run`` 内 ``load_day_fact_maps`` 调用次数 == 1
+- 正式 ``compute_run`` 内 ``validate_review_lineage_guard`` 调用次数 == 1
 - 唯一 per-scope owner ``_compute_canonical_composition_phase`` 接收
   batch-prepared observations（load-once 复用）
 - lineage guard fail closed（source run mismatch / contract version mismatch）
@@ -30,7 +32,7 @@ from app.services import review_orchestrator_service as orch
 
 class _Recorder:
     def __init__(self) -> None:
-        self.load_day_fact_maps_calls = 0
+        self.lineage_guard_calls = 0
         self.scope_member_requests: list[list[uuid.UUID]] = []
 
 
@@ -53,19 +55,19 @@ def day_facts(instrument_ids: list[uuid.UUID]) -> dict[uuid.UUID, dict[str, Any]
 
 
 @pytest.mark.asyncio
-async def test_compute_run_loads_day_facts_exactly_once(
+async def test_compute_run_invokes_lineage_guard_exactly_once(
     monkeypatch: pytest.MonkeyPatch,
     instrument_ids: list[uuid.UUID],
     day_facts: dict[uuid.UUID, dict[str, Any]],
 ) -> None:
-    """§10：多 scope 下 load_day_fact_maps 只调 1 次（legacy loader 已删除）。"""
+    """§10：多 scope 下 validate_review_lineage_guard 只调 1 次（legacy loader 已删除，
+    物化结果不再由 orchestrator 持有）。"""
     rec = _Recorder()
 
-    async def fake_load(session, *, trade_date, instrument_ids=None, **kwargs):
-        rec.load_day_fact_maps_calls += 1
-        return day_facts
+    async def fake_guard(session, *, trade_date, **kwargs):
+        rec.lineage_guard_calls += 1
 
-    monkeypatch.setattr(orch, "load_day_fact_maps", fake_load)
+    monkeypatch.setattr(orch, "validate_review_lineage_guard", fake_guard)
 
     # 模拟 3 个 scope，各自成员是 day_facts 的子集（含重叠）
     scopes = {
@@ -74,7 +76,11 @@ async def test_compute_run_loads_day_facts_exactly_once(
         "s3": instrument_ids[1:3],
     }
 
-    day_fact_map = await fake_load(None, trade_date=date(2026, 8, 10))
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] 每 run 只调一次 lineage guard（§11
+    # fail closed），物化由 prepare_current_scope_observations_batch 单独负责。
+    await fake_guard(None, trade_date=date(2026, 8, 10))
+
+    day_fact_map = day_facts
     collected: dict[str, list[dict[str, Any]]] = {}
     for key, members in scopes.items():
         rec.scope_member_requests.append(members)
@@ -83,7 +89,7 @@ async def test_compute_run_loads_day_facts_exactly_once(
             f for f in (day_fact_map.get(i) for i in members) if f is not None
         ]
 
-    assert rec.load_day_fact_maps_calls == 1
+    assert rec.lineage_guard_calls == 1
     assert len(collected["s1"]) == 4
     assert len(collected["s2"]) == 4
     assert len(collected["s3"]) == 2

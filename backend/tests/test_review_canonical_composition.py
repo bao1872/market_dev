@@ -16,6 +16,7 @@ from app.domain.review.canonical_composition import (
     STATUS_READY,
     STATUS_UNAVAILABLE,
     ReviewCompositionError,
+    _required_layers,
     compose_canonical_review_scope,
 )
 from app.domain.review.review_capability import (
@@ -54,12 +55,13 @@ def test_activation_set_is_the_frozen_4() -> None:
 
 
 @pytest.mark.parametrize("family", ["industry_l1", "industry_l2", "industry_l3", "concept"])
-def test_activated_families_persist_but_dynamics_not_yet_runtime_wired(family: str) -> None:
-    """activated 家族现状：persistence/membership/attribution 均可用。
+def test_activated_families_dynamics_and_leadership_runtime_wired(family: str) -> None:
+    """[REVIEW-BACKEND-FINAL-CLOSURE] Phase 3 已接 Dynamics + Leadership runtime。
 
-    ``historical_dynamics_available`` 本轮为 False —— orchestrator runtime 尚未
-    接入 ObservationSeries -> Scope Dynamics 链（SCALE GATE deferred）；这是诚实的
-    探索期状态，不是永久架构，也不回退 legacy。
+    activated 家族（industry_l1/l2/l3/concept）persistence/membership/attribution 均可用；
+    ``historical_dynamics_runtime_wired`` 与 ``leadership_runtime_wired`` 在 persistence
+    激活后翻转为 True；对应 ``historical_dynamics_available`` / ``leadership_available``
+    为 True；Composition ``_required_layers`` 显式纳入这两层。
     """
     cap = _cap(family)
     assert cap.persistence_activated is True
@@ -67,11 +69,15 @@ def test_activated_families_persist_but_dynamics_not_yet_runtime_wired(family: s
     assert cap.historical_membership_available is True
     assert cap.canonical_observation_available is True
     assert cap.member_attribution_available is True
-    # runtime wiring 未落地 -> dynamics 明确 unavailable_current（结构化 reason）
-    assert cap.historical_dynamics_available is False
-    assert cap.historical_dynamics_runtime_wired is False
-    assert cap.reason is not None
-    assert "not_runtime_wired" in cap.reason
+    # Phase 3 runtime wiring 已落地
+    assert cap.historical_dynamics_runtime_wired is True
+    assert cap.leadership_runtime_wired is True
+    assert cap.historical_dynamics_available is True
+    assert cap.leadership_available is True
+    assert "historical_dynamics" in _required_layers(cap)
+    assert "leadership" in _required_layers(cap)
+    # 占位 reason 已删除：available 为真时 reason 应为 None
+    assert cap.reason is None
 
 
 def test_market_is_not_activated_and_historical_pit_is_a_gap_not_architecture() -> None:
@@ -167,15 +173,25 @@ def test_composition_unavailable_precedence_wins() -> None:
     assert r["composition_readiness"] == STATUS_UNAVAILABLE
 
 
-def test_present_only_unavailable_dynamics_does_not_gate_readiness() -> None:
-    """本轮 historical_dynamics 未 runtime-wired → 结构化 unavailable 层存在但
-    不 gating（``_required_layers`` 只在 ``capability.historical_dynamics_available``
-    为 True 时才 required）。orchestrator runtime 正是依赖这一点：leadership /
-    dynamics 恒为 structured unavailable，但 observation + attribution ready 时
-    composition 仍 ready —— 否则 activated scope 永远无法发布。
+def test_unavailable_required_dynamics_gates_readiness() -> None:
+    """[REVIEW-BACKEND-FINAL-CLOSURE] Phase 3 已接 Dynamics runtime，
+    ``historical_dynamics_available`` 翻转为 True → ``historical_dynamics`` 进入
+    ``_required_layers``。当该 required 层结构化 unavailable（例如该 scope 不在家族
+    dynamics batch 的 map 中）时，composition 必须 unavailable（绝不静默 ready，
+    绝不回退 legacy）。这与 member_attribution 的 required 语义一致。
     """
     ob, _dyn, struct, lead, attr = _layers()
-    dyn = {"status": STATUS_UNAVAILABLE}
+    dyn = {"status": STATUS_UNAVAILABLE, "reason": "not_in_batch_map"}
+    r = _compose(
+        "industry_l1", scope_observation=ob, historical_dynamics=dyn,
+        internal_structure_facts=struct, leadership=lead, member_attribution=attr,
+    )
+    assert r["composition_readiness"] == STATUS_UNAVAILABLE
+
+
+def test_required_dynamics_ready_publishes() -> None:
+    """对照：dynamics 作为 required 层为 ready 时，activated scope composition 可发布。"""
+    ob, dyn, struct, lead, attr = _layers()
     r = _compose(
         "industry_l1", scope_observation=ob, historical_dynamics=dyn,
         internal_structure_facts=struct, leadership=lead, member_attribution=attr,
