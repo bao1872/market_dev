@@ -633,6 +633,85 @@ async def fetch_historical_member_facts(
     return facts
 
 
+def _validate_history_state_lineage(
+    current_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState],
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState],
+    *,
+    trade_date: date,
+    required_source_history_run_id: uuid.UUID | None,
+    required_history_contract_version: str,
+) -> None:
+    """Validate replay CURRENT/PREVIOUS lineage without performing I/O."""
+    for instrument_id, current in current_by_instrument.items():
+        current_run_id = getattr(current, "source_history_run_id", None)
+        if current_run_id is None:
+            raise ValueError(
+                f"HISTORY_STATE_CURRENT_SOURCE_RUN_NULL: instrument={instrument_id} "
+                f"trade_date={trade_date}（history_state 模式 CURRENT T 状态 "
+                f"必须携带 source_history_run_id）"
+            )
+        current_version = getattr(current, "history_contract_version", None)
+        if current_version != required_history_contract_version:
+            raise ValueError(
+                f"HISTORY_STATE_CURRENT_CONTRACT_MISMATCH: instrument={instrument_id} "
+                f"expected={required_history_contract_version} got={current_version!r}"
+            )
+        if (
+            required_source_history_run_id is not None
+            and current_run_id != required_source_history_run_id
+        ):
+            raise ValueError(
+                f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={instrument_id} "
+                f"required={required_source_history_run_id!r} got={current_run_id!r}"
+            )
+        previous = previous_by_instrument.get(instrument_id)
+        if previous is None:
+            continue
+        previous_run_id = getattr(previous, "source_history_run_id", None)
+        if previous_run_id != current_run_id:
+            raise ValueError(
+                f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={instrument_id} "
+                f"current={current_run_id!r} previous={previous_run_id!r} "
+                f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
+            )
+        previous_version = getattr(previous, "history_contract_version", None)
+        if previous_version != required_history_contract_version:
+            raise ValueError(
+                f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={instrument_id} "
+                f"current={required_history_contract_version!r} "
+                f"previous={previous_version!r}"
+            )
+
+
+def _validate_stock_core_previous_lineage(
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState],
+    *,
+    trade_date: date,
+    required_source_history_run_id: uuid.UUID | None,
+    required_history_contract_version: str,
+) -> None:
+    """Validate stock-core historical baselines without performing I/O."""
+    if required_source_history_run_id is None:
+        return
+    for instrument_id, previous in previous_by_instrument.items():
+        previous_run_id = getattr(previous, "source_history_run_id", None)
+        if previous_run_id != required_source_history_run_id:
+            raise ValueError(
+                f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
+                f"{required_source_history_run_id!r} got={previous_run_id!r} "
+                f"for instrument={instrument_id} trade_date={trade_date}"
+            )
+        previous_version = getattr(previous, "history_contract_version", None) or (
+            previous.state_payload or {}
+        ).get("history_contract_version")
+        if previous_version != required_history_contract_version:
+            raise ValueError(
+                f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
+                f"expected={required_history_contract_version} got={previous_version!r} "
+                f"for trade_date={trade_date}"
+            )
+
+
 async def load_day_fact_maps(
     session: AsyncSession,
     *,
@@ -745,63 +824,20 @@ async def load_day_fact_maps(
     #       previous(< T) 必须 shared current 的 source run + contract version
     #   - stock_core 模式：previous 必须匹配绑定的 canonical history source（旧逻辑）。
     if current_source == "history_state":
-        for _iid, _cur in latest_by_instrument.items():
-            _cur_run = getattr(_cur, "source_history_run_id", None)
-            if _cur_run is None:
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_NULL: instrument={_iid} "
-                    f"trade_date={trade_date}（history_state 模式 CURRENT T 状态 "
-                    f"必须携带 source_history_run_id）"
-                )
-            if getattr(_cur, "history_contract_version", None) != _required_version:
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_CONTRACT_MISMATCH: instrument={_iid} "
-                    f"expected={_required_version} got="
-                    f"{getattr(_cur, 'history_contract_version', None)!r}"
-                )
-            if (
-                required_source_history_run_id is not None
-                and _cur_run != required_source_history_run_id
-            ):
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={_iid} "
-                    f"required={required_source_history_run_id!r} got={_cur_run!r}"
-                )
-            _prev = previous_by_instrument.get(_iid)
-            if _prev is not None:
-                _prev_run = getattr(_prev, "source_history_run_id", None)
-                if _prev_run != _cur_run:
-                    raise ValueError(
-                        f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={_iid} "
-                        f"current={_cur_run!r} previous={_prev_run!r} "
-                        f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
-                    )
-                if getattr(_prev, "history_contract_version", None) != _required_version:
-                    raise ValueError(
-                        f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={_iid} "
-                        f"current={_required_version!r} previous="
-                        f"{getattr(_prev, 'history_contract_version', None)!r}"
-                    )
+        _validate_history_state_lineage(
+            latest_by_instrument,
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
     else:
-        # [REVIEW-FACT-PARITY-02 §11] stock_core 模式：previous 必须匹配绑定 canonical source。
-        if required_source_history_run_id is not None:
-            for _iid, _prev in previous_by_instrument.items():
-                _prev_run = getattr(_prev, "source_history_run_id", None)
-                if _prev_run != required_source_history_run_id:
-                    raise ValueError(
-                        f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
-                        f"{required_source_history_run_id!r} got={_prev_run!r} "
-                        f"for instrument={_iid} trade_date={trade_date}"
-                    )
-                _ver = getattr(_prev, "history_contract_version", None) or (
-                    _prev.state_payload or {}
-                ).get("history_contract_version")
-                if _ver != _required_version:
-                    raise ValueError(
-                        f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
-                        f"expected={_required_version} got={_ver!r} "
-                        f"for trade_date={trade_date}"
-                    )
+        _validate_stock_core_previous_lineage(
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
 
     previous_payloads: dict[uuid.UUID, dict[str, Any]] = {
         iid: state.state_payload for iid, state in previous_by_instrument.items()
@@ -1071,51 +1107,20 @@ async def validate_review_lineage_guard(
             previous_by_instrument[_s.instrument_id] = _s
 
     if current_source == "history_state":
-        for _iid, _cur in latest_by_instrument.items():
-            _cur_run = getattr(_cur, "source_history_run_id", None)
-            if (
-                required_source_history_run_id is not None
-                and _cur_run != required_source_history_run_id
-            ):
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={_iid} "
-                    f"required={required_source_history_run_id!r} got={_cur_run!r}"
-                )
-            _prev = previous_by_instrument.get(_iid)
-            if _prev is not None:
-                _prev_run = getattr(_prev, "source_history_run_id", None)
-                if _prev_run != _cur_run:
-                    raise ValueError(
-                        f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={_iid} "
-                        f"current={_cur_run!r} previous={_prev_run!r} "
-                        f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
-                    )
-                if getattr(_prev, "history_contract_version", None) != _required_version:
-                    raise ValueError(
-                        f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={_iid} "
-                        f"current={_required_version!r} previous="
-                        f"{getattr(_prev, 'history_contract_version', None)!r}"
-                    )
+        _validate_history_state_lineage(
+            latest_by_instrument,
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
     else:
-        # [REVIEW-FACT-PARITY-02 §11] stock_core 模式：previous 必须匹配绑定 canonical source。
-        if required_source_history_run_id is not None:
-            for _iid, _prev in previous_by_instrument.items():
-                _prev_run = getattr(_prev, "source_history_run_id", None)
-                if _prev_run != required_source_history_run_id:
-                    raise ValueError(
-                        f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
-                        f"{required_source_history_run_id!r} got={_prev_run!r} "
-                        f"for instrument={_iid} trade_date={trade_date}"
-                    )
-                _ver = getattr(_prev, "history_contract_version", None) or (
-                    _prev.state_payload or {}
-                ).get("history_contract_version")
-                if _ver != _required_version:
-                    raise ValueError(
-                        f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
-                        f"expected={_required_version} got={_ver!r} "
-                        f"for trade_date={trade_date}"
-                    )
+        _validate_stock_core_previous_lineage(
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
         # stock_core 模式二次确认 canonical history source 就绪（fail closed）。
         if required_source_history_run_id is not None and current_source == "stock_core":
             from app.services.review_history_readiness_service import (

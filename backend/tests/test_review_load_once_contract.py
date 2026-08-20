@@ -150,83 +150,118 @@ class _FakeState:
         self.trade_date = date(2026, 8, 10)
 
 
-def _guard_source_run(
-    states: list[_FakeState],
-    *,
-    required_source_history_run_id: uuid.UUID | None,
-    required_version: str,
-) -> None:
-    """复刻 load_day_fact_maps 的 §11 lineage guard 判定。"""
-    for state in states:
-        ver = state.history_contract_version or (state.state_payload or {}).get(
-            "history_contract_version"
-        )
-        if ver != required_version:
-            raise ValueError(
-                f"HISTORY_CONTRACT_VERSION_MISMATCH: expected={required_version} got={ver!r}"
-            )
-        src = state.source_history_run_id
-        if src is None:
-            raise ValueError("HISTORY_SOURCE_RUN_MISSING")
-        if (
-            required_source_history_run_id is not None
-            and src != required_source_history_run_id
-        ):
-            raise ValueError(
-                f"HISTORY_SOURCE_RUN_MISMATCH: required={required_source_history_run_id!r} got={src!r}"
-            )
-
-
 _VERSION = "review-history-v2"
 
 
-def test_lineage_guard_passes_on_matching_source_run() -> None:
-    run_id = uuid.uuid4()
-    states = [
-        _FakeState(uuid.uuid4(), source_history_run_id=run_id, history_contract_version=_VERSION)
-        for _ in range(3)
-    ]
-    _guard_source_run(
-        states, required_source_history_run_id=run_id, required_version=_VERSION
+def _history_state_pair(
+    *,
+    current_source: uuid.UUID | None,
+    current_version: str = _VERSION,
+    previous_source: uuid.UUID | None = None,
+    previous_version: str = _VERSION,
+) -> tuple[uuid.UUID, dict[uuid.UUID, _FakeState], dict[uuid.UUID, _FakeState]]:
+    instrument_id = uuid.uuid4()
+    previous_source = current_source if previous_source is None else previous_source
+    return (
+        instrument_id,
+        {
+            instrument_id: _FakeState(
+                instrument_id,
+                source_history_run_id=current_source,
+                history_contract_version=current_version,
+            )
+        },
+        {
+            instrument_id: _FakeState(
+                instrument_id,
+                source_history_run_id=previous_source,
+                history_contract_version=previous_version,
+            )
+        },
     )
 
 
-def test_lineage_guard_fails_closed_on_source_run_mismatch() -> None:
-    """§11：不得重新 resolve latest 导致 lineage drift。"""
-    bound = uuid.uuid4()
-    other = uuid.uuid4()
-    states = [
-        _FakeState(uuid.uuid4(), source_history_run_id=bound, history_contract_version=_VERSION),
-        _FakeState(uuid.uuid4(), source_history_run_id=other, history_contract_version=_VERSION),
-    ]
-    with pytest.raises(ValueError, match="HISTORY_SOURCE_RUN_MISMATCH"):
-        _guard_source_run(
-            states, required_source_history_run_id=bound, required_version=_VERSION
-        )
+def test_history_state_lineage_valid_path() -> None:
+    from app.services.review_scope_service import _validate_history_state_lineage
 
-
-def test_lineage_guard_fails_closed_on_missing_source_run() -> None:
-    states = [
-        _FakeState(uuid.uuid4(), source_history_run_id=None, history_contract_version=_VERSION)
-    ]
-    with pytest.raises(ValueError, match="HISTORY_SOURCE_RUN_MISSING"):
-        _guard_source_run(
-            states, required_source_history_run_id=None, required_version=_VERSION
-        )
-
-
-def test_lineage_guard_fails_closed_on_contract_version_mismatch() -> None:
     run_id = uuid.uuid4()
-    states = [
-        _FakeState(
-            uuid.uuid4(),
-            source_history_run_id=run_id,
-            history_contract_version="review-history-v1",
+    _, current, previous = _history_state_pair(current_source=run_id)
+    _validate_history_state_lineage(
+        current,
+        previous,
+        trade_date=date(2026, 8, 10),
+        required_source_history_run_id=run_id,
+        required_history_contract_version=_VERSION,
+    )
+
+
+@pytest.mark.parametrize(
+    ("case", "expected"),
+    [
+        ({"current_source": None}, "HISTORY_STATE_CURRENT_SOURCE_RUN_NULL"),
+        (
+            {"current_source": uuid.uuid4(), "current_version": "review-history-v1"},
+            "HISTORY_STATE_CURRENT_CONTRACT_MISMATCH",
+        ),
+        (
+            {"current_source": uuid.uuid4(), "required_source": uuid.uuid4()},
+            "HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH",
+        ),
+        (
+            {"current_source": uuid.uuid4(), "previous_source": uuid.uuid4()},
+            "HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH",
+        ),
+        (
+            {"current_source": uuid.uuid4(), "previous_version": "review-history-v1"},
+            "HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH",
+        ),
+    ],
+)
+def test_history_state_lineage_fails_closed(
+    case: dict[str, Any], expected: str,
+) -> None:
+    from app.services.review_scope_service import _validate_history_state_lineage
+
+    required_source = case.pop("required_source", case.get("current_source"))
+    _, current, previous = _history_state_pair(**case)
+    with pytest.raises(ValueError, match=expected):
+        _validate_history_state_lineage(
+            current,
+            previous,
+            trade_date=date(2026, 8, 10),
+            required_source_history_run_id=required_source,
+            required_history_contract_version=_VERSION,
         )
-    ]
-    with pytest.raises(ValueError, match="HISTORY_CONTRACT_VERSION_MISMATCH"):
-        _guard_source_run(
-            states, required_source_history_run_id=run_id, required_version=_VERSION
+
+
+@pytest.mark.parametrize(
+    ("source_matches", "version", "expected"),
+    [
+        (False, _VERSION, "HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH"),
+        (True, "review-history-v1", "HISTORY_CONTRACT_VERSION_MISMATCH"),
+    ],
+)
+def test_stock_core_previous_lineage_fails_closed(
+    source_matches: bool, version: str, expected: str,
+) -> None:
+    from app.services.review_scope_service import _validate_stock_core_previous_lineage
+
+    required_source = uuid.uuid4()
+    instrument_id = uuid.uuid4()
+    previous_source = required_source if source_matches else uuid.uuid4()
+    previous = {
+        instrument_id: _FakeState(
+            instrument_id,
+            source_history_run_id=previous_source,
+            history_contract_version=version,
+        )
+    }
+    with pytest.raises(ValueError, match=expected):
+        _validate_stock_core_previous_lineage(
+            previous,
+            trade_date=date(2026, 8, 10),
+            required_source_history_run_id=required_source,
+            required_history_contract_version=_VERSION,
         )
 
 
@@ -260,6 +295,19 @@ def test_canonical_history_binding_reassigns_new_jsonb_dict() -> None:
         "不得把同一 dict 对象赋回 metadata_json（就地修改不会被判脏）"
     )
     assert "**metadata" in src, "必须展开为新 dict 以触发 JSONB 变更检测"
+
+
+def test_resume_validates_lineage_before_preparing_observations() -> None:
+    """resume 必须在昂贵的 member fact 物化前 fail closed。"""
+    import inspect
+
+    src = inspect.getsource(orch.resume_run)
+    assert src.index("await _bind_or_reuse_canonical_history_source") < src.index(
+        "await validate_review_lineage_guard"
+    )
+    assert src.index("await validate_review_lineage_guard") < src.index(
+        "await prepare_current_scope_observations_batch"
+    )
 
 
 def test_canonical_composition_phase_accepts_prepared_observations() -> None:

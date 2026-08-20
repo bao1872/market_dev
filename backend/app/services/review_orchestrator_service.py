@@ -705,14 +705,7 @@ async def compute_run(
         canonical_contract_version,
     ) = await _bind_or_reuse_canonical_history_source(session, run)
 
-    # [REVIEW-FACT-PARITY-02 §10] load-once：整个 compute_run 只调用一次
-    # load_day_fact_maps，scope loop 只按 instrument_id 从内存 map 取**引用**。
-    # 禁止每 scope 再调 fetch_member_flat_list（date × scope × 400 日 bars 重复读取
-    # 是此前 Review OOM 的主因），禁止 deepcopy / JSON roundtrip / per-scope rebuild。
-    # lineage 由 §11 guard 在 loader 内 fail closed。
-    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] load-once lineage guard（§11 fail closed）。
-    # 原 load_day_fact_maps 的 member fact 物化结果从未被 composition 消费（死代码），
-    # 抽离为 validate_review_lineage_guard：只做 lineage 校验，不做重物化。
+    # 每个 run 只执行一次轻量 lineage guard；member fact 由后续 batch owner 物化。
     await validate_review_lineage_guard(
         session,
         trade_date=run.trade_date,
@@ -1365,7 +1358,7 @@ async def _persist_canonical_scope_observation(
     dynamics_map: dict[str, Any] | None = None,
     leadership_map: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """双写规范 Scope Observation 七段事实到 ReviewScopeObservationFact。
+    """持久化规范 Scope Observation 并生成 canonical composition。
 
     [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 返回:
     - canonical 六键 composition dict 当 canonical fact 成功计算并落库时；
@@ -1466,9 +1459,7 @@ async def _persist_canonical_scope_observation(
         )
         return None
 
-    # CORRECTION: 规范事实层双写必须在 nested transaction / savepoint 内执行。
-    # 若 canonical DB flush 失败，仅回滚该 savepoint，外层 legacy transaction
-    # （metrics/signal）仍可继续提交，互不污染。
+    # 规范事实与 composition 在同一 savepoint 内执行，失败时原子回滚本 scope。
     async with session.begin_nested():
         observation = compute_scope_observation(
             scope_type=prep.scope_type,
@@ -1495,10 +1486,9 @@ async def _persist_canonical_scope_observation(
 
         # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] Canonical Review Composition —
         # the unique composition point.  Layers are produced ONLY by their single
-        # canonical owners (never re-derived); runtime-unwired layers are carried
-        # as explicit unavailable_current with a structured reason (never a
-        # legacy fallback).  composition_readiness is recorded into run metadata
-        # so the publication gate consumes canonical readiness, not P/Q/U/C/V.
+        # canonical owners (never re-derived). Missing upstream layers remain
+        # explicit unavailable_current with a structured reason. Readiness is
+        # recorded into run metadata for the publication gate.
         # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5.5] Leadership 真实 T-1 → T migration：
         # 由 compute_run/resume_run 在 scope 循环前按家族批量调用唯一 owner
         # compute_scope_leadership_batch，一次性加载 [T-1, T] member facts 并建立
@@ -1652,9 +1642,22 @@ async def resume_run(
         key = (item.scope_type, item.scope_key)
         scopes_to_redo.setdefault(key, set()).add(item.phase)
 
-    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 规范事实层唯一 batch owner：
-    # 对待重算 scope 集合一次 batch prepare。这是 resume 的强制主链前置步骤，
-    # 失败 fail closed（不隔离、不回退 legacy）。
+    # 先复用已绑定的 canonical history source 并验证 lineage。失败时在任何
+    # observation 物化前 fail closed，避免对无效 lineage 做重计算。
+    (
+        resume_canonical_source_run_id,
+        resume_canonical_contract_version,
+    ) = await _bind_or_reuse_canonical_history_source(session, run)
+    await validate_review_lineage_guard(
+        session,
+        trade_date=run.trade_date,
+        source_core_run_id=run.source_core_run_id,
+        required_source_history_run_id=resume_canonical_source_run_id,
+        required_history_contract_version=resume_canonical_contract_version,
+        current_source="stock_core",
+    )
+
+    # 对待重算 scope 集合一次 batch prepare，失败时直接终止。
     redo_specs = [
         ScopeReplaySpec(
             scope_type=scope_type,
@@ -1673,26 +1676,6 @@ async def resume_run(
         prepared_observations = await prepare_current_scope_observations_batch(
             session, run.trade_date, redo_specs
         )
-
-    # [REVIEW-ATOMIC-BUSINESS-CUTOVER / UNIFY] resume 与 compute_run 必须调用
-    # SAME per-scope owner（_compute_canonical_composition_phase），绝不保留第二套
-    # per-scope 业务结果。绑定 canonical history source（绑定已存在则复用，
-    # 绝不重新解析 latest），使 resume 重算的 scope 与主路径产生完全一致的
-    # canonical composition 事实集合。
-    (
-        resume_canonical_source_run_id,
-        resume_canonical_contract_version,
-    ) = await _bind_or_reuse_canonical_history_source(session, run)
-    # load-once lineage guard（与主路径同：§11 fail closed）；
-    # 返回值不被 composition phase 消费（fact 经 batch prepare 传入）。
-    await validate_review_lineage_guard(
-        session,
-        trade_date=run.trade_date,
-        source_core_run_id=run.source_core_run_id,
-        required_source_history_run_id=resume_canonical_source_run_id,
-        required_history_contract_version=resume_canonical_contract_version,
-        current_source="stock_core",
-    )
 
     # 对每个需要重处理的 scope，执行与 compute_run 完全相同的 per-scope owner。
     # 正式 scope 解析一次（补全 taxonomy_compatibility_key），供整段 resume 复用。

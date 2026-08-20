@@ -6,11 +6,10 @@ regression contracts from §11.  No DB, no network.
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import date
 from typing import Any
-
-import json
 
 import pytest
 
@@ -421,6 +420,16 @@ def test_amount_shares_sum_one_and_raw_hhi_consistent() -> None:
     expected = (1 / 6) ** 2 + (1 / 2) ** 2 + (1 / 3) ** 2 + 0.0
     assert conc["raw_hhi"] == pytest.approx(expected)
     assert conc["normalized_hhi"] == pytest.approx((expected - 0.25) / 0.75)
+
+
+def test_amount_contributions_are_supplier_order_independent() -> None:
+    from app.domain.review.scope_observation import compute_member_amount_contributions
+
+    members = [_m("c", amount=1e16), _m("a", amount=1.0), _m("b", amount=1.0)]
+    forward = compute_member_amount_contributions(members)
+    reverse = compute_member_amount_contributions(list(reversed(members)))
+    assert forward == reverse
+    assert [member.member_id for member in forward.members] == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------------------

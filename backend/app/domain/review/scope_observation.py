@@ -429,7 +429,7 @@ def compute_member_amount_contributions(
                 amount=amount,
                 amount_share=None,
             )
-            for member_id, amount in valid
+            for member_id, amount in valid_sorted
         )
     else:
         contributions = tuple(
@@ -438,7 +438,7 @@ def compute_member_amount_contributions(
                 amount=amount,
                 amount_share=amount / total_amount,
             )
-            for member_id, amount in valid
+            for member_id, amount in valid_sorted
         )
 
     return AmountContributionFacts(
