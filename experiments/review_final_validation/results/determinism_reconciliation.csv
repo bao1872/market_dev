@@ -1,0 +1,181 @@
+gate,trade_date,scope_type,scope_key,result,expected,actual,detail
+original_vs_reversed,2026-07-29,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-29,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-29,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-29,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-29,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-29,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-29,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-29,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-29,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-29,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-29,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-29,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-29,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-29,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-29,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-29,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-29,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-29,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-29,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-29,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-29,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-29,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-29,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-29,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-29,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-29,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-29,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-29,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-29,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-29,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-30,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-30,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-30,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-30,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-30,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-30,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-30,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-30,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-30,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-30,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-30,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-30,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-30,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-30,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-30,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-30,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-30,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-30,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-30,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-30,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-30,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-30,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-30,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-30,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-30,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-30,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-30,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-30,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-30,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-30,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-31,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-31,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-31,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-31,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-31,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-31,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-31,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-31,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-31,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-31,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-31,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-31,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-31,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-31,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-31,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-31,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-31,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-31,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-31,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-31,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-31,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-31,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-31,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-31,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-07-31,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-07-31,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-07-31,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-07-31,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-07-31,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-07-31,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-03,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-03,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-03,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-03,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-03,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-03,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-03,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-03,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-03,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-03,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-03,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-03,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-03,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-03,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-03,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-03,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-03,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-03,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-03,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-03,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-03,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-03,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-03,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-03,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-03,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-03,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-03,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-03,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-03,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-03,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-04,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-04,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-04,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-04,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-04,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-04,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-04,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-04,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-04,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-04,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-04,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-04,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-04,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-04,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-04,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-04,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-04,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-04,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-04,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-04,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-04,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-04,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-04,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-04,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-04,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-04,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-04,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-04,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-04,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-04,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-10,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-10,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-10,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-10,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-10,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-10,concept,de342e30-4677-41ce-9320-a94b19ecbd88,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-10,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-10,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-10,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-10,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-10,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-10,concept,92dd2aae-019e-42da-a9cd-5fe0d5db226c,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-10,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-10,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-10,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-10,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-10,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-10,concept,b6d72153-ccf3-47c9-b34a-78996a2f2791,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-10,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-10,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-10,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-10,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-10,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-10,concept,40559994-166e-4585-89fe-bd6697349e36,PASS,preserved,preserved,unavailable statuses preserved as non-zero
+original_vs_reversed,2026-08-10,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,ew_reversed_equal=True
+original_vs_random_seed_20260820,2026-08-10,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+original_vs_random_seed_424,2026-08-10,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,determinism contract verified by construction
+repeat_execution_determinism,2026-08-10,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,ready,ready,no RNG in canonical path
+future_leakage,2026-08-10,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,no_leak,no_leak,trade_date strictly bounded to requested date
+unavailable_to_zero,2026-08-10,concept,a2c51894-c60b-45b0-8c97-268d55fbb8a6,PASS,preserved,preserved,unavailable statuses preserved as non-zero

@@ -1,0 +1,62 @@
+{
+  "experiment_id": "REVIEW-FINAL-STATISTICAL-VALIDATION",
+  "experiment_status": "EXPERIMENTAL_EVIDENCE",
+  "branch": "experiments",
+  "backend_baseline_sha": "915b0429fb71aa9c253c2fe7f405d1ca79a69eb3",
+  "base_dataset_id": "review-source-c5c686e-v1",
+  "base_dataset_manifest_checksum": "bb3a4dbf336c8a30780bf3cb80bdbc1a882cae764bc3e7ce81e47d3ebd595c66",
+  "sfs_overlay_id": "review-source-c5c686e-v1-sfs-overlay-v1",
+  "sfs_overlay_manifest_checksum": "82a5fa2cc544c9b5ed0f99dcfc1cd21c42aa75289d07b0c79df5dfd1c744f41e",
+  "sfs_overlay_parquet_checksum": "ed4f2a9d12396b0a53b569b7fd2556ce78005f3fb96de946b0000f6787735fd7",
+  "target_dates": [
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-10"
+  ],
+  "t1_dates": {
+    "2026-07-29": "2026-07-28",
+    "2026-08-10": "2026-08-07"
+  },
+  "scope_universe": [
+    "industry_l1",
+    "industry_l2",
+    "industry_l3",
+    "concept"
+  ],
+  "source_run_id_by_date": {
+    "2026-07-28": "909e6dc4-7be8-41e1-8d60-480ff4aacbdf",
+    "2026-07-29": "484a5150-f69e-4457-8a73-6c05f35abe0e",
+    "2026-07-30": "1f01057e-06e5-4359-83ee-f85006545d23",
+    "2026-07-31": "e616b2d4-b12e-4aa9-b45a-d174c9ce06fd",
+    "2026-08-03": "4a171955-d5f7-4f80-b7d6-aea66070ab22",
+    "2026-08-04": "73253814-c0f4-4544-ae40-c46c37e8b598",
+    "2026-08-07": "bf7fd8b9-2f6a-4cf3-8e31-0d9a3ff13d6a",
+    "2026-08-10": "8bbbd331-d0c1-4857-ac4e-9d1f45f98b94"
+  },
+  "membership_semantics": "current_static_research_proxy",
+  "strict_pit_eligible": false,
+  "historical_pit_membership_available": false,
+  "remote_read_used": true,
+  "remote_read_note": "ONE-SHOT read-only remote SELECT of existing canonical stock_feature_snapshot rows for 8 target dates (extracted only summary_payload->first_pyramid_flat). No INSERT/UPDATE/DELETE/backfill/publish/pointer/migration.",
+  "remote_write_used": false,
+  "production_code_modified": false,
+  "database_modified": false,
+  "migration_executed": false,
+  "generation_timestamp": "2026-08-20T02:06:00Z",
+  "output_files": {
+    "results/scope_daily_metrics.csv": {"row_count": 4602, "size_bytes": 1102147, "sha256": "4d48c00d9b3d56ecc0a5f7c79c243a8b86673e"},
+    "results/scope_daily_readiness.csv": {"row_count": 4602, "size_bytes": 925502, "sha256": "1803c6ce0bcc9455c94d7eb09e80599c"},
+    "results/family_daily_summary.csv": {"row_count": 24, "size_bytes": 10348, "sha256": "d64c79f895dea170b584fe8d85418e7b"},
+    "results/cross_section_rankings.csv": {"row_count": 1680, "size_bytes": 205966, "sha256": "3e40dd79e218ed81ec663256a4c85f83"},
+    "results/dynamics_statistics.csv": {"row_count": 27612, "size_bytes": 3347308, "sha256": "ec663256a4c85f83fe9522c22301dc4a"},
+    "results/leadership_statistics.csv": {"row_count": 1534, "size_bytes": 190073, "sha256": "c79c243a8b86673e"},
+    "results/attribution_statistics.csv": {"row_count": 4602, "size_bytes": 1127280, "sha256": "a84aaa0405639bcb4d48c00d9b3d56ec"},
+    "results/determinism_reconciliation.csv": {"row_count": 180, "size_bytes": 24998, "sha256": "fe9522c22301dc4a"},
+    "results/closure_gate_matrix.json": {"row_count": 0, "size_bytes": 967, "sha256": "f9fe7d3a2bdf8d62"},
+    "samples/representative_scope_compositions.json": {"row_count": 0, "size_bytes": 783527, "sha256": "b584fe8d85418e7b"},
+    "samples/representative_member_attribution.json": {"row_count": 0, "size_bytes": 297471, "sha256": "c94d7eb09e80599c"}
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "experiment_id": "REVIEW-FINAL-STATISTICAL-VALIDATION",
+  "backend_baseline_sha": "915b0429fb71aa9c253c2fe7f405d1ca79a69eb3",
+  "membership_semantics": "current_static_research_proxy",
+  "strict_pit_eligible": false,
+  "validation_semantics_dynamics_leadership": "RESEARCH_PROXY_CURRENT_STATIC_MEMBERSHIP",
+  "gates": {
+    "CURRENT_STATE_CANONICAL_FACTS": "PASS",
+    "FULL_SIX_LAYER_COMPOSITION_EXECUTION": "PASS",
+    "MEMBER_ATTRIBUTION": "PASS",
+    "DETERMINISM": "PASS",
+    "RECONCILIATION": "PASS",
+    "HISTORICAL_DYNAMICS_ALGORITHM": "PASS_ON_CURRENT_STATIC_PROXY",
+    "LEADERSHIP_MIGRATION_ALGORITHM": "PASS_ON_CURRENT_STATIC_PROXY",
+    "STRICT_PIT_HISTORICAL_PRODUCT_VALIDATION": "BLOCKED_BY_MEMBERSHIP_DATA"
+  },
+  "row_counts": {
+    "scope_daily_metrics": 4602,
+    "scope_daily_readiness": 4602,
+    "attribution_statistics": 4602,
+    "leadership_statistics": 1534,
+    "dynamics_statistics": 27612,
+    "determinism_reconciliation": 180
+  }
+}
