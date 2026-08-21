@@ -233,6 +233,11 @@ jobs:
       PURE_UNIT_TEST: "1"
       APP_ENV: test
       REDIS_URL: redis://localhost:6379/15
+      # capture_main.py 在 import 时会 os.makedirs(CAPTURE_STATIC_DIR, exist_ok=True)。
+      # 其默认值 /app/static/captures 是容器路径约定，CI runner 无权限创建 /app，
+      # 会导致任意 import app.capture_main 的测试 collection 报 PermissionError。
+      # 这里只在本次纯单元测试 job 覆盖为可写路径（生产容器内默认不变）。
+      CAPTURE_STATIC_DIR: /tmp/panji-ci-captures
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
