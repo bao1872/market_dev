@@ -88,6 +88,7 @@ def _real_payload(
         trade_date=trade_date,
         pit_member_ids=[f"m{i}" for i in range(member_count)],
         members=members,
+        event_coverage_member_ids=None,
     )
 
 

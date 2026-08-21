@@ -22,6 +22,7 @@
 >
 > **PRODUCT CONTRACT = FINAL**。
 > Dynamics Phase 六类的 exact numerical contract 已冻结（见 §7.11「Dynamics Phase Numerical Contract（FROZEN）」）。
+> Leadership Migration exact algorithm 已冻结（见 §7.10「Leadership Migration Numerical Contract（FROZEN）」）。
 > Internal Structure Type / Trading Context 的 exact threshold、
 > conflict priority、tie-break 仍属于 **ALGORITHM MAPPING REQUIRED**。
 > 这不代表 Product Contract 未冻结。
@@ -1093,7 +1094,27 @@ Internal Structure Dynamics 消费 §7.7.5 定义的 Observation Series 契约�
 
 **Return Dispersion 冻结（v2.3）**：price-valid member 1D Return 的 **population standard deviation**；公式语义 `sqrt( Σ(Return_i − mean(Return))² / N )`。`N < 2` 时 unavailable。不是 sample std、不是 MAD、不是 IQR、不是 variance。
 
-**Capital Tilt / Concentration / Leadership Migration 语义冻结（v2.3）**：Capital Tilt 保持 `Amount-weighted Return − Equal-weight Return`；Concentration 保持 Price/Amount Normalized HHI；Leadership Migration 产品语义冻结为 `member contribution = Amount Share × Return` 比较连续交易日成员贡献排名是否稳定/迁移，但 exact rank-stability algorithm（Spearman / Top-N overlap / 其他 method）继续标 **ALGORITHM MAPPING REQUIRED**，不要在 PRD 里现在选一个未经数据验证的公式。
+**Capital Tilt / Concentration / Leadership Migration 语义冻结（v2.3）**：Capital Tilt 保持 `Amount-weighted Return − Equal-weight Return`；Concentration 保持 Price/Amount Normalized HHI；Leadership Migration 产品语义冻结为 `member contribution = Amount Share × Return` 比较连续交易日成员贡献排名是否稳定/迁移。
+
+#### Leadership Migration Numerical Contract（FROZEN）
+
+Leadership Migration exact algorithm 已在真实本地数据（4 scopes × 60 trading days）经 mapping 验证，现正式冻结如下：
+
+1. **Raw Contribution**（沿用 §7.10 既有 owner）：`Contribution_{i,T} = AmountShare_{i,T} × Return_{1d,i,T}`。`amount_share` 唯一来源为 `compute_member_amount_contributions`；`return_1d` 来自 MemberObservation；任一 unavailable → `contribution = None`；真实 0 → `contribution = 0`。禁止 Leadership Migration 再算一套 amount denominator。
+2. **Scope Direction**：唯一来源为 canonical `equal_weight_return`（`compute_scope_observation()["price"]["equal_weight_return"]`）。`D_T = +1` 当 `EW_T > 0`，`-1` 当 `EW_T < 0`。`EW = None`（unavailable）或 `EW = 0`（no prevailing direction）→ Leadership Snapshot unavailable（不得 None→0、不得 member_id 伪排名）。
+3. **Direction-Aligned Contribution**：`Aligned_{i,T} = Contribution_{i,T} × D_T`。回答「是否推动 Scope 当天主要方向」；原始 contribution 保留，不被覆盖。
+4. **Leader Candidate Universe**：仅 `Aligned_{i,T} > 0` 成员进入；`= 0` 非 leader；`< 0` 逆势/对立成员（排除）。
+5. **Ranking（FROZEN）**：`aligned_score DESC, member_id ASC`。无其他 tie-break。
+6. **Coverage（FROZEN）**：`LEADERSHIP_COVERAGE = 0.50`。令 `P_T = Σ_{i:Aligned_{i,T}>0} Aligned_{i,T}`；Leader Set `L_T` = 按 ranking 排序、达到 `Σ_{i∈L_T} Aligned_{i,T} / P_T ≥ 0.50` 的**最小前缀**。不是 Top-N，不动态调 40/60%。
+7. **无 minimum-member threshold**：1 个有效 leader 即合法 Leader Set；小 Scope 自然允许更小 Leader Set。
+8. **Snapshot Availability**：`EW` unavailable（Case A）→ `status=unavailable, leader_set=None`；`EW=0`（Case B）→ `status=unavailable, reason=no_prevailing_direction`；`EW` 有方向但无 `Aligned>0`（Case C）→ `status=ready, leader_set=[], leader_count=0`（合法空，`None ≠ []`）。
+9. **Transition Availability**：任一 snapshot unavailable → Migration `status=unavailable`（禁止 unavailable→leader_count 0、unavailable→migration 0）。若参与比较的任一 Leader Set 合法为空（`[]`）→ Migration `status=unavailable, reason=empty_leader_set`（fail-closed，不定义 empty→empty = stable 或 empty→nonempty = 100% migration）。
+10. **Primary Stability（FROZEN）**：`Jaccard Stability J_T = |L_{T-1} ∩ L_T| / |L_{T-1} ∪ L_T|`，字段 `jaccard_stability`，范围 `[0,1]`。同时感知 exits 与 entrants。
+11. **Migration Scalar（FROZEN）**：`LeadershipMigration_T = 1 − J_T`，字段 `migration`，范围 `[0,1]`。这是结构变化事实，非风险/机会/买卖信号；禁止命名 leadership_score / rotation_score / risk_score / confidence。
+12. **Supporting Fact**：`Previous Retention R_T = |L_{T-1} ∩ L_T| / |L_{T-1}|`，字段 `previous_retention`。不参与 Migration 公式；禁止综合评分（如 `0.7J + 0.3R`）。
+13. **Transparent Set-change Facts**：输出 `previous_leader_count / current_leader_count / retained_count / entrant_count / exit_count`，其中 `Retained = L_{T-1} ∩ L_T`、`Entrants = L_T − L_{T-1}`、`Exits = L_{T-1} − L_T`；并保留 `previous_leader_ids / current_leader_ids / entrant_ids / exit_ids` 供 Member Attribution / drill-down。
+
+**Internal Structure Type 五类分类（Broadening / Core-led / Rotating 等）仍标 `ALGORITHM MAPPING REQUIRED`**，不得与 Leadership Migration 一并冻结（属 Interpretation 层）。
 
 这四类 Internal Structure Fact 同样可以消费 Position / Velocity / Acceleration / Persistence，形成内部结构时序。
 
@@ -1278,7 +1299,7 @@ Mapping 依赖按层级拆解，**互不阻塞、各自独立 ready**：
   - priority = NONE（无 priority chain）；
   - tie-break 不需要（一个 ready observation 最多匹配一个 Phase）；
   - ready-but-unclassified 已冻结（status = ready / phase = null）。
-- **B. Internal Structure Type Mapping 依赖 = ALGORITHM MAPPING REQUIRED**：Internal Structure 四类事实（Breadth / Capital Tilt / Concentration / Leadership Migration）真实数据。依赖链：L1 → Internal Structure facts → 五类 Internal Structure Type 分类 Algorithm Mapping。与 Dynamics Phase mapping 并行独立，不等待 A。其中 Leadership Migration 的 exact rank-stability algorithm（Spearman / Top-N overlap / 其他 method）仍标 ALGORITHM MAPPING REQUIRED，不要在 PRD 里现在选一个未经数据验证的公式。
+- **B. Internal Structure Type Mapping 依赖 = ALGORITHM MAPPING REQUIRED**：Internal Structure 四类事实（Breadth / Capital Tilt / Concentration / Leadership Migration）真实数据。依赖链：L1 → Internal Structure facts → 五类 Internal Structure Type 分类 Algorithm Mapping。与 Dynamics Phase mapping 并行独立，不等待 A。其中 **Leadership Migration exact algorithm 已冻结**（见 §7.10「Leadership Migration Numerical Contract（FROZEN）」：coverage=0.50 / aligned_score DESC + member_id ASC / Jaccard primary / Migration=1−Jaccard / Retention supporting），**但五类 Internal Structure Type 分类本身的 threshold / conflict priority / tie-break 仍标 ALGORITHM MAPPING REQUIRED**，不要在 PRD 里现在选一个未经数据验证的分类公式。
 - **C. Trading Context Mapping 依赖 = ALGORITHM MAPPING REQUIRED**：Dynamics Phase（A）与 Internal Structure Type（B）均 ready 后，再冻结五类 Trading Context 的 mapping。Trading Context 消费 Phase × Type 组合，因此是**最晚**解锁的一层；但 A / B 未 ready 不阻塞 L1 / L2 / Cross-sectional / Historical Dynamics 开发。
 
 分层原则：三者 mapping 各自独立 ready，任一层的 threshold 数据尚未产生时，其余层不得被该层阻塞；已 ready 层可以先行冻结，无需等待全链。

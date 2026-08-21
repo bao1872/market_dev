@@ -7,17 +7,12 @@ from typing import Any
 
 import pytest
 
-from app.api.review import _attribution_to_dto, _instrument_to_dto
 from app.domain.review import attribution_engine
 from app.domain.review.attribution_engine import (
     aggregate_child_scope_attributions,
     aggregate_instrument_attributions,
     classify_instrument_board_role,
     classify_instrument_relation_to_scope,
-)
-from app.models.market_review import (
-    MarketReviewSignalAttribution,
-    MarketReviewSignalInstrument,
 )
 from app.services import review_attribution_service as service
 from app.services.board_membership_service import PITMembership
@@ -250,38 +245,7 @@ def test_instrument_attribution_preserves_master_identity_and_role_evidence() ->
 
 
 def test_review_attribution_dtos_expose_hierarchy_and_instrument_evidence() -> None:
-    signal_id = uuid.uuid4()
-    snapshot_id = uuid.uuid4()
-    attribution = MarketReviewSignalAttribution(
-        id=uuid.uuid4(),
-        signal_id=signal_id,
-        child_scope_type="industry_l2",
-        child_scope_key="child",
-        child_scope_name="子行业",
-        source_board_snapshot_id=snapshot_id,
-        taxonomy_version="tax-2",
-        taxonomy_compatibility_key="qstock-industry-v1",
-        membership_version="m-2",
-        eligible_count=10,
-        ready_count=9,
-        data_quality_json={"status": "ready"},
-    )
-    attribution_dto = _attribution_to_dto(attribution)
-    assert attribution_dto.sourceBoardSnapshotId == str(snapshot_id)
-    assert attribution_dto.membershipVersion == "m-2"
-    assert attribution_dto.dataQuality == {"status": "ready"}
-
-    instrument = MarketReviewSignalInstrument(
-        id=uuid.uuid4(),
-        signal_id=signal_id,
-        instrument_id=uuid.uuid4(),
-        symbol="600000",
-        name="浦发银行",
-        source_snapshot_id=snapshot_id,
-        contribution_payload={"components": {"P": 1.0}},
-        role_evidence={"rank": 1},
-    )
-    instrument_dto = _instrument_to_dto(instrument)
-    assert instrument_dto.sourceSnapshotId == str(snapshot_id)
-    assert instrument_dto.contributionPayload == {"components": {"P": 1.0}}
-    assert instrument_dto.roleEvidence == {"rank": 1}
+    # [REVIEW-BACKEND-FINAL-CLOSURE] legacy signal/discovery/tracking API DTO helpers
+    # (_attribution_to_dto / _instrument_to_dto) 已随 Phase 5 退休删除；其底层
+    # attribution_engine 领域逻辑由本文件其余用例覆盖，本用例不再验证已删除的 DTO。
+    pytest.skip("legacy attribution DTO helpers retired in Phase 5")

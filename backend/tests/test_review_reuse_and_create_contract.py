@@ -5,7 +5,7 @@
 - T6: Admin 复用 signals_ready run 时 **不 recompute**
       —— compute_run.call_count == 0 且 resume_run.call_count == 0。
 - T7: Admin 复用 partial/failed run 时走 `resume_run(only_pending=True)`，
-      且 succeeded scope **不进入** `_compute_scope_pipeline`，
+      且 succeeded scope **不进入** per-scope owner（`_compute_scope_metrics_phase`），
       failed / 可重试 scope 才进入。
 - T8: 公共合同锁死
       `create_run(...) -> MarketReviewRun`
@@ -274,12 +274,20 @@ async def test_t7_resume_run_only_pending_skips_succeeded_scopes():
     with (
         patch.object(ros, "list_run_items", AsyncMock(return_value=items)),
         patch.object(
-            ros, "_compute_scope_pipeline", AsyncMock(return_value=1),
-        ) as m_pipeline,
-        patch.object(
-            ros, "evaluate_all_active_trackings", AsyncMock(return_value=0),
+            ros, "prepare_current_scope_observations_batch", AsyncMock(return_value={}),
         ),
-        patch.object(ros, "update_run_signal_count", AsyncMock(return_value=0)),
+        patch.object(
+            ros, "_bind_or_reuse_canonical_history_source",
+            AsyncMock(return_value=(uuid.uuid4(), "h-v2")),
+        ),
+        patch.object(ros, "validate_review_lineage_guard", AsyncMock()),
+        patch.object(ros, "_resolve_all_discovery_scopes", AsyncMock(return_value=[])),
+        patch.object(
+            ros, "_compute_family_dynamics_maps", AsyncMock(return_value={}),
+        ),
+        patch.object(
+            ros, "_compute_canonical_composition_phase", AsyncMock(return_value=None),
+        ) as m_metrics,
         patch.object(ros, "_count_scope_status", AsyncMock(return_value=(1, 1))),
         patch.object(
             ros, "_aggregate_run_data_coverage", AsyncMock(return_value=0),
@@ -287,7 +295,7 @@ async def test_t7_resume_run_only_pending_skips_succeeded_scopes():
     ):
         result = await resume_run(session, run, only_pending=True)
 
-    redone = {call.args[2].scope_key for call in m_pipeline.call_args_list}
+    redone = {call.args[2].scope_key for call in m_metrics.call_args_list}
 
     # succeeded / skipped 绝不重跑
     assert "scope_ok" not in redone
@@ -317,12 +325,20 @@ async def test_t7_resume_run_only_pending_false_includes_succeeded():
     with (
         patch.object(ros, "list_run_items", AsyncMock(return_value=items)),
         patch.object(
-            ros, "_compute_scope_pipeline", AsyncMock(return_value=1),
-        ) as m_pipeline,
-        patch.object(
-            ros, "evaluate_all_active_trackings", AsyncMock(return_value=0),
+            ros, "prepare_current_scope_observations_batch", AsyncMock(return_value={}),
         ),
-        patch.object(ros, "update_run_signal_count", AsyncMock(return_value=0)),
+        patch.object(
+            ros, "_bind_or_reuse_canonical_history_source",
+            AsyncMock(return_value=(uuid.uuid4(), "h-v2")),
+        ),
+        patch.object(ros, "validate_review_lineage_guard", AsyncMock()),
+        patch.object(ros, "_resolve_all_discovery_scopes", AsyncMock(return_value=[])),
+        patch.object(
+            ros, "_compute_family_dynamics_maps", AsyncMock(return_value={}),
+        ),
+        patch.object(
+            ros, "_compute_canonical_composition_phase", AsyncMock(return_value=None),
+        ) as m_metrics,
         patch.object(ros, "_count_scope_status", AsyncMock(return_value=(2, 0))),
         patch.object(
             ros, "_aggregate_run_data_coverage", AsyncMock(return_value=0),
@@ -330,7 +346,7 @@ async def test_t7_resume_run_only_pending_false_includes_succeeded():
     ):
         await resume_run(session, run, only_pending=False)
 
-    redone = {call.args[2].scope_key for call in m_pipeline.call_args_list}
+    redone = {call.args[2].scope_key for call in m_metrics.call_args_list}
     assert redone == {"scope_ok", "scope_failed"}
 
 

@@ -185,8 +185,13 @@ def _median(values: Sequence[float | None]) -> float | None:
 
 
 def _sum(values: Sequence[float | None]) -> float | None:
-    """Sum of a finite subsequence (PRD §7.2 Total rule). None when empty."""
-    finite = [v for v in values if v is not None and math.isfinite(v)]
+    """Sum of a finite subsequence (PRD §7.2 Total rule). None when empty.
+
+    [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] Sorts the finite subsequence before
+    summing so the result is independent of supplier (DB fetch / scope-member)
+    order — float non-associativity can never change the total.
+    """
+    finite = sorted(v for v in values if v is not None and math.isfinite(v))
     if not finite:
         return None
     return sum(finite)
@@ -197,7 +202,7 @@ def _stdev(values: Sequence[float]) -> float | None:
 
     Returns ``None`` when fewer than 2 finite values (no dispersion space).
     """
-    finite = [v for v in values if v is not None and math.isfinite(v)]
+    finite = sorted(v for v in values if v is not None and math.isfinite(v))
     n = len(finite)
     if n < 2:
         return None
@@ -250,7 +255,7 @@ def _return_distribution(returns: Sequence[float]) -> dict[str, Any]:
             "p90": None,
             "valid_count": 0,
         }
-    mean = sum(returns) / len(returns)
+    mean = sum(sorted(returns)) / len(returns)
     ordered = sorted(returns)
     return {
         "mean": mean,
@@ -280,7 +285,7 @@ def _price_breadth(returns: Sequence[float], denominator: int) -> dict[str, Any]
 
 
 def _raw_hhi(shares: Sequence[float]) -> float:
-    return sum(share * share for share in shares)
+    return sum(share * share for share in sorted(shares))
 
 
 def _normalized_hhi(
@@ -336,7 +341,7 @@ def _price_concentration(returns: Sequence[float]) -> dict[str, Any]:
     ``member_count = len(returns)`` (all price-valid members), NOT the
     positive-return count.
     """
-    abs_returns = [abs(r) for r in returns]
+    abs_returns = sorted(abs(r) for r in returns)
     member_count = len(returns)
     total = sum(abs_returns)
 
@@ -411,7 +416,11 @@ def compute_member_amount_contributions(
             continue
         valid.append((member.member_id, amount))
 
-    total_amount = sum(amount for _, amount in valid)
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] Determinism fix: sum over a
+    # member_id-sorted sequence so float non-associativity can never depend on
+    # supplier (DB fetch / scope-member) order. Same formula, deterministic total.
+    valid_sorted = sorted(valid, key=lambda x: x[0])
+    total_amount = sum(amount for _, amount in valid_sorted)
 
     if total_amount <= _EPSILON:
         contributions = tuple(
@@ -420,7 +429,7 @@ def compute_member_amount_contributions(
                 amount=amount,
                 amount_share=None,
             )
-            for member_id, amount in valid
+            for member_id, amount in valid_sorted
         )
     else:
         contributions = tuple(
@@ -429,7 +438,7 @@ def compute_member_amount_contributions(
                 amount=amount,
                 amount_share=amount / total_amount,
             )
-            for member_id, amount in valid
+            for member_id, amount in valid_sorted
         )
 
     return AmountContributionFacts(
@@ -651,9 +660,14 @@ def _structure_level_label(internal: bool | None) -> str | None:
 
 def _aggregate_structure_events(
     events: Sequence[StructureEvent],
-    pit_set: set[str],
+    valid_event_members: set[str] | None,
 ) -> dict[str, Any]:
     """Aggregate T-day canonical immutable events into member-ratio facts (PRD §7.4 D).
+
+    ROUND-2.2B Coverage contract: the event denominator is PIT(T) ∩ coverage, NOT
+    ``len(pit_set)``.  ``valid_event_members`` is that intersection.  ``None``
+    means Event Coverage source is unavailable (structure-events unavailable);
+    a set means coverage is valid (possibly empty -> a legal zero-event day).
 
     Cells:
     - BOS / CHoCH / OB_CREATED / OB_ENTERED / OB_MITIGATED:
@@ -675,17 +689,30 @@ def _aggregate_structure_events(
     The event stream is retained here purely as structure-event EVIDENCE.
 
     ``member_count`` dedupes by member_id (a member firing the same cell multiple
-    times in one day still counts once).  Events whose ``member_id`` is not in
-    PIT(T) are ignored.  ``event_count`` may exceed ``member_count``.
+    times in one day still counts once).  ``event_count`` may exceed ``member_count``.
+
+    ROUND-2.2B EVT-COV-05/06: an event whose ``member_id`` is NOT in
+    ``valid_event_members`` (uncovered, or outside PIT) is excluded from the
+    numerator.  ROUND-2.2B EVT-COV-07: a member firing the same cell twice still
+    counts once in ``member_count`` but the raw count is preserved in ``event_count``.
     """
+    # Coverage unavailable -> structure-events unavailable (never a fake denominator=0).
+    if valid_event_members is None:
+        return {
+            "status": "unavailable",
+            "denominator": None,
+            "cells": {"leveled": {}, "extreme": {}},
+        }
+
     cells: dict[tuple, set[str]] = {}
     cells_event_count: dict[tuple, int] = {}
 
-    # member_ratio denominator is PIT(T) member count (PRD §7.4 D grammar), not the
-    # event count.  Events whose member is not PIT(T) are ignored.
-    denominator = len(pit_set)
+    # member_ratio denominator = PIT(T) ∩ coverage (PRD §7.4 D grammar with the
+    # ROUND-2.2B coverage gate), not the event count.
+    denominator = len(valid_event_members)
     for event in events:
-        if event.member_id not in pit_set:
+        if event.member_id not in valid_event_members:
+            # PIT member without coverage / outside PIT -> NOT counted in numerator.
             continue
         etype = event.event_type
         if etype in _RELEASE_EVENTS:
@@ -736,7 +763,10 @@ def _aggregate_structure_events(
     # REVIEW-V23-A-CORRECTION-3: no ``release_volume_ratio`` key here.  The Release
     # Volume Ratio is a member-first Current fact owned by compute_scope_observation
     # (from the canonical per-member snapshot fact), never an event-weighted median.
+    # ROUND-2.2B: coverage valid -> status="ready" (possibly empty cells for a legal
+    # zero-event day).  Never pre-generate a full zero-cell grid (avoid over-design).
     return {
+        "status": "ready",
         "cells": cells_out,
         "denominator": denominator,
     }
@@ -767,6 +797,8 @@ def compute_scope_observation(
     pit_member_ids_t1: Iterable[str] | None = None,
     members: Iterable[MemberObservation],
     events: Iterable[StructureEvent] | None = None,
+    t1_membership_available: bool = True,
+    event_coverage_member_ids: Iterable[str] | None,
 ) -> dict[str, Any]:
     """Compute objective Canonical Scope Observation facts (PRD §7.2-§7.7).
 
@@ -776,10 +808,45 @@ def compute_scope_observation(
     ``members`` carry the current canonical facts and must all belong to PIT(T).
     ``events`` are the canonical First Pyramid immutable structure events for T
     (PRD §7.4 D); ``None`` / empty yields an empty event aggregation.
+
+    ``t1_membership_available`` is the Transition availability gate (GAP-L1-
+    TRANSITION-T1).  A Transition is only meaningful on the PIT(T)∩PIT(T-1)
+    universe.  When the previous PIT membership is NOT reliably available
+    (``False``), the PIT(T-1) set must never be proxied by the current
+    membership, so all Transition distributions are forced unavailable
+    (denominator = 0, no transition keys) — even if a ``pit_member_ids_t1`` is
+    passed.  This keeps the Current L1 from ever forging a within-T T-1→T
+    migration.  Defaults to ``True`` (Historical Dynamics current-static path),
+    which preserves the existing behavior exactly.
+
+    ``event_coverage_member_ids`` is REQUIRED (no default).  It is the set of
+    members proven to have exact-T canonical Event lifecycle coverage
+    (conservative canonical-backfill contract, ROUND-2.2B).  ``None`` means the
+    Event Coverage source is unavailable -> structure-events are unavailable
+    (denominator=None, never 0).  A set (possibly empty) means coverage is valid
+    -> denominator = PIT(T) ∩ coverage; a legal zero-event day yields empty cells
+    but a real denominator.
     """
     member_list = list(members)
     pit_set = set(pit_member_ids)
-    t1_set = set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set()
+    # ROUND-2 GAP-L1-TRANSITION-T1 FIX: when the previous PIT membership is not
+    # truthfully available, the PIT(T-1) set is unusable for Transition — never
+    # fall back to the current membership (PIT(T)) to fake a T-1→T migration.
+    t1_set = (
+        set()
+        if not t1_membership_available
+        else (set(pit_member_ids_t1) if pit_member_ids_t1 is not None else set())
+    )
+    # ROUND-2.2B AUDIT FIX (F2): valid_event_members = PIT(T) ∩ coverage.
+    # ``None`` (coverage source unavailable), an EMPTY coverage set, or a coverage
+    # that is entirely OUTSIDE PIT (intersection == ∅) all collapse to ``None`` so
+    # the Core never emits a fake ``ready / denominator=0``.  A non-empty
+    # intersection (even if small) is a real coverage universe -> status=ready.
+    if event_coverage_member_ids is None:
+        valid_event_members = None
+    else:
+        covered = pit_set & set(event_coverage_member_ids)
+        valid_event_members = covered if covered else None
     _reject_if_invalid_members(member_list, pit_set)
 
     # PRICE universe — PIT(T) ∩ price candidate(T) ∩ finite exact-T1 return.
@@ -797,15 +864,20 @@ def compute_scope_observation(
     #   return_1d finite  AND  amount finite >= 0.
     # Weights are renormalized INSIDE the joint universe (never the amount-HHI
     # universe).  Equal-weight return uses the price-valid universe above.
-    aw_pairs: list[tuple[float, float]] = []
+    aw_pairs: list[tuple[str, float, float]] = []
     for m in member_list:
         r = _finite_or_none(m.return_1d)
         a = _finite_or_none(m.amount)
         if r is not None and a is not None and a >= 0.0:
-            aw_pairs.append((r, a))
-    aw_total_amount = sum(a for _, a in aw_pairs)
-    if aw_total_amount > _EPSILON and aw_pairs:
-        aw_return = sum(r * a for r, a in aw_pairs) / aw_total_amount
+            aw_pairs.append((m.member_id, r, a))
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 6] sort by member_id so the AW-return
+    # weighted sum is independent of supplier order.
+    aw_pairs_sorted = sorted(aw_pairs, key=lambda x: x[0])
+    aw_total_amount = sum(a for _, _, a in aw_pairs_sorted)
+    if aw_total_amount > _EPSILON and aw_pairs_sorted:
+        aw_return = (
+            sum(r * a for _, r, a in aw_pairs_sorted) / aw_total_amount
+        )
     else:
         aw_return = None
 
@@ -924,9 +996,11 @@ def compute_scope_observation(
         if m.volatility_phase is not None
         and FirstPyramidSemanticAdapter.squeeze(m.volatility_phase) is not None
     ]
-    # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream.
+    # STRUCTURE EVENTS (PRD §7.4 D) — canonical immutable event stream, gated by
+    # exact-T Event Coverage (ROUND-2.2B): denominator = PIT(T) ∩ coverage.
     event_facts = _aggregate_structure_events(
-        list(events) if events is not None else [], pit_set
+        list(events) if events is not None else [],
+        valid_event_members,
     )
 
     direction_labels = {

@@ -23,6 +23,12 @@ It is a **derived view**:
 - does NOT produce score / rank / direction / opportunity / risk / strong / weak
   semantics, and does NOT emit Leadership Migration or any interpretation.
 
+``compute_internal_structure_dynamics`` is the Stage-5 THIN COMPOSITION entry
+point: it calls ``compute_internal_structure`` for the three foundation facts and
+transparently carries an ALREADY-computed ``LeadershipMigrationFacts`` — it does
+not re-derive EW / AW / HHI / contribution / leader-set / Jaccard, and never
+emits interpretation labels (structure_type / stable / rotating / score / risk).
+
 Canonical inputs are consumed exclusively through the shared
 ``OBSERVATION_PRIMITIVES`` registry (the same single source of truth for
 path + extraction used by Analysis A / C1).  There is deliberately NO second
@@ -126,6 +132,41 @@ def compute_internal_structure(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def compute_internal_structure_dynamics(
+    payload: dict[str, Any],
+    leadership_migration: Any,
+) -> dict[str, Any]:
+    """Compose the complete Internal Structure Dynamics (Stage 5, PRD §14).
+
+    Thin composition entry point — it does NOT re-derive any algorithm.  It calls
+    the existing foundation owner ``compute_internal_structure`` for
+    Breadth / Capital Tilt / Concentration, and transparently carries the
+    ALREADY-computed ``LeadershipMigrationFacts`` (from
+    ``leadership_migration.compute_leadership_migration``).  No contribution /
+    snapshot / leader-set / Jaccard / EW / AW / HHI recomputation here.
+
+    Output exactly four keys:
+        ``{"breadth", "capital_tilt", "concentration", "leadership_migration"}``
+
+    Principles:
+      - Local availability: a ``leadership_migration`` with
+        ``status == "unavailable"`` is passed through as-is; it does NOT make the
+        other three foundation facts unavailable.
+      - No interpretation: this layer never emits structure_type / stable /
+        rotating / strong / weak / risk / opportunity / score / direction labels.
+      - Deterministic + non-mutating: neither ``payload`` nor
+        ``leadership_migration`` is modified.
+    """
+    foundation = compute_internal_structure(payload)
+    return {
+        "breadth": foundation["breadth"],
+        "capital_tilt": foundation["capital_tilt"],
+        "concentration": foundation["concentration"],
+        "leadership_migration": leadership_migration,
+    }
+
+
 __all__ = [
     "compute_internal_structure",
+    "compute_internal_structure_dynamics",
 ]

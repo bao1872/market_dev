@@ -21,11 +21,41 @@ from app.services.observation_prep import (
     check_observation_invariants,
     compute_exact_return,
 )
-from app.services.review_observation_prep_service import prepare_scope
-from app.services.volume_context import LONG_WINDOW
+from app.services.review_observation_prep_service import (
+    PreparedScope,
+    ScopeReplaySpec,
+    prepare_current_scope_observations_batch,
+)
 
 T = date(2026, 8, 11)
 T1 = date(2026, 8, 10)
+
+
+async def _prepare_one(
+    session: object,
+    scope_type: str,
+    scope_key: str,
+    trade_date: date,
+) -> PreparedScope:
+    """Single-scope convenience over the unique batch preparation owner.
+
+    [REVIEW-EXECUTION-PATH-CONSOLIDATION] 测试通过唯一 canonical owner
+    ``prepare_current_scope_observations_batch``（batch size = 1）进入，不再
+    依赖已删除的 ``prepare_scope`` 单 scope 入口。
+    """
+    prepared = await prepare_current_scope_observations_batch(
+        session,  # type: ignore[arg-type]
+        trade_date,
+        [
+            ScopeReplaySpec(
+                scope_type=scope_type,
+                scope_key=scope_key,
+                scope_name=scope_key,
+                member_ids=(),
+            )
+        ],
+    )
+    return prepared[scope_key]
 
 
 def _flat(
@@ -183,6 +213,7 @@ def test_added_member_excluded_from_transition() -> None:
         pit_member_ids=["a", "b"],
         pit_member_ids_t1=["a"],  # b added at T -> not in T-1 membership
         members=[a, added],
+        event_coverage_member_ids=None,
     )
     assert out["scope"]["pit_member_count"] == 2
     # even though b has a T-1 state, it is excluded from the transition set.
@@ -197,6 +228,7 @@ def test_removed_member_not_in_provided() -> None:
         pit_member_ids=["a"],
         pit_member_ids_t1=["a", "b"],
         members=[a],
+        event_coverage_member_ids=None,
     )
     assert out["scope"]["provided_member_count"] == 1
     assert out["scope"]["pit_member_count"] == 1
@@ -216,6 +248,7 @@ def test_invariant_checks_all_pass() -> None:
     out = compute_scope_observation(
         scope_type="industry_l1", scope_key="k", trade_date=T,
         pit_member_ids=["a", "b"], pit_member_ids_t1=["a", "b"], members=members,
+        event_coverage_member_ids=None,
     )
     checks = check_observation_invariants(out)
     assert checks, "expected non-empty checks"
@@ -223,7 +256,7 @@ def test_invariant_checks_all_pass() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Service: prepare_scope with mocked canonical loaders
+# Service: batch preparation owner with mocked canonical batch loaders
 # ---------------------------------------------------------------------------
 
 
@@ -258,18 +291,44 @@ async def _install_mocks(
             return ([], scope_key)
         return resolve(scope_type, scope_key, trade_date)
 
-    async def _fake_load_states(session, ids, trade_date):
-        if trade_date == T:
-            return states_t or {}
-        return states_t1 or {}
+    async def _fake_batch_calendar(session, trade_dates):
+        return dict.fromkeys(trade_dates, t1)
 
-    async def _fake_load_bar_facts(session, ids, trade_date):
-        if trade_date == T:
-            return bar_facts or {}
-        return t1_bar_facts or {}
+    async def _fake_batch_states(session, ids, trade_dates, t1_by_date):
+        out = {}
+        if T in trade_dates:
+            out[T] = states_t or {}
+        if T1 in trade_dates or T1 in t1_by_date.values():
+            out[T1] = states_t1 or {}
+        return out
 
-    async def _fake_load_structure_events(session, ids, trade_date):
-        return []
+    def _series(facts):
+        return prep_service._InstrumentBarSeries(
+            facts=tuple(facts),
+            dates=tuple(f.trade_date for f in facts),
+        )
+
+    async def _fake_batch_bars(session, ids, trade_dates):
+        # Batch loader returns ONE series per instrument covering the whole window
+        # [first-400d, last]; merge the per-date stubs and dedupe by trade_date.
+        out = {}
+        for iid in ids:
+            merged: dict[date, object] = {}
+            for f in (bar_facts or {}).get(iid, []):
+                merged[f.trade_date] = f
+            for f in (t1_bar_facts or {}).get(iid, []):
+                merged[f.trade_date] = f
+            if merged:
+                series_facts = [merged[d] for d in sorted(merged)]
+                out[iid] = _series(series_facts)
+        return out
+
+    async def _fake_batch_events(session, ids, trade_dates):
+        return {}
+
+    async def _fake_batch_coverage(session, ids, trade_dates):
+        # ROUND-2.2B: default coverage unavailable in pure-unit (no RunItem lineage).
+        return {}
 
     async def _fake_load_current_only(session, ids, trade_date):
         return current_only or {}
@@ -281,10 +340,12 @@ async def _install_mocks(
     monkeypatch.setattr(
         "app.services.review_scope_service.resolve_scope_members", _fake_resolve,
     )
-    monkeypatch.setattr(prep_service, "_load_states", _fake_load_states)
-    monkeypatch.setattr(prep_service, "_load_bar_facts", _fake_load_bar_facts)
+    monkeypatch.setattr(prep_service, "_load_batch_calendar", _fake_batch_calendar)
+    monkeypatch.setattr(prep_service, "_load_batch_states", _fake_batch_states)
+    monkeypatch.setattr(prep_service, "_load_batch_bars", _fake_batch_bars)
+    monkeypatch.setattr(prep_service, "_load_batch_events", _fake_batch_events)
     monkeypatch.setattr(
-        prep_service, "_load_structure_events", _fake_load_structure_events
+        prep_service, "_load_batch_backfill_event_coverage", _fake_batch_coverage
     )
     monkeypatch.setattr(
         prep_service,
@@ -320,7 +381,7 @@ def test_service_exact_t1_historical_pit_run(monkeypatch) -> None:
             states_t=states_t, states_t1=states_t1,
             bar_facts=bar_facts, t1_bar_facts=t1_bar_facts,
         )
-        prep = await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+        prep = await _prepare_one(_FakeSession(), "industry_l1", "k", T)
         return prep
 
     prep = asyncio.run(scenario())
@@ -356,7 +417,7 @@ def test_service_market_historical_guard_skips_shadow(monkeypatch) -> None:
             bar_facts={id_a: [_bar(id_a, T, 10.0)]},
             t1_bar_facts={id_a: [_bar(id_a, T1, 9.0)]},
         )
-        return await prepare_scope(_FakeSession(), "market", "market", T)
+        return await _prepare_one(_FakeSession(), "market", "market", T)
 
     prep = asyncio.run(scenario())
     # Historical Market shadow must NOT be computed from current active universe.
@@ -385,7 +446,7 @@ def test_service_pit_unavailable_industry(monkeypatch) -> None:
         monkeypatch.setattr(
             "app.services.review_scope_service.resolve_scope_members", fail_resolve,
         )
-        return await prepare_scope(_FakeSession(), "concept", "c", T)
+        return await _prepare_one(_FakeSession(), "concept", "c", T)
 
     prep = asyncio.run(scenario())
     assert prep.pit_status_t == "unavailable"
@@ -409,8 +470,8 @@ def test_service_preparation_deterministic(monkeypatch) -> None:
             bar_facts={id_a: [_bar(id_a, T, 10.0)]},
             t1_bar_facts={id_a: [_bar(id_a, T1, 9.0)]},
         )
-        p1 = await prepare_scope(_FakeSession(), "industry_l1", "s", T)
-        p2 = await prepare_scope(_FakeSession(), "industry_l1", "s", T)
+        p1 = await _prepare_one(_FakeSession(), "industry_l1", "s", T)
+        p2 = await _prepare_one(_FakeSession(), "industry_l1", "s", T)
         return p1, p2
 
     p1, p2 = asyncio.run(run())
@@ -578,8 +639,11 @@ def test_prep_carries_continuous_trend_facts() -> None:
         "available_bars": 250,
     }
     # structure_alignment_categorical 来自 raw flat_t（canonical categorical 字符串），
-    # 非 numeric continuous cast。
-    mo = build_member_observation(_raw(continuous=cont, flat_t={"structure_alignment": "aligned"}))
+    # 非 numeric continuous cast。ROUND-2.1 GAP-L1-STRUCTURE-ALIGNMENT-KEY FIX：
+    # 消费 canonical producer key ``fp_structure_alignment``（previous_state_to_flat
+    # 输出的正式 key）；旧 key ``structure_alignment`` 永不与 producer 匹配，导致
+    # member categorical 恒为 None。
+    mo = build_member_observation(_raw(continuous=cont, flat_t={"fp_structure_alignment": "aligned"}))
     assert mo.regime_strength == pytest.approx(0.7)
     assert mo.dsa_dir_bars == pytest.approx(3.0)
     assert mo.dsa_vwap_dev_pct == pytest.approx(-1.5)
@@ -651,25 +715,30 @@ def test_event_type_normalization_compatibility() -> None:
 async def test_loader_passes_internal_as_structure_level(monkeypatch) -> None:
     # 2026-08-13 CORRECTION: canonical event 的 ``internal`` 标志（Swing/Internal 独立
     # categorical 维度）必须在 loader 边界透传给 StructureEvent，不修改 producer。
+    # [REVIEW-EXECUTION-PATH-CONSOLIDATION] 批次 loader ``_load_batch_events`` 是唯一
+    # event loader；它经 ``_map_structure_event`` 透传 internal / level。
     from app.domain.review.scope_observation import StructureEvent, _aggregate_structure_events
 
-    async def _fake_load(session, ids, trade_date):
+    async def _fake_load(session, instrument_ids, trade_dates):
         # 模拟 loader 从 canonical FirstPyramidHistoryEvent row 构造 StructureEvent：
         #  - event_type 经 _normalize_event_type 归一（CHoCH 大小写）；
         #  - internal 标志从 payload 透传为 Structure Level 维度。
-        return [
-            StructureEvent(
-                member_id="INST1",
-                event_type=prep_service._normalize_event_type("CHoCH"),
-                direction="Up",
-                level=12.34,  # price-level evidence 保留
-                internal=True,  # Swing/Internal 维度
-            )
-        ]
+        return {
+            T: [
+                StructureEvent(
+                    member_id="INST1",
+                    event_type=prep_service._normalize_event_type("CHoCH"),
+                    direction="Up",
+                    level=12.34,  # price-level evidence 保留
+                    internal=True,  # Swing/Internal 维度
+                )
+            ]
+        }
 
-    monkeypatch.setattr(prep_service, "_load_structure_events", _fake_load)
+    monkeypatch.setattr(prep_service, "_load_batch_events", _fake_load)
 
-    events = await prep_service._load_structure_events(None, ["INST1"], T)
+    events_by_date = await prep_service._load_batch_events(None, ["INST1"], [T])
+    events = events_by_date[T]
     ev = events[0]
     assert isinstance(ev, StructureEvent)
     assert ev.internal is True  # Swing/Internal 维度透传
@@ -677,7 +746,11 @@ async def test_loader_passes_internal_as_structure_level(monkeypatch) -> None:
     assert ev.event_type == "CHoCH"  # 大小写已 normalize
 
     # 内部事件聚合为 Internal；price level 不进入 cell key。
-    agg = _aggregate_structure_events(events=events, pit_set={"INST1"})
+    # ROUND-2.2B: valid_event_members = PIT ∩ coverage = {INST1}.
+    agg = _aggregate_structure_events(
+        events=events, valid_event_members={"INST1"}
+    )
+    assert agg["status"] == "ready"
     cell = agg["cells"]["leveled"]["CHoCH_Up_Internal"]
     assert cell["member_count"] == 1
     assert "level" not in cell  # price level 已从聚合 key 移除
@@ -689,13 +762,13 @@ async def test_loader_passes_internal_as_structure_level(monkeypatch) -> None:
 # ---------------------------------------------------------------------------
 # The previous round only compared the helper against the canonical owner using
 # hand-built inputs (``history = vols[:-1]``, ``current = vols[-1]``).  That does
-# NOT exercise how the real ``prepare_scope`` actually passes the series, so a
-# production-path defect (T counted twice, or volume/amount desynchronised) could
-# pass unit tests while being wrong end to end.
+# NOT exercise how the real batch owner (``prepare_current_scope_observations_batch``)
+# actually passes the series, so a production-path defect (T counted twice, or
+# volume/amount desynchronised) could pass unit tests while being wrong end to end.
 #
 # These tests drive the REAL path:
-#   _load_bar_facts (mocked at the DB edge only)
-#     -> prepare_scope
+#   _load_batch_bar_facts (mocked at the DB edge only)
+#     -> prepare_current_scope_observations_batch (batch size = 1)
 #       -> build_member_observation
 #         -> canonical VolumeContext owner
 # and assert exact parity against ``compute_volume_context_series`` computed over
@@ -725,8 +798,8 @@ def _volume_parity_expected(volumes: list[float]) -> dict[str, float | None]:
     }
 
 
-def _run_prepare_scope_with_bars(monkeypatch, bars: list[DailyBarFact]):
-    """Drive the real prepare_scope with a member whose bar history is ``bars``."""
+def _run_batch_prepare_with_bars(monkeypatch, bars: list[DailyBarFact]):
+    """Drive the batch owner (size 1) with a member whose bar history is ``bars``."""
     import asyncio
 
     id_a = uuid.uuid4()
@@ -743,7 +816,7 @@ def _run_prepare_scope_with_bars(monkeypatch, bars: list[DailyBarFact]):
             bar_facts={id_a: bars},
             t1_bar_facts={id_a: [b for b in bars if b.trade_date == T1]},
         )
-        return await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+        return await _prepare_one(_FakeSession(), "industry_l1", "k", T)
 
     prep = asyncio.run(scenario())
     assert len(prep.members) == 1
@@ -751,10 +824,10 @@ def _run_prepare_scope_with_bars(monkeypatch, bars: list[DailyBarFact]):
 
 
 @pytest.mark.parametrize("n_bars", [19, 20, 21, 199, 200, 201])
-def test_prepare_scope_volume_parity_end_to_end(monkeypatch, n_bars: int) -> None:
-    """Real prepare_scope path must match the canonical owner exactly.
+def test_batch_prepare_volume_parity_end_to_end(monkeypatch, n_bars: int) -> None:
+    """Real batch owner (size 1) must match the canonical owner exactly.
 
-    Critically this also proves T is counted EXACTLY ONCE: if ``prepare_scope``
+    Critically this also proves T is counted EXACTLY ONCE: if the batch owner
     passed a history that still contained T (while ``volume_t`` re-appended it),
     the effective window would be shifted and these medians would diverge.
     """
@@ -772,7 +845,7 @@ def test_prepare_scope_volume_parity_end_to_end(monkeypatch, n_bars: int) -> Non
             d = date(2026, 1, 1) + __import__("datetime").timedelta(days=i)
         bars.append(_bar(id_a, d, close=10.0, amount=vol * 10.0, volume=vol))
 
-    member = _run_prepare_scope_with_bars(monkeypatch, bars)
+    member = _run_batch_prepare_with_bars(monkeypatch, bars)
     expected = _volume_parity_expected(volumes)
 
     assert member.volume_t == pytest.approx(volumes[-1])
@@ -830,7 +903,7 @@ def test_prepare_scope_volume_amount_stay_bar_aligned(monkeypatch) -> None:
         amount = None if i == 5 else vol * 10.0
         bars.append(_bar(id_a, d, close=10.0, amount=amount, volume=vol))
 
-    member = _run_prepare_scope_with_bars(monkeypatch, bars)
+    member = _run_batch_prepare_with_bars(monkeypatch, bars)
 
     # Volume facts must still match the canonical owner over the full volume series:
     # the missing amount must not truncate or shift the volume series at all.
@@ -856,6 +929,185 @@ def test_prepare_scope_volume_amount_stay_bar_aligned(monkeypatch) -> None:
     # The hole sits at its own original index, not collapsed away.
     assert raw.amount_history[5] is None
     assert raw.volume_history[5] == pytest.approx(volumes[5])
+
+
+# =============================================================================
+# C1a contract tests — freeze the current-only loader call contract.
+#
+# These tests exist because the existing tests above monkeypatch
+# ``_load_current_only_snapshot_facts`` wholesale (``_fake_load_current_only``)
+# WITHOUT asserting what the third positional argument actually is. That mock is
+# exactly what masked C1a: a list was being passed where a scalar ``date`` is
+# required, failing only under the real PG adapter. The tests below spy on the
+# real call boundary instead of replacing it, so the scalar-T contract is locked.
+# =============================================================================
+
+
+def _contract_current_only_fake(member_ids):
+    """Build the same scoped shape ``_fake_load_current_only`` returns, but the
+    loader below records the (session, ids, third_arg) triple so the call
+    contract can be asserted."""
+
+    async def _loader(session, ids, third_arg):
+        # Record the exact third positional argument the production caller passes.
+        _loader.last_call = (session, ids, third_arg)
+        # Same ``dict[str, dict]`` shape the real loader returns and the existing
+        # tests build via ``current_only={str(id): {...}}``.
+        scoped: dict[str, dict] = {}
+        for mid in member_ids:
+            scoped[str(mid)] = {
+                "bb_position": 0.5,
+                "bb_width": 1.0,
+                "release_volume_ratio": 2.5,
+                "main_current_contract_position": 1,
+                "main_force_net_position": 1,
+                "main_current_contract_turnover_rate": 0.1,
+                "main_force_turnover_rate": 0.1,
+            }
+        return scoped
+
+    _loader.last_call = None  # type: ignore[attr-defined]
+    return _loader
+
+
+async def _contract_resolve(session, scope_type, scope_key, *, trade_date):
+    # Same ``(list[uuid.UUID], str)`` shape as the real
+    # ``review_scope_service.resolve_scope_members``.
+    return [_CONTRACT_MEMBER_ID], scope_key
+
+
+_CONTRACT_MEMBER_ID = uuid.uuid4()
+
+
+def _install_contract_mocks(monkeypatch, current_only_loader):
+    """Minimal pure-unit mock set for the C1a contract tests. The current-only
+    loader is the REAL boundary we spy on; everything else is faked so no DB is
+    touched."""
+    async def _fake_previous(session, ref_date):
+        return date(2026, 1, 1)
+
+    monkeypatch.setattr(
+        "app.services.calendar_service.get_previous_trading_day_async",
+        _fake_previous,
+    )
+    monkeypatch.setattr(
+        "app.services.review_scope_service.resolve_scope_members", _contract_resolve
+    )
+    monkeypatch.setattr(
+        prep_service,
+        "_load_current_only_snapshot_facts",
+        current_only_loader,
+    )
+    async def _fake_empty(*a, **k):
+        return {}
+
+    monkeypatch.setattr(
+        prep_service, "_load_batch_calendar", _fake_empty
+    )
+    monkeypatch.setattr(prep_service, "_load_batch_states", _fake_empty)
+    monkeypatch.setattr(prep_service, "_load_batch_bars", _fake_empty)
+    monkeypatch.setattr(
+        prep_service, "_load_batch_events", _fake_empty
+    )
+    monkeypatch.setattr(
+        prep_service,
+        "_load_batch_backfill_event_coverage",
+        _fake_empty,
+    )
+
+
+def _contract_spec():
+    return ScopeReplaySpec(
+        scope_type="industry_l3",
+        scope_key="C1A_TEST",
+        scope_name="C1a Test",
+        member_ids=(),
+    )
+
+
+@pytest.mark.pure_unit
+async def test_c1a_single_date_loader_called_with_scalar_t(monkeypatch):
+    """T1: single-date preparation must call the current-only loader exactly once
+    with the scalar ``trade_date`` (NOT a one-element list)."""
+    loader = _contract_current_only_fake([_CONTRACT_MEMBER_ID])
+    _install_contract_mocks(monkeypatch, loader)
+
+    result = await prep_service.prepare_current_scope_observations_batch(
+        session=None, trade_date=T, scope_specs=[_contract_spec()]
+    )
+
+    assert loader.last_call is not None, "current-only loader was never called"
+    _session, _ids, third_arg = loader.last_call
+    # Must be a scalar date, never a list.
+    assert isinstance(third_arg, date)
+    assert not isinstance(third_arg, list)
+    assert third_arg == T
+    assert third_arg != [T]
+    # Single-date owner contract returns dict[str, PreparedScope].
+    assert "C1A_TEST" in result
+    assert result["C1A_TEST"].trade_date == T
+
+
+@pytest.mark.pure_unit
+async def test_c1a_leadership_multidate_still_scalar_t(monkeypatch):
+    """T2: a ``[T-1, T]`` Leadership preparation must STILL call the current-only
+    loader with scalar ``trade_date == T`` (NOT the multi-element
+    ``trade_dates`` list)."""
+    loader = _contract_current_only_fake([_CONTRACT_MEMBER_ID])
+    _install_contract_mocks(monkeypatch, loader)
+
+    result = await prep_service.prepare_current_scope_observations_batch(
+        session=None,
+        trade_date=T,
+        scope_specs=[_contract_spec()],
+        trade_dates=[T1, T],
+    )
+
+    assert loader.last_call is not None, "current-only loader was never called"
+    _session, _ids, third_arg = loader.last_call
+    assert isinstance(third_arg, date)
+    assert not isinstance(third_arg, list)
+    # Current-only facts are exact-T only; the loader must never receive the
+    # multi-date window.
+    assert third_arg == T
+    assert third_arg != [T1, T]
+    assert third_arg != [T - __import__("datetime").timedelta(days=1), T]
+
+
+@pytest.mark.pure_unit
+async def test_c1a_multidate_placement_t_minus_1_unavailable(monkeypatch):
+    """T3: in a multi-date series, the T-1 PreparedScope must NOT carry any
+    current-only facts (they are exact-T only), while the T PreparedScope must
+    carry the supplied exact-T current-only values."""
+    loader = _contract_current_only_fake([_CONTRACT_MEMBER_ID])
+    _install_contract_mocks(monkeypatch, loader)
+
+    result = await prep_service.prepare_current_scope_observations_batch(
+        session=None,
+        trade_date=T,
+        scope_specs=[_contract_spec()],
+        trade_dates=[T1, T],
+    )
+
+    scopes = result.get("C1A_TEST")
+    assert scopes is not None and len(scopes) == 2
+    # Ordered by effective_dates: [T1, T].
+    scope_t1, scope_t = scopes[0], scopes[1]
+    assert scope_t1.trade_date == T1
+    assert scope_t.trade_date == T
+
+    assert scope_t1.members, "T-1 scope should still have its membership"
+    assert scope_t.members, "T scope should still have its membership"
+
+    # T-1 current-only fields must be None (exact-T only, never backfilled).
+    for member in scope_t1.members:
+        assert member.release_volume_ratio is None
+        assert member.bb_position is None
+
+    # T carries the exact-T current-only values supplied by the loader.
+    for member in scope_t.members:
+        assert member.release_volume_ratio == pytest.approx(2.5)
+        assert member.bb_position == pytest.approx(0.5)
 
 
 # ---------------------------------------------------------------------------
@@ -891,7 +1143,7 @@ def test_current_only_snapshot_fields_match_flatten_producer_keys() -> None:
 
 
 def test_current_only_facts_flow_into_member_observation(monkeypatch) -> None:
-    """Exact-T snapshot facts must reach MemberObservation through prepare_scope."""
+    """Exact-T snapshot facts must reach MemberObservation through the batch owner."""
     import asyncio
 
     id_a = uuid.uuid4()
@@ -917,7 +1169,7 @@ def test_current_only_facts_flow_into_member_observation(monkeypatch) -> None:
                 }
             },
         )
-        return await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+        return await _prepare_one(_FakeSession(), "industry_l1", "k", T)
 
     member = asyncio.run(scenario()).members[0]
     assert member.release_volume_ratio == pytest.approx(2.5)
@@ -950,7 +1202,7 @@ def test_current_only_facts_absent_snapshot_yields_none(monkeypatch) -> None:
             bar_facts={id_a: [_bar(id_a, T1, 9.0), _bar(id_a, T, 10.0)]},
             current_only={},  # no consumable exact-T snapshot for this member
         )
-        return await prepare_scope(_FakeSession(), "industry_l1", "k", T)
+        return await _prepare_one(_FakeSession(), "industry_l1", "k", T)
 
     member = asyncio.run(scenario()).members[0]
     assert member.release_volume_ratio is None

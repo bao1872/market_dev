@@ -400,6 +400,7 @@ def _scope_payload(
         trade_date=date(2026, 8, 13),
         pit_member_ids=[m.member_id for m in members],
         members=members,
+        event_coverage_member_ids=None,
     )
 
 

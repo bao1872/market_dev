@@ -3,7 +3,7 @@
 职责（PRD70 V2 编排顺序）：
 1. create_run: 创建或复用 MarketReviewRun（幂等：唯一键 trade_date+source_runs+版本）
 2. compute_run: 执行完整流程
-   - [V2] 解析全部 Discovery scope 列表（market / major_index / style / 
+   - [V2] 解析全部 Discovery scope 列表（market / major_index / style /
      industry_l1 / industry_l2 / industry_l3 / concept 平行独立）
    - 每个范围：metrics → signals → attribution（短事务、独立 item）
    - 一个 scope 失败不阻塞其他 scope
@@ -43,7 +43,32 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+# [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 规范 Scope Observation 事实层
+# （PRD §7.2-§7.17 v2.3）是 orchestrator 的**唯一强制主链**：compute_run /
+# resume_run 只执行 canonical Scope Observation 计算与落库。legacy
+# P/Q/U/C/V→Filter→Signal→Attribution pipeline（owner A，已被 canonical
+# 覆盖）已物理移除出主链，不再作为 mandatory path。
+#
+# [REVIEW-EXECUTION-PATH-CONSOLIDATION] 规范事实层唯一 preparation owner =
+# ``prepare_current_scope_observations_batch``（一次解析 memberships + union facts +
+# slice）；orchestrator 不再逐 scope 调用单 scope 入口。
+from app.domain.review.analysis.internal_structure import compute_internal_structure
+from app.domain.review.analysis.leadership_migration import (
+    LeadershipSnapshot,
+    compute_leadership_migration,
+    serialize_leadership_migration,
+)
+from app.domain.review.analysis.member_attribution import compute_member_attribution
+from app.domain.review.canonical_composition import (
+    compose_canonical_review_scope,
+    structured_unavailable_layer,
+)
 from app.domain.review.filter_definitions import REVIEW_FILTER_VERSION
+from app.domain.review.review_capability import (
+    is_scope_observation_persistence_activated,
+    resolve_scope_capability,
+)
+from app.domain.review.scope_observation import compute_scope_observation
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
 from app.models.factor_publication import (
@@ -56,16 +81,23 @@ from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewRunItem,
-    MarketReviewScopeSnapshot,
 )
 from app.services.board_membership_service import list_universe_definitions_at
 from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
-from app.services.review_attribution_service import (
-    compute_signal_attributions,
-    compute_signal_instruments,
-)
-from app.services.review_bootstrap_service import (
+from app.services.observation_prep import check_observation_invariants
+from app.services.review_history_readiness_service import (
     validate_canonical_history_run_readiness,
+)
+from app.services.review_leadership_service import compute_scope_leadership_batch
+from app.services.review_observation_persistence_service import (
+    is_scope_observation_persistence_excluded,
+    save_scope_composition_snapshot,
+    save_scope_observation_fact,
+)
+from app.services.review_observation_prep_service import (
+    ScopeReplaySpec,
+    list_recent_trading_days,
+    prepare_current_scope_observations_batch,
 )
 from app.services.review_publication_service import (
     REVIEW_PUBLISH_MIN_COVERAGE,
@@ -73,37 +105,14 @@ from app.services.review_publication_service import (
     evaluate_publish_gate,
     publish_review,
 )
+from app.services.review_scope_dynamics_service import (
+    compute_current_static_scope_dynamics_batch,
+)
 from app.services.review_scope_service import (
-    ALL_DISCOVERY_SCOPE_TYPES,
     LEVEL1_SCOPE_TYPES,
-    OptionalScopeUnavailableError,
     ScopeDefinition,
-    ScopeSnapshotError,
-    apply_cross_section_percentiles,
-    compute_scope_metrics,
-    fetch_member_flat_list,
-    load_day_fact_maps,
-    resolve_scope_members,
+    validate_review_lineage_guard,
 )
-# [2026-08-13 双轨并存] 规范 Scope Observation 事实层（PRD §7.2-§7.17 v2.3）。
-# 以下三者在 shadow 路径已被真实数据验证契约/invariant/readiness；
-# 此处仅把它们接入 compute 主流程写入 ReviewScopeObservationFact，
-# 供 EvidenceDrawer / scope_evidence_service 消费。Discovery/筛选器/信号管线
-# 仍走 legacy P/Q/U/C/V（本轮不动），二者双轨并存。
-from app.domain.review.scope_observation import compute_scope_observation
-from app.services.observation_prep import check_observation_invariants
-from app.services.review_observation_prep_service import prepare_scope
-from app.services.review_observation_persistence_service import (
-    is_scope_observation_persistence_excluded,
-    save_scope_observation_fact,
-)
-from app.services.review_signal_service import (
-    SignalGenerationError,
-    find_previous_signals,
-    generate_signals_for_scope,
-    update_run_signal_count,
-)
-from app.services.review_tracking_service import evaluate_all_active_trackings
 
 logger = logging.getLogger("review_orchestrator_service")
 
@@ -126,8 +135,6 @@ RUN_STATUS_CANCELLED = "cancelled"
 
 # Item phase 枚举（与迁移 check constraint 一致）
 PHASE_METRICS = "metrics"
-PHASE_SIGNALS = "signals"
-PHASE_ATTRIBUTION = "attribution"
 PHASE_TRACKING = "tracking"
 
 # Item status 枚举
@@ -699,46 +706,86 @@ async def compute_run(
         canonical_contract_version,
     ) = await _bind_or_reuse_canonical_history_source(session, run)
 
-    # [REVIEW-FACT-PARITY-02 §10] load-once：整个 compute_run 只调用一次
-    # load_day_fact_maps，scope loop 只按 instrument_id 从内存 map 取**引用**。
-    # 禁止每 scope 再调 fetch_member_flat_list（date × scope × 400 日 bars 重复读取
-    # 是此前 Review OOM 的主因），禁止 deepcopy / JSON roundtrip / per-scope rebuild。
-    # lineage 由 §11 guard 在 loader 内 fail closed。
-    day_fact_map = await load_day_fact_maps(
+    # 每个 run 只执行一次轻量 lineage guard；member fact 由后续 batch owner 物化。
+    await validate_review_lineage_guard(
         session,
         trade_date=run.trade_date,
         source_core_run_id=run.source_core_run_id,
         required_source_history_run_id=canonical_source_run_id,
         required_history_contract_version=canonical_contract_version,
+        current_source="stock_core",
     )
     logger.info(
-        "[ReviewOrchestrator] load_day_fact_maps once: trade_date=%s facts=%d "
+        "[ReviewOrchestrator] lineage guard once: trade_date=%s "
         "source_history_run_id=%s",
         run.trade_date,
-        len(day_fact_map),
         canonical_source_run_id,
     )
 
+    # === 规范 Scope Observation 事实层 batch prepare（PRD §7.2-§7.17 v2.3）===
+    # [REVIEW-LEGACY-BUSINESS-PATH-RETIREMENT] 唯一 preparation owner =
+    # prepare_current_scope_observations_batch：一次解析 PIT(T)/PIT(T-1) memberships、
+    # 一次加载 union member facts、slice 成各 Scope PreparedScope。scope 循环只从
+    # 该 map SELECT 结果。此 batch prepare 是 orchestrator 的**强制主链前置步骤**，
+    # 失败直接 fail closed，不再被隔离为可回退到 legacy 的 sidecar。
+    eligible_specs = [
+        ScopeReplaySpec(
+            scope_type=s.scope_type,
+            scope_key=s.scope_key,
+            scope_name=s.scope_name,
+            member_ids=(),
+        )
+        for s in scopes
+        if not is_scope_observation_persistence_excluded(
+            scope_type=s.scope_type,
+            scope_name=s.scope_name,
+        )
+    ]
+    prepared_observations: dict[str, Any] = {}
+    if eligible_specs:
+        prepared_observations = await prepare_current_scope_observations_batch(
+            session, run.trade_date, eligible_specs
+        )
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层 batch prepare: scopes=%d prepared=%d",
+            len(eligible_specs), len(prepared_observations),
+        )
+
     succeeded = 0
     failed = 0
-    signals_total = 0
 
-    metric_results: list[tuple[ScopeDefinition, MarketReviewScopeSnapshot, dict[str, dict[str, list[float]]] | None]] = []
-
-    # 2. 第一遍：全部 scope 只计算 raw/normalized metrics。
+    # 2. [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 每 scope 只调用唯一 canonical
+    # composition owner（_compute_canonical_composition_phase）：activated 家族
+    # （industry_l1/l2/l3/concept）计算并落库规范 Scope Observation + 六键 canonical
+    # composition；非激活家族（market/major_index/style）按 capability 合法跳过
+    # （结构化 reason），绝不回退 legacy P/Q/U/C/V。legacy _compute_scope_metrics_phase
+    # 及其 P/Q/U/C/V snapshot 写入已物理删除，不再是任何 runtime owner。
+    # [REVIEW-BACKEND-FINAL-CLOSURE] 循环前按家族批量计算 Historical Dynamics
+    # （唯一 batch owner），产出 scope_key→dynamics map 注入 composition。
+    dynamics_map = await _compute_family_dynamics_maps(session, run, scopes)
+    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5.5] 真实 T-1 → T Leadership migration：
+    # family batch 一次加载 [T-1, T] member facts 并建立真实 previous snapshot，
+    # 不再用 unavailable synthetic previous 包装 migration。
+    leadership_map: dict[str, Any] = {}
+    if eligible_specs:
+        leadership_map = await compute_scope_leadership_batch(
+            session, run.trade_date, eligible_specs
+        )
+        logger.info(
+            "[ReviewOrchestrator] leadership T-1→T batch: scopes=%d produced=%d",
+            len(eligible_specs), len(leadership_map),
+        )
     for scope in scopes:
         try:
-            snapshot, history_maps = await _compute_scope_metrics_phase(
+            await _compute_canonical_composition_phase(
                 session,
                 run,
                 scope,
-                required_history_contract_version=canonical_contract_version,
-                required_source_history_run_id=canonical_source_run_id,
-                day_fact_map=day_fact_map,
+                prepared_observations=prepared_observations,
+                dynamics_map=dynamics_map,
+                leadership_map=leadership_map,
             )
             succeeded += 1
-            if snapshot is not None:
-                metric_results.append((scope, snapshot, history_maps))
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
@@ -756,42 +803,19 @@ async def compute_run(
                 last_error=str(exc)[:500],
             )
 
-    # 3. 第二遍：同日同 family 横截面分位，完成后才能评估 signal。
-    await apply_cross_section_percentiles(session, run.id)
-    for scope, snapshot, history_maps in metric_results:
-        try:
-            signals_total += await _compute_scope_signal_pipeline(
-                session, run, scope, snapshot,
-                day_fact_map=day_fact_map,
-                history_maps=history_maps,
-            )
-        except Exception as exc:  # noqa: BLE001
-            succeeded -= 1
-            failed += 1
-            logger.exception(
-                "[ReviewOrchestrator] signal/attribution 失败: %s/%s err=%s",
-                scope.scope_type,
-                scope.scope_name,
-                exc,
-            )
-
-    # 4. 评估所有 active 追踪（即使有 scope 失败也执行）
-    try:
-        eval_count = await evaluate_all_active_trackings(session, run)
-    except Exception as exc:  # noqa: BLE001
-        eval_count = 0
-        logger.exception("[ReviewOrchestrator] tracking 评估失败: %s", exc)
-
-    # 5. 更新 run 状态
+    # 3. 更新 run 状态。retirement 后 signal/tracking pipeline 不再计算；run 状态名
+    # ``signals_ready`` 保留为 PUBLICATION_CONTRACT 的历史兼容状态 token：publication
+    # gate（review_publication_service.evaluate_publish_gate）仍以 signals_ready /
+    # published 作为可发布前提。Canonical readiness 已通过 run.metadata_json
+    # ``canonical_composition_readiness`` 表达并消费（publication 已切 canonical）。
+    # 业务语义：signal pipeline 已退出主链，run 成功终态现在只反映 canonical
+    # scope observation +（owner C 兼容）snapshot 就绪。
     run.succeeded_scope_count = succeeded
     run.failed_scope_count = failed
     run.completed_at = datetime.now(UTC)
     # [AUD-06 2026-08-07] coverage_ratio 表达真实有效样本覆盖率（数据口径），
     # 不再是 scope 执行成功率；执行率由 succeeded/expected 两列独立表达。
-    run.coverage_ratio = await _aggregate_run_data_coverage(session, run.id)
-
-    # 更新 signal_count（从 DB 实际统计）
-    actual_signal_count = await update_run_signal_count(session, run)
+    run.coverage_ratio = await _aggregate_run_data_coverage(session, run)
 
     if failed == 0 and succeeded > 0:
         run.status = RUN_STATUS_SIGNALS_READY
@@ -811,8 +835,10 @@ async def compute_run(
         "expected_scope_count": run.expected_scope_count,
         "succeeded_scope_count": succeeded,
         "failed_scope_count": failed,
-        "signal_count": actual_signal_count,
-        "tracking_evaluations": eval_count,
+        "signal_count": 0,
+        # [REVIEW-BACKEND-FINAL-CLOSURE] tracking pipeline 已退休（review_tracking_service
+        # 已删除）；tracking_evaluations 固定为 0，不再触发逐日追踪评估。
+        "tracking_evaluations": 0,
         # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),
         "scope_execution_rate": _scope_execution_rate(run),
@@ -920,7 +946,7 @@ async def _list_board_scopes_by_hierarchy(
     hierarchy_level: str | None,
 ) -> list[ScopeDefinition]:
     """从 board_analysis_snapshots 读取当日已计算的板块（通用）。
-    
+
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
@@ -1051,69 +1077,6 @@ async def _list_style_scopes(
     ]
 
 
-async def _build_scope_history(
-    session: AsyncSession,
-    *,
-    scope: ScopeDefinition,
-    trade_date: date,
-    algorithm_version: str,
-    baseline_window: int,
-    required_history_contract_version: str | None = None,
-    required_taxonomy_compatibility_key: str | None = None,
-    required_source_history_run_id: uuid.UUID | None = None,
-) -> tuple[
-    dict[str, dict[str, list[float]]] | None,
-    dict[str, float] | None,
-    dict[str, float] | None,
-]:
-    """从同算法版本的 observation SSOT 构建历史序列（PRD §7.1）。
-
-    [Phase4C 2026-08-09] 绑定 canonical history lineage（P0-B）：
-    必须显式传入 ``required_history_contract_version`` /
-    ``required_taxonomy_compatibility_key`` / ``required_source_history_run_id``，
-    由调用方从正式 canonical history readiness contract 解析得到（**禁止硬编码
-    生产 run id**；market scope 的 taxonomy key 可为 None = canonical market series）。
-
-    Args:
-        session: 异步 DB 会话
-        scope: 当前 scope 定义
-        trade_date: 当前交易日（排除当日，只用历史）
-        algorithm_version: 当前 Review 算法版本（禁止混用旧版本）
-        baseline_window: 历史窗口长度（默认 120）
-        required_history_contract_version: 允许的 history contract 版本
-        required_taxonomy_compatibility_key: 允许兼容的 taxonomy key
-            （market=None 表示接受 canonical market series）
-        required_source_history_run_id: 正式 canonical HistoryRun id
-            （来自 readiness contract，禁止 latest arbitrary / pre-v2 fallback）
-
-    Returns:
-        (history_maps, prev_values, prev5d_values)
-        - history_maps: {metric_code: {component_name: [raw_value 序列]}}
-        - prev_values: {metric_code: value}（最近一交易日）
-        - prev5d_values: {metric_code: value}（最近第5交易日）
-
-    只读取严格早于目标日且算法版本完全一致的 observation。无历史时返回
-    ``(None, None, None)``，由 metric engine 标记 insufficient_history。
-    """
-    from app.services.review_metric_observation_service import load_metric_history
-
-    result = await load_metric_history(
-        session,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        trade_date=trade_date,
-        algorithm_version=algorithm_version,
-        baseline_window=baseline_window,
-        required_history_contract_version=required_history_contract_version,
-        required_taxonomy_compatibility_key=required_taxonomy_compatibility_key,
-        required_source_history_run_id=required_source_history_run_id,
-    )
-    if len(result) == 4:
-        return result
-    # Backward compat: 3-tuple → add None date_indexed
-    return result[0], result[1], result[2], None
-
-
 async def _resolve_canonical_history_source(
     session: AsyncSession,
     required_trade_date: date | None = None,
@@ -1225,64 +1188,186 @@ async def _bind_or_reuse_canonical_history_source(
     return source_run_id, contract_version
 
 
-async def _fetch_pyramid_v2_for_scope(
+# [REVIEW-BACKEND-FINAL-CLOSURE] Historical Dynamics trading axis + family-batch
+# wiring。禁止逐 scope 重建 120 天历史：必须复用唯一 batch owner
+# compute_current_static_scope_dynamics_batch，其内部已 union members / VEC-1 /
+# load once。本 helper 在 compute_run / resume_run 的 scope 循环前调用一次，产出
+# scope_key → dynamics result map 注入 _compute_canonical_composition_phase。
+DYNAMICS_AXIS_PRE_T_COUNT = 120  # 冻结合同：T 之前最近 120 个 observation slots
+
+
+async def _build_dynamics_trading_axis(
     session: AsyncSession,
-    scope: ScopeDefinition,
-) -> dict[str, Any] | None:
-    """[P0-7 2026-07-30] 从 board_analysis_snapshot 读取 pyramid_v2 维度数据。
+    asof_date: date,
+) -> list[date]:
+    """Build the canonical Historical Dynamics trading axis (frozen contract).
 
-    industry/concept scope 通过 scope.source_board_snapshot_id 关联到
-    BoardAnalysisSnapshot，从中读取 payload["pyramid_v2"]。
-    其他 scope（market/major_index/style/instrument）无 board_analysis，
-    返回 None（D 族筛选器评估时 context 无 pyramid_v2，自动跳过）。
-
-    Args:
-        session: 异步 DB 会话
-        scope: 范围定义（需含 source_board_snapshot_id）
-
-    Returns:
-        pyramid_v2 payload dict 或 None
+    axis = [T-120 ... T-1] (pre-T baseline, strictly ascending) + [T]
+    (current value anchor, == analysis_asof_date). T is NEVER part of the
+    baseline denominator (historical_position.compute_historical_position only
+    consults strictly pre-T values). The batch owner does NOT query a calendar,
+    so the caller must supply a complete, strictly-ascending axis here.
     """
-    if scope.source_board_snapshot_id is None:
-        return None
-    stmt = (
-        select(BoardAnalysisSnapshot.payload)
-        .where(BoardAnalysisSnapshot.id == scope.source_board_snapshot_id)
-        .limit(1)
+    pre_t = await list_recent_trading_days(
+        session, end_date=asof_date, n=DYNAMICS_AXIS_PRE_T_COUNT,
     )
-    result = await session.execute(stmt)
-    row = result.first()
-    if row is None:
-        return None
-    payload = row[0] if row[0] is not None else {}
-    if not isinstance(payload, dict):
-        return None
-    pv2 = payload.get("pyramid_v2")
-    return pv2 if isinstance(pv2, dict) else None
+    pre_t_asc = sorted(pre_t)  # list_recent_trading_days returns desc; ascending
+    if pre_t_asc and pre_t_asc[-1] >= asof_date:
+        # 防御：若 end_date=asof_date 返回含 asof 的点，截断到严格 pre-T
+        pre_t_asc = [d for d in pre_t_asc if d < asof_date]
+    axis = pre_t_asc + [asof_date]
+    if len(axis) <= 1:
+        # 历史数据不足：axis 退化为 [asof]（batch owner 会判 insufficient_history）
+        return [asof_date]
+    return axis
 
 
-async def _compute_scope_metrics_phase(
+async def _compute_family_dynamics_maps(
+    session: AsyncSession,
+    run: MarketReviewRun,
+    scopes: list[ScopeDefinition],
+) -> dict[str, Any]:
+    """Compute Historical Dynamics for all activated scopes, grouped by family.
+
+    Returns a single ``scope_key -> dynamics_result`` map consumed by
+    ``_compute_canonical_composition_phase``.  Only ONE batch call per
+    scope_type (family) is issued; never a per-scope 120-day reconstruction.
+    """
+    axis = await _build_dynamics_trading_axis(session, run.trade_date)
+    by_family: dict[str, list[ScopeDefinition]] = {}
+    for scope in scopes:
+        by_family.setdefault(scope.scope_type, []).append(scope)
+    result: dict[str, Any] = {}
+    for scope_type, family_scopes in by_family.items():
+        # [REVIEW-DEV-RC-091] 只对 canonical persistence 激活家族重建历史 Dynamics。
+        # Historical reconstruction 只支持板块家族（industry_l1/l2/l3/concept）；
+        # market/major_index/style 属非激活家族（historical_dynamics_runtime_wired
+        # == persistence_activated == False），既不需要该层，强行重建也会触发
+        # HistoricalReconstructionError(unsupported scope_type) 使整个 run 失败。
+        # 与本函数 docstring「Compute Historical Dynamics for all activated scopes」
+        # 意图一致，且与 _compute_canonical_composition_phase 的非激活合法跳过对齐。
+        if not is_scope_observation_persistence_activated(scope_type):
+            continue
+        scope_keys = [s.scope_key for s in family_scopes]
+        batch_results = await compute_current_static_scope_dynamics_batch(
+            session,
+            scope_type,
+            scope_keys,
+            axis,
+            analysis_asof_date=run.trade_date,
+        )
+        for item in batch_results:
+            sk = (item.get("scope") or {}).get("scope_key")
+            if sk is not None:
+                result[sk] = item
+    return result
+
+
+def _unavailable_leadership_snapshot(trade_date: date) -> LeadershipSnapshot:
+    """诚实的 unavailable Leadership snapshot（仅作 migration fallback 用）。
+
+    正常路径下 leadership 由 ``compute_scope_leadership_batch`` 真实计算，不会
+    落到此处。此处只在 leadership_map 缺失该 scope 时兜底，明确 unavailable，
+    绝不伪装成已计算的 previous/current。
+    """
+    return LeadershipSnapshot(
+        trade_date=trade_date.isoformat(),
+        status="unavailable",
+        reason="leadership_map_missing_for_scope",
+        direction=None,
+        rankable_count=0,
+        leader_set=None,
+    )
+
+
+# Canonical Dynamics producer 产出的是 domain object（无 top-level status）：
+#   {scope, membership, observation_series, scope_dynamics, metrics}
+# 而 Composition 的 required layer contract 需要 top-level "status"（合法词汇：
+# ready / insufficient_history / unavailable_current）。此处是唯一的 application
+# composition boundary 适配点：把 raw dynamics domain object 转成 layer contract。
+# status 复用 canonical dynamics_phase 末条（即目标 T）的合并状态，不重新判断
+# 历史长度；缺失/无 series 时诚实回退 unavailable_current。
+def _adapt_scope_dynamics_to_composition_layer(
+    dynamics_payload: dict,
+) -> dict:
+    """Adapt the raw dynamics batch value into a Composition layer contract.
+
+    ``compute_current_static_scope_dynamics_batch`` returns a dict without a
+    top-level ``status`` (scope / membership / observation_series /
+    scope_dynamics / metrics).  ``compose_canonical_review_scope`` requires every
+    required layer to carry a legal top-level ``status``.  This is the single
+    boundary conversion point.  If the payload already carries a valid ``status``
+    it is returned unchanged (idempotent).
+    """
+    if not isinstance(dynamics_payload, dict):
+        return dynamics_payload
+    if dynamics_payload.get("status") in _DYNAMICS_LAYER_STATUS_SET:
+        return dynamics_payload
+    status = _derive_dynamics_layer_status(dynamics_payload)
+    return {"status": status, **dynamics_payload}
+
+
+_DYNAMICS_LAYER_STATUS_SET = frozenset(
+    {"ready", "insufficient_history", "unavailable_current"}
+)
+
+
+def _derive_dynamics_layer_status(dynamics_payload: dict) -> str:
+    """Derive the layer status from the canonical dynamics_phase tail entry.
+
+    ``scope_dynamics["dynamics_phase"]`` is a per-date series whose last entry
+    corresponds to the target observation date T and whose ``status`` is already
+    the merged ready/insufficient_history/unavailable_current of
+    position/velocity/acceleration/persistence.  Reusing it avoids re-deriving
+    history sufficiency at the boundary.  Falls back to unavailable_current when
+    no dynamics_phase evidence exists.
+    """
+    scope_dynamics = dynamics_payload.get("scope_dynamics") or {}
+    if not isinstance(scope_dynamics, dict):
+        return "unavailable_current"
+    phase_series = scope_dynamics.get("dynamics_phase")
+    if isinstance(phase_series, list) and phase_series:
+        last = phase_series[-1]
+        if isinstance(last, dict):
+            st = last.get("status")
+            if st in _DYNAMICS_LAYER_STATUS_SET:
+                return st
+    return "unavailable_current"
+
+
+async def _compute_canonical_composition_phase(
     session: AsyncSession,
     run: MarketReviewRun,
     scope: ScopeDefinition,
     *,
-    required_history_contract_version: str | None = None,
-    required_source_history_run_id: uuid.UUID | None = None,
-    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
-) -> tuple[MarketReviewScopeSnapshot | None, dict[str, dict[str, list[float]]] | None]:
-    """Compute and persist raw/normalized metrics for one scope.
+    prepared_observations: dict[str, Any] | None = None,
+    dynamics_map: dict[str, Any] | None = None,
+    leadership_map: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] The ONLY per-scope runtime owner.
 
-    Returns (snapshot, history_maps). date_indexed is passed through history_maps
-    as a sentinel key '_date_indexed' for CR-01 date-aligned computations.
+    ``compute_run`` and ``resume_run`` both call exactly this owner — never a
+    second per-scope path, never a legacy fallback.  It computes + persists the
+    canonical Review composition for one scope and terminalizes the metrics run
+    item deterministically:
 
-    [Phase4C 2026-08-09] 透传 canonical history lineage 过滤条件（P0-B）。
+    - activated family (industry_l1/l2/l3/concept): compute canonical Scope
+      Observation -> invariants -> persist fact -> compose the fixed 6-key
+      canonical composition -> record composition_readiness -> item SUCCEEDED.
+    - non-activated family (market/major_index/style): LEGAL SKIP with a
+      structured capability reason (persistence not activated) — never a legacy
+      P/Q/U/C/V snapshot, never a failure.
+    - no-observation-today (PIT(T) unavailable / empty members / tiny concept /
+      A-class mechanism label): LEGAL SKIP (no canonical fact today).
+    - fail-closed: activated family whose batch prepare is missing, invariant
+      failure, or canonical DB failure raises -> outer scope loop marks FAILED.
+      Missing canonical data for an activated family is NEVER a silent return
+      and NEVER falls back to a legacy result.
 
-    [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 由 ``compute_run`` 一次性加载并
-    传入；本函数只按 instrument_id 取**引用**组装 flat_list，不再调用
-    ``fetch_member_flat_list``，也不做 deepcopy / JSON roundtrip。
-    仅当 ``day_fact_map is None``（非正式路径，如独立调试）才回退旧 loader。
+    Returns the composed dict when a canonical fact was persisted, else None
+    (legal skip).  The return value drives run-item terminalization so a
+    RUNNING residue can never block ``evaluate_publish_gate``.
     """
-    # === metrics phase ===
     await _upsert_run_item(
         session,
         run_id=run.id,
@@ -1292,133 +1377,31 @@ async def _compute_scope_metrics_phase(
         status=ITEM_RUNNING,
         started_at=datetime.now(UTC),
     )
-
-    # 解析范围成员
-    #
-    # [REVIEW-OPTIONAL-SCOPE-TERMINALIZATION-01 2026-08-10]
-    # optional scope（major_index / style / industry_l1）的 PIT membership 合法
-    # 不可用不是执行失败：publication contract 已把它定义为 scope-level diagnostic。
-    # 此处是唯一 ownership point——RUNNING item 建立后必须被确定性终态化为
-    # SKIPPED 并回填 completed_at，否则异常逃逸到外层会留下 RUNNING 残留，
-    # 进而永久阻塞 evaluate_publish_gate（running 是硬 blocker）。
-    #
-    # 在此处（而非 compute_run / resume_run 各自）处理，使两条路径共享同一行为。
-    # 只捕获 typed OptionalScopeUnavailableError；其他 ScopeSnapshotError
-    # （scope_type mismatch / 非法 UUID / board_not_found）和未预期异常继续传播为 failure。
-    try:
-        instrument_ids, _resolved_name = await resolve_scope_members(
-            session, scope.scope_type, scope.scope_key, trade_date=run.trade_date,
-        )
-    except OptionalScopeUnavailableError as exc:
-        logger.info(
-            "[ReviewOrchestrator] optional scope 不可用，终态化为 skipped: "
-            "%s/%s reason=%s population_status=%s",
-            exc.scope_type,
-            exc.scope_key,
-            exc.reason,
-            exc.population_status,
-        )
-        await _upsert_run_item(
-            session,
-            run_id=run.id,
-            scope_type=scope.scope_type,
-            scope_key=scope.scope_key,
-            phase=PHASE_METRICS,
-            status=ITEM_SKIPPED,
-            last_error=str(exc)[:500],
-            completed_at=datetime.now(UTC),
-        )
-        # [FIX 5] OptionalScopeUnavailableError 合法不可用时返回 (None, None) 二元组，
-        # 与正常分支 (_compute_scope_metrics 返回 (snapshot, history_maps)) 契约一致，
-        # 关闭 "cannot unpack non-iterable NoneType" 生产错误。
-        return None, None
-    if not instrument_ids:
-        # 空范围：跳过 metrics，标记 succeeded 但无数据
-        await _upsert_run_item(
-            session,
-            run_id=run.id,
-            scope_type=scope.scope_type,
-            scope_key=scope.scope_key,
-            phase=PHASE_METRICS,
-            status=ITEM_SKIPPED,
-            last_error="范围成员为空",
-            completed_at=datetime.now(UTC),
-        )
-        # [FIX 5] 空范围同样返回 (None, None) 二元组，保持 unpack 契约。
-        return None, None
-
-    # 使用调用方传入的 scope_name（resolve_scope_members 可能返回 generic name）
-    # scope.scope_name 已在 ScopeDefinition 中设置，compute_scope_metrics 直接读取
-
-    # 拉取成员 first_pyramid_flat
-    if day_fact_map is not None:
-        # [REVIEW-FACT-PARITY-02 §10] 只按 membership 从已加载 day fact map 取引用。
-        # 共享引用是有意的（多 scope 重叠成员复用同一 fact 对象）；下游只读，
-        # 禁止任何 in-place mutation。
-        flat_list = [
-            fact
-            for fact in (day_fact_map.get(iid) for iid in instrument_ids)
-            if fact is not None
-        ]
-    else:
-        flat_list = await fetch_member_flat_list(
-            session,
-            instrument_ids,
-            run.source_core_run_id,
-            trade_date=run.trade_date,
-        )
-
-    # [P0 2026-07-30] 构建 history_maps/prev_values/prev5d_values
-    # PRD §7.1：历史基线默认 120 日、最低 60 日；先保存 rawValue，
-    # 达到 60 个观测后再计算 normalizedValue、P/Q/U/C/V、1d/5d 和分位。
-    # 禁止用当前成员回填全部历史或使用未来数据。
-    # 实现说明：
-    # - 从 market_review_scope_snapshots 读取历史已发布同 scope 的 raw_value 序列
-    # - 若无历史 review 数据（首次运行），history_maps=None，component status=insufficient_history
-    # - prev_values/prev5d_values 从最近 1/5 个交易日的 scope_snapshot 读取
-    history_maps, prev_values, prev5d_values, date_indexed = await _build_scope_history(
+    composition = await _persist_canonical_scope_observation(
         session,
-        scope=scope,
-        trade_date=run.trade_date,
-        algorithm_version=run.algorithm_version,
-        baseline_window=run.baseline_window,
-        required_history_contract_version=required_history_contract_version,
-        required_taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
-        required_source_history_run_id=required_source_history_run_id,
+        run,
+        scope,
+        prepared_observations=prepared_observations,
+        dynamics_map=dynamics_map,
+        leadership_map=leadership_map,
     )
-
-    try:
-        # [P0-7 2026-07-30] 获取 pyramid_v2 维度数据（PRD §24 D 族筛选器）
-        # industry/concept scope 通过 source_board_snapshot_id 关联到
-        # board_analysis_snapshot，从中读取 payload["pyramid_v2"]
-        pyramid_v2 = await _fetch_pyramid_v2_for_scope(session, scope)
-
-        snapshot = await compute_scope_metrics(
-            session,
-            review_run_id=run.id,
-            trade_date=run.trade_date,
-            scope=scope,
-            flat_list=flat_list,
-            algorithm_version=run.algorithm_version,
-            eligible_count=len(instrument_ids),
-            history_maps=history_maps,
-            prev_values=prev_values,
-            prev5d_values=prev5d_values,
-            pyramid_v2_payload=pyramid_v2,
-        )
-    except ScopeSnapshotError as exc:
+    if composition is None:
+        # Legal skip (non-activated family / no observation today): terminalize
+        # SKIPPED so a RUNNING residue can never block evaluate_publish_gate.
         await _upsert_run_item(
             session,
             run_id=run.id,
             scope_type=scope.scope_type,
             scope_key=scope.scope_key,
             phase=PHASE_METRICS,
-            status=ITEM_FAILED,
-            last_error=str(exc)[:500],
+            status=ITEM_SKIPPED,
+            last_error=(
+                "canonical capability legal skip "
+                "(non-activated family or no observation today)"
+            ),
             completed_at=datetime.now(UTC),
         )
-        raise
-
+        return None
     await _upsert_run_item(
         session,
         run_id=run.id,
@@ -1428,43 +1411,48 @@ async def _compute_scope_metrics_phase(
         status=ITEM_SUCCEEDED,
         completed_at=datetime.now(UTC),
     )
-
-    # Embed date_indexed into history_maps for CR-01 date-aligned computations
-    if history_maps is not None and date_indexed is not None:
-        history_maps["_date_indexed"] = date_indexed  # type: ignore[assignment]
-
-    # === 规范 Scope Observation 事实层双写（PRD §7.2-§7.17 v2.3）===
-    # [2026-08-13 双轨并存] 不替换 legacy P/Q/U/C/V：Discovery/筛选器/信号管线
-    # 仍消费 MarketReviewScopeSnapshot（本轮不动）。此处仅把七段 Canonical
-    # Observation 写入 ReviewScopeObservationFact，供 EvidenceDrawer /
-    # scope_evidence_service 消费。双写失败不得影响 legacy metrics/signal，
-    # 故隔离在 try/except 内，仅记录 diagnostic。
-    # prepare_scope 对 market/major_index/style 返回 unavailable 自动跳过，
-    # 仅 industry_l1/l2/l3 + concept（activated scope）会实际写入。
-    try:
-        await _persist_canonical_scope_observation(session, run, scope)
-    except Exception as exc:  # noqa: BLE001 - 隔离双写失败，不破坏 Discovery
-        logger.warning(
-            "[ReviewOrchestrator] 规范事实层双写失败（不影响 legacy signal）: "
-            "%s/%s trade_date=%s err=%s",
-            scope.scope_type, scope.scope_key, run.trade_date, exc,
-        )
-
-    return snapshot, history_maps
+    return composition
 
 
 async def _persist_canonical_scope_observation(
     session: AsyncSession,
     run: MarketReviewRun,
     scope: ScopeDefinition,
-) -> None:
-    """双写规范 Scope Observation 七段事实到 ReviewScopeObservationFact。
+    *,
+    prepared_observations: dict[str, Any] | None = None,
+    dynamics_map: dict[str, Any] | None = None,
+    leadership_map: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """持久化规范 Scope Observation 并生成 canonical composition。
+
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 返回:
+    - canonical 六键 composition dict 当 canonical fact 成功计算并落库时；
+    - None 当合法跳过（非激活家族 / A 级概念 / 当日无观察）。
+    返回值驱动 ``_compute_canonical_composition_phase`` 的 run-item 终态
+    （composition 非 None → SUCCEEDED；None → SKIPPED），保证 composition
+    readiness 与 run item 状态一致，RUNNING 残留永不阻塞发布门禁。
 
     仅对 activated scope（industry_l1/l2/l3 + concept）生效；market/major_index/
-    style 由 prepare_scope 返回 unavailable 自动跳过（不抛错、不写表）。
+    style 为非激活家族，按 ScopeCapability（persistence_activated=False）合法跳过
+    （写 reason，不抛错、不写表），不再依赖 "prep unavailable => 隐式跳过"。也可选
+    指定已激活家族（industry/concept）的 batch prepare 缺失时 fail-closed；仅
+    PIT unavailable / 空成员 这种"当日无观察"才合法跳过。
 
-    不依赖本 phase 已加载的 day_fact_map——prepare_scope 内部独立加载 canonical
-    FirstPyramidHistory / structure events（与 shadow 路径一致，避免算法漂移）。
+    [REVIEW-EXECUTION-PATH-CONSOLIDATION] 本函数不拥有任何 membership 解析 /
+    SQL / fact preparation：``prepared_observations`` 由 compute_run / resume_run
+    通过唯一 owner ``prepare_current_scope_observations_batch`` 一次 batch prepare，
+    此处只按 scope_key SELECT 对应 PreparedScope 后计算并落库。missing key 表示
+    batch prepare 未包含该 scope（如 batch prepare 失败被隔离），直接跳过。
+
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 除落库外，本函数同时计算 canonical
+    Review Composition 的三个纯层（internal_structure_facts / member_attribution /
+    scope_observation）与两个运行时未接线层（historical_dynamics / leadership，
+    结构化 unavailable_current），经 ``compose_canonical_review_scope`` 产出固定
+    六键 composition + composition_readiness。这是唯一 composition 计算点；本函数
+    只消费既有 canonical owner（compute_scope_observation / compute_internal_structure
+    / compute_member_attribution），不重算任何算法。composition_readiness 同时写入
+    run.metadata_json["canonical_composition_readiness"] 供 publication gate 消费。
+
     compute_scope_observation 输出经 check_observation_invariants 校验，非法
     payload 由 save_scope_observation_fact 的 validate_scope_observation_payload
     在落库前 fail-fast 拒绝（延续 Round 1C Blocker #1/#2/#3）。
@@ -1472,6 +1460,26 @@ async def _persist_canonical_scope_observation(
     A 级机制/资格/事件标签概念（融资融券/沪深股通/专精特新/次新股/ST 等）按
     CONCEPT_OBSERVATION_PERSISTENCE_EXCLUDE_NAMES 直接排除，不写 ReviewScopeObservationFact。
     """
+    # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] Scope-family capability is the
+    # single activation guard.  Non-activated families (market / major_index /
+    # style) are a LEGAL SKIP with a structured reason — they must never reach
+    # ``save_scope_observation_fact`` (which raises
+    # ``ScopePersistenceNotActivatedError``), no matter whether their PIT
+    # membership resolves today.  This fixes the stale comment that claimed
+    # ``is_scope_observation_persistence_excluded`` gates them (it only excludes
+    # concept names/samples); the fragile "prep unavailable => implicit skip"
+    # path is no longer what protects them.
+    capability = resolve_scope_capability(
+        scope_type=scope.scope_type, scope_name=scope.scope_name
+    )
+    if not capability.persistence_activated:
+        logger.info(
+            "[ReviewOrchestrator] 规范事实层家族未激活(合法跳过): %s/%s reasons=%s",
+            scope.scope_type, scope.scope_key, capability.reasons,
+        )
+        return None
+    # concept A-class mechanism/event labels remain excluded at observation
+    # granularity (family-independent of the activation gate above).
     if is_scope_observation_persistence_excluded(
         scope_type=scope.scope_type,
         scope_name=scope.scope_name,
@@ -1481,17 +1489,27 @@ async def _persist_canonical_scope_observation(
             "%s/%s scope_name=%s",
             scope.scope_type, scope.scope_key, scope.scope_name,
         )
-        return
-    prep = await prepare_scope(
-        session, scope.scope_type, scope.scope_key, run.trade_date,
+        return None
+    prep = (
+        prepared_observations.get(scope.scope_key)
+        if prepared_observations is not None
+        else None
     )
+    # Fail-closed: an ACTIVATED family whose batch prepare is missing must NOT be
+    # silently skipped and must NOT fall back to any legacy result (the report's
+    # fail-closed gate).  Missing prep for an activated family is a data-plane gap.
+    if prep is None:
+        raise ValueError(
+            f"canonical batch prepare missing for activated scope "
+            f"{scope.scope_type}/{scope.scope_key}; refusing to skip or fall back"
+        )
     if prep.pit_status_t == "unavailable" or not prep.members:
         logger.info(
             "[ReviewOrchestrator] 规范事实层跳过 unavailable/空范围: "
             "%s/%s pit_status_t=%s member_count=%d",
             scope.scope_type, scope.scope_key, prep.pit_status_t, len(prep.members),
         )
-        return
+        return None
 
     # 成员数过小（<=10）的 concept 样本无统计意义，A 步不持久化（prepare 后拿真实 count）。
     if is_scope_observation_persistence_excluded(
@@ -1504,20 +1522,20 @@ async def _persist_canonical_scope_observation(
             "%s/%s scope_name=%s member_count=%d",
             scope.scope_type, scope.scope_key, scope.scope_name, len(prep.members),
         )
-        return
+        return None
 
-    # CORRECTION: 规范事实层双写必须在 nested transaction / savepoint 内执行。
-    # 若 canonical DB flush 失败，仅回滚该 savepoint，外层 legacy transaction
-    # （metrics/signal）仍可继续提交，互不污染。
+    # 规范事实与 composition 在同一 savepoint 内执行，失败时原子回滚本 scope。
     async with session.begin_nested():
         observation = compute_scope_observation(
             scope_type=prep.scope_type,
             scope_key=prep.scope_key,
             trade_date=prep.trade_date,
             pit_member_ids=prep.pit_member_ids,
-            pit_member_ids_t1=prep.pit_member_ids_t1 if prep.t1_membership_available else None,
+            pit_member_ids_t1=prep.pit_member_ids_t1,
             members=prep.members,
             events=prep.events,
+            t1_membership_available=prep.t1_membership_available,
+            event_coverage_member_ids=prep.event_coverage_member_ids,
         )
         checks = check_observation_invariants(observation)
         failed = [c for c in checks if not c["ok"]]
@@ -1526,369 +1544,116 @@ async def _persist_canonical_scope_observation(
                 f"scope observation invariant failed: {failed!r}"
             )
         await save_scope_observation_fact(
-            session, prep, observation, algorithm_version=run.algorithm_version,
-        )
-
-
-def _build_history_extras(
-    snapshot: MarketReviewScopeSnapshot,
-    history_maps: dict[str, dict[str, list[float]]] | None,
-) -> dict[str, float | int]:
-    """[CR-01] 从历史序列构建 filter engine 所需的 history_extras。
-
-    CR01-D true date alignment:
-    - history_maps["_date_indexed"] = {trade_date: {metric_code: {component_name: raw_value}}}
-    - P-Q 仅在 P 和 Q 同时存在的 trade_date 计算
-    - structure_breakdown 比较当前 snapshot vs 最近 canonical trade_date
-    """
-    extras: dict[str, float | int] = {}
-
-    if history_maps is None:
-        return extras
-
-    date_indexed = history_maps.get("_date_indexed")
-
-    # CR01-A: Q/U/V delta1d historical percentile — true date-aligned
-    for metric_code, key in [("Q", "_q_delta1d_history_pct"),
-                               ("U", "_u_delta1d_history_pct"),
-                               ("V", "_v_delta1d_history_pct")]:
-        payload = getattr(snapshot, f"{metric_code.lower()}_payload") or {}
-        delta = payload.get("delta1d")
-        if not isinstance(delta, (int, float)):
-            continue
-        # Use date_indexed for true 1D deltas (only adjacent canonical dates with data)
-        delta_series = _extract_date_aligned_delta_series(date_indexed, metric_code)
-        if delta_series:
-            extras[key] = _percentile_rank(delta, delta_series)
-
-    # CR01-B: P-Q date-aligned — only on trade_dates where both P and Q exist
-    if isinstance(date_indexed, dict):
-        pq_diffs = []
-        for td in sorted(date_indexed.keys()):
-            entry = date_indexed[td]
-            p_entry = entry.get("P", {})
-            q_entry = entry.get("Q", {})
-            p_val = p_entry.get("_metric_value")
-            q_val = q_entry.get("_metric_value")
-            if p_val is not None and q_val is not None:
-                pq_diffs.append(p_val - q_val)
-        if pq_diffs:
-            p_payload = snapshot.p_payload or {}
-            q_payload = snapshot.q_payload or {}
-            p_val = p_payload.get("value")
-            q_val = q_payload.get("value")
-            if isinstance(p_val, (int, float)) and isinstance(q_val, (int, float)):
-                extras["_pq_diff_history_pct"] = _percentile_rank(p_val - q_val, pq_diffs)
-
-    # CR01-C: structure_breakdown — current snapshot vs most recent canonical trade_date
-    extras["_structure_breakdown_not_rising"] = (
-        _check_structure_breakdown_vs_previous(snapshot, date_indexed)
-    )
-
-    # CR01-D: C context — use existing historyPercentile120d
-    c_payload = snapshot.c_payload or {}
-    c_delta1d = c_payload.get("delta1d")
-    extras["_c_rising"] = 1 if isinstance(c_delta1d, (int, float)) and c_delta1d > 0 else 0
-    c_history_pct = c_payload.get("historyPercentile120d")
-    extras["_c_high_anomaly"] = (
-        1 if isinstance(c_history_pct, (int, float)) and c_history_pct >= 80 else 0
-    )
-
-    return extras
-
-
-def _get_metric_value_series(
-    history_maps: dict[str, dict[str, list[float]]],
-    metric_code: str,
-) -> list[float] | None:
-    components = history_maps.get(metric_code)
-    if not components:
-        return None
-    return components.get("_metric_value")
-
-
-def _extract_delta_series_from_metric_value(
-    history_maps: dict[str, dict[str, list[float]]],
-    metric_code: str,
-) -> list[float] | None:
-    values = _get_metric_value_series(history_maps, metric_code)
-    if values is None or len(values) < 2:
-        return None
-    return [values[i] - values[i - 1] for i in range(1, len(values))]
-
-
-def _extract_date_aligned_delta_series(
-    date_indexed: dict | None,
-    metric_code: str,
-) -> list[float] | None:
-    """从 date_indexed 计算真正的日期对齐 1D delta 序列。
-
-    只在相邻 canonical trade_dates 且两天都有 _metric_value 时才计算。
-    """
-    if not isinstance(date_indexed, dict):
-        return None
-    dates = sorted(date_indexed.keys())
-    deltas = []
-    for i in range(1, len(dates)):
-        prev_entry = date_indexed.get(dates[i - 1], {})
-        curr_entry = date_indexed.get(dates[i], {})
-        prev_val = prev_entry.get(metric_code, {}).get("_metric_value")
-        curr_val = curr_entry.get(metric_code, {}).get("_metric_value")
-        if prev_val is not None and curr_val is not None:
-            deltas.append(curr_val - prev_val)
-    return deltas if deltas else None
-
-
-def _percentile_rank(value: float, series: list[float]) -> float:
-    if not series:
-        return 0.0
-    below = sum(1 for v in series if v < value)
-    return round(below / len(series) * 100, 1)
-
-
-def _check_structure_breakdown_vs_previous(
-    snapshot: MarketReviewScopeSnapshot,
-    date_indexed: dict | None,
-) -> int:
-    """CR01-C: 比较当前 snapshot structure_breakdown_diffusion vs 最近 canonical trade_date。
-
-    使用 date_indexed 获取最近 trade_date 的 Q.structure_breakdown_diffusion 值。
-    """
-    # Get current value from snapshot Q payload components
-    q_payload = snapshot.q_payload or {}
-    components = q_payload.get("components", [])
-    current = None
-    if isinstance(components, list):
-        for c in components:
-            if isinstance(c, dict) and c.get("name") == "structure_breakdown_diffusion":
-                current = c.get("rawValue")
-                if isinstance(current, (int, float)):
-                    current = float(current)
-                break
-
-    if current is None:
-        return 0
-
-    # Get previous value from date_indexed
-    if isinstance(date_indexed, dict) and date_indexed:
-        most_recent_date = max(date_indexed.keys())
-        entry = date_indexed[most_recent_date]
-        q_entry = entry.get("Q", {})
-        prev = q_entry.get("structure_breakdown_diffusion")
-        if isinstance(prev, (int, float)):
-            return 1 if current <= prev else 0
-
-    return 0
-
-
-async def _compute_scope_signal_pipeline(
-    session: AsyncSession,
-    run: MarketReviewRun,
-    scope: ScopeDefinition,
-    snapshot: MarketReviewScopeSnapshot,
-    *,
-    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None,
-    history_maps: dict[str, dict[str, list[float]]] | None = None,
-) -> int:
-    """Evaluate signals and attribution after the cross-section pass is complete.
-
-    [REVIEW-FACT-PARITY-02 §10] ``day_fact_map`` 透传给 attribution，
-    使 signal × child_scope 归因不再重复加载当日 facts。
-
-    [CR-01] ``history_maps`` 用于构建 history_extras 注入 filter evaluation。
-    """
-
-    # === signals phase ===
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_SIGNALS,
-        status=ITEM_RUNNING,
-        started_at=datetime.now(UTC),
-    )
-
-    try:
-        # [CR-01] 从历史序列构建 filter 所需的 history_extras
-        history_extras = _build_history_extras(snapshot, history_maps)
-
-        previous_signals = await find_previous_signals(
-            session,
-            scope_type=scope.scope_type,
-            scope_key=scope.scope_key,
-            before_trade_date=run.trade_date,
+            session, prep, observation,
             algorithm_version=run.algorithm_version,
+            review_run_id=run.id,
         )
-        signals = await generate_signals_for_scope(
-            session,
-            run=run,
-            snapshot=snapshot,
-            previous_signals=previous_signals,
-            history_extras=history_extras,
+
+        # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] Canonical Review Composition —
+        # the unique composition point.  Layers are produced ONLY by their single
+        # canonical owners (never re-derived). Missing upstream layers remain
+        # explicit unavailable_current with a structured reason. Readiness is
+        # recorded into run metadata for the publication gate.
+        # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5.5] Leadership 真实 T-1 → T migration：
+        # 由 compute_run/resume_run 在 scope 循环前按家族批量调用唯一 owner
+        # compute_scope_leadership_batch，一次性加载 [T-1, T] member facts 并建立
+        # 真实 LeadershipSnapshot(T-1) 与 (T) 后计算 migration。previous 不再是
+        # 硬编码 unavailable 合成 snapshot；T-1 加载失败时该 owner 已诚实退回
+        # unavailable migration（不 fake-ready）。leadership 为 domain dataclass，
+        # Member Attribution 直接消费；序列化到 dict 仅用于 Composition 边界。
+        leadership = leadership_map.get(scope.scope_key) if leadership_map else None
+        if leadership is None:
+            leadership = compute_leadership_migration(
+                previous_snapshot=_unavailable_leadership_snapshot(prep.trade_date),
+                current_snapshot=_unavailable_leadership_snapshot(prep.trade_date),
+            )
+        leadership_layer = serialize_leadership_migration(leadership)
+        internal_structure = compute_internal_structure(observation)
+        member_attribution = compute_member_attribution(
+            members=prep.members, observation=observation,
+            leadership_migration=leadership,
         )
-    except SignalGenerationError as exc:
-        await _upsert_run_item(
-            session,
-            run_id=run.id,
+        # [REVIEW-BACKEND-FINAL-CLOSURE] Historical Dynamics 已接 runtime：
+        # 由 compute_run/resume_run 在 scope 循环前按家族批量调用唯一 batch owner
+        # compute_current_static_scope_dynamics_batch，产出 scope_key→dynamics map
+        # 注入此处。batch owner 内部已 union members / VEC-1 / load once；禁止逐
+        # scope 重建 120 天历史。若某 scope 不在 map（如 capability 未激活 family
+        # 的边界情况），退回结构化 unavailable。
+        historical_dynamics = dynamics_map.get(scope.scope_key) if dynamics_map else None
+        if historical_dynamics is not None:
+            # raw dynamics domain object → Composition layer contract（补 top-level status）
+            historical_dynamics = _adapt_scope_dynamics_to_composition_layer(historical_dynamics)
+        else:
+            historical_dynamics = structured_unavailable_layer(
+                "historical_dynamics_not_in_batch_map: scope not produced by "
+                "the family dynamics batch (may be a non-activated family edge)"
+            )
+        # Domain dataclass → single application serialization boundary for
+        # Composition/persistence/API.  Member Attribution below consumes the
+        # dataclass directly; this is the ONLY dict conversion point.
+        # scope_observation / member_attribution layers carry a status wrapper;
+        # the raw payload is still what ``save_scope_observation_fact`` persisted.
+        scope_observation_layer = {"status": "ready", **observation}
+        member_attribution_layer = {"status": "ready", **member_attribution}
+        composition = compose_canonical_review_scope(
             scope_type=scope.scope_type,
             scope_key=scope.scope_key,
-            phase=PHASE_SIGNALS,
-            status=ITEM_FAILED,
-            last_error=str(exc)[:500],
-            completed_at=datetime.now(UTC),
+            trade_date=prep.trade_date.isoformat(),
+            capability=capability,
+            scope_observation=scope_observation_layer,
+            historical_dynamics=historical_dynamics,
+            internal_structure_facts=internal_structure,
+            leadership=leadership_layer,
+            member_attribution=member_attribution_layer,
         )
-        raise
-
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_SIGNALS,
-        status=ITEM_SUCCEEDED,
-        completed_at=datetime.now(UTC),
-    )
-
-    # === attribution phase（仅对命中信号） ===
-    if not signals:
-        await _upsert_run_item(
+        logger.info(
+            "[ReviewOrchestrator] canonical composition: %s/%s readiness=%s "
+            "layers=%s",
+            scope.scope_type, scope.scope_key,
+            composition["composition_readiness"],
+            sorted(
+                k for k, v in composition.items()
+                if k in ("scope_observation", "historical_dynamics",
+                         "internal_structure_facts", "leadership",
+                         "member_attribution")
+                and isinstance(v, dict) and v.get("status")
+            ),
+        )
+        # Record the per-scope composition readiness for the publication gate.
+        # [REVIEW-BACKEND-FINAL-CLOSURE P0] JSONB 必须整体重新赋值为**新 dict**：
+        # `run.metadata_json` 是普通 mapped_column(JSONB)，无 MutableDict；
+        # 就地 setdefault/__setitem__ 不会被 SQLAlchemy 标记 dirty，commit 后
+        # 结果静默丢失（同文件 _bind_or_reuse_canonical_history_source 已踩过此坑）。
+        _old_meta = dict(run.metadata_json or {})
+        _new_readiness = {
+            **(_old_meta.get("canonical_composition_readiness") or {}),
+            scope.scope_key: composition["composition_readiness"],
+        }
+        _new_coverage = {
+            **(_old_meta.get("canonical_coverage") or {}),
+            scope.scope_key: {
+                "provided": len(prep.members),
+                "eligible": len(prep.pit_member_ids),
+            },
+        }
+        run.metadata_json = {
+            **_old_meta,
+            "canonical_composition_readiness": _new_readiness,
+            "canonical_coverage": _new_coverage,
+        }
+        # [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 落库完整 Composition 薄表
+        # （grain = review_run_id + scope_type + scope_key），与 ObservationFact
+        # 同事务。Payload 已验证单 JSONB 全存足够（典型 ~130 KiB 上限）。
+        await save_scope_composition_snapshot(
             session,
-            run_id=run.id,
+            review_run_id=run.id,
             scope_type=scope.scope_type,
             scope_key=scope.scope_key,
-            phase=PHASE_ATTRIBUTION,
-            status=ITEM_SKIPPED,
-            last_error="无命中信号",
-            completed_at=datetime.now(UTC),
+            trade_date=prep.trade_date,
+            algorithm_version=run.algorithm_version,
+            composition_payload=composition,
         )
-        return 0
-
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_ATTRIBUTION,
-        status=ITEM_RUNNING,
-        started_at=datetime.now(UTC),
-    )
-
-    parent_metrics = {
-        "P": snapshot.p_payload or {},
-        "Q": snapshot.q_payload or {},
-        "U": snapshot.u_payload or {},
-        "C": snapshot.c_payload or {},
-        "V": snapshot.v_payload or {},
-    }
-    parent_ready_count = snapshot.ready_count
-
-    attribution_errors: list[str] = []
-    for signal in signals:
-        try:
-            await compute_signal_attributions(
-                session,
-                signal,
-                parent_metrics=parent_metrics,
-                parent_ready_count=parent_ready_count,
-                source_core_run_id=run.source_core_run_id,
-                source_board_run_id=run.source_board_run_id,
-                day_fact_map=day_fact_map,
-            )
-            await compute_signal_instruments(
-                session,
-                signal,
-                parent_metrics=parent_metrics,
-                parent_ready_count=parent_ready_count,
-                source_core_run_id=run.source_core_run_id,
-                day_fact_map=day_fact_map,
-            )
-        except Exception as exc:  # noqa: BLE001
-            attribution_errors.append(f"{signal.signal_type}: {exc}")
-            logger.exception(
-                "[ReviewOrchestrator] 归因失败: signal=%s err=%s",
-                signal.id, exc,
-            )
-
-    status_final = (
-        ITEM_FAILED if attribution_errors and len(attribution_errors) == len(signals)
-        else ITEM_SUCCEEDED
-    )
-    await _upsert_run_item(
-        session,
-        run_id=run.id,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        phase=PHASE_ATTRIBUTION,
-        status=status_final,
-        last_error="; ".join(attribution_errors)[:500] if attribution_errors else None,
-        completed_at=datetime.now(UTC),
-    )
-
-    return len(signals)
-
-
-async def _compute_scope_pipeline(
-    session: AsyncSession,
-    run: MarketReviewRun,
-    scope: ScopeDefinition,
-    *,
-    day_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] | None = None,
-) -> int:
-    """Resume-compatible single-scope pipeline using the same two ordered phases.
-
-    [Phase4C 2026-08-09 P0-B] resume 必须复用 run 已绑定的 canonical history source，
-    绝不重新解析 latest ready run（防止 A→B lineage 漂移）。
-
-    [REVIEW-FACT-PARITY-02 §10] ``day_fact_cache`` 是 ``resume_run`` 传入的跨 scope
-    可变缓存：当日 facts 只在第一个 scope 处加载一次，后续 scope 直接复用同一份
-    内存 map（共享引用，无 copy）。为 None 时（独立调用）不启用 load-once。
-    """
-    canonical_source_run_id, canonical_contract_version = (
-        await _bind_or_reuse_canonical_history_source(session, run)
-    )
-    # [REVIEW-FACT-PARITY-02 §10] resume load-once：facts 只在首个 scope 加载一次。
-    day_fact_map: dict[uuid.UUID, dict[str, Any]] | None = None
-    if day_fact_cache is not None:
-        if "facts" not in day_fact_cache:
-            day_fact_cache["facts"] = await load_day_fact_maps(
-                session,
-                trade_date=run.trade_date,
-                source_core_run_id=run.source_core_run_id,
-                required_source_history_run_id=canonical_source_run_id,
-                required_history_contract_version=canonical_contract_version,
-            )
-            logger.info(
-                "[ReviewOrchestrator] resume load_day_fact_maps once: "
-                "trade_date=%s facts=%d source_history_run_id=%s",
-                run.trade_date,
-                len(day_fact_cache["facts"]),
-                canonical_source_run_id,
-            )
-        day_fact_map = day_fact_cache["facts"]
-
-    # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的 ScopeDefinition 缺此字段）
-    resolved = await _resolve_all_discovery_scopes(session, run)
-    full_scope = next(
-        (s for s in resolved if s.scope_type == scope.scope_type and s.scope_key == scope.scope_key),
-        scope,
-    )
-    snapshot, history_maps = await _compute_scope_metrics_phase(
-        session,
-        run,
-        full_scope,
-        required_history_contract_version=canonical_contract_version,
-        required_source_history_run_id=canonical_source_run_id,
-        day_fact_map=day_fact_map,
-    )
-    if snapshot is None:
-        return 0
-    await apply_cross_section_percentiles(session, run.id)
-    return await _compute_scope_signal_pipeline(
-        session, run, full_scope, snapshot,
-        day_fact_map=day_fact_map,
-        history_maps=history_maps,
-    )
+        return composition
 
 
 # =============================================================================
@@ -1945,50 +1710,97 @@ async def resume_run(
         key = (item.scope_type, item.scope_key)
         scopes_to_redo.setdefault(key, set()).add(item.phase)
 
-    # [REVIEW-FACT-PARITY-02 §10] resume 同样 load-once：当日 facts 只在第一个
-    # scope 处惰性加载一次，之后所有待重算 scope 共享同一份内存 map。
-    # 用可变 cache 传入，避免在此重复调用 _bind_or_reuse_canonical_history_source
-    # （binding 已在 _compute_scope_pipeline 内完成，重复调用会多做一次 DB 解析）。
-    resume_fact_cache: dict[str, dict[uuid.UUID, dict[str, Any]]] = {}
+    # 先复用已绑定的 canonical history source 并验证 lineage。失败时在任何
+    # observation 物化前 fail closed，避免对无效 lineage 做重计算。
+    (
+        resume_canonical_source_run_id,
+        resume_canonical_contract_version,
+    ) = await _bind_or_reuse_canonical_history_source(session, run)
+    await validate_review_lineage_guard(
+        session,
+        trade_date=run.trade_date,
+        source_core_run_id=run.source_core_run_id,
+        required_source_history_run_id=resume_canonical_source_run_id,
+        required_history_contract_version=resume_canonical_contract_version,
+        current_source="stock_core",
+    )
 
-    # 对每个需要重处理的 scope，重新执行 pipeline
+    # 对待重算 scope 集合一次 batch prepare，失败时直接终止。
+    redo_specs = [
+        ScopeReplaySpec(
+            scope_type=scope_type,
+            scope_key=scope_key,
+            scope_name=scope_key,
+            member_ids=(),
+        )
+        for scope_type, scope_key in scopes_to_redo
+        if not is_scope_observation_persistence_excluded(
+            scope_type=scope_type,
+            scope_name=scope_key,
+        )
+    ]
+    prepared_observations: dict[str, Any] = {}
+    if redo_specs:
+        prepared_observations = await prepare_current_scope_observations_batch(
+            session, run.trade_date, redo_specs
+        )
+
+    # 对每个需要重处理的 scope，执行与 compute_run 完全相同的 per-scope owner。
+    # 正式 scope 解析一次（补全 taxonomy_compatibility_key），供整段 resume 复用。
+    resolved = await _resolve_all_discovery_scopes(session, run)
     succeeded = 0
     failed = 0
+    # [REVIEW-BACKEND-FINAL-CLOSURE] resume 同样按家族批量计算 Dynamics（只针对
+    # 需要重做的 scope），产出 scope_key→dynamics map 注入 composition。
+    redo_scopes = [
+        ScopeDefinition(scope_type=st, scope_key=sk, scope_name=sk)
+        for (st, sk) in scopes_to_redo
+    ]
+    resume_dynamics_map = await _compute_family_dynamics_maps(
+        session, run, redo_scopes
+    )
     for (scope_type, scope_key), _phases in scopes_to_redo.items():
         scope = ScopeDefinition(
             scope_type=scope_type,
             scope_key=scope_key,
             scope_name=scope_key,
         )
+        # 从正式 scope 解析补全 taxonomy_compatibility_key（resume 重建的
+        # ScopeDefinition 缺此字段）。
+        full_scope = next(
+            (
+                s
+                for s in resolved
+                if s.scope_type == scope.scope_type
+                and s.scope_key == scope.scope_key
+            ),
+            scope,
+        )
         try:
-            await _compute_scope_pipeline(
-                session, run, scope, day_fact_cache=resume_fact_cache
+            await _compute_canonical_composition_phase(
+                session,
+                run,
+                full_scope,
+                prepared_observations=prepared_observations,
+                dynamics_map=resume_dynamics_map,
             )
             succeeded += 1
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
-                "[ReviewOrchestrator] resume scope 失败: %s err=%s",
-                scope_type, exc,
+                "[ReviewOrchestrator] resume scope 失败: %s/%s err=%s",
+                scope_type, scope_key, exc,
             )
-
-    # 评估 active 追踪
-    try:
-        eval_count = await evaluate_all_active_trackings(session, run)
-    except Exception as exc:  # noqa: BLE001
-        eval_count = 0
-        logger.exception("[ReviewOrchestrator] resume tracking 评估失败: %s", exc)
 
     # 更新 run 状态
     run.completed_at = datetime.now(UTC)
-    actual_signal_count = await update_run_signal_count(session, run)
 
     # 重新统计 succeeded/failed scope（基于 item 状态）
     final_succeeded, final_failed = await _count_scope_status(session, run.id)
     run.succeeded_scope_count = final_succeeded
     run.failed_scope_count = final_failed
     # [AUD-06 2026-08-07] 与主路径同口径：真实有效样本覆盖率
-    run.coverage_ratio = await _aggregate_run_data_coverage(session, run.id)
+    run.coverage_ratio = await _aggregate_run_data_coverage(session, run)
 
     if final_failed == 0 and final_succeeded > 0:
         run.status = RUN_STATUS_SIGNALS_READY
@@ -2007,8 +1819,9 @@ async def resume_run(
         "resumed_scopes": len(scopes_to_redo),
         "succeeded": succeeded,
         "failed": failed,
-        "signal_count": actual_signal_count,
-        "tracking_evaluations": eval_count,
+        "signal_count": 0,
+        # [REVIEW-BACKEND-FINAL-CLOSURE] tracking pipeline 已退休；tracking_evaluations 固定为 0。
+        "tracking_evaluations": 0,
         # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),
         "scope_execution_rate": _scope_execution_rate(run),
@@ -2047,31 +1860,33 @@ async def _count_scope_status(
 
 async def _aggregate_run_data_coverage(
     session: AsyncSession,
-    run_id: uuid.UUID,
+    run: MarketReviewRun,
 ) -> Decimal:
-    """[AUD-06 2026-08-07] 聚合 run 级真实有效样本覆盖率。
+    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 聚合 run 级真实有效样本覆盖率。
 
-    语义：SUM(ready_count) / SUM(eligible_count)，跨该 run 全部 scope 快照。
-    回答的是“底层数据有多少是有效的”，而非“有多少 scope 跑完了”。
+    语义：SUM(provided) / SUM(eligible)，跨该 run 全部 canonical facts（来自
+    ``run.metadata_json["canonical_coverage"]``，由唯一 composition owner 在每次
+    持久化 canonical fact 时记录）。回答的是“底层数据有多少是有效的”，而非
+    “有多少 scope 跑完了”。
 
     与 scope 执行成功率（succeeded_scope_count / expected_scope_count）严格区分：
     10/10 个 scope 全部执行成功，但每个 scope 只有 80/100 成员有效时，
     执行率为 1.0，而本函数返回 0.8。
 
-    分母为 0（无 scope 快照，或全部 scope 成员数为 0）时返回 Decimal("0")，
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 数据源从已退役的
+    ``MarketReviewScopeSnapshot.ready_count/eligible_count`` 聚合切换为 canonical
+    coverage metadata：新 runtime owner 不再写 snapshot 表，旧聚合恒为 0 会把
+    覆盖率错误拉低并阻塞发布。
+
+    分母为 0（无 canonical fact，或全部 scope 成员数为 0）时返回 Decimal("0")，
     不得除零，也不得回落成执行率冒充数据覆盖。
     """
-    stmt = select(
-        func.coalesce(func.sum(MarketReviewScopeSnapshot.ready_count), 0),
-        func.coalesce(func.sum(MarketReviewScopeSnapshot.eligible_count), 0),
-    ).where(MarketReviewScopeSnapshot.review_run_id == run_id)
-    row = (await session.execute(stmt)).one_or_none()
-    if row is None:
+    coverage = (run.metadata_json or {}).get("canonical_coverage") or {}
+    eligible_total = sum(int(v.get("eligible", 0)) for v in coverage.values())
+    provided_total = sum(int(v.get("provided", 0)) for v in coverage.values())
+    if eligible_total <= 0:
         return Decimal("0")
-    ready_total, eligible_total = row
-    if not eligible_total or int(eligible_total) <= 0:
-        return Decimal("0")
-    return Decimal(str(int(ready_total) / int(eligible_total)))
+    return Decimal(str(provided_total / eligible_total))
 
 
 def _scope_execution_rate(run: MarketReviewRun) -> float:

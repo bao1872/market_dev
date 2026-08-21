@@ -101,3 +101,6 @@ backend/app/config.test.py
 
 # 问财(iwencai)登录态 cookie（敏感凭据，本地/容器挂载，不进版本库）
 backend/wencai_cookie.json
+
+# ===== 本地性能/离线数据集产物（probe 测量数据，不入库） =====
+backend/.perfdata/

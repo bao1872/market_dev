@@ -27,6 +27,16 @@ def _number(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
+def number(value: Any) -> float | None:
+    """Public numeric coercion (finite float or None).  Shared mapper owner.
+
+    Same semantics as the module-private ``_number``: ``None``/non-numeric/NaN/Inf
+    all map to ``None``.  Used by the shared source-fact mappers so the DB loader
+    path and the Dataset Replay Adapter path coerce bars identically.
+    """
+    return _number(value)
+
+
 def _ratio(value: float | None, history: list[float], window: int) -> float | None:
     prior = history[-window - 1 : -1]
     if value is None or not prior:
@@ -91,9 +101,24 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
     trend = direction_display(direction_from_regime(state.get("regime_value")))
     structure_alignment = state.get("structure_alignment")
     if structure_alignment is None:
+        # AUDIT-FIX-01 (P1): derive 共振/背离 ONLY from two canonical, valid,
+        # non-zero numeric biases.  A missing or non-numeric bias (None, NaN,
+        # bool, non-numeric) is NOT a valid signal and must yield alignment=None
+        # (unavailable) — NEVER a fake "共振" (e.g. None==None -> 共振).  The old
+        # ``swing_b != 0`` compared None (None != 0 is True), so a non-empty state
+        # with both biases absent silently produced "共振" (missing->aligned).
         swing_b = state.get("swing_bias")
         internal_b = state.get("internal_bias")
-        if swing_b != 0 and internal_b != 0:
+
+        def _valid_bias(value: Any) -> bool:
+            return (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and value == value  # exclude NaN
+                and value != 0
+            )
+
+        if _valid_bias(swing_b) and _valid_bias(internal_b):
             structure_alignment = (
                 "共振" if swing_b == internal_b else "背离"
             )

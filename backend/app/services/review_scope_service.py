@@ -19,11 +19,12 @@
 - 第一金字塔历史基线（默认 120 个交易日，最低 60 日）
 
 输出：
-- MarketReviewScopeSnapshot ORM 记录（每个范围一条，含 P/Q/U/C/V payload）
+- canonical member resolution（resolve_scope_members）/ PIT member facts（fetch_member_flat_list /
+  fetch_historical_member_facts）/ load-once day facts（load_day_fact_maps）。
 
-幂等：
-- 相同 (review_run_id, scope_type, scope_key) 不重算
-- coverage_ratio = ready_count / eligible_count
+[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] legacy P/Q/U/C/V 计算（compute_scope_metrics /
+apply_cross_section_percentiles）与旧 MarketReviewScopeSnapshot 写入（upsert/get/list_scope_snapshot）
+已物理删除：Review canonical runtime 只消费 ReviewScopeObservationFact，不再写旧 snapshot 表。
 
 模块自测：
     PURE_UNIT_TEST=1 python -m app.services.review_scope_service
@@ -35,11 +36,9 @@ import logging
 import uuid
 from collections import defaultdict
 from datetime import date, timedelta
-from decimal import Decimal
 from typing import Any
 
 from sqlalchemy import select
-from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.member_fact import (
@@ -47,12 +46,9 @@ from app.domain.review.member_fact import (
     ReviewMemberFact,
     previous_state_to_flat,
 )
-from app.domain.review.metric_engine import _cross_section_percentile, compute_all_metrics
-from app.domain.review.metric_registry import DEFAULT_REGISTRY
 from app.models.bar import BarDaily
 from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
 from app.models.instrument import Instrument
-from app.models.market_review import MarketReviewScopeSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services.board_membership_service import (
@@ -215,358 +211,6 @@ class ScopeDefinition:
             "taxonomy_compatibility_key": self.taxonomy_compatibility_key,
             "membership_version": self.membership_version,
         }
-
-
-# =============================================================================
-# Scope snapshot upsert（幂等）
-# =============================================================================
-
-
-async def upsert_scope_snapshot(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-    trade_date: date,
-    scope: ScopeDefinition,
-    *,
-    eligible_count: int,
-    ready_count: int,
-    coverage_ratio: float,
-    status: str,
-    p_payload: dict[str, Any] | None,
-    q_payload: dict[str, Any] | None,
-    u_payload: dict[str, Any] | None,
-    c_payload: dict[str, Any] | None,
-    v_payload: dict[str, Any] | None,
-    data_quality_json: dict[str, Any] | None = None,
-) -> MarketReviewScopeSnapshot:
-    """upsert scope snapshot 记录（幂等，唯一键 review_run_id+scope_type+scope_key）。"""
-    values = {
-        "review_run_id": review_run_id,
-        "trade_date": trade_date,
-        "scope_type": scope.scope_type,
-        "scope_key": scope.scope_key,
-        "scope_name": scope.scope_name,
-        "parent_scope_type": scope.parent_scope_type,
-        "parent_scope_key": scope.parent_scope_key,
-        "source_board_snapshot_id": scope.source_board_snapshot_id,
-        "taxonomy_version": scope.taxonomy_version,
-        "taxonomy_compatibility_key": scope.taxonomy_compatibility_key,
-        "membership_version": scope.membership_version,
-        "eligible_count": eligible_count,
-        "ready_count": ready_count,
-        "coverage_ratio": Decimal(str(coverage_ratio)),
-        "status": status,
-        "p_payload": p_payload,
-        "q_payload": q_payload,
-        "u_payload": u_payload,
-        "c_payload": c_payload,
-        "v_payload": v_payload,
-        "data_quality_json": data_quality_json,
-    }
-
-    stmt = pg_insert(MarketReviewScopeSnapshot).values(**values)
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_review_scope_snapshots_run_scope",
-        set_={
-            "trade_date": stmt.excluded.trade_date,
-            "scope_name": stmt.excluded.scope_name,
-            "parent_scope_type": stmt.excluded.parent_scope_type,
-            "parent_scope_key": stmt.excluded.parent_scope_key,
-            "source_board_snapshot_id": stmt.excluded.source_board_snapshot_id,
-            "eligible_count": stmt.excluded.eligible_count,
-            "ready_count": stmt.excluded.ready_count,
-            "coverage_ratio": stmt.excluded.coverage_ratio,
-            "status": stmt.excluded.status,
-            "p_payload": stmt.excluded.p_payload,
-            "q_payload": stmt.excluded.q_payload,
-            "u_payload": stmt.excluded.u_payload,
-            "c_payload": stmt.excluded.c_payload,
-            "v_payload": stmt.excluded.v_payload,
-            "data_quality_json": stmt.excluded.data_quality_json,
-        },
-    )
-    await session.execute(stmt)
-    await session.flush()
-
-    # 读取 upsert 后的记录
-    return await get_scope_snapshot(
-        session, review_run_id, scope.scope_type, scope.scope_key,
-    )  # type: ignore[return-value]
-
-
-async def get_scope_snapshot(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-    scope_type: str,
-    scope_key: str,
-) -> MarketReviewScopeSnapshot | None:
-    """读取单个 scope snapshot。"""
-    stmt = (
-        select(MarketReviewScopeSnapshot)
-        .where(
-            MarketReviewScopeSnapshot.review_run_id == review_run_id,
-            MarketReviewScopeSnapshot.scope_type == scope_type,
-            MarketReviewScopeSnapshot.scope_key == scope_key,
-        )
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
-
-
-async def list_scope_snapshots(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-    *,
-    scope_type: str | None = None,
-    parent_scope_type: str | None = None,
-    parent_scope_key: str | None = None,
-) -> list[MarketReviewScopeSnapshot]:
-    """列出 review run 的 scope snapshot（可按 scope_type / parent 过滤）。"""
-    stmt = select(MarketReviewScopeSnapshot).where(
-        MarketReviewScopeSnapshot.review_run_id == review_run_id,
-    )
-    if scope_type is not None:
-        stmt = stmt.where(MarketReviewScopeSnapshot.scope_type == scope_type)
-    if parent_scope_type is not None:
-        stmt = stmt.where(
-            MarketReviewScopeSnapshot.parent_scope_type == parent_scope_type,
-        )
-    if parent_scope_key is not None:
-        stmt = stmt.where(
-            MarketReviewScopeSnapshot.parent_scope_key == parent_scope_key,
-        )
-    result = await session.execute(stmt)
-    return list(result.scalars())
-
-
-# =============================================================================
-# Scope 指标计算
-# =============================================================================
-
-
-async def compute_scope_metrics(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-    trade_date: date,
-    scope: ScopeDefinition,
-    flat_list: list[dict[str, Any]],
-    *,
-    algorithm_version: str,
-    eligible_count: int | None = None,
-    history_maps: dict[str, dict[str, list[float]]] | None = None,
-    prev_values: dict[str, float] | None = None,
-    prev5d_values: dict[str, float] | None = None,
-    cross_section_values: dict[str, list[float]] | None = None,
-    pyramid_v2_payload: dict[str, Any] | None = None,
-) -> MarketReviewScopeSnapshot:
-    """计算单个范围的 P/Q/U/C/V 并 upsert scope snapshot。
-
-    Args:
-        session: 异步 DB 会话（caller 控制 commit）
-        review_run_id: 复盘 run ID
-        trade_date: 业务交易日
-        scope: 范围定义
-        flat_list: 成员 first_pyramid_flat 列表
-        algorithm_version: 生成 observation 的 Review 算法版本
-        eligible_count: 范围成员总数（None=取 len(flat_list)）
-        history_maps: 每个 metric 的历史序列 map（用于历史分位归一化）
-        prev_values: 前一交易日各 metric 的 value（用于 delta1d）
-        prev5d_values: 前 5 交易日各 metric 的 value（用于 delta5d）
-        cross_section_values: 当日所有 scope 的 value 序列（用于横截面分位）
-        pyramid_v2_payload: 第二金字塔维度数据（PRD §24，来自
-            board_analysis_snapshots.payload["pyramid_v2"]）；
-            industry/concept scope 由 orchestrator 注入，其他 scope 为 None
-
-    Returns:
-        MarketReviewScopeSnapshot ORM 对象
-    """
-    if eligible_count is None:
-        eligible_count = len(flat_list)
-
-    # ready_count = 有 fp_trend_direction 的成员数
-    ready_count = sum(
-        1 for f in flat_list if f and f.get("fp_trend_direction") is not None
-    )
-
-    coverage_ratio = (
-        ready_count / eligible_count if eligible_count > 0 else 0.0
-    )
-
-    # 计算 P/Q/U/C/V
-    payloads = compute_all_metrics(
-        flat_list,
-        ready_count=ready_count,
-        history_maps=history_maps,
-        prev_values=prev_values,
-        prev5d_values=prev5d_values,
-        cross_section_values=cross_section_values,
-        registry=DEFAULT_REGISTRY,
-    )
-
-    # 状态判定（PRD §7.1：历史少于 60 日 status=insufficient_history）
-    statuses = [p.get("status") for p in payloads.values()]
-    if not flat_list:
-        status = "unavailable"
-    elif all(s == "ready" for s in statuses):
-        status = "ready"
-    elif any(s == "insufficient_history" for s in statuses):
-        status = "insufficient_history"
-    else:
-        status = "partial"
-
-    data_quality = {
-        "eligible_count": eligible_count,
-        "ready_count": ready_count,
-        "missing_count": eligible_count - ready_count,
-        "missing_reasons": _classify_missing_reasons(flat_list, eligible_count),
-    }
-    # [P0-7 2026-07-30] 注入 pyramid_v2 维度数据（PRD §24 D 族筛选器）
-    # industry/concept scope 由 orchestrator 从 board_analysis_snapshots 读取并注入；
-    # 其他 scope pyramid_v2_payload=None，不写入 data_quality_json
-    if pyramid_v2_payload is not None:
-        data_quality["pyramid_v2"] = pyramid_v2_payload
-
-    snapshot = await upsert_scope_snapshot(
-        session,
-        review_run_id,
-        trade_date,
-        scope,
-        eligible_count=eligible_count,
-        ready_count=ready_count,
-        coverage_ratio=coverage_ratio,
-        status=status,
-        p_payload=payloads.get("P"),
-        q_payload=payloads.get("Q"),
-        u_payload=payloads.get("U"),
-        c_payload=payloads.get("C"),
-        v_payload=payloads.get("V"),
-        data_quality_json=data_quality,
-    )
-
-    from app.services.review_metric_observation_service import (
-        persist_metric_observations,
-    )
-
-    await persist_metric_observations(
-        session,
-        review_run_id=review_run_id,
-        trade_date=trade_date,
-        scope_type=scope.scope_type,
-        scope_key=scope.scope_key,
-        membership_version=scope.membership_version,
-        algorithm_version=algorithm_version,
-        flat_list=flat_list,
-        payloads=payloads,
-        taxonomy_compatibility_key=scope.taxonomy_compatibility_key,
-    )
-
-    logger.info(
-        "[ReviewScope] %s/%s eligible=%d ready=%d coverage=%.4f status=%s",
-        scope.scope_type, scope.scope_name, eligible_count, ready_count,
-        coverage_ratio, status,
-    )
-    return snapshot
-
-
-def _scope_family(scope_type: str) -> str | None:
-    """[V2] Comparable peer cohort for cross-sectional percentile.
-    
-    Each taxonomy level is an independent peer cohort:
-    - industry_l1 ↔ industry_l1
-    - industry_l2 ↔ industry_l2
-    - industry_l3 ↔ industry_l3
-    - concept ↔ concept
-    - major_index ↔ major_index
-    - style ↔ style
-    - market: None (no peer cohort — uses self-historical baseline)
-
-    Returns None for market to signal no cross-section computation.
-    """
-    if scope_type == "market":
-        return None
-    return scope_type
-
-
-async def apply_cross_section_percentiles(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-) -> int:
-    """Second pass: rank normalized values among same-day scope-family peers."""
-    stmt = (
-        select(MarketReviewScopeSnapshot)
-        .where(MarketReviewScopeSnapshot.review_run_id == review_run_id)
-        .order_by(
-            MarketReviewScopeSnapshot.scope_type.asc(),
-            MarketReviewScopeSnapshot.scope_key.asc(),
-        )
-    )
-    snapshots = list((await session.execute(stmt)).scalars())
-    fields = {
-        "P": "p_payload",
-        "Q": "q_payload",
-        "U": "u_payload",
-        "C": "c_payload",
-        "V": "v_payload",
-    }
-    peers: dict[tuple[str, str], list[float]] = defaultdict(list)
-    for snapshot in snapshots:
-        family = _scope_family(snapshot.scope_type)
-        if family is None:
-            continue  # market: no peer cohort
-        for code, field in fields.items():
-            payload = getattr(snapshot, field)
-            value = payload.get("value") if isinstance(payload, dict) else None
-            if isinstance(value, (int, float)):
-                peers[(family, code)].append(float(value))
-
-    updated = 0
-    for snapshot in snapshots:
-        family = _scope_family(snapshot.scope_type)
-        for code, field in fields.items():
-            original = getattr(snapshot, field)
-            if not isinstance(original, dict):
-                continue
-            payload = dict(original)
-            value = payload.get("value")
-            if family is None:
-                # market: crossSectionPercentile is always None
-                payload["crossSectionPercentile"] = None
-            else:
-                peer_values = peers.get((family, code), [])
-                percentile = (
-                    _cross_section_percentile(float(value), peer_values)
-                    if isinstance(value, (int, float)) and peer_values
-                    else None
-                )
-                payload["crossSectionPercentile"] = percentile
-            setattr(snapshot, field, payload)
-        updated += 1
-    await session.flush()
-    return updated
-
-
-def _classify_missing_reasons(
-    flat_list: list[dict[str, Any]], eligible_count: int,
-) -> dict[str, int]:
-    """分类成员缺失原因。"""
-    reasons: dict[str, int] = {}
-    ready = sum(
-        1 for f in flat_list if f and f.get("fp_trend_direction") is not None
-    )
-    missing = eligible_count - ready
-    if missing > 0:
-        # 简化：所有缺失归为 SNAPSHOT_MISSING 或 FP_TREND_MISSING
-        no_trend = sum(
-            1 for f in flat_list
-            if f and f.get("fp_trend_direction") is None
-        )
-        no_snapshot = eligible_count - len(flat_list)
-        if no_snapshot > 0:
-            reasons["SNAPSHOT_MISSING"] = no_snapshot
-        if no_trend > 0:
-            reasons["FP_TREND_MISSING"] = no_trend
-    return reasons
 
 
 # =============================================================================
@@ -742,6 +386,61 @@ def _hierarchy_level_from_scope(scope_type: str) -> str | None:
     if scope_type == "industry_l3":
         return "L3"
     return None
+
+
+# =============================================================================
+# PIT board discovery（按 board_definition_versions PIT 有效性）
+# =============================================================================
+
+
+async def discover_pit_available_boards(
+    session: AsyncSession,
+    board_type: str,
+    hierarchy_level: str | None,
+    trade_date: date,
+) -> list[ScopeDefinition]:
+    """Boards of a type that have a PIT definition version valid on ``trade_date``.
+
+    [REVIEW-EXECUTION-PATH-CONSOLIDATION] 由原 shadow runner 迁移至 scope 发现
+    服务的 canonical 位置。board_type/hierarchy -> canonical scope_type
+    （industry_l1/l2/l3 / concept），返回 ``ScopeDefinition`` 而非 shadow 专用 spec。
+    """
+    from sqlalchemy import or_
+
+    from app.models.board_taxonomy import BoardDefinitionVersion
+    from app.models.market_board import MarketBoard
+
+    if board_type == "concept":
+        scope_type = "concept"
+    else:
+        if hierarchy_level is None:
+            raise ValueError("industry board discovery requires a hierarchy_level")
+        scope_type = f"industry_{hierarchy_level.lower()}"
+
+    stmt = (
+        select(MarketBoard.id, MarketBoard.name)
+        .join(BoardDefinitionVersion, BoardDefinitionVersion.board_id == MarketBoard.id)
+        .where(
+            MarketBoard.type == board_type,
+            BoardDefinitionVersion.effective_from <= trade_date,
+            or_(
+                BoardDefinitionVersion.effective_to.is_(None),
+                BoardDefinitionVersion.effective_to > trade_date,
+            ),
+        )
+        .distinct()
+        .order_by(MarketBoard.name)
+    )
+    if hierarchy_level is not None:
+        stmt = stmt.where(MarketBoard.hierarchyLevel == hierarchy_level)
+    return [
+        ScopeDefinition(
+            scope_type=scope_type,
+            scope_key=str(row[0]),
+            scope_name=row[1],
+        )
+        for row in (await session.execute(stmt))
+    ]
 
 
 # =============================================================================
@@ -934,6 +633,85 @@ async def fetch_historical_member_facts(
     return facts
 
 
+def _validate_history_state_lineage(
+    current_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState],
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState],
+    *,
+    trade_date: date,
+    required_source_history_run_id: uuid.UUID | None,
+    required_history_contract_version: str,
+) -> None:
+    """Validate replay CURRENT/PREVIOUS lineage without performing I/O."""
+    for instrument_id, current in current_by_instrument.items():
+        current_run_id = getattr(current, "source_history_run_id", None)
+        if current_run_id is None:
+            raise ValueError(
+                f"HISTORY_STATE_CURRENT_SOURCE_RUN_NULL: instrument={instrument_id} "
+                f"trade_date={trade_date}（history_state 模式 CURRENT T 状态 "
+                f"必须携带 source_history_run_id）"
+            )
+        current_version = getattr(current, "history_contract_version", None)
+        if current_version != required_history_contract_version:
+            raise ValueError(
+                f"HISTORY_STATE_CURRENT_CONTRACT_MISMATCH: instrument={instrument_id} "
+                f"expected={required_history_contract_version} got={current_version!r}"
+            )
+        if (
+            required_source_history_run_id is not None
+            and current_run_id != required_source_history_run_id
+        ):
+            raise ValueError(
+                f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={instrument_id} "
+                f"required={required_source_history_run_id!r} got={current_run_id!r}"
+            )
+        previous = previous_by_instrument.get(instrument_id)
+        if previous is None:
+            continue
+        previous_run_id = getattr(previous, "source_history_run_id", None)
+        if previous_run_id != current_run_id:
+            raise ValueError(
+                f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={instrument_id} "
+                f"current={current_run_id!r} previous={previous_run_id!r} "
+                f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
+            )
+        previous_version = getattr(previous, "history_contract_version", None)
+        if previous_version != required_history_contract_version:
+            raise ValueError(
+                f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={instrument_id} "
+                f"current={required_history_contract_version!r} "
+                f"previous={previous_version!r}"
+            )
+
+
+def _validate_stock_core_previous_lineage(
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState],
+    *,
+    trade_date: date,
+    required_source_history_run_id: uuid.UUID | None,
+    required_history_contract_version: str,
+) -> None:
+    """Validate stock-core historical baselines without performing I/O."""
+    if required_source_history_run_id is None:
+        return
+    for instrument_id, previous in previous_by_instrument.items():
+        previous_run_id = getattr(previous, "source_history_run_id", None)
+        if previous_run_id != required_source_history_run_id:
+            raise ValueError(
+                f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
+                f"{required_source_history_run_id!r} got={previous_run_id!r} "
+                f"for instrument={instrument_id} trade_date={trade_date}"
+            )
+        previous_version = getattr(previous, "history_contract_version", None) or (
+            previous.state_payload or {}
+        ).get("history_contract_version")
+        if previous_version != required_history_contract_version:
+            raise ValueError(
+                f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
+                f"expected={required_history_contract_version} got={previous_version!r} "
+                f"for trade_date={trade_date}"
+            )
+
+
 async def load_day_fact_maps(
     session: AsyncSession,
     *,
@@ -1046,63 +824,20 @@ async def load_day_fact_maps(
     #       previous(< T) 必须 shared current 的 source run + contract version
     #   - stock_core 模式：previous 必须匹配绑定的 canonical history source（旧逻辑）。
     if current_source == "history_state":
-        for _iid, _cur in latest_by_instrument.items():
-            _cur_run = getattr(_cur, "source_history_run_id", None)
-            if _cur_run is None:
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_NULL: instrument={_iid} "
-                    f"trade_date={trade_date}（history_state 模式 CURRENT T 状态 "
-                    f"必须携带 source_history_run_id）"
-                )
-            if getattr(_cur, "history_contract_version", None) != _required_version:
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_CONTRACT_MISMATCH: instrument={_iid} "
-                    f"expected={_required_version} got="
-                    f"{getattr(_cur, 'history_contract_version', None)!r}"
-                )
-            if (
-                required_source_history_run_id is not None
-                and _cur_run != required_source_history_run_id
-            ):
-                raise ValueError(
-                    f"HISTORY_STATE_CURRENT_SOURCE_RUN_MISMATCH: instrument={_iid} "
-                    f"required={required_source_history_run_id!r} got={_cur_run!r}"
-                )
-            _prev = previous_by_instrument.get(_iid)
-            if _prev is not None:
-                _prev_run = getattr(_prev, "source_history_run_id", None)
-                if _prev_run != _cur_run:
-                    raise ValueError(
-                        f"HISTORY_STATE_PREVIOUS_SOURCE_RUN_MISMATCH: instrument={_iid} "
-                        f"current={_cur_run!r} previous={_prev_run!r} "
-                        f"（history_state 模式 previous 必须与 CURRENT T 同 source run）"
-                    )
-                if getattr(_prev, "history_contract_version", None) != _required_version:
-                    raise ValueError(
-                        f"HISTORY_STATE_PREVIOUS_CONTRACT_MISMATCH: instrument={_iid} "
-                        f"current={_required_version!r} previous="
-                        f"{getattr(_prev, 'history_contract_version', None)!r}"
-                    )
+        _validate_history_state_lineage(
+            latest_by_instrument,
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
     else:
-        # [REVIEW-FACT-PARITY-02 §11] stock_core 模式：previous 必须匹配绑定 canonical source。
-        if required_source_history_run_id is not None:
-            for _iid, _prev in previous_by_instrument.items():
-                _prev_run = getattr(_prev, "source_history_run_id", None)
-                if _prev_run != required_source_history_run_id:
-                    raise ValueError(
-                        f"HISTORY_PREVIOUS_SOURCE_RUN_MISMATCH: required="
-                        f"{required_source_history_run_id!r} got={_prev_run!r} "
-                        f"for instrument={_iid} trade_date={trade_date}"
-                    )
-                _ver = getattr(_prev, "history_contract_version", None) or (
-                    _prev.state_payload or {}
-                ).get("history_contract_version")
-                if _ver != _required_version:
-                    raise ValueError(
-                        f"HISTORY_CONTRACT_VERSION_MISMATCH(previous): "
-                        f"expected={_required_version} got={_ver!r} "
-                        f"for trade_date={trade_date}"
-                    )
+        _validate_stock_core_previous_lineage(
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
 
     previous_payloads: dict[uuid.UUID, dict[str, Any]] = {
         iid: state.state_payload for iid, state in previous_by_instrument.items()
@@ -1182,9 +917,9 @@ async def load_day_fact_maps(
     # （历史 state < T 即接受），故不传 required_trade_date（见 FIX 4）。
     # 该 readiness 校验仅用于**形式 Review（stock_core 来源）**；history_state 回放
     # 路径读的是 canonical source 自身（CURRENT T 状态即权威），由调用方负责可信源，不在此连 DB 校验。
-    # 延迟导入避免与 review_bootstrap_service 形成循环依赖。
+    # 延迟导入避免循环依赖。
     if required_source_history_run_id is not None and current_source == "stock_core":
-        from app.services.review_bootstrap_service import (
+        from app.services.review_history_readiness_service import (
             validate_canonical_history_run_readiness,
         )
         readiness = await validate_canonical_history_run_readiness(
@@ -1291,6 +1026,117 @@ async def load_day_fact_maps(
         del chunk_bars_by_instrument
 
     return facts_by_instrument
+
+
+async def validate_review_lineage_guard(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    source_core_run_id: uuid.UUID | None = None,
+    required_source_history_run_id: uuid.UUID | None = None,
+    required_history_contract_version: str | None = None,
+    current_source: str = "stock_core",
+    instrument_ids: list[uuid.UUID] | None = None,
+) -> None:
+    """[REVIEW-BACKEND-FINAL-CLOSURE Phase 6] 轻量 lineage fail-closed 守卫。
+
+    从 ``load_day_fact_maps`` 抽离：只执行 REVIEW-FACT-PARITY-02 §11 lineage 校验，
+    **不做** 任何 member fact 物化（current flat 查询 / 400 日 bar 窗口 /
+    ``ReviewMemberFact.build``）。物化结果在 canonical runtime 中由
+    ``prepare_current_scope_observations_batch`` 单独负责，``compute_run`` /
+    ``resume_run`` 原有的 ``day_fact_map`` 返回值从未被 composition 消费，属死代码。
+
+    fail-closed 语义与原 ``load_day_fact_maps`` 内联校验**完全一致**：
+
+    - history_state 模式：CURRENT(T) 与 PREVIOUS(<T) 的 ``source_history_run_id``
+      必须相等，且 contract version 必须匹配 ``required_history_contract_version``。
+    - stock_core 模式：每个 PREVIOUS(<T) 状态的 ``source_history_run_id`` 必须 ==
+      ``required_source_history_run_id`` 且 contract version 匹配；并调用
+      ``validate_canonical_history_run_readiness`` 二次确认 canonical history source 就绪。
+
+    校验失败一律 ``raise ValueError``（fail closed，禁止退回旧源）。
+    """
+    _required_version = (
+        required_history_contract_version or _REVIEW_HISTORY_CONTRACT_VERSION
+    )
+
+    # [P1-D1 FIX] HISTORY FP state 查询必须 bounded（同 load_day_fact_maps 内联校验）。
+    if current_source == "history_state":
+        current_hist_stmt = (
+            select(FirstPyramidHistoryDailyState)
+            .where(
+                FirstPyramidHistoryDailyState.trade_date == trade_date,
+                FirstPyramidHistoryDailyState.algorithm_version
+                == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            )
+        )
+        if instrument_ids is not None:
+            current_hist_stmt = current_hist_stmt.where(
+                FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            )
+        current_hist_states = list(
+            (await session.execute(current_hist_stmt)).scalars()
+        )
+        latest_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {
+            s.instrument_id: s for s in current_hist_states
+        }
+    else:
+        latest_by_instrument = {}
+
+    previous_hist_stmt = (
+        select(FirstPyramidHistoryDailyState)
+        .where(
+            FirstPyramidHistoryDailyState.trade_date < trade_date,
+            FirstPyramidHistoryDailyState.algorithm_version
+            == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        )
+        .order_by(
+            FirstPyramidHistoryDailyState.instrument_id.asc(),
+            FirstPyramidHistoryDailyState.trade_date.desc(),
+        )
+        .distinct(FirstPyramidHistoryDailyState.instrument_id)
+    )
+    if instrument_ids is not None:
+        previous_hist_stmt = previous_hist_stmt.where(
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+        )
+    previous_hist_rows = list((await session.execute(previous_hist_stmt)).scalars())
+    previous_by_instrument: dict[uuid.UUID, FirstPyramidHistoryDailyState] = {}
+    for _s in previous_hist_rows:
+        if _s.instrument_id not in previous_by_instrument:
+            previous_by_instrument[_s.instrument_id] = _s
+
+    if current_source == "history_state":
+        _validate_history_state_lineage(
+            latest_by_instrument,
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
+    else:
+        _validate_stock_core_previous_lineage(
+            previous_by_instrument,
+            trade_date=trade_date,
+            required_source_history_run_id=required_source_history_run_id,
+            required_history_contract_version=_required_version,
+        )
+        # stock_core 模式二次确认 canonical history source 就绪（fail closed）。
+        if required_source_history_run_id is not None and current_source == "stock_core":
+            from app.services.review_history_readiness_service import (
+                validate_canonical_history_run_readiness,
+            )
+            readiness = await validate_canonical_history_run_readiness(
+                session,
+                required_source_history_run_id,
+                _required_version,
+            )
+            if readiness.get("status") != "ok":
+                raise ValueError(
+                    f"CANONICAL_HISTORY_SOURCE_NOT_READY: source="
+                    f"{required_source_history_run_id} contract={_required_version} "
+                    f"未就绪（{readiness.get('reason')}）；fail closed，禁止退回旧源。"
+                )
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ import pytest
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.review.scope_evidence import RAW_HHI_PEER_DISABLED_REASON
+from app.domain.review.scope_evidence import PEER_DISABLED_REASON_BY_PRIMITIVE
 from app.models.market_review import ReviewScopeObservationFact
 from app.services.review_observation_persistence_service import save_scope_observation_fact
 from app.services.scope_evidence_service import compute_scope_evidence
@@ -116,5 +116,5 @@ async def test_raw_hhi_peer_disabled(db_session: AsyncSession) -> None:
     peer = result["primitives"]["price_raw_hhi"]["peer"]
     assert peer["status"] == "unavailable"
     assert peer["percentile"] is None
-    assert peer["reason"] == RAW_HHI_PEER_DISABLED_REASON
+    assert peer["reason"] == PEER_DISABLED_REASON_BY_PRIMITIVE["price_raw_hhi"]
     assert result["primitives"]["trend_up_ratio"]["peer"]["status"] == "ready"

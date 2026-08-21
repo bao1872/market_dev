@@ -9,11 +9,14 @@ PIT membership resolution per scope family, and First Pyramid / bar loading.
 The pure semantic mapping lives in ``app.services.observation_prep``; the Core
 (``scope_observation.py``) stays untouched.
 
-Shadow only: this service is never wired into Filter / Discovery / publication.
+CANONICAL: this is the single preparation owner consumed by the orchestrator
+(``prepare_current_scope_observations_batch``) and by the historical reconstruction
+(``prepare_scopes_from_union``).  It is NOT a shadow path.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
 from bisect import bisect_left, bisect_right
@@ -21,6 +24,7 @@ from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import date, timedelta
+from typing import Any
 
 import numpy as np
 from sqlalchemy import select
@@ -31,6 +35,9 @@ from app.domain.review.member_fact import (
     previous_state_to_flat,
     state_to_continuous,
 )
+from app.domain.review.member_fact import (
+    number as coerce_number,
+)
 from app.domain.review.scope_observation import MemberObservation, StructureEvent
 from app.models.bar import BarDaily
 from app.models.calendar import TradingCalendar
@@ -38,6 +45,8 @@ from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
 )
+from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
+from app.models.first_pyramid_history_run_item import FirstPyramidHistoryRunItem
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
@@ -67,8 +76,9 @@ _BAR_LOOKBACK_DAYS = 400
 
 # Historical market membership is unresolvable this round: ``resolve_scope_members
 # ("market", ...)`` returns the CURRENT active universe and ignores trade_date.
-# Market shadow is therefore skipped (see the guard in ``prepare_scope``); it is
-# never computed from a current snapshot against a historical trade_date.
+# Market shadow is therefore skipped (see the guard in
+# ``prepare_current_scope_observations_batch``); it is never computed from a
+# current snapshot against a historical trade_date.
 MARKET_SKIP_DIAGNOSTIC = (
     "historical_market_membership_unresolved: "
     "market membership is current active universe, not historical PIT; "
@@ -97,6 +107,103 @@ def _normalize_event_type(raw: str | None) -> str:
         return ""
     token = raw.strip().lower()
     return _EVENT_TYPE_NORMALIZATION.get(token, raw.strip().upper())
+
+
+# ----------------------------------------------------------------------------
+# SHARED Source-Fact Mappers (REVIEW-V23-PHASE1-R0-A)
+# ----------------------------------------------------------------------------
+# These pure helpers are the SINGLE mapping owner for translating source facts
+# (a SQLAlchemy row, a PG JSONB dict, or a Dataset parquet/JSON row) into the
+# internal representations consumed by ``_build_member_observations`` /
+# ``compute_scope_observation``.  Both the DB loader path and the Dataset Replay
+# Adapter path call the SAME helpers (Gate 2 Adapter contract parity): we never
+# duplicate a mapping in two places, so a semantic drift cannot appear between
+# "DB path" and "Dataset path".
+#
+# ``_decode_jsonb`` is deliberately loose on input type: PostgreSQL JSONB arrives
+# as a Python ``dict`` while a Dataset parquet row carries the same JSON as a
+# JSON ``str`` (the parquet converter writes dict/list columns as ``pa.string()``
+# + ``json.dumps``).  It accepts ``dict`` / ``str`` / ``None`` and rejects any
+# other type or invalid JSON with ``ValueError`` (fail fast, never silent
+# fallback).
+
+
+def _decode_jsonb(value: Any) -> dict:
+    """Decode a JSONB-ish value to a dict, supporting both DB dict and str.
+
+    - ``dict``     -> returned as-is (defensive shallow copy).
+    - ``str``      -> ``json.loads``; MUST decode to a dict else ValueError.
+    - ``None``     -> ``{}``.
+    - other / invalid JSON / non-dict JSON -> ``ValueError``.
+    """
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"_decode_jsonb: invalid JSON string: {exc}") from exc
+        if not isinstance(loaded, dict):
+            raise ValueError(
+                f"_decode_jsonb: JSON decoded to {type(loaded).__name__}, expected dict"
+            )
+        return loaded
+    raise ValueError(f"_decode_jsonb: unsupported type {type(value).__name__}")
+
+
+def _map_daily_bar_fact(
+    *,
+    trade_date: date,
+    open: float | None,
+    high: float | None,
+    low: float | None,
+    close: float | None,
+    volume: float | None,
+    amount: float | None,
+) -> DailyBarFact:
+    """Shared DailyBarFact mapper (exact numeric coercion, no NaN injection)."""
+    return DailyBarFact(
+        trade_date=trade_date,
+        open=coerce_number(open),
+        high=coerce_number(high),
+        low=coerce_number(low),
+        close=coerce_number(close),
+        volume=coerce_number(volume),
+        amount=coerce_number(amount),
+    )
+
+
+def _map_structure_event(
+    *,
+    instrument_id: str,
+    event_type: str,
+    direction: Any,
+    level: Any,
+    internal: Any,
+    release_volume_ratio: Any,
+) -> StructureEvent:
+    """Shared immutable StructureEvent mapper (identical to the DB loaders).
+
+    Canonical boundary normalization (event_type casing), numeric level /
+    release_volume_ratio coercion, and the bool-only ``internal`` gate are all
+    applied here so the DB path and the Dataset path produce byte-identical
+    events.
+    """
+    internal_flag: bool | None = bool(internal) if isinstance(internal, bool) else None
+    return StructureEvent(
+        member_id=instrument_id,
+        event_type=_normalize_event_type(event_type),
+        direction=direction,
+        level=(float(level) if isinstance(level, (int, float)) else None),
+        internal=internal_flag,
+        release_volume_ratio=(
+            float(release_volume_ratio)
+            if isinstance(release_volume_ratio, (int, float))
+            else None
+        ),
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -197,6 +304,11 @@ class PreparedScope:
     pit_status_t: str
     pit_status_t1: str
     diagnostics: tuple[str, ...]
+    # ROUND-2.2B: REQUIRED (no default) — exact-T Event Coverage members for this
+    # scope/date.  ``None`` = coverage source unavailable (structure-events
+    # unavailable); ``tuple(...)`` = valid coverage (possibly empty = legal
+    # zero-event day).  Every PreparedScope constructor MUST decide explicitly.
+    event_coverage_member_ids: tuple[str, ...] | None
     events: tuple[StructureEvent, ...] = ()
 
 
@@ -223,113 +335,6 @@ async def list_recent_trading_days(
     return list(rows)
 
 
-async def _load_states(
-    session: AsyncSession,
-    instrument_ids: list[uuid.UUID],
-    trade_date: date | None,
-) -> dict[uuid.UUID, dict]:
-    """Canonical First Pyramid daily_state payloads at the exact ``trade_date``."""
-    if not instrument_ids or trade_date is None:
-        return {}
-    stmt = select(FirstPyramidHistoryDailyState).where(
-        FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
-        FirstPyramidHistoryDailyState.trade_date == trade_date,
-        FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-    )
-    return {row.instrument_id: row.state_payload for row in (await session.execute(stmt)).scalars()}
-
-
-async def _load_bar_facts(
-    session: AsyncSession,
-    instrument_ids: list[uuid.UUID],
-    trade_date: date,
-) -> dict[uuid.UUID, list[DailyBarFact]]:
-    """Ascending per-instrument daily bar facts up to ``trade_date`` (window).
-
-    PERF-IO-2: column projection identical to ``_load_batch_bars`` — only the
-    ``DailyBarFact`` columns are selected, never the full ``BarDaily`` ORM row.
-    """
-    if not instrument_ids:
-        return {}
-    stmt = (
-        select(
-            BarDaily.instrument_id,
-            BarDaily.trade_date,
-            BarDaily.open,
-            BarDaily.high,
-            BarDaily.low,
-            BarDaily.close,
-            BarDaily.volume,
-            BarDaily.amount,
-        )
-        .where(
-            BarDaily.instrument_id.in_(instrument_ids),
-            BarDaily.trade_date <= trade_date,
-            BarDaily.trade_date >= trade_date - timedelta(days=_BAR_LOOKBACK_DAYS),
-        )
-        .order_by(BarDaily.instrument_id.asc(), BarDaily.trade_date.asc())
-    )
-    by_instrument: dict[uuid.UUID, list[DailyBarFact]] = defaultdict(list)
-    for bar in (await session.execute(stmt)).all():
-        by_instrument[bar.instrument_id].append(DailyBarFact.from_row(bar))
-    return dict(by_instrument)
-
-
-async def _load_structure_events(
-    session: AsyncSession,
-    instrument_ids: list[uuid.UUID],
-    trade_date: date | None,
-) -> list[StructureEvent]:
-    """Canonical immutable First Pyramid structure events for ``trade_date``.
-
-    Source is ``FirstPyramidHistoryEvent`` (the immutable event stream), NOT
-    ``fp_latest_*`` summaries and NOT a flattened array.  Each event is mapped to
-    a :class:`StructureEvent`, carrying ``direction`` / ``level`` for leveled
-    events (BOS / CHoCH / OB_*) and leaving them ``None`` for EQH/EQL extremes.
-    ``release_volume_ratio`` is carried only for SQZ_RELEASE.
-    """
-    if not instrument_ids or trade_date is None:
-        return []
-    # Events carry event_time (ISO string) + history_contract_version, NOT a
-    # trade_date column.  Filter by canonical algorithm version + history contract
-    # version, and the T-day prefix on event_time (contract-aware, avoids v1/NULL
-    # legacy events double-counting).
-    date_prefix = trade_date.isoformat()
-    stmt = select(FirstPyramidHistoryEvent).where(
-        FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
-        FirstPyramidHistoryEvent.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-        FirstPyramidHistoryEvent.history_contract_version == HISTORY_CONTRACT_VERSION,
-        FirstPyramidHistoryEvent.event_time.startswith(date_prefix),
-    )
-    events: list[StructureEvent] = []
-    for row in (await session.execute(stmt)).scalars():
-        payload = row.event_payload or {}
-        # Canonical boundary normalization: CHoCH casing is a storage artifact, NOT a
-        # product distinction.  Normalize case-insensitively so Scope Core never
-        # perceives "CHoCH" vs "CHOCH".  Additive-only; other known types unaffected.
-        etype = _normalize_event_type(row.event_type)
-        direction = payload.get("direction")
-        level = payload.get("level")
-        # ``internal`` is the canonical Structure Level dimension (False=Swing,
-        # True=Internal).  Stored in the event payload; NOT re-derived by Scope.
-        internal_raw = payload.get("internal")
-        internal = bool(internal_raw) if isinstance(internal_raw, bool) else None
-        release_ratio = payload.get("release_volume_ratio")
-        events.append(
-            StructureEvent(
-                member_id=str(row.instrument_id),
-                event_type=etype,
-                direction=direction,
-                level=(float(level) if isinstance(level, (int, float)) else None),
-                internal=internal,
-                release_volume_ratio=(
-                    float(release_ratio) if isinstance(release_ratio, (int, float)) else None
-                ),
-            )
-        )
-    return events
-
-
 def _build_member_observations(
     pit_ids_t: list[uuid.UUID],
     *,
@@ -343,23 +348,29 @@ def _build_member_observations(
     counters: dict[str, int] | None = None,
     fallback_reasons: list[str] | None = None,
 ) -> list[MemberObservation]:
-    """Build canonical ``MemberObservation`` inputs shared by the per-date and the
-    batch replay path (single member-construction owner).
+    """Build canonical ``MemberObservation`` inputs — the single member-construction
+    owner shared by every batch / union replay path.
 
     ``counters`` / ``fallback_reasons`` are optional OUT parameters populated by the
     batch path for rules/25 §8.7 physical-cost instrumentation: ``counters["vec_hit"]``
     increments when a member resolves its VolumeContext from the precomputed vectorized
     series (no strict-prior window materialization); ``counters["vec_fallback"]``
     increments and ``fallback_reasons`` records the first reason when it falls back to
-    the canonical per-date owner (which needs the strict-prior history window).  They
+    the canonical window owner (which needs the strict-prior history window).  They
     never affect the constructed ``MemberObservation`` — this is pure observability.
     """
     members: list[MemberObservation] = []
     for inst_id in pit_ids_t:
+        # ROUND-2 GAP-L1-MEMBER-GATE FIX: a PIT member EXISTS by virtue of being
+        # in the PIT membership — NOT because it has a daily_state.  When the
+        # daily_state is missing (state_t is None), the member is still built; the
+        # state-derived fact families (Trend / Structure State / Momentum /
+        # state-driven Volume) become unavailable, while bars-driven Price and
+        # snapshot-driven Current-only facts stay available (they have their own
+        # independent sources).  Previously this ``continue`` dropped the whole
+        # member, so bars/snapshots that existed could never form Price /
+        # Current-only on a state-less day (proven on 2026-08-17).
         state_t = states_t.get(inst_id)
-        if state_t is None:
-            # Not a valid canonical First Pyramid member/fact at T -> not provided.
-            continue
         series = bars.get(inst_id)
         current = series.exact_bar(trade_date) if series else None
         t1_bar = series.exact_bar(t1) if (series and t1) else None
@@ -436,123 +447,17 @@ def _build_member_observations(
     return members
 
 
-async def prepare_scope_from_member_ids(
-    session: AsyncSession,
-    scope_type: str,
-    scope_key: str,
-    scope_name: str,
-    trade_date: date,
-    member_ids: list[uuid.UUID],
-    *,
-    pit_member_ids_t1: list[uuid.UUID] | None = None,
-    pit_status_t: str = "current_static",
-    pit_status_t1: str = "current_static",
-    t1_membership_available: bool = True,
-    diagnostics: tuple[str, ...] = (),
-    load_current_only: bool = True,
-) -> PreparedScope:
-    """Prepare canonical MemberObservation inputs from explicitly-given members.
-
-    Used by the current-universe historical reconstruction: the caller fixes the
-    membership once (CURRENT STATIC MEMBERSHIP) and reuses it for every
-    historical trade date.  This function never resolves membership itself — it
-    only prepares member facts at ``trade_date`` (T) and its exact canonical T-1
-    via the single canonical loaders shared with ``prepare_scope``.
-
-    ``pit_member_ids_t1`` defaults to the same current member set (the fixed
-    universe is valid at T-1 too), so scope transitions stay inside the fixed
-    current universe.  Historical facts are read strictly at T / exact T-1.
-
-    ``load_current_only`` gates the Current-only snapshot loader.  The current
-    path (``prepare_scope``) keeps it enabled (current-only facts served for the
-    current day).  The historical reconstruction passes ``False``: the
-    reconstruction is built ONLY from FP history + bars + FP events, never from
-    the current-day snapshot store, so current-only facts stay ``None`` (PRD
-    v2.3) and the large ``summary_payload`` JSONB is never transferred.
-    """
-    t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
-
-    pit_ids_t = list(member_ids)
-    t1_ids = list(pit_member_ids_t1) if pit_member_ids_t1 is not None else list(pit_ids_t)
-
-    # ---- Facts ----
-    states_t = await _load_states(session, pit_ids_t, trade_date)
-    states_t1 = await _load_states(session, pit_ids_t, t1) if t1 else {}
-    bar_facts = await _load_bar_facts(session, pit_ids_t, trade_date)
-    t1_facts = await _load_bar_facts(session, pit_ids_t, t1) if t1 else {}
-    # Wrap the per-replay-date bar lists into per-member ascending series so the
-    # shared ``_build_member_observations`` owner can extract the T-row / T-1-row
-    # bar (``exact_bar`` for the vec path) and the strict-prior window (only for the
-    # window-bound fallback) identically to the batch path.  ``bar_facts`` holds
-    # the T-day bar(s); ``t1_facts`` holds the T-1-day bar(s) — concat keeps the
-    # ascending order the series owner expects (t1 < t).
-    bars: dict[uuid.UUID, _InstrumentBarSeries] = {}
-    for inst_id in bar_facts:
-        # ``bar_facts`` holds the T-day bar(s); ``t1_facts`` holds the T-1-day bar(s)
-        # (t1 < t, no overlap in normal loads).  Key by trade_date so a load that
-        # returns the same bar for both dates (e.g. some test doubles) is not
-        # double-counted, and keep ascending order for the series owner.
-        merged: dict[date, DailyBarFact] = {}
-        for b in t1_facts.get(inst_id, []):
-            merged[b.trade_date] = b
-        for b in bar_facts[inst_id]:
-            merged[b.trade_date] = b
-        ordered = [merged[d] for d in sorted(merged)]
-        bars[inst_id] = _InstrumentBarSeries(
-            facts=tuple(ordered), dates=tuple(b.trade_date for b in ordered)
-        )
-    # Canonical immutable structure events for T (PRD §7.4 D).
-    structure_events = await _load_structure_events(session, pit_ids_t, trade_date)
-    # Current-only canonical facts from the exact-T snapshot (see
-    # ``_load_current_only_snapshot_facts``).  The historical reconstruction
-    # passes ``load_current_only=False``: current-only facts have no FP-history
-    # source and must stay None for historical T (PRD v2.3) — never fetched from
-    # the snapshot store, never a current backfill.
-    current_only_facts = (
-        await _load_current_only_snapshot_facts(session, pit_ids_t, trade_date)
-        if load_current_only
-        else {}
-    )
-
-    members = _build_member_observations(
-        pit_ids_t,
-        trade_date=trade_date,
-        t1=t1,
-        states_t=states_t,
-        states_t1=states_t1,
-        bars=bars,
-        current_only_facts=current_only_facts,
-    )
-
-    return PreparedScope(
-        scope_type=scope_type,
-        scope_key=scope_key,
-        scope_name=scope_name,
-        trade_date=trade_date,
-        canonical_t1=t1,
-        pit_member_ids=tuple(str(i) for i in pit_ids_t),
-        pit_member_ids_t1=tuple(str(i) for i in t1_ids),
-        members=tuple(members),
-        t1_membership_available=t1_membership_available,
-        pit_status_t=pit_status_t,
-        pit_status_t1=pit_status_t1,
-        diagnostics=tuple(diagnostics),
-        events=tuple(structure_events),
-    )
-
-
 # ----------------------------------------------------------------------------
 # BATCH historical reconstruction: ONE bulk read of the whole member x date
-# window, then replay per T (no per-date reload).  The per-date loaders above
-# stay as the canonical SQL owners; the batch loaders read the SAME canonical
-# tables once and the replay reproduces exactly the per-date windows so the
-# resulting PreparedScope is byte-identical to the per-date path.
+# window, then replay per T (no per-date reload).  The batch loaders are the
+# canonical SQL owners; the replay reproduces exactly the per-date windows so
+# the resulting PreparedScope is byte-identical to a hypothetical per-date path.
 #
 # Vectorized preprocessing: each member's VolumeContext series is computed ONCE
 # across the whole window with the numpy owner (``compute_volume_context_vectorized``),
 # then the per-T replay only indexes the precomputed row — the pandas rolling /
-# percentile work that the per-date path repeats for every (member, T) is done a
-# single time per member.  The canonical per-date owner remains the oracle and is
+# percentile work that a per-date path would repeat for every (member, T) is done
+# a single time per member.  The canonical batch window remains the oracle and is
 # used as fallback for the window-bound edge case (see ``_build_member_observations``).
 # ----------------------------------------------------------------------------
 
@@ -620,7 +525,7 @@ class _InstrumentBarSeries:
 
     def window(self, hi: date, lo_days: int = _BAR_LOOKBACK_DAYS) -> list[DailyBarFact]:
         """Facts with ``hi - lo_days <= trade_date <= hi`` (ascending), reproducing
-        ``_load_bar_facts`` for one replay date ``hi`` exactly."""
+        the canonical ``[hi-400d, hi]`` replay window for ``hi`` exactly."""
         lo = hi - timedelta(days=lo_days)
         start = bisect_left(self.dates, lo)
         end = bisect_right(self.dates, hi)
@@ -799,28 +704,19 @@ async def _load_batch_events(
     grouped: dict[str, list[StructureEvent]] = defaultdict(list)
     for row in (await session.execute(stmt)).scalars():
         payload = row.event_payload or {}
-        # Canonical boundary normalization (identical to ``_load_structure_events``).
-        etype = _normalize_event_type(row.event_type)
-        direction = payload.get("direction")
-        level = payload.get("level")
-        internal_raw = payload.get("internal")
-        internal = bool(internal_raw) if isinstance(internal_raw, bool) else None
-        release_ratio = payload.get("release_volume_ratio")
         event_time = row.event_time
         if not event_time:
             # The query bounds ``event_time`` to [first, last+1d), so a NULL here
             # would be a data anomaly; skip rather than crash or mis-group.
             continue
         grouped[event_time[:10]].append(
-            StructureEvent(
-                member_id=str(row.instrument_id),
-                event_type=etype,
-                direction=direction,
-                level=(float(level) if isinstance(level, (int, float)) else None),
-                internal=internal,
-                release_volume_ratio=(
-                    float(release_ratio) if isinstance(release_ratio, (int, float)) else None
-                ),
+            _map_structure_event(
+                instrument_id=str(row.instrument_id),
+                event_type=row.event_type,
+                direction=payload.get("direction"),
+                level=payload.get("level"),
+                internal=payload.get("internal"),
+                release_volume_ratio=payload.get("release_volume_ratio"),
             )
         )
     return {
@@ -830,128 +726,72 @@ async def _load_batch_events(
     }
 
 
-async def prepare_scope_series_from_member_ids(
+# ---------------------------------------------------------------------------
+# ROUND-2.2B — Conservative canonical-backfill Event Coverage (single owner)
+# ---------------------------------------------------------------------------
+# An exact-T DailyState proves Event lifecycle coverage iff (12-condition contract):
+#   1. exact-T FirstPyramidHistoryDailyState exists
+#   2. DailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+#   3. DailyState.history_contract_version == HISTORY_CONTRACT_VERSION
+#   4. DailyState.source_history_run_id IS NOT NULL
+#   5. matching FirstPyramidHistoryRun exists (source_history_run_id)
+#   6. Run.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+#   7. Run.status IN ('partial','succeeded')
+#   8. Run.completed_at IS NOT NULL
+#   9. matching FirstPyramidHistoryRunItem (run_id + instrument_id) exists
+#  10. RunItem.status == 'succeeded'
+#  11. RunItem.completed_at IS NOT NULL
+#  12. DailyState.updated_at <= Run.completed_at   (excludes post-backfill state-only
+#                                                  advancement, e.g. 08-10)
+# This is the CURRENT Review conservative canonical-backfill proof; it does NOT claim
+# to support future lifecycle modes.  NO date hardcode anywhere.
+
+
+async def _load_batch_backfill_event_coverage(
     session: AsyncSession,
-    scope_type: str,
-    scope_key: str,
-    scope_name: str,
+    instrument_ids: list[uuid.UUID],
     trade_dates: list[date],
-    member_ids: list[uuid.UUID],
-    *,
-    pit_member_ids_t1: list[uuid.UUID] | None = None,
-    pit_status_t: str = "current_static",
-    pit_status_t1: str = "current_static",
-    t1_membership_available: bool = True,
-    diagnostics: tuple[str, ...] = (),
-    load_current_only: bool = False,
-    prep_counters: dict[str, int] | None = None,
-    prep_fallback_reasons: list[str] | None = None,
-) -> list[PreparedScope]:
-    """Batch prepare one historical Scope Observation per date in one bulk read.
+) -> dict[date, frozenset[uuid.UUID]]:
+    """Batch coverage for all ``trade_dates`` in ONE query (no per-date SQL).
 
-    The whole member x date window is loaded ONCE (calendar, FP states, bars,
-    FP events) and replayed per ``trade_date`` — reproducing exactly the
-    per-date ``prepare_scope_from_member_ids`` windows, so each returned
-    :class:`PreparedScope` is identical to the per-date path (membership is
-    caller-fixed CURRENT STATIC, facts come from exact T / exact canonical T-1,
-    never current-day backfill).
-
-    ``load_current_only`` defaults to ``False`` (this is the historical-series
-    path: current-only snapshot facts have no FP-history source and stay None
-    per PRD v2.3).
+    Returns a dict {trade_date: frozenset[UUID]}.  A date absent from the dict has
+    NO coverage entry -> its structure-events source is unavailable (caller must not
+    fabricate it).  This avoids an N-date query explosion in the replay path.
     """
-    if not trade_dates:
-        return []
-    import time
-
-    t0 = time.perf_counter()
-    t1_by_date = await _load_batch_calendar(session, trade_dates)
-    cal_ms = (time.perf_counter() - t0) * 1000.0
-    t0 = time.perf_counter()
-    states_by_date = await _load_batch_states(session, member_ids, trade_dates, t1_by_date)
-    states_ms = (time.perf_counter() - t0) * 1000.0
-    t0 = time.perf_counter()
-    bars = await _load_batch_bars(session, member_ids, trade_dates)
-    bars_ms = (time.perf_counter() - t0) * 1000.0
-    t0 = time.perf_counter()
-    events_by_date = await _load_batch_events(session, member_ids, trade_dates)
-    events_ms = (time.perf_counter() - t0) * 1000.0
-    # Vectorized preprocessing: per-member VolumeContext series computed once,
-    # indexed by the per-T replay (see ``_build_member_observations``).
-    t_vec = time.perf_counter()
-    vec_volume = _precompute_vectorized_volume(bars)
-    vec_ms = (time.perf_counter() - t_vec) * 1000.0
-
-    pit_ids_t = list(member_ids)
-    t1_ids = list(pit_member_ids_t1) if pit_member_ids_t1 is not None else list(pit_ids_t)
-
-    out: list[PreparedScope] = []
-    t_loop = time.perf_counter()
-    # rules/25 §8.7 physical-cost instrumentation: accumulate vectorized VolumeContext
-    # hit/fallback counts once for the whole replay.  Pure counters — no effect on the
-    # constructed MemberObservations or any business branch.  When ``prep_counters`` is
-    # provided (Composition Owner), the same counts are surfaced to it for unified
-    # reporting; otherwise the local counters feed only the log line.
-    batch_counters: dict[str, int] = prep_counters if prep_counters is not None else {}
-    batch_fallback_reasons: list[str] = (
-        prep_fallback_reasons if prep_fallback_reasons is not None else []
+    if not instrument_ids or not trade_dates:
+        return {}
+    stmt = (
+        select(
+            FirstPyramidHistoryDailyState.trade_date,
+            FirstPyramidHistoryDailyState.instrument_id,
+        )
+        .join(
+            FirstPyramidHistoryRun,
+            FirstPyramidHistoryDailyState.source_history_run_id == FirstPyramidHistoryRun.id,
+        )
+        .join(
+            FirstPyramidHistoryRunItem,
+            (FirstPyramidHistoryRunItem.history_run_id == FirstPyramidHistoryRun.id)
+            & (FirstPyramidHistoryRunItem.instrument_id == FirstPyramidHistoryDailyState.instrument_id),
+        )
+        .where(
+            FirstPyramidHistoryDailyState.trade_date.in_(trade_dates),
+            FirstPyramidHistoryDailyState.instrument_id.in_(instrument_ids),
+            FirstPyramidHistoryDailyState.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryDailyState.history_contract_version == HISTORY_CONTRACT_VERSION,
+            FirstPyramidHistoryDailyState.source_history_run_id.isnot(None),
+            FirstPyramidHistoryRun.algorithm_version == FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+            FirstPyramidHistoryRun.status.in_(["partial", "succeeded"]),
+            FirstPyramidHistoryRun.completed_at.isnot(None),
+            FirstPyramidHistoryRunItem.status == "succeeded",
+            FirstPyramidHistoryRunItem.completed_at.isnot(None),
+            FirstPyramidHistoryDailyState.updated_at <= FirstPyramidHistoryRun.completed_at,
+        )
     )
-    for t in trade_dates:
-        t1 = t1_by_date.get(t)
-        states_t = states_by_date.get(t, {})
-        states_t1 = states_by_date.get(t1, {}) if t1 else {}
-        # NOTE: the full 400-bar window is NOT materialized here. ``_build_member_observations``
-        # extracts the T-row bar via ``series.exact_bar(t)`` (O(log n)) for the
-        # vectorized fast path, and only calls ``series.window(t)`` inside the
-        # window-bound fallback for the few members that need strict-prior history.
-        # This removes the O(dates x members x ~400) list-copy hotspot.
-        structure_events = events_by_date.get(t, [])
-        current_only_facts = (
-            await _load_current_only_snapshot_facts(session, pit_ids_t, t)
-            if load_current_only
-            else {}
-        )
-        members = _build_member_observations(
-            pit_ids_t,
-            trade_date=t,
-            t1=t1,
-            states_t=states_t,
-            states_t1=states_t1,
-            bars=bars,
-            current_only_facts=current_only_facts,
-            vec_volume=vec_volume,
-            counters=batch_counters,
-            fallback_reasons=batch_fallback_reasons,
-        )
-        out.append(
-            PreparedScope(
-                scope_type=scope_type,
-                scope_key=scope_key,
-                scope_name=scope_name,
-                trade_date=t,
-                canonical_t1=t1,
-                pit_member_ids=tuple(str(i) for i in pit_ids_t),
-                pit_member_ids_t1=tuple(str(i) for i in t1_ids),
-                members=tuple(members),
-                t1_membership_available=t1_membership_available,
-                pit_status_t=pit_status_t,
-                pit_status_t1=pit_status_t1,
-                diagnostics=tuple(diagnostics),
-                events=tuple(structure_events),
-            )
-        )
-    loop_ms = (time.perf_counter() - t_loop) * 1000.0
-    logger.info(
-        "[scope-prep-batch] scope_type=%s scope_key=%s member_count=%d "
-        "trade_date_count=%d vec_hit=%d vec_fallback=%d fallback_reasons=%s "
-        "cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f "
-        "vec_precompute_ms=%.1f replay_loop_ms=%.1f",
-        scope_type, scope_key, len(member_ids), len(trade_dates),
-        batch_counters.get("vec_hit", 0), batch_counters.get("vec_fallback", 0),
-        ",".join(batch_fallback_reasons) or "-",
-        cal_ms, states_ms, bars_ms, events_ms, vec_ms, loop_ms,
-    )
-    return out
+    by_date: dict[date, set[uuid.UUID]] = defaultdict(set)
+    for d, instrument_id in (await session.execute(stmt)).all():
+        by_date[d].add(uuid.UUID(str(instrument_id)))
+    return {d: frozenset(s) for d, s in by_date.items()}
 
 
 @dataclass(frozen=True)
@@ -973,6 +813,36 @@ class _UnionFactContext:
     vec_volume: dict[uuid.UUID, _VectorizedMemberVolume]
 
 
+def build_union_fact_context_from_loaded_facts(
+    *,
+    t1_by_date: dict[date, date | None],
+    states_by_date: dict[date, dict[uuid.UUID, dict]],
+    bars: dict[uuid.UUID, _InstrumentBarSeries],
+    events_by_date: dict[date, list[StructureEvent]],
+) -> _UnionFactContext:
+    """Dataset loaded-facts -> production ``_UnionFactContext`` (R0 Replay Adapter).
+
+    This is the SINGLE entry point that turns already-loaded source facts
+    (calendar T-1 map, FP daily states, bars, FP structure events) into the same
+    ``_UnionFactContext`` consumed by :func:`prepare_scopes_from_union`.  The DB
+    path builds the same context via :func:`prepare_union_fact_context` (which
+    loads from PostgreSQL); the Dataset path builds it here from frozen source
+    facts.  Both then feed the SAME production preparation core.
+
+    The only computation performed here is the shared vectorized VolumeContext
+    precompute (``_precompute_vectorized_volume``) — the same owner the DB path
+    calls.  There is NO second set of business formulas: bars / states / events
+    are passed in already mapped by the shared source-fact mappers.
+    """
+    return _UnionFactContext(
+        t1_by_date=t1_by_date,
+        states_by_date=states_by_date,
+        bars=bars,
+        events_by_date=events_by_date,
+        vec_volume=_precompute_vectorized_volume(bars),
+    )
+
+
 async def prepare_union_fact_context(
     session: AsyncSession,
     trade_dates: list[date],
@@ -983,11 +853,10 @@ async def prepare_union_fact_context(
 ) -> _UnionFactContext:
     """Load the whole member x date window ONCE for a union of member_ids.
 
-    Identical bulk-loading owner as :func:`prepare_scope_series_from_member_ids`
-    (calendar, FP states, bars, FP events, vectorized volume), but the union of
-    members is supplied by the caller so the cost is incurred exactly once even
-    when many scopes share the same members.  Slicing per scope happens in
-    :func:`prepare_scopes_from_union`.
+    Bulk-loading owner (calendar, FP states, bars, FP events, vectorized volume);
+    the union of members is supplied by the caller so the cost is incurred
+    exactly once even when many scopes share the same members.  Slicing per scope
+    happens in :func:`prepare_scopes_from_union`.
     """
     if not trade_dates or not union_member_ids:
         return _UnionFactContext(
@@ -1016,13 +885,7 @@ async def prepare_union_fact_context(
     t_vec = time.perf_counter()
     vec_volume = _precompute_vectorized_volume(bars)
     vec_ms = (time.perf_counter() - t_vec) * 1000.0
-    batch_counters: dict[str, int] = (
-        prep_counters if prep_counters is not None else {}
-    )
-    batch_fallback_reasons: list[str] = (
-        prep_fallback_reasons if prep_fallback_reasons is not None else []
-    )
-    # VEC-1: counters are now populated by the per-date union build in
+    # VEC-1: counters are populated by the per-date union build in
     # ``prepare_scopes_from_union``, not per-scope.  Feed-through is implicit
     # via the shared dict reference.
     logger.info(
@@ -1040,56 +903,94 @@ async def prepare_union_fact_context(
     )
 
 
-async def prepare_scopes_from_union(
-    session: AsyncSession,
-    scope_type: str,
-    trade_dates: list[date],
-    scope_members: dict[str, tuple[list[uuid.UUID], str]],
-    union_ctx: _UnionFactContext,
+@dataclass(frozen=True)
+class ScopeReplaySpec:
+    """One scope to replay from a shared union fact context (R0-B).
+
+    Carries its OWN ``scope_type`` so a single union build can serve a
+    mixed-family view (e.g. concept + industry_l1/l2/l3 in dev_500 /
+    capacity_4096), unlike the DB wrapper which is single-``scope_type``.
+    """
+
+    scope_type: str
+    scope_key: str
+    scope_name: str
+    member_ids: tuple[uuid.UUID, ...]
+
+
+def build_prepared_scopes_from_union(
     *,
+    trade_dates: list[date],
+    scope_specs: Sequence[ScopeReplaySpec],
+    union_ctx: _UnionFactContext,
+    membership_t1_by_scope: dict[str, tuple[uuid.UUID, ...]] | None = None,
+    current_only_facts_by_date: dict[date, dict[str, dict[str, object]]] | None = None,
+    coverage_by_date: dict[date, frozenset[uuid.UUID]] | None = None,
     pit_status_t: str = "current_static",
     pit_status_t1: str = "current_static",
     t1_membership_available: bool = True,
+    pit_status_by_scope: dict[str, str] | None = None,
+    pit_status_t1_by_scope: dict[str, str] | None = None,
+    t1_membership_available_by_scope: dict[str, bool] | None = None,
+    diagnostics_by_scope: dict[str, tuple[str, ...]] | None = None,
     prep_counters: dict[str, int] | None = None,
     prep_fallback_reasons: list[str] | None = None,
 ) -> dict[str, list[PreparedScope]]:
-    """Build per-scope ``PreparedScope`` series by slicing a shared union fact context.
+    """PURE union preparation core: slice a shared ``_UnionFactContext`` into
+    per-scope ``PreparedScope`` series (R0-B single production calculation owner).
 
-    ``scope_members`` maps ``scope_key -> (member_ids, scope_name)``.  The loop
-    order is **date -> union member -> scope slice** (VEC-1): for every
+    This is the ONE owner shared by the DB path and the Dataset Replay Adapter.
+    The loop order is **date -> union member -> scope slice** (VEC-1): for every
     trade_date the canonical ``_build_member_observations`` owner runs ONCE over
     the union of member_ids, then each scope SELECTS the resulting immutable
     ``MemberObservation`` by reference in its own membership order.  A member
-    shared by N scopes (e.g. one stock in many concept boards) is therefore
-    constructed once per date instead of N times, while the result for a single
-    scope stays byte-identical to calling
-    :func:`prepare_scope_series_from_member_ids` for that scope alone.
+    shared by N scopes (e.g. one stock in many concept boards) is constructed
+    once per date instead of N times, while the result for a single scope stays
+    byte-identical to preparing that scope alone.
+
+    Unlike the DB wrapper (which hard-codes current-static semantics), this core
+    explicitly accepts:
+
+    - ``membership_t1_by_scope``: per-scope T-1 membership (``scope_key ->
+      member UUID tuple``).  When ``None``, T-1 == T (current-static, the
+      Historical Dynamics exception).  For Current L1 PIT(T) the caller supplies
+      the real PIT(T-1) set; T-1/Transition facts are only meaningful when this
+      is not forged.
+    - ``current_only_facts_by_date``: per-date Current-only snapshot facts
+      (``{trade_date: {member_id: {attr: value}}}``).  When ``None``, all
+      Current-only facts stay ``None`` (Historical Dynamics path).  For Current
+      L1 the caller supplies them so Release Volume Ratio / BB / VWAP / Distance
+      / Momentum-Volume Relation are populated.
     """
-    if not trade_dates or not scope_members:
+    if not trade_dates or not scope_specs:
         return {}
     import time
 
     t0 = time.perf_counter()
 
     # ---- Precompute stable scope context ONCE (out of the date loop) ----
-    # Scope member order / name / string tuples never change across the replay;
-    # building them here instead of per-T removes repeated tuple/list/set
-    # construction on every trade_date.  ``member_set`` (VEC-1-CORRECTION) is the
-    # scope-specific membership used to filter the union's structure events so
-    # ``PreparedScope.events`` stays strictly scope-local.
-    scope_meta: dict[str, tuple[str, tuple[str, ...], tuple[str, ...], set[str]]] = {}
+    scope_meta: dict[str, tuple[str, str, tuple[str, ...], tuple[str, ...], set[str]]] = {}
     union_ids: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
     scope_member_day_count = 0
-    for scope_key, (member_ids, scope_name) in scope_members.items():
-        ids = tuple(member_ids)
+    t1_by_scope: dict[str, tuple[str, ...]] = {}
+    for spec in scope_specs:
+        ids = tuple(spec.member_ids)
         scope_member_day_count += len(ids)
         str_ids = tuple(str(i) for i in ids)
-        scope_meta[scope_key] = (
-            scope_name,
+        # T-1 membership: explicit PIT(T-1) if supplied, else current-static T==T1.
+        if membership_t1_by_scope is not None:
+            t1_ids = tuple(
+                str(i) for i in membership_t1_by_scope.get(spec.scope_key, ())
+            )
+        else:
+            t1_ids = str_ids
+        t1_by_scope[spec.scope_key] = t1_ids
+        scope_meta[spec.scope_key] = (
+            spec.scope_type,
+            spec.scope_name,
             str_ids,
-            # current-static: the T-1 membership equals the T membership.
-            str_ids,
+            t1_ids,
             set(str_ids),
         )
         for mid in ids:
@@ -1111,16 +1012,37 @@ async def prepare_scopes_from_union(
         prep_fallback_reasons if prep_fallback_reasons is not None else []
     )
 
-    out: dict[str, list[PreparedScope]] = {k: [] for k in scope_members}
+    out: dict[str, list[PreparedScope]] = {s.scope_key: [] for s in scope_specs}
     t_loop = time.perf_counter()
     for t in trade_dates:
         t1 = union_ctx.t1_by_date.get(t)
         states_t = union_ctx.states_by_date.get(t, {})
         states_t1 = union_ctx.states_by_date.get(t1, {}) if t1 else {}
         structure_events = union_ctx.events_by_date.get(t, [])
+        # PERF-FIX-STRUCTURAL-1 (P0-C): index the union events once per date as
+        # member_id -> events, so each scope gathers ONLY its own members' events
+        # instead of scanning the whole union event stream per scope.
+        events_by_member: dict[str, list[StructureEvent]] = {}
+        for _e in structure_events:
+            events_by_member.setdefault(_e.member_id, []).append(_e)
+        current_only_facts = (
+            current_only_facts_by_date.get(t, {})
+            if current_only_facts_by_date is not None
+            else {}
+        )
+        # ROUND-2.2B: per-T coverage for this union membership.  ``None`` coverage
+        # source (no DB) or a date absent from the map -> coverage unavailable.
+        # PERF-FIX-STRUCTURAL-1 (P0-B): convert the union coverage UUIDs to strings
+        # EXACTLY ONCE per date (not once per scope), then each scope takes only its
+        # own PIT(T) ∩ coverage intersection (scope-local) — never copies the whole
+        # union coverage into every PreparedScope (which was O(D×S×U) string/alloc
+        # + a 4096-element set rebuild per scope in the Core).
+        coverage_t = None if coverage_by_date is None else coverage_by_date.get(t)
+        covered_str = (
+            None if coverage_t is None else frozenset(str(i) for i in coverage_t)
+        )
 
         # VEC-1: ONE canonical member build for the whole union per trade_date.
-        # A member shared by N scopes is constructed exactly once, not N times.
         # ``_build_member_observations`` remains the single member-construction
         # owner; the scopes below only SELECT the resulting immutable
         # MemberObservation by reference (scope membership order preserved).
@@ -1131,14 +1053,16 @@ async def prepare_scopes_from_union(
             states_t=states_t,
             states_t1=states_t1,
             bars=union_ctx.bars,
-            current_only_facts={},
+            current_only_facts=current_only_facts,
             vec_volume=union_ctx.vec_volume,
             counters=batch_counters,
             fallback_reasons=batch_fallback_reasons,
         )
         member_by_id = {m.member_id: m for m in union_members}
 
-        for scope_key, (scope_name, str_ids, str_ids_t1, member_set) in scope_meta.items():
+        for scope_key, (
+            scope_type, scope_name, str_ids, str_ids_t1, _member_set,
+        ) in scope_meta.items():
             members = tuple(
                 member_by_id[sid] for sid in str_ids if sid in member_by_id
             )
@@ -1146,9 +1070,27 @@ async def prepare_scopes_from_union(
             # membership so PreparedScope.events stays strictly scope-local (the
             # Scope Core would drop out-of-scope events anyway, but the contract
             # is that a PreparedScope carries ONLY its own members' events).
-            scope_events = tuple(
-                e for e in structure_events if e.member_id in member_set
-            )
+            # ROUND-2.2B: coverage-unavailable -> no events + coverage=None.
+            # PERF-FIX-STRUCTURAL-1 (P0-B): scope-local coverage = PIT(scope) ∩
+            # Coverage(union) only — never the whole union coverage.  This keeps
+            # ``event_coverage_member_ids`` bounded by the scope's own membership
+            # and lets the Core's ``set(...)`` intersect a few hundred IDs, not 4096.
+            if covered_str is None:
+                scope_coverage = None
+                scope_events: tuple[StructureEvent, ...] = ()
+            else:
+                scope_coverage = tuple(sid for sid in str_ids if sid in covered_str)
+                # PERF-FIX-STRUCTURAL-1 (P0-C): gather via the per-date member index,
+                # then filter to this scope's covered members.  No full union scan.
+                scope_events = tuple(
+                    e
+                    for sid in str_ids
+                    if sid in covered_str
+                    for e in events_by_member.get(sid, ())
+                )
+            # Per-scope status / diagnostics win when supplied (Current L1 PIT
+            # batch owner); otherwise the caller-level defaults apply (Historical
+            # current-static wrapper passes "current_static").
             out[scope_key].append(
                 PreparedScope(
                     scope_type=scope_type,
@@ -1159,10 +1101,27 @@ async def prepare_scopes_from_union(
                     pit_member_ids=str_ids,
                     pit_member_ids_t1=str_ids_t1,
                     members=members,
-                    t1_membership_available=t1_membership_available,
-                    pit_status_t=pit_status_t,
-                    pit_status_t1=pit_status_t1,
-                    diagnostics=(),
+                    t1_membership_available=(
+                        t1_membership_available_by_scope.get(scope_key, t1_membership_available)
+                        if t1_membership_available_by_scope is not None
+                        else t1_membership_available
+                    ),
+                    pit_status_t=(
+                        pit_status_by_scope.get(scope_key, pit_status_t)
+                        if pit_status_by_scope is not None
+                        else pit_status_t
+                    ),
+                    pit_status_t1=(
+                        pit_status_t1_by_scope.get(scope_key, pit_status_t1)
+                        if pit_status_t1_by_scope is not None
+                        else pit_status_t1
+                    ),
+                    diagnostics=(
+                        diagnostics_by_scope.get(scope_key, ())
+                        if diagnostics_by_scope is not None
+                        else ()
+                    ),
+                    event_coverage_member_ids=scope_coverage,
                     events=scope_events,
                 )
             )
@@ -1176,7 +1135,7 @@ async def prepare_scopes_from_union(
         "trade_date_count=%d scope_member_day_count=%d unique_member_day_count=%d "
         "duplication_factor=%.2f member_build_calls=%d vec_hit=%d vec_fallback=%d "
         "fallback_reasons=%s replay_loop_ms=%.1f total_ms=%.1f",
-        len(scope_members), len(union_ids), len(trade_dates),
+        len(scope_specs), len(union_ids), len(trade_dates),
         scope_member_day_count, unique_member_day_count, duplication_factor,
         len(trade_dates),
         batch_counters.get("vec_hit", 0), batch_counters.get("vec_fallback", 0),
@@ -1186,115 +1145,270 @@ async def prepare_scopes_from_union(
     return out
 
 
-async def prepare_scope(
+async def prepare_scopes_from_union(
     session: AsyncSession,
     scope_type: str,
-    scope_key: str,
-    trade_date: date,
-) -> PreparedScope:
-    """Prepare canonical MemberObservation inputs for one scope on ``trade_date``."""
-    diagnostics: list[str] = []
-    t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
+    trade_dates: list[date],
+    scope_members: dict[str, tuple[list[uuid.UUID], str]],
+    union_ctx: _UnionFactContext,
+    *,
+    pit_status_t: str = "current_static",
+    pit_status_t1: str = "current_static",
+    t1_membership_available: bool = True,
+    prep_counters: dict[str, int] | None = None,
+    prep_fallback_reasons: list[str] | None = None,
+) -> dict[str, list[PreparedScope]]:
+    """DB-aware thin wrapper over the pure union preparation core.
 
-    # ---- Market historical guard (Round 1B closure) ----
-    # ``resolve_scope_members("market")`` returns the current active universe and
-    # ignores trade_date.  Using current universe x historical trade_date for a
-    # Market Observation is a semantic error (current-snapshot applied to
-    # history).  Market historical membership is unresolvable this round, so the
-    # shadow is skipped with an explicit diagnostic — never current_snapshot.
-    if scope_type == "market":
-        return PreparedScope(
+    Builds per-scope ``PreparedScope`` series by slicing a shared union fact
+    context.  This wrapper hard-codes the **Historical Dynamics current-static
+    semantics** (T-1 membership == T membership, Current-only facts unavailable)
+    that the previous inline implementation baked in; it delegates the entire
+    calculation to :func:`build_prepared_scopes_from_union` so the Dataset
+    Replay Adapter and the DB path share the SAME production calculation owner.
+
+    For Current L1 (PIT(T), Current-only snapshot facts) use
+    :func:`build_prepared_scopes_from_union` directly — do NOT route Current L1
+    through this wrapper, or the current-static exception would be smuggled in.
+    """
+    specs = [
+        ScopeReplaySpec(
             scope_type=scope_type,
             scope_key=scope_key,
-            scope_name=scope_key,
-            trade_date=trade_date,
-            canonical_t1=t1,
-            pit_member_ids=(),
-            pit_member_ids_t1=(),
-            members=(),
-            t1_membership_available=False,
-            pit_status_t="unavailable",
-            pit_status_t1="unavailable",
-            diagnostics=(MARKET_SKIP_DIAGNOSTIC,),
+            scope_name=scope_name,
+            member_ids=tuple(member_ids),
         )
+        for scope_key, (member_ids, scope_name) in scope_members.items()
+    ]
+    # ROUND-2.2B: bulk exact-T Event Coverage (one query for all dates), passed
+    # into the pure core.  A date absent from the map -> coverage unavailable.
+    coverage_by_date = await _load_batch_backfill_event_coverage(
+        session, list(union_ctx.bars.keys()), trade_dates
+    )
+    return build_prepared_scopes_from_union(
+        trade_dates=trade_dates,
+        scope_specs=specs,
+        union_ctx=union_ctx,
+        membership_t1_by_scope=None,          # current-static T==T1
+        current_only_facts_by_date=None,      # Current-only unavailable
+        coverage_by_date=coverage_by_date,
+        pit_status_t=pit_status_t,
+        pit_status_t1=pit_status_t1,
+        t1_membership_available=t1_membership_available,
+        prep_counters=prep_counters,
+        prep_fallback_reasons=prep_fallback_reasons,
+    )
 
-    # ---- PIT(T) ----
-    pit_ids_t: list[uuid.UUID] = []
-    scope_name = scope_key
-    pit_status_t = "ready"
-    try:
-        pit_ids_t, scope_name = await review_scope_service.resolve_scope_members(
-            session,
-            scope_type,
-            scope_key,
-            trade_date=trade_date,
-        )
-        pit_status_t = "historical_pit"
-    except (
-        PITMembershipUnavailableError,
-        review_scope_service.OptionalScopeUnavailableError,
-    ) as exc:
-        pit_status_t = "unavailable"
-        diagnostics.append(f"pit_unavailable_T:{scope_type}/{scope_key} {exc}")
-    except review_scope_service.ScopeSnapshotError as exc:
-        pit_status_t = "unavailable"
-        diagnostics.append(f"scope_error_T:{scope_type}/{scope_key} {exc}")
 
-    # ---- PIT(T-1) ----
-    pit_ids_t1: list[uuid.UUID] = []
-    t1_membership_available = False
-    pit_status_t1 = "unavailable"
-    if t1 is not None and pit_status_t != "unavailable":
-        try:
-            pit_ids_t1, _ = await review_scope_service.resolve_scope_members(
-                session,
-                scope_type,
-                scope_key,
-                trade_date=t1,
+async def prepare_current_scope_observations_batch(
+    session: AsyncSession,
+    trade_date: date,
+    scope_specs: Sequence[ScopeReplaySpec],
+    *,
+    trade_dates: list[date] | None = None,
+) -> dict[str, PreparedScope] | dict[str, list[PreparedScope]]:
+    """Batch-prepare current-day (L1 PIT) Canonical Scope Observations — the
+    SINGLE current-day preparation owner.
+
+    When ``trade_dates`` is provided (e.g. ``[T-1, T]``), the union fact load and
+    ``build_prepared_scopes_from_union`` operate on that multi-date axis and the
+    function returns the per-scope SERIES (``dict[str, list[PreparedScope]]``),
+    keyed/ordered by ``trade_dates``. This is the family-batch path used by
+    Leadership T-1→T reconstruction (no per-scope N+1, no second algorithm).
+    With the default (``None``) the behaviour is unchanged: single ``trade_date``,
+    returned unwrapped as ``dict[str, PreparedScope]``.
+
+    The one DB entry point for the orchestrator's current-day canonical
+    observation double-write.  It:
+
+      1. resolves PIT(T) / PIT(T-1) membership per scope through the existing
+         ``review_scope_service.resolve_scope_members`` owner (identical
+         error / status / diagnostics semantics to the former per-scope path);
+      2. loads the union of member facts ONCE (calendar, FP states, bars, FP
+         events, backfill event coverage, current-only snapshot facts) via the
+         shared batch loaders;
+      3. slices per-scope ``PreparedScope`` via
+         :func:`build_prepared_scopes_from_union` — the single preparation
+         calculation owner.
+
+    Every input scope yields exactly one ``PreparedScope`` keyed by ``scope_key``.
+    A scope whose PIT(T) is unavailable gets the same terminal ``unavailable``
+    ``PreparedScope`` the legacy path produced (empty members, ``pit_status_t`` /
+    ``pit_status_t1`` / diagnostics preserved) — never an exception, never a fake
+    empty payload.  ``member_ids`` on the input ``ScopeReplaySpec`` is ignored:
+    PIT membership is always resolved here (the caller cannot pre-fix it).
+    """
+    if not scope_specs:
+        return {}
+    effective_dates = trade_dates if trade_dates is not None else [trade_date]
+    t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
+
+    # ---- Resolve PIT(T) / PIT(T-1) per scope (single owner: resolve_scope_members).
+    # ---- Unavailable scopes are terminal-ized directly; available scopes are
+    # ---- replayed through the shared union preparation core.
+    resolved_specs: list[ScopeReplaySpec] = []
+    terminal: dict[str, PreparedScope] = {}
+    pit_status_by_scope: dict[str, str] = {}
+    pit_status_t1_by_scope: dict[str, str] = {}
+    t1_membership_available_by_scope: dict[str, bool] = {}
+    diagnostics_by_scope: dict[str, tuple[str, ...]] = {}
+    membership_t1_by_scope: dict[str, tuple[uuid.UUID, ...]] = {}
+
+    for spec in scope_specs:
+        # Market historical guard (Round 1B closure): ``resolve_scope_members
+        # ("market")`` returns the CURRENT active universe and ignores trade_date.
+        # Using current universe x historical trade_date for a Market Observation
+        # is a semantic error (current-snapshot applied to history), so market is
+        # skipped with an explicit diagnostic — never current_snapshot.
+        if spec.scope_type == "market":
+            terminal[spec.scope_key] = PreparedScope(
+                scope_type=spec.scope_type,
+                scope_key=spec.scope_key,
+                scope_name=spec.scope_name,
+                trade_date=trade_date,
+                canonical_t1=t1,
+                pit_member_ids=(),
+                pit_member_ids_t1=(),
+                members=(),
+                t1_membership_available=False,
+                pit_status_t="unavailable",
+                pit_status_t1="unavailable",
+                diagnostics=(MARKET_SKIP_DIAGNOSTIC,),
+                event_coverage_member_ids=None,
             )
-            pit_status_t1 = "historical_pit"
-            t1_membership_available = True
+            continue
+
+        # ---- PIT(T) ----
+        pit_ids_t: list[uuid.UUID] = []
+        scope_name = spec.scope_name
+        pit_status_t = "ready"
+        diagnostics: list[str] = []
+        try:
+            pit_ids_t, resolved_name = await review_scope_service.resolve_scope_members(
+                session,
+                spec.scope_type,
+                spec.scope_key,
+                trade_date=trade_date,
+            )
+            scope_name = resolved_name or spec.scope_name
+            pit_status_t = "historical_pit"
         except (
             PITMembershipUnavailableError,
             review_scope_service.OptionalScopeUnavailableError,
         ) as exc:
-            pit_status_t1 = "unavailable"
-            diagnostics.append(f"pit_unavailable_T1:{scope_type}/{scope_key} {exc}")
+            pit_status_t = "unavailable"
+            diagnostics.append(f"pit_unavailable_T:{spec.scope_type}/{spec.scope_key} {exc}")
         except review_scope_service.ScopeSnapshotError as exc:
-            pit_status_t1 = "unavailable"
-            diagnostics.append(f"scope_error_T1:{scope_type}/{scope_key} {exc}")
-    elif t1 is None:
-        diagnostics.append("canonical_t1_unavailable: no previous trading day")
+            pit_status_t = "unavailable"
+            diagnostics.append(f"scope_error_T:{spec.scope_type}/{spec.scope_key} {exc}")
 
-    if pit_status_t == "unavailable":
-        return PreparedScope(
-            scope_type=scope_type,
-            scope_key=scope_key,
-            scope_name=scope_name,
-            trade_date=trade_date,
-            canonical_t1=t1,
-            pit_member_ids=(),
-            pit_member_ids_t1=tuple(str(i) for i in pit_ids_t1),
-            members=(),
-            t1_membership_available=t1_membership_available,
-            pit_status_t=pit_status_t,
-            pit_status_t1=pit_status_t1,
-            diagnostics=tuple(diagnostics),
-            events=(),
+        # ---- PIT(T-1) ----
+        pit_ids_t1: list[uuid.UUID] = []
+        t1_membership_available = False
+        pit_status_t1 = "unavailable"
+        if t1 is not None and pit_status_t != "unavailable":
+            try:
+                pit_ids_t1, _ = await review_scope_service.resolve_scope_members(
+                    session,
+                    spec.scope_type,
+                    spec.scope_key,
+                    trade_date=t1,
+                )
+                pit_status_t1 = "historical_pit"
+                t1_membership_available = True
+            except (
+                PITMembershipUnavailableError,
+                review_scope_service.OptionalScopeUnavailableError,
+            ) as exc:
+                pit_status_t1 = "unavailable"
+                diagnostics.append(
+                    f"pit_unavailable_T1:{spec.scope_type}/{spec.scope_key} {exc}"
+                )
+            except review_scope_service.ScopeSnapshotError as exc:
+                pit_status_t1 = "unavailable"
+                diagnostics.append(
+                    f"scope_error_T1:{spec.scope_type}/{spec.scope_key} {exc}"
+                )
+        elif t1 is None:
+            diagnostics.append("canonical_t1_unavailable: no previous trading day")
+
+        diagnostics_tuple = tuple(diagnostics)
+        if pit_status_t == "unavailable":
+            terminal[spec.scope_key] = PreparedScope(
+                scope_type=spec.scope_type,
+                scope_key=spec.scope_key,
+                scope_name=scope_name,
+                trade_date=trade_date,
+                canonical_t1=t1,
+                pit_member_ids=(),
+                pit_member_ids_t1=tuple(str(i) for i in pit_ids_t1),
+                members=(),
+                t1_membership_available=t1_membership_available,
+                pit_status_t=pit_status_t,
+                pit_status_t1=pit_status_t1,
+                diagnostics=diagnostics_tuple,
+                event_coverage_member_ids=None,
+                events=(),
+            )
+            continue
+
+        resolved_specs.append(
+            ScopeReplaySpec(
+                scope_type=spec.scope_type,
+                scope_key=spec.scope_key,
+                scope_name=scope_name,
+                member_ids=tuple(pit_ids_t),
+            )
         )
+        pit_status_by_scope[spec.scope_key] = pit_status_t
+        pit_status_t1_by_scope[spec.scope_key] = pit_status_t1
+        t1_membership_available_by_scope[spec.scope_key] = t1_membership_available
+        diagnostics_by_scope[spec.scope_key] = diagnostics_tuple
+        membership_t1_by_scope[spec.scope_key] = tuple(pit_ids_t1)
 
-    # ---- Facts (single canonical path, shared with current-universe
-    #      reconstruction via ``prepare_scope_from_member_ids``) ----
-    return await prepare_scope_from_member_ids(
-        session,
-        scope_type,
-        scope_key,
-        scope_name,
-        trade_date,
-        pit_ids_t,
-        pit_member_ids_t1=pit_ids_t1,
-        pit_status_t=pit_status_t,
-        pit_status_t1=pit_status_t1,
-        t1_membership_available=t1_membership_available,
-        diagnostics=tuple(diagnostics),
+    if not resolved_specs:
+        return terminal
+
+    # ---- Union member facts: load the whole member set ONCE, then slice. ----
+    union_members: list[uuid.UUID] = []
+    seen: set[uuid.UUID] = set()
+    for spec in resolved_specs:
+        for mid in spec.member_ids:
+            if mid not in seen:
+                seen.add(mid)
+                union_members.append(mid)
+
+    union_ctx = await prepare_union_fact_context(session, effective_dates, union_members)
+    # Current-only snapshot facts at exact T (str-keyed, same shape as the
+    # current-only loader consumes). C1a fix: the loader's contract is
+    # exact-T only (scalar ``trade_date``), NOT ``effective_dates`` — passing the
+    # multi-element list would feed a list into a scalar ``Column == date``
+    # comparison and fail at SQL compile/execute time under the real PG adapter.
+    current_only_facts = await _load_current_only_snapshot_facts(
+        session, union_members, trade_date
     )
+    coverage_by_date = await _load_batch_backfill_event_coverage(
+        session, union_members, effective_dates
+    )
+
+    prepared_map = build_prepared_scopes_from_union(
+        trade_dates=effective_dates,
+        scope_specs=resolved_specs,
+        union_ctx=union_ctx,
+        membership_t1_by_scope=membership_t1_by_scope,
+        current_only_facts_by_date={trade_date: current_only_facts},
+        coverage_by_date=coverage_by_date,
+        pit_status_by_scope=pit_status_by_scope,
+        pit_status_t1_by_scope=pit_status_t1_by_scope,
+        t1_membership_available_by_scope=t1_membership_available_by_scope,
+        diagnostics_by_scope=diagnostics_by_scope,
+    )
+    if len(effective_dates) == 1:
+        # Single-date (current-day) owner contract: unwrap the per-scope series
+        # to ``dict[str, PreparedScope]`` consumed by the orchestrator.
+        prepared_single = {key: scopes[0] for key, scopes in prepared_map.items()}
+        return {**terminal, **prepared_single}
+    # Multi-date axis (e.g. [T-1, T] for Leadership T-1→T): return the per-scope
+    # SERIES keyed/ordered by ``effective_dates``. No unwrap — the caller slices
+    # the dates it needs (Leadership reads [T-1] and [T]).
+    return {**terminal, **prepared_map}

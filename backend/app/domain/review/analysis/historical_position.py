@@ -301,7 +301,7 @@ def compute_position_series(
         observation_series: ordered historical canonical Scope Observation
             series, trade_date ASCENDING.  Each element is either a dict
             (``{"trade_date": ISO, "observation": payload}`` — the exact
-            ``reconstruct_scope_series`` output element) or an object exposing
+            ``reconstruct_scope_series_batch`` series element) or an object exposing
             ``.trade_date`` / ``.observation``.
         primitive_key: one of ``HISTORICAL_READY_PRIMITIVE_KEYS``.
 

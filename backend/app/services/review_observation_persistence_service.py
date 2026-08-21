@@ -15,6 +15,7 @@ loop passing them in must be blocked here even if the prep layer already guards.
 """
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from typing import Any
 
@@ -22,7 +23,10 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.market_review import ReviewScopeObservationFact
+from app.models.market_review import (
+    ReviewScopeCompositionSnapshot,
+    ReviewScopeObservationFact,
+)
 from app.services.review_observation_prep_service import PreparedScope
 
 # Activated scope families for daily objective-fact persistence (prompt §15).
@@ -204,13 +208,20 @@ def _build_fact_values(
     prep: PreparedScope,
     observation: dict[str, Any],
     algorithm_version: str | None,
+    *,
+    review_run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """Serialize PreparedScope metadata + Core observation result into a fact row.
 
     ``observation`` is stored as-is (same object, no copy / rename / recompute).
     This is the single serialize point and is kept pure for unit testing.
+
+    ``review_run_id`` binds the fact to the generating ReviewRun (run lineage,
+    REVIEW-BACKEND-FINAL-CLOSURE P0): same-day re-runs must NOT overwrite a
+    published run's Observation into another run's Composition.
     """
     return {
+        "review_run_id": review_run_id,
         "trade_date": prep.trade_date,
         "scope_type": prep.scope_type,
         "scope_key": prep.scope_key,
@@ -235,12 +246,15 @@ async def save_scope_observation_fact(
     observation: dict[str, Any],
     *,
     algorithm_version: str | None = None,
+    review_run_id: uuid.UUID | None = None,
 ) -> ReviewScopeObservationFact:
     """Idempotently persist one daily Canonical Observation Fact snapshot.
 
-    Idempotent upsert on the business grain (trade_date, scope_type, scope_key):
-    the first save inserts one row; a repeated save with a different payload
-    updates that same row (row_count stays 1, payload replaced).
+    Idempotent upsert on the business grain
+    (review_run_id, trade_date, scope_type, scope_key): the first save inserts
+    one row; a repeated save within the SAME run updates that row (row_count
+    stays 1, payload replaced). A different run on the same trade_date writes a
+    DISTINCT row (run lineage, prevents published-run Observation overwrite).
 
     Guards (in order):
     - activation: only industry_l1/l2/l3 + concept are persisted; market /
@@ -269,10 +283,12 @@ async def save_scope_observation_fact(
         trade_date=prep.trade_date,
     )
 
-    values = _build_fact_values(prep, observation, algorithm_version)
+    values = _build_fact_values(
+        prep, observation, algorithm_version, review_run_id=review_run_id,
+    )
     stmt = pg_insert(ReviewScopeObservationFact).values(**values)
     stmt = stmt.on_conflict_do_update(
-        index_elements=["trade_date", "scope_type", "scope_key"],
+        index_elements=["review_run_id", "trade_date", "scope_type", "scope_key"],
         set_={
             "scope_name": stmt.excluded.scope_name,
             "canonical_t1": stmt.excluded.canonical_t1,
@@ -291,8 +307,8 @@ async def save_scope_observation_fact(
     )
     await db.execute(stmt)
     await db.flush()
-    fact = await get_scope_observation_fact(
-        db, prep.trade_date, prep.scope_type, prep.scope_key
+    fact = await get_scope_observation_fact_by_run(
+        db, review_run_id, prep.trade_date, prep.scope_type, prep.scope_key
     )
     if fact is None:  # pragma: no cover - upsert always yields a row
         raise RuntimeError("scope observation fact missing after upsert")
@@ -312,6 +328,47 @@ async def get_scope_observation_fact(
         ReviewScopeObservationFact.scope_key == scope_key,
     )
     return (await db.execute(stmt)).scalars().first()
+
+
+async def get_scope_observation_fact_by_run(
+    db: AsyncSession,
+    review_run_id: uuid.UUID | None,
+    trade_date: date,
+    scope_type: str,
+    scope_key: str,
+) -> ReviewScopeObservationFact | None:
+    """Read-back a single fact by its run-lineage grain (REVIEW-BACKEND-FINAL-CLOSURE).
+
+    Used by the save read-back and by API resolution: the published ReviewRun
+    is resolved first, then facts are queried by ``review_run_id`` (NOT a global
+    ``WHERE trade_date=?`` scan) so a later same-day run cannot poison the
+    published run's Observation. ``review_run_id=None`` matches legacy rows that
+    predate lineage binding.
+    """
+    stmt = select(ReviewScopeObservationFact).where(
+        ReviewScopeObservationFact.review_run_id == review_run_id,
+        ReviewScopeObservationFact.trade_date == trade_date,
+        ReviewScopeObservationFact.scope_type == scope_type,
+        ReviewScopeObservationFact.scope_key == scope_key,
+    )
+    return (await db.execute(stmt)).scalars().first()
+
+
+async def list_scope_observation_facts_by_run(
+    db: AsyncSession,
+    review_run_id: uuid.UUID,
+) -> list[ReviewScopeObservationFact]:
+    """List all Observation Facts belonging to one ReviewRun (run lineage)."""
+    stmt = (
+        select(ReviewScopeObservationFact)
+        .where(ReviewScopeObservationFact.review_run_id == review_run_id)
+        .order_by(
+            ReviewScopeObservationFact.trade_date,
+            ReviewScopeObservationFact.scope_type,
+            ReviewScopeObservationFact.scope_key,
+        )
+    )
+    return list((await db.execute(stmt)).scalars())
 
 
 async def list_scope_observation_facts(
@@ -336,6 +393,85 @@ async def list_scope_observation_facts(
         ReviewScopeObservationFact.trade_date,
         ReviewScopeObservationFact.scope_type,
         ReviewScopeObservationFact.scope_key,
+    )
+    return list((await db.execute(stmt)).scalars())
+
+
+# =============================================================================
+# Composition Snapshot（REVIEW-BACKEND-FINAL-CLOSURE）
+# =============================================================================
+async def save_scope_composition_snapshot(
+    db: AsyncSession,
+    *,
+    review_run_id: uuid.UUID,
+    scope_type: str,
+    scope_key: str,
+    trade_date: date,
+    algorithm_version: str,
+    composition_payload: dict[str, Any],
+) -> ReviewScopeCompositionSnapshot:
+    """Idempotently persist one ReviewScopeCompositionSnapshot (run-lineage grain).
+
+    Upsert on (review_run_id, scope_type, scope_key): the first save inserts one
+    row; a repeated save within the SAME run updates that row (payload replaced).
+    A different run on the same scope writes a DISTINCT row (no published-run
+    Composition overwrite).
+    """
+    values = {
+        "review_run_id": review_run_id,
+        "scope_type": scope_type,
+        "scope_key": scope_key,
+        "trade_date": trade_date,
+        "algorithm_version": algorithm_version,
+        "composition_payload": composition_payload,
+    }
+    stmt = pg_insert(ReviewScopeCompositionSnapshot).values(**values)
+    stmt = stmt.on_conflict_do_update(
+        index_elements=["review_run_id", "scope_type", "scope_key"],
+        set_={
+            "trade_date": stmt.excluded.trade_date,
+            "algorithm_version": stmt.excluded.algorithm_version,
+            "composition_payload": stmt.excluded.composition_payload,
+            "updated_at": func.now(),
+        },
+    )
+    await db.execute(stmt)
+    await db.flush()
+    snap = await get_scope_composition_snapshot(
+        db, review_run_id, scope_type, scope_key
+    )
+    if snap is None:  # pragma: no cover - upsert always yields a row
+        raise RuntimeError("scope composition snapshot missing after upsert")
+    return snap
+
+
+async def get_scope_composition_snapshot(
+    db: AsyncSession,
+    review_run_id: uuid.UUID,
+    scope_type: str,
+    scope_key: str,
+) -> ReviewScopeCompositionSnapshot | None:
+    """Read-back a single Composition by its run-lineage grain."""
+    stmt = select(ReviewScopeCompositionSnapshot).where(
+        ReviewScopeCompositionSnapshot.review_run_id == review_run_id,
+        ReviewScopeCompositionSnapshot.scope_type == scope_type,
+        ReviewScopeCompositionSnapshot.scope_key == scope_key,
+    )
+    return (await db.execute(stmt)).scalars().first()
+
+
+async def list_scope_composition_snapshots(
+    db: AsyncSession,
+    review_run_id: uuid.UUID,
+) -> list[ReviewScopeCompositionSnapshot]:
+    """List all Composition snapshots belonging to one ReviewRun."""
+    stmt = (
+        select(ReviewScopeCompositionSnapshot)
+        .where(ReviewScopeCompositionSnapshot.review_run_id == review_run_id)
+        .order_by(
+            ReviewScopeCompositionSnapshot.scope_type,
+            ReviewScopeCompositionSnapshot.scope_key,
+        )
     )
     return list((await db.execute(stmt)).scalars())
 

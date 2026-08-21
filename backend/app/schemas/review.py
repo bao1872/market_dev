@@ -1,9 +1,10 @@
 """复盘模块 API Schema - 复盘工作台响应契约（PRD §12）。
 
-对应 ORM 模型 `app.models.market_review` 8 张表：
+对应 ORM 模型 `app.models.market_review`：
 - MarketReviewRun / MarketReviewRunItem / MarketReviewScopeSnapshot
-- MarketReviewSignal / MarketReviewSignalAttribution / MarketReviewSignalInstrument
-- MarketReviewTracking / MarketReviewTrackingEvaluation
+- MarketReviewMetricObservation（first_pyramid facts）
+- MarketReviewScopeObservationFact / ReviewScopeCompositionSnapshot（canonical facts）
+- 历史 ORM 表（MarketReviewSignal / MarketReviewTracking 等）保留不 DROP，但本 schema 不再暴露其 API 契约。
 
 字段命名约定：
 - 与前端 JSON API 契约一致，使用 camelCase（reviewRunId / tradeDate / signalId 等）
@@ -146,17 +147,6 @@ class ReviewOverviewCoverageDTO(BaseModel):
     industryL1: float | None = Field(None, description="一级行业覆盖率")
 
 
-class ReviewOverviewSignalSummaryDTO(BaseModel):
-    """overview.signalSummary 子结构（PRD §12.1）。"""
-
-    new: int = Field(0, description="new 状态信号数")
-    continuing: int = Field(0, description="continuing 状态信号数")
-    confirmed: int = Field(0, description="confirmed 状态信号数")
-    weakened: int = Field(0, description="weakened 状态信号数")
-    invalidated: int = Field(0, description="invalidated 状态信号数")
-    transformed: int = Field(0, description="transformed 状态信号数")
-
-
 class ReviewChipCoverageDTO(BaseModel):
     """[P0 2026-08-04] chip 真实覆盖率明细（以 stock_core expected_count 为分母）。
 
@@ -212,10 +202,6 @@ class ReviewOverviewResponse(BaseModel):
         default_factory=ReviewOverviewCoverageDTO,
         description="整体覆盖率明细",
     )
-    signalSummary: ReviewOverviewSignalSummaryDTO = Field(
-        default_factory=ReviewOverviewSignalSummaryDTO,
-        description="信号状态汇总",
-    )
     coverageRatio: float | None = Field(None, description="整体 coverage_ratio")
     expectedScopeCount: int = Field(0, description="期望扫描范围总数")
     succeededScopeCount: int = Field(0, description="扫描成功范围数")
@@ -231,43 +217,67 @@ class ReviewOverviewResponse(BaseModel):
 # =============================================================================
 
 
-class ReviewScopeMetricsResponse(BaseModel):
-    """GET /api/v1/review/{trade_date}/scopes 单条记录。
+class ReviewCanonicalScopeResponse(BaseModel):
+    """GET /api/v1/review/{trade_date}/scopes 单条记录（canonical）。
 
-    返回每个范围的 P/Q/U/C/V、变化、历史分位和命中数量（PRD §14.3）。
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 该端点不再返回 legacy P/Q/U/C/V
+    （MarketReviewScopeSnapshot 已退役），改读 canonical ReviewScopeObservationFact
+    + run.metadata_json["canonical_composition_readiness"/"canonical_coverage"]。
+
+    readiness 为 canonical composition readiness（唯一发布判断依据）；status 为
+    fact 级 PIT 状态；observation 透传 Canonical Observation Core 的客观事实 payload
+    （PRD §7.2-§7.7，前端只展示、不重算）。
     """
 
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
-    id: str = Field(..., description="快照 ID（UUID）")
-    reviewRunId: str = Field(..., description="复盘 run ID")
-    tradeDate: str = Field(..., description="业务交易日")
-    scopeType: str = Field(..., description="范围类型（market/major_index/...）")
+    scopeType: str = Field(..., description="范围类型（industry_l1/l2/l3/concept）")
     scopeKey: str = Field(..., description="范围标识")
-    scopeName: str = Field(..., description="范围名称")
-    parentScopeType: str | None = Field(None, description="父范围类型")
-    parentScopeKey: str | None = Field(None, description="父范围标识")
-    eligibleCount: int = Field(..., description="范围成员总数")
-    readyCount: int = Field(..., description="有效成员数")
-    coverageRatio: float = Field(..., description="覆盖率")
-    status: str = Field(..., description="快照状态")
-    p: ReviewMetricPayloadDTO | None = Field(None, description="P 价格表现强度")
-    q: ReviewMetricPayloadDTO | None = Field(None, description="Q 内部结构质量")
-    u: ReviewMetricPayloadDTO | None = Field(None, description="U 参与范围")
-    c: ReviewMetricPayloadDTO | None = Field(None, description="C 集中程度")
-    v: ReviewMetricPayloadDTO | None = Field(None, description="V 成交活跃与效率")
-    dataQuality: dict[str, Any] | None = Field(None, description="数据质量明细")
+    scopeName: str | None = Field(None, description="范围名称")
+    readiness: str = Field(..., description="canonical composition readiness")
+    status: str = Field(..., description="fact 级 PIT 状态")
+    eligibleCount: int = Field(0, description="PIT(T) 成员数（分母）")
+    providedCount: int = Field(0, description="实际提供成员观察数")
+    coverageRatio: float | None = Field(None, description="provided/eligible 覆盖率")
+    observation: dict[str, Any] | None = Field(
+        None, description="Canonical Observation Core 客观事实 payload",
+    )
     signalCount: int = Field(0, description="该范围命中信号数（API 层注入）")
 
 
 class ReviewScopeListResponse(BaseModel):
-    """GET /api/v1/review/{trade_date}/scopes 分页响应。"""
+    """GET /api/v1/review/{trade_date}/scopes 分页响应（canonical facts）。"""
 
-    items: list[ReviewScopeMetricsResponse] = Field(default_factory=list)
+    items: list[ReviewCanonicalScopeResponse] = Field(default_factory=list)
     total: int = Field(0, description="总数")
     page: int = Field(1, description="当前页码")
     page_size: int = Field(20, description="每页大小")
     has_more: bool = Field(False, description="是否有下一页")
+
+
+class ReviewScopeCompositionDetailResponse(BaseModel):
+    """GET /api/v1/review/{trade_date}/scopes/{scope_type}/{scope_key} 完整响应。
+
+    [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 返回单个 scope 的完整 Canonical
+    Composition（Dynamics / Internal Structure / Leadership / Member Attribution /
+    Objective Observation），数据来自 ReviewScopeCompositionSnapshot 薄表（grain =
+    review_run_id + scope_type + scope_key，单 JSONB 全存，已验证 ~130 KiB 上限）。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    reviewRunId: str = Field(..., description="所属 canonical ReviewRun id")
+    tradeDate: str = Field(..., description="交易日 YYYY-MM-DD")
+    scopeType: str = Field(..., description="范围类型")
+    scopeKey: str = Field(..., description="范围标识")
+    scopeName: str | None = Field(None, description="范围名称")
+    algorithmVersion: str = Field(..., description="Composition 算法版本")
+    composition: dict[str, Any] | None = Field(
+        None, description="完整 Canonical Composition（六键）",
+    )
+    observation: dict[str, Any] | None = Field(
+        None, description="Canonical Observation Core 客观事实 payload（与 fact 共享）",
+    )
 
 
 # =============================================================================
@@ -375,158 +385,6 @@ class ReviewAttributionListResponse(BaseModel):
     """GET /api/v1/review/signals/{signal_id}/attributions 分页响应。"""
 
     items: list[ReviewAttributionResponse] = Field(default_factory=list)
-    total: int = Field(0)
-    page: int = Field(1)
-    page_size: int = Field(20)
-    has_more: bool = Field(False)
-
-
-class ReviewInstrumentResponse(BaseModel):
-    """GET /api/v1/review/signals/{signal_id}/instruments 单条记录（PRD §12.4、§9.2、§14.6）。"""
-
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
-
-    id: str = Field(..., description="instrument 记录 ID（UUID）")
-    signalId: str = Field(..., description="信号 ID")
-    instrumentId: str = Field(..., description="instruments.id")
-    symbol: str = Field(..., description="股票代码")
-    name: str = Field(..., description="股票名称")
-    boardRole: str | None = Field(
-        None,
-        description="板块角色：core/second_line/elasticity/follower/laggard/unclassified",
-    )
-    relationToScope: str | None = Field(
-        None,
-        description=(
-            "与板块关系：synchronized_strengthening/synchronized_weakening/"
-            "instrument_leads_scope/scope_strong_instrument_lags/"
-            "instrument_strong_scope_unsupported/unconfirmed"
-        ),
-    )
-    contributionValue: float | None = Field(None, description="贡献值")
-    contributionRank: int | None = Field(None, description="贡献排名")
-    firstPyramidPayload: dict[str, Any] = Field(
-        default_factory=dict, description="第一金字塔 payload（趋势/结构/动量/筹码）",
-    )
-    freshEventsPayload: dict[str, Any] = Field(
-        default_factory=dict, description="新鲜事件 payload",
-    )
-    contributionPayload: dict[str, Any] = Field(
-        default_factory=dict, description="P/Q/U/C/V 分项贡献与分母",
-    )
-    roleEvidence: dict[str, Any] = Field(
-        default_factory=dict, description="角色判定结构化证据",
-    )
-    sourceSnapshotId: str | None = Field(
-        None, description="来源单股快照 ID（stock_feature_snapshots.id）",
-    )
-    createdAt: str | None = Field(None, description="创建时间 ISO")
-
-
-class ReviewInstrumentListResponse(BaseModel):
-    """GET /api/v1/review/signals/{signal_id}/instruments 分页响应。"""
-
-    items: list[ReviewInstrumentResponse] = Field(default_factory=list)
-    total: int = Field(0)
-    page: int = Field(1)
-    page_size: int = Field(20)
-    has_more: bool = Field(False)
-
-
-# =============================================================================
-# 追踪
-# =============================================================================
-
-
-class ReviewTrackingResponse(BaseModel):
-    """GET /api/v1/review/trackings 单条记录（PRD §12.5、§10.2）。"""
-
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
-
-    id: str = Field(..., description="追踪 ID（UUID）")
-    userId: str = Field(..., description="用户 ID")
-    sourceSignalId: str | None = Field(None, description="关联信号 ID")
-    trackingType: str = Field(..., description="追踪类型：signal/scope/instrument/discovery")
-    scopeType: str | None = Field(None, description="范围类型（追踪 scope 时填充）")
-    scopeKey: str | None = Field(None, description="范围标识（追踪 scope 时填充）")
-    instrumentId: str | None = Field(None, description="instruments.id（追踪 instrument 时填充）")
-    discoveryId: str | None = Field(None, description="Discovery logical identity（追踪 discovery 时填充）")
-    status: str = Field(..., description="状态：active/confirmed/invalidated/closed")
-    confirmationConditions: dict[str, Any] = Field(
-        default_factory=dict, description="确认条件 JSON",
-    )
-    invalidationConditions: dict[str, Any] = Field(
-        default_factory=dict, description="失效条件 JSON",
-    )
-    note: str | None = Field(None, description="用户备注")
-    createdAt: str = Field(..., description="创建时间 ISO")
-    closedAt: str | None = Field(None, description="关闭时间 ISO")
-
-
-class ReviewTrackingListResponse(BaseModel):
-    """GET /api/v1/review/trackings 分页响应。"""
-
-    items: list[ReviewTrackingResponse] = Field(default_factory=list)
-    total: int = Field(0)
-    page: int = Field(1)
-    page_size: int = Field(20)
-    has_more: bool = Field(False)
-
-
-class ReviewTrackingCreateRequest(BaseModel):
-    """POST /api/v1/review/trackings 请求体。"""
-
-    tracking_type: str = Field(..., description="追踪类型：signal/scope/instrument/discovery")
-    source_signal_id: str | None = Field(None, description="信号 ID（追踪 signal 时必填）")
-    scope_type: str | None = Field(None, description="范围类型（追踪 scope 时必填）")
-    scope_key: str | None = Field(None, description="范围标识（追踪 scope 时必填）")
-    instrument_id: str | None = Field(None, description="instruments.id（追踪 instrument 时必填）")
-    discovery_id: str | None = Field(None, description="Discovery logical identity（追踪 discovery 时必填）")
-    confirmation_conditions: dict[str, Any] = Field(
-        default_factory=dict, description="确认条件 JSON",
-    )
-    invalidation_conditions: dict[str, Any] = Field(
-        default_factory=dict, description="失效条件 JSON",
-    )
-    note: str | None = Field(None, description="用户备注")
-    idempotency_key: str = Field(
-        ..., description="幂等键（PRD §12.6 所有写操作要求幂等键）",
-    )
-
-
-class ReviewTrackingPatchRequest(BaseModel):
-    """PATCH /api/v1/review/trackings/{id} 请求体（部分字段更新）。"""
-
-    status: str | None = Field(
-        None, description="状态：active/confirmed/invalidated/closed",
-    )
-    confirmation_conditions: dict[str, Any] | None = Field(None)
-    invalidation_conditions: dict[str, Any] | None = Field(None)
-    note: str | None = Field(None)
-    idempotency_key: str = Field(..., description="幂等键")
-
-
-class ReviewTrackingEvaluationResponse(BaseModel):
-    """GET /api/v1/review/trackings/{id}/evaluations 单条记录（PRD §5.8、§10.2）。"""
-
-    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
-
-    id: str = Field(..., description="评估记录 ID（UUID）")
-    trackingId: str = Field(..., description="追踪 ID")
-    reviewRunId: str = Field(..., description="复盘 run ID")
-    tradeDate: str = Field(..., description="业务交易日")
-    previousState: str | None = Field(None, description="前一交易日状态")
-    currentState: str = Field(..., description="当日状态")
-    evaluationPayload: dict[str, Any] = Field(
-        default_factory=dict, description="评估 payload",
-    )
-    createdAt: str = Field(..., description="创建时间 ISO")
-
-
-class ReviewTrackingEvaluationListResponse(BaseModel):
-    """GET /api/v1/review/trackings/{id}/evaluations 分页响应。"""
-
-    items: list[ReviewTrackingEvaluationResponse] = Field(default_factory=list)
     total: int = Field(0)
     page: int = Field(1)
     page_size: int = Field(20)
@@ -656,123 +514,6 @@ class ReviewRunStatusResponse(BaseModel):
 # =============================================================================
 
 
-class ReviewBootstrapRequest(BaseModel):
-    """POST /api/v1/admin/review/bootstrap 请求体。
-
-    dry_run 默认 True：默认不产生任何业务写入，必须显式传 False 才会回填。
-    """
-
-    end_date: str | None = Field(
-        None,
-        description="截止交易日（ISO YYYY-MM-DD）；为空时解析为最近一个完整 A 股交易日",
-    )
-    days_back: int = Field(
-        120, ge=60, description="回溯交易日数（默认 120，最低 60）",
-    )
-    algorithm_version: str | None = Field(
-        None, description="显式算法版本（默认当前 REVIEW_ALGORITHM_VERSION）",
-    )
-    operator: str = Field(
-        ..., min_length=1, description="执行人标识（必填，审计用）",
-    )
-    reason: str = Field(
-        ..., min_length=1, description="执行原因（必填，审计用）",
-    )
-    dry_run: bool = Field(
-        True, description="True=只计算不写业务数据（默认）",
-    )
-
-
-class ReviewBootstrapSubmitResponse(BaseModel):
-    """POST /api/v1/admin/review/bootstrap 响应（202 Accepted）。
-
-    历史回填是长任务，API 只提交 queued 任务并立即返回 job_run_id，
-    真正计算由 Worker 领取执行；进度经 status 接口查询。
-    """
-
-    job_run_id: str = Field(..., description="bootstrap 任务 ID（用于查询状态）")
-    status: str = Field(..., description="任务状态（queued）")
-    is_new: bool = Field(
-        ..., description="False 表示复用已有活跃任务（幂等）",
-    )
-    dry_run: bool = Field(..., description="是否 dry-run")
-    end_date: str = Field(..., description="解析后的截止交易日")
-    days_back: int = Field(..., description="回溯交易日数")
-    algorithm_version: str = Field(..., description="解析后的算法版本")
-    operator: str = Field(..., description="执行人标识")
-    reason: str = Field(..., description="执行原因")
-    input_hash: str = Field(..., description="输入指纹（同范围多次执行一致）")
-    message: str = Field(..., description="提示信息")
-
-
-class ReviewBootstrapScopeCounts(BaseModel):
-    """按 scope 的四类计数。"""
-
-    succeeded: int = Field(0, description="成功产出观测的 scope 数")
-    skipped: int = Field(0, description="幂等跳过的 scope 数")
-    unavailable: int = Field(
-        0, description="PIT 成员或历史事实缺失，不可用的 scope 数",
-    )
-    failed: int = Field(0, description="执行失败的 scope 数")
-
-
-class ReviewBootstrapSummary(BaseModel):
-    """bootstrap 全局执行摘要。"""
-
-    eligible_dates: int = Field(0, description="可回填的交易日数")
-    processed: int = Field(0, description="已处理交易日数")
-    skipped: int = Field(0, description="跳过交易日数")
-    written: int = Field(0, description="实际写入交易日数（dry-run 恒为 0）")
-    scope_counts: ReviewBootstrapScopeCounts = Field(
-        default_factory=ReviewBootstrapScopeCounts,
-    )
-    reason_codes: dict[str, int] = Field(
-        default_factory=dict, description="不可用/失败原因码计数",
-    )
-
-
-class ReviewBootstrapScopeResult(BaseModel):
-    """单条 (trade_date, scope_type, scope_key) 执行明细。"""
-
-    trade_date: str | None = Field(None)
-    scope_type: str | None = Field(None)
-    scope_key: str | None = Field(None)
-    status: str | None = Field(None)
-    reason: str | None = Field(None, description="不可用/失败原因码")
-    eligible_count: int | None = Field(None)
-    ready_count: int | None = Field(None)
-    coverage: float | None = Field(None)
-
-
-class ReviewBootstrapStatusResponse(BaseModel):
-    """GET /api/v1/admin/review/bootstrap/{job_run_id} 响应。
-
-    全局 summary 常驻返回；scope 明细分页（120 日 × 全 scope 可达上万行）。
-    """
-
-    job_run_id: str = Field(...)
-    job_name: str = Field(...)
-    status: str = Field(..., description="SchedulerJobRun 状态")
-    bootstrap_status: str = Field(..., description="bootstrap 业务状态")
-    dry_run: bool = Field(...)
-    operator: str | None = Field(None)
-    reason: str | None = Field(None)
-    input_hash: str | None = Field(None)
-    end_date: str | None = Field(None)
-    days_back: int | None = Field(None)
-    algorithm_version: str | None = Field(None)
-    summary: ReviewBootstrapSummary = Field(default_factory=ReviewBootstrapSummary)
-    scope_results: list[ReviewBootstrapScopeResult] = Field(default_factory=list)
-    scope_results_total: int = Field(0, description="明细总行数（用于分页）")
-    offset: int = Field(0)
-    limit: int = Field(0)
-    started_at: str | None = Field(None)
-    finished_at: str | None = Field(None)
-    heartbeat_at: str | None = Field(None)
-    error_code: str | None = Field(None)
-    error_message: str | None = Field(None)
-
-
 if __name__ == "__main__":
     # 自测：构造最小合法 payload
     comp = ReviewMetricComponentDTO(
@@ -812,49 +553,5 @@ if __name__ == "__main__":
         baselineWindow=120,
     )
     assert overview.coverage.market is None
-    assert overview.signalSummary.new == 0
     print(f"OK: ReviewOverviewResponse status={overview.status}")
-
-    # bootstrap 请求：dry_run 默认 True，operator/reason 必填
-    boot_req = ReviewBootstrapRequest(operator="owner", reason="review-2.0.0 回填")
-    assert boot_req.dry_run is True, "dry_run 必须默认 True"
-    assert boot_req.days_back == 120
-    assert boot_req.end_date is None, "end_date 默认 None（由服务端解析交易日）"
-    try:
-        ReviewBootstrapRequest(operator="", reason="x")
-    except Exception:
-        pass
-    else:  # pragma: no cover - 防御性断言
-        raise AssertionError("operator 为空应校验失败")
-    print(f"OK: ReviewBootstrapRequest dry_run={boot_req.dry_run}")
-
-    boot_status = ReviewBootstrapStatusResponse(
-        job_run_id="00000000-0000-0000-0000-000000000009",
-        job_name="review_bootstrap",
-        status="succeeded",
-        bootstrap_status="ok",
-        dry_run=True,
-    )
-    assert boot_status.summary.scope_counts.unavailable == 0
-    assert boot_status.scope_results_total == 0
-    print(f"OK: ReviewBootstrapStatusResponse status={boot_status.status}")
     print("OK: review schemas verified")
-
-
-# =============================================================================
-# [V2] Discovery API schemas
-# =============================================================================
-
-
-class ReviewDiscoveryListResponse(BaseModel):
-    trade_date: str
-    total: int
-    page: int
-    page_size: int
-    has_more: bool
-    items: list[dict[str, Any]]
-
-
-class ReviewDiscoveryDetailResponse(BaseModel):
-    trade_date: str
-    discovery: dict[str, Any]

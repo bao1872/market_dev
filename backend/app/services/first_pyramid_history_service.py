@@ -1296,49 +1296,74 @@ def _max_bar_trade_date(bars: pd.DataFrame) -> date | None:
     return None
 
 
-async def _persist_target_daily_state(
-    session: AsyncSession,
-    instrument_id: uuid.UUID,
-    state: dict[str, Any],
-    algorithm_version: str,
-    *,
-    trade_date_val: date,
-    input_hash: str,
-    source_history_run_id: uuid.UUID,
-    history_contract_version: str,
-) -> None:
-    """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §7] 只写单个 target-date canonical daily state。
+def _target_date_events(history: dict[str, Any], trade_date: date) -> list[dict[str, Any]]:
+    """PURE ADAPTER: slice the canonical events whose event date == ``trade_date``.
 
-    刻意**不复用** ``_persist_history_result``：后者会把整个 250-day window 全部
-    upsert（250x write amplification）并连带写 events 表。本 helper：
+    ROUND-2.2A: the exact-T canonical calculation must, in the same lifecycle, form
+    the T-day State AND the T-day Structure Event stream.  This helper only does
+    ``event_time -> date`` filtering — it does NOT re-judge BOS / re-decide Structure
+    Level / recompute Direction / aggregate member ratio / drop "less important"
+    events.  Every event whose date equals ``trade_date`` is kept with its full
+    canonical payload.
 
-    - 只 upsert 1 行 (instrument_id, target_trade_date, algorithm_version)
-    - 完全不触碰历史日期行（08-07 及更早 payload/lineage 保持 byte-identical）
-    - 完全不写 first_pyramid_history_events
+    ROUND-2.2A-1 FAIL-CLOSED (F1): a canonical event that cannot be assigned an
+    event date is a lifecycle failure, NOT a zero-event.  ``events == []`` is a legal
+    zero-event (member had no event on T); but an event with missing/invalid
+    ``time``, or with a future date (> trade_date), must NOT be silently dropped —
+    otherwise a corrupted event stream would be misrepresented as "a clean zero-event
+    lifecycle", systematically lowering the event denominator.  These are raised so
+    ``advance_history_to_trade_date`` fails the instrument and does NOT call
+    persistence (fail closed).  ``event_date < trade_date`` is a history-window
+    legacy event and is legitimately ignored.
 
-    复用既有 ON CONFLICT DO UPDATE contract（同一 unique constraint、同一 set_ 字段集），
-    保证 target-date 行与 backfill 产出的行结构/lineage 语义一致。
+    The event ``time`` field is the canonical occurrence/confirmation date (ISO date)
+    normalized by ``compute_first_pyramid_history``; ``anchor_time`` is a different
+    semantic (anchor/pivot/OB bar) and is NEVER used as the event date.  Input bars
+    are hard-limited to ``max_bar_date <= trade_date``, so a future event date
+    implies timestamp-mapping error / canonical compute leakage / date-semantics bug.
     """
-    stmt = pg_insert(FirstPyramidHistoryDailyState).values(
-        instrument_id=instrument_id,
-        trade_date=trade_date_val,
-        algorithm_version=algorithm_version,
-        input_hash=input_hash,
-        source_history_run_id=source_history_run_id,
-        history_contract_version=history_contract_version,
-        state_payload=state,
-    )
-    stmt = stmt.on_conflict_do_update(
-        constraint="uq_first_pyramid_history_daily_state_instr_date_ver",
-        set_={
-            "input_hash": stmt.excluded.input_hash,
-            "source_history_run_id": stmt.excluded.source_history_run_id,
-            "history_contract_version": stmt.excluded.history_contract_version,
-            "state_payload": stmt.excluded.state_payload,
-            "updated_at": func.now(),
-        },
-    )
-    await session.execute(stmt)
+    raw_events = history.get("events") or []
+    if not raw_events:
+        # history.events == [] -> legitimate zero-event; the lifecycle completed.
+        return []
+    out: list[dict[str, Any]] = []
+    for evt in raw_events:
+        # 2.2A-1 AUDIT FIX (F1): canonical target-date SSOT = evt["time"] ONLY.
+        # compute_first_pyramid_history normalizes every event's canonical occurrence /
+        # confirmation date into "time" (BOS/CHoCH->confirmed_time, OB_CREATED->
+        # confirmed_time, OB_ENTERED->enter_time, OB_MITIGATED->mitigated_time,
+        # EQH/EQL->confirmed_time, SQZ_RELEASE/ZERO_CROSS->times[i]).
+        # ``anchor_time`` is a DIFFERENT semantic (anchor/pivot/OB bar), NOT the
+        # event occurrence date — it must NEVER fallback-infer the event date
+        # (that would attribute an event to the wrong trade day).  Missing time =>
+        # CONTRACT CORRUPTION, fail closed.
+        time_str = evt.get("time")
+        if not time_str:
+            raise ValueError(
+                "event 缺少 canonical time，无法确定其 event date："
+                f"type={evt.get('type') or '?'} — 这是 lifecycle failure，"
+                "不是 zero-event；anchor_time 不是 event occurrence date，"
+                "不允许 fallback 推断"
+            )
+        try:
+            evt_date = pd.to_datetime(time_str).date()
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ValueError(
+                f"event time 无法解析（invalid timestamp）：{time_str!r} "
+                f"type={evt.get('type') or '?'} — lifecycle failure，fail closed"
+            ) from exc
+        if evt_date > trade_date:
+            # Input bars 已限制 max_bar_date <= trade_date；未来事件 = leakage /
+            # 时间语义错误 / timestamp-mapping 错误 -> PIT violation，fail closed。
+            raise ValueError(
+                f"event date {evt_date.isoformat()} > trade_date "
+                f"{trade_date.isoformat()}（type={evt.get('type') or '?'}）— "
+                "PIT violation / canonical compute leakage，fail closed"
+            )
+        if evt_date == trade_date:
+            out.append(evt)
+        # evt_date < trade_date -> history-window legacy event, legitimately ignored.
+    return out
 
 
 async def advance_history_to_trade_date(
@@ -1358,9 +1383,15 @@ async def advance_history_to_trade_date(
       （create_history_run 幂等复用 + daily_state upsert 覆盖 lineage 共同证明），
       因此推进数据集 = 在**同一个 run id** 下补齐 target-date state，
       而不是新建 run X 全量 replay（那会把 ~1.32M 历史行 lineage 改写成 X）。
-    - 只写 target_trade_date 一行/instrument（1x write amplification，非 250x）
+    - ROUND-2.2A：exact-T State 与 exact-T Events 从**同一次** canonical calculation
+      一起持久化（复用 ``_persist_history_result`` 单一 owner：State upsert +
+      Event immutable insert + contract-aware uniqueness + lineage）。
+      target-event slicing 是纯 date adapter（``_target_date_events``），非新业务算法。
+      **零事件是一个合法、可证明的结果**（该 member T 日无事件 = 生命周期完整完成，
+      而非 "no coverage"）。
+    - 只写 target_trade_date 一行/instrument + 该日 events（1x write amplification，
+      非 250x history rewrite；events 用不可变 insert-on-conflict-nothing，重跑幂等）
     - 不 claim / 不修改任何 run item（5283 succeeded + 10 skipped 的 execution history 冻结）
-    - 不写 events 表（formal Review 不消费 FirstPyramidHistoryEvent；见 CASE A 审计）
     - PIT：bars 经 MDAS ``end_date=trade_date`` + ``adjustment_as_of=trade_date``
 
     participating set = run 现有 succeeded run-item set（§8），
@@ -1463,7 +1494,6 @@ async def advance_history_to_trade_date(
                     include_chip=False,
                 )
                 meta = history.get("meta") or {}
-                input_hash = meta.get("input_hash") or ""
 
                 target_state = None
                 for state in history.get("daily_state") or []:
@@ -1483,13 +1513,23 @@ async def advance_history_to_trade_date(
                     no_target_state += 1
                     continue
 
-                await _persist_target_daily_state(
+                # ROUND-2.2A: exact-T State + exact-T Events come from the SAME
+                # canonical calculation and are persisted TOGETHER via the single
+                # ``_persist_history_result`` owner (State upsert + Event immutable
+                # insert + contract-aware event uniqueness + lineage semantics).
+                # Only the T-date state (1 row) and the T-date events are written —
+                # no 250-day history rewrite.  target-event slicing is a pure date
+                # adapter (``_target_date_events``), NOT a new business algorithm.
+                target_result: dict[str, Any] = {
+                    "daily_state": [target_state],
+                    "events": _target_date_events(history, trade_date),
+                    "meta": meta,
+                }
+                await _persist_history_result(
                     session,
                     instrument_id,
-                    target_state,
+                    target_result,
                     algorithm_version,
-                    trade_date_val=trade_date,
-                    input_hash=input_hash,
                     source_history_run_id=history_run_id,
                     history_contract_version=HISTORY_CONTRACT_VERSION,
                 )

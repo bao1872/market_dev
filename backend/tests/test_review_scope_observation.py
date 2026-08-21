@@ -6,11 +6,10 @@ regression contracts from §11.  No DB, no network.
 
 from __future__ import annotations
 
+import json
 import math
 from datetime import date
 from typing import Any
-
-import json
 
 import pytest
 
@@ -133,6 +132,7 @@ def _run(
     pit_member_ids: list[str] | None = None,
     pit_member_ids_t1: list[str] | None = None,
     events: list[StructureEvent] | None = None,
+    coverage: list[str] | None = None,
 ) -> dict[str, Any]:
     ids = pit_member_ids if pit_member_ids is not None else [m.member_id for m in members]
     return compute_scope_observation(
@@ -143,6 +143,7 @@ def _run(
         pit_member_ids_t1=pit_member_ids_t1,
         members=members,
         events=events or [],
+        event_coverage_member_ids=coverage,
     )
 
 
@@ -419,6 +420,16 @@ def test_amount_shares_sum_one_and_raw_hhi_consistent() -> None:
     expected = (1 / 6) ** 2 + (1 / 2) ** 2 + (1 / 3) ** 2 + 0.0
     assert conc["raw_hhi"] == pytest.approx(expected)
     assert conc["normalized_hhi"] == pytest.approx((expected - 0.25) / 0.75)
+
+
+def test_amount_contributions_are_supplier_order_independent() -> None:
+    from app.domain.review.scope_observation import compute_member_amount_contributions
+
+    members = [_m("c", amount=1e16), _m("a", amount=1.0), _m("b", amount=1.0)]
+    forward = compute_member_amount_contributions(members)
+    reverse = compute_member_amount_contributions(list(reversed(members)))
+    assert forward == reverse
+    assert [member.member_id for member in forward.members] == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------------------
@@ -897,6 +908,7 @@ def test_structure_events_member_dedupe_and_cells() -> None:
         [_m("a"), _m("b"), _m("c"), _m("d"), _m("e")],
         pit_member_ids=["a", "b", "c", "d", "e"],
         events=events,
+        coverage=["a", "b", "c", "d", "e"],
     )["structure"]
     cells = structure["events"]["cells"]
     bos = cells["leveled"]["BOS_Up_Swing"]
@@ -916,7 +928,7 @@ def test_structure_events_no_level_for_extremes() -> None:
         StructureEvent("b", "EQL"),
     ]
     cells = _run(
-        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events, coverage=["a", "b"]
     )["structure"]["events"]["cells"]
     assert "EQH" in cells["extreme"]
     assert cells["extreme"]["EQH"]["event_count"] == 1
@@ -946,6 +958,7 @@ def test_release_volume_ratio_is_member_first_not_event_weighted() -> None:
         ],
         pit_member_ids=["a", "b"],
         events=events,
+        coverage=["a", "b"],
     )
     rel = out["momentum"]["release_volume_ratio"]
     # Member-first: values = [2.0 (a), 10.0 (b)] -> median = 6.0.
@@ -1127,7 +1140,7 @@ def test_release_volume_ratio_ignores_event_stream_entirely() -> None:
         StructureEvent("b", "SQZ_RELEASE", release_volume_ratio=10.0),
     ]
     rel = _run(
-        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events
+        [_m("a"), _m("b")], pit_member_ids=["a", "b"], events=events, coverage=["a", "b"]
     )["momentum"]["release_volume_ratio"]
     assert rel["status"] == "unavailable"
     assert "CURRENT_SOURCE_UNAVAILABLE" in rel["reason"]

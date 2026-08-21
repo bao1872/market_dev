@@ -559,6 +559,7 @@ def _real_l1_payload() -> dict:
         pit_member_ids_t1=member_ids,
         members=members,
         events=_real_events(member_ids),
+        event_coverage_member_ids=member_ids,
     )
 
 

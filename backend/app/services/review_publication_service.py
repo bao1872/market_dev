@@ -26,18 +26,14 @@ import logging
 import uuid
 from datetime import UTC, date, datetime
 
-from sqlalchemy import func, or_, select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
-from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
-from app.models.board_taxonomy import UniverseDefinition
 from app.models.factor_publication import FactorPublication
-from app.models.market_board import MarketBoard
 from app.models.market_review import (
     MarketReviewRun,
-    MarketReviewScopeSnapshot,
 )
 
 logger = logging.getLogger("review_publication_service")
@@ -78,42 +74,31 @@ class ReviewWithdrawalBlockError(Exception):
         super().__init__(f"Review withdrawal 安全门禁失败：{'; '.join(blockers)}")
 
 
-def _validate_scope_ready(
-    snapshot: MarketReviewScopeSnapshot,
-    blockers: list[str],
-) -> None:
-    label = f"{snapshot.scope_type}/{snapshot.scope_key}"
-    if snapshot.status != "ready":
-        blockers.append(f"{label} 状态非 ready: status={snapshot.status}")
-    coverage = snapshot.coverage_ratio
-    if coverage is None or float(coverage) < REVIEW_PUBLISH_MIN_COVERAGE:
-        rendered = "None" if coverage is None else f"{float(coverage):.4f}"
-        blockers.append(
-            f"{label} coverage={rendered} < 门槛 {REVIEW_PUBLISH_MIN_COVERAGE}",
-        )
-
-
-def _compare_scope_keys(
-    scope_type: str,
-    expected: set[str],
-    actual: set[str],
-    blockers: list[str],
-) -> None:
-    missing = sorted(expected - actual)
-    unexpected = sorted(actual - expected)
-    if missing:
-        blockers.append(f"{scope_type} 配置范围缺失: {missing}")
-    if unexpected:
-        blockers.append(f"{scope_type} 存在非配置范围: {unexpected}")
-
-
 async def evaluate_publish_gate(
     session: AsyncSession,
     run: MarketReviewRun,
     *,
     lock_pointers: bool = False,
 ) -> tuple[bool, list[str]]:
-    """评估整套 Review 发布门禁（PRD §11.1）。
+    """评估整套 Review 发布门禁（PRD §11.1 / REVIEW-CANONICAL-RUNTIME-REPLACEMENT）。
+
+    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 发布门禁的业务判断**只消费 canonical
+    run/composition readiness**，不再读取 legacy P/Q/U/C/V normalized_ready：
+
+    - canonical composition readiness gate：``run.metadata_json["canonical_composition_readiness"]``
+      由唯一 composition owner 每次持久化 canonical fact 时写入（per scope_key）。
+      没有任何 canonical composition → 空壳 run，禁止发布；任一已记录 activated
+      scope 的 readiness 非 ready（unavailable_current / insufficient_history）→
+      canonical 数据缺口，禁止发布（fail-closed，绝不回退 legacy P/Q/U/C/V）。
+    - run.status ∈ {signals_ready, published} 仅作为 DB enum 的 compatibility
+      storage token（§6.3.8 兼容）；业务可发布性由 canonical readiness + 覆盖率 +
+      执行终态决定。
+    - market / major_index / style 是合法跳过家族（ScopeCapability 非激活，不产生
+      composition），不参与 readiness gate；其不可用不是 blocker，也绝不回退
+      P/Q/U/C/V（market 历史 PIT 缺口是 implementation gap，不是保留 legacy 的理由）。
+    - UNEXPECTED_EXECUTION_FAILURE 仍阻塞：任何 run item 处于 failed/pending/running。
+    - source_core_run_id / source_board_run_id 均指向当前正式 pointer。
+    - 禁止 current membership × historical date 回填 / latest snapshot forward-fill。
 
     Args:
         session: 异步 DB 会话
@@ -126,7 +111,7 @@ async def evaluate_publish_gate(
     """
     blockers: list[str] = []
     # 绑定到 run.metadata_json 本身（而非新建局部 dict），确保后续写入
-    # （optional_scope_diagnostics / canary / provisional 审计）能回写到 run。
+    # （optional diagnostics / canary / provisional 审计）能回写到 run。
     if run.metadata_json is None:
         run.metadata_json = {}
     metadata = run.metadata_json
@@ -137,6 +122,8 @@ async def evaluate_publish_gate(
             f"{REVIEW_ALGORITHM_VERSION}",
         )
     if run.status not in {"signals_ready", "published"}:
+        # signals_ready 为 DB enum 兼容 storage token（§6.3.8）；
+        # 业务可发布性由下方 canonical composition readiness gate 决定。
         blockers.append(f"run 状态不可正式发布: status={run.status}")
     if metadata.get("canary") is True:
         blockers.append("canary run 不可正式发布")
@@ -149,131 +136,31 @@ async def evaluate_publish_gate(
             f"run coverage {float(run.coverage_ratio):.4f} < 门槛 "
             f"{REVIEW_PUBLISH_MIN_COVERAGE}",
         )
-    # [Phase4C 2026-08-09 P0-A] scope counter semantics 修正：
-    # expected_scope_count / succeeded_scope_count / failed_scope_count 保留为
-    # **事实型全量计数器**（反映本次 run 计划/实际处理的全部 level-1 scope，含 optional），
-    # 不再伪造 expected=1，也**不**再作为 whole-review hard gate。
-    # whole-review 可发布性由 market mandatory readiness 单独决定（见 §1），
-    # optional scope 的 unavailable / skipped / 比例不足仅记为诊断（见 §2~4）。
-    # 唯一的 execution-failure blocker 来自 §5：run items 存在未成功终态
-    # （failed/pending/running，即真实执行异常 / system-level failure）。
     if run.expected_scope_count <= 0:
         blockers.append("expected_scope_count=0，无任何范围被处理")
 
-    # 1. market 范围必须 ready，且 P/Q/U/C/V 五项 normalized_ready
-    # [P0-6 2026-07-30] readiness 四态区分（PRD §11.1）：
-    #   - unavailable: raw_ready=False（上游 stock_core 字段缺失）→ 阻塞
-    #   - insufficient_history: raw_ready=True, normalized_ready=False
-    #     （历史 <60 日）→ 阻塞，提示运行 bootstrap
-    #   - raw_ready（非发布态）: 同 insufficient_history，不发布但保留
-    #   - normalized_ready: raw_ready=True, normalized_ready=True → 可发布
-    # 禁止把 raw_ready 当作可发布：冷启动时必须先 bootstrap 补历史
-    market_snap = await _get_scope_snapshot(
-        session, run.id, "market", "market",
-    )
-    if market_snap is None:
-        blockers.append("market 范围快照缺失")
+    # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 唯一 canonical readiness gate。
+    # 不再读取 MarketReviewScopeSnapshot / P/Q/U/C/V normalized_ready。
+    # 空 dict → 空壳 run（未产生任何 canonical fact）；任一非 ready → 数据缺口。
+    composition_readiness = metadata.get("canonical_composition_readiness") or {}
+    if not composition_readiness:
+        blockers.append(
+            "run 无 canonical composition readiness"
+            "（未产生任何 canonical fact，禁止发布空壳）",
+        )
     else:
-        _validate_scope_ready(market_snap, blockers)
-        for metric_code, payload_field in (
-            ("P", "p_payload"), ("Q", "q_payload"),
-            ("U", "u_payload"), ("C", "c_payload"), ("V", "v_payload"),
-        ):
-            payload = getattr(market_snap, payload_field, None)
-            if not isinstance(payload, dict):
-                blockers.append(f"market {metric_code} payload 缺失")
-                continue
-            readiness = payload.get("readiness") or {}
-            reason = readiness.get("reason")
-            raw_ready = readiness.get("raw_ready")
-            normalized_ready = readiness.get("normalized_ready")
-            value = payload.get("value")
-
-            # 显式四态判定，不再把 raw_ready 当作可发布
-            if raw_ready is False:
-                # unavailable: 原始值缺失或数据不可用
+        for scope_key in sorted(composition_readiness):
+            readiness = composition_readiness[scope_key]
+            if readiness != "ready":
                 blockers.append(
-                    f"market {metric_code} unavailable: "
-                    f"raw_ready=False ({reason or '上游字段缺失'})",
+                    f"canonical composition {scope_key} readiness={readiness}"
+                    " 非 ready（canonical 数据缺口，禁止发布）",
                 )
-            elif raw_ready is True and normalized_ready is False:
-                # insufficient_history / raw_ready: 历史不足，不发布但保留
-                blockers.append(
-                    f"market {metric_code} insufficient_history: "
-                    f"raw_ready=True but normalized_ready=False "
-                    f"({reason or '历史 <60 日，需运行 bootstrap'})",
-                )
-            elif value is None:
-                # 安全兜底：readiness 字段缺失但 value 为空
-                blockers.append(
-                    f"market {metric_code} value 为空 "
-                    f"(readiness 缺失: raw_ready={raw_ready}, "
-                    f"normalized_ready={normalized_ready})",
-                )
-            # raw_ready=True, normalized_ready=True, value 非空 → 可发布，不阻塞
 
-    # 2~4. [V2] 所有非 market scope 为渐进式 scope。
-    # 其不可用（bootstrap_unavailable / insufficient_history / blocked_external_population /
-    # PIT unavailable）仅记为诊断，不阻塞整个 Market Review MVP 发布。
-    # 动态查询所有 scope snapshot 并按类型分组（不硬编码 scope type 列表）。
-    all_snaps = await _list_all_scope_snapshots(session, run.id)
-    actual_by_type: dict[str, list[MarketReviewScopeSnapshot]] = {}
-    optional_blockers: list[str] = []
-    for snap in all_snaps:
-        if snap.scope_type == "market":
-            continue  # market 已在 §1 独立处理
-        actual_by_type.setdefault(snap.scope_type, []).append(snap)
-        _validate_scope_ready(snap, optional_blockers)
-
-    # 3. [V2] 配置完整性仅对 optional scope 做一致性核对（缺失/未 populated 不阻塞）。
-    universe_stmt = select(UniverseDefinition).where(
-        UniverseDefinition.universe_type.in_(("major_index", "style")),
-        UniverseDefinition.effective_from <= run.trade_date,
-        or_(
-            UniverseDefinition.effective_to.is_(None),
-            UniverseDefinition.effective_to > run.trade_date,
-        ),
-    )
-    definitions = list((await session.execute(universe_stmt)).scalars())
-    for scope_type in ("major_index", "style"):
-        expected = {
-            item.universe_key
-            for item in definitions if item.universe_type == scope_type
-        }
-        actual = {item.scope_key for item in actual_by_type.get(scope_type, [])}
-        _compare_scope_keys(scope_type, expected, actual, optional_blockers)
-        blocked_populations = sorted(
-            item.universe_key
-            for item in definitions
-            if item.universe_type == scope_type
-            and item.population_status != "ready"
-        )
-        if blocked_populations:
-            optional_blockers.append(
-                f"{scope_type} population 非 ready: {blocked_populations}"
-                "（可选 scope，仅诊断）",
-            )
-
-    # [V2] expected_scope_count 包含全部 parallel scope（含 L2/L3/concept）
-    total_scope_count = (
-        (1 if market_snap is not None else 0)
-        + sum(len(snaps) for snaps in actual_by_type.values())
-    )
-    if run.expected_scope_count > 0 and total_scope_count != run.expected_scope_count:
-        optional_blockers.append(
-            "scope snapshot 数量不一致: "
-            f"actual={total_scope_count}, expected={run.expected_scope_count}"
-            "（可选 scope，仅诊断）",
-        )
-    # optional scope 诊断写入 run metadata，不加入 blockers（market 仍为唯一强制 scope）
-    if optional_blockers:
-        diagnostic = metadata.setdefault("optional_scope_diagnostics", [])
-        diagnostic.extend(optional_blockers)
-
-    # 5. [Phase4C 2026-08-09 P0-A] UNEXPECTED_EXECUTION_FAILURE 仍阻塞：
+    # [Phase4C 2026-08-09 P0-A] UNEXPECTED_EXECUTION_FAILURE 仍阻塞：
     # 仅 failed/pending/running 的真实执行异常项阻塞 whole-review。
-    # skipped（optional scope 不可用 / 空成员 / PIT unavailable / bootstrap_unavailable）
-    # 是诊断性终态，不阻塞（见 §2 诊断路径）。
+    # skipped（非激活家族 / PIT unavailable / 空成员 / A 级概念）是诊断性终态，
+    # 不阻塞（与 canonical 合法跳过语义一致）。
     from app.models.market_review import MarketReviewRunItem
     incomplete_items_stmt = (
         select(MarketReviewRunItem)
@@ -291,7 +178,7 @@ async def evaluate_publish_gate(
             "（真实执行异常 / system-level failure，阻塞发布）",
         )
 
-    # 6. Both source identities must still be the current formal pointers.
+    # Both source identities must still be the current formal pointers.
     core_pub = await _get_publication(
         session, PUBLICATION_KIND_STOCK_CORE_REF, run.trade_date,
         for_update=lock_pointers,
@@ -323,13 +210,11 @@ async def evaluate_publish_gate(
         if review_pub is None or review_pub.data_run_id != run.id:
             blockers.append("旧 published run 已非当前正式 Review pointer，禁止原地重发")
 
-    # 7. [QM-63 review 质量硬门 2026-08-04] 无未来数据（point-in-time）。
-    #    本 run 正常落库的 observation 是当日数据（trade_date == run.trade_date），
-    #    这是合法行为，不得被当作“未来数据”拦截（P0 修复 2026-08-04）。
-    #    门禁只验证：同一 scope 下不得存在 trade_date > run.trade_date 的
-    #    严格未来观测——这代表乱序计算或历史基线污染（真实数据泄漏）。
-    #    历史基线读取（load_metric_history）已使用 trade_date < 当日过滤，
-    #    因此合法 run 只有 == trade_date 的观测，必然通过本门。
+    # [QM-63 review 质量硬门 2026-08-04] 无未来数据（point-in-time）。
+    # 本 run 正常落库的 observation 是当日数据（trade_date == run.trade_date），
+    # 这是合法行为，不得被当作“未来数据”拦截。门禁只验证：同一 scope 下不得
+    # 存在 trade_date > run.trade_date 的严格未来观测——这代表乱序计算或历史基线
+    # 污染（真实数据泄漏）。
     from app.models.market_review import MarketReviewMetricObservation
 
     future_obs_stmt = (
@@ -346,44 +231,6 @@ async def evaluate_publish_gate(
             f"检测到 {future_obs_count} 条 > trade_date 的未来 observation，"
             "历史基线被乱序/未来数据污染（point-in-time 违规）",
         )
-
-    # 8. [QM-63 review 质量硬门 2026-08-04] reason 完整性：
-    #    market 范围每个 P/Q/U/C/V 非 ready 状态必须给出非空 reason，
-    #    禁止无原因的不可用（与 chip 七态合同一致）。
-    if market_snap is not None:
-        for metric_code, payload_field in (
-            ("P", "p_payload"), ("Q", "q_payload"),
-            ("U", "u_payload"), ("C", "c_payload"), ("V", "v_payload"),
-        ):
-            payload = getattr(market_snap, payload_field, None)
-            if not isinstance(payload, dict):
-                continue
-            readiness = payload.get("readiness") or {}
-            if readiness.get("raw_ready") is False or (
-                readiness.get("raw_ready") is True
-                and readiness.get("normalized_ready") is False
-            ):
-                reason = readiness.get("reason")
-                if not reason:
-                    blockers.append(
-                        f"market {metric_code} 非 ready 但缺 reason"
-                        "（禁止无原因的不可用）",
-                    )
-
-    # 9. [QM-63 review 质量硬门 2026-08-04] all-null 不可发布：
-    #    market 范围 P/Q/U/C/V 全部 value 为 None 视为数据缺失，
-    #    即使 status 字段存在也不允许发布（防止空壳发布）。
-    if market_snap is not None:
-        all_null = True
-        for payload_field in (
-            "p_payload", "q_payload", "u_payload", "c_payload", "v_payload",
-        ):
-            payload = getattr(market_snap, payload_field, None)
-            if isinstance(payload, dict) and payload.get("value") is not None:
-                all_null = False
-                break
-        if all_null:
-            blockers.append("market P/Q/U/C/V 全部 value 为 None，禁止发布空壳")
 
     return (len(blockers) == 0, blockers)
 
@@ -796,56 +643,6 @@ async def _get_publication(
         stmt = stmt.with_for_update()
     result = await session.execute(stmt)
     return result.scalar_one_or_none()
-
-
-async def _get_scope_snapshot(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-    scope_type: str,
-    scope_key: str,
-) -> MarketReviewScopeSnapshot | None:
-    """读取单个 scope snapshot。"""
-    stmt = (
-        select(MarketReviewScopeSnapshot)
-        .where(
-            MarketReviewScopeSnapshot.review_run_id == review_run_id,
-            MarketReviewScopeSnapshot.scope_type == scope_type,
-            MarketReviewScopeSnapshot.scope_key == scope_key,
-        )
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
-
-
-async def _list_scope_snapshots(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-    scope_type: str,
-) -> list[MarketReviewScopeSnapshot]:
-    """列出指定类型的所有 scope snapshot。"""
-    stmt = (
-        select(MarketReviewScopeSnapshot)
-        .where(
-            MarketReviewScopeSnapshot.review_run_id == review_run_id,
-            MarketReviewScopeSnapshot.scope_type == scope_type,
-        )
-    )
-    result = await session.execute(stmt)
-    return list(result.scalars())
-
-
-async def _list_all_scope_snapshots(
-    session: AsyncSession,
-    review_run_id: uuid.UUID,
-) -> list[MarketReviewScopeSnapshot]:
-    """[V2] 列出 run 的所有 scope snapshot（不分类型）。"""
-    stmt = (
-        select(MarketReviewScopeSnapshot)
-        .where(MarketReviewScopeSnapshot.review_run_id == review_run_id)
-    )
-    result = await session.execute(stmt)
-    return list(result.scalars())
 
 
 if __name__ == "__main__":

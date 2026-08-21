@@ -439,6 +439,16 @@ class ReviewScopeObservationFact(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
     )
+    # [REVIEW-BACKEND-FINAL-CLOSURE] Run lineage（P0）：每个 fact 绑定到生成它的
+    # ReviewRun，避免同日双 run（Run A published，Run B 同 trade_date 后跑）覆盖
+    # Observation 导致 Composition A 被 B 污染。nullable=True 兼容历史无 binding 行
+    # （PostgreSQL 中 NULL 不参与唯一约束，旧行互不冲突）。
+    review_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("market_review_runs.id", ondelete="CASCADE"),
+        nullable=True,
+        comment="生成该 fact 的 ReviewRun（lineage）；历史行可为 NULL",
+    )
     trade_date: Mapped[date] = mapped_column(
         Date(), nullable=False, comment="业务交易日",
     )
@@ -497,18 +507,99 @@ class ReviewScopeObservationFact(Base):
 
     __table_args__ = (
         UniqueConstraint(
+            "review_run_id",
             "trade_date",
             "scope_type",
             "scope_key",
-            name="uq_review_scope_observation_facts_day_scope",
+            name="uq_review_scope_observation_facts_run_day_scope",
+        ),
+        Index(
+            "ix_review_scope_observation_facts_run",
+            "review_run_id",
         ),
     )
 
     def __repr__(self) -> str:
         return (
             f"<ReviewScopeObservationFact("
+            f"review_run_id={self.review_run_id!r}, "
             f"trade_date={self.trade_date!r}, scope_type={self.scope_type!r}, "
             f"scope_key={self.scope_key!r}, readiness={self.readiness!r})>"
+        )
+
+
+class ReviewScopeCompositionSnapshot(Base):
+    """Canonical Scope Composition 薄快照（REVIEW-BACKEND-FINAL-CLOSURE）。
+
+    保存由 ``_compute_canonical_composition_phase`` 聚合完成的完整 Composition
+    （Dynamics / Internal Structure / Leadership / Member Attribution / readiness）。
+    一 scope / run 一行（grain = review_run_id + scope_type + scope_key），与
+    ``ReviewScopeObservationFact`` 同事务落库。
+
+    设计要点：
+    - 仅保存 analysis payload（JSONB）+ algorithm_version，不写死具体结构；
+      未来推翻当前 Analysis 换版本即可，无需迁移 schema。
+    - 探索期不做复杂 normalized schema；若将来 payload 过大（member evidence
+      量级），再单独拆 member attribution evidence 表。
+    - 历史表 MarketReviewScopeSnapshot（P/Q/U/C/V）保留不 DROP，本表是
+      canonical 替代，互不影响。
+    """
+
+    __tablename__ = "review_scope_composition_snapshots"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+    )
+    review_run_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("market_review_runs.id", ondelete="CASCADE"),
+        nullable=False,
+        comment="生成该 composition 的 ReviewRun（lineage）",
+    )
+    scope_type: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="范围类型（industry_l1/l2/l3/concept）",
+    )
+    scope_key: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="范围标识",
+    )
+    trade_date: Mapped[date] = mapped_column(
+        Date(), nullable=False, comment="业务交易日",
+    )
+    algorithm_version: Mapped[str] = mapped_column(
+        Text(), nullable=False, comment="Composition 算法版本",
+    )
+    composition_payload: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, comment="完整 Composition（Dynamics/Structure/Leadership/Attribution/evidence）",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "review_run_id",
+            "scope_type",
+            "scope_key",
+            name="uq_review_scope_composition_run_scope",
+        ),
+        Index(
+            "ix_review_scope_composition_run_date",
+            "review_run_id", "trade_date",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<ReviewScopeCompositionSnapshot("
+            f"review_run_id={self.review_run_id!r}, "
+            f"scope_type={self.scope_type!r}, scope_key={self.scope_key!r}, "
+            f"algorithm_version={self.algorithm_version!r})>"
         )
 
 

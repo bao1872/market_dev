@@ -37,6 +37,9 @@ from app.models.market_review import (
 )
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.review_metric_observation_service import persist_metric_observations
+from app.services.review_observation_persistence_service import (
+    save_scope_composition_snapshot,
+)
 from app.services.review_orchestrator_service import (
     ITEM_FAILED,
     PHASE_METRICS,
@@ -295,6 +298,42 @@ async def _add_scope_snapshot(
     run.failed_scope_count = 0
     run.coverage_ratio = Decimal("1")
     run.status = "signals_ready"
+    if not blocked:
+        # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 发布门禁已从 legacy P/Q/U/C/V
+        # normalized_ready 切换到 canonical composition readiness：
+        # `evaluate_publish_gate` 只消费 run.metadata_json["canonical_composition_readiness"]，
+        # 且要求其中所有已记录 scope_key == "ready"。market / major_index / style 为
+        # 合法跳过家族（不产生 composition）；activated 的 industry_l1 board scope 必须
+        # 真实持久化 ready canonical composition + 写入 gate readiness 才有资格发布。
+        # composition 计算正确性由专属 determinism 测试覆盖，此处仅构造发布契约前置条件。
+        board_scope_key = str(board_snapshot.board_id)
+        composition = {
+            "scope_type": "industry_l1",
+            "scope_key": board_scope_key,
+            "trade_date": run.trade_date.isoformat(),
+            "composition_readiness": "ready",
+            "scope_observation": {"status": "ready", "value": 1.0},
+            "historical_dynamics": {"status": "ready"},
+            "internal_structure_facts": {"status": "ready"},
+            "leadership": {"status": "ready"},
+            "member_attribution": {"status": "ready"},
+        }
+        await save_scope_composition_snapshot(
+            session,
+            review_run_id=run.id,
+            scope_type="industry_l1",
+            scope_key=board_scope_key,
+            trade_date=run.trade_date,
+            algorithm_version=run.algorithm_version,
+            composition_payload=composition,
+        )
+        # JSONB 必须整体重赋值（非就地 setitem），否则 SQLAlchemy 不标记 dirty，
+        # commit 后 readiness 静默丢失——与 orchestrator 同一约束。
+        _meta = dict(run.metadata_json or {})
+        run.metadata_json = {
+            **_meta,
+            "canonical_composition_readiness": {board_scope_key: "ready"},
+        }
     await session.flush()
 
 
@@ -331,14 +370,15 @@ async def test_real_after_close_review_flow_gate_publish_reuse_withdraw_and_forc
     assert run.source_core_run_id == core_id
     assert run.source_board_run_id == board_id
 
-    # 真实 compute/resume：只把成员查询替换为 empty population，仍让
-    # orchestrator 写入 run item、更新状态和 coverage。
+    # 真实 compute/resume：仅把 scope discovery 收窄为单个 non-activated market
+    # 范围（membership 本身不 resolve，其 PIT membership 由 batch prepare 真实查询）。
+    # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 旧的 resolve_scope_members 已被
+    # canonical composition 重构移除；market 属非激活家族，在
+    # _compute_canonical_composition_phase 中最迟于 capability guard 提前合法跳过，
+    # 不再需要任何成员 empty-population patch。
     with patch(
         "app.services.review_orchestrator_service._resolve_all_discovery_scopes",
         new=AsyncMock(return_value=[ScopeDefinition("market", "market", "全市场")]),
-    ), patch(
-        "app.services.review_orchestrator_service.resolve_scope_members",
-        new=AsyncMock(return_value=([], "全市场")),
     ):
         compute_result = await compute_run(db_session, run)
         assert compute_result["status"] == "signals_ready"

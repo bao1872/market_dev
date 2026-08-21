@@ -65,6 +65,7 @@ def _run(members: list[MemberObservation]) -> dict[str, Any]:
         trade_date=TRADE_DATE,
         pit_member_ids=[m.member_id for m in members],
         members=members,
+        event_coverage_member_ids=None,
     )
 
 
