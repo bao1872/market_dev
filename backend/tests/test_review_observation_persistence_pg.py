@@ -265,6 +265,7 @@ async def test_legal_partial_payload_persists(db_session: AsyncSession) -> None:
     partial = compute_scope_observation(
         scope_type="concept", scope_key="P", trade_date=T,
         pit_member_ids=["m1"], pit_member_ids_t1=["m1"], members=members,
+        event_coverage_member_ids=None,
     )
     await save_scope_observation_fact(db_session, _prep(scope_key="P"), partial)
     await db_session.commit()
