@@ -370,14 +370,15 @@ async def test_real_after_close_review_flow_gate_publish_reuse_withdraw_and_forc
     assert run.source_core_run_id == core_id
     assert run.source_board_run_id == board_id
 
-    # 真实 compute/resume：只把成员查询替换为 empty population，仍让
-    # orchestrator 写入 run item、更新状态和 coverage。
+    # 真实 compute/resume：仅把 scope discovery 收窄为单个 non-activated market
+    # 范围（membership 本身不 resolve，其 PIT membership 由 batch prepare 真实查询）。
+    # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 旧的 resolve_scope_members 已被
+    # canonical composition 重构移除；market 属非激活家族，在
+    # _compute_canonical_composition_phase 中最迟于 capability guard 提前合法跳过，
+    # 不再需要任何成员 empty-population patch。
     with patch(
         "app.services.review_orchestrator_service._resolve_all_discovery_scopes",
         new=AsyncMock(return_value=[ScopeDefinition("market", "market", "全市场")]),
-    ), patch(
-        "app.services.review_orchestrator_service.resolve_scope_members",
-        new=AsyncMock(return_value=([], "全市场")),
     ):
         compute_result = await compute_run(db_session, run)
         assert compute_result["status"] == "signals_ready"
