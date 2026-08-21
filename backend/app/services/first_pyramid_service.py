@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass
 from typing import Any
@@ -1611,6 +1612,7 @@ def compute_first_pyramid_history(
     output_bars: int = 250,
     include_chip: bool = False,
     bars_15m: pd.DataFrame | None = None,
+    perf: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """[CHANGE-20260729-003] 第一金字塔历史 SSOT 一次计算。
 
@@ -1665,6 +1667,8 @@ def compute_first_pyramid_history(
         bars.index = pd.to_datetime(bars.index)
 
     n_input = len(bars)
+    if perf is not None:
+        perf["bars_count"] = n_input
     # 数据不足直接返回空
     if n_input < _MIN_BARS_FOR_REQUIRED_DIMS:
         return {
@@ -1686,7 +1690,10 @@ def compute_first_pyramid_history(
         "min_dir_bars": MIN_DIR_BARS,
         "lookback": None,  # 历史用完整数据
     }
+    _t_dsa = time.perf_counter()
     dsa_bundle = compute_dsa_bundle(bars, dsa_config_history)
+    if perf is not None:
+        perf["dsa_ms"] = (time.perf_counter() - _t_dsa) * 1000.0
     factor_per_bar = dsa_bundle.get("factor_per_bar")
     if factor_per_bar is None or factor_per_bar.empty:
         return {
@@ -1708,15 +1715,19 @@ def compute_first_pyramid_history(
     lows = bars["low"].astype(float).tolist()
     closes = bars["close"].astype(float).tolist()
     times = [d.isoformat() for d in bars.index]
+    _t_smc = time.perf_counter()
     smc_result = compute_smc_pine(
         opens, highs, lows, closes, times, params=None, emit_timeline=True
     )
+    if perf is not None:
+        perf["smc_ms"] = (time.perf_counter() - _t_smc) * 1000.0
     smc_timeline = smc_result.get("state_timeline") or []
     ob_lifecycle_events = smc_result.get("ob_lifecycle_events") or []
     smc_events = smc_result.get("events") or []
     equal_highs_lows = smc_result.get("equal_highs_lows") or []
 
     # 3. SQZMOM（history 路径用 build_momentum_history，不需要 bb_df）
+    _t_sqz = time.perf_counter()
     sqzmom_result = compute_sqzmom_lb(
         opens=np.array(opens, dtype=float),
         highs=np.array(highs, dtype=float),
@@ -1735,11 +1746,17 @@ def compute_first_pyramid_history(
     momentum_daily = momentum_history.get("daily_state") or []
     sqz_release_events = momentum_history.get("sqz_release_events") or []
     zero_cross_events = momentum_history.get("momentum_zero_cross_events") or []
+    if perf is not None:
+        perf["sqzmom_ms"] = (time.perf_counter() - _t_sqz) * 1000.0
 
     # 4. VolumeContext series
+    _t_vc = time.perf_counter()
     vc_series = compute_volume_context_series(bars)
+    if perf is not None:
+        perf["volume_context_ms"] = (time.perf_counter() - _t_vc) * 1000.0
 
     # ===== 组装 daily_state（最近 output_bars 根）=====
+    _t_assembly = time.perf_counter()
     n_total = len(factor_per_bar)
     start_idx = max(0, n_total - output_bars)
     daily_state: list[dict[str, Any]] = []
@@ -2131,6 +2148,8 @@ def compute_first_pyramid_history(
         meta["chip_algorithm_version"] = CHIP_CONSENSUS_ALGORITHM_VERSION
         meta["chip_error"] = chip_result.error
 
+    if perf is not None:
+        perf["history_assembly_ms"] = (time.perf_counter() - _t_assembly) * 1000.0
     return {
         "daily_state": daily_state,
         "events": events,

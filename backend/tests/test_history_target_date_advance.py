@@ -19,6 +19,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from datetime import date
@@ -151,8 +152,8 @@ class TestAdvanceWritesOnlyTargetDate:
             )
 
         with patch(
-            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_for_target",
-            AsyncMock(return_value=_build_bars(end=bars_end)),
+            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_batch",
+            AsyncMock(return_value={iid: MagicMock(bars=_build_bars(end=bars_end))}),
         ), patch(
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             MagicMock(return_value=_history_with_states(states)),
@@ -239,8 +240,8 @@ class TestPitBoundary:
         compute = MagicMock(return_value=_history_with_states([TARGET]))
 
         with patch(
-            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_for_target",
-            AsyncMock(return_value=_build_bars(end="2026-08-14")),  # 未来 bar
+            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_batch",
+            AsyncMock(return_value={iid: MagicMock(bars=_build_bars(end="2026-08-14"))}),  # 未来 bar
         ), patch(
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             compute,
@@ -284,6 +285,216 @@ class TestPitBoundary:
         assert captured["include_realtime"] is False
 
 
+class TestPitBatchParity:
+    """Phase 3.3：old single vs new batch INPUT parity + 冻结算法 OUTPUT parity。
+
+    INPUT_PARITY = 100%：单/批两路得到相同 bars（index/OHLCV/amount/row count/max date）
+    与相同 source_bar_hash / adj_factor_hash / completed_through。
+    OUTPUT_PARITY = 100%：把两路 bars 送入**同一个冻结的** compute_first_pyramid_history，
+    canonical JSON hash 一致（比只比较 target_state_count 更强）。
+    """
+
+    @staticmethod
+    def _bar_result(bars: pd.DataFrame):
+        from app.services.market_data_aggregation_service import BarAggregationResult
+
+        return BarAggregationResult(
+            bars=bars,
+            data_source="test",
+            as_of=pd.Timestamp("2026-08-10", tz="UTC"),
+            is_partial=False,
+            last_persisted_bar_time=None,
+            last_live_bar_time=None,
+            freshness_seconds=0.0,
+            degraded=False,
+            degraded_reason=None,
+            source_bar_hash="single-batch-same-hash",
+            adj_factor_hash="adj-hash-1",
+            completed_through=pd.Timestamp("2026-08-10"),
+        )
+
+    async def test_input_parity_single_vs_batch(self):
+        """old single _fetch_pit_daily_bars_for_target vs new batch 读同一数据 → bars/hash 全一致。"""
+        from app.services.first_pyramid_history_service import (
+            _fetch_pit_daily_bars_batch,
+            _fetch_pit_daily_bars_for_target,
+        )
+        from app.services.market_data_aggregation_service import (
+            BarAggregationResult,
+            MarketDataAggregationService,
+        )
+
+        iid = uuid.uuid4()
+        bars = _build_bars()
+        result = self._bar_result(bars)
+
+        async def fake_single(_self, session, instrument_id, **kw):  # noqa: ANN001
+            return result
+
+        async def fake_batch(_self, session, instrument_ids, **kw):  # noqa: ANN001
+            return {instrument_ids[0]: result}
+
+        with patch.object(MarketDataAggregationService, "get_bars", fake_single), patch.object(
+            MarketDataAggregationService, "get_bars_batch", fake_batch
+        ):
+            df_single = await _fetch_pit_daily_bars_for_target(
+                AsyncMock(), iid, output_bars=250, target_trade_date=TARGET
+            )
+            batch = await _fetch_pit_daily_bars_batch(
+                AsyncMock(), [iid], output_bars=250, target_trade_date=TARGET
+            )
+
+        br = batch[iid]
+        assert isinstance(br, BarAggregationResult), "batch 必须保留完整 BarAggregationResult"
+        # index / columns / 逐值 / row count / max date —— INPUT parity 100%
+        assert list(df_single.index) == list(br.bars.index)
+        assert list(df_single.columns) == list(br.bars.columns)
+        assert (df_single.values == br.bars.values).all()
+        assert len(df_single) == len(br.bars)
+        assert df_single.index.max() == br.bars.index.max()
+        # hash / completed_through —— INPUT parity 100%
+        assert br.source_bar_hash == result.source_bar_hash
+        assert br.adj_factor_hash == result.adj_factor_hash
+        assert br.completed_through == result.completed_through
+
+    async def test_output_parity_frozen_algorithm(self):
+        """单/批两路 bars 送入同一冻结 compute 函数 → canonical JSON hash 100% 一致。"""
+        from app.services.first_pyramid_history_service import (
+            _fetch_pit_daily_bars_batch,
+            _fetch_pit_daily_bars_for_target,
+        )
+        from app.services.first_pyramid_service import compute_first_pyramid_history
+        from app.services.market_data_aggregation_service import MarketDataAggregationService
+
+        iid = uuid.uuid4()
+        bars = _build_bars()
+        result = self._bar_result(bars)
+
+        async def fake_single(_self, session, instrument_id, **kw):  # noqa: ANN001
+            return result
+
+        async def fake_batch(_self, session, instrument_ids, **kw):  # noqa: ANN001
+            return {instrument_ids[0]: result}
+
+        with patch.object(MarketDataAggregationService, "get_bars", fake_single), patch.object(
+            MarketDataAggregationService, "get_bars_batch", fake_batch
+        ):
+            df_single = await _fetch_pit_daily_bars_for_target(
+                AsyncMock(), iid, output_bars=250, target_trade_date=TARGET
+            )
+            batch = await _fetch_pit_daily_bars_batch(
+                AsyncMock(), [iid], output_bars=250, target_trade_date=TARGET
+            )
+
+        hist_single = compute_first_pyramid_history(
+            bars=df_single, symbol=str(iid), output_bars=250, include_chip=False
+        )
+        hist_batch = compute_first_pyramid_history(
+            bars=batch[iid].bars, symbol=str(iid), output_bars=250, include_chip=False
+        )
+
+        def _hash(obj: Any) -> str:
+            return hashlib.sha256(
+                json.dumps(obj, sort_keys=True, default=str).encode("utf-8")
+            ).hexdigest()
+
+        assert _hash(hist_single) == _hash(hist_batch), "冻结算法 OUTPUT parity 必须 100%"
+
+    async def test_batch_pit_params_frozen(self):
+        """批读 helper 必须向 get_bars_batch 传 PIT 参数（end/adjustment/禁 backfill/completed_only）。"""
+        from app.services.first_pyramid_history_service import _fetch_pit_daily_bars_batch
+        from app.services.market_data_aggregation_service import (
+            BarAggregationResult,
+            MarketDataAggregationService,
+        )
+
+        iid = uuid.uuid4()
+        result = self._bar_result(_build_bars())
+        captured: dict[str, Any] = {}
+
+        async def fake_batch(_self, session, instrument_ids, **kw):  # noqa: ANN001
+            captured.update(kw)
+            return {instrument_ids[0]: result}
+
+        with patch.object(MarketDataAggregationService, "get_bars_batch", fake_batch):
+            out = await _fetch_pit_daily_bars_batch(
+                AsyncMock(), [iid], output_bars=250, target_trade_date=TARGET
+            )
+
+        assert out[iid] is result, "BarAggregationResult 原样保留（不提前丢 hash/diagnostics）"
+        assert isinstance(out[iid], BarAggregationResult)
+        assert captured["end_date"] == TARGET
+        assert captured["adjustment_as_of"] == TARGET
+        assert captured["allow_backfill"] is False
+        assert captured["completed_only"] is True
+        assert captured["include_realtime"] is False
+        assert captured["adj"] == "qfq"
+        assert captured["timeframe"] == "1d"
+
+
+class TestBatchFetchContract:
+    """Phase 3.3 batch contract（修改 2/3）：缺失=失败、整批异常可见、未知类型=失败。"""
+
+    @staticmethod
+    async def _fetch(  # noqa: ANN202
+        build_map,
+        *,
+        raise_on_call: bool = False,
+    ):
+        from app.services.first_pyramid_history_service import _fetch_pit_daily_bars_batch
+        from app.services.market_data_aggregation_service import MarketDataAggregationService
+
+        iids = [uuid.uuid4(), uuid.uuid4()]
+
+        async def fake_batch(_self, session, instrument_ids, **kw):  # noqa: ANN001
+            if raise_on_call:
+                raise RuntimeError("boom")
+            return build_map(list(instrument_ids))
+
+        with patch.object(MarketDataAggregationService, "get_bars_batch", fake_batch):
+            result = await _fetch_pit_daily_bars_batch(
+                AsyncMock(), iids, output_bars=250, target_trade_date=TARGET
+            )
+        return result, iids
+
+    async def test_missing_instrument_is_failure_not_no_bar(self):
+        """batch result 缺某 instrument → BATCH CONTRACT VIOLATION（RuntimeError），绝非 no_bar。"""
+        from app.services.market_data_aggregation_service import BarAggregationResult
+
+        result = BarAggregationResult(
+            bars=_build_bars(),
+            data_source="test",
+            as_of=pd.Timestamp("2026-08-10", tz="UTC"),
+            is_partial=False,
+            last_persisted_bar_time=None,
+            last_live_bar_time=None,
+            freshness_seconds=0.0,
+            degraded=False,
+            degraded_reason=None,
+        )
+        # build_map 只给第一个 iid valid result；第二个 iid 缺失
+        out, iids = await self._fetch(lambda ids: {ids[0]: result})
+
+        assert out[iids[0]] is result, "存在的结果原样保留"
+        assert isinstance(out[iids[1]], RuntimeError)
+        assert "BATCH CONTRACT VIOLATION" in str(out[iids[1]]), \
+            "缺失不是 no_bar，必须是失败"
+
+    async def test_whole_batch_exception_visible_per_instrument(self):
+        """整批 get_bars_batch 抛异常 → 每股收到明确 Exception，不整批退出、不静默 fallback。"""
+        result, iids = await self._fetch(None, raise_on_call=True)
+        assert len(result) == len(iids)
+        for iid in iids:
+            assert isinstance(result[iid], RuntimeError)
+            assert "MDAS batch fetch failed" in str(result[iid])
+
+    async def test_unknown_type_is_failure(self):
+        """值既非 BarAggregationResult 也非 Exception → RuntimeError。"""
+        result, iids = await self._fetch(lambda ids: {ids[0]: "not-a-result"})
+        assert isinstance(result[iids[0]], RuntimeError)
+        assert "unexpected MDAS batch result type" in str(result[iids[0]])
+
+
 class TestRunItemsFrozen:
     """§9（用户 §4）：不 claim / 不修改任何 run item。"""
 
@@ -293,8 +504,8 @@ class TestRunItemsFrozen:
         session = _FakeSession(_FakeRun(run_id), [iid])
 
         with patch(
-            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_for_target",
-            AsyncMock(return_value=_build_bars()),
+            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_batch",
+            AsyncMock(return_value={iid: MagicMock(bars=_build_bars())}),
         ), patch(
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             MagicMock(return_value=_history_with_states([TARGET])),
@@ -370,8 +581,8 @@ class TestEventLifecycle:
             captured.append(target_result)
 
         with patch(
-            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_for_target",
-            AsyncMock(return_value=_build_bars()),
+            "app.services.first_pyramid_history_service._fetch_pit_daily_bars_batch",
+            AsyncMock(return_value={iid: MagicMock(bars=_build_bars())}),
         ), patch(
             "app.services.first_pyramid_service.compute_first_pyramid_history",
             MagicMock(return_value=history),

@@ -1010,5 +1010,132 @@ async def test_serialize_deserialize_backfill_fields(monkeypatch: pytest.MonkeyP
     )
 
 
+# ============================================================
+# [Phase 3.3] real MDAS 单/批路径 parity（不 mock get_bars / get_bars_batch）
+# ============================================================
+
+
+class TestRealPathBatchSingleParity:
+    """Phase 3.3 非自证的 MDAS single vs batch parity。
+
+    不 mock ``get_bars``/``get_bars_batch``，只 mock 它们共同依赖的底层
+    repository / cache / now，让单股路径（内联聚合，get_bars）与批量路径
+    （``_build_daily_aggregation``，get_bars_batch）各自跑完真实聚合与复权，
+    断言整份 BarAggregationResult 等价（INPUT parity 100%），再分别把两路 bars
+    送入**同一个冻结的** ``compute_first_pyramid_history``，断言 canonical JSON
+    hash 一致（OUTPUT parity 100%）。
+    """
+
+    async def test_batch_vs_single_input_and_output_parity(self, monkeypatch: pytest.MonkeyPatch):
+        # pylint: disable=too-many-locals
+        import hashlib
+        import json
+
+        from app.services.adjustment_factor_service import AdjustmentFactorService
+        from app.services.first_pyramid_service import compute_first_pyramid_history
+        from app.services.market_data_aggregation_service import (
+            BarAggregationResult,
+            MarketDataAggregationService,
+        )
+
+        iid = TEST_INSTRUMENT_ID
+        end = date(2026, 8, 10)
+        idx = pd.bdate_range("2026-07-13", "2026-08-10")
+        dates_str = [d.strftime("%Y-%m-%d") for d in idx]
+        bars = _build_daily_bars(dates_str)
+        factor = pd.DataFrame({
+            "trade_date": pd.to_datetime(dates_str),
+            "adj_factor": [1.0] * len(dates_str),
+        })
+        now = datetime(2026, 8, 10, 15, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+        async def fake_query_daily_bars(session, instrument_id, start, end_):  # noqa: ANN001
+            return bars.copy()
+
+        async def fake_get_daily_bars_batch(session, ids, start, end_):  # noqa: ANN001
+            return {iid: bars.copy()}
+
+        async def fake_get_factor_series(self, session, instrument_id, as_of=None):  # noqa: ANN001
+            return factor.copy()
+
+        async def fake_get_adj_factor_series_batch(session, ids, as_of=None):  # noqa: ANN001
+            return {instr: factor.copy() for instr in ids}
+
+        async def fake_expected(session, now_):  # noqa: ANN001
+            # 与 get_bars 内部 `min(now_expected, end)` 比较一致，必须返回 date
+            _, resolved_end = mdas._resolve_date_range("1d", None, end, limit=250)
+            return resolved_end
+
+        # 只 mock 底层 repository / cache / 时钟 —— 不 mock get_bars / get_bars_batch
+        monkeypatch.setattr(mdas, "now_shanghai", lambda: now)
+        monkeypatch.setattr(mdas, "_is_trading_hours", lambda now_: False)
+        monkeypatch.setattr(mdas, "_cache_get", lambda *a, **k: None)
+        monkeypatch.setattr(mdas, "_cache_set", lambda *a, **k: None)
+        monkeypatch.setattr(mdas, "_query_daily_bars", fake_query_daily_bars)
+        monkeypatch.setattr(mdas, "get_daily_bars_batch", fake_get_daily_bars_batch)
+        monkeypatch.setattr(
+            AdjustmentFactorService, "get_factor_series", fake_get_factor_series
+        )
+        monkeypatch.setattr(
+            mdas, "get_adj_factor_series_batch", fake_get_adj_factor_series_batch
+        )
+        monkeypatch.setattr(
+            mdas, "_call_expected_last_completed_daily_bar", fake_expected
+        )
+
+        svc = MarketDataAggregationService()
+        session = AsyncMock()
+
+        single: BarAggregationResult = await svc.get_bars(
+            session, iid, timeframe="1d", adj="qfq", include_realtime=False,
+            completed_only=True, end_date=end, adjustment_as_of=end,
+            allow_backfill=False, limit=250,
+        )
+        batch = await svc.get_bars_batch(
+            session, [iid], timeframe="1d", adj="qfq", include_realtime=False,
+            completed_only=True, end_date=end, adjustment_as_of=end,
+            allow_backfill=False, limit=250,
+        )
+        assert not isinstance(batch[iid], Exception), f"batch path failed: {batch[iid]}"
+        batch_one: BarAggregationResult = batch[iid]
+
+        # ---- INPUT parity（bars 数据面）----
+        assert list(single.bars.index) == list(batch_one.bars.index), "index 不一致"
+        assert list(single.bars.columns) == list(batch_one.bars.columns), "columns 不一致"
+        assert len(single.bars) == len(batch_one.bars), "row count 不一致"
+        assert not single.bars.empty
+        assert single.bars.index.max() == batch_one.bars.index.max(), "max date 不一致"
+        _cmp_cols = single.bars.columns.difference(["adj_factor"])
+        pd.testing.assert_frame_equal(
+            single.bars[_cmp_cols],
+            batch_one.bars[_cmp_cols],
+            check_exact=False,
+            rtol=1e-9,
+        )
+
+        # ---- INPUT parity（诊断字段）----
+        assert single.source_bar_hash == batch_one.source_bar_hash
+        assert single.adj_factor_hash == batch_one.adj_factor_hash
+        assert single.completed_through == batch_one.completed_through
+        assert single.adjustment_as_of == batch_one.adjustment_as_of
+        assert single.degraded == batch_one.degraded
+        assert single.degraded_reason == batch_one.degraded_reason
+
+        # ---- OUTPUT parity：同一冻结算法，两路 bars 送入 → canonical hash 一致 ----
+        hist_single = compute_first_pyramid_history(
+            bars=single.bars, symbol=str(iid), output_bars=250, include_chip=False
+        )
+        hist_batch = compute_first_pyramid_history(
+            bars=batch_one.bars, symbol=str(iid), output_bars=250, include_chip=False
+        )
+        h1 = hashlib.sha256(
+            json.dumps(hist_single, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        h2 = hashlib.sha256(
+            json.dumps(hist_batch, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()
+        assert h1 == h2, "冻结算法 OUTPUT parity 必须 100%"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

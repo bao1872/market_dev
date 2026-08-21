@@ -33,8 +33,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import time
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
@@ -52,6 +54,7 @@ from app.models.first_pyramid_history_run import (
     HISTORY_RUN_PARTIAL,
     HISTORY_RUN_RUNNING,
     HISTORY_RUN_SUCCEEDED,
+    SCOPE_ALL_A_SHARE,
     FirstPyramidHistoryRun,
 )
 from app.models.first_pyramid_history_run_item import FirstPyramidHistoryRunItem
@@ -438,6 +441,67 @@ async def create_history_run(
     return run, True
 
 
+async def ensure_current_first_pyramid_history_run(
+    session: AsyncSession,
+    *,
+    algorithm_version: str | None = None,
+    scope: str = SCOPE_ALL_A_SHARE,
+    output_bars: int = 250,
+    include_chip: bool = False,
+    instrument_ids: Sequence[uuid.UUID] | None = None,
+    scheduler_job_run_id: uuid.UUID | None = None,
+) -> tuple[FirstPyramidHistoryRun, bool]:
+    """[CHANGE-20260821-001 Phase 1] 解析或创建「今天盘后」当前 canonical FirstPyramidHistoryRun。
+
+    PRODUCER CURRENT-RUN RESOLVER —— 与 Review consumer resolver 完全独立。
+
+    确定当前 canonical 配置：algorithm_version（默认核心版本
+    ``FIRST_PYRAMID_CORE_ALGORITHM_VERSION``）、parameter_hash（由 output_bars +
+    include_chip + HISTORY_CONTRACT_VERSION 经 ``_compute_parameter_hash`` 计算，
+    contract 进入 identity）、scope（默认 ``all_a_share``）。
+
+    通过既有合法创建契约 ``create_history_run`` 幂等 resolve-or-create：
+    - 相同 (algorithm_version, parameter_hash, scope) 已存在 running/partial/succeeded
+      run → 返回已有 run（is_new=False，resume，不新建、不硬编码任何 run id）。
+    - 不存在 → 创建新 run（is_new=True），identity 由上述三元组决定，绝不硬编码 UUID。
+
+    硬边界（见 PRD 80 / CHANGE-20260821-001，REVIEW_CODE_FREEZE=TRUE）：
+    - **不调用** Review 的 ``validate_canonical_history_run_readiness`` /
+      ``_resolve_canonical_history_source``；producer 仅确保 canonical run 行存在，
+      readiness 由 Review 自行判定（FIX_DIRECTION=UPSTREAM_ONLY）。
+    - algorithm_version / HISTORY_CONTRACT_VERSION / output_bars 任一变化 →
+      resolve key 改变 → 旧 run 不被复用（rollover 不复用旧 run）。
+    - 本阶段**不计算、不修改** participating set（membership reconciliation 属
+      Phase 2）；instrument_ids 仅用于 expected_count 进度展示，不构成 membership
+      定义，默认空（caller 在 Phase 2+ 才传入真实 eligible universe）。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit）
+        algorithm_version: 算法版本（默认 FIRST_PYRAMID_CORE_ALGORITHM_VERSION）
+        scope: 范围标识
+        output_bars: 输出最近 N 日（默认 250）
+        include_chip: 是否含 chip（默认 False）
+        instrument_ids: eligible universe（可选，仅用于 expected_count；membership 不在此解决）
+        scheduler_job_run_id: 关联 SchedulerJobRun（可选）
+
+    Returns:
+        (FirstPyramidHistoryRun, is_new)
+    """
+    if algorithm_version is None:
+        algorithm_version = FIRST_PYRAMID_CORE_ALGORITHM_VERSION
+
+    run, is_new = await create_history_run(
+        session,
+        algorithm_version=algorithm_version,
+        output_bars=output_bars,
+        scope=scope,
+        instrument_ids=instrument_ids or (),
+        scheduler_job_run_id=scheduler_job_run_id,
+        include_chip=include_chip,
+    )
+    return run, is_new
+
+
 async def create_history_run_items(
     session: AsyncSession,
     history_run_id: uuid.UUID,
@@ -480,6 +544,255 @@ async def create_history_run_items(
         await session.flush()
 
     return len(new_items)
+
+
+# =============================================================================
+# [CHANGE-20260821-001 Phase 2] Membership reconciliation
+# =============================================================================
+# 不新增任何 schema / 字段 / enum：membership 完全由「当前 eligible universe 查询」
+# 与「canonical run 已有 run_items」派生。no-longer-current 通过从派生参与集排除表达，
+# 其历史 item 保留，禁止物理删除。
+# RUN-LEVEL COUNTER INVARIANT：reconcile 后 run.expected_count = 该 run 累计 run_item 总数
+# （不更新 succeeded_count/skipped_count，后者属 Phase 3）。REVIEW_CODE_FREEZE=TRUE：本区与 Review 完全独立。
+
+@dataclass
+class MembershipPartition:
+    """[CHANGE-20260821-001 Phase 2] 纯分区结果（不依赖 DB / ORM）。
+
+    输入为普通 dict/set，便于纯单元测试覆盖全部 membership 生命周期场景。
+    """
+
+    retained: list[uuid.UUID]                 # 仍在 universe 且已有 item（保留 lineage）
+    added: list[uuid.UUID]                     # 新成员：应建 pending item（NOT daily-ready）
+    no_longer_current: list[uuid.UUID]         # 退出 universe：保留历史 item，排除出参与集（不删除）
+    no_longer_current_nonterminal: list[uuid.UUID]  # 退出 universe 且仍为非终态(pending/failed/running)：
+                                                    # 须进入 RUN_TERMINALIZATION_SET，不得静默遗弃；本阶段不改其 status
+    reevaluation_candidates: list[uuid.UUID]   # failed / skipped 且仍在 universe → 可复评（候选识别）
+    skipped_reevaluation_candidates: list[uuid.UUID]  # 仅 skipped 且仍在 universe（复评候选，独立于 rearm 策略）
+    rearmed_skipped: list[uuid.UUID]           # 实际重置为 pending 的 skipped（= 候选 ∩ 授权集；默认空）
+    daily_ready: list[uuid.UUID]               # 在 universe 且 status==succeeded（bootstrap 完成）
+    not_daily_ready: list[uuid.UUID]           # 在 universe 但非 succeeded（含新增 pending / failed / 复评）
+    current_expected_participating_set: list[uuid.UUID]  # = retained + added（daily advance 参与集）
+
+
+def compute_membership_partition(
+    existing: Mapping[uuid.UUID, str],
+    eligible_instrument_ids: Iterable[uuid.UUID],
+    *,
+    rearm_skipped: bool = False,
+    reevaluate_instrument_ids: Iterable[uuid.UUID] | None = None,
+) -> MembershipPartition:
+    """纯函数：给定 (instrument_id -> status) 与 eligible universe，计算 membership 分区。
+
+    所有成员状态均由现有 status enum 派生，不引入 inactive / daily_ready 等 schema 变化。
+
+    Args:
+        existing: history_run 已有 run_items 的 (instrument_id -> status)
+        eligible_instrument_ids: 当前 eligible A-share universe
+        rearm_skipped: 是否将**全部** in-universe skipped 重置为 pending（复评入口）。
+            默认 False：不无条件全量复评（避免每天无意义 churn）。
+        reevaluate_instrument_ids: 仅重置这些 instrument 的 skipped（候选 ∩ 本集合）。
+            与 rearm_skipped 互斥优先级：本参数非空时仅按本集合；否则看 rearm_skipped。
+
+    Returns:
+        MembershipPartition
+    """
+    eligible_set = set(eligible_instrument_ids)
+
+    retained: list[uuid.UUID] = []
+    added: list[uuid.UUID] = []
+    no_longer_current: list[uuid.UUID] = []
+    for iid in eligible_set:
+        if iid in existing:
+            retained.append(iid)
+        else:
+            added.append(iid)
+    for iid in existing:
+        if iid not in eligible_set:
+            no_longer_current.append(iid)
+
+    # 退出 universe 且非终态：必须进入 RUN_TERMINALIZATION_SET，不能静默遗弃。
+    # 本阶段仅**暴露**（不改 status）。三个集合必须分清，绝不混用：
+    #   - cumulative lineage membership  = 全部 run_items            → expected_count（run-level counter）
+    #   - current daily eligible set     = eligible ∩ 有 item         → current_expected_participating_set（今天需 T-state）
+    #   - run terminalization set        = no_longer_current_nonterminal（含已退市但仍 pending/failed/running 的历史成员）
+    # 不发明新的 skip reason（如 NO_LONGER_ELIGIBLE）：Review readiness 对 skip reason 有白名单，
+    # 新增 reason 会改变 consumer eligibility contract，违反 REVIEW_CODE_FREEZE。
+    # 这些历史成员应随真实历史数据被 Phase 3 处理到合法 succeeded / 既有允许 skipped，而非为 membership 管理伪造 skip 原因。
+    _NON_TERMINAL = frozenset(
+        {_HISTORY_ITEM_PENDING, _HISTORY_ITEM_FAILED, _HISTORY_ITEM_RUNNING}
+    )
+    no_longer_current_nonterminal = [
+        iid for iid in no_longer_current if existing.get(iid) in _NON_TERMINAL
+    ]
+
+    # 候选识别（始终报告，不依赖 rearm 策略）：failed / skipped 且仍在 universe
+    # （退出 universe 的不复评、不重置）
+    reevaluation_candidates = [
+        iid for iid, st in existing.items()
+        if st in (_HISTORY_ITEM_FAILED, _HISTORY_ITEM_SKIPPED) and iid in eligible_set
+    ]
+    # 仅 skipped 且仍在 universe 的复评候选（独立于 rearm 策略，便于上层识别可复评集合）
+    skipped_reevaluation_candidates = [
+        iid for iid, st in existing.items()
+        if st == _HISTORY_ITEM_SKIPPED and iid in eligible_set
+    ]
+
+    # 实际 rearm（候选 ∩ 授权集）：
+    # - reevaluate_instrument_ids 非空 → 仅重置其中的 skipped（精确授权）
+    # - 否则 rearm_skipped=True → 重置全部 in-universe skipped
+    # - 默认（rearm_skipped=False 且无 reevaluate 列表）→ 不重置任何 skipped
+    # （避免每天把 skipped 全量重开 → Review 临时 not_ready → 重算仍 skipped 的无意义 churn）
+    skip_candidates = set(skipped_reevaluation_candidates)
+    if reevaluate_instrument_ids is not None:
+        rearm_targets = skip_candidates & set(reevaluate_instrument_ids)
+    elif rearm_skipped:
+        rearm_targets = skip_candidates
+    else:
+        rearm_targets = set()
+    rearmed_skipped = sorted(rearm_targets, key=str)
+
+    # 派生最终 status（模拟 rearm 后）用于 daily_ready 判定
+    final_status: dict[uuid.UUID, str] = dict(existing)
+    for iid in rearmed_skipped:
+        final_status[iid] = _HISTORY_ITEM_PENDING
+
+    daily_ready = [
+        iid for iid in eligible_set
+        if final_status.get(iid) == _HISTORY_ITEM_SUCCEEDED
+    ]
+    not_daily_ready = [
+        iid for iid in eligible_set
+        if final_status.get(iid) != _HISTORY_ITEM_SUCCEEDED
+    ]
+
+    return MembershipPartition(
+        retained=sorted(retained, key=str),
+        added=sorted(added, key=str),
+        no_longer_current=sorted(no_longer_current, key=str),
+        no_longer_current_nonterminal=sorted(no_longer_current_nonterminal, key=str),
+        reevaluation_candidates=sorted(reevaluation_candidates, key=str),
+        skipped_reevaluation_candidates=sorted(skipped_reevaluation_candidates, key=str),
+        rearmed_skipped=sorted(rearmed_skipped, key=str),
+        daily_ready=sorted(daily_ready, key=str),
+        not_daily_ready=sorted(not_daily_ready, key=str),
+        current_expected_participating_set=sorted(retained + added, key=str),
+    )
+
+
+@dataclass
+class MembershipReconciliationResult:
+    """[CHANGE-20260821-001 Phase 2] reconcile_first_pyramid_history_membership 返回值。"""
+
+    history_run_id: uuid.UUID
+    partition: MembershipPartition
+    expected_count: int = 0  # reconcile 后该 run 的累计 lineage membership 计数（RUN-LEVEL COUNTER INVARIANT）
+
+
+async def reconcile_first_pyramid_history_membership(
+    session: AsyncSession,
+    *,
+    history_run_id: uuid.UUID,
+    eligible_instrument_ids: Sequence[uuid.UUID],
+    rearm_skipped: bool = False,
+    reevaluate_instrument_ids: Sequence[uuid.UUID] | None = None,
+) -> MembershipReconciliationResult:
+    """[CHANGE-20260821-001 Phase 2] 计算并落地 canonical run 的 membership partition。
+
+    MEMBERSHIP RECONCILIATION OWNER —— 与 Review 完全独立（REVIEW_CODE_FREEZE=TRUE）。
+
+    落地动作（全部 scope 到 history_run_id，不串其它 run lineage）：
+    - added → 委托既有 ``create_history_run_items`` 幂等建 pending item（NOT daily-ready）。
+    - rearmed_skipped → UPDATE skipped→pending 仅限 in-universe（复评入口）。
+    - no_longer_current → 不删除、不改 status，仅由派生参与集排除。
+    - no_longer_current_nonterminal → partition 中暴露退出 universe 且仍非终态(pending/failed/running)
+      的历史成员（RUN_TERMINALIZATION_SET）；本阶段仅暴露、不改 status，供 Phase 3 terminalize。
+      绝不发明新 skip reason（如 NO_LONGER_ELIGIBLE）来"管理" membership，那会改 Review consumer
+      eligibility contract（违反 REVIEW_CODE_FREEZE）。
+
+    硬边界（REVIEW_CODE_FREEZE / FIX_DIRECTION=UPSTREAM_ONLY）：
+    - **不修改** Review 任何代码 / contract；不调用 ``validate_canonical_history_run_readiness``。
+    - **RUN-LEVEL COUNTER INVARIANT（被你纠正，本阶段必须维护）**：reconcile 后
+      ``run.expected_count == 该 canonical run 已纳入 lineage 的 run_item 总数``（累计 membership，
+      非“今天仍上市的股票数”）。新增成员使 count 增加；退出 universe 不删 item → count 不降。
+      Review readiness 依赖 ``expected_count == succeeded_count + skipped_count``；REVIEW_CODE_FREEZE
+      仅禁止修改 Review 的判定逻辑，**不禁止 producer 正确维护 Review 依赖的数据**，否则新 run 会
+      永久 ``expected_count=0`` 而永远过不了现有 readiness（属 Phase 1/2 上游 bug，不是 Review bug）。
+      **本阶段不更新** ``succeeded_count`` / ``skipped_count`` —— 它们随 Phase 3 bootstrap/process
+      完成后的真实 item 状态刷新（run-progress lifecycle，属 Phase 3 关注）。
+    - **不 bootstrap / 不推进到 T**：new member 仅建 pending item，NOT daily-ready，直到
+      Phase 3 required lookback bootstrap + canonical lineage persistence 成功。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit）
+        history_run_id: 目标 canonical FirstPyramidHistoryRun.id
+        eligible_instrument_ids: 当前 eligible A-share universe（caller 提供，本函数不查询 universe）
+        rearm_skipped: 是否将**全部** in-universe skipped 重置为 pending（复评入口），默认 False。
+        reevaluate_instrument_ids: 仅重置这些 instrument 的 skipped（精确授权）；非空时优先于
+            rearm_skipped。Phase 2 提供复评**能力**，但不把“能力”变成“每天无条件全量复评”。
+
+    Returns:
+        MembershipReconciliationResult
+    """
+    # 1. 载入本 run 已有 items（scope 到 history_run_id，不串其它 run lineage）
+    existing_rows = (
+        await session.execute(
+            select(
+                FirstPyramidHistoryRunItem.instrument_id,
+                FirstPyramidHistoryRunItem.status,
+            ).where(FirstPyramidHistoryRunItem.history_run_id == history_run_id)
+        )
+    ).all()
+    existing: dict[uuid.UUID, str] = {row[0]: row[1] for row in existing_rows}
+
+    # 2. 纯分区
+    partition = compute_membership_partition(
+        existing, eligible_instrument_ids,
+        rearm_skipped=rearm_skipped,
+        reevaluate_instrument_ids=reevaluate_instrument_ids,
+    )
+
+    # 3. 新成员：幂等建 pending item（委托既有契约，不硬编码任何 id）
+    if partition.added:
+        await create_history_run_items(session, history_run_id, partition.added)
+
+    # 4. 复评入口：in-universe skipped → pending（仅 UPDATE，不删不改其它字段）
+    if partition.rearmed_skipped:
+        await session.execute(
+            update(FirstPyramidHistoryRunItem)
+            .where(
+                FirstPyramidHistoryRunItem.history_run_id == history_run_id,
+                FirstPyramidHistoryRunItem.instrument_id.in_(partition.rearmed_skipped),
+                FirstPyramidHistoryRunItem.status == _HISTORY_ITEM_SKIPPED,
+            )
+            .values(status=_HISTORY_ITEM_PENDING, updated_at=datetime.now(UTC))
+        )
+        await session.flush()
+
+    # 5. RUN-LEVEL COUNTER INVARIANT：expected_count = 累计 lineage membership 计数
+    #    （新增 item 使 count 增加；no-longer-current 不删 item → count 不降）。
+    #    不碰 succeeded_count / skipped_count（属 Phase 3 run-progress lifecycle）。
+    total_items = (
+        await session.execute(
+            select(func.count())
+            .select_from(FirstPyramidHistoryRunItem)
+            .where(FirstPyramidHistoryRunItem.history_run_id == history_run_id)
+        )
+    ).scalar_one()
+    run = (
+        await session.execute(
+            select(FirstPyramidHistoryRun)
+            .where(FirstPyramidHistoryRun.id == history_run_id)
+        )
+    ).scalar_one()
+    run.expected_count = total_items
+    session.add(run)
+    await session.flush()
+
+    return MembershipReconciliationResult(
+        history_run_id=history_run_id, partition=partition,
+        expected_count=total_items,
+    )
 
 
 async def claim_history_items(
@@ -856,6 +1169,75 @@ async def _fetch_pit_daily_bars_for_target(
     if df is None or df.empty:
         return None
     return df
+
+
+async def _fetch_pit_daily_bars_batch(
+    session: AsyncSession,
+    instrument_ids: Iterable[uuid.UUID],
+    *,
+    output_bars: int,
+    target_trade_date: date,
+) -> dict[uuid.UUID, BarAggregationResult | Exception]:
+    """[CHANGE-20260821-001 Phase 3.3] PIT strict DB-only 批量读日线。
+
+    对整批只发起 ~3 次 repository 查询（1×bars_daily + 1×adj_factor + 1×预期完成日），
+    替代旧单股 ``_fetch_pit_daily_bars_for_target`` 的每股 1 次 ``get_bars`` 往返。
+    与单股 helper 共用同一 MDAS 出口与一致 PIT 合同：
+
+    - ``end_date=target_trade_date``：max(bars.trade_date) <= target，不读未来 bar；
+    - ``adjustment_as_of=target_trade_date``：复权锚点固定，禁止未来除权泄漏；
+    - strict DB-only（``allow_backfill=False``）+ ``completed_only=True``。
+
+    返回 **key=instrument_id → BarAggregationResult | Exception**，保留完整
+    BarAggregationResult（source_bar_hash / adj_factor_hash / completed_through 供 single-vs-batch
+    parity 审计），caller 只消费 ``.bars``。
+
+    BATCH CONTRACT 严格校验（fail visible，绝不静默降级）：
+    - ``get_bars_batch`` 整批抛异常 → 为 batch 每股返回同一明确 Exception（不整批退出，
+      也不静默 fallback 回单股 N+1，避免掩盖性能回归/生产问题）；
+    - batch result 缺失某 instrument（key 不存在）→ 该 instrument 视为
+      BATCH CONTRACT VIOLATION → RuntimeError（这绝不是 ``no_bar``）；
+    - 值既非 BarAggregationResult 也非 Exception → RuntimeError。
+    """
+    from app.services.market_data_aggregation_service import (
+        BarAggregationResult,
+        MarketDataAggregationService,
+    )
+
+    ids = list(instrument_ids)
+    mdas = MarketDataAggregationService()
+    try:
+        agg_map = await mdas.get_bars_batch(
+            session,
+            ids,
+            timeframe="1d",
+            adj="qfq",
+            include_realtime=False,
+            completed_only=True,
+            allow_backfill=False,
+            end_date=target_trade_date,
+            adjustment_as_of=target_trade_date,
+            limit=output_bars * 2,  # 留余量，history SSOT 内部会截取 output_bars
+        )
+    except Exception as exc:  # noqa: BLE001 - 整批失败对 batch 每股可见，不静默 fallback
+        return {iid: RuntimeError(f"MDAS batch fetch failed: {exc}") for iid in ids}
+
+    result: dict[uuid.UUID, BarAggregationResult | Exception] = {}
+    for iid in ids:
+        value = agg_map.get(iid)
+        if isinstance(value, BarAggregationResult):
+            result[iid] = value
+        elif isinstance(value, Exception):
+            result[iid] = value
+        elif value is None:
+            result[iid] = RuntimeError(
+                f"MDAS batch result missing instrument: {iid} (BATCH CONTRACT VIOLATION)"
+            )
+        else:
+            result[iid] = RuntimeError(
+                f"unexpected MDAS batch result type for {iid}: {type(value).__name__}"
+            )
+    return result
 
 
 async def backfill_history_with_run_items(
@@ -1457,6 +1839,21 @@ async def advance_history_to_trade_date(
     )
     instrument_ids = [row[0] for row in item_rows.all()]
 
+    # [Phase 3.2] 性能埋点累加器（纯观测；不改变业务行为；仅 additive 写入返回 perf）
+    _t_run_start = time.perf_counter()
+    _run_perf: dict[str, Any] = {
+        "stock_records": [],
+        # [Phase 3.3] mdas_request_count 保持原语义=「逐股单读 MDAS 调用次数」；
+        # 批读模式不再逐股调用，故保持 0（不换名换义）。批读计数见
+        # mdas_batch_request_count；本轮请求股票数见 mdas_instrument_count。
+        "mdas_request_count": 0,
+        "mdas_batch_request_count": 0,
+        "mdas_instrument_count": len(instrument_ids),
+        "bars_count": 0,
+        "daily_state_output_count": 0,
+        "event_count": 0,
+    }
+
     processed = 0
     target_state_count = 0
     no_bar = 0
@@ -1466,17 +1863,49 @@ async def advance_history_to_trade_date(
 
     for offset in range(0, len(instrument_ids), batch_size):
         batch = instrument_ids[offset : offset + batch_size]
+
+        # [CHANGE-20260821-001 Phase 3.3] 整批一次 MDAS 批读（~3 次 repository SQL，
+        # 替代旧单股 get_bars 的每股 1 次往返）。逐股失败隔离保留；整批异常对每股可见，
+        # 绝不静默 fallback 回单股（NO_SECOND_ALGORITHM_IMPLEMENTATION / fail visible）。
+        _t_batch = time.perf_counter()
+        bars_by_id = await _fetch_pit_daily_bars_batch(
+            session,
+            batch,
+            output_bars=output_bars,
+            target_trade_date=trade_date,
+        )
+        _batch_bars_fetch_ms = (time.perf_counter() - _t_batch) * 1000.0
+        _run_perf["mdas_batch_request_count"] += 1
+
         for instrument_id in batch:
             processed += 1
+            _stock_perf: dict[str, float] = {}
+            # 批读模式已无逐股 MDAS 调用；bars_fetch_ms 表示该股所属整批的批读耗时
+            # （同一 batch 内每股一致），不逐股计时以免产生误导性的 0 值。
+            _bars_fetch_ms = _batch_bars_fetch_ms
+            _history_total_ms = 0.0
+            _event_slice_ms = 0.0
+            _persist_ms = 0.0
             try:
-                bars = await _fetch_pit_daily_bars_for_target(
-                    session,
-                    instrument_id,
-                    output_bars=output_bars,
-                    target_trade_date=trade_date,
-                )
+                entry = bars_by_id[instrument_id]
+                if isinstance(entry, Exception):
+                    # MDAS batch contract：整批异常/缺失/未知类型在 helper 已归一为
+                    # Exception；此处每股 fail visible，不中断其余股票。
+                    raise RuntimeError(f"MDAS batch fetch failed: {entry}")
+                bars = entry.bars
                 if bars is None or bars.empty:
                     no_bar += 1
+                    _run_perf["stock_records"].append({
+                        "instrument_id": str(instrument_id),
+                        "outcome": "no_bar",
+                        "bars_fetch_ms": _bars_fetch_ms,
+                        "history_total_ms": 0.0,
+                        "event_slice_ms": 0.0,
+                        "persist_ms": 0.0,
+                        "dsa_ms": 0.0, "smc_ms": 0.0,
+                        "sqzmom_ms": 0.0, "volume_context_ms": 0.0,
+                        "history_assembly_ms": 0.0, "bars_count": 0,
+                    })
                     continue
 
                 # §5 PIT 硬断言：绝不允许未来 bar 进入 compute input
@@ -1487,12 +1916,15 @@ async def advance_history_to_trade_date(
                     )
 
                 # §6 唯一 SSOT，算法不改
+                _t = time.perf_counter()
                 history = compute_first_pyramid_history(
                     bars=bars,
                     symbol=str(instrument_id),
                     output_bars=output_bars,
                     include_chip=False,
+                    perf=_stock_perf,
                 )
+                _history_total_ms = (time.perf_counter() - _t) * 1000.0
                 meta = history.get("meta") or {}
 
                 target_state = None
@@ -1511,6 +1943,20 @@ async def advance_history_to_trade_date(
                 if target_state is None:
                     # instrument 在 target date 无 completed bar（停牌/退市/未上市）
                     no_target_state += 1
+                    _run_perf["stock_records"].append({
+                        "instrument_id": str(instrument_id),
+                        "outcome": "no_target_state",
+                        "bars_fetch_ms": _bars_fetch_ms,
+                        "history_total_ms": _history_total_ms,
+                        "event_slice_ms": 0.0,
+                        "persist_ms": 0.0,
+                        "dsa_ms": _stock_perf.get("dsa_ms", 0.0),
+                        "smc_ms": _stock_perf.get("smc_ms", 0.0),
+                        "sqzmom_ms": _stock_perf.get("sqzmom_ms", 0.0),
+                        "volume_context_ms": _stock_perf.get("volume_context_ms", 0.0),
+                        "history_assembly_ms": _stock_perf.get("history_assembly_ms", 0.0),
+                        "bars_count": _stock_perf.get("bars_count", 0),
+                    })
                     continue
 
                 # ROUND-2.2A: exact-T State + exact-T Events come from the SAME
@@ -1520,11 +1966,15 @@ async def advance_history_to_trade_date(
                 # Only the T-date state (1 row) and the T-date events are written —
                 # no 250-day history rewrite.  target-event slicing is a pure date
                 # adapter (``_target_date_events``), NOT a new business algorithm.
+                _t = time.perf_counter()
+                target_events = _target_date_events(history, trade_date)
+                _event_slice_ms = (time.perf_counter() - _t) * 1000.0
                 target_result: dict[str, Any] = {
                     "daily_state": [target_state],
-                    "events": _target_date_events(history, trade_date),
+                    "events": target_events,
                     "meta": meta,
                 }
+                _t = time.perf_counter()
                 await _persist_history_result(
                     session,
                     instrument_id,
@@ -1533,7 +1983,25 @@ async def advance_history_to_trade_date(
                     source_history_run_id=history_run_id,
                     history_contract_version=HISTORY_CONTRACT_VERSION,
                 )
+                _persist_ms = (time.perf_counter() - _t) * 1000.0
                 target_state_count += 1
+                _run_perf["bars_count"] += _stock_perf.get("bars_count", 0)
+                _run_perf["daily_state_output_count"] += 1
+                _run_perf["event_count"] += len(target_events)
+                _run_perf["stock_records"].append({
+                    "instrument_id": str(instrument_id),
+                    "outcome": "ok",
+                    "bars_fetch_ms": _bars_fetch_ms,
+                    "history_total_ms": _history_total_ms,
+                    "event_slice_ms": _event_slice_ms,
+                    "persist_ms": _persist_ms,
+                    "dsa_ms": _stock_perf.get("dsa_ms", 0.0),
+                    "smc_ms": _stock_perf.get("smc_ms", 0.0),
+                    "sqzmom_ms": _stock_perf.get("sqzmom_ms", 0.0),
+                    "volume_context_ms": _stock_perf.get("volume_context_ms", 0.0),
+                    "history_assembly_ms": _stock_perf.get("history_assembly_ms", 0.0),
+                    "bars_count": _stock_perf.get("bars_count", 0),
+                })
             except Exception as exc:  # noqa: BLE001 - 单股失败不阻塞整体
                 failed += 1
                 failed_instruments.append(
@@ -1555,6 +2023,63 @@ async def advance_history_to_trade_date(
                 }
             )
 
+    _wall_clock_ms = (time.perf_counter() - _t_run_start) * 1000.0
+    _records = _run_perf["stock_records"]
+
+    def _pctl(values: list[float], q: float) -> float:
+        if not values:
+            return 0.0
+        s = sorted(values)
+        if len(s) == 1:
+            return s[0]
+        idx = max(0, min(len(s) - 1, int(round((q / 100.0) * (len(s) - 1)))))
+        return s[idx]
+
+    _compute_vals = [r["history_total_ms"] for r in _records]
+    _perf_summary: dict[str, Any] = {
+        "instrument_count": len(instrument_ids),
+        "processed": processed,
+        "target_state_count": target_state_count,
+        "no_bar": no_bar,
+        "no_target_state": no_target_state,
+        "failed": failed,
+        "fail_count": failed,
+        "skip_count": 0,
+        "mdas_request_count": _run_perf["mdas_request_count"],
+        "mdas_batch_request_count": _run_perf["mdas_batch_request_count"],
+        "mdas_instrument_count": _run_perf["mdas_instrument_count"],
+        "bars_count": _run_perf["bars_count"],
+        "daily_state_output_count": _run_perf["daily_state_output_count"],
+        "event_count": _run_perf["event_count"],
+        "wall_clock_ms": _wall_clock_ms,
+        "p50_stock_ms": _pctl(_compute_vals, 50),
+        "p90_stock_ms": _pctl(_compute_vals, 90),
+        "p95_stock_ms": _pctl(_compute_vals, 95),
+        "p99_stock_ms": _pctl(_compute_vals, 99),
+        "bars_fetch_p50_ms": _pctl([r["bars_fetch_ms"] for r in _records], 50),
+        "bars_fetch_p95_ms": _pctl([r["bars_fetch_ms"] for r in _records], 95),
+        "persist_p50_ms": _pctl([r["persist_ms"] for r in _records], 50),
+        "persist_p95_ms": _pctl([r["persist_ms"] for r in _records], 95),
+        "kernel": {
+            "dsa_ms_p50": _pctl([r["dsa_ms"] for r in _records], 50),
+            "dsa_ms_p95": _pctl([r["dsa_ms"] for r in _records], 95),
+            "smc_ms_p50": _pctl([r["smc_ms"] for r in _records], 50),
+            "smc_ms_p95": _pctl([r["smc_ms"] for r in _records], 95),
+            "sqzmom_ms_p50": _pctl([r["sqzmom_ms"] for r in _records], 50),
+            "sqzmom_ms_p95": _pctl([r["sqzmom_ms"] for r in _records], 95),
+            "volume_context_ms_p50": _pctl([r["volume_context_ms"] for r in _records], 50),
+            "volume_context_ms_p95": _pctl([r["volume_context_ms"] for r in _records], 95),
+            "history_assembly_ms_p50": _pctl([r["history_assembly_ms"] for r in _records], 50),
+            "history_assembly_ms_p95": _pctl([r["history_assembly_ms"] for r in _records], 95),
+        },
+        # 注意：bollinger 在 history 路径内嵌于 DSA bundle（compute_dsa_bundle），
+        # 无法在不改动 kernel 内部的前提下单独计时；dsa_ms 已含 Bollinger 子步骤。
+        # 若基准显示 DSA 为热点，可在 Phase 3.2.1 对 compute_dsa_bundle 单独插桩。
+        "notes": {
+            "bollinger_ms": "subsumed_in_dsa_ms",
+        },
+    }
+
     return {
         "run_id": str(history_run_id),
         "trade_date": trade_date.isoformat(),
@@ -1565,7 +2090,325 @@ async def advance_history_to_trade_date(
         "no_target_state": no_target_state,
         "failed": failed,
         "failed_instruments": failed_instruments,
+        "perf": _perf_summary,
     }
+
+
+# =============================================================================
+# Phase 3 — canonical history terminalization + daily advancement
+# (CHANGE-20260821-001) PRODUCER lifecycle owner；与 Review 完全独立（REVIEW_CODE_FREEZE=TRUE）
+# =============================================================================
+
+_NON_TERMINAL_TERMINALIZE_STATUSES = (
+    _HISTORY_ITEM_PENDING,
+    _HISTORY_ITEM_RUNNING,
+    _HISTORY_ITEM_FAILED,
+)
+
+
+async def get_history_run_nonterminal_instruments(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+) -> list[uuid.UUID]:
+    """列出该 canonical run 仍处非终态(pending/running/failed)的历史成员。
+
+    这是 RUN_TERMINALIZATION_SET 的精确 instrument 列表（含已退出 universe 但仍
+    pending/failed/running 的历史成员）。用于 Phase 3 结构化结果陈述「仍须 terminalize 的工作」，
+    不依赖 current eligible universe（universe 由 Phase 2/Phase 4 提供）。
+    """
+    rows = (
+        await session.execute(
+            select(FirstPyramidHistoryRunItem.instrument_id).where(
+                FirstPyramidHistoryRunItem.history_run_id == history_run_id,
+                FirstPyramidHistoryRunItem.status.in_(_NON_TERMINAL_TERMINALIZE_STATUSES),
+            )
+        )
+    ).all()
+    return [row[0] for row in rows]
+
+
+@dataclass
+class HistoryRunClaimabilityReport:
+    """[CHANGE-20260821-001 Phase 3.1] RUN_TERMINALIZATION_SET 的 claimability 分区。
+
+    把 run 内仍非终态(pending/running/failed)成员，严格按既有 ``claim_history_items``
+    的领取规则分成两类，供 Phase 3 决定是否 dispatch backfill：
+
+    - CLAIMABLE_TERMINALIZATION_SET: pending / retryable-failed(attempt_count<max) /
+      expired-running(lease 过期) —— claim_history_items 能领取，dispatch backfill 能真正推进
+    - BLOCKING_BUT_NOT_CLAIMABLE: active-lease-running(lease 未过期) /
+      exhausted-failed(attempt_count>=max) —— claim_history_items 领取不到；
+      dispatch backfill 只会空转并触发其内部的 finish_history_run(重写 status/completed_at)，
+      故必须禁止 dispatch，并在结构化结果中暴露 blocker 类别让 caller 知悉原因与可解性。
+    """
+
+    history_run_id: uuid.UUID
+    claimable_count: int
+    claimable_instruments: list[uuid.UUID]
+    pending_nonterminal_instruments: list[uuid.UUID]   # 全部仍非终态成员（RUN_TERMINALIZATION_SET 剩余）
+    active_lease_instruments: list[uuid.UUID]           # running 且 lease 未过期：lease 过期后可自动领取
+    retry_exhausted_instruments: list[uuid.UUID]        # failed 且 attempt_count>=max：非自动可解，需手动 requeue
+
+
+async def analyze_history_run_claimability(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+) -> HistoryRunClaimabilityReport:
+    """[CHANGE-20260821-001 Phase 3.1] 计算 run 非终态成员的 claimability 分区。
+
+    严格复刻 ``claim_history_items`` 的 WHERE 语义（见其 SQL），保证「可 dispatch 的
+    terminalization work」与 worker 实际能领取的集合一致：
+
+        claimable := status='pending'
+                     OR (status='failed' AND attempt_count < max_attempts)
+                     OR (status='running' AND lease_expires_at < now)
+
+    其余非终态成员归入 BLOCKING_BUT_NOT_CLAIMABLE：
+        - running 且 lease_expires_at >= now            → active_lease（将来可自动领取）
+        - failed 且 attempt_count >= max_attempts       → retry_exhausted（需人工 requeue）
+
+    caller 据此仅在有 claimable work 时 dispatch backfill，避免对不可领取项空转 finalization
+    （无意义重写 run.status/completed_at）。
+    """
+    now = datetime.now(UTC)
+    max_attempts = _HISTORY_MAX_ATTEMPT_COUNT
+    rows = (
+        await session.execute(
+            select(
+                FirstPyramidHistoryRunItem.instrument_id,
+                FirstPyramidHistoryRunItem.status,
+                FirstPyramidHistoryRunItem.attempt_count,
+                FirstPyramidHistoryRunItem.lease_expires_at,
+            ).where(
+                FirstPyramidHistoryRunItem.history_run_id == history_run_id,
+                FirstPyramidHistoryRunItem.status.in_(_NON_TERMINAL_TERMINALIZE_STATUSES),
+            )
+        )
+    ).all()
+
+    claimable: list[uuid.UUID] = []
+    active_lease: list[uuid.UUID] = []
+    retry_exhausted: list[uuid.UUID] = []
+    all_nonterminal: list[uuid.UUID] = []
+
+    for instrument_id, status, attempt_count, lease_expires_at in rows:
+        all_nonterminal.append(instrument_id)
+        if status == _HISTORY_ITEM_PENDING:
+            claimable.append(instrument_id)
+        elif status == _HISTORY_ITEM_RUNNING:
+            if lease_expires_at is not None and lease_expires_at < now:
+                claimable.append(instrument_id)
+            else:
+                active_lease.append(instrument_id)
+        elif status == _HISTORY_ITEM_FAILED:
+            if attempt_count is not None and attempt_count < max_attempts:
+                claimable.append(instrument_id)
+            else:
+                retry_exhausted.append(instrument_id)
+
+    return HistoryRunClaimabilityReport(
+        history_run_id=history_run_id,
+        claimable_count=len(claimable),
+        claimable_instruments=claimable,
+        pending_nonterminal_instruments=all_nonterminal,
+        active_lease_instruments=active_lease,
+        retry_exhausted_instruments=retry_exhausted,
+    )
+
+
+async def refresh_history_run_progress_counters(
+    session: AsyncSession,
+    history_run_id: uuid.UUID,
+) -> None:
+    """[CHANGE-20260821-001 Phase 3] 窄 progress-counter refresh owner。
+
+    只把 ``run.succeeded_count`` / ``failed_count`` / ``skipped_count`` 同步为真实 run-item 状态计数，
+    **不碰** ``run.status`` / ``completed_at`` / ``expected_count``（expected_count 由 Phase 2 reconcile 维护）。
+
+    REVIEW_CODE_FREEZE 背景：现有 ``finish_history_run`` 在写 counters 的同时还会改写 status + completed_at。
+    对一个已经 partial/succeeded、需长期 daily advance 的 canonical run，每天机械调用
+    ``finish_history_run`` 会错误重置 execution lifecycle（completed_at 被刷新、status 被重钉为终态）。
+    本 owner 仅同步 counters，是 producer 正确维护 Review 依赖数据（而非改 Review 判定）的安全路径；
+    run status 的最终化只由 INITIAL_BOOTSTRAP_FINALIZATION 经 ``backfill_history_with_run_items``
+    一次性完成，NORMAL_DAILY_ADVANCEMENT 不重做 finalization。
+    """
+    progress = await get_history_run_progress(session, history_run_id)
+    run = await session.get(FirstPyramidHistoryRun, history_run_id)
+    if run is None:
+        return
+    run.succeeded_count = progress["succeeded"]
+    run.failed_count = progress["failed"]
+    run.skipped_count = progress["skipped"]
+    run.updated_at = datetime.now(UTC)
+    session.add(run)
+    await session.flush()
+
+
+@dataclass
+class CanonicalHistoryDailyAdvanceResult:
+    """[CHANGE-20260821-001 Phase 3] ``advance_canonical_history_run_to_trade_date`` 结构化结果。
+
+    不重新定义 Review readiness（READY 由现有 Review contract 判）；本结果只陈述 producer 做好的事实。
+    [Phase 3.1] 新增 active_lease_instruments / retry_exhausted_instruments：当 result 为 incomplete 时，
+    caller 据此知道「为什么 incomplete、以及它现在能不能靠再次自动跑解决」——
+    active_lease 将来 lease 过期后可自动领取；retry_exhausted 需人工 requeue（非自动可解）。
+    """
+
+    history_run_id: uuid.UUID
+    target_trade_date: date
+    mode: str  # INITIAL_BOOTSTRAP_FINALIZATION | NORMAL_DAILY_ADVANCEMENT
+    terminalization_dispatched: bool
+    terminalization_summary: dict[str, Any] | None
+    advance_summary: dict[str, Any]
+    expected_count: int
+    succeeded_count: int
+    failed_count: int
+    skipped_count: int
+    pending_count: int
+    running_count: int
+    pending_nonterminal_instruments: list[uuid.UUID]
+    active_lease_instruments: list[uuid.UUID]   # [Phase 3.1] running 且 lease 未过期：将来可自动领取
+    retry_exhausted_instruments: list[uuid.UUID]  # [Phase 3.1] failed 且 attempt>=max：需人工 requeue
+    failed_instruments: list[dict[str, Any]]
+    status: str  # complete | incomplete（producer 事实，非 Review readiness）
+    reason: str | None
+
+
+async def advance_canonical_history_run_to_trade_date(
+    session: AsyncSession,
+    *,
+    history_run_id: uuid.UUID,
+    target_trade_date: date,
+    output_bars: int = 250,
+    bootstrap_worker_id: str = "history_producer",
+    algorithm_version: str | None = None,
+) -> CanonicalHistoryDailyAdvanceResult:
+    """[CHANGE-20260821-001 Phase 3] 把已选定的 canonical HistoryRun 推进到目标交易日 T。
+
+    固定流程（与 Review 完全独立；REVIEW_CODE_FREEZE=TRUE）：
+      A. terminalize outstanding run_items（整个 run，不限 current eligible universe，
+         故含 no_longer_current_nonterminal）→ 复用 ``backfill_history_with_run_items``
+      B. 刷新 run-level progress counters（窄 owner，不碰 status/completed_at）
+      C. advance canonical history → target T（复用 ``advance_history_to_trade_date``，
+         仅处理 succeeded items；不重算 compute、不反推 snapshot、不绕过既有 canonical 持久化路径）
+
+    硬边界：
+    - 不调用 ``validate_canonical_history_run_readiness`` / ``_resolve_canonical_history_source``
+      （producer 做事实，Review 判 readiness，职责分开）。
+    - 不复写 ``compute_first_pyramid_history``；不从 snapshot summary 反推 history；
+      不调用私有 ``_persist_history_result`` 直接写（一律经 advance_history_to_trade_date 既有 canonical 路径）。
+    - 不谎报 success：任何 incomplete / failed → 返回 status='incomplete' + reason + failed_instruments。
+    - INITIAL_BOOTSTRAP_FINALIZATION vs NORMAL_DAILY_ADVANCEMENT：
+        run.status == running → 初始 bootstrap，terminalization 经 backfill 一次性 finalize
+        （running → succeeded/partial）；NORMAL_DAILY 仅在确有「可自动领取(claimable)的 terminalization
+        work」（pending / retryable-failed / expired-running）时才 dispatch backfill，且窄 counter owner
+        不重钉 status/completed_at（避免每天把长期 canonical run 当 backfill 重做 finalization）。
+        [Phase 3.1] 非过期 running、attempt 已达上限的 failed 属 BLOCKING_BUT_NOT_CLAIMABLE，worker 领取不到，
+        此时不 dispatch backfill（否则其内部 finish_history_run 会无意义重写 status/completed_at），result 标记
+        incomplete 并暴露 active_lease / retry_exhausted blocker 类别。
+
+    Args:
+        session: 异步 DB 会话（caller 控制 commit/transaction）
+        history_run_id: 已 resolve 的 canonical FirstPyramidHistoryRun.id
+        target_trade_date: 目标交易日
+        output_bars: history SSOT window（与 backfill/advance 保持一致，默认 250）
+        bootstrap_worker_id: terminalization worker 标识
+        algorithm_version: 算法版本（默认取 run.algorithm_version）
+
+    Returns:
+        CanonicalHistoryDailyAdvanceResult
+    """
+    run = await session.get(FirstPyramidHistoryRun, history_run_id)
+    if run is None:
+        raise ValueError(f"history run not found: {history_run_id}")
+
+    mode = (
+        "INITIAL_BOOTSTRAP_FINALIZATION"
+        if run.status == HISTORY_RUN_RUNNING
+        else "NORMAL_DAILY_ADVANCEMENT"
+    )
+    algo = algorithm_version or run.algorithm_version
+
+    # ---- A. terminalization（整个 run 的 outstanding 历史债务）----
+    # 复用既有 whole-run bootstrap worker：claim pending/retryable-failed/expired-running →
+    # 计算 → 持久化 → mark（覆盖所有 run items，不限 current universe，故含退出 universe 的非终态历史成员）。
+    # [Phase 3.1] dispatch 门槛从「outstanding > 0」收紧为「存在可自动领取(claimable)的 terminalization work」：
+    #   claimable = pending / retryable-failed(attempt_count<max) / expired-running(lease 过期)
+    #             —— 与 claim_history_items 的 WHERE 语义严格一致，worker 真能领取并推进。
+    # 非过期 running、attempt 已达上限的 failed 属 BLOCKING_BUT_NOT_CLAIMABLE，worker 领取不到；
+    # 若仍 dispatch，backfill 内部 finish_history_run 会重写 status/completed_at（无谓 finalization churn），
+    # 故此时不 dispatch，result 标记 incomplete 并暴露 blocker 类别（active_lease / retry_exhausted）。
+    pre_claim = await analyze_history_run_claimability(session, history_run_id)
+    terminalization_dispatched = False
+    terminalization_summary: dict[str, Any] | None = None
+    if pre_claim.claimable_count > 0:
+        terminalization_summary = await backfill_history_with_run_items(
+            history_run_id=history_run_id,
+            algorithm_version=algo,
+            output_bars=output_bars,
+            worker_id=bootstrap_worker_id,
+        )
+        terminalization_dispatched = True
+
+    # ---- B. 窄 counter refresh（只同步 succeeded/failed/skipped；不碰 status/completed_at/expected_count）----
+    await refresh_history_run_progress_counters(session, history_run_id)
+
+    # ---- C. advance canonical history → target T（复用既有 canonical 路径）----
+    advance_summary = await advance_history_to_trade_date(
+        session, history_run_id, target_trade_date, output_bars=output_bars,
+    )
+
+    # ---- 结构化事实（不重定义 readiness）----
+    progress = await get_history_run_progress(session, history_run_id)
+    run = await session.get(FirstPyramidHistoryRun, history_run_id)
+    post_claim = await analyze_history_run_claimability(session, history_run_id)
+    pending_nonterminal = post_claim.pending_nonterminal_instruments
+    advance_failed = int(advance_summary.get("failed", 0) or 0)
+    failed_instruments = list(advance_summary.get("failed_instruments", []) or [])
+
+    reasons: list[str] = []
+    if progress["pending"] > 0:
+        reasons.append(f"pending={progress['pending']}")
+    if progress["running"] > 0:
+        reasons.append(f"running={progress['running']}")
+    if progress["failed"] > 0:
+        reasons.append(f"failed={progress['failed']}")
+    if advance_failed > 0:
+        reasons.append(f"advance_failed={advance_failed}")
+    # [Phase 3.1] 暴露不可自动领取的 blocker 类别，让 caller 知道：
+    #   active_lease = 将来 lease 过期后可由再次自动跑解决；retry_exhausted = 需人工 requeue（非自动可解）。
+    if post_claim.active_lease_instruments:
+        reasons.append(f"active_lease={len(post_claim.active_lease_instruments)}")
+    if post_claim.retry_exhausted_instruments:
+        reasons.append(f"retry_exhausted={len(post_claim.retry_exhausted_instruments)}")
+
+    if reasons:
+        status = "incomplete"
+        reason = ";".join(reasons)
+    else:
+        status = "complete"
+        reason = None
+
+    return CanonicalHistoryDailyAdvanceResult(
+        history_run_id=history_run_id,
+        target_trade_date=target_trade_date,
+        mode=mode,
+        terminalization_dispatched=terminalization_dispatched,
+        terminalization_summary=terminalization_summary,
+        advance_summary=advance_summary,
+        expected_count=int(run.expected_count or 0),
+        succeeded_count=int(run.succeeded_count or 0),
+        failed_count=int(run.failed_count or 0),
+        skipped_count=int(run.skipped_count or 0),
+        pending_count=progress["pending"],
+        running_count=progress["running"],
+        pending_nonterminal_instruments=pending_nonterminal,
+        active_lease_instruments=post_claim.active_lease_instruments,
+        retry_exhausted_instruments=post_claim.retry_exhausted_instruments,
+        failed_instruments=failed_instruments,
+        status=status,
+        reason=reason,
+    )
 
 
 def _build_event_id(evt: dict[str, Any], event_type: str) -> str:
