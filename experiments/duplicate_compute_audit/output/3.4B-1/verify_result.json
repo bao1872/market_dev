@@ -1,0 +1,25 @@
+{
+  "phase": "3.4B-1",
+  "method": "CSE: compute_dsa_bundle 内第二次 dynamic_swing_anchored_vwap + _remove_dsa_lookahead 移除，改消费 _compute_dsa_history_artifact 投影",
+  "gate": "bundle sha256 100% identical + duration_percentile 105/105 identical",
+  "n_total": 105,
+  "n_hash_identical": 105,
+  "n_percentile_identical": 105,
+  "hash_ratio": "105/105",
+  "percentile_ratio": "105/105",
+  "perf_baseline_ms": {
+    "n": 105,
+    "p50": 116.91,
+    "p95": 163.84,
+    "mean": 116.24
+  },
+  "perf_after_ms": {
+    "n": 105,
+    "p50": 78.68,
+    "p95": 97.7,
+    "mean": 77.19
+  },
+  "perf_p50_delta_ms": -38.23,
+  "parity_pass": true,
+  "diffs": []
+}

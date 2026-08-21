@@ -38,6 +38,7 @@ import asyncio
 import logging
 import math
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
@@ -250,11 +251,36 @@ def _detect_cross_events(
     )
 
 
-def compute_dsa_history(
+@dataclass
+class _DSAHistoryComputation:
+    """compute_dsa_history 的完整内部 computation artifact（compute-once, multi-projection）。
+
+    [Phase 3.4B-1] 消除 compute_dsa_bundle 内第二次 dynamic_swing_anchored_vwap +
+    _remove_dsa_lookahead（common-subexpression elimination）：首次计算保留 raw visual
+    artifact（pivot_labels/visual_segments）与 lookahead 修正后的 dir，供 history /
+    bundle 两个投影消费。输出与重构前 100% identical（不改变任何算法参数与 segment
+    语义，3.4B-1 门禁 105/105 验证）。
+
+    字段：
+    - history: 与 compute_dsa_history 返回完全一致的 DataFrame
+    - corrected_dir: _remove_dsa_lookahead 修正后的 dir_series
+    - pivot_labels: dynamic_swing_anchored_vwap 首次调用返回的 pivot_labels
+    - visual_segments: dynamic_swing_anchored_vwap 首次调用返回的 segments
+    - effective_frame: lookback 截断后的 bars（df），供 bundle 对齐 pivot 索引
+    """
+
+    history: pd.DataFrame
+    corrected_dir: pd.Series
+    pivot_labels: list[dict]
+    visual_segments: list[Any]
+    effective_frame: pd.DataFrame
+
+
+def _compute_dsa_history_artifact(
     bars: pd.DataFrame,
     config: dict[str, Any],
-) -> pd.DataFrame:
-    """统一 DSA 历史指标计算（SSOT）。
+) -> _DSAHistoryComputation:
+    """统一 DSA 历史指标计算（SSOT）的完整内部实现（compute-once, multi-projection）。
 
     每日选股与历史回补共用此函数。所有指标均为因果计算，不含未来数据。
     交叉计数按当前 DSA 趋势区间 group_id 累计，保证点时正确性。
@@ -269,11 +295,17 @@ def compute_dsa_history(
             - lookback: 回看 bar 数（默认 None，不截断）
 
     Returns:
-        DataFrame: 以 bar_time 为索引的完整历史指标表，列见 ad2.md 输出字段集合。
-                   数据不足时返回空 DataFrame。
+        _DSAHistoryComputation；数据不足时 history 为空 DataFrame。
     """
+    empty = _DSAHistoryComputation(
+        history=pd.DataFrame(),
+        corrected_dir=pd.Series(dtype=float),
+        pivot_labels=[],
+        visual_segments=[],
+        effective_frame=pd.DataFrame(),
+    )
     if bars is None or bars.empty or len(bars) < 60:
-        return pd.DataFrame()
+        return empty
 
     df = bars.copy()
     if not isinstance(df.index, pd.DatetimeIndex):
@@ -290,8 +322,8 @@ def compute_dsa_history(
         df = df.tail(lookback)
         logger.debug("DSA lookback 截断: %d -> %d 行", original_len, len(df))
 
-    # 1. 计算 DSA VWAP 与方向
-    vwap_series, dir_series, _, _ = dynamic_swing_anchored_vwap(df, dsa_config)
+    # 1. 计算 DSA VWAP 与方向（一次；pivot_labels/segments 保留给 bundle 视觉投影复用）
+    vwap_series, dir_series, pivot_labels, segments = dynamic_swing_anchored_vwap(df, dsa_config)
     vwap_series, dir_series = _remove_dsa_lookahead(df, vwap_series, dir_series, dsa_config)
     dir_vals = dir_series.fillna(0).astype(int)
 
@@ -368,28 +400,38 @@ def compute_dsa_history(
         offset_percentile[zero_std_mask] = 0.5
 
     # 5. VWAP 收益指标（在 DSA 趋势区间内计算）
+    # [Phase 3.4B-2A] Python group loop → pandas 向量化（仅执行方式等价，指标定义零改动）：
+    #   - 组内第一位置值 = strict positional first（== grp.iloc[0]；首值 NaN/±inf/0 时整组
+    #     五列维持 NaN，等价旧 loop 的 `not np.isfinite(start_val) or start_val == 0` skip）
+    #   - 组内 position = cumcount+1（等价 np.arange(1, len+1)）
+    #   - shift(5/10/20) 必须组内 shift（== grp.shift，禁止跨 segment 污染）
+    #   - 组长 < 2 整组 NaN（等价旧 loop 的 `len(grp) < 2` continue）
+    # 3.4B-2A dualdiff 已证：105 frozen 样本五列逐元素 exact（index/dtype/NaN mask/值）。
     vwap_ret_total = pd.Series(np.nan, index=df.index, dtype=float)
     vwap_ret_avg = pd.Series(np.nan, index=df.index, dtype=float)
     vwap_ret_5 = pd.Series(np.nan, index=df.index, dtype=float)
     vwap_ret_10 = pd.Series(np.nan, index=df.index, dtype=float)
     vwap_ret_20 = pd.Series(np.nan, index=df.index, dtype=float)
 
-    for _gid, grp in vwap_vals.groupby(group_id):
-        if len(grp) < 2:
-            continue
-        start_val = grp.iloc[0]
-        if not np.isfinite(start_val) or start_val == 0:
-            continue
-        idx = grp.index
-        # 区间起点到当前的累计收益
-        total = grp / start_val - 1.0
-        vwap_ret_total.loc[idx] = total
-        # 平均每 bar 收益
-        vwap_ret_avg.loc[idx] = total / np.arange(1, len(grp) + 1)
-        # N 期收益
-        vwap_ret_5.loc[idx] = grp / grp.shift(5) - 1.0
-        vwap_ret_10.loc[idx] = grp / grp.shift(10) - 1.0
-        vwap_ret_20.loc[idx] = grp / grp.shift(20) - 1.0
+    _pos = group_id.groupby(group_id).cumcount() + 1  # 组内位置 1..size
+    _grsize = group_id.groupby(group_id).transform("size")
+    # strict positional first：只保留 position==1 的原始值再取组内 first（first 跳 NaN，
+    # position1 为 NaN 时整组 first=NaN，与 grp.iloc[0]=NaN 的 skip 语义一致）
+    _first = vwap_vals.where(_pos == 1).groupby(group_id).transform("first")
+    _finite_first = pd.Series(np.isfinite(_first.to_numpy()), index=_first.index)
+    _valid = (_grsize >= 2) & _finite_first & (_first != 0)
+    if _valid.any():
+        with np.errstate(divide="ignore", invalid="ignore"):
+            _total = vwap_vals / _first - 1.0
+            _avg = _total / _pos
+            _r5 = vwap_vals / vwap_vals.groupby(group_id).shift(5) - 1.0
+            _r10 = vwap_vals / vwap_vals.groupby(group_id).shift(10) - 1.0
+            _r20 = vwap_vals / vwap_vals.groupby(group_id).shift(20) - 1.0
+        vwap_ret_total.loc[_valid] = _total.loc[_valid]
+        vwap_ret_avg.loc[_valid] = _avg.loc[_valid]
+        vwap_ret_5.loc[_valid] = _r5.loc[_valid]
+        vwap_ret_10.loc[_valid] = _r10.loc[_valid]
+        vwap_ret_20.loc[_valid] = _r20.loc[_valid]
 
     # 6. close 相对 VWAP 偏离百分比
     with np.errstate(divide="ignore", invalid="ignore"):
@@ -650,7 +692,26 @@ def compute_dsa_history(
     offset_variance_rate[valid_var] = offset_std[valid_var] / offset_mean[valid_var].abs()
     result["offset_variance_rate"] = offset_variance_rate
 
-    return result
+    return _DSAHistoryComputation(
+        history=result,
+        corrected_dir=dir_series,
+        pivot_labels=pivot_labels,
+        visual_segments=segments,
+        effective_frame=df,
+    )
+
+
+def compute_dsa_history(
+    bars: pd.DataFrame,
+    config: dict[str, Any],
+) -> pd.DataFrame:
+    """统一 DSA 历史指标计算（SSOT）—— 返回 history DataFrame。
+
+    公共契约保持完全不变（返回 DataFrame，数据不足返回空 DataFrame）。
+    内部委托 _compute_dsa_history_artifact（compute-once, multi-projection），
+    供 compute_dsa_bundle 复用同一份 DSA 计算（Phase 3.4B-1）。
+    """
+    return _compute_dsa_history_artifact(bars, config).history
 
 
 def _history_row_to_metrics(row: pd.Series) -> dict[str, Any]:
@@ -775,10 +836,10 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     - execute() 取 last_row_metrics 作为 StrategyResult.metrics
     - compute_indicators() 取 factor_per_bar / visual_segments / factor_time 转为图表数组
 
-    内部调用 compute_dsa_history（SSOT）获取 metrics，并单独调用
-    dynamic_swing_anchored_vwap 获取图表字段（pivot_labels/segments）。
-    为避免修改 compute_dsa_history（SSOT，可能被其他地方引用），接受
-    dynamic_swing_anchored_vwap 被调用 2 次的开销（每次 < 100ms，预算内）。
+    内部委托 _compute_dsa_history_artifact（compute-once）：history / corrected dir /
+    pivot_labels / visual_segments / effective_frame 全部由同一次
+    dynamic_swing_anchored_vwap + _remove_dsa_lookahead 产生（Phase 3.4B-1），
+    消除原来的第二次重复 DSA 调用（common-subexpression elimination）。
 
     Args:
         bars: 日线行情 DataFrame，index 为 DatetimeIndex，
@@ -802,7 +863,9 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
         - per_bar: pd.DataFrame，factor_per_bar 别名（向后兼容历史测试）
         数据不足时返回各字段为空的结构
     """
-    if bars is None or bars.empty or len(bars) < 60:
+    # 1. 一次 DSA 计算（compute-once）：history + corrected dir + visual artifact
+    artifact = _compute_dsa_history_artifact(bars, config)
+    if artifact.history.empty:
         return {
             "factor_per_bar": pd.DataFrame(),
             "visual_segments": [],
@@ -813,43 +876,21 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
             "per_bar": pd.DataFrame(),  # 向后兼容
         }
 
-    # 1. 调用 compute_dsa_history 获取 metrics DataFrame（SSOT）
-    history = compute_dsa_history(bars, config)
-    if history.empty:
-        return {
-            "factor_per_bar": pd.DataFrame(),
-            "visual_segments": [],
-            "factor_time": pd.DatetimeIndex([]),
-            "pivot_labels": [],
-            "anchor": {},
-            "last_row_metrics": {},
-            "per_bar": pd.DataFrame(),  # 向后兼容
-        }
+    history = artifact.history
+    df = artifact.effective_frame
+    pivot_labels = artifact.pivot_labels
+    segments = artifact.visual_segments
 
     # 2. 提取最后一行作为标量 metrics
     last_row = history.iloc[-1]
     last_row_metrics = _history_row_to_metrics(last_row)
 
-    # 3. 单独调用 dynamic_swing_anchored_vwap 获取图表字段（pivot_labels/regime_id）
-    # 必须与 compute_dsa_history 使用相同的 lookback 截断，保证 df.index 与 history.index 对齐
-    dsa_config = config.get("dsa_config", DSAConfig())
-    lookback = config.get("lookback")
-
-    df = bars.copy()
-    if not isinstance(df.index, pd.DatetimeIndex):
-        df.index = pd.to_datetime(df.index)
-    if lookback is not None and len(df) > lookback:
-        df = df.tail(lookback)
-
-    vwap_series, dir_series, pivot_labels, segments = dynamic_swing_anchored_vwap(df, dsa_config)
-    vwap_series, dir_series = _remove_dsa_lookahead(df, vwap_series, dir_series, dsa_config)
-
-    # 4. 构建 per_bar = history + 图表字段
+    # 3. 构建 per_bar = history + 图表字段
     per_bar = history.copy()
     n = len(per_bar)
 
     # dsa_dir: 方向序列（1/-1，NaN 填 0）
-    dir_vals = dir_series.fillna(0).astype(int)
+    dir_vals = artifact.corrected_dir.fillna(0).astype(int)
     per_bar["dsa_dir"] = dir_vals.values
 
     # regime_id is a compatibility alias of the canonical segment_id produced
@@ -875,7 +916,7 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     per_bar["pivot_price"] = pivot_price
     per_bar["anchor_time"] = anchor_time
 
-    # 5. 构建 anchor：从 pivot_labels 提取锚点信息（每个 dir 翻转点 = 一个锚点）
+    # 4. 构建 anchor：从 pivot_labels 提取锚点信息（每个 dir 翻转点 = 一个锚点）
     # time 通过 format_dsa_time 序列化（PR #34）：
     #   1d/1w/1mo 为 YYYY-MM-DD，15m/1h 含 THH:MM:SS，与 visual_segments 同口径。
     anchor = {
@@ -885,7 +926,7 @@ def compute_dsa_bundle(bars: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
         "type": [lab["text"] or None for lab in pivot_labels],
     }
 
-    # 6. 返回因子与可视化契约分离的结构
+    # 5. 返回因子与可视化契约分离的结构
     # visual_segments 直接透传算法返回的 segments（Pine polyline 契约）
     # per_bar 作为 factor_per_bar 别名保留，向后兼容 test_dsa_bundle_consistency 等历史测试
     return {

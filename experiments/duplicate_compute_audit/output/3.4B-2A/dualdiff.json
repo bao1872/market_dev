@@ -1,0 +1,32 @@
+{
+  "phase": "3.4B-2A",
+  "method": "VWAP-return group loop -> pandas vectorization (dual-run, 5-col exact parity)",
+  "gate": "vwap_ret_total/avg/5/10/20 五列逐元素 exact：index + dtype + NaN mask + 值 （浮点 bit/equality exact，无 tolerance）",
+  "n_total": 105,
+  "n_exact": 105,
+  "exact_ratio": "105/105",
+  "col_stats": {
+    "vwap_ret_total": {
+      "exact_ratio": "105/105",
+      "n_exact": 105
+    },
+    "vwap_ret_avg": {
+      "exact_ratio": "105/105",
+      "n_exact": 105
+    },
+    "vwap_ret_5": {
+      "exact_ratio": "105/105",
+      "n_exact": 105
+    },
+    "vwap_ret_10": {
+      "exact_ratio": "105/105",
+      "n_exact": 105
+    },
+    "vwap_ret_20": {
+      "exact_ratio": "105/105",
+      "n_exact": 105
+    }
+  },
+  "parity_pass": true,
+  "failures": []
+}

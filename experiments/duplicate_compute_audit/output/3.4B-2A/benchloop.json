@@ -1,0 +1,102 @@
+{
+  "phase": "3.4B-2A",
+  "method": "benchmark VWAP-return loop (baseline) vs vectorized (candidate), isolated from DSA main body",
+  "n": 105,
+  "reps": 5,
+  "loop_ms": {
+    "p50": 7.574,
+    "p95": 10.5637,
+    "mean": 7.2403,
+    "total": 760.2329
+  },
+  "vec_ms": {
+    "p50": 1.8208,
+    "p95": 1.992,
+    "mean": 1.8404,
+    "total": 193.2454
+  },
+  "delta_p50_ms": -5.7532,
+  "pct_p50_change": -75.96,
+  "per_instrument": [
+    {
+      "instrument_id": "03a880ad-08c8-4228-9f0c-a720ccb2fa54",
+      "symbol": "600395",
+      "n_bars": 415,
+      "n_groups": 9,
+      "loop_ms": 8.29,
+      "vec_ms": 1.766
+    },
+    {
+      "instrument_id": "048fb093-f24a-430c-8b82-ad999ba4f2e9",
+      "symbol": "300614",
+      "n_bars": 415,
+      "n_groups": 7,
+      "loop_ms": 5.3119,
+      "vec_ms": 1.8703
+    },
+    {
+      "instrument_id": "04dab7da-48eb-43c2-aaf5-1293b9e1776c",
+      "symbol": "301025",
+      "n_bars": 410,
+      "n_groups": 10,
+      "loop_ms": 8.9797,
+      "vec_ms": 1.7668
+    },
+    {
+      "instrument_id": "06534ffe-b2ef-47a1-9d57-f1568fcc0c7c",
+      "symbol": "301202",
+      "n_bars": 415,
+      "n_groups": 13,
+      "loop_ms": 10.9301,
+      "vec_ms": 1.956
+    },
+    {
+      "instrument_id": "07cde8fd-08a3-42fd-8766-919a75b73d77",
+      "symbol": "603285",
+      "n_bars": 415,
+      "n_groups": 11,
+      "loop_ms": 8.033,
+      "vec_ms": 1.8873
+    },
+    {
+      "instrument_id": "0ba84844-7b37-4cb5-bea0-729af7e6da2b",
+      "symbol": "002391",
+      "n_bars": 415,
+      "n_groups": 11,
+      "loop_ms": 8.9578,
+      "vec_ms": 1.8742
+    },
+    {
+      "instrument_id": "0dfc9a7c-251d-4da9-aa00-d82ea5d36b53",
+      "symbol": "000155",
+      "n_bars": 321,
+      "n_groups": 7,
+      "loop_ms": 5.1847,
+      "vec_ms": 1.8325
+    },
+    {
+      "instrument_id": "0ed1efe0-845e-4e25-baa1-d0b21454fd1d",
+      "symbol": "600993",
+      "n_bars": 415,
+      "n_groups": 8,
+      "loop_ms": 7.1421,
+      "vec_ms": 1.9871
+    },
+    {
+      "instrument_id": "1294b522-04e1-456b-9248-7c82fb1e3d21",
+      "symbol": "300513",
+      "n_bars": 415,
+      "n_groups": 9,
+      "loop_ms": 6.9981,
+      "vec_ms": 1.913
+    },
+    {
+      "instrument_id": "157c3c4d-267e-4be5-8667-8d4bfd9cecd1",
+      "symbol": "600195",
+      "n_bars": 415,
+      "n_groups": 9,
+      "loop_ms": 5.9905,
+      "vec_ms": 1.7364
+    }
+  ]
+}
