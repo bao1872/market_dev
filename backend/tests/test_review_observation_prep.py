@@ -931,6 +931,185 @@ def test_prepare_scope_volume_amount_stay_bar_aligned(monkeypatch) -> None:
     assert raw.volume_history[5] == pytest.approx(volumes[5])
 
 
+# =============================================================================
+# C1a contract tests — freeze the current-only loader call contract.
+#
+# These tests exist because the existing tests above monkeypatch
+# ``_load_current_only_snapshot_facts`` wholesale (``_fake_load_current_only``)
+# WITHOUT asserting what the third positional argument actually is. That mock is
+# exactly what masked C1a: a list was being passed where a scalar ``date`` is
+# required, failing only under the real PG adapter. The tests below spy on the
+# real call boundary instead of replacing it, so the scalar-T contract is locked.
+# =============================================================================
+
+
+def _contract_current_only_fake(member_ids):
+    """Build the same scoped shape ``_fake_load_current_only`` returns, but the
+    loader below records the (session, ids, third_arg) triple so the call
+    contract can be asserted."""
+
+    async def _loader(session, ids, third_arg):
+        # Record the exact third positional argument the production caller passes.
+        _loader.last_call = (session, ids, third_arg)
+        # Same ``dict[str, dict]`` shape the real loader returns and the existing
+        # tests build via ``current_only={str(id): {...}}``.
+        scoped: dict[str, dict] = {}
+        for mid in member_ids:
+            scoped[str(mid)] = {
+                "bb_position": 0.5,
+                "bb_width": 1.0,
+                "release_volume_ratio": 2.5,
+                "main_current_contract_position": 1,
+                "main_force_net_position": 1,
+                "main_current_contract_turnover_rate": 0.1,
+                "main_force_turnover_rate": 0.1,
+            }
+        return scoped
+
+    _loader.last_call = None  # type: ignore[attr-defined]
+    return _loader
+
+
+async def _contract_resolve(session, scope_type, scope_key, *, trade_date):
+    # Same ``(list[uuid.UUID], str)`` shape as the real
+    # ``review_scope_service.resolve_scope_members``.
+    return [_CONTRACT_MEMBER_ID], scope_key
+
+
+_CONTRACT_MEMBER_ID = uuid.uuid4()
+
+
+def _install_contract_mocks(monkeypatch, current_only_loader):
+    """Minimal pure-unit mock set for the C1a contract tests. The current-only
+    loader is the REAL boundary we spy on; everything else is faked so no DB is
+    touched."""
+    async def _fake_previous(session, ref_date):
+        return date(2026, 1, 1)
+
+    monkeypatch.setattr(
+        "app.services.calendar_service.get_previous_trading_day_async",
+        _fake_previous,
+    )
+    monkeypatch.setattr(
+        "app.services.review_scope_service.resolve_scope_members", _contract_resolve
+    )
+    monkeypatch.setattr(
+        prep_service,
+        "_load_current_only_snapshot_facts",
+        current_only_loader,
+    )
+    async def _fake_empty(*a, **k):
+        return {}
+
+    monkeypatch.setattr(
+        prep_service, "_load_batch_calendar", _fake_empty
+    )
+    monkeypatch.setattr(prep_service, "_load_batch_states", _fake_empty)
+    monkeypatch.setattr(prep_service, "_load_batch_bars", _fake_empty)
+    monkeypatch.setattr(
+        prep_service, "_load_batch_events", _fake_empty
+    )
+    monkeypatch.setattr(
+        prep_service,
+        "_load_batch_backfill_event_coverage",
+        _fake_empty,
+    )
+
+
+def _contract_spec():
+    return ScopeReplaySpec(
+        scope_type="industry_l3",
+        scope_key="C1A_TEST",
+        scope_name="C1a Test",
+        member_ids=(),
+    )
+
+
+@pytest.mark.pure_unit
+async def test_c1a_single_date_loader_called_with_scalar_t(monkeypatch):
+    """T1: single-date preparation must call the current-only loader exactly once
+    with the scalar ``trade_date`` (NOT a one-element list)."""
+    loader = _contract_current_only_fake([_CONTRACT_MEMBER_ID])
+    _install_contract_mocks(monkeypatch, loader)
+
+    result = await prep_service.prepare_current_scope_observations_batch(
+        session=None, trade_date=T, scope_specs=[_contract_spec()]
+    )
+
+    assert loader.last_call is not None, "current-only loader was never called"
+    _session, _ids, third_arg = loader.last_call
+    # Must be a scalar date, never a list.
+    assert isinstance(third_arg, date)
+    assert not isinstance(third_arg, list)
+    assert third_arg == T
+    assert third_arg != [T]
+    # Single-date owner contract returns dict[str, PreparedScope].
+    assert "C1A_TEST" in result
+    assert result["C1A_TEST"].trade_date == T
+
+
+@pytest.mark.pure_unit
+async def test_c1a_leadership_multidate_still_scalar_t(monkeypatch):
+    """T2: a ``[T-1, T]`` Leadership preparation must STILL call the current-only
+    loader with scalar ``trade_date == T`` (NOT the multi-element
+    ``trade_dates`` list)."""
+    loader = _contract_current_only_fake([_CONTRACT_MEMBER_ID])
+    _install_contract_mocks(monkeypatch, loader)
+
+    result = await prep_service.prepare_current_scope_observations_batch(
+        session=None,
+        trade_date=T,
+        scope_specs=[_contract_spec()],
+        trade_dates=[T1, T],
+    )
+
+    assert loader.last_call is not None, "current-only loader was never called"
+    _session, _ids, third_arg = loader.last_call
+    assert isinstance(third_arg, date)
+    assert not isinstance(third_arg, list)
+    # Current-only facts are exact-T only; the loader must never receive the
+    # multi-date window.
+    assert third_arg == T
+    assert third_arg != [T1, T]
+    assert third_arg != [T - __import__("datetime").timedelta(days=1), T]
+
+
+@pytest.mark.pure_unit
+async def test_c1a_multidate_placement_t_minus_1_unavailable(monkeypatch):
+    """T3: in a multi-date series, the T-1 PreparedScope must NOT carry any
+    current-only facts (they are exact-T only), while the T PreparedScope must
+    carry the supplied exact-T current-only values."""
+    loader = _contract_current_only_fake([_CONTRACT_MEMBER_ID])
+    _install_contract_mocks(monkeypatch, loader)
+
+    result = await prep_service.prepare_current_scope_observations_batch(
+        session=None,
+        trade_date=T,
+        scope_specs=[_contract_spec()],
+        trade_dates=[T1, T],
+    )
+
+    scopes = result.get("C1A_TEST")
+    assert scopes is not None and len(scopes) == 2
+    # Ordered by effective_dates: [T1, T].
+    scope_t1, scope_t = scopes[0], scopes[1]
+    assert scope_t1.trade_date == T1
+    assert scope_t.trade_date == T
+
+    assert scope_t1.members, "T-1 scope should still have its membership"
+    assert scope_t.members, "T scope should still have its membership"
+
+    # T-1 current-only fields must be None (exact-T only, never backfilled).
+    for member in scope_t1.members:
+        assert member.release_volume_ratio is None
+        assert member.bb_position is None
+
+    # T carries the exact-T current-only values supplied by the loader.
+    for member in scope_t.members:
+        assert member.release_volume_ratio == pytest.approx(2.5)
+        assert member.bb_position == pytest.approx(0.5)
+
+
 # ---------------------------------------------------------------------------
 # REVIEW-V23-A-CORRECTION-3 — Current-only exact-T source wiring
 # ---------------------------------------------------------------------------

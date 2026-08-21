@@ -1380,9 +1380,12 @@ async def prepare_current_scope_observations_batch(
 
     union_ctx = await prepare_union_fact_context(session, effective_dates, union_members)
     # Current-only snapshot facts at exact T (str-keyed, same shape as the
-    # current-only loader consumes).
+    # current-only loader consumes). C1a fix: the loader's contract is
+    # exact-T only (scalar ``trade_date``), NOT ``effective_dates`` — passing the
+    # multi-element list would feed a list into a scalar ``Column == date``
+    # comparison and fail at SQL compile/execute time under the real PG adapter.
     current_only_facts = await _load_current_only_snapshot_facts(
-        session, union_members, effective_dates
+        session, union_members, trade_date
     )
     coverage_by_date = await _load_batch_backfill_event_coverage(
         session, union_members, effective_dates
