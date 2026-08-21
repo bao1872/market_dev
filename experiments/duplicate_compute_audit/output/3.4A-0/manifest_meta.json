@@ -1,0 +1,54 @@
+{
+  "phase": "3.4A-0",
+  "purpose": "Dataset + Reproducibility: fixed sample_manifest",
+  "dataset_version": "review-source-c5c686e-v1",
+  "dataset_id": "review-source-c5c686e78343-v1",
+  "dataset_sha": {
+    "bars_daily.parquet": "53465f2ca744c67bc4e1b42f8043fae41b3b5828b752df856929df11349cfaba",
+    "board_memberships_current_snapshot.parquet": "f24bb4460e1a611865097b5b6d3637d2fd948c6558dd06b6f027b3dfbcaa501c",
+    "boards.parquet": "64c341a27474d6881f91b0ac83bd3d148b56bca6c7f1d0322cafe7b4593dddc1",
+    "first_pyramid_daily_state.parquet": "a60bda0c19518ff4defee20de288229af01773b48b659ee4c625b78d7369bcb6",
+    "first_pyramid_events.parquet": "d6c6d37902695cf767018076bdda9d380a3db05b7205a4a501cc6cf5554981f2",
+    "instruments.parquet": "4cd00a41475f3587a21eaf77726ad8291c06e05e4ca4f6fab2295fd465dc0c6b",
+    "stock_feature_snapshots_asof.parquet": "6e9ec922196da11ac3555fff9c058034fae435131e8056347aa2cb18f47843cd",
+    "trading_calendar.parquet": "831c66dacf5cd0849005e7f4d2600b49639d3e5a1a49576f54dac4eaa244db72"
+  },
+  "dataset_capture_git_sha": "c5c686e7834314893f7bcafac81f8473f8e58d08",
+  "dataset_base_dev_sha": "6d145e899d181e0c889ad3e2e155e1ebfb63b741",
+  "audit_code_sha": "28aad801fdf0d2d447bf53d5feece578c63ff24b",
+  "experiment_script_sha": "cac8c9a398301e9d6cf8bef71acf437f797ebec2339076cf20b08118dd14fb9f",
+  "sampling": {
+    "seed": 20260821,
+    "count": 100,
+    "main_pool_ge250": 5206,
+    "main_sample_count": 100,
+    "boundary_sample_count": 5,
+    "eligibility": {
+      "smc_freshness_min_bars": 250,
+      "bb_extra_min_bars": 21,
+      "boundary_range": [
+        60,
+        249
+      ]
+    }
+  },
+  "universe_summary": {
+    "snapshot_instruments": 5293,
+    "core_eligible_with_bars": 5292,
+    "bars_ge_250": 5206,
+    "bars_ge_300": 5188,
+    "bars_ge_500": 0,
+    "bars_60_249": 80,
+    "bars_lt_60": 6,
+    "adj_factor_changed": 3950,
+    "market_mix": {
+      "SZ": 2896,
+      "SH": 2300,
+      "BJ": 96
+    },
+    "bars_count_min": 27,
+    "bars_count_p50": 415.0,
+    "bars_count_max": 415
+  },
+  "generated_at_utc": "2026-08-21T19:37:20.192106+00:00"
+}

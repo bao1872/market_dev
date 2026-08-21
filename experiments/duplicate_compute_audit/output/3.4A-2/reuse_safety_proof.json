@@ -1,0 +1,4638 @@
+{
+  "phase": "3.4A-2",
+  "method": "reuse safety proof（baseline vs raw-based；hash before/after；BB common-field equivalence）",
+  "summary": {
+    "total": 105,
+    "replication_self_check_ok": "105/105",
+    "smc_parity_ok": "100/100（仅 eligible）",
+    "smc_dto_identical": "105/105",
+    "raw_immutability_ok": "105/105",
+    "bb_common_field_parity_ok": "105/105",
+    "errors": 0
+  },
+  "results": [
+    {
+      "instrument_id": "03a880ad-08c8-4228-9f0c-a720ccb2fa54",
+      "symbol": "600395",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "27c8ef1d9fee4b82",
+      "raw_hash_after": "27c8ef1d9fee4b82",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 98,
+        "smc_bos_bullish_swing_freshness_bars": 127,
+        "smc_bos_bearish_internal_freshness_bars": 65,
+        "smc_choch_bullish_internal_freshness_bars": 18,
+        "smc_choch_bearish_internal_freshness_bars": 42,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 15,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 53,
+        "smc_eql_freshness_bars": 12
+      }
+    },
+    {
+      "instrument_id": "048fb093-f24a-430c-8b82-ad999ba4f2e9",
+      "symbol": "300614",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "27099fd3e24a6589",
+      "raw_hash_after": "27099fd3e24a6589",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 109,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_bos_bearish_swing_freshness_bars": 41,
+        "smc_choch_bullish_internal_freshness_bars": 9,
+        "smc_choch_bearish_internal_freshness_bars": 61,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 24,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 23
+      }
+    },
+    {
+      "instrument_id": "04dab7da-48eb-43c2-aaf5-1293b9e1776c",
+      "symbol": "301025",
+      "market": "SZ",
+      "bars_count": 410,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "3a6f74eaf2fc1b44",
+      "raw_hash_after": "3a6f74eaf2fc1b44",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 124,
+        "smc_bos_bullish_swing_freshness_bars": 123,
+        "smc_bos_bearish_internal_freshness_bars": 18,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 61,
+        "smc_choch_bearish_swing_freshness_bars": 51,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 77,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 13,
+        "smc_eql_freshness_bars": 21
+      }
+    },
+    {
+      "instrument_id": "06534ffe-b2ef-47a1-9d57-f1568fcc0c7c",
+      "symbol": "301202",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "958cb0bdea748d53",
+      "raw_hash_after": "958cb0bdea748d53",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 71,
+        "smc_bos_bullish_swing_freshness_bars": 246,
+        "smc_bos_bearish_internal_freshness_bars": 35,
+        "smc_bos_bearish_swing_freshness_bars": 46,
+        "smc_choch_bullish_internal_freshness_bars": 28,
+        "smc_choch_bearish_internal_freshness_bars": 21,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 24,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 4,
+        "smc_eqh_freshness_bars": 136,
+        "smc_eql_freshness_bars": 127
+      }
+    },
+    {
+      "instrument_id": "07cde8fd-08a3-42fd-8766-919a75b73d77",
+      "symbol": "603285",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "4065bdfddf25674b",
+      "raw_hash_after": "4065bdfddf25674b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 0,
+        "smc_bos_bullish_swing_freshness_bars": 130,
+        "smc_bos_bearish_internal_freshness_bars": 161,
+        "smc_choch_bullish_internal_freshness_bars": 7,
+        "smc_choch_bearish_internal_freshness_bars": 26,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 82,
+        "smc_eqh_freshness_bars": 27,
+        "smc_eql_freshness_bars": 165
+      }
+    },
+    {
+      "instrument_id": "0ba84844-7b37-4cb5-bea0-729af7e6da2b",
+      "symbol": "002391",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "c2b2919be66f6f80",
+      "raw_hash_after": "c2b2919be66f6f80",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 119,
+        "smc_bos_bearish_internal_freshness_bars": 216,
+        "smc_bos_bearish_swing_freshness_bars": 51,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 66,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 1,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 79,
+        "smc_eql_freshness_bars": 117
+      }
+    },
+    {
+      "instrument_id": "0dfc9a7c-251d-4da9-aa00-d82ea5d36b53",
+      "symbol": "000155",
+      "market": "SZ",
+      "bars_count": 321,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "f426bdb0f55030af",
+      "raw_hash_after": "f426bdb0f55030af",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 90,
+        "smc_bos_bearish_internal_freshness_bars": 28,
+        "smc_bos_bearish_swing_freshness_bars": 238,
+        "smc_choch_bullish_internal_freshness_bars": 17,
+        "smc_choch_bullish_swing_freshness_bars": 115,
+        "smc_choch_bearish_internal_freshness_bars": 35,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 27,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 17
+      }
+    },
+    {
+      "instrument_id": "0ed1efe0-845e-4e25-baa1-d0b21454fd1d",
+      "symbol": "600993",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "a1f7e58784abe418",
+      "raw_hash_after": "a1f7e58784abe418",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 12,
+        "smc_bos_bearish_internal_freshness_bars": 42,
+        "smc_bos_bearish_swing_freshness_bars": 102,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bearish_internal_freshness_bars": 62,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 8,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 39,
+        "smc_eqh_freshness_bars": 213,
+        "smc_eql_freshness_bars": 143
+      }
+    },
+    {
+      "instrument_id": "1294b522-04e1-456b-9248-7c82fb1e3d21",
+      "symbol": "300513",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "6eec1a4df1dc9743",
+      "raw_hash_after": "6eec1a4df1dc9743",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 249,
+        "smc_bos_bullish_swing_freshness_bars": 191,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 71,
+        "smc_choch_bullish_swing_freshness_bars": 292,
+        "smc_choch_bearish_internal_freshness_bars": 57,
+        "smc_choch_bearish_swing_freshness_bars": 91,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 46,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 22,
+        "smc_eqh_freshness_bars": 82,
+        "smc_eql_freshness_bars": 212
+      }
+    },
+    {
+      "instrument_id": "157c3c4d-267e-4be5-8667-8d4bfd9cecd1",
+      "symbol": "600195",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "3685e815d0fc254b",
+      "raw_hash_after": "3685e815d0fc254b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 139,
+        "smc_bos_bullish_swing_freshness_bars": 139,
+        "smc_bos_bearish_internal_freshness_bars": 42,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bearish_internal_freshness_bars": 79,
+        "smc_choch_bearish_swing_freshness_bars": 61,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 66,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 23,
+        "smc_eql_freshness_bars": 45
+      }
+    },
+    {
+      "instrument_id": "163feb36-fa58-4afb-b93c-333b4aa44d36",
+      "symbol": "603167",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "5269c80fe1e5dc23",
+      "raw_hash_after": "5269c80fe1e5dc23",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 122,
+        "smc_bos_bearish_internal_freshness_bars": 26,
+        "smc_bos_bearish_swing_freshness_bars": 34,
+        "smc_choch_bullish_internal_freshness_bars": 12,
+        "smc_choch_bearish_internal_freshness_bars": 101,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 35,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 30,
+        "smc_eqh_freshness_bars": 126,
+        "smc_eql_freshness_bars": 61
+      }
+    },
+    {
+      "instrument_id": "17259f55-3a2d-4226-bd54-d9c3c1a89f54",
+      "symbol": "002623",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "46853d286663ad26",
+      "raw_hash_after": "46853d286663ad26",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 280,
+        "smc_bos_bullish_swing_freshness_bars": 124,
+        "smc_bos_bearish_internal_freshness_bars": 24,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 69,
+        "smc_choch_bullish_swing_freshness_bars": 276,
+        "smc_choch_bearish_internal_freshness_bars": 55,
+        "smc_choch_bearish_swing_freshness_bars": 44,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10,
+        "smc_eqh_freshness_bars": 207
+      }
+    },
+    {
+      "instrument_id": "1a3bd037-748a-498e-a5dc-5db4b6868f0d",
+      "symbol": "601187",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0136d4bd2df3804e",
+      "raw_hash_after": "0136d4bd2df3804e",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 78,
+        "smc_bos_bullish_swing_freshness_bars": 78,
+        "smc_bos_bearish_internal_freshness_bars": 136,
+        "smc_choch_bullish_internal_freshness_bars": 10,
+        "smc_choch_bearish_internal_freshness_bars": 6,
+        "smc_choch_bearish_swing_freshness_bars": 56,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 9,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10,
+        "smc_eqh_freshness_bars": 198
+      }
+    },
+    {
+      "instrument_id": "1c841fa2-d357-4447-af76-5fa65c62f5d3",
+      "symbol": "002358",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "9a964f05b39828ac",
+      "raw_hash_after": "9a964f05b39828ac",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 110,
+        "smc_bos_bullish_swing_freshness_bars": 190,
+        "smc_bos_bearish_internal_freshness_bars": 28,
+        "smc_choch_bullish_internal_freshness_bars": 10,
+        "smc_choch_bearish_internal_freshness_bars": 62,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 36,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 17,
+        "smc_eqh_freshness_bars": 155,
+        "smc_eql_freshness_bars": 147
+      }
+    },
+    {
+      "instrument_id": "23dc3435-f933-4410-9332-2605f06eb9b0",
+      "symbol": "301314",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "696f69b4109fcb5e",
+      "raw_hash_after": "696f69b4109fcb5e",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 69,
+        "smc_bos_bullish_swing_freshness_bars": 127,
+        "smc_bos_bearish_internal_freshness_bars": 206,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 43,
+        "smc_choch_bullish_swing_freshness_bars": 269,
+        "smc_choch_bearish_internal_freshness_bars": 35,
+        "smc_choch_bearish_swing_freshness_bars": 21,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 49,
+        "smc_eqh_freshness_bars": 133,
+        "smc_eql_freshness_bars": 212
+      }
+    },
+    {
+      "instrument_id": "25929c83-6877-44f6-9b37-fc62d0330433",
+      "symbol": "603901",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0d5f830505da1a41",
+      "raw_hash_after": "0d5f830505da1a41",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 79,
+        "smc_bos_bullish_swing_freshness_bars": 204,
+        "smc_bos_bearish_internal_freshness_bars": 37,
+        "smc_choch_bullish_internal_freshness_bars": 31,
+        "smc_choch_bearish_internal_freshness_bars": 25,
+        "smc_choch_bearish_swing_freshness_bars": 25,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 34,
+        "smc_eqh_freshness_bars": 116,
+        "smc_eql_freshness_bars": 92
+      }
+    },
+    {
+      "instrument_id": "2861398b-867b-4984-b62e-2d33edfc449f",
+      "symbol": "600131",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "2e0551c992fc6526",
+      "raw_hash_after": "2e0551c992fc6526",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 111,
+        "smc_bos_bearish_internal_freshness_bars": 33,
+        "smc_bos_bearish_swing_freshness_bars": 178,
+        "smc_choch_bullish_internal_freshness_bars": 19,
+        "smc_choch_bullish_swing_freshness_bars": 135,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 50,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 19,
+        "smc_eqh_freshness_bars": 124,
+        "smc_eql_freshness_bars": 162
+      }
+    },
+    {
+      "instrument_id": "2a6c90aa-ff48-4f4b-b3ee-3bf5771652e7",
+      "symbol": "002436",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "763c569799f1f1b4",
+      "raw_hash_after": "763c569799f1f1b4",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 118,
+        "smc_bos_bullish_swing_freshness_bars": 137,
+        "smc_bos_bearish_internal_freshness_bars": 11,
+        "smc_choch_bullish_internal_freshness_bars": 0,
+        "smc_choch_bearish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 25,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 6
+      }
+    },
+    {
+      "instrument_id": "2aa01a4c-9e7f-41e4-a658-acb4ab60409a",
+      "symbol": "000633",
+      "market": "SZ",
+      "bars_count": 410,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "85f80868622f0c32",
+      "raw_hash_after": "85f80868622f0c32",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 119,
+        "smc_bos_bullish_swing_freshness_bars": 184,
+        "smc_bos_bearish_internal_freshness_bars": 18,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 114,
+        "smc_choch_bearish_swing_freshness_bars": 102,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 41,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 14,
+        "smc_eql_freshness_bars": 195
+      }
+    },
+    {
+      "instrument_id": "2cab9a4f-a98b-4d24-bfb5-9917938f3b51",
+      "symbol": "002067",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "2f81ad9635003de6",
+      "raw_hash_after": "2f81ad9635003de6",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 63,
+        "smc_bos_bullish_swing_freshness_bars": 228,
+        "smc_bos_bearish_internal_freshness_bars": 94,
+        "smc_choch_bullish_internal_freshness_bars": 15,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_choch_bearish_swing_freshness_bars": 92,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 37,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 63,
+        "smc_eqh_freshness_bars": 67
+      }
+    },
+    {
+      "instrument_id": "32821db7-d883-499e-a9c1-b0b9b3d28452",
+      "symbol": "600039",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "ccf350e18b66c6ce",
+      "raw_hash_after": "ccf350e18b66c6ce",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 20,
+        "smc_bos_bullish_swing_freshness_bars": 163,
+        "smc_bos_bearish_internal_freshness_bars": 76,
+        "smc_choch_bullish_internal_freshness_bars": 28,
+        "smc_choch_bearish_internal_freshness_bars": 39,
+        "smc_choch_bearish_swing_freshness_bars": 34,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 7,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 32
+      }
+    },
+    {
+      "instrument_id": "3296dd13-d68e-432d-8017-4fafb24fbe87",
+      "symbol": "600685",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0ac3f4121ad2ea1c",
+      "raw_hash_after": "0ac3f4121ad2ea1c",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 5,
+        "smc_bos_bearish_internal_freshness_bars": 36,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 26,
+        "smc_choch_bullish_swing_freshness_bars": 177,
+        "smc_choch_bearish_internal_freshness_bars": 50,
+        "smc_choch_bearish_swing_freshness_bars": 47,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 1,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 31,
+        "smc_eqh_freshness_bars": 207,
+        "smc_eql_freshness_bars": 18
+      }
+    },
+    {
+      "instrument_id": "386fe20c-ab46-4e80-b6d2-4dc78586564d",
+      "symbol": "300194",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "75b2e95db5986395",
+      "raw_hash_after": "75b2e95db5986395",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 162,
+        "smc_bos_bearish_internal_freshness_bars": 66,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 3,
+        "smc_choch_bullish_swing_freshness_bars": 254,
+        "smc_choch_bearish_internal_freshness_bars": 130,
+        "smc_choch_bearish_swing_freshness_bars": 113,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 133,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 92,
+        "smc_eqh_freshness_bars": 36,
+        "smc_eql_freshness_bars": 117
+      }
+    },
+    {
+      "instrument_id": "3b262f6b-ef75-4d4c-9e40-309a1beaaeee",
+      "symbol": "600211",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "28e3cd128fc9520b",
+      "raw_hash_after": "28e3cd128fc9520b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 23,
+        "smc_bos_bullish_swing_freshness_bars": 261,
+        "smc_bos_bearish_internal_freshness_bars": 77,
+        "smc_choch_bullish_internal_freshness_bars": 31,
+        "smc_choch_bearish_internal_freshness_bars": 60,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 68,
+        "smc_eqh_freshness_bars": 154
+      }
+    },
+    {
+      "instrument_id": "3cef39d7-e93b-4e24-b3b3-ed2607f6cfc8",
+      "symbol": "603811",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "f77d73f2d726deb6",
+      "raw_hash_after": "f77d73f2d726deb6",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 69,
+        "smc_bos_bearish_internal_freshness_bars": 19,
+        "smc_bos_bearish_swing_freshness_bars": 49,
+        "smc_choch_bullish_internal_freshness_bars": 6,
+        "smc_choch_bearish_internal_freshness_bars": 66,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 68,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 23,
+        "smc_eqh_freshness_bars": 36,
+        "smc_eql_freshness_bars": 147
+      }
+    },
+    {
+      "instrument_id": "3d4ac6d6-5e9b-4345-bb54-b60ac45f243f",
+      "symbol": "002524",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "49af43d839491049",
+      "raw_hash_after": "49af43d839491049",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 136,
+        "smc_bos_bullish_swing_freshness_bars": 134,
+        "smc_bos_bearish_internal_freshness_bars": 58,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 113,
+        "smc_choch_bearish_swing_freshness_bars": 57,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 57,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 111
+      }
+    },
+    {
+      "instrument_id": "40aeda99-ea2c-43d3-abf1-e1ae251932fb",
+      "symbol": "688190",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "f328b1a0d207eb5c",
+      "raw_hash_after": "f328b1a0d207eb5c",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 111,
+        "smc_bos_bullish_swing_freshness_bars": 258,
+        "smc_bos_bearish_internal_freshness_bars": 92,
+        "smc_choch_bullish_internal_freshness_bars": 10,
+        "smc_choch_bullish_swing_freshness_bars": 56,
+        "smc_choch_bearish_internal_freshness_bars": 36,
+        "smc_choch_bearish_swing_freshness_bars": 28,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 29,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 59
+      }
+    },
+    {
+      "instrument_id": "426a343d-cb0e-4851-962e-bec96d0a2ead",
+      "symbol": "300242",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "22cf98136ecefe65",
+      "raw_hash_after": "22cf98136ecefe65",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 135,
+        "smc_bos_bearish_internal_freshness_bars": 91,
+        "smc_bos_bearish_swing_freshness_bars": 229,
+        "smc_choch_bullish_internal_freshness_bars": 12,
+        "smc_choch_bullish_swing_freshness_bars": 187,
+        "smc_choch_bearish_internal_freshness_bars": 37,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 11,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 34
+      }
+    },
+    {
+      "instrument_id": "43bbcca0-c431-49fb-8e60-c367520a40e1",
+      "symbol": "301120",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "d36cdeb3d881c8fe",
+      "raw_hash_after": "d36cdeb3d881c8fe",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 56,
+        "smc_bos_bullish_swing_freshness_bars": 113,
+        "smc_bos_bearish_internal_freshness_bars": 36,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 10,
+        "smc_choch_bullish_swing_freshness_bars": 269,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_choch_bearish_swing_freshness_bars": 36,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 63,
+        "smc_eql_freshness_bars": 166
+      }
+    },
+    {
+      "instrument_id": "4640b51a-35b4-4f2f-b4e4-44e806c30ad2",
+      "symbol": "600998",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "94dfd1655c63c837",
+      "raw_hash_after": "94dfd1655c63c837",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 135,
+        "smc_bos_bearish_internal_freshness_bars": 36,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 30,
+        "smc_choch_bullish_swing_freshness_bars": 134,
+        "smc_choch_bearish_internal_freshness_bars": 8,
+        "smc_choch_bearish_swing_freshness_bars": 60,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 60,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 5,
+        "smc_eqh_freshness_bars": 156,
+        "smc_eql_freshness_bars": 38
+      }
+    },
+    {
+      "instrument_id": "46c40e75-a508-4eeb-86d7-225c6196c064",
+      "symbol": "688072",
+      "market": "SH",
+      "bars_count": 413,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "3c7489b17321e9cd",
+      "raw_hash_after": "3c7489b17321e9cd",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 36,
+        "smc_bos_bearish_internal_freshness_bars": 300,
+        "smc_bos_bearish_swing_freshness_bars": 286,
+        "smc_choch_bullish_internal_freshness_bars": 85,
+        "smc_choch_bullish_swing_freshness_bars": 216,
+        "smc_choch_bearish_internal_freshness_bars": 10,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 10,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 115,
+        "smc_eql_freshness_bars": 172
+      }
+    },
+    {
+      "instrument_id": "4d21a74e-1dd5-4000-bf0a-758c4eac6b76",
+      "symbol": "300668",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "a55433852898facb",
+      "raw_hash_after": "a55433852898facb",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 36,
+        "smc_bos_bullish_swing_freshness_bars": 157,
+        "smc_bos_bearish_internal_freshness_bars": 12,
+        "smc_choch_bullish_internal_freshness_bars": 158,
+        "smc_choch_bearish_internal_freshness_bars": 25,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 11,
+        "smc_eqh_freshness_bars": 169,
+        "smc_eql_freshness_bars": 9
+      }
+    },
+    {
+      "instrument_id": "4f500f32-492c-4f37-9184-7a4c8d9ad04f",
+      "symbol": "002777",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "c27cff628674876b",
+      "raw_hash_after": "c27cff628674876b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 11,
+        "smc_bos_bullish_swing_freshness_bars": 144,
+        "smc_bos_bearish_internal_freshness_bars": 38,
+        "smc_choch_bullish_internal_freshness_bars": 22,
+        "smc_choch_bearish_internal_freshness_bars": 59,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10,
+        "smc_eqh_freshness_bars": 113,
+        "smc_eql_freshness_bars": 12
+      }
+    },
+    {
+      "instrument_id": "4ff6a217-e930-44ba-81d1-eccdbd178be4",
+      "symbol": "301075",
+      "market": "SZ",
+      "bars_count": 408,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "53c218f5120e90a2",
+      "raw_hash_after": "53c218f5120e90a2",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 70,
+        "smc_bos_bullish_swing_freshness_bars": 139,
+        "smc_bos_bearish_internal_freshness_bars": 21,
+        "smc_choch_bullish_internal_freshness_bars": 8,
+        "smc_choch_bearish_internal_freshness_bars": 52,
+        "smc_choch_bearish_swing_freshness_bars": 36,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 3,
+        "smc_eql_freshness_bars": 9
+      }
+    },
+    {
+      "instrument_id": "51d182c3-2939-43e2-a64f-5c4c28f5d090",
+      "symbol": "300809",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "feb0daaf61f153f0",
+      "raw_hash_after": "feb0daaf61f153f0",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 319,
+        "smc_bos_bullish_swing_freshness_bars": 249,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_choch_bullish_internal_freshness_bars": 3,
+        "smc_choch_bearish_internal_freshness_bars": 40,
+        "smc_choch_bearish_swing_freshness_bars": 101,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 46,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 3,
+        "smc_eqh_freshness_bars": 186,
+        "smc_eql_freshness_bars": 93
+      }
+    },
+    {
+      "instrument_id": "539272d9-d714-4fa2-86a9-19f83b37a81c",
+      "symbol": "600461",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "4993adbf204423ce",
+      "raw_hash_after": "4993adbf204423ce",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 105,
+        "smc_bos_bullish_swing_freshness_bars": 105,
+        "smc_bos_bearish_internal_freshness_bars": 31,
+        "smc_bos_bearish_swing_freshness_bars": 353,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bullish_swing_freshness_bars": 326,
+        "smc_choch_bearish_internal_freshness_bars": 8,
+        "smc_choch_bearish_swing_freshness_bars": 41,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 8,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 4,
+        "smc_eqh_freshness_bars": 7
+      }
+    },
+    {
+      "instrument_id": "540819ab-4957-44ee-aa66-3c818e31b822",
+      "symbol": "001226",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "1692714635c5e9d1",
+      "raw_hash_after": "1692714635c5e9d1",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 41,
+        "smc_bos_bullish_swing_freshness_bars": 128,
+        "smc_bos_bearish_internal_freshness_bars": 195,
+        "smc_bos_bearish_swing_freshness_bars": 331,
+        "smc_choch_bullish_internal_freshness_bars": 80,
+        "smc_choch_bullish_swing_freshness_bars": 259,
+        "smc_choch_bearish_internal_freshness_bars": 35,
+        "smc_choch_bearish_swing_freshness_bars": 20,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 89,
+        "smc_eqh_freshness_bars": 20
+      }
+    },
+    {
+      "instrument_id": "576ff033-7788-44df-bd38-80e64d707f1b",
+      "symbol": "002195",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "3eb74baf126d32fc",
+      "raw_hash_after": "3eb74baf126d32fc",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 117,
+        "smc_bos_bullish_swing_freshness_bars": 147,
+        "smc_bos_bearish_internal_freshness_bars": 36,
+        "smc_choch_bullish_internal_freshness_bars": 81,
+        "smc_choch_bearish_internal_freshness_bars": 77,
+        "smc_choch_bearish_swing_freshness_bars": 35,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 13,
+        "smc_eqh_freshness_bars": 164
+      }
+    },
+    {
+      "instrument_id": "5816252c-5fe7-4de4-a495-7c6d75789ac8",
+      "symbol": "301130",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "702801095fd661b8",
+      "raw_hash_after": "702801095fd661b8",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 137,
+        "smc_bos_bullish_swing_freshness_bars": 295,
+        "smc_bos_bearish_internal_freshness_bars": 165,
+        "smc_bos_bearish_swing_freshness_bars": 100,
+        "smc_choch_bullish_internal_freshness_bars": 1,
+        "smc_choch_bullish_swing_freshness_bars": 69,
+        "smc_choch_bearish_internal_freshness_bars": 19,
+        "smc_choch_bearish_swing_freshness_bars": 161,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 3,
+        "smc_eqh_freshness_bars": 115,
+        "smc_eql_freshness_bars": 139
+      }
+    },
+    {
+      "instrument_id": "5864bc96-c5c4-4bab-8599-995bf53f9c83",
+      "symbol": "002848",
+      "market": "SZ",
+      "bars_count": 413,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "b0322d86172dc4b1",
+      "raw_hash_after": "b0322d86172dc4b1",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 68,
+        "smc_bos_bullish_swing_freshness_bars": 148,
+        "smc_bos_bearish_internal_freshness_bars": 21,
+        "smc_choch_bullish_internal_freshness_bars": 104,
+        "smc_choch_bearish_internal_freshness_bars": 53,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 15,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 51,
+        "smc_eqh_freshness_bars": 69,
+        "smc_eql_freshness_bars": 170
+      }
+    },
+    {
+      "instrument_id": "5989d2f5-2ade-4367-a57d-104adb5a320f",
+      "symbol": "000623",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "54a5a74a4a002032",
+      "raw_hash_after": "54a5a74a4a002032",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 134,
+        "smc_bos_bearish_internal_freshness_bars": 102,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 74,
+        "smc_choch_bullish_swing_freshness_bars": 268,
+        "smc_choch_bearish_internal_freshness_bars": 61,
+        "smc_choch_bearish_swing_freshness_bars": 49,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 64,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 39,
+        "smc_eql_freshness_bars": 136
+      }
+    },
+    {
+      "instrument_id": "5b9f90e0-6dbe-4217-9945-21059934ed0f",
+      "symbol": "300852",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "f88da0fa19ea1d1f",
+      "raw_hash_after": "f88da0fa19ea1d1f",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 44,
+        "smc_bos_bullish_swing_freshness_bars": 132,
+        "smc_bos_bearish_internal_freshness_bars": 94,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 79,
+        "smc_choch_bullish_swing_freshness_bars": 241,
+        "smc_choch_bearish_internal_freshness_bars": 22,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 76,
+        "smc_eqh_freshness_bars": 52,
+        "smc_eql_freshness_bars": 122
+      }
+    },
+    {
+      "instrument_id": "5f7d481b-49ce-44c0-8d40-e664952dbb92",
+      "symbol": "920642",
+      "market": "BJ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "02a10b59907bc414",
+      "raw_hash_after": "02a10b59907bc414",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 251,
+        "smc_bos_bearish_internal_freshness_bars": 90,
+        "smc_bos_bearish_swing_freshness_bars": 108,
+        "smc_choch_bullish_internal_freshness_bars": 45,
+        "smc_choch_bearish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 37,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 45,
+        "smc_eqh_freshness_bars": 2,
+        "smc_eql_freshness_bars": 72
+      }
+    },
+    {
+      "instrument_id": "644d16b8-9ee9-400d-b749-15739ae168eb",
+      "symbol": "601500",
+      "market": "SH",
+      "bars_count": 411,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "5976bf12bbbeec30",
+      "raw_hash_after": "5976bf12bbbeec30",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 153,
+        "smc_bos_bullish_swing_freshness_bars": 153,
+        "smc_bos_bearish_internal_freshness_bars": 101,
+        "smc_bos_bearish_swing_freshness_bars": 49,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 73,
+        "smc_eqh_freshness_bars": 80,
+        "smc_eql_freshness_bars": 200
+      }
+    },
+    {
+      "instrument_id": "6d66256a-50d4-45d8-bc4f-788973c22ab8",
+      "symbol": "300061",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "62f3d29552ba482f",
+      "raw_hash_after": "62f3d29552ba482f",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 59,
+        "smc_bos_bearish_internal_freshness_bars": 37,
+        "smc_bos_bearish_swing_freshness_bars": 212,
+        "smc_choch_bullish_internal_freshness_bars": 78,
+        "smc_choch_bearish_internal_freshness_bars": 55,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 49,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 33,
+        "smc_eql_freshness_bars": 81
+      }
+    },
+    {
+      "instrument_id": "6e691060-03f3-4417-b996-a4c2f392913d",
+      "symbol": "300192",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "688aadf317fdda97",
+      "raw_hash_after": "688aadf317fdda97",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 69,
+        "smc_bos_bearish_internal_freshness_bars": 101,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 31,
+        "smc_choch_bullish_swing_freshness_bars": 241,
+        "smc_choch_bearish_internal_freshness_bars": 28,
+        "smc_choch_bearish_swing_freshness_bars": 55,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 3,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 83,
+        "smc_eqh_freshness_bars": 66,
+        "smc_eql_freshness_bars": 88
+      }
+    },
+    {
+      "instrument_id": "76fd94fc-961e-4535-ac03-e851ef987590",
+      "symbol": "301378",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "ded9e00bd85e270e",
+      "raw_hash_after": "ded9e00bd85e270e",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 181,
+        "smc_bos_bearish_internal_freshness_bars": 29,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 11,
+        "smc_choch_bullish_swing_freshness_bars": 143,
+        "smc_choch_bearish_internal_freshness_bars": 55,
+        "smc_choch_bearish_swing_freshness_bars": 46,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 47,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 11,
+        "smc_eqh_freshness_bars": 82,
+        "smc_eql_freshness_bars": 128
+      }
+    },
+    {
+      "instrument_id": "7c08cd5b-4a23-42d9-8199-2737bc78c7af",
+      "symbol": "688232",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "6453e860e0683610",
+      "raw_hash_after": "6453e860e0683610",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bearish_internal_freshness_bars": 16,
+        "smc_bos_bearish_swing_freshness_bars": 229,
+        "smc_choch_bullish_internal_freshness_bars": 11,
+        "smc_choch_bullish_swing_freshness_bars": 142,
+        "smc_choch_bearish_internal_freshness_bars": 57,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 64,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 13,
+        "smc_eqh_freshness_bars": 23,
+        "smc_eql_freshness_bars": 184
+      }
+    },
+    {
+      "instrument_id": "7c65003b-8438-4876-85be-b07a1e82fdbc",
+      "symbol": "603390",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "2fbb110dcf21d1d1",
+      "raw_hash_after": "2fbb110dcf21d1d1",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 65,
+        "smc_bos_bullish_swing_freshness_bars": 302,
+        "smc_bos_bearish_internal_freshness_bars": 28,
+        "smc_bos_bearish_swing_freshness_bars": 101,
+        "smc_choch_bullish_internal_freshness_bars": 78,
+        "smc_choch_bullish_swing_freshness_bars": 77,
+        "smc_choch_bearish_internal_freshness_bars": 56,
+        "smc_choch_bearish_swing_freshness_bars": 36,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 25,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 0,
+        "smc_eqh_freshness_bars": 131
+      }
+    },
+    {
+      "instrument_id": "7d4bf254-950d-44c7-b829-5e429531a4e6",
+      "symbol": "605077",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "c23644485c21067c",
+      "raw_hash_after": "c23644485c21067c",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 117,
+        "smc_bos_bearish_internal_freshness_bars": 101,
+        "smc_bos_bearish_swing_freshness_bars": 100,
+        "smc_choch_bullish_internal_freshness_bars": 79,
+        "smc_choch_bearish_internal_freshness_bars": 56,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 51,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 55,
+        "smc_eqh_freshness_bars": 194,
+        "smc_eql_freshness_bars": 145
+      }
+    },
+    {
+      "instrument_id": "802dd0dc-6ae5-4693-946a-b06b0e04e3ed",
+      "symbol": "601566",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "2854d7ec4c64b56a",
+      "raw_hash_after": "2854d7ec4c64b56a",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 158,
+        "smc_bos_bullish_swing_freshness_bars": 185,
+        "smc_bos_bearish_internal_freshness_bars": 19,
+        "smc_choch_bullish_internal_freshness_bars": 68,
+        "smc_choch_bearish_internal_freshness_bars": 47,
+        "smc_choch_bearish_swing_freshness_bars": 46,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10,
+        "smc_eqh_freshness_bars": 0
+      }
+    },
+    {
+      "instrument_id": "814ccd02-1c38-451d-ac08-faaed841baef",
+      "symbol": "603298",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "67c957a9ee72a807",
+      "raw_hash_after": "67c957a9ee72a807",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 13,
+        "smc_bos_bullish_swing_freshness_bars": 118,
+        "smc_bos_bearish_internal_freshness_bars": 336,
+        "smc_bos_bearish_swing_freshness_bars": 46,
+        "smc_choch_bullish_internal_freshness_bars": 31,
+        "smc_choch_bullish_swing_freshness_bars": 231,
+        "smc_choch_bearish_internal_freshness_bars": 52,
+        "smc_choch_bearish_swing_freshness_bars": 102,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 28,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 69,
+        "smc_eqh_freshness_bars": 14,
+        "smc_eql_freshness_bars": 3
+      }
+    },
+    {
+      "instrument_id": "85a7064f-460b-488b-98a6-4c3b37db6641",
+      "symbol": "002723",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "5c7d644f801f2694",
+      "raw_hash_after": "5c7d644f801f2694",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 0,
+        "smc_bos_bullish_swing_freshness_bars": 122,
+        "smc_bos_bearish_internal_freshness_bars": 20,
+        "smc_choch_bullish_internal_freshness_bars": 9,
+        "smc_choch_bearish_internal_freshness_bars": 69,
+        "smc_choch_bearish_swing_freshness_bars": 19,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 60,
+        "smc_eqh_freshness_bars": 133,
+        "smc_eql_freshness_bars": 88
+      }
+    },
+    {
+      "instrument_id": "88547931-f897-4ab9-9a57-ba8632650468",
+      "symbol": "002130",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "172cc2799c32be6d",
+      "raw_hash_after": "172cc2799c32be6d",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 117,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 86,
+        "smc_choch_bullish_swing_freshness_bars": 215,
+        "smc_choch_bearish_internal_freshness_bars": 73,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 36,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 104
+      }
+    },
+    {
+      "instrument_id": "894cd21b-7054-4621-bcc9-6e43b705df6c",
+      "symbol": "601088",
+      "market": "SH",
+      "bars_count": 405,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "8855d7dbff969e58",
+      "raw_hash_after": "8855d7dbff969e58",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 115,
+        "smc_bos_bullish_swing_freshness_bars": 49,
+        "smc_bos_bearish_internal_freshness_bars": 67,
+        "smc_choch_bullish_internal_freshness_bars": 54,
+        "smc_choch_bearish_internal_freshness_bars": 44,
+        "smc_choch_bearish_swing_freshness_bars": 37,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 38,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 55,
+        "smc_eqh_freshness_bars": 124,
+        "smc_eql_freshness_bars": 117
+      }
+    },
+    {
+      "instrument_id": "8af87e3a-f5dc-4077-ba37-50612b627ad6",
+      "symbol": "002727",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "1f237a81ac124ac3",
+      "raw_hash_after": "1f237a81ac124ac3",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 10,
+        "smc_bos_bearish_internal_freshness_bars": 75,
+        "smc_bos_bearish_swing_freshness_bars": 100,
+        "smc_choch_bullish_internal_freshness_bars": 24,
+        "smc_choch_bearish_internal_freshness_bars": 62,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 8,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 4,
+        "smc_eqh_freshness_bars": 75,
+        "smc_eql_freshness_bars": 78
+      }
+    },
+    {
+      "instrument_id": "8e0ca2ba-0ea8-42e8-8805-b43537b45c7d",
+      "symbol": "688127",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "12d58a4c3786a819",
+      "raw_hash_after": "12d58a4c3786a819",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 73,
+        "smc_bos_bullish_swing_freshness_bars": 167,
+        "smc_bos_bearish_internal_freshness_bars": 301,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 0,
+        "smc_choch_bullish_swing_freshness_bars": 239,
+        "smc_choch_bearish_internal_freshness_bars": 29,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 167
+      }
+    },
+    {
+      "instrument_id": "8f288bc9-61f9-4eac-bc4c-2cd3838613ee",
+      "symbol": "300875",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "e30ff4c2efc75a78",
+      "raw_hash_after": "e30ff4c2efc75a78",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 5,
+        "smc_bos_bearish_internal_freshness_bars": 19,
+        "smc_bos_bearish_swing_freshness_bars": 59,
+        "smc_choch_bullish_internal_freshness_bars": 17,
+        "smc_choch_bearish_internal_freshness_bars": 87,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 4,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 18,
+        "smc_eqh_freshness_bars": 65,
+        "smc_eql_freshness_bars": 165
+      }
+    },
+    {
+      "instrument_id": "91153496-623d-48fc-9c39-aa2d5122ad3b",
+      "symbol": "600178",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "53e83fb8e6ace4ef",
+      "raw_hash_after": "53e83fb8e6ace4ef",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 276,
+        "smc_bos_bearish_internal_freshness_bars": 28,
+        "smc_bos_bearish_swing_freshness_bars": 331,
+        "smc_choch_bullish_internal_freshness_bars": 152,
+        "smc_choch_bullish_swing_freshness_bars": 276,
+        "smc_choch_bearish_internal_freshness_bars": 132,
+        "smc_choch_bearish_swing_freshness_bars": 102,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 100,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 13,
+        "smc_eqh_freshness_bars": 2
+      }
+    },
+    {
+      "instrument_id": "9181ae3a-4ab9-46b2-9795-96aacd9083c0",
+      "symbol": "002960",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0565eb047b5f380f",
+      "raw_hash_after": "0565eb047b5f380f",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 85,
+        "smc_bos_bearish_internal_freshness_bars": 18,
+        "smc_bos_bearish_swing_freshness_bars": 65,
+        "smc_choch_bullish_internal_freshness_bars": 3,
+        "smc_choch_bearish_internal_freshness_bars": 75,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 1,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 2,
+        "smc_eqh_freshness_bars": 6,
+        "smc_eql_freshness_bars": 21
+      }
+    },
+    {
+      "instrument_id": "9505152a-609b-4bbf-ae4b-62c5196e24f9",
+      "symbol": "002010",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "a98eafeb6e56a442",
+      "raw_hash_after": "a98eafeb6e56a442",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 296,
+        "smc_bos_bullish_swing_freshness_bars": 135,
+        "smc_bos_bearish_internal_freshness_bars": 37,
+        "smc_choch_bullish_internal_freshness_bars": 13,
+        "smc_choch_bearish_internal_freshness_bars": 68,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 51,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10,
+        "smc_eql_freshness_bars": 21
+      }
+    },
+    {
+      "instrument_id": "9adf79a9-85f8-4f43-babe-9c151ef27862",
+      "symbol": "600598",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "5cd5b460cdbc9ce4",
+      "raw_hash_after": "5cd5b460cdbc9ce4",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 74,
+        "smc_bos_bullish_swing_freshness_bars": 145,
+        "smc_bos_bearish_internal_freshness_bars": 48,
+        "smc_choch_bullish_internal_freshness_bars": 17,
+        "smc_choch_bearish_internal_freshness_bars": 64,
+        "smc_choch_bearish_swing_freshness_bars": 56,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 58,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 45
+      }
+    },
+    {
+      "instrument_id": "9b30704a-513a-48ed-b710-3c539d28520c",
+      "symbol": "000166",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "918ed0aceafee536",
+      "raw_hash_after": "918ed0aceafee536",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 242,
+        "smc_bos_bearish_internal_freshness_bars": 65,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 20,
+        "smc_choch_bullish_swing_freshness_bars": 261,
+        "smc_choch_bearish_internal_freshness_bars": 7,
+        "smc_choch_bearish_swing_freshness_bars": 60,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 7,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 19,
+        "smc_eqh_freshness_bars": 140,
+        "smc_eql_freshness_bars": 11
+      }
+    },
+    {
+      "instrument_id": "9ec6226d-640d-48ed-b838-5b4fd5c0532c",
+      "symbol": "002205",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "bef742735d54e0e3",
+      "raw_hash_after": "bef742735d54e0e3",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 119,
+        "smc_bos_bullish_swing_freshness_bars": 179,
+        "smc_bos_bearish_internal_freshness_bars": 21,
+        "smc_bos_bearish_swing_freshness_bars": 47,
+        "smc_choch_bullish_internal_freshness_bars": 74,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_choch_bearish_swing_freshness_bars": 101,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 35,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 8,
+        "smc_eqh_freshness_bars": 132
+      }
+    },
+    {
+      "instrument_id": "9f577476-3ae3-4b8e-9d61-d58baaa6a9a7",
+      "symbol": "300366",
+      "market": "SZ",
+      "bars_count": 414,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0dff97546816f396",
+      "raw_hash_after": "0dff97546816f396",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 144,
+        "smc_bos_bullish_swing_freshness_bars": 234,
+        "smc_bos_bearish_internal_freshness_bars": 20,
+        "smc_bos_bearish_swing_freshness_bars": 100,
+        "smc_choch_bullish_internal_freshness_bars": 6,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_choch_bearish_swing_freshness_bars": 215,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 58,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 4,
+        "smc_eqh_freshness_bars": 82,
+        "smc_eql_freshness_bars": 21
+      }
+    },
+    {
+      "instrument_id": "a124a393-1598-4aa0-921f-f7d58703617f",
+      "symbol": "000509",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0a00d942045a06ef",
+      "raw_hash_after": "0a00d942045a06ef",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 59,
+        "smc_bos_bullish_swing_freshness_bars": 101,
+        "smc_bos_bearish_internal_freshness_bars": 114,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 112,
+        "smc_choch_bullish_swing_freshness_bars": 184,
+        "smc_choch_bearish_internal_freshness_bars": 35,
+        "smc_choch_bearish_swing_freshness_bars": 28,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 29,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 111,
+        "smc_eqh_freshness_bars": 115,
+        "smc_eql_freshness_bars": 214
+      }
+    },
+    {
+      "instrument_id": "a495bd99-9690-4428-a6f5-3cdaf1ee1872",
+      "symbol": "002051",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "3f5cd1af10c38020",
+      "raw_hash_after": "3f5cd1af10c38020",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 51,
+        "smc_bos_bearish_internal_freshness_bars": 121,
+        "smc_bos_bearish_swing_freshness_bars": 101,
+        "smc_choch_bullish_internal_freshness_bars": 92,
+        "smc_choch_bullish_swing_freshness_bars": 92,
+        "smc_choch_bearish_internal_freshness_bars": 30,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 25,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 94,
+        "smc_eqh_freshness_bars": 34,
+        "smc_eql_freshness_bars": 125
+      }
+    },
+    {
+      "instrument_id": "a5ceea10-5247-4213-90cd-08aaa4e93f6c",
+      "symbol": "301222",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "ce7006a3289025ec",
+      "raw_hash_after": "ce7006a3289025ec",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 105,
+        "smc_bos_bullish_swing_freshness_bars": 124,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 89,
+        "smc_choch_bullish_swing_freshness_bars": 219,
+        "smc_choch_bearish_internal_freshness_bars": 57,
+        "smc_choch_bearish_swing_freshness_bars": 25,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 24,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 32,
+        "smc_eqh_freshness_bars": 163,
+        "smc_eql_freshness_bars": 165
+      }
+    },
+    {
+      "instrument_id": "a8c94b8c-7f63-43df-b827-9fd0ce8d0bfd",
+      "symbol": "603065",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "955a958654e3112a",
+      "raw_hash_after": "955a958654e3112a",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 24,
+        "smc_bos_bearish_internal_freshness_bars": 12,
+        "smc_bos_bearish_swing_freshness_bars": 101,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bullish_swing_freshness_bars": 48,
+        "smc_choch_bearish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 121,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 9,
+        "smc_eqh_freshness_bars": 68
+      }
+    },
+    {
+      "instrument_id": "ab033739-4038-4742-8a3a-50c305c3e4e1",
+      "symbol": "600208",
+      "market": "SH",
+      "bars_count": 405,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "d649cc8b5d21ea63",
+      "raw_hash_after": "d649cc8b5d21ea63",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 259,
+        "smc_bos_bearish_internal_freshness_bars": 16,
+        "smc_bos_bearish_swing_freshness_bars": 322,
+        "smc_choch_bullish_internal_freshness_bars": 82,
+        "smc_choch_bullish_swing_freshness_bars": 257,
+        "smc_choch_bearish_internal_freshness_bars": 59,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 61,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 8,
+        "smc_eql_freshness_bars": 92
+      }
+    },
+    {
+      "instrument_id": "abfbb5ab-3429-496d-9fcc-04afb086ee48",
+      "symbol": "688720",
+      "market": "SH",
+      "bars_count": 405,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "02cddb27666e1341",
+      "raw_hash_after": "02cddb27666e1341",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 71,
+        "smc_bos_bullish_swing_freshness_bars": 67,
+        "smc_bos_bearish_internal_freshness_bars": 12,
+        "smc_choch_bullish_internal_freshness_bars": 27,
+        "smc_choch_bearish_internal_freshness_bars": 22,
+        "smc_choch_bearish_swing_freshness_bars": 13,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 10,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 3
+      }
+    },
+    {
+      "instrument_id": "ae9b2576-31cc-47b4-9dac-a689b513057d",
+      "symbol": "301555",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "91d2b1146a66bdbe",
+      "raw_hash_after": "91d2b1146a66bdbe",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 33,
+        "smc_bos_bullish_swing_freshness_bars": 147,
+        "smc_bos_bearish_internal_freshness_bars": 161,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 69,
+        "smc_choch_bullish_swing_freshness_bars": 280,
+        "smc_choch_bearish_internal_freshness_bars": 25,
+        "smc_choch_bearish_swing_freshness_bars": 20,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 65,
+        "smc_eqh_freshness_bars": 34
+      }
+    },
+    {
+      "instrument_id": "b307218c-36b7-496d-a58f-fe80e6854152",
+      "symbol": "300650",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "d1f6607a9b9a8c8d",
+      "raw_hash_after": "d1f6607a9b9a8c8d",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 220,
+        "smc_bos_bullish_swing_freshness_bars": 214,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_choch_bullish_internal_freshness_bars": 71,
+        "smc_choch_bearish_internal_freshness_bars": 55,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 54,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 167
+      }
+    },
+    {
+      "instrument_id": "b7a8e188-24e4-4592-8580-c2aaff025e63",
+      "symbol": "300499",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "6565d846a31cf010",
+      "raw_hash_after": "6565d846a31cf010",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 62,
+        "smc_bos_bullish_swing_freshness_bars": 117,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_choch_bullish_internal_freshness_bars": 0,
+        "smc_choch_bearish_internal_freshness_bars": 54,
+        "smc_choch_bearish_swing_freshness_bars": 12,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 39
+      }
+    },
+    {
+      "instrument_id": "b9ff2a63-ffdb-4a0e-bd06-b9e99f7f0961",
+      "symbol": "300886",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "60a5cb5277f3c109",
+      "raw_hash_after": "60a5cb5277f3c109",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 72,
+        "smc_bos_bearish_internal_freshness_bars": 18,
+        "smc_bos_bearish_swing_freshness_bars": 55,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 61,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 54,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 15,
+        "smc_eqh_freshness_bars": 11,
+        "smc_eql_freshness_bars": 21
+      }
+    },
+    {
+      "instrument_id": "bcc20308-aff1-44ec-8ff8-40aeaf495430",
+      "symbol": "600827",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "a8dd8c0df6f5da96",
+      "raw_hash_after": "a8dd8c0df6f5da96",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 12,
+        "smc_bos_bearish_internal_freshness_bars": 37,
+        "smc_bos_bearish_swing_freshness_bars": 113,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bearish_internal_freshness_bars": 59,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 0,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 55,
+        "smc_eqh_freshness_bars": 123,
+        "smc_eql_freshness_bars": 23
+      }
+    },
+    {
+      "instrument_id": "c0754f90-c4e4-40d7-8080-0ababf7a01b7",
+      "symbol": "002247",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "2f57ca7215e79546",
+      "raw_hash_after": "2f57ca7215e79546",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 127,
+        "smc_bos_bearish_internal_freshness_bars": 20,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bullish_swing_freshness_bars": 238,
+        "smc_choch_bearish_internal_freshness_bars": 57,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 57,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 14,
+        "smc_eqh_freshness_bars": 18
+      }
+    },
+    {
+      "instrument_id": "c1a2a23d-10e6-40e4-86e4-455d9e9a4fcf",
+      "symbol": "603355",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "18c7356171cca295",
+      "raw_hash_after": "18c7356171cca295",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 140,
+        "smc_bos_bearish_internal_freshness_bars": 102,
+        "smc_bos_bearish_swing_freshness_bars": 331,
+        "smc_choch_bullish_internal_freshness_bars": 78,
+        "smc_choch_bullish_swing_freshness_bars": 173,
+        "smc_choch_bearish_internal_freshness_bars": 53,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 52,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 72,
+        "smc_eql_freshness_bars": 79
+      }
+    },
+    {
+      "instrument_id": "c8924f3b-054a-4d6e-b31d-59ef1f06a3e2",
+      "symbol": "688657",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "0a123372fd7f636b",
+      "raw_hash_after": "0a123372fd7f636b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 185,
+        "smc_bos_bullish_swing_freshness_bars": 252,
+        "smc_bos_bearish_internal_freshness_bars": 21,
+        "smc_choch_bullish_internal_freshness_bars": 82,
+        "smc_choch_bearish_internal_freshness_bars": 66,
+        "smc_choch_bearish_swing_freshness_bars": 115,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 114,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 3
+      }
+    },
+    {
+      "instrument_id": "c8a6e0de-8218-48ff-bacc-8d71bd96f1bc",
+      "symbol": "688312",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "387b7ef4e7ea0912",
+      "raw_hash_after": "387b7ef4e7ea0912",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 80,
+        "smc_bos_bullish_swing_freshness_bars": 140,
+        "smc_bos_bearish_internal_freshness_bars": 394,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 0,
+        "smc_choch_bullish_swing_freshness_bars": 250,
+        "smc_choch_bearish_internal_freshness_bars": 32,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 88,
+        "smc_eqh_freshness_bars": 94,
+        "smc_eql_freshness_bars": 157
+      }
+    },
+    {
+      "instrument_id": "cf5e5d4f-5bbd-47b3-ad11-d2da6fb76576",
+      "symbol": "301195",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "cbd35fceb347c960",
+      "raw_hash_after": "cbd35fceb347c960",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 59,
+        "smc_bos_bearish_internal_freshness_bars": 25,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 70,
+        "smc_choch_bullish_swing_freshness_bars": 249,
+        "smc_choch_bearish_internal_freshness_bars": 56,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 58,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 4,
+        "smc_eqh_freshness_bars": 1,
+        "smc_eql_freshness_bars": 118
+      }
+    },
+    {
+      "instrument_id": "d0cd3b38-16ec-4ca9-80e8-0b307255020f",
+      "symbol": "002125",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "c4c66bd13b8a6844",
+      "raw_hash_after": "c4c66bd13b8a6844",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 52,
+        "smc_bos_bearish_internal_freshness_bars": 102,
+        "smc_bos_bearish_swing_freshness_bars": 331,
+        "smc_choch_bullish_internal_freshness_bars": 10,
+        "smc_choch_bullish_swing_freshness_bars": 50,
+        "smc_choch_bearish_internal_freshness_bars": 35,
+        "smc_choch_bearish_swing_freshness_bars": 91,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 35,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 71,
+        "smc_eqh_freshness_bars": 109,
+        "smc_eql_freshness_bars": 59
+      }
+    },
+    {
+      "instrument_id": "d224d6b9-51c2-44ed-a2b5-da7d65082120",
+      "symbol": "301203",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "6f87f47e99cc946e",
+      "raw_hash_after": "6f87f47e99cc946e",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 81,
+        "smc_bos_bullish_swing_freshness_bars": 123,
+        "smc_bos_bearish_internal_freshness_bars": 169,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 145,
+        "smc_choch_bullish_swing_freshness_bars": 248,
+        "smc_choch_bearish_internal_freshness_bars": 33,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 139,
+        "smc_eql_freshness_bars": 37
+      }
+    },
+    {
+      "instrument_id": "d9193788-90a9-491b-99a5-cfeec04070ab",
+      "symbol": "002098",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "c8f6f21da322fc53",
+      "raw_hash_after": "c8f6f21da322fc53",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 167,
+        "smc_bos_bearish_internal_freshness_bars": 18,
+        "smc_bos_bearish_swing_freshness_bars": 66,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 121,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 50,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10
+      }
+    },
+    {
+      "instrument_id": "d92496ad-58bd-474d-97c3-266c3a79599a",
+      "symbol": "603306",
+      "market": "SH",
+      "bars_count": 405,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "aff16220e077676a",
+      "raw_hash_after": "aff16220e077676a",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 64,
+        "smc_bos_bullish_swing_freshness_bars": 163,
+        "smc_bos_bearish_internal_freshness_bars": 12,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 26,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 19,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 6,
+        "smc_eqh_freshness_bars": 34
+      }
+    },
+    {
+      "instrument_id": "dac337da-5c09-40d4-baff-36ae9d09e57b",
+      "symbol": "600493",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "7893b6a248578cea",
+      "raw_hash_after": "7893b6a248578cea",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 167,
+        "smc_bos_bearish_internal_freshness_bars": 20,
+        "smc_bos_bearish_swing_freshness_bars": 100,
+        "smc_choch_bullish_internal_freshness_bars": 5,
+        "smc_choch_bearish_internal_freshness_bars": 115,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 49,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 10
+      }
+    },
+    {
+      "instrument_id": "dad1936d-8e9d-4b6d-8beb-d86a10b3fada",
+      "symbol": "600166",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "15e7408005400655",
+      "raw_hash_after": "15e7408005400655",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 78,
+        "smc_bos_bullish_swing_freshness_bars": 136,
+        "smc_bos_bearish_internal_freshness_bars": 397,
+        "smc_choch_bullish_internal_freshness_bars": 44,
+        "smc_choch_bearish_internal_freshness_bars": 65,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 42,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 90,
+        "smc_eqh_freshness_bars": 115,
+        "smc_eql_freshness_bars": 159
+      }
+    },
+    {
+      "instrument_id": "dbd73121-e3f3-4ade-bb74-c7dfac403d15",
+      "symbol": "600037",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "4988a0baa32f644d",
+      "raw_hash_after": "4988a0baa32f644d",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 11,
+        "smc_bos_bullish_swing_freshness_bars": 293,
+        "smc_bos_bearish_internal_freshness_bars": 36,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bearish_internal_freshness_bars": 56,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 60,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 23,
+        "smc_eqh_freshness_bars": 128,
+        "smc_eql_freshness_bars": 23
+      }
+    },
+    {
+      "instrument_id": "dd52d292-a5a6-4699-b4cd-41fbf4d9a26f",
+      "symbol": "001277",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "2d32ee61a033e969",
+      "raw_hash_after": "2d32ee61a033e969",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 141,
+        "smc_bos_bearish_internal_freshness_bars": 403,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 81,
+        "smc_choch_bullish_swing_freshness_bars": 295,
+        "smc_choch_bearish_internal_freshness_bars": 58,
+        "smc_choch_bearish_swing_freshness_bars": 104,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 80,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 134,
+        "smc_eqh_freshness_bars": 77
+      }
+    },
+    {
+      "instrument_id": "e34993ad-c49a-4865-ab28-205e95b4ec52",
+      "symbol": "603681",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "9e720a616f52251d",
+      "raw_hash_after": "9e720a616f52251d",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 71,
+        "smc_bos_bullish_swing_freshness_bars": 55,
+        "smc_bos_bearish_internal_freshness_bars": 403,
+        "smc_bos_bearish_swing_freshness_bars": 331,
+        "smc_choch_bullish_internal_freshness_bars": 7,
+        "smc_choch_bullish_swing_freshness_bars": 165,
+        "smc_choch_bearish_internal_freshness_bars": 30,
+        "smc_choch_bearish_swing_freshness_bars": 12,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 66,
+        "smc_eqh_freshness_bars": 40,
+        "smc_eql_freshness_bars": 122
+      }
+    },
+    {
+      "instrument_id": "e38486cd-261c-4232-a955-54f89f150c50",
+      "symbol": "301300",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "f51be8dc59c474b1",
+      "raw_hash_after": "f51be8dc59c474b1",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 79,
+        "smc_bos_bullish_swing_freshness_bars": 182,
+        "smc_bos_bearish_internal_freshness_bars": 28,
+        "smc_choch_bullish_internal_freshness_bars": 89,
+        "smc_choch_bearish_internal_freshness_bars": 74,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 4,
+        "smc_eqh_freshness_bars": 66,
+        "smc_eql_freshness_bars": 204
+      }
+    },
+    {
+      "instrument_id": "e50b2844-fcde-4474-ba57-df3072d221c7",
+      "symbol": "002518",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "7ab196b338a5cb96",
+      "raw_hash_after": "7ab196b338a5cb96",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 145,
+        "smc_bos_bullish_swing_freshness_bars": 64,
+        "smc_bos_bearish_internal_freshness_bars": 12,
+        "smc_choch_bullish_internal_freshness_bars": 6,
+        "smc_choch_bearish_internal_freshness_bars": 28,
+        "smc_choch_bearish_swing_freshness_bars": 28,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 22,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 8,
+        "smc_eql_freshness_bars": 87
+      }
+    },
+    {
+      "instrument_id": "e5fc15c9-43b9-416c-b136-a4ab1d9d196c",
+      "symbol": "688480",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "999e67e6a02d5eb6",
+      "raw_hash_after": "999e67e6a02d5eb6",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 71,
+        "smc_bos_bullish_swing_freshness_bars": 145,
+        "smc_bos_bearish_internal_freshness_bars": 30,
+        "smc_choch_bullish_internal_freshness_bars": 81,
+        "smc_choch_bearish_internal_freshness_bars": 49,
+        "smc_choch_bearish_swing_freshness_bars": 25,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 49,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 44
+      }
+    },
+    {
+      "instrument_id": "e7080944-cec6-4518-acce-dd348191741c",
+      "symbol": "002736",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "a8ff95efae380cec",
+      "raw_hash_after": "a8ff95efae380cec",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 239,
+        "smc_bos_bearish_internal_freshness_bars": 49,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 45,
+        "smc_choch_bearish_internal_freshness_bars": 101,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 40,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 47,
+        "smc_eqh_freshness_bars": 6,
+        "smc_eql_freshness_bars": 21
+      }
+    },
+    {
+      "instrument_id": "f2254813-8044-4107-822d-6bc5d5b7f637",
+      "symbol": "688179",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "4f010fefe2d9fc0b",
+      "raw_hash_after": "4f010fefe2d9fc0b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 39,
+        "smc_bos_bearish_internal_freshness_bars": 159,
+        "smc_bos_bearish_swing_freshness_bars": 293,
+        "smc_choch_bullish_internal_freshness_bars": 8,
+        "smc_choch_bullish_swing_freshness_bars": 138,
+        "smc_choch_bearish_internal_freshness_bars": 22,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 1,
+        "smc_eql_freshness_bars": 9
+      }
+    },
+    {
+      "instrument_id": "f566f34b-4c27-4e26-b7f6-301cd92f24a2",
+      "symbol": "600577",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "1a88aa627041556e",
+      "raw_hash_after": "1a88aa627041556e",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 154,
+        "smc_bos_bearish_internal_freshness_bars": 37,
+        "smc_bos_bearish_swing_freshness_bars": 331,
+        "smc_choch_bullish_internal_freshness_bars": 71,
+        "smc_choch_bullish_swing_freshness_bars": 235,
+        "smc_choch_bearish_internal_freshness_bars": 51,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 24,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 61
+      }
+    },
+    {
+      "instrument_id": "f6c8a3bf-d36b-49e0-9c3c-00c31c3427ee",
+      "symbol": "920510",
+      "market": "BJ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "7bfc0396654bcf19",
+      "raw_hash_after": "7bfc0396654bcf19",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 31,
+        "smc_bos_bearish_internal_freshness_bars": 115,
+        "smc_bos_bearish_swing_freshness_bars": 110,
+        "smc_choch_bullish_internal_freshness_bars": 71,
+        "smc_choch_bullish_swing_freshness_bars": 49,
+        "smc_choch_bearish_internal_freshness_bars": 20,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 12,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 49,
+        "smc_eqh_freshness_bars": 84,
+        "smc_eql_freshness_bars": 71
+      }
+    },
+    {
+      "instrument_id": "f92d7d49-040d-4d41-b422-4ad14dee8e1a",
+      "symbol": "300016",
+      "market": "SZ",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "ea752b9d2165f7a8",
+      "raw_hash_after": "ea752b9d2165f7a8",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 111,
+        "smc_bos_bullish_swing_freshness_bars": 295,
+        "smc_bos_bearish_internal_freshness_bars": 36,
+        "smc_choch_bullish_internal_freshness_bars": 23,
+        "smc_choch_bearish_internal_freshness_bars": 20,
+        "smc_choch_bearish_swing_freshness_bars": 47,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 21,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 6,
+        "smc_eqh_freshness_bars": 197
+      }
+    },
+    {
+      "instrument_id": "fc6a6af1-a343-49b6-83b9-b230acd35de4",
+      "symbol": "600185",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "9bda5ab707147249",
+      "raw_hash_after": "9bda5ab707147249",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 183,
+        "smc_bos_bullish_swing_freshness_bars": 124,
+        "smc_bos_bearish_internal_freshness_bars": 29,
+        "smc_choch_bullish_internal_freshness_bars": 13,
+        "smc_choch_bearish_internal_freshness_bars": 114,
+        "smc_choch_bearish_swing_freshness_bars": 91,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 0,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 23,
+        "smc_eqh_freshness_bars": 18
+      }
+    },
+    {
+      "instrument_id": "fc7d6fc0-4856-4b6a-8a42-ba529f284d52",
+      "symbol": "600231",
+      "market": "SH",
+      "bars_count": 415,
+      "selection_reason": "main_ge250",
+      "smc_eligible": true,
+      "a_all_none": false,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "b645ede3e089e265",
+      "raw_hash_after": "b645ede3e089e265",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {
+        "smc_bos_bullish_internal_freshness_bars": 184,
+        "smc_bos_bearish_internal_freshness_bars": 142,
+        "smc_bos_bearish_swing_freshness_bars": 332,
+        "smc_choch_bullish_internal_freshness_bars": 12,
+        "smc_choch_bullish_swing_freshness_bars": 272,
+        "smc_choch_bearish_internal_freshness_bars": 57,
+        "smc_choch_bearish_swing_freshness_bars": 100,
+        "smc_order_block_touch_bullish_internal_freshness_bars": 58,
+        "smc_order_block_touch_bearish_internal_freshness_bars": 55
+      }
+    },
+    {
+      "instrument_id": "104c89db-21db-472a-bb22-edf2af4de261",
+      "symbol": "603334",
+      "market": "SH",
+      "bars_count": 191,
+      "selection_reason": "boundary_60_249",
+      "smc_eligible": false,
+      "a_all_none": true,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "9011bcdb6db8ba0b",
+      "raw_hash_after": "9011bcdb6db8ba0b",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {}
+    },
+    {
+      "instrument_id": "9a140e2e-3cbe-40d8-9d92-2ac89249dc2a",
+      "symbol": "688727",
+      "market": "SH",
+      "bars_count": 182,
+      "selection_reason": "boundary_60_249",
+      "smc_eligible": false,
+      "a_all_none": true,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "f6899f1c8f9376dd",
+      "raw_hash_after": "f6899f1c8f9376dd",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {}
+    },
+    {
+      "instrument_id": "b71ccbfe-56eb-4e4b-a374-31fad82a18d1",
+      "symbol": "301563",
+      "market": "SZ",
+      "bars_count": 211,
+      "selection_reason": "boundary_60_249",
+      "smc_eligible": false,
+      "a_all_none": true,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "deb8c3e89408dd51",
+      "raw_hash_after": "deb8c3e89408dd51",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {}
+    },
+    {
+      "instrument_id": "d44ea9bc-77cf-45e3-969f-5025ac6b1205",
+      "symbol": "920100",
+      "market": "BJ",
+      "bars_count": 227,
+      "selection_reason": "boundary_60_249",
+      "smc_eligible": false,
+      "a_all_none": true,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "3e9bc41607b2d3e8",
+      "raw_hash_after": "3e9bc41607b2d3e8",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {}
+    },
+    {
+      "instrument_id": "d91577b0-ee04-42f8-b6d5-81d1c3f38553",
+      "symbol": "603352",
+      "market": "SH",
+      "bars_count": 142,
+      "selection_reason": "boundary_60_249",
+      "smc_eligible": false,
+      "a_all_none": true,
+      "replication_self_check": true,
+      "smc_parity": true,
+      "smc_dto_identical": true,
+      "raw_immutability": true,
+      "raw_hash_before": "767bd829113ceb78",
+      "raw_hash_after": "767bd829113ceb78",
+      "bb_common_field_parity": true,
+      "bb_field_checks": {
+        "bb_mid": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_upper": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        },
+        "bb_lower": {
+          "max_abs_diff": 0.0,
+          "nan_mismatch": 0,
+          "exact": true
+        }
+      },
+      "freshness_baseline": {}
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "static_consumer_map": [
+    {
+      "business_fact": "DSA",
+      "canonical_producer": "compute_core_kernel_bundle -> compute_dsa_bundle",
+      "artifact": "_shared_raw.dsa_bundle",
+      "consumers": [
+        "First Pyramid core builder",
+        "structural dsa_segment (precomputed['dsa_bundle'])"
+      ],
+      "shared_artifact_available": true,
+      "consumer_actually_reuses": true,
+      "extra_kernel_execution": 0,
+      "classification": "reuse-ok"
+    },
+    {
+      "business_fact": "SMC",
+      "canonical_producer": "compute_core_kernel_bundle -> compute_smc_pine(params=None)",
+      "artifact": "_shared_raw.smc_result",
+      "consumers": [
+        "First Pyramid core builder",
+        "structural SMC freshness (_compute_smc_freshness_factors)"
+      ],
+      "shared_artifact_available": true,
+      "consumer_actually_reuses": false,
+      "extra_kernel_execution": "+1（>=250 bars）",
+      "classification": "EXACT_KERNEL_DUPLICATE candidate",
+      "evidence": "structural_factor_service.L1541 compute_smc_adapter(bars, display_bars=len(bars)) 未消费 precomputed['smc_result']；同 kernel compute_smc_pine、相同 bars、params=None"
+    },
+    {
+      "business_fact": "Bollinger",
+      "canonical_producer": "compute_core_kernel_bundle -> compute_bollinger_features(BBcfg(20,2.0))",
+      "artifact": "_shared_raw.bb_df",
+      "consumers": [
+        "structural momentum (precomputed['bb_df'])"
+      ],
+      "shared_artifact_available": true,
+      "consumer_actually_reuses": true,
+      "extra_kernel_execution": 0,
+      "classification": "reuse-ok"
+    },
+    {
+      "business_fact": "Bollinger",
+      "canonical_producer": "CanonicalComputationService.compute(algorithm_id='bollinger') -> compute_bollinger_adapter -> merged_dsa_atr_rope_bb_factors.compute_bollinger",
+      "artifact": "_extract_extra_fields bb_upper/mid/lower",
+      "consumers": [
+        "summary_payload bb_upper/bb_mid/bb_lower"
+      ],
+      "shared_artifact_available": true,
+      "consumer_actually_reuses": false,
+      "extra_kernel_execution": "+1（>=21 bars）",
+      "classification": "EQUIVALENT_OUTPUT_SUBSET candidate",
+      "evidence": "feature_snapshot_service.L1687-L1708 独立 canonical Bollinger；与 _shared_raw.bb_df 的 bb_mid/upper/lower 公式等价（SMA20+2σ，std ddof=0）但 producer 不同"
+    },
+    {
+      "business_fact": "SQZMOM",
+      "canonical_producer": "compute_core_kernel_bundle -> compute_sqzmom_lb",
+      "artifact": "_shared_raw.sqzmom_result",
+      "consumers": [
+        "structural momentum (precomputed['sqz_result'])"
+      ],
+      "shared_artifact_available": true,
+      "consumer_actually_reuses": true,
+      "extra_kernel_execution": 0,
+      "classification": "reuse-ok"
+    },
+    {
+      "business_fact": "VolumeContext",
+      "canonical_producer": "compute_core_kernel_bundle -> compute_volume_context_series",
+      "artifact": "_shared_raw.vc_series",
+      "consumers": [
+        "First Pyramid core builder"
+      ],
+      "shared_artifact_available": true,
+      "consumer_actually_reuses": null,
+      "extra_kernel_execution": 0,
+      "classification": "dead injection（structural 注入 precomputed['vc_series'] 但未消费，无害，不改造）",
+      "evidence": "structural _compute_volatility_momentum_factors 仅消费 bb_df + sqz_result，未读 vc_series"
+    }
+  ],
+  "diagnostics_coverage_boundary": {
+    "gate_nature": "canonical owner scope 的 compute-once Gate（六类计数 run-scoped + enforce_compute_once_gate）",
+    "not_a": "整个 process 内所有低层 kernel invocation 的全局 profiler",
+    "blind_spots": [
+      "structural SMC freshness 调用未传 diagnostics（freshness 在 owner 之外）",
+      "_extract_extra_fields canonical bollinger 未计入 Gate",
+      "MACD canonical compute 未计入 Gate"
+    ],
+    "method_rule": "禁止把 diagnostics 传进 structural 来测真实调用次数（先 bump 再复用 precomputed 会造成假计数）；真实低层 invocation 只由 targeted spy / wrapper 得出。"
+  }
+}
