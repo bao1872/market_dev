@@ -450,3 +450,67 @@ async def test_activated_scope_persists_composition_snapshot():
     assert kwargs["composition_payload"]["composition_readiness"] == "ready"
     # fact 与 composition 均落库（两个薄表同事务）
     mock_fact.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_activated_scope_persists_with_real_dynamics_producer_shape():
+    """REVIEW-DYNAMICS-COMPOSITION-CONTRACT regression (Gate 3).
+
+    The production ``dynamics_map`` value is the raw
+    ``compute_current_static_scope_dynamics_batch`` item — NO top-level ``status``
+    (keys: scope / membership / observation_series / scope_dynamics / metrics).
+    Previously this raised ``ReviewCompositionError`` inside
+    ``compose_canonical_review_scope``. The boundary adapter
+    ``_adapt_scope_dynamics_to_composition_layer`` derives the layer status from
+    the canonical ``scope_dynamics["dynamics_phase"]`` tail, so the full chain
+    (real producer shape → boundary → composition) now succeeds.
+    """
+    run = _make_run()
+    scope = _scope("industry_l2", "sw_electronics")
+    fake_prep = _prep("industry_l2", "sw_electronics")
+
+    raw_dynamics = {
+        "scope": {"scope_type": "industry_l2", "scope_key": "sw_electronics"},
+        "membership": {"member_count": 1},
+        "observation_series": {"primitives": {}},
+        "scope_dynamics": {
+            "historical_dynamics": {
+                "position": [{"trade_date": "2026-08-12", "value": 0.1, "status": "ready"}],
+            },
+            "dynamics_phase": [{"trade_date": "2026-08-12", "phase": None, "status": "ready"}],
+        },
+        "metrics": {"trade_date_count": 1},
+    }
+
+    with patch.object(
+        orch, "compute_scope_observation", return_value=OBSERVATION,
+    ) as mock_compute, patch.object(
+        orch, "check_observation_invariants", return_value=[{"ok": True, "name": "x"}],
+    ) as mock_check, patch.object(
+        orch, "save_scope_observation_fact", AsyncMock(return_value=object()),
+    ) as mock_save, patch.object(
+        orch, "save_scope_composition_snapshot", AsyncMock(return_value=object()),
+    ) as mock_comp, patch.object(
+        orch, "compute_internal_structure", return_value={"status": "ready", "x": 1},
+    ), patch.object(
+        orch, "compute_member_attribution", return_value={"status": "ready", "y": 1},
+    ):
+        # dynamics_map carries the RAW producer shape (no top-level status)
+        result = await orch._persist_canonical_scope_observation(
+            _mock_session(), run, scope,  # type: ignore[arg-type]
+            prepared_observations={"sw_electronics": fake_prep},
+            dynamics_map={"sw_electronics": raw_dynamics},
+            leadership_map={"sw_electronics": _fake_leadership("sw_electronics")},
+        )
+
+    # Real dynamics entered composition via the adapter, readiness == ready,
+    # and the raw scope_dynamics payload is retained (not discarded).
+    assert result is not None
+    assert result["composition_readiness"] == "ready"
+    assert result["historical_dynamics"]["status"] == "ready"
+    assert result["historical_dynamics"]["scope_dynamics"] is raw_dynamics["scope_dynamics"]
+    assert result["historical_dynamics"]["metrics"] is raw_dynamics["metrics"]
+    mock_compute.assert_called_once()
+    mock_check.assert_called_once()
+    mock_save.assert_awaited_once()
+    mock_comp.assert_awaited_once()

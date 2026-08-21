@@ -1270,6 +1270,61 @@ def _unavailable_leadership_snapshot(trade_date: date) -> LeadershipSnapshot:
     )
 
 
+# Canonical Dynamics producer 产出的是 domain object（无 top-level status）：
+#   {scope, membership, observation_series, scope_dynamics, metrics}
+# 而 Composition 的 required layer contract 需要 top-level "status"（合法词汇：
+# ready / insufficient_history / unavailable_current）。此处是唯一的 application
+# composition boundary 适配点：把 raw dynamics domain object 转成 layer contract。
+# status 复用 canonical dynamics_phase 末条（即目标 T）的合并状态，不重新判断
+# 历史长度；缺失/无 series 时诚实回退 unavailable_current。
+def _adapt_scope_dynamics_to_composition_layer(
+    dynamics_payload: dict,
+) -> dict:
+    """Adapt the raw dynamics batch value into a Composition layer contract.
+
+    ``compute_current_static_scope_dynamics_batch`` returns a dict without a
+    top-level ``status`` (scope / membership / observation_series /
+    scope_dynamics / metrics).  ``compose_canonical_review_scope`` requires every
+    required layer to carry a legal top-level ``status``.  This is the single
+    boundary conversion point.  If the payload already carries a valid ``status``
+    it is returned unchanged (idempotent).
+    """
+    if not isinstance(dynamics_payload, dict):
+        return dynamics_payload
+    if dynamics_payload.get("status") in _DYNAMICS_LAYER_STATUS_SET:
+        return dynamics_payload
+    status = _derive_dynamics_layer_status(dynamics_payload)
+    return {"status": status, **dynamics_payload}
+
+
+_DYNAMICS_LAYER_STATUS_SET = frozenset(
+    {"ready", "insufficient_history", "unavailable_current"}
+)
+
+
+def _derive_dynamics_layer_status(dynamics_payload: dict) -> str:
+    """Derive the layer status from the canonical dynamics_phase tail entry.
+
+    ``scope_dynamics["dynamics_phase"]`` is a per-date series whose last entry
+    corresponds to the target observation date T and whose ``status`` is already
+    the merged ready/insufficient_history/unavailable_current of
+    position/velocity/acceleration/persistence.  Reusing it avoids re-deriving
+    history sufficiency at the boundary.  Falls back to unavailable_current when
+    no dynamics_phase evidence exists.
+    """
+    scope_dynamics = dynamics_payload.get("scope_dynamics") or {}
+    if not isinstance(scope_dynamics, dict):
+        return "unavailable_current"
+    phase_series = scope_dynamics.get("dynamics_phase")
+    if isinstance(phase_series, list) and phase_series:
+        last = phase_series[-1]
+        if isinstance(last, dict):
+            st = last.get("status")
+            if st in _DYNAMICS_LAYER_STATUS_SET:
+                return st
+    return "unavailable_current"
+
+
 async def _compute_canonical_composition_phase(
     session: AsyncSession,
     run: MarketReviewRun,
@@ -1515,7 +1570,10 @@ async def _persist_canonical_scope_observation(
         # scope 重建 120 天历史。若某 scope 不在 map（如 capability 未激活 family
         # 的边界情况），退回结构化 unavailable。
         historical_dynamics = dynamics_map.get(scope.scope_key) if dynamics_map else None
-        if historical_dynamics is None:
+        if historical_dynamics is not None:
+            # raw dynamics domain object → Composition layer contract（补 top-level status）
+            historical_dynamics = _adapt_scope_dynamics_to_composition_layer(historical_dynamics)
+        else:
             historical_dynamics = structured_unavailable_layer(
                 "historical_dynamics_not_in_batch_map: scope not produced by "
                 "the family dynamics batch (may be a non-activated family edge)"
