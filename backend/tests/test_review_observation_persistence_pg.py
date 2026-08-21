@@ -14,6 +14,7 @@ Run on the isolated verification DB only (never bz_stock):
 """
 from __future__ import annotations
 
+import uuid
 from collections.abc import Iterable
 from datetime import date
 from decimal import Decimal
