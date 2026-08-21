@@ -1484,7 +1484,10 @@ async def _fetch_bars(
         return None
 
 
-def _compute_smc_freshness_factors(bars: pd.DataFrame) -> dict[str, Any]:
+def _compute_smc_freshness_factors(
+    bars: pd.DataFrame,
+    smc_result: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """计算 14 个细分日线 SMC freshness 因子。
 
     [PROMPT.md §三] 按方向(bullish/bearish)和结构级别(internal/swing)拆分：
@@ -1505,14 +1508,20 @@ def _compute_smc_freshness_factors(bars: pd.DataFrame) -> dict[str, Any]:
 
     复用一次 Canonical SMC 计算结果，禁止重复运行 SMC 算法。
 
+    [3.4B-3A] smc_result 提供时（canonical 盘后链：`_shared_raw.smc_result`，
+    即 `compute_smc_pine` 原始完整结果），通过 `adapt_smc_to_display_dto` 裁出
+    展示 DTO 后消费，不再调用 `compute_smc_adapter`（消除 SMC #2，kernel 每股
+    只算一次）。未提供时（非 canonical 独立调用路径）回退到 `compute_smc_adapter`
+    单次计算，行为与修改前一致。
+
     Args:
         bars: 已完成日线 DataFrame（需 >= 250 根）
+        smc_result: 可选，`compute_smc_pine` 的完整原始结果（_shared_raw.smc_result）。
+            提供时复用，不重跑 SMC kernel。
 
     Returns:
         dict with 14 个 freshness 因子（int 或 null）
     """
-    from app.services.canonical_adapters import compute_smc_adapter
-
     result: dict[str, Any] = {
         # BOS (4)
         "smc_bos_bullish_internal_freshness_bars": None,
@@ -1538,7 +1547,16 @@ def _compute_smc_freshness_factors(bars: pd.DataFrame) -> dict[str, Any]:
         return result
 
     try:
-        smc_dto = compute_smc_adapter(bars, display_bars=len(bars))
+        if smc_result is not None:
+            # [3.4B-3A] 复用 canonical 主链已算好的 SMC 原始结果（compute-once）
+            from app.services.smc_view_adapter import adapt_smc_to_display_dto
+
+            smc_dto = adapt_smc_to_display_dto(smc_result, len(bars))
+        else:
+            # 非 canonical 独立调用路径：单次计算展示 DTO（与修改前一致）
+            from app.services.canonical_adapters import compute_smc_adapter
+
+            smc_dto = compute_smc_adapter(bars, display_bars=len(bars))
     except Exception as exc:
         logger.warning("SMC freshness 计算失败: %s", exc)
         return result
@@ -1730,11 +1748,14 @@ def _compute_all_factors_for_bars(
 
     # 6. SMC freshness（5 个独立日线因子，仅 1d 周期计算）
     #    [PROMPT.md §四.4] 事件 bar=0，此后按已完成日线 bar 递增，从未发生为 null
+    #    [3.4B-3A] canonical 链提供 precomputed["smc_result"] 时复用（SMC kernel 每股只算一次）
     if timeframe == "1d":
         try:
             if is_canonical and diagnostics is not None:
                 diagnostics.bump("smc")
-            factors["smc_freshness"] = _compute_smc_freshness_factors(bars)
+            factors["smc_freshness"] = _compute_smc_freshness_factors(
+                bars, smc_result=(precomputed or {}).get("smc_result")
+            )
         except Exception as exc:
             degraded_reasons.append(f"{timeframe}: smc_freshness failed: {exc}")
             logger.warning("%s SMC freshness 计算失败: %s", timeframe, exc)

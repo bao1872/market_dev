@@ -1,0 +1,13 @@
+{
+  "phase": "3.4B-3A",
+  "mode": "bench",
+  "note": "adapter=SMC #2（被消除）；dto=DTO 转换（替代）。净省 ≈ adapter - dto",
+  "summary": {
+    "samples": 105,
+    "smc_adapter_ms_p50": 4.713,
+    "smc_adapter_ms_p95": 5.471,
+    "dto_ms_p50": 0.204,
+    "dto_ms_p95": 0.243,
+    "net_saving_ms_p50": 4.509
+  }
+}
