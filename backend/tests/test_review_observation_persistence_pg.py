@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import date
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import func, select
@@ -24,12 +25,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.scope_observation import MemberObservation, compute_scope_observation
 from app.models.market_review import (
+    MarketReviewRun,
     MarketReviewScopeSnapshot,
     ReviewScopeObservationFact,
 )
 from app.services.review_observation_persistence_service import (
     ScopeObservationPayloadValidationError,
     get_scope_observation_fact,
+    get_scope_observation_fact_by_run,
     list_scope_observation_facts,
     save_scope_observation_fact,
 )
@@ -124,6 +127,29 @@ async def _count(db: AsyncSession, scope_type: str, scope_key: str, trade_date: 
     return int((await db.execute(stmt)).scalar_one())
 
 
+def _make_run(*, trade_date: date) -> MarketReviewRun:
+    """最小合法 run 行，用于把 fact 绑定到真实 run（满足 review_run_id FK）。
+
+    source_core_run_id / source_board_run_id 为无 FK 的 UUID 列，可任选。
+    """
+    return MarketReviewRun(
+        id=uuid.uuid4(),
+        trade_date=trade_date,
+        source_core_run_id=uuid.uuid4(),
+        source_board_run_id=uuid.uuid4(),
+        algorithm_version="review-contract-test",
+        filter_version="filters-test",
+        baseline_window=120,
+        status="created",
+        expected_scope_count=0,
+        succeeded_scope_count=0,
+        failed_scope_count=0,
+        signal_count=0,
+        coverage_ratio=Decimal("0.0"),
+        metadata_json={},
+    )
+
+
 async def test_insert(db_session: AsyncSession) -> None:
     prep = _prep(scope_type="concept", scope_key="A")
     await save_scope_observation_fact(db_session, prep, _canonical_obs(marker_mean=0.01))
@@ -136,13 +162,29 @@ async def test_insert(db_session: AsyncSession) -> None:
 
 
 async def test_idempotent_update_row_count_stays_one(db_session: AsyncSession) -> None:
+    """同 run 内重复 save 幂等更新（row_count 保持 1）——091 run-lineage 契约。
+
+    091 把唯一约束从 (trade_date, scope_type, scope_key) 改为
+    (review_run_id, trade_date, scope_type, scope_key)，幂等 grain 变为 per-run。
+    运行时写入均带 review_run_id（非空），PG 唯一约束因此能去重：同一 run 内
+    重复 save 更新同一行。review_run_id=NULL 仅用于兼容历史无 binding 行，
+    按 migration 091 注释设计不去重（故幂等断言必须绑定真实 run）。
+    """
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()  # 先落一行 run（满足 fact 的 FK），拿到 run.id
+
     prep = _prep(scope_type="concept", scope_key="A")
-    await save_scope_observation_fact(db_session, prep, _canonical_obs(marker_mean=0.01))
-    await save_scope_observation_fact(db_session, prep, _canonical_obs(marker_mean=0.05))
+    await save_scope_observation_fact(
+        db_session, prep, _canonical_obs(marker_mean=0.01), review_run_id=run.id,
+    )
+    await save_scope_observation_fact(
+        db_session, prep, _canonical_obs(marker_mean=0.05), review_run_id=run.id,
+    )
     await db_session.commit()
 
     assert await _count(db_session, "concept", "A", T) == 1
-    fact = await get_scope_observation_fact(db_session, T, "concept", "A")
+    fact = await get_scope_observation_fact_by_run(db_session, run.id, T, "concept", "A")
     assert fact is not None
     assert fact.observation_payload["price"]["return"]["mean"] == pytest.approx(0.06)
 
