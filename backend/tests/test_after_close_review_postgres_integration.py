@@ -37,6 +37,9 @@ from app.models.market_review import (
 )
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.review_metric_observation_service import persist_metric_observations
+from app.services.review_observation_persistence_service import (
+    save_scope_composition_snapshot,
+)
 from app.services.review_orchestrator_service import (
     ITEM_FAILED,
     PHASE_METRICS,
@@ -295,6 +298,42 @@ async def _add_scope_snapshot(
     run.failed_scope_count = 0
     run.coverage_ratio = Decimal("1")
     run.status = "signals_ready"
+    if not blocked:
+        # [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 发布门禁已从 legacy P/Q/U/C/V
+        # normalized_ready 切换到 canonical composition readiness：
+        # `evaluate_publish_gate` 只消费 run.metadata_json["canonical_composition_readiness"]，
+        # 且要求其中所有已记录 scope_key == "ready"。market / major_index / style 为
+        # 合法跳过家族（不产生 composition）；activated 的 industry_l1 board scope 必须
+        # 真实持久化 ready canonical composition + 写入 gate readiness 才有资格发布。
+        # composition 计算正确性由专属 determinism 测试覆盖，此处仅构造发布契约前置条件。
+        board_scope_key = str(board_snapshot.board_id)
+        composition = {
+            "scope_type": "industry_l1",
+            "scope_key": board_scope_key,
+            "trade_date": run.trade_date.isoformat(),
+            "composition_readiness": "ready",
+            "scope_observation": {"status": "ready", "value": 1.0},
+            "historical_dynamics": {"status": "ready"},
+            "internal_structure_facts": {"status": "ready"},
+            "leadership": {"status": "ready"},
+            "member_attribution": {"status": "ready"},
+        }
+        await save_scope_composition_snapshot(
+            session,
+            review_run_id=run.id,
+            scope_type="industry_l1",
+            scope_key=board_scope_key,
+            trade_date=run.trade_date,
+            algorithm_version=run.algorithm_version,
+            composition_payload=composition,
+        )
+        # JSONB 必须整体重赋值（非就地 setitem），否则 SQLAlchemy 不标记 dirty，
+        # commit 后 readiness 静默丢失——与 orchestrator 同一约束。
+        _meta = dict(run.metadata_json or {})
+        run.metadata_json = {
+            **_meta,
+            "canonical_composition_readiness": {board_scope_key: "ready"},
+        }
     await session.flush()
 
 
