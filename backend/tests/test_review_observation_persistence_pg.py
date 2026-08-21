@@ -14,6 +14,7 @@ Run on the isolated verification DB only (never bz_stock):
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date
 
 import pytest
@@ -46,6 +47,7 @@ def _canonical_obs(
     scope_key: str = "A",
     trade_date: date = T,
     marker_mean: float = 0.01,
+    event_coverage_member_ids: Iterable[str] | None = None,
 ) -> dict:
     """Legal Canonical Observation payload produced by the real Core.
 
@@ -81,6 +83,7 @@ def _canonical_obs(
         pit_member_ids=["m1", "m2"],
         pit_member_ids_t1=["m1", "m2"],
         members=members,
+        event_coverage_member_ids=event_coverage_member_ids,
     )
 
 
