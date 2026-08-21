@@ -926,6 +926,7 @@ async def compute_review_core_for_trade_date(
 
     extra = await _extract_extra_fields(
         df_1d, instrument_id, trade_date, primary_source_bar_hash, primary_adj_factor_hash,
+        precomputed_bb_df=_shared_raw.bb_df if _shared_raw is not None else None,
     )
 
     source_primary = _normalize_primary_bar_time(df_1d, trade_date)
@@ -1657,12 +1658,18 @@ async def _extract_extra_fields(
     trade_date: date,
     source_bar_hash: str | None = None,
     adj_factor_hash: str | None = None,
+    precomputed_bb_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """从日线 bars 最后一根提取 current_price, change_pct, BB 绝对值。
 
     [CP-13] BB 经 CanonicalComputationService.compute(algorithm_id="bollinger", ...) 调用，
     使用 compute_bollinger kernel（DataFrame 11 列）替代旧 bollinger 3-tuple kernel。
     bb_mid/bb_upper/bb_lower 公式不变（与 structural_factor_service 对齐）。
+
+    [3.4B-3B] precomputed_bb_df 提供时（review-core：`_shared_raw.bb_df`，即 First Pyramid
+    已算好的 Bollinger DataFrame），直接复用其 bb_mid/bb_upper/bb_lower 三列，不再经
+    canonical Bollinger 重复计算（BB #2 closure）。precomputed_bb_df 为 None / 缺三列 /
+    不可用时回退原 canonical 路径，非 review-core 调用完全不变。
     """
     extra: dict[str, Any] = {
         "current_price": None,
@@ -1686,21 +1693,35 @@ async def _extract_extra_fields(
     # BB 绝对值（需要 >= 20 根 bar）
     if len(df_1d) >= _BB_WIN + 1:
         try:
-            # [CP-13] 经 canonical 调用 bollinger adapter（v2: DataFrame 11 列）
-            bb_canonical = await CanonicalComputationService.compute(
-                algorithm_id="bollinger",
-                instrument_id=instrument_id,
-                as_of=trade_date.isoformat(),
-                source_bar_hash=source_bar_hash,
-                adj_factor_hash=adj_factor_hash,
-                bars=df_1d,
-                length=_BB_WIN,
-                mult=_BB_K,
-            )
-            bb_df = bb_canonical.payload
-            upper_series = bb_df["bb_upper"]
-            mid_series = bb_df["bb_mid"]
-            lower_series = bb_df["bb_lower"]
+            if (
+                precomputed_bb_df is not None
+                and not precomputed_bb_df.empty
+                and all(
+                    col in precomputed_bb_df.columns
+                    for col in ("bb_upper", "bb_mid", "bb_lower")
+                )
+            ):
+                # [3.4B-3B] review-core 复用 _shared_raw.bb_df（compute-once），
+                # 不重跑 canonical Bollinger；三字段与 canonical 105/105 全序列 exact。
+                upper_series = precomputed_bb_df["bb_upper"]
+                mid_series = precomputed_bb_df["bb_mid"]
+                lower_series = precomputed_bb_df["bb_lower"]
+            else:
+                # [CP-13] 经 canonical 调用 bollinger adapter（v2: DataFrame 11 列）
+                bb_canonical = await CanonicalComputationService.compute(
+                    algorithm_id="bollinger",
+                    instrument_id=instrument_id,
+                    as_of=trade_date.isoformat(),
+                    source_bar_hash=source_bar_hash,
+                    adj_factor_hash=adj_factor_hash,
+                    bars=df_1d,
+                    length=_BB_WIN,
+                    mult=_BB_K,
+                )
+                bb_df = bb_canonical.payload
+                upper_series = bb_df["bb_upper"]
+                mid_series = bb_df["bb_mid"]
+                lower_series = bb_df["bb_lower"]
             extra["bb_upper"] = float(upper_series.iloc[-1]) if pd.notna(upper_series.iloc[-1]) else None
             extra["bb_mid"] = float(mid_series.iloc[-1]) if pd.notna(mid_series.iloc[-1]) else None
             extra["bb_lower"] = float(lower_series.iloc[-1]) if pd.notna(lower_series.iloc[-1]) else None
