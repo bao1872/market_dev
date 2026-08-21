@@ -65,6 +65,7 @@ from app.domain.review.canonical_composition import (
 )
 from app.domain.review.filter_definitions import REVIEW_FILTER_VERSION
 from app.domain.review.review_capability import (
+    is_scope_observation_persistence_activated,
     resolve_scope_capability,
 )
 from app.domain.review.scope_observation import compute_scope_observation
@@ -1238,6 +1239,15 @@ async def _compute_family_dynamics_maps(
         by_family.setdefault(scope.scope_type, []).append(scope)
     result: dict[str, Any] = {}
     for scope_type, family_scopes in by_family.items():
+        # [REVIEW-DEV-RC-091] 只对 canonical persistence 激活家族重建历史 Dynamics。
+        # Historical reconstruction 只支持板块家族（industry_l1/l2/l3/concept）；
+        # market/major_index/style 属非激活家族（historical_dynamics_runtime_wired
+        # == persistence_activated == False），既不需要该层，强行重建也会触发
+        # HistoricalReconstructionError(unsupported scope_type) 使整个 run 失败。
+        # 与本函数 docstring「Compute Historical Dynamics for all activated scopes」
+        # 意图一致，且与 _compute_canonical_composition_phase 的非激活合法跳过对齐。
+        if not is_scope_observation_persistence_activated(scope_type):
+            continue
         scope_keys = [s.scope_key for s in family_scopes]
         batch_results = await compute_current_static_scope_dynamics_batch(
             session,

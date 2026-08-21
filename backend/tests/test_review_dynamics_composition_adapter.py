@@ -22,6 +22,8 @@ Pure unit tests — no DB, no IO.
 """
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from app.domain.review.canonical_composition import (
@@ -152,3 +154,61 @@ def test_adapter_preserves_real_dynamics_entering_ready_composition() -> None:
     assert comp["composition_readiness"] == STATUS_READY
     assert comp["historical_dynamics"]["scope_dynamics"] is adapted["scope_dynamics"]
     assert comp["historical_dynamics"]["status"] == STATUS_READY
+
+
+# ---------------------------------------------------------------------------
+# Gate 3 — _compute_family_dynamics_maps only reconstructs activated families
+#      (REVIEW-DEV-RC-091 regression: market/major_index/style must be skipped,
+#      otherwise HistoricalReconstructionError(unsupported scope_type=market)
+#      fails the whole compute_run in production).
+# ---------------------------------------------------------------------------
+def test_family_dynamics_skips_non_activated_families(monkeypatch) -> None:
+    from datetime import date as _date
+
+    from app.services.review_orchestrator_service import (
+        _compute_family_dynamics_maps,
+        compute_current_static_scope_dynamics_batch,
+    )
+    from app.services.review_scope_service import ScopeDefinition
+
+    called: list[tuple[str, list[str]]] = []
+
+    async def _record_batch(session, scope_type, scope_keys, axis, *, analysis_asof_date):
+        # market/major_index/style must NEVER reach the reconstruction owner.
+        assert scope_type in {
+            "industry_l1", "industry_l2", "industry_l3", "concept"
+        }, f"unsupported family reached reconstruction: {scope_type}"
+        called.append((scope_type, list(scope_keys)))
+        return [{"scope": {"scope_key": k}} for k in scope_keys]
+
+    monkeypatch.setattr(
+        "app.services.review_orchestrator_service"
+        ".compute_current_static_scope_dynamics_batch",
+        _record_batch,
+    )
+
+    async def _fake_axis(session, asof_date):
+        return [_date(2026, 8, 19)]
+
+    monkeypatch.setattr(
+        "app.services.review_orchestrator_service._build_dynamics_trading_axis",
+        _fake_axis,
+    )
+
+    class _Run:
+        trade_date = _date(2026, 8, 19)
+
+    scopes = [
+        ScopeDefinition("market", "market", "全市场"),
+        ScopeDefinition("major_index", "idx", "上证指数"),
+        ScopeDefinition("style", "style", "某风格"),
+        ScopeDefinition("concept", "c1", "概念1"),
+        ScopeDefinition("industry_l1", "i1", "行业1"),
+    ]
+
+    result = asyncio.run(_compute_family_dynamics_maps(object(), _Run(), scopes))
+    # activated families still produce their scopes in the result map
+    assert "c1" in result and "i1" in result
+    # only activated families reached reconstruction; market/major_index/style skipped
+    assert [t for t, _ in called] == ["concept", "industry_l1"]
+    assert not any(t == "market" for t, _ in called)
