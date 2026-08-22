@@ -210,8 +210,17 @@ if [ -z "$TARGET_TREE_SHA" ]; then
   echo "[4B-0G-R3][remote] ERROR: 无法解析 TARGET_CODE_SHA:backend/app tree" >&2
   exit 5
 fi
+EXPECTED_TARGET_APP_TREE_SHA="8f7ff995d69884e9182c89ab1025103f5a389626"
 echo "  materialized app tree sha = $TARGET_TREE_SHA"
-echo "  expected   app tree sha   = 8f7ff995d69884e9182c89ab1025103f5a389626"
+echo "  expected   app tree sha   = $EXPECTED_TARGET_APP_TREE_SHA"
+# R3F hard gate: materialized tree 必须精确等于 TARGET 的 exact app tree。
+# 这是方案 C 的核心事实：实际计算代码 = ac9c。tree 错配即 false-green，立即 STOP。
+if [ "$TARGET_TREE_SHA" != "$EXPECTED_TARGET_APP_TREE_SHA" ]; then
+  echo "[4B-0G-R3F][remote] ERROR: materialized target app tree ($TARGET_TREE_SHA) " \
+       "!= expected ($EXPECTED_TARGET_APP_TREE_SHA)，STOP。" >&2
+  exit 5
+fi
+echo "  target app tree identity: 精确匹配 ac9c:backend/app"
 
 # ---- f/g. read-only heavy-task preflight（production ORM，不写） ----
 # 用同类短命容器执行 harness --heavy-check（与 benchmark 同源 production app）。
@@ -266,17 +275,21 @@ docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" ru
   worker-after-close \
   -m benchmark.run_4b_server_benchmark
 
-# ---- i2. 资源契约证据：比较 one-shot 与常驻 worker-after-close 的 resource envelope ----
-# 仅记录 Image / Memory / NanoCpus / PidsLimit / Network，mismatch → STOP（不入 compute）。
-echo "[4B-0G-R3][remote] i2. 资源契约核验（one-shot vs worker-after-close）..."
+# ---- i2. 资源契约证据：比较 one-shot 与常驻 worker-after-close 的 resource envelope，
+#          并核验实际 /app/app mount 来源（R3F：方案 C 核心事实 = 实际计算代码 = ac9c）。
+# mismatch → STOP（不入 compute）。
+echo "[4B-0G-R3F][remote] i2. 资源契约 + /app/app mount 核验（one-shot vs worker-after-close）..."
 RUNTIME_CONTRACT="$BENCHMARK_WORKSPACE/output/4B-server-db/runtime_contract.json"
 docker inspect trading-worker-after-close "$CONTAINER_NAME" >/dev/null 2>&1 || {
-  echo "[4B-0G-R3][remote] ERROR: 无法 inspect trading-worker-after-close 或 benchmark 容器" >&2
+  echo "[4B-0G-R3F][remote] ERROR: 无法 inspect trading-worker-after-close 或 benchmark 容器" >&2
   exit 12
 }
-python3 - "$CONTAINER_NAME" "$RUNTIME_CONTRACT" <<'PY'
-import sys, json, subprocess
-cn, out = sys.argv[1], sys.argv[2]
+# 期望 /app/app 的 effective source = materialized target app 的 realpath。
+# 命令行 -v 覆盖 service live mount；此处 fail-closed 实测确认最终结果。
+EXPECTED_APP_MOUNT_SOURCE="$(realpath "$TARGET_APP_ACTUAL")"
+python3 - "$CONTAINER_NAME" "$RUNTIME_CONTRACT" "$EXPECTED_APP_MOUNT_SOURCE" <<'PY'
+import sys, json, subprocess, os
+cn, out, expected_src = sys.argv[1], sys.argv[2], sys.argv[3]
 def inspect(name):
     raw = subprocess.check_output(["docker","inspect",name], text=True)
     return json.loads(raw)[0]
@@ -286,6 +299,48 @@ def hostcfg(c): return c.get("HostConfig", {})
 base_h, one_h = hostcfg(base), hostcfg(one)
 base_net = list((base.get("NetworkSettings",{}) or {}).get("Networks",{}) or {})
 one_net  = list((one.get("NetworkSettings",{}) or {}).get("Networks",{}) or {})
+
+# ---- R3F: 实际 /app/app mount 核验 ----
+# 仅看 Destination == "/app/app" 的 mount（不依赖 Mounts 中的命名类型，直接比字段）。
+app_mounts = [
+    m for m in (one.get("Mounts") or [])
+    if (m.get("Destination") or m.get("Target")) == "/app/app"
+]
+n_app = len(app_mounts)
+if n_app != 1:
+    # 多于或少于 1 个 effective /app/app mount 都非法：
+    #  - 0 个：/app/app 来自镜像层（= 常驻 live 的 app，即 eff，非 target）→ false-green
+    #  - >1 个：mount precedence 不明确，无法保证 source → STOP
+    target_mount = {
+        "destination": "/app/app",
+        "expected_source": expected_src,
+        "actual_source": None,
+        "readonly": False,
+        "exact_match": False,
+        "effective_app_mount_count": n_app,
+        "error": f"effective /app/app mount 数量={n_app}（必须恰好 1 个）",
+    }
+    mount_ok = False
+else:
+    m = app_mounts[0]
+    src = m.get("Source") or m.get("Name") or ""
+    rw = not bool(m.get("RW", False))
+    exact = (os.path.realpath(src) == os.path.realpath(expected_src)) and rw
+    target_mount = {
+        "destination": "/app/app",
+        "expected_source": expected_src,
+        "actual_source": src,
+        "readonly": rw,
+        "exact_match": bool(exact),
+        "effective_app_mount_count": 1,
+        "error": None if exact else (
+            f"source 不匹配：actual={src} expected={expected_src}"
+            if not (os.path.realpath(src) == os.path.realpath(expected_src))
+            else "mount 非 readonly（RW=true）"
+        ),
+    }
+    mount_ok = bool(exact)
+
 contract = {
     "baseline_container": "trading-worker-after-close",
     "benchmark_container": cn,
@@ -294,6 +349,7 @@ contract = {
     "nanocpus_match": base_h.get("NanoCpus") == one_h.get("NanoCpus"),
     "pidslimit_match": base_h.get("PidsLimit") == one_h.get("PidsLimit"),
     "network_compatible": (set(base_net) & set(one_net)) != set() or base_net == one_net,
+    "target_app_mount": target_mount,
     "baseline": {"image": base["Image"], "memory": base_h.get("Memory"),
                  "nanocpus": base_h.get("NanoCpus"), "pidslimit": base_h.get("PidsLimit"),
                  "networks": base_net},
@@ -301,20 +357,30 @@ contract = {
                   "nanocpus": one_h.get("NanoCpus"), "pidslimit": one_h.get("PidsLimit"),
                   "networks": one_net},
     "note": "benchmark one-shot 应继承 worker-after-close 同类 resource envelope；"
-            "mismatch 表示 cgroup 不对齐，CPU/RSS baseline 不可信。",
+            "mismatch 表示 cgroup 不对齐，CPU/RSS baseline 不可信。"
+            "target_app_mount.exact_match 为方案 C 核心事实：实际 /app/app 必须精确指向 "
+            "materialized target app（ac9c），且 readonly；否则性能结果对象错误（false-green）。",
 }
-ok = (contract["image_match"] and contract["memory_match"] and contract["nanocpus_match"]
+envelope_ok = (contract["image_match"] and contract["memory_match"] and contract["nanocpus_match"]
       and contract["pidslimit_match"] and contract["network_compatible"])
-contract["envelope_aligned"] = bool(ok)
+contract["envelope_aligned"] = bool(envelope_ok)
+# 总 gate：envelope 对齐 AND /app/app mount 精确匹配
+contract["accept_run"] = bool(envelope_ok and mount_ok)
 with open(out, "w", encoding="utf-8") as f:
     json.dump(contract, f, ensure_ascii=False, indent=2)
-if not ok:
-    print("[4B-0G-R3][remote] ERROR: 资源契约不对齐，STOP before full compute", file=sys.stderr)
+if not contract["accept_run"]:
+    print("[4B-0G-R3F][remote] ERROR: 契约不对齐或 /app/app mount 非 target，STOP before full compute",
+          file=sys.stderr)
+    print(f"[4B-0G-R3F][remote]   envelope_aligned={envelope_ok} target_app_mount.exact_match={mount_ok}",
+          file=sys.stderr)
     sys.exit(13)
-print("[4B-0G-R3][remote] 资源契约对齐: image/memory/nanocpus/pidslimit/network 均匹配")
+print("[4B-0G-R3F][remote] 资源契约对齐 + /app/app mount 精确指向 target app（readonly）: PASS")
 PY
 CONTRACT_RC=$?
 if [ "$CONTRACT_RC" -ne 0 ]; then
+  # mount mismatch 属于 false-green 风险：立即 kill 容器，该 run 不作为 benchmark evidence。
+  echo "[4B-0G-R3F][remote] 契约/mount gate 失败，立即 kill benchmark 容器。" >&2
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   exit "$CONTRACT_RC"
 fi
 

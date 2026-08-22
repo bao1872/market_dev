@@ -556,6 +556,7 @@ def verify_production_identity() -> None:
     live_sha = _require_hex("PANJI_LIVE_RUNTIME_SHA")
     runtime_sha = _require_hex("PANJI_RUNTIME_GIT_SHA")
     target_sha = _require_hex("PANJI_TARGET_CODE_SHA")
+    target_tree_sha = _require_hex("PANJI_TARGET_APP_TREE_SHA")
 
     print(f"[4B] server_repo_head    = {server_head}")
     print(f"[4B] live_runtime_sha   = {live_sha}")
@@ -563,6 +564,8 @@ def verify_production_identity() -> None:
     print(f"[4B] deployed_runtime_sha (required) = {DEPLOYED_RUNTIME_SHA}")
     print(f"[4B] target_code_sha    = {target_sha}")
     print(f"[4B] target_code_sha (required)      = {TARGET_CODE_SHA}")
+    print(f"[4B] target_app_tree_sha = {target_tree_sha}")
+    print(f"[4B] target_app_tree_sha (required)  = {TARGET_APP_TREE_SHA}")
 
     # 部署身份三要件必须互相一致且等于 DEPLOYED_RUNTIME_SHA
     if not (server_head == live_sha == runtime_sha == DEPLOYED_RUNTIME_SHA):
@@ -572,6 +575,12 @@ def verify_production_identity() -> None:
     # 被测应用代码 SHA 必须精确等于 TARGET_CODE_SHA（隔离 one-shot 的 /app/app 来源）
     if target_sha != TARGET_CODE_SHA:
         print("[4B] STOP: target_code_sha 未对齐 TARGET_CODE_SHA，拒绝运行")
+        raise SystemExit(2)
+
+    # R3F: target app tree 必须精确等于 TARGET 的 exact app tree。这是方案 C 的核心事实：
+    # 实际计算代码 = ac9c。env 缺失/非 40-hex/不等都立即 SystemExit(2)，避免 false-green。
+    if target_tree_sha != TARGET_APP_TREE_SHA:
+        print("[4B] STOP: target_app_tree_sha 未对齐 TARGET_APP_TREE_SHA，拒绝运行")
         raise SystemExit(2)
 
 
