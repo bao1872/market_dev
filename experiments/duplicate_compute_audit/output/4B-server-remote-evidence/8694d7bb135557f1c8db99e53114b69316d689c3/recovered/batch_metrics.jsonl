@@ -1,0 +1,1 @@
+{"note": "4B 通过 compute_review_core_with_run_items 黑盒主链执行；逐 batch 计时由内部 MDAS/CPU wrapper 全局聚合，见 stage_timing.json", "total_batches": 212, "mdas_batch_reads": 212, "mdas_calls": 212, "mdas_bars_aggregated": 4448431}

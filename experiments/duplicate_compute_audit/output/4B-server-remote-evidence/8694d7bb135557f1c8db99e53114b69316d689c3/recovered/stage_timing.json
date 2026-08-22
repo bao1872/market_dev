@@ -1,0 +1,19 @@
+{
+  "total_wall_clock_sec": 4765.809,
+  "universe_read_sec": 0.0409,
+  "config_resolution_sec": 0.0634,
+  "mdas_db_wall_clock_sec": 567.413,
+  "mdas_calls": 212,
+  "mdas_bars_aggregated": 4448431,
+  "review_core_compute_wall_clock_sec": 4189.999,
+  "review_core_calls": 5293,
+  "db_fallback_subcomponent": {
+    "calls": 0,
+    "elapsed_sec": 0.0,
+    "note": "db_fallback 发生于 compute_review_core_for_trade_date 内部，其 elapsed 已含于 review_core_compute_wall_clock_sec，不单独再加。理想 calls=0。"
+  },
+  "serialization_artifact_sec": null,
+  "fake_snapshot_persist_sec": 0.0027,
+  "other_orchestration_sec": 8.3948,
+  "note": "MDAS batch 与 Review-Core compute 正常路径不嵌套：MDAS batch 结果直接传入 compute；db_fallback 仅当 bars=None 时触发（理想 0）。other_orchestration 为 total - mdas - review_core - fake_persist 残差（不含 db_fallback）。"
+}

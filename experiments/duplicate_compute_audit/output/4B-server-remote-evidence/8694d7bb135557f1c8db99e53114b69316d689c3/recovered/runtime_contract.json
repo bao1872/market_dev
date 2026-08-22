@@ -1,0 +1,39 @@
+{
+  "baseline_container": "trading-worker-after-close",
+  "benchmark_container": "panji-benchmark-4b-1787377037",
+  "image_match": true,
+  "memory_match": true,
+  "nanocpus_match": true,
+  "pidslimit_match": true,
+  "network_compatible": true,
+  "target_app_mount": {
+    "destination": "/app/app",
+    "expected_source": "/tmp/4b-target-app-20260822-133717-ac9c3810b63f64e702b0d60f7e7822112ab137fb/backend/app",
+    "actual_source": "/tmp/4b-target-app-20260822-133717-ac9c3810b63f64e702b0d60f7e7822112ab137fb/backend/app",
+    "readonly": true,
+    "exact_match": true,
+    "effective_app_mount_count": 1,
+    "error": null
+  },
+  "baseline": {
+    "image": "sha256:abee7c616b5fbdbeb35fd2961c11c7384b463d3648a7e0f0a57f4bc3302d1c12",
+    "memory": 4294967296,
+    "nanocpus": 1000000000,
+    "pidslimit": 1024,
+    "networks": [
+      "web_dev_default"
+    ]
+  },
+  "benchmark": {
+    "image": "sha256:abee7c616b5fbdbeb35fd2961c11c7384b463d3648a7e0f0a57f4bc3302d1c12",
+    "memory": 4294967296,
+    "nanocpus": 1000000000,
+    "pidslimit": 1024,
+    "networks": [
+      "web_dev_default"
+    ]
+  },
+  "note": "benchmark one-shot 应继承 worker-after-close 同类 resource envelope；mismatch 表示 cgroup 不对齐，CPU/RSS baseline 不可信。target_app_mount.exact_match 为方案 C 核心事实：实际 /app/app 必须精确指向 materialized target app（ac9c），且 readonly；否则性能结果对象错误（false-green）。",
+  "envelope_aligned": true,
+  "accept_run": true
+}

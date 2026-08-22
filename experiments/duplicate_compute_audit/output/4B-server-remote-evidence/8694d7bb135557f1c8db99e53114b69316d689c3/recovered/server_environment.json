@@ -1,0 +1,12 @@
+{
+  "hostname_anonymized": "1fe-***",
+  "cpu_model": "unknown",
+  "physical_cores": 2,
+  "logical_cores": 4,
+  "ram_total_gib": 7.44,
+  "python_version": "3.11.15",
+  "pandas_version": "3.0.5",
+  "numpy_version": "2.4.6",
+  "avg_cpu_percent": 0.0,
+  "recorded_at": "2026-08-22T06:57:16.065635+00:00"
+}

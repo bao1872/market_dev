@@ -1,0 +1,10 @@
+{
+  "snapshot_run_id": "2b7c5877-7d36-4396-84c3-7186dc911073",
+  "trade_date": "2026-08-17",
+  "instrument_count": 5293,
+  "distinct_instrument_count": 5293,
+  "computed_sha256": "c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577",
+  "expected_sha256": "c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577",
+  "match": true,
+  "universe_read_elapsed_sec": 0.0409
+}

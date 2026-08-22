@@ -1,0 +1,13 @@
+{
+  "parameter_hash": "5284aa5fec7f58ce65ee7fcf416be5620baa21a345e93c7e942995ef654705aa",
+  "expected_parameter_hash": "5284aa5fec7f58ce65ee7fcf416be5620baa21a345e93c7e942995ef654705aa",
+  "match": true,
+  "algorithm_versions": {
+    "dsa": "1.4.1",
+    "smc": "smc-v1",
+    "momentum": "momentum-v1",
+    "bollinger": "bollinger-v1",
+    "sqzmom": "sqzmom-v1"
+  },
+  "config_resolution_elapsed_sec": 0.0634
+}

@@ -1,0 +1,10 @@
+{
+  "deployed_runtime_sha": "ecc2388ef736a42f89d9d2a4b1b74907cc806253",
+  "server_repo_head": "ecc2388ef736a42f89d9d2a4b1b74907cc806253",
+  "live_runtime_sha": "ecc2388ef736a42f89d9d2a4b1b74907cc806253",
+  "runtime_git_sha": "ecc2388ef736a42f89d9d2a4b1b74907cc806253",
+  "target_code_sha": "ac9c3810b63f64e702b0d60f7e7822112ab137fb",
+  "target_app_tree_sha": "8f7ff995d69884e9182c89ab1025103f5a389626",
+  "benchmark_harness_sha": "8694d7bb135557f1c8db99e53114b69316d689c3",
+  "note": "方案 C 身份模型：deployed_runtime_sha 为服务器当前真实部署/运行身份（server_repo_head / live_runtime_sha / runtime_git_sha 三者必须一致且等于它，由 governed remote runner 在容器启动前 gate）；target_code_sha 为本次被测应用代码SHA（exact Git object），one-shot 容器内 /app/app 即其 backend/app，隔离不部署。两者明确不同：性能结果的对象是 target_code_sha 应用代码，在 production-equivalent资源 + 真实 bz_stock 上的表现，而非声称 deployed runtime 自身的基准。benchmark_harness_sha 为本次 harness 脚本 commit SHA，是独立身份。"
+}

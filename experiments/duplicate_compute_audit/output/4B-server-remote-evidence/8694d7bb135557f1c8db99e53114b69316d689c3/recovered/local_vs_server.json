@@ -1,0 +1,16 @@
+{
+  "universe": {
+    "local_projection": 5293,
+    "server_actual": 5293
+  },
+  "local_central_projection_min": 36.72,
+  "local_optimistic_projection_min": 31.21,
+  "local_conservative_projection_min": 42.22,
+  "server_full_wall_clock_min": 79.43,
+  "server_db_mdas_min": 9.46,
+  "server_cpu_compute_min": 69.83,
+  "server_db_fallback_calls": 0,
+  "server_other_orchestration_min": 0.14,
+  "comparison_note": "LOCAL PROJECTION 仅作对照基线，非最终结果；服务器实测为真实 DB + real compute。",
+  "decision_gate": "B: Server 明显 >42min → 先调查 DB/MDAS（batching/query/index/connection/I/O）"
+}

@@ -1,0 +1,11 @@
+{
+  "universe": 5293,
+  "snapshot_count": 5293,
+  "failed_count": 0,
+  "skipped_count": 0,
+  "processed": 5293,
+  "external_calls": 0,
+  "db_write_attempts": 0,
+  "gate_passed": true,
+  "note": "本 benchmark 要求 snapshot_count==universe 且 failed/skipped==0；无 bars / insufficient history 属 production degraded snapshot 合同，不应表现为计算失败。external_calls==0 与 db_write_attempts==0 为硬门禁。"
+}

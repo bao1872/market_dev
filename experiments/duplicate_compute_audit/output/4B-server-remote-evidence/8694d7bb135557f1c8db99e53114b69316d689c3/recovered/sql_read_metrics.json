@@ -1,0 +1,30 @@
+{
+  "select_count": 1061,
+  "select_total_elapsed_sec": 45.304,
+  "statement_count": 1061,
+  "other_statement_count": 0,
+  "db_write_attempts": 0,
+  "by_category": {
+    "bars_daily": {
+      "count": 424,
+      "elapsed_sec": 44.765
+    },
+    "adj_factor": {
+      "count": 0,
+      "elapsed_sec": 0.0
+    },
+    "instruments": {
+      "count": 212,
+      "elapsed_sec": 0.092
+    },
+    "strategy": {
+      "count": 1,
+      "elapsed_sec": 0.001
+    },
+    "other": {
+      "count": 424,
+      "elapsed_sec": 0.446
+    }
+  },
+  "note": "仅记录 SELECT/read CTE 的 count/elapsed 与粗粒度表分类，不保存 SQL 参数/凭据/query text；任意 INSERT/UPDATE/DELETE/MERGE/DDL 触发 read-only guard 并计数。"
+}

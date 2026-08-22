@@ -1,0 +1,18 @@
+{
+  "trade_date": "2026-08-17",
+  "universe_size": 5293,
+  "batch_size": 25,
+  "snapshot_count": 5293,
+  "failed_count": 0,
+  "skipped_count": 0,
+  "coverage": 1.0,
+  "failure_threshold": 1.0,
+  "mdas_batch_reads": 212,
+  "total_wall_clock_sec": 4765.809,
+  "total_cpu_process_time_sec": 4762.553,
+  "external_provider_calls": 0,
+  "db_fallback_calls": 0,
+  "db_write_attempts": 0,
+  "scheduler_triggers": 0,
+  "publish_calls": 0
+}
