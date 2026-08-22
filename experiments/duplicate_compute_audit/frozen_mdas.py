@@ -46,15 +46,17 @@ class FrozenMDAS:
         self._data_dir = data_dir
         self._bars = pd.read_parquet(data_dir / "bars_daily_raw.parquet")
         self._factors = pd.read_parquet(data_dir / "adj_factors.parquet")
-        # 预分区：instrument_id -> list of row dicts（保持 trade_date 排序）
+        # 预分区：instrument_id(str) -> DataFrame（保持 trade_date 排序）
+        # [4A-3L] 正式主链的 instrument_id 是 UUID；统一 str() 以支持 UUID 或 str 两种 key，
+        # 否则 UUID 在 5293 全量真实链路查不到 parquet 分区。
         self._bars_by_inst: dict[str, pd.DataFrame] = {}
         self._factors_by_inst: dict[str, pd.DataFrame] = {}
         for inst_id, grp in self._bars.groupby("instrument_id"):
             g = grp.sort_values("trade_date").copy()
-            self._bars_by_inst[inst_id] = g
+            self._bars_by_inst[str(inst_id)] = g
         for inst_id, grp in self._factors.groupby("instrument_id"):
             g = grp.sort_values("trade_date").copy()
-            self._factors_by_inst[inst_id] = g
+            self._factors_by_inst[str(inst_id)] = g
 
     # --- 内部：将冻结 raw 转成 production repository 同构 df ---
 
@@ -62,7 +64,7 @@ class FrozenMDAS:
         """production get_daily_bars_batch 的同构输出：
         index=trade_date(DatetimeIndex), columns=open/high/low/close/volume/amount/adj_factor
         """
-        g = self._bars_by_inst.get(inst_id)
+        g = self._bars_by_inst.get(str(inst_id))
         if g is None or len(g) == 0:
             # 空数据也必须保持 DatetimeIndex + float64 列（与 production to_numeric 同构）
             empty = pd.DataFrame(columns=_BAR_COLUMNS, dtype="float64")
@@ -81,7 +83,7 @@ class FrozenMDAS:
         """production get_adj_factor_series_batch 的同构输出：
         columns=[trade_date, adj_factor]，trade_date 为 datetime。
         """
-        g = self._factors_by_inst.get(inst_id)
+        g = self._factors_by_inst.get(str(inst_id))
         if g is None or len(g) == 0:
             return pd.DataFrame(columns=["trade_date", "adj_factor"])
         df = g.copy()

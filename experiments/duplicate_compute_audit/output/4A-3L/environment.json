@@ -1,0 +1,10 @@
+{
+  "cpu_model": "arm",
+  "logical_cores": 8,
+  "physical_cores": "Darwin",
+  "ram_gib": 8.0,
+  "python_version": "3.11.7",
+  "pandas_version": "3.0.5",
+  "numpy_version": "2.4.6",
+  "platform": "macOS-26.5.1-arm64-arm-64bit"
+}

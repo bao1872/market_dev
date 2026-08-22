@@ -1,0 +1,75 @@
+{
+  "basis": "layered_weighted_projection_per_bucket_measured_cost",
+  "note": "LOCAL PROJECTION — not full-universe benchmark",
+  "method": "Σ(N_bucket × measured_per_stock_cost_bucket) + fixed_overhead",
+  "fixed_orchestration_overhead_sec": 0.1069,
+  "per_stock_mean_sec": 0.414252,
+  "bucket_per_stock_sec": {
+    "0": 0.000912,
+    "1-59": 0.017834,
+    "60-249": 0.104707,
+    "250-499": 0.204749,
+    "500-999": 0.428282,
+    "1000-1999": 0.414252,
+    "2000+": 2.249232
+  },
+  "bucket_timing": {
+    "0": {
+      "n_sample": 1,
+      "wall_sec": 0.0009,
+      "per_stock_sec": 0.000912
+    },
+    "1-59": {
+      "n_sample": 6,
+      "wall_sec": 0.107,
+      "per_stock_sec": 0.017834
+    },
+    "60-249": {
+      "n_sample": 8,
+      "wall_sec": 0.8377,
+      "per_stock_sec": 0.104707
+    },
+    "250-499": {
+      "n_sample": 16,
+      "wall_sec": 3.276,
+      "per_stock_sec": 0.204749
+    },
+    "500-999": {
+      "n_sample": 476,
+      "wall_sec": 203.8622,
+      "per_stock_sec": 0.428282
+    },
+    "2000+": {
+      "n_sample": 1,
+      "wall_sec": 2.2492,
+      "per_stock_sec": 2.249232
+    }
+  },
+  "projected_5293_serial_minutes": {
+    "optimistic": 31.21,
+    "central": 36.72,
+    "conservative": 42.22
+  },
+  "input": {
+    "sample_size": 508,
+    "run_p50_sec": 210.4398,
+    "production_bucket_count": {
+      "0": 1,
+      "1-59": 6,
+      "60-249": 80,
+      "250-499": 166,
+      "500-999": 5039,
+      "1000-1999": 0,
+      "2000+": 1
+    },
+    "production_bucket_share": {
+      "0": 0.000189,
+      "1-59": 0.001134,
+      "60-249": 0.015114,
+      "250-499": 0.031362,
+      "500-999": 0.952012,
+      "1000-1999": 0.0,
+      "2000+": 0.000189
+    }
+  }
+}

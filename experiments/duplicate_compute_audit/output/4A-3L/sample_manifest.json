@@ -1,0 +1,3565 @@
+{
+  "target_sample_size": 500,
+  "actual_sample_size": 508,
+  "trade_date": "2026-08-17",
+  "series": "all_a_share",
+  "selection_method": "stratified_by_bars_count_bucket",
+  "samples": [
+    {
+      "instrument_id": "209e7c07-1358-4a64-b9e9-ff2d2dfef801",
+      "symbol": "920305",
+      "bars_count": 0,
+      "bucket": "0",
+      "selection_reason": "oversample_rare_bucket_0"
+    },
+    {
+      "instrument_id": "00c0546f-498d-42d7-b13e-dad20edbfe5e",
+      "symbol": "301583",
+      "bars_count": 27,
+      "bucket": "1-59",
+      "selection_reason": "oversample_rare_bucket_1-59"
+    },
+    {
+      "instrument_id": "a28b4c80-8694-48d1-91c9-630a2f16a659",
+      "symbol": "001248",
+      "bars_count": 33,
+      "bucket": "1-59",
+      "selection_reason": "oversample_rare_bucket_1-59"
+    },
+    {
+      "instrument_id": "a1a27182-6430-4f5a-8594-73afa87fef46",
+      "symbol": "001399",
+      "bars_count": 37,
+      "bucket": "1-59",
+      "selection_reason": "oversample_rare_bucket_1-59"
+    },
+    {
+      "instrument_id": "a0afedc4-d0cf-4919-8be9-8b3a36fd16eb",
+      "symbol": "688797",
+      "bars_count": 39,
+      "bucket": "1-59",
+      "selection_reason": "oversample_rare_bucket_1-59"
+    },
+    {
+      "instrument_id": "6e7e75d9-6473-4707-bc3d-998b76a18c1d",
+      "symbol": "301669",
+      "bars_count": 49,
+      "bucket": "1-59",
+      "selection_reason": "oversample_rare_bucket_1-59"
+    },
+    {
+      "instrument_id": "6f606603-7328-4dfe-ba92-41e8ae3f77e6",
+      "symbol": "688635",
+      "bars_count": 58,
+      "bucket": "1-59",
+      "selection_reason": "oversample_rare_bucket_1-59"
+    },
+    {
+      "instrument_id": "0e35895d-3034-4da6-9951-74141e83e5d4",
+      "symbol": "001237",
+      "bars_count": 61,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "a2c48214-18e7-437a-a30f-f173f1ace13a",
+      "symbol": "001312",
+      "bars_count": 81,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "6a63ecf8-5554-4014-9000-6bb32088a8f0",
+      "symbol": "301682",
+      "bars_count": 99,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "5c30b6ab-cb35-4168-a508-b76a1e98323c",
+      "symbol": "920159",
+      "bars_count": 133,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "8e1e08a7-4fa4-4b75-aa8c-2f97cffb43ad",
+      "symbol": "001396",
+      "bars_count": 152,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "da3d25d2-9689-48f5-bca8-eccaf55be78f",
+      "symbol": "688795",
+      "bars_count": 169,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "9c26011a-779f-4d4d-9f64-997b46d8bab4",
+      "symbol": "688765",
+      "bars_count": 197,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "94845cf9-e933-4568-9df4-9ff3033cea5e",
+      "symbol": "301584",
+      "bars_count": 214,
+      "bucket": "60-249",
+      "selection_reason": "stratified_share_60-249"
+    },
+    {
+      "instrument_id": "0ad8b589-04f7-4a2b-90cb-ccdf5ade16d8",
+      "symbol": "301491",
+      "bars_count": 250,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "8b0c450a-8369-4e7b-98c1-9d4157420eb7",
+      "symbol": "301678",
+      "bars_count": 283,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "da978551-655f-4d7c-ad84-2143b15b3f35",
+      "symbol": "688755",
+      "bars_count": 307,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "3ab0ea4d-57d8-4615-ab3d-2a919a74c714",
+      "symbol": "000698",
+      "bars_count": 323,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "24110158-da07-4207-88c2-9e349c191b48",
+      "symbol": "000863",
+      "bars_count": 324,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "8c04b83f-80b0-441c-91cb-df0600a26e60",
+      "symbol": "000159",
+      "bars_count": 324,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "ef89d0f3-e16f-4ece-939d-3b45e392f5be",
+      "symbol": "000096",
+      "bars_count": 324,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "2ecd052e-ad26-4eea-b2df-a8a4e864baad",
+      "symbol": "920029",
+      "bars_count": 338,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "24424c45-2d11-459c-96bf-f5a97a6c800d",
+      "symbol": "603409",
+      "bars_count": 356,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "968495ff-ace9-4f32-a6b6-9980a64eaaaf",
+      "symbol": "301458",
+      "bars_count": 387,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "d891aa1e-0c89-42b3-a8e3-e2f8d52ed0eb",
+      "symbol": "301617",
+      "bars_count": 408,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "48fe18b2-99d7-47d1-a24c-74911ea84fe7",
+      "symbol": "000823",
+      "bars_count": 418,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "99f05dfe-be27-48ac-ae4c-d138bc6f1fce",
+      "symbol": "000011",
+      "bars_count": 418,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "f8fcab34-d6a5-4ba9-a810-d50d9c3fe473",
+      "symbol": "000906",
+      "bars_count": 418,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "54c24611-3213-4ea2-a434-bf11d7d96ac3",
+      "symbol": "301556",
+      "bars_count": 447,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "dd52d292-a5a6-4699-b4cd-41fbf4d9a26f",
+      "symbol": "001277",
+      "bars_count": 472,
+      "bucket": "250-499",
+      "selection_reason": "stratified_share_250-499"
+    },
+    {
+      "instrument_id": "e0f1a529-a2ee-4a82-a8ec-4dca5488696b",
+      "symbol": "301552",
+      "bars_count": 503,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5b9abd98-133c-47b8-9e8b-88ed387a49b7",
+      "symbol": "920002",
+      "bars_count": 539,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "77c6f993-bd8c-4c58-b7e4-751b9f823b96",
+      "symbol": "688695",
+      "bars_count": 590,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0ee4f097-9fd7-4dee-990a-deba7504dadb",
+      "symbol": "603375",
+      "bars_count": 619,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b193ef3f-65ba-413e-89dd-cafe6de384a9",
+      "symbol": "301578",
+      "bars_count": 637,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1ba887e3-79ef-4c11-95b7-dd9bfddafa6b",
+      "symbol": "301459",
+      "bars_count": 648,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0bec2c8f-11d1-4df9-8ba4-8c791bd5e9cc",
+      "symbol": "688648",
+      "bars_count": 670,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7c764a1e-a382-412b-9049-17c4c3283460",
+      "symbol": "603193",
+      "bars_count": 689,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2ef41d4d-6661-44e5-af4f-d2ae74f6a891",
+      "symbol": "688716",
+      "bars_count": 702,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d2bdbd7c-852e-4eb3-9a00-a640f4f0e1f5",
+      "symbol": "688693",
+      "bars_count": 715,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b7b7286b-ab0f-4c5d-a420-7834755b301c",
+      "symbol": "920274",
+      "bars_count": 725,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "43390a46-3119-4ece-abb4-f131bae137b6",
+      "symbol": "301487",
+      "bars_count": 732,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "31875bea-90f8-4c3e-a318-3fd6b52abbc7",
+      "symbol": "301519",
+      "bars_count": 741,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "21a0f1d3-fc58-4846-90f6-87e4258194e8",
+      "symbol": "920982",
+      "bars_count": 746,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0f8b3d87-2a83-46b5-bdc6-c52b0222eb3c",
+      "symbol": "688638",
+      "bars_count": 752,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d7b82ad7-8cc5-4949-bb6e-40e401f5a9ab",
+      "symbol": "301395",
+      "bars_count": 759,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9213ca6e-6d9d-478a-ae1b-71579ba03ade",
+      "symbol": "920651",
+      "bars_count": 763,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cbc13063-e8cb-4ed6-8c23-cb0bdf9178a6",
+      "symbol": "688334",
+      "bars_count": 767,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "329dd239-46dc-45fc-9574-e0275153c6d7",
+      "symbol": "688570",
+      "bars_count": 777,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fdc29d31-be13-4320-babe-bb26b802aec0",
+      "symbol": "688562",
+      "bars_count": 785,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0a73aeb3-ce05-41fa-b594-5104f46184b9",
+      "symbol": "301382",
+      "bars_count": 790,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "472914e1-5c73-4276-abdb-088ea4057c4d",
+      "symbol": "688249",
+      "bars_count": 798,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "458f846f-6381-4487-a4cd-f5d545b73342",
+      "symbol": "301281",
+      "bars_count": 807,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3c2bb35e-4be0-4d52-bac0-c12fac1ccb70",
+      "symbol": "001328",
+      "bars_count": 814,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "41b6dbde-609e-47c0-b98e-af1925c38c1f",
+      "symbol": "688343",
+      "bars_count": 817,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "23dc3435-f933-4410-9332-2605f06eb9b0",
+      "symbol": "301314",
+      "bars_count": 822,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6638d793-c717-4e38-8b7b-acd784d45c30",
+      "symbol": "603073",
+      "bars_count": 830,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "86310505-494c-40e4-bbd4-860f0faefb85",
+      "symbol": "301157",
+      "bars_count": 835,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "215b8d42-cfa3-4fa4-90ae-8a169df62d92",
+      "symbol": "601059",
+      "bars_count": 841,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "381fb389-57d7-4572-a7ce-7ff5e6073907",
+      "symbol": "301303",
+      "bars_count": 848,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3e3c33ed-499f-4762-8d72-5974f685a2a7",
+      "symbol": "301358",
+      "bars_count": 855,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c291695b-eb99-4279-b178-d90fc34d85a7",
+      "symbol": "601995",
+      "bars_count": 857,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4db87afe-6c08-47c5-bfb6-9721c143ab9a",
+      "symbol": "300807",
+      "bars_count": 862,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "462dc078-64b1-49c3-bd04-2b7aa84f2998",
+      "symbol": "000656",
+      "bars_count": 864,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a91d4e45-cce6-4b98-b834-5bc181a6e4fc",
+      "symbol": "600360",
+      "bars_count": 865,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bd26f107-7ed0-4cb0-abf3-d39caa5a8866",
+      "symbol": "000410",
+      "bars_count": 866,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "144fe822-4d2a-43eb-9bd9-15197344beff",
+      "symbol": "920808",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "205c69db-b302-4674-abbb-2dcb5ce67c97",
+      "symbol": "603488",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2fa1bb5c-b371-4160-9c59-ea0f4593c6a2",
+      "symbol": "688165",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3db52622-5213-4b76-8b87-7edb6a3ae0d0",
+      "symbol": "603933",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "503feb90-d328-4ebb-93f2-8d45f8af5247",
+      "symbol": "002480",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5f8a21ba-3164-45e5-8d8f-ab1c94791e85",
+      "symbol": "600179",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "720fa684-a89b-4462-b675-d3df52ba6fcf",
+      "symbol": "002146",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "817bfbc4-d553-4ab4-8fea-29323f0f0bcd",
+      "symbol": "688038",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8e7555fd-f18e-4b19-baf3-2b8327a5e2a4",
+      "symbol": "688521",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a6ee5ec0-2811-4574-bac1-f1b35b920e70",
+      "symbol": "300688",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b4cab154-75ff-4c1a-888c-bd08338241d2",
+      "symbol": "300672",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cbfbc54b-e5c2-4c91-80c8-690e56196e25",
+      "symbol": "600590",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d4dbe40b-056d-48ea-b52e-86828fad06bc",
+      "symbol": "003013",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ea0dc29e-4a40-40a4-824a-1843f2c182d7",
+      "symbol": "300710",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f68fd160-6bf2-404a-a46c-ba41e0df0762",
+      "symbol": "000561",
+      "bars_count": 867,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1a06ab26-d8b3-46ca-bdce-d318e32138cf",
+      "symbol": "300067",
+      "bars_count": 868,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6af16e29-80ce-49df-a98d-ce59c089c8cd",
+      "symbol": "603496",
+      "bars_count": 868,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ced0a619-6f08-4ba9-afd8-d985498972c3",
+      "symbol": "003041",
+      "bars_count": 868,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4005071f-1e26-4c2e-a62a-935f535908fa",
+      "symbol": "603151",
+      "bars_count": 869,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f7ae61f7-84e5-45c0-9d0d-71dce91fda94",
+      "symbol": "002644",
+      "bars_count": 869,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5d6da61f-d756-446f-9e46-7a85bba2299e",
+      "symbol": "603608",
+      "bars_count": 870,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "067cfbef-6a25-4e67-b8f8-74c937b7a7de",
+      "symbol": "600081",
+      "bars_count": 871,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "734f4bfe-b58b-4a2c-bfc1-330c1a8008b1",
+      "symbol": "300442",
+      "bars_count": 871,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d077dc73-653f-4202-bb93-72c54cc09156",
+      "symbol": "600243",
+      "bars_count": 871,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "04cc54f3-271e-40c3-b2dc-38d68e2f832f",
+      "symbol": "000713",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1777eac6-9e43-4365-9ea4-057d4a5016e4",
+      "symbol": "002571",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2c3ec6c1-9f64-4b07-bbdc-beaa8646d20e",
+      "symbol": "002357",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "401e5ac6-9ed9-4c7d-bef2-0d665efd59aa",
+      "symbol": "603037",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "506867a5-8fc6-4f2e-b702-7f9eaeaf0746",
+      "symbol": "300385",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "69e7518b-b563-4a07-b95e-f0e5089f5022",
+      "symbol": "300585",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "818a1330-fc96-4b61-a33d-5680ff556add",
+      "symbol": "301096",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a7c406fb-cb05-4818-9c01-b621340514e4",
+      "symbol": "300955",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c40eaeec-dda6-4915-b839-6b71687f17bc",
+      "symbol": "688178",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d33e1b4b-7370-44d9-920d-aa558c12f5c3",
+      "symbol": "301057",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e25c9d15-c7ae-4945-acf6-a8ae4c7c1371",
+      "symbol": "300521",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f756b15e-c2b5-4428-9b78-2914f1d7ad31",
+      "symbol": "003043",
+      "bars_count": 872,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2ecc45ec-fcf2-4156-b45d-b2d2b330191d",
+      "symbol": "002955",
+      "bars_count": 873,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "66a24b50-2f40-479e-b9f1-d4e28432d8a9",
+      "symbol": "603330",
+      "bars_count": 873,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "aaf8c0ae-d8da-4345-aa71-2d162a61b703",
+      "symbol": "002513",
+      "bars_count": 873,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "09b29fd3-7dd4-44f8-9b32-7b7e8d7117bd",
+      "symbol": "002207",
+      "bars_count": 874,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "30664d11-3013-4a38-98ca-3256f41afb9e",
+      "symbol": "002633",
+      "bars_count": 874,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "75dc1511-c3da-4228-a614-7774c6f199f8",
+      "symbol": "600117",
+      "bars_count": 874,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "96bbc46d-5c63-4174-abae-74a4f2222ef5",
+      "symbol": "002200",
+      "bars_count": 874,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "beb787a5-eb38-45d5-be12-d82cd065ae16",
+      "symbol": "600715",
+      "bars_count": 874,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e8d6a623-662b-42bd-9de3-da6632686741",
+      "symbol": "000620",
+      "bars_count": 874,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0ceaacb3-bc40-4e7e-b54e-ae25412553ae",
+      "symbol": "300600",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1e8b52e9-d2ba-4c33-8c5b-ee0a126ebe67",
+      "symbol": "603819",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "38e4a35c-1f36-4230-87bb-908b63c06da5",
+      "symbol": "300716",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "582abfb8-16e0-471a-aa80-250a413e3c0d",
+      "symbol": "600396",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "635623ca-ecf3-4307-aa79-9a58ab3b8369",
+      "symbol": "300137",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7c1a78e1-97dc-48a9-8561-b8638a54dbb1",
+      "symbol": "300097",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "85c4bc21-a844-42cc-bb3a-0004256e6562",
+      "symbol": "300746",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9a6b55ed-8bba-478d-a599-beb9cb121b7a",
+      "symbol": "000736",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b56c6866-61c9-4eaf-b52b-f09e7b36ba60",
+      "symbol": "002253",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c97f6ec0-7dd1-4ee7-afd0-cd7c9f92ca1f",
+      "symbol": "600287",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e8bc7e91-57d3-4d81-a14d-929cc90ffaeb",
+      "symbol": "002638",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f90b4286-b475-4298-a977-e8393b32e8fb",
+      "symbol": "301012",
+      "bars_count": 875,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0ccbc46e-35ee-4dea-a40e-a4c8784ac19f",
+      "symbol": "600965",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1c9098f2-7728-4a4e-b89a-d782a32b3b24",
+      "symbol": "600066",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2b203056-eded-4fd4-9e38-ec178cc33c8a",
+      "symbol": "300256",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3c5e6862-8e19-465f-90de-361ffc1041e0",
+      "symbol": "002259",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "548ca88c-751c-4295-b93b-03bf3eff63c4",
+      "symbol": "600399",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "65a6be52-9ab9-4392-9b38-f54ca26d2e6d",
+      "symbol": "300352",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "71604a11-5647-4748-a009-90409fd7d887",
+      "symbol": "002470",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "82b4d6c0-dc1d-4c31-a3c3-c08f66572b37",
+      "symbol": "600382",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "915adf31-fa1a-4075-a265-ebc9b6aeb848",
+      "symbol": "603595",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a1c81e09-4c2f-4796-9136-ac9d945d3632",
+      "symbol": "600423",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b01f0d9f-514e-4b75-aab3-5d631dd53b11",
+      "symbol": "600817",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bff10c7d-d92a-4a2f-9a41-3348e2a1c540",
+      "symbol": "002535",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ca7cd0ea-c69f-4ccf-9693-59e769fdc10c",
+      "symbol": "600641",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "de1d53cc-2350-4c60-9eaf-0c1e511c1367",
+      "symbol": "002427",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ebfe7673-1d2a-408b-a275-7318e3cd3ac2",
+      "symbol": "000610",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fbf843cb-7041-4c1e-93f5-2a2ebc08be66",
+      "symbol": "600678",
+      "bars_count": 876,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "00bc185f-c14e-4606-aae6-ab8170c0ff1c",
+      "symbol": "002839",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "01c0200a-42d2-474c-abe5-e4ca46e8c9f0",
+      "symbol": "300893",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "02d9ed8c-3907-4c1f-bfc8-0599d94c4c8e",
+      "symbol": "002410",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "032f41f2-ce09-4ee0-b252-26b6d700d560",
+      "symbol": "603011",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "043e24e3-60f2-4b80-bbfd-50c0d2e4fbd2",
+      "symbol": "002463",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0515bcf2-899e-43e7-8ccf-100a73fc8cb3",
+      "symbol": "603669",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "05cdce38-b7e5-4866-8e5c-169dcf32433a",
+      "symbol": "301200",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "06ae9189-322e-49ab-859b-64cb656083ee",
+      "symbol": "300743",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0712b25b-628d-4899-97c1-8c30d58c7870",
+      "symbol": "600580",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "07e22f62-c67f-409c-93ee-dfc5f3e1d0be",
+      "symbol": "002311",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "090a0e34-c889-4e9a-b4f5-1d0143aa7633",
+      "symbol": "603165",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "09d96d6e-dfe4-4b72-87c5-795bc42af3ac",
+      "symbol": "601998",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0adab882-1bc0-4911-b719-fe9785021cc8",
+      "symbol": "603929",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0b39d050-97fc-4caf-9859-1acdf8ace1ce",
+      "symbol": "300179",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0bcc6b78-c5ed-47e3-9d72-c9a0b29aa935",
+      "symbol": "603586",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0c5c32f8-1f6e-463f-9556-51f3403d69bd",
+      "symbol": "603456",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0d704d4c-e427-47a9-a27b-b1d164a335b2",
+      "symbol": "301095",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0df27053-7ffb-4a4c-b293-d72d78b85848",
+      "symbol": "000937",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0ebc4feb-b220-40f9-b8b4-3054272bbc9d",
+      "symbol": "002170",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "0f6c9ff3-62ad-4035-b38a-e8b7346f5f99",
+      "symbol": "002422",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1001390c-a413-485e-a1a1-5bd090ea551b",
+      "symbol": "600982",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "108e1730-8ff7-4575-bad3-9564c66eea4e",
+      "symbol": "300878",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "116166a4-43f7-4e1c-bd8c-4aa374437d7a",
+      "symbol": "601921",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "122a5155-11d7-4d9c-a9b7-c2a6df3c9847",
+      "symbol": "603337",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "12df1e50-5404-4548-ba13-e169003de832",
+      "symbol": "002183",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "13ad7d10-b1da-4d90-88ac-08d8964d5002",
+      "symbol": "600739",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "14531428-ee50-478d-9db4-16243dd2155e",
+      "symbol": "603195",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "150b7f58-e93d-4495-9026-7645a799e6fe",
+      "symbol": "688690",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "15973d52-f5b3-426e-b45f-90fcc526656e",
+      "symbol": "603192",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "160e507f-eea4-4585-978c-663b00d08fae",
+      "symbol": "300775",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "16bbc237-afe2-4083-a11c-6834a8787c20",
+      "symbol": "600062",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "17538c88-5f03-446d-964c-9838c5b2c62e",
+      "symbol": "605155",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1809637e-c13d-4bb8-a9f6-1576dabbf6cc",
+      "symbol": "600261",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1898b766-1bec-44dd-b802-5c42c74d76f6",
+      "symbol": "688120",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1918ae5c-ec1e-423a-a0c4-02e0c2367c16",
+      "symbol": "002872",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1a118f46-229d-41e3-b946-e942b7fa5e98",
+      "symbol": "605333",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1a5fd911-4ce9-4e54-a159-930369011132",
+      "symbol": "300682",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1b23e456-8c26-473c-ab6f-7bc16528c8db",
+      "symbol": "002520",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1bb7a668-306d-4065-beb3-146636772105",
+      "symbol": "300229",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1cb05256-0573-43ff-98bc-47ab2d7d8da7",
+      "symbol": "601111",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1d698c76-6ec4-4189-a93f-4dc2e27c8371",
+      "symbol": "688619",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1e1d127d-ff6a-4dac-b9d7-1d80e4473737",
+      "symbol": "688733",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1ec1d1e4-be27-49ff-b0c2-32b4faa7a35a",
+      "symbol": "002273",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "1f9e9877-cb1d-4035-9888-4e0040114d5c",
+      "symbol": "000923",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2035c5a9-5f61-4d3d-b56e-a031b57b01a1",
+      "symbol": "688180",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "20ffe610-74e2-4283-8ea0-ce1f32445cb6",
+      "symbol": "002270",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "21873803-c514-4ae2-abbb-5706824ae556",
+      "symbol": "000990",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "21dcc6b3-0340-404d-a0f4-1a7250afdc87",
+      "symbol": "300286",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "22577930-bbc9-41e0-bb45-be801d28d146",
+      "symbol": "300747",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2309e1cb-2b0e-44ee-ae58-729e5d395771",
+      "symbol": "301328",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "23a1af56-63cb-46b0-aa2f-6d69b935f6fa",
+      "symbol": "603565",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "241c9db5-527e-477b-b871-2625be03d261",
+      "symbol": "600094",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2504d338-8ad5-46fb-8c2c-794e77d896f3",
+      "symbol": "301201",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "258b9501-a871-40d6-b224-7715749d6112",
+      "symbol": "002017",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "261ccbd7-1a61-4565-90f6-53a3b106d867",
+      "symbol": "603809",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "26d36253-d61f-4402-8356-55a8b8c93c50",
+      "symbol": "600692",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "27a65f14-89cf-42ae-91a9-2e7faff6c951",
+      "symbol": "002084",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "28c67759-577d-48d0-a624-cbf2cc4bef0a",
+      "symbol": "002695",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "299a5f0e-cc85-44e9-a4b7-438bbfcaaf7a",
+      "symbol": "603191",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2a2d4618-63d1-4a66-9b6f-08953e251d71",
+      "symbol": "688392",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2addc5b1-be8d-4bc9-84e2-3e7313a44c4c",
+      "symbol": "601860",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2b731a46-fb4d-4a16-b85b-93d3fcbe0d04",
+      "symbol": "600335",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2bdfd3fb-635f-466c-ae5f-30383a69ef81",
+      "symbol": "605108",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2cd711b1-afc4-47cb-a4d3-01d573819617",
+      "symbol": "600129",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2d845bf0-1847-48ce-b8e9-6bfb46d273a6",
+      "symbol": "002373",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2e110756-6561-4ce3-b4e2-65a2544decc1",
+      "symbol": "603097",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "2f39e737-bb2d-411e-93dc-6a245c0d9f1e",
+      "symbol": "003020",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "30072ccc-447c-4022-8006-9b3ffc2823f4",
+      "symbol": "301009",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "30b85f0d-ed4c-4332-ac5e-00e0bef17512",
+      "symbol": "600233",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "316f7fdc-61cc-46bb-87b6-fcd31bc23690",
+      "symbol": "301199",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "31e10e53-f20e-483c-ba3a-6ac0018f3da4",
+      "symbol": "000541",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "327a163f-b27e-4155-bcc6-398b040b176c",
+      "symbol": "002015",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "33221380-eaae-4c4f-9ae4-b495a56ad490",
+      "symbol": "603345",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "336e0004-0752-4102-8b5e-adfc4b280655",
+      "symbol": "002962",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "341f51eb-19bb-45da-8390-b9cced426db4",
+      "symbol": "003001",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "34b7c0a9-b279-48d5-98af-276157b55dea",
+      "symbol": "605090",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "358850bc-31d7-41a0-8aaf-c96902e237ce",
+      "symbol": "002849",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "364f7e17-6a1c-4083-ac92-11d878e0e0da",
+      "symbol": "600918",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "36f3f115-fc2d-4c15-bdb0-ce5393e455f3",
+      "symbol": "601778",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "37ecaad1-eff9-4f5c-8e6c-20054ce7d747",
+      "symbol": "688636",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "38849076-30d1-42ae-b558-31084f44e777",
+      "symbol": "603886",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "392351a6-bfb1-4066-a7fe-07cea905e67f",
+      "symbol": "603214",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "39b51b4b-e6b8-4828-bfd7-af09599ae1a5",
+      "symbol": "000728",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3a7db34f-b5b5-4736-b91d-3a9f6870a4e4",
+      "symbol": "002864",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3b5dd901-bee9-4bca-8dc6-68c6fd5763ee",
+      "symbol": "300287",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3c084c8b-233e-448b-b5ec-bfe71c1bfff1",
+      "symbol": "300233",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3ca5f25e-4bc4-492b-abf9-1eedd124f849",
+      "symbol": "002867",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3d17a9b3-b546-478c-aeb7-08908bbc361c",
+      "symbol": "000985",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3ddc2f30-7870-4817-bf31-bcd3e5144597",
+      "symbol": "002679",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3e641c44-5575-4377-b80c-28e322e0fc72",
+      "symbol": "688305",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3f14f4f5-f809-4e97-aef0-ec37ab5b7432",
+      "symbol": "603303",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "3fb41d8d-2bb4-4e8f-af78-08440ec8236c",
+      "symbol": "300662",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4073b6a9-5d6b-4d16-8782-38f2a1da06b7",
+      "symbol": "603617",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "410c1ade-dbe5-4215-97e2-b2c2779a55df",
+      "symbol": "601216",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "41927d10-14e7-4447-a570-dc017bcce286",
+      "symbol": "301004",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4287b383-1c84-4b2a-9cf3-d919c0f11638",
+      "symbol": "688432",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "43285754-7ecd-4517-a854-8c53dc97a632",
+      "symbol": "300788",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4402a0bc-3f20-4f70-ac91-d0d49d8ae63f",
+      "symbol": "600980",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "444fbad6-8885-4f5b-bba3-0e29a29c5334",
+      "symbol": "688105",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "44c18e44-7514-425f-969d-0775224870f3",
+      "symbol": "601688",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "45913784-a7d2-4c35-8a8c-8fd118b5eca8",
+      "symbol": "601618",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "464b6a34-eddf-4b8a-a6ec-5010b3a96a4f",
+      "symbol": "300284",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "467dd98c-2e69-48e3-8f60-89fc71183e02",
+      "symbol": "000848",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4770de89-2e4e-4919-99d4-d6abd74fed43",
+      "symbol": "002600",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "482dc2ca-5a27-490d-a3a8-e9f3ec05de7b",
+      "symbol": "603108",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "48a694fe-e94b-49e8-b4d9-7e7384f9bfc8",
+      "symbol": "301091",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "49c642d4-386b-44ee-a242-f1c4a34b6cff",
+      "symbol": "002035",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4a965279-503a-4e38-adea-995ebd43ae8c",
+      "symbol": "000523",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4b5aea86-5161-4af3-a713-173cd3bf006c",
+      "symbol": "300239",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4c2a3e98-a234-47fe-9964-6a9e2ccc8d06",
+      "symbol": "300559",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4d20a735-46fb-4aad-9a27-19aa2d7fcffa",
+      "symbol": "601038",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4db419ef-838a-4914-adc6-0a371e429bf7",
+      "symbol": "002782",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4ebd271d-54c6-43ed-b3b4-425d3e503f11",
+      "symbol": "002707",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "4fa8c718-02d9-490c-8cdf-d79f5115013e",
+      "symbol": "300207",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5056bf96-900a-4ffc-bf26-f870767a18bc",
+      "symbol": "300750",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "51234a95-22bb-4835-8b42-524b996d3071",
+      "symbol": "600547",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "51a7b3d8-b302-47e7-b2b4-7f7d53c14062",
+      "symbol": "603071",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "52857117-a268-445d-ba8a-8d844e67c8bd",
+      "symbol": "301279",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "535edf62-197e-45c6-ac68-c897220037ba",
+      "symbol": "001289",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "53ef517f-0e5f-438a-a178-4ea4d0ed2171",
+      "symbol": "605098",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "553ef281-8586-4121-a10f-65d73df02614",
+      "symbol": "300241",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5609b532-14de-4b02-be52-e39112a96264",
+      "symbol": "601865",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "56fdb451-a66b-4359-b410-57447ccd53ea",
+      "symbol": "002937",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "57aa531b-03df-4b1f-aa35-58ee0ce20cf1",
+      "symbol": "301020",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5838c96a-66a7-40eb-8b1c-620c82eb9d75",
+      "symbol": "300240",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "58a7d75c-150d-46f2-8a07-6e65903e7a2c",
+      "symbol": "002672",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "593e9701-2649-48c2-8f90-d89f6cfb7d9a",
+      "symbol": "000619",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5a1a528a-4145-47ef-8a2c-4846894e2305",
+      "symbol": "600784",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5aadf62c-568d-4ff2-baaf-b427c5d8ea3d",
+      "symbol": "301273",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5b58758e-b4c0-4502-b567-4e41bc884491",
+      "symbol": "002821",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5c32bd8d-943d-4958-9f30-a8c1a9bc0109",
+      "symbol": "601518",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5cb588c3-4aad-4a95-9523-f6368eb8fe67",
+      "symbol": "600006",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5d430a39-cc44-4fdf-bbac-1c3ba45e5f7f",
+      "symbol": "002824",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5d9e66c8-2800-4f72-9f50-11ed17979709",
+      "symbol": "601698",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5e2954aa-e852-4d3f-af31-1938a582146b",
+      "symbol": "002536",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5ed88409-e48f-4936-b319-a93ba1634c1e",
+      "symbol": "002540",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "5f7d481b-49ce-44c0-8d40-e664952dbb92",
+      "symbol": "920642",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "600f6a4a-5a2c-4d0a-bde0-609826998ff7",
+      "symbol": "003037",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "605b7d1f-b9e1-4e78-9ef1-d83f14146638",
+      "symbol": "300160",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "61411aad-48c1-495e-bd86-cfab7faadfb5",
+      "symbol": "001236",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "61dbe579-2360-4373-9cc3-32ac7c9c7bc0",
+      "symbol": "600563",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "62c60208-0696-4592-9faf-545596ec14b1",
+      "symbol": "300444",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6362157b-ecb0-4e88-874c-e5b9eb1b9b22",
+      "symbol": "688768",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "63ec2762-60f1-4868-b991-75ddd52a0cfa",
+      "symbol": "300558",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "64c01e3d-5486-4759-9308-515be24f5add",
+      "symbol": "688062",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "65a9336c-0598-42a5-9e31-b1f9c1334586",
+      "symbol": "300930",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "667cbc8f-2bb9-4dd9-8d24-63956ff030be",
+      "symbol": "688628",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6763d5b4-f90d-4aa1-8268-891b841b6b99",
+      "symbol": "600103",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "67ece0d2-7fe7-4b8f-878f-04da2fe7e0dd",
+      "symbol": "600203",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "68d20c77-9d38-4551-b4dd-7892f04ecd47",
+      "symbol": "600036",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "697ef2fb-91e6-4a3c-bfe0-1dcdef50a417",
+      "symbol": "301168",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6a89cd8c-0add-49b5-9f87-058a23345b31",
+      "symbol": "603728",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6b301026-7d91-4255-9192-723658b460c6",
+      "symbol": "605179",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6bba9fa8-befc-4e6d-add4-0b3e537042b4",
+      "symbol": "600529",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6c1cdf25-17de-4cfc-b8af-05a607168eb8",
+      "symbol": "002947",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6c988c6e-92d6-4b48-93b1-cde0345b72bc",
+      "symbol": "600698",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6d19b0b1-730d-435f-bdba-b1f92416c035",
+      "symbol": "600301",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6d94fffd-0172-46e3-b22e-945f0731a45f",
+      "symbol": "300393",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6e2089db-4f9f-4e9f-8cc0-91b715611568",
+      "symbol": "603055",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "6f78cce3-7931-4b5f-9318-6250acaf84d2",
+      "symbol": "002683",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7058a74b-ce49-47f0-a98e-663b1cbd9288",
+      "symbol": "688231",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "71975b7b-c59b-4afd-93a6-183314739f29",
+      "symbol": "600558",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "721f4166-3863-4d65-b62d-66f004dff1b6",
+      "symbol": "300305",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "72df3ef8-8739-47c3-9b58-5f1d83f7a98a",
+      "symbol": "603499",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7378f958-ee57-4977-8368-7a573f5bc2f6",
+      "symbol": "002493",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "73f4617e-5a63-46d3-817f-0566685204e0",
+      "symbol": "600279",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7484dd14-d78e-4de5-a2e9-4508f224066a",
+      "symbol": "300390",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "75452fb2-2f2f-4804-bddc-667d00e1f83b",
+      "symbol": "000025",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7651f8ed-bb8c-470a-8faf-e4cf6f3fcc3a",
+      "symbol": "601599",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "76fe329c-d1e3-4c28-8455-945cc3ea54ba",
+      "symbol": "688225",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "778740b8-b8f4-479f-b71e-bc54bab0249e",
+      "symbol": "002073",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "78aeac9e-7c4e-4971-a78f-c6a6f7db5c79",
+      "symbol": "600969",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "792b28b3-1fc0-44fc-95f3-13c9994a10af",
+      "symbol": "002900",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "79f01102-54fa-4bdc-b2e1-ec1e7e0e3cad",
+      "symbol": "603228",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7a6bc63e-05b9-4a21-9c64-2f24c4a00b0f",
+      "symbol": "688216",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7b2a59e3-0a3a-4e23-9a9d-834463234532",
+      "symbol": "000767",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7ba234db-f019-4fb5-9d44-cd27926f19ab",
+      "symbol": "920564",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7c08cd5b-4a23-42d9-8199-2737bc78c7af",
+      "symbol": "688232",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7c8cb295-7db8-4284-b2bd-74457e8035fd",
+      "symbol": "300377",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7cf3a0ef-3758-4f1f-ab6f-d64b8550de48",
+      "symbol": "002371",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7e07595b-002c-451a-bc9e-0c9d218f48bc",
+      "symbol": "300952",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7e7d7566-333b-4743-bc95-6ee479f5c1b2",
+      "symbol": "002152",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7f46e4c7-3256-423b-89e1-27507d0e8da7",
+      "symbol": "301228",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "7fb95470-76a1-4796-9321-eeac5f91325c",
+      "symbol": "000812",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8063300a-49b9-44eb-97ff-65a885a50e41",
+      "symbol": "600626",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "814ccd02-1c38-451d-ac08-faaed841baef",
+      "symbol": "603298",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8221ab4c-8510-4874-96fa-75b475501dec",
+      "symbol": "600400",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "82da64e9-1eb4-4985-a9fb-33fa6e1888eb",
+      "symbol": "002281",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8327b269-8b50-4a1b-b85c-caf037aa48ff",
+      "symbol": "002041",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "83f06687-04ea-4d6e-bf14-0be49c893386",
+      "symbol": "002787",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8490b3b0-b4e9-4e78-acb6-ea4f7f06db9c",
+      "symbol": "603688",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "85262eb0-f881-4272-a1c7-a3fd08e55887",
+      "symbol": "002622",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "862565fc-4fd6-4526-bf83-438d65565bab",
+      "symbol": "600936",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "86d738e7-a0ee-4bb3-97a4-f8a4e5f7762e",
+      "symbol": "688157",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "87687cab-a3f5-463b-a2fa-cb2670dbcdce",
+      "symbol": "002705",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "88547931-f897-4ab9-9a57-ba8632650468",
+      "symbol": "002130",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "888cffc3-e606-49ee-9773-edd278e68bfa",
+      "symbol": "000831",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8938d62b-db91-468f-bae6-b68f9fdb28ed",
+      "symbol": "688137",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "89cd5be2-430e-492a-ae79-89aba566b25a",
+      "symbol": "688018",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8a2e95aa-1cc1-452d-a97e-61190d849303",
+      "symbol": "002945",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8aafce29-88a4-48fe-bec6-9fba19f7cece",
+      "symbol": "002454",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8b6fc643-d629-4153-96f0-93e162b200f6",
+      "symbol": "688616",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8cb4216b-8746-459f-adc2-eff26feaf55f",
+      "symbol": "600415",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8d712b3e-f80b-4f19-a0d6-5c50274c4d81",
+      "symbol": "002609",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8e09a6c8-2352-4e61-bf8a-14425bf8aa46",
+      "symbol": "002335",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8ee42c6e-aa0d-47a0-b5eb-05774c36b436",
+      "symbol": "601228",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "8f9037d9-cf45-4198-a7eb-a3a09f02320d",
+      "symbol": "002156",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "901ddaea-a6dc-4fc2-9355-2e5d6f9599db",
+      "symbol": "000663",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "90c9759e-8225-4347-8329-287de3fa7dd8",
+      "symbol": "300873",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "91153496-623d-48fc-9c39-aa2d5122ad3b",
+      "symbol": "600178",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "921da364-9d38-4d1a-8fe1-3bccaf7b57ae",
+      "symbol": "002344",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "92f27496-3c56-4316-bfb5-933ba7f8bb52",
+      "symbol": "688488",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "93cc419e-924e-4b0a-a857-5c6afaff8895",
+      "symbol": "300075",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "945ad6b4-dd45-4762-96ac-108f75322425",
+      "symbol": "600353",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "94f1e7af-a02e-4962-b151-7abb9ee52ba1",
+      "symbol": "600779",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "95f76e63-e4bc-46ac-b380-29f3c53dd780",
+      "symbol": "605378",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "96d43385-0f5d-4fee-b319-37a79e9d3b98",
+      "symbol": "688679",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "97c0473c-eda6-4f99-83f5-0a3b96755f22",
+      "symbol": "300041",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "984ca5d7-6979-412f-b783-712047ff1dcd",
+      "symbol": "603619",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "98ecc415-e4fd-4cb6-9fd9-62600e8fd78c",
+      "symbol": "600316",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9981a26b-7db4-47f7-8feb-b9cb33a88681",
+      "symbol": "000948",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9a4dd23c-2fca-44dd-b8fb-b16aee4d178a",
+      "symbol": "601099",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9b0760cc-c994-438b-ab7c-1f43668b2a4f",
+      "symbol": "603599",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9b9f7699-a39f-4841-bb40-326d563caa51",
+      "symbol": "600757",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9c7b3d9c-5e07-4f53-8753-190b0dc1f484",
+      "symbol": "300816",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9ccb0157-7945-4b74-9ed8-b6258f6ccff4",
+      "symbol": "300758",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9da46364-97de-49ed-ab81-820f1fd34174",
+      "symbol": "301266",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9e0eee64-ced5-4107-b64c-a21b70db19a7",
+      "symbol": "600010",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9ec6226d-640d-48ed-b838-5b4fd5c0532c",
+      "symbol": "002205",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "9ff3d9df-510f-48b3-a6ed-2f7d8711a88c",
+      "symbol": "300058",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a0811905-ca8c-4a5d-9abf-35cc94394ee5",
+      "symbol": "600305",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a1283183-b7d6-40a8-a0b7-84339c603be3",
+      "symbol": "688678",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a233a184-3231-4867-ae6f-dc445aeab2ab",
+      "symbol": "300453",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a2d1cc96-668f-411b-a824-e9be2d51dabd",
+      "symbol": "003009",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a379c54b-cb92-4776-8e61-bfe12dab39b0",
+      "symbol": "301175",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a470ddd4-82d8-4524-81a2-c868c5de0076",
+      "symbol": "301105",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a4f70e66-265c-4b0f-a98e-72879c97da2f",
+      "symbol": "301050",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a56e4808-60bc-4620-8525-cef8115dc622",
+      "symbol": "603022",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a5dc1d9e-27e9-4955-babf-7ae7cb594509",
+      "symbol": "002471",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a6bf1a7c-69ed-46f2-a144-01125a42ac2a",
+      "symbol": "603667",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a7d4df22-7921-4ad2-b8b9-d434ce0fd8ef",
+      "symbol": "601717",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a8afb8ca-58fb-491e-a687-bd130b26be93",
+      "symbol": "688396",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "a957bf99-db35-4dd6-9eda-867aeb3ffa8c",
+      "symbol": "300866",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "aa481839-40c6-417f-a639-c324275e3879",
+      "symbol": "600456",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ab1d0769-c5a3-40e0-be46-e8620c2f06eb",
+      "symbol": "600521",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ac25a983-8fd1-49eb-b5db-435da3e23524",
+      "symbol": "603969",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "acf259f9-bafb-47d2-9b3e-9af1268d211b",
+      "symbol": "002222",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ad318e62-a8c2-4571-936d-4376274db457",
+      "symbol": "002902",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "adaf11ec-1c9f-4af3-83d6-e44c3a23c094",
+      "symbol": "601996",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ae480690-35e9-421c-8799-bcef11923f7c",
+      "symbol": "000978",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "af1c9e87-fe4d-41dd-8466-acd1ee491b46",
+      "symbol": "600019",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "af8c0c98-e46e-4f81-b2f0-634e30a20860",
+      "symbol": "600658",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b05bf7f2-54eb-4b29-8a65-9319d965e10d",
+      "symbol": "300539",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b1106012-135d-4bf8-bcd1-966ca06c446d",
+      "symbol": "300622",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b1b33d5a-3723-4019-9a0e-9d3aa7c5388f",
+      "symbol": "920892",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b2124611-527d-426e-a35d-3eca86eebbee",
+      "symbol": "301002",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b2a07a19-6c15-44a6-8297-49abde88990c",
+      "symbol": "688297",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b3655d66-a93d-4488-8a9f-94d5285b1081",
+      "symbol": "300853",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b4e9ae86-9be9-458d-b73c-ac62d8aa9f75",
+      "symbol": "300166",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b5c3a2f2-0624-4bda-84c4-54086ed61264",
+      "symbol": "001319",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b6bdd784-1596-4740-8d14-e4374d6f0f8f",
+      "symbol": "002991",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b73db0a7-226b-4943-95ec-d305dcb45736",
+      "symbol": "002537",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b7f51107-ffdc-49bc-a137-518863ef2f35",
+      "symbol": "002836",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b873e265-488c-4513-846e-c683eb948e98",
+      "symbol": "603059",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b918f431-4632-4071-93c1-179e73f96d59",
+      "symbol": "002144",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "b99b257e-35cc-4bb6-89f0-3e68e35a3115",
+      "symbol": "603602",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ba4249f0-adee-4bd4-a870-98d5f02d3165",
+      "symbol": "002688",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bac43955-1be1-4995-98dc-197a64f75a8c",
+      "symbol": "600219",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bb5e9e85-af8e-47ac-acae-3df5a2329ce6",
+      "symbol": "002078",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bbe5bf00-0719-4b43-8748-89eee81242aa",
+      "symbol": "600495",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bca0d224-468e-40a0-b37f-cb5b7e9c62c6",
+      "symbol": "002056",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bdbf8504-62c3-4e6d-b512-96e72f7b8e91",
+      "symbol": "603048",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bf224e1a-cea1-4569-88ce-494f0cc9d434",
+      "symbol": "300358",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "bfc7b364-3958-487d-9c0e-87e001b77aeb",
+      "symbol": "002340",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c06d62a3-36ed-4eb5-9e20-d2d98b94959b",
+      "symbol": "601619",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c0fff2b1-dd0d-4c5a-848b-aafa12f227f8",
+      "symbol": "605299",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c1a2a23d-10e6-40e4-86e4-455d9e9a4fcf",
+      "symbol": "603355",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c24fed3b-ade3-4f17-a632-5ad992baaa14",
+      "symbol": "002121",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c310841c-c990-4e27-82dd-613cc6d503fb",
+      "symbol": "002418",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c3ae7c8e-4886-47f7-86a5-f4a94a3d3ab4",
+      "symbol": "600138",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c43358fd-1c93-4dd8-9406-9bd0dcb33beb",
+      "symbol": "000957",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c4e650a1-40e1-4504-ba51-d9c2a3f12eb3",
+      "symbol": "600782",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c5621c73-39b7-4a26-a606-c78fd578b7a1",
+      "symbol": "002455",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c62a46dd-1b32-42a3-ad0c-50f5d5416c9f",
+      "symbol": "688107",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c6d24aea-b618-44d5-a013-f225aa9b42b6",
+      "symbol": "688019",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c77747b9-7874-4d3a-be1c-21da7e797cbe",
+      "symbol": "603396",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c82f7c5c-75f3-4ce0-a88d-5d32c0e8b6bc",
+      "symbol": "603882",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c8d5898d-fb45-41c2-98ea-ed7beff15918",
+      "symbol": "300717",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "c996462e-07f3-459d-9f19-8c685f0ed237",
+      "symbol": "603035",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ca30a7ca-87d8-4ed9-87f1-79c3d57f1d42",
+      "symbol": "600768",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cad48bdf-5ea3-4054-935f-7d82433ff827",
+      "symbol": "300748",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cb80c3dc-c11a-4c4c-8e69-9c6d805851dc",
+      "symbol": "688016",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cc3a27e8-35a6-4064-b965-0507dcb80929",
+      "symbol": "300073",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cce031f2-7574-4238-9741-5c557535373f",
+      "symbol": "601179",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cdadc57f-75a7-43f6-a20d-2da90d9a753e",
+      "symbol": "600620",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ce6ad8d0-8e1e-4578-9553-619731c2ac70",
+      "symbol": "600651",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cf177478-e5d8-4e6f-9d4a-a246d86fc596",
+      "symbol": "920726",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "cf6ac489-3399-4907-b2a2-1369e956315f",
+      "symbol": "688286",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d01d2480-096e-454d-aeed-f8c7e913d1f5",
+      "symbol": "300251",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d1147227-5b31-4821-a359-9a88e74b5aff",
+      "symbol": "300592",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d1afc447-4ee7-42b1-86a8-fbdcbf3162f9",
+      "symbol": "600859",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d23cb691-d223-4805-90b1-9ea175bd3682",
+      "symbol": "002786",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d2ef0773-e505-4cb1-b47c-c8e6f9f40a0c",
+      "symbol": "002057",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d3898c18-1059-4efd-b04c-e0f5366a3ad7",
+      "symbol": "300857",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d461d99c-eaa6-4501-a8fb-17a27e758b5b",
+      "symbol": "300842",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d562b288-d669-4928-9f4b-b99036064688",
+      "symbol": "603501",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d5f0d057-ff13-4f39-924d-d4c7eaf8f2d9",
+      "symbol": "601990",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d6ba3508-bccb-4e50-92c5-856bd05fdf8a",
+      "symbol": "601991",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d7316c22-df37-4532-b069-35439aca763f",
+      "symbol": "300530",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d7eba0c2-c7bb-4bd9-873f-d2ef9fdcde40",
+      "symbol": "002120",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "d871e27d-4a37-4d08-a04c-0b9cec7c116c",
+      "symbol": "603015",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "da02bd2b-567f-4eb8-9540-4b79a9cd429a",
+      "symbol": "600489",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "da702aaf-3f01-4faf-b842-126aa4e91b0e",
+      "symbol": "603357",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "db282638-1ccb-47ad-a2cb-068c842a16b5",
+      "symbol": "688176",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "dbf397c1-f80a-44b7-ba77-27aff658e4b0",
+      "symbol": "300920",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "dc9fff47-e18e-477c-b177-955a3e6f314a",
+      "symbol": "000570",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "dd121180-2b81-4cbe-a14f-e6e1b2487340",
+      "symbol": "300342",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ddc2aab8-d49e-4a19-aab0-d2c89dd2c83d",
+      "symbol": "301055",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "de5a8921-7740-405d-9d36-f535aef8f24a",
+      "symbol": "601857",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "deba0cd4-909d-4bc3-8749-837e94a07f57",
+      "symbol": "600961",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "df999353-f722-4c42-b86e-b7a3b03de014",
+      "symbol": "002728",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e03794b3-df2b-4619-bac3-d795f8ad3a1d",
+      "symbol": "600153",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e0e738fa-d256-4f1b-bf13-5f6d8fe7ca81",
+      "symbol": "300599",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e1ae7463-a167-429a-af4f-3a66078084a8",
+      "symbol": "300795",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e25b486a-caf1-4ed3-bf05-8c8d1dc650e0",
+      "symbol": "600501",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e3102928-60a4-4ca3-b8cd-586380f10245",
+      "symbol": "300806",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e40dd4c9-47d8-49b6-8129-98504a4727fe",
+      "symbol": "000553",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e4e33894-dd99-4c05-a6ff-4593ccaf3cc0",
+      "symbol": "688226",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e52c94cc-32cc-4d9b-8a03-71a0547e42c6",
+      "symbol": "300894",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e5fc15c9-43b9-416c-b136-a4ab1d9d196c",
+      "symbol": "688480",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e6a139c7-8f35-4fe0-a5ad-460aba0d3c88",
+      "symbol": "605305",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e7946f0a-731d-4c31-ba87-88eea3fce833",
+      "symbol": "301205",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e8307c8f-01e1-44e7-83b7-8053e02831c1",
+      "symbol": "002075",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e903c505-90ab-44b9-b1cf-33a98070f563",
+      "symbol": "300176",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "e9d46c35-e9ca-44ae-b10d-c746f1a2222f",
+      "symbol": "002749",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ea8abadd-8ccf-405d-920d-3586de208d78",
+      "symbol": "300979",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "eb2ee9a7-32db-4c73-bcd6-0228e612d1b1",
+      "symbol": "300977",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "eb9cd435-fbc2-40d0-b7f7-60175b79d8d0",
+      "symbol": "301008",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ec640a6a-535c-48f2-8e59-ed3956c4d378",
+      "symbol": "688606",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ed068fdf-8470-4cf3-b964-7ec204aa90d2",
+      "symbol": "002553",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ed73b483-340c-4d41-82c4-98c1424b432d",
+      "symbol": "002899",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ee0c8d43-4878-4c66-8368-dade3eb42d20",
+      "symbol": "603323",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "eed3318c-64d4-45e3-9459-3381a081a092",
+      "symbol": "002083",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ef627811-9b7b-4d98-986c-92ecb8ed4a5f",
+      "symbol": "301136",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f0014e7c-7052-459b-8516-638c889f43eb",
+      "symbol": "300669",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f07c34c8-57e9-4bf2-864a-e45ce9a79a80",
+      "symbol": "300001",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f0ee86ba-f127-4489-b71e-7d3db6f14888",
+      "symbol": "600365",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f1c472f5-2d97-4ff0-8e37-c991135c6265",
+      "symbol": "002560",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f238f1f9-cfe3-4535-b751-ba698f910498",
+      "symbol": "300416",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f32c48bd-f6b6-4022-8f55-8405cafad799",
+      "symbol": "600061",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f4315bf0-61d0-4899-b5d4-9ea569bd7a8e",
+      "symbol": "002001",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f54d9629-ce1f-4045-a3f7-cd5449c0e210",
+      "symbol": "603626",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f5fdfd88-9dc3-45ca-9c17-022593a39f22",
+      "symbol": "300699",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f692123a-6e3f-4848-8928-85f839aa270d",
+      "symbol": "605399",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f6f6f434-9fc0-4f60-87f5-39697b847eec",
+      "symbol": "301113",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f76b1a10-79fa-4e13-a894-97cf41383298",
+      "symbol": "002941",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f873f858-e21b-40f7-bd82-378d766cfe7b",
+      "symbol": "603919",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f91e9545-e51e-44cf-9ad0-7651a22425ae",
+      "symbol": "300822",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "f9b5bcce-9832-44c2-adb6-4956c0975e88",
+      "symbol": "688617",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fad2792e-3a0c-4d36-b179-20c2fb29cb1c",
+      "symbol": "688596",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fb705406-ba67-4614-bacc-164010ac7af1",
+      "symbol": "000635",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fc5f1335-57bd-4c64-8d92-3674de470f31",
+      "symbol": "603208",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fcd6f2e3-c41a-4096-91bf-bca08bb2fffe",
+      "symbol": "605499",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fd78b1c6-0622-4026-8420-aeff1e96c5d8",
+      "symbol": "301080",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fdd8d832-ffd2-4463-b525-3e308b1b2106",
+      "symbol": "601139",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "fe924210-4bce-4afb-b651-29849df3822f",
+      "symbol": "300292",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "ff2806f7-8592-47f9-8304-f807c6c63118",
+      "symbol": "688685",
+      "bars_count": 877,
+      "bucket": "500-999",
+      "selection_reason": "stratified_share_500-999"
+    },
+    {
+      "instrument_id": "26200fa3-d776-4e1b-9eee-1de0311b4e54",
+      "symbol": "000032",
+      "bars_count": 3049,
+      "bucket": "2000+",
+      "selection_reason": "oversample_rare_bucket_2000+"
+    }
+  ]
+}

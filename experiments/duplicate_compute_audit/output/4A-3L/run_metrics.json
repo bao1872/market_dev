@@ -1,0 +1,20 @@
+{
+  "dataset_load_elapsed_sec": 2.3268,
+  "main_chain_wall_clock_sec": {
+    "run1": 214.7775,
+    "run2": 209.8058,
+    "run3": 210.4398,
+    "p50": 210.4398
+  },
+  "cpu_time_sec": 847.3544,
+  "peak_rss_mib": 1146.81,
+  "batch_count": 21,
+  "stocks_per_sec_p50": 2.414,
+  "success": 508,
+  "failed": 0,
+  "skipped": 0,
+  "total_sample": 508,
+  "external_provider_calls": 0,
+  "db_fallback_calls": 0,
+  "production_code_diff": 0
+}
