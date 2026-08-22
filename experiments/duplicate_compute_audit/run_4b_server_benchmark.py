@@ -86,6 +86,8 @@ from app.services.core_run_context import (
 # 常量（来自用户规格 / 已审 Git evidence）
 # ============================================================================
 SNAPSHOT_RUN_ID = uuid.UUID("2b7c5877-7d36-4396-84c3-7186dc911073")
+# warmup 使用独立 synthetic run ID，避免 succeeded items 污染正式 5293 full run
+WARMUP_RUN_ID = uuid.UUID("f4b0f00d-0000-4000-8000-000000000001")
 TRADE_DATE = date(2026, 8, 17)
 EXPECTED_UNIVERSE_SHA256 = "c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577"
 EXPECTED_PARAMETER_HASH = "5284aa5fec7f58ce65ee7fcf416be5620baa21a345e93c7e942995ef654705aa"
@@ -120,6 +122,9 @@ C = Counters()
 SQL_METRICS = {
     "select_count": 0,
     "select_elapsed": 0.0,
+    "statement_count": 0,
+    "other_statement_count": 0,
+    "db_write_attempts": 0,
     "by_category": {
         "bars_daily": {"count": 0, "elapsed": 0.0},
         "adj_factor": {"count": 0, "elapsed": 0.0},
@@ -166,55 +171,119 @@ async def resolve_config(ids: list[uuid.UUID]):
 
 
 # ============================================================================
-# 3. In-memory fake run-item store + fake snapshot upsert
+# 3. In-memory fake run-item store（移植自 4A-3L 已验证实现）
+#    字段对齐 StockFeatureSnapshotRunItem，供 orchestration 读取：
+#      item.id / item.instrument_id / item.status / item.lease_epoch /
+#      item.attempt_count / item.error
+#    按 (run_id) 分桶，warmup / full run 天然隔离。
 # ============================================================================
+from dataclasses import dataclass, field
+from collections import Counter, defaultdict
+from typing import Any
+
+
+@dataclass
+class _MemItem:
+    id: uuid.UUID
+    snapshot_run_id: uuid.UUID
+    instrument_id: uuid.UUID
+    phase: str = "core"
+    status: str = "pending"
+    attempt_count: int = 0
+    lease_epoch: int = 0
+    error: str | None = None
+
+
 class InMemoryRunItemStore:
+    """按 (run_id, phase) 维护 items，模拟 create/claim/mark/progress 语义。"""
+
     def __init__(self) -> None:
-        self._items: dict[uuid.UUID, dict] = {}
-        self._run_items: dict[uuid.UUID, list[uuid.UUID]] = {}
+        self._by_run: dict[uuid.UUID, dict[uuid.UUID, _MemItem]] = defaultdict(dict)
+        self._seq = 0
 
-    def seed(self, run_id: uuid.UUID, instrument_ids: list[uuid.UUID]) -> int:
-        existing = self._run_items.setdefault(run_id, [])
-        n = 0
+    def _new_id(self) -> uuid.UUID:
+        self._seq += 1
+        return uuid.UUID(int=self._seq)
+
+    async def create_run_items(
+        self, session, snapshot_run_id, instrument_ids, *, phase="core",
+        input_hash=None,
+    ) -> int:
+        store = self._by_run[snapshot_run_id]
+        created = 0
         for iid in instrument_ids:
-            if iid not in self._items:
-                self._items[iid] = {
-                    "instrument_id": iid,
-                    "status": "pending",
-                    "error": None,
-                }
-                existing.append(iid)
-                n += 1
-        return n
+            key = uuid.UUID(str(iid))
+            if key in store:
+                continue
+            store[key] = _MemItem(
+                id=self._new_id(),
+                snapshot_run_id=snapshot_run_id,
+                instrument_id=key,
+                phase=phase,
+                status="pending",
+            )
+            created += 1
+        return created
 
-    def claim(self, run_id: uuid.UUID, batch_size: int) -> list[dict]:
-        out = []
-        for iid in self._run_items.get(run_id, []):
-            it = self._items[iid]
-            if it["status"] == "pending":
-                it["status"] = "claimed"
-                out.append(it)
-                if len(out) >= batch_size:
-                    break
-        return out
+    async def claim_items(
+        self, session, snapshot_run_id, *, worker_instance_id, batch_size=25,
+        phase="core", lease_seconds=120, max_attempt_count=3,
+    ) -> list[_MemItem]:
+        store = self._by_run[snapshot_run_id]
+        claimed: list[_MemItem] = []
+        for item in store.values():
+            if len(claimed) >= batch_size:
+                break
+            if item.phase != phase:
+                continue
+            if item.status == "pending":
+                pass
+            elif item.status == "failed" and item.attempt_count < max_attempt_count:
+                pass
+            else:
+                continue
+            item.status = "running"
+            item.attempt_count += 1
+            item.lease_epoch += 1
+            claimed.append(item)
+        return claimed
 
-    def mark_succeeded(self, item_id: uuid.UUID) -> None:
-        self._items[item_id]["status"] = "succeeded"
+    async def mark_item_succeeded(
+        self, session, item_id, *, result_count=None, lease_epoch=None,
+    ) -> bool:
+        for store in self._by_run.values():
+            for item in store.values():
+                if item.id == item_id and item.status == "running":
+                    item.status = "succeeded"
+                    return True
+        return False
 
-    def mark_failed(self, item_id: uuid.UUID, error: str) -> None:
-        self._items[item_id]["status"] = "failed"
-        self._items[item_id]["error"] = error
+    async def mark_item_failed(
+        self, session, item_id, error, *, lease_epoch=None,
+    ) -> bool:
+        for store in self._by_run.values():
+            for item in store.values():
+                if item.id == item_id and item.status == "running":
+                    item.status = "failed"
+                    item.error = (error or "")[:1000]
+                    return True
+        return False
 
-    def progress(self, run_id: uuid.UUID) -> dict:
-        items = [self._items[i] for i in self._run_items.get(run_id, [])]
-        total = len(items)
-        succeeded = sum(1 for i in items if i["status"] == "succeeded")
-        failed = sum(1 for i in items if i["status"] == "failed")
-        coverage = (succeeded / total) if total else 0.0
+    async def get_run_progress(
+        self, session, snapshot_run_id, *, phase="core",
+    ) -> dict[str, Any]:
+        store = self._by_run.get(snapshot_run_id, {})
+        counts = Counter(i.status for i in store.values() if i.phase == phase)
+        succeeded = counts.get("succeeded", 0)
+        failed = counts.get("failed", 0)
+        pending = counts.get("pending", 0)
+        running = counts.get("running", 0)
+        skipped = counts.get("skipped", 0)
+        total = succeeded + failed + pending + running + skipped
+        coverage = succeeded / total if total > 0 else 0.0
         return {
-            "total": total,
-            "succeeded": succeeded,
-            "failed": failed,
+            "succeeded": succeeded, "failed": failed, "pending": pending,
+            "running": running, "skipped": skipped, "total": total,
             "coverage": coverage,
         }
 
@@ -228,21 +297,19 @@ STORE = InMemoryRunItemStore()
 def install_harness(ids: list[uuid.UUID]) -> None:
     # ---- fake run-item service (in-memory, no DB write) ----
     async def fake_create_run_items(session, snapshot_run_id, instrument_ids, **kwargs):
-        return STORE.seed(snapshot_run_id, list(instrument_ids))
+        return await STORE.create_run_items(session, snapshot_run_id, instrument_ids, **kwargs)
 
-    async def fake_claim_items(session, snapshot_run_id, *, batch_size=BATCH_SIZE, **kwargs):
-        return STORE.claim(snapshot_run_id, batch_size)
+    async def fake_claim_items(session, snapshot_run_id, **kwargs):
+        return await STORE.claim_items(session, snapshot_run_id, **kwargs)
 
     async def fake_mark_item_succeeded(session, item_id, **kwargs):
-        STORE.mark_succeeded(item_id)
-        return True
+        return await STORE.mark_item_succeeded(session, item_id, **kwargs)
 
     async def fake_mark_item_failed(session, item_id, error="", **kwargs):
-        STORE.mark_failed(item_id, error)
-        return True
+        return await STORE.mark_item_failed(session, item_id, error, **kwargs)
 
     async def fake_get_run_progress(session, snapshot_run_id, **kwargs):
-        return STORE.progress(snapshot_run_id)
+        return await STORE.get_run_progress(session, snapshot_run_id, **kwargs)
 
     sris.create_run_items = fake_create_run_items
     sris.claim_items = fake_claim_items
@@ -326,21 +393,51 @@ def install_harness(ids: list[uuid.UUID]) -> None:
 
 # ============================================================================
 # 5. SQL read metrics listener（experiment-only）
+#    挂 async_engine.sync_engine（AsyncEngine 不支持 cursor execute 事件）。
+#    仅记录只读 SELECT；任意写/DDL 触发 fail-closed guard。
 # ============================================================================
+class UnexpectedDatabaseWrite(RuntimeError):
+    pass
+
+
+_WRITE_KEYWORDS = (
+    "insert", "update", "delete", "merge", "create", "alter", "drop", "truncate"
+)
+
+
+def _is_write_statement(sql_text: str) -> bool:
+    head = (sql_text or "").strip().lower()
+    first = head.split(None, 1)[0] if head else ""
+    return first in _WRITE_KEYWORDS
+
+
 def install_sql_listener(engine) -> None:
     @event.listens_for(engine, "before_cursor_execute")
     def _before(conn, cursor, statement, parameters, context, executemany):
         context._sql_t0 = time.perf_counter()  # type: ignore[attr-defined]
+        if _is_write_statement(statement):
+            SQL_METRICS["db_write_attempts"] += 1
+            raise UnexpectedDatabaseWrite(
+                f"4B READ-ONLY guard: write/DDL detected -> {statement[:120]!r}"
+            )
 
     @event.listens_for(engine, "after_cursor_execute")
     def _after(conn, cursor, statement, parameters, context, executemany):
         dt = time.perf_counter() - getattr(context, "_sql_t0", time.perf_counter())
-        SQL_METRICS["select_count"] += 1
-        SQL_METRICS["select_elapsed"] += dt
-        cat = _classify(statement)
-        c = SQL_METRICS["by_category"][cat]
-        c["count"] += 1
-        c["elapsed"] += dt
+        if _is_write_statement(statement):
+            return  # 已在 before 拦截
+        head = (statement or "").strip().lower()
+        is_select = head.startswith("select") or head.startswith("with")
+        SQL_METRICS["statement_count"] += 1
+        if is_select:
+            SQL_METRICS["select_count"] += 1
+            SQL_METRICS["select_elapsed"] += dt
+            cat = _classify(statement)
+            c = SQL_METRICS["by_category"][cat]
+            c["count"] += 1
+            c["elapsed"] += dt
+        else:
+            SQL_METRICS["other_statement_count"] += 1
 
 
 def _classify(sql_text: str) -> str:
@@ -379,8 +476,47 @@ def machine_info(avg_cpu=None) -> dict:
     }
 
 
+def verify_production_checkout() -> None:
+    """Hard gate：被 import 的 production checkout 必须 exact == ac9c3810。
+
+    在连接 DB 之前执行；不符则 STOP（不自动部署 dev）。
+    """
+    import subprocess
+
+    repo_root = os.environ.get("PANJI_REPO_ROOT", str(REPO_ROOT))
+    try:
+        actual = subprocess.run(
+            ["git", "-C", repo_root, "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=30,
+        ).stdout.strip()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[4B] STOP: 无法读取 production checkout SHA: {exc}")
+        raise SystemExit(2)
+    print(f"[4B] production checkout HEAD = {actual}")
+    print(f"[4B] required baseline        = {PRODUCTION_CODE_SHA}")
+    if actual != PRODUCTION_CODE_SHA:
+        print("[4B] STOP: production checkout SHA 不等于 ac9c3810，拒绝运行")
+        raise SystemExit(2)
+
+
+def verify_harness_sha_env() -> str:
+    """Hard gate：PANJI_BENCHMARK_HARNESS_SHA 必须存在且为完整 40 位 hex。"""
+    raw = os.environ.get("PANJI_BENCHMARK_HARNESS_SHA", "").strip()
+    if len(raw) != 40 or not all(c in "0123456789abcdef" for c in raw):
+        print(
+            f"[4B] STOP: PANJI_BENCHMARK_HARNESS_SHA 缺失或非法"
+            f"（需要完整 40 位 hex），得到 {raw!r}"
+        )
+        raise SystemExit(2)
+    return raw
+
+
 async def main() -> int:
     print(f"[4B] 启动 {now_iso()}")
+
+    # ---- Hard gate：production checkout 必须 == ac9c3810（DB 访问前） ----
+    verify_production_checkout()
+    harness_sha = verify_harness_sha_env()
 
     # ---- Universe gate ----
     t0 = time.perf_counter()
@@ -409,21 +545,20 @@ async def main() -> int:
 
     # ---- install harness ----
     install_harness(ids)
-    install_sql_listener(async_engine)
+    install_sql_listener(async_engine.sync_engine)
 
-    # ---- warmup（25 股 1 batch，不计入） ----
-    print(f"[4B] warmup {WARMUP_STOCKS} stocks ...")
+    # ---- warmup（独立 WARMUP_RUN_ID，25 股 1 batch，不计入；不污染 full run） ----
+    print(f"[4B] warmup {WARMUP_STOCKS} stocks (run={WARMUP_RUN_ID}) ...")
     warmup_ids = ids[:WARMUP_STOCKS]
-    STORE.seed(SNAPSHOT_RUN_ID, warmup_ids)
     await fss.compute_review_core_with_run_items(
         TRADE_DATE,
         warmup_ids,
-        SNAPSHOT_RUN_ID,
+        WARMUP_RUN_ID,
         batch_size=BATCH_SIZE,
         failure_threshold=1.0,
         released_config_resolver=None,
     )
-    # 重置计时，warmup 不计入结果
+    # 重置计时，warmup 不计入结果（只清 counters，不动 store / full-run items）
     C.mdas_elapsed = C.review_core_elapsed = C.db_fallback_elapsed = 0.0
     C.mdas_calls = C.review_core_calls = C.db_fallback_calls = 0
     C.mdas_bars = 0
@@ -434,8 +569,11 @@ async def main() -> int:
         c["elapsed"] = 0.0
     SQL_METRICS["select_count"] = 0
     SQL_METRICS["select_elapsed"] = 0.0
+    SQL_METRICS["statement_count"] = 0
+    SQL_METRICS["other_statement_count"] = 0
+    SQL_METRICS["db_write_attempts"] = 0
 
-    # ---- full run：5293 股，1 次 ----
+    # ---- full run：5293 股，1 次（历史 SNAPSHOT_RUN_ID） ----
     print(f"[4B] FULL RUN {len(ids)} stocks, batch_size={BATCH_SIZE} ...")
     run_start = time.perf_counter()
     run_start_cpu = time.process_time()
@@ -452,12 +590,11 @@ async def main() -> int:
 
     peak_rss_gib = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024 / 1024
 
-    # 其他编排开销（fake bookkeeping + serialization 难以单独分离，用残差近似）
+    # 其他编排开销残差（db_fallback_elapsed 已含于 review_core_elapsed，不再减）
     accounted = (
         C.mdas_elapsed
         + C.review_core_elapsed
         + C.fake_persist_elapsed
-        + C.db_fallback_elapsed
     )
     other_orchestration = max(run_wall - accounted, 0.0)
 
@@ -504,7 +641,7 @@ async def main() -> int:
         "total_cpu_process_time_sec": round(run_cpu_time, 3),
         "external_provider_calls": C.external_calls,
         "db_fallback_calls": C.db_fallback_calls,
-        "db_writes": 0,
+        "db_write_attempts": SQL_METRICS["db_write_attempts"],
         "scheduler_triggers": 0,
         "publish_calls": 0,
     }
@@ -518,24 +655,32 @@ async def main() -> int:
         "mdas_bars_aggregated": C.mdas_bars,
         "review_core_compute_wall_clock_sec": round(C.review_core_elapsed, 3),
         "review_core_calls": C.review_core_calls,
-        "db_fallback_calls": C.db_fallback_calls,
-        "db_fallback_elapsed_sec": round(C.db_fallback_elapsed, 4),
+        "db_fallback_subcomponent": {
+            "calls": C.db_fallback_calls,
+            "elapsed_sec": round(C.db_fallback_elapsed, 4),
+            "note": "db_fallback 发生于 compute_review_core_for_trade_date 内部，"
+            "其 elapsed 已含于 review_core_compute_wall_clock_sec，不单独再加。理想 calls=0。",
+        },
         "serialization_artifact_sec": None,
         "fake_snapshot_persist_sec": round(C.fake_persist_elapsed, 4),
         "other_orchestration_sec": round(other_orchestration, 4),
         "note": "MDAS batch 与 Review-Core compute 正常路径不嵌套：MDAS batch 结果直接传入 "
         "compute；db_fallback 仅当 bars=None 时触发（理想 0）。other_orchestration 为 "
-        "total - mdas - review_core - fake_persist - db_fallback 残差。",
+        "total - mdas - review_core - fake_persist 残差（不含 db_fallback）。",
     }
 
     sql_read_metrics = {
         "select_count": SQL_METRICS["select_count"],
         "select_total_elapsed_sec": round(SQL_METRICS["select_elapsed"], 3),
+        "statement_count": SQL_METRICS["statement_count"],
+        "other_statement_count": SQL_METRICS["other_statement_count"],
+        "db_write_attempts": SQL_METRICS["db_write_attempts"],
         "by_category": {
             k: {"count": v["count"], "elapsed_sec": round(v["elapsed"], 3)}
             for k, v in SQL_METRICS["by_category"].items()
         },
-        "note": "仅记录 SELECT count/elapsed 与粗粒度表分类，不保存 SQL 参数/凭据/query text",
+        "note": "仅记录 SELECT/read CTE 的 count/elapsed 与粗粒度表分类，不保存 SQL 参数/"
+        "凭据/query text；任意 INSERT/UPDATE/DELETE/MERGE/DDL 触发 read-only guard 并计数。",
     }
 
     local_vs_server = {
@@ -554,20 +699,20 @@ async def main() -> int:
     }
 
     failures = []
-    progress = STORE.progress(SNAPSHOT_RUN_ID)
+    progress = await STORE.get_run_progress(None, SNAPSHOT_RUN_ID)
     if progress["failed"] > 0:
-        for iid, it in STORE._items.items():
-            if it["status"] == "failed":
-                failures.append({"instrument_id": str(iid), "error": it["error"]})
+        for item in STORE._by_run.get(SNAPSHOT_RUN_ID, {}).values():
+            if item.status == "failed":
+                failures.append(
+                    {"instrument_id": str(item.instrument_id), "error": item.error}
+                )
 
     evidence_meta = {
         "production_code_sha": PRODUCTION_CODE_SHA,
-        "benchmark_harness_sha": os.environ.get(
-            "PANJI_BENCHMARK_HARNESS_SHA", "TODO_FILL_AT_COMMIT"
-        ),
-        "note": "production_code_sha 为被审计的 production baseline (ac9c3810)；"
-        "benchmark_harness_sha 由运行环境通过 PANJI_BENCHMARK_HARNESS_SHA 注入"
-        "（即本次 harness 脚本的 commit SHA），不写死在脚本内以避免循环依赖。",
+        "benchmark_harness_sha": harness_sha,
+        "note": "production_code_sha 为被审计的 production baseline (ac9c3810)，"
+        "运行时经 git rev-parse 硬校验；benchmark_harness_sha 由运行环境通过 "
+        "PANJI_BENCHMARK_HARNESS_SHA 注入（即本次 harness 脚本的 commit SHA）。",
     }
 
     def _write(name: str, obj: dict) -> None:
@@ -628,6 +773,61 @@ def _decision_gate(total_sec: float, mdas_sec: float, cpu_sec: float) -> str:
     return "C: Server 明显 <31min → 先看 SLA 再决定是否值得并行"
 
 
+async def harness_smoke() -> int:
+    """本地 unit-level harness smoke：验证 run-item store contract 与 run 隔离。
+
+    不连接真实 DB；只验证 InMemoryRunItemStore 对象契约与 warmup/full 分桶隔离。
+    """
+    print("[4B-smoke] 启动（不连接真实 DB）")
+    sample_ids = [uuid.uuid4() for _ in range(25)]
+
+    # 1) create 25 fake items
+    n = await STORE.create_run_items(None, WARMUP_RUN_ID, sample_ids, phase="core")
+    assert n == 25, f"create_run_items 应创建 25，得到 {n}"
+
+    # 2) claim 返回对象契约：pending -> running，attempt_count/lease_epoch +=1
+    claimed = await STORE.claim_items(
+        None, WARMUP_RUN_ID, worker_instance_id="smoke", batch_size=25
+    )
+    assert len(claimed) == 25, f"claim 应返回 25，得到 {len(claimed)}"
+    first = claimed[0]
+    assert hasattr(first, "id") and hasattr(first, "instrument_id"), "item 缺 id/instrument_id"
+    assert hasattr(first, "lease_epoch") and hasattr(first, "status"), "item 缺 lease_epoch/status"
+    assert first.status == "running", f"claim 后 status 应为 running，得到 {first.status}"
+    assert first.attempt_count == 1 and first.lease_epoch == 1, "attempt_count/lease_epoch 应 +1"
+
+    # 3) mark succeeded 25/25
+    ok = 0
+    for it in claimed:
+        if await STORE.mark_item_succeeded(None, it.id):
+            ok += 1
+    assert ok == 25, f"mark_succeeded 应 25，得到 {ok}"
+
+    # 4) progress 反映 succeeded=25
+    prog = await STORE.get_run_progress(None, WARMUP_RUN_ID, phase="core")
+    assert prog["succeeded"] == 25 and prog["total"] == 25, f"progress 异常: {prog}"
+
+    # 5) warmup/full 隔离：SNAPSHOT_RUN_ID 不应被 WARMUP_RUN_ID 污染
+    full_prog = await STORE.get_run_progress(None, SNAPSHOT_RUN_ID, phase="core")
+    assert full_prog["total"] == 0, f"full run store 应仍为空，得到 {full_prog}"
+
+    # 额外：mark_failed 路径
+    await STORE.create_run_items(None, SNAPSHOT_RUN_ID, [uuid.uuid4()], phase="core")
+    f_claimed = await STORE.claim_items(
+        None, SNAPSHOT_RUN_ID, worker_instance_id="smoke", batch_size=25
+    )
+    await STORE.mark_item_failed(None, f_claimed[0].id, "smoke-error")
+    f_prog = await STORE.get_run_progress(None, SNAPSHOT_RUN_ID, phase="core")
+    assert f_prog["failed"] == 1, f"failed 应 1，得到 {f_prog}"
+
+    print("[4B-smoke] PASS: 25 fake items / claim object contract / 25/25 succeeded / "
+          "warmup-full isolation / mark_failed 均验证通过")
+    return 0
+
+
 if __name__ == "__main__":
-    rc = asyncio.run(main())
+    if "--smoke" in sys.argv:
+        rc = asyncio.run(harness_smoke())
+    else:
+        rc = asyncio.run(main())
     raise SystemExit(rc)
