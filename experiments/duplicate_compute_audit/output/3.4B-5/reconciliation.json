@@ -1,0 +1,48 @@
+{
+  "reconciliation": {
+    "phase": "3.4B-5",
+    "method": "per-run exclusive reconciliation; error = |(child_sum - parent)/parent|",
+    "temporal": {
+      "daily_context": {
+        "hist_ages + sqzmom + volpct + other": {
+          "median_rel_error_pct": 0.0,
+          "p95_rel_error_pct": 0.0,
+          "max_rel_error_pct": 0.0
+        }
+      },
+      "hist_ages": {
+        "dsa2_full + seg_age_projection": {
+          "median_rel_error_pct": 0.0,
+          "p95_rel_error_pct": 0.0,
+          "max_rel_error_pct": 0.0
+        }
+      }
+    },
+    "artifact": {
+      "core_artifact": {
+        "build_fp + dsa_metrics + dsa_visual + state_events + residual": {
+          "median_rel_error_pct": 0.0,
+          "p95_rel_error_pct": 0.0,
+          "max_rel_error_pct": 0.0
+        }
+      },
+      "summary": {
+        "afc + flatten + assemble + other": {
+          "median_rel_error_pct": 0.0,
+          "p95_rel_error_pct": 0.0,
+          "max_rel_error_pct": 0.0
+        }
+      }
+    }
+  },
+  "eligible_projection": {
+    "eligible_instruments": 5286,
+    "eligibility_rule": "review-core: len(df_1d) >= 60 (compute_review_core_for_trade_date degraded check)",
+    "total_instruments_in_dataset": 5292,
+    "p50_serial_projection_seconds": 1236.7,
+    "p50_serial_projection_minutes": 20.6,
+    "p95_serial_projection_seconds": 1561.9,
+    "p95_serial_projection_minutes": 26.0,
+    "caveat": "serial compute-only projection != production AfterClose wall-clock (不含 DB 读/写、并发重叠、调度与运行环境开销)"
+  }
+}

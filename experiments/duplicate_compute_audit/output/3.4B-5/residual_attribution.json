@@ -1,0 +1,455 @@
+{
+  "phase": "3.4B-5",
+  "method": "call real compute_review_core_for_trade_date; perf_counter; 3.4B-4 patch 集 + 3.4B-5 leaf timers; per-run exclusive reconciliation",
+  "reproducibility": {
+    "dataset": "review-source-c5c686e-v1",
+    "audit_code_sha": "79cf519db5e408f04a7ac378db36571f296c8b2e",
+    "baseline": {
+      "phase": "3.4B-4",
+      "audit_code_sha": "79cf519db5e408f04a7ac378db36571f296c8b2e"
+    }
+  },
+  "n_runs": 315,
+  "total_per_stock": {
+    "p50_ms": 233.953,
+    "p95_ms": 295.472
+  },
+  "table_34b4_compatible": [
+    {
+      "component": "DSA",
+      "elapsed_p50_ms": 52.569,
+      "elapsed_p95_ms": 67.755,
+      "median_share_pct": 22.77
+    },
+    {
+      "component": "SMC #1",
+      "elapsed_p50_ms": 3.897,
+      "elapsed_p95_ms": 4.405,
+      "median_share_pct": 1.662
+    },
+    {
+      "component": "SMC #2 (freshness)",
+      "elapsed_p50_ms": 0.37,
+      "elapsed_p95_ms": 0.46,
+      "median_share_pct": 0.155
+    },
+    {
+      "component": "Bollinger #1",
+      "elapsed_p50_ms": 1.563,
+      "elapsed_p95_ms": 2.089,
+      "median_share_pct": 0.686
+    },
+    {
+      "component": "Bollinger #2 (extra)",
+      "elapsed_p50_ms": 0.0,
+      "elapsed_p95_ms": 0.0,
+      "median_share_pct": 0.0
+    },
+    {
+      "component": "SQZMOM",
+      "elapsed_p50_ms": 4.924,
+      "elapsed_p95_ms": 5.394,
+      "median_share_pct": 2.112
+    },
+    {
+      "component": "VolumeContext",
+      "elapsed_p50_ms": 11.586,
+      "elapsed_p95_ms": 12.499,
+      "median_share_pct": 4.948
+    },
+    {
+      "component": "ATR / swing / participation",
+      "elapsed_p50_ms": 3.026,
+      "elapsed_p95_ms": 3.368,
+      "median_share_pct": 1.288
+    },
+    {
+      "component": "structural derived (dsa_segment / momentum)",
+      "elapsed_p50_ms": 0.334,
+      "elapsed_p95_ms": 0.478,
+      "median_share_pct": 0.146
+    },
+    {
+      "component": "single-period VP (cost_position)",
+      "elapsed_p50_ms": 4.339,
+      "elapsed_p95_ms": 5.299,
+      "median_share_pct": 1.88
+    },
+    {
+      "component": "MACD / daily_context / derived",
+      "elapsed_p50_ms": 83.066,
+      "elapsed_p95_ms": 105.527,
+      "median_share_pct": 35.697
+    },
+    {
+      "component": "Canonical hash / orchestration overhead",
+      "elapsed_p50_ms": 0.744,
+      "elapsed_p95_ms": 0.852,
+      "median_share_pct": 0.32
+    },
+    {
+      "component": "Artifact / summary assembly",
+      "elapsed_p50_ms": 64.267,
+      "elapsed_p95_ms": 76.981,
+      "median_share_pct": 27.413
+    },
+    {
+      "component": "other / unmeasured",
+      "elapsed_p50_ms": 1.142,
+      "elapsed_p95_ms": 1.363,
+      "median_share_pct": 0.494
+    },
+    {
+      "component": "Total per-stock",
+      "elapsed_p50_ms": 233.953,
+      "elapsed_p95_ms": 295.472,
+      "median_share_pct": 100.0
+    }
+  ],
+  "median_share_sum_pct": 99.571,
+  "temporal_leaf": [
+    {
+      "leaf": "macd_state",
+      "elapsed_p50_ms": 1.3283,
+      "elapsed_p95_ms": 1.5304,
+      "median_share_of_chain_pct": 0.568,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "macd_kernel",
+      "elapsed_p50_ms": 0.805,
+      "elapsed_p95_ms": 0.9476,
+      "median_share_of_chain_pct": 0.345,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "daily_context",
+      "elapsed_p50_ms": 82.2468,
+      "elapsed_p95_ms": 104.7194,
+      "median_share_of_chain_pct": 35.335,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "hist_ages",
+      "elapsed_p50_ms": 76.938,
+      "elapsed_p95_ms": 99.4693,
+      "median_share_of_chain_pct": 33.061,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "dsa2_full",
+      "elapsed_p50_ms": 76.643,
+      "elapsed_p95_ms": 99.0319,
+      "median_share_of_chain_pct": 32.943,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "seg_age_projection",
+      "elapsed_p50_ms": 0.2845,
+      "elapsed_p95_ms": 0.3885,
+      "median_share_of_chain_pct": 0.121,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "other_daily_context",
+      "elapsed_p50_ms": 0.0191,
+      "elapsed_p95_ms": 0.0297,
+      "median_share_of_chain_pct": 0.008,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "sqzmom_at_bar",
+      "elapsed_p50_ms": 5.0338,
+      "elapsed_p95_ms": 5.6548,
+      "median_share_of_chain_pct": 2.168,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "volpct_at_bar",
+      "elapsed_p50_ms": 0.036,
+      "elapsed_p95_ms": 0.1449,
+      "median_share_of_chain_pct": 0.017,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "find_bar_index",
+      "elapsed_p50_ms": 0.2072,
+      "elapsed_p95_ms": 0.2891,
+      "median_share_of_chain_pct": 0.086,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "percentile_rank",
+      "elapsed_p50_ms": 0.0193,
+      "elapsed_p95_ms": 0.0361,
+      "median_share_of_chain_pct": 0.008,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "derived_relation",
+      "elapsed_p50_ms": 0.0018,
+      "elapsed_p95_ms": 0.0029,
+      "median_share_of_chain_pct": 0.001,
+      "n_calls_median": null
+    }
+  ],
+  "artifact_leaf": [
+    {
+      "leaf": "core_artifact",
+      "elapsed_p50_ms": 64.0435,
+      "elapsed_p95_ms": 76.7257,
+      "median_share_of_chain_pct": 27.328,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "build_fp_core",
+      "elapsed_p50_ms": 61.8334,
+      "elapsed_p95_ms": 73.1868,
+      "median_share_of_chain_pct": 26.371,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "dsa_metrics",
+      "elapsed_p50_ms": 0.0263,
+      "elapsed_p95_ms": 0.0311,
+      "median_share_of_chain_pct": 0.011,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "dsa_visual",
+      "elapsed_p50_ms": 0.2361,
+      "elapsed_p95_ms": 0.3064,
+      "median_share_of_chain_pct": 0.102,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "state_events",
+      "elapsed_p50_ms": 0.0073,
+      "elapsed_p95_ms": 0.0106,
+      "median_share_of_chain_pct": 0.003,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "json_safe_aggregate",
+      "elapsed_p50_ms": 9.1363,
+      "elapsed_p95_ms": 11.2976,
+      "median_share_of_chain_pct": 3.851,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "artifact_residual",
+      "elapsed_p50_ms": 1.9212,
+      "elapsed_p95_ms": 2.3793,
+      "median_share_of_chain_pct": 0.81,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "summary",
+      "elapsed_p50_ms": 0.1369,
+      "elapsed_p95_ms": 0.2185,
+      "median_share_of_chain_pct": 0.06,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "build_afc_payload",
+      "elapsed_p50_ms": 0.058,
+      "elapsed_p95_ms": 0.0823,
+      "median_share_of_chain_pct": 0.025,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "flatten_first_pyramid",
+      "elapsed_p50_ms": 0.0613,
+      "elapsed_p95_ms": 0.0891,
+      "median_share_of_chain_pct": 0.027,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "assemble_read_model",
+      "elapsed_p50_ms": 0.003,
+      "elapsed_p95_ms": 0.0044,
+      "median_share_of_chain_pct": 0.001,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "other_summary_assembly",
+      "elapsed_p50_ms": 0.0152,
+      "elapsed_p95_ms": 0.0268,
+      "median_share_of_chain_pct": 0.007,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "codec",
+      "elapsed_p50_ms": 0.0025,
+      "elapsed_p95_ms": 0.0039,
+      "median_share_of_chain_pct": 0.001,
+      "n_calls_median": null
+    },
+    {
+      "leaf": "extra_fields",
+      "elapsed_p50_ms": 0.072,
+      "elapsed_p95_ms": 0.0899,
+      "median_share_of_chain_pct": 0.031,
+      "n_calls_median": null
+    }
+  ],
+  "top10_leaves": [
+    {
+      "leaf": "dsa2_full",
+      "elapsed_p50_ms": 76.643,
+      "elapsed_p95_ms": 99.0319,
+      "median_share_of_chain_pct": 32.943
+    },
+    {
+      "leaf": "build_fp_core",
+      "elapsed_p50_ms": 61.8334,
+      "elapsed_p95_ms": 73.1868,
+      "median_share_of_chain_pct": 26.371
+    },
+    {
+      "leaf": "DSA #1 (250-bar bundle)",
+      "elapsed_p50_ms": 52.5691,
+      "elapsed_p95_ms": 67.7554,
+      "median_share_of_chain_pct": 22.77
+    },
+    {
+      "leaf": "VolumeContext",
+      "elapsed_p50_ms": 11.5857,
+      "elapsed_p95_ms": 12.4994,
+      "median_share_of_chain_pct": 4.948
+    },
+    {
+      "leaf": "sqzmom_at_bar",
+      "elapsed_p50_ms": 5.0338,
+      "elapsed_p95_ms": 5.6548,
+      "median_share_of_chain_pct": 2.168
+    },
+    {
+      "leaf": "SQZMOM",
+      "elapsed_p50_ms": 4.9236,
+      "elapsed_p95_ms": 5.3943,
+      "median_share_of_chain_pct": 2.112
+    },
+    {
+      "leaf": "cost_position (single-period VP)",
+      "elapsed_p50_ms": 4.3387,
+      "elapsed_p95_ms": 5.2992,
+      "median_share_of_chain_pct": 1.88
+    },
+    {
+      "leaf": "SMC #1 (bundle)",
+      "elapsed_p50_ms": 3.897,
+      "elapsed_p95_ms": 4.4052,
+      "median_share_of_chain_pct": 1.662
+    },
+    {
+      "leaf": "swing factors",
+      "elapsed_p50_ms": 2.9042,
+      "elapsed_p95_ms": 3.2539,
+      "median_share_of_chain_pct": 1.233
+    },
+    {
+      "leaf": "artifact_residual",
+      "elapsed_p50_ms": 1.9212,
+      "elapsed_p95_ms": 2.3793,
+      "median_share_of_chain_pct": 0.81
+    }
+  ],
+  "decision_gate": [
+    {
+      "leaf": "dsa2_full",
+      "classification": "C",
+      "elapsed_p50_ms": 76.643,
+      "median_share_of_chain_pct": 32.943,
+      "evidence": "full-history compute_dsa_bundle（DSA #2，DIFFERENT_CONTRACT 250 无 lookback）；真实内核计算，禁止改 lookback/改算法"
+    },
+    {
+      "leaf": "build_fp_core",
+      "classification": "C",
+      "elapsed_p50_ms": 61.8334,
+      "median_share_of_chain_pct": 26.371,
+      "evidence": "FirstPyramidCoreSnapshot 纯 builder（P0-03 收敛），组装大 dict；真实组装成本"
+    },
+    {
+      "leaf": "DSA #1 (250-bar bundle)",
+      "classification": "C",
+      "elapsed_p50_ms": 52.5691,
+      "median_share_of_chain_pct": 22.77,
+      "evidence": "compute_core_kernel_bundle 内 250-bar compute_dsa_bundle，真实内核"
+    },
+    {
+      "leaf": "VolumeContext",
+      "classification": "C",
+      "elapsed_p50_ms": 11.5857,
+      "median_share_of_chain_pct": 4.948,
+      "evidence": "compute_volume_context_series，真实内核"
+    },
+    {
+      "leaf": "sqzmom_at_bar",
+      "classification": "C",
+      "elapsed_p50_ms": 5.0338,
+      "median_share_of_chain_pct": 2.168,
+      "evidence": "待补充静态证据"
+    },
+    {
+      "leaf": "SQZMOM",
+      "classification": "C",
+      "elapsed_p50_ms": 4.9236,
+      "median_share_of_chain_pct": 2.112,
+      "evidence": "bundle 内 compute_sqzmom_lb，真实内核"
+    },
+    {
+      "leaf": "cost_position (single-period VP)",
+      "classification": "C",
+      "elapsed_p50_ms": 4.3387,
+      "median_share_of_chain_pct": 1.88,
+      "evidence": "单周期 VP 计算，真实算法"
+    },
+    {
+      "leaf": "SMC #1 (bundle)",
+      "classification": "C",
+      "elapsed_p50_ms": 3.897,
+      "median_share_of_chain_pct": 1.662,
+      "evidence": "bundle 内 compute_smc_pine，真实内核"
+    },
+    {
+      "leaf": "swing factors",
+      "classification": "C",
+      "elapsed_p50_ms": 2.9042,
+      "median_share_of_chain_pct": 1.233,
+      "evidence": "structural swing 因子，真实算法"
+    },
+    {
+      "leaf": "artifact_residual",
+      "classification": "D",
+      "elapsed_p50_ms": 1.9212,
+      "median_share_of_chain_pct": 0.81,
+      "evidence": "CoreComputationArtifact 构造 + 顶层 _json_safe_value + model_dump"
+    }
+  ],
+  "measurement_notes": {
+    "json_safe_aggregate": "_json_safe_value 在 build_fp_core 内部被递归调用，时间与 build_fp_core 重叠；仅保留原始测量（见 artifact_leaf），不参与 top10 排名避免双重计数；其真实 exclusive 序列化开销上界为 artifact_residual（top10 #10）",
+    "nested_counters_not_ranked": [
+      "daily_context / hist_ages / core_artifact / summary 为聚合桶，不参与排名",
+      "find_bar_index / percentile_rank 为 hist_ages 内部子计数器，数值 <0.5ms，未进入 top10"
+    ]
+  },
+  "full_universe_serial_projection": {
+    "eligible_instruments": 5286,
+    "eligibility_rule": "review-core: len(df_1d) >= 60 (compute_review_core_for_trade_date degraded check)",
+    "total_instruments_in_dataset": 5292,
+    "p50_serial_projection_seconds": 1236.7,
+    "p50_serial_projection_minutes": 20.6,
+    "p95_serial_projection_seconds": 1561.9,
+    "p95_serial_projection_minutes": 26.0,
+    "caveat": "serial compute-only projection != production AfterClose wall-clock (不含 DB 读/写、并发重叠、调度与运行环境开销)"
+  },
+  "calls_summary": {
+    "dsa1_calls": [
+      1
+    ],
+    "dsa2_full_calls": [
+      1
+    ]
+  }
+}
