@@ -91,7 +91,17 @@ WARMUP_RUN_ID = uuid.UUID("f4b0f00d-0000-4000-8000-000000000001")
 TRADE_DATE = date(2026, 8, 17)
 EXPECTED_UNIVERSE_SHA256 = "c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577"
 EXPECTED_PARAMETER_HASH = "5284aa5fec7f58ce65ee7fcf416be5620baa21a345e93c7e942995ef654705aa"
-PRODUCTION_CODE_SHA = "ac9c3810b63f64e702b0d60f7e7822112ab137fb"
+# 身份模型（4B-0G-R3 拆分，方案 C）：
+#   DEPLOYED_RUNTIME_SHA —— 服务器当前真实部署/运行身份（方案 C 中 = ecc2388）。
+#       server_repo_head / live_runtime_sha / runtime_git_sha 三者必须全部等于它。
+#   TARGET_CODE_SHA —— 本轮被测应用代码 SHA（exact Git object，方案 C 中 = ac9c3810）。
+#       one-shot 容器内 /app/app 被替换为 TARGET_CODE_SHA 的 exact backend/app（隔离、不部署）。
+#   两者现在明确不同：deployed != target 是合法状态。
+PRODUCTION_CODE_SHA = "ac9c3810b63f64e702b0d60f7e7822112ab137fb"  # 兼容旧名 = TARGET
+DEPLOYED_RUNTIME_SHA = "ecc2388ef736a42f89d9d2a4b1b74907cc806253"
+TARGET_CODE_SHA = "ac9c3810b63f64e702b0d60f7e7822112ab137fb"
+# ac9c3810:backend/app 的 Git tree sha（materialize 后交叉验证 exact 身份）
+TARGET_APP_TREE_SHA = "8f7ff995d69884e9182c89ab1025103f5a389626"
 BATCH_SIZE = 25
 WARMUP_STOCKS = 25
 
@@ -525,14 +535,15 @@ def machine_info(avg_cpu=None) -> dict:
 
 
 def verify_production_identity() -> None:
-    """Hard gate：验证 remote runner 注入的已核验运行身份。
+    """Hard gate：验证 remote runner 注入的已核验运行身份（4B-0G-R3 拆分）。
 
-    不再在 benchmark container 内调用 Git CLI（production runtime 镜像未声明 git）。
-    真实服务器 Git/runtime 身份由 remote runner 在宿主机完成三处校验：
-      /root/web_dev HEAD == ac9c
-      /opt/panji-live/RUNTIME_SHA == ac9c
-      /v1/version.runtime_git_sha == ac9c
-    并将三者注入环境变量；harness 只校验收到的身份且三者一致 == PRODUCTION_CODE_SHA。
+    不调用 Git CLI（production runtime 镜像未声明 git）。服务器身份由 remote runner
+    在宿主机完成：
+      DEPLOYED 三身份（server_repo_head / live_runtime_sha / runtime_git_sha）
+        必须全部 == DEPLOYED_RUNTIME_SHA（当前线上真实部署身份，方案 C 中 = ecc2388）。
+      TARGET_CODE_SHA（被测应用代码）
+        必须 == TARGET_CODE_SHA（方案 C 中 = ac9c3810），由 one-shot 容器 /app/app 承载。
+    harness 只校验收到的身份，不自行探测服务器。
     """
     def _require_hex(name: str) -> str:
         val = os.environ.get(name, "").strip()
@@ -544,14 +555,23 @@ def verify_production_identity() -> None:
     server_head = _require_hex("PANJI_SERVER_REPO_HEAD")
     live_sha = _require_hex("PANJI_LIVE_RUNTIME_SHA")
     runtime_sha = _require_hex("PANJI_RUNTIME_GIT_SHA")
+    target_sha = _require_hex("PANJI_TARGET_CODE_SHA")
 
     print(f"[4B] server_repo_head    = {server_head}")
     print(f"[4B] live_runtime_sha   = {live_sha}")
     print(f"[4B] runtime_git_sha    = {runtime_sha}")
-    print(f"[4B] required baseline   = {PRODUCTION_CODE_SHA}")
+    print(f"[4B] deployed_runtime_sha (required) = {DEPLOYED_RUNTIME_SHA}")
+    print(f"[4B] target_code_sha    = {target_sha}")
+    print(f"[4B] target_code_sha (required)      = {TARGET_CODE_SHA}")
 
-    if not (server_head == live_sha == runtime_sha == PRODUCTION_CODE_SHA):
-        print("[4B] STOP: 运行身份不一致或未对齐 ac9c3810，拒绝运行")
+    # 部署身份三要件必须互相一致且等于 DEPLOYED_RUNTIME_SHA
+    if not (server_head == live_sha == runtime_sha == DEPLOYED_RUNTIME_SHA):
+        print("[4B] STOP: 部署身份不一致或未对齐 DEPLOYED_RUNTIME_SHA，拒绝运行")
+        raise SystemExit(2)
+
+    # 被测应用代码 SHA 必须精确等于 TARGET_CODE_SHA（隔离 one-shot 的 /app/app 来源）
+    if target_sha != TARGET_CODE_SHA:
+        print("[4B] STOP: target_code_sha 未对齐 TARGET_CODE_SHA，拒绝运行")
         raise SystemExit(2)
 
 
@@ -765,20 +785,23 @@ async def main() -> int:
                 )
 
     # 运行身份：仅读取 remote runner 注入的环境变量并记录，harness 本身不探测服务器。
-    # 四个身份必须互相一致（由 remote runner 在启动容器前 gate），此处只做记录与一致性提示。
+    # 4B-0G-R3 拆分：deployed 三身份（当前线上真实部署）与 target（被测应用代码）是
+    # 两个独立概念，必须分别记录，不得再混用 production_code_sha == deployed 的假设。
     runtime_identities = {
-        "production_code_sha": PRODUCTION_CODE_SHA,
-        "benchmark_harness_sha": harness_sha,
+        "deployed_runtime_sha": DEPLOYED_RUNTIME_SHA,
         "server_repo_head": os.environ.get("PANJI_SERVER_REPO_HEAD", ""),
         "live_runtime_sha": os.environ.get("PANJI_LIVE_RUNTIME_SHA", ""),
         "runtime_git_sha": os.environ.get("PANJI_RUNTIME_GIT_SHA", ""),
-        "note": "production_code_sha 为被审计的 production baseline (ac9c3810)，"
-        "运行时经 git rev-parse 硬校验；benchmark_harness_sha 由运行环境通过 "
-        "PANJI_BENCHMARK_HARNESS_SHA 注入（即本次 harness 脚本的 commit SHA）。"
-        "server_repo_head / live_runtime_sha / runtime_git_sha 由 governed remote runner "
-        "在容器启动前 gate 并注入，harness 仅记录，不自行探测服务器。四者中 "
-        "production_code_sha 与 server_repo_head / live_runtime_sha / runtime_git_sha 必须相等；"
-        "benchmark_harness_sha 允许不同（harness 与 production 是两个独立身份）。",
+        "target_code_sha": os.environ.get("PANJI_TARGET_CODE_SHA", ""),
+        "target_app_tree_sha": os.environ.get("PANJI_TARGET_APP_TREE_SHA", ""),
+        "benchmark_harness_sha": harness_sha,
+        "note": "方案 C 身份模型：deployed_runtime_sha 为服务器当前真实部署/运行身份"
+        "（server_repo_head / live_runtime_sha / runtime_git_sha 三者必须一致且等于它，"
+        "由 governed remote runner 在容器启动前 gate）；target_code_sha 为本次被测应用代码"
+        "SHA（exact Git object），one-shot 容器内 /app/app 即其 backend/app，隔离不部署。"
+        "两者明确不同：性能结果的对象是 target_code_sha 应用代码，在 production-equivalent"
+        "资源 + 真实 bz_stock 上的表现，而非声称 deployed runtime 自身的基准。"
+        "benchmark_harness_sha 为本次 harness 脚本 commit SHA，是独立身份。",
     }
 
     def _write(name: str, obj: dict) -> None:
