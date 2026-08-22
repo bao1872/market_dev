@@ -1,0 +1,80 @@
+{
+  "phase": "3.4B-6B",
+  "audit_code_sha": "0514c36c3f7d91a8249aff5fe7375ebfb5e0a8e3",
+  "method": "call real compute_review_core_for_trade_date; perf_counter; old-reference vs production-new parity; raw reuse offline build",
+  "gate1_hash_contract_parity": {
+    "frozen": {
+      "n_samples": 105,
+      "n_equal": 105,
+      "all_equal": true,
+      "mismatches": []
+    },
+    "edge_cases": {
+      "n_cases": 6,
+      "all_equal": true,
+      "cases": [
+        {
+          "case": "empty",
+          "n_rows": 0,
+          "old": "sha256:empty",
+          "new": "sha256:empty",
+          "equal": true
+        },
+        {
+          "case": "no_ohlcv",
+          "n_rows": 2,
+          "old": "sha256:no_ohlcv",
+          "new": "sha256:no_ohlcv",
+          "equal": true
+        },
+        {
+          "case": "missing_amount",
+          "n_rows": 3,
+          "old": "sha256:0a0a70b83f1681c4",
+          "new": "sha256:0a0a70b83f1681c4",
+          "equal": true
+        },
+        {
+          "case": "nan_inf_zero_neg",
+          "n_rows": 4,
+          "old": "sha256:error",
+          "new": "sha256:error",
+          "equal": true
+        },
+        {
+          "case": "scientific_float",
+          "n_rows": 4,
+          "old": "sha256:7f895ebb39d68a1a",
+          "new": "sha256:7f895ebb39d68a1a",
+          "equal": true
+        },
+        {
+          "case": "duplicate_datetime_index",
+          "n_rows": 5,
+          "old": "sha256:9042701e6ff48680",
+          "new": "sha256:9042701e6ff48680",
+          "equal": true
+        }
+      ]
+    }
+  },
+  "gate2_builder_output_parity": {
+    "n_instruments": 105,
+    "n_equal": 105,
+    "all_equal": true
+  },
+  "gate4_performance": {
+    "baseline_6A_old": {
+      "build_fp_p50_ms": 60.0959,
+      "input_hash_p50_ms": 20.1485
+    },
+    "production_new": {
+      "build_fp_p50_ms": 44.1682,
+      "build_fp_p95_ms": 54.283,
+      "input_hash_in_situ_p50_ms": 2.0792,
+      "input_hash_in_situ_p95_ms": 3.0368,
+      "chain_total_p50_ms": 216.0358,
+      "chain_total_p95_ms": 262.3814
+    }
+  }
+}

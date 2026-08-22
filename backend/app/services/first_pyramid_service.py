@@ -241,8 +241,9 @@ def _compute_input_hash(bars: pd.DataFrame) -> str:
     if not cols:
         return "sha256:no_ohlcv"
     try:
-        idx_str = pd.Series(bars.index.astype(str)).str.cat(sep=",")
-        vals_str = bars[cols].astype(str).agg(",".join, axis=1).str.cat(sep="|")
+        idx_str = ",".join(bars.index.astype(str).tolist())
+        arr = bars[cols].astype(str).to_numpy().tolist()
+        vals_str = "|".join(",".join(row) for row in arr)
         content = f"{idx_str}#{vals_str}"
         return "sha256:" + hashlib.sha256(content.encode("utf-8")).hexdigest()[:16]
     except Exception as exc:
