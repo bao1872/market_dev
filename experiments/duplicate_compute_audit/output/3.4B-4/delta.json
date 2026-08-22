@@ -1,0 +1,214 @@
+{
+  "phase": "3.4B-4",
+  "baseline_phase": "3.4A-3",
+  "baseline_p50_source": "/Users/zhenbao/Desktop/coding/market_dev/experiments/duplicate_compute_audit/output/3.4A-3/cost_decomposition.json",
+  "units": "ms per stock (elapsed p50 wall time)",
+  "delta": [
+    {
+      "component": "Total per-stock",
+      "baseline_p50_ms": 299.292,
+      "current_p50_ms": 232.849,
+      "saved_ms": 66.443,
+      "saved_pct": 22.2
+    },
+    {
+      "component": "MACD / daily_context / derived",
+      "baseline_p50_ms": 124.819,
+      "current_p50_ms": 82.623,
+      "saved_ms": 42.196,
+      "saved_pct": 33.81
+    },
+    {
+      "component": "DSA",
+      "baseline_p50_ms": 74.054,
+      "current_p50_ms": 52.775,
+      "saved_ms": 21.279,
+      "saved_pct": 28.73
+    },
+    {
+      "component": "SMC #2 (freshness)",
+      "baseline_p50_ms": 4.767,
+      "current_p50_ms": 0.368,
+      "saved_ms": 4.399,
+      "saved_pct": 92.28
+    },
+    {
+      "component": "Bollinger #2 (extra)",
+      "baseline_p50_ms": 3.423,
+      "current_p50_ms": 0.0,
+      "saved_ms": 3.423,
+      "saved_pct": 100.0
+    },
+    {
+      "component": "Canonical hash / orchestration overhead",
+      "baseline_p50_ms": 0.752,
+      "current_p50_ms": 0.733,
+      "saved_ms": 0.019,
+      "saved_pct": 2.53
+    },
+    {
+      "component": "SMC #1",
+      "baseline_p50_ms": 3.84,
+      "current_p50_ms": 3.849,
+      "saved_ms": -0.009,
+      "saved_pct": -0.23
+    },
+    {
+      "component": "ATR / swing / participation",
+      "baseline_p50_ms": 2.965,
+      "current_p50_ms": 3.008,
+      "saved_ms": -0.043,
+      "saved_pct": -1.45
+    },
+    {
+      "component": "structural derived (dsa_segment / momentum)",
+      "baseline_p50_ms": 0.281,
+      "current_p50_ms": 0.329,
+      "saved_ms": -0.048,
+      "saved_pct": -17.08
+    },
+    {
+      "component": "SQZMOM",
+      "baseline_p50_ms": 4.723,
+      "current_p50_ms": 4.78,
+      "saved_ms": -0.057,
+      "saved_pct": -1.21
+    },
+    {
+      "component": "Bollinger #1",
+      "baseline_p50_ms": 1.447,
+      "current_p50_ms": 1.554,
+      "saved_ms": -0.107,
+      "saved_pct": -7.39
+    },
+    {
+      "component": "other / unmeasured",
+      "baseline_p50_ms": 1.029,
+      "current_p50_ms": 1.159,
+      "saved_ms": -0.13,
+      "saved_pct": -12.63
+    },
+    {
+      "component": "single-period VP (cost_position)",
+      "baseline_p50_ms": 4.041,
+      "current_p50_ms": 4.348,
+      "saved_ms": -0.307,
+      "saved_pct": -7.6
+    },
+    {
+      "component": "VolumeContext",
+      "baseline_p50_ms": 10.97,
+      "current_p50_ms": 11.493,
+      "saved_ms": -0.523,
+      "saved_pct": -4.77
+    },
+    {
+      "component": "Artifact / summary assembly",
+      "baseline_p50_ms": 62.183,
+      "current_p50_ms": 63.766,
+      "saved_ms": -1.583,
+      "saved_pct": -2.55
+    }
+  ],
+  "current_top_hotspots_by_current_p50": [
+    {
+      "rank": 1,
+      "component": "MACD / daily_context / derived",
+      "elapsed_p50_ms": 82.623,
+      "elapsed_p95_ms": 105.372,
+      "median_share_pct": 35.504
+    },
+    {
+      "rank": 2,
+      "component": "Artifact / summary assembly",
+      "elapsed_p50_ms": 63.766,
+      "elapsed_p95_ms": 77.379,
+      "median_share_pct": 27.293
+    },
+    {
+      "rank": 3,
+      "component": "DSA",
+      "elapsed_p50_ms": 52.775,
+      "elapsed_p95_ms": 69.654,
+      "median_share_pct": 22.885
+    },
+    {
+      "rank": 4,
+      "component": "VolumeContext",
+      "elapsed_p50_ms": 11.493,
+      "elapsed_p95_ms": 12.822,
+      "median_share_pct": 4.984
+    },
+    {
+      "rank": 5,
+      "component": "SQZMOM",
+      "elapsed_p50_ms": 4.78,
+      "elapsed_p95_ms": 5.384,
+      "median_share_pct": 2.068
+    },
+    {
+      "rank": 6,
+      "component": "single-period VP (cost_position)",
+      "elapsed_p50_ms": 4.348,
+      "elapsed_p95_ms": 5.587,
+      "median_share_pct": 1.894
+    },
+    {
+      "rank": 7,
+      "component": "SMC #1",
+      "elapsed_p50_ms": 3.849,
+      "elapsed_p95_ms": 4.461,
+      "median_share_pct": 1.654
+    },
+    {
+      "rank": 8,
+      "component": "ATR / swing / participation",
+      "elapsed_p50_ms": 3.008,
+      "elapsed_p95_ms": 3.542,
+      "median_share_pct": 1.296
+    },
+    {
+      "rank": 9,
+      "component": "Bollinger #1",
+      "elapsed_p50_ms": 1.554,
+      "elapsed_p95_ms": 2.134,
+      "median_share_pct": 0.693
+    },
+    {
+      "rank": 10,
+      "component": "other / unmeasured",
+      "elapsed_p50_ms": 1.159,
+      "elapsed_p95_ms": 1.658,
+      "median_share_pct": 0.507
+    },
+    {
+      "rank": 11,
+      "component": "Canonical hash / orchestration overhead",
+      "elapsed_p50_ms": 0.733,
+      "elapsed_p95_ms": 0.911,
+      "median_share_pct": 0.322
+    },
+    {
+      "rank": 12,
+      "component": "SMC #2 (freshness)",
+      "elapsed_p50_ms": 0.368,
+      "elapsed_p95_ms": 0.479,
+      "median_share_pct": 0.153
+    },
+    {
+      "rank": 13,
+      "component": "structural derived (dsa_segment / momentum)",
+      "elapsed_p50_ms": 0.329,
+      "elapsed_p95_ms": 0.468,
+      "median_share_pct": 0.144
+    },
+    {
+      "rank": 14,
+      "component": "Bollinger #2 (extra)",
+      "elapsed_p50_ms": 0.0,
+      "elapsed_p95_ms": 0.0,
+      "median_share_pct": 0.0
+    }
+  ],
+  "note": "hotspot ranking is based ONLY on current 3.4B-4 p50 measurements; not inherited from 3.4A-3 ordering"
+}
