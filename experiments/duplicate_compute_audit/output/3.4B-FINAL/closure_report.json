@@ -1,0 +1,190 @@
+{
+  "phase": "3.4B-FINAL",
+  "summary": {
+    "baseline_3A3_total_ms": {
+      "p50": 299.292,
+      "p95": 382.46
+    },
+    "final_total_ms": {
+      "p50": 208.67,
+      "p95": 258.832
+    },
+    "saved_ms": {
+      "p50": 90.622,
+      "p95": 123.628
+    },
+    "saved_pct": {
+      "p50": 30.28,
+      "p95": 32.32
+    }
+  },
+  "closed_waste_phase3": [
+    {
+      "item": "MDAS N+1 / batch read",
+      "phase": "3.4B-0 之前",
+      "note": "行情/因子读取 N+1 改 batch；reduce DB round-trips"
+    },
+    {
+      "item": "DSA internal duplicate pipeline",
+      "phase": "3.4B-1",
+      "note": "compute_dsa_bundle 重复 dynamic_swing_anchored_vwap + _remove_dsa_lookahead 消除；_DSAHistoryComputation artifact 复用；call 2→1；p50 116.9→83.8ms（-28.3%）"
+    },
+    {
+      "item": "DSA VWAP-return Python group loop",
+      "phase": "3.4B-2",
+      "note": "VWAP return 组循环改向量化执行，公式不变"
+    },
+    {
+      "item": "SMC #2 duplicate",
+      "phase": "3.4B-3A",
+      "note": "_compute_smc_freshness_factors 复用 _shared_raw.smc_result；SMC low-level 2→1；isolated p50 4.713→0.204ms"
+    },
+    {
+      "item": "Bollinger #2 duplicate",
+      "phase": "3.4B-3B",
+      "note": "_extract_extra_fields 复用 _shared_raw.bb_df 替代 CanonicalComputationService.compute('bollinger')"
+    },
+    {
+      "item": "First Pyramid input_hash row-wise pandas assembly",
+      "phase": "3.4B-6B",
+      "note": "_compute_input_hash 逐行 pandas axis=1 改 list/C-level join；hash contract 不变；105/105 exact；input_hash in-situ p50 20.15→2.08ms（-89.7%）"
+    }
+  ],
+  "remaining_legitimate_costs": [
+    {
+      "item": "full-history DSA #2",
+      "note": "不同 contract（lookback=None）的合法 kernel；约 76.6ms（3.4B-5）；复用被禁止"
+    },
+    {
+      "item": "DSA #1",
+      "note": "250-bar 合法 kernel；约 52.6ms（3.4B-5）"
+    },
+    {
+      "item": "_build_structure_dimension",
+      "note": "First Pyramid structure dimension；约 38ms（3.4B-6A）；本轮不拆不向量化，未来 AfterClose wall-clock 不满足 SLA 再凭 production profile 回查"
+    },
+    {
+      "item": "VolumeContext",
+      "note": "合法序列计算"
+    },
+    {
+      "item": "SQZMOM",
+      "note": "疑似重复但未获合同证明；后续需单独证明 temporal defaults == _FIRST_PYRAMID_PARAMS['sqzmom_config'] 且 bars/index/point-in-time contract 相同"
+    },
+    {
+      "item": "SMC #1",
+      "note": "合法 kernel"
+    }
+  ],
+  "delta_vs_3A3": [
+    {
+      "component": "MACD / daily_context / derived",
+      "baseline_p50_ms": 124.819,
+      "final_p50_ms": 81.786,
+      "saved_ms": 43.033,
+      "saved_pct": 34.48
+    },
+    {
+      "component": "DSA",
+      "baseline_p50_ms": 74.054,
+      "final_p50_ms": 51.217,
+      "saved_ms": 22.837,
+      "saved_pct": 30.84
+    },
+    {
+      "component": "Artifact / summary assembly",
+      "baseline_p50_ms": 62.183,
+      "final_p50_ms": 44.311,
+      "saved_ms": 17.872,
+      "saved_pct": 28.74
+    },
+    {
+      "component": "SMC #2 (freshness)",
+      "baseline_p50_ms": 4.767,
+      "final_p50_ms": 0.362,
+      "saved_ms": 4.405,
+      "saved_pct": 92.41
+    },
+    {
+      "component": "Bollinger #2 (extra)",
+      "baseline_p50_ms": 3.423,
+      "final_p50_ms": 0.0,
+      "saved_ms": 3.423,
+      "saved_pct": 100.0
+    },
+    {
+      "component": "Canonical hash / orchestration overhead",
+      "baseline_p50_ms": 0.752,
+      "final_p50_ms": 0.71,
+      "saved_ms": 0.042,
+      "saved_pct": 5.59
+    },
+    {
+      "component": "SMC #1",
+      "baseline_p50_ms": 3.84,
+      "final_p50_ms": 3.842,
+      "saved_ms": -0.002,
+      "saved_pct": -0.05
+    },
+    {
+      "component": "other / unmeasured",
+      "baseline_p50_ms": 1.029,
+      "final_p50_ms": 1.035,
+      "saved_ms": -0.006,
+      "saved_pct": -0.58
+    },
+    {
+      "component": "structural derived (dsa_segment / momentum)",
+      "baseline_p50_ms": 0.281,
+      "final_p50_ms": 0.291,
+      "saved_ms": -0.01,
+      "saved_pct": -3.56
+    },
+    {
+      "component": "Bollinger #1",
+      "baseline_p50_ms": 1.447,
+      "final_p50_ms": 1.475,
+      "saved_ms": -0.028,
+      "saved_pct": -1.94
+    },
+    {
+      "component": "ATR / swing / participation",
+      "baseline_p50_ms": 2.965,
+      "final_p50_ms": 3.001,
+      "saved_ms": -0.036,
+      "saved_pct": -1.21
+    },
+    {
+      "component": "SQZMOM",
+      "baseline_p50_ms": 4.723,
+      "final_p50_ms": 4.764,
+      "saved_ms": -0.041,
+      "saved_pct": -0.87
+    },
+    {
+      "component": "single-period VP (cost_position)",
+      "baseline_p50_ms": 4.041,
+      "final_p50_ms": 4.138,
+      "saved_ms": -0.097,
+      "saved_pct": -2.4
+    },
+    {
+      "component": "VolumeContext",
+      "baseline_p50_ms": 10.97,
+      "final_p50_ms": 11.117,
+      "saved_ms": -0.147,
+      "saved_pct": -1.34
+    }
+  ],
+  "serial_projection": {
+    "eligible_instruments": 5286,
+    "eligibility_rule": "review-core: len(df_1d) >= 60 (compute_review_core_for_trade_date degraded check)",
+    "total_instruments_in_dataset": 5292,
+    "p50_serial_projection_seconds": 1103.0,
+    "p50_serial_projection_minutes": 18.4,
+    "p95_serial_projection_seconds": 1368.2,
+    "p95_serial_projection_minutes": 22.8,
+    "caveat": "serial compute-only projection != production AfterClose wall-clock (不含 DB read、并发、IO、调度、持久化与序列化等真实运行成本)"
+  },
+  "note_structure_builder": "_build_structure_dimension ≈38ms 本轮不拆/不向量化/不重构；当前收尾优先级高于再抠几十毫秒；未来真实 AfterClose wall-clock 不满足 SLA 再凭 production profile 回查。"
+}
