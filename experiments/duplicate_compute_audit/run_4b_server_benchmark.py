@@ -95,7 +95,12 @@ PRODUCTION_CODE_SHA = "ac9c3810b63f64e702b0d60f7e7822112ab137fb"
 BATCH_SIZE = 25
 WARMUP_STOCKS = 25
 
-OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "4B-server-db"
+OUTPUT_DIR = Path(
+    os.environ.get(
+        "PANJI_4B_OUTPUT_DIR",
+        str(Path(__file__).resolve().parent / "output" / "4B-server-db"),
+    )
+).resolve()
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # 真实业务进度日志（长任务治理）：每批由 production progress_callback 触发，
@@ -627,7 +632,7 @@ async def main() -> int:
         batch_size=BATCH_SIZE,
         failure_threshold=1.0,
         released_config_resolver=None,
-        progress_callback=await _progress_writer(),
+        progress_callback=_progress_writer(),
     )
     run_wall = time.perf_counter() - run_start
     run_cpu_time = time.process_time() - run_start_cpu
@@ -878,9 +883,49 @@ async def harness_smoke() -> int:
     return 0
 
 
+async def heavy_task_preflight() -> int:
+    """Read-only 检查：当前是否有 after_close_orchestrator 的活跃重型任务在跑。
+
+    复用 production ORM（SchedulerJobRun），仅 SELECT，不写任何数据。
+    由 remote runner 在启动 one-shot benchmark 容器前，用同类短命容器执行，
+    判断是否与真实盘后全市场任务争用 DB/CPU。
+    """
+    from app.db import AsyncSessionLocal
+    from app.models.scheduler_job_run import SchedulerJobRun
+    from sqlalchemy import select
+
+    ACTIVE = ("queued", "running", "resume_queued")
+    async with AsyncSessionLocal() as session:
+        stmt = select(SchedulerJobRun).where(
+            SchedulerJobRun.job_name == "after_close_orchestrator",
+            SchedulerJobRun.status.in_(ACTIVE),
+        )
+        rows = (await session.execute(stmt)).scalars().all()
+        active = [
+            {
+                "id": str(r.id),
+                "status": r.status,
+                "business_date": r.business_date,
+                "run_key": r.run_key,
+            }
+            for r in rows
+        ]
+    result = {
+        "timestamp": now_iso(),
+        "job_name": "after_close_orchestrator",
+        "active_count": len(active),
+        "active": active,
+        "verdict": "clear" if not active else "blocked",
+    }
+    print(json.dumps(result, ensure_ascii=False))
+    return 0 if not active else 10
+
+
 if __name__ == "__main__":
     if "--smoke" in sys.argv:
         rc = asyncio.run(harness_smoke())
+    elif "--heavy-check" in sys.argv:
+        rc = asyncio.run(heavy_task_preflight())
     else:
         rc = asyncio.run(main())
     raise SystemExit(rc)
