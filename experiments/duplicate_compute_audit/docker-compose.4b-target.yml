@@ -1,0 +1,31 @@
+# Phase 4B-0G-R3F2 — Benchmark-only target app mount override
+#
+# 本文件是方案 C 的第三层 Compose override：在 prod + live 之上，最后生效，
+# 把 worker-after-close 的 /app/app 唯一指向 materialized 的 TARGET_CODE_SHA (ac9c) app，
+# 其余 live runtime mount（alembic / RUNTIME_SHA / config.production.py）完整保留。
+#
+# 这样方案 C 的核心事实由最终 Compose 层显式定义：
+#   prod compose + live compose + 本 override → /app/app 唯一指向 ac9c target
+# 不再依赖「CLI -v 是否会覆盖 compose service volume」的未定义 precedence。
+#
+# 用法（由 run_4b_server_remote.sh 从 HARNESS_SHA exact Git object materialize 后调用，不 scp）：
+#   docker compose --env-file market.env \
+#     -f docker-compose.prod.yml \
+#     -f docker-compose.live.yml \
+#     -f docker-compose.4b-target.yml \
+#     run --no-deps worker-after-close ...
+#
+# 关键约束：
+# - 必须设置 PANJI_4B_TARGET_APP_DIR（materialized target app 的宿主机绝对路径），
+#   未设置则 Compose 报 required variable 错误而拒绝启动（fail-closed）。
+# - 仅替换 volumes（!override），不改动 env / 资源 / 网络 / 其他生产合同。
+# - /app/app 为只读 (:ro)；容器不得写入运行时文件。
+
+services:
+  worker-after-close:
+    volumes: !override
+      - ${PANJI_4B_TARGET_APP_DIR:?PANJI_4B_TARGET_APP_DIR required (materialized target app)}:/app/app:ro
+      - /opt/panji-live/backend/alembic:/app/alembic:ro
+      - /opt/panji-live/backend/alembic.ini:/app/alembic.ini:ro
+      - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
+      - /etc/market-dev/config.production.py:/app/config.production.py:ro

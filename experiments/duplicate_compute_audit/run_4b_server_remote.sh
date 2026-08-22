@@ -10,8 +10,10 @@
 #     - git fetch origin dev（仅更新 refs/objects，不 checkout/reset/pull）
 #     - 校验部署身份一致（server repo HEAD / live RUNTIME_SHA / runtime_git_sha 三者==DEPLOYED）
 #     - 从 TARGET_CODE_SHA exact Git object materialize backend/app 到临时 workspace（不 scp）
-#     - 用正式组合 Compose（market.env + prod + live）基于 worker-after-close service
-#       创建一次性容器，benchmark Python 作为 MAIN PROCESS；/app/app 挂载 TARGET 的 exact app
+#     - 从 HARNESS_SHA exact Git object materialize benchmark Compose override（不 scp）
+#     - 用正式组合 Compose（market.env + prod + live + benchmark override）基于 worker-after-close
+#       service 创建一次性容器，benchmark Python 作为 MAIN PROCESS；override 在最终层显式将
+#       /app/app 唯一指向 materialized TARGET 的 exact app（不再依赖 CLI -v 与 service volume 的 precedence）
 #     - 继承正式 service env（DATABASE_URL/REDIS_URL/JWT_SECRET 由 Compose 注入）
 #     - read-only heavy-task preflight（production ORM，不写）
 #     - 监控真实业务 progress（output/4B-server-db/progress.jsonl）+ docker stats 采样
@@ -181,8 +183,14 @@ echo "[4B-0G-R3][remote] d. 从 exact Git object materialize harness + remote ru
 mkdir -p "$BENCHMARK_WORKSPACE"
 HARNESS_BLOB="$BENCHMARK_WORKSPACE/run_4b_server_benchmark.py"
 REMOTE_BLOB="$BENCHMARK_WORKSPACE/run_4b_server_remote.sh"
+COMPOSE_TARGET_BLOB="$BENCHMARK_WORKSPACE/docker-compose.4b-target.yml"
 git cat-file -p "$HARNESS_SHA:$HARNESS_REL_PATH" > "$HARNESS_BLOB"
 git cat-file -p "$HARNESS_SHA:$REMOTE_REL_PATH" > "$REMOTE_BLOB"
+git cat-file -p "$HARNESS_SHA:experiments/duplicate_compute_audit/docker-compose.4b-target.yml" > "$COMPOSE_TARGET_BLOB"
+if [ ! -s "$COMPOSE_TARGET_BLOB" ]; then
+  echo "[4B-0G-R3F2][remote] ERROR: 无法从 HARNESS_SHA exact Git object materialize benchmark override" >&2
+  exit 5
+fi
 HARNESS_FILE_SHA="$(sha256sum "$HARNESS_BLOB" | awk '{print $1}')"
 echo "  materialized harness file sha256 = $HARNESS_FILE_SHA"
 
@@ -227,12 +235,13 @@ echo "  target app tree identity: 精确匹配 ac9c:backend/app"
 # --no-deps：禁止 benchmark 启停 production dependencies（PostgreSQL/Redis）。
 # 路径统一：/root/web_dev→/repo:ro，PANJI_REPO_ROOT=/repo（与正式 run 一致）。
 # /app/app 挂载 TARGET 的 exact app（隔离 one-shot），与正式 benchmark 同源。
-echo "[4B-0G-R3][remote] f/g. read-only heavy-task preflight（after_close_orchestrator 活跃任务）..."
+echo "[4B-0G-R3F2][remote] f/g. read-only heavy-task preflight（after_close_orchestrator 活跃任务）..."
+# R3F2: 用最终 Compose override 显式定义 /app/app 指向 materialized target（不再 CLI -v 冲突）。
+export PANJI_4B_TARGET_APP_DIR="$(realpath "$TARGET_APP_ACTUAL")"
 HEAVY_CHECK_RC=0
-docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" run --rm --no-deps \
+docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" -f "$COMPOSE_TARGET_BLOB" run --rm --no-deps \
   --name "${CONTAINER_NAME}-preflight" \
   -v "$SERVER_REPO:/repo:ro" \
-  -v "$TARGET_APP_ACTUAL:/app/app:ro" \
   -v "$HARNESS_BLOB:/app/benchmark/run_4b_server_benchmark.py:ro" \
   -e PANJI_REPO_ROOT=/repo \
   -e PANJI_BACKEND_ROOT=/app \
@@ -256,10 +265,9 @@ echo "  /app/app 来源 = TARGET_CODE_SHA exact app ($TARGET_APP_ACTUAL)，隔�
 
 mkdir -p "$BENCHMARK_WORKSPACE/output"
 
-docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" run -d --no-deps \
+docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" -f "$COMPOSE_TARGET_BLOB" run -d --no-deps \
   --name "$CONTAINER_NAME" \
   -v "$SERVER_REPO:/repo:ro" \
-  -v "$TARGET_APP_ACTUAL:/app/app:ro" \
   -v "$HARNESS_BLOB:/app/benchmark/run_4b_server_benchmark.py:ro" \
   -v "$BENCHMARK_WORKSPACE/output:/app/benchmark/output" \
   -e PANJI_REPO_ROOT=/repo \
@@ -270,6 +278,7 @@ docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" ru
   -e PANJI_RUNTIME_GIT_SHA="$RUNTIME_GIT_SHA" \
   -e PANJI_TARGET_CODE_SHA="$TARGET_CODE_SHA" \
   -e PANJI_TARGET_APP_TREE_SHA="$TARGET_TREE_SHA" \
+  -e PANJI_4B_TARGET_APP_DIR="$PANJI_4B_TARGET_APP_DIR" \
   -e PANJI_4B_OUTPUT_DIR=/app/benchmark/output/4B-server-db \
   --entrypoint python \
   worker-after-close \
@@ -290,7 +299,10 @@ docker inspect trading-worker-after-close "$CONTAINER_NAME" >/dev/null 2>&1 || {
 # 期望 /app/app 的 effective source = materialized target app 的 realpath。
 # 命令行 -v 覆盖 service live mount；此处 fail-closed 实测确认最终结果。
 EXPECTED_APP_MOUNT_SOURCE="$(realpath "$TARGET_APP_ACTUAL")"
-python3 - "$CONTAINER_NAME" "$RUNTIME_CONTRACT" "$EXPECTED_APP_MOUNT_SOURCE" <<'PY'
+# R3F2: 用 `|| CONTRACT_RC=$?` 捕获 Python 非零退出，避免 set -e 在赋值前提前触发 EXIT trap，
+# 导致 FAIL 时未打印 contract / 未打包 evidence 就 cleanup。
+CONTRACT_RC=0
+python3 - "$CONTAINER_NAME" "$RUNTIME_CONTRACT" "$EXPECTED_APP_MOUNT_SOURCE" <<'PY' || CONTRACT_RC=$?
 import sys, json, subprocess, os
 cn, out, expected_src = sys.argv[1], sys.argv[2], sys.argv[3]
 def inspect(name):
@@ -379,10 +391,16 @@ if not contract["accept_run"]:
     sys.exit(13)
 print("[4B-0G-R3F][remote] 资源契约对齐 + /app/app mount 精确指向 target app（readonly）: PASS")
 PY
-CONTRACT_RC=$?
 if [ "$CONTRACT_RC" -ne 0 ]; then
   # mount mismatch 属于 false-green 风险：立即 kill 容器，该 run 不作为 benchmark evidence。
+  # R3F2: FAIL 时先把完整 contract（含 target_app_mount 的 actual_source/RW/mount_count/error）
+  # 打印到 stderr 并打包 evidence archive，避免下次盲诊。
   echo "[4B-0G-R3F][remote] 契约/mount gate 失败，立即 kill benchmark 容器。" >&2
+  if [ -f "$RUNTIME_CONTRACT" ]; then
+    echo "[4B-0G-R3F][remote] runtime_contract.json:" >&2
+    cat "$RUNTIME_CONTRACT" >&2 || true
+    tar -czf "$EVIDENCE_ARCHIVE" -C "$BENCHMARK_WORKSPACE" output 2>/dev/null || true
+  fi
   docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
   exit "$CONTRACT_RC"
 fi
