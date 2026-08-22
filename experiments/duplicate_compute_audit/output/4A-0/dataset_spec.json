@@ -1,7 +1,7 @@
 {
   "phase": "4A-0",
   "title": "AfterClose Frozen Main-Chain Dataset - Contract Freeze",
-  "audit_code_sha": "a9a8ccf8d4b8e9d8c743c41670e05a78b1b0c1d0",
+  "audit_code_sha": "581c5966f8762a791260437492682b7508f323e2",
   "scope": {
     "only": "compute_review_core_with_run_items",
     "excluded": [
@@ -35,7 +35,7 @@
       "constant": "_DEFAULT_DAILY_LOOKBACK_DAYS",
       "value_calendar_days": 5000,
       "contract": "compute_review_core_with_run_items 批读调用未传 start_date/limit: timeframe=1d, adj=qfq, include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date; _resolve_date_range 无 start/limit → end_date - 5000 calendar days",
-      "implication": "frozen daily bars 必须覆盖 [target_trade_date - 5000 cal days, target_trade_date]；不得人为裁成 250/400 bars（此前 review-source 用 bar_lookback_calendar_days=400 未覆盖生产历史长度分布，full-history DSA #2 可能拿到远多于 400 根）"
+      "implication": "frozen daily bars 必须覆盖 [target_trade_date - 5000 cal days, target_trade_date]；不得人为裁成 250/415 bars。现有 review-source frozen 实测 ≈415 trading bars（~623 日历日），而 production MDAS 无 start/limit 时查询窗口 = 5000 日历日 （≈3400+ trading bars）；故现有 frozen 不足以代表生产历史长度分布，full-history DSA #2 可能拿到远多于 415 根"
     },
     "no_15m_secondary": {
       "value": true,
@@ -71,39 +71,68 @@
       "frozen_override": "FrozenReleasedConfigResolver 返回目标交易日冻结的 released_core_config.json"
     },
     "eligible_universe_source": {
-      "function": "get_active_a_share_instruments(session)",
+      "rule": "get_active_a_share_instruments(session)",
       "contract": "status='active' AND symbol ~ r'^\\d{6}$'（A股, 排除指数/基金/ETF）",
-      "frozen_ref": {
-        "existing_review_fact_universe": 8272,
-        "existing_snapshot_rows": 5293,
-        "note": "Phase 4A-1 需重新只读导出 get_active_a_share_instruments 的真实 eligible 集"
+      "count_and_ids": {
+        "known_now": false,
+        "note": "Phase 4A-0 不假装已知 exact universe；真实 count / sorted ids / universe_hash 由 4A-1 远程只读生成"
+      },
+      "extract_contract_4A1": {
+        "artifact": "eligible_universe.json",
+        "fields": [
+          "target_trade_date",
+          "count",
+          "sorted_ids",
+          "universe_hash"
+        ],
+        "universe_hash": "deterministic SHA256 over sorted instrument ids；作为 dataset identity",
+        "fail_closed": "查询为空 / 明显异常 / 出现重复 ID → FAIL CLOSED；禁止用旧 frozen manifest 的 review_fact_universe(8272)/snapshot_rows(5293) 兜底"
       }
     }
   },
   "target_and_sample": {
     "target_trade_date": "2026-08-17",
-    "note": "以既有 frozen 最近的已发布交易日为初选；4A-1 从远程只读确认目标交易日与 5000-cal-day 窗口；目标交易日应选取当日 stock_core/released config 实际发布日",
+    "status": "FROZEN",
+    "note": "target_trade_date 已在 4A-0 正式冻结。4A-1 只能验证该日 remote data / released config 是否存在；不存在则 FAIL CLOSED（禁止自动换成 8/18、8/20 等）。若确需换日期，须另开 4A-0 contract revision + 新 dataset version。",
     "sample_suggestion": {
       "parity_gate_4A2": "100 normal + 5 boundary（与 Phase 3 同口径）",
       "wall_clock_4A3": "完整 eligible universe（生产 batching/claim/compute 总 wall-clock）"
     }
   },
   "evidence": {
-    "universe_rule": "dimension: full; fact: review_fact_universe (all A-share, market in SH/SZ/BJ)",
-    "scope_rule": "all active industry_l1/l2/l3 + concept scopes (membership snapshot, current-only)",
-    "existing_frozen_lookback_calendar_days": 400,
-    "daily_bars_length_histogram": {
+    "frozen_coverage": {
       "n_instruments_in_frozen": 5292,
+      "actual_global_range": {
+        "earliest_trade_date": "2024-12-02",
+        "latest_trade_date": "2026-08-17",
+        "calendar_span_days": 623,
+        "distinct_trading_days": 415
+      },
       "bars_per_instrument": {
+        "min": 27,
         "p50": 415,
         "p90": 415,
         "p99": 415,
         "max": 415
       },
-      "n_with_bars_ge_400": 5081,
-      "note": "既有 review-source-c5c686e-v1 冻结日线 bar_lookback_calendar_days=400，故冻结 bars 长度受此上限约束（full-history DSA 无法看到媲美生产 5000-cal-day contract 的历史长度分布）",
-      "max_observed_daily_bars": 415
+      "representative_instrument": {
+        "instrument_id": "003fe02f-980c-48a7-85ee-a712f682a066",
+        "rows": 415,
+        "first_trade_date": "2024-12-02",
+        "last_trade_date": "2026-08-17",
+        "bar_calendar_span_days": 623
+      },
+      "manifest_bar_lookback_calendar_days": 400,
+      "manifest_field_reliability": "manifest.bar_lookback_calendar_days=400 与真实 parquet 跨度（623 日历日）不一致；该字段不是 parquet coverage 的权威定义，不建立 '400 日历日 → 415 bars' 因果。",
+      "comparison_to_production": "现有 frozen 实测历史 ≈415 trading bars（~623 日历日）；production MDAS 无 start/limit 时查询窗口 = 5000 日历日 （约 3400+ trading bars）。故现有 frozen 不足以代表 production 历史长度分布。"
     },
-    "note_baseline_vs_4A3": "Phase 3 serial projection 18-23min 基于 ~415 bars 外推；4A 使用真实生产 daily-history contract 后 full-history DSA 可能拿到远多于 415 根，真实结果可能明显更慢，这反映了此前 frozen 未覆盖生产历史长度分布"
+    "legacy_frozen_metadata_not_contract": {
+      "manifest_instrument_universe_rule": "dimension: full; fact: review_fact_universe (all A-share, market in SH/SZ/BJ)",
+      "manifest_scope_universe_rule": "all active industry_l1/l2/l3 + concept scopes (membership snapshot, current-only)",
+      "manifest_review_fact_universe": 8272,
+      "manifest_snapshot_rows": 5293,
+      "note": "以上均为旧 review-source manifest 的遗留统计，**不是** Phase 4A eligible universe 合同的证据；Phase 4A contract 仅 get_active_a_share_instruments()。"
+    },
+    "note_baseline_vs_4A3": "Phase 3 serial projection 18-23min 基于既有 frozen ≈415 trading bars （~623 日历日）外推；4A 使用真实生产 daily-history contract（5000 日历日，≈3400+ trading bars）后 full-history DSA 可能拿到远多于 415 根，真实结果可能明显更慢，这反映此前 frozen 未覆盖生产历史长度分布"
   }
 }

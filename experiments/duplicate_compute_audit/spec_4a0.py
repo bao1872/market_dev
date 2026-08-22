@@ -9,10 +9,13 @@
 - daily bars 禁止固定 250/400 根：冻结真实生产 MDAS 批读 contract
 
 本脚本输出 dataset spec + 基于既有 frozen 的契约核查证据：
-1. 复用 review-source-c5c686e-v1 的 manifest 元数据（eligible universe）
-2. 用 _load_bars() 计算 daily 历史长度分布（佐证生产 daily 窗口 >> 400）
+1. 从既有 frozen parquet 实测真实历史覆盖度（earliest/latest/span/bars 分布），
+   不依赖 manifest.bar_lookback_calendar_days=400（该字段与真实 parquet 跨度不一致，
+   不建立 "400 日历日 → 415 bars" 因果）
+2. eligible universe 唯一合同 = get_active_a_share_instruments()；旧 manifest 的
+   review_fact_universe/snapshot_rows 仅标为遗留元数据，非 Phase 4A eligible 证据
 3. 冻结 MDAS 批读 contract / 15m 无关性 / released config 来源 / offline harness 隔离点
-4. 确定 target_trade_date / sample 建议
+4. 正式冻结 target_trade_date=2026-08-17 / sample 建议
 
 约束：PRODUCTION_CODE_DIFF = ZERO；只读消费既有 frozen；不建库不连远程。
 
@@ -57,30 +60,63 @@ def main() -> None:
     analysis_asof = man.get("analysis_asof_date")
     bar_lookback_cal = man.get("bar_lookback_calendar_days")
 
-    # ---- 2. daily 历史长度分布（从既有 frozen 全量统计）----
+    # ---- 2. 从既有 frozen parquet 实测真实历史覆盖度（不依赖 manifest 字段）----
+    # bars_daily.parquet 实际覆盖 2024-12-02 → 2026-08-17：623 日历日 / 415 交易日。
+    # 注意：manifest.bar_lookback_calendar_days=400 与真实 parquet 跨度（623 日历日）不一致，
+    # 该字段不是 parquet coverage 的权威定义，仅作为遗留元数据记录，不建立 "400→415" 因果。
     bars_by_id = _load_bars()
     lens = np.array([len(df) for df in bars_by_id.values()], dtype=np.int64)
-    hist = {
+    min_idx = min(df.index.min() for df in bars_by_id.values())
+    max_idx = max(df.index.max() for df in bars_by_id.values())
+    global_span_days = int((max_idx - min_idx).days)
+    med = int(np.median(lens))
+    rep_id = min(
+        bars_by_id.keys(),
+        key=lambda k: abs(len(bars_by_id[k]) - med),
+    )
+    rep_df = bars_by_id[rep_id]
+    frozen_coverage = {
         "n_instruments_in_frozen": int(len(lens)),
+        "actual_global_range": {
+            "earliest_trade_date": str(min_idx.date()),
+            "latest_trade_date": str(max_idx.date()),
+            "calendar_span_days": global_span_days,
+            "distinct_trading_days": len(
+                set().union(*[set(df.index) for df in bars_by_id.values()])
+            ),
+        },
         "bars_per_instrument": {
+            "min": int(lens.min()),
             "p50": int(np.percentile(lens, 50)),
             "p90": int(np.percentile(lens, 90)),
             "p99": int(np.percentile(lens, 99)),
             "max": int(lens.max()),
         },
-        "n_with_bars_ge_400": int((lens >= 400).sum()),
-        "note": (
-            "既有 review-source-c5c686e-v1 冻结日线 bar_lookback_calendar_days=400，"
-            "故冻结 bars 长度受此上限约束（full-history DSA 无法看到媲美生产 "
-            "5000-cal-day contract 的历史长度分布）"
+        "representative_instrument": {
+            "instrument_id": str(rep_id),
+            "rows": int(len(rep_df)),
+            "first_trade_date": str(rep_df.index.min().date()),
+            "last_trade_date": str(rep_df.index.max().date()),
+            "bar_calendar_span_days": int((rep_df.index.max() - rep_df.index.min()).days),
+        },
+        "manifest_bar_lookback_calendar_days": bar_lookback_cal,
+        "manifest_field_reliability": (
+            "manifest.bar_lookback_calendar_days=400 与真实 parquet 跨度（623 日历日）不一致；"
+            "该字段不是 parquet coverage 的权威定义，不建立 '400 日历日 → 415 bars' 因果。"
         ),
-        "max_observed_daily_bars": int(lens.max()),
+        "comparison_to_production": (
+            "现有 frozen 实测历史 ≈415 trading bars（~623 日历日）；"
+            "production MDAS 无 start/limit 时查询窗口 = 5000 日历日 "
+            "（约 3400+ trading bars）。故现有 frozen 不足以代表 production 历史长度分布。"
+        ),
     }
 
-    # ---- 3. 确定 target/day 建议：用 analysis_asof 最近完整交易日 ----
-    # 真实 eligible universe 由 get_active_a_share_instruments()（status=active + 6位数字 symbol,
-    # A股，排除指数/基金/ETF）定义；(既有 frozen review_fact_universe=8272, snapshot_rows=5293)
-    target_trade_date = analysis_asof  # Phase 4A-1 需从远程确认目标交易日
+    # ---- 3. 冻结 target_trade_date ----
+    # TARGET_TRADE_DATE = 2026-08-17（FROZEN）。
+    # 4A-1 只能验证该日 remote data / released config 是否存在；不存在则 FAIL CLOSED，
+    # 不得自动更换其它日期。换日期 = 4A-0 contract revision + 新 dataset version。
+    target_trade_date = analysis_asof  # analysis_asof=2026-08-17
+    target_frozen_status = "FROZEN"
 
     spec = {
         "phase": "4A-0",
@@ -128,9 +164,11 @@ def main() -> None:
                 ),
                 "implication": (
                     "frozen daily bars 必须覆盖 [target_trade_date - 5000 cal days, "
-                    "target_trade_date]；不得人为裁成 250/400 bars（此前 "
-                    "review-source 用 bar_lookback_calendar_days=400 未覆盖生产历史长度分布，"
-                    "full-history DSA #2 可能拿到远多于 400 根）"
+                    "target_trade_date]；不得人为裁成 250/415 bars。"
+                    "现有 review-source frozen 实测 ≈415 trading bars（~623 日历日），"
+                    "而 production MDAS 无 start/limit 时查询窗口 = 5000 日历日 "
+                    "（≈3400+ trading bars）；故现有 frozen 不足以代表生产历史长度分布，"
+                    "full-history DSA #2 可能拿到远多于 415 根"
                 ),
             },
             "no_15m_secondary": {
@@ -190,30 +228,41 @@ def main() -> None:
                                   "core_config.json",
             },
             "eligible_universe_source": {
-                "function": "get_active_a_share_instruments(session)",
+                "rule": "get_active_a_share_instruments(session)",
                 "contract": "status='active' AND symbol ~ r'^\\d{6}$'（A股, 排除指数/基金/ETF）",
-                "frozen_ref": {
-                    "existing_review_fact_universe": (
-                        man.get("source_readiness", {})
-                        .get("first_pyramid_history", {})
-                        .get("coverage", {})
-                        .get("review_fact_universe")
+                "count_and_ids": {
+                    "known_now": False,
+                    "note": (
+                        "Phase 4A-0 不假装已知 exact universe；真实 count / sorted ids / "
+                        "universe_hash 由 4A-1 远程只读生成"
                     ),
-                    "existing_snapshot_rows": (
-                        man.get("source_readiness", {})
-                        .get("first_pyramid_history", {})
-                        .get("coverage", {})
-                        .get("snapshot_rows")
+                },
+                "extract_contract_4A1": {
+                    "artifact": "eligible_universe.json",
+                    "fields": [
+                        "target_trade_date",
+                        "count",
+                        "sorted_ids",
+                        "universe_hash",
+                    ],
+                    "universe_hash": (
+                        "deterministic SHA256 over sorted instrument ids；作为 dataset identity"
                     ),
-                    "note": "Phase 4A-1 需重新只读导出 get_active_a_share_instruments 的真实 eligible 集",
+                    "fail_closed": (
+                        "查询为空 / 明显异常 / 出现重复 ID → FAIL CLOSED；"
+                        "禁止用旧 frozen manifest 的 review_fact_universe(8272)/"
+                        "snapshot_rows(5293) 兜底"
+                    ),
                 },
             },
         },
         "target_and_sample": {
             "target_trade_date": str(target_trade_date),
+            "status": target_frozen_status,
             "note": (
-                "以既有 frozen 最近的已发布交易日为初选；4A-1 从远程只读确认目标交易日与 "
-                "5000-cal-day 窗口；目标交易日应选取当日 stock_core/released config 实际发布日"
+                "target_trade_date 已在 4A-0 正式冻结。4A-1 只能验证该日 remote data / "
+                "released config 是否存在；不存在则 FAIL CLOSED（禁止自动换成 8/18、8/20 等）。"
+                "若确需换日期，须另开 4A-0 contract revision + 新 dataset version。"
             ),
             "sample_suggestion": {
                 "parity_gate_4A2": "100 normal + 5 boundary（与 Phase 3 同口径）",
@@ -221,14 +270,33 @@ def main() -> None:
             },
         },
         "evidence": {
-            "universe_rule": universe_rule,
-            "scope_rule": scope_rule,
-            "existing_frozen_lookback_calendar_days": bar_lookback_cal,
-            "daily_bars_length_histogram": hist,
+            "frozen_coverage": frozen_coverage,
+            "legacy_frozen_metadata_not_contract": {
+                "manifest_instrument_universe_rule": universe_rule,
+                "manifest_scope_universe_rule": scope_rule,
+                "manifest_review_fact_universe": (
+                    man.get("source_readiness", {})
+                    .get("first_pyramid_history", {})
+                    .get("coverage", {})
+                    .get("review_fact_universe")
+                ),
+                "manifest_snapshot_rows": (
+                    man.get("source_readiness", {})
+                    .get("first_pyramid_history", {})
+                    .get("coverage", {})
+                    .get("snapshot_rows")
+                ),
+                "note": (
+                    "以上均为旧 review-source manifest 的遗留统计，**不是** Phase 4A "
+                    "eligible universe 合同的证据；Phase 4A contract 仅 "
+                    "get_active_a_share_instruments()。"
+                ),
+            },
             "note_baseline_vs_4A3": (
-                "Phase 3 serial projection 18-23min 基于 ~415 bars 外推；4A 使用真实生产 "
-                "daily-history contract 后 full-history DSA 可能拿到远多于 415 根，真实结果"
-                "可能明显更慢，这反映了此前 frozen 未覆盖生产历史长度分布"
+                "Phase 3 serial projection 18-23min 基于既有 frozen ≈415 trading bars "
+                "（~623 日历日）外推；4A 使用真实生产 daily-history contract（5000 日历日，"
+                "≈3400+ trading bars）后 full-history DSA 可能拿到远多于 415 根，真实结果"
+                "可能明显更慢，这反映此前 frozen 未覆盖生产历史长度分布"
             ),
         },
     }
@@ -237,17 +305,24 @@ def main() -> None:
     (OUTPUT_DIR / "dataset_spec.json").write_text(
         json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    print("=== 4A-0 Contract Freeze ===")
+    print("=== 4A-0R Contract Evidence Correction ===")
     print(f"audit_code_sha={head}")
-    print(f"target_trade_date(初选)={target_trade_date}")
-    print(f"existing frozen lookback={bar_lookback_cal} cal days; production contract=5000 cal days")
-    print(f"daily bars len p50/p90/p99/max = "
-          f"{hist['bars_per_instrument']['p50']}/{hist['bars_per_instrument']['p90']}/"
-          f"{hist['bars_per_instrument']['p99']}/{hist['bars_per_instrument']['max']}")
-    print(f"n_instruments_in_frozen={hist['n_instruments_in_frozen']}")
+    print(f"target_trade_date={target_trade_date} status={target_frozen_status}")
+    print(f"frozen actual range: "
+          f"{frozen_coverage['actual_global_range']['earliest_trade_date']} → "
+          f"{frozen_coverage['actual_global_range']['latest_trade_date']} "
+          f"span={frozen_coverage['actual_global_range']['calendar_span_days']} cal days, "
+          f"trading={frozen_coverage['actual_global_range']['distinct_trading_days']}")
+    bp = frozen_coverage['bars_per_instrument']
+    print(f"daily bars len min/p50/p90/p99/max = "
+          f"{bp['min']}/{bp['p50']}/{bp['p90']}/{bp['p99']}/{bp['max']}")
+    print(f"n_instruments_in_frozen={frozen_coverage['n_instruments_in_frozen']}")
+    print(f"manifest bar_lookback_calendar_days={bar_lookback_cal} "
+          "(非 parquet coverage 权威字段，不建立 400→415 因果)")
     print("contracts verified: "
           "mdas_daily_lookback=5000 | no_15m=True | no_boards=True | "
-          "session_factory_partial=True | released_config=SqlAlchemyReleasedConfigResolver")
+          "session_factory_partial=True | released_config=SqlAlchemyReleasedConfigResolver | "
+          "eligible=get_active_a_share_instruments")
     print("dataset spec written:", OUTPUT_DIR / "dataset_spec.json")
 
 
