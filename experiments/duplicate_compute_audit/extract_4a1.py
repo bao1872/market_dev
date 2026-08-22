@@ -229,14 +229,15 @@ def extract_bars(evidence: dict, counts: dict) -> None:
         "ORDER BY instrument_id, trade_date) TO STDOUT "
         "WITH (FORMAT csv, HEADER true, DELIMITER ',');"
     )
-    counts["query_count"] += 1
     bars_pq = DATA_DIR / "bars_daily_raw.parquet"
     adj_pq = DATA_DIR / "adj_factors.parquet"
     adj_cols = ["instrument_id", "trade_date", "adj_factor"]
     # 重跑守卫：bars/adj 已完整生成则跳过下载+解析，直接复算 coverage
     if bars_pq.exists() and adj_pq.exists():
+        # 守卫命中：未发出 COPY，不计入 remote query_count（4A-1R2 修复）
         _add_coverage(evidence, bars_pq, adj_pq)
         return
+    counts["query_count"] += 1
 
     csv_gz = DATA_DIR / "_bars_daily_raw.csv.gz"
     if csv_gz.exists() and csv_gz.stat().st_size > 0:
@@ -583,14 +584,20 @@ def main() -> None:
             "manifest_sha256": evidence.get("manifest_sha256"),
         },
         "readonly_audit": {
-            "query_count": counts["query_count"],
-            # Evid2 修复：initial extract 的重跑守卫会跳过下载，
-            # remote_read_elapsed_s 包含 guard 前的 query_count+1。
-            # 改为 validation_rerun_remote_elapsed_s，initial 标 null（需显式重跑验证）。
-            "validation_rerun_remote_elapsed_s": None,
-            "remote_read_elapsed_s_initial_extract": round(counts["read_elapsed_s"], 3),
+            # 4A-1R2 修复：timing 证据口径纠正
+            # initial_extract：初始 4.45M 行流式 COPY 的时间未真实保留 → null
+            # validation_rerun：本次重跑的 remote small-query 时间（7.x 秒）
+            "initial_extract": {
+                "remote_transfer_elapsed_s": None,
+                "downloaded_bytes": None,
+                "note": "not retained from initial streaming extract",
+            },
+            "validation_rerun": {
+                "remote_elapsed_s": round(counts["read_elapsed_s"], 3),
+                "downloaded_bytes": 0,
+                "remote_query_count": counts["query_count"],
+            },
             "downloaded_rows": evidence["bars"]["row_count"],
-            "downloaded_bytes_initial_extract": counts["downloaded_bytes"],
             "remote_writes": 0,
             "production_task_triggers": 0,
         },

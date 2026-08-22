@@ -1,0 +1,25 @@
+{
+  "target_trade_date": "2026-08-17",
+  "snapshot_run_id": "2b7c5877-7d36-4396-84c3-7186dc911073",
+  "run_status": "succeeded",
+  "rule": "get_active_a_share_instruments(status=active, symbol~^\\d{6}$)",
+  "historical_run_items": 5293,
+  "historical_distinct_instruments": 5293,
+  "historical_state_counts": {
+    "succeeded": 5293
+  },
+  "current_rule_universe_count": 5293,
+  "historical_universe_hash": "sha256:c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577",
+  "current_universe_hash": "sha256:c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577",
+  "classification": "EXACT_SAME",
+  "members_without_any_frozen_bars": [
+    {
+      "instrument_id": "209e7c07-1358-4a64-b9e9-ff2d2dfef801",
+      "symbol": "920305",
+      "listing_date": null,
+      "historical_run_item_state": "succeeded",
+      "classification": "ELIGIBLE_MEMBER_WITHOUT_BAR_HISTORY",
+      "note": "handled successfully by historical run; reason for missing bars not proven by current evidence"
+    }
+  ]
+}

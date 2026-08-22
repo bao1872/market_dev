@@ -51,14 +51,20 @@
       ],
       "parameter_count": 10
     },
-    "manifest_sha256": "c972ddbfe7f6788a0567d6c5cda5b18ccd0e58df256b73a3b604f75cdb2c3ece"
+    "manifest_sha256": "21ca1635498a62eaa7ec919bfbea2c429d7ab5ba5aa245ff7803903a4c1c5cd8"
   },
   "readonly_audit": {
-    "query_count": 4,
-    "validation_rerun_remote_elapsed_s": null,
-    "remote_read_elapsed_s_initial_extract": 7.584,
+    "initial_extract": {
+      "remote_transfer_elapsed_s": null,
+      "downloaded_bytes": null,
+      "note": "not retained from initial streaming extract"
+    },
+    "validation_rerun": {
+      "remote_elapsed_s": 7.442,
+      "downloaded_bytes": 0,
+      "remote_query_count": 3
+    },
     "downloaded_rows": 4448431,
-    "downloaded_bytes_initial_extract": 0,
     "remote_writes": 0,
     "production_task_triggers": 0
   }

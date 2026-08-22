@@ -1,0 +1,68 @@
+{
+  "frozen_at": "2026-08-17",
+  "generated_by": "generate_expected_core_context.py (4A-1R2)",
+  "source": "production resolve_core_run_context() + LocalFrozenReleasedResolver",
+  "trade_date": "2026-08-17",
+  "run_mode": "after_close",
+  "source_cutoff": null,
+  "execution_contract_version": "core-exec-v1",
+  "algorithm_versions": {
+    "dsa": "1.4.1",
+    "smc": "smc-v1",
+    "momentum": "momentum-v1",
+    "bollinger": "bollinger-v1",
+    "sqzmom": "sqzmom-v1"
+  },
+  "parameter_hash": "5284aa5fec7f58ce65ee7fcf416be5620baa21a345e93c7e942995ef654705aa",
+  "config": {
+    "dsa": {
+      "algorithm.lookback": 250,
+      "dsa.prd": 50,
+      "dsa.base_apt": 20.0,
+      "dsa.use_adapt": false,
+      "dsa.vol_bias": 10.0,
+      "dsa.atr_len": 50,
+      "atr_rope.length": 14,
+      "atr_rope.multi": 1.5,
+      "atr_rope.regime_lookback": 55,
+      "atr_rope.regime_threshold": 0.55
+    },
+    "smc": {
+      "version": "smc-v1",
+      "effective_config": {
+        "pine_mode": "smc-pine"
+      }
+    },
+    "momentum": {
+      "version": "momentum-v1",
+      "bollinger_version": "bollinger-v1",
+      "sqzmom_version": "sqzmom-v1",
+      "bollinger_effective_config": {
+        "bb_win": 20,
+        "bb_k": 2.0
+      },
+      "sqzmom_effective_config": {
+        "length": 20,
+        "mult": 2.0
+      }
+    },
+    "volume_context": {
+      "version": "vc-v1",
+      "effective_config": {
+        "short_ma": 20,
+        "long_ma": 200
+      }
+    },
+    "eligible_universe_hash": "c57e1737fed01f53",
+    "eligible_universe_size": 5293,
+    "universe_version": "v1",
+    "market_data_contract_version": "mdc-v1",
+    "adjustment_contract_version": "adj-v1",
+    "adjustment_as_of": "2026-08-17",
+    "run_mode": "after_close",
+    "source_cutoff": null,
+    "dsa_build_hash": "40a7c015c22a8804b7cb32db4097de112fd363423e47544d7fa890cc53afd49e",
+    "source_bar_hash": "",
+    "adj_factor_hash": ""
+  }
+}
