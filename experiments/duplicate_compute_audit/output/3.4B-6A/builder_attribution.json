@@ -1,0 +1,137 @@
+{
+  "phase": "3.4B-6A",
+  "method": "call real compute_review_core_for_trade_date; perf_counter; builder leaf timers; per-run exclusive reconciliation",
+  "reproducibility": {
+    "dataset": "review-source-c5c686e-v1",
+    "audit_code_sha": "e4af18c6be34f87655e8c8bae2b9fbd555f1746c",
+    "baseline": {
+      "phase": "3.4B-5",
+      "audit_code_sha": "e4af18c6be34f87655e8c8bae2b9fbd555f1746c"
+    }
+  },
+  "n_runs": 315,
+  "chain_total_per_stock": {
+    "p50_ms": 221.988,
+    "p95_ms": 277.051
+  },
+  "build_first_pyramid_core_snapshot": {
+    "p50_ms": 60.0959,
+    "p95_ms": 70.4031
+  },
+  "exclusive_children": [
+    {
+      "child": "trend",
+      "elapsed_p50_ms": 0.4499,
+      "elapsed_p95_ms": 0.5757,
+      "median_share_of_build_fp_pct": 0.773,
+      "median_share_of_chain_pct": 0.209,
+      "calls_median": 1
+    },
+    {
+      "child": "structure",
+      "elapsed_p50_ms": 38.5607,
+      "elapsed_p95_ms": 47.5477,
+      "median_share_of_build_fp_pct": 64.55,
+      "median_share_of_chain_pct": 17.154,
+      "calls_median": 1
+    },
+    {
+      "child": "momentum",
+      "elapsed_p50_ms": 0.3444,
+      "elapsed_p95_ms": 0.5741,
+      "median_share_of_build_fp_pct": 0.608,
+      "median_share_of_chain_pct": 0.163,
+      "calls_median": 1
+    },
+    {
+      "child": "input_hash",
+      "elapsed_p50_ms": 20.1485,
+      "elapsed_p95_ms": 21.7591,
+      "median_share_of_build_fp_pct": 33.77,
+      "median_share_of_chain_pct": 9.14,
+      "calls_median": 1
+    },
+    {
+      "child": "param_hash",
+      "elapsed_p50_ms": 0.0259,
+      "elapsed_p95_ms": 0.0327,
+      "median_share_of_build_fp_pct": 0.045,
+      "median_share_of_chain_pct": 0.012,
+      "calls_median": 1
+    },
+    {
+      "child": "agg_status",
+      "elapsed_p50_ms": 0.0012,
+      "elapsed_p95_ms": 0.002,
+      "median_share_of_build_fp_pct": 0.002,
+      "median_share_of_chain_pct": 0.001,
+      "calls_median": 1
+    },
+    {
+      "child": "field_avail",
+      "elapsed_p50_ms": 0.0079,
+      "elapsed_p95_ms": 0.0146,
+      "median_share_of_build_fp_pct": 0.014,
+      "median_share_of_chain_pct": 0.004,
+      "calls_median": 1
+    }
+  ],
+  "builder_residual": {
+    "child": "builder_residual",
+    "elapsed_p50_ms": 0.0635,
+    "elapsed_p95_ms": 0.0718,
+    "median_share_of_build_fp_pct": 0.107,
+    "median_share_of_chain_pct": 0.029,
+    "calls_median": null
+  },
+  "nested_counters": [
+    {
+      "child": "extract_vc_nested",
+      "elapsed_p50_ms": 0.2874,
+      "elapsed_p95_ms": 0.3596,
+      "median_share_of_build_fp_pct": 0.469,
+      "median_share_of_chain_pct": 0.124,
+      "calls_median": null
+    },
+    {
+      "child": "vc_schema_nested",
+      "elapsed_p50_ms": 0.2606,
+      "elapsed_p95_ms": 0.3261,
+      "median_share_of_build_fp_pct": 0.443,
+      "median_share_of_chain_pct": 0.117,
+      "calls_median": null
+    }
+  ],
+  "reconciliation": {
+    "phase": "3.4B-6A",
+    "method": "per-run exclusive reconciliation; error = |(child_sum - parent)/parent|",
+    "build_fp": {
+      "exclusive_children_sum = trend+structure+momentum+input_hash+param_hash+agg_status+field_avail; builder_residual 为剩余": {
+        "median_rel_error_pct": 0.0,
+        "p95_rel_error_pct": 0.0,
+        "max_rel_error_pct": 0.0
+      }
+    },
+    "nested_counters": {
+      "extract_last_volume_context": "模块级 patch 捕获全部 5 个调用点：trend L358、structure L617、momentum L827（squeeze 条件分支，不一定触发）+ L836、build_fp 直接 L1204（per_instrument calls 4~5 次视分支而定）。不参与 exclusive 排名；直接调用部分计入 builder_residual",
+      "_vc_to_schema": "模块级 patch 捕获两类调用：1) 经 _event_vc(L233) 在 structure(L496/L543/L596) 与 momentum(L847) 事件循环中逐事件调用（约 85~90 次/股，per_instrument calls 89~93 次）；2) 直接调用 trend L359、structure L618、momentum L837、build_fp L1205。不参与 exclusive 排名；直接调用部分计入 builder_residual"
+    }
+  },
+  "negative_residual_count": 0,
+  "decision_gate": {
+    "case": 1,
+    "label": "_compute_input_hash dominant + 向量化候选 105/105 exact + 明显更快",
+    "next": "下一阶段允许做 production implementation（仍不触碰指标逻辑）"
+  },
+  "part_c_json_safe_wording": {
+    "supersedes": "3.4B-5 residual_attribution.json measurement_notes.json_safe_aggregate",
+    "old_wording": "_json_safe_value 在 build_fp_core 内部被递归调用，时间与 build_fp_core 重叠",
+    "correction": "真实 production 顺序为 build_first_pyramid_core_snapshot() 返回 fp_core 之后，compute_core_artifact 再调用 _extract_dsa_metrics/_extract_dsa_visual/_extract_state_events、fp_core.model_dump()、_json_safe_value(...)、CoreComputationArtifact(...)；即 _json_safe_value 在 build_fp_core 之后，不在 builder 内部。json_safe_aggregate=~9.2ms 不能作为 exclusive hotspot 排名，是因为 _json_safe_value 是递归函数，timer 对每层 recursive inclusive duration 累加，存在递归层级重复计时。artifact_residual≈1.9ms 可作其 exclusive residual 看待，但其中混有 model_dump/top-level JSON 安全化/模型构造，不进一步拆分猜测。",
+    "old_3.4B5_evidence_not_amended": true
+  },
+  "part_d_sqzmom": {
+    "sqzmom_touched": false,
+    "note": "sqzmom_at_bar≈5ms 疑似重复计算，但 3.4B-5 committed evidence 标注'待补充静态证据'；本轮禁止改动。后续需单独证明 temporal compute_sqzmom_lb defaults == First Pyramid _FIRST_PYRAMID_PARAMS['sqzmom_config'] 且 bars/index/point-in-time contract 相同后，才可进入 duplicate closure。"
+  },
+  "input_hash_gate_met": true
+}

@@ -1,0 +1,107 @@
+{
+  "phase": "3.4B-6A",
+  "gate": {
+    "met": true,
+    "input_hash_p50_ms": 20.1485,
+    "share_of_build_fp_pct": 33.77,
+    "thresholds": {
+      "abs_ms": 10.0,
+      "share": 0.2
+    }
+  },
+  "static_contract": {
+    "caller_hash": {
+      "producer": "chart_bars_service.compute_source_bar_hash(df, timeframe='1d')",
+      "data_flow": "BarAggregationResult.source_bar_hash -> primary_source_bar_hash -> compute_core_artifact(input_hash=primary_source_bar_hash, bars_hash=primary_source_bar_hash)",
+      "row_format": "{time_str}|{open}|{high}|{low}|{close}|{volume}|{amount}",
+      "row_separator": "\\n",
+      "index_representation": "strftime('%Y-%m-%d')（1d）",
+      "value_separator": "|",
+      "hash_prefix": "（无前缀，裸 hexdigest）",
+      "digest_truncation": "sha256 hexdigest[:16]"
+    },
+    "builder_hash": {
+      "producer": "first_pyramid_service._compute_input_hash(bars)",
+      "data_flow": "build_first_pyramid_core_snapshot -> _compute_input_hash(bars) -> fp_core.inputHash",
+      "content": "{idx_str}#{vals_str}",
+      "idx_str": "pd.Series(bars.index.astype(str)).str.cat(sep=',')（全部 index 值，DatetimeIndex 为完整 'YYYY-MM-DD HH:MM:SS' 字符串）",
+      "vals_str": "bars[cols].astype(str).agg(','.join, axis=1).str.cat(sep='|')（行内逗号，行间竖线）",
+      "hash_prefix": "'sha256:' 前缀",
+      "digest_truncation": "sha256 hexdigest[:16]"
+    },
+    "classification": "DIFFERENT_HASH_CONTRACT",
+    "evidence": "1) 行内/行间 separator 不同（'|'+'\\n' vs ','+'+'|'）；2) index 表示不同（strftime('%Y-%m-%d') vs index.astype(str) 完整时间戳）；3) hash 前缀不同（无前缀 vs 'sha256:'）；4) 拼接顺序/结构不同（裸行拼接 vs '{idx}#{vals}'）。对相同 bars，两个函数必然产出不同的 hash 字符串；因此禁止复用 caller 的 primary_source_bar_hash 替换 fp_core.inputHash，否则改变持久化 inputHash 值（违反 hash contract）。",
+    "implication": "_compute_input_hash 不能作为 exact duplicate 删除；但它是纯 Python 行循环/字符串拼接开销，可做 exact-equivalent 向量化（Part B2）。"
+  },
+  "exact_equality": {
+    "n_samples": 105,
+    "n_equal": 105,
+    "all_equal": true,
+    "mismatches": []
+  },
+  "candidate": {
+    "status": "PROOF_OK",
+    "method": "interleaved perf_counter, N=30/sample, same frozen df_1d frames",
+    "old_p50_ms": 19.6982,
+    "old_p95_ms": 20.4147,
+    "candidate_p50_ms": 1.7681,
+    "candidate_p95_ms": 1.9118,
+    "saved_ms_p50": 17.9301,
+    "saved_pct_p50": 91.02,
+    "saved_ms_p95": 18.5029,
+    "saved_pct_p95": 90.64,
+    "note": "candidate proof only；本轮不实施 production implementation",
+    "per_sample_top10": [
+      {
+        "rows": 415,
+        "old_p50_ms": 20.4856,
+        "candidate_p50_ms": 1.9193
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.9073,
+        "candidate_p50_ms": 1.8116
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8544,
+        "candidate_p50_ms": 1.8247
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8542,
+        "candidate_p50_ms": 1.8293
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8499,
+        "candidate_p50_ms": 1.8007
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8373,
+        "candidate_p50_ms": 1.8097
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8242,
+        "candidate_p50_ms": 1.7939
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8179,
+        "candidate_p50_ms": 1.7902
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8133,
+        "candidate_p50_ms": 1.8129
+      },
+      {
+        "rows": 415,
+        "old_p50_ms": 19.8068,
+        "candidate_p50_ms": 1.776
+      }
+    ]
+  }
+}
