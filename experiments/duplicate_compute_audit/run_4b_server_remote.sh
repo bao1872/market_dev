@@ -157,14 +157,17 @@ fi
 
 # ---- f/g. read-only heavy-task preflight（production ORM，不写） ----
 # 用同类短命容器执行 harness --heavy-check（与 benchmark 同源 production app）。
+# --no-deps：禁止 benchmark 启停 production dependencies（PostgreSQL/Redis）。
+# 路径统一：/root/web_dev→/repo:ro，PANJI_REPO_ROOT=/repo（与正式 run 一致）。
 echo "[4B-0G-R][remote] f/g. read-only heavy-task preflight（after_close_orchestrator 活跃任务）..."
 HEAVY_CHECK_RC=0
-docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" run --rm \
+docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" run --rm --no-deps \
   --name "${CONTAINER_NAME}-preflight" \
+  -v "$SERVER_REPO:/repo:ro" \
   -v "$APP_DIR:/app/app:ro" \
   -v "$HARNESS_BLOB:/app/benchmark/run_4b_server_benchmark.py:ro" \
-  -e PANJI_REPO_ROOT="$SERVER_REPO" \
-  -e PANJI_BACKEND_ROOT="$APP_DIR" \
+  -e PANJI_REPO_ROOT=/repo \
+  -e PANJI_BACKEND_ROOT=/app \
   worker-after-close \
   python -m benchmark.run_4b_server_benchmark --heavy-check \
   > "$BENCHMARK_WORKSPACE/heavy_check.json" 2>&1 || HEAVY_CHECK_RC=$?
@@ -179,11 +182,12 @@ echo "  heavy-task preflight: clear（无活跃 after_close 重型任务）"
 # ---- h/i. 创建一次性 worker-after-close 同类容器，benchmark 作为 MAIN PROCESS ----
 # 以 --detach 启动（benchmark 仍是该容器 MAIN PROCESS），runner 并行监控真实进度，
 # 最后 docker wait 取退出码；禁止 sleep infinity + docker exec -d。
+# --no-deps：禁止 benchmark 启停 production dependencies。
 echo "[4B-0G-R][remote] h/i. 创建一次性 benchmark 容器（benchmark = MAIN PROCESS, detach）..."
 
 mkdir -p "$BENCHMARK_WORKSPACE/output"
 
-docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" run -d \
+docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" run -d --no-deps \
   --name "$CONTAINER_NAME" \
   -v "$SERVER_REPO:/repo:ro" \
   -v "$APP_DIR:/app/app:ro" \
@@ -199,6 +203,58 @@ docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" ru
   --entrypoint python \
   worker-after-close \
   -m benchmark.run_4b_server_benchmark
+
+# ---- i2. 资源契约证据：比较 one-shot 与常驻 worker-after-close 的 resource envelope ----
+# 仅记录 Image / Memory / NanoCpus / PidsLimit / Network，mismatch → STOP（不入 compute）。
+echo "[4B-0G-R][remote] i2. 资源契约核验（one-shot vs worker-after-close）..."
+RUNTIME_CONTRACT="$BENCHMARK_WORKSPACE/output/4B-server-db/runtime_contract.json"
+docker inspect trading-worker-after-close "$CONTAINER_NAME" >/dev/null 2>&1 || {
+  echo "[4B-0G-R][remote] ERROR: 无法 inspect trading-worker-after-close 或 benchmark 容器" >&2
+  exit 12
+}
+python3 - "$CONTAINER_NAME" "$RUNTIME_CONTRACT" <<'PY'
+import sys, json, subprocess
+cn, out = sys.argv[1], sys.argv[2]
+def inspect(name):
+    raw = subprocess.check_output(["docker","inspect",name], text=True)
+    return json.loads(raw)[0]
+base = inspect("trading-worker-after-close")
+one  = inspect(cn)
+def hostcfg(c): return c.get("HostConfig", {})
+base_h, one_h = hostcfg(base), hostcfg(one)
+base_net = list((base.get("NetworkSettings",{}) or {}).get("Networks",{}) or {})
+one_net  = list((one.get("NetworkSettings",{}) or {}).get("Networks",{}) or {})
+contract = {
+    "baseline_container": "trading-worker-after-close",
+    "benchmark_container": cn,
+    "image_match": base["Image"] == one["Image"],
+    "memory_match": base_h.get("Memory") == one_h.get("Memory"),
+    "nanocpus_match": base_h.get("NanoCpus") == one_h.get("NanoCpus"),
+    "pidslimit_match": base_h.get("PidsLimit") == one_h.get("PidsLimit"),
+    "network_compatible": (set(base_net) & set(one_net)) != set() or base_net == one_net,
+    "baseline": {"image": base["Image"], "memory": base_h.get("Memory"),
+                 "nanocpus": base_h.get("NanoCpus"), "pidslimit": base_h.get("PidsLimit"),
+                 "networks": base_net},
+    "benchmark": {"image": one["Image"], "memory": one_h.get("Memory"),
+                  "nanocpus": one_h.get("NanoCpus"), "pidslimit": one_h.get("PidsLimit"),
+                  "networks": one_net},
+    "note": "benchmark one-shot 应继承 worker-after-close 同类 resource envelope；"
+            "mismatch 表示 cgroup 不对齐，CPU/RSS baseline 不可信。",
+}
+ok = (contract["image_match"] and contract["memory_match"] and contract["nanocpus_match"]
+      and contract["pidslimit_match"] and contract["network_compatible"])
+contract["envelope_aligned"] = bool(ok)
+with open(out, "w", encoding="utf-8") as f:
+    json.dump(contract, f, ensure_ascii=False, indent=2)
+if not ok:
+    print("[4B-0G-R][remote] ERROR: 资源契约不对齐，STOP before full compute", file=sys.stderr)
+    sys.exit(13)
+print("[4B-0G-R][remote] 资源契约对齐: image/memory/nanocpus/pidslimit/network 均匹配")
+PY
+CONTRACT_RC=$?
+if [ "$CONTRACT_RC" -ne 0 ]; then
+  exit "$CONTRACT_RC"
+fi
 
 # ---- j. 监控真实业务 progress + docker stats（并行，非 generic timeout） ----
 PROGRESS_FILE="$BENCHMARK_WORKSPACE/output/4B-server-db/progress.jsonl"

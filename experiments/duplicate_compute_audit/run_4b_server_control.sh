@@ -72,7 +72,7 @@ echo "[4B-0G-R][control] 运行 preflight ..."
 # 2) 经 panji-prod-ssh 在服务器 bootstrap：从 exact Git object materialize remote runner 并执行
 #    不调用不存在的文件路径，不 scp，不 checkout。
 echo "[4B-0G-R][control] 经 panji-prod-ssh 在服务器 bootstrap + 执行 governed remote runner ..."
-BOOTSTRAP="set -euo pipefail; cd /root/web_dev; \
+BOOTSTRAP="set -u; cd /root/web_dev; \
 git fetch origin dev >/dev/null 2>&1 || true; \
 HS='$HARNESS_SHA'; PRS='$PROD_RUNTIME_SHA'; \
 if ! git merge-base --is-ancestor \"\$HS\" origin/dev 2>/dev/null; then echo '[control] ERROR: HARNESS_SHA 非 origin/dev 祖先' >&2; exit 4; fi; \
@@ -80,19 +80,27 @@ if ! git cat-file -e \"\$HS^{commit}\" 2>/dev/null; then echo '[control] ERROR: 
 TMP=\$(mktemp /tmp/4b-remote.XXXXXX.sh); \
 git cat-file -p \"\$HS:experiments/duplicate_compute_audit/run_4b_server_remote.sh\" > \"\$TMP\"; \
 chmod +x \"\$TMP\"; \
-bash \"\$TMP\" \"\$HS\" \"\$PRS\"; RC=\$?; rm -f \"\$TMP\"; exit \$RC"
+set +e; \
+bash \"\$TMP\" \"\$HS\" \"\$PRS\"; RC=\$?; \
+set -e; \
+rm -f \"\$TMP\"; \
+exit \$RC"
 
+# Blocker 3: 显式捕获 remote RC；set -e 不跳过取回逻辑
+set +e
 "$OPS_DIR/panji-prod-ssh" "$BOOTSTRAP"
 REMOTE_RC=$?
+set -e
 
 echo "[4B-0G-R][control] remote runner 退出码 = $REMOTE_RC"
 
 # 3) 取回 evidence archive（经 SSH 流式 cat，不 scp）
+# 无论 REMOTE_RC 成功/失败，只要远端 archive 存在都尝试取回（失败场景更需要 evidence）。
 LOCAL_EVIDENCE_DIR="$SCRIPT_DIR/output/4B-server-remote-evidence"
-if [ "$REMOTE_RC" -eq 0 ]; then
-  mkdir -p "$LOCAL_EVIDENCE_DIR"
-  ARCHIVE_NAME="4b-evidence-${HARNESS_SHA}.tar.gz"
-  echo "[4B-0G-R][control] 经 panji-prod-ssh 取回 evidence archive ..."
+ARCHIVE_NAME="4b-evidence-${HARNESS_SHA}.tar.gz"
+mkdir -p "$LOCAL_EVIDENCE_DIR"
+echo "[4B-0G-R][control] 经 panji-prod-ssh 取回 evidence archive（若存在）..."
+if "$OPS_DIR/panji-prod-ssh" "test -f /tmp/${ARCHIVE_NAME}" 2>/dev/null; then
   if "$OPS_DIR/panji-prod-ssh" "cat /tmp/${ARCHIVE_NAME}" > "$LOCAL_EVIDENCE_DIR/${ARCHIVE_NAME}" 2>/dev/null; then
     tar -xzf "$LOCAL_EVIDENCE_DIR/${ARCHIVE_NAME}" -C "$LOCAL_EVIDENCE_DIR" 2>/dev/null || {
       echo "[4B-0G-R][control] WARN: archive 解包失败" >&2
@@ -101,8 +109,10 @@ if [ "$REMOTE_RC" -eq 0 ]; then
     "$OPS_DIR/panji-prod-ssh" "rm -f /tmp/${ARCHIVE_NAME}" >/dev/null 2>&1 || true
     echo "[4B-0G-R][control] evidence 已取回至 $LOCAL_EVIDENCE_DIR，远端 archive 已删除。"
   else
-    echo "[4B-0G-R][control] WARN: 未能取回 evidence archive（远端可能已清理）。" >&2
+    echo "[4B-0G-R][control] WARN: 取回 archive 内容失败。" >&2
   fi
+else
+  echo "[4B-0G-R][control] WARN: 远端 archive 不存在（remote runner 未生成或已清理）。" >&2
 fi
 
 exit "$REMOTE_RC"

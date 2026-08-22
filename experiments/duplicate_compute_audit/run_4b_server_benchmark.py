@@ -524,26 +524,34 @@ def machine_info(avg_cpu=None) -> dict:
     }
 
 
-def verify_production_checkout() -> None:
-    """Hard gate：被 import 的 production checkout 必须 exact == ac9c3810。
+def verify_production_identity() -> None:
+    """Hard gate：验证 remote runner 注入的已核验运行身份。
 
-    在连接 DB 之前执行；不符则 STOP（不自动部署 dev）。
+    不再在 benchmark container 内调用 Git CLI（production runtime 镜像未声明 git）。
+    真实服务器 Git/runtime 身份由 remote runner 在宿主机完成三处校验：
+      /root/web_dev HEAD == ac9c
+      /opt/panji-live/RUNTIME_SHA == ac9c
+      /v1/version.runtime_git_sha == ac9c
+    并将三者注入环境变量；harness 只校验收到的身份且三者一致 == PRODUCTION_CODE_SHA。
     """
-    import subprocess
+    def _require_hex(name: str) -> str:
+        val = os.environ.get(name, "").strip()
+        if len(val) != 40 or not all(c in "0123456789abcdef" for c in val):
+            print(f"[4B] STOP: {name} 缺失或非法（需 40 位 hex），得到 {val!r}")
+            raise SystemExit(2)
+        return val
 
-    repo_root = os.environ.get("PANJI_REPO_ROOT", str(REPO_ROOT))
-    try:
-        actual = subprocess.run(
-            ["git", "-C", repo_root, "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=30,
-        ).stdout.strip()
-    except Exception as exc:  # noqa: BLE001
-        print(f"[4B] STOP: 无法读取 production checkout SHA: {exc}")
-        raise SystemExit(2)
-    print(f"[4B] production checkout HEAD = {actual}")
-    print(f"[4B] required baseline        = {PRODUCTION_CODE_SHA}")
-    if actual != PRODUCTION_CODE_SHA:
-        print("[4B] STOP: production checkout SHA 不等于 ac9c3810，拒绝运行")
+    server_head = _require_hex("PANJI_SERVER_REPO_HEAD")
+    live_sha = _require_hex("PANJI_LIVE_RUNTIME_SHA")
+    runtime_sha = _require_hex("PANJI_RUNTIME_GIT_SHA")
+
+    print(f"[4B] server_repo_head    = {server_head}")
+    print(f"[4B] live_runtime_sha   = {live_sha}")
+    print(f"[4B] runtime_git_sha    = {runtime_sha}")
+    print(f"[4B] required baseline   = {PRODUCTION_CODE_SHA}")
+
+    if not (server_head == live_sha == runtime_sha == PRODUCTION_CODE_SHA):
+        print("[4B] STOP: 运行身份不一致或未对齐 ac9c3810，拒绝运行")
         raise SystemExit(2)
 
 
@@ -562,8 +570,8 @@ def verify_harness_sha_env() -> str:
 async def main() -> int:
     print(f"[4B] 启动 {now_iso()}")
 
-    # ---- Hard gate：production checkout 必须 == ac9c3810（DB 访问前） ----
-    verify_production_checkout()
+    # ---- Hard gate：验证 remote runner 注入的已核验运行身份（DB 访问前，无 git 依赖） ----
+    verify_production_identity()
     harness_sha = verify_harness_sha_env()
 
     # ---- Universe gate ----
@@ -802,6 +810,36 @@ async def main() -> int:
             + "\n"
         )
 
+    # ---- Blocker 2: full-run correctness final gate（证据先落盘，再判 nonzero） ----
+    snap = int(result.get("snapshot_count", 0) or 0)
+    fail = int(result.get("failed_count", 0) or 0)
+    skip = int(result.get("skipped_count", 0) or 0)
+    universe = len(ids)
+    processed = snap + fail + skip
+    db_writes = int(SQL_METRICS.get("db_write_attempts", 0) or 0)
+    gate = (
+        processed == universe
+        and snap == universe
+        and fail == 0
+        and skip == 0
+        and C.external_calls == 0
+        and db_writes == 0
+    )
+    final_gate = {
+        "universe": universe,
+        "snapshot_count": snap,
+        "failed_count": fail,
+        "skipped_count": skip,
+        "processed": processed,
+        "external_calls": C.external_calls,
+        "db_write_attempts": db_writes,
+        "gate_passed": bool(gate),
+        "note": "本 benchmark 要求 snapshot_count==universe 且 failed/skipped==0；"
+        "无 bars / insufficient history 属 production degraded snapshot 合同，"
+        "不应表现为计算失败。external_calls==0 与 db_write_attempts==0 为硬门禁。",
+    }
+    _write("final_gate.json", final_gate)
+
     print("=" * 60)
     print("[4B] FULL RUN 完成")
     print(f"  total wall-clock : {run_wall/60:.2f} min")
@@ -810,12 +848,13 @@ async def main() -> int:
     print(f"  db_fallback calls: {C.db_fallback_calls}")
     print(f"  external calls   : {C.external_calls}")
     print(f"  other orchestr.  : {other_orchestration/60:.2f} min")
-    print(f"  snapshot/failed  : {result.get('snapshot_count')}/{result.get('failed_count')}")
+    print(f"  snapshot/failed  : {snap}/{fail} (skipped={skip})")
     print(f"  peak RSS         : {peak_rss_gib:.2f} GiB")
     print(f"  decision gate    : {local_vs_server['decision_gate']}")
+    print(f"  final gate       : {'PASS' if gate else 'FAIL'}")
     print("=" * 60)
     print(f"[4B] 输出目录: {OUTPUT_DIR}")
-    return 0
+    return 0 if gate else 20
 
 
 def _decision_gate(total_sec: float, mdas_sec: float, cpu_sec: float) -> str:
