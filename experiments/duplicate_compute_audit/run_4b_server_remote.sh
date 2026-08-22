@@ -280,6 +280,9 @@ docker compose --env-file "$MARKET_ENV" -f "$COMPOSE_PROD" -f "$COMPOSE_LIVE" ru
 # mismatch → STOP（不入 compute）。
 echo "[4B-0G-R3F][remote] i2. 资源契约 + /app/app mount 核验（one-shot vs worker-after-close）..."
 RUNTIME_CONTRACT="$BENCHMARK_WORKSPACE/output/4B-server-db/runtime_contract.json"
+# R3F1: runner 自己建立 evidence contract 目录，避免依赖后台容器异步创建 4B-server-db/
+# 子目录导致的 open() 时序竞态（FileNotFoundError → compute 前崩溃）。
+mkdir -p "$(dirname "$RUNTIME_CONTRACT")"
 docker inspect trading-worker-after-close "$CONTAINER_NAME" >/dev/null 2>&1 || {
   echo "[4B-0G-R3F][remote] ERROR: 无法 inspect trading-worker-after-close 或 benchmark 容器" >&2
   exit 12

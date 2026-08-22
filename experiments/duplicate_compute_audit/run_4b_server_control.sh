@@ -109,11 +109,18 @@ echo "[4B-0G-R3][control] remote runner 退出码 = $REMOTE_RC"
 
 # 3) 取回 evidence archive（经 SSH 流式 cat，不 scp）
 # 无论 REMOTE_RC 成功/失败，只要远端 archive 存在都尝试取回（失败场景更需要 evidence）。
-LOCAL_EVIDENCE_DIR="$SCRIPT_DIR/output/4B-server-remote-evidence"
+# R3F1: 按 HARNESS_SHA 隔离本地 evidence，避免不同 run 共用同一目录导致历史残留被误读为本轮证据。
+LOCAL_EVIDENCE_DIR="$SCRIPT_DIR/output/4B-server-remote-evidence/$HARNESS_SHA"
 ARCHIVE_NAME="4b-evidence-${HARNESS_SHA}.tar.gz"
-mkdir -p "$LOCAL_EVIDENCE_DIR"
 echo "[4B-0G-R3][control] 经 panji-prod-ssh 取回 evidence archive（若存在）..."
 if "$OPS_DIR/panji-prod-ssh" "test -f /tmp/${ARCHIVE_NAME}" 2>/dev/null; then
+  # 取回前校验：目标目录必须不存在或为空，防止与任何历史 run 的 evidence 混淆。
+  if [ -e "$LOCAL_EVIDENCE_DIR" ] && [ -n "$(ls -A "$LOCAL_EVIDENCE_DIR" 2>/dev/null)" ]; then
+    echo "[4B-0G-R3][control] ERROR: 本地 evidence 目录 $LOCAL_EVIDENCE_DIR 已存在且非空，" \
+         "疑似历史残留，拒绝覆盖（STOP before extract）。" >&2
+    exit 1
+  fi
+  mkdir -p "$LOCAL_EVIDENCE_DIR"
   if "$OPS_DIR/panji-prod-ssh" "cat /tmp/${ARCHIVE_NAME}" > "$LOCAL_EVIDENCE_DIR/${ARCHIVE_NAME}" 2>/dev/null; then
     tar -xzf "$LOCAL_EVIDENCE_DIR/${ARCHIVE_NAME}" -C "$LOCAL_EVIDENCE_DIR" 2>/dev/null || {
       echo "[4B-0G-R3][control] WARN: archive 解包失败" >&2
