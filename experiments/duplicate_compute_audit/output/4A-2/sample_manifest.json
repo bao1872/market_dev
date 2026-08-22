@@ -1,0 +1,632 @@
+[
+  {
+    "instrument_id": "0ad8b589-04f7-4a2b-90cb-ccdf5ade16d8",
+    "symbol": "301491",
+    "bars_count": 250,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "8e5d0aff-9f71-4ecd-bcb2-455c13253b3a",
+    "symbol": "000020",
+    "bars_count": 324,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "0478e3ad-a9db-4cf8-8aad-0dcc5f7cdf98",
+    "symbol": "920098",
+    "bars_count": 412,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "40ffa080-4216-4165-8b92-f3b191fadc6e",
+    "symbol": "301586",
+    "bars_count": 476,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "b193ef3f-65ba-413e-89dd-cafe6de384a9",
+    "symbol": "301578",
+    "bars_count": 637,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "a8708f5a-38da-4706-98ef-12eba5755015",
+    "symbol": "688591",
+    "bars_count": 715,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "225e4563-a608-4855-bd39-c5fc30e19451",
+    "symbol": "301456",
+    "bars_count": 750,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c550529b-740a-4858-8781-3b35d7e23838",
+    "symbol": "920719",
+    "bars_count": 783,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c28dcdbf-a68d-4874-b968-a98a3459cf94",
+    "symbol": "605081",
+    "bars_count": 814,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "33edd96e-45fd-490c-a66d-c430192ea309",
+    "symbol": "603843",
+    "bars_count": 846,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "443503a2-3860-432a-927c-e9fb00f75973",
+    "symbol": "002052",
+    "bars_count": 865,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "3235aa23-d69f-4c1d-8b7b-18ff7c96fce0",
+    "symbol": "600378",
+    "bars_count": 867,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "84eb1eee-f6fe-4486-a273-861056ecdc9c",
+    "symbol": "603213",
+    "bars_count": 867,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "d92496ad-58bd-474d-97c3-266c3a79599a",
+    "symbol": "603306",
+    "bars_count": 867,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "d0a8d502-f6e0-447b-8caf-98e32022f060",
+    "symbol": "002217",
+    "bars_count": 868,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "73f2318c-ee76-4ca8-b830-dadb44bc2fcf",
+    "symbol": "603789",
+    "bars_count": 871,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "401e5ac6-9ed9-4c7d-bef2-0d665efd59aa",
+    "symbol": "603037",
+    "bars_count": 872,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c40eaeec-dda6-4915-b839-6b71687f17bc",
+    "symbol": "688178",
+    "bars_count": 872,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "644d16b8-9ee9-400d-b749-15739ae168eb",
+    "symbol": "601500",
+    "bars_count": 873,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "896cbebe-62f8-44b1-990b-eebf7d90df30",
+    "symbol": "002076",
+    "bars_count": 874,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "34f9aa0d-15f8-4f4f-bc62-db8a1190baae",
+    "symbol": "002798",
+    "bars_count": 875,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "8f784cd8-4b84-40a8-9500-08ad5cf54c5f",
+    "symbol": "600470",
+    "bars_count": 875,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "05154b59-6703-40af-b961-23cb1da9ddf9",
+    "symbol": "002501",
+    "bars_count": 876,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "5a4b0951-1ba9-4e8d-aa70-8bcd800ac03e",
+    "symbol": "002069",
+    "bars_count": 876,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "a53e1ba3-1fdd-4b17-91e4-23f1377b14a8",
+    "symbol": "605318",
+    "bars_count": 876,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "f15151ad-3698-42e5-a125-2f67291cab54",
+    "symbol": "300472",
+    "bars_count": 876,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "0367d1b6-9e91-418c-9b9a-fec4dbb22863",
+    "symbol": "300917",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "0714fc23-906f-4f13-ab32-be9127f283cb",
+    "symbol": "600765",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "0b39d050-97fc-4caf-9859-1acdf8ace1ce",
+    "symbol": "300179",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "0ebc0bcd-9d18-47b1-9ec8-a0e832bfdcb0",
+    "symbol": "601668",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "11dce48c-4f15-48e6-b96b-7e4521c2dca1",
+    "symbol": "002608",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "15914c2e-6967-4451-ab07-fa456e72af6f",
+    "symbol": "301032",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "185cbb42-db8f-4ff6-824f-e5fe2d6c4cb7",
+    "symbol": "300267",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "1b696886-3055-4006-8ef9-0383e26f0361",
+    "symbol": "920810",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "1f249e47-8f78-4569-9dcb-6ed54aff9f91",
+    "symbol": "600742",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "2205133a-b2c8-4e48-a15c-bb26f5242b19",
+    "symbol": "603799",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "253ae11c-757a-41f2-b11c-6a76a48477da",
+    "symbol": "300066",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "28ccb580-30b8-404d-bce3-d2808e865eb7",
+    "symbol": "002805",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "2c05aa81-3aac-459d-929a-31d0fdf1eb45",
+    "symbol": "002658",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "300ba564-0803-4c31-949d-927f3b19e836",
+    "symbol": "301138",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "33221380-eaae-4c4f-9ae4-b495a56ad490",
+    "symbol": "603345",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "36322a48-5e6c-4374-a126-d5f23512d0ab",
+    "symbol": "600246",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "39b2b2dc-4d33-41ea-a6e1-77ca84aa58cb",
+    "symbol": "301276",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "3cf2e1b7-01e9-4980-b854-4fa2f800fb4e",
+    "symbol": "300339",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "40232faa-fec6-4a17-8859-184a8efd5ec9",
+    "symbol": "601100",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "43746df0-8040-4e88-8e1a-7e16962e842f",
+    "symbol": "688317",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "465b33c6-6b4b-4b11-8168-95c1e9f4d610",
+    "symbol": "300412",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "4a0fb1b2-309a-4106-af71-ada13b00b39f",
+    "symbol": "601827",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "4e0a1f7d-33a0-4abc-930b-63bb70d7a2d4",
+    "symbol": "603683",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "5200b622-eaf0-4716-8501-dae790eb1602",
+    "symbol": "300465",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "56729b2f-a72a-4d61-b4e2-f68ca4dbb0d2",
+    "symbol": "600569",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "5951c474-b7c6-4a1d-8672-430592074273",
+    "symbol": "300776",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "5cbb89e7-fd23-4616-8541-c48a7a02d180",
+    "symbol": "002167",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "5f7d481b-49ce-44c0-8d40-e664952dbb92",
+    "symbol": "920642",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "62b23bc5-8f2c-47ef-8dcd-2e4b1f7eca07",
+    "symbol": "002467",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "66531986-e9cc-4a2f-a683-fc3ef175fc66",
+    "symbol": "600750",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "6a29a6e6-7ca0-4109-8973-fbd745f0d2db",
+    "symbol": "688188",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "6cdc5eb9-5778-4970-817c-0cd7e3fe976b",
+    "symbol": "300479",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "7117d305-0dc8-437e-a249-176f4486a201",
+    "symbol": "300896",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "742351dd-30dc-4dc9-bec0-06dba15893c2",
+    "symbol": "002925",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "77e3cf03-4f8d-4af4-93f7-058bff8e7580",
+    "symbol": "002752",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "7b6b20ca-ec55-4afe-9d11-d860760409bc",
+    "symbol": "300548",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "7e18042e-5970-43f8-ad3a-fd7a8c85f9c0",
+    "symbol": "600266",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "8154a255-d17d-448a-bdb3-1d568d5f79da",
+    "symbol": "002912",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "8490b3b0-b4e9-4e78-acb6-ea4f7f06db9c",
+    "symbol": "603688",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "883f9154-c8a0-4461-9ab0-d49fe624a6a3",
+    "symbol": "002444",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "8aa1697a-6b04-45a3-85a3-6febffbfaf08",
+    "symbol": "600183",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "8ed187fe-563a-4abf-a927-08aec51bd5b6",
+    "symbol": "688028",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "91f9a8ce-9adc-4aa9-8886-cfb1fd3ba166",
+    "symbol": "300653",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "95ad9daa-0ed3-4d97-b5e8-eb1aaaca7955",
+    "symbol": "300144",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "991d90bd-e15a-492a-b174-9b1c6aea4390",
+    "symbol": "300276",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "9ca981e8-830c-4b19-9cef-9a73ee51e916",
+    "symbol": "600906",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "a00da425-8de2-4b5a-8685-250e9650b479",
+    "symbol": "600202",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "a394f4f7-5d81-4cbc-9342-af0b4c21690b",
+    "symbol": "001914",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "a72a60a8-8e9d-4bca-90e0-184eaca5c510",
+    "symbol": "600769",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "ab64e8c9-f4c4-4519-b07a-8da41bf031a7",
+    "symbol": "688158",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "ae5f9cdb-c4ea-4300-b69f-3b3ae830ac78",
+    "symbol": "603916",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "b1b33d5a-3723-4019-9a0e-9d3aa7c5388f",
+    "symbol": "920892",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "b5a2a562-7185-4bec-ac17-430a7a8e8b67",
+    "symbol": "300269",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "b8e656eb-da8f-40f6-a15b-f1aaf0c55007",
+    "symbol": "301132",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "bbc659cf-adb0-4fbf-88bc-f9529473968e",
+    "symbol": "002908",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c010754f-e165-43ee-bfb7-b0df8eeb1605",
+    "symbol": "301001",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c373653f-a655-40a9-bc2f-663c3aa6d7e9",
+    "symbol": "688519",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c66d53df-7bce-4e2a-b740-bfd2aa36b844",
+    "symbol": "601009",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "c9e5f768-b7b1-49f9-9335-6af3ae173079",
+    "symbol": "002612",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "cd3c513d-9bb1-4450-9c4b-19a570bb9830",
+    "symbol": "688499",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "d05fa8f5-b3a5-469d-a58c-70eeb840d67f",
+    "symbol": "002631",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "d39d0833-7b56-4208-acab-2f846aeda09c",
+    "symbol": "600327",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "d74a2dd1-8f9e-4ced-b685-fedaa1c0ae51",
+    "symbol": "601288",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "db282638-1ccb-47ad-a2cb-068c842a16b5",
+    "symbol": "688176",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "de5990a6-5912-435d-abfe-8ca96b366278",
+    "symbol": "000735",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "e196cf1d-1d77-438e-a974-c7e7839e9f03",
+    "symbol": "688221",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "e5197acf-74fe-440e-aaa0-59dec422c5c5",
+    "symbol": "600633",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "e8bd5ab9-e312-44e6-80de-e6b8f2325c7f",
+    "symbol": "688102",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "ec05a078-67ae-4db5-b815-3a9b70354239",
+    "symbol": "002817",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "ef2ce1ff-5a48-4bf4-8a08-e67cc535b4db",
+    "symbol": "300607",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "f20a38bb-2922-467e-bdc6-dd721a2cd56d",
+    "symbol": "603128",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "f61f5836-6438-466e-b448-56bf05e4727a",
+    "symbol": "688278",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "f92d7d49-040d-4d41-b422-4ad14dee8e1a",
+    "symbol": "300016",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "fcfce484-7aa8-419a-9ced-d635b95054b2",
+    "symbol": "600475",
+    "bars_count": 877,
+    "boundary_reason": "normal"
+  },
+  {
+    "instrument_id": "209e7c07-1358-4a64-b9e9-ff2d2dfef801",
+    "symbol": "920305",
+    "bars_count": 0,
+    "boundary_reason": "920305 0 bars"
+  },
+  {
+    "instrument_id": "00c0546f-498d-42d7-b13e-dad20edbfe5e",
+    "symbol": "301583",
+    "bars_count": 27,
+    "boundary_reason": "frozen shortest (27 bars)"
+  },
+  {
+    "instrument_id": "0e35895d-3034-4da6-9951-74141e83e5d4",
+    "symbol": "001237",
+    "bars_count": 61,
+    "boundary_reason": "closest to 60 bars (61)"
+  },
+  {
+    "instrument_id": "0ad8b589-04f7-4a2b-90cb-ccdf5ade16d8",
+    "symbol": "301491",
+    "bars_count": 250,
+    "boundary_reason": "closest to 250 bars (250)"
+  },
+  {
+    "instrument_id": "26200fa3-d776-4e1b-9eee-1de0311b4e54",
+    "symbol": "000032",
+    "bars_count": 3049,
+    "boundary_reason": "longest history (3049 bars)"
+  }
+]
