@@ -98,6 +98,49 @@ WARMUP_STOCKS = 25
 OUTPUT_DIR = Path(__file__).resolve().parent / "output" / "4B-server-db"
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
+# 真实业务进度日志（长任务治理）：每批由 production progress_callback 触发，
+# 写入 progress.jsonl，供服务器外部 runner 判断真实进展（而非 generic timeout）。
+PROGRESS_JSONL = OUTPUT_DIR / "progress.jsonl"
+
+
+def _progress_writer() -> "callable":
+    """返回 production 兼容的 progress_callback：写入 progress.jsonl 一行 JSON。
+
+    签名对齐 compute_review_core_with_run_items 的回调契约：
+        (processed, total, snapshot_count, failed_count)
+    不新增 observability framework，只复用已有回调。
+    """
+    import atexit
+
+    class _Writer:
+        def __init__(self) -> None:
+            self._fh = open(PROGRESS_JSONL, "w", encoding="utf-8")
+            atexit.register(self._fh.close)
+
+        async def __call__(
+            self, *, processed: int, total: int,
+            snapshot_count: int, failed_count: int,
+        ) -> None:
+            coverage = (snapshot_count / total) if total > 0 else 0.0
+            line = json.dumps(
+                {
+                    "timestamp": now_iso(),
+                    "processed": processed,
+                    "completed": processed,
+                    "succeeded": snapshot_count,
+                    "failed": failed_count,
+                    "total": total,
+                    "coverage": round(coverage, 6),
+                    "elapsed_sec": round(time.perf_counter() - _progress_writer._t0, 3),
+                },
+                ensure_ascii=False,
+            )
+            self._fh.write(line + "\n")
+            self._fh.flush()
+
+    _progress_writer._t0 = time.perf_counter()
+    return _Writer()
+
 
 # ============================================================================
 # 计时 / 计数
@@ -584,6 +627,7 @@ async def main() -> int:
         batch_size=BATCH_SIZE,
         failure_threshold=1.0,
         released_config_resolver=None,
+        progress_callback=await _progress_writer(),
     )
     run_wall = time.perf_counter() - run_start
     run_cpu_time = time.process_time() - run_start_cpu
@@ -707,12 +751,21 @@ async def main() -> int:
                     {"instrument_id": str(item.instrument_id), "error": item.error}
                 )
 
-    evidence_meta = {
+    # 运行身份：仅读取 remote runner 注入的环境变量并记录，harness 本身不探测服务器。
+    # 四个身份必须互相一致（由 remote runner 在启动容器前 gate），此处只做记录与一致性提示。
+    runtime_identities = {
         "production_code_sha": PRODUCTION_CODE_SHA,
         "benchmark_harness_sha": harness_sha,
+        "server_repo_head": os.environ.get("PANJI_SERVER_REPO_HEAD", ""),
+        "live_runtime_sha": os.environ.get("PANJI_LIVE_RUNTIME_SHA", ""),
+        "runtime_git_sha": os.environ.get("PANJI_RUNTIME_GIT_SHA", ""),
         "note": "production_code_sha 为被审计的 production baseline (ac9c3810)，"
         "运行时经 git rev-parse 硬校验；benchmark_harness_sha 由运行环境通过 "
-        "PANJI_BENCHMARK_HARNESS_SHA 注入（即本次 harness 脚本的 commit SHA）。",
+        "PANJI_BENCHMARK_HARNESS_SHA 注入（即本次 harness 脚本的 commit SHA）。"
+        "server_repo_head / live_runtime_sha / runtime_git_sha 由 governed remote runner "
+        "在容器启动前 gate 并注入，harness 仅记录，不自行探测服务器。四者中 "
+        "production_code_sha 与 server_repo_head / live_runtime_sha / runtime_git_sha 必须相等；"
+        "benchmark_harness_sha 允许不同（harness 与 production 是两个独立身份）。",
     }
 
     def _write(name: str, obj: dict) -> None:
@@ -726,7 +779,7 @@ async def main() -> int:
     _write("stage_timing.json", stage_timing)
     _write("sql_read_metrics.json", sql_read_metrics)
     _write("local_vs_server.json", local_vs_server)
-    _write("evidence_meta.json", evidence_meta)
+    _write("evidence_meta.json", runtime_identities)
     _write("failures.jsonl", {"failures": failures} if failures else {})
     with open(OUTPUT_DIR / "batch_metrics.jsonl", "w", encoding="utf-8") as f:
         f.write(
