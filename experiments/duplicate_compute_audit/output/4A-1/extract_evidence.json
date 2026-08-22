@@ -1,0 +1,64 @@
+{
+  "dataset_version": "afterclose-20260817-v1",
+  "target_trade_date": "2026-08-17",
+  "gate": {
+    "eligible": {
+      "count": 5293,
+      "unique": true,
+      "universe_hash_sha256": "c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577",
+      "instruments_written": 5293,
+      "symbols_where_required": "symbol unique where contract requires"
+    },
+    "bars": {
+      "row_count": 4448431,
+      "instrument_count": 5292,
+      "earliest_trade_date": "2012-12-10",
+      "latest_trade_date": "2026-08-17",
+      "per_instrument_bars": {
+        "min": 27,
+        "p50": 877.0,
+        "p90": 877.0,
+        "p99": 877.0,
+        "max": 3049
+      },
+      "window_contract": "[2012-12-08, 2026-08-17] = target - 5000 calendar days .. target",
+      "no_truncation": "raw/unadjusted, 未裁 250/415，未按 sample 抽股"
+    },
+    "adj": {
+      "row_count": 4448431,
+      "instrument_count": 5292,
+      "effective_date_min": "2012-12-10",
+      "effective_date_max": "2026-08-17",
+      "max_effective_date_le_target": true
+    },
+    "released_config": {
+      "strategy_key": "dsa_selector",
+      "version": "1.4.1",
+      "status": "released",
+      "build_hash": "40a7c015c22a8804b7cb32db4097de112fd363423e47544d7fa890cc53afd49e",
+      "released_at": "2026-07-01T01:13:43",
+      "effective_config_keys": [
+        "algorithm.lookback",
+        "atr_rope.length",
+        "atr_rope.multi",
+        "atr_rope.regime_lookback",
+        "atr_rope.regime_threshold",
+        "dsa.atr_len",
+        "dsa.base_apt",
+        "dsa.prd",
+        "dsa.use_adapt",
+        "dsa.vol_bias"
+      ],
+      "parameter_count": 10
+    },
+    "manifest_sha256": "c5a489398c9245434316f158c600b7bff49c511de1d10a0dc9700908f4f6ed15"
+  },
+  "readonly_audit": {
+    "query_count": 4,
+    "remote_read_elapsed_s": 8.072,
+    "downloaded_rows": 4448431,
+    "downloaded_bytes": 0,
+    "remote_writes": 0,
+    "production_task_triggers": 0
+  }
+}

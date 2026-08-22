@@ -1,0 +1,52 @@
+{
+  "phase": "4A-1",
+  "title": "Read-only Probe schema/coverage/hash evidence (sanitized)",
+  "target_trade_date": "2026-08-17",
+  "dataset_version": "afterclose-20260817-v1",
+  "remote": {
+    "db_identity_readonly_check": "bz_stock",
+    "postgres_version": "16.14",
+    "connection_note": "docker exec trading-postgres psql 本地 socket；仅 SELECT/COPY(SELECT...)；无凭据/无 secret",
+    "insert_update_delete_count": 0,
+    "ddl_migration_count": 0,
+    "production_task_triggers": 0
+  },
+  "schema_identity": {
+    "instruments": {
+      "columns": ["id:uuid", "symbol:text", "name:text", "market:text", "status:text", "listing_date:date", "created_at:tstz", "updated_at:tstz", "factor_algorithm_version:text", "factor_reconciliation_version:int", "factor_reconciled_at:tstz"]
+    },
+    "bars_daily": {
+      "columns": ["instrument_id:uuid", "trade_date:date", "open:numeric", "high:numeric", "low:numeric", "close:numeric", "volume:numeric", "amount:numeric", "adj_factor:numeric"]
+    },
+    "strategy_definitions": {
+      "columns": ["id:uuid", "strategy_key:text", "kind:text", "display_name:text", "created_at:tstz", "environment:text", "is_user_visible:boolean", "is_scheduled:boolean"]
+    },
+    "strategy_versions": {
+      "columns": ["id:uuid", "strategy_definition_id:uuid", "version:text", "status:text", "manifest:jsonb", "build_hash:text", "released_at:tstz"]
+    },
+    "adjustment_factor_source": "bars_daily.adj_factor (PIT factor per bar, effective date = trade_date)"
+  },
+  "probe_findings": {
+    "eligible_count": 5293,
+    "eligible_rule": "instruments.status='active' AND symbol ~ '^\\\\d{6}$'",
+    "target_date_bars": {"trade_date": "2026-08-17", "bar_count": 5286},
+    "bars_global_range_unfiltered": {"min": "2012-10-23", "max": "2026-08-21", "note": "需过滤 <= target 2026-08-17 排除未来数据"},
+    "window_bars": {"row_count": 4448431, "instrument_count": 5292, "range": ["2012-12-10", "2026-08-17"]},
+    "adj_window_max_effective_date": "2026-08-17",
+    "released_dsa": {
+      "strategy_key": "dsa_selector",
+      "version": "1.4.1",
+      "status": "released",
+      "build_hash": "40a7c015c22a8804b7cb32db4097de112fd363423e47544d7fa890cc53afd49e",
+      "released_at": "2026-07-01T01:13:43",
+      "resolver_rule": "strategy_key='dsa_selector' AND status='released' ORDER BY version DESC LIMIT 1 (SqlAlchemyReleasedConfigResolver)"
+    }
+  },
+  "dataset_summary": {
+    "universe_hash": "c57e1737fed01f531aadf7b653d10ae92539b2986781988e2a33a498dfb45577",
+    "bars_row_count": 4448431,
+    "bars_per_instrument": {"min": 27, "p50": 877, "p90": 877, "p99": 877, "max": 3049},
+    "no_truncation": true,
+    "manifest_sha256": "see output/4A-1/extract_evidence.json"
+  }
+}
