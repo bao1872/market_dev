@@ -1,0 +1,109 @@
+{
+  "phase": "4A-0",
+  "title": "AfterClose Frozen Main-Chain Dataset - Contract Freeze",
+  "audit_code_sha": "a9a8ccf8d4b8e9d8c743c41670e05a78b1b0c1d0",
+  "scope": {
+    "only": "compute_review_core_with_run_items",
+    "excluded": [
+      "review / scope aggregation",
+      "chip_consensus",
+      "refreshing_daily / syncing_boards / checking_coverage / publishing / auction_anchor / computing_review / enqueue_chip_job"
+    ]
+  },
+  "dataset_def": {
+    "root_dir": "backend/.perfdata/afterclose/<dataset_version>/",
+    "files": {
+      "manifest.json": "dataset 元数据 / hashes / coverage",
+      "bars_daily_raw.parquet": "未复权 raw daily bars（覆盖生产查询窗口）",
+      "adj_factors.parquet": "PIT adjustment factors（factor effective date <= target_trade_date）",
+      "instruments.parquet": "最小字段 id/symbol/listing_date",
+      "released_core_config.json": "目标交易日真实 released CoreRunContext 配置",
+      "eligible_universe.json": "get_active_a_share_instruments 结果",
+      "expected_mdas_contract.json": "FrozenMDAS 输出合同基准"
+    },
+    "explicitly_excluded_files": [
+      "bars_15m.parquet",
+      "boards.parquet",
+      "board_memberships.parquet",
+      "scope_memberships.parquet",
+      "concept_memberships.parquet",
+      "industry_memberships.parquet"
+    ]
+  },
+  "verified_contracts": {
+    "mdas_daily_lookback": {
+      "constant": "_DEFAULT_DAILY_LOOKBACK_DAYS",
+      "value_calendar_days": 5000,
+      "contract": "compute_review_core_with_run_items 批读调用未传 start_date/limit: timeframe=1d, adj=qfq, include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date; _resolve_date_range 无 start/limit → end_date - 5000 calendar days",
+      "implication": "frozen daily bars 必须覆盖 [target_trade_date - 5000 cal days, target_trade_date]；不得人为裁成 250/400 bars（此前 review-source 用 bar_lookback_calendar_days=400 未覆盖生产历史长度分布，full-history DSA #2 可能拿到远多于 400 根）"
+    },
+    "no_15m_secondary": {
+      "value": true,
+      "contract": "盘后 review core = daily-core only；compute_review_core_with_run_items 主链只调用 get_bars_batch(timeframe='1d')；15m 属 chip_consensus（deferred 异步 job，不在主链）；main 链不消费 15m",
+      "implication": "Phase 4A 不拉 15m，不建 bars_15m.parquet"
+    },
+    "no_boards_scope_membership": {
+      "value": true,
+      "contract": "主链直接核心输入仅：eligible instrument ids / id→symbol / daily raw bars / PIT adj factors / released CoreRunContext / run-item state；scope/concept/industry membership 属 Review/scope aggregation，本阶段不跑",
+      "implication": "不提前冻结 boards / scope / concept / industry membership"
+    },
+    "session_factory_di_partial": {
+      "fully_isolates_db": false,
+      "_sf_controlled_points": [
+        "config 解析（1349）",
+        "create_run_items（1359）",
+        "claim_items（1383）",
+        "compute 每股独立事务（1434）",
+        "get_run_progress（1545）"
+      ],
+      "hard_coded_AsyncSessionLocal_points": [
+        "instrument_id→symbol batch query（1397）",
+        "MDAS get_bars_batch（1414）",
+        "mark_item_failed / first_pyramid failed（1477）",
+        "mark_item_succeeded（1494）",
+        "mark_item_failed / 单股失败（1519）"
+      ],
+      "contract": "compute_review_core_with_run_items(session_factory=fake) 只隔离 _sf 控制点（config 解析 / run-items / 逐股独立事务 / 最终 coverage），不能完整离线：symbol 批查、MDAS 批读与 mark_item_* 仍硬编码 AsyncSessionLocal。Phase 4A-2/4A-3 需 harness monkeypatch：app.db.AsyncSessionLocal / snapshot_run_item_service.create_run_items/claim_items/mark_item_*/get_run_progress / feature_snapshot_service.upsert_snapshot / _get_mdas(→FrozenMDAS) / released_config_resolver(→FrozenReleasedConfigResolver)；production code diff = 0"
+    },
+    "released_config_source": {
+      "resolver": "SqlAlchemyReleasedConfigResolver",
+      "contract": "查 dsa_selector released StrategyVersion.manifest.parameters；scheduled 模式无 released 时 fail-closed（禁止回退代码常量）；resolve_core_run_context 冻结 run_calculated_at/eligible hash/released DSA config/market-data contract/adjustment contract/parameter hash/execution contract",
+      "frozen_override": "FrozenReleasedConfigResolver 返回目标交易日冻结的 released_core_config.json"
+    },
+    "eligible_universe_source": {
+      "function": "get_active_a_share_instruments(session)",
+      "contract": "status='active' AND symbol ~ r'^\\d{6}$'（A股, 排除指数/基金/ETF）",
+      "frozen_ref": {
+        "existing_review_fact_universe": 8272,
+        "existing_snapshot_rows": 5293,
+        "note": "Phase 4A-1 需重新只读导出 get_active_a_share_instruments 的真实 eligible 集"
+      }
+    }
+  },
+  "target_and_sample": {
+    "target_trade_date": "2026-08-17",
+    "note": "以既有 frozen 最近的已发布交易日为初选；4A-1 从远程只读确认目标交易日与 5000-cal-day 窗口；目标交易日应选取当日 stock_core/released config 实际发布日",
+    "sample_suggestion": {
+      "parity_gate_4A2": "100 normal + 5 boundary（与 Phase 3 同口径）",
+      "wall_clock_4A3": "完整 eligible universe（生产 batching/claim/compute 总 wall-clock）"
+    }
+  },
+  "evidence": {
+    "universe_rule": "dimension: full; fact: review_fact_universe (all A-share, market in SH/SZ/BJ)",
+    "scope_rule": "all active industry_l1/l2/l3 + concept scopes (membership snapshot, current-only)",
+    "existing_frozen_lookback_calendar_days": 400,
+    "daily_bars_length_histogram": {
+      "n_instruments_in_frozen": 5292,
+      "bars_per_instrument": {
+        "p50": 415,
+        "p90": 415,
+        "p99": 415,
+        "max": 415
+      },
+      "n_with_bars_ge_400": 5081,
+      "note": "既有 review-source-c5c686e-v1 冻结日线 bar_lookback_calendar_days=400，故冻结 bars 长度受此上限约束（full-history DSA 无法看到媲美生产 5000-cal-day contract 的历史长度分布）",
+      "max_observed_daily_bars": 415
+    },
+    "note_baseline_vs_4A3": "Phase 3 serial projection 18-23min 基于 ~415 bars 外推；4A 使用真实生产 daily-history contract 后 full-history DSA 可能拿到远多于 415 根，真实结果可能明显更慢，这反映了此前 frozen 未覆盖生产历史长度分布"
+  }
+}
