@@ -491,11 +491,28 @@ def _rerun_readonly_check(counts: dict) -> None:
         )
 
 
+def _target_date_bar_count() -> int:
+    """从已落盘 bars parquet 真实计算 target date 的 bar 数（Evid1 修复：
+    不硬编码 PASS，而是验证 target date 在数据集中的真实覆盖。"""
+    import pyarrow.parquet as _pq
+    bars_pq = DATA_DIR / "bars_daily_raw.parquet"
+    if not bars_pq.exists():
+        return 0
+    # 只统计 target date 的行数（按 trade_date 过滤）
+    tbl = _pq.read_table(bars_pq, columns=["trade_date"])
+    import pandas as _pd
+    dates = tbl.column("trade_date").to_pandas()
+    mask = _pd.to_datetime(dates).dt.date == TARGET_TRADE_DATE
+    return int(mask.sum())
+
+
 def print_gate_summary(evidence: dict, counts: dict) -> None:
     e = evidence
     print("=== 4A-1 Gate Summary ===")
+    target_bars = _target_date_bar_count()
     rows = [
-        ("target date", "2026-08-17 存在(5286 bars)", "PASS" if True else "-"),
+        ("target date", f"2026-08-17 bars={target_bars}",
+         "PASS" if target_bars > 0 else "FAIL"),
         ("eligible", f"production rule, count={e['eligible']['count']}, unique",
          "PASS" if e["eligible"]["count"] > 0 and e["eligible"]["unique"] else "FAIL"),
         ("universe hash", e["eligible"]["universe_hash_sha256"][:16] + "...",
@@ -567,9 +584,13 @@ def main() -> None:
         },
         "readonly_audit": {
             "query_count": counts["query_count"],
-            "remote_read_elapsed_s": round(counts["read_elapsed_s"], 3),
+            # Evid2 修复：initial extract 的重跑守卫会跳过下载，
+            # remote_read_elapsed_s 包含 guard 前的 query_count+1。
+            # 改为 validation_rerun_remote_elapsed_s，initial 标 null（需显式重跑验证）。
+            "validation_rerun_remote_elapsed_s": None,
+            "remote_read_elapsed_s_initial_extract": round(counts["read_elapsed_s"], 3),
             "downloaded_rows": evidence["bars"]["row_count"],
-            "downloaded_bytes": counts["downloaded_bytes"],
+            "downloaded_bytes_initial_extract": counts["downloaded_bytes"],
             "remote_writes": 0,
             "production_task_triggers": 0,
         },

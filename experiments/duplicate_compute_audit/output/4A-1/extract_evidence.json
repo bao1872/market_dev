@@ -51,13 +51,14 @@
       ],
       "parameter_count": 10
     },
-    "manifest_sha256": "c5a489398c9245434316f158c600b7bff49c511de1d10a0dc9700908f4f6ed15"
+    "manifest_sha256": "c972ddbfe7f6788a0567d6c5cda5b18ccd0e58df256b73a3b604f75cdb2c3ece"
   },
   "readonly_audit": {
     "query_count": 4,
-    "remote_read_elapsed_s": 8.072,
+    "validation_rerun_remote_elapsed_s": null,
+    "remote_read_elapsed_s_initial_extract": 7.584,
     "downloaded_rows": 4448431,
-    "downloaded_bytes": 0,
+    "downloaded_bytes_initial_extract": 0,
     "remote_writes": 0,
     "production_task_triggers": 0
   }
