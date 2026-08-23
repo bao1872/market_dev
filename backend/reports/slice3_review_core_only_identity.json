@@ -68,6 +68,6 @@
     "backend/tests/test_review_api_core_only_contract.py",
     "backend/reports/slice3_review_core_only_identity.json"
   ],
-  "status": "API_CLOSURE_READY_FOR_COMMIT",
-  "next_action": "Commit Slice3R on dev as 'fix(review): close core-only API contract', normal FF push origin/dev, confirm local HEAD == origin/dev, then STOP for user review."
+  "status": "CLOSED_AT_cc07f515",
+  "next_action": "Slice 3 fully CLOSED (core arch / migration / dependency tests / API closure). Next: Slice 4A1 board current-state capability migration."
 }

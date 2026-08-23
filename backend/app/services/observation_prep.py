@@ -211,6 +211,12 @@ def build_member_observation_from_facts(
     pct200 = vc.volume_percentile_200 if (vc and vc_ready_200) else None
     z20 = vc.volume_zscore_20 if vc else None
     z200 = vc.volume_zscore_200 if (vc and vc_ready_200) else None
+    # Slice 4A1 parity source: the Board producer iterates ``flat_list`` and builds
+    # FirstPyramidSemanticAdapter(flat) directly on each element, reading EVERY
+    # ``fp_*`` from the element's TOP-LEVEL.  Review mirrors that exact resolution
+    # by building the adapter on ``raw.flat_t`` (the same current-state flat) and
+    # reading the same top-level ``fp_*`` keys.
+    _adapter = FirstPyramidSemanticAdapter(raw.flat_t) if raw.flat_t else None
     return MemberObservation(
         member_id=raw.member_id,
         # candidate = close(T) available, independent of return availability.
@@ -285,6 +291,72 @@ def build_member_observation_from_facts(
         vwap_ret_total=_finite(current_only.get("vwap_ret_total")),
         trailing_top_pct=_finite(current_only.get("trailing_top_pct")),
         trailing_bottom_pct=_finite(current_only.get("trailing_bottom_pct")),
+        # ------------------------------------------------------------------
+        # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+        # All fields sourced from ``raw.flat_t`` TOP-LEVEL — the same ``fp_*`` keys
+        # the Board producer reads (it builds FirstPyramidSemanticAdapter(flat)
+        # directly on each flat_list element and reads every fp_* from the
+        # element's top level).  Review mirrors that exact resolution for parity.
+        # Review does NOT re-derive; it only consumes prepared facts.
+        # ------------------------------------------------------------------
+        # trend_strength = median per-bar trend strength (board fp_trend_strength).
+        trend_strength=_finite(raw.flat_t.get("fp_trend_strength"))
+        if raw.flat_t
+        else None,
+        # combined active OB count (board fp_active_ob_count); distinct from the
+        # v2.3-removed active_ob_count — Board current-state source.
+        active_ob_count=_finite(raw.flat_t.get("fp_active_ob_count"))
+        if raw.flat_t
+        else None,
+        # DSA VWAP deviation pct (board fp_dsa_vwap_dev_pct).
+        current_dsa_vwap_dev_pct=_finite(raw.flat_t.get("fp_dsa_vwap_dev_pct"))
+        if raw.flat_t
+        else None,
+        # Momentum independent change dimension (board fp_momentum_change).
+        current_momentum_change=_adapter.momentum_change
+        if raw.flat_t
+        else None,
+        # Squeeze-momentum value (board fp_sqzmom_value).
+        current_sqzmom_val=_finite(raw.flat_t.get("fp_sqzmom_value"))
+        if raw.flat_t
+        else None,
+        # Volume badge categorical (board fp_volume_badge).
+        volume_badge=_adapter.volume_badge
+        if raw.flat_t
+        else None,
+        # Volume ratio/percentile 20D/200D current-state (board fp_volume_*).
+        current_vol_ratio20=_finite(raw.flat_t.get("fp_volume_ratio20"))
+        if raw.flat_t
+        else None,
+        current_vol_ratio200=_finite(raw.flat_t.get("fp_volume_ratio200"))
+        if raw.flat_t
+        else None,
+        current_vol_pct20=_finite(raw.flat_t.get("fp_volume_percentile20"))
+        if raw.flat_t
+        else None,
+        current_vol_pct200=_finite(raw.flat_t.get("fp_volume_percentile200"))
+        if raw.flat_t
+        else None,
+        # Latest-event snapshot state (board fp_latest_*).
+        latest_bos_direction=_adapter.event_direction("fp_latest_bos_direction")
+        if raw.flat_t
+        else None,
+        latest_choch_direction=_adapter.event_direction("fp_latest_choch_direction")
+        if raw.flat_t
+        else None,
+        latest_ob_direction=_adapter.event_direction("fp_latest_ob_direction")
+        if raw.flat_t
+        else None,
+        latest_eqh_present=bool(
+            raw.flat_t.get("fp_latest_eqh_freshness") is not None
+        )
+        if raw.flat_t
+        else False,
+        latest_eql_present=bool(
+            raw.flat_t.get("fp_latest_eql_freshness") is not None
+        )
+        if raw.flat_t
+        else False,
     )
 
 

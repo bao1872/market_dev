@@ -46,8 +46,10 @@ from typing import Any
 
 from app.domain.first_pyramid_semantics import (
     Direction,
+    MomentumChange,
     MomentumDirection,
     SqueezeState,
+    VolumeBadge,
 )
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
@@ -160,6 +162,35 @@ class MemberObservation:
     vwap_ret_total: float | None = None
     trailing_top_pct: float | None = None
     trailing_bottom_pct: float | None = None
+    # ------------------------------------------------------------------
+    # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+    # All sourced from ``raw.flat_t`` (the same ``first_pyramid_flat`` the Board
+    # producer consumes) for exact parity with the Board oracle.  Review does NOT
+    # re-derive any of these; it only consumes prepared canonical First Pyramid facts.
+    # ------------------------------------------------------------------
+    # trend_strength = median per-bar trend strength (board ``fp_trend_strength``).
+    trend_strength: float | None = None
+    # combined active OB count (board ``fp_active_ob_count``).
+    active_ob_count: float | None = None
+    # DSA VWAP deviation pct from current flat (board ``fp_dsa_vwap_dev_pct``).
+    current_dsa_vwap_dev_pct: float | None = None
+    # Momentum independent change dimension (board ``fp_momentum_change``).
+    current_momentum_change: MomentumChange | None = None
+    # Squeeze-momentum value (board ``fp_sqzmom_value``).
+    current_sqzmom_val: float | None = None
+    # Volume badge categorical (board ``fp_volume_badge``).
+    volume_badge: VolumeBadge | None = None
+    # Volume ratio/percentile 20D/200D current-state (board ``fp_volume_*``).
+    current_vol_ratio20: float | None = None
+    current_vol_ratio200: float | None = None
+    current_vol_pct20: float | None = None
+    current_vol_pct200: float | None = None
+    # Latest-event snapshot state (board ``fp_latest_*_direction`` / ``*_freshness``).
+    latest_bos_direction: Direction | None = None
+    latest_choch_direction: Direction | None = None
+    latest_ob_direction: Direction | None = None
+    latest_eqh_present: bool = False
+    latest_eql_present: bool = False
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float | None:
@@ -615,6 +646,109 @@ def _participation_distribution(values: Sequence[float | None]) -> dict[str, Any
     }
 
 
+# ----------------------------------------------------------------------
+# Slice 4A1 — Board current-state capability helpers.
+# These mirror the Board producer's statistics (board_summary_helpers) EXACTLY
+# (same _avg / _percentile / _bucket math) so Review scope aggregation is
+# parity with the Board oracle.  Review must NOT import BoardAnalysisService;
+# these are self-contained pure functions.
+# ----------------------------------------------------------------------
+def _mean(values: list[float]) -> float | None:
+    if not values:
+        return None
+    return sum(values) / len(values)
+
+
+def _volume_histogram(values: Sequence[float | None]) -> dict[str, int]:
+    """Five-bin histogram over 0-100 volume percentile values.
+
+    Identical bucket edges [20,40,60,80] to the Board producer; keys are the
+    canonical Review labels ``lt20 / 20_40 / 40_60 / 60_80 / gte80``.
+    """
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    bins = {"lt20": 0, "20_40": 0, "40_60": 0, "60_80": 0, "gte80": 0}
+    for v in finite:
+        if v < 20:
+            bins["lt20"] += 1
+        elif v < 40:
+            bins["20_40"] += 1
+        elif v < 60:
+            bins["40_60"] += 1
+        elif v < 80:
+            bins["60_80"] += 1
+        else:
+            bins["gte80"] += 1
+    return bins
+
+
+def _momentum_change_counts(
+    values: Sequence[MomentumChange | None],
+) -> dict[str, Any]:
+    enhancing = sum(1 for v in values if v == MomentumChange.ENHANCING)
+    weakening = sum(1 for v in values if v == MomentumChange.WEAKENING)
+    flat = sum(1 for v in values if v == MomentumChange.FLAT)
+    return {
+        "enhancing_count": enhancing,
+        "weakening_count": weakening,
+        "flat_count": flat,
+        "denominator": len(values),
+    }
+
+
+def _volume_badge_counts(
+    values: Sequence[VolumeBadge | None],
+) -> dict[str, int]:
+    out = {"high_count": 0, "low_count": 0, "normal_count": 0, "unknown_count": 0}
+    for v in values:
+        if v == VolumeBadge.HIGH:
+            out["high_count"] += 1
+        elif v == VolumeBadge.LOW:
+            out["low_count"] += 1
+        elif v == VolumeBadge.NORMAL:
+            out["normal_count"] += 1
+        elif v == VolumeBadge.UNKNOWN:
+            out["unknown_count"] += 1
+    return out
+
+
+def _latest_event_state(member_list: Sequence[MemberObservation]) -> dict[str, Any]:
+    """Latest-event snapshot state parity with the Board producer.
+
+    The Board producer aggregates per-event up/down counts and EQH/EQL presence
+    counts across all members (see ``board_analysis_service.compute_board_payload``
+    ``latest_events`` payload: bos_up/bos_down/choch_up/choch_down/ob_up/ob_down/
+    eqh_present/eql_present).  Review mirrors that exact aggregation.
+    """
+    bos_up = bos_down = 0
+    choch_up = choch_down = 0
+    ob_up = ob_down = 0
+    eqh_present = eql_present = 0
+    for m in member_list:
+        if m.latest_bos_direction is Direction.UP:
+            bos_up += 1
+        elif m.latest_bos_direction is Direction.DOWN:
+            bos_down += 1
+        if m.latest_choch_direction is Direction.UP:
+            choch_up += 1
+        elif m.latest_choch_direction is Direction.DOWN:
+            choch_down += 1
+        if m.latest_ob_direction is Direction.UP:
+            ob_up += 1
+        elif m.latest_ob_direction is Direction.DOWN:
+            ob_down += 1
+        if m.latest_eqh_present:
+            eqh_present += 1
+        if m.latest_eql_present:
+            eql_present += 1
+    return {
+        "bos": {"up": bos_up, "down": bos_down},
+        "choch": {"up": choch_up, "down": choch_down},
+        "ob": {"up": ob_up, "down": ob_down},
+        "eqh": eqh_present,
+        "eql": eql_present,
+    }
+
+
 @dataclass(frozen=True)
 class StructureEvent:
     """One canonical First Pyramid immutable structure event for trade date T.
@@ -934,6 +1068,37 @@ def compute_scope_observation(
     vol_zscore200 = _collect([m.vol_zscore200 for m in member_list])
 
     # ------------------------------------------------------------------
+    # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+    # All inputs sourced from the same ``raw.flat_t`` ``fp_*`` facts the Board
+    # producer consumes, so Review aggregation is parity with the Board oracle.
+    # ------------------------------------------------------------------
+    ts_values = _collect([m.trend_strength for m in member_list])
+    vwap_dev_values = _collect([m.current_dsa_vwap_dev_pct for m in member_list])
+    active_ob_values = _collect([m.active_ob_count for m in member_list])
+    sqzmom_values = _collect([m.current_sqzmom_val for m in member_list])
+    cur_vol_ratio20 = _collect([m.current_vol_ratio20 for m in member_list])
+    cur_vol_ratio200 = _collect([m.current_vol_ratio200 for m in member_list])
+    cur_vol_pct20 = _collect([m.current_vol_pct20 for m in member_list])
+    cur_vol_pct200 = _collect([m.current_vol_pct200 for m in member_list])
+
+    # Momentum independent change dimension (enhancing / weakening / flat).
+    momentum_change_values = [
+        m.current_momentum_change
+        for m in member_list
+        if m.current_momentum_change is not None
+    ]
+    momentum_change_counts = _momentum_change_counts(momentum_change_values)
+
+    # Volume badge categorical counts (high / low / normal / unknown).
+    volume_badge_values = [
+        m.volume_badge for m in member_list if m.volume_badge is not None
+    ]
+    volume_badge_counts = _volume_badge_counts(volume_badge_values)
+
+    # Latest-event snapshot state presence/direction.
+    latest_events = _latest_event_state(member_list)
+
+    # ------------------------------------------------------------------
     # CURRENT-ONLY canonical facts (REVIEW-V23-A-CORRECTION-3)
     # ------------------------------------------------------------------
     # These facts are sourced from the exact-T canonical snapshot and carry AT MOST
@@ -1063,6 +1228,19 @@ def compute_scope_observation(
             "segment_direction": _categorical_state_distribution(
                 segment_direction_values, segment_direction_labels
             ),
+            # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+            # Distributions sourced from the same ``raw.flat_t`` ``fp_*`` facts the
+            # Board producer consumes (parity with the Board oracle).  ``mean`` is
+            # added on top of the shared ``_participation_distribution`` descriptors
+            # to match the user's canonical shape (board reports it as ``avg``).
+            "trend_strength_distribution": {
+                **_participation_distribution(ts_values),
+                "mean": _mean(ts_values),
+            },
+            "dsa_vwap_dev_pct_distribution": {
+                **_participation_distribution(vwap_dev_values),
+                "mean": _mean(vwap_dev_values),
+            },
         },
         "structure": {
             "swing": {
@@ -1085,6 +1263,14 @@ def compute_scope_observation(
                 structure_alignment_values,
                 {"aligned": "Aligned", "divergent": "Divergent"},
             ),
+            # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+            # Separately from the v2.3-removed active_ob_count, this is the Board's
+            # current-state combined active OB count (``fp_active_ob_count``) and the
+            # latest-event snapshot state, both parity with the Board oracle.
+            "current_state": {
+                "avg_active_ob_count": _mean(active_ob_values),
+                "latest_events": latest_events,
+            },
             # REVIEW-V23-A-CORRECTION-3: ``active_ob_count`` is FORMALLY REMOVED from
             # the canonical v2.3 Scope payload (PRD).  The key is absent entirely —
             # not present with status="unavailable" — exactly like Turnover.
@@ -1121,6 +1307,14 @@ def compute_scope_observation(
             "momentum_volume_relation": _open_categorical_distribution(
                 momentum_volume_relation_values
             ),
+            # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+            # Momentum independent change dimension (enhancing / weakening / flat) and
+            # squeeze-momentum mean, parity with the Board oracle.
+            "change": momentum_change_counts,
+            "sqzmom": {
+                "mean": _mean(sqzmom_values),
+                "valid_count": len(sqzmom_values),
+            },
         },
         "participation": {
             "volume": {
@@ -1130,6 +1324,16 @@ def compute_scope_observation(
                 "percentile200": _participation_distribution(vol_pct200),
                 "zscore20": _participation_distribution(vol_zscore20),
                 "zscore200": _participation_distribution(vol_zscore200),
+                # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+                # Volume badge counts + mean of 20D/200D ratios + five-bin histograms of
+                # 20D/200D percentiles, parity with the Board oracle.  ``ratio20`` / ``ratio200``
+                # distributions above already carry ``mean`` (per user shape keep p25/p50/p75/
+                # valid_count + mean).
+                "badge": volume_badge_counts,
+                "ratio20_mean": _mean(cur_vol_ratio20),
+                "ratio200_mean": _mean(cur_vol_ratio200),
+                "percentile20_histogram": _volume_histogram(cur_vol_pct20),
+                "percentile200_histogram": _volume_histogram(cur_vol_pct200),
             },
             "amount": _participation_distribution(amt_ratios),
         },
