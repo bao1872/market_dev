@@ -1,0 +1,106 @@
+{
+  "audit": "First Pyramid Gap Repair — Round 2A / 2026-08-11 Production Canary",
+  "observed_at_utc": "2026-08-23T02:05:15.069118Z",
+  "authorization_scope": "canonical history run be56dcd2... advance to 2026-08-11 ONLY; 8/12-8/21 NOT authorized",
+  "production_runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+  "origin_dev_at_execution": "176b08b8bf3f856457dd4cc264cac9b2b368773b",
+  "execution_method": "Option C: one-shot docker compose run --rm --no-deps worker-after-close with -v /root/web_dev/backend/scripts:/app/scripts:ro; no host secret export; no pull/deploy; no entry into running trading-backend",
+  "identity_gate": {
+    "runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+    "host_script_sha256": "5ae39f289a83b625d6aa6f693f7c9962f12a8eef98276014ec0ca4257c951170",
+    "container_script_sha256": "5ae39f289a83b625d6aa6f693f7c9962f12a8eef98276014ec0ca4257c951170",
+    "match": true
+  },
+  "history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+  "trade_date": "2026-08-11",
+  "before": {
+    "run_status": "partial",
+    "expected_count": 5293,
+    "succeeded_count": 5283,
+    "failed_count": 0,
+    "skipped_count": 10,
+    "completed_at": "2026-08-09 13:03:31.014939+08",
+    "run_items": {
+      "succeeded": 5283,
+      "skipped": 10,
+      "failed": 0,
+      "pending": 0,
+      "running": 0
+    },
+    "daily_state_count": 0,
+    "daily_state_distinct_instruments": 0,
+    "supplemental_event_count": 0,
+    "stock_core_publication_data_run_id": "ce488bb3-df5f-4a8a-a6f0-a75af99e9378",
+    "stock_core_snapshot_count": 5293
+  },
+  "execution_summary": {
+    "command": "python -m scripts.advance_history_to_trade_date --run-id be56dcd2... --trade-date 2026-08-11 --batch-size 25 --output-bars 250",
+    "rc": 0,
+    "elapsed_seconds": 2770.2,
+    "total": 5283,
+    "processed": 5283,
+    "target_state_count": 5277,
+    "no_bar": 0,
+    "no_target_state": 6,
+    "failed": 0
+  },
+  "reconciliation": {
+    "formula": "processed == target_state_count + no_bar + no_target_state + failed",
+    "evaluated": "5283 == 5277 + 0 + 6 + 0",
+    "holds": true,
+    "note": "no_target_state=6 is legitimate (suspended/no completed bar); not auto-failure"
+  },
+  "after": {
+    "run_status": "partial",
+    "expected_count": 5293,
+    "succeeded_count": 5283,
+    "failed_count": 0,
+    "skipped_count": 10,
+    "completed_at": "2026-08-09 13:03:31.014939+08",
+    "run_items": {
+      "succeeded": 5283,
+      "skipped": 10,
+      "failed": 0,
+      "pending": 0,
+      "running": 0
+    },
+    "daily_state_count": 5277,
+    "daily_state_distinct_instruments": 5277,
+    "supplemental_event_count": 993,
+    "stock_core_publication_data_run_id": "ce488bb3-df5f-4a8a-a6f0-a75af99e9378",
+    "stock_core_snapshot_count": 5293
+  },
+  "hard_gates": {
+    "rc_zero": true,
+    "total_eq_processed": true,
+    "processed_eq_5283": true,
+    "failed_zero": true,
+    "reconciliation_holds": true,
+    "daily_state_count_eq_target_state_count": true,
+    "daily_state_count_eq_distinct_instruments": true,
+    "daily_state_count_gt_zero": true,
+    "no_duplicate_instrument_date": true,
+    "history_run_lifecycle_unchanged": true,
+    "run_items_lifecycle_unchanged": true,
+    "stock_core_pointer_unchanged": true
+  },
+  "supplemental_event_observation": {
+    "event_count_before": 0,
+    "event_count_after": 993,
+    "note": "events supplemental only; not required >0; history success not judged by event presence"
+  },
+  "no_pollution_evidence": {
+    "history_run_fields_changed": false,
+    "run_item_counts_changed": false,
+    "stock_core_publication_changed": false,
+    "only_added": "2026-08-11 daily_state (5277 rows) + that-day events (993)"
+  },
+  "result": "PASS",
+  "read_only_constraints_respected": {
+    "stock_core_recalculated": false,
+    "publication_modified": false,
+    "full_afterclose_run": false,
+    "board_review_chip_touched": false,
+    "scheduler_triggered": false
+  }
+}
