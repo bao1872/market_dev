@@ -16,10 +16,11 @@ loop passing them in must be blocked here even if the prep layer already guards.
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Float, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -474,6 +475,174 @@ async def list_scope_composition_snapshots(
         )
     )
     return list((await db.execute(stmt)).scalars())
+
+
+# =============================================================================
+# Scope Summary Projection（Slice B — Thin Scope List Read Model）
+# =============================================================================
+@dataclass(frozen=True)
+class ReviewScopeSummaryRow:
+    """Read-only projection of one scope's Fact + Composition analysis fields.
+
+    This is NOT a second business owner: it is a pure SQL projection over the
+    two persisted canonical owners (ReviewScopeObservationFact LEFT OUTER JOIN
+    ReviewScopeCompositionSnapshot).  No canonical recomputation (no
+    compute_* algorithm), no NULL->0 coercion, no score derivation.  Missing
+    composition (LEFT JOIN miss) leaves every analysis field ``None`` and
+    ``composition_present=False`` (list DTO then emits ``summary=None``).
+    """
+
+    scope_type: str
+    scope_key: str
+    scope_name: str | None
+    fact_readiness: str
+    pit_status_t: str
+    pit_member_count: int
+    provided_member_count: int | None
+    composition_present: bool
+
+    # historical_dynamics
+    dynamics_status: str | None
+    phase: str | None
+    position: float | None
+    velocity: float | None
+    acceleration: float | None
+    upper_occupancy: float | None
+    lower_occupancy: float | None
+    # internal_structure_facts
+    equal_weight_return: float | None
+    amount_weighted_return: float | None
+    capital_tilt: float | None
+    advance_ratio: float | None
+    decline_ratio: float | None
+    unchanged_ratio: float | None
+    return_dispersion: float | None
+    price_normalized_hhi: float | None
+    amount_normalized_hhi: float | None
+    # leadership
+    leadership_status: str | None
+    jaccard_stability: float | None
+    migration: float | None
+
+
+async def list_review_scope_summaries_by_run(
+    db: AsyncSession,
+    *,
+    review_run_id: uuid.UUID,
+    trade_date: date,
+    scope_type: str | None = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> tuple[int, list[ReviewScopeSummaryRow]]:
+    """Thin Scope-list read model: one page of projected analysis fields.
+
+    Single read owner for the canonical Scope list.  Fact is the primary table;
+    Composition is LEFT OUTER JOINed on the full lineage grain
+    (review_run_id + trade_date + scope_type + scope_key) so a Fact without a
+    Composition (e.g. partial run) is NOT dropped.  Only scalar identity/display
+    columns and JSONB scalar paths are selected — the full ~130 KiB
+    ``composition_payload`` is never loaded into Python.
+
+    Pagination is DB-level (count query + page projection) with deterministic
+    ``ORDER BY scope_type, scope_key``; no load-all-then-slice, no per-scope
+    round-trip.
+    """
+    fact = ReviewScopeObservationFact
+    comp = ReviewScopeCompositionSnapshot
+    payload = comp.composition_payload
+
+    # --- count (same filter as the page) ---
+    count_stmt = select(func.count()).select_from(fact).where(
+        fact.review_run_id == review_run_id
+    )
+    if scope_type is not None:
+        count_stmt = count_stmt.where(fact.scope_type == scope_type)
+    total = (await db.execute(count_stmt)).scalar_one()
+
+    # --- page projection (Fact LEFT OUTER JOIN Composition) ---
+    join_cond = (
+        (comp.review_run_id == fact.review_run_id)
+        & (comp.trade_date == fact.trade_date)
+        & (comp.scope_type == fact.scope_type)
+        & (comp.scope_key == fact.scope_key)
+    )
+    page_stmt = (
+        select(
+            fact.scope_type,
+            fact.scope_key,
+            fact.scope_name,
+            fact.readiness,
+            fact.pit_status_t,
+            fact.pit_member_count,
+            fact.provided_member_count,
+            comp.id.label("composition_row_id"),
+            # historical_dynamics
+            payload["historical_dynamics"]["status"].astext.label("dynamics_status"),
+            payload["historical_dynamics"]["phase"].astext.label("phase"),
+            payload["historical_dynamics"]["position"].astext.cast(Float).label("position"),
+            payload["historical_dynamics"]["velocity"].astext.cast(Float).label("velocity"),
+            payload["historical_dynamics"]["acceleration"].astext.cast(Float).label("acceleration"),
+            payload["historical_dynamics"]["upper_occupancy"].astext.cast(Float).label("upper_occupancy"),
+            payload["historical_dynamics"]["lower_occupancy"].astext.cast(Float).label("lower_occupancy"),
+            # internal_structure_facts.breadth
+            payload["internal_structure_facts"]["breadth"]["equal_weight_return"].astext.cast(Float).label("equal_weight_return"),
+            payload["internal_structure_facts"]["breadth"]["advance_ratio"].astext.cast(Float).label("advance_ratio"),
+            payload["internal_structure_facts"]["breadth"]["decline_ratio"].astext.cast(Float).label("decline_ratio"),
+            payload["internal_structure_facts"]["breadth"]["unchanged_ratio"].astext.cast(Float).label("unchanged_ratio"),
+            payload["internal_structure_facts"]["breadth"]["return_dispersion"].astext.cast(Float).label("return_dispersion"),
+            # internal_structure_facts.capital_tilt
+            payload["internal_structure_facts"]["capital_tilt"]["amount_weighted_return"].astext.cast(Float).label("amount_weighted_return"),
+            payload["internal_structure_facts"]["capital_tilt"]["capital_tilt"].astext.cast(Float).label("capital_tilt"),
+            # internal_structure_facts.concentration
+            payload["internal_structure_facts"]["concentration"]["price_normalized_hhi"].astext.cast(Float).label("price_normalized_hhi"),
+            payload["internal_structure_facts"]["concentration"]["amount_normalized_hhi"].astext.cast(Float).label("amount_normalized_hhi"),
+            # leadership
+            payload["leadership"]["status"].astext.label("leadership_status"),
+            payload["leadership"]["jaccard_stability"].astext.cast(Float).label("jaccard_stability"),
+            payload["leadership"]["migration"].astext.cast(Float).label("migration"),
+        )
+        .select_from(fact)
+        .join(comp, join_cond, isouter=True)
+        .where(fact.review_run_id == review_run_id)
+        .order_by(fact.scope_type, fact.scope_key)
+        .offset(offset)
+        .limit(limit)
+    )
+    rows = (await db.execute(page_stmt)).mappings().all()
+    summaries: list[ReviewScopeSummaryRow] = []
+    for r in rows:
+        summaries.append(
+            ReviewScopeSummaryRow(
+                scope_type=r["scope_type"],
+                scope_key=r["scope_key"],
+                scope_name=r["scope_name"],
+                fact_readiness=r["readiness"],
+                pit_status_t=r["pit_status_t"],
+                pit_member_count=r["pit_member_count"],
+                provided_member_count=r["provided_member_count"],
+                composition_present=r["composition_row_id"] is not None,
+                dynamics_status=r["dynamics_status"],
+                phase=r["phase"],
+                position=r["position"],
+                velocity=r["velocity"],
+                acceleration=r["acceleration"],
+                upper_occupancy=r["upper_occupancy"],
+                lower_occupancy=r["lower_occupancy"],
+                equal_weight_return=r["equal_weight_return"],
+                amount_weighted_return=r["amount_weighted_return"],
+                capital_tilt=r["capital_tilt"],
+                advance_ratio=r["advance_ratio"],
+                decline_ratio=r["decline_ratio"],
+                unchanged_ratio=r["unchanged_ratio"],
+                return_dispersion=r["return_dispersion"],
+                price_normalized_hhi=r["price_normalized_hhi"],
+                amount_normalized_hhi=r["amount_normalized_hhi"],
+                leadership_status=r["leadership_status"],
+                jaccard_stability=r["jaccard_stability"],
+                migration=r["migration"],
+            )
+        )
+    return total, summaries
 
 
 if __name__ == "__main__":

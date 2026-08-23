@@ -4,7 +4,7 @@
 - GET  /v1/review/dates: 已发布复盘交易日列表
 - GET  /v1/review/latest: 最新已发布复盘 run 信息
 - GET  /v1/review/{trade_date}/overview: 复盘总览（覆盖率）
-- GET  /v1/review/{trade_date}/scopes: 市场扫描（Scope Observation 六键 summary）
+- GET  /v1/review/{trade_date}/scopes: 市场扫描（canonical Scope 薄列表：Fact + Composition 投影）
 - GET  /v1/review/{trade_date}/scopes/{scope_type}/{scope_key}: Scope Composition 详情
 
 权限（PRD §3.2）：
@@ -46,6 +46,7 @@ from app.schemas.review import (
     ReviewOverviewResponse,
     ReviewScopeCompositionDetailResponse,
     ReviewScopeListResponse,
+    ReviewScopeSummaryDTO,
 )
 from app.services.access_control_service import (
     AccessContext,
@@ -53,10 +54,11 @@ from app.services.access_control_service import (
     require_capability,
 )
 from app.services.review_observation_persistence_service import (
+    ReviewScopeSummaryRow,
     get_scope_composition_snapshot,
     get_scope_observation_fact_by_run,
+    list_review_scope_summaries_by_run,
     list_scope_observation_facts,
-    list_scope_observation_facts_by_run,
 )
 from app.services.review_publication_service import (
     get_published_review_run_id,
@@ -140,34 +142,57 @@ async def _get_published_run_or_404(
         return None
 
 
-def _canonical_scope_fact_to_dto(
-    fact: ReviewScopeObservationFact,
+def _summary_row_to_dto(
+    row: ReviewScopeSummaryRow,
     *,
     composition_readiness: dict[str, str] | None = None,
     canonical_coverage: dict[str, dict[str, Any]] | None = None,
-    signal_count: int = 0,
 ) -> ReviewCanonicalScopeResponse:
-    """[REVIEW-CANONICAL-RUNTIME-REPLACEMENT] canonical fact → DTO。
+    """[REVIEW-CANONICAL-SLICE-B] projected summary row → canonical list DTO。
 
-    readiness 优先取 run metadata 中的 canonical composition readiness（唯一发布
+    readiness 优先取 run metadata 的 canonical composition readiness（唯一发布
     判断依据），缺失时回落 fact.readiness；coverage 取 metadata canonical_coverage
-    的 provided/eligible（由唯一 composition owner 记录），缺失时用 fact 列派生。
+    的 provided/eligible，缺失时用 fact 列派生。summary 仅当 Composition 存在
+    （LEFT JOIN 命中）时投影，否则 ``None``（partial / missing composition）。
+    所有 analysis 字段原样透传 Optional，不把 unavailable 转 0。
     """
-    coverage = (canonical_coverage or {}).get(fact.scope_key) or {}
-    eligible = int(coverage.get("eligible", fact.pit_member_count) or 0)
-    provided = int(coverage.get("provided", fact.provided_member_count) or 0)
-    readiness = (composition_readiness or {}).get(fact.scope_key, fact.readiness)
+    coverage = (canonical_coverage or {}).get(row.scope_key) or {}
+    eligible = int(coverage.get("eligible", row.pit_member_count) or 0)
+    provided = int(coverage.get("provided", row.provided_member_count) or 0)
+    readiness = (composition_readiness or {}).get(row.scope_key, row.fact_readiness)
+    summary: ReviewScopeSummaryDTO | None = None
+    if row.composition_present:
+        summary = ReviewScopeSummaryDTO(
+            dynamicsStatus=row.dynamics_status,
+            phase=row.phase,
+            position=row.position,
+            velocity=row.velocity,
+            acceleration=row.acceleration,
+            upperOccupancy=row.upper_occupancy,
+            lowerOccupancy=row.lower_occupancy,
+            equalWeightReturn=row.equal_weight_return,
+            amountWeightedReturn=row.amount_weighted_return,
+            capitalTilt=row.capital_tilt,
+            advanceRatio=row.advance_ratio,
+            declineRatio=row.decline_ratio,
+            unchangedRatio=row.unchanged_ratio,
+            returnDispersion=row.return_dispersion,
+            priceNormalizedHhi=row.price_normalized_hhi,
+            amountNormalizedHhi=row.amount_normalized_hhi,
+            leadershipStatus=row.leadership_status,
+            jaccardStability=row.jaccard_stability,
+            migration=row.migration,
+        )
     return ReviewCanonicalScopeResponse(
-        scopeType=fact.scope_type,
-        scopeKey=fact.scope_key,
-        scopeName=fact.scope_name,
+        scopeType=row.scope_type,
+        scopeKey=row.scope_key,
+        scopeName=row.scope_name,
         readiness=readiness,
-        status=fact.pit_status_t,
+        status=row.pit_status_t,
         eligibleCount=eligible,
         providedCount=provided,
         coverageRatio=float(provided / eligible) if eligible > 0 else None,
-        observation=fact.observation_payload,
-        signalCount=signal_count,
+        summary=summary,
     )
 
 
@@ -374,27 +399,27 @@ async def list_review_scopes(
     readiness = metadata.get("canonical_composition_readiness") or {}
     canonical_coverage = metadata.get("canonical_coverage") or {}
 
-    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 按 review_run_id 查询（grain 含
-    # review_run_id），避免同日双 run 的 Observation lineage 污染（Phase 7 Gate A）。
-    # scope_type 过滤在 router 内轻量完成（service 仅负责 run lineage 读取，
-    # 不退回 global trade_date scan）。
-    facts = await list_scope_observation_facts_by_run(
+    # [REVIEW-CANONICAL-SLICE-B] 单一读取 owner：DB 级分页 + JSONB 标量投影
+    # （Fact LEFT OUTER JOIN Composition）。不加载完整 composition_payload，
+    # 不退回 global trade_date scan，不 per-scope 查询，不做 canonical 重算。
+    # scope_type 过滤下推到 SQL（与 count 同条件，保证 total 一致）。
+    offset = (page - 1) * page_size
+    total, summaries = await list_review_scope_summaries_by_run(
         db,
         review_run_id=run.id,
+        trade_date=td,
+        scope_type=scope_type,
+        offset=offset,
+        limit=page_size,
     )
-    if scope_type:
-        facts = [f for f in facts if f.scope_type == scope_type]
 
-    total = len(facts)
-    offset = (page - 1) * page_size
-    paged = facts[offset:offset + page_size]
     items = [
-        _canonical_scope_fact_to_dto(
-            fact,
+        _summary_row_to_dto(
+            row,
             composition_readiness=readiness,
             canonical_coverage=canonical_coverage,
         )
-        for fact in paged
+        for row in summaries
     ]
 
     return ReviewScopeListResponse(
@@ -449,7 +474,7 @@ async def get_review_scope_composition(
             detail=f"未找到 Composition: scope_type={scope_type} scope_key={scope_key}",
         )
 
-    # observation 与 fact 共享（fact 存客观事实，composition 存完整六键）
+    # observation 与 fact 共享（fact 存客观事实，composition 存完整 9-key payload）
     # 必须显式传入 trade_date（run lineage grain = review_run_id + trade_date +
     # scope_type + scope_key），不退回 global scan。
     fact = await get_scope_observation_fact_by_run(

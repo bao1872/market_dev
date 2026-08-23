@@ -217,6 +217,45 @@ class ReviewOverviewResponse(BaseModel):
 # =============================================================================
 
 
+class ReviewScopeSummaryDTO(BaseModel):
+    """Thin Scope-list analysis projection（Slice B）。
+
+    Pure projection of persisted canonical Composition analysis fields.  Every
+    analysis field is ``Optional``: a missing/unavailable value is ``None`` and
+    MUST NOT be coerced to ``0`` (PRD unavailable≠zero).  The backend canonical
+    owners (Observation Fact + Composition) remain the single source; this DTO
+    never triggers recomputation.  ``summary=None`` (not an all-zero object) is
+    the legal state when a Fact exists but its Composition is missing.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    dynamicsStatus: str | None = None
+    phase: str | None = None
+
+    position: float | None = None
+    velocity: float | None = None
+    acceleration: float | None = None
+    upperOccupancy: float | None = None
+    lowerOccupancy: float | None = None
+
+    equalWeightReturn: float | None = None
+    amountWeightedReturn: float | None = None
+    capitalTilt: float | None = None
+
+    advanceRatio: float | None = None
+    declineRatio: float | None = None
+    unchangedRatio: float | None = None
+    returnDispersion: float | None = None
+
+    priceNormalizedHhi: float | None = None
+    amountNormalizedHhi: float | None = None
+
+    leadershipStatus: str | None = None
+    jaccardStability: float | None = None
+    migration: float | None = None
+
+
 class ReviewCanonicalScopeResponse(BaseModel):
     """GET /api/v1/review/{trade_date}/scopes 单条记录（canonical）。
 
@@ -225,8 +264,9 @@ class ReviewCanonicalScopeResponse(BaseModel):
     + run.metadata_json["canonical_composition_readiness"/"canonical_coverage"]。
 
     readiness 为 canonical composition readiness（唯一发布判断依据）；status 为
-    fact 级 PIT 状态；observation 透传 Canonical Observation Core 的客观事实 payload
-    （PRD §7.2-§7.7，前端只展示、不重算）。
+    fact 级 PIT 状态；summary 为 persisted Composition 的薄投影（Slice B），
+    只展示、不重算。完整 Observation 由 scope detail endpoint 提供，列表不再
+    复制完整 Observation payload（避免 100×~130KiB over-fetch）。
     """
 
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
@@ -239,10 +279,9 @@ class ReviewCanonicalScopeResponse(BaseModel):
     eligibleCount: int = Field(0, description="PIT(T) 成员数（分母）")
     providedCount: int = Field(0, description="实际提供成员观察数")
     coverageRatio: float | None = Field(None, description="provided/eligible 覆盖率")
-    observation: dict[str, Any] | None = Field(
-        None, description="Canonical Observation Core 客观事实 payload",
+    summary: ReviewScopeSummaryDTO | None = Field(
+        None, description="persisted Composition 薄投影；Composition 缺失时为 None",
     )
-    signalCount: int = Field(0, description="该范围命中信号数（API 层注入）")
 
 
 class ReviewScopeListResponse(BaseModel):
@@ -273,7 +312,13 @@ class ReviewScopeCompositionDetailResponse(BaseModel):
     scopeName: str | None = Field(None, description="范围名称")
     algorithmVersion: str = Field(..., description="Composition 算法版本")
     composition: dict[str, Any] | None = Field(
-        None, description="完整 Canonical Composition（六键）",
+        None,
+        description=(
+            "完整 Canonical Composition（固定 9 个 top-level keys："
+            "scope / trade_date / capability / scope_observation / "
+            "historical_dynamics / internal_structure_facts / leadership / "
+            "member_attribution / composition_readiness）"
+        ),
     )
     observation: dict[str, Any] | None = Field(
         None, description="Canonical Observation Core 客观事实 payload（与 fact 共享）",

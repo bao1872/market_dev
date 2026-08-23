@@ -34,7 +34,9 @@ from app.services.review_observation_persistence_service import (
     ScopeObservationPayloadValidationError,
     get_scope_observation_fact,
     get_scope_observation_fact_by_run,
+    list_review_scope_summaries_by_run,
     list_scope_observation_facts,
+    save_scope_composition_snapshot,
     save_scope_observation_fact,
 )
 from app.services.review_observation_prep_service import PreparedScope
@@ -424,3 +426,208 @@ async def test_save_rejects_legacy_top_level_amount(db_session: AsyncSession) ->
     with pytest.raises(ScopeObservationPayloadValidationError):
         await save_scope_observation_fact(db_session, prep, obs)
     assert await _count(db_session, "concept", "A", T) == 0
+
+
+# =============================================================================
+# Slice B — Thin Scope List projection (JSONB scalar projection over
+# ReviewScopeObservationFact LEFT OUTER JOIN ReviewScopeCompositionSnapshot).
+# Uses the real PostgreSQL JSONB operators / casts; proves numeric typing,
+# nested path extraction, LEFT-JOIN miss, scope_type filter, deterministic
+# order, DB pagination, total, and same-run lineage.
+# =============================================================================
+
+def _composition_payload(
+    *,
+    scope_type: str,
+    scope_key: str,
+    trade_date: date,
+    phase: str = "trending",
+    position: float = 0.5,
+    velocity: float = 0.1,
+    acceleration: float = -0.02,
+    upper_occupancy: float = 0.6,
+    lower_occupancy: float = 0.3,
+    ew_return: float = 0.012,
+    aw_return: float = 0.015,
+    capital_tilt: float = 0.2,
+    advance: float = 0.55,
+    decline: float = 0.3,
+    unchanged: float = 0.15,
+    dispersion: float = 0.04,
+    price_hhi: float = 0.12,
+    amount_hhi: float = 0.18,
+    leadership_status: str = "ready",
+    jaccard: float = 0.8,
+    migration: float = 0.1,
+    dynamics_status: str = "ready",
+    include_position_phase: bool = True,
+) -> dict:
+    """Minimal but legal canonical Composition (9 top-level keys)."""
+    historical_dynamics: dict = {"status": dynamics_status}
+    if include_position_phase:
+        historical_dynamics["phase"] = phase
+        historical_dynamics["position"] = position
+        historical_dynamics["velocity"] = velocity
+        historical_dynamics["acceleration"] = acceleration
+        historical_dynamics["upper_occupancy"] = upper_occupancy
+        historical_dynamics["lower_occupancy"] = lower_occupancy
+    return {
+        "scope": {"scope_type": scope_type, "scope_key": scope_key},
+        "trade_date": trade_date.isoformat(),
+        "capability": {"persistence_activated": True},
+        "scope_observation": {"pit_member_count": 2, "provided_member_count": 2},
+        "historical_dynamics": historical_dynamics,
+        "internal_structure_facts": {
+            "breadth": {
+                "equal_weight_return": ew_return,
+                "advance_ratio": advance,
+                "decline_ratio": decline,
+                "unchanged_ratio": unchanged,
+                "return_dispersion": dispersion,
+            },
+            "capital_tilt": {
+                "equal_weight_return": ew_return,
+                "amount_weighted_return": aw_return,
+                "capital_tilt": capital_tilt,
+            },
+            "concentration": {
+                "price_normalized_hhi": price_hhi,
+                "amount_normalized_hhi": amount_hhi,
+            },
+        },
+        "leadership": {
+            "status": leadership_status,
+            "jaccard_stability": jaccard,
+            "migration": migration,
+        },
+        "member_attribution": {"members": []},
+        "composition_readiness": "ready",
+    }
+
+
+async def test_scope_summary_projection_jsonb_left_join_pagination(
+    db_session: AsyncSession,
+) -> None:
+    """Fact LEFT OUTER JOIN Composition thin projection over real PG JSONB."""
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()
+
+    # A: concept/A with composition -> summary projected (typed floats)
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="A", trade_date=T),
+        _canonical_obs(scope_type="concept", scope_key="A", marker_mean=0.01),
+        review_run_id=run.id,
+    )
+    await save_scope_composition_snapshot(
+        db_session,
+        review_run_id=run.id,
+        scope_type="concept",
+        scope_key="A",
+        trade_date=T,
+        algorithm_version="review-2.0.0",
+        composition_payload=_composition_payload(
+            scope_type="concept", scope_key="A", trade_date=T,
+            phase="trending", position=0.5, velocity=0.1,
+        ),
+    )
+
+    # B: industry_l1/B WITHOUT composition -> LEFT JOIN miss -> summary None
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="industry_l1", scope_key="B", trade_date=T),
+        _canonical_obs(scope_type="industry_l1", scope_key="B", marker_mean=0.02),
+        review_run_id=run.id,
+    )
+
+    await db_session.commit()
+
+    total, rows = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=20,
+    )
+    assert total == 2
+    # deterministic order by (scope_type, scope_key)
+    assert [f"{r.scope_type}/{r.scope_key}" for r in rows] == [
+        "concept/A", "industry_l1/B",
+    ]
+
+    a = rows[0]
+    assert a.composition_present is True
+    # numeric typing owned by DB cast (float, not str)
+    assert isinstance(a.position, float) and a.position == pytest.approx(0.5)
+    assert isinstance(a.velocity, float) and a.velocity == pytest.approx(0.1)
+    assert isinstance(a.jaccard_stability, float)
+    assert a.jaccard_stability == pytest.approx(0.8)
+    assert a.migration == pytest.approx(0.1)
+    assert a.phase == "trending"
+    assert a.dynamics_status == "ready"
+    assert a.equal_weight_return == pytest.approx(0.012)
+    assert a.amount_weighted_return == pytest.approx(0.015)
+    assert a.capital_tilt == pytest.approx(0.2)
+    assert a.advance_ratio == pytest.approx(0.55)
+    assert a.leadership_status == "ready"
+
+    b = rows[1]
+    assert b.composition_present is False
+    # LEFT JOIN miss -> every analysis field None (never 0)
+    assert b.position is None
+    assert b.phase is None
+    assert b.capital_tilt is None
+    assert b.jaccard_stability is None
+
+    # scope_type filter
+    t_c, r_c = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type="concept", offset=0, limit=20,
+    )
+    assert t_c == 1 and r_c[0].scope_key == "A"
+
+    # DB pagination (LIMIT/OFFSET)
+    t_p, r_p = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=1,
+    )
+    assert t_p == 2 and len(r_p) == 1 and r_p[0].scope_key == "A"
+
+
+async def test_scope_summary_projection_jsonb_null_key_yields_none(
+    db_session: AsyncSession,
+) -> None:
+    """Missing JSON key -> PostgreSQL NULL -> Python None (no 0 fallback)."""
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="C", trade_date=T),
+        _canonical_obs(scope_type="concept", scope_key="C", marker_mean=0.03),
+        review_run_id=run.id,
+    )
+    await save_scope_composition_snapshot(
+        db_session,
+        review_run_id=run.id,
+        scope_type="concept",
+        scope_key="C",
+        trade_date=T,
+        algorithm_version="review-2.0.0",
+        composition_payload=_composition_payload(
+            scope_type="concept", scope_key="C", trade_date=T,
+            include_position_phase=False, dynamics_status="ready",
+        ),
+    )
+    await db_session.commit()
+
+    total, rows = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=20,
+    )
+    assert total == 1
+    c = rows[0]
+    assert c.composition_present is True
+    assert c.dynamics_status == "ready"
+    # historical_dynamics lacks phase/position keys -> NULL -> None
+    assert c.phase is None
+    assert c.position is None
+    assert c.velocity is None
