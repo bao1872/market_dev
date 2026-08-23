@@ -1,7 +1,7 @@
 // [ReviewUrlState] - 描述: /review URL 状态解析/编码纯函数（PRD §3.1、§15）
 // URL 是页面状态的唯一可分享入口（SSOT），支持前进/后退恢复。
 //
-// [CANONICAL] Slice C Scope-first 产品 URL 合同：
+// [CANONICAL] Slice C Scope-first 产品 URL 合同（Slice F 退休后唯一合同）：
 //   /review
 //     ?date=2026-08-21
 //     &family=industry_l1
@@ -9,16 +9,13 @@
 //     &view=table
 //     &tab=dynamics
 //     &phase=Strengthening
+//     &readiness=ready
 //     &sort=velocity_desc
 //     &page=1
 //     &pageSize=50
 //     &q=有色
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行。
-//
-// [LEGACY] 旧 URL 字段（stage/signalId/discoveryId/trackingTab/scopeFamily/status/
-//          scopeName/parentScopeType/parentScopeKey）已退出 canonical 合同，
-//          仅保留 LegacyReviewUrlState 供 Slice D 前的 ReviewPage 解析使用，
-//          不进入 canonical 合同；禁止新增两个同义 decodeReviewUrl/encodeReviewUrl。
+// 旧 Legacy URL 合同（stage/signalId/discoveryId/trackingTab 等）已于 Slice F 物理删除。
 
 import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness } from './types'
 
@@ -272,122 +269,4 @@ export function withReviewPageChange(
   return { ...state, page: Math.max(DEFAULT_REVIEW_PAGE, page) }
 }
 
-// ============================================================
-// [LEGACY] 旧 URL 状态（retired 于 canonical Scope 之后；Slice D 前 ReviewPage 仍读取）
-// 不进入 canonical 合同；scopeName 不作为 canonical URL 状态。
-// ============================================================
 
-import type { ReviewStage, TrackingTab } from './types'
-
-export interface LegacyReviewUrlState {
-  date: string | null
-  view: 'discovery' | 'stages'
-  stage: ReviewStage
-  scopeType: string | null
-  scopeKey: string | null
-  scopeName: string | null
-  parentScopeType: string | null
-  parentScopeKey: string | null
-  signalId: string | null
-  boardId: string | null
-  symbol: string | null
-  trackingTab: TrackingTab
-  discoveryId: string | null
-  scopeFamily: string | null
-  status: string | null
-}
-
-export const DEFAULT_LEGACY_REVIEW_VIEW: 'discovery' | 'stages' = 'discovery'
-export const DEFAULT_LEGACY_REVIEW_STAGE: ReviewStage = 'scan'
-export const DEFAULT_LEGACY_TRACKING_TAB: TrackingTab = 'history'
-
-/** [LEGACY] 正式 Review 五阶段（Phase 5B 契约）：auction 为 auxiliary entry。
- *  ReviewStageNav 从此派生正式导航项。 */
-export const REVIEW_FORMAL_STAGES: ReadonlyArray<ReviewStage> = [
-  'scan',
-  'signals',
-  'attribution',
-  'validation',
-  'tracking',
-]
-
-const LEGACY_VIEW_VALUES: ReadonlySet<string> = new Set(['discovery', 'stages'])
-const LEGACY_STAGE_VALUES: ReadonlySet<string> = new Set([
-  'scan',
-  'signals',
-  'attribution',
-  'validation',
-  'tracking',
-  'auction',
-])
-const LEGACY_TRACKING_TAB_VALUES: ReadonlySet<string> = new Set([
-  'history',
-  'watchlist',
-  'events',
-])
-
-/** [LEGACY] 归一化旧阶段值，非法值回退 scan */
-export function normalizeLegacyStage(raw: string | null | undefined): ReviewStage {
-  return raw && LEGACY_STAGE_VALUES.has(raw) ? (raw as ReviewStage) : DEFAULT_LEGACY_REVIEW_STAGE
-}
-
-/** [LEGACY] 归一化旧视图值，非法值回退 discovery */
-export function normalizeLegacyView(raw: string | null | undefined): 'discovery' | 'stages' {
-  return raw && LEGACY_VIEW_VALUES.has(raw)
-    ? (raw as 'discovery' | 'stages')
-    : DEFAULT_LEGACY_REVIEW_VIEW
-}
-
-/** [LEGACY] 归一化旧追踪 Tab 值 */
-export function normalizeLegacyTrackingTab(raw: string | null | undefined): TrackingTab {
-  return raw && LEGACY_TRACKING_TAB_VALUES.has(raw)
-    ? (raw as TrackingTab)
-    : DEFAULT_LEGACY_TRACKING_TAB
-}
-
-/** [LEGACY] 解析旧 URL 状态（ReviewPage 在 Slice D 替换前使用） */
-export function decodeLegacyReviewUrl(params: URLSearchParams): LegacyReviewUrlState {
-  return {
-    date: params.get('date') || null,
-    view: normalizeLegacyView(params.get('view')),
-    stage: normalizeLegacyStage(params.get('stage')),
-    scopeType: params.get('scopeType') || null,
-    scopeKey: params.get('scopeKey') || null,
-    scopeName: params.get('scopeName') || null,
-    parentScopeType: params.get('parentScopeType') || null,
-    parentScopeKey: params.get('parentScopeKey') || null,
-    signalId: params.get('signalId') || null,
-    boardId: params.get('boardId') || null,
-    symbol: params.get('symbol') || null,
-    trackingTab: normalizeLegacyTrackingTab(params.get('trackingTab')),
-    discoveryId: params.get('discoveryId') || null,
-    scopeFamily: params.get('scopeFamily') || null,
-    status: params.get('status') || null,
-  }
-}
-
-/** [LEGACY] 编码旧 URL 状态（仅写入非默认值） */
-export function encodeLegacyReviewUrl(state: LegacyReviewUrlState): URLSearchParams {
-  const params = new URLSearchParams()
-  if (state.date) params.set('date', state.date)
-  if (state.view !== DEFAULT_LEGACY_REVIEW_VIEW) params.set('view', state.view)
-  if (state.stage !== DEFAULT_LEGACY_REVIEW_STAGE) params.set('stage', state.stage)
-  if (state.scopeType) params.set('scopeType', state.scopeType)
-  if (state.scopeKey) params.set('scopeKey', state.scopeKey)
-  if (state.scopeName) params.set('scopeName', state.scopeName)
-  if (state.parentScopeType) params.set('parentScopeType', state.parentScopeType)
-  if (state.parentScopeKey) params.set('parentScopeKey', state.parentScopeKey)
-  if (state.signalId) params.set('signalId', state.signalId)
-  if (state.boardId) params.set('boardId', state.boardId)
-  if (state.symbol) params.set('symbol', state.symbol)
-  if (state.trackingTab !== DEFAULT_LEGACY_TRACKING_TAB) params.set('trackingTab', state.trackingTab)
-  if (state.discoveryId) params.set('discoveryId', state.discoveryId)
-  if (state.scopeFamily) params.set('scopeFamily', state.scopeFamily)
-  if (state.status) params.set('status', state.status)
-  return params
-}
-
-// [LEGACY] 向后兼容别名：保留旧测试/组件导入名（normalizeStage / normalizeView）。
-// 语义与 legacy 归一化一致；Slice F 清理时一并移除。
-export const normalizeStage = normalizeLegacyStage
-export const normalizeView = normalizeLegacyView

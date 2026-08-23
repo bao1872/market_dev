@@ -2,17 +2,11 @@
 // 规则：query key 必须包含 reviewRunId/tradeDate/resource/id/filters
 // 切换 signal 时通过 queryKey 隔离，自动取消无效请求
 //
-// [CANONICAL] Scope-first 合同（Slice C）：
-// - dates/latest/overview/scopes/scopeDetail 为 canonical Review API surface。
+// [CANONICAL] Scope-first 合同（Slice C + Slice F 退休完成）：
+// - dates/latest/overview/scopes/familySnapshot/scopeDetail 为 canonical Review API surface。
 // - scopeDetail key 必须包含 tradeDate + scopeType + scopeKey + includePartial（不能只靠 scopeKey）。
-// [LEGACY] 信号/归因/个股/追踪/Discovery 仅剩 legacy 消费者，Slice F 删除。
 import type {
   ReviewScopeListParams,
-  LegacyReviewScopeListParams,
-  ReviewSignalListParams,
-  ReviewAttributionListParams,
-  ReviewInstrumentListParams,
-  ReviewTrackingListParams,
   ReviewScopeFamily,
 } from './types'
 
@@ -34,15 +28,6 @@ export const reviewKeys = {
   familySnapshot: (tradeDate: string, family: ReviewScopeFamily) =>
     [...reviewKeys.all, 'familySnapshot', tradeDate, family] as const,
 
-  /**
-   * [LEGACY] 仅供旧 MarketScanPanel 使用，接受 LegacyReviewScopeListParams（含 market/major_index/style
-   * 等 canonical ReviewScopeFamily 不允许的值）。这是临时兼容债务：canonical scopes key 只接受 canonical
-   * params，本函数绕过该限制，避免 `as ReviewScopeListParams` 的强转。
-   * Slice D canonical 代码严禁使用本函数；Slice F 删除。
-   */
-  legacyScopes: (tradeDate: string, filters: LegacyReviewScopeListParams = {}) =>
-    [...reviewKeys.all, 'scopes', 'legacy', tradeDate, filters] as const,
-
   // [CANONICAL] 单 Scope 详情；identity 必须含 tradeDate + scopeType + scopeKey + includePartial
   scopeDetail: (
     tradeDate: string,
@@ -58,32 +43,6 @@ export const reviewKeys = {
       scopeKey,
       { includePartial },
     ] as const,
-
-  // [LEGACY] 信号（PRD §12.3；Slice F 删除）
-  signals: (tradeDate: string, filters: ReviewSignalListParams = {}) =>
-    [...reviewKeys.all, 'signals', tradeDate, filters] as const,
-  signal: (signalId: string, includePartial = false) =>
-    [...reviewKeys.all, 'signal', signalId, { includePartial }] as const,
-
-  // [LEGACY] 归因与个股（PRD §12.4；Slice F 删除）
-  attributions: (signalId: string, filters: ReviewAttributionListParams = {}) =>
-    [...reviewKeys.all, 'attributions', signalId, filters] as const,
-  instruments: (signalId: string, filters: ReviewInstrumentListParams = {}) =>
-    [...reviewKeys.all, 'instruments', signalId, filters] as const,
-
-  // [LEGACY] 追踪（PRD §12.5；Slice F 删除）
-  trackings: (filters: ReviewTrackingListParams = {}) =>
-    [...reviewKeys.all, 'trackings', filters] as const,
-  tracking: (trackingId: string) =>
-    [...reviewKeys.all, 'tracking', trackingId] as const,
-  evaluations: (trackingId: string, filters: { page?: number; page_size?: number } = {}) =>
-    [...reviewKeys.all, 'evaluations', trackingId, filters] as const,
-
-  // [LEGACY] [V2] Discovery（Slice F 删除）
-  discoveries: (tradeDate: string, filters: Record<string, unknown> = {}) =>
-    [...reviewKeys.all, 'discoveries', tradeDate, filters] as const,
-  discovery: (discoveryId: string, tradeDate?: string) =>
-    [...reviewKeys.all, 'discovery', discoveryId, tradeDate] as const,
 } as const
 
 /** 导出方便组件使用 */

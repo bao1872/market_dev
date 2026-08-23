@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, resolve } from 'node:path'
 import test from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 import { canonicalizeFilterOperator } from '../../src/components/filterOperators.ts'
-import { decodeReviewUrl, encodeReviewUrl } from '../../src/features/review/urlState.ts'
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const source = (path: string) => readFileSync(resolve(ROOT, path), 'utf8')
@@ -31,44 +30,27 @@ test('market and detail navigation share market-stocks query and optimistic watc
   assert.ok(hooks.includes("invalidateQueries({ queryKey: ['market-stocks'] })"))
 })
 
-test('Review renders D family and exposes source, denominator, version, and readiness', () => {
-  const discovery = source('src/features/review/FilterDiscoveryPanel.tsx')
-  const drawer = source('src/features/review/EvidenceDrawer.tsx')
-  assert.ok(discovery.includes("D: 'D 第二金字塔偏差'"))
-  assert.ok(discovery.includes("['A', 'B', 'C', 'D']"))
-  assert.ok(drawer.includes('c.fieldSource'))
-  assert.ok(drawer.includes('c.denominator'))
-  assert.ok(drawer.includes('算法版本'))
-  assert.ok(drawer.includes('payload?.readiness?.raw_ready'))
-  assert.ok(drawer.includes('payload.readiness?.reason'))
-})
-
-test('Review scope hierarchy and signal query survive URL hydration', () => {
-  const params = new URLSearchParams({
-    date: '2026-08-01',
-    stage: 'signals',
-    scopeType: 'industry_l2',
-    scopeKey: 'l2-technology',
-    scopeName: '科技硬件',
-    parentScopeType: 'industry_l1',
-    parentScopeKey: 'l1-technology',
-  })
-  const state = decodeReviewUrl(params)
-  assert.deepEqual(decodeReviewUrl(encodeReviewUrl(state)), state)
-
-  const discovery = source('src/features/review/FilterDiscoveryPanel.tsx')
-  const scan = source('src/features/review/MarketScanPanel.tsx')
-  assert.ok(discovery.includes('scope_type: scopeType || undefined'))
-  assert.ok(discovery.includes('scope_key: scopeKey || undefined'))
-  for (const scopeType of ['industry_l1', 'industry_l2', 'industry_l3', 'concept']) {
-    assert.ok(scan.includes(`value: '${scopeType}'`))
-  }
-})
-
 test('structured chip unavailable reasons remain visible in stock detail', () => {
   const panel = source('src/features/stock-research/FirstPyramidPanel.tsx')
   assert.ok(panel.includes("chipStatus?.reasonCode === 'M15_BARS_INSUFFICIENT'"))
   assert.ok(panel.includes('chipStatus?.reasonText'))
   assert.ok(panel.includes('actualBars'))
   assert.ok(panel.includes('requiredBars'))
+})
+
+// Slice F retired the legacy FilterDiscoveryPanel / EvidenceDrawer / MarketScanPanel
+// components. The following transitional tests (previously verifying legacy D-family,
+// drawer readiness rendering, and legacy discovery filter payload shape) are retired
+// along with those production owners. Canonical Scope Explorer / Detail contracts are
+// now covered by reviewCanonicalContract / scopeExplorerContract / scopeDetailContract.
+
+test('[Slice F] retired legacy FilterDiscoveryPanel/EvidenceDrawer/MarketScanPanel tests are gone', () => {
+  // Legacy source files must no longer exist
+  for (const p of [
+    'src/features/review/FilterDiscoveryPanel.tsx',
+    'src/features/review/EvidenceDrawer.tsx',
+    'src/features/review/MarketScanPanel.tsx',
+  ]) {
+    assert.ok(!existsSync(resolve(ROOT, p)), `${p} 应已在 Slice F 物理删除`)
+  }
 })

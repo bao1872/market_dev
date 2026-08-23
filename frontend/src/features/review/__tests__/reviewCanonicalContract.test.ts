@@ -4,7 +4,7 @@
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
 
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -629,29 +629,7 @@ test('G5. canonical scopes key 接受 canonical params（无 cast）', () => {
   ])
 })
 
-test('G6. legacyScopes key 存在且接受 LegacyReviewScopeListParams', () => {
-  const legacyKey = reviewKeys.legacyScopes('2026-08-21', {
-    scope_type: 'market',
-    page: 1,
-    page_size: 20,
-  })
-  assert.deepEqual(legacyKey, [
-    'review',
-    'scopes',
-    'legacy',
-    '2026-08-21',
-    { scope_type: 'market', page: 1, page_size: 20 },
-  ])
-})
-
-test('G7. MarketScanPanel 不再含 "as ReviewScopeListParams" 强转', () => {
-  const src = read('MarketScanPanel.tsx')
-  assert.doesNotMatch(src, /as\s+ReviewScopeListParams/, '不得对 legacy params 做 as ReviewScopeListParams 强转')
-  // 改用 legacyScopes
-  assert.match(src, /reviewKeys\.legacyScopes\(/, 'MarketScanPanel 应使用 reviewKeys.legacyScopes')
-})
-
-test('G8. canonical ReviewScopeComposition 类型定义不含 scope_name / 嵌套 trade_date', () => {
+test('G6. canonical ReviewScopeComposition 类型定义不含 scope_name / 嵌套 trade_date', () => {
   const src = read('types.ts')
   const m = src.match(/export interface ReviewScopeComposition \{[\s\S]*?\n\}/)
   assert.ok(m, '应存在 ReviewScopeComposition 接口定义')
@@ -666,7 +644,7 @@ test('G8. canonical ReviewScopeComposition 类型定义不含 scope_name / 嵌�
   assert.doesNotMatch(body, /composition_readiness:\s*Record<string, unknown>/, 'composition_readiness 不得是 Record<string, unknown>')
 })
 
-test('G9. Detail observation 类型定义为原始 payload，非 ReviewScopeSummary', () => {
+test('G7. Detail observation 类型定义为原始 payload，非 ReviewScopeSummary', () => {
   const src = read('types.ts')
   const m = src.match(/export interface ReviewScopeCompositionDetailResponse \{[\s\S]*?\n\}/)
   assert.ok(m, '应存在 ReviewScopeCompositionDetailResponse 接口定义')
@@ -682,12 +660,272 @@ test('G9. Detail observation 类型定义为原始 payload，非 ReviewScopeSumm
   )
 })
 
-test('G10. canonical getReviewScopes 是唯一 canonical 列表 API（新代码不得引用 legacy）', () => {
+// ============================================================
+// H. [Slice F] Legacy Retirement 终局断言
+// ============================================================
+
+test('H1. reviewKeys 不含 legacy 键（legacyScopes/signals/signal/attributions/instruments/trackings/tracking/evaluations/discoveries/discovery）', () => {
+  const src = read('queryKeys.ts')
+  for (const k of [
+    'legacyScopes',
+    'signals',
+    'signal',
+    'attributions',
+    'instruments',
+    'trackings',
+    'tracking',
+    'evaluations',
+    'discoveries',
+    'discovery',
+  ]) {
+    assert.doesNotMatch(src, new RegExp(`reviewKeys\\.${k}`), `reviewKeys 不应暴露 ${k} 键`)
+    assert.doesNotMatch(src, new RegExp(`\\b${k}\\s*:`), `queryKeys 不应定义 ${k}`)
+  }
+})
+
+test('H2. api.ts 不导出 legacy 用户侧函数', () => {
   const src = read('api.ts')
-  // 仍保留 legacy 函数但不能被新 canonical 路径使用：仅校验 legacy 函数带有明确债务注释
+  const removed = [
+    'getLegacyReviewScopes',
+    'getReviewSignals',
+    'getReviewSignal',
+    'getSignalAttributions',
+    'getSignalInstruments',
+    'getReviewTrackings',
+    'createReviewTracking',
+    'updateReviewTracking',
+    'closeReviewTracking',
+    'getTrackingEvaluations',
+    'getDiscoveries',
+    'getDiscoveryDetail',
+  ]
+  for (const name of removed) {
+    assert.doesNotMatch(
+      src,
+      new RegExp(`export (async )?function ${name}\\b`),
+      `api.ts 不应导出 ${name}`,
+    )
+  }
+})
+
+test('H3. api.ts 不含 retired Review 路径字面量（/signals /trackings /discoveries）', () => {
+  const src = read('api.ts')
+  // 检查字面量 '/signals' '/trackings' '/discoveries' 均不作为 endpoint 出现
+  assert.doesNotMatch(
+    src,
+    /['"`]\/v1\/review\/[^'"`]*\/signals[^'"`]*['"`]/,
+    'api.ts 不得请求 /signals 路径',
+  )
+  assert.doesNotMatch(
+    src,
+    /['"`]\/v1\/review\/[^'"`]*\/trackings[^'"`]*['"`]/,
+    'api.ts 不得请求 /trackings 路径',
+  )
+  assert.doesNotMatch(
+    src,
+    /['"`]\/v1\/review\/[^'"`]*\/discoveries[^'"`]*['"`]/,
+    'api.ts 不得请求 /discoveries 路径',
+  )
+})
+
+test('H4. urlState.ts 不含 legacy URL 合同/helpers', () => {
+  const src = read('urlState.ts')
+  for (const name of [
+    'LegacyReviewUrlState',
+    'decodeLegacyReviewUrl',
+    'encodeLegacyReviewUrl',
+    'normalizeLegacyStage',
+    'normalizeLegacyView',
+    'normalizeLegacyTrackingTab',
+    'REVIEW_FORMAL_STAGES',
+    'DEFAULT_LEGACY_REVIEW_VIEW',
+    'DEFAULT_LEGACY_REVIEW_STAGE',
+    'DEFAULT_LEGACY_TRACKING_TAB',
+    'normalizeStage',
+    'normalizeView',
+  ]) {
+    assert.doesNotMatch(src, new RegExp(`\\b${name}\\b`), `urlState.ts 不应含 ${name}`)
+  }
+})
+
+test('H5. canonical ReviewPage 仍 import/render ScopeExplorerWorkspace，且不 import 已删除 legacy 组件', () => {
+  const src = read('../../pages/ReviewPage.tsx')
   assert.match(
     src,
-    /getLegacyReviewScopes[\s\S]*?历史兼容债务|getLegacyReviewScopes[\s\S]*?Slice F 删除/,
-    'getLegacyReviewScopes 必须标注 legacy 债务与 Slice F 删除',
+    /import.*ScopeExplorerWorkspace.*from/,
+    'ReviewPage 仍需 import ScopeExplorerWorkspace',
   )
+  for (const deleted of [
+    'MarketScanPanel',
+    'ScopeMetricsTable',
+    'ReviewStageNav',
+    'SignalCard',
+    'BoardAttributionPanel',
+    'AttributionTable',
+    'InstrumentsPanel',
+    'StockValidationPanel',
+    'TrackingReviewPanel',
+    'DiscoveryWorkspace',
+    'DiscoveryCard',
+    'DiscoveryDetail',
+    'FilterDiscoveryPanel',
+    'EvidenceDrawer',
+    'StatePanel',
+    'RelatedScopesPanel',
+    'RankKeyPanel',
+  ]) {
+    assert.doesNotMatch(src, new RegExp(`import.*${deleted}`), `ReviewPage 不应再 import ${deleted}`)
+  }
+})
+
+test('H6. canonical Scope 类型仍编译并保留关键字段', () => {
+  // 引用类型以证明仍存在且可编译
+  const item: ReviewScopeListItem = {
+    scopeType: 'industry_l1',
+    scopeKey: 'bank',
+    scopeName: null,
+    readiness: 'ready',
+    status: 'ready',
+    eligibleCount: 10,
+    providedCount: 10,
+    coverageRatio: 1,
+    summary: null,
+  }
+  assert.ok(item.scopeKey)
+  const list: ReviewScopeListResponse = {
+    items: [],
+    total: 0,
+    page: 1,
+    page_size: 50,
+    has_more: false,
+  }
+  assert.equal(list.total, 0)
+  const summary: ReviewScopeSummary = {
+    dynamicsStatus: null,
+    phase: null,
+    position: null,
+    velocity: null,
+    acceleration: null,
+    upperOccupancy: null,
+    lowerOccupancy: null,
+    equalWeightReturn: null,
+    amountWeightedReturn: null,
+    capitalTilt: null,
+    advanceRatio: null,
+    declineRatio: null,
+    unchangedRatio: null,
+    returnDispersion: null,
+    priceNormalizedHhi: null,
+    amountNormalizedHhi: null,
+    leadershipStatus: null,
+    jaccardStability: null,
+    migration: null,
+  }
+  assert.equal(summary.phase, null)
+  const detail: ReviewScopeCompositionDetailResponse = {
+    reviewRunId: 'r1',
+    tradeDate: '2026-08-21',
+    scopeType: 'industry_l1',
+    scopeKey: 'bank',
+    scopeName: null,
+    algorithmVersion: 'v1',
+    composition: null,
+    observation: null,
+  }
+  assert.equal(detail.composition, null)
+  assert.equal(detail.observation, null)
+})
+
+test('H7. AuctionBackflowPanel 仍存在且未被 Slice F 修改', () => {
+  const src = read('AuctionBackflowPanel.tsx')
+  assert.ok(src.length > 0, 'AuctionBackflowPanel.tsx 必须仍存在且非空')
+  assert.match(src, /export default function AuctionBackflowPanel|export function AuctionBackflowPanel|AuctionBackflowPanel/, 'AuctionBackflowPanel 仍导出 AuctionBackflowPanel')
+})
+
+test('H8. types.ts 不含 legacy 类型家族（Legacy/ReviewSignal/ReviewAttribution/ReviewInstrument/ReviewTracking/Discovery 家族等）', () => {
+  const src = read('types.ts')
+  const removed = [
+    'LegacyReviewMetricComponent',
+    'LegacyReviewMetricReadiness',
+    'LegacyReviewMetricPayload',
+    'LegacyReviewScopeMetrics',
+    'LegacyReviewScopeListResponse',
+    'LegacyReviewScopeListParams',
+    'LegacyMetricKey',
+    'ReviewSignalStatus',
+    'ReviewSignal\\b',
+    'ReviewSignalListResponse',
+    'ReviewSignalListParams',
+    'ReviewBoardRole',
+    'ReviewRelationToScope',
+    'ReviewAttribution\\b',
+    'ReviewAttributionListResponse',
+    'ReviewAttributionListParams',
+    'ReviewInstrument\\b',
+    'ReviewInstrumentListResponse',
+    'ReviewInstrumentListParams',
+    'ReviewInstrumentV2',
+    'ReviewTrackingType',
+    'ReviewTrackingStatus',
+    'ReviewTracking\\b',
+    'ReviewTrackingListResponse',
+    'ReviewTrackingListParams',
+    'ReviewTrackingCreateRequest',
+    'ReviewTrackingPatchRequest',
+    'ReviewTrackingEvaluation',
+    'ReviewTrackingEvaluationListResponse',
+    'DiscoveryMetricState',
+    'DiscoveryMetricChange',
+    'DiscoveryConcentrationState',
+    'DiscoveryConcentrationChange',
+    'DiscoveryInternalStructure',
+    'DiscoveryState',
+    'DiscoveryChange',
+    'DiscoveryAnomaly',
+    'DiscoveryScope',
+    'DiscoveryRelatedScope',
+    'DiscoveryRepresentativeInstrument',
+    'DiscoveryLifecycle',
+    'DiscoveryDataQuality',
+    'DiscoveryRankKey',
+    'Discovery\\b',
+    'DiscoveryListResponse',
+    'DiscoveryDetailResponse',
+    'ReviewStage\\b',
+    'TrackingTab\\b',
+  ]
+  for (const name of removed) {
+    assert.doesNotMatch(
+      src,
+      new RegExp(`export (interface|type) ${name}`),
+      `types.ts 不应导出 ${name}`,
+    )
+  }
+})
+
+test('H9. 已删除 legacy 组件文件不再存在（物理删除）', () => {
+  for (const file of [
+    'MarketScanPanel.tsx',
+    'ScopeMetricsTable.tsx',
+    'ReviewStageNav.tsx',
+    'SignalCard.tsx',
+    'BoardAttributionPanel.tsx',
+    'AttributionTable.tsx',
+    'InstrumentsPanel.tsx',
+    'ReviewInstrumentTable.tsx',
+    'StockValidationPanel.tsx',
+    'TrackingReviewPanel.tsx',
+    'DiscoveryWorkspace.tsx',
+    'DiscoveryCard.tsx',
+    'DiscoveryDetail.tsx',
+    'FilterDiscoveryPanel.tsx',
+    'EvidenceDrawer.tsx',
+    'StatePanel.tsx',
+    'RelatedScopesPanel.tsx',
+    'RankKeyPanel.tsx',
+    'reviewReadiness.ts',
+  ]) {
+    const exists = existsSync(join(REVIEW_DIR, file))
+    assert.ok(!exists, `legacy 文件 ${file} 应已物理删除`)
+  }
 })
