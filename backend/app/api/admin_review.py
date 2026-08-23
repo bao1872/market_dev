@@ -96,7 +96,13 @@ def _run_to_response(run: Any) -> ReviewRunResponse:
         id=str(run.id),
         trade_date=run.trade_date.isoformat(),
         source_core_run_id=str(run.source_core_run_id),
-        source_board_run_id=str(run.source_board_run_id),
+        # [Slice 3 core-only] nullable Board lineage：DB NULL → JSON null，
+        # 历史 UUID → UUID string（禁止 str(None) 序列化为 "None"）
+        source_board_run_id=(
+            str(run.source_board_run_id)
+            if run.source_board_run_id is not None
+            else None
+        ),
         # [QM-63] chip 依赖溯源：None 明确表示 core-only 降级
         source_chip_run_id=(
             str(run.source_chip_run_id) if run.source_chip_run_id else None
@@ -153,11 +159,11 @@ async def create_review_run(
         ) from exc
 
     # 解析可选 source_run_ids
+    # [Slice 3 core-only] Review 身份只依赖 stock_core，不再接受 Board 输入。
+    # payload.source_board_run_id 是 deprecated compatibility 字段：
+    # 非 NULL 已被 Pydantic validator 拒为 422；此处只为明确不把它传给 service。
     source_core_run_id = (
         uuid.UUID(payload.source_core_run_id) if payload.source_core_run_id else None
-    )
-    source_board_run_id = (
-        uuid.UUID(payload.source_board_run_id) if payload.source_board_run_id else None
     )
 
     try:
@@ -166,7 +172,6 @@ async def create_review_run(
             db,
             trade_date=trade_date,
             source_core_run_id=source_core_run_id,
-            source_board_run_id=source_board_run_id,
             algorithm_version=payload.algorithm_version,
             filter_version=payload.filter_version,
             baseline_window=payload.baseline_window,

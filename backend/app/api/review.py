@@ -341,7 +341,13 @@ async def get_review_overview(
         tradeDate=run.trade_date.isoformat(),
         status=run.status,
         sourceCoreRunId=str(run.source_core_run_id),
-        sourceBoardRunId=str(run.source_board_run_id),
+        # [Slice 3 core-only] nullable Board lineage：DB NULL → JSON null，
+        # 历史 UUID → UUID string（禁止 str(None) 序列化为 "None"）
+        sourceBoardRunId=(
+            str(run.source_board_run_id)
+            if run.source_board_run_id is not None
+            else None
+        ),
         # [QM-63] chip 依赖溯源：None 明确表示 core-only 降级，不得省略字段
         sourceChipRunId=(
             str(run.source_chip_run_id) if run.source_chip_run_id else None

@@ -13,14 +13,15 @@
 4. publish_run / get_run_status: 委托给 publication_service + 直接查询
 
 幂等：
-- create_run 通过唯一约束 (trade_date, source_core_run_id, source_board_run_id,
-  algorithm_version, filter_version) 保证
+- create_run 通过唯一约束 (trade_date, source_core_run_id,
+  algorithm_version, filter_version) 保证（[Slice 3 core-only] 已移除 source_board_run_id）
 - 每个阶段通过 run_item (review_run_id + scope + phase) 唯一键 + on_conflict_do_update
   保证幂等；相同 input_hash + 版本的 succeeded item 不重算
 - 信号 / 归因 / 追踪评估均幂等（由各自 service 保证）
 
 约束：
-- 输入只读 stock_core 和 board_analysis 的 factor_publications pointer
+- [Slice 3 core-only] Review canonical 输入 = published stock_core + canonical First Pyramid History
+- Board Analysis 不是 Review 前置依赖；create_run 不查询 BoardAnalysisRun / market_aggregation
 - [AUD-04/05] Review 输入身份不含 chip 等增强产品；create_run 零次 chip 查询，
   且已存在的 run 不被后续 create_run 改写（on_conflict_do_nothing）
 - 历史基线默认 120 日、最低 60 日
@@ -1973,7 +1974,13 @@ def _run_to_dict(run: MarketReviewRun) -> dict[str, Any]:
         "id": str(run.id),
         "trade_date": run.trade_date.isoformat(),
         "source_core_run_id": str(run.source_core_run_id),
-        "source_board_run_id": str(run.source_board_run_id),
+        # [Slice 3 core-only] nullable Board lineage：DB NULL → None（JSON null），
+        # 历史 UUID → UUID string
+        "source_board_run_id": (
+            str(run.source_board_run_id)
+            if run.source_board_run_id is not None
+            else None
+        ),
         "algorithm_version": run.algorithm_version,
         "filter_version": run.filter_version,
         "baseline_window": run.baseline_window,

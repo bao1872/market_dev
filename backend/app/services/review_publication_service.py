@@ -298,7 +298,12 @@ async def publish_review(
         "filter_version": run.filter_version,
         "baseline_window": run.baseline_window,
         "source_core_run_id": str(run.source_core_run_id),
-        "source_board_run_id": str(run.source_board_run_id),
+        # [Slice 3 core-only] nullable Board lineage：DB NULL → null，历史 UUID → string
+        "source_board_run_id": (
+            str(run.source_board_run_id)
+            if run.source_board_run_id is not None
+            else None
+        ),
         "expected_scope_count": run.expected_scope_count,
         "succeeded_scope_count": run.succeeded_scope_count,
         "signal_count": run.signal_count,

@@ -43,17 +43,31 @@
       "slice3_induced_regressions": 0
     }
   },
+  "slice3r_api_closure": {
+    "blockers_fixed": 2,
+    "blocker_1_admin_create_signature": "admin_review.py no longer passes source_board_run_id to create_run_with_result; payload.source_board_run_id remains deprecated (422 on non-NULL via validator, OK on NULL/omitted). TypeError->HTTP500 regression closed.",
+    "blocker_2_nullable_board_lineage_serialization": "All Review API/publication outputs map DB NULL -> JSON null (not 'None' string); historical UUID -> UUID string. Fixed in: admin_review.py (_run_to_response), review.py (public overview), review_orchestrator_service.py (_run_to_dict status), review_publication_service.py (pointer metadata).",
+    "serializer_search": "rg 'str(.*source_board_run_id|sourceBoardRunId=str|source_board_run_id=str' backend/app backend/scripts -> only 4 intentional NULL-aware sites remain; no bare str(None) serialization left.",
+    "orchestrator_docstring": "Top docstring updated: identity=(trade_date,source_core_run_id,algorithm_version,filter_version); canonical input=published stock_core + canonical First Pyramid History; Board Analysis NOT a Review prerequisite.",
+    "api_contract_tests_added": "backend/tests/test_review_api_core_only_contract.py covers A-H: schema deprecated field (omit/null/UUID->422), admin route kwargs lack source_board_run_id (regression gate D), admin response None/UUID, public overview None/UUID.",
+    "forbidden_this_round": ["NO migration execution", "NO production DB write", "NO deploy", "NO Board capability changes", "NO Board runtime removal", "NO Review algorithm changes", "NO Slice 4"]
+  },
   "files_changed": [
     "backend/app/models/market_review.py",
     "backend/app/schemas/review.py",
     "backend/app/services/after_close_orchestrator.py",
     "backend/app/services/review_orchestrator_service.py",
+    "backend/app/api/admin_review.py",
+    "backend/app/api/review.py",
+    "backend/app/services/review_publication_service.py",
     "backend/scripts/review_compute_cli.py",
     "backend/alembic/versions/092_review_core_only_identity.py",
     "backend/tests/test_review_source_pointer_lineage.py",
     "backend/tests/test_review_v21_dependency_contract.py",
-    "backend/tests/test_review_board_independence.py"
+    "backend/tests/test_review_board_independence.py",
+    "backend/tests/test_review_api_core_only_contract.py",
+    "backend/reports/slice3_review_core_only_identity.json"
   ],
-  "status": "CANDIDATE_IMPLEMENTATION_PENDING_ACCEPTANCE",
-  "next_action": "git commit on dev (focused), then normal push origin/dev, then STOP for user review. Do NOT merge or proceed without approval."
+  "status": "API_CLOSURE_READY_FOR_COMMIT",
+  "next_action": "Commit Slice3R on dev as 'fix(review): close core-only API contract', normal FF push origin/dev, confirm local HEAD == origin/dev, then STOP for user review."
 }
