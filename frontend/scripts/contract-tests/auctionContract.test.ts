@@ -118,19 +118,21 @@ test('useAuctionBackflow hook 存在', () => {
   )
 })
 
-test('ReviewPage 集成 AuctionBackflowPanel', () => {
+test('ReviewPage 不再集成 AuctionBackflowPanel（canonical cutover，Slice D）', () => {
+  // Slice D 起 /review 为 canonical Scope-first runtime；auction 从 /review 退休，
+  // AuctionBackflowPanel 物理文件保留至 Slice F 删除，但 ReviewPage 不得再导入/渲染。
   const src = readSource(REVIEW_PAGE_PATH)
   assert.ok(
-    src.includes("import AuctionBackflowPanel"),
-    'ReviewPage 必须导入 AuctionBackflowPanel',
+    !src.includes('import AuctionBackflowPanel'),
+    'ReviewPage 不得导入 AuctionBackflowPanel',
   )
   assert.ok(
-    src.includes("case 'auction'"),
-    'ReviewPage renderContent 必须含 auction stage 分支',
+    !src.includes("case 'auction'"),
+    'ReviewPage 不得保留 auction stage 分支',
   )
   assert.ok(
-    src.includes('<AuctionBackflowPanel'),
-    'ReviewPage 必须渲染 AuctionBackflowPanel 组件',
+    !src.includes('<AuctionBackflowPanel'),
+    'ReviewPage 不得渲染 AuctionBackflowPanel 组件',
   )
 })
 

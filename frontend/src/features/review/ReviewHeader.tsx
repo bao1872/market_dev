@@ -1,8 +1,11 @@
-// [ReviewHeader] - 描述: 复盘固定顶部（PRD §14.1）
-// 展示：交易日与前后交易日 / Review发布状态 / Core/Board Run /
-//      股票与板块覆盖率 / 算法版本、筛选器版本、历史基线 / 数据质量入口
-// 顶部不得显示 AI 自由生成的市场结论
+// [ReviewHeader] - 描述: 复盘固定顶部（canonical Review，Slice D）
+// 展示：交易日与前后交易日 / Review 发布状态 / Core/Board Run /
+//      overall coverageRatio / succeeded/expected/failed scope 计数 / 算法版本 / 历史基线 / 降级原因
+// [Slice D] 不再展示 retired Signal 语义：signalCount / signalSummary / “新增信号” /
+//          旧 market/indices/styles 覆盖块 / Filter Version 产品概念。
+// 顶部不得显示 AI 自由生成的市场结论；不可用值用 null 如实展示。
 import type { ReviewOverview } from './types'
+import { formatPercentNullable } from './reviewFormat'
 import styles from './review.module.scss'
 
 const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
@@ -14,15 +17,11 @@ const RUN_STATUS_META: Record<string, { label: string; cls: string }> = {
   completed_with_errors: { label: '完成但有错误', cls: 'chipWarning' },
   failed: { label: '失败', cls: 'chipDanger' },
   cancelled: { label: '已取消', cls: 'chipDefault' },
-  // [AC-TERMINAL-01 2026-08-04] 终态如实呈现，不回落原始英文 key
   interrupted: { label: '已中断', cls: 'chipWarning' },
   partial_success: { label: '部分成功', cls: 'chipWarning' },
 }
 
-// [QM-63 2026-08-04] 降级原因中文说明。
-// 未收录的 code 原样展示，不猜测、不静默丢弃。
-// [Phase 5B.1 / C2] Chip 为 external enhancement，不属于 Review core 降级范畴，
-// 故 CHIP_UNAVAILABLE / CHIP_PARTIAL 不再映射为中文“core-only 降级”表述。
+// 降级原因中文说明；未收录的 code 原样展示，不猜测、不静默丢弃。
 const DEGRADED_REASON_LABEL: Record<string, string> = {
   AUCTION_UNAVAILABLE: '竞价数据不可用',
   AUCTION_FAILED: '竞价计算失败',
@@ -32,24 +31,11 @@ function degradedReasonText(code: string): string {
   return DEGRADED_REASON_LABEL[code] ?? code
 }
 
-function CoverageItem({ label, ratio }: { label: string; ratio: number | null | undefined }) {
-  const pct = ratio !== null && ratio !== undefined ? Math.round(ratio * 100) : null
+function MetaItem({ label, value }: { label: string; value: string }) {
   return (
-    <span className={styles.coverageBar} title={`${label} 覆盖率`}>
+    <span className={styles.metaItem}>
       <span className={styles.metaLabel}>{label}</span>
-      {pct !== null ? (
-        <>
-          <span className={styles.coverageTrack}>
-            <span
-              className={styles.coverageFill}
-              style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
-            />
-          </span>
-          <span className={styles.metaValue}>{pct}%</span>
-        </>
-      ) : (
-        <span className={styles.metricUnavailable}>-</span>
-      )}
+      <span className={styles.metaValue}>{value}</span>
     </span>
   )
 }
@@ -60,7 +46,6 @@ export interface ReviewHeaderProps {
   /** 可用复盘交易日（降序），用于前后切换 */
   availableDates: string[]
   onDateChange: (date: string) => void
-  onOpenDataQuality?: () => void
 }
 
 export default function ReviewHeader({
@@ -68,7 +53,6 @@ export default function ReviewHeader({
   tradeDate,
   availableDates,
   onDateChange,
-  onOpenDataQuality,
 }: ReviewHeaderProps) {
   // availableDates 为降序；当前日期索引
   const idx = availableDates.indexOf(tradeDate)
@@ -106,21 +90,12 @@ export default function ReviewHeader({
         <span className={`${styles.chip} ${styles[statusMeta.cls]}`}>{statusMeta.label}</span>
         {overview && (
           <div className={styles.headerMeta}>
-            <span className={styles.metaItem}>
-              <span className={styles.metaLabel}>Core Run:</span>
-              <span className={styles.metaValue}>{overview.sourceCoreRunId.slice(0, 8)}</span>
-            </span>
-            <span className={styles.metaItem}>
-              <span className={styles.metaLabel}>Board Run:</span>
-              <span className={styles.metaValue}>{overview.sourceBoardRunId.slice(0, 8)}</span>
-            </span>
-            {/* [Phase 5B.1 / C2] Chip 是 external enhancement，不属于 Review P/Q/U/C/V 或发布门，
-                不再在 Review-core metadata 中展示 Chip 覆盖率 / “不可用” / “core-only 降级”。
-                Review P/Q/U/C/V、unique identity、publication pointer 均不变。 */}
+            <MetaItem label="Core Run:" value={overview.sourceCoreRunId.slice(0, 8)} />
+            <MetaItem label="Board Run:" value={overview.sourceBoardRunId.slice(0, 8)} />
           </div>
         )}
       </div>
-      {/* [QM-63] 降级横幅：有降级必须显式解释原因，禁止静默降级 */}
+      {/* 降级横幅：有降级必须显式解释原因，禁止静默降级 */}
       {overview && overview.degradedReasons.length > 0 && (
         <div className={styles.headerBottom} role="status" aria-live="polite">
           <span className={`${styles.chip} ${styles.chipWarning}`}>数据降级</span>
@@ -133,32 +108,24 @@ export default function ReviewHeader({
       )}
       {overview && (
         <div className={styles.headerBottom}>
-          <CoverageItem label="全市场" ratio={overview.coverage.market} />
-          <CoverageItem label="指数" ratio={overview.coverage.indices} />
-          <CoverageItem label="风格" ratio={overview.coverage.styles} />
-          <CoverageItem label="一级行业" ratio={overview.coverage.industryL1} />
           <span className={styles.metaItem}>
-            <span className={styles.metaLabel}>信号:</span>
-            <span className={styles.metaValue}>{overview.signalCount}</span>
-            <span className={styles.metaLabel}>（新增 {overview.signalSummary.new}）</span>
+            <span className={styles.metaLabel}>总体覆盖率:</span>
+            <span className={styles.metaValue}>{formatPercentNullable(overview.coverageRatio)}</span>
           </span>
           <span className={styles.metaItem}>
-            <span className={styles.metaLabel}>算法:</span>
-            <span className={styles.metaValue}>{overview.algorithmVersion}</span>
+            <span className={styles.metaLabel}>Scope:</span>
+            <span className={styles.metaValue}>
+              {overview.succeededScopeCount}/{overview.expectedScopeCount}
+            </span>
           </span>
-          <span className={styles.metaItem}>
-            <span className={styles.metaLabel}>筛选器:</span>
-            <span className={styles.metaValue}>{overview.filterVersion}</span>
-          </span>
-          <span className={styles.metaItem}>
-            <span className={styles.metaLabel}>基线:</span>
-            <span className={styles.metaValue}>{overview.baselineWindow}日</span>
-          </span>
-          {onOpenDataQuality && (
-            <button type="button" className={styles.btn} onClick={onOpenDataQuality}>
-              数据质量
-            </button>
+          {overview.failedScopeCount > 0 && (
+            <span className={styles.metaItem}>
+              <span className={styles.metaLabel}>失败:</span>
+              <span className={styles.metaValue}>{overview.failedScopeCount}</span>
+            </span>
           )}
+          <MetaItem label="算法:" value={overview.algorithmVersion} />
+          <MetaItem label="基线:" value={`${overview.baselineWindow}日`} />
         </div>
       )}
     </header>

@@ -17,9 +17,13 @@ import {
   normalizeExplorerView,
   normalizeDetailTab,
   normalizePhase,
+  normalizeReadiness,
   normalizeSort,
   normalizePage,
   normalizePageSize,
+  withReviewDateChange,
+  withReviewFamilyChange,
+  withReviewFilterChange,
 } from '../urlState'
 import type {
   ReviewScopeListItem,
@@ -262,6 +266,7 @@ test('D1. 完整 canonical URL 编解码往返', () => {
     view: 'table' as const,
     tab: 'dynamics' as const,
     phase: 'Strengthening' as const,
+    readiness: 'ready' as const,
     sort: 'velocity_desc' as const,
     page: 2,
     pageSize: 50,
@@ -330,6 +335,59 @@ test('D12. scopeName 不是 canonical URL 状态字段', () => {
   // canonical ReviewUrlState 不应含 scopeName；旧字段走 legacy
   const d = decodeReviewUrl(new URLSearchParams('scopeName=银行'))
   assertMissingKeys(d, ['scopeName'])
+})
+
+test('D13. readiness valid/invalid/null roundtrip', () => {
+  // 合法值 roundtrip
+  for (const r of ['ready', 'insufficient_history', 'unavailable_current']) {
+    assert.equal(normalizeReadiness(r), r)
+    const enc = encodeReviewUrl({ ...defaultReviewUrlState(), readiness: r as never })
+    assert.equal(decodeReviewUrl(enc).readiness, r, `readiness=${r} roundtrip`)
+  }
+  // 非法 → null
+  assert.equal(normalizeReadiness('bogus'), null)
+  assert.equal(normalizeReadiness(null), null)
+  assert.equal(decodeReviewUrl(new URLSearchParams('readiness=bogus')).readiness, null)
+  // 缺失 → null（不编码）
+  assert.equal(defaultReviewUrlState().readiness, null)
+  assert.equal(encodeReviewUrl(defaultReviewUrlState()).toString(), '')
+})
+
+test('D14. 过滤类 URL 变化重置页码为 1（保留 scopeKey）', () => {
+  const base = { ...defaultReviewUrlState(), page: 3, scopeKey: 'bank' }
+  const next = withReviewFilterChange(base, { phase: 'Strengthening' as never })
+  assert.equal(next.page, 1, 'q/phase/readiness 变化必须重置页码')
+  assert.equal(next.scopeKey, 'bank', '过滤变化不得清除 scopeKey')
+  assert.equal(next.phase, 'Strengthening')
+  // pageSize 变化同样重置页码
+  assert.equal(withReviewFilterChange(base, { pageSize: 100 }).page, 1)
+})
+
+test('D15. 日期变化清除 scopeKey 并重置页码（保留 family）', () => {
+  const base = {
+    ...defaultReviewUrlState(),
+    family: 'concept' as const,
+    scopeKey: 'ai',
+    page: 4,
+  }
+  const next = withReviewDateChange(base, '2026-08-22')
+  assert.equal(next.date, '2026-08-22')
+  assert.equal(next.scopeKey, null, '日期变化必须清除 scopeKey')
+  assert.equal(next.page, 1, '日期变化必须重置页码')
+  assert.equal(next.family, 'concept', '日期变化保留当前 family')
+})
+
+test('D16. family 变化设置 family、清除 scopeKey、重置页码', () => {
+  const base = {
+    ...defaultReviewUrlState(),
+    family: 'industry_l1' as const,
+    scopeKey: 'bank',
+    page: 3,
+  }
+  const next = withReviewFamilyChange(base, 'concept')
+  assert.equal(next.family, 'concept')
+  assert.equal(next.scopeKey, null, 'family 变化必须清除 scopeKey')
+  assert.equal(next.page, 1, 'family 变化必须重置页码')
 })
 
 // ============================================================

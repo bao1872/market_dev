@@ -24,6 +24,15 @@ export function formatNumberNullable(
   return value.toFixed(digits)
 }
 
+/**
+ * Position 格式化：canonical 0–100 historical percentile，直接展示原值，
+ * 绝不乘 100（75 显示 "75"，不是 "7500%"）。
+ */
+export function formatPosition(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
+  return String(Math.round(value * 100) / 100)
+}
+
 /** Dynamics Phase 展示标签（可在此做本地化映射；不计算 phase） */
 export function formatPhaseLabel(phase: string | null | undefined): string {
   if (!phase) return NULL_DISPLAY

@@ -48,30 +48,37 @@ test('1. 默认视图是 discovery（Discovery-first 正式入口）', () => {
   assert.equal(normalizeView('bogus'), 'discovery')
 })
 
-test('1b. ReviewPage 以 view==discovery 渲染 DiscoveryWorkspace（wiring）', () => {
+test('1b. [Slice D] ReviewPage 不再渲染 DiscoveryWorkspace（canonical cutover）', () => {
   const src = read('../../pages/ReviewPage.tsx')
-  assert.match(src, /import.*DiscoveryWorkspace/m, 'ReviewPage 必须 import DiscoveryWorkspace')
-  assert.match(src, /const isDiscovery = urlState\.view === 'discovery'/, '以 view 派生 Discovery 视图')
-  assert.match(src, /<DiscoveryWorkspace/, '必须渲染 <DiscoveryWorkspace>')
-  // 默认产品视图为 discovery：isDiscovery 为真分支渲染 DiscoveryWorkspace
-  assert.match(src, /isDiscovery \?[\s\S]*?renderDiscoveryView/, 'discovery 分支渲染 DiscoveryWorkspace')
+  assert.doesNotMatch(
+    src,
+    /import[\s\S]*?DiscoveryWorkspace/,
+    'ReviewPage 不得 import DiscoveryWorkspace（Discovery runtime 已从 /review 退休）',
+  )
+  assert.doesNotMatch(src, /<DiscoveryWorkspace/, 'ReviewPage 不得渲染 <DiscoveryWorkspace>')
+  // canonical 主入口为 ScopeExplorerWorkspace
+  assert.match(src, /import ScopeExplorerWorkspace/, 'ReviewPage 必须 import ScopeExplorerWorkspace')
+  assert.match(src, /<ScopeExplorerWorkspace/, 'ReviewPage 必须渲染 <ScopeExplorerWorkspace>')
 })
 
 // ============================================================
 // 2. 旧五阶段不再作为用户一级主导航
 // ============================================================
 
-test('2. 旧五阶段降级为 secondary/debug drilldown（view=stages）', () => {
-  // 正式阶段仍保留五阶段（作为 debug drilldown 存在）
+test('2. [Slice D] 旧五阶段不再作为 /review runtime 路径（仅 legacy 常量保留）', () => {
+  // 正式五阶段仍作为 legacy 常量保留（ReviewStageNav 等物理文件待 Slice F 删除）
   assert.deepStrictEqual([...REVIEW_FORMAL_STAGES], [
     'scan', 'signals', 'attribution', 'validation', 'tracking',
   ])
-  // 但默认视图不是 stages，而是 discovery
+  // 默认视图是 canonical table，不再是 stages（本文件 DEFAULT_REVIEW_VIEW 为 legacy 别名；
+  // canonical 默认值由 scopeExplorerContract RT1 断言）
   assert.notEqual(DEFAULT_REVIEW_VIEW, 'stages')
-  assert.equal(normalizeView('stages'), 'stages', 'stages 仍可深链解析为 debug drilldown')
-  // ReviewPage 中五阶段只在 stages 分支渲染
+  // stages 深链在 legacy decode 层仍可解析（物理组件未被删除前保持兼容）
+  assert.equal(normalizeView('stages'), 'stages', 'stages 仍可深链解析为 legacy debug drilldown')
+  // ReviewPage 不再存在 view=stages 运行时分支（canonical cutover）
   const src = read('../../pages/ReviewPage.tsx')
-  assert.match(src, /view === 'stages'|view: 'stages'/, '切换信号 diagnostics 使用 view=stages')
+  assert.doesNotMatch(src, /view === 'stages'|view: 'stages'/, 'ReviewPage 不得保留 view=stages 运行时路径')
+  assert.doesNotMatch(src, /ReviewStageNav/, 'ReviewPage 不得 import/渲染 ReviewStageNav')
 })
 
 // ============================================================

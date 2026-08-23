@@ -1,43 +1,31 @@
-// [ReviewPage] - 描述: 复盘工作台主页面（PRD §3、§14、§15）
-// 路由 /review；URL 参数：date/stage/scopeType/scopeKey/signalId/boardId/symbol/trackingTab
-//   [V2] view/discoveryId/scopeFamily/status
+// [ReviewPage] - 描述: 复盘工作台主页面（canonical Scope-first，Slice D）
+// 路由 /review；URL 参数（canonical）：date/family/scopeKey/view/tab/phase/readiness/sort/page/pageSize/q
 // URL 是状态 SSOT（前进后退可恢复）；React Query 数据获取；禁止自由 AI 结论
 // 只轮询 computing 状态；404/422/500 显示明确原因及 request_id
 //
-// [REVIEW-V2-B3] Discovery-first：默认产品视图 view=discovery 渲染 DiscoveryWorkspace。
-// 旧五阶段（Market Scan / Filter Discovery / Attribution / Validation / Tracking）
-// 降级为 secondary/debug drilldown（view=stages），不再是用户一级主导航。
-// Auction 保留 auxiliary 语义，仅在 stages 视图作为辅助入口。
-// tradeDate 来自正式 Review URL state（?date=），传给 DiscoveryWorkspace（单一 SSOT）。
-import { useMemo, useState, useEffect, useCallback } from 'react'
+// [Slice D] 真实用户入口切换为 canonical Scope-first 研究终端：
+//   - 不再渲染 legacy Discovery / Signal 五阶段 / Tracking runtime（组件文件仍物理存在，Slice F 删除）
+//   - 无 fallback/debug 按钮进入已退休体验
+import { useMemo, useEffect, useCallback } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
-import { useToast } from '@/store/toast'
 import { getReviewDates, getReviewOverview, extractReviewError } from '@/features/review/api'
 import { reviewKeys } from '@/features/review/queryKeys'
 import {
-  patchReviewUrl,
-  decodeLegacyReviewUrl as decodeReviewUrl,
-  encodeLegacyReviewUrl as encodeReviewUrl,
-  type LegacyReviewUrlState as ReviewUrlState,
+  decodeReviewUrl,
+  encodeReviewUrl,
+  withReviewDateChange,
+  withReviewFamilyChange,
+  withReviewFilterChange,
+  type ReviewUrlState,
 } from '@/features/review/urlState'
-import { COMPUTING_STATUSES } from '@/features/review/types'
+import { COMPUTING_STATUSES, type ReviewScopeFamily } from '@/features/review/types'
 import ReviewHeader from '@/features/review/ReviewHeader'
-import ReviewStageNav from '@/features/review/ReviewStageNav'
-import { DiscoveryWorkspace } from '@/features/review/DiscoveryWorkspace'
-import MarketScanPanel from '@/features/review/MarketScanPanel'
-import FilterDiscoveryPanel from '@/features/review/FilterDiscoveryPanel'
-import BoardAttributionPanel from '@/features/review/BoardAttributionPanel'
-import StockValidationPanel from '@/features/review/StockValidationPanel'
-import TrackingReviewPanel from '@/features/review/TrackingReviewPanel'
-import AuctionBackflowPanel from '@/features/review/AuctionBackflowPanel'
-import EvidenceDrawer, { type EvidenceTarget } from '@/features/review/EvidenceDrawer'
-import type { LegacyReviewScopeMetrics, ReviewSignal, ReviewAttribution, ReviewInstrument, ReviewStage } from '@/features/review/types'
+import ScopeExplorerWorkspace from '@/features/review/ScopeExplorerWorkspace'
 import styles from '@/features/review/review.module.scss'
 
 export default function ReviewPage() {
   const [searchParams, setSearchParams] = useSearchParams()
-  const showToast = useToast((s) => s.show)
 
   // 1. 从 URL 解析状态（SSOT）
   const urlState = useMemo(() => decodeReviewUrl(searchParams), [searchParams])
@@ -61,7 +49,7 @@ export default function ReviewPage() {
 
   const tradeDate = urlState.date ?? datesQuery.data?.latest_trade_date ?? ''
 
-  // 3. 当日总览（仅 computing 时轮询，PRD §15）
+  // 3. 当日总览（仅 computing 时轮询）
   const overviewQuery = useQuery({
     queryKey: reviewKeys.overview(tradeDate),
     queryFn: () => getReviewOverview(tradeDate),
@@ -73,128 +61,50 @@ export default function ReviewPage() {
     },
   })
 
-  // 4. URL 状态更新辅助
+  // 4. canonical URL 更新辅助
   const patchUrl = useCallback(
-    (patch: Partial<ReviewUrlState>, replace = false) => {
-      const next = patchReviewUrl(urlState, patch)
+    (next: ReviewUrlState, replace = false) => {
       setSearchParams(encodeReviewUrl(next), { replace })
     },
-    [urlState, setSearchParams],
+    [setSearchParams],
   )
 
   const handleDateChange = useCallback(
     (date: string) => {
-      // 切换日期：清除 scope/signal/symbol/discovery（避免跨日残留）
-      patchUrl({
-        date,
-        scopeType: null,
-        scopeKey: null,
-        scopeName: null,
-        parentScopeType: null,
-        parentScopeKey: null,
-        signalId: null,
-        symbol: null,
-        discoveryId: null,
-      })
+      patchUrl(withReviewDateChange(urlState, date))
     },
-    [patchUrl],
+    [patchUrl, urlState],
   )
 
-  const handleStageChange = useCallback(
-    (stage: ReviewStage) => {
-      patchUrl({ stage })
+  const handleFamilyChange = useCallback(
+    (family: ReviewScopeFamily) => {
+      patchUrl(withReviewFamilyChange(urlState, family))
     },
-    [patchUrl],
+    [patchUrl, urlState],
   )
 
-  // 5. 证据抽屉目标（任意指标/信号/归因/股票可打开）
-  const [evidenceTarget, setEvidenceTarget] = useState<EvidenceTarget | null>(null)
+  const handleFilterChange = useCallback(
+    (patch: Partial<ReviewUrlState>) => {
+      patchUrl(withReviewFilterChange(urlState, patch))
+    },
+    [patchUrl, urlState],
+  )
 
-  // 阶段间联动
+  const handleViewChange = useCallback(
+    (view: ReviewUrlState['view']) => {
+      patchUrl({ ...urlState, view })
+    },
+    [patchUrl, urlState],
+  )
+
   const handleSelectScope = useCallback(
-    (scope: LegacyReviewScopeMetrics) => {
-      patchUrl({
-        scopeType: scope.scopeType,
-        scopeKey: scope.scopeKey,
-        scopeName: scope.scopeName,
-        parentScopeType: scope.parentScopeType,
-        parentScopeKey: scope.parentScopeKey,
-        stage: 'signals',
-      })
-      setEvidenceTarget({ kind: 'metric', title: `${scope.scopeName} 范围指标`, payload: scope.p, meta: { sourceRunId: scope.reviewRunId } })
+    (scopeKey: string) => {
+      patchUrl({ ...urlState, scopeKey })
     },
-    [patchUrl],
+    [patchUrl, urlState],
   )
 
-  const handleSelectSignal = useCallback(
-    (signal: ReviewSignal) => {
-      patchUrl({ signalId: signal.id, stage: 'attribution' })
-      setEvidenceTarget({ kind: 'signal', signal })
-    },
-    [patchUrl],
-  )
-
-  const handleViewAttribution = useCallback(
-    (signal: ReviewSignal) => {
-      patchUrl({ signalId: signal.id, stage: 'attribution' })
-    },
-    [patchUrl],
-  )
-
-  const handleViewHistory = useCallback(
-    (signal: ReviewSignal) => {
-      patchUrl({ signalId: signal.id, stage: 'tracking', trackingTab: 'history' })
-    },
-    [patchUrl],
-  )
-
-  const handleOpenInstrumentEvidence = useCallback((inst: ReviewInstrument) => {
-    setEvidenceTarget({ kind: 'instrument', inst })
-  }, [])
-
-  const handleOpenAttributionEvidence = useCallback((attr: ReviewAttribution) => {
-    setEvidenceTarget({ kind: 'attribution', attr })
-  }, [])
-
-  const handleSelectAttributionScope = useCallback(
-    (attr: ReviewAttribution) => {
-      patchUrl({
-        parentScopeType: urlState.scopeType,
-        parentScopeKey: urlState.scopeKey,
-        scopeType: attr.childScopeType,
-        scopeKey: attr.childScopeKey,
-        scopeName: attr.childScopeName,
-      })
-    },
-    [patchUrl, urlState.scopeType, urlState.scopeKey],
-  )
-
-  // 6. 面包屑（PRD §14.2：全市场 > 风格 > 行业 > 个股）—— 仅 stages 视图
-  const breadcrumb = useMemo(() => {
-    const scopeTypeLabel: Record<string, string> = {
-      market: '全市场',
-      major_index: '主要指数',
-      style: '风格',
-      industry_l1: '一级行业',
-      industry_l2: '二级行业',
-      industry_l3: '三级行业',
-      concept: '概念',
-      instrument: '个股',
-    }
-    const parts: string[] = ['全市场']
-    if (urlState.parentScopeType && urlState.parentScopeKey) {
-      parts.push(`${scopeTypeLabel[urlState.parentScopeType] ?? urlState.parentScopeType} · ${urlState.parentScopeKey}`)
-    }
-    if (urlState.scopeType && urlState.scopeKey && urlState.scopeType !== 'market') {
-      parts.push(`${scopeTypeLabel[urlState.scopeType] ?? urlState.scopeType} · ${urlState.scopeName ?? urlState.scopeKey}`)
-    }
-    if (urlState.symbol) {
-      parts.push(urlState.symbol)
-    }
-    return parts
-  }, [urlState.parentScopeType, urlState.parentScopeKey, urlState.scopeType, urlState.scopeKey, urlState.scopeName, urlState.symbol])
-
-  // 7. 日期门（两视图共用）：日期未确定时的加载/异常/无发布
+  // 5. 日期门
   const renderDatesGate = () => {
     if (datesQuery.isLoading) {
       return <StateBox title="加载复盘日期" desc="正在获取已发布复盘交易日..." />
@@ -211,30 +121,9 @@ export default function ReviewPage() {
     )
   }
 
-  // 8. Discovery-first 产品视图（默认）
-  const renderDiscoveryView = () => {
+  // 6. canonical Scope-first 工作区
+  const renderWorkspace = () => {
     if (!tradeDate) return renderDatesGate()
-    return (
-      <DiscoveryWorkspace
-        tradeDate={tradeDate}
-        discoveryId={urlState.discoveryId}
-        scopeType={urlState.scopeType}
-        scopeFamily={urlState.scopeFamily}
-        status={urlState.status}
-        overview={overviewQuery.data}
-        onDiscoveryOpen={(id) => patchUrl({ discoveryId: id })}
-        onDiscoveryClose={() => patchUrl({ discoveryId: null })}
-        onFilterChange={(patch) => patchUrl(patch)}
-        showToast={showToast}
-      />
-    )
-  }
-
-  // 9. 旧五阶段（secondary/debug drilldown）
-  const renderStagesContent = () => {
-    if (!tradeDate) {
-      return renderDatesGate()
-    }
 
     // 总览加载
     if (overviewQuery.isLoading) {
@@ -265,72 +154,19 @@ export default function ReviewPage() {
         />
       )
     }
-    // partial / completed_with_errors 继续渲染阶段内容
+    // partial / completed_with_errors 继续渲染 Scope Explorer
 
-    // 按阶段渲染
-    switch (urlState.stage) {
-      case 'scan':
-        return (
-          <MarketScanPanel
-            tradeDate={tradeDate}
-            activeScopeKey={urlState.scopeKey}
-            onSelectScope={handleSelectScope}
-          />
-        )
-      case 'signals':
-        return (
-          <FilterDiscoveryPanel
-            tradeDate={tradeDate}
-            scopeType={urlState.scopeType}
-            scopeKey={urlState.scopeKey}
-            activeSignalId={urlState.signalId}
-            onSelectSignal={handleSelectSignal}
-            onViewAttribution={handleViewAttribution}
-            onViewHistory={handleViewHistory}
-            onTrackingAdded={(s) => showToast('已加入追踪', `信号 ${s.signalType}`)}
-          />
-        )
-      case 'attribution':
-        return (
-          <BoardAttributionPanel
-            signalId={urlState.signalId}
-            boardId={urlState.boardId}
-            onOpenEvidence={(s) => setEvidenceTarget({ kind: 'signal', signal: s })}
-            onOpenAttributionEvidence={handleOpenAttributionEvidence}
-            onOpenInstrumentEvidence={handleOpenInstrumentEvidence}
-            onSelectAttributionScope={handleSelectAttributionScope}
-          />
-        )
-      case 'validation':
-        return (
-          <StockValidationPanel
-            signalId={urlState.signalId}
-            tradeDate={tradeDate}
-            sourceCoreRunId={overviewQuery.data?.sourceCoreRunId ?? null}
-            boardId={urlState.boardId}
-            activeSymbol={urlState.symbol}
-            onOpenInstrumentEvidence={handleOpenInstrumentEvidence}
-            showToast={showToast}
-          />
-        )
-      case 'tracking':
-        return (
-          <TrackingReviewPanel
-            tradeDate={tradeDate}
-            tab={urlState.trackingTab}
-            onTabChange={(t) => patchUrl({ trackingTab: t })}
-            showToast={showToast}
-          />
-        )
-      case 'auction':
-        // [P0-FE 2026-07-31] 第二金字塔 + 竞价事件回流（PRD75 §3）
-        return <AuctionBackflowPanel tradeDate={tradeDate} />
-      default:
-        return null
-    }
+    return (
+      <ScopeExplorerWorkspace
+        tradeDate={tradeDate}
+        urlState={urlState}
+        onFamilyChange={handleFamilyChange}
+        onFilterChange={handleFilterChange}
+        onViewChange={handleViewChange}
+        onSelectScope={handleSelectScope}
+      />
+    )
   }
-
-  const isDiscovery = urlState.view === 'discovery'
 
   return (
     <div className={styles.reviewPage}>
@@ -339,79 +175,10 @@ export default function ReviewPage() {
         tradeDate={tradeDate || '-'}
         availableDates={availableDates}
         onDateChange={handleDateChange}
-        onOpenDataQuality={() => {
-          if (overviewQuery.data) {
-            setEvidenceTarget({
-              kind: 'metric',
-              title: '复盘数据质量',
-              payload: null,
-              meta: {
-                sourceRunId: overviewQuery.data.reviewRunId,
-                algorithmVersion: overviewQuery.data.algorithmVersion,
-              },
-            })
-          }
-        }}
       />
-      <div className={styles.auxEntry}>
-        {isDiscovery ? (
-          <button
-            type="button"
-            className={styles.auxEntryBtn}
-            onClick={() => patchUrl({ view: 'stages', discoveryId: null })}
-          >
-            Signal diagnostics
-          </button>
-        ) : (
-          <button
-            type="button"
-            className={styles.auxEntryBtn}
-            onClick={() => patchUrl({ view: 'discovery' })}
-          >
-            返回市场发现
-          </button>
-        )}
+      <div className={styles.main}>
+        <div className={styles.contentArea}>{renderWorkspace()}</div>
       </div>
-      {isDiscovery ? (
-        <div className={styles.main}>
-          <div className={styles.contentArea}>{renderDiscoveryView()}</div>
-          <EvidenceDrawer target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
-        </div>
-      ) : (
-        <>
-          <ReviewStageNav stage={urlState.stage} onChange={handleStageChange} />
-          {/* [Phase 5B.1 / C1] 竞价回流 auxiliary entry：复用既有 URL state（stage='auction'），
-              不新增 route / 页面 / navigation architecture。 */}
-          <div className={styles.auxEntry}>
-            <button
-              type="button"
-              className={
-                urlState.stage === 'auction'
-                  ? `${styles.auxEntryBtn} ${styles.auxEntryBtnActive}`
-                  : styles.auxEntryBtn
-              }
-              onClick={() => handleStageChange('auction')}
-            >
-              竞价回流
-            </button>
-          </div>
-          {/* 面包屑 */}
-          <div className={styles.breadcrumb}>
-            {breadcrumb.map((part, i) => (
-              <span key={i}>
-                <span className={i === breadcrumb.length - 1 ? styles.breadcrumbCurrent : styles.breadcrumbItem}>
-                  {part}
-                </span>
-                {i < breadcrumb.length - 1 && <span className={styles.breadcrumbSep}> › </span>}
-              </span>
-            ))}
-          </div>
-          <div className={styles.main}>
-            <div className={styles.contentArea}>{renderStagesContent()}</div>
-            <EvidenceDrawer target={evidenceTarget} onClose={() => setEvidenceTarget(null)} />
-          </div>
-        </>
-      )}
     </div>
   )
 }

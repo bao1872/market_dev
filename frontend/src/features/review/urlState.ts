@@ -20,7 +20,7 @@
 //          仅保留 LegacyReviewUrlState 供 Slice D 前的 ReviewPage 解析使用，
 //          不进入 canonical 合同；禁止新增两个同义 decodeReviewUrl/encodeReviewUrl。
 
-import type { ReviewScopeFamily, ReviewDynamicsPhase } from './types'
+import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness } from './types'
 
 // ============================================================
 // [CANONICAL] 枚举与默认
@@ -51,6 +51,8 @@ export interface ReviewUrlState {
   tab: ReviewDetailTab
   /** Dynamics 相位过滤（null = 不过滤） */
   phase: ReviewDynamicsPhase | null
+  /** Composition readiness 过滤（null = 不过滤；UI 过滤，不发给后端） */
+  readiness: ReviewCompositionReadiness | null
   /** 排序 */
   sort: ReviewSort
   /** 列表页码（>=1） */
@@ -66,6 +68,7 @@ export const DEFAULT_REVIEW_VIEW: ReviewExplorerView = 'table'
 export const DEFAULT_REVIEW_TAB: ReviewDetailTab = 'dynamics'
 export const DEFAULT_REVIEW_PHASE: ReviewDynamicsPhase | null = null
 export const DEFAULT_REVIEW_SORT: ReviewSort = 'velocity_desc'
+export const DEFAULT_REVIEW_READINESS: ReviewCompositionReadiness | null = null
 export const DEFAULT_REVIEW_PAGE = 1
 export const DEFAULT_REVIEW_PAGE_SIZE = 50
 export const REVIEW_MAX_PAGE_SIZE = 100
@@ -99,6 +102,12 @@ const PHASE_VALUES: ReadonlySet<string> = new Set([
   'Repairing',
 ])
 
+const READINESS_VALUES: ReadonlySet<string> = new Set([
+  'ready',
+  'insufficient_history',
+  'unavailable_current',
+])
+
 /** 归一化 family，非法值回退 industry_l1 */
 export function normalizeFamily(raw: string | null | undefined): ReviewScopeFamily {
   return raw && FAMILY_VALUES.has(raw) ? (raw as ReviewScopeFamily) : DEFAULT_REVIEW_FAMILY
@@ -122,6 +131,11 @@ export function normalizeSort(raw: string | null | undefined): ReviewSort {
 /** 归一化 phase，非法值回退 null（不做 fallback 映射） */
 export function normalizePhase(raw: string | null | undefined): ReviewDynamicsPhase | null {
   return raw && PHASE_VALUES.has(raw) ? (raw as ReviewDynamicsPhase) : null
+}
+
+/** 归一化 readiness，非法值回退 null（UI 过滤用，不发后端） */
+export function normalizeReadiness(raw: string | null | undefined): ReviewCompositionReadiness | null {
+  return raw && READINESS_VALUES.has(raw) ? (raw as ReviewCompositionReadiness) : null
 }
 
 /** 安全解析正整数页码，非法/缺失回退 1，强制 >=1 */
@@ -148,6 +162,7 @@ export function defaultReviewUrlState(): ReviewUrlState {
     view: DEFAULT_REVIEW_VIEW,
     tab: DEFAULT_REVIEW_TAB,
     phase: DEFAULT_REVIEW_PHASE,
+    readiness: DEFAULT_REVIEW_READINESS,
     sort: DEFAULT_REVIEW_SORT,
     page: DEFAULT_REVIEW_PAGE,
     pageSize: DEFAULT_REVIEW_PAGE_SIZE,
@@ -164,6 +179,7 @@ export function decodeReviewUrl(params: URLSearchParams): ReviewUrlState {
     view: normalizeExplorerView(params.get('view')),
     tab: normalizeDetailTab(params.get('tab')),
     phase: normalizePhase(params.get('phase')),
+    readiness: normalizeReadiness(params.get('readiness')),
     sort: normalizeSort(params.get('sort')),
     page: normalizePage(params.get('page')),
     pageSize: normalizePageSize(params.get('pageSize')),
@@ -191,6 +207,9 @@ export function encodeReviewUrl(state: ReviewUrlState): URLSearchParams {
   }
   if (state.phase !== null) {
     params.set('phase', state.phase)
+  }
+  if (state.readiness !== null) {
+    params.set('readiness', state.readiness)
   }
   if (state.sort !== DEFAULT_REVIEW_SORT) {
     params.set('sort', state.sort)
@@ -220,6 +239,27 @@ export function buildReviewUrl(state: ReviewUrlState): string {
   const params = encodeReviewUrl(state)
   const qs = params.toString()
   return qs ? `/review?${qs}` : '/review'
+}
+
+/** 切换日期：清除 scopeKey 与页码，保留当前 family */
+export function withReviewDateChange(state: ReviewUrlState, date: string): ReviewUrlState {
+  return { ...state, date, scopeKey: null, page: DEFAULT_REVIEW_PAGE }
+}
+
+/** 切换 family：设置 family、清除 scopeKey、页码重置为 1 */
+export function withReviewFamilyChange(
+  state: ReviewUrlState,
+  family: ReviewScopeFamily,
+): ReviewUrlState {
+  return { ...state, family, scopeKey: null, page: DEFAULT_REVIEW_PAGE }
+}
+
+/** 搜索/phase/readiness 等过滤类变化：页码重置为 1（保留 scopeKey） */
+export function withReviewFilterChange(
+  state: ReviewUrlState,
+  patch: Partial<ReviewUrlState>,
+): ReviewUrlState {
+  return { ...state, ...patch, page: DEFAULT_REVIEW_PAGE }
 }
 
 // ============================================================

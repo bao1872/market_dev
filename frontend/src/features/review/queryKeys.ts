@@ -13,6 +13,7 @@ import type {
   ReviewAttributionListParams,
   ReviewInstrumentListParams,
   ReviewTrackingListParams,
+  ReviewScopeFamily,
 } from './types'
 
 /** 复盘模块统一 key 前缀 */
@@ -28,6 +29,10 @@ export const reviewKeys = {
   // [CANONICAL] Scope-first 列表（PRD §12.2）
   scopes: (tradeDate: string, filters: ReviewScopeListParams = {}) =>
     [...reviewKeys.all, 'scopes', tradeDate, filters] as const,
+
+  // [CANONICAL] 完整 family snapshot（transport aggregation，按 tradeDate + family 缓存）
+  familySnapshot: (tradeDate: string, family: ReviewScopeFamily) =>
+    [...reviewKeys.all, 'familySnapshot', tradeDate, family] as const,
 
   /**
    * [LEGACY] 仅供旧 MarketScanPanel 使用，接受 LegacyReviewScopeListParams（含 market/major_index/style
