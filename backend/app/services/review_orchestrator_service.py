@@ -111,6 +111,7 @@ from app.services.review_scope_dynamics_service import (
 from app.services.review_scope_service import (
     LEVEL1_SCOPE_TYPES,
     ScopeDefinition,
+    discover_pit_available_boards,
     validate_review_lineage_guard,
 )
 
@@ -887,37 +888,33 @@ async def _resolve_all_discovery_scopes(
         style_scopes = style_scopes[:2]
     scopes.extend(style_scopes)
 
-    # industry_l1 范围
-    industry_l1_scopes = await _list_board_scopes_by_hierarchy(
-        session, run.trade_date, run.source_board_run_id,
-        board_type="industry", hierarchy_level="L1",
+    # industry_l1 范围（PIT discovery，不再依赖 board_analysis_snapshots）
+    industry_l1_scopes = await discover_pit_available_boards(
+        session, "industry", "L1", run.trade_date,
     )
     if canary:
         industry_l1_scopes = industry_l1_scopes[:5]
     scopes.extend(industry_l1_scopes)
 
-    # [V2] industry_l2 范围（平行独立参与 discovery）
-    industry_l2_scopes = await _list_board_scopes_by_hierarchy(
-        session, run.trade_date, run.source_board_run_id,
-        board_type="industry", hierarchy_level="L2",
+    # [V2] industry_l2 范围（平行独立参与 discovery，PIT discovery）
+    industry_l2_scopes = await discover_pit_available_boards(
+        session, "industry", "L2", run.trade_date,
     )
     if canary:
         industry_l2_scopes = industry_l2_scopes[:3]
     scopes.extend(industry_l2_scopes)
 
-    # [V2] industry_l3 范围（平行独立参与 discovery）
-    industry_l3_scopes = await _list_board_scopes_by_hierarchy(
-        session, run.trade_date, run.source_board_run_id,
-        board_type="industry", hierarchy_level="L3",
+    # [V2] industry_l3 范围（平行独立参与 discovery，PIT discovery）
+    industry_l3_scopes = await discover_pit_available_boards(
+        session, "industry", "L3", run.trade_date,
     )
     if canary:
         industry_l3_scopes = industry_l3_scopes[:3]
     scopes.extend(industry_l3_scopes)
 
-    # [V2] concept 范围（平行独立参与 discovery，不依赖 industry 命中）
-    concept_scopes = await _list_board_scopes_by_hierarchy(
-        session, run.trade_date, run.source_board_run_id,
-        board_type="concept", hierarchy_level=None,
+    # [V2] concept 范围（平行独立参与 discovery，PIT discovery，不依赖 industry 命中）
+    concept_scopes = await discover_pit_available_boards(
+        session, "concept", None, run.trade_date,
     )
     if canary:
         concept_scopes = concept_scopes[:5]

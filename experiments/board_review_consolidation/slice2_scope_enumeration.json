@@ -1,0 +1,49 @@
+{
+  "slice": "2A",
+  "title": "Review scope enumeration decoupled from BoardAnalysisSnapshot",
+  "baseline_sha": "221e1e1889748526cfeab4e87dcb714b315cb33b",
+  "date": "2026-08-23",
+  "hypothesis": "Review 的 industry/concept scope 枚举可从 BoardAnalysisSnapshot 读取改为复用 canonical PIT helper discover_pit_available_boards，切断对 board snapshot 的第一条真实依赖，且不改变可见行为（old scope set ⊆ new PIT scope set 在 2B 验证）。",
+  "visible_outcome": "无前端变化（Slice 2A 仅后端解耦）；2B 才会做 server read-only parity 验收。",
+  "changes": {
+    "review_scope_service.py": [
+      "discover_pit_available_boards 查询新增 MarketBoard.isActive.is_(True) 过滤，仅枚举生效板块（behavior protection）。",
+      "resolve_scope_members 在 industry/concept 分支、population_status==ready 且 instrument_ids 为空时，抛出 OptionalScopeUnavailableError(reason='empty_pit_membership')，由 orchestrator 终态化为 SKIPPED（合法不可用，非执行异常）。"
+    ],
+    "review_orchestrator_service.py": [
+      "_resolve_all_discovery_scopes 中 4 处 industry_l1/l2/l3 + concept 的 _list_board_scopes_by_hierarchy 调用替换为 discover_pit_available_boards(session, board_type, hierarchy_level, trade_date)。",
+      "canary 截断值沿用原值（industry_l1[:5], industry_l2[:3], industry_l3[:3], concept[:5]）。",
+      "新增 import discover_pit_available_boards。",
+      "market / major_index / style / instrument 逻辑未改动。",
+      "_list_board_scopes_by_hierarchy 与 _list_industry_l1_scopes 保留为 legacy（未删除，仍有测试 inspect）。"
+    ]
+  },
+  "kept_unchanged": [
+    "source_board_run_id 未触碰（仅作为 run 属性传入，discover 不再使用）。",
+    "market_aggregation 指针与 PC-40/PC-41 契约未变。",
+    "Board 表 / Board API / AfterClose stage / Board 计算未删未改。",
+    "ScopeDefinition 4 个 lineage 字段（source_board_snapshot_id / taxonomy_version / taxonomy_compatibility_key / membership_version）返回 None（解耦，不回填 board snapshot 字段）；经核验 canonical compute / input_hash / persistence 路径不消费这些字段。"
+  ],
+  "removed_dependency": [
+    "Review industry/concept scope 枚举不再读取 BoardAnalysisSnapshot（通过 _list_board_scopes_by_hierarchy → source_board_run_id）。"
+  ],
+  "tests": {
+    "file": "tests/test_slice2_scope_enumeration.py",
+    "count": 5,
+    "cases": [
+      "A: discover_pit_available_boards 查询包含 MarketBoard.isActive.is_(True)",
+      "D: discover 返回的 ScopeDefinition lineage 字段均为 None",
+      "C: resolve_scope_members 空成员 → OptionalScopeUnavailableError(reason=empty_pit_membership)",
+      "B: _resolve_all_discovery_scopes 调 discover 4 次、不再调 _list_board_scopes_by_hierarchy",
+      "E: 输出 industry/concept scope 不含 source_board_snapshot_id 依赖"
+    ],
+    "result": "5 passed (PURE_UNIT_TEST=1, APP_ENV=development, no DB)"
+  },
+  "forbidden_not_touched": [
+    "no migration / DB write / Board table deletion / Board API removal / Board calc removal",
+    "no market_aggregation removal / source_board_run_id schema change",
+    "no AfterClose stage removal / freshness migration / unified Review extra fields",
+    "no deploy / 30d backfill"
+  ],
+  "next_slice": "2B — server read-only parity：验证 OLD_BOARD_SNAPSHOT_SCOPE_SET ⊆ NEW_PIT_SCOPE_SET；extras 必须 active+valid PIT 且分类；做真实 read-only PG 抽样（不写）。"
+}

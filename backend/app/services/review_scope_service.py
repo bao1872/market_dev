@@ -364,7 +364,22 @@ async def resolve_scope_members(
                     f"trade_date={trade_date}"
                 ),
             )
-        return list(membership.instrument_ids), board.name
+        instrument_ids = list(membership.instrument_ids)
+        if not instrument_ids:
+            # [REVIEW-OPTIONAL-SCOPE-TERMINALIZATION] optional 板块（industry_*/concept）
+            # population_status==ready 但成员为空，是合法不可用而非执行异常，应被 SKIP。
+            raise _optional_unavailable_or_failure(
+                reason="empty_pit_membership",
+                scope_type=scope_type,
+                scope_key=scope_key,
+                trade_date=trade_date,
+                population_status=membership.population_status,
+                fallback_message=(
+                    f"empty_pit_membership: board={scope_key} "
+                    f"trade_date={trade_date}"
+                ),
+            )
+        return instrument_ids, board.name
 
     return [], scope_key
 
@@ -422,6 +437,7 @@ async def discover_pit_available_boards(
         .join(BoardDefinitionVersion, BoardDefinitionVersion.board_id == MarketBoard.id)
         .where(
             MarketBoard.type == board_type,
+            MarketBoard.isActive.is_(True),
             BoardDefinitionVersion.effective_from <= trade_date,
             or_(
                 BoardDefinitionVersion.effective_to.is_(None),
