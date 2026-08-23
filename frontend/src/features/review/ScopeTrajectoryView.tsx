@@ -1,7 +1,9 @@
 // [ScopeTrajectoryView] - 描述: Scope Trajectory 散点视图（Slice D）
 // 坐标契约：x = summary.position（固定 0–100），y = summary.velocity。
 // 仅绘制 position != null 且 velocity != null 的点；缺失值不强制为 0。
-// 品牌色仅用于选中节点描边；节点中性色；acceleration 仅作方向字形。
+// acceleration 只作为中性方向字形（正 ▲ / 负 ▼ / 零 ■）绘制在对应 SVG 节点旁，
+// 不转译成 bullish/bearish 颜色（红涨绿跌的方向色仅用于 EW Return / Capital Tilt
+// 等市场方向值，acceleration 必须用中性 muted 字形）；品牌色仅用于选中节点描边。
 // 不添加机会区标签；散点仅用于交互。
 import type { ReviewScopeListItem } from './types'
 import styles from './review.module.scss'
@@ -13,11 +15,21 @@ const PAD_R = 24
 const PAD_T = 20
 const PAD_B = 40
 
+/** acceleration → 中性字形：正 ▲ / 负 ▼ / 零 ■；null/NaN 不绘制。
+ *  无阈值、无业务解释、无分数；只做符号化，不做方向性解读。 */
+function accelGlyphFor(value: number | null | undefined): string | null {
+  if (value === null || value === undefined || Number.isNaN(value)) return null
+  if (value > 0) return '▲'
+  if (value < 0) return '▼'
+  return '■'
+}
+
+/** 列表项 acceleration 中性字形（随列表行显示，非主要展示位） */
 function AccelGlyph({ value }: { value: number | null | undefined }) {
   if (value === null || value === undefined || Number.isNaN(value)) return null
-  if (value > 0) return <span title="加速上行">▲</span>
-  if (value < 0) return <span title="加速下行">▼</span>
-  return <span title="无加速">■</span>
+  if (value > 0) return <span title="正 Acceleration">▲</span>
+  if (value < 0) return <span title="负 Acceleration">▼</span>
+  return <span title="零 Acceleration">■</span>
 }
 
 export interface ScopeTrajectoryViewProps {
@@ -101,13 +113,15 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
         <text x={(PAD_L + W - PAD_R) / 2} y={H - 6} textAnchor="middle" className={styles.trajAxisLabel}>
           Position (0–100)
         </text>
-        {/* 节点 */}
+        {/* 节点（含 acceleration 中性字形） */}
         {plottable.map((r) => {
           const pos = r.summary.position as number
           const vel = r.summary.velocity as number
           const cx = xScale(pos)
           const cy = yScale(vel)
           const selected = r.scopeKey === selectedScopeKey
+          const rNode = selected ? 6 : 5
+          const accel = accelGlyphFor(r.summary.acceleration)
           return (
             <g
               key={r.scopeKey}
@@ -124,7 +138,17 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
               aria-label={`Scope ${r.scopeName ?? r.scopeKey}`}
             >
               <title>{`${r.scopeName ?? r.scopeKey} · velocity ${vel.toFixed(2)}`}</title>
-              <circle cx={cx} cy={cy} r={selected ? 6 : 5} />
+              <circle cx={cx} cy={cy} r={rNode} />
+              {accel !== null && (
+                <text
+                  x={cx + rNode + 4}
+                  y={cy + 1}
+                  className={styles.trajAccelText}
+                  aria-hidden="true"
+                >
+                  {accel}
+                </text>
+              )}
             </g>
           )
         })}
@@ -141,15 +165,15 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
       </svg>
       <div className={styles.trajLegend}>
         <span className={styles.trajLegendItem}>
-          <span className={`${styles.accelGlyph} ${styles.up}`}>▲</span> 加速上行
+          <span className={styles.accelGlyph}>▲</span> 正 Acceleration
         </span>
         <span className={styles.trajLegendItem}>
-          <span className={`${styles.accelGlyph} ${styles.down}`}>▼</span> 加速下行
+          <span className={styles.accelGlyph}>▼</span> 负 Acceleration
         </span>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>■</span> 无加速
+          <span className={styles.accelGlyph}>■</span> 零 Acceleration
         </span>
-        <span className={styles.trajLegendItem}>● 未标注为方向</span>
+        <span className={styles.trajLegendItem}>● 节点中性色（选中为品牌描边）</span>
       </div>
       <div className={styles.trajList}>
         {plottable.map((r) => (
@@ -161,7 +185,7 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
           >
             {r.scopeName ?? r.scopeKey}
             <span className={styles.trajItemAccel}>
-              <AccelGlyph value={r.summary?.acceleration} />
+              <AccelGlyph value={r.summary.acceleration} />
             </span>
           </button>
         ))}

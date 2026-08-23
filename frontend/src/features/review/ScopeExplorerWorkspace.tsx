@@ -14,6 +14,7 @@ import {
   findScopeById,
   filterScopes,
   sortVelocityDesc,
+  computeEffectivePage,
 } from './scopeExplorerViewModel'
 import ScopeExplorerToolbar from './ScopeExplorerToolbar'
 import ScopeExplorerTable from './ScopeExplorerTable'
@@ -25,7 +26,10 @@ export interface ScopeExplorerWorkspaceProps {
   tradeDate: string
   urlState: ReviewUrlState
   onFamilyChange: (family: ReviewScopeFamily) => void
+  /** 过滤类变化：q/phase/readiness/pageSize（会重置 page=1） */
   onFilterChange: (patch: Partial<ReviewUrlState>) => void
+  /** 翻页专用路径：只改 page，保留全部其他状态 */
+  onPageChange: (page: number) => void
   onViewChange: (view: ReviewExplorerView) => void
   onSelectScope: (scopeKey: string) => void
 }
@@ -44,6 +48,7 @@ export default function ScopeExplorerWorkspace({
   urlState,
   onFamilyChange,
   onFilterChange,
+  onPageChange,
   onViewChange,
   onSelectScope,
 }: ScopeExplorerWorkspaceProps) {
@@ -63,6 +68,12 @@ export default function ScopeExplorerWorkspace({
   const paged = useMemo(
     () => applyScopeExplorerPipeline(snapshotItems, query, urlState.page, urlState.pageSize),
     [snapshotItems, query, urlState.page, urlState.pageSize],
+  )
+
+  // 有效页码：URL 可能越界（?page=999），渲染与交互必须用同一钳制页
+  const effectivePage = useMemo(
+    () => computeEffectivePage(urlState.page, paged.pageCount),
+    [urlState.page, paged.pageCount],
   )
 
   const selectedScope = useMemo(
@@ -140,19 +151,21 @@ export default function ScopeExplorerWorkspace({
                   <button
                     type="button"
                     className={styles.btn}
-                    disabled={urlState.page <= 1}
-                    onClick={() => onFilterChange({ page: urlState.page - 1 })}
+                    disabled={effectivePage <= 1}
+                    onClick={() => onPageChange(effectivePage - 1)}
+                    aria-label="上一页"
                   >
                     ‹
                   </button>
                   <span>
-                    {paged.pageCount === 0 ? 0 : Math.min(urlState.page, paged.pageCount)} / {paged.pageCount}
+                    {paged.pageCount === 0 ? 0 : effectivePage} / {paged.pageCount}
                   </span>
                   <button
                     type="button"
                     className={styles.btn}
-                    disabled={urlState.page >= paged.pageCount}
-                    onClick={() => onFilterChange({ page: urlState.page + 1 })}
+                    disabled={effectivePage >= paged.pageCount}
+                    onClick={() => onPageChange(effectivePage + 1)}
+                    aria-label="下一页"
                   >
                     ›
                   </button>

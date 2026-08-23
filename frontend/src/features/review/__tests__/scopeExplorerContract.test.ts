@@ -23,10 +23,16 @@ import {
   sortVelocityDesc,
   applyScopeExplorerPipeline,
   findScopeById,
+  computeEffectivePage,
 } from '../scopeExplorerViewModel'
 import { loadFamilySnapshot, FAMILY_SNAPSHOT_PAGE_SIZE } from '../useReviewScopeFamilySnapshot'
 import { formatPosition, formatPercentNullable, NULL_DISPLAY } from '../reviewFormat'
-import { DEFAULT_REVIEW_VIEW } from '../urlState'
+import {
+  DEFAULT_REVIEW_VIEW,
+  defaultReviewUrlState,
+  withReviewFilterChange,
+  withReviewPageChange,
+} from '../urlState'
 import type {
   ReviewScopeListItem,
   ReviewScopeSummary,
@@ -263,14 +269,15 @@ test('FS2. total > pageSize 时拉取全部剩余页并按传输顺序合并', a
 test('FS3. 剩余页并行发起（非逐页瀑布）', async () => {
   const calls: number[] = []
   const gates: Record<number, () => void> = {}
+  // 真实 fixture：pageSize=1、total=3，每页恰好 1 行（满足 completeness 校验，
+  // 不得用“每页 1 行但 total=250”的伪造 fixture 绕过完整性校验）
   const fetchPage = (page: number): Promise<ReviewScopeListResponse> => {
     calls.push(page)
-    // 每个请求各自等待 gate；Promise.all 会同步发起全部剩余页请求
     return new Promise((resolve) => {
-      gates[page] = () => resolve(makeListResponse([makeItem(`k${page}`)], page, 100, 250))
+      gates[page] = () => resolve(makeListResponse([makeItem(`k${page}`)], page, 1, 3))
     })
   }
-  const pending = loadFamilySnapshot(fetchPage, FAMILY_SNAPSHOT_PAGE_SIZE)
+  const pending = loadFamilySnapshot(fetchPage, 1)
   await flush()
   // 先发 page 1（需要 total 才知道要补几页）
   assert.deepEqual(calls, [1], '先请求 page 1 以确定 total')
@@ -283,6 +290,8 @@ test('FS3. 剩余页并行发起（非逐页瀑布）', async () => {
   assert.deepEqual(calls, [1, 2, 3], 'page 3 不等 page 2 完成后才发起')
   gates[3]()
   const snap = await pending
+  assert.equal(snap.pageCount, 3)
+  assert.equal(snap.total, 3)
   assert.equal(snap.items.length, 3)
 })
 
@@ -298,6 +307,88 @@ test('FS5. 重复 scope identity → fail closed（显式检测）', async () =>
   const dup = [makeItem('dup'), makeItem('dup')]
   const fetchPage = async (): Promise<ReviewScopeListResponse> => makeListResponse(dup, 1)
   await assert.rejects(() => loadFamilySnapshot(fetchPage, FAMILY_SNAPSHOT_PAGE_SIZE), /重复 scope identity/)
+})
+
+test('FS6. 合并项数不足 total → fail closed（不静默展示部分快照）', async () => {
+  const total = 250
+  const fetchPage = async (page: number): Promise<ReviewScopeListResponse> => {
+    // page3 只返回 20 条（模拟 HTTP 200 但数据缺失）：合并 220 < total 250
+    const count = page === 3 ? 20 : 100
+    const items = Array.from({ length: count }, (_, i) => makeItem(`p${page}-${i}`))
+    return makeListResponse(items, page, 100, total)
+  }
+  await assert.rejects(
+    () => loadFamilySnapshot(fetchPage, FAMILY_SNAPSHOT_PAGE_SIZE),
+    /incomplete family snapshot: expected=250 actual=220/,
+  )
+})
+
+test('FS7. 分页 total 漂移 → fail closed', async () => {
+  const fetchPage = async (page: number): Promise<ReviewScopeListResponse> => {
+    const items = Array.from({ length: 100 }, (_, i) => makeItem(`p${page}-${i}`))
+    // page2 total 与 first 不一致
+    return makeListResponse(items, page, 100, page === 2 ? 249 : 250)
+  }
+  await assert.rejects(
+    () => loadFamilySnapshot(fetchPage, FAMILY_SNAPSHOT_PAGE_SIZE),
+    /family snapshot total 漂移: first=250 page2=249/,
+  )
+})
+
+// ============================================================
+// P. 分页 wiring：翻页走独立 onPageChange，过滤变化才重置 page
+// ============================================================
+
+test('P1. Workspace 提供独立 onPageChange，翻页按钮不经过 onFilterChange', () => {
+  const src = read('ScopeExplorerWorkspace.tsx')
+  assert.match(src, /onPageChange: \(page: number\) => void/, 'props 必须含独立 onPageChange')
+  assert.match(src, /onClick=\{\(\) => onPageChange\(effectivePage/, '翻页按钮必须调用 onPageChange')
+  assert.doesNotMatch(src, /onFilterChange\(\{\s*page:/, '翻页不得走 onFilterChange({ page })')
+})
+
+test('P2. ReviewPage 用 withReviewPageChange 绑定 onPageChange', () => {
+  const src = read('../../pages/ReviewPage.tsx')
+  assert.match(src, /withReviewPageChange/, 'ReviewPage 必须使用 withReviewPageChange')
+  assert.match(src, /onPageChange=\{handlePageChange\}/, 'ReviewPage 必须传递 onPageChange')
+})
+
+test('P3. 生产 helper 语义分离：过滤重置 page=1，翻页只改 page 且保留全部状态', () => {
+  const base = { ...defaultReviewUrlState(), page: 3 }
+  // 过滤类变化 → page=1
+  assert.equal(withReviewFilterChange(base, { q: 'x' }).page, 1)
+  assert.equal(withReviewFilterChange(base, { phase: 'Strengthening' as never }).page, 1)
+  assert.equal(withReviewFilterChange(base, { readiness: 'ready' as never }).page, 1)
+  assert.equal(withReviewFilterChange(base, { pageSize: 100 }).page, 1)
+  // 翻页 → 只改 page，保留 q/phase/readiness/family/scopeKey/pageSize/view
+  const next = withReviewPageChange(
+    { ...base, page: 1, q: '有色', phase: 'Strengthening' as never, readiness: 'ready' as never },
+    2,
+  )
+  assert.equal(next.page, 2)
+  assert.equal(next.q, '有色')
+  assert.equal(next.phase, 'Strengthening')
+  assert.equal(next.readiness, 'ready')
+  assert.equal(next.family, 'industry_l1')
+  assert.equal(next.scopeKey, null)
+  assert.equal(next.pageSize, 50)
+  assert.equal(next.view, 'table')
+  // page 1 → next → 2；page 3 → previous → 2
+  assert.equal(withReviewPageChange({ ...base, page: 1 }, 2).page, 2)
+  assert.equal(withReviewPageChange({ ...base, page: 3 }, 2).page, 2)
+  // 非法页码钳制到 1
+  assert.equal(withReviewPageChange(base, 0).page, 1)
+})
+
+test('P4. effectivePage 钳制：URL 越界页 → 实际末页；Workspace 交互用它驱动', () => {
+  assert.equal(computeEffectivePage(999, 3), 3)
+  assert.equal(computeEffectivePage(1, 3), 1)
+  assert.equal(computeEffectivePage(3, 3), 3)
+  assert.equal(computeEffectivePage(0, 3), 1)
+  assert.equal(computeEffectivePage(2, 0), 1) // pageCount=0（全被过滤）→ 1
+  const src = read('ScopeExplorerWorkspace.tsx')
+  assert.match(src, /computeEffectivePage/, 'Workspace 必须计算 effectivePage')
+  assert.match(src, /disabled=\{effectivePage <= 1\}/, '上一页禁用用 effectivePage')
+  assert.match(src, /disabled=\{effectivePage >= paged\.pageCount\}/, '下一页禁用用 effectivePage')
 })
 
 // ============================================================
@@ -404,6 +495,48 @@ test('TR4. 无机会区标签 / 无相位彩虹节点', () => {
   )
   // 不引入彩虹/机会区绘图语义
   assert.doesNotMatch(src, /rainbow|hue|hsl|opportunityZone|opportunity-zone/i)
+})
+
+test('TR5. acceleration glyph 绘制在 SVG 节点旁（随节点 map，null 不绘制）', () => {
+  const src = read('ScopeTrajectoryView.tsx')
+  assert.match(src, /accelGlyphFor\(r\.summary\.acceleration\)/, '节点使用 summary.acceleration 直接判定字形')
+  assert.match(src, /accel !== null\s*&&/, 'null acceleration 不绘制 glyph')
+  assert.match(src, /<text[\s\S]*?className=\{styles\.trajAccelText\}/, 'glyph 为 SVG text，随节点同组')
+  // glyph 位于 plottable.map 内（节点 <g> 里），非独立列表
+  const mapStart = src.indexOf('plottable.map')
+  const mapEnd = src.indexOf('})}', mapStart)
+  const nodeBlock = src.slice(mapStart, mapEnd)
+  assert.ok(nodeBlock.includes('<circle'), '节点块含 circle')
+  assert.ok(nodeBlock.includes('trajAccelText'), '节点块内含 acceleration glyph')
+})
+
+test('TR6. acceleration glyph 不使用 styles.up/styles.down，节点填充中性', () => {
+  const src = read('ScopeTrajectoryView.tsx')
+  assert.doesNotMatch(src, /styles\.up/, 'Trajectory 不得引用 styles.up')
+  assert.doesNotMatch(src, /styles\.down/, 'Trajectory 不得引用 styles.down')
+  // 不得使用方向/强弱措辞
+  assert.doesNotMatch(src, /看多|看空|强势|弱势|加速上行|加速下行/, '不得使用方向性措辞')
+  const scss = read('review.module.scss')
+  assert.match(scss, /\.trajAccelText \{[\s\S]*?fill: v\.\$color-muted/, 'glyph 用中性 muted 色')
+})
+
+test('TR7. 仅选中节点使用品牌描边，未选中节点中性填充', () => {
+  const scss = read('review.module.scss')
+  const nodeBlock = scss.match(/\.trajNode \{[\s\S]*?\n\}/)
+  assert.ok(nodeBlock, '存在 .trajNode 样式块')
+  // 未选中节点 circle 的 fill 必须中性（focus-visible 描边为可达性焦点环，不属于填充）
+  const fillMatch = nodeBlock[0].match(/circle \{\s*fill: ([^;]+);/)
+  assert.ok(fillMatch, '.trajNode circle 必须显式声明 fill')
+  assert.doesNotMatch(fillMatch[1], /color-brand/, '未选中节点填充不得用品牌色')
+  assert.match(scss, /\.trajNodeSelected \{[\s\S]*?fill: v\.\$color-brand/, '选中节点品牌填充')
+  assert.match(scss, /\.trajNodeSelected \{[\s\S]*?stroke: v\.\$color-brand/, '选中节点品牌描边')
+})
+
+test('TR8. legend 使用中性措辞（正/负/零 Acceleration）', () => {
+  const src = read('ScopeTrajectoryView.tsx')
+  assert.match(src, /正 Acceleration/, 'legend 用 正 Acceleration')
+  assert.match(src, /负 Acceleration/, 'legend 用 负 Acceleration')
+  assert.match(src, /零 Acceleration/, 'legend 用 零 Acceleration')
 })
 
 // ============================================================

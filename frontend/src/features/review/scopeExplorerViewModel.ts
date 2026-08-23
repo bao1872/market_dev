@@ -91,6 +91,13 @@ export function paginateScopes(
   return { items: items.slice(start, start + pageSize), total, pageCount }
 }
 
+/** 有效页码：把 URL 原始页码钳制到 [1, pageCount]（pageCount=0 → 1）。
+ *  URL 可能含 ?page=999，pagination 已按 pageCount 钳制渲染数据；
+ *  交互（上一页/下一页/禁用/显示）必须使用同一有效页，避免 999→998 这类越界导航。 */
+export function computeEffectivePage(rawPage: number, pageCount: number): number {
+  return Math.min(Math.max(1, rawPage), Math.max(1, pageCount))
+}
+
 /** 完整流水线：filter → sort → paginate（供 Workspace 单次调用） */
 export function applyScopeExplorerPipeline(
   snapshot: ReviewScopeListItem[],

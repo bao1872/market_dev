@@ -262,6 +262,16 @@ export function withReviewFilterChange(
   return { ...state, ...patch, page: DEFAULT_REVIEW_PAGE }
 }
 
+/** 页码变化：只改 page，保留全部其他状态（不清 scopeKey、不重置过滤）。
+ *  翻页必须走本 helper；q/phase/readiness/pageSize 等过滤变化才应使用
+ *  withReviewFilterChange（重置 page=1）。 */
+export function withReviewPageChange(
+  state: ReviewUrlState,
+  page: number,
+): ReviewUrlState {
+  return { ...state, page: Math.max(DEFAULT_REVIEW_PAGE, page) }
+}
+
 // ============================================================
 // [LEGACY] 旧 URL 状态（retired 于 canonical Scope 之后；Slice D 前 ReviewPage 仍读取）
 // 不进入 canonical 合同；scopeName 不作为 canonical URL 状态。

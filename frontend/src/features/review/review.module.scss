@@ -1026,6 +1026,14 @@
   }
 }
 
+// acceleration 中性字形（随节点绘制）：不使用 up/down 方向色
+.trajAccelText {
+  fill: v.$color-muted;
+  font-size: 9px;
+  font-family: v.$font-mono;
+  pointer-events: none;
+}
+
 .trajLegend {
   display: flex;
   align-items: center;

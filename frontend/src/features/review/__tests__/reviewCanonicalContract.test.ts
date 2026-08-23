@@ -24,6 +24,7 @@ import {
   withReviewDateChange,
   withReviewFamilyChange,
   withReviewFilterChange,
+  withReviewPageChange,
 } from '../urlState'
 import type {
   ReviewScopeListItem,
@@ -388,6 +389,38 @@ test('D16. family 变化设置 family、清除 scopeKey、重置页码', () => {
   assert.equal(next.family, 'concept')
   assert.equal(next.scopeKey, null, 'family 变化必须清除 scopeKey')
   assert.equal(next.page, 1, 'family 变化必须重置页码')
+})
+
+test('D17. 翻页只改 page，保留全部其他状态（与过滤重置语义分离）', () => {
+  const base = {
+    ...defaultReviewUrlState(),
+    family: 'concept' as const,
+    scopeKey: 'ai',
+    view: 'trajectory' as const,
+    tab: 'dynamics' as const,
+    phase: 'Strengthening' as const,
+    readiness: 'ready' as const,
+    sort: 'velocity_desc' as const,
+    pageSize: 100,
+    q: '有色',
+    page: 1,
+  }
+  const next = withReviewPageChange(base, 2)
+  assert.equal(next.page, 2, '翻页必须更新 page')
+  // 其余状态必须原样保留
+  assert.equal(next.family, 'concept')
+  assert.equal(next.scopeKey, 'ai')
+  assert.equal(next.view, 'trajectory')
+  assert.equal(next.tab, 'dynamics')
+  assert.equal(next.phase, 'Strengthening')
+  assert.equal(next.readiness, 'ready')
+  assert.equal(next.sort, 'velocity_desc')
+  assert.equal(next.pageSize, 100)
+  assert.equal(next.q, '有色')
+  // 上一页：page 3 → 2
+  assert.equal(withReviewPageChange({ ...base, page: 3 }, 2).page, 2)
+  // 非法页码（<1）钳制到 1
+  assert.equal(withReviewPageChange(base, 0).page, 1)
 })
 
 // ============================================================

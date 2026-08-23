@@ -17,6 +17,7 @@ import {
   withReviewDateChange,
   withReviewFamilyChange,
   withReviewFilterChange,
+  withReviewPageChange,
   type ReviewUrlState,
 } from '@/features/review/urlState'
 import { COMPUTING_STATUSES, type ReviewScopeFamily } from '@/features/review/types'
@@ -86,6 +87,14 @@ export default function ReviewPage() {
   const handleFilterChange = useCallback(
     (patch: Partial<ReviewUrlState>) => {
       patchUrl(withReviewFilterChange(urlState, patch))
+    },
+    [patchUrl, urlState],
+  )
+
+  const handlePageChange = useCallback(
+    (page: number) => {
+      // 翻页走独立路径：只改 page，保留 q/phase/readiness/family/scopeKey/pageSize/view
+      patchUrl(withReviewPageChange(urlState, page))
     },
     [patchUrl, urlState],
   )
@@ -162,6 +171,7 @@ export default function ReviewPage() {
         urlState={urlState}
         onFamilyChange={handleFamilyChange}
         onFilterChange={handleFilterChange}
+        onPageChange={handlePageChange}
         onViewChange={handleViewChange}
         onSelectScope={handleSelectScope}
       />
