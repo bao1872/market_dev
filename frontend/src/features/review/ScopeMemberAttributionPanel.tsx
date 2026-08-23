@@ -296,6 +296,12 @@ export default function ScopeMemberAttributionPanel({
       {subtab === 'leadership' && renderLeadershipAttribution(attr.leadership)}
 
       <ReconciliationStrip attr={attr} />
+
+      {attr.determinismChecksum && (
+        <div className={styles.checksumLine} data-testid="determinism-checksum">
+          determinism_checksum {attr.determinismChecksum}
+        </div>
+      )}
     </div>
   )
 }

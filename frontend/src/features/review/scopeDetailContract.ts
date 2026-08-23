@@ -52,10 +52,14 @@ function asNumberArray(v: unknown): (number | null)[] {
   return v.map((x) => asNumber(x))
 }
 
-/** 从后端 fact-object 数组提取 value 字段（Position 特化：读 .position 字段） */
+/** 从后端 fact-object 数组提取 value 字段（Position 特化：读 .position 字段，支持 null） */
 function extractPositionValues(points: ScopeDynamicsPositionPoint[] | null | undefined): (number | null)[] {
   if (!Array.isArray(points)) return []
-  return points.map((p) => asNumber((p as unknown as Record<string, unknown>).position))
+  return points.map((p) => {
+    const raw = (p as unknown as Record<string, unknown>).position
+    if (raw === null || raw === undefined) return null
+    return asNumber(raw)
+  })
 }
 
 /** 从后端 fact-object 数组提取 value 字段（通用：读 .value 字段） */
@@ -282,7 +286,6 @@ export function parseLeadership(
 // ============================================================
 
 export interface ScopeAttributionParsed {
-  status: string | null
   direction: {
     kind: string
     positive: ScopeMemberEvidence[] | null
@@ -431,7 +434,6 @@ export function parseAttribution(
   const m = composition?.member_attribution
   if (!m) {
     return {
-      status: null,
       direction: null,
       capitalTilt: null,
       breadth: null,
@@ -442,7 +444,6 @@ export function parseAttribution(
     }
   }
   return {
-    status: m.status === null ? null : asString(m.status),
     direction: parseDirectionGroup(m.direction),
     capitalTilt: parseCapitalTiltGroup(m.capital_tilt),
     breadth: parseBreadthGroup(m.breadth),

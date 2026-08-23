@@ -672,10 +672,12 @@ export interface ReviewScopeListResponse {
 
 /** Historical Dynamics fact-object 形状（one entry per trading observation，never compressed） */
 
-/** Position series: persisted position fact object */
+/** Position series: persisted position fact object
+ *  position = number when status == "ready"
+ *  position = null when status == "insufficient_history" or "unavailable_current" */
 export interface ScopeDynamicsPositionPoint {
   trade_date: string
-  position: number
+  position: number | null
   status: string | null
   history?: unknown
 }
@@ -906,9 +908,8 @@ export interface ScopeAttributionLeadershipGroup {
   exits: ScopeMemberEvidence[] | null
 }
 
-/** Composition.member_attribution 顶层 */
+/** Composition.member_attribution 顶层（后端固定 8-key，无顶层 status） */
 export interface ScopeMemberAttributionLayer {
-  status: string | null
   scope: Record<string, unknown> | null
   direction: ScopeAttributionDirectionGroup | null
   capital_tilt: ScopeAttributionCapitalTiltGroup | null

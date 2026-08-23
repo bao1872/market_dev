@@ -7,7 +7,6 @@
 import { useMemo } from 'react'
 import { useReviewScopeDetail } from './useReviewScopeDetail'
 import { extractReviewError } from './api'
-import { reviewKeys } from './queryKeys'
 import {
   parseDynamicsLayer,
   parseInternalStructure,
@@ -150,12 +149,10 @@ export default function ScopeDetailWorkspace({
         {tab === 'internal' && <ScopeInternalStructurePanel internal={panels.internal} />}
         {tab === 'leadership' && <ScopeLeadershipPanel leadership={panels.leadership} />}
         {tab === 'attribution' && <ScopeMemberAttributionPanel attr={panels.attribution} />}
-        {tab === 'facts' && <ScopeRawFactsPanel observation={detail.data.observation} attr={panels.attribution} />}
+        {tab === 'facts' && <ScopeRawFactsPanel observation={detail.data.observation} />}
       </div>
     </div>
   )
 }
 
-// 让 detail identity 可被查询合同测试引用（不含 tab，证明切换 tab 不改变 key）
-export { reviewKeys }
 export type { ReviewDetailTab }

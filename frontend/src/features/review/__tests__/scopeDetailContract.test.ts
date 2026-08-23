@@ -68,9 +68,10 @@ function makeComposition(
   }
 }
 
-/** Position fact-object fixture — 镜像 backend compute_historical_dynamics_series 输出 */
+/** Position fact-object fixture — 镜像 backend compute_historical_dynamics_series 输出
+ *  position 支持 number | null（ready → number；unavailable → null） */
 function positionPoint(trade_date: string, position: number | null, status = 'ready'): ScopeDynamicsPositionPoint {
-  return { trade_date, position: position as number, status, history: null }
+  return { trade_date, position, status, history: null }
 }
 
 /** Value fact-object fixture — 镜像 backend EMA/Velocity/Acceleration 输出 */
@@ -78,12 +79,16 @@ function valuePoint(trade_date: string, value: number | null, status = 'ready'):
   return { trade_date, value, status }
 }
 
-/** Persistence fact-object fixture — 镜像 backend persistence 输出 */
-function persistencePoint(trade_date: string, coverage: number | null): ScopeDynamicsPersistencePoint {
+/** Persistence fact-object fixture — 镜像 backend persistence 输出
+ *  PERSISTENCE_MINIMUM_VALID_COUNT = 15 */
+function persistencePoint(trade_date: string, coverage: number | null, status = 'ready'): ScopeDynamicsPersistencePoint {
+  const validCount = coverage !== null ? Math.round(coverage * 20) : null
+  const insufficient = validCount !== null && validCount < 15
   return {
-    trade_date, window_size: 20, minimum_valid_count: 10, candidate_count: 20,
-    valid_count: coverage !== null ? Math.round(coverage * 20) : null,
-    coverage, upper_count: null, lower_count: null, upper_occupancy: null, lower_occupancy: null, status: 'ready',
+    trade_date, window_size: 20, minimum_valid_count: 15, candidate_count: 20,
+    valid_count: validCount,
+    coverage, upper_count: null, lower_count: null, upper_occupancy: null, lower_occupancy: null,
+    status: insufficient ? 'insufficient_history' : status,
   }
 }
 
@@ -181,16 +186,20 @@ function makeConcentrationGroup() {
   }
 }
 
-/** 生成 Reconciliation（skipped: string[], checks: Record<string, Check>） */
+/** 生成 Reconciliation（skipped: string[], checks: Record<string, Check>）
+ *  镜像 backend 真实 keys/kind/resolved vocabulary */
 function makeReconciliation() {
   return {
-    violation_count: 3,
-    skipped: ['leadership', 'breadth'],
+    violation_count: 2,
+    skipped: ['leadership', 'concentration_amount'],
     tolerance: 1e-6,
     checks: {
-      direction_sum: { pass: true, resolved: 'matched', kind: 'sum_check' },
-      leadership: { pass: null, resolved: 'skipped', kind: 'availability_check' },
-      breadth_sum: { pass: false, resolved: 'retry', kind: 'sum_check' },
+      direction: { pass: true, resolved: 'matched', kind: 'sum' },
+      capital_tilt: { pass: true, resolved: 'matched', kind: 'sum' },
+      concentration_price: { pass: null, resolved: 'skipped', kind: 'counts_and_ratios' },
+      concentration_amount: { pass: false, resolved: 'mismatch', kind: 'counts_and_ratios' },
+      breadth: { pass: true, resolved: 'matched', kind: 'sum' },
+      leadership: { pass: null, resolved: 'skipped', kind: 'set' },
     },
   }
 }
@@ -236,13 +245,13 @@ test('D1. Dynamics fact-object 序列正确解析为日期对齐 series（非 nu
   assert.equal(dyn.phaseFacts.length, 3)
 })
 
-test('D2. fact-object 序列中缺失观测以 null 保留（不补 0、不 carry）', () => {
+test('D2. fact-object 序列中 position=null 保留 null（unavailable_current 语义），position=0 是合法值', () => {
   const dates = ['2026-08-19', '2026-08-20', '2026-08-21']
-  // 中间日期 position=null
+  // 中间日期 position=null (status=unavailable_current)
   const positionSeries: ScopeDynamicsPositionPoint[] = [
-    positionPoint(dates[0], 10),
-    { trade_date: dates[1], position: 0, status: 'unavailable' },  // position=0 但 status=unavailable
-    positionPoint(dates[2], 30),
+    { trade_date: dates[0], position: 10, status: 'ready' },
+    { trade_date: dates[1], position: null, status: 'unavailable_current' },  // position=null
+    { trade_date: dates[2], position: 30, status: 'ready' },
   ]
   const valueSeries: ScopeDynamicsValuePoint[] = [
     valuePoint(dates[0], 1),
@@ -261,10 +270,13 @@ test('D2. fact-object 序列中缺失观测以 null 保留（不补 0、不 carr
   })
   const dyn = parseDynamicsLayer(comp)
   assert.ok(dyn)
-  // position=0 是合法值（不是 null），因为 backend position 是 number
-  assert.equal(dyn.position[1], 0, 'position=0 是合法有效值，不是 null')
+  // position=null → 解析为 null（不是 0，不是 number）
+  assert.equal(dyn.position[1], null, 'position=null 解析为 null（unavailable_current 语义）')
   // velocity 中间值为 null（因为 value=null）
   assert.equal(dyn.velocity[1], null, 'value=null 保持 null')
+  // 其他两个位置正常
+  assert.equal(dyn.position[0], 10)
+  assert.equal(dyn.position[2], 30)
 })
 
 test('D3. historical_dynamics 缺失 → 返回结构含空 series 与状态', () => {
@@ -474,29 +486,29 @@ test('L3. empty_leader_set 仍保留 ids（null != 0，empty != null）', () => 
 // 5. Member Attribution parser — 真实后端形状
 // ============================================================
 
-test('A1. direction 正向/负向 direct array 解析（不是 {members:[...]}）', () => {
+test('A1. direction 正向/负向 direct array 解析（不是 {members:[...]}），无顶层 status', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null,
+      scope: null,
       direction: makeDirectionGroup(),
       capital_tilt: null, breadth: null, concentration: null, leadership: null,
       reconciliation: null, determinism_checksum: 'abc',
     },
   })
   const a = parseAttribution(comp)
-  assert.equal(a.status, 'ready')
   assert.equal(a.direction?.positive?.length, 2, 'positive 是直接 MemberEvidence[]，不是嵌套 {members:[...]}')
   assert.equal(a.direction?.negative?.length, 1)
   assert.equal(a.direction?.positive?.[0]?.member_id, 'a')
   assert.equal(a.direction?.positive?.[0]?.contribution, 0.01)
   assert.equal(a.direction?.sumContribution, 0.005)
   assert.equal(a.determinismChecksum, 'abc')
+  assert.equal((a as unknown as Record<string, unknown>).status, undefined, '顶层无 status 字段')
 })
 
 test('A2. capital_tilt 直接数组 + tilt_contribution 字段解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null,
+      scope: null,
       direction: null,
       capital_tilt: makeCapitalTiltGroup(),
       breadth: null, concentration: null, leadership: null,
@@ -514,7 +526,7 @@ test('A2. capital_tilt 直接数组 + tilt_contribution 字段解析', () => {
 test('A3. breadth direct array 解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null,
+      scope: null, direction: null, capital_tilt: null,
       breadth: {
         status: 'ready', denominator: 50,
         advance: [{ member_id: 's1', return_1d: 0.02 }],
@@ -537,7 +549,7 @@ test('A3. breadth direct array 解析', () => {
 test('A4. concentration price/amount 使用 {members:[...]} 对象（唯一例外）', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null,
       concentration: makeConcentrationGroup(),
       leadership: null,
       reconciliation: null, determinism_checksum: null,
@@ -554,7 +566,7 @@ test('A4. concentration price/amount 使用 {members:[...]} 对象（唯一例�
 test('A5. leadership retained/entrants/exits direct array 解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null,
       leadership: makeLeadershipAttrGroup(),
       reconciliation: null, determinism_checksum: null,
     },
@@ -574,33 +586,41 @@ test('A5. leadership retained/entrants/exits direct array 解析', () => {
 test('R1. Reconciliation: skipped 保持 string[]，checks 转为带 key 的数组', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
       reconciliation: makeReconciliation(),
       determinism_checksum: null,
     },
   })
   const a = parseAttribution(comp)
   assert.ok(a.reconciliation)
-  // skipped 必须是 string[]（不是单个 string）
-  assert.deepEqual(a.reconciliation?.skipped, ['leadership', 'breadth'])
+  // skipped 必须是 string[]（不是单个 string），镜像 backend keys
+  assert.deepEqual(a.reconciliation?.skipped, ['leadership', 'concentration_amount'])
   assert.equal(a.reconciliation?.skipped.length, 2)
-  // checks 转为带 key 的数组
-  assert.equal(a.reconciliation?.checks.length, 3)
-  // check identity 来自 map key
-  assert.equal(a.reconciliation?.checks[0]?.key, 'direction_sum')
-  assert.equal(a.reconciliation?.checks[0]?.kind, 'sum_check')
+  // checks 转为带 key 的数组 — 6 条（direction/capital_tilt/concentration_price/concentration_amount/breadth/leadership）
+  assert.equal(a.reconciliation?.checks.length, 6)
+  // check identity 来自 map key（按 Object.entries 插入顺序）
+  assert.equal(a.reconciliation?.checks[0]?.key, 'direction')
+  assert.equal(a.reconciliation?.checks[0]?.kind, 'sum')
   assert.equal(a.reconciliation?.checks[0]?.pass, true)
   assert.equal(a.reconciliation?.checks[0]?.resolved, 'matched')
-  // skipped check（pass=null）
-  assert.equal(a.reconciliation?.checks[1]?.key, 'leadership')
-  assert.equal(a.reconciliation?.checks[1]?.pass, null)
-  assert.equal(a.reconciliation?.checks[1]?.resolved, 'skipped')
+  // concentration_amount mismatch（pass=false）
+  const mismatch = a.reconciliation?.checks.find((c) => c.key === 'concentration_amount')
+  assert.ok(mismatch)
+  assert.equal(mismatch?.pass, false)
+  assert.equal(mismatch?.resolved, 'mismatch')
+  assert.equal(mismatch?.kind, 'counts_and_ratios')
+  // leadership skipped（pass=null, resolved=skipped）
+  const skip = a.reconciliation?.checks.find((c) => c.key === 'leadership')
+  assert.ok(skip)
+  assert.equal(skip?.pass, null)
+  assert.equal(skip?.resolved, 'skipped')
+  assert.equal(skip?.kind, 'set')
 })
 
 test('R2. Reconciliation: skipped 空数组时保持空数组', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
       reconciliation: { violation_count: 0, skipped: [], tolerance: null, checks: {} },
       determinism_checksum: null,
     },
@@ -764,7 +784,7 @@ test('REG-C. 无 Math.min 静默截断（用 Math.max 保持所有日期）', ()
 test('REG-D. direction.positive direct array 被正确解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null,
+      scope: null,
       direction: makeDirectionGroup(),
       capital_tilt: null, breadth: null, concentration: null, leadership: null,
       reconciliation: null, determinism_checksum: null,
@@ -778,7 +798,7 @@ test('REG-D. direction.positive direct array 被正确解析', () => {
 test('REG-E. capital_tilt.positive direct array 被正确解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null,
+      scope: null, direction: null,
       capital_tilt: makeCapitalTiltGroup(),
       breadth: null, concentration: null, leadership: null,
       reconciliation: null, determinism_checksum: null,
@@ -791,7 +811,7 @@ test('REG-E. capital_tilt.positive direct array 被正确解析', () => {
 test('REG-F. breadth.advance direct array 被正确解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null,
+      scope: null, direction: null, capital_tilt: null,
       breadth: { status: 'ready', denominator: 50, advance: [{ member_id: 'x', return_1d: 0.01 }], decline: [], unchanged: [], unavailable: [] },
       concentration: null, leadership: null,
       reconciliation: null, determinism_checksum: null,
@@ -804,7 +824,7 @@ test('REG-F. breadth.advance direct array 被正确解析', () => {
 test('REG-G. leadership.retained direct array 被正确解析', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null,
       leadership: makeLeadershipAttrGroup(),
       reconciliation: null, determinism_checksum: null,
     },
@@ -816,7 +836,7 @@ test('REG-G. leadership.retained direct array 被正确解析', () => {
 test('REG-H. concentration price.members 被正确解析（唯一嵌套）', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null,
       concentration: makeConcentrationGroup(),
       leadership: null,
       reconciliation: null, determinism_checksum: null,
@@ -827,25 +847,28 @@ test('REG-H. concentration price.members 被正确解析（唯一嵌套）', () 
   assert.equal(a.concentration?.price?.members[0]?.member_id, 'f')
 })
 
-test('REG-I. Reconciliation checks object 转为带 key 的数组', () => {
+test('REG-I. Reconciliation checks object 转为带 key 的数组（真实 backend keys）', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
       reconciliation: makeReconciliation(),
       determinism_checksum: null,
     },
   })
   const a = parseAttribution(comp)
   const keys = a.reconciliation?.checks.map((c) => c.key) ?? []
-  assert.ok(keys.includes('direction_sum'), 'direction_sum check 必须存在')
+  assert.ok(keys.includes('direction'), 'direction check 必须存在')
+  assert.ok(keys.includes('capital_tilt'), 'capital_tilt check 必须存在')
+  assert.ok(keys.includes('breadth'), 'breadth check 必须存在')
+  assert.ok(keys.includes('concentration_price'), 'concentration_price check 必须存在')
+  assert.ok(keys.includes('concentration_amount'), 'concentration_amount check 必须存在')
   assert.ok(keys.includes('leadership'), 'leadership check 必须存在')
-  assert.ok(keys.includes('breadth_sum'), 'breadth_sum check 必须存在')
 })
 
 test('REG-J. skipped string[] 保持数组语义', () => {
   const comp = makeComposition({
     member_attribution: {
-      status: 'ready', scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
+      scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
       reconciliation: makeReconciliation(),
       determinism_checksum: null,
     },
@@ -940,4 +963,132 @@ test('ST1. Workspace 对 composition=null 显示明确文案', () => {
   const src = read('ScopeDetailWorkspace.tsx')
   assert.match(src, /该 Scope 当前没有 Canonical Composition/)
   assert.match(src, /选择一个 Scope 查看详细分析/)
+})
+
+// ============================================================
+// 16. Final closure — contract truthfulness regression
+// ============================================================
+
+test('CLOSURE-A. position=null 通过类型检查（无 as number 强转）', () => {
+  // positionPoint 现在接受 number | null，无类型幻觉
+  const p: ScopeDynamicsPositionPoint = {
+    trade_date: '2026-08-21',
+    position: null,  // 真实的 null，不是 as number
+    status: 'unavailable_current',
+  }
+  assert.equal(p.position, null)
+  assert.equal(p.status, 'unavailable_current')
+})
+
+test('CLOSURE-B. position=0 + status=ready 保持真实 0（null != 0）', () => {
+  const dates = ['2026-08-19', '2026-08-20', '2026-08-21']
+  const positionSeries: ScopeDynamicsPositionPoint[] = [
+    { trade_date: dates[0], position: 10, status: 'ready' },
+    { trade_date: dates[1], position: 0, status: 'ready' },  // 0 是合法值
+    { trade_date: dates[2], position: null, status: 'unavailable_current' },
+  ]
+  const comp = makeComposition({
+    historical_dynamics: makeDynamicsLayer({
+      series: {
+        position: positionSeries,
+        ema5: [], ema20: [], velocity: [], signal: [], acceleration: [], persistence: [],
+      },
+      phaseFacts: [],
+    }),
+  })
+  const dyn = parseDynamicsLayer(comp)
+  assert.ok(dyn)
+  assert.equal(dyn.position[0], 10)
+  assert.equal(dyn.position[1], 0, 'ready + position=0 保持真实 0')
+  assert.equal(dyn.position[2], null, 'unavailable_current + position=null 保持 null')
+})
+
+test('CLOSURE-C. Current Dynamics Status 来自 final dynamics_phase（非 layer status）', () => {
+  const src = read('ScopeDynamicsPanel.tsx')
+  // Status 必须从 phaseFact.status 读取（通过 f?.status 其中 f=phaseFact），不是 dynamics.status
+  assert.match(src, /f\?\.status/, 'Status 必须从 phaseFact.status 读取')
+  assert.doesNotMatch(src, /status=\{dynamics\.status\}/, '不得使用 dynamics.status 作为 Current Status')
+})
+
+test('CLOSURE-D. Raw Facts 无 member-attribution 依赖', () => {
+  const src = read('ScopeRawFactsPanel.tsx')
+  assert.doesNotMatch(src, /ScopeAttributionParsed/, 'RawFacts 不得 import ScopeAttributionParsed')
+  assert.doesNotMatch(src, /attr\??:.*ScopeAttributionParsed/, 'RawFacts 不得接受 attr prop')
+  assert.doesNotMatch(src, /determinismChecksum/, 'RawFacts 不得展示 determinism_checksum')
+})
+
+test('CLOSURE-E. determinism_checksum 在 Attribution panel 底部', () => {
+  const src = read('ScopeMemberAttributionPanel.tsx')
+  assert.match(src, /determinismChecksum/, 'Attribution panel 必须展示 determinism_checksum')
+})
+
+test('CLOSURE-F. ScopeMemberAttributionLayer 无顶层 status', () => {
+  const src = read('types.ts')
+  // ScopeMemberAttributionLayer 不得有 status 字段
+  const layerSection = src.substring(src.indexOf('interface ScopeMemberAttributionLayer'))
+  const endIdx = layerSection.indexOf('}', layerSection.indexOf('}') + 1)
+  const layerDef = layerSection.substring(0, endIdx)
+  assert.doesNotMatch(layerDef, /^\s+status:/m, 'ScopeMemberAttributionLayer 不得有顶层 status')
+})
+
+test('CLOSURE-G. Parsed Attribution 无 status 字段', () => {
+  const src = read('scopeDetailContract.ts')
+  // parseAttribution 返回值不得有 status
+  assert.doesNotMatch(src, /status:\s*(m\.status|null)/, 'parseAttribution 不得设置 status')
+})
+
+test('CLOSURE-H. CSS module classes 存在于 review.module.scss', () => {
+  const scss = read('review.module.scss')
+  const requiredClasses = [
+    'dynamicsChartWrapper',
+    'dynamicsChartTitle',
+    'breadthPartial',
+    'breadthRow',
+    'breadthValue',
+    'leadStatusBanner',
+  ]
+  for (const cls of requiredClasses) {
+    assert.match(scss, new RegExp(`\\.${cls}[\\s{]`), `CSS class .${cls} 必须存在于 review.module.scss`)
+  }
+})
+
+test('CLOSURE-I. Persistence fixture 使用 minimum_valid_count=15', () => {
+  const src = read('__tests__/scopeDetailContract.test.ts')
+  assert.match(src, /minimum_valid_count:\s*15/, 'Persistence fixture 必须使用 minimum_valid_count=15')
+})
+
+test('CLOSURE-J. Reconciliation fixture 使用真实 backend keys', () => {
+  const r = makeReconciliation()
+  // 必须使用真实 backend keys
+  const keys = Object.keys(r.checks)
+  assert.ok(keys.includes('direction'), 'Reconciliation fixture 必须包含 direction key')
+  assert.ok(keys.includes('capital_tilt'), 'Reconciliation fixture 必须包含 capital_tilt key')
+  assert.ok(keys.includes('concentration_price'), 'Reconciliation fixture 必须包含 concentration_price key')
+  assert.ok(keys.includes('concentration_amount'), 'Reconciliation fixture 必须包含 concentration_amount key')
+  assert.ok(keys.includes('breadth'), 'Reconciliation fixture 必须包含 breadth key')
+  assert.ok(keys.includes('leadership'), 'Reconciliation fixture 必须包含 leadership key')
+  // 不得有旧的虚构 key
+  assert.ok(!keys.some(k => k.includes('_sum')), 'Reconciliation fixture 不得使用虚构 key (_sum)')
+  // kind 必须是真实值
+  const kinds = new Set(Object.values(r.checks).map(c => c.kind))
+  for (const k of kinds) {
+    assert.ok(['sum', 'counts_and_ratios', 'set'].includes(k), `kind ${k} 必须是真实 backend kind`)
+  }
+  // resolved 必须是真实值
+  const resolvedVals = new Set(Object.values(r.checks).map(c => c.resolved))
+  for (const rv of resolvedVals) {
+    assert.ok(['matched', 'mismatch', 'both_unavailable', 'skipped'].includes(rv),
+      `resolved ${rv} 必须是真实 backend resolved`)
+  }
+})
+
+test('CLOSURE-K. Test-only reviewKeys export 已移除', () => {
+  const src = read('ScopeDetailWorkspace.tsx')
+  assert.doesNotMatch(src, /import.*reviewKeys.*from.*queryKeys/, 'Workspace 不得 import reviewKeys')
+  assert.doesNotMatch(src, /export.*reviewKeys/, 'Workspace 不得 re-export reviewKeys')
+})
+
+test('CLOSURE-L. RawFacts 在 Workspace 中不再接收 attr', () => {
+  const src = read('ScopeDetailWorkspace.tsx')
+  assert.doesNotMatch(src, /ScopeRawFactsPanel.*attr=/, 'Workspace 调用 RawFacts 不得传 attr prop')
 })

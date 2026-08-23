@@ -1006,6 +1006,20 @@
 }
 
 // ===== Dynamics =====
+.dynamicsChartWrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dynamicsChartTitle {
+  font-size: 11px;
+  font-weight: 600;
+  color: v.$color-muted;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
 .dynamicsChart {
   width: 100%;
   height: 120px;
@@ -1112,6 +1126,30 @@
   color: v.$color-muted;
 }
 
+.breadthPartial {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px dashed v.$color-border-soft;
+  border-radius: 6px;
+  background: v.$color-bg;
+}
+
+.breadthRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.breadthValue {
+  margin-left: auto;
+  font-family: v.$font-mono;
+  font-variant-numeric: tabular-nums;
+  color: v.$color-text;
+}
+
 .legendDot {
   width: 8px;
   height: 8px;
@@ -1166,6 +1204,19 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.leadStatusBanner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+  border: 1px solid v.$color-warning;
+  border-radius: 6px;
+  background: rgba(245, 158, 11, 0.08);
+  color: v.$color-warning;
+  font-size: 12px;
 }
 
 // ===== Attribution =====

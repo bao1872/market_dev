@@ -104,11 +104,11 @@ function FactRow({ label, value, title }: { label: string; value: string; title?
   )
 }
 
-function CurrentFactStrip({ phaseFact, status }: { phaseFact: ScopePhaseFact | null; status: string }) {
+function CurrentFactStrip({ phaseFact }: { phaseFact: ScopePhaseFact | null }) {
   const f = phaseFact
   return (
     <div className={styles.factStrip}>
-      <FactRow label="Status" value={status ? String(status) : NULL_DISPLAY} />
+      <FactRow label="Status" value={f?.status ?? NULL_DISPLAY} title="来自末尾 dynamics_phase observation" />
       <FactRow label="Phase" value={formatPhaseLabel(f?.phase)} title="来自末尾 dynamics_phase observation" />
       <FactRow label="Position" value={formatPosition(f?.position)} />
       <FactRow label="Velocity" value={formatNumberNullable(f?.velocity)} />
@@ -149,7 +149,7 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
       <SeriesChart data={positionData} kind="position" title="Position" showZeroLine={false} />
       <SeriesChart data={velocityData} kind="offset" title="Velocity" showZeroLine />
       <SeriesChart data={accelerationData} kind="offset" title="Acceleration" showZeroLine />
-      <CurrentFactStrip phaseFact={current} status={dynamics.status} />
+      <CurrentFactStrip phaseFact={current} />
     </div>
   )
 }

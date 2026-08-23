@@ -6,7 +6,6 @@
 // - chip 可诚实地为 { status: "unavailable" }，原样展示、不隐藏、不转 0。
 // - null != 0、[] != null、unavailable != empty 语义保留。
 // - 默认不是 JSON blob；嵌套未知节点用通用递归事实查看器，但无业务解释/score/推断标签。
-import type { ScopeAttributionParsed } from './scopeDetailContract'
 import { observationGroups } from './scopeDetailContract'
 import { NULL_DISPLAY } from './reviewFormat'
 import styles from './review.module.scss'
@@ -70,10 +69,8 @@ function FactNode({ k, v }: { k: string; v: unknown }) {
 
 export default function ScopeRawFactsPanel({
   observation,
-  attr,
 }: {
   observation: Record<string, unknown> | null | undefined
-  attr?: ScopeAttributionParsed | null
 }) {
   const groups = observationGroups(observation)
   if (groups.length === 0) {
@@ -87,9 +84,6 @@ export default function ScopeRawFactsPanel({
           <FactNode k={g.key} v={g.value} />
         </section>
       ))}
-      {attr?.determinismChecksum && (
-        <div className={styles.checksumLine}>determinism_checksum {attr.determinismChecksum}</div>
-      )}
     </div>
   )
 }
