@@ -543,6 +543,13 @@ async def list_review_scope_summaries_by_run(
     columns and JSONB scalar paths are selected — the full ~130 KiB
     ``composition_payload`` is never loaded into Python.
 
+    Full canonical read identity (lineage contract): BOTH queries constrain the
+    Fact by ``review_run_id`` (published run) AND the requested ``trade_date``.
+    A run that theoretically carries a single trade_date must NOT be relied on to
+    keep the Fact grain honest — the WHERE predicate is the guard against
+    future-leakage / wrong-date contamination, not the assumption that upstream
+    "would not write a different date".
+
     Pagination is DB-level (count query + page projection) with deterministic
     ``ORDER BY scope_type, scope_key``; no load-all-then-slice, no per-scope
     round-trip.
@@ -553,7 +560,8 @@ async def list_review_scope_summaries_by_run(
 
     # --- count (same filter as the page) ---
     count_stmt = select(func.count()).select_from(fact).where(
-        fact.review_run_id == review_run_id
+        fact.review_run_id == review_run_id,
+        fact.trade_date == trade_date,
     )
     if scope_type is not None:
         count_stmt = count_stmt.where(fact.scope_type == scope_type)
@@ -603,7 +611,10 @@ async def list_review_scope_summaries_by_run(
         )
         .select_from(fact)
         .join(comp, join_cond, isouter=True)
-        .where(fact.review_run_id == review_run_id)
+        .where(
+            fact.review_run_id == review_run_id,
+            fact.trade_date == trade_date,
+        )
         .order_by(fact.scope_type, fact.scope_key)
         .offset(offset)
         .limit(limit)

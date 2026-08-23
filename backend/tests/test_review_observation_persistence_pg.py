@@ -441,7 +441,7 @@ def _composition_payload(
     scope_type: str,
     scope_key: str,
     trade_date: date,
-    phase: str = "trending",
+    phase: str = "Strengthening",
     position: float = 0.5,
     velocity: float = 0.1,
     acceleration: float = -0.02,
@@ -449,7 +449,7 @@ def _composition_payload(
     lower_occupancy: float = 0.3,
     ew_return: float = 0.012,
     aw_return: float = 0.015,
-    capital_tilt: float = 0.2,
+    capital_tilt: float = 0.003,
     advance: float = 0.55,
     decline: float = 0.3,
     unchanged: float = 0.15,
@@ -462,7 +462,16 @@ def _composition_payload(
     dynamics_status: str = "ready",
     include_position_phase: bool = True,
 ) -> dict:
-    """Minimal but legal canonical Composition (9 top-level keys)."""
+    """Projection-shape fixture: a hand-assembled, canonical-shaped Composition.
+
+    This is NOT a "legal canonical Composition" in the sense of having been
+    produced or validated by the canonical owner — it only provides the JSONB
+    scalar paths the thin projection reads.  Values are chosen coherent (e.g.
+    capital_tilt 0.003 = aw_return 0.015 − ew_return 0.012) so the projection
+    test stays self-consistent, but the fixture does NOT assert canonical
+    semantic legality.  The projection test exercises projection, not
+    computation, so no second Capital Tilt formula owner is introduced here.
+    """
     historical_dynamics: dict = {"status": dynamics_status}
     if include_position_phase:
         historical_dynamics["phase"] = phase
@@ -529,7 +538,7 @@ async def test_scope_summary_projection_jsonb_left_join_pagination(
         algorithm_version="review-2.0.0",
         composition_payload=_composition_payload(
             scope_type="concept", scope_key="A", trade_date=T,
-            phase="trending", position=0.5, velocity=0.1,
+            phase="Strengthening", position=0.5, velocity=0.1,
         ),
     )
 
@@ -561,11 +570,11 @@ async def test_scope_summary_projection_jsonb_left_join_pagination(
     assert isinstance(a.jaccard_stability, float)
     assert a.jaccard_stability == pytest.approx(0.8)
     assert a.migration == pytest.approx(0.1)
-    assert a.phase == "trending"
+    assert a.phase == "Strengthening"
     assert a.dynamics_status == "ready"
     assert a.equal_weight_return == pytest.approx(0.012)
     assert a.amount_weighted_return == pytest.approx(0.015)
-    assert a.capital_tilt == pytest.approx(0.2)
+    assert a.capital_tilt == pytest.approx(0.003)
     assert a.advance_ratio == pytest.approx(0.55)
     assert a.leadership_status == "ready"
 
@@ -631,3 +640,47 @@ async def test_scope_summary_projection_jsonb_null_key_yields_none(
     assert c.phase is None
     assert c.position is None
     assert c.velocity is None
+
+
+async def test_scope_summary_projection_excludes_wrong_trade_date(
+    db_session: AsyncSession,
+) -> None:
+    """Contamination guard (Slice B lineage regression): a Fact for the SAME run
+    but a DIFFERENT trade_date must NOT leak into a read requested for T.
+
+    The projection must constrain the Fact by BOTH ``review_run_id`` (published
+    run) AND the requested ``trade_date``.  Before the fix the ``trade_date``
+    argument was accepted but ignored by the Fact WHERE predicates, so a request
+    for T would also return a Fact written for T-1 under the same run id
+    (total == 2, both rows returned).  After the fix only the T Fact is read
+    (total == 1, T-1 Fact excluded by the Fact ``trade_date`` predicate).
+    """
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()
+
+    # Fact for the requested trade_date T (scope_key A).
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="A", trade_date=T),
+        _canonical_obs(scope_type="concept", scope_key="A", marker_mean=0.01),
+        review_run_id=run.id,
+    )
+    # Fact for a DIFFERENT trade_date T-1 under the SAME run id (scope_key B).
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="B", trade_date=T1),
+        _canonical_obs(scope_type="concept", scope_key="B", marker_mean=0.02, trade_date=T1),
+        review_run_id=run.id,
+    )
+    await db_session.commit()
+
+    total, rows = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=20,
+    )
+    # wrong-date Fact explicitly excluded from both the count and the page
+    assert total == 1, f"wrong-date Fact leaked into total: {total}"
+    assert len(rows) == 1
+    assert rows[0].scope_type == "concept"
+    assert rows[0].scope_key == "A"

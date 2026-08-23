@@ -479,12 +479,21 @@ async def test_scope_summary_projection_sql_shape_is_thin() -> None:
     )
 
     assert len(captured) == 2, f"expected count+page, got {len(captured)}"
-    page_sql = None
-    for stmt in captured:
-        sql = str(stmt.compile(dialect=pg.dialect()))
-        if "LIMIT" in sql:
-            page_sql = sql
+    compiled = [str(s.compile(dialect=pg.dialect())) for s in captured]
+    # the page statement is the one carrying LIMIT/OFFSET
+    page_sql = next((sql for sql in compiled if "LIMIT" in sql), None)
     assert page_sql is not None, "page statement must carry LIMIT"
+
+    # Fact trade_date lineage predicate must appear in BOTH the count and the
+    # page statement — in the production SQL, not merely in the Python call
+    # arguments.  `review_scope_observation_facts.trade_date = ` (fact on the
+    # LEFT of `=`) matches a WHERE predicate and excludes the LEFT JOIN's
+    # `snapshots.trade_date = fact.trade_date` (where the fact column is on the
+    # RIGHT).  This proves the requested trade_date actually constrains the Fact
+    # rows read (Slice B lineage regression).
+    fact_td_predicate = re.compile(r"review_scope_observation_facts\.trade_date = ")
+    assert fact_td_predicate.search(compiled[0]), compiled[0]
+    assert fact_td_predicate.search(compiled[1]), compiled[1]
 
     # DB-level pagination + LEFT OUTER JOIN on the 4-key lineage grain.
     assert "LEFT OUTER JOIN" in page_sql
