@@ -4,10 +4,10 @@
 // 服务端分页；只读已发布快照，前端不计算聚合变量
 import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { getReviewScopes, extractReviewError } from './api'
+import { getLegacyReviewScopes, extractReviewError } from './api'
 import { reviewKeys } from './queryKeys'
 import ScopeMetricsTable from './ScopeMetricsTable'
-import type { ReviewScopeMetrics, ReviewScopeListParams } from './types'
+import type { LegacyReviewScopeMetrics, LegacyReviewScopeListParams, ReviewScopeListParams } from './types'
 import styles from './review.module.scss'
 
 const SCOPE_TYPE_OPTIONS = [
@@ -28,9 +28,9 @@ export interface MarketScanPanelProps {
   /** 当前选中 scopeKey（高亮行） */
   activeScopeKey: string | null
   /** 点击范围行：更新 URL scope 并切换到信号阶段 */
-  onSelectScope: (scope: ReviewScopeMetrics) => void
+  onSelectScope: (scope: LegacyReviewScopeMetrics) => void
   /** 打开证据抽屉（点击指标表头时） */
-  onOpenEvidence?: (scope: ReviewScopeMetrics) => void
+  onOpenEvidence?: (scope: LegacyReviewScopeMetrics) => void
 }
 
 export default function MarketScanPanel({
@@ -41,15 +41,15 @@ export default function MarketScanPanel({
   const [scopeType, setScopeType] = useState('')
   const [page, setPage] = useState(1)
 
-  const params: ReviewScopeListParams = {
+  const params: LegacyReviewScopeListParams = {
     scope_type: scopeType || undefined,
     page,
     page_size: PAGE_SIZE,
   }
 
   const query = useQuery({
-    queryKey: reviewKeys.scopes(tradeDate, params),
-    queryFn: () => getReviewScopes(tradeDate, params),
+    queryKey: reviewKeys.scopes(tradeDate, params as ReviewScopeListParams),
+    queryFn: () => getLegacyReviewScopes(tradeDate, params),
     enabled: !!tradeDate,
     staleTime: 60 * 1000,
   })

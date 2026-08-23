@@ -4,11 +4,13 @@
 // PRD §7.1 / §12 / §15
 
 // ============================================================
-// P/Q/U/C/V 指标合同（PRD §7.1）
+// [LEGACY] P/Q/U/C/V 指标合同（PRD §7.1， retired 于 canonical Scope 模型之后）
+// Slice C 起仅保留为 legacy 类型，禁止在 canonical 路径中使用。
+// 不得构造 canonical→legacy 适配器伪造 p/q/u/c/v/signalCount。
 // ============================================================
 
-/** P/Q/U/C/V 单个 component（PRD §7.1 components 元素） */
-export interface ReviewMetricComponent {
+/** [LEGACY] P/Q/U/C/V 单个 component（PRD §7.1 components 元素） */
+export interface LegacyReviewMetricComponent {
   name: string
   rawValue: number | null
   normalizedValue: number | null
@@ -23,10 +25,10 @@ export interface ReviewMetricComponent {
   status: string
   extra: Record<string, unknown> | null
   weightMode: string | null
-  readiness: ReviewMetricReadiness
+  readiness: LegacyReviewMetricReadiness
 }
 
-export interface ReviewMetricReadiness {
+export interface LegacyReviewMetricReadiness {
   raw_ready?: boolean
   normalized_ready?: boolean
   status?: string
@@ -35,8 +37,8 @@ export interface ReviewMetricReadiness {
   min_required?: number | null
 }
 
-/** P/Q/U/C/V 单个聚合变量 payload（PRD §7.1 通用结构） */
-export interface ReviewMetricPayload {
+/** [LEGACY] P/Q/U/C/V 单个聚合变量 payload（PRD §7.1 通用结构） */
+export interface LegacyReviewMetricPayload {
   /** 归一化值（0-100） */
   value: number | null
   rawValue: number | null
@@ -49,11 +51,11 @@ export interface ReviewMetricPayload {
   /** 当日横截面分位（0-100） */
   crossSectionPercentile: number | null
   historyObservationCount: number | null
-  components: ReviewMetricComponent[]
+  components: LegacyReviewMetricComponent[]
   coverage: number | null
   /** 状态：ready/insufficient_history/partial/unavailable */
   status: string
-  readiness: ReviewMetricReadiness
+  readiness: LegacyReviewMetricReadiness
 }
 
 // ============================================================
@@ -142,11 +144,12 @@ export interface ReviewOverview {
 }
 
 // ============================================================
-// 市场扫描（PRD §12.2）
+// [LEGACY] 市场扫描（PRD §12.2，P/Q/U/C/V 形态，retired）
+// Slice C 起仅作 legacy 类型，禁止在 canonical Scope 路径中使用。
 // ============================================================
 
-/** GET /v1/review/{trade_date}/scopes 单条记录 */
-export interface ReviewScopeMetrics {
+/** [LEGACY] GET /v1/review/{trade_date}/scopes 旧 P/Q/U/C/V 单条记录 */
+export interface LegacyReviewScopeMetrics {
   id: string
   reviewRunId: string
   tradeDate: string
@@ -159,11 +162,11 @@ export interface ReviewScopeMetrics {
   readyCount: number
   coverageRatio: number
   status: string
-  p: ReviewMetricPayload | null
-  q: ReviewMetricPayload | null
-  u: ReviewMetricPayload | null
-  c: ReviewMetricPayload | null
-  v: ReviewMetricPayload | null
+  p: LegacyReviewMetricPayload | null
+  q: LegacyReviewMetricPayload | null
+  u: LegacyReviewMetricPayload | null
+  c: LegacyReviewMetricPayload | null
+  v: LegacyReviewMetricPayload | null
   dataQuality: Record<string, unknown> | null
   signalCount: number
 }
@@ -177,7 +180,7 @@ export interface ReviewPagedResponse<T> {
   has_more: boolean
 }
 
-export type ReviewScopeListResponse = ReviewPagedResponse<ReviewScopeMetrics>
+export type LegacyReviewScopeListResponse = ReviewPagedResponse<LegacyReviewScopeMetrics>
 
 // ============================================================
 // 信号（PRD §12.3）
@@ -344,10 +347,27 @@ export type ReviewTrackingEvaluationListResponse = ReviewPagedResponse<ReviewTra
 // API 查询参数
 // ============================================================
 
-export interface ReviewScopeListParams {
+/**
+ * [LEGACY] 旧 scopes 列表参数（含 parent_scope_type/parent_scope_key）。
+ * Slice C 起 retired；canonical 列表参数见 ReviewScopeListParams。
+ */
+export interface LegacyReviewScopeListParams {
   scope_type?: string
   parent_scope_type?: string
   parent_scope_key?: string
+  include_partial?: boolean
+  page?: number
+  page_size?: number
+}
+
+// ============================================================
+// [CANONICAL] Scope-first 列表参数（仅后端支持的字段）
+// 不含 parent_scope_type / parent_scope_key（后端无此过滤）。
+// 不添加任何前端-only 过滤字段。
+// ============================================================
+
+export interface ReviewScopeListParams {
+  scope_type?: ReviewScopeFamily
   include_partial?: boolean
   page?: number
   page_size?: number
@@ -401,8 +421,8 @@ export type ReviewStage =
 /** 追踪复核子 Tab */
 export type TrackingTab = 'history' | 'watchlist' | 'events'
 
-/** P/Q/U/C/V 聚合变量标识 */
-export type MetricKey = 'p' | 'q' | 'u' | 'c' | 'v'
+/** [LEGACY] P/Q/U/C/V 聚合变量标识 */
+export type LegacyMetricKey = 'p' | 'q' | 'u' | 'c' | 'v'
 
 /** run 状态集合（PRD §5.1） */
 export const REVIEW_RUN_STATUSES = [
@@ -551,4 +571,127 @@ export interface DiscoveryDetailResponse {
 export interface ReviewInstrumentV2 extends ReviewInstrument {
   contributionPayload: unknown
   roleEvidence: unknown
+}
+
+// =========================================================================
+// [CANONICAL] Scope-first Review 合同（Slice C 引入）
+// 对应后端 schemas/review.py 的 ReviewScopeSummaryDTO / ReviewCanonicalScopeResponse / ReviewScopeCompositionDetailResponse。
+// 字段命名与后端 JSON 序列化保持一致。
+// 规则：前端不重新计算 phase / capital tilt / migration / score / ranking；
+//       所有分析字段为 nullable，缺失（Composition 不存在或 JSON 缺键）= null，绝不伪造 0。
+// =========================================================================
+
+// ------------------------------------------------------------
+// 枚举
+// ------------------------------------------------------------
+
+/** Scope 族（对应后端 scope_type 合法值） */
+export type ReviewScopeFamily =
+  | 'industry_l1'
+  | 'industry_l2'
+  | 'industry_l3'
+  | 'concept'
+
+/**
+ * Dynamics Phase 合法词表（后端 canonical vocabulary）。
+ * 不含第七个 fallback phase；未匹配/缺失 phase 保持 null。
+ */
+export type ReviewDynamicsPhase =
+  | 'Early Lift'
+  | 'Strengthening'
+  | 'Sustained'
+  | 'Decelerating'
+  | 'Weakening'
+  | 'Repairing'
+
+/** Composition readiness 合法值 */
+export type ReviewCompositionReadiness =
+  | 'ready'
+  | 'insufficient_history'
+  | 'unavailable_current'
+
+// ------------------------------------------------------------
+// Scope 列表项（GET /v1/review/{trade_date}/scopes）
+// ------------------------------------------------------------
+
+/** 单 Scope 的薄投影分析字段；Composition 缺失时整体为 null */
+export interface ReviewScopeSummary {
+  dynamicsStatus: string | null
+  phase: ReviewDynamicsPhase | null
+  position: number | null
+  velocity: number | null
+  acceleration: number | null
+  upperOccupancy: number | null
+  lowerOccupancy: number | null
+  equalWeightReturn: number | null
+  amountWeightedReturn: number | null
+  capitalTilt: number | null
+  advanceRatio: number | null
+  declineRatio: number | null
+  unchangedRatio: number | null
+  returnDispersion: number | null
+  priceNormalizedHhi: number | null
+  amountNormalizedHhi: number | null
+  leadershipStatus: string | null
+  jaccardStability: number | null
+  migration: number | null
+}
+
+/** 列表单条记录：Scope 身份 + readiness + 薄投影（永远不含 p/q/u/c/v/signalCount） */
+export interface ReviewScopeListItem {
+  scopeType: ReviewScopeFamily
+  scopeKey: string
+  scopeName: string | null
+  readiness: ReviewCompositionReadiness | string
+  status: string
+  eligibleCount: number
+  providedCount: number
+  coverageRatio: number | null
+  summary: ReviewScopeSummary | null
+}
+
+/** 列表分页响应 */
+export interface ReviewScopeListResponse {
+  items: ReviewScopeListItem[]
+  total: number
+  page: number
+  page_size: number
+  has_more: boolean
+}
+
+// ------------------------------------------------------------
+// Scope 详情（GET /v1/review/{trade_date}/scopes/{scope_type}/{scope_key}）
+// ------------------------------------------------------------
+
+/**
+ * Composition 顶层 9-key 稳定结构（canonical owner 产出，前端只承载、不重算）。
+ * 未知/原始叶子载荷用 Record<string, unknown>，禁止 any，禁止前端重算。
+ */
+export interface ReviewScopeComposition {
+  scope: {
+    scope_type: string
+    scope_key: string
+    scope_name: string | null
+    trade_date: string
+  }
+  trade_date: string
+  capability: Record<string, unknown>
+  scope_observation: Record<string, unknown>
+  historical_dynamics: Record<string, unknown>
+  internal_structure_facts: Record<string, unknown>
+  leadership: Record<string, unknown>
+  member_attribution: Record<string, unknown>
+  composition_readiness: Record<string, unknown>
+}
+
+/** 详情响应：对应后端 ReviewScopeCompositionDetailResponse（9-key composition + 薄 observation） */
+export interface ReviewScopeCompositionDetailResponse {
+  reviewRunId: string
+  tradeDate: string
+  scopeType: string
+  scopeKey: string
+  scopeName: string | null
+  algorithmVersion: string
+  composition: ReviewScopeComposition | null
+  observation: ReviewScopeSummary | null
 }

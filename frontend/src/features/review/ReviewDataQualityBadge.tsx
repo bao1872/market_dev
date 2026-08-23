@@ -1,7 +1,7 @@
 // [ReviewDataQualityBadge] - 描述: 数据质量徽章（PRD §14.1、§17）
 // 根据 scope/snapshot 状态显示 ready/partial/insufficient_history/unavailable
 // 禁止伪造完成状态；coverage 不足或历史不足必须如实展示
-import type { ReviewMetricPayload } from './types'
+import type { LegacyReviewMetricPayload } from './types'
 import styles from './review.module.scss'
 
 export interface ReviewDataQualityBadgeProps {
@@ -29,7 +29,7 @@ const STATUS_META: Record<string, { label: string; cls: string }> = {
  *   必须展示 rawValue + coverage + 历史不足原因，分位/delta 为空，不得显示"不可用"。
  * - unavailable：真不可用，显示缺省。
  */
-export function isMetricDisplayable(payload: ReviewMetricPayload | null): boolean {
+export function isMetricDisplayable(payload: LegacyReviewMetricPayload | null): boolean {
   if (!payload) return false
   return (
     payload.status === 'ready' ||

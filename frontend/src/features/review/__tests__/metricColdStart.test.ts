@@ -9,9 +9,9 @@ import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
 import { buildColdStartTitle, resolveMetricColdStart } from '../reviewReadiness.ts'
-import type { ReviewMetricPayload } from '../types.ts'
+import type { LegacyReviewMetricPayload } from '../types.ts'
 
-function makePayload(overrides: Partial<ReviewMetricPayload> = {}): ReviewMetricPayload {
+function makePayload(overrides: Partial<LegacyReviewMetricPayload> = {}): LegacyReviewMetricPayload {
   return {
     value: null,
     rawValue: 42.5,

@@ -23,11 +23,11 @@ import { test } from 'node:test'
 import { extractReviewError } from '../api'
 import { reviewKeys } from '../queryKeys'
 import {
-  DEFAULT_REVIEW_VIEW,
+  DEFAULT_LEGACY_REVIEW_VIEW as DEFAULT_REVIEW_VIEW,
   REVIEW_FORMAL_STAGES,
-  decodeReviewUrl,
-  encodeReviewUrl,
-  normalizeView,
+  decodeLegacyReviewUrl as decodeReviewUrl,
+  encodeLegacyReviewUrl as encodeReviewUrl,
+  normalizeLegacyView as normalizeView,
 } from '../urlState'
 import type { ReviewTrackingCreateRequest } from '../types'
 

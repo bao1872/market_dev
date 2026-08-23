@@ -3,13 +3,13 @@
 // 每个变量单元格：值 + 方向箭头 + 历史分位细条；不使用雷达图
 // 点击一行：更新 URL scope，进入该范围信号列表，不直接跳转个股
 // 前端不计算聚合变量，只展示后端返回的 payload
-import type { ReviewScopeMetrics, ReviewMetricPayload, MetricKey } from './types'
+import type { LegacyReviewScopeMetrics, LegacyReviewMetricPayload, LegacyMetricKey } from './types'
 import ReviewDataQualityBadge, { isMetricAvailable } from './ReviewDataQualityBadge'
 import { buildColdStartTitle, resolveMetricColdStart } from './reviewReadiness'
 import styles from './review.module.scss'
 
-const METRIC_KEYS: MetricKey[] = ['p', 'q', 'u', 'c', 'v']
-const METRIC_LABELS: Record<MetricKey, string> = {
+const METRIC_KEYS: LegacyMetricKey[] = ['p', 'q', 'u', 'c', 'v']
+const METRIC_LABELS: Record<LegacyMetricKey, string> = {
   p: 'P',
   q: 'Q',
   u: 'U',
@@ -44,11 +44,11 @@ function percentileClass(p: number | null): string {
 }
 
 export interface ScopeMetricsTableProps {
-  items: ReviewScopeMetrics[]
+  items: LegacyReviewScopeMetrics[]
   /** 当前选中范围（scopeKey），高亮对应行 */
   activeScopeKey?: string | null
   /** 点击行回调（更新 URL scope） */
-  onRowClick?: (scope: ReviewScopeMetrics) => void
+  onRowClick?: (scope: LegacyReviewScopeMetrics) => void
 }
 
 /** 单个指标单元格：值 + 方向箭头 + 历史分位细条 + 冷启动rawValue展示。
@@ -58,7 +58,7 @@ export interface ScopeMetricsTableProps {
  * - insufficient_history：rawValue + coverage，分位条和delta为空（但值行显示），
  *   鼠标悬浮显示"历史不足（历史观测=N条，coverage=X%）"
  */
-function MetricCell({ payload }: { payload: ReviewMetricPayload | null }) {
+function MetricCell({ payload }: { payload: LegacyReviewMetricPayload | null }) {
   if (!payload) {
     return <span className={styles.metricUnavailable}>未计算</span>
   }

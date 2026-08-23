@@ -4,11 +4,11 @@
 //      底层字段来源/贡献板块股票/缺失原因/source run与算法版本
 // 主页面保持简洁，但所有结论可追溯。禁止自由 AI 结论。
 import type {
-  ReviewMetricPayload,
+  LegacyReviewMetricPayload,
   ReviewSignal,
   ReviewAttribution,
   ReviewInstrument,
-  ReviewMetricComponent,
+  LegacyReviewMetricComponent,
 } from './types'
 import styles from './review.module.scss'
 
@@ -22,7 +22,7 @@ export type EvidenceTarget =
   | {
       kind: 'metric'
       title: string
-      payload: ReviewMetricPayload | null
+      payload: LegacyReviewMetricPayload | null
       meta?: { sourceRunId?: string; algorithmVersion?: string; definition?: string }
     }
   | { kind: 'signal'; signal: ReviewSignal }
@@ -44,7 +44,7 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
 }
 
 /** components 列表：name / rawValue / direction / fieldSource / weight / coverage / status */
-function ComponentsList({ components }: { components: ReviewMetricComponent[] }) {
+function ComponentsList({ components }: { components: LegacyReviewMetricComponent[] }) {
   if (components.length === 0) {
     return <span className={styles.metricUnavailable}>无 components</span>
   }
@@ -74,7 +74,7 @@ function ComponentsList({ components }: { components: ReviewMetricComponent[] })
 }
 
 /** 缺失原因（status != ready 时展示） */
-function missingReason(payload: ReviewMetricPayload | null): string | null {
+function missingReason(payload: LegacyReviewMetricPayload | null): string | null {
   if (!payload) return '未计算该变量'
   if (payload.readiness?.reason) return payload.readiness.reason
   if (payload.status === 'insufficient_history') {
@@ -95,7 +95,7 @@ function MetricEvidence({
   payload,
   meta,
 }: {
-  payload: ReviewMetricPayload | null
+  payload: LegacyReviewMetricPayload | null
   meta?: { sourceRunId?: string; algorithmVersion?: string; definition?: string }
 }) {
   const reason = missingReason(payload)

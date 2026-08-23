@@ -14,6 +14,9 @@ import type {
   ReviewOverview,
   ReviewScopeListResponse,
   ReviewScopeListParams,
+  ReviewScopeCompositionDetailResponse,
+  LegacyReviewScopeListResponse,
+  LegacyReviewScopeListParams,
   ReviewSignalListResponse,
   ReviewSignalListParams,
   ReviewSignal,
@@ -109,10 +112,14 @@ export async function getReviewOverview(
 }
 
 // ============================================================
-// 12.2 市场扫描
+// [CANONICAL] 12.2 Scope-first 列表
 // ============================================================
 
-/** GET /v1/review/{trade_date}/scopes → /v1/review/{trade_date}/scopes — 市场扫描（P/Q/U/C/V） */
+/**
+ * GET /v1/review/{trade_date}/scopes
+ * 返回 canonical Scope 列表（ReviewScopeListItem[] + 薄投影 summary）。
+ * 仅传后端支持的参数：scope_type / include_partial / page / page_size。
+ */
 export async function getReviewScopes(
   tradeDate: string,
   params: ReviewScopeListParams = {},
@@ -124,8 +131,45 @@ export async function getReviewScopes(
   return data
 }
 
+/**
+ * GET /v1/review/{trade_date}/scopes/{scope_type}/{scope_key}
+ * 单个 Scope 详情（9-key composition + 薄 observation）。
+ * 不请求列表中每条 Scope 的详情；选中一个 Scope 才请求一个。
+ */
+export async function getReviewScopeDetail(
+  tradeDate: string,
+  scopeType: string,
+  scopeKey: string,
+  includePartial = false,
+): Promise<ReviewScopeCompositionDetailResponse> {
+  const { data } = await apiClient.get<ReviewScopeCompositionDetailResponse>(
+    `/v1/review/${tradeDate}/scopes/${scopeType}/${scopeKey}`,
+    { params: { include_partial: includePartial } },
+  )
+  return data
+}
+
 // ============================================================
-// 12.3 信号
+// [LEGACY] 12.2 旧 P/Q/U/C/V 市场扫描（retired 于 canonical Scope 之后）
+// 仅供给 Slice F 前的 legacy ReviewPage / MarketScanPanel 使用，
+// 不属于 canonical Review API surface。禁止在 Slice D/E 新代码中使用。
+// ============================================================
+
+/** [LEGACY] GET /v1/review/{trade_date}/scopes（旧 P/Q/U/C/V 形态） */
+export async function getLegacyReviewScopes(
+  tradeDate: string,
+  params: LegacyReviewScopeListParams = {},
+): Promise<LegacyReviewScopeListResponse> {
+  const { data } = await apiClient.get<LegacyReviewScopeListResponse>(
+    `/v1/review/${tradeDate}/scopes`,
+    { params },
+  )
+  return data
+}
+
+// ============================================================
+// [LEGACY] 12.3 信号（retired 于 canonical Scope 之后；Slice F 删除）
+// 仅供 legacy BoardAttributionPanel / TrackingReviewPanel / FilterDiscoveryPanel 使用。
 // ============================================================
 
 /** GET /v1/review/{trade_date}/signals → /v1/review/{trade_date}/signals — 信号列表 */
@@ -153,7 +197,8 @@ export async function getReviewSignal(
 }
 
 // ============================================================
-// 12.4 归因与个股
+// [LEGACY] 12.4 归因与个股（retired；Slice F 删除）
+// 仅供 legacy BoardAttributionPanel / StockValidationPanel 使用。
 // ============================================================
 
 /** GET /v1/review/signals/{signal_id}/attributions → /v1/review/signals/{signal_id}/attributions — 子范围归因 */
@@ -181,7 +226,8 @@ export async function getSignalInstruments(
 }
 
 // ============================================================
-// 12.5 追踪
+// [LEGACY] 12.5 追踪（retired；Slice F 删除）
+// 仅供 legacy TrackingReviewPanel 使用。
 // ============================================================
 
 /** GET /v1/review/trackings → /v1/review/trackings — 当前用户追踪列表 */
@@ -243,7 +289,8 @@ export async function getTrackingEvaluations(
 }
 
 // =========================================================================
-// [V2] Discovery API
+// [LEGACY] [V2] Discovery API（retired 于 canonical Scope 之后；Slice F 删除）
+// 仅供 legacy DiscoveryWorkspace / DiscoveryDetail 使用。
 // =========================================================================
 
 import type {

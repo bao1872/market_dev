@@ -2,7 +2,7 @@
 // C3：当 metric.value 为空但 raw_ready=true 时，必须以 rawValue 展示并标注历史不足，
 // 不得显示 0 分、不得隐藏卡片、不得把 insufficient_history 写成计算失败。
 // 本模块供 ScopeMetricsTable / EvidenceDrawer 等复用同一冷启动判定逻辑。
-import type { ReviewMetricPayload } from './types'
+import type { LegacyReviewMetricPayload } from './types'
 
 /** 判断单指标是否处于冷启动状态并返回应展示的值。
  *
@@ -11,7 +11,7 @@ import type { ReviewMetricPayload } from './types'
  *   （后端可能把"value 空但 raw_ready=true"标为 ready，此时必须回退 rawValue）；
  * - 冷启动时展示 rawValue，不得显示 0 分、不得隐藏卡片、不得写成计算失败。
  */
-export function resolveMetricColdStart(payload: ReviewMetricPayload | null): {
+export function resolveMetricColdStart(payload: LegacyReviewMetricPayload | null): {
   isCold: boolean
   displayValue: number | null
 } {
@@ -26,7 +26,7 @@ export function resolveMetricColdStart(payload: ReviewMetricPayload | null): {
 }
 
 /** 组装冷启动/历史不足的悬浮提示标题（供表格与抽屉复用）。 */
-export function buildColdStartTitle(payload: ReviewMetricPayload): string {
+export function buildColdStartTitle(payload: LegacyReviewMetricPayload): string {
   const parts: string[] = ['历史不足（冷启动）']
   if (payload.historyObservationCount !== null && payload.historyObservationCount !== undefined) {
     parts.push(`历史观测=${payload.historyObservationCount}条`)

@@ -16,10 +16,10 @@ import { useToast } from '@/store/toast'
 import { getReviewDates, getReviewOverview, extractReviewError } from '@/features/review/api'
 import { reviewKeys } from '@/features/review/queryKeys'
 import {
-  decodeReviewUrl,
-  encodeReviewUrl,
   patchReviewUrl,
-  type ReviewUrlState,
+  decodeLegacyReviewUrl as decodeReviewUrl,
+  encodeLegacyReviewUrl as encodeReviewUrl,
+  type LegacyReviewUrlState as ReviewUrlState,
 } from '@/features/review/urlState'
 import { COMPUTING_STATUSES } from '@/features/review/types'
 import ReviewHeader from '@/features/review/ReviewHeader'
@@ -32,7 +32,7 @@ import StockValidationPanel from '@/features/review/StockValidationPanel'
 import TrackingReviewPanel from '@/features/review/TrackingReviewPanel'
 import AuctionBackflowPanel from '@/features/review/AuctionBackflowPanel'
 import EvidenceDrawer, { type EvidenceTarget } from '@/features/review/EvidenceDrawer'
-import type { ReviewScopeMetrics, ReviewSignal, ReviewAttribution, ReviewInstrument, ReviewStage } from '@/features/review/types'
+import type { LegacyReviewScopeMetrics, ReviewSignal, ReviewAttribution, ReviewInstrument, ReviewStage } from '@/features/review/types'
 import styles from '@/features/review/review.module.scss'
 
 export default function ReviewPage() {
@@ -112,7 +112,7 @@ export default function ReviewPage() {
 
   // 阶段间联动
   const handleSelectScope = useCallback(
-    (scope: ReviewScopeMetrics) => {
+    (scope: LegacyReviewScopeMetrics) => {
       patchUrl({
         scopeType: scope.scopeType,
         scopeKey: scope.scopeKey,
