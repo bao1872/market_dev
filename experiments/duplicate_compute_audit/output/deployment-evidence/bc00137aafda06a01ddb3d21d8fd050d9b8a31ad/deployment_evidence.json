@@ -1,0 +1,19 @@
+{
+  "target_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+  "previous_sha": "ecc2388ef736a42f89d9d2a4b1b74907cc806253",
+  "deployment_mode": "live",
+  "server_repo_head": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+  "live_runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+  "api_runtime_git_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+  "runtime_sha_match": true,
+  "alembic_revision": "091_observation_run_lineage",
+  "migration_attempted": false,
+  "images_built": false,
+  "container_image_git_sha": "111a01f",
+  "image_sha_note": "live-mount deployment; image SHA is dependency/runtime image identity, not application runtime source identity",
+  "services_restarted": true,
+  "health_http_status": 200,
+  "ready_http_status": 200,
+  "four_c_triggered": false,
+  "acceptance_state": "verified_deploy_pending_4c"
+}
