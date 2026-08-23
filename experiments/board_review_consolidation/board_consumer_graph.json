@@ -1,0 +1,164 @@
+{
+  "meta": {
+    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1 (DESIGN/AUDIT ONLY)",
+    "generated_from_head": "beffda00f83025bc038bbfd33a4e17e32729008f",
+    "critical_finding": "Review 对 Board 的真实依赖是 IDENTITY/LINEAGE (source_board_run_id / BoardAnalysisRun 存在性)，不是 Board analytics payload。scope discovery 的 industry/concept 成员实际来自 MarketBoard + PIT membership service (resolve_board_membership_at)，不读 BoardAnalysisSnapshot.analytics。pyramid_v2 不是 Review consumer (Review 用自身 canonical state_transitions 派生 diffusion)。",
+    "consumer_class_vocab": [
+      "RUNTIME_REQUIRED",
+      "API_REQUIRED",
+      "FRONTEND_REQUIRED",
+      "LEGACY_ONLY",
+      "TEST_ONLY",
+      "OPS_ONLY",
+      "DEAD_OR_UNREFERENCED"
+    ],
+    "consumes_vocab": [
+      "BOARD_ANALYTICS_PAYLOAD",
+      "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY",
+      "PUBLICATION_POINTER",
+      "NONE_DIRECT"
+    ]
+  },
+  "symbols": {
+    "BoardAnalysisRun": {
+      "definition": "board_analysis_runs 表；Board 批计算 run；其 .id 即 Review source_board_run_id",
+      "consumers": [
+        {
+          "location": "review_orchestrator_service.py:892 _list_board_scopes_by_hierarchy(trade_date, source_board_run_id)",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY",
+          "note": "仅用 board_analysis_run_id 列出 board scope 身份，不读 analytics"
+        },
+        {
+          "location": "review_orchestrator_service.py:489 _get_board_snapshot_for_scope / :943 _attach_board_payload",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY",
+          "note": "用 source_board_run_id 定位 snapshot 身份并 attach scope.source_board_snapshot_id；当前不读 analytics payload 做 discovery"
+        },
+        {
+          "location": "review_orchestrator_service.py:16 create_run unique constraint (trade_date, source_core_run_id, source_board_run_id, algo, filter)",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY",
+          "note": "PC-40/PC-41 硬约束：source_board_run_id 是 Review 创建唯一键一部分"
+        },
+        {
+          "location": "product_readiness_service.py:1235 lineage expected_source_board_run_id",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "PUBLICATION_POINTER",
+          "note": "校验 source_board_run_id == 当前 market_aggregation pointer.data_run_id"
+        },
+        {
+          "location": "review_attribution_service.py:291 _query_board_snapshot_by_run (BoardAnalysisSnapshot.board_analysis_run_id == source_board_run_id)",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_ANALYTICS_PAYLOAD",
+          "note": "归因引擎通过 source_board_run_id 读取 BoardAnalysisSnapshot payload 做 member attribution"
+        },
+        {
+          "location": "after_close_orchestrator.py:1776 review_run.source_board_run_id",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY",
+          "note": "盘后编排把 board run id 注入 review run"
+        }
+      ]
+    },
+    "BoardAnalysisSnapshot": {
+      "definition": "board_analysis_snapshots 表；per-board 分析快照，含 payload (V1+V2 pyramid_v2)",
+      "consumers": [
+        {
+          "location": "api/board_analysis.py:_to_dto → payload 全量返回前端",
+          "classification": "API_REQUIRED + FRONTEND_REQUIRED",
+          "consumes": "BOARD_ANALYTICS_PAYLOAD",
+          "note": "前端消费整个 payload (trend_dist/structure/momentum/volume/pyramid_v2.*)。这是前端迁移契约重点"
+        },
+        {
+          "location": "review_attribution_service.py:185/238/347 source_board_snapshot_id attach",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_ANALYTICS_PAYLOAD",
+          "note": "归因读取 snapshot payload"
+        },
+        {
+          "location": "review_scope_service.py:184 ScopeDefinition.source_board_snapshot_id (可选, 当前默认 None)",
+          "classification": "RUNTIME_REQUIRED",
+          "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY",
+          "note": "discovery 来源是 MarketBoard + PIT membership，不是 snapshot analytics"
+        }
+      ]
+    },
+    "compute_board_analysis": {
+      "definition": "单 board 计算入口 (admin API)",
+      "consumers": [
+        {"location": "api/board_analysis.py:226 trigger_compute_board", "classification": "API_REQUIRED", "consumes": "NONE_DIRECT", "note": "admin 触发 Board 计算"},
+        {"location": "tests", "classification": "TEST_ONLY", "consumes": "NONE_DIRECT"}
+      ]
+    },
+    "compute_all_boards": {
+      "definition": "批量 board 计算入口",
+      "consumers": [
+        {"location": "api/board_analysis.py:320 trigger_compute_all_boards", "classification": "API_REQUIRED", "consumes": "NONE_DIRECT"},
+        {"location": "after_close_orchestrator.py (board stage)", "classification": "RUNTIME_REQUIRED", "consumes": "NONE_DIRECT", "note": "盘后 Board stage 调用"}
+      ]
+    },
+    "publish_market_aggregation": {
+      "definition": "切换 market_aggregation pointer (data_run_id = BoardAnalysisRun.id)",
+      "consumers": [
+        {"location": "market_factor_aggregation_service.py:97", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"},
+        {"location": "board_analysis_service.py:1910/2147", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"},
+        {"location": "after_close_orchestrator.py:3303 接入顺序", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"}
+      ]
+    },
+    "PUBLICATION_KIND_MARKET_AGGREGATION": {
+      "definition": "factor_publications 发布类型",
+      "consumers": [
+        {"location": "review_orchestrator_service.py:574 PC-40/PC-41 pointer 必须存在", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER", "note": "Review 创建前必须存在 market_aggregation pointer"},
+        {"location": "product_readiness_service.py:1112/1231", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"},
+        {"location": "after_close_orchestrator.py:3579/3595", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"}
+      ]
+    },
+    "market_aggregation": {
+      "definition": "正式发布指针 (current-lineage)",
+      "consumers": [
+        {"location": "review_orchestrator_service.py:542 解析 source_board_run_id", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER", "note": "source_board_run_id 直接取 market_aggregation pointer.data_run_id"},
+        {"location": "product_readiness_service.py:1750 _current_market_aggregation_data_run_id", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"}
+      ]
+    },
+    "source_board_run_id": {
+      "definition": "MarketReviewRun.source_board_run_id (FK-like to BoardAnalysisRun.id)",
+      "consumers": [
+        {"location": "review_orchestrator_service.py:16/214/269/379/423/440/489/537/572/587/892/943/996", "classification": "RUNTIME_REQUIRED", "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY"},
+        {"location": "review_attribution_service.py:112/144/270", "classification": "RUNTIME_REQUIRED", "consumes": "BOARD_ANALYTICS_PAYLOAD"},
+        {"location": "product_readiness_service.py:454/683/1235", "classification": "RUNTIME_REQUIRED", "consumes": "PUBLICATION_POINTER"},
+        {"location": "after_close_orchestrator.py:1776", "classification": "RUNTIME_REQUIRED", "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY"},
+        {"location": "review_scope_service.py (ScopeDefinition.source_board_snapshot_id)", "classification": "RUNTIME_REQUIRED", "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY"}
+      ]
+    },
+    "source_board_snapshot_id": {
+      "definition": "ScopeDefinition.source_board_snapshot_id (可选, 当前默认 None)",
+      "consumers": [
+        {"location": "review_scope_service.py:184/194/206", "classification": "RUNTIME_REQUIRED", "consumes": "BOARD_IDENTITY_MEMBERSHIP_TAXONOMY", "note": "discovery 不依赖它做成员枚举"},
+        {"location": "review_attribution_service.py:69/138/153/185/238", "classification": "RUNTIME_REQUIRED", "consumes": "BOARD_ANALYTICS_PAYLOAD"}
+      ]
+    },
+    "pyramid_v2": {
+      "definition": "Board V2 analytics payload (state_transitions/freshness/diffusion/concentration/dispersion/relative_strength/concept_extras/leadership)",
+      "consumers": [
+        {"location": "board_analysis_service.py (producer only)", "classification": "LEGACY_ONLY", "consumes": "BOARD_ANALYTICS_PAYLOAD", "note": "Board 自身产出"},
+        {"location": "review/filter_engine.py + filter_definitions.py (diffusion from state_transitions)", "classification": "RUNTIME_REQUIRED", "consumes": "NONE_DIRECT", "note": "Review 用自身 canonical state_transitions 派生 diffusion，不读 Board pyramid_v2"},
+        {"location": "api/board_analysis.py (payload 暴露)", "classification": "FRONTEND_REQUIRED", "consumes": "BOARD_ANALYTICS_PAYLOAD", "note": "前端消费 pyramid_v2 字段"}
+      ]
+    }
+  },
+  "summary": {
+    "analytics_payload_consumers": [
+      "api/board_analysis.py (FRONTEND)",
+      "review_attribution_service.py (RUNTIME member attribution reads snapshot payload)",
+      "review_attribution_engine.py (attribution child source_board_snapshot_id)"
+    ],
+    "identity_lineage_consumers": [
+      "review_orchestrator_service.py (source_board_run_id 存在性/lineage)",
+      "product_readiness_service.py (PC-41 lineage 校验)",
+      "after_close_orchestrator.py (注入 review run)",
+      "review_scope_service.py (scope identity)"
+    ],
+    "key_correction": "原假设 'Review scope discovery 从 BoardAnalysisSnapshot 找行业概念' 不成立。实际 review_scope_service.resolve_scope_members 对 industry/concept 直接查 MarketBoard + resolve_board_membership_at (PIT membership)。Board 仅作为 source_board_run_id lineage 身份存在，不提供 analytics 给 discovery。"
+  }
+}

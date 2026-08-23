@@ -1,0 +1,88 @@
+{
+  "meta": {
+    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1 (DESIGN/AUDIT ONLY)",
+    "generated_from_head": "beffda00f83025bc038bbfd33a4e17e32729008f",
+    "purpose": "追踪 source_board_run_id 全依赖链，提出 Slice 2 目标：Review identity 不再依赖 BoardAnalysisRun，替代身份方案先列约束不迁 schema。"
+  },
+  "dependency_chain": [
+    "market_aggregation publication (data_run_id = BoardAnalysisRun.id)",
+    "  ↓ pointer.data_run_id",
+    "source_board_run_id (MarketReviewRun.source_board_run_id)",
+    "  ↓",
+    "MarketReviewRun (create_run unique constraint: trade_date + source_core_run_id + source_board_run_id + algo + filter)",
+    "  ↓",
+    "scope discovery (_list_board_scopes_by_hierarchy uses source_board_run_id to enumerate board scopes)",
+    "  ↓",
+    "ScopeDefinition.source_board_snapshot_id (optional, currently None)",
+    "  ↓",
+    "Review persistence / API / publication (product_readiness_service PC-41 lineage check)"
+  ],
+  "classification_by_usage": {
+    "1_lineage_only": {
+      "description": "仅用 source_board_run_id 做 lineage 身份/存在性校验，不读 Board analytics",
+      "locations": [
+        "review_orchestrator_service.py:16 create_run unique constraint",
+        "review_orchestrator_service.py:542/572/574/587 PC-40/PC-41 (source_board_run_id 必须 == market_aggregation pointer.data_run_id)",
+        "review_orchestrator_service.py:892 _list_board_scopes_by_hierarchy (用 id 枚举 board scope)",
+        "product_readiness_service.py:1235 lineage expected_source_board_run_id 校验",
+        "after_close_orchestrator.py:1776 (注入 review run)"
+      ]
+    },
+    "2_reads_board_payload": {
+      "description": "真正读取 BoardAnalysisSnapshot/pyramid_v2 analytics payload",
+      "locations": [
+        "review_attribution_service.py:291 _query_board_snapshot_by_run (BoardAnalysisSnapshot.board_analysis_run_id == source_board_run_id → reads payload)",
+        "review_attribution_service.py:185/238/347 (attach source_board_snapshot_id + payload to attribution)",
+        "review_attribution_engine.py:138/153 (child source_board_snapshot_id)"
+      ],
+      "note": "这是唯一真正消费 Board ANALYTICS 的 Review 路径（member attribution）。Slice 2 需决定 attribution 是否改用 Review canonical facts。"
+    },
+    "3_unique_constraints": {
+      "description": "包含 source_board_run_id 的唯一约束 / idempotency key",
+      "locations": [
+        "MarketReviewRun unique: (trade_date, source_core_run_id, source_board_run_id, algo, filter)",
+        "Review resume_run idempotency 依赖 source_board_run_id"
+      ]
+    },
+    "4_api_dto_exposes": {
+      "description": "API DTO 暴露 source_board_run_id",
+      "locations": [
+        "api/review.py ReviewRunDTO.source_board_run_id (需确认 schema)",
+        "product_readiness_service.py:683 lineage exposes source_board_run_id in readiness payload"
+      ]
+    },
+    "5_publication_gates": {
+      "description": "publication gate 校验 source_board_run_id",
+      "locations": [
+        "product_readiness_service.py:1228-1237 (run_board.source_board_run_id == current market_aggregation pointer.data_run_id else degraded/blocked)",
+        "review_orchestrator_service.py:574 PC-40 (pointer 必须存在否则 fail-fast)"
+      ]
+    },
+    "6_tests_fixed_dependency": {
+      "description": "tests 固定依赖 source_board_run_id",
+      "locations": [
+        "tests/test_board_analysis_*.py (Board run 创建)",
+        "tests/test_market_factor_aggregation_*.py (market_aggregation pointer)",
+        "tests/test_review_*.py (Review create_run 传入 source_board_run_id)",
+        "tests/test_review_optional_scope_terminalization.py (source_board_run_id in run)"
+      ]
+    }
+  },
+  "slice2_target_proposal": {
+    "goal": "Review identity should no longer depend on BoardAnalysisRun",
+    "replacement_identity_candidates": [
+      "taxonomy_version",
+      "membership_version",
+      "scope_set_hash",
+      "membership_batch_identity"
+    ],
+    "constraints": [
+      "C1: 必须保留 lineage 可追溯 (Review run 能回溯到 PIT membership + taxonomy 版本)",
+      "C2: idempotency key 必须仍能区分同 trade_date 不同 membership/taxonomy 的 run",
+      "C3: PC-40/PC-41 校验需替换为等价约束 (Review 只消费 formal pointer，pointer 身份改为 taxonomy+membership identity)",
+      "C4: ScopeDefinition 仍需 taxonomy_version + taxonomy_compatibility_key + membership_version (不能因删 Board runtime 删 lineage)",
+      "C5: attribution (review_attribution_service) 需改用 Review canonical facts 替代 Board snapshot payload"
+    ],
+    "schema_change": "DEFER to Slice 2 — 本轮只定义 target + constraints，不迁 schema"
+  }
+}
