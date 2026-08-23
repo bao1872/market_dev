@@ -1,0 +1,104 @@
+{
+  "production_runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+  "alembic_head": "091_observation_run_lineage",
+  "scope": {
+    "authorized": [
+      "history repair temp materialization",
+      "experiment raw/benchmark datasets (non-git, non-unique-evidence, regenerable)",
+      "system temp garbage (systemd-tmpfiles)",
+      "docker container/image/builder prune (no -a, no volume prune)",
+      "journal vacuum to 500M",
+      "apt-get clean",
+      "generated caches under /root/web_dev (.ruff_cache etc, no git clean)"
+    ],
+    "excluded": [
+      "production database bz_stock / PostgreSQL data",
+      "Docker postgres/redis volumes",
+      "/opt/panji-live",
+      "/etc/market-dev",
+      "/root/web_dev/.git",
+      "current runtime image",
+      "formal git evidence",
+      "unknown-source large files"
+    ]
+  },
+  "before": {
+    "root_total_bytes": 126695563264,
+    "root_used_bytes": 86100484096,
+    "root_free_bytes": 35317329920,
+    "root_used_pct": 71.0,
+    "inode_used_pct": 13.0,
+    "docker_images_bytes": 17070000000,
+    "docker_images_reclaimable_bytes": 9895000000,
+    "docker_build_cache_bytes": 3337000000,
+    "journal_bytes": 480100000
+  },
+  "candidate_categories": {
+    "history_repair_temp_dir": "/tmp/panji-history-repair-bc00137-xiIbmn",
+    "ended_task_backfill_bak": "/tmp/panji_exp_output_bak_20260817011411",
+    "review_tmp_unpack": ["/tmp/review-source-c5c686e-v1 (412M)", "/tmp/review_manual_inspection (397M)"],
+    "generated_cache": "/root/web_dev/backend/.ruff_cache",
+    "unknown_large_preserved": [
+      "/root/c31_verify (1.2G)",
+      "/root/.panji-experiments (504M)",
+      "/root/panji-local-artifacts (867M)",
+      "/root/web_dev/.git/objects/pack/*.pack (1GB, protected)",
+      "playwright node binaries in .venv (protected venv)"
+    ]
+  },
+  "deleted_categories": [
+    "history_repair_temp_dir",
+    "ended_task_backfill_bak",
+    "review_tmp_unpack",
+    "generated_cache (.ruff_cache)"
+  ],
+  "docker_reclaimed": {
+    "container_prune_bytes": 141701120,
+    "image_prune_bytes": 0,
+    "builder_prune_bytes": 5386000000,
+    "note": "image prune reclaimed 0B (no dangling images); builder cache fully cleared 3.337GB->0"
+  },
+  "journal_before_after": {
+    "before_bytes": 480100000,
+    "after_bytes": 488100000,
+    "reclaimed_bytes": 0,
+    "note": "already within 500M cap; vacuum freed 0B"
+  },
+  "reclaimed_bytes": 7000000000,
+  "after": {
+    "root_total_bytes": 126695563264,
+    "root_used_bytes": 79101755392,
+    "root_free_bytes": 42316058624,
+    "root_used_pct": 66.0,
+    "inode_used_pct": 11.0,
+    "docker_images_bytes": 15020000000,
+    "docker_build_cache_bytes": 0,
+    "journal_bytes": 488100000
+  },
+  "safety_gate": {
+    "after_used_pct": 66.0,
+    "threshold_good_pct": 80.0,
+    "threshold_hold_pct": 85.0,
+    "free_bytes": 42316058624,
+    "free_min_bytes": 10737418240,
+    "verdict": "GOOD"
+  },
+  "protected_paths_untouched": [
+    "bz_stock / PostgreSQL data (Docker volume trading-postgres)",
+    "Docker redis/postgres volumes",
+    "/opt/panji-live",
+    "/etc/market-dev",
+    "/root/web_dev/.git",
+    "current runtime image (market-dev-backend:111a01f)",
+    "formal git evidence (experiments/first_pyramid_gap_repair/*.json)"
+  ],
+  "unknown_large_files_preserved": [
+    "/root/c31_verify (1.2G) - historical verify, not proven disposable",
+    "/root/.panji-experiments (504M) - experiment datasets, not proven unique/regenerable",
+    "/root/panji-local-artifacts (867M) - local artifacts, not proven disposable",
+    "/root/web_dev/.git objects (protected by rule)",
+    "playwright driver node binaries inside .venv (protected venv)"
+  ],
+  "result": "PASS",
+  "note": "Only history-repair temp + ended-task temp + review unpack temp + generated cache deleted. No production data, volumes, runtime, or unknown large files touched. after_used_pct 66% => GOOD, server safe for local consolidation."
+}
