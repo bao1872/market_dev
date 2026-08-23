@@ -376,11 +376,14 @@ async def list_review_scopes(
 
     # [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 按 review_run_id 查询（grain 含
     # review_run_id），避免同日双 run 的 Observation lineage 污染（Phase 7 Gate A）。
+    # scope_type 过滤在 router 内轻量完成（service 仅负责 run lineage 读取，
+    # 不退回 global trade_date scan）。
     facts = await list_scope_observation_facts_by_run(
         db,
         review_run_id=run.id,
-        scope_type=scope_type,
     )
+    if scope_type:
+        facts = [f for f in facts if f.scope_type == scope_type]
 
     total = len(facts)
     offset = (page - 1) * page_size
@@ -447,11 +450,14 @@ async def get_review_scope_composition(
         )
 
     # observation 与 fact 共享（fact 存客观事实，composition 存完整六键）
+    # 必须显式传入 trade_date（run lineage grain = review_run_id + trade_date +
+    # scope_type + scope_key），不退回 global scan。
     fact = await get_scope_observation_fact_by_run(
         db,
-        review_run_id=run.id,
-        scope_type=scope_type,
-        scope_key=scope_key,
+        run.id,
+        td,
+        scope_type,
+        scope_key,
     )
 
     return ReviewScopeCompositionDetailResponse(
