@@ -1,11 +1,12 @@
-// [ScopeExplorerWorkspace] - 描述: canonical Scope Explorer 工作区（Slice D）
-// 布局：工具栏 + （Table | Trajectory）主区 + 右侧已选 Scope 摘要面板。
+// [ScopeExplorerWorkspace] - 描述: canonical Scope Explorer 工作区（Slice D + Slice E）
+// 布局：工具栏 + （Table | Trajectory）主区 + 右侧 Canonical Scope Detail 工作区。
 // 数据流：paginated backend transport → 完整 family snapshot →
-//         ViewModel（q → phase → readiness → velocity_desc → UI 分页）。
-// 绝不在 Slice D 调用 getReviewScopeDetail。
+//         ViewModel（q → phase → readiness → velocity_desc → UI 分页）；
+//         已选 Scope → 唯一 detail owner（useReviewScopeDetail）驱动右侧详情。
+// ScopeExplorerTable / ScopeTrajectoryView / family snapshot 绝不在本 slice 请求 detail（无 N+1）。
 import { useMemo } from 'react'
 import type { ReviewScopeFamily } from './types'
-import type { ReviewUrlState, ReviewExplorerView } from './urlState'
+import type { ReviewUrlState, ReviewExplorerView, ReviewDetailTab } from './urlState'
 import { extractReviewError } from './api'
 import { useReviewScopeFamilySnapshot } from './useReviewScopeFamilySnapshot'
 import {
@@ -19,7 +20,7 @@ import {
 import ScopeExplorerToolbar from './ScopeExplorerToolbar'
 import ScopeExplorerTable from './ScopeExplorerTable'
 import ScopeTrajectoryView from './ScopeTrajectoryView'
-import { ScopeSelectedSummary } from './ScopeSelectedSummary'
+import ScopeDetailWorkspace from './ScopeDetailWorkspace'
 import styles from './review.module.scss'
 
 export interface ScopeExplorerWorkspaceProps {
@@ -32,6 +33,8 @@ export interface ScopeExplorerWorkspaceProps {
   onPageChange: (page: number) => void
   onViewChange: (view: ReviewExplorerView) => void
   onSelectScope: (scopeKey: string) => void
+  /** 详情子 Tab 切换：只 patch tab（URL SSOT，不改 detail query identity） */
+  onTabChange: (tab: ReviewDetailTab) => void
 }
 
 function StateBox({ title, desc }: { title: string; desc: string }) {
@@ -51,6 +54,7 @@ export default function ScopeExplorerWorkspace({
   onPageChange,
   onViewChange,
   onSelectScope,
+  onTabChange,
 }: ScopeExplorerWorkspaceProps) {
   const snapshotQuery = useReviewScopeFamilySnapshot(tradeDate, urlState.family)
 
@@ -174,7 +178,13 @@ export default function ScopeExplorerWorkspace({
             </>
           )}
         </div>
-        <ScopeSelectedSummary scope={selectedScope} family={urlState.family} />
+        <ScopeDetailWorkspace
+          tradeDate={tradeDate}
+          selectedScope={selectedScope}
+          family={urlState.family}
+          tab={urlState.tab}
+          onTabChange={onTabChange}
+        />
       </div>
     </div>
   )

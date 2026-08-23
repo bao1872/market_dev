@@ -663,6 +663,156 @@ export interface ReviewScopeListResponse {
 // Scope 详情（GET /v1/review/{trade_date}/scopes/{scope_type}/{scope_key}）
 // ------------------------------------------------------------
 
+// ------------------------------------------------------------
+// [Slice E] Scope Detail 嵌套合同类型化
+// 只类型化 Slice E 实际消费的 nested contracts；未消费的深层载荷保持
+// Record<string, unknown> | null。Inner canonical composition 键保持后端
+// snake_case；前端只承载、不重算。禁止 any。
+// ------------------------------------------------------------
+
+/** Historical Dynamics 的日期对齐序列（runtime Composition 持久化 package） */
+export interface ScopeHistoricalDynamicsSeries {
+  position: (number | null)[]
+  ema5: (number | null)[]
+  ema20: (number | null)[]
+  velocity: (number | null)[]
+  signal: (number | null)[]
+  acceleration: (number | null)[]
+  persistence: (number | null)[]
+}
+
+/** 单个交易观测的 dynamics phase 事实（persisted，非前端重算） */
+export interface ScopePhaseFact {
+  trade_date: string
+  phase: ReviewDynamicsPhase | null
+  status: string | null
+  position: number | null
+  velocity: number | null
+  acceleration: number | null
+  upper_occupancy: number | null
+  lower_occupancy: number | null
+  velocity_state: string | null
+  acceleration_state: string | null
+  high_regime: string | null
+  bottom_recovery_context: string | null
+}
+
+/** historical_dynamics 下的 runtime 应用对象 */
+export interface ScopeScopeDynamics {
+  historical_dynamics: ScopeHistoricalDynamicsSeries | null
+  dynamics_phase: ScopePhaseFact[] | null
+}
+
+/** Composition.historical_dynamics 层 */
+export interface ScopeDynamicsLayer {
+  status: string
+  scope: Record<string, unknown> | null
+  membership: Record<string, unknown> | null
+  observation_series: Record<string, unknown> | null
+  scope_dynamics: ScopeScopeDynamics | null
+  metrics: Record<string, unknown> | null
+}
+
+/** Internal Structure: Breadth 事实（无 composite score） */
+export interface ScopeBreadthFacts {
+  equal_weight_return: number | null
+  advance_ratio: number | null
+  decline_ratio: number | null
+  unchanged_ratio: number | null
+  return_dispersion: number | null
+}
+
+/** Internal Structure: Capital Tilt 事实（persisted capital_tilt，不重算 AW-EW） */
+export interface ScopeCapitalTiltFacts {
+  equal_weight_return: number | null
+  amount_weighted_return: number | null
+  capital_tilt: number | null
+}
+
+/** Internal Structure: Concentration 事实 */
+export interface ScopeConcentrationFacts {
+  price_normalized_hhi: number | null
+  amount_normalized_hhi: number | null
+}
+
+/** Composition.internal_structure_facts 层 */
+export interface ScopeInternalStructureFacts {
+  breadth: ScopeBreadthFacts | null
+  capital_tilt: ScopeCapitalTiltFacts | null
+  concentration: ScopeConcentrationFacts | null
+}
+
+/** Composition.leadership 层：T-1 → T leader set 迁移事实。
+ *  Unavailable 侧用 null，绝非 0；empty array 与 null 必须区分。 */
+export interface ScopeLeadershipLayer {
+  status: string | null
+  reason: string | null
+  coverage: number | null
+  previous_direction: string | null
+  current_direction: string | null
+  previous_rankable_count: number | null
+  current_rankable_count: number | null
+  previous_leader_count: number | null
+  current_leader_count: number | null
+  retained_count: number | null
+  entrant_count: number | null
+  exit_count: number | null
+  previous_retention: number | null
+  jaccard_stability: number | null
+  migration: number | null
+  previous_leader_ids: string[] | null
+  current_leader_ids: string[] | null
+  entrant_ids: string[] | null
+  exit_ids: string[] | null
+}
+
+/** Member Attribution 成员证据（direction/orientation 成员；缺失字段保持 null，不伪造 0） */
+export interface ScopeMemberEvidence {
+  member_id: string | number
+  member_name?: string | null
+  return_1d?: number | null
+  amount?: number | null
+  amount_share?: number | null
+  aw_weight?: number | null
+  ew_weight?: number | null
+  contribution?: number | null
+  canonical_contribution?: number | null
+  tilt_contribution?: number | null
+  in_price_universe?: boolean | null
+  in_aw_universe?: boolean | null
+  [k: string]: unknown
+}
+
+/** Reconciliation 单条 check */
+export interface ScopeReconciliationCheck {
+  pass: boolean | null
+  resolved: string | null
+  kind: string
+  [k: string]: unknown
+}
+
+/** Reconciliation 完整性诊断（前端只展示，不重跑） */
+export interface ScopeReconciliation {
+  violation_count: number | null
+  skipped: string | null
+  tolerance: number | string | null
+  checks: ScopeReconciliationCheck[] | null
+  [k: string]: unknown
+}
+
+/** Composition.member_attribution 层（仅类型化已知分组；未知深层保持 unknown） */
+export interface ScopeMemberAttributionLayer {
+  status: string | null
+  scope: Record<string, unknown> | null
+  direction: Record<string, unknown> | null
+  capital_tilt: Record<string, unknown> | null
+  breadth: Record<string, unknown> | null
+  concentration: Record<string, unknown> | null
+  leadership: Record<string, unknown> | null
+  reconciliation: ScopeReconciliation | null
+  determinism_checksum: string | null
+}
+
 /**
  * Composition 顶层 9-key 稳定结构（canonical owner `canonical_composition.py` 产出，前端只承载、不重算）。
  * 对应后端返回的固定 9-key（scope / trade_date / capability / scope_observation /
@@ -676,7 +826,9 @@ export interface ReviewScopeListResponse {
  * - scope_observation / historical_dynamics / internal_structure_facts / leadership /
  *   member_attribution 在 owner 上允许为 None（非必产层），必须保留 nullable 语义。
  *
- * 未知/原始叶子载荷用 Record<string, unknown>，禁止 any，禁止前端重算。
+ * [Slice E] historical_dynamics / internal_structure_facts / leadership / member_attribution
+ * 已针对实际消费的 nested contracts 做真值类型化；capability / scope_observation 仍为
+ * Record<string, unknown>（Slice E 不深读其叶子）。
  */
 export interface ReviewScopeComposition {
   scope: {
@@ -686,10 +838,10 @@ export interface ReviewScopeComposition {
   trade_date: string
   capability: Record<string, unknown>
   scope_observation: Record<string, unknown> | null
-  historical_dynamics: Record<string, unknown> | null
-  internal_structure_facts: Record<string, unknown> | null
-  leadership: Record<string, unknown> | null
-  member_attribution: Record<string, unknown> | null
+  historical_dynamics: ScopeDynamicsLayer | null
+  internal_structure_facts: ScopeInternalStructureFacts | null
+  leadership: ScopeLeadershipLayer | null
+  member_attribution: ScopeMemberAttributionLayer | null
   composition_readiness: ReviewCompositionReadiness
 }
 

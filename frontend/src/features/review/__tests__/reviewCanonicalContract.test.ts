@@ -565,7 +565,27 @@ test('G3. composition 非必产层保持 nullable', () => {
   const compFilled: ReviewScopeComposition = {
     ...compNullable,
     scope_observation: { status: 'ready' },
-    leadership: { status: 'insufficient_history' },
+    leadership: {
+      status: 'insufficient_history',
+      reason: null,
+      coverage: null,
+      previous_direction: null,
+      current_direction: null,
+      previous_rankable_count: null,
+      current_rankable_count: null,
+      previous_leader_count: null,
+      current_leader_count: null,
+      retained_count: null,
+      entrant_count: null,
+      exit_count: null,
+      previous_retention: null,
+      jaccard_stability: null,
+      migration: null,
+      previous_leader_ids: null,
+      current_leader_ids: null,
+      entrant_ids: null,
+      exit_ids: null,
+    },
   }
   assert.equal(typeof compFilled.scope_observation, 'object')
   assert.equal(typeof compFilled.leadership, 'object')

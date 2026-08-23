@@ -113,6 +113,15 @@ export default function ReviewPage() {
     [patchUrl, urlState],
   )
 
+  const handleTabChange = useCallback(
+    (tab: ReviewUrlState['tab']) => {
+      // 详情子 Tab 切换只 patch tab：preserve date/family/scopeKey/view/phase/readiness/sort/page/pageSize/q；
+      // 不改 detail query identity（tab 不是 detail key 的 input）。
+      patchUrl({ ...urlState, tab })
+    },
+    [patchUrl, urlState],
+  )
+
   // 5. 日期门
   const renderDatesGate = () => {
     if (datesQuery.isLoading) {
@@ -174,6 +183,7 @@ export default function ReviewPage() {
         onPageChange={handlePageChange}
         onViewChange={handleViewChange}
         onSelectScope={handleSelectScope}
+        onTabChange={handleTabChange}
       />
     )
   }

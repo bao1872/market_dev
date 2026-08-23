@@ -38,3 +38,13 @@ export function formatPhaseLabel(phase: string | null | undefined): string {
   if (!phase) return NULL_DISPLAY
   return phase
 }
+
+/**
+ * 成员展示名：member_name 有真实值且不同于 member_id 时展示 name；
+ * member_name 缺失/为空/与 member_id 相同 → 诚实展示 member_id（prompt §9）。
+ */
+export function memberName(m: { member_id: string | number; member_name?: string | null }): string {
+  return m.member_name && String(m.member_name).trim() !== '' && String(m.member_name) !== String(m.member_id)
+    ? String(m.member_name)
+    : String(m.member_id)
+}
