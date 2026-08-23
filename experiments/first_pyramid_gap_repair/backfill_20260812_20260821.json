@@ -1,0 +1,83 @@
+{
+  "authorization_scope": {
+    "authorized_by": "user Round 2B explicit authorization",
+    "history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+    "trade_dates": ["2026-08-12","2026-08-13","2026-08-14","2026-08-17","2026-08-18","2026-08-19","2026-08-20","2026-08-21"],
+    "writable_objects_only": ["first_pyramid_history_daily_state","first_pyramid_history_events"],
+    "not_authorized": [
+      "Stock Core recompute", "factor publication modification",
+      "HistoryRun/RunItem lifecycle modification", "board/review/chip",
+      "scheduler/full AfterClose", "migration", "deploy", "dates after 2026-08-21"
+    ]
+  },
+  "production_runtime_identity": {
+    "server_repo_head": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+    "live_runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+    "api_runtime_git_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+    "runtime_sha_source": "/opt/panji-live/RUNTIME_SHA",
+    "db": "bz_stock",
+    "alembic_head": "091_observation_run_lineage",
+    "note": "Server NOT advanced to origin/dev. 1f47eb56 Review API work NOT deployed, NOT part of this runtime."
+  },
+  "identity_gate": {
+    "method": "git archive bc00137a backend/scripts -> tmp; sha256 of materialized script == git show bc00137a:script sha256; one-shot container python reads /app/RUNTIME_SHA and /app/scripts hash",
+    "tmp_extract_dir": "/tmp/panji-history-repair-bc00137-xiIbmn/backend/scripts",
+    "git_object_script_sha256": "5ae39f289a83b625d6aa6f693f7c9962f12a8eef98276014ec0ca4257c951170",
+    "materialized_script_sha256": "5ae39f289a83b625d6aa6f693f7c9962f12a8eef98276014ec0ca4257c951170",
+    "container_runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+    "container_script_sha256": "5ae39f289a83b625d6aa6f693f7c9962f12a8eef98276014ec0ca4257c951170",
+    "result": "PASS"
+  },
+  "before": {
+    "per_date": {
+      "2026-08-12": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-13": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-14": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-17": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-18": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-19": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-20": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0},
+      "2026-08-21": {"daily_state_count":0,"distinct_instruments":0,"supplemental_event_count":0}
+    },
+    "history_run": {"status":"partial","expected_count":5293,"succeeded_count":5283,"failed_count":0,"skipped_count":10,"completed_at":"2026-08-09 13:03:31.014939+08"},
+    "run_items": {"succeeded":5283,"skipped":10,"failed":0,"pending":0,"running":0},
+    "stock_core": {"latest_publication_id":"0ed98ba5-12ef-4547-b000-4cb4f6d47d99","data_run_id":"045d3fdb-f8ad-47b8-9006-c6b6bf9073a4","trade_date":"2026-08-21","snapshot_rows":5293}
+  },
+  "per_date": {
+    "2026-08-12": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1334,"elapsed_sec":2775.2},
+    "2026-08-13": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1076,"elapsed_sec":2745.3},
+    "2026-08-14": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1105,"elapsed_sec":2771.4},
+    "2026-08-17": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1337,"elapsed_sec":2806.1},
+    "2026-08-18": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1230,"elapsed_sec":2746.2},
+    "2026-08-19": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1696,"elapsed_sec":2793.3},
+    "2026-08-20": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":823,"elapsed_sec":2785.6},
+    "2026-08-21": {"rc":0,"total":5283,"processed":5283,"target_state_count":5277,"no_bar":0,"no_target_state":6,"failed":0,"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":855,"elapsed_sec":2791.5}
+  },
+  "final_nine_day_validation": {
+    "dates": ["2026-08-11","2026-08-12","2026-08-13","2026-08-14","2026-08-17","2026-08-18","2026-08-19","2026-08-20","2026-08-21"],
+    "rows": {
+      "2026-08-11": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":993,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-12": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1334,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-13": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1076,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-14": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1105,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-17": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1337,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-18": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1230,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-19": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":1696,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-20": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":823,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0},
+      "2026-08-21": {"daily_state_count":5277,"distinct_instruments":5277,"duplicate_count":0,"supplemental_event_count":855,"target_state_count_from_execution":5277,"no_bar":0,"no_target_state":6,"failed":0}
+    },
+    "all_dates_pass": true
+  },
+  "lifecycle_after": {
+    "history_run": {"status":"partial","expected_count":5293,"succeeded_count":5283,"failed_count":0,"skipped_count":10,"completed_at":"2026-08-09 13:03:31.014939+08"},
+    "run_items": {"succeeded":5283,"skipped":10,"failed":0,"pending":0,"running":0}
+  },
+  "stock_core_unchanged": {
+    "latest_publication_id": "0ed98ba5-12ef-4547-b000-4cb4f6d47d99",
+    "data_run_id": "045d3fdb-f8ad-47b8-9006-c6b6bf9073a4",
+    "trade_date": "2026-08-21",
+    "snapshot_rows": 5293,
+    "unchanged_from_before": true
+  },
+  "result": "PASS"
+}
