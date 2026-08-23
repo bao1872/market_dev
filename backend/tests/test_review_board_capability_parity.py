@@ -1,29 +1,49 @@
-"""Slice 4A1 — Board current-state capability migration parity test (pure-unit).
+"""Slice 4A1R — Board current-state capability migration parity test (pure-unit).
 
 Runs the OLD Board producer (as a test oracle) and the NEW Review scope
-aggregation on the SAME synthetic ``first_pyramid_flat`` member fixtures and
-compares the 9 current-state capability groups field-by-field.
+aggregation on the SAME synthetic exact-T ``first_pyramid_flat`` member fixtures
+and compares the 9 current-state capability groups field-by-field.
+
+Slice 4A1R corrections locked by this file:
+
+1. RUNTIME SOURCE.  Review must resolve the migrated capabilities from the
+   exact-T ``StockFeatureSnapshot.summary_payload.first_pyramid_flat`` carried as
+   the current-only fact ``board_first_pyramid_flat`` -- NOT from the History
+   ``RawMemberFacts.flat_t`` (``previous_state_to_flat``, partial ``fp_*``
+   subset).  ``test_runtime_source_is_exact_t_snapshot_not_history_flat``
+   deliberately makes the two sources CONFLICT so any regression back to
+   ``flat_t`` turns the suite red.
+
+2. BOARD READY GATE.  ``semantics.trend is None`` -> the member is skipped by the
+   Board producer, so it must contribute to NO migrated capability (numerator or
+   denominator).  Boundary case A.
+
+3. MISSING-VALUE SEMANTICS.  A board-ready member with a missing
+   ``momentum_change`` counts as **flat** (boundary B) and with a missing
+   ``volume_badge`` counts as **unknown** (boundary C) -- never dropped before
+   the denominator is taken.
 
 Hard gate: Review production code must NOT import BoardAnalysisService.  This
 test imports it ONLY as an oracle (allowed by the migration spec).
 
-Parity requirements (per user spec):
-  count exact
-  enum exact
-  mean exact (same numeric normalization as board)
-  p25/p50/p75 exact (same percentile implementation)
-  histogram exact
-  latest-event up/down/presence exact
-  missing / null denominator semantics exact
+Parity requirements (per spec):
+  count exact | enum exact | mean exact | p25/p50/p75 exact | histogram exact
+  latest-event up/down/presence exact | missing / null denominator exact
 """
 from __future__ import annotations
 
+import ast
 import math
 from datetime import date
+from pathlib import Path
 
 from app.domain.review.scope_observation import compute_scope_observation
 from app.services.board_analysis_service import compute_board_payload
-from app.services.observation_prep import RawMemberFacts, build_member_observation
+from app.services.observation_prep import (
+    _BOARD_CURRENT_FLAT_KEY,
+    RawMemberFacts,
+    build_member_observation,
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -46,22 +66,15 @@ def _member(
     ob_dir=None,
     eqh_freshness=None,
     eql_freshness=None,
+    trend_direction="up",
 ):
-    """Build a board-format member dict.
+    """Build one exact-T ``first_pyramid_flat`` element in Board input layout.
 
-    Mirrors the Board producer's exact input layout:
-      - trend_strength / dsa_vwap_dev_pct / sqzmom_value / volume_ratio* /
-        volume_percentile* / momentum_change / volume_badge live in the NESTED
-        ``first_pyramid_flat`` sub-dict
-      - active_ob_count / fp_latest_*_direction live TOP-LEVEL (board reads them
-        from the top-level member dict)
-      - fp_latest_eqh_freshness / fp_latest_eql_freshness live in the NESTED
-        ``first_pyramid_flat`` sub-dict (board reads them via ``flat``)
+    The Board producer builds ``FirstPyramidSemanticAdapter(flat)`` directly on
+    each ``flat_list`` element and reads EVERY ``fp_*`` from that element's
+    TOP-LEVEL.  ``fp_trend_direction`` drives the Board ready gate: ``None`` means
+    the member is counted as missing and skipped entirely.
     """
-    # The Board producer builds FirstPyramidSemanticAdapter(flat) directly on each
-    # flat_list element and reads EVERY fp_* from the element's TOP-LEVEL.
-    # ``fp_trend_direction`` is required for the Board's ``ready`` gate (members
-    # with a null trend direction are counted as missing and skipped).
     return {
         "fp_trend_strength": trend_strength,
         "fp_dsa_vwap_dev_pct": dsa_vwap_dev_pct,
@@ -73,7 +86,7 @@ def _member(
         "fp_volume_percentile200": volume_percentile200,
         "fp_momentum_change": momentum_change,
         "fp_volume_badge": volume_badge,
-        "fp_trend_direction": "up",  # all members ready
+        "fp_trend_direction": trend_direction,
         "fp_latest_bos_direction": bos_dir,
         "fp_latest_choch_direction": choch_dir,
         "fp_latest_ob_direction": ob_dir,
@@ -83,7 +96,13 @@ def _member(
 
 
 def _members():
-    """Deterministic synthetic fixture set with mixed presence/nulls."""
+    """Deterministic fixture set: 4 plain members + boundary cases A / B / C.
+
+    A. ``fp_trend_direction=None`` with every other ``fp_*`` populated
+       -> Board skips it (missing); Review must skip it too.
+    B. board-ready with ``fp_momentum_change=None`` -> Board flat +1.
+    C. board-ready with ``fp_volume_badge=None``    -> Board unknown +1.
+    """
     return [
         _member(
             trend_strength=0.80,
@@ -153,15 +172,98 @@ def _members():
             eqh_freshness=1.0,
             eql_freshness=3.0,
         ),
+        # ---- Boundary A: NOT board-ready (trend_direction None), everything else
+        # populated with distinctive values.  If Review forgets the ready gate,
+        # these values leak into the distributions and parity breaks.
+        _member(
+            trend_strength=99.0,
+            dsa_vwap_dev_pct=99.0,
+            active_ob_count=99,
+            sqzmom_value=99.0,
+            volume_ratio20=99.0,
+            volume_ratio200=99.0,
+            volume_percentile20=99.0,
+            volume_percentile200=99.0,
+            momentum_change="enhancing",
+            volume_badge="high",
+            bos_dir="up",
+            choch_dir="up",
+            ob_dir="up",
+            eqh_freshness=1.0,
+            eql_freshness=1.0,
+            trend_direction=None,
+        ),
+        # ---- Boundary B: board-ready, momentum_change missing -> flat.
+        _member(
+            trend_strength=0.50,
+            dsa_vwap_dev_pct=0.10,
+            active_ob_count=4,
+            sqzmom_value=0.30,
+            volume_ratio20=1.10,
+            volume_ratio200=1.20,
+            volume_percentile20=61.0,
+            volume_percentile200=25.0,
+            momentum_change=None,
+            volume_badge="normal",
+            bos_dir=None,
+            choch_dir=None,
+            ob_dir=None,
+        ),
+        # ---- Boundary C: board-ready, volume_badge missing -> unknown.
+        _member(
+            trend_strength=0.30,
+            dsa_vwap_dev_pct=-0.40,
+            active_ob_count=0,
+            sqzmom_value=-0.25,
+            volume_ratio20=0.95,
+            volume_ratio200=0.85,
+            volume_percentile20=5.0,
+            volume_percentile200=99.5,
+            momentum_change="flat",
+            volume_badge=None,
+            bos_dir="down",
+            choch_dir="down",
+            ob_dir="down",
+            eqh_freshness=7.0,
+            eql_freshness=None,
+        ),
     ]
 
 
-def _build_review_members(flats):
+def _history_flat_subset(flat):
+    """Simulate History ``previous_state_to_flat`` output for the same member.
+
+    ``previous_state_to_flat`` emits only a PARTIAL ``fp_*`` subset -- notably it
+    does NOT emit fp_trend_strength / fp_dsa_vwap_dev_pct / fp_active_ob_count /
+    fp_sqzmom_value / fp_volume_badge / fp_volume_ratio200 /
+    fp_volume_percentile200 / fp_latest_eq*_freshness.
+    """
+    return {
+        "fp_trend_direction": flat.get("fp_trend_direction"),
+        "fp_momentum_change": flat.get("fp_momentum_change"),
+        "fp_volume_ratio20": flat.get("fp_volume_ratio20"),
+        "fp_volume_percentile20": flat.get("fp_volume_percentile20"),
+        "fp_latest_bos_direction": flat.get("fp_latest_bos_direction"),
+        "fp_latest_choch_direction": flat.get("fp_latest_choch_direction"),
+        "fp_latest_ob_direction": flat.get("fp_latest_ob_direction"),
+    }
+
+
+def _build_review_members(flats, *, history_flats=None):
+    """Build Review MemberObservations the way real runtime does.
+
+    ``flat_t`` gets the History projection (partial), and the exact-T Board flat
+    is delivered through ``current_only[_BOARD_CURRENT_FLAT_KEY]`` exactly as
+    ``_load_current_only_snapshot_facts`` does in production.
+    """
     member_list = []
     for i, f in enumerate(flats):
+        hist = (
+            history_flats[i] if history_flats is not None else _history_flat_subset(f)
+        )
         raw = RawMemberFacts(
             member_id=f"M{i:03d}",
-            flat_t=f,
+            flat_t=hist,
             close_t=10.0,
             amount_t=10000.0,
             volume_t=1000.0,
@@ -170,7 +272,7 @@ def _build_review_members(flats):
             flat_t1=None,
             close_t1=None,
             continuous={},
-            current_only=None,
+            current_only={_BOARD_CURRENT_FLAT_KEY: f},
         )
         member_list.append(build_member_observation(raw))
     return member_list
@@ -191,6 +293,11 @@ def _review_payload(member_list):
     )
 
 
+def _both():
+    flats = _members()
+    return _board_payload(flats), _review_payload(_build_review_members(flats))
+
+
 # --------------------------------------------------------------------------- #
 # Comparison helpers
 # --------------------------------------------------------------------------- #
@@ -204,10 +311,8 @@ def _close(a, b, tol=1e-9):
 # Parity tests (9 capability groups)
 # --------------------------------------------------------------------------- #
 def test_parity_trend_strength_distribution():
-    """1. trend_strength: mean/p25/p50/p75/valid_count exact."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    """1. trend_strength: mean/p25/p50/p75 exact."""
+    board, review = _both()
     b = board["trend_strength"]
     r = review["trend"]["trend_strength_distribution"]
     assert _close(b["avg"], r["mean"])
@@ -218,9 +323,7 @@ def test_parity_trend_strength_distribution():
 
 def test_parity_dsa_vwap_dev_pct_distribution():
     """2. dsa_vwap_dev_pct: mean/p25/p50/p75 exact."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    board, review = _both()
     b = board["vwap_dev_pct"]
     r = review["trend"]["dsa_vwap_dev_pct_distribution"]
     assert _close(b["avg"], r["mean"])
@@ -229,36 +332,38 @@ def test_parity_dsa_vwap_dev_pct_distribution():
     assert _close(b["p75"], r["p75"])
 
 
-def test_parity_avg_active_ob_count():
-    """3. structure.current_state.avg_active_ob_count exact (NULL-safe)."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+def test_parity_mean_active_orderblock_count():
+    """3. structure.current_state.mean_active_orderblock_count exact (NULL-safe).
+
+    Review names this key ``mean_active_orderblock_count`` (not the board's
+    ``avg_active_ob_count``) so it cannot collide with the PRD v2.3 whole-payload
+    invariant that Review's own removed ``active_ob_count`` fact stays absent.
+    The VALUE must still be exactly the board's.
+    """
+    board, review = _both()
     b = board["structure"]["avg_active_ob_count"]
-    r = review["structure"]["current_state"]["avg_active_ob_count"]
+    r = review["structure"]["current_state"]["mean_active_orderblock_count"]
     assert _close(b, r)
 
 
 def test_parity_momentum_change_counts():
     """4. momentum.change: enhancing/weakening(fading)/flat/denominator exact."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    board, review = _both()
     b = board["momentum"]
     r = review["momentum"]["change"]
     assert b["enhancing"] == r["enhancing_count"]
     assert b["fading"] == r["weakening_count"]
     assert b["flat"] == r["flat_count"]
-    # Board's momentum change counts carry no explicit denominator key; the
-    # implicit denominator is the sum of the three change categories.
+    # Board carries no explicit denominator key; its implicit denominator is the
+    # board-ready count, because the trailing ``else`` sends every ready member
+    # without a recognized momentum_change into flat.
     assert b["enhancing"] + b["fading"] + b["flat"] == r["denominator"]
+    assert r["denominator"] == review["trend"]["board_ready_member_count"]
 
 
 def test_parity_avg_sqzmom():
     """5. momentum.sqzmom.mean exact (NULL-safe)."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    board, review = _both()
     b = board["momentum"]["avg_sqzmom"]
     r = review["momentum"]["sqzmom"]["mean"]
     assert _close(b, r)
@@ -266,22 +371,23 @@ def test_parity_avg_sqzmom():
 
 def test_parity_volume_badge_counts():
     """6. volume badge: high/low/normal/unknown counts exact."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    board, review = _both()
     b = board["volume"]
     r = review["participation"]["volume"]["badge"]
     assert b["high"] == r["high_count"]
     assert b["low"] == r["low_count"]
     assert b["normal"] == r["normal_count"]
     assert b["unknown"] == r["unknown_count"]
+    # The four categories partition the board-ready universe exactly.
+    assert (
+        r["high_count"] + r["low_count"] + r["normal_count"] + r["unknown_count"]
+        == review["trend"]["board_ready_member_count"]
+    )
 
 
 def test_parity_volume_ratio_means():
     """7. volume ratio20/200 mean exact."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    board, review = _both()
     b = board["volume"]
     r = review["participation"]["volume"]
     assert _close(b["avg_volume_ratio20"], r["ratio20_mean"])
@@ -290,10 +396,7 @@ def test_parity_volume_ratio_means():
 
 def test_parity_volume_percentile_histograms():
     """8. volume percentile20/200 five-bin histogram exact."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
-    # Board bucket keys are float-formatted strings (e.g. "<20.0").
+    board, review = _both()
     board_to_review = {
         "<20.0": "lt20",
         "[20.0,40.0)": "20_40",
@@ -313,9 +416,7 @@ def test_parity_volume_percentile_histograms():
 
 def test_parity_latest_event_state():
     """9. latest-event up/down/presence exact (board payload: structure_events)."""
-    flats = _members()
-    board = _board_payload(flats)
-    review = _review_payload(_build_review_members(flats))
+    board, review = _both()
     b = board["structure_events"]
     r = review["structure"]["current_state"]["latest_events"]
     assert b["bos_up"] == r["bos"]["up"]
@@ -328,20 +429,241 @@ def test_parity_latest_event_state():
     assert b["eql_present"] == r["eql"]
 
 
-def test_review_does_not_import_board_service():
-    """Hard gate: Review production code must not import BoardAnalysisService."""
-    import app.domain.review.scope_observation as so
-    import app.services.observation_prep as op
+# --------------------------------------------------------------------------- #
+# Slice 4A1R — ready gate / missing-value / runtime-source regression gates
+# --------------------------------------------------------------------------- #
+def test_board_ready_gate_excludes_non_ready_member():
+    """Boundary A: trend_direction=None member is excluded from every group.
 
-    assert "board_analysis_service" not in {
-        m.split(".")[-1] for m in so.__dict__.get("__builtins__", {})
-    }
-    # Inspect module imports directly.
-    import types
+    The non-ready fixture carries distinctive ``99.0`` values; if the ready gate
+    were missing they would pollute the distributions.  Board's own ``ready``
+    count is the authoritative denominator.
+    """
+    flats = _members()
+    board = _board_payload(flats)
+    review = _review_payload(_build_review_members(flats))
+    ready = review["trend"]["board_ready_member_count"]
+    # One fixture is deliberately not board-ready.
+    assert ready == len(flats) - 1
+    assert board["ready_members"] == ready
+    assert board["missing_members"] == 1
+    assert review["structure"]["current_state"]["board_ready_member_count"] == ready
+    # The 99.0 outlier must not reach any distribution.
+    assert review["trend"]["trend_strength_distribution"]["p75"] < 1.0
+    assert review["trend"]["dsa_vwap_dev_pct_distribution"]["p75"] < 10.0
+    assert review["participation"]["volume"]["ratio20_mean"] < 10.0
+    assert review["participation"]["volume"]["ratio200_mean"] < 10.0
 
-    for mod in (so, op):
-        for name, val in vars(mod).items():
-            if isinstance(val, types.ModuleType) and name == "board_analysis_service":
-                raise AssertionError(
-                    "Review production module imports BoardAnalysisService"
-                )
+
+def test_ready_member_with_missing_momentum_change_counts_as_flat():
+    """Boundary B: ready + momentum_change None -> flat (NOT dropped)."""
+    flats = _members()
+    board_before = _board_payload(flats)
+    review_before = _review_payload(_build_review_members(flats))
+    # Add one more ready member whose momentum_change is missing.
+    extra = _member(
+        trend_strength=0.45,
+        dsa_vwap_dev_pct=0.05,
+        active_ob_count=2,
+        sqzmom_value=0.11,
+        volume_ratio20=1.0,
+        volume_ratio200=1.0,
+        volume_percentile20=50.0,
+        volume_percentile200=50.0,
+        momentum_change=None,
+        volume_badge="normal",
+    )
+    flats2 = [*flats, extra]
+    board_after = _board_payload(flats2)
+    review_after = _review_payload(_build_review_members(flats2))
+    assert board_after["momentum"]["flat"] == board_before["momentum"]["flat"] + 1
+    assert (
+        review_after["momentum"]["change"]["flat_count"]
+        == review_before["momentum"]["change"]["flat_count"] + 1
+    )
+    # Denominator grows with the ready universe, not with valid-value count.
+    assert (
+        review_after["momentum"]["change"]["denominator"]
+        == review_before["momentum"]["change"]["denominator"] + 1
+    )
+    assert board_after["momentum"]["flat"] == review_after["momentum"]["change"][
+        "flat_count"
+    ]
+
+
+def test_ready_member_with_missing_volume_badge_counts_as_unknown():
+    """Boundary C: ready + volume_badge None -> unknown (NOT dropped)."""
+    flats = _members()
+    board_before = _board_payload(flats)
+    review_before = _review_payload(_build_review_members(flats))
+    extra = _member(
+        trend_strength=0.45,
+        dsa_vwap_dev_pct=0.05,
+        active_ob_count=2,
+        sqzmom_value=0.11,
+        volume_ratio20=1.0,
+        volume_ratio200=1.0,
+        volume_percentile20=50.0,
+        volume_percentile200=50.0,
+        momentum_change="flat",
+        volume_badge=None,
+    )
+    flats2 = [*flats, extra]
+    board_after = _board_payload(flats2)
+    review_after = _review_payload(_build_review_members(flats2))
+    assert board_after["volume"]["unknown"] == board_before["volume"]["unknown"] + 1
+    assert (
+        review_after["participation"]["volume"]["badge"]["unknown_count"]
+        == review_before["participation"]["volume"]["badge"]["unknown_count"] + 1
+    )
+    assert (
+        board_after["volume"]["unknown"]
+        == review_after["participation"]["volume"]["badge"]["unknown_count"]
+    )
+
+
+def test_runtime_source_is_exact_t_snapshot_not_history_flat():
+    """RUNTIME-SOURCE REGRESSION GATE.
+
+    ``flat_t`` is given a CONFLICTING History-shaped projection (partial ``fp_*``,
+    different values).  Review must report the exact-T snapshot values, so any
+    regression that reads the migrated facts back from ``flat_t`` fails here.
+    """
+    flats = _members()
+    # History flat: partial + deliberately conflicting on the keys it does carry.
+    conflicting_history = []
+    for f in flats:
+        hist = _history_flat_subset(f)
+        hist["fp_volume_ratio20"] = 42.0
+        hist["fp_volume_percentile20"] = 5.0
+        hist["fp_momentum_change"] = "weakening"
+        conflicting_history.append(hist)
+
+    board = _board_payload(flats)
+    review = _review_payload(
+        _build_review_members(flats, history_flats=conflicting_history)
+    )
+    # Snapshot wins on every migrated capability -> full board parity holds.
+    assert _close(board["volume"]["avg_volume_ratio20"], review["participation"]["volume"]["ratio20_mean"])
+    assert _close(board["volume"]["avg_volume_ratio200"], review["participation"]["volume"]["ratio200_mean"])
+    assert board["momentum"]["enhancing"] == review["momentum"]["change"]["enhancing_count"]
+    assert board["momentum"]["fading"] == review["momentum"]["change"]["weakening_count"]
+    assert board["momentum"]["flat"] == review["momentum"]["change"]["flat_count"]
+    b20 = board["volume"]["percentile_20_dist"]
+    r20 = review["participation"]["volume"]["percentile20_histogram"]
+    assert b20["<20.0"] == r20["lt20"]
+    assert b20["[60.0,80.0)"] == r20["60_80"]
+    # History-only value 42.0 must never appear.
+    assert review["participation"]["volume"]["ratio20_mean"] < 10.0
+
+
+def test_migrated_capabilities_unavailable_without_exact_t_snapshot():
+    """No exact-T snapshot -> capability unavailable, NEVER History-derived.
+
+    ``current_only`` is empty while ``flat_t`` carries a full Board-shaped flat.
+    Review must NOT fall back to it: nothing is board-ready and every migrated
+    statistic reports empty rather than a History-derived value.
+    """
+    flats = _members()
+    member_list = []
+    for i, f in enumerate(flats):
+        raw = RawMemberFacts(
+            member_id=f"M{i:03d}",
+            flat_t=f,  # full board-shaped flat available here on purpose
+            close_t=10.0,
+            amount_t=10000.0,
+            volume_t=1000.0,
+            volume_history=(500.0, 600.0, 700.0),
+            amount_history=(5000.0, 6000.0, 7000.0),
+            flat_t1=None,
+            close_t1=None,
+            continuous={},
+            current_only=None,  # exact-T snapshot absent
+        )
+        member_list.append(build_member_observation(raw))
+    review = _review_payload(member_list)
+    assert review["trend"]["board_ready_member_count"] == 0
+    assert review["trend"]["trend_strength_distribution"]["valid_count"] == 0
+    assert review["trend"]["trend_strength_distribution"]["mean"] is None
+    assert (
+        review["structure"]["current_state"]["mean_active_orderblock_count"] is None
+    )
+    assert review["momentum"]["change"]["denominator"] == 0
+    assert review["momentum"]["sqzmom"]["mean"] is None
+    badge = review["participation"]["volume"]["badge"]
+    assert badge["high_count"] == 0
+    assert badge["low_count"] == 0
+    assert badge["normal_count"] == 0
+    assert badge["unknown_count"] == 0
+    assert review["participation"]["volume"]["ratio20_mean"] is None
+
+
+def test_active_ob_count_uses_board_safe_int_semantics():
+    """``fp_active_ob_count`` must use the Board ``_safe_int`` integer parse."""
+    flats = [
+        _member(
+            trend_strength=0.5,
+            dsa_vwap_dev_pct=0.0,
+            active_ob_count="3",  # str -> int("3") == 3 in board
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="flat",
+            volume_badge="normal",
+        ),
+        _member(
+            trend_strength=0.5,
+            dsa_vwap_dev_pct=0.0,
+            active_ob_count="abc",  # unparsable -> None in board
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="flat",
+            volume_badge="normal",
+        ),
+    ]
+    board = _board_payload(flats)
+    review = _review_payload(_build_review_members(flats))
+    assert _close(
+        board["structure"]["avg_active_ob_count"],
+        review["structure"]["current_state"]["mean_active_orderblock_count"],
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Hard gate: no BoardAnalysisService import in Review production code
+# --------------------------------------------------------------------------- #
+_REVIEW_PROD_MODULES = (
+    "app/domain/review/scope_observation.py",
+    "app/services/observation_prep.py",
+    "app/services/review_observation_prep_service.py",
+)
+
+
+def test_review_production_code_does_not_import_board_service():
+    """AST/source import gate (stronger than runtime attribute inspection).
+
+    Board producer may only be imported by tests, as a parity oracle.
+    """
+    backend_root = Path(__file__).resolve().parents[1]
+    offenders = []
+    for rel in _REVIEW_PROD_MODULES:
+        path = backend_root / rel
+        assert path.exists(), f"missing review production module: {rel}"
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    if "board_analysis_service" in alias.name:
+                        offenders.append(f"{rel}: import {alias.name}")
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                if "board_analysis_service" in module:
+                    offenders.append(f"{rel}: from {module} import ...")
+    assert not offenders, "Review production code imports BoardAnalysisService: " + str(
+        offenders
+    )

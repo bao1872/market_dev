@@ -1,31 +1,59 @@
 {
-  "slice": "Slice 4A1 — migrate Board current-state capabilities into Unified Review",
+  "slice": "Slice 4A1R — Board current-state capability migration: runtime source + ready semantics correction",
   "objective": "Review owns the complete industry/concept board current-state analysis by consuming already-prepared First Pyramid current-state member facts. NO board capability is deleted; only migrated.",
   "generated_at": "2026-08-23",
-  "baseline_sha": "cc07f515ea87728bbe71d9a0aaac56a7d40313b2",
+  "baseline_sha": "f3072da91da744ffae4522e7f548c2c343c7d073",
+  "supersedes": "Slice 4A1 (f3072da9) unconditional PASS — that evidence was NOT valid: parity was proven only against a synthetic fixture that pre-populated raw.flat_t, while real runtime sources flat_t from History previous_state_to_flat (partial fp_* subset). Two production-semantics blockers are corrected here.",
+
+  "blockers_corrected": {
+    "blocker_1_runtime_source": {
+      "problem": "Migrated Board facts were read from RawMemberFacts.flat_t. In real runtime flat_t = previous_state_to_flat(state_t) (FirstPyramidHistoryDailyState), which does NOT emit fp_trend_strength / fp_dsa_vwap_dev_pct / fp_active_ob_count / fp_sqzmom_value / fp_volume_badge / fp_volume_ratio200 / fp_volume_percentile200 / fp_latest_eqh_freshness / fp_latest_eql_freshness. Production would silently degrade to None/0 while the synthetic fixture passed.",
+      "fix": "Migrated facts now source EXCLUSIVELY from the exact-T StockFeatureSnapshot.summary_payload.first_pyramid_flat already loaded by _load_current_only_snapshot_facts, carried whole as the current-only fact 'board_first_pyramid_flat' (single owner, NO second DB query). No fallback to flat_t. flat_t keeps its existing History responsibility unchanged.",
+      "status": "FIXED"
+    },
+    "blocker_2_ready_and_null_semantics": {
+      "problem": "Review aggregated over the whole member_list with no Board ready gate, and filtered None momentum_change / None volume_badge BEFORE taking denominators. Board producer skips non-ready members entirely and counts missing momentum_change as flat / missing volume_badge as unknown.",
+      "fix": "Added MemberObservation.board_current_ready (SSOT = FirstPyramidSemanticAdapter(board_flat).trend is not None, exact replication of the Board entry gate). compute_scope_observation derives board_ready_members and ALL 9 migrated capabilities use that universe only. _momentum_change_counts / _volume_badge_counts now receive one entry per board-ready member INCLUDING None, replicating the Board trailing else.",
+      "status": "FIXED"
+    }
+  },
+
+  "runtime_source": "exact-T StockFeatureSnapshot.first_pyramid_flat",
+  "history_flat_used_for_migrated_board_facts": false,
+  "board_ready_gate_parity": true,
+  "missing_momentum_as_flat": true,
+  "missing_volume_badge_as_unknown": true,
+  "active_ob_count_uses_board_safe_int": true,
+  "persistence_payload_preserved": true,
   "formula_changes": 0,
   "lookback_changes": 0,
   "threshold_changes": 0,
   "approximation_introduced": false,
   "review_runtime_imports_board_service": false,
-  "parity": "PASS",
-  "parity_method": "Same synthetic first_pyramid_flat member fixtures run through OLD Board producer (oracle) AND NEW Review aggregation; 9 capability groups compared field-by-field with exact count/enum/mean/percentile/histogram/latest-event/presence semantics.",
+  "second_db_query_added": false,
+  "result": "PASS",
+
+  "parity_method": "Same synthetic exact-T first_pyramid_flat member fixtures run through OLD Board producer (oracle) AND NEW Review aggregation; 9 capability groups compared field-by-field with exact count/enum/mean/percentile/histogram/latest-event/presence semantics. Review members are built through the REAL runtime path (build_member_observation with current_only[board_first_pyramid_flat]), with flat_t carrying only the partial History projection.",
   "board_capabilities_targeted": 9,
   "board_capabilities_preserved": 9,
   "capability_groups": [
     "1. trend_strength (avg/p25/p50/p75)",
     "2. dsa_vwap_dev_pct (avg/p25/p50/p75)",
-    "3. structure.current_state.avg_active_ob_count",
-    "4. momentum.change (enhancing/weakening(fading)/flat/denominator)",
+    "3. structure.current_state.mean_active_orderblock_count",
+    "4. momentum.change (enhancing/weakening(fading)/flat/denominator=board_ready_member_count)",
     "5. momentum.sqzmom (mean)",
-    "6. volume badge (high/low/normal/unknown counts)",
+    "6. volume badge (high/low/normal/unknown counts; sum == board_ready_member_count)",
     "7. volume ratio20/200 mean",
     "8. volume percentile20/200 five-bin histogram (lt20/20_40/40_60/60_80/gte80)",
     "9. latest-event snapshot state (bos/choch/ob up/down counts; eqh/eql presence counts)"
   ],
-  "parity_source_mapping": "Board producer builds FirstPyramidSemanticAdapter(flat) directly on each flat_list element and reads EVERY fp_* from the element's TOP-LEVEL. Review mirrors exactly: build_member_observation reads the same top-level raw.flat_t fp_* keys (trend_strength, dsa_vwap_dev_pct, active_ob_count, sqzmom_value, volume_ratio20/200, volume_percentile20/200, momentum_change, volume_badge, fp_latest_*_direction, fp_latest_*_freshness).",
-  "schema_contract": "Compatible extension only — no existing field types changed. New scope-observation groups added under trend.continuous.{trend_strength_distribution,dsa_vwap_dev_pct_distribution}, structure.current_state.{avg_active_ob_count,latest_events}, momentum.{change,sqzmom}, participation.volume.{badge,ratio20_mean,ratio200_mean,percentile20_histogram,percentile200_histogram}.",
+  "board_oracle_contract": "compute_board_payload iterates flat_list and builds FirstPyramidSemanticAdapter(flat) directly on each element, reading EVERY fp_* from the element's TOP-LEVEL. That element IS the exact-T first_pyramid_flat. Entry gate: 'if semantics.trend is None: missing += 1; continue'. Payload exposes ready_members / missing_members.",
+
+  "key_naming_note": "Review exposes the migrated OB mean as structure.current_state.mean_active_orderblock_count, deliberately NOT avg_active_ob_count. PRD v2.3 formally removed Review's own 'active_ob_count' fact from the canonical Scope payload and enforces it with a whole-payload substring assertion. Slice 4A1 (f3072da9) introduced 'avg_active_ob_count' and thereby BROKE that invariant (test_canonical_scope_payload_excludes_active_ob_count was failing on f3072da9). Slice 4A1R renames the migrated key instead of weakening the v2.3 invariant, so the pre-existing regression is repaired.",
+
+  "schema_contract": "Compatible extension only — no existing field types changed. Scope-observation groups: trend.{board_ready_member_count,trend_strength_distribution,dsa_vwap_dev_pct_distribution}, structure.current_state.{board_ready_member_count,mean_active_orderblock_count,latest_events}, momentum.{change,sqzmom}, participation.volume.{badge,ratio20_mean,ratio200_mean,percentile20_histogram,percentile200_histogram}.",
   "member_observation_new_fields": [
+    "board_current_ready",
     "trend_strength",
     "active_ob_count",
     "current_dsa_vwap_dev_pct",
@@ -45,15 +73,29 @@
   "files_changed": [
     "backend/app/domain/review/scope_observation.py",
     "backend/app/services/observation_prep.py",
+    "backend/app/services/review_observation_prep_service.py",
     "backend/tests/test_review_board_capability_parity.py",
+    "backend/tests/test_review_observation_persistence.py",
     "backend/reports/slice4a1_board_current_state_parity.json"
   ],
   "tests": {
     "parity_suite": "tests/test_review_board_capability_parity.py",
-    "tests_passed": 10,
-    "tests_failed": 0,
-    "gate_no_board_import": "PASS (review production code does NOT import BoardAnalysisService; test imports it only as oracle)",
-    "broader_regression": "61 passed (Slice3 + Slice3R + existing review API contract + Slice4A1); 0 failed."
+    "parity_tests_passed": 16,
+    "parity_tests_failed": 0,
+    "boundary_cases": [
+      "A. trend_direction=None with all other fp_* populated (distinctive 99.0 values) -> Board skips; Review must skip from every migrated group (numerator AND denominator). Asserted against board ready_members / missing_members.",
+      "B. board-ready with fp_momentum_change=None -> Board flat +1; Review flat_count +1 and denominator +1.",
+      "C. board-ready with fp_volume_badge=None -> Board unknown +1; Review unknown_count +1."
+    ],
+    "runtime_source_regression_test": "test_runtime_source_is_exact_t_snapshot_not_history_flat — flat_t is given a CONFLICTING partial History projection (ratio20=42.0, percentile20=5.0, momentum_change=weakening); Review must still match the Board oracle, so any regression back to flat_t turns the suite red.",
+    "snapshot_absent_test": "test_migrated_capabilities_unavailable_without_exact_t_snapshot — current_only=None while flat_t carries a FULL board-shaped flat; Review must report board_ready_member_count=0 and null/empty statistics, proving there is no History fallback.",
+    "safe_int_test": "test_active_ob_count_uses_board_safe_int_semantics — '3' -> 3, 'abc' -> None, matching board _safe_int.",
+    "persistence_test": "tests/test_review_observation_persistence.py::test_migrated_board_capabilities_preserved_through_persistence — asserts values['observation_payload'] is the whole observation and every migrated nested path is present. Locks existing correct behaviour; persistence implementation unchanged.",
+    "gate_no_board_import": "PASS — AST/source import gate over app/domain/review/scope_observation.py, app/services/observation_prep.py, app/services/review_observation_prep_service.py; rejects both 'import app.services.board_analysis_service' and 'from ...board_analysis_service import ...'. Board producer imported only by tests, as oracle.",
+    "focused_suite": "180 passed, 0 failed (parity + persistence + observation prep + scope observation + orchestrator persist + observation primitives + review API core-only contract).",
+    "regression_diff_vs_baseline": "review/observation/board selection: 48 failed before (f3072da9 pristine) -> 47 failed after. NEW regressions: 0. FIXED: 1 (test_canonical_scope_payload_excludes_active_ob_count, the PRD v2.3 invariant broken by 4A1).",
+    "known_preexisting_baseline": "47 remaining failures are pre-existing probe/no-migration and related baseline failures, identical on the pristine tree. 8 collection errors (OSError Errno 30 read-only fs) also pre-existing and identical on pristine.",
+    "ruff": "clean"
   },
   "explicitly_not_done_this_round": [
     "Event Freshness",
@@ -66,9 +108,12 @@
     "market_aggregation producer removal",
     "AfterClose Board stage removal",
     "migration 092 deployment",
+    "migration (any)",
+    "production DB write",
     "production deploy",
-    "production backfill"
+    "production backfill",
+    "First Pyramid formula / lookback changes"
   ],
-  "next": "After Slice4A1 parity PASS: migrate technical_state_concentration/dispersion -> Event Freshness -> Diffusion, then retire independent BoardAnalysisRun -> BoardAnalysisSnapshot -> market_aggregation chain once all capabilities parity-PASS.",
+  "next": "After Slice4A1R PASS: migrate technical_state_concentration/dispersion -> Event Freshness -> Diffusion, then retire the independent BoardAnalysisRun -> BoardAnalysisSnapshot -> market_aggregation chain once all capabilities parity-PASS.",
   "status": "IMPLEMENTATION_PUSHED_PENDING_REVIEW"
 }

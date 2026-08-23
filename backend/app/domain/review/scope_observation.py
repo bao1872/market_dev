@@ -163,15 +163,30 @@ class MemberObservation:
     trailing_top_pct: float | None = None
     trailing_bottom_pct: float | None = None
     # ------------------------------------------------------------------
-    # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
-    # All sourced from ``raw.flat_t`` (the same ``first_pyramid_flat`` the Board
-    # producer consumes) for exact parity with the Board oracle.  Review does NOT
-    # re-derive any of these; it only consumes prepared canonical First Pyramid facts.
+    # Slice 4A1R — Board current-state capability migration (NO_FORMULA_CHANGE).
+    #
+    # RUNTIME SOURCE CONTRACT (Slice 4A1R correction):
+    # These facts are sourced EXCLUSIVELY from the exact-T
+    # ``StockFeatureSnapshot.summary_payload.first_pyramid_flat`` -- the SAME
+    # payload the Board producer consumes -- carried as the current-only fact
+    # ``board_first_pyramid_flat``.  They are NEVER sourced from the History
+    # ``raw.flat_t`` (``previous_state_to_flat``), which only emits a partial
+    # ``fp_*`` subset and would silently degrade these facts to None.
+    # There is NO fallback from snapshot to History flat: when the exact-T
+    # snapshot is absent the whole Board current-state capability is unavailable
+    # for that member (``board_current_ready`` is False).
     # ------------------------------------------------------------------
+    # Board READY GATE (SSOT).  Exact replication of the Board producer entry
+    # gate ``if semantics.trend is None: missing += 1; continue``.  A member that
+    # is not board-ready contributes to NONE of the 9 migrated Board
+    # current-state capabilities (not to their numerators, not to their
+    # denominators).  Other Review canonical facts keep their own universe.
+    board_current_ready: bool = False
     # trend_strength = median per-bar trend strength (board ``fp_trend_strength``).
     trend_strength: float | None = None
-    # combined active OB count (board ``fp_active_ob_count``).
-    active_ob_count: float | None = None
+    # combined active OB count (board ``fp_active_ob_count``), parsed with the
+    # Board ``_safe_int`` integer semantics (NOT a looser float parse).
+    active_ob_count: int | None = None
     # DSA VWAP deviation pct from current flat (board ``fp_dsa_vwap_dev_pct``).
     current_dsa_vwap_dev_pct: float | None = None
     # Momentum independent change dimension (board ``fp_momentum_change``).
@@ -684,9 +699,24 @@ def _volume_histogram(values: Sequence[float | None]) -> dict[str, int]:
 def _momentum_change_counts(
     values: Sequence[MomentumChange | None],
 ) -> dict[str, Any]:
+    """Momentum change counts with EXACT Board producer missing-value semantics.
+
+    Board producer (``compute_board_payload``)::
+
+        if mc == ENHANCING:   enhancing += 1
+        elif mc == WEAKENING: fading += 1
+        else:                 mom_flat += 1
+
+    The trailing ``else`` means a board-ready member whose ``momentum_change`` is
+    missing / unrecognized is counted as **flat** -- it is NOT dropped.  Callers
+    MUST therefore pass one entry per board-ready member (including ``None``),
+    which makes ``denominator == board_ready_member_count``.
+    """
     enhancing = sum(1 for v in values if v == MomentumChange.ENHANCING)
     weakening = sum(1 for v in values if v == MomentumChange.WEAKENING)
-    flat = sum(1 for v in values if v == MomentumChange.FLAT)
+    # Board parity: everything that is neither ENHANCING nor WEAKENING (incl.
+    # None / unrecognized) falls through to flat.
+    flat = len(values) - enhancing - weakening
     return {
         "enhancing_count": enhancing,
         "weakening_count": weakening,
@@ -698,6 +728,20 @@ def _momentum_change_counts(
 def _volume_badge_counts(
     values: Sequence[VolumeBadge | None],
 ) -> dict[str, int]:
+    """Volume badge counts with EXACT Board producer missing-value semantics.
+
+    Board producer (``compute_board_payload``)::
+
+        if badge == HIGH:     high += 1
+        elif badge == LOW:    low += 1
+        elif badge == NORMAL: normal += 1
+        else:                 unknown += 1
+
+    The trailing ``else`` means a board-ready member with a missing /
+    unrecognized badge is counted as **unknown** -- it is NOT dropped.  Callers
+    MUST pass one entry per board-ready member (including ``None``), so the four
+    counts sum to ``board_ready_member_count``.
+    """
     out = {"high_count": 0, "low_count": 0, "normal_count": 0, "unknown_count": 0}
     for v in values:
         if v == VolumeBadge.HIGH:
@@ -706,7 +750,8 @@ def _volume_badge_counts(
             out["low_count"] += 1
         elif v == VolumeBadge.NORMAL:
             out["normal_count"] += 1
-        elif v == VolumeBadge.UNKNOWN:
+        else:
+            # Board parity: None / UNKNOWN / unrecognized -> unknown.
             out["unknown_count"] += 1
     return out
 
@@ -1068,35 +1113,53 @@ def compute_scope_observation(
     vol_zscore200 = _collect([m.vol_zscore200 for m in member_list])
 
     # ------------------------------------------------------------------
-    # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
-    # All inputs sourced from the same ``raw.flat_t`` ``fp_*`` facts the Board
-    # producer consumes, so Review aggregation is parity with the Board oracle.
+    # Slice 4A1R — Board current-state capability migration (NO_FORMULA_CHANGE).
+    #
+    # UNIVERSE CONTRACT: the 9 migrated Board current-state capabilities use
+    # ``board_ready_members`` ONLY -- the exact replication of the Board producer
+    # entry gate (``semantics.trend is None -> missing; continue``).  A member
+    # that is not board-ready is excluded from BOTH numerator and denominator of
+    # every migrated capability.  All other Review canonical facts (price /
+    # transition / participation / structure events / historical dynamics) keep
+    # their own ``member_list`` universe and are NOT affected by this gate.
+    #
+    # SOURCE CONTRACT: every input below originates from the exact-T
+    # ``StockFeatureSnapshot.summary_payload.first_pyramid_flat`` (carried as the
+    # current-only fact ``board_first_pyramid_flat``) -- the same payload the
+    # Board producer consumes.  NEVER from the History ``raw.flat_t``.
     # ------------------------------------------------------------------
-    ts_values = _collect([m.trend_strength for m in member_list])
-    vwap_dev_values = _collect([m.current_dsa_vwap_dev_pct for m in member_list])
-    active_ob_values = _collect([m.active_ob_count for m in member_list])
-    sqzmom_values = _collect([m.current_sqzmom_val for m in member_list])
-    cur_vol_ratio20 = _collect([m.current_vol_ratio20 for m in member_list])
-    cur_vol_ratio200 = _collect([m.current_vol_ratio200 for m in member_list])
-    cur_vol_pct20 = _collect([m.current_vol_pct20 for m in member_list])
-    cur_vol_pct200 = _collect([m.current_vol_pct200 for m in member_list])
+    board_ready_members = [m for m in member_list if m.board_current_ready]
+    board_ready_count = len(board_ready_members)
+
+    ts_values = _collect([m.trend_strength for m in board_ready_members])
+    vwap_dev_values = _collect(
+        [m.current_dsa_vwap_dev_pct for m in board_ready_members]
+    )
+    active_ob_values = _collect([m.active_ob_count for m in board_ready_members])
+    sqzmom_values = _collect([m.current_sqzmom_val for m in board_ready_members])
+    cur_vol_ratio20 = _collect([m.current_vol_ratio20 for m in board_ready_members])
+    cur_vol_ratio200 = _collect([m.current_vol_ratio200 for m in board_ready_members])
+    cur_vol_pct20 = _collect([m.current_vol_pct20 for m in board_ready_members])
+    cur_vol_pct200 = _collect([m.current_vol_pct200 for m in board_ready_members])
 
     # Momentum independent change dimension (enhancing / weakening / flat).
-    momentum_change_values = [
-        m.current_momentum_change
-        for m in member_list
-        if m.current_momentum_change is not None
-    ]
-    momentum_change_counts = _momentum_change_counts(momentum_change_values)
+    # Board parity: pass ONE entry per board-ready member, INCLUDING ``None`` --
+    # a ready member with missing momentum_change counts as flat, so the
+    # denominator is board_ready_count (NOT the valid momentum-change count).
+    momentum_change_counts = _momentum_change_counts(
+        [m.current_momentum_change for m in board_ready_members]
+    )
 
     # Volume badge categorical counts (high / low / normal / unknown).
-    volume_badge_values = [
-        m.volume_badge for m in member_list if m.volume_badge is not None
-    ]
-    volume_badge_counts = _volume_badge_counts(volume_badge_values)
+    # Board parity: pass ONE entry per board-ready member, INCLUDING ``None`` --
+    # a ready member with a missing badge counts as unknown, so the four counts
+    # sum to board_ready_count.
+    volume_badge_counts = _volume_badge_counts(
+        [m.volume_badge for m in board_ready_members]
+    )
 
-    # Latest-event snapshot state presence/direction.
-    latest_events = _latest_event_state(member_list)
+    # Latest-event snapshot state presence/direction (board-ready universe only).
+    latest_events = _latest_event_state(board_ready_members)
 
     # ------------------------------------------------------------------
     # CURRENT-ONLY canonical facts (REVIEW-V23-A-CORRECTION-3)
@@ -1228,11 +1291,13 @@ def compute_scope_observation(
             "segment_direction": _categorical_state_distribution(
                 segment_direction_values, segment_direction_labels
             ),
-            # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
-            # Distributions sourced from the same ``raw.flat_t`` ``fp_*`` facts the
-            # Board producer consumes (parity with the Board oracle).  ``mean`` is
-            # added on top of the shared ``_participation_distribution`` descriptors
-            # to match the user's canonical shape (board reports it as ``avg``).
+            # Slice 4A1R — Board current-state capability migration (NO_FORMULA_CHANGE).
+            # Sourced from the exact-T snapshot ``board_first_pyramid_flat`` (same
+            # payload the Board producer consumes), restricted to
+            # ``board_ready_members`` (Board ready-gate parity).  ``mean`` is added
+            # on top of the shared ``_participation_distribution`` descriptors to
+            # match the canonical shape (board reports it as ``avg``).
+            "board_ready_member_count": board_ready_count,
             "trend_strength_distribution": {
                 **_participation_distribution(ts_values),
                 "mean": _mean(ts_values),
@@ -1263,12 +1328,22 @@ def compute_scope_observation(
                 structure_alignment_values,
                 {"aligned": "Aligned", "divergent": "Divergent"},
             ),
-            # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+            # Slice 4A1R — Board current-state capability migration (NO_FORMULA_CHANGE).
             # Separately from the v2.3-removed active_ob_count, this is the Board's
             # current-state combined active OB count (``fp_active_ob_count``) and the
-            # latest-event snapshot state, both parity with the Board oracle.
+            # latest-event snapshot state, both parity with the Board oracle:
+            # exact-T ``board_first_pyramid_flat`` source, ``board_ready_members``
+            # universe, Board ``_safe_int`` integer parse for the OB count.
+            # KEY NAMING (Slice 4A1R): deliberately ``mean_active_orderblock_count``,
+            # NOT ``avg_active_ob_count``.  PRD v2.3 formally REMOVED Review's own
+            # ``active_ob_count`` fact from the canonical Scope payload, and that
+            # invariant is enforced by a whole-payload substring assertion
+            # (``"active_ob_count" not in json.dumps(payload)``).  The Board fact
+            # migrated here is a DIFFERENT fact (Board ``fp_active_ob_count``), so it
+            # gets a non-colliding name instead of weakening the v2.3 invariant.
             "current_state": {
-                "avg_active_ob_count": _mean(active_ob_values),
+                "board_ready_member_count": board_ready_count,
+                "mean_active_orderblock_count": _mean(active_ob_values),
                 "latest_events": latest_events,
             },
             # REVIEW-V23-A-CORRECTION-3: ``active_ob_count`` is FORMALLY REMOVED from
@@ -1307,9 +1382,13 @@ def compute_scope_observation(
             "momentum_volume_relation": _open_categorical_distribution(
                 momentum_volume_relation_values
             ),
-            # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
+            # Slice 4A1R — Board current-state capability migration (NO_FORMULA_CHANGE).
             # Momentum independent change dimension (enhancing / weakening / flat) and
-            # squeeze-momentum mean, parity with the Board oracle.
+            # squeeze-momentum mean, parity with the Board oracle: exact-T
+            # ``board_first_pyramid_flat`` source, ``board_ready_members`` universe.
+            # ``change.denominator == board_ready_member_count`` because a ready
+            # member with a missing momentum_change is counted as flat (Board
+            # producer trailing ``else``), NOT dropped.
             "change": momentum_change_counts,
             "sqzmom": {
                 "mean": _mean(sqzmom_values),
@@ -1324,11 +1403,13 @@ def compute_scope_observation(
                 "percentile200": _participation_distribution(vol_pct200),
                 "zscore20": _participation_distribution(vol_zscore20),
                 "zscore200": _participation_distribution(vol_zscore200),
-                # Slice 4A1 — Board current-state capability migration (NO_FORMULA_CHANGE).
-                # Volume badge counts + mean of 20D/200D ratios + five-bin histograms of
-                # 20D/200D percentiles, parity with the Board oracle.  ``ratio20`` / ``ratio200``
-                # distributions above already carry ``mean`` (per user shape keep p25/p50/p75/
-                # valid_count + mean).
+                # Slice 4A1R — Board current-state capability migration (NO_FORMULA_CHANGE).
+                # Volume badge counts + mean of 20D/200D ratios + five-bin histograms
+                # of 20D/200D percentiles, parity with the Board oracle: exact-T
+                # ``board_first_pyramid_flat`` source, ``board_ready_members``
+                # universe.  The four ``badge`` counts sum to
+                # ``board_ready_member_count`` because a ready member with a missing
+                # badge is counted as unknown (Board producer trailing ``else``).
                 "badge": volume_badge_counts,
                 "ratio20_mean": _mean(cur_vol_ratio20),
                 "ratio200_mean": _mean(cur_vol_ratio200),

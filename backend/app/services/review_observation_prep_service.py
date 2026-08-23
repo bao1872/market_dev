@@ -53,6 +53,7 @@ from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services import calendar_service, review_scope_service
 from app.services.board_membership_service import PITMembershipUnavailableError
 from app.services.observation_prep import (
+    _BOARD_CURRENT_FLAT_KEY,
     RawMemberFacts,
     build_member_observation,
     build_member_observation_from_facts,
@@ -283,6 +284,17 @@ async def _load_current_only_snapshot_facts(
         for attr, flat_key in _CURRENT_ONLY_SNAPSHOT_FIELDS.items():
             if flat_key in flat:
                 facts[attr] = flat[flat_key]
+        # Slice 4A1R — Board current-state capability runtime source (SINGLE OWNER).
+        #
+        # The 9 migrated Board current-state capabilities MUST consume the exact-T
+        # ``first_pyramid_flat`` that the Board producer consumes, NOT the History
+        # ``previous_state_to_flat`` output (which emits only a partial ``fp_*``
+        # subset and would silently degrade the migrated facts to None/0).
+        #
+        # This loader already holds that exact payload, so we carry it whole here
+        # instead of adding a second DB query.  ``build_member_observation_from_facts``
+        # is the only consumer; there is NO fallback to ``raw.flat_t``.
+        facts[_BOARD_CURRENT_FLAT_KEY] = flat
         if facts:
             out[str(instrument_id)] = facts
     return out

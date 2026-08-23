@@ -384,3 +384,45 @@ def test_snapshot_readiness_mapping() -> None:
 
 def test_market_persistence_diagnostic_text() -> None:
     assert "market_not_activated_for_historical_persistence" in MARKET_PERSISTENCE_DIAGNOSTIC
+
+
+# ── Slice 4A1R — migrated Board current-state facts survive the persistence boundary ──
+
+def test_migrated_board_capabilities_preserved_through_persistence() -> None:
+    """Lock (not change) persistence behaviour for the migrated Board facts.
+
+    ``_build_fact_values`` stores the WHOLE canonical observation under
+    ``observation_payload`` without field selection, so the Slice 4A1R nested
+    facts must reach persistence untouched.  This test asserts the nested paths
+    explicitly so a future field-picking regression in the persistence owner
+    cannot silently drop the migrated capability.
+    """
+    prep = _prep()
+    obs = _canonical_obs()
+    values = _build_fact_values(prep, obs, "review-obs-1.0.0")
+
+    # Whole-payload identity (no copy / rename / field selection).
+    assert values["observation_payload"] is obs
+
+    payload = values["observation_payload"]
+    # Every migrated Board current-state capability is present in the payload.
+    trend = payload["trend"]
+    assert "board_ready_member_count" in trend
+    assert "trend_strength_distribution" in trend
+    assert "dsa_vwap_dev_pct_distribution" in trend
+    current_state = payload["structure"]["current_state"]
+    assert "board_ready_member_count" in current_state
+    assert "mean_active_orderblock_count" in current_state
+    assert "latest_events" in current_state
+    momentum = payload["momentum"]
+    assert "change" in momentum and "denominator" in momentum["change"]
+    assert "sqzmom" in momentum and "mean" in momentum["sqzmom"]
+    volume = payload["participation"]["volume"]
+    for key in (
+        "badge",
+        "ratio20_mean",
+        "ratio200_mean",
+        "percentile20_histogram",
+        "percentile200_histogram",
+    ):
+        assert key in volume, key
