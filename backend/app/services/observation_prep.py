@@ -78,6 +78,10 @@ _BOARD_CURRENT_FLAT_KEY = "board_first_pyramid_flat"
 # NOT change the existing Review price / transition / historical / participation
 # universes.
 _BOARD_CURRENT_ELIGIBLE_KEY = "board_current_eligible"
+# Slice 4A2 — instrument symbol carried from the same union-level metadata query
+# (``_load_batch_instrument_board_meta``) so the migrated Board capability can
+# emit ``leader_symbol`` (the instrument symbol, NEVER the member_id UUID).
+_BOARD_CURRENT_SYMBOL_KEY = "board_current_symbol"
 
 
 def _finite(value: float | None) -> float | None:
@@ -382,6 +386,10 @@ def build_member_observation_from_facts(
         # Board ready gate (SSOT): adapter.trend is not None.
         board_current_eligible=_board_eligible,
         board_current_ready=_board_ready,
+        # Slice 4A2 — instrument symbol (for ``leader_symbol``).  Carried from the
+        # same union-level metadata query that produced eligibility, so Review does
+        # NOT issue a second Instrument query (instrument meta queries == 1).
+        board_current_symbol=current_only.get(_BOARD_CURRENT_SYMBOL_KEY),
         # trend_strength = median per-bar trend strength (board fp_trend_strength).
         trend_strength=_finite(_board_flat.get("fp_trend_strength"))
         if _board_flat is not None

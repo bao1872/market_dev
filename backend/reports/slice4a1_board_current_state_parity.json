@@ -70,6 +70,7 @@
   "schema_contract": "Compatible extension only — no existing field types changed. Scope-observation groups: trend.{board_ready_member_count,trend_strength_distribution,dsa_vwap_dev_pct_distribution}, structure.current_state.{board_ready_member_count,mean_active_orderblock_count,latest_events}, momentum.{change,sqzmom}, participation.volume.{badge,ratio20_mean,ratio200_mean,percentile20_histogram,percentile200_histogram}.",
   "member_observation_new_fields": [
     "board_current_ready",
+    "board_current_eligible",
     "trend_strength",
     "active_ob_count",
     "current_dsa_vwap_dev_pct",
@@ -94,7 +95,6 @@
     "backend/app/services/review_leadership_service.py",
     "backend/tests/test_review_board_capability_parity.py",
     "backend/tests/test_review_observation_prep.py",
-    "backend/tests/test_review_observation_persistence.py",
     "backend/tests/test_review_leadership_integration_slice.py",
     "backend/reports/slice4a1_board_current_state_parity.json"
   ],
@@ -140,5 +140,5 @@
     "First Pyramid formula / lookback changes"
   ],
   "next": "After Slice4A1R2 PASS: migrate technical_state_concentration/dispersion -> Event Freshness -> Diffusion, then retire the independent BoardAnalysisRun -> BoardAnalysisSnapshot -> market_aggregation chain once all capabilities parity-PASS.",
-  "status": "IMPLEMENTATION_PUSHED_PENDING_REVIEW"
+  "status": "CLOSED_AT_11cd2c9e"
 }

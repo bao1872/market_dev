@@ -360,7 +360,7 @@ async def _install_mocks(
         return {}
 
     monkeypatch.setattr(
-        prep_service, "_load_batch_instrument_active_status", _fake_batch_active
+        prep_service, "_load_batch_instrument_board_meta", _fake_batch_active
     )
 
 
@@ -1028,7 +1028,7 @@ def _install_contract_mocks(monkeypatch, current_only_loader):
     # faked too (no DB in contract tests). Returns empty -> no member eligible;
     # these C1a tests assert the exact-T loader contract, not eligibility parity.
     monkeypatch.setattr(
-        prep_service, "_load_batch_instrument_active_status", _fake_empty
+        prep_service, "_load_batch_instrument_board_meta", _fake_empty
     )
 
 
@@ -1242,7 +1242,7 @@ from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
 from app.models.stock_feature_snapshot import StockFeatureSnapshot as _SFS
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun as _SFSR
 from app.services.review_observation_prep_service import (
-    _load_batch_instrument_active_status,
+    _load_batch_instrument_board_meta,
     _load_current_only_snapshot_facts,
 )
 
@@ -1384,7 +1384,7 @@ def test_batch_passes_immutable_source_core_run_id_to_loader(monkeypatch):
             prep_service, "_load_current_only_snapshot_facts", fake_loader
         )
         monkeypatch.setattr(
-            prep_service, "_load_batch_instrument_active_status", fake_active
+            prep_service, "_load_batch_instrument_board_meta", fake_active
         )
         return await prepare_current_scope_observations_batch(
             _FakeSession(),
@@ -1420,8 +1420,12 @@ def test_batch_injects_board_eligibility_into_current_only(monkeypatch):
         }
 
     async def fake_active(session, ids):
-        # Only id_active is active, mirroring ``Instrument.status == "active"``.
-        return {str(id_active): True, str(id_inactive): False}
+        # Only id_active is active, mirroring ``Instrument.status == "active"``;
+        # the symbol is carried in the same query (Slice 4A2).
+        return {
+            str(id_active): {"eligible": True, "symbol": "ACTV"},
+            str(id_inactive): {"eligible": False, "symbol": "INAC"},
+        }
 
     async def scenario():
         await _install_mocks(
@@ -1434,7 +1438,7 @@ def test_batch_injects_board_eligibility_into_current_only(monkeypatch):
             prep_service, "_load_current_only_snapshot_facts", fake_loader
         )
         monkeypatch.setattr(
-            prep_service, "_load_batch_instrument_active_status", fake_active
+            prep_service, "_load_batch_instrument_board_meta", fake_active
         )
         return await prepare_current_scope_observations_batch(
             _FakeSession(),
@@ -1455,4 +1459,7 @@ def test_batch_injects_board_eligibility_into_current_only(monkeypatch):
     # Board ``Instrument.status == "active"`` gate is carried per-member, not
     # blanket-true.
     assert eligibles == {True, False}, eligibles
+    # Slice 4A2 — the symbol rides the same query (instrument meta queries == 1).
+    sym_map = {str(m.member_id): m.board_current_symbol for m in members}
+    assert sym_map == {str(id_active): "ACTV", str(id_inactive): "INAC"}, sym_map
 

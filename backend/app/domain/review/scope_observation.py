@@ -191,6 +191,12 @@ class MemberObservation:
     # denominators).  Other Review canonical facts keep their own universe.
     # 4A1R2: ready is gated on eligible first.
     board_current_ready: bool = False
+    # Slice 4A2 — instrument symbol carried from the same union-level metadata
+    # query.  Needed so the migrated Board technical-state capability can emit
+    # ``leader_symbol`` (the instrument symbol, NEVER the member_id UUID which
+    # ``member_id`` already holds).  ``None`` when the instrument metadata query
+    # did not return this member.
+    board_current_symbol: str | None = None
     # trend_strength = median per-bar trend strength (board ``fp_trend_strength``).
     trend_strength: float | None = None
     # combined active OB count (board ``fp_active_ob_count``), parsed with the
@@ -284,6 +290,179 @@ def _percentile(sorted_values: Sequence[float], q: float) -> float | None:
         return sorted_values[lower]
     frac = position - lower
     return sorted_values[lower] * (1.0 - frac) + sorted_values[upper] * frac
+
+
+# ---------------------------------------------------------------------------
+# Slice 4A2 — Board technical-state distribution migration (NO_FORMULA_CHANGE).
+#
+# These two owners replicate the legacy Board producer ``_compute_concentration``
+# and ``_compute_dispersion`` EXACTLY at the price/math level, consuming exactly
+# the Board-ready member technical magnitudes (``change_magnitude``).  They are
+# PURE (no DB, no numpy, no Board service import).  The legacy Board oracle
+# functions of the same names are imported ONLY by the parity tests, never by
+# production Review code (see AST gate: Review MUST NOT import
+# board_analysis_service).
+# ---------------------------------------------------------------------------
+
+
+def _technical_change_magnitude(
+    trend_strength: float | None,
+    dsa_vwap_dev_pct: float | None,
+) -> float:
+    """Board ``change_magnitude`` priority: ``|fp_trend_strength|`` > ``|fp_dsa_vwap_dev_pct|`` > 0.
+
+    STRICT priority (not ``max(abs(trend_strength), abs(vwap))``): even if
+    ``dsa_vwap_dev_pct`` has a far larger absolute value, ``trend_strength`` wins
+    whenever it is present.  Both missing -> ``0.0`` (never ``None``), so a
+    board-ready member always contributes a finite magnitude.
+    """
+    if trend_strength is not None:
+        return abs(trend_strength)
+    if dsa_vwap_dev_pct is not None:
+        return abs(dsa_vwap_dev_pct)
+    return 0.0
+
+
+def _compute_technical_concentration(
+    magnitudes: Sequence[float],
+    symbols: Sequence[str | None],
+) -> dict[str, Any]:
+    """Top3/Top5 contribution, HHI, leader/median gap (legacy Board parity).
+
+    ``magnitudes`` and ``symbols`` are parallel sequences over the Board-ready
+    technical members, in their Board-ready encounter order.  The leader tie is
+    resolved by ``max()`` over the ordered list (first encountered wins) — the
+    SAME tie semantics as the legacy Board ``max(valid, key=...)``.  We must NOT
+    introduce a ``(magnitude, symbol)`` tie-break, which would re-order ties.
+
+    Empty input -> all-zero / None skeleton (count == 0).  All-zero magnitudes ->
+    count > 0, hhi = 0.0, leader/ median = 0.0, gap = 0.0 (distinct from empty).
+    """
+    mags = [float(m) for m in magnitudes]
+    n = len(mags)
+    out: dict[str, Any] = {
+        "top3_contribution": {"numerator": 0.0, "denominator": 0.0},
+        "top5_contribution": {"numerator": 0.0, "denominator": 0.0},
+        "hhi": 0.0,
+        "leader_median_gap": None,
+        "leader_symbol": None,
+        "leader_magnitude": None,
+        "median_magnitude": None,
+        "count": n,
+    }
+    if n == 0:
+        return out
+
+    s = sorted(mags, reverse=True)
+    total = sum(s)
+    out["top3_contribution"] = {
+        "numerator": round(sum(s[:3]), 6),
+        "denominator": round(total, 6),
+    }
+    out["top5_contribution"] = {
+        "numerator": round(sum(s[:5]), 6),
+        "denominator": round(total, 6),
+    }
+    if total > 0:
+        out["hhi"] = round(sum((m / total) ** 2 for m in mags), 6)
+
+    # Leader: max magnitude, FIRST encountered wins the tie (legacy Board parity).
+    leader_idx = 0
+    for i in range(1, n):
+        if mags[i] > mags[leader_idx]:
+            leader_idx = i
+    leader_mag = mags[leader_idx]
+    out["leader_symbol"] = symbols[leader_idx]
+    out["leader_magnitude"] = round(leader_mag, 6)
+    # Review ``_percentile`` requires an ASCENDING sorted sequence (the Board
+    # oracle's ``np.percentile`` sorts internally; we must sort explicitly to keep
+    # the same linear-interpolation result).
+    sorted_mags = sorted(mags)
+    med = _percentile(sorted_mags, 0.5)
+    out["median_magnitude"] = round(med, 6) if med is not None else None
+    out["leader_median_gap"] = round(leader_mag - (med or 0.0), 6)
+    return out
+
+
+def _compute_technical_dispersion(
+    magnitudes: Sequence[float],
+) -> dict[str, Any]:
+    """Board internal dispersion (population std / cv / p25/p50/p75/iqr/range).
+
+    Uses POPULATION variance (divide by ``n``, NOT ``n-1``) — distinct from the
+    Review ``_stdev`` owner (which returns ``None`` for ``n < 2``).  A single
+    member -> std = 0.0 and cv = 0.0 (when magnitude != 0).  Reuses the Review
+    ``_percentile`` owner (linear interpolation, identical to Board's percentile).
+    """
+    mags = [float(m) for m in magnitudes]
+    n = len(mags)
+    out: dict[str, Any] = {
+        "count": n,
+        "mean": None,
+        "std": None,
+        "cv": None,
+        "p25": None,
+        "p50": None,
+        "p75": None,
+        "iqr": None,
+        "min": None,
+        "max": None,
+        "range": None,
+    }
+    if n == 0:
+        return out
+
+    mean = sum(mags) / n
+    var = sum((m - mean) ** 2 for m in mags) / n  # population variance
+    std = var ** 0.5
+    # Review ``_percentile`` requires an ASCENDING sorted sequence.
+    sorted_mags = sorted(mags)
+    p25 = _percentile(sorted_mags, 0.25)
+    p50 = _percentile(sorted_mags, 0.50)
+    p75 = _percentile(sorted_mags, 0.75)
+    mn, mx = min(mags), max(mags)
+    out["mean"] = round(mean, 6)
+    out["std"] = round(std, 6)
+    out["cv"] = round(std / mean, 6) if mean != 0 else None
+    out["p25"] = round(p25, 6) if p25 is not None else None
+    out["p50"] = round(p50, 6) if p50 is not None else None
+    out["p75"] = round(p75, 6) if p75 is not None else None
+    out["iqr"] = (
+        round(p75 - p25, 6) if p75 is not None and p25 is not None else None
+    )
+    out["min"] = round(mn, 6)
+    out["max"] = round(mx, 6)
+    out["range"] = round(mx - mn, 6)
+    return out
+
+
+def _compute_board_technical_state(
+    board_ready_members: Sequence[MemberObservation],
+) -> dict[str, Any]:
+    """Slice 4A2 — assemble the Board ``technical_state`` dict from Review facts.
+
+    Consumes ONLY the Board-ready ``MemberObservation`` members (exact-T
+    ``board_first_pyramid_flat`` source + Board ready-gate parity), in encounter
+    order, so the leader tie-break and percentile order match the legacy Board
+    producer exactly.  The magnitude priority is Board's ``change_magnitude``:
+    ``|fp_trend_strength|`` > ``|fp_dsa_vwap_dev_pct|`` > ``0.0`` (strict
+    priority, never ``max`` of the two).  No DB read, no bar reload, no First
+    Pyramid recompute — all inputs are already in the exact-T snapshot facts that
+    Slice 4A1 migrated.
+    """
+    magnitudes: list[float] = []
+    symbols: list[str | None] = []
+    for m in board_ready_members:
+        magnitudes.append(
+            _technical_change_magnitude(
+                m.trend_strength, m.current_dsa_vwap_dev_pct
+            )
+        )
+        symbols.append(m.board_current_symbol)
+    return {
+        "concentration": _compute_technical_concentration(magnitudes, symbols),
+        "dispersion": _compute_technical_dispersion(magnitudes),
+    }
 
 
 def _finite_or_none(value: float | None) -> float | None:
@@ -1354,6 +1533,21 @@ def compute_scope_observation(
                 "board_ready_member_count": board_ready_count,
                 "mean_active_orderblock_count": _mean(active_ob_values),
                 "latest_events": latest_events,
+                # Slice 4A2 — Board technical-state distribution migration
+                # (NO_FORMULA_CHANGE).  ``concentration`` / ``dispersion`` are the
+                # Board producers' ``pyramid_v2.concentration`` /
+                # ``pyramid_v2.dispersion`` replicated EXACTLY at the price/math
+                # level, consuming the Board-ready technical magnitude
+                # (``change_magnitude``) of each ``board_ready_members`` member, in
+                # the SAME encounter order as the Board ``instrument_results`` list
+                # (so the leader tie-break is identical).  See
+                # ``_compute_technical_concentration`` / ``_compute_technical_dispersion``.
+                # These are deliberately NAMED under ``technical_state`` and DO NOT
+                # reuse Review's existing price / amount concentration owners (which
+                # are different facts, different formulas).
+                "technical_state": _compute_board_technical_state(
+                    board_ready_members
+                ),
             },
             # REVIEW-V23-A-CORRECTION-3: ``active_ob_count`` is FORMALLY REMOVED from
             # the canonical v2.3 Scope payload (PRD).  The key is absent entirely —

@@ -1,0 +1,95 @@
+{
+  "slice": "Slice 4A2 — Board technical-state distribution migration: concentration + dispersion",
+  "objective": "Migrate the two remaining Board current-state distribution capabilities (pyramid_v2.concentration, pyramid_v2.dispersion) into Review by consuming the SAME exact-T Board-ready member facts already migrated in 4A1/4A1R/4A1R2. NO Board capability is deleted; only migrated. Pure capability migration — no Freshness, no Diffusion, no Relative Strength, no formula/lookback/threshold changes, no Board runtime removal.",
+  "generated_at": "2026-08-23",
+  "baseline_sha": "11cd2c9ea6e98e0f1d1103e24444a4c64d70eeb0",
+  "supersedes": "Slice 4A1 / 4A1R / 4A1R2 (all CLOSED at 11cd2c9e). Those migrated 9 Board current-state capabilities + core lineage lock + eligible universe. This slice adds the 10th/11th (technical_state.concentration / dispersion) reusing the identical Board-ready universe and exact-T source facts.",
+
+  "capabilities_targeted": [
+    "pyramid_v2.concentration (Top3/Top5 contribution, HHI, leader_median_gap, leader_symbol, leader_magnitude, median_magnitude, count)",
+    "pyramid_v2.dispersion (count, mean, std, cv, p25, p50, p75, iqr, min, max, range)"
+  ],
+
+  "source": "exact-T source_core_run Board-ready member facts (same universe as 4A1R2: PIT membership ∩ Instrument.status=='active' ∩ exact-T StockFeatureSnapshot.first_pyramid_flat ∩ FirstPyramidSemanticAdapter.trend is not None). The technical magnitude change_magnitude is computed from each member's already-loaded exact-T fp_trend_strength / fp_dsa_vwap_dev_pct — NO second First Pyramid recompute, NO bar reload.",
+
+  "magnitude_formula": "change_magnitude = abs(fp_trend_strength) if fp_trend_strength is not None else abs(fp_dsa_vwap_dev_pct) if fp_dsa_vwap_dev_pct is not None else 0.0. STRICT priority: |trend_strength| wins even when |dsa_vwap_dev_pct| is far larger (e.g. 0.1 vs 9.0 -> 0.1). NOT max(|trend_strength|, |vwap|).",
+
+  "concentration_formula": "mags = board-ready technical magnitudes; sort DESC. total = sum(mags). top3 numerator = sum(top 3), top5 numerator = sum(top 5), denominator = total, all round(...,6). HHI = sum((m/total)^2) round 6 if total>0 else 0.0. leader = FIRST member (encounter order) with max(change_magnitude) — Board max() first-encountered tie semantics, NO (magnitude, symbol) re-tiebreak. median_magnitude = linear-interpolation percentile p50 (Review _percentile, which requires a sorted sequence, mirrors Board np.percentile linear interpolation). leader_median_gap = round(leader_magnitude - (median or 0.0), 6).",
+
+  "dispersion_formula": "population (NOT sample): mean = sum/n; variance = sum((m-mean)^2)/n (divided by n, not n-1); std = sqrt(variance); cv = std/mean if mean!=0 else None. p25/p50/p75/iqr/min/max/range via linear-interpolation percentile, all round(...,6). Single member: std=0.0, cv=0.0 (NOT Review _stdev n<2 -> None, which is a different Review fact).",
+
+  "empty_and_zero_semantics": "No board-ready member: concentration all-zero/Nones (top3/5 numerator/denominator 0.0, hhi 0.0, leader*/median None, count 0); dispersion all None (count 0, mean/std/cv/p25/p50/p75/iqr/min/max/range None). Universe non-empty but all magnitudes 0: concentration.count>0, hhi 0.0, leader_magnitude 0.0, median_magnitude 0.0, gap 0.0; dispersion mean 0.0, std 0.0, cv None. The two cases are kept distinct (not conflated).",
+
+  "placement": "structure.current_state.technical_state.{concentration,dispersion}. Deliberately NEW key names under technical_state — these are NOT the existing Review price concentration / amount concentration facts (different semantics, different formulas).",
+
+  "instrument_meta_queries": 1,
+  "instrument_meta_contract": "_load_batch_instrument_active_status (4A1R2) is converged into _load_batch_instrument_board_meta: one SELECT of Instrument.id, Instrument.status, Instrument.symbol returns {str(id): {'eligible': status=='active', 'symbol': symbol}}. board_current_eligible AND board_current_symbol are both injected from this single result. No separate symbol query. Verified via rg that _load_batch_instrument_active_status had no unexpected production caller before rename.",
+
+  "leader_symbol_preserved": true,
+  "leader_symbol_contract": "MemberObservation.board_current_symbol carries Instrument.symbol (NOT the instrument UUID member_id). Injected from the same _load_batch_instrument_board_meta result as board_current_eligible.",
+
+  "magnitude_priority": "trend_strength > dsa_vwap_dev_pct > 0",
+  "board_ready_universe_reused": true,
+  "formula_changes": 0,
+  "lookback_changes": 0,
+  "threshold_changes": 0,
+  "concentration_parity": "PASS",
+  "dispersion_parity": "PASS",
+  "review_runtime_imports_board_service": false,
+  "result": "PASS",
+
+  "parity_method": "Same synthetic exact-T first_pyramid_flat member fixtures run through OLD Board producer private pure functions (_change_magnitude, _compute_concentration, _compute_dispersion) as oracle AND NEW Review _compute_board_technical_state. Hard gate: Review technical_state.concentration == OLD Board concentration AND == OLD Board dispersion, field-by-field after both round(...,6). Board functions imported only by tests, never by production Review code (AST gate PASS).",
+
+  "board_capabilities_targeted": 2,
+  "board_capabilities_preserved": 2,
+  "tests": {
+    "parity_suite": "tests/test_review_board_capability_parity.py",
+    "parity_tests_passed": 18,
+    "parity_tests_failed": 0,
+    "concentration_dispersion_tests": [
+      "test_technical_concentration_dispersion_parity_normal_multimember",
+      "test_technical_magnitude_prefers_trend_strength_over_larger_vwap",
+      "test_technical_magnitude_both_missing_yields_zero",
+      "test_technical_magnitude_abs_of_negative",
+      "test_technical_leader_tie_keeps_first_encountered_member",
+      "test_technical_single_member",
+      "test_technical_all_zero_magnitude",
+      "test_technical_empty_board_ready_universe",
+      "test_technical_inactive_and_non_ready_members_excluded",
+      "test_technical_state_survives_json_roundtrip_persistence"
+    ],
+    "boundary_cases": [
+      "normal multi-member: concentration/dispersion field-by-field equal to Board oracle",
+      "trend_strength 0.1 vs vwap 9.0 -> magnitude 0.1 (strict priority)",
+      "both magnitude inputs None -> 0.0 (not None), contributes zero weight",
+      "negative trend_strength -> abs()",
+      "two members equal max magnitude -> leader = FIRST encountered (no symbol re-tiebreak)",
+      "single member -> std 0.0, cv 0.0 (population, not Review _stdev None)",
+      "all-zero magnitude but non-empty universe -> count>0, hhi 0.0, cv None (distinct from empty)",
+      "empty board-ready universe -> all None / zero (distinct from all-zero)",
+      "inactive + non-ready members fully excluded from universe",
+      "JSON round-trip (observation_payload -> JSONB -> observation_payload) preserves every field exactly"
+    ],
+    "gate_no_board_import": "PASS — AST/source import gate over app/domain/review/scope_observation.py, app/services/observation_prep.py, app/services/review_observation_prep_service.py; rejects 'import app.services.board_analysis_service' and 'from ...board_analysis_service import ...'. Board producer imported ONLY by tests as oracle.",
+    "persistence_test": "tests/test_review_board_capability_parity.py::test_technical_state_survives_json_roundtrip_persistence — full key set present and json.loads(json.dumps(technical_state)) == technical_state. Canonical PG persistence exercised by the verification plan (ReviewScopeObservationFact JSONB).",
+    "known_preexisting_baseline": "Remaining failures are pre-existing probe/no-migration/worker/stock-state/pg baseline failures, identical on the pristine tree and confirmed not caused by 4A2 (the 3 isolated modules that fail only under full-suite ordering pollution PASS in isolation). ruff error count unchanged from committed 11cd2c9e baseline.",
+    "regression_diff_vs_baseline": "vs 11cd2c9e: NEW regressions 0. ruff error count unchanged from committed baseline."
+  },
+  "explicitly_not_done_this_round": [
+    "Event Freshness",
+    "Diffusion",
+    "Relative Strength",
+    "concept_extras",
+    "Board runtime removal",
+    "AfterClose Board-stage removal",
+    "migration",
+    "production DB read/write",
+    "deploy",
+    "backfill",
+    "First Pyramid formula changes",
+    "lookback changes",
+    "threshold changes"
+  ],
+  "next": "After Slice 4A2 PASS: next刀 = Event Freshness (HistoryEvent, 5/10/20-day windows, four-dimensional decay) — significantly more complex than concentration/dispersion, do NOT touch early.",
+  "status": "IMPLEMENTATION_PENDING_REVIEW"
+}

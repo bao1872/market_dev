@@ -56,6 +56,7 @@ from app.services.board_membership_service import PITMembershipUnavailableError
 from app.services.observation_prep import (
     _BOARD_CURRENT_ELIGIBLE_KEY,
     _BOARD_CURRENT_FLAT_KEY,
+    _BOARD_CURRENT_SYMBOL_KEY,
     RawMemberFacts,
     build_member_observation,
     build_member_observation_from_facts,
@@ -319,31 +320,39 @@ async def _load_current_only_snapshot_facts(
     return out
 
 
-async def _load_batch_instrument_active_status(
+async def _load_batch_instrument_board_meta(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],
-) -> dict[str, bool]:
-    """Batch-load ``Instrument.status == "active"`` eligibility (Slice 4A1R2).
+) -> dict[str, dict[str, Any]]:
+    """Slice 4A2 union-level Instrument metadata loader (single batch query).
 
     Replicates the legacy Board producer universe gate
     ``_is_instrument_valid_for_aggregation`` == ``Instrument.status == "active"``
-    EXACTLY — no extra rules (no `.ST` / `.退` / delisted-suffix checks).  Single
-    batch query over the union member set (no N+1).
+    EXACTLY — no extra rules (no `.ST` / `.退` / delisted-suffix checks) — and
+    additionally carries the ``symbol`` so the migrated Board capability can emit
+    ``leader_symbol`` (which must be the instrument symbol, NOT the member_id
+    UUID).  A single ``SELECT Instrument.id, Instrument.status, Instrument.symbol``
+    over the union member set (no N+1, no second query).
 
     The result gates the migrated Board current-state capability universe ONLY;
     it does NOT change the existing Review price / transition / historical /
     participation universes.  ``build_member_observation_from_facts`` reads it as
-    the current-only fact ``_BOARD_CURRENT_ELIGIBLE_KEY``.
+    the current-only facts ``_BOARD_CURRENT_ELIGIBLE_KEY`` and
+    ``_BOARD_CURRENT_SYMBOL_KEY``.
 
-    Returns ``{str(instrument_id): (status == "active")}`` for all requested ids.
+    Returns ``{str(instrument_id): {"eligible": bool, "symbol": str}}`` for all
+    requested ids that exist in the table.
     """
     if not instrument_ids:
         return {}
-    stmt = select(Instrument.id, Instrument.status).where(
-        Instrument.id.in_(instrument_ids)
-    )
+    stmt = select(
+        Instrument.id, Instrument.status, Instrument.symbol
+    ).where(Instrument.id.in_(instrument_ids))
     rows = (await session.execute(stmt)).all()
-    return {str(iid): (status == "active") for iid, status in rows}
+    return {
+        str(iid): {"eligible": (status == "active"), "symbol": symbol}
+        for iid, status, symbol in rows
+    }
 
 
 @dataclass(frozen=True)
@@ -1455,17 +1464,24 @@ async def prepare_current_scope_observations_batch(
         trade_date,
         source_core_run_id=source_core_run_id,
     )
-    # Slice 4A1R2 — Board valid_for_market_aggregation eligibility
-    # (``Instrument.status == "active"``), single batch query.  Carried into the
-    # current-only facts so ``build_member_observation_from_facts`` can gate the
-    # migrated Board capability universe exactly like the legacy Board flat_list
-    # pre-filter.  Affects ONLY the migrated Board capabilities, not other Review
-    # universes.
-    active_status = await _load_batch_instrument_active_status(
+    # Slice 4A2 — Board union-level Instrument metadata (single batch query):
+    # ``Instrument.status == "active"`` eligibility (4A1R2) AND the symbol needed
+    # for ``leader_symbol`` (4A2).  Carried into the current-only facts so
+    # ``build_member_observation_from_facts`` can gate the migrated Board
+    # capability universe and emit the leader symbol exactly like the legacy Board
+    # flat_list pre-filter.  Affects ONLY the migrated Board capabilities, not
+    # other Review universes.
+    board_meta = await _load_batch_instrument_board_meta(
         session, union_members
     )
     for iid, facts in current_only_facts.items():
-        facts[_BOARD_CURRENT_ELIGIBLE_KEY] = bool(active_status.get(iid, False))
+        meta = board_meta.get(iid)
+        if meta is None:
+            facts[_BOARD_CURRENT_ELIGIBLE_KEY] = False
+            facts[_BOARD_CURRENT_SYMBOL_KEY] = None
+        else:
+            facts[_BOARD_CURRENT_ELIGIBLE_KEY] = bool(meta["eligible"])
+            facts[_BOARD_CURRENT_SYMBOL_KEY] = meta["symbol"]
     coverage_by_date = await _load_batch_backfill_event_coverage(
         session, union_members, effective_dates
     )

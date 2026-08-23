@@ -33,15 +33,25 @@ Parity requirements (per spec):
 from __future__ import annotations
 
 import ast
+import json
 import math
 from datetime import date
 from pathlib import Path
 
-from app.domain.review.scope_observation import compute_scope_observation
-from app.services.board_analysis_service import compute_board_payload
+from app.domain.review.scope_observation import (
+    FirstPyramidSemanticAdapter,
+    compute_scope_observation,
+)
+from app.services.board_analysis_service import (
+    _change_magnitude,
+    _compute_concentration,
+    _compute_dispersion,
+    compute_board_payload,
+)
 from app.services.observation_prep import (
     _BOARD_CURRENT_ELIGIBLE_KEY,
     _BOARD_CURRENT_FLAT_KEY,
+    _BOARD_CURRENT_SYMBOL_KEY,
     RawMemberFacts,
     build_member_observation,
 )
@@ -68,6 +78,7 @@ def _member(
     eqh_freshness=None,
     eql_freshness=None,
     trend_direction="up",
+    symbol=None,
 ):
     """Build one exact-T ``first_pyramid_flat`` element in Board input layout.
 
@@ -75,6 +86,10 @@ def _member(
     each ``flat_list`` element and reads EVERY ``fp_*`` from that element's
     TOP-LEVEL.  ``fp_trend_direction`` drives the Board ready gate: ``None`` means
     the member is counted as missing and skipped entirely.
+
+    ``fp_symbol`` is the instrument symbol consumed by the Board
+    ``_compute_concentration`` leader_symbol oracle; it must equal the Review
+    ``board_current_symbol`` injected below for the 4A2 leader_symbol parity.
     """
     return {
         "fp_trend_strength": trend_strength,
@@ -93,6 +108,7 @@ def _member(
         "fp_latest_ob_direction": ob_dir,
         "fp_latest_eqh_freshness": eqh_freshness,
         "fp_latest_eql_freshness": eql_freshness,
+        "fp_symbol": symbol,
     }
 
 
@@ -104,7 +120,7 @@ def _members():
     B. board-ready with ``fp_momentum_change=None`` -> Board flat +1.
     C. board-ready with ``fp_volume_badge=None``    -> Board unknown +1.
     """
-    return [
+    flats = [
         _member(
             trend_strength=0.80,
             dsa_vwap_dev_pct=-1.20,
@@ -229,6 +245,12 @@ def _members():
             eql_freshness=None,
         ),
     ]
+    # 4A2 — Board ``leader_symbol`` oracle reads ``fp_symbol``; Review reads the
+    # same value from ``board_current_symbol`` (instrument meta).  Pin them equal
+    # so the concentration leader_symbol parity test is meaningful.
+    for i, f in enumerate(flats):
+        f["fp_symbol"] = f"M{i:03d}"
+    return flats
 
 
 def _history_flat_subset(flat):
@@ -280,6 +302,10 @@ def _build_review_members(flats, *, history_flats=None, eligible=None):
             current_only={
                 _BOARD_CURRENT_ELIGIBLE_KEY: is_eligible,
                 _BOARD_CURRENT_FLAT_KEY: f,
+                # Symbol parity: prefer the flat's fp_symbol (if the test pinned
+                # one), else fall back to the deterministic M{i:03d} so Review and
+                # the Board oracle read the SAME symbol.
+                _BOARD_CURRENT_SYMBOL_KEY: f.get("fp_symbol") or f"M{i:03d}",
             },
         )
         member_list.append(build_member_observation(raw))
@@ -713,3 +739,347 @@ def test_board_eligibility_gate_all_ineligible_yields_empty_universe():
     assert review["trend"]["board_ready_member_count"] == 0
     assert review["momentum"]["change"]["denominator"] == 0
     assert review["participation"]["volume"]["badge"]["unknown_count"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Slice 4A2 — Board technical-state distribution (concentration / dispersion)
+# --------------------------------------------------------------------------- #
+def _board_technical_oracle(flats, eligible=None):
+    """Faithful Board producer oracle for pyramid_v2 concentration / dispersion.
+
+    Mirrors Board's ``_build_instrument_results``: keep only members that pass
+    the Board eligibility (``eligible`` here, default all-active) AND the Board
+    ready gate (``FirstPyramidSemanticAdapter(flat).trend is not None``), in the
+    SAME encounter order as the ``flats`` list.  The magnitude is Board's
+    ``_change_magnitude`` (``|fp_trend_strength|`` > ``|fp_dsa_vwap_dev_pct|`` > 0)
+    and the symbol is ``fp_symbol``.  Production Review code MUST NOT call this —
+    it is a test-only oracle.  Returns ``(concentration, dispersion)`` dicts.
+    """
+    instrument_results = []
+    for i, f in enumerate(flats):
+        if eligible is not None and not eligible[i]:
+            continue
+        if FirstPyramidSemanticAdapter(f).trend is None:
+            continue
+        instrument_results.append(
+            {
+                "change_magnitude": _change_magnitude(f),
+                "symbol": f.get("fp_symbol") or f"M{i:03d}",
+            }
+        )
+    return (
+        _compute_concentration(instrument_results),
+        _compute_dispersion(instrument_results),
+    )
+
+
+def _review_technical_state(flats, eligible=None):
+    member_list = _build_review_members(flats, eligible=eligible)
+    return _review_payload(member_list)["structure"]["current_state"][
+        "technical_state"
+    ]
+
+
+def test_technical_concentration_dispersion_parity_normal_multimember():
+    """Normal multi-member board: Review technical_state.concentration /
+    dispersion must equal the legacy Board producers EXACTLY (hard gate).
+
+    ``Review technical_state.concentration == OLD Board concentration`` and
+    ``== OLD Board dispersion``, field-by-field, after both round(..., 6).
+    """
+    flats = _members()
+    b_conc, b_disp = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+
+    # Distinct from Review's price/amount concentration (must NOT be reused).
+    assert "concentration" in review
+    assert "dispersion" in review
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+    # Leader symbol preserved (instrument symbol, not member UUID).
+    assert review["concentration"]["leader_symbol"] == b_conc["leader_symbol"]
+
+
+def test_technical_magnitude_prefers_trend_strength_over_larger_vwap():
+    """Magnitude priority is STRICT: ``|trend_strength|`` wins even when the
+    ``|dsa_vwap_dev_pct|`` is far larger.  Board uses the same priority, so the
+    resulting concentration/dispersion must still match field-by-field.
+    """
+    flats = [
+        _member(
+            trend_strength=0.1,  # tiny trend strength
+            dsa_vwap_dev_pct=9.0,  # huge vwap deviation, must be IGNORED
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="up",
+            volume_badge="normal",
+            symbol="A",
+        ),
+        _member(
+            trend_strength=0.5,
+            dsa_vwap_dev_pct=0.2,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="up",
+            volume_badge="normal",
+            symbol="B",
+        ),
+    ]
+    b_conc, b_disp = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+    # Both magnitudes equal the respective |trend_strength|, not vwap.
+    assert b_conc["leader_magnitude"] == 0.5
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+
+
+def test_technical_magnitude_both_missing_yields_zero():
+    """Both magnitude inputs missing -> magnitude ``0.0`` (never None), so a
+    board-ready member still contributes to concentration/dispersion with a
+    zero weight; parity with Board (which also returns 0.0 for missing inputs).
+    """
+    flats = [
+        _member(
+            trend_strength=None,
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="flat",
+            volume_badge="normal",
+            symbol="A",
+        )
+        for _ in range(3)
+    ]
+    b_conc, b_disp = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+    assert b_conc["hhi"] == 0.0
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+
+
+def test_technical_magnitude_abs_of_negative():
+    """Negative trend_strength must be taken absolute, matching Board."""
+    flats = [
+        _member(
+            trend_strength=-0.8,
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="down",
+            volume_badge="normal",
+            symbol="A",
+        ),
+        _member(
+            trend_strength=0.3,
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="up",
+            volume_badge="normal",
+            symbol="B",
+        ),
+    ]
+    b_conc, b_disp = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+    assert b_conc["leader_magnitude"] == 0.8
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+
+
+def test_technical_leader_tie_keeps_first_encountered_member():
+    """Two members with identical max magnitude: leader stays the FIRST
+    encountered (legacy Board ``max`` semantics) — NOT a (magnitude, symbol)
+    re-tiebreak.  Parity with Board must hold and the symbol is the first one's.
+    """
+    flats = [
+        _member(
+            trend_strength=0.5,
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="up",
+            volume_badge="normal",
+            symbol="FIRST",
+        ),
+        _member(
+            trend_strength=0.5,  # identical magnitude, lexicographically-smaller symbol
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="up",
+            volume_badge="normal",
+            symbol="SECOND",
+        ),
+    ]
+    b_conc, _ = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+    # Both Board and Review must pick the FIRST encountered member's symbol.
+    assert b_conc["leader_symbol"] == "FIRST"
+    assert review["concentration"]["leader_symbol"] == "FIRST"
+    assert review["concentration"] == b_conc
+
+
+def test_technical_single_member():
+    """Single board-ready member -> concentration leader/median = that magnitude,
+    dispersion std = 0.0 and cv = 0.0 (population semantics, NOT Review _stdev
+    None-for-n<2).  Parity with Board.
+    """
+    flats = [
+        _member(
+            trend_strength=0.42,
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="up",
+            volume_badge="normal",
+            symbol="A",
+        )
+    ]
+    b_conc, b_disp = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+    assert b_disp["std"] == 0.0
+    assert b_disp["cv"] == 0.0
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+
+
+def test_technical_all_zero_magnitude():
+    """All magnitudes 0 but universe non-empty -> count > 0, hhi 0.0,
+    leader/median 0.0, gap 0.0; dispersion mean/std 0.0, cv None.  Distinct from
+    the empty-universe case.  Parity with Board.
+    """
+    flats = [
+        _member(
+            trend_strength=0.0,
+            dsa_vwap_dev_pct=None,
+            active_ob_count=0,
+            sqzmom_value=0.0,
+            volume_ratio20=1.0,
+            volume_ratio200=1.0,
+            volume_percentile20=50.0,
+            volume_percentile200=50.0,
+            momentum_change="flat",
+            volume_badge="normal",
+            symbol="A",
+        )
+        for _ in range(3)
+    ]
+    b_conc, b_disp = _board_technical_oracle(flats)
+    review = _review_technical_state(flats)
+    assert b_conc["count"] == 3
+    assert b_conc["hhi"] == 0.0
+    assert b_disp["mean"] == 0.0
+    assert b_disp["cv"] is None
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+
+
+def test_technical_empty_board_ready_universe():
+    """No board-ready member -> concentration all-zero/Nones (count 0), dispersion
+    all None (count 0).  Distinct from the all-zero-magnitude case.
+    """
+    flats = _members()
+    review = _review_technical_state(flats, eligible=[False] * len(flats))
+    assert review["concentration"]["count"] == 0
+    assert review["concentration"]["leader_symbol"] is None
+    assert review["concentration"]["hhi"] == 0.0
+    assert review["concentration"]["top3_contribution"]["denominator"] == 0.0
+    assert review["dispersion"]["count"] == 0
+    assert review["dispersion"]["mean"] is None
+    assert review["dispersion"]["std"] is None
+    assert review["dispersion"]["range"] is None
+
+
+def test_technical_inactive_and_non_ready_members_excluded():
+    """Eligibility + ready gate must shrink the technical universe exactly like
+    the other migrated capabilities: an inactive (but otherwise board-ready)
+    member drops out of concentration/dispersion, while a trend-missing member
+    (member 0) is already excluded by the Board ready gate on both sides.
+    """
+    flats = _members()  # member 0 has trend None -> not board-ready on both sides
+    # Make member 1 (board-ready) inactive -> only it is added to the Board-side
+    # exclusion that the eligibility gate produces on the Review side.
+    eligible = [True] + [False] + [True] * (len(flats) - 2)
+    b_conc, b_disp = _board_technical_oracle(flats, eligible=eligible)
+    review = _review_technical_state(flats, eligible=eligible)
+    # Member 1 dropped by eligibility; member 0 excluded by ready gate on both.
+    assert review["concentration"]["count"] == b_conc["count"]
+    assert review["dispersion"]["count"] == b_disp["count"]
+    assert review["concentration"] == b_conc
+    assert review["dispersion"] == b_disp
+    # Sanity: one fewer than the unfiltered Board baseline (member 1 dropped).
+    b_all, _ = _board_technical_oracle(flats)
+    assert b_conc["count"] == b_all["count"] - 1
+
+
+def test_technical_state_survives_json_roundtrip_persistence():
+    """Persistence boundary (observation_payload -> JSONB -> observation_payload)
+    must preserve every concentration / dispersion field exactly, including the
+    nested numerator/denominator and the round(..., 6) float precision.  This is
+    the pure stand-in for the ReviewScopeObservationFact JSONB write/read path;
+    the canonical persistence is exercised by the PG verification plan.
+    """
+    flats = _members()
+    review = _review_payload(_build_review_members(flats))[
+        "structure"
+    ]["current_state"]["technical_state"]
+
+    # Full key set present.
+    assert set(review["concentration"].keys()) == {
+        "top3_contribution",
+        "top5_contribution",
+        "hhi",
+        "leader_median_gap",
+        "leader_symbol",
+        "leader_magnitude",
+        "median_magnitude",
+        "count",
+    }
+    assert set(review["dispersion"].keys()) == {
+        "count",
+        "mean",
+        "std",
+        "cv",
+        "p25",
+        "p50",
+        "p75",
+        "iqr",
+        "min",
+        "max",
+        "range",
+    }
+    # JSONB round-trip stability (the persistence contract).
+    restored = json.loads(json.dumps(review))
+    assert restored == review
