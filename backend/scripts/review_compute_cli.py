@@ -193,7 +193,7 @@ async def _run_create_and_compute(args: argparse.Namespace) -> int:
                 print("[DRY-RUN] 输入校验通过:")
                 print(f"  trade_date: {trade_date}")
                 print(f"  source_core_run_id: {run.source_core_run_id}")
-                print(f"  source_board_run_id: {run.source_board_run_id}")
+                print(f"  source_board_run_id: null (Slice 3: Board-independent)")
                 print(f"  algorithm_version: {run.algorithm_version}")
                 print(f"  filter_version: {run.filter_version}")
                 print(f"  baseline_window: {run.baseline_window}")

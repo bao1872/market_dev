@@ -70,9 +70,8 @@ from app.domain.review.review_capability import (
 )
 from app.domain.review.scope_observation import compute_scope_observation
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
-from app.models.board_analysis_snapshot import BoardAnalysisRun, BoardAnalysisSnapshot
+from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
 from app.models.factor_publication import (
-    PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
     FactorPublication,
 )
@@ -212,7 +211,6 @@ async def _create_run_impl(
     *,
     trade_date: date,
     source_core_run_id: uuid.UUID | None = None,
-    source_board_run_id: uuid.UUID | None = None,
     algorithm_version: str | None = None,
     filter_version: str | None = None,
     baseline_window: int = DEFAULT_BASELINE_WINDOW,
@@ -223,17 +221,13 @@ async def _create_run_impl(
 ) -> tuple[MarketReviewRun, bool]:
     """创建或复用 review run（幂等：唯一键组合保证）的**内部实现**。
 
-    [Phase4.2 corrective] 恢复 baseline(76e1338) backward-compat 合同：
-    `create_run` 返回 **MarketReviewRun**（与全部既有生产调用方 after_close_orchestrator
-    / review_compute_cli / PG integration 一致）。需要显式 created/reused 信息的调用方
-    （如 Admin）改用 `create_run_with_result() -> ReviewRunCreation`。
+    [Slice 3] Review 身份仅由 stock_core + canonical history 构成；
+    source_board_run_id 不再作为输入参数（新 run 恒为 NULL）。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 业务交易日
         source_core_run_id: 输入 stock_core run_id（None 时从 publication 读取）
-        source_board_run_id: 输入 board_analysis 的 source_core_run_id
-            （None 时从 publication 读取 board_analysis_snapshot）
         algorithm_version: 算法版本（默认 REVIEW_ALGORITHM_VERSION）
         filter_version: 筛选器版本（默认 REVIEW_FILTER_VERSION）
         baseline_window: 历史基线窗口（默认 120，最低 60）
@@ -250,7 +244,7 @@ async def _create_run_impl(
         ReviewRunCreation(run, created)。
 
     Raises:
-        ReviewOrchestratorError: 输入校验失败（缺 publication pointer 等）；
+        ReviewOrchestratorError: 输入校验失败（缺 stock_core publication pointer）；
             或 [Phase4.1] 既有 run 的 canary/symbols scope 与新请求不一致
             （scope 冲突，避免 canary 结果续成 formal run）
     """
@@ -263,16 +257,14 @@ async def _create_run_impl(
     filt = filter_version or REVIEW_FILTER_VERSION
 
     # 解析 source run_ids
-    resolved_core_id, resolved_board_id = await _resolve_source_run_ids(
+    resolved_core_id = await _resolve_source_core_run_id(
         session,
         trade_date,
         source_core_run_id=source_core_run_id,
-        source_board_run_id=source_board_run_id,
     )
 
-    # [AUD-04/05 2026-08-07] Review 输入身份仅由 stock_core + market_aggregation
-    # + 历史观测构成。chip 属增强产品，不参与 Review lineage：创建阶段零次 chip
-    # 查询，也不写入 source_chip_run_id / degraded_reasons / chip_coverage。
+    # [Slice 3] Review 身份仅由 stock_core + canonical history 构成；Board Analysis
+    # 不再是前置条件，source_board_run_id 恒为 NULL（历史 lineage 仍保留在既有 run）。
     if dry_run:
         # dry-run：不写 DB，返回一个非持久化的 run 对象供调用方打印。
         # created=False —— 未真正插入任何行，调用方不得据此触发 compute。
@@ -280,7 +272,7 @@ async def _create_run_impl(
             MarketReviewRun(
                 trade_date=trade_date,
                 source_core_run_id=resolved_core_id,
-                source_board_run_id=resolved_board_id,
+                source_board_run_id=None,
                 algorithm_version=algo,
                 filter_version=filt,
                 baseline_window=baseline_window,
@@ -303,7 +295,7 @@ async def _create_run_impl(
     values = {
         "trade_date": trade_date,
         "source_core_run_id": resolved_core_id,
-        "source_board_run_id": resolved_board_id,
+        "source_board_run_id": None,
         "algorithm_version": algo,
         "filter_version": filt,
         "baseline_window": baseline_window,
@@ -316,13 +308,10 @@ async def _create_run_impl(
         "metadata_json": meta,
     }
     stmt = pg_insert(MarketReviewRun).values(**values)
-    # [AUD-05 2026-08-07] Review run 一经创建即不可变：晚到的增强产品（chip 等）
-    # 不得改写已存在的 run 行。DO NOTHING 是唯一能在 SQL 层保证
-    # “已有 run 不被后续 create_run 修改”的写法。RETURNING id 让我们可以区分
-    # “本事务新插入” vs “唯一键冲突被 DO NOTHING 跳过（复用既有行）”，从而对外
-    # 暴露 created 语义供调用方决定能否 compute（published run 严禁原地重算）。
+    # [AUD-05 2026-08-07] Review run 一经创建即不可变。DO NOTHING 保证已有 run
+    # 不被后续 create_run 修改；RETURNING id 区分“新插入” vs “唯一键冲突复用”。
     stmt = stmt.on_conflict_do_nothing(
-        constraint="uq_review_runs_date_core_board_algo_filter",
+        constraint="uq_review_runs_date_core_algo_filter",
     ).returning(MarketReviewRun.id)
     insert_result = await session.execute(stmt)
     await session.flush()
@@ -334,7 +323,6 @@ async def _create_run_impl(
         session,
         trade_date=trade_date,
         source_core_run_id=resolved_core_id,
-        source_board_run_id=resolved_board_id,
         algorithm_version=algo,
         filter_version=filt,
     )
@@ -377,7 +365,6 @@ async def create_run(
     *,
     trade_date: date,
     source_core_run_id: uuid.UUID | None = None,
-    source_board_run_id: uuid.UUID | None = None,
     algorithm_version: str | None = None,
     filter_version: str | None = None,
     baseline_window: int = DEFAULT_BASELINE_WINDOW,
@@ -388,17 +375,13 @@ async def create_run(
 ) -> MarketReviewRun:
     """创建或复用 review run（幂等：唯一键组合保证）。
 
-    [Phase4.2 corrective] 恢复 baseline(76e1338) backward-compat 合同：
-    `create_run` 返回 **MarketReviewRun**（与全部既有生产调用方 after_close_orchestrator
-    / review_compute_cli / PG integration 一致）。需要显式 created/reused 信息的调用方
-    （如 Admin）改用 `create_run_with_result() -> ReviewRunCreation`。
+    [Slice 3] Review 身份仅依赖 stock_core + canonical history；
+    source_board_run_id 不再作为 Review 输入（新 run 恒为 NULL）。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 业务交易日
         source_core_run_id: 输入 stock_core run_id（None 时从 publication 读取）
-        source_board_run_id: 输入 board_analysis 的 source_core_run_id
-            （None 时从 publication 读取 board_analysis_snapshot）
         algorithm_version: 算法版本（默认 REVIEW_ALGORITHM_VERSION）
         filter_version: 筛选器版本（默认 REVIEW_FILTER_VERSION）
         baseline_window: 历史基线窗口（默认 120，最低 60）
@@ -413,7 +396,7 @@ async def create_run(
         处理，禁止原地重算。
 
     Raises:
-        ReviewOrchestratorError: 输入校验失败（缺 publication pointer 等）；
+        ReviewOrchestratorError: 输入校验失败（缺 stock_core publication pointer）；
             或 [Phase4.1] 既有 run 的 canary/symbols scope 与新请求不一致
             （scope 冲突，避免 canary 结果续成 formal run）
     """
@@ -421,7 +404,6 @@ async def create_run(
         session,
         trade_date=trade_date,
         source_core_run_id=source_core_run_id,
-        source_board_run_id=source_board_run_id,
         algorithm_version=algorithm_version,
         filter_version=filter_version,
         baseline_window=baseline_window,
@@ -438,7 +420,6 @@ async def create_run_with_result(
     *,
     trade_date: date,
     source_core_run_id: uuid.UUID | None = None,
-    source_board_run_id: uuid.UUID | None = None,
     algorithm_version: str | None = None,
     filter_version: str | None = None,
     baseline_window: int = DEFAULT_BASELINE_WINDOW,
@@ -449,9 +430,7 @@ async def create_run_with_result(
 ) -> ReviewRunCreation:
     """创建或复用 review run，并返回显式的 created/reused 信息。
 
-    [Phase4.2 corrective] 真正的 create_run_with_result 入口（非 alias 冒充兼容层）。
-    内部复用 `create_run` 的真实实现，仅额外暴露 ReviewRunCreation(run, created) 合同，
-    供需要区分“本次新建 vs 复用既有”的调用方（如 Admin）使用。
+    [Slice 3] 不再接受 source_board_run_id（Board 非 Review 输入）。
 
     Returns:
         ReviewRunCreation(run, created)
@@ -462,7 +441,6 @@ async def create_run_with_result(
         session,
         trade_date=trade_date,
         source_core_run_id=source_core_run_id,
-        source_board_run_id=source_board_run_id,
         algorithm_version=algorithm_version,
         filter_version=filter_version,
         baseline_window=baseline_window,
@@ -487,17 +465,15 @@ async def get_run_by_keys(
     *,
     trade_date: date,
     source_core_run_id: uuid.UUID,
-    source_board_run_id: uuid.UUID,
     algorithm_version: str,
     filter_version: str,
 ) -> MarketReviewRun | None:
-    """按唯一键读取 run。"""
+    """按唯一键读取 run（core-only 身份，不含 source_board_run_id）。"""
     stmt = (
         select(MarketReviewRun)
         .where(
             MarketReviewRun.trade_date == trade_date,
             MarketReviewRun.source_core_run_id == source_core_run_id,
-            MarketReviewRun.source_board_run_id == source_board_run_id,
             MarketReviewRun.algorithm_version == algorithm_version,
             MarketReviewRun.filter_version == filter_version,
         )
@@ -530,33 +506,31 @@ async def list_run_items(
 # =============================================================================
 
 
-async def _resolve_source_run_ids(
+async def _resolve_source_core_run_id(
     session: AsyncSession,
     trade_date: date,
     *,
     source_core_run_id: uuid.UUID | None,
-    source_board_run_id: uuid.UUID | None,
-) -> tuple[uuid.UUID, uuid.UUID]:
-    """解析 source_core_run_id 和 source_board_run_id。
+) -> uuid.UUID:
+    """解析 Review 的 canonical Stock Core run_id。
 
-    source_core_run_id：从 stock_core publication pointer 读取
-    source_board_run_id：直接使用 market_aggregation pointer 指向的
-        board_analysis_runs.id
+    [Slice 3] Board Analysis 不再是 Review 的前置条件。Review 身份仅依赖
+    Stock Core + canonical First Pyramid History。source_board_run_id 在新 run
+    中恒为 NULL（历史 lineage 仍保留在既有 run 记录中）。
+
+    source_core_run_id：从 stock_core publication pointer 读取；显式传入时直接使用。
 
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
         source_core_run_id: 调用方显式传入的 stock_core run_id（None 时自动解析）
-        source_board_run_id: 调用方显式传入的 board_analysis_runs.id
-            （None 时自动解析）
 
     Returns:
-        (resolved_core_run_id, resolved_board_run_id)
+        resolved_core_run_id
 
     Raises:
-        ReviewOrchestratorError: 缺少必要的 publication pointer
+        ReviewOrchestratorError: 缺少必要的 stock_core publication pointer
     """
-    # 1. 解析 source_core_run_id
     if source_core_run_id is None:
         core_pub = await _get_publication(
             session, trade_date, PUBLICATION_KIND_STOCK_CORE,
@@ -566,53 +540,8 @@ async def _resolve_source_run_ids(
                 f"trade_date={trade_date} 无已发布 stock_core pointer，"
                 f"必须先完成盘后核心计算并发布 stock_core",
             )
-        resolved_core_id = core_pub.data_run_id
-    else:
-        resolved_core_id = source_core_run_id
-
-    # 2. 解析 source_board_run_id
-    #
-    # [PC-40/PC-41] Review 只消费正式 market_aggregation pointer：pointer 必须存在，
-    # 且无论 source_board_run_id 是自动解析还是调用方显式传入，都必须严格等于
-    # pointer.data_run_id。Review **不得**自行挑选 board run
-    # （无 fallback / 无 latest-partial / 无绕 pointer 路径）。
-    board_pub = await _get_publication(
-        session, trade_date, PUBLICATION_KIND_MARKET_AGGREGATION,
-    )
-    if board_pub is None:
-        raise ReviewOrchestratorError(
-            f"trade_date={trade_date} 无已发布 board_analysis pointer，"
-            f"必须先完成板块分析并发布",
-        )
-    resolved_board_id = (
-        board_pub.data_run_id if source_board_run_id is None else source_board_run_id
-    )
-    if resolved_board_id != board_pub.data_run_id:
-        raise ReviewOrchestratorError(
-            f"[PC-41] source_board_run_id={resolved_board_id} 与正式 "
-            f"market_aggregation pointer.data_run_id="
-            f"{board_pub.data_run_id} 不一致",
-        )
-
-    board_run = await session.get(BoardAnalysisRun, resolved_board_id)
-    if board_run is None:
-        raise ReviewOrchestratorError(
-            f"board_analysis_run id={resolved_board_id} 不存在",
-        )
-    if board_run.trade_date != trade_date:
-        raise ReviewOrchestratorError("Board batch trade_date 与 Review 不一致")
-    if board_run.source_core_run_id != resolved_core_id:
-        raise ReviewOrchestratorError("Board batch 与 stock_core pointer 不同源")
-    # [PRD 31 PC-42] board_aggregation 是 mandatory product，但 MANDATORY != PERFECT。
-    # 正式 pointer 指向的 run 可以是 succeeded（READY）或 degraded-publishable 的
-    # partial（DEGRADED）；DEGRADED 不阻断 Review，FAILED / 非终态阻断。
-    # 这里接受的是「正式 pointer 指向的 degraded run」，而不是 Review 自己挑 partial run。
-    if board_run.status not in ("succeeded", "partial"):
-        raise ReviewOrchestratorError(
-            f"Board batch 非 ready: status={board_run.status}",
-        )
-
-    return resolved_core_id, resolved_board_id
+        return core_pub.data_run_id
+    return source_core_run_id
 
 
 # [AUD-04/05 2026-08-07] `_resolve_chip_dependency` 与 `_load_core_expected_count`

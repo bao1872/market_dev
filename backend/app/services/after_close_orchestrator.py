@@ -1668,7 +1668,6 @@ async def _execute_review_step(
     worker_id: str | None,
     skip_review: bool,
     stock_core_published: bool,
-    aggregation_status: str,
 ) -> dict[str, Any]:
     """[AC-02] computing_review 业务体（软失败，不阻断主流程）。
 
@@ -1715,16 +1714,10 @@ async def _execute_review_step(
     prereq_missing: bool = False
 
     if not skip_review:
-        # 仅在 stock_core + board_analysis 均已正式发布时执行 review。
-        # [Phase 4D.3 / PRD 31 PC-42] board_aggregation 为 mandatory product，
-        # 但 MANDATORY != PERFECT：`succeeded`(READY) 与 `degraded`(正式 pointer 指向
-        # degraded-publishable partial run) 都允许 Review 执行；`failed` / 非终态 /
-        # pointer_mismatch 阻断。Review 仍只消费正式 pointer（PC-40/PC-41 不变）。
-        if (
-            stock_core_published
-            and aggregation_status in ("succeeded", "degraded")
-            and snapshot_run_id is not None
-        ):
+        # [Slice 3] Board Analysis 不再是 Review 前置条件：只要 stock_core 已发布且
+        # snapshot 存在，无论 board aggregation 状态（succeeded/degraded/failed/skipped/
+        # mismatch）都执行 Review。Board 仍作为 legacy side-product 运行，但不 gate Review。
+        if stock_core_published and snapshot_run_id is not None:
             # 断点恢复：先从 metadata 读取已有 review_run_id
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -2027,11 +2020,10 @@ async def _execute_review_step(
                     )
                 await db.commit()
         else:
-            # 前置条件不满足：stock_core 或 board_analysis 未正式发布
+            # 前置条件不满足：stock_core 未正式发布或 snapshot 缺失
             _review_status = "skipped"
             _review_reason = (
                 f"prerequisite_missing: stock_core_published={stock_core_published}, "
-                f"aggregation_status={aggregation_status}, "
                 f"snapshot_run_id={'present' if snapshot_run_id else 'None'}"
             )
             prereq_missing = True
@@ -2057,7 +2049,6 @@ async def _execute_review_step(
                             "review_status": _review_status,
                             "review_reason": _review_reason,
                             "stock_core_published": stock_core_published,
-                            "aggregation_status": aggregation_status,
                         },
                     )
                     # 前置条件缺失：仅刷新心跳/租约，不推进 last_completed_step。
@@ -3646,7 +3637,6 @@ async def execute_after_close_run(
                 worker_id=worker_id,
                 skip_review=skip_review,
                 stock_core_published=_stock_core_published,
-                aggregation_status=_aggregation_status,
             ),
             timeout_seconds=_step_timeout("computing_review"),
             optional=True,

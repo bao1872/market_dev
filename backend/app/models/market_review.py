@@ -77,10 +77,14 @@ class MarketReviewRun(Base):
         nullable=False,
         comment="输入 stock_core snapshot_run_id（factor_publications.data_run_id）",
     )
-    source_board_run_id: Mapped[uuid.UUID] = mapped_column(
+    source_board_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
-        nullable=False,
-        comment="输入 board_analysis_snapshot 的 source_core_run_id",
+        nullable=True,
+        comment=(
+            "Legacy Board Analysis lineage. Historical runs may retain "
+            "BoardAnalysisRun UUID. Canonical Board-independent Review runs "
+            "use NULL."
+        ),
     )
     # [QM-63 review 依赖矩阵 2026-08-04] chip 来源 run id。
     # None 表示本次 run 未解析到 chip run（chip 不可用 → core-only 降级）。
@@ -167,10 +171,9 @@ class MarketReviewRun(Base):
         UniqueConstraint(
             "trade_date",
             "source_core_run_id",
-            "source_board_run_id",
             "algorithm_version",
             "filter_version",
-            name="uq_review_runs_date_core_board_algo_filter",
+            name="uq_review_runs_date_core_algo_filter",
         ),
         Index("ix_review_runs_status", "status"),
         Index("ix_review_runs_trade_date", "trade_date"),
@@ -1325,7 +1328,7 @@ if __name__ == "__main__":
 
     # 验证关键 unique 约束
     _expected_uq: dict[str, set[str]] = {
-        "MarketReviewRun": {"uq_review_runs_date_core_board_algo_filter"},
+        "MarketReviewRun": {"uq_review_runs_date_core_algo_filter"},
         "MarketReviewRunItem": {"uq_review_items_run_scope_phase"},
         "MarketReviewScopeSnapshot": {"uq_review_scope_snapshots_run_scope"},
         "MarketReviewSignal": {"uq_review_signals_run_family_type_scope"},

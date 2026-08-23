@@ -36,7 +36,7 @@ from __future__ import annotations
 # ruff: noqa: N815 - camelCase 字段为前端 JSON API 契约
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # =============================================================================
 # 基础 DTO
@@ -172,7 +172,9 @@ class ReviewOverviewResponse(BaseModel):
     tradeDate: str = Field(..., description="业务交易日（ISO YYYY-MM-DD）")
     status: str = Field(..., description="run 状态")
     sourceCoreRunId: str = Field(..., description="输入 stock_core run ID")
-    sourceBoardRunId: str = Field(..., description="输入 board_analysis run ID")
+    sourceBoardRunId: str | None = Field(
+        None, description="[Slice 3] legacy Board Analysis run ID（新 run 为 null）",
+    )
     sourceChipRunId: str | None = Field(
         None,
         description=(
@@ -449,7 +451,11 @@ class ReviewRunCreateRequest(BaseModel):
         None, description="输入 stock_core run ID（None 时从最新发布 pointer 读取）",
     )
     source_board_run_id: str | None = Field(
-        None, description="输入 board_analysis run ID（None 时从最新发布 pointer 读取）",
+        None,
+        description=(
+            "[DEPRECATED Slice 3] Board Analysis 不再是 Review 输入。本字段必须为空；"
+            "传入非 NULL 值将被拒绝。"
+        ),
     )
     algorithm_version: str | None = Field(None, description="算法版本（默认 REVIEW_ALGORITHM_VERSION）")
     filter_version: str | None = Field(None, description="筛选器版本（默认 REVIEW_FILTER_VERSION）")
@@ -463,6 +469,18 @@ class ReviewRunCreateRequest(BaseModel):
     )
     idempotency_key: str = Field(..., description="幂等键")
 
+    @model_validator(mode="after")
+    def _reject_board_input(self) -> ReviewRunCreateRequest:
+        # [Slice 3] Board Analysis 不再是 Review 输入；历史 lineage 仍保留在既有 run，
+        # 但新请求不得指定 source_board_run_id（避免重建已废弃依赖）。
+        if self.source_board_run_id is not None:
+            raise ValueError(
+                "source_board_run_id is no longer a supported Review input "
+                "(Board Analysis is not a Review prerequisite since Slice 3); "
+                "omit this field or pass null"
+            )
+        return self
+
 
 class ReviewRunResponse(BaseModel):
     """复盘 run 响应（管理端 status/publish/resume 共用）。"""
@@ -472,7 +490,9 @@ class ReviewRunResponse(BaseModel):
     id: str = Field(..., description="run ID（UUID）")
     trade_date: str = Field(..., description="业务交易日")
     source_core_run_id: str = Field(..., description="输入 stock_core run ID")
-    source_board_run_id: str = Field(..., description="输入 board_analysis run ID")
+    source_board_run_id: str | None = Field(
+        None, description="[Slice 3] legacy board_analysis run ID（新 run 为 null）",
+    )
     source_chip_run_id: str | None = Field(
         None,
         description=(

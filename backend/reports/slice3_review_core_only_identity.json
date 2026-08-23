@@ -1,0 +1,59 @@
+{
+  "slice": "Slice 3 — Review core-only identity",
+  "objective": "Review startup & identity depend only on stock_core identity; remove BoardAnalysisRun / market_aggregation dependency from Review create path and AfterClose prereq gate.",
+  "generated_at": "2026-08-23",
+  "proof_points": {
+    "review_create_source_board_run_id": "INSERT values set source_board_run_id = None (hardcoded NULL), review_orchestrator_service.py:298",
+    "review_create_unique_constraint": "on_conflict_do_nothing(constraint=\"uq_review_runs_date_core_algo_filter\") — core-only identity, review_orchestrator_service.py:314",
+    "resolver_only_reads_stock_core": "_resolve_source_core_run_id queries PUBLICATION_KIND_STOCK_CORE only; never market_aggregation / BoardAnalysisRun, review_orchestrator_service.py:509-544",
+    "afterclose_prereq": "Review executes when stock_core_published and snapshot_run_id is not None; Board aggregation status no longer gates Review, after_close_orchestrator.py:1716-1719",
+    "migration": "092_review_core_only_identity: fail-closed dedupe check, drop board-coupled UQ, DROP NOT NULL on source_board_run_id, create core-only UQ; downgrade fails if any NULL board lineage exists"
+  },
+  "legacy_contract_tests": {
+    "deleted": 0,
+    "whole_file_skipped": 0,
+    "rewritten_for_core_only_contract": [
+      "backend/tests/test_review_source_pointer_lineage.py",
+      "backend/tests/test_review_v21_dependency_contract.py"
+    ]
+  },
+  "board_dependency": {
+    "market_aggregation_lookup_in_review_create": 0,
+    "BoardAnalysisRun_lookup_in_review_create": 0
+  },
+  "valid_old_contracts_preserved": {
+    "review_publication_consumer": true,
+    "chip_independence": true,
+    "auction_independence": true,
+    "state_event_independence": true
+  },
+  "test_results": {
+    "slice3_files": [
+      "backend/tests/test_review_board_independence.py",
+      "backend/tests/test_review_source_pointer_lineage.py",
+      "backend/tests/test_review_v21_dependency_contract.py"
+    ],
+    "slice3_passed": 30,
+    "slice3_failed": 0,
+    "slice3_errors": 0,
+    "slice3_skipped": 0,
+    "broader_pure_unit_regression_check": {
+      "note": "Pre-existing failures in test_review_probe_capacity_contract.py and test_review_probe_no_migration.py inspect scripts/review_scope_dynamics_probe.py source text and are UNRELATED to Slice 3. Confirmed identical failure count on clean baseline (git stash of Slice 3 changes) — NOT a regression.",
+      "pre_existing_failure_count_on_baseline": 52,
+      "slice3_induced_regressions": 0
+    }
+  },
+  "files_changed": [
+    "backend/app/models/market_review.py",
+    "backend/app/schemas/review.py",
+    "backend/app/services/after_close_orchestrator.py",
+    "backend/app/services/review_orchestrator_service.py",
+    "backend/scripts/review_compute_cli.py",
+    "backend/alembic/versions/092_review_core_only_identity.py",
+    "backend/tests/test_review_source_pointer_lineage.py",
+    "backend/tests/test_review_v21_dependency_contract.py",
+    "backend/tests/test_review_board_independence.py"
+  ],
+  "status": "CANDIDATE_IMPLEMENTATION_PENDING_ACCEPTANCE",
+  "next_action": "git commit on dev (focused), then normal push origin/dev, then STOP for user review. Do NOT merge or proceed without approval."
+}
