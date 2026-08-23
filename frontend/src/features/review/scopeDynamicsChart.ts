@@ -1,90 +1,100 @@
-// [ScopeDynamicsChart] - 描述: Canonical Historical Dynamics → lightweight-charts 数据适配（Slice E）
+// [ScopeDynamicsChart] - 描述: Dynamics 图表数据适配层（Slice E correction）
 //
-// 硬契约（prompt §6 gap preservation）：
-// - runtime 序列日期对齐且刻意保留缺失观测；前端必须原样保留。
-// - 禁止 filter(Boolean) / 删除空点重连 / forward-fill / zero-fill / carry previous / 差值伪连续。
-// - 缺失观测用 lightweight-charts 的 whitespace point（仅 { time }，无 value）表示缺口，
-//   有值点才带 value；lightweight-charts 据此断开连线。
-// - 只做坐标映射，绝不重算 EMA/Velocity/Acceleration/Persistence/Phase。
-//
-// 纯 TS（无 React / lightweight-charts / @/ 别名依赖），可被 node --test 直接运行。
+// 硬契约（prompt §2、§3、§4）：
+// - 图表数据源 ONLY composition.historical_dynamics.scope_dynamics.historical_dynamics。
+// - 绝不前端重算 EMA/Velocity/Acceleration/Persistence/Phase。
+// - 缺失观测 = whitespace 缺口（gap preservation），不填 0、不插值、不 carry。
+// - Position 图固定 0–100 y 域（visual domain，不修改数据本身）。
+// - Velocity/Acceleration 含 0 参考线（visible reference line，不是 autoscale trick）。
+// - **禁止**使用较短者静默截断时间轴（dates 与 series 取较短者）。
+//   每个 series 的日期来自各自 fact-object 的 trade_date；缺失日 = 显式 whitespace gap。
+//   当 dates 与 values 长度不一致时，不按较短者截断——保留所有 date，缺失 value 标记为 gap。
 
-export interface ScopeDynamicsValuePoint {
+import type { LineWidth } from 'lightweight-charts'
+
+export interface ScopeDynamicsChartPoint {
   time: string
-  value: number
+  value?: number
 }
 
-/** whitespace point：缺失观测 = 缺口（lightweight-charts 断开连线） */
-export interface ScopeDynamicsGapPoint {
-  time: string
-}
+export type ScopeDynamicsChartData = ScopeDynamicsChartPoint[]
 
-export type ScopeDynamicsChartData = Array<
-  ScopeDynamicsValuePoint | ScopeDynamicsGapPoint
->
-
-/** Position 合法域：canonical 0–100 historical percentile */
+/** Position 视觉域边界（固定 0–100，不修改数据值） */
 export const POSITION_MIN = 0
 export const POSITION_MAX = 100
 
 /**
- * 把日期对齐的观测值序列映射为 chart data。
- * - dates 与 series 逐位对齐（同一交易日下标）。
- * - null / undefined / NaN → whitespace（缺口），不填 0、不携带上一值、不插值。
- * - 有值则原样保留（Position 不做 ×100）。
+ * 将 date + (nullable) value 序列对齐为 lightweight-charts 数据。
+ * 缺失点 = 仅 time 的 whitespace point（无 value），不填 0、不 carry 前值。
+ * 不静默截断：dates 与 values 长度不一致时，保留所有 date，缺失 value 标记为 gap。
+ * 这是 date-aligned / never compressed 合同的前端实现。
  */
 export function alignDynamicsSeries(
   dates: readonly string[],
-  series: readonly (number | null | undefined)[],
+  series: readonly (number | null)[],
 ): ScopeDynamicsChartData {
-  const length = Math.min(dates.length, series.length)
   const out: ScopeDynamicsChartData = []
-  for (let i = 0; i < length; i += 1) {
+  const maxLen = Math.max(dates.length, series.length)
+  for (let i = 0; i < maxLen; i += 1) {
     const time = dates[i]
     if (!time) continue
     const v = series[i]
     if (v === null || v === undefined || Number.isNaN(v)) {
       out.push({ time })
-      continue
+    } else {
+      out.push({ time, value: v })
     }
-    out.push({ time, value: v })
   }
   return out
 }
 
-/** Position 是否落在合法 0–100 域内（不钳制、不伪造，仅用于校验/落点保护） */
-export function positionInDomain(position: number): boolean {
-  return Number.isFinite(position) && position >= POSITION_MIN && position <= POSITION_MAX
-}
-
 /**
- * Position 图固定 0–100 域 autoscale（min/max 固定），保证 y 轴语义稳定。
- * 返回 null 表示无可绘制的有值点（不渲染指标线）。
+ * 为 Position 图生成 autoscale 建议：
+ * - 视觉域固定 0–100（后端 position 已是百分位值）。
+ * - 返回固定域，不依赖数据实际范围。
  */
 export function buildPositionAutoscale(
-  points: ScopeDynamicsChartData,
+  _data: ScopeDynamicsChartData,
 ): { min: number; max: number } | null {
-  if (!points.some((p): p is ScopeDynamicsValuePoint => 'value' in p)) return null
   return { min: POSITION_MIN, max: POSITION_MAX }
 }
 
 /**
- * 选取 velocity/acceleration 图的有值点，用于计算含 0 参考线的 y 域。
- * 仅坐标映射（保证 0 至少在某点值时包含），不重算数值。
+ * 为 Velocity/Acceleration 图生成 autoscale 建议：
+ * - 必须包含 0 参考线（neutral zero）。
+ * - 不修改数据值本身，仅建议视觉范围。
  */
 export function buildOffsetAutoscale(
-  points: ScopeDynamicsChartData,
+  data: ScopeDynamicsChartData,
 ): { min: number; max: number } | null {
-  let min: number | null = null
-  let max: number | null = null
-  for (const p of points) {
-    if (!('value' in p)) continue
-    const v = p.value
-    if (min === null || v < min) min = v
-    if (max === null || v > max) max = v
+  const values: number[] = []
+  for (const p of data) {
+    if ('value' in p && typeof p.value === 'number' && Number.isFinite(p.value)) {
+      values.push(p.value)
+    }
   }
-  // 始终包含 0 参考线
-  min = min === null ? 0 : Math.min(min, 0)
-  max = max === null ? 0 : Math.max(max, 0)
+  if (values.length === 0) return null
+  const dataMin = Math.min(...values)
+  const dataMax = Math.max(...values)
+  // 必须包含 0 参考线
+  const min = Math.min(0, dataMin)
+  const max = Math.max(0, dataMax)
   return { min, max }
+}
+
+/**
+ * 为 offset 系列（Velocity/Acceleration）返回零参考线定义。
+ * 使用 createPriceLine({ price: 0 }) 展示可见 neutral zero，
+ * 不是仅靠 autoscale 包含 0 来隐式暗示。
+ */
+export function buildZeroReferenceLine(
+  color = '#263440',
+): { price: number; color: string; lineWidth: LineWidth; axisLabelVisible: boolean; title: string } {
+  return {
+    price: 0,
+    color,
+    lineWidth: 1 as LineWidth,
+    axisLabelVisible: true,
+    title: 'zero',
+  }
 }

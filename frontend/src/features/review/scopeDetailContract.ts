@@ -1,4 +1,4 @@
-// [ScopeDetailContract] - 描述: Scope Detail nested contract 解析 owner（Slice E）
+// [ScopeDetailContract] - 描述: Scope Detail nested contract 解析 owner（Slice E correction）
 //
 // 职责：把 backend canonical composition 的嵌套载荷解析为前端展示可用的结构化 ViewModel。
 // 原则：
@@ -7,6 +7,13 @@
 //   Capital Tilt=AW-EW / Migration=1-Jaccard / HHI / leader set / reconciliation）。
 // - null != 0、[] != null、unavailable != empty、ready phase=null != unavailable 语义保留。
 //
+// Slice E correction（对齐真实 backend producer 输出）：
+// - Dynamics: fact-object 数组，不是 number[]；每个 point 自带 trade_date
+// - Attribution: Direction/CapitalTilt/Breadth/Leadership 用直接 MemberEvidence[]；
+//   只有 Concentration 用 {members: MemberEvidence[]} 对象
+// - Reconciliation: skipped: string[], checks: Record<string, Check>
+// - Leadership: previous/current_direction 为 number | null（+1/-1/null）
+//
 // 纯 TS（无 React / @/ 别名依赖），可被 node --test 直接运行。
 
 import type {
@@ -14,6 +21,16 @@ import type {
   ScopePhaseFact,
   ScopeMemberEvidence,
   ScopeReconciliation,
+  ScopeReconciliationCheck,
+  ScopeDynamicsPositionPoint,
+  ScopeDynamicsValuePoint,
+  ScopeDynamicsPersistencePoint,
+  ScopeAttributionDirectionGroup,
+  ScopeAttributionCapitalTiltGroup,
+  ScopeAttributionBreadthGroup,
+  ScopeAttributionConcentrationGroup,
+  ScopeAttributionConcentrationSubGroup,
+  ScopeAttributionLeadershipGroup,
 } from './types'
 
 // ============================================================
@@ -30,40 +47,41 @@ function asString(v: unknown): string | null {
   return typeof v === 'string' ? v : null
 }
 
-/**
- * 读取 attribution 子分组（如 direction.positive）下的成员数组。
- * 分组结构 = { members: [...], sum_contribution?, ... }；成员在 .members，而非分组本身。
- */
-function readGroupMembers(v: unknown): ScopeMemberEvidence[] | null {
-  if (!v || typeof v !== 'object') return null
-  const members = (v as Record<string, unknown>).members
-  if (!Array.isArray(members)) return null
-  return members.filter(
-    (item) => item && typeof item === 'object' && 'member_id' in item,
-  ) as ScopeMemberEvidence[]
+function asNumberArray(v: unknown): (number | null)[] {
+  if (!Array.isArray(v)) return []
+  return v.map((x) => asNumber(x))
 }
 
-/** 构建单个 attribution 子分组；分组不存在（未在载荷中）→ null，空 members → 空组 */
-function buildSubGroup(
-  parent: Record<string, unknown> | null | undefined,
-  key: string,
-): ScopeAttributionMemberGroup | null {
-  if (!parent) return null
-  const g = parent[key]
-  if (g === undefined || g === null) return null
-  const groupRecord = typeof g === 'object' ? (g as Record<string, unknown>) : null
-  return buildGroup(groupRecord, readGroupMembers(g) ?? [])
+/** 从后端 fact-object 数组提取 value 字段（Position 特化：读 .position 字段） */
+function extractPositionValues(points: ScopeDynamicsPositionPoint[] | null | undefined): (number | null)[] {
+  if (!Array.isArray(points)) return []
+  return points.map((p) => asNumber((p as unknown as Record<string, unknown>).position))
 }
 
-// 可选标量求和（direction/capital_tilt 分组顶层）
-function readOptionalNumber(record: Record<string, unknown> | null | undefined, key: string): number | null {
-  if (!record) return null
-  return asNumber(record[key])
+/** 从后端 fact-object 数组提取 value 字段（通用：读 .value 字段） */
+function extractValuePoints(points: ScopeDynamicsValuePoint[] | null | undefined): (number | null)[] {
+  if (!Array.isArray(points)) return []
+  return points.map((p) => asNumber((p as unknown as Record<string, unknown>).value))
 }
 
-function readOptionalString(record: Record<string, unknown> | null | undefined, key: string): string | null {
-  if (!record) return null
-  return asString(record[key])
+/** 提取日期数组：每个 fact-object 的 trade_date */
+function extractDatesFromPosition(points: ScopeDynamicsPositionPoint[] | null | undefined): string[] {
+  if (!Array.isArray(points)) return []
+  return points.map((p) => String((p as unknown as Record<string, unknown>).trade_date ?? ''))
+}
+
+function extractDatesFromValue(points: ScopeDynamicsValuePoint[] | null | undefined): string[] {
+  if (!Array.isArray(points)) return []
+  return points.map((p) => String((p as unknown as Record<string, unknown>).trade_date ?? ''))
+}
+
+/** 从 Attribution 子分组直接数组读取成员（Direction/CapitalTilt/Breadth/Leadership 形状） */
+function readDirectMembers(v: unknown): ScopeMemberEvidence[] | null {
+  if (!Array.isArray(v)) return null
+  return v.filter(
+    (item): item is ScopeMemberEvidence =>
+      !!item && typeof item === 'object' && 'member_id' in item,
+  )
 }
 
 // ============================================================
@@ -72,21 +90,23 @@ function readOptionalString(record: Record<string, unknown> | null | undefined, 
 
 export interface ScopeDynamicsParsed {
   status: string
-  /** 由 dynamics_phase[].trade_date 得到（每个观测一条），与序列逐位对齐 */
-  dates: string[]
+  /** 每个 series 自己的日期数组（from persisted fact-object trade_date） */
+  positionDates: string[]
+  ema5Dates: string[]
+  ema20Dates: string[]
+  velocityDates: string[]
+  signalDates: string[]
+  accelerationDates: string[]
+  persistenceDates: string[]
   position: (number | null)[]
   ema5: (number | null)[]
   ema20: (number | null)[]
   velocity: (number | null)[]
   signal: (number | null)[]
   acceleration: (number | null)[]
+  /** persistence 保留原始 fact-object（前端只展示不解析） */
   persistence: (number | null)[]
   phaseFacts: ScopePhaseFact[]
-}
-
-function toNullableSeries(v: unknown): (number | null)[] {
-  if (!Array.isArray(v)) return []
-  return v.map((x) => asNumber(x))
 }
 
 /** 解析 historical_dynamics 层为结构化 ViewModel（不可用返回 null） */
@@ -99,38 +119,43 @@ export function parseDynamicsLayer(
   if (!sd) return null
   const phaseFacts = Array.isArray(sd.dynamics_phase) ? sd.dynamics_phase : []
   const series = sd.historical_dynamics
-  const dates = phaseFacts.map((f) => f.trade_date)
   if (!series) {
     return {
       status: layer.status,
-      dates,
-      position: [],
-      ema5: [],
-      ema20: [],
-      velocity: [],
-      signal: [],
-      acceleration: [],
+      positionDates: [], ema5Dates: [], ema20Dates: [],
+      velocityDates: [], signalDates: [], accelerationDates: [], persistenceDates: [],
+      position: [], ema5: [], ema20: [],
+      velocity: [], signal: [], acceleration: [],
       persistence: [],
       phaseFacts,
     }
   }
+  const s = series
   return {
     status: layer.status,
-    dates,
-    position: toNullableSeries(series.position),
-    ema5: toNullableSeries(series.ema5),
-    ema20: toNullableSeries(series.ema20),
-    velocity: toNullableSeries(series.velocity),
-    signal: toNullableSeries(series.signal),
-    acceleration: toNullableSeries(series.acceleration),
-    persistence: toNullableSeries(series.persistence),
+    positionDates: extractDatesFromPosition(s.position),
+    ema5Dates: extractDatesFromValue(s.ema5),
+    ema20Dates: extractDatesFromValue(s.ema20),
+    velocityDates: extractDatesFromValue(s.velocity),
+    signalDates: extractDatesFromValue(s.signal),
+    accelerationDates: extractDatesFromValue(s.acceleration),
+    persistenceDates: extractDatesFromValue(s.persistence as unknown as ScopeDynamicsValuePoint[]),
+    position: extractPositionValues(s.position),
+    ema5: extractValuePoints(s.ema5),
+    ema20: extractValuePoints(s.ema20),
+    velocity: extractValuePoints(s.velocity),
+    signal: extractValuePoints(s.signal),
+    acceleration: extractValuePoints(s.acceleration),
+    persistence: s.persistence
+      ? asNumberArray((s.persistence as ScopeDynamicsPersistencePoint[]).map((p) => (p as unknown as Record<string, unknown>).coverage))
+      : [],
     phaseFacts,
   }
 }
 
 /**
  * 当前事实来自最后一条 dynamics_phase observation（persisted），
- * 绝不从 chart series 反推。phase=null + ready → 显示 “—”，不是第 7 个 phase。
+ * 绝不从 chart series 反推。phase=null + ready → 显示 "—"，不是第 7 个 phase。
  */
 export function currentPhaseFact(
   dynamics: ScopeDynamicsParsed | null,
@@ -204,6 +229,9 @@ export interface ScopeLeadershipParsed {
   status: string | null
   reason: string | null
   coverage: number | null
+  /** +1/-1/null，来自 persisted backend direction */
+  previousDirection: number | null
+  currentDirection: number | null
   previousLeaderCount: number | null
   currentLeaderCount: number | null
   retainedCount: number | null
@@ -232,6 +260,8 @@ export function parseLeadership(
     status: asString(l.status),
     reason: asString(l.reason),
     coverage: asNumber(l.coverage),
+    previousDirection: asNumber(l.previous_direction),
+    currentDirection: asNumber(l.current_direction),
     previousLeaderCount: asNumber(l.previous_leader_count),
     currentLeaderCount: asNumber(l.current_leader_count),
     retainedCount: asNumber(l.retained_count),
@@ -248,77 +278,150 @@ export function parseLeadership(
 }
 
 // ============================================================
-// Member Attribution
+// Member Attribution — 真实后端形状解析
 // ============================================================
-
-export interface ScopeAttributionMemberGroup {
-  members: ScopeMemberEvidence[]
-  sumContribution?: number | null
-  canonicalAwReturn?: number | null
-  canonicalEwReturn?: number | null
-  sumTiltContribution?: number | null
-  priceUniverseCount?: number | null
-  awUniverseCount?: number | null
-  denominator?: number | null
-}
-
-export interface ScopeAttributionSub {
-  kind: string
-  positive?: ScopeAttributionMemberGroup | null
-  negative?: ScopeAttributionMemberGroup | null
-  advance?: ScopeAttributionMemberGroup | null
-  decline?: ScopeAttributionMemberGroup | null
-  unchanged?: ScopeAttributionMemberGroup | null
-  unavailable?: ScopeAttributionMemberGroup | null
-  retained?: ScopeAttributionMemberGroup | null
-  entrants?: ScopeAttributionMemberGroup | null
-  exits?: ScopeAttributionMemberGroup | null
-  price?: ScopeAttributionMemberGroup | null
-  amount?: ScopeAttributionMemberGroup | null
-}
 
 export interface ScopeAttributionParsed {
   status: string | null
-  direction: ScopeAttributionSub | null
-  capitalTilt: ScopeAttributionSub | null
-  breadth: ScopeAttributionSub | null
-  concentration: ScopeAttributionSub | null
-  leadership: ScopeAttributionSub | null
-  reconciliation: ScopeReconciliation | null
+  direction: {
+    kind: string
+    positive: ScopeMemberEvidence[] | null
+    negative: ScopeMemberEvidence[] | null
+    sumContribution: number | null
+    canonicalAwReturn: number | null
+  } | null
+  capitalTilt: {
+    kind: string
+    positive: ScopeMemberEvidence[] | null
+    negative: ScopeMemberEvidence[] | null
+    sumTiltContribution: number | null
+    canonicalAwReturn: number | null
+    canonicalEwReturn: number | null
+    priceUniverseCount: number | null
+    awUniverseCount: number | null
+  } | null
+  breadth: {
+    kind: string
+    advance: ScopeMemberEvidence[] | null
+    decline: ScopeMemberEvidence[] | null
+    unchanged: ScopeMemberEvidence[] | null
+    unavailable: ScopeMemberEvidence[] | null
+    denominator: number | null
+  } | null
+  concentration: {
+    kind: string
+    price: {
+      members: ScopeMemberEvidence[]
+      sumHhi: number | null
+      canonicalRawHhi: number | null
+      canonicalNormalizedHhi: number | null
+    } | null
+    amount: {
+      members: ScopeMemberEvidence[]
+      sumHhi: number | null
+      canonicalRawHhi: number | null
+      canonicalNormalizedHhi: number | null
+    } | null
+  } | null
+  leadership: {
+    kind: string
+    retained: ScopeMemberEvidence[] | null
+    entrants: ScopeMemberEvidence[] | null
+    exits: ScopeMemberEvidence[] | null
+  } | null
+  reconciliation: {
+    violationCount: number | null
+    skipped: string[]
+    tolerance: number | string | null
+    checks: Array<{ key: string; kind: string; pass: boolean | null; resolved: string | null }>
+  } | null
   determinismChecksum: string | null
 }
 
-function buildGroup(
-  record: Record<string, unknown> | null | undefined,
-  members: ScopeMemberEvidence[] | null,
-): ScopeAttributionMemberGroup {
+function parseDirectionGroup(g: ScopeAttributionDirectionGroup | null): ScopeAttributionParsed['direction'] {
+  if (!g) return null
   return {
-    members: members ?? [],
-    sumContribution: readOptionalNumber(record, 'sum_contribution'),
-    canonicalAwReturn: readOptionalNumber(record, 'canonical_aw_return'),
-    canonicalEwReturn: readOptionalNumber(record, 'canonical_ew_return'),
-    sumTiltContribution: readOptionalNumber(record, 'sum_tilt_contribution'),
-    priceUniverseCount: readOptionalNumber(record, 'price_universe_count'),
-    awUniverseCount: readOptionalNumber(record, 'aw_universe_count'),
-    denominator: readOptionalNumber(record, 'denominator'),
+    kind: g.status ?? 'group',
+    positive: readDirectMembers(g.positive),
+    negative: readDirectMembers(g.negative),
+    sumContribution: asNumber(g.sum_contribution),
+    canonicalAwReturn: asNumber(g.canonical_aw_return),
   }
 }
 
-function parseAttributionSub(record: Record<string, unknown> | null): ScopeAttributionSub | null {
-  if (!record) return null
+function parseCapitalTiltGroup(g: ScopeAttributionCapitalTiltGroup | null): ScopeAttributionParsed['capitalTilt'] {
+  if (!g) return null
   return {
-    kind: readOptionalString(record, 'kind') ?? 'group',
-    positive: buildSubGroup(record, 'positive'),
-    negative: buildSubGroup(record, 'negative'),
-    advance: buildSubGroup(record, 'advance'),
-    decline: buildSubGroup(record, 'decline'),
-    unchanged: buildSubGroup(record, 'unchanged'),
-    unavailable: buildSubGroup(record, 'unavailable'),
-    retained: buildSubGroup(record, 'retained'),
-    entrants: buildSubGroup(record, 'entrants'),
-    exits: buildSubGroup(record, 'exits'),
-    price: buildSubGroup(record, 'price'),
-    amount: buildSubGroup(record, 'amount'),
+    kind: g.status ?? 'group',
+    positive: readDirectMembers(g.positive),
+    negative: readDirectMembers(g.negative),
+    sumTiltContribution: asNumber(g.sum_tilt_contribution),
+    canonicalAwReturn: asNumber(g.canonical_aw_return),
+    canonicalEwReturn: asNumber(g.canonical_ew_return),
+    priceUniverseCount: asNumber(g.price_universe_count),
+    awUniverseCount: asNumber(g.aw_universe_count),
+  }
+}
+
+function parseBreadthGroup(g: ScopeAttributionBreadthGroup | null): ScopeAttributionParsed['breadth'] {
+  if (!g) return null
+  return {
+    kind: g.status ?? 'group',
+    advance: readDirectMembers(g.advance),
+    decline: readDirectMembers(g.decline),
+    unchanged: readDirectMembers(g.unchanged),
+    unavailable: readDirectMembers(g.unavailable),
+    denominator: asNumber(g.denominator),
+  }
+}
+
+function parseConcentrationSub(g: ScopeAttributionConcentrationSubGroup | null) {
+  if (!g) return null
+  return {
+    members: readDirectMembers(g.members) ?? [],
+    sumHhi: asNumber(g.sum_hhi),
+    canonicalRawHhi: asNumber(g.canonical_raw_hhi),
+    canonicalNormalizedHhi: asNumber(g.canonical_normalized_hhi),
+  }
+}
+
+function parseConcentrationGroup(g: ScopeAttributionConcentrationGroup | null): ScopeAttributionParsed['concentration'] {
+  if (!g) return null
+  return {
+    kind: 'group',
+    price: parseConcentrationSub(g.price),
+    amount: parseConcentrationSub(g.amount),
+  }
+}
+
+function parseAttributionLeadershipGroup(g: ScopeAttributionLeadershipGroup | null): ScopeAttributionParsed['leadership'] {
+  if (!g) return null
+  return {
+    kind: g.status ?? 'group',
+    retained: readDirectMembers(g.retained),
+    entrants: readDirectMembers(g.entrants),
+    exits: readDirectMembers(g.exits),
+  }
+}
+
+function parseReconciliation(r: ScopeReconciliation | null): ScopeAttributionParsed['reconciliation'] {
+  if (!r) return null
+  const checks: Array<{ key: string; kind: string; pass: boolean | null; resolved: string | null }> = []
+  if (r.checks && typeof r.checks === 'object') {
+    for (const [key, chk] of Object.entries(r.checks)) {
+      checks.push({
+        key,
+        kind: String((chk as ScopeReconciliationCheck).kind ?? key),
+        pass: (chk as ScopeReconciliationCheck).pass ?? null,
+        resolved: (chk as ScopeReconciliationCheck).resolved ?? null,
+      })
+    }
+  }
+  return {
+    violationCount: r.violation_count,
+    skipped: Array.isArray(r.skipped) ? r.skipped : [],
+    tolerance: r.tolerance,
+    checks,
   }
 }
 
@@ -340,12 +443,12 @@ export function parseAttribution(
   }
   return {
     status: m.status === null ? null : asString(m.status),
-    direction: parseAttributionSub(m.direction),
-    capitalTilt: parseAttributionSub(m.capital_tilt),
-    breadth: parseAttributionSub(m.breadth),
-    concentration: parseAttributionSub(m.concentration),
-    leadership: parseAttributionSub(m.leadership),
-    reconciliation: m.reconciliation,
+    direction: parseDirectionGroup(m.direction),
+    capitalTilt: parseCapitalTiltGroup(m.capital_tilt),
+    breadth: parseBreadthGroup(m.breadth),
+    concentration: parseConcentrationGroup(m.concentration),
+    leadership: parseAttributionLeadershipGroup(m.leadership),
+    reconciliation: parseReconciliation(m.reconciliation),
     determinismChecksum: asString(m.determinism_checksum),
   }
 }

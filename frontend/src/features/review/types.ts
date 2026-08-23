@@ -670,15 +670,49 @@ export interface ReviewScopeListResponse {
 // snake_case；前端只承载、不重算。禁止 any。
 // ------------------------------------------------------------
 
-/** Historical Dynamics 的日期对齐序列（runtime Composition 持久化 package） */
+/** Historical Dynamics fact-object 形状（one entry per trading observation，never compressed） */
+
+/** Position series: persisted position fact object */
+export interface ScopeDynamicsPositionPoint {
+  trade_date: string
+  position: number
+  status: string | null
+  history?: unknown
+}
+
+/** EMA / derived series: persisted value fact object with validity metadata */
+export interface ScopeDynamicsValuePoint {
+  trade_date: string
+  value: number | null
+  status: string | null
+  valid_count?: number | null
+  span?: number | null
+}
+
+/** Persistence series: full window fact object */
+export interface ScopeDynamicsPersistencePoint {
+  trade_date: string
+  window_size: number | null
+  minimum_valid_count: number | null
+  candidate_count: number | null
+  valid_count: number | null
+  coverage: number | null
+  upper_count: number | null
+  lower_count: number | null
+  upper_occupancy: number | null
+  lower_occupancy: number | null
+  status: string | null
+}
+
+/** Historical Dynamics 真实后端输出形状（fact-object 数组，非 number[]） */
 export interface ScopeHistoricalDynamicsSeries {
-  position: (number | null)[]
-  ema5: (number | null)[]
-  ema20: (number | null)[]
-  velocity: (number | null)[]
-  signal: (number | null)[]
-  acceleration: (number | null)[]
-  persistence: (number | null)[]
+  position: ScopeDynamicsPositionPoint[]
+  ema5: ScopeDynamicsValuePoint[]
+  ema20: ScopeDynamicsValuePoint[]
+  velocity: ScopeDynamicsValuePoint[]
+  signal: ScopeDynamicsValuePoint[]
+  acceleration: ScopeDynamicsValuePoint[]
+  persistence: ScopeDynamicsPersistencePoint[]
 }
 
 /** 单个交易观测的 dynamics phase 事实（persisted，非前端重算） */
@@ -743,13 +777,16 @@ export interface ScopeInternalStructureFacts {
 }
 
 /** Composition.leadership 层：T-1 → T leader set 迁移事实。
- *  Unavailable 侧用 null，绝非 0；empty array 与 null 必须区分。 */
+ *  Unavailable 侧用 null，绝非 0；empty array 与 null 必须区分。
+ *  previous_direction / current_direction 为 +1/-1/null（number），不是 string。
+ *  unavailable_snapshot / empty_leader_set 时仍可能保留有效 evidence。 */
 export interface ScopeLeadershipLayer {
   status: string | null
   reason: string | null
   coverage: number | null
-  previous_direction: string | null
-  current_direction: string | null
+  /** +1 / -1 / null，不是 string */
+  previous_direction: number | null
+  current_direction: number | null
   previous_rankable_count: number | null
   current_rankable_count: number | null
   previous_leader_count: number | null
@@ -766,7 +803,13 @@ export interface ScopeLeadershipLayer {
   exit_ids: string[] | null
 }
 
-/** Member Attribution 成员证据（direction/orientation 成员；缺失字段保持 null，不伪造 0） */
+/** Member Attribution 成员证据（direction/orientation 成员；缺失字段保持 null，不伪造 0）
+ *  不同子分组使用不同字段语义：
+ *  - Direction: contribution
+ *  - Capital Tilt: tilt_contribution, aw_weight
+ *  - Breadth: return_1d
+ *  - Concentration: concentration_weight, hhi_contribution
+ *  - Leadership: aligned_contribution */
 export interface ScopeMemberEvidence {
   member_id: string | number
   member_name?: string | null
@@ -778,12 +821,15 @@ export interface ScopeMemberEvidence {
   contribution?: number | null
   canonical_contribution?: number | null
   tilt_contribution?: number | null
+  aligned_contribution?: number | null
+  concentration_weight?: number | null
+  hhi_contribution?: number | null
   in_price_universe?: boolean | null
   in_aw_universe?: boolean | null
   [k: string]: unknown
 }
 
-/** Reconciliation 单条 check */
+/** Reconciliation 单条 check（后端 key → check map，前端按 Object.entries 展示） */
 export interface ScopeReconciliationCheck {
   pass: boolean | null
   resolved: string | null
@@ -794,21 +840,81 @@ export interface ScopeReconciliationCheck {
 /** Reconciliation 完整性诊断（前端只展示，不重跑） */
 export interface ScopeReconciliation {
   violation_count: number | null
-  skipped: string | null
+  skipped: string[]
   tolerance: number | string | null
-  checks: ScopeReconciliationCheck[] | null
+  checks: Record<string, ScopeReconciliationCheck>
   [k: string]: unknown
 }
 
-/** Composition.member_attribution 层（仅类型化已知分组；未知深层保持 unknown） */
+/** Composition.member_attribution 层 — 真实后端形状（Slice E correction）。
+ *  各子分组有不同结构：Direction/CapitalTilt/Breadth/Leadership 用直接 MemberEvidence[]；
+ *  只有 Concentration 使用 {members: MemberEvidence[]} 对象。 */
+
+/** Direction 子分组：positive/negative 直接是 MemberEvidence[] */
+export interface ScopeAttributionDirectionGroup {
+  status?: string | null
+  aw_universe_count?: number | null
+  positive: ScopeMemberEvidence[] | null
+  negative: ScopeMemberEvidence[] | null
+  sum_contribution?: number | null
+  canonical_aw_return?: number | null
+}
+
+/** Capital Tilt 子分组：positive/negative 直接是 MemberEvidence[] */
+export interface ScopeAttributionCapitalTiltGroup {
+  status?: string | null
+  price_universe_count?: number | null
+  aw_universe_count?: number | null
+  positive: ScopeMemberEvidence[] | null
+  negative: ScopeMemberEvidence[] | null
+  sum_tilt_contribution?: number | null
+  canonical_aw_return?: number | null
+  canonical_ew_return?: number | null
+}
+
+/** Breadth 子分组：advance/decline/unchanged/unavailable 直接是 MemberEvidence[] */
+export interface ScopeAttributionBreadthGroup {
+  status?: string | null
+  denominator?: number | null
+  advance: ScopeMemberEvidence[] | null
+  decline: ScopeMemberEvidence[] | null
+  unchanged: ScopeMemberEvidence[] | null
+  unavailable: ScopeMemberEvidence[] | null
+}
+
+/** Concentration 子分组：price/amount 使用 {members: MemberEvidence[]} 对象 */
+export interface ScopeAttributionConcentrationSubGroup {
+  members: ScopeMemberEvidence[]
+  sum_hhi?: number | null
+  canonical_raw_hhi?: number | null
+  canonical_normalized_hhi?: number | null
+}
+
+export interface ScopeAttributionConcentrationGroup {
+  price: ScopeAttributionConcentrationSubGroup | null
+  amount: ScopeAttributionConcentrationSubGroup | null
+}
+
+/** Leadership 子分组：retained/entrants/exits 直接是 MemberEvidence[] */
+export interface ScopeAttributionLeadershipGroup {
+  status?: string | null
+  reason?: string | null
+  previous_direction?: number | null
+  current_direction?: number | null
+  retained: ScopeMemberEvidence[] | null
+  entrants: ScopeMemberEvidence[] | null
+  exits: ScopeMemberEvidence[] | null
+}
+
+/** Composition.member_attribution 顶层 */
 export interface ScopeMemberAttributionLayer {
   status: string | null
   scope: Record<string, unknown> | null
-  direction: Record<string, unknown> | null
-  capital_tilt: Record<string, unknown> | null
-  breadth: Record<string, unknown> | null
-  concentration: Record<string, unknown> | null
-  leadership: Record<string, unknown> | null
+  direction: ScopeAttributionDirectionGroup | null
+  capital_tilt: ScopeAttributionCapitalTiltGroup | null
+  breadth: ScopeAttributionBreadthGroup | null
+  concentration: ScopeAttributionConcentrationGroup | null
+  leadership: ScopeAttributionLeadershipGroup | null
   reconciliation: ScopeReconciliation | null
   determinism_checksum: string | null
 }

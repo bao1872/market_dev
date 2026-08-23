@@ -1,32 +1,40 @@
-// [ScopeDynamicsPanel] - 描述: Dynamics 研究面板（Slice E）
+// [ScopeDynamicsPanel] - 描述: Dynamics 研究面板（Slice E correction）
 //
-// 硬契约（prompt §5、§6、§20）：
+// 硬契约（prompt §2、§3、§4）：
 // - 图表数据源 ONLY composition.historical_dynamics.scope_dynamics.historical_dynamics
-//   （position/ema5/ema20/velocity/signal/acceleration/persistence 日期对齐序列）。
+//   （position/ema5/ema20/velocity/signal/acceleration/persistence 各自 fact-object 日期序列）。
 // - 绝不前端重算 EMA/Velocity/Acceleration/Persistence/Phase。
 // - 缺失观测 = whitespace 缺口（gap preservation），不填 0、不插值、不 carry。
-// - Position 图固定 0–100 y 域；Velocity/Acceleration 含 0 参考线。
+// - Position 图固定 0–100 y 域；Velocity/Acceleration 含可见 0 参考线。
 // - 当前事实来自末尾 dynamics_phase observation（persisted），绝不反推 chart series。
 // - ready + phase=null → 显示 "—"，不是第七个 phase。
 // - 图表渲染 lightweight-charts（例：import { createChart }），不引入新图表库。
+// - 三张图均有显式标题（Position / Velocity / Acceleration），neutral analytic 线色。
 import { useEffect, useMemo, useRef } from 'react'
-import { createChart, type IChartApi, type ISeriesApi, type AutoscaleInfo } from 'lightweight-charts'
+import { createChart, type IChartApi, type ISeriesApi, type AutoscaleInfo, type IPriceLine } from 'lightweight-charts'
 import type { ScopeDynamicsParsed } from './scopeDetailContract'
 import type { ScopePhaseFact } from './types'
 import {
   alignDynamicsSeries,
   buildPositionAutoscale,
   buildOffsetAutoscale,
+  buildZeroReferenceLine,
   type ScopeDynamicsChartData,
 } from './scopeDynamicsChart'
 import { currentPhaseFact } from './scopeDetailContract'
 import { NULL_DISPLAY, formatPosition, formatNumberNullable, formatPercentNullable, formatPhaseLabel } from './reviewFormat'
 import styles from './review.module.scss'
 
+/** neutral 分析线色（非 brand green，brand green 保留给 selection/focus） */
+const ANALYTIC_LINE_COLOR = '#98A1B3'
+const ZERO_LINE_COLOR = 'rgba(152,161,179,0.6)'
+
 function useInlineChart(
   containerRef: React.RefObject<HTMLDivElement | null>,
   data: ScopeDynamicsChartData,
   kind: 'position' | 'offset',
+  title: string,
+  showZeroLine: boolean,
 ) {
   useEffect(() => {
     const el = containerRef.current
@@ -40,7 +48,7 @@ function useInlineChart(
       crosshair: { mode: 0 },
     })
     const series: ISeriesApi<'Line'> = chart.addLineSeries({
-      color: '#00F6C2',
+      color: ANALYTIC_LINE_COLOR,
       lineWidth: 1,
       autoscaleInfoProvider: (base: AutoscaleInfo | null) => {
         const range = kind === 'position' ? buildPositionAutoscale(data) : buildOffsetAutoscale(data)
@@ -53,18 +61,38 @@ function useInlineChart(
         'value' in p ? { time: p.time, value: p.value } : ({ time: p.time } as never),
       ),
     )
+    if (showZeroLine) {
+      const priceLine: IPriceLine = series.createPriceLine(buildZeroReferenceLine(ZERO_LINE_COLOR))
+      // priceLine 在组件卸载时由 chart.remove() 清理
+      void priceLine
+    }
     chart.timeScale().fitContent()
     return () => {
       chart.remove()
     }
     // containerRef 为稳定 ref，不会导致 effect 重跑；显式纳入依赖以对齐 hooks 规范
-  }, [data, kind, containerRef])
+  }, [data, kind, title, showZeroLine, containerRef])
 }
 
-function SeriesChart({ data, kind }: { data: ScopeDynamicsChartData; kind: 'position' | 'offset' }) {
+function SeriesChart({
+  data,
+  kind,
+  title,
+  showZeroLine,
+}: {
+  data: ScopeDynamicsChartData
+  kind: 'position' | 'offset'
+  title: string
+  showZeroLine: boolean
+}) {
   const ref = useRef<HTMLDivElement>(null)
-  useInlineChart(ref, data, kind)
-  return <div ref={ref} className={styles.dynamicsChart} data-chart-kind={kind} />
+  useInlineChart(ref, data, kind, title, showZeroLine)
+  return (
+    <div className={styles.dynamicsChartWrapper} data-chart-kind={kind}>
+      <div className={styles.dynamicsChartTitle}>{title}</div>
+      <div ref={ref} className={styles.dynamicsChart} />
+    </div>
+  )
 }
 
 function FactRow({ label, value, title }: { label: string; value: string; title?: string }) {
@@ -98,11 +126,19 @@ function CurrentFactStrip({ phaseFact, status }: { phaseFact: ScopePhaseFact | n
 }
 
 export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynamicsParsed | null }) {
-  const positionData = useMemo(() => alignDynamicsSeries(dynamics?.dates ?? [], dynamics?.position ?? []), [dynamics])
-  const velocityData = useMemo(() => alignDynamicsSeries(dynamics?.dates ?? [], dynamics?.velocity ?? []), [dynamics])
+  // 每个 series 使用自己的 fact-object 日期（never compressed，不静默截断）
+  // Hooks 必须无条件调用（react-hooks/rules-of-hooks），即使 dynamics 为 null
+  const positionData = useMemo(
+    () => alignDynamicsSeries(dynamics?.positionDates ?? [], dynamics?.position ?? []),
+    [dynamics?.positionDates, dynamics?.position],
+  )
+  const velocityData = useMemo(
+    () => alignDynamicsSeries(dynamics?.velocityDates ?? [], dynamics?.velocity ?? []),
+    [dynamics?.velocityDates, dynamics?.velocity],
+  )
   const accelerationData = useMemo(
-    () => alignDynamicsSeries(dynamics?.dates ?? [], dynamics?.acceleration ?? []),
-    [dynamics],
+    () => alignDynamicsSeries(dynamics?.accelerationDates ?? [], dynamics?.acceleration ?? []),
+    [dynamics?.accelerationDates, dynamics?.acceleration],
   )
   if (!dynamics) {
     return <div className={styles.panelUnavailable}>该层当前不可用（无 historical_dynamics）</div>
@@ -110,13 +146,10 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
   const current = currentPhaseFact(dynamics)
   return (
     <div className={styles.panel} data-panel="dynamics">
-      <SeriesChart data={positionData} kind="position" />
-      <SeriesChart data={velocityData} kind="offset" />
-      <SeriesChart data={accelerationData} kind="offset" />
+      <SeriesChart data={positionData} kind="position" title="Position" showZeroLine={false} />
+      <SeriesChart data={velocityData} kind="offset" title="Velocity" showZeroLine />
+      <SeriesChart data={accelerationData} kind="offset" title="Acceleration" showZeroLine />
       <CurrentFactStrip phaseFact={current} status={dynamics.status} />
     </div>
   )
 }
-
-// 保持导出签名稳定，便于契约测试断言（不强制在面板内执行图表库逻辑）
-export { alignDynamicsSeries }

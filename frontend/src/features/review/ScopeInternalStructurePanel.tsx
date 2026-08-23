@@ -1,12 +1,13 @@
-// [ScopeInternalStructurePanel] - 描述: Internal Structure 面板（Slice E）
+// [ScopeInternalStructurePanel] - 描述: Internal Structure 面板（Slice E correction）
 //
-// 硬契约（prompt §7）：
+// 硬契约（prompt §5、§8）：
 // - 数据源 ONLY composition.internal_structure_facts。
-// - Breadth：advance/decline/unchanged 100% 横向堆叠，不合成 composite score。
+// - Breadth：advance/decline/unchanged 使用 persisted ratio，不重算、不伪造 0。
 // - Return/Capital：EW Return / AW Return / persisted Capital Tilt（绝不前端计算 AW-EW）。
 // - A-share direction colors ONLY 用于市场方向事实：positive = red、negative = green、zero = neutral。
 // - HHI 是中性分析信息，绝不上色（不高 HHI=风险 / 低 HHI=好）。
 // - 禁止文本：资金认可/资金背离/结构健康/风险/机会/强/弱。
+// - null != 0：缺失 ratio 时展示 unavailable，不画假 100% 堆叠条。
 import type { ScopeInternalParsed } from './scopeDetailContract'
 import { NULL_DISPLAY, formatPercentNullable, formatNumberNullable } from './reviewFormat'
 import styles from './review.module.scss'
@@ -18,37 +19,74 @@ function directionClass(value: number | null, safeNeutral = false): string {
   return safeNeutral ? '' : ''
 }
 
+/**
+ * 宽度百分比：使用 persisted ratio * 100，不重新归一化。
+ * null 时返回 null（调用方判断是否画堆叠条）。
+ */
+function widthPercent(ratio: number | null | undefined): number | null {
+  if (ratio === null || ratio === undefined || Number.isNaN(ratio)) return null
+  return ratio * 100
+}
+
 function BreadthStack({ breadth }: { breadth: ScopeInternalParsed['breadth'] }) {
   if (!breadth) return <div className={styles.panelUnavailable}>Breadth 不可用</div>
-  const a = breadth.advanceRatio ?? 0
-  const d = breadth.declineRatio ?? 0
-  const u = breadth.unchangedRatio ?? 0
-  const total = a + d + u
+  const a = widthPercent(breadth.advanceRatio)
+  const d = widthPercent(breadth.declineRatio)
+  const u = widthPercent(breadth.unchangedRatio)
+
+  // 三者全部非 null → 使用 persisted ratio 宽度
+  // 任一 null → 不画假 100% 堆叠，展示 partial/unavailable 状态
+  const allReady = a !== null && d !== null && u !== null
+
   return (
     <dl className={styles.metricGroup}>
       <dt className={styles.metricHeading}>Breadth</dt>
       <dd className={styles.breadthStack}>
-        <div
-          className={`${styles.breadthSegment} ${styles.up}`}
-          style={{ width: total > 0 ? `${(a / total) * 100}%` : '0%' }}
-          title={`advance <span>${breadth.advanceRatio ?? NULL_DISPLAY}</span>`}
-        />
-        <div
-          className={`${styles.breadthSegment} ${styles.down}`}
-          style={{ width: total > 0 ? `${(d / total) * 100}%` : '0%' }}
-          title={`decline <span>${breadth.declineRatio ?? NULL_DISPLAY}</span>`}
-        />
-        <div
-          className={`${styles.breadthSegment} ${styles.breadthNeutral}`}
-          style={{ width: total > 0 ? `${(u / total) * 100}%` : '0%' }}
-          title={`unchanged <span>${breadth.unchangedRatio ?? NULL_DISPLAY}</span>`}
-        />
+        {allReady ? (
+          <>
+            <div
+              className={`${styles.breadthSegment} ${styles.up}`}
+              style={{ width: `${a}%` }}
+              title={`advance ${breadth.advanceRatio ?? NULL_DISPLAY}`}
+            />
+            <div
+              className={`${styles.breadthSegment} ${styles.down}`}
+              style={{ width: `${d}%` }}
+              title={`decline ${breadth.declineRatio ?? NULL_DISPLAY}`}
+            />
+            <div
+              className={`${styles.breadthSegment} ${styles.breadthNeutral}`}
+              style={{ width: `${u}%` }}
+              title={`unchanged ${breadth.unchangedRatio ?? NULL_DISPLAY}`}
+            />
+          </>
+        ) : (
+          <div className={styles.breadthPartial}>
+            <div className={styles.breadthRow}>
+              <span className={`${styles.legendDot} ${styles.up}`} />
+              <span>advance</span>
+              <span className={styles.breadthValue}>{breadth.advanceRatio === null || breadth.advanceRatio === undefined ? NULL_DISPLAY : formatPercentNullable(breadth.advanceRatio, 1)}</span>
+            </div>
+            <div className={styles.breadthRow}>
+              <span className={`${styles.legendDot} ${styles.down}`} />
+              <span>decline</span>
+              <span className={styles.breadthValue}>{breadth.declineRatio === null || breadth.declineRatio === undefined ? NULL_DISPLAY : formatPercentNullable(breadth.declineRatio, 1)}</span>
+            </div>
+            <div className={styles.breadthRow}>
+              <span className={`${styles.legendDot} ${styles.breadthNeutral}`} />
+              <span>unchanged</span>
+              <span className={styles.breadthValue}>{breadth.unchangedRatio === null || breadth.unchangedRatio === undefined ? NULL_DISPLAY : formatPercentNullable(breadth.unchangedRatio, 1)}</span>
+            </div>
+          </div>
+        )}
       </dd>
-      <div className={styles.breadthLegend}>
-        <span className={`${styles.legendDot} ${styles.up}`} /> advance
-        <span className={`${styles.legendDot} ${styles.down}`} /> decline
-        <span className={`${styles.legendDot} ${styles.breadthNeutral}`} /> unchanged
-      </div>
+      {allReady && (
+        <div className={styles.breadthLegend}>
+          <span className={`${styles.legendDot} ${styles.up}`} /> advance
+          <span className={`${styles.legendDot} ${styles.down}`} /> decline
+          <span className={`${styles.legendDot} ${styles.breadthNeutral}`} /> unchanged
+        </div>
+      )}
     </dl>
   )
 }
