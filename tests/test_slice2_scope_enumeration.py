@@ -28,8 +28,6 @@ import pytest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
-
 _REPO = Path(__file__).resolve().parents[1]
 _SCOPE_SVC = (
     _REPO / "backend" / "app" / "services" / "review_scope_service.py"
