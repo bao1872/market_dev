@@ -28,6 +28,8 @@
       "EXACT_DUPLICATE",
       "REVIEW_SUPERSET",
       "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
+      "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+      "SEMANTIC_OVERLAP_DIFFERENT_TIME_SEMANTICS",
       "BOARD_UNIQUE",
       "INFRASTRUCTURE_NOT_ANALYTICS",
       "LEGACY_UNUSED",
@@ -37,11 +39,25 @@
       "USE_REVIEW_OWNER",
       "MIGRATE_TO_REVIEW",
       "DERIVE_FROM_REVIEW_FACTS",
+      "DERIVE_FROM_MEMBER_FACTS",
       "RENAME_AND_MIGRATE",
       "KEEP_INFRASTRUCTURE_ONLY",
       "RETIRE",
       "NEEDS_PRODUCT_DECISION"
-    ]
+    ],
+    "information_parity_vocab": [
+      "EXACT",
+      "DERIVABLE",
+      "LOSSY",
+      "DIFFERENT_SEMANTICS"
+    ],
+    "information_parity_rules": {
+      "LOSSY_or_DIFFERENT_SEMANTICS": "target_disposition MUST NOT be USE_REVIEW_OWNER; must be MIGRATE_TO_REVIEW / RENAME_AND_MIGRATE / DERIVE_FROM_MEMBER_FACTS / (RETIRE only if Review truly superset).",
+      "USE_REVIEW_OWNER": "requires information_parity in {EXACT, DERIVABLE} — i.e. Board info must be fully recoverable from current Review persisted payload without re-querying Stock Core."
+    },
+    "new_disposition_notes": {
+      "DERIVE_FROM_MEMBER_FACTS": "Do NOT re-save a re-aggregated duplicate of base facts. The unified Review batch-prepare consumes the same member facts once and produces all required Review aggregates in a single pass. Use when Board aggregate is reconstructible from the member-fact batch (not from current persisted Review payload)."
+    }
   },
   "fields": [
     {
@@ -56,6 +72,13 @@
       "review_owner": "scope_observation.trend.state",
       "classification": "REVIEW_SUPERSET",
       "target_disposition": "USE_REVIEW_OWNER",
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["trend_dist.up", "trend_dist.down", "trend_dist.neutral"],
+        "review_information": ["trend.state.direction_labels {UP,DOWN,NEUTRAL} counts"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review trend.state categorical counts fully cover Board trend_dist."
+      },
       "reason": "Review trend.state categorical distribution (up/down/neutral counts) is the superset. Board counts derive from same trend direction fact."
     },
     {
@@ -66,11 +89,18 @@
       "board_denominator_or_universe": "board members with finite trend_strength",
       "board_history_window": "T only",
       "board_pit_semantics": "membership(T)",
-      "review_equivalent": "trend.continuous (regime_strength) + trend.state distributions",
+      "review_equivalent": "trend.continuous.regime_strength (currently median only)",
       "review_owner": "scope_observation.trend.continuous",
-      "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Board uses percentile of fp_trend_strength magnitude; Review trend.continuous carries regime_strength. Same trend-strength family but different aggregation/shape. Review is the single owner; Board version retired. NOT EXACT_DUPLICATE (different formula)."
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "LOSSY",
+        "board_information": ["trend_strength.avg", "trend_strength.p25", "trend_strength.p50", "trend_strength.p75"],
+        "review_information": ["trend.continuous.regime_strength = _median only"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Extend Review trend.continuous.regime_strength to a distribution: {mean, p25, p50, p75, valid_count}. Board avg/p25/p50/p75 are NOT recoverable from a single median. MIGRATE_TO_REVIEW (single batch-prepare over member trend_strength)."
+      },
+      "reason": "Board stores avg + P25 + P50 + P75 of fp_trend_strength; Review currently persists ONLY regime_strength = _median. This is LOSSY: the four Board statistics cannot be recovered from a single median. Disposition MIGRATE_TO_REVIEW (parity LOSSY forbids USE_REVIEW_OWNER). Extend Review distribution helper to emit {mean,p25,p50,p75,valid_count}."
     },
     {
       "board_field": "vwap_dev_pct.avg/p25/p50/p75",
@@ -80,11 +110,18 @@
       "board_denominator_or_universe": "board members with finite vwap_dev",
       "board_history_window": "T only",
       "board_pit_semantics": "membership(T)",
-      "review_equivalent": "price.amount_concentration / participation.amount (signed deviation)",
-      "review_owner": "scope_observation.price.amount_concentration + participation.amount",
-      "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Board vwap_dev is price-vs-VWAP deviation; Review has amount_concentration + participation. Different denominator (VWAP vs amount). Review single owner; Board retired. NOT EXACT_DUPLICATE."
+      "review_equivalent": "trend.continuous.dsa_vwap_dev_pct (currently median only)",
+      "review_owner": "scope_observation.trend.continuous",
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "LOSSY",
+        "board_information": ["vwap_dev_pct.avg", "vwap_dev_pct.p25", "vwap_dev_pct.p50", "vwap_dev_pct.p75"],
+        "review_information": ["trend.continuous.dsa_vwap_dev_pct = _median only"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Extend Review trend.continuous.dsa_vwap_dev_pct to {mean, p25, p50, p75, valid_count}. Board avg/P25/P50/P75 are NOT recoverable from a single median, and are DISTINCT from price.amount_concentration / participation.amount (wrong equivalence removed). MIGRATE_TO_REVIEW."
+      },
+      "reason": "Board vwap_dev_pct = (close-vwap)/vwap*100 → avg+P25+P50+P75. Review currently persists ONLY dsa_vwap_dev_pct = _median. LOSSY: four statistics not recoverable from one median. Also corrected prior wrong equivalence to price.amount_concentration/participation.amount (those are amount-share, not VWAP deviation). Disposition MIGRATE_TO_REVIEW (parity LOSSY forbids USE_REVIEW_OWNER)."
     },
     {
       "board_field": "structure.swing_up/swing_down/swing_neutral",
@@ -98,7 +135,14 @@
       "review_owner": "scope_observation.structure.swing.state",
       "classification": "REVIEW_SUPERSET",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review structure.swing.state categorical distribution is superset of Board swing_up/down/neutral."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["structure.swing_up", "structure.swing_down", "structure.swing_neutral"],
+        "review_information": ["structure.swing.state categorical {UP, DOWN, NEUTRAL} counts"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review structure.swing.state covers Board swing counts."
+      },
+      "reason": "Review structure.swing.state categorical distribution is superset of Board swing_up/down/neutral. Parity DERIVABLE (USE_REVIEW_OWNER allowed)."
     },
     {
       "board_field": "structure.alignment_aligned/alignment_misaligned/alignment_neutral",
@@ -112,7 +156,14 @@
       "review_owner": "scope_observation.structure.alignment",
       "classification": "REVIEW_SUPERSET",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review structure.alignment categorical (Aligned/Divergent) is the superset."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["structure.alignment_aligned", "structure.alignment_misaligned", "structure.alignment_neutral"],
+        "review_information": ["structure.alignment categorical {ALIGNED, DIVERGENT} counts"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review structure.alignment covers Board alignment counts."
+      },
+      "reason": "Review structure.alignment categorical (Aligned/Divergent) is the superset. Parity DERIVABLE (USE_REVIEW_OWNER allowed)."
     },
     {
       "board_field": "structure.avg_active_ob_count",
@@ -126,7 +177,14 @@
       "review_owner": "none",
       "classification": "BOARD_UNIQUE",
       "target_disposition": "MIGRATE_TO_REVIEW",
-      "reason": "Review v2.3 canonical formally removed active_ob_count (like Turnover). Board still exposes avg_active_ob_count. Must be migrated to Review as a distinct retained fact, not silently dropped. (Slice 2 product decision: re-add vs keep Board-only.)"
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["structure.avg_active_ob_count (mean of per-member active_ob_count)"],
+        "review_information": ["NONE (Review canonical v2.3 formally REMOVED active_ob_count)"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "MIGRATE_TO_REVIEW: re-add active_ob_count as a retained Review fact via single batch-prepare from member facts. Decision already made (dedupe but preserve full functionality)."
+      },
+      "reason": "Review v2.3 canonical formally removed active_ob_count (like Turnover). Board still exposes avg_active_ob_count. Must be migrated to Review as a distinct retained fact, not silently dropped. Decision already made: MIGRATE_TO_REVIEW (Board runtime is itself retired, cannot stay Board-only)."
     },
     {
       "board_field": "structure_events.bos_up/bos_down/choch_up/choch_down/ob_up/ob_down/eqh_present/eql_present/bos_rate/choch_rate/ob_rate",
@@ -138,9 +196,16 @@
       "board_pit_semantics": "membership(T)",
       "review_equivalent": "structure.events (BOS/CHoCH/OB/EQH/EQL cells)",
       "review_owner": "scope_observation.structure.events",
-      "classification": "REVIEW_SUPERSET",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review structure.events is the canonical BOS/CHoCH/OB/EQH/EQL owner. Board V1 rates derive from same Stock Core flat. Review superset."
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_TIME_SEMANTICS",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["structure_events.bos_up/down", "choch_up/down", "ob_up/down", "eqh_present", "eql_present", "bos_rate", "choch_rate", "ob_rate"],
+        "review_information": ["structure.events = exact-T canonical immutable event stream with event coverage gate"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Keep Review structure.events (exact-T incidence). ADD a 'latest-event state' node (current BOS/CHoCH/OB direction per member) as Review Current State, mirroring Event Freshness. The two are complementary: latest-event state (current snapshot) + exact-T incidence (today happened) + event freshness (how recent)."
+      },
+      "reason": "Board V1 reads fp_latest_bos/choch/ob/eqh/eql = Stock Core CURRENT snapshot's latest-event state ('does this stock currently have a recent BOS / what direction?'). Review structure.events reads the EXACT-T canonical immutable event stream ('how many BOS happened today?') with an event-coverage gate. Different time semantics: latest-event state vs exact-T event incidence. Cannot be USE_REVIEW_OWNER (DIFFERENT_SEMANTICS). MIGRATE_TO_REVIEW: retain latest-event state as a Review Current-State node alongside exact-T events + freshness."
     },
     {
       "board_field": "momentum.positive/negative/neutral",
@@ -154,7 +219,14 @@
       "review_owner": "scope_observation.momentum.state",
       "classification": "REVIEW_SUPERSET",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review momentum.state categorical is superset of Board momentum pos/neg/neutral."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["momentum.positive", "momentum.negative", "momentum.neutral"],
+        "review_information": ["momentum.state categorical {EXPANDING, FLAT, CONTRACTING} labels"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review momentum.state categorical covers Board momentum pos/neg/neutral."
+      },
+      "reason": "Review momentum.state categorical is superset of Board momentum pos/neg/neutral. Parity DERIVABLE (USE_REVIEW_OWNER allowed)."
     },
     {
       "board_field": "momentum.squeeze/released/normal",
@@ -168,7 +240,14 @@
       "review_owner": "scope_observation.momentum.squeeze_state",
       "classification": "REVIEW_SUPERSET",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review momentum.squeeze_state categorical is superset."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["momentum.squeeze", "momentum.released", "momentum.normal"],
+        "review_information": ["momentum.squeeze_state categorical {SQUEEZE, RELEASED, NORMAL}"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review momentum.squeeze_state categorical covers Board squeeze/released/normal."
+      },
+      "reason": "Review momentum.squeeze_state categorical is superset of Board squeeze/released/normal. Parity DERIVABLE (USE_REVIEW_OWNER allowed)."
     },
     {
       "board_field": "momentum.enhancing/fading/flat",
@@ -178,11 +257,18 @@
       "board_denominator_or_universe": "board ready members",
       "board_history_window": "T only",
       "board_pit_semantics": "membership(T)",
-      "review_equivalent": "momentum.state / momentum.transition (categorical)",
+      "review_equivalent": "momentum.state (direction: EXPANDING/FLAT/CONTRACTING) + momentum.transition (T-1→T state migration)",
       "review_owner": "scope_observation.momentum.state + transition",
-      "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Board momentum_phase (enhancing/fading/flat) vs Review momentum.state/transition. Same momentum family, different category shape. Review single owner."
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_TIME_SEMANTICS",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["momentum.enhancing_count", "momentum.fading_count", "momentum.flat_count", "momentum.denominator"],
+        "review_information": ["momentum.state = direction (EXPANDING/FLAT/CONTRACTING)", "momentum.transition = T-1 state → T state"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Add momentum.change node: {enhancing_count, weakening_count, flat_count, denominator}. This is a SEPARATE dimension from momentum direction state; not reducible to state/transition. MIGRATE_TO_REVIEW."
+      },
+      "reason": "Board has TWO momentum dimensions: (1) Direction (expanding/contracting/neutral) and (2) Momentum change (enhancing/fading/flat). Review momentum.state covers ONLY dimension (1); momentum.transition covers T-1→T state migration, NOT the enhancing/fading/flat change dimension. These are different semantics; USE_REVIEW_OWNER would silently drop the change dimension. MIGRATE_TO_REVIEW: add momentum.change node."
     },
     {
       "board_field": "momentum.avg_sqzmom",
@@ -195,8 +281,15 @@
       "review_equivalent": "momentum.bb_position / momentum.bb_width (current-only distribution)",
       "review_owner": "scope_observation.momentum.bb_position + bb_width",
       "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Board sqzmom vs Review bb_position/bb_width. Both momentum squeeze-oscillator family but different formula. Review single owner."
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["momentum.avg_sqzmom (mean of fp_sqzmom across members)"],
+        "review_information": ["momentum.bb_position", "momentum.bb_width", "momentum.squeeze_state"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Add momentum.sqzmom aggregate (mean/valid_count) to Review momentum node. SQZMOM oscillator is a DISTINCT metric from BB position/width. MIGRATE_TO_REVIEW."
+      },
+      "reason": "Board avg_sqzmom = mean of fp_sqzmom across members. Review momentum exposes bb_position/bb_width/squeeze_state — these are Bollinger-band derived, a DIFFERENT oscillator than SQZMOM (squeeze-momentum). The prior equivalence to bb_position/bb_width is invalid. Review has NO sqzmom aggregate, so USE_REVIEW_OWNER would silently drop it. MIGRATE_TO_REVIEW (not RETIRE: it is a unique Board capability)."
     },
     {
       "board_field": "volume.high/low/normal/unknown",
@@ -206,11 +299,18 @@
       "board_denominator_or_universe": "board ready members",
       "board_history_window": "T only",
       "board_pit_semantics": "membership(T)",
-      "review_equivalent": "participation.volume (ratio20/ratio200/percentile20/percentile200/zscore20/zscore200)",
+      "review_equivalent": "participation.volume (ratio20/ratio200/percentile20/percentile200/zscore20/zscore200: p25/p50/p75/valid_count only)",
       "review_owner": "scope_observation.participation.volume",
-      "classification": "REVIEW_SUPERSET",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review participation.volume threshold-free distribution (ratio20/200, percentile, zscore) is the superset of Board high/low/normal volume buckets."
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "LOSSY",
+        "board_information": ["volume.high_count", "volume.low_count", "volume.normal_count", "volume.unknown_count"],
+        "review_information": ["participation.volume ratio/percentile/zscore p25/p50/p75/valid_count (no badge counts)"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Add participation.volume.badge: {high_count, low_count, normal_count, unknown_count}. P25/P50/P75 cannot recover 'how many members are High/Low'."
+      },
+      "reason": "Board volume.high/low/normal/unknown are badge COUNTS (how many members fall in each volume bucket). Review participation.volume only stores p25/p50/p75/valid_count of ratio/percentile/zscore distributions. The badge counts are NOT recoverable from percentiles (cannot invert 'how many High/Low'). LOSSY → MIGRATE_TO_REVIEW: add badge counts node."
     },
     {
       "board_field": "volume.avg_volume_ratio20/avg_volume_ratio200",
@@ -220,11 +320,18 @@
       "board_denominator_or_universe": "board ready members",
       "board_history_window": "T only",
       "board_pit_semantics": "membership(T)",
-      "review_equivalent": "participation.volume.ratio20 / ratio200 (p50 of distribution)",
+      "review_equivalent": "participation.volume.ratio20 / ratio200 (p25/p50/p75 only)",
       "review_owner": "scope_observation.participation.volume.ratio20 + ratio200",
-      "classification": "REVIEW_SUPERSET",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review participation.volume.ratio20/200 p50 is superset (Board reports simple avg)."
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "LOSSY",
+        "board_information": ["volume.avg_volume_ratio20", "volume.avg_volume_ratio200"],
+        "review_information": ["participation.volume.ratio20.p25/p50/p75", "ratio200.p25/p50/p75"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Add mean to participation.volume.ratio20/ratio200 distributions: {mean, p25, p50, p75, valid_count}. Board avg is NOT recoverable from median."
+      },
+      "reason": "Board avg_volume_ratio20/200 = mean of member volume ratio. Review participation.volume.ratio20/200 stores ONLY p25/p50/p75 (no mean). The Board mean is NOT recoverable from median/percentiles (different aggregation). LOSSY → MIGRATE_TO_REVIEW: extend distribution helper to emit mean. (Prior 'p50 is superset of avg' claim was incorrect.)"
     },
     {
       "board_field": "volume.percentile_20_dist/percentile_200_dist",
@@ -234,11 +341,18 @@
       "board_denominator_or_universe": "board ready members",
       "board_history_window": "T only",
       "board_pit_semantics": "membership(T)",
-      "review_equivalent": "participation.volume.percentile20/percentile200 (p25/p50/p75)",
+      "review_equivalent": "participation.volume.percentile20/percentile200 (p25/p50/p75 only)",
       "review_owner": "scope_observation.participation.volume.percentile20 + percentile200",
-      "classification": "REVIEW_SUPERSET",
-      "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Review participation.volume.percentile20/200 p25/p50/p75 is superset of Board quartile buckets."
+      "classification": "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+      "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "LOSSY",
+        "board_information": ["volume.percentile_20_dist histogram [<20,20-40,40-60,60-80,>=80]", "volume.percentile_200_dist histogram [<20,20-40,40-60,60-80,>=80]"],
+        "review_information": ["participation.volume.percentile20.p25/p50/p75", "percentile200.p25/p50/p75"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "Add histogram to participation.volume.percentile20/percentile200: {mean, p25, p50, p75, histogram_20_40_60_80}. Board quartile histogram is NOT recoverable from three percentiles."
+      },
+      "reason": "Board percentile_20_dist/percentile_200_dist bucket members into 5 histogram bins (<20/20-40/40-60/60-80/>=80). Review participation.volume.percentile20/200 stores ONLY p25/p50/p75/valid_count. The histogram cannot be recovered from three percentiles. LOSSY → MIGRATE_TO_REVIEW: add histogram_20_40_60_80 to the distribution helper."
     },
     {
       "board_field": "total_members/ready_members/missing_members",
@@ -266,7 +380,14 @@
       "review_owner": "scope_observation.trend.transition",
       "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Different algorithin: Board uses prev=MAX(trade_date)<T (no membership(T-1) gate, just instrument_id match); Review uses strict PIT(T)∩PIT(T-1) common valid set. Same transition concept, different denominator semantics. Review is single owner. NOT REVIEW_SUPERSET (Board's denominator is looser). NOT EXACT_DUPLICATE (formula differs). This is the key semantic-overlap case the review flagged."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["state_transitions.up/down/neutral counts", "transition ratios", "event counts (BOS/CHoCH/SQZ_RELEASE)"],
+        "review_information": ["trend.transition (PIT(T)∩PIT(T-1) common valid, T-1→T exact migration + ratios)"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review trend.transition is the canonical (stricter) owner. Board's looser denominator is a degraded variant, not a unique info set."
+      },
+      "reason": "Different algorithm: Board uses prev=MAX(trade_date)<T (no membership(T-1) gate, just instrument_id match); Review uses strict PIT(T)∩PIT(T-1) common valid set. Same transition concept, different denominator semantics. Review is single owner. NOT REVIEW_SUPERSET (Board's denominator is looser). NOT EXACT_DUPLICATE (formula differs). Parity DERIVABLE (Review transition facts fully cover the transition concept; USE_REVIEW_OWNER allowed)."
     },
     {
       "board_field": "pyramid_v2.freshness.*",
@@ -280,6 +401,13 @@
       "review_owner": "none (canonical Review has no freshness)",
       "classification": "BOARD_UNIQUE",
       "target_disposition": "MIGRATE_TO_REVIEW",
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["freshness.today/last_5d/10d/20d_count", "decay_weighted_density", "density by_dimension{trend,structure,momentum,chip}"],
+        "review_information": ["NONE (canonical Review has no freshness layer)"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "MIGRATE_TO_REVIEW: add a freshness layer to canonical Review. Board event freshness is genuinely Board-unique; Review must own it after Board runtime retires."
+      },
       "reason": "Canonical Review compute_scope_observation has NO freshness layer. Legacy filter_engine/metric_engine may have had freshness logic but legacy P/Q/U/C/V->Filter->Signal->Attribution is RETIRED from mandatory main chain, so it cannot be cited as canonical owner. Board event freshness is genuinely Board-unique and MUST migrate to Review (add a freshness layer). Slice 2 decides which windows/formulas directly reuse."
     },
     {
@@ -294,7 +422,14 @@
       "review_owner": "Review filter_engine (derives diffusion from canonical state.transition)",
       "classification": "REVIEW_SUPERSET",
       "target_disposition": "DERIVE_FROM_REVIEW_FACTS",
-      "reason": "Board diffusion is fully derived from state_transitions. Review filter_engine already derives diffusion from canonical state.transition facts. Prohibit a second stored diffusion fact; unify on Review transition facts. Classification is REVIEW_SUPERSET (Review's transition facts are the superset from which diffusion is derived), disposition DERIVE_FROM_REVIEW_FACTS (no separate stored diffusion fact in Review)."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["diffusion.positive/negative/total migration counts", "ratios", "participation_coverage"],
+        "review_information": ["trend.transition facts (PIT(T)∩PIT(T-1)) from which diffusion is derived"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; diffusion is fully derived from Review's canonical trend.transition facts. No separate stored diffusion fact needed (DERIVE_FROM_REVIEW_FACTS)."
+      },
+      "reason": "Board diffusion is fully derived from state_transitions. Review filter_engine already derives diffusion from canonical state.transition facts. Prohibit a second stored diffusion fact; unify on Review transition facts. Classification is REVIEW_SUPERSET (Review's transition facts are the superset from which diffusion is derived), disposition DERIVE_FROM_REVIEW_FACTS (no separate stored diffusion fact in Review). Parity DERIVABLE (USE_REVIEW_OWNER-equivalent: not a stored duplicate)."
     },
     {
       "board_field": "pyramid_v2.concentration.*",
@@ -308,7 +443,14 @@
       "review_owner": "scope_observation.price.amount_concentration",
       "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
       "target_disposition": "RENAME_AND_MIGRATE",
-      "reason": "Board concentration is HHI over |change_magnitude| (trend-strength magnitude); Review price_concentration is HHI over abs-price-change share, amount_concentration over amount share. DIFFERENT underlying variable — Board answers 'is trend-strength concentrated', Review answers 'is price-change/amount concentrated'. Not EXACT_DUPLICATE. Preserve as technical_state_concentration migrated into Review (answers a question Review does not currently cover)."
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["concentration.top3/top5 contribution", "HHI", "leader_median_gap", "leader_symbol/magnitude", "median_magnitude (all over |change_magnitude|)"],
+        "review_information": ["price.concentration HHI over abs-price-change share", "amount_concentration HHI over amount share"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "RENAME_AND_MIGRATE as technical_state_concentration (HHI over |change_magnitude|). Board answers 'is trend-strength concentrated'; Review price/amount concentration answer a DIFFERENT question. Not lossless-replaceable."
+      },
+      "reason": "Board concentration is HHI over |change_magnitude| (trend-strength magnitude); Review price_concentration is HHI over abs-price-change share, amount_concentration over amount share. DIFFERENT underlying variable — Board answers 'is trend-strength concentrated', Review answers 'is price-change/amount concentrated'. DIFFERENT_SEMANTICS (parity LOSSY-equivalent: not recoverable from current Review payload). RENAME_AND_MIGRATE as technical_state_concentration (preserves a question Review does not currently cover)."
     },
     {
       "board_field": "pyramid_v2.dispersion.*",
@@ -322,7 +464,14 @@
       "review_owner": "scope_observation.price.return",
       "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
       "target_disposition": "RENAME_AND_MIGRATE",
-      "reason": "Board dispersion is std/cv over |change_magnitude|; Review return distribution is over price_returns. Different underlying variable. Preserve as technical_state_dispersion migrated into Review."
+      "information_parity": {
+        "parity": "DIFFERENT_SEMANTICS",
+        "board_information": ["dispersion.std/cv/p25/p50/p75/iqr/range (over |change_magnitude|)"],
+        "review_information": ["price.return distribution over price_returns"],
+        "recoverable_from_current_review_payload": false,
+        "required_preservation_action": "RENAME_AND_MIGRATE as technical_state_dispersion (std/cv over |change_magnitude|). Board answers 'how dispersed is trend-strength'; Review return distribution answers a DIFFERENT question."
+      },
+      "reason": "Board dispersion is std/cv over |change_magnitude|; Review return distribution is over price_returns. DIFFERENT underlying variable. DIFFERENT_SEMANTICS (not recoverable from current Review payload). RENAME_AND_MIGRATE as technical_state_dispersion (preserves a question Review does not currently cover)."
     },
     {
       "board_field": "pyramid_v2.relative_strength.*",
@@ -336,7 +485,14 @@
       "review_owner": "Review Cross-sectional C1 (cross-sectional positioning evidence)",
       "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Board relative_strength uses vs-market/parent ratio + label; Review C1 cross-sectional uses peer percentile rank. Both relative-strength positioning but different formula (ratio vs rank). Review C1 is single owner; Board label retired. NOT EXACT_DUPLICATE."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["relative_strength.vs_market_ratio/label/diff", "vs_parent_ratio/label", "equal_weight_diff"],
+        "review_information": ["participation / cross-sectional C1 peer percentile rank"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review C1 cross-sectional positioning is the canonical relative-strength owner (peer percentile rank superset). Board vs-market/parent label is a derived projection."
+      },
+      "reason": "Board relative_strength uses vs-market/parent ratio + label; Review C1 cross-sectional uses peer percentile rank. Both relative-strength positioning but different formula (ratio vs rank). Review C1 is single owner; Board label retired. Parity DERIVABLE (USE_REVIEW_OWNER allowed)."
     },
     {
       "board_field": "pyramid_v2.concept_extras.core_count/peripheral_count/core_coverage/confidence_level/board_direction/median_magnitude/ready_count",
@@ -350,7 +506,14 @@
       "review_owner": "review_leadership_service.compute_scope_leadership_batch",
       "classification": "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
       "target_disposition": "USE_REVIEW_OWNER",
-      "reason": "Board core/peripheral uses change_magnitude vs median + board-direction majority; Review Leadership uses actual member contribution vector to build Leader Set + T-1→T migration. Different algorithm, Review is the more formal leadership owner. Board definition retired (no double-track). NOTE: this lives in concept_extras, NOT a separate pyramid_v2.leadership key (which does not exist)."
+      "information_parity": {
+        "parity": "DERIVABLE",
+        "board_information": ["concept_extras.core_count/peripheral_count", "core_coverage", "confidence_level", "board_direction", "median_magnitude", "ready_count"],
+        "review_information": ["Review Leadership leader_set (actual member contribution vector)", "trend.state direction", "trend_strength magnitude"],
+        "recoverable_from_current_review_payload": true,
+        "required_preservation_action": "none; Review Leadership (leader_set from actual contribution) is the canonical, more formal leadership owner. Board core/peripheral is a derived projection."
+      },
+      "reason": "Board core/peripheral uses change_magnitude vs median + board-direction majority; Review Leadership uses actual member contribution vector to build Leader Set + T-1→T migration. Different algorithm, Review is the more formal leadership owner. Parity DERIVABLE (USE_REVIEW_OWNER allowed). Board definition retired (no double-track). NOTE: this lives in concept_extras, NOT a separate pyramid_v2.leadership key (which does not exist)."
     }
   ]
 }

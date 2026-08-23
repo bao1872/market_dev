@@ -39,6 +39,8 @@ DECLARED_CLASSIFICATIONS = {
     "EXACT_DUPLICATE",
     "REVIEW_SUPERSET",
     "SEMANTIC_OVERLAP_DIFFERENT_FORMULA",
+    "SEMANTIC_OVERLAP_DIFFERENT_AGGREGATION",
+    "SEMANTIC_OVERLAP_DIFFERENT_TIME_SEMANTICS",
     "BOARD_UNIQUE",
     "INFRASTRUCTURE_NOT_ANALYTICS",
     "LEGACY_UNUSED",
@@ -324,9 +326,72 @@ def test_manifest_categories(manifest):
 # ---------------------------------------------------------------------------
 def test_semantic_overlap_documented(matrix):
     for f in matrix["fields"]:
-        if f["classification"] == "SEMANTIC_OVERLAP_DIFFERENT_FORMULA":
+        if f["classification"].startswith("SEMANTIC_OVERLAP"):
             assert f.get("reason"), (
                 f"SEMANTIC_OVERLAP '{f['board_field']}' missing reason"
             )
             # must NOT be classified as REVIEW_SUPERSET (that was the 1R error)
             assert f["classification"] != "REVIEW_SUPERSET"
+
+
+# ---------------------------------------------------------------------------
+# 10. Information-parity hard gate (Slice 1S)
+#     LOSSY / DIFFERENT_SEMANTICS forbids USE_REVIEW_OWNER.
+#     USE_REVIEW_OWNER requires information_parity in {EXACT, DERIVABLE}.
+# ---------------------------------------------------------------------------
+def test_information_parity_blocks_use_review_owner(matrix):
+    """P50 ≈ mean, BB width ≈ SQZMOM, exact-T event ≈ latest event
+    must NOT be silently classed as lossless USE_REVIEW_OWNER."""
+    for f in matrix["fields"]:
+        ip = f.get("information_parity")
+        if ip is None:
+            # fields without an explicit block must still declare a parity
+            # via an allowed default; require the key to exist for any
+            # field that is NOT INFRASTRUCTURE/LEGACY/UNKNOWN.
+            assert f["classification"] in (
+                "INFRASTRUCTURE_NOT_ANALYTICS",
+                "LEGACY_UNUSED",
+                "UNKNOWN_NEEDS_DECISION",
+            ), (
+                f"field '{f['board_field']}' missing information_parity block "
+                f"(classification={f['classification']})"
+            )
+            continue
+        parity = ip["parity"]
+        disp = f["target_disposition"]
+        if parity in ("LOSSY", "DIFFERENT_SEMANTICS"):
+            assert disp != "USE_REVIEW_OWNER", (
+                f"field '{f['board_field']}' parity={parity} but "
+                f"target_disposition=USE_REVIEW_OWNER (would silently drop info)"
+            )
+        if disp == "USE_REVIEW_OWNER":
+            assert parity in ("EXACT", "DERIVABLE"), (
+                f"field '{f['board_field']}' USE_REVIEW_OWNER requires "
+                f"information_parity in {{EXACT, DERIVABLE}}, got {parity}"
+            )
+        # parity must be a declared vocab value
+        assert parity in (
+            "EXACT",
+            "DERIVABLE",
+            "LOSSY",
+            "DIFFERENT_SEMANTICS",
+        ), f"field '{f['board_field']}' invalid parity '{parity}'"
+
+
+def test_information_parity_recoverable_flag(matrix):
+    """If the board info is NOT recoverable from current Review payload,
+    the field must NOT be USE_REVIEW_OWNER and must carry a
+    required_preservation_action."""
+    for f in matrix["fields"]:
+        ip = f.get("information_parity")
+        if ip is None:
+            continue
+        if ip.get("recoverable_from_current_review_payload") is False:
+            assert f["target_disposition"] != "USE_REVIEW_OWNER", (
+                f"field '{f['board_field']}' not recoverable from Review "
+                f"payload but target_disposition=USE_REVIEW_OWNER"
+            )
+            assert ip.get("required_preservation_action"), (
+                f"field '{f['board_field']}' not recoverable but missing "
+                f"required_preservation_action"
+            )

@@ -1,6 +1,6 @@
 {
   "meta": {
-    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1R (Source-Truth Correction)",
+    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1S (Information-Loss Audit)",
     "generated_from_head": "d6ad65a0f83025bc038bbfd33a4e17e32729008f",
     "principle": "全功能但只有一个 owner：去重但保留全功能。Board 独有能力必须迁入 Review，不得静默删除。",
     "freshness_correction": "Canonical Review compute_scope_observation top keys are scope/price/trend/structure/momentum/participation/chip — NO freshness layer. Legacy filter_engine/metric_engine freshness is RETIRED from mandatory main chain, so cannot be cited as canonical owner. Board event freshness is BOARD_UNIQUE -> MIGRATE_TO_REVIEW.",
@@ -66,9 +66,57 @@
     },
     {
       "feature": "structure.avg_active_ob_count (V1)",
-      "reason": "Review canonical v2.3 FORMALLY removed active_ob_count (like Turnover). Board still exposes avg_active_ob_count. Migrate as a distinct retained fact — must not be silently dropped.",
+      "reason": "Review canonical v2.3 FORMALLY removed active_ob_count (like Turnover). Board still exposes avg_active_ob_count. Per the consolidation principle 'dedupe but preserve full functionality', the decision is made: MIGRATE_TO_REVIEW. Board runtime is itself a RETIRE target, so it cannot remain 'Board-only'. Must not be silently dropped.",
       "disposition": "MIGRATE_TO_REVIEW",
-      "verification_required": "Slice 2 product decision: re-add active_ob_count to Review vs keep Board-only historical."
+      "verification_required": "Slice 2: re-add avg_active_ob_count as a retained Review fact (single batch-prepare from member facts)."
+    },
+    {
+      "feature": "trend_strength distribution (avg/p25/p50/p75)",
+      "reason": "Board stores avg+P25+P50+P75 of fp_trend_strength; Review trend.continuous.regime_strength persists ONLY a median. LOSSY. MIGRATE_TO_REVIEW: extend regime_strength to {mean,p25,p50,p75,valid_count}.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: extend Review trend.continuous.regime_strength distribution helper."
+    },
+    {
+      "feature": "vwap_dev_pct distribution (avg/p25/p50/p75)",
+      "reason": "Board stores avg+P25+P50+P75 of (close-vwap)/vwap*100; Review trend.continuous.dsa_vwap_dev_pct persists ONLY a median. LOSSY and DISTINCT from amount_concentration. MIGRATE_TO_REVIEW: extend dsa_vwap_dev_pct to {mean,p25,p50,p75,valid_count}.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: extend Review trend.continuous.dsa_vwap_dev_pct distribution helper."
+    },
+    {
+      "feature": "momentum.change (enhancing/fading/flat dimension)",
+      "reason": "Board momentum_phase is a SEPARATE dimension from momentum direction state. Review momentum.state (direction) + transition (T-1→T) do NOT cover enhancing/fading/flat change counts. DIFFERENT_SEMANTICS. MIGRATE_TO_REVIEW: add momentum.change {enhancing_count, weakening_count, flat_count, denominator}.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: add momentum.change node to Review momentum output."
+    },
+    {
+      "feature": "momentum.sqzmom aggregate (avg of fp_sqzmom)",
+      "reason": "SQZMOM oscillator is a DISTINCT metric from BB position/width/squeeze_state. Review momentum has NO sqzmom aggregate. Not RETIRE (unique Board capability). MIGRATE_TO_REVIEW: add momentum.sqzmom {mean, valid_count}.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: add momentum.sqzmom aggregate to Review momentum output."
+    },
+    {
+      "feature": "volume badge counts (high/low/normal/unknown)",
+      "reason": "Board volume badge counts are NOT recoverable from Review participation.volume p25/p50/p75. LOSSY. MIGRATE_TO_REVIEW: add participation.volume.badge {high_count, low_count, normal_count, unknown_count}.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: add volume badge counts to Review participation.volume."
+    },
+    {
+      "feature": "volume ratio mean (avg_volume_ratio20/200)",
+      "reason": "Board avg volume ratio is NOT recoverable from Review ratio20/200 median/percentiles (different aggregation). LOSSY. MIGRATE_TO_REVIEW: add mean to participation.volume.ratio20/ratio200 distributions.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: extend participation.volume.ratio20/ratio200 to emit mean."
+    },
+    {
+      "feature": "volume percentile histogram (20_40_60_80)",
+      "reason": "Board percentile_20/200_dist 5-bin histogram is NOT recoverable from Review p25/p50/p75. LOSSY. MIGRATE_TO_REVIEW: add histogram_20_40_60_80 to participation.volume.percentile20/percentile200.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: extend participation.volume.percentile20/percentile200 to emit histogram."
+    },
+    {
+      "feature": "structure latest-event state (fp_latest_bos/choch/ob/eqh/eql)",
+      "reason": "Board V1 reads CURRENT snapshot latest-event state ('does this stock currently have a recent BOS / what direction?'). Review structure.events reads EXACT-T immutable event incidence ('how many BOS happened today?'). DIFFERENT_TIME_SEMANTICS. MIGRATE_TO_REVIEW: retain latest-event state as a Review Current-State node, complementary to exact-T events + event freshness.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2: add latest-event state node to Review structure output."
     }
   ],
   "derive_from_review": [
@@ -116,11 +164,6 @@
     {
       "feature": "exact freshness windows/formulas reuse in Review",
       "reason": "Board freshness has by_dimension{trend/structure/momentum/chip} with different decay windows. Slice 2 decides which to port as Review freshness layer shape.",
-      "disposition": "NEEDS_PRODUCT_DECISION"
-    },
-    {
-      "feature": "active_ob_count re-add vs keep Board-only",
-      "reason": "Review v2.3 formally removed it; product decision needed on re-adding.",
       "disposition": "NEEDS_PRODUCT_DECISION"
     }
   ]
