@@ -155,7 +155,14 @@ export async function getReviewScopeDetail(
 // 不属于 canonical Review API surface。禁止在 Slice D/E 新代码中使用。
 // ============================================================
 
-/** [LEGACY] GET /v1/review/{trade_date}/scopes（旧 P/Q/U/C/V 形态） */
+/**
+ * [LEGACY] GET /v1/review/{trade_date}/scopes（旧 P/Q/U/C/V 形态）
+ *
+ * 后端 /scopes 现在已是 canonical 实现；本函数仅因旧 MarketScanPanel（Slice D/F 前）尚未迁移而保留，
+ * 把同一个 canonical endpoint 声明成 LegacyReviewScopeListResponse 是已知历史兼容债务。
+ * 严禁在新 canonical 路径（Slice D Explorer 等）中消费本函数；Slice F 删除。
+ * 不得用 canonical summary 伪造 p/q/u/c/v。
+ */
 export async function getLegacyReviewScopes(
   tradeDate: string,
   params: LegacyReviewScopeListParams = {},

@@ -27,6 +27,7 @@ import type {
   ReviewScopeListParams,
   ReviewScopeListResponse,
   ReviewScopeCompositionDetailResponse,
+  ReviewScopeComposition,
 } from '../types'
 import { formatPercentNullable, formatNumberNullable, formatPhaseLabel } from '../reviewFormat'
 
@@ -391,4 +392,191 @@ test('F2. 百分比与数字正常格式化', () => {
 test('F3. 0 是合法值，不应被显示成占位符', () => {
   assert.equal(formatPercentNullable(0), '0.0%')
   assert.equal(formatNumberNullable(0), '0.00')
+})
+
+// ============================================================
+// G. [Slice C 修复] Composition / Detail contract 真实性
+// ============================================================
+
+test('G1. ReviewScopeComposition.scope 仅含 scope_type / scope_key', () => {
+  const comp: ReviewScopeComposition = {
+    scope: { scope_type: 'industry_l1', scope_key: 'bank' },
+    trade_date: '2026-08-21',
+    capability: {},
+    scope_observation: null,
+    historical_dynamics: null,
+    internal_structure_facts: null,
+    leadership: null,
+    member_attribution: null,
+    composition_readiness: 'ready',
+  }
+  // scope 内不得有 scope_name / trade_date
+  assertMissingKeys(comp.scope, ['scope_name', 'trade_date'])
+  assert.equal(comp.trade_date, '2026-08-21')
+  // 9-key 顶层齐全
+  assertMissingKeys(comp, [])
+  for (const k of [
+    'scope',
+    'trade_date',
+    'capability',
+    'scope_observation',
+    'historical_dynamics',
+    'internal_structure_facts',
+    'leadership',
+    'member_attribution',
+    'composition_readiness',
+  ]) {
+    assert.ok(k in comp, `composition 必须含顶层 key ${k}`)
+  }
+})
+
+test('G2. composition_readiness 接受 canonical readiness 字符串', () => {
+  const ok: Array<ReviewScopeComposition['composition_readiness']> = [
+    'ready',
+    'insufficient_history',
+    'unavailable_current',
+  ]
+  for (const r of ok) {
+    const comp: ReviewScopeComposition = {
+      scope: { scope_type: 'concept', scope_key: 'ai' },
+      trade_date: '2026-08-21',
+      capability: {},
+      scope_observation: null,
+      historical_dynamics: null,
+      internal_structure_facts: null,
+      leadership: null,
+      member_attribution: null,
+      composition_readiness: r,
+    }
+    assert.equal(comp.composition_readiness, r)
+  }
+})
+
+test('G3. composition 非必产层保持 nullable', () => {
+  // 非必产层允许同时为 null（owner 在不可产时返回 None）
+  const compNullable: ReviewScopeComposition = {
+    scope: { scope_type: 'industry_l1', scope_key: 'bank' },
+    trade_date: '2026-08-21',
+    capability: {},
+    scope_observation: null,
+    historical_dynamics: null,
+    internal_structure_facts: null,
+    leadership: null,
+    member_attribution: null,
+    composition_readiness: 'unavailable_current',
+  }
+  assert.equal(compNullable.scope_observation, null)
+  assert.equal(compNullable.historical_dynamics, null)
+  assert.equal(compNullable.internal_structure_facts, null)
+  assert.equal(compNullable.leadership, null)
+  assert.equal(compNullable.member_attribution, null)
+  // 同一字段也可承载非 null 对象（status 携带）
+  const compFilled: ReviewScopeComposition = {
+    ...compNullable,
+    scope_observation: { status: 'ready' },
+    leadership: { status: 'insufficient_history' },
+  }
+  assert.equal(typeof compFilled.scope_observation, 'object')
+  assert.equal(typeof compFilled.leadership, 'object')
+})
+
+test('G4. Detail observation 是原始 payload（Record<string, unknown>），非 ReviewScopeSummary', () => {
+  const detail: ReviewScopeCompositionDetailResponse = {
+    reviewRunId: 'r1',
+    tradeDate: '2026-08-21',
+    scopeType: 'industry_l1',
+    scopeKey: 'bank',
+    scopeName: null,
+    algorithmVersion: 'v1',
+    composition: null,
+    observation: { price: { return_level: 0.5 }, trend: {}, participation: {} },
+  }
+  // observation 接受任意原始 payload
+  assert.equal(typeof detail.observation, 'object')
+  assert.ok(detail.observation !== null)
+  // null 也是合法值（fact 缺失时）
+  const empty: ReviewScopeCompositionDetailResponse = {
+    reviewRunId: 'r1',
+    tradeDate: '2026-08-21',
+    scopeType: 'industry_l1',
+    scopeKey: 'bank',
+    scopeName: null,
+    algorithmVersion: 'v1',
+    composition: null,
+    observation: null,
+  }
+  assert.equal(empty.observation, null)
+})
+
+test('G5. canonical scopes key 接受 canonical params（无 cast）', () => {
+  const key = reviewKeys.scopes('2026-08-21', { scope_type: 'concept', page: 1, page_size: 50 })
+  assert.deepEqual(key, [
+    'review',
+    'scopes',
+    '2026-08-21',
+    { scope_type: 'concept', page: 1, page_size: 50 },
+  ])
+})
+
+test('G6. legacyScopes key 存在且接受 LegacyReviewScopeListParams', () => {
+  const legacyKey = reviewKeys.legacyScopes('2026-08-21', {
+    scope_type: 'market',
+    page: 1,
+    page_size: 20,
+  })
+  assert.deepEqual(legacyKey, [
+    'review',
+    'scopes',
+    'legacy',
+    '2026-08-21',
+    { scope_type: 'market', page: 1, page_size: 20 },
+  ])
+})
+
+test('G7. MarketScanPanel 不再含 "as ReviewScopeListParams" 强转', () => {
+  const src = read('MarketScanPanel.tsx')
+  assert.doesNotMatch(src, /as\s+ReviewScopeListParams/, '不得对 legacy params 做 as ReviewScopeListParams 强转')
+  // 改用 legacyScopes
+  assert.match(src, /reviewKeys\.legacyScopes\(/, 'MarketScanPanel 应使用 reviewKeys.legacyScopes')
+})
+
+test('G8. canonical ReviewScopeComposition 类型定义不含 scope_name / 嵌套 trade_date', () => {
+  const src = read('types.ts')
+  const m = src.match(/export interface ReviewScopeComposition \{[\s\S]*?\n\}/)
+  assert.ok(m, '应存在 ReviewScopeComposition 接口定义')
+  const body = m[0]
+  // scope 块内不得含 scope_name
+  const scopeBlock = body.match(/scope: \{[\s\S]*?\}/)
+  assert.ok(scopeBlock, 'scope 应为对象块')
+  assert.doesNotMatch(scopeBlock[0], /scope_name/, 'scope 内不得含 scope_name')
+  // 顶层不得有 scope_name
+  assert.doesNotMatch(body, /^\s*scope_name:/m, 'composition 顶层不得有 scope_name')
+  // composition_readiness 不得是 Record<string, unknown>
+  assert.doesNotMatch(body, /composition_readiness:\s*Record<string, unknown>/, 'composition_readiness 不得是 Record<string, unknown>')
+})
+
+test('G9. Detail observation 类型定义为原始 payload，非 ReviewScopeSummary', () => {
+  const src = read('types.ts')
+  const m = src.match(/export interface ReviewScopeCompositionDetailResponse \{[\s\S]*?\n\}/)
+  assert.ok(m, '应存在 ReviewScopeCompositionDetailResponse 接口定义')
+  assert.doesNotMatch(
+    m[0],
+    /observation:\s*ReviewScopeSummary/,
+    'detail.observation 不得被定义为 ReviewScopeSummary',
+  )
+  assert.match(
+    m[0],
+    /observation:\s*Record<string, unknown>\s*\|\s*null/,
+    'detail.observation 应为 Record<string, unknown> | null',
+  )
+})
+
+test('G10. canonical getReviewScopes 是唯一 canonical 列表 API（新代码不得引用 legacy）', () => {
+  const src = read('api.ts')
+  // 仍保留 legacy 函数但不能被新 canonical 路径使用：仅校验 legacy 函数带有明确债务注释
+  assert.match(
+    src,
+    /getLegacyReviewScopes[\s\S]*?历史兼容债务|getLegacyReviewScopes[\s\S]*?Slice F 删除/,
+    'getLegacyReviewScopes 必须标注 legacy 债务与 Slice F 删除',
+  )
 })

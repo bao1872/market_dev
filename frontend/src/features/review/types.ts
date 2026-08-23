@@ -664,27 +664,43 @@ export interface ReviewScopeListResponse {
 // ------------------------------------------------------------
 
 /**
- * Composition 顶层 9-key 稳定结构（canonical owner 产出，前端只承载、不重算）。
+ * Composition 顶层 9-key 稳定结构（canonical owner `canonical_composition.py` 产出，前端只承载、不重算）。
+ * 对应后端返回的固定 9-key（scope / trade_date / capability / scope_observation /
+ * historical_dynamics / internal_structure_facts / leadership / member_attribution /
+ * composition_readiness）。
+ *
+ * 关键纠正（Slice C 修复）：
+ * - scope 仅有 scope_type / scope_key；owner 不输出 scope_name，也不在 scope 内嵌 trade_date。
+ * - trade_date 是顶层 key，不在 scope 内。
+ * - composition_readiness 是合并后的字符串 status（'ready'/'insufficient_history'/'unavailable_current'），不是 object。
+ * - scope_observation / historical_dynamics / internal_structure_facts / leadership /
+ *   member_attribution 在 owner 上允许为 None（非必产层），必须保留 nullable 语义。
+ *
  * 未知/原始叶子载荷用 Record<string, unknown>，禁止 any，禁止前端重算。
  */
 export interface ReviewScopeComposition {
   scope: {
     scope_type: string
     scope_key: string
-    scope_name: string | null
-    trade_date: string
   }
   trade_date: string
   capability: Record<string, unknown>
-  scope_observation: Record<string, unknown>
-  historical_dynamics: Record<string, unknown>
-  internal_structure_facts: Record<string, unknown>
-  leadership: Record<string, unknown>
-  member_attribution: Record<string, unknown>
-  composition_readiness: Record<string, unknown>
+  scope_observation: Record<string, unknown> | null
+  historical_dynamics: Record<string, unknown> | null
+  internal_structure_facts: Record<string, unknown> | null
+  leadership: Record<string, unknown> | null
+  member_attribution: Record<string, unknown> | null
+  composition_readiness: ReviewCompositionReadiness
 }
 
-/** 详情响应：对应后端 ReviewScopeCompositionDetailResponse（9-key composition + 薄 observation） */
+/**
+ * 详情响应：对应后端 ReviewScopeCompositionDetailResponse（9-key composition + 完整 Observation payload）。
+ *
+ * 关键纠正（Slice C 修复）：`observation` 是后端 fact.observation_payload 的完整
+ * Canonical Observation Core payload（dict[str, Any]），**不是** Slice B 的 ReviewScopeSummary。
+ * 前端不得将其按 Summary 字段读取，也不得在 frontend 重算/Duplicate Observation。
+ * 待 Slice E 真正消费各组字段时，再依据 canonical observation owner 精确定义 nested types。
+ */
 export interface ReviewScopeCompositionDetailResponse {
   reviewRunId: string
   tradeDate: string
@@ -693,5 +709,5 @@ export interface ReviewScopeCompositionDetailResponse {
   scopeName: string | null
   algorithmVersion: string
   composition: ReviewScopeComposition | null
-  observation: ReviewScopeSummary | null
+  observation: Record<string, unknown> | null
 }

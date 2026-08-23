@@ -8,6 +8,7 @@
 // [LEGACY] 信号/归因/个股/追踪/Discovery 仅剩 legacy 消费者，Slice F 删除。
 import type {
   ReviewScopeListParams,
+  LegacyReviewScopeListParams,
   ReviewSignalListParams,
   ReviewAttributionListParams,
   ReviewInstrumentListParams,
@@ -27,6 +28,15 @@ export const reviewKeys = {
   // [CANONICAL] Scope-first 列表（PRD §12.2）
   scopes: (tradeDate: string, filters: ReviewScopeListParams = {}) =>
     [...reviewKeys.all, 'scopes', tradeDate, filters] as const,
+
+  /**
+   * [LEGACY] 仅供旧 MarketScanPanel 使用，接受 LegacyReviewScopeListParams（含 market/major_index/style
+   * 等 canonical ReviewScopeFamily 不允许的值）。这是临时兼容债务：canonical scopes key 只接受 canonical
+   * params，本函数绕过该限制，避免 `as ReviewScopeListParams` 的强转。
+   * Slice D canonical 代码严禁使用本函数；Slice F 删除。
+   */
+  legacyScopes: (tradeDate: string, filters: LegacyReviewScopeListParams = {}) =>
+    [...reviewKeys.all, 'scopes', 'legacy', tradeDate, filters] as const,
 
   // [CANONICAL] 单 Scope 详情；identity 必须含 tradeDate + scopeType + scopeKey + includePartial
   scopeDetail: (

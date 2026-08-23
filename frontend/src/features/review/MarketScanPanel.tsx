@@ -7,7 +7,7 @@ import { useQuery } from '@tanstack/react-query'
 import { getLegacyReviewScopes, extractReviewError } from './api'
 import { reviewKeys } from './queryKeys'
 import ScopeMetricsTable from './ScopeMetricsTable'
-import type { LegacyReviewScopeMetrics, LegacyReviewScopeListParams, ReviewScopeListParams } from './types'
+import type { LegacyReviewScopeMetrics, LegacyReviewScopeListParams } from './types'
 import styles from './review.module.scss'
 
 const SCOPE_TYPE_OPTIONS = [
@@ -48,7 +48,7 @@ export default function MarketScanPanel({
   }
 
   const query = useQuery({
-    queryKey: reviewKeys.scopes(tradeDate, params as ReviewScopeListParams),
+    queryKey: reviewKeys.legacyScopes(tradeDate, params),
     queryFn: () => getLegacyReviewScopes(tradeDate, params),
     enabled: !!tradeDate,
     staleTime: 60 * 1000,
