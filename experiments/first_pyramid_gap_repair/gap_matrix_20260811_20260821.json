@@ -38,7 +38,9 @@
     "daily_state_filter": "source_history_run_id = canonical_run_id AND trade_date = date",
     "events_table": "first_pyramid_history_events",
     "events_filter": "instrument_id IN (canonical run members) AND event_time::date = date",
-    "note": "events table has no source_history_run_id column; tied to canonical run via membership + event_time"
+    "note": "canonical daily_state is the HARD evidence for HISTORY gap; history_event_count_for_date is supplemental_only (events table has no source_history_run_id; tied via canonical membership + event_time, not strict event lineage)",
+    "hard_evidence": "first_pyramid_history_daily_state WHERE source_history_run_id = canonical_run_id",
+    "events_supplemental_only": true
   },
   "legacy_backfill_script_disabled": {
     "path": "backend/scripts/feature_snapshot_backfill.py",
@@ -54,10 +56,11 @@
     "trading_days_in_window": 9,
     "stock_core_complete": 9,
     "history_missing": 9,
-    "both_complete": 0,
+    "core_hard_gate_all_pass": true,
     "classification_breakdown": {
       "CORE_COMPLETE_HISTORY_MISSING": 9
-    }
+    },
+    "repair_scope": "HISTORY_ONLY"
   },
   "gap_matrix": [
     {
@@ -76,7 +79,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -89,7 +100,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -112,7 +124,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -125,7 +145,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -148,7 +169,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -161,7 +190,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -184,7 +214,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -197,7 +235,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -220,7 +259,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -233,7 +280,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -256,7 +304,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -269,7 +325,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -292,7 +349,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -305,7 +370,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -328,7 +394,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -341,7 +415,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -364,7 +439,15 @@
         "snapshot_run_failed_count": null,
         "snapshot_run_skipped_count": null,
         "actual_snapshot_rows_for_source_run": 5293,
-        "classification": "COMPLETE"
+        "classification": "COMPLETE",
+        "core_run_items_total": 5293,
+        "core_run_items_succeeded": 5293,
+        "core_run_items_failed": 0,
+        "core_run_items_pending": 0,
+        "core_run_items_running": 0,
+        "core_run_items_skipped": 0,
+        "event_outbox_items_total": 0,
+        "core_hard_gate_passed": true
       },
       "history": {
         "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
@@ -377,7 +460,8 @@
         "history_event_count_for_date": 0,
         "classification": "HISTORY_MISSING",
         "daily_state_present": false,
-        "event_present": false
+        "event_present": false,
+        "history_event_count_for_date_methodology": "supplemental_only"
       },
       "classification": "CORE_COMPLETE_HISTORY_MISSING",
       "notes": [
@@ -393,5 +477,14 @@
     "no_publication": true,
     "no_deploy": true,
     "no_algorithm_code_change": true
-  }
+  },
+  "stale_docstring_note": {
+    "path": "backend/scripts/advance_history_to_trade_date.py",
+    "cli_docstring_says": "不写 events 表 (line 9)",
+    "deployed_service_reality": "first_pyramid_history_service.advance_history_to_trade_date() persists exact-T state + exact-T events in same canonical calculation; events immutable ON CONFLICT DO NOTHING (idempotent); only target date 1 row state + that day events",
+    "action": "DOCUMENTED ONLY; no production code change this round"
+  },
+  "round_status": "Round 1R — Core COMPLETE closed (9/9 hard gate PASS); History gap CONFIRMED; Core audit CLOSED",
+  "audit_closed": true,
+  "repair_scope": "HISTORY_ONLY"
 }
