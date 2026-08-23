@@ -23,6 +23,7 @@ prepared members' price_candidate / return_1d).
 """
 from __future__ import annotations
 
+import uuid
 from datetime import date
 
 import pytest
@@ -118,7 +119,9 @@ async def test_real_t1_batch_to_composition_serialization():
         )
         mp.setattr(ls, "prepare_current_scope_observations_batch", fake_prep)
 
-        batch_result = await ls.compute_scope_leadership_batch(None, T, [spec])
+        batch_result = await ls.compute_scope_leadership_batch(
+            None, T, [spec], source_core_run_id=uuid.uuid4()
+        )
 
     # 1) batch returns the domain dataclass (NOT a dict)
     assert SCOPE_KEY in batch_result
@@ -216,7 +219,9 @@ async def test_real_t1_batch_honest_unavailable_when_t1_missing():
         )
         mp.setattr(ls, "prepare_current_scope_observations_batch", fake_prep)
 
-        batch_result = await ls.compute_scope_leadership_batch(None, T, [spec])
+        batch_result = await ls.compute_scope_leadership_batch(
+            None, T, [spec], source_core_run_id=uuid.uuid4()
+        )
 
     facts = batch_result[SCOPE_KEY]
     assert isinstance(facts, LeadershipMigrationFacts)

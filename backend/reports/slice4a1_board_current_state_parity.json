@@ -1,9 +1,9 @@
 {
-  "slice": "Slice 4A1R — Board current-state capability migration: runtime source + ready semantics correction",
-  "objective": "Review owns the complete industry/concept board current-state analysis by consuming already-prepared First Pyramid current-state member facts. NO board capability is deleted; only migrated.",
+  "slice": "Slice 4A1R2 — Board current-state capability migration: core lineage lock + eligible universe closure",
+  "objective": "Review owns the complete industry/concept board current-state analysis by consuming already-prepared First Pyramid current-state member facts. NO board capability is deleted; only migrated. Slice 4A1R fixed runtime source + ready/null semantics; 4A1R2 locks the core run identity and the eligible universe.",
   "generated_at": "2026-08-23",
-  "baseline_sha": "f3072da91da744ffae4522e7f548c2c343c7d073",
-  "supersedes": "Slice 4A1 (f3072da9) unconditional PASS — that evidence was NOT valid: parity was proven only against a synthetic fixture that pre-populated raw.flat_t, while real runtime sources flat_t from History previous_state_to_flat (partial fp_* subset). Two production-semantics blockers are corrected here.",
+  "baseline_sha": "0cb9cbf0f7b372e8af018b94bae5a22c423275c2",
+  "supersedes": "Slice 4A1R (0cb9cbf0) HOLD — runtime source + ready/null semantics were correct, but two production-level UNIVERSE / LINEAGE blockers remained: (1) the exact-T loader was NOT locked to ReviewRun.source_core_run_id, so rerun/resume could silently consume another same-day succeeded/published core run; (2) the Board eligibility gate (Instrument.status == 'active', valid_for_market_aggregation) was not replicated, so the migrated capability universe was PIT members ∩ exact-T snapshot ∩ trend, not PIT ∩ active ∩ source_core_run snapshot ∩ trend. Both corrected here.",
 
   "blockers_corrected": {
     "blocker_1_runtime_source": {
@@ -15,6 +15,16 @@
       "problem": "Review aggregated over the whole member_list with no Board ready gate, and filtered None momentum_change / None volume_badge BEFORE taking denominators. Board producer skips non-ready members entirely and counts missing momentum_change as flat / missing volume_badge as unknown.",
       "fix": "Added MemberObservation.board_current_ready (SSOT = FirstPyramidSemanticAdapter(board_flat).trend is not None, exact replication of the Board entry gate). compute_scope_observation derives board_ready_members and ALL 9 migrated capabilities use that universe only. _momentum_change_counts / _volume_badge_counts now receive one entry per board-ready member INCLUDING None, replicating the Board trailing else.",
       "status": "FIXED"
+    },
+    "blocker_3_core_lineage_lock": {
+      "problem": "The exact-T loader locked only on (trade_date + succeeded + published), NOT on source_core_run_id. StockFeatureSnapshot's unique key does NOT include source_run_id, and the model allows multiple succeeded runs per trade_date, so Review could silently consume a different core run than the Board producer (which locks StockFeatureSnapshot.source_run_id == source_run_id). ReviewRun.source_core_run_id is a non-null immutable input identity, but the orchestrator never passed it.",
+      "fix": "source_core_run_id is now an explicit required parameter of prepare_current_scope_observations_batch and _load_current_only_snapshot_facts. The SQL adds BOTH StockFeatureSnapshot.source_run_id == source_core_run_id AND StockFeatureSnapshotRun.id == source_core_run_id. compute_run and resume_run both pass run.source_core_run_id; this layer never re-resolves a 'latest publication pointer'. If the specified core run's rows are absent, the loader returns empty (fail-safe) — never a fallback to another same-day run.",
+      "status": "FIXED"
+    },
+    "blocker_4_valid_universe": {
+      "problem": "The legacy Board producer pre-filters its flat_list through _is_instrument_valid_for_aggregation == (Instrument.status == 'active') BEFORE building the ready/missing universe and all current-state aggregation. Review consumed PIT membership instrument IDs directly with no equivalent active-status gate, so a non-active PIT member entered the migrated Board capability universe even though the Board runtime would have excluded it. The 16 parity tests could not catch this — they call compute_board_payload(flats) directly, validating aggregation-formula parity, not full production-universe parity.",
+      "fix": "Added MemberObservation.board_current_eligible (single batch query, no N+1) carrying Instrument.status == 'active' exactly as the Board code does (no extra .ST/.退/delisted-suffix rules). board_current_ready is now gated on board_current_eligible first (eligible AND trend-present). The gate affects ONLY the migrated Board current-state capabilities; existing Review price / transition / historical / participation universes are unchanged. The eligible flag is injected into current_only facts (single owner, no second Board snapshot query).",
+      "status": "FIXED"
     }
   },
 
@@ -25,12 +35,18 @@
   "missing_volume_badge_as_unknown": true,
   "active_ob_count_uses_board_safe_int": true,
   "persistence_payload_preserved": true,
+  "runtime_source_trade_date_exact": true,
+  "runtime_source_core_run_exact": true,
+  "review_run_source_core_lineage_preserved": true,
+  "resume_does_not_follow_newer_pointer": true,
+  "board_valid_for_market_aggregation_parity": true,
+  "board_eligibility_rule": "Instrument.status == active",
+  "second_snapshot_query_added": false,
   "formula_changes": 0,
   "lookback_changes": 0,
   "threshold_changes": 0,
   "approximation_introduced": false,
   "review_runtime_imports_board_service": false,
-  "second_db_query_added": false,
   "result": "PASS",
 
   "parity_method": "Same synthetic exact-T first_pyramid_flat member fixtures run through OLD Board producer (oracle) AND NEW Review aggregation; 9 capability groups compared field-by-field with exact count/enum/mean/percentile/histogram/latest-event/presence semantics. Review members are built through the REAL runtime path (build_member_observation with current_only[board_first_pyramid_flat]), with flat_t carrying only the partial History projection.",
@@ -74,27 +90,36 @@
     "backend/app/domain/review/scope_observation.py",
     "backend/app/services/observation_prep.py",
     "backend/app/services/review_observation_prep_service.py",
+    "backend/app/services/review_orchestrator_service.py",
+    "backend/app/services/review_leadership_service.py",
     "backend/tests/test_review_board_capability_parity.py",
+    "backend/tests/test_review_observation_prep.py",
     "backend/tests/test_review_observation_persistence.py",
+    "backend/tests/test_review_leadership_integration_slice.py",
     "backend/reports/slice4a1_board_current_state_parity.json"
   ],
   "tests": {
     "parity_suite": "tests/test_review_board_capability_parity.py",
-    "parity_tests_passed": 16,
+    "parity_tests_passed": 18,
     "parity_tests_failed": 0,
     "boundary_cases": [
       "A. trend_direction=None with all other fp_* populated (distinctive 99.0 values) -> Board skips; Review must skip from every migrated group (numerator AND denominator). Asserted against board ready_members / missing_members.",
       "B. board-ready with fp_momentum_change=None -> Board flat +1; Review flat_count +1 and denominator +1.",
-      "C. board-ready with fp_volume_badge=None -> Board unknown +1; Review unknown_count +1."
+      "C. board-ready with fp_volume_badge=None -> Board unknown +1; Review unknown_count +1.",
+      "D. PIT member with full snapshot + trend but Instrument.status != active -> Board filters via valid_for_market_aggregation; Review must exclude it from EVERY migrated Board capability (numerator AND denominator). NEW 4A1R2.",
+      "E. all members non-active -> migrated Board universe empty (0 ready, 0 denominators). NEW 4A1R2."
     ],
     "runtime_source_regression_test": "test_runtime_source_is_exact_t_snapshot_not_history_flat — flat_t is given a CONFLICTING partial History projection (ratio20=42.0, percentile20=5.0, momentum_change=weakening); Review must still match the Board oracle, so any regression back to flat_t turns the suite red.",
     "snapshot_absent_test": "test_migrated_capabilities_unavailable_without_exact_t_snapshot — current_only=None while flat_t carries a FULL board-shaped flat; Review must report board_ready_member_count=0 and null/empty statistics, proving there is no History fallback.",
     "safe_int_test": "test_active_ob_count_uses_board_safe_int_semantics — '3' -> 3, 'abc' -> None, matching board _safe_int.",
     "persistence_test": "tests/test_review_observation_persistence.py::test_migrated_board_capabilities_preserved_through_persistence — asserts values['observation_payload'] is the whole observation and every migrated nested path is present. Locks existing correct behaviour; persistence implementation unchanged.",
     "gate_no_board_import": "PASS — AST/source import gate over app/domain/review/scope_observation.py, app/services/observation_prep.py, app/services/review_observation_prep_service.py; rejects both 'import app.services.board_analysis_service' and 'from ...board_analysis_service import ...'. Board producer imported only by tests, as oracle.",
-    "focused_suite": "180 passed, 0 failed (parity + persistence + observation prep + scope observation + orchestrator persist + observation primitives + review API core-only contract).",
-    "regression_diff_vs_baseline": "review/observation/board selection: 48 failed before (f3072da9 pristine) -> 47 failed after. NEW regressions: 0. FIXED: 1 (test_canonical_scope_payload_excludes_active_ob_count, the PRD v2.3 invariant broken by 4A1).",
-    "known_preexisting_baseline": "47 remaining failures are pre-existing probe/no-migration and related baseline failures, identical on the pristine tree. 8 collection errors (OSError Errno 30 read-only fs) also pre-existing and identical on pristine.",
+    "lineage_tests": "tests/test_review_observation_prep.py — test_loader_locks_snapshot_to_source_core_run_id (SQL contains BOTH source_run_id locks), test_loader_fail_safe_no_fallback_on_missing_core_run (missing run -> empty, never fallback), test_loader_returns_only_specified_core_run_rows (only run A rows returned even when run B also exists), test_batch_passes_immutable_source_core_run_id_to_loader (resume contract: run.source_core_run_id passed through, never re-resolved to a newer pointer).",
+    "eligibility_injection_test": "tests/test_review_observation_prep.py::test_batch_injects_board_eligibility_into_current_only — active member gets board_current_eligible=True, non-active gets False, mirroring Instrument.status == 'active' batch query.",
+    "eligibility_universe_tests": "tests/test_review_board_capability_parity.py — test_board_eligibility_gate_excludes_non_active_member / test_board_eligibility_gate_all_ineligible_yields_empty_universe.",
+    "focused_suite": "observation prep + parity + persistence + scope observation + orchestrator persist + observation primitives + review API core-only contract.",
+    "regression_diff_vs_baseline": "vs 0cb9cbf0 (the 4A1R HOLD commit): NEW regressions 0; FIXED 0 (4A1R already green on formulas). Lineage + eligibility are net-new hardening, not regression fixes.",
+    "known_preexisting_baseline": "Remaining failures are pre-existing probe/no-migration and related baseline failures, identical on the pristine tree. Collection errors (OSError Errno 30 read-only fs) also pre-existing and identical on pristine.",
     "ruff": "clean"
   },
   "explicitly_not_done_this_round": [
@@ -103,7 +128,7 @@
     "technical_state_dispersion",
     "Diffusion",
     "relative_strength",
-    "Leadership",
+    "Leadership (lineage wiring done; capability migration not started)",
     "Board runtime removal",
     "market_aggregation producer removal",
     "AfterClose Board stage removal",
@@ -114,6 +139,6 @@
     "production backfill",
     "First Pyramid formula / lookback changes"
   ],
-  "next": "After Slice4A1R PASS: migrate technical_state_concentration/dispersion -> Event Freshness -> Diffusion, then retire the independent BoardAnalysisRun -> BoardAnalysisSnapshot -> market_aggregation chain once all capabilities parity-PASS.",
+  "next": "After Slice4A1R2 PASS: migrate technical_state_concentration/dispersion -> Event Freshness -> Diffusion, then retire the independent BoardAnalysisRun -> BoardAnalysisSnapshot -> market_aggregation chain once all capabilities parity-PASS.",
   "status": "IMPLEMENTATION_PUSHED_PENDING_REVIEW"
 }

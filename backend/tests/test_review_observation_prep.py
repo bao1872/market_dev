@@ -54,6 +54,7 @@ async def _prepare_one(
                 member_ids=(),
             )
         ],
+        source_core_run_id=uuid.uuid4(),
     )
     return prepared[scope_key]
 
@@ -330,7 +331,7 @@ async def _install_mocks(
         # ROUND-2.2B: default coverage unavailable in pure-unit (no RunItem lineage).
         return {}
 
-    async def _fake_load_current_only(session, ids, trade_date):
+    async def _fake_load_current_only(session, ids, trade_date, *, source_core_run_id=None):
         return current_only or {}
 
     monkeypatch.setattr(
@@ -351,6 +352,15 @@ async def _install_mocks(
         prep_service,
         "_load_current_only_snapshot_facts",
         _fake_load_current_only,
+    )
+    # 4A1R2: Board valid_for_market_aggregation eligibility batch loader. Returns
+    # empty -> no member eligible in the base _install_mocks setup; tests that
+    # need eligibility parity override this after _install_mocks.
+    async def _fake_batch_active(session, ids):
+        return {}
+
+    monkeypatch.setattr(
+        prep_service, "_load_batch_instrument_active_status", _fake_batch_active
     )
 
 
@@ -948,7 +958,7 @@ def _contract_current_only_fake(member_ids):
     loader below records the (session, ids, third_arg) triple so the call
     contract can be asserted."""
 
-    async def _loader(session, ids, third_arg):
+    async def _loader(session, ids, third_arg, **kwargs):
         # Record the exact third positional argument the production caller passes.
         _loader.last_call = (session, ids, third_arg)
         # Same ``dict[str, dict]`` shape the real loader returns and the existing
@@ -1014,6 +1024,12 @@ def _install_contract_mocks(monkeypatch, current_only_loader):
         "_load_batch_backfill_event_coverage",
         _fake_empty,
     )
+    # 4A1R2: Board valid_for_market_aggregation eligibility batch loader must be
+    # faked too (no DB in contract tests). Returns empty -> no member eligible;
+    # these C1a tests assert the exact-T loader contract, not eligibility parity.
+    monkeypatch.setattr(
+        prep_service, "_load_batch_instrument_active_status", _fake_empty
+    )
 
 
 def _contract_spec():
@@ -1033,7 +1049,8 @@ async def test_c1a_single_date_loader_called_with_scalar_t(monkeypatch):
     _install_contract_mocks(monkeypatch, loader)
 
     result = await prep_service.prepare_current_scope_observations_batch(
-        session=None, trade_date=T, scope_specs=[_contract_spec()]
+        session=None, trade_date=T, scope_specs=[_contract_spec()],
+        source_core_run_id=uuid.uuid4(),
     )
 
     assert loader.last_call is not None, "current-only loader was never called"
@@ -1061,6 +1078,7 @@ async def test_c1a_leadership_multidate_still_scalar_t(monkeypatch):
         trade_date=T,
         scope_specs=[_contract_spec()],
         trade_dates=[T1, T],
+        source_core_run_id=uuid.uuid4(),
     )
 
     assert loader.last_call is not None, "current-only loader was never called"
@@ -1087,6 +1105,7 @@ async def test_c1a_multidate_placement_t_minus_1_unavailable(monkeypatch):
         trade_date=T,
         scope_specs=[_contract_spec()],
         trade_dates=[T1, T],
+        source_core_run_id=uuid.uuid4(),
     )
 
     scopes = result.get("C1A_TEST")
@@ -1212,3 +1231,228 @@ def test_current_only_facts_absent_snapshot_yields_none(monkeypatch) -> None:
     assert member.vwap_ret_total is None
     assert member.trailing_top_pct is None
     assert member.trailing_bottom_pct is None
+
+
+# ---------------------------------------------------------------------------
+# Slice 4A1R2 — Core lineage lock + Board valid_for_market_aggregation universe
+# ---------------------------------------------------------------------------
+from sqlalchemy import select as _sa_select
+from unittest.mock import AsyncMock as _AsyncMock, MagicMock as _MagicMock
+
+from app.models.stock_feature_snapshot import StockFeatureSnapshot as _SFS
+from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun as _SFSR
+from app.services.review_observation_prep_service import (
+    _load_batch_instrument_active_status,
+    _load_current_only_snapshot_facts,
+)
+
+
+def test_loader_locks_snapshot_to_source_core_run_id():
+    """The exact-T loader must lock BOTH the snapshot source_run_id AND the run id
+    to the ReviewRun's immutable ``source_core_run_id`` (Slice 4A1R2).
+
+    This is what makes the Review snapshot source lineage-identical to the legacy
+    Board path (``StockFeatureSnapshot.source_run_id == source_run_id``). Multiple
+    succeeded/published runs may share a trade_date; Review must not silently read
+    another core run.
+    """
+    import asyncio
+
+    run_a = uuid.uuid4()
+    session = _AsyncMock()
+    captured: dict = {}
+
+    async def _fake_execute(stmt):
+        captured["stmt"] = stmt
+        result = _MagicMock()
+        result.all.return_value = []
+        return result
+
+    session.execute.side_effect = _fake_execute
+
+    asyncio.run(
+        _load_current_only_snapshot_facts(
+            session,
+            [uuid.uuid4()],
+            date(2026, 8, 20),
+            source_core_run_id=run_a,
+        )
+    )
+    assert captured.get("stmt") is not None, "loader never executed a query"
+    sql = str(captured["stmt"])
+    # Snapshot.source_run_id == source_core_run_id
+    assert "source_run_id" in sql
+    # Run.id == source_core_run_id (two distinct lineage locks)
+    assert sql.count("source_run_id") >= 2
+
+
+def test_loader_fail_safe_no_fallback_on_missing_core_run():
+    """If the row for the specified ``source_core_run_id`` is absent, the loader
+    returns empty (fail-safe) — never a fallback to another same-day run.
+    """
+    import asyncio
+
+    run_a = uuid.uuid4()
+    run_b = uuid.uuid4()
+    session = _AsyncMock()
+    # Only run B's row exists; the query is for run A.
+    captured: dict = {}
+
+    async def _fake_execute(stmt):
+        captured["stmt"] = stmt
+        result = _MagicMock()
+        # Empty result set => no consumable snapshot for run A.
+        result.all.return_value = []
+        return result
+
+    session.execute.side_effect = _fake_execute
+
+    out = asyncio.run(
+        _load_current_only_snapshot_facts(
+            session,
+            [uuid.uuid4()],
+            date(2026, 8, 20),
+            source_core_run_id=run_a,
+        )
+    )
+    assert out == {}, "missing core run must NOT fall back to another run"
+
+
+def test_loader_returns_only_specified_core_run_rows():
+    """The loader must return rows ONLY for the locked ``source_core_run_id``,
+    never rows belonging to a different (even newer/later) same-day run.
+    """
+    import asyncio
+
+    run_a = uuid.uuid4()
+    run_b = uuid.uuid4()
+    id_a = uuid.uuid4()
+    id_b = uuid.uuid4()
+    session = _AsyncMock()
+    captured: dict = {}
+
+    async def _fake_execute(stmt):
+        captured["stmt"] = stmt
+        # Simulate the DB returning only run A's row (this is what the SQL lock
+        # guarantees); if the lock were absent, both A and B rows would match.
+        result = _MagicMock()
+        result.all.return_value = [(id_a, {"first_pyramid_flat": {"fp_trend_direction": "up"}})]
+        return result
+
+    session.execute.side_effect = _fake_execute
+
+    out = asyncio.run(
+        _load_current_only_snapshot_facts(
+            session,
+            [id_a, id_b],
+            date(2026, 8, 20),
+            source_core_run_id=run_a,
+        )
+    )
+    assert set(out.keys()) == {str(id_a)}
+    assert str(id_b) not in out
+
+
+def test_batch_passes_immutable_source_core_run_id_to_loader(monkeypatch):
+    """``prepare_current_scope_observations_batch`` must thread the orchestrator's
+    ``source_core_run_id`` straight into the exact-T loader.  The resume contract:
+    even if the external publication pointer has moved to a different run, the run's
+    frozen ``source_core_run_id`` is always used (never re-resolved).
+    """
+    import asyncio
+
+    run_a = uuid.uuid4()
+    run_b = uuid.uuid4()  # simulated "newer publication pointer"
+    captured: dict = {}
+
+    async def fake_loader(session, ids, td, *, source_core_run_id):
+        captured["source_core_run_id"] = source_core_run_id
+        return {}
+
+    async def fake_active(session, ids):
+        return {}
+
+    async def scenario():
+        await _install_mocks(
+            monkeypatch,
+            resolve=lambda st, sk, td: ([uuid.uuid4()], "s"),
+            current_only={},
+        )
+        # Override AFTER _install_mocks (it also patches the loader with an
+        # older-signature fake that does not accept source_core_run_id).
+        monkeypatch.setattr(
+            prep_service, "_load_current_only_snapshot_facts", fake_loader
+        )
+        monkeypatch.setattr(
+            prep_service, "_load_batch_instrument_active_status", fake_active
+        )
+        return await prepare_current_scope_observations_batch(
+            _FakeSession(),
+            T,
+            [ScopeReplaySpec(
+                scope_type="industry_l1",
+                scope_key="k",
+                scope_name="k",
+                member_ids=(),
+            )],
+            source_core_run_id=run_a,  # frozen identity, NOT run_b
+        )
+
+    asyncio.run(scenario())
+    assert captured.get("source_core_run_id") == run_a
+    assert captured.get("source_core_run_id") != run_b
+
+
+def test_batch_injects_board_eligibility_into_current_only(monkeypatch):
+    """The Board ``Instrument.status == "active"`` eligibility gate must be carried
+    into each member's current-only facts (Slice 4A1R2), exactly mirroring the
+    legacy Board ``valid_for_market_aggregation`` pre-filter.
+    """
+    import asyncio
+
+    id_active = uuid.uuid4()
+    id_inactive = uuid.uuid4()
+
+    async def fake_loader(session, ids, td, *, source_core_run_id):
+        return {
+            str(id_active): {"fp_trend_direction": "up"},
+            str(id_inactive): {"fp_trend_direction": "up"},
+        }
+
+    async def fake_active(session, ids):
+        # Only id_active is active, mirroring ``Instrument.status == "active"``.
+        return {str(id_active): True, str(id_inactive): False}
+
+    async def scenario():
+        await _install_mocks(
+            monkeypatch,
+            resolve=lambda st, sk, td: ([id_active, id_inactive], "s"),
+            current_only={},
+        )
+        # Override AFTER _install_mocks (older-signature loader fake).
+        monkeypatch.setattr(
+            prep_service, "_load_current_only_snapshot_facts", fake_loader
+        )
+        monkeypatch.setattr(
+            prep_service, "_load_batch_instrument_active_status", fake_active
+        )
+        return await prepare_current_scope_observations_batch(
+            _FakeSession(),
+            T,
+            [ScopeReplaySpec(
+                scope_type="industry_l1",
+                scope_key="k",
+                scope_name="k",
+                member_ids=(),
+            )],
+            source_core_run_id=uuid.uuid4(),
+        )
+
+    prepared = asyncio.run(scenario())
+    members = prepared["k"].members
+    eligibles = {m.board_current_eligible for m in members}
+    # Exactly one member passes (id_active) and one fails (id_inactive) — the
+    # Board ``Instrument.status == "active"`` gate is carried per-member, not
+    # blanket-true.
+    assert eligibles == {True, False}, eligibles
+

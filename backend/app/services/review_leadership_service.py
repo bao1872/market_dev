@@ -26,6 +26,7 @@ Pure + deterministic.  No DB write.  No future-leak (T+1 never read).
 """
 from __future__ import annotations
 
+import uuid
 from datetime import date
 from typing import Any
 
@@ -86,6 +87,8 @@ async def compute_scope_leadership_batch(
     session: AsyncSession,
     trade_date: date,
     scope_specs: list[Any],
+    *,
+    source_core_run_id: uuid.UUID,
 ) -> dict[str, LeadershipMigrationFacts]:
     """Compute real T-1→T Leadership Migration for a batch of scopes.
 
@@ -94,6 +97,9 @@ async def compute_scope_leadership_batch(
     migration.  Returns ``scope_key -> LeadershipMigrationFacts`` for every input
     spec (never raises on unavailable T-1; it emits an honest unavailable
     migration instead of faking a previous snapshot).
+
+    ``source_core_run_id`` (Slice 4A1R2) is the immutable ReviewRun input identity,
+    threaded into the prep owner so the exact-T snapshot source is lineage-locked.
     """
     from app.services.calendar_service import get_previous_trading_day_async
 
@@ -110,7 +116,11 @@ async def compute_scope_leadership_batch(
 
     # Single neutral load of [T-1, T] member facts for the whole batch.
     series = await prepare_current_scope_observations_batch(
-        session, trade_date, scope_specs, trade_dates=[t1, trade_date]
+        session,
+        trade_date,
+        scope_specs,
+        trade_dates=[t1, trade_date],
+        source_core_run_id=source_core_run_id,
     )
 
     result: dict[str, LeadershipMigrationFacts] = {}

@@ -176,11 +176,20 @@ class MemberObservation:
     # snapshot is absent the whole Board current-state capability is unavailable
     # for that member (``board_current_ready`` is False).
     # ------------------------------------------------------------------
+    # Board ELIGIBILITY GATE (SSOT, Slice 4A1R2).  Exact replication of the
+    # legacy Board producer universe gate ``_is_instrument_valid_for_aggregation``
+    # == ``Instrument.status == "active"``.  A member that is not active is
+    # excluded from EVERY migrated Board current-state capability (numerator and
+    # denominator), matching the Board ``flat_list`` pre-filter.  This does NOT
+    # change the existing Review price / transition / historical / participation
+    # universes.
+    board_current_eligible: bool = False
     # Board READY GATE (SSOT).  Exact replication of the Board producer entry
     # gate ``if semantics.trend is None: missing += 1; continue``.  A member that
     # is not board-ready contributes to NONE of the 9 migrated Board
     # current-state capabilities (not to their numerators, not to their
     # denominators).  Other Review canonical facts keep their own universe.
+    # 4A1R2: ready is gated on eligible first.
     board_current_ready: bool = False
     # trend_strength = median per-bar trend strength (board ``fp_trend_strength``).
     trend_strength: float | None = None

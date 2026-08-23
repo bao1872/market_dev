@@ -47,12 +47,14 @@ from app.models.first_pyramid_history import (
 )
 from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
 from app.models.first_pyramid_history_run_item import FirstPyramidHistoryRunItem
+from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
 from app.services import calendar_service, review_scope_service
 from app.services.board_membership_service import PITMembershipUnavailableError
 from app.services.observation_prep import (
+    _BOARD_CURRENT_ELIGIBLE_KEY,
     _BOARD_CURRENT_FLAT_KEY,
     RawMemberFacts,
     build_member_observation,
@@ -244,6 +246,8 @@ async def _load_current_only_snapshot_facts(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],
     trade_date: date,
+    *,
+    source_core_run_id: uuid.UUID,
 ) -> dict[str, dict[str, object]]:
     """Load exact-T Current-only canonical facts per member.
 
@@ -251,11 +255,24 @@ async def _load_current_only_snapshot_facts(
     have a consumable exact-T snapshot.  Members without one are simply absent
     from the mapping, which downstream maps to ``None`` (unavailable) — never to a
     fallback snapshot from another trade date.
+
+    Slice 4A1R2 — Core lineage lock:
+    The query is additionally locked to the ReviewRun's immutable
+    ``source_core_run_id`` identity
+    (``StockFeatureSnapshot.source_run_id == source_core_run_id`` and
+    ``StockFeatureSnapshotRun.id == source_core_run_id``).  This makes the Review
+    snapshot source lineage-identical to the legacy Board path
+    (``StockFeatureSnapshot.source_run_id == source_run_id``).  Multiple
+    succeeded/published runs may exist for the same ``trade_date``; Review must not
+    silently consume another core run on rerun / resume.  If the row for the
+    specified ``source_core_run_id`` is absent, this returns empty (fail-safe) —
+    never a fallback to another same-day run.
     """
     if not instrument_ids:
         return {}
 
-    # Exact-T only, joined against the run gate (succeeded + published).
+    # Exact-T only, joined against the run gate (succeeded + published), AND locked
+    # to the immutable source_core_run_id identity (Slice 4A1R2).
     stmt = (
         select(
             StockFeatureSnapshot.instrument_id,
@@ -268,6 +285,8 @@ async def _load_current_only_snapshot_facts(
         .where(
             StockFeatureSnapshot.trade_date == trade_date,
             StockFeatureSnapshot.instrument_id.in_(instrument_ids),
+            StockFeatureSnapshot.source_run_id == source_core_run_id,
+            StockFeatureSnapshotRun.id == source_core_run_id,
             StockFeatureSnapshotRun.trade_date == trade_date,
             StockFeatureSnapshotRun.status == _SNAPSHOT_RUN_CONSUMABLE_STATUS,
             StockFeatureSnapshotRun.published_at.isnot(None),
@@ -298,6 +317,33 @@ async def _load_current_only_snapshot_facts(
         if facts:
             out[str(instrument_id)] = facts
     return out
+
+
+async def _load_batch_instrument_active_status(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+) -> dict[str, bool]:
+    """Batch-load ``Instrument.status == "active"`` eligibility (Slice 4A1R2).
+
+    Replicates the legacy Board producer universe gate
+    ``_is_instrument_valid_for_aggregation`` == ``Instrument.status == "active"``
+    EXACTLY — no extra rules (no `.ST` / `.退` / delisted-suffix checks).  Single
+    batch query over the union member set (no N+1).
+
+    The result gates the migrated Board current-state capability universe ONLY;
+    it does NOT change the existing Review price / transition / historical /
+    participation universes.  ``build_member_observation_from_facts`` reads it as
+    the current-only fact ``_BOARD_CURRENT_ELIGIBLE_KEY``.
+
+    Returns ``{str(instrument_id): (status == "active")}`` for all requested ids.
+    """
+    if not instrument_ids:
+        return {}
+    stmt = select(Instrument.id, Instrument.status).where(
+        Instrument.id.in_(instrument_ids)
+    )
+    rows = (await session.execute(stmt)).all()
+    return {str(iid): (status == "active") for iid, status in rows}
 
 
 @dataclass(frozen=True)
@@ -1218,6 +1264,7 @@ async def prepare_current_scope_observations_batch(
     scope_specs: Sequence[ScopeReplaySpec],
     *,
     trade_dates: list[date] | None = None,
+    source_core_run_id: uuid.UUID,
 ) -> dict[str, PreparedScope] | dict[str, list[PreparedScope]]:
     """Batch-prepare current-day (L1 PIT) Canonical Scope Observations — the
     SINGLE current-day preparation owner.
@@ -1243,9 +1290,15 @@ async def prepare_current_scope_observations_batch(
          :func:`build_prepared_scopes_from_union` — the single preparation
          calculation owner.
 
+    ``source_core_run_id`` (Slice 4A1R2) is the immutable ReviewRun input identity.
+    It is threaded into ``_load_current_only_snapshot_facts`` so the Review exact-T
+    snapshot source is lineage-locked to the same core run the Board producer used.
+    The orchestrator passes ``run.source_core_run_id`` from BOTH ``compute_run`` and
+    ``resume_run`` — this layer never re-resolves "the latest publication pointer".
+
     Every input scope yields exactly one ``PreparedScope`` keyed by ``scope_key``.
     A scope whose PIT(T) is unavailable gets the same terminal ``unavailable``
-    ``PreparedScope`` the legacy path produced (empty members, ``pit_status_t`` /
+    The legacy path produced (empty members, ``pit_status_t`` /
     ``pit_status_t1`` / diagnostics preserved) — never an exception, never a fake
     empty payload.  ``member_ids`` on the input ``ScopeReplaySpec`` is ignored:
     PIT membership is always resolved here (the caller cannot pre-fix it).
@@ -1397,8 +1450,22 @@ async def prepare_current_scope_observations_batch(
     # multi-element list would feed a list into a scalar ``Column == date``
     # comparison and fail at SQL compile/execute time under the real PG adapter.
     current_only_facts = await _load_current_only_snapshot_facts(
-        session, union_members, trade_date
+        session,
+        union_members,
+        trade_date,
+        source_core_run_id=source_core_run_id,
     )
+    # Slice 4A1R2 — Board valid_for_market_aggregation eligibility
+    # (``Instrument.status == "active"``), single batch query.  Carried into the
+    # current-only facts so ``build_member_observation_from_facts`` can gate the
+    # migrated Board capability universe exactly like the legacy Board flat_list
+    # pre-filter.  Affects ONLY the migrated Board capabilities, not other Review
+    # universes.
+    active_status = await _load_batch_instrument_active_status(
+        session, union_members
+    )
+    for iid, facts in current_only_facts.items():
+        facts[_BOARD_CURRENT_ELIGIBLE_KEY] = bool(active_status.get(iid, False))
     coverage_by_date = await _load_batch_backfill_event_coverage(
         session, union_members, effective_dates
     )

@@ -64,6 +64,21 @@ from app.services.volume_context import (
 # for that member (``board_current_ready`` False), never History-derived.
 _BOARD_CURRENT_FLAT_KEY = "board_first_pyramid_flat"
 
+# Slice 4A1R2 — Board valid_for_market_aggregation eligibility (SINGLE OWNER).
+#
+# The legacy Board producer gates its ``flat_list`` through
+# ``_is_instrument_valid_for_aggregation`` == ``Instrument.status == "active"``
+# BEFORE building the ready/missing universe and all current-state aggregation.
+# The migrated Review Board capabilities MUST apply the SAME universe gate, so the
+# eligibility is carried (single query, no N+1) under this key inside
+# ``RawMemberFacts.current_only`` by ``_load_current_only_snapshot_facts`` /
+# ``_load_batch_instrument_active_status``.
+#
+# This gate affects ONLY the migrated Board current-state capabilities. It does
+# NOT change the existing Review price / transition / historical / participation
+# universes.
+_BOARD_CURRENT_ELIGIBLE_KEY = "board_current_eligible"
+
 
 def _finite(value: float | None) -> float | None:
     if value is None:
@@ -263,10 +278,22 @@ def build_member_observation_from_facts(
     _board_adapter = (
         FirstPyramidSemanticAdapter(_board_flat) if _board_flat is not None else None
     )
+    # BOARD ELIGIBILITY GATE (SSOT, 4A1R2) — exact replication of the Board producer
+    # ``_is_instrument_valid_for_aggregation`` == ``Instrument.status == "active"``.
+    # Carried as a current-only fact (single batch query, no N+1).  A member that
+    # is not active is excluded from EVERY migrated Board capability universe
+    # (numerator and denominator), matching the legacy Board flat_list gate.
+    _board_eligible = bool(current_only.get(_BOARD_CURRENT_ELIGIBLE_KEY, False))
     # BOARD READY GATE (SSOT) — exact replication of the Board producer entry gate
     # ``if semantics.trend is None: missing += 1; continue``.  Not board-ready ->
     # the member contributes to NO migrated capability (numerator or denominator).
-    _board_ready = _board_adapter is not None and _board_adapter.trend is not None
+    # 4A1R2: ready is gated on eligible first, mirroring
+    # ``valid_member_ids = [i for i in member_ids if valid(i)]`` then the trend gate.
+    _board_ready = (
+        _board_eligible
+        and _board_adapter is not None
+        and _board_adapter.trend is not None
+    )
     return MemberObservation(
         member_id=raw.member_id,
         # candidate = close(T) available, independent of return availability.
@@ -353,6 +380,7 @@ def build_member_observation_from_facts(
         # Review does NOT re-derive any of these; it only consumes prepared facts.
         # ------------------------------------------------------------------
         # Board ready gate (SSOT): adapter.trend is not None.
+        board_current_eligible=_board_eligible,
         board_current_ready=_board_ready,
         # trend_strength = median per-bar trend strength (board fp_trend_strength).
         trend_strength=_finite(_board_flat.get("fp_trend_strength"))

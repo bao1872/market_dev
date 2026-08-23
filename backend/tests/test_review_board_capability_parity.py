@@ -40,6 +40,7 @@ from pathlib import Path
 from app.domain.review.scope_observation import compute_scope_observation
 from app.services.board_analysis_service import compute_board_payload
 from app.services.observation_prep import (
+    _BOARD_CURRENT_ELIGIBLE_KEY,
     _BOARD_CURRENT_FLAT_KEY,
     RawMemberFacts,
     build_member_observation,
@@ -249,18 +250,22 @@ def _history_flat_subset(flat):
     }
 
 
-def _build_review_members(flats, *, history_flats=None):
+def _build_review_members(flats, *, history_flats=None, eligible=None):
     """Build Review MemberObservations the way real runtime does.
 
     ``flat_t`` gets the History projection (partial), and the exact-T Board flat
-    is delivered through ``current_only[_BOARD_CURRENT_FLAT_KEY]`` exactly as
-    ``_load_current_only_snapshot_facts`` does in production.
+    is delivered through ``current_only[_BOARD_CURRENT_FLAT_KEY]`` exactly as the
+    production loader does.  The Board valid_for_market_aggregation eligibility
+    gate (``Instrument.status == "active"``) is carried under
+    ``current_only[_BOARD_CURRENT_ELIGIBLE_KEY]``; when ``eligible`` is None all
+    members are eligible, otherwise it is a per-member bool list.
     """
     member_list = []
     for i, f in enumerate(flats):
         hist = (
             history_flats[i] if history_flats is not None else _history_flat_subset(f)
         )
+        is_eligible = True if eligible is None else bool(eligible[i])
         raw = RawMemberFacts(
             member_id=f"M{i:03d}",
             flat_t=hist,
@@ -272,7 +277,10 @@ def _build_review_members(flats, *, history_flats=None):
             flat_t1=None,
             close_t1=None,
             continuous={},
-            current_only={_BOARD_CURRENT_FLAT_KEY: f},
+            current_only={
+                _BOARD_CURRENT_ELIGIBLE_KEY: is_eligible,
+                _BOARD_CURRENT_FLAT_KEY: f,
+            },
         )
         member_list.append(build_member_observation(raw))
     return member_list
@@ -667,3 +675,41 @@ def test_review_production_code_does_not_import_board_service():
     assert not offenders, "Review production code imports BoardAnalysisService: " + str(
         offenders
     )
+
+
+# --------------------------------------------------------------------------- #
+# Slice 4A1R2 — Board valid_for_market_aggregation eligibility gate
+# --------------------------------------------------------------------------- #
+def test_board_eligibility_gate_excludes_non_active_member():
+    """A PIT member with a full snapshot + trend but ``Instrument.status != active``
+    must be excluded from EVERY migrated Board capability universe (numerator AND
+    denominator), exactly like the legacy Board ``valid_for_market_aggregation``
+    pre-filter.  The Board oracle (``compute_board_payload``) only sees
+    already-filtered ``flats`` so it does NOT replicate this gate — the parity
+    test must therefore assert the Review-side universe shrink directly.
+    """
+    flats = _members()  # all have trend present
+    # Member 0 is NOT active -> must be dropped from the migrated capability universe.
+    member_list = _build_review_members(flats, eligible=[False] + [True] * (len(flats) - 1))
+    review = _review_payload(member_list)
+
+    # Board oracle baseline (unfiltered) for comparison.
+    board = _board_payload(flats)
+
+    # Review ready count must be one less than the unfiltered Board baseline.
+    assert review["trend"]["board_ready_member_count"] == board["ready_members"] - 1
+    # Denominator for every migrated capability reflects the shrunk universe.
+    assert review["momentum"]["change"]["denominator"] == board["ready_members"] - 1
+
+
+def test_board_eligibility_gate_all_ineligible_yields_empty_universe():
+    """If NO member passes ``Instrument.status == active``, the migrated Board
+    capability universe is empty (zero ready, zero denominators) — never a
+    fallback to the unfiltered PIT set.
+    """
+    flats = _members()
+    member_list = _build_review_members(flats, eligible=[False] * len(flats))
+    review = _review_payload(member_list)
+    assert review["trend"]["board_ready_member_count"] == 0
+    assert review["momentum"]["change"]["denominator"] == 0
+    assert review["participation"]["volume"]["badge"]["unknown_count"] == 0
