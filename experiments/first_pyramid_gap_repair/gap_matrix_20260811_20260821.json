@@ -1,0 +1,397 @@
+{
+  "audit": "First Pyramid Gap Repair — Round 1 / Read-Only Gap Matrix",
+  "generated_at_utc": "2026-08-23T01:04:09.080744Z",
+  "query_window": {
+    "start_exclusive": "2026-08-10",
+    "end_inclusive": "2026-08-21",
+    "is_trading_day": true
+  },
+  "runtime_context": {
+    "production_runtime_sha": "bc00137aafda06a01ddb3d21d8fd050d9b8a31ad",
+    "local_evidence_commit": "e1c363554ea41c6e252de4687270458ed880acdf",
+    "current_database": "bz_stock",
+    "alembic_revision": "091_observation_run_lineage",
+    "sha_consistency": "server_repo_head = live_RUNTIME_SHA = api_runtime_git_sha = bc00137a (PASS)",
+    "note": "evidence-only commit e1c36355 != production runtime bc00137a is EXPECTED; no redeploy"
+  },
+  "canonical_history_run": {
+    "run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+    "status": "partial",
+    "scope": "all_a_share",
+    "algorithm_version": "1.0.0-core-split",
+    "eligible_count": 5293,
+    "succeeded_count": 5283,
+    "failed_count": 0,
+    "skipped_count": 10,
+    "data_max_trade_date": "2026-08-10",
+    "note": "STABLE_A_READY canonical run; daily_state trade_date range 2025-02-12..2026-08-10; no daily advance after 2026-08-10"
+  },
+  "stock_core_definition": {
+    "publication_table": "factor_publications",
+    "filter": "publication_kind='stock_core' AND superseded_by IS NULL",
+    "pointer": "factor_publications.data_run_id -> stock_feature_snapshot_runs.id",
+    "snapshot_rows": "stock_feature_snapshots WHERE source_run_id = data_run_id",
+    "note": "snapshot_run.snapshot_count/failed_count/skipped_count columns are NULL in DB; actual truth = stock_feature_snapshots row count"
+  },
+  "history_definition": {
+    "daily_state_table": "first_pyramid_history_daily_state",
+    "daily_state_filter": "source_history_run_id = canonical_run_id AND trade_date = date",
+    "events_table": "first_pyramid_history_events",
+    "events_filter": "instrument_id IN (canonical run members) AND event_time::date = date",
+    "note": "events table has no source_history_run_id column; tied to canonical run via membership + event_time"
+  },
+  "legacy_backfill_script_disabled": {
+    "path": "backend/scripts/feature_snapshot_backfill.py",
+    "reason_not_usable": [
+      "legacy compute_feature_snapshot_for_date path",
+      "default schema_version=1 while current production schema_version=6",
+      "does NOT represent current Review-Core compute-once main chain",
+      "must NOT use legacy publish_stock_core()"
+    ],
+    "action": "NOT EXECUTED (read-only round)"
+  },
+  "summary": {
+    "trading_days_in_window": 9,
+    "stock_core_complete": 9,
+    "history_missing": 9,
+    "both_complete": 0,
+    "classification_breakdown": {
+      "CORE_COMPLETE_HISTORY_MISSING": 9
+    }
+  },
+  "gap_matrix": [
+    {
+      "trade_date": "2026-08-11",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "ce488bb3-df5f-4a8a-a6f0-a75af99e9378",
+        "publication_published_at": "2026-08-11 18:27:39.593033+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-12",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "a3d49a74-35cd-46c3-94de-d167d0ce13ac",
+        "publication_published_at": "2026-08-12 18:32:50.675112+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-13",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "51b4aaa4-666c-4e36-89a6-7d9ad1cb99d2",
+        "publication_published_at": "2026-08-13 18:33:46.644453+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-14",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "6a01777d-d7ab-494e-8c76-af5bd1ddd440",
+        "publication_published_at": "2026-08-14 18:38:34.989235+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-17",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "2b7c5877-7d36-4396-84c3-7186dc911073",
+        "publication_published_at": "2026-08-17 18:35:01.377892+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-18",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "d6bf5163-fa2c-4b92-bc46-4f0588ba4234",
+        "publication_published_at": "2026-08-18 18:33:22.140774+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-19",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "34e0584a-e0c5-4afe-aefa-cf969aed653a",
+        "publication_published_at": "2026-08-19 18:21:29.212121+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-20",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "c66fdc62-3466-4bb9-8e4f-1099706210d3",
+        "publication_published_at": "2026-08-20 18:20:26.896102+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    },
+    {
+      "trade_date": "2026-08-21",
+      "is_trading_day": true,
+      "bars_daily_instrument_count": 5286,
+      "stock_core": {
+        "current_publication_exists": true,
+        "publication_data_run_id": "045d3fdb-f8ad-47b8-9006-c6b6bf9073a4",
+        "publication_published_at": "2026-08-21 18:18:46.407866+08",
+        "publication_scope_type": "market",
+        "snapshot_run_status": "succeeded",
+        "snapshot_run_scope": "market",
+        "snapshot_run_expected_count": 5293,
+        "snapshot_run_snapshot_count": null,
+        "snapshot_run_failed_count": null,
+        "snapshot_run_skipped_count": null,
+        "actual_snapshot_rows_for_source_run": 5293,
+        "classification": "COMPLETE"
+      },
+      "history": {
+        "canonical_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813",
+        "canonical_history_run_status": "partial",
+        "canonical_history_eligible_count": 5293,
+        "canonical_history_succeeded_count": 5283,
+        "canonical_history_failed_count": 0,
+        "canonical_history_skipped_count": 10,
+        "history_daily_state_count_for_date": 0,
+        "history_event_count_for_date": 0,
+        "classification": "HISTORY_MISSING",
+        "daily_state_present": false,
+        "event_present": false
+      },
+      "classification": "CORE_COMPLETE_HISTORY_MISSING",
+      "notes": [
+        "stock_core published & 5293 snapshot rows present; canonical history daily_state/events for this date = 0 (canonical run stopped at 2026-08-10)"
+      ]
+    }
+  ],
+  "read_only_constraints": {
+    "no_bz_stock_writes": true,
+    "no_backfill": true,
+    "no_scheduler_trigger": true,
+    "no_afterclose_trigger": true,
+    "no_publication": true,
+    "no_deploy": true,
+    "no_algorithm_code_change": true
+  }
+}
