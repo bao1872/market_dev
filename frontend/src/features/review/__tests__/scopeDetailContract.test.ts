@@ -80,15 +80,35 @@ function valuePoint(trade_date: string, value: number | null, status = 'ready'):
 }
 
 /** Persistence fact-object fixture — 镜像 backend persistence 输出
- *  PERSISTENCE_MINIMUM_VALID_COUNT = 15 */
-function persistencePoint(trade_date: string, coverage: number | null, status = 'ready'): ScopeDynamicsPersistencePoint {
-  const validCount = coverage !== null ? Math.round(coverage * 20) : null
-  const insufficient = validCount !== null && validCount < 15
+ *  PERSISTENCE_MINIMUM_VALID_COUNT = 15
+ *  candidate_count = 当前已存在的交易观察数（up to 20）
+ *  valid_count = 有效 position 数
+ *  coverage = valid_count / 20
+ *  lower/upper counts 基于 position 阈值（lower<=20, upper>=80）
+ *  insufficient_history 时 occupancy = null */
+function persistencePoint(params: {
+  trade_date: string
+  candidate_count: number
+  valid_count: number
+  upper_count: number
+  lower_count: number
+  status: 'ready' | 'insufficient_history' | 'unavailable'
+}): ScopeDynamicsPersistencePoint {
+  const { trade_date, candidate_count, valid_count, upper_count, lower_count, status } = params
+  const coverage = valid_count / 20
+  const isInsufficient = status === 'insufficient_history'
   return {
-    trade_date, window_size: 20, minimum_valid_count: 15, candidate_count: 20,
-    valid_count: validCount,
-    coverage, upper_count: null, lower_count: null, upper_occupancy: null, lower_occupancy: null,
-    status: insufficient ? 'insufficient_history' : status,
+    trade_date,
+    window_size: 20,
+    minimum_valid_count: 15,
+    candidate_count,
+    valid_count,
+    coverage,
+    upper_count,
+    lower_count,
+    upper_occupancy: isInsufficient ? null : null,
+    lower_occupancy: isInsufficient ? null : null,
+    status,
   }
 }
 
@@ -114,18 +134,41 @@ function makeDynamicsLayer({
   }
 }
 
-/** 生成 Dynamics 完整 fact-object 序列（3 天） */
+/** 生成 Dynamics 完整 fact-object 序列（3 天）
+ *  Position 值: [10, 20, 30]
+ *  Persistence 镜像 early-window:
+ *    day1: candidate=1, valid=1, lower=1(10≤20), upper=0, insufficient
+ *    day2: candidate=2, valid=2, lower=2(10,20≤20), upper=0, insufficient
+ *    day3: candidate=3, valid=3, lower=2(10,20≤20), upper=0, insufficient */
 function makeFullDynamicsSeries(dates: string[]): ScopeHistoricalDynamicsSeries {
   // 使用预计算值避免浮点精度问题（0.1*3 !== 0.3 在 IEEE 754 中）
   const accelValues = [0.1, 0.2, 0.3]
+  const positions = dates.map((_d, i) => (i + 1) * 10) // [10, 20, 30]
+  const persistence = dates.map((d, i) => {
+    // 每日累计观察
+    const candidate = i + 1
+    const valid = i + 1
+    // lower: position <= 20 → day1:10, day2:10+20, day3:10+20
+    const lower = positions.slice(0, i + 1).filter((p) => p <= 20).length
+    // upper: position >= 80 → none in this 3-day fixture
+    const upper = positions.slice(0, i + 1).filter((p) => p >= 80).length
+    return persistencePoint({
+      trade_date: d,
+      candidate_count: candidate,
+      valid_count: valid,
+      upper_count: upper,
+      lower_count: lower,
+      status: 'insufficient_history',
+    })
+  })
   return {
-    position: dates.map((d, i) => positionPoint(d, (i + 1) * 10)),
+    position: dates.map((d, i) => positionPoint(d, positions[i])),
     ema5: dates.map((d, i) => valuePoint(d, (i + 1) * 9)),
     ema20: dates.map((d, i) => valuePoint(d, (i + 1) * 8)),
     velocity: dates.map((d, i) => valuePoint(d, i + 1)),
     signal: dates.map((d) => valuePoint(d, null)),
     acceleration: dates.map((d, i) => valuePoint(d, accelValues[i])),
-    persistence: dates.map((d, i) => persistencePoint(d, Number((0.3 * (i + 1)).toFixed(15)))),
+    persistence,
   }
 }
 
@@ -187,20 +230,32 @@ function makeConcentrationGroup() {
 }
 
 /** 生成 Reconciliation（skipped: string[], checks: Record<string, Check>）
- *  镜像 backend 真实 keys/kind/resolved vocabulary */
+ *  严格镜像 backend producer:
+ *    direction/capital_tilt/concentration_price/concentration_amount → kind: 'sum'
+ *    breadth → kind: 'counts_and_ratios'
+ *    leadership → kind: 'set'
+ *    violation_count = count(check.pass === false)
+ *    skipped = sorted keys where resolved === 'skipped' */
 function makeReconciliation() {
+  const checks = {
+    direction: { pass: true as const, resolved: 'matched' as const, kind: 'sum' as const },
+    capital_tilt: { pass: true as const, resolved: 'both_unavailable' as const, kind: 'sum' as const },
+    concentration_price: { pass: true as const, resolved: 'matched' as const, kind: 'sum' as const },
+    concentration_amount: { pass: false as const, resolved: 'mismatch' as const, kind: 'sum' as const },
+    breadth: { pass: true as const, resolved: 'matched' as const, kind: 'counts_and_ratios' as const },
+    leadership: { pass: null, resolved: 'skipped' as const, kind: 'set' as const },
+  }
+  // 严格镜像 backend 计算逻辑
+  const violationCount = Object.values(checks).filter((c) => c.pass === false).length
+  const skipped = Object.entries(checks)
+    .filter(([, c]) => c.resolved === 'skipped')
+    .map(([k]) => k)
+    .sort()
   return {
-    violation_count: 2,
-    skipped: ['leadership', 'concentration_amount'],
+    violation_count: violationCount,
+    skipped,
     tolerance: 1e-6,
-    checks: {
-      direction: { pass: true, resolved: 'matched', kind: 'sum' },
-      capital_tilt: { pass: true, resolved: 'matched', kind: 'sum' },
-      concentration_price: { pass: null, resolved: 'skipped', kind: 'counts_and_ratios' },
-      concentration_amount: { pass: false, resolved: 'mismatch', kind: 'counts_and_ratios' },
-      breadth: { pass: true, resolved: 'matched', kind: 'sum' },
-      leadership: { pass: null, resolved: 'skipped', kind: 'set' },
-    },
+    checks,
   }
 }
 
@@ -593,9 +648,9 @@ test('R1. Reconciliation: skipped 保持 string[]，checks 转为带 key 的数�
   })
   const a = parseAttribution(comp)
   assert.ok(a.reconciliation)
-  // skipped 必须是 string[]（不是单个 string），镜像 backend keys
-  assert.deepEqual(a.reconciliation?.skipped, ['leadership', 'concentration_amount'])
-  assert.equal(a.reconciliation?.skipped.length, 2)
+  // skipped 必须是 string[]，镜像 backend — 只有 leadership resolved='skipped'
+  assert.deepEqual(a.reconciliation?.skipped, ['leadership'])
+  assert.equal(a.reconciliation?.skipped.length, 1)
   // checks 转为带 key 的数组 — 6 条（direction/capital_tilt/concentration_price/concentration_amount/breadth/leadership）
   assert.equal(a.reconciliation?.checks.length, 6)
   // check identity 来自 map key（按 Object.entries 插入顺序）
@@ -603,13 +658,13 @@ test('R1. Reconciliation: skipped 保持 string[]，checks 转为带 key 的数�
   assert.equal(a.reconciliation?.checks[0]?.kind, 'sum')
   assert.equal(a.reconciliation?.checks[0]?.pass, true)
   assert.equal(a.reconciliation?.checks[0]?.resolved, 'matched')
-  // concentration_amount mismatch（pass=false）
+  // concentration_amount mismatch（pass=false, kind=sum）
   const mismatch = a.reconciliation?.checks.find((c) => c.key === 'concentration_amount')
   assert.ok(mismatch)
   assert.equal(mismatch?.pass, false)
   assert.equal(mismatch?.resolved, 'mismatch')
-  assert.equal(mismatch?.kind, 'counts_and_ratios')
-  // leadership skipped（pass=null, resolved=skipped）
+  assert.equal(mismatch?.kind, 'sum')
+  // leadership skipped（pass=null, resolved=skipped, kind=set）
   const skip = a.reconciliation?.checks.find((c) => c.key === 'leadership')
   assert.ok(skip)
   assert.equal(skip?.pass, null)
@@ -865,7 +920,7 @@ test('REG-I. Reconciliation checks object 转为带 key 的数组（真实 backe
   assert.ok(keys.includes('leadership'), 'leadership check 必须存在')
 })
 
-test('REG-J. skipped string[] 保持数组语义', () => {
+test('REG-J. skipped string[] 保持数组语义，且与 resolved=skipped 一致', () => {
   const comp = makeComposition({
     member_attribution: {
       scope: null, direction: null, capital_tilt: null, breadth: null, concentration: null, leadership: null,
@@ -875,7 +930,9 @@ test('REG-J. skipped string[] 保持数组语义', () => {
   })
   const a = parseAttribution(comp)
   assert.ok(Array.isArray(a.reconciliation?.skipped), 'skipped 必须是 string[]')
-  assert.equal(a.reconciliation?.skipped.length, 2)
+  // 只有 leadership resolved='skipped' → 长度 1
+  assert.equal(a.reconciliation?.skipped.length, 1, 'skipped 长度必须等于 resolved=skipped 的 key 数')
+  assert.equal(a.reconciliation?.skipped[0], 'leadership', 'skipped 必须包含 leadership')
 })
 
 test('REG-K. Internal Breadth null 绝不以 ?? 0 伪装（源码契约）', () => {
@@ -1052,34 +1109,44 @@ test('CLOSURE-H. CSS module classes 存在于 review.module.scss', () => {
   }
 })
 
-test('CLOSURE-I. Persistence fixture 使用 minimum_valid_count=15', () => {
-  const src = read('__tests__/scopeDetailContract.test.ts')
-  assert.match(src, /minimum_valid_count:\s*15/, 'Persistence fixture 必须使用 minimum_valid_count=15')
+test('CLOSURE-I. Persistence fixture 使用 minimum_valid_count=15 + 真实 early-window counts', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  const p0 = r.persistence[0]!
+  const p1 = r.persistence[1]!
+  const p2 = r.persistence[2]!
+  // minimum_valid_count = 15
+  assert.equal(p0.minimum_valid_count, 15, 'minimum_valid_count 必须为 15')
+  assert.equal(p1.minimum_valid_count, 15)
+  assert.equal(p2.minimum_valid_count, 15)
+  // candidate_count 真实 early-window: 1, 2, 3
+  assert.equal(p0.candidate_count, 1, 'day1 candidate_count=1')
+  assert.equal(p1.candidate_count, 2, 'day2 candidate_count=2')
+  assert.equal(p2.candidate_count, 3, 'day3 candidate_count=3')
 })
 
-test('CLOSURE-J. Reconciliation fixture 使用真实 backend keys', () => {
+test('CLOSURE-J. Reconciliation fixture 内部一致性：kind/violation_count/skipped', () => {
   const r = makeReconciliation()
   // 必须使用真实 backend keys
-  const keys = Object.keys(r.checks)
-  assert.ok(keys.includes('direction'), 'Reconciliation fixture 必须包含 direction key')
-  assert.ok(keys.includes('capital_tilt'), 'Reconciliation fixture 必须包含 capital_tilt key')
-  assert.ok(keys.includes('concentration_price'), 'Reconciliation fixture 必须包含 concentration_price key')
-  assert.ok(keys.includes('concentration_amount'), 'Reconciliation fixture 必须包含 concentration_amount key')
-  assert.ok(keys.includes('breadth'), 'Reconciliation fixture 必须包含 breadth key')
-  assert.ok(keys.includes('leadership'), 'Reconciliation fixture 必须包含 leadership key')
-  // 不得有旧的虚构 key
-  assert.ok(!keys.some(k => k.includes('_sum')), 'Reconciliation fixture 不得使用虚构 key (_sum)')
-  // kind 必须是真实值
-  const kinds = new Set(Object.values(r.checks).map(c => c.kind))
-  for (const k of kinds) {
-    assert.ok(['sum', 'counts_and_ratios', 'set'].includes(k), `kind ${k} 必须是真实 backend kind`)
-  }
-  // resolved 必须是真实值
-  const resolvedVals = new Set(Object.values(r.checks).map(c => c.resolved))
-  for (const rv of resolvedVals) {
-    assert.ok(['matched', 'mismatch', 'both_unavailable', 'skipped'].includes(rv),
-      `resolved ${rv} 必须是真实 backend resolved`)
-  }
+  const keys = Object.keys(r.checks).sort()
+  assert.deepEqual(keys, ['breadth', 'capital_tilt', 'concentration_amount', 'concentration_price', 'direction', 'leadership'])
+  // direction/capital/concentration kinds == 'sum'
+  assert.equal(r.checks.direction.kind, 'sum')
+  assert.equal(r.checks.capital_tilt.kind, 'sum')
+  assert.equal(r.checks.concentration_price.kind, 'sum')
+  assert.equal(r.checks.concentration_amount.kind, 'sum')
+  // breadth kind == 'counts_and_ratios'
+  assert.equal(r.checks.breadth.kind, 'counts_and_ratios')
+  // leadership kind == 'set'
+  assert.equal(r.checks.leadership.kind, 'set')
+  // violation_count == count(pass === false)
+  const expectedViolations = Object.values(r.checks).filter((c) => c.pass === false).length
+  assert.equal(r.violation_count, expectedViolations, 'violation_count 必须等于 pass===false 的数量')
+  // skipped == sorted resolved==='skipped' keys
+  const expectedSkipped = Object.entries(r.checks)
+    .filter(([, c]) => c.resolved === 'skipped')
+    .map(([k]) => k)
+    .sort()
+  assert.deepEqual(r.skipped, expectedSkipped, 'skipped 必须等于 resolved===skipped 的排序 key')
 })
 
 test('CLOSURE-K. Test-only reviewKeys export 已移除', () => {
@@ -1091,4 +1158,98 @@ test('CLOSURE-K. Test-only reviewKeys export 已移除', () => {
 test('CLOSURE-L. RawFacts 在 Workspace 中不再接收 attr', () => {
   const src = read('ScopeDetailWorkspace.tsx')
   assert.doesNotMatch(src, /ScopeRawFactsPanel.*attr=/, 'Workspace 调用 RawFacts 不得传 attr prop')
+})
+
+// ============================================================
+// 17. Reconciliation producer-fidelity regression
+// ============================================================
+
+test('REC-1. Reconciliation check keys 精确包含 6 个 backend keys', () => {
+  const r = makeReconciliation()
+  const keys = Object.keys(r.checks).sort()
+  assert.deepEqual(keys, ['breadth', 'capital_tilt', 'concentration_amount', 'concentration_price', 'direction', 'leadership'])
+})
+
+test('REC-2. direction/capital/concentration 所有 kind 必须为 sum', () => {
+  const r = makeReconciliation()
+  assert.equal(r.checks.direction.kind, 'sum')
+  assert.equal(r.checks.capital_tilt.kind, 'sum')
+  assert.equal(r.checks.concentration_price.kind, 'sum')
+  assert.equal(r.checks.concentration_amount.kind, 'sum')
+})
+
+test('REC-3. breadth kind 必须为 counts_and_ratios', () => {
+  const r = makeReconciliation()
+  assert.equal(r.checks.breadth.kind, 'counts_and_ratios')
+})
+
+test('REC-4. leadership kind 必须为 set', () => {
+  const r = makeReconciliation()
+  assert.equal(r.checks.leadership.kind, 'set')
+})
+
+test('REC-5. violation_count 等于 pass===false 的数量', () => {
+  const r = makeReconciliation()
+  const expected = Object.values(r.checks).filter((c) => c.pass === false).length
+  assert.equal(r.violation_count, expected)
+  // 当前 fixture 只有 concentration_amount.pass=false → 预期 1
+  assert.equal(r.violation_count, 1)
+})
+
+test('REC-6. skipped 等于 resolved===skipped 的排序 key 列表', () => {
+  const r = makeReconciliation()
+  const expected = Object.entries(r.checks)
+    .filter(([, c]) => c.resolved === 'skipped')
+    .map(([k]) => k)
+    .sort()
+  assert.deepEqual(r.skipped, expected)
+  // 当前 fixture 只有 leadership 被 skip
+  assert.deepEqual(r.skipped, ['leadership'])
+})
+
+// ============================================================
+// 18. Persistence producer-fidelity regression
+// ============================================================
+
+test('PERSIST-1. 3-day candidate_count 递增 [1, 2, 3]', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  assert.equal(r.persistence[0]!.candidate_count, 1)
+  assert.equal(r.persistence[1]!.candidate_count, 2)
+  assert.equal(r.persistence[2]!.candidate_count, 3)
+})
+
+test('PERSIST-2. 3-day valid_count 递增 [1, 2, 3]', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  assert.equal(r.persistence[0]!.valid_count, 1)
+  assert.equal(r.persistence[1]!.valid_count, 2)
+  assert.equal(r.persistence[2]!.valid_count, 3)
+})
+
+test('PERSIST-3. coverage = valid_count / 20', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  assert.equal(r.persistence[0]!.coverage, 1 / 20)
+  assert.equal(r.persistence[1]!.coverage, 2 / 20)
+  assert.equal(r.persistence[2]!.coverage, 3 / 20)
+})
+
+test('PERSIST-4. 所有 persistence status 为 insufficient_history（valid < 15）', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  for (const p of r.persistence) {
+    assert.equal(p!.status, 'insufficient_history')
+  }
+})
+
+test('PERSIST-5. minimum_valid_count = 15', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  for (const p of r.persistence) {
+    assert.equal(p!.minimum_valid_count, 15)
+  }
+})
+
+test('PERSIST-6. insufficient_history 时 occupancy 保持 null', () => {
+  const r = makeFullDynamicsSeries(['2026-08-19', '2026-08-20', '2026-08-21'])
+  for (const p of r.persistence) {
+    assert.equal(p!.upper_occupancy, null, 'upper_occupancy 在 insufficient_history 时为 null')
+    assert.equal(p!.lower_occupancy, null, 'lower_occupancy 在 insufficient_history 时为 null')
+  }
 })
