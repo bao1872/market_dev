@@ -1,50 +1,52 @@
 {
   "meta": {
-    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1 (DESIGN/AUDIT ONLY)",
-    "generated_from_head": "beffda00f83025bc038bbfd33a4e17e32729008f",
-    "current_state": "Review scope discovery 当前对 industry/concept 实际不读 BoardAnalysisSnapshot；resolve_scope_members 直接查 MarketBoard + resolve_board_membership_at (PIT membership)。source_board_run_id 仅作为 lineage 身份附加。Board runtime 删除后，discovery 应完全基于 MarketBoard + PIT membership，不再经 BoardAnalysisRun。"
+    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1R (Source-Truth Correction)",
+    "generated_from_head": "d6ad65a0f83025bc038bbfd33a4e17e32729008f",
+    "current_state_corrected": "MUST split into two concepts: (A) Scope ENUMERATION — which scopes exist — CURRENTLY depends on BoardAnalysisSnapshot via _list_board_scopes_by_hierarchy (SELECT BoardAnalysisSnapshot WHERE trade_date=T AND board_analysis_run_id=source_board_run_id). (B) Scope MEMBERSHIP RESOLUTION — who is in each scope — uses MarketBoard + resolve_board_membership_at(T) (already PIT, independent of Board analytics). The previous Slice 1 misread (B) as (A)."
   },
-  "current_scope_enumerate_owner": {
-    "industry_l1_l2_l3": "discover_pit_available_boards (MarketBoard, where scope_type in industry)",
-    "concept": "discover_pit_available_boards (MarketBoard, where scope_type = concept)",
-    "note": "当前已直接枚举 MarketBoard，不依赖 BoardAnalytics run。Board runtime 删除不影响此路径。"
+  "scope_enumeration_current": {
+    "owner": "Board runtime (BoardAnalysisSnapshot)",
+    "mechanism": "review_orchestrator._list_board_scopes_by_hierarchy(trade_date, source_board_run_id) → SELECT BoardAnalysisSnapshot WHERE trade_date=T AND board_analysis_run_id=source_board_run_id",
+    "covers": ["industry_l1", "industry_l2", "industry_l3", "concept"],
+    "dependency": "BoardAnalysisRun must exist AND be published as market_aggregation pointer (data_run_id = BoardAnalysisRun.id)"
+  },
+  "scope_membership_resolution_current": {
+    "owner": "Review scope service",
+    "mechanism": "resolve_scope_members → discover_pit_available_boards (MarketBoard) + resolve_board_membership_at(T) (PIT membership)",
+    "dependency": "MarketBoard taxonomy + PIT membership service — NOT BoardAnalysisSnapshot analytics",
+    "note": "This is already Board-analytics-independent. Deleting Board runtime does NOT break membership resolution."
   },
   "target_design": {
     "scope_enumeration_owner": {
-      "responsibility": "列出 industry_l1/l2/l3/concept scope",
-      "implementation": "MarketBoard table (taxonomy) — KEEP",
-      "change_required": "NONE — 已不依赖 Board runtime"
+      "responsibility": "list industry_l1/l2/l3/concept scopes",
+      "target_implementation": "MarketBoard / taxonomy + PIT-available scope registry (REPLACES BoardAnalysisSnapshot enumeration)",
+      "change_required": "YES — this is the Slice 2 first cut: enumerate from MarketBoard taxonomy, not BoardAnalysisSnapshot",
+      "parity_required": "old vs new discovery exact parity on: scope_type, scope_key, scope_name, taxonomy_version, taxonomy_compatibility_key, membership_version, scope count"
     },
     "pit_membership": {
-      "guarantee": "membership(T) via resolve_board_membership_at / PIT membership service",
-      "change_required": "NONE — 当前已用 PIT membership，不回填历史",
-      "note": "需确认 resolve_board_membership_at 的 PIT(T) 语义无回归（已在 review_scope_service 核验）"
+      "guarantee": "membership(T) via resolve_board_membership_at / PIT membership service (already PIT, no historical backfill)",
+      "change_required": "NONE"
     },
     "batch_performance": {
       "forbidden_design": "N boards × per-board membership SQL (N+1)",
-      "required_design": "batch membership owner — 单批加载 T 日所有 in-scope board 的 PIT membership",
-      "status": "DESIGN ONLY — Slice 1 不实现；若现有 membership service 有 N+1 风险，Slice 2 需引入 batch owner",
-      "note": "当前 discover_pit_available_boards + resolve_board_membership_at 的实际批量行为需在 Slice 2 实测确认，不在本轮实现"
+      "required_design": "batch membership owner — single batch load T-day PIT membership for all in-scope boards",
+      "status": "DESIGN ONLY — Slice 1R does not implement; if current membership service has N+1 risk, Slice 2 introduces batch owner"
     },
     "lineage_preservation": {
-      "must_keep": [
-        "taxonomy_version",
-        "taxonomy_compatibility_key",
-        "membership_version"
-      ],
-      "reason": "删 Board runtime 不得删除 lineage。ScopeDefinition 仍需保留 taxonomy/membership 版本以追溯 PIT(T)",
+      "must_keep": ["taxonomy_version", "taxonomy_compatibility_key", "membership_version"],
+      "reason": "Deleting Board runtime must NOT delete lineage. ScopeDefinition still needs taxonomy/membership version to trace PIT(T).",
       "constraint": "C4 from source_board_run_dependency.json"
     }
   },
   "slice2_first_cut": {
-    "action": "让 Review Scope Discovery 脱离 BoardAnalysisSnapshot / BoardAnalysisRun，保持相同 scope universe + PIT lineage",
+    "action": "Replace scope enumeration source from BoardAnalysisSnapshot to MarketBoard/taxonomy + PIT-available scope registry; keep membership resolution unchanged.",
     "how": [
-      "1. review_orchestrator._list_board_scopes_by_hierarchy 改为直接枚举 MarketBoard (不经 source_board_run_id)",
-      "2. create_run unique constraint 移除 source_board_run_id，改为 (trade_date, source_core_run_id, taxonomy_version, membership_version, algo, filter)",
-      "3. ScopeDefinition.source_board_snapshot_id 设为永久 None / 后续删除 column",
-      "4. market_aggregation pointer 身份改为 taxonomy+membership identity (DEFER schema)",
-      "5. after_close 编排移除 board stage，直接 stock_core → review"
+      "1. review_orchestrator._list_board_scopes_by_hierarchy → enumerate from MarketBoard (no source_board_run_id)",
+      "2. create_run unique constraint: replace source_board_run_id with (taxonomy_version, membership_version)",
+      "3. ScopeDefinition.source_board_snapshot_id → permanent None / later drop column",
+      "4. market_aggregation pointer identity → taxonomy+membership identity (DEFER schema)",
+      "5. after_close: remove board stage, stock_core → review directly"
     ],
-    "verification": "Slice 2 需证明：scope universe 与 PIT lineage 完全相同（industry/concept 成员集合 == 当前 Board runtime 产出）"
+    "gate_before_review_without_board": "old discovery vs new discovery exact parity on (scope_type, scope_key, scope_name, taxonomy_version, taxonomy_compatibility_key, membership_version, scope count) MUST match before Review can be created/computed without BoardAnalysisRun."
   }
 }

@@ -1,8 +1,9 @@
 {
   "meta": {
-    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1 (DESIGN/AUDIT ONLY)",
-    "generated_from_head": "beffda00f83025bc038bbfd33a4e17e32729008f",
+    "slice": "BOARD-REVIEW-CONSOLIDATION / Slice 1R (Source-Truth Correction)",
+    "generated_from_head": "d6ad65a0f83025bc038bbfd33a4e17e32729008f",
     "principle": "全功能但只有一个 owner：去重但保留全功能。Board 独有能力必须迁入 Review，不得静默删除。",
+    "freshness_correction": "Canonical Review compute_scope_observation top keys are scope/price/trend/structure/momentum/participation/chip — NO freshness layer. Legacy filter_engine/metric_engine freshness is RETIRED from mandatory main chain, so cannot be cited as canonical owner. Board event freshness is BOARD_UNIQUE -> MIGRATE_TO_REVIEW.",
     "target_architecture": {
       "dag": [
         "Daily Bars",
@@ -15,9 +16,9 @@
         "  - Internal Structure (BOS/CHoCH/OB/EQH/EQL events)",
         "  - Leadership (leader/core/peripheral from member contribution)",
         "  - Member Attribution (from Review canonical facts)",
-        "  - Event Freshness (migrated from Board)",
+        "  - Event Freshness (MIGRATED from Board — add freshness layer to Review)",
         "  - Diffusion (derived from Review transition facts)",
-        "  - Technical Structure (technical_state_concentration / dispersion migrated from Board)",
+        "  - Technical Structure (technical_state_concentration / dispersion MIGRATED from Board)",
         "Review publication"
       ],
       "retire_targets": [
@@ -29,98 +30,97 @@
         "PIT Membership service = KEEP",
         "taxonomy_version / membership_version = KEEP"
       ],
-      "slice1_scope": "ONLY define target. Do NOT physically delete tables/columns/publications this slice."
+      "slice1r_scope": "ONLY define target. Do NOT physically delete tables/columns/publications this slice."
     }
   },
   "already_owned_by_review": [
-    "trend distributions (stdev_trend.state_distribution)",
-    "structure state (stdev_trend)",
-    "momentum state (momentum_state)",
-    "volume participation (participation volume/amount)",
-    "structure events BOS/CHoCH/OB/EQH/EQL (internal_structure.events)",
-    "T-1->T transitions (state.transition)",
-    "price/amount concentration (price_concentration / amount_concentration)",
+    "trend distributions (trend.state categorical)",
+    "structure swing/alignment state (structure.swing.state / structure.alignment)",
+    "momentum state (momentum.state / squeeze_state)",
+    "volume participation (participation.volume ratio20/200/percentile20/200/zscore)",
+    "structure events BOS/CHoCH/OB/EQH/EQL (structure.events)",
+    "T-1->T transitions (trend.transition, PIT(T)∩PIT(T-1))",
+    "price/amount concentration (price.amount_concentration)",
     "Review Leadership (leader_set from actual member contribution)",
     "C1 cross-sectional positioning (relative strength peer percentile)",
-    "return dispersion (return_dispersion stdev over price_returns)",
-    "regime_strength / dsa_vwap_dev_pct (scope_observation)"
+    "price return distribution (mean/median/p25/p75/p10/p90)"
   ],
   "migrate_from_board": [
     {
       "feature": "Event Freshness (pyramid_v2.freshness)",
-      "reason": "Review 已有 event freshness (decay_weighted_density + today/last_5d)，但 Board 额外有 last_10d/last_20d 密度窗口。需完整迁入 Review，补齐 10d/20d 窗口。",
+      "reason": "Canonical Review has NO freshness layer. Board computes today/last_5d/10d/20d event counts + by_dimension{trend/structure/momentum/chip}.density + decay_weighted_density. Must migrate into Review as a new freshness layer (Slice 2 defines exact windows/formulas).",
       "disposition": "MIGRATE_TO_REVIEW",
-      "verification_required": "Slice 2 验证 Review freshness == Board freshness (含 10d/20d) bit-equivalent"
+      "verification_required": "Slice 2: add Review freshness layer; parity vs Board freshness (today/5d/10d/20d + by_dimension + decay)."
     },
     {
-      "feature": "Technical Structure: technical_state_concentration (pyramid_v2.concentration)",
-      "reason": "基于 |change_magnitude| (trend_strength magnitude) HHI；Review price/amount concentration 用不同底层变量。回答'趋势强度是否集中'，Review 未覆盖。",
+      "feature": "Technical Structure: technical_state_concentration (pyramid_v2.concentration over |change_magnitude|)",
+      "reason": "Board HHI over trend-strength magnitude; Review price/amount concentration uses different input (abs-price-change share / amount share). Board answers 'is trend-strength concentrated' — Review does not cover this. Preserve as technical_state_concentration.",
       "disposition": "RENAME_AND_MIGRATE",
       "review_field_name": "technical_state_concentration"
     },
     {
-      "feature": "Technical Structure: technical_state_dispersion (pyramid_v2.dispersion)",
-      "reason": "基于 |change_magnitude| std/cv/分位差；Review return_dispersion 用 price_returns stdev。不同底层变量。回答'趋势强度离散度'，Review 未覆盖。",
+      "feature": "Technical Structure: technical_state_dispersion (pyramid_v2.dispersion over |change_magnitude|)",
+      "reason": "Board std/cv over trend-strength magnitude; Review return distribution uses price_returns. Different underlying variable. Preserve as technical_state_dispersion.",
       "disposition": "RENAME_AND_MIGRATE",
       "review_field_name": "technical_state_dispersion"
     },
     {
-      "feature": "concept_extras (pyramid_v2.concept_extras)",
-      "reason": "concept-only tail metrics；若仅是 concept scope 复用则 Review 已覆盖，若有 concept-only 独有定义需保留。",
-      "disposition": "NEEDS_PRODUCT_DECISION",
-      "verification_required": "Slice 2 精确核对 concept_extras 语义"
+      "feature": "structure.avg_active_ob_count (V1)",
+      "reason": "Review canonical v2.3 FORMALLY removed active_ob_count (like Turnover). Board still exposes avg_active_ob_count. Migrate as a distinct retained fact — must not be silently dropped.",
+      "disposition": "MIGRATE_TO_REVIEW",
+      "verification_required": "Slice 2 product decision: re-add active_ob_count to Review vs keep Board-only historical."
     }
   ],
   "derive_from_review": [
     {
       "feature": "Diffusion (pyramid_v2.diffusion)",
-      "reason": "Board diffusion 完全由 state_transitions 派生；Review filter_engine 已从 canonical state.transition 派生 diffusion (D1/D3/D5)。禁止保存第二份 diffusion 事实。",
+      "reason": "Board diffusion fully derived from state_transitions. Review filter_engine derives diffusion from canonical state.transition facts. Prohibit a second stored diffusion fact.",
       "disposition": "DERIVE_FROM_REVIEW_FACTS"
     },
     {
       "feature": "trend_repair / trend_damage display projection",
-      "reason": "可由 Review canonical transition + state facts 推出展示，不存第二份。",
+      "reason": "Derivable from Review canonical transition + state facts; do not store a second copy.",
       "disposition": "DERIVE_FROM_REVIEW_FACTS"
     }
   ],
   "retire_conflicting_definition": [
     {
-      "feature": "Board leader/core/peripheral + confidence (pyramid_v2.leadership)",
-      "reason": "Board 用 change_magnitude vs median + 方向对齐（简单 magnitude 分类）；Review Leadership 用实际成员贡献向量构造 Leader Set + T-1->T migration，是更正式 owner。Board 定义退役，不得双轨并存。",
-      "disposition": "RETIRE (conflicting, Review is canonical owner)"
+      "feature": "Board core/peripheral/confidence/board_direction (pyramid_v2.concept_extras, called for EVERY board)",
+      "reason": "Board uses change_magnitude vs median + board-direction majority; Review Leadership uses actual member contribution vector (Leader Set + T-1→T migration). Review is more formal owner. Board definition retired, no double-track. NOTE: lives in concept_extras, NOT a separate pyramid_v2.leadership key.",
+      "disposition": "RETIRE (conflicting, Review Leadership is canonical owner)"
     },
     {
       "feature": "Board strong/neutral/weak relative-strength label (pyramid_v2.relative_strength.label)",
-      "reason": "Board 用 vs market/parent ratio + label；Review C1 cross-sectional 是相对强度正式 owner (peer percentile rank)。Board label 退役，Review C1 唯一 owner。",
+      "reason": "Board uses vs-market/parent ratio + label; Review C1 cross-sectional is the relative-strength owner (peer percentile rank). Board label retired.",
       "disposition": "RETIRE (conflicting, Review C1 is canonical owner)"
     }
   ],
   "infrastructure_only": [
     {
       "feature": "total_members / ready_members / missing_members / coverage",
-      "reason": "identity/coverage 元数据，非 analytics。Review ScopeDefinition.member_count + readiness 已持有。",
+      "reason": "identity/coverage metadata, not analytics. Review ScopeDefinition.member_count + readiness already holds it.",
       "disposition": "KEEP_INFRASTRUCTURE_ONLY"
     },
     {
       "feature": "taxonomy_version / taxonomy_compatibility_key / membership_version",
-      "reason": "lineage 基础设施，不能被分析层退役误伤。",
+      "reason": "lineage infrastructure; must not be retired by analytics layer.",
       "disposition": "KEEP_INFRASTRUCTURE_ONLY"
     },
     {
       "feature": "MarketBoard (taxonomy) / PIT Membership service",
-      "reason": "scope enumeration + PIT membership 基础设施，Board runtime 删除后由 Review 直接持有。",
+      "reason": "scope enumeration (taxonomy) + PIT membership; Board runtime deletion leaves these owned by Review directly.",
       "disposition": "KEEP_INFRASTRUCTURE_ONLY"
     }
   ],
   "unresolved": [
     {
-      "feature": "pyramid_v2.concept_extras exact semantics",
-      "reason": "需 Slice 2 精确核对是否有 concept-only 独有定义。",
+      "feature": "exact freshness windows/formulas reuse in Review",
+      "reason": "Board freshness has by_dimension{trend/structure/momentum/chip} with different decay windows. Slice 2 decides which to port as Review freshness layer shape.",
       "disposition": "NEEDS_PRODUCT_DECISION"
     },
     {
-      "feature": "Board momentum.divergence (if exists beyond Review momentum_state)",
-      "reason": "ownership matrix 标记 REVIEW_SUPERSET，但 divergence 子项需 Slice 2 确认 Review 覆盖度。",
+      "feature": "active_ob_count re-add vs keep Board-only",
+      "reason": "Review v2.3 formally removed it; product decision needed on re-adding.",
       "disposition": "NEEDS_PRODUCT_DECISION"
     }
   ]
