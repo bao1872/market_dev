@@ -122,6 +122,71 @@ def _obs_with_groups() -> dict:
     }
 
 
+def _canonical_l1_observation() -> dict:
+    """Structurally valid canonical L1 Observation fixture spanning all 8 groups.
+
+    Built against the REAL ``L2_GROUP_SPECS`` source paths so the un-mocked
+    ``build_l2_observation_groups`` projection reads representative facts in every
+    group.  Used by the REAL projection-through-endpoint test (R3A-V §3).
+    """
+    return {
+        "scope": {"scope_type": "industry_l1", "scope_key": "k1"},
+        # Group 1 — 价格与资金表现
+        "price": {
+            "equal_weight_return": 0.0123,
+            "amount_weighted_return": 0.0156,
+            "concentration": 0.42,
+            "amount": {"total_amount": 5000.0, "concentration": 0.18},
+        },
+        # Group 2 — 趋势状态
+        "trend": {
+            "state": "uptrend",
+            "continuous": {"regime_strength": 0.78, "dsa_vwap_dev_pct": -0.012},
+        },
+        # Group 3/4 — 趋势进程 / 趋势量能确认
+        "continuous": {
+            "segment_bars": 14,
+            "segment_volume_mean_ratio": 1.23,
+            "segment_amount_mean_ratio": 1.11,
+        },
+        # Group 5/6 — 结构 (events projected by type)
+        "structure": {
+            "events": {
+                "cells": {
+                    "leveled": {
+                        "ob1": {"event_type": "BOS", "member_ratio": 0.5},
+                        "ob2": {"event_type": "OB_CREATED", "member_ratio": 0.3},
+                    },
+                    "extreme": {},
+                },
+                "denominator": 42,
+            },
+            "alignment": {"state": "aligned"},
+            "distance_to_trailing_top_pct": 0.05,
+            "distance_to_trailing_bottom_pct": -0.12,
+        },
+        # Group 7 — 动量与压缩释放
+        "momentum": {
+            "squeeze_state": "released",
+            "bb_position": 0.82,
+            "bb_width": 0.04,
+            "release_volume_ratio": 1.5,
+            "momentum_volume_relation": "confirming",
+        },
+        # Group 8 — 量能异常
+        "participation": {
+            "volume": {
+                "ratio20": 1.2,
+                "ratio200": 0.9,
+                "percentile20": 0.6,
+                "percentile200": 0.4,
+                "zscore20": 0.3,
+                "zscore200": -0.2,
+            }
+        },
+    }
+
+
 def _summary_row(
     scope_type: str,
     scope_key: str,
@@ -229,7 +294,7 @@ async def test_get_review_scope_composition_ok() -> None:
     ) as mock_fact, patch.object(
         review_api,
         "build_l2_observation_groups",
-        new=MagicMock(return_value={"price_capital": {}, "trend_state": {}}),
+        new=MagicMock(return_value=_eight_groups()),
     ) as mock_groups:
         resp = await review_api.get_review_scope_composition(
             "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
@@ -244,12 +309,113 @@ async def test_get_review_scope_composition_ok() -> None:
     assert resp.scopeType == "industry_l1"
     assert resp.composition == {"dynamics": {"position": 0.5}}
     assert resp.observation == fact.observation_payload
-    assert resp.observationGroups == {"price_capital": {}, "trend_state": {}}
+    # BE-1 now asserts the FULL canonical 8-group projection (not a 2-group stub)
+    assert resp.observationGroups == _eight_groups()
+    assert len(resp.observationGroups) == 8
+    assert list(resp.observationGroups.keys()) == [
+        "price_capital",
+        "trend_state",
+        "trend_progress",
+        "trend_volume_confirmation",
+        "structure_break_turn",
+        "structure_evolution_position",
+        "momentum_squeeze_release",
+        "volume_anomaly",
+    ]
+
+
+async def test_get_review_scope_composition_real_projection_through_endpoint() -> None:
+    # [R3A-V §3] REAL chain proof: L1 Observation → Fact → endpoint →
+    # build_l2_observation_groups (NOT mocked) → 8/8 exact groups + canonical labels
+    # + representative facts flow through. This is the one test that proves the
+    # L1→L2→API→frontend contract end-to-end without mocking the projection.
+    from app.domain.review.observation_groups import build_l2_observation_groups
+
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    snapshot = SimpleNamespace(
+        scope_type="industry_l1",
+        scope_key="k1",
+        scope_name="行业",
+        algorithm_version="review-2.0.0",
+        composition_payload={"dynamics": {"position": 0.5}},
+    )
+    payload = _canonical_l1_observation()
+    fact = _fact("industry_l1", "k1", run_id, observation_payload=payload)
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api,
+        "get_scope_composition_snapshot",
+        new=AsyncMock(return_value=snapshot),
+    ), patch.object(
+        review_api,
+        "get_scope_observation_fact_by_run",
+        new=AsyncMock(return_value=fact),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+
+    # 1) groups equal the REAL projection of the canonical L1 payload
+    expected = build_l2_observation_groups(payload)
+    assert resp.observationGroups == expected
+    # 2) exactly 8 groups, exact ordered keys, canonical labels from L2_GROUP_SPECS
+    assert len(resp.observationGroups) == 8
+    assert list(resp.observationGroups.keys()) == [
+        "price_capital",
+        "trend_state",
+        "trend_progress",
+        "trend_volume_confirmation",
+        "structure_break_turn",
+        "structure_evolution_position",
+        "momentum_squeeze_release",
+        "volume_anomaly",
+    ]
+    for key, spec in [
+        ("price_capital", "价格与资金表现"),
+        ("trend_state", "趋势状态"),
+        ("trend_progress", "趋势进程"),
+        ("trend_volume_confirmation", "趋势量能确认"),
+        ("structure_break_turn", "结构突破与转折"),
+        ("structure_evolution_position", "结构演化与位置"),
+        ("momentum_squeeze_release", "动量与压缩释放"),
+        ("volume_anomaly", "量能异常"),
+    ]:
+        assert resp.observationGroups[key]["group_key"] == key
+        assert resp.observationGroups[key]["label"] == spec
+        assert "facts" in resp.observationGroups[key]
+    # 3) representative facts flow through the real projection
+    groups = resp.observationGroups
+    # Group 1 — price/amount read directly by L1 source path
+    assert groups["price_capital"]["facts"]["equal_weight_return"] == 0.0123
+    assert groups["price_capital"]["facts"]["amount_weighted_return"] == 0.0156
+    assert groups["price_capital"]["facts"]["price_hhi"] == 0.42
+    assert groups["price_capital"]["facts"]["total_amount"] == 5000.0
+    assert groups["price_capital"]["facts"]["amount_hhi"] == 0.18
+    # Group 2 — trend state
+    assert groups["trend_state"]["facts"]["trend_direction_member_ratio"] == "uptrend"
+    assert groups["trend_state"]["facts"]["trend_strength"] == 0.78
+    # Group 5 — structure break/turn: only BOS/CHoCH retained, OB_CREATED excluded
+    bos = groups["structure_break_turn"]["facts"]["bos_choch_events"]
+    assert bos["cells"]["leveled"]["ob1"]["event_type"] == "BOS"
+    assert "ob2" not in bos["cells"]["leveled"]  # OB_CREATED filtered out
+    # Group 7 — momentum squeeze/release
+    assert groups["momentum_squeeze_release"]["facts"]["squeeze_state"] == "released"
+    assert groups["momentum_squeeze_release"]["facts"]["bb_position"] == 0.82
+    # Group 8 — volume anomaly (full six-fact vector)
+    assert groups["volume_anomaly"]["facts"]["volume_ratio20"] == 1.2
+    assert groups["volume_anomaly"]["facts"]["volume_zscore200"] == -0.2
+    # composition and observation still preserved alongside real groups
+    assert resp.composition == {"dynamics": {"position": 0.5}}
+    assert resp.observation == payload
 
 
 async def test_get_review_scope_composition_404_when_fact_missing() -> None:
     # [R3A BE-3/BE-4] Fact missing → 404 (Fact owns detail existence),
-    # even if Composition exists.
+    # even if Composition exists. Short-circuit: snapshot NOT fetched.
     run_id = uuid.uuid4()
     run = _run(run_id)
     db = AsyncMock()
@@ -257,8 +423,10 @@ async def test_get_review_scope_composition_404_when_fact_missing() -> None:
     with patch.object(
         review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
     ), patch.object(
-        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
-    ), patch.object(
+        review_api,
+        "get_scope_composition_snapshot",
+        new=AsyncMock(return_value="SHOULD_NOT_BE_CALLED"),
+    ) as mock_snapshot, patch.object(
         review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=None)
     ) as mock_fact:
         with pytest.raises(HTTPException) as exc:
@@ -268,6 +436,8 @@ async def test_get_review_scope_composition_404_when_fact_missing() -> None:
         mock_fact.assert_called_once_with(
             db, run_id, date(2026, 7, 29), "industry_l1", "k1"
         )
+        # Fact-missing must short-circuit BEFORE the Composition snapshot query
+        mock_snapshot.assert_not_called()
     assert exc.value.status_code == 404
 
 
@@ -278,8 +448,14 @@ async def test_get_review_scope_composition_404_when_fact_missing() -> None:
 
 
 def _eight_groups() -> dict:
+    """Canonical 8-group projection shape (labels owned by L2_GROUP_SPECS).
+
+    These labels MUST match ``app.domain.review.observation_groups.L2_GROUP_SPECS``
+    exactly — the frontend has no second label vocabulary.  Any drift here means
+    the backend SSOT changed and the test must be updated to track it.
+    """
     return {
-        "price_capital": {"group_key": "price_capital", "label": "价格与资金", "facts": {}},
+        "price_capital": {"group_key": "price_capital", "label": "价格与资金表现", "facts": {}},
         "trend_state": {"group_key": "trend_state", "label": "趋势状态", "facts": {}},
         "trend_progress": {"group_key": "trend_progress", "label": "趋势进程", "facts": {}},
         "trend_volume_confirmation": {
@@ -289,17 +465,17 @@ def _eight_groups() -> dict:
         },
         "structure_break_turn": {
             "group_key": "structure_break_turn",
-            "label": "结构破位转折",
+            "label": "结构突破与转折",
             "facts": {},
         },
         "structure_evolution_position": {
             "group_key": "structure_evolution_position",
-            "label": "结构演化位置",
+            "label": "结构演化与位置",
             "facts": {},
         },
         "momentum_squeeze_release": {
             "group_key": "momentum_squeeze_release",
-            "label": "动量 squeeze 释放",
+            "label": "动量与压缩释放",
             "facts": {},
         },
         "volume_anomaly": {"group_key": "volume_anomaly", "label": "量能异常", "facts": {}},
