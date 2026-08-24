@@ -362,6 +362,14 @@ async def _install_mocks(
     monkeypatch.setattr(
         prep_service, "_load_batch_instrument_board_meta", _fake_batch_active
     )
+    # Slice 4A3: freshness event history loader is part of the union batch read;
+    # default empty so base _install_mocks stays DB-free.
+    async def _fake_batch_freshness(session, ids, trade_date):
+        return {}
+
+    monkeypatch.setattr(
+        prep_service, "_load_batch_freshness_events", _fake_batch_freshness
+    )
 
 
 def test_service_exact_t1_historical_pit_run(monkeypatch) -> None:
@@ -1029,6 +1037,10 @@ def _install_contract_mocks(monkeypatch, current_only_loader):
     # these C1a tests assert the exact-T loader contract, not eligibility parity.
     monkeypatch.setattr(
         prep_service, "_load_batch_instrument_board_meta", _fake_empty
+    )
+    # Slice 4A3: freshness event history loader faked (no DB in contract tests).
+    monkeypatch.setattr(
+        prep_service, "_load_batch_freshness_events", _fake_empty
     )
 
 

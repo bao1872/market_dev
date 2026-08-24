@@ -199,7 +199,10 @@ def test_canonical_top_level_sections_exact() -> None:
     # ``amount`` is legacy topology (canonical amount lives under ``price.amount``)
     # and is explicitly rejected at the top level.
     assert CANONICAL_TOP_LEVEL_SECTIONS == frozenset(
-        {"scope", "price", "trend", "structure", "momentum", "participation", "chip"}
+        {
+            "scope", "price", "trend", "structure", "momentum", "participation",
+            "chip", "freshness",
+        }
     )
 
 

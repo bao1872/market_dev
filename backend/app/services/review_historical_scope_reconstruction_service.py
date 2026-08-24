@@ -315,6 +315,7 @@ async def _reconstruct_batch_chunk(
                 events=prepared.events,
                 t1_membership_available=prepared.t1_membership_available,
                 event_coverage_member_ids=prepared.event_coverage_member_ids,
+                freshness_events=prepared.freshness_events,
             )
             validate_scope_observation_payload(
                 observation,

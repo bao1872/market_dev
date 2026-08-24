@@ -114,7 +114,18 @@ MARKET_PERSISTENCE_DIAGNOSTIC = (
 # top-level ``amount`` is a legacy topology and is explicitly rejected (no silent
 # compatibility fallback, no topology migration, no re-normalization here).
 CANONICAL_TOP_LEVEL_SECTIONS: frozenset[str] = frozenset(
-    {"scope", "price", "trend", "structure", "momentum", "participation", "chip"}
+    {
+        "scope",
+        "price",
+        "trend",
+        "structure",
+        "momentum",
+        "participation",
+        "chip",
+        # Slice 4A3 — Board Event Freshness migration (pyramid_v2.freshness
+        # migrated into the Unified Review canonical top-level shape).
+        "freshness",
+    }
 )
 
 

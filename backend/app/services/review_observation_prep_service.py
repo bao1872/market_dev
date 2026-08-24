@@ -22,7 +22,7 @@ import uuid
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from collections.abc import Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Any
 
@@ -377,6 +377,12 @@ class PreparedScope:
     # zero-event day).  Every PreparedScope constructor MUST decide explicitly.
     event_coverage_member_ids: tuple[str, ...] | None
     events: tuple[StructureEvent, ...] = ()
+    # Slice 4A3 — Board Event Freshness migration.  The board-ready universe's
+    # immutable FP event history over ``[T-20, T]`` as an ordered stream of
+    # ``(event_type, event_time_iso)`` pairs, sliced per scope by board-ready
+    # member IDs in the union core (NO per-scope SQL).  Empty when the freshness
+    # history is not carried (replay / historical path).
+    freshness_events: tuple[tuple[str, str], ...] = ()
 
 
 async def list_recent_trading_days(
@@ -793,6 +799,57 @@ async def _load_batch_events(
     }
 
 
+async def _load_batch_freshness_events(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    trade_date: date,
+) -> dict[str, list[tuple[str, str]]]:
+    """Union-level immutable FP event history over ``[T-20, T]`` — ONE query.
+
+    Exact replication of the Board ``_compute_freshness_density`` query bounds:
+    ``event_time >= (T - 20d).isoformat()`` with the canonical history contract
+    (``HISTORY_CONTRACT_VERSION``) and NO upper bound — the aggregation Core
+    skips future events via ``days_ago < 0``, exactly like the Board loop.
+    Grouped per member (string UUID to match ``MemberObservation.member_id``) so
+    the union core slices per-scope by board-ready IDs with NO per-scope SQL.
+
+    Filters match the Board query EXACTLY: ONLY ``history_contract_version``
+    (per the migration spec "只使用 FirstPyramidHistoryEvent 并且
+    history_contract_version == review-history-v2").  Do NOT add an
+    ``algorithm_version`` filter here — the Board freshness producer has none,
+    and adding one would silently drop events the Board counts.
+
+    Event types are kept RAW (no ``_normalize_event_type`` casing normalization):
+    the Board freshness producer feeds ``row.event_type`` straight into
+    ``_event_dimension``, so normalizing here would break field-level parity.
+    """
+    if not instrument_ids:
+        return {}
+    start_iso = (trade_date - timedelta(days=20)).isoformat()
+    stmt = select(
+        FirstPyramidHistoryEvent.instrument_id,
+        FirstPyramidHistoryEvent.event_type,
+        FirstPyramidHistoryEvent.event_time,
+    ).where(
+        FirstPyramidHistoryEvent.instrument_id.in_(instrument_ids),
+        FirstPyramidHistoryEvent.history_contract_version == HISTORY_CONTRACT_VERSION,
+        FirstPyramidHistoryEvent.event_time.isnot(None),
+        FirstPyramidHistoryEvent.event_time >= start_iso,
+    )
+    out: dict[str, list[tuple[str, str]]] = defaultdict(list)
+    for row in (await session.execute(stmt)).all():
+        # ``compute_freshness`` handles ``""`` exactly like ``None`` (falls
+        # through to structure), so NULL event_type is safe here.
+        out[str(row.instrument_id)].append(
+            (row.event_type or "", row.event_time)
+        )
+    # Deterministic per-member order (the Board has no ORDER BY; we sort by
+    # time then type so production output is reproducible).
+    for key in out:
+        out[key].sort(key=lambda ev: (ev[1], ev[0]))
+    return dict(out)
+
+
 # ---------------------------------------------------------------------------
 # ROUND-2.2B — Conservative canonical-backfill Event Coverage (single owner)
 # ---------------------------------------------------------------------------
@@ -878,6 +935,12 @@ class _UnionFactContext:
     bars: dict[uuid.UUID, _InstrumentBarSeries]
     events_by_date: dict[date, list[StructureEvent]]
     vec_volume: dict[uuid.UUID, _VectorizedMemberVolume]
+    # Slice 4A3 — Board Event Freshness migration.  Immutable FP event history
+    # over ``[T-20, T]`` keyed by string member UUID, loaded ONCE at union level
+    # (one batch read) and sliced per scope by board-ready IDs in the union core.
+    freshness_events_by_member: dict[str, list[tuple[str, str]]] = field(
+        default_factory=dict
+    )
 
 
 def build_union_fact_context_from_loaded_facts(
@@ -886,6 +949,7 @@ def build_union_fact_context_from_loaded_facts(
     states_by_date: dict[date, dict[uuid.UUID, dict]],
     bars: dict[uuid.UUID, _InstrumentBarSeries],
     events_by_date: dict[date, list[StructureEvent]],
+    freshness_events_by_member: dict[str, list[tuple[str, str]]] | None = None,
 ) -> _UnionFactContext:
     """Dataset loaded-facts -> production ``_UnionFactContext`` (R0 Replay Adapter).
 
@@ -907,6 +971,7 @@ def build_union_fact_context_from_loaded_facts(
         bars=bars,
         events_by_date=events_by_date,
         vec_volume=_precompute_vectorized_volume(bars),
+        freshness_events_by_member=freshness_events_by_member or {},
     )
 
 
@@ -949,6 +1014,14 @@ async def prepare_union_fact_context(
     t0 = time.perf_counter()
     events_by_date = await _load_batch_events(session, union_member_ids, trade_dates)
     events_ms = (time.perf_counter() - t0) * 1000.0
+    # Slice 4A3 — Board Event Freshness: ONE union-level batch read of the
+    # immutable ``[T-20, T]`` event history (never per-scope SQL).  T is the last
+    # date of the window, matching the Board's ``trade_date`` argument.
+    t0 = time.perf_counter()
+    freshness_events_by_member = await _load_batch_freshness_events(
+        session, union_member_ids, trade_dates[-1],
+    )
+    freshness_ms = (time.perf_counter() - t0) * 1000.0
     t_vec = time.perf_counter()
     vec_volume = _precompute_vectorized_volume(bars)
     vec_ms = (time.perf_counter() - t_vec) * 1000.0
@@ -957,9 +1030,10 @@ async def prepare_union_fact_context(
     # via the shared dict reference.
     logger.info(
         "[union-fact-context] union_member_count=%d trade_date_count=%d "
-        "cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f vec_precompute_ms=%.1f",
+        "cal_ms=%.1f states_ms=%.1f bars_ms=%.1f events_ms=%.1f "
+        "freshness_ms=%.1f vec_precompute_ms=%.1f",
         len(union_member_ids), len(trade_dates),
-        cal_ms, states_ms, bars_ms, events_ms, vec_ms,
+        cal_ms, states_ms, bars_ms, events_ms, freshness_ms, vec_ms,
     )
     return _UnionFactContext(
         t1_by_date=t1_by_date,
@@ -967,6 +1041,7 @@ async def prepare_union_fact_context(
         bars=bars,
         events_by_date=events_by_date,
         vec_volume=vec_volume,
+        freshness_events_by_member=freshness_events_by_member,
     )
 
 
@@ -1133,6 +1208,20 @@ def build_prepared_scopes_from_union(
             members = tuple(
                 member_by_id[sid] for sid in str_ids if sid in member_by_id
             )
+            # Slice 4A3 — Board Event Freshness: the scope universe is the
+            # board-ready members ONLY (Board ``ready_ids`` parity: active ∩
+            # snapshot-exists ∩ trend-ready).  Events come from the union-level
+            # ``[T-20, T]`` batch read (ONE query, never per-scope SQL), sliced
+            # here by board-ready member IDs into the ``(event_type,
+            # event_time_iso)`` stream consumed by ``compute_freshness``.
+            freshness_events = tuple(
+                (etype, etime)
+                for m in members
+                if m.board_current_ready
+                for (etype, etime) in union_ctx.freshness_events_by_member.get(
+                    m.member_id, ()
+                )
+            )
             # VEC-1-CORRECTION: the union's events are filtered to this scope's
             # membership so PreparedScope.events stays strictly scope-local (the
             # Scope Core would drop out-of-scope events anyway, but the contract
@@ -1190,6 +1279,7 @@ def build_prepared_scopes_from_union(
                     ),
                     event_coverage_member_ids=scope_coverage,
                     events=scope_events,
+                    freshness_events=freshness_events,
                 )
             )
     loop_ms = (time.perf_counter() - t_loop) * 1000.0

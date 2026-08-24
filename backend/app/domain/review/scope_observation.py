@@ -1155,6 +1155,146 @@ def _reject_if_invalid_members(
             )
 
 
+# ---------------------------------------------------------------------------
+# Slice 4A3 — Board Event Freshness migration (NO_FORMULA_CHANGE).
+#
+# These constants and ``_event_dimension`` / ``compute_freshness`` replicate the
+# legacy Board ``pyramid_v2.freshness`` producer EXACTLY at the price/math level
+# (``board_analysis_service._compute_freshness_density``).  The parity test
+# ``test_review_board_freshness_parity.py`` imports the Board producer as the
+# oracle and compares field-by-field.  Production Review MUST NOT import
+# ``board_analysis_service``, so the mapping is re-declared here and is the
+# SINGLE Review owner of the freshness taxonomy.
+#
+# Calendar semantics are faithful to the Board: ``days_ago`` is calendar days
+# (``(trade_date - event_date).days``), with INCLUSIVE bounds
+# ``days_ago <= 5`` / ``days_ago <= 10`` and a ``T-20 .. T`` query window.
+# NO trading-day conversion, NO ``< 5`` / ``< 10`` reinterpretation.
+# ---------------------------------------------------------------------------
+
+# Event type -> dimension mapping (per-dimension decay window differs).
+_EVENT_DIMENSION_MAP: dict[str, str] = {
+    "CHoCH": "trend",
+    "BOS": "structure",
+    "OB_CREATED": "structure",
+    "OB_ENTERED": "structure",
+    "OB_MITIGATED": "structure",
+    "EQH": "structure",
+    "EQL": "structure",
+    "SQZ_RELEASE": "momentum",
+    "SQZ_OFF": "momentum",
+    "MOMENTUM_DIFFUSION": "momentum",
+    "node_cluster_touch": "chip",
+}
+
+# Per-dimension decay window (days).
+_DIMENSION_WINDOW: dict[str, int] = {
+    "trend": 5,
+    "structure": 10,
+    "momentum": 5,
+    "chip": 20,
+}
+
+
+def _event_dimension(event_type: str | None) -> str:
+    """Map an event type to one of the four freshness dimensions.
+
+    Exact replication of the Board producer ``_event_dimension``: an unknown
+    type falls through to ``structure``.
+    """
+    if not event_type:
+        return "structure"
+    if event_type in _EVENT_DIMENSION_MAP:
+        return _EVENT_DIMENSION_MAP[event_type]
+    if event_type.startswith("ZERO_CROSS"):
+        return "momentum"
+    if event_type.startswith("OB_"):
+        return "structure"
+    if event_type.startswith("NODE") or "node" in event_type.lower():
+        return "chip"
+    return "structure"
+
+
+def compute_freshness(
+    *,
+    trade_date: date,
+    events: Iterable[tuple[str, str]],
+    instrument_count: int,
+) -> dict[str, Any]:
+    """Board Event Freshness aggregation (exact ``pyramid_v2.freshness`` parity).
+
+    ``events`` is the ordered ``(event_type, event_time_iso)`` stream for the
+    board-ready universe only (the loader bounds it to ``[T-20, T]``).  Pure and
+    deterministic; NO DB access.  ``instrument_count`` is the board-ready member
+    count (``board_ready_members``).  Empty universe -> all-zero skeleton with
+    ``instrument_count == 0`` (Board parity).
+
+    Replicates the Board in-memory loop exactly:
+      - ``days_ago = (trade_date - event_date).days`` (calendar days);
+      - future events (``days_ago < 0``) ignored;
+      - ``last_20d_count`` counts every in-window event;
+      - ``last_5d_count`` / ``last_10d_count`` use INCLUSIVE bounds;
+      - ``today_count`` is ``days_ago == 0``;
+      - per-dimension ``w = max(0.0, 1.0 - days_ago / window)``;
+      - ``density = weighted_sum / instrument_count``;
+      - ``decay_weighted_density = mean(weighted_sum over 4 dims) / instrument_count``.
+    """
+    out: dict[str, Any] = {
+        "today_count": 0,
+        "last_5d_count": 0,
+        "last_10d_count": 0,
+        "last_20d_count": 0,
+        "instrument_count": instrument_count,
+        "by_dimension": {
+            dim: {
+                "window_days": _DIMENSION_WINDOW[dim],
+                "event_count": 0,
+                "weighted_sum": 0.0,
+                "density": 0.0,
+            }
+            for dim in ("trend", "structure", "momentum", "chip")
+        },
+        "decay_weighted_density": 0.0,
+    }
+    if not instrument_count:
+        return out
+    inst_count = instrument_count
+    for etype, etime in events:
+        if not etime:
+            continue
+        try:
+            ev_date = date.fromisoformat(etime[:10])
+        except ValueError:
+            continue
+        days_ago = (trade_date - ev_date).days
+        if days_ago < 0:
+            continue
+        out["last_20d_count"] += 1
+        if days_ago <= 5:
+            out["last_5d_count"] += 1
+        if days_ago <= 10:
+            out["last_10d_count"] += 1
+        if days_ago == 0:
+            out["today_count"] += 1
+        dim = _event_dimension(etype)
+        d = out["by_dimension"][dim]
+        d["event_count"] += 1
+        window = d["window_days"]
+        w = max(0.0, 1.0 - days_ago / window) if window > 0 else 1.0
+        d["weighted_sum"] = round(d["weighted_sum"] + w, 6)
+
+    total_weighted = 0.0
+    for d in out["by_dimension"].values():
+        d["density"] = (
+            round(d["weighted_sum"] / inst_count, 6) if inst_count > 0 else 0.0
+        )
+        total_weighted += d["weighted_sum"]
+    out["decay_weighted_density"] = (
+        round(total_weighted / 4 / inst_count, 6) if inst_count > 0 else 0.0
+    )
+    return out
+
+
 def compute_scope_observation(
     *,
     scope_type: str,
@@ -1166,6 +1306,7 @@ def compute_scope_observation(
     events: Iterable[StructureEvent] | None = None,
     t1_membership_available: bool = True,
     event_coverage_member_ids: Iterable[str] | None,
+    freshness_events: Iterable[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
     """Compute objective Canonical Scope Observation facts (PRD §7.2-§7.7).
 
@@ -1193,6 +1334,13 @@ def compute_scope_observation(
     (denominator=None, never 0).  A set (possibly empty) means coverage is valid
     -> denominator = PIT(T) ∩ coverage; a legal zero-event day yields empty cells
     but a real denominator.
+
+    ``freshness_events`` (Slice 4A3) is the board-ready universe's immutable
+    event history over ``[T-20, T]`` as an ordered ``(event_type, event_time_iso)``
+    stream, already sliced per scope by the prep layer.  ``None`` -> freshness
+    history not carried -> all-zero skeleton with ``instrument_count`` =
+    ``board_ready_count`` (identical to the Board result for an empty ready
+    universe).
     """
     member_list = list(members)
     pit_set = set(pit_member_ids)
@@ -1318,6 +1466,21 @@ def compute_scope_observation(
     # ------------------------------------------------------------------
     board_ready_members = [m for m in member_list if m.board_current_ready]
     board_ready_count = len(board_ready_members)
+
+    # Slice 4A3 — Board Event Freshness (NO_FORMULA_CHANGE).  ``freshness_events``
+    # is the board-ready universe's immutable event history over ``[T-20, T]``
+    # (union-level batch read, sliced per scope by board-ready IDs in the prep
+    # layer).  ``None`` -> no freshness history carried (historical / replay
+    # path), yielding the all-zero skeleton with ``instrument_count`` =
+    # ``board_ready_count`` — the same result the Board emits for an empty ready
+    # universe.  This deliberately does NOT reuse the exact-T ``events`` /
+    # ``event_coverage_member_ids`` aggregation (which answers "what happened
+    # today"), because freshness answers "how dense / how recent over T-20..T".
+    freshness = compute_freshness(
+        trade_date=trade_date,
+        events=freshness_events or (),
+        instrument_count=board_ready_count,
+    )
 
     ts_values = _collect([m.trend_strength for m in board_ready_members])
     vwap_dev_values = _collect(
@@ -1622,4 +1785,9 @@ def compute_scope_observation(
             "amount": _participation_distribution(amt_ratios),
         },
         "chip": {"status": "unavailable"},
+        # Slice 4A3 — Board Event Freshness (NO_FORMULA_CHANGE).  Exact
+        # ``pyramid_v2.freshness`` shape: today/5d/10d/20d counts +
+        # ``instrument_count`` (board-ready universe) + per-dimension decay
+        # density + overall ``decay_weighted_density``.
+        "freshness": freshness,
     }
