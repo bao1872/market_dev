@@ -55,12 +55,18 @@ test('R3C G1 — Total Amount availability (no recomputation)', () => {
     amount_hhi: { raw_hhi: 0.2, normalized_hhi: 0.5, member_count: 38, status: 'ready' },
   }
 
-  // total_amount=0 + valid_count=0 -> unavailable
+  // total_amount=0 + valid_count=0 -> unavailable (NOT observed zero)
   const obs0 = { price: { amount: { valid_count: 0 } } }
   const vm0 = buildPriceCapitalVM(parsePriceCapital(baseFacts, obs0))
   assert.ok(vm0)
   assert.match(vm0!.amountAvailabilityNote ?? '', /不可用/)
-  assert.equal(vm0!.totalAmount, '0.00')
+  assert.equal(vm0!.totalAmount, '—')
+
+  // valid_count=0 + total_amount null (no fake zero either)
+  const vmNull = buildPriceCapitalVM(
+    parsePriceCapital({ ...baseFacts, total_amount: null }, obs0),
+  )
+  assert.equal(vmNull!.totalAmount, '—')
 
   // total_amount=0 + valid_count>0 -> valid zero (no unavailable note)
   const obs30 = { price: { amount: { valid_count: 30 } } }
@@ -227,9 +233,54 @@ test('R3C G4 — open categorical momentum/volume relation', () => {
   assert.ok(vocabCats.includes('divergence'))
   assert.ok(vocabCats.includes('confirming'))
 
-  // malformed shape (no category pairs, not unavailable) -> fail closed
-  const g4Bad = parseTrendVolumeConfirmation({
-    momentum_volume_relation: { denominator: 0 },
+  // C. foo pair + denominator>0 -> accepted
+  const g4C = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { foo_count: 12, foo_ratio: 0.4, denominator: 30 },
   })
-  assert.equal(g4Bad!.momentumRelation, null)
+  assert.ok(g4C!.momentumRelation)
+  assert.equal(g4C!.momentumRelation!.categories.length, 1)
+  assert.equal(g4C!.momentumRelation!.categories[0].category, 'foo')
+  assert.equal(g4C!.momentumRelation!.categories[0].count, 12)
+  assert.equal(g4C!.momentumRelation!.categories[0].ratio, 0.4)
+
+  // D. foo_count only -> fail closed (no ratio)
+  const g4D = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { foo_count: 12, denominator: 30 },
+  })
+  assert.equal(g4D!.momentumRelation, null)
+
+  // E. foo_ratio only -> fail closed (no count)
+  const g4E = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { foo_ratio: 0.4, denominator: 30 },
+  })
+  assert.equal(g4E!.momentumRelation, null)
+
+  // F. foo pair + missing denominator -> fail closed
+  const g4F = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { foo_count: 12, foo_ratio: 0.4 },
+  })
+  assert.equal(g4F!.momentumRelation, null)
+
+  // G. foo pair + denominator=0 -> fail closed (ready requires >0)
+  const g4G = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { foo_count: 12, foo_ratio: 0.4, denominator: 0 },
+  })
+  assert.equal(g4G!.momentumRelation, null)
+
+  // G2. foo pair + denominator negative -> fail closed
+  const g4Gneg = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { foo_count: 12, foo_ratio: 0.4, denominator: -5 },
+  })
+  assert.equal(g4Gneg!.momentumRelation, null)
+
+  // H. status=unavailable + denominator=0 -> accepted, reason preserved
+  const g4H = parseTrendVolumeConfirmation({
+    momentum_volume_relation: { status: 'unavailable', reason: 'no valid members', denominator: 0 },
+  })
+  assert.equal(g4H!.momentumRelation!.status, 'unavailable')
+  assert.equal(g4H!.momentumRelation!.reason, 'no valid members')
+  assert.equal(g4H!.momentumRelation!.categories.length, 0)
+
+  // no recomputation: ratio stays persisted (not count/denominator derived)
+  assert.equal(g4C!.momentumRelation!.categories[0].ratio, 0.4)
 })

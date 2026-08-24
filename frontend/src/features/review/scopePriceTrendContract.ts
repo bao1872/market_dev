@@ -205,13 +205,17 @@ export function buildPriceCapitalVM(facts: PriceCapitalFacts | null): PriceCapit
   if (facts.amountAvailability === 'unavailable') {
     note = '成交额不可用（无有效成交额成员）'
   }
+  // unavailable (valid_count==0) => Total Amount is NOT an observed zero.
+  // Display "—" (never "0.00"); availability note carries the truth.
+  const totalAmountDisplay =
+    facts.amountAvailability === 'unavailable' ? NULL_DISPLAY : formatRawSumNullable(facts.totalAmount)
   return {
     equalWeightReturn: formatPercentNullable(facts.equalWeightReturn, 2),
     equalWeightReturnTone: signedTone(facts.equalWeightReturn),
     amountWeightedReturn: formatPercentNullable(facts.amountWeightedReturn, 2),
     amountWeightedReturnTone: signedTone(facts.amountWeightedReturn),
     totalVolume: formatRawSumNullable(facts.totalVolume),
-    totalAmount: formatRawSumNullable(facts.totalAmount),
+    totalAmount: totalAmountDisplay,
     amountAvailabilityNote: note,
     priceHhi: facts.priceHhi,
     amountHhi: facts.amountHhi,
@@ -394,33 +398,57 @@ export function parseMomentumVolumeRelation(
   const status = typeof o['status'] === 'string' ? (o['status'] as string) : null
   const reason = typeof o['reason'] === 'string' ? (o['reason'] as string) : null
   const denom = o['denominator']
-  const denominator = isFiniteNumber(denom) ? denom : null
 
-  // Preserve upstream category tokens verbatim; pair *_count and *_ratio.
-  // No hardcoded Review vocabulary. Fail closed on malformed shape.
-  const categories: OpenCategoryEntry[] = []
+  // Unavailable payload: valid when explicitly flagged. Preserve reason +
+  // denominator verbatim; never fabricate categories.
+  if (status === 'unavailable') {
+    const denominator = isFiniteNumber(denom) ? denom : null
+    return { status, reason, denominator, categories: [] }
+  }
+
+  // Ready contract (backend real producer):
+  //   denominator: finite integer > 0
+  //   every dynamic category present as BOTH <cat>_count and <cat>_ratio,
+  //   each a finite number. No recomputation of ratio / denominator.
+  const denominator = isFiniteNumber(denom) ? denom : null
+  if (
+    denominator === null ||
+    !Number.isInteger(denominator) ||
+    denominator <= 0
+  ) {
+    // categories present but denominator missing/null/0/negative/non-finite
+    // -> malformed ready -> fail closed.
+    return null
+  }
+
+  // Collect category stems that appear as *_count or *_ratio.
   const countMap = new Map<string, number | null>()
   const ratioMap = new Map<string, number | null>()
   for (const [k, v] of Object.entries(o)) {
-    const m = /^(.*)_count$/.exec(k)
-    if (m) countMap.set(m[1], isFiniteNumber(v) ? v : null)
-    const r = /^(.*)_ratio$/.exec(k)
-    if (r) ratioMap.set(r[1], isFiniteNumber(v) ? v : null)
+    const cm = /^(.*)_count$/.exec(k)
+    if (cm) countMap.set(cm[1], isFiniteNumber(v) ? (v as number) : null)
+    const rm = /^(.*)_ratio$/.exec(k)
+    if (rm) ratioMap.set(rm[1], isFiniteNumber(v) ? (v as number) : null)
   }
-  if (countMap.size === 0 && ratioMap.size === 0) {
-    // No category pairs present (and not a clean unavailable) -> malformed.
-    if (status !== 'unavailable') return null
-  }
-  for (const category of new Set([...countMap.keys(), ...ratioMap.keys()])) {
-    categories.push({
-      category,
-      count: countMap.get(category) ?? null,
-      ratio: ratioMap.get(category) ?? null,
-    })
+
+  // Every dynamic category MUST have BOTH count and ratio (finite). Partial
+  // pairs (count-only / ratio-only) are malformed -> fail closed.
+  const stems = new Set<string>([...countMap.keys(), ...ratioMap.keys()])
+  const categories: OpenCategoryEntry[] = []
+  for (const category of stems) {
+    const count = countMap.get(category)
+    const ratio = ratioMap.get(category)
+    if (count === null || count === undefined || ratio === null || ratio === undefined) {
+      return null
+    }
+    categories.push({ category, count, ratio })
   }
   categories.sort((a, b) => a.category.localeCompare(b.category))
 
-  return { status, reason, denominator, categories }
+  // No category pairs at all and not unavailable -> malformed.
+  if (categories.length === 0) return null
+
+  return { status: null, reason: null, denominator, categories }
 }
 
 export function parseTrendVolumeConfirmation(
