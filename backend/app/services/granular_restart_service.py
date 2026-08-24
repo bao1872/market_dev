@@ -848,34 +848,24 @@ async def _handle_board_aggregation(
     actor: str,
     attempt: int,
 ) -> uuid.UUID | None:
-    """board_aggregation boundary：查找当日 succeeded BoardAnalysisSnapshot → publish_board_analysis。
+    """board_aggregation boundary 已退役（[Slice 4A9]）。
 
-    真实签名：publish_board_analysis(session, snapshot: BoardAnalysisSnapshot, *, threshold=...)
-    —— 接收 **ORM 对象**，不是 id。
+    legacy Board aggregation 已由 Unified Review 取代，AfterClose 不再生产
+    BoardAnalysisRun / BoardAnalysisSnapshot，也不再切换 market_aggregation pointer。
+    因此该 restart boundary 不再执行任何重建/发布，直接抛出明确退役错误，
+    避免经 admin force 端点恢复 legacy Board 生产。
     """
-    from app.models.board_analysis_snapshot import BoardAnalysisSnapshot
-    from app.services.board_analysis_service import publish_board_analysis
-
-    conditions = [
-        BoardAnalysisSnapshot.trade_date == _as_date(trade_date),
-        BoardAnalysisSnapshot.status == "succeeded",
-    ]
-    if source_core_run_id is not None:
-        conditions.append(BoardAnalysisSnapshot.source_core_run_id == source_core_run_id)
-    stmt = (
-        select(BoardAnalysisSnapshot)
-        .where(*conditions)
-        .order_by(BoardAnalysisSnapshot.created_at.desc())
-        .limit(1)
+    _ = db
+    _ = trade_date
+    _ = parent_job_run_id
+    _ = source_core_run_id
+    _ = input_hash
+    _ = actor
+    _ = attempt
+    raise RuntimeError(
+        "board_aggregation boundary 已退役：legacy Board compute 不再触发，"
+        "板块分析由 Unified Review 提供"
     )
-    snapshot = (await db.execute(stmt)).scalar_one_or_none()
-    if snapshot is None:
-        raise RuntimeError(
-            f"board_aggregation 重建失败: 当日无 succeeded BoardAnalysisSnapshot "
-            f"(trade_date={trade_date}, source_core_run_id={source_core_run_id})"
-        )
-    await publish_board_analysis(db, snapshot)
-    return snapshot.id
 
 
 async def _handle_review(

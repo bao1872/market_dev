@@ -227,10 +227,9 @@ async def test_detail_reads_canonical_fact(monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_get_handlers_do_not_query_board_snapshot_model():
     src = inspect.getsource(board_api)
-    # 读接口不 import / 不 refer BoardAnalysisSnapshot 持久化模型
-    assert "from app.models" not in src or "BoardAnalysisSnapshot" not in src.split(
-        "from app.models"
-    )[-1]
+    # 读接口不得 import BoardAnalysisSnapshot 持久化模型
+    # （BoardAnalysisSnapshotDTO 是响应 DTO 类型标注，非持久化模型，允许出现）。
+    assert "from app.models.board_analysis_snapshot" not in src
     # _board_fact_statement 查询的是 canonical ReviewScopeObservationFact
     stmt_src = inspect.getsource(board_api._board_fact_statement)
     assert "ReviewScopeObservationFact" in stmt_src
@@ -371,3 +370,56 @@ async def test_list_empty_when_no_published_review(monkeypatch):
     )
     assert resp.total == 0
     assert resp.items == []
+
+
+# --------------------------------------------------------------------------- #
+# 8. [Slice 4A9] admin POST 写接口已退役（HTTP 410 Gone）
+# --------------------------------------------------------------------------- #
+async def test_admin_post_single_compute_returns_410():
+    """POST /v1/admin/boards/{board_id}/analysis/compute → 410 Gone。
+
+    不做任何 DB 查询 / 计算 / market_aggregation 发布 / BoardAnalysisSnapshot 写入。
+    传入真实 AsyncMock 的 db，验证 execute 未被调用。
+    """
+    db = AsyncMock()
+    with pytest.raises(HTTPException) as exc:
+        await board_api.retire_legacy_board_compute(
+            board_id=uuid.uuid4(),
+            trade_date=TRADE_DATE,
+            publish=True,
+            db=db,
+            current_user=MagicMock(),
+        )
+    assert exc.value.status_code == 410
+    assert "Unified Review" in exc.value.detail
+    db.execute.assert_not_called()
+    db.commit.assert_not_called()
+
+
+async def test_admin_post_compute_all_returns_410():
+    """POST /v1/admin/boards/analysis/compute-all → 410 Gone，同样不做任何 DB 调用。"""
+    db = AsyncMock()
+    with pytest.raises(HTTPException) as exc:
+        await board_api.retire_legacy_board_compute_all(
+            trade_date=TRADE_DATE,
+            board_type=None,
+            limit=None,
+            publish=True,
+            db=db,
+            current_user=MagicMock(),
+        )
+    assert exc.value.status_code == 410
+    assert "Unified Review" in exc.value.detail
+    db.execute.assert_not_called()
+    db.commit.assert_not_called()
+
+
+def test_admin_post_handlers_no_legacy_writer_calls():
+    """源码守卫：两个 POST handler 不得引用 legacy Board 生产函数。"""
+    for name in ("retire_legacy_board_compute", "retire_legacy_board_compute_all"):
+        src = inspect.getsource(getattr(board_api, name))
+        assert "compute_all_boards" not in src, f"{name} 不得调用 compute_all_boards"
+        assert "compute_board_analysis" not in src, \
+            f"{name} 不得调用 compute_board_analysis"
+        assert "publish_board_analysis" not in src, \
+            f"{name} 不得调用 publish_board_analysis"

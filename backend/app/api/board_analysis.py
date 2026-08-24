@@ -3,18 +3,19 @@
 端点：
 - GET /v1/boards/analysis: 板块分析列表（分页，按 type/trade_date/sort 过滤）
 - GET /v1/boards/{board_id}/analysis: 单板块分析详情
-- POST /v1/admin/boards/{board_id}/analysis/compute: 管理员触发计算（canary 用）
-- POST /v1/admin/boards/analysis/compute-all: 管理员触发批量计算（行业+概念）
+- POST /v1/admin/boards/{board_id}/analysis/compute: 已退役（410 Gone）
+- POST /v1/admin/boards/analysis/compute-all: 已退役（410 Gone）
 
 权限：
 - GET 接口：require_authenticated（任何登录用户可读）
-- POST 接口：require_roles("admin")
+- POST 接口：require_roles("admin")（保留签名兼容，但统一 410）
 
 设计：
 - [Slice 4A7] 读接口（两个 GET）数据源已从 BoardAnalysisSnapshot 切换到
   published Unified Review canonical facts（ReviewScopeObservationFact）。
   使用当前已发布的 MarketReviewRun 作为 lineage；绝不回退到 BoardAnalysisSnapshot。
-- 写接口（admin）触发计算并发布
+- [Slice 4A9] 写接口（admin）已退役：legacy Board compute 不再可触发，
+  两个 POST 统一返回 HTTP 410 Gone；板块分析完全由 Unified Review 提供。
 - 失败返回 4xx/5xx，不静默返回空数据
 """
 
@@ -38,12 +39,7 @@ from app.schemas.board_analysis import (
 )
 from app.services.access_control_service import AccessContext, require_authenticated
 from app.services.board_analysis_service import (
-    BOARD_ANALYSIS_ALGORITHM_VERSION,
-    BOARD_ANALYSIS_MIN_COVERAGE,
-    compute_all_boards,
-    compute_board_analysis,
     compute_is_stale,
-    publish_board_analysis,
 )
 from app.services.review_publication_service import (
     get_published_review_run_id,
@@ -431,9 +427,9 @@ async def get_board_analysis(
 
 @admin_router.post(
     "/{board_id}/analysis/compute",
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_410_GONE,
 )
-async def trigger_compute_board(
+async def retire_legacy_board_compute(
     board_id: uuid.UUID,
     trade_date: date | None = Query(
         None, description="业务交易日（不传取最新已发布 stock_core 日期）",
@@ -441,76 +437,32 @@ async def trigger_compute_board(
     publish: bool = Query(True, description="计算后是否发布"),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
-) -> dict[str, Any]:
-    """[Admin] 触发单个板块分析计算。
+) -> None:
+    """[Admin] Legacy 板块计算已退役。
 
-    若 trade_date 未指定，自动从最新 stock_core publication pointer 获取。
+    [Slice 4A9] 板块分析已由 Unified Review 提供，不再触发 legacy Board compute。
+    统一返回 HTTP 410 Gone：不做任何 DB 查询 / 计算 / market_aggregation 发布 /
+    legacy 快照写入。
     """
     _ = current_user
-
-    # 解析 trade_date
-    if trade_date is None:
-        # 从最新 stock_core pointer 获取 trade_date
-        from sqlalchemy import select
-
-        from app.models.factor_publication import FactorPublication
-
-        pub_stmt = (
-            select(FactorPublication)
-            .where(FactorPublication.publication_kind == "stock_core")
-            .order_by(FactorPublication.published_at.desc())
-            .limit(1)
-        )
-        pub = (await db.execute(pub_stmt)).scalar_one_or_none()
-        if pub is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="无已发布 stock_core pointer，无法触发板块分析",
-            )
-        trade_date = pub.trade_date
-
-    try:
-        snapshot = await compute_board_analysis(
-            db,
-            board_id,
-            trade_date,
-            algorithm_version=BOARD_ANALYSIS_ALGORITHM_VERSION,
-        )
-        pub_result = None
-        if publish and snapshot.coverage_ratio >= BOARD_ANALYSIS_MIN_COVERAGE:
-            pub_result = await publish_board_analysis(db, snapshot)
-        await db.commit()
-    except ValueError as exc:
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=str(exc),
-        ) from exc
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Admin] 板块分析计算失败 board_id=%s", board_id)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"板块分析计算失败: {exc}",
-        ) from exc
-
-    return {
-        "board_id": str(board_id),
-        "trade_date": trade_date.isoformat(),
-        "status": snapshot.status,
-        "coverage_ratio": snapshot.coverage_ratio,
-        "eligible_count": snapshot.eligible_count,
-        "ready_count": snapshot.ready_count,
-        "published": pub_result is not None,
-        "snapshot_id": str(snapshot.id),
-    }
+    _ = db
+    _ = board_id
+    _ = trade_date
+    _ = publish
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            "Legacy Board compute is retired; "
+            "board analysis is served by Unified Review."
+        ),
+    )
 
 
 @admin_router.post(
     "/analysis/compute-all",
-    status_code=status.HTTP_200_OK,
+    status_code=status.HTTP_410_GONE,
 )
-async def trigger_compute_all_boards(
+async def retire_legacy_board_compute_all(
     trade_date: date | None = Query(
         None, description="业务交易日（不传取最新已发布 stock_core 日期）",
     ),
@@ -523,61 +475,23 @@ async def trigger_compute_all_boards(
     publish: bool = Query(True, description="计算后是否发布 coverage>=0.95 的结果"),
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
-) -> dict[str, Any]:
-    """[Admin] 触发批量板块分析计算。
+) -> None:
+    """[Admin] Legacy 批量板块计算已退役。
 
-    可用于 canary（limit=5）或全量（不传 limit）。
+    [Slice 4A9] 板块分析已由 Unified Review 提供，不再触发 legacy Board compute。
+    统一返回 HTTP 410 Gone：不做任何 DB 查询 / 计算 / market_aggregation 发布 /
+    legacy 快照写入。
     """
     _ = current_user
-
-    # 解析 trade_date
-    if trade_date is None:
-        latest_run_id = None
-        try:
-            # 从最新 stock_core pointer 推断 trade_date
-            from sqlalchemy import select
-
-            from app.models.factor_publication import FactorPublication
-
-            pub_stmt = (
-                select(FactorPublication)
-                .where(FactorPublication.publication_kind == "stock_core")
-                .order_by(FactorPublication.published_at.desc())
-                .limit(1)
-            )
-            pub = (await db.execute(pub_stmt)).scalar_one_or_none()
-            if pub is None:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="无已发布 stock_core pointer，无法触发板块分析",
-                )
-            trade_date = pub.trade_date
-            latest_run_id = pub.data_run_id
-        except HTTPException:
-            raise
-        _ = latest_run_id
-
-    if board_type is not None and board_type not in ("industry", "concept"):
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=f"Invalid board_type: {board_type}",
-        )
-
-    try:
-        result = await compute_all_boards(
-            db,
-            trade_date,
-            board_type=board_type,
-            limit=limit,
-            publish=publish,
-        )
-        await db.commit()
-    except Exception as exc:
-        await db.rollback()
-        logger.exception("[Admin] 批量板块分析失败")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"批量板块分析失败: {exc}",
-        ) from exc
-
-    return result
+    _ = db
+    _ = trade_date
+    _ = board_type
+    _ = limit
+    _ = publish
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            "Legacy Board compute is retired; "
+            "board analysis is served by Unified Review."
+        ),
+    )

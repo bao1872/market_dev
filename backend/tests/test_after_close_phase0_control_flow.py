@@ -1,9 +1,14 @@
 """Phase 4.2 corrective — after-close 控制流真实行为测试。
 
 这些测试直接驱动 `execute_after_close_run`，用全 mock 的 `AsyncSessionLocal`
-（不连 PG，纯单元）验证 **normal publish 专属步骤（auction anchor / board
-aggregation / publishing checkpoint）** 与 **skip_publish 断点恢复路径** 的分支归属，
-以及 superseded run 不被 auction/aggregation/state_events/chip 消费。
+（不连 PG，纯单元）验证 **normal publish 专属步骤（auction anchor /
+publishing checkpoint）** 与 **skip_publish 断点恢复路径** 的分支归属，
+以及 superseded run 不被 auction/state_events/chip 消费。
+
+[Slice 4A9] legacy board aggregation 已退役：AfterClose 不再调用
+`compute_all_boards`，`aggregation_status` 恒为 "skipped" 且不再参与
+PARTIAL_SUCCESS 判定。相关测试断言已同步为「aggregation 必须不被调用、
+Review 只依赖已发布 stock_core」。
 
 绝不依赖 inspect.getsource() 或脆弱的 AsyncSession 行为模拟；只断言业务步骤
 是否真正被调用（spy on service 函数）。
@@ -81,7 +86,7 @@ def _install_patches(job_run, *, resolve_side_effect):
     """安装所有外部依赖的 mock，返回 spied 函数供断言。"""
     spies = {}
 
-    # 拍卖锚点 / 板块聚合 / 状态事件 / chip 入队 / 计算 core
+    # 拍卖锚点 / 状态事件 / chip 入队 / 计算 core
     spies["auction"] = AsyncMock(
         return_value={
             "publication_id": uuid.uuid4(),
@@ -90,9 +95,8 @@ def _install_patches(job_run, *, resolve_side_effect):
             "composite_count": 1,
         }
     )
-    # 默认返回「正式发布且 live pointer 已确认属于当前 lineage」的成功合同，
-    # 以匹配修复后的 orchestrator 语义（_aggregation_status 仅当
-    # status==succeeded 且 pointer_confirmed 才置 succeeded）。
+    # [Slice 4A9] legacy board aggregation 已退役：AfterClose 不再调用
+    # compute_all_boards，该 spy 仅用于断言「必须不被调用」。
     spies["aggregation"] = AsyncMock(return_value={
         "status": "succeeded",
         "pointer_confirmed": True,
@@ -110,6 +114,9 @@ def _install_patches(job_run, *, resolve_side_effect):
     spies["finish_snapshot_run"] = AsyncMock()
     spies["repair"] = AsyncMock(return_value=[])
     spies["resolve"] = AsyncMock(side_effect=resolve_side_effect)
+    # [Slice 4A9] 捕获终态 status 与 metadata payload（断言 aggregation_status=="skipped"、
+    # 且不再触发 PARTIAL_SUCCESS）。
+    spies["update_status"] = AsyncMock()
 
     # batch service
     batch = MagicMock()
@@ -138,6 +145,8 @@ def _install_patches(job_run, *, resolve_side_effect):
               new=spies["chip"]),
         patch("app.services.after_close_orchestrator._update_heartbeat_and_step",
               new=spies["heartbeat_step"]),
+        patch("app.services.after_close_orchestrator._update_orchestrator_status",
+              new=spies["update_status"]),
         patch("app.services.after_close_orchestrator._get_job_run_or_raise",
               new=spies["get_job_run"]),
         patch("app.services.review_orchestrator_service.create_run",
@@ -184,7 +193,7 @@ async def _run_orchestrator(*, job_run, skip_publish):
     )
 
 
-async def test_normal_publish_pointer_current_triggers_auction_and_aggregation():
+async def test_normal_publish_pointer_current_triggers_auction_but_no_board_aggregation():
     job_run = _make_job_run(
         dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
     spies, patchers = _install_patches(
@@ -193,7 +202,9 @@ async def test_normal_publish_pointer_current_triggers_auction_and_aggregation()
         await _run_orchestrator(job_run=job_run, skip_publish=False)
         # normal publish + pointer=current → auction anchor 必须被调用
         assert spies["auction"].called, "normal publish 应调用 auction anchor"
-        assert spies["aggregation"].called, "normal publish 应调用 board aggregation"
+        # [Slice 4A9] legacy board aggregation 已退役，compute_all_boards 不得被调用
+        assert not spies["aggregation"].called, \
+            "board aggregation 已退役，AfterClose 不得调用 compute_all_boards"
         # publishing checkpoint 推进：_update_heartbeat_and_step 被以 PUBLISHING 调用
         assert any(
             len(c.args) >= 3 and c.args[2] == AfterCloseRunStatus.PUBLISHING.value
@@ -207,16 +218,18 @@ async def test_normal_publish_pointer_current_triggers_auction_and_aggregation()
         _stop_patches(patchers)
 
 
-async def test_superseded_run_not_consumed_by_auction_aggregation_events_chip():
+async def test_superseded_run_not_consumed_by_auction_events_chip():
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id)
     spies, patchers = _install_patches(
         job_run, resolve_side_effect=_superseded_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
-        # superseded run 不得触发 auction / aggregation / state events / chip
+        # superseded run 不得触发 auction / state events / chip
+        # （board aggregation 已退役恒不被调用，见 aggregation spy）
         assert not spies["auction"].called, "superseded run 不应调用 auction anchor"
-        assert not spies["aggregation"].called, "superseded run 不应调用 board aggregation"
+        assert not spies["aggregation"].called, \
+            "board aggregation 已退役，任何情况下都不应被调用"
         assert not spies["events"].called, "superseded run 不应生成 state events"
         assert not spies["chip"].called, "superseded run 不应入队 chip"
     finally:
@@ -245,13 +258,15 @@ async def test_skip_publish_pointer_current_recovers_but_no_normal_publish_steps
 
 
 # ---------------------------------------------------------------------------
-# [Phase 4.4 RB-01 2026-08-07] Recovery Boundary Closure
-# Board aggregation 是 mandatory 步骤，判据只依赖 stock_core pointer 是否已发布，
-# 不受 skip_publish 控制。publishing 检查点上的断点恢复必须补齐 aggregation，
-# 否则 review 前置条件（aggregation_status == "succeeded"）永不满足。
+# [Phase 4.4 RB-01 / Slice 4A9] Recovery Boundary Closure
+# Board aggregation 曾是 mandatory 步骤，判据只依赖 stock_core pointer 是否已发布，
+# 不受 skip_publish 控制。publishing 检查点上的断点恢复必须补齐 aggregation。
+# [Slice 4A9] legacy board aggregation 已退役：不再执行 compute_all_boards，
+# 断点恢复不再补齐 aggregation；Review 只依赖已发布 stock_core，因此仍须执行。
 # ---------------------------------------------------------------------------
-async def test_rb01_skip_publish_recovery_still_runs_mandatory_board_aggregation():
-    """publishing 检查点断点恢复：stock_core 已发布 → 必须补齐 board aggregation。"""
+async def test_rb01_skip_publish_recovery_does_not_run_retired_board_aggregation():
+    """publishing 检查点断点恢复：stock_core 已发布 → aggregation 已退役必须不被调用，
+    但 Review 仍须执行（只依赖已发布 stock_core）。"""
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
                             last_completed_step="publishing")
@@ -259,16 +274,18 @@ async def test_rb01_skip_publish_recovery_still_runs_mandatory_board_aggregation
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=True)
-        assert spies["aggregation"].called, (
-            "RB-01：skip_publish 断点恢复下 mandatory board aggregation 必须执行，"
-            "不得因 skip_publish 被永久跳过"
+        assert not spies["aggregation"].called, (
+            "[Slice 4A9] board aggregation 已退役，skip_publish 断点恢复也不得执行"
+        )
+        assert spies["create_run"].called, (
+            "Review 只依赖已发布 stock_core，断点恢复下仍必须执行"
         )
     finally:
         _stop_patches(patchers)
 
 
-async def test_rb01_skip_publish_recovery_runs_review_after_aggregation():
-    """publishing 断点恢复：aggregation 成功后 review 前置条件满足，review 必须执行。"""
+async def test_rb01_skip_publish_recovery_runs_review_without_board_aggregation():
+    """publishing 断点恢复：不再执行 aggregation，chip 与 Review 均正常执行。"""
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
                             last_completed_step="publishing")
@@ -276,19 +293,20 @@ async def test_rb01_skip_publish_recovery_runs_review_after_aggregation():
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=True)
-        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
+        assert not spies["aggregation"].called, \
+            "[Slice 4A9] 断点恢复不得执行 board aggregation"
         assert spies["create_run"].called, (
-            "RB-01：aggregation 成功后 review 前置条件应满足，review 必须执行"
+            "Review 只依赖已发布 stock_core，断点恢复下必须执行"
         )
-        assert record.index("chip") < record.index("aggregation"), (
-            "断点恢复下 chip 仍必须早于 board aggregation（PC-8）"
+        assert "aggregation" not in record, (
+            f"[Slice 4A9] 执行序列不得出现 board aggregation，实际: {record}"
         )
     finally:
         _stop_patches(patchers)
 
 
 async def test_rb01_stock_core_not_published_still_skips_aggregation():
-    """stock_core 未发布（superseded）→ aggregation 仍必须跳过，修复不放宽边界。"""
+    """stock_core 未发布（superseded）→ aggregation 已退役恒不执行，且 Review 不执行。"""
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
                             last_completed_step="publishing")
@@ -297,70 +315,24 @@ async def test_rb01_stock_core_not_published_still_skips_aggregation():
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=True)
         assert not spies["aggregation"].called, (
-            "stock_core 未发布时 board aggregation 仍不得执行"
+            "[Slice 4A9] board aggregation 已退役，任何情况下都不应执行"
         )
     finally:
         _stop_patches(patchers)
 
 
 # ---------------------------------------------------------------------------
-# [Phase 4.4.1 RB-01 收口] Board Aggregation publication / pointer 闭环
-# orchestrator 不得因 compute_all_boards() 未抛异常就写 "succeeded"。
-# 只有 batch 真正 succeeded 且当前正式 market_aggregation pointer
-# 已确认属于当前 snapshot_run_id 时，才设置 _aggregation_status="succeeded"。
-# partial / failed / blocked_external_population / pointer mismatch 必须如实映射，
-# Review 不得执行。
+# [Phase 4.4.1 RB-01 收口 / Slice 4A9] Board Aggregation 退役后不再 gate Review
+# 原语义：orchestrator 不得因 compute_all_boards() 未抛异常就写 "succeeded"，
+# 只有 batch 真正 succeeded 且 market_aggregation pointer 确认属于当前 lineage 时，
+# 才置 _aggregation_status="succeeded"；partial / failed / pointer mismatch 会阻断 Review。
+# [Slice 4A9] legacy board aggregation 已退役：compute_all_boards 不再被调用，
+# _aggregation_status 恒为 "skipped"，且不再参与 Review 执行与 PARTIAL_SUCCESS 判定。
+# Review 只依赖已发布 stock_core。
 # ---------------------------------------------------------------------------
-async def test_rb011_aggregation_pointer_mismatch_blocks_review():
-    """compute_all_boards 返回 succeeded 但 live pointer 指向其它 run
-    （pointer_confirmed=False）→ 不得假绿，Review 不得执行。"""
-    snap_id = uuid.uuid4()
-    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
-                            last_completed_step="publishing")
-    spies, patchers = _install_patches(
-        job_run, resolve_side_effect=_published_resolution)
-    spies["aggregation"].return_value = {
-        "status": "succeeded",
-        "pointer_confirmed": False,  # live pointer 指向旧 core / 错误 run
-        "published": 1,
-    }
-    try:
-        await _run_orchestrator(job_run=job_run, skip_publish=True)
-        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
-        assert not spies["create_run"].called, (
-            "RB-01.1：live pointer 未确认属于当前 lineage 时不得假绿，"
-            "Review 前置条件不满足，必须跳过"
-        )
-    finally:
-        _stop_patches(patchers)
-
-
-async def test_rb011_aggregation_partial_status_blocks_review():
-    """compute_all_boards status=partial → _aggregation_status != succeeded，
-    Review 不得执行。"""
-    snap_id = uuid.uuid4()
-    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
-                            last_completed_step="publishing")
-    spies, patchers = _install_patches(
-        job_run, resolve_side_effect=_published_resolution)
-    spies["aggregation"].return_value = {
-        "status": "partial",
-        "pointer_confirmed": False,
-        "published": 0,
-    }
-    try:
-        await _run_orchestrator(job_run=job_run, skip_publish=True)
-        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
-        assert not spies["create_run"].called, (
-            "RB-01.1：partial aggregation 不得使 review 前置条件满足"
-        )
-    finally:
-        _stop_patches(patchers)
-
-
-async def test_rb011_aggregation_failed_status_blocks_review():
-    """compute_all_boards status=failed → _aggregation_status != succeeded，
-    Review 不得执行。"""
+async def test_rb011_retired_aggregation_failed_does_not_block_review():
+    """即使 legacy compute_all_boards 会返回 failed，AfterClose 也不再调用它；
+    Review 仍须执行（只依赖已发布 stock_core）。"""
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
                             last_completed_step="publishing")
@@ -373,16 +345,18 @@ async def test_rb011_aggregation_failed_status_blocks_review():
     }
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=True)
-        assert not spies["create_run"].called, (
-            "RB-01.1：failed aggregation 不得使 review 前置条件满足"
+        assert not spies["aggregation"].called, \
+            "[Slice 4A9] board aggregation 已退役，不得被调用"
+        assert spies["create_run"].called, (
+            "Review 只依赖已发布 stock_core，legacy aggregation 状态不再阻断 Review"
         )
     finally:
         _stop_patches(patchers)
 
 
-async def test_rb011_aggregation_succeeded_pointer_confirmed_runs_review():
-    """publishing 断点恢复 happy path：status=succeeded 且 pointer_confirmed
-    → _aggregation_status="succeeded"，Review 必须执行（验证修复未误伤正常路径）。"""
+async def test_rb011_retired_aggregation_pointer_mismatch_does_not_block_review():
+    """即使 legacy compute_all_boards 会返回 pointer mismatch，AfterClose 也不再调用它；
+    Review 仍须执行。"""
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id,
                             last_completed_step="publishing")
@@ -390,32 +364,70 @@ async def test_rb011_aggregation_succeeded_pointer_confirmed_runs_review():
         job_run, resolve_side_effect=_published_resolution)
     spies["aggregation"].return_value = {
         "status": "succeeded",
-        "pointer_confirmed": True,
+        "pointer_confirmed": False,  # live pointer 指向旧 core / 错误 run（原会阻断）
         "published": 1,
     }
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=True)
-        assert spies["aggregation"].called, "断点恢复应执行 board aggregation"
+        assert not spies["aggregation"].called, \
+            "[Slice 4A9] board aggregation 已退役，不得被调用"
         assert spies["create_run"].called, (
-            "RB-01.1：succeeded + pointer_confirmed 时 review 前置条件满足，"
-            "Review 必须执行"
+            "Review 只依赖已发布 stock_core，legacy pointer 状态不再阻断 Review"
+        )
+    finally:
+        _stop_patches(patchers)
+
+
+async def test_rb011_retired_aggregation_skipped_in_final_status_and_no_partial_success():
+    """终态断言：aggregation_status=="skipped"，且 legacy aggregation 不再触发
+    PARTIAL_SUCCESS（其余可选阶段均成功 → 主任务为 SUCCEEDED）。"""
+    snap_id = uuid.uuid4()
+    job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id)
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+    # Review 发布门禁/发布成功（PURE_UNIT 不连 PG）：让 review 阶段成功，
+    # 从而隔离验证「legacy aggregation 已退役不再触发 PARTIAL_SUCCESS」。
+    gate_patch = patch(
+        "app.services.review_publication_service.evaluate_publish_gate",
+        new=AsyncMock(return_value=(True, [])),
+    )
+    pub_patch = patch(
+        "app.services.review_orchestrator_service.publish_run",
+        new=AsyncMock(return_value=(MagicMock(id=uuid.uuid4()), MagicMock())),
+    )
+    gate_patch.start()
+    pub_patch.start()
+    patchers.extend([gate_patch, pub_patch])
+    try:
+        await _run_orchestrator(job_run=job_run, skip_publish=False)
+        assert spies["update_status"].called, "终态必须写 orchestrator status"
+        last_call = spies["update_status"].call_args_list[-1]
+        assert last_call.kwargs["status"] == AfterCloseRunStatus.SUCCEEDED, (
+            "其余可选阶段均成功时，主任务应为 SUCCEEDED（而非 PARTIAL_SUCCESS）"
+        )
+        payload = last_call.kwargs.get("payload") or {}
+        assert payload.get("aggregation_status") == "skipped", (
+            f"兼容字段 aggregation_status 应如实为 skipped，实际: "
+            f"{payload.get('aggregation_status')}"
+        )
+        assert payload.get("partial_success") is False, (
+            "legacy aggregation 已退役，不得参与 partial_success 判定"
         )
     finally:
         _stop_patches(patchers)
 
 
 # ---------------------------------------------------------------------------
-# [P1-2 2026-08-07] post-core 依赖顺序收口（V2.1 PC-8）
-# Chip / State Events 不得等待 Board Aggregation：
+# [P1-2 2026-08-07 / Slice 4A9] post-core 依赖顺序收口（V2.1 PC-8）
+# Chip / State Events 不依赖 Board Aggregation：
 #   stock_core published
 #     ├─ state events
 #     ├─ enqueue chip
 #     ├─ auction anchor
 #     └─ DSA projection
 #           ↓
-#        board aggregation
-#           ↓
 #         review
+# [Slice 4A9] legacy board aggregation 已退役，不再出现在该链中。
 # ---------------------------------------------------------------------------
 def _install_patches_with_order(job_run, *, resolve_side_effect):
     """与 _install_patches 相同，但记录各 step 的真实调用顺序到 return 元组。"""
@@ -440,33 +452,37 @@ def _install_patches_with_order(job_run, *, resolve_side_effect):
     return spies, patchers, record
 
 
-async def test_p1_2_chip_enqueue_before_board_aggregation():
-    """normal stock_core publication：chip 入队必须发生在 board aggregation 之前。"""
+async def test_p1_2_chip_enqueue_and_no_board_aggregation():
+    """normal stock_core publication：chip 入队正常执行；board aggregation 已退役
+    不得出现在执行序列中。"""
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
     spies, patchers, record = _install_patches_with_order(
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
         assert spies["chip"].called, "normal publish 应入队 chip"
-        assert spies["aggregation"].called, "normal publish 应调用 board aggregation"
-        assert record.index("chip") < record.index("aggregation"), (
-            "chip 入队必须早于 board aggregation（PC-8：chip 不得等待 aggregation）"
+        assert not spies["aggregation"].called, \
+            "[Slice 4A9] board aggregation 已退役，不得被调用"
+        assert "aggregation" not in record, (
+            f"[Slice 4A9] 执行序列不得出现 board aggregation，实际: {record}"
         )
     finally:
         _stop_patches(patchers)
 
 
-async def test_p1_2_state_events_before_board_aggregation():
-    """normal stock_core publication：state events 必须发生在 board aggregation 之前。"""
+async def test_p1_2_state_events_and_no_board_aggregation():
+    """normal stock_core publication：state events 正常生成；board aggregation 已退役
+    不得出现在执行序列中。"""
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
     spies, patchers, record = _install_patches_with_order(
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
         assert spies["events"].called, "normal publish 应生成 state events"
-        assert spies["aggregation"].called, "normal publish 应调用 board aggregation"
-        assert record.index("events") < record.index("aggregation"), (
-            "state events 必须早于 board aggregation（PC-8：events 不得等待 aggregation）"
+        assert not spies["aggregation"].called, \
+            "[Slice 4A9] board aggregation 已退役，不得被调用"
+        assert "aggregation" not in record, (
+            f"[Slice 4A9] 执行序列不得出现 board aggregation，实际: {record}"
         )
     finally:
         _stop_patches(patchers)
@@ -488,7 +504,8 @@ async def test_p1_2_superseded_does_not_trigger_events_chip_auction_aggregation(
         assert not spies["events"].called, "superseded run 不应生成 state events"
         assert not spies["chip"].called, "superseded run 不应入队 chip"
         assert not spies["auction"].called, "superseded run 不应调用 auction anchor"
-        assert not spies["aggregation"].called, "superseded run 不应调用 board aggregation"
+        assert not spies["aggregation"].called, \
+            "board aggregation 已退役，任何情况下都不应被调用"
         # 这四类 post-core 副作用都不应出现在执行序列中
         post_core = {"events", "chip", "auction", "aggregation"}
         assert post_core.isdisjoint(set(record)), (

@@ -710,7 +710,7 @@ class AfterCloseRunStatus(StrEnum):
     任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
 
     [Step Contract 2026-08-03] 总任务级终态补充：
-    - PARTIAL_SUCCESS：核心已发布（stock_core/board）但可选阶段（auction/review/chip）失败/跳过
+    - PARTIAL_SUCCESS：核心已发布（stock_core）但可选阶段（auction/review/chip）失败/跳过
     - INTERRUPTED：Worker 崩溃/租约失效，由 watchdog 标记（区别于主动 failed）
     - CANCELLED：管理员协作式取消
     步骤级状态（succeeded/skipped/unavailable/failed/timed_out/cancelled/interrupted）
@@ -1714,9 +1714,9 @@ async def _execute_review_step(
     prereq_missing: bool = False
 
     if not skip_review:
-        # [Slice 3] Board Analysis 不再是 Review 前置条件：只要 stock_core 已发布且
-        # snapshot 存在，无论 board aggregation 状态（succeeded/degraded/failed/skipped/
-        # mismatch）都执行 Review。Board 仍作为 legacy side-product 运行，但不 gate Review。
+        # [Slice 3 / Slice 4A9] Board Analysis 不是 Review 前置条件，且 legacy
+        # board aggregation 已退役：只要 stock_core 已发布且 snapshot 存在，
+        # 都执行 Review（只依赖已发布 stock_core），不再有 aggregation 状态参与判断。
         if stock_core_published and snapshot_run_id is not None:
             # 断点恢复：先从 metadata 读取已有 review_run_id
             async with AsyncSessionLocal() as db:
@@ -2167,7 +2167,7 @@ async def resolve_stock_core_published(
     - superseded=True : pointer 存在但指向别的 run（本 run 被抢占）
     - 两者皆 False    : 无 pointer（未发布）
 
-    这是 Chip 入队、auction anchor、board aggregation 的唯一判据来源。
+    这是 Chip 入队、auction anchor 的唯一判据来源（[Slice 4A9] legacy board aggregation 已退役）。
     normal publish 路径与 skip_publish=True resume 路径共用同一判定，
     避免各自用局部布尔（publish_failed / snapshot_error）推断“已发布”而产生分叉。
     """
@@ -2245,8 +2245,7 @@ async def execute_after_close_run(
     # [Phase4.2 corrective] 不再以顶部 "skipped" 默认值掩盖业务步骤未执行。
     # 这些状态变量由 normal publish 分支（执行 auction anchor / publishing checkpoint）
     # 或 skip_publish 分支（显式置 skipped）赋值，不得用统一的默认值假装“已处理”。
-    # [Phase 4.4 RB-01] board aggregation 例外：它是 mandatory 步骤，
-    # _aggregation_status 在 top-level post-core 段按 stock_core 发布状态统一赋值。
+    # [Slice 4A9] legacy board aggregation 已退役，_aggregation_status 恒为 "skipped"。
 
     # [JOB-02] 设置 lease_epoch ContextVar，子任务（asyncio.create_task）自动继承
     # _update_heartbeat_and_step 读取此 ContextVar 决定是否使用 fenced UPDATE
@@ -3259,7 +3258,7 @@ async def execute_after_close_run(
 
             # ============================================================
             # [P0 corrective] normal publish 专属步骤（superseded handling /
-            # auction anchor / board aggregation / publishing checkpoint）。
+            # auction anchor / publishing checkpoint）。
             # 这些步骤属于「正常发布」分支，仅当 not skip_publish 时执行；
             # skip_publish 断点恢复分支不得错误翻转到这些步骤。
             # ============================================================
@@ -3289,9 +3288,9 @@ async def execute_after_close_run(
                     )
                     await db.commit()
 
-            # [P0-4 aggregation dependency closure] After stock_core pointer is
-            # published, trigger auction anchor generation then board analysis.
-            # 接入顺序: stock_core → chip_consensus → auction_anchor → market_aggregation → review
+            # [P0-4] After stock_core pointer is published, trigger auction anchor
+            # generation. 接入顺序: stock_core → chip_consensus → auction_anchor → review
+            # [Slice 4A9] legacy board aggregation 已退役，不再出现在此链中。
             # [P0-1/P0-2 修复 2026-07-31] 主流程通过统一入口 generate_and_publish_auction_anchors
             # 完成生成+发布。chip 未完成时生成 structure_only 并发布；chip 完成后由
             # chip_consensus_service 回调重新生成完整锚点并原子切换 publication。
@@ -3348,10 +3347,9 @@ async def execute_after_close_run(
                     )
 
             # [P1-2 2026-08-07] post-core 依赖顺序收口（V2.1 PC-8）：
-            # stock_core 发布身份确认后，state events 与 chip 入队必须早于
-            # board aggregation —— Chip / State Events 不得等待 Board Aggregation。
-            # auction anchor 与之同属 post-core 层；chip/state events 不依赖
-            # auction 或 aggregation 的完成。Board Aggregation 完成后再 Review。
+            # stock_core 发布身份确认后，state events 与 chip 入队先行，
+            # 再执行 auction anchor 与 Review（[Slice 4A9] legacy board aggregation
+            # 已退役，不再作为中间 mandatory 阶段）。
             #
             # 顺序：stock_core published
             #         ├─ state events
@@ -3359,15 +3357,13 @@ async def execute_after_close_run(
             #         ├─ auction anchor
             #         └─ DSA projection（保持现有 canonical projection 合同）
             #               ↓
-            #            board aggregation
-            #               ↓
             #             review
             #
-            # state events / chip / board aggregation 已下移到本 if 块之后的
-            # top-level post-core 段（见下方 [P1-2] 段），以便：
-            #   - normal publish：auction → state events → chip → aggregation → review
-            #   - skip_publish 断点恢复：state events / chip / board aggregation 仍执行
-            #     （chip 重新入队；aggregation 为 mandatory，见 [Phase 4.4 RB-01]），
+            # state events / chip 已下移到本 if 块之后的 top-level post-core 段
+            # （见下方 [P1-2] 段），以便 normal 与 skip_publish 断点恢复均执行：
+            #   - normal publish：auction → state events → chip → review
+            #   - skip_publish 断点恢复：state events / chip 仍执行
+            #     （chip 重新入队；legacy aggregation 已退役不再执行），
             #     仅 auction anchor 与 publishing 检查点不执行。
 
             # [Phase5] - publishing 完成，更新心跳 + 检查点
@@ -3398,8 +3394,8 @@ async def execute_after_close_run(
             # stock_core publication；否则（pointer 指向别人 / 不存在）一律视为未发布/被抢占，
             # chip 不得入队。禁止用 publish_failed=False 等局部布尔推断“已发布”。
             # 注意：上面的 normal publish 专属步骤（auction anchor / publishing checkpoint）
-            # **不**在 skip_publish 分支执行；board aggregation 是 mandatory 步骤，
-            # 在下方 top-level post-core 段按 stock_core 发布状态执行（[Phase 4.4 RB-01]）。
+            # **不**在 skip_publish 分支执行；legacy board aggregation 已退役（[Slice 4A9]），
+            # 不再作为任何分支的 mandatory 步骤。
             _stock_core_superseded = False
             if snapshot_run_id is not None:
                 # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
@@ -3421,8 +3417,8 @@ async def execute_after_close_run(
                 _stock_core_published = False
                 _stock_core_superseded = False
             # skip_publish 路径不执行 normal publish 专属步骤，显式置 skipped 以如实反映未执行。
-            # 注意：_aggregation_status 由下方 top-level post-core 段无条件重新赋值，
-            # 此处默认值仅为防御性初始化（[Phase 4.4 RB-01]：aggregation 不再受 skip_publish 控制）。
+            # 注意：_aggregation_status 恒为 "skipped"（[Slice 4A9] legacy aggregation 已退役），
+            # 此处默认值仅为防御性初始化。
             _auction_anchor_status = "skipped"
             _auction_publication_id = None
             _aggregation_status = "skipped"
@@ -3435,12 +3431,9 @@ async def execute_after_close_run(
         #   ├─ auction anchor（已在上方 if not skip_publish 块内）
         #   └─ DSA projection（保持现有 canonical projection 合同）
         #         ↓
-        #      board aggregation（mandatory：normal 与 skip_publish 断点恢复均执行）
-        #         ↓
         #       review
-        # Chip / State Events 不等待 Board Aggregation；[Phase 4.4 RB-01] aggregation 只以
-        # stock_core 是否已发布为守卫，skip_publish 断点恢复同样补齐 aggregation 与 review，
-        # 仅 auction anchor 属 normal publish 专属。
+        # [Slice 4A9] legacy board aggregation 已退役，不再出现在该链中；
+        # Chip / State Events 不依赖 aggregation，Review 只依赖已发布 stock_core。
         if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
             logger.info(
                 "[BOUNDARY-P3] before state-events job=%s trade=%s pid=%s",
@@ -3510,7 +3503,7 @@ async def execute_after_close_run(
             "[BOUNDARY-P5] before chip-enqueue job=%s trade=%s pid=%s",
             str(job_run_id), trade_date, os.getpid(),
         )
-        # [P1-2] chip 入队（stock_core 发布成功后，早于 board aggregation）
+        # [P1-2] chip 入队（stock_core 发布成功后，在 post-core 段执行）
         # [AUD-08 2026-08-07] chip 只依赖 stock_core，与 Review 无因果关系，
         # 前移到 post-core 段，判据复用 stock_core 发布成功条件。
         # 幂等依据：create_after_close_chip_consensus_job 以
@@ -3533,92 +3526,12 @@ async def execute_after_close_run(
                 str(job_run_id), _chip_enqueue_status, os.getpid(),
             )
 
-        # Aggregation binds same source_core_run_id; failure only reruns
-        # aggregation, does NOT reverse core. Main run status distinguishes
-        # core_published vs optional_failure.
-        # [Phase 4.4 RB-01 2026-08-07] Board aggregation 是 mandatory 步骤，
-        # 判据只依赖「当前 stock_core pointer 是否已正式发布」，不再受
-        # skip_publish 控制。skip_publish 仅表示"stock_core 已在上次尝试中发布，
-        # 本次不重复发布"，若据此跳过 aggregation，会使 publishing 检查点上的
-        # 断点恢复永久丢失 mandatory aggregation，并连带使 review 前置条件
-        # （aggregation_status == "succeeded"）永不满足。
-        # 重入安全：compute_all_boards 按 source_core_run_id + taxonomy /
-        # membership / algorithm_version 匹配既有 BoardAnalysisRun，
-        # published_at 非空时幂等复用，不重复聚合。
+        # [Slice 4A9] Legacy board aggregation 已退役：AfterClose 不再运行任何
+        # 板块聚合 / 发布 / pointer 确认，也不维护 legacy batch 状态。
+        # Unified Review 是当前正式板块分析唯一 owner，且 Review 只依赖已发布的
+        # stock_core（见下方 computing_review），因此此处不添加任何替代 Board 阶段。
+        # 兼容性：保留 metadata 键 aggregation_status，如实置为 "skipped"（该阶段已退役/不再执行）。
         _aggregation_status = "skipped"
-        if _stock_core_published and snapshot_run_id is not None:
-            logger.info(
-                "[BOUNDARY-P7] before board-aggregation job=%s trade=%s snap=%s pid=%s",
-                str(job_run_id), trade_date, snapshot_run_id, os.getpid(),
-            )
-            try:
-                from app.services.board_analysis_service import (
-                    compute_all_boards,
-                )
-
-                async with AsyncSessionLocal() as agg_db:
-                    agg_result = None
-                    agg_result = await compute_all_boards(
-                        agg_db,
-                        trade_date=trade_date,
-                        publish=True,
-                    )
-                    await agg_db.commit()
-                # [Phase 4.4.1 RB-01 收口] 不得因 compute_all_boards() 未抛异常
-                # 就写 "succeeded"。只有：
-                #   (1) batch 真正 succeeded 且
-                #   (2) 当前正式 market_aggregation pointer 已确认属于当前
-                #       snapshot_run_id（lineage 一致）时，
-                # 才设置 _aggregation_status="succeeded"。
-                # failed / 非终态 / pointer mismatch 必须如实映射，Review 不得执行。
-                # [Phase 4D.3 / PRD 31 PC-42] degraded-publishable 的 partial batch
-                # 若已确认写入正式 pointer，则 board_aggregation = DEGRADED，
-                # **不阻断 Review**（MANDATORY != PERFECT）。
-                _agg_batch_status = (
-                    agg_result.get("status") if isinstance(agg_result, dict) else None
-                )
-                _agg_pointer_confirmed = (
-                    agg_result.get("pointer_confirmed")
-                    if isinstance(agg_result, dict)
-                    else False
-                )
-                if _agg_batch_status == "succeeded" and _agg_pointer_confirmed:
-                    # batch 真正 succeeded 且当前正式 market_aggregation pointer
-                    # 已确认属于当前 snapshot_run_id（lineage 一致）。
-                    _aggregation_status = "succeeded"
-                elif _agg_batch_status == "partial" and _agg_pointer_confirmed:
-                    # [PC-42] degraded 但已正式发布 pointer → Review 可继续。
-                    _aggregation_status = "degraded"
-                elif _agg_batch_status in ("partial", "failed"):
-                    # 如实映射 batch 的非成功态（未确认 pointer 的 partial 仍阻断）。
-                    _aggregation_status = _agg_batch_status
-                elif _agg_batch_status == "succeeded" and not _agg_pointer_confirmed:
-                    # batch 计算成功但正式 pointer 未确认（live pointer 指向
-                    # 旧 core / 错误 run，或 reconciliation 未通过）→ 不得假绿。
-                    _aggregation_status = "pointer_mismatch"
-                else:
-                    # 兜底：status 未知或缺失（不预期路径），不得假绿。
-                    _aggregation_status = (
-                        _agg_batch_status if _agg_batch_status else "pointer_mismatch"
-                    )
-                logger.info(
-                    "[AfterClose] board aggregation 完成: trade_date=%s, "
-                    "batch_status=%s, pointer_confirmed=%s, aggregation_status=%s",
-                    trade_date, _agg_batch_status, _agg_pointer_confirmed,
-                    _aggregation_status,
-                )
-                logger.info(
-                    "[BOUNDARY-P8] after board-aggregation job=%s result=%s pid=%s",
-                    str(job_run_id), _aggregation_status, os.getpid(),
-                )
-            except Exception as agg_exc:
-                _aggregation_status = "failed"
-                logger.warning(
-                    "[AfterClose] board aggregation 失败（optional，不影响 core）: "
-                    "trade_date=%s, error=%s",
-                    trade_date, agg_exc,
-                    exc_info=True,
-                )
 
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
         logger.info(
@@ -3761,13 +3674,14 @@ async def execute_after_close_run(
                 if published_run is not None and published_run.published_at
                 else None
             )
-            # [P0-1 2026-08-03] 核心已发布但可选阶段（auction/review/aggregation）失败时，
+            # [P0-1 2026-08-03] 核心已发布但可选阶段（auction/review/chip）失败时，
             # 主任务状态为 PARTIAL_SUCCESS（而非 succeeded），明确表达"核心成功、后置降级"。
+            # [Slice 4A9] legacy board aggregation 已退役、不再执行，其状态恒为
+            # "skipped"，因此不再参与 partial_success 判定。
             # stock_core 被 superseded（pointer 指向其他 run）也视为部分成功。
             _optional_failed = (
                 _review_failed
                 or _auction_anchor_status == "failed"
-                or _aggregation_status == "failed"
                 or _stock_core_superseded
                 # [Phase0-Fix#8] chip 入队失败纳入 partial_success 判定
                 or _chip_enqueue_status == "failed"
@@ -4187,7 +4101,6 @@ async def _inspect_run_artifacts(
     artifacts: dict[str, Any] = {
         "stock_core_published": False,
         "stock_core_data_run_id": None,
-        "market_aggregation_published": False,
         "checked_trade_date": None,
     }
     meta = _parse_metadata(job_run)
@@ -4204,18 +4117,18 @@ async def _inspect_run_artifacts(
                     FROM factor_publications
                     WHERE trade_date = CAST(:trade_date AS date)
                       AND scope_type = 'market'
-                      AND publication_kind IN ('stock_core', 'market_aggregation')
+                      AND publication_kind = 'stock_core'
                     """
                 ),
                 {"trade_date": trade_date_raw},
             )
         ).fetchall()
         for kind, data_run_id in rows:
+            # [Slice 4A9] legacy board aggregation 已退役，AfterClose 不再核验
+            # market_aggregation pointer；reconcile 只关注 stock_core 产物。
             if kind == "stock_core":
                 artifacts["stock_core_published"] = True
                 artifacts["stock_core_data_run_id"] = str(data_run_id)
-            elif kind == "market_aggregation":
-                artifacts["market_aggregation_published"] = True
     except Exception as exc:
         logger.warning("[AfterClose] reconcile 产物核验失败（不阻断）: %s", exc)
         artifacts["inspect_error"] = str(exc)[:200]
