@@ -69,10 +69,10 @@ function BreakTurnSection({ vm }: { vm: StructureBreakTurnVM }) {
   return (
     <div className={styles.structSection}>
       <div className={styles.structSectionTitle}>结构破位 / 转折</div>
-      {vm.availability === 'unavailable' ? (
+      {vm.contractInvalid ? (
+        <div className={styles.structContractInvalid}>结构事件合同异常（status/denominator 不可用或非法）</div>
+      ) : vm.availability === 'unavailable' ? (
         <div className={styles.structUnavailable}>结构事件覆盖不可用（无有效覆盖成员）</div>
-      ) : vm.zeroDenominator ? (
-        <div className={styles.structUnavailable}>事件覆盖已就绪，但当前无可比较覆盖成员</div>
       ) : vm.zeroEventToday ? (
         <div className={styles.structNeutral}>
           覆盖有效；今日未观察到该组结构事件
@@ -226,8 +226,15 @@ function EvolutionSection({ vm }: { vm: StructureEvolutionPositionVM }) {
         <div className={styles.structBlockTitle}>结构事件</div>
         {!vm.events ? (
           <div className={styles.structUnavailable}>结构事件不可用</div>
-        ) : vm.events.denominator === null && vm.events.leveled.length === 0 && vm.events.extreme.length === 0 ? (
-          <div className={styles.structUnavailable}>事件覆盖不可用（无有效覆盖成员）</div>
+        ) : vm.events.contractInvalid ? (
+          <div className={styles.structContractInvalid}>结构事件合同异常（status/denominator 不可用或非法）</div>
+        ) : vm.events.availability === 'unavailable' ? (
+          <div className={styles.structUnavailable}>结构事件覆盖不可用（无有效覆盖成员）</div>
+        ) : vm.events.zeroEventToday ? (
+          <div className={styles.structNeutral}>
+            覆盖有效；今日未观察到该组结构事件
+            {vm.events.denominator !== null && <span className={styles.structDenominator}>n = {vm.events.denominator}</span>}
+          </div>
         ) : (
           (() => {
             const ev = vm.events!

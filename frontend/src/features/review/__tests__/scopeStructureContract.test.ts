@@ -50,12 +50,13 @@ test('member_ratio is persisted, never event_count/denominator recompute', () =>
   assert.equal(vm.leveled[0].eventCount, 7)
 })
 
-// ----- §28 three event states (G5) -----
-test('G5 three availability states remain distinguishable', () => {
+// ----- §1/§2/§3 real producer event states (G5) -----
+test('G5 real event states: unavailable / ready-empty / ready-events / ready-denom=0 fail-closed', () => {
   const unavailable = parseStructureBreakTurn({
     bos_choch_events: { status: 'unavailable', denominator: null, cells: { leveled: {}, extreme: {} } },
   }) as StructureBreakTurnVM
   assert.equal(unavailable.availability, 'unavailable')
+  assert.equal(unavailable.contractInvalid, false)
   assert.equal(unavailable.denominator, null)
   assert.equal(unavailable.leveled.length, 0)
 
@@ -66,12 +67,87 @@ test('G5 three availability states remain distinguishable', () => {
   assert.equal(zeroEvent.zeroEventToday, true)
   assert.equal(zeroEvent.denominator, 40)
 
+  const withEvents = parseStructureBreakTurn({
+    bos_choch_events: {
+      status: 'ready',
+      denominator: 40,
+      cells: {
+        leveled: { c1: { event_type: 'BOS', direction: 'up', structure_level: 'Swing', event_count: 1, member_count: 1, member_ratio: 0.08 } },
+        extreme: {},
+      },
+    },
+  }) as StructureBreakTurnVM
+  assert.equal(withEvents.zeroEventToday, false)
+  assert.equal(withEvents.leveled.length, 1)
+
+  // status=ready + denominator=0 is NOT a production state -> fail closed (R3D-V §1/§3)
   const zeroDenom = parseStructureBreakTurn({
     bos_choch_events: { status: 'ready', denominator: 0, cells: { leveled: {}, extreme: {} } },
   }) as StructureBreakTurnVM
-  assert.equal(zeroDenom.availability, 'ready')
-  assert.equal(zeroDenom.zeroDenominator, true)
+  assert.equal(zeroDenom.contractInvalid, true)
   assert.equal(zeroDenom.denominator, 0)
+})
+
+// ----- §2 outer status fail-closed (G5) -----
+test('G5 outer status must be ready/unavailable; missing/unknown -> contract invalid', () => {
+  const missing = parseStructureBreakTurn({
+    bos_choch_events: { denominator: 40, cells: { leveled: {}, extreme: {} } },
+  }) as StructureBreakTurnVM
+  assert.equal(missing.contractInvalid, true)
+
+  const unknown = parseStructureBreakTurn({
+    bos_choch_events: { status: 'weird', denominator: 40, cells: { leveled: {}, extreme: {} } },
+  }) as StructureBreakTurnVM
+  assert.equal(unknown.contractInvalid, true)
+})
+
+// ----- §4 G6 availability preserved from persisted status -----
+test('G6 event availability A-F (unavailable / ready-empty / ready-events / ready-denom=0 / missing / unknown)', () => {
+  const mk = (payload: unknown) => {
+    const g6 = parseStructureEvolutionPosition({
+      ob_and_eq_events: payload,
+    }) as StructureEvolutionPositionVM
+    return g6.events!
+  }
+
+  // A. unavailable + denominator null + empty
+  const a = mk({ status: 'unavailable', denominator: null, cells: { leveled: {}, extreme: {} } })
+  assert.equal(a.availability, 'unavailable')
+  assert.equal(a.contractInvalid, false)
+  assert.equal(a.denominator, null)
+  assert.equal(a.zeroEventToday, false)
+
+  // B. ready + denominator 40 + empty -> zeroEventToday
+  const b = mk({ status: 'ready', denominator: 40, cells: { leveled: {}, extreme: {} } })
+  assert.equal(b.availability, 'ready')
+  assert.equal(b.zeroEventToday, true)
+  assert.equal(b.denominator, 40)
+
+  // C. ready + denominator 40 + events
+  const c = mk({
+    status: 'ready',
+    denominator: 40,
+    cells: {
+      leveled: { c1: { event_type: 'OB_CREATED', direction: 'bullish', structure_level: 'Swing', event_count: 2, member_count: 2, member_ratio: 0.05 } },
+      extreme: { EQH: { event_count: 1, member_count: 1, member_ratio: 0.025 } },
+    },
+  })
+  assert.equal(c.availability, 'ready')
+  assert.equal(c.zeroEventToday, false)
+  assert.equal(c.leveled.length, 1)
+  assert.equal(c.extreme.length, 1)
+
+  // D. ready + denominator 0 -> fail closed
+  const d = mk({ status: 'ready', denominator: 0, cells: { leveled: {}, extreme: {} } })
+  assert.equal(d.contractInvalid, true)
+
+  // E. missing status -> invalid
+  const e = mk({ denominator: 40, cells: { leveled: {}, extreme: {} } })
+  assert.equal(e.contractInvalid, true)
+
+  // F. unknown status -> invalid
+  const f = mk({ status: 'pending', denominator: 40, cells: { leveled: {}, extreme: {} } })
+  assert.equal(f.contractInvalid, true)
 })
 
 // ----- §29 leveled key opaqueness -----
@@ -230,11 +306,13 @@ test('alignment persisted ratios; denominator 0 -> no valid members', () => {
   assert.equal(ready?.divergentRatio, 0.4)
   assert.equal(ready?.zeroDenominator, false)
 
+  // Real producer: categorical_state_distribution with denominator=0 -> ratios null
   const zero = parseStructureAlignment({
-    structure_alignment: { aligned_count: 0, aligned_ratio: 0, divergent_count: 0, divergent_ratio: 0, denominator: 0 },
+    structure_alignment: { aligned_count: 0, aligned_ratio: null, divergent_count: 0, divergent_ratio: null, denominator: 0 },
   })
   assert.equal(zero?.zeroDenominator, true)
-  assert.equal(zero?.alignedRatio, 0)
+  assert.equal(zero?.alignedRatio, null)
+  assert.equal(zero?.divergentRatio, null)
 })
 
 // ----- §35/§36 trailing distance scale + passthrough -----

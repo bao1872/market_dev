@@ -34,6 +34,20 @@ function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
 
+function isFiniteNonNegInt(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v) && Number.isInteger(v) && v >= 0
+}
+
+// Canonical event outer status must be exactly "ready" or "unavailable".
+// Anything else (missing/unknown) is contract invalidity -> fail closed.
+type EventStatus = 'ready' | 'unavailable' | 'invalid'
+
+function normalizeEventStatus(v: unknown): EventStatus {
+  if (v === 'ready') return 'ready'
+  if (v === 'unavailable') return 'unavailable'
+  return 'invalid'
+}
+
 // ---------------------------------------------------------------------------
 // Direction tone (A-share: up=red, down=green; verbatim display token)
 // ---------------------------------------------------------------------------
@@ -78,8 +92,14 @@ export interface ExtremeStructureEventCell {
 }
 
 export interface StructureEventBundle {
-  /** persisted source denominator (PIT(T) ∩ coverage), verbatim. */
+  /** persisted canonical status: "ready" | "unavailable". */
+  availability: StructureEventAvailability
+  /** true when outer status is invalid (missing/unknown) -> fail closed. */
+  contractInvalid: boolean
+  /** persisted source denominator (PIT(T) ∩ coverage); null iff unavailable/contract-invalid. */
   denominator: number | null
+  /** true when ready + denominator>0 + cells empty (legal zero-event day). */
+  zeroEventToday: boolean
   /** presentation order only; NOT ranking. */
   leveled: LeveledStructureEventCell[]
   extreme: ExtremeStructureEventCell[]
@@ -94,10 +114,10 @@ export type StructureEventAvailability = 'ready' | 'unavailable'
 export interface StructureBreakTurnVM {
   groupKey: 'structure_break_turn'
   availability: StructureEventAvailability
+  /** true when outer status is invalid (missing/unknown/ready+denom=0) -> fail closed. */
+  contractInvalid: boolean
   /** true when ready + denominator>0 + cells empty (legal zero-event day). */
   zeroEventToday: boolean
-  /** true when ready + denominator==0 + cells empty (no comparable covered members). */
-  zeroDenominator: boolean
   denominator: number | null
   leveled: LeveledStructureEventCell[]
   hasContractInvalidity: boolean
@@ -175,8 +195,8 @@ function parseCanonicalLeveledCell(
     structureLevel = null
   }
 
-  const eventCount = isFiniteNumber(o.event_count) ? o.event_count : null
-  const memberCount = isFiniteNumber(o.member_count) ? o.member_count : null
+  const eventCount = isFiniteNonNegInt(o.event_count) ? o.event_count : null
+  const memberCount = isFiniteNonNegInt(o.member_count) ? o.member_count : null
   const memberRatio = isFiniteNumber(o.member_ratio) ? o.member_ratio : null
 
   const malformed =
@@ -207,7 +227,7 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
   const raw = groupFacts['bos_choch_events']
   if (raw === null || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
-  const status = typeof o['status'] === 'string' ? (o['status'] as string) : null
+  const status = normalizeEventStatus(o['status'])
   const denominator = isFiniteNumber(o['denominator']) ? (o['denominator'] as number) : null
   const cells = o['cells']
   const leveledMap =
@@ -215,13 +235,33 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
       ? ((cells as Record<string, unknown>)['leveled'] as Record<string, unknown>)
       : {}
 
+  // Outer contract fail-closed (R3D-V §2):
+  // - status must be exactly "ready"/"unavailable"
+  // - ready requires finite integer denominator > 0
+  // - ready + denominator == 0 is NOT a current production state -> invalid
+  const contractInvalid =
+    status === 'invalid' || (status === 'ready' && !(Number.isInteger(denominator) && (denominator as number) > 0))
+
   if (status === 'unavailable') {
     return {
       groupKey: 'structure_break_turn',
       availability: 'unavailable',
+      contractInvalid: false,
       zeroEventToday: false,
-      zeroDenominator: false,
       denominator: null,
+      leveled: [],
+      hasContractInvalidity: false,
+      hasMalformedCell: false,
+    }
+  }
+
+  if (contractInvalid) {
+    return {
+      groupKey: 'structure_break_turn',
+      availability: 'ready', // nominal; renderer must treat contractInvalid as fail-closed
+      contractInvalid: true,
+      zeroEventToday: false,
+      denominator: status === 'ready' ? denominator : null,
       leveled: [],
       hasContractInvalidity: false,
       hasMalformedCell: false,
@@ -246,14 +286,13 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
     leveled.push(parsed)
   }
 
-  const zeroEventToday = leveled.length === 0 && denominator !== null && denominator > 0
-  const zeroDenominator = leveled.length === 0 && denominator !== null && denominator === 0
+  const zeroEventToday = leveled.length === 0
 
   return {
     groupKey: 'structure_break_turn',
     availability: 'ready',
+    contractInvalid: false,
     zeroEventToday,
-    zeroDenominator,
     denominator,
     leveled,
     hasContractInvalidity,
@@ -319,7 +358,7 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
 
   if (raw && typeof raw === 'object') {
     const o = raw as Record<string, unknown>
-    const status = typeof o['status'] === 'string' ? (o['status'] as string) : null
+    const status = normalizeEventStatus(o['status'])
     const denominator = isFiniteNumber(o['denominator']) ? (o['denominator'] as number) : null
     const cells = o['cells']
     const leveledMap =
@@ -331,8 +370,11 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
         ? ((cells as Record<string, unknown>)['extreme'] as Record<string, unknown>)
         : {}
 
+    const contractInvalid =
+      status === 'invalid' || (status === 'ready' && !(Number.isInteger(denominator) && (denominator as number) > 0))
+
     const leveled: LeveledStructureEventCell[] = []
-    if (status !== 'unavailable') {
+    if (status !== 'unavailable' && !contractInvalid) {
       for (const [key, val] of Object.entries(leveledMap)) {
         const parsed = parseCanonicalLeveledCell(key, val, G6_LEVELED_TYPES)
         if (parsed === 'invalid') {
@@ -359,19 +401,29 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
         continue
       }
       const e = val as Record<string, unknown>
+      // extreme cell requires finite event_count/member_count/member_ratio (R3D-V §5)
+      const evCount = isFiniteNonNegInt(e['event_count']) ? (e['event_count'] as number) : null
+      const memCount = isFiniteNonNegInt(e['member_count']) ? (e['member_count'] as number) : null
+      const memRatio = isFiniteNumber(e['member_ratio']) ? (e['member_ratio'] as number) : null
+      if (evCount === null || memCount === null || memRatio === null) {
+        eventsMalformed = true
+        continue
+      }
       extreme.push({
         eventType: key as 'EQH' | 'EQL',
-        eventCount: isFiniteNumber(e['event_count']) ? (e['event_count'] as number) : null,
-        memberCount: isFiniteNumber(e['member_count']) ? (e['member_count'] as number) : null,
-        memberRatio: isFiniteNumber(e['member_ratio']) ? (e['member_ratio'] as number) : null,
+        eventCount: evCount,
+        memberCount: memCount,
+        memberRatio: memRatio,
       })
     }
 
-    // G6 event availability: unavailable carries empty cells; ready keeps cells
-    // (an empty ready+denominator>0 is a legal zero-event day, not "unavailable").
-    const availability = status === 'unavailable' ? 'unavailable' : 'ready'
+    // G6 event availability is preserved from persisted status, NOT inferred from denominator.
+    const availability: StructureEventAvailability = status === 'unavailable' ? 'unavailable' : 'ready'
     events = {
-      denominator: availability === 'unavailable' ? null : denominator,
+      availability,
+      contractInvalid,
+      denominator: status === 'unavailable' || contractInvalid ? null : denominator,
+      zeroEventToday: !contractInvalid && status === 'ready' && leveled.length === 0 && extreme.length === 0,
       leveled,
       extreme,
       hasContractInvalidity,
