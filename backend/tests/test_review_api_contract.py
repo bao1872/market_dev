@@ -46,6 +46,13 @@ from app.services.review_observation_persistence_service import (
     list_review_scope_summaries_by_run,
 )
 
+# Canonical L1 Observation payload factory — SINGLE source of truth for the
+# canonical L1 shape, owned by test_review_observation_groups.  We reuse it here
+# instead of duplicating a second (drifted) shape definition.  The real
+# L1→L2→API chain is proven by feeding THIS exact producer-shaped payload through
+# the endpoint's (un-mocked) build_l2_observation_groups.
+from tests.test_review_observation_groups import _make_l1_payload
+
 # Resolved Query/Depends defaults (FastAPI does not apply these when the
 # endpoint function is called directly in a unit test).
 _DEF_LIST = {"include_partial": False, "page": 1, "page_size": 20}
@@ -122,69 +129,12 @@ def _obs_with_groups() -> dict:
     }
 
 
-def _canonical_l1_observation() -> dict:
-    """Structurally valid canonical L1 Observation fixture spanning all 8 groups.
-
-    Built against the REAL ``L2_GROUP_SPECS`` source paths so the un-mocked
-    ``build_l2_observation_groups`` projection reads representative facts in every
-    group.  Used by the REAL projection-through-endpoint test (R3A-V §3).
-    """
-    return {
-        "scope": {"scope_type": "industry_l1", "scope_key": "k1"},
-        # Group 1 — 价格与资金表现
-        "price": {
-            "equal_weight_return": 0.0123,
-            "amount_weighted_return": 0.0156,
-            "concentration": 0.42,
-            "amount": {"total_amount": 5000.0, "concentration": 0.18},
-        },
-        # Group 2 — 趋势状态
-        "trend": {
-            "state": "uptrend",
-            "continuous": {"regime_strength": 0.78, "dsa_vwap_dev_pct": -0.012},
-        },
-        # Group 3/4 — 趋势进程 / 趋势量能确认
-        "continuous": {
-            "segment_bars": 14,
-            "segment_volume_mean_ratio": 1.23,
-            "segment_amount_mean_ratio": 1.11,
-        },
-        # Group 5/6 — 结构 (events projected by type)
-        "structure": {
-            "events": {
-                "cells": {
-                    "leveled": {
-                        "ob1": {"event_type": "BOS", "member_ratio": 0.5},
-                        "ob2": {"event_type": "OB_CREATED", "member_ratio": 0.3},
-                    },
-                    "extreme": {},
-                },
-                "denominator": 42,
-            },
-            "alignment": {"state": "aligned"},
-            "distance_to_trailing_top_pct": 0.05,
-            "distance_to_trailing_bottom_pct": -0.12,
-        },
-        # Group 7 — 动量与压缩释放
-        "momentum": {
-            "squeeze_state": "released",
-            "bb_position": 0.82,
-            "bb_width": 0.04,
-            "release_volume_ratio": 1.5,
-            "momentum_volume_relation": "confirming",
-        },
-        # Group 8 — 量能异常
-        "participation": {
-            "volume": {
-                "ratio20": 1.2,
-                "ratio200": 0.9,
-                "percentile20": 0.6,
-                "percentile200": 0.4,
-                "zscore20": 0.3,
-                "zscore200": -0.2,
-            }
-        },
-    }
+# NOTE: the canonical L1 Observation fixture is owned by
+# ``tests.test_review_observation_groups._make_l1_payload`` (the single source of
+# truth for the producer-shaped payload, with real distribution objects under
+# ``trend.continuous`` — NOT a top-level ``continuous`` and NOT scalar/string
+# stand-ins).  The R3A-V2 real-chain test feeds THAT factory's output through the
+# un-mocked projection.  Do NOT reintroduce a second hand-written L1 shape here.
 
 
 def _summary_row(
@@ -325,10 +275,17 @@ async def test_get_review_scope_composition_ok() -> None:
 
 
 async def test_get_review_scope_composition_real_projection_through_endpoint() -> None:
-    # [R3A-V §3] REAL chain proof: L1 Observation → Fact → endpoint →
-    # build_l2_observation_groups (NOT mocked) → 8/8 exact groups + canonical labels
-    # + representative facts flow through. This is the one test that proves the
-    # L1→L2→API→frontend contract end-to-end without mocking the projection.
+    # [R3A-V2] TRUE canonical L1→L2→API chain proof.
+    #
+    # Uses _make_l1_payload() — the SINGLE canonical L1 fixture owned by
+    # test_review_observation_groups.  This payload carries the REAL producer
+    # shape: distribution/categorical objects, and segment facts under
+    # ``trend.continuous`` (NOT a top-level ``continuous``).
+    #
+    # build_l2_observation_groups is NOT mocked here — we prove the full chain:
+    #   compute_scope_observation-shaped L1 → Fact → endpoint →
+    #   real build_l2_observation_groups → 8/8 groups + canonical labels +
+    #   one non-null representative fact per group.
     from app.domain.review.observation_groups import build_l2_observation_groups
 
     run_id = uuid.uuid4()
@@ -340,7 +297,7 @@ async def test_get_review_scope_composition_real_projection_through_endpoint() -
         algorithm_version="review-2.0.0",
         composition_payload={"dynamics": {"position": 0.5}},
     )
-    payload = _canonical_l1_observation()
+    payload = _make_l1_payload()
     fact = _fact("industry_l1", "k1", run_id, observation_payload=payload)
     db = AsyncMock()
     await _resolve_run(db, run)
@@ -387,27 +344,65 @@ async def test_get_review_scope_composition_real_projection_through_endpoint() -
         assert resp.observationGroups[key]["group_key"] == key
         assert resp.observationGroups[key]["label"] == spec
         assert "facts" in resp.observationGroups[key]
-    # 3) representative facts flow through the real projection
     groups = resp.observationGroups
-    # Group 1 — price/amount read directly by L1 source path
-    assert groups["price_capital"]["facts"]["equal_weight_return"] == 0.0123
-    assert groups["price_capital"]["facts"]["amount_weighted_return"] == 0.0156
-    assert groups["price_capital"]["facts"]["price_hhi"] == 0.42
-    assert groups["price_capital"]["facts"]["total_amount"] == 5000.0
-    assert groups["price_capital"]["facts"]["amount_hhi"] == 0.18
-    # Group 2 — trend state
-    assert groups["trend_state"]["facts"]["trend_direction_member_ratio"] == "uptrend"
-    assert groups["trend_state"]["facts"]["trend_strength"] == 0.78
-    # Group 5 — structure break/turn: only BOS/CHoCH retained, OB_CREATED excluded
-    bos = groups["structure_break_turn"]["facts"]["bos_choch_events"]
-    assert bos["cells"]["leveled"]["ob1"]["event_type"] == "BOS"
-    assert "ob2" not in bos["cells"]["leveled"]  # OB_CREATED filtered out
-    # Group 7 — momentum squeeze/release
-    assert groups["momentum_squeeze_release"]["facts"]["squeeze_state"] == "released"
-    assert groups["momentum_squeeze_release"]["facts"]["bb_position"] == 0.82
-    # Group 8 — volume anomaly (full six-fact vector)
-    assert groups["volume_anomaly"]["facts"]["volume_ratio20"] == 1.2
-    assert groups["volume_anomaly"]["facts"]["volume_zscore200"] == -0.2
+
+    # [R3A-V2 §6] SOURCE-PATH PROTECTION: segment facts MUST live under
+    # trend.continuous — the R3A-V bug (top-level ``continuous``) must not recur.
+    # The producer emits segment facts as distribution objects, so we assert the
+    # KEY PATH exists under trend.continuous and NO top-level ``continuous``.
+    assert "continuous" in payload["trend"]
+    assert "segment_bars" in payload["trend"]["continuous"]
+    assert payload.get("continuous") is None  # no top-level continuous object
+
+    # [R3A-V2 §5] 8/8 representative facts — one NON-NULL per group.
+    # Each asserted value EQUALS the corresponding L1 source object (no
+    # recomputation); the L1 source objects are real distribution/categorical
+    # shapes, not scalar/string stand-ins.
+    # G1 price_capital
+    g1 = groups["price_capital"]["facts"]
+    assert g1["equal_weight_return"] == payload["price"]["equal_weight_return"]
+    assert g1["amount_weighted_return"] == payload["price"]["amount_weighted_return"]
+    assert g1["total_amount"] == payload["price"]["amount"]["total_amount"]
+    # G2 trend_state
+    g2 = groups["trend_state"]["facts"]
+    assert g2["trend_direction_member_ratio"] == payload["trend"]["state"]
+    assert g2["trend_strength"] == payload["trend"]["continuous"]["regime_strength"]
+    # G3 trend_progress — segment facts come from trend.continuous (NOT top-level)
+    g3 = groups["trend_progress"]["facts"]
+    assert g3["current_segment_bars"] == payload["trend"]["continuous"]["segment_bars"]
+    assert g3["segment_change_pct"] == payload["trend"]["continuous"]["segment_change_pct"]
+    assert g3["segment_slope"] == payload["trend"]["continuous"]["segment_slope"]
+    assert g3["current_segment_bars"]["median"] == 12  # non-null representative
+    # G4 trend_volume_confirmation — at least one SEGMENT fact non-null
+    g4 = groups["trend_volume_confirmation"]["facts"]
+    assert g4["segment_volume_mean_ratio"] == payload["trend"]["continuous"]["segment_volume_mean_ratio"]
+    assert g4["segment_amount_mean_ratio"] == payload["trend"]["continuous"]["segment_amount_mean_ratio"]
+    assert g4["momentum_volume_relation"] == payload["momentum"]["momentum_volume_relation"]
+    assert g4["segment_volume_mean_ratio"]["median"] == 1.2  # segment fact proved non-null
+    # G5 structure_break_turn — BOS/CHoCH events retained (OBJ_CREATED filtered out)
+    g5 = groups["structure_break_turn"]["facts"]["bos_choch_events"]
+    assert "BOS_up_Swing" in g5["cells"]["leveled"]
+    assert g5["cells"]["leveled"]["BOS_up_Swing"]["event_type"] == "BOS"
+    assert "CHoCH_down_Internal" in g5["cells"]["leveled"]
+    # G6 structure_evolution_position — OB/EQ events + alignment
+    g6 = groups["structure_evolution_position"]["facts"]
+    assert "OB_CREATED_up_Swing" in g6["ob_and_eq_events"]["cells"]["leveled"]
+    assert g6["ob_and_eq_events"]["cells"]["leveled"]["OB_CREATED_up_Swing"]["event_type"] == "OB_CREATED"
+    assert g6["structure_alignment"] == payload["structure"]["alignment"]
+    # G7 momentum_squeeze_release
+    g7 = groups["momentum_squeeze_release"]["facts"]
+    assert g7["squeeze_state"] == payload["momentum"]["squeeze_state"]
+    assert g7["bb_position"] == payload["momentum"]["bb_position"]
+    assert g7["release_volume_ratio"] == payload["momentum"]["release_volume_ratio"]
+    assert g7["squeeze_state"]["member_ratio"]["squeeze"] == 0.2  # non-null representative
+    # G8 volume_anomaly — full six-fact vector (distribution objects)
+    g8 = groups["volume_anomaly"]["facts"]
+    assert g8["volume_ratio20"] == payload["participation"]["volume"]["ratio20"]
+    assert g8["volume_ratio200"] == payload["participation"]["volume"]["ratio200"]
+    assert g8["volume_percentile200"] == payload["participation"]["volume"]["percentile200"]
+    assert g8["volume_zscore200"] == payload["participation"]["volume"]["zscore200"]
+    assert g8["volume_ratio20"]["median"] == 1.1  # non-null representative
+
     # composition and observation still preserved alongside real groups
     assert resp.composition == {"dynamics": {"position": 0.5}}
     assert resp.observation == payload
