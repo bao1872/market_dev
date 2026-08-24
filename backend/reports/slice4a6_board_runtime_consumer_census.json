@@ -1,0 +1,261 @@
+{
+  "slice": "4A6",
+  "baseline_sha": "d52f12bcd2d76a78437b1c5def8488edb85c3e70",
+  "status": "PASS",
+  "summary": "Board Analysis runtime 与 market_aggregation publication 在 canonical Review 计算/发布链上已无 active decision consumer。保留的消费者均为 admin 运维/展示/legacy frontend 快照 API，以及 AfterClose 默认仍调用的 legacy producer 阶段。stop 生产（4A7）安全，但会有当前 ACTIVE frontend BoardAnalysisPage 消费者需要显式决定生命周期，且 system_overview/admin_readiness 展示读取（BoardAnalysisRun 级 run 质量）也会随 market_aggregation 停止而显现为空/失败，需作为 follow-up 明确处理。",
+
+  "retirement_targets": [
+    "BoardAnalysis runtime stage (compute_all_boards / compute_board_analysis)",
+    "BoardAnalysisRun / BoardAnalysisSnapshot artifact publication path",
+    "market_aggregation publication (PUBLICATION_KIND_MARKET_AGGREGATION, scope_type=board/market)",
+    "AfterClose legacy compute_all_boards stage",
+    "board_analysis_service runtime entrypoints",
+    "review_attribution_service (dead, unmaintained)",
+    "market_factor_aggregation_service.run_market_factor_aggregation (dead component-level producer)"
+  ],
+
+  "protected_canonical_board_infra": [
+    "MarketBoard",
+    "BoardDefinitionVersion",
+    "PITMembership",
+    "taxonomy",
+    "industry / concept hierarchy",
+    "L1 / L2 / L3",
+    "membership_version",
+    "discover_pit_available_boards (canonical Review scope enumeration)"
+  ],
+
+  "active_producers": [
+    {
+      "symbol": "compute_all_boards",
+      "file": "backend/app/services/after_close_orchestrator.py:3555-3565",
+      "caller": "_execute_after_close_run post-core aggregation stage",
+      "artifact": "BoardAnalysisRun / BoardAnalysisSnapshot + market_aggregation pointer (via publish_market_aggregation)",
+      "runtime_effect": "Publishes legacy Board artifacts + market_aggregation pointer. Its failure maps to _aggregation_status=failed -> PARTIAL_SUCCESS (line 3770). Does NOT gate stock_core publication / Review compute / Review publish (Review compute entry line 1717-1719 checks only stock_core_published + snapshot_run_id)."
+    },
+    {
+      "symbol": "compute_all_boards",
+      "file": "backend/app/api/board_analysis.py:320-326 (trigger_compute_all_boards)",
+      "caller": "POST /v1/admin/boards/analysis/compute-all (admin)",
+      "artifact": "same as above afterclose producer",
+      "runtime_effect": "Admin-triggered legacy Board aggregation; returns succeeded/failed/published. Reuses compute_all_boards(publish=True)."
+    },
+    {
+      "symbol": "compute_board_analysis",
+      "file": "backend/app/api/board_analysis.py:41 import + endpoint for single board; backend/app/services/board_analysis_service.py:2005",
+      "caller": "POST /v1/admin/boards/{board_id}/analysis/compute (admin) + internal batch loop",
+      "artifact": "single BoardAnalysisSnapshot",
+      "runtime_effect": "Computes single board snapshot; internal batch loop produces full batch."
+    },
+    {
+      "symbol": "publish_market_aggregation",
+      "file": "backend/app/services/factor_publication_service.py:370 / 395",
+      "caller": "compute_all_boards (board_analysis_service.py:1910 / publish path)",
+      "artifact": "FactorPublication kind=market_aggregation pointer",
+      "runtime_effect": "Validates BoardAnalysisRun status (succeeded / full success internal consistency; partial+degraded_publishable) then writes the market_aggregation pointer. This is the sole writer of the market_aggregation pointer."
+    },
+    {
+      "symbol": "run_market_factor_aggregation",
+      "file": "backend/app/services/market_factor_aggregation_service.py:33",
+      "caller": "NONE within backend/app (module __main__ self-test only; verify stack does not call it either - seed uses compute_all_boards directly)",
+      "artifact": "market_aggregation pointer",
+      "runtime_effect": "DEAD producer: no active app caller. Reads stock_core pointer and calls compute_all_boards if aggregation_run_id is None. Unreachable from canonical runtime."
+    }
+  ],
+
+  "active_consumers": [],
+
+  "compatibility_only": [
+    {
+      "symbol": "_get_after_close_artifacts_fact",
+      "file": "backend/app/services/after_close_orchestrator.py:4185-4222",
+      "artifact": "market_aggregation pointer (diagnostic read)",
+      "runtime_effect": "Read-only reconcile/diagnostic; '不阻断' on failure. Does not alter runtime behavior of core/Review."
+    },
+    {
+      "symbol": "system_overview_service.get_system_overview board node",
+      "file": "backend/app/services/system_overview_service.py:1464-1503",
+      "artifact": "BoardAnalysisRun run-level quality (expected/succeeded/failed/coverage)",
+      "runtime_effect": "Admin system overview '板块分析' node. Presentation only; reads BoardAnalysisRun (not snapshot payload content). If Board runtime stops, this node shows pending/failed/no run (cosmetic for admin, not a decision gate for canonical computation)."
+    },
+    {
+      "symbol": "product_readiness_service board_aggregation node",
+      "file": "backend/app/services/product_readiness_service.py:1110-1149 / 1765",
+      "artifact": "market_aggregation pointer + BoardAnalysisRun lineage",
+      "runtime_effect": "Admin readiness (admin_readiness.py) - board_aggregation READY state based on market_aggregation pointer + current-lineage validation. Presentation/monitoring; not a gate for stock_core/Review."
+    },
+    {
+      "symbol": "admin_incremental_publish aggregation pointer read",
+      "file": "backend/app/api/admin_incremental_publish.py:93-99",
+      "artifact": "market_aggregation pointer",
+      "runtime_effect": "Admin ops panel shows aggregation pointer. Monitoring/compat only."
+    },
+    {
+      "symbol": "admin_review serialization",
+      "file": "backend/app/api/admin_review.py:100-104",
+      "artifact": "source_board_run_id JSON (NULL-aware)",
+      "runtime_effect": "NULL-aware serialization; nullable legacy lineage. No decision."
+    }
+  ],
+
+  "test_only": [
+    {
+      "symbol": "seed_v21_verify_data.py board chain",
+      "file": "scripts/verify/seed_v21_verify_data.py:927-1000 / 1489-1523",
+      "artifact": "compute_all_boards / BoardAnalysisRun / source_board_run_id",
+      "runtime_effect": "Verify-stack synthetic seeding; TEST/verify tooling only, not canonical runtime."
+    },
+    {
+      "symbol": "test_board_review_consolidation_contract.py",
+      "file": "tests/test_board_review_consolidation_contract.py",
+      "artifact": "board_analysis_service source inspection (parity oracle)",
+      "runtime_effect": "AST/parity test, retirement-target marker asserted."
+    },
+    {
+      "symbol": "test_board_hierarchy_batch_contract.py:105",
+      "file": "tests/test_board_hierarchy_batch_contract.py:105",
+      "artifact": "inspect.getsource(review_orchestrator_service._list_industry_l1_scopes)",
+      "runtime_effect": "Tests a DEAD function's source; does not execute it at runtime."
+    },
+    {
+      "symbol": "test_slice2_scope_enumeration.py / test_review_* model fixtures",
+      "file": "tests/test_slice2_scope_enumeration.py:154,220; test_review_publication_safety.py:107; test_review_api_core_only_contract.py; test_review_board_independence.py; etc.",
+      "artifact": "source_board_run_id in fake ORM fixtures",
+      "runtime_effect": "Test fixtures only."
+    }
+  ],
+
+  "dead_or_unreachable": [
+    {
+      "symbol": "_list_board_scopes_by_hierarchy",
+      "file": "backend/app/services/review_orchestrator_service.py:873-923",
+      "artifact": "BoardAnalysisSnapshot scope enumeration",
+      "runtime_effect": "No production caller. Main scope enumeration _resolve_all_discovery_scopes (line 785-870) now uses discover_pit_available_boards (PIT discovery), NOT BoardAnalysisSnapshot. Referenced only by test source-inspection."
+    },
+    {
+      "symbol": "_list_industry_l1_scopes",
+      "file": "backend/app/services/review_orchestrator_service.py:926-950",
+      "artifact": "BoardAnalysisSnapshot industry L1 enumeration",
+      "runtime_effect": "No production caller. Same as above."
+    },
+    {
+      "symbol": "review_attribution_service (compute_signal_attributions / compute_signal_instruments / list_attributions / list_instruments)",
+      "file": "backend/app/services/review_attribution_service.py:105 / 372 / 502 / 529",
+      "artifact": "BoardAnalysisSnapshot in _list_child_scope_keys (line 283-291)",
+      "runtime_effect": "No app caller for any public entry point. _list_child_scope_keys queries BoardAnalysisSnapshot filtered by source_board_run_id. Unreachable dead code; consistent with legacy Review attribution graph being removed."
+    },
+    {
+      "symbol": "run_market_factor_aggregation",
+      "file": "backend/app/services/market_factor_aggregation_service.py:33",
+      "artifact": "market_aggregation pointer producer",
+      "runtime_effect": "No app/verify caller. Component-level market aggregation job no longer wired into runtime."
+    }
+  ],
+
+  "source_board_run_id": {
+    "active_decision_dependencies": [],
+    "legacy_lineage_only": [
+      "review_publication_service.py (serialize metadata; gate no longer inspects it - Slice 4A5/4A5R)",
+      "review_orchestrator_service.py:276 (new canonical runs hardcode source_board_run_id=None; field retained nullable)",
+      "admin_review.py:100-104 (NULL-aware JSON serialization)",
+      "review_attribution_service.py:144/270/291 (DEAD consumer - no app caller, no decision effect)"
+    ],
+    "other": [
+      {
+        "classification": "SERIALIZATION/API_COMPATIBILITY",
+        "symbol": "ReviewRunResponse source_board_run_id",
+        "file": "backend/app/api/admin_review.py:100-104",
+        "effect": "nullable legacy lineage; NULL->null, UUID->string. No decision."
+      },
+      {
+        "classification": "TEST",
+        "symbol": "test fixtures",
+        "file": "backend/tests/*",
+        "effect": "test-only."
+      },
+      {
+        "classification": "DOCUMENTATION",
+        "symbol": "docs/prd/70-review.md, docs/prd/31-after-close-product-closure-v2.1.md, docs/maps/30-after-close.md, docs/maps/70-review.md",
+        "file": "docs/",
+        "effect": "PRD text still references source_board_run_id as formal lineage (out-of-date with Slice 3/4A5 cutover); documentation-only, deferred to a later PRD/Maps sync authorization."
+      }
+    ]
+  },
+
+  "market_aggregation": {
+    "writers": [
+      "factor_publication_service.publish_market_aggregation (sole writer; called by compute_all_boards / board_analysis_service.py:1910)"
+    ],
+    "readers": [
+      { "reader": "compute_all_boards internal round-trip", "file": "backend/app/services/board_analysis_service.py:1599/1625/1645/1876/2331", "decision_effect": "NO — idempotency/reconciliation of the producer's own pointer." },
+      { "reader": "_get_after_close_artifacts_fact", "file": "backend/app/services/after_close_orchestrator.py:4207", "decision_effect": "NO — reconcile diagnostics, non-blocking read." },
+      { "reader": "product_readiness_service board_aggregation", "file": "backend/app/services/product_readiness_service.py:1127/1765", "decision_effect": "NO — admin readiness presentation (via admin_readiness.py). Not a canonical computation gate." },
+      { "reader": "admin_incremental_publish", "file": "backend/app/api/admin_incremental_publish.py:98", "decision_effect": "NO — admin ops panel pointer display." }
+    ],
+    "decision_consumers": []
+  },
+
+  "after_close": {
+    "still_invokes_compute_all_boards": true,
+    "call_site": "backend/app/services/after_close_orchestrator.py:3555-3565 (compute_all_boards(agg_db, trade_date, publish=True))",
+    "blocks_stock_core": false,
+    "blocks_review_compute": false,
+    "review_compute_gate_source": "_execute_review_step line 1720 checks `stock_core_published and snapshot_run_id is not None` only; Board aggregation status excluded (Slice 3)",
+    "blocks_review_publish": false,
+    "review_publish_note": "review_publication_service gate no longer references market_aggregation pointer / source_board_run_id (Slice 4A5)",
+    "affects_partial_success": true,
+    "partial_success_source": "backend/app/services/after_close_orchestrator.py:3770 — if _aggregation_status == 'failed' then final_status = PARTIAL_SUCCESS",
+    "downstream_canonical_payload_consumers": [],
+    "detail": "AfterClose still RUNS compute_all_boards as a mandated legacy side-product. Its failure does not block stock_core or Review (compute or publish); it only downgrades the overall AfterClose run status to PARTIAL_SUCCESS and records aggregation_status in metadata/diagnostics. Its artifacts are not consumed by any canonical downstream calculation that produces Review data (Review producer never reads BoardAnalysisSnapshot payload)."
+  },
+
+  "frontend_api_consumers": [
+    {
+      "component": "BoardAnalysisPage",
+      "route": "/boards, /boards/:boardId",
+      "api_calls": [
+        "GET /v1/boards/analysis (frontend/src/api/endpoints.ts:2889)",
+        "GET /v1/boards/{boardId}/analysis (endpoints.ts:2903)",
+        "POST /v1/admin/boards/{boardId}/analysis/compute (endpoints.ts:2924)",
+        "POST /v1/admin/boards/analysis/compute-all (endpoints.ts:2957)"
+      ],
+      "backend": "BoardAnalysisSnapshotDTO (backend/app/schemas/board_analysis.py) + board_analysis_service",
+      "classification": "computed BoardAnalysis snapshot API consumer (CASE C — legacy frontend Board snapshot API remains)",
+      "note": "This page reads computed BoardAnalysisSnapshot payload and can trigger Board compute-all. It is a real ACTIVE consumer of the legacy Board runtime, exposed to authenticated (and admin) users. Removal of the Board stage / market_aggregation will break or empty this page unless Unified Review provides equivalent info or the page is explicitly retired."
+    }
+  ],
+
+  "retirement_decision": {
+    "safe_to_remove_afterclose_board_stage": true,
+    "afterclose_rationale": "No canonical Review calculation or publication depends on the Board aggregation outcome. compute_all_boards is run as side-product; its only runtime effect is overall PARTIAL_SUCCESS vs SUCCEEDED status and legacy artifacts. Removing the stage only affects that status downgrade (and board artifacts), not stock_core or Review closure.",
+    "safe_to_stop_market_aggregation_publication": true,
+    "marketagg_rationale": "market_aggregation pointer has zero decision readers in canonical runtime. Remaining readers are admin presentation (product_readiness, admin_incremental_publish), reconcile diagnostics, and the producer's own idempotency checks. Stopping the writer stops those presentation nodes from reporting 'published' but breaks no canonical computation.",
+    "blocking_consumers": [
+      {
+        "consumer": "frontend BoardAnalysisPage",
+        "kind": "frontend legacy Board snapshot API (CASE C)",
+        "location": "frontend/src/pages/BoardAnalysisPage.tsx; App.tsx:268-269; api/endpoints.ts:2889-2957",
+        "decision": "Stopping the board stage makes this page empty/failing. Decide whether Unified Review already provides equivalent information before removing the API; otherwise retire/hide the page as part of 4A7 follow-up."
+      },
+      {
+        "consumer": "system_overview_service '板块分析' node",
+        "kind": "admin presentation read of BoardAnalysisRun run-level quality",
+        "location": "backend/app/services/system_overview_service.py:1464-1503",
+        "decision": "Cosmetic admin node; will report pending/no-run after retirement. Not a hard blocker; update presentation follow-up."
+      },
+      {
+        "consumer": "product_readiness_service board_aggregation node",
+        "kind": "admin readiness read of market_aggregation pointer",
+        "location": "backend/app/services/product_readiness_service.py:1110-1149",
+        "decision": "Presentation node will report PENDING/NO_PUBLICATION after retirement. Not a decision gate; update presentation follow-up."
+      }
+    ],
+    "required_followup_slices": [
+      "4A7: stop AfterClose legacy Board aggregation producer (gated by confirmed census)",
+      "4A8: stop market_aggregation publication writer",
+      "frontend BoardAnalysisPage lifecycle decision (equivalent info from Unified Review?, hide vs remove)",
+      "admin presentation: system_overview / admin_readiness board node handling after retirement",
+      "later clean-up: legacy models/API/schema (BoardAnalysisRun/BoardAnalysisSnapshot tables, board_analysis.py API, review_attribution_service dead code, market_factor_aggregation_service dead producer)"
+    ]
+  }
+}
