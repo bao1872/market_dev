@@ -41,6 +41,7 @@ from app.services.review_observation_persistence_service import (
     validate_scope_observation_payload,
 )
 from app.services.review_observation_prep_service import (
+    _log_rss,
     build_union_fact_context_from_loaded_facts,
     prepare_scopes_from_union,
     prepare_union_fact_context,
@@ -239,7 +240,7 @@ async def reconstruct_scope_series_batch(
         batches.append(current_batch)
 
     results: list[dict[str, Any]] | None = None
-    for batch in batches:
+    for batch_index, batch in enumerate(batches, start=1):
         batch_result = await _reconstruct_batch_chunk(
             session,
             scope_type,
@@ -248,11 +249,23 @@ async def reconstruct_scope_series_batch(
             asof_date=asof_date,
             current_only=current_only,
             scope_members=scope_members,
+            batch_index=batch_index,
         )
         if results is None:
             results = batch_result
         else:
             results.extend(batch_result)
+        # M4: emitted after the caller appended this chunk, so it measures the
+        # retained results list INCLUDING this chunk (reconstructions accumulate
+        # until the whole batch returns).  Observability only.
+        _log_rss(
+            "hist-recon-chunk-complete",
+            scope_type=scope_type,
+            batch_index=batch_index,
+            scope_count=len(batch),
+            trade_date_count=len(trade_dates),
+            result_count=len(batch_result),
+        )
     return results if results is not None else []
 
 
@@ -265,10 +278,19 @@ async def _reconstruct_batch_chunk(
     asof_date: date,
     current_only: bool,
     scope_members: dict[str, tuple[list[uuid.UUID], str]],
+    batch_index: int = 0,
 ) -> list[dict[str, Any]]:
     """Shared-load one chunk of scope_keys and reconstruct per-scope series."""
     prep_counters: dict[str, int] = {}
     prep_fallback_reasons: list[str] = []
+
+    _log_rss(
+        "hist-recon-chunk-start",
+        scope_type=scope_type,
+        batch_index=batch_index,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+    )
 
     # 3) Union member_ids across the chunk -> ONE bulk load.
     union_member_ids: list[uuid.UUID] = []
@@ -290,12 +312,28 @@ async def _reconstruct_batch_chunk(
             session, trade_dates, union_member_ids,
             prep_counters=prep_counters, prep_fallback_reasons=prep_fallback_reasons,
         )
+    _log_rss(
+        "hist-recon-union-loaded",
+        scope_type=scope_type,
+        batch_index=batch_index,
+        scope_count=len(scope_keys),
+        union_member_count=len(union_member_ids),
+        trade_date_count=len(trade_dates),
+    )
 
     # 4) Slice the shared context per scope (same _build_member_observations owner).
     prepared_map = await prepare_scopes_from_union(
         session, scope_type, trade_dates,
         {k: scope_members[k] for k in scope_keys}, union_ctx,
         prep_counters=prep_counters, prep_fallback_reasons=prep_fallback_reasons,
+    )
+    _log_rss(
+        "hist-recon-scopes-prepared",
+        scope_type=scope_type,
+        batch_index=batch_index,
+        scope_count=len(scope_keys),
+        union_member_count=len(union_member_ids),
+        trade_date_count=len(trade_dates),
     )
 
     # 5) compute_scope_observation per scope per T — UNCHANGED algorithm.
@@ -357,5 +395,14 @@ async def _reconstruct_batch_chunk(
         scope_type, len(scope_keys), len(union_member_ids), len(trade_dates),
         obs_ms,
         prep_counters.get("vec_hit", 0), prep_counters.get("vec_fallback", 0),
+    )
+    # M4: chunk results built and still retained by the caller (not yet freed).
+    _log_rss(
+        "hist-recon-results-built",
+        scope_type=scope_type,
+        batch_index=batch_index,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+        result_count=len(results),
     )
     return results

@@ -45,6 +45,7 @@ from app.domain.review.analysis.leadership_migration import (
 from app.domain.review.scope_observation import compute_scope_observation
 from app.services.review_observation_prep_service import (
     PreparedScope,
+    _log_rss,
     prepare_current_scope_observations_batch,
 )
 
@@ -115,12 +116,30 @@ async def compute_scope_leadership_batch(
         }
 
     # Single neutral load of [T-1, T] member facts for the whole batch.
+    # M4 OBSERVED MEMORY-RISK PATH (documented, NOT fixed in this slice):
+    # this call does NOT pass ``chunk_members=True``; the production default of
+    # ``prepare_current_scope_observations_batch`` is ``chunk_members=False``,
+    # so on arrival here the 5286-member union can go through the non-chunked
+    # bars/vector whole-union prep path again.  RSS markers below bound this
+    # call only — no semantic change.
+    _log_rss(
+        "leadership-prep-start",
+        scope_type="leadership",
+        scope_count=len(scope_specs),
+        trade_date_count=2,
+    )
     series = await prepare_current_scope_observations_batch(
         session,
         trade_date,
         scope_specs,
         trade_dates=[t1, trade_date],
         source_core_run_id=source_core_run_id,
+    )
+    _log_rss(
+        "leadership-prep-end",
+        scope_type="leadership",
+        scope_count=len(scope_specs),
+        result_count=len(series),
     )
 
     result: dict[str, LeadershipMigrationFacts] = {}

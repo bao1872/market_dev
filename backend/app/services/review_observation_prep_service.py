@@ -124,6 +124,14 @@ def _log_rss(
     member_refs_t1: int = 0,
     current_only_member_count: int = 0,
     coverage_member_count: int = 0,
+    scope_type: str = "",
+    batch_index: int | None = None,
+    result_count: int = 0,
+    reconstruction_count: int = 0,
+    processed_scope_count: int = 0,
+    session_identity_map_count: int | None = None,
+    session_new_count: int | None = None,
+    session_dirty_count: int | None = None,
 ) -> None:
     """Log current + peak RSS (MiB) at a named preparation stage.
 
@@ -138,6 +146,11 @@ def _log_rss(
     early ``current-prep-*`` attribution markers in
     ``prepare_current_scope_observations_batch``; they default to 0 so the
     existing ``union-prep-*`` call sites are unchanged.
+
+    M4 post-prep attribution markers reuse the same helper with additional
+    observability fields (scope_type / batch_index / result_count /
+    reconstruction_count / processed_scope_count / session_*_count). These are
+    pure logging only — never read back into any business computation.
     """
     cur_bytes, peak_bytes = _read_proc_rss()
     if peak_bytes is None:
@@ -164,6 +177,22 @@ def _log_rss(
         extra += f" current_only_members={current_only_member_count}"
     if coverage_member_count:
         extra += f" coverage_members={coverage_member_count}"
+    if scope_type:
+        extra += f" scope_type={scope_type}"
+    if batch_index is not None:
+        extra += f" batch_index={batch_index}"
+    if result_count:
+        extra += f" result_count={result_count}"
+    if reconstruction_count:
+        extra += f" reconstruction_count={reconstruction_count}"
+    if processed_scope_count:
+        extra += f" processed_scope_count={processed_scope_count}"
+    if session_identity_map_count is not None:
+        extra += f" session_identity_map_count={session_identity_map_count}"
+    if session_new_count is not None:
+        extra += f" session_new_count={session_new_count}"
+    if session_dirty_count is not None:
+        extra += f" session_dirty_count={session_dirty_count}"
     logger.info(
         "[RSS] stage=%s current_rss_mb=%.1f peak_rss_mb=%.1f union_member_count=%d trade_date_count=%d%s",
         stage,

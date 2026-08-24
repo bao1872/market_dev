@@ -54,6 +54,7 @@ from app.domain.review.analysis.scope_dynamics import (
 from app.services.review_historical_scope_reconstruction_service import (
     reconstruct_scope_series_batch,
 )
+from app.services.review_observation_prep_service import _log_rss
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +156,16 @@ async def compute_current_static_scope_dynamics_batch(
 
     import time
 
+    # M4 dynamics-batch attribution: the current code holds reconstructions AND
+    # the composed results simultaneously until return (reconstructions is not
+    # released before results are built).  RSS boundaries here split the
+    # reconstruction load from the composition step.  Observability only.
+    _log_rss(
+        "dynamics-batch-recon-start",
+        scope_type=scope_type,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+    )
     t_recon = time.perf_counter()
     reconstructions = await reconstruct_scope_series_batch(
         db,
@@ -165,6 +176,13 @@ async def compute_current_static_scope_dynamics_batch(
         union_member_cap=union_member_cap,
     )
     batch_reconstruction_ms = (time.perf_counter() - t_recon) * 1000.0
+    _log_rss(
+        "dynamics-batch-recon-end",
+        scope_type=scope_type,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+        reconstruction_count=len(reconstructions),
+    )
 
     results = [
         _compose_scope_dynamics_from_reconstruction(
@@ -176,6 +194,14 @@ async def compute_current_static_scope_dynamics_batch(
         )
         for reconstruction in reconstructions
     ]
+    _log_rss(
+        "dynamics-batch-compose-end",
+        scope_type=scope_type,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+        reconstruction_count=len(reconstructions),
+        result_count=len(results),
+    )
     batch_composition_ms = sum(
         r["metrics"].get("composition_ms", 0.0) for r in results
     )

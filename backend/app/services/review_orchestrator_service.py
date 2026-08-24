@@ -96,6 +96,7 @@ from app.services.review_observation_persistence_service import (
 )
 from app.services.review_observation_prep_service import (
     ScopeReplaySpec,
+    _log_rss,
     list_recent_trading_days,
     prepare_current_scope_observations_batch,
 )
@@ -578,6 +579,26 @@ async def _get_publication(
 # =============================================================================
 
 
+def _session_state_counts(
+    session: AsyncSession,
+) -> tuple[int | None, int | None, int | None]:
+    """M4 observability — SQLAlchemy session UoW state (identity map / new / dirty).
+
+    Pure read, used ONLY to attribute the composition-loop memory owner.  Falls
+    back to ``(None, None, None)`` when the session does not expose these state
+    views (e.g. AsyncMock in unit tests), so instrumentation never changes the
+    session lifecycle or business behaviour.
+    """
+    try:
+        return (
+            len(session.identity_map),
+            len(session.new),
+            len(session.dirty),
+        )
+    except Exception:  # pragma: no cover - observability fallback only
+        return None, None, None
+
+
 async def compute_run(
     session: AsyncSession,
     run: MarketReviewRun,
@@ -688,6 +709,10 @@ async def compute_run(
 
     succeeded = 0
     failed = 0
+    # M4 post-prep attribution: after the instrumented chunked prep we enter
+    # phases that previously had NO RSS boundary.  Each candidate owner below
+    # (Historical Dynamics / Leadership / composition loop) gets its own marker.
+    _log_rss("post-prep-start", scope_count=len(eligible_specs))
 
     # 2. [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 每 scope 只调用唯一 canonical
     # composition owner（_compute_canonical_composition_phase）：activated 家族
@@ -697,10 +722,13 @@ async def compute_run(
     # 及其 P/Q/U/C/V snapshot 写入已物理删除，不再是任何 runtime owner。
     # [REVIEW-BACKEND-FINAL-CLOSURE] 循环前按家族批量计算 Historical Dynamics
     # （唯一 batch owner），产出 scope_key→dynamics map 注入 composition。
+    _log_rss("dynamics-start", scope_count=len(scopes))
     dynamics_map = await _compute_family_dynamics_maps(session, run, scopes)
+    _log_rss("dynamics-end", scope_count=len(dynamics_map))
     # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5.5] 真实 T-1 → T Leadership migration：
     # family batch 一次加载 [T-1, T] member facts 并建立真实 previous snapshot，
     # 不再用 unavailable synthetic previous 包装 migration。
+    _log_rss("leadership-start", scope_count=len(eligible_specs))
     leadership_map: dict[str, Any] = {}
     if eligible_specs:
         leadership_map = await compute_scope_leadership_batch(
@@ -713,7 +741,13 @@ async def compute_run(
             "[ReviewOrchestrator] leadership T-1→T batch: scopes=%d produced=%d",
             len(eligible_specs), len(leadership_map),
         )
-    for scope in scopes:
+    _log_rss("leadership-end", scope_count=len(leadership_map))
+
+    # M4 composition-loop attribution: reports processed_scope_count plus the
+    # SQLAlchemy session UoW state (identity_map / new / dirty) every 25 scopes.
+    # Observability ONLY — no session lifecycle change, no expunge / commit.
+    _log_rss("composition-loop-start", scope_count=len(scopes))
+    for scope_idx, scope in enumerate(scopes, start=1):
         try:
             await _compute_canonical_composition_phase(
                 session,
@@ -740,6 +774,23 @@ async def compute_run(
                 status=ITEM_FAILED,
                 last_error=str(exc)[:500],
             )
+        if scope_idx % 25 == 0:
+            _identity, _new, _dirty = _session_state_counts(session)
+            _log_rss(
+                "composition-loop-progress",
+                processed_scope_count=scope_idx,
+                session_identity_map_count=_identity,
+                session_new_count=_new,
+                session_dirty_count=_dirty,
+            )
+    _identity, _new, _dirty = _session_state_counts(session)
+    _log_rss(
+        "composition-loop-end",
+        processed_scope_count=len(scopes),
+        session_identity_map_count=_identity,
+        session_new_count=_new,
+        session_dirty_count=_dirty,
+    )
 
     # 3. 更新 run 状态。retirement 后 signal/tracking pipeline 不再计算；run 状态名
     # ``signals_ready`` 保留为 PUBLICATION_CONTRACT 的历史兼容状态 token：publication
@@ -1183,12 +1234,26 @@ async def _compute_family_dynamics_maps(
         if not is_scope_observation_persistence_activated(scope_type):
             continue
         scope_keys = [s.scope_key for s in family_scopes]
+        # M4 dynamics-family attribution: per activated family boundary before /
+        # after the single batch reconstruction+composition.  Observability only —
+        # never serializes results, never changes the batch owner semantics.
+        _log_rss(
+            "dynamics-family-start",
+            scope_type=scope_type,
+            scope_count=len(family_scopes),
+            trade_date_count=len(axis),
+        )
         batch_results = await compute_current_static_scope_dynamics_batch(
             session,
             scope_type,
             scope_keys,
             axis,
             analysis_asof_date=run.trade_date,
+        )
+        _log_rss(
+            "dynamics-family-end",
+            scope_type=scope_type,
+            result_count=len(batch_results),
         )
         for item in batch_results:
             sk = (item.get("scope") or {}).get("scope_key")
