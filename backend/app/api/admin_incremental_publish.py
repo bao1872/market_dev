@@ -34,13 +34,13 @@ from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.models.stock_feature_snapshot_run_item import StockFeatureSnapshotRunItem
 from app.services.factor_publication_service import (
     PUBLICATION_KIND_HISTORY_CROSS_SECTION,
-    PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
     SCOPE_TYPE_MARKET,
     compute_coverage,
     get_publication,
 )
 from app.services.first_pyramid_history_service import get_history_run_progress
+from app.services.review_publication_service import PUBLICATION_KIND_MARKET_REVIEW
 
 logger = logging.getLogger("admin_incremental_publish")
 
@@ -59,7 +59,7 @@ async def get_incremental_publish_status(
 
     返回：
     - core: { latest_run, pointer, coverage }
-    - aggregation: { pointer }
+    - review: { pointer }（板块/复盘事实的已发布 Review pointer）
     - history: { latest_run, pointer }
     - chip: 占位（待 chip job 表完善）
     - pointers: 所有 publication 列表
@@ -89,13 +89,14 @@ async def get_incremental_publish_status(
                            core_latest.id, exc)
             core_coverage = {"error": str(exc)}
 
-    # 2. aggregation pointer
-    agg_pointer = await get_publication(
+    # 2. board/review pointer（Slice 4A8 — 板块/复盘事实来自已发布 Unified Review，
+    #    不再展示 legacy 板块聚合指针作为当前板块依赖 gate）
+    review_pointer = await get_publication(
         db,
         scope_type=SCOPE_TYPE_MARKET,
         scope_key="market",
         trade_date=None,
-        publication_kind=PUBLICATION_KIND_MARKET_AGGREGATION,
+        publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
     )
 
     # 3. history: 最新 history run + pointer
@@ -132,8 +133,8 @@ async def get_incremental_publish_status(
             "pointer": _serialize_publication(core_pointer),
             "coverage": core_coverage,
         },
-        "aggregation": {
-            "pointer": _serialize_publication(agg_pointer),
+        "review": {
+            "pointer": _serialize_publication(review_pointer),
         },
         "history": {
             "latest_run": _serialize_history_run(history_latest),

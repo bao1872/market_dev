@@ -248,6 +248,51 @@ def test_payload_built_without_board_snapshot_fields():
 
 
 # --------------------------------------------------------------------------- #
+# 7. [Slice 4A8] Board 事件率恢复（旧 Board 公式：rate = (up+down)/ready，round 4）
+# --------------------------------------------------------------------------- #
+def _obs_with_trend_events(board_ready: int, bos_up=0, bos_down=0,
+                            choch_up=0, choch_down=0) -> dict:
+    """构造携带 trend.board_ready_member_count 与最新事件快照的 canonical obs。"""
+    return {
+        "trend": {**OBS["trend"], "board_ready_member_count": board_ready},
+        "structure": {
+            "current_state": {
+                "latest_events": {
+                    "bos": {"up": bos_up, "down": bos_down},
+                    "choch": {"up": choch_up, "down": choch_down},
+                    "ob": {"up": 0, "down": 0},
+                    "eqh": 0,
+                    "eql": 0,
+                },
+            },
+        },
+    }
+
+
+def test_payload_restores_board_event_rates():
+    """ready=10，BOS up/down=2/1 → bos_rate=0.3；CHoCH up/down=1/1 → choch_rate=0.2。"""
+    obs = _obs_with_trend_events(10, bos_up=2, bos_down=1, choch_up=1, choch_down=1)
+    se = board_api._build_board_payload(obs)["structure_events"]
+    assert se["bos_rate"] == 0.3
+    assert se["choch_rate"] == 0.2
+
+
+def test_payload_board_rates_zero_when_ready_zero():
+    """ready=0 → 两个事件率均为 0.0。"""
+    obs = _obs_with_trend_events(0, bos_up=2, bos_down=1, choch_up=1, choch_down=1)
+    se = board_api._build_board_payload(obs)["structure_events"]
+    assert se["bos_rate"] == 0.0
+    assert se["choch_rate"] == 0.0
+
+
+def test_payload_board_rates_zero_when_ready_missing():
+    """canonical 缺 trend.board_ready_member_count → 0.0（不抛错、不伪造）。"""
+    se = board_api._build_board_payload(OBS)["structure_events"]
+    assert se["bos_rate"] == 0.0
+    assert se["choch_rate"] == 0.0
+
+
+# --------------------------------------------------------------------------- #
 # 4. canonical missing -> 404 detail
 # --------------------------------------------------------------------------- #
 async def test_detail_404_when_canonical_missing(monkeypatch):

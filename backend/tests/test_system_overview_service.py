@@ -1538,16 +1538,18 @@ async def test_product_nodes_empty_db_returns_6_nodes() -> None:
 # ============================================================
 
 
-def test_product_nodes_uses_run_level_board_model() -> None:
-    """板块节点必须用 BoardAnalysisRun（run 级批次质量），不能用单条 snapshot 最高覆盖率。"""
+def test_product_nodes_board_follows_published_review() -> None:
+    """板块/复盘事实节点必须 follow 已发布 Unified Review（MarketReviewRun + canonical
+    ReviewScopeObservationFact），不能再把 legacy BoardAnalysisRun 表述为当前正式板块产品。"""
     from pathlib import Path
 
     path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
     src = path.read_text(encoding="utf-8")
-    assert "from app.models.board_analysis_snapshot import BoardAnalysisRun" in src, "必须用 BoardAnalysisRun"
-    assert "board_run.coverage_ratio" in src, "必须用 run 级覆盖率判定"
-    assert "board_run.succeeded_count" in src, "必须展示 run 级成功数"
-    assert "BoardAnalysisRun.trade_date" in src, "必须按 run 级 trade_date 查询"
+    # 不再查询 legacy BoardAnalysisRun
+    assert "BoardAnalysisRun" not in src, "板块节点不得再用 legacy BoardAnalysisRun"
+    assert "MarketReviewRun" in src, "板块节点必须读 MarketReviewRun"
+    assert "ReviewScopeObservationFact" in src, "板块节点必须读 canonical ReviewScopeObservationFact"
+    assert '.where(MarketReviewRun.status == "published")' in src, "板块节点须取已发布复盘"
 
 
 def test_product_nodes_uses_stock_core_publication_for_pyramid() -> None:
@@ -1584,32 +1586,31 @@ def test_product_nodes_limits_selector_publish() -> None:
 # ============================================================
 
 
-async def _add_board_run(
+async def _add_review_run(
     db,
     trade_date,
     *,
-    expected: int,
-    succeeded: int,
-    coverage: float,
-    status: str = "succeeded",
+    status: str = "published",
+    algorithm_version: str = "review-1.0.0",
     created_at: datetime | None = None,
 ):
-    """构造一条 BoardAnalysisRun 记录。"""
-    from app.models.board_analysis_snapshot import BoardAnalysisRun
+    """构造一条已发布 MarketReviewRun（canonical board-independent，source_board_run_id=None）。"""
+    from app.models.market_review import MarketReviewRun
 
-    run = BoardAnalysisRun(
+    run = MarketReviewRun(
         trade_date=trade_date,
         source_core_run_id=uuid.uuid4(),
-        taxonomy_version="tax-v1",
-        taxonomy_compatibility_key="qstock-board-v1",
-        membership_version="mem-v1",
-        algorithm_version="alg-v1",
-        expected_count=expected,
-        succeeded_count=succeeded,
-        failed_count=max(expected - succeeded, 0),
-        coverage_ratio=coverage,
+        source_board_run_id=None,
+        algorithm_version=algorithm_version,
+        filter_version="filters-1.0.0",
         status=status,
-        blockers=[],
+        expected_scope_count=0,
+        succeeded_scope_count=0,
+        failed_scope_count=0,
+        signal_count=0,
+        coverage_ratio=0,
+        degraded_reasons=[],
+        baseline_window=120,
     )
     if created_at is not None:
         run.created_at = created_at
@@ -1618,39 +1619,79 @@ async def _add_board_run(
     return run
 
 
+async def _add_review_scope_fact(
+    db,
+    run,
+    scope_type: str,
+    scope_key: str,
+    *,
+    pit: int,
+    provided: int,
+):
+    """构造一条 canonical ReviewScopeObservationFact（板块范围成员覆盖事实）。"""
+    from app.models.market_review import ReviewScopeObservationFact
+
+    fact = ReviewScopeObservationFact(
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        pit_member_count=pit,
+        provided_member_count=provided,
+        pit_status_t="historical_pit",
+        readiness="ready",
+        observation_payload={},
+        diagnostics=[],
+        t1_membership_available=False,
+        algorithm_version=run.algorithm_version,
+    )
+    db.add(fact)
+    await db.flush()
+    return fact
+
+
 @pytest.mark.asyncio
-async def test_product_nodes_board_selects_latest_run(db_session) -> None:
-    """板块节点：同一 trade_date 多个 run 时按 created_at 选最新一条。"""
-    from datetime import UTC
+async def test_product_nodes_board_follows_published_review_run(db_session) -> None:
+    """板块节点：已发布 MarketReviewRun + 高成员覆盖 canonical facts → ok/passed/published。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
-    older = await _add_board_run(
-        db_session, d, expected=10, succeeded=10, coverage=0.5,
-        created_at=datetime(2026, 8, 4, 10, 0, tzinfo=UTC),
-    )
-    newer = await _add_board_run(
-        db_session, d, expected=10, succeeded=10, coverage=1.0,
-        created_at=datetime(2026, 8, 4, 12, 0, tzinfo=UTC),
-    )
+    run = await _add_review_run(db_session, d, status="published")
+    await _add_review_scope_fact(db_session, run, "industry_l1", "IND1", pit=100, provided=98)
+    await _add_review_scope_fact(db_session, run, "concept", "C1", pit=100, provided=95)
     nodes = await _compute_product_nodes(db_session, d)
     board = next(n for n in nodes if n["key"] == "board")
-    assert board["run_id"] == str(newer.id)
+    assert board["run_id"] == str(run.id)
     assert board["status"] == "ok"
-    assert board["run_id"] != str(older.id)
+    assert board["quality_gate"] == "passed"
+    assert board["publication_status"] == "published"
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_board_incomplete_batch_not_ok(db_session) -> None:
-    """板块节点：批次不完整（expected>succeeded，覆盖率<0.95）→ 不能标 ok。"""
+async def test_product_nodes_board_low_coverage_not_ok(db_session) -> None:
+    """板块节点：已发布复盘但板块成员覆盖 <95% → 不能标 ok。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
-    await _add_board_run(db_session, d, expected=10, succeeded=5, coverage=0.5)
+    run = await _add_review_run(db_session, d, status="published")
+    await _add_review_scope_fact(db_session, run, "industry_l1", "IND1", pit=100, provided=50)
     nodes = await _compute_product_nodes(db_session, d)
     board = next(n for n in nodes if n["key"] == "board")
     assert board["status"] != "ok"
     assert board["quality_gate"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_product_nodes_board_pending_without_published_review(db_session) -> None:
+    """板块节点：无已发布复盘 → pending（不因 absence of legacy BoardAnalysisRun 报错）。"""
+    from datetime import date as _date
+
+    d = _date(2026, 8, 4)
+    await _add_review_run(db_session, d, status="computing")  # 未发布
+    nodes = await _compute_product_nodes(db_session, d)
+    board = next(n for n in nodes if n["key"] == "board")
+    assert board["status"] == "pending"
+    assert board["publication_status"] == "not_applicable"
 
 
 @pytest.mark.asyncio

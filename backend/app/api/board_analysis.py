@@ -129,6 +129,21 @@ def _build_board_payload(observation: dict[str, Any]) -> dict[str, Any]:
 
     volume_badge = volume.get("badge", {}) if isinstance(volume.get("badge"), dict) else {}
 
+    # Slice 4A8 — 恢复 Board 事件率（旧 Board 公式复现，非新公式）。
+    # ready 分母来自已迁移的 canonical trend.board_ready_member_count，
+    # bos/choch up/down 来自最新事件快照（已 parity）。
+    board_ready = trend.get("board_ready_member_count", 0) or 0
+    bos_up_n = _count(bos, "up")
+    bos_down_n = _count(bos, "down")
+    choch_up_n = _count(choch, "up")
+    choch_down_n = _count(choch, "down")
+    if board_ready > 0:
+        bos_rate = round((bos_up_n + bos_down_n) / board_ready, 4)
+        choch_rate = round((choch_up_n + choch_down_n) / board_ready, 4)
+    else:
+        bos_rate = 0.0
+        choch_rate = 0.0
+
     # 动量 distribution：Expanding/Flat/Contracting → 正/中性/负 位置映射
     momentum_dir = {
         "positive": _count(momentum_state, "expanding_count"),
@@ -178,9 +193,9 @@ def _build_board_payload(observation: dict[str, Any]) -> dict[str, Any]:
             "ob_down": _count(ob, "down"),
             "eqh_present": latest_events.get("eqh", 0),
             "eql_present": latest_events.get("eql", 0),
-            # 无 canonical 事件率公式；不新增公式，保持 None。
-            "bos_rate": None,
-            "choch_rate": None,
+            # Slice 4A8 — 旧 Board 公式：rate = (up+down)/board_ready，round 4。
+            "bos_rate": bos_rate,
+            "choch_rate": choch_rate,
         },
         "momentum": {
             **momentum_dir,

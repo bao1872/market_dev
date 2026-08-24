@@ -1461,44 +1461,57 @@ async def _compute_product_nodes(
             ).model_dump()
         )
 
-    # ===== 3. 板块分析（BoardAnalysisRun run 级模型 = 整个批次的真实质量）=====
-    # 不能取单条 snapshot 的最高覆盖率来判定整个板块正常（一个板块 100% 但其他板块缺失仍会误判）。
-    # 用 BoardAnalysisRun（含 expected_count/succeeded_count/failed_count/coverage_ratio/status/published_at）
-    # 按最新 trade_date 取该批次 run，以 run 级覆盖率判定整个批次。
-    from app.models.board_analysis_snapshot import BoardAnalysisRun
-    board_date = await db.scalar(select(func.max(BoardAnalysisRun.trade_date)))
-    if board_date is None:
+    # ===== 3. 板块/复盘事实（sourced from published Unified Review）=====
+    # Slice 4A8 — 不再把 legacy 板块运行表表述为当前正式板块产品。
+    # 板块事实来自已发布的 MarketReviewRun 及其 canonical board scopes。
+    from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
+    _BOARD_SCOPE_TYPES = ("concept", "industry_l1", "industry_l2", "industry_l3")
+    board_review = await db.scalar(
+        select(MarketReviewRun)
+        .where(MarketReviewRun.status == "published")
+        .order_by(MarketReviewRun.trade_date.desc())
+        .limit(1)
+    )
+    if board_review is None:
         nodes.append(
             ProductionChainNode(
-                key="board", label="板块分析", status="pending",
-                detail="尚无板块分析 run", trade_date=None,
+                key="board", label="板块/复盘事实", status="pending",
+                detail="尚无已发布复盘", trade_date=None,
                 publication_status="not_applicable",
-                blocking_reason="无 run 记录", recommended_action="触发板块分析计算",
+                blocking_reason="无已发布复盘", recommended_action="发布复盘",
             ).model_dump()
         )
     else:
-        board_run = await db.scalar(
-            select(BoardAnalysisRun)
-            .where(BoardAnalysisRun.trade_date == board_date)
-            .order_by(BoardAnalysisRun.created_at.desc())
-            .limit(1)
-        )
-        board_cov_ok = board_run is not None and board_run.coverage_ratio >= 0.95
+        exp_total, prov_total, scope_cnt = (
+            await db.execute(
+                select(
+                    func.coalesce(func.sum(ReviewScopeObservationFact.pit_member_count), 0),
+                    func.coalesce(func.sum(ReviewScopeObservationFact.provided_member_count), 0),
+                    func.count(ReviewScopeObservationFact.id),
+                ).where(
+                    ReviewScopeObservationFact.review_run_id == board_review.id,
+                    ReviewScopeObservationFact.scope_type.in_(_BOARD_SCOPE_TYPES),
+                )
+            )
+        ).one()
+        exp_total = int(exp_total)
+        prov_total = int(prov_total)
+        board_cov = prov_total / exp_total if exp_total > 0 else 0.0
+        board_cov_ok = exp_total > 0 and board_cov >= 0.95
         nodes.append(
             ProductionChainNode(
-                key="board", label="板块分析",
-                status="ok" if board_cov_ok else ("running" if board_run and board_run.status == "running" else "failed"),
+                key="board", label="板块/复盘事实",
+                status="ok" if board_cov_ok else "failed",
                 detail=(
-                    f"{board_date} 批次覆盖率 {(board_run.coverage_ratio * 100):.0f}%"
-                    f"（成功 {board_run.succeeded_count}/{board_run.expected_count}）"
-                    if board_run else "无 run"
+                    f"{board_review.trade_date} 已发布复盘板块范围 {scope_cnt} 个"
+                    f"，成员覆盖 {board_cov * 100:.0f}%（{prov_total}/{exp_total}）"
                 ),
-                trade_date=board_date,
-                run_id=str(board_run.id) if board_run else None,
+                trade_date=board_review.trade_date,
+                run_id=str(board_review.id),
                 quality_gate="passed" if board_cov_ok else "failed",
-                publication_status="not_applicable",
-                blocking_reason=None if board_cov_ok else "批次覆盖率未达 95%",
-                recommended_action=None if board_cov_ok else "查看板块批次缺失股票并重算",
+                publication_status="published" if board_review.status == "published" else "pending",
+                blocking_reason=None if board_cov_ok else "已发布复盘板块成员覆盖未达 95%",
+                recommended_action=None if board_cov_ok else "检查已发布复盘板块范围",
             ).model_dump()
         )
 

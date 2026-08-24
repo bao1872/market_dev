@@ -53,7 +53,6 @@ from app.models.factor_publication import (
     PUBLICATION_KIND_AUCTION_ANCHOR,
     PUBLICATION_KIND_BOARD_FACTS,
     PUBLICATION_KIND_CHIP_CONSENSUS,
-    PUBLICATION_KIND_MARKET_AGGREGATION,
     PUBLICATION_KIND_STOCK_CORE,
     SCOPE_TYPE_MARKET,
 )
@@ -1109,85 +1108,53 @@ class ProductReadinessService:
     async def _board_aggregation_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """board_aggregation：market_aggregation 发布指针 + **current-lineage 归属校验**。
+        """board_aggregation：板块分析能力就绪 = 已发布的 Unified Review（Slice 4A8）。
 
-        [current-lineage validation] 除 pointer 存在性外，还须验证 pointer 指向的
-        BoardAnalysisRun.source_core_run_id == 当前 stock_core pointer.data_run_id；
-        不一致（如 Core 重跑后 board 仍基于旧 Core）→ BOARD_AGGREGATION_LINEAGE_MISMATCH，
-        不得 READY。
+        Slice 4A8 — 不再将 legacy market_aggregation 指针 / 旧板块运行表 /
+        source_board_run_id 表述为当前正式板块产品的必要条件。当前正式板块事实
+        （板块/复盘事实）源自已发布 MarketReviewRun，因此本节点跟随已发布的
+        Review 就绪；无 market_review 发布指针 → PENDING / DEGRADED，但绝不因
+        market_aggregation 或旧板块运行表缺失而判定不可用。
         """
-        from app.models.board_analysis_snapshot import BoardAnalysisRun
         from app.models.factor_publication import FactorPublication
+        from app.models.market_review import MarketReviewRun
+        from app.services.review_publication_service import (
+            PUBLICATION_KIND_MARKET_REVIEW,
+        )
 
         pub = await db.scalar(
             select(FactorPublication)
             .where(
+                FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
                 FactorPublication.trade_date == trade_date,
-                FactorPublication.publication_kind
-                == PUBLICATION_KIND_MARKET_AGGREGATION,
             )
             .limit(1)
         )
         if pub is None:
             return ProductReadinessState(
                 "board_aggregation", READINESS_PENDING, "fresh",
-                lineage={"source_type": "publication_pointer",
+                is_mandatory=True, is_terminal=False,
+                lineage={"source_type": "review_publication",
                          "reason_code": "NO_PUBLICATION"},
             )
-
-        board_run = await db.scalar(
-            select(BoardAnalysisRun)
-            .where(BoardAnalysisRun.id == pub.data_run_id)
+        pub_run = await db.scalar(
+            select(MarketReviewRun)
+            .where(MarketReviewRun.id == pub.data_run_id)
             .limit(1)
         )
-        current_core = await self._current_stock_core_data_run_id(db, trade_date)
-        lineage = _publication_lineage(pub, board_run)
-        lineage["source_type"] = "market_aggregation_publication"
-        lineage["board_run_id"] = _sid(getattr(pub, "data_run_id", None))
-        lineage["reason_code"] = "BOARD_AGGREGATION_PUBLISHED"
-        if current_core is None or board_run is None \
-                or getattr(board_run, "source_core_run_id", None) != current_core:
-            # 当前 stock_core pointer 缺失，或 board run 的 source_core 与当前 Core 不一致
+        lineage = _publication_lineage(pub, pub_run)
+        lineage["source_type"] = "review_publication"
+        lineage["review_run_id"] = _sid(getattr(pub, "data_run_id", None))
+        if pub_run is None:
+            lineage["reason_code"] = "REVIEW_RUN_MISSING"
             return ProductReadinessState(
                 "board_aggregation", READINESS_DEGRADED, "stale",
-                is_mandatory=True, is_terminal=False,
-                lineage={
-                    **lineage,
-                    "expected_source_core_run_id": _sid(current_core),
-                    "actual_source_core_run_id": _sid(
-                        getattr(board_run, "source_core_run_id", None),
-                    ),
-                    "reason_code": "BOARD_AGGREGATION_LINEAGE_MISMATCH",
-                },
+                is_mandatory=True, is_terminal=False, lineage=lineage,
             )
-        # [Phase 4D.3 / PRD 31 PC-42] board_aggregation 是 mandatory product，但
-        # MANDATORY != PERFECT。正式 pointer 可以指向 succeeded(READY) 或
-        # degraded-publishable 的 partial(DEGRADED)。DEGRADED 仍是**可消费**的正式
-        # 产品（不阻断 Review），因此复用 READINESS_READY + freshness="degraded"
-        # 表达；READINESS_DEGRADED 在本 evaluator 中保留给 lineage 失配等
-        # **不可消费** 的降级（见上方分支），不改变其既有语义。
-        board_status = getattr(board_run, "status", None)
-        if board_status == "partial":
-            degradation = {}
-            metadata = getattr(pub, "metadata_json", None)
-            if isinstance(metadata, dict):
-                raw = metadata.get("board_degradation")
-                if isinstance(raw, dict):
-                    degradation = raw
-            return ProductReadinessState(
-                "board_aggregation", READINESS_READY, "degraded",
-                is_mandatory=True, is_terminal=True,
-                lineage={
-                    **lineage,
-                    "board_run_status": board_status,
-                    "board_degradation": degradation,
-                    "reason_code": "BOARD_AGGREGATION_PUBLISHED_DEGRADED",
-                },
-            )
+        lineage["reason_code"] = "REVIEW_PUBLISHED"
         return ProductReadinessState(
             "board_aggregation", READINESS_READY, "fresh",
-            is_mandatory=True, is_terminal=True,
-            lineage={**lineage, "board_run_status": board_status},
+            is_mandatory=True, is_terminal=True, lineage=lineage,
         )
 
     async def _review_state(
@@ -1223,20 +1190,13 @@ class ProductReadinessService:
             lineage = _publication_lineage(pub, pub_run)
             lineage["source_type"] = "review_publication"
             lineage["review_run_id"] = _sid(getattr(pub, "data_run_id", None))
-            # [current-lineage validation] review 必须归属当前上游：
-            #   source_core_run_id == 当前 stock_core pointer.data_run_id
-            #   source_board_run_id == 当前 market_aggregation pointer.data_run_id
-            # 任一不一致 → REVIEW_LINEAGE_MISMATCH，不得 READY。
+            # [Slice 4A8] review 只归属当前 stock_core（source_core_run_id）。
+            # source_board_run_id 只是 nullable legacy 血缘字段，不再作为当前正式
+            # 依赖 gate；market_aggregation 指针缺失不得阻断已发布 Review 就绪。
             current_core = await self._current_stock_core_data_run_id(db, trade_date)
-            current_board = await self._current_market_aggregation_data_run_id(
-                db, trade_date,
-            )
             run_core = getattr(pub_run, "source_core_run_id", None)
-            run_board = getattr(pub_run, "source_board_run_id", None)
             lineage["expected_source_core_run_id"] = _sid(current_core)
-            lineage["expected_source_board_run_id"] = _sid(current_board)
-            if pub_run is None or current_core is None or current_board is None \
-                    or run_core != current_core or run_board != current_board:
+            if pub_run is None or current_core is None or run_core != current_core:
                 lineage["reason_code"] = "REVIEW_LINEAGE_MISMATCH"
                 return ProductReadinessState(
                     "review", READINESS_DEGRADED, "stale",
@@ -1738,31 +1698,6 @@ class ProductReadinessService:
             .where(
                 FactorPublication.trade_date == trade_date,
                 FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
-                FactorPublication.superseded_by.is_(None),
-            )
-            .order_by(FactorPublication.created_at.desc())
-            .limit(1)
-        )
-        if pub is None:
-            return None
-        return getattr(pub, "data_run_id", None)
-
-    async def _current_market_aggregation_data_run_id(
-        self, db: Any, trade_date: date,
-    ) -> Any | None:
-        """当前 market_aggregation pointer 的 data_run_id（与下游 review 对齐）。
-
-        作为 review 判定 source_board lineage 的权威 board run 标识。
-        优先取当日 MARKET_AGGREGATION 发布指针的 data_run_id（非 superseded）。
-        """
-        from app.models.factor_publication import FactorPublication
-
-        pub = await db.scalar(
-            select(FactorPublication)
-            .where(
-                FactorPublication.trade_date == trade_date,
-                FactorPublication.publication_kind
-                == PUBLICATION_KIND_MARKET_AGGREGATION,
                 FactorPublication.superseded_by.is_(None),
             )
             .order_by(FactorPublication.created_at.desc())

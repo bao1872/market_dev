@@ -21,6 +21,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import date
 from types import SimpleNamespace
 
@@ -428,13 +429,20 @@ def _auction_snap(status="succeeded", snap_id="snap1",
 
 
 def _full_plan(**overrides) -> dict:
-    """构造全就绪 plan，所有节点均有正式 pointer 与对应领域 run。"""
+    """构造全就绪 plan，所有节点均有正式 pointer 与对应领域 run。
+
+    [Slice 4A8] board_aggregation 与 review 现在共用同一条已发布 MarketReviewRun
+    （不再走 market_aggregation / BoardAnalysisRun）。collect_states 先估
+    board_aggregation 再估 review，二者各消费一次 MARKET_REVIEW pub 与
+    MarketReviewRun，因此这里各提供两份完全相同的事实（模拟同一条已发布复盘被
+    board 节点与 review 节点共同读取）。当前板块产品就绪不再需要 market_aggregation
+    指针 / BoardAnalysisRun / source_board_run_id。
+    """
     pubs = {
         _DAILY: [_pub(_DAILY)],
         _BOARD_FACTS: [_pub(_BOARD_FACTS)],
         _STOCK_CORE: [_pub(_STOCK_CORE)],
-        _BOARD_AGG: [_pub(_BOARD_AGG)],
-        _REVIEW: [_pub(_REVIEW)],
+        _REVIEW: [_pub(_REVIEW), _pub(_REVIEW)],
         # chip 正式产物为 SchedulerJobRun + StockChipConsensusSnapshot，
         # 不再经 FactorPublication(CHIP_CONSENSUS) pointer；故此处置 None，
         # 由 job 元数据驱动 readiness。
@@ -443,19 +451,19 @@ def _full_plan(**overrides) -> dict:
     }
     runs = {
         BoardFactsRun: [_bf_run("published")],
-        BoardAnalysisRun: [_board_agg_run("succeeded", source_core=_DRID)],
-        MarketReviewRun: [_review_run("published")],
+        MarketReviewRun: [
+            _review_run("published", source_board=None),
+            _review_run("published", source_board=None),
+        ],
         SchedulerJobRun: [_chip_job("succeeded")],
         StockChipConsensusSnapshot: [10],  # 真实 snapshot 行数（lineage 对账）
         AuctionAnchorPublication: [_auction_pub("succeeded")],
         AuctionAnchorSnapshot: [_auction_snap("succeeded")],
     }
-    # [current-lineage validation] 当前上游 pointer（供 _current_*_data_run_id）。
-    # 默认与 _full_plan 的 stock_core/market_aggregation pointer 一致（data_run_id=_DRID），
-    # 使 board_aggregation/review 的 source 归属校验通过。
+    # [current-lineage validation] 当前 stock_core pointer（供 _current_stock_core_data_run_id）。
+    # 默认 data_run_id=_DRID，使 board_aggregation/review 的 source_core 归属校验通过。
     current_pubs = {
         _STOCK_CORE: _pub(_STOCK_CORE),
-        _BOARD_AGG: _pub(_BOARD_AGG),
     }
     plan = {
         "pubs": pubs,
@@ -746,74 +754,98 @@ async def test_state_events_exact_match_ready():
 
 
 async def test_board_aggregation_exact_lineage_ready():
-    """[current-lineage validation] market_aggregation pointer 指向的 BoardAnalysisRun
-    source_core_run_id == 当前 stock_core pointer.data_run_id，且 daily_facts 完整
-    → fully_ready。"""
-    plan = _full_plan()  # board run source_core=_DRID == current stock_core(_DRID)
+    """[Slice 4A8] board_aggregation 就绪 = 已发布 MarketReviewRun（canonical board-independent）
+    存在且与之归属一致 → fully_ready。"""
+    plan = _full_plan()  # board/review 共用同一已发布 MarketReviewRun
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_FULLY_READY
 
 
-async def test_board_aggregation_stale_lineage_not_ready():
-    """[current-lineage validation] market_aggregation pointer 指向的 BoardAnalysisRun
-    source_core_run_id 与当前 stock_core pointer 不一致（如 Core 重跑后 board 基于旧 Core）
-    → BOARD_AGGREGATION_LINEAGE_MISMATCH，不得 READY。
-
-    board_aggregation 是 mandatory 节点，lineage mismatch 阻断闭包 → 不得 fully_ready。
-    """
+async def test_board_aggregation_ready_without_market_aggregation():
+    """[Slice 4A8] board_aggregation 就绪只依赖已发布 MarketReviewRun（source_board_run_id=None），
+    不再依赖 market_aggregation 指针 / BoardAnalysisRun。"""
     plan = _full_plan()
-    # board run 基于旧 Core（source_core 与当前 stock_core _DRID 不一致）
-    plan["runs"] = {**plan["runs"], BoardAnalysisRun: [_board_agg_run("succeeded", source_core="old_core_id")]}
-    ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_CORE_READY  # mandatory board_aggregation 未就绪
+    plan["pubs"] = {**plan["pubs"], _REVIEW: [_pub(_REVIEW)]}
+    plan["runs"] = {
+        **plan["runs"],
+        MarketReviewRun: [_review_run("published", source_core=_DRID, source_board=None)],
+    }
+    db = _FakeDB(plan)
+    service = ProductReadinessService()
+    st = await service._board_aggregation_state(db, date(2026, 8, 4))
+    assert st.readiness == READINESS_READY
+    assert st.lineage.get("source_type") == "review_publication"
+    assert "expected_source_core_run_id" not in st.lineage  # 不再做 legacy board lineage 归属
 
-    # 且状态本身不得 READY（lineage mismatch → degraded, non-terminal）
-    # 注：_evaluate 会 pop 共享 plan 的 FIFO，需用 fresh plan 断言直接状态。
-    plan2 = _full_plan()
-    plan2["runs"] = {**plan2["runs"], BoardAnalysisRun: [_board_agg_run("succeeded", source_core="old_core_id")]}
-    db = _FakeDB(plan2)
+
+async def test_board_aggregation_degraded_when_review_run_missing():
+    """[Slice 4A8] market_review 发布指针存在但 MarketReviewRun 缺失 → 降级（REVIEW_RUN_MISSING）。"""
+    plan = _full_plan()
+    plan["pubs"] = {**plan["pubs"], _REVIEW: [_pub(_REVIEW)]}
+    plan["runs"] = {**plan["runs"], MarketReviewRun: []}
+    db = _FakeDB(plan)
     service = ProductReadinessService()
     st = await service._board_aggregation_state(db, date(2026, 8, 4))
     assert st.readiness == READINESS_DEGRADED
-    assert st.lineage.get("reason_code") == "BOARD_AGGREGATION_LINEAGE_MISMATCH"
+    assert st.lineage.get("reason_code") == "REVIEW_RUN_MISSING"
 
 
 async def test_review_exact_lineage_ready():
-    """[current-lineage validation] market_review pointer 指向的 MarketReviewRun
-    source_core_run_id == 当前 stock_core pointer 且 source_board_run_id == 当前
-    market_aggregation pointer，且 daily_facts 完整 → fully_ready。
-    """
-    plan = _full_plan()  # review run source_core=_DRID, source_board=_DRID 与当前指针一致
+    """[Slice 4A8] review 就绪只归属当前 stock_core（source_core_run_id）；不再要求
+    source_board_run_id 归属 market_aggregation。已发布 Review + daily_facts 完整 → fully_ready。"""
+    plan = _full_plan()  # review run source_core=_DRID == 当前 stock_core pointer
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_FULLY_READY
 
 
-async def test_review_stale_lineage_not_ready():
-    """[current-lineage validation] market_review pointer 指向的 MarketReviewRun
-    source_core_run_id 与当前 stock_core 不一致 → REVIEW_LINEAGE_MISMATCH，不得 READY。
+async def test_review_ready_without_board_lineage():
+    """[Slice 4A8] review 就绪无需 market_aggregation 指针或 source_board_run_id（canonical
+    board-independent，source_board_run_id=None）→ READY。"""
+    plan = _full_plan()
+    plan["pubs"] = {**plan["pubs"], _REVIEW: [_pub(_REVIEW)]}
+    plan["runs"] = {
+        **plan["runs"],
+        MarketReviewRun: [_review_run("published", source_core=_DRID, source_board=None)],
+    }
+    db = _FakeDB(plan)
+    service = ProductReadinessService()
+    st = await service._review_state(db, date(2026, 8, 4))
+    assert st.readiness == READINESS_READY
+    assert st.lineage.get("reason_code") == "REVIEW_PUBLISHED"
 
-    review 是 mandatory 节点，lineage mismatch 阻断闭包 → 不得 fully_ready。
-    """
+
+async def test_review_stale_lineage_not_ready():
+    """[Slice 4A8] market_review pointer 指向的 MarketReviewRun source_core_run_id 与当前
+    stock_core 不一致 → REVIEW_LINEAGE_MISMATCH（legacy source_board 归属已不再是依赖 gate）。"""
     plan = _full_plan()
     plan["runs"] = {
         **plan["runs"],
-        MarketReviewRun: [_review_run("published", source_core="old_core_id", source_board=_DRID)],
+        MarketReviewRun: [_review_run("published", source_core="old_core_id", source_board=None)],
     }
-    ev = await _evaluate(plan)
-    assert ev.closure == CLOSURE_CORE_READY  # mandatory review 未就绪
-
-    # 且状态本身不得 READY（review lineage mismatch → degraded, non-terminal）
-    # 注：_evaluate 会 pop 共享 plan 的 FIFO，需用 fresh plan 断言直接状态。
-    plan2 = _full_plan()
-    plan2["runs"] = {
-        **plan2["runs"],
-        MarketReviewRun: [_review_run("published", source_core="old_core_id", source_board=_DRID)],
-    }
-    db = _FakeDB(plan2)
+    db = _FakeDB(plan)
     service = ProductReadinessService()
     st = await service._review_state(db, date(2026, 8, 4))
     assert st.readiness == READINESS_DEGRADED
     assert st.lineage.get("reason_code") == "REVIEW_LINEAGE_MISMATCH"
+    assert "REVIEW_LINEAGE_MISMATCH" in str(st.lineage)
+
+
+def test_readiness_source_no_longer_gates_on_market_aggregation():
+    """[Slice 4A8] 生产就绪源码不再把 market_aggregation / BoardAnalysisRun /
+    source_board_run_id 当作当前板块/review 的强制依赖 gate。"""
+    from app.services.product_readiness_service import ProductReadinessService
+
+    # board_aggregation 就绪节点：不再走 market_aggregation 指针 / BoardAnalysisRun
+    ba_src = inspect.getsource(ProductReadinessService._board_aggregation_state)
+    assert "PUBLICATION_KIND_MARKET_AGGREGATION" not in ba_src
+    assert "BoardAnalysisRun" not in ba_src
+    assert "review_publication" in ba_src
+
+    # review 就绪节点：不再按 source_board_run_id 归属 market_aggregation 做 gate
+    rev_src = inspect.getsource(ProductReadinessService._review_state)
+    assert "expected_source_board_run_id" not in rev_src
+    assert "run_board" not in rev_src
+    assert "current_board" not in rev_src
 
 
 # =============================================================================
