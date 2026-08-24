@@ -34,7 +34,7 @@ import {
   isScopeDetailEnabled,
   scopeDetailQueryOptions,
 } from '../useReviewScopeDetail'
-import { DEFAULT_REVIEW_TAB, defaultReviewUrlState } from '../urlState'
+import { DEFAULT_REVIEW_TAB, defaultReviewUrlState, normalizeDetailTab, buildReviewUrl, decodeReviewUrl, type ReviewUrlState } from '../urlState'
 import { memberName, formatContributionFraction, NULL_DISPLAY } from '../reviewFormat'
 import type {
   ReviewScopeComposition,
@@ -794,8 +794,46 @@ test('N2. 只有 detail owner 调用 getReviewScopeDetail', () => {
 // 11. URL tab SSOT
 // ============================================================
 
-test('URL1. 默认 detail tab 为 dynamics', () => {
-  assert.equal(DEFAULT_REVIEW_TAB, 'dynamics')
+test('URL1. [R3A] 默认 detail tab 为 current', () => {
+  assert.equal(DEFAULT_REVIEW_TAB, 'current')
+})
+
+test('URL2. [R3A FE-9] 缺失 tab → current', () => {
+  const st = defaultReviewUrlState()
+  assert.equal(st.tab, 'current')
+})
+
+test('URL3. [R3A FE-8] 默认/显式 current 一致', () => {
+  assert.equal(normalizeDetailTab('current'), 'current')
+})
+
+test('URL4. [R3A FE-10] 非法/缺失 tab → current', () => {
+  assert.equal(normalizeDetailTab('bogus'), 'current')
+  assert.equal(normalizeDetailTab(null), 'current')
+  assert.equal(normalizeDetailTab(undefined), 'current')
+})
+
+function detailState(tab: 'current' | 'dynamics'): ReviewUrlState {
+  return { ...defaultReviewUrlState(), date: '2026-08-21', family: 'industry_l1', scopeKey: 'bank', tab }
+}
+
+test('URL5. [R3A FE-11] current 编码省略 tab 参数', () => {
+  const url = buildReviewUrl(detailState('current'))
+  assert.ok(!url.includes('tab='), `current 不应编码 tab，实际：${url}`)
+})
+
+test('URL6. [R3A FE-12] dynamics 编码保留 tab=dynamics 且可 round-trip', () => {
+  const url = buildReviewUrl(detailState('dynamics'))
+  assert.ok(url.includes('tab=dynamics'), `dynamics 应编码 tab，实际：${url}`)
+  const parsed = decodeReviewUrl(new URLSearchParams(url.split('?')[1] ?? ''))
+  assert.equal(parsed.tab, 'dynamics')
+})
+
+test('URL7. [R3A FE-13] tab 切换不改 detail query identity', () => {
+  const base = { tradeDate: '2026-08-21', scopeType: 'industry_l1', scopeKey: 'copper' }
+  const key = scopeDetailQueryOptions(base).queryKey
+  assert.ok(!JSON.stringify(key).includes('dynamics'), 'detail identity 不得包含 tab')
+  assert.ok(!JSON.stringify(key).includes('current'), 'detail identity 不得包含 tab')
 })
 
 // ============================================================
@@ -1017,9 +1055,9 @@ test('M1. member_name==member_id 时诚实显示 member_id', () => {
 // 15. 面板渲染边界
 // ============================================================
 
-test('ST1. Workspace 对 composition=null 显示明确文案', () => {
+test('ST1. [R3A] Workspace 对 composition=null 显示中性说明（非 hard-stop，不称 failed/broken/error）', () => {
   const src = read('ScopeDetailWorkspace.tsx')
-  assert.match(src, /该 Scope 当前没有 Canonical Composition/)
+  assert.match(src, /Canonical Composition 不可用；Objective Observation 仍可用/)
   assert.match(src, /选择一个 Scope 查看详细分析/)
 })
 

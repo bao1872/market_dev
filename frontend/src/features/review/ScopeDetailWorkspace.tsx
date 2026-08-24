@@ -145,19 +145,18 @@ export default function ScopeDetailWorkspace({
     selectedScope.readiness ??
     'unavailable_current'
 
-  if (!detail.data.composition) {
-    return (
-      <div className={styles.detailWorkspace}>
-        <Header data={detail.data} family={family} readiness={readiness} />
-        <div className={styles.detailHeaderNote}>该 Scope 当前没有 Canonical Composition</div>
-        <ScopeDetailTabs tab={tab} onTabChange={onTabChange} />
-      </div>
-    )
-  }
+  const compositionMissing = !detail.data.composition
 
   return (
     <div className={styles.detailWorkspace} data-detail-workspace>
       <Header data={detail.data} family={family} readiness={readiness} />
+      {compositionMissing && (
+        // [R3A] Fact-only detail：Objective Observation 仍可用，不把缺失 Composition
+        // 说成 failed/broken/error（除非发生实际 API error，已在上方处理）。
+        <div className={styles.detailHeaderNote}>
+          Canonical Composition 不可用；Objective Observation 仍可用
+        </div>
+      )}
       <ScopeDetailTabs tab={tab} onTabChange={onTabChange} />
 
       <div className={styles.detailContent}>

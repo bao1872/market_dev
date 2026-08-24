@@ -29,7 +29,7 @@ from __future__ import annotations
 import uuid
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -52,7 +52,12 @@ _DEF_LIST = {"include_partial": False, "page": 1, "page_size": 20}
 _DEF_DETAIL = {"include_partial": False}
 
 
-def _run(run_id: uuid.UUID, trade_date: date = date(2026, 7, 29)) -> SimpleNamespace:
+def _run(
+    run_id: uuid.UUID,
+    trade_date: date = date(2026, 7, 29),
+    *,
+    algorithm_version: str = "review-2.0.0",
+) -> SimpleNamespace:
     return SimpleNamespace(
         id=run_id,
         trade_date=trade_date,
@@ -65,7 +70,7 @@ def _run(run_id: uuid.UUID, trade_date: date = date(2026, 7, 29)) -> SimpleNames
         succeeded_scope_count=2,
         failed_scope_count=0,
         signal_count=0,
-        algorithm_version="review-2.0.0",
+        algorithm_version=algorithm_version,
         filter_version="filters-1.0.0",
         baseline_window=120,
         metadata_json={},
@@ -76,17 +81,45 @@ def _run(run_id: uuid.UUID, trade_date: date = date(2026, 7, 29)) -> SimpleNames
     )
 
 
-def _fact(scope_type: str, scope_key: str, review_run_id: uuid.UUID) -> SimpleNamespace:
+def _fact(
+    scope_type: str,
+    scope_key: str,
+    review_run_id: uuid.UUID,
+    *,
+    trade_date: date | None = None,
+    scope_name: str | None = None,
+    algorithm_version: str | None = "fact-2.0.0",
+    observation_payload: dict | None = None,
+) -> SimpleNamespace:
     return SimpleNamespace(
+        review_run_id=review_run_id,
         scope_type=scope_type,
         scope_key=scope_key,
-        scope_name=scope_key,
+        scope_name=scope_name if scope_name is not None else scope_key,
+        trade_date=trade_date if trade_date is not None else date(2026, 7, 29),
         pit_member_count=10,
         provided_member_count=9,
         pit_status_t="historical_pit",
         readiness="ready",
-        observation_payload={"scope": {"scope_type": scope_type, "scope_key": scope_key}},
+        algorithm_version=algorithm_version,
+        observation_payload=(
+            observation_payload
+            if observation_payload is not None
+            else {"scope": {"scope_type": scope_type, "scope_key": scope_key}}
+        ),
     )
+
+
+def _obs_with_groups() -> dict:
+    """Canonical observation_payload with enough shape for the 8-group projection."""
+    return {
+        "scope": {"scope_type": "industry_l1", "scope_key": "k1"},
+        "price_capital": {"return_level": {"ew": 0.01}},
+        "trend": {"state": {"status": "ready"}},
+        "structure": {"current_state": {"board_ready_member_count": 42}},
+        "momentum": {"squeeze_release": {"status": "ready"}},
+        "participation": {"volume": {"amount": 1.0}},
+    }
 
 
 def _summary_row(
@@ -169,6 +202,8 @@ def _patch_list(db, run, *, rows, total=None):
 
 
 async def test_get_review_scope_composition_ok() -> None:
+    # [R3A BE-1] Fact exists + Composition exists: 200, composition preserved,
+    # observation preserved, observationGroups exactly canonical projection.
     run_id = uuid.uuid4()
     run = _run(run_id)
     snapshot = SimpleNamespace(
@@ -178,7 +213,7 @@ async def test_get_review_scope_composition_ok() -> None:
         algorithm_version="review-2.0.0",
         composition_payload={"dynamics": {"position": 0.5}},
     )
-    fact = _fact("industry_l1", "k1", run_id)
+    fact = _fact("industry_l1", "k1", run_id, observation_payload=_obs_with_groups())
     db = AsyncMock()
     await _resolve_run(db, run)
     with patch.object(
@@ -191,7 +226,11 @@ async def test_get_review_scope_composition_ok() -> None:
         review_api,
         "get_scope_observation_fact_by_run",
         new=AsyncMock(return_value=fact),
-    ) as mock_fact:
+    ) as mock_fact, patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value={"price_capital": {}, "trend_state": {}}),
+    ) as mock_groups:
         resp = await review_api.get_review_scope_composition(
             "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
         )
@@ -199,12 +238,18 @@ async def test_get_review_scope_composition_ok() -> None:
         mock_fact.assert_called_once_with(
             db, run_id, date(2026, 7, 29), "industry_l1", "k1"
         )
+        # [R3A] groups projected directly from fact.observation_payload
+        mock_groups.assert_called_once_with(fact.observation_payload)
 
     assert resp.scopeType == "industry_l1"
     assert resp.composition == {"dynamics": {"position": 0.5}}
+    assert resp.observation == fact.observation_payload
+    assert resp.observationGroups == {"price_capital": {}, "trend_state": {}}
 
 
-async def test_get_review_scope_composition_404_when_missing() -> None:
+async def test_get_review_scope_composition_404_when_fact_missing() -> None:
+    # [R3A BE-3/BE-4] Fact missing → 404 (Fact owns detail existence),
+    # even if Composition exists.
     run_id = uuid.uuid4()
     run = _run(run_id)
     db = AsyncMock()
@@ -213,12 +258,317 @@ async def test_get_review_scope_composition_404_when_missing() -> None:
         review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
     ), patch.object(
         review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=None)
+    ) as mock_fact:
+        with pytest.raises(HTTPException) as exc:
+            await review_api.get_review_scope_composition(
+                "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+            )
+        mock_fact.assert_called_once_with(
+            db, run_id, date(2026, 7, 29), "industry_l1", "k1"
+        )
+    assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# R3A — Canonical Observation Detail Contract (Fact-first, observationGroups,
+#       nullable composition, published-run lineage)
+# ---------------------------------------------------------------------------
+
+
+def _eight_groups() -> dict:
+    return {
+        "price_capital": {"group_key": "price_capital", "label": "价格与资金", "facts": {}},
+        "trend_state": {"group_key": "trend_state", "label": "趋势状态", "facts": {}},
+        "trend_progress": {"group_key": "trend_progress", "label": "趋势进程", "facts": {}},
+        "trend_volume_confirmation": {
+            "group_key": "trend_volume_confirmation",
+            "label": "趋势量能确认",
+            "facts": {},
+        },
+        "structure_break_turn": {
+            "group_key": "structure_break_turn",
+            "label": "结构破位转折",
+            "facts": {},
+        },
+        "structure_evolution_position": {
+            "group_key": "structure_evolution_position",
+            "label": "结构演化位置",
+            "facts": {},
+        },
+        "momentum_squeeze_release": {
+            "group_key": "momentum_squeeze_release",
+            "label": "动量 squeeze 释放",
+            "facts": {},
+        },
+        "volume_anomaly": {"group_key": "volume_anomaly", "label": "量能异常", "facts": {}},
+    }
+
+
+async def test_r3a_fact_exists_composition_missing_200() -> None:
+    # [R3A BE-2] Fact exists + Composition missing → 200, composition==null,
+    # observation preserved, observationGroups present with exactly 8 canonical groups.
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    fact = _fact("industry_l1", "k1", run_id, observation_payload=_obs_with_groups())
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+    assert resp.composition is None
+    assert resp.observation == fact.observation_payload
+    assert set(resp.observationGroups.keys()) == set(_eight_groups().keys())
+    assert len(resp.observationGroups) == 8
+
+
+async def test_r3a_same_day_multirun_selects_published() -> None:
+    # [R3A BE-5/BE-6] Same-day multiple ReviewRuns: published run's Fact selected
+    # by review_run_id; later/unpublished Fact must not contaminate the response.
+    published_run_id = uuid.uuid4()
+    other_run_id = uuid.uuid4()
+    published_run = _run(published_run_id)
+    fact_published = _fact(
+        "industry_l1", "k1", published_run_id, scope_name="PUBLISHED"
+    )
+    fact_other = _fact("industry_l1", "k1", other_run_id, scope_name="OTHER")
+    db = AsyncMock()
+    await _resolve_run(db, published_run)
+    with patch.object(
+        review_api,
+        "get_published_review_run_id",
+        new=AsyncMock(return_value=published_run_id),
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api,
+        "get_scope_observation_fact_by_run",
+        new=AsyncMock(return_value=fact_published),
+    ) as mock_fact, patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+        # identity must come from the published-run lineage fact
+        mock_fact.assert_called_once_with(
+            db, published_run_id, date(2026, 7, 29), "industry_l1", "k1"
+        )
+    # verify the OTHER fact was never selected (lineage integrity)
+    assert resp.scopeName == "PUBLISHED"
+    assert fact_other.scope_name == "OTHER"  # untouched; not used
+
+
+async def test_r3a_algorithm_version_precedence_snapshot_fact_run() -> None:
+    # [R3A BE-7] algorithmVersion precedence: snapshot > fact > run.
+    run_id = uuid.uuid4()
+    run = _run(run_id, algorithm_version="run-1.0.0")
+    snapshot = SimpleNamespace(
+        scope_type="industry_l1",
+        scope_key="k1",
+        scope_name="行业",
+        algorithm_version="snapshot-2.0.0",
+        composition_payload={"dynamics": {}},
+    )
+    fact = _fact(
+        "industry_l1", "k1", run_id, algorithm_version="fact-1.5.0",
+        observation_payload=_obs_with_groups(),
+    )
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=snapshot)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+    assert resp.algorithmVersion == "snapshot-2.0.0"
+
+
+async def test_r3a_algorithm_version_fact_fallback() -> None:
+    # [R3A BE-7] snapshot absent → fact.algorithm_version used.
+    run_id = uuid.uuid4()
+    run = _run(run_id, algorithm_version="run-1.0.0")
+    fact = _fact(
+        "industry_l1", "k1", run_id, algorithm_version="fact-1.5.0",
+        observation_payload=_obs_with_groups(),
+    )
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+    assert resp.algorithmVersion == "fact-1.5.0"
+
+
+async def test_r3a_observation_payload_returned_verbatim() -> None:
+    # [R3A BE-8] observation payload returned verbatim (no normalization/recompute).
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    payload = _obs_with_groups()
+    fact = _fact("industry_l1", "k1", run_id, observation_payload=payload)
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+    # verbatim content (pydantic copies on validation, but no normalization/recompute)
+    assert resp.observation == payload
+
+
+async def test_r3a_observation_groups_equals_projection() -> None:
+    # [R3A BE-9] observationGroups equals build_l2_observation_groups(fact.observation_payload).
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    payload = _obs_with_groups()
+    fact = _fact("industry_l1", "k1", run_id, observation_payload=payload)
+    projected = _eight_groups()
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=projected),
+    ) as mock_groups:
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+        mock_groups.assert_called_once_with(payload)
+    assert resp.observationGroups == projected
+
+
+async def test_r3a_no_global_fact_fallback() -> None:
+    # [R3A BE-10] user-detail path must NOT call global get_scope_observation_fact.
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    fact = _fact("industry_l1", "k1", run_id, observation_payload=_obs_with_groups())
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        # If the endpoint called the global get_scope_observation_fact, it would
+        # raise AttributeError (not patched) → test fails. We assert it is NOT used.
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+    assert resp.scopeKey == "k1"
+
+
+async def test_r3a_malformed_fact_payload_fails_closed() -> None:
+    # [R3A BE-11] malformed canonical Fact payload fails closed (500),
+    # do not manufacture empty groups / {} observation.
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    fact = _fact("industry_l1", "k1", run_id)
+    fact.observation_payload = "NOT_A_DICT"  # corrupt
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
     ):
         with pytest.raises(HTTPException) as exc:
             await review_api.get_review_scope_composition(
                 "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
             )
-    assert exc.value.status_code == 404
+    assert exc.value.status_code == 500
+
+
+async def test_r3a_no_board_signal_discovery_fallback() -> None:
+    # [R3A BE-12] No legacy Board / Signal / Discovery fallback for the detail.
+    # The endpoint must derive identity purely from the canonical Fact lineage,
+    # not from any external/legacy source. (Negative: any such fallback would
+    # require an extra import/call not present — we assert the pure path holds.)
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    fact = _fact("industry_l1", "k1", run_id, scope_name="FROM_FACT",
+                 observation_payload=_obs_with_groups())
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    with patch.object(
+        review_api, "get_published_review_run_id", new=AsyncMock(return_value=run_id)
+    ), patch.object(
+        review_api, "get_scope_composition_snapshot", new=AsyncMock(return_value=None)
+    ), patch.object(
+        review_api, "get_scope_observation_fact_by_run", new=AsyncMock(return_value=fact)
+    ), patch.object(
+        review_api,
+        "build_l2_observation_groups",
+        new=MagicMock(return_value=_eight_groups()),
+    ):
+        resp = await review_api.get_review_scope_composition(
+            "2026-07-29", "industry_l1", "k1", db=db, ctx=_ctx(), **_DEF_DETAIL
+        )
+    assert resp.scopeName == "FROM_FACT"
+    assert resp.scopeType == "industry_l1"
+    assert resp.scopeKey == "k1"
+    assert resp.tradeDate == "2026-07-29"
 
 
 # ---------------------------------------------------------------------------

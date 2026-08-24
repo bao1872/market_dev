@@ -518,12 +518,38 @@ export interface ReviewScopeComposition {
 }
 
 /**
- * 详情响应：对应后端 ReviewScopeCompositionDetailResponse（9-key composition + 完整 Observation payload）。
+ * L2 Observation Group 固定契约（canonical backend projection 8 组，
+ * 由 build_l2_observation_groups 投影，前端只承载、不重算、不改变 grouping）。
+ * 每个 group 至少保留 group_key / label / facts；facts 叶子保持后端 snake_case。
+ */
+export interface ObservationGroup {
+  group_key: string
+  label: string
+  facts: Record<string, unknown>
+}
+
+/** 8 个 canonical L2 group 的封闭集合（键顺序与后端一致）。 */
+export interface ObservationGroups {
+  price_capital: ObservationGroup
+  trend_state: ObservationGroup
+  trend_progress: ObservationGroup
+  trend_volume_confirmation: ObservationGroup
+  structure_break_turn: ObservationGroup
+  structure_evolution_position: ObservationGroup
+  momentum_squeeze_release: ObservationGroup
+  volume_anomaly: ObservationGroup
+}
+
+/**
+ * 详情响应：对应后端 ReviewScopeCompositionDetailResponse（R3A Fact-first）。
  *
- * 关键纠正（Slice C 修复）：`observation` 是后端 fact.observation_payload 的完整
- * Canonical Observation Core payload（dict[str, Any]），**不是** Slice B 的 ReviewScopeSummary。
- * 前端不得将其按 Summary 字段读取，也不得在 frontend 重算/Duplicate Observation。
- * 待 Slice E 真正消费各组字段时，再依据 canonical observation owner 精确定义 nested types。
+ * R3A 契约：
+ * - `observation` 是后端 fact.observation_payload 的完整 Canonical Observation
+ *   Core payload（dict[str, Any]），成功响应中 NON-NULL；前端不得将其按 Summary
+ *   字段读取，也不得在 frontend 重算/Duplicate Observation。
+ * - `observationGroups` 是后端 build_l2_observation_groups 投影的 8 组 canonical
+ *   L2 projection，成功响应中 NON-NULL；前端只承载、不重算、不另立别名。
+ * - `composition` 为可选 enrichment：Fact-only detail 时为 null（不 404、不硬停渲染）。
  */
 export interface ReviewScopeCompositionDetailResponse {
   reviewRunId: string
@@ -532,8 +558,9 @@ export interface ReviewScopeCompositionDetailResponse {
   scopeKey: string
   scopeName: string | null
   algorithmVersion: string
+  observation: Record<string, unknown>
+  observationGroups: ObservationGroups
   composition: ReviewScopeComposition | null
-  observation: Record<string, unknown> | null
 }
 
 // ------------------------------------------------------------

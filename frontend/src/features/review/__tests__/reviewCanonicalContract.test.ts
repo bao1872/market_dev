@@ -197,7 +197,7 @@ test('B6. ReviewScopeListResponse 形状', () => {
   assert.equal(resp.has_more, false)
 })
 
-test('B7. ReviewScopeCompositionDetailResponse 含 9-key composition + observation', () => {
+test('B7. ReviewScopeCompositionDetailResponse 含 observation + observationGroups（R3A Fact-first）', () => {
   const detail: ReviewScopeCompositionDetailResponse = {
     reviewRunId: 'r1',
     tradeDate: '2026-08-21',
@@ -205,11 +205,22 @@ test('B7. ReviewScopeCompositionDetailResponse 含 9-key composition + observati
     scopeKey: 'bank',
     scopeName: null,
     algorithmVersion: 'v1',
+    observation: { price: { return_level: 0.5 } },
+    observationGroups: {
+      price_capital: { group_key: 'price_capital', label: '价格与资金', facts: {} },
+      trend_state: { group_key: 'trend_state', label: '趋势状态', facts: {} },
+      trend_progress: { group_key: 'trend_progress', label: '趋势进程', facts: {} },
+      trend_volume_confirmation: { group_key: 'trend_volume_confirmation', label: '趋势量能确认', facts: {} },
+      structure_break_turn: { group_key: 'structure_break_turn', label: '结构破位转折', facts: {} },
+      structure_evolution_position: { group_key: 'structure_evolution_position', label: '结构演化位置', facts: {} },
+      momentum_squeeze_release: { group_key: 'momentum_squeeze_release', label: '动量 squeeze 释放', facts: {} },
+      volume_anomaly: { group_key: 'volume_anomaly', label: '量能异常', facts: {} },
+    },
     composition: null,
-    observation: null,
   }
   assert.equal(detail.composition, null)
-  assert.equal(detail.observation, null)
+  assert.ok(detail.observation !== null)
+  assert.equal(Object.keys(detail.observationGroups).length, 8)
 })
 
 // ============================================================
@@ -300,9 +311,9 @@ test('D5. 非法 view → table', () => {
   assert.equal(decodeReviewUrl(new URLSearchParams('view=bogus')).view, 'table')
 })
 
-test('D6. 非法 tab → dynamics', () => {
-  assert.equal(normalizeDetailTab('bogus'), 'dynamics')
-  assert.equal(decodeReviewUrl(new URLSearchParams('tab=bogus')).tab, 'dynamics')
+test('D6. [R3A] 非法 tab → current', () => {
+  assert.equal(normalizeDetailTab('bogus'), 'current')
+  assert.equal(decodeReviewUrl(new URLSearchParams('tab=bogus')).tab, 'current')
 })
 
 // ============================================================
@@ -316,10 +327,10 @@ test('CURRENT-1. current tab 被 URL decoder/encoder 接受并往返', () => {
   assert.equal(normalizeDetailTab('current'), 'current', 'normalizeDetailTab 接受 current')
 })
 
-test('CURRENT-2. 默认 detail tab 仍为 dynamics（R1 不改默认）', () => {
-  assert.equal(defaultReviewUrlState().tab, 'dynamics', '默认 tab = dynamics')
-  assert.equal(normalizeDetailTab(undefined), 'dynamics')
-  assert.equal(decodeReviewUrl(new URLSearchParams('')).tab, 'dynamics')
+test('CURRENT-2. [R3A] 默认 detail tab 为 current', () => {
+  assert.equal(defaultReviewUrlState().tab, 'current', '默认 tab = current')
+  assert.equal(normalizeDetailTab(undefined), 'current')
+  assert.equal(decodeReviewUrl(new URLSearchParams('')).tab, 'current')
 })
 
 test('D7. 非法 phase → null（不 fallback 映射）', () => {
@@ -618,24 +629,24 @@ test('G4. Detail observation 是原始 payload（Record<string, unknown>），�
     scopeKey: 'bank',
     scopeName: null,
     algorithmVersion: 'v1',
-    composition: null,
     observation: { price: { return_level: 0.5 }, trend: {}, participation: {} },
+    observationGroups: {
+      price_capital: { group_key: 'price_capital', label: '价格与资金', facts: {} },
+      trend_state: { group_key: 'trend_state', label: '趋势状态', facts: {} },
+      trend_progress: { group_key: 'trend_progress', label: '趋势进程', facts: {} },
+      trend_volume_confirmation: { group_key: 'trend_volume_confirmation', label: '趋势量能确认', facts: {} },
+      structure_break_turn: { group_key: 'structure_break_turn', label: '结构破位转折', facts: {} },
+      structure_evolution_position: { group_key: 'structure_evolution_position', label: '结构演化位置', facts: {} },
+      momentum_squeeze_release: { group_key: 'momentum_squeeze_release', label: '动量 squeeze 释放', facts: {} },
+      volume_anomaly: { group_key: 'volume_anomaly', label: '量能异常', facts: {} },
+    },
+    composition: null,
   }
-  // observation 接受任意原始 payload
+  // observation 接受任意原始 payload（成功响应中 NON-NULL）
   assert.equal(typeof detail.observation, 'object')
   assert.ok(detail.observation !== null)
-  // null 也是合法值（fact 缺失时）
-  const empty: ReviewScopeCompositionDetailResponse = {
-    reviewRunId: 'r1',
-    tradeDate: '2026-08-21',
-    scopeType: 'industry_l1',
-    scopeKey: 'bank',
-    scopeName: null,
-    algorithmVersion: 'v1',
-    composition: null,
-    observation: null,
-  }
-  assert.equal(empty.observation, null)
+  // observationGroups 是 8 组 canonical L2 projection
+  assert.equal(Object.keys(detail.observationGroups).length, 8)
 })
 
 test('G5. canonical scopes key 接受 canonical params（无 cast）', () => {
@@ -674,8 +685,8 @@ test('G7. Detail observation 类型定义为原始 payload，非 ReviewScopeSumm
   )
   assert.match(
     m[0],
-    /observation:\s*Record<string, unknown>\s*\|\s*null/,
-    'detail.observation 应为 Record<string, unknown> | null',
+    /observation:\s*Record<string, unknown>/,
+    'detail.observation 应为 Record<string, unknown>（R3A 成功响应中 NON-NULL）',
   )
 })
 
@@ -849,11 +860,21 @@ test('H6. canonical Scope 类型仍编译并保留关键字段', () => {
     scopeKey: 'bank',
     scopeName: null,
     algorithmVersion: 'v1',
+    observation: { price: { return_level: 0.5 } },
+    observationGroups: {
+      price_capital: { group_key: 'price_capital', label: '价格与资金', facts: {} },
+      trend_state: { group_key: 'trend_state', label: '趋势状态', facts: {} },
+      trend_progress: { group_key: 'trend_progress', label: '趋势进程', facts: {} },
+      trend_volume_confirmation: { group_key: 'trend_volume_confirmation', label: '趋势量能确认', facts: {} },
+      structure_break_turn: { group_key: 'structure_break_turn', label: '结构破位转折', facts: {} },
+      structure_evolution_position: { group_key: 'structure_evolution_position', label: '结构演化位置', facts: {} },
+      momentum_squeeze_release: { group_key: 'momentum_squeeze_release', label: '动量 squeeze 释放', facts: {} },
+      volume_anomaly: { group_key: 'volume_anomaly', label: '量能异常', facts: {} },
+    },
     composition: null,
-    observation: null,
   }
   assert.equal(detail.composition, null)
-  assert.equal(detail.observation, null)
+  assert.ok(detail.observation !== null)
 })
 
 test('H7. AuctionBackflowPanel 仍存在且未被 Slice F 修改', () => {

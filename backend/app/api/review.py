@@ -65,6 +65,7 @@ from app.services.review_publication_service import (
     get_published_review_run_id,
     list_published_review_dates,
 )
+from app.domain.review.observation_groups import build_l2_observation_groups
 
 logger = logging.getLogger("api.review")
 
@@ -464,14 +465,22 @@ async def get_review_scope_composition(
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
 ) -> ReviewScopeCompositionDetailResponse:
-    """市场扫描 - 单个范围完整 Canonical Composition。
+    """市场扫描 - 单个范围 Canonical Observation Detail。
 
-    [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 返回单个 scope 的完整 Composition
-    （Dynamics / Internal Structure / Leadership / Member Attribution / Objective
-    Observation），数据来自 ReviewScopeCompositionSnapshot 薄表（grain =
-    review_run_id + scope_type + scope_key）。按 published ReviewRun 的
-    review_run_id 查询，避免同日双 run lineage 污染。
+    [R3A Canonical Observation Detail Contract] Scope Detail 以 Observation
+    Fact 为第一归属（最小存在 owner）；Composition 为可选 enrichment。
 
+    读取顺序（Fact-first，published-run lineage）：
+      1. 解析 published ReviewRun；
+      2. 用 run-lineage grain（review_run_id + trade_date + scope_type +
+         scope_key）查 Fact via ``get_scope_observation_fact_by_run``；
+         Fact 缺失 → 404（Fact owns detail existence）；
+      3. 再查 Composition（可选）；缺失 → composition=null，仍返回 200；
+      4. observationGroups 由已加载 Fact.observation_payload 直接投影
+         ``build_l2_observation_groups``，不二次查库、不调 global
+         ``get_scope_observation_fact``、不调 review_observation_group_service。
+
+    同日多 run 不污染 published run：用户详情路径严禁 global trade_date scan。
     端点路径与 scope list 路由分离，``{scope_type}`` 动态段不会捕获其它子路径。
     """
     if include_partial and not ctx.is_admin:
@@ -483,21 +492,9 @@ async def get_review_scope_composition(
     td = _parse_date_or_422(trade_date)
     run = await _get_published_run(db, td, include_partial=include_partial)
 
-    snapshot = await get_scope_composition_snapshot(
-        db,
-        review_run_id=run.id,
-        scope_type=scope_type,
-        scope_key=scope_key,
-    )
-    if snapshot is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"未找到 Composition: scope_type={scope_type} scope_key={scope_key}",
-        )
-
-    # observation 与 fact 共享（fact 存客观事实，composition 存完整 9-key payload）
-    # 必须显式传入 trade_date（run lineage grain = review_run_id + trade_date +
-    # scope_type + scope_key），不退回 global scan。
+    # [R3A] Fact-first：observation 是 detail 存在的最小 owner，必须按
+    # published run lineage grain 查（review_run_id + trade_date + scope_type +
+    # scope_key），不退回 global get_scope_observation_fact(trade_date, ...)。
     fact = await get_scope_observation_fact_by_run(
         db,
         run.id,
@@ -505,16 +502,51 @@ async def get_review_scope_composition(
         scope_type,
         scope_key,
     )
+    if fact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"未找到 Observation Fact: scope_type={scope_type} scope_key={scope_key}",
+        )
+
+    # [R3A] Composition 为可选 enrichment：缺失不 404，composition=null。
+    snapshot = await get_scope_composition_snapshot(
+        db,
+        review_run_id=run.id,
+        scope_type=scope_type,
+        scope_key=scope_key,
+    )
+
+    # [R3A] observation payload 原样透传；非 dict 视为内部数据完整性错误，
+    # 不得静默制造 {} / 全 null 8 组假 observation。
+    if not isinstance(fact.observation_payload, dict):
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="内部数据完整性错误：Observation Fact.observation_payload 非合法 dict",
+        )
+    observation = fact.observation_payload
+
+    # [R3A] L2 Observation Groups：由已加载 Fact 直接投影，单一 owner。
+    observation_groups = build_l2_observation_groups(observation)
+
+    # [R3A] algorithmVersion 元数据回退（仅 metadata 选择，不业务计算）：
+    # snapshot > fact > run。
+    if snapshot is not None:
+        algorithm_version = snapshot.algorithm_version
+    elif fact.algorithm_version is not None:
+        algorithm_version = fact.algorithm_version
+    else:
+        algorithm_version = run.algorithm_version
 
     return ReviewScopeCompositionDetailResponse(
         reviewRunId=str(run.id),
-        tradeDate=run.trade_date.isoformat(),
-        scopeType=snapshot.scope_type,
-        scopeKey=snapshot.scope_key,
-        scopeName=(fact.scope_name if fact is not None else None),
-        algorithmVersion=snapshot.algorithm_version,
-        composition=snapshot.composition_payload,
-        observation=(fact.observation_payload if fact is not None else None),
+        tradeDate=fact.trade_date.isoformat(),
+        scopeType=fact.scope_type,
+        scopeKey=fact.scope_key,
+        scopeName=fact.scope_name,
+        algorithmVersion=algorithm_version,
+        observation=observation,
+        observationGroups=observation_groups,
+        composition=(snapshot.composition_payload if snapshot is not None else None),
     )
 
 

@@ -77,7 +77,8 @@ export interface ReviewUrlState {
 
 export const DEFAULT_REVIEW_FAMILY: ReviewScopeFamily = 'industry_l1'
 export const DEFAULT_REVIEW_VIEW: ReviewExplorerView = 'table'
-export const DEFAULT_REVIEW_TAB: ReviewDetailTab = 'dynamics'
+/** 默认详情 Tab = current（R3A：Canonical Observation 是第一层，current 优先于 dynamics） */
+export const DEFAULT_REVIEW_TAB: ReviewDetailTab = 'current'
 export const DEFAULT_REVIEW_PHASE: ReviewDynamicsPhase | null = null
 export const DEFAULT_REVIEW_SORT: ReviewSort = 'velocity_desc'
 export const DEFAULT_REVIEW_READINESS: ReviewCompositionReadiness | null = null

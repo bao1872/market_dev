@@ -333,31 +333,49 @@ class ReviewScopeListResponse(BaseModel):
 class ReviewScopeCompositionDetailResponse(BaseModel):
     """GET /api/v1/review/{trade_date}/scopes/{scope_type}/{scope_key} 完整响应。
 
-    [REVIEW-BACKEND-FINAL-CLOSURE Phase 4] 返回单个 scope 的完整 Canonical
-    Composition（Dynamics / Internal Structure / Leadership / Member Attribution /
-    Objective Observation），数据来自 ReviewScopeCompositionSnapshot 薄表（grain =
-    review_run_id + scope_type + scope_key，单 JSONB 全存，已验证 ~130 KiB 上限）。
+    [R3A Canonical Observation Detail Contract] Scope Detail 以 Observation
+    Fact 为第一归属：``observation`` 与 ``observationGroups`` 在每个成功响应中
+    均 NON-NULL；``composition`` 为可选 enrichment（缺失 = null，仍 200）。
+    响应身份优先取自 canonical Fact（scopeType/scopeKey/scopeName/tradeDate）。
     """
 
     model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
-    reviewRunId: str = Field(..., description="所属 canonical ReviewRun id")
-    tradeDate: str = Field(..., description="交易日 YYYY-MM-DD")
-    scopeType: str = Field(..., description="范围类型")
-    scopeKey: str = Field(..., description="范围标识")
-    scopeName: str | None = Field(None, description="范围名称")
-    algorithmVersion: str = Field(..., description="Composition 算法版本")
+    reviewRunId: str = Field(..., description="所属 canonical published ReviewRun id")
+    tradeDate: str = Field(..., description="交易日 YYYY-MM-DD（来自 canonical Fact）")
+    scopeType: str = Field(..., description="范围类型（来自 canonical Fact）")
+    scopeKey: str = Field(..., description="范围标识（来自 canonical Fact）")
+    scopeName: str | None = Field(None, description="范围名称（来自 canonical Fact）")
+    algorithmVersion: str = Field(
+        ...,
+        description=(
+            "算法版本元数据回退（仅 metadata 选择，不业务计算）："
+            "snapshot > fact.algorithm_version > run.algorithm_version；"
+            "不发明 unknown/legacy/default"
+        ),
+    )
+    observation: dict[str, Any] = Field(
+        ...,
+        description="Canonical Observation Fact L1 客观事实 payload（detail 最小存在 owner，成功响应中 NON-NULL）",
+    )
+    observationGroups: dict[str, Any] = Field(
+        ...,
+        description=(
+            "Canonical L2 Observation Groups（由 fact.observation_payload 经 "
+            "build_l2_observation_groups 直接投影的 8 个固定组："
+            "price_capital / trend_state / trend_progress / trend_volume_confirmation / "
+            "structure_break_turn / structure_evolution_position / "
+            "momentum_squeeze_release / volume_anomaly），成功响应中 NON-NULL"
+        ),
+    )
     composition: dict[str, Any] | None = Field(
         None,
         description=(
-            "完整 Canonical Composition（固定 9 个 top-level keys："
+            "可选 enrichment：完整 Canonical Composition（固定 9 个 top-level keys："
             "scope / trade_date / capability / scope_observation / "
             "historical_dynamics / internal_structure_facts / leadership / "
-            "member_attribution / composition_readiness）"
+            "member_attribution / composition_readiness）；缺失时为 null（Fact-only detail）"
         ),
-    )
-    observation: dict[str, Any] | None = Field(
-        None, description="Canonical Observation Core 客观事实 payload（与 fact 共享）",
     )
 
 
