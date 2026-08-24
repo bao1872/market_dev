@@ -26,6 +26,11 @@
 - 不使用 mock 冒充真实数据；
 - loading / unavailable / error 不会误显示为正常结果。
 
+> **单 component binding PASS ≠ 整层完成。** 上述链路只能证明“某个字段绑对了”；
+> 不能证明“PRD 对该产品层定义的所有 required capabilities 都已有 component”。
+> 对 milestone / product-layer closure，必须额外做 **PRD capability completeness audit**
+> （见 §10），否则不得把当前 slice 判为整层/整机完成。
+
 ## 3. IDE 与用户责任边界
 
 ### IDE / 工程侧负责
@@ -139,3 +144,81 @@ Exploration Runtime 的目标是：
 立即 STOP。
 
 不得自动进入下一个域。
+
+## 10. Milestone / Product-Layer Completeness Gate
+
+现有 §2 的链路只能证明“一个 slice 做对了”（单 component binding）；它**不证明**
+“整个产品层 / 整机没有漏”。Exploration 模式下局部成功也不得冒充整体成功
+（见 AGENTS.md §0.2 第 7、9 条）。本 gate 补足这一缺口。
+
+### 10.1 两级 PASS 语义（必须区分）
+
+- **SLICE PASS**：本轮承诺做的事情实现正确（对应 AGENTS.md §5.x 的 hypothesis slice）。
+- **LAYER COMPLETE**：PRD 对该产品层定义的**所有 required capabilities** 都有完整
+  `backend owner → persistence → API → frontend formal surface → tests → representative runtime` 链。
+- **PRODUCT COMPLETE**：所有 required layer 闭合。
+
+报告不得只写 `R2B PASS` 而暗示整机完成。必须显式拆分：
+
+```text
+SLICE STATUS: PASS
+PRODUCT COVERAGE IMPACT:
+  <product layer>: <before> → <after>
+  Review overall: still PARTIAL
+```
+
+### 10.2 Milestone Completeness Gate
+
+仅在 **milestone boundary**（如 R1 Current / R2 Scanner / R3 Observation / R4 Overview）
+结束时回看整个 PRD，**不只看本次 diff**。检查链：
+
+```text
+PRD required capabilities
+ ↓ 是否每个都有 backend owner？
+Backend
+ ↓ 是否 runtime-wired（非仅 unit-test）？
+Persistence
+ ↓
+API
+ ↓ 是否暴露给产品？
+Frontend
+ ↓ 是 Raw Facts 还是 formal UX？
+Tests
+ ↓
+Runtime
+```
+
+三个必答问题：
+
+1. PRD required capabilities 是否全部有 owner？
+2. 有 owner 的是否全部暴露给产品（API + frontend formal surface）？
+3. 产品可见是 Raw Facts 还是正式 UX？
+
+单 component binding PASS 不得作为整层完成证据。
+
+### 10.3 Active Domain Coverage Matrix
+
+每个 **active domain**（正在持续开发的领域）维护一张覆盖矩阵，作为“我们到底做到哪了”
+的唯一基准，避免后续 AI/IDE 在 `PRD=新 / Code=新 / Map=旧` 之间认知漂移。格式：
+
+```text
+| Product Contract | Backend Owner | Persistence | API | Frontend | Tests | Runtime | 状态 |
+```
+
+状态取值：`DONE` / `PARTIAL` / `MISSING_UI` / `MISSING` / `UNAVAILABLE_BY_DESIGN` / `AUDIT`。
+
+矩阵放在该 domain 的 Map（`docs/maps/`）中，不新建治理目录。
+
+### 10.4 Active Map Freshness（里程碑边界同步）
+
+Exploration 模式不要求每次 commit 同步文档（AGENTS.md §6）。但 **active domain 发生
+canonical architecture / product-layer milestone 变化后，在开始下一 milestone 前必须同步 Map**。
+
+即：milestone boundary 更新一次，而非每次小 slice 写文档。长期停留在 legacy 状态（如
+仍写 V1 已完整实现、旧 P/Q/U/C/V、旧五阶段 UI）的 Map 属于治理缺陷，会误导后续开发。
+
+### 10.5 与现有治理的关系
+
+本 §10 不引入新目录、不推翻现有 Hypothesis Slice / Correctness Gate / dev-only / 测试分层 /
+真实 Runtime / API→Frontend closure。它只补“从每个任务是否正确”到“同时知道整个产品还差多少”
+的全局覆盖层。普通小 bug（AGENTS.md §5.2）不触发本 gate。
