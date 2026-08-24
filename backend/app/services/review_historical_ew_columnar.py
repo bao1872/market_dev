@@ -35,7 +35,7 @@ datasets belongs to M5-B2 onwards and must not leak into this module.
 from __future__ import annotations
 
 from datetime import date
-from typing import Any, Hashable, Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -87,12 +87,32 @@ def build_required_bar_axis(
 ) -> tuple[list[date], np.ndarray, np.ndarray]:
     """Expand the analysis axis to include every required exact bar date.
 
+    T1-calendar fail-closed contract
+    ---------------------------------
+
+    ``t1_by_date`` is treated as the authoritative T-1 predecessor map owned
+    by the calendar adapter.  Two hard gates are enforced here so that a
+    loader/calendar bug cannot silently degrade a valid analysis return
+    into an unavailable observation:
+
+    (1) *Complete map.*  Every analysis date MUST be a key in the input map,
+        even when the exact T-1 is known-absent.  For "no exact T-1 available
+        for this analysis date" the explicit sentinel is ``d: None``.  A
+        missing key is NOT equivalent to an explicit ``None`` — it raises.
+
+    (2) *Strictly lower T1.*  Every non-``None`` T-1 value must be strictly
+        earlier than the analysis date it belongs to.  ``t1 >= d`` (same-day
+        or future-looking) raises ``ValueError``.  This mirrors the canonical
+        production ``_build_t1_map()`` owner which always returns the
+        strictly-lower trading-day predecessor; no local derivation or
+        correction is attempted here.
+
     Args:
         analysis_dates: strictly ascending trading date axis.  Elements are
             ``date`` or anything ``str(·)`` of which parses as ISO ``YYYY-MM-DD``.
         t1_by_date: for every analysis date the exact-calendar previous trading
-            date, or ``None`` when no exact T-1 is available.  Keys match
-            (or coerce to) analysis dates.
+            date, or ``None`` when no exact T-1 is available.  Keys MUST cover
+            all analysis dates exactly (see contract above).
 
     Returns:
         ``(required_bar_dates, t_idx, t1_idx)`` where
@@ -102,9 +122,13 @@ def build_required_bar_axis(
         * ``t_idx[D]`` maps each analysis date to its row in the close matrix.
         * ``t1_idx[D]`` likewise maps to the exact T-1 row; ``-1`` when no
           exact T-1 is available.
+
+    Raises:
+        ValueError: analysis_dates not strictly ascending; or any analysis
+            date is missing from ``t1_by_date``; or any non-``None`` T-1 is
+            not strictly earlier than its analysis date.
     """
     d_dates = [_to_date(d) for d in analysis_dates]
-    # Strictly ascending validation is a silent caller-contract check.
     for i in range(1, len(d_dates)):
         if not (d_dates[i - 1] < d_dates[i]):
             raise ValueError("analysis_dates must be strictly ascending unique")
@@ -114,10 +138,30 @@ def build_required_bar_axis(
     for k, v in t1_by_date.items():
         t1_by_date_norm[_to_date(k)] = None if v is None else _to_date(v)
 
+    # (1) Fail-closed: EVERY analysis date MUST be explicitly keyed.
+    for d in d_dates:
+        if d not in t1_by_date_norm:
+            raise ValueError(
+                f"t1_by_date is missing an explicit entry for analysis date {d}; "
+                "use `d: None` for dates whose exact T-1 is known-absent.  "
+                "A missing key is NOT equivalent to an explicit None."
+            )
+    # (2) Fail-closed: strictly lower T1 (no same-day, no future).
+    for d in d_dates:
+        t1 = t1_by_date_norm[d]
+        if t1 is None:
+            continue
+        if not (t1 < d):
+            raise ValueError(
+                f"exact T-1 for analysis date {d} must be strictly earlier; "
+                f"got T-1 = {t1}.  The calendar adapter is the T-1 owner; do "
+                "not try to derive or correct the predecessor locally."
+            )
+
     # Build required set.
     required = set(d_dates)
     for d in d_dates:
-        t1 = t1_by_date_norm.get(d)
+        t1 = t1_by_date_norm[d]
         if t1 is not None:
             required.add(t1)
     required_bar_dates = sorted(required)
@@ -126,10 +170,10 @@ def build_required_bar_axis(
     t_idx = np.zeros(len(d_dates), dtype=np.int32)
     t1_idx = np.full(len(d_dates), fill_value=-1, dtype=np.int32)
     for i, d in enumerate(d_dates):
-        if d not in required_idx:  # pragma: no cover - defensive
+        if d not in required_idx:  # pragma: no cover — defensive
             raise KeyError(f"analysis date missing from required_bar_dates: {d}")
         t_idx[i] = required_idx[d]
-        t1 = t1_by_date_norm.get(d)
+        t1 = t1_by_date_norm[d]
         if t1 is not None:
             t1_idx[i] = required_idx[t1]
 

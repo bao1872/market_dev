@@ -11,8 +11,8 @@ Scope A-L gate coverage (explicit):
     H. overflow / non-finite raw return (huge ratio + invalid) → finite(raw) mask.
     I. EW empty member universe (no valid returns on a date/scope) → None/NaN.
     J. EW exact parity with canonical _return_distribution reducer.
-    K. sparse membership: deterministic order, dedupe per-scope, unknown ids ignored.
-    L. minimal ObservationSeries + Dynamics smoke parity vs canonical
+    K. sparse membership: deterministic order, dedupe per-scope, unknown ids fail closed.
+    L. minimal ObservationSeries + Dynamics smoke parity. vs canonical
        compute_exact_return / _return_distribution manually-built oracle path.
 
 PURE_UNIT_TEST=1 safe: no DB, no network, no orchestrator.
@@ -133,29 +133,126 @@ def test_a_exact_t1_outside_analysis_axis() -> None:
 # B — non-consecutive analysis axis (R != D+1 pattern)
 # ===========================================================================
 def test_b_non_consecutive_analysis_axis() -> None:
-    """If the analysis axis has multiple gaps requiring off-axis T1s, the R set
-    still includes every exact T1, and indices are correct."""
-    # Analysis axis is D0, D2, D4 (skipping D1, D3).  All T-1s are off-axis.
-    d0, d1, d2, d3, d4 = _dates(
-        "2026-03-02", "2026-03-03", "2026-03-04", "2026-03-05", "2026-03-06",
-    )
-    analysis_dates = [d0, d2, d4]
-    t1_by_date = {d0: d1, d2: d3, d4: None}  # T1s can be in any calendar order.
+    """If the analysis axis has multiple gaps requiring off-axis T1s — where
+    every exact T-1 lives strictly BEFORE the analysis day, but the T1 is not
+    itself an analysis day — the R set still correctly includes every exact
+    T1, indices are correct, and explicit T1=None still maps to -1.
+
+    Purpose preserved from original gate: verifies the implementation does
+    NOT assume ``R == D + 1`` or require an axis-consecutive calendar.
+    """
+    # Strictly-lower, off-axis T1 calendar.
+    # Analysis: 2026-03-03 (Mar03), 2026-03-05 (Mar05), 2026-03-09 (Mar09)
+    # T1s:      2026-03-02           2026-03-04           None (explicit)
+    a3, a5, a9 = _dates("2026-03-03", "2026-03-05", "2026-03-09")
+    tmar2, tmar4 = _dates("2026-03-02", "2026-03-04")
+    analysis_dates = [a3, a5, a9]
+    # Final analysis slot uses explicit ``None`` for the known-absent T1
+    # (preserves that contract path too).
+    t1_by_date = {a3: tmar2, a5: tmar4, a9: None}
 
     required_bar_dates, t_idx, t1_idx = build_required_bar_axis(
         analysis_dates, t1_by_date,
     )
-    expected_set = {d0, d2, d4, d1, d3}  # T1 of d4 is None, not included.
+    # Required set is analysis ∪ off-axis T-1s (excludes Mar06 — we only
+    # demand the UNION of analysis dates and their actual T-1s; dates not
+    # reachable as T or T-1 remain out).
+    expected_set = {a3, a5, a9, tmar2, tmar4}
     assert set(required_bar_dates) == expected_set
     assert len(required_bar_dates) == 5
 
-    assert t1_idx[2] == -1  # d4's T1 None maps to -1.
-    # Non-consecutive T→idx still land on correct rows.
-    assert required_bar_dates[t_idx[0]] == d0
-    assert required_bar_dates[t_idx[1]] == d2
-    assert required_bar_dates[t_idx[2]] == d4
-    assert required_bar_dates[t1_idx[0]] == d1
-    assert required_bar_dates[t1_idx[1]] == d3
+    assert t1_idx[2] == -1  # a9 explicit None maps to -1 (not a missing-key error).
+    # Off-axis T-1s all still strictly earlier than their analysis day,
+    # confirming pass-through of the gate.
+    assert required_bar_dates[t_idx[0]] == a3
+    assert required_bar_dates[t_idx[1]] == a5
+    assert required_bar_dates[t_idx[2]] == a9
+    assert required_bar_dates[t1_idx[0]] == tmar2
+    assert required_bar_dates[t1_idx[1]] == tmar4
+    # Sanity: every non-null t1 is strictly < analysis day.
+    assert required_bar_dates[t1_idx[0]] < required_bar_dates[t_idx[0]]
+    assert required_bar_dates[t1_idx[1]] < required_bar_dates[t_idx[1]]
+
+
+# ===========================================================================
+# T1-failclosed: missing t1_by_date key → ValueError (NOT equiv to explicit None)
+# ===========================================================================
+def test_t1_failclosed_missing_key_must_raise() -> None:
+    """A calendar adapter that silently drops an analysis day from the T1 map
+    used to be treated equivalently to explicit ``None``.  That was wrong: a
+    missing mapping could hide a real loader/calendar bug and silently turn a
+    valid first-day return into unavailable.  ``ValueError`` forces the
+    caller to declare intent (explicit None)."""
+    d0, d1 = _dates("2026-02-24", "2026-02-25")
+    # Analysis axis has d0 and d1, but the t1 map only keys d1 (d0 is dropped).
+    with pytest.raises(ValueError, match="missing an explicit entry"):
+        build_required_bar_axis(
+            analysis_dates=[d0, d1],
+            t1_by_date={d1: d0},  # d0's T-1 is NOT explicit → missing key.
+        )
+    # Sanity: providing d0 explicitly as None → legal.
+    required, t_idx, t1_idx = build_required_bar_axis(
+        analysis_dates=[d0, d1],
+        t1_by_date={d0: None, d1: d0},
+    )
+    # explicit None → t1_idx[0] == -1 and d0 still doesn't require a T1 bar.
+    assert t1_idx[0] == -1
+    assert d0 in required
+    assert d1 in required
+
+
+# ===========================================================================
+# T1-failclosed: T-1 == T (same-day) → ValueError
+# ===========================================================================
+def test_t1_failclosed_same_day_t1_must_raise() -> None:
+    """The canonical production T-1 map is strictly the strictly-lower trading
+    day predecessor.  ``T-1 == T`` is never a legal calendar output; fail
+    closed instead of silently producing a 0-return / divide-self."""
+    d0, d1 = _dates("2026-02-24", "2026-02-25")
+    # d1's T-1 is wrongly set to d1 itself (self loop).
+    with pytest.raises(ValueError, match="strictly earlier"):
+        build_required_bar_axis(
+            analysis_dates=[d0, d1],
+            t1_by_date={d0: None, d1: d1},
+        )
+    # Sanity: d1 -> d0 (strictly earlier) → legal.
+    _, _t, t1 = build_required_bar_axis(
+        analysis_dates=[d0, d1],
+        t1_by_date={d0: None, d1: d0},
+    )
+    assert t1[1] >= 0  # d0 index resolved (not -1).
+
+
+# ===========================================================================
+# T1-failclosed: T-1 > T (future-looking T1) → ValueError
+# ===========================================================================
+def test_t1_failclosed_future_t1_must_raise() -> None:
+    """Future-looking T-1 is a future-leakage risk: for analysis date d=T,
+    referencing a later calendar date as "T-1" violates the Dynamics
+    time-arrow contract.  Fail closed; do not derive or correct locally."""
+    d0, d1, d2 = _dates("2026-02-23", "2026-02-24", "2026-02-25")
+    # For analysis d1, the T-1 map accidentally points to d2 (future).
+    with pytest.raises(ValueError, match="strictly earlier"):
+        build_required_bar_axis(
+            analysis_dates=[d1, d2],
+            t1_by_date={d1: d2, d2: d1},
+        )
+    # Also works when the offending T-1 is an off-axis date that is still
+    # strictly LATER than its analysis day (the strict-order check is on
+    # value, not membership in the analysis set).
+    with pytest.raises(ValueError, match="strictly earlier"):
+        build_required_bar_axis(
+            analysis_dates=[d1],
+            # d0 is earlier; pass a LATER non-axis date (Mar 03 vs d1=Feb 24).
+            t1_by_date={d1: date.fromisoformat("2026-03-03")},
+        )
+    # Sanity: all earlier / explicit-None mix → legal.
+    _, _t, t1 = build_required_bar_axis(
+        analysis_dates=[d0, d1, d2],
+        t1_by_date={d0: None, d1: d0, d2: d1},
+    )
+    assert t1[0] == -1
+    assert t1[1] >= 0 and t1[2] >= 0
 
 
 # ===========================================================================
@@ -324,7 +421,6 @@ def test_h_non_finite_raw_return() -> None:
     """
     from app.domain.review.scope_observation import _finite_or_none
 
-    member_ids = [M0]
     # Base case: T1 = 1.5e-12 (just above epsilon gate) and T = MAX so that
     # raw_return = T / T1 - 1 overflows to +inf with finite inputs.
     close_T1 = 1.5e-12
