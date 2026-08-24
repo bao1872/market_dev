@@ -33,14 +33,27 @@ class BoardAnalysisSnapshotDTO(BaseModel):
     board_type: str = Field(..., description="板块类型：industry | concept")
     board_name: str = Field(..., description="板块名称（冗余存储）")
     source_core_run_id: str = Field(..., description="输入 stock_core snapshot_run_id")
-    board_analysis_run_id: str = Field(..., description="真实 Board batch run ID")
-    taxonomy_version: str = Field(..., description="当日 taxonomy version")
-    taxonomy_compatibility_key: str = Field(
-        ..., description="taxonomy 兼容序列键",
+    # [Slice 4A7] Board 读 API 数据源已切到 Unified Review canonical facts。
+    # 以下字段在没有真实 Board lineage 时保持 nullable，绝不伪造数值。
+    board_analysis_run_id: str | None = Field(
+        None,
+        description="Legacy Board batch run ID；canonical Review 来源下为 None（不伪造）",
     )
-    membership_version: str = Field(..., description="当日 membership version")
-    algorithm_version: str = Field(..., description="板块分析算法版本")
-    parameter_hash: str = Field(..., description="参数 hash")
+    taxonomy_version: str | None = Field(
+        None, description="当日 taxonomy version；canonical Review 来源下为 None",
+    )
+    taxonomy_compatibility_key: str | None = Field(
+        None, description="taxonomy 兼容序列键；canonical Review 来源下为 None",
+    )
+    membership_version: str | None = Field(
+        None, description="当日 membership version；canonical Review 来源下为 None",
+    )
+    algorithm_version: str = Field(
+        ..., description="复盘算法版本（来源为 published Review run）",
+    )
+    parameter_hash: str | None = Field(
+        None, description="参数 hash；canonical Review 来源下为 None（不伪造）",
+    )
     eligible_count: int = Field(..., description="板块成员总数")
     ready_count: int = Field(..., description="有效股票数")
     coverage_ratio: float = Field(..., description="覆盖率 = ready/eligible")
