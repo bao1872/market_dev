@@ -1,8 +1,8 @@
 {
-  "slice": "4A6",
-  "baseline_sha": "d52f12bcd2d76a78437b1c5def8488edb85c3e70",
+  "slice": "4A6R",
+  "baseline_sha": "fe0008c8b6c3347550291ffc0170f6c8445363f1",
   "status": "PASS",
-  "summary": "Board Analysis runtime 与 market_aggregation publication 在 canonical Review 计算/发布链上已无 active decision consumer。保留的消费者均为 admin 运维/展示/legacy frontend 快照 API，以及 AfterClose 默认仍调用的 legacy producer 阶段。stop 生产（4A7）安全，但会有当前 ACTIVE frontend BoardAnalysisPage 消费者需要显式决定生命周期，且 system_overview/admin_readiness 展示读取（BoardAnalysisRun 级 run 质量）也会随 market_aggregation 停止而显现为空/失败，需作为 follow-up 明确处理。",
+  "summary": "[4A6R 修正] Board Analysis runtime 与 market_aggregation publication 在 canonical Review 计算/发布链（canonical_decision_consumers）上确实已无决策消费者——stock_core / Unified Review compute / Unified Review publish 均不依赖 Board artifacts。但 canonical 独立性 ≠ 全局无消费者：当前仍有真实 ACTIVE 消费者——(1) 前端 BoardAnalysisPage / Board 分析 API（ACTIVE_PRODUCT_CONSUMER，读取 BoardAnalysisSnapshot 并触发 compute_all_boards/compute_board_analysis），(2) system_overview_service 板块节点（ACTIVE_PRESENTATION_CONSUMER，读取 BoardAnalysisRun 计算 status/coverage/quality_gate/blocking_reason/recommended_action），(3) product_readiness_service board_aggregation 节点（ACTIVE_MONITORING_CONSUMER，读取 market_aggregation pointer + BoardAnalysisRun lineage 计算 READY/DEGRADED/PENDING/LINEAGE_MISMATCH，且 is_mandatory=True）。因此 retirement 必须分开表述：canonical 层安全、产品/界面层尚不安全。迁移顺序必须是 consumer-first（改 BoardAnalysisPage 数据源为 Unified Review canonical board scope）→ admin monitoring 迁移 → 停 producer（AfterClose compute_all_boards / market_aggregation publication）→ 最后清理 legacy 模型/schema。",
 
   "retirement_targets": [
     "BoardAnalysis runtime stage (compute_all_boards / compute_board_analysis)",
@@ -63,38 +63,58 @@
     }
   ],
 
-  "active_consumers": [],
+  "active_consumers": [
+    {
+      "symbol": "BoardAnalysisPage / Board Analysis API",
+      "classification": "ACTIVE_PRODUCT_CONSUMER",
+      "file": "frontend/src/pages/BoardAnalysisPage.tsx (route /boards, /boards/:boardId under market_data capability); backend/app/api/board_analysis.py",
+      "chain": [
+        "BoardAnalysisPage -> GET /v1/boards/analysis (useBoardAnalysisList)",
+        "BoardAnalysisPage -> GET /v1/boards/{board_id}/analysis (useBoardAnalysisDetail)",
+        "backend board_analysis.py -> BoardAnalysisSnapshot DTO -> board_analysis_snapshots rows",
+        "board_analysis_service import (line 41) + compute_board_analysis / compute_all_boards inbound triggers"
+      ],
+      "artifact": "BoardAnalysisSnapshot / BoardAnalysisRun (via compute-all trigger)",
+      "runtime_effect": "User-visible board-analysis product and its user+admin compute controls depend on fresh BoardAnalysisSnapshot payloads. GET reads snapshots; POST single / POST compute-all write snapshots via compute_board_analysis / compute_all_boards. Not a canonical computation gate, but a real runtime behavior dependency."
+    },
+    {
+      "symbol": "system_overview_service.get_system_overview board node",
+      "classification": "ACTIVE_PRESENTATION_CONSUMER",
+      "file": "backend/app/services/system_overview_service.py:1464-1503",
+      "chain": "admin_system_overview API -> system_overview_service.get_system_overview -> BoardAnalysisRun (run-level expected/succeeded/failed/coverage) -> status / coverage / quality_gate / blocking_reason / recommended_action",
+      "artifact": "BoardAnalysisRun run-level quality",
+      "runtime_effect": "Admin overview '板块分析' node output (status, coverage, quality_gate, blocking_reason, recommended_action) genuinely depends on BoardAnalysisRun data. Read is run-level (not snapshot payload content). Not a canonical computation gate; IS a running semantic presentation consumer."
+    },
+    {
+      "symbol": "product_readiness_service board_aggregation node",
+      "classification": "ACTIVE_MONITORING_CONSUMER",
+      "file": "backend/app/services/product_readiness_service.py:1110-1149 / 1765",
+      "chain": "admin_readiness API -> product_readiness_service -> market_aggregation pointer + BoardAnalysisRun.source_core_run_id -> READY / DEGRADED / PENDING / LINEAGE_MISMATCH",
+      "artifact": "market_aggregation pointer + BoardAnalysisRun lineage (board_aggregation is_mandatory=True)",
+      "runtime_effect": "Readiness state computation depends on the market_aggregation pointer and BoardAnalysisRun current-lineage validation. Even though it does not gate canonical Review, it is a running semantic monitoring consumer and is marked mandatory in the readiness model."
+    }
+  ],
+
+  "canonical_decision_consumers": [],
 
   "compatibility_only": [
     {
       "symbol": "_get_after_close_artifacts_fact",
       "file": "backend/app/services/after_close_orchestrator.py:4185-4222",
       "artifact": "market_aggregation pointer (diagnostic read)",
-      "runtime_effect": "Read-only reconcile/diagnostic; '不阻断' on failure. Does not alter runtime behavior of core/Review."
-    },
-    {
-      "symbol": "system_overview_service.get_system_overview board node",
-      "file": "backend/app/services/system_overview_service.py:1464-1503",
-      "artifact": "BoardAnalysisRun run-level quality (expected/succeeded/failed/coverage)",
-      "runtime_effect": "Admin system overview '板块分析' node. Presentation only; reads BoardAnalysisRun (not snapshot payload content). If Board runtime stops, this node shows pending/failed/no run (cosmetic for admin, not a decision gate for canonical computation)."
-    },
-    {
-      "symbol": "product_readiness_service board_aggregation node",
-      "file": "backend/app/services/product_readiness_service.py:1110-1149 / 1765",
-      "artifact": "market_aggregation pointer + BoardAnalysisRun lineage",
-      "runtime_effect": "Admin readiness (admin_readiness.py) - board_aggregation READY state based on market_aggregation pointer + current-lineage validation. Presentation/monitoring; not a gate for stock_core/Review."
+      "runtime_effect": "Read-only reconcile/diagnostic; '不阻断' on failure. Does not alter live output behavior of core/Review."
     },
     {
       "symbol": "admin_incremental_publish aggregation pointer read",
       "file": "backend/app/api/admin_incremental_publish.py:93-99",
       "artifact": "market_aggregation pointer",
-      "runtime_effect": "Admin ops panel shows aggregation pointer. Monitoring/compat only."
+      "runtime_effect": "Admin ops panel shows aggregation pointer; monitoring-only serialization-style display."
     },
     {
       "symbol": "admin_review serialization",
       "file": "backend/app/api/admin_review.py:100-104",
       "artifact": "source_board_run_id JSON (NULL-aware)",
-      "runtime_effect": "NULL-aware serialization; nullable legacy lineage. No decision."
+      "runtime_effect": "NULL-aware serialization; nullable legacy lineage storage. No live decision."
     }
   ],
 
@@ -189,10 +209,13 @@
     "readers": [
       { "reader": "compute_all_boards internal round-trip", "file": "backend/app/services/board_analysis_service.py:1599/1625/1645/1876/2331", "decision_effect": "NO — idempotency/reconciliation of the producer's own pointer." },
       { "reader": "_get_after_close_artifacts_fact", "file": "backend/app/services/after_close_orchestrator.py:4207", "decision_effect": "NO — reconcile diagnostics, non-blocking read." },
-      { "reader": "product_readiness_service board_aggregation", "file": "backend/app/services/product_readiness_service.py:1127/1765", "decision_effect": "NO — admin readiness presentation (via admin_readiness.py). Not a canonical computation gate." },
-      { "reader": "admin_incremental_publish", "file": "backend/app/api/admin_incremental_publish.py:98", "decision_effect": "NO — admin ops panel pointer display." }
+      { "reader": "product_readiness_service board_aggregation", "file": "backend/app/services/product_readiness_service.py:1127/1765", "decision_effect": "NO canonical decision; YES active monitoring output — READY/DEGRADED/PENDING/LINEAGE_MISMATCH depends on this pointer (ACTIVE_MONITORING_CONSUMER, is_mandatory=True). Not a stock_core/Review gate but a live semantic consumer." },
+      { "reader": "admin_incremental_publish", "file": "backend/app/api/admin_incremental_publish.py:98", "decision_effect": "NO — admin ops panel pointer display (compatibility-only)." }
     ],
-    "decision_consumers": []
+    "decision_consumers": [],
+    "active_monitoring_consumers": [
+      "product_readiness_service board_aggregation node (READY/DEGRADED/PENDING/LINEAGE_MISMATCH)"
+    ]
   },
 
   "after_close": {
@@ -226,36 +249,38 @@
   ],
 
   "retirement_decision": {
-    "safe_to_remove_afterclose_board_stage": true,
-    "afterclose_rationale": "No canonical Review calculation or publication depends on the Board aggregation outcome. compute_all_boards is run as side-product; its only runtime effect is overall PARTIAL_SUCCESS vs SUCCEEDED status and legacy artifacts. Removing the stage only affects that status downgrade (and board artifacts), not stock_core or Review closure.",
-    "safe_to_stop_market_aggregation_publication": true,
-    "marketagg_rationale": "market_aggregation pointer has zero decision readers in canonical runtime. Remaining readers are admin presentation (product_readiness, admin_incremental_publish), reconcile diagnostics, and the producer's own idempotency checks. Stopping the writer stops those presentation nodes from reporting 'published' but breaks no canonical computation.",
+    "canonical_safe_to_remove_afterclose_board_stage": true,
+    "product_safe_to_remove_afterclose_board_stage": false,
+    "afterclose_rationale": "canonical_safe: No stock_core / Unified Review compute / Unified Review publish decision depends on the Board aggregation outcome; compute_all_boards is a legacy side-product and Blocking only downgrades PARTIAL_SUCCESS. product NOT safe: the running /boards product still consumes fresh BoardAnalysisSnapshot, and admin monitoring (system_overview, product_readiness) still depends on BoardAnalysisRun / market_aggregation pointer. Stopping the producer now would starve those live consumers.",
+    "canonical_safe_to_stop_market_aggregation_publication": true,
+    "product_safe_to_stop_market_aggregation_publication": false,
+    "marketagg_rationale": "canonical_safe: market_aggregation pointer has zero canonical decision readers (production and publish of Unified Review independent). product NOT safe: product_readiness board_aggregation node (ACTIVE_MONITORING_CONSUMER, is_mandatory=True) and system_overview board node depend on this pointer / BoardAnalysisRun; stopping the writer leaves them PENDING/stale.",
     "blocking_consumers": [
       {
         "consumer": "frontend BoardAnalysisPage",
-        "kind": "frontend legacy Board snapshot API (CASE C)",
+        "kind": "ACTIVE_PRODUCT_CONSUMER — legacy Board snapshot API (CASE C)",
         "location": "frontend/src/pages/BoardAnalysisPage.tsx; App.tsx:268-269; api/endpoints.ts:2889-2957",
-        "decision": "Stopping the board stage makes this page empty/failing. Decide whether Unified Review already provides equivalent information before removing the API; otherwise retire/hide the page as part of 4A7 follow-up."
+        "decision": "MUST be rewired to Unified Review before stopping producer, per product rule: merge Board Analysis into Unified Review while preserving board-analysis functionality. Do NOT simply hide/remove the page."
       },
       {
         "consumer": "system_overview_service '板块分析' node",
-        "kind": "admin presentation read of BoardAnalysisRun run-level quality",
+        "kind": "ACTIVE_PRESENTATION_CONSUMER of BoardAnalysisRun",
         "location": "backend/app/services/system_overview_service.py:1464-1503",
-        "decision": "Cosmetic admin node; will report pending/no-run after retirement. Not a hard blocker; update presentation follow-up."
+        "decision": "After migration to Unified Review board scope, update node to source from Review's board observation (or drop node). Migrate before producer stop."
       },
       {
         "consumer": "product_readiness_service board_aggregation node",
-        "kind": "admin readiness read of market_aggregation pointer",
+        "kind": "ACTIVE_MONITORING_CONSUMER of market_aggregation pointer + BoardAnalysisRun lineage (is_mandatory=True)",
         "location": "backend/app/services/product_readiness_service.py:1110-1149",
-        "decision": "Presentation node will report PENDING/NO_PUBLICATION after retirement. Not a decision gate; update presentation follow-up."
+        "decision": "After migration, source board readiness from Review canonical observation or relax is_mandatory. Migrate/retire before market_aggregation publication stop."
       }
     ],
     "required_followup_slices": [
-      "4A7: stop AfterClose legacy Board aggregation producer (gated by confirmed census)",
-      "4A8: stop market_aggregation publication writer",
-      "frontend BoardAnalysisPage lifecycle decision (equivalent info from Unified Review?, hide vs remove)",
-      "admin presentation: system_overview / admin_readiness board node handling after retirement",
-      "later clean-up: legacy models/API/schema (BoardAnalysisRun/BoardAnalysisSnapshot tables, board_analysis.py API, review_attribution_service dead code, market_factor_aggregation_service dead producer)"
+      "4A7: migrate Board Analysis read consumer (BoardAnalysisPage -> GET /v1/boards/analysis, /v1/boards/{board_id}/analysis) to Unified Review canonical board scope observation, keeping the API contract/adapter so UI can stay unchanged",
+      "4A8: migrate/retire admin monitoring consumers (system_overview board node, product_readiness board_aggregation node, admin_incremental_publish market_aggregation display)",
+      "4A9: remove/disable legacy Board compute APIs and frontend compute controls (POST single / compute-all)",
+      "ONLY AFTER consumers are cut over: 4A10: remove AfterClose compute_all_boards stage + stop market_aggregation publication (producer retirement)",
+      "later only: clean up legacy models/API/schema (BoardAnalysisRun/BoardAnalysisSnapshot tables, board_analysis.py API, review_attribution_service dead code, market_factor_aggregation_service dead producer)"
     ]
   }
 }
