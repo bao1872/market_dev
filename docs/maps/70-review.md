@@ -40,7 +40,7 @@
 |---|---|---|
 | §0 背景与当前基线 | Historical/Non-Normative：Board V1 producer 已退役（见 §0）；stock_core pointer 仍有效 | `board_analysis_snapshots` 表（migration 074，legacy）、`factor_publications` |
 | §1 产品目标与边界 | 已实现 | `/review` 页面已部署 |
-| §2 权威业务链 | Historical/Non-Normative（legacy V1）：stock_core + board → review 为旧链路；当前权威链见 §0 / §26（Review 仅依赖 stock_core + market_aggregation，Board 非 Review 前置） | `review_orchestrator_service.py`（legacy） |
+| §2 权威业务链 | Historical/Non-Normative（legacy V1）：stock_core + board → review 为旧链路；当前权威链见 §0 及当前 production code（`review_orchestrator_service` / `review_publication_service` / `after_close_orchestrator`），Board 非 Review 前置 | `review_orchestrator_service.py`（legacy） |
 | §3 路由权限 | 已实现：review:read=research_replay capability | `access_control_service.require_capability("research_replay")` |
 | §4 后端模块结构 | 已实现 | `backend/app/domain/review/` 6 个文件、`services/review_*.py` 6 个、`api/review.py`+`admin_review.py`、`schemas/review.py`、`scripts/review_compute_cli.py` |
 | §5 数据模型（8 表） | 已实现 | migration `076_market_review_workbench.py`（已应用，alembic head） |
@@ -643,7 +643,14 @@ ORM → schema → API → 前端类型 → UI 已闭环：
 
 ## 26. V2.1 Review 依赖与血统（2026-08-05 基线 2267d43，Commit F）
 
-> 当前为代码开发阶段，未部署、未跑 PG 集成、未做真实数据验收。
+> **Historical / Non-Normative** —— 本节记录 2026-08-05 时的旧 V2.1 dependency contract，**已被 Slice 3 / 4A5 / 4A9 / 4A10 后的 core-only canonical Review contract 取代**，不得作为当前 API。
+>
+> 当前 authoritative contract：
+> - 输入 = 已发布 `stock_core` + canonical First Pyramid History；
+> - `BoardAnalysisRun` / `BoardAnalysisSnapshot` / `market_aggregation` / `source_board_run_id` 均**不是**当前 Review create / compute / publish 前置；
+> - new Review run：`source_board_run_id = NULL`。
+>
+> 旧内容（§26.1–§26.4）保留为历史证据；其中的 `market_aggregation` pointer / `_resolve_source_run_ids` 等描述均为 2026-08-05 当时状态，非当前。
 
 ### 26.1 依赖与血统合同
 

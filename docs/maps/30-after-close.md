@@ -208,7 +208,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - ✅ **历史回补已接入 run/item**：`backfill_history_with_run_items` + `create_history_run` / `claim_history_items` / `mark_history_item_*` / `finish_history_run`，单股独立事务，DB-only 取数
 - ✅ **管理状态 API 已实现**：`app.api.admin_incremental_publish`，提供 `/status` / `/core/runs` / `/core/runs/{id}/progress` / `/history/runs` / `/history/runs/{id}/progress` / `/pointers`
 - ✅ **历史回补 CLI 已实现**：`scripts/first_pyramid_history_backfill_cli.py`，支持 `--canary` / `--limit` / `--all` / `--symbols` / `--resume` / `--dry-run` / `--output-bars` / `--algorithm-version`
-- ~~市场聚合独立 job：`market_factor_aggregation_service.run_market_factor_aggregation`~~（Historical/Non-Normative：该 service 已于 [Slice 4A10] 删除，见 70-review.md §0；`market_aggregation` pointer 当前来源见 granular restart / orchestrator）
+- ~~市场聚合独立 job：`market_factor_aggregation_service.run_market_factor_aggregation`~~（Historical/Non-Normative：legacy `market_aggregation` producer 已于 [Slice 4A10] 退役，该 service 已删除，见 70-review.md §0；当前 Review **不消费** `market_aggregation` pointer，granular restart / orchestrator 也不再生产它。历史 pointer / 表若存在仅为兼容 / 审计资产，不得作为 current Review dependency）
 - ✅ **事件 outbox 模型支持**：`StockFeatureSnapshotRunItem.phase='event_outbox'` 已定义，实际事件写入由 `stock_state_event` 表（稳定唯一键幂等）承载
 
 **[本轮仍待验证的项]**：
@@ -619,31 +619,29 @@ stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → 
 **真实执行链**（`after_close_orchestrator.py:publishing` 之后的 `computing_review` 阶段）：
 
 ```python
-# 步骤 1：从 factor_publications 拿 stock_core 正式 pointer（board_analysis 已退役，见 70-review.md §0）
-stock_core_pub   = get_current_pointer(scope='stock_core')
-board_analysis_pub = get_current_pointer(scope='board_analysis')
+# 前置：AfterClose 主链 publishing 阶段后，stock_core 已正式发布且 snapshot_run_id 存在
+# （Board Analysis / market_aggregation 不是当前 Review compute / publication prerequisite）
 
-# 步骤 2：review_orchestrator_service.create_run() (幂等: 同输入返回同 run)
+# 步骤 1：review_orchestrator_service.create_run()（幂等：同输入返回同 run）
+#   - 内部仅解析已发布 stock_core publication；Board / market_aggregation 不查询
+#   - source_board_run_id 恒为 NULL（legacy lineage 字段，Slice 4A5 Board-independent）
 review_run_id = review_orchestrator_service.create_run(
-    trade_date              = trade_date,
-    source_stock_core_run_id = stock_core_pub.run_id,
-    source_board_run_id      = board_analysis_pub.run_id,  # Historical/Non-Normative: legacy Review 输入，当前 source_board_run_id 恒为 NULL（Slice 4A5 Board-independent）
-    algorithm_version       = CURRENT_ALGO_VERSION,
-    # + metadata: bootstrap_required, scope 列表, 等
+    trade_date        = trade_date,
+    canary            = False,
+    dry_run           = False,
+    idempotency_key   = ...,
 )
 
-# 步骤 3：review_orchestrator_service.compute_run(review_run_id)
-#   - 内部按 scope 逐项计算; 失败记录 reason; 支持幂等
+# 步骤 2：review_orchestrator_service.compute_run / resume_run（按 scope 逐项计算，失败记录 reason，支持幂等）
 compute_status = review_orchestrator_service.compute_run(review_run_id)
 if compute_status != 'succeeded':
     raise AfterCloseReviewError(review_run_id, compute_status)
 
-# 步骤 4：review_orchestrator_service.publish_review(review_run_id)
-#   - 切换 review_publications.published_run_id; 写入 publishing factor 元数据
+# 步骤 3：evaluate publish gate → review_orchestrator_service.publish_review（切换 review_publications.published_run_id）
 pub_status = review_orchestrator_service.publish_review(review_run_id)
 
-# 步骤 5：主任务 only after 上面四步都 succeeded → 主任务 SUCCEEDED
-# 若任一步失败: 主任务 FAILED, metadata.review_run_id / review_status / review_reason 回写
+# 步骤 4：主任务 only after 上面三步都 succeeded → 主任务 SUCCEEDED
+# 若任一步失败：主任务 FAILED，metadata.review_run_id / review_status / review_reason 回写
 ```
 
 位置：`backend/app/services/after_close_orchestrator.py` 的 `computing_review` 阶段（在 publishing 后，watchlist_ready 前）。
