@@ -1981,3 +1981,127 @@
   border-color: v.$color-primary;
   color: #000;
 }
+
+// =========================================================================
+// [R3B] Current Observation Workspace — Observation-owned Current
+// =========================================================================
+.observationNav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 8px 0 10px;
+  border-bottom: 1px solid v.$color-border;
+  position: sticky;
+  top: 0;
+  background: v.$color-panel;
+  z-index: 1;
+}
+.observationNavLink {
+  font-size: 0.8rem;
+  color: v.$color-text-dim;
+  padding: 3px 10px;
+  border: 1px solid v.$color-border;
+  border-radius: 14px;
+  text-decoration: none;
+  cursor: pointer;
+  &:hover { border-color: v.$color-primary; color: v.$color-text; }
+}
+.observationArea {
+  padding: 12px 0;
+  scroll-margin-top: 44px;
+  &[data-scroll-active='true'] {
+    outline: 1px solid v.$color-primary;
+    outline-offset: 4px;
+    border-radius: 6px;
+  }
+}
+.observationAreaTitle {
+  font-size: 0.95rem;
+  font-weight: 600;
+  margin: 0 0 8px;
+  color: v.$color-text;
+}
+.observationGroup {
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+.observationGroupHeader {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+.observationGroupTitle {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin: 0;
+  color: v.$color-text;
+}
+.observationGroupKey {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  font-family: monospace;
+}
+.observationGroupEmpty {
+  font-size: 0.8rem;
+  color: v.$color-muted;
+  padding: 4px 0;
+}
+.observationFactList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.observationFactItem {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.8rem;
+  padding: 2px 0;
+}
+.observationFactKey {
+  color: v.$color-text-dim;
+  font-family: monospace;
+  word-break: break-all;
+}
+.observationFactState {
+  color: v.$color-muted;
+  font-size: 0.72rem;
+  flex-shrink: 0;
+  margin-left: 8px;
+}
+.observationContext {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.observationContextBlock {
+  border: 1px dashed v.$color-border;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.observationContextTitle {
+  font-size: 0.85rem;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: v.$color-text;
+}
+.observationContextNote {
+  font-size: 0.78rem;
+  color: v.$color-text-dim;
+}
+.observationContextUnavailable {
+  font-size: 0.78rem;
+  color: v.$color-muted;
+  font-style: italic;
+}
+.hiddenFactProbe {
+  display: none;
+}
+

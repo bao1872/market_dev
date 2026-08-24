@@ -12,7 +12,6 @@ import {
   parseInternalStructure,
   parseLeadership,
   parseAttribution,
-  parseCurrentSnapshot,
 } from './scopeDetailContract'
 import type { ReviewScopeCompositionDetailResponse } from './types'
 import type { ReviewScopeListItem, ReviewScopeFamily } from './types'
@@ -23,7 +22,7 @@ import ScopeInternalStructurePanel from './ScopeInternalStructurePanel'
 import ScopeLeadershipPanel from './ScopeLeadershipPanel'
 import ScopeMemberAttributionPanel from './ScopeMemberAttributionPanel'
 import ScopeRawFactsPanel from './ScopeRawFactsPanel'
-import ScopeCurrentSnapshotPanel from './ScopeCurrentSnapshotPanel'
+import ScopeCurrentObservationWorkspace from './ScopeCurrentObservationWorkspace'
 import { NULL_DISPLAY } from './reviewFormat'
 import styles from './review.module.scss'
 
@@ -82,25 +81,13 @@ export default function ScopeDetailWorkspace({
 
   const panels = useMemo(() => {
     const c = detail.data?.composition ?? null
-    // Current 身份来自已加载的 Scope list item（不发起新请求；无 N+1）。
-    const currentIdentity = selectedScope
-      ? {
-          eligibleCount: selectedScope.eligibleCount,
-          providedCount: selectedScope.providedCount,
-          coverageRatio: selectedScope.coverageRatio,
-        }
-      : null
     return {
       dynamics: parseDynamicsLayer(c),
       internal: parseInternalStructure(c),
       leadership: parseLeadership(c),
       attribution: parseAttribution(c),
-      // [R1] Current Snapshot：projection only，复用单一解析 owner；不重算。
-      current: parseCurrentSnapshot({
-        composition: c,
-        observation: detail.data?.observation ?? null,
-        identity: currentIdentity,
-      }),
+      // [R3B] Current 由 Canonical Observation 拥有（L2 observationGroups + L1 observation）。
+      // 不再由混合 ScopeCurrentSnapshot（parseCurrentSnapshot）拥有。
     }
   }, [detail.data, selectedScope])
 
@@ -160,7 +147,12 @@ export default function ScopeDetailWorkspace({
       <ScopeDetailTabs tab={tab} onTabChange={onTabChange} />
 
       <div className={styles.detailContent}>
-        {tab === 'current' && <ScopeCurrentSnapshotPanel current={panels.current} />}
+        {tab === 'current' && (
+          <ScopeCurrentObservationWorkspace
+            observationGroups={detail.data?.observationGroups ?? null}
+            observation={detail.data?.observation ?? null}
+          />
+        )}
         {tab === 'dynamics' && <ScopeDynamicsPanel dynamics={panels.dynamics} />}
         {tab === 'internal' && <ScopeInternalStructurePanel internal={panels.internal} />}
         {tab === 'leadership' && <ScopeLeadershipPanel leadership={panels.leadership} />}
