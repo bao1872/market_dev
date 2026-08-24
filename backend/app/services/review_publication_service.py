@@ -13,7 +13,8 @@
 - UNEXPECTED EXECUTION FAILURE 仍阻塞：任何 run item 处于 failed/pending/running → CLOSED
 - 禁止 current membership × historical date 回填 / latest snapshot forward-fill
 - signal evaluation 无系统性异常
-- source_core_run_id 和 source_board_run_id 均指向当前正式 pointer
+- source_core_run_id 必须匹配当前正式 stock_core pointer；source_board_run_id
+  是 nullable legacy lineage，**不是发布门禁**（Slice 4A5 Board-independent）
 
 模块自测：
     PURE_UNIT_TEST=1 python -m app.services.review_publication_service
@@ -48,7 +49,6 @@ SCOPE_KEY_REVIEW = "market"
 # 发布门禁（PRD §11.1）
 REVIEW_PUBLISH_MIN_INDUSTRY_RATIO = 0.95  # 一级行业 ready 比例门槛
 REVIEW_PUBLISH_MIN_COVERAGE = 0.95  # 单 scope 最低 coverage
-PUBLICATION_KIND_MARKET_AGGREGATION_REF = "market_aggregation"
 
 
 class ReviewPublishBlockError(Exception):
@@ -97,7 +97,8 @@ async def evaluate_publish_gate(
       composition），不参与 readiness gate；其不可用不是 blocker，也绝不回退
       P/Q/U/C/V（market 历史 PIT 缺口是 implementation gap，不是保留 legacy 的理由）。
     - UNEXPECTED_EXECUTION_FAILURE 仍阻塞：任何 run item 处于 failed/pending/running。
-    - source_core_run_id / source_board_run_id 均指向当前正式 pointer。
+    - source_core_run_id 必须匹配当前正式 stock_core pointer；source_board_run_id
+      是 nullable legacy lineage，不是发布门禁（Slice 4A5 Board-independent）。
     - 禁止 current membership × historical date 回填 / latest snapshot forward-fill。
 
     Args:
@@ -178,7 +179,10 @@ async def evaluate_publish_gate(
             "（真实执行异常 / system-level failure，阻塞发布）",
         )
 
-    # Both source identities must still be the current formal pointers.
+    # [Slice 4A5 Board-independent] 发布门禁只依赖当前正式 stock_core pointer。
+    # source_board_run_id 是 nullable legacy lineage（历史 Review run 可能保留
+    # Board UUID，新 canonical run 为 NULL），**不参与任何发布判断**。不再查询
+    # market_aggregation pointer，也不比较 source_board_run_id。
     core_pub = await _get_publication(
         session, PUBLICATION_KIND_STOCK_CORE_REF, run.trade_date,
         for_update=lock_pointers,
@@ -189,17 +193,6 @@ async def evaluate_publish_gate(
         blockers.append(
             f"source_core_run_id={run.source_core_run_id} 与已发布 stock_core "
             f"pointer={core_pub.data_run_id} 不匹配",
-        )
-    board_pub = await _get_publication(
-        session, PUBLICATION_KIND_MARKET_AGGREGATION_REF, run.trade_date,
-        for_update=lock_pointers,
-    )
-    if board_pub is None:
-        blockers.append("正式 board pointer 缺失")
-    elif board_pub.data_run_id != run.source_board_run_id:
-        blockers.append(
-            f"source_board_run_id={run.source_board_run_id} 与已发布 board "
-            f"pointer={board_pub.data_run_id} 不匹配",
         )
 
     if run.status == "published":

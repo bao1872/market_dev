@@ -99,12 +99,15 @@ def _make_run(
     status: str = "signals_ready",
     published_at: datetime | None = None,
     composition_readiness: dict | None = None,
+    source_board_run_id: uuid.UUID | None = None,
 ) -> MarketReviewRun:
     run = MarketReviewRun(
         id=uuid.uuid4(),
         trade_date=date(2026, 7, 31),
         source_core_run_id=uuid.uuid4(),
-        source_board_run_id=uuid.uuid4(),
+        source_board_run_id=(
+            source_board_run_id if source_board_run_id is not None else uuid.uuid4()
+        ),
         algorithm_version=REVIEW_ALGORITHM_VERSION,
         filter_version="filters-1.1.0",
         baseline_window=120,
@@ -137,22 +140,18 @@ def _gate_pass_results(
 ) -> list[_FakeResult]:
     """构造 evaluate_publish_gate 全部通过所需的查询结果。
 
-    [REVIEW-CANONICAL-RUNTIME-REPLACEMENT] 新 canonical gate 查询顺序
+    [Slice 4A5 Board-independent] 新 canonical gate（不查 board pointer）查询顺序
     （与实现严格一致）：
         1 incomplete run items（failed/pending/running）
         2 stock_core pointer
-        3 board pointer
-        [仅 run.status == "published"] 4 live review pointer
+        [仅 run.status == "published"] 3 live review pointer
         末位 future_obs count（[QM-63] 无未来数据硬门）。
     """
     core_pub = AsyncMock()
     core_pub.data_run_id = run.source_core_run_id
-    board_pub = AsyncMock()
-    board_pub.data_run_id = run.source_board_run_id
     results = [
         _FakeResult(scalar_list=[]),            # 1. incomplete run items
         _FakeResult(scalar=core_pub),           # 2. stock_core pointer
-        _FakeResult(scalar=board_pub),          # 3. board pointer
     ]
     if run.status == "published":
         results.append(_FakeResult(scalar=live_review_pointer))
@@ -161,14 +160,13 @@ def _gate_pass_results(
 
 
 def _gate_fail_results() -> list[_FakeResult]:
-    """门禁失败的查询结果（core/board pointer 缺失 + 无 future data）。
+    """门禁失败的查询结果（core pointer 缺失 + 无 future data）。
 
     与 `_gate_pass_results` 保持相同查询顺序。
     """
     return [
         _FakeResult(scalar_list=[]),    # incomplete run items
         _FakeResult(scalar=None),       # stock_core pointer 缺失
-        _FakeResult(scalar=None),       # board pointer 缺失
         _FakeResult(scalar=0),          # future_obs count
     ]
 
@@ -270,14 +268,16 @@ class TestFormalGateCompleteness:
         assert not any("market" in b for b in blockers)
         assert not any("P/Q/U/C/V" in b for b in blockers)
 
-    async def test_both_source_pointers_are_required(self):
+    async def test_core_pointer_required_board_pointer_not(self):
+        """[Slice 4A5 Board-independent] 只要求正式 stock_core pointer；board /
+        market_aggregation pointer 不再参与门禁。"""
         run = _make_run()
         publishable, blockers = await evaluate_publish_gate(
             _make_session(_gate_fail_results()), run,
         )
         assert publishable is False
         assert "正式 stock_core pointer 缺失" in blockers
-        assert "正式 board pointer 缺失" in blockers
+        assert not any("board pointer" in b for b in blockers)
 
     async def test_superseded_published_run_cannot_overwrite_live_pointer(self):
         run = _make_run(
@@ -354,9 +354,10 @@ class TestFormalPublish:
         ]
         assert len(inserts) == 1, "正式发布必须写且只写一次 pointer"
         statements = _executed_statements(session)
-        # 新 canonical gate：core/board pointer 锁在第 1/2 个 execute
-        assert statements[1]._for_update_arg is not None
-        assert statements[2]._for_update_arg is not None
+        # [Slice 4A5 Board-independent] 唯一被 for-update 锁定的 pointer 是
+        # stock_core（第 1 个 execute）；不再有 board/market_aggregation pointer 锁。
+        locked = [s for s in statements if getattr(s, "_for_update_arg", None) is not None]
+        assert len(locked) == 1, "只锁定 stock_core pointer，不再锁定 board pointer"
         assert run.status == "published"
         assert run.published_at is not None
         assert "provisional_publication" not in (run.metadata_json or {})
@@ -658,18 +659,15 @@ class TestProgressiveScopeReadiness:
         items: list | None = None,
         future_obs: int = 0,
     ) -> list[_FakeResult]:
-        """canonical gate 查询结果（非 published run 共 4 次 execute，与实现一致）。
+        """canonical gate 查询结果（非 published run 共 3 次 execute，与实现一致）。
 
-        顺序：incomplete items / stock_core pointer / board pointer / future_obs。
+        [Slice 4A5 Board-independent] 顺序：incomplete items / stock_core pointer / future_obs。
         """
         core_pub = AsyncMock()
         core_pub.data_run_id = run.source_core_run_id
-        board_pub = AsyncMock()
-        board_pub.data_run_id = run.source_board_run_id
         return [
             _FakeResult(scalar_list=items if items is not None else []),
             _FakeResult(scalar=core_pub),
-            _FakeResult(scalar=board_pub),
             _FakeResult(scalar=future_obs),
         ]
 
@@ -848,3 +846,116 @@ class TestProgressiveScopeReadiness:
         # 必须是 canonical 缺口 blocker，不得伪装 ready 或回退 legacy
         assert any("非 ready" in b for b in blockers)
         assert not any("P/Q/U/C/V" in b for b in blockers)
+
+
+# =============================================================================
+# Slice 4A5 Board-independent：Review 发布只依赖 stock_core pointer + canonical
+# readiness，不再依赖 market_aggregation / BoardAnalysis / source_board_run_id。
+# =============================================================================
+
+
+class Test4A5BoardIndependentPublication:
+    """[Slice 4A5 Board-independent]
+
+    canonical Review（``source_board_run_id=None``）及其 legacy 兄弟
+    （``source_board_run_id=任意 UUID``）都以同一套 core-only gate 判断发布。
+
+    关键：新 gate 只在 stock_core pointer 上做发布判断，**不查询 board /
+    market_aggregation pointer**；因此 `_gate_pass_results` 的 execute 结果
+    序列中不存在任何 board pointer 槽位。若生产实现恢复 board 查询，本组测试
+    会因 execute 结果耗尽（mock 越界）而失败——这正是"不查 board"的直接证据。
+    """
+
+    async def test_canonical_run_source_board_none_publishes_without_board(
+        self,
+    ):
+        """[4A5-A/D] canonical run（source_board_run_id=None）+ 无任何 board / 
+        market_aggregation pointer → 门禁 OPEN。"""
+        run = _make_run(
+            source_board_run_id=None,  # 新 canonical Review 设计态
+            composition_readiness={"industry_l1:board-a": "ready"},
+        )
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(_gate_pass_results(run)), run,
+        )
+        assert publishable is True
+        assert not any("board" in b for b in blockers)
+        assert not any("market_aggregation" in b for b in blockers)
+
+    async def test_legacy_run_arbitrary_source_board_id_publishes(self):
+        """[4A5-E] legacy Review run 保留任意 Board lineage UUID；core pointer
+        匹配 → 门禁 OPEN，Board lineage 不影响发布。"""
+        for arbitrary_board_id in (uuid.uuid4(), None):
+            run = _make_run(
+                source_board_run_id=arbitrary_board_id,
+                composition_readiness={"concept:scope-x": "ready"},
+            )
+            publishable, blockers = await evaluate_publish_gate(
+                _make_session(_gate_pass_results(run)), run,
+            )
+            assert publishable is True
+            assert not any("board" in b for b in blockers)
+
+    async def test_board_pointer_presence_or_staleness_never_matters(self):
+        """[4A5-D] Board pointer 是否存在、是否 stale，都不改变 gate 判定。
+
+        无论 source_board_run_id 是 NULL、任取 UUID，还是与任何 board 记录不一致，
+        gate 结果只由 stock_core pointer + canonical readiness 决定。这里显式
+        用一个不等于任何 board UUID 的 source_board_run_id 复核不触发任何 board 比较。
+        """
+        run = _make_run(
+            source_board_run_id=uuid.uuid4(),
+            composition_readiness={"industry_l1:board-a": "ready"},
+        )
+        # 提供与 _gate_pass_results 完全一致的 execute 序列（不含 board 查询）。
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(_gate_pass_results(run)), run,
+        )
+        assert publishable is True
+        assert not any("board" in b for b in blockers)
+
+    async def test_core_pointer_mismatch_still_blocks(self):
+        """[4A5-C] core publication pointer 存在但与 source_core_run_id 不匹配
+        → BLOCK，语义与之前一致。"""
+        run = _make_run(composition_readiness={"industry_l1:board-a": "ready"})
+        stale_core = AsyncMock()
+        stale_core.data_run_id = uuid.uuid4()  # != run.source_core_run_id
+        results = [
+            _FakeResult(scalar_list=[]),                 # incomplete run items
+            _FakeResult(scalar=stale_core),              # stock_core pointer（stale）
+            _FakeResult(scalar=0),                       # future_obs count
+        ]
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(results), run,
+        )
+        assert publishable is False
+        assert any("source_core_run_id" in b and "不匹配" in b for b in blockers)
+
+    async def test_source_is_free_of_market_aggregation_ref_and_board_read(self):
+        """[4A5-I] 生产源码契约门：
+
+        1. review_publication_service.py 不引用 PUBLICATION_KIND_MARKET_AGGREGATION_REF
+           （不存在该常量名）；
+        2. evaluate_publish_gate 函数体（AST，排除 docstring）不读取
+           run.source_board_run_id。
+        """
+        import ast
+        import inspect
+
+        import app.services.review_publication_service as svc
+
+        module_src = inspect.getsource(svc)
+        assert "PUBLICATION_KIND_MARKET_AGGREGATION_REF" not in module_src
+
+        # 用 AST 收集函数底层真实读取到的属性名，避免误伤注释/docstring 文本。
+        func_src = inspect.getsource(svc.evaluate_publish_gate)
+        reads = set()
+
+        def _walk(node):
+            if isinstance(node, ast.Attribute) and node.attr == "source_board_run_id":
+                reads.add("source_board_run_id")
+            for child in ast.iter_child_nodes(node):
+                _walk(child)
+
+        _walk(ast.parse(func_src))
+        assert "source_board_run_id" not in reads
