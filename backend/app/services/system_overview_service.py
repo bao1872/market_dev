@@ -1462,16 +1462,25 @@ async def _compute_product_nodes(
         )
 
     # ===== 3. 板块/复盘事实（sourced from published Unified Review）=====
-    # Slice 4A8 — 不再把 legacy 板块运行表表述为当前正式板块产品。
-    # 板块事实来自已发布的 MarketReviewRun 及其 canonical board scopes。
+    # Slice 4A8R — 用正式 market_review publication pointer 锁定当前正式复盘，
+    # 不再仅按 MarketReviewRun.status == "published" + trade_date DESC 取 run，
+    # 避免与 Board GET / canonical Review 指向不同 run。
     from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
-    _BOARD_SCOPE_TYPES = ("concept", "industry_l1", "industry_l2", "industry_l3")
-    board_review = await db.scalar(
-        select(MarketReviewRun)
-        .where(MarketReviewRun.status == "published")
-        .order_by(MarketReviewRun.trade_date.desc())
-        .limit(1)
+    from app.services.review_publication_service import (
+        get_published_review_run_id,
+        list_published_review_dates,
     )
+    _BOARD_SCOPE_TYPES = ("concept", "industry_l1", "industry_l2", "industry_l3")
+    board_review = None
+    _published_review_dates = await list_published_review_dates(db, limit=1)
+    if _published_review_dates:
+        _board_run_id = await get_published_review_run_id(db, _published_review_dates[0])
+        if _board_run_id is not None:
+            board_review = await db.scalar(
+                select(MarketReviewRun)
+                .where(MarketReviewRun.id == _board_run_id)
+                .limit(1)
+            )
     if board_review is None:
         nodes.append(
             ProductionChainNode(

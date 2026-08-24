@@ -754,16 +754,15 @@ async def test_state_events_exact_match_ready():
 
 
 async def test_board_aggregation_exact_lineage_ready():
-    """[Slice 4A8] board_aggregation 就绪 = 已发布 MarketReviewRun（canonical board-independent）
-    存在且与之归属一致 → fully_ready。"""
+    """[Slice 4A8R] board_aggregation 就绪 = review 就绪（同一 owner 派生）→ fully_ready。"""
     plan = _full_plan()  # board/review 共用同一已发布 MarketReviewRun
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_FULLY_READY
 
 
 async def test_board_aggregation_ready_without_market_aggregation():
-    """[Slice 4A8] board_aggregation 就绪只依赖已发布 MarketReviewRun（source_board_run_id=None），
-    不再依赖 market_aggregation 指针 / BoardAnalysisRun。"""
+    """[Slice 4A8R] board_aggregation 直接派生自 _review_state：已发布 MarketReviewRun
+    （source_board_run_id=None，无需 market_aggregation / BoardAnalysisRun）→ READY。"""
     plan = _full_plan()
     plan["pubs"] = {**plan["pubs"], _REVIEW: [_pub(_REVIEW)]}
     plan["runs"] = {
@@ -773,13 +772,35 @@ async def test_board_aggregation_ready_without_market_aggregation():
     db = _FakeDB(plan)
     service = ProductReadinessService()
     st = await service._board_aggregation_state(db, date(2026, 8, 4))
+    assert st.product == "board_aggregation"
     assert st.readiness == READINESS_READY
     assert st.lineage.get("source_type") == "review_publication"
-    assert "expected_source_core_run_id" not in st.lineage  # 不再做 legacy board lineage 归属
+    assert st.lineage.get("reason_code") == "REVIEW_PUBLISHED"
+    # lineage 由 review owner 带出 current-core 归属（不再有第二套更弱公式）
+    assert st.lineage.get("expected_source_core_run_id") == _DRID
 
 
-async def test_board_aggregation_degraded_when_review_run_missing():
-    """[Slice 4A8] market_review 发布指针存在但 MarketReviewRun 缺失 → 降级（REVIEW_RUN_MISSING）。"""
+async def test_board_aggregation_follows_review_degraded_on_lineage_mismatch():
+    """[Slice 4A8R] Review source_core_run_id != 当前 stock_core pointer → review DEGRADED，
+    board_aggregation 必须同样 DEGRADED（堵住 false-ready：Review DEGRADED 而 Board READY）。"""
+    plan = _full_plan()
+    plan["runs"] = {
+        **plan["runs"],
+        MarketReviewRun: [_review_run("published", source_core="old_core_id", source_board=None)],
+    }
+    db = _FakeDB(plan)
+    service = ProductReadinessService()
+    rev = await service._review_state(db, date(2026, 8, 4))
+    ba = await service._board_aggregation_state(db, date(2026, 8, 4))
+    assert rev.readiness == READINESS_DEGRADED
+    assert rev.lineage.get("reason_code") == "REVIEW_LINEAGE_MISMATCH"
+    assert ba.readiness == READINESS_DEGRADED
+    assert ba.lineage.get("reason_code") == "REVIEW_LINEAGE_MISMATCH"
+
+
+async def test_board_aggregation_follows_review_degraded_when_run_missing():
+    """[Slice 4A8R] market_review 发布指针存在但 MarketReviewRun 缺失 → review DEGRADED，
+    board_aggregation 同步 DEGRADED（同一 owner）。"""
     plan = _full_plan()
     plan["pubs"] = {**plan["pubs"], _REVIEW: [_pub(_REVIEW)]}
     plan["runs"] = {**plan["runs"], MarketReviewRun: []}
@@ -787,7 +808,19 @@ async def test_board_aggregation_degraded_when_review_run_missing():
     service = ProductReadinessService()
     st = await service._board_aggregation_state(db, date(2026, 8, 4))
     assert st.readiness == READINESS_DEGRADED
-    assert st.lineage.get("reason_code") == "REVIEW_RUN_MISSING"
+    assert st.lineage.get("reason_code") == "REVIEW_LINEAGE_MISMATCH"
+
+
+async def test_board_aggregation_follows_review_pending_without_pointer():
+    """[Slice 4A8R] 无 market_review 发布指针 → review PENDING，board_aggregation 同步 PENDING。"""
+    plan = _full_plan()
+    plan["pubs"] = {**plan["pubs"], _REVIEW: [None]}
+    plan["runs"] = {**plan["runs"], MarketReviewRun: []}
+    db = _FakeDB(plan)
+    service = ProductReadinessService()
+    st = await service._board_aggregation_state(db, date(2026, 8, 4))
+    assert st.readiness == READINESS_PENDING
+    assert st.lineage.get("reason_code") == "NO_REVIEW_RUN"
 
 
 async def test_review_exact_lineage_ready():

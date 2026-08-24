@@ -1108,53 +1108,23 @@ class ProductReadinessService:
     async def _board_aggregation_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """board_aggregation：板块分析能力就绪 = 已发布的 Unified Review（Slice 4A8）。
+        """board_aggregation：跟随 _review_state 的单一就绪判定（Slice 4A8R）。
 
-        Slice 4A8 — 不再将 legacy market_aggregation 指针 / 旧板块运行表 /
-        source_board_run_id 表述为当前正式板块产品的必要条件。当前正式板块事实
-        （板块/复盘事实）源自已发布 MarketReviewRun，因此本节点跟随已发布的
-        Review 就绪；无 market_review 发布指针 → PENDING / DEGRADED，但绝不因
-        market_aggregation 或旧板块运行表缺失而判定不可用。
+        Slice 4A8R — 只允许一个 readiness owner：_review_state 已校验 market_review
+        pointer + MarketReviewRun + source_core_run_id == 当前 stock_core pointer。
+        本节点直接派生同一结论，仅把 product 名改为 board_aggregation，避免出现
+        "Review DEGRADED 而 Board READY" 的第二套、更弱的就绪公式。
+        不再独立查询 FactorPublication / MarketReviewRun / market_aggregation /
+        旧板块运行表。
         """
-        from app.models.factor_publication import FactorPublication
-        from app.models.market_review import MarketReviewRun
-        from app.services.review_publication_service import (
-            PUBLICATION_KIND_MARKET_REVIEW,
-        )
-
-        pub = await db.scalar(
-            select(FactorPublication)
-            .where(
-                FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
-                FactorPublication.trade_date == trade_date,
-            )
-            .limit(1)
-        )
-        if pub is None:
-            return ProductReadinessState(
-                "board_aggregation", READINESS_PENDING, "fresh",
-                is_mandatory=True, is_terminal=False,
-                lineage={"source_type": "review_publication",
-                         "reason_code": "NO_PUBLICATION"},
-            )
-        pub_run = await db.scalar(
-            select(MarketReviewRun)
-            .where(MarketReviewRun.id == pub.data_run_id)
-            .limit(1)
-        )
-        lineage = _publication_lineage(pub, pub_run)
-        lineage["source_type"] = "review_publication"
-        lineage["review_run_id"] = _sid(getattr(pub, "data_run_id", None))
-        if pub_run is None:
-            lineage["reason_code"] = "REVIEW_RUN_MISSING"
-            return ProductReadinessState(
-                "board_aggregation", READINESS_DEGRADED, "stale",
-                is_mandatory=True, is_terminal=False, lineage=lineage,
-            )
-        lineage["reason_code"] = "REVIEW_PUBLISHED"
+        review_state = await self._review_state(db, trade_date)
         return ProductReadinessState(
-            "board_aggregation", READINESS_READY, "fresh",
-            is_mandatory=True, is_terminal=True, lineage=lineage,
+            product="board_aggregation",
+            readiness=review_state.readiness,
+            freshness=review_state.freshness,
+            is_mandatory=True,
+            is_terminal=review_state.is_terminal,
+            lineage=dict(review_state.lineage),
         )
 
     async def _review_state(

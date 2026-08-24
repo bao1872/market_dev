@@ -1539,8 +1539,9 @@ async def test_product_nodes_empty_db_returns_6_nodes() -> None:
 
 
 def test_product_nodes_board_follows_published_review() -> None:
-    """板块/复盘事实节点必须 follow 已发布 Unified Review（MarketReviewRun + canonical
-    ReviewScopeObservationFact），不能再把 legacy BoardAnalysisRun 表述为当前正式板块产品。"""
+    """板块/复盘事实节点必须 follow 正式 market_review publication pointer + canonical
+    ReviewScopeObservationFact，不能再把 legacy BoardAnalysisRun 表述为当前正式板块产品，
+    也不能仅凭 MarketReviewRun.status == "published" 选 run（可能拿到非当前 pointer 的旧 run）。"""
     from pathlib import Path
 
     path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
@@ -1549,7 +1550,12 @@ def test_product_nodes_board_follows_published_review() -> None:
     assert "BoardAnalysisRun" not in src, "板块节点不得再用 legacy BoardAnalysisRun"
     assert "MarketReviewRun" in src, "板块节点必须读 MarketReviewRun"
     assert "ReviewScopeObservationFact" in src, "板块节点必须读 canonical ReviewScopeObservationFact"
-    assert '.where(MarketReviewRun.status == "published")' in src, "板块节点须取已发布复盘"
+    # 必须通过正式 market_review publication pointer 锁定 run，而不是裸 status 查询
+    assert "list_published_review_dates" in src, "板块节点必须经 list_published_review_dates 取正式发布日"
+    assert "get_published_review_run_id" in src, "板块节点必须经 get_published_review_run_id 取正式 pointer"
+    assert '.where(MarketReviewRun.status == "published")' not in src, (
+        "不得仅按 MarketReviewRun.status == published 选 run"
+    )
 
 
 def test_product_nodes_uses_stock_core_publication_for_pyramid() -> None:
@@ -1650,13 +1656,39 @@ async def _add_review_scope_fact(
     return fact
 
 
+async def _add_review_pointer(db, run, *, published_at=None):
+    """构造正式 market_review publication pointer 指向该 run（scope_type/key=market）。
+
+    system_overview 板块节点只能经正式 pointer 识别当前复盘。
+    """
+    from datetime import datetime, timezone
+
+    from app.models.factor_publication import FactorPublication
+    from app.services.review_publication_service import PUBLICATION_KIND_MARKET_REVIEW
+
+    pub = FactorPublication(
+        scope_type="market",
+        scope_key="market",
+        trade_date=run.trade_date,
+        publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
+        algorithm_version=run.algorithm_version,
+        data_run_id=run.id,
+        coverage_ratio=run.coverage_ratio,
+        published_at=published_at or datetime.now(timezone.utc),
+    )
+    db.add(pub)
+    await db.flush()
+    return pub
+
+
 @pytest.mark.asyncio
 async def test_product_nodes_board_follows_published_review_run(db_session) -> None:
-    """板块节点：已发布 MarketReviewRun + 高成员覆盖 canonical facts → ok/passed/published。"""
+    """板块节点：正式 market_review pointer + 高成员覆盖 canonical facts → ok/passed/published。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
     run = await _add_review_run(db_session, d, status="published")
+    await _add_review_pointer(db_session, run)
     await _add_review_scope_fact(db_session, run, "industry_l1", "IND1", pit=100, provided=98)
     await _add_review_scope_fact(db_session, run, "concept", "C1", pit=100, provided=95)
     nodes = await _compute_product_nodes(db_session, d)
@@ -1668,12 +1700,31 @@ async def test_product_nodes_board_follows_published_review_run(db_session) -> N
 
 
 @pytest.mark.asyncio
+async def test_product_nodes_board_uses_formal_pointer_among_same_date_runs(db_session) -> None:
+    """同日多条 published run：正式 market_review pointer 指向 Run B，板块节点必须报 Run B。"""
+    from datetime import date as _date
+    from datetime import datetime, timezone
+
+    d = _date(2026, 8, 4)
+    run_a = await _add_review_run(db_session, d, status="published",
+                                  algorithm_version="review-1.0.0")
+    run_b = await _add_review_run(db_session, d, status="published",
+                                  algorithm_version="review-1.1.0")
+    await _add_review_pointer(db_session, run_b, published_at=datetime.now(timezone.utc))
+    await _add_review_scope_fact(db_session, run_b, "industry_l1", "IND1", pit=100, provided=98)
+    nodes = await _compute_product_nodes(db_session, d)
+    board = next(n for n in nodes if n["key"] == "board")
+    assert board["run_id"] == str(run_b.id), "板块节点必须跟随正式 pointer 指向的 run，而不是裸 status 查询的任意 run"
+
+
+@pytest.mark.asyncio
 async def test_product_nodes_board_low_coverage_not_ok(db_session) -> None:
-    """板块节点：已发布复盘但板块成员覆盖 <95% → 不能标 ok。"""
+    """板块节点：正式 pointer 但板块成员覆盖 <95% → 不能标 ok。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
     run = await _add_review_run(db_session, d, status="published")
+    await _add_review_pointer(db_session, run)
     await _add_review_scope_fact(db_session, run, "industry_l1", "IND1", pit=100, provided=50)
     nodes = await _compute_product_nodes(db_session, d)
     board = next(n for n in nodes if n["key"] == "board")
