@@ -199,3 +199,38 @@ test('R3E: parsers consume group.facts directly (no wrapper key)', () => {
     'VolumeBlock must not read facts["volume_anomaly"] wrapper',
   )
 })
+
+// R3F-V: Freshness display scale — density is a RAW analytical value
+// (weighted_sum / instrument_count), NOT a probability; must not be ×100.
+// Counts (today/5D/10D/20D/instruments/event_count) are integers.
+test('R3F-V: freshness density uses raw number formatter (no percent)', () => {
+  assert.ok(
+    !/formatPercentNullable\(\s*num\('decay_weighted_density'\)/.test(workspaceSrc),
+    'decay_weighted_density must NOT use formatPercentNullable',
+  )
+  assert.ok(
+    !/formatPercentNullable\(\s*dimNum\(/.test(workspaceSrc),
+    'dimension density must NOT use formatPercentNullable',
+  )
+  assert.ok(
+    /formatNumberNullable\(\s*num\('decay_weighted_density'\)\s*,\s*3\s*\)/.test(workspaceSrc),
+    'decay_weighted_density must use formatNumberNullable(..., 3) (raw, 3 decimals)',
+  )
+  assert.ok(
+    /formatNumberNullable\(\s*dimNum\([^)]*\)\s*,\s*3\s*\)/.test(workspaceSrc),
+    'dimension density must use formatNumberNullable(..., 3) (raw, 3 decimals)',
+  )
+})
+
+test('R3F-V: freshness counts use integer formatting', () => {
+  for (const f of ['today_count', 'last_5d_count', 'last_10d_count', 'last_20d_count', 'instrument_count']) {
+    assert.ok(
+      new RegExp(`formatNumberNullable\\(\\s*num\\('${f}'\\)\\s*,\\s*0\\s*\\)`).test(workspaceSrc),
+      `${f} must use formatNumberNullable(..., 0) (integer display)`,
+    )
+  }
+  assert.ok(
+    /formatNumberNullable\(\s*dimNum\([^)]*,\s*'event_count'\)\s*,\s*0\s*\)/.test(workspaceSrc),
+    'dimension event_count must use formatNumberNullable(..., 0) (integer display)',
+  )
+})

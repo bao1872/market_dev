@@ -26,7 +26,7 @@ import {
   extractObservationContext,
   ObservationGroupContractError,
 } from './scopeObservationWorkspaceContract'
-import { formatNumberNullable, formatPercentNullable } from './reviewFormat'
+import { formatNumberNullable } from './reviewFormat'
 import type { ObservationGroup, ObservationGroups } from './types'
 import {
   parsePriceCapital,
@@ -299,35 +299,35 @@ function ContextShell({
           <div className={styles.observationContextMetrics}>
             <div className={styles.observationContextMetric}>
               <span className={styles.observationContextMetricLabel}>Today</span>
-              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('today_count'))}</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('today_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
               <span className={styles.observationContextMetricLabel}>5D</span>
-              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_5d_count'))}</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_5d_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
               <span className={styles.observationContextMetricLabel}>10D</span>
-              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_10d_count'))}</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_10d_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
               <span className={styles.observationContextMetricLabel}>20D</span>
-              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_20d_count'))}</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_20d_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
               <span className={styles.observationContextMetricLabel}>Instruments</span>
-              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('instrument_count'))}</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('instrument_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
               <span className={styles.observationContextMetricLabel}>Decay-weighted density</span>
-              <span className={styles.observationContextMetricValue}>{formatPercentNullable(num('decay_weighted_density'))}</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('decay_weighted_density'), 3)}</span>
             </div>
             {DIMENSIONS.map(({ key, label }) => (
               <div key={key} className={styles.observationContextMetric}>
                 <span className={styles.observationContextMetricLabel}>{label} density / events</span>
                 <span className={styles.observationContextMetricValue}>
-                  {formatPercentNullable(dimNum(key, 'density'))}
+                  {formatNumberNullable(dimNum(key, 'density'), 3)}
                   {' / '}
-                  {formatNumberNullable(dimNum(key, 'event_count'))}
+                  {formatNumberNullable(dimNum(key, 'event_count'), 0)}
                 </span>
               </div>
             ))}
