@@ -22,7 +22,8 @@ import styles from './review.module.scss'
 
 function GroupShell({ group }: { group: ObservationGroup }) {
   // R3B §11：minimal shell 仅证明 group 已 wired、label 来自 backend、facts 已到达。
-  // 不实现详细 fact 可视化（属 R3C-R3E）。
+  // 不做 generic fact-kind inference / 不显示"已加载/不可用"等状态判断（事实可用性属 R3C-R3E）。
+  // backend canonical L2 = {group_key,label,facts}，无 group-level status。
   const factEntries = Object.entries(group.facts ?? {})
   return (
     <section className={styles.observationGroup} id={`obs-group-${group.group_key}`}>
@@ -31,15 +32,12 @@ function GroupShell({ group }: { group: ObservationGroup }) {
         <code className={styles.observationGroupKey}>{group.group_key}</code>
       </header>
       {factEntries.length === 0 ? (
-        <div className={styles.observationGroupEmpty}>
-          {group.status === 'unavailable' ? '本组事实当前不可用（unavailable，未覆盖）' : '本组暂无事实'}
-        </div>
+        <div className={styles.observationGroupEmpty}>暂无事实字段</div>
       ) : (
         <ul className={styles.observationFactList}>
           {factEntries.map(([key]) => (
             <li key={key} className={styles.observationFactItem}>
               <span className={styles.observationFactKey}>{key}</span>
-              <span className={styles.observationFactState}>已加载</span>
             </li>
           ))}
         </ul>

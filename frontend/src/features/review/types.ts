@@ -526,8 +526,6 @@ export interface ObservationGroup {
   group_key: string
   label: string
   facts: Record<string, unknown>
-  /** 后端可能标记整组 unavailable；R3B 如实展示，不伪造 ready。 */
-  status?: string
 }
 
 /** 8 个 canonical L2 group 的封闭集合（键顺序与后端一致）。 */

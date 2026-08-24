@@ -135,3 +135,26 @@ test('R3B: null/undefined observationGroups invalid', () => {
   assert.equal(validateCanonicalGroups(undefined).valid, false)
   assert.equal(validateCanonicalGroups({} as ObservationGroups).valid, false)
 })
+
+// R3B-V A：ObservationGroup 只依赖 canonical 结构字段，无 group.status 依赖
+test('R3B-V A: model does not depend on group.status', () => {
+  const groups = makeValidGroups()
+  // 故意加一个 group-level status（违反 backend contract），adapter 不应读取它
+  ;(groups.price_capital as unknown as Record<string, unknown>).status = 'unavailable'
+  const model = buildObservationWorkspaceModel(groups)
+  // 模型成功构建且 facts verbatim，证明它没用 group.status 做决策
+  assert.equal(model.allGroups.length, 8)
+  assert.strictEqual(model.allGroups[0].facts, groups.price_capital.facts)
+})
+
+// R3B-V D：individual unavailable fact 经 adapter verbatim 保留（不解读）
+test('R3B-V D: per-fact unavailable object preserved verbatim', () => {
+  const groups = makeValidGroups()
+  const unavailableFact = { status: 'unavailable', reason: 'readiness_200_not_met' }
+  groups.volume_anomaly = makeGroup('volume_anomaly', '量能异常', { volume_ratio200: unavailableFact })
+  const model = buildObservationWorkspaceModel(groups)
+  const g8 = model.allGroups[7]
+  const passed = (g8.facts as Record<string, unknown>).volume_ratio200
+  assert.strictEqual(passed, unavailableFact) // 同引用，未复制/未解读
+  assert.deepEqual(passed, { status: 'unavailable', reason: 'readiness_200_not_met' })
+})

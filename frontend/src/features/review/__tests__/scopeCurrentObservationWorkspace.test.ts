@@ -129,3 +129,26 @@ test('R3B §20: no new query hook in Current workspace', () => {
     'Current workspace must not create a second query hook',
   )
 })
+
+// R3B-V B：Current workspace 不引用 group.status（backend 无 group-level status）
+test('R3B-V B: workspace does not reference group.status', () => {
+  assert.ok(
+    !/group\.status/.test(workspaceSrc),
+    'Current workspace must not read invented group.status contract',
+  )
+})
+
+// R3B-V C：GroupShell 不声称每个 present fact 是"已加载"状态标签。
+// 精确匹配：GroupShell 用的 per-fact state span class 已被移除（observationFactState 不再出现）。
+// Observation Context 区块的"已加载"是诚实标注 observation 字段存在，不在此约束内。
+test('R3B-V C: GroupShell no per-fact "已加载" state label', () => {
+  assert.ok(
+    !workspaceSrc.includes('observationFactState'),
+    'GroupShell must not render per-fact state label (observationFactState class removed)',
+  )
+  // GroupShell 渲染的 fact 项只含 fact key，不应含任何 status-like 文案
+  assert.ok(
+    !/observationFactState|className=\{styles\.observationFactState\}/.test(workspaceSrc),
+    'GroupShell must not attach fact-state label nodes',
+  )
+})
