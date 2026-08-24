@@ -583,13 +583,16 @@ async def list_review_scope_summaries_by_run(
     payload = comp.composition_payload
     fact_payload = fact.observation_payload
 
-    # --- count (same filter as the page) ---
-    count_stmt = select(func.count()).select_from(fact).where(
+    # --- R2C: single filter owner. count + page share the EXACT same family
+    # predicate so total and returned rows can never diverge. ---
+    family_filters = [
         fact.review_run_id == review_run_id,
         fact.trade_date == trade_date,
-    )
+    ]
     if scope_type is not None:
-        count_stmt = count_stmt.where(fact.scope_type == scope_type)
+        family_filters.append(fact.scope_type == scope_type)
+
+    count_stmt = select(func.count()).select_from(fact).where(*family_filters)
     total = (await db.execute(count_stmt)).scalar_one()
 
     # --- page projection (Fact LEFT OUTER JOIN Composition) ---
@@ -646,10 +649,7 @@ async def list_review_scope_summaries_by_run(
         )
         .select_from(fact)
         .join(comp, join_cond, isouter=True)
-        .where(
-            fact.review_run_id == review_run_id,
-            fact.trade_date == trade_date,
-        )
+        .where(*family_filters)
         .order_by(fact.scope_type, fact.scope_key)
         .offset(offset)
         .limit(limit)

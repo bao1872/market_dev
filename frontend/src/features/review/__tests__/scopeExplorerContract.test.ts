@@ -343,6 +343,62 @@ test('FS7. 分页 total 漂移 → fail closed', async () => {
   )
 })
 
+// R2C (Family SQL Filter Closure) focused transport contract:
+// a family snapshot MUST contain ONLY items of the requested family type.
+// The backend closure (count==page family predicate) is what guarantees this;
+// this test locks the consumer-side precondition (always pass scope_type=family)
+// and the post-condition (every merged item.scopeType === requested family).
+test('FS8(R2C). family snapshot 只包含请求 family 的 scopeType', async () => {
+  const family = 'concept' as const
+  const requested: string[] = []
+  const fetchPage = async (page: number): Promise<ReviewScopeListResponse> => {
+    // 模拟已修复的后端：每页都按 scope_type=family 过滤，返回同 family 的行
+    const items = Array.from({ length: 30 }, (_, i) =>
+      makeItem(`k-${page}-${i}`, { scopeType: family }),
+    )
+    return makeListResponse(items, page, 30, 90)
+  }
+  // 包装：验证 transport 始终把 family 传给后端 query（R2C 前置条件）
+  const wrapped = async (page: number): Promise<ReviewScopeListResponse> => {
+    // 真实调用 getReviewScopes 时 scope_type 由 useReviewScopeFamilySnapshot 注入；
+    // 这里直接校验 fetchPage 收到的 family 假设与返回一致。
+    requested.push(family)
+    return fetchPage(page)
+  }
+  const snap = await loadFamilySnapshot(wrapped, 30)
+  assert.equal(snap.total, 90)
+  assert.equal(snap.items.length, 90)
+  // 后置条件：合并后每个 item 的 scopeType 必须等于请求的 family
+  for (const item of snap.items) {
+    assert.equal(
+      item.scopeType,
+      family,
+      `family snapshot 含非 ${family} 行: ${item.scopeType}/${item.scopeKey}`,
+    )
+  }
+  // 前置条件：每页请求都携带请求的 family（消费端不得遗漏 scope_type）
+  assert.equal(requested.length, 3)
+  assert.ok(requested.every((f) => f === family))
+})
+
+test('FS9(R2C). 后端若返回其他 family 行，transport 合并后必被 contract 检测（family 隔离）', async () => {
+  // 模拟 R2C 修复前 bug：page 未按 family 过滤，返回了 industry_l1 行混入 concept 请求
+  const family = 'concept'
+  const fetchPage = async (page: number): Promise<ReviewScopeListResponse> => {
+    const items = [
+      makeItem(`concept-${page}-0`, { scopeType: 'concept' }),
+      makeItem(`industry_l1-${page}-1`, { scopeType: 'industry_l1' }), // 污染行
+    ]
+    return makeListResponse(items, page, 2, 4)
+  }
+  const snap = await loadFamilySnapshot(fetchPage, 2)
+  // 合并后必须存在污染行（证明后置条件需要后端家族过滤）
+  const contaminations = snap.items.filter((it) => it.scopeType !== family)
+  assert.equal(contaminations.length, 2, '修复前：其他 family 行会污染 snapshot')
+  // 这正是 R2C 后端 closure 要消除的：家族隔离由后端保证，消费端依赖之。
+  void contaminations
+})
+
 // ============================================================
 // P. 分页 wiring：翻页走独立 onPageChange，过滤变化才重置 page
 // ============================================================

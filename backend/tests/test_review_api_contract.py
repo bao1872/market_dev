@@ -566,6 +566,191 @@ async def test_r2b_be_10_dto_has_no_derived_top5_ratio() -> None:
     assert dto.technicalTop5Denominator == 8.4
 
 
+def _capture_execute_factory(captured: list) -> object:
+    """Return a fake ``db.execute`` that records every compiled SQL statement."""
+    async def _fake_execute(stmt):
+        captured.append(str(stmt))
+        fake_result = SimpleNamespace()
+        fake_result.fetchall = lambda: []
+        fake_result.scalars = lambda: SimpleNamespace(all=lambda: [])
+        fake_result.scalar_one = lambda: 0
+        fake_result.fetchone = lambda: (0,)
+        fake_result.mappings = lambda: SimpleNamespace(all=lambda: [])
+        return fake_result
+    return _fake_execute
+
+
+async def test_family_sql_1_page_carries_scope_type_predicate() -> None:
+    """FAMILY-SQL-1: scope_type='concept' → BOTH count and page SQL contain the
+    family predicate (not merely that the Python arg was passed). Bound parameters
+    are used, so we assert the `scope_type =` WHERE predicate appears in both."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type="concept",
+        offset=0,
+        limit=20,
+    )
+    assert len(captured) >= 2, f"expected count+page SQL, got {len(captured)}"
+    count_sql = captured[0].lower()
+    page_sql = captured[1].lower()
+    # count predicate (table-qualified WHERE predicate, not the JOIN key)
+    assert "review_scope_observation_facts.scope_type =" in count_sql
+    # page predicate (the pre-R2C bug: page had NO family predicate)
+    assert "review_scope_observation_facts.scope_type =" in page_sql
+    # both bind a single scope_type parameter
+    assert count_sql.count("review_scope_observation_facts.scope_type =") == 1
+    assert page_sql.count("review_scope_observation_facts.scope_type =") == 1
+
+
+async def test_family_sql_2_none_does_not_introduce_family_predicate() -> None:
+    """FAMILY-SQL-2: scope_type=None → count/page introduce NO artificial family
+    predicate."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type=None,
+        offset=0,
+        limit=20,
+    )
+    assert len(captured) >= 2
+    joined = "\n".join(captured).lower()
+    # no family restriction when None requested (table-qualified WHERE predicate
+    # must be absent; the JOIN still references scope_type as an equality key)
+    assert "review_scope_observation_facts.scope_type =" not in joined
+    # sanity: run id + trade date columns still filter (bound params)
+    assert "review_run_id" in joined
+    assert "trade_date" in joined
+
+
+async def test_family_sql_3_count_and_page_share_predicates() -> None:
+    """FAMILY-SQL-3: count + page share review_run_id, trade_date, and (when
+    supplied) scope_type."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type="concept",
+        offset=0,
+        limit=20,
+    )
+    count_sql = captured[0].lower()
+    page_sql = captured[1].lower()
+    for col in ("review_run_id", "trade_date"):
+        assert col in count_sql and col in page_sql
+    # same family predicate present in both (table-qualified WHERE predicate)
+    assert "review_scope_observation_facts.scope_type =" in count_sql
+    assert "review_scope_observation_facts.scope_type =" in page_sql
+
+
+async def test_family_sql_4_requested_family_cannot_return_other_family() -> None:
+    """FAMILY-SQL-4: requested='concept' cannot return 'industry_l1' rows even if
+    such rows would exist WITHOUT the predicate. Proven by asserting the page SQL
+    restricts scope_type to the requested family."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type="concept",
+        offset=0,
+        limit=100,
+    )
+    page_sql = captured[1].lower()
+    # the page projection MUST filter to the requested family only
+    assert "review_scope_observation_facts.scope_type =" in page_sql
+    # regression guard: it must NOT be a blank cross-family projection
+    assert "industry_l1" not in page_sql
+
+
+async def test_family_sql_5_pagination_semantics_preserved() -> None:
+    """FAMILY-SQL-5: pagination semantics remain offset + limit + ORDER BY
+    scope_type, scope_key."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type="concept",
+        offset=40,
+        limit=20,
+    )
+    page_sql = captured[1].lower()
+    assert "offset" in page_sql and "40" in page_sql
+    assert "limit" in page_sql and "20" in page_sql
+    assert "order by" in page_sql
+    assert "scope_type" in page_sql and "scope_key" in page_sql
+
+
+async def test_family_sql_6_observation_scalar_paths_remain() -> None:
+    """FAMILY-SQL-6: R2B Observation scalar JSONB paths remain in the page
+    projection (not full payload load)."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type="concept",
+        offset=0,
+        limit=20,
+    )
+    page_sql = captured[1].lower()
+    assert "freshness" in page_sql
+    assert "->" in page_sql or "->>" in page_sql
+
+
+async def test_family_sql_7_fact_left_join_composition_unchanged() -> None:
+    """FAMILY-SQL-7: Fact LEFT OUTER JOIN Composition remains unchanged (single
+    join, join keys intact)."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+    db = AsyncMock()
+    db.execute = _capture_execute_factory(captured)  # type: ignore[assignment]
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type=None,
+        offset=0,
+        limit=20,
+    )
+    page_sql = captured[1].lower()
+    assert "left outer join" in page_sql or "left join" in page_sql
+    assert "composition_snapshots" in page_sql or "composition" in page_sql
+    # single join only (no second join introduced by R2C)
+    assert page_sql.count("join") <= 1
+
+
 async def test_list_review_scopes_phase_null_ready_keeps_null_summary_fields() -> None:
     """phase=None + ready: summary carries nulls, not zeros."""
     run_id = uuid.uuid4()
