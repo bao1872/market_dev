@@ -26,6 +26,7 @@ import {
   extractObservationContext,
   ObservationGroupContractError,
 } from './scopeObservationWorkspaceContract'
+import { formatNumberNullable, formatPercentNullable } from './reviewFormat'
 import type { ObservationGroup, ObservationGroups } from './types'
 import {
   parsePriceCapital,
@@ -258,7 +259,26 @@ function ContextShell({
   const structure = obs?.structure
   const currentState =
     structure && typeof structure === 'object' && (structure as Record<string, unknown>).current_state
-  const freshness = obs?.freshness
+
+  const f = ctx.freshness
+  const num = (k: string): number | null =>
+    f && typeof f[k] === 'number' && Number.isFinite(f[k] as number) ? (f[k] as number) : null
+  const dim = (k: string): Record<string, unknown> | null =>
+    f && f.by_dimension && typeof f.by_dimension === 'object'
+      ? ((f.by_dimension as Record<string, unknown>)[k] as Record<string, unknown> | null) ?? null
+      : null
+  const dimNum = (k: string, field: string): number | null => {
+    const d = dim(k)
+    const v = d?.[field]
+    return typeof v === 'number' && Number.isFinite(v) ? v : null
+  }
+
+  const DIMENSIONS: { key: string; label: string }[] = [
+    { key: 'trend', label: 'Trend' },
+    { key: 'structure', label: 'Structure' },
+    { key: 'momentum', label: 'Momentum' },
+    { key: 'chip', label: 'Chip' },
+  ]
 
   return (
     <div className={styles.observationContext}>
@@ -274,9 +294,44 @@ function ContextShell({
       </div>
 
       <div className={styles.observationContextBlock}>
-        <h4 className={styles.observationContextTitle}>Freshness</h4>
-        {ctx.hasFreshness ? (
-          <div className={styles.observationContextNote}>来自 observation.freshness（已加载）</div>
+        <h4 className={styles.observationContextTitle}>Event Freshness</h4>
+        {ctx.hasFreshness && f ? (
+          <div className={styles.observationContextMetrics}>
+            <div className={styles.observationContextMetric}>
+              <span className={styles.observationContextMetricLabel}>Today</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('today_count'))}</span>
+            </div>
+            <div className={styles.observationContextMetric}>
+              <span className={styles.observationContextMetricLabel}>5D</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_5d_count'))}</span>
+            </div>
+            <div className={styles.observationContextMetric}>
+              <span className={styles.observationContextMetricLabel}>10D</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_10d_count'))}</span>
+            </div>
+            <div className={styles.observationContextMetric}>
+              <span className={styles.observationContextMetricLabel}>20D</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_20d_count'))}</span>
+            </div>
+            <div className={styles.observationContextMetric}>
+              <span className={styles.observationContextMetricLabel}>Instruments</span>
+              <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('instrument_count'))}</span>
+            </div>
+            <div className={styles.observationContextMetric}>
+              <span className={styles.observationContextMetricLabel}>Decay-weighted density</span>
+              <span className={styles.observationContextMetricValue}>{formatPercentNullable(num('decay_weighted_density'))}</span>
+            </div>
+            {DIMENSIONS.map(({ key, label }) => (
+              <div key={key} className={styles.observationContextMetric}>
+                <span className={styles.observationContextMetricLabel}>{label} density / events</span>
+                <span className={styles.observationContextMetricValue}>
+                  {formatPercentNullable(dimNum(key, 'density'))}
+                  {' / '}
+                  {formatNumberNullable(dimNum(key, 'event_count'))}
+                </span>
+              </div>
+            ))}
+          </div>
         ) : (
           <div className={styles.observationContextUnavailable}>Event Freshness 不可用（observation 无 freshness）</div>
         )}
@@ -294,7 +349,7 @@ function ContextShell({
       </div>
 
       {currentState ? <span className={styles.hiddenFactProbe} data-probe="current_state_present" /> : null}
-      {freshness ? <span className={styles.hiddenFactProbe} data-probe="freshness_present" /> : null}
+      {f ? <span className={styles.hiddenFactProbe} data-probe="freshness_present" /> : null}
     </div>
   )
 }

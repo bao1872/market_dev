@@ -186,6 +186,8 @@ export function buildObservationWorkspaceModel(
 export interface ObservationContextFacts {
   hasCurrentState: boolean
   hasFreshness: boolean
+  /** 原始 freshness 对象（persisted backend 形状），供 ContextShell 完整数值展示；无则 null */
+  freshness: Record<string, unknown> | null
   /** chip 当前 canonical producer 恒为 unavailable；前端如实展示 */
   chipAvailability: 'unavailable' | 'present' | 'absent'
 }
@@ -197,7 +199,9 @@ export function extractObservationContext(
   const structure = obs?.structure
   const currentState =
     structure && typeof structure === 'object' && (structure as Record<string, unknown>).current_state
-  const freshness = obs?.freshness
+  const freshness = obs?.freshness && typeof obs.freshness === 'object'
+    ? (obs.freshness as Record<string, unknown>)
+    : null
   const chip = obs?.chip
   let chipAvailability: ObservationContextFacts['chipAvailability'] = 'absent'
   if (chip && typeof chip === 'object') {
@@ -209,6 +213,7 @@ export function extractObservationContext(
   return {
     hasCurrentState: !!currentState,
     hasFreshness: !!freshness,
+    freshness,
     chipAvailability,
   }
 }

@@ -2101,6 +2101,26 @@
   color: v.$color-muted;
   font-style: italic;
 }
+.observationContextMetrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 4px;
+}
+.observationContextMetric {
+  display: flex;
+  flex-direction: column;
+  min-width: 120px;
+}
+.observationContextMetricLabel {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+}
+.observationContextMetricValue {
+  font-size: 0.84rem;
+  color: v.$color-text;
+  font-variant-numeric: tabular-nums;
+}
 .hiddenFactProbe {
   display: none;
 }

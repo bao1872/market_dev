@@ -20,7 +20,6 @@ import {
   currentPhaseFact,
   observationGroups,
   OBSERVATION_GROUP_ORDER,
-  parseCurrentSnapshot,
 } from '../scopeDetailContract'
 import {
   alignDynamicsSeries,
@@ -35,7 +34,7 @@ import {
   scopeDetailQueryOptions,
 } from '../useReviewScopeDetail'
 import { DEFAULT_REVIEW_TAB, defaultReviewUrlState, normalizeDetailTab, buildReviewUrl, decodeReviewUrl, type ReviewUrlState } from '../urlState'
-import { memberName, formatContributionFraction, NULL_DISPLAY } from '../reviewFormat'
+import { memberName } from '../reviewFormat'
 import type {
   ReviewScopeComposition,
   ScopePhaseFact,
@@ -1294,178 +1293,11 @@ test('PERSIST-6. insufficient_history 时 occupancy 保持 null', () => {
 })
 
 // ============================================================
-// 13. [R1] Current Snapshot 解析 owner 合同（CURRENT-3..12）
-//     所有 fixtures 镜像真实 backend producer 输出形状（已逐字段核对 scope_observation.py）。
+// 13. Current 解析 owner 合同（CURRENT-11..12，仍保留的 observationGroups / scopeDetailQueryOptions）
+//     原 CURRENT-3..10（parseCurrentSnapshot 整段）已随 R3F legacy cleanup 移除：
+//     ScopeCurrentSnapshotPanel 与 parseCurrentSnapshot 在生产代码 0 引用，Current 现由
+//     ScopeCurrentObservationWorkspace.extractObservationContext 拥有。
 // ============================================================
-
-/** 构造带单个末尾 dynamics_phase fact 的 composition（Regime 来源） */
-function compWithPhase(phase: ScopePhaseFact | null): ReviewScopeComposition {
-  return makeComposition({
-    historical_dynamics: makeDynamicsLayer({
-      status: phase?.status ?? 'ready',
-      phaseFacts: phase ? [phase] : null,
-    }),
-  })
-}
-
-const PHASE_READY_NULL: ScopePhaseFact = {
-  trade_date: '2026-08-21',
-  phase: null,
-  status: 'ready',
-  position: 50,
-  velocity: 1.2,
-  acceleration: 0.3,
-  upper_occupancy: 0.4,
-  lower_occupancy: 0.2,
-  velocity_state: null,
-  acceleration_state: null,
-  high_regime: null,
-  bottom_recovery_context: null,
-}
-
-test('CURRENT-3. phase=null + status=ready 的 regime.phase 保持 null（regime 来自 persisted fact，非整体 null）', () => {
-  const snap = parseCurrentSnapshot({ composition: compWithPhase(PHASE_READY_NULL), observation: null })
-  assert.ok(snap.regime, 'regime 来自 persisted dynamics_phase fact，应为非 null')
-  assert.equal(snap.regime!.phase, null, 'phase=null 保持 null，不发明第 7 个 phase')
-  assert.equal(snap.regime!.status, 'ready')
-  assert.equal(snap.regime!.position, 50)
-  assert.equal(snap.regime!.velocity, 1.2)
-  assert.equal(snap.regime!.acceleration, 0.3)
-  assert.equal(snap.regime!.upperOccupancy, 0.4)
-  assert.equal(snap.regime!.lowerOccupancy, 0.2)
-})
-
-test('CURRENT-4. position=0 / velocity=0 / acceleration=0 保持 0（非 null）', () => {
-  const phase0: ScopePhaseFact = { ...PHASE_READY_NULL, phase: 'Strengthening', position: 0, velocity: 0, acceleration: 0 }
-  const snap = parseCurrentSnapshot({ composition: compWithPhase(phase0), observation: null })
-  assert.equal(snap.regime!.position, 0, 'position=0 是有效值')
-  assert.equal(snap.regime!.velocity, 0)
-  assert.equal(snap.regime!.acceleration, 0)
-})
-
-test('CURRENT-5. capital tilt 读 persisted，不重算 AW-EW', () => {
-  // AW-EW = 0.05 - 0.02 = 0.03，但 persisted capital_tilt = 0.99 → 必须赢
-  const comp = makeComposition({
-    internal_structure_facts: {
-      breadth: null,
-      capital_tilt: { equal_weight_return: 0.02, amount_weighted_return: 0.05, capital_tilt: 0.99 },
-      concentration: null,
-    },
-  })
-  const snap = parseCurrentSnapshot({ composition: comp, observation: null })
-  assert.equal(snap.participation!.capitalTilt, 0.99, 'persisted capital_tilt 胜出，不重算 AW-EW')
-  assert.equal(snap.participation!.equalWeightReturn, 0.02)
-  assert.equal(snap.participation!.amountWeightedReturn, 0.05)
-})
-
-test('CURRENT-6. technical HHI 来自 structure.current_state.technical_state.concentration.hhi（非 price/amount normalized HHI）', () => {
-  const observation = {
-    structure: {
-      current_state: {
-        board_ready_member_count: 10,
-        mean_active_orderblock_count: 2.0,
-        latest_events: { bos: { up: 3, down: 1 }, choch: { up: 2, down: 0 }, ob: { up: 1, down: 4 }, eqh: 1, eql: 0 },
-        technical_state: {
-          concentration: {
-            top3_contribution: { numerator: 0.3, denominator: 1.0 },
-            top5_contribution: { numerator: 0.5, denominator: 1.0 },
-            hhi: 0.42,
-            leader_symbol: '601899',
-            leader_magnitude: 3.2,
-            median_magnitude: 1.1,
-            leader_median_gap: 2.1,
-            count: 10,
-          },
-          dispersion: { count: 10, mean: 1.5, std: 0.4, cv: 0.27, p25: 1.0, p50: 1.4, p75: 2.0, iqr: 1.0, range: 3.0 },
-        },
-      },
-    },
-  }
-  // 故意放不同值的 price/amount normalized HHI，证明 Current 不读它
-  const comp = makeComposition({
-    internal_structure_facts: {
-      breadth: null,
-      capital_tilt: null,
-      concentration: { price_normalized_hhi: 0.99, amount_normalized_hhi: 0.88 },
-    },
-  })
-  const snap = parseCurrentSnapshot({ composition: comp, observation })
-  assert.equal(snap.currentState!.technical_state!.concentration!.hhi, 0.42, 'technical HHI 来自 current_state，不是 internal price/amount HHI')
-  assert.equal(snap.currentState!.board_ready_member_count, 10)
-  assert.equal(snap.currentState!.latest_events!.eqh, 1)
-  assert.equal(snap.currentState!.technical_state!.dispersion!.p50, 1.4)
-})
-
-test('CURRENT-7. top5 denominator=0 不渲染假 0%（显示 —）；persisted 分数原样保留', () => {
-  assert.equal(formatContributionFraction({ numerator: 0, denominator: 0 }), NULL_DISPLAY, 'denominator=0 → —')
-  assert.equal(formatContributionFraction(null), NULL_DISPLAY, '缺失 → —')
-  assert.equal(formatContributionFraction({ numerator: null, denominator: 1 }), NULL_DISPLAY, '分子 null → —')
-  assert.equal(formatContributionFraction({ numerator: 0.3, denominator: 1.0 }), '0.3 / 1.0  (30.0%)')
-  const concentration = {
-    top5_contribution: { numerator: 0, denominator: 0 },
-    hhi: 0.1,
-    count: 0,
-  }
-  const observation = {
-    structure: {
-      current_state: {
-        technical_state: { concentration },
-      },
-    },
-  }
-  const snap = parseCurrentSnapshot({ composition: null, observation: observation as unknown as Record<string, unknown> })
-  assert.equal(snap.currentState!.technical_state!.concentration!.top5_contribution!.denominator, 0, 'persisted denominator=0 原样保留（供 formatter 显示 —）')
-})
-
-test('CURRENT-8. freshness today_count=0 是有效零（非 unavailable）', () => {
-  const observation = {
-    freshness: {
-      today_count: 0,
-      last_5d_count: 3,
-      last_10d_count: 7,
-      last_20d_count: 12,
-      instrument_count: 20,
-      by_dimension: {
-        trend: { window_days: 20, event_count: 5, weighted_sum: 1.6, density: 0.62 },
-        structure: { window_days: 20, event_count: 4, weighted_sum: 1.2, density: 0.48 },
-        momentum: { window_days: 20, event_count: 2, weighted_sum: 0.7, density: 0.31 },
-        chip: { window_days: 20, event_count: 0, weighted_sum: 0.0, density: 0.0 },
-      },
-      decay_weighted_density: 0.43,
-    },
-  }
-  const snap = parseCurrentSnapshot({ composition: null, observation })
-  assert.equal(snap.freshness!.today_count, 0, 'today_count=0 是有效零事件，不是 null')
-  assert.equal(snap.freshness!.instrument_count, 20)
-  assert.equal(snap.freshness!.decay_weighted_density, 0.43)
-})
-
-test('CURRENT-9. freshness 缺失 → null（unavailable）', () => {
-  const snap = parseCurrentSnapshot({ composition: null, observation: { structure: {} } })
-  assert.equal(snap.freshness, null, 'observation 无 freshness → null')
-  const snap2 = parseCurrentSnapshot({ composition: null, observation: null })
-  assert.equal(snap2.freshness, null)
-})
-
-test('CURRENT-10. per-dimension density 值精确保留', () => {
-  const observation = {
-    freshness: {
-      today_count: 1, last_5d_count: 1, last_10d_count: 1, last_20d_count: 1, instrument_count: 1,
-      by_dimension: {
-        trend: { window_days: 20, event_count: 1, weighted_sum: 1, density: 0.62 },
-        structure: { window_days: 20, event_count: 1, weighted_sum: 1, density: 0.48 },
-        momentum: { window_days: 20, event_count: 1, weighted_sum: 1, density: 0.31 },
-        chip: { window_days: 20, event_count: 0, weighted_sum: 0, density: 0.0 },
-      },
-      decay_weighted_density: 0.1,
-    },
-  }
-  const snap = parseCurrentSnapshot({ composition: null, observation })
-  assert.equal(snap.freshness!.by_dimension!.trend!.density, 0.62)
-  assert.equal(snap.freshness!.by_dimension!.structure!.density, 0.48)
-  assert.equal(snap.freshness!.by_dimension!.momentum!.density, 0.31)
-  assert.equal(snap.freshness!.by_dimension!.chip!.density, 0.0, 'chip density=0 是有效值，不是 null')
-})
 
 test('CURRENT-11. observationGroups 在存在 freshness 时返回 freshness（不只顺序常量）', () => {
   const groups = observationGroups({ scope: {}, structure: {}, freshness: { today_count: 1 } })
