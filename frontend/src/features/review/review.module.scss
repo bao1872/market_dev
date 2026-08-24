@@ -1079,6 +1079,14 @@
   margin: 0;
 }
 
+/* [R1] Current panel 内联 unavailable 注记（区别于整面板 panelUnavailable） */
+.metricEmpty {
+  grid-column: 1 / -1;
+  font-size: 11px;
+  color: v.$color-text-dim;
+  padding: 2px 0;
+}
+
 .metricCell {
   display: flex;
   flex-direction: column;

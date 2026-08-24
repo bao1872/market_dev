@@ -303,6 +303,23 @@ test('D6. 非法 tab → dynamics', () => {
   assert.equal(decodeReviewUrl(new URLSearchParams('tab=bogus')).tab, 'dynamics')
 })
 
+// ============================================================
+// [R1] Current tab URL 合同（CURRENT-1/2）
+// ============================================================
+
+test('CURRENT-1. current tab 被 URL decoder/encoder 接受并往返', () => {
+  const state = { ...defaultReviewUrlState(), tab: 'current' as const }
+  const enc = encodeReviewUrl(state)
+  assert.equal(decodeReviewUrl(enc).tab, 'current', 'current 经编解码往返保留')
+  assert.equal(normalizeDetailTab('current'), 'current', 'normalizeDetailTab 接受 current')
+})
+
+test('CURRENT-2. 默认 detail tab 仍为 dynamics（R1 不改默认）', () => {
+  assert.equal(defaultReviewUrlState().tab, 'dynamics', '默认 tab = dynamics')
+  assert.equal(normalizeDetailTab(undefined), 'dynamics')
+  assert.equal(decodeReviewUrl(new URLSearchParams('')).tab, 'dynamics')
+})
+
 test('D7. 非法 phase → null（不 fallback 映射）', () => {
   assert.equal(normalizePhase('bogus'), null)
   assert.equal(decodeReviewUrl(new URLSearchParams('phase=bogus')).phase, null)

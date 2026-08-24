@@ -521,3 +521,99 @@ export interface ReviewScopeCompositionDetailResponse {
   composition: ReviewScopeComposition | null
   observation: Record<string, unknown> | null
 }
+
+// ------------------------------------------------------------
+// [R1] Current Snapshot — nested Observation contracts that Current 实际消费
+// 只类型化 Current 消费的 nested contracts；字段命名与 backend scope_observation.py
+// canonical producer 输出保持一致（snake_case）。禁止 any。
+// 来源（已逐字段核对真实 backend 形状，未发明想象合同）：
+// - latest_events: _latest_event_state → {bos/choch/ob:{up,down}, eqh, eql}
+// - technical_state.concentration: _compute_technical_concentration
+// - technical_state.dispersion: _compute_technical_dispersion
+// - structure.current_state: compute_scope_observation structure.current_state
+// - freshness: _compute_event_freshness（顶层 + by_dimension）
+// ------------------------------------------------------------
+
+/** latest_events 精确 producer 形状（scope_observation._latest_event_state）。
+ *  bos/choch/ob 为 {up,down} 计数；eqh/eql 为整型计数。 */
+export interface ScopeLatestEventPair {
+  up: number | null
+  down: number | null
+}
+export interface ScopeLatestEvents {
+  bos: ScopeLatestEventPair | null
+  choch: ScopeLatestEventPair | null
+  ob: ScopeLatestEventPair | null
+  eqh: number | null
+  eql: number | null
+}
+
+/** technical_state.concentration 精确 producer 形状（_compute_technical_concentration）。
+ *  top3/top5_contribution 为 {numerator, denominator}（persisted 分数；前端只格式化，不重算比例）。
+ *  leader_symbol 为 board_current_symbol（member 展示符号，非 Board 产品概念）。 */
+export interface ScopeContributionFraction {
+  numerator: number | null
+  denominator: number | null
+}
+export interface ScopeTechnicalConcentration {
+  top3_contribution: ScopeContributionFraction | null
+  top5_contribution: ScopeContributionFraction | null
+  hhi: number | null
+  leader_symbol: string | null
+  leader_magnitude: number | null
+  median_magnitude: number | null
+  leader_median_gap: number | null
+  count: number | null
+}
+
+/** technical_state.dispersion 精确 producer 形状（_compute_technical_dispersion）。
+ *  纯统计描述（population std / cv / 分位数 / iqr / range），不携带方向语义。 */
+export interface ScopeTechnicalDispersion {
+  count: number | null
+  mean: number | null
+  std: number | null
+  cv: number | null
+  p25: number | null
+  p50: number | null
+  p75: number | null
+  iqr: number | null
+  range: number | null
+}
+
+/** structure.current_state 精确 producer 形状（compute_scope_observation structure.current_state）。
+ *  board_ready_member_count / mean_active_orderblock_count / latest_events 是 persisted backend fact，
+ *  名称中的 "board" 仅表示历史来源 key 命名，不表示 Board 是 runtime owner。 */
+export interface ScopeObservationCurrentState {
+  board_ready_member_count: number | null
+  mean_active_orderblock_count: number | null
+  latest_events: ScopeLatestEvents | null
+  technical_state: {
+    concentration: ScopeTechnicalConcentration | null
+    dispersion: ScopeTechnicalDispersion | null
+  } | null
+}
+
+/** freshness 单维度精确 producer 形状（_compute_event_freshness by_dimension）。 */
+export interface ScopeFreshnessDimension {
+  window_days: number | null
+  event_count: number | null
+  weighted_sum: number | null
+  density: number | null
+}
+
+/** observation.freshness 精确 producer 形状（_compute_event_freshness 顶层）。
+ *  today_count=0 是有效零事件（不可 unavailable 化）；freshness 整体缺失才是 unavailable。 */
+export interface ScopeFreshnessFacts {
+  today_count: number | null
+  last_5d_count: number | null
+  last_10d_count: number | null
+  last_20d_count: number | null
+  instrument_count: number | null
+  by_dimension: {
+    trend: ScopeFreshnessDimension | null
+    structure: ScopeFreshnessDimension | null
+    momentum: ScopeFreshnessDimension | null
+    chip: ScopeFreshnessDimension | null
+  } | null
+  decay_weighted_density: number | null
+}

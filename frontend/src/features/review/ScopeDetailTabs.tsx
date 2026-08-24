@@ -14,6 +14,7 @@ export interface ScopeDetailTabDef {
 }
 
 export const SCOPE_DETAIL_TABS: ReadonlyArray<ScopeDetailTabDef> = [
+  { value: 'current', label: 'Current' },
   { value: 'dynamics', label: 'Dynamics' },
   { value: 'internal', label: 'Internal' },
   { value: 'leadership', label: 'Leadership' },

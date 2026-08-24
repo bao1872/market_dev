@@ -26,6 +26,7 @@ import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness
 export type ReviewExplorerView = 'table' | 'trajectory'
 
 export type ReviewDetailTab =
+  | 'current'
   | 'dynamics'
   | 'internal'
   | 'leadership'
@@ -81,6 +82,7 @@ const FAMILY_VALUES: ReadonlySet<string> = new Set([
 const VIEW_VALUES: ReadonlySet<string> = new Set(['table', 'trajectory'])
 
 const TAB_VALUES: ReadonlySet<string> = new Set([
+  'current',
   'dynamics',
   'internal',
   'leadership',

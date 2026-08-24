@@ -18,6 +18,7 @@
 
 import type {
   ReviewScopeComposition,
+  ReviewDynamicsPhase,
   ScopePhaseFact,
   ScopeMemberEvidence,
   ScopeReconciliation,
@@ -31,6 +32,14 @@ import type {
   ScopeAttributionConcentrationGroup,
   ScopeAttributionConcentrationSubGroup,
   ScopeAttributionLeadershipGroup,
+  ScopeObservationCurrentState,
+  ScopeFreshnessFacts,
+  ScopeFreshnessDimension,
+  ScopeTechnicalConcentration,
+  ScopeTechnicalDispersion,
+  ScopeLatestEvents,
+  ScopeLatestEventPair,
+  ScopeContributionFraction,
 } from './types'
 
 // ============================================================
@@ -481,4 +490,226 @@ export function observationGroups(
     }
   }
   return out
+}
+
+// ============================================================
+// [R1] Current Snapshot — 单一解析 owner（prompt §3、§11）
+// ============================================================
+//
+// 职责：把 backend persisted Composition / Observation 中 Current Tab 实际消费的
+// 嵌套载荷解析为前端展示 ViewModel。
+// 原则（与文件顶部一致）：
+// - 唯一解析 owner；组件绝不散落 `payload.xxx as SomeType`。
+// - 只做守卫/字段映射/格式，禁止业务重算（Phase/score/信号/HHI/集中度/广度/
+//   capital tilt=AW-EW/leader strength/动量-趋势分类/freshness/decay 全部来自 persisted）。
+// - null != 0、[] != null、unavailable != empty 语义保留。
+// - 内部复用已有解析 owner：currentPhaseFact(parseDynamicsLayer(...)) / parseInternalStructure(...)。
+
+/** Current Regime 展示 ViewModel（来自 persisted dynamics_phase 末尾 fact） */
+export interface ScopeCurrentRegime {
+  status: string | null
+  phase: ReviewDynamicsPhase | null
+  position: number | null
+  velocity: number | null
+  acceleration: number | null
+  upperOccupancy: number | null
+  lowerOccupancy: number | null
+}
+
+/** Current 身份（来自已加载的 Scope list item，不发起新请求；eligible/provided/coverage） */
+export interface ScopeCurrentIdentity {
+  eligibleCount: number | null
+  providedCount: number | null
+  coverageRatio: number | null
+}
+
+/** Current Breadth & Participation 展示 ViewModel（来自 composition.internal_structure_facts） */
+export interface ScopeCurrentParticipation {
+  equalWeightReturn: number | null
+  amountWeightedReturn: number | null
+  capitalTilt: number | null
+  advanceRatio: number | null
+  declineRatio: number | null
+  unchangedRatio: number | null
+  returnDispersion: number | null
+}
+
+/** Current Snapshot 顶层 ViewModel（projection layer only，persisted facts） */
+export interface ScopeCurrentSnapshot {
+  regime: ScopeCurrentRegime | null
+  identity: ScopeCurrentIdentity | null
+  participation: ScopeCurrentParticipation | null
+  currentState: ScopeObservationCurrentState | null
+  freshness: ScopeFreshnessFacts | null
+}
+
+export interface ParseCurrentSnapshotArgs {
+  composition: ReviewScopeComposition | null
+  observation: Record<string, unknown> | null
+  /** 来自已加载 Scope list item 的 identity；不传则 identity=null（不发起新请求） */
+  identity?: ScopeCurrentIdentity | null
+}
+
+/** 安全读取嵌套对象（排除数组与 null/undefined） */
+function asObj(v: unknown): Record<string, unknown> | null {
+  return v && typeof v === 'object' && !Array.isArray(v)
+    ? (v as Record<string, unknown>)
+    : null
+}
+
+function parseCurrentRegime(
+  composition: ReviewScopeComposition | null,
+): ScopeCurrentRegime | null {
+  // 来源：末尾 persisted dynamics_phase fact；绝不从 chart series 反推（prompt §4）。
+  const f = currentPhaseFact(parseDynamicsLayer(composition))
+  if (!f) return null
+  return {
+    status: asString(f.status),
+    phase: f.phase,
+    position: asNumber(f.position),
+    velocity: asNumber(f.velocity),
+    acceleration: asNumber(f.acceleration),
+    upperOccupancy: asNumber(f.upper_occupancy),
+    lowerOccupancy: asNumber(f.lower_occupancy),
+  }
+}
+
+function parseCurrentParticipation(
+  composition: ReviewScopeComposition | null,
+): ScopeCurrentParticipation | null {
+  const f = composition?.internal_structure_facts
+  if (!f) return null
+  const ct = f.capital_tilt
+  const b = f.breadth
+  // capitalTilt 直接读 persisted，绝不重算 amountWeightedReturn - equalWeightReturn（CURRENT-5）。
+  return {
+    equalWeightReturn: asNumber(ct?.equal_weight_return),
+    amountWeightedReturn: asNumber(ct?.amount_weighted_return),
+    capitalTilt: asNumber(ct?.capital_tilt),
+    advanceRatio: asNumber(b?.advance_ratio),
+    declineRatio: asNumber(b?.decline_ratio),
+    unchangedRatio: asNumber(b?.unchanged_ratio),
+    returnDispersion: asNumber(b?.return_dispersion),
+  }
+}
+
+function parseLatestEvents(le: Record<string, unknown>): ScopeLatestEvents {
+  const pair = (v: unknown): ScopeLatestEventPair | null => {
+    const o = asObj(v)
+    if (!o) return null
+    return { up: asNumber(o.up), down: asNumber(o.down) }
+  }
+  return {
+    bos: pair(le.bos),
+    choch: pair(le.choch),
+    ob: pair(le.ob),
+    eqh: asNumber(le.eqh),
+    eql: asNumber(le.eql),
+  }
+}
+
+function parseConcentration(c: Record<string, unknown>): ScopeTechnicalConcentration {
+  const frac = (v: unknown): ScopeContributionFraction | null => {
+    const o = asObj(v)
+    if (!o) return null
+    return { numerator: asNumber(o.numerator), denominator: asNumber(o.denominator) }
+  }
+  return {
+    top3_contribution: frac(c.top3_contribution),
+    top5_contribution: frac(c.top5_contribution),
+    hhi: asNumber(c.hhi),
+    leader_symbol: asString(c.leader_symbol),
+    leader_magnitude: asNumber(c.leader_magnitude),
+    median_magnitude: asNumber(c.median_magnitude),
+    leader_median_gap: asNumber(c.leader_median_gap),
+    count: asNumber(c.count),
+  }
+}
+
+function parseDispersion(d: Record<string, unknown>): ScopeTechnicalDispersion {
+  return {
+    count: asNumber(d.count),
+    mean: asNumber(d.mean),
+    std: asNumber(d.std),
+    cv: asNumber(d.cv),
+    p25: asNumber(d.p25),
+    p50: asNumber(d.p50),
+    p75: asNumber(d.p75),
+    iqr: asNumber(d.iqr),
+    range: asNumber(d.range),
+  }
+}
+
+function parseCurrentState(
+  observation: Record<string, unknown> | null,
+): ScopeObservationCurrentState | null {
+  const structure = asObj(observation?.structure)
+  const cs = asObj(structure?.current_state)
+  if (!cs) return null
+  const tech = asObj(cs.technical_state)
+  const conc = asObj(tech?.concentration)
+  const disp = asObj(tech?.dispersion)
+  const le = asObj(cs.latest_events)
+  return {
+    board_ready_member_count: asNumber(cs.board_ready_member_count),
+    mean_active_orderblock_count: asNumber(cs.mean_active_orderblock_count),
+    latest_events: le ? parseLatestEvents(le) : null,
+    technical_state: tech
+      ? {
+          concentration: conc ? parseConcentration(conc) : null,
+          dispersion: disp ? parseDispersion(disp) : null,
+        }
+      : null,
+  }
+}
+
+function parseFreshnessDimension(d: Record<string, unknown> | null): ScopeFreshnessDimension | null {
+  if (!d) return null
+  return {
+    window_days: asNumber(d.window_days),
+    event_count: asNumber(d.event_count),
+    weighted_sum: asNumber(d.weighted_sum),
+    density: asNumber(d.density),
+  }
+}
+
+function parseFreshness(
+  observation: Record<string, unknown> | null,
+): ScopeFreshnessFacts | null {
+  const f = asObj(observation?.freshness)
+  if (!f) return null
+  const bd = asObj(f.by_dimension)
+  return {
+    today_count: asNumber(f.today_count),
+    last_5d_count: asNumber(f.last_5d_count),
+    last_10d_count: asNumber(f.last_10d_count),
+    last_20d_count: asNumber(f.last_20d_count),
+    instrument_count: asNumber(f.instrument_count),
+    by_dimension: bd
+      ? {
+          trend: parseFreshnessDimension(asObj(bd.trend)),
+          structure: parseFreshnessDimension(asObj(bd.structure)),
+          momentum: parseFreshnessDimension(asObj(bd.momentum)),
+          chip: parseFreshnessDimension(asObj(bd.chip)),
+        }
+      : null,
+    decay_weighted_density: asNumber(f.decay_weighted_density),
+  }
+}
+
+/**
+ * 解析 Current Snapshot ViewModel（唯一解析 owner）。
+ * 输入：composition（Regime/Participation/identity 来源）、observation（Current State/Freshness 来源）、
+ *       identity（来自已加载 list item 的 eligible/provided/coverage，可选）。
+ * 不发起任何请求；所有值来自 persisted backend facts。
+ */
+export function parseCurrentSnapshot(args: ParseCurrentSnapshotArgs): ScopeCurrentSnapshot {
+  const { composition, observation, identity } = args
+  return {
+    regime: parseCurrentRegime(composition),
+    identity: identity ?? null,
+    participation: parseCurrentParticipation(composition),
+    currentState: parseCurrentState(observation),
+    freshness: parseFreshness(observation),
+  }
 }
