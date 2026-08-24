@@ -21,6 +21,7 @@ import {
   buildScopeExplorerQuery,
   filterScopes,
   sortVelocityDesc,
+  sortScopes,
   applyScopeExplorerPipeline,
   findScopeById,
   computeEffectivePage,
@@ -29,10 +30,15 @@ import { loadFamilySnapshot, FAMILY_SNAPSHOT_PAGE_SIZE } from '../useReviewScope
 import { formatPosition, formatPercentNullable, NULL_DISPLAY } from '../reviewFormat'
 import {
   DEFAULT_REVIEW_VIEW,
+  DEFAULT_REVIEW_SORT,
   defaultReviewUrlState,
   withReviewFilterChange,
   withReviewPageChange,
+  normalizeSort,
+  decodeReviewUrl,
+  encodeReviewUrl,
 } from '../urlState'
+import type { ReviewSort } from '../urlState'
 import type {
   ReviewScopeListItem,
   ReviewScopeSummary,
@@ -593,4 +599,239 @@ test('RT5. ReviewPage 不调用 legacy 信号/Discovery API', () => {
   ]) {
     assert.doesNotMatch(src, new RegExp(legacyApi), `ReviewPage 不得调用 legacy API ${legacyApi}`)
   }
+})
+
+// ============================================================
+// R2A. Scope Explorer Multi-Sort（纯展示层、单一排序 owner、persisted 字段直接读取）
+// ============================================================
+
+const ALL_SORTS: ReadonlyArray<ReviewSort> = [
+  'velocity_desc',
+  'acceleration_desc',
+  'position_desc',
+  'equal_weight_return_desc',
+  'capital_tilt_desc',
+  'migration_desc',
+  'coverage_desc',
+]
+
+test('SORT-1. 每个合法 sort 都能被 normalize 接受', () => {
+  for (const s of ALL_SORTS) {
+    assert.equal(normalizeSort(s), s, `合法 sort ${s} 必须原样保留`)
+  }
+})
+
+test('SORT-2. 每个非默认 sort 的 encode/decode 往返一致', () => {
+  for (const s of ALL_SORTS) {
+    if (s === DEFAULT_REVIEW_SORT) continue
+    const url = encodeReviewUrl({ ...defaultReviewUrlState(), sort: s })
+    const back = decodeReviewUrl(url)
+    assert.equal(back.sort, s, `sort=${s} 必须往返一致`)
+  }
+})
+
+test('SORT-3. velocity_desc 仍是默认且从 URL 省略', () => {
+  assert.equal(DEFAULT_REVIEW_SORT, 'velocity_desc')
+  const url = encodeReviewUrl({ ...defaultReviewUrlState(), sort: 'velocity_desc' })
+  assert.ok(!url.toString().includes('sort='), '默认 sort 不得出现在 URL 中')
+  // 无 sort 的 URL 解码回默认
+  assert.equal(decodeReviewUrl(new URLSearchParams('?family=industry_l1')).sort, 'velocity_desc')
+})
+
+test('SORT-4. 非法 sort 回退 velocity_desc', () => {
+  const back = decodeReviewUrl(new URLSearchParams('?sort=not_a_real_sort'))
+  assert.equal(back.sort, 'velocity_desc', '非法 sort 必须回退默认')
+  assert.equal(normalizeSort('bogus' as ReviewSort), 'velocity_desc')
+})
+
+test('SORT-5. sort 变化经由 withReviewFilterChange 时重置 page=1 但保留 scopeKey', () => {
+  const base = { ...defaultReviewUrlState(), page: 3, scopeKey: 'copper' }
+  const next = withReviewFilterChange(base, { sort: 'acceleration_desc' })
+  assert.equal(next.page, 1, 'sort 变化必须重置 page=1')
+  assert.equal(next.sort, 'acceleration_desc')
+  assert.equal(next.scopeKey, 'copper', '必须保留 scopeKey')
+  assert.equal(next.family, 'industry_l1')
+  assert.equal(next.view, 'table')
+})
+
+// 构造一个每项都带「自相矛盾」persisted 值的 fixture，证明每个 sort 只读自己字段
+function makeContradictoryItems(): ReviewScopeListItem[] {
+  // 同一批 scope，故意让各字段取值彼此不相关：
+  //  - itemA：velocity 最大，其余字段非最大
+  //  - itemB：acceleration 最大
+  //  - itemC：position 最大
+  //  - itemD：equalWeightReturn 最大
+  //  - itemE：capitalTilt 最大
+  //  - itemF：migration 最大
+  //  - itemG：coverageRatio 最大
+  return [
+    makeItem('A', {
+      coverageRatio: 0.1,
+      summary: makeSummary({ velocity: 99, acceleration: 1, position: 2, equalWeightReturn: 0.01, capitalTilt: 0.1, migration: 0.1 }),
+    }),
+    makeItem('B', {
+      coverageRatio: 0.2,
+      summary: makeSummary({ velocity: 1, acceleration: 99, position: 3, equalWeightReturn: 0.02, capitalTilt: 0.2, migration: 0.2 }),
+    }),
+    makeItem('C', {
+      coverageRatio: 0.3,
+      summary: makeSummary({ velocity: 2, acceleration: 3, position: 99, equalWeightReturn: 0.03, capitalTilt: 0.3, migration: 0.3 }),
+    }),
+    makeItem('D', {
+      coverageRatio: 0.4,
+      summary: makeSummary({ velocity: 3, acceleration: 4, position: 4, equalWeightReturn: 0.99, capitalTilt: 0.4, migration: 0.4 }),
+    }),
+    makeItem('E', {
+      coverageRatio: 0.5,
+      summary: makeSummary({ velocity: 4, acceleration: 5, position: 5, equalWeightReturn: 0.05, capitalTilt: 0.99, migration: 0.5 }),
+    }),
+    makeItem('F', {
+      coverageRatio: 0.6,
+      summary: makeSummary({ velocity: 5, acceleration: 6, position: 6, equalWeightReturn: 0.06, capitalTilt: 0.6, migration: 0.99 }),
+    }),
+    makeItem('G', {
+      coverageRatio: 0.99,
+      summary: makeSummary({ velocity: 6, acceleration: 7, position: 7, equalWeightReturn: 0.07, capitalTilt: 0.7, migration: 0.7 }),
+    }),
+  ]
+}
+
+test('SORT-6. velocity_desc 降序，null 最后，且只读 velocity', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'velocity_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['A', 'G', 'F', 'E', 'D', 'C', 'B'])
+})
+
+test('SORT-7. acceleration_desc 降序，且只读 acceleration（不随 velocity 顺序）', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'acceleration_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['B', 'G', 'F', 'E', 'D', 'C', 'A'])
+})
+
+test('SORT-8. position_desc 降序，且只读 position', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'position_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['C', 'G', 'F', 'E', 'D', 'B', 'A'])
+})
+
+test('SORT-9. equal_weight_return_desc 降序，且只读 equalWeightReturn', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'equal_weight_return_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['D', 'G', 'F', 'E', 'C', 'B', 'A'])
+})
+
+test('SORT-10. capital_tilt_desc 降序，且只读 capitalTilt（persisted，不重算）', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'capital_tilt_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['E', 'G', 'F', 'D', 'C', 'B', 'A'])
+})
+
+test('SORT-11. migration_desc 降序，且只读 migration（persisted，不重算）', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'migration_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['F', 'G', 'E', 'D', 'C', 'B', 'A'])
+})
+
+test('SORT-12. coverage_desc 降序，且只读行级 coverageRatio（persisted，不重算）', () => {
+  const sorted = sortScopes(makeContradictoryItems(), 'coverage_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['G', 'F', 'E', 'D', 'C', 'B', 'A'])
+})
+
+// 对给定 sort 字段，构造「正/零/负/null/缺失」五条 fixture，验证该字段降序时 null 恒最后
+function itemsForSortField(field: keyof NonNullable<ReviewScopeListItem['summary']>): ReviewScopeListItem[] {
+  const base = {
+    velocity: null,
+    acceleration: null,
+    position: null,
+    equalWeightReturn: null,
+    capitalTilt: null,
+    migration: null,
+  } as const
+  const withField = (v: number | null) => ({ ...base, [field]: v })
+  return [
+    makeItem('pos', { summary: makeSummary(withField(0.5) as Record<string, number | null>) }),
+    makeItem('zero', { summary: makeSummary(withField(0) as Record<string, number | null>) }),
+    makeItem('neg', { summary: makeSummary(withField(-0.2) as Record<string, number | null>) }),
+    makeItem('nullv', { summary: makeSummary(withField(null) as Record<string, number | null>) }),
+    makeItem('noval', { summary: null }),
+  ]
+}
+
+test('SORT-6..12 共同：每个排序字段含正/零/负/null 时 null 恒最后', () => {
+  const fieldBySort: Record<ReviewSort, keyof NonNullable<ReviewScopeListItem['summary']>> = {
+    velocity_desc: 'velocity',
+    acceleration_desc: 'acceleration',
+    position_desc: 'position',
+    equal_weight_return_desc: 'equalWeightReturn',
+    capital_tilt_desc: 'capitalTilt',
+    migration_desc: 'migration',
+    coverage_desc: 'position', // coverage 用行级字段，下方单独处理
+  }
+  for (const s of ALL_SORTS) {
+    if (s === 'coverage_desc') {
+      const items = [
+        makeItem('pos', { coverageRatio: 0.5 }),
+        makeItem('zero', { coverageRatio: 0 }),
+        makeItem('neg', { coverageRatio: -0.2 }),
+        makeItem('nullv', { coverageRatio: null }),
+        makeItem('noval', { coverageRatio: null }),
+      ]
+      const sorted = sortScopes(items, s).map((i) => i.scopeKey)
+      // 0.5 > 0 > -0.2 在前，两个 null 占据最后两位（顺序由 scopeName 决定，不强制互序）
+      assert.deepEqual(sorted.slice(0, 3), ['pos', 'zero', 'neg'], `coverage_desc 数值降序在前`)
+      assert.deepEqual(sorted.slice(-2).sort(), ['noval', 'nullv'], `coverage_desc 两个 null 在最后`)
+      continue
+    }
+    const items = itemsForSortField(fieldBySort[s])
+    const sorted = sortScopes(items, s).map((i) => i.scopeKey)
+    // 0.5 > 0 > -0.2 在前，undefined(summary=null) 与 null(field=null) 占据最后两位
+    assert.deepEqual(sorted.slice(0, 3), ['pos', 'zero', 'neg'], `sort=${s}: 数值降序在前`)
+    assert.deepEqual(sorted.slice(-2).sort(), ['noval', 'nullv'], `sort=${s}: 两个 null 类在最后`)
+  }
+})
+
+test('SORT-13. 确定性 tie-break：同字段值相等时按 scopeName ?? scopeKey 字典序', () => {
+  // tieBreak 比较 (scopeName ?? scopeKey) 的 localeCompare：
+  //  - alpha(zeta 的 scopeName)/zeta 用 scopeName
+  //  - abel/mike 的 scopeName=null → 用 scopeKey 'abel'/'mike'
+  // 全序：abel < alpha < mike < zeta
+  const items = [
+    makeItem('zeta', { scopeName: 'zeta', summary: makeSummary({ acceleration: 5 }) }),
+    makeItem('alpha', { scopeName: 'alpha', summary: makeSummary({ acceleration: 5 }) }),
+    makeItem('mike', { summary: makeSummary({ acceleration: 5 }), scopeName: null }),
+    makeItem('abel', { summary: makeSummary({ acceleration: 5 }), scopeName: null }),
+  ]
+  const sorted = sortScopes(items, 'acceleration_desc').map((i) => i.scopeKey)
+  assert.deepEqual(sorted, ['abel', 'alpha', 'mike', 'zeta'], '同值按 (scopeName ?? scopeKey) 字典序')
+})
+
+test('SORT-14. filter → sort（整组）→ paginate：第 2 页顶行对应全局排序位置', () => {
+  // 构造 12 条，q 过滤后 10 条，pageSize=2：第 2 页顶行应为全局第 3 名
+  const items = Array.from({ length: 12 }, (_, i) =>
+    makeItem(`k${i}`, {
+      scopeName: `cat${i}`,
+      summary: makeSummary({ position: i }), // position 0..11
+    }),
+  )
+  const query = buildScopeExplorerQuery('cat', null, null) // 命中全部 12 条
+  const page1 = applyScopeExplorerPipeline(items, query, 1, 2, 'position_desc')
+  const page2 = applyScopeExplorerPipeline(items, query, 2, 2, 'position_desc')
+  assert.equal(page1.total, 12, 'total = 过滤后数量')
+  assert.equal(page1.items[0].scopeKey, 'k11', '第 1 页顶行 = 全局最大 position')
+  assert.equal(page1.items[1].scopeKey, 'k10')
+  assert.equal(page2.items[0].scopeKey, 'k9', '第 2 页顶行 = 全局第 3（非页内独立排序）')
+  assert.equal(page2.items[1].scopeKey, 'k8')
+})
+
+test('SORT-15. Workspace 把 urlState.sort 同时喂给 Trajectory（filteredSorted）与 Table（paged）同一 pipeline', () => {
+  // 源码契约：Workspace.filteredSorted 与 paged 都使用 urlState.sort 驱动的同一排序 owner
+  const src = read('ScopeExplorerWorkspace.tsx')
+  // filteredSorted 经 sortScopes(... , urlState.sort)
+  assert.match(src, /sortScopes\(filterScopes\(snapshotItems, query\), urlState\.sort\)/, 'Trajectory 源必须用 urlState.sort')
+  // paged 经 applyScopeExplorerPipeline(..., urlState.sort) 同一 sort 参数
+  assert.match(src, /applyScopeExplorerPipeline\(snapshotItems, query, urlState\.page, urlState\.pageSize, urlState\.sort\)/, 'Table 源必须用同一 urlState.sort')
+  // 不得再出现 sortVelocityDesc（单一排序 owner）
+  assert.doesNotMatch(src, /sortVelocityDesc/, 'Workspace 不得保留旧 sortVelocityDesc 调用')
+  // Toolbar 接收 sort 并经 onFilterChange({ sort }) 上报
+  assert.match(src, /sort=\{urlState\.sort\}/, 'Toolbar 必须接收 urlState.sort')
+  const tb = read('ScopeExplorerToolbar.tsx')
+  assert.match(tb, /onFilterChange\(\{ sort: e\.target\.value as ReviewSort \}\)/, 'Toolbar 必须上报 onFilterChange({ sort })')
+  // 几何坐标不被 sort 改变：x=position / y=velocity
+  const traj = read('ScopeTrajectoryView.tsx')
+  assert.match(traj, /\(pos \/ 100\)/, 'Trajectory x 仍由 position 决定')
+  assert.match(traj, /velocity/, 'Trajectory y 仍由 velocity 决定')
 })

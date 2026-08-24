@@ -1,7 +1,7 @@
 // [ScopeExplorerWorkspace] - 描述: canonical Scope Explorer 工作区（Slice D + Slice E）
 // 布局：工具栏 + （Table | Trajectory）主区 + 右侧 Canonical Scope Detail 工作区。
 // 数据流：paginated backend transport → 完整 family snapshot →
-//         ViewModel（q → phase → readiness → velocity_desc → UI 分页）；
+//         ViewModel（q → phase → readiness → 选定 sort 降序 → UI 分页）；
 //         已选 Scope → 唯一 detail owner（useReviewScopeDetail）驱动右侧详情。
 // ScopeExplorerTable / ScopeTrajectoryView / family snapshot 绝不在本 slice 请求 detail（无 N+1）。
 import { useMemo } from 'react'
@@ -14,7 +14,7 @@ import {
   buildScopeExplorerQuery,
   findScopeById,
   filterScopes,
-  sortVelocityDesc,
+  sortScopes,
   computeEffectivePage,
 } from './scopeExplorerViewModel'
 import ScopeExplorerToolbar from './ScopeExplorerToolbar'
@@ -65,13 +65,13 @@ export default function ScopeExplorerWorkspace({
   const filteredTotal = useMemo(() => filterScopes(snapshotItems, query).length, [snapshotItems, query])
 
   const filteredSorted = useMemo(
-    () => sortVelocityDesc(filterScopes(snapshotItems, query)),
-    [snapshotItems, query],
+    () => sortScopes(filterScopes(snapshotItems, query), urlState.sort),
+    [snapshotItems, query, urlState.sort],
   )
 
   const paged = useMemo(
-    () => applyScopeExplorerPipeline(snapshotItems, query, urlState.page, urlState.pageSize),
-    [snapshotItems, query, urlState.page, urlState.pageSize],
+    () => applyScopeExplorerPipeline(snapshotItems, query, urlState.page, urlState.pageSize, urlState.sort),
+    [snapshotItems, query, urlState.page, urlState.pageSize, urlState.sort],
   )
 
   // 有效页码：URL 可能越界（?page=999），渲染与交互必须用同一钳制页
@@ -116,6 +116,7 @@ export default function ScopeExplorerWorkspace({
         q={urlState.q}
         phase={urlState.phase}
         readiness={urlState.readiness}
+        sort={urlState.sort}
         onFamilyChange={onFamilyChange}
         onViewChange={onViewChange}
         onFilterChange={onFilterChange}

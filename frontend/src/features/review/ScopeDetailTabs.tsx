@@ -1,7 +1,7 @@
 // [ScopeDetailTabs] - 描述: Canonical Scope Detail 五个精确子 Tab（Slice E）
 //
 // 合同（prompt §2、§15）：
-// - 恰好五个 tab：dynamics / internal / leadership / attribution / facts。
+// - 六个 tab：dynamics / current / internal / leadership / attribution / facts（current 为 R1 新增合法 tab）。
 // - tab 状态只来自 canonical URL（SSOT），组件无本地副本。
 // - 点击 tab 只 patch `tab`，preserve date/family/scopeKey/view/phase/readiness/sort/page/pageSize/q。
 // - brand green 仅用于当前激活 tab（focus/focus）。

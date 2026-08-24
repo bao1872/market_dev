@@ -14,6 +14,9 @@
 //     &page=1
 //     &pageSize=50
 //     &q=有色
+// 排序词表（R2A，仅降序；升序变体不在 R2A 范围）：
+//   velocity_desc | acceleration_desc | position_desc |
+//   equal_weight_return_desc | capital_tilt_desc | migration_desc | coverage_desc
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行。
 // 旧 Legacy URL 合同（stage/signalId/discoveryId/trackingTab 等）已于 Slice F 物理删除。
 
@@ -33,8 +36,15 @@ export type ReviewDetailTab =
   | 'attribution'
   | 'facts'
 
-/** 排序词表：至少 velocity_desc 为默认；仅含当前 PRD 已要求的取值 */
-export type ReviewSort = 'velocity_desc'
+/** 排序词表：默认 velocity_desc；R2A 仅含降序变体（升序不在 R2A 范围） */
+export type ReviewSort =
+  | 'velocity_desc'
+  | 'acceleration_desc'
+  | 'position_desc'
+  | 'equal_weight_return_desc'
+  | 'capital_tilt_desc'
+  | 'migration_desc'
+  | 'coverage_desc'
 
 export interface ReviewUrlState {
   /** 交易日（YYYY-MM-DD） */
@@ -90,7 +100,15 @@ const TAB_VALUES: ReadonlySet<string> = new Set([
   'facts',
 ])
 
-const SORT_VALUES: ReadonlySet<string> = new Set(['velocity_desc'])
+const SORT_VALUES: ReadonlySet<string> = new Set([
+  'velocity_desc',
+  'acceleration_desc',
+  'position_desc',
+  'equal_weight_return_desc',
+  'capital_tilt_desc',
+  'migration_desc',
+  'coverage_desc',
+])
 
 const PHASE_VALUES: ReadonlySet<string> = new Set([
   'Early Lift',

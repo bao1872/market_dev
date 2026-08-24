@@ -1,9 +1,9 @@
-// [ScopeExplorerToolbar] - 描述: Scope Explorer 顶部工具栏（Slice D）
+// [ScopeExplorerToolbar] - 描述: Scope Explorer 顶部工具栏（Slice D + R2A）
 // 仅展示已激活 canonical family（industry_l1/l2/l3/concept）；
 // 不暴露 market/major_index/style；无“全部类型”模式。
-// q / phase / readiness 为展示过滤（作用于完整 family snapshot 的 ViewModel）。
+// q / phase / readiness / sort 均为展示层状态（sort 为 R2A 新增的单一排序 owner）。
 import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness } from './types'
-import type { ReviewExplorerView, ReviewUrlState } from './urlState'
+import type { ReviewExplorerView, ReviewUrlState, ReviewSort } from './urlState'
 import styles from './review.module.scss'
 
 const FAMILY_OPTIONS: ReadonlyArray<{ value: ReviewScopeFamily; label: string }> = [
@@ -28,12 +28,24 @@ const READINESS_OPTIONS: ReadonlyArray<ReviewCompositionReadiness> = [
   'unavailable_current',
 ]
 
+// R2A：排序枚举 → 用户可见标签（降序，仅展示最强/最高 persisted 事实，不做机会标签）
+const SORT_OPTIONS: ReadonlyArray<{ value: ReviewSort; label: string }> = [
+  { value: 'velocity_desc', label: 'Velocity ↓' },
+  { value: 'acceleration_desc', label: 'Acceleration ↓' },
+  { value: 'position_desc', label: 'Position ↓' },
+  { value: 'equal_weight_return_desc', label: 'EW Return ↓' },
+  { value: 'capital_tilt_desc', label: 'Capital Tilt ↓' },
+  { value: 'migration_desc', label: 'Leadership Migration ↓' },
+  { value: 'coverage_desc', label: 'Coverage ↓' },
+]
+
 export interface ScopeExplorerToolbarProps {
   family: ReviewScopeFamily
   view: ReviewExplorerView
   q: string
   phase: ReviewDynamicsPhase | null
   readiness: ReviewCompositionReadiness | null
+  sort: ReviewSort
   onFamilyChange: (family: ReviewScopeFamily) => void
   onViewChange: (view: ReviewExplorerView) => void
   onFilterChange: (patch: Partial<ReviewUrlState>) => void
@@ -45,6 +57,7 @@ export default function ScopeExplorerToolbar({
   q,
   phase,
   readiness,
+  sort,
   onFamilyChange,
   onViewChange,
   onFilterChange,
@@ -103,9 +116,18 @@ export default function ScopeExplorerToolbar({
             </option>
           ))}
         </select>
-        <span className={styles.sortLabel} title="当前仅支持 velocity_desc">
-          排序: velocity_desc
-        </span>
+        <select
+          className={styles.select}
+          value={sort}
+          onChange={(e) => onFilterChange({ sort: e.target.value as ReviewSort })}
+          aria-label="排序字段"
+        >
+          {SORT_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </select>
         <div className={styles.viewSwitch} role="group" aria-label="视图切换">
           <button
             type="button"

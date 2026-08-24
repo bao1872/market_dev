@@ -1,13 +1,14 @@
-// [ScopeExplorerViewModel] - 描述: canonical Scope Explorer 展示层纯函数（Slice D）
+// [ScopeExplorerViewModel] - 描述: canonical Scope Explorer 展示层纯函数（Slice D + R2A）
 // 只做 presentation-only 操作，绝不重算业务指标：
 //   complete family snapshot → q 过滤 → phase 过滤 → readiness 过滤 →
-//   velocity_desc 排序 → UI 分页
+//   选定 sort 降序排序（null 恒最后）→ UI 分页
 // 纯 TS，无 React/SCSS 依赖，可被 node --test 直接运行。
 import type {
   ReviewScopeListItem,
   ReviewDynamicsPhase,
   ReviewCompositionReadiness,
 } from './types'
+import type { ReviewSort } from './urlState'
 
 export interface ScopeExplorerQuery {
   q: string
@@ -30,17 +31,41 @@ export function buildScopeExplorerQuery(
   return { q, phase, readiness }
 }
 
-/** 数值 null 恒排最后；仅对有限数值参与排序 */
+/** 数值 null 恒排最后；仅对有限数值参与排序；NaN 视为 null（非数字不在有限集合内） */
 function finiteOrNull(v: number | null | undefined): number | null {
   return v !== null && v !== undefined && Number.isFinite(v) ? v : null
 }
 
-/** 确定性 tie-break：scopeName ?? scopeKey，再 scopeKey */
+/** 确定性 tie-break：scopeName ?? scopeKey，再 scopeKey（所有 sort 模式共用） */
 function tieBreak(a: ReviewScopeListItem, b: ReviewScopeListItem): number {
   const na = a.scopeName ?? a.scopeKey
   const nb = b.scopeName ?? b.scopeKey
   if (na !== nb) return na.localeCompare(nb)
   return a.scopeKey.localeCompare(b.scopeKey)
+}
+
+/** 取某 sort 对应的排序数值（persisted 字段直接读取，绝不重算）：
+ *  velocity/acceleration/position/equalWeightReturn/capitalTilt/migration 来自 summary，
+ *  coverage 来自行级 coverageRatio。 */
+function sortValueFor(item: ReviewScopeListItem, sort: ReviewSort): number | null {
+  switch (sort) {
+    case 'velocity_desc':
+      return finiteOrNull(item.summary?.velocity)
+    case 'acceleration_desc':
+      return finiteOrNull(item.summary?.acceleration)
+    case 'position_desc':
+      return finiteOrNull(item.summary?.position)
+    case 'equal_weight_return_desc':
+      return finiteOrNull(item.summary?.equalWeightReturn)
+    case 'capital_tilt_desc':
+      return finiteOrNull(item.summary?.capitalTilt)
+    case 'migration_desc':
+      return finiteOrNull(item.summary?.migration)
+    case 'coverage_desc':
+      return finiteOrNull(item.coverageRatio)
+    default:
+      return finiteOrNull(item.summary?.velocity)
+  }
 }
 
 /**
@@ -65,11 +90,15 @@ export function filterScopes(
   })
 }
 
-/** velocity_desc：数值 null 恒排最后，descending finite velocity，确定性 tie-break */
-export function sortVelocityDesc(items: ReviewScopeListItem[]): ReviewScopeListItem[] {
+/** 通用排序 owner：所有降序 sort 模式共用，数值 null 恒最后，确定性 tie-break。
+ * 不进入 React 组件；不改 chart 几何（x=position/y=velocity 由 Trajectory 决定）。 */
+export function sortScopes(
+  items: ReviewScopeListItem[],
+  sort: ReviewSort,
+): ReviewScopeListItem[] {
   return [...items].sort((a, b) => {
-    const va = finiteOrNull(a.summary?.velocity)
-    const vb = finiteOrNull(b.summary?.velocity)
+    const va = sortValueFor(a, sort)
+    const vb = sortValueFor(b, sort)
     if (va === null && vb === null) return tieBreak(a, b)
     if (va === null) return 1
     if (vb === null) return -1
@@ -77,6 +106,11 @@ export function sortVelocityDesc(items: ReviewScopeListItem[]): ReviewScopeListI
     return tieBreak(a, b)
   })
 }
+
+/** 兼容别名：velocity_desc 仍是默认排序 */
+export const sortVelocityDesc = (
+  items: ReviewScopeListItem[],
+): ReviewScopeListItem[] => sortScopes(items, 'velocity_desc')
 
 /** UI 分页：作用于过滤+排序后的完整列表 */
 export function paginateScopes(
@@ -98,15 +132,18 @@ export function computeEffectivePage(rawPage: number, pageCount: number): number
   return Math.min(Math.max(1, rawPage), Math.max(1, pageCount))
 }
 
-/** 完整流水线：filter → sort → paginate（供 Workspace 单次调用） */
+/** 完整流水线：filter → 选定 sort 降序排序 → paginate（供 Workspace 单次调用）。
+ * 排序在分页之前，且整组 filtered 一起排序（绝不按页独立排序）。
+ * Trajectory 与 Table 共用同一 sort，但不改 chart 几何（x=position/y=velocity）。 */
 export function applyScopeExplorerPipeline(
   snapshot: ReviewScopeListItem[],
   query: ScopeExplorerQuery,
   page: number,
   pageSize: number,
+  sort: ReviewSort = 'velocity_desc',
 ): PaginatedScopes {
   const filtered = filterScopes(snapshot, query)
-  const sorted = sortVelocityDesc(filtered)
+  const sorted = sortScopes(filtered, sort)
   return paginateScopes(sorted, page, pageSize)
 }
 
