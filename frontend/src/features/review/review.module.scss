@@ -2105,3 +2105,232 @@
   display: none;
 }
 
+// ============================================================
+// [R3C] Price & Capital (G1)
+// ============================================================
+.pcRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.pcRow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 10px;
+}
+.pcMetric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.pcMetricLabel {
+  font-size: 0.74rem;
+  color: v.$color-text-dim;
+}
+.pcMetricValue {
+  font-size: 1.05rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pcNote {
+  font-size: 0.74rem;
+  color: v.$color-muted;
+  font-style: italic;
+}
+.pcConcentrationRow {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+}
+.pcHhiBlock {
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  padding: 8px 10px;
+}
+.pcHhiTitle {
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: v.$color-text;
+}
+.pcHhiGrid {
+  display: flex;
+  gap: 14px;
+}
+.pcHhiKey {
+  display: block;
+  font-size: 0.7rem;
+  color: v.$color-text-dim;
+}
+.pcHhiValue {
+  font-size: 0.92rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.pcHhiStatus {
+  margin-top: 6px;
+  font-size: 0.72rem;
+  color: v.$color-muted;
+  font-style: italic;
+}
+
+// ============================================================
+// [R3C] Trend (G2/G3/G4)
+// ============================================================
+.trendRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.trendSection {
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+.trendSectionTitle {
+  font-size: 0.82rem;
+  font-weight: 600;
+  margin-bottom: 8px;
+  color: v.$color-text;
+}
+.trendUnavailable {
+  font-size: 0.78rem;
+  color: v.$color-muted;
+  font-style: italic;
+}
+.trendDirGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.trendDirCell {
+  display: grid;
+  grid-template-columns: 120px 1fr 40px;
+  align-items: center;
+  gap: 8px;
+}
+.trendDirHead {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.78rem;
+}
+.trendDirLabel {
+  color: v.$color-text-dim;
+}
+.trendDirPct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.trendDirTrack {
+  height: 8px;
+  background: v.$color-border-soft;
+  border-radius: 4px;
+  overflow: hidden;
+}
+.trendDirFill {
+  height: 100%;
+  border-radius: 4px;
+}
+.trendDirFill.up {
+  background: v.$color-up;
+}
+.trendDirFill.down {
+  background: v.$color-down;
+}
+.trendDirFill.neutral {
+  background: v.$color-muted;
+}
+.trendDirCount {
+  font-size: 0.74rem;
+  color: v.$color-text-dim;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.trendDenominator {
+  margin-top: 4px;
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  font-variant-numeric: tabular-nums;
+}
+.trendStateRow {
+  display: flex;
+  gap: 18px;
+  margin-top: 10px;
+}
+.trendProgressGrid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+}
+.trendAnalytic {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.trendAnalyticLabel {
+  font-size: 0.74rem;
+  color: v.$color-text-dim;
+}
+.trendAnalyticValue {
+  font-size: 1rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.trendVolumeRatioRow {
+  display: flex;
+  gap: 18px;
+  margin-bottom: 10px;
+}
+.trendMvrBlock {
+  border-top: 1px dashed v.$color-border;
+  padding-top: 8px;
+}
+.trendMvrTitle {
+  font-size: 0.78rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+  color: v.$color-text;
+}
+.trendMvrList {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.trendMvrRow {
+  display: grid;
+  grid-template-columns: 1fr 48px 40px;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.78rem;
+}
+.trendMvrCat {
+  color: v.$color-text;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.trendMvrPct {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+.trendMvrCount {
+  color: v.$color-text-dim;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+// direction tone classes (A-share: up=red, down=green)
+.up {
+  color: v.$color-up;
+}
+.down {
+  color: v.$color-down;
+}
+.neutral {
+  color: v.$color-text;
+}
+

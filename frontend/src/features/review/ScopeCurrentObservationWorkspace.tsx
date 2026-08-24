@@ -1,16 +1,21 @@
-// [ScopeCurrentObservationWorkspace] - 描述: Current Observation Workspace 主 owner（R3B）
+// [ScopeCurrentObservationWorkspace] - 描述: Current Observation Workspace 主 owner（R3B + R3C）
 //
 // R3B 核心：Current 从此由 Canonical Observation 拥有：
 //   detail.data.observationGroups (L2) + detail.data.observation (L1 Observation Context)
 // 不再由混合 ScopeCurrentSnapshot（Composition + Observation + list identity）拥有。
 //
-// 硬契约（R3B §3/§6/§10/§13/§15/§18/§20）：
+// R3C：G1–G4 使用正式、真实 Current Observation UX（price_capital / trend_state /
+// trend_progress / trend_volume_confirmation）；G5–G8 仍保留 R3B shell。
+//
+// 硬契约（R3B §3/§6/§10/§13/§15/§18/§20；R3C §1/§11/§19）：
 // - 单一 owner：只接收已加载的 observationGroups / observation，绝不 fetch。
 // - 无第二请求：复用上层 useReviewScopeDetail（ONE query invariant）。
 // - 无 useState sub-tab / 无新 URL state / 无新 query 参数（anchor scroll 仅 presentational）。
 // - 不渲染 Analysis：Position / Velocity / Acceleration / Capital Tilt / Migration 不属于 Current。
 // - composition = null 不阻断 Current 渲染（Fact-only detail）。
-// - 不创建 generic fact-kind detector；group body 仅展示 shell（R3C-R3E 才做正式 grammar）。
+// - G1–G4 前端只承载、不重算；方向色仅限 signed directional facts（见 R3C §8）。
+// - 不创建 generic fact-kind detector；G5–G8 仍走 R3B shell。
+import { type FC, useMemo } from 'react'
 import { anchorScroll } from './reviewAnchorScroll'
 import {
   buildObservationWorkspaceModel,
@@ -18,6 +23,17 @@ import {
   ObservationGroupContractError,
 } from './scopeObservationWorkspaceContract'
 import type { ObservationGroup, ObservationGroups } from './types'
+import {
+  parsePriceCapital,
+  buildPriceCapitalVM,
+  parseTrendState,
+  buildTrendStateVM,
+  parseTrendProgress,
+  buildTrendProgressVM,
+  parseTrendVolumeConfirmation,
+} from './scopePriceTrendContract'
+import ScopePriceCapitalObservation from './ScopePriceCapitalObservation'
+import ScopeTrendObservation from './ScopeTrendObservation'
 import styles from './review.module.scss'
 
 function GroupShell({ group }: { group: ObservationGroup }) {
@@ -45,6 +61,58 @@ function GroupShell({ group }: { group: ObservationGroup }) {
     </section>
   )
 }
+
+// ---- R3C formal renderers (G1–G4) -----------------------------------------
+
+function PriceCapitalBlock({ facts, observation }: { facts: Record<string, unknown>; observation: Record<string, unknown> | null }) {
+  const vm = useMemo(
+    () => buildPriceCapitalVM(parsePriceCapital(facts, observation ?? undefined)),
+    [facts, observation],
+  )
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopePriceCapitalObservation vm={vm} />
+}
+
+function TrendStateBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => buildTrendStateVM(parseTrendState(facts)), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeTrendObservation state={vm} />
+}
+
+function TrendProgressBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => buildTrendProgressVM(parseTrendProgress(facts)), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeTrendObservation progress={vm} />
+}
+
+function TrendVolumeBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => parseTrendVolumeConfirmation(facts), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeTrendObservation volume={vm} />
+}
+
+const FORMAL_RENDERERS: Record<string, FC<{ facts: Record<string, unknown>; observation: Record<string, unknown> | null }>> = {
+  price_capital: PriceCapitalBlock,
+  trend_state: TrendStateBlock,
+  trend_progress: TrendProgressBlock,
+  trend_volume_confirmation: TrendVolumeBlock,
+}
+
+function GroupBody({
+  group,
+  observation,
+}: {
+  group: ObservationGroup
+  observation: Record<string, unknown> | null
+}) {
+  const Renderer = FORMAL_RENDERERS[group.group_key]
+  if (Renderer) {
+    return <Renderer facts={group.facts ?? {}} observation={observation} />
+  }
+  return <GroupShell group={group} />
+}
+
+// ---- Anchor nav ------------------------------------------------------------
 
 function AnchorNav({
   areaKeys,
@@ -90,6 +158,7 @@ export default function ScopeCurrentObservationWorkspace({
     throw err
   }
 
+  const obsRecord = observation && typeof observation === 'object' ? (observation as Record<string, unknown>) : null
   const ctx = extractObservationContext(observation)
   const areaKeys = model.areas.map((a) => a.area.areaKey)
   const areaTitles = model.areas.map((a) => a.area.areaTitle)
@@ -112,7 +181,13 @@ export default function ScopeCurrentObservationWorkspace({
           <section key={area.areaKey} id={`obs-area-${area.areaKey}`} className={styles.observationArea}>
             <h3 className={styles.observationAreaTitle}>{area.areaTitle}</h3>
             {groups.map((g) => (
-              <GroupShell key={g.group_key} group={g} />
+              <div key={g.group_key} id={`obs-group-${g.group_key}`} className={styles.observationGroup}>
+                <header className={styles.observationGroupHeader}>
+                  <h4 className={styles.observationGroupTitle}>{g.label}</h4>
+                  <code className={styles.observationGroupKey}>{g.group_key}</code>
+                </header>
+                <GroupBody group={g} observation={obsRecord} />
+              </div>
             ))}
           </section>
         )
