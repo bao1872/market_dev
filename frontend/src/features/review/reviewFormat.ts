@@ -66,3 +66,39 @@ export function formatContributionFraction(
   const pct = (num / den) * 100
   return `${num.toFixed(1)} / ${den.toFixed(1)}  (${pct.toFixed(1)}%)`
 }
+
+/** 无量纲倍数（1.50 → "1.50×"）。绝不 x100。 */
+export function formatMultipleNullable(
+  value: number | null | undefined,
+  digits = 2,
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
+  return `${value.toFixed(digits)}×`
+}
+
+/** 无量纲原始标量（BB position 1.12 / -0.15，BB width 0.0832）：原值展示，绝不 clamp / 绝不 x100 / 无单位后缀。 */
+export function formatRawDimensionlessNullable(
+  value: number | null | undefined,
+  digits = 4,
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
+  return value.toFixed(digits)
+}
+
+/** 历史百分位原值展示（72.5 → "72.5"）；绝不 x100（非 "7250%" 亦非 "72.5%"）。 */
+export function formatPercentileNullable(
+  value: number | null | undefined,
+  digits = 1,
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
+  return value.toFixed(digits)
+}
+
+/** Z-score 原始展示（1.35 / -1.35）；无 "%"，无方向配色。 */
+export function formatZScoreNullable(
+  value: number | null | undefined,
+  digits = 2,
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
+  return value.toFixed(digits)
+}

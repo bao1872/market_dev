@@ -43,6 +43,9 @@ import {
 import ScopePriceCapitalObservation from './ScopePriceCapitalObservation'
 import ScopeTrendObservation from './ScopeTrendObservation'
 import ScopeStructureObservation from './ScopeStructureObservation'
+import ScopeMomentumObservation from './ScopeMomentumObservation'
+import ScopeVolumeObservation from './ScopeVolumeObservation'
+import { parseMomentumObservation, parseVolumeObservation } from './scopeMomentumVolumeContract'
 import styles from './review.module.scss'
 
 function GroupShell({ group }: { group: ObservationGroup }) {
@@ -114,6 +117,21 @@ function StructureEvolutionBlock({ facts }: { facts: Record<string, unknown> }) 
   return <ScopeStructureObservation evolution={vm} />
 }
 
+// ---- R3E formal renderers (G7–G8) -----------------------------------------
+// L2 group keys: momentum (momentum_squeeze_release) / participation (volume_anomaly).
+
+function MomentumBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => parseMomentumObservation(facts['momentum_squeeze_release']), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeMomentumObservation vm={vm} />
+}
+
+function VolumeBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => parseVolumeObservation(facts['volume_anomaly']), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeVolumeObservation vm={vm} />
+}
+
 const FORMAL_RENDERERS: Record<string, FC<{ facts: Record<string, unknown>; observation: Record<string, unknown> | null }>> = {
   price_capital: PriceCapitalBlock,
   trend_state: TrendStateBlock,
@@ -121,6 +139,8 @@ const FORMAL_RENDERERS: Record<string, FC<{ facts: Record<string, unknown>; obse
   trend_volume_confirmation: TrendVolumeBlock,
   structure_break_turn: StructureBreakTurnBlock,
   structure_evolution_position: StructureEvolutionBlock,
+  momentum: MomentumBlock,
+  participation: VolumeBlock,
 }
 
 function GroupBody({

@@ -2466,3 +2466,136 @@
   color: #d9a441;
 }
 
+// ---- R3E: Momentum (G7) + Volume (G8) formal Observation --------------
+.mvRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.mvSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.mvSectionTitle {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: v.$color-text;
+  border-left: 3px solid v.$color-border-soft;
+  padding-left: 8px;
+}
+.mvBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mvBlockTitle {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: v.$color-text;
+}
+.mvMetricRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  align-items: baseline;
+}
+.mvMetric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.mvMetricLabel {
+  font-size: 0.7rem;
+  color: v.$color-text-dim;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.mvMetricValue {
+  font-size: 0.88rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: v.$color-text;
+}
+.mvMetricSub {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.76rem;
+  color: v.$color-text-dim;
+}
+.mvDenominator {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  font-variant-numeric: tabular-nums;
+}
+.mvNeutral,
+.mvUnavailable {
+  font-size: 0.8rem;
+  color: v.$color-text-dim;
+  padding: 8px 10px;
+  border: 1px dashed v.$color-border-soft;
+  border-radius: 6px;
+}
+.mvNote {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  font-style: italic;
+}
+.mvSqueezeGrid {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mvSqueezeRow {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.mvSqueezeCat {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: v.$color-text;
+  min-width: 120px;
+}
+.mvSqueezeRatio {
+  font-size: 0.82rem;
+  color: v.$color-text;
+}
+.mvSqueezeCount {
+  font-size: 0.76rem;
+  color: v.$color-text-dim;
+}
+.mvMatrix {
+  display: grid;
+  grid-template-columns: 120px 1fr 1fr;
+  gap: 8px 16px;
+  align-items: baseline;
+}
+.mvMatrixHead {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: v.$color-text;
+  padding-bottom: 4px;
+  border-bottom: 1px solid v.$color-border-soft;
+}
+.mvMatrixRowLabel {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: v.$color-text;
+}
+.mvMatrixCell {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  font-variant-numeric: tabular-nums;
+}
+.mvMatrixPrimary {
+  font-size: 0.84rem;
+  font-weight: 600;
+  color: v.$color-text;
+}
+.mvMatrixSub {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+}
+
