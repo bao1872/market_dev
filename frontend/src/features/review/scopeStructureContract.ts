@@ -40,13 +40,6 @@ function isFiniteNonNegInt(v: unknown): v is number {
 
 // Canonical event outer status must be exactly "ready" or "unavailable".
 // Anything else (missing/unknown) is contract invalidity -> fail closed.
-type EventStatus = 'ready' | 'unavailable' | 'invalid'
-
-function normalizeEventStatus(v: unknown): EventStatus {
-  if (v === 'ready') return 'ready'
-  if (v === 'unavailable') return 'unavailable'
-  return 'invalid'
-}
 
 // ---------------------------------------------------------------------------
 // Direction tone (A-share: up=red, down=green; verbatim display token)
@@ -167,19 +160,64 @@ const G6_LEVELED_TYPES = new Set(['OB_CREATED', 'OB_ENTERED', 'OB_MITIGATED'])
 const G6_EXTREME_TYPES = new Set(['EQH', 'EQL'])
 
 // ---------------------------------------------------------------------------
-// Strict outer bundle validation (R3D-V2 P0-1..P0-7)
+// Strict outer bundle validation (R3D FINAL CLOSURE)
+//
+// RAW-BEFORE-NORMALIZATION: the canonical external contract is validated on the
+// RAW field values BEFORE any normalization.  Invalid raw values are NEVER
+// coerced into a normalized value and then re-validated (which would launder
+// malformed input into a legal state).  See P0 in the task contract.
 // ---------------------------------------------------------------------------
+
+// Plain record topology: non-null object that is NOT an array.
+function isPlainRecord(v: unknown): v is Record<string, unknown> {
+  return typeof v === 'object' && v !== null && !Array.isArray(v)
+}
+
+// RAW exact-status check.  No normalization: the field must be exactly one of
+// the two canonical tokens.  Anything else (missing/unknown) is invalid.
+function rawExactStatus(v: unknown): 'ready' | 'unavailable' | 'invalid' {
+  if (v === 'ready') return 'ready'
+  if (v === 'unavailable') return 'unavailable'
+  return 'invalid'
+}
+
+// RAW exact-unavailable denominator check.  Canonical unavailable requires the
+// denominator field to exist AND hold EXACTLY `null`.  The following are NOT
+// canonical null and must NOT be laundered into null via "unparseable -> null":
+//   missing / undefined / "40" / "abc" / {} / [] / NaN / Infinity / 0 / 40
+function rawExactUnavailableDenominator(raw: Record<string, unknown>): boolean {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'denominator')) return false
+  return raw['denominator'] === null
+}
+
+// RAW exact-ready denominator check.  Must be a finite integer > 0.  Strings
+// ("40") must NOT be normalized to 40.  Rejects 0 / -1 / 1.5 / NaN / Infinity /
+// null / missing.
+function rawExactReadyDenominator(raw: Record<string, unknown>): number | null {
+  if (!Object.prototype.hasOwnProperty.call(raw, 'denominator')) return null
+  const v = raw['denominator']
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  if (!Number.isInteger(v) || v <= 0) return null
+  return v
+}
 
 interface RawBundle {
   raw: Record<string, unknown>
-  status: EventStatus
-  denominator: number | null
+  status: 'ready' | 'unavailable' | 'invalid'
+  /** raw exact-unavailable denominator present? (status must be unavailable) */
+  hasExactNullDenominator: boolean
+  /** raw exact-ready denominator value (null if not a valid ready denom) */
+  readyDenominator: number | null
   cells: Record<string, unknown> | null
-  leveled: Record<string, unknown>
-  extreme: Record<string, unknown>
+  leveled: Record<string, unknown> | null
+  extreme: Record<string, unknown> | null
 }
 
-// Extracts the canonical outer bundle shape WITHOUT defaulting missing maps to {}.
+// Extracts the canonical outer bundle shape WITHOUT defaulting missing maps to
+// {}.  Returns null only for topology failures that make the whole bundle
+// unparseable (non-object raw / missing cells / missing leveled / missing
+// extreme / leveled-or-extreme-as-array).  Status and denominator are surfaced
+// as RAW exactness checks, not normalized values.
 // `allowExtreme`: G5 must reject any non-empty extreme; G6 permits EQH/EQL.
 function extractEventBundle(
   raw: unknown,
@@ -187,24 +225,29 @@ function extractEventBundle(
 ): RawBundle | null {
   if (raw === null || typeof raw !== 'object') return null
   const o = raw as Record<string, unknown>
-  const status = normalizeEventStatus(o['status'])
-  const denominator = isFiniteNumber(o['denominator']) ? (o['denominator'] as number) : null
+
   const cells = o['cells']
-  const cellsObj = cells && typeof cells === 'object' ? (cells as Record<string, unknown>) : null
-  const leveled = cellsObj && (cellsObj['leveled'] && typeof cellsObj['leveled'] === 'object')
-    ? (cellsObj['leveled'] as Record<string, unknown>)
-    : null
-  const extreme = cellsObj && (cellsObj['extreme'] && typeof cellsObj['extreme'] === 'object')
-    ? (cellsObj['extreme'] as Record<string, unknown>)
-    : null
+  const cellsObj = isPlainRecord(cells) ? cells : null
+  // Missing / non-record / array cells -> unparseable topology.
+  if (cellsObj === null) return null
 
-  // Missing cells / leveled / extreme topology -> shape invalid (P0-3).
-  if (!cellsObj || leveled === null || extreme === null) return null
+  const leveled = isPlainRecord(cellsObj['leveled']) ? (cellsObj['leveled'] as Record<string, unknown>) : null
+  const extreme = isPlainRecord(cellsObj['extreme']) ? (cellsObj['extreme'] as Record<string, unknown>) : null
+  // Missing / array leveled / extreme -> unparseable topology (P0-3/P0-4).
+  if (leveled === null || extreme === null) return null
 
-  // G5 extreme must be empty (P0-4); any non-empty extreme -> shape invalid.
+  // G5 extreme must be empty (P0-5); any non-empty extreme -> unparseable shape.
   if (!allowExtreme && Object.keys(extreme).length > 0) return null
 
-  return { raw: o, status, denominator, cells: cellsObj, leveled, extreme }
+  return {
+    raw: o,
+    status: rawExactStatus(o['status']),
+    hasExactNullDenominator: rawExactUnavailableDenominator(o),
+    readyDenominator: rawExactReadyDenominator(o),
+    cells: cellsObj,
+    leveled,
+    extreme,
+  }
 }
 
 interface RawLeveledCell {
@@ -280,13 +323,16 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
     }
   }
 
-  const { status, denominator, leveled, extreme } = bundle
+  const { status, hasExactNullDenominator, readyDenominator, leveled: lvl, extreme: ext } = bundle
+  const leveled = lvl as Record<string, unknown>
+  const extreme = ext as Record<string, unknown>
 
-  // UNAVAILABLE strict shape (P0-2): status=unavailable requires
-  // denominator===null AND both maps genuinely empty.
+  // UNAVAILABLE strict shape (P0-2): status=unavailable requires RAW
+  // denominator EXACTLY null AND both maps genuinely empty. Any non-null or
+  // missing raw denominator is NOT canonical null and fails closed.
   if (status === 'unavailable') {
     const strictUnavailable =
-      denominator === null && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
+      hasExactNullDenominator && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
     return {
       groupKey: 'structure_break_turn',
       availability: 'unavailable',
@@ -299,20 +345,21 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
     }
   }
 
-  // READY strict shape (P0-1/P0-3): status=ready, finite int denominator>0.
-  const readyShapeValid = status === 'ready' && Number.isInteger(denominator) && (denominator as number) > 0
-  if (!readyShapeValid) {
+  // READY strict shape (P0-1/P0-3): status=ready, RAW finite int denominator>0.
+  // A string "40" or 0 / -1 / 1.5 / NaN / Infinity / null / missing are invalid.
+  if (status !== 'ready' || readyDenominator === null) {
     return {
       groupKey: 'structure_break_turn',
       availability: 'ready',
       contractInvalid: true,
       zeroEventToday: false,
-      denominator: status === 'ready' ? denominator : null,
+      denominator: null,
       leveled: [],
       hasContractInvalidity: false,
       hasMalformedCell: false,
     }
   }
+  const denominator = readyDenominator
 
   // ready + cells present: parse leveled (only BOS/CHoCH).
   const parsedLeveled: LeveledStructureEventCell[] = []
@@ -328,7 +375,12 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
       hasContractInvalidity = true
       continue
     }
-    if (parsed.malformed) hasMalformedCell = true
+    // A malformed but valid-shape cell (e.g. missing member_ratio) must be
+    // flagged but NOT enter the formal event list (P0-6).
+    if (parsed.malformed) {
+      hasMalformedCell = true
+      continue
+    }
     parsedLeveled.push(parsed)
   }
 
@@ -406,12 +458,16 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
   // Strict outer shape validation (P0-1..P0-3). G6 permits extreme (EQH/EQL).
   const bundle = extractEventBundle(raw, true)
   if (bundle !== null) {
-    const { status, denominator, leveled, extreme } = bundle
+    const { status, hasExactNullDenominator, readyDenominator, leveled: lvl, extreme: ext } = bundle
+    // extractEventBundle only returns non-null when both maps are non-null records.
+    const leveled = lvl as Record<string, unknown>
+    const extreme = ext as Record<string, unknown>
 
-    // UNAVAILABLE strict shape (P0-2): denominator===null AND both maps empty.
+    // UNAVAILABLE strict shape (P0-2): RAW denominator EXACTLY null AND both
+    // maps genuinely empty. Any non-null/missing raw denominator fails closed.
     if (status === 'unavailable') {
       const strictUnavailable =
-        denominator === null && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
+        hasExactNullDenominator && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
       events = {
         availability: 'unavailable',
         contractInvalid: !strictUnavailable,
@@ -422,8 +478,9 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
         hasContractInvalidity: false,
       }
     } else {
-      // READY strict shape (P0-1/P0-3): status=ready, finite int denominator>0.
-      const readyShapeValid = status === 'ready' && Number.isInteger(denominator) && (denominator as number) > 0
+      // READY strict shape (P0-1/P0-3): status=ready, RAW finite int denominator>0.
+      // string "40" / 0 / -1 / 1.5 / NaN / Infinity / null / missing -> invalid.
+      const readyShapeValid = status === 'ready' && readyDenominator !== null
 
       const parsedLeveled: LeveledStructureEventCell[] = []
       const parsedExtreme: ExtremeStructureEventCell[] = []
@@ -438,7 +495,11 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
             hasContractInvalidity = true
             continue
           }
-          if (parsed.malformed) eventsMalformed = true
+          // malformed valid-shape cell: flag but DO NOT enter formal list (P0-6).
+          if (parsed.malformed) {
+            eventsMalformed = true
+            continue
+          }
           parsedLeveled.push(parsed)
         }
         for (const [key, val] of Object.entries(extreme)) {
@@ -462,14 +523,14 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
         }
       }
 
-      // zeroEventToday only when RAW maps genuinely empty AND bundle valid (P0-6).
+      // zeroEventToday only when RAW maps genuinely empty AND bundle valid (P0-6/P0-7).
       const zeroEventToday =
         readyShapeValid && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
 
       events = {
         availability: status === 'ready' ? 'ready' : 'unavailable',
         contractInvalid: !readyShapeValid,
-        denominator: readyShapeValid ? denominator : null,
+        denominator: readyShapeValid ? (readyDenominator as number) : null,
         zeroEventToday,
         leveled: parsedLeveled,
         extreme: parsedExtreme,

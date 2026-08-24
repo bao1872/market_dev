@@ -80,12 +80,14 @@ test('G5 real event states: unavailable / ready-empty / ready-events / ready-den
   assert.equal(withEvents.zeroEventToday, false)
   assert.equal(withEvents.leveled.length, 1)
 
-  // status=ready + denominator=0 is NOT a production state -> fail closed (R3D-V §1/§3)
+  // status=ready + denominator=0 is NOT a production state -> fail closed.
+  // New raw-exactness contract: raw 0 is a real number but not >0, so the
+  // ready denominator is rejected (null) and the bundle is contract-invalid.
   const zeroDenom = parseStructureBreakTurn({
     bos_choch_events: { status: 'ready', denominator: 0, cells: { leveled: {}, extreme: {} } },
   }) as StructureBreakTurnVM
   assert.equal(zeroDenom.contractInvalid, true)
-  assert.equal(zeroDenom.denominator, 0)
+  assert.equal(zeroDenom.denominator, null)
 })
 
 // ----- §2 outer status fail-closed (G5) -----
@@ -200,7 +202,8 @@ test('structure_level Swing/Internal; missing fails closed', () => {
   }) as StructureBreakTurnVM
   assert.equal(internal.leveled[0].structureLevel, 'Internal')
 
-  // missing structure_level -> malformed, fail closed (no default Swing/Internal)
+  // missing structure_level -> malformed valid-shape cell: flagged but EXCLUDED
+  // from the formal event list (no default Swing/Internal; P0-6).
   const missing = parseStructureBreakTurn({
     bos_choch_events: {
       status: 'ready',
@@ -208,8 +211,9 @@ test('structure_level Swing/Internal; missing fails closed', () => {
       cells: { leveled: { c1: { event_type: 'BOS', direction: 'up', event_count: 1, member_count: 1, member_ratio: 0.1 } }, extreme: {} },
     },
   }) as StructureBreakTurnVM
-  assert.equal(missing.leveled[0].structureLevel, null)
-  assert.equal(missing.leveled[0].malformed, true)
+  assert.equal(missing.leveled.length, 0)
+  assert.equal(missing.hasMalformedCell, true)
+  assert.equal(missing.zeroEventToday, false)
 })
 
 // ----- §31 event type validity -----
@@ -535,4 +539,231 @@ test('[V2] G6 ready + denominator=0 = contract invalid', () => {
     ob_and_eq_events: { status: 'ready', denominator: 0, cells: { leveled: {}, extreme: {} } },
   }) as StructureEvolutionPositionVM
   assert.equal(vm.events?.contractInvalid, true)
+})
+
+// ===========================================================================
+// [FINAL CLOSURE] Raw contract validation BEFORE normalization (P0-1..P0-14)
+// ===========================================================================
+
+// ----- P0-11/12: raw denominator exactness — UNAVAILABLE -----
+// Canonical unavailable requires the RAW denominator field to EXIST and hold
+// EXACTLY null.  Missing / "abc" / 0 / 40 etc. must NOT be laundered into null.
+const UNAVAILABLE_DENOM_INVALID: Array<{ name: string; denom: unknown }> = [
+  { name: 'missing', denom: undefined },
+  { name: 'undefined', denom: undefined },
+  { name: 'string-abc', denom: 'abc' },
+  { name: 'number-0', denom: 0 },
+  { name: 'number-40', denom: 40 },
+]
+
+for (const { name, denom } of UNAVAILABLE_DENOM_INVALID) {
+  test(`[FINAL] G5 unavailable + invalid denom "${name}" = contract invalid (not null-laundered)`, () => {
+    const raw: Record<string, unknown> = { status: 'unavailable', cells: { leveled: {}, extreme: {} } }
+    if (denom !== undefined) raw['denominator'] = denom
+    const vm = parseStructureBreakTurn(raw) as StructureBreakTurnVM
+    assert.equal(vm.contractInvalid, true)
+    assert.equal(vm.denominator, null)
+    assert.equal(vm.availability, 'unavailable')
+  })
+  test(`[FINAL] G6 unavailable + invalid denom "${name}" = contract invalid (not null-laundered)`, () => {
+    const raw: Record<string, unknown> = { status: 'unavailable', cells: { leveled: {}, extreme: {} } }
+    if (denom !== undefined) raw['denominator'] = denom
+    const vm = parseStructureEvolutionPosition(raw) as StructureEvolutionPositionVM
+    assert.equal(vm.events?.contractInvalid, true)
+    assert.equal(vm.events?.availability, 'unavailable')
+    assert.equal(vm.events?.denominator, null)
+  })
+}
+
+test('[FINAL] G5/G6 unavailable + RAW denom EXACTLY null = valid', () => {
+  const g5 = parseStructureBreakTurn({
+    bos_choch_events: { status: 'unavailable', denominator: null, cells: { leveled: {}, extreme: {} } },
+  }) as StructureBreakTurnVM
+  assert.equal(g5.contractInvalid, false)
+  assert.equal(g5.denominator, null)
+
+  const g6 = parseStructureEvolutionPosition({
+    ob_and_eq_events: { status: 'unavailable', denominator: null, cells: { leveled: {}, extreme: {} } },
+  }) as StructureEvolutionPositionVM
+  assert.equal(g6.events?.contractInvalid, false)
+  assert.equal(g6.events?.denominator, null)
+})
+
+// ----- P0-12: raw denominator exactness — READY -----
+const READY_DENOM_INVALID: Array<{ name: string; denom: unknown }> = [
+  { name: 'string-40', denom: '40' },
+  { name: 'number-0', denom: 0 },
+  { name: 'number-neg', denom: -1 },
+  { name: 'number-1.5', denom: 1.5 },
+  { name: 'null', denom: null },
+  { name: 'missing', denom: undefined },
+  { name: 'NaN', denom: NaN },
+  { name: 'Infinity', denom: Infinity },
+]
+
+for (const { name, denom } of READY_DENOM_INVALID) {
+  test(`[FINAL] G5 ready + invalid denom "${name}" = contract invalid`, () => {
+    const raw: Record<string, unknown> = { status: 'ready', cells: { leveled: {}, extreme: {} } }
+    if (denom !== undefined) raw['denominator'] = denom
+    const vm = parseStructureBreakTurn(raw) as StructureBreakTurnVM
+    assert.equal(vm.contractInvalid, true)
+    assert.equal(vm.denominator, null)
+  })
+  test(`[FINAL] G6 ready + invalid denom "${name}" = contract invalid`, () => {
+    const raw: Record<string, unknown> = { status: 'ready', cells: { leveled: {}, extreme: {} } }
+    if (denom !== undefined) raw['denominator'] = denom
+    const vm = parseStructureEvolutionPosition(raw) as StructureEvolutionPositionVM
+    assert.equal(vm.events?.contractInvalid, true)
+    assert.equal(vm.events?.denominator, null)
+  })
+}
+
+test('[FINAL] G5/G6 ready + RAW denom 40 (integer>0) = valid', () => {
+  const g5 = parseStructureBreakTurn({
+    bos_choch_events: { status: 'ready', denominator: 40, cells: { leveled: {}, extreme: {} } },
+  }) as StructureBreakTurnVM
+  assert.equal(g5.contractInvalid, false)
+  assert.equal(g5.denominator, 40)
+
+  const g6 = parseStructureEvolutionPosition({
+    ob_and_eq_events: { status: 'ready', denominator: 40, cells: { leveled: {}, extreme: {} } },
+  }) as StructureEvolutionPositionVM
+  assert.equal(g6.events?.contractInvalid, false)
+  assert.equal(g6.events?.denominator, 40)
+})
+
+// ----- P0-13: plain object topology (no arrays) -----
+test('[FINAL] G5/G6 cells/leveled/extreme as array = contract invalid', () => {
+  const arrCases = [
+    { cells: [] as unknown },
+    { cells: { leveled: [] as unknown, extreme: {} } },
+    { cells: { leveled: {}, extreme: [] as unknown } },
+  ]
+  for (const c of arrCases) {
+    const g5 = parseStructureBreakTurn({
+      bos_choch_events: { status: 'unavailable', denominator: null, ...c },
+    } as Record<string, unknown>) as StructureBreakTurnVM
+    assert.equal(g5.contractInvalid, true)
+
+    const g6 = parseStructureEvolutionPosition({
+      ob_and_eq_events: { status: 'unavailable', denominator: null, ...c },
+    } as Record<string, unknown>) as StructureEvolutionPositionVM
+    assert.equal(g6.events?.contractInvalid, true)
+  }
+})
+
+test('[FINAL] G5/G6 missing cells topology = contract invalid', () => {
+  const g5 = parseStructureBreakTurn({
+    bos_choch_events: { status: 'unavailable', denominator: null },
+  } as Record<string, unknown>) as StructureBreakTurnVM
+  assert.equal(g5.contractInvalid, true)
+
+  const g6 = parseStructureEvolutionPosition({
+    ob_and_eq_events: { status: 'unavailable', denominator: null },
+  } as Record<string, unknown>) as StructureEvolutionPositionVM
+  assert.equal(g6.events?.contractInvalid, true)
+})
+
+// ----- P0-14 + §8/§9/§10: malformed cell EXCLUDED from formal list -----
+test('[FINAL] G5 malformed leveled cell excluded from formal list', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: {
+      status: 'ready',
+      denominator: 10,
+      cells: {
+        leveled: {
+          bad: {
+            event_type: 'BOS',
+            direction: 'up',
+            structure_level: 'Swing',
+            event_count: 1,
+            member_count: 1,
+            // member_ratio missing -> malformed
+          },
+        },
+        extreme: {},
+      },
+    },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, false)
+  assert.equal(vm.hasMalformedCell, true)
+  assert.equal(vm.zeroEventToday, false)
+  assert.equal(vm.leveled.length, 0)
+})
+
+test('[FINAL] G6 malformed leveled cell excluded from formal list', () => {
+  const vm = parseStructureEvolutionPosition({
+    ob_and_eq_events: {
+      status: 'ready',
+      denominator: 10,
+      cells: {
+        leveled: {
+          bad: {
+            event_type: 'OB_CREATED',
+            direction: 'bullish',
+            structure_level: 'Swing',
+            event_count: 1,
+            member_count: 1,
+            // member_ratio missing -> malformed
+          },
+        },
+        extreme: {},
+      },
+    },
+  }) as StructureEvolutionPositionVM
+  assert.equal(vm.events?.contractInvalid, false)
+  assert.equal(vm.eventsMalformed, true)
+  assert.equal(vm.events?.zeroEventToday, false)
+  assert.equal(vm.events?.leveled.length, 0)
+})
+
+test('[FINAL] G6 malformed extreme cell excluded (independent G6 facts survive)', () => {
+  const vm = parseStructureEvolutionPosition({
+    ob_and_eq_events: {
+      status: 'ready',
+      denominator: 10,
+      cells: {
+        leveled: {},
+        extreme: {
+          EQH: { event_count: 3, member_count: 2 }, // missing member_ratio -> malformed
+        },
+      },
+    },
+    structure_alignment: {
+      aligned_count: 4,
+      aligned_ratio: 0.2,
+      divergent_count: 16,
+      divergent_ratio: 0.8,
+      denominator: 20,
+    },
+    distance_to_trailing_top_pct: { median: 1.1, p25: 0.5, p75: 2.0, valid_count: 18, denominator: 20 },
+    distance_to_trailing_bottom_pct: { median: -2.3, p25: -3.0, p75: -1.5, valid_count: 18, denominator: 20 },
+  }) as StructureEvolutionPositionVM
+  assert.equal(vm.eventsMalformed, true)
+  assert.equal(vm.events?.extreme.length, 0)
+  // alignment / trailing distances remain independently visible (not suppressed
+  // by the malformed extreme cell)
+  assert.ok(vm.alignment !== null)
+  assert.equal(vm.alignment?.denominator, 20)
+  assert.ok(vm.distanceTop !== null)
+  assert.ok(vm.distanceBottom !== null)
+})
+
+test('[FINAL] G6 mixed valid + malformed: valid kept, malformed excluded, warning set', () => {
+  const vm = parseStructureEvolutionPosition({
+    ob_and_eq_events: {
+      status: 'ready',
+      denominator: 10,
+      cells: {
+        leveled: {
+          good: { event_type: 'OB_CREATED', direction: 'bullish', structure_level: 'Swing', event_count: 2, member_count: 2, member_ratio: 0.2 },
+          bad: { event_type: 'OB_ENTERED', direction: 'bullish', structure_level: 'Swing', event_count: 1, member_count: 1 }, // missing ratio
+        },
+        extreme: {},
+      },
+    },
+  }) as StructureEvolutionPositionVM
+  assert.equal(vm.eventsMalformed, true)
+  assert.equal(vm.events?.leveled.length, 1)
+  assert.equal(vm.events?.leveled[0].eventType, 'OB_CREATED')
 })
