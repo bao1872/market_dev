@@ -273,8 +273,13 @@ set_evaluator("eval_c3_synchronized_expansion", _eval_c3_synchronized_expansion)
 #       },
 #   }
 #
-# 无 pyramid_v2 数据时（market/major_index/style scope 无 board_analysis），
-# 所有 D 族评估器返回 False。
+# D 族数据的 owner（Slice 4A4 / 4A4R 后不再统一依赖 pyramid_v2）：
+# - D2（event_freshness_high）：读取 canonical context["scope_observation"].freshness，
+#   可 canonical-only 命中；canonical 缺失时不回退到 pyramid_v2。
+# - D4（concentration_high）：读取 canonical
+#   context["scope_observation"].structure.current_state.technical_state.concentration，
+#   可 canonical-only 命中；canonical 缺失时不回退到 pyramid_v2。
+# - D1 / D3 / D5：仍读取 legacy context["pyramid_v2"]。
 # =============================================================================
 
 
@@ -538,34 +543,49 @@ def build_signal_payloads(
         "components_evidence": _collect_components_evidence(context),
     }
     # [P0-7] D 族信号附加维度证据（PRD §24）
-    # Slice 4A4 — D2/D4 evidence from canonical scope_observation; D1/D3/D5
-    # remain on legacy pyramid_v2.  ``pyramid_v2_evidence`` key is kept for
-    # forward-compat with the persisted evidence contract; for D2/D4 the values
-    # are now sourced from the canonical Review owner.
+    # Slice 4A4R — evidence 按具体 D filter 的各自 owner 选择，而非整族一刀切：
+    #   D2 的 freshness            ← canonical scope_observation
+    #   D4 的 concentration        ← canonical scope_observation
+    #   其余维度（diffusion / relative_strength / 未切源的 freshness、concentration）
+    #                              ← legacy pyramid_v2
+    #   D1 / D3 / D5 的 evidence 与 4A4 之前完全一致（全部 legacy）。
+    # canonical 缺失时不得回退到 pyramid_v2；canonical-only 也允许生成相关
+    # canonical evidence，其余 section 保持 None（不 fallback）。
     if filt.family == FilterFamily.D:
-        obs = _get_scope_observation(context)
         pv2 = _get_pyramid_v2(context)
-        if obs is not None or pv2 is not None:
-            freshness = {}
-            concentration = {}
-            if obs is not None:
-                freshness = obs.get("freshness") or {}
-                technical_state = (
-                    (obs.get("structure") or {})
-                    .get("current_state") or {}
-                ).get("technical_state") or {}
-                concentration = technical_state.get("concentration") or {}
+        obs = _get_scope_observation(context)
+        if pv2 is not None or obs is not None:
+            if filt.signal_type == "event_freshness_high":
+                # D2：freshness 由 canonical Review 提供；concentration 仍取 legacy
+                fresh_raw = (obs.get("freshness") or {}) if obs is not None else {}
+                conc_raw = (
+                    (pv2.get("concentration") or {}) if pv2 is not None else {}
+                )
+            elif filt.signal_type == "concentration_high":
+                # D4：technical-state concentration 由 canonical Review 提供
+                # （注意是 technical-state，不是 price/amount 集中度）；freshness 仍取 legacy
+                fresh_raw = (pv2.get("freshness") or {}) if pv2 is not None else {}
+                conc_raw = (
+                    ((obs.get("structure") or {}).get("current_state") or {})
+                    .get("technical_state") or {}
+                ).get("concentration") or {}
+            else:
+                # D1 / D3 / D5：全部 legacy（与 4A4 之前完全一致）
+                fresh_raw = (pv2.get("freshness") or {}) if pv2 is not None else {}
+                conc_raw = (
+                    (pv2.get("concentration") or {}) if pv2 is not None else {}
+                )
             evidence["pyramid_v2_evidence"] = {
                 "diffusion": pv2.get("diffusion") if pv2 is not None else None,
                 "freshness": {
-                    k: freshness.get(k)
+                    k: fresh_raw.get(k)
                     for k in (
                         "today_count", "last_5d_count", "last_10d_count",
                         "decay_weighted_density",
                     )
                 },
                 "concentration": {
-                    k: concentration.get(k)
+                    k: conc_raw.get(k)
                     for k in ("hhi", "leader_median_gap", "leader_symbol")
                 },
                 "relative_strength": (

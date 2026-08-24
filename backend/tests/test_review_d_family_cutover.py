@@ -1,8 +1,14 @@
-"""Slice 4A4 — D2/D4 filter consumer cutover parity test (pure-unit).
+"""Slice 4A4 / 4A4R — D2/D4 filter consumer cutover parity test (pure-unit).
 
 Slice 4A4 cuts the D2 (event freshness) and D4 (concentration) filter inputs
 from the legacy Board ``pyramid_v2`` payload over to the canonical Review
 ``scope_observation``.  D1 / D3 / D5 are intentionally left on ``pyramid_v2``.
+
+Slice 4A4R narrows the cutover: ``build_signal_payloads()`` must select the
+evidence owner **per specific D filter** (D2 -> canonical freshness,
+D4 -> canonical technical-state concentration; every other section and every
+other D filter stays on legacy ``pyramid_v2``).  D1/D3/D5 evidence must be
+byte-identical to the pre-4A4 legacy shape.
 
 Hard requirements locked by this file:
 
@@ -14,7 +20,7 @@ Hard requirements locked by this file:
    ``pyramid_v2.concentration``.
 3. When canonical is absent while legacy is present, D2/D4 must NOT fire
    (missing/unavailable semantics, no silent fallback).
-4. D1 / D3 / D5 remain unchanged on ``pyramid_v2``.
+4. D1 / D3 / D5 remain unchanged on ``pyramid_v2`` — evaluator AND evidence.
 5. Thresholds/score/filter name/match semantics are frozen — only the data
    *source* changes (same input value -> same D result).
 
@@ -28,7 +34,11 @@ import inspect
 
 import pytest
 
-from app.domain.review.filter_engine import _eval_d2_event_freshness_high, _eval_d4_concentration_high
+from app.domain.review.filter_engine import (
+    _eval_d2_event_freshness_high,
+    _eval_d4_concentration_high,
+    build_signal_payloads,
+)
 from app.domain.review.filter_definitions import (
     FilterDefinition,
     FilterFamily,
@@ -59,6 +69,28 @@ _FILTER_D4 = _filter("eval_d4_concentration_high")
 _FILTER_D1 = _filter("eval_d1_state_migration_positive")
 _FILTER_D3 = _filter("eval_d3_breadth_expansion")
 _FILTER_D5 = _filter("eval_d5_relative_strength_strong")
+
+
+def _payload_filter(signal_type: str, evaluator: str) -> FilterDefinition:
+    """Build a D-family FilterDefinition with the real ``signal_type``.
+
+    ``build_signal_payloads`` selects the evidence owner **per signal_type**
+    (Slice 4A4R), so the payload fixtures must carry the true D1/D2/D3/D4/D5
+    signal_type rather than the ``"dummy"`` used by the evaluate() dispatch tests.
+    """
+    return FilterDefinition(
+        signal_type=signal_type,
+        family=FilterFamily.D,
+        description="slice 4a4r payload test",
+        evaluator=evaluator,
+    )
+
+
+_PL_D1 = _payload_filter("state_migration_positive", "eval_d1_state_migration_positive")
+_PL_D2 = _payload_filter("event_freshness_high", "eval_d2_event_freshness_high")
+_PL_D3 = _payload_filter("breadth_expansion", "eval_d3_breadth_expansion")
+_PL_D4 = _payload_filter("concentration_high", "eval_d4_concentration_high")
+_PL_D5 = _payload_filter("relative_strength_strong", "eval_d5_relative_strength_strong")
 
 
 def _canonical_ctx(
@@ -303,3 +335,128 @@ def test_d2_d4_production_source_has_no_pyramid_v2_lookup(evaluator) -> None:
         f"D2/D4 production source must read canonical scope_observation: "
         f"{evaluator.__name__}"
     )
+
+
+# --------------------------------------------------------------------------- #
+# Slice 4A4R — build_signal_payloads() evidence owner parity
+# --------------------------------------------------------------------------- #
+def _conflict_ctx() -> dict:
+    """Context carrying BOTH a conflicting canonical and a known legacy payload.
+
+    Canonical values are seeded to disagree with legacy on every section, so any
+    leak of canonical data into D1/D3/D5 evidence would be caught.
+    """
+    ctx = _canonical_ctx(
+        density=0.01, today_count=0, last_5d_count=0,
+        hhi=0.01, top5_num=None, leader_median_gap=None,
+    )
+    ctx["pyramid_v2"] = {
+        "diffusion": {"positive_migration_count": 3},
+        "freshness": {
+            "today_count": 11, "last_5d_count": 12, "last_10d_count": 13,
+            "decay_weighted_density": 0.66,
+        },
+        "concentration": {
+            "hhi": 0.22, "leader_median_gap": 2.0, "leader_symbol": "LEG",
+        },
+        "relative_strength": {"vs_market": {"ratio": 1.2}},
+    }
+    return ctx
+
+
+@pytest.mark.parametrize(
+    "flt",
+    [_PL_D1, _PL_D3, _PL_D5],
+)
+def test_d1_d3_d5_evidence_stays_legacy_under_conflicting_canonical(flt) -> None:
+    # Slice 4A4R regression: D1/D3/D5 evidence must be byte-identical to the
+    # pre-4A4 legacy shape even when a conflicting canonical observation exists.
+    ev = build_signal_payloads(flt, _conflict_ctx())["evidence_payload"]["pyramid_v2_evidence"]
+    assert ev["diffusion"] == {"positive_migration_count": 3}
+    assert ev["freshness"] == {
+        "today_count": 11, "last_5d_count": 12, "last_10d_count": 13,
+        "decay_weighted_density": 0.66,
+    }
+    assert ev["concentration"] == {
+        "hhi": 0.22, "leader_median_gap": 2.0, "leader_symbol": "LEG",
+    }
+    assert ev["relative_strength"] == {"vs_market": {"ratio": 1.2}}
+
+
+def test_d2_evidence_freshness_from_canonical_unrelated_from_legacy() -> None:
+    ctx = _canonical_ctx(density=0.45, today_count=2, last_5d_count=5)
+    ctx["pyramid_v2"] = {
+        "diffusion": {"negative_migration_count": 3},
+        "freshness": {
+            "today_count": 99, "last_5d_count": 99, "last_10d_count": 99,
+            "decay_weighted_density": 0.05,
+        },
+        "concentration": {
+            "hhi": 0.7, "leader_median_gap": 9.0, "leader_symbol": "LEGACY",
+        },
+        "relative_strength": {"vs_market": {"ratio": 0.5}},
+    }
+    ev = build_signal_payloads(_PL_D2, ctx)["evidence_payload"]["pyramid_v2_evidence"]
+    # freshness is the cut-over section -> canonical A
+    assert ev["freshness"]["today_count"] == 2
+    assert ev["freshness"]["decay_weighted_density"] == 0.45
+    # unrelated evidence still comes from legacy
+    assert ev["diffusion"] == {"negative_migration_count": 3}
+    assert ev["concentration"] == {
+        "hhi": 0.7, "leader_median_gap": 9.0, "leader_symbol": "LEGACY",
+    }
+    assert ev["relative_strength"] == {"vs_market": {"ratio": 0.5}}
+
+
+def test_d4_evidence_concentration_from_canonical_unrelated_from_legacy() -> None:
+    ctx = _canonical_ctx(
+        hhi=0.15, top5_num=0.5, top5_den=1.0, leader_median_gap=3.5,
+    )
+    ctx["pyramid_v2"] = {
+        "diffusion": {"positive_migration_count": 7},
+        "freshness": {
+            "today_count": 55, "last_5d_count": 55, "last_10d_count": 55,
+            "decay_weighted_density": 0.99,
+        },
+        "concentration": {
+            "hhi": 0.99, "leader_median_gap": 88.0, "leader_symbol": "LEGACY",
+        },
+        "relative_strength": {"vs_market": {"ratio": 0.2}},
+    }
+    ev = build_signal_payloads(_PL_D4, ctx)["evidence_payload"]["pyramid_v2_evidence"]
+    # concentration is the cut-over section -> canonical (technical-state) A
+    assert ev["concentration"]["hhi"] == 0.15
+    assert ev["concentration"]["leader_symbol"] == "000001"
+    # unrelated evidence still comes from legacy
+    assert ev["freshness"]["today_count"] == 55
+    assert ev["freshness"]["decay_weighted_density"] == 0.99
+    assert ev["diffusion"] == {"positive_migration_count": 7}
+    assert ev["relative_strength"] == {"vs_market": {"ratio": 0.2}}
+
+
+def test_d2_evidence_canonical_only_no_fallback() -> None:
+    ctx = _canonical_ctx(density=0.45, today_count=2, last_5d_count=5)
+    ctx.pop("pyramid_v2", None)
+    payload = build_signal_payloads(_PL_D2, ctx)
+    ev = payload["evidence_payload"].get("pyramid_v2_evidence")
+    assert ev is not None, "canonical-only D2 must still generate signal payload"
+    assert ev["freshness"]["decay_weighted_density"] == 0.45
+    # no legacy -> unrelated sections stay None (no fallback, no canonical leak)
+    assert ev["diffusion"] is None
+    assert ev["concentration"]["hhi"] is None
+    assert ev["relative_strength"] is None
+
+
+def test_d4_evidence_canonical_only_no_fallback() -> None:
+    ctx = _canonical_ctx(
+        hhi=0.15, top5_num=0.5, top5_den=1.0, leader_median_gap=3.5,
+    )
+    ctx.pop("pyramid_v2", None)
+    payload = build_signal_payloads(_PL_D4, ctx)
+    ev = payload["evidence_payload"].get("pyramid_v2_evidence")
+    assert ev is not None, "canonical-only D4 must still generate signal payload"
+    assert ev["concentration"]["hhi"] == 0.15
+    # no legacy -> unrelated sections stay None (no fallback, no canonical leak)
+    assert ev["freshness"]["decay_weighted_density"] is None
+    assert ev["diffusion"] is None
+    assert ev["relative_strength"] is None
