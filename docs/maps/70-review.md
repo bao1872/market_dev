@@ -16,7 +16,13 @@
 第一金字塔 + 行情 + Scope PIT membership
         ↓
 L1 Scope Facts  (compute_scope_observation @ scope_observation.py:1298)
-        ↓ 落库 ReviewScopeObservationFact (migration 090, grain = trade_date+scope_type+scope_key)
+        ↓ 落库 ReviewScopeObservationFact (migration 090)
+        ↓   Business scope identity inside ONE ReviewRun:
+        ↓     trade_date + scope_type + scope_key
+        ↓   Current persisted/read lineage grain (防同日多 run 污染):
+        ↓     review_run_id + trade_date + scope_type + scope_key
+        ↓   (owners: save_scope_observation_fact upsert grain;
+        ↓    get_scope_observation_fact_by_run read grain)
         ↓
 唯一编排入口：review_orchestrator_service.py::compute_run / resume_run
         ↓ 逐 scope 调 _persist_canonical_scope_observation (review_orchestrator_service.py:1462)
@@ -36,7 +42,9 @@ API（只读 5 GET，app/api/review.py）：
 **关键约束（已核验）**：
 - Review 计算**只在** `compute_run`/`resume_run` 编排发生；API 是 read-only，不触发计算。
 - `L1 Scope Facts` 已双写落库（090）+ Composition 投影。
-- `L2 Observation Groups` / `Cross-sectional` / `Evidence` 后端代码已就绪，但**未接线到编排主链与用户 API**（见 §3）。
+- **L2 Observation Groups**：domain projection `build_l2_observation_groups` 已实现；但 current service 非 canonical run-lineage-safe，user-facing service/API 未就绪（见 §3.1）。
+- **Cross-sectional**：domain algorithm 已实现；current service 缺 published-run lineage，API/前端未就绪（见 §3.1）。
+- **Evidence**：legacy/current ownership 仍处 AUDIT，历史 Objective Evidence 引擎不得等同 v2.3 最终 Evidence Workflow（见 §3.1）。
 
 ---
 
@@ -66,16 +74,16 @@ Runtime 列词汇（区别于“代码接线”与“真实运行验收”，见
 | L1 Scope Facts | scope_observation.py:1298 | Fact (090) | scopes / scopes/{type}/{key}（raw observation） | Raw Facts 可用；Current formal projection PARTIAL（Regime/Breadth/Technical State/Freshness 子集，非完整 Observation UX） | yes | WIRED_NOT_REVERIFIED | PARTIAL |
 | L2 Observation Groups (8组) | observation_groups.py:136（domain projection `build_l2_observation_groups`） | derived（不落库） | **无端点** | **MISSING**（无 8 组卡片） | backend only | NOT_WIRED | **PARTIAL** |
 | Analysis: Cross-sectional | cross_sectional.py + review_cross_sectional_service.py | derived | **无端点** | **MISSING**（Explorer 排序/Trajectory ≠ Cross-sectional Percentile 分析） | backend only | NOT_WIRED | PARTIAL |
-| Analysis: Historical Dynamics (Pos/Vel/Acc/Pers) | review_scope_dynamics_service.py:128 → scope_dynamics.py:65 | composition_payload | scopes/{type}/{key} | Dynamics Tab（P/V/A 图） | yes | WIRED_NOT_REVERIFIED | DONE |
-| Analysis: Internal Structure Dynamics (Breadth/Tilt/Concentration/Leadership Migration) | internal_structure.py:93 / leadership_migration.py | composition_payload | scopes/{type}/{key} | Internal Tab + Leadership Tab | yes | WIRED_NOT_REVERIFIED | DONE |
+| Analysis: Historical Dynamics (Pos/Vel/Acc/Pers) | review_scope_dynamics_service.py:128 → scope_dynamics.py:65 | composition_payload | scopes/{type}/{key} | Dynamics Tab（P/V/A 图） | yes | WIRED_NOT_REVERIFIED | PARTIAL |
+| Analysis: Internal Structure Dynamics (Breadth/Tilt/Concentration/Leadership Migration) | internal_structure.py:93 / leadership_migration.py | composition_payload | scopes/{type}/{key} | Internal Tab + Leadership Tab | yes | WIRED_NOT_REVERIFIED | PARTIAL |
 | Interpretation: Dynamics Phase (6类, FROZEN) | dynamics_phase.py:252（经 Historical Dynamics 链） | composition_payload | scopes/{type}/{key} | 标签展示（无独立分类 UI） | yes | WIRED_NOT_REVERIFIED | PARTIAL |
 | Interpretation: Internal Structure Type (5类, ALGORITHM MAPPING REQUIRED) | 无实现模块（仅 candidate JSON + test） | — | 无 | MISSING | candidate only | NOT_RUN | UNAVAILABLE_BY_DESIGN |
 | Trading Context (5类) | 零后端文件 | — | 无 | MISSING | no | NOT_RUN | UNAVAILABLE_BY_DESIGN |
-| Member Attribution (canonical) | analysis/member_attribution.py:198 | composition_payload | scopes/{type}/{key} | Attribution Tab（5 子 Tab） | yes | WIRED_NOT_REVERIFIED | DONE |
+| Member Attribution (canonical) | analysis/member_attribution.py:198 | composition_payload | scopes/{type}/{key} | Attribution Tab（5 子 Tab） | yes | WIRED_NOT_REVERIFIED | PARTIAL |
 | Member Attribution (legacy Signal) | review_attribution_service.py | MarketReviewSignal* 表 | 无存活端点 | 退休 | legacy | NOT_RUN | MISSING（已退休） |
 | Evidence (Objective Evidence, 待 audit) | scope_evidence.py + scope_evidence_service.py:94（携带历史 Objective Evidence 语义：current/delta/historical/peer + 29+24 primitive 框架） | derived | **无端点** | RawFactsPanel + AuctionBackflowPanel（audit/raw fact 可见性，非正式 Evidence Workflow） | backend only | NOT_WIRED | AUDIT |
-| Scope Explorer（家族 tab / 11 排序 / 薄列表 / Trajectory） | review_observation_persistence_service.py (family filter R2C closed) | Fact + Composition LEFT JOIN | /scopes | PRESENT | yes | WIRED_NOT_REVERIFIED | DONE |
-| Scope Family Snapshot（R2A/R2C） | 同上 | 同上 | /scopes?scope_type= | PRESENT | yes | WIRED_NOT_REVERIFIED | DONE |
+| Scope Explorer（家族 tab / 11 排序 / 薄列表 / Trajectory） | review_observation_persistence_service.py (family filter R2C closed) | Fact + Composition LEFT JOIN | /scopes | PRESENT | yes | WIRED_NOT_REVERIFIED | PARTIAL |
+| Scope Family Snapshot（R2A/R2C） | 同上 | 同上 | /scopes?scope_type= | PRESENT | yes | WIRED_NOT_REVERIFIED | PARTIAL |
 
 ### 2.1 Slice PASS 记录（本 map 重建前已完成）
 
@@ -144,7 +152,7 @@ R4  Analysis Completion
  ↓
 R5  Interpretation / Trading Context (only frozen contracts)
  ↓
-R6  Evidence Workflow + Fact-only Detail（先 AUDIT 定义 canonical ownership）
+R6  Evidence Workflow（先 AUDIT 定义 canonical ownership；Fact-only Detail 只属 R3A）
  ↓
 R7  Market-level Review Overview
  ↓
