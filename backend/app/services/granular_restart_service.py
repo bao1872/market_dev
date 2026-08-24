@@ -1,8 +1,8 @@
 """V2.1 Granular Restart 调度服务（Corrective Pass 3）。
 
-[PRD 31 §6] 正式枚举（10 个 boundary）：
+[PRD 31 §6] 正式枚举（9 个 boundary）：
     daily_ready / board_facts / core / stock_core_published /
-    dsa_projection / state_events / chip / auction / board_aggregation / review
+    dsa_projection / state_events / chip / auction / review
 
 ## Corrective Pass 3 修复的确定性缺陷（相对 fdb09a1）
 
@@ -24,7 +24,6 @@
      —— **无 `operator` 参数**；上一轮 `publish_chip_consensus(db, run_id, operator=...)` 会 TypeError。
    - `publish_review(session, run: MarketReviewRun, *, force, operator, idempotency_key)`
      —— 第一个业务参数是 **ORM 对象**，不是 id；上一轮传 id 会 AttributeError。
-   - `publish_board_analysis(session, snapshot: BoardAnalysisSnapshot, *, threshold=...)`
    - auction 重建 = `generate_auction_anchors(db, trade_date)` → `publish_auction_anchors(db, snapshot_id)`；
      上一轮只调 publish，等于重发旧 snapshot，不是重建。
    - dsa_projection 重建 = 从持久化 core artifact `build_dsa_projection_payload(...)`；
@@ -80,7 +79,6 @@ ALL_BOUNDARIES: tuple[str, ...] = (
     "state_events",
     "chip",
     "auction",
-    "board_aggregation",
     "review",
 )
 
@@ -733,7 +731,7 @@ async def _handle_state_events(
 
 
 # =============================================================================
-# chip / auction / board_aggregation / review：真实领域重建 + 发布
+# chip / auction / review：真实领域重建 + 发布
 # =============================================================================
 
 
@@ -838,34 +836,6 @@ async def _handle_auction(
     return snapshot_id
 
 
-async def _handle_board_aggregation(
-    db: AsyncSession,
-    *,
-    trade_date: str,
-    parent_job_run_id: uuid.UUID,
-    source_core_run_id: uuid.UUID | None,
-    input_hash: str,
-    actor: str,
-    attempt: int,
-) -> uuid.UUID | None:
-    """board_aggregation boundary 已退役（[Slice 4A9]）。
-
-    legacy Board aggregation 已由 Unified Review 取代，AfterClose 不再生产
-    BoardAnalysisRun / BoardAnalysisSnapshot，也不再切换 market_aggregation pointer。
-    因此该 restart boundary 不再执行任何重建/发布，直接抛出明确退役错误，
-    避免经 admin force 端点恢复 legacy Board 生产。
-    """
-    _ = db
-    _ = trade_date
-    _ = parent_job_run_id
-    _ = source_core_run_id
-    _ = input_hash
-    _ = actor
-    _ = attempt
-    raise RuntimeError(
-        "board_aggregation boundary 已退役：legacy Board compute 不再触发，"
-        "板块分析由 Unified Review 提供"
-    )
 
 
 async def _handle_review(
@@ -928,7 +898,6 @@ _REAL_HANDLERS: dict[str, RestartHandler] = {
     "state_events": _handle_state_events,
     "chip": _handle_chip,
     "auction": _handle_auction,
-    "board_aggregation": _handle_board_aggregation,
     "review": _handle_review,
 }
 
@@ -970,7 +939,7 @@ async def dispatch_restart(
 
     Raises:
         ValueError: 未知 boundary 或无法解析 trade_date。
-        NotImplementedError: boundary 无真实 handler（当前 10/10 已实现）。
+        NotImplementedError: boundary 无真实 handler（当前 9/9 已实现）。
     """
     if restart_from not in ALL_BOUNDARIES:
         raise ValueError(f"未知 restart_from boundary: {restart_from}")

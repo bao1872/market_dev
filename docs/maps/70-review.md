@@ -14,6 +14,23 @@
 > 发布门禁、§23-§27 legacy 契约）的映射/迁移 **DEFER 到后续 Implementation Design**；届时本 Map 需
 > 同步更新。
 
+## 0. Board Analysis Runtime Status（[Slice 4A9 / 4A10]）
+
+> **2026-08-24 退役收口**：Legacy Board 计算已彻底退役，以下为当前权威状态；IDE / 维护者据此实现，
+> 不得复活 legacy 路径。
+
+- Legacy ``BoardAnalysisRun`` / ``BoardAnalysisSnapshot`` 计算已退役；**禁止再实现或调用**
+  ``compute_board_analysis`` / ``compute_all_boards`` / ``publish_board_analysis``。
+- 当前板块分析 owner 是 **Unified Review**；``GET /v1/boards/analysis`` 与
+  ``GET /v1/boards/{id}/analysis`` 仅为 published ``ReviewScopeObservationFact`` 的投影。
+- ``board_analysis_service`` / ``market_factor_aggregation_service`` 已删除；
+  granular restart 的 ``board_aggregation`` boundary 已移除（``restart_from=board_aggregation``
+  现在走「未知 boundary」校验错误）。
+- ``MarketBoard`` / taxonomy（L1/L2/L3）/ ``concept`` / PIT membership / ``BoardDefinitionVersion`` /
+  ``membership_version`` 仍是 Unified Review 做板块分析的正式基础设施，不得删除。
+- 历史 ORM（``BoardAnalysisRun`` / ``BoardAnalysisSnapshot``）/ 表 / migration 暂保留（C2，待确认无历史
+  兼容需求后再清理）。
+
 ## 1. PRD 实现映射
 
 | PRD 章节 | 当前实现状态 | 验证证据 |

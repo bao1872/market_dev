@@ -17,6 +17,14 @@
 - [Slice 4A9] 写接口（admin）已退役：legacy Board compute 不再可触发，
   两个 POST 统一返回 HTTP 410 Gone；板块分析完全由 Unified Review 提供。
 - 失败返回 4xx/5xx，不静默返回空数据
+
+Board Analysis Runtime Status（[Slice 4A9 / 4A10]）：
+- Legacy ``BoardAnalysisRun`` / ``BoardAnalysisSnapshot`` 计算已退役；禁止再实现或调用
+  ``compute_board_analysis`` / ``compute_all_boards`` / ``publish_board_analysis``。
+- 当前板块分析 owner 是 Unified Review；Board GET 仅为 published
+  ``ReviewScopeObservationFact`` 的投影。
+- ``board_analysis_service`` / ``market_factor_aggregation_service`` 已删除；``MarketBoard`` /
+  taxonomy / PIT membership 仍是 Unified Review 做板块分析的正式基础设施。
 """
 
 from __future__ import annotations
@@ -27,10 +35,11 @@ from datetime import date
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+from app.models.bar import BarDaily
 from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
 from app.schemas.board_analysis import (
     BoardAnalysisDetailResponse,
@@ -38,9 +47,6 @@ from app.schemas.board_analysis import (
     BoardAnalysisSnapshotDTO,
 )
 from app.services.access_control_service import AccessContext, require_authenticated
-from app.services.board_analysis_service import (
-    compute_is_stale,
-)
 from app.services.review_publication_service import (
     get_published_review_run_id,
     list_published_review_dates,
@@ -56,6 +62,21 @@ admin_router = APIRouter(prefix="/v1/admin/boards", tags=["admin-board-analysis"
 
 
 _BOARD_SCOPE_TYPES = ("industry_l1", "industry_l2", "industry_l3")
+
+
+async def compute_is_stale(
+    session: AsyncSession,
+    snapshot_trade_date: date,
+) -> bool:
+    """判断快照是否过期（snapshot.trade_date < MAX(bars_daily.trade_date)）。
+
+    从 board_analysis_service 退役时迁入：板块读接口仍需此新鲜度守卫，
+    但不再依赖 legacy Board producer。
+    """
+    max_date = await session.scalar(select(func.max(BarDaily.trade_date)))
+    if max_date is None:
+        return False
+    return snapshot_trade_date < max_date
 
 
 def _scope_types_for_board_type(board_type: str | None) -> tuple[str, ...]:
