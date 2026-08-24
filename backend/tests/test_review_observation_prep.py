@@ -1347,8 +1347,11 @@ def test_loader_returns_only_specified_core_run_rows():
         captured["stmt"] = stmt
         # Simulate the DB returning only run A's row (this is what the SQL lock
         # guarantees); if the lock were absent, both A and B rows would match.
+        # M3-B: the projected column is the ``first_pyramid_flat`` JSONB subtree
+        # itself (NOT the full summary_payload), so the row's second element is
+        # the flat dict directly.
         result = _MagicMock()
-        result.all.return_value = [(id_a, {"first_pyramid_flat": {"fp_trend_direction": "up"}})]
+        result.all.return_value = [(id_a, {"fp_trend_direction": "up"})]
         return result
 
     session.execute.side_effect = _fake_execute
@@ -1363,6 +1366,142 @@ def test_loader_returns_only_specified_core_run_rows():
     )
     assert set(out.keys()) == {str(id_a)}
     assert str(id_b) not in out
+
+
+def test_loader_projects_only_first_pyramid_flat_subtree():
+    """M3-B projection contract — the OOM fix is a query-projection change.
+
+    The production statement must select ONLY the JSONB subtree
+    ``summary_payload -> 'first_pyramid_flat'``, NEVER the full
+    ``summary_payload`` column.  A test that merely mocks the returned value
+    would NOT prove this: the pre-chunk OOM defect is precisely that PostgreSQL
+    transferred + the application hydrated the whole ~1.6 GB decompressed
+    summary to retain a ~19 MB flat.  So we compile the actual statement against
+    the PostgreSQL dialect and assert the projection operator.
+
+    The query must ALSO keep every source gate intact: trade_date, the immutable
+    source_core_run_id lineage locks, run status == succeeded, published_at IS
+    NOT NULL.  No same-day-latest fallback.
+    """
+    import asyncio
+
+    from sqlalchemy.dialects import postgresql
+
+    run_a = uuid.uuid4()
+    id_a = uuid.uuid4()
+    session = _AsyncMock()
+    captured: dict = {}
+
+    async def _fake_execute(stmt):
+        captured["stmt"] = stmt
+        result = _MagicMock()
+        result.all.return_value = []
+        return result
+
+    session.execute.side_effect = _fake_execute
+
+    asyncio.run(
+        _load_current_only_snapshot_facts(
+            session,
+            [id_a],
+            date(2026, 8, 20),
+            source_core_run_id=run_a,
+        )
+    )
+    stmt = captured.get("stmt")
+    assert stmt is not None, "loader never executed a query"
+    # literal_binds inlines every bound parameter so the compiled SQL shows the
+    # EXACT text PostgreSQL receives — proving the subtree key is literal.
+    sql = str(
+        stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    # The SELECT must project the JSONB subtree via the -> operator — NOT the
+    # bare full summary_payload column.
+    assert "summary_payload -> 'first_pyramid_flat'" in sql, (
+        f"full summary_payload projected? -> {sql}"
+    )
+
+    # The second selected column must itself carry the projection expression,
+    # not be the bare column reference (a bare column would compile without ->).
+    projected = str(
+        stmt.selected_columns[1].compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+    assert "summary_payload -> 'first_pyramid_flat'" in projected, (
+        f"2nd selected column is not the subtree projection -> {projected}"
+    )
+
+    # All source gates must survive unchanged (exact source gate, C).
+    assert "trade_date" in sql
+    # Two distinct lineage locks: snapshot.source_run_id AND run.id.
+    assert sql.count("source_run_id") >= 2
+    assert "status" in sql
+    assert "published_at IS NOT NULL" in sql
+
+
+def test_loader_keeps_whole_first_pyramid_flat_for_board():
+    """M3-B semantic guard — key-level projection is deferred on purpose.
+
+    Even though SQL now returns only the ``first_pyramid_flat`` subtree, the
+    WHOLE flat (all fp_* keys, including non-current-only ones) must still be
+    carried under ``_BOARD_CURRENT_FLAT_KEY`` so the migrated Board capabilities
+    consume the identical payload they did before.  Only the Current-only
+    attributes are additionally extracted; no formula/rename/fallback change.
+    """
+    import asyncio
+
+    from app.services.observation_prep import _BOARD_CURRENT_FLAT_KEY
+
+    run_a = uuid.uuid4()
+    id_a = uuid.uuid4()
+    session = _AsyncMock()
+
+    full_flat = {
+        "fp_trend_direction": "up",
+        "fp_swing_direction": "up",
+        "fp_release_volume_ratio": 2.5,
+        "fp_momentum_volume_relation": "共振",
+        "fp_bb_position": 0.75,
+        "fp_bb_width": 0.12,
+        "fp_vwap_ret_total": 3.5,
+        "fp_distance_to_trailing_top_pct": -2.0,
+        "fp_distance_to_trailing_bottom_pct": 8.0,
+        # a non-current-only key the migrated Board capability also reads:
+        "fp_trend_strength": 0.9,
+    }
+
+    async def _fake_execute(stmt):
+        result = _MagicMock()
+        # Projected column: the flat dict itself (as PostgreSQL -> returns it).
+        result.all.return_value = [(id_a, dict(full_flat))]
+        return result
+
+    session.execute.side_effect = _fake_execute
+
+    out = asyncio.run(
+        _load_current_only_snapshot_facts(
+            session,
+            [id_a],
+            date(2026, 8, 20),
+            source_core_run_id=run_a,
+        )
+    )
+    facts = out[str(id_a)]
+    assert facts["release_volume_ratio"] == pytest.approx(2.5)
+    assert facts["momentum_volume_relation"] == "共振"
+    assert facts["bb_position"] == pytest.approx(0.75)
+    assert facts["bb_width"] == pytest.approx(0.12)
+    assert facts["vwap_ret_total"] == pytest.approx(3.5)
+    assert facts["trailing_top_pct"] == pytest.approx(-2.0)
+    assert facts["trailing_bottom_pct"] == pytest.approx(8.0)
+    # Whole flat preserved for the Board capability (all keys, not just the 7).
+    assert facts[_BOARD_CURRENT_FLAT_KEY] == full_flat
 
 
 def test_batch_passes_immutable_source_core_run_id_to_loader(monkeypatch):

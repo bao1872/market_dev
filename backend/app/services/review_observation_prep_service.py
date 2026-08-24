@@ -119,6 +119,11 @@ def _log_rss(
     state_rows: int | None = None,
     event_rows: int | None = None,
     vector_member_count: int | None = None,
+    scope_count: int = 0,
+    member_refs_t: int = 0,
+    member_refs_t1: int = 0,
+    current_only_member_count: int = 0,
+    coverage_member_count: int = 0,
 ) -> None:
     """Log current + peak RSS (MiB) at a named preparation stage.
 
@@ -127,6 +132,12 @@ def _log_rss(
     back to resource.getrusage(ru_maxrss) for the peak value only — and is
     explicitly NOT labelled as current RSS. Pure read, no tracemalloc (which
     must never run in production).
+
+    The extra counters (scope_count / member_refs_t / member_refs_t1 /
+    current_only_member_count / coverage_member_count) are emitted only by the
+    early ``current-prep-*`` attribution markers in
+    ``prepare_current_scope_observations_batch``; they default to 0 so the
+    existing ``union-prep-*`` call sites are unchanged.
     """
     cur_bytes, peak_bytes = _read_proc_rss()
     if peak_bytes is None:
@@ -143,6 +154,16 @@ def _log_rss(
         extra += f" event_rows={event_rows}"
     if vector_member_count is not None:
         extra += f" vec_members={vector_member_count}"
+    if scope_count:
+        extra += f" scope_count={scope_count}"
+    if member_refs_t:
+        extra += f" member_refs_t={member_refs_t}"
+    if member_refs_t1:
+        extra += f" member_refs_t1={member_refs_t1}"
+    if current_only_member_count:
+        extra += f" current_only_members={current_only_member_count}"
+    if coverage_member_count:
+        extra += f" coverage_members={coverage_member_count}"
     logger.info(
         "[RSS] stage=%s current_rss_mb=%.1f peak_rss_mb=%.1f union_member_count=%d trade_date_count=%d%s",
         stage,
@@ -349,10 +370,21 @@ async def _load_current_only_snapshot_facts(
 
     # Exact-T only, joined against the run gate (succeeded + published), AND locked
     # to the immutable source_core_run_id identity (Slice 4A1R2).
+    #
+    # M3-B (OOM closure): the SELECT projects ONLY the JSONB subtree
+    # ``summary_payload -> 'first_pyramid_flat'`` (via the ``->`` operator),
+    # NOT the full ``summary_payload`` (~57 KB avg / ~1.6 GB decompressed across
+    # the whole union).  PostgreSQL therefore transfers and the application
+    # hydrates only the ~19-20 MB flat — the primary pre-chunk memory owner.
+    # ``first_pyramid_flat`` is kept WHOLE (all fp_* keys): key-level projection
+    # is intentionally deferred so the migrated Board capabilities consume the
+    # identical flat payload they did before (no semantic drift).  The JSONB
+    # ``->`` expression carries type JSONB, so the driver decodes the subtree
+    # directly into a Python dict (missing key / JSON null -> None).
     stmt = (
         select(
             StockFeatureSnapshot.instrument_id,
-            StockFeatureSnapshot.summary_payload,
+            StockFeatureSnapshot.summary_payload.op("->")("first_pyramid_flat"),
         )
         .join(
             StockFeatureSnapshotRun,
@@ -371,8 +403,7 @@ async def _load_current_only_snapshot_facts(
     rows = (await session.execute(stmt)).all()
 
     out: dict[str, dict[str, object]] = {}
-    for instrument_id, summary_payload in rows:
-        flat = (summary_payload or {}).get("first_pyramid_flat")
+    for instrument_id, flat in rows:
         if not isinstance(flat, dict):
             continue
         facts: dict[str, object] = {}
@@ -1700,6 +1731,13 @@ async def prepare_current_scope_observations_batch(
     if not scope_specs:
         return {}
     effective_dates = trade_dates if trade_dates is not None else [trade_date]
+    # M3-B early RSS attribution: capture the baseline BEFORE any current-day
+    # membership resolution / snapshot loading.  The pre-chunk memory owner is
+    # the full summary_payload hydration that used to happen inside
+    # ``_load_current_only_snapshot_facts`` — this marker plus
+    # ``current-prep-current-needs-loaded`` bracket the exact jump the OOM
+    # acceptance must prove no longer reaches ~4 GiB.
+    _log_rss("current-prep-start", scope_count=len(scope_specs))
     t1 = await calendar_service.get_previous_trading_day_async(session, trade_date)
 
     # ---- Resolve PIT(T) / PIT(T-1) per scope (single owner: resolve_scope_members).
@@ -1828,6 +1866,17 @@ async def prepare_current_scope_observations_batch(
     if not resolved_specs:
         return terminal
 
+    # M3-B early RSS attribution: membership resolution is complete.  Reports the
+    # PIT(T) / PIT(T-1) member-reference totals (the 83989-ish reference count on
+    # the real scale) without building any additional duplicate structures —
+    # these totals are derived from the already-resolved spec tuples.
+    _log_rss(
+        "current-prep-memberships-resolved",
+        scope_count=len(resolved_specs),
+        member_refs_t=sum(len(spec.member_ids) for spec in resolved_specs),
+        member_refs_t1=sum(len(m) for m in membership_t1_by_scope.values()),
+    )
+
     # ---- Union member facts: load the whole member set ONCE, then slice. ----
     union_members: list[uuid.UUID] = []
     seen: set[uuid.UUID] = set()
@@ -1836,6 +1885,10 @@ async def prepare_current_scope_observations_batch(
             if mid not in seen:
                 seen.add(mid)
                 union_members.append(mid)
+
+    # M3-B early RSS attribution: the deduplicated union is now bounded (the
+    # unique PIT(T) member set feeding every loader below).
+    _log_rss("current-prep-union-built", union_member_count=len(union_members))
 
     # ---- Current-only facts MUST be fully resolved BEFORE the chunked union
     # prep (PERF-OOM-V2 P0-1/P0-2).  The chunked builder prebuilds
@@ -1855,14 +1908,35 @@ async def prepare_current_scope_observations_batch(
     current_only_facts = await _load_current_needs(
         session, union_members, trade_date, source_core_run_id=source_core_run_id
     )
+    # M3-B early RSS attribution: the current-only snapshot facts (the M3-B
+    # projection target) have been loaded.  On the real scale this marker vs
+    # ``current-prep-start`` is the decisive proof that pre-chunk RSS no longer
+    # jumps to ~4 GiB — the full summary_payload is no longer hydrated here.
+    _log_rss(
+        "current-prep-current-needs-loaded",
+        union_member_count=len(union_members),
+        current_only_member_count=len(current_only_facts),
+    )
     coverage_by_date = await _load_batch_backfill_event_coverage(
         session, union_members, effective_dates
+    )
+    _log_rss(
+        "current-prep-coverage-loaded",
+        union_member_count=len(union_members),
+        coverage_member_count=sum(
+            len(s) for s in coverage_by_date.values()
+        ),
     )
 
     # PERF-OOM (2026-08-24 closure): the production current-day path uses the
     # chunked, memory-bounded union preparation (heavy bars/vectors released per
     # chunk, Members prebuilt).  The non-chunked path remains the oracle used by
     # tests and the Dataset Replay Adapter — identical outputs.
+    _log_rss(
+        "current-prep-before-union-context",
+        union_member_count=len(union_members),
+        trade_date_count=len(effective_dates),
+    )
     if chunk_members:
         union_ctx = await prepare_union_fact_context_chunked(
             session,
