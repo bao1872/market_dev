@@ -88,6 +88,9 @@ function BreakTurnSection({ vm }: { vm: StructureBreakTurnVM }) {
           )}
         </div>
       )}
+      {vm.hasMalformedCell && (
+        <div className={styles.structContractInvalid}>存在结构事实合同异常事件单元，已按合同失效显示</div>
+      )}
       {vm.hasContractInvalidity && (
         <div className={styles.structContractInvalid}>检测到非 G5 结构事件类型，已按合同失效处理</div>
       )}

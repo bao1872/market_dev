@@ -395,3 +395,144 @@ test('formal wiring produces typed VMs for both G5 and G6', () => {
   assert.equal(g5vm.groupKey, 'structure_break_turn')
   assert.equal(g6vm.groupKey, 'structure_evolution_position')
 })
+
+// ===========================================================================
+// R3D-V2 — Final Structure Outer-Shape Closure test matrix (P0-1..P0-7)
+// ===========================================================================
+
+const g5EmptyCells = { leveled: {}, extreme: {} }
+
+// 1. unavailable + denominator=null + empty maps -> valid unavailable
+test('[V2] G5 unavailable + null denom + empty maps = valid unavailable', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: { status: 'unavailable', denominator: null, cells: g5EmptyCells },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.availability, 'unavailable')
+  assert.equal(vm.contractInvalid, false)
+  assert.equal(vm.denominator, null)
+})
+
+// 2. unavailable + denominator=40 -> contract invalid
+test('[V2] G5 unavailable + non-null denom = contract invalid', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: { status: 'unavailable', denominator: 40, cells: g5EmptyCells },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, true)
+  assert.equal(vm.availability, 'unavailable')
+})
+
+// 3. unavailable + nonempty cells -> contract invalid
+test('[V2] G5 unavailable + nonempty cells = contract invalid', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: {
+      status: 'unavailable',
+      denominator: null,
+      cells: { leveled: { c1: { event_type: 'BOS', direction: 'up', structure_level: 'Swing', event_count: 1, member_count: 1, member_ratio: 0.1 } }, extreme: {} },
+    },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, true)
+})
+
+// 4. ready + denominator=40 + explicit empty leveled/extreme -> legal zeroEventToday
+test('[V2] G5 ready + empty raw maps = zeroEventToday', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: { status: 'ready', denominator: 40, cells: g5EmptyCells },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, false)
+  assert.equal(vm.zeroEventToday, true)
+  assert.equal(vm.leveled.length, 0)
+})
+
+// 5. ready + cells missing -> contract invalid
+test('[V2] G5 ready + cells missing = contract invalid', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: { status: 'ready', denominator: 40 },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, true)
+})
+
+// 6. ready + leveled missing -> contract invalid
+test('[V2] G5 ready + leveled missing = contract invalid', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: { status: 'ready', denominator: 40, cells: { extreme: {} } },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, true)
+})
+
+// 7. ready + extreme missing -> contract invalid
+test('[V2] G5 ready + extreme missing = contract invalid', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: { status: 'ready', denominator: 40, cells: { leveled: {} } },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, true)
+})
+
+// 8. ready + malformed raw cell -> NOT zeroEventToday
+test('[V2] G5 ready + malformed raw cell = NOT zeroEventToday', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: {
+      status: 'ready',
+      denominator: 40,
+      cells: {
+        leveled: { c1: { event_type: 'CHoCH', direction: 'up', structure_level: 'Swing', event_count: 1, member_count: 1 /* missing member_ratio */ } },
+        extreme: {},
+      },
+    },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, false)
+  assert.equal(vm.zeroEventToday, false) // raw map non-empty
+  assert.equal(vm.hasMalformedCell, true)
+})
+
+// 9. G5 extreme nonempty -> contract invalid
+test('[V2] G5 extreme nonempty = contract invalid', () => {
+  const vm = parseStructureBreakTurn({
+    bos_choch_events: {
+      status: 'ready',
+      denominator: 40,
+      cells: { leveled: {}, extreme: { EQH: { event_count: 1, member_count: 1, member_ratio: 0.05 } } },
+    },
+  }) as StructureBreakTurnVM
+  assert.equal(vm.contractInvalid, true)
+})
+
+// 10. G6 unexpected event type -> contract invalidity
+test('[V2] G6 unexpected event type = contract invalidity', () => {
+  const vm = parseStructureEvolutionPosition({
+    ob_and_eq_events: {
+      status: 'ready',
+      denominator: 20,
+      cells: {
+        leveled: { c1: { event_type: 'BOS', direction: 'up', structure_level: 'Swing', event_count: 1, member_count: 1, member_ratio: 0.05 } },
+        extreme: {},
+      },
+    },
+  }) as StructureEvolutionPositionVM
+  assert.equal(vm.events?.hasContractInvalidity, true)
+})
+
+// 11. valid ready events -> normal formal rendering
+test('[V2] G6 valid ready events = formal rendering', () => {
+  const vm = parseStructureEvolutionPosition({
+    ob_and_eq_events: {
+      status: 'ready',
+      denominator: 20,
+      cells: {
+        leveled: { c1: { event_type: 'OB_CREATED', direction: 'bullish', structure_level: 'Swing', event_count: 2, member_count: 2, member_ratio: 0.1 } },
+        extreme: { EQH: { event_count: 3, member_count: 2, member_ratio: 0.15 } },
+      },
+    },
+  }) as StructureEvolutionPositionVM
+  assert.equal(vm.events?.contractInvalid, false)
+  assert.equal(vm.events?.zeroEventToday, false)
+  assert.equal(vm.events?.leveled.length, 1)
+  assert.equal(vm.events?.extreme.length, 1)
+})
+
+// 12. ready + denominator=0 -> contract invalid
+test('[V2] G6 ready + denominator=0 = contract invalid', () => {
+  const vm = parseStructureEvolutionPosition({
+    ob_and_eq_events: { status: 'ready', denominator: 0, cells: { leveled: {}, extreme: {} } },
+  }) as StructureEvolutionPositionVM
+  assert.equal(vm.events?.contractInvalid, true)
+})

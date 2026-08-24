@@ -166,6 +166,47 @@ const G5_LEVELED_TYPES = new Set(['BOS', 'CHoCH'])
 const G6_LEVELED_TYPES = new Set(['OB_CREATED', 'OB_ENTERED', 'OB_MITIGATED'])
 const G6_EXTREME_TYPES = new Set(['EQH', 'EQL'])
 
+// ---------------------------------------------------------------------------
+// Strict outer bundle validation (R3D-V2 P0-1..P0-7)
+// ---------------------------------------------------------------------------
+
+interface RawBundle {
+  raw: Record<string, unknown>
+  status: EventStatus
+  denominator: number | null
+  cells: Record<string, unknown> | null
+  leveled: Record<string, unknown>
+  extreme: Record<string, unknown>
+}
+
+// Extracts the canonical outer bundle shape WITHOUT defaulting missing maps to {}.
+// `allowExtreme`: G5 must reject any non-empty extreme; G6 permits EQH/EQL.
+function extractEventBundle(
+  raw: unknown,
+  allowExtreme: boolean,
+): RawBundle | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const status = normalizeEventStatus(o['status'])
+  const denominator = isFiniteNumber(o['denominator']) ? (o['denominator'] as number) : null
+  const cells = o['cells']
+  const cellsObj = cells && typeof cells === 'object' ? (cells as Record<string, unknown>) : null
+  const leveled = cellsObj && (cellsObj['leveled'] && typeof cellsObj['leveled'] === 'object')
+    ? (cellsObj['leveled'] as Record<string, unknown>)
+    : null
+  const extreme = cellsObj && (cellsObj['extreme'] && typeof cellsObj['extreme'] === 'object')
+    ? (cellsObj['extreme'] as Record<string, unknown>)
+    : null
+
+  // Missing cells / leveled / extreme topology -> shape invalid (P0-3).
+  if (!cellsObj || leveled === null || extreme === null) return null
+
+  // G5 extreme must be empty (P0-4); any non-empty extreme -> shape invalid.
+  if (!allowExtreme && Object.keys(extreme).length > 0) return null
+
+  return { raw: o, status, denominator, cells: cellsObj, leveled, extreme }
+}
+
 interface RawLeveledCell {
   event_type?: unknown
   direction?: unknown
@@ -225,28 +266,12 @@ function parseCanonicalLeveledCell(
 export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | undefined): StructureBreakTurnVM | null {
   if (!groupFacts || typeof groupFacts !== 'object') return null
   const raw = groupFacts['bos_choch_events']
-  if (raw === null || typeof raw !== 'object') return null
-  const o = raw as Record<string, unknown>
-  const status = normalizeEventStatus(o['status'])
-  const denominator = isFiniteNumber(o['denominator']) ? (o['denominator'] as number) : null
-  const cells = o['cells']
-  const leveledMap =
-    cells && typeof cells === 'object' && (cells as Record<string, unknown>)['leveled']
-      ? ((cells as Record<string, unknown>)['leveled'] as Record<string, unknown>)
-      : {}
-
-  // Outer contract fail-closed (R3D-V §2):
-  // - status must be exactly "ready"/"unavailable"
-  // - ready requires finite integer denominator > 0
-  // - ready + denominator == 0 is NOT a current production state -> invalid
-  const contractInvalid =
-    status === 'invalid' || (status === 'ready' && !(Number.isInteger(denominator) && (denominator as number) > 0))
-
-  if (status === 'unavailable') {
+  const bundle = extractEventBundle(raw, false) // G5 rejects any extreme
+  if (bundle === null) {
     return {
       groupKey: 'structure_break_turn',
       availability: 'unavailable',
-      contractInvalid: false,
+      contractInvalid: true,
       zeroEventToday: false,
       denominator: null,
       leveled: [],
@@ -255,10 +280,31 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
     }
   }
 
-  if (contractInvalid) {
+  const { status, denominator, leveled, extreme } = bundle
+
+  // UNAVAILABLE strict shape (P0-2): status=unavailable requires
+  // denominator===null AND both maps genuinely empty.
+  if (status === 'unavailable') {
+    const strictUnavailable =
+      denominator === null && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
     return {
       groupKey: 'structure_break_turn',
-      availability: 'ready', // nominal; renderer must treat contractInvalid as fail-closed
+      availability: 'unavailable',
+      contractInvalid: !strictUnavailable,
+      zeroEventToday: false,
+      denominator: null,
+      leveled: [],
+      hasContractInvalidity: false,
+      hasMalformedCell: false,
+    }
+  }
+
+  // READY strict shape (P0-1/P0-3): status=ready, finite int denominator>0.
+  const readyShapeValid = status === 'ready' && Number.isInteger(denominator) && (denominator as number) > 0
+  if (!readyShapeValid) {
+    return {
+      groupKey: 'structure_break_turn',
+      availability: 'ready',
       contractInvalid: true,
       zeroEventToday: false,
       denominator: status === 'ready' ? denominator : null,
@@ -268,11 +314,11 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
     }
   }
 
-  // ready: collect leveled (only BOS/CHoCH accepted; others fail closed)
-  const leveled: LeveledStructureEventCell[] = []
+  // ready + cells present: parse leveled (only BOS/CHoCH).
+  const parsedLeveled: LeveledStructureEventCell[] = []
   let hasContractInvalidity = false
   let hasMalformedCell = false
-  for (const [key, val] of Object.entries(leveledMap)) {
+  for (const [key, val] of Object.entries(leveled)) {
     const parsed = parseCanonicalLeveledCell(key, val, G5_LEVELED_TYPES)
     if (parsed === 'invalid') {
       hasMalformedCell = true
@@ -283,10 +329,11 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
       continue
     }
     if (parsed.malformed) hasMalformedCell = true
-    leveled.push(parsed)
+    parsedLeveled.push(parsed)
   }
 
-  const zeroEventToday = leveled.length === 0
+  // zeroEventToday only when RAW maps are genuinely empty AND bundle valid (P0-6).
+  const zeroEventToday = Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
 
   return {
     groupKey: 'structure_break_turn',
@@ -294,7 +341,7 @@ export function parseStructureBreakTurn(groupFacts: Record<string, unknown> | un
     contractInvalid: false,
     zeroEventToday,
     denominator,
-    leveled,
+    leveled: parsedLeveled,
     hasContractInvalidity,
     hasMalformedCell,
   }
@@ -356,77 +403,89 @@ export function parseStructureEvolutionPosition(groupFacts: Record<string, unkno
   let eventsMalformed = false
   let hasContractInvalidity = false
 
-  if (raw && typeof raw === 'object') {
-    const o = raw as Record<string, unknown>
-    const status = normalizeEventStatus(o['status'])
-    const denominator = isFiniteNumber(o['denominator']) ? (o['denominator'] as number) : null
-    const cells = o['cells']
-    const leveledMap =
-      cells && typeof cells === 'object' && (cells as Record<string, unknown>)['leveled']
-        ? ((cells as Record<string, unknown>)['leveled'] as Record<string, unknown>)
-        : {}
-    const extremeMap =
-      cells && typeof cells === 'object' && (cells as Record<string, unknown>)['extreme']
-        ? ((cells as Record<string, unknown>)['extreme'] as Record<string, unknown>)
-        : {}
+  // Strict outer shape validation (P0-1..P0-3). G6 permits extreme (EQH/EQL).
+  const bundle = extractEventBundle(raw, true)
+  if (bundle !== null) {
+    const { status, denominator, leveled, extreme } = bundle
 
-    const contractInvalid =
-      status === 'invalid' || (status === 'ready' && !(Number.isInteger(denominator) && (denominator as number) > 0))
+    // UNAVAILABLE strict shape (P0-2): denominator===null AND both maps empty.
+    if (status === 'unavailable') {
+      const strictUnavailable =
+        denominator === null && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
+      events = {
+        availability: 'unavailable',
+        contractInvalid: !strictUnavailable,
+        denominator: null,
+        zeroEventToday: false,
+        leveled: [],
+        extreme: [],
+        hasContractInvalidity: false,
+      }
+    } else {
+      // READY strict shape (P0-1/P0-3): status=ready, finite int denominator>0.
+      const readyShapeValid = status === 'ready' && Number.isInteger(denominator) && (denominator as number) > 0
 
-    const leveled: LeveledStructureEventCell[] = []
-    if (status !== 'unavailable' && !contractInvalid) {
-      for (const [key, val] of Object.entries(leveledMap)) {
-        const parsed = parseCanonicalLeveledCell(key, val, G6_LEVELED_TYPES)
-        if (parsed === 'invalid') {
-          eventsMalformed = true
-          continue
+      const parsedLeveled: LeveledStructureEventCell[] = []
+      const parsedExtreme: ExtremeStructureEventCell[] = []
+      if (readyShapeValid) {
+        for (const [key, val] of Object.entries(leveled)) {
+          const parsed = parseCanonicalLeveledCell(key, val, G6_LEVELED_TYPES)
+          if (parsed === 'invalid') {
+            eventsMalformed = true
+            continue
+          }
+          if (parsed === 'unexpected') {
+            hasContractInvalidity = true
+            continue
+          }
+          if (parsed.malformed) eventsMalformed = true
+          parsedLeveled.push(parsed)
         }
-        if (parsed === 'unexpected') {
-          hasContractInvalidity = true
-          continue
+        for (const [key, val] of Object.entries(extreme)) {
+          if (!G6_EXTREME_TYPES.has(key)) {
+            hasContractInvalidity = true
+            continue
+          }
+          if (val === null || typeof val !== 'object') {
+            eventsMalformed = true
+            continue
+          }
+          const e = val as Record<string, unknown>
+          const evCount = isFiniteNonNegInt(e['event_count']) ? (e['event_count'] as number) : null
+          const memCount = isFiniteNonNegInt(e['member_count']) ? (e['member_count'] as number) : null
+          const memRatio = isFiniteNumber(e['member_ratio']) ? (e['member_ratio'] as number) : null
+          if (evCount === null || memCount === null || memRatio === null) {
+            eventsMalformed = true
+            continue
+          }
+          parsedExtreme.push({ eventType: key as 'EQH' | 'EQL', eventCount: evCount, memberCount: memCount, memberRatio: memRatio })
         }
-        if (parsed.malformed) eventsMalformed = true
-        leveled.push(parsed)
+      }
+
+      // zeroEventToday only when RAW maps genuinely empty AND bundle valid (P0-6).
+      const zeroEventToday =
+        readyShapeValid && Object.keys(leveled).length === 0 && Object.keys(extreme).length === 0
+
+      events = {
+        availability: status === 'ready' ? 'ready' : 'unavailable',
+        contractInvalid: !readyShapeValid,
+        denominator: readyShapeValid ? denominator : null,
+        zeroEventToday,
+        leveled: parsedLeveled,
+        extreme: parsedExtreme,
+        hasContractInvalidity,
       }
     }
-
-    const extreme: ExtremeStructureEventCell[] = []
-    for (const [key, val] of Object.entries(extremeMap)) {
-      if (!G6_EXTREME_TYPES.has(key)) {
-        hasContractInvalidity = true
-        continue
-      }
-      if (val === null || typeof val !== 'object') {
-        eventsMalformed = true
-        continue
-      }
-      const e = val as Record<string, unknown>
-      // extreme cell requires finite event_count/member_count/member_ratio (R3D-V §5)
-      const evCount = isFiniteNonNegInt(e['event_count']) ? (e['event_count'] as number) : null
-      const memCount = isFiniteNonNegInt(e['member_count']) ? (e['member_count'] as number) : null
-      const memRatio = isFiniteNumber(e['member_ratio']) ? (e['member_ratio'] as number) : null
-      if (evCount === null || memCount === null || memRatio === null) {
-        eventsMalformed = true
-        continue
-      }
-      extreme.push({
-        eventType: key as 'EQH' | 'EQL',
-        eventCount: evCount,
-        memberCount: memCount,
-        memberRatio: memRatio,
-      })
-    }
-
-    // G6 event availability is preserved from persisted status, NOT inferred from denominator.
-    const availability: StructureEventAvailability = status === 'unavailable' ? 'unavailable' : 'ready'
+  } else {
+    // shapeInvalid: missing cells/leveled/extreme or G5-style extreme rejection.
     events = {
-      availability,
-      contractInvalid,
-      denominator: status === 'unavailable' || contractInvalid ? null : denominator,
-      zeroEventToday: !contractInvalid && status === 'ready' && leveled.length === 0 && extreme.length === 0,
-      leveled,
-      extreme,
-      hasContractInvalidity,
+      availability: 'unavailable',
+      contractInvalid: true,
+      denominator: null,
+      zeroEventToday: false,
+      leveled: [],
+      extreme: [],
+      hasContractInvalidity: false,
     }
   }
 
