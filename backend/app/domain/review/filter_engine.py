@@ -279,11 +279,26 @@ set_evaluator("eval_c3_synchronized_expansion", _eval_c3_synchronized_expansion)
 
 
 def _get_pyramid_v2(context: dict[str, Any]) -> dict[str, Any] | None:
-    """从 context 中安全提取 pyramid_v2 payload。"""
+    """从 context 中安全提取 pyramid_v2 payload (legacy Board ``pyramid_v2``)."""
     pv2 = context.get("pyramid_v2")
     if not isinstance(pv2, dict):
         return None
     return pv2
+
+
+def _get_scope_observation(context: dict[str, Any]) -> dict[str, Any] | None:
+    """从 context 中安全提取 canonical Review ``scope_observation``。
+
+    Slice 4A4 — Board-derived filter consumer cutover.  D2 / D4 read their inputs
+    from the canonical ``scope_observation`` top-level (single source of truth),
+    NOT from the legacy Board ``pyramid_v2``.  Absent / non-dict canonical payload
+    -> ``None`` (D2 / D4 return False with the exact same missing semantics as
+    their pre-cutover behavior).
+    """
+    obs = context.get("scope_observation")
+    if not isinstance(obs, dict):
+        return None
+    return obs
 
 
 def _ratio_value(ratio_obj: Any) -> float | None:
@@ -329,11 +344,16 @@ def _eval_d2_event_freshness_high(
 
     decay_weighted_density >= 0.3
     today_count >= 1 或 last_5d_count >= 3
+
+    Slice 4A4 — consumer cutover: reads from canonical ``scope_observation.freshness``
+    (Review is now the owner).  MUST NOT fall back to ``pyramid_v2.freshness``.
     """
-    pv2 = _get_pyramid_v2(context)
-    if pv2 is None:
+    obs = _get_scope_observation(context)
+    if obs is None:
         return False
-    freshness = pv2.get("freshness") or {}
+    freshness = obs.get("freshness")
+    if not isinstance(freshness, dict):
+        return False
     density = _to_float(freshness.get("decay_weighted_density"))
     if density is None or density < 0.3:
         return False
@@ -370,11 +390,27 @@ def _eval_d4_concentration_high(
 
     hhi >= 0.1 或 top5_contribution >= 0.4
     leader_median_gap > 0
+
+    Slice 4A4 — consumer cutover: reads from canonical
+    ``scope_observation.structure.current_state.technical_state.concentration``
+    (this is the technical-state concentration, NOT price/amount concentration;
+    Review is now the owner).  MUST NOT fall back to ``pyramid_v2.concentration``.
     """
-    pv2 = _get_pyramid_v2(context)
-    if pv2 is None:
+    obs = _get_scope_observation(context)
+    if obs is None:
         return False
-    conc = pv2.get("concentration") or {}
+    structure = obs.get("structure")
+    if not isinstance(structure, dict):
+        return False
+    current_state = structure.get("current_state")
+    if not isinstance(current_state, dict):
+        return False
+    technical_state = current_state.get("technical_state")
+    if not isinstance(technical_state, dict):
+        return False
+    conc = technical_state.get("concentration")
+    if not isinstance(conc, dict):
+        return False
     hhi = _to_float(conc.get("hhi"))
     top5 = _ratio_value(conc.get("top5_contribution"))
     hhi_high = hhi is not None and hhi >= 0.1
@@ -501,24 +537,40 @@ def build_signal_payloads(
         "filter_version": REVIEW_FILTER_VERSION,
         "components_evidence": _collect_components_evidence(context),
     }
-    # [P0-7] D 族信号附加 pyramid_v2 维度证据（PRD §24）
+    # [P0-7] D 族信号附加维度证据（PRD §24）
+    # Slice 4A4 — D2/D4 evidence from canonical scope_observation; D1/D3/D5
+    # remain on legacy pyramid_v2.  ``pyramid_v2_evidence`` key is kept for
+    # forward-compat with the persisted evidence contract; for D2/D4 the values
+    # are now sourced from the canonical Review owner.
     if filt.family == FilterFamily.D:
+        obs = _get_scope_observation(context)
         pv2 = _get_pyramid_v2(context)
-        if pv2 is not None:
+        if obs is not None or pv2 is not None:
+            freshness = {}
+            concentration = {}
+            if obs is not None:
+                freshness = obs.get("freshness") or {}
+                technical_state = (
+                    (obs.get("structure") or {})
+                    .get("current_state") or {}
+                ).get("technical_state") or {}
+                concentration = technical_state.get("concentration") or {}
             evidence["pyramid_v2_evidence"] = {
-                "diffusion": pv2.get("diffusion"),
+                "diffusion": pv2.get("diffusion") if pv2 is not None else None,
                 "freshness": {
-                    k: pv2.get("freshness", {}).get(k)
+                    k: freshness.get(k)
                     for k in (
                         "today_count", "last_5d_count", "last_10d_count",
                         "decay_weighted_density",
                     )
                 },
                 "concentration": {
-                    k: pv2.get("concentration", {}).get(k)
+                    k: concentration.get(k)
                     for k in ("hhi", "leader_median_gap", "leader_symbol")
                 },
-                "relative_strength": pv2.get("relative_strength"),
+                "relative_strength": (
+                    pv2.get("relative_strength") if pv2 is not None else None
+                ),
             }
 
     # rank_key（PRD §8.4）
@@ -720,7 +772,7 @@ if __name__ == "__main__":
     assert payload["rank_key"]["scope_type_priority"] == 1
     print(f"OK: filter_engine hits={len(hits)} rank_key={payload['rank_key']}")
 
-    # [P0-7] D 族筛选器自测：pyramid_v2 维度偏差
+    # [P0-7] D 族筛选器自测：canonical scope_observation（D2/D4）+ pyramid_v2（D1/D3/D5）
     ctx_d = {
         "P": {"value": 50, "status": "ready", "components": []},
         "Q": {"value": 50, "status": "ready", "components": []},
@@ -728,6 +780,27 @@ if __name__ == "__main__":
         "C": {"value": 50, "status": "ready", "components": []},
         "V": {"value": 50, "status": "ready", "components": []},
         "coverage": 0.98,
+        # Slice 4A4 — D2/D4 must read from canonical scope_observation.
+        "scope_observation": {
+            "freshness": {
+                "today_count": 2,
+                "last_5d_count": 5,
+                "decay_weighted_density": 0.45,
+            },
+            "structure": {
+                "current_state": {
+                    "technical_state": {
+                        "concentration": {
+                            "hhi": 0.15,
+                            "top5_contribution": {"numerator": 0.5, "denominator": 1.0},
+                            "leader_median_gap": 3.5,
+                            "leader_symbol": "000001",
+                        },
+                    },
+                },
+            },
+        },
+        # D1 / D3 / D5 remain on legacy pyramid_v2 (this Slice only cuts D2/D4).
         "pyramid_v2": {
             "diffusion": {
                 "positive_migration_count": 8,
@@ -736,17 +809,6 @@ if __name__ == "__main__":
                 "positive_ratio": {"numerator": 8, "denominator": 11},
                 "negative_ratio": {"numerator": 3, "denominator": 11},
                 "participation_coverage": {"numerator": 15, "denominator": 40},
-            },
-            "freshness": {
-                "today_count": 2,
-                "last_5d_count": 5,
-                "decay_weighted_density": 0.45,
-            },
-            "concentration": {
-                "hhi": 0.15,
-                "top5_contribution": {"numerator": 0.5, "denominator": 1.0},
-                "leader_median_gap": 3.5,
-                "leader_symbol": "000001",
             },
             "relative_strength": {
                 "vs_market": {"ratio": 1.25, "label": "strong", "diff": 0.15},
@@ -758,16 +820,16 @@ if __name__ == "__main__":
     d_types = {f.signal_type for f in d_hits}
     print(f"D-family hits: {d_types}")
     assert "state_migration_positive" in d_types, "D1 应命中"
-    assert "event_freshness_high" in d_types, "D2 应命中"
+    assert "event_freshness_high" in d_types, "D2 应命中（canonical freshness）"
     assert "breadth_expansion" in d_types, "D3 应命中（coverage=0.375>=0.3, total=11>=5）"
-    assert "concentration_high" in d_types, "D4 应命中"
+    assert "concentration_high" in d_types, "D4 应命中（canonical technical-state concentration）"
     assert "relative_strength_strong" in d_types, "D5 应命中"
 
-    # 无 pyramid_v2 时 D 族不命中
+    # 无 canonical scope_observation（且无 pyramid_v2）时 D 族不命中
     ctx_no_pv2 = {"P": {}, "Q": {}, "U": {}, "C": {}, "V": {}, "coverage": 0.98}
     d_hits_empty = evaluate_filters(ctx_no_pv2)
     d_types_empty = {f.signal_type for f in d_hits_empty}
-    assert not any(f.family.value == "D" for f in d_hits_empty), "无 pyramid_v2 时 D 族不应命中"
-    print(f"OK: no-pyramid_v2 D-family hits: {d_types_empty}")
+    assert not any(f.family.value == "D" for f in d_hits_empty), "无 canonical/旧 payload 时 D 族不应命中"
+    print(f"OK: no-D-inputs D-family hits: {d_types_empty}")
 
     print("OK: filter_engine verified")

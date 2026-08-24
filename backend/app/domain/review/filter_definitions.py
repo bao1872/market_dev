@@ -400,16 +400,22 @@ FILTER_C3_SYNCHRONIZED_EXPANSION = FilterDefinition(
 # =============================================================================
 # D 族：第二金字塔维度偏差筛选器（PRD §24）
 #
-# 输入上下文：context["pyramid_v2"]，来自 board_analysis_snapshots.payload["pyramid_v2"]
-# 维度（PRD §24.1）：
-# - 状态迁移（state migration）：pyramid_v2.state_transitions / pyramid_v2.diffusion
-# - 事件新鲜度（event freshness）：pyramid_v2.freshness
-# - 覆盖率/宽度（breadth）：pyramid_v2.diffusion.participation_coverage
-# - 集中度（concentration）：pyramid_v2.concentration
-# - 相对强度（relative strength）：pyramid_v2.relative_strength
+# Slice 4A4 — consumer cutover：
+# - D2（事件新鲜度）读取 canonical ``scope_observation.freshness``（Review owner）；
+# - D4（集中度）读取 canonical
+#   ``scope_observation.structure.current_state.technical_state.concentration``
+#   （technical-state concentration，Review owner）；
+# - D1 / D3 / D5 仍读取 legacy ``context["pyramid_v2"]``。
 #
-# D 族筛选器只在 pyramid_v2 数据可用时评估；market/major_index/style 等
-# 无 board_analysis 的 scope 不命中 D 族（context 无 pyramid_v2 时评估器返回 False）。
+# 维度（PRD §24.1）：
+# - 状态迁移（state migration）：D1 pyramid_v2.diffusion（legacy）
+# - 事件新鲜度（event freshness）：D2 scope_observation.freshness（canonical）
+# - 覆盖率/宽度（breadth）：D3 pyramid_v2.diffusion.participation_coverage（legacy）
+# - 集中度（concentration）：D4 scope_observation...technical_state.concentration（canonical）
+# - 相对强度（relative strength）：D5 pyramid_v2.relative_strength（legacy）
+#
+# D 族筛选器只在对应输入数据可用时评估；market/major_index/style 等
+# 无数据来源的 scope 不命中 D 族（评估器返回 False）。
 # =============================================================================
 
 # D1 state_migration_positive（PRD §24.1 状态迁移）
