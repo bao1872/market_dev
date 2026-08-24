@@ -618,30 +618,27 @@ stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → 
 
 **真实执行链**（`after_close_orchestrator.py:publishing` 之后的 `computing_review` 阶段）：
 
-```python
-# 前置：AfterClose 主链 publishing 阶段后，stock_core 已正式发布且 snapshot_run_id 存在
-# （Board Analysis / market_aggregation 不是当前 Review compute / publication prerequisite）
+```text
+当前执行流（high-level，非伪代码函数签名）：
 
-# 步骤 1：review_orchestrator_service.create_run()（幂等：同输入返回同 run）
-#   - 内部仅解析已发布 stock_core publication；Board / market_aggregation 不查询
-#   - source_board_run_id 恒为 NULL（legacy lineage 字段，Slice 4A5 Board-independent）
-review_run_id = review_orchestrator_service.create_run(
-    trade_date        = trade_date,
-    canary            = False,
-    dry_run           = False,
-    idempotency_key   = ...,
-)
+1. 前置：AfterClose 主链 publishing 阶段后，stock_core 已正式发布且 snapshot_run_id 存在
+   （Board Analysis / market_aggregation 不是当前 Review compute / publication prerequisite）
 
-# 步骤 2：review_orchestrator_service.compute_run / resume_run（按 scope 逐项计算，失败记录 reason，支持幂等）
-compute_status = review_orchestrator_service.compute_run(review_run_id)
-if compute_status != 'succeeded':
-    raise AfterCloseReviewError(review_run_id, compute_status)
+2. create / reuse ReviewRun：source_board_run_id = NULL（legacy lineage 字段，Slice 4A5 Board-independent）
 
-# 步骤 3：evaluate publish gate → review_orchestrator_service.publish_review（切换 review_publications.published_run_id）
-pub_status = review_orchestrator_service.publish_review(review_run_id)
+3. 若 Review 已正式发布 → 幂等复用，不再重算；否则：
+      compute_run / resume_run（按 scope 逐项计算，失败记录 reason，支持幂等）
+         ↓
+      evaluate publish gate
+         ↓
+      publish Review（切换 review_publications.published_run_id）
 
-# 步骤 4：主任务 only after 上面三步都 succeeded → 主任务 SUCCEEDED
-# 若任一步失败：主任务 FAILED，metadata.review_run_id / review_status / review_reason 回写
+4. 状态语义：
+   - Review 成功：正常发布。
+   - Review 计算失败 / 质量门阻塞 / 发布失败：写入 review 失败 metadata；
+     父 AfterClose **不因** Review 失败而整体 FAILED（core 已发布后仅收 partial_success）。
+   - 仅成功的 Review 推进 computing_review 检查点；
+     失败的 Review 只刷新心跳、不推进 last_completed_step。
 ```
 
 位置：`backend/app/services/after_close_orchestrator.py` 的 `computing_review` 阶段（在 publishing 后，watchlist_ready 前）。
