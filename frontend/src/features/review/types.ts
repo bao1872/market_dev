@@ -188,6 +188,19 @@ export interface ReviewScopeSummary {
   migration: number | null
 }
 
+/** 列表单条记录的 Observation Fact 薄投影（R2B）：独立于 Composition summary，
+ * 仅含已 persisted 的 freshness / technical 标量；缺失为 null（0 仍合法）。 */
+export interface ReviewScopeObservationSummary {
+  freshnessTodayCount: number | null
+  freshnessDecayWeightedDensity: number | null
+  technicalHhi: number | null
+  technicalTop5Numerator: number | null
+  technicalTop5Denominator: number | null
+  technicalLeaderMedianGap: number | null
+  technicalLeaderSymbol: string | null
+  technicalMemberCount: number | null
+}
+
 /** 列表单条记录：Scope 身份 + readiness + 薄投影（永远不含 p/q/u/c/v/signalCount） */
 export interface ReviewScopeListItem {
   scopeType: ReviewScopeFamily
@@ -199,6 +212,7 @@ export interface ReviewScopeListItem {
   providedCount: number
   coverageRatio: number | null
   summary: ReviewScopeSummary | null
+  observationSummary: ReviewScopeObservationSummary | null
 }
 
 /** 列表分页响应 */

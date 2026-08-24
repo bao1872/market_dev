@@ -46,6 +46,7 @@ from app.schemas.review import (
     ReviewOverviewResponse,
     ReviewScopeCompositionDetailResponse,
     ReviewScopeListResponse,
+    ReviewScopeObservationSummaryDTO,
     ReviewScopeSummaryDTO,
 )
 from app.services.access_control_service import (
@@ -183,6 +184,19 @@ def _summary_row_to_dto(
             jaccardStability=row.jaccard_stability,
             migration=row.migration,
         )
+    # R2B Observation Fact thin projection — SEPARATE owner from summary.
+    # Not gated on composition_present; Fact-derived scalars pass through
+    # verbatim (None stays None, 0 stays 0 — no `or 0` coercion).
+    observation_summary = ReviewScopeObservationSummaryDTO(
+        freshnessTodayCount=row.freshness_today_count,
+        freshnessDecayWeightedDensity=row.freshness_decay_weighted_density,
+        technicalHhi=row.technical_hhi,
+        technicalTop5Numerator=row.technical_top5_numerator,
+        technicalTop5Denominator=row.technical_top5_denominator,
+        technicalLeaderMedianGap=row.technical_leader_median_gap,
+        technicalLeaderSymbol=row.technical_leader_symbol,
+        technicalMemberCount=row.technical_member_count,
+    )
     return ReviewCanonicalScopeResponse(
         scopeType=row.scope_type,
         scopeKey=row.scope_key,
@@ -193,6 +207,7 @@ def _summary_row_to_dto(
         providedCount=provided,
         coverageRatio=float(provided / eligible) if eligible > 0 else None,
         summary=summary,
+        observationSummary=observation_summary,
     )
 
 

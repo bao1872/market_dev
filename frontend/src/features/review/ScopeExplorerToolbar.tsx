@@ -28,7 +28,7 @@ const READINESS_OPTIONS: ReadonlyArray<ReviewCompositionReadiness> = [
   'unavailable_current',
 ]
 
-// R2A：排序枚举 → 用户可见标签（降序，仅展示最强/最高 persisted 事实，不做机会标签）
+// R2A/R2B：排序枚举 → 用户可见标签（降序，仅展示最强/最高 persisted 事实，不做机会标签）
 const SORT_OPTIONS: ReadonlyArray<{ value: ReviewSort; label: string }> = [
   { value: 'velocity_desc', label: 'Velocity ↓' },
   { value: 'acceleration_desc', label: 'Acceleration ↓' },
@@ -37,6 +37,10 @@ const SORT_OPTIONS: ReadonlyArray<{ value: ReviewSort; label: string }> = [
   { value: 'capital_tilt_desc', label: 'Capital Tilt ↓' },
   { value: 'migration_desc', label: 'Leadership Migration ↓' },
   { value: 'coverage_desc', label: 'Coverage ↓' },
+  { value: 'freshness_density_desc', label: 'Freshness ρ ↓' },
+  { value: 'freshness_today_desc', label: 'Today Events ↓' },
+  { value: 'technical_hhi_desc', label: 'Tech HHI ↓' },
+  { value: 'leader_median_gap_desc', label: 'Leader Gap ↓' },
 ]
 
 export interface ScopeExplorerToolbarProps {

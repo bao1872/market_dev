@@ -115,6 +115,7 @@ test('B1. ReviewScopeListItem.summary 允许为 null', () => {
     providedCount: 42,
     coverageRatio: 1,
     summary: null,
+    observationSummary: null,
   }
   assert.equal(sample.summary, null, 'Composition 缺失时 summary=null（不伪造全 0）')
 })
@@ -174,6 +175,7 @@ test('B4. canonical list item 不要求 p/q/u/c/v/signalCount', () => {
     providedCount: 5,
     coverageRatio: 0.5,
     summary: null,
+    observationSummary: null,
   }
   assertMissingKeys(item, ['p', 'q', 'u', 'c', 'v', 'signalCount'])
 })
@@ -807,6 +809,7 @@ test('H6. canonical Scope 类型仍编译并保留关键字段', () => {
     providedCount: 10,
     coverageRatio: 1,
     summary: null,
+    observationSummary: null,
   }
   assert.ok(item.scopeKey)
   const list: ReviewScopeListResponse = {

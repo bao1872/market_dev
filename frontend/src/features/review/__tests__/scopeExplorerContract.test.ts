@@ -27,7 +27,7 @@ import {
   computeEffectivePage,
 } from '../scopeExplorerViewModel'
 import { loadFamilySnapshot, FAMILY_SNAPSHOT_PAGE_SIZE } from '../useReviewScopeFamilySnapshot'
-import { formatPosition, formatPercentNullable, NULL_DISPLAY } from '../reviewFormat'
+import { formatPosition, formatPercentNullable, formatContributionFraction, NULL_DISPLAY } from '../reviewFormat'
 import {
   DEFAULT_REVIEW_VIEW,
   DEFAULT_REVIEW_SORT,
@@ -42,6 +42,7 @@ import type { ReviewSort } from '../urlState'
 import type {
   ReviewScopeListItem,
   ReviewScopeSummary,
+  ReviewScopeObservationSummary,
   ReviewScopeListResponse,
 } from '../types'
 
@@ -93,6 +94,7 @@ function makeItem(
     providedCount: 10,
     coverageRatio: 1,
     summary: null,
+    observationSummary: null,
     ...overrides,
   }
 }
@@ -752,7 +754,8 @@ function itemsForSortField(field: keyof NonNullable<ReviewScopeListItem['summary
 }
 
 test('SORT-6..12 共同：每个排序字段含正/零/负/null 时 null 恒最后', () => {
-  const fieldBySort: Record<ReviewSort, keyof NonNullable<ReviewScopeListItem['summary']>> = {
+  // 仅 composition 字段参与本组测试（R2B 的 4 个 observation 字段在 R2B-FE 段单独验证）
+  const fieldBySort: Partial<Record<ReviewSort, keyof NonNullable<ReviewScopeListItem['summary']>>> = {
     velocity_desc: 'velocity',
     acceleration_desc: 'acceleration',
     position_desc: 'position',
@@ -776,7 +779,7 @@ test('SORT-6..12 共同：每个排序字段含正/零/负/null 时 null 恒最�
       assert.deepEqual(sorted.slice(-2).sort(), ['noval', 'nullv'], `coverage_desc 两个 null 在最后`)
       continue
     }
-    const items = itemsForSortField(fieldBySort[s])
+    const items = itemsForSortField(fieldBySort[s]!)
     const sorted = sortScopes(items, s).map((i) => i.scopeKey)
     // 0.5 > 0 > -0.2 在前，undefined(summary=null) 与 null(field=null) 占据最后两位
     assert.deepEqual(sorted.slice(0, 3), ['pos', 'zero', 'neg'], `sort=${s}: 数值降序在前`)
@@ -835,3 +838,128 @@ test('SORT-15. Workspace 把 urlState.sort 同时喂给 Trajectory（filteredSor
   assert.match(traj, /\(pos \/ 100\)/, 'Trajectory x 仍由 position 决定')
   assert.match(traj, /velocity/, 'Trajectory y 仍由 velocity 决定')
 })
+
+// ============================================================
+// R2B. Observation Thin Projection + Cross-sectional Scan（§10..18）
+// ============================================================
+
+// 构造一个带 observationSummary 的 item（默认字段全 0/null，便于单独设置）
+function makeObs(overrides: Partial<ReviewScopeObservationSummary> = {}): ReviewScopeObservationSummary {
+  return {
+    freshnessTodayCount: null,
+    freshnessDecayWeightedDensity: null,
+    technicalHhi: null,
+    technicalTop5Numerator: null,
+    technicalTop5Denominator: null,
+    technicalLeaderMedianGap: null,
+    technicalLeaderSymbol: null,
+    technicalMemberCount: null,
+    ...overrides,
+  }
+}
+
+test('R2B-FE-1. ReviewScopeListItem 接受 observationSummary', () => {
+  const item = makeItem('k1', { observationSummary: makeObs({ freshnessTodayCount: 3 }) })
+  assert.equal(item.observationSummary?.freshnessTodayCount, 3)
+})
+
+test('R2B-FE-2. freshnessTodayCount=0 存活（非 null）', () => {
+  const item = makeItem('k1', { observationSummary: makeObs({ freshnessTodayCount: 0 }) })
+  assert.equal(item.observationSummary?.freshnessTodayCount, 0)
+  assert.notEqual(item.observationSummary?.freshnessTodayCount, null)
+})
+
+test('R2B-FE-3. freshnessDensity=0 存活（非 null）', () => {
+  const item = makeItem('k1', { observationSummary: makeObs({ freshnessDecayWeightedDensity: 0 }) })
+  assert.equal(item.observationSummary?.freshnessDecayWeightedDensity, 0)
+})
+
+test('R2B-FE-4. technicalHhi=0 存活（非 null）', () => {
+  const item = makeItem('k1', { observationSummary: makeObs({ technicalHhi: 0 }) })
+  assert.equal(item.observationSummary?.technicalHhi, 0)
+})
+
+test('R2B-FE-5. top5 denominator=0 渲染 "—"（不显示 0%）', () => {
+  const item = makeItem('k1', {
+    observationSummary: makeObs({ technicalTop5Numerator: 0, technicalTop5Denominator: 0 }),
+  })
+  // 使用既有 display formatter，den=0 返回 NULL_DISPLAY
+  assert.equal(formatContributionFraction({ numerator: 0, denominator: 0 }), NULL_DISPLAY)
+  assert.equal(item.observationSummary?.technicalTop5Denominator, 0)
+})
+
+test('R2B-FE-6. leaderSymbol=null 渲染 "—"', () => {
+  const item = makeItem('k1', { observationSummary: makeObs({ technicalLeaderSymbol: null }) })
+  assert.equal(item.observationSummary?.technicalLeaderSymbol, null)
+})
+
+test('R2B-FE-7. 四个新 sort 均 URL 往返一致', () => {
+  const news: ReviewSort[] = [
+    'freshness_density_desc',
+    'freshness_today_desc',
+    'technical_hhi_desc',
+    'leader_median_gap_desc',
+  ]
+  for (const s of news) {
+    assert.equal(normalizeSort(s), s, `合法 sort ${s} 必须原样保留`)
+    const url = encodeReviewUrl({ ...defaultReviewUrlState(), sort: s })
+    assert.equal(decodeReviewUrl(url).sort, s, `sort=${s} 必须往返一致`)
+  }
+})
+
+test('R2B-FE-8. 每个新 sort 只读取其精确 observationSummary 字段（矛盾 fixture）', () => {
+  // 每个 item 在其对应字段取极大值，其余 observation 字段为 null；
+  // 验证 sort 只按本字段排序，不串字段。
+  const items = [
+    makeItem('A', { observationSummary: makeObs({ freshnessDecayWeightedDensity: 99 }) }),
+    makeItem('B', { observationSummary: makeObs({ freshnessTodayCount: 99 }) }),
+    makeItem('C', { observationSummary: makeObs({ technicalHhi: 99 }) }),
+    makeItem('D', { observationSummary: makeObs({ technicalLeaderMedianGap: 99 }) }),
+    // 同时令 summary（composition）字段极大，证明不串到 composition
+    makeItem('E', { summary: makeSummary({ position: 999, velocity: 999 }) }),
+  ]
+  assert.deepEqual(sortScopes(items, 'freshness_density_desc').map((i) => i.scopeKey), ['A', 'B', 'C', 'D', 'E'], 'freshness_density 只排 density')
+  assert.deepEqual(sortScopes(items, 'freshness_today_desc').map((i) => i.scopeKey), ['B', 'A', 'C', 'D', 'E'], 'freshness_today 只排 today')
+  assert.deepEqual(sortScopes(items, 'technical_hhi_desc').map((i) => i.scopeKey), ['C', 'A', 'B', 'D', 'E'], 'technical_hhi 只排 hhi')
+  assert.deepEqual(sortScopes(items, 'leader_median_gap_desc').map((i) => i.scopeKey), ['D', 'A', 'B', 'C', 'E'], 'leader_gap 只排 gap')
+})
+
+test('R2B-FE-9. 新 sort 仍遵守 null-last 契约', () => {
+  const items = [
+    makeItem('pos', { observationSummary: makeObs({ technicalHhi: 0.5 }) }),
+    makeItem('zero', { observationSummary: makeObs({ technicalHhi: 0 }) }),
+    makeItem('neg', { observationSummary: makeObs({ technicalHhi: -0.2 }) }),
+    makeItem('nullv', { observationSummary: makeObs({ technicalHhi: null }) }),
+    makeItem('noval', { observationSummary: null }),
+  ]
+  assert.deepEqual(sortScopes(items, 'technical_hhi_desc').map((i) => i.scopeKey).slice(0, 3), ['pos', 'zero', 'neg'], 'technical_hhi 数值降序在前')
+  assert.deepEqual(sortScopes(items, 'technical_hhi_desc').map((i) => i.scopeKey).slice(-2).sort(), ['noval', 'nullv'], 'technical_hhi 两个 null 类在最后')
+})
+
+test('R2B-FE-10. filter → selected sort → paginate 顺序不变（含新 sort）', () => {
+  const items = Array.from({ length: 12 }, (_, i) =>
+    makeItem(`k${i}`, { observationSummary: makeObs({ freshnessTodayCount: i }) }),
+  )
+  const query = buildScopeExplorerQuery('k', null, null)
+  const p2 = applyScopeExplorerPipeline(items, query, 2, 2, 'freshness_today_desc')
+  assert.equal(p2.items[0].scopeKey, 'k9', '第 2 页顶行 = 全局第 3（整组排序后分页）')
+  assert.equal(p2.items[1].scopeKey, 'k8')
+})
+
+test('R2B-FE-11. Trajectory 与 Table 仍共用同一 selected sort', () => {
+  const src = read('ScopeExplorerWorkspace.tsx')
+  assert.match(src, /sortScopes\(filterScopes\(snapshotItems, query\), urlState\.sort\)/, 'Trajectory 源仍用 urlState.sort')
+  assert.match(src, /applyScopeExplorerPipeline\(snapshotItems, query, urlState\.page, urlState\.pageSize, urlState\.sort\)/, 'Table 源仍用同一 urlState.sort')
+  assert.doesNotMatch(src, /sortVelocityDesc/, 'Workspace 不得保留旧 sortVelocityDesc')
+})
+
+test('R2B-FE-12. 列表渲染不新增 detail 请求', () => {
+  // 源码契约：Table 仅消费 item.observationSummary（已加载薄投影），不调用 useReviewScopeDetail
+  const tbl = read('ScopeExplorerTable.tsx')
+  assert.match(tbl, /FreshnessCell/, 'Table 必须渲染 FreshnessCell')
+  assert.match(tbl, /TechnicalCell/, 'Table 必须渲染 TechnicalCell')
+  assert.match(tbl, /obs=\{row\.observationSummary\}/, '单元格必须消费 observationSummary')
+  // 不得出现对 detail hook 的依赖
+  assert.doesNotMatch(tbl, /useReviewScopeDetail/, '列表渲染不得新增 detail 请求')
+})
+

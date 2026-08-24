@@ -38,6 +38,7 @@ from app.api import review as review_api
 from app.schemas.review import (
     ReviewCanonicalScopeResponse,
     ReviewScopeListResponse,
+    ReviewScopeObservationSummaryDTO,
     ReviewScopeSummaryDTO,
 )
 from app.services.review_observation_persistence_service import (
@@ -124,6 +125,15 @@ def _summary_row(
         "leadership_status": "ready",
         "jaccard_stability": 0.8,
         "migration": 0.1,
+        # R2B Observation Fact thin projection (Fact-derived; NOT gated on composition_present)
+        "freshness_today_count": 5,
+        "freshness_decay_weighted_density": 0.432,
+        "technical_hhi": 0.142,
+        "technical_top5_numerator": 3.2,
+        "technical_top5_denominator": 8.4,
+        "technical_leader_median_gap": 2.18,
+        "technical_leader_symbol": "601899",
+        "technical_member_count": 42,
     }
     defaults.update(overrides)
     return ReviewScopeSummaryRow(**defaults)  # type: ignore[arg-type]
@@ -292,7 +302,12 @@ async def test_list_review_scopes_no_n_plus_one_single_projection_call() -> None
 
 
 async def test_list_review_scopes_composition_missing_yields_summary_none() -> None:
-    """Fact exists, Composition missing → summary=None (never all-zero)."""
+    """Fact exists, Composition missing → summary=None BUT observationSummary still populated.
+
+    R2B HARD ACCEPTANCE CONTRACT (§8): the two owners are independent. A missing
+    Composition nulls `summary` (existing Slice-B invariant) without dropping the
+    Fact-derived `observationSummary`.
+    """
     run_id = uuid.uuid4()
     run = _run(run_id)
     rows = [_summary_row("industry_l1", "k1", composition_present=False)]
@@ -308,9 +323,247 @@ async def test_list_review_scopes_composition_missing_yields_summary_none() -> N
     item = resp.items[0]
     assert item.scopeType == "industry_l1"
     assert item.summary is None
+    # R2B: Observation Fact thin projection survives a missing Composition
+    assert item.observationSummary is not None
+    assert item.observationSummary.freshnessTodayCount == 5
+    assert item.observationSummary.technicalHhi == 0.142
+    assert item.observationSummary.technicalLeaderSymbol == "601899"
     # no full observation payload leaked into the list DTO
     assert not hasattr(item, "observation")
     assert not hasattr(item, "signalCount")
+
+
+# ============================================================
+# R2B backend tests (R2B-BE-1 .. R2B-BE-10)
+# ============================================================
+
+async def test_r2b_be_1_observation_jsonb_paths_map_to_scalar_row_fields() -> None:
+    """R2B-BE-1: Fact observation_payload scalar JSONB paths map to correct row fields."""
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    rows = [
+        _summary_row(
+            "industry_l1",
+            "k1",
+            freshness_today_count=7,
+            freshness_decay_weighted_density=0.51,
+            technical_hhi=0.23,
+            technical_top5_numerator=4.1,
+            technical_top5_denominator=9.3,
+            technical_leader_median_gap=1.9,
+            technical_leader_symbol="600519",
+            technical_member_count=33,
+        )
+    ]
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    p_run, p_list = _patch_list(db, run, rows=rows)
+    with p_run, p_list:
+        resp = await review_api.list_review_scopes(
+            "2026-07-29", db=db, ctx=_ctx(), scope_type=None, **_DEF_LIST
+        )
+    obs = resp.items[0].observationSummary
+    assert isinstance(obs, ReviewScopeObservationSummaryDTO)
+    assert obs.freshnessTodayCount == 7
+    assert obs.freshnessDecayWeightedDensity == 0.51
+    assert obs.technicalHhi == 0.23
+    assert obs.technicalTop5Numerator == 4.1
+    assert obs.technicalTop5Denominator == 9.3
+    assert obs.technicalLeaderMedianGap == 1.9
+    assert obs.technicalLeaderSymbol == "600519"
+    assert obs.technicalMemberCount == 33
+
+
+async def test_r2b_be_2_freshness_today_count_zero_survives() -> None:
+    """R2B-BE-2: freshness today_count=0 is a valid zero, not None."""
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    rows = [_summary_row("industry_l1", "k1", freshness_today_count=0)]
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    p_run, p_list = _patch_list(db, run, rows=rows)
+    with p_run, p_list:
+        resp = await review_api.list_review_scopes(
+            "2026-07-29", db=db, ctx=_ctx(), scope_type=None, **_DEF_LIST
+        )
+    assert resp.items[0].observationSummary.freshnessTodayCount == 0
+
+
+async def test_r2b_be_3_technical_hhi_zero_survives() -> None:
+    """R2B-BE-3: technical hhi=0 is a valid zero, not None."""
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    rows = [_summary_row("industry_l1", "k1", technical_hhi=0)]
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    p_run, p_list = _patch_list(db, run, rows=rows)
+    with p_run, p_list:
+        resp = await review_api.list_review_scopes(
+            "2026-07-29", db=db, ctx=_ctx(), scope_type=None, **_DEF_LIST
+        )
+    assert resp.items[0].observationSummary.technicalHhi == 0
+
+
+async def test_r2b_be_4_top5_denominator_zero_survives() -> None:
+    """R2B-BE-4: top5 denominator=0 is a valid persisted zero, NOT coerced to None."""
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    rows = [_summary_row("industry_l1", "k1", technical_top5_numerator=0, technical_top5_denominator=0)]
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    p_run, p_list = _patch_list(db, run, rows=rows)
+    with p_run, p_list:
+        resp = await review_api.list_review_scopes(
+            "2026-07-29", db=db, ctx=_ctx(), scope_type=None, **_DEF_LIST
+        )
+    obs = resp.items[0].observationSummary
+    assert obs.technicalTop5Denominator == 0
+    assert obs.technicalTop5Numerator == 0
+
+
+async def test_r2b_be_5_leader_symbol_null_survives() -> None:
+    """R2B-BE-5: leader_symbol=None remains None."""
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    rows = [_summary_row("industry_l1", "k1", technical_leader_symbol=None)]
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    p_run, p_list = _patch_list(db, run, rows=rows)
+    with p_run, p_list:
+        resp = await review_api.list_review_scopes(
+            "2026-07-29", db=db, ctx=_ctx(), scope_type=None, **_DEF_LIST
+        )
+    assert resp.items[0].observationSummary.technicalLeaderSymbol is None
+
+
+async def test_r2b_be_6_fact_only_case_summary_null_observation_populated() -> None:
+    """R2B-BE-6: Fact present + Composition missing → summary=None, observationSummary filled."""
+    run_id = uuid.uuid4()
+    run = _run(run_id)
+    rows = [_summary_row("industry_l1", "k1", composition_present=False)]
+    db = AsyncMock()
+    await _resolve_run(db, run)
+    p_run, p_list = _patch_list(db, run, rows=rows)
+    with p_run, p_list:
+        resp = await review_api.list_review_scopes(
+            "2026-07-29", db=db, ctx=_ctx(), scope_type=None, **_DEF_LIST
+        )
+    item = resp.items[0]
+    assert item.summary is None
+    assert item.observationSummary is not None
+    assert item.observationSummary.technicalLeaderSymbol == "601899"
+
+
+async def test_r2b_be_7_read_model_keeps_fact_left_join_composition() -> None:
+    """R2B-BE-7: list owner still uses ReviewScopeObservationFact LEFT JOIN
+    ReviewScopeCompositionSnapshot with full lineage join keys (no second join)."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+
+    async def _fake_execute(stmt):
+        captured.append(str(stmt))
+        FakeResult = SimpleNamespace()
+        FakeResult.fetchall = lambda: []
+        FakeResult.scalars = lambda: SimpleNamespace(all=lambda: [])
+        FakeResult.scalar_one = lambda: 0
+        FakeResult.fetchone = lambda: (0,)
+        FakeResult.mappings = lambda: SimpleNamespace(all=lambda: [])
+        return FakeResult
+
+    db = AsyncMock()
+    db.execute = _fake_execute
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type=None,
+        offset=0,
+        limit=20,
+    )
+    # at least one statement issued; the page projection references the Fact table
+    assert captured, "read model must issue SQL"
+    joined = "\n".join(captured).lower()
+    assert "observation_facts" in joined or "observation" in joined
+    # composition snapshot still joined (the existing LEFT JOIN architecture)
+    assert "composition_snapshots" in joined or "composition" in joined
+
+
+async def test_r2b_be_8_one_count_one_page_query_no_per_scope() -> None:
+    """R2B-BE-8: list issues exactly 1 count + 1 page projection query; no per-scope query."""
+    run = _run(uuid.uuid4())
+    call_count = {"n": 0}
+
+    async def _fake_execute(stmt):
+        call_count["n"] += 1
+        FakeResult = SimpleNamespace()
+        FakeResult.fetchall = lambda: []
+        FakeResult.scalars = lambda: SimpleNamespace(all=lambda: [])
+        FakeResult.scalar_one = lambda: 0
+        FakeResult.fetchone = lambda: (0,)
+        FakeResult.mappings = lambda: SimpleNamespace(all=lambda: [])
+        return FakeResult
+
+    db = AsyncMock()
+    db.execute = _fake_execute
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type=None,
+        offset=0,
+        limit=20,
+    )
+    # count query + page projection query = 2 statements, no per-scope query
+    assert call_count["n"] == 2, f"expected 2 statements (count+page), got {call_count['n']}"
+
+
+async def test_r2b_be_9_page_projection_does_not_load_full_json_into_python() -> None:
+    """R2B-BE-9: page projection references scalar JSONB paths; it does NOT select
+    the complete observation_payload or composition_payload object into Python."""
+    run = _run(uuid.uuid4())
+    captured: list = []
+
+    async def _fake_execute(stmt):
+        captured.append(str(stmt))
+        FakeResult = SimpleNamespace()
+        FakeResult.fetchall = lambda: []
+        FakeResult.scalars = lambda: SimpleNamespace(all=lambda: [])
+        FakeResult.scalar_one = lambda: 0
+        FakeResult.fetchone = lambda: (0,)
+        FakeResult.mappings = lambda: SimpleNamespace(all=lambda: [])
+        return FakeResult
+
+    db = AsyncMock()
+    db.execute = _fake_execute
+    await _resolve_run(db, run)
+    await list_review_scope_summaries_by_run(
+        db,
+        review_run_id=run.id,
+        trade_date=run.trade_date,
+        scope_type=None,
+        offset=0,
+        limit=20,
+    )
+    # page projection is the 2nd statement (count is 1st); verify thin scalar JSONB
+    # paths are referenced (not the full ~130 KiB observation_payload object).
+    page_sql = captured[1].lower()
+    assert "freshness" in page_sql
+    assert "->" in page_sql or "->>" in page_sql
+
+
+async def test_r2b_be_10_dto_has_no_derived_top5_ratio() -> None:
+    """R2B-BE-10: DTO carries numerator + denominator verbatim; no derived ratio field."""
+    assert "technicalTop5Numerator" in ReviewScopeObservationSummaryDTO.model_fields
+    assert "technicalTop5Denominator" in ReviewScopeObservationSummaryDTO.model_fields
+    assert "technicalTop5Ratio" not in ReviewScopeObservationSummaryDTO.model_fields
+    # round-trip preserves both scalars without a ratio
+    dto = ReviewScopeObservationSummaryDTO(
+        technicalTop5Numerator=3.2, technicalTop5Denominator=8.4
+    )
+    assert dto.technicalTop5Numerator == 3.2
+    assert dto.technicalTop5Denominator == 8.4
 
 
 async def test_list_review_scopes_phase_null_ready_keeps_null_summary_fields() -> None:

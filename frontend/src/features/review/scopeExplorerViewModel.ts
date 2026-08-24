@@ -63,6 +63,14 @@ function sortValueFor(item: ReviewScopeListItem, sort: ReviewSort): number | nul
       return finiteOrNull(item.summary?.migration)
     case 'coverage_desc':
       return finiteOrNull(item.coverageRatio)
+    case 'freshness_density_desc':
+      return finiteOrNull(item.observationSummary?.freshnessDecayWeightedDensity)
+    case 'freshness_today_desc':
+      return finiteOrNull(item.observationSummary?.freshnessTodayCount)
+    case 'technical_hhi_desc':
+      return finiteOrNull(item.observationSummary?.technicalHhi)
+    case 'leader_median_gap_desc':
+      return finiteOrNull(item.observationSummary?.technicalLeaderMedianGap)
     default:
       return finiteOrNull(item.summary?.velocity)
   }

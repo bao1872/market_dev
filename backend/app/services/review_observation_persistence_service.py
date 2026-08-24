@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
-from sqlalchemy import Float, func, select
+from sqlalchemy import Float, Integer, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -535,6 +535,19 @@ class ReviewScopeSummaryRow:
     jaccard_stability: float | None
     migration: float | None
 
+    # Observation Fact thin projection (R2B): scalar JSONB paths from
+    # ReviewScopeObservationFact.observation_payload only.  These are a SEPARATE
+    # owner from the Composition summary above — they are NOT gated on
+    # composition_present and MUST survive a missing Composition.
+    freshness_today_count: int | None
+    freshness_decay_weighted_density: float | None
+    technical_hhi: float | None
+    technical_top5_numerator: float | None
+    technical_top5_denominator: float | None
+    technical_leader_median_gap: float | None
+    technical_leader_symbol: str | None
+    technical_member_count: int | None
+
 
 async def list_review_scope_summaries_by_run(
     db: AsyncSession,
@@ -568,6 +581,7 @@ async def list_review_scope_summaries_by_run(
     fact = ReviewScopeObservationFact
     comp = ReviewScopeCompositionSnapshot
     payload = comp.composition_payload
+    fact_payload = fact.observation_payload
 
     # --- count (same filter as the page) ---
     count_stmt = select(func.count()).select_from(fact).where(
@@ -619,6 +633,16 @@ async def list_review_scope_summaries_by_run(
             payload["leadership"]["status"].astext.label("leadership_status"),
             payload["leadership"]["jaccard_stability"].astext.cast(Float).label("jaccard_stability"),
             payload["leadership"]["migration"].astext.cast(Float).label("migration"),
+            # Observation Fact thin projection (R2B): scalar JSONB paths only —
+            # never load the full ~130 KiB observation_payload into Python.
+            fact_payload["freshness"]["today_count"].astext.cast(Integer).label("freshness_today_count"),
+            fact_payload["freshness"]["decay_weighted_density"].astext.cast(Float).label("freshness_decay_weighted_density"),
+            fact_payload["structure"]["current_state"]["technical_state"]["concentration"]["hhi"].astext.cast(Float).label("technical_hhi"),
+            fact_payload["structure"]["current_state"]["technical_state"]["concentration"]["top5_contribution"]["numerator"].astext.cast(Float).label("technical_top5_numerator"),
+            fact_payload["structure"]["current_state"]["technical_state"]["concentration"]["top5_contribution"]["denominator"].astext.cast(Float).label("technical_top5_denominator"),
+            fact_payload["structure"]["current_state"]["technical_state"]["concentration"]["leader_median_gap"].astext.cast(Float).label("technical_leader_median_gap"),
+            fact_payload["structure"]["current_state"]["technical_state"]["concentration"]["leader_symbol"].astext.label("technical_leader_symbol"),
+            fact_payload["structure"]["current_state"]["technical_state"]["concentration"]["count"].astext.cast(Integer).label("technical_member_count"),
         )
         .select_from(fact)
         .join(comp, join_cond, isouter=True)
@@ -662,6 +686,14 @@ async def list_review_scope_summaries_by_run(
                 leadership_status=r["leadership_status"],
                 jaccard_stability=r["jaccard_stability"],
                 migration=r["migration"],
+                freshness_today_count=r["freshness_today_count"],
+                freshness_decay_weighted_density=r["freshness_decay_weighted_density"],
+                technical_hhi=r["technical_hhi"],
+                technical_top5_numerator=r["technical_top5_numerator"],
+                technical_top5_denominator=r["technical_top5_denominator"],
+                technical_leader_median_gap=r["technical_leader_median_gap"],
+                technical_leader_symbol=r["technical_leader_symbol"],
+                technical_member_count=r["technical_member_count"],
             )
         )
     return total, summaries

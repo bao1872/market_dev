@@ -258,6 +258,33 @@ class ReviewScopeSummaryDTO(BaseModel):
     migration: float | None = None
 
 
+class ReviewScopeObservationSummaryDTO(BaseModel):
+    """Thin Scope-list Observation projection (R2B).
+
+    Pure projection of a SMALL set of already-persisted canonical Observation
+    Facts (ReviewScopeObservationFact.observation_payload).  This is a SEPARATE
+    owner from ReviewScopeSummaryDTO (Composition thin projection): it is
+    sourced ONLY from the Fact and MUST NOT be gated on composition_present.
+    Every field is Optional — a missing/unavailable value is None and MUST NOT
+    be coerced to 0 (e.g. freshnessTodayCount=0 is a valid zero, not None).
+    No derived metric (no top5 ratio) is computed here.
+    """
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    freshnessTodayCount: int | None = None
+    freshnessDecayWeightedDensity: float | None = None
+
+    technicalHhi: float | None = None
+
+    technicalTop5Numerator: float | None = None
+    technicalTop5Denominator: float | None = None
+
+    technicalLeaderMedianGap: float | None = None
+    technicalLeaderSymbol: str | None = None
+    technicalMemberCount: int | None = None
+
+
 class ReviewCanonicalScopeResponse(BaseModel):
     """GET /api/v1/review/{trade_date}/scopes 单条记录（canonical）。
 
@@ -283,6 +310,13 @@ class ReviewCanonicalScopeResponse(BaseModel):
     coverageRatio: float | None = Field(None, description="provided/eligible 覆盖率")
     summary: ReviewScopeSummaryDTO | None = Field(
         None, description="persisted Composition 薄投影；Composition 缺失时为 None",
+    )
+    observationSummary: ReviewScopeObservationSummaryDTO | None = Field(
+        None,
+        description=(
+            "persisted Observation Fact 薄投影（R2B）；仅含 freshness / technical "
+            "标量，独立于 summary。Fact 存在即填充，不依赖 Composition"
+        ),
     )
 
 

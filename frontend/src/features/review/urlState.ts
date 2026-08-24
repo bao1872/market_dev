@@ -36,7 +36,7 @@ export type ReviewDetailTab =
   | 'attribution'
   | 'facts'
 
-/** 排序词表：默认 velocity_desc；R2A 仅含降序变体（升序不在 R2A 范围） */
+/** 排序词表：默认 velocity_desc；R2A/R2B 仅含降序变体（升序不在范围） */
 export type ReviewSort =
   | 'velocity_desc'
   | 'acceleration_desc'
@@ -45,6 +45,10 @@ export type ReviewSort =
   | 'capital_tilt_desc'
   | 'migration_desc'
   | 'coverage_desc'
+  | 'freshness_density_desc'
+  | 'freshness_today_desc'
+  | 'technical_hhi_desc'
+  | 'leader_median_gap_desc'
 
 export interface ReviewUrlState {
   /** 交易日（YYYY-MM-DD） */
@@ -108,6 +112,10 @@ const SORT_VALUES: ReadonlySet<string> = new Set([
   'capital_tilt_desc',
   'migration_desc',
   'coverage_desc',
+  'freshness_density_desc',
+  'freshness_today_desc',
+  'technical_hhi_desc',
+  'leader_median_gap_desc',
 ])
 
 const PHASE_VALUES: ReadonlySet<string> = new Set([
