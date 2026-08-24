@@ -178,9 +178,9 @@ def svc(monkeypatch):
 # =============================================================================
 
 
-def test_all_ten_boundaries_have_real_handlers():
-    """CP3：10/10 boundary 都有真实 handler（CP2 的 state_events 缺口已补齐）。"""
-    assert len(ALL_BOUNDARIES) == 10
+def test_all_nine_boundaries_have_real_handlers():
+    """CP3：9/9 boundary 都有真实 handler（CP2 的 state_events 缺口已补齐；[Slice 4A10] 已移除 board_aggregation）。"""
+    assert len(ALL_BOUNDARIES) == 9
     for boundary in ALL_BOUNDARIES:
         assert is_implemented_boundary(boundary) is True, f"{boundary} 无真实 handler"
     assert set(implemented_boundaries()) == set(ALL_BOUNDARIES)

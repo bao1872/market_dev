@@ -208,7 +208,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - ✅ **历史回补已接入 run/item**：`backfill_history_with_run_items` + `create_history_run` / `claim_history_items` / `mark_history_item_*` / `finish_history_run`，单股独立事务，DB-only 取数
 - ✅ **管理状态 API 已实现**：`app.api.admin_incremental_publish`，提供 `/status` / `/core/runs` / `/core/runs/{id}/progress` / `/history/runs` / `/history/runs/{id}/progress` / `/pointers`
 - ✅ **历史回补 CLI 已实现**：`scripts/first_pyramid_history_backfill_cli.py`，支持 `--canary` / `--limit` / `--all` / `--symbols` / `--resume` / `--dry-run` / `--output-bars` / `--algorithm-version`
-- ✅ **市场聚合独立 job**：`market_factor_aggregation_service.run_market_factor_aggregation`，读取 stock_core pointer 后切 market_aggregation pointer，失败只重跑聚合
+- ~~市场聚合独立 job：`market_factor_aggregation_service.run_market_factor_aggregation`~~（Historical/Non-Normative：该 service 已于 [Slice 4A10] 删除，见 70-review.md §0；`market_aggregation` pointer 当前来源见 granular restart / orchestrator）
 - ✅ **事件 outbox 模型支持**：`StockFeatureSnapshotRunItem.phase='event_outbox'` 已定义，实际事件写入由 `stock_state_event` 表（稳定唯一键幂等）承载
 
 **[本轮仍待验证的项]**：
@@ -468,7 +468,7 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - watchdog：`auto_resume_interrupted_after_close_runs`（`scheduler_job_run_recovery_service.py:L169`）同时扫描 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次；
 - chip 入队：`after_close_orchestrator.py` 的正式步骤 `enqueue_chip_job`（`_enqueue_chip_job_step`）在**主任务终态提交之前**调用 `create_after_close_chip_consensus_job`（只入队，不 await chip 计算，chip 由独立 Worker 异步执行）。入队失败计入 `partial_success` 判定，metadata 记录 `chip_enqueue_status / chip_job_id`；chip.core_run_id 指向 `snapshot_run_id`（数据版本）。
 
-### 13.4 聚合依赖闭环：stock_core pointer → board aggregation
+### 13.4 聚合依赖闭环：stock_core pointer → board aggregation（Historical/Non-Normative：legacy V1 链路，Board 非当前 Review 前置）
 
 - `market_factor_aggregation_service.run_market_factor_aggregation`（`backend/app/services/market_factor_aggregation_service.py:L33`）：
   - 步骤 1 读取已发布 `stock_core` pointer（`get_publication`），无 pointer 抛 `ValueError`；
@@ -547,8 +547,8 @@ Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `s
 ### run 与输入 pointer 关系
 
 - `market_review_run.source_core_run_id` 必须指向当前已发布的 `stock_core` pointer 的 `data_run_id`；
-- `market_review_run.source_board_run_id` 必须指向当前已发布的 `market_aggregation`（board）pointer 的 `data_run_id`；
-- 两者均必须为当前正式 pointer，不得指向已过期或被替换的旧 run。
+- `market_review_run.source_board_run_id`【Historical/Non-Normative：legacy lineage，非当前 Review 发布门禁】历史上指向 `market_aggregation`（board）pointer 的 `data_run_id`；当前 Review 不再以 `source_board_run_id` 为前置（见 70-review.md §0、review_publication_service 标注「Slice 4A5 Board-independent」）。
+- 上述 `source_core_run_id` 必须为当前正式 pointer，不得指向已过期或被替换的旧 run。
 
 ### pointer 切换语义
 
@@ -619,7 +619,7 @@ stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → 
 **真实执行链**（`after_close_orchestrator.py:publishing` 之后的 `computing_review` 阶段）：
 
 ```python
-# 步骤 1：从 factor_publications 拿 stock_core + board_analysis 正式 pointer
+# 步骤 1：从 factor_publications 拿 stock_core 正式 pointer（board_analysis 已退役，见 70-review.md §0）
 stock_core_pub   = get_current_pointer(scope='stock_core')
 board_analysis_pub = get_current_pointer(scope='board_analysis')
 
@@ -627,7 +627,7 @@ board_analysis_pub = get_current_pointer(scope='board_analysis')
 review_run_id = review_orchestrator_service.create_run(
     trade_date              = trade_date,
     source_stock_core_run_id = stock_core_pub.run_id,
-    source_board_run_id      = board_analysis_pub.run_id,
+    source_board_run_id      = board_analysis_pub.run_id,  # Historical/Non-Normative: legacy Review 输入，当前 source_board_run_id 恒为 NULL（Slice 4A5 Board-independent）
     algorithm_version       = CURRENT_ALGO_VERSION,
     # + metadata: bootstrap_required, scope 列表, 等
 )

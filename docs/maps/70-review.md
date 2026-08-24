@@ -1,7 +1,7 @@
 # 复盘模块 Map
 
 核验状态：080/081 候选实现已通过同一 SHA CI 与临时 PostgreSQL；远程开发部署/发布未执行
-最后核验日期：2026-08-01（当前实现 baseline；2026-08-12 PRD 语义收口后映射未实现）
+最后核验日期：2026-08-01（legacy implementation baseline；2026-08-12 PRD 语义收口后映射未实现）
 核验分支：`codex/panji-full-closure-20260801`
 核验提交：`c6abcc1`；CI Run `30731828236`
 核验范围：层级归因、P/Q/U/C/V、PIT bootstrap、发布门禁、withdrawal 安全与五阶段 UI
@@ -9,7 +9,7 @@
 
 > **2026-08-12 PRD 语义收口（Scope Observation Model）**：`docs/prd/70-review.md` 已将 Review
 > first-layer observation model 从 P/Q/U/C/V 替换为 Scope Observation Model（§7）。本 Map 描述的
-> 是 **当前 legacy implementation baseline**（P/Q/U/C/V 引擎/表/API/gate）。New Observation semantic
+> 是 **legacy implementation baseline（Non-Normative）**（P/Q/U/C/V 引擎/表/API/gate）。New Observation semantic
 > contract 与现有实现（`metric_engine`、`market_review_scope_snapshots` 的 p_payload..v_payload、
 > 发布门禁、§23-§27 legacy 契约）的映射/迁移 **DEFER 到后续 Implementation Design**；届时本 Map 需
 > 同步更新。
@@ -28,6 +28,9 @@
   现在走「未知 boundary」校验错误）。
 - ``MarketBoard`` / taxonomy（L1/L2/L3）/ ``concept`` / PIT membership / ``BoardDefinitionVersion`` /
   ``membership_version`` 仍是 Unified Review 做板块分析的正式基础设施，不得删除。
+- 当前权威数据链（Normative）：Daily/Core canonical artifacts → Unified Review →
+  ``ReviewScopeObservationFact`` → Board GET 投影。``BoardAnalysisRun`` / ``BoardAnalysisSnapshot``
+  不是当前 Review 计算/发布前置（C2 前仅保留历史 ORM/表/migration）。
 - 历史 ORM（``BoardAnalysisRun`` / ``BoardAnalysisSnapshot``）/ 表 / migration 暂保留（C2，待确认无历史
   兼容需求后再清理）。
 
@@ -35,14 +38,14 @@
 
 | PRD 章节 | 当前实现状态 | 验证证据 |
 |---|---|---|
-| §0 背景与当前基线 | 已满足：Board V1 + stock_core pointer 已发布 | `board_analysis_snapshots` 表（migration 074）、`factor_publications` |
+| §0 背景与当前基线 | Historical/Non-Normative：Board V1 producer 已退役（见 §0）；stock_core pointer 仍有效 | `board_analysis_snapshots` 表（migration 074，legacy）、`factor_publications` |
 | §1 产品目标与边界 | 已实现 | `/review` 页面已部署 |
-| §2 权威业务链 | 已实现：stock_core + board → review run 链路完整 | `review_orchestrator_service.py` |
+| §2 权威业务链 | Historical/Non-Normative（legacy V1）：stock_core + board → review 为旧链路；当前权威链见 §0 / §26（Review 仅依赖 stock_core + market_aggregation，Board 非 Review 前置） | `review_orchestrator_service.py`（legacy） |
 | §3 路由权限 | 已实现：review:read=research_replay capability | `access_control_service.require_capability("research_replay")` |
 | §4 后端模块结构 | 已实现 | `backend/app/domain/review/` 6 个文件、`services/review_*.py` 6 个、`api/review.py`+`admin_review.py`、`schemas/review.py`、`scripts/review_compute_cli.py` |
 | §5 数据模型（8 表） | 已实现 | migration `076_market_review_workbench.py`（已应用，alembic head） |
 | §6 两级扫描 | 已实现 | `review_scope_service.list_scope_snapshots` |
-| §7 P/Q/U/C/V 指标 | 已实现 | `domain/review/metric_registry.py` + `metric_engine.py` |
+| §7 P/Q/U/C/V 指标 | Historical/Non-Normative（legacy 引擎）：PRD §7 已收口为 Scope Observation Model；`metric_engine` 仍输出 P/Q/U/C/V 但非当前权威契约 | `domain/review/metric_registry.py` + `metric_engine.py` |
 | §8 三类筛选器 | 已实现 | `domain/review/filter_definitions.py` + `filter_engine.py` + `review_filters.yaml` |
 | §9 板块归因 | 已实现 | `domain/review/attribution_engine.py` + `review_attribution_service.py` |
 | §10 信号生命周期与追踪 | 已实现 | `domain/review/tracking_state_machine.py` + `review_tracking_service.py` |
@@ -217,7 +220,7 @@
 - signal_count=0 是 canary 范围内无偏差命中的正常结果，不代表筛选器故障
 - 000021 chip_status 为 unavailable/M15_BARS_INSUFFICIENT（370<500，符合数据门槛约束）
 - 浏览器 UI 真实链路验收 PENDING 用户手工登录（受 Owner 账户保护规则约束，TRAE 不得自动登录）
-- Board V1 仍保留为独立板块分析入口；Review 阶段三通过 `BoardAttributionPanel.tsx` 复用其可抽取组件
+- ~~Board V1 仍保留为独立板块分析入口~~（Historical/Non-Normative）：Legacy Board producer 已退役（见 §0），Board GET 现为 `ReviewScopeObservationFact` 投影；`BoardAttributionPanel.tsx` 复用的是可抽取组件，非旧 Board run
 
 ## 10. 更新触发条件
 
@@ -241,7 +244,7 @@
 | `industry_l1` scope_key 统一 board_id | 早期 `scope_key` 混用 `industry_name`（如 `electronics`）与 `board_id`（UUID），导致归因 JOIN 失败、history_maps 错配 | 所有第一级 scope 的 `scope_key` 统一为 `board_id`（industry_l1）/ `index_code`（major_index）/ `style_code`（style）/ `"market"`（market） | `backend/app/services/review_scope_service.py` |
 | `major_index` / `style` 范围补全 | canary run 只覆盖 market + 6 个 industry_l1，major_index 和 style 完全缺失 | 第一级范围合同强制覆盖 market + major_index（≥2）+ style（≥2）+ industry_l1（≥25），canary 不得只算部分类型 | `backend/app/services/review_scope_service.py:list_scope_snapshots` |
 | `metric_engine` history is None → insufficient_history | 历史基线为空（首次运行）时 `history` 参数为 `None`，metric_engine 直接访问 `history[...]` 抛 `AttributeError`，被上层 `try/except` 静默吞掉，返回 `status=None` | `metric_engine` 显式判空，`history is None` 或 `len(history) < 60` 时返回 `status=insufficient_history`，`value/normalizedValue/historyPercentile120d/delta1d/delta5d` 全部为 `null` | `backend/app/domain/review/metric_engine.py` |
-| 发布门禁强化（value 非空 + source_board_run_id + failed signals） | `publish_review(force=False)` 仅检查 coverage_ratio 与 run_items.status，未校验 market P/Q/U/C/V value 非空、未校验 source_board_run_id 与当日 board pointer 一致、未校验 signals 无 failed | 新增 6 项门禁：①market P/Q/U/C/V 五项 value 非空且 status=ready；②source_board_run_id 等于当日 market_aggregation pointer.data_run_id；③source_core_run_id 等于当日 stock_core pointer.data_run_id；④market_review_signals 无 status=failed；⑤market_review_run_items 无 status=failed；⑥coverage_ratio >= 0.95 + industry_l1 ready 比例门槛 | `backend/app/services/review_publication_service.py:publish_review` |
+| 发布门禁强化（value 非空 + source_board_run_id + failed signals）【Historical/Non-Normative：2026-07-30 review-1.1.0 旧门禁；source_board_run_id 当前非 Review publication 依赖，见 §0】 | `publish_review(force=False)` 仅检查 coverage_ratio 与 run_items.status，未校验 market P/Q/U/C/V value 非空、未校验 source_board_run_id 与当日 board pointer 一致、未校验 signals 无 failed | 新增 6 项门禁：①market P/Q/U/C/V 五项 value 非空且 status=ready；②source_board_run_id 等于当日 market_aggregation pointer.data_run_id；③source_core_run_id 等于当日 stock_core pointer.data_run_id；④market_review_signals 无 status=failed；⑤market_review_run_items 无 status=failed；⑥coverage_ratio >= 0.95 + industry_l1 ready 比例门槛 | `backend/app/services/review_publication_service.py:publish_review` |
 
 ### 11.3 当前限制
 
@@ -396,10 +399,10 @@ else:
 
 ### 21.3 Review pointer date sync（解决7/29陈旧）
 
-根因：after_close_orchestrator publishing 阶段之后未执行 review 阶段；stock_core/board pointer 已更新到 7/31，但 review pointer 仍停留在 7/29。
+根因（Historical/Non-Normative，2026-08-01 视角）：after_close_orchestrator publishing 阶段之后未执行 review 阶段；stock_core pointer 已更新到 7/31，但 review pointer 仍停留在 7/29。（board pointer 为 legacy 概念，当前 Review 仅依赖 stock_core + market_aggregation，见 §0 / §26）
 
 修复：
-- §30 Map 12.1 的 after_close 正式链确保 review 阶段与 stock_core/board pointer 同交易日落盘。
+- §30 Map 12.1 的 after_close 正式链确保 review 阶段与 stock_core pointer 同交易日落盘（board pointer 为 legacy，不计入当前 Review 依赖）。
 - `ReviewPage` 读取 `GET /api/v1/review/meta/latest`（scope=market）：如果 published pointer 的 trade_date ≠ stock_core.published.trade_date → 顶部 banner 显示"盘后未完成，当前正式review发布日期 = YYYY-MM-DD；stock_core 最新 = YYYY-MM-DD"。
 
 位置：`frontend/src/features/review/ReviewHeader.tsx` + `backend/app/api/review.py:get_latest_review_meta`
@@ -427,14 +430,14 @@ else:
 
 ## 22. 2026-08-01 Review 候选实现核验
 
-| 能力 | 当前实现事实 |
+| 能力 | 2026-08-01 核验事实（部分已过时，当前 Review 依赖见 §0 / §26） |
 |---|---|
 | 层级 scope/归因 | Migration 080；支持 L1/L2/L3/concept PIT membership、全量分页、正负贡献、真实 instrument/snapshot/run evidence |
-| P/Q/U/C/V | `domain/review/member_fact.py` + `metric_engine.py` 使用真实日收益、canonical 状态、前日比较和显式权重/量纲 |
+| P/Q/U/C/V（legacy 引擎，Non-Normative） | `domain/review/member_fact.py` + `metric_engine.py` 使用真实日收益、canonical 状态、前日比较和显式权重/量纲（PRD §7 已收口为 Scope Observation Model） |
 | 历史观测 | Migration 081；`review_metric_observation_service.py` 保存 raw/denominator/source/version/hash/membership |
 | Bootstrap | `review_bootstrap_service.py` 默认 dry-run，PIT 缺失写 `bootstrap_unavailable`，不使用当前成员回填 |
 | 两遍横截面 | orchestrator 先落 component，再按同日同 family 计算分位并评估 signal |
-| 发布 | `review_publication_service.py` 校验 core/board pointer、scope 配置、coverage、run items、版本和 provisional/canary |
+| 发布（Historical/Non-Normative，2026-08-01 核验） | `review_publication_service.py` 旧版校验 core/board pointer；当前（§26）Review 仅依赖 stock_core + market_aggregation，不再校验 board pointer |
 | UI | 五阶段真实 API；无信号/无追踪/历史不足/字段缺失/API 错误分别展示；Evidence Drawer 可追溯 |
 
 算法版本已升级；旧 Review run 保持不可变。Migration 080/081、Review PG Integration、完整后端
@@ -554,7 +557,7 @@ overview/run API 的 `chipCoverage` / `chip_coverage` 字段。
 ### 24.3 `evaluate_publish_gate` 查询顺序（测试 mock 必须与之一致）
 
 1 market scope → 2 major_index → 3 style → 4 industry_l1 → 5 PIT universe definitions →
-6 expected L1 industries → 7 incomplete run items → 8 stock_core pointer → 9 board pointer →
+6 expected L1 industries → 7 incomplete run items → 8 stock_core pointer → 9 board pointer（legacy 残留，非当前 Review 依赖；当前 Review 依赖见 §26） →
 **[仅当 `run.status == "published"`] 10 live review pointer** → 末位 future_obs count。
 
 新增的 future_obs 计数查询位于**最后**；published 分支的 review pointer 查询在其**之前**。

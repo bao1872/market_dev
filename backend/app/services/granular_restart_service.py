@@ -16,7 +16,7 @@
    在 metadata 中写入 `restart_from` / `mainchain_stage` / `execution_mode`
    显式标记，由 worker 从对应阶段执行，**绝不写 last_completed_step**。
 
-2. **`dispatch_restart` 按 `restart_from` 显式分派到 10 个真实 handler**，
+2. **`dispatch_restart` 按 `restart_from` 显式分派到 9 个真实 handler**，
    不再有「主链 vs 子产品」两套语义割裂的分支。
 
 3. **真实函数签名对齐**（本轮逐个读取源码确认）：
@@ -46,7 +46,7 @@
   是通用「步骤包装器」，需要调用方自己传 operation 闭包，无法按 boundary 名调度。
   因此主链 handler 的真实实现是「创建 child run + 写阶段标记 + 写事件」，
   child 保持 `queued` 交由 worker 领取执行，**不写 succeeded**（不伪造成功）。
-- 子产品六 boundary 在本进程内同步执行真实重建/发布，成功置 succeeded，失败置 failed
+- 子产品五 boundary 在本进程内同步执行真实重建/发布，成功置 succeeded，失败置 failed
   并写 level=error 事件，记录真实异常，绝不返回 501、绝不伪造成功。
 
 测试策略：纯单元测试注入 fake db + handler/publisher（PURE_UNIT_TEST）；
@@ -930,7 +930,7 @@ async def dispatch_restart(
 
     统一语义（不再区分「主链改父 run」和「子产品建 child」两套返回）：
     - 所有 boundary 都创建 / 复用一个 child SchedulerJobRun（operation=boundary）；
-    - 子产品六 boundary 在本调用内同步执行真实重建/发布，成功 succeeded、失败 failed；
+    - 子产品五 boundary 在本调用内同步执行真实重建/发布，成功 succeeded、失败 failed；
     - 主链四 boundary 的 child 保持 queued，由 after-close worker 从 `mainchain_stage`
       开始执行（**不写 last_completed_step**，不伪造成功）。
 
