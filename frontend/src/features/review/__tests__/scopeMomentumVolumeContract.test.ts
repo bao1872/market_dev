@@ -181,10 +181,10 @@ test('G7 squeeze persisted ratios preserved verbatim (NO recomputation)', () => 
   assert.equal(fmtSqueezeRatio(byCat['Non_Squeeze'].ratio), '84.0%')
 })
 
-// 12. REAL L2 WIRING — prove the workspace formal dispatch recognizes the
-//     canonical backend ObservationGroup shape and keys. This is the wiring
-//     that the pre-fix renderer registration (momentum/participation) missed.
-test('R3E real L2 wiring: canonical group_key + direct facts dispatch', () => {
+// 12. Canonical L2-shaped facts feed parsers directly (parser-level only —
+//     does NOT exercise workspace FORMAL_RENDERERS dispatch; that wiring is
+//     locked separately in scopeCurrentObservationWorkspace.test.ts).
+test('R3E canonical L2-shaped facts feed parsers directly', () => {
   // The canonical backend L2 group key is momentum_squeeze_release (NOT momentum).
   const g7: { group_key: string; label: string; facts: Record<string, unknown> } = {
     group_key: 'momentum_squeeze_release',

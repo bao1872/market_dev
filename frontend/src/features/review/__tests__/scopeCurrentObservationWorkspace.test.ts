@@ -152,3 +152,50 @@ test('R3B-V C: GroupShell no per-fact "已加载" state label', () => {
     'GroupShell must not attach fact-state label nodes',
   )
 })
+
+// R3E wiring closure — lock the REAL workspace dispatch (not parser-only fixture).
+// This guards the Git-audited defects P0-1 / P0-2: canonical L2 group_key must
+// dispatch to the right formal renderer, and parsers must consume group.facts directly.
+test('R3E: canonical L2 dispatch momentum_squeeze_release -> MomentumBlock', () => {
+  assert.ok(
+    /momentum_squeeze_release:\s*MomentumBlock/.test(workspaceSrc),
+    'FORMAL_RENDERERS must register momentum_squeeze_release -> MomentumBlock',
+  )
+})
+
+test('R3E: canonical L2 dispatch volume_anomaly -> VolumeBlock', () => {
+  assert.ok(
+    /volume_anomaly:\s*VolumeBlock/.test(workspaceSrc),
+    'FORMAL_RENDERERS must register volume_anomaly -> VolumeBlock',
+  )
+})
+
+test('R3E: old dispatch momentum/participation rejected', () => {
+  assert.ok(
+    !/\bmomentum:\s*MomentumBlock/.test(workspaceSrc),
+    'old L2 key "momentum" must not dispatch (backend uses momentum_squeeze_release)',
+  )
+  assert.ok(
+    !/\bparticipation:\s*VolumeBlock/.test(workspaceSrc),
+    'old L2 key "participation" must not dispatch (backend uses volume_anomaly)',
+  )
+})
+
+test('R3E: parsers consume group.facts directly (no wrapper key)', () => {
+  assert.ok(
+    /parseMomentumObservation\(\s*facts\s*\)/.test(workspaceSrc),
+    'MomentumBlock must call parseMomentumObservation(facts) directly',
+  )
+  assert.ok(
+    /parseVolumeObservation\(\s*facts\s*\)/.test(workspaceSrc),
+    'VolumeBlock must call parseVolumeObservation(facts) directly',
+  )
+  assert.ok(
+    !/facts\['momentum_squeeze_release'\]/.test(workspaceSrc),
+    'MomentumBlock must not read facts["momentum_squeeze_release"] wrapper',
+  )
+  assert.ok(
+    !/facts\['volume_anomaly'\]/.test(workspaceSrc),
+    'VolumeBlock must not read facts["volume_anomaly"] wrapper',
+  )
+})
