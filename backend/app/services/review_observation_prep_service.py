@@ -80,10 +80,34 @@ logger = logging.getLogger("review_observation_prep_service")
 _RATIO_WINDOW = 20
 _BAR_LOOKBACK_DAYS = 400
 
-# Phase-1 memory instrumentation: peak RSS helper via /proc-backed ru_maxrss.
-# On Linux ru_maxrss is in bytes; on macOS it is in KiB. We normalise to MiB.
-_RSS_UNIT = 1024 if hasattr(resource, "RU_MAXRSS_UNIT") else (1024 if "linux" in __import__("sys").platform else 1)
-_PEAK_RSS_BYTES = 0
+# P1 instrumentation (PERF-OOM-V2): report BOTH current and peak RSS.
+# Preferred Linux source is /proc/self/status (VmRSS = current resident,
+# VmHWM = high-water peak).  ru_maxrss from resource.getrusage is only a
+# high-water mark (NOT current), so we never label it as current RSS; it is
+# used only as a fallback when /proc is unavailable (macOS/CI).  No tracemalloc.
+_PROC_SELF_STATUS = "/proc/self/status"
+
+
+def _read_proc_rss() -> tuple[int | None, int | None]:
+    """Return (current_rss_bytes, peak_rss_bytes) from /proc/self/status.
+
+    VmRSS is the live resident set size; VmHWM is the high-water mark.
+    Returns (None, None) if /proc is unavailable. No tracemalloc, no side effects.
+    """
+    try:
+        with open(_PROC_SELF_STATUS, "r", encoding="utf-8") as fh:
+            cur = peak = None
+            for line in fh:
+                if cur is not None and peak is not None:
+                    break
+                if line.startswith("VmRSS:"):
+                    # e.g. "VmRSS:   123456 kB"
+                    cur = int(line.split()[1]) * 1024
+                elif line.startswith("VmHWM:"):
+                    peak = int(line.split()[1]) * 1024
+            return cur, peak
+    except OSError:
+        return None, None
 
 
 def _log_rss(
@@ -96,19 +120,20 @@ def _log_rss(
     event_rows: int | None = None,
     vector_member_count: int | None = None,
 ) -> None:
-    """Log current + delta RSS (MiB) at a named preparation stage.
+    """Log current + peak RSS (MiB) at a named preparation stage.
 
-    Uses ``resource.getrusage`` (ru_maxrss, peak resident set) — NOT tracemalloc,
-    which must never run in production. Pure read of the process resource struct.
+    Reports both current_rss_mb (live resident) and peak_rss_mb (high-water),
+    sourced from /proc/self/status on Linux. On platforms without /proc, falls
+    back to resource.getrusage(ru_maxrss) for the peak value only — and is
+    explicitly NOT labelled as current RSS. Pure read, no tracemalloc (which
+    must never run in production).
     """
-    global _PEAK_RSS_BYTES
-    ru = resource.getrusage(resource.RUSAGE_SELF)
-    # ru_maxrss unit: Linux=kB, macOS/FreeBSD=bytes historically; normalise to bytes.
-    unit = 1024 if "linux" in __import__("sys").platform else 1
-    rss_bytes = ru.ru_maxrss * unit
-    _PEAK_RSS_BYTES = max(_PEAK_RSS_BYTES, rss_bytes)
-    rss_mb = rss_bytes / (1024 * 1024)
-    peak_mb = _PEAK_RSS_BYTES / (1024 * 1024)
+    cur_bytes, peak_bytes = _read_proc_rss()
+    if peak_bytes is None:
+        # Fallback: ru_maxrss is high-water peak only; current unknown.
+        peak_bytes = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+    current_mb = (cur_bytes / (1024 * 1024)) if cur_bytes is not None else float("nan")
+    peak_mb = peak_bytes / (1024 * 1024)
     extra = ""
     if bar_rows is not None:
         extra += f" bar_rows={bar_rows}"
@@ -119,9 +144,9 @@ def _log_rss(
     if vector_member_count is not None:
         extra += f" vec_members={vector_member_count}"
     logger.info(
-        "[RSS] stage=%s rss_mb=%.1f peak_mb=%.1f union_member_count=%d trade_date_count=%d%s",
+        "[RSS] stage=%s current_rss_mb=%.1f peak_rss_mb=%.1f union_member_count=%d trade_date_count=%d%s",
         stage,
-        rss_mb,
+        current_mb,
         peak_mb,
         union_member_count,
         trade_date_count,
@@ -1576,6 +1601,56 @@ async def prepare_scopes_from_union(
     )
 
 
+async def _load_current_needs(
+    session: AsyncSession,
+    union_members: list[uuid.UUID],
+    trade_date: date,
+    *,
+    source_core_run_id: uuid.UUID,
+) -> dict[str, dict[str, object]]:
+    """Load + enrich ALL Current-only canonical facts needed by
+    ``_build_member_observations`` BEFORE any union prep (PERF-OOM-V2 P0-2).
+
+    The chunked union prep prebuilds ``MemberObservation`` objects and releases
+    the heavy bars/vectors per chunk, so every Current-only fact consumed by the
+    member builder MUST be present here — enrichment done after prep would never
+    re-enter ``_build_member_observations``.
+
+    Steps (fixed order):
+      1. exact-T ``StockFeatureSnapshot`` first_pyramid_flat facts (release_volume
+         ratio, momentum volume relation, BB position/width, VWAP return, trailing
+         distance) via ``_load_current_only_snapshot_facts``;
+      2. union-level ``Instrument`` metadata (active eligibility + symbol) via
+         ``_load_batch_instrument_board_meta``;
+      3. inject ``_BOARD_CURRENT_ELIGIBLE_KEY`` / ``_BOARD_CURRENT_SYMBOL_KEY``
+         into the per-member fact dict (matches the legacy Board flat_list
+         pre-filter, scoped to migrated Board capabilities only).
+    """
+    facts = await _load_current_only_snapshot_facts(
+        session,
+        union_members,
+        trade_date,
+        source_core_run_id=source_core_run_id,
+    )
+    # Slice 4A2 — Board union-level Instrument metadata (single batch query):
+    # ``Instrument.status == "active"`` eligibility (4A1R2) AND the symbol needed
+    # for ``leader_symbol`` (4A2).  Carried into the current-only facts so
+    # ``build_member_observation_from_facts`` can gate the migrated Board
+    # capability universe and emit the leader symbol exactly like the legacy Board
+    # flat_list pre-filter.  Affects ONLY the migrated Board capabilities, not
+    # other Review universes.
+    board_meta = await _load_batch_instrument_board_meta(session, union_members)
+    for iid, member_facts in facts.items():
+        meta = board_meta.get(iid)
+        if meta is None:
+            member_facts[_BOARD_CURRENT_ELIGIBLE_KEY] = False
+            member_facts[_BOARD_CURRENT_SYMBOL_KEY] = None
+        else:
+            member_facts[_BOARD_CURRENT_ELIGIBLE_KEY] = bool(meta["eligible"])
+            member_facts[_BOARD_CURRENT_SYMBOL_KEY] = meta["symbol"]
+    return facts
+
+
 async def prepare_current_scope_observations_batch(
     session: AsyncSession,
     trade_date: date,
@@ -1762,6 +1837,28 @@ async def prepare_current_scope_observations_batch(
                 seen.add(mid)
                 union_members.append(mid)
 
+    # ---- Current-only facts MUST be fully resolved BEFORE the chunked union
+    # prep (PERF-OOM-V2 P0-1/P0-2).  The chunked builder prebuilds
+    # ``MemberObservation`` objects inside each chunk and releases the heavy
+    # bars/vectors immediately; any Current-only fact not present at that point
+    # is permanently frozen out of the prebuilt members.  Order is therefore
+    # fixed: resolve union members -> load current-only snapshot facts -> load
+    # board_meta -> enrich current_only_facts with eligibility + symbol -> ONLY
+    # THEN call either union prep (chunked or oracle).  Coverage is a
+    # PreparedScope-level concern and is loaded after prep (unchanged).
+
+    # Current-only snapshot facts at exact T (str-keyed, same shape as the
+    # current-only loader consumes). C1a fix: the loader's contract is
+    # exact-T only (scalar ``trade_date``), NOT ``effective_dates`` — passing the
+    # multi-element list would feed a list into a scalar ``Column == date``
+    # comparison and fail at SQL compile/execute time under the real PG adapter.
+    current_only_facts = await _load_current_needs(
+        session, union_members, trade_date, source_core_run_id=source_core_run_id
+    )
+    coverage_by_date = await _load_batch_backfill_event_coverage(
+        session, union_members, effective_dates
+    )
+
     # PERF-OOM (2026-08-24 closure): the production current-day path uses the
     # chunked, memory-bounded union preparation (heavy bars/vectors released per
     # chunk, Members prebuilt).  The non-chunked path remains the oracle used by
@@ -1777,38 +1874,6 @@ async def prepare_current_scope_observations_batch(
         union_ctx = await prepare_union_fact_context(
             session, effective_dates, union_members
         )
-    # Current-only snapshot facts at exact T (str-keyed, same shape as the
-    # current-only loader consumes). C1a fix: the loader's contract is
-    # exact-T only (scalar ``trade_date``), NOT ``effective_dates`` — passing the
-    # multi-element list would feed a list into a scalar ``Column == date``
-    # comparison and fail at SQL compile/execute time under the real PG adapter.
-    current_only_facts = await _load_current_only_snapshot_facts(
-        session,
-        union_members,
-        trade_date,
-        source_core_run_id=source_core_run_id,
-    )
-    # Slice 4A2 — Board union-level Instrument metadata (single batch query):
-    # ``Instrument.status == "active"`` eligibility (4A1R2) AND the symbol needed
-    # for ``leader_symbol`` (4A2).  Carried into the current-only facts so
-    # ``build_member_observation_from_facts`` can gate the migrated Board
-    # capability universe and emit the leader symbol exactly like the legacy Board
-    # flat_list pre-filter.  Affects ONLY the migrated Board capabilities, not
-    # other Review universes.
-    board_meta = await _load_batch_instrument_board_meta(
-        session, union_members
-    )
-    for iid, facts in current_only_facts.items():
-        meta = board_meta.get(iid)
-        if meta is None:
-            facts[_BOARD_CURRENT_ELIGIBLE_KEY] = False
-            facts[_BOARD_CURRENT_SYMBOL_KEY] = None
-        else:
-            facts[_BOARD_CURRENT_ELIGIBLE_KEY] = bool(meta["eligible"])
-            facts[_BOARD_CURRENT_SYMBOL_KEY] = meta["symbol"]
-    coverage_by_date = await _load_batch_backfill_event_coverage(
-        session, union_members, effective_dates
-    )
 
     prepared_map = build_prepared_scopes_from_union(
         trade_dates=effective_dates,

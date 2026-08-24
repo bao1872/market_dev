@@ -1742,3 +1742,192 @@ async def test_chunked_prep_releases_heavy_objects(monkeypatch):
     assert ch.prebuilt_members_by_date is not None
     assert len(ch.prebuilt_members_by_date[T]) == len(members)
 
+
+# =============================================================================
+# PERF-OOM-V2 (2026-08-24 closure) — production WIRING + REAL current-only parity.
+#
+# P0-3: exercise the ACTUAL owner ``prepare_current_scope_observations_batch``
+# with ``chunk_members=True`` (the production wiring).  The v1 commit called the
+# chunked union prep BEFORE ``current_only_facts`` was assigned -> a deterministic
+# ``UnboundLocalError`` on the production path.  This test must reproduce that
+# failure against 4f549302 and pass after the V2 closure.
+#
+# P0-4: the v1 oracle/chunk tests passed ``current_only_facts_by_date={T: {}}``,
+# so the current-only/BB/vwap/trailing/board facts were vacuously equal (None ==
+# None).  Here we inject NON-EMPTY, deterministic current-only facts and require
+# ``chunk_members=False`` vs ``chunk_members=True`` to produce identical
+# ``PreparedScope`` / ``MemberObservation`` facts — including board enrichment —
+# with a scope spanning at least 2 chunk boundaries (chunk_size=500).
+# =============================================================================
+
+
+def _nonempty_current_only(member_ids: list[uuid.UUID]) -> dict[str, dict[str, object]]:
+    """Deterministic NON-EMPTY current-only facts so BB/current-only/vwap/trailing
+    fields are actually populated (not None).  Mirrors the keys the member builder
+    consumes; values vary per-member so a dropped/duplicated fact is detectable."""
+    out: dict[str, dict[str, object]] = {}
+    for idx, mid in enumerate(member_ids):
+        k = str(mid)
+        out[k] = {
+            "release_volume_ratio": 1.0 + idx * 0.01,
+            "momentum_volume_relation": "up" if idx % 2 == 0 else "down",
+            "bb_position": -0.5 + (idx % 10) * 0.1,
+            "bb_width": 2.0 + (idx % 5) * 0.25,
+            "vwap_ret_total": 0.01 * idx,
+            "trailing_top_pct": 0.10 + idx * 0.001,
+            "trailing_bottom_pct": -0.20 - idx * 0.001,
+        }
+    return out
+
+
+def _board_meta(member_ids: list[uuid.UUID]) -> dict[str, dict[str, object]]:
+    """Eligibility + symbol per member (Slice 4A1R2/4A2).  Every member is
+    ``active`` with a distinct symbol so the enrichment is observable."""
+    return {
+        str(mid): {"eligible": True, "symbol": f"SYM{idx:04d}"}
+        for idx, mid in enumerate(member_ids)
+    }
+
+
+@pytest.mark.pure_unit
+async def test_production_wiring_chunk_members_true_does_not_crash(monkeypatch):
+    """P0-3: the real owner ``prepare_current_scope_observations_batch`` with
+    ``chunk_members=True`` (exactly what compute_run/resume_run pass) must run to
+    completion — i.e. ``current_only_facts`` + board enrichment are resolved BEFORE
+    the chunked union prep.  Against 4f549302 this raised UnboundLocalError."""
+    members = [uuid.uuid4() for _ in range(12)]
+    import datetime as _dt
+
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1, "sqzmom_val": 1.0}
+    states_t = {m: state for m in members}
+    states_t1 = {m: state for m in members}
+    bar_facts: dict[uuid.UUID, list] = {}
+    t1_bar_facts: dict[uuid.UUID, list] = {}
+    for idx, m in enumerate(members):
+        base = date(2026, 1, 1)
+        facts = [
+            _bar(m, base + _dt.timedelta(days=i), close=10.0, volume=100.0 + i)
+            for i in range(23)
+        ]
+        facts.append(_bar(m, T1, close=9.0, volume=110.0))
+        facts.append(_bar(m, T, close=10.0, volume=120.0))
+        bar_facts[m] = facts
+        t1_bar_facts[m] = [_bar(m, T1, close=9.0, volume=110.0)]
+
+    def resolve(scope_type, scope_key, trade_date):
+        return (members, "电子")
+
+    await _install_mocks(
+        monkeypatch, resolve=resolve, t1=T1,
+        states_t=states_t, states_t1=states_t1,
+        bar_facts=bar_facts, t1_bar_facts=t1_bar_facts,
+        current_only=_nonempty_current_only(members),
+    )
+    # Override the board_meta loader (base _install_mocks returns empty -> no
+    # eligible member; we need the enrichment to be observable).
+    async def _fake_board_meta(session, ids):
+        return _board_meta(ids)
+
+    monkeypatch.setattr(
+        prep_service, "_load_batch_instrument_board_meta", _fake_board_meta,
+    )
+
+    from app.services.review_observation_prep_service import ScopeReplaySpec as _SRS
+
+    prepared = await prepare_current_scope_observations_batch(
+        _FakeSession(),
+        T,
+        [_SRS(scope_type="industry_l1", scope_key="k", scope_name="k",
+              member_ids=tuple(members))],
+        source_core_run_id=uuid.uuid4(),
+        chunk_members=True,  # production wiring
+    )
+    assert "k" in prepared
+    out_members = prepared["k"].members
+    assert len(out_members) == len(members)
+    # Board enrichment MUST be present (proves enrichment happened before prebuild).
+    assert all(m.board_current_eligible for m in out_members)
+    assert all(m.board_current_symbol for m in out_members)
+
+
+@pytest.mark.pure_unit
+async def test_real_current_only_parity_chunk_vs_oracle(monkeypatch):
+    """P0-4: NON-EMPTY current-only facts must produce identical MemberObservation
+    facts (incl. BB/current-only/vwap/trailing/board) for chunk_members=False vs
+    chunk_members=True, through the real owner.  Scope spans >=2 chunk boundaries
+    (1101 members, chunk_size=500 -> 3 chunks)."""
+    members = [uuid.uuid4() for _ in range(1101)]  # 3 chunks at chunk_size=500
+    import datetime as _dt
+
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1, "sqzmom_val": 1.0}
+    states_t = {m: state for m in members}
+    states_t1 = {m: state for m in members}
+    current_only = _nonempty_current_only(members)
+    board_meta = _board_meta(members)
+
+    bar_facts: dict[uuid.UUID, list] = {}
+    t1_bar_facts: dict[uuid.UUID, list] = {}
+    for idx, m in enumerate(members):
+        base = date(2026, 1, 1)
+        facts = [
+            _bar(m, base + _dt.timedelta(days=i), close=10.0 + idx * 0.001,
+                 volume=100.0 + i)
+            for i in range(23)
+        ]
+        facts.append(_bar(m, T1, close=9.0 + idx * 0.001, volume=110.0))
+        facts.append(_bar(m, T, close=10.0 + idx * 0.001, volume=120.0))
+        bar_facts[m] = facts
+        t1_bar_facts[m] = [_bar(m, T1, close=9.0 + idx * 0.001, volume=110.0)]
+
+    def resolve(scope_type, scope_key, trade_date):
+        return (members, "电子")
+
+    async def run(chunk: bool):
+        # Fresh mock install per run (board_meta is a closure over our dict).
+        await _install_mocks(
+            monkeypatch, resolve=resolve, t1=T1,
+            states_t=states_t, states_t1=states_t1,
+            bar_facts=bar_facts, t1_bar_facts=t1_bar_facts,
+            current_only=current_only,
+        )
+        async def _fake_board_meta(session, ids):
+            return board_meta
+
+        monkeypatch.setattr(
+            prep_service, "_load_batch_instrument_board_meta", _fake_board_meta,
+        )
+        from app.services.review_observation_prep_service import (
+            ScopeReplaySpec as _SRS,
+        )
+        return await prepare_current_scope_observations_batch(
+            _FakeSession(),
+            T,
+            [_SRS(scope_type="industry_l1", scope_key="k", scope_name="k",
+                  member_ids=tuple(members))],
+            source_core_run_id=uuid.uuid4(),
+            chunk_members=chunk,
+        )
+
+    out_oracle = await run(False)
+    out_chunked = await run(True)
+    mo = {str(m.member_id): m for m in out_oracle["k"].members}
+    mc = {str(m.member_id): m for m in out_chunked["k"].members}
+    assert set(mo) == set(mc)
+    for mid in mo:
+        # Full comparable tuple INCLUDING board enrichment (P0-4 adds the two
+        # board fields so a missed enrichment is caught).
+        assert _member_comparable_full(mo[mid]) == _member_comparable_full(mc[mid]), (
+            f"member {mid} current-only/BB/board facts differ between "
+            f"chunk_members=False vs True"
+        )
+
+
+def _member_comparable_full(m) -> tuple:
+    """Like ``_member_comparable`` but also asserts the board-current enrichment
+    (P0-4) — the v1 tests only compared the base tuple, so a missed enrichment
+    slipped through as None == None."""
+    return _member_comparable(m) + (
+        m.board_current_eligible,
+        m.board_current_symbol,
+    )
+
