@@ -343,16 +343,18 @@ test('FS7. 分页 total 漂移 → fail closed', async () => {
   )
 })
 
-// R2C (Family SQL Filter Closure) focused transport contract:
-// a family snapshot MUST contain ONLY items of the requested family type.
-// The backend closure (count==page family predicate) is what guarantees this;
-// this test locks the consumer-side precondition (always pass scope_type=family)
-// and the post-condition (every merged item.scopeType === requested family).
-test('FS8(R2C). family snapshot 只包含请求 family 的 scopeType', async () => {
+// R2C (Family SQL Filter Closure) transport contract.
+// 生产所有权：backend SQL 保证家族隔离（count==page 同一 family 谓词）。
+// 前端 loadFamilySnapshot() 不主动拒绝 foreign-family rows；它只是把 backend
+// 返回的每页按 total 合并。因此 FS8 记录「backend→transport 期望的家族不变式」，
+// FS9 证明「若 backend 再次返回错误 family，transport 会把污染数据合并进
+// snapshot，test 自身能发现 contamination」——而不是 production transport 会
+// fail closed。
+test('FS8(R2C). 期望 family 不变式：每页请求携带 scope_type=family，合并后全为同 family', async () => {
   const family = 'concept' as const
   const requested: string[] = []
   const fetchPage = async (page: number): Promise<ReviewScopeListResponse> => {
-    // 模拟已修复的后端：每页都按 scope_type=family 过滤，返回同 family 的行
+    // 模拟 backend 正确隔离：每页都按 scope_type=family 过滤，返回同 family 的行
     const items = Array.from({ length: 30 }, (_, i) =>
       makeItem(`k-${page}-${i}`, { scopeType: family }),
     )
@@ -368,7 +370,7 @@ test('FS8(R2C). family snapshot 只包含请求 family 的 scopeType', async () 
   const snap = await loadFamilySnapshot(wrapped, 30)
   assert.equal(snap.total, 90)
   assert.equal(snap.items.length, 90)
-  // 后置条件：合并后每个 item 的 scopeType 必须等于请求的 family
+  // 后置条件：合并后每个 item 的 scopeType 必须等于请求的 family（backend 保证）
   for (const item of snap.items) {
     assert.equal(
       item.scopeType,
@@ -381,8 +383,8 @@ test('FS8(R2C). family snapshot 只包含请求 family 的 scopeType', async () 
   assert.ok(requested.every((f) => f === family))
 })
 
-test('FS9(R2C). 后端若返回其他 family 行，transport 合并后必被 contract 检测（family 隔离）', async () => {
-  // 模拟 R2C 修复前 bug：page 未按 family 过滤，返回了 industry_l1 行混入 concept 请求
+test('FS9(R2C). backend 若再返回错误 family，transport 会把污染合并进 snapshot（test 能发现 contamination）', async () => {
+  // 模拟 backend 回归：page 未按 family 过滤，返回了 industry_l1 行混入 concept 请求
   const family = 'concept'
   const fetchPage = async (page: number): Promise<ReviewScopeListResponse> => {
     const items = [
@@ -392,10 +394,11 @@ test('FS9(R2C). 后端若返回其他 family 行，transport 合并后必被 con
     return makeListResponse(items, page, 2, 4)
   }
   const snap = await loadFamilySnapshot(fetchPage, 2)
-  // 合并后必须存在污染行（证明后置条件需要后端家族过滤）
+  // 注意：production transport 不独立 fail closed；它只是合并 backend 返回。
+  // 因此污染行会出现在 snapshot 中——这证明了家族隔离必须依赖 backend SQL，
+  // 且 test 自身通过统计 contamination 能发现回归。
   const contaminations = snap.items.filter((it) => it.scopeType !== family)
-  assert.equal(contaminations.length, 2, '修复前：其他 family 行会污染 snapshot')
-  // 这正是 R2C 后端 closure 要消除的：家族隔离由后端保证，消费端依赖之。
+  assert.equal(contaminations.length, 2, '模拟 backend 回归：其他 family 行污染了 snapshot')
   void contaminations
 })
 

@@ -937,8 +937,24 @@ async def test_scope_summary_projection_sql_shape_is_thin() -> None:
     assert "LEFT OUTER JOIN" in page_sql
     assert "OFFSET" in page_sql
 
-    # Thin: never select the full observation payload.
-    assert "observation_payload" not in page_sql, page_sql
+    # R2B thin contract (replaces the stale "observation_payload absent" check):
+    # ALLOWED  — Observation scalar JSONB path projection, e.g.
+    #   review_scope_observation_facts.observation_payload[...] ->> ...
+    #            ->> cast AS freshness_today_count
+    # FORBIDDEN — selecting the COMPLETE/BARE observation_payload JSON object into
+    #   Python, e.g.
+    #   SELECT ..., review_scope_observation_facts.observation_payload, ...
+    #   or review_scope_observation_facts.observation_payload AS observation_payload
+    # PostgreSQL renders the allowed form as `observation_payload[%(...)s]...`, so a
+    # scalar path projection must be present, and every occurrence of the column
+    # must be immediately subscripted (never a bare full-column select).
+    assert "observation_payload[" in page_sql, page_sql
+    # forbid a bare/full observation_payload column select. The allowed scalar
+    # form is always `observation_payload[...]`; the bind-param name is
+    # `observation_payload_N` (underscore suffix). So a forbidden occurrence is
+    # `observation_payload` followed by neither `[` nor `_`.
+    bare_observation = re.compile(r"observation_payload(?![_\[])")
+    assert not bare_observation.search(page_sql), page_sql
 
     # composition_payload must only appear inside JSON path projections
     # (subscript `composition_payload[...]`) or as a SQL bind param name
@@ -990,6 +1006,16 @@ def test_scope_list_response_size_is_thin() -> None:
                     leadershipStatus="stable",
                     jaccardStability=0.88,
                     migration=-0.04,
+                ),
+                observationSummary=ReviewScopeObservationSummaryDTO(
+                    freshnessTodayCount=7,
+                    freshnessDecayWeightedDensity=0.51,
+                    technicalHhi=0.23,
+                    technicalTop5Numerator=3.2,
+                    technicalTop5Denominator=8.4,
+                    technicalLeaderMedianGap=0.07,
+                    technicalLeaderSymbol="600519",
+                    technicalMemberCount=118,
                 ),
             )
         )
