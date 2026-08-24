@@ -16,8 +16,10 @@ CANONICAL: this is the single preparation owner consumed by the orchestrator
 
 from __future__ import annotations
 
+import gc
 import json
 import logging
+import resource
 import uuid
 from bisect import bisect_left, bisect_right
 from collections import defaultdict
@@ -77,6 +79,54 @@ logger = logging.getLogger("review_observation_prep_service")
 # Bar history window for the shared vol/amt ratio SSOT (same as Review pipeline).
 _RATIO_WINDOW = 20
 _BAR_LOOKBACK_DAYS = 400
+
+# Phase-1 memory instrumentation: peak RSS helper via /proc-backed ru_maxrss.
+# On Linux ru_maxrss is in bytes; on macOS it is in KiB. We normalise to MiB.
+_RSS_UNIT = 1024 if hasattr(resource, "RU_MAXRSS_UNIT") else (1024 if "linux" in __import__("sys").platform else 1)
+_PEAK_RSS_BYTES = 0
+
+
+def _log_rss(
+    stage: str,
+    union_member_count: int = 0,
+    trade_date_count: int = 0,
+    *,
+    bar_rows: int | None = None,
+    state_rows: int | None = None,
+    event_rows: int | None = None,
+    vector_member_count: int | None = None,
+) -> None:
+    """Log current + delta RSS (MiB) at a named preparation stage.
+
+    Uses ``resource.getrusage`` (ru_maxrss, peak resident set) — NOT tracemalloc,
+    which must never run in production. Pure read of the process resource struct.
+    """
+    global _PEAK_RSS_BYTES
+    ru = resource.getrusage(resource.RUSAGE_SELF)
+    # ru_maxrss unit: Linux=kB, macOS/FreeBSD=bytes historically; normalise to bytes.
+    unit = 1024 if "linux" in __import__("sys").platform else 1
+    rss_bytes = ru.ru_maxrss * unit
+    _PEAK_RSS_BYTES = max(_PEAK_RSS_BYTES, rss_bytes)
+    rss_mb = rss_bytes / (1024 * 1024)
+    peak_mb = _PEAK_RSS_BYTES / (1024 * 1024)
+    extra = ""
+    if bar_rows is not None:
+        extra += f" bar_rows={bar_rows}"
+    if state_rows is not None:
+        extra += f" state_rows={state_rows}"
+    if event_rows is not None:
+        extra += f" event_rows={event_rows}"
+    if vector_member_count is not None:
+        extra += f" vec_members={vector_member_count}"
+    logger.info(
+        "[RSS] stage=%s rss_mb=%.1f peak_mb=%.1f union_member_count=%d trade_date_count=%d%s",
+        stage,
+        rss_mb,
+        peak_mb,
+        union_member_count,
+        trade_date_count,
+        extra,
+    )
 
 # Historical market membership is unresolvable this round: ``resolve_scope_members
 # ("market", ...)`` returns the CURRENT active universe and ignores trade_date.
@@ -941,6 +991,13 @@ class _UnionFactContext:
     freshness_events_by_member: dict[str, list[tuple[str, str]]] = field(
         default_factory=dict
     )
+    # PERF-OOM (2026-08-24 closure): when the union is prepared chunked, the heavy
+    # ``bars`` / ``vec_volume`` are released after each chunk and the already-built
+    # compact ``MemberObservation`` list is carried here instead.  ``None`` => the
+    # non-chunked path still owns ``bars`` / ``vec_volume`` (oracle, unchanged).
+    prebuilt_members_by_date: dict[date, list[MemberObservation]] | None = field(
+        default=None
+    )
 
 
 def build_union_fact_context_from_loaded_facts(
@@ -1045,6 +1102,160 @@ async def prepare_union_fact_context(
     )
 
 
+# PERF-OOM (2026-08-24 closure): initial chunk size for the bar/vector path.
+# The non-chunked loader held the ENTIRE union (~5286 members x 400-day bars) AND
+# the full ``VectorizedVolumeContext`` simultaneously, peaking ~3.95 GiB and being
+# OOM-killed at the 4 GiB container ceiling.  Chunking bounds peak memory to
+# ~one chunk of bars + vectors while the canonical union-first architecture and
+# every business formula are preserved (``_load_batch_bars`` / ``_precompute_
+# vectorized_volume`` / ``_build_member_observations`` are the SAME owners; only
+# their lifetime is bounded per chunk).  Output is semantically identical.
+_REVIEW_PREP_CHUNK_SIZE = 500
+
+
+async def prepare_union_fact_context_chunked(
+    session: AsyncSession,
+    trade_dates: list[date],
+    union_member_ids: list[uuid.UUID],
+    *,
+    chunk_size: int = _REVIEW_PREP_CHUNK_SIZE,
+    current_only_facts_by_date: dict[date, dict] | None = None,
+    prep_counters: dict[str, int] | None = None,
+    prep_fallback_reasons: list[str] | None = None,
+) -> _UnionFactContext:
+    """Memory-bounded union fact context — chunked bar/vector load (PERF-OOM).
+
+    Loads the compact maps (calendar T-1, FP states, FP events, board freshness)
+    ONCE (unchanged), then loads bars + precomputes the vectorized volume in
+    chunks of ``chunk_size`` members.  For each chunk the canonical
+    ``MemberObservation`` list is built per trade_date and appended to
+    ``prebuilt_members_by_date``; the chunk's heavy ``bars`` / ``vec_volume`` are
+    then released before the next chunk.  Peak memory is thus bounded by one
+    chunk rather than the whole union.
+
+    The returned ``_UnionFactContext`` carries ``prebuilt_members_by_date`` and
+    empty ``bars`` / ``vec_volume``; :func:`build_prepared_scopes_from_union`
+    reuses the prebuilt members verbatim, producing output identical to the
+    non-chunked oracle.
+    """
+    import time
+
+    _log_rss(
+        "union-prep-start",
+        union_member_count=len(union_member_ids),
+        trade_date_count=len(trade_dates) if trade_dates else 0,
+    )
+    # Compact maps: loaded once, held for the whole prep (small footprint).
+    t0 = time.perf_counter()
+    t1_by_date = await _load_batch_calendar(session, trade_dates)
+    cal_ms = (time.perf_counter() - t0) * 1000.0
+    _log_rss("union-prep-calendar", union_member_count=len(union_member_ids),
+             trade_date_count=len(trade_dates) if trade_dates else 0)
+
+    t0 = time.perf_counter()
+    states_by_date = await _load_batch_states(
+        session, union_member_ids, trade_dates, t1_by_date
+    )
+    states_ms = (time.perf_counter() - t0) * 1000.0
+    state_rows = sum(len(v) for v in states_by_date.values())
+    _log_rss("union-prep-states", union_member_count=len(union_member_ids),
+             trade_date_count=len(trade_dates) if trade_dates else 0,
+             state_rows=state_rows)
+
+    t0 = time.perf_counter()
+    events_by_date = await _load_batch_events(session, union_member_ids, trade_dates)
+    events_ms = (time.perf_counter() - t0) * 1000.0
+    event_rows = sum(len(v) for v in events_by_date.values())
+    _log_rss("union-prep-events", union_member_count=len(union_member_ids),
+             trade_date_count=len(trade_dates) if trade_dates else 0,
+             event_rows=event_rows)
+
+    t0 = time.perf_counter()
+    freshness_events_by_member = await _load_batch_freshness_events(
+        session, union_member_ids, trade_dates[-1],
+    )
+    freshness_ms = (time.perf_counter() - t0) * 1000.0
+    _log_rss("union-prep-freshness", union_member_count=len(union_member_ids),
+             trade_date_count=len(trade_dates) if trade_dates else 0)
+
+    # Chunked bar + vector precompute.  ``states_by_date`` is keyed by ALL union
+    # members, so per-chunk state masks are sliced from it (same lookup the
+    # non-chunked path does per member).
+    prebuilt: dict[date, list[MemberObservation]] = {t: [] for t in trade_dates}
+    total_chunks = (len(union_member_ids) + chunk_size - 1) // chunk_size if union_member_ids else 0
+    for chunk_idx in range(total_chunks):
+        chunk = union_member_ids[chunk_idx * chunk_size:(chunk_idx + 1) * chunk_size]
+        t0 = time.perf_counter()
+        bars = await _load_batch_bars(session, chunk, trade_dates)
+        bars_ms = (time.perf_counter() - t0) * 1000.0
+        bar_rows = sum(len(s.facts) for s in bars.values())
+        _log_rss(
+            "union-prep-bars-chunk",
+            union_member_count=len(chunk),
+            trade_date_count=len(trade_dates) if trade_dates else 0,
+            bar_rows=bar_rows,
+        )
+        t_vec = time.perf_counter()
+        vec_volume = _precompute_vectorized_volume(bars)
+        vec_ms = (time.perf_counter() - t_vec) * 1000.0
+        _log_rss(
+            "union-prep-vector-chunk",
+            union_member_count=len(chunk),
+            trade_date_count=len(trade_dates) if trade_dates else 0,
+            vector_member_count=len(vec_volume),
+        )
+        for t in trade_dates:
+            states_t = states_by_date.get(t, {})
+            t1 = t1_by_date.get(t)
+            states_t1 = states_by_date.get(t1, {}) if t1 is not None else {}
+            chunk_members = _build_member_observations(
+                chunk,
+                trade_date=t,
+                t1=t1,
+                states_t={mid: states_t.get(mid) for mid in chunk},
+                states_t1={mid: states_t1.get(mid) for mid in chunk},
+                bars=bars,
+                current_only_facts=(
+                    current_only_facts_by_date.get(t, {})
+                    if current_only_facts_by_date
+                    else {}
+                ),
+                vec_volume=vec_volume,
+                counters=prep_counters,
+                fallback_reasons=prep_fallback_reasons,
+            )
+            prebuilt[t].extend(chunk_members)
+        # Release the chunk's heavy objects before loading the next chunk.
+        del bars
+        del vec_volume
+        gc.collect()
+        _log_rss(
+            "union-prep-chunk-released",
+            union_member_count=len(chunk),
+            trade_date_count=len(trade_dates) if trade_dates else 0,
+        )
+    _log_rss(
+        "union-prep-done",
+        union_member_count=len(union_member_ids),
+        trade_date_count=len(trade_dates) if trade_dates else 0,
+    )
+    logger.info(
+        "[union-fact-context-chunked] union_member_count=%d trade_date_count=%d "
+        "chunks=%d cal_ms=%.1f states_ms=%.1f events_ms=%.1f freshness_ms=%.1f",
+        len(union_member_ids), len(trade_dates) if trade_dates else 0,
+        total_chunks, cal_ms, states_ms, events_ms, freshness_ms,
+    )
+    return _UnionFactContext(
+        t1_by_date=t1_by_date,
+        states_by_date=states_by_date,
+        bars={},
+        events_by_date=events_by_date,
+        vec_volume={},
+        freshness_events_by_member=freshness_events_by_member,
+        prebuilt_members_by_date=prebuilt,
+    )
+
+
 @dataclass(frozen=True)
 class ScopeReplaySpec:
     """One scope to replay from a shared union fact context (R0-B).
@@ -1077,6 +1288,7 @@ def build_prepared_scopes_from_union(
     diagnostics_by_scope: dict[str, tuple[str, ...]] | None = None,
     prep_counters: dict[str, int] | None = None,
     prep_fallback_reasons: list[str] | None = None,
+    prebuilt_members_by_date: dict[date, list[MemberObservation]] | None = None,
 ) -> dict[str, list[PreparedScope]]:
     """PURE union preparation core: slice a shared ``_UnionFactContext`` into
     per-scope ``PreparedScope`` series (R0-B single production calculation owner).
@@ -1188,18 +1400,25 @@ def build_prepared_scopes_from_union(
         # ``_build_member_observations`` remains the single member-construction
         # owner; the scopes below only SELECT the resulting immutable
         # MemberObservation by reference (scope membership order preserved).
-        union_members = _build_member_observations(
-            union_ids,
-            trade_date=t,
-            t1=t1,
-            states_t=states_t,
-            states_t1=states_t1,
-            bars=union_ctx.bars,
-            current_only_facts=current_only_facts,
-            vec_volume=union_ctx.vec_volume,
-            counters=batch_counters,
-            fallback_reasons=batch_fallback_reasons,
-        )
+        # PERF-OOM: when the union was prepared chunked, the already-built compact
+        # ``MemberObservation`` list is carried on the context (heavy bars/vectors
+        # already released) — reuse it verbatim so output is identical to the
+        # non-chunked oracle.  Otherwise build from the live bars/vec_volume.
+        if union_ctx.prebuilt_members_by_date is not None:
+            union_members = union_ctx.prebuilt_members_by_date.get(t, [])
+        else:
+            union_members = _build_member_observations(
+                union_ids,
+                trade_date=t,
+                t1=t1,
+                states_t=states_t,
+                states_t1=states_t1,
+                bars=union_ctx.bars,
+                current_only_facts=current_only_facts,
+                vec_volume=union_ctx.vec_volume,
+                counters=batch_counters,
+                fallback_reasons=batch_fallback_reasons,
+            )
         member_by_id = {m.member_id: m for m in union_members}
 
         for scope_key, (
@@ -1364,6 +1583,7 @@ async def prepare_current_scope_observations_batch(
     *,
     trade_dates: list[date] | None = None,
     source_core_run_id: uuid.UUID,
+    chunk_members: bool = False,
 ) -> dict[str, PreparedScope] | dict[str, list[PreparedScope]]:
     """Batch-prepare current-day (L1 PIT) Canonical Scope Observations — the
     SINGLE current-day preparation owner.
@@ -1542,7 +1762,21 @@ async def prepare_current_scope_observations_batch(
                 seen.add(mid)
                 union_members.append(mid)
 
-    union_ctx = await prepare_union_fact_context(session, effective_dates, union_members)
+    # PERF-OOM (2026-08-24 closure): the production current-day path uses the
+    # chunked, memory-bounded union preparation (heavy bars/vectors released per
+    # chunk, Members prebuilt).  The non-chunked path remains the oracle used by
+    # tests and the Dataset Replay Adapter — identical outputs.
+    if chunk_members:
+        union_ctx = await prepare_union_fact_context_chunked(
+            session,
+            effective_dates,
+            union_members,
+            current_only_facts_by_date={trade_date: current_only_facts},
+        )
+    else:
+        union_ctx = await prepare_union_fact_context(
+            session, effective_dates, union_members
+        )
     # Current-only snapshot facts at exact T (str-keyed, same shape as the
     # current-only loader consumes). C1a fix: the loader's contract is
     # exact-T only (scalar ``trade_date``), NOT ``effective_dates`` — passing the
@@ -1587,6 +1821,7 @@ async def prepare_current_scope_observations_batch(
         pit_status_t1_by_scope=pit_status_t1_by_scope,
         t1_membership_available_by_scope=t1_membership_available_by_scope,
         diagnostics_by_scope=diagnostics_by_scope,
+        prebuilt_members_by_date=union_ctx.prebuilt_members_by_date,
     )
     if len(effective_dates) == 1:
         # Single-date (current-day) owner contract: unwrap the per-scope series

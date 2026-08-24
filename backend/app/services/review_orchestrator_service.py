@@ -679,6 +679,7 @@ async def compute_run(
             run.trade_date,
             eligible_specs,
             source_core_run_id=run.source_core_run_id,
+            chunk_members=True,
         )
         logger.info(
             "[ReviewOrchestrator] 规范事实层 batch prepare: scopes=%d prepared=%d",
@@ -1680,6 +1681,7 @@ async def resume_run(
             run.trade_date,
             redo_specs,
             source_core_run_id=run.source_core_run_id,
+            chunk_members=True,
         )
 
     # 对每个需要重处理的 scope，执行与 compute_run 完全相同的 per-scope owner。

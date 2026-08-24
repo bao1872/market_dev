@@ -1475,3 +1475,270 @@ def test_batch_injects_board_eligibility_into_current_only(monkeypatch):
     sym_map = {str(m.member_id): m.board_current_symbol for m in members}
     assert sym_map == {str(id_active): "ACTV", str(id_inactive): "INAC"}, sym_map
 
+
+# =============================================================================
+# PERF-OOM (2026-08-24 closure) — chunked vs oracle semantic-identity contract.
+#
+# The production current-day path now prepares the union fact context in chunks
+# of ``_REVIEW_PREP_CHUNK_SIZE`` members, releasing the heavy bars + vector
+# context per chunk.  This MUST be bit-identical to the non-chunked oracle
+# ``prepare_union_fact_context`` + ``build_prepared_scopes_from_union``.  The
+# test forces a scope whose members straddle MULTIPLE chunk boundaries so a
+# cross-chunk membership slice is exercised.
+# =============================================================================
+
+
+def _member_comparable(m) -> tuple:
+    """Curated MemberObservation fields that must be identical oracle vs chunked.
+
+    Covers every business fact the protocol lists: volume ratios/percentiles/
+    zscores, BB/current-only fields, event linkage (via event_coverage on the
+    scope), PIT membership, and T/T-1 facts.
+    """
+    return (
+        m.member_id,
+        m.return_1d,
+        m.t1_trend,
+        m.t1_swing,
+        m.t1_internal,
+        m.t1_momentum,
+        m.trend,
+        m.swing,
+        m.internal,
+        m.momentum,
+        m.price_candidate,
+        m.vol_ratio20,
+        m.vol_ratio200,
+        m.vol_pct20,
+        m.vol_pct200,
+        m.vol_zscore20,
+        m.vol_zscore200,
+        m.bb_position,
+        m.bb_width,
+        m.release_volume_ratio,
+        m.momentum_volume_relation,
+        m.vwap_ret_total,
+        m.trailing_top_pct,
+        m.trailing_bottom_pct,
+        m.regime_strength,
+        m.segment_bars,
+        m.volatility_phase,
+        m.structure_alignment_categorical,
+        m.active_internal_ob_count,
+        m.active_swing_ob_count,
+    )
+
+
+@pytest.mark.pure_unit
+async def test_oracle_vs_chunked_prep_identical_cross_chunk_scope(monkeypatch):
+    """Chunked union prep must be bit-identical to the non-chunked oracle, even
+    when a scope's members straddle multiple chunk boundaries."""
+
+    # 12 members -> 3 chunks at chunk_size=5; scope spans ALL chunks.
+    members = [uuid.uuid4() for _ in range(12)]
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1, "sqzmom_val": 1.0}
+    states_t = {m: state for m in members}
+    states_t1 = {m: state for m in members}
+
+    # 25-day history so the 20D volume window is satisfied for every member.
+    import datetime as _dt
+
+    bar_facts: dict[uuid.UUID, list] = {}
+    t1_bar_facts: dict[uuid.UUID, list] = {}
+    for idx, m in enumerate(members):
+        facts = []
+        base = date(2026, 1, 1)
+        for i in range(23):
+            facts.append(_bar(m, base + _dt.timedelta(days=i),
+                              close=10.0 + idx * 0.1, volume=100.0 + i))
+        facts.append(_bar(m, T1, close=9.0 + idx * 0.1, volume=110.0))
+        facts.append(_bar(m, T, close=10.0 + idx * 0.1, volume=120.0))
+        bar_facts[m] = facts
+        t1_bar_facts[m] = [_bar(m, T1, close=9.0 + idx * 0.1, volume=110.0)]
+
+    def resolve(scope_type, scope_key, trade_date):
+        return (members, "电子")
+
+    await _install_mocks(
+        monkeypatch, resolve=resolve, t1=T1,
+        states_t=states_t, states_t1=states_t1,
+        bar_facts=bar_facts, t1_bar_facts=t1_bar_facts,
+    )
+
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        prepare_union_fact_context,
+        prepare_union_fact_context_chunked,
+    )
+    from app.services.review_observation_prep_service import ScopeReplaySpec as _SRS
+
+    session = _FakeSession()
+    trade_dates = [T]
+
+    ctx_oracle = await prepare_union_fact_context(session, trade_dates, members)
+    ctx_chunked = await prepare_union_fact_context_chunked(
+        session, trade_dates, members, chunk_size=5, current_only_facts_by_date={T: {}}
+    )
+
+    assert ctx_oracle.prebuilt_members_by_date is None
+    assert ctx_chunked.prebuilt_members_by_date is not None
+    # Chunking must not drop or duplicate a single member across the union.
+    assert len(ctx_chunked.prebuilt_members_by_date[T]) == len(members)
+
+    specs = [
+        _SRS(
+            scope_type="industry_l1",
+            scope_key="k",
+            scope_name="k",
+            member_ids=tuple(members),
+        )
+    ]
+
+    out_oracle = build_prepared_scopes_from_union(
+        trade_dates=trade_dates,
+        scope_specs=specs,
+        union_ctx=ctx_oracle,
+        current_only_facts_by_date={T: {}},
+        coverage_by_date=None,
+    )
+    out_chunked = build_prepared_scopes_from_union(
+        trade_dates=trade_dates,
+        scope_specs=specs,
+        union_ctx=ctx_chunked,
+        current_only_facts_by_date={T: {}},
+        coverage_by_date=None,
+        prebuilt_members_by_date=ctx_chunked.prebuilt_members_by_date,
+    )
+
+    assert set(out_oracle.keys()) == set(out_chunked.keys())
+    for key in out_oracle:
+        so = out_oracle[key][0]
+        sc = out_chunked[key][0]
+        assert list(so.pit_member_ids) == list(sc.pit_member_ids), key
+        assert list(so.pit_member_ids_t1) == list(sc.pit_member_ids_t1), key
+        assert so.pit_status_t == sc.pit_status_t, key
+        assert so.pit_status_t1 == sc.pit_status_t1, key
+        assert len(so.members) == len(sc.members), (
+            f"{key}: member count mismatch {len(so.members)} vs {len(sc.members)}"
+        )
+        for mo, mc in zip(so.members, sc.members):
+            assert _member_comparable(mo) == _member_comparable(mc), (
+                f"{key}: member {mo.member_id} facts differ between oracle and "
+                f"chunked prep"
+            )
+
+
+@pytest.mark.pure_unit
+async def test_chunked_prep_preserves_t_t1_facts_per_chunk(monkeypatch):
+    """Every member — including those in later chunks — must carry correct T/T-1
+    facts (return_1d, t1_trend).  A chunking bug would zero these for non-first
+    members."""
+
+    members = [uuid.uuid4() for _ in range(11)]  # 3 chunks at chunk_size=4
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1, "sqzmom_val": 1.0}
+    states_t = {m: state for m in members}
+    states_t1 = {m: state for m in members}
+
+    import datetime as _dt
+
+    bar_facts: dict[uuid.UUID, list] = {}
+    t1_bar_facts: dict[uuid.UUID, list] = {}
+    for idx, m in enumerate(members):
+        base = date(2026, 1, 1)
+        facts = [
+            _bar(m, base + _dt.timedelta(days=i), close=10.0, volume=100.0 + i)
+            for i in range(23)
+        ]
+        facts.append(_bar(m, T1, close=9.0, volume=110.0))
+        facts.append(_bar(m, T, close=11.0, volume=120.0))
+        bar_facts[m] = facts
+        t1_bar_facts[m] = [_bar(m, T1, close=9.0, volume=110.0)]
+
+    def resolve(scope_type, scope_key, trade_date):
+        return (members, "电子")
+
+    await _install_mocks(
+        monkeypatch, resolve=resolve, t1=T1,
+        states_t=states_t, states_t1=states_t1,
+        bar_facts=bar_facts, t1_bar_facts=t1_bar_facts,
+    )
+
+    from app.services.review_observation_prep_service import (
+        build_prepared_scopes_from_union,
+        prepare_union_fact_context_chunked,
+    )
+    from app.services.review_observation_prep_service import ScopeReplaySpec as _SRS
+
+    ctx = await prepare_union_fact_context_chunked(
+        _FakeSession(), [T], members, chunk_size=4, current_only_facts_by_date={T: {}}
+    )
+    specs = [_SRS(scope_type="industry_l1", scope_key="k", scope_name="k",
+                  member_ids=tuple(members))]
+    out = build_prepared_scopes_from_union(
+        trade_dates=[T], scope_specs=specs, union_ctx=ctx,
+        current_only_facts_by_date={T: {}}, coverage_by_date=None,
+        prebuilt_members_by_date=ctx.prebuilt_members_by_date,
+    )
+    members_out = {str(m.member_id): m for m in out["k"][0].members}
+    assert len(members_out) == len(members)
+    for mid, m in members_out.items():
+        assert m.return_1d == pytest.approx(11.0 / 9.0 - 1.0), mid
+        assert m.t1_trend == Direction.UP, mid
+        assert m.vol_ratio20 is not None, mid  # 20D window satisfied
+
+
+@pytest.mark.pure_unit
+async def test_chunked_prep_releases_heavy_objects(monkeypatch):
+    """The chunked builder MUST release the heavy ``bars`` + ``vec_volume`` after
+    building members, so the returned context carries only the compact
+    ``prebuilt_members_by_date`` (peak RSS bounded by one chunk, not the union).
+    The oracle keeps both alive."""
+
+    members = [uuid.uuid4() for _ in range(10)]
+    state = {"regime_value": 1, "swing_bias": 1, "internal_bias": 1, "sqzmom_val": 1.0}
+    states_t = {m: state for m in members}
+    states_t1 = {m: state for m in members}
+
+    import datetime as _dt
+
+    bar_facts: dict[uuid.UUID, list] = {}
+    t1_bar_facts: dict[uuid.UUID, list] = {}
+    for idx, m in enumerate(members):
+        base = date(2026, 1, 1)
+        facts = [
+            _bar(m, base + _dt.timedelta(days=i), close=10.0, volume=100.0 + i)
+            for i in range(23)
+        ]
+        facts.append(_bar(m, T1, close=9.0, volume=110.0))
+        facts.append(_bar(m, T, close=10.0, volume=120.0))
+        bar_facts[m] = facts
+        t1_bar_facts[m] = [_bar(m, T1, close=9.0, volume=110.0)]
+
+    def resolve(scope_type, scope_key, trade_date):
+        return (members, "电子")
+
+    await _install_mocks(
+        monkeypatch, resolve=resolve, t1=T1,
+        states_t=states_t, states_t1=states_t1,
+        bar_facts=bar_facts, t1_bar_facts=t1_bar_facts,
+    )
+
+    from app.services.review_observation_prep_service import (
+        prepare_union_fact_context,
+        prepare_union_fact_context_chunked,
+    )
+
+    ora = await prepare_union_fact_context(_FakeSession(), [T], members)
+    ch = await prepare_union_fact_context_chunked(
+        _FakeSession(), [T], members, chunk_size=4, current_only_facts_by_date={T: {}}
+    )
+
+    # Oracle retains the heavy bars/vectors.
+    assert len(ora.bars) == len(members)
+    assert len(ora.vec_volume) == len(members)
+    # Chunked RELEASED bars/vectors; only the compact prebuilt members remain.
+    assert ch.bars == {}
+    assert ch.vec_volume == {}
+    assert ch.prebuilt_members_by_date is not None
+    assert len(ch.prebuilt_members_by_date[T]) == len(members)
+
