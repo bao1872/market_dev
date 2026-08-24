@@ -94,20 +94,25 @@ def _executed_statements(session: AsyncMock) -> list:
     return [c.args[0] for c in session.execute.call_args_list]
 
 
+# [Slice 4A5R] 哨兵：区分「调用方未传 source_board_run_id」（应退回到随机的
+# legacy lineage）与「调用方显式传 None」（真 JSON NULL canonical lineage）。
+_UNSET_BOARD_RUN_ID = object()
+
+
 def _make_run(
     *,
     status: str = "signals_ready",
     published_at: datetime | None = None,
     composition_readiness: dict | None = None,
-    source_board_run_id: uuid.UUID | None = None,
+    source_board_run_id: uuid.UUID | None | object = _UNSET_BOARD_RUN_ID,
 ) -> MarketReviewRun:
+    # [Slice 4A5R] 只有哨兵（未传）才退回到随机 legacy UUID；显式 None 保持 NULL。
+    resolved_board_run_id = uuid.uuid4() if source_board_run_id is _UNSET_BOARD_RUN_ID else source_board_run_id
     run = MarketReviewRun(
         id=uuid.uuid4(),
         trade_date=date(2026, 7, 31),
         source_core_run_id=uuid.uuid4(),
-        source_board_run_id=(
-            source_board_run_id if source_board_run_id is not None else uuid.uuid4()
-        ),
+        source_board_run_id=resolved_board_run_id,
         algorithm_version=REVIEW_ALGORITHM_VERSION,
         filter_version="filters-1.1.0",
         baseline_window=120,
@@ -869,32 +874,46 @@ class Test4A5BoardIndependentPublication:
     async def test_canonical_run_source_board_none_publishes_without_board(
         self,
     ):
-        """[4A5-A/D] canonical run（source_board_run_id=None）+ 无任何 board / 
-        market_aggregation pointer → 门禁 OPEN。"""
+        """[4A5R-A/D] canonical run（source_board_run_id=NULL）+ 无任何 board /
+        market_aggregation pointer → 门禁 OPEN。
+
+        [4A5R] 必须先证明前置条件：显式 ``source_board_run_id=None`` 得到真
+        JSON NULL lineage（哨兵保证不会退回到随机 UUID）。
+        """
         run = _make_run(
-            source_board_run_id=None,  # 新 canonical Review 设计态
+            source_board_run_id=None,  # 显式 NULL → canonical 设计态
             composition_readiness={"industry_l1:board-a": "ready"},
         )
+        # 前置条件：确认真 NULL，而非被 helper 换成 random UUID。
+        assert run.source_board_run_id is None
         publishable, blockers = await evaluate_publish_gate(
             _make_session(_gate_pass_results(run)), run,
         )
         assert publishable is True
+        assert blockers == []
         assert not any("board" in b for b in blockers)
         assert not any("market_aggregation" in b for b in blockers)
 
     async def test_legacy_run_arbitrary_source_board_id_publishes(self):
-        """[4A5-E] legacy Review run 保留任意 Board lineage UUID；core pointer
-        匹配 → 门禁 OPEN，Board lineage 不影响发布。"""
-        for arbitrary_board_id in (uuid.uuid4(), None):
-            run = _make_run(
-                source_board_run_id=arbitrary_board_id,
-                composition_readiness={"concept:scope-x": "ready"},
-            )
-            publishable, blockers = await evaluate_publish_gate(
-                _make_session(_gate_pass_results(run)), run,
-            )
-            assert publishable is True
-            assert not any("board" in b for b in blockers)
+        """[4A5R-E] legacy Review run 只保留任意 Board lineage UUID；core pointer
+        匹配 → 门禁 OPEN，Board lineage 不影响发布。
+
+        [4A5R] 只覆盖 UUID lineage（legacy 语义），不在此参数化 None——
+        NULL canonical lineage 由 `test_canonical_run_source_board_none...`
+        独立证明，避免隐藏不同前置条件。
+        """
+        legacy_board_id = uuid.uuid4()
+        run = _make_run(
+            source_board_run_id=legacy_board_id,
+            composition_readiness={"concept:scope-x": "ready"},
+        )
+        assert run.source_board_run_id == legacy_board_id
+        publishable, blockers = await evaluate_publish_gate(
+            _make_session(_gate_pass_results(run)), run,
+        )
+        assert publishable is True
+        assert blockers == []
+        assert not any("board" in b for b in blockers)
 
     async def test_board_pointer_presence_or_staleness_never_matters(self):
         """[4A5-D] Board pointer 是否存在、是否 stale，都不改变 gate 判定。
