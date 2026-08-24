@@ -2334,3 +2334,135 @@
   color: v.$color-text;
 }
 
+// ===== R3D Structure Observation (G5/G6) =====
+.structRoot {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+.structSection {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.structSectionTitle {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: v.$color-text;
+  border-left: 3px solid v.$color-border-soft;
+  padding-left: 8px;
+}
+.structSubBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.structBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.structBlockTitle {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: v.$color-text;
+}
+.structEventList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.structEventRow {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.structEventHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.structEventType {
+  font-weight: 700;
+  font-size: 0.85rem;
+  letter-spacing: 0.02em;
+}
+.structEventDir {
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+.structEventLevel {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  padding: 1px 6px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 4px;
+}
+.structEventPrimary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+.structEventSupporting {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.76rem;
+  color: v.$color-text-dim;
+}
+.structMetricLabel {
+  font-size: 0.7rem;
+  color: v.$color-text-dim;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.structMetricValue {
+  font-size: 0.88rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+.structMetricSub {
+  font-variant-numeric: tabular-nums;
+  font-size: 0.76rem;
+}
+.structDenominator {
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  font-variant-numeric: tabular-nums;
+}
+.structAlignGrid,
+.structDistanceGrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: baseline;
+}
+.structAlignCell,
+.structDistCell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.structUnavailable,
+.structNeutral {
+  font-size: 0.8rem;
+  color: v.$color-text-dim;
+  padding: 8px 10px;
+  border: 1px dashed v.$color-border-soft;
+  border-radius: 6px;
+}
+.structContractInvalid {
+  font-size: 0.74rem;
+  color: #d9a441;
+  padding: 4px 8px;
+  border-left: 2px solid #d9a441;
+}
+.structEventInvalid {
+  font-size: 0.78rem;
+  color: #d9a441;
+}
+

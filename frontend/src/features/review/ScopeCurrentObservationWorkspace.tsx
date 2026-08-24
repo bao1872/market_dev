@@ -1,4 +1,4 @@
-// [ScopeCurrentObservationWorkspace] - 描述: Current Observation Workspace 主 owner（R3B + R3C）
+// [ScopeCurrentObservationWorkspace] - 描述: Current Observation Workspace 主 owner（R3B + R3C + R3D）
 //
 // R3B 核心：Current 从此由 Canonical Observation 拥有：
 //   detail.data.observationGroups (L2) + detail.data.observation (L1 Observation Context)
@@ -7,14 +7,18 @@
 // R3C：G1–G4 使用正式、真实 Current Observation UX（price_capital / trend_state /
 // trend_progress / trend_volume_confirmation）；G5–G8 仍保留 R3B shell。
 //
-// 硬契约（R3B §3/§6/§10/§13/§15/§18/§20；R3C §1/§11/§19）：
+// R3D：G5（structure_break_turn）/ G6（structure_evolution_position）升级为正式
+//   Structure Observation UX；G7–G8 仍保留 R3B shell。
+//
+// 硬契约（R3B §3/§6/§10/§13/§15/§18/§20；R3C §1/§11/§19；R3D §1/§4/§5/§21）：
 // - 单一 owner：只接收已加载的 observationGroups / observation，绝不 fetch。
 // - 无第二请求：复用上层 useReviewScopeDetail（ONE query invariant）。
 // - 无 useState sub-tab / 无新 URL state / 无新 query 参数（anchor scroll 仅 presentational）。
 // - 不渲染 Analysis：Position / Velocity / Acceleration / Capital Tilt / Migration 不属于 Current。
 // - composition = null 不阻断 Current 渲染（Fact-only detail）。
 // - G1–G4 前端只承载、不重算；方向色仅限 signed directional facts（见 R3C §8）。
-// - 不创建 generic fact-kind detector；G5–G8 仍走 R3B shell。
+// - G5–G6 前端只承载、不重算；member_ratio 为主事实，事件条数仅作证据（R3D §5/§13）。
+// - 不创建 generic fact-kind detector；G7–G8 仍走 R3B shell。
 import { type FC, useMemo } from 'react'
 import { anchorScroll } from './reviewAnchorScroll'
 import {
@@ -32,8 +36,13 @@ import {
   buildTrendProgressVM,
   parseTrendVolumeConfirmation,
 } from './scopePriceTrendContract'
+import {
+  parseStructureBreakTurn,
+  parseStructureEvolutionPosition,
+} from './scopeStructureContract'
 import ScopePriceCapitalObservation from './ScopePriceCapitalObservation'
 import ScopeTrendObservation from './ScopeTrendObservation'
+import ScopeStructureObservation from './ScopeStructureObservation'
 import styles from './review.module.scss'
 
 function GroupShell({ group }: { group: ObservationGroup }) {
@@ -91,11 +100,27 @@ function TrendVolumeBlock({ facts }: { facts: Record<string, unknown> }) {
   return <ScopeTrendObservation volume={vm} />
 }
 
+// ---- R3D formal renderers (G5–G6) -----------------------------------------
+
+function StructureBreakTurnBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => parseStructureBreakTurn(facts), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeStructureObservation breakTurn={vm} />
+}
+
+function StructureEvolutionBlock({ facts }: { facts: Record<string, unknown> }) {
+  const vm = useMemo(() => parseStructureEvolutionPosition(facts), [facts])
+  if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
+  return <ScopeStructureObservation evolution={vm} />
+}
+
 const FORMAL_RENDERERS: Record<string, FC<{ facts: Record<string, unknown>; observation: Record<string, unknown> | null }>> = {
   price_capital: PriceCapitalBlock,
   trend_state: TrendStateBlock,
   trend_progress: TrendProgressBlock,
   trend_volume_confirmation: TrendVolumeBlock,
+  structure_break_turn: StructureBreakTurnBlock,
+  structure_evolution_position: StructureEvolutionBlock,
 }
 
 function GroupBody({
