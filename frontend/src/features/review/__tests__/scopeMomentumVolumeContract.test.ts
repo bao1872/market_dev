@@ -92,7 +92,6 @@ test('G7 current-only unavailable preserves reason + valid_count=0', () => {
 test('G8 ratio p50=1.25 -> 1.25×', () => {
   const vm = parseVolumeDistribution({ p25: 0.9, p50: 1.25, p75: 1.6, valid_count: 40 })
   assert.equal(vm!.p50, 1.25)
-  assert.equal(vm!.denominator, null)
   assert.equal(vm!.unavailable, false)
 })
 
@@ -128,11 +127,11 @@ test('G8 200D unavailable valid_count=0, 20D displays', () => {
   assert.equal(vm.zscore200!.unavailable, true)
 })
 
-// 10. G8 parser NEVER fabricates a denominator
+// 10. G8 parser has NO denominator field (backend _participation_distribution
+//     returns {p25,p50,p75,valid_count} only — frontend must not invent one).
 test('G8 volume distribution has no denominator field', () => {
   const vm = parseVolumeDistribution({ p25: 0.9, p50: 1.25, p75: 1.6, valid_count: 40 })
-  assert.equal('denominator' in (vm as object), true)
-  assert.equal((vm as { denominator: unknown }).denominator, null)
+  assert.equal('denominator' in (vm as object), false)
 })
 
 // ---------------------------------------------------------------------------
@@ -158,4 +157,75 @@ test('G7 momentum group: parseMomentumObservation reads momentum_squeeze_release
   assert.equal(vm.bbPosition!.median, 0.5)
   assert.equal(vm.bbWidth!.median, 0.0832)
   assert.equal(vm.releaseVolumeRatio!.median, 1.5)
+})
+
+// 11. P0-3 — Persisted squeeze ratios are read VERBATIM, never recomputed.
+//     Backend already computed count/denominator; frontend MUST NOT do ratio/denom.
+//     This test MUST FAIL against the pre-fix code (which did persisted/denominator).
+test('G7 squeeze persisted ratios preserved verbatim (NO recomputation)', () => {
+  const squeeze = parseSqueezeState({
+    squeeze_count: 5,
+    squeeze_ratio: 0.1,
+    squeeze_release_count: 3,
+    squeeze_release_ratio: 0.06,
+    non_squeeze_count: 42,
+    non_squeeze_ratio: 0.84,
+    denominator: 50,
+  })!
+  const byCat = Object.fromEntries(squeeze.categories.map((c) => [c.category, c]))
+  assert.equal(byCat['Squeeze'].ratio, 0.1) // -> 10.0%, NOT 0.10/50=0.002
+  assert.equal(byCat['Squeeze_Release'].ratio, 0.06) // -> 6.0%
+  assert.equal(byCat['Non_Squeeze'].ratio, 0.84) // -> 84.0%
+  assert.equal(fmtSqueezeRatio(byCat['Squeeze'].ratio), '10.0%')
+  assert.equal(fmtSqueezeRatio(byCat['Squeeze_Release'].ratio), '6.0%')
+  assert.equal(fmtSqueezeRatio(byCat['Non_Squeeze'].ratio), '84.0%')
+})
+
+// 12. REAL L2 WIRING — prove the workspace formal dispatch recognizes the
+//     canonical backend ObservationGroup shape and keys. This is the wiring
+//     that the pre-fix renderer registration (momentum/participation) missed.
+test('R3E real L2 wiring: canonical group_key + direct facts dispatch', () => {
+  // The canonical backend L2 group key is momentum_squeeze_release (NOT momentum).
+  const g7: { group_key: string; label: string; facts: Record<string, unknown> } = {
+    group_key: 'momentum_squeeze_release',
+    label: '动量与压缩释放',
+    facts: {
+      squeeze_state: {
+        squeeze_count: 5,
+        squeeze_ratio: 0.1,
+        squeeze_release_count: 3,
+        squeeze_release_ratio: 0.06,
+        non_squeeze_count: 42,
+        non_squeeze_ratio: 0.84,
+        denominator: 50,
+      },
+      bb_position: { median: 0.5, p25: 0.2, p75: 0.8, valid_count: 50, denominator: 50 },
+      bb_width: { median: 0.0832, p25: 0.05, p75: 0.12, valid_count: 50, denominator: 50 },
+      release_volume_ratio: { median: 1.5, p25: 1.2, p75: 1.9, valid_count: 50, denominator: 50 },
+    },
+  }
+  // group.facts is passed DIRECTLY (no nested momentum_squeeze_release wrapper).
+  const g7vm = parseMomentumObservation(g7.facts)
+  assert.equal(g7vm.squeeze!.denominator, 50)
+  assert.equal(g7vm.squeeze!.categories.length, 3)
+  assert.equal(g7vm.bbWidth!.median, 0.0832)
+
+  // The canonical backend L2 group key is volume_anomaly (NOT participation).
+  const g8: { group_key: string; label: string; facts: Record<string, unknown> } = {
+    group_key: 'volume_anomaly',
+    label: '量能异常',
+    facts: {
+      volume_ratio20: { p25: 0.9, p50: 1.25, p75: 1.6, valid_count: 40 },
+      volume_ratio200: { p25: null, p50: null, p75: null, valid_count: 0 },
+      volume_percentile20: { p25: 60, p50: 72.5, p75: 85, valid_count: 40 },
+      volume_percentile200: { p25: null, p50: null, p75: null, valid_count: 0 },
+      volume_zscore20: { p25: -2.0, p50: -1.35, p75: -0.2, valid_count: 40 },
+      volume_zscore200: { p25: null, p50: null, p75: null, valid_count: 0 },
+    },
+  }
+  const g8vm = parseVolumeObservation(g8.facts)
+  assert.equal(g8vm.ratio20!.p50, 1.25)
+  assert.equal(g8vm.ratio200!.unavailable, true)
+  assert.equal(g8vm.percentile20!.p50, 72.5)
+  assert.equal(g8vm.zscore20!.p50, -1.35)
 })

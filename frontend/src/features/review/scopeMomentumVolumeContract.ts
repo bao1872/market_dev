@@ -87,11 +87,9 @@ export interface SqueezeStateVM {
   }[]
 }
 
-// Canonical squeeze categories (producer squeeze_labels: SQUEEZE/RELEASED/NORMAL).
-function safeRatio(numerator: unknown, denominator: number): number | null {
-  const n = typeof numerator === 'number' && Number.isFinite(numerator) ? numerator : 0
-  return denominator > 0 ? n / denominator : null
-}
+// Squeeze ratio is a PERSISTED fact (backend computes count/denominator).
+// Frontend MUST NOT recompute (no count/denominator or ratio/denominator math).
+// Read each persisted ratio verbatim; null stays null (denominator=0 producer).
 
 export function parseSqueezeState(raw: unknown): SqueezeStateVM | null {
   const o = asRecord(raw)
@@ -111,10 +109,12 @@ export function parseSqueezeState(raw: unknown): SqueezeStateVM | null {
     const count = typeof countRaw === 'number' && Number.isFinite(countRaw) && countRaw >= 0
       ? Math.floor(countRaw)
       : 0
+    const ratioRaw = o[`${key}_ratio`]
+    const ratio = typeof ratioRaw === 'number' && Number.isFinite(ratioRaw) ? ratioRaw : null
     return {
       category: cat,
       count,
-      ratio: safeRatio(o[`${key}_ratio`], denominator),
+      ratio,
     }
   })
 
@@ -203,8 +203,6 @@ export interface VolumeDistributionVM {
   p50: number | null
   p75: number | null
   validCount: number | null
-  /** always null — G8 has NO denominator by contract */
-  denominator: null
 }
 
 export function parseVolumeDistribution(raw: unknown): VolumeDistributionVM | null {
@@ -221,7 +219,6 @@ export function parseVolumeDistribution(raw: unknown): VolumeDistributionVM | nu
     p50,
     p75,
     validCount,
-    denominator: null,
   }
 }
 

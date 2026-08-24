@@ -118,16 +118,19 @@ function StructureEvolutionBlock({ facts }: { facts: Record<string, unknown> }) 
 }
 
 // ---- R3E formal renderers (G7–G8) -----------------------------------------
-// L2 group keys: momentum (momentum_squeeze_release) / participation (volume_anomaly).
+// Canonical L2 group keys (backend ObservationGroupSpec):
+//   momentum_squeeze_release / volume_anomaly
+// group.facts is the direct fact object (squeeze_state / bb_position / ...),
+// NOT a nested wrapper key. Parser consumes group.facts directly.
 
 function MomentumBlock({ facts }: { facts: Record<string, unknown> }) {
-  const vm = useMemo(() => parseMomentumObservation(facts['momentum_squeeze_release']), [facts])
+  const vm = useMemo(() => parseMomentumObservation(facts), [facts])
   if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
   return <ScopeMomentumObservation vm={vm} />
 }
 
 function VolumeBlock({ facts }: { facts: Record<string, unknown> }) {
-  const vm = useMemo(() => parseVolumeObservation(facts['volume_anomaly']), [facts])
+  const vm = useMemo(() => parseVolumeObservation(facts), [facts])
   if (!vm) return <div className={styles.observationGroupEmpty}>暂无事实字段</div>
   return <ScopeVolumeObservation vm={vm} />
 }
@@ -139,8 +142,8 @@ const FORMAL_RENDERERS: Record<string, FC<{ facts: Record<string, unknown>; obse
   trend_volume_confirmation: TrendVolumeBlock,
   structure_break_turn: StructureBreakTurnBlock,
   structure_evolution_position: StructureEvolutionBlock,
-  momentum: MomentumBlock,
-  participation: VolumeBlock,
+  momentum_squeeze_release: MomentumBlock,
+  volume_anomaly: VolumeBlock,
 }
 
 function GroupBody({
