@@ -1,6 +1,8 @@
 // [ReviewHeader] - 描述: 复盘固定顶部（canonical Review，Slice D）
-// 展示：交易日与前后交易日 / Review 发布状态 / Core/Board Run /
+// 展示：交易日与前后交易日 / Review 发布状态 / Core Run /
 //      overall coverageRatio / succeeded/expected/failed scope 计数 / 算法版本 / 历史基线 / 降级原因
+// [R0 2026-08-24] Board runtime 已退役：sourceBoardRunId 当前恒为 null，仅历史数据可能非空；
+//      前端不在主业务层显示「Board Run」，Legacy lineage 只放 diagnostics（见底部条件块）。
 // [Slice D] 不再展示 retired Signal 语义：signalCount / signalSummary / “新增信号” /
 //          旧 market/indices/styles 覆盖块 / Filter Version 产品概念。
 // 顶部不得显示 AI 自由生成的市场结论；不可用值用 null 如实展示。
@@ -91,7 +93,6 @@ export default function ReviewHeader({
         {overview && (
           <div className={styles.headerMeta}>
             <MetaItem label="Core Run:" value={overview.sourceCoreRunId.slice(0, 8)} />
-            <MetaItem label="Board Run:" value={overview.sourceBoardRunId.slice(0, 8)} />
           </div>
         )}
       </div>
@@ -126,6 +127,13 @@ export default function ReviewHeader({
           )}
           <MetaItem label="算法:" value={overview.algorithmVersion} />
           <MetaItem label="基线:" value={`${overview.baselineWindow}日`} />
+        </div>
+      )}
+      {/* Legacy Board lineage（diagnostics，非主业务层）：当前 run 的 sourceBoardRunId 恒为 null；
+          仅历史/回溯数据中非空时出现，不表示 Review 的上游或 runtime owner。 */}
+      {overview && overview.sourceBoardRunId && (
+        <div className={styles.headerBottom}>
+          <MetaItem label="Legacy Board lineage:" value={overview.sourceBoardRunId.slice(0, 8)} />
         </div>
       )}
     </header>

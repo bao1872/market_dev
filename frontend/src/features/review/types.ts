@@ -32,16 +32,6 @@ export interface ReviewOverviewCoverage {
   industryL1: number | null
 }
 
-/** overview.signalSummary 子结构 */
-export interface ReviewOverviewSignalSummary {
-  new: number
-  continuing: number
-  confirmed: number
-  weakened: number
-  invalidated: number
-  transformed: number
-}
-
 /** [P0 2026-08-04] chip 真实覆盖率明细（以 stock_core expectedCount 为分母） */
 export interface ReviewChipCoverage {
   expectedCount: number | null
@@ -58,7 +48,13 @@ export interface ReviewOverview {
   tradeDate: string
   status: string
   sourceCoreRunId: string
-  sourceBoardRunId: string
+  /**
+   * [R0 2026-08-24] Legacy Board lineage pointer。
+   * Unified Review 现在是所有板块复盘事实的唯一当前 owner；当前 run 的 sourceBoardRunId
+   * 恒为 null（正确的常态，既非异常也非降级）。仅历史/回溯数据中可能非空，供审计。
+   * 前端不得将其作为 Review 的前置条件或 runtime owner 展示。
+   */
+  sourceBoardRunId: string | null
   /**
    * [QM-63] 输入 chip 共识 run ID。
    * null 明确表示 chip 不可用、本次 run 降级为 core-only，
@@ -79,7 +75,6 @@ export interface ReviewOverview {
   filterVersion: string
   baselineWindow: number
   coverage: ReviewOverviewCoverage
-  signalSummary: ReviewOverviewSignalSummary
   coverageRatio: number | null
   expectedScopeCount: number
   succeededScopeCount: number

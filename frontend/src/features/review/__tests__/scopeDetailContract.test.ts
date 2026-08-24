@@ -691,7 +691,7 @@ test('R2. Reconciliation: skipped 空数组时保持空数组', () => {
 
 test('F1. observation 顶层精确顺序', () => {
   assert.deepEqual(OBSERVATION_GROUP_ORDER, [
-    'scope', 'price', 'trend', 'structure', 'momentum', 'participation', 'chip',
+    'scope', 'price', 'trend', 'structure', 'momentum', 'participation', 'chip', 'freshness',
   ])
   const groups = observationGroups({
     price: { p: 1 },

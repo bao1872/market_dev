@@ -466,6 +466,7 @@ export const OBSERVATION_GROUP_ORDER: ReadonlyArray<string> = [
   'momentum',
   'participation',
   'chip',
+  'freshness',
 ]
 
 /** 从完整 observation payload 中读取有序的顶层分组（key → value），缺失组不出现。 */
