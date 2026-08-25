@@ -60,6 +60,7 @@ from app.services.feature_snapshot_service import (
     get_active_a_share_instruments,
 )
 from app.services.first_pyramid_history_service import (
+    advance_history_to_trade_date,
     ensure_current_first_pyramid_history_run,
 )
 from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
@@ -1676,11 +1677,16 @@ def _make_history_step(
 ) -> Callable[[], Awaitable[dict[str, Any]]]:
     """[SLICE-01 H2] 构造 computing_history 步骤业务体。
 
-    exact-T First Pyramid History readiness 门控步骤：
+    exact-T First Pyramid History 自动生产 + readiness 门控步骤：
     - skip_history=True 时（显式跳过复盘）直接返回 ready=False（不阻断主流程）；
-    - 否则 resolve-or-create 当前 canonical FirstPyramidHistoryRun，并用既有
-      Review readiness 服务校验该 run 对 trade_date 是否 exact-T ready。
-    返回 dict：{"history_run_id", "ready", "status", "reason"}。
+    - 否则：
+        1) resolve-or-create 当前 canonical FirstPyramidHistoryRun（producer resolver，幂等）；
+        2) 调用既有 canonical advancement owner ``advance_history_to_trade_date``
+           把数据集推进到 trade_date（1x write amplification，幂等，不重写历史）；
+        3) 用 ``validate_canonical_history_run_readiness`` 校验该 run 对 trade_date
+           是否 exact-T ready（真实合同：返回 dict，status=='ok' 才是 ready）。
+    返回 dict：{"history_run_id", "ready", "status", "reason", "advanced"}。
+    history_run_id 仅作诊断 metadata；ready 才是 Review 是否允许的真实门控信号。
     """
 
     async def _run() -> dict[str, Any]:
@@ -1690,6 +1696,7 @@ def _make_history_step(
                 "ready": False,
                 "status": "skipped",
                 "reason": "skip_history",
+                "advanced": False,
             }
         async with AsyncSessionLocal() as db:
             run, _is_new = await ensure_current_first_pyramid_history_run(
@@ -1697,22 +1704,46 @@ def _make_history_step(
                 scheduler_job_run_id=job_run_id,
             )
             await db.commit()
-            ready = await validate_canonical_history_run_readiness(
+            # [SLICE-01-CORRECTION] 先自动推进 canonical History 到 trade_date。
+            # 这是当前 canonical exact-T advancement owner（非 250 天全量重跑），
+            # 幂等（daily_state upsert + events on_conflict_do_nothing）。
+            advance_result = await advance_history_to_trade_date(
+                db,
+                run.id,
+                trade_date,
+                progress_callback=_make_step_progress_callback(job_run_id, worker_id),
+            )
+            await db.commit()
+            # [SLICE-01-CORRECTION] 真实 readiness 合同：返回 dict，
+            # status == 'ok' 才是 exact-T ready；任何 predicate 不满足都返回
+            # status='not_ready'（含 reason）。禁止 bool(dict)（空 dict 仍为 True）。
+            readiness = await validate_canonical_history_run_readiness(
                 db,
                 run.id,
                 HISTORY_CONTRACT_VERSION,
                 required_trade_date=trade_date,
             )
             await db.commit()
+            history_ready = (
+                isinstance(readiness, dict) and readiness.get("status") == "ok"
+            )
             logger.info(
-                "[AfterClose][H2] history readiness job=%s trade=%s run=%s ready=%s",
-                str(job_run_id), trade_date, run.id, ready,
+                "[AfterClose][H2] history advance+readiness job=%s trade=%s run=%s "
+                "advance=%s readiness_status=%s ready=%s",
+                str(job_run_id), trade_date, run.id,
+                advance_result.get("target_state_count"),
+                readiness.get("status") if isinstance(readiness, dict) else readiness,
+                history_ready,
             )
             return {
+                # 诊断 metadata（不用于 Review gate 绕过 readiness）
                 "history_run_id": run.id,
-                "ready": bool(ready),
-                "status": "succeeded" if ready else "not_ready",
-                "reason": None if ready else "HISTORY_NOT_READY_T",
+                # 真实门控信号：仅 exact-T readiness 决定
+                "ready": history_ready,
+                "status": "succeeded" if history_ready else "not_ready",
+                "reason": None if history_ready else "HISTORY_NOT_READY_T",
+                "advanced": True,
+                "readiness_detail": readiness if isinstance(readiness, dict) else {"status": "error"},
             }
 
     return _run
@@ -1727,15 +1758,19 @@ async def _execute_review_step(
     skip_review: bool,
     stock_core_published: bool,
     history_run_id: uuid.UUID | None = None,
+    history_ready: bool = False,
 ) -> dict[str, Any]:
     """[AC-02] computing_review 业务体（软失败，不阻断主流程）。
 
-    [SLICE-01 H2] exact-T History 硬依赖门控：
-    调用方（computing_history 步骤）已校验当前 trade_date 的 First Pyramid
-    History 是否 exact-T ready，并通过 history_run_id 传入。若 history_run_id
-    为 None（History 未 ready / 未生产），则 Review 不得计算或发布，直接返回
-    gate_blocked——满足 invariant H2：History(T) 缺失 → Review NOT computed /
-    NOT published。这是硬门控，不等同于软失败（不切 pointer、不写发布）。
+    [SLICE-01-CORRECTION H2] exact-T History 硬依赖门控：
+    调用方（computing_history 步骤）已自动推进并校验当前 trade_date 的 First
+    Pyramid History 是否 exact-T ready，并通过 history_ready 布尔传入。
+    - history_ready=False（History 未生产 / 未 exact-T ready）→ Review 不得计算
+      或发布，直接返回 gate_blocked——满足 invariant H2：History(T) 缺失 →
+      Review NOT computed / NOT published。
+    - history_run_id 仅作诊断 metadata，不参与 gate 判定；即使存在 UUID，
+      history_ready=False 仍必须 gate_blocked（run 存在 ≠ run exact-T ready）。
+    这是硬门控，不等同于软失败（不切 pointer、不写发布）。
 
 
     原为 execute_after_close_run 内的内联块；Phase0 收口后抽为独立业务体，
@@ -1781,22 +1816,23 @@ async def _execute_review_step(
     prereq_missing: bool = False
 
     if not skip_review:
-        # [SLICE-01 H2] exact-T History 硬门控：computing_history 步骤已完成
-        # readiness 判定并通过 history_run_id 传入。若 History(T) 未 exact-T ready
-        # （history_run_id is None），Review 不得计算/发布——直接 gate_blocked。
+        # [SLICE-01-CORRECTION H2] exact-T History 硬门控：
+        # 门控信号是 history_ready（由 computing_history 步骤真实校验得出），
+        # 而非 history_run_id 是否存在。run 存在 ≠ run exact-T ready。
+        # history_ready=False → Review 不得计算/发布——直接 gate_blocked。
         # 这是硬依赖（invariant H2），不等同软失败：不创建 review run、不切 pointer、
         # 不写发布，仅如实标记 gate_blocked 供前端时间线展示。
-        if history_run_id is None:
+        if not history_ready:
             logger.warning(
                 "[AfterClose][H2] History(T) not exact-T ready, Review gate_blocked: "
-                "job=%s trade=%s",
-                str(job_run_id), trade_date,
+                "job=%s trade=%s history_run_id=%s",
+                str(job_run_id), trade_date, history_run_id,
             )
             return {
                 "status": "gate_blocked",
-                "failed": False,
+                "failed": True,
                 "reason": "HISTORY_NOT_READY_T",
-                "history_run_id": None,
+                "history_run_id": str(history_run_id) if history_run_id else None,
                 "run_id": None,
                 "publication_id": None,
                 "scope_count": 0,
@@ -2468,8 +2504,12 @@ async def execute_after_close_run(
         skip_publish = "publishing" in completed
         # [CHANGE-20260801-REVIEW-CLOSURE] review 阶段跳过标志
         skip_review = "computing_review" in completed
-        # [SLICE-01 H2] history 阶段跳过标志（history 在 review 之前）
-        skip_history = "computing_history" in completed
+        # [SLICE-01-CORRECTION] history 阶段跳过标志：
+        # History readiness 不能通过 checkpoint 名称恢复（run 存在 ≠ exact-T ready）。
+        # 仅当 computing_review 也已完成（即整个 History+Review 后置链都完成）
+        # 才可整体跳过 History 步骤；否则必须重新执行幂等 advance + revalidate，
+        # 否则会出现「已验证 ready → crash → resume 反而判 not-ready」的回归。
+        skip_history = "computing_history" in completed and "computing_review" in completed
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
@@ -3635,14 +3675,15 @@ async def execute_after_close_run(
         # 兼容性：保留 metadata 键 aggregation_status，如实置为 "skipped"（该阶段已退役/不再执行）。
         _aggregation_status = "skipped"
 
-        # ---- 步骤 4.4: computing_history（First Pyramid History exact-T readiness gate） ----
-        # [SLICE-01 H2] Review(T) 硬依赖 exact-T First Pyramid History。此步骤负责：
+        # ---- 步骤 4.4: computing_history（First Pyramid History 自动生产 + exact-T readiness gate） ----
+        # [SLICE-01-CORRECTION] Review(T) 硬依赖 exact-T First Pyramid History。
+        # 此步骤负责：
         #  1) 解析/创建当前 canonical FirstPyramidHistoryRun（producer resolver，幂等）；
-        #  2) 校验该 run 对 trade_date 是否 exact-T ready（validate_canonical_history_run_readiness）。
-        # readiness 由既有的 Review readiness 服务判定（fail-closed），computed/events
-        # 的 exact-T 契约由 producer 维护。after-close 不负责重型 backfill（membership
-        # 属 producer Phase 2），只做 readiness 绑定 + 硬门控。
-        # 若 not ready：_history_run_id=None，后续 Review 步骤按 H2 硬门控 gate_blocked。
+        #  2) 调用既有 canonical advancement owner「advance_history_to_trade_date」
+        #     把数据集推进到 trade_date（1x write amplification，幂等）；
+        #  3) 校验该 run 对 trade_date 是否 exact-T ready（validate_canonical_history_run_readiness）。
+        # readiness 由既有的 Review readiness 服务判定，返回 dict，status=='ok' 才是 ready。
+        # 若 not ready：_history_ready=False，后续 Review 步骤按 H2 硬门控 gate_blocked。
         _history_run_id: uuid.UUID | None = None
         _history_ready: bool = False
         logger.info(
@@ -3690,6 +3731,7 @@ async def execute_after_close_run(
                 worker_id=worker_id,
                 skip_review=skip_review,
                 history_run_id=_history_run_id,
+                history_ready=_history_ready,
                 stock_core_published=_stock_core_published,
             ),
             timeout_seconds=_step_timeout("computing_review"),
