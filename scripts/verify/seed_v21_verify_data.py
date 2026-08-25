@@ -102,7 +102,6 @@ from app.services.after_close_chip_consensus_service import (
     create_after_close_chip_consensus_job,
     execute_after_close_chip_consensus,
 )
-from app.services.board_analysis_service import compute_all_boards
 from app.services.board_facts_service import (
     run_board_facts,
 )
@@ -921,42 +920,6 @@ async def _seed_blocked_board_failure(trade_date: date) -> uuid.UUID:
         f"removed_publications={removed} (state reason_code 由 service 生成为 RUN_FAILED)"
     )
     return run_id
-
-
-async def _publish_board_aggregation(trade_date: date) -> uuid.UUID | None:
-    """真实 board aggregation 链：compute_all_boards(publish=True) → market_aggregation pointer。
-
-    真实签名（board_analysis_service.py:1649）：
-        compute_all_boards(session, trade_date, *, board_type=None, limit=None,
-            publish=True, algorithm_version=BOARD_ANALYSIS_ALGORITHM_VERSION) -> dict
-
-    [审查第四节修正] 原 Seed 只做单板块 compute 而**从不写 market_aggregation publication**，
-    导致 _board_aggregation_state 永远 unavailable。compute_all_boards 内部在
-    batch_run.status == "succeeded" 时才逐板块 publish_board_analysis 并调用
-    publish_market_aggregation（写 market_aggregation pointer），是唯一真实 producer。
-
-    [约束4+5] 不直接写 factor_publications；source_core_run_id 由 compute_all_boards 从
-    已发布 stock_core pointer 读取，与 Core 同 universe，lineage 天然一致。
-
-    Returns:
-        board_analysis_runs.id（成功发布时），否则 None（软失败，由 closure 断言暴露）
-    """
-    async with AsyncSessionLocal() as db:
-        result = await compute_all_boards(db, trade_date, publish=True)
-        await db.commit()
-    published = result.get("published", 0)
-    status = result.get("status")
-    run_id = result.get("board_analysis_run_id")
-    print(
-        f"[seed] board aggregation: {trade_date} run={run_id} status={status} "
-        f"succeeded={result.get('succeeded')} failed={result.get('failed')} "
-        f"published_boards={published} coverage_below={result.get('coverage_below_threshold')}"
-    )
-    if result.get("errors"):
-        print(f"        errors[:3]={result['errors'][:3]}")
-    if status != "succeeded":
-        return None
-    return uuid.UUID(str(run_id))
 
 
 async def _run_and_publish_review(
