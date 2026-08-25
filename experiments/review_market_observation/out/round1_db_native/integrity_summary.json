@@ -1,0 +1,20 @@
+{
+  "duplicate_count": 0,
+  "duplicate_sample_limit_20": [],
+  "lineage_snapshot_trade_date_end": "2026-08-10",
+  "lineage_snapshot_trade_date_start": "2026-02-09",
+  "row_summary": {
+    "algo_match_count": 628459,
+    "distinct_instrument_count": 5283,
+    "hc_outer_match_count": 628459,
+    "hc_payload_match_count": 628459,
+    "row_count": 628459,
+    "trade_date_count": 120
+  },
+  "source_history_run_histogram_limit_50": [
+    {
+      "n": 628459,
+      "source_history_run_id": "be56dcd2-d2f8-4ff9-bd66-ad2ed83f3813"
+    }
+  ]
+}

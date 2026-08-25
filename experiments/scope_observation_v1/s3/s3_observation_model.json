@@ -1,0 +1,110 @@
+{
+  "experiment": "S3 Minimum Sufficient Observation Model Closure",
+  "branch": "exp/scope-observation-model-v1",
+  "s2_final_sha": "1cbf1c54164f1aa1511a0c48670b8fdc622bacf7",
+  "s2_verdict": "PASS",
+  "purpose": "Answer what is the minimum but semantically complete Scope Observation Model. NOT a search for best score/weight/threshold, prediction, future return, or opportunity/risk ranking.",
+  "model_contract": {
+    "no_score": true,
+    "no_weight": true,
+    "no_threshold": true,
+    "no_new_top_level_dimensions": true,
+    "no_correlation_based_removal": true,
+    "top_level_dimensions_allowed": ["PRICE", "TREND", "STRUCTURE", "MOMENTUM", "PARTICIPATION", "CONCENTRATION_CONTRIBUTION", "CHIP"]
+  },
+  "final_minimal_observation_model": {
+    "SCOPE_OBSERVATION": {
+      "PRICE": {
+        "role": "top-level result fact layer (NOT a Trend score)",
+        "Return_Level": "CORE",
+        "Return_Distribution": "CORE",
+        "Price_Breadth": "CORE",
+        "Signed_Return_Contribution": "EXPLANATORY",
+        "Price_Concentration": "CORE",
+        "Amount_Contribution_Concentration": "CORE"
+      },
+      "TREND": {
+        "State_and_Breadth": "CORE",
+        "Transition": "CORE",
+        "Diffusion": "PROVISIONAL"
+      },
+      "STRUCTURE": {
+        "State_and_Breadth": "CORE",
+        "Transition": "CORE",
+        "Diffusion": "PROVISIONAL"
+      },
+      "MOMENTUM": {
+        "State_and_Breadth": "CORE",
+        "Transition": "CORE",
+        "Diffusion": "PROVISIONAL"
+      },
+      "PARTICIPATION": {
+        "Volume_Participation_Distribution": "CORE",
+        "Amount_Participation_Distribution": "CORE"
+      },
+      "CONCENTRATION_CONTRIBUTION": {
+        "Price_Concentration": "CORE",
+        "Amount_Concentration": "CORE",
+        "Signed_Return_Contribution": "EXPLANATORY",
+        "Amount_Contribution": "EXPLANATORY"
+      },
+      "CHIP": {
+        "disposition": "UNRESOLVED",
+        "slot": "CHIP / PARTICIPATION RELATION — PENDING DATA"
+      }
+    }
+  },
+  "deletions_merges": [
+    {
+      "action": "MERGE",
+      "object": "return_median",
+      "into": "return_p50",
+      "reason": "return_median and return_p50 are the same fact (identical values in S2: median=0.0077). One product field."
+    },
+    {
+      "action": "NO_BREADTH_SCORE",
+      "object": "State categorical distribution",
+      "reason": "State categorical proportions ARE Breadth (Q1 SUPPORTED). Do not design a separate Breadth Score."
+    },
+    {
+      "action": "KEEP_RATIO_ONLY_FOR_CROSS_SCOPE",
+      "object": "Transition",
+      "reason": "Ratio is the cross-scope core expression; raw counts remain EXPLANATORY/audit only."
+    },
+    {
+      "action": "NO_CONCENTRATION_SCORE",
+      "object": "Price/Amount HHI",
+      "reason": "raw HHI kept for single-scope time variation; normalized HHI for cross-scope comparison. Never averaged, no Concentration Score."
+    },
+    {
+      "action": "TOP_CONTRIBUTORS_EXPLANATORY",
+      "object": "Top contributors",
+      "reason": "top_positive/negative/abs_price/amount are explanation, not primitives."
+    },
+    {
+      "action": "NO_PARTICIPATION_SCORE",
+      "object": "Participation",
+      "reason": "retain threshold-free volume/amount ratio distribution; P25/P50/P75 are one distribution object, not three dimensions. No active/high/low, no >1/>1.5, no Participation Score."
+    },
+    {
+      "action": "DISTINCT_SEMANTICS_KEPT",
+      "objects": [
+        "Price Breadth vs Trend State/Breadth",
+        "Signed return contribution vs abs price share vs amount share",
+        "price concentration vs amount concentration"
+      ],
+      "reason": "Different semantics are kept distinct even if correlated (per §5/§9). No correlation-based merge."
+    }
+  ],
+  "pqucv_scoring_judgment": {
+    "judgment": "NOT_NEEDED",
+    "confidence": "HIGH",
+    "criterion": "Is there information that can ONLY be expressed through P/Q/U/C/V scores and that the observation model above cannot express?",
+    "reason": "No. Every P/Q/U/C/V score is an aggregation over the CORE observation facts already enumerated (return level/distribution/breadth, state+breadth, transition ratios, price/amount concentration, participation distributions). The observation model expresses all the underlying semantics directly; P/Q/U/C/V add no new information. Retaining them 'for aggregation convenience' is a summary-presentation choice, not an observation-model requirement.",
+    "distinction": {
+      "summary_presentation": "UI summaries / at-a-glance scores MAY remain as a presentation convenience. This is NOT part of the underlying observation model.",
+      "underlying_observation_model": "P/Q/U/C/V are NOT needed as the first-layer observation model. The CORE objects above are the observation model."
+    }
+  },
+  "evidence_window_note": "All conclusions rest on a 6-day short window (2026-08-03..2026-08-10) plus exact-T1 same-day contrasts. Long-history stability is not established."
+}

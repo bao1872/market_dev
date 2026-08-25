@@ -1,0 +1,256 @@
+{
+  "internal_bias": [
+    {
+      "current_state": "-1",
+      "n": 379622,
+      "n_instruments": 5274,
+      "prev_state": "-1"
+    },
+    {
+      "current_state": "1",
+      "n": 225272,
+      "n_instruments": 5193,
+      "prev_state": "1"
+    },
+    {
+      "current_state": "-1",
+      "n": 8997,
+      "n_instruments": 5006,
+      "prev_state": "1"
+    },
+    {
+      "current_state": "1",
+      "n": 8584,
+      "n_instruments": 4944,
+      "prev_state": "-1"
+    },
+    {
+      "current_state": "0",
+      "n": 663,
+      "n_instruments": 37,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "-1",
+      "n": 23,
+      "n_instruments": 23,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "1",
+      "n": 15,
+      "n_instruments": 15,
+      "prev_state": "0"
+    }
+  ],
+  "momentum_change": [
+    {
+      "current_state": "enhancing",
+      "n": 279053,
+      "n_instruments": 5282,
+      "prev_state": "enhancing"
+    },
+    {
+      "current_state": "weakening",
+      "n": 241938,
+      "n_instruments": 5283,
+      "prev_state": "weakening"
+    },
+    {
+      "current_state": "enhancing",
+      "n": 51102,
+      "n_instruments": 5282,
+      "prev_state": "weakening"
+    },
+    {
+      "current_state": "weakening",
+      "n": 49802,
+      "n_instruments": 5264,
+      "prev_state": "enhancing"
+    }
+  ],
+  "momentum_direction": [
+    {
+      "current_state": "contracting",
+      "n": 373798,
+      "n_instruments": 5283,
+      "prev_state": "contracting"
+    },
+    {
+      "current_state": "expanding",
+      "n": 219504,
+      "n_instruments": 5277,
+      "prev_state": "expanding"
+    },
+    {
+      "current_state": "expanding",
+      "n": 15271,
+      "n_instruments": 5273,
+      "prev_state": "contracting"
+    },
+    {
+      "current_state": "contracting",
+      "n": 13368,
+      "n_instruments": 5230,
+      "prev_state": "expanding"
+    }
+  ],
+  "regime_value": [
+    {
+      "current_state": "0",
+      "n": 371063,
+      "n_instruments": 5039,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "-1",
+      "n": 149770,
+      "n_instruments": 3246,
+      "prev_state": "-1"
+    },
+    {
+      "current_state": "1",
+      "n": 93756,
+      "n_instruments": 2774,
+      "prev_state": "1"
+    },
+    {
+      "current_state": "0",
+      "n": 2841,
+      "n_instruments": 2703,
+      "prev_state": "1"
+    },
+    {
+      "current_state": "-1",
+      "n": 2835,
+      "n_instruments": 2787,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "1",
+      "n": 1575,
+      "n_instruments": 1531,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "0",
+      "n": 1336,
+      "n_instruments": 1307,
+      "prev_state": "-1"
+    }
+  ],
+  "structure_alignment": [
+    {
+      "current_state": "共振",
+      "n": 356008,
+      "n_instruments": 5220,
+      "prev_state": "共振"
+    },
+    {
+      "current_state": "背离",
+      "n": 231400,
+      "n_instruments": 5140,
+      "prev_state": "背离"
+    },
+    {
+      "current_state": "背离",
+      "n": 10588,
+      "n_instruments": 5065,
+      "prev_state": "共振"
+    },
+    {
+      "current_state": "共振",
+      "n": 9771,
+      "n_instruments": 4926,
+      "prev_state": "背离"
+    }
+  ],
+  "swing_bias": [
+    {
+      "current_state": "1",
+      "n": 334443,
+      "n_instruments": 4378,
+      "prev_state": "1"
+    },
+    {
+      "current_state": "-1",
+      "n": 269659,
+      "n_instruments": 3978,
+      "prev_state": "-1"
+    },
+    {
+      "current_state": "0",
+      "n": 15132,
+      "n_instruments": 323,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "-1",
+      "n": 3058,
+      "n_instruments": 2960,
+      "prev_state": "1"
+    },
+    {
+      "current_state": "1",
+      "n": 607,
+      "n_instruments": 603,
+      "prev_state": "-1"
+    },
+    {
+      "current_state": "-1",
+      "n": 209,
+      "n_instruments": 209,
+      "prev_state": "0"
+    },
+    {
+      "current_state": "1",
+      "n": 68,
+      "n_instruments": 68,
+      "prev_state": "0"
+    }
+  ],
+  "volatility_phase": [
+    {
+      "current_state": "squeeze_off",
+      "n": 319571,
+      "n_instruments": 5282,
+      "prev_state": "squeeze_off"
+    },
+    {
+      "current_state": "squeeze_on",
+      "n": 259700,
+      "n_instruments": 5273,
+      "prev_state": "squeeze_on"
+    },
+    {
+      "current_state": "squeeze_off",
+      "n": 22167,
+      "n_instruments": 5269,
+      "prev_state": "squeeze_on"
+    },
+    {
+      "current_state": "squeeze_on",
+      "n": 21217,
+      "n_instruments": 5273,
+      "prev_state": "squeeze_off"
+    },
+    {
+      "current_state": "no_squeeze",
+      "n": 489,
+      "n_instruments": 32,
+      "prev_state": "no_squeeze"
+    },
+    {
+      "current_state": "squeeze_off",
+      "n": 20,
+      "n_instruments": 20,
+      "prev_state": "no_squeeze"
+    },
+    {
+      "current_state": "squeeze_on",
+      "n": 12,
+      "n_instruments": 12,
+      "prev_state": "no_squeeze"
+    }
+  ]
+}

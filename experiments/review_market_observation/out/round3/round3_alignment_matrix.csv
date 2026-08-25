@@ -1,0 +1,28 @@
+component,family,semantic_dimension,round2_counterpart,spearman,coverage,finding,evidence
+scope_return_1d,P,PRICE,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+advance_ratio,P,BREADTH,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+trend_price_alignment_ratio,P,MIXED,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+new_high_ratio,P,PRICE,t_swing_neg1_1_rate,0.7361,COVERED,COVERED,spearman_vs_t_swing_neg1_1_rate=0.7361 | multi_dim=t_swing_neg1_1_rate(TRANSITION):0.7361
+price_position_median,P,PRICE,regime_up_cnt,0.8777,MIXED,MIXED,spearman_vs_regime_up_cnt=0.8777 | multi_dim=regime_up_ratio(STATE):0.8767;regime_down_ratio(STATE):-0.7723;swing_up_ratio(STATE):0.8322
+uptrend_member_ratio,Q,STATE,regime_up_ratio,1.0000,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_regime_up_ratio=1.0000 | multi_dim=top5_amount_contribution(CONCENTRATION):-0.7756 | same_fam_rho≥0.7=main_structure_up_ratio:0.9422;structure_net_event_rate:0.8375;structure_breakdown_diffusion:-0.8331
+main_structure_up_ratio,Q,STATE,swing_up_ratio,1.0000,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_swing_up_ratio=1.0000 | multi_dim=top5_amount_contribution(CONCENTRATION):-0.8432 | same_fam_rho≥0.7=uptrend_member_ratio:0.9422;structure_net_event_rate:0.8062;structure_breakdown_diffusion:-0.7719
+short_structure_up_ratio,Q,STATE,internal_up_ratio,1.0000,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_internal_up_ratio=1.0000 | same_fam_rho≥0.7=structure_net_event_rate:0.8377;structure_breakdown_diffusion:-0.8531
+trend_structure_momentum_alignment_ratio,Q,DIFFUSION,divergence_ratio,-0.9938,COVERED,COVERED,spearman_vs_divergence_ratio=-0.9938
+structure_net_event_rate,Q,TRANSITION,t_swing_neg1_1_rate,0.6396,MIXED,MIXED,spearman_vs_t_swing_neg1_1_rate=0.6396 | multi_dim=regime_up_ratio(STATE):0.8375;swing_up_ratio(STATE):0.8062;swing_down_ratio(STATE):-0.7933 | same_fam_rho≥0.7=uptrend_member_ratio:0.8375;main_structure_up_ratio:0.8062;short_structure_up_ratio:0.8377;structure_breakdown_diffusion:-0.9564
+structure_breakdown_diffusion,Q,DIFFUSION,regime_strength_median,-0.8760,MIXED,MIXED,spearman_vs_regime_strength_median=-0.8760 | multi_dim=regime_up_ratio(STATE):-0.8331;swing_up_ratio(STATE):-0.7719;swing_down_ratio(STATE):0.7544 | same_fam_rho≥0.7=uptrend_member_ratio:-0.8331;main_structure_up_ratio:-0.7719;short_structure_up_ratio:-0.8531;structure_net_event_rate:-0.9564
+multi_dim_improving_ratio,U,DIFFUSION,t_internal_neg1_1_rate,0.7603,COVERED,COVERED,spearman_vs_t_internal_neg1_1_rate=0.7603 | multi_dim=t_internal_neg1_1_rate(TRANSITION):0.7603
+momentum_enhancing_coverage,U,TRANSITION,t_internal_1_neg1_rate,-0.3800,PARTIAL,PARTIAL,spearman_vs_t_internal_1_neg1_rate=-0.3800
+fresh_structure_event_coverage,U,PARTICIPATION,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+non_head_participation_ratio,U,PARTICIPATION,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+leader_follower_common_confirm_ratio,U,PARTICIPATION,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+top5_price_change_contribution,C,CONCENTRATION,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+top10pct_event_contribution,C,CONCENTRATION,top5_amount_contribution,0.1086,PARTIAL,PARTIAL,spearman_vs_top5_amount_contribution=0.1086
+member_change_hhi,C,CONCENTRATION,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+leader_median_diff,C,CONCENTRATION,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,
+top5_amount_contribution,C,CONCENTRATION,top5_amount_contribution,1.0000,MIXED,MIXED,spearman_vs_top5_amount_contribution=1.0000 | multi_dim=regime_up_ratio(STATE):-0.7783;regime_down_ratio(STATE):0.8248;swing_up_ratio(STATE):-0.845
+volume_expansion_ratio,V,PARTICIPATION,amount_above_1_ratio,0.9273,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_amount_above_1_ratio=0.9273 | same_fam_rho≥0.7=amount_expansion_ratio:0.9768;volume_percentile20_median:0.8829;amount_percentile200_median:0.7069
+amount_expansion_ratio,V,PARTICIPATION,amount_above_1_ratio,0.9327,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_amount_above_1_ratio=0.9327 | same_fam_rho≥0.7=volume_expansion_ratio:0.9768;volume_percentile20_median:0.8477;amount_percentile200_median:0.7063
+volume_percentile20_median,V,PARTICIPATION,volume_above_1_ratio,0.9874,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_volume_above_1_ratio=0.9874 | same_fam_rho≥0.7=volume_expansion_ratio:0.8829;amount_expansion_ratio:0.8477
+amount_percentile200_median,V,PARTICIPATION,amount_above_1_ratio,0.6619,REDUNDANT_CANDIDATE,REDUNDANT_CANDIDATE,spearman_vs_amount_above_1_ratio=0.6619 | same_fam_rho≥0.7=volume_expansion_ratio:0.7069;amount_expansion_ratio:0.7063
+trend_segment_volume_improvement,V,MIXED,regime_strength_median,0.9411,MIXED,MIXED,spearman_vs_regime_strength_median=0.9411 | multi_dim=regime_up_ratio(STATE):0.7705;regime_down_ratio(STATE):-0.726;swing_up_ratio(STATE):0.822
+price_amount_efficiency_median,V,OTHER,,,NO_DIRECT_COUNTERPART,NO_DIRECT_COUNTERPART,

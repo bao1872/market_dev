@@ -1,0 +1,305 @@
+{
+  "STATE": {
+    "verdict": "PARTIAL",
+    "direct_components": [
+      {
+        "name": "uptrend_member_ratio",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 1.0
+      },
+      {
+        "name": "main_structure_up_ratio",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 1.0
+      },
+      {
+        "name": "short_structure_up_ratio",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 1.0
+      }
+    ],
+    "mixed_components": [
+      {
+        "name": "price_position_median",
+        "spearman": 0.8767
+      },
+      {
+        "name": "price_position_median",
+        "spearman": -0.7723
+      },
+      {
+        "name": "price_position_median",
+        "spearman": 0.8322
+      },
+      {
+        "name": "price_position_median",
+        "spearman": -0.8258
+      },
+      {
+        "name": "price_position_median",
+        "spearman": 0.7964
+      },
+      {
+        "name": "price_position_median",
+        "spearman": -0.7964
+      },
+      {
+        "name": "structure_net_event_rate",
+        "spearman": 0.8375
+      },
+      {
+        "name": "structure_net_event_rate",
+        "spearman": 0.8062
+      },
+      {
+        "name": "structure_net_event_rate",
+        "spearman": -0.7933
+      },
+      {
+        "name": "structure_net_event_rate",
+        "spearman": 0.8377
+      },
+      {
+        "name": "structure_net_event_rate",
+        "spearman": -0.8377
+      },
+      {
+        "name": "structure_breakdown_diffusion",
+        "spearman": -0.8331
+      },
+      {
+        "name": "structure_breakdown_diffusion",
+        "spearman": -0.7719
+      },
+      {
+        "name": "structure_breakdown_diffusion",
+        "spearman": 0.7544
+      },
+      {
+        "name": "structure_breakdown_diffusion",
+        "spearman": -0.8531
+      },
+      {
+        "name": "structure_breakdown_diffusion",
+        "spearman": 0.8531
+      },
+      {
+        "name": "top5_amount_contribution",
+        "spearman": -0.7783
+      },
+      {
+        "name": "top5_amount_contribution",
+        "spearman": 0.8248
+      },
+      {
+        "name": "top5_amount_contribution",
+        "spearman": -0.845
+      },
+      {
+        "name": "top5_amount_contribution",
+        "spearman": 0.8475
+      },
+      {
+        "name": "trend_segment_volume_improvement",
+        "spearman": 0.7705
+      },
+      {
+        "name": "trend_segment_volume_improvement",
+        "spearman": -0.726
+      },
+      {
+        "name": "trend_segment_volume_improvement",
+        "spearman": 0.822
+      },
+      {
+        "name": "trend_segment_volume_improvement",
+        "spearman": -0.8089
+      }
+    ],
+    "n_direct": 3,
+    "n_covered": 0
+  },
+  "TRANSITION": {
+    "verdict": "PARTIAL",
+    "direct_components": [
+      {
+        "name": "structure_net_event_rate",
+        "finding": "MIXED",
+        "spearman": 0.6396
+      },
+      {
+        "name": "momentum_enhancing_coverage",
+        "finding": "PARTIAL",
+        "spearman": -0.38
+      }
+    ],
+    "mixed_components": [
+      {
+        "name": "new_high_ratio",
+        "spearman": 0.7361
+      },
+      {
+        "name": "multi_dim_improving_ratio",
+        "spearman": 0.7603
+      }
+    ],
+    "n_direct": 2,
+    "n_covered": 0
+  },
+  "BREADTH": {
+    "verdict": "MISSING",
+    "direct_components": [
+      {
+        "name": "advance_ratio",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      }
+    ],
+    "mixed_components": [],
+    "n_direct": 1,
+    "n_covered": 0
+  },
+  "DIFFUSION": {
+    "verdict": "COVERED",
+    "direct_components": [
+      {
+        "name": "trend_structure_momentum_alignment_ratio",
+        "finding": "COVERED",
+        "spearman": -0.9938
+      },
+      {
+        "name": "structure_breakdown_diffusion",
+        "finding": "MIXED",
+        "spearman": -0.876
+      },
+      {
+        "name": "multi_dim_improving_ratio",
+        "finding": "COVERED",
+        "spearman": 0.7603
+      }
+    ],
+    "mixed_components": [],
+    "n_direct": 3,
+    "n_covered": 2
+  },
+  "CONCENTRATION": {
+    "verdict": "PARTIAL",
+    "direct_components": [
+      {
+        "name": "top5_price_change_contribution",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "top10pct_event_contribution",
+        "finding": "PARTIAL",
+        "spearman": 0.1086
+      },
+      {
+        "name": "member_change_hhi",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "leader_median_diff",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "top5_amount_contribution",
+        "finding": "MIXED",
+        "spearman": 1.0
+      }
+    ],
+    "mixed_components": [
+      {
+        "name": "price_position_median",
+        "spearman": -0.7256
+      },
+      {
+        "name": "uptrend_member_ratio",
+        "spearman": -0.7756
+      },
+      {
+        "name": "main_structure_up_ratio",
+        "spearman": -0.8432
+      }
+    ],
+    "n_direct": 5,
+    "n_covered": 0
+  },
+  "PARTICIPATION": {
+    "verdict": "MISSING",
+    "direct_components": [
+      {
+        "name": "fresh_structure_event_coverage",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "non_head_participation_ratio",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "leader_follower_common_confirm_ratio",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "volume_expansion_ratio",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 0.9273
+      },
+      {
+        "name": "amount_expansion_ratio",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 0.9327
+      },
+      {
+        "name": "volume_percentile20_median",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 0.9874
+      },
+      {
+        "name": "amount_percentile200_median",
+        "finding": "REDUNDANT_CANDIDATE",
+        "spearman": 0.6619
+      }
+    ],
+    "mixed_components": [],
+    "n_direct": 7,
+    "n_covered": 0
+  },
+  "PRICE": {
+    "verdict": "PARTIAL",
+    "direct_components": [
+      {
+        "name": "scope_return_1d",
+        "finding": "NO_DIRECT_COUNTERPART",
+        "spearman": null
+      },
+      {
+        "name": "new_high_ratio",
+        "finding": "COVERED",
+        "spearman": 0.7361
+      },
+      {
+        "name": "price_position_median",
+        "finding": "MIXED",
+        "spearman": 0.8777
+      }
+    ],
+    "mixed_components": [],
+    "n_direct": 3,
+    "n_covered": 1
+  },
+  "CROSS_HORIZON_DIVERGENCE": {
+    "verdict": "MISSING",
+    "direct_components": [],
+    "mixed_components": [],
+    "n_direct": 0,
+    "n_covered": 0,
+    "note": "no direct component; trend_structure_momentum_alignment_ratio touches DIFFUSION but not explicit cross-horizon divergence labels"
+  }
+}

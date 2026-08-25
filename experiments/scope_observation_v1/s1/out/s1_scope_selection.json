@@ -1,0 +1,49 @@
+{
+  "experiment": "S1 minimum Scope sample selection (S1 §13)",
+  "selection_rule": "仅从 CONFIRMED_PIT 或能严格构造 PIT membership 的 Scope 中选样本。用客观规则：member count quantile + history completeness，不人工按观点挑选。",
+  "note": "PIT bootstrap 从 2026-08-01 开始；definition effective_from 观测到 08-01/08-03/08-05；pre-08-01 historical membership unavailable；已生效 definition 在 effective_to=NULL 时继续覆盖 08-05 之后日期。member_count 字段一律表示 PIT membership（per-trade-date resolve 结果），fp_row_count 表示当日有 fp 行的 members（两者不同，不得混淆）。5 个 State/Breadth 代表交易日取在 2026-08-03~08-07，S1 Correction 已修正为 per-trade-date PIT resolution：4 个 board scopes 在 08-03~08-07 均 resolve 到 2026-08-03 版本（members:*），无 membership change on 08-05。market 用 state 横截面。120 日 board experiment DATA_BLOCKED 的真正原因是缺少 2026-08-01 之前的 PIT membership history（不是 08-05 之后没有 membership）。",
+  "selected_scopes": [
+    {
+      "scope_id": "market",
+      "family": "market",
+      "name": "全市场横截面",
+      "member_count_basis": "state 横截面（5277/日）",
+      "selection_dimension": "市场基准；覆盖完整 120 日 PIT"
+    },
+    {
+      "scope_id": "gold",
+      "family": "concept",
+      "board_id": "9cff0650-83c4-44c5-b756-1dd4db1932ad",
+      "name": "黄金概念",
+      "member_count": 80,
+      "selection_dimension": "concept 中等规模（~p50 概念）"
+    },
+    {
+      "scope_id": "micro",
+      "family": "concept",
+      "board_id": "143ee7de-82d4-47a8-99a2-01705ca5b261",
+      "name": "MicroLED概念",
+      "member_count": 80,
+      "fp_row_count": 79,
+      "selection_dimension": "concept 中等规模（~p50 概念，不同行为）"
+    },
+    {
+      "scope_id": "lio",
+      "family": "concept",
+      "board_id": "826efb29-0b53-40f4-8d5b-d9736cd2ff93",
+      "name": "锂电池概念",
+      "member_count": 594,
+      "fp_row_count": 593,
+      "selection_dimension": "concept 大规模（~p90 概念，member count quantile 高）"
+    },
+    {
+      "scope_id": "fba87331",
+      "family": "industry",
+      "board_id": "fba87331-b7da-4cca-844a-3fb74db5644e",
+      "name": "钢铁-钢铁-特钢",
+      "member_count": 12,
+      "selection_dimension": "industry 小规模（~p50 行业，member count quantile 低）"
+    }
+  ],
+  "coverage": "覆盖 PIT member_count 12(industry小) / 80(concept中, fp_row_count=79) / 594(concept大, fp_row_count=593) / 5277(market)，以及不同 family（industry/concept/market）与不同行为。member_count=PIT membership，fp_row_count=当日有 fp 行的 members。"
+}

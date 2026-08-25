@@ -1,0 +1,464 @@
+{
+  "archetype_days": [
+    {
+      "trade_date": "2026-04-01",
+      "tag": "max_regime_breadth_expansion",
+      "reason": "最大 regime_up breadth 5日扩张",
+      "score": 0.0203,
+      "state": {
+        "regime_up": 0.1666,
+        "regime_neutral": 0.6986,
+        "regime_down": 0.1348,
+        "swing_up": 0.5844,
+        "swing_down": 0.3937,
+        "internal_up": 0.2163,
+        "internal_down": 0.7837,
+        "resonance": 0.5351,
+        "divergence": 0.443,
+        "momentum_expanding": 0.1556,
+        "momentum_enhancing": 0.5909
+      },
+      "transition": {
+        "t_regime_0_1": 0.0062,
+        "t_regime_0_neg1": 0.0012,
+        "t_regime_1_0": 0.001,
+        "t_regime_neg1_0": 0.0012,
+        "t_swing_neg1_1": 0.0012,
+        "t_swing_1_neg1": 0.0,
+        "t_internal_neg1_1": 0.0168,
+        "t_internal_1_neg1": 0.0039,
+        "t_momdir_contract_expand": 0.0152,
+        "t_momdir_expand_contract": 0.0131,
+        "t_momchg_enhance_weaken": 0.027,
+        "t_momchg_weaken_enhance": 0.151,
+        "t_align_div_resonance": 0.011,
+        "t_align_resonance_div": 0.0102
+      },
+      "diffusion": {
+        "regime_up_d3": 0.015,
+        "regime_down_d3": -0.0,
+        "momentum_expanding_d3": 0.0002
+      },
+      "concentration": {
+        "top5_price": 0.0084,
+        "hhi": 0.0004,
+        "top5_amount": 0.0389
+      },
+      "participation": {
+        "volume_ratio20_median": 0.8182,
+        "amount_ratio20_median": 0.7737,
+        "volume_above_1": 0.3047,
+        "amount_above_1": 0.2827
+      }
+    },
+    {
+      "trade_date": "2026-03-24",
+      "tag": "max_regime_breadth_contraction",
+      "reason": "最大 regime_up breadth 5日收缩",
+      "score": -0.1127,
+      "state": {
+        "regime_up": 0.1421,
+        "regime_neutral": 0.7231,
+        "regime_down": 0.1348,
+        "swing_up": 0.5884,
+        "swing_down": 0.3889,
+        "internal_up": 0.192,
+        "internal_down": 0.808,
+        "resonance": 0.5293,
+        "divergence": 0.448,
+        "momentum_expanding": 0.1579,
+        "momentum_enhancing": 0.2129
+      },
+      "transition": {
+        "t_regime_0_1": 0.0027,
+        "t_regime_0_neg1": 0.001,
+        "t_regime_1_0": 0.0083,
+        "t_regime_neg1_0": 0.0008,
+        "t_swing_neg1_1": 0.0008,
+        "t_swing_1_neg1": 0.0006,
+        "t_internal_neg1_1": 0.0027,
+        "t_internal_1_neg1": 0.0017,
+        "t_momdir_contract_expand": 0.0054,
+        "t_momdir_expand_contract": 0.0254,
+        "t_momchg_enhance_weaken": 0.0042,
+        "t_momchg_weaken_enhance": 0.1398,
+        "t_align_div_resonance": 0.0037,
+        "t_align_resonance_div": 0.0019
+      },
+      "diffusion": {
+        "regime_up_d3": -0.0993,
+        "regime_down_d3": 0.0047,
+        "momentum_expanding_d3": -0.1402
+      },
+      "concentration": {
+        "top5_price": 0.0053,
+        "hhi": 0.0003,
+        "top5_amount": 0.0381
+      },
+      "participation": {
+        "volume_ratio20_median": 0.9146,
+        "amount_ratio20_median": 0.822,
+        "volume_above_1": 0.3983,
+        "amount_above_1": 0.3165
+      }
+    },
+    {
+      "trade_date": "2026-04-17",
+      "tag": "max_momentum_expansion",
+      "reason": "最大 momentum expanding 5日扩张",
+      "score": 0.4105,
+      "state": {
+        "regime_up": 0.1819,
+        "regime_neutral": 0.677,
+        "regime_down": 0.141,
+        "swing_up": 0.5744,
+        "swing_down": 0.405,
+        "internal_up": 0.4355,
+        "internal_down": 0.5645,
+        "resonance": 0.5731,
+        "divergence": 0.4063,
+        "momentum_expanding": 0.6868,
+        "momentum_enhancing": 0.8494
+      },
+      "transition": {
+        "t_regime_0_1": 0.004,
+        "t_regime_0_neg1": 0.0013,
+        "t_regime_1_0": 0.0008,
+        "t_regime_neg1_0": 0.0025,
+        "t_swing_neg1_1": 0.0013,
+        "t_swing_1_neg1": 0.0015,
+        "t_internal_neg1_1": 0.0277,
+        "t_internal_1_neg1": 0.0031,
+        "t_momdir_contract_expand": 0.0788,
+        "t_momdir_expand_contract": 0.0058,
+        "t_momchg_enhance_weaken": 0.074,
+        "t_momchg_weaken_enhance": 0.011,
+        "t_align_div_resonance": 0.0177,
+        "t_align_resonance_div": 0.0146
+      },
+      "diffusion": {
+        "regime_up_d3": 0.0081,
+        "regime_down_d3": 0.0041,
+        "momentum_expanding_d3": 0.2623
+      },
+      "concentration": {
+        "top5_price": 0.0116,
+        "hhi": 0.0005,
+        "top5_amount": 0.048
+      },
+      "participation": {
+        "volume_ratio20_median": 0.9203,
+        "amount_ratio20_median": 0.929,
+        "volume_above_1": 0.4094,
+        "amount_above_1": 0.4317
+      }
+    },
+    {
+      "trade_date": "2026-03-23",
+      "tag": "max_momentum_contraction",
+      "reason": "最大 momentum expanding 5日收缩",
+      "score": -0.1984,
+      "state": {
+        "regime_up": 0.1478,
+        "regime_neutral": 0.7178,
+        "regime_down": 0.1344,
+        "swing_up": 0.5886,
+        "swing_down": 0.3888,
+        "internal_up": 0.1915,
+        "internal_down": 0.8085,
+        "resonance": 0.5278,
+        "divergence": 0.4497,
+        "momentum_expanding": 0.1782,
+        "momentum_enhancing": 0.0778
+      },
+      "transition": {
+        "t_regime_0_1": 0.0019,
+        "t_regime_0_neg1": 0.0025,
+        "t_regime_1_0": 0.0657,
+        "t_regime_neg1_0": 0.0002,
+        "t_swing_neg1_1": 0.0,
+        "t_swing_1_neg1": 0.1126,
+        "t_internal_neg1_1": 0.0012,
+        "t_internal_1_neg1": 0.092,
+        "t_momdir_contract_expand": 0.0031,
+        "t_momdir_expand_contract": 0.0718,
+        "t_momchg_enhance_weaken": 0.1121,
+        "t_momchg_weaken_enhance": 0.0089,
+        "t_align_div_resonance": 0.1194,
+        "t_align_resonance_div": 0.0678
+      },
+      "diffusion": {
+        "regime_up_d3": -0.105,
+        "regime_down_d3": 0.0056,
+        "momentum_expanding_d3": -0.165
+      },
+      "concentration": {
+        "top5_price": 0.0031,
+        "hhi": 0.0002,
+        "top5_amount": 0.0416
+      },
+      "participation": {
+        "volume_ratio20_median": 1.1875,
+        "amount_ratio20_median": 1.0884,
+        "volume_above_1": 0.691,
+        "amount_above_1": 0.585
+      }
+    },
+    {
+      "trade_date": "2026-03-31",
+      "tag": "max_positive_transition",
+      "reason": "最大 regime 0->1 当日 transition rate",
+      "score": 0.01,
+      "state": {
+        "regime_up": 0.1613,
+        "regime_neutral": 0.7039,
+        "regime_down": 0.1349,
+        "swing_up": 0.583,
+        "swing_down": 0.3948,
+        "internal_up": 0.2029,
+        "internal_down": 0.7971,
+        "resonance": 0.5339,
+        "divergence": 0.4439,
+        "momentum_expanding": 0.1532,
+        "momentum_enhancing": 0.4669
+      },
+      "transition": {
+        "t_regime_0_1": 0.01,
+        "t_regime_0_neg1": 0.0006,
+        "t_regime_1_0": 0.0029,
+        "t_regime_neg1_0": 0.0008,
+        "t_swing_neg1_1": 0.0004,
+        "t_swing_1_neg1": 0.0035,
+        "t_internal_neg1_1": 0.0064,
+        "t_internal_1_neg1": 0.0131,
+        "t_momdir_contract_expand": 0.0125,
+        "t_momdir_expand_contract": 0.0193,
+        "t_momchg_enhance_weaken": 0.2141,
+        "t_momchg_weaken_enhance": 0.0227,
+        "t_align_div_resonance": 0.0092,
+        "t_align_resonance_div": 0.0129
+      },
+      "diffusion": {
+        "regime_up_d3": 0.0117,
+        "regime_down_d3": 0.0007,
+        "momentum_expanding_d3": -0.0002
+      },
+      "concentration": {
+        "top5_price": 0.0086,
+        "hhi": 0.0004,
+        "top5_amount": 0.0306
+      },
+      "participation": {
+        "volume_ratio20_median": 0.8024,
+        "amount_ratio20_median": 0.7371,
+        "volume_above_1": 0.2892,
+        "amount_above_1": 0.2595
+      }
+    },
+    {
+      "trade_date": "2026-06-05",
+      "tag": "max_negative_transition",
+      "reason": "最大 regime 0->-1 当日 transition rate",
+      "score": 0.0907,
+      "state": {
+        "regime_up": 0.1348,
+        "regime_neutral": 0.4967,
+        "regime_down": 0.3685,
+        "swing_up": 0.5289,
+        "swing_down": 0.4569,
+        "internal_up": 0.3142,
+        "internal_down": 0.6858,
+        "resonance": 0.6254,
+        "divergence": 0.3604,
+        "momentum_expanding": 0.1605,
+        "momentum_enhancing": 0.4247
+      },
+      "transition": {
+        "t_regime_0_1": 0.0002,
+        "t_regime_0_neg1": 0.0907,
+        "t_regime_1_0": 0.004,
+        "t_regime_neg1_0": 0.0021,
+        "t_swing_neg1_1": 0.001,
+        "t_swing_1_neg1": 0.0019,
+        "t_internal_neg1_1": 0.0038,
+        "t_internal_1_neg1": 0.0098,
+        "t_momdir_contract_expand": 0.0096,
+        "t_momdir_expand_contract": 0.0211,
+        "t_momchg_enhance_weaken": 0.0385,
+        "t_momchg_weaken_enhance": 0.1837,
+        "t_align_div_resonance": 0.0067,
+        "t_align_resonance_div": 0.0092
+      },
+      "diffusion": {
+        "regime_up_d3": -0.009,
+        "regime_down_d3": 0.1467,
+        "momentum_expanding_d3": -0.0467
+      },
+      "concentration": {
+        "top5_price": 0.0132,
+        "hhi": 0.0005,
+        "top5_amount": 0.0596
+      },
+      "participation": {
+        "volume_ratio20_median": 0.8634,
+        "amount_ratio20_median": 0.7825,
+        "volume_above_1": 0.3347,
+        "amount_above_1": 0.2699
+      }
+    },
+    {
+      "trade_date": "2026-05-13",
+      "tag": "max_concentration",
+      "reason": "成员变化 HHI 最高",
+      "score": 0.0005,
+      "state": {
+        "regime_up": 0.1801,
+        "regime_neutral": 0.6833,
+        "regime_down": 0.1365,
+        "swing_up": 0.5882,
+        "swing_down": 0.3925,
+        "internal_up": 0.6453,
+        "internal_down": 0.3547,
+        "resonance": 0.5996,
+        "divergence": 0.3812,
+        "momentum_expanding": 0.6649,
+        "momentum_enhancing": 0.4836
+      },
+      "transition": {
+        "t_regime_0_1": 0.0036,
+        "t_regime_0_neg1": 0.0027,
+        "t_regime_1_0": 0.001,
+        "t_regime_neg1_0": 0.001,
+        "t_swing_neg1_1": 0.0033,
+        "t_swing_1_neg1": 0.0004,
+        "t_internal_neg1_1": 0.0138,
+        "t_internal_1_neg1": 0.0046,
+        "t_momdir_contract_expand": 0.0186,
+        "t_momdir_expand_contract": 0.0242,
+        "t_momchg_enhance_weaken": 0.0436,
+        "t_momchg_weaken_enhance": 0.1179,
+        "t_align_div_resonance": 0.0146,
+        "t_align_resonance_div": 0.0067
+      },
+      "diffusion": {
+        "regime_up_d3": 0.0037,
+        "regime_down_d3": -0.0039,
+        "momentum_expanding_d3": -0.0017
+      },
+      "concentration": {
+        "top5_price": 0.0122,
+        "hhi": 0.0005,
+        "top5_amount": 0.04
+      },
+      "participation": {
+        "volume_ratio20_median": 0.9732,
+        "amount_ratio20_median": 1.0046,
+        "volume_above_1": 0.4705,
+        "amount_above_1": 0.5037
+      }
+    },
+    {
+      "trade_date": "2026-03-02",
+      "tag": "max_participation_increase",
+      "reason": "参与度(amount>1) 单日增幅最大",
+      "score": 0.3177,
+      "state": {
+        "regime_up": 0.2862,
+        "regime_neutral": 0.5895,
+        "regime_down": 0.1243,
+        "swing_up": 0.7734,
+        "swing_down": 0.181,
+        "internal_up": 0.5741,
+        "internal_down": 0.4259,
+        "resonance": 0.5865,
+        "divergence": 0.368,
+        "momentum_expanding": 0.4657,
+        "momentum_enhancing": 0.6318
+      },
+      "transition": {
+        "t_regime_0_1": 0.0023,
+        "t_regime_0_neg1": 0.0037,
+        "t_regime_1_0": 0.0091,
+        "t_regime_neg1_0": 0.0029,
+        "t_swing_neg1_1": 0.0019,
+        "t_swing_1_neg1": 0.0056,
+        "t_internal_neg1_1": 0.0127,
+        "t_internal_1_neg1": 0.0737,
+        "t_momdir_contract_expand": 0.0494,
+        "t_momdir_expand_contract": 0.021,
+        "t_momchg_enhance_weaken": 0.1621,
+        "t_momchg_weaken_enhance": 0.0307,
+        "t_align_div_resonance": 0.0326,
+        "t_align_resonance_div": 0.056
+      },
+      "diffusion": {
+        "regime_up_d3": 0.0001,
+        "regime_down_d3": -0.0065,
+        "momentum_expanding_d3": 0.1016
+      },
+      "concentration": {
+        "top5_price": 0.0067,
+        "hhi": 0.0003,
+        "top5_amount": 0.034
+      },
+      "participation": {
+        "volume_ratio20_median": 1.1398,
+        "amount_ratio20_median": 1.1264,
+        "volume_above_1": 0.6557,
+        "amount_above_1": 0.6322
+      }
+    },
+    {
+      "trade_date": "2026-03-03",
+      "tag": "high_internal_transition_low_regime_change",
+      "reason": "短周期内部 transition 大但长周期 regime 平稳",
+      "score": null,
+      "state": {
+        "regime_up": 0.2722,
+        "regime_neutral": 0.6024,
+        "regime_down": 0.1254,
+        "swing_up": 0.7635,
+        "swing_down": 0.1939,
+        "internal_up": 0.4495,
+        "internal_down": 0.5505,
+        "resonance": 0.517,
+        "divergence": 0.4404,
+        "momentum_expanding": 0.4435,
+        "momentum_enhancing": 0.3621
+      },
+      "transition": {
+        "t_regime_0_1": 0.0033,
+        "t_regime_0_neg1": 0.0039,
+        "t_regime_1_0": 0.0174,
+        "t_regime_neg1_0": 0.0027,
+        "t_swing_neg1_1": 0.0014,
+        "t_swing_1_neg1": 0.0114,
+        "t_internal_neg1_1": 0.0029,
+        "t_internal_1_neg1": 0.1281,
+        "t_momdir_contract_expand": 0.0259,
+        "t_momdir_expand_contract": 0.0477,
+        "t_momchg_enhance_weaken": 0.2894,
+        "t_momchg_weaken_enhance": 0.0189,
+        "t_align_div_resonance": 0.0314,
+        "t_align_resonance_div": 0.1038
+      },
+      "diffusion": {
+        "regime_up_d3": -0.0178,
+        "regime_down_d3": -0.0002,
+        "momentum_expanding_d3": 0.0561
+      },
+      "concentration": {
+        "top5_price": 0.0061,
+        "hhi": 0.0003,
+        "top5_amount": 0.0285
+      },
+      "participation": {
+        "volume_ratio20_median": 1.1796,
+        "amount_ratio20_median": 1.1345,
+        "volume_above_1": 0.7097,
+        "amount_above_1": 0.6466
+      }
+    }
+  ],
+  "count": 9
+}

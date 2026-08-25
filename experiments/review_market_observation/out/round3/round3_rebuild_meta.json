@@ -1,0 +1,24 @@
+{
+  "window": {
+    "start": "2026-02-09",
+    "end": "2026-08-10",
+    "count": 120,
+    "is_exact_target": true
+  },
+  "audit": {
+    "tables_exist": false,
+    "can_reuse": false,
+    "reason": "review tables not exist"
+  },
+  "rebuild_info": {
+    "rows": 120,
+    "components": 27,
+    "metric_value_status": {
+      "P": "0",
+      "Q": "60",
+      "U": "60",
+      "C": "60",
+      "V": "60"
+    }
+  }
+}

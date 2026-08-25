@@ -1,0 +1,512 @@
+{
+  "scope_return_1d": {
+    "family": "P",
+    "semantic_dimension": "PRICE",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "advance_ratio": {
+    "family": "P",
+    "semantic_dimension": "BREADTH",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "trend_price_alignment_ratio": {
+    "family": "P",
+    "semantic_dimension": "MIXED",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "new_high_ratio": {
+    "family": "P",
+    "semantic_dimension": "PRICE",
+    "best_r2_column": "t_swing_neg1_1_rate",
+    "best_spearman": 0.736093752341206,
+    "multi_dimension_correlations": [
+      [
+        "t_swing_neg1_1_rate",
+        "TRANSITION",
+        0.7361
+      ]
+    ],
+    "same_family_redundant_pairs": [],
+    "finding": "COVERED"
+  },
+  "price_position_median": {
+    "family": "P",
+    "semantic_dimension": "PRICE",
+    "best_r2_column": "regime_up_cnt",
+    "best_spearman": 0.8776556218785669,
+    "multi_dimension_correlations": [
+      [
+        "regime_up_ratio",
+        "STATE",
+        0.8767
+      ],
+      [
+        "regime_down_ratio",
+        "STATE",
+        -0.7723
+      ],
+      [
+        "swing_up_ratio",
+        "STATE",
+        0.8322
+      ],
+      [
+        "swing_down_ratio",
+        "STATE",
+        -0.8258
+      ],
+      [
+        "internal_up_ratio",
+        "STATE",
+        0.7964
+      ],
+      [
+        "internal_down_ratio",
+        "STATE",
+        -0.7964
+      ],
+      [
+        "top5_amount_contribution",
+        "CONCENTRATION",
+        -0.7256
+      ]
+    ],
+    "same_family_redundant_pairs": [],
+    "finding": "MIXED"
+  },
+  "uptrend_member_ratio": {
+    "family": "Q",
+    "semantic_dimension": "STATE",
+    "best_r2_column": "regime_up_ratio",
+    "best_spearman": 1.0,
+    "multi_dimension_correlations": [
+      [
+        "top5_amount_contribution",
+        "CONCENTRATION",
+        -0.7756
+      ]
+    ],
+    "same_family_redundant_pairs": [
+      [
+        "main_structure_up_ratio",
+        0.9422
+      ],
+      [
+        "structure_net_event_rate",
+        0.8375
+      ],
+      [
+        "structure_breakdown_diffusion",
+        -0.8331
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "main_structure_up_ratio": {
+    "family": "Q",
+    "semantic_dimension": "STATE",
+    "best_r2_column": "swing_up_ratio",
+    "best_spearman": 0.9999999999999998,
+    "multi_dimension_correlations": [
+      [
+        "top5_amount_contribution",
+        "CONCENTRATION",
+        -0.8432
+      ]
+    ],
+    "same_family_redundant_pairs": [
+      [
+        "uptrend_member_ratio",
+        0.9422
+      ],
+      [
+        "structure_net_event_rate",
+        0.8062
+      ],
+      [
+        "structure_breakdown_diffusion",
+        -0.7719
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "short_structure_up_ratio": {
+    "family": "Q",
+    "semantic_dimension": "STATE",
+    "best_r2_column": "internal_up_ratio",
+    "best_spearman": 1.0,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [
+      [
+        "structure_net_event_rate",
+        0.8377
+      ],
+      [
+        "structure_breakdown_diffusion",
+        -0.8531
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "trend_structure_momentum_alignment_ratio": {
+    "family": "Q",
+    "semantic_dimension": "DIFFUSION",
+    "best_r2_column": "divergence_ratio",
+    "best_spearman": -0.993803356849318,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "COVERED"
+  },
+  "structure_net_event_rate": {
+    "family": "Q",
+    "semantic_dimension": "TRANSITION",
+    "best_r2_column": "t_swing_neg1_1_rate",
+    "best_spearman": 0.6395883600357185,
+    "multi_dimension_correlations": [
+      [
+        "regime_up_ratio",
+        "STATE",
+        0.8375
+      ],
+      [
+        "swing_up_ratio",
+        "STATE",
+        0.8062
+      ],
+      [
+        "swing_down_ratio",
+        "STATE",
+        -0.7933
+      ],
+      [
+        "internal_up_ratio",
+        "STATE",
+        0.8377
+      ],
+      [
+        "internal_down_ratio",
+        "STATE",
+        -0.8377
+      ]
+    ],
+    "same_family_redundant_pairs": [
+      [
+        "uptrend_member_ratio",
+        0.8375
+      ],
+      [
+        "main_structure_up_ratio",
+        0.8062
+      ],
+      [
+        "short_structure_up_ratio",
+        0.8377
+      ],
+      [
+        "structure_breakdown_diffusion",
+        -0.9564
+      ]
+    ],
+    "finding": "MIXED"
+  },
+  "structure_breakdown_diffusion": {
+    "family": "Q",
+    "semantic_dimension": "DIFFUSION",
+    "best_r2_column": "regime_strength_median",
+    "best_spearman": -0.8760152650019619,
+    "multi_dimension_correlations": [
+      [
+        "regime_up_ratio",
+        "STATE",
+        -0.8331
+      ],
+      [
+        "swing_up_ratio",
+        "STATE",
+        -0.7719
+      ],
+      [
+        "swing_down_ratio",
+        "STATE",
+        0.7544
+      ],
+      [
+        "internal_up_ratio",
+        "STATE",
+        -0.8531
+      ],
+      [
+        "internal_down_ratio",
+        "STATE",
+        0.8531
+      ]
+    ],
+    "same_family_redundant_pairs": [
+      [
+        "uptrend_member_ratio",
+        -0.8331
+      ],
+      [
+        "main_structure_up_ratio",
+        -0.7719
+      ],
+      [
+        "short_structure_up_ratio",
+        -0.8531
+      ],
+      [
+        "structure_net_event_rate",
+        -0.9564
+      ]
+    ],
+    "finding": "MIXED"
+  },
+  "multi_dim_improving_ratio": {
+    "family": "U",
+    "semantic_dimension": "DIFFUSION",
+    "best_r2_column": "t_internal_neg1_1_rate",
+    "best_spearman": 0.7603253844756922,
+    "multi_dimension_correlations": [
+      [
+        "t_internal_neg1_1_rate",
+        "TRANSITION",
+        0.7603
+      ]
+    ],
+    "same_family_redundant_pairs": [],
+    "finding": "COVERED"
+  },
+  "momentum_enhancing_coverage": {
+    "family": "U",
+    "semantic_dimension": "TRANSITION",
+    "best_r2_column": "t_internal_1_neg1_rate",
+    "best_spearman": -0.3800311568228202,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "PARTIAL"
+  },
+  "fresh_structure_event_coverage": {
+    "family": "U",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "non_head_participation_ratio": {
+    "family": "U",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "leader_follower_common_confirm_ratio": {
+    "family": "U",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "top5_price_change_contribution": {
+    "family": "C",
+    "semantic_dimension": "CONCENTRATION",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "top10pct_event_contribution": {
+    "family": "C",
+    "semantic_dimension": "CONCENTRATION",
+    "best_r2_column": "top5_amount_contribution",
+    "best_spearman": 0.10864196058728008,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "PARTIAL"
+  },
+  "member_change_hhi": {
+    "family": "C",
+    "semantic_dimension": "CONCENTRATION",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "leader_median_diff": {
+    "family": "C",
+    "semantic_dimension": "CONCENTRATION",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  },
+  "top5_amount_contribution": {
+    "family": "C",
+    "semantic_dimension": "CONCENTRATION",
+    "best_r2_column": "top5_amount_contribution",
+    "best_spearman": 1.0,
+    "multi_dimension_correlations": [
+      [
+        "regime_up_ratio",
+        "STATE",
+        -0.7783
+      ],
+      [
+        "regime_down_ratio",
+        "STATE",
+        0.8248
+      ],
+      [
+        "swing_up_ratio",
+        "STATE",
+        -0.845
+      ],
+      [
+        "swing_down_ratio",
+        "STATE",
+        0.8475
+      ]
+    ],
+    "same_family_redundant_pairs": [],
+    "finding": "MIXED"
+  },
+  "volume_expansion_ratio": {
+    "family": "V",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": "amount_above_1_ratio",
+    "best_spearman": 0.9272604473596296,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [
+      [
+        "amount_expansion_ratio",
+        0.9768
+      ],
+      [
+        "volume_percentile20_median",
+        0.8829
+      ],
+      [
+        "amount_percentile200_median",
+        0.7069
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "amount_expansion_ratio": {
+    "family": "V",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": "amount_above_1_ratio",
+    "best_spearman": 0.9327175498298492,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [
+      [
+        "volume_expansion_ratio",
+        0.9768
+      ],
+      [
+        "volume_percentile20_median",
+        0.8477
+      ],
+      [
+        "amount_percentile200_median",
+        0.7063
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "volume_percentile20_median": {
+    "family": "V",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": "volume_above_1_ratio",
+    "best_spearman": 0.987374123203,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [
+      [
+        "volume_expansion_ratio",
+        0.8829
+      ],
+      [
+        "amount_expansion_ratio",
+        0.8477
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "amount_percentile200_median": {
+    "family": "V",
+    "semantic_dimension": "PARTICIPATION",
+    "best_r2_column": "amount_above_1_ratio",
+    "best_spearman": 0.6619418015139938,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [
+      [
+        "volume_expansion_ratio",
+        0.7069
+      ],
+      [
+        "amount_expansion_ratio",
+        0.7063
+      ]
+    ],
+    "finding": "REDUNDANT_CANDIDATE"
+  },
+  "trend_segment_volume_improvement": {
+    "family": "V",
+    "semantic_dimension": "MIXED",
+    "best_r2_column": "regime_strength_median",
+    "best_spearman": 0.941136435060164,
+    "multi_dimension_correlations": [
+      [
+        "regime_up_ratio",
+        "STATE",
+        0.7705
+      ],
+      [
+        "regime_down_ratio",
+        "STATE",
+        -0.726
+      ],
+      [
+        "swing_up_ratio",
+        "STATE",
+        0.822
+      ],
+      [
+        "swing_down_ratio",
+        "STATE",
+        -0.8089
+      ]
+    ],
+    "same_family_redundant_pairs": [],
+    "finding": "MIXED"
+  },
+  "price_amount_efficiency_median": {
+    "family": "V",
+    "semantic_dimension": "OTHER",
+    "best_r2_column": null,
+    "best_spearman": null,
+    "multi_dimension_correlations": [],
+    "same_family_redundant_pairs": [],
+    "finding": "NO_DIRECT_COUNTERPART"
+  }
+}

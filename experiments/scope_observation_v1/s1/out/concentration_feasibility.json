@@ -1,0 +1,23 @@
+{
+  "experiment": "Concentration (HHI) feasibility (S1 §12)",
+  "note": "只检查能否从现有 point-in-time facts 可靠计算三类 HHI，不在本轮计算完整 120 日序列。Top5 等只作 optional explanatory。",
+  "price_contribution_hhi": {
+    "status": "AVAILABLE",
+    "basis": "每成员点值 review_return_1d（由 bars_daily close 计算，bars_daily 覆盖 2012-10-23~2026-08-12，amount/close 近窗口 ~100% 完整）。",
+    "evidence": "member_change_hhi 已在当前 Review metric_registry 中定义（derive_fn=member_change_hhi，extra_fields=review_return_1d），说明该计算路径已存在。",
+    "denominator": "当日有效 PIT members 的绝对收益率贡献"
+  },
+  "amount_contribution_hhi": {
+    "status": "AVAILABLE",
+    "basis": "每成员点值 review_amount（由 bars_daily.amount 提供，近窗口 amount_ok 5280/5281/5282 于 08-03/05/07，~99.9% 完整）。",
+    "evidence": "top5_amount_contribution 已在 registry 中定义（extra_fields=review_amount），amount 数据可用。",
+    "denominator": "当日有效 PIT members 的成交额贡献"
+  },
+  "event_contribution_hhi": {
+    "status": "PARTIAL",
+    "basis": "每成员结构事件方向可用（fp_latest_bos/choch/ob_direction + freshness），但事件贡献 HHI 依赖事件语义定义（按方向计数 vs 按事件影响力加权），且 freshness 需区分 current state vs fresh event。",
+    "evidence": "top10pct_event_contribution 已在 registry 中定义（extra_fields=latest event freshness），表明事件贡献路径存在，但事件语义（bullish/bearish 归一化权重）尚未冻结。",
+    "denominator": "当日有效 PIT members 的事件贡献（需明确事件影响力定义）"
+  },
+  "conclusion": "price HHI 与 amount HHI 可从现有 point-in-time facts 可靠计算（AVAILABLE）。event HHI 数据可获取但事件语义需先冻结（PARTIAL）。三类 HHI 是否表达不同信息需在 S2+ 比较，本轮不做最终判定。"
+}

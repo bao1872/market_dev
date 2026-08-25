@@ -1,0 +1,3574 @@
+{
+  "selection_rule": "deterministic nearest-neighbor on similarity keys (rank-scaled), ranked by contrast distance (rank-scaled); missing value never becomes 0; distinct key sets per Q2/Q3/Q4/Q5",
+  "experiments": {
+    "Q2": {
+      "name": "Q2_state_breadth_similar_transition_differs",
+      "similarity_keys": [
+        "regime_up_ratio",
+        "regime_neutral_ratio",
+        "regime_down_ratio",
+        "swing_up_ratio",
+        "swing_neutral_ratio",
+        "swing_down_ratio",
+        "internal_up_ratio",
+        "internal_neutral_ratio",
+        "internal_down_ratio",
+        "resonance_ratio",
+        "divergence_ratio",
+        "expanding_ratio",
+        "flat_ratio",
+        "contracting_ratio"
+      ],
+      "contrast_keys": [
+        "regime_neutral_to_up_ratio",
+        "regime_neutral_to_down_ratio",
+        "regime_up_to_neutral_ratio",
+        "regime_down_to_neutral_ratio",
+        "regime_up_to_down_ratio",
+        "regime_down_to_up_ratio",
+        "swing_transition_ratio",
+        "internal_transition_ratio",
+        "momentum_transition_ratio"
+      ],
+      "eligible_rows": 3207,
+      "total_rows": 3853,
+      "missing_rows": 646,
+      "eligible_dates": [
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "input_dates": [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "eligible_rows_by_date": {
+        "2026-08-03": 0,
+        "2026-08-04": 646,
+        "2026-08-05": 623,
+        "2026-08-06": 646,
+        "2026-08-07": 646,
+        "2026-08-10": 646
+      },
+      "missing_rows_by_date": {
+        "2026-08-03": 646,
+        "2026-08-04": 0,
+        "2026-08-05": 0,
+        "2026-08-06": 0,
+        "2026-08-07": 0,
+        "2026-08-10": 0
+      },
+      "cases_by_date": {
+        "2026-08-03": [],
+        "2026-08-04": [
+          {
+            "a": "concept/眼科医疗/2026-08-04",
+            "b": "concept/语音技术/2026-08-04",
+            "similarity_distance": 0.2713,
+            "contrast_distance": 1.2506
+          },
+          {
+            "a": "concept/语音技术/2026-08-04",
+            "b": "concept/眼科医疗/2026-08-04",
+            "similarity_distance": 0.2713,
+            "contrast_distance": 1.2506
+          },
+          {
+            "a": "concept/天津自贸区/2026-08-04",
+            "b": "industry/农林牧渔-农产品加工-其他农产品加工/2026-08-04",
+            "similarity_distance": 0.4567,
+            "contrast_distance": 1.2191
+          },
+          {
+            "a": "industry/石油石化-油气开采及服务-油气开采/2026-08-04",
+            "b": "industry/钢铁-钢铁-特钢/2026-08-04",
+            "similarity_distance": 0.3155,
+            "contrast_distance": 1.1738
+          },
+          {
+            "a": "industry/食品饮料-食品加工制造-肉制品/2026-08-04",
+            "b": "concept/租售同权/2026-08-04",
+            "similarity_distance": 0.307,
+            "contrast_distance": 1.1203
+          },
+          {
+            "a": "concept/细胞免疫治疗/2026-08-04",
+            "b": "industry/医药生物-医疗器械-医疗耗材/2026-08-04",
+            "similarity_distance": 0.2691,
+            "contrast_distance": 1.1083
+          },
+          {
+            "a": "industry/医药生物-医疗器械-医疗耗材/2026-08-04",
+            "b": "concept/细胞免疫治疗/2026-08-04",
+            "similarity_distance": 0.2691,
+            "contrast_distance": 1.1083
+          },
+          {
+            "a": "industry/医药生物-中药-中药III/2026-08-04",
+            "b": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+            "similarity_distance": 0.413,
+            "contrast_distance": 1.0981
+          },
+          {
+            "a": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+            "b": "industry/医药生物-中药-中药III/2026-08-04",
+            "similarity_distance": 0.413,
+            "contrast_distance": 1.0981
+          },
+          {
+            "a": "industry/农林牧渔-养殖业-生猪养殖/2026-08-04",
+            "b": "industry/建筑材料-建筑材料-管材/2026-08-04",
+            "similarity_distance": 0.2973,
+            "contrast_distance": 1.0915
+          },
+          {
+            "a": "industry/有色金属-工业金属-铝/2026-08-04",
+            "b": "concept/煤化工概念/2026-08-04",
+            "similarity_distance": 0.6007,
+            "contrast_distance": 1.0846
+          },
+          {
+            "a": "concept/互联网保险/2026-08-04",
+            "b": "concept/可燃冰/2026-08-04",
+            "similarity_distance": 0.3425,
+            "contrast_distance": 1.081
+          },
+          {
+            "a": "industry/电力设备-电网设备-电气自控设备/2026-08-04",
+            "b": "industry/汽车-汽车服务及其他-其他运输设备/2026-08-04",
+            "similarity_distance": 0.2887,
+            "contrast_distance": 1.0689
+          },
+          {
+            "a": "concept/云游戏/2026-08-04",
+            "b": "concept/肝炎概念/2026-08-04",
+            "similarity_distance": 0.34,
+            "contrast_distance": 1.0641
+          },
+          {
+            "a": "industry/电力设备-光伏设备-光伏加工设备/2026-08-04",
+            "b": "industry/基础化工-化学原料-无机盐/2026-08-04",
+            "similarity_distance": 0.401,
+            "contrast_distance": 1.0625
+          }
+        ],
+        "2026-08-05": [
+          {
+            "a": "concept/青蒿素/2026-08-05",
+            "b": "industry/有色金属-能源金属-钴/2026-08-05",
+            "similarity_distance": 0.2245,
+            "contrast_distance": 1.3834
+          },
+          {
+            "a": "industry/有色金属-能源金属-钴/2026-08-05",
+            "b": "concept/青蒿素/2026-08-05",
+            "similarity_distance": 0.2245,
+            "contrast_distance": 1.3834
+          },
+          {
+            "a": "concept/金属钴/2026-08-05",
+            "b": "industry/电力设备-电网设备-电气自控设备/2026-08-05",
+            "similarity_distance": 0.3034,
+            "contrast_distance": 1.3409
+          },
+          {
+            "a": "industry/电力设备-电网设备-电气自控设备/2026-08-05",
+            "b": "concept/金属钴/2026-08-05",
+            "similarity_distance": 0.3034,
+            "contrast_distance": 1.3409
+          },
+          {
+            "a": "industry/纺织服饰-纺织制造-棉纺/2026-08-05",
+            "b": "industry/钢铁-钢铁-冶钢原料/2026-08-05",
+            "similarity_distance": 0.4306,
+            "contrast_distance": 1.3041
+          },
+          {
+            "a": "industry/钢铁-钢铁-冶钢原料/2026-08-05",
+            "b": "industry/食品饮料-饮料制造-软饮料/2026-08-05",
+            "similarity_distance": 0.3508,
+            "contrast_distance": 1.3041
+          },
+          {
+            "a": "industry/食品饮料-饮料制造-软饮料/2026-08-05",
+            "b": "industry/钢铁-钢铁-冶钢原料/2026-08-05",
+            "similarity_distance": 0.3508,
+            "contrast_distance": 1.3041
+          },
+          {
+            "a": "concept/超导概念/2026-08-05",
+            "b": "concept/人造肉/2026-08-05",
+            "similarity_distance": 0.4072,
+            "contrast_distance": 1.2827
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-林业/2026-08-05",
+            "b": "industry/基础化工-化学纤维-涤纶/2026-08-05",
+            "similarity_distance": 0.2122,
+            "contrast_distance": 1.2767
+          },
+          {
+            "a": "industry/基础化工-化学纤维-涤纶/2026-08-05",
+            "b": "industry/农林牧渔-种植业与林业-林业/2026-08-05",
+            "similarity_distance": 0.2122,
+            "contrast_distance": 1.2767
+          },
+          {
+            "a": "concept/禽流感/2026-08-05",
+            "b": "concept/云办公/2026-08-05",
+            "similarity_distance": 0.3906,
+            "contrast_distance": 1.2591
+          },
+          {
+            "a": "concept/供销社/2026-08-05",
+            "b": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+            "similarity_distance": 0.1753,
+            "contrast_distance": 1.2466
+          },
+          {
+            "a": "concept/转基因/2026-08-05",
+            "b": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+            "similarity_distance": 0.2516,
+            "contrast_distance": 1.2466
+          },
+          {
+            "a": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+            "b": "concept/供销社/2026-08-05",
+            "similarity_distance": 0.1753,
+            "contrast_distance": 1.2466
+          },
+          {
+            "a": "industry/有色金属-小金属-稀土/2026-08-05",
+            "b": "industry/非银金融-保险-保险III/2026-08-05",
+            "similarity_distance": 0.6491,
+            "contrast_distance": 1.2221
+          }
+        ],
+        "2026-08-06": [
+          {
+            "a": "industry/医药生物-医药商业-医药流通/2026-08-06",
+            "b": "industry/非银金融-保险-保险III/2026-08-06",
+            "similarity_distance": 0.3065,
+            "contrast_distance": 1.3657
+          },
+          {
+            "a": "industry/非银金融-保险-保险III/2026-08-06",
+            "b": "industry/医药生物-医药商业-医药流通/2026-08-06",
+            "similarity_distance": 0.3065,
+            "contrast_distance": 1.3657
+          },
+          {
+            "a": "industry/基础化工-非金属材料-非金属材料III/2026-08-06",
+            "b": "concept/国家大基金持股/2026-08-06",
+            "similarity_distance": 0.3113,
+            "contrast_distance": 1.3054
+          },
+          {
+            "a": "industry/基础化工-化学制品-纺织化学用品/2026-08-06",
+            "b": "industry/通信-通信服务-通信应用增值服务/2026-08-06",
+            "similarity_distance": 0.2432,
+            "contrast_distance": 1.2777
+          },
+          {
+            "a": "industry/通信-通信服务-通信应用增值服务/2026-08-06",
+            "b": "industry/基础化工-化学制品-纺织化学用品/2026-08-06",
+            "similarity_distance": 0.2432,
+            "contrast_distance": 1.2777
+          },
+          {
+            "a": "concept/玉米/2026-08-06",
+            "b": "industry/社会服务-旅游及酒店-旅游综合/2026-08-06",
+            "similarity_distance": 0.079,
+            "contrast_distance": 1.2735
+          },
+          {
+            "a": "industry/社会服务-旅游及酒店-旅游综合/2026-08-06",
+            "b": "concept/玉米/2026-08-06",
+            "similarity_distance": 0.079,
+            "contrast_distance": 1.2735
+          },
+          {
+            "a": "industry/交通运输-公路铁路运输-铁路运输/2026-08-06",
+            "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+            "similarity_distance": 0.063,
+            "contrast_distance": 1.2596
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+            "b": "industry/交通运输-公路铁路运输-铁路运输/2026-08-06",
+            "similarity_distance": 0.063,
+            "contrast_distance": 1.2596
+          },
+          {
+            "a": "industry/基础化工-化学原料-煤化工/2026-08-06",
+            "b": "industry/基础化工-化学纤维-涤纶/2026-08-06",
+            "similarity_distance": 0.4016,
+            "contrast_distance": 1.2453
+          },
+          {
+            "a": "concept/EDR概念/2026-08-06",
+            "b": "industry/基础化工-塑料制品-其他塑料制品/2026-08-06",
+            "similarity_distance": 0.2747,
+            "contrast_distance": 1.2305
+          },
+          {
+            "a": "industry/基础化工-塑料制品-其他塑料制品/2026-08-06",
+            "b": "concept/EDR概念/2026-08-06",
+            "similarity_distance": 0.2747,
+            "contrast_distance": 1.2305
+          },
+          {
+            "a": "industry/基础化工-农化制品-钾肥/2026-08-06",
+            "b": "industry/纺织服饰-服装家纺-家纺/2026-08-06",
+            "similarity_distance": 0.3004,
+            "contrast_distance": 1.2215
+          },
+          {
+            "a": "industry/有色金属-能源金属-锂/2026-08-06",
+            "b": "industry/纺织服饰-纺织制造-印染/2026-08-06",
+            "similarity_distance": 0.5317,
+            "contrast_distance": 1.2096
+          },
+          {
+            "a": "concept/DRG/DIP/2026-08-06",
+            "b": "concept/家庭医生/2026-08-06",
+            "similarity_distance": 0.1602,
+            "contrast_distance": 1.2075
+          }
+        ],
+        "2026-08-07": [
+          {
+            "a": "industry/房地产-房地产-商业地产/2026-08-07",
+            "b": "concept/金属镍/2026-08-07",
+            "similarity_distance": 0.4549,
+            "contrast_distance": 1.2965
+          },
+          {
+            "a": "industry/石油石化-油气开采及服务-油气开采/2026-08-07",
+            "b": "industry/轻工制造-家居用品-其他家居用品/2026-08-07",
+            "similarity_distance": 0.6209,
+            "contrast_distance": 1.2758
+          },
+          {
+            "a": "industry/轻工制造-家居用品-成品家居/2026-08-07",
+            "b": "concept/烟草/2026-08-07",
+            "similarity_distance": 0.3741,
+            "contrast_distance": 1.2526
+          },
+          {
+            "a": "industry/基础化工-化学原料-无机盐/2026-08-07",
+            "b": "industry/汽车-汽车零部件-车身附件及饰件/2026-08-07",
+            "similarity_distance": 0.3353,
+            "contrast_distance": 1.2275
+          },
+          {
+            "a": "industry/银行-银行-股份制银行/2026-08-07",
+            "b": "industry/有色金属-能源金属-锂/2026-08-07",
+            "similarity_distance": 0.3735,
+            "contrast_distance": 1.1975
+          },
+          {
+            "a": "industry/电力设备-风电设备-风电零部件/2026-08-07",
+            "b": "industry/综合-综合-综合III/2026-08-07",
+            "similarity_distance": 0.3224,
+            "contrast_distance": 1.1769
+          },
+          {
+            "a": "industry/综合-综合-综合III/2026-08-07",
+            "b": "industry/电力设备-风电设备-风电零部件/2026-08-07",
+            "similarity_distance": 0.3224,
+            "contrast_distance": 1.1769
+          },
+          {
+            "a": "concept/金属镍/2026-08-07",
+            "b": "industry/机械设备-专用设备-纺织服装设备/2026-08-07",
+            "similarity_distance": 0.4147,
+            "contrast_distance": 1.1592
+          },
+          {
+            "a": "industry/有色金属-小金属-稀土/2026-08-07",
+            "b": "industry/农林牧渔-农产品加工-果蔬加工/2026-08-07",
+            "similarity_distance": 0.4221,
+            "contrast_distance": 1.1197
+          },
+          {
+            "a": "industry/医药生物-医药商业-医药流通/2026-08-07",
+            "b": "industry/非银金融-保险-保险III/2026-08-07",
+            "similarity_distance": 0.2305,
+            "contrast_distance": 1.1148
+          },
+          {
+            "a": "industry/非银金融-保险-保险III/2026-08-07",
+            "b": "industry/医药生物-医药商业-医药流通/2026-08-07",
+            "similarity_distance": 0.2305,
+            "contrast_distance": 1.1148
+          },
+          {
+            "a": "concept/可燃冰/2026-08-07",
+            "b": "industry/基础化工-化学制品-聚氨酯/2026-08-07",
+            "similarity_distance": 0.3901,
+            "contrast_distance": 1.1065
+          },
+          {
+            "a": "industry/基础化工-化学制品-涂料油墨/2026-08-07",
+            "b": "industry/纺织服饰-服装家纺-服装/2026-08-07",
+            "similarity_distance": 0.3566,
+            "contrast_distance": 1.0919
+          },
+          {
+            "a": "industry/纺织服饰-服装家纺-服装/2026-08-07",
+            "b": "industry/基础化工-化学制品-涂料油墨/2026-08-07",
+            "similarity_distance": 0.3566,
+            "contrast_distance": 1.0919
+          },
+          {
+            "a": "concept/MLOps概念/2026-08-07",
+            "b": "concept/消毒剂/2026-08-07",
+            "similarity_distance": 0.3956,
+            "contrast_distance": 1.073
+          }
+        ],
+        "2026-08-10": [
+          {
+            "a": "industry/农林牧渔-农产品加工-畜禽饲料/2026-08-10",
+            "b": "industry/基础化工-化学纤维-粘胶/2026-08-10",
+            "similarity_distance": 0.3826,
+            "contrast_distance": 1.3911
+          },
+          {
+            "a": "industry/基础化工-化学纤维-粘胶/2026-08-10",
+            "b": "industry/农林牧渔-农产品加工-畜禽饲料/2026-08-10",
+            "similarity_distance": 0.3826,
+            "contrast_distance": 1.3911
+          },
+          {
+            "a": "industry/有色金属-金属新材料-其他金属新材料/2026-08-10",
+            "b": "industry/商贸零售-互联网电商-互联网电商III/2026-08-10",
+            "similarity_distance": 0.6908,
+            "contrast_distance": 1.3758
+          },
+          {
+            "a": "industry/食品饮料-食品加工制造-预加工食品/2026-08-10",
+            "b": "concept/高压氧舱/2026-08-10",
+            "similarity_distance": 0.3741,
+            "contrast_distance": 1.3573
+          },
+          {
+            "a": "industry/电力设备-电机-电机III/2026-08-10",
+            "b": "industry/食品饮料-食品加工制造-其他食品/2026-08-10",
+            "similarity_distance": 0.3145,
+            "contrast_distance": 1.3364
+          },
+          {
+            "a": "industry/食品饮料-食品加工制造-其他食品/2026-08-10",
+            "b": "industry/电力设备-电机-电机III/2026-08-10",
+            "similarity_distance": 0.3145,
+            "contrast_distance": 1.3364
+          },
+          {
+            "a": "industry/基础化工-化学纤维-其他纤维/2026-08-10",
+            "b": "industry/基础化工-化学纤维-涤纶/2026-08-10",
+            "similarity_distance": 0.3288,
+            "contrast_distance": 1.3018
+          },
+          {
+            "a": "industry/基础化工-化学纤维-涤纶/2026-08-10",
+            "b": "industry/基础化工-化学纤维-其他纤维/2026-08-10",
+            "similarity_distance": 0.3288,
+            "contrast_distance": 1.3018
+          },
+          {
+            "a": "industry/基础化工-塑料制品-膜材料/2026-08-10",
+            "b": "industry/机械设备-自动化设备-其他自动化设备/2026-08-10",
+            "similarity_distance": 0.1034,
+            "contrast_distance": 1.2994
+          },
+          {
+            "a": "industry/机械设备-自动化设备-其他自动化设备/2026-08-10",
+            "b": "industry/基础化工-塑料制品-膜材料/2026-08-10",
+            "similarity_distance": 0.1034,
+            "contrast_distance": 1.2994
+          },
+          {
+            "a": "concept/青蒿素/2026-08-10",
+            "b": "concept/辅助生殖/2026-08-10",
+            "similarity_distance": 0.5789,
+            "contrast_distance": 1.282
+          },
+          {
+            "a": "concept/共享单车/2026-08-10",
+            "b": "concept/玉米/2026-08-10",
+            "similarity_distance": 0.1098,
+            "contrast_distance": 1.2699
+          },
+          {
+            "a": "concept/丙烯酸/2026-08-10",
+            "b": "industry/机械设备-专用设备-纺织服装设备/2026-08-10",
+            "similarity_distance": 0.3511,
+            "contrast_distance": 1.269
+          },
+          {
+            "a": "industry/基础化工-化学原料-煤化工/2026-08-10",
+            "b": "industry/钢铁-钢铁-冶钢原料/2026-08-10",
+            "similarity_distance": 0.4903,
+            "contrast_distance": 1.2654
+          },
+          {
+            "a": "industry/基础化工-化学原料-无机盐/2026-08-10",
+            "b": "concept/动物疫苗/2026-08-10",
+            "similarity_distance": 0.4443,
+            "contrast_distance": 1.2639
+          }
+        ]
+      },
+      "available_scope_families": [
+        "concept",
+        "industry"
+      ],
+      "cases": [
+        {
+          "a": "concept/眼科医疗/2026-08-04",
+          "b": "concept/语音技术/2026-08-04",
+          "similarity_distance": 0.2713,
+          "contrast_distance": 1.2506
+        },
+        {
+          "a": "concept/语音技术/2026-08-04",
+          "b": "concept/眼科医疗/2026-08-04",
+          "similarity_distance": 0.2713,
+          "contrast_distance": 1.2506
+        },
+        {
+          "a": "concept/天津自贸区/2026-08-04",
+          "b": "industry/农林牧渔-农产品加工-其他农产品加工/2026-08-04",
+          "similarity_distance": 0.4567,
+          "contrast_distance": 1.2191
+        },
+        {
+          "a": "industry/石油石化-油气开采及服务-油气开采/2026-08-04",
+          "b": "industry/钢铁-钢铁-特钢/2026-08-04",
+          "similarity_distance": 0.3155,
+          "contrast_distance": 1.1738
+        },
+        {
+          "a": "industry/食品饮料-食品加工制造-肉制品/2026-08-04",
+          "b": "concept/租售同权/2026-08-04",
+          "similarity_distance": 0.307,
+          "contrast_distance": 1.1203
+        },
+        {
+          "a": "concept/细胞免疫治疗/2026-08-04",
+          "b": "industry/医药生物-医疗器械-医疗耗材/2026-08-04",
+          "similarity_distance": 0.2691,
+          "contrast_distance": 1.1083
+        },
+        {
+          "a": "industry/医药生物-医疗器械-医疗耗材/2026-08-04",
+          "b": "concept/细胞免疫治疗/2026-08-04",
+          "similarity_distance": 0.2691,
+          "contrast_distance": 1.1083
+        },
+        {
+          "a": "industry/医药生物-中药-中药III/2026-08-04",
+          "b": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+          "similarity_distance": 0.413,
+          "contrast_distance": 1.0981
+        },
+        {
+          "a": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+          "b": "industry/医药生物-中药-中药III/2026-08-04",
+          "similarity_distance": 0.413,
+          "contrast_distance": 1.0981
+        },
+        {
+          "a": "industry/农林牧渔-养殖业-生猪养殖/2026-08-04",
+          "b": "industry/建筑材料-建筑材料-管材/2026-08-04",
+          "similarity_distance": 0.2973,
+          "contrast_distance": 1.0915
+        },
+        {
+          "a": "industry/有色金属-工业金属-铝/2026-08-04",
+          "b": "concept/煤化工概念/2026-08-04",
+          "similarity_distance": 0.6007,
+          "contrast_distance": 1.0846
+        },
+        {
+          "a": "concept/互联网保险/2026-08-04",
+          "b": "concept/可燃冰/2026-08-04",
+          "similarity_distance": 0.3425,
+          "contrast_distance": 1.081
+        },
+        {
+          "a": "industry/电力设备-电网设备-电气自控设备/2026-08-04",
+          "b": "industry/汽车-汽车服务及其他-其他运输设备/2026-08-04",
+          "similarity_distance": 0.2887,
+          "contrast_distance": 1.0689
+        },
+        {
+          "a": "concept/云游戏/2026-08-04",
+          "b": "concept/肝炎概念/2026-08-04",
+          "similarity_distance": 0.34,
+          "contrast_distance": 1.0641
+        },
+        {
+          "a": "industry/电力设备-光伏设备-光伏加工设备/2026-08-04",
+          "b": "industry/基础化工-化学原料-无机盐/2026-08-04",
+          "similarity_distance": 0.401,
+          "contrast_distance": 1.0625
+        },
+        {
+          "a": "concept/青蒿素/2026-08-05",
+          "b": "industry/有色金属-能源金属-钴/2026-08-05",
+          "similarity_distance": 0.2245,
+          "contrast_distance": 1.3834
+        },
+        {
+          "a": "industry/有色金属-能源金属-钴/2026-08-05",
+          "b": "concept/青蒿素/2026-08-05",
+          "similarity_distance": 0.2245,
+          "contrast_distance": 1.3834
+        },
+        {
+          "a": "concept/金属钴/2026-08-05",
+          "b": "industry/电力设备-电网设备-电气自控设备/2026-08-05",
+          "similarity_distance": 0.3034,
+          "contrast_distance": 1.3409
+        },
+        {
+          "a": "industry/电力设备-电网设备-电气自控设备/2026-08-05",
+          "b": "concept/金属钴/2026-08-05",
+          "similarity_distance": 0.3034,
+          "contrast_distance": 1.3409
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-棉纺/2026-08-05",
+          "b": "industry/钢铁-钢铁-冶钢原料/2026-08-05",
+          "similarity_distance": 0.4306,
+          "contrast_distance": 1.3041
+        },
+        {
+          "a": "industry/钢铁-钢铁-冶钢原料/2026-08-05",
+          "b": "industry/食品饮料-饮料制造-软饮料/2026-08-05",
+          "similarity_distance": 0.3508,
+          "contrast_distance": 1.3041
+        },
+        {
+          "a": "industry/食品饮料-饮料制造-软饮料/2026-08-05",
+          "b": "industry/钢铁-钢铁-冶钢原料/2026-08-05",
+          "similarity_distance": 0.3508,
+          "contrast_distance": 1.3041
+        },
+        {
+          "a": "concept/超导概念/2026-08-05",
+          "b": "concept/人造肉/2026-08-05",
+          "similarity_distance": 0.4072,
+          "contrast_distance": 1.2827
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-林业/2026-08-05",
+          "b": "industry/基础化工-化学纤维-涤纶/2026-08-05",
+          "similarity_distance": 0.2122,
+          "contrast_distance": 1.2767
+        },
+        {
+          "a": "industry/基础化工-化学纤维-涤纶/2026-08-05",
+          "b": "industry/农林牧渔-种植业与林业-林业/2026-08-05",
+          "similarity_distance": 0.2122,
+          "contrast_distance": 1.2767
+        },
+        {
+          "a": "concept/禽流感/2026-08-05",
+          "b": "concept/云办公/2026-08-05",
+          "similarity_distance": 0.3906,
+          "contrast_distance": 1.2591
+        },
+        {
+          "a": "concept/供销社/2026-08-05",
+          "b": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+          "similarity_distance": 0.1753,
+          "contrast_distance": 1.2466
+        },
+        {
+          "a": "concept/转基因/2026-08-05",
+          "b": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+          "similarity_distance": 0.2516,
+          "contrast_distance": 1.2466
+        },
+        {
+          "a": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+          "b": "concept/供销社/2026-08-05",
+          "similarity_distance": 0.1753,
+          "contrast_distance": 1.2466
+        },
+        {
+          "a": "industry/有色金属-小金属-稀土/2026-08-05",
+          "b": "industry/非银金融-保险-保险III/2026-08-05",
+          "similarity_distance": 0.6491,
+          "contrast_distance": 1.2221
+        },
+        {
+          "a": "industry/医药生物-医药商业-医药流通/2026-08-06",
+          "b": "industry/非银金融-保险-保险III/2026-08-06",
+          "similarity_distance": 0.3065,
+          "contrast_distance": 1.3657
+        },
+        {
+          "a": "industry/非银金融-保险-保险III/2026-08-06",
+          "b": "industry/医药生物-医药商业-医药流通/2026-08-06",
+          "similarity_distance": 0.3065,
+          "contrast_distance": 1.3657
+        },
+        {
+          "a": "industry/基础化工-非金属材料-非金属材料III/2026-08-06",
+          "b": "concept/国家大基金持股/2026-08-06",
+          "similarity_distance": 0.3113,
+          "contrast_distance": 1.3054
+        },
+        {
+          "a": "industry/基础化工-化学制品-纺织化学用品/2026-08-06",
+          "b": "industry/通信-通信服务-通信应用增值服务/2026-08-06",
+          "similarity_distance": 0.2432,
+          "contrast_distance": 1.2777
+        },
+        {
+          "a": "industry/通信-通信服务-通信应用增值服务/2026-08-06",
+          "b": "industry/基础化工-化学制品-纺织化学用品/2026-08-06",
+          "similarity_distance": 0.2432,
+          "contrast_distance": 1.2777
+        },
+        {
+          "a": "concept/玉米/2026-08-06",
+          "b": "industry/社会服务-旅游及酒店-旅游综合/2026-08-06",
+          "similarity_distance": 0.079,
+          "contrast_distance": 1.2735
+        },
+        {
+          "a": "industry/社会服务-旅游及酒店-旅游综合/2026-08-06",
+          "b": "concept/玉米/2026-08-06",
+          "similarity_distance": 0.079,
+          "contrast_distance": 1.2735
+        },
+        {
+          "a": "industry/交通运输-公路铁路运输-铁路运输/2026-08-06",
+          "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+          "similarity_distance": 0.063,
+          "contrast_distance": 1.2596
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+          "b": "industry/交通运输-公路铁路运输-铁路运输/2026-08-06",
+          "similarity_distance": 0.063,
+          "contrast_distance": 1.2596
+        },
+        {
+          "a": "industry/基础化工-化学原料-煤化工/2026-08-06",
+          "b": "industry/基础化工-化学纤维-涤纶/2026-08-06",
+          "similarity_distance": 0.4016,
+          "contrast_distance": 1.2453
+        },
+        {
+          "a": "concept/EDR概念/2026-08-06",
+          "b": "industry/基础化工-塑料制品-其他塑料制品/2026-08-06",
+          "similarity_distance": 0.2747,
+          "contrast_distance": 1.2305
+        },
+        {
+          "a": "industry/基础化工-塑料制品-其他塑料制品/2026-08-06",
+          "b": "concept/EDR概念/2026-08-06",
+          "similarity_distance": 0.2747,
+          "contrast_distance": 1.2305
+        },
+        {
+          "a": "industry/基础化工-农化制品-钾肥/2026-08-06",
+          "b": "industry/纺织服饰-服装家纺-家纺/2026-08-06",
+          "similarity_distance": 0.3004,
+          "contrast_distance": 1.2215
+        },
+        {
+          "a": "industry/有色金属-能源金属-锂/2026-08-06",
+          "b": "industry/纺织服饰-纺织制造-印染/2026-08-06",
+          "similarity_distance": 0.5317,
+          "contrast_distance": 1.2096
+        },
+        {
+          "a": "concept/DRG/DIP/2026-08-06",
+          "b": "concept/家庭医生/2026-08-06",
+          "similarity_distance": 0.1602,
+          "contrast_distance": 1.2075
+        },
+        {
+          "a": "industry/房地产-房地产-商业地产/2026-08-07",
+          "b": "concept/金属镍/2026-08-07",
+          "similarity_distance": 0.4549,
+          "contrast_distance": 1.2965
+        },
+        {
+          "a": "industry/石油石化-油气开采及服务-油气开采/2026-08-07",
+          "b": "industry/轻工制造-家居用品-其他家居用品/2026-08-07",
+          "similarity_distance": 0.6209,
+          "contrast_distance": 1.2758
+        },
+        {
+          "a": "industry/轻工制造-家居用品-成品家居/2026-08-07",
+          "b": "concept/烟草/2026-08-07",
+          "similarity_distance": 0.3741,
+          "contrast_distance": 1.2526
+        },
+        {
+          "a": "industry/基础化工-化学原料-无机盐/2026-08-07",
+          "b": "industry/汽车-汽车零部件-车身附件及饰件/2026-08-07",
+          "similarity_distance": 0.3353,
+          "contrast_distance": 1.2275
+        },
+        {
+          "a": "industry/银行-银行-股份制银行/2026-08-07",
+          "b": "industry/有色金属-能源金属-锂/2026-08-07",
+          "similarity_distance": 0.3735,
+          "contrast_distance": 1.1975
+        },
+        {
+          "a": "industry/电力设备-风电设备-风电零部件/2026-08-07",
+          "b": "industry/综合-综合-综合III/2026-08-07",
+          "similarity_distance": 0.3224,
+          "contrast_distance": 1.1769
+        },
+        {
+          "a": "industry/综合-综合-综合III/2026-08-07",
+          "b": "industry/电力设备-风电设备-风电零部件/2026-08-07",
+          "similarity_distance": 0.3224,
+          "contrast_distance": 1.1769
+        },
+        {
+          "a": "concept/金属镍/2026-08-07",
+          "b": "industry/机械设备-专用设备-纺织服装设备/2026-08-07",
+          "similarity_distance": 0.4147,
+          "contrast_distance": 1.1592
+        },
+        {
+          "a": "industry/有色金属-小金属-稀土/2026-08-07",
+          "b": "industry/农林牧渔-农产品加工-果蔬加工/2026-08-07",
+          "similarity_distance": 0.4221,
+          "contrast_distance": 1.1197
+        },
+        {
+          "a": "industry/医药生物-医药商业-医药流通/2026-08-07",
+          "b": "industry/非银金融-保险-保险III/2026-08-07",
+          "similarity_distance": 0.2305,
+          "contrast_distance": 1.1148
+        },
+        {
+          "a": "industry/非银金融-保险-保险III/2026-08-07",
+          "b": "industry/医药生物-医药商业-医药流通/2026-08-07",
+          "similarity_distance": 0.2305,
+          "contrast_distance": 1.1148
+        },
+        {
+          "a": "concept/可燃冰/2026-08-07",
+          "b": "industry/基础化工-化学制品-聚氨酯/2026-08-07",
+          "similarity_distance": 0.3901,
+          "contrast_distance": 1.1065
+        },
+        {
+          "a": "industry/基础化工-化学制品-涂料油墨/2026-08-07",
+          "b": "industry/纺织服饰-服装家纺-服装/2026-08-07",
+          "similarity_distance": 0.3566,
+          "contrast_distance": 1.0919
+        },
+        {
+          "a": "industry/纺织服饰-服装家纺-服装/2026-08-07",
+          "b": "industry/基础化工-化学制品-涂料油墨/2026-08-07",
+          "similarity_distance": 0.3566,
+          "contrast_distance": 1.0919
+        },
+        {
+          "a": "concept/MLOps概念/2026-08-07",
+          "b": "concept/消毒剂/2026-08-07",
+          "similarity_distance": 0.3956,
+          "contrast_distance": 1.073
+        },
+        {
+          "a": "industry/农林牧渔-农产品加工-畜禽饲料/2026-08-10",
+          "b": "industry/基础化工-化学纤维-粘胶/2026-08-10",
+          "similarity_distance": 0.3826,
+          "contrast_distance": 1.3911
+        },
+        {
+          "a": "industry/基础化工-化学纤维-粘胶/2026-08-10",
+          "b": "industry/农林牧渔-农产品加工-畜禽饲料/2026-08-10",
+          "similarity_distance": 0.3826,
+          "contrast_distance": 1.3911
+        },
+        {
+          "a": "industry/有色金属-金属新材料-其他金属新材料/2026-08-10",
+          "b": "industry/商贸零售-互联网电商-互联网电商III/2026-08-10",
+          "similarity_distance": 0.6908,
+          "contrast_distance": 1.3758
+        },
+        {
+          "a": "industry/食品饮料-食品加工制造-预加工食品/2026-08-10",
+          "b": "concept/高压氧舱/2026-08-10",
+          "similarity_distance": 0.3741,
+          "contrast_distance": 1.3573
+        },
+        {
+          "a": "industry/电力设备-电机-电机III/2026-08-10",
+          "b": "industry/食品饮料-食品加工制造-其他食品/2026-08-10",
+          "similarity_distance": 0.3145,
+          "contrast_distance": 1.3364
+        },
+        {
+          "a": "industry/食品饮料-食品加工制造-其他食品/2026-08-10",
+          "b": "industry/电力设备-电机-电机III/2026-08-10",
+          "similarity_distance": 0.3145,
+          "contrast_distance": 1.3364
+        },
+        {
+          "a": "industry/基础化工-化学纤维-其他纤维/2026-08-10",
+          "b": "industry/基础化工-化学纤维-涤纶/2026-08-10",
+          "similarity_distance": 0.3288,
+          "contrast_distance": 1.3018
+        },
+        {
+          "a": "industry/基础化工-化学纤维-涤纶/2026-08-10",
+          "b": "industry/基础化工-化学纤维-其他纤维/2026-08-10",
+          "similarity_distance": 0.3288,
+          "contrast_distance": 1.3018
+        },
+        {
+          "a": "industry/基础化工-塑料制品-膜材料/2026-08-10",
+          "b": "industry/机械设备-自动化设备-其他自动化设备/2026-08-10",
+          "similarity_distance": 0.1034,
+          "contrast_distance": 1.2994
+        },
+        {
+          "a": "industry/机械设备-自动化设备-其他自动化设备/2026-08-10",
+          "b": "industry/基础化工-塑料制品-膜材料/2026-08-10",
+          "similarity_distance": 0.1034,
+          "contrast_distance": 1.2994
+        },
+        {
+          "a": "concept/青蒿素/2026-08-10",
+          "b": "concept/辅助生殖/2026-08-10",
+          "similarity_distance": 0.5789,
+          "contrast_distance": 1.282
+        },
+        {
+          "a": "concept/共享单车/2026-08-10",
+          "b": "concept/玉米/2026-08-10",
+          "similarity_distance": 0.1098,
+          "contrast_distance": 1.2699
+        },
+        {
+          "a": "concept/丙烯酸/2026-08-10",
+          "b": "industry/机械设备-专用设备-纺织服装设备/2026-08-10",
+          "similarity_distance": 0.3511,
+          "contrast_distance": 1.269
+        },
+        {
+          "a": "industry/基础化工-化学原料-煤化工/2026-08-10",
+          "b": "industry/钢铁-钢铁-冶钢原料/2026-08-10",
+          "similarity_distance": 0.4903,
+          "contrast_distance": 1.2654
+        },
+        {
+          "a": "industry/基础化工-化学原料-无机盐/2026-08-10",
+          "b": "concept/动物疫苗/2026-08-10",
+          "similarity_distance": 0.4443,
+          "contrast_distance": 1.2639
+        }
+      ]
+    },
+    "Q3": {
+      "name": "Q3_transition_similar_diffusion_differs",
+      "similarity_keys": [
+        "regime_neutral_to_up_ratio",
+        "regime_neutral_to_down_ratio",
+        "regime_up_to_neutral_ratio",
+        "regime_down_to_neutral_ratio",
+        "regime_up_to_down_ratio",
+        "regime_down_to_up_ratio",
+        "swing_transition_ratio",
+        "internal_transition_ratio",
+        "momentum_transition_ratio"
+      ],
+      "contrast_keys": [
+        "diffusion_regime_up_d1",
+        "diffusion_regime_up_d3",
+        "diffusion_regime_up_d5",
+        "diffusion_regime_down_d1",
+        "diffusion_regime_down_d3",
+        "diffusion_regime_down_d5",
+        "diffusion_swing_up_d1",
+        "diffusion_swing_up_d3",
+        "diffusion_swing_up_d5",
+        "diffusion_internal_up_d1",
+        "diffusion_internal_up_d3",
+        "diffusion_internal_up_d5",
+        "diffusion_resonance_d1",
+        "diffusion_resonance_d3",
+        "diffusion_resonance_d5",
+        "diffusion_expanding_d1",
+        "diffusion_expanding_d3",
+        "diffusion_expanding_d5",
+        "diffusion_contracting_d1",
+        "diffusion_contracting_d3",
+        "diffusion_contracting_d5"
+      ],
+      "eligible_rows": 646,
+      "total_rows": 3853,
+      "missing_rows": 3207,
+      "eligible_dates": [
+        "2026-08-10"
+      ],
+      "input_dates": [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "eligible_rows_by_date": {
+        "2026-08-03": 0,
+        "2026-08-04": 0,
+        "2026-08-05": 0,
+        "2026-08-06": 0,
+        "2026-08-07": 0,
+        "2026-08-10": 646
+      },
+      "missing_rows_by_date": {
+        "2026-08-03": 646,
+        "2026-08-04": 646,
+        "2026-08-05": 623,
+        "2026-08-06": 646,
+        "2026-08-07": 646,
+        "2026-08-10": 0
+      },
+      "cases_by_date": {
+        "2026-08-03": [],
+        "2026-08-04": [],
+        "2026-08-05": [],
+        "2026-08-06": [],
+        "2026-08-07": [],
+        "2026-08-10": [
+          {
+            "a": "concept/芬太尼/2026-08-10",
+            "b": "industry/有色金属-能源金属-锂/2026-08-10",
+            "similarity_distance": 0.0347,
+            "contrast_distance": 3.0255
+          },
+          {
+            "a": "industry/有色金属-能源金属-锂/2026-08-10",
+            "b": "concept/芬太尼/2026-08-10",
+            "similarity_distance": 0.0347,
+            "contrast_distance": 3.0255
+          },
+          {
+            "a": "industry/银行-银行-国有大型银行/2026-08-10",
+            "b": "concept/PVDF概念/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.7725
+          },
+          {
+            "a": "industry/基础化工-塑料制品-改性塑料/2026-08-10",
+            "b": "industry/食品饮料-食品加工制造-预加工食品/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.5942
+          },
+          {
+            "a": "industry/食品饮料-食品加工制造-预加工食品/2026-08-10",
+            "b": "industry/基础化工-塑料制品-改性塑料/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.5942
+          },
+          {
+            "a": "concept/PVDF概念/2026-08-10",
+            "b": "industry/交通运输-公路铁路运输-铁路运输/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.5043
+          },
+          {
+            "a": "industry/交通运输-公路铁路运输-铁路运输/2026-08-10",
+            "b": "concept/PVDF概念/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.5043
+          },
+          {
+            "a": "industry/石油石化-油气开采及服务-油服工程/2026-08-10",
+            "b": "industry/纺织服饰-纺织制造-其他纺织/2026-08-10",
+            "similarity_distance": 0.0527,
+            "contrast_distance": 2.4493
+          },
+          {
+            "a": "industry/机械设备-轨交设备-轨交设备III/2026-08-10",
+            "b": "industry/电子-半导体-半导体设备/2026-08-10",
+            "similarity_distance": 0.0619,
+            "contrast_distance": 2.3058
+          },
+          {
+            "a": "concept/数字水印/2026-08-10",
+            "b": "concept/禽流感/2026-08-10",
+            "similarity_distance": 0.084,
+            "contrast_distance": 2.3049
+          },
+          {
+            "a": "industry/石油石化-石油加工贸易-油品石化贸易/2026-08-10",
+            "b": "industry/非银金融-保险-保险III/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.2196
+          },
+          {
+            "a": "industry/非银金融-保险-保险III/2026-08-10",
+            "b": "industry/石油石化-石油加工贸易-油品石化贸易/2026-08-10",
+            "similarity_distance": 0.0,
+            "contrast_distance": 2.2196
+          },
+          {
+            "a": "concept/禽流感/2026-08-10",
+            "b": "concept/金属钴/2026-08-10",
+            "similarity_distance": 0.0415,
+            "contrast_distance": 2.2188
+          },
+          {
+            "a": "industry/基础化工-化学原料-煤化工/2026-08-10",
+            "b": "industry/纺织服饰-纺织制造-棉纺/2026-08-10",
+            "similarity_distance": 0.0187,
+            "contrast_distance": 2.146
+          },
+          {
+            "a": "industry/纺织服饰-纺织制造-棉纺/2026-08-10",
+            "b": "industry/基础化工-化学原料-煤化工/2026-08-10",
+            "similarity_distance": 0.0187,
+            "contrast_distance": 2.146
+          }
+        ]
+      },
+      "available_scope_families": [
+        "concept",
+        "industry"
+      ],
+      "cases": [
+        {
+          "a": "concept/芬太尼/2026-08-10",
+          "b": "industry/有色金属-能源金属-锂/2026-08-10",
+          "similarity_distance": 0.0347,
+          "contrast_distance": 3.0255
+        },
+        {
+          "a": "industry/有色金属-能源金属-锂/2026-08-10",
+          "b": "concept/芬太尼/2026-08-10",
+          "similarity_distance": 0.0347,
+          "contrast_distance": 3.0255
+        },
+        {
+          "a": "industry/银行-银行-国有大型银行/2026-08-10",
+          "b": "concept/PVDF概念/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.7725
+        },
+        {
+          "a": "industry/基础化工-塑料制品-改性塑料/2026-08-10",
+          "b": "industry/食品饮料-食品加工制造-预加工食品/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.5942
+        },
+        {
+          "a": "industry/食品饮料-食品加工制造-预加工食品/2026-08-10",
+          "b": "industry/基础化工-塑料制品-改性塑料/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.5942
+        },
+        {
+          "a": "concept/PVDF概念/2026-08-10",
+          "b": "industry/交通运输-公路铁路运输-铁路运输/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.5043
+        },
+        {
+          "a": "industry/交通运输-公路铁路运输-铁路运输/2026-08-10",
+          "b": "concept/PVDF概念/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.5043
+        },
+        {
+          "a": "industry/石油石化-油气开采及服务-油服工程/2026-08-10",
+          "b": "industry/纺织服饰-纺织制造-其他纺织/2026-08-10",
+          "similarity_distance": 0.0527,
+          "contrast_distance": 2.4493
+        },
+        {
+          "a": "industry/机械设备-轨交设备-轨交设备III/2026-08-10",
+          "b": "industry/电子-半导体-半导体设备/2026-08-10",
+          "similarity_distance": 0.0619,
+          "contrast_distance": 2.3058
+        },
+        {
+          "a": "concept/数字水印/2026-08-10",
+          "b": "concept/禽流感/2026-08-10",
+          "similarity_distance": 0.084,
+          "contrast_distance": 2.3049
+        },
+        {
+          "a": "industry/石油石化-石油加工贸易-油品石化贸易/2026-08-10",
+          "b": "industry/非银金融-保险-保险III/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.2196
+        },
+        {
+          "a": "industry/非银金融-保险-保险III/2026-08-10",
+          "b": "industry/石油石化-石油加工贸易-油品石化贸易/2026-08-10",
+          "similarity_distance": 0.0,
+          "contrast_distance": 2.2196
+        },
+        {
+          "a": "concept/禽流感/2026-08-10",
+          "b": "concept/金属钴/2026-08-10",
+          "similarity_distance": 0.0415,
+          "contrast_distance": 2.2188
+        },
+        {
+          "a": "industry/基础化工-化学原料-煤化工/2026-08-10",
+          "b": "industry/纺织服饰-纺织制造-棉纺/2026-08-10",
+          "similarity_distance": 0.0187,
+          "contrast_distance": 2.146
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-棉纺/2026-08-10",
+          "b": "industry/基础化工-化学原料-煤化工/2026-08-10",
+          "similarity_distance": 0.0187,
+          "contrast_distance": 2.146
+        }
+      ]
+    },
+    "Q4": {
+      "name": "Q4_state_breadth_similar_normalized_concentration_differs",
+      "similarity_keys": [
+        "regime_up_ratio",
+        "regime_neutral_ratio",
+        "regime_down_ratio",
+        "swing_up_ratio",
+        "swing_neutral_ratio",
+        "swing_down_ratio",
+        "internal_up_ratio",
+        "internal_neutral_ratio",
+        "internal_down_ratio",
+        "resonance_ratio",
+        "divergence_ratio",
+        "expanding_ratio",
+        "flat_ratio",
+        "contracting_ratio"
+      ],
+      "contrast_keys": [
+        "price_contribution_hhi_normalized",
+        "amount_contribution_hhi_normalized"
+      ],
+      "eligible_rows": 3847,
+      "total_rows": 3853,
+      "missing_rows": 6,
+      "eligible_dates": [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "input_dates": [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "eligible_rows_by_date": {
+        "2026-08-03": 645,
+        "2026-08-04": 645,
+        "2026-08-05": 622,
+        "2026-08-06": 645,
+        "2026-08-07": 645,
+        "2026-08-10": 645
+      },
+      "missing_rows_by_date": {
+        "2026-08-03": 1,
+        "2026-08-04": 1,
+        "2026-08-05": 1,
+        "2026-08-06": 1,
+        "2026-08-07": 1,
+        "2026-08-10": 1
+      },
+      "cases_by_date": {
+        "2026-08-03": [
+          {
+            "a": "industry/医药生物-医疗服务-医疗研发外包/2026-08-03",
+            "b": "concept/2026中报预增/2026-08-03",
+            "similarity_distance": 0.4829,
+            "contrast_distance": 1.1089
+          },
+          {
+            "a": "industry/纺织服饰-纺织制造-辅料/2026-08-03",
+            "b": "concept/同花顺漂亮100/2026-08-03",
+            "similarity_distance": 0.5355,
+            "contrast_distance": 1.0871
+          },
+          {
+            "a": "concept/牙科医疗/2026-08-03",
+            "b": "concept/智能医疗/2026-08-03",
+            "similarity_distance": 0.4421,
+            "contrast_distance": 1.0199
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-03",
+            "b": "concept/共享单车/2026-08-03",
+            "similarity_distance": 0.4199,
+            "contrast_distance": 1.0106
+          },
+          {
+            "a": "concept/电子纸/2026-08-03",
+            "b": "concept/AI眼镜/2026-08-03",
+            "similarity_distance": 0.2375,
+            "contrast_distance": 0.9495
+          },
+          {
+            "a": "industry/电子-元件-被动元件/2026-08-03",
+            "b": "concept/中芯国际概念/2026-08-03",
+            "similarity_distance": 0.2748,
+            "contrast_distance": 0.9345
+          },
+          {
+            "a": "concept/PEEK材料/2026-08-03",
+            "b": "concept/新型工业化/2026-08-03",
+            "similarity_distance": 0.2211,
+            "contrast_distance": 0.928
+          },
+          {
+            "a": "concept/EDR概念/2026-08-03",
+            "b": "concept/燃料电池/2026-08-03",
+            "similarity_distance": 0.3081,
+            "contrast_distance": 0.9152
+          },
+          {
+            "a": "concept/燃料电池/2026-08-03",
+            "b": "concept/EDR概念/2026-08-03",
+            "similarity_distance": 0.3081,
+            "contrast_distance": 0.9152
+          },
+          {
+            "a": "concept/上海国企改革/2026-08-03",
+            "b": "concept/物业管理/2026-08-03",
+            "similarity_distance": 0.2737,
+            "contrast_distance": 0.8782
+          },
+          {
+            "a": "concept/物业管理/2026-08-03",
+            "b": "concept/上海国企改革/2026-08-03",
+            "similarity_distance": 0.2737,
+            "contrast_distance": 0.8782
+          },
+          {
+            "a": "industry/国防军工-军工装备-航海装备/2026-08-03",
+            "b": "concept/天然气/2026-08-03",
+            "similarity_distance": 0.4325,
+            "contrast_distance": 0.8738
+          },
+          {
+            "a": "concept/足球概念/2026-08-03",
+            "b": "concept/燃料电池/2026-08-03",
+            "similarity_distance": 0.356,
+            "contrast_distance": 0.866
+          },
+          {
+            "a": "industry/计算机-计算机设备-安防设备/2026-08-03",
+            "b": "concept/安防/2026-08-03",
+            "similarity_distance": 0.25,
+            "contrast_distance": 0.8564
+          },
+          {
+            "a": "industry/基础化工-化学原料-纯碱/2026-08-03",
+            "b": "concept/化肥/2026-08-03",
+            "similarity_distance": 0.6746,
+            "contrast_distance": 0.8471
+          }
+        ],
+        "2026-08-04": [
+          {
+            "a": "industry/房地产-房地产-产业地产/2026-08-04",
+            "b": "concept/鸿蒙概念/2026-08-04",
+            "similarity_distance": 0.3344,
+            "contrast_distance": 1.2658
+          },
+          {
+            "a": "industry/纺织服饰-纺织制造-辅料/2026-08-04",
+            "b": "concept/同花顺漂亮100/2026-08-04",
+            "similarity_distance": 0.5566,
+            "contrast_distance": 1.1973
+          },
+          {
+            "a": "concept/牙科医疗/2026-08-04",
+            "b": "concept/智能医疗/2026-08-04",
+            "similarity_distance": 0.3718,
+            "contrast_distance": 1.0307
+          },
+          {
+            "a": "concept/EDR概念/2026-08-04",
+            "b": "concept/燃料电池/2026-08-04",
+            "similarity_distance": 0.3183,
+            "contrast_distance": 0.994
+          },
+          {
+            "a": "concept/燃料电池/2026-08-04",
+            "b": "concept/EDR概念/2026-08-04",
+            "similarity_distance": 0.3183,
+            "contrast_distance": 0.994
+          },
+          {
+            "a": "industry/农林牧渔-养殖业-海洋捕捞/2026-08-04",
+            "b": "industry/综合-综合-综合III/2026-08-04",
+            "similarity_distance": 0.1868,
+            "contrast_distance": 0.9727
+          },
+          {
+            "a": "industry/综合-综合-综合III/2026-08-04",
+            "b": "industry/农林牧渔-养殖业-海洋捕捞/2026-08-04",
+            "similarity_distance": 0.1868,
+            "contrast_distance": 0.9727
+          },
+          {
+            "a": "industry/基础化工-化学原料-纯碱/2026-08-04",
+            "b": "concept/化肥/2026-08-04",
+            "similarity_distance": 0.6891,
+            "contrast_distance": 0.9591
+          },
+          {
+            "a": "concept/代糖概念/2026-08-04",
+            "b": "concept/华为鲲鹏/2026-08-04",
+            "similarity_distance": 0.2144,
+            "contrast_distance": 0.9553
+          },
+          {
+            "a": "industry/计算机-计算机设备-安防设备/2026-08-04",
+            "b": "concept/安防/2026-08-04",
+            "similarity_distance": 0.3713,
+            "contrast_distance": 0.9102
+          },
+          {
+            "a": "industry/医药生物-中药-中药III/2026-08-04",
+            "b": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+            "similarity_distance": 0.4136,
+            "contrast_distance": 0.884
+          },
+          {
+            "a": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+            "b": "industry/医药生物-中药-中药III/2026-08-04",
+            "similarity_distance": 0.4136,
+            "contrast_distance": 0.884
+          },
+          {
+            "a": "industry/国防军工-军工装备-航海装备/2026-08-04",
+            "b": "concept/天然气/2026-08-04",
+            "similarity_distance": 0.3283,
+            "contrast_distance": 0.882
+          },
+          {
+            "a": "concept/上海国企改革/2026-08-04",
+            "b": "concept/物业管理/2026-08-04",
+            "similarity_distance": 0.2552,
+            "contrast_distance": 0.8795
+          },
+          {
+            "a": "concept/智慧灯杆/2026-08-04",
+            "b": "concept/智能家居/2026-08-04",
+            "similarity_distance": 0.2676,
+            "contrast_distance": 0.859
+          }
+        ],
+        "2026-08-05": [
+          {
+            "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-05",
+            "b": "industry/农林牧渔-农产品加工-宠物食品/2026-08-05",
+            "similarity_distance": 0.5592,
+            "contrast_distance": 1.1442
+          },
+          {
+            "a": "industry/纺织服饰-纺织制造-辅料/2026-08-05",
+            "b": "concept/同花顺漂亮100/2026-08-05",
+            "similarity_distance": 0.5419,
+            "contrast_distance": 1.1335
+          },
+          {
+            "a": "concept/牙科医疗/2026-08-05",
+            "b": "concept/智能医疗/2026-08-05",
+            "similarity_distance": 0.4845,
+            "contrast_distance": 1.0419
+          },
+          {
+            "a": "industry/国防军工-军工装备-航海装备/2026-08-05",
+            "b": "concept/天然气/2026-08-05",
+            "similarity_distance": 0.3594,
+            "contrast_distance": 1.0137
+          },
+          {
+            "a": "concept/EDR概念/2026-08-05",
+            "b": "concept/燃料电池/2026-08-05",
+            "similarity_distance": 0.2686,
+            "contrast_distance": 0.9662
+          },
+          {
+            "a": "concept/燃料电池/2026-08-05",
+            "b": "concept/EDR概念/2026-08-05",
+            "similarity_distance": 0.2686,
+            "contrast_distance": 0.9662
+          },
+          {
+            "a": "concept/云游戏/2026-08-05",
+            "b": "concept/多模态AI/2026-08-05",
+            "similarity_distance": 0.2239,
+            "contrast_distance": 0.9638
+          },
+          {
+            "a": "concept/基因测序/2026-08-05",
+            "b": "concept/低空经济/2026-08-05",
+            "similarity_distance": 0.2669,
+            "contrast_distance": 0.9582
+          },
+          {
+            "a": "industry/环保-环境治理-综合环境治理/2026-08-05",
+            "b": "concept/机器视觉/2026-08-05",
+            "similarity_distance": 0.4196,
+            "contrast_distance": 0.9483
+          },
+          {
+            "a": "industry/社会服务-旅游及酒店-旅游综合/2026-08-05",
+            "b": "industry/医药生物-医疗服务-医院/2026-08-05",
+            "similarity_distance": 0.1423,
+            "contrast_distance": 0.946
+          },
+          {
+            "a": "industry/房地产-房地产-产业地产/2026-08-05",
+            "b": "industry/美容护理-美容护理-个护用品/2026-08-05",
+            "similarity_distance": 0.2952,
+            "contrast_distance": 0.9251
+          },
+          {
+            "a": "concept/机器视觉/2026-08-05",
+            "b": "concept/电子纸/2026-08-05",
+            "similarity_distance": 0.255,
+            "contrast_distance": 0.9249
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-05",
+            "b": "industry/商贸零售-零售-旅游零售/2026-08-05",
+            "similarity_distance": 0.0,
+            "contrast_distance": 0.8741
+          },
+          {
+            "a": "industry/商贸零售-零售-旅游零售/2026-08-05",
+            "b": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-05",
+            "similarity_distance": 0.0,
+            "contrast_distance": 0.8741
+          },
+          {
+            "a": "industry/基础化工-化学原料-纯碱/2026-08-05",
+            "b": "concept/化肥/2026-08-05",
+            "similarity_distance": 0.6847,
+            "contrast_distance": 0.8573
+          }
+        ],
+        "2026-08-06": [
+          {
+            "a": "industry/纺织服饰-纺织制造-辅料/2026-08-06",
+            "b": "concept/同花顺漂亮100/2026-08-06",
+            "similarity_distance": 0.5939,
+            "contrast_distance": 1.1592
+          },
+          {
+            "a": "concept/中船系/2026-08-06",
+            "b": "concept/同花顺漂亮100/2026-08-06",
+            "similarity_distance": 0.5447,
+            "contrast_distance": 1.091
+          },
+          {
+            "a": "industry/环保-环境治理-固废治理/2026-08-06",
+            "b": "concept/风电/2026-08-06",
+            "similarity_distance": 0.4922,
+            "contrast_distance": 1.0852
+          },
+          {
+            "a": "concept/牙科医疗/2026-08-06",
+            "b": "concept/智能医疗/2026-08-06",
+            "similarity_distance": 0.5417,
+            "contrast_distance": 1.0615
+          },
+          {
+            "a": "industry/基础化工-化学纤维-粘胶/2026-08-06",
+            "b": "industry/通信-通信设备-其他通信设备/2026-08-06",
+            "similarity_distance": 0.2655,
+            "contrast_distance": 1.0185
+          },
+          {
+            "a": "industry/通信-通信设备-其他通信设备/2026-08-06",
+            "b": "industry/基础化工-化学纤维-粘胶/2026-08-06",
+            "similarity_distance": 0.2655,
+            "contrast_distance": 1.0185
+          },
+          {
+            "a": "industry/家用电器-黑色家电-彩电/2026-08-06",
+            "b": "industry/纺织服饰-纺织制造-辅料/2026-08-06",
+            "similarity_distance": 0.6879,
+            "contrast_distance": 0.9938
+          },
+          {
+            "a": "concept/天津自贸区/2026-08-06",
+            "b": "concept/在线教育/2026-08-06",
+            "similarity_distance": 0.3793,
+            "contrast_distance": 0.9809
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-06",
+            "b": "industry/商贸零售-零售-旅游零售/2026-08-06",
+            "similarity_distance": 0.0,
+            "contrast_distance": 0.9483
+          },
+          {
+            "a": "industry/商贸零售-零售-旅游零售/2026-08-06",
+            "b": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-06",
+            "similarity_distance": 0.0,
+            "contrast_distance": 0.9483
+          },
+          {
+            "a": "concept/基因测序/2026-08-06",
+            "b": "concept/低空经济/2026-08-06",
+            "similarity_distance": 0.2991,
+            "contrast_distance": 0.9182
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-06",
+            "b": "industry/社会服务-旅游及酒店-餐饮/2026-08-06",
+            "similarity_distance": 0.5266,
+            "contrast_distance": 0.917
+          },
+          {
+            "a": "industry/国防军工-军工装备-航海装备/2026-08-06",
+            "b": "concept/天然气/2026-08-06",
+            "similarity_distance": 0.4412,
+            "contrast_distance": 0.8943
+          },
+          {
+            "a": "industry/房地产-房地产-商业地产/2026-08-06",
+            "b": "concept/煤炭概念/2026-08-06",
+            "similarity_distance": 0.4761,
+            "contrast_distance": 0.8926
+          },
+          {
+            "a": "industry/美容护理-美容护理-个护用品/2026-08-06",
+            "b": "industry/房地产-房地产-产业地产/2026-08-06",
+            "similarity_distance": 0.3263,
+            "contrast_distance": 0.8636
+          }
+        ],
+        "2026-08-07": [
+          {
+            "a": "industry/家用电器-白色家电-家电零部件/2026-08-07",
+            "b": "concept/机器视觉/2026-08-07",
+            "similarity_distance": 0.3168,
+            "contrast_distance": 1.0639
+          },
+          {
+            "a": "concept/智能家居/2026-08-07",
+            "b": "industry/环保-环境治理-综合环境治理/2026-08-07",
+            "similarity_distance": 0.1997,
+            "contrast_distance": 1.0438
+          },
+          {
+            "a": "industry/环保-环境治理-综合环境治理/2026-08-07",
+            "b": "concept/智能家居/2026-08-07",
+            "similarity_distance": 0.1997,
+            "contrast_distance": 1.0438
+          },
+          {
+            "a": "concept/牙科医疗/2026-08-07",
+            "b": "concept/智能医疗/2026-08-07",
+            "similarity_distance": 0.6144,
+            "contrast_distance": 1.0045
+          },
+          {
+            "a": "industry/国防军工-军工装备-航海装备/2026-08-07",
+            "b": "concept/雄安新区/2026-08-07",
+            "similarity_distance": 0.5424,
+            "contrast_distance": 0.9754
+          },
+          {
+            "a": "concept/跨境支付(CIPS)/2026-08-07",
+            "b": "industry/汽车-汽车整车-商用载货车/2026-08-07",
+            "similarity_distance": 0.1708,
+            "contrast_distance": 0.9542
+          },
+          {
+            "a": "industry/汽车-汽车整车-商用载货车/2026-08-07",
+            "b": "concept/跨境支付(CIPS)/2026-08-07",
+            "similarity_distance": 0.1708,
+            "contrast_distance": 0.9542
+          },
+          {
+            "a": "industry/基础化工-化学原料-纯碱/2026-08-07",
+            "b": "concept/化肥/2026-08-07",
+            "similarity_distance": 0.6623,
+            "contrast_distance": 0.9379
+          },
+          {
+            "a": "concept/EDR概念/2026-08-07",
+            "b": "concept/燃料电池/2026-08-07",
+            "similarity_distance": 0.4092,
+            "contrast_distance": 0.9143
+          },
+          {
+            "a": "industry/有色金属-小金属-其他小金属/2026-08-07",
+            "b": "industry/医药生物-中药-中药III/2026-08-07",
+            "similarity_distance": 0.6914,
+            "contrast_distance": 0.879
+          },
+          {
+            "a": "concept/PEEK材料/2026-08-07",
+            "b": "concept/新型工业化/2026-08-07",
+            "similarity_distance": 0.3218,
+            "contrast_distance": 0.8777
+          },
+          {
+            "a": "industry/食品饮料-食品加工制造-肉制品/2026-08-07",
+            "b": "concept/蚂蚁集团概念/2026-08-07",
+            "similarity_distance": 0.5616,
+            "contrast_distance": 0.8743
+          },
+          {
+            "a": "concept/煤炭概念/2026-08-07",
+            "b": "industry/房地产-房地产-商业地产/2026-08-07",
+            "similarity_distance": 0.4986,
+            "contrast_distance": 0.8692
+          },
+          {
+            "a": "concept/新型工业化/2026-08-07",
+            "b": "concept/智慧灯杆/2026-08-07",
+            "similarity_distance": 0.2104,
+            "contrast_distance": 0.8633
+          },
+          {
+            "a": "industry/家用电器-白色家电-空调/2026-08-07",
+            "b": "industry/银行-银行-城商行/2026-08-07",
+            "similarity_distance": 0.7781,
+            "contrast_distance": 0.8535
+          }
+        ],
+        "2026-08-10": [
+          {
+            "a": "industry/纺织服饰-纺织制造-辅料/2026-08-10",
+            "b": "concept/同花顺漂亮100/2026-08-10",
+            "similarity_distance": 0.6693,
+            "contrast_distance": 1.1152
+          },
+          {
+            "a": "industry/商贸零售-互联网电商-互联网电商III/2026-08-10",
+            "b": "concept/三胎概念/2026-08-10",
+            "similarity_distance": 0.5,
+            "contrast_distance": 1.1007
+          },
+          {
+            "a": "concept/牙科医疗/2026-08-10",
+            "b": "concept/智能医疗/2026-08-10",
+            "similarity_distance": 0.5364,
+            "contrast_distance": 1.0729
+          },
+          {
+            "a": "concept/新型工业化/2026-08-10",
+            "b": "concept/智慧灯杆/2026-08-10",
+            "similarity_distance": 0.1591,
+            "contrast_distance": 0.9132
+          },
+          {
+            "a": "concept/智慧灯杆/2026-08-10",
+            "b": "concept/新型工业化/2026-08-10",
+            "similarity_distance": 0.1591,
+            "contrast_distance": 0.9132
+          },
+          {
+            "a": "industry/基础化工-化学原料-纯碱/2026-08-10",
+            "b": "concept/化肥/2026-08-10",
+            "similarity_distance": 0.6851,
+            "contrast_distance": 0.9046
+          },
+          {
+            "a": "industry/医药生物-生物制品-疫苗/2026-08-10",
+            "b": "concept/华为昇腾/2026-08-10",
+            "similarity_distance": 0.3097,
+            "contrast_distance": 0.8961
+          },
+          {
+            "a": "industry/有色金属-小金属-其他小金属/2026-08-10",
+            "b": "concept/小金属概念/2026-08-10",
+            "similarity_distance": 0.5213,
+            "contrast_distance": 0.872
+          },
+          {
+            "a": "industry/建筑材料-建筑材料-其他建材/2026-08-10",
+            "b": "concept/人民币贬值受益/2026-08-10",
+            "similarity_distance": 0.4718,
+            "contrast_distance": 0.8719
+          },
+          {
+            "a": "concept/跨境支付(CIPS)/2026-08-10",
+            "b": "industry/汽车-汽车整车-商用载货车/2026-08-10",
+            "similarity_distance": 0.2106,
+            "contrast_distance": 0.8577
+          },
+          {
+            "a": "concept/玉米/2026-08-10",
+            "b": "industry/农林牧渔-农产品加工-宠物食品/2026-08-10",
+            "similarity_distance": 0.0944,
+            "contrast_distance": 0.8455
+          },
+          {
+            "a": "concept/天津自贸区/2026-08-10",
+            "b": "concept/水泥概念/2026-08-10",
+            "similarity_distance": 0.3219,
+            "contrast_distance": 0.8443
+          },
+          {
+            "a": "industry/电力设备-光伏设备-逆变器/2026-08-10",
+            "b": "industry/农林牧渔-养殖业-肉鸡养殖/2026-08-10",
+            "similarity_distance": 0.4404,
+            "contrast_distance": 0.8361
+          },
+          {
+            "a": "concept/小米汽车/2026-08-10",
+            "b": "concept/机器人概念/2026-08-10",
+            "similarity_distance": 0.26,
+            "contrast_distance": 0.8243
+          },
+          {
+            "a": "concept/机器人概念/2026-08-10",
+            "b": "concept/小米汽车/2026-08-10",
+            "similarity_distance": 0.26,
+            "contrast_distance": 0.8243
+          }
+        ]
+      },
+      "available_scope_families": [
+        "concept",
+        "industry"
+      ],
+      "cases": [
+        {
+          "a": "industry/医药生物-医疗服务-医疗研发外包/2026-08-03",
+          "b": "concept/2026中报预增/2026-08-03",
+          "similarity_distance": 0.4829,
+          "contrast_distance": 1.1089
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-辅料/2026-08-03",
+          "b": "concept/同花顺漂亮100/2026-08-03",
+          "similarity_distance": 0.5355,
+          "contrast_distance": 1.0871
+        },
+        {
+          "a": "concept/牙科医疗/2026-08-03",
+          "b": "concept/智能医疗/2026-08-03",
+          "similarity_distance": 0.4421,
+          "contrast_distance": 1.0199
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-03",
+          "b": "concept/共享单车/2026-08-03",
+          "similarity_distance": 0.4199,
+          "contrast_distance": 1.0106
+        },
+        {
+          "a": "concept/电子纸/2026-08-03",
+          "b": "concept/AI眼镜/2026-08-03",
+          "similarity_distance": 0.2375,
+          "contrast_distance": 0.9495
+        },
+        {
+          "a": "industry/电子-元件-被动元件/2026-08-03",
+          "b": "concept/中芯国际概念/2026-08-03",
+          "similarity_distance": 0.2748,
+          "contrast_distance": 0.9345
+        },
+        {
+          "a": "concept/PEEK材料/2026-08-03",
+          "b": "concept/新型工业化/2026-08-03",
+          "similarity_distance": 0.2211,
+          "contrast_distance": 0.928
+        },
+        {
+          "a": "concept/EDR概念/2026-08-03",
+          "b": "concept/燃料电池/2026-08-03",
+          "similarity_distance": 0.3081,
+          "contrast_distance": 0.9152
+        },
+        {
+          "a": "concept/燃料电池/2026-08-03",
+          "b": "concept/EDR概念/2026-08-03",
+          "similarity_distance": 0.3081,
+          "contrast_distance": 0.9152
+        },
+        {
+          "a": "concept/上海国企改革/2026-08-03",
+          "b": "concept/物业管理/2026-08-03",
+          "similarity_distance": 0.2737,
+          "contrast_distance": 0.8782
+        },
+        {
+          "a": "concept/物业管理/2026-08-03",
+          "b": "concept/上海国企改革/2026-08-03",
+          "similarity_distance": 0.2737,
+          "contrast_distance": 0.8782
+        },
+        {
+          "a": "industry/国防军工-军工装备-航海装备/2026-08-03",
+          "b": "concept/天然气/2026-08-03",
+          "similarity_distance": 0.4325,
+          "contrast_distance": 0.8738
+        },
+        {
+          "a": "concept/足球概念/2026-08-03",
+          "b": "concept/燃料电池/2026-08-03",
+          "similarity_distance": 0.356,
+          "contrast_distance": 0.866
+        },
+        {
+          "a": "industry/计算机-计算机设备-安防设备/2026-08-03",
+          "b": "concept/安防/2026-08-03",
+          "similarity_distance": 0.25,
+          "contrast_distance": 0.8564
+        },
+        {
+          "a": "industry/基础化工-化学原料-纯碱/2026-08-03",
+          "b": "concept/化肥/2026-08-03",
+          "similarity_distance": 0.6746,
+          "contrast_distance": 0.8471
+        },
+        {
+          "a": "industry/房地产-房地产-产业地产/2026-08-04",
+          "b": "concept/鸿蒙概念/2026-08-04",
+          "similarity_distance": 0.3344,
+          "contrast_distance": 1.2658
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-辅料/2026-08-04",
+          "b": "concept/同花顺漂亮100/2026-08-04",
+          "similarity_distance": 0.5566,
+          "contrast_distance": 1.1973
+        },
+        {
+          "a": "concept/牙科医疗/2026-08-04",
+          "b": "concept/智能医疗/2026-08-04",
+          "similarity_distance": 0.3718,
+          "contrast_distance": 1.0307
+        },
+        {
+          "a": "concept/EDR概念/2026-08-04",
+          "b": "concept/燃料电池/2026-08-04",
+          "similarity_distance": 0.3183,
+          "contrast_distance": 0.994
+        },
+        {
+          "a": "concept/燃料电池/2026-08-04",
+          "b": "concept/EDR概念/2026-08-04",
+          "similarity_distance": 0.3183,
+          "contrast_distance": 0.994
+        },
+        {
+          "a": "industry/农林牧渔-养殖业-海洋捕捞/2026-08-04",
+          "b": "industry/综合-综合-综合III/2026-08-04",
+          "similarity_distance": 0.1868,
+          "contrast_distance": 0.9727
+        },
+        {
+          "a": "industry/综合-综合-综合III/2026-08-04",
+          "b": "industry/农林牧渔-养殖业-海洋捕捞/2026-08-04",
+          "similarity_distance": 0.1868,
+          "contrast_distance": 0.9727
+        },
+        {
+          "a": "industry/基础化工-化学原料-纯碱/2026-08-04",
+          "b": "concept/化肥/2026-08-04",
+          "similarity_distance": 0.6891,
+          "contrast_distance": 0.9591
+        },
+        {
+          "a": "concept/代糖概念/2026-08-04",
+          "b": "concept/华为鲲鹏/2026-08-04",
+          "similarity_distance": 0.2144,
+          "contrast_distance": 0.9553
+        },
+        {
+          "a": "industry/计算机-计算机设备-安防设备/2026-08-04",
+          "b": "concept/安防/2026-08-04",
+          "similarity_distance": 0.3713,
+          "contrast_distance": 0.9102
+        },
+        {
+          "a": "industry/医药生物-中药-中药III/2026-08-04",
+          "b": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+          "similarity_distance": 0.4136,
+          "contrast_distance": 0.884
+        },
+        {
+          "a": "industry/商贸零售-互联网电商-互联网电商III/2026-08-04",
+          "b": "industry/医药生物-中药-中药III/2026-08-04",
+          "similarity_distance": 0.4136,
+          "contrast_distance": 0.884
+        },
+        {
+          "a": "industry/国防军工-军工装备-航海装备/2026-08-04",
+          "b": "concept/天然气/2026-08-04",
+          "similarity_distance": 0.3283,
+          "contrast_distance": 0.882
+        },
+        {
+          "a": "concept/上海国企改革/2026-08-04",
+          "b": "concept/物业管理/2026-08-04",
+          "similarity_distance": 0.2552,
+          "contrast_distance": 0.8795
+        },
+        {
+          "a": "concept/智慧灯杆/2026-08-04",
+          "b": "concept/智能家居/2026-08-04",
+          "similarity_distance": 0.2676,
+          "contrast_distance": 0.859
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-05",
+          "b": "industry/农林牧渔-农产品加工-宠物食品/2026-08-05",
+          "similarity_distance": 0.5592,
+          "contrast_distance": 1.1442
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-辅料/2026-08-05",
+          "b": "concept/同花顺漂亮100/2026-08-05",
+          "similarity_distance": 0.5419,
+          "contrast_distance": 1.1335
+        },
+        {
+          "a": "concept/牙科医疗/2026-08-05",
+          "b": "concept/智能医疗/2026-08-05",
+          "similarity_distance": 0.4845,
+          "contrast_distance": 1.0419
+        },
+        {
+          "a": "industry/国防军工-军工装备-航海装备/2026-08-05",
+          "b": "concept/天然气/2026-08-05",
+          "similarity_distance": 0.3594,
+          "contrast_distance": 1.0137
+        },
+        {
+          "a": "concept/EDR概念/2026-08-05",
+          "b": "concept/燃料电池/2026-08-05",
+          "similarity_distance": 0.2686,
+          "contrast_distance": 0.9662
+        },
+        {
+          "a": "concept/燃料电池/2026-08-05",
+          "b": "concept/EDR概念/2026-08-05",
+          "similarity_distance": 0.2686,
+          "contrast_distance": 0.9662
+        },
+        {
+          "a": "concept/云游戏/2026-08-05",
+          "b": "concept/多模态AI/2026-08-05",
+          "similarity_distance": 0.2239,
+          "contrast_distance": 0.9638
+        },
+        {
+          "a": "concept/基因测序/2026-08-05",
+          "b": "concept/低空经济/2026-08-05",
+          "similarity_distance": 0.2669,
+          "contrast_distance": 0.9582
+        },
+        {
+          "a": "industry/环保-环境治理-综合环境治理/2026-08-05",
+          "b": "concept/机器视觉/2026-08-05",
+          "similarity_distance": 0.4196,
+          "contrast_distance": 0.9483
+        },
+        {
+          "a": "industry/社会服务-旅游及酒店-旅游综合/2026-08-05",
+          "b": "industry/医药生物-医疗服务-医院/2026-08-05",
+          "similarity_distance": 0.1423,
+          "contrast_distance": 0.946
+        },
+        {
+          "a": "industry/房地产-房地产-产业地产/2026-08-05",
+          "b": "industry/美容护理-美容护理-个护用品/2026-08-05",
+          "similarity_distance": 0.2952,
+          "contrast_distance": 0.9251
+        },
+        {
+          "a": "concept/机器视觉/2026-08-05",
+          "b": "concept/电子纸/2026-08-05",
+          "similarity_distance": 0.255,
+          "contrast_distance": 0.9249
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-05",
+          "b": "industry/商贸零售-零售-旅游零售/2026-08-05",
+          "similarity_distance": 0.0,
+          "contrast_distance": 0.8741
+        },
+        {
+          "a": "industry/商贸零售-零售-旅游零售/2026-08-05",
+          "b": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-05",
+          "similarity_distance": 0.0,
+          "contrast_distance": 0.8741
+        },
+        {
+          "a": "industry/基础化工-化学原料-纯碱/2026-08-05",
+          "b": "concept/化肥/2026-08-05",
+          "similarity_distance": 0.6847,
+          "contrast_distance": 0.8573
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-辅料/2026-08-06",
+          "b": "concept/同花顺漂亮100/2026-08-06",
+          "similarity_distance": 0.5939,
+          "contrast_distance": 1.1592
+        },
+        {
+          "a": "concept/中船系/2026-08-06",
+          "b": "concept/同花顺漂亮100/2026-08-06",
+          "similarity_distance": 0.5447,
+          "contrast_distance": 1.091
+        },
+        {
+          "a": "industry/环保-环境治理-固废治理/2026-08-06",
+          "b": "concept/风电/2026-08-06",
+          "similarity_distance": 0.4922,
+          "contrast_distance": 1.0852
+        },
+        {
+          "a": "concept/牙科医疗/2026-08-06",
+          "b": "concept/智能医疗/2026-08-06",
+          "similarity_distance": 0.5417,
+          "contrast_distance": 1.0615
+        },
+        {
+          "a": "industry/基础化工-化学纤维-粘胶/2026-08-06",
+          "b": "industry/通信-通信设备-其他通信设备/2026-08-06",
+          "similarity_distance": 0.2655,
+          "contrast_distance": 1.0185
+        },
+        {
+          "a": "industry/通信-通信设备-其他通信设备/2026-08-06",
+          "b": "industry/基础化工-化学纤维-粘胶/2026-08-06",
+          "similarity_distance": 0.2655,
+          "contrast_distance": 1.0185
+        },
+        {
+          "a": "industry/家用电器-黑色家电-彩电/2026-08-06",
+          "b": "industry/纺织服饰-纺织制造-辅料/2026-08-06",
+          "similarity_distance": 0.6879,
+          "contrast_distance": 0.9938
+        },
+        {
+          "a": "concept/天津自贸区/2026-08-06",
+          "b": "concept/在线教育/2026-08-06",
+          "similarity_distance": 0.3793,
+          "contrast_distance": 0.9809
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-06",
+          "b": "industry/商贸零售-零售-旅游零售/2026-08-06",
+          "similarity_distance": 0.0,
+          "contrast_distance": 0.9483
+        },
+        {
+          "a": "industry/商贸零售-零售-旅游零售/2026-08-06",
+          "b": "industry/农林牧渔-种植业与林业-粮食种植/2026-08-06",
+          "similarity_distance": 0.0,
+          "contrast_distance": 0.9483
+        },
+        {
+          "a": "concept/基因测序/2026-08-06",
+          "b": "concept/低空经济/2026-08-06",
+          "similarity_distance": 0.2991,
+          "contrast_distance": 0.9182
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-06",
+          "b": "industry/社会服务-旅游及酒店-餐饮/2026-08-06",
+          "similarity_distance": 0.5266,
+          "contrast_distance": 0.917
+        },
+        {
+          "a": "industry/国防军工-军工装备-航海装备/2026-08-06",
+          "b": "concept/天然气/2026-08-06",
+          "similarity_distance": 0.4412,
+          "contrast_distance": 0.8943
+        },
+        {
+          "a": "industry/房地产-房地产-商业地产/2026-08-06",
+          "b": "concept/煤炭概念/2026-08-06",
+          "similarity_distance": 0.4761,
+          "contrast_distance": 0.8926
+        },
+        {
+          "a": "industry/美容护理-美容护理-个护用品/2026-08-06",
+          "b": "industry/房地产-房地产-产业地产/2026-08-06",
+          "similarity_distance": 0.3263,
+          "contrast_distance": 0.8636
+        },
+        {
+          "a": "industry/家用电器-白色家电-家电零部件/2026-08-07",
+          "b": "concept/机器视觉/2026-08-07",
+          "similarity_distance": 0.3168,
+          "contrast_distance": 1.0639
+        },
+        {
+          "a": "concept/智能家居/2026-08-07",
+          "b": "industry/环保-环境治理-综合环境治理/2026-08-07",
+          "similarity_distance": 0.1997,
+          "contrast_distance": 1.0438
+        },
+        {
+          "a": "industry/环保-环境治理-综合环境治理/2026-08-07",
+          "b": "concept/智能家居/2026-08-07",
+          "similarity_distance": 0.1997,
+          "contrast_distance": 1.0438
+        },
+        {
+          "a": "concept/牙科医疗/2026-08-07",
+          "b": "concept/智能医疗/2026-08-07",
+          "similarity_distance": 0.6144,
+          "contrast_distance": 1.0045
+        },
+        {
+          "a": "industry/国防军工-军工装备-航海装备/2026-08-07",
+          "b": "concept/雄安新区/2026-08-07",
+          "similarity_distance": 0.5424,
+          "contrast_distance": 0.9754
+        },
+        {
+          "a": "concept/跨境支付(CIPS)/2026-08-07",
+          "b": "industry/汽车-汽车整车-商用载货车/2026-08-07",
+          "similarity_distance": 0.1708,
+          "contrast_distance": 0.9542
+        },
+        {
+          "a": "industry/汽车-汽车整车-商用载货车/2026-08-07",
+          "b": "concept/跨境支付(CIPS)/2026-08-07",
+          "similarity_distance": 0.1708,
+          "contrast_distance": 0.9542
+        },
+        {
+          "a": "industry/基础化工-化学原料-纯碱/2026-08-07",
+          "b": "concept/化肥/2026-08-07",
+          "similarity_distance": 0.6623,
+          "contrast_distance": 0.9379
+        },
+        {
+          "a": "concept/EDR概念/2026-08-07",
+          "b": "concept/燃料电池/2026-08-07",
+          "similarity_distance": 0.4092,
+          "contrast_distance": 0.9143
+        },
+        {
+          "a": "industry/有色金属-小金属-其他小金属/2026-08-07",
+          "b": "industry/医药生物-中药-中药III/2026-08-07",
+          "similarity_distance": 0.6914,
+          "contrast_distance": 0.879
+        },
+        {
+          "a": "concept/PEEK材料/2026-08-07",
+          "b": "concept/新型工业化/2026-08-07",
+          "similarity_distance": 0.3218,
+          "contrast_distance": 0.8777
+        },
+        {
+          "a": "industry/食品饮料-食品加工制造-肉制品/2026-08-07",
+          "b": "concept/蚂蚁集团概念/2026-08-07",
+          "similarity_distance": 0.5616,
+          "contrast_distance": 0.8743
+        },
+        {
+          "a": "concept/煤炭概念/2026-08-07",
+          "b": "industry/房地产-房地产-商业地产/2026-08-07",
+          "similarity_distance": 0.4986,
+          "contrast_distance": 0.8692
+        },
+        {
+          "a": "concept/新型工业化/2026-08-07",
+          "b": "concept/智慧灯杆/2026-08-07",
+          "similarity_distance": 0.2104,
+          "contrast_distance": 0.8633
+        },
+        {
+          "a": "industry/家用电器-白色家电-空调/2026-08-07",
+          "b": "industry/银行-银行-城商行/2026-08-07",
+          "similarity_distance": 0.7781,
+          "contrast_distance": 0.8535
+        },
+        {
+          "a": "industry/纺织服饰-纺织制造-辅料/2026-08-10",
+          "b": "concept/同花顺漂亮100/2026-08-10",
+          "similarity_distance": 0.6693,
+          "contrast_distance": 1.1152
+        },
+        {
+          "a": "industry/商贸零售-互联网电商-互联网电商III/2026-08-10",
+          "b": "concept/三胎概念/2026-08-10",
+          "similarity_distance": 0.5,
+          "contrast_distance": 1.1007
+        },
+        {
+          "a": "concept/牙科医疗/2026-08-10",
+          "b": "concept/智能医疗/2026-08-10",
+          "similarity_distance": 0.5364,
+          "contrast_distance": 1.0729
+        },
+        {
+          "a": "concept/新型工业化/2026-08-10",
+          "b": "concept/智慧灯杆/2026-08-10",
+          "similarity_distance": 0.1591,
+          "contrast_distance": 0.9132
+        },
+        {
+          "a": "concept/智慧灯杆/2026-08-10",
+          "b": "concept/新型工业化/2026-08-10",
+          "similarity_distance": 0.1591,
+          "contrast_distance": 0.9132
+        },
+        {
+          "a": "industry/基础化工-化学原料-纯碱/2026-08-10",
+          "b": "concept/化肥/2026-08-10",
+          "similarity_distance": 0.6851,
+          "contrast_distance": 0.9046
+        },
+        {
+          "a": "industry/医药生物-生物制品-疫苗/2026-08-10",
+          "b": "concept/华为昇腾/2026-08-10",
+          "similarity_distance": 0.3097,
+          "contrast_distance": 0.8961
+        },
+        {
+          "a": "industry/有色金属-小金属-其他小金属/2026-08-10",
+          "b": "concept/小金属概念/2026-08-10",
+          "similarity_distance": 0.5213,
+          "contrast_distance": 0.872
+        },
+        {
+          "a": "industry/建筑材料-建筑材料-其他建材/2026-08-10",
+          "b": "concept/人民币贬值受益/2026-08-10",
+          "similarity_distance": 0.4718,
+          "contrast_distance": 0.8719
+        },
+        {
+          "a": "concept/跨境支付(CIPS)/2026-08-10",
+          "b": "industry/汽车-汽车整车-商用载货车/2026-08-10",
+          "similarity_distance": 0.2106,
+          "contrast_distance": 0.8577
+        },
+        {
+          "a": "concept/玉米/2026-08-10",
+          "b": "industry/农林牧渔-农产品加工-宠物食品/2026-08-10",
+          "similarity_distance": 0.0944,
+          "contrast_distance": 0.8455
+        },
+        {
+          "a": "concept/天津自贸区/2026-08-10",
+          "b": "concept/水泥概念/2026-08-10",
+          "similarity_distance": 0.3219,
+          "contrast_distance": 0.8443
+        },
+        {
+          "a": "industry/电力设备-光伏设备-逆变器/2026-08-10",
+          "b": "industry/农林牧渔-养殖业-肉鸡养殖/2026-08-10",
+          "similarity_distance": 0.4404,
+          "contrast_distance": 0.8361
+        },
+        {
+          "a": "concept/小米汽车/2026-08-10",
+          "b": "concept/机器人概念/2026-08-10",
+          "similarity_distance": 0.26,
+          "contrast_distance": 0.8243
+        },
+        {
+          "a": "concept/机器人概念/2026-08-10",
+          "b": "concept/小米汽车/2026-08-10",
+          "similarity_distance": 0.26,
+          "contrast_distance": 0.8243
+        }
+      ]
+    },
+    "Q5": {
+      "name": "Q5_state_breadth_normalized_concentration_similar_participation_differs",
+      "similarity_keys": [
+        "regime_up_ratio",
+        "regime_neutral_ratio",
+        "regime_down_ratio",
+        "swing_up_ratio",
+        "swing_neutral_ratio",
+        "swing_down_ratio",
+        "internal_up_ratio",
+        "internal_neutral_ratio",
+        "internal_down_ratio",
+        "resonance_ratio",
+        "divergence_ratio",
+        "expanding_ratio",
+        "flat_ratio",
+        "contracting_ratio",
+        "price_contribution_hhi_normalized",
+        "amount_contribution_hhi_normalized"
+      ],
+      "contrast_keys": [
+        "vol_ratio20_p25",
+        "vol_ratio20_p50",
+        "vol_ratio20_p75",
+        "amt_ratio20_p25",
+        "amt_ratio20_p50",
+        "amt_ratio20_p75",
+        "vol_pct20_median",
+        "amt_pct200_median"
+      ],
+      "eligible_rows": 3847,
+      "total_rows": 3853,
+      "missing_rows": 6,
+      "eligible_dates": [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "input_dates": [
+        "2026-08-03",
+        "2026-08-04",
+        "2026-08-05",
+        "2026-08-06",
+        "2026-08-07",
+        "2026-08-10"
+      ],
+      "eligible_rows_by_date": {
+        "2026-08-03": 645,
+        "2026-08-04": 645,
+        "2026-08-05": 622,
+        "2026-08-06": 645,
+        "2026-08-07": 645,
+        "2026-08-10": 645
+      },
+      "missing_rows_by_date": {
+        "2026-08-03": 1,
+        "2026-08-04": 1,
+        "2026-08-05": 1,
+        "2026-08-06": 1,
+        "2026-08-07": 1,
+        "2026-08-10": 1
+      },
+      "cases_by_date": {
+        "2026-08-03": [
+          {
+            "a": "concept/肝炎概念/2026-08-03",
+            "b": "concept/多模态AI/2026-08-03",
+            "similarity_distance": 0.35,
+            "contrast_distance": 2.3885
+          },
+          {
+            "a": "industry/医药生物-生物制品-血液制品/2026-08-03",
+            "b": "concept/DRG/DIP/2026-08-03",
+            "similarity_distance": 0.1886,
+            "contrast_distance": 2.3568
+          },
+          {
+            "a": "industry/家用电器-黑色家电-其他黑色家电/2026-08-03",
+            "b": "industry/电力设备-光伏设备-硅料硅片/2026-08-03",
+            "similarity_distance": 0.4221,
+            "contrast_distance": 2.2058
+          },
+          {
+            "a": "industry/电力设备-光伏设备-硅料硅片/2026-08-03",
+            "b": "industry/家用电器-黑色家电-其他黑色家电/2026-08-03",
+            "similarity_distance": 0.4221,
+            "contrast_distance": 2.2058
+          },
+          {
+            "a": "concept/共享单车/2026-08-03",
+            "b": "industry/医药生物-生物制品-血液制品/2026-08-03",
+            "similarity_distance": 0.3468,
+            "contrast_distance": 2.1931
+          },
+          {
+            "a": "concept/眼科医疗/2026-08-03",
+            "b": "concept/云办公/2026-08-03",
+            "similarity_distance": 0.338,
+            "contrast_distance": 2.1559
+          },
+          {
+            "a": "industry/公用事业-电力-水电/2026-08-03",
+            "b": "industry/基础化工-化学纤维-氨纶/2026-08-03",
+            "similarity_distance": 0.3876,
+            "contrast_distance": 2.1541
+          },
+          {
+            "a": "industry/电力设备-风电设备-风电零部件/2026-08-03",
+            "b": "industry/农林牧渔-农产品加工-畜禽饲料/2026-08-03",
+            "similarity_distance": 0.416,
+            "contrast_distance": 2.0816
+          },
+          {
+            "a": "industry/家用电器-白色家电-冰洗/2026-08-03",
+            "b": "industry/社会服务-教育-教育III/2026-08-03",
+            "similarity_distance": 0.6053,
+            "contrast_distance": 2.0644
+          },
+          {
+            "a": "concept/芬太尼/2026-08-03",
+            "b": "industry/通信-通信服务-电信运营商/2026-08-03",
+            "similarity_distance": 0.7223,
+            "contrast_distance": 2.0454
+          },
+          {
+            "a": "industry/农林牧渔-种植业与林业-其他种植业/2026-08-03",
+            "b": "industry/石油石化-油气开采及服务-油气开采/2026-08-03",
+            "similarity_distance": 0.3338,
+            "contrast_distance": 2.0171
+          },
+          {
+            "a": "industry/石油石化-油气开采及服务-油气开采/2026-08-03",
+            "b": "industry/农林牧渔-种植业与林业-其他种植业/2026-08-03",
+            "similarity_distance": 0.3338,
+            "contrast_distance": 2.0171
+          },
+          {
+            "a": "industry/家用电器-白色家电-空调/2026-08-03",
+            "b": "industry/公用事业-电力-水电/2026-08-03",
+            "similarity_distance": 0.8263,
+            "contrast_distance": 2.0105
+          },
+          {
+            "a": "industry/石油石化-油气开采及服务-油服工程/2026-08-03",
+            "b": "industry/电力设备-风电设备-风电整机/2026-08-03",
+            "similarity_distance": 0.5166,
+            "contrast_distance": 1.9901
+          },
+          {
+            "a": "concept/MLCC概念/2026-08-03",
+            "b": "industry/医药生物-生物制品-其他生物制品/2026-08-03",
+            "similarity_distance": 0.5536,
+            "contrast_distance": 1.9653
+          }
+        ],
+        "2026-08-04": [
+          {
+            "a": "industry/有色金属-能源金属-锂/2026-08-04",
+            "b": "industry/有色金属-小金属-钨/2026-08-04",
+            "similarity_distance": 0.2808,
+            "contrast_distance": 2.4164
+          },
+          {
+            "a": "industry/医药生物-医药商业-医药流通/2026-08-04",
+            "b": "industry/社会服务-教育-教育III/2026-08-04",
+            "similarity_distance": 0.2926,
+            "contrast_distance": 2.3208
+          },
+          {
+            "a": "industry/社会服务-教育-教育III/2026-08-04",
+            "b": "industry/医药生物-医药商业-医药流通/2026-08-04",
+            "similarity_distance": 0.2926,
+            "contrast_distance": 2.3208
+          },
+          {
+            "a": "concept/云游戏/2026-08-04",
+            "b": "concept/生物疫苗/2026-08-04",
+            "similarity_distance": 0.5107,
+            "contrast_distance": 2.2056
+          },
+          {
+            "a": "industry/医药生物-化学制药-原料药/2026-08-04",
+            "b": "industry/通信-通信服务-通信应用增值服务/2026-08-04",
+            "similarity_distance": 0.5065,
+            "contrast_distance": 2.1842
+          },
+          {
+            "a": "concept/盐湖提锂/2026-08-04",
+            "b": "industry/通信-通信服务-通信应用增值服务/2026-08-04",
+            "similarity_distance": 0.401,
+            "contrast_distance": 2.1821
+          },
+          {
+            "a": "industry/商贸零售-贸易-贸易III/2026-08-04",
+            "b": "concept/知识产权保护/2026-08-04",
+            "similarity_distance": 0.2639,
+            "contrast_distance": 2.1375
+          },
+          {
+            "a": "concept/毛发医疗/2026-08-04",
+            "b": "concept/数字乡村/2026-08-04",
+            "similarity_distance": 0.5085,
+            "contrast_distance": 2.1363
+          },
+          {
+            "a": "industry/纺织服饰-服装家纺-家纺/2026-08-04",
+            "b": "concept/钛白粉概念/2026-08-04",
+            "similarity_distance": 0.5907,
+            "contrast_distance": 2.129
+          },
+          {
+            "a": "concept/语音技术/2026-08-04",
+            "b": "concept/眼科医疗/2026-08-04",
+            "similarity_distance": 0.3591,
+            "contrast_distance": 2.1037
+          },
+          {
+            "a": "concept/禽流感/2026-08-04",
+            "b": "concept/云办公/2026-08-04",
+            "similarity_distance": 0.5776,
+            "contrast_distance": 2.0902
+          },
+          {
+            "a": "concept/互联网保险/2026-08-04",
+            "b": "concept/可燃冰/2026-08-04",
+            "similarity_distance": 0.3585,
+            "contrast_distance": 2.0431
+          },
+          {
+            "a": "industry/房地产-房地产-住宅开发/2026-08-04",
+            "b": "concept/AI视频/2026-08-04",
+            "similarity_distance": 0.4114,
+            "contrast_distance": 2.0077
+          },
+          {
+            "a": "industry/银行-银行-国有大型银行/2026-08-04",
+            "b": "industry/公用事业-电力-水电/2026-08-04",
+            "similarity_distance": 0.7378,
+            "contrast_distance": 1.9972
+          },
+          {
+            "a": "concept/肝炎概念/2026-08-04",
+            "b": "concept/数字孪生/2026-08-04",
+            "similarity_distance": 0.3646,
+            "contrast_distance": 1.9771
+          }
+        ],
+        "2026-08-05": [
+          {
+            "a": "concept/电子身份证/2026-08-05",
+            "b": "industry/美容护理-美容护理-个护用品/2026-08-05",
+            "similarity_distance": 0.249,
+            "contrast_distance": 2.4983
+          },
+          {
+            "a": "industry/美容护理-美容护理-个护用品/2026-08-05",
+            "b": "concept/电子身份证/2026-08-05",
+            "similarity_distance": 0.249,
+            "contrast_distance": 2.4983
+          },
+          {
+            "a": "industry/有色金属-小金属-钨/2026-08-05",
+            "b": "concept/CRO概念/2026-08-05",
+            "similarity_distance": 1.0212,
+            "contrast_distance": 2.3316
+          },
+          {
+            "a": "industry/医药生物-生物制品-血液制品/2026-08-05",
+            "b": "concept/DRG/DIP/2026-08-05",
+            "similarity_distance": 0.3592,
+            "contrast_distance": 2.3228
+          },
+          {
+            "a": "concept/华为昇腾/2026-08-05",
+            "b": "concept/生物疫苗/2026-08-05",
+            "similarity_distance": 0.3717,
+            "contrast_distance": 2.3157
+          },
+          {
+            "a": "industry/有色金属-小金属-其他小金属/2026-08-05",
+            "b": "industry/医药生物-中药-中药III/2026-08-05",
+            "similarity_distance": 0.6886,
+            "contrast_distance": 2.2972
+          },
+          {
+            "a": "concept/转基因/2026-08-05",
+            "b": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+            "similarity_distance": 0.2803,
+            "contrast_distance": 2.2651
+          },
+          {
+            "a": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+            "b": "concept/转基因/2026-08-05",
+            "similarity_distance": 0.2803,
+            "contrast_distance": 2.2651
+          },
+          {
+            "a": "industry/有色金属-能源金属-锂/2026-08-05",
+            "b": "concept/F5G概念/2026-08-05",
+            "similarity_distance": 0.6352,
+            "contrast_distance": 2.23
+          },
+          {
+            "a": "industry/机械设备-专用设备-纺织服装设备/2026-08-05",
+            "b": "industry/非银金融-证券-证券III/2026-08-05",
+            "similarity_distance": 0.3851,
+            "contrast_distance": 2.2262
+          },
+          {
+            "a": "industry/非银金融-证券-证券III/2026-08-05",
+            "b": "industry/机械设备-专用设备-纺织服装设备/2026-08-05",
+            "similarity_distance": 0.3851,
+            "contrast_distance": 2.2262
+          },
+          {
+            "a": "industry/有色金属-工业金属-铜/2026-08-05",
+            "b": "industry/交通运输-港口航运-港口/2026-08-05",
+            "similarity_distance": 0.5689,
+            "contrast_distance": 2.2106
+          },
+          {
+            "a": "concept/预制菜/2026-08-05",
+            "b": "industry/计算机-软件开发-垂直应用软件/2026-08-05",
+            "similarity_distance": 0.2643,
+            "contrast_distance": 2.1428
+          },
+          {
+            "a": "concept/AI语料/2026-08-05",
+            "b": "industry/医药生物-医药商业-医药流通/2026-08-05",
+            "similarity_distance": 0.3635,
+            "contrast_distance": 2.1396
+          },
+          {
+            "a": "industry/电子-元件-被动元件/2026-08-05",
+            "b": "industry/电子-半导体-集成电路制造/2026-08-05",
+            "similarity_distance": 0.1958,
+            "contrast_distance": 2.13
+          }
+        ],
+        "2026-08-06": [
+          {
+            "a": "industry/有色金属-小金属-稀土/2026-08-06",
+            "b": "industry/非银金融-保险-保险III/2026-08-06",
+            "similarity_distance": 0.5616,
+            "contrast_distance": 2.5453
+          },
+          {
+            "a": "industry/煤炭-煤炭开采加工-焦炭加工/2026-08-06",
+            "b": "concept/可燃冰/2026-08-06",
+            "similarity_distance": 0.5432,
+            "contrast_distance": 2.4691
+          },
+          {
+            "a": "industry/有色金属-小金属-钨/2026-08-06",
+            "b": "concept/CRO概念/2026-08-06",
+            "similarity_distance": 0.9849,
+            "contrast_distance": 2.4678
+          },
+          {
+            "a": "industry/交通运输-公路铁路运输-铁路运输/2026-08-06",
+            "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+            "similarity_distance": 0.2044,
+            "contrast_distance": 2.4601
+          },
+          {
+            "a": "concept/电子身份证/2026-08-06",
+            "b": "industry/美容护理-美容护理-个护用品/2026-08-06",
+            "similarity_distance": 0.4007,
+            "contrast_distance": 2.407
+          },
+          {
+            "a": "industry/美容护理-美容护理-个护用品/2026-08-06",
+            "b": "concept/电子身份证/2026-08-06",
+            "similarity_distance": 0.4007,
+            "contrast_distance": 2.407
+          },
+          {
+            "a": "industry/有色金属-小金属-其他小金属/2026-08-06",
+            "b": "industry/医药生物-中药-中药III/2026-08-06",
+            "similarity_distance": 0.7497,
+            "contrast_distance": 2.379
+          },
+          {
+            "a": "concept/工业大麻/2026-08-06",
+            "b": "concept/华为盘古/2026-08-06",
+            "similarity_distance": 0.3211,
+            "contrast_distance": 2.3784
+          },
+          {
+            "a": "industry/医药生物-医药商业-药店/2026-08-06",
+            "b": "industry/非银金融-保险-保险III/2026-08-06",
+            "similarity_distance": 0.4846,
+            "contrast_distance": 2.3784
+          },
+          {
+            "a": "industry/非银金融-保险-保险III/2026-08-06",
+            "b": "industry/医药生物-医药商业-药店/2026-08-06",
+            "similarity_distance": 0.4846,
+            "contrast_distance": 2.3784
+          },
+          {
+            "a": "industry/农林牧渔-农产品加工-粮油加工/2026-08-06",
+            "b": "industry/社会服务-旅游及酒店-旅游综合/2026-08-06",
+            "similarity_distance": 0.276,
+            "contrast_distance": 2.3061
+          },
+          {
+            "a": "industry/纺织服饰-服装家纺-饰品/2026-08-06",
+            "b": "concept/工业大麻/2026-08-06",
+            "similarity_distance": 0.5851,
+            "contrast_distance": 2.2713
+          },
+          {
+            "a": "concept/MLCC概念/2026-08-06",
+            "b": "concept/CRO概念/2026-08-06",
+            "similarity_distance": 0.5347,
+            "contrast_distance": 2.2339
+          },
+          {
+            "a": "industry/商贸零售-零售-百货零售/2026-08-06",
+            "b": "industry/计算机-软件开发-垂直应用软件/2026-08-06",
+            "similarity_distance": 0.5278,
+            "contrast_distance": 2.2085
+          },
+          {
+            "a": "concept/高压氧舱/2026-08-06",
+            "b": "industry/有色金属-能源金属-钴/2026-08-06",
+            "similarity_distance": 0.2868,
+            "contrast_distance": 2.1816
+          }
+        ],
+        "2026-08-07": [
+          {
+            "a": "industry/社会服务-其他社会服务-体育/2026-08-07",
+            "b": "industry/有色金属-工业金属-铜/2026-08-07",
+            "similarity_distance": 0.5486,
+            "contrast_distance": 2.6684
+          },
+          {
+            "a": "industry/有色金属-工业金属-铜/2026-08-07",
+            "b": "industry/交通运输-港口航运-航运/2026-08-07",
+            "similarity_distance": 0.522,
+            "contrast_distance": 2.5912
+          },
+          {
+            "a": "industry/有色金属-贵金属-贵金属III/2026-08-07",
+            "b": "industry/银行-银行-股份制银行/2026-08-07",
+            "similarity_distance": 0.4452,
+            "contrast_distance": 2.433
+          },
+          {
+            "a": "industry/银行-银行-股份制银行/2026-08-07",
+            "b": "industry/有色金属-贵金属-贵金属III/2026-08-07",
+            "similarity_distance": 0.4452,
+            "contrast_distance": 2.433
+          },
+          {
+            "a": "industry/通信-通信服务-通信工程及服务/2026-08-07",
+            "b": "industry/家用电器-白色家电-冰洗/2026-08-07",
+            "similarity_distance": 0.5046,
+            "contrast_distance": 2.4262
+          },
+          {
+            "a": "industry/银行-银行-国有大型银行/2026-08-07",
+            "b": "industry/有色金属-贵金属-贵金属III/2026-08-07",
+            "similarity_distance": 0.5626,
+            "contrast_distance": 2.4221
+          },
+          {
+            "a": "industry/医药生物-医药商业-医药流通/2026-08-07",
+            "b": "industry/非银金融-保险-保险III/2026-08-07",
+            "similarity_distance": 0.4435,
+            "contrast_distance": 2.3892
+          },
+          {
+            "a": "industry/非银金融-保险-保险III/2026-08-07",
+            "b": "industry/医药生物-医药商业-医药流通/2026-08-07",
+            "similarity_distance": 0.4435,
+            "contrast_distance": 2.3892
+          },
+          {
+            "a": "concept/黄金概念/2026-08-07",
+            "b": "concept/同花顺中特估100/2026-08-07",
+            "similarity_distance": 0.367,
+            "contrast_distance": 2.3187
+          },
+          {
+            "a": "industry/传媒-文化传媒-广告营销/2026-08-07",
+            "b": "industry/建筑装饰-建筑装饰-房屋建设/2026-08-07",
+            "similarity_distance": 0.2902,
+            "contrast_distance": 2.2772
+          },
+          {
+            "a": "industry/建筑装饰-建筑装饰-房屋建设/2026-08-07",
+            "b": "industry/传媒-文化传媒-广告营销/2026-08-07",
+            "similarity_distance": 0.2902,
+            "contrast_distance": 2.2772
+          },
+          {
+            "a": "industry/食品饮料-饮料制造-啤酒/2026-08-07",
+            "b": "industry/美容护理-美容护理-医疗美容/2026-08-07",
+            "similarity_distance": 0.2608,
+            "contrast_distance": 2.2483
+          },
+          {
+            "a": "industry/医药生物-医药商业-药店/2026-08-07",
+            "b": "industry/非银金融-保险-保险III/2026-08-07",
+            "similarity_distance": 0.4489,
+            "contrast_distance": 2.2382
+          },
+          {
+            "a": "industry/家用电器-黑色家电-彩电/2026-08-07",
+            "b": "industry/纺织服饰-纺织制造-辅料/2026-08-07",
+            "similarity_distance": 0.8006,
+            "contrast_distance": 2.2227
+          },
+          {
+            "a": "industry/汽车-汽车整车-商用载客车/2026-08-07",
+            "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-07",
+            "similarity_distance": 0.205,
+            "contrast_distance": 2.2216
+          }
+        ],
+        "2026-08-10": [
+          {
+            "a": "industry/有色金属-贵金属-贵金属III/2026-08-10",
+            "b": "industry/银行-银行-股份制银行/2026-08-10",
+            "similarity_distance": 0.5899,
+            "contrast_distance": 2.7231
+          },
+          {
+            "a": "industry/有色金属-能源金属-钴/2026-08-10",
+            "b": "industry/社会服务-其他社会服务-体育/2026-08-10",
+            "similarity_distance": 0.2362,
+            "contrast_distance": 2.7079
+          },
+          {
+            "a": "industry/社会服务-其他社会服务-体育/2026-08-10",
+            "b": "industry/有色金属-能源金属-钴/2026-08-10",
+            "similarity_distance": 0.2362,
+            "contrast_distance": 2.7079
+          },
+          {
+            "a": "industry/银行-银行-股份制银行/2026-08-10",
+            "b": "industry/有色金属-工业金属-铜/2026-08-10",
+            "similarity_distance": 0.4632,
+            "contrast_distance": 2.5807
+          },
+          {
+            "a": "concept/可燃冰/2026-08-10",
+            "b": "concept/兵装重组概念/2026-08-10",
+            "similarity_distance": 0.3549,
+            "contrast_distance": 2.4786
+          },
+          {
+            "a": "industry/银行-银行-国有大型银行/2026-08-10",
+            "b": "industry/纺织服饰-纺织制造-印染/2026-08-10",
+            "similarity_distance": 0.6268,
+            "contrast_distance": 2.4083
+          },
+          {
+            "a": "industry/电力设备-风电设备-风电整机/2026-08-10",
+            "b": "industry/农林牧渔-农产品加工-其他农产品加工/2026-08-10",
+            "similarity_distance": 0.4907,
+            "contrast_distance": 2.4075
+          },
+          {
+            "a": "industry/机械设备-通用设备-机床工具/2026-08-10",
+            "b": "industry/电子-光学光电子-面板/2026-08-10",
+            "similarity_distance": 0.337,
+            "contrast_distance": 2.3718
+          },
+          {
+            "a": "industry/电子-光学光电子-面板/2026-08-10",
+            "b": "industry/机械设备-通用设备-机床工具/2026-08-10",
+            "similarity_distance": 0.337,
+            "contrast_distance": 2.3718
+          },
+          {
+            "a": "industry/基础化工-非金属材料-非金属材料III/2026-08-10",
+            "b": "industry/电子-半导体-集成电路制造/2026-08-10",
+            "similarity_distance": 0.5034,
+            "contrast_distance": 2.3366
+          },
+          {
+            "a": "industry/电子-半导体-集成电路制造/2026-08-10",
+            "b": "industry/基础化工-非金属材料-非金属材料III/2026-08-10",
+            "similarity_distance": 0.5034,
+            "contrast_distance": 2.3366
+          },
+          {
+            "a": "concept/信托概念/2026-08-10",
+            "b": "industry/医药生物-医疗服务-医院/2026-08-10",
+            "similarity_distance": 0.237,
+            "contrast_distance": 2.3214
+          },
+          {
+            "a": "concept/黄金概念/2026-08-10",
+            "b": "concept/同花顺中特估100/2026-08-10",
+            "similarity_distance": 0.5052,
+            "contrast_distance": 2.3022
+          },
+          {
+            "a": "industry/有色金属-工业金属-铅锌/2026-08-10",
+            "b": "industry/银行-银行-城商行/2026-08-10",
+            "similarity_distance": 0.5824,
+            "contrast_distance": 2.2713
+          },
+          {
+            "a": "concept/养鸡/2026-08-10",
+            "b": "industry/轻工制造-包装印刷-印刷/2026-08-10",
+            "similarity_distance": 0.4469,
+            "contrast_distance": 2.2532
+          }
+        ]
+      },
+      "available_scope_families": [
+        "concept",
+        "industry"
+      ],
+      "cases": [
+        {
+          "a": "concept/肝炎概念/2026-08-03",
+          "b": "concept/多模态AI/2026-08-03",
+          "similarity_distance": 0.35,
+          "contrast_distance": 2.3885
+        },
+        {
+          "a": "industry/医药生物-生物制品-血液制品/2026-08-03",
+          "b": "concept/DRG/DIP/2026-08-03",
+          "similarity_distance": 0.1886,
+          "contrast_distance": 2.3568
+        },
+        {
+          "a": "industry/家用电器-黑色家电-其他黑色家电/2026-08-03",
+          "b": "industry/电力设备-光伏设备-硅料硅片/2026-08-03",
+          "similarity_distance": 0.4221,
+          "contrast_distance": 2.2058
+        },
+        {
+          "a": "industry/电力设备-光伏设备-硅料硅片/2026-08-03",
+          "b": "industry/家用电器-黑色家电-其他黑色家电/2026-08-03",
+          "similarity_distance": 0.4221,
+          "contrast_distance": 2.2058
+        },
+        {
+          "a": "concept/共享单车/2026-08-03",
+          "b": "industry/医药生物-生物制品-血液制品/2026-08-03",
+          "similarity_distance": 0.3468,
+          "contrast_distance": 2.1931
+        },
+        {
+          "a": "concept/眼科医疗/2026-08-03",
+          "b": "concept/云办公/2026-08-03",
+          "similarity_distance": 0.338,
+          "contrast_distance": 2.1559
+        },
+        {
+          "a": "industry/公用事业-电力-水电/2026-08-03",
+          "b": "industry/基础化工-化学纤维-氨纶/2026-08-03",
+          "similarity_distance": 0.3876,
+          "contrast_distance": 2.1541
+        },
+        {
+          "a": "industry/电力设备-风电设备-风电零部件/2026-08-03",
+          "b": "industry/农林牧渔-农产品加工-畜禽饲料/2026-08-03",
+          "similarity_distance": 0.416,
+          "contrast_distance": 2.0816
+        },
+        {
+          "a": "industry/家用电器-白色家电-冰洗/2026-08-03",
+          "b": "industry/社会服务-教育-教育III/2026-08-03",
+          "similarity_distance": 0.6053,
+          "contrast_distance": 2.0644
+        },
+        {
+          "a": "concept/芬太尼/2026-08-03",
+          "b": "industry/通信-通信服务-电信运营商/2026-08-03",
+          "similarity_distance": 0.7223,
+          "contrast_distance": 2.0454
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-其他种植业/2026-08-03",
+          "b": "industry/石油石化-油气开采及服务-油气开采/2026-08-03",
+          "similarity_distance": 0.3338,
+          "contrast_distance": 2.0171
+        },
+        {
+          "a": "industry/石油石化-油气开采及服务-油气开采/2026-08-03",
+          "b": "industry/农林牧渔-种植业与林业-其他种植业/2026-08-03",
+          "similarity_distance": 0.3338,
+          "contrast_distance": 2.0171
+        },
+        {
+          "a": "industry/家用电器-白色家电-空调/2026-08-03",
+          "b": "industry/公用事业-电力-水电/2026-08-03",
+          "similarity_distance": 0.8263,
+          "contrast_distance": 2.0105
+        },
+        {
+          "a": "industry/石油石化-油气开采及服务-油服工程/2026-08-03",
+          "b": "industry/电力设备-风电设备-风电整机/2026-08-03",
+          "similarity_distance": 0.5166,
+          "contrast_distance": 1.9901
+        },
+        {
+          "a": "concept/MLCC概念/2026-08-03",
+          "b": "industry/医药生物-生物制品-其他生物制品/2026-08-03",
+          "similarity_distance": 0.5536,
+          "contrast_distance": 1.9653
+        },
+        {
+          "a": "industry/有色金属-能源金属-锂/2026-08-04",
+          "b": "industry/有色金属-小金属-钨/2026-08-04",
+          "similarity_distance": 0.2808,
+          "contrast_distance": 2.4164
+        },
+        {
+          "a": "industry/医药生物-医药商业-医药流通/2026-08-04",
+          "b": "industry/社会服务-教育-教育III/2026-08-04",
+          "similarity_distance": 0.2926,
+          "contrast_distance": 2.3208
+        },
+        {
+          "a": "industry/社会服务-教育-教育III/2026-08-04",
+          "b": "industry/医药生物-医药商业-医药流通/2026-08-04",
+          "similarity_distance": 0.2926,
+          "contrast_distance": 2.3208
+        },
+        {
+          "a": "concept/云游戏/2026-08-04",
+          "b": "concept/生物疫苗/2026-08-04",
+          "similarity_distance": 0.5107,
+          "contrast_distance": 2.2056
+        },
+        {
+          "a": "industry/医药生物-化学制药-原料药/2026-08-04",
+          "b": "industry/通信-通信服务-通信应用增值服务/2026-08-04",
+          "similarity_distance": 0.5065,
+          "contrast_distance": 2.1842
+        },
+        {
+          "a": "concept/盐湖提锂/2026-08-04",
+          "b": "industry/通信-通信服务-通信应用增值服务/2026-08-04",
+          "similarity_distance": 0.401,
+          "contrast_distance": 2.1821
+        },
+        {
+          "a": "industry/商贸零售-贸易-贸易III/2026-08-04",
+          "b": "concept/知识产权保护/2026-08-04",
+          "similarity_distance": 0.2639,
+          "contrast_distance": 2.1375
+        },
+        {
+          "a": "concept/毛发医疗/2026-08-04",
+          "b": "concept/数字乡村/2026-08-04",
+          "similarity_distance": 0.5085,
+          "contrast_distance": 2.1363
+        },
+        {
+          "a": "industry/纺织服饰-服装家纺-家纺/2026-08-04",
+          "b": "concept/钛白粉概念/2026-08-04",
+          "similarity_distance": 0.5907,
+          "contrast_distance": 2.129
+        },
+        {
+          "a": "concept/语音技术/2026-08-04",
+          "b": "concept/眼科医疗/2026-08-04",
+          "similarity_distance": 0.3591,
+          "contrast_distance": 2.1037
+        },
+        {
+          "a": "concept/禽流感/2026-08-04",
+          "b": "concept/云办公/2026-08-04",
+          "similarity_distance": 0.5776,
+          "contrast_distance": 2.0902
+        },
+        {
+          "a": "concept/互联网保险/2026-08-04",
+          "b": "concept/可燃冰/2026-08-04",
+          "similarity_distance": 0.3585,
+          "contrast_distance": 2.0431
+        },
+        {
+          "a": "industry/房地产-房地产-住宅开发/2026-08-04",
+          "b": "concept/AI视频/2026-08-04",
+          "similarity_distance": 0.4114,
+          "contrast_distance": 2.0077
+        },
+        {
+          "a": "industry/银行-银行-国有大型银行/2026-08-04",
+          "b": "industry/公用事业-电力-水电/2026-08-04",
+          "similarity_distance": 0.7378,
+          "contrast_distance": 1.9972
+        },
+        {
+          "a": "concept/肝炎概念/2026-08-04",
+          "b": "concept/数字孪生/2026-08-04",
+          "similarity_distance": 0.3646,
+          "contrast_distance": 1.9771
+        },
+        {
+          "a": "concept/电子身份证/2026-08-05",
+          "b": "industry/美容护理-美容护理-个护用品/2026-08-05",
+          "similarity_distance": 0.249,
+          "contrast_distance": 2.4983
+        },
+        {
+          "a": "industry/美容护理-美容护理-个护用品/2026-08-05",
+          "b": "concept/电子身份证/2026-08-05",
+          "similarity_distance": 0.249,
+          "contrast_distance": 2.4983
+        },
+        {
+          "a": "industry/有色金属-小金属-钨/2026-08-05",
+          "b": "concept/CRO概念/2026-08-05",
+          "similarity_distance": 1.0212,
+          "contrast_distance": 2.3316
+        },
+        {
+          "a": "industry/医药生物-生物制品-血液制品/2026-08-05",
+          "b": "concept/DRG/DIP/2026-08-05",
+          "similarity_distance": 0.3592,
+          "contrast_distance": 2.3228
+        },
+        {
+          "a": "concept/华为昇腾/2026-08-05",
+          "b": "concept/生物疫苗/2026-08-05",
+          "similarity_distance": 0.3717,
+          "contrast_distance": 2.3157
+        },
+        {
+          "a": "industry/有色金属-小金属-其他小金属/2026-08-05",
+          "b": "industry/医药生物-中药-中药III/2026-08-05",
+          "similarity_distance": 0.6886,
+          "contrast_distance": 2.2972
+        },
+        {
+          "a": "concept/转基因/2026-08-05",
+          "b": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+          "similarity_distance": 0.2803,
+          "contrast_distance": 2.2651
+        },
+        {
+          "a": "industry/计算机-软件开发-横向通用软件/2026-08-05",
+          "b": "concept/转基因/2026-08-05",
+          "similarity_distance": 0.2803,
+          "contrast_distance": 2.2651
+        },
+        {
+          "a": "industry/有色金属-能源金属-锂/2026-08-05",
+          "b": "concept/F5G概念/2026-08-05",
+          "similarity_distance": 0.6352,
+          "contrast_distance": 2.23
+        },
+        {
+          "a": "industry/机械设备-专用设备-纺织服装设备/2026-08-05",
+          "b": "industry/非银金融-证券-证券III/2026-08-05",
+          "similarity_distance": 0.3851,
+          "contrast_distance": 2.2262
+        },
+        {
+          "a": "industry/非银金融-证券-证券III/2026-08-05",
+          "b": "industry/机械设备-专用设备-纺织服装设备/2026-08-05",
+          "similarity_distance": 0.3851,
+          "contrast_distance": 2.2262
+        },
+        {
+          "a": "industry/有色金属-工业金属-铜/2026-08-05",
+          "b": "industry/交通运输-港口航运-港口/2026-08-05",
+          "similarity_distance": 0.5689,
+          "contrast_distance": 2.2106
+        },
+        {
+          "a": "concept/预制菜/2026-08-05",
+          "b": "industry/计算机-软件开发-垂直应用软件/2026-08-05",
+          "similarity_distance": 0.2643,
+          "contrast_distance": 2.1428
+        },
+        {
+          "a": "concept/AI语料/2026-08-05",
+          "b": "industry/医药生物-医药商业-医药流通/2026-08-05",
+          "similarity_distance": 0.3635,
+          "contrast_distance": 2.1396
+        },
+        {
+          "a": "industry/电子-元件-被动元件/2026-08-05",
+          "b": "industry/电子-半导体-集成电路制造/2026-08-05",
+          "similarity_distance": 0.1958,
+          "contrast_distance": 2.13
+        },
+        {
+          "a": "industry/有色金属-小金属-稀土/2026-08-06",
+          "b": "industry/非银金融-保险-保险III/2026-08-06",
+          "similarity_distance": 0.5616,
+          "contrast_distance": 2.5453
+        },
+        {
+          "a": "industry/煤炭-煤炭开采加工-焦炭加工/2026-08-06",
+          "b": "concept/可燃冰/2026-08-06",
+          "similarity_distance": 0.5432,
+          "contrast_distance": 2.4691
+        },
+        {
+          "a": "industry/有色金属-小金属-钨/2026-08-06",
+          "b": "concept/CRO概念/2026-08-06",
+          "similarity_distance": 0.9849,
+          "contrast_distance": 2.4678
+        },
+        {
+          "a": "industry/交通运输-公路铁路运输-铁路运输/2026-08-06",
+          "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+          "similarity_distance": 0.2044,
+          "contrast_distance": 2.4601
+        },
+        {
+          "a": "concept/电子身份证/2026-08-06",
+          "b": "industry/美容护理-美容护理-个护用品/2026-08-06",
+          "similarity_distance": 0.4007,
+          "contrast_distance": 2.407
+        },
+        {
+          "a": "industry/美容护理-美容护理-个护用品/2026-08-06",
+          "b": "concept/电子身份证/2026-08-06",
+          "similarity_distance": 0.4007,
+          "contrast_distance": 2.407
+        },
+        {
+          "a": "industry/有色金属-小金属-其他小金属/2026-08-06",
+          "b": "industry/医药生物-中药-中药III/2026-08-06",
+          "similarity_distance": 0.7497,
+          "contrast_distance": 2.379
+        },
+        {
+          "a": "concept/工业大麻/2026-08-06",
+          "b": "concept/华为盘古/2026-08-06",
+          "similarity_distance": 0.3211,
+          "contrast_distance": 2.3784
+        },
+        {
+          "a": "industry/医药生物-医药商业-药店/2026-08-06",
+          "b": "industry/非银金融-保险-保险III/2026-08-06",
+          "similarity_distance": 0.4846,
+          "contrast_distance": 2.3784
+        },
+        {
+          "a": "industry/非银金融-保险-保险III/2026-08-06",
+          "b": "industry/医药生物-医药商业-药店/2026-08-06",
+          "similarity_distance": 0.4846,
+          "contrast_distance": 2.3784
+        },
+        {
+          "a": "industry/农林牧渔-农产品加工-粮油加工/2026-08-06",
+          "b": "industry/社会服务-旅游及酒店-旅游综合/2026-08-06",
+          "similarity_distance": 0.276,
+          "contrast_distance": 2.3061
+        },
+        {
+          "a": "industry/纺织服饰-服装家纺-饰品/2026-08-06",
+          "b": "concept/工业大麻/2026-08-06",
+          "similarity_distance": 0.5851,
+          "contrast_distance": 2.2713
+        },
+        {
+          "a": "concept/MLCC概念/2026-08-06",
+          "b": "concept/CRO概念/2026-08-06",
+          "similarity_distance": 0.5347,
+          "contrast_distance": 2.2339
+        },
+        {
+          "a": "industry/商贸零售-零售-百货零售/2026-08-06",
+          "b": "industry/计算机-软件开发-垂直应用软件/2026-08-06",
+          "similarity_distance": 0.5278,
+          "contrast_distance": 2.2085
+        },
+        {
+          "a": "concept/高压氧舱/2026-08-06",
+          "b": "industry/有色金属-能源金属-钴/2026-08-06",
+          "similarity_distance": 0.2868,
+          "contrast_distance": 2.1816
+        },
+        {
+          "a": "industry/社会服务-其他社会服务-体育/2026-08-07",
+          "b": "industry/有色金属-工业金属-铜/2026-08-07",
+          "similarity_distance": 0.5486,
+          "contrast_distance": 2.6684
+        },
+        {
+          "a": "industry/有色金属-工业金属-铜/2026-08-07",
+          "b": "industry/交通运输-港口航运-航运/2026-08-07",
+          "similarity_distance": 0.522,
+          "contrast_distance": 2.5912
+        },
+        {
+          "a": "industry/有色金属-贵金属-贵金属III/2026-08-07",
+          "b": "industry/银行-银行-股份制银行/2026-08-07",
+          "similarity_distance": 0.4452,
+          "contrast_distance": 2.433
+        },
+        {
+          "a": "industry/银行-银行-股份制银行/2026-08-07",
+          "b": "industry/有色金属-贵金属-贵金属III/2026-08-07",
+          "similarity_distance": 0.4452,
+          "contrast_distance": 2.433
+        },
+        {
+          "a": "industry/通信-通信服务-通信工程及服务/2026-08-07",
+          "b": "industry/家用电器-白色家电-冰洗/2026-08-07",
+          "similarity_distance": 0.5046,
+          "contrast_distance": 2.4262
+        },
+        {
+          "a": "industry/银行-银行-国有大型银行/2026-08-07",
+          "b": "industry/有色金属-贵金属-贵金属III/2026-08-07",
+          "similarity_distance": 0.5626,
+          "contrast_distance": 2.4221
+        },
+        {
+          "a": "industry/医药生物-医药商业-医药流通/2026-08-07",
+          "b": "industry/非银金融-保险-保险III/2026-08-07",
+          "similarity_distance": 0.4435,
+          "contrast_distance": 2.3892
+        },
+        {
+          "a": "industry/非银金融-保险-保险III/2026-08-07",
+          "b": "industry/医药生物-医药商业-医药流通/2026-08-07",
+          "similarity_distance": 0.4435,
+          "contrast_distance": 2.3892
+        },
+        {
+          "a": "concept/黄金概念/2026-08-07",
+          "b": "concept/同花顺中特估100/2026-08-07",
+          "similarity_distance": 0.367,
+          "contrast_distance": 2.3187
+        },
+        {
+          "a": "industry/传媒-文化传媒-广告营销/2026-08-07",
+          "b": "industry/建筑装饰-建筑装饰-房屋建设/2026-08-07",
+          "similarity_distance": 0.2902,
+          "contrast_distance": 2.2772
+        },
+        {
+          "a": "industry/建筑装饰-建筑装饰-房屋建设/2026-08-07",
+          "b": "industry/传媒-文化传媒-广告营销/2026-08-07",
+          "similarity_distance": 0.2902,
+          "contrast_distance": 2.2772
+        },
+        {
+          "a": "industry/食品饮料-饮料制造-啤酒/2026-08-07",
+          "b": "industry/美容护理-美容护理-医疗美容/2026-08-07",
+          "similarity_distance": 0.2608,
+          "contrast_distance": 2.2483
+        },
+        {
+          "a": "industry/医药生物-医药商业-药店/2026-08-07",
+          "b": "industry/非银金融-保险-保险III/2026-08-07",
+          "similarity_distance": 0.4489,
+          "contrast_distance": 2.2382
+        },
+        {
+          "a": "industry/家用电器-黑色家电-彩电/2026-08-07",
+          "b": "industry/纺织服饰-纺织制造-辅料/2026-08-07",
+          "similarity_distance": 0.8006,
+          "contrast_distance": 2.2227
+        },
+        {
+          "a": "industry/汽车-汽车整车-商用载客车/2026-08-07",
+          "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-07",
+          "similarity_distance": 0.205,
+          "contrast_distance": 2.2216
+        },
+        {
+          "a": "industry/有色金属-贵金属-贵金属III/2026-08-10",
+          "b": "industry/银行-银行-股份制银行/2026-08-10",
+          "similarity_distance": 0.5899,
+          "contrast_distance": 2.7231
+        },
+        {
+          "a": "industry/有色金属-能源金属-钴/2026-08-10",
+          "b": "industry/社会服务-其他社会服务-体育/2026-08-10",
+          "similarity_distance": 0.2362,
+          "contrast_distance": 2.7079
+        },
+        {
+          "a": "industry/社会服务-其他社会服务-体育/2026-08-10",
+          "b": "industry/有色金属-能源金属-钴/2026-08-10",
+          "similarity_distance": 0.2362,
+          "contrast_distance": 2.7079
+        },
+        {
+          "a": "industry/银行-银行-股份制银行/2026-08-10",
+          "b": "industry/有色金属-工业金属-铜/2026-08-10",
+          "similarity_distance": 0.4632,
+          "contrast_distance": 2.5807
+        },
+        {
+          "a": "concept/可燃冰/2026-08-10",
+          "b": "concept/兵装重组概念/2026-08-10",
+          "similarity_distance": 0.3549,
+          "contrast_distance": 2.4786
+        },
+        {
+          "a": "industry/银行-银行-国有大型银行/2026-08-10",
+          "b": "industry/纺织服饰-纺织制造-印染/2026-08-10",
+          "similarity_distance": 0.6268,
+          "contrast_distance": 2.4083
+        },
+        {
+          "a": "industry/电力设备-风电设备-风电整机/2026-08-10",
+          "b": "industry/农林牧渔-农产品加工-其他农产品加工/2026-08-10",
+          "similarity_distance": 0.4907,
+          "contrast_distance": 2.4075
+        },
+        {
+          "a": "industry/机械设备-通用设备-机床工具/2026-08-10",
+          "b": "industry/电子-光学光电子-面板/2026-08-10",
+          "similarity_distance": 0.337,
+          "contrast_distance": 2.3718
+        },
+        {
+          "a": "industry/电子-光学光电子-面板/2026-08-10",
+          "b": "industry/机械设备-通用设备-机床工具/2026-08-10",
+          "similarity_distance": 0.337,
+          "contrast_distance": 2.3718
+        },
+        {
+          "a": "industry/基础化工-非金属材料-非金属材料III/2026-08-10",
+          "b": "industry/电子-半导体-集成电路制造/2026-08-10",
+          "similarity_distance": 0.5034,
+          "contrast_distance": 2.3366
+        },
+        {
+          "a": "industry/电子-半导体-集成电路制造/2026-08-10",
+          "b": "industry/基础化工-非金属材料-非金属材料III/2026-08-10",
+          "similarity_distance": 0.5034,
+          "contrast_distance": 2.3366
+        },
+        {
+          "a": "concept/信托概念/2026-08-10",
+          "b": "industry/医药生物-医疗服务-医院/2026-08-10",
+          "similarity_distance": 0.237,
+          "contrast_distance": 2.3214
+        },
+        {
+          "a": "concept/黄金概念/2026-08-10",
+          "b": "concept/同花顺中特估100/2026-08-10",
+          "similarity_distance": 0.5052,
+          "contrast_distance": 2.3022
+        },
+        {
+          "a": "industry/有色金属-工业金属-铅锌/2026-08-10",
+          "b": "industry/银行-银行-城商行/2026-08-10",
+          "similarity_distance": 0.5824,
+          "contrast_distance": 2.2713
+        },
+        {
+          "a": "concept/养鸡/2026-08-10",
+          "b": "industry/轻工制造-包装印刷-印刷/2026-08-10",
+          "similarity_distance": 0.4469,
+          "contrast_distance": 2.2532
+        }
+      ]
+    }
+  }
+}

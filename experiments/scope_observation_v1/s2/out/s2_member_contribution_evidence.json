@@ -1,0 +1,901 @@
+{
+  "price": {
+    "scopes_analyzed": 3882,
+    "share_sum_validation": {
+      "scopes_validated": 3876,
+      "sum_amount_share_all": {
+        "min": 1.0,
+        "max": 1.0
+      },
+      "sum_price_change_share_all": {
+        "min": 1.0,
+        "max": 1.0
+      },
+      "note": "amount_share summed over amount-valid members; abs_price_change_share summed over price-valid members; == 1 by construction"
+    },
+    "representative_cases": [
+      {
+        "scope_day": "market/全A横截面/2026-08-03",
+        "price_valid_count": 5276,
+        "amount_valid_count": 5276,
+        "price_candidate_count": 5276,
+        "missing_exact_t1_count": 0,
+        "equal_weight_return_mean": 0.012363106499602742,
+        "sum_signed_return_contribution": 0.012363106499602742,
+        "signed_contribution_delta": 0.0,
+        "sum_abs_price_change_share": 1.0,
+        "sum_amount_share": 1.0,
+        "top_positive_return_contributors": [
+          {
+            "instrument_id": "1ef2d6eb-78b9-4689-b8bc-00a2b634bdbf",
+            "symbol": "300615",
+            "name": "欣天科技",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "fe23b52c-dc78-44a6-8fc4-a6a4bb3f208c",
+            "symbol": "300613",
+            "name": "富瀚微",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "721f4166-3863-4d65-b62d-66f004dff1b6",
+            "symbol": "300305",
+            "name": "裕兴股份",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "7da8670b-5507-46b7-abe4-1e29bcc64225",
+            "symbol": "301082",
+            "name": "久盛电气",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "50b3677d-fbe2-4622-9bb8-e8b72b2d221e",
+            "symbol": "301182",
+            "name": "凯旺科技",
+            "signed_return_contribution": 3.8e-05
+          }
+        ],
+        "top_negative_return_contributors": [
+          {
+            "instrument_id": "e1ae7463-a167-429a-af4f-3a66078084a8",
+            "symbol": "300795",
+            "name": "米奥会展",
+            "signed_return_contribution": -2.6e-05
+          },
+          {
+            "instrument_id": "49feaca3-9718-480f-b0cb-14b0b4657c1e",
+            "symbol": "301526",
+            "name": "国际复材",
+            "signed_return_contribution": -2.4e-05
+          },
+          {
+            "instrument_id": "68e90fe5-f664-4908-bd6e-84e434412da8",
+            "symbol": "688361",
+            "name": "中科飞测",
+            "signed_return_contribution": -2.4e-05
+          },
+          {
+            "instrument_id": "d3952b36-2135-47dc-84a3-c25ac2c48881",
+            "symbol": "300567",
+            "name": "精测电子",
+            "signed_return_contribution": -2.4e-05
+          },
+          {
+            "instrument_id": "fad2792e-3a0c-4d36-b179-20c2fb29cb1c",
+            "symbol": "688596",
+            "name": "正帆科技",
+            "signed_return_contribution": -2.4e-05
+          }
+        ],
+        "top_abs_price_change_contributors": [
+          {
+            "instrument_id": "1ef2d6eb-78b9-4689-b8bc-00a2b634bdbf",
+            "symbol": "300615",
+            "name": "欣天科技",
+            "abs_price_change_share": 0.0015
+          },
+          {
+            "instrument_id": "fe23b52c-dc78-44a6-8fc4-a6a4bb3f208c",
+            "symbol": "300613",
+            "name": "富瀚微",
+            "abs_price_change_share": 0.0015
+          },
+          {
+            "instrument_id": "721f4166-3863-4d65-b62d-66f004dff1b6",
+            "symbol": "300305",
+            "name": "裕兴股份",
+            "abs_price_change_share": 0.0015
+          },
+          {
+            "instrument_id": "7da8670b-5507-46b7-abe4-1e29bcc64225",
+            "symbol": "301082",
+            "name": "久盛电气",
+            "abs_price_change_share": 0.0015
+          },
+          {
+            "instrument_id": "50b3677d-fbe2-4622-9bb8-e8b72b2d221e",
+            "symbol": "301182",
+            "name": "凯旺科技",
+            "abs_price_change_share": 0.0015
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-04",
+        "price_valid_count": 5276,
+        "amount_valid_count": 5276,
+        "price_candidate_count": 5276,
+        "missing_exact_t1_count": 0,
+        "equal_weight_return_mean": 0.018875137990753476,
+        "sum_signed_return_contribution": 0.018875137990753476,
+        "signed_contribution_delta": 0.0,
+        "sum_abs_price_change_share": 1.0,
+        "sum_amount_share": 1.0,
+        "top_positive_return_contributors": [
+          {
+            "instrument_id": "eee2d0bb-d9fc-45d0-b192-0ec57eb84d6f",
+            "symbol": "920092",
+            "name": "汉鑫科技",
+            "signed_return_contribution": 5.7e-05
+          },
+          {
+            "instrument_id": "00918f7e-c9ea-4f10-ad47-993b4e064cbe",
+            "symbol": "920045",
+            "name": "蘅东光",
+            "signed_return_contribution": 3.9e-05
+          },
+          {
+            "instrument_id": "1ef2d6eb-78b9-4689-b8bc-00a2b634bdbf",
+            "symbol": "300615",
+            "name": "欣天科技",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "e3009320-4858-4c0c-b238-344bc154a387",
+            "symbol": "301227",
+            "name": "森鹰窗业",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "6abf92ba-127d-4f02-ab31-38cc671444eb",
+            "symbol": "300052",
+            "name": "中青宝",
+            "signed_return_contribution": 3.8e-05
+          }
+        ],
+        "top_negative_return_contributors": [
+          {
+            "instrument_id": "a98de9f1-cf8f-4766-ab39-6c2810245d0f",
+            "symbol": "600530",
+            "name": "交大昂立",
+            "signed_return_contribution": -1.9e-05
+          },
+          {
+            "instrument_id": "80fb7d0e-e55a-41ce-badf-c986c58a2878",
+            "symbol": "688036",
+            "name": "传音控股",
+            "signed_return_contribution": -1.6e-05
+          },
+          {
+            "instrument_id": "674e848b-4e92-45cb-a6eb-53375d48f91d",
+            "symbol": "688068",
+            "name": "热景生物",
+            "signed_return_contribution": -1.3e-05
+          },
+          {
+            "instrument_id": "7b629548-b8db-4918-8a8c-8569e83030d6",
+            "symbol": "002541",
+            "name": "鸿路钢构",
+            "signed_return_contribution": -1.3e-05
+          },
+          {
+            "instrument_id": "b9f357d0-12ad-42b9-8cf3-f979be5f8c92",
+            "symbol": "002726",
+            "name": "ST龙大",
+            "signed_return_contribution": -1.2e-05
+          }
+        ],
+        "top_abs_price_change_contributors": [
+          {
+            "instrument_id": "eee2d0bb-d9fc-45d0-b192-0ec57eb84d6f",
+            "symbol": "920092",
+            "name": "汉鑫科技",
+            "abs_price_change_share": 0.0021
+          },
+          {
+            "instrument_id": "00918f7e-c9ea-4f10-ad47-993b4e064cbe",
+            "symbol": "920045",
+            "name": "蘅东光",
+            "abs_price_change_share": 0.0015
+          },
+          {
+            "instrument_id": "1ef2d6eb-78b9-4689-b8bc-00a2b634bdbf",
+            "symbol": "300615",
+            "name": "欣天科技",
+            "abs_price_change_share": 0.0014
+          },
+          {
+            "instrument_id": "e3009320-4858-4c0c-b238-344bc154a387",
+            "symbol": "301227",
+            "name": "森鹰窗业",
+            "abs_price_change_share": 0.0014
+          },
+          {
+            "instrument_id": "6abf92ba-127d-4f02-ab31-38cc671444eb",
+            "symbol": "300052",
+            "name": "中青宝",
+            "abs_price_change_share": 0.0014
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-05",
+        "price_valid_count": 5276,
+        "amount_valid_count": 5276,
+        "price_candidate_count": 5276,
+        "missing_exact_t1_count": 0,
+        "equal_weight_return_mean": 0.017521808603111564,
+        "sum_signed_return_contribution": 0.017521808603111564,
+        "signed_contribution_delta": 0.0,
+        "sum_abs_price_change_share": 1.0,
+        "sum_amount_share": 1.0,
+        "top_positive_return_contributors": [
+          {
+            "instrument_id": "eee2d0bb-d9fc-45d0-b192-0ec57eb84d6f",
+            "symbol": "920092",
+            "name": "汉鑫科技",
+            "signed_return_contribution": 4.4e-05
+          },
+          {
+            "instrument_id": "ef883efd-fd57-4e58-bbc3-1269b2844dbb",
+            "symbol": "300248",
+            "name": "新开普",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "180c3685-f4c7-4ebf-95e1-55a9968b4333",
+            "symbol": "300552",
+            "name": "万集科技",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "2b838676-4d60-4e5e-9748-8c905f1c6971",
+            "symbol": "688549",
+            "name": "中巨芯",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "f21e27cd-9e52-4b99-86ff-1157153ef756",
+            "symbol": "301045",
+            "name": "天禄科技",
+            "signed_return_contribution": 3.8e-05
+          }
+        ],
+        "top_negative_return_contributors": [
+          {
+            "instrument_id": "3fb24c2f-8a43-409a-a109-c656b83fe4d2",
+            "symbol": "301172",
+            "name": "君逸数码",
+            "signed_return_contribution": -3.9e-05
+          },
+          {
+            "instrument_id": "6e95f634-dd86-498f-bd25-3197c7ef6279",
+            "symbol": "300912",
+            "name": "凯龙高科",
+            "signed_return_contribution": -2e-05
+          },
+          {
+            "instrument_id": "d237d658-a380-4754-8ba3-d4d4c0e04048",
+            "symbol": "600363",
+            "name": "联创光电",
+            "signed_return_contribution": -1.9e-05
+          },
+          {
+            "instrument_id": "aff1b62f-402c-491b-818a-0b2e54f57086",
+            "symbol": "600499",
+            "name": "科达制造",
+            "signed_return_contribution": -1.4e-05
+          },
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "signed_return_contribution": -1.4e-05
+          }
+        ],
+        "top_abs_price_change_contributors": [
+          {
+            "instrument_id": "eee2d0bb-d9fc-45d0-b192-0ec57eb84d6f",
+            "symbol": "920092",
+            "name": "汉鑫科技",
+            "abs_price_change_share": 0.0019
+          },
+          {
+            "instrument_id": "3fb24c2f-8a43-409a-a109-c656b83fe4d2",
+            "symbol": "301172",
+            "name": "君逸数码",
+            "abs_price_change_share": 0.0017
+          },
+          {
+            "instrument_id": "ef883efd-fd57-4e58-bbc3-1269b2844dbb",
+            "symbol": "300248",
+            "name": "新开普",
+            "abs_price_change_share": 0.0016
+          },
+          {
+            "instrument_id": "180c3685-f4c7-4ebf-95e1-55a9968b4333",
+            "symbol": "300552",
+            "name": "万集科技",
+            "abs_price_change_share": 0.0016
+          },
+          {
+            "instrument_id": "2b838676-4d60-4e5e-9748-8c905f1c6971",
+            "symbol": "688549",
+            "name": "中巨芯",
+            "abs_price_change_share": 0.0016
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-06",
+        "price_valid_count": 5276,
+        "amount_valid_count": 5276,
+        "price_candidate_count": 5276,
+        "missing_exact_t1_count": 0,
+        "equal_weight_return_mean": 0.005442416336540022,
+        "sum_signed_return_contribution": 0.005442416336540022,
+        "signed_contribution_delta": 0.0,
+        "sum_abs_price_change_share": 1.0,
+        "sum_amount_share": 1.0,
+        "top_positive_return_contributors": [
+          {
+            "instrument_id": "4d274fb3-c049-4aa4-b099-e3e5fd1ec483",
+            "symbol": "301251",
+            "name": "威尔高",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "d2bdbd7c-852e-4eb3-9a00-a640f4f0e1f5",
+            "symbol": "688693",
+            "name": "锴威特",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "15966531-8b46-433a-a66e-45a86a6c8b33",
+            "symbol": "300903",
+            "name": "科翔股份",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "7f59dddb-30b2-4ba9-9c40-25bd2fa6fca7",
+            "symbol": "300540",
+            "name": "蜀道装备",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "2b838676-4d60-4e5e-9748-8c905f1c6971",
+            "symbol": "688549",
+            "name": "中巨芯",
+            "signed_return_contribution": 3.8e-05
+          }
+        ],
+        "top_negative_return_contributors": [
+          {
+            "instrument_id": "0630b672-c0b0-4246-aae5-ce0762672ec7",
+            "symbol": "688501",
+            "name": "青达环保",
+            "signed_return_contribution": -5.6e-05
+          },
+          {
+            "instrument_id": "eee2d0bb-d9fc-45d0-b192-0ec57eb84d6f",
+            "symbol": "920092",
+            "name": "汉鑫科技",
+            "signed_return_contribution": -2.5e-05
+          },
+          {
+            "instrument_id": "027775ba-e07a-46e9-ab40-ee053a7b5f67",
+            "symbol": "300779",
+            "name": "惠城环保",
+            "signed_return_contribution": -2.5e-05
+          },
+          {
+            "instrument_id": "ad4176a0-7efd-453e-8791-04daf5b5a759",
+            "symbol": "300654",
+            "name": "世纪天鸿",
+            "signed_return_contribution": -2e-05
+          },
+          {
+            "instrument_id": "d237d658-a380-4754-8ba3-d4d4c0e04048",
+            "symbol": "600363",
+            "name": "联创光电",
+            "signed_return_contribution": -1.9e-05
+          }
+        ],
+        "top_abs_price_change_contributors": [
+          {
+            "instrument_id": "0630b672-c0b0-4246-aae5-ce0762672ec7",
+            "symbol": "688501",
+            "name": "青达环保",
+            "abs_price_change_share": 0.0031
+          },
+          {
+            "instrument_id": "4d274fb3-c049-4aa4-b099-e3e5fd1ec483",
+            "symbol": "301251",
+            "name": "威尔高",
+            "abs_price_change_share": 0.0021
+          },
+          {
+            "instrument_id": "d2bdbd7c-852e-4eb3-9a00-a640f4f0e1f5",
+            "symbol": "688693",
+            "name": "锴威特",
+            "abs_price_change_share": 0.0021
+          },
+          {
+            "instrument_id": "15966531-8b46-433a-a66e-45a86a6c8b33",
+            "symbol": "300903",
+            "name": "科翔股份",
+            "abs_price_change_share": 0.0021
+          },
+          {
+            "instrument_id": "7f59dddb-30b2-4ba9-9c40-25bd2fa6fca7",
+            "symbol": "300540",
+            "name": "蜀道装备",
+            "abs_price_change_share": 0.0021
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-07",
+        "price_valid_count": 5277,
+        "amount_valid_count": 5277,
+        "price_candidate_count": 5277,
+        "missing_exact_t1_count": 0,
+        "equal_weight_return_mean": 0.009039191998500892,
+        "sum_signed_return_contribution": 0.009039191998500892,
+        "signed_contribution_delta": 0.0,
+        "sum_abs_price_change_share": 1.0,
+        "sum_amount_share": 1.0,
+        "top_positive_return_contributors": [
+          {
+            "instrument_id": "842e8436-40cb-4ad5-ace1-21650435bd11",
+            "symbol": "300986",
+            "name": "志特新材",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "faaaebd5-cbf2-4599-9ecd-08e960cbeb3c",
+            "symbol": "300363",
+            "name": "博腾股份",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "8938d62b-db91-468f-bae6-b68f9fdb28ed",
+            "symbol": "688137",
+            "name": "近岸蛋白",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "6b3e24f2-7693-41ac-9571-4ef945e193af",
+            "symbol": "688073",
+            "name": "毕得医药",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "81f73fd9-9800-496b-a2f4-d44396dfd256",
+            "symbol": "301234",
+            "name": "五洲医疗",
+            "signed_return_contribution": 3.8e-05
+          }
+        ],
+        "top_negative_return_contributors": [
+          {
+            "instrument_id": "cb86c4d1-7f56-401c-98f3-4d86b7a25fa0",
+            "symbol": "300506",
+            "name": "名家汇",
+            "signed_return_contribution": -2.6e-05
+          },
+          {
+            "instrument_id": "2ce49d82-f6c6-4740-9122-529b8faae128",
+            "symbol": "688121",
+            "name": "卓然股份",
+            "signed_return_contribution": -1.9e-05
+          },
+          {
+            "instrument_id": "e225e957-5220-42d4-8de0-78f0af5f1908",
+            "symbol": "601700",
+            "name": "风范股份",
+            "signed_return_contribution": -1.9e-05
+          },
+          {
+            "instrument_id": "523a048d-079f-4f1f-8505-53c818670872",
+            "symbol": "600892",
+            "name": "大晟文化",
+            "signed_return_contribution": -1.9e-05
+          },
+          {
+            "instrument_id": "1121a67a-eee3-409f-a963-5e47d2ce3581",
+            "symbol": "301310",
+            "name": "鑫宏业",
+            "signed_return_contribution": -1.9e-05
+          }
+        ],
+        "top_abs_price_change_contributors": [
+          {
+            "instrument_id": "842e8436-40cb-4ad5-ace1-21650435bd11",
+            "symbol": "300986",
+            "name": "志特新材",
+            "abs_price_change_share": 0.0018
+          },
+          {
+            "instrument_id": "faaaebd5-cbf2-4599-9ecd-08e960cbeb3c",
+            "symbol": "300363",
+            "name": "博腾股份",
+            "abs_price_change_share": 0.0018
+          },
+          {
+            "instrument_id": "8938d62b-db91-468f-bae6-b68f9fdb28ed",
+            "symbol": "688137",
+            "name": "近岸蛋白",
+            "abs_price_change_share": 0.0018
+          },
+          {
+            "instrument_id": "6b3e24f2-7693-41ac-9571-4ef945e193af",
+            "symbol": "688073",
+            "name": "毕得医药",
+            "abs_price_change_share": 0.0018
+          },
+          {
+            "instrument_id": "81f73fd9-9800-496b-a2f4-d44396dfd256",
+            "symbol": "301234",
+            "name": "五洲医疗",
+            "abs_price_change_share": 0.0018
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-10",
+        "price_valid_count": 5277,
+        "amount_valid_count": 5277,
+        "price_candidate_count": 5277,
+        "missing_exact_t1_count": 0,
+        "equal_weight_return_mean": 0.014133952888039656,
+        "sum_signed_return_contribution": 0.014133952888039656,
+        "signed_contribution_delta": 0.0,
+        "sum_abs_price_change_share": 1.0,
+        "sum_amount_share": 1.0,
+        "top_positive_return_contributors": [
+          {
+            "instrument_id": "fd78b1c6-0622-4026-8420-aeff1e96c5d8",
+            "symbol": "301080",
+            "name": "百普赛斯",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "6b3e24f2-7693-41ac-9571-4ef945e193af",
+            "symbol": "688073",
+            "name": "毕得医药",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "cfbb3bc5-60cd-4101-99f2-54a3d74bc06f",
+            "symbol": "301357",
+            "name": "北方长龙",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "537a58c8-d0fb-46b3-bc7e-2aa096b2e7ab",
+            "symbol": "300862",
+            "name": "蓝盾光电",
+            "signed_return_contribution": 3.8e-05
+          },
+          {
+            "instrument_id": "b8a5fcb8-305a-43d0-bb9f-b4e9acf40a2d",
+            "symbol": "301051",
+            "name": "信濠光电",
+            "signed_return_contribution": 3.8e-05
+          }
+        ],
+        "top_negative_return_contributors": [
+          {
+            "instrument_id": "6583f2c0-6603-4c73-b3b9-ff577827356b",
+            "symbol": "603093",
+            "name": "南华期货",
+            "signed_return_contribution": -5.8e-05
+          },
+          {
+            "instrument_id": "0054a4a4-6da4-4de5-96e7-feb3c12c99c9",
+            "symbol": "300246",
+            "name": "宝莱特",
+            "signed_return_contribution": -3.8e-05
+          },
+          {
+            "instrument_id": "71b6a8e7-bb7f-4e71-a59a-bb4135ebe0bd",
+            "symbol": "301007",
+            "name": "德迈仕",
+            "signed_return_contribution": -2.5e-05
+          },
+          {
+            "instrument_id": "44333f99-5c1d-41a0-a130-e1865faef690",
+            "symbol": "300935",
+            "name": "盈建科",
+            "signed_return_contribution": -2.1e-05
+          },
+          {
+            "instrument_id": "29b2f681-e47f-4ebd-ac60-88426502d1cf",
+            "symbol": "000429",
+            "name": "粤高速A",
+            "signed_return_contribution": -2e-05
+          }
+        ],
+        "top_abs_price_change_contributors": [
+          {
+            "instrument_id": "6583f2c0-6603-4c73-b3b9-ff577827356b",
+            "symbol": "603093",
+            "name": "南华期货",
+            "abs_price_change_share": 0.0025
+          },
+          {
+            "instrument_id": "fd78b1c6-0622-4026-8420-aeff1e96c5d8",
+            "symbol": "301080",
+            "name": "百普赛斯",
+            "abs_price_change_share": 0.0017
+          },
+          {
+            "instrument_id": "6b3e24f2-7693-41ac-9571-4ef945e193af",
+            "symbol": "688073",
+            "name": "毕得医药",
+            "abs_price_change_share": 0.0017
+          },
+          {
+            "instrument_id": "cfbb3bc5-60cd-4101-99f2-54a3d74bc06f",
+            "symbol": "301357",
+            "name": "北方长龙",
+            "abs_price_change_share": 0.0017
+          },
+          {
+            "instrument_id": "0054a4a4-6da4-4de5-96e7-feb3c12c99c9",
+            "symbol": "300246",
+            "name": "宝莱特",
+            "abs_price_change_share": 0.0017
+          }
+        ]
+      }
+    ]
+  },
+  "amount": {
+    "scopes_analyzed": 3882,
+    "share_sum_validation": {
+      "scopes_validated": 3876,
+      "sum_amount_share_all": {
+        "min": 1.0,
+        "max": 1.0
+      },
+      "sum_price_change_share_all": {
+        "min": 1.0,
+        "max": 1.0
+      },
+      "note": "amount_share summed over amount-valid members; abs_price_change_share summed over price-valid members; == 1 by construction"
+    },
+    "representative_cases": [
+      {
+        "scope_day": "market/全A横截面/2026-08-03",
+        "amount_valid_count": 5276,
+        "top_amount_contributors": [
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "amount_share": 0.0149
+          },
+          {
+            "instrument_id": "e1a66de0-1c9b-46fb-b2a9-191e82c82c55",
+            "symbol": "603986",
+            "name": "兆易创新",
+            "amount_share": 0.0117
+          },
+          {
+            "instrument_id": "0862a372-d35f-40c8-a8c4-513798e239d8",
+            "symbol": "300502",
+            "name": "新易盛",
+            "amount_share": 0.0081
+          },
+          {
+            "instrument_id": "f7220fe9-ce85-454a-accf-345834102e77",
+            "symbol": "688256",
+            "name": "寒武纪",
+            "amount_share": 0.0074
+          },
+          {
+            "instrument_id": "589ec3c7-6563-4cf4-990a-d7448085d41e",
+            "symbol": "002384",
+            "name": "东山精密",
+            "amount_share": 0.0068
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-04",
+        "amount_valid_count": 5276,
+        "top_amount_contributors": [
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "amount_share": 0.0229
+          },
+          {
+            "instrument_id": "0862a372-d35f-40c8-a8c4-513798e239d8",
+            "symbol": "300502",
+            "name": "新易盛",
+            "amount_share": 0.0138
+          },
+          {
+            "instrument_id": "e1a66de0-1c9b-46fb-b2a9-191e82c82c55",
+            "symbol": "603986",
+            "name": "兆易创新",
+            "amount_share": 0.0102
+          },
+          {
+            "instrument_id": "f7220fe9-ce85-454a-accf-345834102e77",
+            "symbol": "688256",
+            "name": "寒武纪",
+            "amount_share": 0.0086
+          },
+          {
+            "instrument_id": "18a4d896-7600-4000-a8e0-62a2defebe56",
+            "symbol": "300394",
+            "name": "天孚通信",
+            "amount_share": 0.0073
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-05",
+        "amount_valid_count": 5276,
+        "top_amount_contributors": [
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "amount_share": 0.0258
+          },
+          {
+            "instrument_id": "0862a372-d35f-40c8-a8c4-513798e239d8",
+            "symbol": "300502",
+            "name": "新易盛",
+            "amount_share": 0.0139
+          },
+          {
+            "instrument_id": "e1a66de0-1c9b-46fb-b2a9-191e82c82c55",
+            "symbol": "603986",
+            "name": "兆易创新",
+            "amount_share": 0.01
+          },
+          {
+            "instrument_id": "589ec3c7-6563-4cf4-990a-d7448085d41e",
+            "symbol": "002384",
+            "name": "东山精密",
+            "amount_share": 0.0094
+          },
+          {
+            "instrument_id": "f7220fe9-ce85-454a-accf-345834102e77",
+            "symbol": "688256",
+            "name": "寒武纪",
+            "amount_share": 0.0079
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-06",
+        "amount_valid_count": 5276,
+        "top_amount_contributors": [
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "amount_share": 0.016
+          },
+          {
+            "instrument_id": "e1a66de0-1c9b-46fb-b2a9-191e82c82c55",
+            "symbol": "603986",
+            "name": "兆易创新",
+            "amount_share": 0.0094
+          },
+          {
+            "instrument_id": "0862a372-d35f-40c8-a8c4-513798e239d8",
+            "symbol": "300502",
+            "name": "新易盛",
+            "amount_share": 0.0087
+          },
+          {
+            "instrument_id": "7e332650-33cb-4848-ad9f-316e21af12ad",
+            "symbol": "300476",
+            "name": "胜宏科技",
+            "amount_share": 0.0073
+          },
+          {
+            "instrument_id": "5056bf96-900a-4ffc-bf26-f870767a18bc",
+            "symbol": "300750",
+            "name": "宁德时代",
+            "amount_share": 0.0071
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-07",
+        "amount_valid_count": 5277,
+        "top_amount_contributors": [
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "amount_share": 0.0209
+          },
+          {
+            "instrument_id": "e1a66de0-1c9b-46fb-b2a9-191e82c82c55",
+            "symbol": "603986",
+            "name": "兆易创新",
+            "amount_share": 0.0117
+          },
+          {
+            "instrument_id": "0862a372-d35f-40c8-a8c4-513798e239d8",
+            "symbol": "300502",
+            "name": "新易盛",
+            "amount_share": 0.0098
+          },
+          {
+            "instrument_id": "589ec3c7-6563-4cf4-990a-d7448085d41e",
+            "symbol": "002384",
+            "name": "东山精密",
+            "amount_share": 0.0077
+          },
+          {
+            "instrument_id": "7e332650-33cb-4848-ad9f-316e21af12ad",
+            "symbol": "300476",
+            "name": "胜宏科技",
+            "amount_share": 0.0075
+          }
+        ]
+      },
+      {
+        "scope_day": "market/全A横截面/2026-08-10",
+        "amount_valid_count": 5277,
+        "top_amount_contributors": [
+          {
+            "instrument_id": "487cfcb6-5b44-4974-bbe6-1e3d44f95b03",
+            "symbol": "300308",
+            "name": "中际旭创",
+            "amount_share": 0.0184
+          },
+          {
+            "instrument_id": "0862a372-d35f-40c8-a8c4-513798e239d8",
+            "symbol": "300502",
+            "name": "新易盛",
+            "amount_share": 0.0108
+          },
+          {
+            "instrument_id": "e1a66de0-1c9b-46fb-b2a9-191e82c82c55",
+            "symbol": "603986",
+            "name": "兆易创新",
+            "amount_share": 0.0103
+          },
+          {
+            "instrument_id": "f7220fe9-ce85-454a-accf-345834102e77",
+            "symbol": "688256",
+            "name": "寒武纪",
+            "amount_share": 0.0096
+          },
+          {
+            "instrument_id": "7c7a634b-6684-4a9a-841a-64d0f787ad0b",
+            "symbol": "603259",
+            "name": "药明康德",
+            "amount_share": 0.0082
+          }
+        ]
+      }
+    ]
+  },
+  "note": "per-member facts are DB-native; signed_return_contribution = return/price_valid_count (full-universe sum == equal_weight_return_mean); abs_price_change_share = |return|/Σ|return| (concentration); amount_share = amount/Σamount over amount-valid members; positive/negative/abs_price/amount ranks are TRUE global top-N over the full universe; top-N is evidence display, not a primitive; full member rows are process-only (gitignored)"
+}

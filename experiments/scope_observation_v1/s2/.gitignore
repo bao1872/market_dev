@@ -1,0 +1,3 @@
+# S2 intermediate DB extracts (process data, not final output)
+out/_*.csv
+out/_*.err

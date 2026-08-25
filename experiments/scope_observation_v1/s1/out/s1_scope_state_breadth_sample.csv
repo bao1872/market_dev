@@ -1,0 +1,26 @@
+scope_id,scope_family,scope_name,trade_date,membership_definition_effective_from,membership_version,pit_member_count,fp_row_count,regime_valid,swing_valid,internal_valid,momentum_valid,regime_up,regime_neutral,regime_down,swing_up,swing_neutral,swing_down,internal_up,internal_neutral,internal_down,momentum_expanding,momentum_flat,momentum_contracting,regime_sum_ok,swing_sum_ok,internal_sum_ok,momentum_sum_ok,fp_coverage_note
+market,market,全市场横截面,2026-08-03,N/A,N/A,5277,5277,5277,5277,5277,5277,155,2964,2158,1598,53,3626,1794,0,3483,2320,0,2957,True,True,True,True,market=per-date state cross-section; all pit members have fp row
+market,market,全市场横截面,2026-08-04,N/A,N/A,5277,5277,5277,5277,5277,5277,157,2962,2158,1600,53,3624,1967,0,3310,2643,0,2634,True,True,True,True,market=per-date state cross-section; all pit members have fp row
+market,market,全市场横截面,2026-08-05,N/A,N/A,5277,5277,5277,5277,5277,5277,161,2940,2176,1601,53,3623,2225,0,3052,2951,0,2326,True,True,True,True,market=per-date state cross-section; all pit members have fp row
+market,market,全市场横截面,2026-08-06,N/A,N/A,5277,5277,5277,5277,5277,5277,163,2902,2212,1604,53,3620,2396,0,2881,3253,0,2024,True,True,True,True,market=per-date state cross-section; all pit members have fp row
+market,market,全市场横截面,2026-08-07,N/A,N/A,5277,5277,5277,5277,5277,5277,167,2876,2234,1605,53,3619,2583,0,2694,3570,0,1707,True,True,True,True,market=per-date state cross-section; all pit members have fp row
+gold,concept,黄金概念,2026-08-03,2026-08-03,members:8999214c351737bf,80,80,80,80,80,80,2,38,40,33,0,47,36,0,44,53,0,27,True,True,True,True,fp covers all pit members
+gold,concept,黄金概念,2026-08-04,2026-08-03,members:8999214c351737bf,80,80,80,80,80,80,2,38,40,33,0,47,41,0,39,57,0,23,True,True,True,True,fp covers all pit members
+gold,concept,黄金概念,2026-08-05,2026-08-03,members:8999214c351737bf,80,80,80,80,80,80,2,41,37,33,0,47,55,0,25,62,0,18,True,True,True,True,fp covers all pit members
+gold,concept,黄金概念,2026-08-06,2026-08-03,members:8999214c351737bf,80,80,80,80,80,80,2,48,30,33,0,47,55,0,25,65,0,15,True,True,True,True,fp covers all pit members
+gold,concept,黄金概念,2026-08-07,2026-08-03,members:8999214c351737bf,80,80,80,80,80,80,2,49,29,33,0,47,59,0,21,69,0,11,True,True,True,True,fp covers all pit members
+micro,concept,MicroLED概念,2026-08-03,2026-08-03,members:393283d60377bad8,80,79,79,79,79,79,7,59,13,39,0,40,7,0,72,7,0,72,True,True,True,True,1 pit member lacks fp row on this date
+micro,concept,MicroLED概念,2026-08-04,2026-08-03,members:393283d60377bad8,80,79,79,79,79,79,7,59,13,39,0,40,9,0,70,12,0,67,True,True,True,True,1 pit member lacks fp row on this date
+micro,concept,MicroLED概念,2026-08-05,2026-08-03,members:393283d60377bad8,80,79,79,79,79,79,7,59,13,39,0,40,16,0,63,16,0,63,True,True,True,True,1 pit member lacks fp row on this date
+micro,concept,MicroLED概念,2026-08-06,2026-08-03,members:393283d60377bad8,80,79,79,79,79,79,8,58,13,39,0,40,20,0,59,20,0,59,True,True,True,True,1 pit member lacks fp row on this date
+micro,concept,MicroLED概念,2026-08-07,2026-08-03,members:393283d60377bad8,80,79,79,79,79,79,8,57,14,39,0,40,26,0,53,27,0,52,True,True,True,True,1 pit member lacks fp row on this date
+lio,concept,锂电池概念,2026-08-03,2026-08-03,members:ac80635c1bf88497,594,593,593,593,593,593,14,403,176,227,9,357,118,0,475,173,0,420,True,True,True,True,1 pit member lacks fp row on this date
+lio,concept,锂电池概念,2026-08-04,2026-08-03,members:ac80635c1bf88497,594,593,593,593,593,593,15,399,179,227,9,357,134,0,459,223,0,370,True,True,True,True,1 pit member lacks fp row on this date
+lio,concept,锂电池概念,2026-08-05,2026-08-03,members:ac80635c1bf88497,594,593,593,593,593,593,16,393,184,227,9,357,180,0,413,274,0,319,True,True,True,True,1 pit member lacks fp row on this date
+lio,concept,锂电池概念,2026-08-06,2026-08-03,members:ac80635c1bf88497,594,593,593,593,593,593,16,390,187,227,9,357,208,0,385,319,0,274,True,True,True,True,1 pit member lacks fp row on this date
+lio,concept,锂电池概念,2026-08-07,2026-08-03,members:ac80635c1bf88497,594,593,593,593,593,593,17,384,192,227,9,357,241,0,352,370,0,223,True,True,True,True,1 pit member lacks fp row on this date
+fba87331,industry,钢铁-钢铁-特钢,2026-08-03,2026-08-03,members:c340d0713048f114,12,12,12,12,12,12,0,4,8,5,0,7,4,0,8,9,0,3,True,True,True,True,fp covers all pit members
+fba87331,industry,钢铁-钢铁-特钢,2026-08-04,2026-08-03,members:c340d0713048f114,12,12,12,12,12,12,0,5,7,5,0,7,4,0,8,9,0,3,True,True,True,True,fp covers all pit members
+fba87331,industry,钢铁-钢铁-特钢,2026-08-05,2026-08-03,members:c340d0713048f114,12,12,12,12,12,12,0,5,7,5,0,7,4,0,8,9,0,3,True,True,True,True,fp covers all pit members
+fba87331,industry,钢铁-钢铁-特钢,2026-08-06,2026-08-03,members:c340d0713048f114,12,12,12,12,12,12,0,5,7,5,0,7,4,0,8,9,0,3,True,True,True,True,fp covers all pit members
+fba87331,industry,钢铁-钢铁-特钢,2026-08-07,2026-08-03,members:c340d0713048f114,12,12,12,12,12,12,1,4,7,5,0,7,5,0,7,10,0,2,True,True,True,True,fp covers all pit members

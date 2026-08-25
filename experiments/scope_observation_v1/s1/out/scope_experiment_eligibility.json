@@ -1,0 +1,41 @@
+{
+  "experiment": "Scope Data & Semantic Baseline (S1)",
+  "window": "2026-02-09 ~ 2026-08-10 (120 trading days)",
+  "scope_families": {
+    "market": {
+      "eligibility": "FULL_120D_ELIGIBLE",
+      "reason": "全市场横截面由 first_pyramid_history_daily_state 每日期 state 行构成（5277 instrument/日，365 distinct dates，覆盖 2025-02-12~2026-08-10）。每日期 membership 为该日实际出现的 instrument，是严格 PIT 构造，无 current 回填。",
+      "point_in_time_semantics": "CONFIRMED_PIT",
+      "membership_source": "derived from first_pyramid_history_daily_state per trade_date"
+    },
+    "industry": {
+      "eligibility": "PARTIAL_HISTORY_ONLY",
+      "reason": "board_definition_versions + board_membership_history 仅覆盖 2026-08-01/08-03/08-05 三个 effective_from（08-01 646、08-03 646、08-05 23）。无法覆盖 120 日窗口。",
+      "point_in_time_semantics": "CONFIRMED_PIT",
+      "coverage_days_available": 3,
+      "note": "仅近期窗口可用，不能用于完整 120 日实验"
+    },
+    "concept": {
+      "eligibility": "PARTIAL_HISTORY_ONLY",
+      "reason": "与 industry 相同，PIT membership 仅覆盖 08-01/08-03/08-05。membership 行 154391。",
+      "point_in_time_semantics": "CONFIRMED_PIT",
+      "coverage_days_available": 3,
+      "note": "仅近期窗口可用"
+    },
+    "style": {
+      "eligibility": "NOT_AVAILABLE",
+      "reason": "universe_definitions 有 4 行（large_cap_style/small_cap_style），但 universe_memberships 表为空（0 行），population_status=blocked_external_population。无任何成员数据。",
+      "point_in_time_semantics": "SNAPSHOT_BUT_UNVERIFIED",
+      "note": "表结构具备 PIT 能力但无数据"
+    },
+    "index": {
+      "eligibility": "NOT_AVAILABLE",
+      "reason": "universe_definitions 有 csi300/csi500 (major_index)，但 universe_memberships 为空，blocked_external_population。",
+      "point_in_time_semantics": "SNAPSHOT_BUT_UNVERIFIED",
+      "note": "表结构具备 PIT 能力但无数据"
+    }
+  },
+  "blocked_for_120d": ["industry", "concept", "style", "index"],
+  "eligible_for_120d": ["market"],
+  "data_gap_summary": "仅有 market（state 横截面）可做完整 120 日实验；industry/concept 的 PIT membership 只覆盖 08-01~08-05 近 3 个版本日，style/index 完全无成员数据。本轮不解决数据缺口。"
+}

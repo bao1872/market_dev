@@ -1,0 +1,1730 @@
+{
+  "2026-04-01": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.1666024653312789,
+        "regime_down_ratio": 0.1348228043143297,
+        "swing_up_ratio": 0.5843605546995377,
+        "momentum_expanding_ratio": 0.1556240369799691
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0061633281972265,
+          "t_regime_0_neg1_rate": 0.0011556240369799,
+          "t_swing_neg1_1_rate": 0.0011556240369799,
+          "t_momdir_contract_expand_rate": 0.0152157164869029
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 2300.0,
+        "divergence_ratio": 0.4429892141756548,
+        "t_align_div_resonance": 57.0,
+        "t_align_resonance_div": 53.0,
+        "t_align_div_resonance_rate": 0.0109784283513097,
+        "t_align_resonance_div_rate": 0.0102080123266563
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0084315405196982,
+        "member_change_hhi": 0.0003719531130325,
+        "top5_amount_contribution": 0.0389385407125985
+      },
+      "Participation": {
+        "volume_ratio20_median": 0.8182095602549027,
+        "amount_ratio20_median": 0.7737261417779062
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.1540337830446174,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.3684845969727245,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3859142270159219,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0694596383008186,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.366915000796075,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.3031
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.005
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.3031
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.005
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.8507
+            },
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.5844
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.5471
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.2163
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1666
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": -0.1541
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1508
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0069
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1508
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0069
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.1
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0389
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.1
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0389
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.7623
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4298
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.4005
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.4005
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.1215
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.1204
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-03-24": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.1420870234886407,
+        "regime_down_ratio": 0.1347708894878706,
+        "swing_up_ratio": 0.5883711975356181,
+        "momentum_expanding_ratio": 0.1578744705429341
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0026959368380512,
+          "t_regime_0_neg1_rate": 0.0009628345850182,
+          "t_swing_neg1_1_rate": 0.0007702676680146,
+          "t_momdir_contract_expand_rate": 0.0053918736761024
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 2327.0,
+        "divergence_ratio": 0.448016942626107,
+        "t_align_div_resonance": 19.0,
+        "t_align_resonance_div": 10.0,
+        "t_align_div_resonance_rate": 0.0036587714230695,
+        "t_align_resonance_div_rate": 0.0019256691700365
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0053117581810053,
+        "member_change_hhi": 0.0002680751440898,
+        "top5_amount_contribution": 0.0381260758536179
+      },
+      "Participation": {
+        "volume_ratio20_median": 0.9146240805466216,
+        "amount_ratio20_median": 0.8220383251760035
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.1121752000777394,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.3654185933558341,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3813464003988466,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0690313336585365,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.4086786842828799,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.218
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0064
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.218
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0064
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.8504
+            },
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.5884
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.5416
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.192
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1421
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": -0.1219
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1396
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0044
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1396
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0044
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0381
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0381
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.8578
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.5011
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4939
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4939
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.1065
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.0841
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-04-17": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.181940441882805,
+        "regime_down_ratio": 0.1410182516810759,
+        "swing_up_ratio": 0.574447646493756,
+        "momentum_expanding_ratio": 0.6868395773294909
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0040353574173712,
+          "t_regime_0_neg1_rate": 0.0013451191391237,
+          "t_swing_neg1_1_rate": 0.0013451191391237,
+          "t_momdir_contract_expand_rate": 0.0787855495772482
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 2115.0,
+        "divergence_ratio": 0.4063400576368876,
+        "t_align_div_resonance": 92.0,
+        "t_align_resonance_div": 76.0,
+        "t_align_div_resonance_rate": 0.0176787086856264,
+        "t_align_resonance_div_rate": 0.0146041506533435
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.011623683349101,
+        "member_change_hhi": 0.0004562817490067,
+        "top5_amount_contribution": 0.0479633754274365
+      },
+      "Participation": {
+        "volume_ratio20_median": 0.9203100620243688,
+        "amount_ratio20_median": 0.9290361802977588
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.1801880863326998,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.4153573186800321,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3396100514321479,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0739426183114746,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.4107872443426825,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.3431
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0173
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.3431
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0173
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.7796
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.5851
+            },
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.5744
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.4355
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1819
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": -0.0646
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.011
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0079
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.011
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0079
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.048
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.048
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.7443
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.5011
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4681
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4681
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.1823
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.1581
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-03-23": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.1478344562078922,
+        "regime_down_ratio": 0.1343599615014437,
+        "swing_up_ratio": 0.5886429258902791,
+        "momentum_expanding_ratio": 0.1782483156881616
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0019252984212552,
+          "t_regime_0_neg1_rate": 0.0025028879476318,
+          "t_swing_neg1_1_rate": 0.0,
+          "t_momdir_contract_expand_rate": 0.0030804774740084
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 2336.0,
+        "divergence_ratio": 0.4496631376323388,
+        "t_align_div_resonance": 620.0,
+        "t_align_resonance_div": 352.0,
+        "t_align_div_resonance_rate": 0.1193685021178282,
+        "t_align_resonance_div_rate": 0.0677705044281863
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0031400306623784,
+        "member_change_hhi": 0.0002227391870562,
+        "top5_amount_contribution": 0.0415629127884614
+      },
+      "Participation": {
+        "volume_ratio20_median": 1.187520285147189,
+        "amount_ratio20_median": 1.088365233896445
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.0593003958311876,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.3647688130188838,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3366704431422995,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0707413481340543,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.5359012991131548,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.1155
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0031
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.1155
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0031
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.8499
+            },
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.5886
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.54
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.1915
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1478
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": -0.1292
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0089
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0012
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0089
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0012
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0416
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0416
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.9073
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.7103
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.6208
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.6208
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.2616
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.1794
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-03-31": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.161271676300578,
+        "regime_down_ratio": 0.1348747591522158,
+        "swing_up_ratio": 0.5830443159922929,
+        "momentum_expanding_ratio": 0.1531791907514451
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.010019267822736,
+          "t_regime_0_neg1_rate": 0.0005780346820809,
+          "t_swing_neg1_1_rate": 0.0003853564547206,
+          "t_momdir_contract_expand_rate": 0.01252408477842
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 2304.0,
+        "divergence_ratio": 0.4439306358381503,
+        "t_align_div_resonance": 48.0,
+        "t_align_resonance_div": 67.0,
+        "t_align_div_resonance_rate": 0.0092485549132947,
+        "t_align_resonance_div_rate": 0.0129094412331406
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0085536728834945,
+        "member_change_hhi": 0.0003523272254835,
+        "top5_amount_contribution": 0.0306345956938503
+      },
+      "Participation": {
+        "volume_ratio20_median": 0.802431964161027,
+        "amount_ratio20_median": 0.7371494021314788
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.1318057030915888,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.3645083857740824,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3414258188824663,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0653269336148958,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.3586257593084755,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.2601
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0035
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.2601
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0035
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.852
+            },
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.583
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.546
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.2029
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1613
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": -0.1582
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0227
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0015
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0227
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0015
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.1
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0306
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.1
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0306
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.7675
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4271
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.3848
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.3848
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.1073
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.1064
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-06-05": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.1347776073619632,
+        "regime_down_ratio": 0.3684815950920245,
+        "swing_up_ratio": 0.5289493865030674,
+        "momentum_expanding_ratio": 0.1604677914110429
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.000191717791411,
+          "t_regime_0_neg1_rate": 0.0906825153374233,
+          "t_swing_neg1_1_rate": 0.0009585889570552,
+          "t_momdir_contract_expand_rate": 0.0095858895705521
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 1880.0,
+        "divergence_ratio": 0.3604294478527607,
+        "t_align_div_resonance": 35.0,
+        "t_align_resonance_div": 48.0,
+        "t_align_div_resonance_rate": 0.0067101226993865,
+        "t_align_resonance_div_rate": 0.00920245398773
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.013216325195335,
+        "member_change_hhi": 0.0004588211158036,
+        "top5_amount_contribution": 0.059551430920372
+      },
+      "Participation": {
+        "volume_ratio20_median": 0.8633545939127776,
+        "amount_ratio20_median": 0.7824980305416223
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.0897330231745208,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": 28.378378378378383,
+        "metric_Q_rawValue": 0.3871616515300835,
+        "metric_Q_status": "ready",
+        "metric_U_value": 40.046896211279766,
+        "metric_U_rawValue": 0.3958333333333333,
+        "metric_U_status": "partial",
+        "metric_C_value": 60.81081081081081,
+        "metric_C_rawValue": 0.0797277768216433,
+        "metric_C_status": "partial",
+        "metric_V_value": 34.05405405405405,
+        "metric_V_rawValue": 0.3972014526711673,
+        "metric_V_status": "partial"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.1737
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0058
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.1737
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0058
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.7786
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.6344
+            },
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.5289
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.3142
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1348
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": -0.0679
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1837
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0038
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1837
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0038
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0596
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0596
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.8915
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.4685
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.434
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.434
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.0972
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.0949
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-05-13": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.1801421163817937,
+        "regime_down_ratio": 0.1365469560207413,
+        "swing_up_ratio": 0.5882465911273286,
+        "momentum_expanding_ratio": 0.6648742077971961
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0036496350364963,
+          "t_regime_0_neg1_rate": 0.0026892047637341,
+          "t_swing_neg1_1_rate": 0.0032654629273914,
+          "t_momdir_contract_expand_rate": 0.0186323472915866
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 1985.0,
+        "divergence_ratio": 0.3812175917034761,
+        "t_align_div_resonance": 76.0,
+        "t_align_resonance_div": 35.0,
+        "t_align_div_resonance_rate": 0.0145985401459854,
+        "t_align_resonance_div_rate": 0.0067230119093353
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0122095128995823,
+        "member_change_hhi": 0.0005058722396235,
+        "top5_amount_contribution": 0.0400054997595573
+      },
+      "Participation": {
+        "volume_ratio20_median": 0.9732274179489984,
+        "amount_ratio20_median": 1.0045714111344244
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.2326651622815439,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.4512343996300896,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3759117816296969,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0699438017846961,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.4814665431250987,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.425
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0403
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.425
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0403
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.6453
+            },
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.6253
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.6113
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.5882
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.1801
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": 0.0571
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1179
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0098
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.1179
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0098
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.04
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.04
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 0.9352
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.5645
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.5535
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.5535
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.1911
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.163
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-03-02": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.2861829409494403,
+        "regime_down_ratio": 0.1242763411810111,
+        "swing_up_ratio": 0.7734465457352374,
+        "momentum_expanding_ratio": 0.4656503280586646
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0023157082207641,
+          "t_regime_0_neg1_rate": 0.0036665380162099,
+          "t_swing_neg1_1_rate": 0.0019297568506368,
+          "t_momdir_contract_expand_rate": 0.0494017753763025
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 1907.0,
+        "divergence_ratio": 0.3680046314164415,
+        "t_align_div_resonance": 169.0,
+        "t_align_resonance_div": 290.0,
+        "t_align_div_resonance_rate": 0.0326128907757622,
+        "t_align_resonance_div_rate": 0.0559629486684677
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0067372066855052,
+        "member_change_hhi": 0.0002963765541049,
+        "top5_amount_contribution": 0.0339636032558063
+      },
+      "Participation": {
+        "volume_ratio20_median": 1.139755688679009,
+        "amount_ratio20_median": 1.126360297827666
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.2554994029485581,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.4901799028981242,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3449118744371542,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0669689349269253,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.6502422931750517,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.4857
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0253
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.4857
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0253
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.7734
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.6144
+            },
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.5741
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.5481
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.2862
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": 0.1449
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0303
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0044
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0303
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0044
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.1
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.034
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.1
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.034
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 1.4333
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.6817
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.6814
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.6814
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.2327
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.2221
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  },
+  "2026-03-03": {
+    "Round2": {
+      "state_ratios": {
+        "regime_up_ratio": 0.2721836419753086,
+        "regime_down_ratio": 0.1253858024691358,
+        "swing_up_ratio": 0.7635030864197531,
+        "momentum_expanding_ratio": 0.4434799382716049
+      },
+      "Transition": {
+        "transition_rates": {
+          "t_regime_0_1_rate": 0.0032799536947713,
+          "t_regime_0_neg1_rate": 0.0038587690526721,
+          "t_swing_neg1_1_rate": 0.0013505691684352,
+          "t_momdir_contract_expand_rate": 0.0258537526529037
+        }
+      },
+      "Diffusion": {
+        "divergence_cnt": 2283.0,
+        "divergence_ratio": 0.4403935185185185,
+        "t_align_div_resonance": 163.0,
+        "t_align_resonance_div": 538.0,
+        "t_align_div_resonance_rate": 0.0314489677792784,
+        "t_align_resonance_div_rate": 0.1038008875168821
+      },
+      "Concentration": {
+        "top5_price_contribution": 0.0061364086457838,
+        "member_change_hhi": 0.0002797129056948,
+        "top5_amount_contribution": 0.0285018767575887
+      },
+      "Participation": {
+        "volume_ratio20_median": 1.1795500104342818,
+        "amount_ratio20_median": 1.1345383171281878
+      }
+    },
+    "CurrentReview": {
+      "P_Q_U_C_V": {
+        "metric_P_value": null,
+        "metric_P_rawValue": 0.1992844145339301,
+        "metric_P_status": "unavailable",
+        "metric_Q_value": null,
+        "metric_Q_rawValue": 0.4527500999681594,
+        "metric_Q_status": "insufficient_history",
+        "metric_U_value": null,
+        "metric_U_rawValue": 0.3410505985061958,
+        "metric_U_status": "insufficient_history",
+        "metric_C_value": null,
+        "metric_C_rawValue": 0.0642174644476771,
+        "metric_C_status": "insufficient_history",
+        "metric_V_value": null,
+        "metric_V_rawValue": 0.6426449020806737,
+        "metric_V_status": "insufficient_history"
+      },
+      "key_components": {
+        "P": {
+          "top3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.386
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0125
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "price_position_median",
+              "raw": 0.386
+            },
+            {
+              "name": "new_high_ratio",
+              "raw": 0.0125
+            }
+          ]
+        },
+        "Q": {
+          "top3": [
+            {
+              "name": "main_structure_up_ratio",
+              "raw": 0.7635
+            },
+            {
+              "name": "structure_breakdown_diffusion",
+              "raw": 0.6389
+            },
+            {
+              "name": "trend_structure_momentum_alignment_ratio",
+              "raw": 0.54
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "short_structure_up_ratio",
+              "raw": 0.4495
+            },
+            {
+              "name": "uptrend_member_ratio",
+              "raw": 0.2722
+            },
+            {
+              "name": "structure_net_event_rate",
+              "raw": 0.0525
+            }
+          ]
+        },
+        "U": {
+          "top3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0189
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0042
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "fresh_structure_event_coverage",
+              "raw": 1.0
+            },
+            {
+              "name": "momentum_enhancing_coverage",
+              "raw": 0.0189
+            },
+            {
+              "name": "multi_dim_improving_ratio",
+              "raw": 0.0042
+            }
+          ]
+        },
+        "C": {
+          "top3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0285
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "top10pct_event_contribution",
+              "raw": 0.0999
+            },
+            {
+              "name": "top5_amount_contribution",
+              "raw": 0.0285
+            }
+          ]
+        },
+        "V": {
+          "top3": [
+            {
+              "name": "trend_segment_volume_improvement",
+              "raw": 1.414
+            },
+            {
+              "name": "volume_percentile20_median",
+              "raw": 0.692
+            },
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.6778
+            }
+          ],
+          "bottom3": [
+            {
+              "name": "amount_percentile200_median",
+              "raw": 0.6778
+            },
+            {
+              "name": "volume_expansion_ratio",
+              "raw": 0.2149
+            },
+            {
+              "name": "amount_expansion_ratio",
+              "raw": 0.2145
+            }
+          ]
+        }
+      }
+    },
+    "clarity_verdict": "CLEAR",
+    "clarity_reason": "P/Q/U/C/V与R2 primitive 无明显矛盾"
+  }
+}

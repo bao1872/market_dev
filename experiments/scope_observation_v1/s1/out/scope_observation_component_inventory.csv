@@ -1,0 +1,46 @@
+raw_field,source,canonical_semantic,candidate_axis,candidate_role,data_type,categorical_values_or_unit,history_coverage,notes
+regime_value,state_payload.categorical,趋势方向状态,TREND,STATE,int,1=up/0=neutral/-1=down,365d,趋势 categorical state
+regime_strength,state_payload.continuous,趋势强度,TREND,EXPLANATORY_ONLY,float,0-1 强度,365d,continuous descriptor
+dsa_dir_bars,state_payload.continuous,DSA 方向持续天数,TREND,EXPLANATORY_ONLY,int,天数,365d,continuous descriptor (persistence)
+dsa_vwap_dev_pct,state_payload.continuous,DSA VWAP 偏离百分比,TREND,EXPLANATORY_ONLY,float,百分比,365d,continuous descriptor
+trend_transition,state_payload.categorical,趋势迁移事件,TREND,TRANSITION_SOURCE,str,UP_CONFIRMED/DOWN_CONFIRMED/...,365d,需确认是否今日新发生
+segment_direction,state_payload.categorical,趋势段方向,TREND,STATE,int,1/-1,365d,segment 方向
+segment_slope,state_payload.continuous,趋势段斜率,TREND,EXPLANATORY_ONLY,float,斜率,365d
+segment_change_pct,state_payload.continuous,趋势段变化百分比,TREND,EXPLANATORY_ONLY,float,百分比,365d
+swing_bias,state_payload.categorical,主要结构方向,STRUCTURE,STATE,int,1=up/-1=down/0=none,365d,structure categorical state
+internal_bias,state_payload.categorical,内部(短线)结构方向,STRUCTURE,STATE,int,1=up/-1=down/0=none,365d,structure categorical state
+structure_alignment,state_payload.categorical,结构共振/背离,STRUCTURE,STATE,str,共振/背离,365d,swing 与 internal 一致性
+latest_bos_direction,state_payload.event,BOS 方向,STRUCTURE,TRANSITION_SOURCE,str,up/down,365d,最新 BOS 事件方向
+latest_bos_freshness,state_payload.event,BOS 新鲜度(距今日),STRUCTURE,TRANSITION_SOURCE,int,天数,365d,区分 current state vs fresh event
+latest_choch_direction,state_payload.event,CHoCH 方向,STRUCTURE,TRANSITION_SOURCE,str,up/down,365d,最新 CHoCH 事件方向
+latest_choch_freshness,state_payload.event,CHoCH 新鲜度,STRUCTURE,TRANSITION_SOURCE,int,天数,365d,freshness 判今日是否新发生
+latest_ob_direction,state_payload.event,OB 事件方向,STRUCTURE,TRANSITION_SOURCE,str,up/down,365d,最新 OB 方向
+latest_ob_freshness,state_payload.event,OB 事件新鲜度,STRUCTURE,TRANSITION_SOURCE,int,天数,365d,freshness 判今日新发生
+latest_ob_active,state_payload.event,OB 是否活跃,STRUCTURE,STATE,bool,true/false,365d,persistent state
+active_swing_ob_count,state_payload.count,活跃 swing OB 数量,STRUCTURE,EXPLANATORY_ONLY,int,计数,365d
+active_internal_ob_count,state_payload.count,活跃 internal OB 数量,STRUCTURE,EXPLANATORY_ONLY,int,计数,365d
+momentum_direction,state_payload.categorical,动量方向,MOMENTUM,STATE,str,expanding/contracting/flat,365d,来自 sqzmom_val 符号
+momentum_change,member_fact,动量变化,MOMENTUM,TRANSITION_SOURCE,str,enhancing/weakening,365d,来自 sqzmom_delta
+sqzmom_val,state_payload.continuous,动量指标值,MOMENTUM,EXPLANATORY_ONLY,float,无单位,365d,continuous descriptor
+sqzmom_delta,state_payload.continuous,动量变化量,MOMENTUM,TRANSITION_SOURCE,float,delta,365d,transition source 候选
+volatility_phase,state_payload.categorical,波动率阶段,MOMENTUM,EXPLANATORY_ONLY,str,squeeze_off/...,365d,categorical descriptor
+fp_trend_direction,member_fact,趋势方向(中文规范),TREND,STATE,str,上行/下行/震荡,365d,regime_value 的 canonical 中文标签
+fp_swing_direction,member_fact,主要结构方向(中文),STRUCTURE,STATE,str,上行/下行/震荡,365d,swing_bias 中文标签
+fp_internal_direction,member_fact,内部结构方向(中文),STRUCTURE,STATE,str,上行/下行/震荡,365d,internal_bias 中文标签
+fp_structure_alignment,member_fact,结构共振/背离(规范),STRUCTURE,STATE,str,共振/背离,365d,structure_alignment 规范
+fp_momentum_direction,member_fact,动量方向(中文),MOMENTUM,STATE,str,扩张/收缩/平缓,365d,momentum_direction 中文标签
+fp_momentum_change,member_fact,动量变化(数值),MOMENTUM,TRANSITION_SOURCE,float,sqzmom delta,365d,round 数值
+price_position_120d,state_payload.continuous,120日价格位置,PRICE,EXPLANATORY_ONLY,float,0-1,365d,price position
+review_return_1d,member_fact,1日收益率,PRICE,BREADTH_SOURCE,float,百分比,365d,advance ratio 来源
+fp_volume_ratio20,state_payload.continuous,20日量比,CHIP,EXPLANATORY_ONLY,float,ratio,365d,volume ratio
+fp_volume_percentile20,state_payload.continuous,20日量分位,CHIP,PARTICIPATION_SOURCE,float,0-100,365d,volume percentile
+review_volume_ratio20,state_payload.continuous,20日量比(review),CHIP,PARTICIPATION_SOURCE,float,ratio,365d,rolling volume ratio
+review_amount_ratio20,state_payload.continuous,20日额比(review),CHIP,PARTICIPATION_SOURCE,float,ratio,365d,rolling amount ratio
+review_volume_percentile20,state_payload.continuous,20日量分位(review),CHIP,PARTICIPATION_SOURCE,float,0-100,365d,rolling volume percentile
+review_amount_percentile200,state_payload.continuous,200日额分位(review),CHIP,PARTICIPATION_SOURCE,float,0-100,365d,rolling amount percentile
+volume_zscore_20,state_payload.continuous,20日量 zscore,CHIP,EXPLANATORY_ONLY,float,zscore,365d,volume zscore
+current_vs_prev_volume_mean_ratio,state_payload.continuous,当前/前段量均比,CHIP,EXPLANATORY_ONLY,float,ratio,365d,segment volume improvement
+current_vs_prev_amount_mean_ratio,state_payload.continuous,当前/前段额均比,CHIP,EXPLANATORY_ONLY,float,ratio,365d,segment amount improvement
+current_segment_volume_mean,state_payload.continuous,当前段均量,CHIP,EXPLANATORY_ONLY,float,volume,365d
+prev_segment_volume_mean,state_payload.continuous,前段均量,CHIP,EXPLANATORY_ONLY,float,volume,365d,fp_prev_segment_volume
+fp_segment_volume_ratio,member_fact,段量能改善比,CHIP,EXPLANATORY_ONLY,float,ratio,365d,current/prev volume mean ratio

@@ -1,0 +1,95 @@
+{
+  "window": {
+    "start": "2026-02-09",
+    "end": "2026-08-10",
+    "count": 120,
+    "is_exact_target": true
+  },
+  "transition_adjacency": {
+    "eligible_common_universe_pairs": 620918,
+    "exact_Tminus1_pairs": 620630,
+    "skipped_date_pairs": 288,
+    "skipped_date_pair_ratio": 0.0004638293623312579
+  },
+  "concentration_adjacency": {
+    "total_close_pairs": 620918,
+    "exact_Tminus1_pairs": 620630,
+    "skipped_date_pairs": 288,
+    "skipped_date_pair_ratio": 0.0004638293623312579
+  },
+  "recompute_required": true,
+  "rho_comparison": {
+    "regime_up_ratio__vs__t_regime_0_1_rate": {
+      "group": "state_transition",
+      "old": 0.3904818709409718,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    },
+    "regime_down_ratio__vs__t_regime_0_neg1_rate": {
+      "group": "state_transition",
+      "old": 0.3464680203088707,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    },
+    "swing_up_ratio__vs__t_swing_neg1_1_rate": {
+      "group": "state_transition",
+      "old": 0.4958800114904972,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    },
+    "momentum_expanding_ratio__vs__t_momdir_contract_expand_rate": {
+      "group": "state_transition",
+      "old": 0.3257305329205649,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    },
+    "top5_price_contribution__vs__regime_up_ratio": {
+      "group": "concentration",
+      "old": 0.27845491545154255,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    },
+    "member_change_hhi__vs__regime_up_ratio": {
+      "group": "concentration",
+      "old": 0.24463126560212628,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    },
+    "top5_amount_contribution__vs__regime_up_ratio": {
+      "group": "concentration",
+      "old": -0.7755511164809047,
+      "corrected": null,
+      "delta": null,
+      "direction_same": true,
+      "relative_same": true,
+      "indeterminate_strict": true,
+      "verdict_changed": false
+    }
+  },
+  "conclusion": "ROUND2_CONCLUSION_UNCHANGED",
+  "note": "skip_ratio极小(trans=0.0464%, conc=0.0464%<0.1%), 判定 ROUND2 结论不受跳日影响；corrected rho边界缺值不影响结论"
+}

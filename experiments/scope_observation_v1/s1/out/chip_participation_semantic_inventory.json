@@ -1,0 +1,84 @@
+{
+  "experiment": "Chip vs Participation semantic inventory (S1 §11)",
+  "note": "本轮只形成语义证据，不给出 SAME_AXIS / DISTINCT_AXES 最终 verdict。",
+  "fields": {
+    "volume_ratio_20": {
+      "raw_field": "volume_ratio_20",
+      "description": "20日成交量比（当前量 / 前20日均量）",
+      "semantic_class": "BOTH_POSSIBLE",
+      "evidence": "描述单只成员自身相对历史成交活跃度（个体层面），但也可作为 Scope 横截面参与度统计的输入。属于个体成交强度，非明确筹码成本共识。"
+    },
+    "review_volume_ratio20": {
+      "raw_field": "review_volume_ratio20",
+      "description": "20日量比（review rolling 公式）",
+      "semantic_class": "BOTH_POSSIBLE",
+      "evidence": "与 volume_ratio_20 同类，个体成交活跃度；横截面统计时表达参与度。"
+    },
+    "review_amount_ratio20": {
+      "raw_field": "review_amount_ratio20",
+      "description": "20日成交额比（review）",
+      "semantic_class": "BOTH_POSSIBLE",
+      "evidence": "个体成交额相对活跃度；金额口径参与度输入。"
+    },
+    "volume_percentile_20": {
+      "raw_field": "volume_percentile_20",
+      "description": "20日成交量分位",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "衡量个体相对自身历史上量的位置，偏向参与活跃度而非筹码成本。"
+    },
+    "review_volume_percentile20": {
+      "raw_field": "review_volume_percentile20",
+      "description": "20日量分位（review）",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "同 volume_percentile_20，参与度口径。"
+    },
+    "review_amount_percentile200": {
+      "raw_field": "review_amount_percentile200",
+      "description": "200日成交额分位（review）",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "长期金额位置，参与度维度。"
+    },
+    "volume_zscore_20": {
+      "raw_field": "volume_zscore_20",
+      "description": "20日量 z-score",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "量的标准化活跃度，参与度。"
+    },
+    "current_vs_prev_volume_mean_ratio": {
+      "raw_field": "current_vs_prev_volume_mean_ratio",
+      "description": "当前趋势段均量 / 前段均量",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "段级量能改善，表达参与强度变化，非筹码成本。"
+    },
+    "current_vs_prev_amount_mean_ratio": {
+      "raw_field": "current_vs_prev_amount_mean_ratio",
+      "description": "当前趋势段均额 / 前段均额",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "段级金额参与改善。"
+    },
+    "current_segment_volume_mean": {
+      "raw_field": "current_segment_volume_mean",
+      "description": "当前趋势段均量",
+      "semantic_class": "EXPLANATORY_ONLY",
+      "evidence": "绝对量，作解释性输入。"
+    },
+    "prev_segment_volume_mean": {
+      "raw_field": "prev_segment_volume_mean",
+      "description": "前趋势段均量",
+      "semantic_class": "EXPLANATORY_ONLY",
+      "evidence": "绝对量，解释性。"
+    },
+    "fp_segment_volume_ratio": {
+      "raw_field": "fp_segment_volume_ratio",
+      "description": "段量能改善比（规范）",
+      "semantic_class": "PARTICIPATION_ONLY",
+      "evidence": "段级参与强度。"
+    }
+  },
+  "semantic_observations": [
+    "当前数据中不存在明确的芯片成本共识字段（如 OBV/平均成本/筹码分布密集区）。",
+    "volume/amount ratio 与 percentile 主要描述个体成交活跃度 / 参与度，而非筹码成本共识。",
+    "最大的语义重叠点：volume/amount ratio 既可用作个体活跃度（CHIP 倾向），也可作为 Scope 横截面参与度（PARTICIPATION 倾向）。",
+    "PRD H1 的 Chip/筹码共识 与 Scope-level Participation 是否同轴，需在 S2/S3 用真实横截面与时间序列行为判定，本轮只记录证据。"
+  ]
+}

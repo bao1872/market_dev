@@ -1,0 +1,379 @@
+{
+  "adjacency_conclusion": "ROUND2_CONCLUSION_UNCHANGED",
+  "classification_counts": {
+    "SUPPORTED_CURRENT_DESIGN": 3,
+    "PARTIALLY_SUPPORTED": 2,
+    "SPECIFICATION_DEFECT_CANDIDATE": 5,
+    "MISSING_PRIMITIVE": 1,
+    "REDUNDANT_CANDIDATE": 7,
+    "INCONCLUSIVE": 9
+  },
+  "primitive_coverage_classification": {
+    "STATE": "PARTIALLY_SUPPORTED",
+    "TRANSITION": "PARTIALLY_SUPPORTED",
+    "BREADTH": "MISSING_PRIMITIVE",
+    "DIFFUSION": "SUPPORTED_CURRENT_DESIGN",
+    "CONCENTRATION": "PARTIALLY_SUPPORTED",
+    "PARTICIPATION": "MISSING_PRIMITIVE",
+    "PRICE": "PARTIALLY_SUPPORTED",
+    "CROSS_HORIZON_DIVERGENCE": "MISSING_PRIMITIVE"
+  },
+  "family_level_classification": {
+    "P": {
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "verdict": "RESTRUCTURE_CANDIDATE",
+      "n_dimensions": 3,
+      "dimensions_spanned": [
+        "BREADTH",
+        "MIXED",
+        "PRICE"
+      ]
+    },
+    "Q": {
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "verdict": "RESTRUCTURE_CANDIDATE",
+      "n_dimensions": 3,
+      "dimensions_spanned": [
+        "DIFFUSION",
+        "STATE",
+        "TRANSITION"
+      ]
+    },
+    "U": {
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "verdict": "RESTRUCTURE_CANDIDATE",
+      "n_dimensions": 3,
+      "dimensions_spanned": [
+        "DIFFUSION",
+        "PARTICIPATION",
+        "TRANSITION"
+      ]
+    },
+    "C": {
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "verdict": "RESTRUCTURE_CANDIDATE",
+      "n_dimensions": 1,
+      "dimensions_spanned": [
+        "CONCENTRATION"
+      ]
+    },
+    "V": {
+      "class": "INCONCLUSIVE",
+      "verdict": "INCONCLUSIVE",
+      "n_dimensions": 3,
+      "dimensions_spanned": [
+        "MIXED",
+        "OTHER",
+        "PARTICIPATION"
+      ]
+    }
+  },
+  "summary": {
+    "specification_defect_candidates": [
+      {
+        "component": "price_position_median",
+        "family": "P",
+        "semantic_dimension": "PRICE",
+        "class": "SPECIFICATION_DEFECT_CANDIDATE",
+        "note": "component 混合多个独立 primitive 维度"
+      },
+      {
+        "component": "structure_net_event_rate",
+        "family": "Q",
+        "semantic_dimension": "TRANSITION",
+        "class": "SPECIFICATION_DEFECT_CANDIDATE",
+        "note": "component 混合多个独立 primitive 维度"
+      },
+      {
+        "component": "structure_breakdown_diffusion",
+        "family": "Q",
+        "semantic_dimension": "DIFFUSION",
+        "class": "SPECIFICATION_DEFECT_CANDIDATE",
+        "note": "component 混合多个独立 primitive 维度"
+      },
+      {
+        "component": "top5_amount_contribution",
+        "family": "C",
+        "semantic_dimension": "CONCENTRATION",
+        "class": "SPECIFICATION_DEFECT_CANDIDATE",
+        "note": "component 混合多个独立 primitive 维度"
+      },
+      {
+        "component": "trend_segment_volume_improvement",
+        "family": "V",
+        "semantic_dimension": "MIXED",
+        "class": "SPECIFICATION_DEFECT_CANDIDATE",
+        "note": "component 混合多个独立 primitive 维度"
+      }
+    ],
+    "missing_primitives": [
+      "BREADTH",
+      "PARTICIPATION",
+      "CROSS_HORIZON_DIVERGENCE"
+    ],
+    "redundant_candidates": [
+      "uptrend_member_ratio",
+      "main_structure_up_ratio",
+      "short_structure_up_ratio",
+      "volume_expansion_ratio",
+      "amount_expansion_ratio",
+      "volume_percentile20_median",
+      "amount_percentile200_median"
+    ]
+  },
+  "component_findings": [
+    {
+      "component": "scope_return_1d",
+      "family": "P",
+      "semantic_dimension": "PRICE",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "advance_ratio",
+      "family": "P",
+      "semantic_dimension": "BREADTH",
+      "class": "MISSING_PRIMITIVE"
+    },
+    {
+      "component": "trend_price_alignment_ratio",
+      "family": "P",
+      "semantic_dimension": "MIXED",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "new_high_ratio",
+      "family": "P",
+      "semantic_dimension": "PRICE",
+      "class": "SUPPORTED_CURRENT_DESIGN"
+    },
+    {
+      "component": "price_position_median",
+      "family": "P",
+      "semantic_dimension": "PRICE",
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "note": "component 混合多个独立 primitive 维度"
+    },
+    {
+      "component": "uptrend_member_ratio",
+      "family": "Q",
+      "semantic_dimension": "STATE",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "main_structure_up_ratio",
+          0.9422
+        ],
+        [
+          "structure_net_event_rate",
+          0.8375
+        ],
+        [
+          "structure_breakdown_diffusion",
+          -0.8331
+        ]
+      ]
+    },
+    {
+      "component": "main_structure_up_ratio",
+      "family": "Q",
+      "semantic_dimension": "STATE",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "uptrend_member_ratio",
+          0.9422
+        ],
+        [
+          "structure_net_event_rate",
+          0.8062
+        ],
+        [
+          "structure_breakdown_diffusion",
+          -0.7719
+        ]
+      ]
+    },
+    {
+      "component": "short_structure_up_ratio",
+      "family": "Q",
+      "semantic_dimension": "STATE",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "structure_net_event_rate",
+          0.8377
+        ],
+        [
+          "structure_breakdown_diffusion",
+          -0.8531
+        ]
+      ]
+    },
+    {
+      "component": "trend_structure_momentum_alignment_ratio",
+      "family": "Q",
+      "semantic_dimension": "DIFFUSION",
+      "class": "SUPPORTED_CURRENT_DESIGN"
+    },
+    {
+      "component": "structure_net_event_rate",
+      "family": "Q",
+      "semantic_dimension": "TRANSITION",
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "note": "component 混合多个独立 primitive 维度"
+    },
+    {
+      "component": "structure_breakdown_diffusion",
+      "family": "Q",
+      "semantic_dimension": "DIFFUSION",
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "note": "component 混合多个独立 primitive 维度"
+    },
+    {
+      "component": "multi_dim_improving_ratio",
+      "family": "U",
+      "semantic_dimension": "DIFFUSION",
+      "class": "SUPPORTED_CURRENT_DESIGN"
+    },
+    {
+      "component": "momentum_enhancing_coverage",
+      "family": "U",
+      "semantic_dimension": "TRANSITION",
+      "class": "PARTIALLY_SUPPORTED"
+    },
+    {
+      "component": "fresh_structure_event_coverage",
+      "family": "U",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "non_head_participation_ratio",
+      "family": "U",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "leader_follower_common_confirm_ratio",
+      "family": "U",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "top5_price_change_contribution",
+      "family": "C",
+      "semantic_dimension": "CONCENTRATION",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "top10pct_event_contribution",
+      "family": "C",
+      "semantic_dimension": "CONCENTRATION",
+      "class": "PARTIALLY_SUPPORTED"
+    },
+    {
+      "component": "member_change_hhi",
+      "family": "C",
+      "semantic_dimension": "CONCENTRATION",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "leader_median_diff",
+      "family": "C",
+      "semantic_dimension": "CONCENTRATION",
+      "class": "INCONCLUSIVE"
+    },
+    {
+      "component": "top5_amount_contribution",
+      "family": "C",
+      "semantic_dimension": "CONCENTRATION",
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "note": "component 混合多个独立 primitive 维度"
+    },
+    {
+      "component": "volume_expansion_ratio",
+      "family": "V",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "amount_expansion_ratio",
+          0.9768
+        ],
+        [
+          "volume_percentile20_median",
+          0.8829
+        ],
+        [
+          "amount_percentile200_median",
+          0.7069
+        ]
+      ]
+    },
+    {
+      "component": "amount_expansion_ratio",
+      "family": "V",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "volume_expansion_ratio",
+          0.9768
+        ],
+        [
+          "volume_percentile20_median",
+          0.8477
+        ],
+        [
+          "amount_percentile200_median",
+          0.7063
+        ]
+      ]
+    },
+    {
+      "component": "volume_percentile20_median",
+      "family": "V",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "volume_expansion_ratio",
+          0.8829
+        ],
+        [
+          "amount_expansion_ratio",
+          0.8477
+        ]
+      ]
+    },
+    {
+      "component": "amount_percentile200_median",
+      "family": "V",
+      "semantic_dimension": "PARTICIPATION",
+      "class": "REDUNDANT_CANDIDATE",
+      "redundant_with": [
+        [
+          "volume_expansion_ratio",
+          0.7069
+        ],
+        [
+          "amount_expansion_ratio",
+          0.7063
+        ]
+      ]
+    },
+    {
+      "component": "trend_segment_volume_improvement",
+      "family": "V",
+      "semantic_dimension": "MIXED",
+      "class": "SPECIFICATION_DEFECT_CANDIDATE",
+      "note": "component 混合多个独立 primitive 维度"
+    },
+    {
+      "component": "price_amount_efficiency_median",
+      "family": "V",
+      "semantic_dimension": "OTHER",
+      "class": "INCONCLUSIVE"
+    }
+  ]
+}

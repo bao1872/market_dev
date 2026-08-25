@@ -1,0 +1,183 @@
+{
+  "experiment": "S3 Minimum Sufficient Observation Model Closure",
+  "branch": "exp/scope-observation-model-v1",
+  "s2_final_sha": "1cbf1c54164f1aa1511a0c48670b8fdc622bacf7",
+  "s2_verdict": "PASS",
+  "date_window": ["2026-08-03", "2026-08-10"],
+  "disposition_policy": {
+    "CORE": "indispensable semantic primitive; must exist in the observation model",
+    "EXPLANATORY": "derived/display layer used to explain CORE facts; not a primitive",
+    "DERIVED_REDUNDANT": "mathematically derivable from another field, or semantically identical with zero added observation information (per §5 A/B)",
+    "PROVISIONAL": "retained but not yet verified; verdict inconclusive due to data/evidence limits",
+    "UNRESOLVED": "cannot be decided with current real data; explicit open slot"
+  },
+  "rule_5_note": "No correlation-based dimension removal. Only (A) math-derivable or (B) semantic-identical-with-zero-added-info may be DERIVED_REDUNDANT. Different semantics stay distinct even if correlated.",
+  "frozen_s2_verdicts": {
+    "Q1_State_Breadth": "SUPPORTED",
+    "Q2_Transition_incremental_information": "PARTIALLY_SUPPORTED",
+    "Q3_Diffusion_incremental_information": "INCONCLUSIVE",
+    "Q3_reason": "complete D1/D3/D5 same-day evidence only available on 2026-08-10",
+    "Q4_Concentration": "PARTIALLY_SUPPORTED",
+    "Q5_Participation": "PARTIALLY_SUPPORTED",
+    "Q6_Cross_horizon_raw_axes": "SUPPORTED",
+    "Q7_Chip_vs_Participation": "INCONCLUSIVE",
+    "Q7_reason": "chip-like field data gap (fp_segment_volume_ratio NULL for all valid state rows)"
+  },
+  "components": {
+    "PRICE": {
+      "layer": "top-level result fact",
+      "objects": {
+        "Return_Level": {
+          "disposition": "CORE",
+          "fields": ["equal_weight_return_mean"],
+          "evidence": "S2 price_facts return_level.equal_weight_return_mean (n=3859, mean=0.012)",
+          "merge": {
+            "return_median": "DERIVED_REDUNDANT",
+            "reason": "return_median is numerically identical to return_p50 (same field semantics, same values in S2: median=0.0077). Same fact; one product field."
+          }
+        },
+        "Return_Distribution": {
+          "disposition": "CORE",
+          "fields": ["return_p25", "return_p50", "return_p75"],
+          "evidence": "S2 price_facts return_distribution",
+          "note": "P25/P50/P75 describe ONE distribution object, not three independent dimensions (per §7 analog for price). return_p10/return_p90 are EXPLANATORY tail context.",
+          "sub_fields": {
+            "return_p10": "EXPLANATORY",
+            "return_p90": "EXPLANATORY"
+          }
+        },
+        "Price_Breadth": {
+          "disposition": "CORE",
+          "fields": ["advance_ratio", "decline_ratio", "unchanged_ratio"],
+          "evidence": "S2 price_facts.price_breadth (threshold-free: return>0/<0/==0); price-vs-trend contrast proves Price Breadth != Trend State/Breadth (same-day contrast_distance_trend_diff up to 1.55)",
+          "note": "Distinct semantics from Trend State/Breadth. Return sign, no +/- threshold, no Breadth Score."
+        },
+        "Signed_Return_Contribution": {
+          "disposition": "EXPLANATORY",
+          "fields": ["signed_return_contribution", "top_positive_return_contributors", "top_negative_return_contributors"],
+          "evidence": "S2 full-universe signed validation (sum_signed == equal_weight_return_mean, delta=0.0 over 6 rep scopes)",
+          "note": "Who pushed/dragged the board return. Top-N is explanation, not a primitive."
+        },
+        "Price_Concentration": {
+          "disposition": "CORE",
+          "fields": ["price_contribution_hhi", "price_contribution_hhi_normalized"],
+          "evidence": "S2 Q4 concentration contrast (PARTIALLY_SUPPORTED), price_facts.price_hhi (n=3859)",
+          "note": "raw HHI kept for single-scope time variation; normalized HHI for cross-scope (different member-count) comparison. Never averaged, no Concentration Score."
+        },
+        "Amount_Contribution_Concentration": {
+          "disposition": "CORE",
+          "fields": ["amount_share", "amount_contribution_hhi", "amount_contribution_hhi_normalized"],
+          "evidence": "S2 Q4 contrast (PARTIALLY_SUPPORTED); sum_amount_share=1.0 validated; amount_valid universe independent of price (no T-1)",
+          "note": "Whether turnover/amount is concentrated. Independent of price concentration. No Concentration Score."
+        }
+      }
+    },
+    "TREND": {
+      "axis": "slow",
+      "objects": {
+        "State_Breadth": {
+          "disposition": "CORE",
+          "fields": ["regime_up_ratio", "regime_neutral_ratio", "regime_down_ratio"],
+          "evidence": "Q1 SUPPORTED: State categorical proportions ARE Breadth. No separate Breadth Score."
+        },
+        "Transition": {
+          "disposition": "CORE",
+          "fields": ["regime_neutral_to_up_ratio", "regime_neutral_to_down_ratio", "regime_up_to_neutral_ratio", "regime_down_to_neutral_ratio", "regime_up_to_down_ratio", "regime_down_to_up_ratio"],
+          "evidence": "Q2 PARTIALLY_SUPPORTED. Ratio is the cross-scope core expression.",
+          "raw_counts": {
+            "disposition": "EXPLANATORY",
+            "reason": "raw transition counts retained only as audit/explanation; all cross-scope analysis uses ratio."
+          }
+        },
+        "Diffusion": {
+          "disposition": "PROVISIONAL",
+          "fields": ["diffusion_regime_up_d1_d3_d5", "diffusion_regime_down_d1_d3_d5"],
+          "evidence": "Q3 INCONCLUSIVE: full D1/D3/D5 same-day evidence only on 2026-08-10; history PIT board data too short",
+          "note": "Retain D1/D3/D5; do not decide which horizon is optimal. Do not delete, do not claim verified."
+        }
+      }
+    },
+    "STRUCTURE": {
+      "axis": "medium",
+      "objects": {
+        "State_Breadth": {
+          "disposition": "CORE",
+          "fields": ["swing_up_ratio", "swing_neutral_ratio", "swing_down_ratio", "internal_up_ratio", "internal_neutral_ratio", "internal_down_ratio"],
+          "evidence": "Q1 SUPPORTED (swing & internal categorical proportions are breadth)"
+        },
+        "Transition": {
+          "disposition": "CORE",
+          "fields": ["swing_transition_ratio", "internal_transition_ratio"],
+          "evidence": "Q2 PARTIALLY_SUPPORTED (Transition RATIOS vary among similar State/Breadth)",
+          "raw_counts": {
+            "disposition": "EXPLANATORY",
+            "reason": "raw counts audit-only; ratio is cross-scope core."
+          }
+        },
+        "Diffusion": {
+          "disposition": "PROVISIONAL",
+          "fields": ["diffusion_swing_up_d1_d3_d5", "diffusion_internal_up_d1_d3_d5"],
+          "evidence": "Q3 INCONCLUSIVE (data too short)",
+          "note": "Retain D1/D3/D5, no horizon optimization."
+        }
+      }
+    },
+    "MOMENTUM": {
+      "axis": "fast",
+      "objects": {
+        "State_Breadth": {
+          "disposition": "CORE",
+          "fields": ["expanding_ratio", "flat_ratio", "contracting_ratio", "resonance_ratio", "divergence_ratio"],
+          "evidence": "Q1 SUPPORTED (momentum categorical proportions are breadth); Q6 SUPPORTED (expanding-contracting is the fast directional boundary)"
+        },
+        "Transition": {
+          "disposition": "CORE",
+          "fields": ["momentum_transition_ratio"],
+          "evidence": "Q2 PARTIALLY_SUPPORTED",
+          "raw_counts": {
+            "disposition": "EXPLANATORY",
+            "reason": "raw counts audit-only."
+          }
+        },
+        "Diffusion": {
+          "disposition": "PROVISIONAL",
+          "fields": ["diffusion_resonance_d1_d3_d5", "diffusion_expanding_d1_d3_d5", "diffusion_contracting_d1_d3_d5"],
+          "evidence": "Q3 INCONCLUSIVE (data too short)",
+          "note": "Retain D1/D3/D5, no horizon optimization."
+        }
+      }
+    },
+    "PARTICIPATION": {
+      "objects": {
+        "Volume_Participation_Distribution": {
+          "disposition": "CORE",
+          "fields": ["vol_ratio20_p25", "vol_ratio20_p50", "vol_ratio20_p75", "vol_pct20_median"],
+          "evidence": "Q5 PARTIALLY_SUPPORTED (participation continuous distributions distinguish similar State/Breadth+HHI)",
+          "note": "threshold-free distribution retained. P25/P50/P75 describe ONE distribution object. No active/high/low, no >1/>1.5 cut, no Participation Score. vol_pct20_median is a context field of the same distribution."
+        },
+        "Amount_Participation_Distribution": {
+          "disposition": "CORE",
+          "fields": ["amt_ratio20_p25", "amt_ratio20_p50", "amt_ratio20_p75", "amt_pct200_median"],
+          "evidence": "Q5 PARTIALLY_SUPPORTED",
+          "note": "threshold-free distribution. P25/P50/P75 one object. No Participation Score."
+        }
+      }
+    },
+    "CONCENTRATION_CONTRIBUTION": {
+      "disposition": "CORE",
+      "objects": {
+        "Price_Concentration": "CORE (raw+normalized HHI, two views not averaged)",
+        "Amount_Concentration": "CORE (raw+normalized HHI)",
+        "Signed_Return_Contribution": "EXPLANATORY (who pushed/dragged)",
+        "Amount_Contribution": "EXPLANATORY (top amount contributors)",
+        "note": "Concentration/Contribution is a top-level family in the model; it spans price-concentration and amount-concentration plus the explanatory contributor lists. It is NOT a single 'Concentration Score'."
+      }
+    },
+    "CHIP": {
+      "disposition": "UNRESOLVED",
+      "evidence": "fp_segment_volume_ratio NULL for all valid state rows (Q7 INCONCLUSIVE)",
+      "slot": "CHIP / PARTICIPATION RELATION — PENDING DATA",
+      "note": "Do not force Chip==Participation or Chip!=Participation. Unresolved slot does not block the observation model closure."
+    }
+  }
+}

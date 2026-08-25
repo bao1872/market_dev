@@ -1,0 +1,19 @@
+{
+  "chip_like_field": "seg_vol_ratio_median",
+  "participation_fields": [
+    "vol_ratio20_p50",
+    "amt_ratio20_p50",
+    "vol_pct20_median",
+    "amt_pct200_median"
+  ],
+  "correlations": {
+    "vol_ratio20_p50": null,
+    "amt_ratio20_p50": null,
+    "vol_pct20_median": null,
+    "amt_pct200_median": null
+  },
+  "overlap_verdict": "inconclusive",
+  "chip_field_populated_rows": 0,
+  "note": "chip-like segment volume ratio (fp_segment_volume_ratio) is NULL for ALL valid state rows in the window — data gap, not computation failure. Q7 cannot be answered from real data. Does NOT decide Architecture A/B.",
+  "long_history": "unavailable"
+}

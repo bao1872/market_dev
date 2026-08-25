@@ -1,0 +1,351 @@
+{
+  "return_level": {
+    "equal_weight_return_mean": {
+      "n": 3859,
+      "min": -0.0772,
+      "p25": 0.002,
+      "median": 0.0103,
+      "p75": 0.02,
+      "max": 0.1318,
+      "mean": 0.012,
+      "std": 0.0154
+    },
+    "return_median": {
+      "n": 3859,
+      "min": -0.0785,
+      "p25": -0.0013,
+      "median": 0.0077,
+      "p75": 0.0163,
+      "max": 0.1235,
+      "mean": 0.0088,
+      "std": 0.0147
+    }
+  },
+  "return_distribution": {
+    "return_p25": {
+      "n": 3859,
+      "min": -0.11,
+      "p25": -0.0104,
+      "median": -0.0038,
+      "p75": 0.0046,
+      "max": 0.1,
+      "mean": -0.0024,
+      "std": 0.0133
+    },
+    "return_p50": {
+      "n": 3859,
+      "min": -0.0785,
+      "p25": -0.0013,
+      "median": 0.0077,
+      "p75": 0.0163,
+      "max": 0.1235,
+      "mean": 0.0088,
+      "std": 0.0147
+    },
+    "return_p75": {
+      "n": 3859,
+      "min": -0.0584,
+      "p25": 0.0102,
+      "median": 0.0205,
+      "p75": 0.0316,
+      "max": 0.173,
+      "mean": 0.0225,
+      "std": 0.0184
+    },
+    "return_p10": {
+      "n": 3859,
+      "min": -0.1155,
+      "p25": -0.02,
+      "median": -0.0127,
+      "p75": -0.0051,
+      "max": 0.1,
+      "mean": -0.0125,
+      "std": 0.0147
+    },
+    "return_p90": {
+      "n": 3859,
+      "min": -0.0379,
+      "p25": 0.0234,
+      "median": 0.0364,
+      "p75": 0.0525,
+      "max": 0.1999,
+      "mean": 0.04,
+      "std": 0.0248
+    }
+  },
+  "price_breadth": {
+    "advance_count": {
+      "n": 3859,
+      "min": 0.0,
+      "p25": 9.0,
+      "median": 27.0,
+      "p75": 68.5,
+      "max": 3916.0,
+      "mean": 76.1464,
+      "std": 198.5556
+    },
+    "decline_count": {
+      "n": 3859,
+      "min": 0.0,
+      "p25": 4.0,
+      "median": 13.0,
+      "p75": 37.0,
+      "max": 2445.0,
+      "mean": 41.347,
+      "std": 113.1303
+    },
+    "unchanged_count": {
+      "n": 3859,
+      "min": 0.0,
+      "p25": 0.0,
+      "median": 1.0,
+      "p75": 2.0,
+      "max": 180.0,
+      "mean": 2.4991,
+      "std": 7.3297
+    }
+  },
+  "price_hhi": {
+    "price_contribution_hhi": {
+      "n": 3859,
+      "min": 0.0003,
+      "p25": 0.0178,
+      "median": 0.0435,
+      "p75": 0.1081,
+      "max": 1.0,
+      "mean": 0.0844,
+      "std": 0.1116
+    }
+  },
+  "amount_hhi": {
+    "amount_contribution_hhi": {
+      "n": 3859,
+      "min": 0.0017,
+      "p25": 0.0396,
+      "median": 0.0802,
+      "p75": 0.1636,
+      "max": 1.0,
+      "mean": 0.1266,
+      "std": 0.1352
+    }
+  },
+  "price_vs_trend_breadth": {
+    "method": "PRICE BREADTH = advance/decline/unchanged (return sign, no ±threshold); TREND BREADTH = regime up/neutral/down; SAME-DAY cross-sectional tie-aware rank-scaled multi-dimensional distance; nearest-neighbor only within the same trade_date; market excluded; missing-aware; no cross-date pairing",
+    "price_breadth_keys": [
+      "advance_ratio",
+      "decline_ratio",
+      "unchanged_ratio"
+    ],
+    "trend_breadth_keys": [
+      "regime_up_ratio",
+      "regime_neutral_ratio",
+      "regime_down_ratio"
+    ],
+    "price_similar_trend_differs": {
+      "eligible": 3853,
+      "cases": [
+        {
+          "a": "industry/基础化工-化学制品-氟化工/2026-08-06",
+          "b": "industry/农林牧渔-养殖业-水产养殖/2026-08-06",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.5533
+        },
+        {
+          "a": "industry/医药生物-医疗服务-医院/2026-08-05",
+          "b": "industry/银行-银行-城商行/2026-08-05",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.5133
+        },
+        {
+          "a": "industry/银行-银行-城商行/2026-08-05",
+          "b": "industry/医药生物-医疗服务-医院/2026-08-05",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.5133
+        },
+        {
+          "a": "industry/农林牧渔-种植业与林业-农业综合/2026-08-05",
+          "b": "concept/光刻机/2026-08-05",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.5127
+        },
+        {
+          "a": "industry/商贸零售-零售-旅游零售/2026-08-07",
+          "b": "concept/PVDF概念/2026-08-07",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.5081
+        },
+        {
+          "a": "industry/家用电器-白色家电-空调/2026-08-07",
+          "b": "industry/交通运输-公路铁路运输-公交/2026-08-07",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.5076
+        },
+        {
+          "a": "industry/银行-银行-城商行/2026-08-07",
+          "b": "industry/交通运输-公路铁路运输-公交/2026-08-07",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.4976
+        },
+        {
+          "a": "industry/医药生物-医疗服务-医院/2026-08-07",
+          "b": "industry/机械设备-自动化设备-机器人/2026-08-07",
+          "similarity_distance_price_sim": 0.0092,
+          "contrast_distance_trend_diff": 1.4716
+        },
+        {
+          "a": "industry/机械设备-自动化设备-机器人/2026-08-07",
+          "b": "industry/医药生物-医疗服务-医院/2026-08-07",
+          "similarity_distance_price_sim": 0.0092,
+          "contrast_distance_trend_diff": 1.4716
+        },
+        {
+          "a": "industry/基础化工-化学制品-氟化工/2026-08-10",
+          "b": "concept/供销社/2026-08-10",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.4637
+        },
+        {
+          "a": "industry/建筑材料-建筑材料-耐火材料/2026-08-04",
+          "b": "industry/基础化工-化学制品-氟化工/2026-08-04",
+          "similarity_distance_price_sim": 0.106,
+          "contrast_distance_trend_diff": 1.4604
+        },
+        {
+          "a": "industry/银行-银行-股份制银行/2026-08-03",
+          "b": "concept/MLOps概念/2026-08-03",
+          "similarity_distance_price_sim": 0.0,
+          "contrast_distance_trend_diff": 1.4593
+        }
+      ]
+    },
+    "trend_similar_price_differs": {
+      "eligible": 3853,
+      "cases": [
+        {
+          "a": "industry/纺织服饰-纺织制造-印染/2026-08-07",
+          "b": "concept/芬太尼/2026-08-07",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.5219
+        },
+        {
+          "a": "industry/建筑材料-建筑材料-水泥/2026-08-06",
+          "b": "concept/兵装重组概念/2026-08-06",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.5137
+        },
+        {
+          "a": "industry/建筑装饰-建筑装饰-房屋建设/2026-08-06",
+          "b": "industry/农林牧渔-种植业与林业-种子生产/2026-08-06",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.5089
+        },
+        {
+          "a": "industry/电力设备-光伏设备-光伏加工设备/2026-08-10",
+          "b": "industry/基础化工-化学纤维-涤纶/2026-08-10",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.4592
+        },
+        {
+          "a": "concept/F5G概念/2026-08-10",
+          "b": "industry/纺织服饰-服装家纺-家纺/2026-08-10",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.4478
+        },
+        {
+          "a": "industry/纺织服饰-服装家纺-家纺/2026-08-10",
+          "b": "concept/F5G概念/2026-08-10",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.4478
+        },
+        {
+          "a": "industry/通信-通信设备-通信线缆及配套/2026-08-06",
+          "b": "industry/公用事业-电力-水电/2026-08-06",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.4089
+        },
+        {
+          "a": "industry/纺织服饰-服装家纺-鞋帽及其他/2026-08-06",
+          "b": "concept/芬太尼/2026-08-06",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.4062
+        },
+        {
+          "a": "industry/建筑材料-建筑材料-耐火材料/2026-08-04",
+          "b": "concept/供销社/2026-08-04",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.3933
+        },
+        {
+          "a": "concept/丙烯酸/2026-08-05",
+          "b": "industry/交通运输-公路铁路运输-高速公路/2026-08-05",
+          "similarity_distance_trend_sim": 0.0642,
+          "contrast_distance_price_diff": 1.3917
+        },
+        {
+          "a": "industry/交通运输-公路铁路运输-高速公路/2026-08-05",
+          "b": "concept/丙烯酸/2026-08-05",
+          "similarity_distance_trend_sim": 0.0642,
+          "contrast_distance_price_diff": 1.3917
+        },
+        {
+          "a": "industry/社会服务-旅游及酒店-餐饮/2026-08-06",
+          "b": "industry/农林牧渔-农产品加工-宠物食品/2026-08-06",
+          "similarity_distance_trend_sim": 0.0,
+          "contrast_distance_price_diff": 1.3895
+        }
+      ]
+    },
+    "finding_note": "verifies today's % advancers != % in Up Trend (semantic distinction, not a score)"
+  },
+  "universe_counts": {
+    "price_candidate_count": {
+      "price_candidate_count": {
+        "n": 3859,
+        "min": 1.0,
+        "p25": 17.0,
+        "median": 44.0,
+        "p75": 109.0,
+        "max": 5277.0,
+        "mean": 119.9925,
+        "std": 307.766
+      }
+    },
+    "price_valid_count": {
+      "price_valid_count": {
+        "n": 3859,
+        "min": 1.0,
+        "p25": 17.0,
+        "median": 44.0,
+        "p75": 109.0,
+        "max": 5277.0,
+        "mean": 119.9925,
+        "std": 307.766
+      }
+    },
+    "missing_exact_t1_count": {
+      "missing_exact_t1_count": {
+        "n": 3859,
+        "min": 0.0,
+        "p25": 0.0,
+        "median": 0.0,
+        "p75": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "std": 0.0
+      }
+    },
+    "amount_valid_count": {
+      "amount_valid_count": {
+        "n": 3859,
+        "min": 1.0,
+        "p25": 17.0,
+        "median": 44.0,
+        "p75": 109.0,
+        "max": 5277.0,
+        "mean": 119.9925,
+        "std": 307.766
+      }
+    }
+  },
+  "note": "Price is a result-fact layer, NOT a Trend score. EXACT canonical T-1 (explicit day-pair mapping + two bars join; missing exact T-1 bar -> return UNAVAILABLE; no LAG/fallback). price_candidate_count = PIT∩valid∩close(T); price_valid_count = candidate with exact T-1 close; missing_exact_t1_count = candidate - valid. amount_valid_count = PIT∩valid∩amount(T) (no T-1 required). return>0=advance, <0=decline, ==0=unchanged; no ±threshold."
+}

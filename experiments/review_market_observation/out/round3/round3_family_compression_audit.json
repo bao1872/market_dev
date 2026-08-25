@@ -1,0 +1,304 @@
+{
+  "P": {
+    "components": [
+      "scope_return_1d",
+      "advance_ratio",
+      "trend_price_alignment_ratio",
+      "new_high_ratio",
+      "price_position_median"
+    ],
+    "dimensions_spanned": [
+      "BREADTH",
+      "MIXED",
+      "PRICE"
+    ],
+    "n_dimensions": 3,
+    "component_pair_correlations": {
+      "total_pairs": 1,
+      "high_corr_pairs_ge_0_7": [],
+      "low_corr_pairs_lt_0_4": []
+    },
+    "component_to_family_raw_corr": [
+      [
+        "price_position_median",
+        0.9976
+      ],
+      [
+        "new_high_ratio",
+        0.5931
+      ]
+    ],
+    "verdict": "RESTRUCTURE_CANDIDATE"
+  },
+  "Q": {
+    "components": [
+      "uptrend_member_ratio",
+      "main_structure_up_ratio",
+      "short_structure_up_ratio",
+      "trend_structure_momentum_alignment_ratio",
+      "structure_net_event_rate",
+      "structure_breakdown_diffusion"
+    ],
+    "dimensions_spanned": [
+      "DIFFUSION",
+      "STATE",
+      "TRANSITION"
+    ],
+    "n_dimensions": 3,
+    "component_pair_correlations": {
+      "total_pairs": 15,
+      "high_corr_pairs_ge_0_7": [
+        [
+          "uptrend_member_ratio",
+          "main_structure_up_ratio",
+          0.9422
+        ],
+        [
+          "uptrend_member_ratio",
+          "structure_net_event_rate",
+          0.8375
+        ],
+        [
+          "uptrend_member_ratio",
+          "structure_breakdown_diffusion",
+          -0.8331
+        ],
+        [
+          "main_structure_up_ratio",
+          "structure_net_event_rate",
+          0.8062
+        ],
+        [
+          "main_structure_up_ratio",
+          "structure_breakdown_diffusion",
+          -0.7719
+        ],
+        [
+          "short_structure_up_ratio",
+          "structure_net_event_rate",
+          0.8377
+        ],
+        [
+          "short_structure_up_ratio",
+          "structure_breakdown_diffusion",
+          -0.8531
+        ],
+        [
+          "structure_net_event_rate",
+          "structure_breakdown_diffusion",
+          -0.9564
+        ]
+      ],
+      "low_corr_pairs_lt_0_4": [
+        [
+          "uptrend_member_ratio",
+          "trend_structure_momentum_alignment_ratio",
+          -0.2846
+        ],
+        [
+          "main_structure_up_ratio",
+          "trend_structure_momentum_alignment_ratio",
+          -0.3292
+        ],
+        [
+          "short_structure_up_ratio",
+          "trend_structure_momentum_alignment_ratio",
+          -0.1227
+        ],
+        [
+          "trend_structure_momentum_alignment_ratio",
+          "structure_net_event_rate",
+          -0.1543
+        ],
+        [
+          "trend_structure_momentum_alignment_ratio",
+          "structure_breakdown_diffusion",
+          -0.0012
+        ]
+      ]
+    },
+    "component_to_family_raw_corr": [
+      [
+        "structure_net_event_rate",
+        0.9622
+      ],
+      [
+        "structure_breakdown_diffusion",
+        -0.9557
+      ],
+      [
+        "uptrend_member_ratio",
+        0.934
+      ],
+      [
+        "main_structure_up_ratio",
+        0.8792
+      ],
+      [
+        "short_structure_up_ratio",
+        0.7934
+      ],
+      [
+        "trend_structure_momentum_alignment_ratio",
+        -0.1389
+      ]
+    ],
+    "verdict": "RESTRUCTURE_CANDIDATE"
+  },
+  "U": {
+    "components": [
+      "multi_dim_improving_ratio",
+      "momentum_enhancing_coverage",
+      "fresh_structure_event_coverage",
+      "non_head_participation_ratio",
+      "leader_follower_common_confirm_ratio"
+    ],
+    "dimensions_spanned": [
+      "DIFFUSION",
+      "PARTICIPATION",
+      "TRANSITION"
+    ],
+    "n_dimensions": 3,
+    "component_pair_correlations": {
+      "total_pairs": 3,
+      "high_corr_pairs_ge_0_7": [],
+      "low_corr_pairs_lt_0_4": []
+    },
+    "component_to_family_raw_corr": [
+      [
+        "momentum_enhancing_coverage",
+        0.9975
+      ],
+      [
+        "multi_dim_improving_ratio",
+        0.5099
+      ],
+      [
+        "fresh_structure_event_coverage",
+        NaN
+      ]
+    ],
+    "verdict": "RESTRUCTURE_CANDIDATE"
+  },
+  "C": {
+    "components": [
+      "top5_price_change_contribution",
+      "top10pct_event_contribution",
+      "member_change_hhi",
+      "leader_median_diff",
+      "top5_amount_contribution"
+    ],
+    "dimensions_spanned": [
+      "CONCENTRATION"
+    ],
+    "n_dimensions": 1,
+    "component_pair_correlations": {
+      "total_pairs": 1,
+      "high_corr_pairs_ge_0_7": [],
+      "low_corr_pairs_lt_0_4": [
+        [
+          "top10pct_event_contribution",
+          "top5_amount_contribution",
+          0.0967
+        ]
+      ]
+    },
+    "component_to_family_raw_corr": [
+      [
+        "top5_amount_contribution",
+        0.9999
+      ],
+      [
+        "top10pct_event_contribution",
+        0.1015
+      ]
+    ],
+    "verdict": "RESTRUCTURE_CANDIDATE"
+  },
+  "V": {
+    "components": [
+      "volume_expansion_ratio",
+      "amount_expansion_ratio",
+      "volume_percentile20_median",
+      "amount_percentile200_median",
+      "trend_segment_volume_improvement",
+      "price_amount_efficiency_median"
+    ],
+    "dimensions_spanned": [
+      "MIXED",
+      "OTHER",
+      "PARTICIPATION"
+    ],
+    "n_dimensions": 3,
+    "component_pair_correlations": {
+      "total_pairs": 10,
+      "high_corr_pairs_ge_0_7": [
+        [
+          "volume_expansion_ratio",
+          "amount_expansion_ratio",
+          0.9768
+        ],
+        [
+          "volume_expansion_ratio",
+          "volume_percentile20_median",
+          0.8829
+        ],
+        [
+          "volume_expansion_ratio",
+          "amount_percentile200_median",
+          0.7069
+        ],
+        [
+          "amount_expansion_ratio",
+          "volume_percentile20_median",
+          0.8477
+        ],
+        [
+          "amount_expansion_ratio",
+          "amount_percentile200_median",
+          0.7063
+        ]
+      ],
+      "low_corr_pairs_lt_0_4": [
+        [
+          "volume_expansion_ratio",
+          "trend_segment_volume_improvement",
+          0.0631
+        ],
+        [
+          "amount_expansion_ratio",
+          "trend_segment_volume_improvement",
+          0.0816
+        ],
+        [
+          "volume_percentile20_median",
+          "trend_segment_volume_improvement",
+          -0.0418
+        ]
+      ]
+    },
+    "component_to_family_raw_corr": [
+      [
+        "amount_percentile200_median",
+        0.9364
+      ],
+      [
+        "trend_segment_volume_improvement",
+        0.7529
+      ],
+      [
+        "amount_expansion_ratio",
+        0.6118
+      ],
+      [
+        "volume_expansion_ratio",
+        0.5967
+      ],
+      [
+        "volume_percentile20_median",
+        0.522
+      ]
+    ],
+    "verdict": "INCONCLUSIVE"
+  }
+}
