@@ -1025,9 +1025,12 @@ test('SRC1. Dynamics 面板使用分 series 日期（不是单一 dates）', () 
 
 test('SRC2. Dynamics 面板有图表标题', () => {
   const src = read('ScopeDynamicsPanel.tsx')
-  assert.match(src, /Position.*title|title.*Position/, 'Position 图必须有标题')
-  assert.match(src, /Velocity.*title|title.*Velocity/, 'Velocity 图必须有标题')
-  assert.match(src, /Acceleration.*title|title.*Acceleration/, 'Acceleration 图必须有标题')
+  // REVIEW-UX-CN-01：图表标题经 ReviewTerm termKey 渲染（position/velocity/acceleration）
+  assert.match(src, /termKey="position" compact/, 'Position 图必须有标题')
+  assert.match(src, /termKey="velocity" compact/, 'Velocity 图必须有标题')
+  assert.match(src, /termKey="acceleration" compact/, 'Acceleration 图必须有标题')
+  // 必须渲染三张独立图表（SeriesChart 实例），每张带显式标题
+  assert.ok((src.match(/<SeriesChart /g) ?? []).length >= 3, '必须渲染三个 SeriesChart 图实例')
 })
 
 test('SRC3. Dynamics 面板不再 export alignDynamicsSeries（test-driven export 已移除）', () => {

@@ -10,7 +10,7 @@
 // - ready + phase=null → 显示 "—"，不是第七个 phase。
 // - 图表渲染 lightweight-charts（例：import { createChart }），不引入新图表库。
 // - 三张图均有显式标题（Position / Velocity / Acceleration），neutral analytic 线色。
-import { useEffect, useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, type ReactNode } from 'react'
 import { createChart, type IChartApi, type ISeriesApi, type AutoscaleInfo, type IPriceLine } from 'lightweight-charts'
 import type { ScopeDynamicsParsed } from './scopeDetailContract'
 import type { ScopePhaseFact } from './types'
@@ -22,7 +22,8 @@ import {
   type ScopeDynamicsChartData,
 } from './scopeDynamicsChart'
 import { currentPhaseFact } from './scopeDetailContract'
-import { NULL_DISPLAY, formatPosition, formatNumberNullable, formatPercentNullable, formatPhaseLabel } from './reviewFormat'
+import { NULL_DISPLAY, formatPosition, formatNumberNullable, formatPercentNullable, formatPhaseLabel, formatReadiness } from './reviewFormat'
+import ReviewTerm from './ReviewTerm'
 import styles from './review.module.scss'
 
 /** neutral 分析线色（非 brand green，brand green 保留给 selection/focus） */
@@ -33,7 +34,6 @@ function useInlineChart(
   containerRef: React.RefObject<HTMLDivElement | null>,
   data: ScopeDynamicsChartData,
   kind: 'position' | 'offset',
-  title: string,
   showZeroLine: boolean,
 ) {
   useEffect(() => {
@@ -70,8 +70,9 @@ function useInlineChart(
     return () => {
       chart.remove()
     }
-    // containerRef 为稳定 ref，不会导致 effect 重跑；显式纳入依赖以对齐 hooks 规范
-  }, [data, kind, title, showZeroLine, containerRef])
+    // containerRef 为稳定 ref，不会导致 effect 重跑；data/kind/showZeroLine 变化才重建图表。
+    // title 为 ReactNode（ReviewTerm），不参与 effect 依赖，避免 JSX element 引用变化触发重建。
+  }, [data, kind, showZeroLine, containerRef])
 }
 
 function SeriesChart({
@@ -82,11 +83,11 @@ function SeriesChart({
 }: {
   data: ScopeDynamicsChartData
   kind: 'position' | 'offset'
-  title: string
+  title: ReactNode
   showZeroLine: boolean
 }) {
   const ref = useRef<HTMLDivElement>(null)
-  useInlineChart(ref, data, kind, title, showZeroLine)
+  useInlineChart(ref, data, kind, showZeroLine)
   return (
     <div className={styles.dynamicsChartWrapper} data-chart-kind={kind}>
       <div className={styles.dynamicsChartTitle}>{title}</div>
@@ -95,9 +96,9 @@ function SeriesChart({
   )
 }
 
-function FactRow({ label, value, title }: { label: string; value: string; title?: string }) {
+function FactRow({ label, value }: { label: ReactNode; value: string }) {
   return (
-    <div className={styles.factRow} title={title}>
+    <div className={styles.factRow}>
       <span className={styles.factLabel}>{label}</span>
       <span className={styles.factValue}>{value}</span>
     </div>
@@ -108,17 +109,19 @@ function CurrentFactStrip({ phaseFact }: { phaseFact: ScopePhaseFact | null }) {
   const f = phaseFact
   return (
     <div className={styles.factStrip}>
-      <FactRow label="Status" value={f?.status ?? NULL_DISPLAY} title="来自末尾 dynamics_phase observation" />
-      <FactRow label="Phase" value={formatPhaseLabel(f?.phase)} title="来自末尾 dynamics_phase observation" />
-      <FactRow label="Position" value={formatPosition(f?.position)} />
-      <FactRow label="Velocity" value={formatNumberNullable(f?.velocity)} />
-      <FactRow label="Acceleration" value={formatNumberNullable(f?.acceleration)} />
+      {/* [REVIEW-PRODUCT-CLOSURE-01 Phase G] 状态经 formatReadiness 中文化：
+          ready → 可用，不展示原始 "ready" */}
+      <FactRow label={<ReviewTerm termKey="status" compact />} value={formatReadiness(f?.status)} />
+      <FactRow label={<ReviewTerm termKey="phaseCurrent" compact />} value={formatPhaseLabel(f?.phase)} />
+      <FactRow label={<ReviewTerm termKey="position" compact />} value={formatPosition(f?.position)} />
+      <FactRow label={<ReviewTerm termKey="velocity" compact />} value={formatNumberNullable(f?.velocity)} />
+      <FactRow label={<ReviewTerm termKey="acceleration" compact />} value={formatNumberNullable(f?.acceleration)} />
       <FactRow
-        label="Upper Occ"
+        label={<ReviewTerm termKey="upperOccupancy" compact />}
         value={f?.upper_occupancy === null || f?.upper_occupancy === undefined ? NULL_DISPLAY : formatPercentNullable(f.upper_occupancy)}
       />
       <FactRow
-        label="Lower Occ"
+        label={<ReviewTerm termKey="lowerOccupancy" compact />}
         value={f?.lower_occupancy === null || f?.lower_occupancy === undefined ? NULL_DISPLAY : formatPercentNullable(f.lower_occupancy)}
       />
     </div>
@@ -146,9 +149,9 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
   const current = currentPhaseFact(dynamics)
   return (
     <div className={styles.panel} data-panel="dynamics">
-      <SeriesChart data={positionData} kind="position" title="Position" showZeroLine={false} />
-      <SeriesChart data={velocityData} kind="offset" title="Velocity" showZeroLine />
-      <SeriesChart data={accelerationData} kind="offset" title="Acceleration" showZeroLine />
+      <SeriesChart data={positionData} kind="position" title={<ReviewTerm termKey="position" compact />} showZeroLine={false} />
+      <SeriesChart data={velocityData} kind="offset" title={<ReviewTerm termKey="velocity" compact />} showZeroLine />
+      <SeriesChart data={accelerationData} kind="offset" title={<ReviewTerm termKey="acceleration" compact />} showZeroLine />
       <CurrentFactStrip phaseFact={current} />
     </div>
   )

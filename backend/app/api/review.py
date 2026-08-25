@@ -25,6 +25,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import date
 from typing import Any
 
@@ -33,6 +34,12 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.domain.review.member_fact import (
+    collect_composition_member_ids,
+    is_uuid,
+)
+from app.domain.review.observation_groups import build_l2_observation_groups
+from app.models.instrument import Instrument
 from app.models.market_review import (
     MarketReviewRun,
     ReviewScopeObservationFact,
@@ -65,7 +72,6 @@ from app.services.review_publication_service import (
     get_published_review_run_id,
     list_published_review_dates,
 )
-from app.domain.review.observation_groups import build_l2_observation_groups
 
 logger = logging.getLogger("api.review")
 
@@ -537,6 +543,34 @@ async def get_review_scope_composition(
     else:
         algorithm_version = run.algorithm_version
 
+    # [REVIEW-PRODUCT-CLOSURE-01 Phase C] Member identity directory — ADDITIVE
+    # display metadata.  ONE bulk Instrument query for every member id referenced
+    # by the Composition (leadership id arrays + attribution member_id); zero
+    # N+1.  Missing ids simply stay out of the mapping (frontend falls back to
+    # the short/internal id).  Nothing here rewrites the persisted Composition.
+    member_directory: dict[str, dict[str, str]] = {}
+    # [R3A-BE2] snapshot may be None (composition missing) -> keep empty directory,
+    # do NOT touch snapshot.composition_payload. composition stays null, endpoint 200.
+    composition_ok = snapshot is not None and isinstance(snapshot.composition_payload, dict)
+    if composition_ok:
+        ref_ids = [
+            mid for mid in collect_composition_member_ids(snapshot.composition_payload)
+            if is_uuid(mid)
+        ]
+        if ref_ids:
+            id_uuids = [uuid.UUID(mid) for mid in ref_ids]
+            inst_rows = (
+                await db.execute(
+                    select(Instrument.id, Instrument.symbol, Instrument.name).where(
+                        Instrument.id.in_(id_uuids)
+                    )
+                )
+            ).all()
+            member_directory = {
+                str(inst_id): {"symbol": symbol, "name": name}
+                for inst_id, symbol, name in inst_rows
+            }
+
     return ReviewScopeCompositionDetailResponse(
         reviewRunId=str(run.id),
         tradeDate=fact.trade_date.isoformat(),
@@ -547,6 +581,7 @@ async def get_review_scope_composition(
         observation=observation,
         observationGroups=observation_groups,
         composition=(snapshot.composition_payload if snapshot is not None else None),
+        memberDirectory=member_directory,
     )
 
 

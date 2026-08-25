@@ -561,6 +561,13 @@ export interface ReviewScopeCompositionDetailResponse {
   observation: Record<string, unknown>
   observationGroups: ObservationGroups
   composition: ReviewScopeComposition | null
+  /**
+   * [REVIEW-PRODUCT-CLOSURE-01 Phase C] 成员身份目录（ADDITIVE display metadata）。
+   * ``{instrument_uuid: {symbol, name}}`` —— 后端一次批量查询解析 composition.leadership /
+   * member_attribution 引用的全部成员。前端唯一展示 owner displayMember(id) 消费它，
+   * 绝不二次发 metadata 请求。Composition 缺失 / 无引用成员时为空 dict。
+   */
+  memberDirectory: Record<string, { symbol: string; name: string }>
 }
 
 // ------------------------------------------------------------

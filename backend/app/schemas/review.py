@@ -377,6 +377,16 @@ class ReviewScopeCompositionDetailResponse(BaseModel):
             "member_attribution / composition_readiness）；缺失时为 null（Fact-only detail）"
         ),
     )
+    memberDirectory: dict[str, dict[str, str]] = Field(
+        default_factory=dict,
+        description=(
+            "[REVIEW-PRODUCT-CLOSURE-01 Phase C] 追加显示元数据（ADDITIVE，不写回、不改写"
+            "persisted Composition）：``{instrument_uuid: {symbol, name}}``。一次批量查询覆盖"
+            "composition.leadership（current/previous/entrant/exit ids）与 "
+            "composition.member_attribution（member_id）引用的全部成员；前端唯一展示 owner "
+            "``displayMember(id)`` 用其解析 名称+代码。Composition 缺失 / 无成员引用时为空 dict。"
+        ),
+    )
 
 
 # =============================================================================

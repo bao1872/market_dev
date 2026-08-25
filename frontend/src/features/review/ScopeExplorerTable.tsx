@@ -6,6 +6,8 @@
 // Breadth 只展示持久化的 advance/decline/unchanged 三分量，不计算 composite score。
 // A股红涨绿跌：EW Return / Capital Tilt 正=红 负=绿；品牌色仅用于选中行。
 // R2B Freshness / Technical 为中性 analytics，不使用方向色（§15）。
+// REVIEW-UX-CN-01：表头经 reviewCopy + ReviewTerm 中文化并带 tooltip；
+// 单元格计算与 canonical 字段一律不变。
 import type { ReviewScopeListItem } from './types'
 import {
   NULL_DISPLAY,
@@ -15,6 +17,7 @@ import {
   formatPhaseLabel,
   formatContributionFraction,
 } from './reviewFormat'
+import ReviewTerm from './ReviewTerm'
 import styles from './review.module.scss'
 
 function directionClass(value: number | null | undefined): string {
@@ -105,21 +108,21 @@ export interface ScopeExplorerTableProps {
 export default function ScopeExplorerTable({ rows, selectedScopeKey, onSelectScope }: ScopeExplorerTableProps) {
   return (
     <div className={styles.explorerTableWrap}>
-      <table className={styles.table}>
+      <table className={styles.explorerScopeTable}>
         <thead>
           <tr>
-            <th>Scope</th>
-            <th>Phase</th>
-            <th className={styles.numCell}>Position</th>
-            <th className={styles.numCell}>Velocity</th>
-            <th className={styles.numCell}>Acceleration</th>
-            <th className={styles.numCell}>EW Return</th>
-            <th className={styles.numCell}>Capital Tilt</th>
-            <th>Breadth</th>
-            <th className={styles.numCell}>Leadership Migration</th>
-            <th className={styles.numCell}>Coverage</th>
-            <th>Freshness</th>
-            <th>Technical</th>
+            <th><ReviewTerm termKey="scope" /></th>
+            <th><ReviewTerm termKey="phase" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="position" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="velocity" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="acceleration" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="equalWeightReturn" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="capitalTilt" /></th>
+            <th><ReviewTerm termKey="breadth" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="leadershipMigration" /></th>
+            <th className={styles.numCell}><ReviewTerm termKey="coverage" /></th>
+            <th><ReviewTerm termKey="freshness" /></th>
+            <th><ReviewTerm termKey="technical" /></th>
           </tr>
         </thead>
         <tbody>
@@ -140,7 +143,7 @@ export default function ScopeExplorerTable({ rows, selectedScopeKey, onSelectSco
                 tabIndex={0}
                 role="button"
                 aria-selected={selected}
-                aria-label={`选择 Scope ${row.scopeName ?? row.scopeKey}`}
+                aria-label={`选择板块 ${row.scopeName ?? row.scopeKey}`}
               >
                 <td>
                   <div className={styles.scopeCellName}>{row.scopeName ?? NULL_DISPLAY}</div>

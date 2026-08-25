@@ -2,7 +2,10 @@
 // 规则：
 // - null/undefined → 显示占位符 "—"（绝不把 null 当作 0）
 // - 只做展示格式化，不计算 phase / capital tilt / migration / score / ranking
+// - phase / readiness 展示 label 经 reviewCopy 中文化映射；canonical 值不变
 // - 无 React / SCSS 依赖，可被 node --test 直接运行
+
+import { PHASE_LABELS, READINESS_LABELS } from './reviewCopy'
 
 export const NULL_DISPLAY = '—'
 
@@ -33,10 +36,16 @@ export function formatPosition(value: number | null | undefined): string {
   return String(Math.round(value * 100) / 100)
 }
 
-/** Dynamics Phase 展示标签（可在此做本地化映射；不计算 phase） */
+/** Dynamics Phase 展示标签（REVIEW-UX-CN-01：经 reviewCopy 中文化映射；不计算 phase，canonical 值不变） */
 export function formatPhaseLabel(phase: string | null | undefined): string {
   if (!phase) return NULL_DISPLAY
-  return phase
+  return PHASE_LABELS[phase] ?? phase
+}
+
+/** Composition Readiness 展示标签（REVIEW-UX-CN-01：经 reviewCopy 中文化映射；canonical 值不变） */
+export function formatReadiness(readiness: string | null | undefined): string {
+  if (!readiness) return NULL_DISPLAY
+  return READINESS_LABELS[readiness] ?? readiness
 }
 
 /**
@@ -47,6 +56,52 @@ export function memberName(m: { member_id: string | number; member_name?: string
   return m.member_name && String(m.member_name).trim() !== '' && String(m.member_name) !== String(m.member_id)
     ? String(m.member_name)
     : String(m.member_id)
+}
+
+/** 成员身份目录类型（后端 memberDirectory 值）。 */
+export interface MemberDirectoryEntry {
+  symbol: string
+  name: string
+}
+
+export type MemberDirectory = Record<string, MemberDirectoryEntry>
+
+/**
+ * [REVIEW-PRODUCT-CLOSURE-01 Phase C] 成员展示唯一 owner。
+ * 优先级：目录中 name+symbol 齐全 → "名称 · 代码"；仅 symbol → symbol；
+ * 目录缺失该 id 时 → 短/内部 id（UUID 兜底）。
+ * UUID 只出现在 title/技术 hover，不作为主展示。
+ */
+export function displayMember(
+  memberId: string | number,
+  directory: MemberDirectory | null | undefined,
+): string {
+  const id = String(memberId)
+  const entry = directory?.[id]
+  if (!entry) return id
+  const name = entry.name?.trim()
+  const symbol = entry.symbol?.trim()
+  if (name && symbol) return `${name} · ${symbol}`
+  if (name) return name
+  if (symbol) return symbol
+  return id
+}
+
+/** 从 MemberEvidence 读取成员展示名：优先 directory，其次 payload member_name，最后 UUID。 */
+export function displayMemberEvidence(
+  m: { member_id: string | number; member_name?: string | null },
+  directory: MemberDirectory | null | undefined,
+): string {
+  const id = String(m.member_id)
+  const entry = directory?.[id]
+  if (entry) {
+    const name = entry.name?.trim()
+    const symbol = entry.symbol?.trim()
+    if (name && symbol) return `${name} · ${symbol}`
+    if (name) return name
+    if (symbol) return symbol
+  }
+  return memberName(m)
 }
 
 /**

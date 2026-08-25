@@ -138,7 +138,7 @@ export default function ScopeExplorerWorkspace({
               />
               <div className={styles.explorerFooter}>
                 <span className={styles.explorerCount}>
-                  {filteredTotal} matched / {familyTotal} total
+                  {filteredTotal} 匹配 / 共 {familyTotal} 个板块
                 </span>
                 <div className={styles.pagination}>
                   <select

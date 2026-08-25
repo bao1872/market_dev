@@ -5,21 +5,26 @@
 // - tab 状态只来自 canonical URL（SSOT），组件无本地副本。
 // - 点击 tab 只 patch `tab`，preserve date/family/scopeKey/view/phase/readiness/sort/page/pageSize/q。
 // - brand green 仅用于当前激活 tab（focus/focus）。
+// REVIEW-UX-CN-01：tab label 中文化（reviewCopy.DETAIL_TAB_LABELS）+ hover tooltip
+// （reviewCopy.DETAIL_TAB_HELP，经 ReviewTerm compact 渲染，无 ⓘ 图标）。
 import type { ReviewDetailTab } from './urlState'
+import ReviewTerm from './ReviewTerm'
+import { DETAIL_TAB_LABELS, DETAIL_TAB_HELP } from './reviewCopy'
 import styles from './review.module.scss'
 
 export interface ScopeDetailTabDef {
   value: ReviewDetailTab
   label: string
+  help: string
 }
 
 export const SCOPE_DETAIL_TABS: ReadonlyArray<ScopeDetailTabDef> = [
-  { value: 'current', label: 'Current' },
-  { value: 'dynamics', label: 'Dynamics' },
-  { value: 'internal', label: 'Internal' },
-  { value: 'leadership', label: 'Leadership' },
-  { value: 'attribution', label: 'Attribution' },
-  { value: 'facts', label: 'Facts' },
+  { value: 'current', label: DETAIL_TAB_LABELS.current, help: DETAIL_TAB_HELP.current },
+  { value: 'dynamics', label: DETAIL_TAB_LABELS.dynamics, help: DETAIL_TAB_HELP.dynamics },
+  { value: 'internal', label: DETAIL_TAB_LABELS.internal, help: DETAIL_TAB_HELP.internal },
+  { value: 'leadership', label: DETAIL_TAB_LABELS.leadership, help: DETAIL_TAB_HELP.leadership },
+  { value: 'attribution', label: DETAIL_TAB_LABELS.attribution, help: DETAIL_TAB_HELP.attribution },
+  { value: 'facts', label: DETAIL_TAB_LABELS.facts, help: DETAIL_TAB_HELP.facts },
 ]
 
 export interface ScopeDetailTabsProps {
@@ -43,7 +48,7 @@ export default function ScopeDetailTabs({ tab, onTabChange }: ScopeDetailTabsPro
             className={active ? `${styles.detailTab} ${styles.detailTabActive}` : styles.detailTab}
             onClick={() => onTabChange(def.value)}
           >
-            {def.label}
+            <ReviewTerm label={def.label} help={def.help} compact />
           </button>
         )
       })}

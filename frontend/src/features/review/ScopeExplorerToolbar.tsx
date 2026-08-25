@@ -2,8 +2,10 @@
 // 仅展示已激活 canonical family（industry_l1/l2/l3/concept）；
 // 不暴露 market/major_index/style；无“全部类型”模式。
 // q / phase / readiness / sort 均为展示层状态（sort 为 R2A 新增的单一排序 owner）。
+// REVIEW-UX-CN-01：所有用户可见 label 中文化；canonical value（phase/readiness/sort）不变。
 import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness } from './types'
 import type { ReviewExplorerView, ReviewUrlState, ReviewSort } from './urlState'
+import { PHASE_LABELS, READINESS_LABELS, SORT_LABELS } from './reviewCopy'
 import styles from './review.module.scss'
 
 const FAMILY_OPTIONS: ReadonlyArray<{ value: ReviewScopeFamily; label: string }> = [
@@ -28,19 +30,19 @@ const READINESS_OPTIONS: ReadonlyArray<ReviewCompositionReadiness> = [
   'unavailable_current',
 ]
 
-// R2A/R2B：排序枚举 → 用户可见标签（降序，仅展示最强/最高 persisted 事实，不做机会标签）
+// R2A/R2B：排序枚举 → 用户可见 label（canonical value 不变，中文经 reviewCopy.SORT_LABELS）
 const SORT_OPTIONS: ReadonlyArray<{ value: ReviewSort; label: string }> = [
-  { value: 'velocity_desc', label: 'Velocity ↓' },
-  { value: 'acceleration_desc', label: 'Acceleration ↓' },
-  { value: 'position_desc', label: 'Position ↓' },
-  { value: 'equal_weight_return_desc', label: 'EW Return ↓' },
-  { value: 'capital_tilt_desc', label: 'Capital Tilt ↓' },
-  { value: 'migration_desc', label: 'Leadership Migration ↓' },
-  { value: 'coverage_desc', label: 'Coverage ↓' },
-  { value: 'freshness_density_desc', label: 'Freshness ρ ↓' },
-  { value: 'freshness_today_desc', label: 'Today Events ↓' },
-  { value: 'technical_hhi_desc', label: 'Tech HHI ↓' },
-  { value: 'leader_median_gap_desc', label: 'Leader Gap ↓' },
+  { value: 'velocity_desc', label: SORT_LABELS.velocity_desc },
+  { value: 'acceleration_desc', label: SORT_LABELS.acceleration_desc },
+  { value: 'position_desc', label: SORT_LABELS.position_desc },
+  { value: 'equal_weight_return_desc', label: SORT_LABELS.equal_weight_return_desc },
+  { value: 'capital_tilt_desc', label: SORT_LABELS.capital_tilt_desc },
+  { value: 'migration_desc', label: SORT_LABELS.migration_desc },
+  { value: 'coverage_desc', label: SORT_LABELS.coverage_desc },
+  { value: 'freshness_density_desc', label: SORT_LABELS.freshness_density_desc },
+  { value: 'freshness_today_desc', label: SORT_LABELS.freshness_today_desc },
+  { value: 'technical_hhi_desc', label: SORT_LABELS.technical_hhi_desc },
+  { value: 'leader_median_gap_desc', label: SORT_LABELS.leader_median_gap_desc },
 ]
 
 export interface ScopeExplorerToolbarProps {
@@ -87,21 +89,21 @@ export default function ScopeExplorerToolbar({
         <input
           className={styles.searchInput}
           type="search"
-          placeholder="搜索 scope / key"
+          placeholder="搜索板块 / 概念名称"
           value={q}
           onChange={(e) => onFilterChange({ q: e.target.value })}
-          aria-label="搜索 Scope"
+          aria-label="搜索板块 / 概念"
         />
         <select
           className={styles.select}
           value={phase ?? ''}
           onChange={(e) => onFilterChange({ phase: e.target.value === '' ? null : (e.target.value as ReviewDynamicsPhase) })}
-          aria-label="Phase 过滤"
+          aria-label="阶段过滤"
         >
-          <option value="">Phase: 全部</option>
+          <option value="">阶段：全部</option>
           {PHASE_OPTIONS.map((p) => (
             <option key={p} value={p}>
-              {p}
+              {PHASE_LABELS[p]}
             </option>
           ))}
         </select>
@@ -111,12 +113,12 @@ export default function ScopeExplorerToolbar({
           onChange={(e) =>
             onFilterChange({ readiness: e.target.value === '' ? null : (e.target.value as ReviewCompositionReadiness) })
           }
-          aria-label="Readiness 过滤"
+          aria-label="数据状态过滤"
         >
-          <option value="">Readiness: 全部</option>
+          <option value="">数据状态：全部</option>
           {READINESS_OPTIONS.map((r) => (
             <option key={r} value={r}>
-              {r}
+              {READINESS_LABELS[r]}
             </option>
           ))}
         </select>
@@ -138,14 +140,14 @@ export default function ScopeExplorerToolbar({
             className={view === 'table' ? `${styles.viewBtn} ${styles.viewBtnActive}` : styles.viewBtn}
             onClick={() => onViewChange('table')}
           >
-            Table
+            表格
           </button>
           <button
             type="button"
             className={view === 'trajectory' ? `${styles.viewBtn} ${styles.viewBtnActive}` : styles.viewBtn}
             onClick={() => onViewChange('trajectory')}
           >
-            Trajectory
+            轨迹图
           </button>
         </div>
       </div>

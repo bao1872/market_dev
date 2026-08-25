@@ -8,6 +8,7 @@
 // - 默认不是 JSON blob；嵌套未知节点用通用递归事实查看器，但无业务解释/score/推断标签。
 import { observationGroups } from './scopeDetailContract'
 import { NULL_DISPLAY } from './reviewFormat'
+import { FACT_GROUP_ALIASES } from './reviewCopy'
 import styles from './review.module.scss'
 
 export function scalarDisplay(value: unknown): string | null {
@@ -78,12 +79,18 @@ export default function ScopeRawFactsPanel({
   }
   return (
     <div className={styles.panel} data-panel="facts">
-      {groups.map((g) => (
-        <section key={g.key} className={styles.factGroup} data-fact-group={g.key}>
-          <h4 className={styles.factGroupHeading}>{g.key}</h4>
-          <FactNode k={g.key} v={g.value} />
-        </section>
-      ))}
+      {groups.map((g) => {
+        const alias = FACT_GROUP_ALIASES[g.key] ?? g.key
+        return (
+          <section key={g.key} className={styles.factGroup} data-fact-group={g.key}>
+            {/* REVIEW-UX-CN-01：中文显示名 + 小号 canonical key（展示专用别名，canonical key 不变） */}
+            <h4 className={styles.factGroupHeading}>
+              {alias} <code className={styles.factGroupKey}>{g.key}</code>
+            </h4>
+            <FactNode k={g.key} v={g.value} />
+          </section>
+        )
+      })}
     </div>
   )
 }

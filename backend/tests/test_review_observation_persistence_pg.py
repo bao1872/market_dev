@@ -474,12 +474,27 @@ def _composition_payload(
     """
     historical_dynamics: dict = {"status": dynamics_status}
     if include_position_phase:
-        historical_dynamics["phase"] = phase
-        historical_dynamics["position"] = position
-        historical_dynamics["velocity"] = velocity
-        historical_dynamics["acceleration"] = acceleration
-        historical_dynamics["upper_occupancy"] = upper_occupancy
-        historical_dynamics["lower_occupancy"] = lower_occupancy
+        # [REVIEW-PRODUCT-CLOSURE-01 Phase B] CANONICAL nested shape ONLY:
+        #   historical_dynamics.scope_dynamics.dynamics_phase[-1]
+        # The obsolete flat paths (historical_dynamics.phase / .position / ...)
+        # are NOT produced by the canonical owner AND are no longer read by the
+        # list projection — this fixture must mirror the real nested shape
+        # (2026-08-24 published run evidence) so the projection test stays honest.
+        historical_dynamics["scope_dynamics"] = {
+            "dynamics_phase": [
+                {
+                    "trade_date": trade_date.isoformat(),
+                    "status": dynamics_status,
+                    "phase": phase,
+                    "position": position,
+                    "velocity": velocity,
+                    "acceleration": acceleration,
+                    "upper_occupancy": upper_occupancy,
+                    "lower_occupancy": lower_occupancy,
+                }
+            ],
+            "historical_dynamics": {},
+        }
     return {
         "scope": {"scope_type": scope_type, "scope_key": scope_key},
         "trade_date": trade_date.isoformat(),
@@ -636,10 +651,185 @@ async def test_scope_summary_projection_jsonb_null_key_yields_none(
     c = rows[0]
     assert c.composition_present is True
     assert c.dynamics_status == "ready"
-    # historical_dynamics lacks phase/position keys -> NULL -> None
+    # historical_dynamics lacks the nested scope_dynamics.dynamics_phase -> NULL -> None
     assert c.phase is None
     assert c.position is None
     assert c.velocity is None
+
+
+async def test_scope_summary_projection_nested_dynamics_current_phase(
+    db_session: AsyncSession,
+) -> None:
+    """[REVIEW-PRODUCT-CLOSURE-01 Phase B] The 6 Dynamics fields project from the
+    NESTED canonical path ``historical_dynamics.scope_dynamics.dynamics_phase[-1]``
+    (the current-phase fact) — NOT from obsolete flat paths.
+
+    Mirrors the 2026-08-24 published run evidence (3D打印 concept scope):
+    top-level ``status=ready`` + nested ``dynamics_phase[-1]`` with the real
+    position/velocity/acceleration/occupancies.
+    """
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="D3D", trade_date=T),
+        _canonical_obs(scope_type="concept", scope_key="D3D", marker_mean=0.04),
+        review_run_id=run.id,
+    )
+    await save_scope_composition_snapshot(
+        db_session,
+        review_run_id=run.id,
+        scope_type="concept",
+        scope_key="D3D",
+        trade_date=T,
+        algorithm_version="review-2.0.0",
+        composition_payload=_composition_payload(
+            scope_type="concept", scope_key="D3D", trade_date=T,
+            phase="Weakening", position=32.7731, velocity=-5.2843,
+            acceleration=-2.8553, upper_occupancy=0.3, lower_occupancy=0.1,
+        ),
+    )
+    await db_session.commit()
+
+    total, rows = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=20,
+    )
+    assert total == 1
+    r = rows[0]
+    assert r.composition_present is True
+    assert r.dynamics_status == "ready"
+    assert r.phase == "Weakening"
+    assert r.position == pytest.approx(32.7731)
+    assert r.velocity == pytest.approx(-5.2843)
+    assert r.acceleration == pytest.approx(-2.8553)
+    assert r.upper_occupancy == pytest.approx(0.3)
+    assert r.lower_occupancy == pytest.approx(0.1)
+
+
+async def test_scope_summary_projection_no_legacy_flat_fallback(
+    db_session: AsyncSession,
+) -> None:
+    """[REVIEW-PRODUCT-CLOSURE-01 Phase B] The projection must NOT fall back to
+    the obsolete FLAT paths.  A Composition that only carries the old flat keys
+    (``historical_dynamics.phase`` / ``.position`` / ... — the shape that produced
+    the original list-API NULL bug) must still project all 6 fields as None.
+
+    This locks the anti-regression: the flat paths are dead and must never be
+    re-read as an alternate source.
+    """
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="FLAT", trade_date=T),
+        _canonical_obs(scope_type="concept", scope_key="FLAT", marker_mean=0.05),
+        review_run_id=run.id,
+    )
+    flat_only_payload = {
+        "scope": {"scope_type": "concept", "scope_key": "FLAT"},
+        "trade_date": T.isoformat(),
+        "capability": {"persistence_activated": True},
+        "scope_observation": {"pit_member_count": 2, "provided_member_count": 2},
+        "historical_dynamics": {
+            "status": "ready",
+            # obsolete flat shape — the real producer NEVER wrote these
+            "phase": "Weakening",
+            "position": 32.7731,
+            "velocity": -5.2843,
+            "acceleration": -2.8553,
+            "upper_occupancy": 0.3,
+            "lower_occupancy": 0.1,
+        },
+        "internal_structure_facts": {
+            "breadth": {"equal_weight_return": 0.01, "advance_ratio": 0.5,
+                        "decline_ratio": 0.4, "unchanged_ratio": 0.1,
+                        "return_dispersion": 0.03},
+            "capital_tilt": {"equal_weight_return": 0.01, "amount_weighted_return": 0.02,
+                             "capital_tilt": 0.01},
+            "concentration": {"price_normalized_hhi": 0.1, "amount_normalized_hhi": 0.2},
+        },
+        "leadership": {"status": "ready", "jaccard_stability": 0.8, "migration": 0.1},
+        "member_attribution": {"members": []},
+        "composition_readiness": "ready",
+    }
+    await save_scope_composition_snapshot(
+        db_session,
+        review_run_id=run.id,
+        scope_type="concept",
+        scope_key="FLAT",
+        trade_date=T,
+        algorithm_version="review-2.0.0",
+        composition_payload=flat_only_payload,
+    )
+    await db_session.commit()
+
+    total, rows = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=20,
+    )
+    assert total == 1
+    r = rows[0]
+    assert r.composition_present is True
+    assert r.dynamics_status == "ready"
+    # flat keys are NOT read: all 6 fields stay None (no legacy fallback)
+    assert r.phase is None
+    assert r.position is None
+    assert r.velocity is None
+    assert r.acceleration is None
+    assert r.upper_occupancy is None
+    assert r.lower_occupancy is None
+    # non-dynamics summary still projects from their canonical nested paths
+    assert r.equal_weight_return == pytest.approx(0.01)
+    assert r.leadership_status == "ready"
+
+
+async def test_scope_summary_projection_ready_with_phase_null(
+    db_session: AsyncSession,
+) -> None:
+    """[REVIEW-PRODUCT-CLOSURE-01 Phase B] ``ready`` + ``phase=null`` is a legal
+    state (the current-phase fact may carry no canonical phase).  semantics:
+    ``status=ready`` survives from the top-level layer; ``phase=None`` is NOT
+    coerced to a 7th phase or to 0 — Detail's currentPhaseFact shows "—".
+    """
+    run = _make_run(trade_date=T)
+    db_session.add(run)
+    await db_session.flush()
+    await save_scope_observation_fact(
+        db_session,
+        _prep(scope_type="concept", scope_key="NP", trade_date=T),
+        _canonical_obs(scope_type="concept", scope_key="NP", marker_mean=0.06),
+        review_run_id=run.id,
+    )
+    payload = _composition_payload(
+        scope_type="concept", scope_key="NP", trade_date=T,
+        phase="Weakening",
+    )
+    # force the current-phase fact's phase to None while keeping status=ready
+    payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"][0]["phase"] = None
+    await save_scope_composition_snapshot(
+        db_session,
+        review_run_id=run.id,
+        scope_type="concept",
+        scope_key="NP",
+        trade_date=T,
+        algorithm_version="review-2.0.0",
+        composition_payload=payload,
+    )
+    await db_session.commit()
+
+    total, rows = await list_review_scope_summaries_by_run(
+        db_session, review_run_id=run.id, trade_date=T,
+        scope_type=None, offset=0, limit=20,
+    )
+    assert total == 1
+    r = rows[0]
+    assert r.dynamics_status == "ready"
+    assert r.phase is None
+    # numeric fields still read from the nested current-phase fact
+    assert r.position == pytest.approx(0.5)
 
 
 async def test_scope_summary_projection_excludes_wrong_trade_date(

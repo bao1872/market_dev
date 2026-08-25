@@ -37,15 +37,15 @@ function TrendStateSection({ vm }: { vm: TrendStateVM }) {
         <div className={styles.trendUnavailable}>无有效趋势状态成员</div>
       ) : (
         <div className={styles.trendDirGrid}>
-          <DirBar label="Up" ratio={dir.upRatio} count={dir.upCount} tone="up" />
-          <DirBar label="Neutral" ratio={dir.neutralRatio} count={dir.neutralCount} tone="neutral" />
-          <DirBar label="Down" ratio={dir.downRatio} count={dir.downCount} tone="down" />
+          <DirBar label="上涨" ratio={dir.upRatio} count={dir.upCount} tone="up" />
+          <DirBar label="平盘" ratio={dir.neutralRatio} count={dir.neutralCount} tone="neutral" />
+          <DirBar label="下跌" ratio={dir.downRatio} count={dir.downCount} tone="down" />
           <div className={styles.trendDenominator}>n = {dir.denominator}</div>
         </div>
       )}
       <div className={styles.trendStateRow}>
-        <Analytic label="Trend Strength" value={vm.trendStrength} />
-        <Analytic label="DSA-VWAP Dev" value={vm.dsaVwapDevPct} tone={vm.dsaVwapDevTone} />
+        <Analytic label="趋势强度" value={vm.trendStrength} />
+        <Analytic label="DSA-VWAP 偏离" value={vm.dsaVwapDevPct} tone={vm.dsaVwapDevTone} />
       </div>
     </div>
   )
@@ -83,12 +83,12 @@ function TrendProgressSection({ vm }: { vm: TrendProgressVM }) {
     <div className={styles.trendSection}>
       <div className={styles.trendSectionTitle}>趋势进程</div>
       <div className={styles.trendProgressGrid}>
-        <Analytic label="Segment Bars" value={vm.segmentBars} />
-        <Analytic label="Segment Change" value={vm.segmentChangePct} tone={vm.segmentChangeTone} />
-        <Analytic label="Segment Slope" value={vm.segmentSlope} tone={vm.segmentSlopeTone} />
-        <Analytic label="VWAP Return Total" value={vm.vwapRetTotal} tone={vm.vwapRetTotalTone} />
-        <Analytic label="Volume Ratio" value={vm.volumeRatio} />
-        <Analytic label="Amount Ratio" value={vm.amountRatio} />
+        <Analytic label="分段数" value={vm.segmentBars} />
+        <Analytic label="分段变化" value={vm.segmentChangePct} tone={vm.segmentChangeTone} />
+        <Analytic label="分段斜率" value={vm.segmentSlope} tone={vm.segmentSlopeTone} />
+        <Analytic label="VWAP 累计收益" value={vm.vwapRetTotal} tone={vm.vwapRetTotalTone} />
+        <Analytic label="量比" value={vm.volumeRatio} />
+        <Analytic label="额比" value={vm.amountRatio} />
       </div>
     </div>
   )
@@ -102,17 +102,17 @@ function TrendVolumeSection({ vm }: { vm: TrendVolumeConfirmationVM }) {
     <div className={styles.trendSection}>
       <div className={styles.trendSectionTitle}>趋势量能确认</div>
       <div className={styles.trendVolumeRatioRow}>
-        <Analytic label="Segment Volume Ratio" value={vm.volumeRatio} />
-        <Analytic label="Segment Amount Ratio" value={vm.amountRatio} />
+        <Analytic label="分段量比" value={vm.volumeRatio} />
+        <Analytic label="分段额比" value={vm.amountRatio} />
       </div>
       <div className={styles.trendMvrBlock}>
-        <div className={styles.trendMvrTitle}>Momentum / Volume Relation</div>
+        <div className={styles.trendMvrTitle}>动量与量能关系</div>
         {!mvr || mvr.status === 'unavailable' ? (
           <div className={styles.trendUnavailable}>
-            {mvr?.reason ? mvr.reason : 'Momentum / Volume Relation 不可用'}
+            {mvr?.reason ? mvr.reason : '动量与量能关系不可用'}
           </div>
         ) : mvr.categories.length === 0 ? (
-          <div className={styles.trendUnavailable}>Momentum / Volume Relation 无有效类别</div>
+          <div className={styles.trendUnavailable}>动量与量能关系无有效类别</div>
         ) : (
           <div className={styles.trendMvrList}>
             {mvr.categories.map((c) => (

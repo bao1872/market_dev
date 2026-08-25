@@ -47,14 +47,14 @@ function MatrixCell({ d, kind }: { d: VolumeDistributionVM | null; kind: MetricK
 
 const ScopeVolumeObservation: FC<Props> = ({ vm }) => {
   const rows: { label: string; kind: MetricKind; k20: keyof VolumeObservationVM; k200: keyof VolumeObservationVM }[] = [
-    { label: 'Ratio', kind: 'ratio', k20: 'ratio20', k200: 'ratio200' },
-    { label: 'Percentile', kind: 'percentile', k20: 'percentile20', k200: 'percentile200' },
-    { label: 'Z-score', kind: 'zscore', k20: 'zscore20', k200: 'zscore200' },
+    { label: '量比', kind: 'ratio', k20: 'ratio20', k200: 'ratio200' },
+    { label: '分位数', kind: 'percentile', k20: 'percentile20', k200: 'percentile200' },
+    { label: 'Z 分数', kind: 'zscore', k20: 'zscore20', k200: 'zscore200' },
   ]
   return (
     <div className={styles.mvRoot}>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>Volume Anomaly</div>
+        <div className={styles.mvSectionTitle}>量能异常</div>
         <div className={styles.mvMatrix}>
           <div className={styles.mvMatrixHead} />
           <div className={styles.mvMatrixHead}>20D</div>
@@ -64,7 +64,7 @@ const ScopeVolumeObservation: FC<Props> = ({ vm }) => {
           ))}
         </div>
         <div className={styles.mvNote}>
-          Ratio → ×；Percentile → 原值（0–100）；Z-score → 原始 z。均为中性分析语气，无方向配色。
+          量比 → ×；分位数 → 原值（0–100）；Z 分数 → 原始 z。均为中性分析语气，无方向配色。
           200D 不可用时显示 “—”（上游 200D 就绪条件未满足），不回填 0 或 20D。
         </div>
       </div>

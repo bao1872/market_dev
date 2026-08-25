@@ -10,10 +10,25 @@
 // - 禁止创建 Stable/Rotating/Leadership Strength/Rotation Score/Risk Score 等解释标签。
 // - previous_direction / current_direction 为 number | null（+1/-1/null），非 string。
 import type { ScopeLeadershipParsed } from './scopeDetailContract'
-import { NULL_DISPLAY, formatNumberNullable } from './reviewFormat'
+import {
+  NULL_DISPLAY,
+  formatNumberNullable,
+  formatReadiness,
+  displayMember,
+  type MemberDirectory,
+} from './reviewFormat'
+import ReviewTerm from './ReviewTerm'
 import styles from './review.module.scss'
 
-function IdList({ ids, label }: { ids: string[] | null; label: string }) {
+function IdList({
+  ids,
+  label,
+  directory,
+}: {
+  ids: string[] | null
+  label: React.ReactNode
+  directory: MemberDirectory | null | undefined
+}) {
   const isEmpty = ids !== null && ids.length === 0
   return (
     <div className={styles.leadGroup}>
@@ -26,7 +41,7 @@ function IdList({ ids, label }: { ids: string[] | null; label: string }) {
         <div className={styles.leadIds}>
           {ids.map((id) => (
             <span key={id} className={styles.leadChip} title={id}>
-              {id}
+              {displayMember(id, directory)}
             </span>
           ))}
         </div>
@@ -45,8 +60,10 @@ function directionArrow(dir: number | null): string {
 
 export default function ScopeLeadershipPanel({
   leadership,
+  memberDirectory,
 }: {
   leadership: ScopeLeadershipParsed | null
+  memberDirectory?: MemberDirectory | null
 }) {
   if (!leadership) {
     return <div className={styles.panelUnavailable}>该层当前不可用（无 leadership）</div>
@@ -60,53 +77,53 @@ export default function ScopeLeadershipPanel({
     <div className={styles.panel} data-panel="leadership">
       {!isReady && (
         <div className={styles.leadStatusBanner}>
-          <span>状态：{status ?? NULL_DISPLAY}</span>
+          <span>状态：{formatReadiness(status)}</span>
           {leadership.reason && <span> · 原因：{leadership.reason}</span>}
         </div>
       )}
 
       <div className={styles.leadRow}>
-        <IdList ids={leadership.previousLeaderIds} label="T-1 leaders" />
-        <IdList ids={leadership.currentLeaderIds} label="T leaders" />
+        <IdList ids={leadership.previousLeaderIds} label={<ReviewTerm termKey="tMinus1Leaders" compact />} directory={memberDirectory} />
+        <IdList ids={leadership.currentLeaderIds} label={<ReviewTerm termKey="tLeaders" compact />} directory={memberDirectory} />
       </div>
 
       <dl className={styles.metricGroup}>
-        <dt className={styles.metricHeading}>Direction</dt>
+        <dt className={styles.metricHeading}><ReviewTerm termKey="direction" compact /></dt>
         <dd className={styles.metricGrid}>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Prev Dir</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="prevDir" compact /></span>
             <span className={styles.metricValue}>{directionArrow(leadership.previousDirection)}</span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Curr Dir</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="currDir" compact /></span>
             <span className={styles.metricValue}>{directionArrow(leadership.currentDirection)}</span>
           </div>
         </dd>
       </dl>
 
       <dl className={styles.metricGroup}>
-        <dt className={styles.metricHeading}>Transition</dt>
+        <dt className={styles.metricHeading}><ReviewTerm termKey="transition" compact /></dt>
         <dd className={styles.metricGrid}>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Retained</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="retained" compact /></span>
             <span className={styles.metricValue}>{formatNumberNullable(leadership.retainedCount, 0)}</span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Entrants</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="entrants" compact /></span>
             <span className={styles.metricValue}>{formatNumberNullable(leadership.entrantCount, 0)}</span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Exits</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="exits" compact /></span>
             <span className={styles.metricValue}>{formatNumberNullable(leadership.exitCount, 0)}</span>
           </div>
         </dd>
       </dl>
 
       <dl className={styles.metricGroup}>
-        <dt className={styles.metricHeading}>Metrics</dt>
+        <dt className={styles.metricHeading}><ReviewTerm termKey="metrics" compact /></dt>
         <dd className={styles.metricGrid}>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Prev Retention</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="prevRetention" compact /></span>
             <span className={styles.metricValue}>
               {leadership.previousRetention === null || leadership.previousRetention === undefined
                 ? NULL_DISPLAY
@@ -114,7 +131,7 @@ export default function ScopeLeadershipPanel({
             </span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Jaccard Stability</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="jaccardStability" compact /></span>
             <span className={styles.metricValue}>
               {leadership.jaccardStability === null || leadership.jaccardStability === undefined
                 ? NULL_DISPLAY
@@ -122,7 +139,7 @@ export default function ScopeLeadershipPanel({
             </span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Migration</span>
+            <span className={styles.metricLabel}><ReviewTerm termKey="migration" compact /></span>
             <span className={styles.metricValue}>
               {leadership.migration === null || leadership.migration === undefined
                 ? NULL_DISPLAY

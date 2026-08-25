@@ -10,6 +10,7 @@
 // - null != 0：缺失 ratio 时展示 unavailable，不画假 100% 堆叠条。
 import type { ScopeInternalParsed } from './scopeDetailContract'
 import { NULL_DISPLAY, formatPercentNullable, formatNumberNullable } from './reviewFormat'
+import ReviewTerm, { type ReviewTermProps } from './ReviewTerm'
 import styles from './review.module.scss'
 
 function directionClass(value: number | null, safeNeutral = false): string {
@@ -28,8 +29,12 @@ function widthPercent(ratio: number | null | undefined): number | null {
   return ratio * 100
 }
 
+function ReviewMetricLabel({ termKey }: { termKey: ReviewTermProps['termKey'] }) {
+  return <ReviewTerm termKey={termKey} compact />
+}
+
 function BreadthStack({ breadth }: { breadth: ScopeInternalParsed['breadth'] }) {
-  if (!breadth) return <div className={styles.panelUnavailable}>Breadth 不可用</div>
+  if (!breadth) return <div className={styles.panelUnavailable}>该层当前不可用（无 internal_structure_facts）</div>
   const a = widthPercent(breadth.advanceRatio)
   const d = widthPercent(breadth.declineRatio)
   const u = widthPercent(breadth.unchangedRatio)
@@ -40,41 +45,41 @@ function BreadthStack({ breadth }: { breadth: ScopeInternalParsed['breadth'] }) 
 
   return (
     <dl className={styles.metricGroup}>
-      <dt className={styles.metricHeading}>Breadth</dt>
+      <dt className={styles.metricHeading}><ReviewTerm termKey="breadth" compact /></dt>
       <dd className={styles.breadthStack}>
         {allReady ? (
           <>
             <div
               className={`${styles.breadthSegment} ${styles.up}`}
               style={{ width: `${a}%` }}
-              title={`advance ${breadth.advanceRatio ?? NULL_DISPLAY}`}
+              title={`上涨 ${breadth.advanceRatio ?? NULL_DISPLAY}`}
             />
             <div
               className={`${styles.breadthSegment} ${styles.down}`}
               style={{ width: `${d}%` }}
-              title={`decline ${breadth.declineRatio ?? NULL_DISPLAY}`}
+              title={`下跌 ${breadth.declineRatio ?? NULL_DISPLAY}`}
             />
             <div
               className={`${styles.breadthSegment} ${styles.breadthNeutral}`}
               style={{ width: `${u}%` }}
-              title={`unchanged ${breadth.unchangedRatio ?? NULL_DISPLAY}`}
+              title={`平盘 ${breadth.unchangedRatio ?? NULL_DISPLAY}`}
             />
           </>
         ) : (
           <div className={styles.breadthPartial}>
             <div className={styles.breadthRow}>
               <span className={`${styles.legendDot} ${styles.up}`} />
-              <span>advance</span>
+              <span><ReviewTerm termKey="advance" compact /></span>
               <span className={styles.breadthValue}>{breadth.advanceRatio === null || breadth.advanceRatio === undefined ? NULL_DISPLAY : formatPercentNullable(breadth.advanceRatio, 1)}</span>
             </div>
             <div className={styles.breadthRow}>
               <span className={`${styles.legendDot} ${styles.down}`} />
-              <span>decline</span>
+              <span><ReviewTerm termKey="decline" compact /></span>
               <span className={styles.breadthValue}>{breadth.declineRatio === null || breadth.declineRatio === undefined ? NULL_DISPLAY : formatPercentNullable(breadth.declineRatio, 1)}</span>
             </div>
             <div className={styles.breadthRow}>
               <span className={`${styles.legendDot} ${styles.breadthNeutral}`} />
-              <span>unchanged</span>
+              <span><ReviewTerm termKey="unchanged" compact /></span>
               <span className={styles.breadthValue}>{breadth.unchangedRatio === null || breadth.unchangedRatio === undefined ? NULL_DISPLAY : formatPercentNullable(breadth.unchangedRatio, 1)}</span>
             </div>
           </div>
@@ -82,9 +87,9 @@ function BreadthStack({ breadth }: { breadth: ScopeInternalParsed['breadth'] }) 
       </dd>
       {allReady && (
         <div className={styles.breadthLegend}>
-          <span className={`${styles.legendDot} ${styles.up}`} /> advance
-          <span className={`${styles.legendDot} ${styles.down}`} /> decline
-          <span className={`${styles.legendDot} ${styles.breadthNeutral}`} /> unchanged
+          <span className={`${styles.legendDot} ${styles.up}`} /> <ReviewTerm termKey="advance" compact />
+          <span className={`${styles.legendDot} ${styles.down}`} /> <ReviewTerm termKey="decline" compact />
+          <span className={`${styles.legendDot} ${styles.breadthNeutral}`} /> <ReviewTerm termKey="unchanged" compact />
         </div>
       )}
     </dl>
@@ -104,22 +109,22 @@ export default function ScopeInternalStructurePanel({
       <BreadthStack breadth={breadth} />
 
       <dl className={styles.metricGroup}>
-        <dt className={styles.metricHeading}>Return / Capital</dt>
+        <dt className={styles.metricHeading}><ReviewTerm termKey="returnCapital" compact /></dt>
         <dd className={styles.metricGrid}>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>EW Return</span>
+            <span className={styles.metricLabel}><ReviewMetricLabel termKey="equalWeightReturn" /></span>
             <span className={`${styles.metricValue} ${directionClass(ct?.equalWeightReturn ?? null)}`}>
               {formatPercentNullable(ct?.equalWeightReturn, 2)}
             </span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>AW Return</span>
+            <span className={styles.metricLabel}><ReviewMetricLabel termKey="amountWeightedReturn" /></span>
             <span className={`${styles.metricValue} ${directionClass(ct?.amountWeightedReturn ?? null)}`}>
               {formatPercentNullable(ct?.amountWeightedReturn, 2)}
             </span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Capital Tilt</span>
+            <span className={styles.metricLabel}><ReviewMetricLabel termKey="capitalTilt" /></span>
             <span className={`${styles.metricValue} ${directionClass(ct?.capitalTilt ?? null)}`}>
               {formatNumberNullable(ct?.capitalTilt, 3)}
             </span>
@@ -128,24 +133,24 @@ export default function ScopeInternalStructurePanel({
       </dl>
 
       <dl className={styles.metricGroup}>
-        <dt className={styles.metricHeading}>Concentration</dt>
+        <dt className={styles.metricHeading}><ReviewTerm termKey="concentration" compact /></dt>
         <dd className={styles.metricGrid}>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Price HHI</span>
+            <span className={styles.metricLabel}><ReviewMetricLabel termKey="priceHhi" /></span>
             <span className={styles.metricValue}>{formatNumberNullable(con?.priceNormalizedHhi, 3)}</span>
           </div>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Amount HHI</span>
+            <span className={styles.metricLabel}><ReviewMetricLabel termKey="amountHhi" /></span>
             <span className={styles.metricValue}>{formatNumberNullable(con?.amountNormalizedHhi, 3)}</span>
           </div>
         </dd>
       </dl>
 
       <dl className={styles.metricGroup}>
-        <dt className={styles.metricHeading}>Return Dispersion</dt>
+        <dt className={styles.metricHeading}><ReviewTerm termKey="returnDispersion" compact /></dt>
         <dd className={styles.metricGrid}>
           <div className={styles.metricCell}>
-            <span className={styles.metricLabel}>Dispersion</span>
+            <span className={styles.metricLabel}><ReviewMetricLabel termKey="dispersion" /></span>
             <span className={styles.metricValue}>{formatNumberNullable(breadth?.returnDispersion, 3)}</span>
           </div>
         </dd>

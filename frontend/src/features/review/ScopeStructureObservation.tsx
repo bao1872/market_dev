@@ -48,13 +48,13 @@ function EventRow({ cell, denominator }: { cell: LeveledStructureEventCell; deno
         <span className={`${styles.structEventLevel} ${styles.neutral}`}>{level}</span>
       </div>
       <div className={styles.structEventPrimary}>
-        <span className={styles.structMetricLabel}>Member Ratio</span>
+        <span className={styles.structMetricLabel}>成员占比</span>
         <span className={`${styles.structMetricValue} ${styles.neutral}`}>{ratio}</span>
       </div>
       <div className={styles.structEventSupporting}>
-        <span className={styles.structMetricLabel}>Members</span>
+        <span className={styles.structMetricLabel}>成员数</span>
         <span className={`${styles.structMetricValue} ${styles.neutral}`}>{membersComposite}</span>
-        <span className={styles.structMetricLabel}>Events</span>
+        <span className={styles.structMetricLabel}>事件数</span>
         <span className={`${styles.structMetricValue} ${styles.neutral}`}>{events}</span>
       </div>
     </div>
@@ -109,13 +109,13 @@ function ExtremeRow({ cell }: { cell: ExtremeStructureEventCell }) {
         <span className={`${styles.structEventType} ${styles.neutral}`}>{cell.eventType}</span>
       </div>
       <div className={styles.structEventPrimary}>
-        <span className={styles.structMetricLabel}>Member Ratio</span>
+        <span className={styles.structMetricLabel}>成员占比</span>
         <span className={`${styles.structMetricValue} ${styles.neutral}`}>{formatMemberRatioNullable(cell.memberRatio)}</span>
       </div>
       <div className={styles.structEventSupporting}>
-        <span className={styles.structMetricLabel}>Members</span>
+        <span className={styles.structMetricLabel}>成员数</span>
         <span className={`${styles.structMetricValue} ${styles.neutral}`}>{cell.memberCount === null ? '—' : cell.memberCount}</span>
-        <span className={styles.structMetricLabel}>Events</span>
+        <span className={styles.structMetricLabel}>事件数</span>
         <span className={`${styles.structMetricValue} ${styles.neutral}`}>{cell.eventCount === null ? '—' : cell.eventCount}</span>
       </div>
     </div>
@@ -147,8 +147,8 @@ function AlignmentBlock({ vm }: { vm: StructureAlignmentVM | null }) {
     <div className={styles.structBlock}>
       <div className={styles.structBlockTitle}>结构对齐</div>
       <div className={styles.structAlignGrid}>
-        <AlignCell label="Aligned" ratio={vm.alignedRatio} count={vm.alignedCount} />
-        <AlignCell label="Divergent" ratio={vm.divergentRatio} count={vm.divergentCount} />
+        <AlignCell label="对齐" ratio={vm.alignedRatio} count={vm.alignedCount} />
+        <AlignCell label="分化" ratio={vm.divergentRatio} count={vm.divergentCount} />
         {vm.denominator !== null && (
           <div className={styles.structDenominator}>n = {vm.denominator}</div>
         )}
@@ -176,7 +176,7 @@ function DistanceBlock({ title, vm }: { title: string; vm: StructureDistanceVM |
     return (
       <div className={styles.structBlock}>
         <div className={styles.structBlockTitle}>{title}</div>
-        <div className={styles.structUnavailable}>Trailing 距离不可用</div>
+        <div className={styles.structUnavailable}>移动窗口距离不可用</div>
       </div>
     )
   }
@@ -184,7 +184,7 @@ function DistanceBlock({ title, vm }: { title: string; vm: StructureDistanceVM |
     return (
       <div className={styles.structBlock}>
         <div className={styles.structBlockTitle}>{title}</div>
-        <div className={styles.structUnavailable}>Trailing 距离不可用于当前覆盖范围</div>
+        <div className={styles.structUnavailable}>移动窗口距离不可用于当前覆盖范围</div>
       </div>
     )
   }
@@ -192,11 +192,11 @@ function DistanceBlock({ title, vm }: { title: string; vm: StructureDistanceVM |
     <div className={styles.structBlock}>
       <div className={styles.structBlockTitle}>{title}</div>
       <div className={styles.structDistanceGrid}>
-        <DistCell label="Median" value={vm.median} />
+        <DistCell label="中位数" value={vm.median} />
         <DistCell label="P25" value={vm.p25} />
         <DistCell label="P75" value={vm.p75} />
         {vm.validCount !== null && (
-          <div className={styles.structDenominator}>valid = {vm.validCount}</div>
+          <div className={styles.structDenominator}>有效数 = {vm.validCount}</div>
         )}
         {vm.denominator !== null && (
           <div className={styles.structDenominator}>n = {vm.denominator}</div>
@@ -265,8 +265,8 @@ function EvolutionSection({ vm }: { vm: StructureEvolutionPositionVM }) {
       <AlignmentBlock vm={vm.alignment} />
 
       {/* trailing distances (independent facts, current-only) */}
-      <DistanceBlock title="Distance to Trailing Top" vm={vm.distanceTop} />
-      <DistanceBlock title="Distance to Trailing Bottom" vm={vm.distanceBottom} />
+      <DistanceBlock title="到移动窗口高点的距离" vm={vm.distanceTop} />
+      <DistanceBlock title="到移动窗口低点的距离" vm={vm.distanceBottom} />
 
       {vm.hasContractInvalidity && (
         <div className={styles.structContractInvalid}>检测到非 G6 结构事件类型（如 SQZ_RELEASE），已按合同失效处理</div>

@@ -274,56 +274,56 @@ function ContextShell({
   }
 
   const DIMENSIONS: { key: string; label: string }[] = [
-    { key: 'trend', label: 'Trend' },
-    { key: 'structure', label: 'Structure' },
-    { key: 'momentum', label: 'Momentum' },
-    { key: 'chip', label: 'Chip' },
+    { key: 'trend', label: '趋势' },
+    { key: 'structure', label: '结构' },
+    { key: 'momentum', label: '动量' },
+    { key: 'chip', label: '筹码' },
   ]
 
   return (
     <div className={styles.observationContext}>
       <div className={styles.observationContextBlock}>
-        <h4 className={styles.observationContextTitle}>Current Technical State</h4>
+        <h4 className={styles.observationContextTitle}>当前技术状态</h4>
         {ctx.hasCurrentState ? (
           <div className={styles.observationContextNote}>
             来自 observation.structure.current_state（已加载）
           </div>
         ) : (
-          <div className={styles.observationContextUnavailable}>Current Technical State 不可用（observation 无 structure.current_state）</div>
+          <div className={styles.observationContextUnavailable}>当前技术状态不可用（observation 无 structure.current_state）</div>
         )}
       </div>
 
       <div className={styles.observationContextBlock}>
-        <h4 className={styles.observationContextTitle}>Event Freshness</h4>
+        <h4 className={styles.observationContextTitle}>事件新鲜度</h4>
         {ctx.hasFreshness && f ? (
           <div className={styles.observationContextMetrics}>
             <div className={styles.observationContextMetric}>
-              <span className={styles.observationContextMetricLabel}>Today</span>
+              <span className={styles.observationContextMetricLabel}>今日</span>
               <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('today_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
-              <span className={styles.observationContextMetricLabel}>5D</span>
+              <span className={styles.observationContextMetricLabel}>近5日</span>
               <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_5d_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
-              <span className={styles.observationContextMetricLabel}>10D</span>
+              <span className={styles.observationContextMetricLabel}>近10日</span>
               <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_10d_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
-              <span className={styles.observationContextMetricLabel}>20D</span>
+              <span className={styles.observationContextMetricLabel}>近20日</span>
               <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('last_20d_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
-              <span className={styles.observationContextMetricLabel}>Instruments</span>
+              <span className={styles.observationContextMetricLabel}>涉及股票数</span>
               <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('instrument_count'), 0)}</span>
             </div>
             <div className={styles.observationContextMetric}>
-              <span className={styles.observationContextMetricLabel}>Decay-weighted density</span>
+              <span className={styles.observationContextMetricLabel}>衰减加权密度</span>
               <span className={styles.observationContextMetricValue}>{formatNumberNullable(num('decay_weighted_density'), 3)}</span>
             </div>
             {DIMENSIONS.map(({ key, label }) => (
               <div key={key} className={styles.observationContextMetric}>
-                <span className={styles.observationContextMetricLabel}>{label} density / events</span>
+                <span className={styles.observationContextMetricLabel}>{label} 密度 / 事件数</span>
                 <span className={styles.observationContextMetricValue}>
                   {formatNumberNullable(dimNum(key, 'density'), 3)}
                   {' / '}
@@ -333,18 +333,18 @@ function ContextShell({
             ))}
           </div>
         ) : (
-          <div className={styles.observationContextUnavailable}>Event Freshness 不可用（observation 无 freshness）</div>
+          <div className={styles.observationContextUnavailable}>事件新鲜度不可用（observation 无 freshness）</div>
         )}
       </div>
 
       <div className={styles.observationContextBlock}>
-        <h4 className={styles.observationContextTitle}>Chip availability</h4>
+        <h4 className={styles.observationContextTitle}>筹码可用性</h4>
         {ctx.chipAvailability === 'unavailable' ? (
-          <div className={styles.observationContextUnavailable}>Chip Unavailable（当前 canonical producer 未产出 chip 事实，如实展示）</div>
+          <div className={styles.observationContextUnavailable}>筹码不可用（当前 canonical producer 未产出 chip 事实，如实展示）</div>
         ) : ctx.chipAvailability === 'present' ? (
-          <div className={styles.observationContextNote}>Chip 已加载</div>
+          <div className={styles.observationContextNote}>筹码已加载</div>
         ) : (
-          <div className={styles.observationContextUnavailable}>Chip 不存在（不伪造 ready）</div>
+          <div className={styles.observationContextUnavailable}>筹码不存在（不伪造 ready）</div>
         )}
       </div>
 

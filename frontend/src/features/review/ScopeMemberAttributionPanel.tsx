@@ -21,17 +21,25 @@ import type {
   ScopeAttributionParsed,
 } from './scopeDetailContract'
 import type { ScopeMemberEvidence } from './types'
-import { NULL_DISPLAY, formatNumberNullable, formatPercentNullable, memberName } from './reviewFormat'
+import {
+  NULL_DISPLAY,
+  formatNumberNullable,
+  formatPercentNullable,
+  displayMemberEvidence,
+  type MemberDirectory,
+} from './reviewFormat'
+import { ATTRIBUTION_SUBTAB_LABELS } from './reviewCopy'
 import styles from './review.module.scss'
 
 type Subtabs = 'direction' | 'capital' | 'breadth' | 'concentration' | 'leadership'
 
+// REVIEW-UX-CN-01：subtab label 中文化（canonical value 不变）
 const SUBTABS: ReadonlyArray<{ value: Subtabs; label: string }> = [
-  { value: 'direction', label: 'Direction' },
-  { value: 'capital', label: 'Capital Tilt' },
-  { value: 'breadth', label: 'Breadth' },
-  { value: 'concentration', label: 'Concentration' },
-  { value: 'leadership', label: 'Leadership' },
+  { value: 'direction', label: ATTRIBUTION_SUBTAB_LABELS.direction },
+  { value: 'capital', label: ATTRIBUTION_SUBTAB_LABELS.capital },
+  { value: 'breadth', label: ATTRIBUTION_SUBTAB_LABELS.breadth },
+  { value: 'concentration', label: ATTRIBUTION_SUBTAB_LABELS.concentration },
+  { value: 'leadership', label: ATTRIBUTION_SUBTAB_LABELS.leadership },
 ]
 
 /** 每个 subtab 的列配置：列标题 + 从 MemberEvidence 读取的字段 */
@@ -45,33 +53,76 @@ interface ColumnConfig {
 
 /** Direction 列：return_1d + contribution */
 const DIRECTION_COLUMNS: ColumnConfig[] = [
-  { value: 'Return', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
-  { value: 'Contribution', field: 'contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '收益', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
+  { value: '贡献值', field: 'contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
 
 /** Capital Tilt 列：return_1d + tilt_contribution + aw_weight */
 const CAPITAL_COLUMNS: ColumnConfig[] = [
-  { value: 'Return', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
-  { value: 'Tilt Contrib', field: 'tilt_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
-  { value: 'AW Weight', field: 'aw_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '收益', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
+  { value: '资金偏向贡献', field: 'tilt_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '成交额权重', field: 'aw_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
 
 /** Breadth 列：member 信息即事实，展示 return_1d */
 const BREADTH_COLUMNS: ColumnConfig[] = [
-  { value: 'Return', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
+  { value: '收益', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
 ]
 
 /** Concentration 列：concentration_weight + hhi_contribution */
 const CONCENTRATION_COLUMNS: ColumnConfig[] = [
-  { value: 'Weight', field: 'concentration_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
-  { value: 'HHI Contrib', field: 'hhi_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '权重', field: 'concentration_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '集中度贡献', field: 'hhi_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
 
 /** Leadership 列：aligned_contribution */
 const LEADERSHIP_COLUMNS: ColumnConfig[] = [
-  { value: 'Aligned Contrib', field: 'aligned_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
-  { value: 'Contribution', field: 'contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '同向贡献', field: 'aligned_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '贡献值', field: 'contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
+
+/** 成员组展示 label（中文 + 小号 canonical key；无机会/风险解读） */
+const GROUP_LABELS: Readonly<Record<string, string>> = {
+  Positive: '正贡献',
+  Negative: '负贡献',
+  Advance: '上涨成员',
+  Decline: '下跌成员',
+  Unchanged: '平盘成员',
+  Unavailable: '数据不可用',
+  Price: '价格侧',
+  Amount: '成交额侧',
+  Retained: '留存成员',
+  Entrants: '新进入成员',
+  Exits: '退出成员',
+}
+
+/** 可见 metadata 中文 label（canonical payload key 保持原样展示在辅助位置） */
+function metaLabel(key: string): string {
+  const map: Readonly<Record<string, string>> = {
+    sum_contribution: '贡献合计',
+    sum_tilt_contribution: '资金偏向贡献合计',
+    canonical_aw_return: '成交额加权收益基准',
+    canonical_ew_return: '等权收益基准',
+    price_universe: '价格有效样本数',
+    aw_universe: '成交额有效样本数',
+    sum_hhi: 'HHI 贡献合计',
+    raw_hhi: '原始集中度',
+    normalized_hhi: '标准化集中度',
+    denominator: '有效成员数',
+  }
+  return map[key] ?? key
+}
+
+/** Reconciliation / checksum 中文 label（canonical key 保持原样） */
+const RECON_LABELS: Readonly<Record<string, string>> = {
+  violations: '异常数',
+  tolerance: '容差',
+  skipped: '跳过项',
+  pass: '通过',
+  fail: '未通过',
+  skippedState: '已跳过',
+  determinism_checksum: '确定性校验码',
+}
 
 /**
  * 成员组表格：按传入列配置渲染。
@@ -81,15 +132,18 @@ function GroupTable({
   members,
   groupLabel,
   columns,
+  directory,
 }: {
   members: ScopeMemberEvidence[] | null
   groupLabel: string
   columns: ColumnConfig[]
+  directory: MemberDirectory | null | undefined
 }) {
   if (!members) return null
+  const label = GROUP_LABELS[groupLabel] ?? groupLabel
   return (
     <div className={styles.attrGroup}>
-      <div className={styles.attrGroupTitle}>{groupLabel}</div>
+      <div className={styles.attrGroupTitle}>{label}</div>
       {members.length === 0 ? (
         <div className={styles.attrEmpty}>（空成员组）</div>
       ) : (
@@ -106,7 +160,7 @@ function GroupTable({
             {members.map((m) => (
               <tr key={String(m.member_id)}>
                 <td className={styles.attrMember} title={String(m.member_id)}>
-                  {memberName(m)}
+                  {displayMemberEvidence(m, directory)}
                 </td>
                 {columns.map((c) => (
                   <td key={c.value}>{c.format(m[c.field])}</td>
@@ -124,100 +178,100 @@ function MetaRow({ children }: { children: React.ReactNode }) {
   return <div className={styles.attrGroupMeta}>{children}</div>
 }
 
-function renderDirection(sub: ScopeAttributionParsed['direction']) {
+function renderDirection(sub: ScopeAttributionParsed['direction'], directory: MemberDirectory | null | undefined) {
   if (!sub) return null
   return (
     <>
-      <GroupTable members={sub.positive} groupLabel="Positive" columns={DIRECTION_COLUMNS} />
-      <GroupTable members={sub.negative} groupLabel="Negative" columns={DIRECTION_COLUMNS} />
+      <GroupTable members={sub.positive} groupLabel="Positive" columns={DIRECTION_COLUMNS} directory={directory} />
+      <GroupTable members={sub.negative} groupLabel="Negative" columns={DIRECTION_COLUMNS} directory={directory} />
       <MetaRow>
         {sub.sumContribution !== null && sub.sumContribution !== undefined && (
-          <span>sum_contribution {formatNumberNullable(sub.sumContribution, 4)}</span>
+          <span>{metaLabel('sum_contribution')} {formatNumberNullable(sub.sumContribution, 4)}</span>
         )}
         {sub.canonicalAwReturn !== null && sub.canonicalAwReturn !== undefined && (
-          <span>canonical_aw_return {formatPercentNullable(sub.canonicalAwReturn, 2)}</span>
+          <span>{metaLabel('canonical_aw_return')} {formatPercentNullable(sub.canonicalAwReturn, 2)}</span>
         )}
       </MetaRow>
     </>
   )
 }
 
-function renderCapital(sub: ScopeAttributionParsed['capitalTilt']) {
+function renderCapital(sub: ScopeAttributionParsed['capitalTilt'], directory: MemberDirectory | null | undefined) {
   if (!sub) return null
   return (
     <>
-      <GroupTable members={sub.positive} groupLabel="Positive" columns={CAPITAL_COLUMNS} />
-      <GroupTable members={sub.negative} groupLabel="Negative" columns={CAPITAL_COLUMNS} />
+      <GroupTable members={sub.positive} groupLabel="Positive" columns={CAPITAL_COLUMNS} directory={directory} />
+      <GroupTable members={sub.negative} groupLabel="Negative" columns={CAPITAL_COLUMNS} directory={directory} />
       <MetaRow>
         {sub.sumTiltContribution !== null && sub.sumTiltContribution !== undefined && (
-          <span>sum_tilt_contribution {formatNumberNullable(sub.sumTiltContribution, 4)}</span>
+          <span>{metaLabel('sum_tilt_contribution')} {formatNumberNullable(sub.sumTiltContribution, 4)}</span>
         )}
         {sub.canonicalAwReturn !== null && sub.canonicalAwReturn !== undefined && (
-          <span>canonical_aw_return {formatPercentNullable(sub.canonicalAwReturn, 2)}</span>
+          <span>{metaLabel('canonical_aw_return')} {formatPercentNullable(sub.canonicalAwReturn, 2)}</span>
         )}
         {sub.canonicalEwReturn !== null && sub.canonicalEwReturn !== undefined && (
-          <span>canonical_ew_return {formatPercentNullable(sub.canonicalEwReturn, 2)}</span>
+          <span>{metaLabel('canonical_ew_return')} {formatPercentNullable(sub.canonicalEwReturn, 2)}</span>
         )}
         {sub.priceUniverseCount !== null && sub.priceUniverseCount !== undefined && (
-          <span>price_universe {sub.priceUniverseCount}</span>
+          <span>{metaLabel('price_universe')} {sub.priceUniverseCount}</span>
         )}
         {sub.awUniverseCount !== null && sub.awUniverseCount !== undefined && (
-          <span>aw_universe {sub.awUniverseCount}</span>
+          <span>{metaLabel('aw_universe')} {sub.awUniverseCount}</span>
         )}
       </MetaRow>
     </>
   )
 }
 
-function renderBreadth(sub: ScopeAttributionParsed['breadth']) {
+function renderBreadth(sub: ScopeAttributionParsed['breadth'], directory: MemberDirectory | null | undefined) {
   if (!sub) return null
   return (
     <>
-      <GroupTable members={sub.advance} groupLabel="Advance" columns={BREADTH_COLUMNS} />
-      <GroupTable members={sub.decline} groupLabel="Decline" columns={BREADTH_COLUMNS} />
-      <GroupTable members={sub.unchanged} groupLabel="Unchanged" columns={BREADTH_COLUMNS} />
-      <GroupTable members={sub.unavailable} groupLabel="Unavailable" columns={BREADTH_COLUMNS} />
+      <GroupTable members={sub.advance} groupLabel="Advance" columns={BREADTH_COLUMNS} directory={directory} />
+      <GroupTable members={sub.decline} groupLabel="Decline" columns={BREADTH_COLUMNS} directory={directory} />
+      <GroupTable members={sub.unchanged} groupLabel="Unchanged" columns={BREADTH_COLUMNS} directory={directory} />
+      <GroupTable members={sub.unavailable} groupLabel="Unavailable" columns={BREADTH_COLUMNS} directory={directory} />
       {sub.denominator !== null && sub.denominator !== undefined && (
         <MetaRow>
-          <span>denominator {sub.denominator}</span>
+          <span>{metaLabel('denominator')} {sub.denominator}</span>
         </MetaRow>
       )}
     </>
   )
 }
 
-function renderConcentration(sub: ScopeAttributionParsed['concentration']) {
+function renderConcentration(sub: ScopeAttributionParsed['concentration'], directory: MemberDirectory | null | undefined) {
   if (!sub) return null
   return (
     <>
       {sub.price && (
         <>
-          <GroupTable members={sub.price.members} groupLabel="Price" columns={CONCENTRATION_COLUMNS} />
+          <GroupTable members={sub.price.members} groupLabel="Price" columns={CONCENTRATION_COLUMNS} directory={directory} />
           <MetaRow>
             {sub.price.sumHhi !== null && sub.price.sumHhi !== undefined && (
-              <span>price sum_hhi {formatNumberNullable(sub.price.sumHhi, 4)}</span>
+              <span>价格侧 {metaLabel('sum_hhi')} {formatNumberNullable(sub.price.sumHhi, 4)}</span>
             )}
             {sub.price.canonicalRawHhi !== null && sub.price.canonicalRawHhi !== undefined && (
-              <span>price raw_hhi {formatNumberNullable(sub.price.canonicalRawHhi, 4)}</span>
+              <span>价格侧 {metaLabel('raw_hhi')} {formatNumberNullable(sub.price.canonicalRawHhi, 4)}</span>
             )}
             {sub.price.canonicalNormalizedHhi !== null && sub.price.canonicalNormalizedHhi !== undefined && (
-              <span>price normalized_hhi {formatNumberNullable(sub.price.canonicalNormalizedHhi, 4)}</span>
+              <span>价格侧 {metaLabel('normalized_hhi')} {formatNumberNullable(sub.price.canonicalNormalizedHhi, 4)}</span>
             )}
           </MetaRow>
         </>
       )}
       {sub.amount && (
         <>
-          <GroupTable members={sub.amount.members} groupLabel="Amount" columns={CONCENTRATION_COLUMNS} />
+          <GroupTable members={sub.amount.members} groupLabel="Amount" columns={CONCENTRATION_COLUMNS} directory={directory} />
           <MetaRow>
             {sub.amount.sumHhi !== null && sub.amount.sumHhi !== undefined && (
-              <span>amount sum_hhi {formatNumberNullable(sub.amount.sumHhi, 4)}</span>
+              <span>成交额侧 {metaLabel('sum_hhi')} {formatNumberNullable(sub.amount.sumHhi, 4)}</span>
             )}
             {sub.amount.canonicalRawHhi !== null && sub.amount.canonicalRawHhi !== undefined && (
-              <span>amount raw_hhi {formatNumberNullable(sub.amount.canonicalRawHhi, 4)}</span>
+              <span>成交额侧 {metaLabel('raw_hhi')} {formatNumberNullable(sub.amount.canonicalRawHhi, 4)}</span>
             )}
             {sub.amount.canonicalNormalizedHhi !== null && sub.amount.canonicalNormalizedHhi !== undefined && (
-              <span>amount normalized_hhi {formatNumberNullable(sub.amount.canonicalNormalizedHhi, 4)}</span>
+              <span>成交额侧 {metaLabel('normalized_hhi')} {formatNumberNullable(sub.amount.canonicalNormalizedHhi, 4)}</span>
             )}
           </MetaRow>
         </>
@@ -226,13 +280,13 @@ function renderConcentration(sub: ScopeAttributionParsed['concentration']) {
   )
 }
 
-function renderLeadershipAttribution(sub: ScopeAttributionParsed['leadership']) {
+function renderLeadershipAttribution(sub: ScopeAttributionParsed['leadership'], directory: MemberDirectory | null | undefined) {
   if (!sub) return null
   return (
     <>
-      <GroupTable members={sub.retained} groupLabel="Retained" columns={LEADERSHIP_COLUMNS} />
-      <GroupTable members={sub.entrants} groupLabel="Entrants" columns={LEADERSHIP_COLUMNS} />
-      <GroupTable members={sub.exits} groupLabel="Exits" columns={LEADERSHIP_COLUMNS} />
+      <GroupTable members={sub.retained} groupLabel="Retained" columns={LEADERSHIP_COLUMNS} directory={directory} />
+      <GroupTable members={sub.entrants} groupLabel="Entrants" columns={LEADERSHIP_COLUMNS} directory={directory} />
+      <GroupTable members={sub.exits} groupLabel="Exits" columns={LEADERSHIP_COLUMNS} directory={directory} />
     </>
   )
 }
@@ -243,20 +297,22 @@ function ReconciliationStrip({ attr }: { attr: ScopeAttributionParsed }) {
   const skippedStr = r.skipped.length > 0 ? r.skipped.join(', ') : NULL_DISPLAY
   return (
     <div className={styles.reconStrip} data-panel="reconciliation">
-      <div className={styles.reconTitle}>Reconciliation</div>
+      <div className={styles.reconTitle}>一致性校验</div>
       <div className={styles.reconRow}>
-        <span>violations {formatNumberNullable(r.violationCount, 0)}</span>
-        <span>tolerance {r.tolerance === null || r.tolerance === undefined ? NULL_DISPLAY : String(r.tolerance)}</span>
-        <span>skipped {skippedStr}</span>
+        <span>{RECON_LABELS.violations} {formatNumberNullable(r.violationCount, 0)}</span>
+        <span>{RECON_LABELS.tolerance} {r.tolerance === null || r.tolerance === undefined ? NULL_DISPLAY : String(r.tolerance)}</span>
+        <span>{RECON_LABELS.skipped} {skippedStr}</span>
       </div>
       {r.checks.length > 0 && (
         <ul className={styles.reconChecks}>
           {r.checks.map((c) => {
             const state = c.pass === null || c.resolved === 'skipped' ? 'skipped' : c.pass ? 'pass' : 'fail'
+            const stateLabel =
+              state === 'skipped' ? RECON_LABELS.skippedState : state === 'pass' ? RECON_LABELS.pass : RECON_LABELS.fail
             return (
               <li key={c.key} className={styles.reconCheck}>
                 <span className={styles.reconCheckKind}>{c.key}</span>
-                <span className={`${styles.reconCheckState} ${styles[`reconState${state}`]}`}>{state}</span>
+                <span className={`${styles.reconCheckState} ${styles[`reconState${state}`]}`}>{stateLabel}</span>
               </li>
             )
           })}
@@ -268,13 +324,15 @@ function ReconciliationStrip({ attr }: { attr: ScopeAttributionParsed }) {
 
 export default function ScopeMemberAttributionPanel({
   attr,
+  memberDirectory,
 }: {
   attr: ScopeAttributionParsed
+  memberDirectory?: MemberDirectory | null
 }) {
   const [subtab, setSubtab] = useState<Subtabs>('direction')
   return (
     <div className={styles.panel} data-panel="attribution">
-      <div className={styles.attrSubtabs} role="tablist" aria-label="Attribution 子分组">
+      <div className={styles.attrSubtabs} role="tablist" aria-label="归因贡献子分组">
         {SUBTABS.map((s) => (
           <button
             key={s.value}
@@ -289,17 +347,17 @@ export default function ScopeMemberAttributionPanel({
         ))}
       </div>
 
-      {subtab === 'direction' && renderDirection(attr.direction)}
-      {subtab === 'capital' && renderCapital(attr.capitalTilt)}
-      {subtab === 'breadth' && renderBreadth(attr.breadth)}
-      {subtab === 'concentration' && renderConcentration(attr.concentration)}
-      {subtab === 'leadership' && renderLeadershipAttribution(attr.leadership)}
+      {subtab === 'direction' && renderDirection(attr.direction, memberDirectory)}
+      {subtab === 'capital' && renderCapital(attr.capitalTilt, memberDirectory)}
+      {subtab === 'breadth' && renderBreadth(attr.breadth, memberDirectory)}
+      {subtab === 'concentration' && renderConcentration(attr.concentration, memberDirectory)}
+      {subtab === 'leadership' && renderLeadershipAttribution(attr.leadership, memberDirectory)}
 
       <ReconciliationStrip attr={attr} />
 
       {attr.determinismChecksum && (
         <div className={styles.checksumLine} data-testid="determinism-checksum">
-          determinism_checksum {attr.determinismChecksum}
+          {RECON_LABELS.determinism_checksum} {attr.determinismChecksum}
         </div>
       )}
     </div>

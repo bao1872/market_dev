@@ -206,6 +206,7 @@ test('B7. ReviewScopeCompositionDetailResponse 含 observation + observationGrou
     scopeName: null,
     algorithmVersion: 'v1',
     observation: { price: { return_level: 0.5 } },
+    memberDirectory: {},
     observationGroups: {
       price_capital: { group_key: 'price_capital', label: '价格与资金表现', facts: {} },
       trend_state: { group_key: 'trend_state', label: '趋势状态', facts: {} },
@@ -630,6 +631,7 @@ test('G4. Detail observation 是原始 payload（Record<string, unknown>），�
     scopeName: null,
     algorithmVersion: 'v1',
     observation: { price: { return_level: 0.5 }, trend: {}, participation: {} },
+    memberDirectory: {},
     observationGroups: {
       price_capital: { group_key: 'price_capital', label: '价格与资金表现', facts: {} },
       trend_state: { group_key: 'trend_state', label: '趋势状态', facts: {} },
@@ -861,6 +863,7 @@ test('H6. canonical Scope 类型仍编译并保留关键字段', () => {
     scopeName: null,
     algorithmVersion: 'v1',
     observation: { price: { return_level: 0.5 } },
+    memberDirectory: {},
     observationGroups: {
       price_capital: { group_key: 'price_capital', label: '价格与资金表现', facts: {} },
       trend_state: { group_key: 'trend_state', label: '趋势状态', facts: {} },

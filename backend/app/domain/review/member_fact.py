@@ -92,6 +92,65 @@ def compute_price_position_120d(
     return (close - low_value) / (high_value - low_value)
 
 
+# Keys whose values are member / instrument UUID references inside a persisted
+# Composition payload.  ``leadership`` stores them as string id arrays; every
+# ``member_attribution`` sub-group stores them as a ``member_id`` string field.
+_MEMBER_UUID_KEYS: frozenset[str] = frozenset(
+    {
+        "member_id",
+        "current_leader_ids",
+        "previous_leader_ids",
+        "entrant_ids",
+        "exit_ids",
+    }
+)
+
+
+def collect_composition_member_ids(composition: dict[str, Any] | None) -> set[str]:
+    """Collect every member / instrument UUID referenced by a Composition payload.
+
+    Walks ``leadership`` id arrays (current / previous / entrant / exit) and
+    every ``member_id`` inside ``member_attribution`` (breadth / direction /
+    capital_tilt / concentration / leadership sub-groups).  Purely additive
+    display metadata (REVIEW-PRODUCT-CLOSURE-01 Phase C): does NOT modify the
+    persisted canonical Composition and never recomputes any fact.  Unknown /
+    non-UUID values are dropped by the caller's ``_is_uuid`` gate.
+    """
+    if not isinstance(composition, dict):
+        return set()
+    ids: set[str] = set()
+
+    def _walk(node: Any) -> None:
+        if isinstance(node, dict):
+            for key, value in node.items():
+                if key in _MEMBER_UUID_KEYS:
+                    if isinstance(value, list):
+                        for item in value:
+                            if isinstance(item, str) and item.strip():
+                                ids.add(item)
+                    elif isinstance(value, str) and value.strip():
+                        ids.add(value)
+                else:
+                    _walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                _walk(item)
+
+    _walk(composition)
+    return ids
+
+
+def is_uuid(value: Any) -> bool:
+    """True when the value is a well-formed UUID string."""
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except (ValueError, AttributeError):
+        return False
+    return True
+
+
 def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
     """Map the history SSOT payload to the canonical flat keys used by semantics."""
     if not state:
@@ -182,7 +241,17 @@ def previous_state_to_flat(state: dict[str, Any] | None) -> dict[str, Any]:
 # Structure / Momentum / Volume).  These are present in the history payload but
 # were not surfaced through previous_state_to_flat, which only emits categorical
 # states.  This passthrough is additive and does NOT alter previous_state_to_flat.
-_CONTINUOUS_STATE_KEYS = (
+#
+# [REVIEW-PRODUCT-CLOSURE-01 Phase D] TYPED ownership split: the numeric keys are
+# coerced through ``_number``; the categorical keys are CANONICAL STRINGS carried
+# verbatim.  Previously the whole tuple ran through ``_number``, silently
+# nulling real categorical values (e.g. volatility_phase "squeeze_on" -> None),
+# which broke momentum.squeeze_state / categorical consumers on any date where
+# the history state IS present.  Verified against the real 2026-08-21 history
+# state payload (5277 rows): momentum_direction / momentum_change /
+# structure_alignment / volatility_phase are JSONB strings, all other keys are
+# JSONB numbers.
+NUMERIC_STATE_KEYS: tuple[str, ...] = (
     "regime_strength",
     "dsa_dir_bars",
     "dsa_vwap_dev_pct",
@@ -195,12 +264,8 @@ _CONTINUOUS_STATE_KEYS = (
     "current_vs_prev_amount_mean_ratio",
     "current_segment_volume_mean",
     "prev_segment_volume_mean",
-    "structure_alignment",
     "active_internal_ob_count",
     "active_swing_ob_count",
-    "volatility_phase",
-    "momentum_direction",
-    "momentum_change",
     "sqzmom_delta",
     "sqzmom_val",
     "volume_ratio_20",
@@ -208,6 +273,15 @@ _CONTINUOUS_STATE_KEYS = (
     "volume_zscore_20",
     "available_bars",
 )
+
+CATEGORICAL_STATE_KEYS: tuple[str, ...] = (
+    "momentum_direction",  # "contracting" / "expanding"
+    "momentum_change",     # "enhancing" / "weakening"
+    "structure_alignment",  # "共振" / "背离"
+    "volatility_phase",    # "squeeze_on" / "squeeze_off"
+)
+
+_CONTINUOUS_STATE_KEYS = NUMERIC_STATE_KEYS + CATEGORICAL_STATE_KEYS
 
 
 def state_to_continuous(state: dict[str, Any] | None) -> dict[str, Any]:
@@ -217,10 +291,21 @@ def state_to_continuous(state: dict[str, Any] | None) -> dict[str, Any]:
     the numeric Trend / Structure / Momentum / Volume continuous fields that the
     Scope L1 aggregation consumes.  Missing / non-numeric keys become ``None``
     (unavailable), never 0.  Additive: does not affect existing consumers.
+
+    [REVIEW-PRODUCT-CLOSURE-01 Phase D] Typed mapping:
+    - ``NUMERIC_STATE_KEYS`` are coerced through ``_number`` (finite float or None);
+    - ``CATEGORICAL_STATE_KEYS`` are passed through VERBATIM — a canonical
+      categorical string must NEVER be numeric-coerced to None.  The backend does
+      not invent category translations; the canonical string is preserved exactly.
     """
     if not state:
         return dict.fromkeys(_CONTINUOUS_STATE_KEYS)
-    return {key: _number(state.get(key)) for key in _CONTINUOUS_STATE_KEYS}
+    out: dict[str, Any] = {}
+    for key in NUMERIC_STATE_KEYS:
+        out[key] = _number(state.get(key))
+    for key in CATEGORICAL_STATE_KEYS:
+        out[key] = state.get(key)
+    return out
 
 
 @dataclass(frozen=True)

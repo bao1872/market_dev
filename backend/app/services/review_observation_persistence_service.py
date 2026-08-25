@@ -612,14 +612,29 @@ async def list_review_scope_summaries_by_run(
             fact.pit_member_count,
             fact.provided_member_count,
             comp.id.label("composition_row_id"),
-            # historical_dynamics
+            # historical_dynamics — [REVIEW-PRODUCT-CLOSURE-01 Phase B] projected from
+            # the CANONICAL nested path only:
+            #   composition_payload.historical_dynamics.scope_dynamics.dynamics_phase[-1]
+            # The obsolete flat paths (payload["historical_dynamics"]["position"] etc.)
+            # are NULL for every published run and are NOT read back here.
+            # dynamics_status is the TOP-LEVEL layer status (scope_dynamics absent
+            # when the analysis is unavailable); the 6 numeric fields come from the
+            # LAST dynamics_phase observation (the current-phase fact), exactly as
+            # the Detail currentPhaseFact reads them.  A missing/absent phase stays
+            # NULL (never 0) — null != 0, [] != null semantics preserved.
             payload["historical_dynamics"]["status"].astext.label("dynamics_status"),
-            payload["historical_dynamics"]["phase"].astext.label("phase"),
-            payload["historical_dynamics"]["position"].astext.cast(Float).label("position"),
-            payload["historical_dynamics"]["velocity"].astext.cast(Float).label("velocity"),
-            payload["historical_dynamics"]["acceleration"].astext.cast(Float).label("acceleration"),
-            payload["historical_dynamics"]["upper_occupancy"].astext.cast(Float).label("upper_occupancy"),
-            payload["historical_dynamics"]["lower_occupancy"].astext.cast(Float).label("lower_occupancy"),
+            (payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"]
+             [-1]["phase"]).astext.label("phase"),
+            (payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"]
+             [-1]["position"]).astext.cast(Float).label("position"),
+            (payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"]
+             [-1]["velocity"]).astext.cast(Float).label("velocity"),
+            (payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"]
+             [-1]["acceleration"]).astext.cast(Float).label("acceleration"),
+            (payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"]
+             [-1]["upper_occupancy"]).astext.cast(Float).label("upper_occupancy"),
+            (payload["historical_dynamics"]["scope_dynamics"]["dynamics_phase"]
+             [-1]["lower_occupancy"]).astext.cast(Float).label("lower_occupancy"),
             # internal_structure_facts.breadth
             payload["internal_structure_facts"]["breadth"]["equal_weight_return"].astext.cast(Float).label("equal_weight_return"),
             payload["internal_structure_facts"]["breadth"]["advance_ratio"].astext.cast(Float).label("advance_ratio"),

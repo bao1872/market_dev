@@ -83,7 +83,7 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
 
   return (
     <div className={styles.trajectory}>
-      <svg viewBox={`0 0 ${W} ${H}`} className={styles.trajectorySvg} role="img" aria-label="Scope 轨迹散点图">
+      <svg viewBox={`0 0 ${W} ${H}`} className={styles.trajectorySvg} role="img" aria-label="板块轨迹散点图">
         {/* y=0 参考线 */}
         <line x1={PAD_L} y1={yZero} x2={W - PAD_R} y2={yZero} className={styles.trajZeroLine} />
         {/* y 刻度 */}
@@ -111,7 +111,7 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
           </text>
         ))}
         <text x={(PAD_L + W - PAD_R) / 2} y={H - 6} textAnchor="middle" className={styles.trajAxisLabel}>
-          Position (0–100)
+          历史位置（0–100）
         </text>
         {/* 节点（含 acceleration 中性字形） */}
         {plottable.map((r) => {
@@ -135,9 +135,9 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
               }}
               tabIndex={0}
               role="button"
-              aria-label={`Scope ${r.scopeName ?? r.scopeKey}`}
+              aria-label={`板块 ${r.scopeName ?? r.scopeKey}`}
             >
-              <title>{`${r.scopeName ?? r.scopeKey} · velocity ${vel.toFixed(2)}`}</title>
+              <title>{`${r.scopeName ?? r.scopeKey} · 变化速度 ${vel.toFixed(2)}`}</title>
               <circle cx={cx} cy={cy} r={rNode} />
               {accel !== null && (
                 <text
@@ -160,18 +160,18 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
           transform={`rotate(-90 14 ${(PAD_T + H - PAD_B) / 2})`}
           className={styles.trajAxisLabel}
         >
-          Velocity
+          变化速度
         </text>
       </svg>
       <div className={styles.trajLegend}>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>▲</span> 正 Acceleration
+          <span className={styles.accelGlyph}>▲</span> 正向变化加速度
         </span>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>▼</span> 负 Acceleration
+          <span className={styles.accelGlyph}>▼</span> 负向变化加速度
         </span>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>■</span> 零 Acceleration
+          <span className={styles.accelGlyph}>■</span> 零变化加速度
         </span>
         <span className={styles.trajLegendItem}>● 节点中性色（选中为品牌描边）</span>
       </div>

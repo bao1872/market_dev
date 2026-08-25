@@ -21,7 +21,7 @@ interface Props {
 
 function SqueezeStateBlock({ squeeze }: { squeeze: SqueezeStateVM | null }) {
   if (!squeeze) {
-    return <div className={styles.mvNeutral}>暂无 Squeeze 状态分布</div>
+    return <div className={styles.mvNeutral}>暂无压缩状态分布</div>
   }
   if (squeeze.unavailable) {
     return <div className={styles.mvUnavailable}>无有效成员（denominator=0）→ 全部占比不可用，非 0%</div>
@@ -73,7 +73,7 @@ function CurrentOnlyBlock({
       <div className={styles.mvBlockTitle}>{title}</div>
       <div className={styles.mvMetricRow}>
         <div className={styles.mvMetric}>
-          <span className={styles.mvMetricLabel}>Median</span>
+          <span className={styles.mvMetricLabel}>中位数</span>
           <span className={styles.mvMetricValue}>{fmt(dist.median)}</span>
         </div>
         <div className={styles.mvMetric}>
@@ -83,11 +83,11 @@ function CurrentOnlyBlock({
           </span>
         </div>
         <div className={styles.mvMetric}>
-          <span className={styles.mvMetricLabel}>valid</span>
+          <span className={styles.mvMetricLabel}>有效数</span>
           <span className={styles.mvMetricValue}>{dist.validCount ?? NULL_DISPLAY}</span>
         </div>
         <div className={styles.mvMetric}>
-          <span className={styles.mvMetricLabel}>denominator</span>
+          <span className={styles.mvMetricLabel}>有效成员数</span>
           <span className={styles.mvMetricValue}>{dist.denominator ?? NULL_DISPLAY}</span>
         </div>
       </div>
@@ -99,21 +99,21 @@ const ScopeMomentumObservation: FC<Props> = ({ vm }) => {
   return (
     <div className={styles.mvRoot}>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>Squeeze State</div>
+        <div className={styles.mvSectionTitle}>压缩状态</div>
         <SqueezeStateBlock squeeze={vm.squeeze} />
       </div>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>BB Position</div>
+        <div className={styles.mvSectionTitle}>BB 位置</div>
         <CurrentOnlyBlock title="" dist={vm.bbPosition} unit="raw" />
-        <div className={styles.mvNote}>0 = Lower Band / 1 = Upper Band；band 外值合法，不做 clamp</div>
+        <div className={styles.mvNote}>0 = 下轨 / 1 = 上轨；轨道外值合法，不做 clamp</div>
       </div>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>BB Width</div>
+        <div className={styles.mvSectionTitle}>BB 宽度</div>
         <CurrentOnlyBlock title="" dist={vm.bbWidth} unit="raw" />
         <div className={styles.mvNote}>无量纲宽度比率，非百分比（不 ×100）</div>
       </div>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>Release Volume Ratio</div>
+        <div className={styles.mvSectionTitle}>释放量比</div>
         <CurrentOnlyBlock title="" dist={vm.releaseVolumeRatio} unit="multiple" />
         <div className={styles.mvNote}>无量纲倍数（×），无方向配色</div>
       </div>

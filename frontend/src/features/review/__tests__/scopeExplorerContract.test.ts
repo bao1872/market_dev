@@ -462,22 +462,25 @@ test('P4. effectivePage 钳制：URL 越界页 → 实际末页；Workspace 交�
 // 6. Table：canonical 列 + 无 legacy 字段 + null 显示
 // ============================================================
 
-test('T1. Table 精确 canonical 列（10 列，无 p/q/u/c/v/signalCount）', () => {
+test('T1. Table 精确 canonical 列（12 列，无 p/q/u/c/v/signalCount）', () => {
   const src = read('ScopeExplorerTable.tsx')
+  // REVIEW-UX-CN-01：表头经 ReviewTerm termKey 渲染中文 label；canonical 列集合不变。
   const expected = [
-    'Scope',
-    'Phase',
-    'Position',
-    'Velocity',
-    'Acceleration',
-    'EW Return',
-    'Capital Tilt',
-    'Breadth',
-    'Leadership Migration',
-    'Coverage',
+    'scope',
+    'phase',
+    'position',
+    'velocity',
+    'acceleration',
+    'equalWeightReturn',
+    'capitalTilt',
+    'breadth',
+    'leadershipMigration',
+    'coverage',
+    'freshness',
+    'technical',
   ]
   for (const col of expected) {
-    assert.ok(src.includes(`>${col}<`) || src.includes(`>{${'col'}}`), `Table 必须含列 ${col}`)
+    assert.ok(src.includes(`termKey="${col}"`), `Table 必须含 ReviewTerm 列 ${col}`)
   }
   // 源码不得引用 legacy 指标
   assert.doesNotMatch(src, /\.p\b|\.q\b|\.u\b|\.c\b|\.v\b|signalCount/, 'Table 不得引用 p/q/u/c/v/signalCount')

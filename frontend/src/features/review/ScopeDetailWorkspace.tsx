@@ -23,7 +23,7 @@ import ScopeLeadershipPanel from './ScopeLeadershipPanel'
 import ScopeMemberAttributionPanel from './ScopeMemberAttributionPanel'
 import ScopeRawFactsPanel from './ScopeRawFactsPanel'
 import ScopeCurrentObservationWorkspace from './ScopeCurrentObservationWorkspace'
-import { NULL_DISPLAY } from './reviewFormat'
+import { NULL_DISPLAY, formatReadiness } from './reviewFormat'
 import styles from './review.module.scss'
 
 const FAMILY_LABEL: Record<ReviewScopeFamily, string> = {
@@ -54,12 +54,14 @@ function Header({
     <div className={styles.detailHeader}>
       <div className={styles.detailName}>{data.scopeName ?? NULL_DISPLAY}</div>
       <div className={styles.detailKeyline}>
+        <span className={styles.detailMeta}>{FAMILY_LABEL[family] ?? family}</span>
+        <span className={styles.detailMeta}>数据状态：{formatReadiness(readiness)}</span>
+      </div>
+      <div className={styles.detailTechnical} data-tech-line>
         <span className={styles.detailKey} title={data.scopeKey}>
           {data.scopeKey}
         </span>
-        <span className={styles.detailMeta}>{FAMILY_LABEL[family] ?? family}</span>
-        <span className={styles.detailMeta}>readiness: {readiness}</span>
-        <span className={styles.detailMeta}>algo: {data.algorithmVersion}</span>
+        <span className={styles.detailMeta}>算法版本：{data.algorithmVersion}</span>
       </div>
     </div>
   )
@@ -155,8 +157,8 @@ export default function ScopeDetailWorkspace({
         )}
         {tab === 'dynamics' && <ScopeDynamicsPanel dynamics={panels.dynamics} />}
         {tab === 'internal' && <ScopeInternalStructurePanel internal={panels.internal} />}
-        {tab === 'leadership' && <ScopeLeadershipPanel leadership={panels.leadership} />}
-        {tab === 'attribution' && <ScopeMemberAttributionPanel attr={panels.attribution} />}
+        {tab === 'leadership' && <ScopeLeadershipPanel leadership={panels.leadership} memberDirectory={detail.data?.memberDirectory} />}
+        {tab === 'attribution' && <ScopeMemberAttributionPanel attr={panels.attribution} memberDirectory={detail.data?.memberDirectory} />}
         {tab === 'facts' && <ScopeRawFactsPanel observation={detail.data.observation} />}
       </div>
     </div>
