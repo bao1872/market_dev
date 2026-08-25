@@ -715,14 +715,12 @@
   }
 }
 
+// P0-6：tooltip 经 React Portal 渲染到 document.body，position:fixed（内联 style 控制），
+// 不在任何 overflow 滚动容器内 → 不被裁切；高 z-index；white-space:normal 可换行。
 .termTooltip {
-  display: none;
-  position: absolute;
-  left: 0;
-  top: calc(100% + 6px);
-  z-index: 30;
-  width: 260px;
-  max-width: 320px;
+  z-index: 9999;
+  width: max-content;
+  max-width: 340px;
   padding: 8px 10px;
   border: 1px solid v.$color-border;
   border-radius: 6px;
@@ -734,7 +732,7 @@
   text-transform: none;
   letter-spacing: normal;
   white-space: normal;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
   pointer-events: none;
 }
 
@@ -939,6 +937,42 @@
 
   tbody tr:hover td:first-child {
     background: v.$color-panel-2;
+  }
+
+  // P0-2：可排序表头。箭头仅在活动列显示，其余列不常驻。
+  .sortableHeader {
+    padding: 0;
+  }
+
+  .sortHeaderBtn {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    width: 100%;
+    padding: 8px 10px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-weight: 600;
+    cursor: pointer;
+    text-align: left;
+    text-align: right;
+
+    &:hover {
+      color: v.$color-text;
+    }
+
+    &:focus-visible {
+      outline: 2px solid v.$color-brand;
+      outline-offset: -2px;
+    }
+  }
+
+  .sortArrow {
+    font-size: 11px;
+    color: v.$color-brand;
+    min-width: 10px;
   }
 }
 
@@ -1164,6 +1198,14 @@
   border: 1px solid v.$color-border-soft;
   border-radius: 6px;
   background: v.$color-bg;
+}
+
+.chartAttribution {
+  font-size: 10px;
+  color: v.$color-text-dim;
+  text-align: right;
+  padding: 2px 4px 0;
+  opacity: 0.7;
 }
 
 .factStrip {

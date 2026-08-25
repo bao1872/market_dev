@@ -193,6 +193,28 @@ export interface ObservationContextFacts {
   chipAvailability: 'unavailable' | 'present' | 'absent'
 }
 
+/**
+ * [REVIEW-RUNTIME-PRESENTATION-CLOSURE-01 Phase 2] 判断一个 observation group 是否含有
+ * 任一“有效事实”。用于 GroupBody 层决定：父级 group 存在但所有 scalar 都为 null/空时，
+ * 视为“父级不可用”，渲染中文父级 unavailable 态而非把十几个 null 机械渲染成 "—"。
+ *
+ * 规则（与 Phase 2 严格对齐）：
+ * - null / undefined / '' → 无事实
+ * - 空对象 {} → 无事实（避免把真实但为空的事件投影误判为可用）
+ * - 数字 0 / false / 非空对象 / 非空字符串 → 有事实（null != 0，0 是真实值）
+ */
+export function groupHasAnyPresentFact(
+  facts: Record<string, unknown> | undefined | null,
+): boolean {
+  if (!facts) return false
+  for (const v of Object.values(facts)) {
+    if (v === null || v === undefined || v === '') continue
+    if (typeof v === 'object' && !Array.isArray(v) && Object.keys(v as object).length === 0) continue
+    return true
+  }
+  return false
+}
+
 export function extractObservationContext(
   observation: Record<string, unknown> | null | undefined,
 ): ObservationContextFacts {

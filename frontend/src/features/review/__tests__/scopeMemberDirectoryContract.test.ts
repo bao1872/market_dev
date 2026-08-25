@@ -113,3 +113,18 @@ test('PC11. 详情响应契约含 memberDirectory（types.ts）', () => {
   const types = read('types.ts')
   assert.ok(types.includes('memberDirectory: Record<string, { symbol: string; name: string }>'))
 })
+
+// P1-2 补充：memberDirectory 由 API 响应经 Detail 工作区下发到 Leadership/Attribution，
+// 且前端不使用 N+1 / 不硬编码 symbol→name / 不猜名称。
+test('P1-2: memberDirectory 为批量下发（无 N+1、无硬编码字典、无猜名）', () => {
+  const detail = read('ScopeDetailWorkspace.tsx')
+  assert.ok(detail.includes('memberDirectory={detail.data?.memberDirectory}'), 'memberDirectory 经详情响应一次性下发')
+  const lead = read('ScopeLeadershipPanel.tsx')
+  const attr = read('ScopeMemberAttributionPanel.tsx')
+  // 不得出现逐个成员独立请求符号/名称的 N+1 调用
+  assert.doesNotMatch(lead, /getInstrument|fetchInstrument|useInstrument\(/, 'Leadership 不得逐成员 N+1 查询')
+  assert.doesNotMatch(attr, /getInstrument|fetchInstrument|useInstrument\(/, 'Attribution 不得逐成员 N+1 查询')
+  // 不得出现硬编码 symbol→name 映射表
+  assert.doesNotMatch(lead, /SYMBOL_NAME_MAP|NAME_BY_SYMBOL|MANUAL_NAME/, '不得硬编码 symbol→name 字典')
+  assert.doesNotMatch(attr, /SYMBOL_NAME_MAP|NAME_BY_SYMBOL|MANUAL_NAME/, '不得硬编码 symbol→name 字典')
+})

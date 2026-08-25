@@ -14,8 +14,9 @@
 //     &page=1
 //     &pageSize=50
 //     &q=有色
-// 排序词表（R2A，仅降序；升序变体不在 R2A 范围）：
-//   velocity_desc | acceleration_desc | position_desc |
+// 排序词表（R2A，降序；升序为表头排序增强，仅作用于前端全量排序）：
+//   velocity_desc | velocity_asc | acceleration_desc | acceleration_asc |
+//   position_desc | position_asc | phase_desc | phase_asc |
 //   equal_weight_return_desc | capital_tilt_desc | migration_desc | coverage_desc
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行。
 // 旧 Legacy URL 合同（stage/signalId/discoveryId/trackingTab 等）已于 Slice F 物理删除。
@@ -36,11 +37,22 @@ export type ReviewDetailTab =
   | 'attribution'
   | 'facts'
 
-/** 排序词表：默认 velocity_desc；R2A/R2B 仅含降序变体（升序不在范围） */
+/**
+ * 排序词表。
+ * - R2A/R2B canonical 降序变体保留（向后兼容已有 URL）。
+ * - 表头排序增强（P0-2）：velocity/acceleration/position/phase 额外支持 _asc 升序，
+ *   该方向仅作用于前端全量排序（后端 list_review_scopes 当前不接收 sort 参数，
+ *   排序始终在客户端对完整 family snapshot 进行），不改动后端 contract。
+ */
 export type ReviewSort =
   | 'velocity_desc'
+  | 'velocity_asc'
   | 'acceleration_desc'
+  | 'acceleration_asc'
   | 'position_desc'
+  | 'position_asc'
+  | 'phase_desc'
+  | 'phase_asc'
   | 'equal_weight_return_desc'
   | 'capital_tilt_desc'
   | 'migration_desc'
@@ -49,6 +61,33 @@ export type ReviewSort =
   | 'freshness_today_desc'
   | 'technical_hhi_desc'
   | 'leader_median_gap_desc'
+
+/** 表头可排序列的 canonical 排序 key（用于构造 sort 值，不含方向） */
+export type ReviewSortKey = 'velocity' | 'acceleration' | 'position' | 'phase'
+
+/** 解析 sort 字符串为 {key, dir}；非法值回退默认方向 desc */
+export function parseReviewSort(sort: ReviewSort): { key: ReviewSortKey | null; dir: 'asc' | 'desc' } {
+  const m = /^(velocity|acceleration|position|phase)_(asc|desc)$/.exec(sort)
+  if (!m) return { key: null, dir: 'desc' }
+  return { key: m[1] as ReviewSortKey, dir: m[2] as 'asc' | 'desc' }
+}
+
+/** 由 {key, dir} 构造 sort 字符串 */
+export function buildReviewSort(key: ReviewSortKey, dir: 'asc' | 'desc'): ReviewSort {
+  return `${key}_${dir}` as ReviewSort
+}
+
+/**
+ * P0-2 表头排序切换：第一次点击 → 降序 desc；第二次点击同一列 → 升序 asc。
+ * 切换不同列时回到该列降序。无第三态（无“无排序”）。
+ */
+export function reviewSortToggle(key: ReviewSortKey, current: ReviewSort): ReviewSort {
+  const { key: curKey, dir: curDir } = parseReviewSort(current)
+  if (curKey === key && curDir === 'desc') {
+    return buildReviewSort(key, 'asc')
+  }
+  return buildReviewSort(key, 'desc')
+}
 
 export interface ReviewUrlState {
   /** 交易日（YYYY-MM-DD） */
@@ -107,8 +146,13 @@ const TAB_VALUES: ReadonlySet<string> = new Set([
 
 const SORT_VALUES: ReadonlySet<string> = new Set([
   'velocity_desc',
+  'velocity_asc',
   'acceleration_desc',
+  'acceleration_asc',
   'position_desc',
+  'position_asc',
+  'phase_desc',
+  'phase_asc',
   'equal_weight_return_desc',
   'capital_tilt_desc',
   'migration_desc',

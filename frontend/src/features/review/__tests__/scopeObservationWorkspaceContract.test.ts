@@ -18,6 +18,7 @@ import {
   extractObservationContext,
   ObservationGroupContractError,
 } from '../scopeObservationWorkspaceContract'
+import { groupHasAnyPresentFact } from '../scopeObservationWorkspaceContract'
 import type { ObservationGroup, ObservationGroups } from '../types'
 
 function makeGroup(key: string, label: string, facts: Record<string, unknown> = {}): ObservationGroup {
@@ -158,3 +159,48 @@ test('R3B-V D: per-fact unavailable object preserved verbatim', () => {
   assert.strictEqual(passed, unavailableFact) // 同引用，未复制/未解读
   assert.deepEqual(passed, { status: 'unavailable', reason: 'readiness_200_not_met' })
 })
+
+// [REVIEW-RUNTIME-PRESENTATION-CLOSURE-01 Phase 2] 父级 observation group 无任一有效事实
+// → 应在 GroupBody 层渲染中文父级 unavailable 态，而不是把十几个 null 机械渲染成 "—"。
+// 回归：真实 2026-08-24 数据 trend.continuous.* 全部为 null，导致 trend_state /
+// trend_progress / trend_volume_confirmation 大量空值（实为父级不可用），必须收口。
+test('P2-A: all-null observation group has NO present fact (parent unavailable)', () => {
+  // trend_progress 真实形态：continuous 子事实全 null
+  assert.equal(
+    groupHasAnyPresentFact({
+      segment_bars: null,
+      segment_slope: null,
+      regime_strength: null,
+      dsa_vwap_dev_pct: null,
+      segment_volume_mean_ratio: null,
+    }),
+    false,
+  )
+  // 空对象视为无事实（避免把空事件投影误判为可用）
+  assert.equal(groupHasAnyPresentFact({ bos_choch_events: {} }), false)
+  // 空字符串视为无事实
+  assert.equal(groupHasAnyPresentFact({ squeeze_state: '' }), false)
+})
+
+test('P2-B: group with >=1 present fact still has present fact (single missing scalar may use —)', () => {
+  // trend_progress 在有任一有效事实时不触发父级 unavailable 态
+  assert.equal(
+    groupHasAnyPresentFact({
+      segment_bars: 14, // 有效
+      segment_slope: null,
+      regime_strength: null,
+    }),
+    true,
+  )
+  // 非空对象（事件 cells）视为有事实
+  assert.equal(groupHasAnyPresentFact({ bos_choch_events: { a: 1 } }), true)
+  // 数字 0 是真实值，不是“无事实”（null != 0）
+  assert.equal(groupHasAnyPresentFact({ equal_weight_return: 0 }), true)
+})
+
+test('P2-C: undefined / null / empty facts => no present fact', () => {
+  assert.equal(groupHasAnyPresentFact(undefined), false)
+  assert.equal(groupHasAnyPresentFact(null), false)
+  assert.equal(groupHasAnyPresentFact({}), false)
+})
+

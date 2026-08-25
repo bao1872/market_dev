@@ -9,6 +9,8 @@ import type {
   TrendProgressVM,
   TrendVolumeConfirmationVM,
 } from './scopePriceTrendContract'
+import ReviewTerm from './ReviewTerm'
+import type { ReviewTermKey } from './reviewCopy'
 
 interface TrendProps {
   state?: TrendStateVM | null
@@ -44,8 +46,8 @@ function TrendStateSection({ vm }: { vm: TrendStateVM }) {
         </div>
       )}
       <div className={styles.trendStateRow}>
-        <Analytic label="趋势强度" value={vm.trendStrength} />
-        <Analytic label="DSA-VWAP 偏离" value={vm.dsaVwapDevPct} tone={vm.dsaVwapDevTone} />
+        <Analytic termKey="trendStrength" label="趋势强度" value={vm.trendStrength} />
+        <Analytic termKey="dsaVwapDev" label="均价偏离" value={vm.dsaVwapDevPct} tone={vm.dsaVwapDevTone} />
       </div>
     </div>
   )
@@ -67,10 +69,13 @@ function DirBar({ label, ratio, count, tone }: { label: string; ratio: number | 
   )
 }
 
-function Analytic({ label, value, tone = 'neutral' }: { label: string; value: string; tone?: 'up' | 'down' | 'neutral' }) {
+// P0-4/P0-5：label 经 ReviewTerm 统一中文 + tooltip（单一展示 owner）。
+function Analytic({ label, value, termKey, tone = 'neutral' }: { label: string; value: string; termKey?: ReviewTermKey; tone?: 'up' | 'down' | 'neutral' }) {
   return (
     <div className={styles.trendAnalytic}>
-      <div className={styles.trendAnalyticLabel}>{label}</div>
+      <div className={styles.trendAnalyticLabel}>
+        {termKey ? <ReviewTerm termKey={termKey} /> : label}
+      </div>
       <div className={`${styles.trendAnalyticValue} ${styles[tone]}`}>{value}</div>
     </div>
   )
@@ -83,12 +88,12 @@ function TrendProgressSection({ vm }: { vm: TrendProgressVM }) {
     <div className={styles.trendSection}>
       <div className={styles.trendSectionTitle}>趋势进程</div>
       <div className={styles.trendProgressGrid}>
-        <Analytic label="分段数" value={vm.segmentBars} />
-        <Analytic label="分段变化" value={vm.segmentChangePct} tone={vm.segmentChangeTone} />
-        <Analytic label="分段斜率" value={vm.segmentSlope} tone={vm.segmentSlopeTone} />
-        <Analytic label="VWAP 累计收益" value={vm.vwapRetTotal} tone={vm.vwapRetTotalTone} />
-        <Analytic label="量比" value={vm.volumeRatio} />
-        <Analytic label="额比" value={vm.amountRatio} />
+        <Analytic termKey="segmentBars" label="持续K数" value={vm.segmentBars} />
+        <Analytic termKey="segmentChange" label="区间涨跌" value={vm.segmentChangePct} tone={vm.segmentChangeTone} />
+        <Analytic termKey="segmentSlope" label="趋势斜率" value={vm.segmentSlope} tone={vm.segmentSlopeTone} />
+        <Analytic termKey="vwapRetTotal" label="均价累计收益" value={vm.vwapRetTotal} tone={vm.vwapRetTotalTone} />
+        <Analytic termKey="volumeRatio" label="量比" value={vm.volumeRatio} />
+        <Analytic termKey="amountRatio" label="额比" value={vm.amountRatio} />
       </div>
     </div>
   )
@@ -102,8 +107,8 @@ function TrendVolumeSection({ vm }: { vm: TrendVolumeConfirmationVM }) {
     <div className={styles.trendSection}>
       <div className={styles.trendSectionTitle}>趋势量能确认</div>
       <div className={styles.trendVolumeRatioRow}>
-        <Analytic label="分段量比" value={vm.volumeRatio} />
-        <Analytic label="分段额比" value={vm.amountRatio} />
+        <Analytic termKey="volumeRatio" label="分段量比" value={vm.volumeRatio} />
+        <Analytic termKey="amountRatio" label="分段额比" value={vm.amountRatio} />
       </div>
       <div className={styles.trendMvrBlock}>
         <div className={styles.trendMvrTitle}>动量与量能关系</div>

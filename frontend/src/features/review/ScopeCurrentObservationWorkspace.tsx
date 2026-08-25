@@ -147,6 +147,11 @@ const FORMAL_RENDERERS: Record<string, FC<{ facts: Record<string, unknown>; obse
   volume_anomaly: VolumeBlock,
 }
 
+export function groupHasAnyPresentFact(facts: Record<string, unknown> | undefined | null): boolean {
+  return groupHasAnyPresentFactImpl(facts)
+}
+import { groupHasAnyPresentFact as groupHasAnyPresentFactImpl } from './scopeObservationWorkspaceContract'
+
 function GroupBody({
   group,
   observation,
@@ -154,6 +159,15 @@ function GroupBody({
   group: ObservationGroup
   observation: Record<string, unknown> | null
 }) {
+  // [Phase 2] 整个父级 observation group 无有效事实 → 中文父级 unavailable 态，
+  // 不产生 dash-spam。文字与 canonical label 对齐（group.label 来自 backend L2）。
+  if (!groupHasAnyPresentFact(group.facts)) {
+    return (
+      <div className={styles.observationGroupEmpty}>
+        本期暂无{group.label}数据
+      </div>
+    )
+  }
   const Renderer = FORMAL_RENDERERS[group.group_key]
   if (Renderer) {
     return <Renderer facts={group.facts ?? {}} observation={observation} />

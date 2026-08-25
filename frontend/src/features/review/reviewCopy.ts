@@ -204,6 +204,59 @@ export const REVIEW_TERMS = {
     label: '龙头更替率',
     help: '描述领先成员名单发生变化的程度。越高表示龙头成员更替越明显',
   },
+  // ---- P0-4/P0-5：趋势 / 量能指标中文简称 + 解释（单一展示 owner，统一 tooltip） ----
+  trendStrength: {
+    label: '趋势强度',
+    help: '衡量当前趋势方向的强弱程度。数值越高表示趋势方向越明确、持续性越强',
+  },
+  dsaVwapDev: {
+    label: '均价偏离',
+    help: 'DSA（动态结构分析）相对 VWAP 均价的偏离百分比。正值表示价格位于均价上方，负值表示下方',
+  },
+  segmentBars: {
+    label: '持续K数',
+    help: '当前趋势连续段包含的 K 线数量，反映趋势已持续的时间长度',
+  },
+  segmentChange: {
+    label: '区间涨跌',
+    help: '当前趋势连续段内的累计涨跌幅',
+  },
+  segmentSlope: {
+    label: '趋势斜率',
+    help: '趋势连续段的价格变化速率，反映趋势推进的陡缓',
+  },
+  vwapRetTotal: {
+    label: '均价累计收益',
+    help: '自趋势段开始以来相对 VWAP 均价的累计收益',
+  },
+  volumeRatio: {
+    label: '量比',
+    help: '当前成交量与近期平均成交量的比值，反映成交量相对活跃程度',
+  },
+  amountRatio: {
+    label: '额比',
+    help: '当前成交额与近期平均成交额的比值，反映资金活跃程度',
+  },
+  zScore: {
+    label: 'Z分数',
+    help: '指标值相对其历史分布的 standardized 偏离程度（标准差倍数），用于判断当前处于常态还是极端',
+  },
+  bbPosition: {
+    label: '布林位置',
+    help: '当前价格处在布林带中的相对位置（0=下轨，1=上轨）',
+  },
+  bbWidth: {
+    label: '布林宽度',
+    help: '布林带上下轨之间的宽度，反映波动扩张或收缩',
+  },
+  vwapTotalReturn: {
+    label: '均价累计收益',
+    help: '相对 VWAP 均价的累计收益',
+  },
+  percentile: {
+    label: '分位数',
+    help: '指标值在其历史分布中所处的百分位置（0–100），用于判断当前处于常态还是极端区间',
+  },
 } as const
 
 export type ReviewTermKey = keyof typeof REVIEW_TERMS

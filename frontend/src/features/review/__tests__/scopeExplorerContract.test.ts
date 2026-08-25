@@ -37,6 +37,7 @@ import {
   normalizeSort,
   decodeReviewUrl,
   encodeReviewUrl,
+  reviewSortToggle,
 } from '../urlState'
 import type { ReviewSort } from '../urlState'
 import type {
@@ -480,7 +481,9 @@ test('T1. Table 精确 canonical 列（12 列，无 p/q/u/c/v/signalCount）', (
     'technical',
   ]
   for (const col of expected) {
-    assert.ok(src.includes(`termKey="${col}"`), `Table 必须含 ReviewTerm 列 ${col}`)
+    // 列经 ReviewTerm 渲染：非排序列为 termKey="col"；排序列经 renderSortableHeader('col', 'col')
+    const ok = src.includes(`termKey="${col}"`) || src.includes(`renderSortableHeader('${col}'`)
+    assert.ok(ok, `Table 必须含 canonical 列 ${col}`)
   }
   // 源码不得引用 legacy 指标
   assert.doesNotMatch(src, /\.p\b|\.q\b|\.u\b|\.c\b|\.v\b|signalCount/, 'Table 不得引用 p/q/u/c/v/signalCount')
@@ -891,10 +894,17 @@ test('SORT-15. Workspace 把 urlState.sort 同时喂给 Trajectory（filteredSor
   assert.match(src, /applyScopeExplorerPipeline\(snapshotItems, query, urlState\.page, urlState\.pageSize, urlState\.sort\)/, 'Table 源必须用同一 urlState.sort')
   // 不得再出现 sortVelocityDesc（单一排序 owner）
   assert.doesNotMatch(src, /sortVelocityDesc/, 'Workspace 不得保留旧 sortVelocityDesc 调用')
-  // Toolbar 接收 sort 并经 onFilterChange({ sort }) 上报
-  assert.match(src, /sort=\{urlState\.sort\}/, 'Toolbar 必须接收 urlState.sort')
+  // P0-2：排序改由表头控制，Toolbar 不再接收 sort；Table 接收 sort={urlState.sort}
+  assert.match(src, /ScopeExplorerTable[^]*sort=\{urlState\.sort\}/, 'Table 必须接收 urlState.sort')
+  // Toolbar 元素自身（从 <ScopeExplorerToolbar 到其首个 />）不得含 sort= prop
+  const toolbarEl = /<ScopeExplorerToolbar[\s\S]*?\/>/.exec(src)
+  assert.ok(toolbarEl, 'ScopeExplorerToolbar 元素必须存在')
+  assert.doesNotMatch(toolbarEl[0], /sort=/, 'Toolbar 元素自身不再接收 sort（P0-2 表头排序）')
   const tb = read('ScopeExplorerToolbar.tsx')
-  assert.match(tb, /onFilterChange\(\{ sort: e\.target\.value as ReviewSort \}\)/, 'Toolbar 必须上报 onFilterChange({ sort })')
+  // P0-2：排序改由表头控制，Toolbar 不再渲染 sort 下拉，故不再上报 onFilterChange({ sort })
+  assert.doesNotMatch(tb, /onFilterChange\(\{ sort:/, 'Toolbar 不再上报 sort（P0-2 表头排序）')
+  // sort 仍经 onFilterChange({ sort }) 上报（由 Workspace 内 Table 表头触发）
+  assert.match(src, /onFilterChange\(\{ sort: s, page: 1 \}\)/, 'Workspace 内 Table 表头必须上报 onFilterChange({ sort })')
   // 几何坐标不被 sort 改变：x=position / y=velocity
   const traj = read('ScopeTrajectoryView.tsx')
   assert.match(traj, /\(pos \/ 100\)/, 'Trajectory x 仍由 position 决定')
@@ -1024,4 +1034,124 @@ test('R2B-FE-12. 列表渲染不新增 detail 请求', () => {
   // 不得出现对 detail hook 的依赖
   assert.doesNotMatch(tbl, /useReviewScopeDetail/, '列表渲染不得新增 detail 请求')
 })
+
+// ============================================================
+// REVIEW-UX-CLOSURE-02 (P0-1 .. P0-6) 收口合同测试
+// ============================================================
+
+// P0-1：Readiness 数据状态筛选控件删除（普通用户不再用它筛选列表）
+test('P0-1: Readiness 筛选控件已从工具栏删除（readiness canonical 字段仍保留在 URL/API）', () => {
+  const tb = read('ScopeExplorerToolbar.tsx')
+  // 不得再渲染 readiness 下拉
+  assert.doesNotMatch(tb, /数据状态过滤/, '工具栏不得保留“数据状态过滤”控件')
+  assert.doesNotMatch(tb, /READINESS_OPTIONS/, '工具栏不得引用 READINESS_OPTIONS')
+  // readiness 不再是工具栏渲染的 select（仅保留在 URL/API canonical 字段）
+  assert.doesNotMatch(tb, /aria-label="数据状态过滤"/, '工具栏不得渲染 readiness select aria-label')
+  // readiness 仍是 URL state 合法字段（canonical 不变）
+  const url = read('urlState.ts')
+  assert.match(url, /readiness/, 'readiness 仍是 URL state 字段（API contract 不变）')
+})
+
+// P0-2：排序下拉删除，表头排序 desc↔asc
+test('P0-2: 排序下拉已从工具栏删除（排序改由表头控制）', () => {
+  const tb = read('ScopeExplorerToolbar.tsx')
+  assert.doesNotMatch(tb, /排序字段/, '工具栏不得保留“排序字段”下拉')
+  assert.doesNotMatch(tb, /SORT_OPTIONS/, '工具栏不得引用 SORT_OPTIONS')
+  const tbl = read('ScopeExplorerTable.tsx')
+  assert.match(tbl, /reviewSortToggle/, '表头必须使用 reviewSortToggle 控制排序')
+  assert.match(tbl, /onSortChange/, '表头点击必须回调 onSortChange')
+})
+
+test('P0-2: reviewSortToggle 第一次点击降序、第二次升序、切换列回到降序', () => {
+  assert.equal(reviewSortToggle('velocity', 'velocity_desc'), 'velocity_asc')
+  assert.equal(reviewSortToggle('velocity', 'velocity_asc'), 'velocity_desc')
+  assert.equal(reviewSortToggle('position', 'velocity_desc'), 'position_desc')
+  assert.equal(reviewSortToggle('phase', 'phase_asc'), 'phase_desc')
+})
+
+test('P0-2: asc/desc 经 URL encode/decode 往返保持', () => {
+  for (const s of ['velocity_asc', 'acceleration_desc', 'position_asc', 'phase_desc'] as ReviewSort[]) {
+    const st = defaultReviewUrlState()
+    const enc = encodeReviewUrl({ ...st, sort: s })
+    const dec = decodeReviewUrl(enc)
+    assert.equal(dec.sort, s, `sort ${s} 应往返一致`)
+  }
+})
+
+test('P0-2: sortScopes 升序/降序方向正确，null 恒最后，作用于完整 snapshot', () => {
+  const items = [
+    makeItem('a', { summary: makeSummary({ velocity: 3 }) }),
+    makeItem('b', { summary: makeSummary({ velocity: null }) }),
+    makeItem('c', { summary: makeSummary({ velocity: 1 }) }),
+    makeItem('d', { summary: makeSummary({ velocity: 2 }) }),
+  ]
+  const desc = sortScopes(items, 'velocity_desc').map((i) => i.scopeKey)
+  assert.deepEqual(desc, ['a', 'd', 'c', 'b'], '降序：3,2,1,null')
+  const asc = sortScopes(items, 'velocity_asc').map((i) => i.scopeKey)
+  assert.deepEqual(asc, ['c', 'd', 'a', 'b'], '升序：1,2,3,null（null 恒最后）')
+})
+
+test('P0-2: 排序作用于完整 family snapshot（跨分页），而非仅当前页', () => {
+  // 构造 120 条（>1 页 50），验证排序后第 1 页首条是全局最大 velocity
+  const all = Array.from({ length: 120 }, (_, i) =>
+    makeItem(`s${i}`, { summary: makeSummary({ velocity: 120 - i }) }),
+  )
+  const sorted = sortScopes(all, 'velocity_desc')
+  assert.equal(sorted[0].scopeKey, 's0', '全局降序首条应为 velocity=120 的 s0')
+  // 取前 50（第 1 页）应全是 velocity 120..71 的降序，不混入小值
+  const page1 = sorted.slice(0, 50)
+  assert.equal(page1[49].summary?.velocity, 71, '第 1 页末条应为全局第 50 大（71）')
+})
+
+// P0-3：TradingView logo 关闭 + attribution 保留
+test('P0-3: 图表关闭 Lightweight Charts attribution logo，并保留许可归属文本', () => {
+  const dp = read('ScopeDynamicsPanel.tsx')
+  assert.match(dp, /attributionLogo:\s*false/, '必须设置 layout.attributionLogo=false 关闭 TV logo')
+  assert.doesNotMatch(dp, /display:\s*none[^\n]*logo|mask|overlay/, '禁止用 CSS/overlay 强盖 logo')
+  assert.match(dp, /chartAttribution/, '面板必须保留 TradingView 许可归属文本（非干扰区）')
+})
+
+// P0-4/P0-5：字段字典存在统一 owner
+test('P0-4/P0-5: REVIEW_TERMS 含新增指标中文简称与解释（单一展示 owner）', () => {
+  const rc = read('reviewCopy.ts')
+  for (const k of [
+    'trendStrength',
+    'dsaVwapDev',
+    'segmentBars',
+    'segmentChange',
+    'segmentSlope',
+    'vwapRetTotal',
+    'volumeRatio',
+    'amountRatio',
+    'zScore',
+    'percentile',
+    'bbPosition',
+    'bbWidth',
+  ]) {
+    assert.match(rc, new RegExp(`  ${k}:\\s*\\{`), `REVIEW_TERMS 必须包含 ${k}`)
+    assert.match(rc, new RegExp(`  ${k}:[\\s\\S]*?label:`), `${k} 必须有 label`)
+    assert.match(rc, new RegExp(`  ${k}:[\\s\\S]*?help:`), `${k} 必须有 help（tooltip 解释）`)
+  }
+})
+
+// P0-6：tooltip 经 Portal 渲染到 document.body，且非 absolute（不被滚动容器裁切）
+test('P0-6: ReviewTerm tooltip 经 React Portal 到 document.body，非 absolute 内联', () => {
+  const rt = read('ReviewTerm.tsx')
+  assert.match(rt, /createPortal\(/, 'tooltip 必须使用 React Portal')
+  assert.match(rt, /document\.body/, 'Portal 目标为 document.body（脱离滚动容器）')
+  assert.match(rt, /position:\s*'fixed'/, 'tooltip 使用 position: fixed')
+  const scss = read('review.module.scss')
+  // .termTooltip 块内不得再是 position:absolute（避免被 overflow 容器裁切）。
+  // 仅抽取 .termTooltip { ... } 第一对花括号之间的内容做断言（不跨块）。
+  const m = /\.termTooltip\s*\{([^}]*)\}/.exec(scss)
+  assert.ok(m, '.termTooltip 块必须存在')
+  assert.doesNotMatch(m[1], /absolute/, '.termTooltip 块内不得含 position:absolute')
+})
+
+// P0-1 补充：Phase 列普通用户文案应为“阶段”（非 Phase），来自 REVIEW_TERMS.phase.label
+test('P0-1 补充: 阶段列中文文案为“阶段”', () => {
+  const rc = read('reviewCopy.ts')
+  assert.match(rc, /phase:\s*\{\s*label:\s*'阶段'/, 'REVIEW_TERMS.phase.label 必须为中文“阶段”')
+})
+
 

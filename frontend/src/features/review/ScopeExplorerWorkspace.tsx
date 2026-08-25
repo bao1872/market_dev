@@ -115,8 +115,6 @@ export default function ScopeExplorerWorkspace({
         view={urlState.view}
         q={urlState.q}
         phase={urlState.phase}
-        readiness={urlState.readiness}
-        sort={urlState.sort}
         onFamilyChange={onFamilyChange}
         onViewChange={onViewChange}
         onFilterChange={onFilterChange}
@@ -134,6 +132,8 @@ export default function ScopeExplorerWorkspace({
               <ScopeExplorerTable
                 rows={paged.items}
                 selectedScopeKey={urlState.scopeKey}
+                sort={urlState.sort}
+                onSortChange={(s) => onFilterChange({ sort: s, page: 1 })}
                 onSelectScope={onSelectScope}
               />
               <div className={styles.explorerFooter}>

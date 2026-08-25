@@ -41,7 +41,14 @@ function useInlineChart(
     if (!el) return
     const chart: IChartApi = createChart(el, {
       height: 120,
-      layout: { background: { color: 'transparent' }, textColor: '#98A1B3', fontFamily: 'SFMono-Regular, monospace' },
+      // P0-3: 关闭 Lightweight Charts 自带 attribution logo（"TV"）。
+      // 许可要求的归属信息移至面板底部非干扰区域（见 chartAttribution），不再出现在图表左下角。
+      layout: {
+        background: { color: 'transparent' },
+        textColor: '#98A1B3',
+        fontFamily: 'SFMono-Regular, monospace',
+        attributionLogo: false,
+      },
       grid: { vertLines: { color: 'rgba(38,52,64,0.35)' }, horzLines: { color: 'rgba(38,52,64,0.35)' } },
       rightPriceScale: { borderColor: '#263440' },
       timeScale: { borderColor: '#263440', timeVisible: false },
@@ -153,6 +160,10 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
       <SeriesChart data={velocityData} kind="offset" title={<ReviewTerm termKey="velocity" compact />} showZeroLine />
       <SeriesChart data={accelerationData} kind="offset" title={<ReviewTerm termKey="acceleration" compact />} showZeroLine />
       <CurrentFactStrip phaseFact={current} />
+      {/* P0-3: TradingView Lightweight Charts 许可归属（图表 logo 已关闭，归属信息保留于此非干扰区域） */}
+      <div className={styles.chartAttribution}>
+        Charts by TradingView Lightweight Charts
+      </div>
     </div>
   )
 }

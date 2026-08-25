@@ -18,6 +18,8 @@ import {
   formatContributionFraction,
 } from './reviewFormat'
 import ReviewTerm from './ReviewTerm'
+import { parseReviewSort, reviewSortToggle, type ReviewSort, type ReviewSortKey } from './urlState'
+import type { ReviewTermKey } from './reviewCopy'
 import styles from './review.module.scss'
 
 function directionClass(value: number | null | undefined): string {
@@ -102,20 +104,48 @@ function TechnicalCell({ obs }: { obs: ReviewScopeListItem['observationSummary']
 export interface ScopeExplorerTableProps {
   rows: ReviewScopeListItem[]
   selectedScopeKey: string | null
+  sort: ReviewSort
+  onSortChange: (sort: ReviewSort) => void
   onSelectScope: (scopeKey: string) => void
 }
 
-export default function ScopeExplorerTable({ rows, selectedScopeKey, onSelectScope }: ScopeExplorerTableProps) {
+export default function ScopeExplorerTable({ rows, selectedScopeKey, sort, onSortChange, onSelectScope }: ScopeExplorerTableProps) {
+  const { key: activeKey, dir: activeDir } = parseReviewSort(sort)
+
+  // P0-2：表头点击排序。第一次点击→降序 ↓；第二次点击→升序 ↑（无第三态）。
+  const handleSortClick = (key: ReviewSortKey) => {
+    onSortChange(reviewSortToggle(key, sort))
+  }
+
+  const renderSortableHeader = (key: ReviewSortKey, termKey: ReviewTermKey) => {
+    const active = activeKey === key
+    const arrow = active ? (activeDir === 'desc' ? ' ↓' : ' ↑') : ''
+    return (
+      <th className={`${styles.numCell} ${styles.sortableHeader}`} aria-sort={active ? (activeDir === 'desc' ? 'descending' : 'ascending') : 'none'}>
+        <button
+          type="button"
+          className={styles.sortHeaderBtn}
+          onClick={() => handleSortClick(key)}
+          title="点击按此列排序"
+          aria-label={`按${termKey}排序`}
+        >
+          <ReviewTerm termKey={termKey} />
+          <span className={styles.sortArrow} aria-hidden="true">{arrow}</span>
+        </button>
+      </th>
+    )
+  }
+
   return (
     <div className={styles.explorerTableWrap}>
       <table className={styles.explorerScopeTable}>
         <thead>
           <tr>
             <th><ReviewTerm termKey="scope" /></th>
-            <th><ReviewTerm termKey="phase" /></th>
-            <th className={styles.numCell}><ReviewTerm termKey="position" /></th>
-            <th className={styles.numCell}><ReviewTerm termKey="velocity" /></th>
-            <th className={styles.numCell}><ReviewTerm termKey="acceleration" /></th>
+            {renderSortableHeader('phase', 'phase')}
+            {renderSortableHeader('position', 'position')}
+            {renderSortableHeader('velocity', 'velocity')}
+            {renderSortableHeader('acceleration', 'acceleration')}
             <th className={styles.numCell}><ReviewTerm termKey="equalWeightReturn" /></th>
             <th className={styles.numCell}><ReviewTerm termKey="capitalTilt" /></th>
             <th><ReviewTerm termKey="breadth" /></th>

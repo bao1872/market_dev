@@ -8,7 +8,7 @@ import type {
   ReviewDynamicsPhase,
   ReviewCompositionReadiness,
 } from './types'
-import type { ReviewSort } from './urlState'
+import { parseReviewSort, type ReviewSort } from './urlState'
 
 export interface ScopeExplorerQuery {
   q: string
@@ -44,17 +44,37 @@ function tieBreak(a: ReviewScopeListItem, b: ReviewScopeListItem): number {
   return a.scopeKey.localeCompare(b.scopeKey)
 }
 
+/** phase 排序顺序索引（canonical phase 顺序，用于升/降序比较；null 恒最后） */
+const PHASE_ORDER: Readonly<Record<string, number>> = {
+  'Early Lift': 0,
+  Strengthening: 1,
+  Sustained: 2,
+  Decelerating: 3,
+  Weakening: 4,
+  Repairing: 5,
+}
+
 /** 取某 sort 对应的排序数值（persisted 字段直接读取，绝不重算）：
  *  velocity/acceleration/position/equalWeightReturn/capitalTilt/migration 来自 summary，
- *  coverage 来自行级 coverageRatio。 */
+ *  coverage 来自行级 coverageRatio。_asc 与 _desc 取同一数值，方向由 sortScopes 决定。
+ *  phase 使用 canonical phase 顺序索引参与排序。 */
 function sortValueFor(item: ReviewScopeListItem, sort: ReviewSort): number | null {
   switch (sort) {
     case 'velocity_desc':
+    case 'velocity_asc':
       return finiteOrNull(item.summary?.velocity)
     case 'acceleration_desc':
+    case 'acceleration_asc':
       return finiteOrNull(item.summary?.acceleration)
     case 'position_desc':
+    case 'position_asc':
       return finiteOrNull(item.summary?.position)
+    case 'phase_desc':
+    case 'phase_asc': {
+      const p = item.summary?.phase
+      if (!p) return null
+      return PHASE_ORDER[p] ?? null
+    }
     case 'equal_weight_return_desc':
       return finiteOrNull(item.summary?.equalWeightReturn)
     case 'capital_tilt_desc':
@@ -98,19 +118,25 @@ export function filterScopes(
   })
 }
 
-/** 通用排序 owner：所有降序 sort 模式共用，数值 null 恒最后，确定性 tie-break。
- * 不进入 React 组件；不改 chart 几何（x=position/y=velocity 由 Trajectory 决定）。 */
+/**
+ * 通用排序 owner：数值 null 恒最后，确定性 tie-break。
+ * 升序变体（_asc）反向比较；降序（_desc）保持历史默认行为。
+ * 不进入 React 组件；不改 chart 几何（x=position/y=velocity 由 Trajectory 决定）。
+ * 排序始终作用于完整 family snapshot（调用方传入全量 items），满足“跨分页完整结果集排序”。
+ */
 export function sortScopes(
   items: ReviewScopeListItem[],
   sort: ReviewSort,
 ): ReviewScopeListItem[] {
+  const { dir } = parseReviewSort(sort)
+  const sign = dir === 'desc' ? 1 : -1
   return [...items].sort((a, b) => {
     const va = sortValueFor(a, sort)
     const vb = sortValueFor(b, sort)
     if (va === null && vb === null) return tieBreak(a, b)
     if (va === null) return 1
     if (vb === null) return -1
-    if (vb !== va) return vb - va
+    if (vb !== va) return sign * (vb - va)
     return tieBreak(a, b)
   })
 }

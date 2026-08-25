@@ -202,18 +202,21 @@ test('UX10. 前端不硬编码 canonical 8-group 中文 label map（R3B-FE-7 延
 // 4. 关键组件不再直接渲染英文用户标签
 // ============================================================
 
-test('UX11. Toolbar 全面中文化（canonical 值不变）', () => {
+test('UX11. Toolbar 全面中文化（canonical 值不变；P0-1 已删除 Readiness 筛选）', () => {
   const src = read('ScopeExplorerToolbar.tsx')
   assert.ok(src.includes('搜索板块 / 概念名称'), '搜索 placeholder 中文')
   assert.ok(src.includes('阶段：全部'), 'Phase 过滤中文')
-  assert.ok(src.includes('数据状态：全部'), 'Readiness 过滤中文')
   assert.ok(src.includes('表格'), 'Table 视图中文')
   assert.ok(src.includes('轨迹图'), 'Trajectory 视图中文')
+  // P0-1：Readiness 数据状态筛选控件已从工具栏删除（普通用户不再用它筛选）
+  assert.doesNotMatch(src, /数据状态：全部/, '工具栏不得保留 Readiness 筛选')
+  assert.doesNotMatch(src, /Readiness/, '工具栏不得出现 Readiness 英文标签')
   // 不得残留英文用户标签
   assert.doesNotMatch(src, /Phase: 全部|Readiness: 全部|搜索 scope \/ key|>Table<|>Trajectory</)
-  // canonical 选项值不变（触发值仍是英文 raw）
+  // canonical 选项值不变（phase 触发值仍是英文 raw；readiness canonical 值保留在 types/urlState）
   assert.ok(src.includes("'Early Lift'"), 'phase canonical 值不变')
-  assert.ok(src.includes("'ready'"), 'readiness canonical 值不变')
+  const types = read('types.ts')
+  assert.ok(types.includes("'ready'"), 'readiness canonical 值仍保留')
 })
 
 test('UX12. ExplorerTable 表头经 ReviewTerm 中文化，无英文硬编码', () => {
