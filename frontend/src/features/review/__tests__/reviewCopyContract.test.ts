@@ -277,24 +277,39 @@ test('UX16. null/unavailable 语义不变（不伪造 0）', () => {
 // ============================================================
 
 const REVIEW_TERM_SRC = read('ReviewTerm.tsx')
+const DETAIL_TABS_SRC = read('ScopeDetailTabs.tsx')
 
-test('UX17. ReviewTerm label 是 keyboard focus trigger（tabIndex + onFocus + onBlur）', () => {
-  // focus 路径必须挂在 label span 上，与 aria-describedby 同一可交互元素
-  assert.ok(REVIEW_TERM_SRC.includes('className={styles.termLabel}'))
-  assert.ok(REVIEW_TERM_SRC.includes('aria-describedby={tooltipId}'))
-  assert.ok(REVIEW_TERM_SRC.includes('tabIndex={0}'))
-  assert.ok(REVIEW_TERM_SRC.includes('onFocus={() => setOpen(true)}'))
-  assert.ok(REVIEW_TERM_SRC.includes('onBlur={() => setOpen(false)}'))
+test('UX17. standalone ReviewTerm label 是 keyboard focus trigger（tabIndex + onFocus + onBlur + aria-describedby 同元素）', () => {
+  // standalone card/label（focusable 默认 true）必须自身可聚焦并拥有 description
+  assert.ok(REVIEW_TERM_SRC.includes('focusable = true'))
+  assert.ok(REVIEW_TERM_SRC.includes("tabIndex: 0"))
+  assert.ok(REVIEW_TERM_SRC.includes('onFocus: () => setOpen(true)'))
+  assert.ok(REVIEW_TERM_SRC.includes('onBlur: () => setOpen(false)'))
+  assert.ok(REVIEW_TERM_SRC.includes("'aria-describedby': tooltipId"))
 })
 
-test('UX18. compact 不删除 keyboard focus（focus 挂在 label，icon 才受 compact 控制）', () => {
-  // label 的 focus 三件套不应在 {!compact && ...} 分支内（否则 compact 会丢 focus）
-  const labelBlock = REVIEW_TERM_SRC.split('termLabel')[1] ?? ''
-  assert.ok(
-    labelBlock.includes('onFocus') && labelBlock.includes('tabIndex'),
-    'label 自带 focus，不依赖 compact icon',
+test('UX18. ReviewTerm 支持 focusable={false}（嵌套交互 trigger 内不创建第二个 tab stop）', () => {
+  // focusable=false 时 labelFocusProps 必须退化为空对象（不渲染 tabIndex/onFocus/aria-describedby）
+  assert.ok(REVIEW_TERM_SRC.includes('focusable = true'))
+  assert.ok(REVIEW_TERM_SRC.includes('const labelFocusProps = focusable'))
+  assert.ok(REVIEW_TERM_SRC.includes('tabIndex: 0,'))
+  // 关键负向：focusable=false 路径（: {}）不得含 tabIndex/onFocus
+  const falseBranch = REVIEW_TERM_SRC.split('const labelFocusProps = focusable')[1] ?? ''
+  assert.ok(falseBranch.includes(': {}'), 'focusable=false 时 labelFocusProps 为空对象')
+})
+
+test('UX19. Detail Tab button 是 sole focus owner（aria-describedby + 内部 ReviewTerm focusable=false）', () => {
+  // 1. tab button 自己持有 aria-describedby（真实 focus owner 与 description owner 一致）
+  assert.ok(DETAIL_TABS_SRC.includes('aria-describedby={tabTooltipId}'))
+  // 2. 内部 ReviewTerm 关闭自身 focusability，避免嵌套第二个 tabIndex=0 stop
+  assert.ok(DETAIL_TABS_SRC.includes('focusable={false}'))
+  // 3. 共享 tooltipId，使 button 的 aria-describedby 指向 ReviewTerm 渲染的 tooltip
+  assert.ok(DETAIL_TABS_SRC.includes('tooltipId={tabTooltipId}'))
+  // 负向 gate：tab button 内部不得出现裸 tabIndex={0} 后代（即 ReviewTerm 自身不再注入）
+  const buttonBlock = DETAIL_TABS_SRC.split('role="tab"')[1] ?? ''
+  assert.doesNotMatch(
+    buttonBlock,
+    /<ReviewTerm[\s\S]*?tabIndex=\{0\}/,
+    'tab 内 ReviewTerm 不得自带 tabIndex=0（否则破坏 tablist 键盘模型）',
   )
-  // 正常模式仍有 ⓘ icon（独立 focus target）
-  assert.ok(REVIEW_TERM_SRC.includes('termHelpIcon'))
-  assert.ok(REVIEW_TERM_SRC.includes('{!compact &&'))
 })

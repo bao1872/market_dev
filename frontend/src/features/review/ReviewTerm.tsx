@@ -19,6 +19,20 @@ export interface ReviewTermProps {
   help?: string
   /** compact：隐藏 ⓘ 图标，仅 hover/focus label 显示 tooltip */
   compact?: boolean
+  /**
+   * focusable：是否由 ReviewTerm 自身 label 担任键盘 focus owner。
+   * - true（默认，standalone card/label）：label 自带 tabIndex=0 + aria-describedby，
+   *   keyboard focus 展开 tooltip。
+   * - false（嵌套在已有交互 trigger 内，如 role="tab" button）：label 不再创建
+   *   第二个 tabIndex=0 stop，仅作展示；tooltip 由祖先 trigger 的 focus 驱动
+   *   （调用方负责在祖先元素挂 aria-describedby + :focus-visible CSS）。
+   */
+  focusable?: boolean
+  /**
+   * tooltipId：外部传入的 tooltip 元素 id（用于嵌套场景，让祖先 trigger 的
+   * aria-describedby 指向本 tooltip）。不传则由内部 useId() 生成。
+   */
+  tooltipId?: string
   className?: string
 }
 
@@ -27,13 +41,16 @@ export default function ReviewTerm({
   label,
   help,
   compact = false,
+  focusable = true,
+  tooltipId: tooltipIdProp,
   className,
 }: ReviewTermProps) {
   const term = termKey ? REVIEW_TERMS[termKey] : undefined
   const displayLabel = label ?? term?.label ?? ''
   const displayHelp = help ?? term?.help
   const [open, setOpen] = useState(false)
-  const tooltipId = useId()
+  const generatedTooltipId = useId()
+  const tooltipId = tooltipIdProp ?? generatedTooltipId
 
   // 无 help 时只渲染纯 label（无 ⓘ、无 tooltip、无 aria 引用）
   if (!displayHelp) {
@@ -42,19 +59,24 @@ export default function ReviewTerm({
 
   const rootClass = className ? `${styles.term} ${className}` : styles.term
 
+  // 键盘 focus owner：仅当 focusable 时由 label 自身承担（避免嵌套 trigger 内出现
+  // 第二个 tabIndex=0 stop，破坏 tablist 键盘模型）。
+  const labelFocusProps = focusable
+    ? {
+        tabIndex: 0,
+        onFocus: () => setOpen(true),
+        onBlur: () => setOpen(false),
+        'aria-describedby': tooltipId,
+      }
+    : {}
+
   return (
     <span
       className={rootClass}
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
-      <span
-        className={styles.termLabel}
-        aria-describedby={tooltipId}
-        tabIndex={0}
-        onFocus={() => setOpen(true)}
-        onBlur={() => setOpen(false)}
-      >
+      <span className={styles.termLabel} {...labelFocusProps}>
         {displayLabel}
       </span>
       {!compact && (

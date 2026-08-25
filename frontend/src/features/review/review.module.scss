@@ -742,6 +742,14 @@
   display: block;
 }
 
+// B2: 当 ReviewTerm 嵌套在已有交互 trigger（如 role="tab" button）内且
+// focusable={false} 时，tooltip 由祖先 trigger 的键盘 focus 驱动显示，
+// 不引入第二个 tabIndex=0 stop。
+.detailTab:focus-visible .termTooltip,
+.detailTab:focus .termTooltip {
+  display: block;
+}
+
 // =========================================================================
 // [Slice D] Canonical Scope Explorer
 // =========================================================================

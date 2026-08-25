@@ -38,6 +38,7 @@ export default function ScopeDetailTabs({ tab, onTabChange }: ScopeDetailTabsPro
     <div className={styles.detailTabs} role="tablist" aria-label="Scope 详情子 Tab">
       {SCOPE_DETAIL_TABS.map((def) => {
         const active = def.value === tab
+        const tabTooltipId = `review-detail-tab-tooltip-${def.value}`
         return (
           <button
             key={def.value}
@@ -45,10 +46,17 @@ export default function ScopeDetailTabs({ tab, onTabChange }: ScopeDetailTabsPro
             role="tab"
             aria-selected={active}
             aria-label={`${def.label} 子 Tab`}
+            aria-describedby={tabTooltipId}
             className={active ? `${styles.detailTab} ${styles.detailTabActive}` : styles.detailTab}
             onClick={() => onTabChange(def.value)}
           >
-            <ReviewTerm label={def.label} help={def.help} compact />
+            <ReviewTerm
+              label={def.label}
+              help={def.help}
+              compact
+              focusable={false}
+              tooltipId={tabTooltipId}
+            />
           </button>
         )
       })}
