@@ -35,8 +35,6 @@ export interface ReviewTermProps {
   className?: string
 }
 
-const TOOLTIP_MAX_WIDTH = 340
-
 export default function ReviewTerm({
   termKey,
   label,
@@ -160,7 +158,12 @@ export default function ReviewTerm({
               position: 'fixed',
               top: coords?.top ?? -9999,
               left: coords?.left ?? -9999,
-              maxWidth: TOOLTIP_MAX_WIDTH,
+              // P1-3：实际 tooltip 最大尺寸不超过 viewport，由 CSS/render owner 保证；
+              // computeTooltipPosition 只负责 left/top 定位（基于真实 getBoundingClientRect）。
+              maxWidth: 'min(340px, calc(100vw - 16px))',
+              maxHeight: 'calc(100vh - 16px)',
+              overflowY: 'auto',
+              whiteSpace: 'normal',
               width: 'max-content',
               // coords 计算前隐藏，避免未定位瞬间闪现于左上角
               visibility: coords ? 'visible' : 'hidden',

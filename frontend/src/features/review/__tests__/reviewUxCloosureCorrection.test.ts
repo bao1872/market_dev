@@ -55,13 +55,26 @@ test('geom: top clamp — tooltip 比视口还高时顶部 clamp 到 margin', ()
   assert.equal(res.top, 8)
 })
 
-test('geom: oversized tooltip — 超宽且超矮都夹紧在视口内', () => {
+test('geom: oversized tooltip — 纯几何只做 left/top clamp，不缩小 tooltip 尺寸', () => {
+  // 职责边界：computeTooltipPosition 只负责定位（left/top clamp），
+  // 不负责改变 tooltip 尺寸；tooltip 实际尺寸由 CSS/render owner（max-width/max-height）保证。
   const tooltip: Rect = { top: 0, left: 0, right: 0, bottom: 0, width: 900, height: 800 }
   const res = computeTooltipPosition(anchor, tooltip, { width: 600, height: 400 }, 8)
   assert.equal(res.left, 8) // 右侧不足 → 向左 → clamp 到 margin
   assert.equal(res.top, 8) // 顶部不足 → clamp 到 margin
-  // 确认定位后 tooltip 不会超出右/下边界（left+width 与 top+height 受 clamp 约束）
-  assert.ok(res.left + tooltip.width >= 600 - 8 + 8) // 仅校验不溢出右边界的计算逻辑：left=margin
+  // 纯几何函数不得声称可以缩小 tooltip：left/top 已 clamp，但 900x800 的尺寸原样透传（由 CSS 约束）
+  assert.ok(res.left + tooltip.width > 600, '纯几何不缩小 tooltip 宽度（超视口部分由 CSS 截断，非定位函数职责）')
+})
+
+test('source: rendered tooltip 受 viewport 约束（max-width / max-height 由 CSS/inline 保证）', () => {
+  const src = readSource('ReviewTerm.tsx')
+  // P1-3：tooltip 实际最大尺寸不超过 viewport，由 render owner 保证；定位仍用真实 getBoundingClientRect。
+  assert.ok(/maxWidth:\s*'min\(340px, calc\(100vw - 16px\)\)'/.test(src), 'tooltip 缺少 viewport 约束的 max-width')
+  assert.ok(/maxHeight:\s*'calc\(100vh - 16px\)'/.test(src), 'tooltip 缺少 viewport 约束的 max-height')
+  assert.ok(/overflowY:\s*'auto'/.test(src), 'tooltip 缺少 overflow-y:auto')
+  assert.ok(/whiteSpace:\s*'normal'/.test(src), 'tooltip 缺少 white-space:normal')
+  // 不得重新引入固定高度猜测
+  assert.ok(!/const tooltipH = \d+/.test(src), '仍存在固定高度猜测')
 })
 
 // ---------------------------------------------------------------------------
@@ -102,6 +115,23 @@ test('source: TradingView attribution 是真实 <a> 链接', () => {
   assert.ok(/href="https:\/\/www\.tradingview\.com\/"/.test(src), '缺少 TradingView 真实链接')
   assert.ok(/<a[\s\S]*TradingView Lightweight Charts[\s\S]*<\/a>/.test(src), 'attribution 不是真实 <a> 元素')
   assert.ok(/attributionLogo:\s*false/.test(src), 'attributionLogo 未保持 false')
+})
+
+test('source: P0-1 普通 UI 不显示 historical_dynamics（改为中文 unavailable 文案）', () => {
+  const dyn = readSource('ScopeDynamicsPanel.tsx')
+  // 旧的可视 unavailable 文案已移除（不再把 backend canonical 名称作为普通用户文本）
+  assert.ok(!/该层当前不可用（无 historical_dynamics）/.test(dyn), '旧 historical_dynamics 可视文案仍存在')
+  // 主视觉已改为中文
+  assert.ok(/本期暂无历史动态数据/.test(dyn), '缺少中文 unavailable 文案')
+  // canonical 技术 identity 仅允许出现在注释/tooltip，不应作为主视觉文本
+})
+
+test('source: P0-2 普通错误标题不显示 backend canonical 名称（Current Observation）', () => {
+  const cur = readSource('ScopeCurrentObservationWorkspace.tsx')
+  assert.ok(!/Current Observation 合同无效/.test(cur), '普通错误标题仍含 backend canonical 名称')
+  assert.ok(/当日观察数据格式异常/.test(cur), '缺少中文错误主标题')
+  // err.message 仅作为技术细节，不作为主视觉文本（已放入 panelErrorDetail）
+  assert.ok(/技术细节：\{err\.message\}/.test(cur), 'err.message 未降级为技术细节')
 })
 
 test('source: ReviewTerm 使用 useRef 而非 useState 作为 DOM ref', () => {

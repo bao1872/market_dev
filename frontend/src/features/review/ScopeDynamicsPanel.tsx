@@ -151,7 +151,7 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
     [dynamics?.accelerationDates, dynamics?.acceleration],
   )
   if (!dynamics) {
-    return <div className={styles.panelUnavailable}>该层当前不可用（无 historical_dynamics）</div>
+    return <div className={styles.panelUnavailable}>本期暂无历史动态数据</div>
   }
   const current = currentPhaseFact(dynamics)
   return (

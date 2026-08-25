@@ -214,7 +214,8 @@ export default function ScopeCurrentObservationWorkspace({
     if (err instanceof ObservationGroupContractError) {
       return (
         <div className={styles.panelUnavailable}>
-          Current Observation 合同无效：{err.message}
+          当日观察数据格式异常
+          <div className={styles.panelErrorDetail}>技术细节：{err.message}</div>
         </div>
       )
     }
