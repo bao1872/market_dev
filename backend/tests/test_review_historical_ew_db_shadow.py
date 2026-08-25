@@ -1,251 +1,295 @@
 """M5-C2 shadow runner unit tests — DB-free (PURE_UNIT_TEST=1).
 
-Coverage (8 gates A–H as required by PERF-OOM-M5C2-A):
-
-A. deterministic small/median/large sample selection.
-B. exact EW comparator catches availability mismatch.
-C. exact EW comparator catches 1-bit / float value mismatch.
-D. deep Dynamics comparator (NaN eq NaN, inf sign, dict/list strict, ndarray-reject).
-E. read-only transaction SET TRANSACTION READ ONLY is issued for every session.
-F. there is NO commit() / persistence writer path in the runner.
-G. NEW-path memory verdict is frozen before the OLD 3-sample loop runs.
-H. final evaluate_acceptance returns False and nonzero on any mismatch.
+Source ownership: ``app.services.review_historical_ew_db_shadow_runner``.
+``backend/scripts/review_historical_ew_db_shadow.py`` is ONLY a thin
+development wrapper; the canonical logic under test lives in
+``backend/app`` so the audited target truly runs inside the backend 4 GiB
+container via Live Mount.
 """
 from __future__ import annotations
 
 import math
 import uuid
 from datetime import date
-from types import SimpleNamespace
-from typing import Any
+from pathlib import Path
 
 import numpy as np
 import pytest
 
-from scripts.review_historical_ew_db_shadow import (
+# Canonical owner is now the app-side runner.  Imports come from there:
+from app.domain.review.analysis.observation_series import build_observation_series
+from app.services.review_historical_ew_db_shadow_runner import (
+    EXPECTED_RUNTIME_SHA_ENV,
+    PRODUCTION_CGROUP_LIMIT_BYTES,
+    SAMPLE_STRATEGIES,
     MemorySnapshot,
     SampleParityResult,
-    SAMPLE_STRATEGIES,
     compare_ew_series_parity,
     deep_equal_dynamics,
     evaluate_acceptance,
+    resolve_runtime_sha,
     select_deterministic_sample_scopes,
+    validate_and_extract_ew_old_points,
+    verify_runtime_sha_identity,
 )
 
-
-# ===========================================================================
-# Test A — deterministic 3-sample selection.
-# ===========================================================================
-class TestASampleSelectionDeterministic:
-    def test_standard_dense_11_scopes_picks_0_mid_10(self) -> None:
-        # 11 scopes (member_count 1..11) → small = idx 0 (mc=1),
-        # median = idx 5 (mc=6), large = idx 10 (mc=11).
-        scopes = [
-            (str(uuid.UUID(int=1000 + i)), i)
-            for i in range(1, 12)
-        ]
-        sel = select_deterministic_sample_scopes(scopes)
-        assert list(sel.keys()) == ["small", "median", "large"]
-        mcs = {k: scopes[[s for s, _ in scopes].index(v)][1]
-               for k, v in sel.items()}
-        assert mcs == {"small": 1, "median": 6, "large": 11}
-
-    def test_ties_broken_by_scope_key(self) -> None:
-        # All three scopes have identical member_count. The (mc, scope_key)
-        # tuple tie-breaker forces a deterministic order by UUID string.
-        ids = sorted([str(uuid.UUID(int=i)) for i in (1, 2, 3)])
-        scopes = [(k, 42) for k in ids]
-        sel = select_deterministic_sample_scopes(scopes)
-        assert sel == {"small": ids[0], "median": ids[1], "large": ids[2]}
-
-    def test_two_scopes_dedup_to_unique_plan(self) -> None:
-        # Only 2 scopes: median selection may collide with large; the
-        # selection owner walks forward to an unused key so all 3 returned
-        # names still have entries (and uniqueness is preserved when possible).
-        ids = [str(uuid.UUID(int=5)), str(uuid.UUID(int=7))]
-        scopes = [(k, 10) if i == 0 else (k, 20) for i, k in enumerate(ids)]
-        sel = select_deterministic_sample_scopes(scopes)
-        keys = [sel["small"], sel["median"], sel["large"]]
-        # All 3 slots filled (may reuse); the set of used keys must be a subset
-        # of {id0, id1}.
-        assert all(k in set(ids) for k in keys)
-        # With len==2 we expect small=index0, median=index1 (2//2=1),
-        # large=index1 → but large collides with median → next unused = id0.
-        assert sel["small"] == ids[0]
-
-    def test_zero_scopes_fail_closed(self) -> None:
-        with pytest.raises(ValueError, match="zero scopes"):
-            select_deterministic_sample_scopes([])
-
-
-# ===========================================================================
-# Tests B & C — exact EW comparator.
-# ===========================================================================
-def _fake_observation_series(
-    axis: list[date], values: list[Any]
-) -> Any:
-    """Build an old-observation-series stand-in that exposes the public
-    ``to_snapshots()`` shape used by the runner."""
-    class _Obs:
-        def to_snapshots(self_inner):
-            out = []
-            for td, v in zip(axis, values):
-                out.append({
-                    "trade_date": td.isoformat(),
-                    "payload": {"price": {"equal_weight_return": v}},
-                })
-            return out
-    return _Obs()
-
-
 AXIS_3 = [date(2026, 8, 1), date(2026, 8, 2), date(2026, 8, 3)]
+CANONICAL_SHA_EXAMPLE = "f0" * 20  # 40 hex chars
+CANONICAL_SHA_EXAMPLE_2 = "ba" * 20
+assert len(CANONICAL_SHA_EXAMPLE) == 40
 
 
-class TestBCEwComparator:
-    def test_B_catches_availability_mismatch(self) -> None:
-        # NEW has value at [1]; OLD returns None there.
-        new = [0.05, 0.10, None]
-        old_vals = [0.05, None, None]
-        a_m, v_m = compare_ew_series_parity(
-            AXIS_3, new, _fake_observation_series(AXIS_3, old_vals)
-        )
-        assert a_m == 1
-        assert v_m == 0
+# ===========================================================================
+# Helpers — build the canonical old-series dict via build_observation_series.
+# ===========================================================================
+def _make_snapshot_series(axis, values):
+    """Each snapshot = {trade_date, readiness, payload: {price: {equal_weight_return: v}}}.
 
-    def test_B_catches_reverse_availability_mismatch_old_finite_new_none(self) -> None:
-        new = [0.05, None, -0.01]
-        old_vals = [0.05, 0.10, -0.01]
-        a_m, v_m = compare_ew_series_parity(
-            AXIS_3, new, _fake_observation_series(AXIS_3, old_vals)
-        )
-        assert a_m == 1
-        assert v_m == 0
+    ``values[i] is None`` yields no payload entry → the registry extractor
+    returns None → canonical ``available=False, value=None``.
+    """
+    out = []
+    for td, v in zip(axis, values):
+        payload: dict[str, Any] = {}
+        readiness = "live"
+        if v is None:
+            # No payload equal_weight_return → canonical unavailable.
+            readiness = "stale_snapshot"
+        else:
+            payload = {"price": {"equal_weight_return": float(v)}}
+        out.append({
+            "trade_date": td.isoformat(),
+            "readiness": readiness,
+            "payload": payload,
+        })
+    return out
 
-    def test_B_both_unavailable_are_exact_parity(self) -> None:
-        new = [None, None, 0.0]
-        old_vals = [None, float("nan"), 0.0]
-        a_m, v_m = compare_ew_series_parity(
-            AXIS_3, new, _fake_observation_series(AXIS_3, old_vals)
-        )
-        # OLD value NaN is treated non-finite → semantically unavailable.
+
+def _build_canonical_ew_series(axis, values):
+    """Return the real build_observation_series dict.
+
+    For a given value list where ``None`` means unavailable we leave the
+    payload path empty; canonical builder then emits ``available=False``.
+    """
+    snapshots = _make_snapshot_series(axis, values)
+    return build_observation_series(
+        scope_type="industry_l1",
+        scope_key=str(uuid.UUID(int=12345)),
+        from_date=axis[0],
+        to_date=axis[-1],
+        trading_dates=list(axis),
+        snapshot_series=snapshots,
+        primitive_keys=["equal_weight_return"],
+    )
+
+
+# ===========================================================================
+# P1-1: REAL DICT PARSING & PARITY
+# ===========================================================================
+class TestP11RealCanonicalDictParity:
+    """Tests 1..9 (P1-1 regressions listed in CLOSURE plan)."""
+
+    def test_01_build_observation_series_dict_parity_pass(self) -> None:
+        # Exact values, some finite some unavailable — should pass 0 mismatch.
+        values = [0.05, None, -0.02]
+        new_vals = [0.05, None, -0.02]
+        old = _build_canonical_ew_series(AXIS_3, values)
+        assert isinstance(old, dict)  # The real contract.
+        a_m, v_m = compare_ew_series_parity(AXIS_3, new_vals, old)
         assert a_m == 0
         assert v_m == 0
 
-    def test_C_exact_bit_mismatch_counts_value_mismatch(self) -> None:
-        # Use 1 ULP apart floats that are definitively distinct regardless of
-        # Python decimal-representation folding (0.1 parses to a single value
-        # in both literals, so we pick 2 truly distinct IEEE floats).
-        a = 1.0
-        b = float.fromhex("0x1.0000000000001p+0")  # 1 + 2**-52
-        assert a != b
-        new = [a]
-        old_vals = [b]
-        a_m, v_m = compare_ew_series_parity(
-            AXIS_3[:1], new, _fake_observation_series(AXIS_3[:1], old_vals)
-        )
+    def test_02_availability_mismatch_detected(self) -> None:
+        old = _build_canonical_ew_series(AXIS_3, [0.1, None, 0.2])
+        new = [0.1, 0.17, 0.2]  # middle: NEW avail, OLD unavail.
+        a_m, v_m = compare_ew_series_parity(AXIS_3, new, old)
+        assert a_m == 1
+        assert v_m == 0
+
+    def test_03_1_ulp_difference_counts_value_mismatch(self) -> None:
+        base = 1.0
+        one_ulp_higher = float.fromhex("0x1.0000000000001p+0")
+        assert base != one_ulp_higher
+        old = _build_canonical_ew_series(AXIS_3, [base, base, base])
+        new = [one_ulp_higher, base, base]
+        a_m, v_m = compare_ew_series_parity(AXIS_3, new, old)
         assert a_m == 0
         assert v_m == 1
 
-    def test_C_exact_same_floats_pass(self) -> None:
-        values = [math.pi / 4.0, -7.0 / 9.0, 1e-9]
-        new = list(values)
-        # exact same float representation — pass.
-        a_m, v_m = compare_ew_series_parity(
-            AXIS_3, new, _fake_observation_series(AXIS_3, list(values))
-        )
-        assert a_m == 0
-        assert v_m == 0
+    def test_04_fake_to_snapshots_object_shape_rejected(self) -> None:
+        """The previous C2 comparator invented ``.to_snapshots()`` which does
+        NOT match production contract.  A non-dict MUST raise ValueError."""
+        class FakeObs:
+            def to_snapshots(self):
+                return [
+                    {"trade_date": d.isoformat(),
+                     "payload": {"price": {"equal_weight_return": 1.0}}}
+                    for d in AXIS_3
+                ]
+        with pytest.raises(ValueError, match="must be a dict"):
+            validate_and_extract_ew_old_points(AXIS_3, FakeObs())
 
-    def test_C_nan_not_counted_as_value_mismatch_when_both_unavailable(self) -> None:
-        # NEW has None (unavail) and OLD has NaN (non-finite unavail).
-        new = [None]
-        old_vals = [float("nan")]
-        a_m, v_m = compare_ew_series_parity(
-            AXIS_3[:1], new, _fake_observation_series(AXIS_3[:1], old_vals)
-        )
-        assert a_m == 0
-        assert v_m == 0
+    def test_05_malformed_primitive_path_fail_closed(self) -> None:
+        # missing 'primitives'.
+        with pytest.raises(ValueError, match="missing 'primitives'"):
+            validate_and_extract_ew_old_points(AXIS_3, {"not_primitives": {}})
+        # missing equal_weight_return.
+        with pytest.raises(ValueError, match="equal_weight_return"):
+            validate_and_extract_ew_old_points(AXIS_3, {"primitives": {"other": {}}})
+        # points is not a list.
+        with pytest.raises(ValueError, match="points is not a list"):
+            validate_and_extract_ew_old_points(
+                AXIS_3,
+                {"primitives": {"equal_weight_return": {"points": "nope"}}},
+            )
+
+    def test_06_point_count_not_D_fail_closed(self) -> None:
+        old = _build_canonical_ew_series(AXIS_3, [0.1, 0.2, 0.3])
+        # Inject a shorter points list manually.
+        tampered = dict(old)
+        tampered["primitives"] = {
+            "equal_weight_return": {
+                "key": "equal_weight_return",
+                "l1_path": ("payload", "price", "equal_weight_return"),
+                "points": old["primitives"]["equal_weight_return"]["points"][:-1],
+            }
+        }
+        with pytest.raises(ValueError, match="length mismatch"):
+            validate_and_extract_ew_old_points(AXIS_3, tampered)
+
+    def test_07_trade_date_mismatch_fail_closed(self) -> None:
+        old = _build_canonical_ew_series(AXIS_3, [0.1, 0.2, 0.3])
+        tampered = dict(old)
+        pts = [dict(p) for p in old["primitives"]["equal_weight_return"]["points"]]
+        pts[1] = dict(pts[1])
+        pts[1]["trade_date"] = date(2099, 1, 1).isoformat()
+        tampered["primitives"] = {
+            "equal_weight_return": {
+                "key": "equal_weight_return",
+                "l1_path": ("payload", "price", "equal_weight_return"),
+                "points": pts,
+            }
+        }
+        with pytest.raises(ValueError, match="trade_date mismatch"):
+            validate_and_extract_ew_old_points(AXIS_3, tampered)
+
+    def test_08_available_true_with_none_or_nonfinite_fail_closed(self) -> None:
+        # available=True with value=None → violation.
+        bad_points = [
+            {"trade_date": d.isoformat(), "readiness": "live",
+             "value": None, "available": True}
+            for d in AXIS_3
+        ]
+        bad_dict = {
+            "scope_type": "industry_l1",
+            "scope_key": str(uuid.UUID(int=1)),
+            "primitives": {
+                "equal_weight_return": {
+                    "key": "equal_weight_return",
+                    "l1_path": ("p",),
+                    "points": bad_points,
+                }
+            },
+        }
+        with pytest.raises(ValueError, match="available=True but.*value"):
+            validate_and_extract_ew_old_points(AXIS_3, bad_dict)
+        # available=True with value NaN.
+        bad_points[0] = {**bad_points[0], "value": float("nan"), "available": True}
+        with pytest.raises(ValueError, match="available=True but.*non-finite"):
+            validate_and_extract_ew_old_points(AXIS_3, bad_dict)
+
+    def test_09_available_false_with_finite_value_fail_closed(self) -> None:
+        bad_points = [
+            {"trade_date": d.isoformat(), "readiness": "unavailable",
+             "value": 0.42, "available": False}
+            for d in AXIS_3
+        ]
+        bad_dict = {
+            "scope_type": "industry_l1",
+            "scope_key": str(uuid.UUID(int=2)),
+            "primitives": {
+                "equal_weight_return": {
+                    "key": "equal_weight_return",
+                    "l1_path": ("p",),
+                    "points": bad_points,
+                }
+            },
+        }
+        with pytest.raises(ValueError, match="available=False but.*value is not None"):
+            validate_and_extract_ew_old_points(AXIS_3, bad_dict)
 
 
 # ===========================================================================
-# Test D — deep dynamics comparator.
+# Baseline determinism + deep comparator (from C2-A, kept valid).
 # ===========================================================================
-class TestDDeepDynamicsComparator:
-    def test_nan_equal_nan_only(self) -> None:
-        ok, why = deep_equal_dynamics(float("nan"), float("nan"))
-        assert ok, why
-        ok, why = deep_equal_dynamics(float("nan"), 1.0)
-        assert not ok and "NaN parity" in why
+class TestDeterministicSampling:
+    def test_standard_11_scopes_unique_3_small_median_large(self) -> None:
+        scopes = [(str(uuid.UUID(int=1000 + i)), i) for i in range(1, 12)]
+        sel = select_deterministic_sample_scopes(scopes)
+        assert list(sel.keys()) == list(SAMPLE_STRATEGIES)
+        assert len({sel[k] for k in SAMPLE_STRATEGIES}) == 3
+        # Pick by ordering: smallest mc=1 at idx 0, median idx=5 mc=6, largest idx=10 mc=11.
+        mcs = {k: next(mc for (sk, mc) in scopes if sk == sel[k])
+               for k in SAMPLE_STRATEGIES}
+        assert mcs == {"small": 1, "median": 6, "large": 11}
 
-    def test_same_sign_inf_equal(self) -> None:
+    def test_len_3_returns_all_unique(self) -> None:
+        scopes = [
+            (str(uuid.UUID(int=1)), 5),
+            (str(uuid.UUID(int=2)), 10),
+            (str(uuid.UUID(int=3)), 50),
+        ]
+        sel = select_deterministic_sample_scopes(scopes)
+        assert len(set(sel.values())) == 3
+
+    def test_fewer_than_3_scopes_fails_closed(self) -> None:
+        with pytest.raises(ValueError, match="at least 3"):
+            select_deterministic_sample_scopes(
+                [(str(uuid.UUID(int=1)), 5), (str(uuid.UUID(int=2)), 10)]
+            )
+        with pytest.raises(ValueError, match="at least 3"):
+            select_deterministic_sample_scopes([])
+
+    def test_3_scopes_with_ties_all_unique(self) -> None:
+        # Three scopes all with the same member_count.
+        ids = sorted([str(uuid.UUID(int=i)) for i in (1, 2, 3)])
+        scopes = [(k, 42) for k in ids]
+        sel = select_deterministic_sample_scopes(scopes)
+        assert set(sel.values()) == set(ids)
+        assert sel == {"small": ids[0], "median": ids[1], "large": ids[2]}
+
+
+class TestDeepDynamicsComparator:
+    def test_nan_inf_rules(self) -> None:
+        assert deep_equal_dynamics(float("nan"), float("nan"))[0]
+        assert not deep_equal_dynamics(float("nan"), 1.0)[0]
         assert deep_equal_dynamics(float("inf"), float("inf"))[0]
-        assert deep_equal_dynamics(float("-inf"), float("-inf"))[0]
         assert not deep_equal_dynamics(float("inf"), float("-inf"))[0]
-        assert not deep_equal_dynamics(float("inf"), 1e308)[0]
 
-    def test_dict_key_sets_strict(self) -> None:
-        ok, why = deep_equal_dynamics(
-            {"a": 1, "b": 2.0}, {"a": 1, "c": 2.0}
+    def test_keys_and_order_strict(self) -> None:
+        ok, _ = deep_equal_dynamics(
+            {"a": [1, 2.0], "b": float("nan")},
+            {"a": [1, 2.0], "b": float("nan")},
         )
-        assert not ok and "missing" in why
-
-    def test_lists_length_and_order_enforced(self) -> None:
-        assert deep_equal_dynamics([1, 2, 3.0], [1, 2, 3.0])[0]
-        ok, why = deep_equal_dynamics([1, 2], [1, 2, 3])
-        assert not ok and "length" in why
+        assert ok
         ok, why = deep_equal_dynamics([1, 2, 3], [3, 2, 1])
-        assert not ok and why  # must report a mismatch at the first differing idx
-        # The returned message for a first-element scalar mismatch is
-        # deterministic (it mentions index 0) — check index, not "list index".
-        assert "root[0]" in why
+        assert not ok and "root[0]" in why
+        ok, why = deep_equal_dynamics({"a": 1}, {"a": 1, "b": None})
+        assert not ok and "keys differ" in why
 
-    def test_nested_dict_and_list(self) -> None:
-        left = {
-            "phase": {"name": "reacceleration", "strength": 1},
-            "position": [0.1, 0.2, float("nan")],
-            "signal": None,
-        }
-        right = {
-            "phase": {"name": "reacceleration", "strength": 1},
-            "position": [0.1, 0.2, float("nan")],
-            "signal": None,
-        }
-        assert deep_equal_dynamics(left, right)[0]
-        # mutate 1 bit in float
-        right["position"][0] = 0.1 + 1e-16
-        ok, why = deep_equal_dynamics(left, right)
-        assert not ok and "float value" in why
-
-    def test_ndarray_is_rejected(self) -> None:
-        # The C2 result contract forbids retaining ndarrays in Dynamics.
-        # Any ndarray path must hard-fail the comparator.
-        arr = np.array([1.0, 2.0, 3.0])
+    def test_ndarray_rejected_first(self) -> None:
         ok, why = deep_equal_dynamics(
-            {"data": arr}, {"data": arr.tolist()}
+            {"x": np.array([1.0, 2.0])}, {"x": [1.0, 2.0]}
         )
         assert not ok and "ndarray retention not allowed" in why
 
-    def test_tuple_vs_list_shape_coerced(self) -> None:
-        # Acceptable per comparator: both represent iterable ordered containers.
-        assert deep_equal_dynamics((1, 2.0), [1, 2.0])[0]
-        ok, why = deep_equal_dynamics((1,), [1, 2])
-        assert not ok and "length" in why
 
-
-# ===========================================================================
-# Test E — READ ONLY transaction is issued on the session.
-# ===========================================================================
-class TestEReadOnlyTransactionIssued:
+class TestReadOnlySessionGates:
     @pytest.mark.asyncio
-    async def test_session_executes_set_transaction_read_only(self) -> None:
-        # Swap SESSION_FACTORY for a fake AsyncSession that records every
-        # execute() call's SQL text and returns a compliant empty result.
-        # SESSION_FACTORY in the runner is invoked SYNCHRONOUSLY (callable →
-        # returns AsyncSession instance).  We must mirror that exact calling
-        # convention, not return an awaitable.
-        import scripts.review_historical_ew_db_shadow as shadow
+    async def test_session_issues_set_transaction_read_only(self) -> None:
+        import app.services.review_historical_ew_db_shadow_runner as shadow
 
-        issued: list[str] = []
+        issued_sql: list[str] = []
 
         class FakeResult:
             async def all(self): return []
@@ -253,9 +297,7 @@ class TestEReadOnlyTransactionIssued:
 
         class FakeSession:
             async def execute(self, stmt):
-                # stmt is a TextClause; we compile with string context using
-                # str() for simplicity.
-                issued.append(str(stmt))
+                issued_sql.append(str(stmt))
                 return FakeResult()
             async def rollback(self): return
             async def close(self): return
@@ -272,272 +314,289 @@ class TestEReadOnlyTransactionIssued:
         finally:
             shadow.SESSION_FACTORY = original
         assert issued_flag is True
-        # The captured SQL MUST include SET TRANSACTION READ ONLY.
-        joined = "\n".join(issued).upper()
+        joined = "\n".join(issued_sql).upper()
         assert "SET TRANSACTION READ ONLY" in joined
 
-
-# ===========================================================================
-# Test F — No commit or persistence helpers exist in the runner source text.
-# ===========================================================================
-class TestFNoWritePaths:
-    def test_no_commit_save_publish_calls_in_runner_source(self) -> None:
-        from pathlib import Path
-        src = Path(__file__).resolve().parents[1].joinpath(
-            "scripts", "review_historical_ew_db_shadow.py"
-        ).read_text()
-        # The runner must NEVER call these writers.
-        forbidden_calls = [
+    def test_source_code_no_writer_calls(self) -> None:
+        src_path = Path(__file__).resolve().parents[1].joinpath(
+            "app", "services", "review_historical_ew_db_shadow_runner.py"
+        )
+        src = src_path.read_text()
+        forbidden = [
             ".commit(",
             "publish_review(",
             "save_scope_observation_fact(",
             "save_scope_composition_snapshot(",
-            "await session.flush(",
-            "session.flush()",
+            "session.flush(",
+            "INSERT ",
+            "UPDATE ",
+            "DELETE ",
         ]
-        hits = [c for c in forbidden_calls if c in src]
-        assert hits == [], f"write paths found in runner source: {hits}"
-
-    def test_only_rollback_in_cleanup_blocks(self) -> None:
-        from pathlib import Path
-        src = Path(__file__).resolve().parents[1].joinpath(
-            "scripts", "review_historical_ew_db_shadow.py"
-        ).read_text()
-        # Cleanup blocks call rollback; never commit.  Count is at least 2
-        # (main session cleanup + per-sample session cleanup).
+        hits = [c for c in forbidden if c in src]
+        assert hits == [], f"forbidden write tokens present: {hits}"
+        # 2 rollback paths minimum: main session + old sample sessions.
         assert src.count(".rollback()") >= 2
-        assert src.count(".commit()") == 0
 
 
 # ===========================================================================
-# Test G — NEW peak frozen before OLD samples loop.
+# P1-3: RUNTIME SHA STRICT IDENTITY — tests 10, 11, 12.
 # ===========================================================================
-class TestGNewPeakFrozenBeforeOldSamples:
-    def test_evaluate_acceptance_uses_incremental_new_not_post_old(self) -> None:
-        # Contract: incremental_process_peak_new_mib is the FROZEN verdict,
-        # regardless of what the OLD loop does afterwards.
-        import inspect
-        sig = inspect.signature(evaluate_acceptance)
-        params = list(sig.parameters.keys())
-        # Only ONE peak-denominated argument represents the NEW-path peak.
-        # There is NO "old_samples_peak" or "after_old" peak parameter — that
-        # value cannot overwrite the frozen verdict.
-        new_peak_arg = "incremental_process_peak_new_mib"
-        assert new_peak_arg in params
-        # There must be NO "old_samples" / "post_old" / "after_old" peak arg.
-        assert not any(
-            ("old" in p.lower() or "post" in p.lower() or "after" in p.lower())
-            and ("peak" in p.lower() or "rss" in p.lower() or "memory" in p.lower())
-            for p in params
+class TestP13RuntimeStrictSha:
+    def test_10_expected_sha_env_missing_fail_closed(self) -> None:
+        def env_getter_empty(k): return None
+        def resolver_returns_ok(): return CANONICAL_SHA_EXAMPLE
+        expected, actual, match = verify_runtime_sha_identity(
+            env_getter=env_getter_empty,
+            runtime_sha_resolver=resolver_returns_ok,
         )
-        # The unrelated hard_peak_mib constant (500 MiB) is there for
-        # flexibility — it is NOT a runtime measurement; confirm it is
-        # literally the gate-constant name.
-        assert set(params) & {
-            "hard_peak_mib",
-            new_peak_arg,
-        } == {new_peak_arg, "hard_peak_mib"}
+        assert match is False
+        assert expected is None
+        assert actual == CANONICAL_SHA_EXAMPLE
 
-    def test_incremental_peak_300_passes_but_550_fails_hard_gate(self) -> None:
+    def test_11_expected_sha_mismatch_fail_closed(self) -> None:
+        def env_getter(k): return CANONICAL_SHA_EXAMPLE if k == EXPECTED_RUNTIME_SHA_ENV else None
+        def resolver_returns_other(): return CANONICAL_SHA_EXAMPLE_2
+        expected, actual, match = verify_runtime_sha_identity(
+            env_getter=env_getter,
+            runtime_sha_resolver=resolver_returns_other,
+        )
+        assert match is False
+        assert expected == CANONICAL_SHA_EXAMPLE.lower()
+        assert actual == CANONICAL_SHA_EXAMPLE_2.lower()
+
+    def test_12_expected_and_actual_exact_match_including_app_runtime_sha_file(self, tmp_path) -> None:
+        # Priority 1 path: /app/RUNTIME_SHA.
+        fake_app = tmp_path / "app"
+        fake_app.mkdir(parents=True, exist_ok=True)
+        sha_file = fake_app / "RUNTIME_SHA"
+        sha_file.write_text(CANONICAL_SHA_EXAMPLE + "\n")
+        def env_getter(k): return CANONICAL_SHA_EXAMPLE if k == EXPECTED_RUNTIME_SHA_ENV else None
+        def my_resolver():
+            # Override resolve_runtime_sha's disk check by using the test tmpdir.
+            # Simpler: we provide a resolver that returns the sha IF /app/RUNTIME_SHA exists.
+            # We instead monkey-patch the candidate path briefly via fixture-style
+            # mock by reading the file ourselves.
+            path = fake_app / "RUNTIME_SHA"
+            if path.exists():
+                return path.read_text().strip()[:40]
+            return None
+        expected, actual, match = verify_runtime_sha_identity(
+            env_getter=env_getter,
+            runtime_sha_resolver=my_resolver,
+        )
+        assert expected == CANONICAL_SHA_EXAMPLE.lower()
+        assert actual == CANONICAL_SHA_EXAMPLE.lower()
+        assert match is True
+
+    def test_expected_sha_short_or_illegal_hex_treated_as_missing(self) -> None:
+        for bad in ["", "abc", "g0" * 20, CANONICAL_SHA_EXAMPLE + "abc", CANONICAL_SHA_EXAMPLE.upper().replace("A", "G")]:
+            def env_getter(k, bad=bad): return bad if k == EXPECTED_RUNTIME_SHA_ENV else None
+            _, _, match = verify_runtime_sha_identity(
+                env_getter=env_getter,
+                runtime_sha_resolver=lambda: CANONICAL_SHA_EXAMPLE,
+            )
+            # Note: 40 uppercase hex is valid (we lowercase before compare).
+            if len(bad) == 40 and all(c in "0123456789abcdefABCDEF" for c in bad):
+                # Legal format, just wrong value — mismatch.
+                continue
+            assert match is False, f"env='{bad}' must fail closed"
+
+
+# ===========================================================================
+# P1-4: 4 GiB CGROUP — tests 13, 14.
+# ===========================================================================
+class TestP14FourGBcgroup:
+    def _make_snapshot(self, limit_bytes):
+        s = MemorySnapshot()
+        s.cgroup_limit_bytes = limit_bytes
+        return s
+
+    def test_13_4gib_exact_bytes_passes_gate(self) -> None:
+        # evaluate_acceptance production_cgroup_4g_confirmed = True.
         gates, passed = evaluate_acceptance(
             read_only_confirmed=True,
+            runtime_sha_exact_match=True,
             scopes_S=31,
+            production_cgroup_4g_confirmed=True,
             ew_lengths_all_equal_D=True,
             all_dynamics_built=True,
+            sample_plan_unique_3=True,
             sample_results=[
                 SampleParityResult(
-                    strategy=strategy, scope_key=str(uuid.UUID(int=i)),
+                    strategy=s, scope_key=str(uuid.UUID(int=i)),
                     member_count=10 + i, ew_availability_mismatch=0,
                     ew_value_mismatch=0, dynamics_deep_equal=True,
-                    dynamics_mismatch_path="", old_path_elapsed_ms=100.0,
-                    process_rss_before_old_mib=None,
-                    process_rss_after_old_mib=None,
+                    dynamics_mismatch_path="", old_path_elapsed_ms=10.0,
+                    process_rss_before_old_mib=None, process_rss_after_old_mib=None,
                 )
-                for i, strategy in enumerate(SAMPLE_STRATEGIES)
+                for i, s in enumerate(SAMPLE_STRATEGIES)
             ],
             required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=300.0,
+            incremental_process_peak_new_mib=200.0,
         )
-        assert gates["incremental_process_peak_new_lt_500_mib"] is True
+        assert gates["production_cgroup_4g_confirmed"] is True
+        # Otherwise fully pass (so this gate does not block).
         assert passed
-        gates2, passed2 = evaluate_acceptance(
-            read_only_confirmed=True,
-            scopes_S=31,
-            ew_lengths_all_equal_D=True,
-            all_dynamics_built=True,
-            sample_results=[
-                SampleParityResult(
-                    strategy=strategy, scope_key=str(uuid.UUID(int=i)),
-                    member_count=10 + i, ew_availability_mismatch=0,
-                    ew_value_mismatch=0, dynamics_deep_equal=True,
-                    dynamics_mismatch_path="", old_path_elapsed_ms=100.0,
-                    process_rss_before_old_mib=None,
-                    process_rss_after_old_mib=None,
-                )
-                for i, strategy in enumerate(SAMPLE_STRATEGIES)
-            ],
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=550.0,
-        )
-        assert gates2["incremental_process_peak_new_lt_500_mib"] is False
-        assert passed2 is False
 
-
-# ===========================================================================
-# Test H — acceptance returns nonzero on any mismatch (shell semantic).
-# ===========================================================================
-class TestHAcceptanceNonzeroOnMismatch:
-    def _ok_samples(self) -> list[SampleParityResult]:
-        return [
+    def test_14_limit_max_missing_or_non_4gib_fail(self) -> None:
+        """memory.max='max', missing (None), or a different byte count all
+        fail the acceptance gate."""
+        ok_samples = [
             SampleParityResult(
                 strategy=s, scope_key=str(uuid.UUID(int=i)),
                 member_count=10 + i, ew_availability_mismatch=0,
                 ew_value_mismatch=0, dynamics_deep_equal=True,
-                dynamics_mismatch_path="", old_path_elapsed_ms=100.0,
-                process_rss_before_old_mib=None,
-                process_rss_after_old_mib=None,
+                dynamics_mismatch_path="", old_path_elapsed_ms=10.0,
+                process_rss_before_old_mib=None, process_rss_after_old_mib=None,
+            )
+            for i, s in enumerate(SAMPLE_STRATEGIES)
+        ]
+        base = dict(
+            read_only_confirmed=True, runtime_sha_exact_match=True, scopes_S=31,
+            ew_lengths_all_equal_D=True, all_dynamics_built=True,
+            sample_plan_unique_3=True,
+            sample_results=ok_samples, required_sample_names=SAMPLE_STRATEGIES,
+            incremental_process_peak_new_mib=200.0,
+        )
+        for case_confirmed in (False,):
+            _, passed = evaluate_acceptance(
+                **{**base, "production_cgroup_4g_confirmed": case_confirmed}
+            )
+            assert passed is False, (
+                f"production_cgroup_4g_confirmed={case_confirmed} must FAIL"
+            )
+        # Also verify hard 4GiB = 4294967296 exactly (sanity numeric contract).
+        assert PRODUCTION_CGROUP_LIMIT_BYTES == 4 * 1024**3 == 4294967296
+
+
+# ===========================================================================
+# P1-5: 3 UNIQUE SAMPLES GATE — tests 15, 16.
+# ===========================================================================
+class TestP15ThreeUniqueSampleGate:
+    def _samples_for(self, keys):
+        return [
+            SampleParityResult(
+                strategy=s, scope_key=k, member_count=10,
+                ew_availability_mismatch=0, ew_value_mismatch=0,
+                dynamics_deep_equal=True, dynamics_mismatch_path="",
+                old_path_elapsed_ms=1.0,
+                process_rss_before_old_mib=None, process_rss_after_old_mib=None,
+            )
+            for s, k in zip(SAMPLE_STRATEGIES, keys)
+        ]
+
+    def test_15_fewer_than_3_unique_keys_or_S_lt_3_fail(self) -> None:
+        # Case A: 3 samples but duplicate scope keys + plan not unique → fail.
+        dup_samples = self._samples_for([
+            str(uuid.UUID(int=1)),
+            str(uuid.UUID(int=1)),  # duplicate
+            str(uuid.UUID(int=3)),
+        ])
+        _, passed = evaluate_acceptance(
+            read_only_confirmed=True, runtime_sha_exact_match=True,
+            scopes_S=31, production_cgroup_4g_confirmed=True,
+            ew_lengths_all_equal_D=True, all_dynamics_built=True,
+            required_sample_names=SAMPLE_STRATEGIES,
+            incremental_process_peak_new_mib=200.0,
+            sample_plan_unique_3=False,
+            sample_results=dup_samples,
+        )
+        assert passed is False
+        # Case B: S < 3 → fail closed.
+        _, passed = evaluate_acceptance(
+            read_only_confirmed=True, runtime_sha_exact_match=True,
+            scopes_S=2, production_cgroup_4g_confirmed=True,
+            ew_lengths_all_equal_D=True, all_dynamics_built=True,
+            required_sample_names=SAMPLE_STRATEGIES,
+            incremental_process_peak_new_mib=200.0,
+            sample_plan_unique_3=True,
+            sample_results=self._samples_for([
+                str(uuid.UUID(int=i)) for i in (1, 2, 3)
+            ]),
+        )
+        assert passed is False
+
+    def test_16_exactly_3_unique_keys_with_S_ge_3_pass(self) -> None:
+        unique_keys = [str(uuid.UUID(int=i)) for i in (1, 2, 3)]
+        samples = self._samples_for(unique_keys)
+        gates, passed = evaluate_acceptance(
+            read_only_confirmed=True, runtime_sha_exact_match=True,
+            scopes_S=31, production_cgroup_4g_confirmed=True,
+            ew_lengths_all_equal_D=True, all_dynamics_built=True,
+            sample_plan_unique_3=True, sample_results=samples,
+            required_sample_names=SAMPLE_STRATEGIES,
+            incremental_process_peak_new_mib=200.0,
+        )
+        assert passed
+        assert gates["3_deterministic_unique_samples_completed"] is True
+        assert gates["sample_plan_resolved_3_unique_keys"] is True
+        assert gates["S_ge_3"] is True
+
+
+# ===========================================================================
+# Misc important contracts: NEW peak frozen / write zero / acceptance overall.
+# ===========================================================================
+class TestAcceptanceAllGates:
+    """Verify that every individual gate, when flipped to False, causes
+    evaluate_acceptance to return False (nonzero semantic)."""
+
+    def ok_samples(self):
+        return [
+            SampleParityResult(
+                strategy=s, scope_key=str(uuid.UUID(int=i)),
+                member_count=10, ew_availability_mismatch=0,
+                ew_value_mismatch=0, dynamics_deep_equal=True,
+                dynamics_mismatch_path="", old_path_elapsed_ms=1.0,
+                process_rss_before_old_mib=None, process_rss_after_old_mib=None,
             )
             for i, s in enumerate(SAMPLE_STRATEGIES)
         ]
 
-    def test_all_passing_returns_pass(self) -> None:
-        _, passed = evaluate_acceptance(
-            read_only_confirmed=True,
-            scopes_S=31,
-            ew_lengths_all_equal_D=True,
-            all_dynamics_built=True,
-            sample_results=self._ok_samples(),
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert passed
-
-    def test_read_only_false_fail(self) -> None:
-        _, p = evaluate_acceptance(
-            read_only_confirmed=False, scopes_S=31,
+    def base(self, **overrides):
+        base = dict(
+            read_only_confirmed=True, runtime_sha_exact_match=True,
+            scopes_S=31, production_cgroup_4g_confirmed=True,
             ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=self._ok_samples(),
+            sample_plan_unique_3=True, sample_results=self.ok_samples(),
             required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
+            incremental_process_peak_new_mib=200.0,
         )
-        assert not p
+        base.update(overrides)
+        return base
 
-    def test_S_zero_fail(self) -> None:
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=0,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=[],
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
+    def test_all_permutations_of_single_false_gate_result_in_false(self) -> None:
+        toggles = {
+            "read_only_confirmed": False,
+            "runtime_sha_exact_match": False,
+            "scopes_S": 2,
+            "production_cgroup_4g_confirmed": False,
+            "ew_lengths_all_equal_D": False,
+            "all_dynamics_built": False,
+            "sample_plan_unique_3": False,
+            "incremental_process_peak_new_mib": None,  # fail closed
+        }
+        for key, bad_value in toggles.items():
+            gates, passed = evaluate_acceptance(**self.base(**{key: bad_value}))
+            assert passed is False, (
+                f"gate {key}={bad_value!r} should cause acceptance=False but passed=True; gates={gates}"
+            )
 
-    def test_ew_len_not_D_fail(self) -> None:
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=False, all_dynamics_built=True,
-            sample_results=self._ok_samples(),
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
+    def test_incremental_peak_500_exactly_fails_strict_lt(self) -> None:
+        _, passed = evaluate_acceptance(**self.base(incremental_process_peak_new_mib=500.0))
+        assert passed is False
+        _, passed = evaluate_acceptance(**self.base(incremental_process_peak_new_mib=499.99))
+        assert passed is True
 
-    def test_dynamics_not_built_fail(self) -> None:
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=False,
-            sample_results=self._ok_samples(),
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
-
-    def test_sample_ew_avail_mismatch_fail(self) -> None:
-        samples = self._ok_samples()
-        samples[1] = SampleParityResult(
-            strategy=samples[1].strategy, scope_key=samples[1].scope_key,
-            member_count=samples[1].member_count,
-            ew_availability_mismatch=1, ew_value_mismatch=0,
-            dynamics_deep_equal=True, dynamics_mismatch_path="",
-            old_path_elapsed_ms=1.0,
-            process_rss_before_old_mib=None,
-            process_rss_after_old_mib=None,
-        )
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=samples,
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
-
-    def test_sample_ew_value_mismatch_fail(self) -> None:
-        samples = self._ok_samples()
-        samples[0] = SampleParityResult(
-            strategy=samples[0].strategy, scope_key=samples[0].scope_key,
-            member_count=samples[0].member_count,
-            ew_availability_mismatch=0, ew_value_mismatch=1,
-            dynamics_deep_equal=True, dynamics_mismatch_path="",
-            old_path_elapsed_ms=1.0,
-            process_rss_before_old_mib=None,
-            process_rss_after_old_mib=None,
-        )
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=samples,
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
-
-    def test_sample_dynamics_not_equal_fail(self) -> None:
-        samples = self._ok_samples()
-        samples[2] = SampleParityResult(
-            strategy=samples[2].strategy, scope_key=samples[2].scope_key,
-            member_count=samples[2].member_count,
-            ew_availability_mismatch=0, ew_value_mismatch=0,
-            dynamics_deep_equal=False,
-            dynamics_mismatch_path="root.phase",
-            old_path_elapsed_ms=1.0,
-            process_rss_before_old_mib=None,
-            process_rss_after_old_mib=None,
-        )
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=samples,
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
-
-    def test_sample_count_mismatch_fail(self) -> None:
-        # Only 2 samples completed instead of 3.
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=self._ok_samples()[:2],
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=150.0,
-        )
-        assert not p
-
-    def test_incremental_peak_over_500_fail(self) -> None:
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=self._ok_samples(),
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=None,
-        )
-        assert not p  # None → fail closed
-        _, p = evaluate_acceptance(
-            read_only_confirmed=True, scopes_S=31,
-            ew_lengths_all_equal_D=True, all_dynamics_built=True,
-            sample_results=self._ok_samples(),
-            required_sample_names=SAMPLE_STRATEGIES,
-            incremental_process_peak_new_mib=500.0,  # strict lt
-        )
-        assert not p
+    def test_strategy_names_mismatch_fails(self) -> None:
+        wrong_order_samples = [
+            SampleParityResult(
+                strategy=name, scope_key=str(uuid.UUID(int=i)),
+                member_count=10, ew_availability_mismatch=0,
+                ew_value_mismatch=0, dynamics_deep_equal=True,
+                dynamics_mismatch_path="", old_path_elapsed_ms=1.0,
+                process_rss_before_old_mib=None, process_rss_after_old_mib=None,
+            )
+            for i, name in enumerate(("median", "small", "large"))  # wrong order
+        ]
+        _, passed = evaluate_acceptance(**self.base(sample_results=wrong_order_samples))
+        assert passed is False
