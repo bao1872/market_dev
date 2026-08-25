@@ -70,6 +70,7 @@ _PIPELINE_STEPS = [
     AfterCloseRunStatus.CHECKING_COVERAGE.value,
     AfterCloseRunStatus.COMPUTING_FEATURES.value,
     AfterCloseRunStatus.PUBLISHING.value,
+    AfterCloseRunStatus.COMPUTING_HISTORY.value,
     AfterCloseRunStatus.COMPUTING_REVIEW.value,
     "watchlist_ready",
 ]
@@ -99,8 +100,9 @@ _COMPLETED_STEP_INDEX = {
     AfterCloseRunStatus.CHECKING_COVERAGE.value: 2,
     AfterCloseRunStatus.COMPUTING_FEATURES.value: 3,
     AfterCloseRunStatus.PUBLISHING.value: 4,
-    AfterCloseRunStatus.COMPUTING_REVIEW.value: 5,
-    AfterCloseRunStatus.SUCCEEDED.value: 6,
+    AfterCloseRunStatus.COMPUTING_HISTORY.value: 5,
+    AfterCloseRunStatus.COMPUTING_REVIEW.value: 6,
+    AfterCloseRunStatus.SUCCEEDED.value: 7,
     # 旧四状态映射到 computing_features 的索引（历史 run 兼容）
     AfterCloseRunStatus.CREATING_DSA.value: 3,
     AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
@@ -910,29 +912,34 @@ if __name__ == "__main__":
     assert "watchlist_ready" in _PIPELINE_STEPS
     assert "computing_features" in _PIPELINE_STEPS
     assert "syncing_boards" in _PIPELINE_STEPS
-    # [CHANGE-20260801-REVIEW-CLOSURE] 7 步序列（新增 computing_review）
+    # [CHANGE-20260801-REVIEW-CLOSURE] 8 步序列（publishing→computing_history→computing_review→watchlist_ready）
     assert "computing_review" in _PIPELINE_STEPS, (
         "_PIPELINE_STEPS 必须包含 computing_review（复盘阶段）"
     )
-    assert len(_PIPELINE_STEPS) == 7, (
-        f"新 7 步序列（含 computing_review），实际={len(_PIPELINE_STEPS)}"
+    assert "computing_history" in _PIPELINE_STEPS, (
+        "_PIPELINE_STEPS 必须包含 computing_history（历史状态推进阶段）"
     )
-    # 顺序：computing_review 在 publishing 之后，watchlist_ready 之前
+    assert len(_PIPELINE_STEPS) == 8, (
+        f"8 步序列（含 computing_history / computing_review），实际={len(_PIPELINE_STEPS)}"
+    )
+    # 顺序：computing_history 在 publishing 之后、computing_review 之前；review 在 watchlist_ready 之前
     pub_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.PUBLISHING.value)
+    hist_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_HISTORY.value)
     rev_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_REVIEW.value)
     wl_idx = _PIPELINE_STEPS.index("watchlist_ready")
-    assert pub_idx < rev_idx < wl_idx, (
-        f"computing_review 顺序必须在 publishing 之后、watchlist_ready 之前："
-        f"pub={pub_idx}, rev={rev_idx}, wl={wl_idx}"
+    assert pub_idx < hist_idx < rev_idx < wl_idx, (
+        f"顺序必须为 publishing < computing_history < computing_review < watchlist_ready："
+        f"pub={pub_idx}, hist={hist_idx}, rev={rev_idx}, wl={wl_idx}"
     )
     # 旧四状态映射到 computing_features 索引（=3）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
-    # 新状态机索引（7 步：publishing=4, computing_review=5, succeeded=6）
+    # 新状态机索引（8 步：publishing=4, computing_history=5, computing_review=6, succeeded=7）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 3
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 4
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 5
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 6
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 5
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 6
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 7
     # 旧四状态映射
     assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
     # 时区归一化 + 负耗时防御：_normalize_to_shanghai 基本行为

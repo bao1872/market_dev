@@ -89,8 +89,12 @@ test('1b. getStepKeys: API 返回乱序 steps 时保持 API 顺序（不重排�
 test('1c. getStepKeys: API 返回空数组时用 DEFAULT_STEP_ORDER 兜底', () => {
   const keys = getStepKeys([])
   assert.deepEqual(keys, DEFAULT_STEP_ORDER)
-  // [CHANGE-20260801-REVIEW-CLOSURE] 新 7 步（含 computing_review）
-  assert.ok(keys.length === 7, `默认步骤应为 7 步（含 computing_review），实际: ${keys.length}`)
+  // [SLICE-01-CORRECTION-02] 新 8 步（publishing → computing_history → computing_review → watchlist_ready）
+  assert.ok(keys.length === 8, `默认步骤应为 8 步（含 computing_history/computing_review），实际: ${keys.length}`)
+  assert.ok(
+    keys.includes('computing_history'),
+    'DEFAULT_STEP_ORDER 必须包含 computing_history（历史状态推进阶段）',
+  )
   assert.ok(
     keys.includes('computing_review'),
     'DEFAULT_STEP_ORDER 必须包含 computing_review（复盘阶段）',
@@ -132,10 +136,28 @@ test('2c2. computing_review: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS 且中�
   assert.strictEqual(occurrences, 1, 'computing_review 在 DEFAULT_STEP_ORDER 中应仅出现一次')
   // 顺序：publishing 之后，watchlist_ready 之前
   const pubIdx = DEFAULT_STEP_ORDER.indexOf('publishing')
+  const histIdx = DEFAULT_STEP_ORDER.indexOf('computing_history')
   const revIdx = DEFAULT_STEP_ORDER.indexOf('computing_review')
   const wlIdx = DEFAULT_STEP_ORDER.indexOf('watchlist_ready')
-  assert.ok(revIdx > pubIdx, 'computing_review 应在 publishing 之后')
+  assert.ok(histIdx > pubIdx, 'computing_history 应在 publishing 之后')
+  assert.ok(revIdx > histIdx, 'computing_review 应在 computing_history 之后')
   assert.ok(revIdx < wlIdx, 'computing_review 应在 watchlist_ready 之前')
+})
+
+// [SLICE-01-CORRECTION-02] 新增历史状态推进阶段断言
+test('2c3. computing_history: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS 且中文标签正确', () => {
+  assert.ok(
+    DEFAULT_STEP_ORDER.includes('computing_history'),
+    'DEFAULT_STEP_ORDER 必须包含 computing_history',
+  )
+  assert.strictEqual(
+    STEP_LABELS['computing_history'],
+    '历史状态推进',
+    'computing_history 中文标签应为"历史状态推进"',
+  )
+  // computing_history 只出现一次
+  const occurrences = DEFAULT_STEP_ORDER.filter((k) => k === 'computing_history').length
+  assert.strictEqual(occurrences, 1, 'computing_history 在 DEFAULT_STEP_ORDER 中应仅出现一次')
 })
 
 test('2d. 新状态机 7 步（含 computing_review）全部有中文标签', () => {

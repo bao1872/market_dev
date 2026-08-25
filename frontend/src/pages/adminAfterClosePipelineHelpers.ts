@@ -16,21 +16,24 @@ export const STEP_LABELS: Record<string, string> = {
   checking_coverage: '检查覆盖率',
   computing_features: '统一特征计算',
   publishing: '发布结果',
+  // [SLICE-01-CORRECTION-02] 新增历史状态推进阶段（First Pyramid History 自动生产 + exact-T readiness）
+  computing_history: '历史状态推进',
   // [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘计算与发布阶段
   computing_review: '复盘计算发布',
   watchlist_ready: '自选可用',
 }
 
 // 默认步骤顺序（API 未返回 steps 或步骤缺失时的兜底）
-// [CHANGE-20260801-REVIEW-CLOSURE] 7 步序列（含 computing_review）。
-// 6 步旧数据（无 computing_review 事件）会因 API 步骤聚合缺省，
-//   但 DEFAULT 仍用 7 步以兼容新代码；前端 PipelineTimeline 用 getStepKeys(steps) 取实际 API steps 为主。
+// [SLICE-01-CORRECTION-02] 8 步序列（publishing → computing_history → computing_review → watchlist_ready）。
+// 旧数据（无 computing_history / computing_review 事件）会因 API 步骤聚合缺省，
+//   但 DEFAULT 仍用 8 步以兼容新代码；前端 PipelineTimeline 用 getStepKeys(steps) 取实际 API steps 为主。
 export const DEFAULT_STEP_ORDER: string[] = [
   'refreshing_daily',
   'syncing_boards',
   'checking_coverage',
   'computing_features',
   'publishing',
+  'computing_history',
   'computing_review',
   'watchlist_ready',
 ]

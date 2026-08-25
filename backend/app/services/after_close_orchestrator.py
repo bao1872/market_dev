@@ -102,6 +102,12 @@ _STEP_TIMEOUT_SECONDS: dict[str, float | None] = {
     "checking_coverage": 300,
     "computing_features": 28800,   # 约 7 小时主链
     "publishing": 3600,
+    # [SLICE-01-CORRECTION-02] computing_history 是全市场 canonical History exact-T
+    # advancement（workload-variant long-running business batch）：耗时随 instrument
+    # count 变化，不由 fixed generic absolute wall-clock 上限决定成败（rules/80 §13.1）。
+    # 值为 None —— 无 absolute timeout，由 stale watchdog（lease 过期 + heartbeat 不健康）
+    # 依据真实无进展判定 stalled，而非总耗时过长。
+    "computing_history": None,
     "computing_review": 1800,
     "auction_anchor": _AUCTION_ANCHOR_TIMEOUT_SECONDS,
     # [Phase0-Fix#8] chip 只做入队（不等计算），超时应短
@@ -384,6 +390,35 @@ def _make_step_progress_callback(
     return _cb
 
 
+def _make_history_progress_adapter(
+    job_run_id: uuid.UUID,
+    worker_id: str | None,
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    """[SLICE-01-CORRECTION-02] orchestrator-side 稀疏进度适配器。
+
+    advance_history_to_trade_date 的 callback payload 形如：
+        {"processed": N, "total": M, "target_state_count": K}
+    不含 ``step`` 字段，若直接传给 _make_step_progress_callback 会被 no-op 丢弃
+    （heartbeat 不能冒充业务 progress）。
+
+    本适配器注入 orchestrator 侧 step 名 "computing_history"，并把业务进度
+    （processed/total/target_state_count）并入既有 step_summary，保留 status/
+    started_at/heartbeat_at 等字段，并写 last_progress_at = now —— 使全市场
+    History batch 的真实进度被持久化，watchdog 可据此判定 stall（而非总耗时）。
+    ownership 留在 orchestrator：producer 不知道 "computing_history" 这一 UI 名。
+    """
+
+    _base = _make_step_progress_callback(job_run_id, worker_id)
+
+    async def _adapter(payload: dict[str, Any]) -> None:
+        merged = dict(payload or {})
+        merged["step"] = "computing_history"
+        merged["last_progress_at"] = datetime.now(UTC).isoformat()
+        await _base(merged)
+
+    return _adapter
+
+
 async def _enqueue_chip_job_step(
     *,
     job_run_id: uuid.UUID,
@@ -526,6 +561,45 @@ async def _persist_step_summary(
     except Exception as exc:
         logger.warning(
             "[AfterClose] step summary 持久化失败: step=%s, error=%s", step, exc,
+        )
+
+
+async def _persist_step_summary_status(
+    *,
+    job_run_id: uuid.UUID,
+    step: str,
+    status: str,
+    error_code: str | None = None,
+    processed: Any = None,
+) -> None:
+    """[SLICE-01-CORRECTION-02] 轻量便捷封装：直接以给定 status/error_code 写 step_summary。
+
+    用于业务结果真实性与状态机收尾（如 History not_ready 必须标 failed，而非被
+    execute_orchestrator_step 误写为 succeeded）。仅覆盖该 step 的 status/error_code/
+    processed/last_progress_at，不破坏其他既有字段。
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            job_run = await db.get(SchedulerJobRun, job_run_id)
+            if job_run is None:
+                return
+            meta = _parse_metadata(job_run)
+            step_summary = dict(meta.get("step_summary") or {})
+            existing = dict(step_summary.get(step) or {})
+            existing["step"] = step
+            existing["status"] = status
+            if error_code is not None:
+                existing["error_code"] = error_code
+            if processed is not None:
+                existing["processed"] = processed
+            existing["last_progress_at"] = datetime.now(UTC).isoformat()
+            step_summary[step] = existing
+            meta["step_summary"] = step_summary
+            job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+            await db.commit()
+    except Exception as exc:
+        logger.warning(
+            "[AfterClose] step summary 状态覆盖失败: step=%s, error=%s", step, exc,
         )
 
 
@@ -737,6 +811,8 @@ class AfterCloseRunStatus(StrEnum):
     FEATURE_SNAPSHOT = "feature_snapshot"
     COMPUTING_FEATURES = "computing_features"
     PUBLISHING = "publishing"
+    # [SLICE-01-CORRECTION-02] 新增 First Pyramid History 自动生产 + exact-T readiness 阶段
+    COMPUTING_HISTORY = "computing_history"
     # [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘计算与发布阶段
     COMPUTING_REVIEW = "computing_review"
     SUCCEEDED = "succeeded"
@@ -1690,6 +1766,11 @@ def _make_history_step(
     """
 
     async def _run() -> dict[str, Any]:
+        # [SLICE-01-CORRECTION-02] History 启动前正式写入 orchestrator 当前阶段，
+        # 使 admin 页面「当前阶段」不再停留在上一阶段（publishing）。
+        await _update_orchestrator_status(
+            job_run_id=job_run_id, status=AfterCloseRunStatus.COMPUTING_HISTORY
+        )
         if skip_history:
             return {
                 "history_run_id": None,
@@ -1707,11 +1788,14 @@ def _make_history_step(
             # [SLICE-01-CORRECTION] 先自动推进 canonical History 到 trade_date。
             # 这是当前 canonical exact-T advancement owner（非 250 天全量重跑），
             # 幂等（daily_state upsert + events on_conflict_do_nothing）。
+            # [SLICE-01-CORRECTION-02] progress_callback 用 orchestrator-side 适配器：
+            # advance 的 {processed,total,target_state_count} 被并入 step_summary 并
+            # 写 last_progress_at（真实业务 progress，非 heartbeat 冒充）。
             advance_result = await advance_history_to_trade_date(
                 db,
                 run.id,
                 trade_date,
-                progress_callback=_make_step_progress_callback(job_run_id, worker_id),
+                progress_callback=_make_history_progress_adapter(job_run_id, worker_id),
             )
             await db.commit()
             # [SLICE-01-CORRECTION] 真实 readiness 合同：返回 dict，
@@ -1735,6 +1819,17 @@ def _make_history_step(
                 readiness.get("status") if isinstance(readiness, dict) else readiness,
                 history_ready,
             )
+            # [SLICE-01-CORRECTION-02] 业务结果真实性：
+            # step wrapper 正常 return 不代表业务成功。history_ready=False 时，
+            # 必须显式把 step_summary 标 failed（error_code），否则页面会误显「历史状态：已完成」。
+            if not history_ready:
+                await _persist_step_summary_status(
+                    job_run_id=job_run_id,
+                    step="computing_history",
+                    status="failed",
+                    error_code="HISTORY_NOT_READY_T",
+                    processed=advance_result.get("target_state_count"),
+                )
             return {
                 # 诊断 metadata（不用于 Review gate 绕过 readiness）
                 "history_run_id": run.id,
@@ -3698,19 +3793,54 @@ async def execute_after_close_run(
                 worker_id=worker_id,
                 skip_history=skip_history,
             ),
-            timeout_seconds=_step_timeout("computing_history"),
+            timeout_seconds=_step_timeout("computing_history"),  # None: 无 absolute timeout
             optional=True,
             heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-            progress=_make_step_progress_callback(job_run_id, worker_id),
+            # [SLICE-01-CORRECTION-02] 真实业务 progress（processed/total/target_state_count）
+            progress=_make_history_progress_adapter(job_run_id, worker_id),
             cancellation_check=_make_step_cancellation_check(job_run_id),
         )
         if isinstance(_history_result, dict):
             _history_run_id = _history_result.get("history_run_id")
             _history_ready = bool(_history_result.get("ready"))
+        _history_status = _history_step_summary.get("status")
         logger.info(
             "[AfterClose] computing_history 完成: ready=%s, run_id=%s, step=%s",
-            _history_ready, _history_run_id, _history_step_summary.get("status"),
+            _history_ready, _history_run_id, _history_status,
         )
+
+        # [SLICE-01-CORRECTION-02] History 终止短路：管理员 cancel / worker interrupted
+        # 时必须立即收尾，绝不继续 Review 或落到 final partial_success。
+        # 复用与 Review 相同的 terminal preservation 合同（保留 Orchestrator 状态机 + step summary）。
+        if _history_status in ("cancelled", "interrupted"):
+            _terminal_status = resolve_terminal_run_status(_history_status)
+            async with AsyncSessionLocal() as db:
+                job_run = await _get_job_run_or_raise(db, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=_terminal_status,
+                    message=(
+                        f"盘后编排在历史状态推进阶段被{_terminal_status.value}，"
+                        f"停止后续步骤"
+                    ),
+                    dsa_run_id=dsa_run_id,
+                    payload={
+                        "stock_core_published": _stock_core_published,
+                        "history_ready": _history_ready,
+                        "terminal_short_circuit": True,
+                    },
+                )
+                job_run.status = _terminal_status.value
+                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                # 不写入 last_completed_step（取消/中断不是完成步骤），保留原检查点。
+                await _update_heartbeat_and_step(db, job_run, None, worker_id)
+                await db.commit()
+            logger.warning(
+                "[AfterClose][H2] computing_history 终止短路: job=%s status=%s",
+                str(job_run_id), _terminal_status.value,
+            )
+            raise AfterCloseCancelledError(_terminal_status)
 
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
         logger.info(
