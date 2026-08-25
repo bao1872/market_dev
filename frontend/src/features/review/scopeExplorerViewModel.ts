@@ -1,19 +1,21 @@
 // [ScopeExplorerViewModel] - 描述: canonical Scope Explorer 展示层纯函数（Slice D + R2A）
 // 只做 presentation-only 操作，绝不重算业务指标：
-//   complete family snapshot → q 过滤 → phase 过滤 → readiness 过滤 →
+//   complete family snapshot → q 过滤 → phase 过滤 →
 //   选定 sort 降序排序（null 恒最后）→ UI 分页
 // 纯 TS，无 React/SCSS 依赖，可被 node --test 直接运行。
+//
+// P0-1：readiness 不再参与 Review scope list 过滤（普通用户不再用它筛选列表）。
+// readiness 仍作为 row/detail/API canonical 字段保留（见 ReviewScopeListItem.readiness、
+// urlState.readiness、详情响应），只是不再驱动列表过滤。
 import type {
   ReviewScopeListItem,
   ReviewDynamicsPhase,
-  ReviewCompositionReadiness,
 } from './types'
 import { parseReviewSort, type ReviewSort } from './urlState'
 
 export interface ScopeExplorerQuery {
   q: string
   phase: ReviewDynamicsPhase | null
-  readiness: ReviewCompositionReadiness | null
 }
 
 export interface PaginatedScopes {
@@ -26,9 +28,8 @@ export interface PaginatedScopes {
 export function buildScopeExplorerQuery(
   q: string,
   phase: ReviewDynamicsPhase | null,
-  readiness: ReviewCompositionReadiness | null,
 ): ScopeExplorerQuery {
-  return { q, phase, readiness }
+  return { q, phase }
 }
 
 /** 数值 null 恒排最后；仅对有限数值参与排序；NaN 视为 null（非数字不在有限集合内） */
@@ -99,7 +100,8 @@ function sortValueFor(item: ReviewScopeListItem, sort: ReviewSort): number | nul
 /**
  * q：大小写不敏感匹配 scopeName / scopeKey（不搜索任意 JSON）。
  * phase：exact canonical phase 匹配（phase=null 不过滤）。
- * readiness：exact readiness 匹配（readiness=null 不过滤）。
+ * P0-1：readiness 不再参与过滤（普通用户不再用它筛选列表）；
+ *       readiness 仍作为 row/detail/API canonical 字段保留，仅不再驱动列表过滤。
  */
 export function filterScopes(
   snapshot: ReviewScopeListItem[],
@@ -113,7 +115,6 @@ export function filterScopes(
       if (!name.includes(q) && !key.includes(q)) return false
     }
     if (query.phase !== null && item.summary?.phase !== query.phase) return false
-    if (query.readiness !== null && item.readiness !== query.readiness) return false
     return true
   })
 }

@@ -60,7 +60,8 @@ export default function ScopeExplorerWorkspace({
 
   const snapshotItems = useMemo(() => snapshotQuery.data?.items ?? [], [snapshotQuery.data])
 
-  const query = buildScopeExplorerQuery(urlState.q, urlState.phase, urlState.readiness)
+  // P0-1：readiness 不再参与列表过滤（仅作 row/detail/API canonical 字段保留），故查询不含 readiness
+  const query = buildScopeExplorerQuery(urlState.q, urlState.phase)
 
   const filteredTotal = useMemo(() => filterScopes(snapshotItems, query).length, [snapshotItems, query])
 

@@ -121,23 +121,23 @@ test('VM1. q 大小写不敏感匹配 scopeName / scopeKey', () => {
   ]
   // 中文 scopeName
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('有色', null, null)).map((i) => i.scopeKey),
+    filterScopes(items, buildScopeExplorerQuery('有色', null)).map((i) => i.scopeKey),
     ['copper'],
   )
   // scopeKey 精确 + 大小写不敏感
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('copper', null, null)).map((i) => i.scopeKey),
+    filterScopes(items, buildScopeExplorerQuery('copper', null)).map((i) => i.scopeKey),
     ['copper'],
   )
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('COPPER', null, null)).map((i) => i.scopeKey),
+    filterScopes(items, buildScopeExplorerQuery('COPPER', null)).map((i) => i.scopeKey),
     ['copper'],
   )
   // q 空 → 全部
-  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null, null)).length, 3)
+  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null)).length, 3)
   // q 只匹配 key 时也命中（不搜索任意 JSON）
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('bank', null, null)).map((i) => i.scopeKey),
+    filterScopes(items, buildScopeExplorerQuery('bank', null)).map((i) => i.scopeKey),
     ['bank'],
   )
 })
@@ -153,32 +153,38 @@ test('VM2. phase 精确 canonical 匹配；phase=null 不过滤', () => {
     makeItem('c', { summary: null }),
   ]
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('', 'Strengthening', null)).map((i) => i.scopeKey),
+    filterScopes(items, buildScopeExplorerQuery('', 'Strengthening')).map((i) => i.scopeKey),
     ['a'],
   )
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('', 'Weakening', null)).map((i) => i.scopeKey),
+    filterScopes(items, buildScopeExplorerQuery('', 'Weakening')).map((i) => i.scopeKey),
     ['b'],
   )
   // phase=null → 全部（含 summary=null 的项）
-  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null, null)).length, 3)
+  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null)).length, 3)
 })
 
-test('VM3. readiness 精确过滤；readiness=null 不过滤', () => {
+// P0-1：readiness 不再参与 Review scope list 过滤（普通用户不再用它筛选列表）。
+// readiness 仍作为 row/detail/API canonical 字段保留，但没有任何 readiness 值会隐藏 scope。
+test('VM3. P0-1: readiness 不再过滤列表（stale ?readiness=ready 不会隐藏 scope）', () => {
   const items = [
     makeItem('a', { readiness: 'ready' }),
     makeItem('b', { readiness: 'insufficient_history' }),
     makeItem('c', { readiness: 'unavailable_current' }),
   ]
+  // 即使 query 仍携带 readiness（来自旧 URL），filterScopes 也必须忽略它 → 全部返回
+  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null)).length, 3)
+  // 旧 URL 携带 readiness=ready 也不应隐藏非 ready 的 scope
+  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null)).length, 3)
+  // phase 过滤仍正常（用带 summary 的项验证，避免 summary=null 被 phase 过滤）
+  const phased = [
+    makeItem('x', { summary: makeSummary({ phase: 'Strengthening' }) }),
+    makeItem('y', { summary: makeSummary({ phase: 'Weakening' }) }),
+  ]
   assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('', null, 'ready')).map((i) => i.scopeKey),
-    ['a'],
+    filterScopes(phased, buildScopeExplorerQuery('', 'Strengthening')).map((i) => i.scopeKey),
+    ['x'],
   )
-  assert.deepEqual(
-    filterScopes(items, buildScopeExplorerQuery('', null, 'insufficient_history')).map((i) => i.scopeKey),
-    ['b'],
-  )
-  assert.equal(filterScopes(items, buildScopeExplorerQuery('', null, null)).length, 3)
 })
 
 // ============================================================
@@ -223,7 +229,7 @@ test('VM6. applyScopeExplorerPipeline：过滤 → 排序 → 分页（total 为
     makeItem('c', { scopeName: '银行C', summary: makeSummary({ velocity: 20 }) }),
   ]
   // q=有色 → 过滤后 2 条，velocity 降序 [a(10), b(5)]
-  const q = buildScopeExplorerQuery('有色', null, null)
+  const q = buildScopeExplorerQuery('有色', null)
   const page1 = applyScopeExplorerPipeline(items, q, 1, 1)
   assert.equal(page1.total, 2)
   assert.equal(page1.items.length, 1)
@@ -875,7 +881,7 @@ test('SORT-14. filter → sort（整组）→ paginate：第 2 页顶行对应�
       summary: makeSummary({ position: i }), // position 0..11
     }),
   )
-  const query = buildScopeExplorerQuery('cat', null, null) // 命中全部 12 条
+  const query = buildScopeExplorerQuery('cat', null) // 命中全部 12 条
   const page1 = applyScopeExplorerPipeline(items, query, 1, 2, 'position_desc')
   const page2 = applyScopeExplorerPipeline(items, query, 2, 2, 'position_desc')
   assert.equal(page1.total, 12, 'total = 过滤后数量')
@@ -1012,7 +1018,7 @@ test('R2B-FE-10. filter → selected sort → paginate 顺序不变（含新 sor
   const items = Array.from({ length: 12 }, (_, i) =>
     makeItem(`k${i}`, { observationSummary: makeObs({ freshnessTodayCount: i }) }),
   )
-  const query = buildScopeExplorerQuery('k', null, null)
+  const query = buildScopeExplorerQuery('k', null)
   const p2 = applyScopeExplorerPipeline(items, query, 2, 2, 'freshness_today_desc')
   assert.equal(p2.items[0].scopeKey, 'k9', '第 2 页顶行 = 全局第 3（整组排序后分页）')
   assert.equal(p2.items[1].scopeKey, 'k8')
