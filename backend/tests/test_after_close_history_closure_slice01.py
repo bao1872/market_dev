@@ -40,6 +40,7 @@ from app.services.after_close_orchestrator import (
     AfterCloseCancelledError,
     AfterCloseRunStatus,
     _make_history_business_progress,
+    _make_history_executor_progress,
     _make_history_step,
     _make_step_progress_callback,
     _step_timeout,
@@ -330,6 +331,68 @@ async def test_t7_business_callback_ignores_non_business_payload():
     await cb({"step": "computing_history", "heartbeat_at": "2026-08-25T13:00:00+00:00"})  # 无 processed
     after = json.loads(fake._job.metadata_json)["step_summary"]["computing_history"]
     assert after["last_progress_at"] == old_ts  # 未推进
+
+
+@pytest.mark.asyncio
+async def test_t7_interleaved_heartbeat_preserves_business_progress():
+    """[CORRECTION-04 关键回归] 真实交错顺序：executor heartbeat 不得覆盖 History 业务进度。
+
+    1) executor started：processed=None, last_progress_at=t0
+    2) business callback：processed=500, last_progress_at=T1
+    3) executor heartbeat：heartbeat_at=T2（无 processed）
+    4) 断言：processed==500, total==5283, target_state_count==500,
+              last_progress_at==T1（不是 t0 也不是 T2），heartbeat_at==T2
+    5) business=1000 → heartbeat 再次 → processed==1000
+    """
+    fake = _FakeSession()
+    t0 = "2026-08-25T12:00:00+00:00"
+    t2 = "2026-08-25T12:00:10+00:00"
+    meta = {"step_summary": {"computing_history": {
+        "step": "computing_history", "status": "running",
+        "started_at": t0, "last_progress_at": t0, "heartbeat_at": t0,
+    }}}
+    fake._job.metadata_json = json.dumps(meta)
+    job_run_id = uuid.uuid4()
+    biz = _make_history_business_progress(job_run_id, "w1")
+    exec_cb = _make_history_executor_progress(job_run_id, "w1")
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        return_value=_fake_session_cm(fake),
+    ):
+        # 1) executor started（心跳语义：无 processed）
+        await exec_cb({"step": "computing_history", "status": "running",
+                       "started_at": t0, "last_progress_at": t0, "heartbeat_at": t0})
+        # 2) business progress=500（business callback 写入真实业务时间 last_progress_at）
+        await biz({"processed": 500, "total": 5283, "target_state_count": 500})
+        # 3) executor heartbeat @ T2（无 processed/total）
+        await exec_cb({"step": "computing_history", "status": "running",
+                       "started_at": t0, "heartbeat_at": t2})
+
+    after = json.loads(fake._job.metadata_json)["step_summary"]["computing_history"]
+    assert after["processed"] == 500
+    assert after["total"] == 5283
+    assert after["target_state_count"] == 500
+    # 关键：heartbeat(t2) 没把 last_progress_at 改回 t0/t2，保留业务写入时间
+    assert after["last_progress_at"] != t0
+    assert after["last_progress_at"] != t2
+    assert after["heartbeat_at"] == t2             # executor 字段正常更新
+
+    # 5) business=1000，再 heartbeat，必须仍是 1000（不被覆盖回 None）
+    t4 = "2026-08-25T12:01:10+00:00"
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        return_value=_fake_session_cm(fake),
+    ):
+        await biz({"processed": 1000, "total": 5283, "target_state_count": 1000})
+        await exec_cb({"step": "computing_history", "status": "running",
+                       "started_at": t0, "heartbeat_at": t4})
+
+    after2 = json.loads(fake._job.metadata_json)["step_summary"]["computing_history"]
+    assert after2["processed"] == 1000
+    assert after2["last_progress_at"] != t0
+    assert after2["last_progress_at"] != t4
+    assert after2["heartbeat_at"] == t4
 
 
 # ===== T8: not_ready → 最终持久化 step == failed（修正 executor succeeded 覆盖） =====

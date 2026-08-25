@@ -284,7 +284,10 @@ async def execute_orchestrator_step(
         finished_at = datetime.now(UTC)
         summary["finished_at"] = finished_at.isoformat()
         summary["elapsed_seconds"] = max(0.0, (finished_at - started_at).total_seconds())
-        summary["last_progress_at"] = finished_at.isoformat()
+        # [SLICE-01-CORRECTION-04] last_progress_at 是 History 业务拥有字段；对 computing_history
+        # 不在此覆盖（executor 不应冒充业务进度所有权），由 business callback 维护。
+        if summary.get("step") != "computing_history":
+            summary["last_progress_at"] = finished_at.isoformat()
         if progress is not None:
             await progress(dict(summary))
     return result, summary
@@ -439,6 +442,80 @@ def _make_history_business_progress(
         except Exception as exc:  # 进度回调失败不得影响主流程
             logger.warning(
                 "[AfterClose] history business progress 写入失败: error=%s", exc,
+            )
+
+    return _cb
+
+
+# [SLICE-01-CORRECTION-04] progress 字段所有权划分：
+# computing_history.step_summary 由两类 writer 共同更新，任一方不得整块覆盖另一方。
+# - executor 拥有（心跳/状态机/超时语义）：status/finished_at/elapsed_seconds/
+#   heartbeat_at/timeout_seconds/attempt/retry_count/error_code/error_message/step
+# - History 业务拥有（advance 真实推进）：processed/total/target_state_count/last_progress_at
+# 通用 _make_step_progress_callback 是「整块覆盖」语义；对 computing_history 必须用
+# 下面的 MERGE 版本，否则外层 executor heartbeat 会把业务 progress 擦掉（P0）。
+_HISTORY_EXECUTOR_OWNED_FIELDS = (
+    "status", "finished_at", "elapsed_seconds", "heartbeat_at", "timeout_seconds",
+    "attempt", "retry_count", "error_code", "error_message", "step",
+)
+_HISTORY_BUSINESS_OWNED_FIELDS = (
+    "processed", "total", "target_state_count", "last_progress_at",
+)
+
+
+def _make_history_executor_progress(
+    job_run_id: uuid.UUID,
+    worker_id: str | None,
+) -> Callable[[dict[str, Any]], Awaitable[None]]:
+    """[SLICE-01-CORRECTION-04] computing_history 专属 executor progress 持久化回调。
+
+    与通用 _make_step_progress_callback（整块覆盖）不同，本回调采用 MERGE 语义：
+    只把 executor payload 中的「executor 拥有字段」写回，并**保留** DB 中已由
+    _make_history_business_progress 写入的「业务拥有字段」
+    （processed/total/target_state_count/last_progress_at）。
+
+    这样形成：
+        executor heartbeat ─┐
+                            ├─► 同一条 computing_history summary（不互相覆盖）
+        History business  ─┘
+    """
+
+    async def _cb(summary: dict[str, Any]) -> None:
+        step = summary.get("step")
+        if step != "computing_history":
+            # 非本步骤仍走通用整块覆盖语义（其它步骤没有分离的业务 writer）
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    return
+                meta = _parse_metadata(job_run)
+                step_summary = dict(meta.get("step_summary") or {})
+                step_summary[step] = summary
+                meta["step_summary"] = step_summary
+                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                await db.commit()
+            return
+        try:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    return
+                meta = _parse_metadata(job_run)
+                step_summary = dict(meta.get("step_summary") or {})
+                existing = dict(step_summary.get("computing_history") or {})
+                # 只更新 executor 拥有的字段，保留业务拥有的字段
+                merged = dict(existing)
+                for f in _HISTORY_EXECUTOR_OWNED_FIELDS:
+                    if f in summary:
+                        merged[f] = summary[f]
+                merged["step"] = "computing_history"
+                step_summary["computing_history"] = merged
+                meta["step_summary"] = step_summary
+                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                await db.commit()
+        except Exception as exc:  # 进度回调失败不得影响主流程
+            logger.warning(
+                "[AfterClose] history executor progress 写入失败: error=%s", exc,
             )
 
     return _cb
@@ -3828,10 +3905,11 @@ async def execute_after_close_run(
             timeout_seconds=_step_timeout("computing_history"),  # None: 无 absolute timeout
             optional=True,
             heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-            # [SLICE-01-CORRECTION-03] executor progress 用通用回调：只持久化 executor summary，
-            # 不碰 last_progress_at（heartbeat 不冒充业务 progress，避免 false-liveness）。
+            # [SLICE-01-CORRECTION-04] computing_history 用专属 executor progress 回调
+            # （MERGE 语义）：heartbeat 只更新 executor 拥有字段，保留 advance 写入的业务
+            # 进度（processed/total/target_state_count/last_progress_at），两者不再互相覆盖。
             # 真实业务 progress 由 advance_history_to_trade_date 的专属回调写入。
-            progress=_make_step_progress_callback(job_run_id, worker_id),
+            progress=_make_history_executor_progress(job_run_id, worker_id),
             cancellation_check=_make_step_cancellation_check(job_run_id),
         )
         if isinstance(_history_result, dict):
