@@ -421,13 +421,20 @@ def _make_history_business_progress(
             return
         try:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                # [CORRECTION-05] FOR UPDATE：锁定 exact 行，避免与 executor writer 并发
+                # lost update（双方各拿旧快照先后 commit）。
+                stmt = (
+                    select(SchedulerJobRun)
+                    .where(SchedulerJobRun.id == job_run_id)
+                    .with_for_update()
+                )
+                job_run = (await db.execute(stmt)).scalar_one_or_none()
                 if job_run is None:
                     return
                 meta = _parse_metadata(job_run)
                 step_summary = dict(meta.get("step_summary") or {})
                 existing = dict(step_summary.get("computing_history") or {})
-                # MERGE：保留既有 status/started_at/heartbeat_at 等，只更新业务进度
+                # MERGE：保留既有 executor 字段，只更新业务进度（业务拥有字段白名单）
                 merged = dict(existing)
                 merged["step"] = "computing_history"
                 merged["processed"] = payload.get("processed")
@@ -447,17 +454,17 @@ def _make_history_business_progress(
     return _cb
 
 
-# [SLICE-01-CORRECTION-04] progress 字段所有权划分：
-# computing_history.step_summary 由两类 writer 共同更新，任一方不得整块覆盖另一方。
-# - executor 拥有（心跳/状态机/超时语义）：status/finished_at/elapsed_seconds/
-#   heartbeat_at/timeout_seconds/attempt/retry_count/error_code/error_message/step
+# [SLICE-01-CORRECTION-04/05] progress 字段所有权划分 + 并发事务所有权：
+# computing_history.step_summary 由两类 writer 共同更新。
 # - History 业务拥有（advance 真实推进）：processed/total/target_state_count/last_progress_at
-# 通用 _make_step_progress_callback 是「整块覆盖」语义；对 computing_history 必须用
-# 下面的 MERGE 版本，否则外层 executor heartbeat 会把业务 progress 擦掉（P0）。
-_HISTORY_EXECUTOR_OWNED_FIELDS = (
-    "status", "finished_at", "elapsed_seconds", "heartbeat_at", "timeout_seconds",
-    "attempt", "retry_count", "error_code", "error_message", "step",
-)
+# - 其余字段（status/finished_at/elapsed_seconds/heartbeat_at/timeout_seconds/attempt/
+#   retry_count/error_code/error_message/step/started_at/optional 等）均属 executor 拥有。
+# 原则：executor 可写 summary 中「除业务拥有字段外」的所有字段（白名单反转，避免漏同步
+# 新增 executor 字段，例如 CORRECTION-05 补的 started_at/optional）；business 只写业务字段。
+# [CORRECTION-05] 两个 writer 各自独立 AsyncSession，若只做「读 metadata → Python merge →
+# 写回」而无行锁，真实 asyncio 并发下会 lost update（双方各拿旧快照先后 commit）。因此两个
+# callback 都必须用 SELECT ... FOR UPDATE 锁定 exact SchedulerJobRun 行，锁后读最新已提交
+# metadata → 按字段 owner merge → commit；第二个 writer 阻塞直到第一个 commit，杜绝丢更新。
 _HISTORY_BUSINESS_OWNED_FIELDS = (
     "processed", "total", "target_state_count", "last_progress_at",
 )
@@ -467,12 +474,17 @@ def _make_history_executor_progress(
     job_run_id: uuid.UUID,
     worker_id: str | None,
 ) -> Callable[[dict[str, Any]], Awaitable[None]]:
-    """[SLICE-01-CORRECTION-04] computing_history 专属 executor progress 持久化回调。
+    """[SLICE-01-CORRECTION-04/05] computing_history 专属 executor progress 持久化回调。
 
     与通用 _make_step_progress_callback（整块覆盖）不同，本回调采用 MERGE 语义：
-    只把 executor payload 中的「executor 拥有字段」写回，并**保留** DB 中已由
+    把 executor summary 中「除业务拥有字段外」的所有字段写回（白名单反转，自动覆盖
+    started_at/optional 等新增 executor 字段），并**保留** DB 中已由
     _make_history_business_progress 写入的「业务拥有字段」
     （processed/total/target_state_count/last_progress_at）。
+
+    [CORRECTION-05] 使用 SELECT ... FOR UPDATE 锁定 exact SchedulerJobRun 行，确保与
+    business writer 在真实 asyncio 并发下串行化（read-modify-write 全程持锁），杜绝
+    lost update。
 
     这样形成：
         executor heartbeat ─┐
@@ -485,7 +497,12 @@ def _make_history_executor_progress(
         if step != "computing_history":
             # 非本步骤仍走通用整块覆盖语义（其它步骤没有分离的业务 writer）
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                stmt = (
+                    select(SchedulerJobRun)
+                    .where(SchedulerJobRun.id == job_run_id)
+                    .with_for_update()
+                )
+                job_run = (await db.execute(stmt)).scalar_one_or_none()
                 if job_run is None:
                     return
                 meta = _parse_metadata(job_run)
@@ -497,17 +514,26 @@ def _make_history_executor_progress(
             return
         try:
             async with AsyncSessionLocal() as db:
-                job_run = await db.get(SchedulerJobRun, job_run_id)
+                # [CORRECTION-05] FOR UPDATE：锁定 exact 行，避免与 business writer 并发
+                # lost update。
+                stmt = (
+                    select(SchedulerJobRun)
+                    .where(SchedulerJobRun.id == job_run_id)
+                    .with_for_update()
+                )
+                job_run = (await db.execute(stmt)).scalar_one_or_none()
                 if job_run is None:
                     return
                 meta = _parse_metadata(job_run)
                 step_summary = dict(meta.get("step_summary") or {})
                 existing = dict(step_summary.get("computing_history") or {})
-                # 只更新 executor 拥有的字段，保留业务拥有的字段
+                # executor 可写：summary 中除业务拥有字段外的所有字段（反转白名单，
+                # 自动保留 started_at/optional 等）
                 merged = dict(existing)
-                for f in _HISTORY_EXECUTOR_OWNED_FIELDS:
-                    if f in summary:
-                        merged[f] = summary[f]
+                for f, v in summary.items():
+                    if f in _HISTORY_BUSINESS_OWNED_FIELDS:
+                        continue
+                    merged[f] = v
                 merged["step"] = "computing_history"
                 step_summary["computing_history"] = merged
                 meta["step_summary"] = step_summary
@@ -1357,9 +1383,20 @@ async def _update_heartbeat_and_step(
     """
     now = datetime.now(ZoneInfo("Asia/Shanghai"))
     lease_expires_at = now + timedelta(seconds=_ORCHESTRATOR_LEASE_SECONDS)
-    # 保留已有 metadata（含 feature_snapshot_progress / feature_snapshot_run_id 等），
+    # [SLICE-01-CORRECTION-05] 重新从 DB 读取最新已提交 metadata_json（FOR UPDATE 持锁），
+    # 不信任传入的 job_run 内存对象：computing_history 期间 business progress 由独立
+    # AsyncSession 提交，producer 会话内的 job_run 可能是旧快照；若直接用旧快照会覆盖
+    # 业务进度（lost update）。锁后读取保证看到最新已提交状态。
+    refreshed = (
+        await db.execute(
+            select(SchedulerJobRun)
+            .where(SchedulerJobRun.id == job_run.id)
+            .with_for_update()
+        )
+    ).scalar_one_or_none()
+    # 保留已有 metadata（含 feature_snapshot_progress / feature_snapshot_run_id / 业务进度等），
     # 仅更新 last_completed_step。
-    meta = _parse_metadata(job_run)
+    meta = _parse_metadata(refreshed) if refreshed is not None else _parse_metadata(job_run)
     # [Phase0] None = 仅心跳，不推进检查点（保留原有 last_completed_step）
     if last_completed_step is not None:
         meta["last_completed_step"] = last_completed_step

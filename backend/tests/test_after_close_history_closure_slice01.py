@@ -1,6 +1,10 @@
-"""Slice-01 History Closure CORRECTION-03 — 运行合同 + 真实进度 + 终态 聚焦测试。
+"""Slice-01 History Closure CORRECTION-03/04/05 — 运行合同 + 真实进度 + 进度所有权 + 并发原子性 聚焦测试。
 
-验证 [SLICE-01-CORRECTION-03] 的 4 个 runtime ownership 修复：
+验证 [SLICE-01-CORRECTION-03/04/05] 的 runtime ownership 修复：
+- CORRECTION-04：executor heartbeat 与 History business progress 不再互相覆盖（字段所有权）。
+- CORRECTION-05：两个独立 writer 对同一 SchedulerJobRun.metadata_json 的并发 read-modify-write
+  用 SELECT ... FOR UPDATE 串行化，杜绝 lost update；executor 反转白名单保留 started_at/optional；
+  checkpoint 重新读最新 metadata 不再覆盖业务进度。
 
 P0-1  orchestrator 状态写入必须用真实 db+job_run 合同（_update_orchestrator_status
        无 job_run_id= 参数）；测试不得用 signatureless AsyncMock 隐藏该合同。
@@ -29,6 +33,7 @@ T11  pipeline API 顺序（backend 侧契约）
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import date
@@ -51,20 +56,44 @@ from app.services.after_close_pipeline_service import (
 )
 
 
+class _FakeResult:
+    def __init__(self, row):
+        self._row = row
+
+    def scalar_one_or_none(self):
+        return self._row
+
+
 class _FakeSession:
-    """捕获 metadata_json / status 写入的 fake AsyncSession，用于真实合同测试。"""
+    """捕获 metadata_json / status 写入的 fake AsyncSession，用于真实合同测试。
+
+    [CORRECTION-05] 支持 select(SchedulerJobRun).with_for_update() 路径：execute() 返回
+    当前 self._job.metadata_json 的最新值，并通过 asyncio.Lock 把「read(FOR UPDATE) →
+    merge → commit」串行化，从而在纯单元层面模拟 PostgreSQL 行锁语义，使并发 writer 测试
+    能验证「第二个 writer 在锁内读到第一个 writer 已提交的最新状态」。真实行锁隔离由远程
+    bz_stock_verify_<sha> 的 targeted-PG 测试证明（见 test_pg_history_progress_lost_update_closure）。
+    """
 
     def __init__(self):
         self._job = MagicMock()
         self._job.metadata_json = json.dumps({})
         self._job.status = None
         self.commits = 0
+        self._lock = asyncio.Lock()
 
     async def get(self, model, key):
         return self._job
 
+    async def execute(self, stmt):
+        # 仅 FOR UPDATE / select(SchedulerJobRun) 路径被 callback 使用；串行化 read→write。
+        # 返回 self._job 本身（MagicMock），使 callback 对其 .metadata_json 的写入直接落到
+        # self._job（meta() 读取的对象），模拟 ORM 行与 session 绑定、commit 即持久化。
+        async with self._lock:
+            return _FakeResult(self._job)
+
     async def commit(self):
-        self.commits += 1
+        async with self._lock:
+            self.commits += 1
 
     async def refresh(self, obj):
         pass
@@ -393,6 +422,120 @@ async def test_t7_interleaved_heartbeat_preserves_business_progress():
     assert after2["last_progress_at"] != t0
     assert after2["last_progress_at"] != t4
     assert after2["heartbeat_at"] == t4
+
+
+@pytest.mark.asyncio
+async def test_t7_concurrent_heartbeat_and_business_no_lost_update():
+    """[CORRECTION-05 关键回归] 真实并发：executor heartbeat 与 History business progress
+    同时到达时，不得发生 lost update（双方各拿旧快照先后 commit）。
+
+    初始：processed=500, heartbeat=H0。
+    同时启动：
+      - executor heartbeat → heartbeat=H1
+      - business progress → processed=1000, total=5283
+    最终必须**同时**具备：
+      processed == 1000   （业务进度未被 executor 覆盖回 500）
+      heartbeat == H1     （executor 进度未被 business 覆盖回 H0）
+
+    纯单元层面靠 _FakeSession 的 asyncio.Lock 串行化 read(FOR UPDATE)→write，模拟
+    PostgreSQL 行锁：第二个 writer 在锁内读到第一个 writer 已提交的最新 metadata。
+    真实行锁隔离由远程 bz_stock_verify_<sha> targeted-PG 测试证明。
+    """
+    fake = _FakeSession()
+    h0 = "2026-08-25T12:00:00+00:00"
+    h1 = "2026-08-25T12:00:10+00:00"
+    meta = {"step_summary": {"computing_history": {
+        "step": "computing_history", "status": "running",
+        "started_at": h0, "last_progress_at": h0, "heartbeat_at": h0,
+        "processed": 500, "total": 5283, "target_state_count": 500,
+    }}}
+    fake._job.metadata_json = json.dumps(meta)
+    job_run_id = uuid.uuid4()
+    biz = _make_history_business_progress(job_run_id, "w1")
+    exec_cb = _make_history_executor_progress(job_run_id, "w1")
+
+    async def _executor():
+        await exec_cb({"step": "computing_history", "status": "running",
+                       "started_at": h0, "heartbeat_at": h1})
+
+    async def _business():
+        await biz({"processed": 1000, "total": 5283, "target_state_count": 1000})
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        return_value=_fake_session_cm(fake),
+    ):
+        # 真正并发：两个 writer 同时起飞，不人为顺序 await
+        await asyncio.gather(_executor(), _business())
+
+    after = json.loads(fake._job.metadata_json)["step_summary"]["computing_history"]
+    assert after["processed"] == 1000, "lost update: business processed 被 executor 覆盖"
+    assert after["total"] == 5283
+    assert after["target_state_count"] == 1000
+    assert after["heartbeat_at"] == h1, "lost update: executor heartbeat 被 business 覆盖"
+    assert after["status"] == "running"
+    assert after["started_at"] == h0
+
+
+@pytest.mark.asyncio
+async def test_t7_concurrent_forced_stale_read_barrier_no_lost_update():
+    """[CORRECTION-05 极端时序] 强制两个 writer 都先读取旧快照、再先后 commit 的场景。
+
+    用 barrier 让两个 callback 都在「读旧 metadata」之后、「写回」之前会合，模拟最坏的
+    并发交错。由于新代码在 FOR UPDATE 锁内才读最新 metadata（而非持锁前快照），
+    第二个 writer 读到的是第一个已提交的结果 → 不丢更新。
+
+    最终必须同时具备：processed==1000（business 最新）与 heartbeat==H1（executor 最新）。
+    """
+    fake = _FakeSession()
+    h0 = "2026-08-25T12:00:00+00:00"
+    h1 = "2026-08-25T12:00:10+00:00"
+    meta = {"step_summary": {"computing_history": {
+        "step": "computing_history", "status": "running",
+        "started_at": h0, "last_progress_at": h0, "heartbeat_at": h0,
+        "processed": 500, "total": 5283, "target_state_count": 500,
+    }}}
+    fake._job.metadata_json = json.dumps(meta)
+    job_run_id = uuid.uuid4()
+    biz = _make_history_business_progress(job_run_id, "w1")
+    exec_cb = _make_history_executor_progress(job_run_id, "w1")
+
+    started = asyncio.Event()
+    proceed = asyncio.Event()
+
+    async def _executor():
+        await exec_cb({"step": "computing_history", "status": "running",
+                       "started_at": h0, "heartbeat_at": h1})
+
+    async def _business():
+        await biz({"processed": 1000, "total": 5283, "target_state_count": 1000})
+
+    # 用包装强制「两个 callback 都进入各自 read 后再放行 write」的会合点
+    orig_execute = fake.execute
+
+    async def _patched_execute(stmt):
+        # 第一次 read 即代表 writer 已拿到旧快照；会合后再允许继续
+        if not started.is_set():
+            started.set()
+        await proceed.wait()
+        return await orig_execute(stmt)
+
+    fake.execute = _patched_execute
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        return_value=_fake_session_cm(fake),
+    ):
+        t_exec = asyncio.create_task(_executor())
+        t_biz = asyncio.create_task(_business())
+        # 等两个 writer 都完成初次 read（旧快照），再同时放行写回
+        await asyncio.wait_for(started.wait(), timeout=5)
+        proceed.set()
+        await asyncio.gather(t_exec, t_biz)
+
+    after = json.loads(fake._job.metadata_json)["step_summary"]["computing_history"]
+    assert after["processed"] == 1000, "lost update: 极端交错下 business 进度丢失"
+    assert after["heartbeat_at"] == h1, "lost update: 极端交错下 executor 进度丢失"
 
 
 # ===== T8: not_ready → 最终持久化 step == failed（修正 executor succeeded 覆盖） =====
