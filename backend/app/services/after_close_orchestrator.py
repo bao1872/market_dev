@@ -390,33 +390,58 @@ def _make_step_progress_callback(
     return _cb
 
 
-def _make_history_progress_adapter(
+def _make_history_business_progress(
     job_run_id: uuid.UUID,
     worker_id: str | None,
 ) -> Callable[[dict[str, Any]], Awaitable[None]]:
-    """[SLICE-01-CORRECTION-02] orchestrator-side 稀疏进度适配器。
+    """[SLICE-01-CORRECTION-03] 专属业务进度回调（仅给 advance_history_to_trade_date 用）。
 
     advance_history_to_trade_date 的 callback payload 形如：
         {"processed": N, "total": M, "target_state_count": K}
-    不含 ``step`` 字段，若直接传给 _make_step_progress_callback 会被 no-op 丢弃
-    （heartbeat 不能冒充业务 progress）。
+    这是唯一合法的「真实业务 progress」来源。本回调：
+    1) 仅当 payload 含 processed/total 业务键时才视为真实进度（与 executor 的
+       heartbeat/elapsed tick 区分，后者不含这些键，绝不在此被当成业务 progress）；
+    2) MERGE 进既有 step_summary：保留 status / started_at / heartbeat_at /
+       last_progress_at 等已有字段，只覆盖业务进度字段；
+    3) 写入 last_progress_at = now（只有真实业务推进才更新，heartbeat 不冒充）；
+    4) 注入 orchestrator 侧 step 名 "computing_history"（ownership 留在 orchestrator，
+       producer 不知道该 UI 名）。
 
-    本适配器注入 orchestrator 侧 step 名 "computing_history"，并把业务进度
-    （processed/total/target_state_count）并入既有 step_summary，保留 status/
-    started_at/heartbeat_at 等字段，并写 last_progress_at = now —— 使全市场
-    History batch 的真实进度被持久化，watchdog 可据此判定 stall（而非总耗时）。
-    ownership 留在 orchestrator：producer 不知道 "computing_history" 这一 UI 名。
+    注意：本回调与外层 executor 的 progress= 回调（_make_step_progress_callback）
+    严格分离 —— executor 的 tick/finally 调用只持久化 executor summary，不碰
+    last_progress_at（其 last_progress_at 由 executor 自身语义控制），绝不产生 false-liveness。
     """
 
-    _base = _make_step_progress_callback(job_run_id, worker_id)
+    async def _cb(payload: dict[str, Any]) -> None:
+        if not payload or "processed" not in payload or "total" not in payload:
+            # 非业务进度（如 executor heartbeat tick），忽略，避免 false-liveness
+            return
+        try:
+            async with AsyncSessionLocal() as db:
+                job_run = await db.get(SchedulerJobRun, job_run_id)
+                if job_run is None:
+                    return
+                meta = _parse_metadata(job_run)
+                step_summary = dict(meta.get("step_summary") or {})
+                existing = dict(step_summary.get("computing_history") or {})
+                # MERGE：保留既有 status/started_at/heartbeat_at 等，只更新业务进度
+                merged = dict(existing)
+                merged["step"] = "computing_history"
+                merged["processed"] = payload.get("processed")
+                merged["total"] = payload.get("total")
+                if "target_state_count" in payload:
+                    merged["target_state_count"] = payload["target_state_count"]
+                merged["last_progress_at"] = datetime.now(UTC).isoformat()
+                step_summary["computing_history"] = merged
+                meta["step_summary"] = step_summary
+                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
+                await db.commit()
+        except Exception as exc:  # 进度回调失败不得影响主流程
+            logger.warning(
+                "[AfterClose] history business progress 写入失败: error=%s", exc,
+            )
 
-    async def _adapter(payload: dict[str, Any]) -> None:
-        merged = dict(payload or {})
-        merged["step"] = "computing_history"
-        merged["last_progress_at"] = datetime.now(UTC).isoformat()
-        await _base(merged)
-
-    return _adapter
+    return _cb
 
 
 async def _enqueue_chip_job_step(
@@ -1766,11 +1791,9 @@ def _make_history_step(
     """
 
     async def _run() -> dict[str, Any]:
-        # [SLICE-01-CORRECTION-02] History 启动前正式写入 orchestrator 当前阶段，
-        # 使 admin 页面「当前阶段」不再停留在上一阶段（publishing）。
-        await _update_orchestrator_status(
-            job_run_id=job_run_id, status=AfterCloseRunStatus.COMPUTING_HISTORY
-        )
+        # [SLICE-01-CORRECTION-02/03] History 启动前写入 orchestrator 当前阶段，
+        # 由主流程在拥有 db/job_run 的上下文中调用 _update_orchestrator_status
+        # （真实合同需要 db + job_run，不在 operation 内部用 job_run_id= 误调用）。
         if skip_history:
             return {
                 "history_run_id": None,
@@ -1788,14 +1811,16 @@ def _make_history_step(
             # [SLICE-01-CORRECTION] 先自动推进 canonical History 到 trade_date。
             # 这是当前 canonical exact-T advancement owner（非 250 天全量重跑），
             # 幂等（daily_state upsert + events on_conflict_do_nothing）。
-            # [SLICE-01-CORRECTION-02] progress_callback 用 orchestrator-side 适配器：
-            # advance 的 {processed,total,target_state_count} 被并入 step_summary 并
-            # 写 last_progress_at（真实业务 progress，非 heartbeat 冒充）。
+            # [SLICE-01-CORRECTION-03] business progress 使用专属回调
+            # _make_history_business_progress（只认 producer 的 {processed,total,
+            # target_state_count}，MERGE 进既有 step_summary 并写 last_progress_at）；
+            # 外层 executor 的 progress= 另用 _make_step_progress_callback（不碰
+            # last_progress_at，heartbeat 不冒充业务 progress）。两者严格分离。
             advance_result = await advance_history_to_trade_date(
                 db,
                 run.id,
                 trade_date,
-                progress_callback=_make_history_progress_adapter(job_run_id, worker_id),
+                progress_callback=_make_history_business_progress(job_run_id, worker_id),
             )
             await db.commit()
             # [SLICE-01-CORRECTION] 真实 readiness 合同：返回 dict，
@@ -1819,17 +1844,9 @@ def _make_history_step(
                 readiness.get("status") if isinstance(readiness, dict) else readiness,
                 history_ready,
             )
-            # [SLICE-01-CORRECTION-02] 业务结果真实性：
-            # step wrapper 正常 return 不代表业务成功。history_ready=False 时，
-            # 必须显式把 step_summary 标 failed（error_code），否则页面会误显「历史状态：已完成」。
-            if not history_ready:
-                await _persist_step_summary_status(
-                    job_run_id=job_run_id,
-                    step="computing_history",
-                    status="failed",
-                    error_code="HISTORY_NOT_READY_T",
-                    processed=advance_result.get("target_state_count"),
-                )
+            # [SLICE-01-CORRECTION-03] 业务结果真实性（step_summary 标 failed）放在
+            # execute_orchestrator_step 返回以后由主流程统一修正并持久化，避免被
+            # executor finally 的 succeeded 覆盖（见主流程 after-history 块）。
             return {
                 # 诊断 metadata（不用于 Review gate 绕过 readiness）
                 "history_run_id": run.id,
@@ -3785,6 +3802,21 @@ async def execute_after_close_run(
             "[BOUNDARY-PH] before computing_history job=%s trade=%s pid=%s",
             str(job_run_id), trade_date, os.getpid(),
         )
+        # [SLICE-01-CORRECTION-03] History 启动前写入 orchestrator 当前阶段（真实合同：
+        # _update_orchestrator_status 需要 db + job_run）。使 admin 页面「当前阶段」
+        # 不再停留在上一阶段（publishing）。
+        async with AsyncSessionLocal() as db:
+            _hr_job = await _get_job_run_or_raise(db, job_run_id)
+            await _update_orchestrator_status(
+                db=db,
+                job_run=_hr_job,
+                status=AfterCloseRunStatus.COMPUTING_HISTORY,
+                message="开始历史状态推进（First Pyramid History 自动生产 + exact-T readiness）",
+                dsa_run_id=dsa_run_id,
+                payload={"stock_core_published": _stock_core_published},
+            )
+            await db.commit()
+
         _history_result, _history_step_summary = await execute_orchestrator_step(
             "computing_history",
             _make_history_step(
@@ -3796,8 +3828,10 @@ async def execute_after_close_run(
             timeout_seconds=_step_timeout("computing_history"),  # None: 无 absolute timeout
             optional=True,
             heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-            # [SLICE-01-CORRECTION-02] 真实业务 progress（processed/total/target_state_count）
-            progress=_make_history_progress_adapter(job_run_id, worker_id),
+            # [SLICE-01-CORRECTION-03] executor progress 用通用回调：只持久化 executor summary，
+            # 不碰 last_progress_at（heartbeat 不冒充业务 progress，避免 false-liveness）。
+            # 真实业务 progress 由 advance_history_to_trade_date 的专属回调写入。
+            progress=_make_step_progress_callback(job_run_id, worker_id),
             cancellation_check=_make_step_cancellation_check(job_run_id),
         )
         if isinstance(_history_result, dict):
@@ -3809,7 +3843,19 @@ async def execute_after_close_run(
             _history_ready, _history_run_id, _history_status,
         )
 
-        # [SLICE-01-CORRECTION-02] History 终止短路：管理员 cancel / worker interrupted
+        # [SLICE-01-CORRECTION-03] 业务结果真实性（修正 executor 的 succeeded 覆盖）：
+        # execute_orchestrator_step 的 finally 会把正常 return 的 summary 标 succeeded，
+        # 但 History not_ready 是业务失败，不是 step 成功。必须在 wrapper 返回后据此修正
+        # _history_step_summary 并持久化，使页面如实显示「历史状态：失败」而非「已完成」。
+        if (not skip_history) and (not _history_ready) and _history_status != "cancelled" \
+                and _history_status != "interrupted":
+            _history_step_summary["status"] = "failed"
+            _history_step_summary["error_code"] = "HISTORY_NOT_READY_T"
+            await _make_step_progress_callback(job_run_id, worker_id)(
+                dict(_history_step_summary)
+            )
+
+        # [SLICE-01-CORRECTION-02/03] History 终止短路：管理员 cancel / worker interrupted
         # 时必须立即收尾，绝不继续 Review 或落到 final partial_success。
         # 复用与 Review 相同的 terminal preservation 合同（保留 Orchestrator 状态机 + step summary）。
         if _history_status in ("cancelled", "interrupted"):
@@ -3841,6 +3887,20 @@ async def execute_after_close_run(
                 str(job_run_id), _terminal_status.value,
             )
             raise AfterCloseCancelledError(_terminal_status)
+
+        # [SLICE-01-CORRECTION-03] checkpoint：仅 history_ready=True 时才把
+        # last_completed_step 推进为 computing_history（记录真实历史事实）。
+        # resume 若 computing_review 未完成仍会 re-advance + revalidate（沿用上轮原则），
+        # 与「checkpoint 记录 History 曾成功完成」不冲突。
+        if _history_ready:
+            async with AsyncSessionLocal() as db:
+                _ck_job = await _get_job_run_or_raise(db, job_run_id)
+                await _update_heartbeat_and_step(
+                    db, _ck_job,
+                    AfterCloseRunStatus.COMPUTING_HISTORY.value,
+                    worker_id,
+                )
+                await db.commit()
 
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
         logger.info(
