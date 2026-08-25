@@ -167,17 +167,26 @@ def test_family_dynamics_skips_non_activated_families(monkeypatch) -> None:
 
     from app.services.review_orchestrator_service import (
         _compute_family_dynamics_maps,
-        compute_current_static_scope_dynamics_batch,
     )
     from app.services.review_scope_service import ScopeDefinition
 
     called: list[tuple[str, list[str]]] = []
 
-    async def _record_batch(session, scope_type, scope_keys, axis, *, analysis_asof_date):
-        # market/major_index/style must NEVER reach the reconstruction owner.
+    async def _record_batch(
+        session,
+        scope_type,
+        scope_keys,
+        axis,
+        *,
+        analysis_asof_date,
+        historical_source="reconstruction",
+    ):
+        # market/major_index/style must NEVER reach the historical dynamics
+        # owner (M5-D3: the authoritative columnar_ew source).
+        assert historical_source == "columnar_ew"
         assert scope_type in {
             "industry_l1", "industry_l2", "industry_l3", "concept"
-        }, f"unsupported family reached reconstruction: {scope_type}"
+        }, f"unsupported family reached owner: {scope_type}"
         called.append((scope_type, list(scope_keys)))
         return [{"scope": {"scope_key": k}} for k in scope_keys]
 

@@ -33,7 +33,6 @@
 
 from __future__ import annotations
 
-import json
 import logging
 import uuid
 from dataclasses import dataclass
@@ -1212,8 +1211,6 @@ async def _compute_family_dynamics_maps(
     session: AsyncSession,
     run: MarketReviewRun,
     scopes: list[ScopeDefinition],
-    *,
-    dynamics_shadow: bool = False,
 ) -> dict[str, Any]:
     """Compute Historical Dynamics for all activated scopes, grouped by family.
 
@@ -1221,24 +1218,29 @@ async def _compute_family_dynamics_maps(
     ``_compute_canonical_composition_phase``.  Only ONE batch call per
     scope_type (family) is issued; never a per-scope 120-day reconstruction.
 
-    M5-D2 orchestration wiring: ``dynamics_shadow`` (default False — NOT
-    production default) opts into a SHADOW-ONLY re-run of the same family
-    through ``historical_source="columnar_ew"`` (the M5-D1 new owner).  The
-    shadow result is audit / wiring evidence ONLY:
+    M5-D3 owner switch: the AUTHORITATIVE source is the proven
+    ``historical_source="columnar_ew"`` owner (M5-D1), selected explicitly at
+    this orchestrator boundary.  It makes EXACTLY ONE Historical Dynamics batch
+    call per activated family:
 
-    * it never replaces the legacy ``"reconstruction"`` result, never enters the
-      returned map, composition, persistence or publication, and never mutates
-      facts;
-    * the exact canonical axis / scope_keys / scope_type / analysis_asof_date
-      objects are forwarded to BOTH calls (verified by captured call signatures
-      in the D2 wiring tests);
-    * shadow failures are isolated into the evidence report — the legacy result
-      is untouched and there is NO fallback / retry (this exception isolation is
-      NOT the D3 production fail-closed owner behaviour).
+    * the returned ``batch_results`` is the ONLY data entering
+      ``result[scope_key]`` -> dynamics_map -> canonical composition ->
+      persistence / publication (no shadow copy, no second owner);
+    * the canonical inputs are forwarded unchanged — ``axis`` straight from
+      ``_build_dynamics_trading_axis`` (no second axis / rebuild / resort /
+      truncation), ``scope_type``, ordered ``scope_keys``,
+      ``analysis_asof_date=run.trade_date``, current-static membership
+      semantics;
+    * FAIL CLOSED: any owner exception propagates to the caller and the existing
+      orchestrator per-scope / run failure semantics handle it.  There is NO
+      fallback to the legacy reconstruction owner and NO retry — we never
+      silently return to the OOM owner.
 
-    ``compute_run`` / ``resume_run`` deliberately do NOT enable this mode today;
-    the shadow is reachable only by an explicit caller opt-in (test-only / later
-    runtime shadow with C2 small/median/large sampling).
+    The legacy ``"reconstruction"`` owner is NOT invoked by the production
+    orchestrator path.  It remains explicitly reachable at the SERVICE level
+    (``compute_current_static_scope_dynamics_batch(..., historical_source=
+    "reconstruction")``) for debug / rollback / parity / probes; the service
+    default is unchanged.
     """
     axis = await _build_dynamics_trading_axis(session, run.trade_date)
     by_family: dict[str, list[ScopeDefinition]] = {}
@@ -1265,30 +1267,20 @@ async def _compute_family_dynamics_maps(
             scope_count=len(family_scopes),
             trade_date_count=len(axis),
         )
-        # CONSUMED result: the legacy reconstruction owner, called exactly as
-        # before this phase — the authoritative input for composition below.
+        # M5-D3 AUTHORITATIVE call: the proven columnar_ew owner.  EXACTLY ONE
+        # Historical Dynamics batch call per activated family — the returned
+        # batch_results is the ONLY data entering result / composition /
+        # persistence.  Fail-closed: no try/except here — owner exceptions
+        # propagate to the existing orchestrator run failure semantics, with
+        # NO fallback to the legacy reconstruction (OOM) owner and NO retry.
         batch_results = await compute_current_static_scope_dynamics_batch(
             session,
             scope_type,
             scope_keys,
             axis,
             analysis_asof_date=run.trade_date,
+            historical_source="columnar_ew",
         )
-        if dynamics_shadow:
-            shadow_report = await _build_dynamics_shadow_report(
-                session,
-                scope_type=scope_type,
-                scope_keys=scope_keys,
-                axis=axis,
-                analysis_asof_date=run.trade_date,
-                legacy_result_count=len(batch_results),
-            )
-            logger.info(
-                "[Review-dynamics-shadow] scope_type=%s status=%s report=%s",
-                scope_type,
-                shadow_report["shadow_status"],
-                json.dumps(shadow_report, ensure_ascii=False),
-            )
         _log_rss(
             "dynamics-family-end",
             scope_type=scope_type,
@@ -1299,107 +1291,6 @@ async def _compute_family_dynamics_maps(
             if sk is not None:
                 result[sk] = item
     return result
-
-
-async def _build_dynamics_shadow_report(
-    session: AsyncSession,
-    *,
-    scope_type: str,
-    scope_keys: list[str],
-    axis: list[date],
-    analysis_asof_date: date,
-    legacy_result_count: int,
-) -> dict[str, Any]:
-    """M5-D2: run the columnar_ew historical source as shadow-only wiring audit.
-
-    The new owner is invoked with the EXACT same canonical inputs forwarded by
-    the orchestrator boundary (same ``axis`` / ``scope_keys`` / ``scope_type`` /
-    ``analysis_asof_date`` objects — captured verbatim in the D2 tests) and
-    ``historical_source="columnar_ew"``.  The returned payload is packaged into
-    a small evidence structure; the payload itself is NOT retained (no EW
-    matrices, no duplicate Dynamics families).
-
-    Wiring facts recorded:
-
-    * ``axis_exact_forwarded`` — the same axis object is forwarded (structural;
-      verified by captured call signatures in tests);
-    * ``scope_order_exact`` + ``missing/extra/crosswired`` — the returned
-      ``scope.scope_key`` sequence is compared positionally against the
-      requested order, so a reorder / dropped / surplus / foreign-key result is
-      surfaced as "fail" evidence instead of silently mis-mapping.
-
-    Exception isolation (G): any owner exception is caught and recorded as
-    ``shadow_status="fail"`` + ``shadow_error`` WITHOUT touching the legacy
-    result and WITHOUT fallback / retry.  Allowed ONLY because the shadow is
-    non-authoritative — this is NOT the M5-D3 production fail-closed behaviour.
-    """
-    report: dict[str, Any] = {
-        "scope_type": scope_type,
-        "analysis_asof_date": analysis_asof_date.isoformat(),
-        "requested_scope_count": len(scope_keys),
-        "legacy_result_count": legacy_result_count,
-        "columnar_result_count": None,
-        "axis_exact_forwarded": True,
-        "scope_order_exact": True,
-        "missing_scope_keys": [],
-        "extra_scope_keys": [],
-        "crosswired_scope_keys": [],
-        "shadow_status": "pass",
-        "shadow_error": None,
-    }
-    try:
-        # 把 orchestrator 边界的 SAME canonical objects 原样转发（不复制）：
-        # scope_keys 本就是 list，axis 本就是 _build_dynamics_trading_axis 的
-        # canonical list；D1 service 内部需要 defensive copy 的地方自行处理。
-        # 这正是 axis_exact_forwarded=True 的可信依据（测试以 object identity 证明）。
-        shadow_results = await compute_current_static_scope_dynamics_batch(
-            session,
-            scope_type,
-            scope_keys,
-            axis,
-            analysis_asof_date=analysis_asof_date,
-            historical_source="columnar_ew",
-        )
-    except Exception as exc:  # noqa: BLE001 — shadow-only isolation, never falls back
-        report["shadow_status"] = "fail"
-        report["shadow_error"] = f"{type(exc).__name__}: {exc}"
-        # axis_exact_forwarded 保留 True：已用原 canonical axis 发起调用（P1-1 后
-        # 确为原对象）。scope_order_exact 则只能为 False：无结果可验证，禁止自相
-        # 矛盾地声明 order exact。
-        report["scope_order_exact"] = False
-        return report
-
-    report["columnar_result_count"] = len(shadow_results)
-    requested = list(scope_keys)
-    requested_set = set(requested)
-    returned = [
-        (item.get("scope") or {}).get("scope_key") for item in shadow_results
-    ]
-    returned_set = {k for k in returned if k is not None}
-    report["missing_scope_keys"] = [
-        k for k in requested if k not in returned_set
-    ]
-    report["extra_scope_keys"] = [
-        k for k in returned if k is not None and k not in requested_set
-    ]
-    report["crosswired_scope_keys"] = [
-        rk for k, rk in zip(requested, returned, strict=False) if rk != k
-    ]
-    # 防御：shadow item 缺失 scope 映射（None key）无条件视为 cross-wired 证据。
-    report["crosswired_scope_keys"].extend(
-        f"<unmapped@{idx}>"
-        for idx, k in enumerate(returned)
-        if k is None
-    )
-    report["scope_order_exact"] = (
-        len(returned) == len(requested)
-        and not report["missing_scope_keys"]
-        and not report["extra_scope_keys"]
-        and not report["crosswired_scope_keys"]
-    )
-    if not report["scope_order_exact"]:
-        report["shadow_status"] = "fail"
-    return report
 
 
 def _unavailable_leadership_snapshot(trade_date: date) -> LeadershipSnapshot:
