@@ -51,6 +51,12 @@ from app.domain.review.analysis.scope_dynamics import (
     DYNAMICS_PHASE_PRIMITIVE_KEY,
     compute_scope_dynamics_analysis,
 )
+from app.services.review_historical_ew_columnar import (
+    build_scope_dynamics_from_ew,
+)
+from app.services.review_historical_ew_db_service import (
+    compute_current_static_historical_ew_batch,
+)
 from app.services.review_historical_scope_reconstruction_service import (
     reconstruct_scope_series_batch,
 )
@@ -134,6 +140,7 @@ async def compute_current_static_scope_dynamics_batch(
     *,
     analysis_asof_date: date,
     union_member_cap: int = 4096,
+    historical_source: str = "reconstruction",
 ) -> list[dict[str, Any]]:
     """Compose current-static Scope Dynamics for a batch of scopes (not-runtime-yet).
 
@@ -148,11 +155,35 @@ async def compute_current_static_scope_dynamics_batch(
     phase is reported once via ``batch_reconstruction_ms`` / ``batch_total_ms``
     on every result (identical across the batch, labelled ``batch_*``).
 
+    M5-D1 (integration-only, NO owner switch yet): a second internal historical
+    source is available via ``historical_source="columnar_ew"`` —
+    ``compute_current_static_historical_ew_batch`` (close-only SQL -> columnar
+    EW) then ``build_scope_dynamics_from_ew`` (canonical ObservationSeries +
+    ScopeDynamics).  ``historical_source`` defaults to ``"reconstruction"`` so
+    production behaviour is unchanged; the new implementation is reachable only
+    when the caller explicitly opts in.  The public result contract
+    ``{scope, membership, observation_series, scope_dynamics, metrics}`` is
+    identical for both sources.
+
     EXPERIMENT / NOT_RUNTIME: not wired into API / orchestrator / persistence / frontend yet.
     """
+    if historical_source not in ("reconstruction", "columnar_ew"):
+        raise ValueError(
+            "historical_source must be 'reconstruction' (legacy owner) or "
+            f"'columnar_ew' (M5-D1 new owner); got {historical_source!r}"
+        )
     _validate_trade_dates(trade_dates, analysis_asof_date=analysis_asof_date)
     if not scope_keys:
         return []
+
+    if historical_source == "columnar_ew":
+        return await _compose_batch_from_ew_source(
+            db,
+            scope_type,
+            list(scope_keys),
+            list(trade_dates),
+            analysis_asof_date=analysis_asof_date,
+        )
 
     import time
 
@@ -211,6 +242,175 @@ async def compute_current_static_scope_dynamics_batch(
         r["metrics"]["batch_composition_ms"] = batch_composition_ms
         r["metrics"]["batch_total_ms"] = batch_reconstruction_ms + batch_composition_ms
     return results
+
+
+async def _compose_batch_from_ew_source(
+    db: AsyncSession,
+    scope_type: str,
+    scope_keys: list[str],
+    trade_dates: list[date],
+    *,
+    analysis_asof_date: date,
+) -> list[dict[str, Any]]:
+    """M5-D1: columnar_ew historical source -> canonical Dynamics composition.
+
+    The ONLY new-source batch composition owner.  Routes through:
+
+        compute_current_static_historical_ew_batch        (close-only SQL -> EW)
+            -> build_scope_dynamics_from_ew               (canonical owners)
+
+    then re-packages into the SAME public contract as the legacy
+    reconstruction path:  ``{scope, membership, observation_series,
+    scope_dynamics, metrics}``.
+
+    Fail-closed guarantees (deliberate, mirror the C2/C3 contract):
+
+    * scope iteration of the EW batch MUST match the caller-supplied scope
+      order exactly (no reorder, no missing / surplus scope);
+    * every returned EW series MUST be exactly ``len(trade_dates)`` long and
+      ``None`` (missing EW) stays ``None`` -> Builder unavailable — it is never
+      coerced to zero;
+    * a scope absent from the EW batch result raises, never skips.
+
+    Metrics parity: per-scope keys mirror the reconstruction result.  The
+    shared source cost is reported once via ``batch_ew_source_ms`` (the legacy
+    reconstruction counterpart is ``batch_reconstruction_ms``, which we set to
+    0 — no reconstruction ran).  Phase-level ``observation_series_ms`` /
+    ``dynamics_ms`` are 0.0 here: ``build_scope_dynamics_from_ew`` is a single
+    canonical-owner call that builds both, so only the true end-to-end
+    ``composition_ms`` is measured per scope (see comment below).
+    """
+    import time
+
+    _log_rss(
+        "dynamics-batch-ew-start",
+        scope_type=scope_type,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+    )
+    t_ew_src = time.perf_counter()
+    ew_batch = await compute_current_static_historical_ew_batch(
+        db,
+        scope_type,
+        scope_keys,
+        trade_dates,
+        analysis_asof_date=analysis_asof_date,
+    )
+    batch_ew_source_ms = (time.perf_counter() - t_ew_src) * 1000.0
+    _log_rss(
+        "dynamics-batch-ew-end",
+        scope_type=scope_type,
+        scope_count=len(scope_keys),
+        trade_date_count=len(trade_dates),
+        result_count=len(ew_batch.scopes),
+    )
+
+    scopes_by_key = {s.scope_key: s for s in ew_batch.scopes}
+    if list(scopes_by_key) != scope_keys:
+        raise RuntimeError(
+            "columnar_ew batch scope ordering mismatch: EW batch returned "
+            f"order {list(scopes_by_key)} != caller order {scope_keys}"
+        )
+
+    results: list[dict[str, Any]] = []
+    for sk in scope_keys:
+        scope_res = scopes_by_key[sk]
+        if len(scope_res.ew_values) != len(trade_dates):
+            raise ValueError(
+                f"columnar_ew scope {sk} EW series length "
+                f"{len(scope_res.ew_values)} != trade_dates length "
+                f"{len(trade_dates)}"
+            )
+        t_build = time.perf_counter()
+        built = build_scope_dynamics_from_ew(
+            scope_type=scope_type,
+            scope_key=sk,
+            analysis_dates=trade_dates,
+            ew_values=list(scope_res.ew_values),
+        )
+        # ``build_scope_dynamics_from_ew`` internally calls the canonical
+        # ObservationSeries builder + ScopeDynamics analysis as ONE owner; we
+        # measure the true end-to-end per-scope compose time here.
+        ew_compose_ms = (time.perf_counter() - t_build) * 1000.0
+        results.append(
+            _package_scope_dynamics_from_ew(
+                built=built,
+                scope_type=scope_type,
+                scope_key=sk,
+                member_count=scope_res.member_count,
+                scope_name=scope_res.scope_name,
+                trade_dates=trade_dates,
+                analysis_asof_date=analysis_asof_date,
+                ew_source_composition_ms=ew_compose_ms,
+            )
+        )
+        _log_rss(
+            "dynamics-batch-ew-composed",
+            scope_type=scope_type,
+            result_count=len(results),
+        )
+
+    batch_composition_ms = sum(
+        r["metrics"].get("composition_ms", 0.0) for r in results
+    )
+    for r in results:
+        r["metrics"]["batch_scope_count"] = len(results)
+        r["metrics"]["batch_reconstruction_ms"] = 0.0
+        r["metrics"]["batch_ew_source_ms"] = batch_ew_source_ms
+        r["metrics"]["batch_composition_ms"] = batch_composition_ms
+        r["metrics"]["batch_total_ms"] = batch_ew_source_ms + batch_composition_ms
+    return results
+
+
+def _package_scope_dynamics_from_ew(
+    *,
+    built: dict[str, Any],
+    scope_type: str,
+    scope_key: str,
+    member_count: int,
+    scope_name: str,
+    trade_dates: Sequence[date],
+    analysis_asof_date: date,
+    ew_source_composition_ms: float,
+) -> dict[str, Any]:
+    """Package one built EW->Dynamics chain into the canonical public result.
+
+    Result keys / shapes are identical to
+    :func:`_compose_scope_dynamics_from_reconstruction` so the orchestrator and
+    composition boundary are source-agnostic.  ``membership`` mirrors the
+    reconstruction provenance layout (mode / asof_date / member_count).
+    """
+    observation_series = built.get("observation_series")
+    scope_dynamics = built.get("dynamics")
+    return {
+        "scope": {
+            "scope_type": scope_type,
+            "scope_key": scope_key,
+        },
+        "membership": {
+            "mode": "current_static",
+            "asof_date": analysis_asof_date.isoformat(),
+            "member_count": member_count,
+        },
+        "observation_series": observation_series,
+        "scope_dynamics": scope_dynamics,
+        "metrics": {
+            "scope_count": 1,
+            "member_count": member_count,
+            "scope_name": scope_name,
+            "trade_date_count": len(trade_dates),
+            "member_date_count": member_count * len(trade_dates),
+            "vec_hit": 0,
+            "vec_fallback": 0,
+            "fallback_reasons": [],
+            "historical_source": "columnar_ew",
+            "reconstruction_ms": 0.0,
+            "observation_series_ms": 0.0,
+            "dynamics_ms": 0.0,
+            "composition_ms": ew_source_composition_ms,
+            "total_ms": ew_source_composition_ms,
+        },
+    }
 
 
 def _compose_scope_dynamics_from_reconstruction(

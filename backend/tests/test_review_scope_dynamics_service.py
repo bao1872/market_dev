@@ -40,19 +40,27 @@ No DB / network: the AsyncSession is a stand-in; the only IO boundary
 from __future__ import annotations
 
 import asyncio
+import inspect
 import math
 from collections.abc import Callable, Sequence
 from datetime import date, timedelta
 from typing import Any
 
+import numpy as np
 import pytest
 
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.scope_observation import (
     MemberObservation,
+    _return_distribution,
     compute_scope_observation,
 )
 from app.services import review_scope_dynamics_service as svc
+from app.services.review_historical_ew_db_service import (
+    HistoricalEWBatchResult,
+    HistoricalEWScopeResult,
+    HistoricalEWSourceMetrics,
+)
 from app.services.review_scope_dynamics_service import (
     CurrentStaticDynamicsSourceContractError,
 )
@@ -692,3 +700,436 @@ def test_batch_contract_guard_rejects_non_current_static(monkeypatch) -> None:
                 object(), SCOPE_TYPE, scope_keys, list(days), analysis_asof_date=days[-1]
             )
         )
+
+
+# ---------------------------------------------------------------------------
+# M5-D1. columnar_ew source — integration only, production default unchanged
+# ---------------------------------------------------------------------------
+# A second internal historical source is wired into the SAME batch owner behind
+# the ``historical_source`` selector (default keeps the legacy
+# ``"reconstruction"`` owner, so production behaviour is unchanged).  The ONLY
+# added IO boundary is ``compute_current_static_historical_ew_batch`` (the real
+# close-only SQL adapter, mocked here); ``build_scope_dynamics_from_ew`` runs the
+# REAL canonical ObservationSeries Builder + Scope Dynamics analysis, i.e. the
+# recorded EW values flow through the true Dyn chain (no fake math).
+#
+# Coverage per M5-D1 acceptance:
+#   D1-1 old mode output unchanged            -> ``test_d1_default_owner_is_reconstruction``
+#   D1-2 new mode exact output                -> ``test_d1_new_mode_exact_output``
+#   D1-3 same scope order                     -> ``test_d1_batch_scope_order_preserved``
+#   D1-4/5 same observation_series / dynamics shape -> ``test_d1_columnar_parity_with_reconstruction``
+#   D1-6 missing EW stays unavailable         -> ``test_d1_missing_ew_unavailable_not_zero``
+#   D1-7 invalid calendar/member source fail closed -> ``test_d1_source_violations_fail_closed``
+#   D1-8 no ndarray escapes public result     -> ``test_d1_no_ndarray_escapes_public_result``
+#   D1-9 no DB writes                         -> ``test_d1_no_db_writes_only_ew_adapter_called``
+#   D1-10 old reconstruction still reachable  -> ``test_d1_old_reconstruction_still_reachable``
+
+
+def _ew_scope_result(
+    sk: str,
+    *,
+    days: Sequence[date],
+    ew_values: Sequence[float | None],
+    scope_name: str = "",
+    member_count: int = 3,
+) -> HistoricalEWScopeResult:
+    return HistoricalEWScopeResult(
+        scope_key=sk,
+        scope_name=scope_name or sk,
+        member_count=member_count,
+        ew_values=tuple(ew_values),
+    )
+
+
+def _make_ew_source(
+    days: Sequence[date],
+    *,
+    ew_by_scope: dict[str, Sequence[float | None]],
+    scope_names: dict[str, str] | None = None,
+    member_counts: dict[str, int] | None = None,
+    calls: list[dict[str, Any]] | None = None,
+    order: Sequence[str] | None = None,
+):
+    """Fake ``compute_current_static_historical_ew_batch`` (the C1/C2 SQL adapter).
+
+    Returns a real ``HistoricalEWBatchResult`` with per-scope EW series aligned
+    to the requested axis.  ``order`` lets a test inject a scope iteration that
+    differs from the caller's order to prove the fail-closed ordering guard.
+    ``ew_values`` length is used as-is, so a test can pass a wrong-length series
+    to prove the adapter-length guard.
+    """
+
+    async def fake(
+        db, scope_type: str, scope_keys, trade_dates, *, analysis_asof_date: date,
+    ) -> HistoricalEWBatchResult:
+        if calls is not None:
+            calls.append(
+                {
+                    "scope_type": scope_type,
+                    "scope_keys": list(scope_keys),
+                    "trade_dates": list(trade_dates),
+                    "analysis_asof_date": analysis_asof_date,
+                }
+            )
+        if len(list(trade_dates)) != len(days):
+            raise AssertionError(
+                f"test harness: axis length {len(list(trade_dates))} != {len(days)}"
+            )
+        keys = list(scope_keys) if order is None else list(order)
+        scopes = [
+            _ew_scope_result(
+                k,
+                days=days,
+                ew_values=ew_by_scope[k],
+                scope_name=(scope_names or {}).get(k, ""),
+                member_count=(member_counts or {}).get(k, 3),
+            )
+            for k in keys
+        ]
+        return HistoricalEWBatchResult(
+            scope_type=scope_type,
+            analysis_asof_date=analysis_asof_date,
+            trade_dates=tuple(trade_dates),
+            scopes=tuple(scopes),
+            metrics=HistoricalEWSourceMetrics(),
+        )
+
+    return fake
+
+
+async def _run_ew(
+    scope_keys: Sequence[str],
+    days: Sequence[date],
+    *,
+    historical_source: str = "columnar_ew",
+    analysis_asof_date: date | None = None,
+) -> list[dict[str, Any]]:
+    return await svc.compute_current_static_scope_dynamics_batch(
+        object(),
+        SCOPE_TYPE,
+        list(scope_keys),
+        list(days),
+        analysis_asof_date=analysis_asof_date or days[-1],
+        historical_source=historical_source,
+    )
+
+
+def test_d1_default_owner_is_reconstruction() -> None:
+    """D1-1. The selector defaults to the legacy owner; production behaviour is
+    unchanged — the new source is reachable ONLY via explicit opt-in."""
+    sig = inspect.signature(svc.compute_current_static_scope_dynamics_batch)
+    assert sig.parameters["historical_source"].default == "reconstruction"
+
+
+def test_d1_new_mode_exact_output(monkeypatch) -> None:
+    """D1-2. columnar_ew routes the recorded EW values through the REAL canonical
+    chain: every finite EW becomes an available PrimitivePoint with the exact
+    same value (no coercion), and the canonical Dynamics arrays match the axis."""
+    days = _trading_days(date(2026, 1, 5), 4)
+    ew = [0.01, 0.02, 0.03, 0.04]
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope={SCOPE_KEY: ew}, calls=calls),
+    )
+
+    out = asyncio.run(_run_ew([SCOPE_KEY], days))[0]
+
+    assert out["scope"] == {"scope_type": SCOPE_TYPE, "scope_key": SCOPE_KEY}
+    assert out["membership"]["mode"] == "current_static"
+    assert out["membership"]["asof_date"] == days[-1].isoformat()
+    assert out["membership"]["member_count"] == 3
+    assert out["metrics"]["historical_source"] == "columnar_ew"
+    assert out["metrics"]["batch_reconstruction_ms"] == 0.0
+    assert "batch_ew_source_ms" in out["metrics"]
+
+    primitives = out["observation_series"]["primitives"]
+    assert set(primitives) == {"equal_weight_return"}
+    points = primitives["equal_weight_return"]["points"]
+    assert len(points) == 4
+    for point, expected in zip(points, ew, strict=True):
+        assert point["available"] is True
+        assert point["value"] == expected
+        assert point["readiness"] == "ready"
+
+    position = out["scope_dynamics"]["historical_dynamics"]["position"]
+    phase = out["scope_dynamics"]["dynamics_phase"]
+    assert len(position) == len(phase) == 4
+
+    # The only mocked IO boundary is the EW adapter: exactly one call, with the
+    # caller-supplied axis passed through untouched.
+    assert len(calls) == 1
+    assert calls[0]["scope_keys"] == [SCOPE_KEY]
+    assert calls[0]["trade_dates"] == list(days)
+    assert calls[0]["analysis_asof_date"] == days[-1]
+
+
+def test_d1_batch_scope_order_preserved(monkeypatch) -> None:
+    """D1-3. Multi-scope columnar_ew returns one result per scope_key in the
+    caller's order, each scope carrying its own EW series (no cross-wiring)."""
+    days = _trading_days(date(2026, 1, 5), 5)
+    scope_keys = ["alpha", "beta"]
+    ew_by_scope = {
+        "alpha": [0.01, 0.02, 0.03, 0.04, 0.05],
+        "beta": [0.5, 0.4, 0.3, 0.2, 0.1],
+    }
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope=ew_by_scope),
+    )
+
+    out = asyncio.run(_run_ew(scope_keys, days))
+
+    assert [r["scope"]["scope_key"] for r in out] == scope_keys
+    for result, sk in zip(out, scope_keys, strict=True):
+        points = result["observation_series"]["primitives"]["equal_weight_return"]["points"]
+        assert [p["value"] for p in points] == ew_by_scope[sk]
+        assert len(result["scope_dynamics"]["dynamics_phase"]) == len(days)
+        assert result["membership"]["member_count"] == 3
+
+
+def test_d1_columnar_parity_with_reconstruction(monkeypatch) -> None:
+    """D1-4/D1-5. Feeding the SAME EW facts through both owners yields identical
+    observation_series points AND identical canonical Dynamics — every value and
+    shape field matches exactly (shared canonical reducer, PRD red line)."""
+    days = _trading_days(date(2026, 1, 5), 20)
+    scope_keys = ["alpha", "beta"]
+    index = {d: i for i, d in enumerate(days)}
+    missing_day_index = 2
+
+    def builder(d: date, sk: str) -> dict[str, Any]:
+        if index[d] == missing_day_index:
+            # Whole-scope missing EW on both owners: all members lack the
+            # exact-T1 return -> EW None, snapshot still present (readiness
+            # "ready"), so both point "readiness" fields must match too.
+            return _canonical_payload(d, returns=[], missing_count=3)
+        return _canonical_payload(d, returns=[0.01, 0.01, -0.005])
+
+    monkeypatch.setattr(
+        svc,
+        "reconstruct_scope_series_batch",
+        _make_batch_source(days, payload_builder=builder, scope_keys=scope_keys),
+    )
+    old_out = asyncio.run(
+        svc.compute_current_static_scope_dynamics_batch(
+            object(), SCOPE_TYPE, scope_keys, list(days), analysis_asof_date=days[-1]
+        )
+    )
+
+    # The columnar side must reproduce the same EW facts.  EW is the canonical
+    # sorted-mean of the member returns, so derive the recorded EW via the SAME
+    # frozen reducer instead of hand-rolling floats.
+    recon_ew = _return_distribution([0.01, 0.01, -0.005])["mean"]
+    ew_series = [
+        None if i == missing_day_index else recon_ew for i in range(len(days))
+    ]
+    ew_by_scope = {sk: list(ew_series) for sk in scope_keys}
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope=ew_by_scope),
+    )
+    new_out = asyncio.run(_run_ew(scope_keys, days))
+
+    assert [r["scope"]["scope_key"] for r in new_out] == scope_keys
+
+    def _obs_signature(result: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "obs_keys": sorted(result["observation_series"].keys()),
+            "primitive_keys": sorted(result["observation_series"]["primitives"].keys()),
+            "point_keys": sorted(
+                result["observation_series"]["primitives"]["equal_weight_return"]["points"][0]
+            ),
+            "dyn_keys": sorted(result["scope_dynamics"].keys()),
+            "hd_keys": sorted(result["scope_dynamics"]["historical_dynamics"].keys()),
+            "phase_keys": sorted(result["scope_dynamics"]["dynamics_phase"][0]),
+        }
+
+    for old_r, new_r in zip(old_out, new_out, strict=True):
+        # Same contract shape on the non-metrics sections.
+        assert _obs_signature(old_r) == _obs_signature(new_r)
+        # Same primitive values (bit-exact — identical canonical reducer).
+        old_points = old_r["observation_series"]["primitives"]["equal_weight_return"]["points"]
+        new_points = new_r["observation_series"]["primitives"]["equal_weight_return"]["points"]
+        assert new_points == old_points
+        # Same canonical Dynamics output (bit-exact).
+        assert new_r["scope_dynamics"] == old_r["scope_dynamics"]
+
+
+def test_d1_missing_ew_unavailable_not_zero(monkeypatch) -> None:
+    """D1-6. A None EW slot stays unavailable (never coerced to 0.0): the
+    Builder renders an unavailable point and the Dynamics axis keeps its shape."""
+    days = _trading_days(date(2026, 1, 5), 4)
+    ew = [0.01, None, 0.03, None]
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope={SCOPE_KEY: ew}),
+    )
+
+    out = asyncio.run(_run_ew([SCOPE_KEY], days))[0]
+
+    points = out["observation_series"]["primitives"]["equal_weight_return"]["points"]
+    assert [p["value"] for p in points] == [0.01, None, 0.03, None]
+    assert [p["available"] for p in points] == [True, False, True, False]
+    # A date whose EW scalar is not available is a PRESENT snapshot with a
+    # missing value (both owners), so readiness stays "ready" — unlike a whole
+    # snapshot gap which the Builder registers as "unavailable".  The core
+    # requirement is value remains None / unavailable — never coerced to 0.0.
+    assert points[1]["value"] is None
+    assert points[1]["readiness"] == "ready"
+    position = out["scope_dynamics"]["historical_dynamics"]["position"]
+    phase = out["scope_dynamics"]["dynamics_phase"]
+    assert len(position) == len(phase) == 4
+
+
+def test_d1_source_violations_fail_closed(monkeypatch) -> None:
+    """D1-7. Adapter / calendar violations fail closed — no silent coercion:
+    scope ordering mismatch -> RuntimeError; EW series length mismatch ->
+    ValueError; unknown selector -> ValueError before ANY source call."""
+    days = _trading_days(date(2026, 1, 5), 4)
+    scope_keys = ["alpha", "beta"]
+    ew_by_scope = {"alpha": [0.01, 0.02, 0.03, 0.04], "beta": [0.05, 0.06, 0.07, 0.08]}
+
+    # (a) adapter iterates scopes in a different order than the caller asked
+    calls_a: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(
+            days,
+            ew_by_scope=ew_by_scope,
+            calls=calls_a,
+            order=["beta", "alpha"],
+        ),
+    )
+    with pytest.raises(RuntimeError, match="ordering mismatch"):
+        asyncio.run(_run_ew(scope_keys, days))
+    assert len(calls_a) == 1
+
+    # (b) adapter returned an EW series of the wrong axis length
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(
+            days,
+            ew_by_scope={"alpha": [0.01, 0.02], "beta": [0.05, 0.06, 0.07, 0.08]},
+        ),
+    )
+    with pytest.raises(ValueError, match="length"):
+        asyncio.run(_run_ew(scope_keys, days))
+
+    # (c) unknown selector: fails before trade-date validation / any source
+    calls_c: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope={SCOPE_KEY: [0.01] * 4}, calls=calls_c),
+    )
+    with pytest.raises(ValueError, match="historical_source"):
+        asyncio.run(
+            svc.compute_current_static_scope_dynamics_batch(
+                object(), SCOPE_TYPE, [SCOPE_KEY], list(days),
+                analysis_asof_date=days[-1],
+                historical_source="matrix",
+            )
+        )
+    assert calls_c == []
+
+
+def test_d1_no_ndarray_escapes_public_result(monkeypatch) -> None:
+    """D1-8. The public result is plain Python data — no numpy scalars / arrays
+    leak out of the columnar source into the orchestrator-facing contract."""
+
+    def _assert_no_numpy(value: Any, path: str = "result") -> None:
+        if isinstance(value, (np.ndarray, np.floating, np.integer, np.bool_)):
+            raise AssertionError(f"numpy type escaped at {path}: {type(value).__name__}")
+        if isinstance(value, dict):
+            for k, v in value.items():
+                _assert_no_numpy(v, f"{path}.{k}")
+        elif isinstance(value, (list, tuple)):
+            for i, v in enumerate(value):
+                _assert_no_numpy(v, f"{path}[{i}]")
+
+    days = _trading_days(date(2026, 1, 5), 10)
+    ew = [0.01 * (i % 4) for i in range(len(days))]
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope={SCOPE_KEY: ew}),
+    )
+
+    out = asyncio.run(_run_ew([SCOPE_KEY], days))
+    for result in out:
+        _assert_no_numpy(result)
+
+
+def test_d1_no_db_writes_only_ew_adapter_called(monkeypatch) -> None:
+    """D1-9. The composition path performs NO session writes of its own: the
+    only IO boundary touched is the (mocked) close-only SQL adapter, called
+    exactly once; the legacy reconstruction source is never invoked."""
+    days = _trading_days(date(2026, 1, 5), 4)
+    ew = [0.01, 0.02, 0.03, 0.04]
+    calls: list[dict[str, Any]] = []
+
+    def _recon_must_not_run(*args, **kwargs):
+        raise AssertionError("reconstruct_scope_series_batch must not run for columnar_ew")
+
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope={SCOPE_KEY: ew}, calls=calls),
+    )
+    monkeypatch.setattr(svc, "reconstruct_scope_series_batch", _recon_must_not_run)
+
+    out = asyncio.run(_run_ew([SCOPE_KEY], days))
+    assert len(out) == 1
+    assert len(calls) == 1  # single adapter call for the whole batch
+
+    # Empty scope batch short-circuits BEFORE any source for the new mode too.
+    calls2: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "compute_current_static_historical_ew_batch",
+        _make_ew_source(days, ew_by_scope={}, calls=calls2),
+    )
+    out2 = asyncio.run(
+        svc.compute_current_static_scope_dynamics_batch(
+            object(), SCOPE_TYPE, [], list(days),
+            analysis_asof_date=days[-1],
+            historical_source="columnar_ew",
+        )
+    )
+    assert out2 == []
+    assert calls2 == []
+
+
+def test_d1_old_reconstruction_still_reachable(monkeypatch) -> None:
+    """D1-10. The legacy owner is still fully reachable by explicit selector:
+    explicit ``"reconstruction"`` runs the exact legacy path (reconstruction
+    adapter called once, EW adapter never), keeping the rollback option intact."""
+    days = _trading_days(date(2026, 1, 5), 30)
+    payload_builder = _fixed_payloads(days, returns_per_index=lambda i: 0.01)
+    recon_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        svc,
+        "reconstruct_scope_series_batch",
+        _make_source(days, payload_builder=payload_builder, calls=recon_calls),
+    )
+
+    def _ew_must_not_run(*args, **kwargs):
+        raise AssertionError("EW adapter must not run for reconstruction source")
+
+    monkeypatch.setattr(svc, "compute_current_static_historical_ew_batch", _ew_must_not_run)
+
+    out = asyncio.run(_run_ew([SCOPE_KEY], days, historical_source="reconstruction"))
+    assert len(out) == 1
+    assert len(recon_calls) == 1
+    points = out[0]["observation_series"]["primitives"]["equal_weight_return"]["points"]
+    assert len(points) == len(days)
+    # Legacy provenance layout untouched: no source marker is injected and the
+    # reconstruction phase cost is still reported.
+    assert "historical_source" not in out[0]["metrics"]
+    assert out[0]["metrics"]["batch_reconstruction_ms"] > 0.0
