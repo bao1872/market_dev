@@ -59,8 +59,15 @@ from app.services.feature_snapshot_service import (
     finish_snapshot_run,
     get_active_a_share_instruments,
 )
+from app.services.first_pyramid_history_service import (
+    ensure_current_first_pyramid_history_run,
+)
+from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
+from app.services.review_history_readiness_service import (
+    validate_canonical_history_run_readiness,
+)
 from app.services.strategy_batch_service import StrategyBatchService
 
 logger = logging.getLogger("after_close_orchestrator")
@@ -1660,6 +1667,57 @@ async def repair_stale_after_close_snapshot_runs(
     return repaired
 
 
+def _make_history_step(
+    *,
+    job_run_id: uuid.UUID,
+    trade_date: date,
+    worker_id: str | None,
+    skip_history: bool,
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """[SLICE-01 H2] 构造 computing_history 步骤业务体。
+
+    exact-T First Pyramid History readiness 门控步骤：
+    - skip_history=True 时（显式跳过复盘）直接返回 ready=False（不阻断主流程）；
+    - 否则 resolve-or-create 当前 canonical FirstPyramidHistoryRun，并用既有
+      Review readiness 服务校验该 run 对 trade_date 是否 exact-T ready。
+    返回 dict：{"history_run_id", "ready", "status", "reason"}。
+    """
+
+    async def _run() -> dict[str, Any]:
+        if skip_history:
+            return {
+                "history_run_id": None,
+                "ready": False,
+                "status": "skipped",
+                "reason": "skip_history",
+            }
+        async with AsyncSessionLocal() as db:
+            run, _is_new = await ensure_current_first_pyramid_history_run(
+                db,
+                scheduler_job_run_id=job_run_id,
+            )
+            await db.commit()
+            ready = await validate_canonical_history_run_readiness(
+                db,
+                run.id,
+                HISTORY_CONTRACT_VERSION,
+                required_trade_date=trade_date,
+            )
+            await db.commit()
+            logger.info(
+                "[AfterClose][H2] history readiness job=%s trade=%s run=%s ready=%s",
+                str(job_run_id), trade_date, run.id, ready,
+            )
+            return {
+                "history_run_id": run.id,
+                "ready": bool(ready),
+                "status": "succeeded" if ready else "not_ready",
+                "reason": None if ready else "HISTORY_NOT_READY_T",
+            }
+
+    return _run
+
+
 async def _execute_review_step(
     *,
     job_run_id: uuid.UUID,
@@ -1668,8 +1726,17 @@ async def _execute_review_step(
     worker_id: str | None,
     skip_review: bool,
     stock_core_published: bool,
+    history_run_id: uuid.UUID | None = None,
 ) -> dict[str, Any]:
     """[AC-02] computing_review 业务体（软失败，不阻断主流程）。
+
+    [SLICE-01 H2] exact-T History 硬依赖门控：
+    调用方（computing_history 步骤）已校验当前 trade_date 的 First Pyramid
+    History 是否 exact-T ready，并通过 history_run_id 传入。若 history_run_id
+    为 None（History 未 ready / 未生产），则 Review 不得计算或发布，直接返回
+    gate_blocked——满足 invariant H2：History(T) 缺失 → Review NOT computed /
+    NOT published。这是硬门控，不等同于软失败（不切 pointer、不写发布）。
+
 
     原为 execute_after_close_run 内的内联块；Phase0 收口后抽为独立业务体，
     由统一执行器 execute_orchestrator_step("computing_review", ...) 包装，
@@ -1714,6 +1781,33 @@ async def _execute_review_step(
     prereq_missing: bool = False
 
     if not skip_review:
+        # [SLICE-01 H2] exact-T History 硬门控：computing_history 步骤已完成
+        # readiness 判定并通过 history_run_id 传入。若 History(T) 未 exact-T ready
+        # （history_run_id is None），Review 不得计算/发布——直接 gate_blocked。
+        # 这是硬依赖（invariant H2），不等同软失败：不创建 review run、不切 pointer、
+        # 不写发布，仅如实标记 gate_blocked 供前端时间线展示。
+        if history_run_id is None:
+            logger.warning(
+                "[AfterClose][H2] History(T) not exact-T ready, Review gate_blocked: "
+                "job=%s trade=%s",
+                str(job_run_id), trade_date,
+            )
+            return {
+                "status": "gate_blocked",
+                "failed": False,
+                "reason": "HISTORY_NOT_READY_T",
+                "history_run_id": None,
+                "run_id": None,
+                "publication_id": None,
+                "scope_count": 0,
+                "signal_count": 0,
+                "coverage": 0.0,
+                "blockers": [
+                    "exact-T First Pyramid History 未就绪，Review 按 invariant H2 不计算/不发布",
+                ],
+                "prereq_missing": True,
+                "resume_skipped": False,
+            }
         # [Slice 3 / Slice 4A9] Board Analysis 不是 Review 前置条件，且 legacy
         # board aggregation 已退役：只要 stock_core 已发布且 snapshot 存在，
         # 都执行 Review（只依赖已发布 stock_core），不再有 aggregation 状态参与判断。
@@ -2332,11 +2426,17 @@ async def execute_after_close_run(
             # [CHANGE-20260801-REVIEW-CLOSURE] computing_review 断点恢复
             "computing_review": {
                 "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing", "computing_review",
+                "publishing", "computing_history", "computing_review",
+            },
+            # [SLICE-01 H2] computing_history 断点恢复：其前置步骤与 computing_review 一致
+            # （history 在 review 之前，review 完成即 history 也已完成）。
+            "computing_history": {
+                "refreshing_daily", "syncing_boards", "computing_features",
+                "publishing", "computing_history",
             },
             "succeeded": {
                 "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing", "computing_review", "succeeded",
+                "publishing", "computing_history", "computing_review", "succeeded",
             },
             # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
             "waiting_dsa_worker": {
@@ -2368,6 +2468,8 @@ async def execute_after_close_run(
         skip_publish = "publishing" in completed
         # [CHANGE-20260801-REVIEW-CLOSURE] review 阶段跳过标志
         skip_review = "computing_review" in completed
+        # [SLICE-01 H2] history 阶段跳过标志（history 在 review 之前）
+        skip_history = "computing_history" in completed
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
@@ -3533,6 +3635,42 @@ async def execute_after_close_run(
         # 兼容性：保留 metadata 键 aggregation_status，如实置为 "skipped"（该阶段已退役/不再执行）。
         _aggregation_status = "skipped"
 
+        # ---- 步骤 4.4: computing_history（First Pyramid History exact-T readiness gate） ----
+        # [SLICE-01 H2] Review(T) 硬依赖 exact-T First Pyramid History。此步骤负责：
+        #  1) 解析/创建当前 canonical FirstPyramidHistoryRun（producer resolver，幂等）；
+        #  2) 校验该 run 对 trade_date 是否 exact-T ready（validate_canonical_history_run_readiness）。
+        # readiness 由既有的 Review readiness 服务判定（fail-closed），computed/events
+        # 的 exact-T 契约由 producer 维护。after-close 不负责重型 backfill（membership
+        # 属 producer Phase 2），只做 readiness 绑定 + 硬门控。
+        # 若 not ready：_history_run_id=None，后续 Review 步骤按 H2 硬门控 gate_blocked。
+        _history_run_id: uuid.UUID | None = None
+        _history_ready: bool = False
+        logger.info(
+            "[BOUNDARY-PH] before computing_history job=%s trade=%s pid=%s",
+            str(job_run_id), trade_date, os.getpid(),
+        )
+        _history_result, _history_step_summary = await execute_orchestrator_step(
+            "computing_history",
+            _make_history_step(
+                job_run_id=job_run_id,
+                trade_date=trade_date,
+                worker_id=worker_id,
+                skip_history=skip_history,
+            ),
+            timeout_seconds=_step_timeout("computing_history"),
+            optional=True,
+            heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
+            progress=_make_step_progress_callback(job_run_id, worker_id),
+            cancellation_check=_make_step_cancellation_check(job_run_id),
+        )
+        if isinstance(_history_result, dict):
+            _history_run_id = _history_result.get("history_run_id")
+            _history_ready = bool(_history_result.get("ready"))
+        logger.info(
+            "[AfterClose] computing_history 完成: ready=%s, run_id=%s, step=%s",
+            _history_ready, _history_run_id, _history_step_summary.get("status"),
+        )
+
         # ---- 步骤 4.5: computing_review（复盘计算 + 发布） ----
         logger.info(
             "[BOUNDARY-P9] before computing_review job=%s trade=%s snap=%s pid=%s",
@@ -3541,6 +3679,8 @@ async def execute_after_close_run(
         # [AC-02] 复盘业务体抽为 _execute_review_step，由统一执行器包装。
         # 软失败（gate_blocked/计算失败）不阻断主流程，仅标记 _review_failed
         # 收 partial_success；step summary 如实反映业务状态，失败不推进检查点。
+        # [SLICE-01 H2] 传入 history_run_id：若 computing_history 未就绪则为 None，
+        # _execute_review_step 据此硬门控 gate_blocked（History 缺失 → Review 不运行）。
         _review_result, _review_step_summary = await execute_orchestrator_step(
             "computing_review",
             lambda: _execute_review_step(
@@ -3549,6 +3689,7 @@ async def execute_after_close_run(
                 snapshot_run_id=snapshot_run_id,
                 worker_id=worker_id,
                 skip_review=skip_review,
+                history_run_id=_history_run_id,
                 stock_core_published=_stock_core_published,
             ),
             timeout_seconds=_step_timeout("computing_review"),
@@ -3731,6 +3872,9 @@ async def execute_after_close_run(
                     "review_signal_count": _review_signal_count,
                     "review_coverage": _review_coverage,
                     "review_blockers": _review_blockers,
+                    # [SLICE-01 H2] First Pyramid History exact-T readiness 闭环字段
+                    "history_run_id": str(_history_run_id) if _history_run_id else None,
+                    "history_ready": _history_ready,
                 },
             )
             job_run.status = final_status.value
@@ -4330,8 +4474,10 @@ _CHECKPOINT_ORDER: dict[str, int] = {
     "syncing_boards": 1,
     "computing_features": 2,
     "publishing": 3,
-    "computing_review": 4,
-    "succeeded": 5,
+    # [SLICE-01 H2] history readiness 校验在 publishing 之后、review 之前
+    "computing_history": 4,
+    "computing_review": 5,
+    "succeeded": 6,
 }
 
 
