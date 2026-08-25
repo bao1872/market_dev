@@ -47,6 +47,7 @@ import ScopeStructureObservation from './ScopeStructureObservation'
 import ScopeMomentumObservation from './ScopeMomentumObservation'
 import ScopeVolumeObservation from './ScopeVolumeObservation'
 import { parseMomentumObservation, parseVolumeObservation } from './scopeMomentumVolumeContract'
+import ReviewTerm from './ReviewTerm'
 import styles from './review.module.scss'
 
 function GroupShell({ group }: { group: ObservationGroup }) {
@@ -58,7 +59,6 @@ function GroupShell({ group }: { group: ObservationGroup }) {
     <section className={styles.observationGroup} id={`obs-group-${group.group_key}`}>
       <header className={styles.observationGroupHeader}>
         <h4 className={styles.observationGroupTitle}>{group.label}</h4>
-        <code className={styles.observationGroupKey}>{group.group_key}</code>
       </header>
       {factEntries.length === 0 ? (
         <div className={styles.observationGroupEmpty}>暂无事实字段</div>
@@ -247,7 +247,6 @@ export default function ScopeCurrentObservationWorkspace({
               <div key={g.group_key} id={`obs-group-${g.group_key}`} className={styles.observationGroup}>
                 <header className={styles.observationGroupHeader}>
                   <h4 className={styles.observationGroupTitle}>{g.label}</h4>
-                  <code className={styles.observationGroupKey}>{g.group_key}</code>
                 </header>
                 <GroupBody group={g} observation={obsRecord} />
               </div>
@@ -300,10 +299,13 @@ function ContextShell({
         <h4 className={styles.observationContextTitle}>当前技术状态</h4>
         {ctx.hasCurrentState ? (
           <div className={styles.observationContextNote}>
-            来自 observation.structure.current_state（已加载）
+            <ReviewTerm
+              label="当前技术状态已加载"
+              help="当前状态来自本期结构分析结果。技术字段：observation.structure.current_state"
+            />
           </div>
         ) : (
-          <div className={styles.observationContextUnavailable}>当前技术状态不可用（observation 无 structure.current_state）</div>
+          <div className={styles.observationContextUnavailable}>本期暂无结构状态数据</div>
         )}
       </div>
 
@@ -354,7 +356,7 @@ function ContextShell({
       <div className={styles.observationContextBlock}>
         <h4 className={styles.observationContextTitle}>筹码可用性</h4>
         {ctx.chipAvailability === 'unavailable' ? (
-          <div className={styles.observationContextUnavailable}>筹码不可用（当前 canonical producer 未产出 chip 事实，如实展示）</div>
+          <div className={styles.observationContextUnavailable}>本期暂无筹码数据</div>
         ) : ctx.chipAvailability === 'present' ? (
           <div className={styles.observationContextNote}>筹码已加载</div>
         ) : (

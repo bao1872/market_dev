@@ -160,9 +160,17 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
       <SeriesChart data={velocityData} kind="offset" title={<ReviewTerm termKey="velocity" compact />} showZeroLine />
       <SeriesChart data={accelerationData} kind="offset" title={<ReviewTerm termKey="acceleration" compact />} showZeroLine />
       <CurrentFactStrip phaseFact={current} />
-      {/* P0-3: TradingView Lightweight Charts 许可归属（图表 logo 已关闭，归属信息保留于此非干扰区域） */}
+      {/* P1-F: TradingView Lightweight Charts 许可归属（图表 logo 已关闭，归属信息保留于此非干扰区域）。
+          必须是真实 <a> 链接，不能仅为纯字符串；attributionLogo 仍保持 false（P0-3）。 */}
       <div className={styles.chartAttribution}>
-        Charts by TradingView Lightweight Charts
+        <a
+          href="https://www.tradingview.com/"
+          target="_blank"
+          rel="noopener noreferrer"
+          className={styles.chartAttributionLink}
+        >
+          Charts by TradingView Lightweight Charts
+        </a>
       </div>
     </div>
   )

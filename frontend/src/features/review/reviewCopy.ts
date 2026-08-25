@@ -239,7 +239,7 @@ export const REVIEW_TERMS = {
   },
   zScore: {
     label: 'Z分数',
-    help: '指标值相对其历史分布的 standardized 偏离程度（标准差倍数），用于判断当前处于常态还是极端',
+    help: '指标值相对其历史分布的标准化偏离程度（标准差倍数），用于判断当前处于常态还是极端',
   },
   bbPosition: {
     label: '布林位置',
