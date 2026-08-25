@@ -255,14 +255,16 @@ async def test_lu4_checkpoint_sees_fresh_metadata_after_independent_commit() -> 
             await _update_heartbeat_and_step(db_a2, job_a2, "computing_history", "w1")
 
         after = await _read_computing_history(job_run_id)
-        # 新的业务进度必须保留
+        # 新的业务进度必须保留（checkpoint 不得覆盖 computing_history.processed）
         assert after["processed"] == 1000, (
             f"checkpoint 覆盖了业务进度，processed={after.get('processed')}"
         )
         assert after["target_state_count"] == 1000
-        # 新的 checkpoint 必须写入
-        assert after["status"] == "completed", (
-            f"checkpoint 未生效，status={after.get('status')}"
+        # 注意 _update_heartbeat_and_step 只更新 last_completed_step / last_heartbeat_at
+        # 等顶层字段，不修改 computing_history.status（保持 running）；checkpoint 生效的证据是
+        # 顶层 last_completed_step == computing_history，而非子字段 status。
+        assert after["status"] == "running", (
+            f"computing_history.status 不应被 checkpoint 改写，实际 {after.get('status')}"
         )
         meta = await _read_full_meta(job_run_id)
         assert meta.get("last_completed_step") == "computing_history", (
