@@ -25,7 +25,7 @@ import {
   NULL_DISPLAY,
   formatNumberNullable,
   formatPercentNullable,
-  displayMemberEvidence,
+  displayMember,
   type MemberDirectory,
 } from './reviewFormat'
 import { ATTRIBUTION_SUBTAB_LABELS } from './reviewCopy'
@@ -160,7 +160,7 @@ function GroupTable({
             {members.map((m) => (
               <tr key={String(m.member_id)}>
                 <td className={styles.attrMember} title={String(m.member_id)}>
-                  {displayMemberEvidence(m, directory)}
+                  {displayMember(m.member_id, directory)}
                 </td>
                 {columns.map((c) => (
                   <td key={c.value}>{c.format(m[c.field])}</td>

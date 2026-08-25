@@ -2,9 +2,9 @@
 //
 // 覆盖：
 // - displayMember：目录 name+symbol → "名称 · 代码"；仅 symbol → symbol；
-//   目录缺失 → UUID 兜底（仅 title/技术 hover 保留 UUID）
-// - displayMemberEvidence：优先 directory，其次 payload member_name，最后 UUID
-// - 目录缺失时 UUID 回退是最终兜底（绝不猜测股票名 / 绝不 N+1 补名）
+//   仅 name → name；目录缺失 → UUID 兜底（仅 title/技术 hover 保留 UUID）
+// - Leadership 与 Attribution 必须使用 SAME display owner（displayMember）
+// - directory miss 时 UUID 回退是最终兜底（Attribution 不得私自回退 payload member_name）
 // - null/unavailable 语义不变
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -14,7 +14,6 @@ import { fileURLToPath } from 'node:url'
 
 import {
   displayMember,
-  displayMemberEvidence,
   memberName,
   type MemberDirectory,
 } from '../reviewFormat'
@@ -63,44 +62,46 @@ test('PC5. 展示结果绝不等于裸 UUID（目录存在时主展示不出现 
 })
 
 // ============================================================
-// displayMemberEvidence — attribution 成员行
+// memberName — 纯 evidence name 提取工具（保留原语义）
 // ============================================================
 
-test('PC6. evidence 优先 directory，其次 payload member_name，最后 UUID', () => {
-  const m = { member_id: UUID, member_name: UUID } // backend 常回退 member_id
-  assert.equal(displayMemberEvidence(m, DIRECTORY), '苏大维格 · 300331')
-  // 目录缺失时回退到 payload member_name（真实非 UUID 名）
-  assert.equal(
-    displayMemberEvidence({ member_id: UUID, member_name: '真实名称' }, null),
-    '真实名称',
-  )
-  // 目录与 payload 都不可用时回退 UUID
-  assert.equal(displayMemberEvidence({ member_id: UUID, member_name: UUID }, null), UUID)
-  assert.equal(displayMemberEvidence({ member_id: UUID, member_name: '' }, undefined), UUID)
-})
-
-test('PC7. memberName 原语义保留（目录未命中时）', () => {
+test('PC6. memberName 原语义保留（目录未命中时）', () => {
   assert.equal(memberName({ member_id: UUID, member_name: UUID }), UUID)
   assert.equal(memberName({ member_id: UUID, member_name: '真实名称' }), '真实名称')
   assert.equal(memberName({ member_id: UUID }), UUID)
 })
 
 // ============================================================
-// 面板接入 — 组件必须通过 displayMember/displayMemberEvidence 展示
+// 面板接入 — Leadership 与 Attribution 必须 SAME display owner
 // ============================================================
 
 const LEADERSHIP_SRC = read('ScopeLeadershipPanel.tsx')
 const ATTRIBUTION_SRC = read('ScopeMemberAttributionPanel.tsx')
 
-test('PC8. Leadership 面板接入 displayMember（不展示裸 UUID）', () => {
+test('PC7. Leadership 面板接入 displayMember（不展示裸 UUID）', () => {
   assert.ok(LEADERSHIP_SRC.includes('displayMember(id, directory)'), '龙头 chip 走 displayMember')
   assert.ok(LEADERSHIP_SRC.includes('title={id}'), 'UUID 仅保留在 title 技术 hover')
   assert.doesNotMatch(LEADERSHIP_SRC, /\{ids\.map\(\(id\) => \(\s*<span[^>]*>\{id\}<\/span>/)
 })
 
-test('PC9. Attribution 面板接入 displayMemberEvidence（不展示裸 UUID）', () => {
-  assert.ok(ATTRIBUTION_SRC.includes('displayMemberEvidence(m, directory)'), '成员行走 displayMemberEvidence')
+test('PC8. Attribution 面板接入 displayMember（与 Leadership SAME owner）', () => {
+  assert.ok(
+    ATTRIBUTION_SRC.includes('displayMember(m.member_id, directory)'),
+    'Attribution 成员行走 displayMember（与 Leadership 同 owner）',
+  )
+  // 不得私自使用另一套 identity owner
+  assert.ok(
+    !ATTRIBUTION_SRC.includes('displayMemberEvidence'),
+    'Attribution 不得调用已删除的 displayMemberEvidence（禁止第二套 fallback）',
+  )
   assert.ok(ATTRIBUTION_SRC.includes('title={String(m.member_id)}'), 'UUID 仅保留在 title 技术 hover')
+})
+
+test('PC9. Attribution directory miss → UUID（不回退 payload member_name）', () => {
+  // 即使 evidence 携带 payload member_name，目录缺失时也必须回退 UUID，不伪造身份
+  assert.equal(displayMember(UUID, null), UUID)
+  assert.equal(displayMember(UUID, undefined), UUID)
+  assert.equal(displayMember(UUID, {}), UUID)
 })
 
 test('PC10. Detail 工作区把 memberDirectory 传给 Leadership + Attribution', () => {

@@ -82,26 +82,9 @@ export function displayMember(
   const name = entry.name?.trim()
   const symbol = entry.symbol?.trim()
   if (name && symbol) return `${name} · ${symbol}`
-  if (name) return name
   if (symbol) return symbol
+  if (name) return name
   return id
-}
-
-/** 从 MemberEvidence 读取成员展示名：优先 directory，其次 payload member_name，最后 UUID。 */
-export function displayMemberEvidence(
-  m: { member_id: string | number; member_name?: string | null },
-  directory: MemberDirectory | null | undefined,
-): string {
-  const id = String(m.member_id)
-  const entry = directory?.[id]
-  if (entry) {
-    const name = entry.name?.trim()
-    const symbol = entry.symbol?.trim()
-    if (name && symbol) return `${name} · ${symbol}`
-    if (name) return name
-    if (symbol) return symbol
-  }
-  return memberName(m)
 }
 
 /**

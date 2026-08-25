@@ -48,7 +48,13 @@ export default function ReviewTerm({
       onMouseEnter={() => setOpen(true)}
       onMouseLeave={() => setOpen(false)}
     >
-      <span className={styles.termLabel} aria-describedby={tooltipId}>
+      <span
+        className={styles.termLabel}
+        aria-describedby={tooltipId}
+        tabIndex={0}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+      >
         {displayLabel}
       </span>
       {!compact && (

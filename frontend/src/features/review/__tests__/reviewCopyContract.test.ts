@@ -271,3 +271,30 @@ test('UX16. null/unavailable 语义不变（不伪造 0）', () => {
   assert.equal(formatNumberNullable(0), '0.00', '0 仍是合法值')
   assert.equal(formatPercentNullable(0), '0.0%', '0 仍是合法值')
 })
+
+// ============================================================
+// 6. ReviewTerm a11y — compact 必须保留 keyboard focus 路径
+// ============================================================
+
+const REVIEW_TERM_SRC = read('ReviewTerm.tsx')
+
+test('UX17. ReviewTerm label 是 keyboard focus trigger（tabIndex + onFocus + onBlur）', () => {
+  // focus 路径必须挂在 label span 上，与 aria-describedby 同一可交互元素
+  assert.ok(REVIEW_TERM_SRC.includes('className={styles.termLabel}'))
+  assert.ok(REVIEW_TERM_SRC.includes('aria-describedby={tooltipId}'))
+  assert.ok(REVIEW_TERM_SRC.includes('tabIndex={0}'))
+  assert.ok(REVIEW_TERM_SRC.includes('onFocus={() => setOpen(true)}'))
+  assert.ok(REVIEW_TERM_SRC.includes('onBlur={() => setOpen(false)}'))
+})
+
+test('UX18. compact 不删除 keyboard focus（focus 挂在 label，icon 才受 compact 控制）', () => {
+  // label 的 focus 三件套不应在 {!compact && ...} 分支内（否则 compact 会丢 focus）
+  const labelBlock = REVIEW_TERM_SRC.split('termLabel')[1] ?? ''
+  assert.ok(
+    labelBlock.includes('onFocus') && labelBlock.includes('tabIndex'),
+    'label 自带 focus，不依赖 compact icon',
+  )
+  // 正常模式仍有 ⓘ icon（独立 focus target）
+  assert.ok(REVIEW_TERM_SRC.includes('termHelpIcon'))
+  assert.ok(REVIEW_TERM_SRC.includes('{!compact &&'))
+})
