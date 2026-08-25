@@ -436,7 +436,14 @@ class VerifyAttempt:
              # canonical new payload uses price.amount / normalized HHI JSONB round-trip /
              # legacy top-level amount save rejected. 显式注册文件；不改 verification plan
              # schema；不改 CLI；不动态 discovery；不扩大为全量 -m postgres。
-             "tests/test_review_observation_persistence_pg.py"],
+             "tests/test_review_observation_persistence_pg.py",
+
+             # [SLICE-01-CORRECTION-05 / 2026-08-25] History concurrent progress lost-update
+             # closure：LU-1 并发 executor+business、LU-2 反转方向、LU-3 高压 10 轮、LU-4
+             # checkpoint 重新读最新 metadata。证明两个独立 writer 经 SELECT ... FOR UPDATE
+             # 串行化，不丢更新。仅追加，不删除/替换已有文件；不动态 discovery；不扩大为
+             # 全量 -m postgres。
+             "tests/test_pg_history_progress_lost_update_closure.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:

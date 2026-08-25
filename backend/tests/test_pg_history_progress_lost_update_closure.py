@@ -40,6 +40,7 @@ from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.after_close_orchestrator import (
     _make_history_business_progress,
     _make_history_executor_progress,
+    _update_heartbeat_and_step,
 )
 
 
@@ -96,6 +97,12 @@ async def _read_computing_history(job_run_id: uuid.UUID) -> dict:
         job = await db.get(SchedulerJobRun, job_run_id)
         meta = json.loads(job.metadata_json)
         return meta.get("step_summary", {}).get("computing_history", {})
+
+
+async def _read_full_meta(job_run_id: uuid.UUID) -> dict:
+    async with AsyncSessionLocal() as db:
+        job = await db.get(SchedulerJobRun, job_run_id)
+        return json.loads(job.metadata_json)
 
 
 async def _cleanup(job_run_id: uuid.UUID) -> None:
@@ -210,6 +217,56 @@ async def test_lu3_high_contention_no_intermediate_rollback() -> None:
         # 最后一次 heartbeat 为 12:00:10
         assert after["heartbeat_at"] == "2026-08-25T12:00:10+00:00", (
             f"heartbeat 应为最后一次 H1，实际 {after.get('heartbeat_at')}"
+        )
+    finally:
+        await _cleanup(job_run_id)
+
+
+async def _load_job_run(db, job_run_id: uuid.UUID) -> SchedulerJobRun:
+    return await db.get(SchedulerJobRun, job_run_id)
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_lu4_checkpoint_sees_fresh_metadata_after_independent_commit() -> None:
+    """LU-4: session A 先加载 SchedulerJobRun；独立 session B 更新并提交
+    computing_history.processed；session A 再执行 _update_heartbeat_and_step；
+    最终必须同时保留新的 processed 与新的 checkpoint。
+
+    验证 CORRECTION-05 的修复：_update_heartbeat_and_step 内部以 FOR UPDATE 重新从 DB 读取
+    最新 metadata（不信任 session A 内存中旧快照），否则 identity-map stale 会覆盖业务进度。
+    """
+    h0 = "2026-08-25T12:00:00+00:00"
+    job_run_id = await _create_job_run_with_history(
+        processed=500, total=5283, heartbeat=h0
+    )
+    try:
+        # session A 先加载 job_run（模拟旧快照已驻留内存）
+        async with AsyncSessionLocal() as db_a:
+            await _load_job_run(db_a, job_run_id)
+
+        # 独立 session B 更新并提交 computing_history.processed
+        biz = _make_history_business_progress(job_run_id, "w1")
+        await biz({"processed": 1000, "total": 5283, "target_state_count": 1000})
+
+        # session A 再次加载后执行 checkpoint（last_completed_step=computing_history）
+        async with AsyncSessionLocal() as db_a2:
+            job_a2 = await _load_job_run(db_a2, job_run_id)
+            await _update_heartbeat_and_step(db_a2, job_a2, "computing_history", "w1")
+
+        after = await _read_computing_history(job_run_id)
+        # 新的业务进度必须保留
+        assert after["processed"] == 1000, (
+            f"checkpoint 覆盖了业务进度，processed={after.get('processed')}"
+        )
+        assert after["target_state_count"] == 1000
+        # 新的 checkpoint 必须写入
+        assert after["status"] == "completed", (
+            f"checkpoint 未生效，status={after.get('status')}"
+        )
+        meta = await _read_full_meta(job_run_id)
+        assert meta.get("last_completed_step") == "computing_history", (
+            f"last_completed_step={meta.get('last_completed_step')}"
         )
     finally:
         await _cleanup(job_run_id)
