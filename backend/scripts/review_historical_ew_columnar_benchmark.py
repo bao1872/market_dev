@@ -389,33 +389,41 @@ def step5_close_matrix(
     finite_close_count = 0
     duplicate_exact = 0
     duplicate_conflict = 0
+    selected_raw_unavailable_close_rows = 0
 
     # ------------------------------------------------------------------
-    # Frozen-adapter integrity gate: deterministic sample of ~1000
-    # selected raw bar records, sampled as first 100 + last 100 +
-    # hash-selected 800.  After streaming we verify each sampled raw
-    # record independently against the matrix's (row, col) mapping.
+    # Frozen-adapter integrity gate: deterministic sample of selected
+    # raw bar records, sampled as first 100 + last 100 + hash-selected.
+    # After streaming we verify each sampled raw record independently
+    # against the matrix's (row, col) mapping.
     #
     # We do NOT construct a second full 639k-cell Python-dict oracle;
     # the sample is strictly for adapter-proof (row/col did not drift,
     # column/row ordering did not shift, matrix was written correctly
     # from the raw record inputs we actually ingested).
+    #
+    # Hash rule: sha256(date|inst|selected_ordinal) masked with a
+    # 10-bit mask → accept ~1 in every 1024 selected rows.  On a
+    # ~634k-selected frozen world this yields ~620 hash hits; combined
+    # with first+last buffers gives ~820 total sampled checks.  This
+    # is a deterministic adapter-proof, not a statistics sample.
     # ------------------------------------------------------------------
     SAMPLE_FIRST_N = 100
     SAMPLE_LAST_N = 100
-    SAMPLE_HASH_TARGET = 800
-    # Upper bound mask so we accept ~1 in every 2^11 / 2048 rows; with
-    # ~634k selected rows this yields ~309 expected hash-hits which
-    # together with first+last still leaves us short of 1000.  We keep
-    # a small, stable, deterministic sample that also doesn't grow with
-    # scale.
-    SAMPLE_HASH_MASK = (1 << 10) - 1  # accept ~1/1024 → ~618
+    SAMPLE_HASH_MASK = (1 << 10) - 1  # ~1/1024 selected rows
     first_selected_samples: list[tuple[date, Any, Any]] = []
     last_selected_samples: list[tuple[date, Any, Any]] = []
     hash_selected_samples: list[tuple[date, Any, Any]] = []
 
-    # Sentinel for "we've never seen this (date, instrument) cell before".
-    seen: dict[tuple[int, int], float] = {}
+    # Explicit unseen sentinel — None is a valid first-seen normalized
+    # state ("unavailable close"), so `seen.get(key) is None` can NOT be
+    # used to decide whether a cell has already been occupied.
+    _UNSET: Any = object()
+    # seen[(r,c)] stores the NORMALIZED first-occurrence close for every
+    # selected (date, instrument):
+    #   None                       → raw close was missing/None (unavailable)
+    #   float (finite or nonfinite) → numeric raw close as float
+    seen: dict[tuple[int, int], Any] = {}
     with gzip.open(path, "rt") as fh:
         for line in fh:
             line = line.strip()
@@ -432,56 +440,74 @@ def step5_close_matrix(
             r = date_to_row[td]
             c = member_to_col[inst]
             raw = row.get("close")
+            # --- Normalize raw close per §BAR DUPLICATE OWNER semantics.
             if raw is None:
-                # Unavailable → leave NaN, still count as a selected row.
-                rows_selected += 1
-                sample_item = (td, inst, None)
+                normalized: Any = None
             else:
-                val = float(raw)
-                key = (r, c)
-                prior = seen.get(key)
-                if prior is None:
-                    seen[key] = val
-                    close[r, c] = val
-                    rows_selected += 1
-                    if math.isfinite(val):
-                        finite_close_count += 1
+                normalized = float(raw)
+            key = (r, c)
+            prior = seen.get(key, _UNSET)
+            if prior is _UNSET:
+                # FIRST occurrence → record normalized (including unavailable),
+                # write matrix, count selected row.
+                seen[key] = normalized
+                rows_selected += 1
+                if normalized is None:
+                    selected_raw_unavailable_close_rows += 1
+                    # matrix cell remains NaN (preallocated state).
                 else:
-                    # Fail-closed semantics: exact duplicate → safe; any
-                    # conflicting value is a dataset integrity fault that must
-                    # not be silently papered over (last-write-wins hides bugs).
-                    if math.isnan(prior) and math.isnan(val):
-                        duplicate_exact += 1
-                    elif (
-                        math.isfinite(prior)
-                        and math.isfinite(val)
-                        and float(prior) == float(val)
-                    ):
+                    fval = float(normalized)
+                    if math.isfinite(fval):
+                        close[r, c] = fval
+                        finite_close_count += 1
+                    else:
+                        # non-finite numeric → still NaN in the matrix
+                        # (matches compute_exact_return's availability gate).
+                        pass
+                # Sample item uses the SAME raw semantics as the bar-proof
+                # oracle: None = unavailable; else numeric.
+                sample_item: tuple[date, Any, Any] | None
+                if normalized is None:
+                    sample_item = (td, inst, None)
+                else:
+                    sample_item = (td, inst, normalized)
+            else:
+                # DUPLICATE — compare normalized vs prior.  Exact equality
+                # is allowed (dataset has identical repeat rows); any
+                # semantic difference is a conflict that MUST raise
+                # (no last-write-wins, no silent paper-over).
+                sample_item = None
+                if normalized is None and prior is None:
+                    duplicate_exact += 1
+                elif normalized is None or prior is None:
+                    # unavailable ↔ finite/nonfinite: semantic mismatch.
+                    duplicate_conflict += 1
+                else:
+                    a = float(prior)
+                    b = float(normalized)
+                    # Two NaNs or ±same-sign infs: treat as exact repeat.
+                    both_nan = math.isnan(a) and math.isnan(b)
+                    both_inf = math.isinf(a) and math.isinf(b) and (a > 0) == (b > 0)
+                    both_finite_eq = (
+                        math.isfinite(a) and math.isfinite(b) and a == b
+                    )
+                    if both_nan or both_inf or both_finite_eq:
                         duplicate_exact += 1
                     else:
                         duplicate_conflict += 1
-                        raise ValueError(
-                            f"duplicate conflicting bar close at (trade_date={td}, "
-                            f"instrument_id={inst}); prior={prior!r} new={val!r}.  "
-                            f"Dataset owner must be audited; last-write-wins is "
-                            f"forbidden here."
-                        )
-                    # Duplicate rows don't count as new writes; do not touch
-                    # the sample (otherwise sample can record a write that
-                    # was identical but not the "first seen" used earlier).
-                    sample_item = None
-                if prior is None:
-                    sample_item = (td, inst, val)
-                else:
-                    sample_item = None
+                if duplicate_conflict > 0:
+                    raise ValueError(
+                        f"duplicate conflicting bar close at (trade_date={td}, "
+                        f"instrument_id={inst}); prior={prior!r} new={normalized!r}.  "
+                        f"Dataset owner must be audited; last-write-wins is "
+                        f"forbidden here."
+                    )
 
             if sample_item is not None:
                 sel_idx = rows_selected - 1
                 if len(first_selected_samples) < SAMPLE_FIRST_N:
                     first_selected_samples.append(sample_item)
-                # Rotating last-N buffer — we keep the last SAMPLE_LAST_N
-                # unique (first-seen) writes so the tail of the stream is
-                # also covered.
+                # Rotating last-N buffer.
                 if len(last_selected_samples) >= SAMPLE_LAST_N:
                     last_selected_samples.pop(0)
                 last_selected_samples.append(sample_item)
@@ -537,10 +563,11 @@ def step5_close_matrix(
     print(f"  rows scanned/s:                 {rows_per_sec:,.0f}")
     print(f"  finite close cells:             {finite_close_count:,}")
     print(f"  missing (NaN) cells:            {missing_cells:,}")
+    print(f"  raw unavailable close rows:     {selected_raw_unavailable_close_rows}")
     print(f"  duplicate exact bars:           {duplicate_exact}")
     print(f"  duplicate conflict bars:        {duplicate_conflict}")
     print(f"  close[{R},{M}] size MiB:        {matrix_bytes / (1024*1024):.1f}")
-    print(f"\n=== FROZEN ADAPTER INTEGRITY GATE ===")
+    print("\n=== FROZEN ADAPTER INTEGRITY GATE ===")
     print(f"  bar sample size (first+last+hash): {len(adapter_samples)}")
     print(f"    first N kept:                    {len(first_selected_samples)}")
     print(f"    last N kept:                     {len(last_selected_samples)}")
@@ -552,6 +579,7 @@ def step5_close_matrix(
         "rows_per_second": rows_per_sec,
         "finite_close_count": finite_close_count,
         "missing_cells": missing_cells,
+        "selected_raw_unavailable_close_rows": selected_raw_unavailable_close_rows,
         "duplicate_exact": duplicate_exact,
         "duplicate_conflict": duplicate_conflict,
         "matrix_size_mib": matrix_bytes / (1024 * 1024),
@@ -921,7 +949,7 @@ def step14_final_report(
         and l3l4["dynamics_mismatch_scope_count"] == 0
         and adapter["adapter_bar_sample_mismatches"] == 0
         and adapter["membership_refs_match"] is True
-        and adapter["membership_unknown_member_count"] == 0
+        and adapter["membership_unmapped_after_union"] == 0
     )
     rss_inc_mib = memory.get("incremental_peak_mib")
     rss_ok = rss_inc_mib is not None and rss_inc_mib < 500
@@ -930,22 +958,22 @@ def step14_final_report(
     print("\n" + "=" * 68)
     print("M5-B2 — FROZEN DATASET BENCHMARK FINAL SUMMARY")
     print("=" * 68)
-    print(f"\nDATASET")
+    print("\nDATASET")
     for k, v in report["DIMENSIONS"].items():
         print(f"  {k:<24s}: {v}")
-    print(f"\nPARITY")
+    print("\nPARITY")
     for k, v in report["PARITY"].items():
         print(f"  {k:<28s}: {v}")
-    print(f"\nADAPTER INTEGRITY")
+    print("\nADAPTER INTEGRITY")
     for k, v in report["ADAPTER_INTEGRITY"].items():
         if isinstance(v, float):
             print(f"  {k:<32s}: {v:,.1f}")
         else:
             print(f"  {k:<32s}: {v}")
-    print(f"\nMEMORY (MiB)")
+    print("\nMEMORY (MiB)")
     for k, v in memory.items():
         print(f"  {k:<28s}: {v}")
-    print(f"\nCPU (s)")
+    print("\nCPU (s)")
     for k, v in cpu.items():
         if isinstance(v, float):
             print(f"  {k:<28s}: {v:8.3f}")
@@ -969,7 +997,7 @@ def step14_final_report(
         elif (
             adapter["adapter_bar_sample_mismatches"] != 0
             or adapter["membership_refs_match"] is not True
-            or adapter["membership_unknown_member_count"] != 0
+            or adapter["membership_unmapped_after_union"] != 0
         ):
             print(
                 "  reason: frozen adapter integrity gate FAILED; see "
@@ -1041,21 +1069,37 @@ def main(argv: list[str]) -> int:
     M = len(member_ids)
 
     # --- Membership adapter integrity gate.
-    # 4a. "unknown" member count: members referenced by the (deduped)
-    # snapshot that are NOT present in the union member universe.  By
-    # construction this should be zero (we built the union from the same
-    # lists), but the report requires it for proof.
-    membership_unknown_members = 0
+    # NOTE on "unmapped after union":
+    #   member_ids is built as the deduped, sorted union of the exact
+    #   membership lists we just loaded.  Therefore, by construction,
+    #   every deduped membership id IS present in member_ids.  We still
+    #   measure it explicitly so the report carries the evidence
+    #   (instead of silently hardcoding 0) — but we also document
+    #   that this is NOT an external instrument-master validation.
+    #   The real fail-closed owner for "member id is actually a column"
+    #   is build_scope_member_indices() in M5-B1 core.  (Instrument
+    #   master data is intentionally outside M5-B2's allowed inputs.)
+    member_to_col = {m: i for i, m in enumerate(member_ids)}
+    membership_unmapped_after_union = 0
+    for _sid, members in memberships_ordered.items():
+        for m in members:
+            if m not in member_to_col:
+                membership_unmapped_after_union += 1
     # 4b. mapped scope-member refs == sum of scope_member_idx lengths.
     mapped_scope_member_refs = sum(
         len(v) for v in scope_member_idx.values()
     )
-    print(f"\n=== MEMBERSHIP ADAPTER INTEGRITY GATE ===")
+    print("\n=== MEMBERSHIP ADAPTER INTEGRITY GATE ===")
     print(f"  raw selected membership rows:   {raw_selected_membership_rows}")
     print(f"  raw duplicate membership rows:  {raw_duplicate_membership_rows}")
     print(f"  deduped membership refs:        {raw_deduped_membership_refs}")
     print(f"  mapped scope-member refs:       {mapped_scope_member_refs}")
-    print(f"  unknown member count:           {membership_unknown_members}")
+    print(f"  unmapped after union:           {membership_unmapped_after_union}")
+    print(
+        "    (expected 0 by construction; real fail-closed owner is"
+        " build_scope_member_indices; does NOT assert external instrument"
+        " master validity — instruments are outside M5-B2 allowed inputs)"
+    )
     membership_refs_match = (
         raw_deduped_membership_refs == mapped_scope_member_refs
     )
@@ -1063,10 +1107,10 @@ def main(argv: list[str]) -> int:
         print("  MATCH: NO (acceptance gate FAIL)")
     else:
         print("  MATCH: deduped refs == mapped refs  (OK)")
-    if membership_unknown_members != 0:
-        print("  UNKNOWN MEMBERS: non-zero (acceptance gate FAIL)")
+    if membership_unmapped_after_union != 0:
+        print("  UNMAPPED AFTER UNION: non-zero (FAIL)")
     else:
-        print("  UNKNOWN MEMBERS: 0  (OK)")
+        print("  UNMAPPED AFTER UNION: 0  (OK by construction)")
 
     # 5. Close matrix.
     close, bars_stats = step5_close_matrix(
@@ -1159,11 +1203,17 @@ def main(argv: list[str]) -> int:
         "adapter_bar_sample_mismatches": bars_stats[
             "adapter_bar_sample_mismatches"
         ],
+        "selected_raw_unavailable_close_rows": bars_stats[
+            "selected_raw_unavailable_close_rows"
+        ],
+        "bars_duplicate_exact": bars_stats["duplicate_exact"],
+        "bars_duplicate_conflict": bars_stats["duplicate_conflict"],
         "membership_raw_selected_rows": raw_selected_membership_rows,
         "membership_raw_duplicate_rows": raw_duplicate_membership_rows,
         "membership_deduped_refs": raw_deduped_membership_refs,
         "membership_mapped_scope_member_refs": mapped_scope_member_refs,
-        "membership_unknown_member_count": membership_unknown_members,
+        "membership_unmapped_after_union": membership_unmapped_after_union,
+        "membership_unmapped_after_union_expected_zero": True,
         "membership_refs_match": bool(membership_refs_match),
     }
     ok, report = step14_final_report(
