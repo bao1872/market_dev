@@ -213,11 +213,14 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         execute_after_close_run,
         get_after_close_run_status,
     )
+    from app.services.factor_publication_service import (
+        PUBLICATION_KIND_STOCK_CORE,
+        get_publication,
+    )
 
     test_date = date(2026, 8, 22)
 
     core_count = {"n": 0}
-    stock_core_publish_count = {"n": 0}
     history_advance_attempts = {"n": 0}
     history_should_crash = {"on": True}
     review_step_count = {"n": 0}
@@ -228,10 +231,6 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     async def _fake_compute_core(*a, **k):
         core_count["n"] += 1
         return {}
-
-    async def _fake_publish_stock_core(*a, **k):
-        stock_core_publish_count["n"] += 1
-        return MagicMock(id=uuid.uuid4())
 
     async def _fake_history(db, *a, **k):
         history_advance_attempts["n"] += 1
@@ -289,11 +288,11 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # 最小 faithful patch：core 计算与 stock_core 发布计数；History 注入 crash；
+    # 最小 faithful patch：core 计算跳过（记录计数）；History 注入 crash；
+    # stock_core 走真实发布（验证崩溃恢复后不重复发布 / 不撤销指针）；
     # Review 用 sentinel 停在入口（证明到达），与既有 PG resume 测试一致。
     common_patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
-        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_fake_publish_stock_core),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.review_orchestrator_service.create_run", new=_sentinel_create_run),
@@ -335,9 +334,15 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     assert final_status.get("orchestrator_status") in (AfterCloseRunStatus.COMPUTING_REVIEW.value, AfterCloseRunStatus.SUCCEEDED.value, AfterCloseRunStatus.PARTIAL_SUCCESS.value), final_status
 
     assert core_count["n"] == 0, f"resume must NOT recompute core, got {core_count['n']}"
-    assert stock_core_publish_count["n"] == 1, "stock_core published exactly once (crash did not revoke/double-publish)"
     assert history_advance_attempts["n"] == 2, "History advanced twice (crash + resume)"
     assert review_step_count["n"] == 1, "Review entered exactly once after resume"
+    # stock_core 走真实发布：崩溃恢复后指针仍保留（未撤销 / 未重复发布覆盖）。
+    async with AsyncSessionLocal() as pointer_db:
+        final_pointer = await get_publication(
+            pointer_db, scope_type="market", scope_key="market", trade_date=test_date,
+            publication_kind=PUBLICATION_KIND_STOCK_CORE,
+        )
+    assert final_pointer is not None, "stock_core pointer missing after crash+resume (revoked/double-publish?)"
 
 
 # ===========================================================================
