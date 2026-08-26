@@ -23,8 +23,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import text
 
-from app.models.scheduler import AfterCloseRunStatus, SchedulerJobRun
+from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.after_close_orchestrator import (
+    AfterCloseRunStatus,
     after_close_orchestrator,
     execute_after_close_run,
 )
@@ -151,8 +152,6 @@ async def test_contract_b_daily_ready_skips_refreshing_daily_reaches_history_rev
       computing_history      RUN（可达）
       computing_review       RUN（可达）
     """
-    from app.services.after_close_orchestrator import AsyncSessionLocal as _RealAsyncSessionLocal
-
     now = datetime.now(_TZ)
     meta = {
         "orchestrator_status": AfterCloseRunStatus.WAITING_DSA_WORKER.value,
@@ -199,7 +198,6 @@ async def test_contract_b_daily_ready_skips_refreshing_daily_reaches_history_rev
     assert "computing_history" in seen, "History 阶段必须可达"
     assert "computing_review" in seen, "Review 阶段必须可达"
 
-    _RealAsyncSessionLocal  # 保留引用，避免未使用告警
     async with TestAsyncSessionLocal() as db:
         await db.execute(
             text("DELETE FROM scheduler_job_runs WHERE id = :id"),
