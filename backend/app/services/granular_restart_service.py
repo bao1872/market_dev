@@ -165,11 +165,31 @@ def build_run_key(
     source_core_run_id: uuid.UUID | None,
     input_hash: str,
 ) -> str:
-    """幂等键：含 parent / source / input_hash，禁止跨 parent 或跨输入误复用。"""
-    return (
+    """[REPROCESS-OWNER-CLOSURE-01 CORRECTION-02] 幂等键：含 parent / source / input_hash。
+
+    SchedulerJobRun.run_key 为 VARCHAR(128)。为在不改 schema、不新增 migration 的前提下
+    解决「两个 36-char UUID + 16-char hash」越界冲突（daily_ready + non-null source）：
+
+      1. 先生成 canonical full key（readable，含全部 identity）。
+      2. len(full_key) <= 128 → 原样返回，保持所有已成功持久化的 legacy run_key 完全兼容。
+      3. len(full_key) > 128  → deterministic compact fallback：
+         digest 基于【完整 original key】，parent/source/input_hash 全部进入 identity；
+         保留 granular_restart + trade_date + boundary 前缀，后接稳定 SHA-256 digest。
+         最终长度 <= 128。
+
+    禁止：字符串直接截断 / UUID prefix-only / Python hash() / 随机 key。
+    """
+    full_key = (
         f"granular_restart:{trade_date}:{boundary}:"
         f"{parent_job_run_id}:{source_core_run_id or 'none'}:{input_hash}"
     )
+    if len(full_key) <= 128:
+        return full_key
+    # compact fallback：digest 覆盖完整 original key，确保 parent/source/input_hash 任一变化
+    # 都反映到 key 上；前缀保留三段可读信息，digest 取 16 hex（总长 15+1+date+1+boundary
+    # +1+16 <= 128 对任一 trade_date/boundary 稳定成立）。
+    digest = hashlib.sha256(full_key.encode("utf-8")).hexdigest()[:16]
+    return f"granular_restart:{trade_date}:{boundary}:{digest}"
 
 
 async def _resolve_published_core_run_id(

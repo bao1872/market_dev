@@ -52,10 +52,16 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
       child.metadata.mainchain_stage == 'syncing_boards'
       child.metadata.parent_job_run_id preserved
       child.metadata.restart_from == 'daily_ready'
+      child.metadata.source_core_run_id == synthetic UUID（non-null）
+      len(child.run_key) <= 128（REPROCESS-OWNER-CLOSURE-01 CORRECTION-02 长度合同）
     且真实 worker selector 领取后：
       child.status == 'running' 且 worker_instance_id 被设置
     """
     from app.worker import _WORKER_INSTANCE_ID, _after_close_poll_once
+
+    # 固定 synthetic non-null UUID：覆盖 non-null source_core_run_id 真实路径
+    # （不得为 None —— CORRECTION-02 明确禁止再用 mock source=None 绕过长度合同）。
+    synthetic_source = uuid.UUID("11111111-2222-3333-4444-555555555555")
 
     # --- producer: 创建 cancelled 的 after_close_orchestrator parent ---
     parent_id = uuid.uuid4()
@@ -81,23 +87,18 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
         await db.commit()
 
     # --- producer: 真实 dispatch_restart 创建 daily_ready child ---
-    # 注：source_core_run_id 解析（_resolve_published_core_run_id）在 verify 库中
-    # 可能返回一个 36-char UUID，使 run_key 触及 VARCHAR(128) 边界（此为 dispatch_restart
-    # 既有长度脆弱性，不在 REPROCESS-OWNER-CLOSURE-01 P0-1/P0-2 范围内）。Contract A
-    # 不负责 DSA/History/Review/Publishing，仅验证 identity + claim，故将 source 解析
-    # 置 None，使 run_key 使用 "none" 段（96 字符，稳定落在 VARCHAR(128) 内）。
+    # 使用真实 handler registry（主链 daily_ready handler 仅做阶段标记/事件，不执行重计算）。
+    # _resolve_published_core_run_id 替换为固定 synthetic UUID（non-null），覆盖真实
+    # run_key 长度路径（parent UUID + source UUID + 16-char hash > 128 → compact fallback）。
     async with TestAsyncSessionLocal() as db:
         parent = await db.get(SchedulerJobRun, parent_id)
-        async def fake_handler(db, **kw):
-            return uuid.uuid4()
         with patch(
             "app.services.granular_restart_service._resolve_published_core_run_id",
-            new=AsyncMock(return_value=None),
+            new=AsyncMock(return_value=synthetic_source),
         ):
             child = await dispatch_restart(
                 db, parent, "daily_ready",
                 actor="audit", request_id="req-a",
-                handlers={"daily_ready": fake_handler},
             )
         await db.commit()
 
@@ -110,6 +111,14 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
     assert child_meta.get("mainchain_stage") == "syncing_boards"
     assert child_meta.get("parent_job_run_id") == str(parent_id)
     assert child_meta.get("restart_from") == "daily_ready"
+    assert child_meta.get("source_core_run_id") == str(synthetic_source), (
+        f"source_core_run_id 必须为 synthetic UUID，实际: {child_meta.get('source_core_run_id')}"
+    )
+    # [CORRECTION-02] run_key 长度合同：真实 build_run_key 生成的 key 必须 <= 128
+    assert child.run_key is not None
+    assert len(child.run_key) <= 128, (
+        f"run_key 越界: len={len(child.run_key)} key={child.run_key!r}"
+    )
 
     # --- consumer: 真实 worker selector 领取该 child；截断业务 execution ---
     mock_exec = AsyncMock(return_value=None)

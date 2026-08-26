@@ -463,3 +463,132 @@ async def test_missing_trade_date_raises_value_error(svc):
     job.business_date = None
     with pytest.raises(ValueError):
         await dispatch_restart(db, job, "chip", actor="t", request_id="r1")
+
+
+# =============================================================================
+# REPROCESS-OWNER-CLOSURE-01 CORRECTION-02 — build_run_key 长度合同（production owner）
+# =============================================================================
+
+_RUN_KEY_TRADE_DATE = "2026-08-25"
+
+
+def _sample_parent() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+def _sample_source() -> uuid.UUID:
+    return uuid.uuid4()
+
+
+def test_run_key_contract_all_boundaries_within_128() -> None:
+    """A. ALL_BOUNDARIES：parent UUID + source UUID + 16-char input_hash
+    → len(build_run_key(...)) <= 128。"""
+    parent = _sample_parent()
+    source = _sample_source()
+    input_hash = compute_input_hash(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        source_core_run_id=source, extra={"request_scope": "granular_restart"},
+    )
+    for boundary in ALL_BOUNDARIES:
+        key = build_run_key(
+            trade_date=_RUN_KEY_TRADE_DATE,
+            boundary=boundary,
+            parent_job_run_id=parent,
+            source_core_run_id=source,
+            input_hash=input_hash,
+        )
+        assert len(key) <= 128, f"boundary={boundary} run_key 越界: len={len(key)} key={key!r}"
+
+
+def test_run_key_contract_deterministic() -> None:
+    """B. 同样输入 → deterministic，同一 key。"""
+    parent = _sample_parent()
+    source = _sample_source()
+    input_hash = compute_input_hash(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        source_core_run_id=source, extra={"request_scope": "granular_restart"},
+    )
+    k1 = build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=parent, source_core_run_id=source, input_hash=input_hash,
+    )
+    k2 = build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=parent, source_core_run_id=source, input_hash=input_hash,
+    )
+    assert k1 == k2
+
+
+def test_run_key_contract_input_change_alters_key() -> None:
+    """C. parent / source / input_hash 任一改变 → key 必须改变。"""
+    source = _sample_source()
+    input_hash = compute_input_hash(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        source_core_run_id=source, extra={"request_scope": "granular_restart"},
+    )
+    base = build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=_sample_parent(), source_core_run_id=source,
+        input_hash=input_hash,
+    )
+    # parent 改变
+    other_parent = _sample_parent()
+    assert base != build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=other_parent, source_core_run_id=source,
+        input_hash=input_hash,
+    )
+    # source 改变
+    assert base != build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=_sample_parent(), source_core_run_id=_sample_source(),
+        input_hash=input_hash,
+    )
+    # input_hash 改变
+    assert base != build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=_sample_parent(), source_core_run_id=source,
+        input_hash="0" * 16,
+    )
+
+
+def test_run_key_contract_short_key_backward_compatible() -> None:
+    """D. 当前本来 <=128 的 readable key → 格式保持不变（backward compatibility）。"""
+    parent = uuid.UUID("00000000-0000-0000-0000-000000000000")
+    # 'none' 段使 key 落在 128 内 → 原样 readable 格式。
+    key = build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=parent, source_core_run_id=None, input_hash="a" * 16,
+    )
+    assert key == (
+        f"granular_restart:{_RUN_KEY_TRADE_DATE}:daily_ready:"
+        f"{parent}:none:{'a' * 16}"
+    )
+
+
+def test_run_key_contract_overlength_uses_compact_fallback() -> None:
+    """E. daily_ready + non-null source UUID → overlength → compact fallback，
+    不发生简单截断（digest 覆盖完整 original key），且最终 <= 128。"""
+    parent = _sample_parent()
+    source = _sample_source()
+    input_hash = compute_input_hash(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        source_core_run_id=source, extra={"request_scope": "granular_restart"},
+    )
+    full = (
+        f"granular_restart:{_RUN_KEY_TRADE_DATE}:daily_ready:"
+        f"{parent}:{source}:{input_hash}"
+    )
+    assert len(full) > 128, "前提：canonical full key 必须 > 128 才触发 fallback"
+    key = build_run_key(
+        trade_date=_RUN_KEY_TRADE_DATE, boundary="daily_ready",
+        parent_job_run_id=parent, source_core_run_id=source, input_hash=input_hash,
+    )
+    assert len(key) <= 128
+    # compact fallback 必须保留三段可读前缀 + 稳定 digest，且非简单截断。
+    assert key.startswith(f"granular_restart:{_RUN_KEY_TRADE_DATE}:daily_ready:")
+    # digest 段为 16 hex（前缀 15+1+date+1+boundary+1 = 47，剩余 81 容得下 16 hex）。
+    digest_part = key.split(":", 3)[3]
+    assert len(digest_part) == 16 and all(c in "0123456789abcdef" for c in digest_part)
+    # 简单截断（仅切到 128）会丢失尾部 hash，此处 fallback 含完整 original 的 digest。
+    assert digest_part != full[len(f"granular_restart:{_RUN_KEY_TRADE_DATE}:daily_ready:"):][:16]
