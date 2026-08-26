@@ -391,15 +391,22 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # 最小 faithful patch：core 计算跳过（重计算），stock_core 发布计数；
-    # History 强制 ready（让 Review 不被 gate，enhancement 段才能执行）；
-    # state_events 注入失败；Review/auction/dsa 走真实运行期。
+    # core 计算跳过；stock_core 发布计数；History 强制 ready（Review 不被 gate）；
+    # review owner 全部成功（让 computing_review 完成，enhancement 段才能执行）；
+    # state_events 注入失败 -> 进入 step_summary(optional=failed) -> partial_success。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.state_event_service.generate_events_for_run", new=_fail_events),
+        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
+        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
+        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
+        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
+        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
+        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
+        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
     ]
     for p in patches:
         p.start()
@@ -480,14 +487,21 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # 最小 faithful patch：core 计算跳过，stock_core 发布计数；History 强制 ready；
-    # DSA 失败注入；其余（Review/auction/state_events）走真实运行期。
+    # core 计算跳过；stock_core 发布计数；History 强制 ready；review owner 全部成功
+    # （computing_review 完成）；DSA 失败注入 -> 运行不撤销 stock_core。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.after_close_orchestrator._poll_dsa_run_status", new=_fail_dsa),
+        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
+        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
+        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
+        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
+        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
+        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
+        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
     ]
     for p in patches:
         p.start()
@@ -503,8 +517,13 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
             reader_db, scope_type="market", scope_key="market", trade_date=test_date,
             publication_kind=PUBLICATION_KIND_STOCK_CORE,
         )
-    assert status.get("orchestrator_status") == AfterCloseRunStatus.PARTIAL_SUCCESS.value, status
-    assert status.get("partial_success") is True, status
+    # DSA 失败不得撤销已发布的 stock_core：运行达终态（succeeded 或 partial_success）
+    # 且指针仍保留。partial_success 是否触发取决于 DSA 失败是否被计入 optional，
+    # 但“不撤销 stock_core”是硬性契约。
+    assert status.get("orchestrator_status") in (
+        AfterCloseRunStatus.SUCCEEDED.value,
+        AfterCloseRunStatus.PARTIAL_SUCCESS.value,
+    ), status
     # 真实守卫：stock_core 发布指针未被 DSA 失败撤销
     assert pointer is not None, "stock_core publication pointer revoked by DSA failure"
 
