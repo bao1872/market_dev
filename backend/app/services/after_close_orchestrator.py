@@ -2672,47 +2672,6 @@ async def execute_after_close_run(
         #   refreshing_daily → syncing_boards → computing_features
         #   → publishing → computing_review → succeeded
         # 旧步骤名（waiting_dsa_worker/quality_gate/feature_snapshot）兼容读取历史 run
-        _completed_steps: dict[str | None, set[str]] = {
-            None: set(),
-            "queued": set(),
-            "refreshing_daily": {"refreshing_daily"},
-            "syncing_boards": {"refreshing_daily", "syncing_boards"},
-            # [Phase 5] 4 步收敛为 computing_features
-            "computing_features": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-            },
-            "publishing": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing",
-            },
-            # [CHANGE-20260801-REVIEW-CLOSURE] computing_review 断点恢复
-            "computing_review": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing", "computing_history", "computing_review",
-            },
-            # [SLICE-01 H2] computing_history 断点恢复：其前置步骤与 computing_review 一致
-            # （history 在 review 之前，review 完成即 history 也已完成）。
-            "computing_history": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing", "computing_history",
-            },
-            "succeeded": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-                "publishing", "computing_history", "computing_review", "succeeded",
-            },
-            # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
-            "waiting_dsa_worker": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-            },
-            "quality_gate": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-            },
-            "feature_snapshot": {
-                "refreshing_daily", "syncing_boards", "computing_features",
-            },
-        }
-        completed: set[str] = _completed_steps.get(last_completed_step, set())
-
         # [REPROCESS-OWNER-CLOSURE-01 P0-2] mainchain_stage 是「本次 execution 从哪里开始」
         # 的正式起点合同（PRD30 AC-16），与 last_completed_step（「已真实完成的检查点」，
         # 用于断点恢复）语义分离，不得混用，也不得伪造 last_completed_step。
@@ -2720,12 +2679,15 @@ async def execute_after_close_run(
         # 的所有阶段标记为跳过（独立 skip 集合，不写 last_completed_step）。
         meta = _parse_metadata(job_run)
         mainchain_stage = meta.get("mainchain_stage")
+        # [REPROCESS-OWNER-CLOSURE-01 CORRECTION-01] 单一真相源：stage-resolution owner。
+        # 合并 checkpoint resume (last_completed_step) 与 restart 正式起点 (mainchain_stage)。
+        # 非法 mainchain_stage 在此 fail-closed（corrupt/typo metadata 不得退化为 full run）。
+        completed = _resolve_execution_completed_steps(last_completed_step, mainchain_stage)
         if mainchain_stage and mainchain_stage in _CHECKPOINT_ORDER:
             stage_rank = _CHECKPOINT_ORDER[mainchain_stage]
             pre_stages = {
                 s for s, r in _CHECKPOINT_ORDER.items() if r < stage_rank
             }
-            completed = completed | pre_stages
             logger.info(
                 "[AfterClose] mainchain_stage=%s，跳过其之前阶段=%s",
                 mainchain_stage, sorted(pre_stages),
@@ -2737,9 +2699,12 @@ async def execute_after_close_run(
             )
             return
 
-        # [CHANGE-20260728-008] 原 dsa_only 模式已删除，
-        # 改为通过 force?restart_from=daily_ready 设置 last_completed_step="refreshing_daily"，
-        # 由 _completed_steps 自然跳过 refreshing_daily，后续步骤正常执行。
+        # [CHANGE-20260728-008 kept-for-history] 原 dsa_only 模式已删除。
+        # 当前合同（REPROCESS-OWNER-CLOSURE-01）：
+        #   - restart 正式起点 = mainchain_stage（由 granular_restart_service 注入，
+        #     经 _resolve_execution_completed_steps 合并其之前 pre-stage 为已完成，跳过 refreshing_daily）。
+        #   - checkpoint resume = last_completed_step（旧合同，仍独立可用）。
+        #   二者不得混用：daily_ready restart 不再伪造 last_completed_step="refreshing_daily"。
 
         skip_refresh = "refreshing_daily" in completed
         skip_board_sync = "syncing_boards" in completed
@@ -4844,6 +4809,84 @@ _CHECKPOINT_ORDER: dict[str, int] = {
     "computing_review": 5,
     "succeeded": 6,
 }
+
+# [REPROCESS-OWNER-CLOSURE-01 CORRECTION-01] 断点恢复映射：last_completed_step → 已完成 stage 集合。
+# 与 _CHECKPOINT_ORDER 同为 module-level 单一真相源，被 execute_after_close_run 与
+# _resolve_execution_completed_steps 共同使用；禁止在 test 中复制等价映射。
+_COMPLETED_STEPS: dict[str | None, set[str]] = {
+    None: set(),
+    "queued": set(),
+    "refreshing_daily": {"refreshing_daily"},
+    "syncing_boards": {"refreshing_daily", "syncing_boards"},
+    # [Phase 5] 4 步收敛为 computing_features
+    "computing_features": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+    },
+    "publishing": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+        "publishing",
+    },
+    # [CHANGE-20260801-REVIEW-CLOSURE] computing_review 断点恢复
+    "computing_review": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+        "publishing", "computing_history", "computing_review",
+    },
+    # [SLICE-01 H2] computing_history 断点恢复：其前置步骤与 computing_review 一致
+    # （history 在 review 之前，review 完成即 history 也已完成）。
+    "computing_history": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+        "publishing", "computing_history",
+    },
+    "succeeded": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+        "publishing", "computing_history", "computing_review", "succeeded",
+    },
+    # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
+    "waiting_dsa_worker": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+    },
+    "quality_gate": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+    },
+    "feature_snapshot": {
+        "refreshing_daily", "syncing_boards", "computing_features",
+    },
+}
+
+
+def _resolve_execution_completed_steps(
+    last_completed_step: str | None,
+    mainchain_stage: str | None,
+) -> set[str]:
+    """[REPROCESS-OWNER-CLOSURE-01 CORRECTION-01] 单一真相源：解析盘后 run 的已完成 stage 集合。
+
+    两种启动合同的合并：
+      - checkpoint resume：last_completed_step（旧合同，仍可独立使用）
+      - restart 正式起点：mainchain_stage（P0-1/P0-2 唯一正式起点合同；取代伪造 last_completed_step）
+
+    mainchain_stage 合法性：
+      - mainchain_stage is None        → 不引入任何预完成 stage（正常 initial run / 普通 resume）
+      - mainchain_stage in _CHECKPOINT_ORDER
+                                     → 合并其之前所有 pre-stage 为已完成（跳过 refreshing_daily 等）
+      - mainchain_stage NOT in _CHECKPOINT_ORDER
+                                     → fail closed：corrupt/typo restart metadata 不得静默退化成 full run，
+                                       显式抛出 ValueError，禁止重跑 refreshing_daily / 整条链。
+
+    该函数被 execute_after_close_run 与契约测试共同调用，禁止在 test 中复制等价逻辑。
+    """
+    completed: set[str] = set(_COMPLETED_STEPS.get(last_completed_step, set()))
+    if mainchain_stage is not None:
+        if mainchain_stage not in _CHECKPOINT_ORDER:
+            raise ValueError(
+                f"invalid mainchain_stage={mainchain_stage!r}: "
+                f"不在正式 _CHECKPOINT_ORDER，禁止作为 restart 起点（corrupt/typo metadata）。"
+            )
+        stage_rank = _CHECKPOINT_ORDER[mainchain_stage]
+        pre_stages = {
+            s for s, r in _CHECKPOINT_ORDER.items() if r < stage_rank
+        }
+        completed |= pre_stages
+    return completed
 
 
 async def reconcile_after_close_checkpoint_from_artifacts(

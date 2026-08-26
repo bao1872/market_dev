@@ -305,7 +305,8 @@ async def _create_or_reuse_child(
     # `after_close_orchestrator`（PRD30 AC-16：only one formal after-close job type），
     # 由 worker._after_close_poll_once 正常领取执行。子产品 boundary（dsa_projection /
     # state_events / chip / auction / review）保持独立 granular_restart_{boundary} 任务
-    # 类型（由各自专属 worker 处理，不进入 after_close_orchestrator）。
+    # 类型，在本 dispatch 调用内通过各自专属 inline handler 同步执行真实重建/发布
+    # （不进入 after_close_orchestrator 主链，但其执行发生在当前 API 进程而非专属 worker）。
     # 严禁：扩大 worker 到「所有 queued job」、新增第二套 granular worker、API 进程
     # 直接执行 orchestrator、手工 SQL 改 child、特判 granular_restart_daily_ready。
     child_job_name = (
