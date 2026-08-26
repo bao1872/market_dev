@@ -58,16 +58,25 @@ async def test_verify_db_identity():
 
 async def test_current_facts_locked_to_source_core_run_id():
     """KPI-3: same-day 两 run，Review 只消费 source_core_run_id 的快照；
-    错误 run 被忽略（无 fallback）。"""
+    错误 run 被忽略（无 fallback）。
+
+    注意：stock_feature_snapshots 唯一键为
+    (instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj,
+     schema_version)，不含 source_run_id —— 即每个 instrument+date 只有一行快照，
+    source_run_id 标识其来源 run。因此用两个不同 instrument 分别代表
+    correct_run / wrong_run 的快照，验证 loader 按 source_core_run_id 精确选取。
+    """
     await _assert_verify_db_identity()
 
-    iid = uuid.UUID("11111111-1111-1111-1111-11111111a0a1")
+    iid_a = uuid.UUID("11111111-1111-1111-1111-11111111a0a1")
+    iid_b = uuid.UUID("11111111-1111-1111-1111-11111111b0b1")
     td = datetime.date(2026, 8, 25)
     correct_run = uuid.UUID("aaaa1111-1111-1111-1111-1111111111aa")
     wrong_run = uuid.UUID("bbbb2222-2222-2222-2222-2222222222bb")
 
     async with TestAsyncSessionLocal() as s:
-        await _seed_instrument(s, iid, "SLC1A0A1")
+        await _seed_instrument(s, iid_a, "SLC1A0A1")
+        await _seed_instrument(s, iid_b, "SLC1B0B1")
         await s.flush()
         s.add(StockFeatureSnapshotRun(
             id=correct_run, trade_date=td, status="succeeded",
@@ -78,13 +87,14 @@ async def test_current_facts_locked_to_source_core_run_id():
             run_type="after_close", published_at=datetime.datetime.utcnow(),
         ))
         await s.flush()
+        # iid_a 的快照来自 correct_run（上行）；iid_b 的快照来自 wrong_run（下行）。
         s.add(StockFeatureSnapshot(
-            instrument_id=iid, source_run_id=correct_run, trade_date=td,
+            instrument_id=iid_a, source_run_id=correct_run, trade_date=td,
             structural_payload={}, temporal_payload={},
             summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
         ))
         s.add(StockFeatureSnapshot(
-            instrument_id=iid, source_run_id=wrong_run, trade_date=td,
+            instrument_id=iid_b, source_run_id=wrong_run, trade_date=td,
             structural_payload={}, temporal_payload={},
             summary_payload={"first_pyramid_flat": {"fp_trend_direction": "下行"}},
         ))
@@ -92,18 +102,23 @@ async def test_current_facts_locked_to_source_core_run_id():
 
     async with TestAsyncSessionLocal() as s:
         out = await _load_current_only_snapshot_facts(
-            s, [iid], td, source_core_run_id=correct_run
+            s, [iid_a, iid_b], td, source_core_run_id=correct_run
         )
         out_wrong = await _load_current_only_snapshot_facts(
-            s, [iid], td, source_core_run_id=wrong_run
+            s, [iid_a, iid_b], td, source_core_run_id=wrong_run
         )
 
-    # Loader 锁定 source_core_run_id：只返回该 run 的快照，整张 first_pyramid_flat 透传。
-    assert out[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] == "上行"
-    assert out_wrong[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] == "下行"
-    # 关键：错误 run 不污染正确 run（无 fallback 到另一 same-day run）
-    assert out[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] != "下行"
-    assert out_wrong[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] != "上行"
+    # source_core_run_id=correct_run → 只返回 iid_a（上行），不含 iid_b（下行）。
+    assert iid_a in out
+    assert iid_b not in out
+    assert out[str(iid_a)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] == "上行"
+    # source_core_run_id=wrong_run → 只返回 iid_b（下行），不含 iid_a（上行）。
+    assert iid_b in out_wrong
+    assert iid_a not in out_wrong
+    assert out_wrong[str(iid_b)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] == "下行"
+    # 关键：错误 run 不污染正确 run（无 fallback 到另一 run 的快照）
+    assert "下行" not in str(out)
+    assert "上行" not in str(out_wrong)
 
 
 async def test_current_facts_wrong_run_fails_closed():
