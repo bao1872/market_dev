@@ -193,6 +193,82 @@ def test_b1_event_projection_matches_daily_state():
     assert rel["release_volume_ratio"] == ds["release_volume_ratio"]
 
 
+def test_b1_event_independent_of_volume_none():
+    # PHASE B(1): vol_arr=None 时 SQZ_RELEASE event 仍生成，身份正确，量能事实=None，无异常
+    n = 6
+    sqz_on = [False] * 4 + [True, False]  # T=5 为正式 release
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), None, times=[str(i) for i in range(n)])
+    rel = [e for e in mh["sqz_release_events"] if e["type"] == "SQZ_RELEASE"]
+    assert len(rel) == 1
+    assert rel[0]["squeeze_start_index"] == 4
+    assert rel[0]["squeeze_length"] == 1
+    assert rel[0]["squeeze_period_volume_mean"] is None
+    assert rel[0]["release_volume_ratio"] is None
+    # daily_state 也不应包含量能事实（无异常）
+    assert mh["daily_state"][5]["squeeze_period_volume_mean"] is None
+
+
+def test_b1_event_identity_unaffected_by_nan_volume():
+    # PHASE B(2): squeeze history 含 NaN 不影响 window identity
+    n = 6
+    sqz_on = [False] * 4 + [True, False]
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    vol = [np.nan, 100.0, 100.0, 100.0, 100.0, 500.0]  # idx0 NaN（在 squeeze 区间外）
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), vol, times=[str(i) for i in range(n)])
+    rel = [e for e in mh["sqz_release_events"] if e["type"] == "SQZ_RELEASE"][0]
+    assert rel["squeeze_start_index"] == 4
+    assert rel["squeeze_length"] == 1
+    assert rel["release_volume_ratio"] is not None  # 区间 [4:5]=[100] → mean/500
+
+
+def test_b1_event_release_volume_nan_ratio_none():
+    # PHASE B(3): release volume=NaN → event 存在, mean 可存在, ratio=None
+    n = 6
+    sqz_on = [False] * 4 + [True, False]
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    vol = [100.0, 100.0, 100.0, 100.0, 100.0, np.nan]
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), vol, times=[str(i) for i in range(n)])
+    rel = [e for e in mh["sqz_release_events"] if e["type"] == "SQZ_RELEASE"][0]
+    assert rel["squeeze_start_index"] == 4
+    assert rel["squeeze_period_volume_mean"] is not None
+    assert rel["release_volume_ratio"] is None
+
+
+def test_b1_active_squeeze_volume_none_mean_none():
+    # PHASE B(4): active squeeze + volume unavailable → state 仍合法, mean=None
+    n = 4
+    sqz_on = [True, True, True, True]
+    sqz_off = [False] * n
+    val = [-1.0] * n
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), None, times=[str(i) for i in range(n)])
+    ds = mh["daily_state"][3]
+    assert ds["squeeze_period_volume_mean"] is None
+    assert ds["release_volume_ratio"] is None
+    assert ds["volatility_phase"] == "squeeze_on"
+
+
+def test_b1_valid_volume_active_and_release_correct():
+    # PHASE B(5): 有效 volume → active squeeze mean 正确, release mean/ratio 正确
+    n = 6
+    sqz_on = [False] * 4 + [True, False]
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    vol = [100.0, 100.0, 100.0, 100.0, 100.0, 500.0]  # squeeze 区间 [4:5]=[100]
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), vol, times=[str(i) for i in range(n)])
+    # active squeeze at T=4 (sqzOn)
+    ds4 = mh["daily_state"][4]
+    assert abs(ds4["squeeze_period_volume_mean"] - 100.0) < 1e-6
+    assert ds4["release_volume_ratio"] is None
+    # release at T=5
+    ds5 = mh["daily_state"][5]
+    assert abs(ds5["squeeze_period_volume_mean"] - 100.0) < 1e-6
+    assert abs(ds5["release_volume_ratio"] - (100.0 / 500.0)) < 1e-6
+
+
 # ---------------------------------------------------------------------------
 # B2. Consumer wiring 层（monkeypatch 注入 daily_state sentinel，证明只转发不重算）
 # ---------------------------------------------------------------------------

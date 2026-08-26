@@ -536,35 +536,36 @@ def build_momentum_history(
                 change = MomentumChange.FLAT.value
 
         # [CHANGE-20260826] SqueezeVolumeFacts 唯一 owner = build_momentum_history。
-        # 对每个 T 在 daily_state 暴露 squeeze_period_volume_mean 与 release_volume_ratio，
+        # 事件身份（squeeze_start_index / squeeze_length）完全由 sqz_on_list / sqz_off_list
+        # 决定，**不依赖 volume**；volume 仅用于可选的量能事实（CASE 1/2 的 mean/ratio）。
+        # volume unavailable 时 SQZ_RELEASE event 仍必须合法生成（身份恒存在）。
         # 覆盖两种时态，禁止下游（_build_momentum_dimension）自行扫描 squeeze 区间：
-        #   CASE 1 — 当前仍 sqzOn[T]：
-        #       squeeze_period_volume_mean = 当前连续 sqzOn 区间均量（区间含 T）
-        #       release_volume_ratio = None
-        #   CASE 2 — 刚 release（sqzOn[T-1] and sqzOff[T]）：
-        #       squeeze_period_volume_mean = T 前连续 sqzOn 区间均量
-        #       release_volume_ratio = squeeze_mean / volume[T]（需 volume[T] > 0 finite）
-        #   CASE 3 — 其他状态：两者均 None
-        # 这两种时态互斥，使得「缩量挤压」（last_sqz_on + mean）与「放量释放」
-        # （last_sqz_off + ratio）都能正常工作，且不引入第二计算 owner。
+        #   CASE 1 — 当前仍 sqzOn[T]：量能 mean=当前连续区间均量, ratio=None
+        #   CASE 2 — 刚 release（sqzOn[T-1] and sqzOff[T]）：量能 mean=前置区间均量,
+        #            ratio=squeeze_mean/volume[T]（需 volume[T]>0 finite），否则 None
+        #   CASE 3 — 其他状态：量能事实均 None
         squeeze_period_volume_mean = None
         release_vol_ratio = None
-        if vol_arr is not None:
-            if sqz_on_list[i]:
-                # CASE 1：当前连续 squeeze 区间 [s, i]（含 T）
-                seg_start = i
-                while seg_start > 0 and sqz_on_list[seg_start - 1]:
-                    seg_start -= 1
+
+        if sqz_on_list[i]:
+            # CASE 1：当前连续 squeeze 区间 [seg_start, i]（含 T）
+            seg_start = i
+            while seg_start > 0 and sqz_on_list[seg_start - 1]:
+                seg_start -= 1
+            squeeze_len = i - seg_start + 1
+            if vol_arr is not None:
                 seg = vol_arr[seg_start:i + 1]
                 valid = seg[~np.isnan(seg)]
                 if len(valid) > 0:
                     squeeze_period_volume_mean = float(np.mean(valid))
                     release_vol_ratio = None
-            elif i > 0 and sqz_on_list[i - 1] and sqz_off_list[i]:
-                # CASE 2：前置连续 squeeze 区间 [seg_start, i-1]
-                seg_start = i - 1
-                while seg_start > 0 and sqz_on_list[seg_start - 1]:
-                    seg_start -= 1
+        elif i > 0 and sqz_on_list[i - 1] and sqz_off_list[i]:
+            # CASE 2：前置连续 squeeze 区间 [seg_start, i-1]
+            seg_start = i - 1
+            while seg_start > 0 and sqz_on_list[seg_start - 1]:
+                seg_start -= 1
+            squeeze_len = i - seg_start
+            if vol_arr is not None:
                 seg = vol_arr[seg_start:i]
                 valid = seg[~np.isnan(seg)]
                 if len(valid) > 0:
@@ -572,6 +573,9 @@ def build_momentum_history(
                     squeeze_period_volume_mean = squeeze_mean
                     if vol_arr[i] > 0:
                         release_vol_ratio = squeeze_mean / float(vol_arr[i])
+        else:
+            seg_start = None
+            squeeze_len = None
 
         daily_state.append({
             "bar_index": i,
@@ -589,9 +593,8 @@ def build_momentum_history(
         })
 
         # SQZ_RELEASE 事件：sqzOn[t-1] 且 sqzOff[t]
-        # 投影同一 daily_state 事实（CASE 2），禁止重算 squeeze 区间/ratio。
+        # 身份（seg_start/squeeze_len）恒存在，与 volume 无关；量能事实仅投影 CASE 2。
         if i > 0 and sqz_on_list[i - 1] and sqz_off_list[i]:
-            squeeze_len = i - seg_start
             # 方向按当日 val
             if v is None or (isinstance(v, float) and np.isnan(v)):
                 release_dir = "null"

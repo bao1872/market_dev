@@ -74,6 +74,23 @@ CASE 3 — 其他: 两者均 None
 `缩量挤压`(last_sqz_on+mean) 与 `放量释放`(last_sqz_off+ratio) 均可达。
 新增 B1 active-squeeze 用例 + B2 `缩量挤压` 可达 consumer 测试验证。
 
+### A5 — Squeeze event identity 与 volume availability 解耦（CORRECTION GATE 3 / PHASE A）
+
+确定 bug：`seg_start` 原仅在 `vol_arr is not None` 时计算，但 SQZ_RELEASE event 路径
+无条件引用 `seg_start` → `vol_arr=None` 时 NameError（event 路径崩溃）。
+
+修复：`build_momentum_history` 先完全根据 `sqz_on_list` / `sqz_off_list` 解析 squeeze window
+身份（`squeeze_start_index` / `squeeze_length`），**该逻辑不依赖 volume**；volume 仅用于
+可选的量能事实（CASE 1/2 的 mean/ratio）。`vol_arr=None` 时 event 仍合法生成，身份恒存在，
+量能事实为 None，无异常。
+
+PHASE B negative tests 新增：
+1. SQZ_RELEASE + volumes=None → event 生成、seg_start/squeeze_length 正确、mean/ratio=None、无异常；
+2. SQZ_RELEASE + squeeze history 含 NaN → window identity 不受影响；
+3. SQZ_RELEASE + release volume NaN → event 存在、mean 可存在、ratio=None；
+4. active squeeze + volume unavailable → state 合法、mean=None；
+5. valid volume → active squeeze mean 正确、release mean/ratio 正确。
+
 `fp_squeeze_avg_volume`, `fp_release_volume_ratio`, `fp_momentum_volume_relation` all
 consume the corrected owner. `momentum_volume_relation` (`vol_divergence`) inherits the
 direction fix.
@@ -102,21 +119,83 @@ total=5293  key_missing_sql_null=0  json_null=5293  json_number=0  other_type=0
 
 ### 因此「释放量比 暂无事实」是 LEGIT_UNAVAILABLE（非 producer defect）
 
+> **⚠ 该结论在 CORRECTION GATE 3 被推翻**（见下方 PHASE C 独立 transition census）。
+> 以下原 LEGIT 论证保留为历史记录，最终裁决以 PHASE C 为准。
+
 - 全市场 5293 个 `fp_release_volume_ratio` 全为 JSON null → 每个成员的
   `MemberObservation.release_volume_ratio` = None。
 - 全市场 749 个 8/25 scope facts（concept 371 / industry_l1 31 / industry_l2 90 /
   industry_l3 257）的 `momentum.release_volume_ratio` 全部
   `status=unavailable, valid_count=0`，reason =
   `CURRENT_SOURCE_UNAVAILABLE: no member has a consumable exact-T canonical snapshot value`。
-- 即：8/25 当天**没有任何成员 snapshot 携带可用的 release ratio**，
-  `valid_count=0` 是数据真实状态的必然结果，**不是 producer 计算错误**。
 
-**纠正上一轮错误结论**：此前称「释放量比 on 8/25 为 PRODUCER_DEFECT」是错的，
-根因正是无效的 5293 查询。正确分类 = **LEGIT_UNAVAILABLE**。
+#### PHASE C（独立 release-transition census，不使用 ratio 自身为证据）
 
-A 修复保证**未来** ratio 计算正确；但 8/25 历史 snapshot 本身无可用 ratio 值，
-页面在 8/25 显示「暂无事实」在语义上正确，无需 reprocess 来「修正」该字段
-（reprocess 不会产出原本不存在的数据）。
+使用正式 persisted canonical Core state（`stock_feature_snapshots.summary_payload`
+→ `first_pyramid_flat` → `fp_squeeze_state` + `fp_latest_sqz_off_freshness`），
+对同时具有 8/24 与 8/25 快照的 instrument 解析真实 momentum squeeze transition：
+
+```text
+REAL_RELEASE = squeeze_state(8/24)='挤压中'
+            AND squeeze_state(8/25)='已释放'
+            AND latest_sqz_off_freshness(8/25)=0
+```
+
+结果（真实 SQL 计数，非 ratio 反推）：
+```text
+ELIGIBLE_PAIR_COUNT          = 5293
+REAL_RELEASE_EVENT_COUNT_0825 = 86
+RELEASE_RATIO_JSON_NUMBER_COUNT = 0   (全市场 fp_release_volume_ratio 全 JSON null)
+RELEASE_RATIO_JSON_NULL_COUNT   = 5293
+```
+
+按既定裁决规则：
+```text
+if REAL_RELEASE_EVENT_COUNT > 0 and JSON_NUMBER_COUNT == 0:
+    RELEASE_RATIO_0825 = PRODUCER_DEFECT
+```
+→ **RELEASE_RATIO_0825 = PRODUCER_DEFECT**（非 LEGIT_UNAVAILABLE）。
+
+**根因**：8/25 快照生产时 `fp_release_volume_ratio` 字段尚未被 materialize
+（该字段由本 CHANGE 系列新增，8/25 历史快照早于它）→ 86 个真实 release 成员均无数值
+ratio 可用。A 修复保证**未来**快照正确填充；8/25 历史需 reprocess 才能补齐
+（本轮 gate 规则：NO reprocess，故 8/25 页面仍显示该字段 unavailable，属待 reprocess 的
+producer/completeness 缺陷，非页面逻辑错误）。
+
+**纠正前两轮错误结论**：此前两论称「释放量比 on 8/25 = LEGIT_UNAVAILABLE」是错的，
+根因是只用 ratio 自身为空反推「无 release」（循环论证）。
+独立 transition census 证明 86 个真实 release 存在 → 应为 PRODUCER_DEFECT。
+
+#### PHASE D — 全量 8/25 Review 用户可见字段 census（递归遍历真实 observation_payload）
+
+对 749 个 8/25 scope facts 的 `build_l2_observation_groups` 真实输出做递归 leaf 遍历
+（含 `status` 的叶子），聚合：
+
+| field_path | total | available | unavailable | valid_count=0 | reason |
+|---|---|---|---|---|---|
+| `{chip}` | 749 | 0 | 749 | 0 | (无 reason) |
+| `{momentum,momentum_volume_relation}` | 81 | 0 | 81 | 0 | CURRENT_SOURCE_UNAVAILABLE |
+| `{momentum,release_volume_ratio}` | 749 | 0 | 749 | 749 | CURRENT_SOURCE_UNAVAILABLE |
+| `{price,amount,concentration}` | 749 | 0 | 749 | 0 | — |
+| `{price,concentration}` | 749 | 0 | 749 | 0 | — |
+| `{price,signed_contribution}` | 749 | 0 | 749 | 0 | — |
+| `{structure,events}` | 749 | 0 | 749 | 0 | — |
+
+按 PHASE E 业务不变量分类（禁止 source null 自动归 LEGIT）：
+
+- **CONFIRMED_PAGE_FACT_DEFECTS**
+  - `momentum.release_volume_ratio` → **PRODUCER_DEFECT**（独立证明 86 真实 release，0 数值）。
+- **PENDING_OWNER_TRACE**（本 gate 未穷尽 trace，不臆断）
+  - `momentum.momentum_volume_relation`（仅 81 scope 出现，同源 CURRENT_SOURCE_UNAVAILABLE；
+    其 canonical squeeze state 已证明可用 → 疑似 PROJECTION/owner 问题，需单独 trace）。
+- **NOT_ASSESSED_IN_THIS_GATE**（属 chip/price/structure 其他模块，本 gate 未跑其独立 source census）
+  - `chip`、`price.concentration`、`price.signed_contribution`、`price.amount.concentration`、
+    `structure.events` → 各自有独立 canonical source（chip/participation、price、structure 模块），
+    本 gate 未对其 source 做独立可用性验证，**不判定 LEGIT 也不判定 DEFECT**。
+- **LEGIT_UNAVAILABLE** = 无（本 gate 未确认任何字段为 legit）。
+
+> 注：本 gate 范围聚焦 squeeze-volume facts；chip/price/structure 字段的可用性需各自模块
+> 的独立 source census，不在本轮裁决内。
 
 ### 精确 scope 成员枚举（§D）状态
 
@@ -198,12 +277,14 @@ Not merely "events exist"; the type-to-type semantic mapping must be verified.
   B1 `build_momentum_history` SqueezeVolumeFacts（exactly-one release, no-release-after-
   continued-sqzoff, still-squeezing mean present & ratio None, release-day mean from prior
   squeeze & ratio=mean/vol[T], release-2nd-day both None, no-sqz, event==daily_state
-  projection, vol<=0 ratio None but mean exists）.
+  projection, vol<=0 ratio None but mean exists）+
+  PHASE B（vol=None event 仍生成且身份正确、NaN history 不影响 identity、NaN release vol
+  ratio=None、active squeeze vol=None mean=None、valid vol mean/ratio 正确）.
   B2 consumer（注入 daily_state[T] sentinel → 只转发不重算；缩量挤压分支可达；
   vol_divergence 阈值 ratio=0.50→放量释放, ratio=0.80→not）。
 - Regressions: `test_first_pyramid_flatten`, `test_review_observation_prep`,
   `test_review_observation_group_service`, `test_change_20260729_003`,
   `test_review_scope_observation`, `test_review_observation_groups`,
-  `test_release_volume_ratio_ssot` → 270 passed.
+  `test_release_volume_ratio_ssot` → 275 passed.
 - `test_review_vectorized_facts` has 4 pre-existing failures confirmed identical on base
   `aedcc766` (unrelated to this change; not a regression).
