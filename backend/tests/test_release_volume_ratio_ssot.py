@@ -269,6 +269,65 @@ def test_b1_valid_volume_active_and_release_correct():
     assert abs(ds5["release_volume_ratio"] - (100.0 / 500.0)) < 1e-6
 
 
+def test_b1_finite_squeeze_interval_inf_filtered():
+    # PHASE A: squeeze 区间内含 +inf/-inf 成员 → 用 isfinite 过滤，均量只取有限值
+    n = 6
+    sqz_on = [False] * 4 + [True, False]
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    # T=4 仍 sqzOn；区间 [4:5]=[100]，若用 isnan 会误含 ±inf（此处区间外无影响，
+    # 改用 active squeeze 多根区间测试 inf 过滤）
+    sqz_on2 = [False] * 3 + [True, True, False]  # T=3,4 sqzOn
+    sqz_off2 = [False] * 5 + [True]
+    vol2 = [10.0, 10.0, 10.0, np.inf, -np.inf, 500.0]  # T=3,4 为 ±inf
+    mh = build_momentum_history(_sqzmom(sqz_on2, sqz_off2, [-1.0]*5+[0.5]), vol2, times=[str(i) for i in range(n)])
+    # T=3,4 为 active squeeze，区间 [3:5]=[inf,-inf] 全非有限 → mean 应有值则取空 → None
+    ds3 = mh["daily_state"][3]
+    # 区间 [3:4]=[inf] 非有限 → valid 空 → mean None
+    assert ds3["squeeze_period_volume_mean"] is None
+
+
+def test_b1_finite_release_volume_inf_ratio_none():
+    # PHASE A: release volume = +inf → 通过 >0 但 isfinite 失败 → ratio=None（非 0）
+    n = 6
+    sqz_on = [False] * 4 + [True, False]
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    vol = [100.0, 100.0, 100.0, 100.0, 100.0, np.inf]  # release vol = +inf
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), vol, times=[str(i) for i in range(n)])
+    rel = [e for e in mh["sqz_release_events"] if e["type"] == "SQZ_RELEASE"][0]
+    assert rel["squeeze_start_index"] == 4
+    assert rel["squeeze_period_volume_mean"] is not None  # 区间 [4:5]=[100] 有限
+    assert rel["release_volume_ratio"] is None  # +inf 不产出 ratio=0
+
+
+def test_b1_finite_release_volume_neg_inf_ratio_none():
+    # PHASE A: release volume = -inf → isfinite 失败 → ratio=None
+    n = 6
+    sqz_on = [False] * 4 + [True, False]
+    sqz_off = [False] * 5 + [True]
+    val = [-1.0] * 5 + [0.5]
+    vol = [100.0, 100.0, 100.0, 100.0, 100.0, -np.inf]
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), vol, times=[str(i) for i in range(n)])
+    rel = [e for e in mh["sqz_release_events"] if e["type"] == "SQZ_RELEASE"][0]
+    assert rel["squeeze_period_volume_mean"] is not None
+    assert rel["release_volume_ratio"] is None
+
+
+def test_b1_finite_squeeze_mean_ignores_inf_but_keeps_finite():
+    # PHASE A: squeeze 区间混有 ±inf 与有限值 → 均量仅用有限值
+    n = 7
+    sqz_on = [False] * 3 + [True, True, True, False]  # T=3,4,5 sqzOn
+    sqz_off = [False] * 6 + [True]
+    val = [-1.0] * 6 + [0.5]
+    vol = [10.0, 10.0, 10.0, np.inf, 50.0, -np.inf, 200.0]  # T=3,4,5 区间=[inf,50,-inf]
+    mh = build_momentum_history(_sqzmom(sqz_on, sqz_off, val), vol, times=[str(i) for i in range(n)])
+    ds5 = mh["daily_state"][5]  # active squeeze 最后一根，区间 [3:6]=[inf,50,-inf]
+    # 仅 50 有限 → mean=50
+    assert abs(ds5["squeeze_period_volume_mean"] - 50.0) < 1e-6
+    assert ds5["release_volume_ratio"] is None
+
+
 # ---------------------------------------------------------------------------
 # B2. Consumer wiring 层（monkeypatch 注入 daily_state sentinel，证明只转发不重算）
 # ---------------------------------------------------------------------------

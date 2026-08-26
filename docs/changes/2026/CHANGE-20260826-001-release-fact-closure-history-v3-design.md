@@ -1,9 +1,11 @@
 # CHANGE-20260826-001 — Release Volume Ratio Closure + History-v3 Boundary Design
 
 - Status: `verified_code_pending_acceptance`
-- Base: `aedcc76639fc1d82d74ee8f83c0a6a308c5c7182` (correction commit on top)
+- Base: `946ef94fe3d40b14b9bb059e3672d484d6fdb66f`
 - No production deploy / no production DB write / no after-close run / no History backfill this round.
 - after-close worker remains STOPPED.
+- 8/25 release ratio 历史结论冻结为 `LEGACY_SNAPSHOT_INCOMPLETE_REQUIRES_REPROCESS`
+  （不再跑 86-stock production forensic；交由未来 deploy+reprocess 验收）。
 
 ## 1. Release-fact semantic closure (P0)
 
@@ -84,6 +86,29 @@ CASE 3 — 其他: 两者均 None
 可选的量能事实（CASE 1/2 的 mean/ratio）。`vol_arr=None` 时 event 仍合法生成，身份恒存在，
 量能事实为 None，无异常。
 
+### A6 — finite volume contract（PHASE A 收尾，本轮冻结项）
+
+代码注释与测试合同规定 release volume 必须 `finite && > 0`，但原实现仅 `vol_arr[i] > 0`
+且 squeeze 区间仅 `~np.isnan(...)` 过滤，导致 `+inf`/`-inf` 会通过 `> 0` 并被算入均量
+（如 `volume[T]=+inf` → `ratio = mean/inf = 0`，甚至误判为「放量释放」），与「非有限量能应
+unavailable」不一致。
+
+修复（`sqzmom_lb.build_momentum_history`）：
+```python
+# squeeze 区间过滤
+valid = seg[np.isfinite(seg)]
+# release volume 门
+if np.isfinite(vol_arr[i]) and vol_arr[i] > 0:
+    release_vol_ratio = squeeze_mean / float(vol_arr[i])
+```
+非有限 volume → event identity 保留、volume fact unavailable。
+
+新增 B1 测试（`test_release_volume_ratio_ssot.py`）：
+1. `+inf`/`-inf` squeeze 成员 → `np.isfinite` 过滤，区间均量只取有限值；
+2. `release volume = +inf` → 通过 `>0` 但 `isfinite` 失败 → `ratio=None`（不产出 0）；
+3. `release volume = -inf` → `isfinite` 失败 → `ratio=None`；
+4. squeeze 区间混有 ±inf 与有限值 → 均量仅用有限值（`[inf,50,-inf]` → mean=50）。
+
 PHASE B negative tests 新增：
 1. SQZ_RELEASE + volumes=None → event 生成、seg_start/squeeze_length 正确、mean/ratio=None、无异常；
 2. SQZ_RELEASE + squeeze history 含 NaN → window identity 不受影响；
@@ -149,53 +174,66 @@ RELEASE_RATIO_JSON_NUMBER_COUNT = 0   (全市场 fp_release_volume_ratio 全 JSO
 RELEASE_RATIO_JSON_NULL_COUNT   = 5293
 ```
 
-按既定裁决规则：
+独立证据（未进一步 forensic 重建历史有效 volume 基数）：
 ```text
-if REAL_RELEASE_EVENT_COUNT > 0 and JSON_NUMBER_COUNT == 0:
-    RELEASE_RATIO_0825 = PRODUCER_DEFECT
+REAL_RELEASE_EVENT_COUNT_0825 = 86   (真实 squeeze-release transition 存在)
+RELEASE_RATIO_JSON_NUMBER_COUNT = 0  (8/25 全市场 fp_release_volume_ratio 全 JSON null)
+EXPECTED_RELEASE_RATIO_COUNT   = 未重建 (因本轮 AST-FORWARD：不再跑 86-stock production forensic)
 ```
-→ **RELEASE_RATIO_0825 = PRODUCER_DEFECT**（非 LEGIT_UNAVAILABLE）。
 
-**根因**：8/25 快照生产时 `fp_release_volume_ratio` 字段尚未被 materialize
-（该字段由本 CHANGE 系列新增，8/25 历史快照早于它）→ 86 个真实 release 成员均无数值
-ratio 可用。A 修复保证**未来**快照正确填充；8/25 历史需 reprocess 才能补齐
-（本轮 gate 规则：NO reprocess，故 8/25 页面仍显示该字段 unavailable，属待 reprocess 的
-producer/completeness 缺陷，非页面逻辑错误）。
+→ **RELEASE_RATIO_0825 = LEGACY_SNAPSHOT_INCOMPLETE_REQUIRES_REPROCESS**
 
-**纠正前两轮错误结论**：此前两论称「释放量比 on 8/25 = LEGIT_UNAVAILABLE」是错的，
-根因是只用 ratio 自身为空反推「无 release」（循环论证）。
-独立 transition census 证明 86 个真实 release 存在 → 应为 PRODUCER_DEFECT。
+**含义**：8/25 历史快照生产时 `fp_release_volume_ratio` 字段尚未被 materialize
+（该字段由本 CHANGE 系列新增，8/25 历史快照早于它），导致 86 个真实 release 成员均无数值
+ratio。本轮 gate 规则明确：**NO production deploy / NO reprocess / 不再做旧数据考古**。
+因此 8/25 的确切 EXPECTED_RELEASE_RATIO_COUNT（86 ∩ 合法 volume 基数）**有意不再 forensic
+重建**，交由未来「正式 deploy 修正后 producer + reprocess」统一验收。
 
-#### PHASE D — 全量 8/25 Review 用户可见字段 census（递归遍历真实 observation_payload）
+**此冻结结论不阻断已修正的 producer 合同**：PHASE A 的 `np.isfinite` volume 合同与
+A1–A5 的 owner 修复保证未来快照正确填充；88/25 页面该字段 unavailable 属「待 reprocess 的
+legacy snapshot 不完整」，非页面逻辑错误，也非本轮需继续论证的 PRODUCER_DEFECT 铁证。
 
-对 749 个 8/25 scope facts 的 `build_l2_observation_groups` 真实输出做递归 leaf 遍历
-（含 `status` 的叶子），聚合：
+**纠正前两轮错误结论**：此前两论称「释放量比 on 8/25 = LEGIT_UNAVAILABLE」是错的（循环论证：
+只用 ratio 自身为空反推无 release）。独立 transition census 已证明 86 个真实 release 存在，
+但本轮不再进一步 forensic 重建历史有效 volume 基数以升级为 PRODUCER_DEFECT 铁证。
 
-| field_path | total | available | unavailable | valid_count=0 | reason |
-|---|---|---|---|---|---|
-| `{chip}` | 749 | 0 | 749 | 0 | (无 reason) |
-| `{momentum,momentum_volume_relation}` | 81 | 0 | 81 | 0 | CURRENT_SOURCE_UNAVAILABLE |
-| `{momentum,release_volume_ratio}` | 749 | 0 | 749 | 749 | CURRENT_SOURCE_UNAVAILABLE |
-| `{price,amount,concentration}` | 749 | 0 | 749 | 0 | — |
-| `{price,concentration}` | 749 | 0 | 749 | 0 | — |
-| `{price,signed_contribution}` | 749 | 0 | 749 | 0 | — |
-| `{structure,events}` | 749 | 0 | 749 | 0 | — |
+#### PHASE D — 全量 8/25 Review 用户可见字段 census（方法纠正，本轮不重跑）
 
-按 PHASE E 业务不变量分类（禁止 source null 自动归 LEGIT）：
+> **方法纠错（CRITICAL）**：上一版文档写「递归遍历 `ReviewScopeObservationFact.observation_payload`
+> 发现 7 个用户可见 leaf unavailable」是**错误的方法**。正式 API 是运行时才把 L1
+> `observation_payload` 经 `build_l2_observation_groups()` 投影成 L2 `observationGroups`
+> 再送前端；**递归扫描原始 observation_payload ≠ 扫描前端用户可见字段**。
+> 本轮按 AST-FORWARD 不再跑 production forensic，故 L2 contract-aware census 推迟到
+> History-v3 稳定后的独立验收轮，此处仅记录方法纠错，不保留旧 recursive census 结论。
 
-- **CONFIRMED_PAGE_FACT_DEFECTS**
-  - `momentum.release_volume_ratio` → **PRODUCER_DEFECT**（独立证明 86 真实 release，0 数值）。
-- **PENDING_OWNER_TRACE**（本 gate 未穷尽 trace，不臆断）
-  - `momentum.momentum_volume_relation`（仅 81 scope 出现，同源 CURRENT_SOURCE_UNAVAILABLE；
-    其 canonical squeeze state 已证明可用 → 疑似 PROJECTION/owner 问题，需单独 trace）。
-- **NOT_ASSESSED_IN_THIS_GATE**（属 chip/price/structure 其他模块，本 gate 未跑其独立 source census）
+L2 固定 8 组（`observation_groups.py` `L2_GROUP_SPECS`）及其 L1 source path 已明确，例如：
+```text
+momentum_squeeze_release:
+    squeeze_state      ← momentum.squeeze_state
+    bb_position        ← momentum.bb_position
+    bb_width           ← momentum.bb_width
+    release_volume_ratio ← momentum.release_volume_ratio
+trend_volume_confirmation:
+    momentum_volume_relation ← momentum.momentum_volume_relation
+```
+后续 census 应直接调用 `build_l2_observation_groups(fact.observation_payload)`（禁止手写 JSON path），
+且**不得用统一的 `status=="available"` 判断所有字段**——不同 fact shape 不同
+（`_current_only_distribution` 与 `_open_categorical_distribution` 的 available 输出本就无
+`status="available"`，只有 unavailable 才有 `status`）。旧「`momentum_volume_relation` 0/81
+available」统计即源于此解释错误：81 行实际是 **81 个 scope 该 categorical 无数据（status=unavailable）**，
+其余约 668 个 scope 本就有 available 输出（只是 shape 无 `status` 字段，被 query 漏数）。
+
+按 PHASE E 业务不变量分类（禁止 source null 自动归 LEGIT；本轮不重跑，仅记录待验收项）：
+
+- **PENDING_REPROCESS_VERIFY**（需未来 deploy+reprocess 后由 contract-aware L2 census 验收）
+  - `momentum.release_volume_ratio`（独立证明 86 真实 release；0 数值源于 legacy snapshot 未 materialize）。
+  - `momentum.momentum_volume_relation`（81 scope 无 categorical 数据；其 canonical
+    `vol_divergence` owner 条件已明确，需重算 expected member set 与 persisted parity，疑为
+    legacy snapshot 不完整而非 projection defect）。
+- **NOT_ASSESSED_IN_THIS_GATE**（chip/price/structure 模块，本轮未跑其独立 source census）
   - `chip`、`price.concentration`、`price.signed_contribution`、`price.amount.concentration`、
-    `structure.events` → 各自有独立 canonical source（chip/participation、price、structure 模块），
-    本 gate 未对其 source 做独立可用性验证，**不判定 LEGIT 也不判定 DEFECT**。
-- **LEGIT_UNAVAILABLE** = 无（本 gate 未确认任何字段为 legit）。
-
-> 注：本 gate 范围聚焦 squeeze-volume facts；chip/price/structure 字段的可用性需各自模块
-> 的独立 source census，不在本轮裁决内。
+    `structure.events` → 各自有独立 canonical source，本轮不判定 LEGIT 也不判定 DEFECT。
+- **LEGIT_UNAVAILABLE** = 无本轮确认项（同上，待 contract-aware census 验收）。
 
 ### 精确 scope 成员枚举（§D）状态
 
@@ -279,12 +317,26 @@ Not merely "events exist"; the type-to-type semantic mapping must be verified.
   squeeze & ratio=mean/vol[T], release-2nd-day both None, no-sqz, event==daily_state
   projection, vol<=0 ratio None but mean exists）+
   PHASE B（vol=None event 仍生成且身份正确、NaN history 不影响 identity、NaN release vol
-  ratio=None、active squeeze vol=None mean=None、valid vol mean/ratio 正确）.
+  ratio=None、active squeeze vol=None mean=None、valid vol mean/ratio 正确）；
+  **A6 finite-input（±inf squeeze 成员过滤、±inf release volume → ratio=None、混合
+  区间均量仅用有限值）**.
   B2 consumer（注入 daily_state[T] sentinel → 只转发不重算；缩量挤压分支可达；
   vol_divergence 阈值 ratio=0.50→放量释放, ratio=0.80→not）。
 - Regressions: `test_first_pyramid_flatten`, `test_review_observation_prep`,
   `test_review_observation_group_service`, `test_change_20260729_003`,
   `test_review_scope_observation`, `test_review_observation_groups`,
-  `test_release_volume_ratio_ssot` → 275 passed.
+  `test_release_volume_ratio_ssot` → 279 passed.
 - `test_review_vectorized_facts` has 4 pre-existing failures confirmed identical on base
   `aedcc766` (unrelated to this change; not a regression).
+
+## 6. Frozen verdicts (AST-FORWARD)
+
+```text
+FINITE_VOLUME_CONTRACT = PASS   (np.isfinite 过滤 squeeze 区间 + release volume)
+REAL_RELEASE_EVENT_COUNT_0825 = 86
+RELEASE_RATIO_JSON_NUMBER_COUNT_0825 = 0
+RELEASE_RATIO_0825 = LEGACY_SNAPSHOT_INCOMPLETE_REQUIRES_REPROCESS
+  (EXPECTED_RELEASE_RATIO_COUNT 有意不再 forensic 重建；不阻断已修正 producer 合同)
+PRODUCTION_DEPLOY = NONE
+AFTER_CLOSE_WORKER = STOPPED
+```

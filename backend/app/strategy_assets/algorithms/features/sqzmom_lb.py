@@ -555,7 +555,8 @@ def build_momentum_history(
             squeeze_len = i - seg_start + 1
             if vol_arr is not None:
                 seg = vol_arr[seg_start:i + 1]
-                valid = seg[~np.isnan(seg)]
+                # 正式 volume 输入必须 finite：±inf / NaN 都不计入均量
+                valid = seg[np.isfinite(seg)]
                 if len(valid) > 0:
                     squeeze_period_volume_mean = float(np.mean(valid))
                     release_vol_ratio = None
@@ -567,11 +568,13 @@ def build_momentum_history(
             squeeze_len = i - seg_start
             if vol_arr is not None:
                 seg = vol_arr[seg_start:i]
-                valid = seg[~np.isnan(seg)]
+                # 正式 volume 输入必须 finite：±inf / NaN 都不计入均量
+                valid = seg[np.isfinite(seg)]
                 if len(valid) > 0:
                     squeeze_mean = float(np.mean(valid))
                     squeeze_period_volume_mean = squeeze_mean
-                    if vol_arr[i] > 0:
+                    # release volume 必须 finite 且 > 0 才允许 ratio
+                    if np.isfinite(vol_arr[i]) and vol_arr[i] > 0:
                         release_vol_ratio = squeeze_mean / float(vol_arr[i])
         else:
             seg_start = None
