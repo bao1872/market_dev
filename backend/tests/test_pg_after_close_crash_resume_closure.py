@@ -214,7 +214,7 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         get_after_close_run_status,
     )
 
-    test_date = date(2026, 8, 25)
+    test_date = date(2026, 8, 22)
 
     core_count = {"n": 0}
     stock_core_publish_count = {"n": 0}
@@ -350,7 +350,7 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         get_after_close_run_status,
     )
 
-    test_date = date(2026, 8, 25)
+    test_date = date(2026, 8, 21)
 
     async def _fail_events(db, *a, **k):
         raise RuntimeError("state_events failed")
@@ -439,7 +439,7 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         get_publication,
     )
 
-    test_date = date(2026, 8, 25)
+    test_date = date(2026, 8, 20)
 
     async def _fail_dsa(*a, **k):
         return "failed"  # DSA projection failure (optional step)
