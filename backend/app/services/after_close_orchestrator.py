@@ -4110,12 +4110,16 @@ async def execute_after_close_run(
                 )
                 # [AUDIT-CORRECTION-01 / Blocker 4] 记录成功态，使 enhancement 段
                 # 的成功/失败均有 step_summary 条目，统一进入 optional_failures 判定。
-                step_summary["state_events"] = {
+                # 使用 _persist_step_summary 落库（避免闭包 free-var 在 except 分支的
+                # UnboundLocalError，并确保 terminal 块与 get_after_close_run_status
+                # 读取的是同一份 DB step_summary）。
+                await _persist_step_summary(job_run_id, {
+                    "step": "state_events",
                     "optional": True,
                     "status": "succeeded",
                     "event_count": event_stats.get("event_count", 0),
                     "failed_count": event_stats.get("failed_count", 0),
-                }
+                })
             except Exception as event_exc:
                 logger.warning(
                     "[AfterClose] 状态事件生成失败（不影响主流程）: "
@@ -4126,11 +4130,14 @@ async def execute_after_close_run(
                 # enhancement 失败必须写入 step_summary（optional=True, status=failed），
                 # 否则它既不会进入 optional_failures，也不会使 parent 成为 partial_success，
                 # 造成「enhancement 失败却被伪装成全成功」的 false-green。
-                step_summary["state_events"] = {
+                # 使用 _persist_step_summary 落库（避免闭包 free-var 在 except 分支的
+                # UnboundLocalError）。
+                await _persist_step_summary(job_run_id, {
+                    "step": "state_events",
                     "optional": True,
                     "status": "failed",
                     "error": str(event_exc),
-                }
+                })
 
         # [P1-2] chip 入队（non-blocking post-core；stock_core 发布成功后执行）
         # 幂等依据：create_after_close_chip_consensus_job 以
@@ -4169,6 +4176,13 @@ async def execute_after_close_run(
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:
             job_run = await _get_job_run_or_raise(db, job_run_id)
+            # [AUDIT-CORRECTION-01 / Blocker 4] 单一事实源：terminal 块必须从「已落库」的
+            # metadata.step_summary 重新加载，而不是用函数内早期那份 in-memory 副本
+            # （review/auction_anchor/state_events/chip 等 enhancement 摘要只经
+            # _persist_step_summary 写入 DB，不会回写 in-memory 副本）。否则 terminal
+            # 计算的 optional_failures / partial_success 会与 DB 中 step_summary 不一致
+            # （false-green）。
+            step_summary = dict(_parse_metadata(job_run).get("step_summary") or {})
             # published_run 可能为 None（断点恢复跳过 publishing 时）
             published_at_str = (
                 published_run.published_at.isoformat()
