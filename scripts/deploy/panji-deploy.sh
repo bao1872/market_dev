@@ -1186,6 +1186,21 @@ deploy() {
     fi
 
     # 6. 重启：Python 服务与 frontend 分别判定；postgres/redis/umami 永不重启
+    #
+    # [DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE] 紧邻 runtime destructive action
+    # 的第二道 fail-closed 门禁：第一道 guard 在 deploy() 开头执行（任何 live mutation 之前），
+    # 但中间存在 classify/build/sync/migration 等多个可能耗时的阶段，期间 worker-after-close
+    # 可能接纳新的强制阻塞类活跃任务。restart_services / reconcile_compose_runtime 会
+    # force-recreate worker-after-close，若在此时存在活跃任务 → 直接 SIGKILL 正在执行的
+    # mandatory after-close / Review 链路，造成 ownership 不清的 running job（本次真实 8/25
+    # reprocess 即暴露此 TOCTOU 窗口）。
+    #
+    # 因此在实际发起重启 / 配置对账（destructive runtime action）之前，复用同一
+    # guard_active_after_close_jobs 再检查一次，fail-closed 拒绝部署。
+    # guard 自身已在 backend runtime 不变化时直接放行（frontend-only 不被无关活跃任务阻塞）。
+    FAILURE_STAGE="active_job_gate_pre_restart"
+    guard_active_after_close_jobs
+
     FAILURE_STAGE="restart"
     local restart_list=()
     if [[ "${need_backend}" == "true" ]]; then

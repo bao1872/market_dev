@@ -429,6 +429,68 @@ fi
 assert_code_contains "DEFECT2 纯 Compose 变化走 reconcile（CASE A）" \
     'if \[\[ "\$\{COMPOSE_RUNTIME_CHANGED\}" == "true" \]\]; then' "${SERVER_SCRIPT}"
 
+# ---------------------------------------------------------------------------
+echo "== 11/11 DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE =="
+# 复用现有 owner guard_active_after_close_jobs，在 deploy() 两处各调用一次：
+#   guard #1：deploy() 开头，任何 live mutation 之前（防已存在 running job 时开始变更）
+#   guard #2：紧邻 destructive runtime action（restart_services / reconcile_compose_runtime）之前，
+#             拦截 gate→restart 窗口内新接纳的活跃 after-close 任务。
+# 不新建另一套 active-job 查询 owner。
+
+# CASE A：原有行为——第一道 guard 位于 deploy() 开头（任何 live mutation 之前）。
+_deploy_func_body="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1; next} f&&/^}/{exit} f')"
+_guard1_line="$(echo "${_deploy_func_body}" | grep -n 'guard_active_after_close_jobs' | head -1 | cut -d: -f1)"
+_guard_total="$(echo "${_deploy_func_body}" | grep -c 'guard_active_after_close_jobs')"
+if [[ -n "${_guard1_line}" && "${_guard1_line}" -le 10 ]]; then
+    ok "CASE A 第一道 guard 位于 deploy() 开头（live mutation 之前）"
+else
+    bad "CASE A 第一道 guard 应位于 deploy() 开头"
+fi
+
+# CASE B：本次新增核心合同——第二道 guard 紧邻 restart_services / reconcile_compose_runtime 之前。
+_restart_line="$(echo "${_deploy_func_body}" | grep -n 'restart_services "\${restart_list\[@\]}" || return 1' | head -1 | cut -d: -f1)"
+_reconcile_line="$(echo "${_deploy_func_body}" | grep -n 'reconcile_compose_runtime "${PYTHON_SERVICES\[@\]}" frontend || return 1' | head -1 | cut -d: -f1)"
+_guard2_line="$(echo "${_deploy_func_body}" | grep -n 'guard_active_after_close_jobs' | tail -1 | cut -d: -f1)"
+if [[ "${_guard_total}" -ge 2 ]]; then ok "CASE B 存在第二道 guard（复用同一 owner）"; else bad "CASE B 必须存在第二道 guard"; fi
+if [[ -n "${_guard2_line}" && -n "${_restart_line}" && "${_guard2_line}" -lt "${_restart_line}" ]]; then
+    ok "CASE B 第二道 guard 位于 restart_services 之前"
+else
+    bad "CASE B 第二道 guard 必须紧邻 restart_services 之前"
+fi
+if [[ -n "${_guard2_line}" && -n "${_reconcile_line}" && "${_guard2_line}" -lt "${_reconcile_line}" ]]; then
+    ok "CASE B 第二道 guard 位于 reconcile_compose_runtime 之前"
+else
+    bad "CASE B 第二道 guard 必须位于 reconcile_compose_runtime 之前"
+fi
+# 两道 guard 之间必须存在多阶段窗口（TOCTOU 窗口客观存在，需第二道兜底）。
+if [[ -n "${_guard1_line}" && -n "${_guard2_line}" && "$((_guard2_line - _guard1_line))" -ge 5 ]]; then
+    ok "CASE B 两道 guard 之间存在多阶段窗口（TOCTOU 窗口客观存在，需第二道兜底）"
+else
+    bad "CASE B 两道 guard 之间应存在多阶段窗口"
+fi
+
+# CASE C：无 active job 时正常重启路径保留（guard 后仍存在 restart_services 调用）。
+if [[ -n "${_restart_line}" ]]; then
+    ok "CASE C 第二道 guard 后仍存在 restart_services 调用（无 active job 时正常重启路径保留）"
+else
+    bad "CASE C 必须保留 restart_services 正常路径"
+fi
+
+# CASE D：frontend-only（backend runtime 不 mutate）时，guard 自身 early-return 放行，
+#   不被 after-close 活跃任务无关阻塞。结构断言：guard_active_after_close_jobs 函数体内，
+#   在 `! _backend_runtime_will_mutate` 守卫后存在 return 0 提前放行（backend 不变则跳过门禁）。
+if code_of "${SERVER_SCRIPT}" | awk '
+/^guard_active_after_close_jobs\(\)/{f=1; next}
+f && /^}/{exit}
+f && /! _backend_runtime_will_mutate/ {seen=1; next}
+seen && /return 0/ {found=1}
+END{exit !found}
+'; then
+    ok "CASE D guard 在 backend runtime 不变化时 early-return 放行（frontend-only 不被阻塞）"
+else
+    bad "CASE D guard 必须在 backend runtime 不变时 early-return 放行"
+fi
+
 rm -f "${_DEPLOY_FIXTURE}"
 rm -rf "${_GIT_STUB_DIR}"
 
