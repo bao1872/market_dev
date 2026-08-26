@@ -588,8 +588,8 @@ async def generate_events_for_run(
     # 所有 chunk 仍属于当前同一个 transaction（不 per-chunk commit），任一分批失败按
     # 现有异常语义传播，保持外层 rollback/失败契约。
     inserted_count = 0
+    _t2 = time.time()
     if events_to_insert:
-        _t2 = time.time()
         logger.info(
             "[EVENT-E5] before bulk-write run_id=%s rows=%s pid=%s",
             run_id, len(events_to_insert), os.getpid(),

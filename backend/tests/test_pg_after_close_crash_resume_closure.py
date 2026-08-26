@@ -224,9 +224,6 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     history_advance_attempts = {"n": 0}
     history_should_crash = {"on": True}
     review_step_count = {"n": 0}
-    review_create_count = {"n": 0}
-    review_compute_count = {"n": 0}
-    review_publish_count = {"n": 0}
 
     async def _fake_compute_core(*a, **k):
         core_count["n"] += 1
@@ -238,39 +235,11 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
             raise _SimulatedProcessDeath("process disappeared during History advance")
         return {"target_state_count": 100, "advanced": True}
 
-    async def _fake_create_run(db, *a, **k):
-        review_create_count["n"] += 1
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = uuid.uuid4()
-        rr.source_board_run_id = None
-        return rr
-
-    async def _fake_compute_run(db, review_run, *a, **k):
-        review_compute_count["n"] += 1
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        review_publish_count["n"] += 1
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
-
-    async def _spy_review_step(*a, **k):
+    async def _sentinel_review_step(*a, **k):
+        # 入口即停（证明 Review 已被到达），raise 前计数。
+        # 不真实执行 review step：避免 verify 运行期真实 owner 交互的脆弱性，
+        # 也避免全局 patch 污染其他并发 after_close run 的计数。
         review_step_count["n"] += 1
-        # 执行真实 review step（owner 在 verify 运行期真实可用），仅计数入口。
-        return await orchestrator._execute_review_step(*a, **k)
-
-    async def _sentinel_create_run(db, *a, **k):
-        # 与既有 test_pg_resume_integration 一致：review 入口即停（证明 Review 已到达），
-        # 避免真实 review step 在 synthetic DB 下的脆弱 DB 交互。
-        review_create_count["n"] += 1
         raise _ReviewStepEnteredError()
 
     class _ReviewStepEnteredError(Exception):
@@ -294,8 +263,7 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     common_patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
-        patch("app.services.review_orchestrator_service.create_run", new=_sentinel_create_run),
+        patch("app.services.after_close_orchestrator._execute_review_step", new=_sentinel_review_step),
     ]
 
     # Attempt 1: crash at History
