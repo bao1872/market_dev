@@ -91,8 +91,10 @@ def test_state_events_gate_on_core_readiness():
     m = re.search(r'\n\s*if (.*?):\n', block)
     assert m is not None, "未找到 state_events 守卫"
     cond = m.group(1).strip()
-    assert cond == "snapshot_run_id is not None", (
-        f"state_events 守卫必须基于 CoreRun 显式绑定（snapshot_run_id is not None），"
+    # [CORRECTION-03 升级] 门控进一步升级为 canonical CORE_READY
+    # （由 _validate_core_ready 校验真实 CoreRun 行后置位）
+    assert cond == "core_ready", (
+        f"state_events 守卫必须基于 canonical CORE_READY（core_ready），"
         f"实际为: {cond}"
     )
     assert "_stock_core_published" not in cond, (
@@ -121,9 +123,10 @@ def test_chip_gate_on_core_readiness():
     m = re.search(r'\n\s*if (.*?):\n', block)
     assert m is not None, "未找到 chip 守卫"
     cond = m.group(1).strip()
-    assert cond == "snapshot_run_id is not None", (
-        f"chip 守卫必须基于 CoreRun 显式绑定（snapshot_run_id is not None），"
-        f"实际为: {cond}"
+    # [CORRECTION-03 升级] 门控进一步升级为 canonical CORE_READY
+    # （由 _validate_core_ready 校验真实 CoreRun 行后置位）
+    assert cond == "core_ready", (
+        f"chip 守卫必须基于 canonical CORE_READY（core_ready），实际为: {cond}"
     )
     assert "_stock_core_published" not in cond, (
         "chip 不得再依赖 _stock_core_published"
@@ -286,20 +289,20 @@ def test_auction_anchor_retired_not_gated_on_publication():
 # ---------------------------------------------------------------------------
 
 
-def test_dsa_projection_ok_truthful_not_unconditional_true():
-    """DSA 兼容性投影：_dsa_projection_ok 据真实执行产物置位，不得无条件 True。
+def test_dsa_projection_status_truthful_not_from_run_id():
+    """DSA 兼容性状态：不得由 run id 推断成功，必须来自真实执行结果。
 
-    锁定：正常分支中 _dsa_projection_ok 的赋值不再是 `= True`，
-    而是基于 dsa_run_id 是否真实创建（实际投影在步骤 2.x 已执行）。
+    [CORRECTION-03 升级] _dsa_projection_ok 已被整体移除；正常分支使用
+    _dsa_compatibility_status="not_run" 初始化，真实值仅能来自
+    _run_dsa_compatibility_projection 的实际执行返回。
     """
     src = _main_src()
-    # 找到正常分支（not skip_publish）的 _dsa_projection_ok 赋值
-    # 该分支的赋值形如 `_dsa_projection_ok = (dsa_run_id is not None)`
-    assert "_dsa_projection_ok = (dsa_run_id is not None)" in src, (
-        "正常分支 _dsa_projection_ok 必须基于 dsa_run_id 真实创建置位，"
-        "不得无条件 = True（防 false-green）"
+    # 旧的 run-id 推断布尔必须不存在
+    assert "_dsa_projection_ok" not in src, (
+        "_dsa_projection_ok 已废止：run id 仅证明身份创建，不证明完成/就绪"
     )
-    # 不得再有无条件 True 赋值
-    assert "_dsa_projection_ok = True" not in src, (
-        "_dsa_projection_ok 不得无条件置 True"
+    # 正常分支以 not_run 初始化（未执行前不得伪造成功）
+    assert '_dsa_compatibility_status: str = "not_run"' in src, (
+        "DSA 兼容性状态必须以 not_run 初始化，等待真实执行结果"
     )
+    assert "_dsa_projection_ok = True" not in src

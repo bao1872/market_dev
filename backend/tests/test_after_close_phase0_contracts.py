@@ -697,12 +697,12 @@ def test_chip_enqueue_gated_on_core_readiness_not_publication():
     m = re.search(r"\n\s*if (.*?):\n", block)
     assert m is not None, "未找到 chip 守卫"
     cond = m.group(1).strip()
-    assert cond == "snapshot_run_id is not None", (
-        f"chip 守卫必须基于 CoreRun 显式绑定（snapshot_run_id is not None），"
-        f"实际为: {cond}"
+    # [CORRECTION-03 升级] 门控升级为 canonical CORE_READY（真实 CoreRun 行校验后置位）
+    assert cond == "core_ready", (
+        f"chip 守卫必须基于 canonical CORE_READY（core_ready），实际为: {cond}"
     )
-    assert "_stock_core_published" not in cond, (
-        "chip 不得再依赖 _stock_core_published（否则 publication 缺失时悄悄跳过）"
+    assert "snapshot_run_id is not None" != cond, (
+        "仅凭 snapshot_run_id 非空不足以证明 Core Ready（running/failed 均可能）"
     )
 
 
