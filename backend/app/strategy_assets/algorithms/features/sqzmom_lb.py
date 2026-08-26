@@ -555,14 +555,18 @@ def build_momentum_history(
                 squeeze_start -= 1
             # squeeze 区间 [squeeze_start, i-1]，长度 = i - squeeze_start
             squeeze_len = i - squeeze_start
-            # 释放量能比 = squeeze 区间均量 / 当日量
+            # squeeze 区间均量（描述性字段，独立于 release 日量是否合法）
             release_vol_ratio = None
+            squeeze_period_volume_mean = None
             if vol_arr is not None and squeeze_len > 0:
                 squeeze_vols = vol_arr[squeeze_start:i]
                 valid_vols = squeeze_vols[~np.isnan(squeeze_vols)]
-                if len(valid_vols) > 0 and vol_arr[i] > 0:
+                if len(valid_vols) > 0:
                     squeeze_mean = float(np.mean(valid_vols))
-                    release_vol_ratio = squeeze_mean / float(vol_arr[i])
+                    squeeze_period_volume_mean = squeeze_mean
+                    # 释放量能比 = squeeze 区间均量 / 当日量（需 release 日量 > 0）
+                    if vol_arr[i] > 0:
+                        release_vol_ratio = squeeze_mean / float(vol_arr[i])
 
             # 方向按当日 val
             if v is None or (isinstance(v, float) and np.isnan(v)):
@@ -581,6 +585,7 @@ def build_momentum_history(
                 "direction": release_dir,
                 "squeeze_start_index": squeeze_start,
                 "squeeze_length": squeeze_len,
+                "squeeze_period_volume_mean": squeeze_period_volume_mean,
                 "release_volume_ratio": release_vol_ratio,
                 "sqzmom_val": float(v) if v is not None and not (
                     isinstance(v, float) and np.isnan(v)

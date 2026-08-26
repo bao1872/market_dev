@@ -132,6 +132,17 @@ _MIN_BARS_FOR_REQUIRED_DIMS = 60
 # 防止 progressive backfill 期间把未升级旧 state 当完整新 state。
 HISTORY_CONTRACT_VERSION = "review-history-v2"
 
+# [CHANGE-20260826] 放量释放阈值（canonical ratio 语义）。
+# 正式 ratio = release_volume_ratio = squeeze_mean / release_volume[T]  (SQZ_RELEASE SSOT)。
+# 业务规则「放量释放」= release_volume[T] > 1.5 × squeeze_mean。
+# 代入 canonical ratio r = squeeze_mean / release_volume：
+#     release_volume / squeeze_mean > 1.5
+#     ⟺ 1 / r > 1.5
+#     ⟺ r < 1 / 1.5 = 2/3 ≈ 0.6666667
+# 因此当 canonical ratio < RELEASE_VOLUME_RATIO_EXPAND_THRESHOLD 时判定放量释放。
+# 禁止直接使用旧方向 (> 1.5) 或 magic number，避免公式倒数关系漂移。
+RELEASE_VOLUME_RATIO_EXPAND_THRESHOLD = 2.0 / 3.0  # = 1 / 1.5
+
 
 def _safe_float(v: Any) -> float | None:
     if v is None:
@@ -803,27 +814,18 @@ def _build_momentum_dimension(
     vol_divergence: str | None = None  # "缩量挤压" / "放量释放" / "量价背离" / None
     if bars is not None and sqz_on_list and "volume" in bars.columns:
         vol_series = bars["volume"].astype(float)
-        # 最近连续 sqzOn 区间均量（描述性字段，本地计算，非 ratio owner）
-        sqz_end = len(sqz_on_list) - 1
-        sqz_start = sqz_end
-        for i in range(sqz_end, -1, -1):
-            if sqz_on_list[i]:
-                sqz_start = i
-            else:
-                break
-        if sqz_end > sqz_start:
-            squeeze_vols = vol_series.iloc[sqz_start:sqz_end + 1].dropna()
-            if len(squeeze_vols) > 0:
-                squeeze_period_vol_mean = _safe_float(squeeze_vols.mean())
-        # [CHANGE-20260826] release_volume_ratio 唯一 owner = build_momentum_history
-        # 正式 SQZ_RELEASE: sqzOn[t-1]==True && sqzOff[t]==True；ratio = squeeze_mean / vol[t]。
-        # 禁止在此重复实现 squeeze 区间寻找 + 反方向 ratio（旧实现分子分母相反）。
-        # 当前 T(last_bar_index) 若不是正式 release 日，则 ratio 为 None（不读 T+1）。
+        # [CHANGE-20260826] release_volume_ratio 与 squeeze_period_volume_mean 的唯一 owner
+        # 均为 build_momentum_history 的 SQZ_RELEASE SSOT（ratio = squeeze_mean / vol[T]）。
+        # 禁止在此重复实现 squeeze 区间寻找、反方向 ratio 或第二份 squeeze 均量搜索：
+        # 旧实现从 sqz_on_list[T] 反向寻找，当 T 为正式 release(sqzOn[T]=False) 时
+        # 循环第一步即停止，导致 squeeze_period_volume_mean 丢失；现统一由 SSOT 提供。
+        # 当前 T(last_bar_index) 若不是正式 release 日，则两者均为 None（不读 T+1）。
         times = [str(t) for t in bars.index]
         mh = build_momentum_history(sqzmom_result, vol_series.tolist(), times=times)
         for ev in mh["sqz_release_events"]:
             if ev.get("bar_index") == last_bar_index:
                 release_vs_squeeze_vol_ratio = ev.get("release_volume_ratio")
+                squeeze_period_vol_mean = ev.get("squeeze_period_volume_mean")
                 break
         # 判断量价关系
         if last_sqz_on and squeeze_period_vol_mean is not None:
@@ -831,8 +833,10 @@ def _build_momentum_dimension(
             if last_vc and last_vc.readiness and last_vc.volume_percentile_20 is not None:
                 if last_vc.volume_percentile_20 < 20:
                     vol_divergence = "缩量挤压"
+        # 放量释放：canonical ratio = squeeze_mean / release_volume[T]；
+        # release_volume[T] > 1.5 × squeeze_mean ⟺ ratio < 1/1.5（见常量注释）。
         if last_sqz_off and release_vs_squeeze_vol_ratio is not None:
-            if release_vs_squeeze_vol_ratio > 1.5:
+            if release_vs_squeeze_vol_ratio < RELEASE_VOLUME_RATIO_EXPAND_THRESHOLD:
                 vol_divergence = "放量释放"
 
     # Gate1：统一 VolumeContext
