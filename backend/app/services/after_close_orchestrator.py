@@ -4243,7 +4243,12 @@ async def execute_after_close_run(
                 # [AUDIT-CORRECTION-01 / Blocker 4] 单一 owner：partial_success 与
                 # optional_failures 由本终端块从最终 step_summary 一次性生成，并经 extra
                 # 写回 metadata_json，确保与 job_run.status（同源）最终一致。
+                # [AUDIT-CORRECTION-03 / Reviewer #2] 同时将最终完整 step_summary 一并
+                # 落库，保证 metadata.step_summary / optional_failures / partial_success /
+                # job_run.status 四者全部来自同一最终事实集合（step_summary 是后续
+                # reconcile / debug / resume / 事故调查的正式运行证据，不得停留在早先版本）。
                 extra={
+                    "step_summary": step_summary,
                     "partial_success": bool(optional_failures),
                     "optional_failures": optional_failures,
                 },

@@ -45,6 +45,9 @@ from app.services.after_close_orchestrator import (
     repair_stale_after_close_snapshot_runs,
     retry_after_close_run,
 )
+from app.services.after_close_orchestrator import (
+    _execute_review_step as _real_execute_review_step,
+)
 from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
 from app.services.core_artifact_repository import CoreArtifactRepository
 from app.services.job_run_event_service import append_event
@@ -2454,22 +2457,97 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
     fake_batch_result = BatchResult(total=100, succeeded=95)
     fake_batch_result.dsa_run_id = dsa_run.id
 
-    # spy Review owner：证明 Attempt1 未进入、Attempt2 进入。
-    # 返回与真实 _execute_review_step 成功路径一致的 dict，使 Review 成功。
+    # [AUDIT-CORRECTION-03 / Reviewer #1] 不得 fake 整个 Review owner。
+    # 这里只记录「_execute_review_step 被进入」的次数，然后**调用 production**
+    # _execute_review_step 真跑（其内部重型 I/O owner 单独 mock+计数）。
+    # 这样 Attempt2 真正经过 production Review orchestration branch，
+    # 并通过 review create/compute/publish 的计数证明真实完成了 Review。
     async def _spy_review_step(*a, **k):
         review_step_count["n"] += 1
-        return {
-            "review_run_id": uuid.uuid4(),
-            "status": "succeeded",
-            "published": True,
-            "scope_count": 1,
-            "signal_count": 1,
-            "coverage": 1.0,
-            "blockers": [],
-        }
+        return await _real_execute_review_step(*a, **k)
+
+    # Review 内部重型 owner 的 spy+mock：返回 production 代码所需的最小属性，
+    # 同时记录调用次数。production _execute_review_step 会真实读取这些返回值。
+    review_create_count = {"n": 0}
+    review_compute_count = {"n": 0}
+    review_publish_count = {"n": 0}
+
+    def _make_review_owner_mocks():
+        async def _fake_create_run(db, *a, **k):
+            review_create_count["n"] += 1
+            rr = MagicMock()
+            rr.id = uuid.uuid4()
+            rr.status = "created"
+            rr.expected_scope_count = 1
+            rr.signal_count = 1
+            rr.coverage_ratio = 1.0
+            rr.algorithm_version = "v1"
+            rr.filter_version = "f1"
+            rr.source_core_run_id = uuid.uuid4()
+            rr.source_board_run_id = None
+            return rr
+
+        async def _fake_compute_run(db, review_run, *a, **k):
+            review_compute_count["n"] += 1
+            return {
+                "status": "succeeded",
+                "expected_scope_count": 1,
+                "signal_count": 1,
+                "coverage_ratio": 1.0,
+            }
+
+        async def _fake_publish_run(db, review_run, *a, **k):
+            review_publish_count["n"] += 1
+            pub = MagicMock()
+            pub.id = uuid.uuid4()
+            return pub, None
+
+        return _fake_create_run, _fake_compute_run, _fake_publish_run
+
+    (_fake_create_run, _fake_compute_run, _fake_publish_run_review) = _make_review_owner_mocks()
+
+    def _add_review_patches(patchers):
+        # 内部重型 owner：create/compute/publish（计数+最小返回值）
+        patchers.extend([
+            patch(
+                "app.services.review_orchestrator_service.create_run",
+                new=_fake_create_run,
+            ),
+            patch(
+                "app.services.review_orchestrator_service.compute_run",
+                new=_fake_compute_run,
+            ),
+            patch(
+                "app.services.review_orchestrator_service.publish_run",
+                new=_fake_publish_run_review,
+            ),
+            patch(
+                "app.services.review_orchestrator_service.get_run",
+                new=AsyncMock(return_value=MagicMock(
+                    id=uuid.uuid4(), status="signals_ready",
+                    expected_scope_count=1, signal_count=1, coverage_ratio=1.0,
+                    algorithm_version="v1", filter_version="f1",
+                    source_core_run_id=uuid.uuid4(), source_board_run_id=None,
+                )),
+            ),
+            # review publication gate：默认「尚未发布 / 可发布」
+            patch(
+                "app.services.review_publication_service.get_published_review_run_id",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "app.services.review_publication_service.is_formally_published_review_run",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "app.services.review_publication_service.evaluate_publish_gate",
+                new=AsyncMock(return_value=(True, [])),
+            ),
+        ])
+        return patchers
 
     def _patch_common(pub_core, compute_core, hist_adv):
-        return (
+        patchers = [
             patch(
                 "app.services.after_close_orchestrator.AsyncSessionLocal",
                 new=MagicMock(return_value=_FakeSessionContext()),
@@ -2533,12 +2611,13 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
                 "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
                 new=AsyncMock(return_value={"status": "published", "publication_id": uuid.uuid4()}),
             ),
-            # spy Review owner：证明 Attempt1 未进入、Attempt2 进入
+            # [AUDIT-CORRECTION-03] 只 spy 进入次数，内部调用 production _execute_review_step
             patch(
                 "app.services.after_close_orchestrator._execute_review_step",
                 new=_spy_review_step,
             ),
-        )
+        ]
+        return _add_review_patches(patchers)
 
     pub_core_1, compute_core_1, hist_1 = _make_mocks(history_raises=True)
     with contextlib.ExitStack() as stack:
@@ -2621,6 +2700,17 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
     )
     assert review_step_count["n"] == 1, (
         f"[Attempt2] resume 应进入 computing_review 1 次，实际 {review_step_count['n']}"
+    )
+    # [AUDIT-CORRECTION-03 #1] 证明真实经过 production Review orchestration：
+    # 不 fake 整个 owner，仅证明内部重型 owner 各被真实调用 1 次。
+    assert review_create_count["n"] == 1, (
+        f"[Attempt2] review create_run 应被真实调用 1 次，实际 {review_create_count['n']}"
+    )
+    assert review_compute_count["n"] == 1, (
+        f"[Attempt2] review compute_run 应被真实调用 1 次，实际 {review_compute_count['n']}"
+    )
+    assert review_publish_count["n"] == 1, (
+        f"[Attempt2] review publish_run 应被真实调用 1 次，实际 {review_publish_count['n']}"
     )
     meta2 = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
     assert meta2.get("last_completed_step") == "review", (
@@ -2754,6 +2844,21 @@ async def test_enhancement_failure_does_not_block_review(
     )
     assert meta.get("partial_success") is True, (
         "[Blocker 4] metadata.partial_success 应为 True"
+    )
+    # [AUDIT-CORRECTION-03 / Reviewer #2] 最终 metadata.step_summary 必须真实反映
+    # state_events 的失败（不得停留在 publishing 阶段的早先版本）。step_summary 是
+    # 后续 reconcile / debug / resume / 事故调查的正式运行证据，必须同源一致。
+    ss = meta.get("step_summary") or {}
+    assert isinstance(ss.get("state_events"), dict), (
+        f"[Correction03] metadata.step_summary.state_events 应存在，实际={ss.get('state_events')}"
+    )
+    assert ss["state_events"].get("status") == "failed", (
+        f"[Correction03] step_summary.state_events.status 应为 failed，"
+        f"实际={ss['state_events'].get('status')}"
+    )
+    assert ss["state_events"].get("optional") is True, (
+        f"[Correction03] step_summary.state_events.optional 应为 True，"
+        f"实际={ss['state_events'].get('optional')}"
     )
 
 
