@@ -801,8 +801,9 @@ def _build_momentum_dimension(
     squeeze_period_vol_mean: float | None = None
     release_vs_squeeze_vol_ratio: float | None = None
     vol_divergence: str | None = None  # "缩量挤压" / "放量释放" / "量价背离" / None
-    if bars is not None and sqz_on_list:
-        # 找到最近的连续 squeeze on 区间
+    if bars is not None and sqz_on_list and "volume" in bars.columns:
+        vol_series = bars["volume"].astype(float)
+        # 最近连续 sqzOn 区间均量（描述性字段，本地计算，非 ratio owner）
         sqz_end = len(sqz_on_list) - 1
         sqz_start = sqz_end
         for i in range(sqz_end, -1, -1):
@@ -811,27 +812,28 @@ def _build_momentum_dimension(
             else:
                 break
         if sqz_end > sqz_start:
-            vol_series = bars["volume"].astype(float) if "volume" in bars.columns else None
-            if vol_series is not None:
-                squeeze_vols = vol_series.iloc[sqz_start:sqz_end + 1].dropna()
-                if len(squeeze_vols) > 0:
-                    squeeze_period_vol_mean = _safe_float(squeeze_vols.mean())
-                    # 释放期量 / 挤压期均量
-                    if sqz_end + 1 < len(vol_series):
-                        release_vol = _safe_float(vol_series.iloc[sqz_end + 1])
-                        if release_vol is not None and squeeze_period_vol_mean and squeeze_period_vol_mean > 0:
-                            release_vs_squeeze_vol_ratio = _safe_float(
-                                release_vol / squeeze_period_vol_mean
-                            )
-                    # 判断量价关系
-                    if last_sqz_on and squeeze_period_vol_mean is not None:
-                        last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
-                        if last_vc and last_vc.readiness and last_vc.volume_percentile_20 is not None:
-                            if last_vc.volume_percentile_20 < 20:
-                                vol_divergence = "缩量挤压"
-                    if last_sqz_off and release_vs_squeeze_vol_ratio is not None:
-                        if release_vs_squeeze_vol_ratio > 1.5:
-                            vol_divergence = "放量释放"
+            squeeze_vols = vol_series.iloc[sqz_start:sqz_end + 1].dropna()
+            if len(squeeze_vols) > 0:
+                squeeze_period_vol_mean = _safe_float(squeeze_vols.mean())
+        # [CHANGE-20260826] release_volume_ratio 唯一 owner = build_momentum_history
+        # 正式 SQZ_RELEASE: sqzOn[t-1]==True && sqzOff[t]==True；ratio = squeeze_mean / vol[t]。
+        # 禁止在此重复实现 squeeze 区间寻找 + 反方向 ratio（旧实现分子分母相反）。
+        # 当前 T(last_bar_index) 若不是正式 release 日，则 ratio 为 None（不读 T+1）。
+        times = [str(t) for t in bars.index]
+        mh = build_momentum_history(sqzmom_result, vol_series.tolist(), times=times)
+        for ev in mh["sqz_release_events"]:
+            if ev.get("bar_index") == last_bar_index:
+                release_vs_squeeze_vol_ratio = ev.get("release_volume_ratio")
+                break
+        # 判断量价关系
+        if last_sqz_on and squeeze_period_vol_mean is not None:
+            last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
+            if last_vc and last_vc.readiness and last_vc.volume_percentile_20 is not None:
+                if last_vc.volume_percentile_20 < 20:
+                    vol_divergence = "缩量挤压"
+        if last_sqz_off and release_vs_squeeze_vol_ratio is not None:
+            if release_vs_squeeze_vol_ratio > 1.5:
+                vol_divergence = "放量释放"
 
     # Gate1：统一 VolumeContext
     last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
