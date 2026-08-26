@@ -78,6 +78,10 @@ from app.models.factor_publication import (
 )
 from app.models.first_pyramid_history_run import FirstPyramidHistoryRun
 from app.models.market_board import MarketBoard
+from app.models.stock_feature_snapshot_run import (
+    STATUS_SUCCEEDED,
+    StockFeatureSnapshotRun,
+)
 from app.models.market_review import (
     MarketReviewRun,
     MarketReviewRunItem,
@@ -264,6 +268,17 @@ async def _create_run_impl(
         trade_date,
         source_core_run_id=source_core_run_id,
     )
+
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 显式校验 CoreRun compute-complete 合同。
+    # 直接查 StockFeatureSnapshotRun 行（run 存在 / trade_date==T / status==succeeded /
+    # compute-complete），**不查 published_at / stock_core pointer /
+    # FactorPublication(kind=stock_core)**。
+    if not dry_run:
+        await validate_core_run(
+            session,
+            core_run_id=resolved_core_id,
+            trade_date=trade_date,
+        )
 
     # [Slice 3] Review 身份仅由 stock_core + canonical history 构成；Board Analysis
     # 不再是前置条件，source_board_run_id 恒为 NULL（历史 lineage 仍保留在既有 run）。
@@ -516,34 +531,79 @@ async def _resolve_source_core_run_id(
 ) -> uuid.UUID:
     """解析 Review 的 canonical Stock Core run_id。
 
-    [Slice 3] Board Analysis 不再是 Review 的前置条件。Review 身份仅依赖
-    Stock Core + canonical First Pyramid History。source_board_run_id 在新 run
-    中恒为 NULL（历史 lineage 仍保留在既有 run 记录中）。
-
-    source_core_run_id：从 stock_core publication pointer 读取；显式传入时直接使用。
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Review 显式绑定本次 AfterCloseRun 产生的
+    CoreRun（StockFeatureSnapshotRun）。**不再通过 stock_core FactorPublication
+    pointer 解析**（KPI-2/3: FactorPublication(kind=stock_core) reads=0）。
+    因此 source_core_run_id 必须显式传入；为 None 时直接 fail-closed，绝不回退到
+    publication pointer 重新寻找本轮刚产生的 CoreRun（KPI-4: 100% lineage lock，
+    无 latest fallback / 无 pointer resolution）。
 
     Args:
         session: 异步 DB 会话
         trade_date: 业务交易日
-        source_core_run_id: 调用方显式传入的 stock_core run_id（None 时自动解析）
+        source_core_run_id: 调用方显式传入的 core run_id（None 即 fail-closed）
 
     Returns:
         resolved_core_run_id
 
     Raises:
-        ReviewOrchestratorError: 缺少必要的 stock_core publication pointer
+        ReviewOrchestratorError: 未显式提供 source_core_run_id（fail-closed）
     """
     if source_core_run_id is None:
-        core_pub = await _get_publication(
-            session, trade_date, PUBLICATION_KIND_STOCK_CORE,
+        raise ReviewOrchestratorError(
+            f"trade_date={trade_date} 未显式提供 source_core_run_id，"
+            f"Review 必须显式绑定本次 AfterCloseRun 产生的 CoreRun，"
+            f"不得经 stock_core publication pointer 解析",
         )
-        if core_pub is None:
-            raise ReviewOrchestratorError(
-                f"trade_date={trade_date} 无已发布 stock_core pointer，"
-                f"必须先完成盘后核心计算并发布 stock_core",
-            )
-        return core_pub.data_run_id
     return source_core_run_id
+
+
+async def validate_core_run(
+    session: AsyncSession,
+    *,
+    core_run_id: uuid.UUID,
+    trade_date: date,
+) -> StockFeatureSnapshotRun:
+    """校验 Review 显式绑定的 CoreRun 是否满足 Core readiness 合同。
+
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core readiness = StockFeatureSnapshotRun
+    本身的 compute-complete contract，**不再检查 published_at / stock_core pointer /
+    FactorPublication(kind=stock_core)**。仅验证：
+
+      - run 存在
+      - trade_date == T（时间口径一致）
+      - run.status == succeeded（Core compute-complete）
+      - compute-complete contract 满足（非 running 的中间态）
+
+    Args:
+        session: 异步 DB 会话
+        core_run_id: 显式绑定的 CoreRun id
+        trade_date: 业务交易日 T
+
+    Returns:
+        校验通过的 StockFeatureSnapshotRun 行
+
+    Raises:
+        ReviewOrchestratorError: run 不存在 / trade_date 不匹配 / 状态非 succeeded
+    """
+    from sqlalchemy import select as _select
+
+    run = await session.get(StockFeatureSnapshotRun, core_run_id)
+    if run is None:
+        raise ReviewOrchestratorError(
+            f"CoreRun {core_run_id} 不存在，无法作为 Review source_core_run_id",
+        )
+    if run.trade_date != trade_date:
+        raise ReviewOrchestratorError(
+            f"CoreRun {core_run_id} trade_date={run.trade_date} "
+            f"与 Review trade_date={trade_date} 不一致",
+        )
+    if run.status != STATUS_SUCCEEDED:
+        raise ReviewOrchestratorError(
+            f"CoreRun {core_run_id} status={run.status} 非 succeeded，"
+            f"不满足 Core compute-complete 合同",
+        )
+    return run
 
 
 # [AUD-04/05 2026-08-07] `_resolve_chip_dependency` 与 `_load_core_expected_count`

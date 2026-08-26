@@ -100,7 +100,9 @@
 
 重算通过现有 `force` 端点 + `restart_from="daily_ready"` 参数实现，仍是同一 `after_close` 任务，不创建 `dsa_only` 类型，不跳过后续特征/快照/发布步骤。仅 admin 可用；必须先验证日线覆盖率 ≥ 90%。显式 `restart_from` 必须属于允许的步骤并验证其前置步骤已完成；重启 run 在 `metadata_json` 保存 `parent_job_run_id`、`restart_from` 和重启次数，不新增数据库列。`restart_from="daily_ready"` 的语义是重新进入 Core computation：DSA/SMC/Momentum 按统一 Core 合同重新计算一次，后续 projection / board / Review 等正常重建；不存在"从 DSA 阶段单独重算"这一步骤。
 
-状态链：`queued→running→refreshing_daily→syncing_boards→checking_coverage→computing_features→publishing→succeeded`；`StrategyRun` 状态链：`running→completed→published`，异常 → `failed`。不得在发布前伪造 `completed`。
+顶层状态链：`queued→running→refreshing_daily→syncing_boards→checking_coverage→computing_features→computing_review→succeeded`；`StrategyRun` 状态链：`running→completed→published`，异常 → `failed`。不得在发布前伪造 `completed`。
+
+> **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core→Review 主链变更**：正常 Core→Review DAG **不再经过 `publishing` 阶段**。`stock_core` FactorPublication pointer 的发布/切换已不再是 Core 计算完成到 Review 启动的业务依赖、readiness 条件或同步机制。Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`）后，编排直接以显式 `snapshot_run_id` 绑定 `ReviewRun.source_core_run_id` 进入 `computing_review`；`publishing` 阶段仅在断点恢复（skip_publish）兼容路径下保留，不属于正常 Core→Review 链路。详见 §17 AC-70。
 
 顶层步骤使用统一执行合同：开始时写步骤状态、进度和 heartbeat，执行受明确 timeout 约束；成功、失败、超时、取消和合法不可用均写结构化 `step_summary`；`finally` 必须停止 heartbeat 并保存结束时间。可选步骤失败使主 run 成为 `partial_success`，不得伪装全成功；`auction_anchor` 超时或无数据统一记为 `skipped_unavailable`，默认非阻断，不得仅因此阻断 Review。long-running business step 的 liveness 政策以 [PRD 31 PC-43](../prd/31-after-close-product-closure-v2.1.md) 为准：工作负载随 instrument count / backfill window / provider throughput 变化的长任务，不得仅因 fixed generic absolute elapsed 被判失败，其失败条件只限显式 execution failure、正式治理认定的 no-progress / stalled，或权威 PRD 明确写明的 business deadline。
 
@@ -133,7 +135,7 @@
 - `CORE_PUBLICATION_MIN_COVERAGE = 0.98`，低于门禁拒绝发布。
 - 发布只做小事务原子切换指针，不复制结果数据；不得修改已发布 run。
 - `trade_date` 必须为 NOT NULL（禁止普通唯一约束允许多 NULL 产生重复 pointer）。
-- `publish_market_aggregation` 必须验证 `source_core_run_id` 等于该日期已发布 stock_core pointer。
+- `publish_market_aggregation` 必须验证 `source_core_run_id` 等于该日期 Review 的 `source_core_run_id`（即当前 Core `snapshot_run_id`），不得依赖 stock_core FactorPublication pointer 解析。
 - `publish_history_cross_section` 的 coverage 必须由 DB 统计，不接受调用方任意传值。
 - pointer 不得倒退到旧 run。
 
@@ -145,7 +147,7 @@
 
 ### AC-14：独立任务与核心保护
 - 市场聚合、事件、chip、通知为独立任务，失败只重试自身，不反改核心。
-- 主编排在 core pointer 发布后即可标记 `core_published` 并允许复盘。
+- 主编排在 Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`，`snapshot_run_id` 可用）后即可标记 `core_published` 并允许复盘；**[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** 不再要求 `stock_core` FactorPublication pointer 已发布。Review 通过显式 `source_core_run_id = snapshot_run_id` 绑定本次 CoreRun。
 - 最终状态可为 `completed_with_errors`，但不得因 optional 失败反改 core。
 - chip.core_run_id = snapshot_run_id（不指向 SchedulerJobRun.id）。
 - chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配。
@@ -166,9 +168,11 @@
   after-close / Review 启动会受阻，违反本条合同。
 - 本条不改变 AC-04 / PRD31「chip 不阻断 Review」语义，仅将其落为 executor 级硬合同。
 
-## 5. 板块分析 V1（CHANGE-20260730-011）
+## 5. 板块分析 V1（CHANGE-20260730-011）— [Slice 4A9] 已退役
 
-### BA-01：定位与门禁
+> **[Slice 4A9] Legacy board aggregation 已退役**：板块分析 V1 及其 BA-* 条款不再属于正常 AfterClose DAG。本 §5 仅作历史合同保留，不约束当前 Core→Review 主链。`stock_core` 数据消费已由 Review 通过显式 `source_core_run_id`（snapshot_run_id）直接完成，不再经由 Board Analysis 间接进入。
+
+### BA-01：定位与门禁（retired）
 
 板块分析 V1 是基于已发布 `stock_core` 数据的衍生分析，独立于 chip 共识。chip 是可选维度，不作为板块核心门禁。
 
@@ -306,13 +310,14 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 
 > 本节明确盘后链路各阶段的发布闭环和依赖合同。与 §4 增量发布架构需求、§5 板块分析 V1 叠加生效。
 
-### AC-17：stock_core 发布闭环
+### AC-17：stock_core 发布闭环（legacy 兼容路径，[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 重锚）
 
-- DSA StrategyRun 发布成功（`status=published`）且 snapshot run coverage 达标（`CORE_PUBLICATION_MIN_COVERAGE = 0.98`）后，after_close 编排必须显式调用 `factor_publication_service.publish_stock_core` 切换 `stock_core` publication pointer；
-- `publish_stock_core` 是 stock_core 正式发布的唯一入口，禁止跳过该步骤直接依赖 `published_at IS NOT NULL`；
-- pointer 切换失败只重试 `publish_stock_core`，不重新计算数据；
-- `stock_core` pointer 未发布前，下游 board aggregation / market aggregation / review 不得启动；
-- 失败恢复必须走 `dsa_recovery_service` 或 `publish_stock_core` 幂等重发，禁止裸 SQL 改状态（详见 `rules/80-deployment-data-safety.md` "手工恢复走正式 service/CLI"）。
+> **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 合同变更**：`stock_core` FactorPublication pointer 的发布/切换**已不再是** Core 计算完成到 Review 启动的业务依赖、readiness 条件或同步机制。正常 Core→Review DAG 不进入 `publishing` 阶段，不调用 `publish_stock_core_atomically`，下游 Review 不再因 `stock_core` pointer 未发布而等待。
+
+- `stock_core` publication service / schema 作为 legacy 兼容路径保留（KPI-10），仅用于断点恢复（skip_publish）兼容和历史数据查询，**不属于正常 AfterClose Core→Review DAG**；
+- 若 legacy 路径仍执行 `factor_publication_service.publish_stock_core`，它必须是 stock_core 正式发布的唯一入口（禁止跳过该步骤直接依赖 `published_at IS NOT NULL`），pointer 切换失败只重试该 service，不重新计算数据；
+- **Review 启动不再依赖 `stock_core` pointer**：Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`，`snapshot_run_id` 可用）即可进入 `computing_review`，通过 `ReviewRun.source_core_run_id = snapshot_run_id` 显式绑定；
+- 失败恢复必须走正式 service/CLI，禁止裸 SQL 改状态（详见 `rules/80-deployment-data-safety.md` "手工恢复走正式 service/CLI"）。
 
 ### AC-18：chip_consensus Worker
 
@@ -328,12 +333,13 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 - 终态必须写 `finished_at`、释放 lease 并保存 succeeded/failed/skipped 计数与结构化原因；全成功、部分成功、全部合法 skipped、系统性失败分别映射为 `succeeded/succeeded`、`succeeded/partial`、`succeeded/skipped`、`failed/failed`（主 status / `metadata.chip_status`）；
 - `auto_resume_interrupted_after_close_runs` 同时处理 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次。
 
-### AC-19：聚合依赖合同
+### AC-19：聚合依赖合同（[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 重锚）
 
-- board aggregation / market aggregation 必须在 `stock_core` pointer 发布成功后才能触发；
-- `run_market_factor_aggregation` 必须读取已发布 `stock_core` pointer，校验 `source_core_run_id` 等于该日期 `stock_core` pointer 的 `data_run_id`，不匹配抛错；
-- board_analysis 输入门禁要求存在已发布 `stock_core` pointer，否则拒绝计算；
-- 聚合失败只重跑聚合，**不影响已发布 stock_core**；
+> **合同变更**：`stock_core` FactorPublication pointer 不再是聚合或 Review 的前置依赖。
+
+- market aggregation 的 `source_core_run_id` 必须等于当前 Review 的 `source_core_run_id`（即 Core `snapshot_run_id`），不再通过 `stock_core` pointer 的 `data_run_id` 解析；
+- board aggregation 已随 `[Slice 4A9]` 退役，退出正常 AfterClose DAG；
+- 聚合失败只重跑聚合，**不影响已发布 Core / Review**；
 - 聚合 pointer 不得倒退到旧 run；不足门禁时保存 `partial` 结果但不切 pointer。
 
 ### AC-20：Daily Facts / Board Facts 独立输入分支（V2.1 对齐 PRD31 §1 / §2 / §8）
@@ -345,8 +351,8 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 
 - **Daily Facts 与 Board Facts 是两条独立输入分支**：Daily Facts（`daily_facts` 产品节点）只承载目标交易日**日线** readiness；Board Facts（`board_facts` 产品节点）只承载板块 **taxonomy / PIT membership / board-facts publication readiness**；二者不得合并或互相替代，也不得用模糊的"板块行情"概念混入其它领域事实。
 - **`stock_core` 只依赖 Daily Facts**：core 计算链的输入门禁只看 Daily Facts 是否达标，Board Facts 不参与 core 发布门禁，Board Facts 缺失或降级不得阻断 `stock_core` 发布。
-- **Board Aggregation 依赖正式 `stock_core` + usable Board Facts**：`board_analysis` 在 `stock_core` pointer 发布成功后触发，并以 usable board facts（taxonomy / PIT membership / publication readiness）为输入；Board Facts 不可用时应记录结构化 reason 并降级 / 暂缓，不得反改已发布 `stock_core`。
-- **Review 依赖正式 `market_aggregation`**：`market_review_run` 创建需要 `stock_core` pointer 与 `board_analysis` pointer 均已发布（即 `market_aggregation` 已就绪）；Board Facts 通过 board aggregation 间接进入 Review，不绕过该 lineage。
+- **Board Aggregation 依赖正式 `stock_core` + usable Board Facts**（legacy 路径，[Slice 4A9] 已退役）：`board_analysis` 在 `stock_core` pointer 发布成功后触发，并以 usable board facts（taxonomy / PIT membership / publication readiness）为输入；- **Board Aggregation 依赖正式 `stock_core` + usable Board Facts**（legacy 路径，[Slice 4A9] 已退役）：`board_analysis` 在 `stock_core` pointer 发布成功后触发，并以 usable board facts（taxonomy / PIT membership / publication readiness）为输入；Board Facts 不可用时应记录结构化 reason 并降级 / 暂缓，不得反改已发布 `stock_core`。
+- **Review 依赖显式 `source_core_run_id`（[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]）**：`market_review_run` 创建由 AfterClose 编排以显式 `snapshot_run_id` 直接绑定 `ReviewRun.source_core_run_id`，**不再依赖** `stock_core` pointer 或 `market_aggregation` pointer 已发布。Board Facts 已随 board aggregation 退役，不再间接进入 Review。
 - 上述分支与 PRD31 §8 编排阶段 `daily → core → post_core → board_review → finalize` 一致：core 阶段只读 Daily Facts，board_review 阶段才消费 Board Facts。
 
 ## 复盘编排 (Review Orchestration)
@@ -356,7 +362,20 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 
 ### RV-AC-01 触发条件
 
-当 `stock_core` pointer 和 `board_analysis` pointer 均已发布后，创建 `market_review_run`。两个输入 pointer 缺一不可。
+**[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** 当 Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`）后，AfterClose 编排直接以显式 `snapshot_run_id` 绑定 `ReviewRun.source_core_run_id`，创建 `market_review_run`。
+
+新的权威业务链：
+
+```text
+Core compute complete (StockFeatureSnapshotRun.status == succeeded)
+→ snapshot_run_id X
+→ ReviewRun.source_core_run_id = X
+→ Review (computing_review)
+```
+
+`stock_core` FactorPublication pointer 的发布/切换**不再是** Review 创建或启动的业务依赖、readiness 条件或同步机制（不再"两个 pointer 缺一不可"）。`board_analysis` pointer 已随 `[Slice 4A9] Legacy board aggregation 退役` 退出正常 AfterClose DAG。
+
+> Review(T) = Core(T) + History(<T)。History(T) 的 First Pyramid History 自动生产**不得**是 Review(T) 的 prerequisite：Computing History 改到 Review compute/publish **之后**执行，从 Core complete 到 Review compute started 之间不再有任何 History(T) producer / recompute。
 
 ### RV-AC-02 编排顺序（平行扫描模型）
 
@@ -419,12 +438,13 @@ refreshing_daily        // 刷新 & 校验日线 readiness
 → syncing_boards        // 同步板块成员
 → checking_coverage     // 检查 coverage 质量门槛
 → computing_features    // 统一特征计算（含旧4步：creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
-→ publishing            // stock_core & board_analysis 正式 pointer 切换
-→ computing_review      // 【新增】复盘计算与发布（create_run→compute_run→publish_review）
+→ computing_review      // [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core 完成后直接以 snapshot_run_id 绑定 ReviewRun.source_core_run_id 进入复盘（create_run→compute_run→publish_review）
 → watchlist_ready      // 全部就绪：选股监控与自选可用
 ```
 
-- `watchlist_ready` 只在 **stock_core 成功 + board_analysis 成功 + review 成功 三项全部满足** 时标记为 completed；任何一环失败都不得显示为整体成功。
+> **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** 正常 Core→Review DAG **不再经过 `publishing` 阶段**：`stock_core` / `board_analysis` FactorPublication pointer 的发布/切换已不是 Core 计算完成到 Review 启动的业务依赖、readiness 条件或同步机制。`publishing` 仅在断点恢复（skip_publish）兼容路径下保留，不属于正常 Core→Review 链路（KPI-7）。
+
+- `watchlist_ready` 只在 **Core 成功（snapshot_run_id 可用）+ review 成功 两项满足** 时标记为 completed；任何一环失败都不得显示为整体成功。board_analysis 已退役，不再作为 watchlist_ready 前置条件。
 - review 四步（create/compute/publish 三步 + 结果校验）必须在盘后编排代码中显式调用，不得仅存在于注释中。
 - 失败不得静默写主任务 SUCCEEDED：review 任一步骤失败或返回 failed 时，主任务整体转 FAILED，在 `after_close_runs.metadata` 和 `job_run_event` 时间线中记录 `review_run_id / review_status / review_reason`。
 
@@ -434,8 +454,8 @@ refreshing_daily        // 刷新 & 校验日线 readiness
 
 | 输入变化情况 | 行为 |
 |---|---|
-| `stock_core_pointer run_id + board_analysis run_id 与上次相同 | 直接返回已存在的同一 review_run；已发布则不重复切换 pointer |
-| 任一上游 run_id 变化（pointer 切换为新 run） | 创建新 review_run；新 run 通过后再切换正式 pointer；旧 review_run 保留供审计不删 |
+| `source_core_run_id`（snapshot_run_id）与上次相同 | 直接返回已存在的同一 review_run；已发布则不重复切换 pointer |
+| `source_core_run_id` 变化（新 Core snapshot run） | 创建新 review_run；新 run 通过后再切换正式 pointer；旧 review_run 保留供审计不删 |
 | 计算中/发布中（running） | 不重入；返回当前 run 完成后再判定 |
 
 ### AC-72 时间线合同（防负数耗时）

@@ -2165,10 +2165,12 @@ async def _execute_review_step(
         # 的 <=T-1 状态（独立于 exact-T History(T)）。因此移除旧的「History(T) 未就绪
         # 即阻断 Review」硬门控（原 invariant H2）；Review 仅依赖已发布 stock_core。
         # 注意：本 Slice 不引入任何 review-history-v3 DB write（v3 物化在 Slice 4 接回）。
-        # [Slice 3 / Slice 4A9] Board Analysis 不是 Review 前置条件，且 legacy
-        # board aggregation 已退役：只要 stock_core 已发布且 snapshot 存在，
-        # 都执行 Review（只依赖已发布 stock_core），不再有 aggregation 状态参与判断。
-        if stock_core_published and snapshot_run_id is not None:
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core 计算完成后直接进入 Review。
+        # Review 的 readiness 仅依赖本次 AfterCloseRun 产生的 CoreRun（StockFeatureSnapshotRun，
+        # 由 snapshot_run_id 标识）compute-complete 合同，**不再依赖 stock_core publication
+        # pointer / published_at / FactorPublication(kind=stock_core)**。因此 gate 只检查
+        # snapshot_run_id 非空（Core 已产生可消费的快照 run），不再检查 stock_core_published。
+        if snapshot_run_id is not None:
             # 断点恢复：先从 metadata 读取已有 review_run_id
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
@@ -2209,6 +2211,10 @@ async def _execute_review_step(
                         trade_date=trade_date,
                         canary=False,
                         dry_run=False,
+                        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 显式绑定本次 CoreRun
+                        # （snapshot_run_id），Review 直接消费，不再经 stock_core
+                        # FactorPublication pointer 解析（KPI-4: 100% lineage lock）。
+                        source_core_run_id=snapshot_run_id,
                         idempotency_key=f"after_close_orchestrator:{job_run_id}",
                     )
                     _review_run_id = review_run.id
@@ -3525,267 +3531,35 @@ async def execute_after_close_run(
         _chip_enqueue_status: str = "skipped"
         _chip_job_id: uuid.UUID | None = None
         if not skip_publish:
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 正常 AfterClose DAG 不再进入
+            # PUBLISHING 阶段（KPI-7）：Core 计算完成后直接进入 Review。
+            # stock_core publication / FactorPublication(kind=stock_core) 的 read/write
+            # 与 publish_stock_core_atomically 调用全部从 Core → Review 主链旁路
+            # （KPI-2/3）；DSA 兼容性投影可保留为 Review 后 optional enhancement 或
+            # 独立 compatibility path，不在此阻塞 Review（合同 7）。
+            # 因此正常路径直接置发布相关布尔为安全默认值，不再执行任何发布步骤。
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_orchestrator_status(
                     db=db,
                     job_run=job_run,
-                    status=AfterCloseRunStatus.PUBLISHING,
-                    message=f"开始发布 DSA 结果: dsa_run_id={dsa_run_id}",
+                    status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                    message=(
+                        f"Core 计算完成，直接进入 Review（stock_core 发布已旁路）: "
+                        f"dsa_run_id={dsa_run_id}"
+                    ),
                     dsa_run_id=dsa_run_id,
                 )
                 await db.commit()
 
-            # [AC-02] publishing 核心发布（phase1 publish_run + stock_core pointer）通过统一执行器：
-            # 超时保护 + cancellation_check（协作取消）。核心失败 → 执行器标记 failed 并重新抛出。
-            async def _run_core_publish_op() -> dict[str, Any]:
-                _published_run = None
-                _publish_failed = False
-                # [CRASH-RESUME-SLICE / P0-D] DSA 兼容性投影是 required-compatibility
-                # OUTPUT，不得成为 stock_core 规范发布的硬前置门。其失败只表达
-                # compatibility incomplete / degraded，绝不把已合法的 core snapshot
-                # 标 failed，也不允许异常上抛阻断 stock_core 原子发布。
-                _dsa_projection_ok = True
-                try:
-                    async with AsyncSessionLocal() as db:
-                        _published_run = await batch_service.publish_run(db, dsa_run_id)
-                        await db.commit()
-                except Exception as publish_exc:
-                    _publish_failed = True
-                    _dsa_projection_ok = False
-                    logger.error(
-                        "[AfterClose] DSA 兼容性投影发布失败（core 不受影响，标记 "
-                        "compatibility incomplete）: dsa_run_id=%s, error=%s",
-                        dsa_run_id, publish_exc, exc_info=True,
-                    )
-
-                # [P0-2 2026-07-30 visibility window fix] Publish stock_core pointer FIRST,
-                # then mark snapshot succeeded. If pointer fails or points to different run,
-                # snapshot stays running (no published_at, not visible to consumers).
-                _stock_core_published_local = False
-                _stock_core_superseded_local = False
-                if snapshot_run_id is not None and snapshot_error is None:
-                    async with AsyncSessionLocal() as pub_db:
-                        from app.schemas.first_pyramid import FIRST_PYRAMID_CORE_ALGORITHM_VERSION
-
-                        _published_now, _superseded_now = await resolve_stock_core_published(
-                            pub_db, trade_date, snapshot_run_id
-                        )
-                        if _published_now:
-                            # 本 run 已是当前 pointer（断点恢复重入 / 并发抢占已达成）
-                            _stock_core_published_local = True
-                            _stock_core_superseded_local = False
-                        elif _superseded_now:
-                            # pointer 指向别的 run → 本 run 被抢占，禁止发布、禁止聚合
-                            logger.warning(
-                                "[AfterClose] stock_core pointer exists for different run: "
-                                "current=%s is SUPERSEDED, will NOT publish or aggregate",
-                                snapshot_run_id,
-                            )
-                            await append_event(
-                                db=pub_db,
-                                job_run_id=job_run_id,
-                                step="publishing",
-                                level="warning",
-                                message=(
-                                    f"stock_core pointer exists for different run: "
-                                    f"current={snapshot_run_id} — current run is SUPERSEDED, "
-                                    f"will NOT be marked published or aggregated"
-                                ),
-                                payload={"current_snapshot_run_id": str(snapshot_run_id), "superseded": True},
-                            )
-                            await pub_db.commit()
-                            _stock_core_published_local = False
-                            _stock_core_superseded_local = True
-                        else:
-                            from app.models.factor_publication import (
-                                PUBLICATION_KIND_STOCK_CORE,
-                            )
-                            from app.services.factor_publication_service import (
-                                compute_coverage,
-                            )
-                            # [CHANGE-20260806 / P0-C] 用原子 publication service（同一事务：
-                            # quality gate + fencing + publication + supersede + run published +
-                            # audit），替换旧的 two-phase publish_stock_core。
-
-                            cov_data = await compute_coverage(pub_db, snapshot_run_id)
-                            from app.services.stock_core_publication_service import (
-                                StockCorePublicationError,
-                                publish_stock_core_atomically,
-                            )
-                            try:
-                                _lease_epoch = int(time.time())
-                                await publish_stock_core_atomically(
-                                    pub_db,
-                                    scope_key="market",
-                                    trade_date=trade_date,
-                                    publication_kind=PUBLICATION_KIND_STOCK_CORE,
-                                    algorithm_version=FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
-                                    snapshot_run_id=snapshot_run_id,
-                                    coverage_ratio=cov_data["coverage"],
-                                    worker_id=worker_id or "scheduled",
-                                    lease_epoch=_lease_epoch,
-                                    # [CHANGE-20260806-005 / Phase 2] coverage SSOT：compute_coverage
-                                    # 返回键为 "expected"（DB RunItem 统计），非 "expected_count"。
-                                    # 旧用 cov_data.get("expected_count", 0) 恒为 0 → quality gate 被绕过。
-                                    eligible_count=cov_data.get("expected", 0),
-                                )
-                                await pub_db.commit()
-                                logger.info(
-                                    "[AfterClose] stock_core 原子发布完成: trade_date=%s, "
-                                    "run=%s coverage=%.4f worker=%s",
-                                    trade_date, snapshot_run_id, cov_data["coverage"],
-                                    worker_id,
-                                )
-                                # 发布后再次核验 pointer 身份（与 skip_publish 路径共用同一判定）
-                                _published_now, _superseded_now = await resolve_stock_core_published(
-                                    pub_db, trade_date, snapshot_run_id
-                                )
-                                _stock_core_published_local = _published_now
-                                _stock_core_superseded_local = _superseded_now
-                            except StockCorePublicationError as pub_exc:
-                                await pub_db.rollback()
-                                logger.error(
-                                    "[AfterClose] stock_core 原子发布失败（回滚，旧 pointer 保留）: %s",
-                                    pub_exc,
-                                )
-                                raise RuntimeError(
-                                    f"stock_core publication failed: {pub_exc}"
-                                ) from pub_exc
-
-                return {
-                    "published_run": _published_run,
-                    "publish_failed": _publish_failed,
-                    "stock_core_published": _stock_core_published_local,
-                    "stock_core_superseded": _stock_core_superseded_local,
-                    "dsa_projection_ok": _dsa_projection_ok,
-                }
-
-            try:
-                _core_pub_out, _core_pub_summary = await execute_orchestrator_step(
-                    "publishing",
-                    _run_core_publish_op,
-                    timeout_seconds=_step_timeout("publishing"),
-                    progress=_make_step_progress_callback(job_run_id, worker_id),
-                    cancellation_check=_make_step_cancellation_check(job_run_id),
-                    heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-                )
-            except Exception as pub_exc:
-                # 执行器已标记 step_summary=failed，核心发布失败 → 整个 run 失败
-                logger.error(
-                    "[AfterClose] publishing 核心发布失败: job_run_id=%s, error=%s",
-                    job_run_id, pub_exc, exc_info=True,
-                )
-                raise
-
-            # [mypy-clean] publishing 步骤成功返回后 _core_pub_out 必非 None
-            assert _core_pub_out is not None, "publishing 成功但输出为空"
-            published_run = _core_pub_out["published_run"]
-            _stock_core_published = _core_pub_out["stock_core_published"]
-            _stock_core_superseded = _core_pub_out["stock_core_superseded"]
-            _dsa_projection_ok = _core_pub_out.get("dsa_projection_ok", True)
-
-            # normal publish 分支汇总前初始化；superseded 路径不执行 auction/aggregation
-            # /checkpoint/chip，这些状态如实置为 skipped（不掩盖未执行）。
-            # [CRASH-RESUME-SLICE / P0-B] 这些 enhancement 状态变量现在提前声明默认值，
-            # 因为 enhancement 段（auction/state_events/chip）已下移到 Review 之后执行，
-            # 而 final-status / review 短路日志会在 enhancement 段之前引用它们。
+            # 发布相关布尔直接置安全默认值：无 stock_core publication 也能 Review。
+            published_run = None
+            _stock_core_published = False
+            _stock_core_superseded = False
+            _dsa_projection_ok = True
             _auction_anchor_status: str = "skipped"
             _auction_publication_id: uuid.UUID | None = None
             _aggregation_status: str = "skipped"
-            _chip_enqueue_status: str = "skipped"
-            _chip_job_id: uuid.UUID | None = None
-
-            # ============================================================
-            # [P0 corrective] normal publish 专属步骤（superseded handling /
-            # auction anchor / publishing checkpoint）。
-            # 这些步骤属于「正常发布」分支，仅当 not skip_publish 时执行；
-            # skip_publish 断点恢复分支不得错误翻转到这些步骤。
-            # ============================================================
-            # [CHANGE-20260806-CP4A.1 / P0-C] 正常链不再有独立的 phase-2 run-mark。
-            # `publish_stock_core_atomically` 已在同一事务内标记 snapshot run published/succeeded，
-            # 正常路径只存在**一个 run 状态 owner**（原子发布服务）。断点恢复场景的 run 终态
-            # 由独立的 reconcile service 处理（reconcile_stock_core_publication），不在此内联。
-            # Superseded 的 run 不标记 succeeded（无 published_at → API 不可见）。
-
-            # [P0-1] Superseded: snapshot NOT marked succeeded, aggregation skipped
-            if _stock_core_superseded and snapshot_run_id is not None:
-                async with AsyncSessionLocal() as db:
-                    job_run = await _get_job_run_or_raise(db, job_run_id)
-                    await append_event(
-                        db=db,
-                        job_run_id=job_run_id,
-                        step="publishing",
-                        level="warning",
-                        message=(
-                            f"Snapshot run {snapshot_run_id} SUPERSEDED by existing pointer. "
-                            f"Not marking succeeded. Aggregation skipped."
-                        ),
-                        payload={
-                            "snapshot_run_id": str(snapshot_run_id),
-                            "superseded": True,
-                        },
-                    )
-                    await db.commit()
-
-            # [CRASH-RESUME-SLICE / P0-A] publishing checkpoint 必须在 auction_anchor /
-            # state_events / chip 等 enhancement 之前立即落库：stock_core 规范发布已确认
-            # 成功，其事实 checkpoint 不得依赖后续可选步骤的成败。若 process 在 enhancement
-            # 阶段 crash，resume 时 last_completed_step 已是 publishing，core 不会被重做，
-            # 且 History/Review（mandatory 关键路径）仍会继续执行。
-            if _stock_core_published:
-                async with AsyncSessionLocal() as db:
-                    _ck_job = await _get_job_run_or_raise(db, job_run_id)
-                    await _update_heartbeat_and_step(
-                        db, _ck_job,
-                        AfterCloseRunStatus.PUBLISHING.value,
-                        worker_id,
-                    )
-                    await db.commit()
-
-            # [CRASH-RESUME-SLICE / P0-B] auction anchor（legacy deprecated 产品）已下移到
-            # post-core enhancement 段（computing_review 之后）执行，不再阻塞 History/Review
-            # 这一 mandatory 关键路径。其原始执行条件（normal publish 且
-            # _stock_core_published and snapshot_run_id is not None）在 post-core 段复现，
-            # 并额外要求 not skip_publish（断点恢复不重复执行 normal-publish 专属步骤）。
-
-            # [P1-2 2026-08-07] post-core 依赖顺序收口（V2.1 PC-8）：
-            # stock_core 发布身份确认后，state events 与 chip 入队先行，
-            # 再执行 auction anchor 与 Review（[Slice 4A9] legacy board aggregation
-            # 已退役，不再作为中间 mandatory 阶段）。
-            #
-            # 顺序：stock_core published
-            #         ├─ state events
-            #         ├─ enqueue chip
-            #         ├─ auction anchor
-            #         └─ DSA projection（保持现有 canonical projection 合同）
-            #               ↓
-            #             review
-            #
-            # state events / chip 已下移到本 if 块之后的 top-level post-core 段
-            # （见下方 [P1-2] 段），以便 normal 与 skip_publish 断点恢复均执行：
-            #   - normal publish：auction → state events → chip → review
-            #   - skip_publish 断点恢复：state events / chip 仍执行
-            #     （chip 重新入队；legacy aggregation 已退役不再执行），
-            #     仅 auction anchor 与 publishing 检查点不执行。
-
-            # [Phase5] - publishing 段收尾：持久化 step_summary / partial_success 元数据。
-            # 注意：PUBLISHING checkpoint 已提前到 stock_core 发布确认之后立即落库
-            # （[CRASH-RESUME-SLICE / P0-A]），此处不再推进 last_completed_step，
-            # 仅刷新心跳/租约（传 None）并保存元数据。
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                meta = _parse_metadata(job_run)
-                step_summary = dict(meta.get("step_summary") or {})
-                meta["step_summary"] = step_summary
-                # [AUDIT-CORRECTION-01 / Blocker 4] 此处只落发布 checkpoint + 心跳，
-                # 不提前计算 optional_failures/partial_success——enhancement（auction/
-                # state_events/chip）在本步之后才执行，提前算会导致元数据与终态不一致
-                # （status=partial_success 但 meta.partial_success=false）。
-                # optional 汇总的唯一 owner 在终端汇总块一次性从最终 step_summary 生成。
-                job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                await _update_heartbeat_and_step(db, job_run, None, worker_id)
-                await db.commit()
 
         else:
             # [Phase4.2 corrective] skip_publish=True（断点恢复到 publishing 之后）：

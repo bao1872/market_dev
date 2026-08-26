@@ -633,16 +633,21 @@ async def test_execute_writes_status_events(db_session) -> None:
             dsa_poll_timeout=1,
         )
 
-    # 验证事件序列：应包含 refreshing_daily → computing_features → publishing → succeeded
+    # 验证事件序列：应包含 refreshing_daily → computing_features → computing_review → succeeded
     # [Phase8A] 旧四状态（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
-    # 收敛为 computing_features
+    # 收敛为 computing_features。
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core→Review 主链不再经过 PUBLISHING 阶段
+    # （stock_core publication 已旁路），正常 DAG 不进入 publishing step。
     from app.services.job_run_event_service import list_events
     events = await list_events(db_session, job_run.id, limit=20)
     steps = [e.step for e in events]
 
     assert AfterCloseRunStatus.REFRESHING_DAILY.value in steps, f"缺少 refreshing_daily 事件: {steps}"
     assert AfterCloseRunStatus.COMPUTING_FEATURES.value in steps, f"缺少 computing_features 事件: {steps}"
-    assert AfterCloseRunStatus.PUBLISHING.value in steps, f"缺少 publishing 事件: {steps}"
+    assert AfterCloseRunStatus.PUBLISHING.value not in steps, (
+        f"正常 DAG 不应进入 PUBLISHING 阶段: {steps}"
+    )
+    assert AfterCloseRunStatus.COMPUTING_REVIEW.value in steps, f"缺少 computing_review 事件: {steps}"
     assert AfterCloseRunStatus.SUCCEEDED.value in steps, f"缺少 succeeded 事件: {steps}"
 
     # [AfterClose] - 不断言事件顺序：同一事务内 created_at 可能相同，

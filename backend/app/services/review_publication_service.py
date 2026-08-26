@@ -179,21 +179,39 @@ async def evaluate_publish_gate(
             "（真实执行异常 / system-level failure，阻塞发布）",
         )
 
-    # [Slice 4A5 Board-independent] 发布门禁只依赖当前正式 stock_core pointer。
-    # source_board_run_id 是 nullable legacy lineage（历史 Review run 可能保留
-    # Board UUID，新 canonical run 为 NULL），**不参与任何发布判断**。不再查询
-    # market_aggregation pointer，也不比较 source_board_run_id。
-    core_pub = await _get_publication(
-        session, PUBLICATION_KIND_STOCK_CORE_REF, run.trade_date,
-        for_update=lock_pointers,
-    )
-    if core_pub is None:
-        blockers.append("正式 stock_core pointer 缺失")
-    elif core_pub.data_run_id != run.source_core_run_id:
-        blockers.append(
-            f"source_core_run_id={run.source_core_run_id} 与已发布 stock_core "
-            f"pointer={core_pub.data_run_id} 不匹配",
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 发布门禁直接校验 Review 显式绑定的
+    # CoreRun（StockFeatureSnapshotRun）完整性，**不再要求 Review.source_core_run_id
+    # == stock_core FactorPublication.data_run_id**（不查 stock_core pointer）。
+    # Core readiness = StockFeatureSnapshotRun 本身 compute-complete contract：
+    #   - run 存在
+    #   - run.trade_date == run.trade_date（时间口径一致）
+    #   - run.status == succeeded（Core compute-complete）
+    #   - compute-complete contract 满足
+    # 不检查 published_at / stock_core pointer / FactorPublication(kind=stock_core)。
+    if run.source_core_run_id is None:
+        blockers.append("Review.source_core_run_id 为空（未显式绑定 CoreRun）")
+    else:
+        from app.models.stock_feature_snapshot_run import (
+            STATUS_SUCCEEDED,
+            StockFeatureSnapshotRun,
         )
+        core_run = await session.get(
+            StockFeatureSnapshotRun, run.source_core_run_id,
+        )
+        if core_run is None:
+            blockers.append(
+                f"Review.source_core_run_id={run.source_core_run_id} 对应的 CoreRun 不存在",
+            )
+        elif core_run.trade_date != run.trade_date:
+            blockers.append(
+                f"CoreRun trade_date={core_run.trade_date} 与 Review "
+                f"trade_date={run.trade_date} 不一致",
+            )
+        elif core_run.status != STATUS_SUCCEEDED:
+            blockers.append(
+                f"CoreRun status={core_run.status} 非 succeeded，"
+                f"不满足 Core compute-complete 合同",
+            )
 
     if run.status == "published":
         review_pub = await _get_publication(

@@ -74,13 +74,13 @@
 |---|---|---|---|
 | `daily_facts` | mandatory input | 目标交易日日线 readiness | 不达标阻断 core |
 | `board_facts` | mandatory input | 正式 board facts run/pointer 与 PIT membership | 不可用阻断对应聚合；复用必须显式 degraded |
-| `stock_core` | mandatory product | 正式 stock_core pointer | 失败则 closure blocked |
+| `stock_core` | mandatory product（legacy 兼容路径） | 正式 stock_core pointer（legacy，[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 不再阻塞 Review） | 失败则 legacy stock_core publication blocked；**不再阻断 Review / watchlist_ready** |
 | `dsa_projection` | required compatibility output | 投影 run、source core、版本与 matched coverage | 不撤销 core，但形成 degraded/issue |
 | `state_events` | enhancement | source core、事件生命周期与 coverage | 不阻断 board/Review |
 | `chip_consensus` | enhancement | ChipConsensusRun、逐股 readiness、coverage 与正式 pointer | 不阻断 core/board/Review |
 | `auction_anchor` | enhancement | AuctionAnchorRun、mode、coverage 与正式 pointer | 不阻断 Review |
 | `auction`（新，未来节点） | 次日 9:25 竞价重新定价观测 | 非盘后编排节点；见 [PRD75](./75-auction-analysis.md) | 非本轮 P0 实现 |
-| `board_aggregation` | mandatory product | 正式 market aggregation pointer（READY 或 DEGRADED，见 PC-42） | **FAILED** 阻断 Review；**DEGRADED 不阻断** |
+| `board_aggregation` | mandatory product（[Slice 4A9] 已退役） | 正式 market aggregation pointer（READY 或 DEGRADED，见 PC-42） | **退役**，不再阻断 Review；新合同下 Review 经 `source_core_run_id` 直接绑定 Core |
 | `market_review` | mandatory product | 正式 Review pointer 与发布质量门 | 失败保留旧 pointer |
 
 每个节点至少返回：`status/readiness/mandatory/runId/publicationId/sourceRunIds/coverage/processed/total/heartbeat/lease/isStale/reasonCode/reasonText/recommendedAction`。
@@ -141,7 +141,7 @@ Canonical reason code：
 
 ### PC-30 Review
 
-Review 的硬依赖只有正式 stock_core、正式 market aggregation 和历史 observations。chip/auction 不进入 Review 唯一键、P/Q/U/C/V 或发布门；chip 晚到不改写 Review run/pointer。P/Q/U/C/V 公式、60 日边界、PIT membership、bootstrap、Discovery、Cross-Scope Relation、归因和 Discovery Workspace UI 只以 PRD 70 为权威。
+Review 的硬依赖只有**当前 Core（`snapshot_run_id` 绑定的 StockFeatureSnapshotRun）与历史 observations**。**[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** Review 不再依赖 `stock_core` FactorPublication pointer 或 `market_aggregation` pointer 已发布；其 `source_core_run_id` 由 AfterClose 编排显式绑定 Core `snapshot_run_id`，而非经 pointer 解析。chip/auction 不进入 Review 唯一键、P/Q/U/C/V 或发布门；chip 晚到不改写 Review run/pointer。P/Q/U/C/V 公式、60 日边界、PIT membership、bootstrap、Discovery、Cross-Scope Relation、归因和 Discovery Workspace UI 只以 PRD 70 为权威。
 
 ### PC-31 Auction
 
@@ -160,13 +160,16 @@ Review 的硬依赖只有正式 stock_core、正式 market aggregation 和历史
 ### PC-41 Lineage
 
 ```text
-board.source_core_run_id == stock_core.pointer.data_run_id
-review.source_core_run_id == stock_core.pointer.data_run_id
-review.source_board_run_id == market_aggregation.pointer.data_run_id
-chip.source_core_run_id == stock_core.pointer.data_run_id
-auction.source_core_run_id == stock_core.pointer.data_run_id
+[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]
+board.source_core_run_id == snapshot_run_id (retired, [Slice 4A9] board 退役)
+review.source_core_run_id == snapshot_run_id   // Core 计算的 StockFeatureSnapshotRun.id，直接绑定，不再经 stock_core.pointer 解析
+review.source_board_run_id == null             // board/market_aggregation 已退役，不再作为 Review lineage
+chip.source_core_run_id == snapshot_run_id
+auction.source_core_run_id == snapshot_run_id
 auction.source_chip_run_id == chip_consensus.pointer.data_run_id or null
 ```
+
+> **合同变更（[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]）**：Review（`review.source_core_run_id`）由 AfterClose 编排以显式 `snapshot_run_id`（Core `StockFeatureSnapshotRun.id`）直接绑定，**不再等于 `stock_core.pointer.data_run_id`**，也不经 `market_aggregation` pointer 解析。`stock_core` FactorPublication pointer 的发布/切换已不是 Core→Review 的业务依赖、readiness 条件或同步机制。`stock_core` publication service/schema 作为 legacy 兼容保留（KPI-10），不属于正常 Core→Review DAG。
 
 > 上述 `auction.*` lineage 为**旧 AuctionAnchor 产品**的 lineage（DEPRECATED，见 PRD75 §23）。新 Auction（次日 9:25）的 lineage 以 [PRD75](./75-auction-analysis.md) §17 为准，不在此列。
 
@@ -193,13 +196,11 @@ auction.source_chip_run_id == chip_consensus.pointer.data_run_id or null
   `missing_count` / `status`
 - **H** 不存在 UNKNOWN failure
 
-`degraded != failed`。**degraded pointer 仍然是正式的 `market_aggregation` pointer**，
-PC-40 与 PC-41 完全不变：Review 仍只消费正式 pointer，且必须满足
-`review.source_board_run_id == market_aggregation.pointer.data_run_id`。
+`degraded != failed`。**degraded pointer 仍然是正式的 `market_aggregation` pointer**（legacy 路径，[Slice 4A9] board 退役）。
 
-**禁止 Review 侧自行解析 board source**：不得增加 Review-side board resolver、fallback、
-"latest partial run" 或任何绕过 pointer 的路径。Review 接受的是「正式 pointer 指向的 degraded run」，
-而不是「自己挑一个 partial run」。
+> **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** PC-40/PC-41 重锚：Review 不再消费 `market_aggregation` pointer，也不设 `source_board_run_id`（恒为 null）；Review 通过 `source_core_run_id` 直接绑定 Core `snapshot_run_id`。
+
+**禁止 Review 侧自行解析 stock_core / board source 作为前置依赖**：不得增加 Review-side stock_core pointer resolver、fallback、"latest partial run" 或任何绕过 `snapshot_run_id` 的路径。Review 接受的是 AfterClose 编排显式传入的 `source_core_run_id` 指向的 Core run，而不是「自己挑一个 pointer 或 partial run」。
 
 ### PC-43 Long-running step liveness contract（Phase 4D.4）
 
@@ -248,7 +249,7 @@ optional / asynchronous enhancements:
 |---|---|
 | `pending` | mandatory 链尚未形成 stock_core 或仍在运行 |
 | `blocked` | stock_core 或 mandatory publication 失败 |
-| `core_ready` | stock_core 已发布，但 board aggregation/Review 尚未全部 ready |
+| `core_ready` | Core 计算完成（snapshot_run_id 可用），但 Review 尚未全部 ready |
 | `mandatory_ready_enhancing` | mandatory 全部 ready，但仍有 active/stale 未对账增强任务 |
 | `degraded_ready` | mandatory 全部 ready、增强均终结，但至少一个 required compatibility output（如 dsa_projection）或 enhancement 降级 |
 | `fully_ready` | mandatory 全部 ready、required enhancement 全部达到正式 ready 条件且无 active/stale/unreconciled child |
@@ -261,9 +262,9 @@ ProductReadinessService 动态读取九节点 canonical、领域 run、child job
 
 ## 8. 编排与恢复
 
-编排阶段固定为 `daily → core → post_core → board_review → finalize`，产品节点不等于编排阶段。stock_core publication 成功后应尽早并行创建 DSA projection、state events、chip 和 structure-only auction；board aggregation 成功后运行 Review。
+编排阶段固定为 `daily → core → post_core → board_review → finalize`，产品节点不等于编排阶段。**[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** Core 计算完成后 AfterClose 编排直接以 `snapshot_run_id` 绑定 `ReviewRun.source_core_run_id` 进入 Review（computing_review），不再等待 `stock_core` / `market_aggregation` publication；`stock_core` publication 成功后应尽早并行创建 DSA projection、state events、chip 和 structure-only auction。
 
-granular restart 边界：`daily_ready/core/stock_core_published/dsa_projection/state_events/chip/auction/board_aggregation/review`。恢复下游不得重算上游；chip 独立 retry；projection 只从 artifact 重建；force 创建新 run、保留历史、不绕过质量门并记录审计。
+granular restart 边界：`daily_ready/core/dsa_projection/state_events/chip/auction/review`。`stock_core_published` / `board_aggregation` 已不再属于正常 Core→Review DAG 的 restart 边界（legacy 兼容保留）。恢复下游不得重算上游；chip 独立 retry；projection 只从 artifact 重建；force 创建新 run、保留历史、不绕过质量门并记录审计。
 
 ## 9. API 与用户状态
 

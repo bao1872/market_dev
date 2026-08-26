@@ -110,29 +110,37 @@ class _FakeSession:
 
 
 # =============================================================================
-# 1. Review identity depends on stock_core only
+# 1. Review identity requires explicit source_core_run_id (fail-closed)
 # =============================================================================
 
 
-async def test_resolve_requires_stock_core_pointer() -> None:
-    """stock_core pointer missing -> reject (no silent core fallback)."""
+async def test_resolve_requires_explicit_source_core_run_id() -> None:
+    """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] source_core_run_id=None ->
+    fail-closed（不回退到 stock_core FactorPublication pointer 解析）。
+
+    Review 必须显式绑定本次 AfterCloseRun 产生的 CoreRun；旧合同
+    "stock_core pointer missing -> reject, present -> accept" 已被否决。
+    """
     session = _FakeSession(core_pointer=None)
     with pytest.raises(ReviewOrchestratorError) as exc:
         await _resolve_source_core_run_id(
             session, TRADE_DATE, source_core_run_id=None,
         )
-    assert "stock_core" in str(exc.value).lower()
+    assert "source_core_run_id" in str(exc.value).lower()
+    # 关键不变量：fail-closed 路径绝不查询 stock_core FactorPublication pointer。
+    assert PUBLICATION_KIND_STOCK_CORE not in session.executed_kind
 
 
-async def test_resolve_accepts_without_market_aggregation() -> None:
-    """stock_core present + market_aggregation absent -> accept."""
+async def test_resolve_uses_explicit_source_core_run_id() -> None:
+    """显式 source_core_run_id 被直接使用，不读任何 publication pointer。"""
     core_id = uuid.uuid4()
     session = _FakeSession(core_pointer=_make_pointer(core_id))
     resolved = await _resolve_source_core_run_id(
-        session, TRADE_DATE, source_core_run_id=None,
+        session, TRADE_DATE, source_core_run_id=core_id,
     )
     assert resolved == core_id
-    assert PUBLICATION_KIND_STOCK_CORE in session.executed_kind
+    # 显式 id 短路：不查询 stock_core / 任何 publication kind。
+    assert PUBLICATION_KIND_STOCK_CORE not in session.executed_kind
 
 
 # =============================================================================
@@ -140,14 +148,18 @@ async def test_resolve_accepts_without_market_aggregation() -> None:
 # =============================================================================
 
 
-async def test_creation_queries_only_stock_core_kind() -> None:
-    """Creation queries stock_core only; never market_aggregation/chip/auction."""
+async def test_creation_queries_no_stock_core_pointer() -> None:
+    """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Review 创建不查询任何
+    FactorPublication pointer（含 stock_core / market_aggregation / chip /
+    auction / state_event / market_review / history_cross_section）。
+    """
     core_id = uuid.uuid4()
     session = _FakeSession(core_pointer=_make_pointer(core_id))
+    # 显式传入 source_core_run_id（不再解析 pointer）
     await _resolve_source_core_run_id(
-        session, TRADE_DATE, source_core_run_id=None,
+        session, TRADE_DATE, source_core_run_id=core_id,
     )
-    assert set(session.executed_kind) == {PUBLICATION_KIND_STOCK_CORE}
+    assert PUBLICATION_KIND_STOCK_CORE not in session.executed_kind
     for kind in FORBIDDEN_KINDS:
         assert kind not in session.executed_kind, (
             f"Review creation must not query publication kind {kind!r}"
@@ -194,12 +206,20 @@ class _RecordingSession:
 
     async def get(self, model, ident):
         from app.models.board_analysis_snapshot import BoardAnalysisRun
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 
         if model is BoardAnalysisRun:
             self.board_get_calls += 1
             raise AssertionError(
                 "create_run MUST NOT session.get(BoardAnalysisRun)"
             )
+        if model is StockFeatureSnapshotRun:
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] validate_core_run 直接查
+            # StockFeatureSnapshotRun 行（status==succeeded, trade_date==T）。
+            core = AsyncMock()
+            core.trade_date = TRADE_DATE
+            core.status = "succeeded"
+            return core
         return None
 
     async def flush(self):
@@ -237,6 +257,7 @@ async def test_create_run_never_queries_board_or_chip(monkeypatch) -> None:
 
     creation = await ros.create_run_with_result(
         session, trade_date=TRADE_DATE,  # type: ignore[arg-type]
+        source_core_run_id=session._core_id,
     )
     run = creation.run
     # Core-only identity: new run carries NULL board lineage.
@@ -254,13 +275,16 @@ async def test_create_run_never_queries_board_or_chip(monkeypatch) -> None:
             f"actual SQL:\n{joined}"
         )
 
-    # publication kinds queried: only stock_core, never market_aggregation
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] create_run 不查询任何 publication_kind
+    # （含 stock_core / market_aggregation / chip_consensus / auction_anchor /
+    # history_cross_section / market_review / state_event）。CoreRun 通过显式
+    # source_core_run_id + validate_core_run（直接查 StockFeatureSnapshotRun 行）校验。
     for kind in ("chip_consensus", "auction_anchor", "market_aggregation",
-                 "history_cross_section"):
+                 "history_cross_section", "stock_core", "market_review",
+                 "state_event"):
         assert f"publication_kind = '{kind}'" not in joined, (
             f"create_run must not query publication_kind={kind!r}"
         )
-    assert "publication_kind = 'stock_core'" in joined
 
 
 async def test_create_run_inserts_null_board_run_id(monkeypatch) -> None:
@@ -278,6 +302,7 @@ async def test_create_run_inserts_null_board_run_id(monkeypatch) -> None:
 
     await ros.create_run_with_result(
         session, trade_date=TRADE_DATE,  # type: ignore[arg-type]
+        source_core_run_id=session._core_id,
     )
 
     inserts = [s for s in session.sql_log if "insert into" in s.lower()]
@@ -313,8 +338,9 @@ async def test_create_run_dry_run_has_null_board() -> None:
     from app.services import review_orchestrator_service as ros
 
     session = _build_recording_session()
-    creation = await ros.create_run_with_result(
+    creation =     await ros.create_run_with_result(
         session, trade_date=TRADE_DATE, dry_run=True,  # type: ignore[arg-type]
+        source_core_run_id=session._core_id,
     )
     run = creation.run
     assert run.source_board_run_id is None
@@ -335,6 +361,7 @@ async def test_create_run_upsert_is_do_nothing(monkeypatch) -> None:
 
     await ros.create_run_with_result(
         session, trade_date=TRADE_DATE,  # type: ignore[arg-type]
+        source_core_run_id=session._core_id,
     )
 
     inserts = [s for s in session.sql_log if "insert into" in s.lower()]

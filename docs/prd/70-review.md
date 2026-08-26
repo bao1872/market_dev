@@ -1843,9 +1843,11 @@ stock_core published
 
 **6. 其他整套条件（不变）**
 
-- source_core_run_id 和 source_board_run_id 均指向当前正式 pointer。
+- **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** `source_core_run_id` 由 AfterClose 编排以显式 Core `snapshot_run_id`（StockFeatureSnapshotRun.id）直接绑定，**不再经由 `stock_core` FactorPublication pointer 解析或回退**；`source_board_run_id` 恒为 null（board/market_aggregation 已退役，见 [Slice 4A9]）。Review 创建/发布门禁不查询 stock_core publication pointer。
 
 > **2026-08-12（Round 2C-1 follow-up）**：旧发布门禁中的「signal evaluation 无系统性异常」从 V2 target publication gate 中移除。若现有 legacy runtime 仍依赖 signal evaluation，该条件仅作为 Legacy compatibility runtime condition，不构成 V2 future gate。本轮不发明新的 Discovery gate。
+
+> **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** Review 发布门禁（`evaluate_publish_gate`）直接通过 `session.get(StockFeatureSnapshotRun, source_core_run_id)` 校验 CoreRun 完整性（run 存在 + trade_date 一致 + status == succeeded），**不比较 `stock_core` publication `data_run_id`**，也不要求 stock_core pointer 已存在/已发布。历史 observations 的 First Pyramid History 生产不在 Review 创建/启动前作为 prerequisite。
 
 ---
 
@@ -2271,8 +2273,8 @@ Discovery 阶段必须独立覆盖以下全部 Scope Family，缺一不可：mar
 
 1. **market Canonical Observation facts 就绪（新发布门禁）**：market 范围的 Canonical Scope Observation Facts（`review_scope_observation_facts`，business grain = `trade_date + scope_type + scope_key`）必须已成功计算且 `readiness` 通过；任一 required Canonical Observation fact 为 `null` / `status=insufficient` / `status=not_ready` 拒绝发布。
    > **LEGACY 历史兼容**：旧 `market_review_scope_snapshots.p/q/u/c/v` payload `value` 非空门禁仅作为 legacy implementation compatibility 保留，不得继续作为新发布链路的 hard gate。新门禁以 required Canonical Observation facts readiness + coverage / execution / lineage 现行合同为准。
-2. **source_board_run_id 一致**；
-3. **source_core_run_id 一致**；
+2. **source_board_run_id 恒为 null**（[Slice 4A9] board 退役；不再作为门禁校验对象）；
+3. **source_core_run_id 绑定 CoreRun 完整性（[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]）**：`session.get(StockFeatureSnapshotRun, source_core_run_id)` 必须存在且 `trade_date == run.trade_date` 且 `status == succeeded`；**不再与 stock_core FactorPublication pointer 的 `data_run_id` 比较，也不要求 stock_core pointer 已发布**。
 4. **无 failed signals**；
 5. **无 failed run_items**；
 6. **coverage_ratio >= 0.95**（market coverage hard gate）。

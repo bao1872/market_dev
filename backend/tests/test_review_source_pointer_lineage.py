@@ -1,41 +1,33 @@
-"""Slice 3 — Review core-only source lineage contract.
+"""AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 — Review source lineage contract.
 
 Pure-unit tests (mock AsyncSession, no DB/network):
     PURE_UNIT_TEST=1 python -m pytest tests/test_review_source_pointer_lineage.py -v
 
-Slice 3 removed the Board Analysis dependency from Review identity. Review
-source resolution now depends ONLY on stock_core (or an explicitly supplied
-source_core_run_id). The market_aggregation pointer and BoardAnalysisRun are no
-longer part of Review identity.
+New contract for `_resolve_source_core_run_id`:
 
-This file locks the NEW contract for `_resolve_source_core_run_id`:
-
-1. stock_core pointer present  -> returns pointer.data_run_id
-2. stock_core pointer missing  -> ReviewOrchestratorError
-3. explicit source_core_run_id -> used directly, NO market_aggregation lookup
-4. market_aggregation pointer missing + stock_core present -> SUCCESS
-   (most important inverse regression guard for Slice 3)
-5. Board run present in any status (failed/partial/succeeded) does NOT affect
-   resolver behavior
-6. resolver MUST NOT:
-     - query PUBLICATION_KIND_MARKET_AGGREGATION
-     - session.get(BoardAnalysisRun, ...)
-7. publication query kind set is exactly {stock_core}
+1. explicit source_core_run_id -> used directly, NO stock_core publication lookup,
+   NO FactorPublication read at all (KPI-2/3: FactorPublication(kind=stock_core)
+   reads = 0 in normal path).
+2. source_core_run_id=None -> ReviewOrchestratorError (fail-closed).
+   MUST NOT read stock_core pointer / FactorPublication(kind=stock_core).
+3. resolver MUST NOT query PUBLICATION_KIND_STOCK_CORE / market_aggregation.
+4. resolver MUST NOT session.get(BoardAnalysisRun).
+5. validate_core_run: run row exists + trade_date==T + status==succeeded
+   (compute-complete), no published_at / stock_core pointer check.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import date
-from unittest.mock import AsyncMock
 
 import pytest
 
-from app.models.board_analysis_snapshot import BoardAnalysisRun
-from app.models.factor_publication import PUBLICATION_KIND_STOCK_CORE
+from app.models.stock_feature_snapshot_run import STATUS_SUCCEEDED
 from app.services.review_orchestrator_service import (
     ReviewOrchestratorError,
     _resolve_source_core_run_id,
+    validate_core_run,
 )
 
 pytestmark = pytest.mark.asyncio
@@ -56,15 +48,12 @@ class _FakeResult:
         return self._scalar
 
 
-def _make_pointer(data_run_id: uuid.UUID) -> AsyncMock:
-    pub = AsyncMock()
-    pub.data_run_id = data_run_id
-    pub.status = "published"
-    return pub
-
-
 class _FakeSession:
-    """Records publication kinds queried and BoardAnalysisRun lookups."""
+    """Records publication kinds queried and BoardAnalysisRun lookups.
+
+    Must NEVER be asked for stock_core / market_aggregation publication, and must
+    NEVER load a BoardAnalysisRun.
+    """
 
     def __init__(
         self,
@@ -82,21 +71,15 @@ class _FakeSession:
     async def execute(self, stmt):
         compiled = stmt.compile(compile_kwargs={"literal_binds": True}).string
         if "publication_kind" in compiled:
-            # Slice 3: resolver must only ever ask for stock_core.
-            assert "market_aggregation" not in compiled, (
-                "Review source resolution MUST NOT query "
-                "PUBLICATION_KIND_MARKET_AGGREGATION"
+            # New contract: resolver must NEVER query any FactorPublication kind.
+            raise AssertionError(
+                f"Review source resolution MUST NOT query FactorPublication: {compiled}"
             )
-            assert "stock_core" in compiled, (
-                f"unexpected publication_kind query: {compiled}"
-            )
-            self.executed_kind.append(PUBLICATION_KIND_STOCK_CORE)
-            return _FakeResult(scalar=self._core_pointer)
         self.executed_kind.append("unknown:" + compiled[:80])
         return _FakeResult(scalar=None)
 
     async def get(self, model, ident):
-        if model is BoardAnalysisRun:
+        if model.__name__ == "BoardAnalysisRun":
             self.board_get_calls += 1
             raise AssertionError(
                 "Review source resolution MUST NOT session.get(BoardAnalysisRun)"
@@ -104,38 +87,17 @@ class _FakeSession:
         return None
 
 
-# =============================================================================
-# 1. stock_core present -> use pointer.data_run_id
-# =============================================================================
+class _FakePointer:
+    def __init__(self, data_run_id: uuid.UUID) -> None:
+        self.data_run_id = data_run_id
 
 
-async def test_resolve_uses_stock_core_pointer() -> None:
-    core_id = uuid.uuid4()
-    session = _FakeSession(core_pointer=_make_pointer(core_id))
-    resolved = await _resolve_source_core_run_id(
-        session, TRADE_DATE, source_core_run_id=None,
-    )
-    assert resolved == core_id
-    assert PUBLICATION_KIND_STOCK_CORE in session.executed_kind
-    assert session.board_get_calls == 0
+def _make_pointer(data_run_id: uuid.UUID) -> _FakePointer:
+    return _FakePointer(data_run_id)
 
 
 # =============================================================================
-# 2. stock_core missing -> reject
-# =============================================================================
-
-
-async def test_resolve_requires_stock_core_pointer() -> None:
-    session = _FakeSession(core_pointer=None)
-    with pytest.raises(ReviewOrchestratorError) as exc:
-        await _resolve_source_core_run_id(
-            session, TRADE_DATE, source_core_run_id=None,
-        )
-    assert "stock_core" in str(exc.value).lower()
-
-
-# =============================================================================
-# 3. explicit source_core_run_id -> used directly, no publication lookup
+# 1. explicit source_core_run_id -> used directly, no publication lookup
 # =============================================================================
 
 
@@ -152,61 +114,119 @@ async def test_resolve_uses_explicit_core_run_id() -> None:
 
 
 # =============================================================================
-# 4. market_aggregation missing + stock_core present -> SUCCESS
-#    (core inverse regression guard for Slice 3)
+# 2. source_core_run_id=None -> fail-closed, no stock_core pointer read
 # =============================================================================
 
 
-async def test_resolve_succeeds_without_market_aggregation() -> None:
-    core_id = uuid.uuid4()
-    # No board pointer, no BoardAnalysisRun referenced anywhere.
-    session = _FakeSession(core_pointer=_make_pointer(core_id))
-    resolved = await _resolve_source_core_run_id(
-        session, TRADE_DATE, source_core_run_id=None,
-    )
-    assert resolved == core_id
-    # The only publication kind ever queried is stock_core.
-    assert session.executed_kind == [PUBLICATION_KIND_STOCK_CORE]
+async def test_resolve_requires_explicit_core_run_id() -> None:
+    # Even when a stock_core pointer exists, None must NOT fall back to it.
+    session = _FakeSession(core_pointer=_make_pointer(uuid.uuid4()))
+    with pytest.raises(ReviewOrchestratorError) as exc:
+        await _resolve_source_core_run_id(
+            session, TRADE_DATE, source_core_run_id=None,
+        )
+    assert "source_core_run_id" in str(exc.value).lower()
+    # Fail-closed: no publication query was ever issued.
+    assert session.executed_kind == []
     assert session.board_get_calls == 0
 
 
-# =============================================================================
-# 5. Board run in any status does NOT affect resolver
-# =============================================================================
-
-
-@pytest.mark.parametrize("board_status", ["failed", "partial", "succeeded", "skipped"])
-async def test_resolve_ignores_board_run_status(board_status: str) -> None:
-    core_id = uuid.uuid4()
-    session = _FakeSession(
-        core_pointer=_make_pointer(core_id),
-        board_present=True,
-        board_status=board_status,
-    )
-    resolved = await _resolve_source_core_run_id(
-        session, TRADE_DATE, source_core_run_id=None,
-    )
-    assert resolved == core_id
-    assert session.board_get_calls == 0
+async def test_resolve_none_without_pointer_rejected() -> None:
+    session = _FakeSession(core_pointer=None)
+    with pytest.raises(ReviewOrchestratorError):
+        await _resolve_source_core_run_id(
+            session, TRADE_DATE, source_core_run_id=None,
+        )
 
 
 # =============================================================================
-# 6. resolver MUST NOT query market_aggregation or BoardAnalysisRun
+# 3. resolver MUST NOT query stock_core / market_aggregation publication
 # =============================================================================
 
 
-async def test_resolve_forbids_board_dependency_graph() -> None:
-    """Strongest Slice 3 proof: Board is NOT in the dependency graph."""
-    core_id = uuid.uuid4()
-    session = _FakeSession(core_pointer=_make_pointer(core_id))
+async def test_resolve_forbids_publication_dependency() -> None:
+    """Strongest proof: no FactorPublication query in normal resolution."""
+    explicit = uuid.uuid4()
+    session = _FakeSession(core_pointer=_make_pointer(uuid.uuid4()))
     await _resolve_source_core_run_id(
-        session, TRADE_DATE, source_core_run_id=None,
+        session, TRADE_DATE, source_core_run_id=explicit,
     )
-    # No market_aggregation publication query
     assert all(
-        "market_aggregation" not in k for k in session.executed_kind
-    ), "resolver queried market_aggregation publication"
-    # No BoardAnalysisRun entity load
+        "publication_kind" not in k for k in session.executed_kind
+    ), "resolver queried FactorPublication"
     assert session.board_get_calls == 0
-    # Exactly one publication kind queried: stock_core
-    assert set(session.executed_kind) == {PUBLICATION_KIND_STOCK_CORE}
+
+
+# =============================================================================
+# 4. validate_core_run: direct StockFeatureSnapshotRun integrity (no pointer)
+# =============================================================================
+
+
+class _FakeCoreRun:
+    def __init__(self, *, exists: bool = True, trade_date=TRADE_DATE,
+                 status: str = STATUS_SUCCEEDED) -> None:
+        self._exists = exists
+        self.trade_date = trade_date
+        self.status = status
+
+
+async def test_validate_core_run_succeeded() -> None:
+    core_id = uuid.uuid4()
+    session = _FakeSession()
+    session._resolve_target = _FakeCoreRun(exists=True, status=STATUS_SUCCEEDED)
+
+    async def _get(model, ident):
+        return session._resolve_target if ident == core_id else None
+
+    session.get = _get  # type: ignore[assignment]
+    run = await validate_core_run(
+        session, core_run_id=core_id, trade_date=TRADE_DATE,
+    )
+    assert run is not None
+    assert run.status == STATUS_SUCCEEDED
+
+
+async def test_validate_core_run_missing() -> None:
+    core_id = uuid.uuid4()
+    session = _FakeSession()
+
+    async def _get(model, ident):
+        return None
+
+    session.get = _get  # type: ignore[assignment]
+    with pytest.raises(ReviewOrchestratorError):
+        await validate_core_run(
+            session, core_run_id=core_id, trade_date=TRADE_DATE,
+        )
+
+
+async def test_validate_core_run_trade_date_mismatch() -> None:
+    core_id = uuid.uuid4()
+    session = _FakeSession()
+    session._resolve_target = _FakeCoreRun(
+        exists=True, trade_date=date(2026, 8, 4),
+    )
+
+    async def _get(model, ident):
+        return session._resolve_target
+
+    session.get = _get  # type: ignore[assignment]
+    with pytest.raises(ReviewOrchestratorError):
+        await validate_core_run(
+            session, core_run_id=core_id, trade_date=TRADE_DATE,
+        )
+
+
+async def test_validate_core_run_not_succeeded() -> None:
+    core_id = uuid.uuid4()
+    session = _FakeSession()
+    session._resolve_target = _FakeCoreRun(exists=True, status="running")
+
+    async def _get(model, ident):
+        return session._resolve_target
+
+    session.get = _get  # type: ignore[assignment]
+    with pytest.raises(ReviewOrchestratorError):
+        await validate_core_run(
+            session, core_run_id=core_id, trade_date=TRADE_DATE,
+        )

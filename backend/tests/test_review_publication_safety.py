@@ -17,6 +17,9 @@ composition readiness**（``run.metadata_json["canonical_composition_readiness"]
    任一 activated scope readiness 非 ready → canonical 数据缺口，禁止发布；
    market/major_index/style 非激活家族合法跳过（不出现在 readiness），不阻塞；
    UNEXPECTED_EXECUTION_FAILURE（failed/pending/running item）仍阻塞；
+   [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 发布门禁直接校验 Review 显式绑定的
+   CoreRun（StockFeatureSnapshotRun）完整性（run 存在 + trade_date 一致 +
+   status==succeeded），**不查 stock_core FactorPublication pointer**；
    [QM-63] 未来 observation 硬门仍生效。
 
 测试环境：纯单元测试（mock AsyncSession），无需数据库：
@@ -80,13 +83,37 @@ class _FakeResult:
         return iter(self._list)
 
 
-def _make_session(execute_results: list[_FakeResult]) -> AsyncMock:
-    """构造 mock AsyncSession，execute 按序返回预置结果。"""
+def _make_session(
+    execute_results: list[_FakeResult] | tuple[list[_FakeResult], object | None],
+    *,
+    core_run: object | None = None,
+) -> AsyncMock:
+    """构造 mock AsyncSession，execute 按序返回预置结果。
+
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 第一个参数可直接传
+    ``_gate_pass_results`` / ``_gate_fail_results`` 返回的
+    ``(execute_results, core_run)`` tuple，自动解包；也可显式传
+    ``execute_results`` + ``core_run=``。
+
+    evaluate_publish_gate 直接通过 ``session.get(StockFeatureSnapshotRun,
+    run.source_core_run_id)`` 校验 CoreRun 完整性（不查 stock_core
+    FactorPublication pointer）。mock 在此对 StockFeatureSnapshotRun 返回
+    ``core_run``，其余 model 返回 None。
+    """
+    if isinstance(execute_results, tuple):
+        execute_results, core_run = execute_results
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+
+    async def _get(model, ident):
+        if model is StockFeatureSnapshotRun:
+            return core_run
+        return None
+
     session = AsyncMock()
     session.execute = AsyncMock(side_effect=execute_results)
     session.flush = AsyncMock()
     session.delete = AsyncMock()
-    session.get = AsyncMock(return_value=None)
+    session.get = _get
     return session
 
 
@@ -137,43 +164,56 @@ def _ready_readiness() -> dict:
     return {str(uuid.uuid4()): "ready"}
 
 
+def _make_core_run(
+    *, trade_date: date | None = None, status: str = "succeeded",
+) -> AsyncMock:
+    """构造 evaluate_publish_gate 校验通过的 CoreRun 行（StockFeatureSnapshotRun）。
+
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 发布门禁直接校验 CoreRun 完整性：
+    run 存在 + trade_date 一致 + status==succeeded（compute-complete），
+    **不查 stock_core FactorPublication pointer**。
+    """
+    core = AsyncMock()
+    core.trade_date = trade_date
+    core.status = status
+    return core
+
+
 def _gate_pass_results(
     run: MarketReviewRun,
     *,
     live_review_pointer: object | None = None,
     future_obs_count: int = 0,
-) -> list[_FakeResult]:
-    """构造 evaluate_publish_gate 全部通过所需的查询结果。
+) -> tuple[list[_FakeResult], AsyncMock]:
+    """构造 evaluate_publish_gate 全部通过所需的查询结果 + CoreRun 行。
 
-    [Slice 4A5 Board-independent] 新 canonical gate（不查 board pointer）查询顺序
-    （与实现严格一致）：
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 新门禁查询顺序（与实现严格一致）：
         1 incomplete run items（failed/pending/running）
-        2 stock_core pointer
+        2 session.get(StockFeatureSnapshotRun, source_core_run_id) → 合法 CoreRun
         [仅 run.status == "published"] 3 live review pointer
         末位 future_obs count（[QM-63] 无未来数据硬门）。
     """
-    core_pub = AsyncMock()
-    core_pub.data_run_id = run.source_core_run_id
     results = [
         _FakeResult(scalar_list=[]),            # 1. incomplete run items
-        _FakeResult(scalar=core_pub),           # 2. stock_core pointer
     ]
+    core_run = _make_core_run(trade_date=run.trade_date, status="succeeded")
     if run.status == "published":
         results.append(_FakeResult(scalar=live_review_pointer))
     results.append(_FakeResult(scalar=future_obs_count))    # future_obs count
-    return results
+    return results, core_run
 
 
-def _gate_fail_results() -> list[_FakeResult]:
-    """门禁失败的查询结果（core pointer 缺失 + 无 future data）。
+def _gate_fail_results() -> tuple[list[_FakeResult], None]:
+    """门禁失败的查询（CoreRun 不存在 + 无 future data）。
 
-    与 `_gate_pass_results` 保持相同查询顺序。
+    与 `_gate_pass_results` 保持相同查询顺序；CoreRun 返回 None →
+    触发「CoreRun 不存在」blocker。
     """
-    return [
+    results = [
         _FakeResult(scalar_list=[]),    # incomplete run items
-        _FakeResult(scalar=None),       # stock_core pointer 缺失
         _FakeResult(scalar=0),          # future_obs count
     ]
+    return results, None
 
 
 # =============================================================================
@@ -273,15 +313,17 @@ class TestFormalGateCompleteness:
         assert not any("market" in b for b in blockers)
         assert not any("P/Q/U/C/V" in b for b in blockers)
 
-    async def test_core_pointer_required_board_pointer_not(self):
-        """[Slice 4A5 Board-independent] 只要求正式 stock_core pointer；board /
-        market_aggregation pointer 不再参与门禁。"""
+    async def test_core_run_required_not_stock_core_pointer(self):
+        """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 发布门禁直接校验 CoreRun 完整性，
+        不再要求正式 stock_core FactorPublication pointer；board / market_aggregation
+        pointer 更不参与门禁。CoreRun 不存在 → blocker。"""
         run = _make_run()
         publishable, blockers = await evaluate_publish_gate(
             _make_session(_gate_fail_results()), run,
         )
         assert publishable is False
-        assert "正式 stock_core pointer 缺失" in blockers
+        assert any("CoreRun 不存在" in b for b in blockers)
+        assert not any("正式 stock_core pointer" in b for b in blockers)
         assert not any("board pointer" in b for b in blockers)
 
     async def test_superseded_published_run_cannot_overwrite_live_pointer(self):
@@ -344,11 +386,15 @@ class TestFormalPublish:
         run = _make_run(composition_readiness=_ready_readiness())
         pub = AsyncMock()
         pub.id = uuid.uuid4()
-        session = _make_session([
-            *_gate_pass_results(run),
-            _FakeResult(),              # pointer upsert
-            _FakeResult(scalar=pub),    # 发布成功后回读 pointer
-        ])
+        gate_results, core_run = _gate_pass_results(run)
+        session = _make_session(
+            [
+                *gate_results,
+                _FakeResult(),              # pointer upsert
+                _FakeResult(scalar=pub),    # 发布成功后回读 pointer
+            ],
+            core_run=core_run,
+        )
 
         result = await publish_review(session, run, force=False)
 
@@ -358,11 +404,9 @@ class TestFormalPublish:
             if isinstance(s, PgInsert)
         ]
         assert len(inserts) == 1, "正式发布必须写且只写一次 pointer"
-        statements = _executed_statements(session)
-        # [Slice 4A5 Board-independent] 唯一被 for-update 锁定的 pointer 是
-        # stock_core（第 1 个 execute）；不再有 board/market_aggregation pointer 锁。
-        locked = [s for s in statements if getattr(s, "_for_update_arg", None) is not None]
-        assert len(locked) == 1, "只锁定 stock_core pointer，不再锁定 board pointer"
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 发布只写 market_review pointer，
+        # stock_core publication 已从 Core→Review 主链旁路，故不再产生 stock_core
+        # pointer 写入。下方仅校验写入数量，for-update 锁语义由集成测试覆盖。
         assert run.status == "published"
         assert run.published_at is not None
         assert "provisional_publication" not in (run.metadata_json or {})
@@ -374,9 +418,9 @@ class TestFormalPublish:
             composition_readiness=_ready_readiness(),
         )
         pointer = _make_pointer(run.id)
-        results = _gate_pass_results(run, live_review_pointer=pointer)
-        results.append(_FakeResult(scalar=pointer))  # idempotent return under lock
-        session = _make_session(results)
+        gate_results, core_run = _gate_pass_results(run, live_review_pointer=pointer)
+        gate_results.append(_FakeResult(scalar=pointer))  # idempotent return under lock
+        session = _make_session(gate_results, core_run=core_run)
 
         result = await publish_review(session, run, force=False)
 
@@ -663,18 +707,22 @@ class TestProgressiveScopeReadiness:
         *,
         items: list | None = None,
         future_obs: int = 0,
-    ) -> list[_FakeResult]:
-        """canonical gate 查询结果（非 published run 共 3 次 execute，与实现一致）。
+    ) -> tuple[list[_FakeResult], AsyncMock]:
+        """canonical gate 查询结果（非 published run 共 2 次 execute + 1 次 CoreRun get）。
 
-        [Slice 4A5 Board-independent] 顺序：incomplete items / stock_core pointer / future_obs。
+        [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 新门禁顺序（与实现严格一致）：
+            execute: incomplete items / future_obs count
+            session.get(StockFeatureSnapshotRun): CoreRun 行（直接校验完整性，
+            不查 stock_core FactorPublication pointer）。
         """
-        core_pub = AsyncMock()
-        core_pub.data_run_id = run.source_core_run_id
-        return [
-            _FakeResult(scalar_list=items if items is not None else []),
-            _FakeResult(scalar=core_pub),
-            _FakeResult(scalar=future_obs),
-        ]
+        core_run = _make_core_run(trade_date=run.trade_date, status="succeeded")
+        return (
+            [
+                _FakeResult(scalar_list=items if items is not None else []),
+                _FakeResult(scalar=future_obs),
+            ],
+            core_run,
+        )
 
     def _run_item(self, run: MarketReviewRun, status: str, last_error: str | None = None):
         """构造 MarketReviewRunItem（真实 ORM 对象，非 mock）。"""
@@ -863,12 +911,15 @@ class Test4A5BoardIndependentPublication:
     """[Slice 4A5 Board-independent]
 
     canonical Review（``source_board_run_id=None``）及其 legacy 兄弟
-    （``source_board_run_id=任意 UUID``）都以同一套 core-only gate 判断发布。
+    （``source_board_run_id=任意 UUID``）都以同一套 CoreRun-only gate 判断发布。
 
-    关键：新 gate 只在 stock_core pointer 上做发布判断，**不查询 board /
-    market_aggregation pointer**；因此 `_gate_pass_results` 的 execute 结果
-    序列中不存在任何 board pointer 槽位。若生产实现恢复 board 查询，本组测试
-    会因 execute 结果耗尽（mock 越界）而失败——这正是"不查 board"的直接证据。
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 新 gate 直接通过
+    ``session.get(StockFeatureSnapshotRun, source_core_run_id)`` 校验 CoreRun
+    完整性（run 存在 + trade_date 一致 + status==succeeded），**不查询 stock_core
+    FactorPublication pointer，也不查询 board / market_aggregation pointer**；
+    因此 `_gate_pass_results` 的 execute 结果序列中不存在任何 board pointer 槽位。
+    若生产实现恢复 board 查询，本组测试会因 execute 结果耗尽（mock 越界）而失败——
+    这正是"不查 board"的直接证据。
     """
 
     async def test_canonical_run_source_board_none_publishes_without_board(
@@ -933,22 +984,25 @@ class Test4A5BoardIndependentPublication:
         assert publishable is True
         assert not any("board" in b for b in blockers)
 
-    async def test_core_pointer_mismatch_still_blocks(self):
-        """[4A5-C] core publication pointer 存在但与 source_core_run_id 不匹配
-        → BLOCK，语义与之前一致。"""
+    async def test_core_run_not_succeeded_blocks(self):
+        """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CoreRun 行存在但 status 非
+        succeeded（compute-complete 合同未满足）→ BLOCK。
+
+        旧合同比较 stock_core pointer.data_run_id == source_core_run_id；新合同
+        直接校验 CoreRun（StockFeatureSnapshotRun）行的 compute-complete 状态。
+        """
         run = _make_run(composition_readiness={"industry_l1:board-a": "ready"})
-        stale_core = AsyncMock()
-        stale_core.data_run_id = uuid.uuid4()  # != run.source_core_run_id
+        # CoreRun 存在，但 status 非 succeeded（例如仍 running / failed）
+        stale_core = _make_core_run(trade_date=run.trade_date, status="running")
         results = [
             _FakeResult(scalar_list=[]),                 # incomplete run items
-            _FakeResult(scalar=stale_core),              # stock_core pointer（stale）
             _FakeResult(scalar=0),                       # future_obs count
         ]
         publishable, blockers = await evaluate_publish_gate(
-            _make_session(results), run,
+            _make_session(results, core_run=stale_core), run,
         )
         assert publishable is False
-        assert any("source_core_run_id" in b and "不匹配" in b for b in blockers)
+        assert any("CoreRun status" in b and "非 succeeded" in b for b in blockers)
 
     async def test_source_is_free_of_market_aggregation_ref_and_board_read(self):
         """[4A5-I] 生产源码契约门：

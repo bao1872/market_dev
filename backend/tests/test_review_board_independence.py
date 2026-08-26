@@ -91,21 +91,22 @@ async def test_resolver_errors_when_no_publication(monkeypatch):
         )
 
 
-async def test_resolver_uses_stock_core_publication(monkeypatch):
-    """Gate 3: no explicit id but STOCK_CORE publication -> uses publication.data_run_id."""
-    expected = uuid.uuid4()
-    get_pub = AsyncMock(return_value=_make_publication("stock_core", expected))
+async def test_resolver_requires_explicit_id_fail_closed(monkeypatch):
+    """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Gate 3 重写为 fail-closed：
+    source_core_run_id=None 必须报错，绝不回退到 stock_core publication 解析。
+
+    Review 必须显式绑定本次 AfterCloseRun 产生的 CoreRun。
+    """
+    get_pub = AsyncMock(return_value=_make_publication("stock_core", uuid.uuid4()))
     monkeypatch.setattr(
         "app.services.review_orchestrator_service._get_publication", get_pub
     )
-    result = await _resolve_source_core_run_id(
-        _make_fake_session(), date(2026, 8, 20), source_core_run_id=None
-    )
-    assert result == expected
-    # resolver requested the stock_core pointer only (Board never consulted)
-    get_pub.assert_awaited_once()
-    assert get_pub.await_args.args[1] == date(2026, 8, 20)
-    assert get_pub.await_args.args[2] == "stock_core"
+    with pytest.raises(ReviewOrchestratorError):
+        await _resolve_source_core_run_id(
+            _make_fake_session(), date(2026, 8, 20), source_core_run_id=None
+        )
+    # fail-closed 路径绝不查询任何 publication（含 stock_core）
+    get_pub.assert_not_awaited()
 
 
 async def test_resolver_ignores_board_publication(monkeypatch):
@@ -180,6 +181,18 @@ async def test_create_run_impl_new_run_has_null_board_and_new_constraint(monkeyp
     sess = _make_fake_session()
     sess.execute = fake_execute
 
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] _create_run_impl 通过 validate_core_run
+    # 直接查 StockFeatureSnapshotRun 行（status==succeeded, trade_date==T）。
+    async def _fake_get(model, ident):
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        if model is StockFeatureSnapshotRun:
+            core = MagicMock()
+            core.trade_date = date(2026, 8, 20)
+            core.status = "succeeded"
+            return core
+        return None
+    sess.get = _fake_get
+
     core_id = uuid.uuid4()
     with patch(
         "app.services.review_orchestrator_service._resolve_source_core_run_id",
@@ -219,6 +232,18 @@ async def test_create_run_impl_dry_run_null_board(monkeypatch):
     )
     sess = _make_fake_session()
     sess.execute = fake_execute
+
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] _create_run_impl 通过 validate_core_run
+    # 直接查 StockFeatureSnapshotRun 行（status==succeeded, trade_date==T）。
+    async def _fake_get(model, ident):
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        if model is StockFeatureSnapshotRun:
+            core = MagicMock()
+            core.trade_date = date(2026, 8, 20)
+            core.status = "succeeded"
+            return core
+        return None
+    sess.get = _fake_get
 
     core_id = uuid.uuid4()
     with patch(
