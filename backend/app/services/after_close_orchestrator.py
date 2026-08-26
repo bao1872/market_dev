@@ -2158,34 +2158,13 @@ async def _execute_review_step(
     prereq_missing: bool = False
 
     if not skip_review:
-        # [SLICE-01-CORRECTION H2] exact-T History 硬门控：
-        # 门控信号是 history_ready（由 computing_history 步骤真实校验得出），
-        # 而非 history_run_id 是否存在。run 存在 ≠ run exact-T ready。
-        # history_ready=False → Review 不得计算/发布——直接 gate_blocked。
-        # 这是硬依赖（invariant H2），不等同软失败：不创建 review run、不切 pointer、
-        # 不写发布，仅如实标记 gate_blocked 供前端时间线展示。
-        if not history_ready:
-            logger.warning(
-                "[AfterClose][H2] History(T) not exact-T ready, Review gate_blocked: "
-                "job=%s trade=%s history_run_id=%s",
-                str(job_run_id), trade_date, history_run_id,
-            )
-            return {
-                "status": "gate_blocked",
-                "failed": True,
-                "reason": "HISTORY_NOT_READY_T",
-                "history_run_id": str(history_run_id) if history_run_id else None,
-                "run_id": None,
-                "publication_id": None,
-                "scope_count": 0,
-                "signal_count": 0,
-                "coverage": 0.0,
-                "blockers": [
-                    "exact-T First Pyramid History 未就绪，Review 按 invariant H2 不计算/不发布",
-                ],
-                "prereq_missing": True,
-                "resume_skipped": False,
-            }
+        # [CHANGE-20260826-001 Slice 1 REVIEW-CURRENT-OWNER-01]
+        # Review(T) = Core(T) + History(<T)。exact-T History(T) 不再是 Review 前置条件：
+        # Review 当前第一金字塔事实直接来自已发布的 Core(T)（StockFeatureSnapshot，
+        # 锁定 source_core_run_id）；历史 baseline 来自 FirstPyramidHistoryDailyState
+        # 的 <=T-1 状态（独立于 exact-T History(T)）。因此移除旧的「History(T) 未就绪
+        # 即阻断 Review」硬门控（原 invariant H2）；Review 仅依赖已发布 stock_core。
+        # 注意：本 Slice 不引入任何 review-history-v3 DB write（v3 物化在 Slice 4 接回）。
         # [Slice 3 / Slice 4A9] Board Analysis 不是 Review 前置条件，且 legacy
         # board aggregation 已退役：只要 stock_core 已发布且 snapshot 存在，
         # 都执行 Review（只依赖已发布 stock_core），不再有 aggregation 状态参与判断。
@@ -3888,12 +3867,11 @@ async def execute_after_close_run(
 
         _history_result, _history_step_summary = await execute_orchestrator_step(
             "computing_history",
-            _make_history_v3_step(
+            _make_history_step(
                 job_run_id=job_run_id,
                 trade_date=trade_date,
                 worker_id=worker_id,
                 skip_history=skip_history,
-                core_run_id=snapshot_run_id,
             ),
             timeout_seconds=_step_timeout("computing_history"),  # None: 无 absolute timeout
             optional=True,
@@ -3906,8 +3884,7 @@ async def execute_after_close_run(
             cancellation_check=_make_step_cancellation_check(job_run_id),
         )
         if isinstance(_history_result, dict):
-            # v3 投影步骤无独立 history_run_id；lineage 指向来源 Core run
-            _history_run_id = core_run_id
+            _history_run_id = _history_result.get("history_run_id")
             _history_ready = bool(_history_result.get("ready"))
         _history_status = _history_step_summary.get("status")
         logger.info(
