@@ -68,26 +68,26 @@ async def test_current_facts_locked_to_source_core_run_id():
 
     async with TestAsyncSessionLocal() as s:
         await _seed_instrument(s, iid, "SLC1A0A1")
-        s.add_all([
-            StockFeatureSnapshotRun(
-                id=correct_run, trade_date=td, status="succeeded",
-                run_type="after_close", published_at=datetime.datetime.utcnow(),
-            ),
-            StockFeatureSnapshotRun(
-                id=wrong_run, trade_date=td, status="succeeded",
-                run_type="after_close", published_at=datetime.datetime.utcnow(),
-            ),
-            StockFeatureSnapshot(
-                instrument_id=iid, source_run_id=correct_run, trade_date=td,
-                structural_payload={}, temporal_payload={},
-                summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
-            ),
-            StockFeatureSnapshot(
-                instrument_id=iid, source_run_id=wrong_run, trade_date=td,
-                structural_payload={}, temporal_payload={},
-                summary_payload={"first_pyramid_flat": {"fp_trend_direction": "下行"}},
-            ),
-        ])
+        await s.flush()
+        s.add(StockFeatureSnapshotRun(
+            id=correct_run, trade_date=td, status="succeeded",
+            run_type="after_close", published_at=datetime.datetime.utcnow(),
+        ))
+        s.add(StockFeatureSnapshotRun(
+            id=wrong_run, trade_date=td, status="succeeded",
+            run_type="after_close", published_at=datetime.datetime.utcnow(),
+        ))
+        await s.flush()
+        s.add(StockFeatureSnapshot(
+            instrument_id=iid, source_run_id=correct_run, trade_date=td,
+            structural_payload={}, temporal_payload={},
+            summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
+        ))
+        s.add(StockFeatureSnapshot(
+            instrument_id=iid, source_run_id=wrong_run, trade_date=td,
+            structural_payload={}, temporal_payload={},
+            summary_payload={"first_pyramid_flat": {"fp_trend_direction": "下行"}},
+        ))
         await s.commit()
 
     async with TestAsyncSessionLocal() as s:
@@ -117,17 +117,17 @@ async def test_current_facts_wrong_run_fails_closed():
 
     async with TestAsyncSessionLocal() as s:
         await _seed_instrument(s, iid, "SLC2B0B1")
-        s.add_all([
-            StockFeatureSnapshotRun(
-                id=present_run, trade_date=td, status="succeeded",
-                run_type="after_close", published_at=datetime.datetime.utcnow(),
-            ),
-            StockFeatureSnapshot(
-                instrument_id=iid, source_run_id=present_run, trade_date=td,
-                structural_payload={}, temporal_payload={},
-                summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
-            ),
-        ])
+        await s.flush()
+        s.add(StockFeatureSnapshotRun(
+            id=present_run, trade_date=td, status="succeeded",
+            run_type="after_close", published_at=datetime.datetime.utcnow(),
+        ))
+        await s.flush()
+        s.add(StockFeatureSnapshot(
+            instrument_id=iid, source_run_id=present_run, trade_date=td,
+            structural_payload={}, temporal_payload={},
+            summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
+        ))
         await s.commit()
 
     async with TestAsyncSessionLocal() as s:
