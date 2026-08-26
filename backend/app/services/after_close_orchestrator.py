@@ -2712,6 +2712,24 @@ async def execute_after_close_run(
             },
         }
         completed: set[str] = _completed_steps.get(last_completed_step, set())
+
+        # [REPROCESS-OWNER-CLOSURE-01 P0-2] mainchain_stage 是「本次 execution 从哪里开始」
+        # 的正式起点合同（PRD30 AC-16），与 last_completed_step（「已真实完成的检查点」，
+        # 用于断点恢复）语义分离，不得混用，也不得伪造 last_completed_step。
+        # 若 run metadata 含 mainchain_stage，则把 _CHECKPOINT_ORDER 中位于该 stage 之前
+        # 的所有阶段标记为跳过（独立 skip 集合，不写 last_completed_step）。
+        meta = _parse_metadata(job_run)
+        mainchain_stage = meta.get("mainchain_stage")
+        if mainchain_stage and mainchain_stage in _CHECKPOINT_ORDER:
+            stage_rank = _CHECKPOINT_ORDER[mainchain_stage]
+            pre_stages = {
+                s for s, r in _CHECKPOINT_ORDER.items() if r < stage_rank
+            }
+            completed = completed | pre_stages
+            logger.info(
+                "[AfterClose] mainchain_stage=%s，跳过其之前阶段=%s",
+                mainchain_stage, sorted(pre_stages),
+            )
         if "succeeded" in completed:
             logger.info(
                 "[AfterClose] 断点恢复: 已完成 succeeded，直接返回: job_run_id=%s",

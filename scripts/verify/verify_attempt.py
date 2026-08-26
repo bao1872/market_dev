@@ -443,7 +443,16 @@ class VerifyAttempt:
              # checkpoint 重新读最新 metadata。证明两个独立 writer 经 SELECT ... FOR UPDATE
              # 串行化，不丢更新。仅追加，不删除/替换已有文件；不动态 discovery；不扩大为
              # 全量 -m postgres。
-             "tests/test_pg_history_progress_lost_update_closure.py"],
+             "tests/test_pg_history_progress_lost_update_closure.py",
+
+             # [REPROCESS-OWNER-CLOSURE-01 / 2026-08-25] 盘后 daily_ready restart 修复的
+             # 契约收口（P0-1 起点合同 / P0-2 mainchain_stage / P0-3 真正能抓缺陷的测试）：
+             #   Contract A producer/consumer 身份（child.job_name==after_close_orchestrator
+             #     且真实 worker selector 领取）、Contract B daily_ready 跳过 refreshing_daily
+             #     可达 computing_history/review、Contract C 正常 run 仍执行 refreshing_daily、
+             #     Contract D resume/lease_epoch/last_completed_step 语义不被 mainchain_stage 改坏。
+             #   仅追加，不删除/替换已有文件；不动态 discovery；不扩大为全量 -m postgres。
+             "tests/test_pg_after_close_restart_closure.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:

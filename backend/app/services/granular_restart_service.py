@@ -1,8 +1,10 @@
 """V2.1 Granular Restart 调度服务（Corrective Pass 3）。
 
-[PRD 31 §6] 正式枚举（9 个 boundary）：
+[PRD30 after-close] 盘后 restart / recovery owner 正式枚举（9 个 boundary）：
     daily_ready / board_facts / core / stock_core_published /
     dsa_projection / state_events / chip / auction / review
+（注：PRD31 负责 cross-domain lineage / readiness / publication closure，
+ 盘后 restart 的 owner 归属是 PRD30，不得用 PRD31 §6 注释替代真实 PRD30。）
 
 ## Corrective Pass 3 修复的确定性缺陷（相对 fdb09a1）
 
@@ -299,8 +301,20 @@ async def _create_or_reuse_child(
         "triggered_by": actor,
         **(extra_metadata or {}),
     }
+    # [REPROCESS-OWNER-CLOSURE-01 P0-1] 主链 boundary 进入唯一正式盘后任务类型
+    # `after_close_orchestrator`（PRD30 AC-16：only one formal after-close job type），
+    # 由 worker._after_close_poll_once 正常领取执行。子产品 boundary（dsa_projection /
+    # state_events / chip / auction / review）保持独立 granular_restart_{boundary} 任务
+    # 类型（由各自专属 worker 处理，不进入 after_close_orchestrator）。
+    # 严禁：扩大 worker 到「所有 queued job」、新增第二套 granular worker、API 进程
+    # 直接执行 orchestrator、手工 SQL 改 child、特判 granular_restart_daily_ready。
+    child_job_name = (
+        "after_close_orchestrator"
+        if boundary in _MAINCHAIN_BOUNDARIES
+        else f"granular_restart_{boundary}"
+    )
     child = SchedulerJobRun(
-        job_name=f"granular_restart_{boundary}",
+        job_name=child_job_name,
         business_date=trade_date,
         run_key=run_key,
         status="queued",
