@@ -179,10 +179,13 @@ async def test_contract_b_daily_ready_skips_refreshing_daily_reaches_history_rev
 
     # 用真实 production stage-selection function 验证：记录 execute_orchestrator_step
     # 实际被调度的阶段（直接 spy 统一执行器，避免复制理想 stage list）。
+    # 注意：execute_orchestrator_step 返回 (result, summary)，主流程读 summary["status"]。
     seen: list[str] = []
     async def spy_step(step, operation, **kwargs):
         seen.append(step)
-        return ("ok", {"summary": {}})
+        # 第一个元素为 MagicMock（满足 refresh_result is not None 等断言；
+        # history/review 的 .get 读受 isinstance(...,dict) 保护，MagicMock 安全降级）。
+        return (MagicMock(), {"status": "succeeded", "summary": {"progress": 1.0}})
 
     with (
         patch.object(after_close_orchestrator, "execute_orchestrator_step", spy_step),
@@ -240,7 +243,9 @@ async def test_contract_c_normal_run_still_executes_refreshing_daily() -> None:
     seen: list[str] = []
     async def spy_step(step, operation, **kwargs):
         seen.append(step)
-        return ("ok", {"summary": {}})
+        # 第一个元素为 MagicMock（满足 refresh_result is not None 等断言；
+        # history/review 的 .get 读受 isinstance(...,dict) 保护，MagicMock 安全降级）。
+        return (MagicMock(), {"status": "succeeded", "summary": {"progress": 1.0}})
 
     with (
         patch.object(after_close_orchestrator, "execute_orchestrator_step", spy_step),
