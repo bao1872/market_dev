@@ -21,6 +21,7 @@ import pytest
 from sqlalchemy import text
 
 from tests.conftest import TestAsyncSessionLocal
+from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.observation_prep import _BOARD_CURRENT_FLAT_KEY
@@ -29,6 +30,15 @@ from app.services.review_observation_prep_service import (
 )
 
 pytestmark = pytest.mark.postgres
+
+
+async def _seed_instrument(s, iid: uuid.UUID, symbol: str):
+    """verify DB 是空迁移库，无 instruments 种子；snapshot 有 FK 约束，必须自建行。"""
+    s.add(Instrument(
+        id=iid, symbol=symbol, name=f"slice1_{symbol}", market="SZ",
+        status="active", listing_date=datetime.date(2010, 1, 4),
+    ))
+    await s.flush()
 
 
 async def _assert_verify_db_identity():
@@ -51,12 +61,13 @@ async def test_current_facts_locked_to_source_core_run_id():
     错误 run 被忽略（无 fallback）。"""
     await _assert_verify_db_identity()
 
-    iid = uuid.UUID("00000000-0000-0000-0000-00000000a0a1")
+    iid = uuid.UUID("11111111-1111-1111-1111-11111111a0a1")
     td = datetime.date(2026, 8, 25)
-    correct_run = uuid.UUID("aaaa1111-1111-1111-1111-111111111111")
-    wrong_run = uuid.UUID("bbbb2222-2222-2222-2222-222222222222")
+    correct_run = uuid.UUID("aaaa1111-1111-1111-1111-1111111111aa")
+    wrong_run = uuid.UUID("bbbb2222-2222-2222-2222-2222222222bb")
 
     async with TestAsyncSessionLocal() as s:
+        await _seed_instrument(s, iid, "SLC1A0A1")
         s.add_all([
             StockFeatureSnapshotRun(
                 id=correct_run, trade_date=td, status="succeeded",
@@ -99,12 +110,13 @@ async def test_current_facts_wrong_run_fails_closed():
     """Case C: source_core_run_id 指向不存在/无快照的 run → 空（fail-closed）。"""
     await _assert_verify_db_identity()
 
-    iid = uuid.UUID("00000000-0000-0000-0000-00000000b0b1")
+    iid = uuid.UUID("22222222-2222-2222-2222-22222222b0b1")
     td = datetime.date(2026, 8, 25)
-    present_run = uuid.UUID("cccc3333-3333-3333-3333-333333333333")
-    missing_run = uuid.UUID("dddd4444-4444-4444-4444-444444444444")
+    present_run = uuid.UUID("cccc3333-3333-3333-3333-33333333cc33")
+    missing_run = uuid.UUID("dddd4444-4444-4444-4444-44444444dd44")
 
     async with TestAsyncSessionLocal() as s:
+        await _seed_instrument(s, iid, "SLC2B0B1")
         s.add_all([
             StockFeatureSnapshotRun(
                 id=present_run, trade_date=td, status="succeeded",
