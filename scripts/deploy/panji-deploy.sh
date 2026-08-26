@@ -1187,20 +1187,18 @@ deploy() {
 
     # 6. 重启：Python 服务与 frontend 分别判定；postgres/redis/umami 永不重启
     #
-    # [DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE] 紧邻 runtime destructive action
-    # 的第二道 fail-closed 门禁：第一道 guard 在 deploy() 开头执行（任何 live mutation 之前），
-    # 但中间存在 classify/build/sync/migration 等多个可能耗时的阶段，期间 worker-after-close
-    # 可能接纳新的强制阻塞类活跃任务。restart_services / reconcile_compose_runtime 会
-    # force-recreate worker-after-close，若在此时存在活跃任务 → 直接 SIGKILL 正在执行的
-    # mandatory after-close / Review 链路，造成 ownership 不清的 running job（本次真实 8/25
-    # reprocess 即暴露此 TOCTOU 窗口）。
+    # [DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE] 在每个可能
+    # restart / recreate worker-after-close 的 runtime action 之前，复用同一
+    # guard_active_after_close_jobs 做 fresh fail-closed 门禁。第一道 guard 在 deploy()
+    # 开头（任何 live mutation 之前）已执行；此处对每个实际 action 分别再加 final guard，
+    # 以缩小 gate→action 之间的 admission TOCTOU 窗口（本次真实 8/25 reprocess 暴露此窗口）。
     #
-    # 因此在实际发起重启 / 配置对账（destructive runtime action）之前，复用同一
-    # guard_active_after_close_jobs 再检查一次，fail-closed 拒绝部署。
+    # 注意语义差异（避免误述）：
+    #   - restart_services 使用 docker compose up -d --force-recreate（会强制重建受影响服务）；
+    #   - reconcile_compose_runtime 使用 up -d --no-build（不 --force-recreate），
+    #     但 Compose 可能因配置变化 recrecreate/restart 受影响服务，故同样需要 final guard。
+    # 若本次只有一种 runtime action，则不会产生无意义第三次检查。
     # guard 自身已在 backend runtime 不变化时直接放行（frontend-only 不被无关活跃任务阻塞）。
-    FAILURE_STAGE="active_job_gate_pre_restart"
-    guard_active_after_close_jobs
-
     FAILURE_STAGE="restart"
     local restart_list=()
     if [[ "${need_backend}" == "true" ]]; then
@@ -1225,6 +1223,12 @@ deploy() {
 
     # 代码/环境/Migration 运行变化：restart_services（force-recreate）为权威路径。
     if [[ ${#restart_list[@]} -gt 0 ]]; then
+        # final guard：紧邻 restart_services（--force-recreate）之前，复用同一 owner。
+        # 显式 || return 1，保证门禁失败（存在活跃 after-close 强制任务）即 fail-closed 阻止重启，
+        # 不依赖外层 set -e。
+        FAILURE_STAGE="active_job_gate_pre_restart"
+        guard_active_after_close_jobs || return 1
+        FAILURE_STAGE="restart"
         restart_services "${restart_list[@]}" || return 1
     fi
 
@@ -1233,6 +1237,13 @@ deploy() {
     # Compose-only 变更未被 restart 命中。reconcile 使用 up -d --no-build（无
     # --force-recreate），Compose 会跳过已是最新的服务、只应用剩余 config-only 差异。
     if [[ "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]; then
+        # final guard：紧邻 reconcile_compose_runtime 之前，复用同一 owner。
+        # reconcile 不 --force-recreate，但 Compose 可能因配置变化 recrecreate/restart 受影响服务，
+        # 故仍需 final guard 拦截 reconcile 前新接纳的活跃 after-close 任务。
+        # 显式 || return 1，保证门禁失败即 fail-closed 阻止配置对账。
+        FAILURE_STAGE="active_job_gate_pre_reconcile"
+        guard_active_after_close_jobs || return 1
+        FAILURE_STAGE="compose_reconcile"
         reconcile_compose_runtime "${PYTHON_SERVICES[@]}" frontend || return 1
     elif [[ ${#restart_list[@]} -eq 0 ]]; then
         log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"

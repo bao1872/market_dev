@@ -431,49 +431,20 @@ assert_code_contains "DEFECT2 纯 Compose 变化走 reconcile（CASE A）" \
 
 # ---------------------------------------------------------------------------
 echo "== 11/11 DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE =="
-# 复用现有 owner guard_active_after_close_jobs，在 deploy() 两处各调用一次：
+# 复用现有 owner guard_active_after_close_jobs，在 deploy() 每个实际 runtime action 前分别
+# 做 fresh fail-closed 门禁：
 #   guard #1：deploy() 开头，任何 live mutation 之前（防已存在 running job 时开始变更）
-#   guard #2：紧邻 destructive runtime action（restart_services / reconcile_compose_runtime）之前，
-#             拦截 gate→restart 窗口内新接纳的活跃 after-close 任务。
+#   final guard → restart_services 前
+#   final guard → reconcile_compose_runtime 前
 # 不新建另一套 active-job 查询 owner。
 
 # CASE A：原有行为——第一道 guard 位于 deploy() 开头（任何 live mutation 之前）。
 _deploy_func_body="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1; next} f&&/^}/{exit} f')"
 _guard1_line="$(echo "${_deploy_func_body}" | grep -n 'guard_active_after_close_jobs' | head -1 | cut -d: -f1)"
-_guard_total="$(echo "${_deploy_func_body}" | grep -c 'guard_active_after_close_jobs')"
 if [[ -n "${_guard1_line}" && "${_guard1_line}" -le 10 ]]; then
     ok "CASE A 第一道 guard 位于 deploy() 开头（live mutation 之前）"
 else
     bad "CASE A 第一道 guard 应位于 deploy() 开头"
-fi
-
-# CASE B：本次新增核心合同——第二道 guard 紧邻 restart_services / reconcile_compose_runtime 之前。
-_restart_line="$(echo "${_deploy_func_body}" | grep -n 'restart_services "\${restart_list\[@\]}" || return 1' | head -1 | cut -d: -f1)"
-_reconcile_line="$(echo "${_deploy_func_body}" | grep -n 'reconcile_compose_runtime "${PYTHON_SERVICES\[@\]}" frontend || return 1' | head -1 | cut -d: -f1)"
-_guard2_line="$(echo "${_deploy_func_body}" | grep -n 'guard_active_after_close_jobs' | tail -1 | cut -d: -f1)"
-if [[ "${_guard_total}" -ge 2 ]]; then ok "CASE B 存在第二道 guard（复用同一 owner）"; else bad "CASE B 必须存在第二道 guard"; fi
-if [[ -n "${_guard2_line}" && -n "${_restart_line}" && "${_guard2_line}" -lt "${_restart_line}" ]]; then
-    ok "CASE B 第二道 guard 位于 restart_services 之前"
-else
-    bad "CASE B 第二道 guard 必须紧邻 restart_services 之前"
-fi
-if [[ -n "${_guard2_line}" && -n "${_reconcile_line}" && "${_guard2_line}" -lt "${_reconcile_line}" ]]; then
-    ok "CASE B 第二道 guard 位于 reconcile_compose_runtime 之前"
-else
-    bad "CASE B 第二道 guard 必须位于 reconcile_compose_runtime 之前"
-fi
-# 两道 guard 之间必须存在多阶段窗口（TOCTOU 窗口客观存在，需第二道兜底）。
-if [[ -n "${_guard1_line}" && -n "${_guard2_line}" && "$((_guard2_line - _guard1_line))" -ge 5 ]]; then
-    ok "CASE B 两道 guard 之间存在多阶段窗口（TOCTOU 窗口客观存在，需第二道兜底）"
-else
-    bad "CASE B 两道 guard 之间应存在多阶段窗口"
-fi
-
-# CASE C：无 active job 时正常重启路径保留（guard 后仍存在 restart_services 调用）。
-if [[ -n "${_restart_line}" ]]; then
-    ok "CASE C 第二道 guard 后仍存在 restart_services 调用（无 active job 时正常重启路径保留）"
-else
-    bad "CASE C 必须保留 restart_services 正常路径"
 fi
 
 # CASE D：frontend-only（backend runtime 不 mutate）时，guard 自身 early-return 放行，
@@ -489,6 +460,98 @@ END{exit !found}
     ok "CASE D guard 在 backend runtime 不变化时 early-return 放行（frontend-only 不被阻塞）"
 else
     bad "CASE D guard 必须在 backend runtime 不变时 early-return 放行"
+fi
+
+# ---------------------------------------------------------------------------
+# 行为级测试（Behavior B / C / E）：抽取 deploy() 真实 STEP-6 重启/对账控制流为 snippet，
+# 用 stub 替换 restart_services / reconcile_compose_runtime / guard_active_after_close_jobs
+# 为调用计数器，并可控 guard 的 PASS / BLOCK。验证真实控制流中的 guard 放置与 action 调用计数。
+# 不新建重型 framework——复用已 sourced 的 fixture 函数定义 + 测试内 stub 覆盖。
+
+# 抽取 deploy() 中 STEP-6 重启块（从 FAILURE_STAGE="restart" 起到 STEP-6 结束的 `fi` 之前）。
+# 使用 awk 按函数体边界精确截取，保证测试的是源码真实控制流，而非副本。
+_STEP6_SNIPPET="$(mktemp -t panji-step6.XXXXXX.sh)"
+awk '
+/^deploy\(\)/{inf=1; next}
+inf && /^}/{inf=0; exit}
+inf && /FAILURE_STAGE="restart"/{cap=1}
+cap{print}
+' "${SERVER_SCRIPT}" > "${_STEP6_SNIPPET}"
+
+if [[ ! -s "${_STEP6_SNIPPET}" ]]; then
+    bad "Behavior 抽取 STEP-6 控制流 snippet 失败（需源码含 FAILURE_STAGE=\"restart\" 块）"
+fi
+
+# 行为测试 runner：传入输入开关，构造 stub 后执行真实 snippet。
+# 用 EXIT trap 保证即便 guard stub 返回非 0（BLOCK）导致 set -e 中止 snippet，
+# 调用计数仍被打印出来；外层以 || true 容忍 subshell 非零退出。
+run_behavior() {
+    # $1 = guard_pre_restart 行为: pass|block
+    # $2 = guard_pre_reconcile 行为: pass|block
+    # $3.. = 输入：NEED_BACKEND NEED_FRONTEND COMPOSE_RUNTIME_CHANGED
+    local _gpr="$1" _gpc="$2"
+    local _nb="$3" _nf="$4" _crc="$5"
+    (
+        source "${_DEPLOY_FIXTURE}"
+        set +e   # 容忍 guard BLOCK 触发的非零退出
+        RESTART_CALLS=0; RECONCILE_CALLS=0; GUARD_PR_CALLS=0; GUARD_PC_CALLS=0
+        _emit_counts() { echo "RESTART_CALLS=${RESTART_CALLS}"; echo "RECONCILE_CALLS=${RECONCILE_CALLS}"; echo "GUARD_PR_CALLS=${GUARD_PR_CALLS}"; echo "GUARD_PC_CALLS=${GUARD_PC_CALLS}"; }
+        trap _emit_counts EXIT
+        guard_active_after_close_jobs() {
+            local _who="${FAILURE_STAGE:-?}"
+            if [[ "${_who}" == "active_job_gate_pre_restart" ]]; then
+                GUARD_PR_CALLS=$((GUARD_PR_CALLS+1))
+                if [[ "${_gpr}" == "block" ]]; then return 1; fi
+                return 0
+            elif [[ "${_who}" == "active_job_gate_pre_reconcile" ]]; then
+                GUARD_PC_CALLS=$((GUARD_PC_CALLS+1))
+                if [[ "${_gpc}" == "block" ]]; then return 1; fi
+                return 0
+            fi
+            return 0
+        }
+        restart_services()   { RESTART_CALLS=$((RESTART_CALLS+1)); }
+        reconcile_compose_runtime() { RECONCILE_CALLS=$((RECONCILE_CALLS+1)); }
+        need_backend="${_nb}"; need_frontend="${_nf}"; COMPOSE_RUNTIME_CHANGED="${_crc}"
+        RESTARTED_PYTHON=false; RESTARTED_FRONTEND=false
+        source "${_STEP6_SNIPPET}" || true
+    ) || true
+}
+
+# Behavior B — 核心：initial/first guard PASS → 准备 → final guard BLOCK
+# 模拟：backend runtime 变化（restart 路径）+ compose 变化（reconcile 路径）均存在，
+#       但 pre-restart / pre-reconcile final guard 都 BLOCK。
+# 断言：deploy 非零（被阻塞）；restart_services call_count=0；reconcile call_count=0。
+_B_OUT="$(run_behavior block block true true true)"
+_B_RC="$(echo "${_B_OUT}" | grep -c 'RESTART_CALLS=0')"
+_B_PC="$(echo "${_B_OUT}" | grep -c 'RECONCILE_CALLS=0')"
+if [[ "${_B_RC}" -ge 1 && "${_B_PC}" -ge 1 ]]; then
+    ok "Behavior B final guard BLOCK → restart_services=0 且 reconcile=0（部署被 fail-closed 阻止）"
+else
+    bad "Behavior B 期望 restart=0 且 reconcile=0；实际: ${_B_OUT}"
+fi
+
+# Behavior C — 所有 guard PASS：backend 变化触发 restart_services 恰好执行一次。
+_C_OUT="$(run_behavior pass pass true false false)"
+_C_RC="$(echo "${_C_OUT}" | grep -E 'RESTART_CALLS=[^0]' | head -1)"
+if echo "${_C_RC}" | grep -q 'RESTART_CALLS=1'; then
+    ok "Behavior C 所有 guard PASS → restart_services 执行 1 次"
+else
+    bad "Behavior C 期望 restart_services=1；实际: ${_C_OUT}"
+fi
+
+# Behavior E — 两种 action 同时存在：
+#   initial/first guard PASS，pre-restart guard PASS → restart_services 执行；
+#   随后模拟 reconcile 前新出现 active job → pre-reconcile guard BLOCK。
+# 断言：restart_services call_count=1；reconcile_compose_runtime call_count=0。
+# 此测试须抓住 6c5ead29 的残余窗口（当时仅一个 pre-restart guard，reconcile 前无 fresh guard）。
+_E_OUT="$(run_behavior pass block true true true)"
+_E_RC="$(echo "${_E_OUT}" | grep -E 'RESTART_CALLS=[0-9]+' | head -1)"
+_E_PC="$(echo "${_E_OUT}" | grep -E 'RECONCILE_CALLS=[0-9]+' | head -1)"
+if echo "${_E_RC}" | grep -q 'RESTART_CALLS=1' && echo "${_E_PC}" | grep -q 'RECONCILE_CALLS=0'; then
+    ok "Behavior E 两种 action 并存：restart=1 且 reconcile=0（pre-reconcile fresh guard 拦截）"
+else
+    bad "Behavior E 期望 restart=1 且 reconcile=0；实际: ${_E_OUT}"
 fi
 
 rm -f "${_DEPLOY_FIXTURE}"
