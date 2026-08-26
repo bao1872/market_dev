@@ -24,9 +24,9 @@ import pytest
 from sqlalchemy import text
 
 from app.models.scheduler_job_run import SchedulerJobRun
+import app.services.after_close_orchestrator as after_close_orchestrator
 from app.services.after_close_orchestrator import (
     AfterCloseRunStatus,
-    after_close_orchestrator,
     execute_after_close_run,
 )
 from app.services.granular_restart_service import dispatch_restart
