@@ -3514,15 +3514,13 @@ async def execute_after_close_run(
                 )
                 await db.commit()
 
-        # ---- 步骤 4: publishing ----
-        # [Phase8A 两阶段幂等发布] DSA publish_run（阶段1）与 snapshot run finalize（阶段2）
-        # 在各自独立 session/事务中提交，非单一原子事务。故障恢复后通过 publish_run 幂等
-        # 返回 + skip_publish 断点跳过达到最终一致。失败时 snapshot run 标记 failed。
-        # [Phase4.1 corrective] _stock_core_published 是最权威的“本 snapshot_run_id
-        # 是否真正成为正式 stock_core publication pointer”判据。仅当发布原子提交成功、
-        # 且 pointer 确实指向本 run 时才为 True；superseded / 发布失败 / 未发布均为 False。
-        # 它不等价于“snapshot_error is None + snapshot_run_id 非空 + not publish_failed”，
-        # 后者在 superseded 场景下会错误地给出 True。Chip 入队守卫必须以它为准。
+        # ---- 步骤 4: post-core readiness setup ----
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02] 正常 AfterClose DAG 不再进入
+        # PUBLISHING 阶段（KPI-7）：Core 计算完成 → Review(T) 计算 → History(T) 推进 →
+        # post-core enhancement（state_events / chip）。stock_core publication 已旁路，
+        # 不再是 Review / state_events / chip 的 readiness owner。
+        # chip / state_events 的 readiness owner 改为 CoreRun 显式绑定（snapshot_run_id X）；
+        # 此处仅置发布相关布尔为安全默认值，供 diagnostics 使用，不再决定任何业务步骤是否执行。
         _stock_core_published = False
         # [P1-2 2026-08-07] chip 状态变量在此处统一声明默认值（位于 skip_publish
         # 分支判定之前），保证 normal publish 分支（下方 post-core 分叉点赋值）与
@@ -3556,7 +3554,11 @@ async def execute_after_close_run(
             published_run = None
             _stock_core_published = False
             _stock_core_superseded = False
-            _dsa_projection_ok = True
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02] DSA 兼容性投影（required_compatibility）
+            # 实际在上方步骤 2.x（create_batch_run → project_dsa_batch → persist_precomputed_dsa_results
+            # → quality gates）已执行；此处仅据真实执行产物（dsa_run_id 是否创建）诚实置位，
+            # 不再无条件置 True（避免「投影被要求但未执行」的 false-green）。
+            _dsa_projection_ok = (dsa_run_id is not None)
             _auction_anchor_status: str = "skipped"
             _auction_publication_id: uuid.UUID | None = None
             _aggregation_status: str = "skipped"
@@ -3859,13 +3861,18 @@ async def execute_after_close_run(
 
         # ---- 步骤 4.9: post-core enhancement（non-blocking）----
         # [CRASH-RESUME-SLICE / P0-B] 以下 enhancement 输出在 mandatory 关键路径
-        # （stock_core 发布 → publishing checkpoint → History exact-T → Review 发布）
+        # （Core X 计算完成 → Review(T) 计算 → History(T) 推进）
         # 全部完成之后执行。它们失败/超时/crash 都不得阻断 Review(T) 的形成，
         # 只能表达 partial_success / compatibility incomplete / degraded。
+        # 这些 enhancement 的 readiness owner 是 CoreRun 显式绑定（snapshot_run_id X），
+        # 而非 stock_core publication / published_at。
         # auction_anchor 原始为 normal-publish 专属步骤（skip_publish 恢复路径不重复执行）。
 
-        # [P0-4] auction anchor（legacy deprecated 产品）
-        if _stock_core_published and snapshot_run_id is not None and not skip_publish:
+        # [P0-4][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02] auction anchor（RETIRED 产品）
+        # 旧 AuctionAnchor 产品（structure/chip anchor 模型）已废止（PRD75 §23）；
+        # 竞价分析现在是 observation 产品（PRD75），不再由 AfterClose 生成 AuctionAnchorRun。
+        # 因此 auction_anchor 永远是显式 skipped，不依赖 stock_core publication 也不读它。
+        if False:  # RETIRED: AuctionAnchor 产品已废止，不执行任何 anchor 生成/发布
             try:
                 from app.services.auction_anchor_service import (
                     generate_and_publish_auction_anchors,
@@ -3918,8 +3925,11 @@ async def execute_after_close_run(
                     exc_info=True,
                 )
 
-        # [P1-2 2026-08-07] state events（non-blocking post-core）
-        if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
+        # [P1-2 2026-08-07][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02] state events（non-blocking post-core）
+        # readiness owner 改为 CoreRun 显式绑定（snapshot_run_id X），不再依赖 stock_core publication。
+        # Core X succeeded → Review（computing_review 已在上方完成）→ 此处生成 Core X 的事件。
+        # publication row 是否存在与此无关。
+        if snapshot_run_id is not None:
             logger.info(
                 "[BOUNDARY-P3] before state-events job=%s trade=%s pid=%s",
                 str(job_run_id), trade_date, os.getpid(),
@@ -4008,10 +4018,11 @@ async def execute_after_close_run(
                     "error": str(event_exc),
                 })
 
-        # [P1-2] chip 入队（non-blocking post-core；stock_core 发布成功后执行）
+        # [P1-2][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02] chip 入队（non-blocking post-core）
+        # readiness owner 改为 CoreRun 显式绑定（snapshot_run_id X），不再依赖 stock_core publication。
         # 幂等依据：create_after_close_chip_consensus_job 以
-        # (trade_date, core_run_id) 幂等，重复调用返回既有 job（chip_is_new=False）。
-        if _stock_core_published:
+        # (trade_date, core_run_id=snapshot_run_id) 幂等，重复调用返回既有 job（chip_is_new=False）。
+        if snapshot_run_id is not None:
             try:
                 _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
                     job_run_id=job_run_id,
@@ -4037,9 +4048,9 @@ async def execute_after_close_run(
                     str(job_run_id), chip_exc, exc_info=True,
                 )
 
-        # [AUD-08 2026-08-07] 原步骤 4.9 的 chip 入队已从 stock_core 发布成功后的
-        # 前移逻辑收敛到上方 post-core enhancement 段（仅在 stock_core 发布成功时执行，
-        # 且在 Review 之后），此处不再重复。chip 入队仍是正式步骤、失败仍纳入
+        # [AUD-08 2026-08-07][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02]
+        # chip 入队已在上方 post-core enhancement 段执行（readiness owner = snapshot_run_id X，
+        # 不再依赖 stock_core 发布），此处不再重复。chip 入队仍是正式步骤、失败仍纳入
         # partial_success 判定（见下方 _optional_failed）。
 
         # ---- 步骤 5: succeeded ----

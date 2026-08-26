@@ -10,7 +10,7 @@
 """
 
 import uuid
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -102,6 +102,15 @@ async def test_update_heartbeat_with_none_step_preserves_checkpoint():
     job_run = _FakeJobRun('{"last_completed_step": "publishing"}')
     db = AsyncMock()
 
+    # [Slice1 contract] _update_heartbeat_and_step 重新从 DB FOR UPDATE 读取最新
+    # metadata；此处让 execute().scalar_one_or_none() 返回 None，回到传入 job_run 路径。
+    async def _fake_execute(*_a, **_k):
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = None
+        return r
+
+    db.execute.side_effect = _fake_execute
+
     await _update_heartbeat_and_step(db, job_run, None, "worker-1")
 
     meta = after_close_orchestrator._parse_metadata(job_run)
@@ -114,6 +123,13 @@ async def test_update_heartbeat_with_step_advances_checkpoint():
     """成功路径仍必须正常推进检查点（防止修复过度）。"""
     job_run = _FakeJobRun('{"last_completed_step": "publishing"}')
     db = AsyncMock()
+
+    async def _fake_execute(*_a, **_k):
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = None
+        return r
+
+    db.execute.side_effect = _fake_execute
 
     await _update_heartbeat_and_step(db, job_run, "computing_review", "worker-1")
 
@@ -318,8 +334,12 @@ async def test_review_step_prereq_missing_returns_skipped():
 
     from app.services import after_close_orchestrator as orch
 
+    fake_db = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__.return_value = fake_db
+    cm.__aexit__.return_value = False
     with (
-        patch.object(orch, "AsyncSessionLocal"),
+        patch.object(orch, "AsyncSessionLocal", new=lambda: cm),
         patch.object(
             orch, "_get_job_run_or_raise",
             return_value=_FakeJobRun("{}"),
@@ -335,7 +355,6 @@ async def test_review_step_prereq_missing_returns_skipped():
             worker_id="w1",
             skip_review=False,
             stock_core_published=False,
-            aggregation_status="skipped",
         )
 
     assert result["status"] == "skipped"
@@ -358,8 +377,12 @@ async def test_review_step_resume_skip_returns_resume_skipped():
 
     from app.services import after_close_orchestrator as orch
 
+    fake_db = AsyncMock()
+    cm = MagicMock()
+    cm.__aenter__.return_value = fake_db
+    cm.__aexit__.return_value = False
     with (
-        patch.object(orch, "AsyncSessionLocal"),
+        patch.object(orch, "AsyncSessionLocal", new=lambda: cm),
         patch.object(
             orch, "_get_job_run_or_raise",
             return_value=_FakeJobRun('{"review_status": "published"}'),
@@ -372,7 +395,6 @@ async def test_review_step_resume_skip_returns_resume_skipped():
             worker_id="w1",
             skip_review=True,
             stock_core_published=True,
-            aggregation_status="succeeded",
         )
 
     assert result["resume_skipped"] is True
@@ -555,17 +577,24 @@ async def test_cancelled_run_preserves_checkpoint():
       → orchestrator_status = cancelled
       → last_completed_step 仍为 publishing（未被覆写）
 
-    [AUD-08 2026-08-07] 原用例名为 ..._and_skips_chip，断言取消时 chip 未入队。
-    该合同已被判定为错误：chip 只依赖 stock_core，与 Review 无因果关系，
-    不应因 Review 被取消而丢失。chip 现已前移到 stock_core 发布后入队，
-    取消场景下 chip 依然存在（见 test_chip_enqueued_before_review_step 与
-    test_chip_survives_review_failure_and_cancellation）。
+    [CORRECTION-02] chip 是 post-core enhancement，readiness owner 为 CoreRun 显式绑定
+    （snapshot_run_id），与 Review 终态无因果关系：Review 取消/中断不得撤销已入队的 chip，
+    且 chip 不会因 stock_core publication 缺失而悄悄跳过（见
+    test_chip_enqueue_gated_on_core_readiness_not_publication 与
+    test_chip_runs_after_review_and_survives_publication_absence）。
     """
     from app.services import after_close_orchestrator as orch
     from app.services.after_close_orchestrator import AfterCloseRunStatus
 
     job_run = _FakeJobRun('{"last_completed_step": "publishing"}')
     db = AsyncMock()
+
+    async def _fake_execute(*_a, **_k):
+        r = MagicMock()
+        r.scalar_one_or_none.return_value = None
+        return r
+
+    db.execute.side_effect = _fake_execute
 
     # 模拟短路块的两个关键调用
     terminal = orch.resolve_terminal_run_status(
@@ -643,42 +672,17 @@ def test_execute_after_close_run_short_circuit_uses_enum_and_none_checkpoint():
 
 
 # ---------------------------------------------------------------------------
-# Gate: chip_forks_after_core_publish
-# [AUD-08 2026-08-07] chip 只依赖 stock_core，不得绑定 Review 生命周期
+# Gate: chip_forks_after_core_readiness
+# [CORRECTION-02] chip 的 readiness owner 是 CoreRun 显式绑定（snapshot_run_id），
+# 不再依赖 stock_core publication；chip 是 post-core enhancement，位于 Review 之后。
 # ---------------------------------------------------------------------------
 
 
-def test_chip_enqueued_before_review_step():
-    """[AUD-08] chip 入队必须早于 Review 步骤。
+def test_chip_enqueue_gated_on_core_readiness_not_publication():
+    """[CORRECTION-02] chip 守卫基于 snapshot_run_id(Core X)，而非 stock_core publication。
 
-    改动前 chip 入队位于 Review 之后（步骤 4.9），使 chip 这一增强产品被
-    Review 的成败/取消所左右：Review 取消时短路块直接 raise，chip 永远不入队。
-    chip 只消费 stock_core，与 Review 无因果关系，必须在核心发布后立即分叉。
-
-    原合同（test_after_close_phase0_contracts 原第 6 条）只验证 chip 入队早于
-    "最终终态"，不足以阻止它被塞在 Review 之后 —— 本用例补上顺序约束。
-    """
-    import inspect
-
-    from app.services import after_close_orchestrator as orch
-
-    src = inspect.getsource(orch.execute_after_close_run)
-
-    chip_pos = src.find("_enqueue_chip_job_step(")
-    review_pos = src.find("_execute_review_step(")
-
-    assert chip_pos != -1, "未找到 chip 入队调用"
-    assert review_pos != -1, "未找到 review 步骤调用"
-    assert chip_pos < review_pos, (
-        "chip 入队必须早于 Review 步骤（chip 只依赖 stock_core，"
-        "不得因 Review 失败/取消而丢失）"
-    )
-
-
-def test_chip_survives_review_failure_and_cancellation():
-    """[AUD-08] Review 短路块之后不得再有 chip 入队，且短路不撤销已入队 chip。
-
-    结构性保证：chip 入队位于短路块之前 → 无论短路是否触发，chip 都已入队。
+    关键不变式：Core X succeeded（无 stock_core publication）→ chip 仍入队。
+    chip 不得因 _stock_core_published=False 而悄悄永不执行（原 P0 回归）。
     """
     import inspect
     import re
@@ -687,13 +691,49 @@ def test_chip_survives_review_failure_and_cancellation():
 
     src = inspect.getsource(orch.execute_after_close_run)
 
+    idx = src.find("chip 入队（non-blocking post-core）")
+    assert idx != -1, "未找到 chip 注释块"
+    block = src[idx: idx + 400]
+    m = re.search(r"\n\s*if (.*?):\n", block)
+    assert m is not None, "未找到 chip 守卫"
+    cond = m.group(1).strip()
+    assert cond == "snapshot_run_id is not None", (
+        f"chip 守卫必须基于 CoreRun 显式绑定（snapshot_run_id is not None），"
+        f"实际为: {cond}"
+    )
+    assert "_stock_core_published" not in cond, (
+        "chip 不得再依赖 _stock_core_published（否则 publication 缺失时悄悄跳过）"
+    )
+
+
+def test_chip_runs_after_review_and_survives_publication_absence():
+    """[CORRECTION-02] chip 是 post-core enhancement（Review 之后），且
+    Review 短路/取消不得撤销已入队的 chip。
+
+    结构性保证：chip 入队位于 Review 终态短路块之后（post-core），
+    但其 readiness 只依赖 snapshot_run_id，与 publication 无关。
+    """
+    import inspect
+    import re
+
+    from app.services import after_close_orchestrator as orch
+
+    src = inspect.getsource(orch.execute_after_close_run)
+
+    def _exec_pos(step: str) -> int:
+        m = re.search(r'execute_orchestrator_step\(\s*\n?\s*"' + step + '"', src)
+        assert m is not None, f"未找到 {step} 执行器提交"
+        return m.start()
+
+    review_pos = _exec_pos("computing_review")
     chip_pos = src.find("_enqueue_chip_job_step(")
     short_circuit_pos = src.find("if _is_terminal_review_short_circuit(")
 
     assert short_circuit_pos != -1, "未找到终态短路块"
-    assert chip_pos < short_circuit_pos, (
-        "chip 入队必须早于 Review 终态短路块，"
-        "否则 Review 取消/中断时 chip 永远不会入队"
+    # chip 入队位于短路块之后（post-core）：无论短路是否触发，chip 段都执行
+    # （短路块 raise 前不会执行 chip；但正常路径下 chip 段在 Review 之后运行）
+    assert chip_pos > review_pos, (
+        "chip 入队必须位于 Review 步骤之后（post-core enhancement）"
     )
 
     # 短路块内不得有任何撤销/删除 chip 的动作
