@@ -185,10 +185,11 @@ def build_run_key(
     )
     if len(full_key) <= 128:
         return full_key
-    # compact fallback：digest 覆盖完整 original key，确保 parent/source/input_hash 任一变化
-    # 都反映到 key 上；前缀保留三段可读信息，digest 取 16 hex（总长 15+1+date+1+boundary
-    # +1+16 <= 128 对任一 trade_date/boundary 稳定成立）。
-    digest = hashlib.sha256(full_key.encode("utf-8")).hexdigest()[:16]
+    # compact fallback：完整 SHA-256 digest 覆盖完整 original key，确保 parent/source/
+    # input_hash 任一变化都反映到 key 上；前缀保留三段可读信息。最长正式 boundary
+    # (stock_core_published) 下形如 granular_restart:2026-08-25:stock_core_published:
+    # <64 hex> ≈ 113 字符 <= VARCHAR(128)，无需 migration。
+    digest = hashlib.sha256(full_key.encode("utf-8")).hexdigest()
     return f"granular_restart:{trade_date}:{boundary}:{digest}"
 
 

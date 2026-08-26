@@ -18,6 +18,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from typing import Any
 
@@ -585,10 +586,11 @@ def test_run_key_contract_overlength_uses_compact_fallback() -> None:
         parent_job_run_id=parent, source_core_run_id=source, input_hash=input_hash,
     )
     assert len(key) <= 128
-    # compact fallback 必须保留三段可读前缀 + 稳定 digest，且非简单截断。
+    # compact fallback 必须保留三段可读前缀 + 完整 SHA-256 digest（非简单截断）。
     assert key.startswith(f"granular_restart:{_RUN_KEY_TRADE_DATE}:daily_ready:")
-    # digest 段为 16 hex（前缀 15+1+date+1+boundary+1 = 47，剩余 81 容得下 16 hex）。
     digest_part = key.split(":", 3)[3]
-    assert len(digest_part) == 16 and all(c in "0123456789abcdef" for c in digest_part)
-    # 简单截断（仅切到 128）会丢失尾部 hash，此处 fallback 含完整 original 的 digest。
-    assert digest_part != full[len(f"granular_restart:{_RUN_KEY_TRADE_DATE}:daily_ready:"):][:16]
+    expected_digest = hashlib.sha256(full.encode("utf-8")).hexdigest()
+    # CORRECTION-03：完整 64-hex digest，且必须等于 original key 的 SHA-256。
+    assert digest_part == expected_digest
+    assert len(digest_part) == 64
+    assert len(key) <= 128
