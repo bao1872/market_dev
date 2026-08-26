@@ -329,6 +329,70 @@ Not merely "events exist"; the type-to-type semantic mapping must be verified.
 - `test_review_vectorized_facts` has 4 pre-existing failures confirmed identical on base
   `aedcc766` (unrelated to this change; not a regression).
 
+## 5b. History-v3 contract freeze (PHASE 1–14)
+
+> AST-FORWARD：PHASE 0 之后进入 History-v3。本轮目标 = 把「Daily AfterClose 重新计算
+> First Pyramid History」改为「canonical Core 计算一次 → History-v3 纯投影」。
+
+### 不变量
+```text
+ONE instrument + ONE trade_date + ONE canonical Core input
+= ONE DSA/SMC/BB/SQZMOM/VolumeContext compute
+History-v3 只能投影、不能运行 kernel。
+```
+- `review-history-v2` = legacy recomputation semantics = immutable / read-compatible only
+- `review-history-v3` = canonical Core projection semantics
+- 禁止 v2/v3 混写。
+
+### 实现（已落入代码）
+1. **新增常量** `REVIEW_HISTORY_V3_CONTRACT_VERSION = "review-history-v3"`
+   （`first_pyramid_service.py`）。
+2. **纯投影 owner** `app/services/history_v3_projection.py`
+   - `build_history_v3_projection(core_flat, instrument_id, trade_date, core_run_id)`
+     纯函数、无 IO、无 kernel 调用；
+   - 全字段 RTM：`fp_*` → v3 canonical key，含显式 adapter
+     （`momentum_change`/`sqzmom_delta` 数值 → enhancing/weakening/flat；
+     Core display enum 透传）；
+   - 事件投影：Core `fp_structure_event_*` / `fp_momentum_event_*` / `fp_node_event_*`
+     + 由 `fp_squeeze_state=已释放` 推导 `SQZ_RELEASE`；不重判结构/动量事件；
+   - `lineage` = sha256(state+events+core_run_id)（deterministic）。
+3. **物化器** `materialize_history_v3_from_core(session, instrument_id, trade_date,
+   core_flat, core_run_id)`（`first_pyramid_history_service.py`）：
+   - 输入仅为 durable Core artifact（`StockFeatureSnapshot.summary_payload["first_pyramid_flat"]`）；
+   - 复用既有 `_persist_history_result`（state upsert + events immutable insert），
+     `history_contract_version=review-history-v3`；
+   - **禁止** `compute_first_pyramid_history` / `advance_history_to_trade_date` /
+     `compute_dsa_bundle` / `compute_smc_pine` / `compute_sqzmom_lb` / VolumeContext；
+   - 不新增数据库表（复用既有 `FirstPyramidHistoryDailyState`/`Event` 的
+     `history_contract_version` + JSONB payload）。
+4. **AfterClose 重排**（`after_close_orchestrator.py`）
+   - `computing_history` 步骤改用 `_make_history_v3_step`：从当日 `StockFeatureSnapshot`
+     读 durable Core flat → 投影物化 v3（不再 `advance_history_to_trade_date`）；
+   - 旧 `_make_history_step` + `advance_history_to_trade_date` 保留给 legacy v2
+     replay/backfill，daily AfterClose 不可达；
+   - Review(T) gate：v3 投影成功即 `ready`（不再等待重算）；正式 Review current owner 为
+     `published stock_core(T)`（Core 已算一次），History 提供 `<T` baseline。
+5. **状态机**：保留 `computing_history` 枚举（implementation semantics = projection/
+   materialization only）；不在本轮扩大 migration scope 改名。
+
+### 测试
+- `test_history_v3_projection.py`（PURE_UNIT）：
+  - **compute-once spy gate**（`test_v3_is_pure_projection_no_kernel_calls`）：
+    投影执行期 `compute_sqzmom_lb` / `compute_dsa_bundle` / `compute_smc_pine` 调用计数 = 0；
+  - 全字段 RTM + momentum delta adapter；
+  - 事件投影（BOS + SQZ_RELEASE 来自 Core，不重判）；
+  - deterministic lineage；`to_history_result_shape` 携带 v3 contract_version。
+- `test_history_v3_materialize.py`（@pytest.mark.postgres）：
+  - crash/resume 幂等（重复 materialize → state 行数=1、events 不重复）。
+- 相关回归 `test_release_volume_ratio_ssot` + `test_first_pyramid_flatten` +
+  observation/review 系列 → 285 passed。
+
+### 治理
+- Daily History = projection/materialization，not recomputation；
+- Review(T) = Core(T) + History(<T)；
+- v2 = legacy，v3 = canonical Core projection；
+- 当前治理本身已要求 Compute Once，本 CHANGE 仅固化为代码不变量 + spy gate。
+
 ## 6. Frozen verdicts (AST-FORWARD)
 
 ```text

@@ -62,8 +62,12 @@ from app.services.feature_snapshot_service import (
 from app.services.first_pyramid_history_service import (
     advance_history_to_trade_date,
     ensure_current_first_pyramid_history_run,
+    materialize_history_v3_from_core,
 )
-from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
+from app.services.first_pyramid_service import (
+    HISTORY_CONTRACT_VERSION,
+    REVIEW_HISTORY_V3_CONTRACT_VERSION,
+)
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
 from app.services.review_history_readiness_service import (
@@ -1975,6 +1979,118 @@ def _make_history_step(
     return _run
 
 
+def _make_history_v3_step(
+    *,
+    job_run_id: uuid.UUID,
+    trade_date: date,
+    worker_id: str | None,
+    skip_history: bool,
+    core_run_id: uuid.UUID | None = None,
+) -> Callable[[], Awaitable[dict[str, Any]]]:
+    """[CHANGE-20260826-001 History-v3] Daily AfterClose 的 canonical History(T) owner。
+
+    **投影语义，禁止重算**：从 durable Core artifact
+    （``StockFeatureSnapshot.summary_payload["first_pyramid_flat"]``，Core 已计算一次）
+    投影并物化 review-history-v3。不再调用 ``advance_history_to_trade_date`` /
+    ``compute_first_pyramid_history`` / DSA / SMC / BB / SQZMOM / VolumeContext。
+
+    旧 ``_make_history_step`` + ``advance_history_to_trade_date`` 保留给 legacy v2
+    replay / backfill 专用，daily AfterClose 不可达。
+
+    Returns:
+        {"materialized": bool, "ready": bool, "processed", "target_state_count",
+         "no_core_flat", "failed", "failed_instruments"}
+    """
+
+    async def _run() -> dict[str, Any]:
+        if skip_history:
+            return {
+                "materialized": False,
+                "ready": False,
+                "status": "skipped",
+                "reason": "skip_history",
+                "processed": 0,
+                "target_state_count": 0,
+                "no_core_flat": 0,
+                "failed": 0,
+                "failed_instruments": [],
+            }
+
+        from sqlalchemy import and_
+
+        from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
+        from app.models.stock_feature_snapshot import StockFeatureSnapshot
+        from app.services.first_pyramid_history_service import (
+            materialize_history_v3_from_core,
+        )
+
+        async with AsyncSessionLocal() as db:
+            # 取当日所有已发布 Core 快照的 first_pyramid_flat（durable artifact）
+            rows = await db.execute(
+                select(
+                    StockFeatureSnapshot.instrument_id,
+                    StockFeatureSnapshot.source_run_id,
+                    StockFeatureSnapshot.summary_payload,
+                ).where(StockFeatureSnapshot.trade_date == trade_date)
+            )
+            snapshots = rows.all()
+
+            processed = 0
+            target_state_count = 0
+            no_core_flat = 0
+            failed = 0
+            failed_instruments: list[dict[str, Any]] = []
+
+            for instrument_id, snap_run_id, summary in snapshots:
+                core_flat = (summary or {}).get("first_pyramid_flat")
+                if not isinstance(core_flat, dict) or not core_flat:
+                    no_core_flat += 1
+                    continue
+                try:
+                    result = await materialize_history_v3_from_core(
+                        db,
+                        instrument_id,
+                        trade_date,
+                        core_flat,
+                        core_run_id=core_run_id or snap_run_id,
+                    )
+                    processed += 1
+                    target_state_count += result.get("daily_state_count", 0)
+                except Exception as exc:  # noqa: BLE001
+                    failed += 1
+                    failed_instruments.append(
+                        {"instrument_id": str(instrument_id), "error": str(exc)[:200]}
+                    )
+                    logger.warning(
+                        "[AfterClose][H3] v3 materialize failed iid=%s err=%s",
+                        instrument_id, exc,
+                    )
+
+            await db.commit()
+
+            # v3 readiness：T 日已成功投影即为 ready（纯投影，无二次重算等待）
+            ready = processed > 0 and failed == 0
+            logger.info(
+                "[AfterClose][H3] v3 materialize job=%s trade=%s processed=%s "
+                "target_state=%s no_core_flat=%s failed=%s",
+                str(job_run_id), trade_date, processed, target_state_count,
+                no_core_flat, failed,
+            )
+            return {
+                "materialized": True,
+                "ready": ready,
+                "status": "succeeded" if ready else "partial",
+                "reason": None if ready else "HISTORY_V3_PARTIAL",
+                "processed": processed,
+                "target_state_count": target_state_count,
+                "no_core_flat": no_core_flat,
+                "failed": failed,
+                "failed_instruments": failed_instruments,
+            }
+
+    return _run
+
+
 async def _execute_review_step(
     *,
     job_run_id: uuid.UUID,
@@ -3772,11 +3888,12 @@ async def execute_after_close_run(
 
         _history_result, _history_step_summary = await execute_orchestrator_step(
             "computing_history",
-            _make_history_step(
+            _make_history_v3_step(
                 job_run_id=job_run_id,
                 trade_date=trade_date,
                 worker_id=worker_id,
                 skip_history=skip_history,
+                core_run_id=snapshot_run_id,
             ),
             timeout_seconds=_step_timeout("computing_history"),  # None: 无 absolute timeout
             optional=True,
@@ -3789,7 +3906,8 @@ async def execute_after_close_run(
             cancellation_check=_make_step_cancellation_check(job_run_id),
         )
         if isinstance(_history_result, dict):
-            _history_run_id = _history_result.get("history_run_id")
+            # v3 投影步骤无独立 history_run_id；lineage 指向来源 Core run
+            _history_run_id = core_run_id
             _history_ready = bool(_history_result.get("ready"))
         _history_status = _history_step_summary.get("status")
         logger.info(

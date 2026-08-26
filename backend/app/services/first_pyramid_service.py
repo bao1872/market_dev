@@ -132,6 +132,12 @@ _MIN_BARS_FOR_REQUIRED_DIMS = 60
 # 防止 progressive backfill 期间把未升级旧 state 当完整新 state。
 HISTORY_CONTRACT_VERSION = "review-history-v2"
 
+# [CHANGE-20260826-001 History-v3] canonical Core projection contract。
+# review-history-v3 = pure projection of the once-computed Core artifact
+# (StockFeatureSnapshot.summary_payload["first_pyramid_flat"] + Core events)。
+# History-v3 禁止重新运行 DSA/SMC/BB/SQZMOM/VolumeContext kernel；只能投影。
+REVIEW_HISTORY_V3_CONTRACT_VERSION = "review-history-v3"
+
 # [CHANGE-20260826] 放量释放阈值（canonical ratio 语义）。
 # 正式 ratio = release_volume_ratio = squeeze_mean / release_volume[T]  (SQZ_RELEASE SSOT)。
 # 业务规则「放量释放」= release_volume[T] > 1.5 × squeeze_mean。

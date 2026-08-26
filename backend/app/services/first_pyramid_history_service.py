@@ -1661,6 +1661,68 @@ async def _persist_history_result(
     }
 
 
+# =============================================================================
+# [CHANGE-20260826-001 History-v3] Pure projection materializer
+# =============================================================================
+async def materialize_history_v3_from_core(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    trade_date: date,
+    core_flat: dict[str, Any],
+    *,
+    core_run_id: uuid.UUID | None = None,
+    algorithm_version: str | None = None,
+) -> dict[str, int]:
+    """[CHANGE-20260826-001] 从 durable Core artifact 投影并物化 review-history-v3。
+
+    这是 Daily AfterClose 的 canonical History(T) 生产 owner。
+
+    **禁止**：compute_first_pyramid_history / advance_history_to_trade_date /
+    compute_dsa_bundle / compute_smc_pine / compute_sqzmom_lb / VolumeContext compute /
+    bars reload for Core recompute。History-v3 只投影、不运行 kernel。
+
+    Args:
+        session: 异步 DB 会话（不 commit，由 caller 控制）
+        instrument_id: 股票 ID
+        trade_date: 业务交易日
+        core_flat: StockFeatureSnapshot.summary_payload["first_pyramid_flat"]
+                   （Core 已计算一次的事实；作为唯一投影输入）
+        core_run_id: 来源 Core run id（lineage）
+        algorithm_version: 算法版本（默认 FIRST_PYRAMID_CORE_ALGORITHM_VERSION）
+
+    Returns:
+        {"daily_state_count": int, "events_count": int}
+    """
+    from app.services.history_v3_projection import (
+        REVIEW_HISTORY_V3_CONTRACT_VERSION,
+        build_history_v3_projection,
+        to_history_result_shape,
+    )
+
+    if not isinstance(core_flat, dict) or not core_flat:
+        # 投影语义：Core 无事实 → 合法空投影（不崩溃、不重算）
+        return {"daily_state_count": 0, "events_count": 0}
+
+    projection = build_history_v3_projection(
+        core_flat=core_flat,
+        instrument_id=str(instrument_id),
+        trade_date=trade_date,
+        core_run_id=str(core_run_id) if core_run_id else None,
+    )
+    history_result = to_history_result_shape(projection)
+
+    # 复用既有 _persist_history_result（state upsert + events 不可变 insert），
+    # 仅 history_contract_version 指向 review-history-v3。
+    return await _persist_history_result(
+        session,
+        instrument_id,
+        history_result,
+        algorithm_version or FIRST_PYRAMID_CORE_ALGORITHM_VERSION,
+        source_history_run_id=core_run_id,
+        history_contract_version=REVIEW_HISTORY_V3_CONTRACT_VERSION,
+    )
+
+
 def _max_bar_trade_date(bars: pd.DataFrame) -> date | None:
     """[HISTORY-CURRENT-DATE-LIFECYCLE-01 §5] 取 bars 最大交易日（PIT 断言用）。
 
