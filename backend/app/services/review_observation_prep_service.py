@@ -35,6 +35,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.review.member_fact import (
     DailyBarFact,
     previous_state_to_flat,
+    snapshot_flat_to_continuous,
+    snapshot_flat_to_flat_t,
     state_to_continuous,
 )
 from app.domain.review.member_fact import (
@@ -582,9 +584,27 @@ def _build_member_observations(
         series = bars.get(inst_id)
         current = series.exact_bar(trade_date) if series else None
         t1_bar = series.exact_bar(t1) if (series and t1) else None
+        # [CHANGE-20260826-001 Slice 1 CORRECTION] Current(T) First Pyramid facts
+        # are owned by published Core(T), NOT History(T).  When the Core snapshot
+        # flat is present (daily current path), build flat_t / continuous from it;
+        # otherwise fall back to History(T) state (historical replay / union paths
+        # where Core(T) is not the observation target).  This makes Review(T)
+        # Current result independent of whether History(T) exists (KPI-1/KPI-2).
+        current_only = current_only_facts.get(str(inst_id))
+        core_flat = (
+            current_only.get(_BOARD_CURRENT_FLAT_KEY)
+            if current_only is not None
+            else None
+        )
+        if core_flat is not None:
+            flat_t = snapshot_flat_to_flat_t(core_flat)
+            continuous = snapshot_flat_to_continuous(core_flat)
+        else:
+            flat_t = previous_state_to_flat(state_t)
+            continuous = state_to_continuous(state_t)
         raw = RawMemberFacts(
             member_id=str(inst_id),
-            flat_t=previous_state_to_flat(state_t),
+            flat_t=flat_t,
             close_t=current.close if current else None,
             amount_t=current.amount if current else None,
             volume_t=current.volume if current else None,
@@ -595,7 +615,7 @@ def _build_member_observations(
             # Continuous Trend/Structure/Momentum/Volume facts (PRD §7.3-§7.6)
             # that the history state_payload carries but previous_state_to_flat
             # does not surface. Additive passthrough; missing -> None.
-            continuous=state_to_continuous(state_t),
+            continuous=continuous,
             # Current-only canonical facts from the exact-T snapshot.  These
             # have no member-day history series; Historical Dynamics stays
             # unavailable while Current is served (PRD v2.3).

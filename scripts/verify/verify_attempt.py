@@ -461,7 +461,14 @@ class VerifyAttempt:
              #     可达 computing_history/review、Contract C 正常 run 仍执行 refreshing_daily、
              #     Contract D resume/lease_epoch/last_completed_step 语义不被 mainchain_stage 改坏。
              #   仅追加，不删除/替换已有文件；不动态 discovery；不扩大为全量 -m postgres。
-             "tests/test_pg_after_close_restart_closure.py"],
+             "tests/test_pg_after_close_restart_closure.py",
+
+             # [SLICE-01-CORRECTION / 2026-08-26] REVIEW-CURRENT-OWNER-01 修正：Review(T)
+             # 当前第一金字塔事实归 Core(T)（StockFeatureSnapshot 锁定 source_core_run_id），
+             # 不消费 History(T)。本文件断言 verify DB 身份（bz_stock_verify_<sha> 且 != bz_stock）
+             # 并证明 same-day 两 run 只读取 source_core_run_id；错误/缺失 run fail-closed 不
+             # fallback。仅追加，不删除/替换已有文件；不动态 discovery；不扩大为全量 -m postgres。
+             "tests/test_slice1_current_facts_lock.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:

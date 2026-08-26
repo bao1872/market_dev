@@ -3,19 +3,27 @@
 [CHANGE-20260826-001 Slice 1] Review(T) current First Pyramid facts come ONLY from the
 published StockFeatureSnapshot(T) locked to source_core_run_id.
 
-Requires real PostgreSQL (verify DB): KPI-2/KPI-3/Case C.
-- same-day two runs → Review consumes only source_core_run_id's snapshot
-- wrong same-day run → empty (fail-closed), no fallback to latest
+真实 PostgreSQL 验证（远程 verify 库 bz_stock_verify_<sha>）：
+- 断言 current_database() == bz_stock_verify_<sha> 且 != bz_stock（KPI-6）；
+- 不自行创建 SQLite engine（旧实现用 sqlite+aiosqlite 自创建，违反仓库测试规则，
+  本次已改为复用 conftest 的 TestAsyncSessionLocal，由 PANJI_REMOTE_VERIFY_DB_TEST
+  指向 verify 库）。
+
+运行：
+    PANJI_REMOTE_VERIFY_DB_TEST=1 .venv/bin/python -m pytest \
+        tests/test_slice1_current_facts_lock.py -p no:cacheprovider
+（需经 panji-verify 注册的 targeted-pg plan，先跑 Migration 再跑本测试）
 """
 import datetime
 import uuid
 
 import pytest
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import text
 
-from app.models.base import Base
+from tests.conftest import TestAsyncSessionLocal
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+from app.services.observation_prep import _BOARD_CURRENT_FLAT_KEY
 from app.services.review_observation_prep_service import (
     _load_current_only_snapshot_facts,
 )
@@ -23,46 +31,55 @@ from app.services.review_observation_prep_service import (
 pytestmark = pytest.mark.postgres
 
 
-def _mk_run(rid, trade_date, status="succeeded", published=True):
-    return StockFeatureSnapshotRun(
-        id=rid,
-        trade_date=trade_date,
-        status=status,
-        published_at=datetime.datetime.utcnow() if published else None,
+async def _assert_verify_db_identity():
+    """KPI-6: 必须连在 verify 库，绝不连 bz_stock。"""
+    async with TestAsyncSessionLocal() as s:
+        db_name = (await s.execute(text("SELECT current_database()"))).scalar()
+    assert db_name is not None
+    assert db_name.startswith("bz_stock_verify_"), (
+        f"PG 测试必须连 verify 库，实际={db_name}"
     )
+    assert db_name != "bz_stock", "禁止连生产 bz_stock"
 
 
-def _mk_snap(iid, rid, trade_date, flat):
-    return StockFeatureSnapshot(
-        instrument_id=iid,
-        source_run_id=rid,
-        trade_date=trade_date,
-        summary_payload={"first_pyramid_flat": flat},
-    )
+async def test_verify_db_identity():
+    await _assert_verify_db_identity()
 
 
-@pytest.mark.asyncio
 async def test_current_facts_locked_to_source_core_run_id():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    """KPI-3: same-day 两 run，Review 只消费 source_core_run_id 的快照；
+    错误 run 被忽略（无 fallback）。"""
+    await _assert_verify_db_identity()
 
-    iid = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
+    iid = uuid.UUID("00000000-0000-0000-0000-00000000a0a1")
     td = datetime.date(2026, 8, 25)
-    correct_run = uuid.UUID("11111111-1111-1111-1111-111111111111")
-    wrong_run = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    correct_run = uuid.UUID("aaaa1111-1111-1111-1111-111111111111")
+    wrong_run = uuid.UUID("bbbb2222-2222-2222-2222-222222222222")
 
-    async with factory() as s:
+    async with TestAsyncSessionLocal() as s:
         s.add_all([
-            _mk_run(correct_run, td),
-            _mk_run(wrong_run, td),
-            _mk_snap(iid, correct_run, td, {"fp_regime_value": "强势"}),
-            _mk_snap(iid, wrong_run, td, {"fp_regime_value": "弱势"}),
+            StockFeatureSnapshotRun(
+                id=correct_run, trade_date=td, status="succeeded",
+                run_type="after_close", published_at=datetime.datetime.utcnow(),
+            ),
+            StockFeatureSnapshotRun(
+                id=wrong_run, trade_date=td, status="succeeded",
+                run_type="after_close", published_at=datetime.datetime.utcnow(),
+            ),
+            StockFeatureSnapshot(
+                instrument_id=iid, source_run_id=correct_run, trade_date=td,
+                structural_payload={}, temporal_payload={},
+                summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
+            ),
+            StockFeatureSnapshot(
+                instrument_id=iid, source_run_id=wrong_run, trade_date=td,
+                structural_payload={}, temporal_payload={},
+                summary_payload={"first_pyramid_flat": {"fp_trend_direction": "下行"}},
+            ),
         ])
         await s.commit()
 
-    async with factory() as s:
+    async with TestAsyncSessionLocal() as s:
         out = await _load_current_only_snapshot_facts(
             s, [iid], td, source_core_run_id=correct_run
         )
@@ -70,32 +87,38 @@ async def test_current_facts_locked_to_source_core_run_id():
             s, [iid], td, source_core_run_id=wrong_run
         )
 
-    assert out[str(iid)]["regime_value"] == "强势"
-    assert out_wrong[str(iid)]["regime_value"] == "弱势"
-    assert "弱势" not in str(out)
-    assert "强势" not in str(out_wrong)
+    # Loader 锁定 source_core_run_id：只返回该 run 的快照，整张 first_pyramid_flat 透传。
+    assert out[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] == "上行"
+    assert out_wrong[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] == "下行"
+    # 关键：错误 run 不污染正确 run（无 fallback 到另一 same-day run）
+    assert out[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] != "下行"
+    assert out_wrong[str(iid)][_BOARD_CURRENT_FLAT_KEY]["fp_trend_direction"] != "上行"
 
 
-@pytest.mark.asyncio
 async def test_current_facts_wrong_run_fails_closed():
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    """Case C: source_core_run_id 指向不存在/无快照的 run → 空（fail-closed）。"""
+    await _assert_verify_db_identity()
 
-    iid = uuid.UUID("00000000-0000-0000-0000-0000000000b1")
+    iid = uuid.UUID("00000000-0000-0000-0000-00000000b0b1")
     td = datetime.date(2026, 8, 25)
-    present_run = uuid.UUID("33333333-3333-3333-3333-333333333333")
-    missing_run = uuid.UUID("44444444-4444-4444-4444-444444444444")
+    present_run = uuid.UUID("cccc3333-3333-3333-3333-333333333333")
+    missing_run = uuid.UUID("dddd4444-4444-4444-4444-444444444444")
 
-    async with factory() as s:
+    async with TestAsyncSessionLocal() as s:
         s.add_all([
-            _mk_run(present_run, td),
-            _mk_snap(iid, present_run, td, {"fp_regime_value": "强势"}),
+            StockFeatureSnapshotRun(
+                id=present_run, trade_date=td, status="succeeded",
+                run_type="after_close", published_at=datetime.datetime.utcnow(),
+            ),
+            StockFeatureSnapshot(
+                instrument_id=iid, source_run_id=present_run, trade_date=td,
+                structural_payload={}, temporal_payload={},
+                summary_payload={"first_pyramid_flat": {"fp_trend_direction": "上行"}},
+            ),
         ])
         await s.commit()
 
-    async with factory() as s:
+    async with TestAsyncSessionLocal() as s:
         out = await _load_current_only_snapshot_facts(
             s, [iid], td, source_core_run_id=missing_run
         )

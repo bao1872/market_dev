@@ -308,6 +308,108 @@ def state_to_continuous(state: dict[str, Any] | None) -> dict[str, Any]:
     return out
 
 
+# ----------------------------------------------------------------------------
+# [CHANGE-20260826-001 Slice 1 CORRECTION] Core(T)-owned Current First Pyramid
+# fact adapters.
+#
+# REVIEW-CURRENT-OWNER-01 freezes: Review(T) Current facts = published Core(T)
+# (StockFeatureSnapshot.first_pyramid_flat), NOT History(T). The Core snapshot
+# flat already carries the canonical ``fp_*`` keys (produced by
+# flatten_first_pyramid — the SAME source the Board producer consumes). These
+# adapters map that Core(T) ``fp_*`` flat into the EXACT output-key space that
+# previous_state_to_flat / state_to_continuous emit from a History
+# ``state_payload``, so the general MemberObservation Trend / Structure State /
+# Momentum / state-driven Volume families are now owned by Core(T).
+#
+# Invariants:
+#   * Zero kernel recompute — only the already-materialized Core flat is read.
+#   * History(T) is NEVER read for the Current(T) flat_t / continuous.
+#   * Keys absent from the Core flat stay None (Current(T) has no History(T)
+#     owner for them) — no latest / same-day-other-run fallback.
+#   * Raw DSA/segment/OB/sqzmom-delta keys that the History payload carries but
+#     the Core ``fp_*`` flat does not are intentionally None for Current(T)
+#     (they are Historical <T-only facts, served by states_t1).
+# ----------------------------------------------------------------------------
+
+# Core(T) ``fp_*`` flat key -> previous_state_to_flat output key (1:1, same name).
+_SNAPSHOT_FLAT_T_KEYS: tuple[str, ...] = (
+    "fp_trend_direction",
+    "fp_swing_direction",
+    "fp_internal_direction",
+    "fp_structure_alignment",
+    "fp_momentum_direction",
+    "fp_momentum_change",
+    "fp_volume_ratio20",
+    "fp_volume_percentile20",
+    "review_price_position",
+    "review_volume_ratio20",
+    "review_amount_ratio20",
+    "review_volume_percentile20",
+    "review_amount_percentile200",
+    "fp_latest_bos_direction",
+    "fp_latest_bos_freshness",
+    "fp_latest_choch_direction",
+    "fp_latest_choch_freshness",
+    "fp_latest_ob_direction",
+    "fp_latest_ob_freshness",
+    "fp_segment_volume_ratio",
+    "fp_prev_segment_volume",
+)
+
+
+def snapshot_flat_to_flat_t(snapshot_flat: object) -> dict[str, Any]:
+    """Map the Core(T) ``first_pyramid_flat`` (``fp_*`` keys) to the
+    previous_state_to_flat output-key space for the Current(T) categorical state.
+
+    Pure pass-through of the canonical ``fp_*`` keys the Core snapshot already
+    carries (flatten_first_pyramid emits them as finalized categorical strings,
+    so no direction-label re-derivation is needed). Missing keys -> None.
+    """
+    flat = snapshot_flat if isinstance(snapshot_flat, dict) else None
+    if not flat:
+        return dict.fromkeys(_SNAPSHOT_FLAT_T_KEYS)
+    return {key: flat.get(key) for key in _SNAPSHOT_FLAT_T_KEYS}
+
+
+# Core(T) ``fp_*`` flat key -> state_to_continuous output key. Only the keys the
+# Core flat actually carries are mapped; remaining raw History-only keys stay
+# None (Current(T) has no History(T) owner for them).
+_SNAPSHOT_CONTINUOUS_MAP: tuple[tuple[str, str], ...] = (
+    ("fp_sqzmom_value", "sqzmom_val"),
+    ("fp_volume_ratio20", "volume_ratio_20"),
+    ("fp_volume_percentile20", "volume_percentile_20"),
+    ("fp_volume_zscore20", "volume_zscore_20"),
+    ("fp_segment_volume_ratio", "current_vs_prev_volume_mean_ratio"),
+    ("fp_prev_segment_volume", "prev_segment_volume_mean"),
+)
+
+
+def snapshot_flat_to_continuous(snapshot_flat: object) -> dict[str, Any]:
+    """Map the Core(T) ``first_pyramid_flat`` to the state_to_continuous
+    output-key space for Current(T) continuous Trend / Structure / Momentum /
+    Volume facts.
+
+    Only keys present in the Core ``fp_*`` flat are surfaced; raw DSA/segment/OB/
+    sqzmom-delta keys the History payload carries (but the Core flat does not)
+    stay None — they are Historical <T-only, served by states_t1.
+    """
+    out: dict[str, Any] = dict.fromkeys(_CONTINUOUS_STATE_KEYS)
+    flat = snapshot_flat if isinstance(snapshot_flat, dict) else None
+    if not flat:
+        return out
+    for src_key, dst_key in _SNAPSHOT_CONTINUOUS_MAP:
+        val = flat.get(src_key)
+        out[dst_key] = _number(val) if dst_key in NUMERIC_STATE_KEYS else val
+    # categorical mapped keys carried verbatim
+    for src_key, dst_key in (
+        ("fp_momentum_direction", "momentum_direction"),
+        ("fp_momentum_change", "momentum_change"),
+        ("fp_structure_alignment", "structure_alignment"),
+    ):
+        out[dst_key] = flat.get(src_key)
+    return out
+
+
 @dataclass(frozen=True)
 class DailyBarFact:
     trade_date: date

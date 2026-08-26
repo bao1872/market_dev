@@ -393,39 +393,53 @@ History-v3 只能投影、不能运行 kernel。
 - v2 = legacy，v3 = canonical Core projection；
 - 当前治理本身已要求 Compute Once，本 CHANGE 仅固化为代码不变量 + spy gate。
 
-## 5c. Slice 1 — REVIEW-CURRENT-OWNER-01（已提交并推送）
+## 5c. Slice 1 — REVIEW-CURRENT-OWNER-01（CORRECTION，已提交并推送）
 
-> 单向 Ownership 收敛第一步：**Review(T) = Core(T) + History(<T)**。
-> exact-T History(T) 不再是 Review 前置条件；Review 当前第一金字塔事实直接来自
-> 已发布 Core(T)（StockFeatureSnapshot，锁定 source_core_run_id）。
+> 单向 Ownership 收敛第一步（修正版）：**Review(T) = Core(T) + History(<T)**。
+> 当前第一金字塔事实**全部**来自已发布 Core(T)（StockFeatureSnapshot.first_pyramid_flat，
+> 锁定 source_core_run_id）；exact-T History(T) 既不提供 Current 事实，也不挡在 Review 前面。
 
-### 本 Slice 只做这件事
-1. 移除编排中「History(T) 未就绪即阻断 Review」的硬门控（原 invariant H2，
-   `if not history_ready: return gate_blocked HISTORY_NOT_READY_T`）。
-   → 现在 Review 仅依赖 `stock_core_published and snapshot_run_id`（Core(T) 已发布）。
-2. `computing_history` 步骤从 v3 投影（`_make_history_v3_step`）**隔离**回 v2
-   `_make_history_step`：本轮 daily path **不产生 review-history-v3 DB write**
-   （v3 module 保留，Slack 4 再接回）。
-3. 清除 `1181afab` 中 `_history_run_id = core_run_id` 错误路径，还原
-   `_history_run_id = _history_result.get("history_run_id")`（v2 run lineage）。
+### 这轮修正了什么（相对首版 Slice 1 的 P0 缺口）
+首版只删了 `HISTORY_NOT_READY_T` 硬门，但 Review Current(T) 的 Trend / Structure State /
+Momentum / state-driven Volume 仍来自 `FirstPyramidHistoryDailyState(T)`（经
+`previous_state_to_flat` / `state_to_continuous`）。这轮把 Current(T) 真正归 Core(T) 所有。
 
-### 未改动（明确 scope 冻结）
-- `stock_core` 原子发布代码：零业务修改（KPI-6）。
-- Review current 消费路径：`review_observation_prep_service._load_current_only_snapshot_facts`
-  本已锁定 `source_core_run_id`（join `StockFeatureSnapshotRun.id == source_core_run_id`），
-  无 latest fallback → same-day 错误 run 直接 fail-closed（KPI-2/KPI-3/Case C 已满足）。
-- v2 `FirstPyramidHistoryDailyState` / `advance_history_to_trade_date`：保留给
-  `<T` historical baseline 与 legacy backfill。
+1. **Current(T) 事实归 Core(T)**（KPI-1/2）：
+   - `member_fact.snapshot_flat_to_flat_t` / `snapshot_flat_to_continuous`：把 Core(T)
+     `first_pyramid_flat`（`fp_*` 键，由 `flatten_first_pyramid` 产出，与 Board producer
+     同源）映射到 `previous_state_to_flat` / `state_to_continuous` 的同一输出键空间。
+   - `_build_member_observations`：当 Core flat 存在（daily current 路径）时，`flat_t` /
+     `continuous` 改由 Core flat 构建；否则回退到 History（历史 replay / union 路径，
+     此时 Core(T) 不是观测目标）。**零核重算**——只读取已物化的 Core flat。
+   - 因此 Review Current(T) 与 History(T) 是否存在无关（I1/I2）；History(T) 消费次数 = 0（KPI-2）。
+2. **编排真正解耦**（KPI-4）：`computing_history`（`_make_history_step` →
+   `advance_history_to_trade_date` 的第二次计算）从 Review **之前**移到 **之后**执行。
+   从 `stock_core published` 到 `Review compute started` 之间不再有任何 History(T) producer /
+   recompute。Legacy v2 函数保留给 backfill，不删除；v3 物化仍隔离（不产生 v3 DB write）。
+3. **PG 测试纠正**（KPI-6）：`test_slice1_current_facts_lock.py` 原用 `sqlite+aiosqlite` 自创建，
+   违反仓库测试规则。本轮改为复用 conftest `TestAsyncSessionLocal`（由 `PANJI_REMOTE_VERIFY_DB_TEST`
+   指向 `bz_stock_verify_<sha>`），并断言 `current_database()` 以 `bz_stock_verify_` 开头且 ≠ `bz_stock`。
+
+### 明确不变量
+- I3：Review 只消费 `source_core_run_id` 对应 exact-T Core；禁止 latest / same-day other-run fallback
+  （Core flat 缺失 → 对应 Current fact 为 None，不是 History 兜底）。
+- I4：stock_core published → Review compute 之间 0 次 History(T) producer / recompute path。
+- I5：`stock_core` 原子发布代码零业务修改（KPI-6/范围保护）。
 
 ### 测试
-- `test_slice1_review_current_owner.py`（PURE）：gate 行为证明
-  - KPI-4：History(T) 缺失 + Core 已发布 → Review 进入 compute/publish 路径
-    （status ∈ {succeeded, published_already}），**绝不** `HISTORY_NOT_READY_T`；
-  - KPI-6：Core 未发布 → Review 不计算（skipped），且 reason ≠ HISTORY_NOT_READY_T。
-- `test_slice1_current_facts_lock.py`（@pytest.mark.postgres，verify DB）：
-  - same-day 两 run → Review 只消费 `source_core_run_id` 快照；
-  - 错误 run → 空（fail-closed），不 fallback。
-- 相关回归 287 passed（2 skipped = postgres loader 测试）。
+- `test_slice1_review_current_owner.py`（PURE，2 passed）：gate 行为
+  - KPI-4：History(T) 缺失 + Core 已发布 → Review 进入 compute/publish，绝不 `HISTORY_NOT_READY_T`；
+  - KPI-6：Core 未发布 → Review 不计算（skipped），reason ≠ `HISTORY_NOT_READY_T`。
+- `test_slice1_core_current_owner.py`（PURE，7 passed）：Current(T) 归 Core(T)
+  - KPI-1：Core flat 相同、History(T) 有/无 → Current 结果一致（含 `_build_member_observations`
+    行为测试：冲突 History state 不污染 Current 的 trend/momentum/internal）；
+  - KPI-2：`snapshot_flat_to_flat_t` / `snapshot_flat_to_continuous` 只读 Core flat，不读
+    History `state_payload` 原始键；缺失 Core 键 → None，无 fallback；
+  - KPI-3 精神：same-day 错误 run / 缺失 run → fail-closed。
+- `test_slice1_current_facts_lock.py`（@pytest.mark.postgres，verify DB）：KPI-3/6
+  - 断言 `current_database()` 为 `bz_stock_verify_<sha>` 且 ≠ `bz_stock`；
+  - same-day 两 run → 只消费 `source_core_run_id` 快照；错误 run → 空（fail-closed）。
+- 相关回归 274 passed（postgres loader 测试需 `PANJI_REMOTE_VERIFY_DB_TEST` 跑）。
 
 ## 6. Frozen verdicts (AST-FORWARD)
 
