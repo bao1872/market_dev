@@ -3417,7 +3417,6 @@ async def execute_after_close_run(
         # [Phase8A 两阶段幂等发布] DSA publish_run（阶段1）与 snapshot run finalize（阶段2）
         # 在各自独立 session/事务中提交，非单一原子事务。故障恢复后通过 publish_run 幂等
         # 返回 + skip_publish 断点跳过达到最终一致。失败时 snapshot run 标记 failed。
-        publish_failed = False
         # [Phase4.1 corrective] _stock_core_published 是最权威的“本 snapshot_run_id
         # 是否真正成为正式 stock_core publication pointer”判据。仅当发布原子提交成功、
         # 且 pointer 确实指向本 run 时才为 True；superseded / 发布失败 / 未发布均为 False。
@@ -3586,7 +3585,6 @@ async def execute_after_close_run(
 
             # [mypy-clean] publishing 步骤成功返回后 _core_pub_out 必非 None
             assert _core_pub_out is not None, "publishing 成功但输出为空"
-            publish_failed = _core_pub_out["publish_failed"]
             published_run = _core_pub_out["published_run"]
             _stock_core_published = _core_pub_out["stock_core_published"]
             _stock_core_superseded = _core_pub_out["stock_core_superseded"]
@@ -3684,16 +3682,12 @@ async def execute_after_close_run(
                 job_run = await _get_job_run_or_raise(db, job_run_id)
                 meta = _parse_metadata(job_run)
                 step_summary = dict(meta.get("step_summary") or {})
-                if "anchor_summary" in locals():
-                    step_summary["auction_anchor"] = anchor_summary
                 meta["step_summary"] = step_summary
-                optional_failures = [
-                    name for name, item in step_summary.items()
-                    if item.get("optional")
-                    and item.get("status") in {"failed", "unavailable", "timed_out", "interrupted"}
-                ]
-                meta["partial_success"] = bool(optional_failures)
-                meta["optional_failures"] = optional_failures
+                # [AUDIT-CORRECTION-01 / Blocker 4] 此处只落发布 checkpoint + 心跳，
+                # 不提前计算 optional_failures/partial_success——enhancement（auction/
+                # state_events/chip）在本步之后才执行，提前算会导致元数据与终态不一致
+                # （status=partial_success 但 meta.partial_success=false）。
+                # optional 汇总的唯一 owner 在终端汇总块一次性从最终 step_summary 生成。
                 job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
                 await _update_heartbeat_and_step(db, job_run, None, worker_id)
                 await db.commit()
@@ -4114,12 +4108,29 @@ async def execute_after_close_run(
                     "[BOUNDARY-P4] after state-events job=%s count=%s pid=%s",
                     str(job_run_id), event_stats.get("event_count", 0), os.getpid(),
                 )
+                # [AUDIT-CORRECTION-01 / Blocker 4] 记录成功态，使 enhancement 段
+                # 的成功/失败均有 step_summary 条目，统一进入 optional_failures 判定。
+                step_summary["state_events"] = {
+                    "optional": True,
+                    "status": "succeeded",
+                    "event_count": event_stats.get("event_count", 0),
+                    "failed_count": event_stats.get("failed_count", 0),
+                }
             except Exception as event_exc:
                 logger.warning(
                     "[AfterClose] 状态事件生成失败（不影响主流程）: "
                     "run_id=%s, error=%s",
                     snapshot_run_id, event_exc, exc_info=True,
                 )
+                # [AUDIT-CORRECTION-01 / Blocker 4] 与 auction/chip 一致：
+                # enhancement 失败必须写入 step_summary（optional=True, status=failed），
+                # 否则它既不会进入 optional_failures，也不会使 parent 成为 partial_success，
+                # 造成「enhancement 失败却被伪装成全成功」的 false-green。
+                step_summary["state_events"] = {
+                    "optional": True,
+                    "status": "failed",
+                    "error": str(event_exc),
+                }
 
         # [P1-2] chip 入队（non-blocking post-core；stock_core 发布成功后执行）
         # 幂等依据：create_after_close_chip_consensus_job 以
@@ -4164,18 +4175,22 @@ async def execute_after_close_run(
                 if published_run is not None and published_run.published_at
                 else None
             )
-            # [P0-1 2026-08-03] 核心已发布但可选阶段（auction/review/chip）失败时，
-            # 主任务状态为 PARTIAL_SUCCESS（而非 succeeded），明确表达"核心成功、后置降级"。
-            # [Slice 4A9] legacy board aggregation 已退役、不再执行，其状态恒为
-            # "skipped"，因此不再参与 partial_success 判定。
+            # [AUDIT-CORRECTION-01 / Blocker 4] 单一 owner 原则：optional 汇总的唯一事实源
+            # 是最终 step_summary（review / auction_anchor / state_events / chip 均已写入）。
+            # 所有 enhancement 在 Review 之后才执行，因此必须在本终端块一次性从最终
+            # step_summary 生成 optional_failures / partial_success / final_status，
+            # 禁止再用早期（publishing 阶段）的 stale 值或多个分散的 _*_status 变量各算一遍。
+            # 这样保证 job_run.status、meta.partial_success、meta.optional_failures 三者
+            # 必然一致（同源同刻）。
+            optional_failures = [
+                name
+                for name, item in step_summary.items()
+                if isinstance(item, dict)
+                and item.get("optional")
+                and item.get("status") in {"failed", "unavailable", "timed_out", "interrupted"}
+            ]
             # stock_core 被 superseded（pointer 指向其他 run）也视为部分成功。
-            _optional_failed = (
-                _review_failed
-                or _auction_anchor_status == "failed"
-                or _stock_core_superseded
-                # [Phase0-Fix#8] chip 入队失败纳入 partial_success 判定
-                or _chip_enqueue_status == "failed"
-            )
+            _optional_failed = bool(optional_failures) or _stock_core_superseded
             final_status = (
                 AfterCloseRunStatus.PARTIAL_SUCCESS
                 if _optional_failed
@@ -4224,6 +4239,13 @@ async def execute_after_close_run(
                     # [SLICE-01 H2] First Pyramid History exact-T readiness 闭环字段
                     "history_run_id": str(_history_run_id) if _history_run_id else None,
                     "history_ready": _history_ready,
+                },
+                # [AUDIT-CORRECTION-01 / Blocker 4] 单一 owner：partial_success 与
+                # optional_failures 由本终端块从最终 step_summary 一次性生成，并经 extra
+                # 写回 metadata_json，确保与 job_run.status（同源）最终一致。
+                extra={
+                    "partial_success": bool(optional_failures),
+                    "optional_failures": optional_failures,
                 },
             )
             job_run.status = final_status.value

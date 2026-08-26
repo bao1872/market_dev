@@ -214,12 +214,21 @@ async def recover_replaced_incarnation_runs(
         # 当前 worker 自身是 legacy 格式（无 nonce），无法证明替换关系，跳过。
         return 0
 
-    # 取出本 slot 上所有 running 任务（含 legacy 精确匹配与新格式前缀匹配）
+    # [AUDIT-CORRECTION-01 / Blocker 3] 本 slice 仅修复 ONE REAL 8/25 AfterClose child，
+    # 因此严格限定 owner scope 为 after_close_orchestrator，绝不扫描/中断同 slot 上的
+    # chip / auction / 其他 scheduler job（它们未必具备 interrupted → resume_queued
+    # 的 resume contract，误中断会被 auto_resume 遗留）。
+    recovery_job_name = "after_close_orchestrator"
+
+    # 取出本 slot 上所有 running 的 after_close_orchestrator 任务
+    # （含 legacy 精确匹配与新格式前缀匹配；legacy 无 nonce 视为可替换前代）
     select_sql = text(
         """
-        SELECT id, job_name, worker_instance_id, heartbeat_at, metadata_json
+        SELECT id, job_name, worker_instance_id, heartbeat_at,
+               lease_epoch, metadata_json
         FROM scheduler_job_runs
         WHERE status = 'running'
+          AND job_name = :job_name
           AND (
             worker_instance_id = :slot
             OR worker_instance_id LIKE :slot_prefix
@@ -228,7 +237,11 @@ async def recover_replaced_incarnation_runs(
     )
     result = await db.execute(
         select_sql,
-        {"slot": current_slot, "slot_prefix": f"{current_slot}:%"},
+        {
+            "job_name": recovery_job_name,
+            "slot": current_slot,
+            "slot_prefix": f"{current_slot}:%",
+        },
     )
     candidate_rows = result.fetchall()
 
@@ -251,14 +264,24 @@ async def recover_replaced_incarnation_runs(
     if not to_interrupt:
         return 0
 
+    # [AUDIT-CORRECTION-01 / Blocker 2] 原子 fencing：running → interrupted 的同一笔
+    # UPDATE 必须同时：lease_epoch += 1、lease_expires_at = NULL、finished_at、error_code。
+    # 原因：_update_heartbeat_and_step 的 fenced write 仅按 (id, lease_epoch) 校验，
+    # 不依赖 status。若 interrupted 后 epoch 未立即改变，旧 epoch writer 在 new claim
+    # 前仍可能写 metadata/checkpoint。因此必须「先 fencing，再宣布 ownership 已转移」。
+    # WHERE 同时带 lease_epoch = :old_epoch，保证即使竞态下旧 worker 已并发改 epoch，
+    # 也只有持有该 epoch 的一方成功（乐观并发）。
     update_sql = text(
         """
         UPDATE scheduler_job_runs
         SET status = 'interrupted',
             error_code = 'WORKER_INCARNATION_REPLACED',
             error_message = '同 slot 上已启动新 incarnation，旧进程被替换，任务立即中断并断点恢复',
+            lease_epoch = lease_epoch + 1,
+            lease_expires_at = NULL,
             finished_at = :now
         WHERE id = :id
+          AND lease_epoch = :old_epoch
         """
     )
     check_event_sql = text(
@@ -281,7 +304,14 @@ async def recover_replaced_incarnation_runs(
         job_run_id = row.id
         job_name = row.job_name
         last_heartbeat = row.heartbeat_at
-        await db.execute(update_sql, {"now": now, "id": job_run_id})
+        old_epoch = row.lease_epoch
+        result = await db.execute(
+            update_sql,
+            {"now": now, "id": job_run_id, "old_epoch": old_epoch},
+        )
+        if getattr(result, "rowcount", 1) == 0:
+            # 乐观并发：epoch 已被并发方改变，跳过本行（不被本 worker 重复中断）
+            continue
         existing = await db.execute(
             check_event_sql, {"job_run_id": job_run_id},
         )
@@ -297,6 +327,7 @@ async def recover_replaced_incarnation_runs(
                     "original_status": "running",
                     "owner_instance_id": row.worker_instance_id,
                     "current_instance_id": current_worker_instance_id,
+                    "old_lease_epoch": old_epoch,
                     "last_heartbeat": (
                         last_heartbeat.isoformat() if last_heartbeat else None
                     ),
@@ -304,13 +335,13 @@ async def recover_replaced_incarnation_runs(
                 },
             )
             db.add(event)
-        if job_name == "after_close_orchestrator":
+        if job_name == recovery_job_name:
             await db.execute(update_metadata_sql, {"id": job_run_id})
         recovered += 1
 
     await db.flush()
     logger.info(
-        "[Recovery] incarnation 替换快速恢复: %d 个同 slot 旧进程任务",
+        "[Recovery] incarnation 替换快速恢复（已 atomic fence）: %d 个同 slot 旧进程任务",
         recovered,
     )
     return recovered

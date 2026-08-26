@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import uuid
 from datetime import date, datetime, timedelta
@@ -2341,18 +2342,50 @@ async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
     )
 
 
+class _SimulatedProcessDeath(BaseException):
+    """测试专用：模拟进程/容器消失。BaseException 不被 except Exception 捕获，
+    因此 orchestrator 的普通错误处理器无法「吞掉」它——这才是真正的 crash，
+    而非被 optional handler 捕获的普通异常。"""
+
+
 @pytest.mark.postgres
 @pytest.mark.asyncio
 async def test_crash_resume_publishing_checkpoint_before_enhancement(
     db_session,
 ) -> None:
-    """[CRASH-RESUME-SLICE / P0-A] stock_core 发布确认后立即落 publishing checkpoint，
-    且其不依赖后续 enhancement（auction_anchor）成败。
+    """[AUDIT-CORRECTION-01 / Blocker 1] 真·两段式 crash-resume。
 
-    场景：auction_anchor（legacy deprecated 产品）生成+发布阶段抛异常。
-    要求：orchestrator 仍应终态 succeeded（Review 已形成），且 core 规范发布成功、
-    不被 auction 失败阻断。这直接对应 8/25 事故「stock_core 已发布但
-    last_completed_step 停留在 computing_features」的根因修复。
+    8/25 真相是「进程/容器消失」，finally/except 都来不及正常收尾。
+    因此必须用不被 except Exception 捕获的 BaseException 模拟 process death。
+
+    关键：注入点必须是**真实 History owner**，而非 computing_features 主链。
+    经源码确认：
+        compute_review_core_with_run_items  = computing_features / stock_core compute
+        advance_history_to_trade_date       = computing_history 正式 owner
+
+    正确顺序：
+        computing_features → publishing → computing_history(advance_history_to_trade_date)
+        → computing_review(_execute_review_step) → enhancements
+
+    故 Attempt 1 在 advance_history_to_trade_date 抛 _SimulatedProcessDeath：
+        stock_core 已正式发布 + publishing checkpoint 已 commit，但 History 未完成即进程消失。
+
+    Attempt 1 必须证明：
+        compute_review_core_with_run_items（core）count == 1
+        stock_core canonical publish count == 1
+        stock_core canonical pointer exists
+        advance_history_to_trade_date entered（count == 1）→ 抛 SimulatedProcessDeath
+        last_completed_step == "publishing"
+        _execute_review_step（Review）NOT entered
+
+    Attempt 2（same job_run_id + 新 fenced ownership）：
+        last_completed_step = "publishing"、lease_epoch 递增（模拟新 claim）后重新执行。
+    必须证明：
+        compute_review_core_with_run_items count 仍 == 1（core 不重复）
+        stock_core canonical publish count 仍 == 1（不重复发布）
+        advance_history_to_trade_date 第二次正常完成（count == 2）
+        _execute_review_step 进入（count == 1）
+        last_completed_step == "review"、终态 succeeded
     """
     target_trade_date = date(2026, 8, 25)
 
@@ -2366,11 +2399,33 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
         db_session, status="running", trade_date=target_trade_date,
     )
 
-    event_gen_call_count = {"n": 0}
+    core_compute_count = {"n": 0}
+    core_publish_count = {"n": 0}
+    advance_history_count = {"n": 0}
+    review_step_count = {"n": 0}
 
-    async def _fake_generate_events(db, run_id):
-        event_gen_call_count["n"] += 1
-        return {"event_count": 1, "skipped_count": 0, "failed_count": 0}
+    def _make_mocks(history_raises: bool):
+        async def _fake_publish_stock_core(db, *a, **k):
+            core_publish_count["n"] += 1
+            return MagicMock(id=uuid.uuid4())
+
+        async def _fake_compute_review_core(*a, **k):
+            # 这是 computing_features 主链（core compute），不是 History
+            core_compute_count["n"] += 1
+            return {"snapshot_count": 1, "failed_count": 0}
+
+        async def _fake_advance_history(*a, **k):
+            # 真实 History owner：computing_history 业务体调用它
+            advance_history_count["n"] += 1
+            if history_raises:
+                raise _SimulatedProcessDeath("process disappeared during History advance")
+            return {"target_state_count": 100, "advanced": True}
+
+        return (
+            _fake_publish_stock_core,
+            _fake_compute_review_core,
+            _fake_advance_history,
+        )
 
     original_get = db_session.get
 
@@ -2399,51 +2454,152 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
     fake_batch_result = BatchResult(total=100, succeeded=95)
     fake_batch_result.dsa_run_id = dsa_run.id
 
-    with patch(
-        "app.services.after_close_orchestrator.AsyncSessionLocal",
-        new=MagicMock(return_value=_FakeSessionContext()),
-    ), patch.object(db_session, "commit", new=db_session.flush), patch.object(
-        db_session, "get", new=_fake_get,
-    ), patch.object(
-        BarsSchedulerService, "refresh_all_instruments",
-        new=AsyncMock(return_value=fake_batch_result),
-    ), patch(
-        "app.services.after_close_orchestrator._poll_dsa_run_status",
-        new=AsyncMock(return_value="completed"),
-    ), patch.object(
-        StrategyBatchService, "_check_quality_gates",
-        new=AsyncMock(return_value=True),
-    ), patch.object(
-        StrategyBatchService, "publish_run",
-        new=_fake_publish_run,
-    ), patch(
-        "app.services.after_close_orchestrator.get_active_a_share_instruments",
-        new=AsyncMock(return_value=[uuid.uuid4()]),
-    ), patch(
-        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
-        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
-    ), patch(
-        "app.services.state_event_service.generate_events_for_run",
-        new=_fake_generate_events,
-    ), patch(
-        "app.services.state_event_service.cleanup_old_events",
-        new=AsyncMock(return_value={"deleted_count": 0}),
-    ), patch(
-        "app.services.factor_publication_service.compute_coverage",
-        new=AsyncMock(return_value={
-            "coverage": 1.0, "succeeded": 1, "expected": 1,
-            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
-        }),
-    ), patch(
-        "app.services.factor_publication_service.publish_stock_core",
-        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
-    ), patch(
-        "app.services.board_analysis_service.compute_all_boards",
-        new=AsyncMock(return_value={"published": 1, "failed": 0}),
-    ), patch(
-        "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
-        new=AsyncMock(side_effect=RuntimeError("auction anchor boom")),
-    ):
+    # spy Review owner：证明 Attempt1 未进入、Attempt2 进入。
+    # 返回与真实 _execute_review_step 成功路径一致的 dict，使 Review 成功。
+    async def _spy_review_step(*a, **k):
+        review_step_count["n"] += 1
+        return {
+            "review_run_id": uuid.uuid4(),
+            "status": "succeeded",
+            "published": True,
+            "scope_count": 1,
+            "signal_count": 1,
+            "coverage": 1.0,
+            "blockers": [],
+        }
+
+    def _patch_common(pub_core, compute_core, hist_adv):
+        return (
+            patch(
+                "app.services.after_close_orchestrator.AsyncSessionLocal",
+                new=MagicMock(return_value=_FakeSessionContext()),
+            ),
+            patch.object(db_session, "commit", new=db_session.flush),
+            patch.object(db_session, "get", new=_fake_get),
+            patch.object(
+                BarsSchedulerService, "refresh_all_instruments",
+                new=AsyncMock(return_value=fake_batch_result),
+            ),
+            patch(
+                "app.services.after_close_orchestrator._poll_dsa_run_status",
+                new=AsyncMock(return_value="completed"),
+            ),
+            patch.object(
+                StrategyBatchService, "_check_quality_gates",
+                new=AsyncMock(return_value=True),
+            ),
+            patch.object(
+                StrategyBatchService, "publish_run",
+                new=_fake_publish_run,
+            ),
+            patch(
+                "app.services.after_close_orchestrator.get_active_a_share_instruments",
+                new=AsyncMock(return_value=[uuid.uuid4()]),
+            ),
+            patch(
+                "app.services.factor_publication_service.publish_stock_core",
+                new=pub_core,
+            ),
+            patch(
+                "app.services.factor_publication_service.compute_coverage",
+                new=AsyncMock(return_value={
+                    "coverage": 1.0, "succeeded": 1, "expected": 1,
+                    "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+                }),
+            ),
+            patch(
+                "app.services.board_analysis_service.compute_all_boards",
+                new=AsyncMock(return_value={"published": 1, "failed": 0}),
+            ),
+            # 真实 History owner：inject crash/failure 的唯一正确点
+            patch(
+                "app.services.first_pyramid_history_service.advance_history_to_trade_date",
+                new=hist_adv,
+            ),
+            # 真实 computing_features 主链（core compute）
+            patch(
+                "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+                new=compute_core,
+            ),
+            patch(
+                "app.services.state_event_service.generate_events_for_run",
+                new=AsyncMock(return_value={"event_count": 1}),
+            ),
+            patch(
+                "app.services.state_event_service.cleanup_old_events",
+                new=AsyncMock(return_value={"deleted_count": 0}),
+            ),
+            patch(
+                "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
+                new=AsyncMock(return_value={"status": "published", "publication_id": uuid.uuid4()}),
+            ),
+            # spy Review owner：证明 Attempt1 未进入、Attempt2 进入
+            patch(
+                "app.services.after_close_orchestrator._execute_review_step",
+                new=_spy_review_step,
+            ),
+        )
+
+    pub_core_1, compute_core_1, hist_1 = _make_mocks(history_raises=True)
+    with contextlib.ExitStack() as stack:
+        for p in _patch_common(pub_core_1, compute_core_1, hist_1):
+            stack.enter_context(p)
+        # 必须真正异常退出（BaseException 不被 except Exception 吞掉）
+        with pytest.raises(_SimulatedProcessDeath):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=target_trade_date,
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    # Attempt 1 断言
+    await db_session.refresh(job_run)
+    meta1 = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    assert core_compute_count["n"] == 1, (
+        f"[Attempt1] computing_features(core) 应已完成 1 次，实际 {core_compute_count['n']}"
+    )
+    assert core_publish_count["n"] == 1, (
+        f"[Attempt1] stock_core 应已发布 1 次，实际 {core_publish_count['n']}"
+    )
+    assert meta1.get("last_completed_step") == "publishing", (
+        f"[Attempt1] publishing checkpoint 应先于 crash 落库，"
+        f"实际={meta1.get('last_completed_step')}"
+    )
+    assert advance_history_count["n"] == 1, (
+        f"[Attempt1] advance_history_to_trade_date 应已进入 1 次，"
+        f"实际 {advance_history_count['n']}"
+    )
+    assert review_step_count["n"] == 0, (
+        f"[Attempt1] crash 点前的 computing_review 不得进入，实际 {review_step_count['n']}"
+    )
+    # stock_core canonical pointer 已存在
+    from sqlalchemy import select
+
+    from app.models.stock_feature_snapshot import StockFeatureSnapshot
+    snap = (await db_session.execute(
+        select(StockFeatureSnapshot).where(
+            StockFeatureSnapshot.trade_date == target_trade_date,
+        )
+    )).scalars().first()
+    assert snap is not None, "[Attempt1] stock_core canonical pointer 必须已存在"
+    assert snap.published_at is not None, "[Attempt1] stock_core pointer 应已发布"
+
+    # ===== Attempt 2：模拟新 fenced ownership 后 resume =====
+    # 设置 resume 状态：last_completed_step=publishing（不重跑 core/publish），lease_epoch 递增
+    meta1["last_completed_step"] = "publishing"
+    job_run.metadata_json = json.dumps(meta1, ensure_ascii=False)
+    from sqlalchemy import text as _text
+    await db_session.execute(
+        _text("UPDATE scheduler_job_runs SET lease_epoch = lease_epoch + 1 WHERE id = :id"),
+        {"id": job_run.id},
+    )
+    await db_session.flush()
+
+    pub_core_2, compute_core_2, hist_2 = _make_mocks(history_raises=False)
+    with contextlib.ExitStack() as stack:
+        for p in _patch_common(pub_core_2, compute_core_2, hist_2):
+            stack.enter_context(p)
         await execute_after_close_run(
             job_run_id=job_run.id,
             trade_date=target_trade_date,
@@ -2451,18 +2607,27 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
             dsa_poll_timeout=1,
         )
 
+    # Attempt 2 断言：core 不重复、History 完成、Review 进入并完成
     await db_session.refresh(job_run)
-    # [P0-A] Review 已形成，auction 失败未阻断 mandatory 关键路径
+    assert core_compute_count["n"] == 1, (
+        f"[Attempt2] resume 不得重复 core compute，实际 {core_compute_count['n']}"
+    )
+    assert core_publish_count["n"] == 1, (
+        f"[Attempt2] resume 不得重复发布 stock_core，实际 {core_publish_count['n']}"
+    )
+    assert advance_history_count["n"] == 2, (
+        f"[Attempt2] advance_history_to_trade_date 应第二次正常完成（count=2），"
+        f"实际 {advance_history_count['n']}"
+    )
+    assert review_step_count["n"] == 1, (
+        f"[Attempt2] resume 应进入 computing_review 1 次，实际 {review_step_count['n']}"
+    )
+    meta2 = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    assert meta2.get("last_completed_step") == "review", (
+        f"[Attempt2] resume 应完成 Review，last_completed_step={meta2.get('last_completed_step')}"
+    )
     assert job_run.status == "succeeded", (
-        f"[P0-A] auction 失败不得阻断 Review，实际 status={job_run.status}"
-    )
-    meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
-    assert meta.get("last_completed_step") in ("review", "publishing"), (
-        f"[P0-A] publishing checkpoint 应在 enhancement 之前落库，"
-        f"last_completed_step={meta.get('last_completed_step')}"
-    )
-    assert meta.get("auction_anchor_status") == "failed", (
-        "[P0-A] auction 失败应记为 failed（non-blocking）"
+        f"[Attempt2] resume 终态应为 succeeded，实际 {job_run.status}"
     )
 
 
@@ -2471,10 +2636,13 @@ async def test_crash_resume_publishing_checkpoint_before_enhancement(
 async def test_enhancement_failure_does_not_block_review(
     db_session,
 ) -> None:
-    """[CRASH-RESUME-SLICE / P0-B] state_events/chip/auction 任一失败均不得阻断 Review。
+    """[AUDIT-CORRECTION-01 / Blocker 4] enhancement 普通失败：mandatory 成功但 parent=partial_success。
 
-    场景：state_events 生成阶段抛异常（[P0-B] 第二个暴露点）。
-    要求：orchestrator 仍终态 succeeded，Review(T) 照常形成。
+    场景：state_events 生成阶段抛普通异常（[P0-B] 第二个暴露点），被 optional handler 捕获。
+    要求：
+        Review publication 存在（mandatory 链没被挡）
+        enhancement 标记为 failed
+        parent terminal = partial_success（不得伪装全成功 succeeded）
     """
     target_trade_date = date(2026, 8, 25)
 
@@ -2565,9 +2733,27 @@ async def test_enhancement_failure_does_not_block_review(
         )
 
     await db_session.refresh(job_run)
-    # [P0-B] state_events 失败不得阻断 Review
-    assert job_run.status == "succeeded", (
-        f"[P0-B] state_events 失败不得阻断 Review，实际 status={job_run.status}"
+    meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    # [P0-B] mandatory 链（Review）必须完成，enhancement 失败不得阻断
+    assert meta.get("last_completed_step") == "review", (
+        f"[P0-B] state_events 失败不得阻断 Review，"
+        f"last_completed_step={meta.get('last_completed_step')}"
+    )
+    # [Blocker 4] enhancement 失败必须落入 optional_failures（证明它进入了
+    # partial_success 判定路径，而非被静默吞掉）。orchestrator 将 step_summary 中
+    # optional=True 且 status=failed 的项汇总为 meta["optional_failures"]（name 列表）。
+    optional_failures = meta.get("optional_failures") or []
+    assert "state_events" in optional_failures, (
+        f"[Blocker 4] state_events 失败应进入 optional_failures，"
+        f"实际 optional_failures={optional_failures}"
+    )
+    # parent terminal 必须是 partial_success（不得伪装 succeeded）
+    assert job_run.status == "partial_success", (
+        f"[Blocker 4] enhancement 失败 parent 应为 partial_success，"
+        f"实际 status={job_run.status}"
+    )
+    assert meta.get("partial_success") is True, (
+        "[Blocker 4] metadata.partial_success 应为 True"
     )
 
 

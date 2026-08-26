@@ -318,6 +318,11 @@ async def test_same_slot_old_incarnation_fast_recover(db_session) -> None:
     assert job_run.status == "interrupted"
     assert job_run.error_code == "WORKER_INCARNATION_REPLACED"
     assert job_run.finished_at is not None
+    # [Blocker 2] 原子 fence：lease_epoch 必须自初始值 +1，lease 立即失效
+    assert job_run.lease_epoch >= 2, (
+        f"[Blocker 2] 快速恢复必须 lease_epoch+1，实际 {job_run.lease_epoch}"
+    )
+    assert job_run.lease_expires_at is None
     assert await _count_recovery_events(db_session, job_run_id) == 1
 
 
@@ -405,3 +410,106 @@ async def test_same_incarnation_not_reinterrupted(db_session) -> None:
     assert recovered == 0
     await db_session.refresh(job_run)
     assert job_run.status == "running"
+
+
+@pytest.mark.asyncio
+async def test_unrelated_job_name_not_recovered(db_session) -> None:
+    """[AUDIT-CORRECTION-01 / Blocker 3] 同 slot 前代但 job_name 非 after_close_orchestrator
+    的任务，本 slice 绝不断中断（避免误伤无 resume contract 的 chip/auction 等 job）。
+    """
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    current_worker = "6230ac1ea028:1:bbbb"
+    # 同 slot 旧 incarnation，但 owner 是 unrelated_job（非 after_close_orchestrator）
+    job_run = await _create_job_run(
+        db_session,
+        job_name="chip_consensus_worker",  # 不在本 slice 的 recovery scope
+        status="running",
+        lease_expires_at=test_now + timedelta(hours=3),
+        heartbeat_at=test_now - timedelta(minutes=30),
+    )
+    job_run_id = job_run.id
+    await _set_worker_instance_id(db_session, job_run_id, "6230ac1ea028:1:aaaa")
+
+    recovered = await recover_replaced_incarnation_runs(
+        db_session, current_worker_instance_id=current_worker, now=test_now
+    )
+
+    assert recovered == 0, "非 after_close_orchestrator 的 job 绝不被本 slice 恢复"
+    await db_session.refresh(job_run)
+    assert job_run.status == "running"
+    assert job_run.error_code is None
+
+
+@pytest.mark.asyncio
+async def test_fast_recovery_atomic_fence_bumps_epoch(db_session) -> None:
+    """[AUDIT-CORRECTION-01 / Blocker 2] 快速恢复须原子 fence：running→interrupted 同笔
+    UPDATE 必须 lease_epoch += 1 且 lease_expires_at = NULL。
+
+    并验证：持有旧 epoch 的 stale writer 其 fenced 写入被拒（_update_heartbeat_and_step
+    仅按 id+lease_epoch 校验，不依赖 status）。
+    """
+    from sqlalchemy import text
+
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    current_worker = "6230ac1ea028:1:bbbb"
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_orchestrator",
+        status="running",
+        lease_expires_at=test_now + timedelta(hours=3),
+        heartbeat_at=test_now - timedelta(minutes=30),
+    )
+    job_run_id = job_run.id
+    await _set_worker_instance_id(db_session, job_run_id, "6230ac1ea028:1:aaaa")
+    # 显式设定旧 epoch（base SchedulerJobRun 默认 epoch 通常为 1）
+    old_epoch = 7
+    await db_session.execute(
+        text("UPDATE scheduler_job_runs SET lease_epoch = :e WHERE id = :id"),
+        {"e": old_epoch, "id": job_run_id},
+    )
+    await db_session.flush()
+
+    recovered = await recover_replaced_incarnation_runs(
+        db_session, current_worker_instance_id=current_worker, now=test_now
+    )
+
+    assert recovered == 1
+    await db_session.refresh(job_run)
+    assert job_run.status == "interrupted"
+    assert job_run.error_code == "WORKER_INCARNATION_REPLACED"
+    assert job_run.lease_epoch == old_epoch + 1, (
+        f"[Blocker 2] 快速恢复必须 lease_epoch+1，实际 {job_run.lease_epoch}"
+    )
+    assert job_run.lease_expires_at is None, (
+        "[Blocker 2] 快速恢复必须立即令 lease 失效（lease_expires_at=NULL）"
+    )
+
+    # 模拟旧 owner（仍持有 old_epoch=7）试图做 fenced checkpoint 写入
+    stale_write = text(
+        """
+        UPDATE scheduler_job_runs
+        SET metadata_json = '{"stale":"writer"}'
+        WHERE id = :id AND lease_epoch = :old_epoch
+        """
+    )
+    res = await db_session.execute(
+        stale_write, {"id": job_run_id, "old_epoch": old_epoch}
+    )
+    assert getattr(res, "rowcount", 0) == 0, (
+        "[Blocker 2] 旧 epoch writer 的 fenced 写入必须被拒（rowcount=0）"
+    )
+
+    # 新 epoch（old_epoch+1）持有者可以写（模拟 new claim 后的合法 owner）
+    new_write = text(
+        """
+        UPDATE scheduler_job_runs
+        SET metadata_json = '{"new":"owner"}'
+        WHERE id = :id AND lease_epoch = :new_epoch
+        """
+    )
+    res2 = await db_session.execute(
+        new_write, {"id": job_run_id, "new_epoch": old_epoch + 1}
+    )
+    assert getattr(res2, "rowcount", 0) == 1, (
+        "新 epoch owner 的 fenced 写入应成功"
+    )
