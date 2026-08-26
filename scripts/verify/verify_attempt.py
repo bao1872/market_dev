@@ -430,6 +430,15 @@ class VerifyAttempt:
              # 仅追加，不删除/不替换原 3 文件；不改为动态 discovery 或全量 -m postgres。
              "tests/test_pg_review_runtime_blocker_closure.py",
 
+            # [TARGETED-PG / 2026-08-26] 盘后 crash-resume A-H closure：
+            # A crash-after-publishing -> same-run resume / B state_events failure ->
+            # truthful partial_success / C DSA projection failure cannot revoke
+            # stock_core / D same-slot incarnation fast recover / E different-slot
+            # cannot steal / F legacy hostname:pid compatibility / G atomic epoch
+            # fence / H reconcile date 2026-08-25 regression。仅注册此单文件，不动态
+            # discovery，不扩大为全量 -m postgres。
+            "tests/test_pg_after_close_crash_resume_closure.py",
+
              # [3C / CHANGE-013] Review Canonical Observation L1 persistence contract:
              # insert / read-back / idempotent update / date|scope|family isolation /
              # diagnostics+readiness round-trip / legacy P/Q/U/C/V isolation /
