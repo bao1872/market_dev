@@ -268,6 +268,15 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         # 执行真实 review step（owner 在 verify 运行期真实可用），仅计数入口。
         return await orchestrator._execute_review_step(*a, **k)
 
+    async def _sentinel_create_run(db, *a, **k):
+        # 与既有 test_pg_resume_integration 一致：review 入口即停（证明 Review 已到达），
+        # 避免真实 review step 在 synthetic DB 下的脆弱 DB 交互。
+        review_create_count["n"] += 1
+        raise _ReviewStepEnteredError()
+
+    class _ReviewStepEnteredError(Exception):
+        pass
+
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
         from app.services.strategy_batch_service import reconcile_strategy_run_from_items
@@ -281,12 +290,13 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         job_run_id = str(job.id)
 
     # 最小 faithful patch：core 计算与 stock_core 发布计数；History 注入 crash；
-    # Review/auction/events/dsa 全部走真实运行期（与 production 一致）。
+    # Review 用 sentinel 停在入口（证明到达），与既有 PG resume 测试一致。
     common_patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_fake_publish_stock_core),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
+        patch("app.services.review_orchestrator_service.create_run", new=_sentinel_create_run),
     ]
 
     # Attempt 1: crash at History
@@ -382,10 +392,12 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         job_run_id = str(job.id)
 
     # 最小 faithful patch：core 计算跳过（重计算），stock_core 发布计数；
-    # state_events 注入失败；其余（History/Review/auction/dsa/events 清理）走真实运行期。
+    # History 强制 ready（让 Review 不被 gate，enhancement 段才能执行）；
+    # state_events 注入失败；Review/auction/dsa 走真实运行期。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
+        patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.state_event_service.generate_events_for_run", new=_fail_events),
     ]
@@ -468,11 +480,12 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # 最小 faithful patch：core 计算跳过，stock_core 发布计数；DSA 失败注入；
-    # 其余（History/Review/auction/state_events）走真实运行期。
+    # 最小 faithful patch：core 计算跳过，stock_core 发布计数；History 强制 ready；
+    # DSA 失败注入；其余（Review/auction/state_events）走真实运行期。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
+        patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.after_close_orchestrator._poll_dsa_run_status", new=_fail_dsa),
     ]
