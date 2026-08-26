@@ -483,8 +483,8 @@ if [[ ! -s "${_STEP6_SNIPPET}" ]]; then
 fi
 
 # 行为测试 runner：传入输入开关，构造 stub 后执行真实 snippet。
-# 用 EXIT trap 保证即便 guard stub 返回非 0（BLOCK）导致 set -e 中止 snippet，
-# 调用计数仍被打印出来；外层以 || true 容忍 subshell 非零退出。
+# 不使用 || true 吞掉 source 状态；set +e 后显式捕获 STEP-6 的真实 return code（STEP6_RC），
+# 与调用计数一并输出，供断言验证 fail-closed（guard BLOCK 必须使 STEP-6 非零返回）。
 run_behavior() {
     # $1 = guard_pre_restart 行为: pass|block
     # $2 = guard_pre_reconcile 行为: pass|block
@@ -493,10 +493,8 @@ run_behavior() {
     local _nb="$3" _nf="$4" _crc="$5"
     (
         source "${_DEPLOY_FIXTURE}"
-        set +e   # 容忍 guard BLOCK 触发的非零退出
+        set +e   # 不吞掉 STEP-6 真实 return code；显式捕获
         RESTART_CALLS=0; RECONCILE_CALLS=0; GUARD_PR_CALLS=0; GUARD_PC_CALLS=0
-        _emit_counts() { echo "RESTART_CALLS=${RESTART_CALLS}"; echo "RECONCILE_CALLS=${RECONCILE_CALLS}"; echo "GUARD_PR_CALLS=${GUARD_PR_CALLS}"; echo "GUARD_PC_CALLS=${GUARD_PC_CALLS}"; }
-        trap _emit_counts EXIT
         guard_active_after_close_jobs() {
             local _who="${FAILURE_STAGE:-?}"
             if [[ "${_who}" == "active_job_gate_pre_restart" ]]; then
@@ -514,44 +512,56 @@ run_behavior() {
         reconcile_compose_runtime() { RECONCILE_CALLS=$((RECONCILE_CALLS+1)); }
         need_backend="${_nb}"; need_frontend="${_nf}"; COMPOSE_RUNTIME_CHANGED="${_crc}"
         RESTARTED_PYTHON=false; RESTARTED_FRONTEND=false
-        source "${_STEP6_SNIPPET}" || true
+        source "${_STEP6_SNIPPET}"
+        _step6_rc=$?
+        echo "STEP6_RC=${_step6_rc}"
+        echo "RESTART_CALLS=${RESTART_CALLS}"
+        echo "RECONCILE_CALLS=${RECONCILE_CALLS}"
+        echo "GUARD_PR_CALLS=${GUARD_PR_CALLS}"
+        echo "GUARD_PC_CALLS=${GUARD_PC_CALLS}"
     ) || true
 }
 
 # Behavior B — 核心：initial/first guard PASS → 准备 → final guard BLOCK
 # 模拟：backend runtime 变化（restart 路径）+ compose 变化（reconcile 路径）均存在，
 #       但 pre-restart / pre-reconcile final guard 都 BLOCK。
-# 断言：deploy 非零（被阻塞）；restart_services call_count=0；reconcile call_count=0。
+# 断言：STEP6_RC != 0（被阻塞）；restart_services call_count=0；reconcile call_count=0。
 _B_OUT="$(run_behavior block block true true true)"
-_B_RC="$(echo "${_B_OUT}" | grep -c 'RESTART_CALLS=0')"
-_B_PC="$(echo "${_B_OUT}" | grep -c 'RECONCILE_CALLS=0')"
-if [[ "${_B_RC}" -ge 1 && "${_B_PC}" -ge 1 ]]; then
-    ok "Behavior B final guard BLOCK → restart_services=0 且 reconcile=0（部署被 fail-closed 阻止）"
+_B_RC="$(echo "${_B_OUT}" | grep -E '^STEP6_RC=' | head -1 | cut -d= -f2)"
+_B_R="$(echo "${_B_OUT}" | grep -E '^RESTART_CALLS=' | head -1 | cut -d= -f2)"
+_B_P="$(echo "${_B_OUT}" | grep -E '^RECONCILE_CALLS=' | head -1 | cut -d= -f2)"
+if [[ "${_B_RC}" != "0" && "${_B_R}" == "0" && "${_B_P}" == "0" ]]; then
+    ok "Behavior B final guard BLOCK → STEP6_RC=${_B_RC}（!=0）restart_services=0 且 reconcile=0（部署被 fail-closed 阻止）"
 else
-    bad "Behavior B 期望 restart=0 且 reconcile=0；实际: ${_B_OUT}"
+    bad "Behavior B 期望 STEP6_RC!=0 且 restart=0 且 reconcile=0；实际: ${_B_OUT}"
 fi
 
 # Behavior C — 所有 guard PASS：backend 变化触发 restart_services 恰好执行一次。
 _C_OUT="$(run_behavior pass pass true false false)"
-_C_RC="$(echo "${_C_OUT}" | grep -E 'RESTART_CALLS=[^0]' | head -1)"
-if echo "${_C_RC}" | grep -q 'RESTART_CALLS=1'; then
-    ok "Behavior C 所有 guard PASS → restart_services 执行 1 次"
+_C_RC="$(echo "${_C_OUT}" | grep -E '^STEP6_RC=' | head -1 | cut -d= -f2)"
+_C_R="$(echo "${_C_OUT}" | grep -E '^RESTART_CALLS=' | head -1 | cut -d= -f2)"
+if [[ "${_C_RC}" == "0" && "${_C_R}" == "1" ]]; then
+    ok "Behavior C 所有 guard PASS → STEP6_RC=${_C_RC} restart_services=1"
 else
-    bad "Behavior C 期望 restart_services=1；实际: ${_C_OUT}"
+    bad "Behavior C 期望 STEP6_RC=0 且 restart_services=1；实际: ${_C_OUT}"
 fi
 
 # Behavior E — 两种 action 同时存在：
 #   initial/first guard PASS，pre-restart guard PASS → restart_services 执行；
 #   随后模拟 reconcile 前新出现 active job → pre-reconcile guard BLOCK。
-# 断言：restart_services call_count=1；reconcile_compose_runtime call_count=0。
-# 此测试须抓住 6c5ead29 的残余窗口（当时仅一个 pre-restart guard，reconcile 前无 fresh guard）。
+# 断言：STEP6_RC != 0（reconcile 被拦截至非零）；restart_services call_count=1；
+#        reconcile_compose_runtime call_count=0；GUARD_PR_CALLS=1；GUARD_PC_CALLS=1
+#        （证明第二次 fresh guard 确实执行）。此测试抓住 6c5ead29 仅单一 pre-restart guard 的残余窗口。
 _E_OUT="$(run_behavior pass block true true true)"
-_E_RC="$(echo "${_E_OUT}" | grep -E 'RESTART_CALLS=[0-9]+' | head -1)"
-_E_PC="$(echo "${_E_OUT}" | grep -E 'RECONCILE_CALLS=[0-9]+' | head -1)"
-if echo "${_E_RC}" | grep -q 'RESTART_CALLS=1' && echo "${_E_PC}" | grep -q 'RECONCILE_CALLS=0'; then
-    ok "Behavior E 两种 action 并存：restart=1 且 reconcile=0（pre-reconcile fresh guard 拦截）"
+_E_RC="$(echo "${_E_OUT}" | grep -E '^STEP6_RC=' | head -1 | cut -d= -f2)"
+_E_R="$(echo "${_E_OUT}" | grep -E '^RESTART_CALLS=' | head -1 | cut -d= -f2)"
+_E_P="$(echo "${_E_OUT}" | grep -E '^RECONCILE_CALLS=' | head -1 | cut -d= -f2)"
+_E_GPR="$(echo "${_E_OUT}" | grep -E '^GUARD_PR_CALLS=' | head -1 | cut -d= -f2)"
+_E_GPC="$(echo "${_E_OUT}" | grep -E '^GUARD_PC_CALLS=' | head -1 | cut -d= -f2)"
+if [[ "${_E_RC}" != "0" && "${_E_R}" == "1" && "${_E_P}" == "0" && "${_E_GPR}" == "1" && "${_E_GPC}" == "1" ]]; then
+    ok "Behavior E 两种 action 并存：STEP6_RC=${_E_RC}（!=0）restart=1 reconcile=0 pre-restart_guard=${_E_GPR} pre-reconcile_guard=${_E_GPC}（第二次 fresh guard 已执行并拦截）"
 else
-    bad "Behavior E 期望 restart=1 且 reconcile=0；实际: ${_E_OUT}"
+    bad "Behavior E 期望 STEP6_RC!=0 且 restart=1 且 reconcile=0 且 GUARD_PR=1 且 GUARD_PC=1；实际: ${_E_OUT}"
 fi
 
 rm -f "${_DEPLOY_FIXTURE}"
