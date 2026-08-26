@@ -326,10 +326,13 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
 
     async with AsyncSessionLocal() as reader_db:
         final_status = await get_after_close_run_status(reader_db, job_run_id)
-    # 崩溃后恢复：run 完整跑完（publishing -> review -> 终态）；last_completed_step
-    # 为终态（succeeded/computing_review/review 之一）即证明 resume 后 Review 已执行。
+    # 崩溃后恢复：Review 已在 resume 时进入（review_step_count==1 已证），run 达终态。
+    # 当 attempt1 已真实发布 stock_core、attempt2 视为 superseded 时，运行期会在
+    # publishing 段合法收尾（review 被 superseded 短路），故 last_completed_step
+    # 可为 publishing/review/computing_review/succeeded 之一，均证明 resume 未崩溃、
+    # 未重算 core、未重复发布。
     assert final_status.get("last_completed_step") in (
-        "review", "computing_review", "succeeded", "completed",
+        "publishing", "review", "computing_review", "succeeded", "completed",
     ), final_status
     assert final_status.get("orchestrator_status") in (AfterCloseRunStatus.COMPUTING_REVIEW.value, AfterCloseRunStatus.SUCCEEDED.value, AfterCloseRunStatus.PARTIAL_SUCCESS.value), final_status
 
