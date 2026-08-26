@@ -535,6 +535,44 @@ def build_momentum_history(
             else:
                 change = MomentumChange.FLAT.value
 
+        # [CHANGE-20260826] SqueezeVolumeFacts 唯一 owner = build_momentum_history。
+        # 对每个 T 在 daily_state 暴露 squeeze_period_volume_mean 与 release_volume_ratio，
+        # 覆盖两种时态，禁止下游（_build_momentum_dimension）自行扫描 squeeze 区间：
+        #   CASE 1 — 当前仍 sqzOn[T]：
+        #       squeeze_period_volume_mean = 当前连续 sqzOn 区间均量（区间含 T）
+        #       release_volume_ratio = None
+        #   CASE 2 — 刚 release（sqzOn[T-1] and sqzOff[T]）：
+        #       squeeze_period_volume_mean = T 前连续 sqzOn 区间均量
+        #       release_volume_ratio = squeeze_mean / volume[T]（需 volume[T] > 0 finite）
+        #   CASE 3 — 其他状态：两者均 None
+        # 这两种时态互斥，使得「缩量挤压」（last_sqz_on + mean）与「放量释放」
+        # （last_sqz_off + ratio）都能正常工作，且不引入第二计算 owner。
+        squeeze_period_volume_mean = None
+        release_vol_ratio = None
+        if vol_arr is not None:
+            if sqz_on_list[i]:
+                # CASE 1：当前连续 squeeze 区间 [s, i]（含 T）
+                seg_start = i
+                while seg_start > 0 and sqz_on_list[seg_start - 1]:
+                    seg_start -= 1
+                seg = vol_arr[seg_start:i + 1]
+                valid = seg[~np.isnan(seg)]
+                if len(valid) > 0:
+                    squeeze_period_volume_mean = float(np.mean(valid))
+                    release_vol_ratio = None
+            elif i > 0 and sqz_on_list[i - 1] and sqz_off_list[i]:
+                # CASE 2：前置连续 squeeze 区间 [seg_start, i-1]
+                seg_start = i - 1
+                while seg_start > 0 and sqz_on_list[seg_start - 1]:
+                    seg_start -= 1
+                seg = vol_arr[seg_start:i]
+                valid = seg[~np.isnan(seg)]
+                if len(valid) > 0:
+                    squeeze_mean = float(np.mean(valid))
+                    squeeze_period_volume_mean = squeeze_mean
+                    if vol_arr[i] > 0:
+                        release_vol_ratio = squeeze_mean / float(vol_arr[i])
+
         daily_state.append({
             "bar_index": i,
             "time": times[i] if times else None,
@@ -545,29 +583,15 @@ def build_momentum_history(
             "sqzmom_val": float(v) if v is not None and not (
                 isinstance(v, float) and np.isnan(v)
             ) else None,
+            # SqueezeVolumeFacts（每 T 暴露，下游只消费）
+            "squeeze_period_volume_mean": squeeze_period_volume_mean,
+            "release_volume_ratio": release_vol_ratio,
         })
 
         # SQZ_RELEASE 事件：sqzOn[t-1] 且 sqzOff[t]
+        # 投影同一 daily_state 事实（CASE 2），禁止重算 squeeze 区间/ratio。
         if i > 0 and sqz_on_list[i - 1] and sqz_off_list[i]:
-            # 从 t-1 向前取连续 sqzOn 区间
-            squeeze_start = i - 1
-            while squeeze_start > 0 and sqz_on_list[squeeze_start - 1]:
-                squeeze_start -= 1
-            # squeeze 区间 [squeeze_start, i-1]，长度 = i - squeeze_start
-            squeeze_len = i - squeeze_start
-            # squeeze 区间均量（描述性字段，独立于 release 日量是否合法）
-            release_vol_ratio = None
-            squeeze_period_volume_mean = None
-            if vol_arr is not None and squeeze_len > 0:
-                squeeze_vols = vol_arr[squeeze_start:i]
-                valid_vols = squeeze_vols[~np.isnan(squeeze_vols)]
-                if len(valid_vols) > 0:
-                    squeeze_mean = float(np.mean(valid_vols))
-                    squeeze_period_volume_mean = squeeze_mean
-                    # 释放量能比 = squeeze 区间均量 / 当日量（需 release 日量 > 0）
-                    if vol_arr[i] > 0:
-                        release_vol_ratio = squeeze_mean / float(vol_arr[i])
-
+            squeeze_len = i - seg_start
             # 方向按当日 val
             if v is None or (isinstance(v, float) and np.isnan(v)):
                 release_dir = "null"
@@ -583,7 +607,7 @@ def build_momentum_history(
                 "bar_index": i,
                 "time": times[i] if times else None,
                 "direction": release_dir,
-                "squeeze_start_index": squeeze_start,
+                "squeeze_start_index": seg_start,
                 "squeeze_length": squeeze_len,
                 "squeeze_period_volume_mean": squeeze_period_volume_mean,
                 "release_volume_ratio": release_vol_ratio,

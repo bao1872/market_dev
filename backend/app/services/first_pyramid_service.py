@@ -814,19 +814,19 @@ def _build_momentum_dimension(
     vol_divergence: str | None = None  # "缩量挤压" / "放量释放" / "量价背离" / None
     if bars is not None and sqz_on_list and "volume" in bars.columns:
         vol_series = bars["volume"].astype(float)
-        # [CHANGE-20260826] release_volume_ratio 与 squeeze_period_volume_mean 的唯一 owner
-        # 均为 build_momentum_history 的 SQZ_RELEASE SSOT（ratio = squeeze_mean / vol[T]）。
-        # 禁止在此重复实现 squeeze 区间寻找、反方向 ratio 或第二份 squeeze 均量搜索：
-        # 旧实现从 sqz_on_list[T] 反向寻找，当 T 为正式 release(sqzOn[T]=False) 时
-        # 循环第一步即停止，导致 squeeze_period_volume_mean 丢失；现统一由 SSOT 提供。
-        # 当前 T(last_bar_index) 若不是正式 release 日，则两者均为 None（不读 T+1）。
+        # [CHANGE-20260826] SqueezeVolumeFacts 唯一 owner = build_momentum_history。
+        # 该函数对每个 T 在 daily_state 暴露 squeeze_period_volume_mean 与
+        # release_volume_ratio（ratio = squeeze_mean / vol[T]），覆盖两种时态：
+        #   - 当前仍 sqzOn[T] → mean=当前连续挤压均量, ratio=None
+        #   - 刚 release(sqzOn[T-1]&sqzOff[T]) → mean=前置挤压均量, ratio=mean/vol[T]
+        # 禁止在此重复实现 squeeze 区间寻找、反方向 ratio 或第二份 squeeze 均量搜索。
+        # 直接消费 mh["daily_state"][last_bar_index]，使「缩量挤压」(last_sqz_on+mean)
+        # 与「放量释放」(last_sqz_off+ratio) 均可达。
         times = [str(t) for t in bars.index]
         mh = build_momentum_history(sqzmom_result, vol_series.tolist(), times=times)
-        for ev in mh["sqz_release_events"]:
-            if ev.get("bar_index") == last_bar_index:
-                release_vs_squeeze_vol_ratio = ev.get("release_volume_ratio")
-                squeeze_period_vol_mean = ev.get("squeeze_period_volume_mean")
-                break
+        ds = mh["daily_state"][last_bar_index] if last_bar_index < len(mh["daily_state"]) else {}
+        squeeze_period_vol_mean = ds.get("squeeze_period_volume_mean")
+        release_vs_squeeze_vol_ratio = ds.get("release_volume_ratio")
         # 判断量价关系
         if last_sqz_on and squeeze_period_vol_mean is not None:
             last_vc = extract_last_volume_context(vc_series) if vc_series is not None else None
@@ -834,7 +834,7 @@ def _build_momentum_dimension(
                 if last_vc.volume_percentile_20 < 20:
                     vol_divergence = "缩量挤压"
         # 放量释放：canonical ratio = squeeze_mean / release_volume[T]；
-        # release_volume[T] > 1.5 × squeeze_mean ⟺ ratio < 1/1.5（见常量注释）。
+        # release_volume[T] > 1.5 × squeeze_mean ⟺ in business ⇒ ratio < 1/1.5（见常量注释）。
         if last_sqz_off and release_vs_squeeze_vol_ratio is not None:
             if release_vs_squeeze_vol_ratio < RELEASE_VOLUME_RATIO_EXPAND_THRESHOLD:
                 vol_divergence = "放量释放"
