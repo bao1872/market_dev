@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
+from app.models.factor_publication import FactorPublication
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import (
@@ -481,6 +482,58 @@ async def test_reconcile_running_with_fresh_heartbeat_stays_running(db_session) 
     assert result.status == "running"
     # 未触发 fence（lease_epoch 不变）
     assert result.lease_epoch == 1
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_reconcile_trade_date_date_bind_no_dataerror(db_session) -> None:
+    """[CRASH-RESUME-SLICE / P1-B] reconcile("2026-08-25") 不再触发 asyncpg DataError。
+
+    场景：job_run.metadata.trade_date 是字符串 "2026-08-25"，reconcile 内部
+    _inspect_run_artifacts 必须把它显式解析为 datetime.date 再绑定 SQL，
+    不得把字符串直接交给 date 占位符（旧实现用 CAST(:trade_date AS date) 仍会
+    因 asyncpg 类型合同报错）。本实施例中预置一条 stock_core pointer，
+    验证它能正确读出（stock_core_published=True）。
+    """
+    target_trade_date = date(2026, 8, 25)
+    job_run = await _create_after_close_job_run(
+        db_session,
+        status="succeeded",
+        orchestrator_status=AfterCloseRunStatus.SUCCEEDED.value,
+        trade_date="2026-08-25",
+    )
+    # 预置一条 stock_core 发布指针（trade_date 为真正的 date 类型）
+    pub = FactorPublication(
+        scope_type="market",
+        scope_key="all",
+        trade_date=target_trade_date,
+        publication_kind="stock_core",
+        algorithm_version="v1",
+        data_run_id=uuid.uuid4(),
+        coverage_ratio=1.0,
+        metadata_json=json.dumps({"source": "test"}),
+    )
+    db_session.add(pub)
+    await db_session.flush()
+
+    with patch.object(db_session, "commit", new=db_session.flush):
+        result = await reconcile_after_close_run(
+            db_session,
+            job_run_id=str(job_run.id),
+            actor="admin@test",
+            request_id="req-reconcile-date-1",
+        )
+
+    # 关键：reconcile 不应抛 asyncpg DataError（旧实现会抛）
+    assert result is not None
+    meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    artifacts = meta.get("reconcile_artifacts", {})
+    # 正确读到 stock_core pointer（证明 date 绑定生效）
+    assert artifacts.get("stock_core_published") is True, (
+        f"[P1-B] reconcile 应正确读到 stock_core pointer，"
+        f"artifacts={artifacts}"
+    )
+    assert artifacts.get("checked_trade_date") == "2026-08-25"
 
 
 @pytest.mark.postgres
@@ -2144,16 +2197,16 @@ async def test_c5_publishing_success_generates_events_once(db_session) -> None:
 async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
     db_session,
 ) -> None:
-    """[P0 Atomicity] DSA publish_run 失败时 snapshot run=failed、published_at=null、无事件。
+    """[CRASH-RESUME-SLICE / P0-D] DSA 兼容性投影 publish_run 失败时不得撤销 core。
 
     场景：
-    1. feature_snapshot 成功（compute_for_trade_date 返回正常结果）
-    2. DSA publish_run 抛异常
-    要求：
-    1. snapshot run 被标记为 failed
-    2. snapshot run.published_at 为 None
-    3. generate_events_for_run 不被调用
-    4. orchestrator 最终状态为 failed
+    1. feature_snapshot 成功
+    2. DSA 兼容性投影 publish_run 抛异常
+    要求（[P0-D] 新合同）：
+    1. snapshot run 不得被标记为 failed，core 规范发布成功（status=succeeded, published_at 非空）
+    2. orchestrator 不因 DSA 失败而终态 failed
+    3. metadata 记录 dsa_projection_ok=False（compatibility incomplete）
+    4. enhancement 段（含 generate_events）在 Review 之后仍照常执行
     """
     dsa_run, _ = await _create_dsa_strategy_run(db_session, status="completed")
     job_run = await _create_after_close_job_run(db_session)
@@ -2231,21 +2284,35 @@ async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
     ), patch(
         "app.services.state_event_service.cleanup_old_events",
         new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
     ):
-        with pytest.raises(RuntimeError, match="DSA publish failed"):
-            await execute_after_close_run(
-                job_run_id=job_run.id,
-                trade_date=target_trade_date,
-                dsa_poll_interval=0,
-                dsa_poll_timeout=1,
-            )
+        # [CRASH-RESUME-SLICE / P0-D] DSA 兼容性投影发布失败不得上抛异常、
+        # 不得阻断 stock_core 规范发布、不得把合法 core snapshot 标 failed。
+        # orchestrator 应继续推进到 History/Review 并终态（succeeded）。
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
 
-    # 验证 generate_events 未被调用
-    assert event_gen_call_count == 0, (
-        f"publish_run 失败时不应生成事件，但 generate_events 被调用了 {event_gen_call_count} 次"
+    # 验证 generate_events 仍被调用（enhancement 段在 Review 之后照常执行）
+    assert event_gen_call_count == 1, (
+        f"DSA 失败后 enhancement 仍应生成事件 1 次，实际 {event_gen_call_count} 次"
     )
 
-    # 验证 snapshot run 被标记为 failed，published_at=None
+    # 验证 snapshot run 未被标 failed，core 规范发布成功（[P0-D] 核心断言）
     from sqlalchemy import select
     stmt = select(StockFeatureSnapshotRun).where(
         StockFeatureSnapshotRun.trade_date == target_trade_date,
@@ -2255,8 +2322,253 @@ async def test_p0_publish_failure_marks_snapshot_run_failed_no_events(
     runs = result.scalars().all()
     assert len(runs) >= 1, f"应创建至少 1 个 snapshot run，实际 {len(runs)}"
     run = runs[0]
-    assert run.status == "failed", f"run.status 应为 failed，实际 {run.status}"
-    assert run.published_at is None, "failed run 不应写 published_at"
+    assert run.status == "succeeded", (
+        f"[P0-D] DSA 投影失败不得把 core snapshot 标 failed，"
+        f"实际 status={run.status}"
+    )
+    assert run.published_at is not None, (
+        "[P0-D] core snapshot 规范发布应写 published_at"
+    )
+
+    # 验证 orchestrator 终态未因 DSA 失败而 failed；compatibility 标记为 incomplete
+    await db_session.refresh(job_run)
+    meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    assert job_run.status != "failed", (
+        f"[P0-D] DSA 投影失败不得使 orchestrator 终态 failed，实际 {job_run.status}"
+    )
+    assert meta.get("dsa_projection_ok") is False, (
+        "[P0-D] metadata 应记录 dsa_projection_ok=False（compatibility incomplete）"
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_crash_resume_publishing_checkpoint_before_enhancement(
+    db_session,
+) -> None:
+    """[CRASH-RESUME-SLICE / P0-A] stock_core 发布确认后立即落 publishing checkpoint，
+    且其不依赖后续 enhancement（auction_anchor）成败。
+
+    场景：auction_anchor（legacy deprecated 产品）生成+发布阶段抛异常。
+    要求：orchestrator 仍应终态 succeeded（Review 已形成），且 core 规范发布成功、
+    不被 auction 失败阻断。这直接对应 8/25 事故「stock_core 已发布但
+    last_completed_step 停留在 computing_features」的根因修复。
+    """
+    target_trade_date = date(2026, 8, 25)
+
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=target_trade_date,
+    )
+    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    job_run = await _create_after_close_job_run(
+        db_session, status="running", trade_date=target_trade_date,
+    )
+
+    event_gen_call_count = {"n": 0}
+
+    async def _fake_generate_events(db, run_id):
+        event_gen_call_count["n"] += 1
+        return {"event_count": 1, "skipped_count": 0, "failed_count": 0}
+
+    original_get = db_session.get
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        return await original_get(model, id, *args, **kwargs)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *args):
+            return False
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    fake_published_run.status = "succeeded"
+
+    async def _fake_publish_run(db, run_id):
+        fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+        return fake_published_run
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=MagicMock(return_value=_FakeSessionContext()),
+    ), patch.object(db_session, "commit", new=db_session.flush), patch.object(
+        db_session, "get", new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=_fake_publish_run,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=_fake_generate_events,
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
+    ), patch(
+        "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
+        new=AsyncMock(side_effect=RuntimeError("auction anchor boom")),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    await db_session.refresh(job_run)
+    # [P0-A] Review 已形成，auction 失败未阻断 mandatory 关键路径
+    assert job_run.status == "succeeded", (
+        f"[P0-A] auction 失败不得阻断 Review，实际 status={job_run.status}"
+    )
+    meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    assert meta.get("last_completed_step") in ("review", "publishing"), (
+        f"[P0-A] publishing checkpoint 应在 enhancement 之前落库，"
+        f"last_completed_step={meta.get('last_completed_step')}"
+    )
+    assert meta.get("auction_anchor_status") == "failed", (
+        "[P0-A] auction 失败应记为 failed（non-blocking）"
+    )
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
+async def test_enhancement_failure_does_not_block_review(
+    db_session,
+) -> None:
+    """[CRASH-RESUME-SLICE / P0-B] state_events/chip/auction 任一失败均不得阻断 Review。
+
+    场景：state_events 生成阶段抛异常（[P0-B] 第二个暴露点）。
+    要求：orchestrator 仍终态 succeeded，Review(T) 照常形成。
+    """
+    target_trade_date = date(2026, 8, 25)
+
+    dsa_run, _ = await _create_dsa_strategy_run(
+        db_session, status="completed", trade_date=target_trade_date,
+    )
+    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    await db_session.flush()
+
+    job_run = await _create_after_close_job_run(
+        db_session, status="running", trade_date=target_trade_date,
+    )
+
+    original_get = db_session.get
+
+    async def _fake_get(model, id, *args, **kwargs):
+        if model is SchedulerJobRun and id == job_run.id:
+            return job_run
+        if model is StrategyRun and id == dsa_run.id:
+            return dsa_run
+        return await original_get(model, id, *args, **kwargs)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *args):
+            return False
+
+    fake_published_run = MagicMock()
+    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+    fake_published_run.status = "succeeded"
+
+    async def _fake_publish_run(db, run_id):
+        fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+        return fake_published_run
+
+    fake_batch_result = BatchResult(total=100, succeeded=95)
+    fake_batch_result.dsa_run_id = dsa_run.id
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=MagicMock(return_value=_FakeSessionContext()),
+    ), patch.object(db_session, "commit", new=db_session.flush), patch.object(
+        db_session, "get", new=_fake_get,
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(return_value=fake_batch_result),
+    ), patch(
+        "app.services.after_close_orchestrator._poll_dsa_run_status",
+        new=AsyncMock(return_value="completed"),
+    ), patch.object(
+        StrategyBatchService, "_check_quality_gates",
+        new=AsyncMock(return_value=True),
+    ), patch.object(
+        StrategyBatchService, "publish_run",
+        new=_fake_publish_run,
+    ), patch(
+        "app.services.after_close_orchestrator.get_active_a_share_instruments",
+        new=AsyncMock(return_value=[uuid.uuid4()]),
+    ), patch(
+        "app.services.feature_snapshot_service.compute_review_core_with_run_items",
+        new=AsyncMock(return_value={"snapshot_count": 1, "failed_count": 0}),
+    ), patch(
+        "app.services.state_event_service.generate_events_for_run",
+        new=AsyncMock(side_effect=RuntimeError("state_events boom")),
+    ), patch(
+        "app.services.state_event_service.cleanup_old_events",
+        new=AsyncMock(return_value={"deleted_count": 0}),
+    ), patch(
+        "app.services.factor_publication_service.compute_coverage",
+        new=AsyncMock(return_value={
+            "coverage": 1.0, "succeeded": 1, "expected": 1,
+            "failed": 0, "pending": 0, "running": 0, "skipped": 0,
+        }),
+    ), patch(
+        "app.services.factor_publication_service.publish_stock_core",
+        new=AsyncMock(return_value=MagicMock(id=uuid.uuid4())),
+    ), patch(
+        "app.services.board_analysis_service.compute_all_boards",
+        new=AsyncMock(return_value={"published": 1, "failed": 0}),
+    ):
+        await execute_after_close_run(
+            job_run_id=job_run.id,
+            trade_date=target_trade_date,
+            dsa_poll_interval=0,
+            dsa_poll_timeout=1,
+        )
+
+    await db_session.refresh(job_run)
+    # [P0-B] state_events 失败不得阻断 Review
+    assert job_run.status == "succeeded", (
+        f"[P0-B] state_events 失败不得阻断 Review，实际 status={job_run.status}"
+    )
 
 
 @pytest.mark.postgres

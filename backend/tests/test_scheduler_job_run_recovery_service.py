@@ -29,6 +29,7 @@ from sqlalchemy import select
 from app.models.job_run_event import JobRunEvent
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.scheduler_job_run_recovery_service import (
+    recover_replaced_incarnation_runs,
     recover_stale_scheduler_job_runs,
 )
 
@@ -264,3 +265,143 @@ async def test_lease_expired_heartbeat_fresh_not_recovered(db_session) -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+# ============================================================================
+# [CRASH-RESUME-SLICE / P0-C] incarnation 替换快速恢复行为测试
+# 设计原则：仅在「同一 worker slot（hostname:pid）已出现新 incarnation」时，
+# 才允许绕过长 lease 立即中断上一代进程遗留的 running 任务；
+# 不同 slot 的 worker（即便 heartbeat stale + lease 仍有效）绝不抢占。
+# ============================================================================
+
+
+async def _set_worker_instance_id(
+    db_session, job_run_id, instance_id: str
+) -> None:
+    """直接更新任务占有的 worker 实例标识（绕过 ORM 事件）。"""
+    from sqlalchemy import text
+
+    await db_session.execute(
+        text("UPDATE scheduler_job_runs SET worker_instance_id = :wid WHERE id = :id"),
+        {"wid": instance_id, "id": job_run_id},
+    )
+    await db_session.flush()
+
+
+@pytest.mark.asyncio
+async def test_same_slot_old_incarnation_fast_recover(db_session) -> None:
+    """D: 同 slot 旧 incarnation → 新 incarnation，旧 running 任务可快速恢复。
+
+    当前 worker = 6230ac1ea028:1:bbbb（新 incarnation）。
+    旧任务 owner = 6230ac1ea028:1:aaaa（同 slot 旧 incarnation），
+    heartbeat stale 且 lease 仍有效（4h 未到期）。
+    recover_replaced_incarnation_runs 应不等待 lease 立即中断该任务。
+    """
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    current_worker = "6230ac1ea028:1:bbbb"
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_orchestrator",
+        status="running",
+        lease_expires_at=test_now + timedelta(hours=3),  # 4h lease 仍有效
+        heartbeat_at=test_now - timedelta(minutes=30),     # heartbeat 已 stale
+    )
+    job_run_id = job_run.id
+    await _set_worker_instance_id(db_session, job_run_id, "6230ac1ea028:1:aaaa")
+
+    recovered = await recover_replaced_incarnation_runs(
+        db_session, current_worker_instance_id=current_worker, now=test_now
+    )
+
+    assert recovered == 1
+    await db_session.refresh(job_run)
+    assert job_run.status == "interrupted"
+    assert job_run.error_code == "WORKER_INCARNATION_REPLACED"
+    assert job_run.finished_at is not None
+    assert await _count_recovery_events(db_session, job_run_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_different_slot_stale_lease_valid_no_steal(db_session) -> None:
+    """E: 不同 slot 的 worker，即便 heartbeat stale 且 lease 仍有效，也不能抢占。
+
+    当前 worker = 9999ffff:1:cccc（另一个 slot）。
+    旧任务 owner = 6230ac1ea028:1（不同 slot），
+    heartbeat stale 且 lease 有效。recover_replaced_incarnation_runs 必须不动它。
+    """
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    current_worker = "9999ffff:1:cccc"
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_orchestrator",
+        status="running",
+        lease_expires_at=test_now + timedelta(hours=3),
+        heartbeat_at=test_now - timedelta(minutes=30),
+    )
+    job_run_id = job_run.id
+    await _set_worker_instance_id(db_session, job_run_id, "6230ac1ea028:1:aaaa")
+
+    recovered = await recover_replaced_incarnation_runs(
+        db_session, current_worker_instance_id=current_worker, now=test_now
+    )
+
+    assert recovered == 0
+    await db_session.refresh(job_run)
+    assert job_run.status == "running"
+    assert job_run.error_code is None
+    assert job_run.finished_at is None
+    assert await _count_recovery_events(db_session, job_run_id) == 0
+
+
+@pytest.mark.asyncio
+async def test_legacy_worker_id_recognized_same_slot(db_session) -> None:
+    """F: legacy worker id（hostname:pid）可被新 hostname:pid:nonce 识别为同 slot 前代。
+
+    当前 worker = 6230ac1ea028:1:xxxx（新格式，带 nonce）。
+    旧任务 owner = 6230ac1ea028:1（legacy 格式，无 nonce）。
+    应识别为同 slot 前代 → 快速恢复（这正是修复当前 8/25 child 的关键）。
+    """
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    current_worker = "6230ac1ea028:1:xxxx"
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_orchestrator",
+        status="running",
+        lease_expires_at=test_now + timedelta(hours=3),
+        heartbeat_at=test_now - timedelta(minutes=30),
+    )
+    job_run_id = job_run.id
+    await _set_worker_instance_id(db_session, job_run_id, "6230ac1ea028:1")
+
+    recovered = await recover_replaced_incarnation_runs(
+        db_session, current_worker_instance_id=current_worker, now=test_now
+    )
+
+    assert recovered == 1
+    await db_session.refresh(job_run)
+    assert job_run.status == "interrupted"
+    assert job_run.error_code == "WORKER_INCARNATION_REPLACED"
+
+
+@pytest.mark.asyncio
+async def test_same_incarnation_not_reinterrupted(db_session) -> None:
+    """安全护栏：当前 worker 与 owner 是同一 incarnation（同一进程），绝不重复中断自己。"""
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    current_worker = "6230ac1ea028:1:bbbb"
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_orchestrator",
+        status="running",
+        lease_expires_at=test_now + timedelta(hours=3),
+        heartbeat_at=test_now - timedelta(seconds=10),
+    )
+    job_run_id = job_run.id
+    await _set_worker_instance_id(db_session, job_run_id, "6230ac1ea028:1:bbbb")
+
+    recovered = await recover_replaced_incarnation_runs(
+        db_session, current_worker_instance_id=current_worker, now=test_now
+    )
+
+    assert recovered == 0
+    await db_session.refresh(job_run)
+    assert job_run.status == "running"

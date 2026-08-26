@@ -2904,6 +2904,7 @@ async def execute_after_close_run(
                         timeout_seconds=_step_timeout("checking_coverage"),
                         progress=_make_step_progress_callback(job_run_id, worker_id),
                         cancellation_check=_make_step_cancellation_check(job_run_id),
+                        heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
                     )
                     daily_coverage_ok = coverage_summary["status"] == "succeeded"
                 except Exception as _cov_exc:
@@ -3446,35 +3447,23 @@ async def execute_after_close_run(
             async def _run_core_publish_op() -> dict[str, Any]:
                 _published_run = None
                 _publish_failed = False
+                # [CRASH-RESUME-SLICE / P0-D] DSA 兼容性投影是 required-compatibility
+                # OUTPUT，不得成为 stock_core 规范发布的硬前置门。其失败只表达
+                # compatibility incomplete / degraded，绝不把已合法的 core snapshot
+                # 标 failed，也不允许异常上抛阻断 stock_core 原子发布。
+                _dsa_projection_ok = True
                 try:
                     async with AsyncSessionLocal() as db:
                         _published_run = await batch_service.publish_run(db, dsa_run_id)
                         await db.commit()
                 except Exception as publish_exc:
                     _publish_failed = True
+                    _dsa_projection_ok = False
                     logger.error(
-                        "[AfterClose] DSA publish_run 失败，snapshot run 将标记 failed: "
-                        "dsa_run_id=%s, error=%s",
+                        "[AfterClose] DSA 兼容性投影发布失败（core 不受影响，标记 "
+                        "compatibility incomplete）: dsa_run_id=%s, error=%s",
                         dsa_run_id, publish_exc, exc_info=True,
                     )
-                    if snapshot_run_id is not None:
-                        async with AsyncSessionLocal() as db:
-                            from app.models.stock_feature_snapshot_run import (
-                                StockFeatureSnapshotRun,
-                            )
-                            run_to_fail = await db.get(StockFeatureSnapshotRun, snapshot_run_id)
-                            if run_to_fail is not None:
-                                await finish_snapshot_run(
-                                    db, run_to_fail,
-                                    status="failed",
-                                    metadata={
-                                        "source": "after_close_orchestrator",
-                                        "error": f"DSA publish_run failed: {publish_exc}",
-                                        "scope": "full",
-                                    },
-                                )
-                                await db.commit()
-                    raise
 
                 # [P0-2 2026-07-30 visibility window fix] Publish stock_core pointer FIRST,
                 # then mark snapshot succeeded. If pointer fails or points to different run,
@@ -3575,6 +3564,7 @@ async def execute_after_close_run(
                     "publish_failed": _publish_failed,
                     "stock_core_published": _stock_core_published_local,
                     "stock_core_superseded": _stock_core_superseded_local,
+                    "dsa_projection_ok": _dsa_projection_ok,
                 }
 
             try:
@@ -3584,6 +3574,7 @@ async def execute_after_close_run(
                     timeout_seconds=_step_timeout("publishing"),
                     progress=_make_step_progress_callback(job_run_id, worker_id),
                     cancellation_check=_make_step_cancellation_check(job_run_id),
+                    heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
                 )
             except Exception as pub_exc:
                 # 执行器已标记 step_summary=failed，核心发布失败 → 整个 run 失败
@@ -3599,13 +3590,18 @@ async def execute_after_close_run(
             published_run = _core_pub_out["published_run"]
             _stock_core_published = _core_pub_out["stock_core_published"]
             _stock_core_superseded = _core_pub_out["stock_core_superseded"]
+            _dsa_projection_ok = _core_pub_out.get("dsa_projection_ok", True)
 
             # normal publish 分支汇总前初始化；superseded 路径不执行 auction/aggregation
             # /checkpoint/chip，这些状态如实置为 skipped（不掩盖未执行）。
+            # [CRASH-RESUME-SLICE / P0-B] 这些 enhancement 状态变量现在提前声明默认值，
+            # 因为 enhancement 段（auction/state_events/chip）已下移到 Review 之后执行，
+            # 而 final-status / review 短路日志会在 enhancement 段之前引用它们。
             _auction_anchor_status: str = "skipped"
             _auction_publication_id: uuid.UUID | None = None
             _aggregation_status: str = "skipped"
             _chip_enqueue_status: str = "skipped"
+            _chip_job_id: uuid.UUID | None = None
 
             # ============================================================
             # [P0 corrective] normal publish 专属步骤（superseded handling /
@@ -3639,63 +3635,26 @@ async def execute_after_close_run(
                     )
                     await db.commit()
 
-            # [P0-4] After stock_core pointer is published, trigger auction anchor
-            # generation. 接入顺序: stock_core → chip_consensus → auction_anchor → review
-            # [Slice 4A9] legacy board aggregation 已退役，不再出现在此链中。
-            # [P0-1/P0-2 修复 2026-07-31] 主流程通过统一入口 generate_and_publish_auction_anchors
-            # 完成生成+发布。chip 未完成时生成 structure_only 并发布；chip 完成后由
-            # chip_consensus_service 回调重新生成完整锚点并原子切换 publication。
-            if _stock_core_published and snapshot_run_id is not None:
-                try:
-                    from app.services.auction_anchor_service import (
-                        generate_and_publish_auction_anchors,
+            # [CRASH-RESUME-SLICE / P0-A] publishing checkpoint 必须在 auction_anchor /
+            # state_events / chip 等 enhancement 之前立即落库：stock_core 规范发布已确认
+            # 成功，其事实 checkpoint 不得依赖后续可选步骤的成败。若 process 在 enhancement
+            # 阶段 crash，resume 时 last_completed_step 已是 publishing，core 不会被重做，
+            # 且 History/Review（mandatory 关键路径）仍会继续执行。
+            if _stock_core_published:
+                async with AsyncSessionLocal() as db:
+                    _ck_job = await _get_job_run_or_raise(db, job_run_id)
+                    await _update_heartbeat_and_step(
+                        db, _ck_job,
+                        AfterCloseRunStatus.PUBLISHING.value,
+                        worker_id,
                     )
+                    await db.commit()
 
-                    async with AsyncSessionLocal() as anchor_db:
-                        async def _generate_anchor() -> dict[str, Any]:
-                            result = await generate_and_publish_auction_anchors(
-                                anchor_db,
-                                trade_date=trade_date,
-                                worker_id=worker_id,
-                                lease_epoch=lease_epoch,
-                            )
-                            if not result or (
-                                result.get("structure_count", 0) == 0
-                                and result.get("chip_count", 0) == 0
-                                and result.get("composite_count", 0) == 0
-                            ):
-                                raise StepUnavailableError("auction anchor source data unavailable")
-                            await anchor_db.commit()
-                            return result
-
-                        anchor_result, anchor_summary = await execute_orchestrator_step(
-                            "auction_anchor",
-                            _generate_anchor,
-                            timeout_seconds=_AUCTION_ANCHOR_TIMEOUT_SECONDS,
-                            optional=True,
-                        )
-                    _auction_anchor_status = anchor_summary["status"]
-                    _auction_publication_id = (
-                        anchor_result.get("publication_id") if anchor_result else None
-                    )
-                    logger.info(
-                        "[AfterClose] auction anchor 生成+发布完成: trade_date=%s, "
-                        "status=%s, publication_id=%s, structure=%s, chip=%s, composite=%s",
-                        trade_date,
-                        _auction_anchor_status,
-                        _auction_publication_id,
-                        anchor_result.get("structure_count", 0) if anchor_result else 0,
-                        anchor_result.get("chip_count", 0) if anchor_result else 0,
-                        anchor_result.get("composite_count", 0) if anchor_result else 0,
-                    )
-                except Exception as anchor_exc:
-                    _auction_anchor_status = "failed"
-                    logger.warning(
-                        "[AfterClose] auction anchor 生成+发布失败（optional，不影响 core）: "
-                        "trade_date=%s, error=%s",
-                        trade_date, anchor_exc,
-                        exc_info=True,
-                    )
+            # [CRASH-RESUME-SLICE / P0-B] auction anchor（legacy deprecated 产品）已下移到
+            # post-core enhancement 段（computing_review 之后）执行，不再阻塞 History/Review
+            # 这一 mandatory 关键路径。其原始执行条件（normal publish 且
+            # _stock_core_published and snapshot_run_id is not None）在 post-core 段复现，
+            # 并额外要求 not skip_publish（断点恢复不重复执行 normal-publish 专属步骤）。
 
             # [P1-2 2026-08-07] post-core 依赖顺序收口（V2.1 PC-8）：
             # stock_core 发布身份确认后，state events 与 chip 入队先行，
@@ -3717,7 +3676,10 @@ async def execute_after_close_run(
             #     （chip 重新入队；legacy aggregation 已退役不再执行），
             #     仅 auction anchor 与 publishing 检查点不执行。
 
-            # [Phase5] - publishing 完成，更新心跳 + 检查点
+            # [Phase5] - publishing 段收尾：持久化 step_summary / partial_success 元数据。
+            # 注意：PUBLISHING checkpoint 已提前到 stock_core 发布确认之后立即落库
+            # （[CRASH-RESUME-SLICE / P0-A]），此处不再推进 last_completed_step，
+            # 仅刷新心跳/租约（传 None）并保存元数据。
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
                 meta = _parse_metadata(job_run)
@@ -3733,9 +3695,7 @@ async def execute_after_close_run(
                 meta["partial_success"] = bool(optional_failures)
                 meta["optional_failures"] = optional_failures
                 job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                await _update_heartbeat_and_step(
-                    db, job_run, AfterCloseRunStatus.PUBLISHING.value, worker_id,
-                )
+                await _update_heartbeat_and_step(db, job_run, None, worker_id)
                 await db.commit()
 
         else:
@@ -3775,107 +3735,9 @@ async def execute_after_close_run(
             _aggregation_status = "skipped"
             _chip_enqueue_status = "skipped"
 
-        # [P1-2 2026-08-07] post-core 依赖顺序（top-level，normal 与 skip_publish 共用）：
-        # stock_core published
-        #   ├─ state events
-        #   ├─ enqueue chip
-        #   ├─ auction anchor（已在上方 if not skip_publish 块内）
-        #   └─ DSA projection（保持现有 canonical projection 合同）
-        #         ↓
-        #       review
-        # [Slice 4A9] legacy board aggregation 已退役，不再出现在该链中；
-        # Chip / State Events 不依赖 aggregation，Review 只依赖已发布 stock_core。
-        if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
-            logger.info(
-                "[BOUNDARY-P3] before state-events job=%s trade=%s pid=%s",
-                str(job_run_id), trade_date, os.getpid(),
-            )
-            try:
-                from app.services.state_event_service import (
-                    cleanup_old_events,
-                    generate_events_for_run,
-                )
-                async with AsyncSessionLocal() as event_db:
-                    logger.info(
-                        "[BOUNDARY-S1] before generate_events_for_run job=%s snap=%s pid=%s",
-                        str(job_run_id), snapshot_run_id, os.getpid(),
-                    )
-                    event_stats = await generate_events_for_run(event_db, snapshot_run_id)
-                    logger.info(
-                        "[BOUNDARY-S2] after generate_events_for_run job=%s events=%s skipped=%s failed=%s pid=%s",
-                        str(job_run_id),
-                        event_stats.get("event_count", 0),
-                        event_stats.get("skipped_count", 0),
-                        event_stats.get("failed_count", 0),
-                        os.getpid(),
-                    )
-                    # 90 天清理（P1-2）：事件生成后执行，失败不阻断主发布
-                    logger.info(
-                        "[BOUNDARY-S3] before cleanup_old_events job=%s pid=%s",
-                        str(job_run_id), os.getpid(),
-                    )
-                    cleanup_stats = await cleanup_old_events(event_db)
-                    logger.info(
-                        "[BOUNDARY-S4] after cleanup_old_events job=%s deleted=%s pid=%s",
-                        str(job_run_id), cleanup_stats.get("deleted_count", 0), os.getpid(),
-                    )
-                    logger.info(
-                        "[BOUNDARY-S5] before commit job=%s pid=%s",
-                        str(job_run_id), os.getpid(),
-                    )
-                    await event_db.commit()
-                    logger.info(
-                        "[BOUNDARY-S6] after commit job=%s pid=%s",
-                        str(job_run_id), os.getpid(),
-                    )
-                logger.info(
-                    "[AfterClose] 状态事件生成完成: run_id=%s, "
-                    "event_count=%s, skipped=%s, failed=%s, "
-                    "cleanup_deleted=%s, cleanup_duration_ms=%s",
-                    snapshot_run_id,
-                    event_stats.get("event_count", 0),
-                    event_stats.get("skipped_count", 0),
-                    event_stats.get("failed_count", 0),
-                    cleanup_stats.get("deleted_count", 0),
-                    cleanup_stats.get("duration_ms", 0),
-                )
-                logger.info(
-                    "[BOUNDARY-P4] after state-events job=%s count=%s pid=%s",
-                    str(job_run_id), event_stats.get("event_count", 0), os.getpid(),
-                )
-            except Exception as event_exc:
-                logger.warning(
-                    "[AfterClose] 状态事件生成失败（不影响主流程）: "
-                    "run_id=%s, error=%s",
-                    snapshot_run_id, event_exc, exc_info=True,
-                )
-
-        logger.info(
-            "[BOUNDARY-P5] before chip-enqueue job=%s trade=%s pid=%s",
-            str(job_run_id), trade_date, os.getpid(),
-        )
-        # [P1-2] chip 入队（stock_core 发布成功后，在 post-core 段执行）
-        # [AUD-08 2026-08-07] chip 只依赖 stock_core，与 Review 无因果关系，
-        # 前移到 post-core 段，判据复用 stock_core 发布成功条件。
-        # 幂等依据：create_after_close_chip_consensus_job 以
-        # (trade_date, core_run_id) 幂等，重复调用返回既有 job（chip_is_new=False）。
-        if _stock_core_published:
-            _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
-                job_run_id=job_run_id,
-                worker_id=worker_id,
-                lease_epoch=lease_epoch,
-                trade_date=trade_date,
-                snapshot_run_id=snapshot_run_id,
-                expected_count=(
-                    len(cached_instrument_ids)
-                    if cached_instrument_ids is not None
-                    else None
-                ),
-            )
-            logger.info(
-                "[BOUNDARY-P6] after chip-enqueue job=%s chip_status=%s pid=%s",
-                str(job_run_id), _chip_enqueue_status, os.getpid(),
-            )
+        # [CRASH-RESUME-SLICE / P0-B] state_events 与 chip 已下移到 computing_review 之后
+        # 的 post-core enhancement 段执行，不再阻塞 History/Review 这一 mandatory 关键路径。
+        # 详见下方 "# ---- 步骤 4.9: post-core enhancement（non-blocking）----"。
 
         # [Slice 4A9] Legacy board aggregation 已退役：AfterClose 不再运行任何
         # 板块聚合 / 发布 / pointer 确认，也不维护 legacy batch 状态。
@@ -4124,17 +3986,174 @@ async def execute_after_close_run(
                 await db.commit()
             logger.warning(
                 "[AfterClose] 复盘阶段终态短路: job_run_id=%s, status=%s, "
-                "chip 已于 stock_core 发布后入队(status=%s)（保留原检查点）",
+                "post-core enhancement（chip/state_events/auction）将于 Review 之后执行"
+                "（status=%s）（保留原检查点）",
                 job_run_id, _terminal_status.value, _chip_enqueue_status,
             )
             # [AC-TERMINAL-01 P0#3] 抛信号异常，让外层 except 明确区分
             # "取消/中断"与"真实失败"，避免被覆写成 failed。
             raise AfterCloseCancelledError(_terminal_status)
 
-        # [AUD-08 2026-08-07] 原步骤 4.9 的 chip 入队已前移至步骤 4.6
-        # （stock_core 发布成功后立即分叉），此处不再重复入队。
-        # [Phase0-Fix#8] 保持不变的性质：chip 入队仍是正式步骤、仍在主任务终态
-        # 之前完成、失败仍纳入 partial_success 判定（见下方 _optional_failed）。
+        # ---- 步骤 4.9: post-core enhancement（non-blocking）----
+        # [CRASH-RESUME-SLICE / P0-B] 以下 enhancement 输出在 mandatory 关键路径
+        # （stock_core 发布 → publishing checkpoint → History exact-T → Review 发布）
+        # 全部完成之后执行。它们失败/超时/crash 都不得阻断 Review(T) 的形成，
+        # 只能表达 partial_success / compatibility incomplete / degraded。
+        # auction_anchor 原始为 normal-publish 专属步骤（skip_publish 恢复路径不重复执行）。
+
+        # [P0-4] auction anchor（legacy deprecated 产品）
+        if _stock_core_published and snapshot_run_id is not None and not skip_publish:
+            try:
+                from app.services.auction_anchor_service import (
+                    generate_and_publish_auction_anchors,
+                )
+
+                async with AsyncSessionLocal() as anchor_db:
+                    async def _generate_anchor() -> dict[str, Any]:
+                        result = await generate_and_publish_auction_anchors(
+                            anchor_db,
+                            trade_date=trade_date,
+                            worker_id=worker_id,
+                            lease_epoch=lease_epoch,
+                        )
+                        if not result or (
+                            result.get("structure_count", 0) == 0
+                            and result.get("chip_count", 0) == 0
+                            and result.get("composite_count", 0) == 0
+                        ):
+                            raise StepUnavailableError("auction anchor source data unavailable")
+                        await anchor_db.commit()
+                        return result
+
+                    anchor_result, anchor_summary = await execute_orchestrator_step(
+                        "auction_anchor",
+                        _generate_anchor,
+                        timeout_seconds=_AUCTION_ANCHOR_TIMEOUT_SECONDS,
+                        optional=True,
+                        heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
+                    )
+                _auction_anchor_status = anchor_summary["status"]
+                _auction_publication_id = (
+                    anchor_result.get("publication_id") if anchor_result else None
+                )
+                logger.info(
+                    "[AfterClose] auction anchor 生成+发布完成: trade_date=%s, "
+                    "status=%s, publication_id=%s, structure=%s, chip=%s, composite=%s",
+                    trade_date,
+                    _auction_anchor_status,
+                    _auction_publication_id,
+                    anchor_result.get("structure_count", 0) if anchor_result else 0,
+                    anchor_result.get("chip_count", 0) if anchor_result else 0,
+                    anchor_result.get("composite_count", 0) if anchor_result else 0,
+                )
+            except Exception as anchor_exc:
+                _auction_anchor_status = "failed"
+                logger.warning(
+                    "[AfterClose] auction anchor 生成+发布失败（optional，不影响 core）: "
+                    "trade_date=%s, error=%s",
+                    trade_date, anchor_exc,
+                    exc_info=True,
+                )
+
+        # [P1-2 2026-08-07] state events（non-blocking post-core）
+        if _stock_core_published and not _stock_core_superseded and snapshot_run_id is not None:
+            logger.info(
+                "[BOUNDARY-P3] before state-events job=%s trade=%s pid=%s",
+                str(job_run_id), trade_date, os.getpid(),
+            )
+            try:
+                from app.services.state_event_service import (
+                    cleanup_old_events,
+                    generate_events_for_run,
+                )
+                async with AsyncSessionLocal() as event_db:
+                    logger.info(
+                        "[BOUNDARY-S1] before generate_events_for_run job=%s snap=%s pid=%s",
+                        str(job_run_id), snapshot_run_id, os.getpid(),
+                    )
+                    event_stats = await generate_events_for_run(event_db, snapshot_run_id)
+                    logger.info(
+                        "[BOUNDARY-S2] after generate_events_for_run job=%s events=%s skipped=%s failed=%s pid=%s",
+                        str(job_run_id),
+                        event_stats.get("event_count", 0),
+                        event_stats.get("skipped_count", 0),
+                        event_stats.get("failed_count", 0),
+                        os.getpid(),
+                    )
+                    # 90 天清理（P1-2）：事件生成后执行，失败不阻断主发布
+                    logger.info(
+                        "[BOUNDARY-S3] before cleanup_old_events job=%s pid=%s",
+                        str(job_run_id), os.getpid(),
+                    )
+                    cleanup_stats = await cleanup_old_events(event_db)
+                    logger.info(
+                        "[BOUNDARY-S4] after cleanup_old_events job=%s deleted=%s pid=%s",
+                        str(job_run_id), cleanup_stats.get("deleted_count", 0), os.getpid(),
+                    )
+                    logger.info(
+                        "[BOUNDARY-S5] before commit job=%s pid=%s",
+                        str(job_run_id), os.getpid(),
+                    )
+                    await event_db.commit()
+                    logger.info(
+                        "[BOUNDARY-S6] after commit job=%s pid=%s",
+                        str(job_run_id), os.getpid(),
+                    )
+                logger.info(
+                    "[AfterClose] 状态事件生成完成: run_id=%s, "
+                    "event_count=%s, skipped=%s, failed=%s, "
+                    "cleanup_deleted=%s, cleanup_duration_ms=%s",
+                    snapshot_run_id,
+                    event_stats.get("event_count", 0),
+                    event_stats.get("skipped_count", 0),
+                    event_stats.get("failed_count", 0),
+                    cleanup_stats.get("deleted_count", 0),
+                    cleanup_stats.get("duration_ms", 0),
+                )
+                logger.info(
+                    "[BOUNDARY-P4] after state-events job=%s count=%s pid=%s",
+                    str(job_run_id), event_stats.get("event_count", 0), os.getpid(),
+                )
+            except Exception as event_exc:
+                logger.warning(
+                    "[AfterClose] 状态事件生成失败（不影响主流程）: "
+                    "run_id=%s, error=%s",
+                    snapshot_run_id, event_exc, exc_info=True,
+                )
+
+        # [P1-2] chip 入队（non-blocking post-core；stock_core 发布成功后执行）
+        # 幂等依据：create_after_close_chip_consensus_job 以
+        # (trade_date, core_run_id) 幂等，重复调用返回既有 job（chip_is_new=False）。
+        if _stock_core_published:
+            try:
+                _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
+                    job_run_id=job_run_id,
+                    worker_id=worker_id,
+                    lease_epoch=lease_epoch,
+                    trade_date=trade_date,
+                    snapshot_run_id=snapshot_run_id,
+                    expected_count=(
+                        len(cached_instrument_ids)
+                        if cached_instrument_ids is not None
+                        else None
+                    ),
+                )
+                logger.info(
+                    "[BOUNDARY-P6] after chip-enqueue job=%s chip_status=%s pid=%s",
+                    str(job_run_id), _chip_enqueue_status, os.getpid(),
+                )
+            except Exception as chip_exc:
+                _chip_enqueue_status = "failed"
+                logger.warning(
+                    "[AfterClose] chip 实时计算入队失败（optional，不影响 core）: "
+                    "job=%s, error=%s",
+                    str(job_run_id), chip_exc, exc_info=True,
+                )
+
+        # [AUD-08 2026-08-07] 原步骤 4.9 的 chip 入队已从 stock_core 发布成功后的
+        # 前移逻辑收敛到上方 post-core enhancement 段（仅在 stock_core 发布成功时执行，
+        # 且在 Review 之后），此处不再重复。chip 入队仍是正式步骤、失败仍纳入
+        # partial_success 判定（见下方 _optional_failed）。
 
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:
@@ -4581,7 +4600,15 @@ async def _inspect_run_artifacts(
     trade_date_raw = meta.get("trade_date")
     if not trade_date_raw:
         return artifacts
-    artifacts["checked_trade_date"] = trade_date_raw
+    # [CRASH-RESUME-SLICE / P1-B] trade_date 必须显式解析为 datetime.date 再绑定，
+    # 不能把 "2026-08-25" 字符串直接交给 asyncpg 的 date 占位符，
+    # 否则会触发 asyncpg DataError（字符串无法按 date 合同绑定）。
+    try:
+        trade_date_obj = date.fromisoformat(str(trade_date_raw))
+    except ValueError:
+        artifacts["inspect_error"] = f"invalid trade_date: {trade_date_raw!r}"
+        return artifacts
+    artifacts["checked_trade_date"] = trade_date_obj.isoformat()
     try:
         rows = (
             await db.execute(
@@ -4589,12 +4616,12 @@ async def _inspect_run_artifacts(
                     """
                     SELECT publication_kind, data_run_id
                     FROM factor_publications
-                    WHERE trade_date = CAST(:trade_date AS date)
+                    WHERE trade_date = :trade_date
                       AND scope_type = 'market'
                       AND publication_kind = 'stock_core'
                     """
                 ),
-                {"trade_date": trade_date_raw},
+                {"trade_date": trade_date_obj},
             )
         ).fetchall()
         for kind, data_run_id in rows:

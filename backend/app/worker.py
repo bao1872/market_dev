@@ -66,6 +66,7 @@ from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.scheduler_job_run_recovery_service import (
     auto_resume_interrupted_after_close_runs,
+    recover_replaced_incarnation_runs,
     recover_stale_scheduler_job_runs,
 )
 
@@ -84,8 +85,37 @@ STALE_HEARTBEAT_THRESHOLD_SECONDS = int(os.getenv("STALE_HEARTBEAT_THRESHOLD_SEC
 # 优雅退出标志
 _shutdown = False
 
-# [WorkerHeartbeat] - 实例标识：hostname:pid
-_WORKER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}"
+# [CRASH-RESUME-SLICE / P0-C] worker 实例标识 = "hostname:pid:incarnation_nonce"。
+# 新增的 incarnation nonce 在每次进程启动时生成，用于区分「同一 PID slot 上的
+# 不同代进程」——Docker restart 后 hostname 通常不变、PID 重新为 1，新旧 Python
+# 进程会拿到同一个 slot（hostname:pid），但 nonce 不同，从而能证明上一代进程已被替换。
+# 同时兼容 legacy 格式 "hostname:pid"（无 nonce）：解析时 incarnation 视为 None。
+_WORKER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
+
+
+def parse_worker_slot(instance_id: str) -> str:
+    """返回 worker slot（hostname:pid），兼容 legacy "hostname:pid" 与
+    新格式 "hostname:pid:nonce"。
+
+    slot 相等意味着「同一台机器上的同一进程 PID 槽位」，是判断 incarnation
+    替换的依据；incarnation（nonce）不同则说明该 slot 上的进程已更新。
+    """
+    if not instance_id:
+        return instance_id
+    parts = instance_id.split(":")
+    if len(parts) >= 2:
+        return f"{parts[0]}:{parts[1]}"
+    return instance_id
+
+
+def parse_worker_incarnation(instance_id: str) -> str | None:
+    """返回 incarnation nonce；legacy "hostname:pid" 返回 None。"""
+    if not instance_id:
+        return None
+    parts = instance_id.split(":")
+    if len(parts) == 3:
+        return parts[2]
+    return None
 
 
 async def _heartbeat_loop(worker_name: str, interval: int = 60) -> None:
@@ -1347,10 +1377,15 @@ async def _recovery_watchdog_loop(interval_seconds: int = 60) -> None:
         try:
             async with AsyncSessionLocal() as db:
                 recovered = await recover_stale_scheduler_job_runs(db)
+                # [CRASH-RESUME-SLICE / P0-C] 同 slot 新 incarnation 已启动 →
+                # 立即中断上一代进程遗留的 running 任务，无需等待 4h lease。
+                replaced = await recover_replaced_incarnation_runs(db, _WORKER_INSTANCE_ID)
                 # [PRD §4.3 JOB-01] 自动恢复 interrupted 的盘后任务 → resume_queued
                 resumed = await auto_resume_interrupted_after_close_runs(db)
                 stale_marked = await mark_stale_worker_heartbeats(db)
                 await db.commit()
+                if replaced > 0:
+                    logger.info("[Recovery] 看门狗 incarnation 替换恢复: %d 个旧进程任务", replaced)
                 if recovered > 0:
                     logger.info("[Recovery] 看门狗恢复: %d 个过期任务", recovered)
                 if resumed > 0:
@@ -1584,13 +1619,18 @@ async def run_after_close_orchestrator_worker() -> None:
     try:
         async with AsyncSessionLocal() as db:
             recovered = await recover_stale_scheduler_job_runs(db)
+            # [CRASH-RESUME-SLICE / P0-C] 同 slot 新 incarnation 已启动 →
+            # 立即中断上一代进程遗留的 running 任务（如本次 8/25 child 所属的旧进程），
+            # 无需等待 4h lease 自然过期。
+            replaced = await recover_replaced_incarnation_runs(db, _WORKER_INSTANCE_ID)
             # [PRD §4.3 JOB-01] 自动将 interrupted 的盘后任务转为 resume_queued
             resumed = await auto_resume_interrupted_after_close_runs(db)
             await db.commit()
-            if recovered > 0 or resumed > 0:
+            if recovered > 0 or resumed > 0 or replaced > 0:
                 logger.info(
-                    "[AfterCloseWorker] 启动恢复: %d 个过期任务, %d 个自动恢复",
-                    recovered, resumed,
+                    "[AfterCloseWorker] 启动恢复: %d 个过期任务, %d 个自动恢复, "
+                    "%d 个 incarnation 替换恢复",
+                    recovered, resumed, replaced,
                 )
     except Exception as exc:
         logger.exception("[AfterCloseWorker] 启动恢复异常: %s", exc)

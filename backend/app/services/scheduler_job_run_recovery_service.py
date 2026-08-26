@@ -155,6 +155,167 @@ async def recover_stale_scheduler_job_runs(
     return len(recovered_rows)
 
 
+def _parse_worker_slot(instance_id: str) -> str:
+    """返回 worker slot（hostname:pid）。
+
+    兼容 legacy 格式 "hostname:pid"（无 incarnation nonce）与新格式
+    "hostname:pid:nonce"。slot 相同意味着「同一机器同一 PID 槽位」，是判断
+    incarnation 是否被替换的依据。
+    """
+    if not instance_id:
+        return instance_id
+    parts = instance_id.split(":")
+    if len(parts) >= 2:
+        return f"{parts[0]}:{parts[1]}"
+    return instance_id
+
+
+def _parse_worker_incarnation(instance_id: str) -> str | None:
+    """返回 incarnation nonce；legacy "hostname:pid" 返回 None。"""
+    if not instance_id:
+        return None
+    parts = instance_id.split(":")
+    if len(parts) == 3:
+        return parts[2]
+    return None
+
+
+async def recover_replaced_incarnation_runs(
+    db: AsyncSession,
+    current_worker_instance_id: str,
+    now: datetime | None = None,
+) -> int:
+    """[CRASH-RESUME-SLICE / P0-C] 同 slot incarnation 替换快速恢复。
+
+    安全前提：当前 worker 进程已真实启动（current_worker_instance_id 含全新
+    startup nonce）。若存在同一 PID slot（hostname:pid）上的「上一代」running 任务，
+    则可证明该 slot 上的旧进程已被替换（进程不复活），无需等待 4h lease 自然过期即可
+    立即 interrupted → 触发 auto-resume 断点恢复。
+
+    判定（Python 端，安全且可解释）：
+        owner_slot == current_slot
+        AND (owner_incarnation is None  # legacy 无 nonce，视为可替换
+             OR owner_incarnation != current_incarnation)
+
+    该分支与 recover_stale_scheduler_job_runs 的保守 AND 分支互补、互不重叠：
+    - 保守分支要求 lease 过期 AND heartbeat 超时，用于「owner 死亡无法证明」的模糊场景；
+    - 本分支仅用于「同 slot 已出现新 incarnation」这类 owner 被明确替换的场景，
+      不会因「存在另一个不同 slot 的 worker」而误抢任务。
+
+    注意：本函数不处理不同 slot 的 worker（即使其 heartbeat stale 且 lease 仍有效），
+    那属于保守分支的责任范围，本分支故意不触碰，保持 fail-safe。
+    """
+    if now is None:
+        now = datetime.now(ZoneInfo("Asia/Shanghai"))
+
+    current_slot = _parse_worker_slot(current_worker_instance_id)
+    current_incarnation = _parse_worker_incarnation(current_worker_instance_id)
+    if not current_slot or current_incarnation is None:
+        # 当前 worker 自身是 legacy 格式（无 nonce），无法证明替换关系，跳过。
+        return 0
+
+    # 取出本 slot 上所有 running 任务（含 legacy 精确匹配与新格式前缀匹配）
+    select_sql = text(
+        """
+        SELECT id, job_name, worker_instance_id, heartbeat_at, metadata_json
+        FROM scheduler_job_runs
+        WHERE status = 'running'
+          AND (
+            worker_instance_id = :slot
+            OR worker_instance_id LIKE :slot_prefix
+          )
+        """
+    )
+    result = await db.execute(
+        select_sql,
+        {"slot": current_slot, "slot_prefix": f"{current_slot}:%"},
+    )
+    candidate_rows = result.fetchall()
+
+    to_interrupt: list = []
+    for row in candidate_rows:
+        owner_id = row.worker_instance_id
+        if not owner_id:
+            continue
+        owner_slot = _parse_worker_slot(owner_id)
+        if owner_slot != current_slot:
+            # 不同 slot：不抢（保守路径负责）
+            continue
+        owner_incarnation = _parse_worker_incarnation(owner_id)
+        if owner_incarnation == current_incarnation:
+            # 同一 incarnation（同一进程）：不抢，避免重复中断自身正在跑的任务
+            continue
+        # owner 为 legacy（None）或不同 nonce → 上一代进程已被替换，可快速恢复
+        to_interrupt.append(row)
+
+    if not to_interrupt:
+        return 0
+
+    update_sql = text(
+        """
+        UPDATE scheduler_job_runs
+        SET status = 'interrupted',
+            error_code = 'WORKER_INCARNATION_REPLACED',
+            error_message = '同 slot 上已启动新 incarnation，旧进程被替换，任务立即中断并断点恢复',
+            finished_at = :now
+        WHERE id = :id
+        """
+    )
+    check_event_sql = text(
+        "SELECT 1 FROM job_run_events "
+        "WHERE job_run_id = :job_run_id AND step = 'recovery' LIMIT 1"
+    )
+    update_metadata_sql = text(
+        """
+        UPDATE scheduler_job_runs
+        SET metadata_json = jsonb_set(
+            COALESCE(metadata_json::jsonb, '{}'::jsonb),
+            '{orchestrator_status}',
+            '"interrupted"'
+        )::text
+        WHERE id = :id
+        """
+    )
+    recovered = 0
+    for row in to_interrupt:
+        job_run_id = row.id
+        job_name = row.job_name
+        last_heartbeat = row.heartbeat_at
+        await db.execute(update_sql, {"now": now, "id": job_run_id})
+        existing = await db.execute(
+            check_event_sql, {"job_run_id": job_run_id},
+        )
+        if existing.first() is None:
+            event = JobRunEvent(
+                job_run_id=job_run_id,
+                step="recovery",
+                level="error",
+                message=(
+                    "同 slot 已启动新 incarnation，旧进程被替换，任务立即中断并断点恢复"
+                ),
+                payload={
+                    "original_status": "running",
+                    "owner_instance_id": row.worker_instance_id,
+                    "current_instance_id": current_worker_instance_id,
+                    "last_heartbeat": (
+                        last_heartbeat.isoformat() if last_heartbeat else None
+                    ),
+                    "recovered_at": now.isoformat(),
+                },
+            )
+            db.add(event)
+        if job_name == "after_close_orchestrator":
+            await db.execute(update_metadata_sql, {"id": job_run_id})
+        recovered += 1
+
+    await db.flush()
+    logger.info(
+        "[Recovery] incarnation 替换快速恢复: %d 个同 slot 旧进程任务",
+        recovered,
+    )
+    return recovered
+
+
 # [PRD §4.3 JOB-01] - after_close_orchestrator 任务名（支持 auto-resume）
 _AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
 
