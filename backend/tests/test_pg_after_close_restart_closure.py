@@ -81,15 +81,24 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
         await db.commit()
 
     # --- producer: 真实 dispatch_restart 创建 daily_ready child ---
+    # 注：source_core_run_id 解析（_resolve_published_core_run_id）在 verify 库中
+    # 可能返回一个 36-char UUID，使 run_key 触及 VARCHAR(128) 边界（此为 dispatch_restart
+    # 既有长度脆弱性，不在 REPROCESS-OWNER-CLOSURE-01 P0-1/P0-2 范围内）。Contract A
+    # 不负责 DSA/History/Review/Publishing，仅验证 identity + claim，故将 source 解析
+    # 置 None，使 run_key 使用 "none" 段（96 字符，稳定落在 VARCHAR(128) 内）。
     async with TestAsyncSessionLocal() as db:
         parent = await db.get(SchedulerJobRun, parent_id)
         async def fake_handler(db, **kw):
             return uuid.uuid4()
-        child = await dispatch_restart(
-            db, parent, "daily_ready",
-            actor="audit", request_id="req-a",
-            handlers={"daily_ready": fake_handler},
-        )
+        with patch(
+            "app.services.granular_restart_service._resolve_published_core_run_id",
+            new=AsyncMock(return_value=None),
+        ):
+            child = await dispatch_restart(
+                db, parent, "daily_ready",
+                actor="audit", request_id="req-a",
+                handlers={"daily_ready": fake_handler},
+            )
         await db.commit()
 
     # --- producer identity 断言 ---
