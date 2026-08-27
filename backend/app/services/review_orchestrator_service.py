@@ -227,13 +227,14 @@ async def _create_run_impl(
 ) -> tuple[MarketReviewRun, bool]:
     """创建或复用 review run（幂等：唯一键组合保证）的**内部实现**。
 
-    [Slice 3] Review 身份仅由 stock_core + canonical history 构成；
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Review 显式绑定本次 AfterCloseRun 产生的
+    CoreRun（StockFeatureSnapshotRun），不再依赖 stock_core publication pointer；
     source_board_run_id 不再作为输入参数（新 run 恒为 NULL）。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 业务交易日
-        source_core_run_id: 输入 stock_core run_id（None 时从 publication 读取）
+        source_core_run_id: 输入 CoreRun run_id（None 即 fail-closed，不回退 publication）
         algorithm_version: 算法版本（默认 REVIEW_ALGORITHM_VERSION）
         filter_version: 筛选器版本（默认 REVIEW_FILTER_VERSION）
         baseline_window: 历史基线窗口（默认 120，最低 60）
@@ -250,7 +251,7 @@ async def _create_run_impl(
         ReviewRunCreation(run, created)。
 
     Raises:
-        ReviewOrchestratorError: 输入校验失败（缺 stock_core publication pointer）；
+        ReviewOrchestratorError: 输入校验失败（未显式提供 source_core_run_id）；
             或 [Phase4.1] 既有 run 的 canary/symbols scope 与新请求不一致
             （scope 冲突，避免 canary 结果续成 formal run）
     """
@@ -392,13 +393,14 @@ async def create_run(
 ) -> MarketReviewRun:
     """创建或复用 review run（幂等：唯一键组合保证）。
 
-    [Slice 3] Review 身份仅依赖 stock_core + canonical history；
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Review 显式绑定本次 AfterCloseRun 产生的
+    CoreRun（StockFeatureSnapshotRun），不再依赖 stock_core publication pointer；
     source_board_run_id 不再作为 Review 输入（新 run 恒为 NULL）。
 
     Args:
         session: 异步 DB 会话（caller 控制 commit）
         trade_date: 业务交易日
-        source_core_run_id: 输入 stock_core run_id（None 时从 publication 读取）
+        source_core_run_id: 输入 CoreRun run_id（None 即 fail-closed，不回退 publication）
         algorithm_version: 算法版本（默认 REVIEW_ALGORITHM_VERSION）
         filter_version: 筛选器版本（默认 REVIEW_FILTER_VERSION）
         baseline_window: 历史基线窗口（默认 120，最低 60）
@@ -413,7 +415,7 @@ async def create_run(
         处理，禁止原地重算。
 
     Raises:
-        ReviewOrchestratorError: 输入校验失败（缺 stock_core publication pointer）；
+        ReviewOrchestratorError: 输入校验失败（未显式提供 source_core_run_id）；
             或 [Phase4.1] 既有 run 的 canary/symbols scope 与新请求不一致
             （scope 冲突，避免 canary 结果续成 formal run）
     """

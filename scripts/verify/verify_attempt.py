@@ -478,7 +478,12 @@ class VerifyAttempt:
              # 自包含 synthetic universe（calendar/instruments/bars/released version/artifact），
              # 不读 bz_stock。仅追加，不删除/替换既有文件；不动态 discovery；
              # 不扩大为全量 -m postgres。
-             "tests/test_pg_dsa_compat_after_close04.py"],
+             "tests/test_pg_dsa_compat_after_close04.py",
+             # PHASE C1 — Review read-owner / API 合同契约：
+             # T1 _resolve_source_core_run_id fail-closed；T2 overview schema lineage；
+             # 多 run 假绿（同日 Core A/B + Review Y(A)/Z(B)，指针唯一覆盖，非 latest-Z）。
+             # 自包含 synthetic universe，写入验证库 bz_stock_verify_<SHA>，不读 bz_stock。
+             "tests/test_pg_review_read_owner_c1.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:

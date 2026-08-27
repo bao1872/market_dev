@@ -13,7 +13,10 @@
 - UNEXPECTED EXECUTION FAILURE 仍阻塞：任何 run item 处于 failed/pending/running → CLOSED
 - 禁止 current membership × historical date 回填 / latest snapshot forward-fill
 - signal evaluation 无系统性异常
-- source_core_run_id 必须匹配当前正式 stock_core pointer；source_board_run_id
+- source_core_run_id 必须引用一个**已存在且 status=succeeded 的 StockFeatureSnapshotRun
+  （CoreRun）**；这是 Review 的显式 lineage，由调用方在 create 时显式提供
+  （review_orchestrator_service._resolve_source_core_run_id 在缺失时 fail-closed，
+  **不**回退 stock_core FactorPublication pointer）。source_board_run_id
   是 nullable legacy lineage，**不是发布门禁**（Slice 4A5 Board-independent）
 
 模块自测：
@@ -97,7 +100,8 @@ async def evaluate_publish_gate(
       composition），不参与 readiness gate；其不可用不是 blocker，也绝不回退
       P/Q/U/C/V（market 历史 PIT 缺口是 implementation gap，不是保留 legacy 的理由）。
     - UNEXPECTED_EXECUTION_FAILURE 仍阻塞：任何 run item 处于 failed/pending/running。
-    - source_core_run_id 必须匹配当前正式 stock_core pointer；source_board_run_id
+    - source_core_run_id 必须引用已存在且 succeeded 的 StockFeatureSnapshotRun
+      （CoreRun，显式 lineage，不取自 stock_core pointer）；source_board_run_id
       是 nullable legacy lineage，不是发布门禁（Slice 4A5 Board-independent）。
     - 禁止 current membership × historical date 回填 / latest snapshot forward-fill。
 
