@@ -692,13 +692,20 @@ async def _run_dsa_compatibility_projection(
 
     内部合同（全部不重算 DSA kernel，仅消费已持久化 Core artifact）：
 
-    1. 创建/复用 required_compatibility StrategyRun（source_core_run_id=X）
-    2. project_dsa_batch + persist_precomputed_dsa_results（从 snapshot 重建 artifact）
-    3. 质量门禁（run 必须 completed 且 succeeded>0 → _check_quality_gates）
-    4. publish_run 真实签名调用：await StrategyBatchService().publish_run(db, run_id)
+    1. 创建/复用 required_compatibility StrategyRun（source_core_run_id=X）；
+       恢复路径对已有 run 做 lineage fail-closed 核验
+       （input_overrides.source_core_run_id / requirement / trade_date）
+    2. already-published 幂等 resume：status==published 且 published_at 非空 →
+       直接返回 succeeded（不投影/不质检/不新建）；published_at 缺失 fail-closed
+    3. project_dsa_batch + persist_precomputed_dsa_results（从 snapshot 重建 artifact）
+    4. 质量门禁（run 必须 completed 且 succeeded>0 → _check_quality_gates）
+    5. publish_run 真实签名调用：await StrategyBatchService().publish_run(db, run_id)
        （内部只 flush 不 commit）→ 由本函数显式 commit
-    5. 提交后复核真实行：status == "published" 且 published_at 非空，
+    6. 提交后复核真实行：status == "published" 且 published_at 非空，
        否则视为兼容性输出未达成 → RuntimeError（optional failed，绝不伪造成功）
+
+    状态所有权：仅执行中非终态异常把 run 标 failed；completed 的门禁失败由
+    step_summary 表达（run 保持 completed），不得改写 completed 领域语义。
     """
     from app.constants.strategy_keys import DSA_SELECTOR
     from app.services.core_artifact_repository import CoreArtifactRepository
@@ -747,6 +754,53 @@ async def _run_dsa_compatibility_projection(
             dsa_run_row = await db.get(StrategyRun, dsa_run_id)
             if dsa_run_row is None:
                 raise RuntimeError(f"DSA run 不存在 dsa_run_id={dsa_run_id}")
+
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04-PG-GATE]
+            # lineage fail-closed：恢复到已有 compatibility run 时必须核验真实身份
+            # （StrategyRun 无直列 source_core_run_id —— create_batch_run 把
+            # source_core_run_id / requirement 写入 input_overrides JSONB，
+            # existing-run 幂等查询亦以该键匹配）。lineage 不匹配 → fail-closed，
+            # 禁止把其他 CoreRun 的 DSA compatibility run 当作本 Core 的兼容输出。
+            _row_source_core = ((dsa_run_row.input_overrides or {}).get(
+                "source_core_run_id"))
+            _row_requirement = (dsa_run_row.input_overrides or {}).get("requirement")
+            if (_row_source_core != str(snapshot_run_id)) or (
+                _row_requirement != "required_compatibility"
+            ) or (getattr(dsa_run_row, "trade_date", None) != trade_date):
+                raise RuntimeError(
+                    f"[DSA compat] lineage 不匹配，禁止复用: dsa_run_id={dsa_run_id}, "
+                    f"expected(source_core={snapshot_run_id}, "
+                    f"requirement=required_compatibility, trade_date={trade_date}), "
+                    f"actual(source_core={_row_source_core}, "
+                    f"requirement={_row_requirement}, "
+                    f"trade_date={getattr(dsa_run_row, 'trade_date', None)})"
+                )
+
+            # [CORRECTION-04-PG-GATE] already-published 幂等 resume：
+            # crash 发生在 publish commit 之后时，恢复路径会带着既有 dsa_run_id 重入。
+            # status == published 且 published_at 非空 → 兼容输出已达成，
+            # 直接幂等返回 succeeded；不得重新投影/持久化/质检/创建新 run，
+            # 也不得将 parent 标 partial_success（这不是失败）。
+            if getattr(dsa_run_row, "status", None) == "published":
+                if dsa_run_row.published_at is None:
+                    # fail-closed：published 但缺时间戳属损坏事实，禁止冒充成功。
+                    raise RuntimeError(
+                        f"[DSA compat] run 已 published 但 published_at 缺失，"
+                        f"拒绝幂等复用: dsa_run_id={dsa_run_id}"
+                    )
+                logger.info(
+                    "[AfterClose][DSA compat] 已发布兼容 run 幂等复用（resume）: "
+                    "dsa_run_id=%s, published_at=%s",
+                    dsa_run_id, dsa_run_row.published_at,
+                )
+                return {
+                    "status": "succeeded",
+                    "dsa_run_id": str(dsa_run_id),
+                    "published_at": dsa_run_row.published_at.isoformat()
+                    if hasattr(dsa_run_row.published_at, "isoformat") else None,
+                    "resumed": True,
+                }
+
             strategy_version_id = dsa_run_row.strategy_version_id
 
             # 2) DSA 预计算投影（不重算算法，仅从持久化 snapshot 重建 artifact）
@@ -819,9 +873,18 @@ async def _run_dsa_compatibility_projection(
             if hasattr(verify_row.published_at, "isoformat") else None,
         }
     except Exception as dsa_exc:
-        # [CORRECTION-04] 执行异常：先如实落 DSA run failure 状态（尽力而为），
-        # 然后向 optional executor re-raise —— 由 execute_orchestrator_step 吸收为
-        # step_summary["dsa_compatibility"] failed → parent partial_success。
+        # [CORRECTION-04-PG-GATE] 状态所有权准确描述（修正过宽的"所有异常都会把
+        # run 标 failed"表述）：
+        # - 仅当 run 仍处于执行中非终态（queued/running 等执行阶段异常）时，
+        #   才按既有状态机把 StrategyRun 标记 failed —— StrategyRun.status==completed
+        #   表示「DSA projection 计算完成」，该领域语义不得被改写；
+        # - completed 之后的质量门禁失败 / 未发布，由统一执行器的
+        #   step_summary["dsa_compatibility"].status=failed 表达（run 保持 completed），
+        #   不回写 completed→failed；
+        # - lineage fail-closed / published-at 缺失等校验异常发生在已终态行上，
+        #   同样不触碰 row 状态。
+        # 异常本身继续向 optional executor re-raise：由 execute_orchestrator_step
+        # 吸收为 step_summary["dsa_compatibility"] failed → parent partial_success。
         # 绝不在 helper 内吞掉异常伪造状态；Core/Review 不受影响（post-core 位置保证）。
         logger.error(
             "[AfterClose][DSA compat] 兼容性投影失败（OPTIONAL）: "
@@ -2281,15 +2344,14 @@ async def _execute_review_step(
 ) -> dict[str, Any]:
     """[AC-02] computing_review 业务体（软失败，不阻断主流程）。
 
-    [SLICE-01-CORRECTION H2] exact-T History 硬依赖门控：
-    调用方（computing_history 步骤）已自动推进并校验当前 trade_date 的 First
-    Pyramid History 是否 exact-T ready，并通过 history_ready 布尔传入。
-    - history_ready=False（History 未生产 / 未 exact-T ready）→ Review 不得计算
-      或发布，直接返回 gate_blocked——满足 invariant H2：History(T) 缺失 →
-      Review NOT computed / NOT published。
-    - history_run_id 仅作诊断 metadata，不参与 gate 判定；即使存在 UUID，
-      history_ready=False 仍必须 gate_blocked（run 存在 ≠ run exact-T ready）。
-    这是硬门控，不等同于软失败（不切 pointer、不写发布）。
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 / CORRECTION-04-PG-GATE] 当前合同：
+    Review(T) = Core(T) + History(<T)。当前第一金字塔事实直接来自
+    Core(T) StockFeatureSnapshot（由显式 source_core_run_id=snapshot_run_id=X 锁定）；
+    历史 baseline 来自 FirstPyramidHistoryDailyState 的 <=T-1 状态。
+    History(T) 在 Review 之后由 computing_history 生产，exact-T History(T)
+    不是 Review 前置条件；stock_core publication 不是 Review readiness owner。
+    （history_ready/history_run_id 参数保留为兼容签名与诊断 metadata，
+    不再参与 gate 判定 —— 原 invariant H2 硬门控已移除。）
 
 
     原为 execute_after_close_run 内的内联块；Phase0 收口后抽为独立业务体，
@@ -2337,10 +2399,11 @@ async def _execute_review_step(
     if not skip_review:
         # [CHANGE-20260826-001 Slice 1 REVIEW-CURRENT-OWNER-01]
         # Review(T) = Core(T) + History(<T)。exact-T History(T) 不再是 Review 前置条件：
-        # Review 当前第一金字塔事实直接来自已发布的 Core(T)（StockFeatureSnapshot，
-        # 锁定 source_core_run_id）；历史 baseline 来自 FirstPyramidHistoryDailyState
-        # 的 <=T-1 状态（独立于 exact-T History(T)）。因此移除旧的「History(T) 未就绪
-        # 即阻断 Review」硬门控（原 invariant H2）；Review 仅依赖已发布 stock_core。
+        # Review 当前第一金字塔事实直接来自 Core(T)（StockFeatureSnapshot，
+        # 由显式 source_core_run_id=snapshot_run_id 锁定）；历史 baseline 来自
+        # FirstPyramidHistoryDailyState 的 <=T-1 状态（独立于 exact-T History(T)）。
+        # 因此移除旧的「History(T) 未就绪即阻断 Review」硬门控（原 invariant H2）；
+        # stock_core publication 不是 Review readiness owner，Review 不经任何 pointer 解析。
         # 注意：本 Slice 不引入任何 review-history-v3 DB write（v3 物化在 Slice 4 接回）。
         # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core 计算完成后直接进入 Review。
         # Review 的 readiness 仅依赖本次 AfterCloseRun 产生的 CoreRun（StockFeatureSnapshotRun，
@@ -3745,7 +3808,8 @@ async def execute_after_close_run(
         _aggregation_status = "skipped"
 
         # ---- 步骤 4.4: computing_history（First Pyramid History 自动生产 + exact-T readiness gate） ----
-        # [SLICE-01-CORRECTION] Review(T) 硬依赖 exact-T First Pyramid History。
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] History(T) 在 Review 之后生产：
+        # Review(T) = Core(T) + History(<T)，exact-T History(T) 不再是 Review 前置。
         # 此步骤负责：
         #  1) 解析/创建当前 canonical FirstPyramidHistoryRun（producer resolver，幂等）；
         #  2) 调用既有 canonical advancement owner「advance_history_to_trade_date」

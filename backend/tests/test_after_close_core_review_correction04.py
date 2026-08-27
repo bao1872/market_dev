@@ -120,6 +120,12 @@ def _strategy_run(status="completed", succeeded_count=95):
     row.strategy_version_id = uuid.uuid4()
     row.published_at = None
     row.error_message = None
+    row.trade_date = T_DATE
+    # [CORRECTION-04-PG-GATE] lineage 以 input_overrides 承载（与生产写入同构）
+    row.input_overrides = {
+        "source_core_run_id": "CORE-X",
+        "requirement": "required_compatibility",
+    }
     return row
 
 
@@ -843,3 +849,162 @@ def test_publish_stock_core_not_referenced_by_orchestrator_structural_I():
     assert "publish_stock_core_atomically(" not in src, (
         "主链源码不得调用 publish_stock_core_atomically"
     )
+
+
+# ---------------------------------------------------------------------------
+# DSA already-published resume（CORRECTION-04-PG-GATE Case R1/R2/R3）
+# ---------------------------------------------------------------------------
+
+
+_PUBLISHED_AT_AUTO = object()  # 仅在未显式指定时自动生成时间戳
+
+
+def _published_dsa_row(
+    *,
+    status="published",
+    published_at=_PUBLISHED_AT_AUTO,
+    source_core="CORE-X",
+    requirement="required_compatibility",
+):
+    from app.models.strategy_run import StrategyRun
+    from datetime import datetime, timezone
+
+    row = StrategyRun()
+    row.id = uuid.uuid4()
+    row.status = status
+    if published_at is _PUBLISHED_AT_AUTO:
+        row.published_at = (
+            datetime.now(timezone.utc) if status == "published" else None
+        )
+    else:
+        row.published_at = published_at  # 允许显式 None（Case R3）
+    row.trade_date = T_DATE
+    row.succeeded_count = 95
+    row.total_instruments = 100
+    row.strategy_version_id = uuid.uuid4()
+    # lineage 以 input_overrides JSONB 承载（与 create_batch_run 写入路径同构）
+    row.input_overrides = {
+        "source_core_run_id": source_core,
+        "requirement": requirement,
+    }
+    return row
+
+
+@pytest.mark.asyncio
+async def test_dsa_resume_published_idempotent_R1():
+    """Case R1: 已 published + lineage 正确 → resume 幂等返回 succeeded；
+    projection call_count=0、create_batch_run call_count=0。"""
+    dsa_row = _published_dsa_row(published_at=datetime.now(timezone.utc))
+    store = {
+        ("SchedulerJobRun", "JOB"): _job_row(),
+        ("StrategyRun", dsa_row.id): dsa_row,
+        dsa_row.id: dsa_row,
+    }
+
+    spec_create = create_autospec(StrategyBatchService.create_batch_run)
+
+    async def _must_not_create(_self, **kw):
+        raise AssertionError("已发布 run 恢复不得新建 compatibility run")
+
+    spec_create.side_effect = _must_not_create
+
+    class RepoMustNotRun:
+        def __init__(self, *a, **k):
+            self.calls = []
+
+        async def project_dsa_batch(self, **kw):
+            raise AssertionError("已发布 run 恢复不得重新投影")
+
+    spec_publish = create_autospec(StrategyBatchService.publish_run)
+
+    async def _must_not_publish(_self, db, run_id):
+        raise AssertionError("已发布 run 恢复不得重复 publish")
+
+    spec_publish.side_effect = _must_not_publish
+
+    import app.services.core_artifact_repository as car_mod
+
+    with (
+        patch_session_local(orch, lambda: FakeSessionCtx(store)),
+        patch_publish_stack(spec_publish, spec_create, None),
+        patch_publish_repo(car_mod, RepoMustNotRun),
+    ):
+        result = await _run_dsa_compatibility_projection(
+            job_run_id="JOB",
+            worker_id="w1",
+            lease_epoch=1,
+            trade_date=T_DATE,
+            snapshot_run_id="CORE-X",
+            dsa_run_id=dsa_row.id,
+            instrument_ids=["600000"],
+        )
+
+    assert result["status"] == "succeeded"
+    assert result.get("resumed") is True
+    assert result["dsa_run_id"] == str(dsa_row.id)
+    assert spec_create.call_count == 0, "create_batch_run call_count 必须为 0"
+    assert spec_publish.call_count == 0
+
+
+class _NoopRepo:
+    def __init__(self, *a, **k):
+        pass
+
+    async def project_dsa_batch(self, **kw):
+        raise AssertionError("lineage 校验失败路径不得触发投影")
+
+
+@pytest.mark.asyncio
+async def test_dsa_resume_lineage_mismatch_fail_closed_R2():
+    """Case R2: source_core_run_id != X → fail-closed，禁止复用他人兼容输出。"""
+    dsa_row = _published_dsa_row(source_core="OTHER-CORE")
+    store = {
+        ("SchedulerJobRun", "JOB"): _job_row(),
+        ("StrategyRun", dsa_row.id): dsa_row,
+        dsa_row.id: dsa_row,
+    }
+    import app.services.core_artifact_repository as car_mod
+
+    with (
+        patch_session_local(orch, lambda: FakeSessionCtx(store)),
+        patch_publish_stack(None, None, None),
+        patch_publish_repo(car_mod, _NoopRepo),
+    ):
+        with pytest.raises(RuntimeError, match="lineage"):
+            await _run_dsa_compatibility_projection(
+                job_run_id="JOB",
+                worker_id="w1",
+                lease_epoch=1,
+                trade_date=T_DATE,
+                snapshot_run_id="CORE-X",
+                dsa_run_id=dsa_row.id,
+                instrument_ids=["600000"],
+            )
+
+
+@pytest.mark.asyncio
+async def test_dsa_resume_published_without_timestamp_fail_closed_R3():
+    """Case R3: published 但 published_at=None → fail-closed，禁止冒充成功。"""
+    dsa_row = _published_dsa_row(status="published", published_at=None)
+    store = {
+        ("SchedulerJobRun", "JOB"): _job_row(),
+        ("StrategyRun", dsa_row.id): dsa_row,
+        dsa_row.id: dsa_row,
+    }
+    import app.services.core_artifact_repository as car_mod
+
+    with (
+        patch_session_local(orch, lambda: FakeSessionCtx(store)),
+        patch_publish_stack(None, None, None),
+        patch_publish_repo(car_mod, _NoopRepo),
+    ):
+        with pytest.raises(RuntimeError, match="published_at"):
+            await _run_dsa_compatibility_projection(
+                job_run_id="JOB",
+                worker_id="w1",
+                lease_epoch=1,
+                trade_date=T_DATE,
+                snapshot_run_id="CORE-X",
+                dsa_run_id=dsa_row.id,
+                instrument_ids=["600000"],
+            )

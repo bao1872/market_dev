@@ -468,7 +468,17 @@ class VerifyAttempt:
              # 不消费 History(T)。本文件断言 verify DB 身份（bz_stock_verify_<sha> 且 != bz_stock）
              # 并证明 same-day 两 run 只读取 source_core_run_id；错误/缺失 run fail-closed 不
              # fallback。仅追加，不删除/替换已有文件；不动态 discovery；不扩大为全量 -m postgres。
-             "tests/test_slice1_current_facts_lock.py"],
+             "tests/test_slice1_current_facts_lock.py",
+
+             # [CORRECTION-04-PG-GATE / 2026-08-26] 盘后 DSA compatibility contract 收口：
+             # PG-A required_compatibility create_batch_run lineage/universe、
+             # PG-B 完整生产持久化链（真实 codec artifact → project → persist → quality →
+             # publish_run(db,run_id) → commit → 新 session 读回 published），
+             # PG-C projection 失败时 Core succeeded / Review lineage 保持。
+             # 自包含 synthetic universe（calendar/instruments/bars/released version/artifact），
+             # 不读 bz_stock。仅追加，不删除/替换既有文件；不动态 discovery；
+             # 不扩大为全量 -m postgres。
+             "tests/test_pg_dsa_compat_after_close04.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:

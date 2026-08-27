@@ -1,124 +1,176 @@
-"""Targeted-PG closure (1-7) for CORRECTION-04 DSA compatibility contract.
+"""Targeted-PG closure (PG-A/B/C) for CORRECTION-04-PG-GATE.
 
-Synthetic data only. NO production bz_stock fixture is read.
+Self-contained synthetic tests: calendar / instruments / bars / released DSA
+version / persisted Core artifacts are ALL created by these tests inside the
+verification database. NO production bz_stock fixture is read.
 Registry: scripts/verify/verify_attempt.py -> run_self_contained_pg_tests
 (仅追加注册；不动态 discovery；不扩大为全量 -m postgres)。
 
-审计十六最小覆盖：
-1. CoreRun succeeded
-2. 创建 required_compatibility DSA run（helper dsa_run_id=None 路径）
-3. 执行 persisted Core artifact projection（project_dsa_batch）
-4. publish_run(db, run_id)（真实签名，内部只 flush）
-5. commit（helper 显式提交）
-6. 新 session 读回：StrategyRun.status == published 且 published_at != null
-7. DSA failure 场景：helper raise（投影无产物/未达 completed）→
-   CoreRun.status 仍 succeeded；MarketReviewRun(source_core_run_id=X)
-   lineage 不被撤销；兼容性 run 如实标 failed。
+责任拆分：
+- PG-A  required_compatibility create_batch_run 在 synthetic released version
+        + market readiness 下：source_core_run_id==X、requirement==required_compatibility、
+        total_instruments == synthetic universe count（2）。
+- PG-B  给定真实 compatibility run + 可解码 persisted Core artifact，
+        执行完整生产持久化链（不 mock）：
+        StockFeatureSnapshot → iter_core_artifacts → decode_dsa_projection_from_summary
+        → project_dsa_batch → persist_precomputed_dsa_results → run completed
+        → quality gate → publish_run(db, run_id) → commit
+        → 新 session 读回 status==published 且 published_at != null。
+- PG-C  projection/persistence 失败（无可投影 artifact）：CoreRun.status 仍
+        succeeded；MarketReviewRun.source_core_run_id 仍 == X；
+        不产生 published 成功事实。
 
-DB identity fail-closed：APP_ENV=verification 且 current_database() ==
-bz_stock_verify_<sha> 且 != bz_stock。
+DB identity（fail-closed，测试自身要求）：
+- APP_ENV == "verification"（非空）
+- current_database() 匹配 ^bz_stock_verify_[0-9a-f]{40}$ 且 != bz_stock
+- 完整 SHA ↔ DB 一一对应由 verify_attempt.py identity gate 负责。
 """
 
-import json
 import os
+import re
 import uuid
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 import pytest
 from sqlalchemy import select, text
 
 from app.db import AsyncSessionLocal
+from app.models.bar import BarDaily
+from app.models.calendar import TradingCalendar
+from app.models.instrument import Instrument
 from app.models.market_review import MarketReviewRun
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+from app.models.stock_feature_snapshot_run_item import StockFeatureSnapshotRunItem
+from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_run import StrategyRun
 from app.services.after_close_orchestrator import (
     _run_dsa_compatibility_projection,
     _validate_core_ready,
 )
+from app.services.core_artifact_codec import (
+    CORE_ARTIFACT_SCHEMA_VERSION,
+    encode_core_artifact_to_summary,
+)
+from app.services.calendar_service import is_trading_day_async
+from app.constants.strategy_keys import DSA_SELECTOR
 
 pytestmark = pytest.mark.postgres
 
 T = date(2026, 8, 26)
 
+_VERIFY_DB_RE = re.compile(r"^bz_stock_verify_[0-9a-f]{40}$")
+
 
 async def _assert_verify_db(db_session):
-    """fail-closed：必须处于 bz_stock_verify_<sha>，绝不允许连到 bz_stock。"""
-    row = (
-        await db_session.execute(
-            text("select current_database(), current_setting('app.env', true)")
-        )
-    ).one()
-    db_name = row[0]
-    assert db_name.startswith("bz_stock_verify_"), (
-        f"非法验证数据库: {db_name!r}（必须是 bz_stock_verify_<sha>）"
-    )
-    assert db_name != "bz_stock"
+    """测试自身 fail-closed 身份检查。"""
     env = (os.environ.get("APP_ENV") or "").lower()
-    assert env in ("verification", ""), f"APP_ENV 必须 verification, got {env!r}"
+    assert env == "verification", f"APP_ENV 必须 verification, got {env!r}"
+    db_name = (await db_session.execute(text("select current_database()"))).scalar_one()
+    assert _VERIFY_DB_RE.match(db_name), f"非法验证数据库: {db_name!r}"
+    assert db_name != "bz_stock"
     return db_name
 
 
-async def _make_instruments(db_session, n=2):
-    from app.models.instrument import Instrument
+# ---------------------------------------------------------------------------
+# self-contained synthetic universe（2 只股票 + 交易日历 + 当日 K 线）
+# ---------------------------------------------------------------------------
 
-    out = []
-    for i in range(n):
+
+async def _seed_calendar(db_session):
+    T_prev = T - timedelta(days=1)
+    for d, trading in ((T, True), (T_prev, True)):
+        db_session.add(
+            TradingCalendar(trade_date=d, is_trading_day=trading, market="A")
+        )
+    await db_session.flush()
+    return T_prev
+
+
+async def _seed_universe(db_session):
+    inst_ids = []
+    for i in range(2):  # 最小 synthetic universe：2 只股票
+        sym = f"6{uuid.uuid4().hex[:5]}"[:6].ljust(6, "0")
         inst = Instrument(
             id=uuid.uuid4(),
-            symbol=f"T{uuid.uuid4().hex[:16]}",
-            name=f"cor04_{i}",
-            market="SZ",
+            symbol=sym,
+            name=f"cor04pg_{i}",
+            market="SH",
             status="active",
-            listing_date=date(2010, 1, 4),
+            listing_date=T - timedelta(days=3650),  # 非 new listing
         )
         db_session.add(inst)
-        out.append(inst.id)
-    await db_session.flush()
-    return out
+        inst_ids.append(inst.id)
+    return inst_ids
 
 
-async def _make_core_run_with_snapshots(db_session, n=2):
-    """点1 前置：StockFeatureSnapshotRun(succeeded) + core run items + snapshots。"""
-    from app.models.stock_feature_snapshot import StockFeatureSnapshot
-    from app.models.stock_feature_snapshot_run_item import (
-        StockFeatureSnapshotRunItem,
-    )
-
-    inst_ids = await _make_instruments(db_session, n=n)
-    run = StockFeatureSnapshotRun(
-        trade_date=T,
-        run_type="after_close",
-        status="succeeded",
-        started_at=datetime.now().astimezone(),
-        finished_at=datetime.now().astimezone(),
-    )
-    db_session.add(run)
-    await db_session.flush()
+async def _seed_bars_for_coverage(db_session, inst_ids, dates):
     for iid in inst_ids:
-        db_session.add(
-            StockFeatureSnapshotRunItem(
-                snapshot_run_id=run.id, instrument_id=iid,
-                phase="core", status="succeeded",
+        for d in dates:
+            db_session.add(
+                BarDaily(instrument_id=iid, trade_date=d, close=Decimal("10.00"))
             )
-        )
-        # 三键 payload 与生产写入路径同构（proven 模式：runtime_blocker_closure）
-        db_session.add(
-            StockFeatureSnapshot(
-                instrument_id=iid,
-                trade_date=T,
-                primary_timeframe="1d",
-                secondary_timeframe="15m",
-                adj="qfq",
-                schema_version=1,
-                source_run_id=run.id,
-                structural_payload={"ok": True},
-                temporal_payload={"ok": True},
-                summary_payload={"ok": True},
-            )
-        )
+
+
+async def _seed_released_dsa_version(db_session):
+    d = StrategyDefinition(
+        strategy_key=f"test_dsa_cor04_{uuid.uuid4().hex[:8]}",
+        kind="selector",
+        display_name="CORRECTION-04-PG-GATE DSA compat",
+    )
+    db_session.add(d)
     await db_session.flush()
-    return run
+    v = StrategyVersion(
+        strategy_definition_id=d.id,
+        version="1.0.0",
+        status="released",
+        manifest={"outputs": [], "parameters": []},
+        build_hash=uuid.uuid4().hex,
+        released_at=datetime.now().astimezone(),
+    )
+    db_session.add(v)
+    await db_session.flush()
+    return v
+
+
+def _artifact_summary_payload(seq, *, core_run_id, algo_ver):
+    """生产 codec 构造可被 decode_dsa_projection_from_summary 真实解码的 artifact。"""
+    block = encode_core_artifact_to_summary(
+        schema_version=CORE_ARTIFACT_SCHEMA_VERSION,
+        first_pyramid_core={"trend": {"availability": "ready"}, "nBars": 250},
+        structural_payload={"dsa_segment": {"seg": 1}},
+        dsa_projection_payload={"dsa_vwap": 10.5, "dsa_dir_bars": 12},
+        dsa_visual_contract={"dsa_vwap": 10.5},
+        state_event_candidates=[{"type": "structure_break", "t": str(T)}],
+        availability={
+            "trend": "ready", "structure": "ready", "momentum": "ready",
+        },
+        parameter_hash=f"ph-{seq}",
+        source_core_run_id=str(core_run_id),
+        algorithm_versions={"dsa": algo_ver},
+        input_hash=f"in-{seq}",
+        bars_hash=f"bars-{seq}",
+        adj_factor_hash=f"adj-{seq}",
+        diagnostics={"dsa": 1, "smc": 1},
+    )
+    return {"coreArtifact": block}
+
+
+def _make_job_row():
+    now = datetime.now().astimezone()
+    return SchedulerJobRun(
+        job_name="after_close_orchestrator",
+        business_date=T.isoformat(),
+        run_key=f"after_close_orchestrator:pg_cor04:{uuid.uuid4().hex[:8]}",
+        status="running",
+        scheduled_at=now,
+        started_at=now,
+        heartbeat_at=now,
+        lease_expires_at=now,
+        metadata_json="{}",
+    )
 
 
 def _make_review_run(core_run):
@@ -134,78 +186,149 @@ def _make_review_run(core_run):
     )
 
 
-def _make_job_row():
-    now = datetime.now().astimezone()
-    return SchedulerJobRun(
-        job_name="after_close_orchestrator",
-        business_date=T.isoformat(),
-        run_key=f"after_close_orchestrator:pg_cor04:{uuid.uuid4().hex[:8]}",
-        status="running",
-        scheduled_at=now,
-        started_at=now,
-        heartbeat_at=now,
-        lease_expires_at=now,
-        metadata_json=json.dumps({}),
-    )
+# ---------------------------------------------------------------------------
+# PG-A
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_pg_cor04_points_1_to_6_publish_roundtrip(db_session) -> None:
-    """点1-6: Core succeeded → 兼容 run 创建/投影/publish_run(db,id)/commit →
-    新会话读回 published；Core/Review lineage 保持完好。"""
+async def test_pg_a_compat_create_batch_run_lineage_and_universe(db_session):
     await _assert_verify_db(db_session)
 
-    core_run = await _make_core_run_with_snapshots(db_session)
+    _prev = await _seed_calendar(db_session)
+    inst_ids = await _seed_universe(db_session)
+    await _seed_bars_for_coverage(db_session, inst_ids, [T])
+    version = await _seed_released_dsa_version(db_session)
+    core_run = StockFeatureSnapshotRun(
+        trade_date=T, run_type="after_close", status="succeeded",
+        started_at=datetime.now().astimezone(),
+        finished_at=datetime.now().astimezone(),
+    )
+    db_session.add(core_run)
+    await db_session.commit()
+
+    # readiness 自证：synthetic universe 必须处于就绪态
+    assert await is_trading_day_async(db_session, T) is True
+
+    from app.services.strategy_batch_service import StrategyBatchService
+
+    svc = StrategyBatchService()
+    run = await svc.create_batch_run(
+        db=db_session,
+        strategy_key=DSA_SELECTOR,
+        trade_date=T,
+        run_type="scheduled",
+        instrument_ids=inst_ids,   # 真实 UUID 列表（[] 会造成 total=0）
+        claim_for_worker="orchestrator:pg-a",
+        source_core_run_id=core_run.id,
+        requirement="required_compatibility",
+    )
+    await db_session.commit()
+
+    assert run.source_core_run_id == core_run.id or (
+        (run.input_overrides or {}).get("source_core_run_id") == str(core_run.id)
+    ), "compatibility lineage 必须绑定 Core X"
+    assert (run.input_overrides or {}).get("requirement") == "required_compatibility"
+    assert run.total_instruments == len(inst_ids), (
+        "total_instruments 必须 == synthetic universe count"
+    )
+    assert run.status in ("queued", "running")
+
+
+# ---------------------------------------------------------------------------
+# PG-B
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pg_b_full_projection_publish_readback(db_session):
+    from uuid import UUID
+
+    await _assert_verify_db(db_session)
+
+    _prev = await _seed_calendar(db_session)
+    inst_ids = await _seed_universe(db_session)
+    await _seed_bars_for_coverage(db_session, inst_ids, [T])
+    version = await _seed_released_dsa_version(db_session)
+    core_run = StockFeatureSnapshotRun(
+        trade_date=T, run_type="after_close", status="succeeded",
+        started_at=datetime.now().astimezone(),
+        finished_at=datetime.now().astimezone(),
+    )
+    db_session.add(core_run)
+    await db_session.flush()
+
     review_row = _make_review_run(core_run)
     db_session.add(review_row)
     job = _make_job_row()
     db_session.add(job)
-    await db_session.commit()  # 让独立 session 可见基线数据
+    for iid in inst_ids:
+        db_session.add(
+            StockFeatureSnapshotRunItem(
+                snapshot_run_id=core_run.id, instrument_id=iid,
+                phase="core", status="succeeded",
+            )
+        )
+        # 真实可 decode 的 versioned Core artifact（生产 codec 构造）
+        db_session.add(
+            StockFeatureSnapshot(
+                instrument_id=iid,
+                trade_date=T,
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=1,
+                source_run_id=core_run.id,
+                structural_payload=_artifact_summary_payload(
+                    str(iid)[:8], core_run_id=core_run.id,
+                    algo_ver=version.version,
+                ),
+                temporal_payload={},
+                summary_payload={},
+            )
+        )
+    await db_session.commit()
 
-    # 点1: canonical owner 对真实行判定成功
     async with AsyncSessionLocal() as vdb:
         validated = await _validate_core_ready(vdb, core_run.id, T)
         assert validated.status == "succeeded"
 
-    # 点2-5: helper 全链（required_compatibility run 创建 → 投影 → publish_run → commit）
+    # 完整生产 helper 链：无任何持久化环节 mock
     result = await _run_dsa_compatibility_projection(
         job_run_id=job.id,
-        worker_id="pg-cor04",
+        worker_id="pg-b",
         lease_epoch=None,
         trade_date=T,
         snapshot_run_id=core_run.id,
         dsa_run_id=None,
-        instrument_ids=[],
+        instrument_ids=inst_ids,
     )
     assert result["status"] == "succeeded", result
-    assert result.get("published_at")  # 点5: helper 显式 commit 后取得发布时间
+    assert result.get("published_at")
 
-    # 点6: 新开 session 读回持久化事实
     async with AsyncSessionLocal() as pdb:
-        row = await pdb.get(StrategyRun, uuid.UUID(result["dsa_run_id"]))
-        assert row is not None
+        row = await pdb.get(StrategyRun, UUID(result["dsa_run_id"]))
         assert row.status == "published"
         assert row.published_at is not None
-        assert row.requirement == "required_compatibility"
+        assert (row.input_overrides or {}).get("requirement") == "required_compatibility"
 
-    # Core / Review lineage 未被兼容性工作破坏
-    async with AsyncSessionLocal() as cdb:
-        c2 = await cdb.get(StockFeatureSnapshotRun, core_run.id)
-        assert c2.status == "succeeded"
-        r2 = await cdb.get(MarketReviewRun, review_row.id)
-        assert r2.status == "published"
+
+# ---------------------------------------------------------------------------
+# PG-C
+# ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_pg_cor04_point7_dsa_failure_preserves_lineage(db_session) -> None:
-    """点7: 投影无产物（无 snapshot 行）→ helper RuntimeError；
-    CoreRun.status 保持 succeeded；Review lineage 不被撤销；兼容 run 标 failed。"""
+async def test_pg_c_projection_failure_preserves_lineage(db_session):
+    from uuid import UUID
+
     await _assert_verify_db(db_session)
 
+    await _seed_calendar(db_session)
+    await _seed_universe(db_session)
+    version = await _seed_released_dsa_version(db_session)
     core_run = StockFeatureSnapshotRun(
-        trade_date=T,
-        run_type="after_close",
-        status="succeeded",
+        trade_date=T, run_type="after_close", status="succeeded",
         started_at=datetime.now().astimezone(),
         finished_at=datetime.now().astimezone(),
     )
@@ -214,12 +337,13 @@ async def test_pg_cor04_point7_dsa_failure_preserves_lineage(db_session) -> None
     db_session.add(review_row)
     job = _make_job_row()
     db_session.add(job)
+    # 无 snapshot 行 → 投影零产物 → 未达 completed → RuntimeError
     await db_session.commit()
 
     with pytest.raises(RuntimeError):
         await _run_dsa_compatibility_projection(
             job_run_id=job.id,
-            worker_id="pg-cor04",
+            worker_id="pg-c",
             lease_epoch=None,
             trade_date=T,
             snapshot_run_id=core_run.id,
@@ -227,10 +351,9 @@ async def test_pg_cor04_point7_dsa_failure_preserves_lineage(db_session) -> None
             instrument_ids=[],
         )
 
-    # Core 不被撤销；Review lineage 完好
     async with AsyncSessionLocal() as cdb:
         c2 = await cdb.get(StockFeatureSnapshotRun, core_run.id)
-        assert c2.status == "succeeded"
+        assert c2.status == "succeeded", "Core 不被兼容性失败撤销"
         rr = (
             await cdb.execute(
                 select(MarketReviewRun).where(
@@ -238,16 +361,19 @@ async def test_pg_cor04_point7_dsa_failure_preserves_lineage(db_session) -> None
                 )
             )
         ).scalars().all()
-        assert rr and all(r.status == "published" for r in rr)
+        assert rr and all(
+            r.source_core_run_id == core_run.id and r.status == "published"
+            for r in rr
+        ), "Review lineage 保持 source_core_run_id == X"
 
-    # 兼容性 run 已如实标 failed（不得伪造 completed/published）
-    async with AsyncSessionLocal() as sdb:
-        rows = (
-            await sdb.execute(
+        compat_runs = (
+            await cdb.execute(
                 select(StrategyRun).where(
                     StrategyRun.trade_date == T,
                     StrategyRun.requirement == "required_compatibility",
                 )
             )
         ).scalars().all()
-        assert rows and all(r.status == "failed" for r in rows)
+        assert compat_runs and all(
+            r.status != "published" for r in compat_runs
+        ), "兼容性不得产生 published 成功事实"
