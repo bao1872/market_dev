@@ -25,6 +25,13 @@
 
 ## 1. 最终业务链
 
+> **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] 冻结架构**：正常主链为
+> `Core Compute Once → Core Ready（canonical 事实源）→ Review(X) → History(T) →
+> post-core optional/compatibility`。`stock_core` FactorPublication 已不是
+> Core→Review 主链的 mandatory step 或 readiness owner（publication 不是内部
+> readiness owner）；它仅作为 legacy 兼容机制暂留。post-core 的 DSA compatibility、
+> state_events、chip 均不阻断 Core / Review。
+
 ```text
 市场事实
 → CoreRunContext
@@ -33,24 +40,33 @@
    ├─ Structure = SMC
    └─ Momentum
 → CoreComputationArtifact
-   ├─ stock_core canonical publication
-   └─ DSA compatibility projection（同一 canonical DSA artifact，不重新计算）
-→ stock_core 发布
-→ post-core 产品
-   ├─ state_events
+→ Core Ready Gate（canonical 唯一事实源：run 存在 AND id 匹配 AND trade_date==T
+   AND status==succeeded；snapshot_run_id 非空 / publication / snapshot_error 均不构成就绪）
+→ Review（source_core_run_id = X 显式绑定）
+→ History(T)
+→ post-core optional / compatibility
+   ├─ DSA compatibility projection（同一 canonical DSA artifact，不重新计算；
+   │  经统一执行器 optional=True；失败 → degraded/partial_success，不撤销 Core/Review）
+   ├─ state_events（X）
    ├─ chip_consensus（daily + 15m 异步增强）
-   ├─ auction_anchor（legacy AuctionAnchor，DEPRECATED，见 [PRD75 §23](../prd/75-auction-analysis.md#23-legacy-auctionanchor-deprecation--migration-gap)；新 Auction 是次日 9:25 产品，不属于盘后编排节点）
-   └─ board_aggregation → market_review
+   └─ auction_anchor（legacy AuctionAnchor，DEPRECATED，见 [PRD75 §23](../prd/75-auction-analysis.md#23-legacy-auctionanchor-deprecation--migration-gap)；新 Auction 是次日 9:25 产品，不属于盘后编排节点）
+   （legacy 兼容路径：stock_core publication 仅在此之后按需保留，非 mandatory 主链）
 → ProductReadinessService 动态聚合
 → 行情、详情、Review、竞价和管理后台消费正式结果
 ```
 
 ### PC-01 Canonical
 
-- 个股核心唯一 canonical 是正式 `stock_core` pointer 指向的数据。
+- 个股核心唯一 canonical 是 Core compute 完成的第一金字塔事实（`StockFeatureSnapshotRun`
+  status==succeeded / compute-complete，且由 `ReviewRun.source_core_run_id` 显式绑定）；
+  **[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** 正常 Core→Review 主链不再经
+  `stock_core` FactorPublication pointer 解析。`stock_core` pointer 作为 legacy
+  兼容机制可继续存在，但其发布/读取不再是 Core→Review 主链的 readiness 条件或同步机制。
 - 第一金字塔 core 固定为 trend + structure + momentum。
-- chip 是非破坏异步增强，不得写回或覆盖已发布 stock_core。
-- 正式消费者不得用 `max(created_at)`、最新成功行或父任务 metadata 代替 publication/readiness。
+- chip 是非破坏异步增强，不得写回或覆盖已发布的 Core 产物与 Review lineage。
+- 正式消费者不得用 `max(created_at)`、最新成功行或父任务 metadata 代替 canonical run
+  状态 / Core Ready 判定。Core Ready 唯一事实源为对真实 CoreRun 行的显式校验，
+  不接受以 `snapshot_run_id 非空`、`publication 存在` 或 `snapshot_error is None` 代位。
 
 ### PC-02 Compute Once
 

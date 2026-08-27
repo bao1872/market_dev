@@ -681,30 +681,33 @@ async def _run_dsa_compatibility_projection(
     snapshot_run_id: uuid.UUID,
     dsa_run_id: uuid.UUID | None,
     instrument_ids: list[str],
-) -> str:
-    """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] post-core OPTIONAL DSA 兼容性投影。
+) -> dict[str, Any]:
+    """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] post-core OPTIONAL DSA 兼容性投影。
 
-    从 mandatory Core(computing_features) 路径移出，作为 Core 就绪 → Review → History
-    之后的 OPTIONAL 兼容工作执行。其失败必须：
+    状态 owner 是统一执行器 execute_orchestrator_step("dsa_compatibility",
+    optional=True) 的 summary —— 本函数不再自持 catch-all return 状态机：
+    执行异常时先如实把 DSA run 标记为 failed，然后把异常向 optional executor
+    re-raise（由 executor 吸收为 step_summary["dsa_compatibility"].status="failed"
+    → optional_failures → parent partial_success）。成功返回业务结果 dict。
 
-    - 不标记 Core failed（Core 已 succeeded，且此函数绝不 raise 到外层）；
-    - 不阻断 Review（Review 已在上方完成）；
-    - 仅产生 partial_success / degraded，并如实写入 step_summary；
-    - 状态来自真实执行结果（succeeded/failed/skipped/not_run），不得仅由 run id 推断成功。
+    内部合同（全部不重算 DSA kernel，仅消费已持久化 Core artifact）：
 
-    仅从已持久化 Core artifact 投影（project_dsa_batch + persist_precomputed_dsa_results），
-    不重算 DSA kernels。
+    1. 创建/复用 required_compatibility StrategyRun（source_core_run_id=X）
+    2. project_dsa_batch + persist_precomputed_dsa_results（从 snapshot 重建 artifact）
+    3. 质量门禁（run 必须 completed 且 succeeded>0 → _check_quality_gates）
+    4. publish_run 真实签名调用：await StrategyBatchService().publish_run(db, run_id)
+       （内部只 flush 不 commit）→ 由本函数显式 commit
+    5. 提交后复核真实行：status == "published" 且 published_at 非空，
+       否则视为兼容性输出未达成 → RuntimeError（optional failed，绝不伪造成功）
     """
     from app.constants.strategy_keys import DSA_SELECTOR
-    from app.models.stock_feature_snapshot_run import STATUS_SUCCEEDED
     from app.services.core_artifact_repository import CoreArtifactRepository
     from app.services.strategy_batch_service import (
         StrategyBatchService,
         persist_precomputed_dsa_results,
     )
 
-    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] batch_service 为函数内局部实例
-    # （原 mandatory 路径亦如此），不污染模块级符号。
+    # 局部实例（原 mandatory 路径亦如此），不污染模块级符号。
     batch_service = StrategyBatchService()
 
     try:
@@ -761,59 +764,88 @@ async def _run_dsa_compatibility_projection(
                 )
                 await db.commit()
 
-            # 3) 组合质量门禁（仅 DSA run 已 completed 且有成功结果时）
+            # 3) 质量门禁前提：run 必须已达 completed 且有成功结果。
             refreshed = await db.get(StrategyRun, dsa_run_id)
-            if refreshed.status == "completed" and (refreshed.succeeded_count or 0) > 0:
-                result_count = await strategy_result_repository.count_by_run(
-                    db, dsa_run_id
+            if refreshed.status != "completed":
+                raise RuntimeError(
+                    f"[DSA compat] 投影后 run 未达 completed: "
+                    f"status={refreshed.status}, dsa_run_id={dsa_run_id}"
                 )
-                quality_passed = await batch_service._check_quality_gates(
-                    refreshed, result_count=result_count, db=db
+            if (refreshed.succeeded_count or 0) <= 0:
+                raise RuntimeError(
+                    f"[DSA compat] 无成功结果禁止发布: dsa_run_id={dsa_run_id}"
                 )
-                if not quality_passed:
-                    await _update_orchestrator_status(
-                        db=db,
-                        job_run=job_run,
-                        status=AfterCloseRunStatus.COMPUTING_FEATURES,
-                        message=(
-                            f"[DSA compat] 组合质量门禁未通过: dsa_run_id={dsa_run_id}"
-                        ),
-                        dsa_run_id=dsa_run_id,
-                        payload={"quality_passed": False},
-                    )
-                    await db.commit()
-                    return "failed"
+            result_count = await strategy_result_repository.count_by_run(
+                db, dsa_run_id
+            )
+            quality_passed = await batch_service._check_quality_gates(
+                refreshed, result_count=result_count, db=db
+            )
+            if not quality_passed:
+                raise RuntimeError(
+                    f"[DSA compat] 组合质量门禁未通过: dsa_run_id={dsa_run_id}, "
+                    f"succeeded={refreshed.succeeded_count}, total={refreshed.total_instruments}"
+                )
 
-            # 4) 兼容性 publish_run finalization（PRD31 required_compatibility 输出）
-            svc = StrategyBatchService()
-            await svc.publish_run(dsa_run_id=dsa_run_id)
+            # 4) 兼容性发布 —— 真实签名合同（KPI-7/8）：
+            #    publish_run(db, run_id)；publish_run 内部只 flush 不自行 commit，
+            #    因此本函数随后显式 commit。
+            published_row = await StrategyBatchService().publish_run(
+                db, dsa_run_id
+            )
+            await db.commit()
+
+            # 5) 提交后复核真实行状态（不得以内存对象冒充持久化事实）
+            verify_row = await db.get(StrategyRun, dsa_run_id)
+            if verify_row is None or verify_row.status != "published":
+                raise RuntimeError(
+                    f"[DSA compat] 发布后复核失败: status="
+                    f"{getattr(verify_row, 'status', None)}, dsa_run_id={dsa_run_id}"
+                )
+            if verify_row.published_at is None:
+                raise RuntimeError(
+                    f"[DSA compat] 发布后 published_at 缺失: dsa_run_id={dsa_run_id}"
+                )
 
         logger.info(
-            "[AfterClose][DSA compat] 兼容性投影完成: dsa_run_id=%s", dsa_run_id,
+            "[AfterClose][DSA compat] 兼容性投影完成并发布: dsa_run_id=%s, "
+            "published_at=%s",
+            dsa_run_id, verify_row.published_at,
         )
-        return "succeeded"
-    except Exception as dsa_exc:  # 兼容失败：记 failed，绝不抛到外层标记 Core failed
+        return {
+            "status": "succeeded",
+            "dsa_run_id": str(dsa_run_id),
+            "published_at": verify_row.published_at.isoformat()
+            if hasattr(verify_row.published_at, "isoformat") else None,
+        }
+    except Exception as dsa_exc:
+        # [CORRECTION-04] 执行异常：先如实落 DSA run failure 状态（尽力而为），
+        # 然后向 optional executor re-raise —— 由 execute_orchestrator_step 吸收为
+        # step_summary["dsa_compatibility"] failed → parent partial_success。
+        # 绝不在 helper 内吞掉异常伪造状态；Core/Review 不受影响（post-core 位置保证）。
         logger.error(
-            "[AfterClose][DSA compat] 兼容性投影失败（OPTIONAL，不阻断 Core/Review）: "
+            "[AfterClose][DSA compat] 兼容性投影失败（OPTIONAL）: "
             "snapshot_run_id=%s, error=%s",
             snapshot_run_id, dsa_exc, exc_info=True,
         )
         try:
-            async with AsyncSessionLocal() as db:
-                failed_row = await db.get(StrategyRun, dsa_run_id) if dsa_run_id else None
+            async with AsyncSessionLocal() as fail_db:
+                failed_row = (
+                    await fail_db.get(StrategyRun, dsa_run_id) if dsa_run_id else None
+                )
                 if failed_row is not None and failed_row.status not in (
                     "completed", "failed", "partial_failed", "published"
                 ):
                     failed_row.status = "failed"
                     failed_row.error_message = f"DSA 兼容性投影失败: {dsa_exc}"[:500]
                     failed_row.finished_at = datetime.now(UTC)
-                    await db.commit()
-        except Exception as persist_exc:  # 写入失败状态也失败则仅记日志
+                    await fail_db.commit()
+        except Exception as persist_exc:
             logger.error(
                 "[AfterClose][DSA compat] 写 DSA 失败状态异常: %s", persist_exc,
                 exc_info=True,
             )
-        return "failed"
+        raise
 
 
 async def _persist_step_summary(
@@ -2711,8 +2743,10 @@ def _is_terminal_review_short_circuit(review_step_status: str | None) -> bool:
 
     Review step 为 cancelled / interrupted 时，主流程不得覆盖总任务终态：
 
-    [AUD-08 2026-08-07] 短路不再影响 chip：chip 入队已前移到 stock_core
-    发布成功之后（步骤 4.6），在本判定之前就已完成，不受 Review 成败/取消影响。
+    [CORRECTION-04 2026-08-26] 短路点位于 computing_review 之后、computing_history
+    之前：Review cancelled/interrupted 时 History / DSA compatibility / state_events /
+    chip 全部不再执行（KPI-11）。此前 History 终止短路仅覆盖 History 阶段的取消，
+    Review 阶段取消会继续跑后续副作用 —— 本判定现提前到 Review 后立即生效。
     - cancelled：管理员主动取消，保持 cancelled；
     - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
 
@@ -2932,6 +2966,13 @@ async def execute_after_close_run(
     # [P0-7 修复 2026-07-29] cached_instrument_ids 初始化为 None，
     # 断点恢复 skip_computing=True 时仍可安全访问（chip job 创建时用于 expected_count）
     cached_instrument_ids: list[uuid.UUID] | None = None
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] core_ready 唯一生命周期：
+    # 仅在此初始化一次为 False。正常路径由 mandatory Core gate（finalize 后经
+    # canonical _validate_core_ready 校验真实 CoreRun 行）置 True；skip_publish /
+    # resume 分支同样调用 _validate_core_ready 置位。此后任何代码路径不得重新
+    # 初始化/覆盖为 False（CORRECTION-03 曾出现 gate PASS 后被二次声明清零的
+    # false-green：DSA/state_events/chip 全部静默跳过）。
+    core_ready: bool = False
 
     try:
         # [Phase5] - 读取断点恢复信息：last_completed_step + dsa_run_id + snapshot_run_id
@@ -3552,27 +3593,34 @@ async def execute_after_close_run(
             # finished_at），不写 published_at / 不动 pointer。质量门禁失败只阻止发布，
             # 不得使本已完成的 compute run 继续显示 running（COMPUTATION TERMINALITY PRINCIPLE）。
             #
-            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] MANDATORY CORE GATE。
-            # finalize 后调用 canonical _validate_core_ready 显式校验真实 CoreRun 行
-            # （id / trade_date / status==succeeded）。任一不满足 → fail-closed
-            # （AfterCloseCoreNotReadyError），禁止进入 Review / History(T) / state_events /
-            # chip / DSA 兼容性。Core 是 mandatory foundation，其失败不得降级为 partial_success。
-            if snapshot_run_id is not None:
-                async with AsyncSessionLocal() as db:
-                    finalized_core_run = await finalize_snapshot_run_compute_complete(
-                        db, snapshot_run_id
-                    )
-                    await db.commit()
-                    # canonical Core readiness owner：校验真实 DB 行
-                    _validated_core_run = await _validate_core_ready(
-                        db, snapshot_run_id, trade_date
-                    )
-                core_ready = True
-                logger.info(
-                    "[AfterClose] Core 已就绪（finalize,未发布）: snapshot_run_id=%s, "
-                    "trade_date=%s, status=%s",
-                    snapshot_run_id, trade_date, _validated_core_run.status,
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] MANDATORY CORE GATE（无条件）。
+            # 不得用 `if snapshot_run_id is not None:` 包裹本门禁——那会使 snapshot_run_id=None
+            # 绕过校验、Core missing 不 fail-closed（CORRECTION-03 P0-2 回归教训）。
+            # snapshot_run_id 为 None → 立即抛 AfterCloseCoreNotReadyError；
+            # snapshot_run_id 存在 → finalize 后经 canonical _validate_core_ready 校验真实
+            # CoreRun 行（id / trade_date / status==succeeded），任一不满足 → fail-closed raise，
+            # Review / History(T) / DSA 兼容性 / state_events / chip 一律不执行，
+            # 且 mandatory 失败不得降级为 partial_success（executor 对非 optional 步骤 re-raise）。
+            if snapshot_run_id is None:
+                raise AfterCloseCoreNotReadyError(
+                    f"CoreRun 缺失: snapshot_run_id=None (job={job_run_id}, "
+                    f"trade_date={trade_date})，mandatory 下游禁止执行"
                 )
+            async with AsyncSessionLocal() as db:
+                finalized_core_run = await finalize_snapshot_run_compute_complete(
+                    db, snapshot_run_id
+                )
+                await db.commit()
+                # canonical Core readiness owner：校验真实 DB 行（单一事实源）
+                _validated_core_run = await _validate_core_ready(
+                    db, snapshot_run_id, trade_date
+                )
+            core_ready = True
+            logger.info(
+                "[AfterClose] Core 已就绪（finalize,未发布）: snapshot_run_id=%s, "
+                "trade_date=%s, status=%s",
+                snapshot_run_id, trade_date, _validated_core_run.status,
+            )
 
             # 2.6 [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] DSA 组合质量门禁已从
             # mandatory Core 路径移除。continuous + event freshness 门禁仍在 compute_for_trade_date
@@ -3601,11 +3649,10 @@ async def execute_after_close_run(
         # 避免 skip_publish 路径 UnboundLocalError。
         _chip_enqueue_status: str = "skipped"
         _chip_job_id: uuid.UUID | None = None
-        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] canonical Core readiness owner。
-        # 由 mandatory Core gate（finalize 后校验真实 CoreRun 行）置位；skip_publish 恢复路径
-        # 也需显式核验 CoreRun 真实状态后再置位。state_events / chip 据此门控，
-        # 不得再依赖 snapshot_run_id 非空或 publication。
-        core_ready: bool = False
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] core_ready 的唯一置位点在
+        # mandatory Core gate（fresh compute）与 skip_publish 恢复分支（统一 owner
+        # _validate_core_ready）。此处禁止再初始化/清零（CORRECTION-03 P0-1 回归教训）：
+        # DSA compatibility / state_events / chip 全部依赖该布尔保持为 True。
         if not skip_publish:
             # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 正常 AfterClose DAG 不再进入
             # PUBLISHING 阶段（KPI-7）：Core 计算完成后直接进入 Review。
@@ -3632,9 +3679,8 @@ async def execute_after_close_run(
             published_run = None
             _stock_core_published = False
             _stock_core_superseded = False
-            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] DSA 兼容性投影已从 mandatory Core
-            # 路径移除，改由 post-core OPTIONAL _run_dsa_compatibility_projection 执行。其状态必须
-            # 来自真实执行结果（succeeded/failed/skipped/not_run），不得仅由 dsa_run_id 存在推断成功。
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] DSA 兼容性已在 post-core
+            # 由统一执行器执行；此初始值仅在步骤被跳过时如实表达 not_run。
             _dsa_compatibility_status: str = "not_run"
             _auction_anchor_status: str = "skipped"
             _auction_publication_id: uuid.UUID | None = None
@@ -3669,27 +3715,21 @@ async def execute_after_close_run(
             else:
                 _stock_core_published = False
                 _stock_core_superseded = False
-            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] skip_publish 恢复路径也必须
-            # 显式核验 CoreRun 真实状态（不得仅因 snapshot_run_id 非空就假定 Core Ready）。
-            if snapshot_run_id is not None:
-                from app.models.stock_feature_snapshot_run import (
-                    StockFeatureSnapshotRun as _CoreRun,
-                )
-                async with AsyncSessionLocal() as verify_db:
-                    _core_row = await verify_db.get(_CoreRun, snapshot_run_id)
-                    core_ready = (
-                        _core_row is not None
-                        and _core_row.trade_date == trade_date
-                        and _core_row.status == STATUS_SUCCEEDED
-                    )
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] skip_publish 恢复路径
+            # 必须复用唯一事实源 _validate_core_ready（禁止第二套手写 row exists/
+            # trade_date/status 逻辑——CORRECTION-03 曾出现双 owner 漂移）。
+            # snapshot_run_id=None 同样 fail-closed；Core running/failed → raise。
+            async with AsyncSessionLocal() as verify_db:
+                await _validate_core_ready(verify_db, snapshot_run_id, trade_date)
+            core_ready = True
             # skip_publish 路径不执行 normal publish 专属步骤，显式置 skipped 以如实反映未执行。
             # 注意：_aggregation_status 恒为 "skipped"（[Slice 4A9] legacy aggregation 已退役），
             # 此处默认值仅为防御性初始化。
             _auction_anchor_status = "skipped"
             _auction_publication_id = None
             _aggregation_status = "skipped"
-            # skip_publish 路径：DSA 兼容性投影作为 post-core optional 同样会执行，
-            # 此处仅防御性初始化状态；实际值由 _run_dsa_compatibility_projection 写入。
+            # skip_publish 路径：DSA 兼容性投影由 post-core 统一执行器执行，
+            # 此初始值仅在步骤被跳过时如实表达 not_run（实际状态以 executor summary 为准）。
             _dsa_compatibility_status = "not_run"
             _chip_enqueue_status = "skipped"
 
@@ -3749,6 +3789,47 @@ async def execute_after_close_run(
             progress=_make_step_progress_callback(job_run_id, worker_id),
             cancellation_check=_make_step_cancellation_check(job_run_id),
         )
+
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] Review 终态短路（KPI-11）。
+        # Review step summary 为 cancelled / interrupted 时，必须先终态收尾再停止：
+        # 不得继续 History / DSA compatibility / state_events / chip 任何后续副作用写入。
+        # 与 History 终止短路同构（resolve_terminal_run_status + 最终状态落库 +
+        # AfterCloseCancelledError → 外层 as-terminal 返回，不覆写 failed）。
+        _review_step_status_for_short_circuit = (
+            _review_step_summary.get("status")
+        ) if isinstance(_review_step_summary, dict) else None
+        if _is_terminal_review_short_circuit(_review_step_status_for_short_circuit):
+            _terminal_status = resolve_terminal_run_status(
+                _review_step_status_for_short_circuit
+            )
+            async with AsyncSessionLocal() as db:
+                job_run = await _get_job_run_or_raise(db, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=_terminal_status,
+                    message=(
+                        f"盘后编排在复盘计算阶段被{_terminal_status.value}，"
+                        f"停止后续步骤"
+                    ),
+                    dsa_run_id=dsa_run_id,
+                    payload={
+                        "stock_core_published": _stock_core_published,
+                        "review_step_status": _review_step_status_for_short_circuit,
+                        "terminal_short_circuit": True,
+                    },
+                )
+                job_run.status = _terminal_status.value
+                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+                await _update_heartbeat_and_step(db, job_run, None, worker_id)
+                await db.commit()
+            logger.warning(
+                "[AfterClose][CORRECTION-04] computing_review 终止短路: "
+                "job=%s status=%s（History/DSA/events/chip 均不执行）",
+                str(job_run_id), _terminal_status.value,
+            )
+            raise AfterCloseCancelledError(_terminal_status)
+
         # ---- 步骤 4.6: computing_history（历史状态推进）— Review 之后执行 ----
         # [CHANGE-20260826-001 Slice 1 CORRECTION] 仅在此处（Review 已 compute/publish 后）
         # 才运行 History(T) producer（_make_history_step → advance_history_to_trade_date）。
@@ -3837,35 +3918,45 @@ async def execute_after_close_run(
             )
             raise AfterCloseCancelledError(_terminal_status)
 
-        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] post-core OPTIONAL DSA 兼容性投影。
-        # Core 已就绪（core_ready）→ Review → History 后，DSA 兼容性投影作为 OPTIONAL 工作执行。
-        # 其失败不得标记 Core failed、不得阻断 Review、仅产生 partial_success/degraded，
-        # 并如实写入 step_summary。Core/Review 成功与否与此解耦。
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] post-core OPTIONAL DSA 兼容性投影
+        # —— 统一执行器顶层步骤（与 refreshing_daily / computing_review / enqueue_chip_job 同级）。
+        # Core 已就绪（core_ready）→ Review → History 后执行；经 execute_orchestrator_step(
+        # optional=True) 由统一执行器拥有 status/timeout/heartbeat/cancel/step summary/
+        # optional failure，不再维护第二套手写状态机。其失败不得标记 Core failed、不得阻断
+        # Review；summary["dsa_compatibility"]（含 step 键的 executor 标准结构）落库后进入
+        # optional_failures → parent partial_success。
         if core_ready and snapshot_run_id is not None:
-            _dsa_compatibility_status = await _run_dsa_compatibility_projection(
-                job_run_id=job_run_id,
-                worker_id=worker_id,
-                lease_epoch=lease_epoch,
-                trade_date=trade_date,
-                snapshot_run_id=snapshot_run_id,
-                dsa_run_id=dsa_run_id,
-                instrument_ids=cached_instrument_ids or [],
+            async def _dsa_compatibility_operation() -> dict[str, Any]:
+                return await _run_dsa_compatibility_projection(
+                    job_run_id=job_run_id,
+                    worker_id=worker_id,
+                    lease_epoch=lease_epoch,
+                    trade_date=trade_date,
+                    snapshot_run_id=snapshot_run_id,
+                    dsa_run_id=dsa_run_id,
+                    instrument_ids=cached_instrument_ids or [],
+                )
+
+            _dsa_result, _dsa_step_summary = await execute_orchestrator_step(
+                "dsa_compatibility",
+                _dsa_compatibility_operation,
+                timeout_seconds=_step_timeout("dsa_compatibility"),
+                optional=True,
+                heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
+                progress=_make_step_progress_callback(job_run_id, worker_id),
+                cancellation_check=_make_step_cancellation_check(job_run_id),
             )
-            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] DSA 兼容性结果如实写入
-            # step_summary：失败 → optional=True/status=failed → 进入 optional_failures
-            # → parent partial_success。绝不伪造成功。Core/Review 不受影响。
-            await _persist_step_summary(
-                job_run_id,
-                {
-                    "dsa_compatibility": {
-                        "optional": True,
-                        "status": (
-                            "succeeded" if _dsa_compatibility_status == "succeeded"
-                            else "failed"
-                        ),
-                        "detail": _dsa_compatibility_status,
-                    }
-                },
+            # 规范化 summary 元数据（不改 status —— status owner 仍是统一执行器）：
+            # step_summary["dsa_compatibility"] 必须存在且带 optional=True，
+            # 失败时才能被 optional_failures 读取并使 parent 成为 partial_success。
+            _dsa_step_summary.setdefault("step", "dsa_compatibility")
+            _dsa_step_summary.setdefault("optional", True)
+            _dsa_compatibility_status = _dsa_step_summary.get("status", "not_run")
+            await _persist_step_summary(job_run_id, dict(_dsa_step_summary))
+            logger.info(
+                "[AfterClose][CORRECTION-04] dsa_compatibility 完成: "
+                "step_status=%s, result=%s",
+                _dsa_compatibility_status, _dsa_result,
             )
 
         # checkpoint：仅 history_ready=True 时才把 last_completed_step 推进为
