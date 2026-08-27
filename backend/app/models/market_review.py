@@ -75,7 +75,7 @@ class MarketReviewRun(Base):
     source_core_run_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         nullable=False,
-        comment="输入 stock_core snapshot_run_id（factor_publications.data_run_id）",
+        comment="显式 CoreRun lineage：StockFeatureSnapshotRun.id（不依赖 stock_core publication pointer）",
     )
     source_board_run_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),

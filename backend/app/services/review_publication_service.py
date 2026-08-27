@@ -622,6 +622,7 @@ async def list_published_review_dates(
             FactorPublication.scope_type == SCOPE_TYPE_REVIEW,
             FactorPublication.scope_key == SCOPE_KEY_REVIEW,
             FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
+            FactorPublication.superseded_by.is_(None),
         )
         .order_by(FactorPublication.trade_date.desc())
         .limit(limit)
@@ -655,9 +656,8 @@ async def _get_publication(
             FactorPublication.scope_key == "market",
             FactorPublication.trade_date == trade_date,
             FactorPublication.publication_kind == publication_kind,
+            FactorPublication.superseded_by.is_(None),
         )
-        .order_by(FactorPublication.published_at.desc())
-        .limit(1)
     )
     if for_update:
         stmt = stmt.with_for_update()

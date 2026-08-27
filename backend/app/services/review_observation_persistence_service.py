@@ -386,13 +386,21 @@ async def list_scope_observation_facts_by_run(
 async def list_scope_observation_facts(
     db: AsyncSession,
     *,
+    review_run_id: uuid.UUID | None = None,
     scope_type: str | None = None,
     scope_key: str | None = None,
     from_date: date | None = None,
     to_date: date | None = None,
 ) -> list[ReviewScopeObservationFact]:
-    """List fact snapshots with optional filters, ordered by grain."""
+    """List fact snapshots with optional filters, ordered by grain.
+
+    双 lineage 守卫（REVIEW_OVERVIEW_CROSS_RUN_CONTAMINATION fix）：
+    review_run_id 显式传入时，SQL 层按 review_run_id 过滤，避免同日多 ReviewRun
+    （Run A published / Run B 同 trade_date 后跑）的 Observation 被聚合污染。
+    """
     stmt = select(ReviewScopeObservationFact)
+    if review_run_id is not None:
+        stmt = stmt.where(ReviewScopeObservationFact.review_run_id == review_run_id)
     if scope_type is not None:
         stmt = stmt.where(ReviewScopeObservationFact.scope_type == scope_type)
     if scope_key is not None:

@@ -70,6 +70,7 @@ from app.services.review_observation_persistence_service import (
 )
 from app.services.review_publication_service import (
     get_published_review_run_id,
+    is_formally_published_review_run,
     list_published_review_dates,
 )
 
@@ -109,7 +110,30 @@ async def _get_published_run(
     if run_id is not None:
         run = await session.get(MarketReviewRun, run_id)
         if run is not None:
-            return run
+            # §4 formal publication guard（用户正式路径）：live pointer 指向的 run
+            # 必须已正式发布（status=published 且 published_at IS NOT NULL），否则 fail-closed。
+            if include_partial or is_formally_published_review_run(run, run_id):
+                return run
+            # §4 case C: live pointer 指向 run，但 status!=published 或 published_at IS NULL
+            # → data-integrity fail-closed，不得作为正式 Review 返回。
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"trade_date={trade_date} 的正式 Review pointer 指向 run={run_id}，"
+                    f"但该 run 未正式发布（status={run.status}, published_at={run.published_at}），"
+                    "数据一致性异常，拒绝作为正式 Review 返回"
+                ),
+            )
+        # §4 case B: live pointer 指向不存在的 run
+        # → data-integrity fail-closed，绝不回退 latest run。
+        if not include_partial:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"trade_date={trade_date} 的正式 Review pointer 指向不存在的 run={run_id}，"
+                    "数据一致性异常，拒绝回退到 latest run"
+                ),
+            )
 
     if not include_partial:
         raise HTTPException(
@@ -332,7 +356,7 @@ async def get_review_overview(
     # 未激活家族（ScopeCapability.persistence_activated=False），不产生 canonical
     # fact，其覆盖率为 None（合法跳过，绝不回退 legacy P/Q/U/C/V）。
     facts = await list_scope_observation_facts(
-        db, from_date=run.trade_date, to_date=run.trade_date,
+        db, review_run_id=run.id, from_date=run.trade_date, to_date=run.trade_date,
     )
     facts_by_type: dict[str, list[ReviewScopeObservationFact]] = {}
     for fact in facts:
