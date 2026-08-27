@@ -22,7 +22,7 @@ import json
 import math
 import uuid
 from datetime import UTC, date, datetime
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -626,30 +626,45 @@ async def test_pg_resume_integration() -> None:
     # Phase 3: spy + mock + 调用真实 execute_after_close_run
     # =====================================================================
     compute_call_count = {"n": 0}
+    publish_spy = {"n": 0}
+    captured_review_create: dict = {}
 
     async def _spy_compute(*a, **k):
         compute_call_count["n"] += 1
         return {}
+
+    async def _spy_publish(*a, **k):
+        publish_spy["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    def _review_create_sentinel(*args, **kwargs):
+        # §10: Review 被 source_core_run_id=X 进入（不再经 stock_core publish）
+        captured_review_create["source_core_run_id"] = kwargs.get("source_core_run_id")
+        raise DownstreamEntryReachedError("review entry reached")
 
     with (
         patch(
             "app.services.feature_snapshot_service.compute_review_core_with_run_items",
             new=_spy_compute,
         ),
-        # publishing 后 auction_anchor 不阻塞（返回空结果，不抛异常）
+        # §10 KPI-4: normal Core->Review 主链不调用 stock_core publication
+        patch(
+            "app.services.stock_core_publication_service.publish_stock_core_atomically",
+            new=_spy_publish,
+        ),
+        # auction_anchor 不阻塞（返回空结果，不抛异常）
         patch(
             "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
             new=AsyncMock(return_value={"structure_count": 0, "chip_count": 0}),
         ),
-        # downstream entry sentinel：review create_run 被调用 = orchestrator 已过 publishing
+        # Review 入口 sentinel：create_run 被调用 = Review 被 source_core_run_id=X 进入
         patch(
             "app.services.review_orchestrator_service.create_run",
-            side_effect=DownstreamEntryReachedError("review entry reached"),
+            side_effect=_review_create_sentinel,
         ),
     ):
         try:
             await execute_after_close_run(job_run_id, trade_date=test_date)
-            # 如果没抛 sentinel，orchestrator 完整执行到了结束 — 也接受
             downstream_reached = True
         except DownstreamEntryReachedError:
             downstream_reached = True
@@ -658,21 +673,27 @@ async def test_pg_resume_integration() -> None:
     # =====================================================================
     # Phase 4: 逐项验收
     # =====================================================================
-    # A. compute 未调用（PG-6）
+    # A. compute 未调用（PG-6 / KPI-4 no recompute）
     assert compute_call_count["n"] == 0, (
         f"resume 不得重算 5293 stocks，实际 compute 调用={compute_call_count['n']}"
+    )
+    # §10 KPI-4: normal Core->Review 主链不发布 stock_core
+    assert publish_spy["n"] == 0, (
+        f"normal Core->Review 不得调用 publish_stock_core_atomically，实际={publish_spy['n']}"
     )
 
     # B/C/D/E/F. 用独立 reader session 核验所有 after 状态
     async with AsyncSessionLocal() as reader_db:
-        # 重新加载 snapshot run
+        # 重新加载 snapshot run（Core Ready X）
         snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
         assert snap_reread is not None, "snapshot run 必须存在"
-        assert snap_reread.published_at is not None, (
-            "publish 后 published_at 必须 set"
+        # §10 KPI-4: Core->Review 主链 published_at 可保持 None（不要求发布）
+        assert snap_reread.status == STATUS_SUCCEEDED, "Core Run 必须 succeeded"
+        assert snap_reread.published_at is None, (
+            "Core->Review 主链 published_at 可保持 None，不要求发布"
         )
 
-        # 核验 formal pointer
+        # §10: 正常 resume 不要求 FactorPublication(kind=stock_core)
         from app.services.factor_publication_service import (
             PUBLICATION_KIND_STOCK_CORE,
             get_publication,
@@ -685,20 +706,23 @@ async def test_pg_resume_integration() -> None:
             trade_date=test_date,
             publication_kind=PUBLICATION_KIND_STOCK_CORE,
         )
-        assert pointer is not None, "publication pointer 必须存在"
-        assert pointer.data_run_id == snap.id, (
-            f"pointer.data_run_id={pointer.data_run_id} != snap.id={snap.id}"
+        assert pointer is None, (
+            "normal Core->Review 不要求 stock_core publication pointer"
+        )
+
+        # §10: Review 被 source_core_run_id=X 进入（create_run 被调用并触发 sentinel）
+        assert downstream_reached, "Review 必须被 source_core_run_id=X 进入"
+        assert captured_review_create.get("source_core_run_id") == snap.id, (
+            f"Review lineage 必须绑定 source_core_run_id=X，实际="
+            f"{captured_review_create.get('source_core_run_id')} != {snap.id}"
         )
 
         # ---- checkpoint 推进（PG-8 核心） ----
         status = await get_after_close_run_status(reader_db, job_run_id)
         after_last_step = status.get("last_completed_step", "")
         after_orch_status = status.get("orchestrator_status", "")
-        assert downstream_reached, "downstream entry 必须触发"
-
-        # orchestrator_status: 允许 partial_success（测试故意 mock 下游）
+        # §10: checkpoint 从 computing_features 合法推进到 computing_review（不要求 publishing）
         assert after_orch_status in {
-            AfterCloseRunStatus.PUBLISHING.value,
             AfterCloseRunStatus.COMPUTING_REVIEW.value,
             AfterCloseRunStatus.SUCCEEDED.value,
             AfterCloseRunStatus.PARTIAL_SUCCESS.value,
@@ -712,7 +736,6 @@ async def test_pg_resume_integration() -> None:
             "refreshing_daily",
             "syncing_boards",
             "computing_features",
-            "publishing",
             "computing_review",
             "succeeded",
         }
@@ -721,8 +744,6 @@ async def test_pg_resume_integration() -> None:
             f"合法值: {sorted(legal_checkpoints)}\n"
             f"orchestrator_status={after_orch_status}\n"
             f"before_last_step={before_last_step}\n"
-            f"如果 after_last_step 是 orchestrator_status 值（如 partial_success），"
-            f"说明代码将终端状态写入了断点恢复检查点字段 → CHECKPOINT-SEMANTICS-01"
         )
 
     # G. 没有创建新的 snapshot run（same snap.id 就是 existing 的）
@@ -859,15 +880,30 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
         await fix_db.commit()
 
     compute_resume = {"n": 0}
+    publish_resume = {"n": 0}
+    captured_review_create: dict = {}
 
     async def _spy_resume(*a, **k):
         compute_resume["n"] += 1
         return {}
 
+    async def _spy_publish_resume(*a, **k):
+        publish_resume["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    def _review_create_sentinel(*args, **kwargs):
+        captured_review_create["source_core_run_id"] = kwargs.get("source_core_run_id")
+        raise DownstreamEntryReachedError("review entry reached")
+
     with (
         patch(
             "app.services.feature_snapshot_service.compute_review_core_with_run_items",
             new=_spy_resume,
+        ),
+        # §10 KPI-4: normal Core->Review 主链不调用 stock_core publication
+        patch(
+            "app.services.stock_core_publication_service.publish_stock_core_atomically",
+            new=_spy_publish_resume,
         ),
         patch(
             "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
@@ -875,7 +911,7 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
         ),
         patch(
             "app.services.review_orchestrator_service.create_run",
-            side_effect=DownstreamEntryReachedError("review entry reached"),
+            side_effect=_review_create_sentinel,
         ),
     ):
         try:
@@ -890,7 +926,11 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
 
     async with AsyncSessionLocal() as reader_db:
         snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
-        assert snap_reread.published_at is not None, "publish 后 published_at 必须 set"
+        # §10 KPI-4: Core->Review 主链 published_at 可保持 None（不要求发布）
+        assert snap_reread.status == STATUS_SUCCEEDED, "Core Run 必须 succeeded"
+        assert snap_reread.published_at is None, (
+            "Core->Review 主链 published_at 可保持 None，不要求发布"
+        )
 
         pointer = await get_publication(
             reader_db,
@@ -899,9 +939,16 @@ async def test_recovery_checkpoint_reconcile_and_resume() -> None:
             trade_date=test_date,
             publication_kind=PUBLICATION_KIND_STOCK_CORE,
         )
-        assert pointer is not None, "publication pointer 必须存在"
-        assert pointer.data_run_id == snap.id, (
-            f"pointer.data_run_id={pointer.data_run_id} != snap.id={snap.id}"
+        # §10: 正常 resume 不要求 FactorPublication(kind=stock_core)
+        assert pointer is None, "normal Core->Review 不要求 stock_core pointer"
+        # §10: Review 被 source_core_run_id=X 进入
+        assert captured_review_create.get("source_core_run_id") == snap.id, (
+            f"Review lineage 必须绑定 source_core_run_id=X，实际="
+            f"{captured_review_create.get('source_core_run_id')} != {snap.id}"
+        )
+        # §10 KPI-4: 正常 Core->Review 主链不发布 stock_core
+        assert publish_resume["n"] == 0, (
+            f"normal Core->Review 不得调用 publish_stock_core_atomically，实际={publish_resume['n']}"
         )
 
 

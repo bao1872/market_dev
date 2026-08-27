@@ -364,9 +364,16 @@ _CURRENT_ONLY_SNAPSHOT_FIELDS: dict[str, str] = {
     "trailing_bottom_pct": "fp_distance_to_trailing_bottom_pct",
 }
 
-# Snapshot run gate: only a published, succeeded run may be consumed.  This
-# mirrors the existing snapshot consumption gate (feature_snapshot_service /
-# review_scope_service) rather than inventing a second selection policy.
+# Snapshot run gate: a source-bound succeeded Core(T) run may be consumed.
+# REVIEW-CURRENT-OWNER-01 / CORRECTION-05: publication is NOT part of Review
+# current-fact readiness.  Review consumes the exact-T snapshot owned by the
+# immutable ``source_core_run_id`` X with ``X.status == succeeded`` and
+# ``X.trade_date == T``.  It does NOT consult ``published_at``,
+# ``FactorPublication(kind=stock_core)`` or any stock_core pointer.  This
+# mirrors the Core->Review direct-link contract
+# (after_close_orchestrator: ``stock_core publication 不是 Review readiness
+# owner``); it deliberately does NOT reuse the legacy snapshot-consumption
+# gate that required ``published_at IS NOT NULL``.
 _SNAPSHOT_RUN_CONSUMABLE_STATUS = "succeeded"
 
 
@@ -390,8 +397,8 @@ async def _load_current_only_snapshot_facts(
     (``StockFeatureSnapshot.source_run_id == source_core_run_id`` and
     ``StockFeatureSnapshotRun.id == source_core_run_id``).  This makes the Review
     snapshot source lineage-identical to the legacy Board path
-    (``StockFeatureSnapshot.source_run_id == source_run_id``).  Multiple
-    succeeded/published runs may exist for the same ``trade_date``; Review must not
+    (``StockFeatureSnapshot.source_run_id == source_run_id``).      Multiple
+    succeeded runs may exist for the same ``trade_date``; Review must not
     silently consume another core run on rerun / resume.  If the row for the
     specified ``source_core_run_id`` is absent, this returns empty (fail-safe) —
     never a fallback to another same-day run.
@@ -399,7 +406,7 @@ async def _load_current_only_snapshot_facts(
     if not instrument_ids:
         return {}
 
-    # Exact-T only, joined against the run gate (succeeded + published), AND locked
+    # Exact-T only, joined against the run gate (succeeded), AND locked
     # to the immutable source_core_run_id identity (Slice 4A1R2).
     #
     # M3-B (OOM closure): the SELECT projects ONLY the JSONB subtree
@@ -428,7 +435,6 @@ async def _load_current_only_snapshot_facts(
             StockFeatureSnapshotRun.id == source_core_run_id,
             StockFeatureSnapshotRun.trade_date == trade_date,
             StockFeatureSnapshotRun.status == _SNAPSHOT_RUN_CONSUMABLE_STATUS,
-            StockFeatureSnapshotRun.published_at.isnot(None),
         )
     )
     rows = (await session.execute(stmt)).all()

@@ -208,6 +208,7 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     if os.environ.get("PURE_UNIT_TEST") == "1":
         pytest.skip("PG-only")
 
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
     from app.services.after_close_orchestrator import (
         AfterCloseRunStatus,
         execute_after_close_run,
@@ -224,6 +225,8 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     history_advance_attempts = {"n": 0}
     history_should_crash = {"on": True}
     review_step_count = {"n": 0}
+    publish_spy = {"n": 0}
+    captured = {}
 
     async def _fake_compute_core(*a, **k):
         core_count["n"] += 1
@@ -235,15 +238,36 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
             raise _SimulatedProcessDeath("process disappeared during History advance")
         return {"target_state_count": 100, "advanced": True}
 
-    async def _sentinel_review_step(*a, **k):
-        # 入口即停（证明 Review 已被到达），raise 前计数。
-        # 不真实执行 review step：避免 verify 运行期真实 owner 交互的脆弱性，
-        # 也避免全局 patch 污染其他并发 after_close run 的计数。
+    async def _spy_review_step(*a, **k):
+        # §11: Review 真实进入（不只在入口停），证明 Review 在 History 之前完成。
         review_step_count["n"] += 1
-        raise _ReviewStepEnteredError()
+        return await orchestrator._execute_review_step(*a, **k)
 
-    class _ReviewStepEnteredError(Exception):
-        pass
+    async def _spy_publish(*a, **k):
+        publish_spy["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    async def _fake_create_run(db, *a, **k):
+        captured["source_core_run_id"] = k.get("source_core_run_id")
+        rr = MagicMock()
+        rr.id = uuid.uuid4()
+        rr.status = "created"
+        rr.expected_scope_count = 1
+        rr.signal_count = 1
+        rr.coverage_ratio = 1.0
+        rr.algorithm_version = "v1"
+        rr.filter_version = "f1"
+        rr.source_core_run_id = k.get("source_core_run_id")
+        rr.source_board_run_id = None
+        return rr
+
+    async def _fake_compute_run(db, review_run, *a, **k):
+        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
+
+    async def _fake_publish_run(db, review_run, *a, **k):
+        pub = MagicMock()
+        pub.id = uuid.uuid4()
+        return pub, None
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -257,13 +281,21 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # 最小 faithful patch：core 计算跳过（记录计数）；History 注入 crash；
-    # stock_core 走真实发布（验证崩溃恢复后不重复发布 / 不撤销指针）；
-    # Review 用 sentinel 停在入口（证明到达），与既有 PG resume 测试一致。
+    # §11: 最小 faithful patch —— core 计算跳过（记录计数）；History 注入 crash；
+    # Review 真实进入（spy）；normal Core->Review 主链不发布 stock_core（spy 计数）。
+    # 不再依赖 stock_core 真实发布 / pointer。
     common_patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
+        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_sentinel_review_step),
+        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
+        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
+        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
+        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
+        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
+        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
+        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
+        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
     ]
 
     # Attempt 1: crash at History
@@ -278,11 +310,11 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
 
     async with AsyncSessionLocal() as mid_db:
         mid_status = await get_after_close_run_status(mid_db, job_run_id)
-    # crash at History (inside publishing phase) -> Review must NOT have run yet
-    assert review_step_count["n"] == 0, "Review must NOT run before History crash"
-    assert mid_status.get("last_completed_step") != "review", mid_status
+    # §11 新顺序：Review → History(T)。History crash 时 Review 应已成功进入/完成。
+    assert review_step_count["n"] == 1, "Review 必须在 History crash 前已成功进入"
+    assert mid_status.get("last_completed_step") != "publishing", mid_status
 
-    # Attempt 2: resume -> History succeeds -> Review runs for real
+    # Attempt 2: resume -> History succeeds -> Review 不重复
     history_should_crash["on"] = False
     for p in common_patches:
         p.start()
@@ -294,26 +326,31 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
 
     async with AsyncSessionLocal() as reader_db:
         final_status = await get_after_close_run_status(reader_db, job_run_id)
-    # 崩溃后恢复：Review 已在 resume 时进入（review_step_count==1 已证），run 达终态。
-    # 当 attempt1 已真实发布 stock_core、attempt2 视为 superseded 时，运行期会在
-    # publishing 段合法收尾（review 被 superseded 短路），故 last_completed_step
-    # 可为 publishing/review/computing_review/succeeded 之一，均证明 resume 未崩溃、
-    # 未重算 core、未重复发布。
+        snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+    # 崩溃后恢复：Review 已在 Attempt1 完成（review_step_count==1 已证），run 达终态。
     assert final_status.get("last_completed_step") in (
-        "publishing", "review", "computing_review", "succeeded", "completed",
+        "computing_review", "succeeded", "completed",
     ), final_status
     assert final_status.get("orchestrator_status") in (AfterCloseRunStatus.COMPUTING_REVIEW.value, AfterCloseRunStatus.SUCCEEDED.value, AfterCloseRunStatus.PARTIAL_SUCCESS.value), final_status
 
     assert core_count["n"] == 0, f"resume must NOT recompute core, got {core_count['n']}"
     assert history_advance_attempts["n"] == 2, "History advanced twice (crash + resume)"
-    assert review_step_count["n"] == 1, "Review entered exactly once after resume"
-    # stock_core 走真实发布：崩溃恢复后指针仍保留（未撤销 / 未重复发布覆盖）。
+    assert review_step_count["n"] == 1, "Review entered exactly once (durable checkpoint, no duplicate side effect)"
+    # §11 KPI-4: normal Core->Review 主链不发布 stock_core
+    assert publish_spy["n"] == 0, f"normal Core->Review 不得发布 stock_core，实际={publish_spy['n']}"
+    # §11: Review lineage 必须绑定 source_core_run_id=X
+    assert captured.get("source_core_run_id") == snap.id, (
+        f"Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
+    )
+    # §11: Core Ready X 保持 succeeded（DSA/History crash 不撤销 Core）
+    assert snap_reread is not None and snap_reread.status == "succeeded", "Core X 必须保持 succeeded"
+    # §11: 新合同不要求 stock_core pointer（移除旧 stale 合同）
     async with AsyncSessionLocal() as pointer_db:
         final_pointer = await get_publication(
             pointer_db, scope_type="market", scope_key="market", trade_date=test_date,
             publication_kind=PUBLICATION_KIND_STOCK_CORE,
         )
-    assert final_pointer is not None, "stock_core pointer missing after crash+resume (revoked/double-publish?)"
+    assert final_pointer is None, "normal Core->Review 不要求 stock_core pointer（移除旧 stale 合同）"
 
 
 # ===========================================================================
@@ -335,7 +372,9 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
     async def _fail_events(db, *a, **k):
         raise RuntimeError("state_events failed")
 
+    captured = {}
     async def _fake_create_run(db, *a, **k):
+        captured["source_core_run_id"] = k.get("source_core_run_id")
         rr = MagicMock()
         rr.id = uuid.uuid4()
         rr.status = "created"
@@ -344,7 +383,7 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         rr.coverage_ratio = 1.0
         rr.algorithm_version = "v1"
         rr.filter_version = "f1"
-        rr.source_core_run_id = uuid.uuid4()
+        rr.source_core_run_id = k.get("source_core_run_id")
         rr.source_board_run_id = None
         return rr
 
@@ -371,12 +410,18 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # core 计算跳过；stock_core 发布计数；History 强制 ready（Review 不被 gate）；
+    publish_spy = {"n": 0}
+
+    async def _spy_publish(*a, **k):
+        publish_spy["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    # core 计算跳过；stock_core 发布计数（§12 KPI-4）；History 强制 ready（Review 不被 gate）；
     # review owner 全部成功（让 computing_review 完成，enhancement 段才能执行）；
     # state_events 注入失败 -> 进入 step_summary(optional=failed) -> partial_success。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
-        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
+        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.state_event_service.generate_events_for_run", new=_fail_events),
@@ -409,6 +454,24 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
     # 若 enhancement 段执行并记录 state_events，则其失败应被诚实记录（status=failed）。
     if isinstance(ss.get("state_events"), dict):
         assert ss["state_events"].get("status") == "failed", ss.get("state_events")
+    # §12 KPI-4: normal Core->Review 主链不发布 stock_core
+    assert publish_spy["n"] == 0, f"normal Core->Review 不得发布 stock_core，实际={publish_spy['n']}"
+    # §12: Core Ready X 保持 succeeded；Review lineage 保持
+    async with AsyncSessionLocal() as snap_db:
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        snap_reread = await snap_db.get(StockFeatureSnapshotRun, snap.id)
+    assert snap_reread is not None and snap_reread.status == "succeeded", "Core X 必须保持 succeeded"
+    assert captured.get("source_core_run_id") == snap.id, (
+        f"Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
+    )
+    # §12: 不以 stock_core pointer 存活作为主链验收（新合同不要求 pointer）
+    async with AsyncSessionLocal() as pointer_db:
+        from app.services.factor_publication_service import (
+            PUBLICATION_KIND_STOCK_CORE,
+            get_publication,
+        )
+        final_pointer = await get_publication(pointer_db, scope_type="market", scope_key="market", trade_date=test_date, publication_kind=PUBLICATION_KIND_STOCK_CORE)
+    assert final_pointer is None, "normal Core->Review 不要求 stock_core pointer"
 
 
 # ===========================================================================
@@ -434,7 +497,9 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
     async def _fail_dsa(*a, **k):
         return "failed"  # DSA projection failure (optional step)
 
+    captured = {}
     async def _fake_create_run(db, *a, **k):
+        captured["source_core_run_id"] = k.get("source_core_run_id")
         rr = MagicMock()
         rr.id = uuid.uuid4()
         rr.status = "created"
@@ -443,7 +508,7 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         rr.coverage_ratio = 1.0
         rr.algorithm_version = "v1"
         rr.filter_version = "f1"
-        rr.source_core_run_id = uuid.uuid4()
+        rr.source_core_run_id = k.get("source_core_run_id")
         rr.source_board_run_id = None
         return rr
 
@@ -470,10 +535,17 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         await prep_db.commit()
         job_run_id = str(job.id)
 
-    # core 计算跳过；History 强制 ready；review owner 全部成功（computing_review 完成）；
-    # DSA 失败注入。stock_core 走真实发布（验证 DSA 失败不撤销已发布指针）。
+    publish_spy = {"n": 0}
+
+    async def _spy_publish(*a, **k):
+        publish_spy["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    # §11: core 计算跳过；History 强制 ready；review owner 全部成功（computing_review 完成）；
+    # DSA 失败注入。normal Core->Review 主链不发布 stock_core（spy 计数）。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
+        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
         patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
         patch("app.services.after_close_orchestrator._poll_dsa_run_status", new=_fail_dsa),
@@ -499,15 +571,23 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
             reader_db, scope_type="market", scope_key="market", trade_date=test_date,
             publication_kind=PUBLICATION_KIND_STOCK_CORE,
         )
-    # DSA 失败不得撤销已发布的 stock_core：运行达终态（succeeded 或 partial_success）
-    # 且指针仍保留。partial_success 是否触发取决于 DSA 失败是否被计入 optional，
-    # 但“不撤销 stock_core”是硬性契约。
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+    # §11: DSA compatibility failure 不得反向撤销 Core / Review。
+    # Core X 保持 succeeded；Review(source_core_run_id=X) lineage 保持；
+    # parent 进入 truthful succeeded/partial_success；不依赖 stock_core pointer。
     assert status.get("orchestrator_status") in (
         AfterCloseRunStatus.SUCCEEDED.value,
         AfterCloseRunStatus.PARTIAL_SUCCESS.value,
     ), status
-    # 真实守卫：stock_core 发布指针未被 DSA 失败撤销
-    assert pointer is not None, "stock_core publication pointer revoked by DSA failure"
+    assert snap_reread is not None and snap_reread.status == "succeeded", "DSA 失败不得撤销 Core X（必须保持 succeeded）"
+    assert captured.get("source_core_run_id") == snap.id, (
+        f"Review lineage 必须保持绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
+    )
+    # §11 KPI-4: normal Core->Review 主链不发布 stock_core
+    assert publish_spy["n"] == 0, f"normal Core->Review 不得发布 stock_core，实际={publish_spy['n']}"
+    # §11: 移除旧 stale 合同（pointer is not None 作为成功标准）；新合同不要求 pointer
+    assert pointer is None, "normal Core->Review 不要求 stock_core pointer（移除旧 stale 合同）"
 
 
 # ===========================================================================
@@ -632,6 +712,106 @@ async def test_pg_H_reconcile_date_2026_08_25_no_asyncpg_dataerror():
         final = await db3.get(SchedulerJobRun, uuid.UUID(job_run_id))
         assert final is not None
         assert final.business_date == "2026-08-25"
+
+
+# ===========================================================================
+# I. Review-before-History call-order behavior test (§13)
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_pg_I_review_before_history_call_order():
+    """§13: 真实行为证明调用顺序 Core Ready -> Review -> History(T)。
+
+    不依赖源码字符串 / grep / 注释；通过记录 orchestrator 对 Review step 与
+    History advance 的真实调用顺序断言 index(review) < index(history)。
+    """
+    if os.environ.get("PURE_UNIT_TEST") == "1":
+        pytest.skip("PG-only")
+
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        execute_after_close_run,
+    )
+
+    test_date = date(2026, 8, 23)
+    calls: list[str] = []
+    captured = {}
+
+    async def _fake_compute_core(*a, **k):
+        return {}
+
+    async def _spy_review(*a, **k):
+        calls.append("review")
+        return await orchestrator._execute_review_step(*a, **k)
+
+    async def _fake_history(db, *a, **k):
+        calls.append("history")
+        # 记录顺序后即停止，避免进入脆弱的 enhancement 段
+        raise _SimulatedProcessDeath("stop after history (order capture)")
+
+    async def _fake_create_run(db, *a, **k):
+        captured["source_core_run_id"] = k.get("source_core_run_id")
+        rr = MagicMock()
+        rr.id = uuid.uuid4()
+        rr.status = "created"
+        rr.expected_scope_count = 1
+        rr.signal_count = 1
+        rr.coverage_ratio = 1.0
+        rr.algorithm_version = "v1"
+        rr.filter_version = "f1"
+        rr.source_core_run_id = k.get("source_core_run_id")
+        rr.source_board_run_id = None
+        return rr
+
+    async def _fake_compute_run(db, review_run, *a, **k):
+        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
+
+    async def _fake_publish_run(db, review_run, *a, **k):
+        pub = MagicMock()
+        pub.id = uuid.uuid4()
+        return pub, None
+
+    async with AsyncSessionLocal() as prep_db:
+        dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
+        from app.services.strategy_batch_service import reconcile_strategy_run_from_items
+        await reconcile_strategy_run_from_items(prep_db, dsa_run.id, set_finished_at=True)
+        snap = await _make_snapshot_run_with_items(prep_db, expected=5293, succeeded=5293, skipped=0, failed=0, published_at=None, status="succeeded", trade_date=test_date)
+        job = await _create_after_close_job_run(
+            prep_db, trade_date=test_date, orchestrator_status=AfterCloseRunStatus.COMPUTING_FEATURES.value,
+            last_completed_step="computing_features", dsa_run_id=dsa_run.id, feature_snapshot_run_id=snap.id,
+        )
+        await prep_db.commit()
+        job_run_id = str(job.id)
+
+    patches = [
+        patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
+        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
+        patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
+        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review),
+        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
+        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
+        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
+        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
+        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
+        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
+        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        with pytest.raises(_SimulatedProcessDeath):
+            await execute_after_close_run(job_run_id, trade_date=test_date)
+    finally:
+        for p in patches:
+            p.stop()
+
+    # §13: 行为证明 Core Ready -> Review -> History（非源码/grep）
+    assert "review" in calls and "history" in calls, f"缺失调用顺序标记: {calls}"
+    assert calls.index("review") < calls.index("history"), (
+        f"Review 必须在 History(T) 之前执行，实际顺序={calls}"
+    )
+    assert captured.get("source_core_run_id") == snap.id, (
+        f"Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
+    )
 
 
 # ---------------------------------------------------------------------------
