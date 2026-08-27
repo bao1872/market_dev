@@ -238,10 +238,13 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
             raise _SimulatedProcessDeath("process disappeared during History advance")
         return {"target_state_count": 100, "advanced": True}
 
+    # §11: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
+    _real_execute_review_step = orchestrator._execute_review_step
+
     async def _spy_review_step(*a, **k):
         # §11: Review 真实进入（不只在入口停），证明 Review 在 History 之前完成。
         review_step_count["n"] += 1
-        return await orchestrator._execute_review_step(*a, **k)
+        return await _real_execute_review_step(*a, **k)
 
     async def _spy_publish(*a, **k):
         publish_spy["n"] += 1
@@ -395,8 +398,11 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         pub.id = uuid.uuid4()
         return pub, None
 
+    # §11/§12: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
+    _real_execute_review_step = orchestrator._execute_review_step
+
     async def _spy_review_step(*a, **k):
-        return await orchestrator._execute_review_step(*a, **k)
+        return await _real_execute_review_step(*a, **k)
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -520,8 +526,11 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         pub.id = uuid.uuid4()
         return pub, None
 
+    # §11/§12: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
+    _real_execute_review_step = orchestrator._execute_review_step
+
     async def _spy_review_step(*a, **k):
-        return await orchestrator._execute_review_step(*a, **k)
+        return await _real_execute_review_step(*a, **k)
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -739,9 +748,12 @@ async def test_pg_I_review_before_history_call_order():
     async def _fake_compute_core(*a, **k):
         return {}
 
+    # §13: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
+    _real_execute_review_step = orchestrator._execute_review_step
+
     async def _spy_review(*a, **k):
         calls.append("review")
-        return await orchestrator._execute_review_step(*a, **k)
+        return await _real_execute_review_step(*a, **k)
 
     async def _fake_history(db, *a, **k):
         calls.append("history")
