@@ -1,317 +1,390 @@
-# PHASE B1.1 — Schema + Reader Architecture Design
+# PHASE B1.1-R1 — Snapshot Ownership Architecture Finalization
 
 > MASTER GOAL: Review 前后端生产闭环
-> CURRENT_PHASE: B1 — Core Rerun Lifecycle Decoupling (B1.1 = Schema + Reader Architecture Design)
-> BASE_SHA: `939600be6174b78a0d75935e0698323b69670cb7`
-> PRIOR_CHECKPOINT_SHA: `d350236c5b935fade8c7301170413a2020991101` (B1 schema-blocker checkpoint)
-> THIS_SHA (design only):见 §11
+> CURRENT_PHASE: B1.1 — Snapshot Ownership Design（FINAL REVISION）
+> BASE_SHA: `e8a693fcb883b4a6095affe346afcd7df22df49b`
+> PRIOR: `d350236c`（B1 schema-blocker checkpoint）→ `e8a693fc`（B1.1 v1 design）
+> THIS_SHA (design only): 见 §14
+>
+> **B1.1-R1 审计裁决前置：GIT_GOVERNANCE_PASS = YES；B1.1_DESIGN_APPROVED = NO；
+> 本修订按审计 §1-§13 逐项收口。禁止 production code / migration implementation / DB write。**
 
 ---
 
-## 0. 状态与结论
+## 0. 修订摘要（相对 B1.1 v1 的五大修正）
 
-B1 上一轮（checkpoint `d350236c`）因 `stock_feature_snapshots` 唯一键不含 `source_run_id` 而判定
-**SCHEMA_BLOCKER / STOP**。本轮 B1.1 重新审计后结论：
+| 审计缺口 | B1.1 v1（被否） | B1.1-R1（修正，附证据） |
+|---|---|---|
+| 1. 又造 latest 新 owner | `get_canonical_snapshot_run` = latest succeeded + finished_at DESC | **取消**。explicit lineage 优先；仅真正 date-only 产品 reader 进入 DISPLAY_CORE_OWNER 合同（§6） |
+| 2. 11 个 reader 统一 canonical | R1/R3..R14 全部 canonical 化 | **证据修正为 15 个中 10 个已 EXPLICIT**，1 个 PARENT_JOB_RUN，仅 4 个显示类 reader 依赖 DISPLAY_CORE_OWNER（§5） |
+| 3. NULL legacy 失去 DB 唯一 | 仅一个 non-null partial index | **双 universe 双 partial unique index**（CURRENT run-scoped + LEGACY base-scoped），有同仓先例（§3） |
+| 4. ON CONFLICT 契约错误 | `constraint="uq_..._run_isolated"`（partial index 名） | **修正为 index_elements + index_where 推断**；代码库注释明文禁止 ON CONFLICT ON CONSTRAINT <partial-index>（§4） |
+| 5. ADDITIVE/SAFE 分类错误 | ADDITIVE / SAFE | **重分类：NON-DATA-DESTRUCTIVE BUT CONTRACT-BREAKING（schema relaxation）**（§2） |
 
-**该 blocker 是「可解」的，且解是 ADDITIVE / SAFE（非破坏性），可以按 §15 governance + PG 验证推进到 B1.2 实现。**
-
-根因不变：唯一键 `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`
-不含 `source_run_id`，且 `upsert_snapshot` 的行级覆盖保护以 `published_at IS NOT NULL` 为判据——
-PHASE A 之后 Core 可在 `published_at=None` 下 `succeeded`，故 succeeded-but-unpublished run A 不受保护，
-同日 rerun B 会物理覆盖 A 的 snapshot 行 → A/B mixed world（§8 CASE C，P0）。
-
-解法的两个支柱（本设计详述）：
-1. **Schema**：DROP 旧全键唯一约束，ADD **partial unique index** 把 `source_run_id` 纳入归属
-   （`WHERE source_run_id IS NOT NULL`）。A/B 因 `source_run_id` 不同而共存，互不覆盖。
-2. **Reader**：所有非 Review 的 snapshot 读取路径必须「先解析 canonical run → 再按 `source_run_id`
-   精确读取」，杜绝 trade_date-only 读取在 rerun 后返回 A+B 混合行。
-
-**重要更正（相对 B1 checkpoint 报告）**：REVIEW 读取路径（`review_scope_service.py:495/885`、
-`review_observation_prep_service.py:434`）**已经**按 `source_core_run_id` 精确过滤，Phase A 的 Review
-隔离在 B1 下仍然成立，Review 不是 mixed-world 风险点。真正的爆破半径见 §3.3。
+**补充重大发现（v1 未识别）**：market_stocks 的「当前展示 Core」现 owner = `FactorPublication(kind=stock_core).data_run_id`
+（`market_stocks_service.py:807-817`）。PHASE A 已退役运行时自动 publication 写入
+（`publish_stock_core_atomically` 在 runtime 零调用；仅 admin 手动可写）→ **该 pointer 已冻结/陈旧**。
+即：**display owner 现状已损坏（stale-or-latest-guessed），与是否做 B1 无关**。这使
+DISPLAY_CORE_OWNER 合同成为**必须**，而不是可选增强（§6）。
 
 ---
 
-## 1. Schema 设计（B1.2 目标 DDL）
+## 1. 保留的已确认事实（§1，无需重做）
 
-### 1.1 当前
-- `stock_feature_snapshots` 唯一键：`uq_feature_snapshot_instrument_date_tf_adj_schema`
+- `stock_feature_snapshots` 唯一键 `uq_feature_snapshot_instrument_date_tf_adj_schema`
   = `(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`，
   **不含 `source_run_id`**（model `stock_feature_snapshot.py:117-125`）。
-- `source_run_id` 为 nullable lineage FK（`stock_feature_snapshot.py:72-77`），仅 `ix_feature_snapshot_run_instrument` 索引。
+- `source_run_id` 为 nullable lineage FK（`stock_feature_snapshot.py:72-77`）；migration 061 晚于 056 新增
+  （nullable 兼容历史），pre-061 行 `source_run_id=NULL`。
 - `upsert_snapshot`（`feature_snapshot_service.py:1834-1846`）`ON CONFLICT` 命中上述全键约束，
-  `WHERE` 子句以 `published_at IS NOT NULL` 为覆盖保护判据。
+  `WHERE` 以 `published_at IS NOT NULL` 为覆盖保护判据 → succeeded-but-unpublished run 不受保护 → rerun 覆盖（P0）。
+- Review R8/R9 已 explicit `source_core_run_id`（Phase A 隔离成立）。
+- `compute_review_core_with_run_items` 要求 `snapshot_run_id`（positional 必填）→ 主链 ALWAYS-bound。
 
-### 1.2 目标（partial unique index）
+---
+
+## 2. Migration 分类修正（§2 / §15）
+
+| 项 | 值 |
+|---|---|
+| DATA_REWRITE_REQUIRED | **NO**（设计成立前提下；无行重写） |
+| HISTORICAL_BACKFILL_REQUIRED | **NO**（历史 NULL 行保留为 legacy universe，由 legacy partial index 保护，无需回填） |
+| SCHEMA_RELAXATION | **YES**（每 base 1 行 → 每 base N 行，按 run 隔离） |
+| OLD CONSTRAINT DROP | **YES**（DROP 旧 6 列唯一约束） |
+| COMPATIBILITY_SENSITIVE | **YES**（DROP 后 legacy NULL 唯一性依赖新 partial index，必须与 writer/reader 同版本原子验证） |
+| MIGRATION_RISK | **MEDIUM**（无数据破坏/无回填；但约束替换 + 双 partial index 必须单 migration 原子应用 + migration-roundtrip/targeted-pg 验证） |
+| **MIGRATION_CLASS** | **NON-DATA-DESTRUCTIVE BUT CONTRACT-BREAKING（schema relaxation）** |
+
+**禁止再写 ADDITIVE / SAFE。** 部署纪律：不直部署 prod；governance + `migration-roundtrip`/`targeted-pg` 验证后方可排期（§15）。
+
+---
+
+## 3. DB Invariant 双 universe 设计（§3）
+
+### 3.1 目标 DDL（RECOMMENDED_DB_INVARIANT = OPTION A2：两个 partial unique index）
+
 ```sql
--- 1) 删除旧全键唯一约束（不再约束 source_run_id）
+-- 1) DROP 旧全键唯一约束（不再约束 source_run_id）
 ALTER TABLE stock_feature_snapshots
   DROP CONSTRAINT uq_feature_snapshot_instrument_date_tf_adj_schema;
 
--- 2) 新增归属隔离唯一索引（仅对带 source_run_id 的行生效）
-CREATE UNIQUE INDEX uq_feature_snapshot_run_isolated
+-- 2) CURRENT universe：run-scoped 唯一性（source_run_id NOT NULL）
+CREATE UNIQUE INDEX uq_feature_snapshot_run_current
   ON stock_feature_snapshots (
-    instrument_id,
-    trade_date,
-    primary_timeframe,
-    secondary_timeframe,
-    adj,
-    schema_version,
-    source_run_id
+    instrument_id, trade_date, primary_timeframe, secondary_timeframe,
+    adj, schema_version, source_run_id
   )
   WHERE source_run_id IS NOT NULL;
+
+-- 3) LEGACY universe：base-key 唯一性（source_run_id NULL 保留 DB 级保护）
+CREATE UNIQUE INDEX uq_feature_snapshot_legacy_base
+  ON stock_feature_snapshots (
+    instrument_id, trade_date, primary_timeframe, secondary_timeframe,
+    adj, schema_version
+  )
+  WHERE source_run_id IS NULL;
 ```
-- **A/B 共存证明**：run A 写 `source_run_id=A`、run B 写 `source_run_id=B`，二者 `(base, source_run_id)`
-  不同 → partial index 不冲突 → 同时 INSERT，互不覆盖。✓
-- **历史 NULL 行**：pre-061 行 `source_run_id=NULL`，被 `WHERE source_run_id IS NOT NULL` 豁免 →
-  不受唯一约束 → 保持可读（经 legacy `source_run_id IS NULL` 回退，见 §3.2）。✓
-- **新 run B vs 旧 NULL run A（同 base）**：旧约束已 DROP，partial index 豁免 NULL A → B INSERT 成功，
-  A(NULL) 保留 → 共存。✓
 
-### 1.3 Migration 分类（§15）
-- **分类：ADDITIVE / SAFE（但触碰约束，需 governance + PG 验证）**。
-- **非破坏性**：不删行、不重写历史行、不不可逆重构。仅「约束替换 + 索引新增」。
-- **强制应用不变量**（B1.2 落地护栏）：**所有 `StockFeatureSnapshot` 写入必须设置 `source_run_id`**
-  （run 必然已知自身 id）。任何遗漏 `source_run_id` 的写入会在同一 base 下产生两条 NULL 行，
-  破坏 legacy 回退的「每 base 唯一」假设 → 必须在 B1.2 审计所有 writer（仅 `upsert_snapshot` 一条路径，
-  见 §4.1，已确认它写入 `source_run_id=snapshot.source_run_id`）。
-- **部署纪律**：本 migration 不得直接部署到正式 DB；须经 migration governance 评审 + `targeted-pg`
-  / `migration-roundtrip` 验证（B1.3）后方可排期。符合 §15。
+### 3.2 正确性证明
 
-### 1.4 upsert ON CONFLICT 目标
-`upsert_snapshot`（`feature_snapshot_service.py:1834`）改为：
-- `on_conflict_do_update(constraint="uq_feature_snapshot_run_isolated", set_=update_cols)`。
-- **`WHERE` 子句简化**：因隔离已结构性由 partial index 保证（同 run 重 upsert 才冲突，跨 run 不冲突），
-  原 `published_at` 覆盖保护可移除；仅保留「同 run 内始终可更新」语义。跨 run 不会被覆盖。
-- 行为：B 重跑 B 自身行 → 更新；B 写 A 的 base（不同 source_run_id）→ 新行，不碰 A。✓
+- **A/B 共存（CURRENT）**：A(source=A)、B(source=B) 的 `(base, source_run_id)` 不同 → CURRENT index 不冲突 → 同时 INSERT，互不覆盖。
+- **同 run 幂等（CURRENT）**：run B 重 upsert 自身行 → `(base, B)` 冲突 → DO UPDATE，更新 B 行。
+- **LEGACY 唯一（DB fail-closed）**：`source_run_id IS NULL` 的行受 `uq_feature_snapshot_legacy_base` 约束 →
+  同 base 最多 1 行。**即使未来 writer 遗漏 source_run_id，DB 仍拒绝同 base 重复 NULL 行**（不再依赖应用层自觉）。
+- **LEGACY/CURRENT 共存**：NULL 行在 CURRENT index 中被豁免（`WHERE IS NOT NULL`），CURRENT 行在 LEGACY index 中被豁免 →
+  历史 NULL 行与新 run 行同 base 共存，legacy 回退读 NULL 行，精确读 CURRENT 行。✓
+- **OPTION A1（real UniqueConstraint(base..., source_run_id) + partial legacy）被否**：
+  real constraint 在 Postgres 中允许 NULL 不冲突（NULL ≠ NULL），CURRENT universe 语义与 A2 相同；
+  但 A1 的 CURRENT 需 `ON CONFLICT ON CONSTRAINT`，而代码库 CURRENT 写入路径与 partial index 先例
+  （`FirstPyramidHistoryEvent`）完全一致 —— **A2 是 house pattern，A1 无额外收益**。
+
+### 3.3 同仓先例（强证据）
+`FirstPyramidHistoryEvent`（`first_pyramid_history_service.py:1629-1652`）**已实施完全相同的双 universe**：
+普通 UNIQUE 约束拆成两个 partial unique index（`WHERE history_contract_version IS NULL` /
+`WHERE history_contract_version IS NOT NULL`），注释明文：
+> "on_conflict 必须用 index_elements + index_where 做 index inference，禁止 ON CONFLICT ON CONSTRAINT <partial-index-name>，
+> 保证旧 NULL X + v2 X 可共存、v2 X 重跑仍幂等。"
+
+这正是审计要求的形态，且已在 production 验证。
 
 ---
 
-## 2. Reader 架构（B1.2 核心）
+## 4. ON CONFLICT 契约（可实施级，§4）
 
-### 2.1 Canonical run 解析（新增 owner）
-新增 `get_canonical_snapshot_run(db, trade_date, *, scope="full", schema_version=_SCHEMA_VERSION)`
-→ 返回「当前可读」的单一 run：
-- 筛选：`trade_date`, `schema_version`, `status == succeeded`, `metadata_['scope'] == scope`。
-- **排序**：`finished_at DESC`（最新 succeeded 优先；rerun B 成功后取代 A 成为 canonical）。
-- **不再要求 `published_at IS NOT NULL`**（§9/§13 解耦）。
-- legacy（pre-061，所有 run `source_run_id=NULL`）回退：取 `published_at IS NOT NULL` 的最新 run（兼容现有 watchlist 语义直到 B3 退役 publication）。
-
-### 2.2 标准读取模式（modeled on `api/stock_context.py:223-253`）
-每个 snapshot 读取点统一为两段式：
+### 4.1 CURRENT writer（run-scoped）
 ```python
-# 1) 精确：source_run_id == canonical_run.id（或调用方已有的显式 run id）
-stmt = select(StockFeatureSnapshot).where(
-    StockFeatureSnapshot.instrument_id == iid,
-    StockFeatureSnapshot.source_run_id == canonical_run.id,
+stmt = pg_insert(StockFeatureSnapshot).values(...)
+stmt = stmt.on_conflict_do_update(
+    index_elements=[
+        StockFeatureSnapshot.instrument_id,
+        StockFeatureSnapshot.trade_date,
+        StockFeatureSnapshot.primary_timeframe,
+        StockFeatureSnapshot.secondary_timeframe,
+        StockFeatureSnapshot.adj,
+        StockFeatureSnapshot.schema_version,
+        StockFeatureSnapshot.source_run_id,
+    ],
+    index_where=text("source_run_id IS NOT NULL"),
+    set_={...payload cols..., "updated_at": func.now()},
 )
-# 2) Legacy 回退（仅当精确查无结果且 canonical_run.source_run_id IS NULL）：
-#    WHERE base-key AND source_run_id IS NULL
 ```
-- 调用方若已持有显式 `run_id`（如 Review 持有 `source_core_run_id`、market_stocks 持有 `snapshot_run_id`），
-  **直接用该 id**，不经 canonical 解析（更精确、零歧义）。
-- 调用方仅持有 `trade_date`（如 watchlist monitor-status），**先 `get_canonical_snapshot_run` 解析**，再精确读。
+- **冲突目标 = `uq_feature_snapshot_run_current`（partial unique index，index inference）**。
+- **禁止 `constraint="uq_..."`**（ON CONFLICT ON CONSTRAINT 仅对 real constraint 合法；对 partial unique index 无效）。
 
-### 2.3 读取点清单（爆破半径 + 改造要求）
+### 4.2 LEGACY writer（source_run_id IS NULL）
+```python
+stmt = stmt.on_conflict_do_update(
+    index_elements=[base 6 列...],          # 不含 source_run_id
+    index_where=text("source_run_id IS NULL"),
+    set_={...},
+)
+```
 
-| # | 文件:行 | 当前过滤 | mixed-world 风险 | B1.2 改造 |
-|---|---|---|---|---|
-| R1 | `api/watchlist.py:371-379` | instrument_id IN + trade_date + schema_version（**无 source_run_id**） | **高**（用户面） | 先 `get_canonical_snapshot_run`，再 `source_run_id == canonical.id`；legacy NULL 回退 |
-| R2 | `api/stock_context.py:223-253` | `source_run_id == run.id` 精确 + legacy 回退 | 低（已正确） | 验收一致即可；legacy 回退保留 |
-| R3 | `api/stock_context.py:515-521` | trade_date DESC limit(1)（无 source_run_id） | 中 | 解析 canonical 后精确读 |
-| R4 | `market_stocks_service.py:478-501`（lateral） | `source_run_id == snapshot_run_id` 当给定；否则 `trade_date DESC limit(1)` | 中（legacy 分支） | 无 `snapshot_run_id` 时改走 canonical 解析 |
-| R5 | `market_stocks_service.py:280-281,383-384` | instrument join + trade_date DESC | 中 | canonical 精确读 |
-| R6 | `market_stocks_service.py:1009-1022`（window） | partition instrument, trade_date DESC | 中 | canonical 精确读 |
-| R7 | `state_event_service.py:282-377` | max(trade_date) subquery + instrument | 中（跨日） | 每 base date 解析 canonical；legacy NULL 回退 |
-| R8 | `review_scope_service.py:495,885` | **`source_run_id == source_core_run_id`** | **无**（已隔离） | 不变（Phase A 已正确） |
-| R9 | `review_observation_prep_service.py:434` | **`source_run_id == source_core_run_id`** | **无**（已隔离） | 不变 |
-| R10 | `core_artifact_repository.py:47` | trade_date + order_by instrument | 中 | canonical 精确读 |
-| R11 | `granular_restart_service.py:556,690` | trade_date / instrument_id | 低 | canonical 精确读 |
-| R12 | `product_readiness_service.py:1596-1615` | trade_date count | 低 | 绑定 canonical run id 计数 |
-| R13 | `auction_anchor_service.py:935-937` | trade_date | 中 | canonical 精确读 |
-| R14 | `after_close_orchestrator.py:2269-2275`（history 物化） | trade_date（SELECT source_run_id 列，遍历所有行） | 中 | 仅物化 canonical run 的行（`WHERE source_run_id == canonical.id`） |
-| R15 | `after_close_orchestrator.py:5269-5271` | **`source_run_id == snap_id`** | **无**（已正确） | 不变 |
-
-**结论**：R1/R3/R4/R5/R6/R7/R10/R11/R12/R13/R14 共 11 处需在 B1.2 改造；R2/R8/R9/R15 已正确（验收即可）。
-Review 隔离（R8/R9）已成立，Phase A 不变量延续到 B1。
+### 4.3 `source_run_id=None` 是否允许进入 CURRENT writer？—— **fail-closed：禁止**
+- CURRENT writer（`compute_review_core_with_run_items` 及 batch 入口 run-scoped 模式）在 upsert 前
+  **assert `snapshot.source_run_id is not None`**（否则 `ValueError`）。
+- LEGACY 写入（backfill，若保持 NULL）必须**显式走 legacy 冲突目标**，与 CURRENT 完全分离，
+  **禁止共享一个 silent optional contract**。
+- 若 B1.2 采用「修复 backfill 传 source_run_id」（推荐，见 §7），则 LEGACY writer 仅剩「历史数据维护脚本」，
+  legacy 冲突目标仅用于兜底。
 
 ---
 
-## 3. Writer / Lifecycle 解耦（B1.2）
+## 5. Writer Caller Map（函数级 → caller 级，§5）
 
-### 3.1 `upsert_snapshot`（§4.1，已述）
-`ON CONFLICT` 命中 `uq_feature_snapshot_run_isolated`；`WHERE` 移除 `published_at` 判据。
-
-### 3.2 `create_snapshot_run`（§8 CASE A / §11）
-- 当前：`scope='full'` 且 `get_published_full_run`（succeeded+**published**+full）存在 →
-  抛 `PublishedSnapshotRunExistsError`（`feature_snapshot_service.py:2182-2198`）。
-- 目标：A succeeded（`published_at=None`）**必须允许**创建 B（§8 CASE A）。解耦为：
-  - 保留「已有 `running` run 则幂等复用」（`L2164-2180`，不变）。
-  - **移除 `published_at` 门控**：不再因 A 已 published / 曾 published 拒绝 B。
-  - 仍阻止「同 base 已有 `running` 但未被复用」的并发创建（由 run 表 partial unique index 保证；
-    当前 run 表已是 `status='running'` 部分唯一，见 `create_snapshot_run` docstring L2129-2131）。
-  - 不再抛 `PublishedSnapshotRunExistsError`（或重命名为 `RunningSnapshotRunExistsError` 仅拦 running）。
-- 语义：rerun 合法；正确性由 §1.2 写隔离 + §2 读隔离保证，而非「拒绝创建」。
-
-### 3.3 `finish_snapshot_run`（§9/§13）
-- 当前：`status==succeeded` 时写 `published_at`（`feature_snapshot_service.py:2345-2347`）。
-- 目标：`published_at` **不再作为任何 Core/Readiness 门控**（§9/§13）。
-- B1 决定：**保留写 `published_at`**（§14 禁止在 B1 删除 publication subsystem；B3 才退役）。
-  仅确保「无 reader 再以其为可读判据」——由 §2.3 读改造落实。最小爆破半径。
-
-### 3.4 `has_succeeded_snapshot_run` → `has_canonical_snapshot_run`（watchlist gate）
-- 当前：`succeeded AND published_at IS NOT NULL AND scope='full'`（`feature_snapshot_service.py:2456-2468`）。
-- 目标：`succeeded AND scope='full'`，**去掉 `published_at`**；语义等价于「存在 canonical run」。
-- `after_close_pipeline_service.py:703` 调用点随之改名；`_get_snapshot_run_summary`（`L225-259`）
-  `WHERE published_at.is_not(None)` 一并去掉（与 `has_canonical_snapshot_run` 一致）。
-
-### 3.5 `finalize_snapshot_run_compute_complete`（compute 终态）
-- 不变：基于 run-items item-truth 判 `succeeded/failed/running`（`feature_snapshot_service.py:2363-2429`）。
-- 其 `published_at is not None` early-return（`L2393`）保留为「已发布 run 不回退」无害守卫。
-
----
-
-## 4. 更新后的 CORE_LIFECYCLE_OWNER_MAP
-
-| operation | current owner | current published_at dependency | target owner (B1.2) |
+| writer（函数） | 生产 caller | source_run_id | 分类 |
 |---|---|---|---|
-| create | `create_snapshot_run` → `PublishedSnapshotRunExistsError` | YES（拦 published） | `create_snapshot_run` → 仅拦 running（rerun 合法） |
-| compute/rerun | orchestrator `computing_features` | 间接（经 create 拦 published） | 直接（create 解耦后 rerun 自由） |
-| persist (upsert) | `upsert_snapshot` WHERE `published_at` | YES（覆盖保护判据） | `upsert_snapshot` ON CONFLICT `uq_feature_snapshot_run_isolated`（结构性隔离） |
-| finalize (compute terminal) | `finalize_snapshot_run_compute_complete` | NO（item-truth） | 不变 |
-| finish (publish sem) | `finish_snapshot_run` 写 `published_at` | YES（写） | 保留写（B3 退役），不再作门控 |
-| rerun | 受 create 拦 published 限制 | YES | 解耦（见 create） |
-| resume | orchestrator running 复用 | NO | 不变 |
-| consume-watchlist | `has_succeeded_snapshot_run` + `api/watchlist.py` trade_date 读 | YES（published_at + 无 source_run_id） | `has_canonical_snapshot_run` + canonical 精确读 |
-| consume-Review | `review_scope/review_observation_prep` `source_core_run_id` | **NO**（已隔离） | 不变 ✓ |
-| consume-market_stocks | `market_stocks_service` trade_date/latest | 无 published_at，但无 source_run_id | canonical 精确读 |
-| consume-history | `after_close_orchestrator:2269` trade_date 全量 | 无 published_at，但全量遍历 | canonical 精确物化 |
+| `compute_review_core_with_run_items` | `after_close_orchestrator.py:3597`（AfterClose scheduled computing_features） | **ALWAYS**（`snapshot_run_id` positional 必填；upsert 于 1474/1490） | **CURRENT** |
+| `compute_review_core_for_trade_date` | 经 with_run_items（1460 `source_run_id=snapshot_run_id`）；经 batch（1194 透传 param） | ALWAYS（主链）；MAYBE_NULL（batch 入口） | CURRENT / legacy-entry |
+| `compute_review_core_batch_for_trade_date` | **无生产 caller**（tests 仅） | MAYBE_NULL（param 默认 None） | legacy-entry（保留） |
+| `compute_for_trade_date` | **无生产 caller**（tests 仅） | MAYBE_NULL（param 默认 None） | legacy-entry（保留） |
+| `compute_feature_snapshot_for_date` | `feature_snapshot_backfill.py:593,867`；`canonical_adapters.compute_snapshot_derived_adapter:581`（无活跃生产 caller，registry 合同仅） | **NULL**（backfill 不传） | **LEGACY/backfill** |
+| `create_snapshot_run` | `after_close_orchestrator.py:3536`（CURRENT）；`feature_snapshot_backfill.py:492,1000`（backfill 建 run） | — | CURRENT + backfill |
+
+**关键事实**：
+- **CURRENT production writer 仅一条**（orchestrator → with_run_items），source_run_id **ALWAYS**（非可选）。
+- **backfill 存在 lineage gap**：`feature_snapshot_backfill.py:492/1000` 创建 run，但 `593/867` 计算快照时
+  **不传 source_run_id** → backfill 快照落入 NULL universe（run 存在但行未绑定）。B1.2 推荐修复为传
+  `source_run_id=run.id`（一行改动，把 backfill 并入 CURRENT universe，杜绝 future NULL 写入）。
+- legacy-entry（batch / compute_for_trade_date）无生产 caller → B1.2 只补 fail-closed 守卫，不扩展。
+
+**目标策略（§5）**：CURRENT production writer `source_run_id MUST NOT BE NULL`；backfill 修复为 run-scoped；
+历史 NULL 行保持 legacy universe（DB 级保护，不回填）。
 
 ---
 
-## 5. §8 合同裁决（CASE A–F 如何在设计中满足）
+## 6. Reader Domain Owner Map（15 个读取点终审，§6-§8）
 
-- **CASE A**（A succeeded, published_at=None → 允许创建 B）：§3.2 `create_snapshot_run` 移除 published 门控 → B 可建。✓
-- **CASE B**（B succeeded → Review 仅消费 B）：R8/R9 已 `source_core_run_id=B` 精确读；A 行 `source_run_id=A` 不被选。✓
-- **CASE C**（B 中途 failed → 不形成 A/B mixed）：B 失败行 `source_run_id=B` 但 run=`failed`；canonical =
-  最新 `succeeded`（=A 或 none）；R1/R4..R14 走 canonical，绝不读 failed B 的行；A 行 `source_run_id=A` 完好。
-  → 无 mixed world。✓
-- **CASE D**（B running → Review fail-closed）：canonical 解析排除 `running`；Review `_validate_core_ready`
-  已要求 `status==succeeded`；running B 不被消费。✓
-- **CASE E**（B failed → Review fail-closed）：同上，failed 排除；Review 不消费。✓
-- **CASE F**（published_at None/非None 不改变生命周期判断）：§3.3/`has_canonical_snapshot_run` 去掉
-  `published_at` 门控；Core ready/rerun/snapshot 可读性仅取决于 `status==succeeded` + canonical。✓
+| R | 站点 | DOMAIN_OWNER | 裁决 |
+|---|---|---|---|
+| R1 | `api/watchlist.py:371-379`（monitor-status） | **PRODUCT_DISPLAY_OWNER**（仅 trade_date 上下文） | **改**：解析 DISPLAY_CORE_OWNER → `source_run_id` 精确读 |
+| R2 | `api/stock_context.py:223-253` | **EXPLICIT_RUN**（`source_run_id == run.id` + legacy 回退） | OK（验收） |
+| R3 | `api/stock_context.py:495-535`（recent changes） | **PRODUCT_DISPLAY_OWNER**（published-gated 多日读） | **改**：去 published 门控；per-date display owner 绑定 |
+| R4 | `market_stocks_service.py:493-501`（lateral） | **EXPLICIT_RUN** 当 `snapshot_run_id` 给定（819 传 `published_core_run_id`） | **改**：display owner 重新指定来源（现为陈旧 pub pointer） |
+| R5 | `market_stocks_service.py:807-819`（display owner 解析） | **PRODUCT_DISPLAY_OWNER**（现 = `FactorPublication(stock_core).data_run_id`，**已陈旧**） | **改**：按 §6.3 合同替换 |
+| R6 | `market_stocks_service.py:1007-1028`（window rn=1） | **PRODUCT_DISPLAY_OWNER**（date-only latest，无 pin） | **改**：display owner 绑定 |
+| R7 | `state_event_service.generate_events_for_run:293` | **EXPLICIT_RUN**（`source_run_id == run.id`；事件幂等键 = symbol:source_run_id:algo） | OK |
+| R8 | `review_scope_service.py:495,885` | **REVIEW_LINEAGE**（`source_core_run_id`） | OK |
+| R9 | `review_observation_prep_service.py:434` | **REVIEW_LINEAGE**（`source_core_run_id`） | OK |
+| R10 | `core_artifact_repository.py:48` | **EXPLICIT_RUN**（`source_run_id == source_core_run_id`） | OK |
+| R11 | `granular_restart_service.py:557,691` | **EXPLICIT_RUN**（`source_run_id == source_core_run_id`） | OK |
+| R12 | `product_readiness_service.py:1599,1614` | **EXPLICIT_RUN**（`source_run_id == source_core_run_id`；跨日 existence 子查询无害） | OK |
+| R13 | `auction_anchor_service.py:938` | **EXPLICIT_RUN**（`_load_core_snapshots(trade_date, core_run_id)` 双键） | OK |
+| R14 | `after_close_orchestrator.py:2269-2275`（History 物化） | **PARENT_JOB_RUN**（execution 持 `snapshot_run_id=X`/`core_run_id`） | **改**：`WHERE source_run_id == X`（禁止全量遍历） |
+| R15 | `after_close_orchestrator.py:5269-5271` | **EXPLICIT_RUN**（`source_run_id == snap_id`） | OK |
+
+**结论（§8 要求的 DISPLAY_OWNER_REQUIRED_READERS）**：
+- EXPLICIT / REVIEW_LINEAGE / PARENT 直接绑定 = **10 + 1 = 11 个已/可直接 explicit**，**零 canonical resolver**。
+- 真正 date-only 产品展示 reader（需 DISPLAY_CORE_OWNER）= **R1 / R3 / R4+R5 / R6，共 4 个站点（1 个合同）**。
+- **R14 是唯一「parent 绑定」改动**（history 物化只读当前 execution 的 X）。
+- 审计 §7 特别裁决：R7 state_events → 绑定 X（**已绑定**，`generate_events_for_run(db, snapshot_run_id)`）；
+  R11 granular_restart → 绑定 restart lineage（**已绑定**，`source_core_run_id`）；R14 History → `History(X)`（需改）；
+  R12 readiness → 绑定 X（**已绑定**，`source_core_run_id`）。
 
 ---
 
-## 6. KPI 映射（§18）
+## 7. DISPLAY_CORE_OWNER_CONTRACT（§8/§9）
 
-| KPI | 满足方式 |
+### 7.1 现状（证据）
+- `market_stocks_service.py:807-817`：`get_publication(scope=market, kind=stock_core) → pub.data_run_id`。
+- `stock_context.py:112-118,167-174`：同款 publication 读（stock context 展示 owner）。
+- PHASE A 后 `publish_stock_core_atomically` **runtime 零调用**（仅注释残留）；pointer 仅 admin 手动可写
+  （`admin_incremental_publish.py:80`）→ **pointer 冻结在最后一次手动发布，或 NULL**。
+- 因此：R5 的 display owner **要么陈旧（stale），要么回退 latest-guess** —— 现状已损坏，与 B1 无关。
+
+### 7.2 合同（推荐默认，需产品签核）
+> **DISPLAY_CORE_OWNER(T) = 当日 AfterClose execution lineage 记录的 `feature_snapshot_run_id`**
+> （`job_run.metadata["feature_snapshot_run_id"]`，写入点 `after_close_orchestrator.py:3576`，
+> 恢复读取点 2003/3056/5188；**durable 执行血缘，非 snapshot 时间戳**）。
+> - 资格：full-scope + `status == succeeded` 的 Core run（CORE_READY 语义，§13/Phase A 已批准，不含 published_at）。
+> - **显式 supersede**：对 T 发起新 AfterClose execution（rerun）→ 新 execution 成为当日 owner（执行血缘即权威）。
+> - **backfill/manual 日**（无 AfterClose execution）：owner = 该 backfill/manual 全量 run（其自身 run 血缘记录）；
+>   运营显式 supersede。
+> - **明确禁止**：(a) 对 `stock_feature_snapshot_runs` 按 `finished_at DESC` 取 latest（timestamp 猜测）；
+>   (b) 新增 display pointer 表/列（= 再造 publication，Design B 即此）。
+
+### 7.3 LATEST_SUCCESSFUL_RERUN_WINS
+- **YES，但仅经执行血缘（job_run / backfill run lineage），非 snapshot finished_at**。
+- 资格：`run_type ∈ {after_close, manual, backfill}` 且 full scope；scheduled/manual/backfill 谁有资格抢占
+  display owner = **产品合同**（本设计提供默认：AfterClose execution 为权威；manual/backfill 仅在其缺席时，
+  且须显式 ops supersede）。
+- `scope=full` **≠** canonical（审计 §9 正确）；full 只是资格必要条件。
+
+---
+
+## 8. DESIGN A（修正版）评估（§10/§11）
+
+| 维度 | 结论 |
 |---|---|
-| B1-1 lifecycle 不依赖 published_at | §3.3/§3.4 去门控 |
-| B1-2 A succeeded 后可安全建 B | §3.2 |
-| B1-3 B succeeded 时 snapshot 100% source_run_id=B | §1.2 partial index（写隔离）+ R8/R9 精确读 |
-| B1-4 B failed 不形成 mixed | §5 CASE C |
-| B1-5 A 历史 artifact 不被失败 B 破坏 | §1.2（B 写 source_run_id=B，不碰 A 行） |
-| B1-6 running/failed B 不被 Review 消费 | §5 CASE D/E |
-| B1-7 Phase A publication read/write=0 不回归 | Review 路径(R8/R9/R15) 不变；orchestrator CURRENT 分支不变 |
-| B1-8 Phase A targeted PG 继续 PASS | B1.3 跑 `targeted-pg`，含新增 B1 用例 |
-| B1-9 B1 targeted PG rerun cases 全 PASS | §7 PG-B1-A..F |
+| rerun isolation | writer run-scoped（已具备主链）+ DB run-scoped（A2 双 partial index） |
+| failed B safety | B 行 `source_run_id=B` 但 run=failed；display/Review 均不选 failed；A 行完好 |
+| reader blast radius | **5 个站点**：R14（parent 绑定）+ R1/R3/R5/R6（display owner 合同） |
+| schema complexity | 1 migration：DROP 1 constraint + ADD 2 partial unique index（house 先例） |
+| migration risk | MEDIUM（contract-breaking，无数据破坏） |
+| historical rewrite | **NO**（NULL 留 legacy universe，DB 级保护） |
+| publication dependency | display owner 从 publication pointer 迁移到 execution lineage（顺带修复现状 stale pointer） |
+| watchlist owner complexity | 中（1 个合同 + 4 站点） |
+| implementation effort | 中：migration + writer fail-closed 守卫 + backfill 传 run id + R14 + display 合同 + PG-B1-A..F |
+| deployment risk | 中（约束替换需与 writer/reader 原子发布） |
+| Exploration speed | 快（B1.2 实现 + B1.3 PG 可闭环） |
+| future cleanliness | 高（消灭 timestamp guessing；display owner 显式 durable） |
+
+**DESIGN_A = VIABLE**（修正 scope 后：不是「十几个 reader + 新 display owner 才能 rerun」，而是 5 站点 + 1 合同；
+且 display owner 合同**本来就必须做**——现状已损坏）。
 
 ---
 
-## 7. Rerun-isolation 真值表（A/B 共存矩阵）
+## 9. DESIGN B（staging → atomic promote）评估（§10）
 
-| 场景 | A.source_run_id | B.source_run_id | upsert 冲突？ | watchlist 读 | Review 读 |
-|---|---|---|---|---|---|
-| 仅 A（legacy NULL） | NULL | — | — | legacy NULL 回退=A | A（若持有 A id） |
-| A succeeded + B rerun 中 | A / NULL | B(running) | 否 | canonical=A（running 排除 B） | A |
-| A succeeded + B succeeded | A / NULL | B(succeeded) | 否 | canonical=B（finished_at 新） | B（source_core_run_id=B） |
-| A succeeded + B failed | A / NULL | B(failed) | 否 | canonical=A（failed 排除 B） | A |
-| 两 legacy NULL（不合理，历史最多 1/base） | NULL | NULL | 旧约束已 DROP，但历史仅 1 行/base | legacy 回退 | — |
+| 维度 | 结论 |
+|---|---|
+| schema changes | staging universe + canonical pointer（新表/新列，或复用 snapshot 行 + supersede 列） |
+| reader changes | 全部 reader 改读 pointer（display owner 显式化，同 Design A 的 R1/R3/R5/R6 + 更多） |
+| failed B isolation | B 不 promote → A 保持 display ✓（隔离性好） |
+| storage | 双写 staging + canonical（或 supersede 版本列） |
+| promotion transaction | 新增原子 promote 事务（pointer 更新 = 单行 update，但要处理并发/回滚） |
+| **publication-like pointer 是否重现** | **YES —— 明确写出**：promote = 写 canonical pointer = 再造 publication 机制（与 B2/B3 目标矛盾） |
+| implementation cost | 高（新机制 + 事务 + 版本化 + 兼容） |
+| Review lineage | 不受影响（source_core_run_id 独立） |
+| watchlist compatibility | 依赖 pointer 写入（backfill/AfterClose 都要 promote） |
 
----
-
-## 8. 风险登记 / 护栏
-
-1. **应用不变量**：所有 writer 必须写 `source_run_id`（仅 `upsert_snapshot` 一条路径，已确认写入）。
-   若新增 writer 遗漏 → legacy 回退歧义。B1.2 静态审计所有 `StockFeatureSnapshot(...)` 构造。
-2. **partial index 与 ON CONFLICT**：`on_conflict_do_update(constraint=...)` 引用新索引名；PG 要求
-   冲突列集合精确匹配索引列。B1.2 单测验证。
-3. **canonical 解析竞态**：同日多 succeeded run 时 `finished_at DESC` 取最新；rerun B 成功后自然取代 A。
-   无需额外锁（同一 after_close 串行）。
-4. **legacy NULL 回退范围**：仅 pre-061 行；B1.2 后所有新写均带 source_run_id，legacy 分支仅兜底历史。
-5. **`finish_snapshot_run` 仍写 `published_at`**：B1 保留（B3 退役），但无 reader 以其为门控（§2.3）。
-   若后续发现遗漏 reader，B1.3 PG 必暴露。
-6. **Migration 部署**：§1.3 纪律——不直部署 prod；governance + `migration-roundtrip`/`targeted-pg` 验证。
+**DESIGN_B = VIABLE but BLOCKED for B1 recommendation**：其本质是「再造一个 publication-like pointer」，
+与 PHASE B「退役 publication」的目标自相矛盾；成本高于 Design A，收益相同。
 
 ---
 
-## 9. B1.2 / B1.3 工作分解（交接）
+## 10. DEFER B1 分析（§11）
 
-### B1.2 — Migration / Ownership Implementation
-1. 新增 migration：DROP 旧约束 + ADD `uq_feature_snapshot_run_isolated`（partial）。更新 model
-   `__table_args__`（移除旧 `UniqueConstraint`，新增 `Index(..., postgresql_where=...)` 表达 partial；
-   保留 `ix_feature_snapshot_run_instrument`）。
-2. `upsert_snapshot`：`ON CONFLICT` 改新索引名 + 简化 WHERE。
-3. `create_snapshot_run`：移除 `published_at` 门控（§3.2）；`PublishedSnapshotRunExistsError` 语义收敛为仅拦 running。
-4. `has_succeeded_snapshot_run` → `has_canonical_snapshot_run`（去 published_at）；`_get_snapshot_run_summary` 同步。
-5. 新增 `get_canonical_snapshot_run`。
-6. R1/R3/R4/R5/R6/R7/R10/R11/R12/R13/R14 共 11 处读取点改造为 canonical/精确读（§2.3）。
-7. 静态审计：所有 `StockFeatureSnapshot(...)` 构造必须传 `source_run_id`。
+| 维度 | 结论 |
+|---|---|
+| 保持 current schema | 是（不 DROP 约束，保留 `PublishedSnapshotRunExistsError`，保留 publication 保护） |
+| 同日 full rerun | 保持 blocked（已发布 full run 存在时拒绝新 run） |
+| **是否阻塞 Review 产品上线** | **NO** —— Review 已 explicit `source_core_run_id` + `status==succeeded`（Phase A），
+  与同日 rerun 无关；backfill 新日期（无 published run）不受阻 |
+| 遗留问题 | (1) 同日 rerun 不可用（ops 能力缺失）；(2) display owner stale pointer 未修
+  （**注意：这是独立于 B1 的现存 bug**，即便 DEFER 也应单独立项修复） |
+
+**DEFER_B1 = VIABLE**（不阻塞 Phase C），但必须单独立项修 display stale pointer（否则 watchlist/market 展示持续陈旧）。
+
+---
+
+## 11. 三方案正式比较（§12）
+
+| 维度 | A（修正） | B | DEFER |
+|---|---|---|---|
+| rerun isolation | 强（DB run-scoped） | 强 | 无（rerun blocked） |
+| failed rerun safety | 强（行级隔离） | 强（不 promote） | N/A（不允许 rerun） |
+| reader blast radius | 5 站点 + 1 合同 | 全部经 pointer | 0 |
+| schema complexity | 中（1 migration + 2 index） | 高（pointer 机制） | 0 |
+| migration risk | MEDIUM | HIGH | 0 |
+| historical rewrite | NO | NO（但需 pointer 回填） | N/A |
+| publication dependency | display owner 去 publication | **重现 publication-like** | 保留 |
+| watchlist owner complexity | 中 | 高 | 0（但 stale bug 未解） |
+| implementation effort | 中 | 高 | 低（仅修 stale bug） |
+| deployment risk | 中 | 高 | 低 |
+| Exploration speed | 快 | 慢 | 立即进 Phase C |
+| future cleanliness | 高 | 低（违背 B2/B3） | 中（rerun 悬置） |
+
+**RECOMMENDED_DESIGN = A**（证据支撑：15 个 reader 中 10 个已 explicit、主链 writer 已 run-scoped，
+系统已在向 immutable run artifact 演进——与审计 §0「Design A 最有潜力」判断一致；
+且 display owner 合同是现存 bug 的必修项，与 B1 深度协同）。
+**DEFER = 有效 fallback**（若产品/治理希望 Phase C 优先、零 migration 风险；rerun 冻结不阻塞 Review 上线）。
+**B = 否**（再造 publication-like pointer，违背 PHASE B 目标）。
+
+---
+
+## 12. B1.1 Done Condition 清单（§13）
+
+| 项 | 值 |
+|---|---|
+| HISTORICAL_BACKFILL_REQUIRED | **NO**（NULL 留 legacy universe，DB 级保护，不回填） |
+| DB_CURRENT_UNIQUENESS | `uq_feature_snapshot_run_current`（base..., source_run_id）WHERE source_run_id IS NOT NULL |
+| DB_LEGACY_NULL_UNIQUENESS | `uq_feature_snapshot_legacy_base`（base 6 列）WHERE source_run_id IS NULL |
+| ON_CONFLICT_CONTRACT | **VALIDATED_DESIGN**：CURRENT `index_elements=[base7...source_run_id], index_where="source_run_id IS NOT NULL"`；
+  LEGACY `index_elements=[base6], index_where="source_run_id IS NULL"`；禁止 `constraint=` 引用 partial index
+  （同仓先例 first_pyramid_history_service.py:1632 已验证） |
+| CURRENT_WRITER_NULL_ALLOWED | **NO**（fail-closed：upsert 前 assert source_run_id is not None） |
+| READER_EXPLICIT_OWNER_COUNT | **11 / 15**（R2,R7,R8,R9,R10,R11,R12,R13,R15 + R14 parent 绑定 + R4 传入即 explicit） |
+| DISPLAY_OWNER_REQUIRED_READERS | **R1 / R3 / R5 / R6（4 站点，1 合同）** |
+| DISPLAY_CORE_OWNER_CONTRACT | **AfterClose execution lineage（job_run.metadata.feature_snapshot_run_id）**；资格 full+succeeded；显式 supersede；禁止 timestamp/pointer |
+| DESIGN_A | **VIABLE** |
+| DESIGN_B | **VIABLE but publication-like → BLOCKED for B1** |
+| DEFER_B1 | **VIABLE（不阻塞 Phase C）** |
+| RECOMMENDED_DESIGN | **A**（DEFER 为 fallback） |
+| MIGRATION_IMPLEMENTATION_AUTHORIZED | **NO**（本包仅设计；批准后 B1.2 实现） |
+
+---
+
+## 13. B1.2 / B1.3 工作分解（交接，待批准）
+
+### B1.2 — Schema + Ownership Implementation
+1. migration：DROP 旧约束 + ADD 双 partial unique index（§3.1）；model `__table_args__` 同步。
+2. `upsert_snapshot`：CURRENT 冲突目标 + fail-closed assert；LEGACY 冲突目标显式分离（§4）。
+3. `create_snapshot_run`：去 `published_at` 门控（A succeeded 可建 B，§8 CASE A）；`PublishedSnapshotRunExistsError`
+   收敛为仅拦 running。
+4. `has_succeeded_snapshot_run` → 弃 bool，改 `resolve_display_snapshot_run(T) → run`（§7 合同；一个 API 返回 owner，
+   不再 has_xxx()+再猜两步）。
+5. R14 History 物化绑定 X；R1/R3/R5/R6 走 DISPLAY_CORE_OWNER（含 market_stocks/stock_context 去 publication 读）。
+6. backfill 传 `source_run_id=run.id`（修 lineage gap）；legacy-entry batch 补 fail-closed 守卫。
+7. writer 静态审计：所有 `StockFeatureSnapshot(...)` 构造必须显式 source_run_id（CURRENT）或显式 legacy 标记。
 
 ### B1.3 — Same-day rerun PG closure
-- PG-B1-A：A succeeded(pub=None) → B create allowed。
-- PG-B1-B：B succeeded → 全部 snapshot `source_run_id==B`；Review 仅消费 B。
-- PG-B1-C：B failed 中途 → 无 A/B mixed canonical；A 行完好。
-- PG-B1-D：running B → Review/consume fail-closed。
-- PG-B1-E：failed B → Review/consume fail-closed。
-- PG-B1-F：`published_at` None/非None 不改变 lifecycle/可读性判断。
-- 跑 `panji-verify targeted-pg`：Phase A 62 passed 不回归 + B1 新增用例全 PASS。
+- PG-B1-A..F（同 v1 §9 清单，逐条断言 run id / source_run_id / status / trade_date 全列归属）。
+- `panji-verify targeted-pg`：Phase A 62 passed 不回归 + B1 用例全 PASS；`migration-roundtrip` 验证双 partial index。
 
 ---
 
-## 10. git 纪律（§20）
-
-- 本设计文档为**非破坏性 additive artifact**，不含 production 代码变更。
-- `git add -- PHASE_B1_1_DESIGN.md`；commit；`git fetch origin dev`；确认 `merge-base --is-ancestor origin/dev HEAD`（ff-only）；
-  `git push origin dev` → 形成 `B1.1_VERIFY_SHA`。
-- 禁止 `add . / -A / -u` / rebase / amend / force / main / new branch。
-- **STOP**：B1.1 设计完成，交 ChatGPT exact-SHA 审计批准后再进入 B1.2 实现。
-
----
-
-## 11. 字段填表（最终报告用）
+## 14. 字段填表（最终报告用）
 
 ```
-MASTER_GOAL                = Review 前后端生产闭环
-CURRENT_PHASE              = B1.1 — Schema + Reader Architecture Design
-BASE_SHA                   = 939600be6174b78a0d75935e0698323b69670cb7
-FINAL_SHA (B1.1 design)    = <B1.1_VERIFY_SHA>
+BASE_SHA                 = e8a693fcb883b4a6095affe346afcd7df22df49b
+FINAL_SHA (B1.1-R1)      = <B1_1_FINAL_DESIGN_SHA>
 
-snapshot unique key (current) = (instrument_id, trade_date, tf, adj, schema_version)  [无 source_run_id]
-schema change              = ADD partial unique index (...) WHERE source_run_id IS NOT NULL; DROP old full uq
-source_run_id 属唯一归属    = YES (after B1.2 migration)
+DB invariant             = dual-universe partial unique indexes (A2)
+legacy NULL invariant    = uq_feature_snapshot_legacy_base (base6) WHERE source_run_id IS NULL
+ON CONFLICT design       = index_elements + index_where (CURRENT run-scoped / LEGACY base-scoped); 禁 constraint=partial-index
 
-A succeeded → B create     = ALLOWED (create_snapshot_run 去 published 门控)
-A published → B create     = ALLOWED (同上; published_at 不再是创建判据)
+historical backfill      = NO
+writer current-null policy = NO (fail-closed)
 
-B succeeded snapshot ownership = 100% source_run_id=B (partial index 写隔离)
-B failed snapshot ownership   = source_run_id=B 但 run=failed, 不被 canonical 选; A 行完好
-mixed A/B                    = NO (写隔离 + canonical 读隔离)
-A artifact preserved after B failure = YES
+readers:
+  explicit lineage       = 11/15 (R2,R7,R8,R9,R10,R11,R12,R13,R15 + R14 parent + R4 传入即 explicit)
+  display owner          = R1, R3, R5, R6 (4 sites, 1 contract)
+  legacy                 = R2 legacy-fallback (kept); backfill NULL rows (legacy universe)
+  unknown                = 0
 
-published_at lifecycle deps removed = YES (create/finish/has_*/readers 去门控; finish 仍写但无 reader 用)
-running Review consume  = NO (fail-closed)
-failed  Review consume  = NO (fail-closed)
+DISPLAY_CORE_OWNER       = AfterClose execution lineage (job_run.metadata.feature_snapshot_run_id); full+succeeded; explicit supersede
 
-schema change = ADDITIVE / SAFE (constraint swap, no row rewrite)
-Migration     = DESIGNED_NOT_DEPLOYED (governance + PG 验证后方可排期)
+Design A                 = VIABLE
+Design B                 = VIABLE but publication-like → BLOCKED for B1
+Defer                    = VIABLE (不阻塞 Phase C)
 
-PG-B1-A..F   = NOT EXECUTED (B1.3)
-Phase A regression = PASS (未触碰 orchestrator/Review 路径)
-formal PG    = pending (B1.3)
+recommended              = A
 
-PHASE_B1_CORE_LIFECYCLE_CLOSED = NO (B1.1 design only; B1.2+B1.3 后裁定)
-NEXT = B1.2 Runtime Publication Dependency Zero (Migration / Ownership Implementation)
+migration classification = NON-DATA-DESTRUCTIVE BUT CONTRACT-BREAKING (schema relaxation); RISK=MEDIUM
+production changed       = NO
+migration created        = NO
+
+B1_1_DESIGN_CLOSED       = CANDIDATE
+NEXT_REQUEST             = B1.2 / (或 DEFER → PHASE C)
 ```
