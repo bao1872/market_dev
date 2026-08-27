@@ -3079,9 +3079,10 @@ async def execute_after_close_run(
             )
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
-        # 阶段顺序（Phase 5 + Review Closure）：
+        # 阶段顺序（PHASE-A Core→Review Source Closure）：
         #   refreshing_daily → syncing_boards → computing_features
-        #   → publishing → computing_review → succeeded
+        #   → computing_review → computing_history → post-core optional → succeeded
+        # publishing / stock_core 发布已旁路，不再是真实步骤（KPI-A1）。
         # 旧步骤名（waiting_dsa_worker/quality_gate/feature_snapshot）兼容读取历史 run
         # [REPROCESS-OWNER-CLOSURE-01 P0-2] mainchain_stage 是「本次 execution 从哪里开始」
         # 的正式起点合同（PRD30 AC-16），与 last_completed_step（「已真实完成的检查点」，
@@ -3748,6 +3749,18 @@ async def execute_after_close_run(
             _auction_anchor_status: str = "skipped"
             _auction_publication_id: uuid.UUID | None = None
             _aggregation_status: str = "skipped"
+
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 PHASE-A] resume readiness owner：
+        # 正常 AfterClose DAG 不再进入 PUBLISHING 阶段（skip_publish=False）。
+        # 但 fresh compute 的 mandatory Core gate 在 skip_computing=True（断点恢复）
+        # 时被跳过，core_ready 不会经该门置位。此处必须复用唯一事实源 _validate_core_ready
+        # 重新校验真实 CoreRun 行（id / trade_date / status==succeeded），置 core_ready=True，
+        # 供下游 state_events / chip 等 CORE_READY-gated post-core enhancement 继续执行（§10）。
+        # 严禁读取 stock_core FactorPublication / pointer（KPI-A7/A8：resume publication read=0）。
+        if skip_computing:
+            async with AsyncSessionLocal() as verify_db:
+                await _validate_core_ready(verify_db, snapshot_run_id, trade_date)
+            core_ready = True
 
         else:
             # [Phase4.2 corrective] skip_publish=True（断点恢复到 publishing 之后）：
@@ -5031,11 +5044,17 @@ _CHECKPOINT_ORDER: dict[str, int] = {
     "refreshing_daily": 0,
     "syncing_boards": 1,
     "computing_features": 2,
-    "publishing": 3,
-    # [SLICE-01 H2] history readiness 校验在 publishing 之后、review 之前
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 PHASE-A] 真实 DAG 已收敛为
+    # features → review → history（publishing / stock_core 发布已旁路，不再是真实步骤）。
+    "computing_review": 3,
     "computing_history": 4,
-    "computing_review": 5,
-    "succeeded": 6,
+    "succeeded": 5,
+    # legacy token：旧 DAG 中 last_completed_step 可能为 "publishing"（stock_core 发布步骤）。
+    # 当前正文不再执行 publishing 步骤，保留 rank 仅供 reconcile 兼容历史 run 的
+    # last_completed_step="publishing"（_CHECKPOINT_ORDER.get 必须非 None）；
+    # rank 置于 succeeded 之后，确保其不落入任何真实 stage 的 pre_stages 区间，
+    # 不会污染当前 DAG 的 restart/resume skip 计算（KPI-A1/A7/A8）。
+    "publishing": 99,
 }
 
 # [REPROCESS-OWNER-CLOSURE-01 CORRECTION-01] 断点恢复映射：last_completed_step → 已完成 stage 集合。
@@ -5050,24 +5069,30 @@ _COMPLETED_STEPS: dict[str | None, set[str]] = {
     "computing_features": {
         "refreshing_daily", "syncing_boards", "computing_features",
     },
+    # [PHASE-A] legacy publishing token：历史 run 的 last_completed_step 可能为 publishing；
+    # 当前正文不再执行 publishing 步骤，保留此映射供兼容（Contract D / reconcile）。
+    # 不含 computing_review / computing_history（publishing token 不得污染当前语义）。
     "publishing": {
         "refreshing_daily", "syncing_boards", "computing_features",
         "publishing",
     },
-    # [CHANGE-20260801-REVIEW-CLOSURE] computing_review 断点恢复
+    # [PHASE-A] computing_review 断点恢复：Review 成功、History 尚未执行。
+    # 严禁包含 computing_history —— 否则 resume 会误判 skip_history=True，History 永不 retry
+    # （违反 KPI-A2/A4）。也不包含 legacy publishing（token 不得污染当前语义）。
     "computing_review": {
         "refreshing_daily", "syncing_boards", "computing_features",
-        "publishing", "computing_history", "computing_review",
+        "computing_review",
     },
-    # [SLICE-01 H2] computing_history 断点恢复：其前置步骤与 computing_review 一致
-    # （history 在 review 之前，review 完成即 history 也已完成）。
+    # [PHASE-A] computing_history 断点恢复：真实 DAG 为 features → review → history，
+    # History 完成即 Review+History 后置链整体完成（review 必在 history 之前）。
+    # 不含 legacy publishing。
     "computing_history": {
         "refreshing_daily", "syncing_boards", "computing_features",
-        "publishing", "computing_history",
+        "computing_review", "computing_history",
     },
     "succeeded": {
         "refreshing_daily", "syncing_boards", "computing_features",
-        "publishing", "computing_history", "computing_review", "succeeded",
+        "computing_review", "computing_history", "succeeded",
     },
     # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
     "waiting_dsa_worker": {
