@@ -69,6 +69,17 @@ SYNTH_SYMBOLS = ("688991", "688992")
 # DSA 正常路径要求每只标的 >= 60 根历史日线（StrategyBatchService._DSA_MIN_HISTORY_BARS）。
 HISTORY_BARS = 60
 
+# [Blocker 1] 唯一 DSA 指标 owner：coreArtifact 与 dsaProjection 两个 block 必须共用
+# 同一 metrics，避免再次漂移。map_dsa_projection 必需指标门禁要求：
+# dsa_dir_bars / regime_value / dsa_vwap 三者缺一不可。
+def _dsa_metrics():
+    return {
+        "dsa_dir_bars": 12,
+        "regime_value": 1,
+        "dsa_vwap": 10.5,
+    }
+
+
 _VERIFY_DB_RE = re.compile(r"^bz_stock_verify_[0-9a-f]{40}$")
 
 
@@ -236,7 +247,7 @@ async def _make_core_run_with_snapshots(inst_ids, version):
                 schema_version=CORE_ARTIFACT_SCHEMA_VERSION,
                 first_pyramid_core={"trend": {"availability": "ready"}, "nBars": 250},
                 structural_payload={"dsa_segment": {"seg": idx + 1}},
-                dsa_projection_payload={"dsa_vwap": 10.5, "dsa_dir_bars": 12},
+                dsa_projection_payload=_dsa_metrics(),
                 dsa_visual_contract={"dsa_vwap": 10.5},
                 state_event_candidates=[{"type": "structure_break", "t": str(T)}],
                 availability={
@@ -252,7 +263,7 @@ async def _make_core_run_with_snapshots(inst_ids, version):
             )
             dsa_block = encode_dsa_projection_to_summary(
                 schema_version=CORE_ARTIFACT_SCHEMA_VERSION,
-                dsa_projection_payload={"dsa_vwap": 10.5, "dsa_dir_bars": 12},
+                dsa_projection_payload=_dsa_metrics(),
                 dsa_visual_contract={"dsa_vwap": 10.5},
                 availability={
                     "trend": "ready", "structure": "ready", "momentum": "ready",
@@ -461,11 +472,19 @@ async def test_pg_c_projection_failure_preserves_lineage():
         c2 = await cdb.get(StockFeatureSnapshotRun, core_x)
         assert c2.status == "succeeded", "Core 不被兼容性失败撤销"
 
+        # [Blocker 2] 只查 PG-C 自己 Core X 的 compatibility run：与生产 create_batch_run
+        # lineage 一致的真实 owner（source_core_run_id + requirement 写入 input_overrides
+        # JSONB）。禁止用同日所有 required_compatibility run，否则会误读 PG-B 已 published
+        # 的结果。input_overrides 为 JSONB，生产 product_readiness_service /
+        # strategy_batch_service 均用 ["key"].astext 匹配。
         compat_runs = (
             await cdb.execute(
                 select(StrategyRun).where(
                     StrategyRun.trade_date == T,
-                    StrategyRun.requirement == "required_compatibility",
+                    StrategyRun.input_overrides["source_core_run_id"].astext
+                    == str(core_x),
+                    StrategyRun.input_overrides["requirement"].astext
+                    == "required_compatibility",
                 )
             )
         ).scalars().all()
