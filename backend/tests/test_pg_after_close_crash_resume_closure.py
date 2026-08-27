@@ -831,6 +831,275 @@ async def test_pg_I_review_before_history_call_order():
     )
 
 
+# ===========================================================================
+# J. FRESH initial run -> CURRENT Direct-Link path (§6 KPI-A1/A2/A3/A7)
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_pg_J_fresh_path_direct_link_no_stock_core_read():
+    """§6 FRESH-path regression proof (KPI-A1/A2/A3/A7).
+
+    真实执行正常 initial run（skip_computing=False, skip_publish=False），
+    证明 CURRENT Direct-Link 路径正确隔离 stock_core 读取/发布：
+
+      - resolve_stock_core_published 调用 0 次（stock_core pointer 读取被严格隔离）
+      - publish_stock_core_atomically 调用 0 次（stock_core 发布已旁路）
+      - Review lineage 绑定 source_core_run_id == X
+      - Core X 经 fresh compute finalize 为 succeeded
+
+    不依赖 inspect.getsource / grep / 字符串断言；真正执行生产 path。
+    """
+    if os.environ.get("PURE_UNIT_TEST") == "1":
+        pytest.skip("PG-only")
+
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        execute_after_close_run,
+        get_after_close_run_status,
+    )
+
+    test_date = date(2026, 8, 24)
+
+    resolve_spy = {"n": 0}
+    publish_spy = {"n": 0}
+    review_create_count = {"n": 0}
+    captured = {}
+
+    async def _spy_resolve(*a, **k):
+        resolve_spy["n"] += 1
+        return (False, False)
+
+    async def _spy_publish(*a, **k):
+        publish_spy["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    # §11: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
+    _real_execute_review_step = orchestrator._execute_review_step
+
+    async def _spy_review_step(*a, **k):
+        return await _real_execute_review_step(*a, **k)
+
+    async def _fake_create_run(db, *a, **k):
+        review_create_count["n"] += 1
+        captured["source_core_run_id"] = k.get("source_core_run_id")
+        rr = MagicMock()
+        rr.id = uuid.uuid4()
+        rr.status = "created"
+        rr.expected_scope_count = 1
+        rr.signal_count = 1
+        rr.coverage_ratio = 1.0
+        rr.algorithm_version = "v1"
+        rr.filter_version = "f1"
+        rr.source_core_run_id = k.get("source_core_run_id")
+        rr.source_board_run_id = None
+        return rr
+
+    async def _fake_compute_run(db, review_run, *a, **k):
+        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
+
+    async def _fake_publish_run(db, review_run, *a, **k):
+        pub = MagicMock()
+        pub.id = uuid.uuid4()
+        return pub, None
+
+    async with AsyncSessionLocal() as prep_db:
+        dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
+        from app.services.strategy_batch_service import reconcile_strategy_run_from_items
+        await reconcile_strategy_run_from_items(prep_db, dsa_run.id, set_finished_at=True)
+        # FRESH：预创建 running 态 Core run X，computing_features 复用并 finalize -> succeeded
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status="running", trade_date=test_date,
+        )
+        job = await _create_after_close_job_run(
+            prep_db, trade_date=test_date, orchestrator_status=AfterCloseRunStatus.SYNCING_BOARDS.value,
+            last_completed_step="syncing_boards", dsa_run_id=dsa_run.id, feature_snapshot_run_id=snap.id,
+        )
+        await prep_db.commit()
+        job_run_id = str(job.id)
+
+    # §6: FRESH 路径最小 faithful patch。computing_features 复用 running X 并 finalize；
+    # stock_core 读取/发布全程 spy 计数（应 0）；Review 真实进入（spy 调用生产 callable）。
+    patches = [
+        patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
+        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
+        patch("app.services.after_close_orchestrator.resolve_stock_core_published", new=_spy_resolve),
+        patch("app.services.after_close_orchestrator.get_active_a_share_instruments", new=AsyncMock(return_value=[])),
+        patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
+        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
+        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
+        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
+        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
+        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
+        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
+        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
+        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        await execute_after_close_run(job_run_id, trade_date=test_date)
+    finally:
+        for p in patches:
+            p.stop()
+
+    async with AsyncSessionLocal() as reader_db:
+        status = await get_after_close_run_status(reader_db, job_run_id)
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+
+    # §6 KPI-A1/A2: FRESH 路径绝不读取/发布 stock_core
+    assert resolve_spy["n"] == 0, (
+        f"FRESH 不得调用 resolve_stock_core_published（stock_core pointer 读取必须隔离），实际={resolve_spy['n']}"
+    )
+    assert publish_spy["n"] == 0, (
+        f"FRESH 不得调用 publish_stock_core_atomically（发布已旁路），实际={publish_spy['n']}"
+    )
+    # §6: 运行达终态（succeeded 或诚实 partial_success）
+    assert status.get("orchestrator_status") in (
+        AfterCloseRunStatus.SUCCEEDED.value,
+        AfterCloseRunStatus.PARTIAL_SUCCESS.value,
+    ), status
+    # §6 KPI-A3: Review lineage 绑定 source_core_run_id == X
+    assert captured.get("source_core_run_id") == snap.id, (
+        f"FRESH Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
+    )
+    assert review_create_count["n"] == 1, "FRESH Review 业务 create_run 必须执行一次"
+    # §6 KPI-A1: Core X 经 fresh compute finalize 为 succeeded
+    assert snap_reread is not None and snap_reread.status == "succeeded", (
+        f"FRESH Core X 必须 finalize 为 succeeded，实际={snap_reread.status if snap_reread else None}"
+    )
+
+
+# ===========================================================================
+# K. LEGACY publishing-resume compatibility -> LEGACY branch entered (§8)
+# ===========================================================================
+@pytest.mark.asyncio
+async def test_pg_K_legacy_publishing_resume_enters_legacy_branch():
+    """§8 Legacy compatibility proof (KPI-A8).
+
+    last_completed_step='publishing'（历史 stock_core 发布 checkpoint）必须进入
+    LEGACY publishing-resume 兼容分支（if skip_publish:），即 resolve_stock_core_published
+    被调用（>=1）；同时 stock_core 发布本身已旁路（publish_stock_core_atomically == 0）。
+
+    与 test_pg_J 互补：J 证明 fresh/computing_features resume 永不进入 LEGACY；
+    K 证明 legacy 'publishing' checkpoint 正确进入 LEGACY 分支，且二者隔离。
+    """
+    if os.environ.get("PURE_UNIT_TEST") == "1":
+        pytest.skip("PG-only")
+
+    from app.services.after_close_orchestrator import (
+        AfterCloseRunStatus,
+        execute_after_close_run,
+        get_after_close_run_status,
+    )
+
+    test_date = date(2026, 8, 26)
+
+    resolve_spy = {"n": 0}
+    publish_spy = {"n": 0}
+    captured = {}
+
+    async def _spy_resolve(*a, **k):
+        resolve_spy["n"] += 1
+        return (False, False)
+
+    async def _spy_publish(*a, **k):
+        publish_spy["n"] += 1
+        return MagicMock(id=uuid.uuid4())
+
+    _real_execute_review_step = orchestrator._execute_review_step
+
+    async def _spy_review_step(*a, **k):
+        return await _real_execute_review_step(*a, **k)
+
+    async def _fake_create_run(db, *a, **k):
+        captured["source_core_run_id"] = k.get("source_core_run_id")
+        rr = MagicMock()
+        rr.id = uuid.uuid4()
+        rr.status = "created"
+        rr.expected_scope_count = 1
+        rr.signal_count = 1
+        rr.coverage_ratio = 1.0
+        rr.algorithm_version = "v1"
+        rr.filter_version = "f1"
+        rr.source_core_run_id = k.get("source_core_run_id")
+        rr.source_board_run_id = None
+        return rr
+
+    async def _fake_compute_run(db, review_run, *a, **k):
+        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
+
+    async def _fake_publish_run(db, review_run, *a, **k):
+        pub = MagicMock()
+        pub.id = uuid.uuid4()
+        return pub, None
+
+    async with AsyncSessionLocal() as prep_db:
+        dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
+        from app.services.strategy_batch_service import reconcile_strategy_run_from_items
+        await reconcile_strategy_run_from_items(prep_db, dsa_run.id, set_finished_at=True)
+        # LEGACY：computing_features 已 completed（publishing 在其后），X 为 succeeded 态被复用
+        snap = await _make_snapshot_run_with_items(
+            prep_db, expected=5293, succeeded=5293, skipped=0, failed=0,
+            published_at=None, status="succeeded", trade_date=test_date,
+        )
+        job = await _create_after_close_job_run(
+            prep_db, trade_date=test_date, orchestrator_status=AfterCloseRunStatus.SYNCING_BOARDS.value,
+            last_completed_step="publishing", dsa_run_id=dsa_run.id, feature_snapshot_run_id=snap.id,
+        )
+        await prep_db.commit()
+        job_run_id = str(job.id)
+
+    patches = [
+        patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
+        patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
+        patch("app.services.after_close_orchestrator.resolve_stock_core_published", new=_spy_resolve),
+        patch("app.services.after_close_orchestrator.get_active_a_share_instruments", new=AsyncMock(return_value=[])),
+        patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
+        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
+        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
+        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
+        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
+        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
+        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
+        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
+        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+    ]
+    for p in patches:
+        p.start()
+    try:
+        await execute_after_close_run(job_run_id, trade_date=test_date)
+    finally:
+        for p in patches:
+            p.stop()
+
+    async with AsyncSessionLocal() as reader_db:
+        status = await get_after_close_run_status(reader_db, job_run_id)
+        from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+        snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
+
+    # §8 KPI-A8: legacy 'publishing' checkpoint 正确进入 LEGACY 分支（resolve 被调用）
+    assert resolve_spy["n"] >= 1, (
+        f"legacy last_completed_step='publishing' 必须进入 LEGACY 分支调用 "
+        f"resolve_stock_core_published，实际={resolve_spy['n']}"
+    )
+    # §8: 即便进入 LEGACY 分支，stock_core 发布本身已旁路（publishing 阶段退役）
+    assert publish_spy["n"] == 0, (
+        f"LEGACY 分支不得调用 publish_stock_core_atomically，实际={publish_spy['n']}"
+    )
+    # §8: 运行达终态；Review lineage 仍绑定 source_core_run_id == X
+    assert status.get("orchestrator_status") in (
+        AfterCloseRunStatus.SUCCEEDED.value,
+        AfterCloseRunStatus.PARTIAL_SUCCESS.value,
+    ), status
+    assert captured.get("source_core_run_id") == snap.id, (
+        f"LEGACY Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
+    )
+    assert snap_reread is not None and snap_reread.status == "succeeded", (
+        f"LEGACY Core X 必须保持 succeeded，实际={snap_reread.status if snap_reread else None}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # recovery-job helper (D/E/F/G) using the real SchedulerJobRun model
 # ---------------------------------------------------------------------------

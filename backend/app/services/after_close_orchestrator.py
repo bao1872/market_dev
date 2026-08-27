@@ -3717,60 +3717,19 @@ async def execute_after_close_run(
         # mandatory Core gate（fresh compute）与 skip_publish 恢复分支（统一 owner
         # _validate_core_ready）。此处禁止再初始化/清零（CORRECTION-03 P0-1 回归教训）：
         # DSA compatibility / state_events / chip 全部依赖该布尔保持为 True。
-        if not skip_publish:
-            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 正常 AfterClose DAG 不再进入
-            # PUBLISHING 阶段（KPI-7）：Core 计算完成后直接进入 Review。
-            # stock_core publication / FactorPublication(kind=stock_core) 的 read/write
-            # 与 publish_stock_core_atomically 调用全部从 Core → Review 主链旁路
-            # （KPI-2/3）；DSA 兼容性投影可保留为 Review 后 optional enhancement 或
-            # 独立 compatibility path，不在此阻塞 Review（合同 7）。
-            # 因此正常路径直接置发布相关布尔为安全默认值，不再执行任何发布步骤。
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.COMPUTING_FEATURES,
-                    message=(
-                        f"Core 计算完成，直接进入 Review（stock_core 发布已旁路）: "
-                        f"dsa_run_id={dsa_run_id}"
-                    ),
-                    dsa_run_id=dsa_run_id,
-                )
-                await db.commit()
-
-            # 发布相关布尔直接置安全默认值：无 stock_core publication 也能 Review。
-            published_run = None
-            _stock_core_published = False
-            _stock_core_superseded = False
-            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] DSA 兼容性已在 post-core
-            # 由统一执行器执行；此初始值仅在步骤被跳过时如实表达 not_run。
-            _dsa_compatibility_status: str = "not_run"
-            _auction_anchor_status: str = "skipped"
-            _auction_publication_id: uuid.UUID | None = None
-            _aggregation_status: str = "skipped"
-
-        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 PHASE-A] resume readiness owner：
-        # 正常 AfterClose DAG 不再进入 PUBLISHING 阶段（skip_publish=False）。
-        # 但 fresh compute 的 mandatory Core gate 在 skip_computing=True（断点恢复）
-        # 时被跳过，core_ready 不会经该门置位。此处必须复用唯一事实源 _validate_core_ready
-        # 重新校验真实 CoreRun 行（id / trade_date / status==succeeded），置 core_ready=True，
-        # 供下游 state_events / chip 等 CORE_READY-gated post-core enhancement 继续执行（§10）。
-        # 严禁读取 stock_core FactorPublication / pointer（KPI-A7/A8：resume publication read=0）。
-        if skip_computing:
-            async with AsyncSessionLocal() as verify_db:
-                await _validate_core_ready(verify_db, snapshot_run_id, trade_date)
-            core_ready = True
-
-        else:
-            # [Phase4.2 corrective] skip_publish=True（断点恢复到 publishing 之后）：
-            # 本轮局部布尔变量不可信，必须重新核验线上真实 publication pointer 的真实身份。
+        if skip_publish:
+            # =================================================================
+            # LEGACY publishing-resume compatibility branch
+            # -----------------------------------------------------------------
+            # 仅当 last_completed_step == "publishing"（或正式兼容合同明确识别的
+            # 旧 checkpoint）时进入。正常 Core→Review 主链（skip_publish=False）
+            # 永不进入本分支，resolve_stock_core_published 的 stock_core pointer
+            # 读取被严格隔离在 legacy 路径内（KPI-A1/A2/A4/A5/A6/A7）。
+            # [Phase4.2 corrective] 断点恢复到 publishing 之后：局部布尔不可信，
+            # 必须重新核验线上真实 publication pointer 的真实身份。
             # 只有当 pointer 确实存在且 data_run_id == snapshot_run_id 时，本 run 才是正式
             # stock_core publication；否则（pointer 指向别人 / 不存在）一律视为未发布/被抢占，
             # chip 不得入队。禁止用 publish_failed=False 等局部布尔推断“已发布”。
-            # 注意：上面的 normal publish 专属步骤（auction anchor / publishing checkpoint）
-            # **不**在 skip_publish 分支执行；legacy board aggregation 已退役（[Slice 4A9]），
-            # 不再作为任何分支的 mandatory 步骤。
             _stock_core_superseded = False
             if snapshot_run_id is not None:
                 # 断点恢复：局部布尔不可信，复用唯一权威判定 resolve_stock_core_published
@@ -3799,8 +3758,6 @@ async def execute_after_close_run(
                 await _validate_core_ready(verify_db, snapshot_run_id, trade_date)
             core_ready = True
             # skip_publish 路径不执行 normal publish 专属步骤，显式置 skipped 以如实反映未执行。
-            # 注意：_aggregation_status 恒为 "skipped"（[Slice 4A9] legacy aggregation 已退役），
-            # 此处默认值仅为防御性初始化。
             _auction_anchor_status = "skipped"
             _auction_publication_id = None
             _aggregation_status = "skipped"
@@ -3808,6 +3765,54 @@ async def execute_after_close_run(
             # 此初始值仅在步骤被跳过时如实表达 not_run（实际状态以 executor summary 为准）。
             _dsa_compatibility_status = "not_run"
             _chip_enqueue_status = "skipped"
+        else:
+            # =================================================================
+            # CURRENT Direct-Link path (skip_publish == False)
+            # -----------------------------------------------------------------
+            # 适用于 fresh / computing_features resume / computing_review resume /
+            # computing_history resume。正常 AfterClose DAG 不再进入 PUBLISHING 阶段
+            # （KPI-7）：Core 计算完成 → Review(T) → History(T) → post-core enhancement。
+            # stock_core publication / FactorPublication(kind=stock_core) 的 read/write
+            # 与 publish_stock_core_atomically 调用全部从 Core → Review 主链旁路
+            # （KPI-2/3）；DSA 兼容性投影保留为 Review 后 optional enhancement。
+            # 本分支严禁调用 resolve_stock_core_published（KPI-A1/A2/A4/A5/A6/A7）。
+            async with AsyncSessionLocal() as db:
+                job_run = await _get_job_run_or_raise(db, job_run_id)
+                await _update_orchestrator_status(
+                    db=db,
+                    job_run=job_run,
+                    status=AfterCloseRunStatus.COMPUTING_FEATURES,
+                    message=(
+                        f"Core 计算完成，直接进入 Review（stock_core 发布已旁路）: "
+                        f"dsa_run_id={dsa_run_id}"
+                    ),
+                    dsa_run_id=dsa_run_id,
+                )
+                await db.commit()
+
+            # 发布相关布尔直接置安全默认值：无 stock_core publication 也能 Review。
+            published_run = None
+            _stock_core_published = False
+            _stock_core_superseded = False
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] DSA 兼容性已在 post-core
+            # 由统一执行器执行；此初始值仅在步骤被跳过时如实表达 not_run。
+            _dsa_compatibility_status = "not_run"
+            _auction_anchor_status = "skipped"
+            _auction_publication_id = None
+            _aggregation_status = "skipped"
+
+            # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 PHASE-A] resume readiness owner：
+            # fresh compute 的 mandatory Core gate 在 skip_computing=True（断点恢复）时被跳过，
+            # core_ready 不会经该门置位（core_ready 已在 mandatory Core gate 成功路径置 True，
+            # 见 3682）。此处对 current resume 复用唯一事实源 _validate_core_ready 重新校验真实
+            # CoreRun 行（id / trade_date / status==succeeded），置 core_ready=True，供下游
+            # state_events / chip 等 CORE_READY-gated post-core enhancement 继续执行（§10）。
+            # 严禁读取 stock_core FactorPublication / pointer（KPI-A7/A8：resume publication read=0）。
+            # fresh（skip_computing=False）core_ready 已为 True，无需重复校验（KPI-A7=0 read）。
+            if skip_computing:
+                async with AsyncSessionLocal() as verify_db:
+                    await _validate_core_ready(verify_db, snapshot_run_id, trade_date)
+                core_ready = True
 
         # [CRASH-RESUME-SLICE / P0-B] state_events 与 chip 已下移到 computing_review 之后
         # 的 post-core enhancement 段执行，不再阻塞 History/Review 这一 mandatory 关键路径。
