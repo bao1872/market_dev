@@ -225,6 +225,7 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     history_advance_attempts = {"n": 0}
     history_should_crash = {"on": True}
     review_step_count = {"n": 0}
+    review_create_count = {"n": 0}  # KPI-A6: Review 业务副作用（create_run）调用次数
     publish_spy = {"n": 0}
     captured = {}
 
@@ -251,6 +252,7 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         return MagicMock(id=uuid.uuid4())
 
     async def _fake_create_run(db, *a, **k):
+        review_create_count["n"] += 1
         captured["source_core_run_id"] = k.get("source_core_run_id")
         rr = MagicMock()
         rr.id = uuid.uuid4()
@@ -338,7 +340,10 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
 
     assert core_count["n"] == 0, f"resume must NOT recompute core, got {core_count['n']}"
     assert history_advance_attempts["n"] == 2, "History advanced twice (crash + resume)"
-    assert review_step_count["n"] == 1, "Review entered exactly once (durable checkpoint, no duplicate side effect)"
+    # KPI-A6: Review 业务副作用（create_run）必须恰好执行一次。orchestrator 在 resume 时会重新进入
+    # computing_review 步骤的 unified-executor wrapper（幂等，review_step_count 因此为 2），但 skip_review=True
+    # 时 _execute_review_step 内部提前返回，create_run 不会被重复调用。重复业务副作用 = 0。
+    assert review_create_count["n"] == 1, "Review business create_run must run exactly once (durable checkpoint, no duplicate side-effect on resume)"
     # §11 KPI-4: normal Core->Review 主链不发布 stock_core
     assert publish_spy["n"] == 0, f"normal Core->Review 不得发布 stock_core，实际={publish_spy['n']}"
     # §11: Review lineage 必须绑定 source_core_run_id=X
