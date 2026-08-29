@@ -415,6 +415,25 @@ C1 FINAL 新增（§8 CASE A/B/C，统一正式读边界）：
 | `/latest` | **500** | §6：不得返回 `T_REAL`、不得跳过到更早日期、不得把 alias 当正式日期 |
 | `/overview/T_REAL` | 200 且 `reviewRunId == V.id` | §7 正向对照：合法同日 pointer 完全不受影响 |
 
+### 15.1 C1 FINAL-IDENTITY 验证证据（`targeted-pg` 正式通道）
+
+入口：`scripts/ops/panji-verify run --sha 1f4c2e1bbf36caa83495baffa1c5d63c84987e3a --plan targeted-pg`
+attempt：`verify-1f4c2e1bbf36-1787975387-816a9e85`；验证库 `bz_stock_verify_1f4c2e1bbf36caa83495baffa1c5d63c84987e3a`；`verify_attempt exit=0`，status `cleanup_completed`。
+
+| gate | 结果 | detail |
+|---|---|---|
+| preflight | PASS | RUNTIME_SHA 一致 + 容器存活 |
+| create_database | PASS | 验证库就绪 |
+| migration | PASS | upgrade head succeeded（head = `092_review_core_only_identity`） |
+| identity | PASS | 容器内 identity 自检通过（含 current_database 比对） |
+| pg_tests | PASS | **71 passed, 2 deselected, 6 warnings in 162.61s** |
+
+**TARGETED_PG = 0 FAILED**（5/5 gate PASS）。相对上一次 attempt（`6af452d1`，70 passed）**+1**，与新增的 1 个 cross-date 用例一致；C1 文件用例数 8 → **9**，全部 PASS。
+
+T0：`ruff` + `py_compile` 在修改范围内全绿；`PURE_UNIT_TEST=1 pytest tests/test_review_publication_safety.py` → **46 passed**（helper 签名变更未破坏既有断言）。
+
+> 诚实性说明：`app/services/after_close_orchestrator.py` 存在 **8 项既有 ruff 发现**（F401 ×4 / F811 ×1 / F841 ×2 / I001 ×1）。已比对 `git show HEAD:...` 的 BASE 版本，**错误集合逐条一致**，属修改前既有的 deferred debt，本轮未修（§7.3 最小必要修改）。本轮对该文件的改动只有 `expected_trade_date` 一处调用点。
+
 ---
 
 ## 14. C1 FINAL 验证证据（`targeted-pg` 正式通道）
