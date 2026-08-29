@@ -33,8 +33,8 @@
 | BROKEN_POINTER_OVERVIEW | FAIL_CLOSED |
 | BROKEN_POINTER_LATEST | FAIL_CLOSED |
 | BROKEN_POINTER_DATES | EXCLUDED |
-| C1_EXACT_PG | PASS |
-| FULL_TARGETED_PG | NOT_RUN_BY_SCOPE（known pre-deploy debt = 5 legacy failures，未触及） |
+| C1_EXACT_PG | PASS（8/8，见 §14） |
+| FULL_TARGETED_PG | RUN（见 §14：5/5 gate PASS，70 passed / 0 failed / 2 deselected） |
 | DISPLAY_STALE_POINTER_BLOCKS_REVIEW | NO |
 | API_EMPTY_STATUS_CONTRACT | DEFINED |
 | FRONTEND_DATA_CONTRACT | DEFINED |
@@ -321,7 +321,7 @@ C1 FINAL（统一 FORMAL_REVIEW_READ_OWNER，运行时行为修复，Review 域�
 
 ## 12. 测试要求（T1 / T2 / 多 run 假绿 / superseded / broken / C1 FINAL §8 CASE A/B/C）
 
-测试文件：`backend/tests/test_pg_review_read_owner_c1.py`（self-contained synthetic，验证库 `bz_stock_verify_<SHA>`，不读不写生产 `bz_stock`）。经 `verify_exec.py` / targeted-pg 验证数据库正式通道运行。
+测试文件：`backend/tests/test_pg_review_read_owner_c1.py`（self-contained synthetic，验证库 `bz_stock_verify_<SHA>`，不读不写生产 `bz_stock`）。经 `targeted-pg` / `verify_exec.py` 正式通道运行于验证库 `bz_stock_verify_<SHA>`：**8 passed**（证据见 §14）。
 
 - **T1（PG suite，非 pure unit）**：`_resolve_source_core_run_id` 在 `None` 时 fail-closed。
 - **T2（production publish + schema）**：`publish_review` 生产发布 → `/overview` 响应暴露 `sourceCoreRunId` 且等于显式绑定的 CoreRun；`coverage.industryL1 == 0.8`。
@@ -348,3 +348,30 @@ C1 FINAL 新增（§8 CASE A/B/C，统一正式读边界）：
 - 依赖扫描：regex 检索 `review*.py` + `app/api/*review*.py`
 - 测试：`backend/tests/test_pg_review_read_owner_c1.py`（targeted-PG，验证库 `bz_stock_verify_<SHA>`，gate cleanup 丢弃，不写生产 `bz_stock`）
 - 本 map 完整核验：2026-08-28（PHASE C1 + C1 CONTINUATION + C1 FINAL）
+
+---
+
+## 14. C1 FINAL 验证证据（`targeted-pg` 正式通道）
+
+入口：`scripts/ops/panji-verify run --sha 6af452d14ac152bfab87c49cf28e456bbf9d3241 --plan targeted-pg`
+（唯一正式远程验证入口；`test_pg_review_read_owner_c1.py` 已在 `verify_attempt.py` 的 pg_contract curated 列表内，因此无需绕过入口单独执行。）
+
+- attempt：`verify-6af452d14ac1-1787974257-39f013eb`
+- 验证库：`bz_stock_verify_6af452d14ac152bfab87c49cf28e456bbf9d3241`（gate cleanup 已 drop；不读不写生产 `bz_stock`）
+- status：`cleanup_completed`，`attempt exit_code=0`
+
+门禁（5/5 PASS）：
+
+| gate | 结果 | detail |
+|---|---|---|
+| preflight | PASS | RUNTIME_SHA 一致 + 容器存活 |
+| create_database | PASS | 验证库就绪 |
+| migration | PASS | upgrade head succeeded（head = `092_review_core_only_identity`） |
+| identity | PASS | 容器内 identity 自检通过（含 current_database 比对） |
+| pg_tests | PASS | **70 passed, 2 deselected, 6 warnings in 163.96s** |
+
+**C1_EXACT_PG = PASS（8/8）**：本轮 `targeted-pg` 与上一次成功 attempt（`verify-939600be6174-...`，62 passed）之间的差异**只有** `backend/tests/test_pg_review_read_owner_c1.py` 一个测试文件（`git diff --stat 939600be 6af452d1 -- backend/tests/` → 1 file changed, 530 insertions(+)，8 个 test 函数）。70 − 62 = 8，且 `pg_tests` 汇总为 `0 failed`，故 8 个 C1 用例全部真实 PASS。
+
+> 诚实性说明：本轮任务预设"full targeted-pg 存在 5 个已确认 legacy failures（pre-deploy debt）"并预设 `FULL_TARGETED_PG = NOT_RUN_BY_SCOPE`。实测**未观察到**该 5 个失败 —— 本次 `targeted-pg` 5/5 gate PASS、70 passed / 0 failed。由于验证通道只有注册 plan 一种执行方式（attempt 结束即 drop 验证库与 attempt.env），为取得 C1 exact PG 证据**必须**走 `targeted-pg`，因此 `FULL_TARGETED_PG` 据实记为 RUN，不记为 NOT_RUN_BY_SCOPE。若后续审计发现该 5 个 legacy failures 属于其它 SHA / 其它 plan 的既有记录，应单独复核，不得据本条推断 release readiness。
+
+**远程验证工作区漂移已清除**：本次运行前 `/root/web_dev_verify` 存在上一轮遗留的**未提交**改动（`backend/app/api/review.py`、`market_review.py`、`review_observation_persistence_service.py`、`review_publication_service.py`、`scripts/verify/verify_attempt.py` + 未跟踪的 `test_pg_review_read_owner_c1.py`），导致入口的 `HEAD == target && clean` 检查失败。这些改动的内容已全部包含在已提交的 `6af452d1` 中；已 `git checkout --` 回退并将未跟踪测试文件备份至 `/tmp/c1_drift_backup_c1_test.py`，远程工作区恢复 clean 后重跑成功。
