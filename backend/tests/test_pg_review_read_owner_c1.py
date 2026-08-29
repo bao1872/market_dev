@@ -16,6 +16,17 @@
 - §8 broken pointer fail-closed：live pointer → run status=signals_ready / published_at=NULL
        → 用户正式 read path 不得返回 200 正式 Review（按 §4 guard fail-closed）
 
+PHASE C1 FINAL 追加（统一 FORMAL_REVIEW_READ_OWNER，§3/§4/§8）：
+- CASE A broken live pointer（status=signals_ready / published_at=NULL）：
+       /overview fail-closed、/latest fail-closed、/dates 不得把 T 标成正式已发布日期
+- CASE B valid published run：/dates 包含 T、/latest 返回该正式 run
+- CASE C 仅 superseded historical pointer：/dates 不包含 T、/latest 不得 resurrect
+       historical run（返回次新的正式发布日）
+
+/latest 语义 = live pointer 中最大 trade_date，因此 CASE A/B/C 使用远大于本文件
+其它用例（2026-08-xx）的日期（2099-12-31 / 2099-12-30），确保"该 T 必为 /latest
+命中目标"这一前提确定成立，不依赖 pytest 执行顺序或其它测试文件残留。
+
 DB identity（fail-closed，测试自身要求）：
 - APP_ENV == "verification"
 - current_database() 匹配 ^bz_stock_verify_[0-9a-f]{40}$ 且 != bz_stock
@@ -32,7 +43,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import text
 
-from app.api.review import get_review_overview
+from app.api.review import get_latest_review, get_review_dates, get_review_overview
 from app.db import AsyncSessionLocal
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.factor_publication import FactorPublication
@@ -50,6 +61,7 @@ from app.services.review_publication_service import (
     SCOPE_TYPE_REVIEW,
     get_published_review_run_id,
     is_formally_published_review_run,
+    list_formally_published_review_dates,
     list_published_review_dates,
     publish_review,
 )
@@ -62,6 +74,10 @@ T2 = date(2026, 8, 25)
 T5 = date(2026, 8, 24)
 T7 = date(2026, 8, 23)
 T8 = date(2026, 8, 22)
+# PHASE C1 FINAL §8 CASE A/B/C：/latest 取 live pointer 的最大 trade_date，
+# 故使用远大于上述日期的 sentinel 日期，保证命中确定、不依赖测试执行顺序。
+T_MAX = date(2099, 12, 31)
+T_PREV = date(2099, 12, 30)
 _VERIFY_DB_RE = re.compile(r"^bz_stock_verify_[0-9a-f]{40}$")
 
 
@@ -352,3 +368,163 @@ async def test_t8_broken_pointer_fail_closed():
         with pytest.raises(HTTPException) as exc:
             await get_review_overview(str(T8), include_partial=False, db=s, ctx=_ctx())
         assert exc.value.status_code == 500, "broken pointer 必须 fail-closed，不得返回正式 Review"
+
+
+# ---------------------------------------------------------------------------
+# PHASE C1 FINAL §8 CASE A — broken live pointer：三个用户端点同时 fail-closed/排除
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c1_final_case_a_broken_pointer_all_user_endpoints():
+    """CASE A：broken live pointer（status=signals_ready / published_at=NULL）
+    → /overview fail-closed、/latest fail-closed、/dates 不得把 T 标成正式发布日期。
+
+    /latest 必须 fail-closed（500），**不得**回退到同日其它 ReviewRun，
+    也**不得**跳过到更早的交易日（§3 / §8 CASE A）。
+    """
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, T_MAX)
+        core = _make_core_run(T_MAX)
+        s.add(core)
+        await s.flush()
+        broken = _make_publishable_review_run(core.id, T_MAX)
+        broken.status = "signals_ready"  # 未正式发布，published_at 保持 NULL
+        s.add(broken)
+        await s.flush()
+        # 手写 live pointer（异常 DB 状态，允许 fixture 直接插表）
+        s.add(_insert_pointer(s, broken.id, T_MAX, superseded_by=None, published_at=None))
+        await s.commit()
+
+        # 1) /overview fail-closed
+        with pytest.raises(HTTPException) as exc_o:
+            await get_review_overview(str(T_MAX), include_partial=False, db=s, ctx=_ctx())
+        assert exc_o.value.status_code == 500
+
+        # 2) /latest fail-closed（复用统一 formal guard，不自行 pointer→get→return）
+        with pytest.raises(HTTPException) as exc_l:
+            await get_latest_review(db=s, ctx=_ctx())
+        assert exc_l.value.status_code == 500, (
+            f"/latest 对 broken pointer 必须 fail-closed，got {exc_l.value.status_code}"
+        )
+
+        # 3) /dates 不得把 T 标成正式已发布日期（DB 层 JOIN run formal state）
+        dates_resp = await get_review_dates(db=s, ctx=_ctx())
+        assert T_MAX.isoformat() not in dates_resp.trade_dates, (
+            "broken pointer 的 T 不得列为正式已发布日期"
+        )
+        formal = await list_formally_published_review_dates(s, limit=500)
+        assert T_MAX not in formal
+        # LIVE POINTER OWNER 与 FORMAL OWNER 的区别：pointer 存在 ≠ 正式发布
+        live = await list_published_review_dates(s, limit=500)
+        assert T_MAX in live, "live pointer 仍然存在（证明 /dates 的排除来自 run formal state）"
+
+        await _clean_pointers(s, T_MAX)
+        await s.commit()
+
+
+# ---------------------------------------------------------------------------
+# PHASE C1 FINAL §8 CASE B — valid published run：/dates 含 T、/latest 返回该 run
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c1_final_case_b_valid_published_dates_and_latest():
+    """CASE B：valid published run（生产 publish_review 路径）
+    → /dates 包含 T、/latest 返回该正式 run。"""
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, T_MAX)
+        core = _make_core_run(T_MAX)
+        s.add(core)
+        await s.flush()
+        run = _make_publishable_review_run(core.id, T_MAX)
+        s.add(run)
+        await s.flush()
+        s.add(_make_fact(run.id, T_MAX, 100, 80))
+        await s.flush()
+        await publish_review(s, run)  # 生产发布路径，绝不复制 SQL
+        await s.commit()
+
+        assert is_formally_published_review_run(run, run.id) is True
+
+        dates_resp = await get_review_dates(db=s, ctx=_ctx())
+        assert T_MAX.isoformat() in dates_resp.trade_dates, (
+            "正式发布日的 T 必须出现在 /dates"
+        )
+        assert dates_resp.latest_trade_date == T_MAX.isoformat()
+
+        latest = await get_latest_review(db=s, ctx=_ctx())
+        assert latest.review_run_id == str(run.id)
+        assert latest.trade_date == T_MAX.isoformat()
+        assert latest.status == "published"
+
+        await _clean_pointers(s, T_MAX)
+        await s.commit()
+
+
+# ---------------------------------------------------------------------------
+# PHASE C1 FINAL §8 CASE C — 仅 superseded historical：排除 T + /latest 不复活
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_c1_final_case_c_superseded_only_excluded():
+    """CASE C：T 只有 superseded historical pointer
+    → /dates 不包含 T、/latest 不得 resurrect 该 historical run。
+
+    historical run 自身是正式发布态（status=published + published_at 非空），
+    被排除的唯一原因是它的 pointer 已被 supersede —— 这正是"live pointer ≠
+    formal read owner"的分界。为让 /latest 有确定性返回值，同时准备一个次新的
+    正式发布日 T_PREV。
+    """
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, T_MAX)
+        await _clean_pointers(s, T_PREV)
+
+        core_h = _make_core_run(T_MAX)
+        s.add(core_h)
+        await s.flush()
+        run_h = _make_publishable_review_run(core_h.id, T_MAX)
+        # 异常/历史状态由 fixture 直接制造：run 已正式发布，但 pointer 已被 supersede
+        run_h.status = "published"
+        run_h.published_at = datetime.now(timezone.utc)
+        s.add(run_h)
+        await s.flush()
+        s.add(
+            _insert_pointer(
+                s,
+                run_h.id,
+                T_MAX,
+                superseded_by=uuid.uuid4(),  # superseded_by 无 FK，直接制造 historical 语义
+                published_at=datetime.now(timezone.utc),
+            )
+        )
+
+        core_p = _make_core_run(T_PREV)
+        s.add(core_p)
+        await s.flush()
+        run_p = _make_publishable_review_run(core_p.id, T_PREV)
+        s.add(run_p)
+        await s.flush()
+        s.add(_make_fact(run_p.id, T_PREV, 100, 80))
+        await s.flush()
+        await publish_review(s, run_p)  # 生产发布路径
+        await s.commit()
+
+        dates_resp = await get_review_dates(db=s, ctx=_ctx())
+        assert T_MAX.isoformat() not in dates_resp.trade_dates, (
+            "superseded historical pointer 对应的 T 不得列为正式已发布日期"
+        )
+        assert T_PREV.isoformat() in dates_resp.trade_dates
+
+        latest = await get_latest_review(db=s, ctx=_ctx())
+        assert latest.review_run_id != str(run_h.id), "/latest 不得 resurrect historical run"
+        assert latest.trade_date == T_PREV.isoformat()
+        assert latest.review_run_id == str(run_p.id)
+
+        await _clean_pointers(s, T_MAX)
+        await _clean_pointers(s, T_PREV)
+        await s.commit()

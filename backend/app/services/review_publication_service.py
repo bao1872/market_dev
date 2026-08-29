@@ -603,7 +603,18 @@ async def get_published_review_run_id(
     session: AsyncSession,
     trade_date: date,
 ) -> uuid.UUID | None:
-    """读取已发布的 review run_id（无 pointer 返回 None）。"""
+    """读取已发布的 review run_id（无 pointer 返回 None）。
+
+    [PHASE C1 FINAL §5] **本函数是 LIVE POINTER RESOLVER，不是 FORMAL REVIEW
+    READ OWNER**。它只回答 pointer identity：``(kind=market_review, trade_date=T,
+    superseded_by IS NULL)`` 的 live pointer 当前指向哪个 ``run_id``。
+
+    它**不单独证明** ``MarketReviewRun`` 的 formal state（``status == published``
+    且 ``published_at IS NOT NULL``）。用户正式 endpoint 不得把本函数的非 None
+    返回值单独当作 ``FORMALLY_PUBLISHED = TRUE``；必须再经
+    ``is_formally_published_review_run`` / ``app.api.review._get_published_run``
+    校验 run 自身正式发布状态，否则 broken pointer 会被误判为正式 Review。
+    """
     pub = await _get_publication(
         session, PUBLICATION_KIND_MARKET_REVIEW, trade_date,
     )
@@ -615,7 +626,17 @@ async def list_published_review_dates(
     *,
     limit: int = 100,
 ) -> list[date]:
-    """列出已发布复盘的交易日（降序）。"""
+    """列出**持有 live publication pointer** 的复盘交易日（降序）。
+
+    [PHASE C1 FINAL §4/§5] **本函数是 LIVE POINTER OWNER**：只过滤
+    ``superseded_by IS NULL``，**不**校验 ``MarketReviewRun`` 的 formal state。
+    因此它可能包含 pointer 存在但 run 未正式发布（broken pointer）的交易日。
+
+    - 用户 ``/v1/review/dates`` 语义是"已正式发布 Review 的交易日"，
+      必须使用 ``list_formally_published_review_dates``，不得使用本函数。
+    - 本函数仅用于需要 pointer-identity 语义的场景（如 ``/latest`` 定位候选
+      最新交易日，其后仍需经 ``_get_published_run`` 做 formal guard）。
+    """
     stmt = (
         select(FactorPublication.trade_date)
         .where(
@@ -623,6 +644,51 @@ async def list_published_review_dates(
             FactorPublication.scope_key == SCOPE_KEY_REVIEW,
             FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
             FactorPublication.superseded_by.is_(None),
+        )
+        .order_by(FactorPublication.trade_date.desc())
+        .limit(limit)
+    )
+    result = await session.execute(stmt)
+    return [row[0] for row in result]
+
+
+async def list_formally_published_review_dates(
+    session: AsyncSession,
+    *,
+    limit: int = 100,
+) -> list[date]:
+    """列出**已正式发布**复盘的交易日（降序）—— FORMAL REVIEW READ OWNER。
+
+    [PHASE C1 FINAL §4] 用户 ``/v1/review/dates`` 的名义语义是"已正式发布 Review
+    的交易日"。仅凭 live pointer 存在不足以成立：pointer 可能指向缺失、
+    ``status != published`` 或 ``published_at IS NULL`` 的 ``MarketReviewRun``，
+    这种 T 不得被列为正式已发布日期。
+
+    全部条件在 DB query 层完成（``factor_publications`` INNER JOIN
+    ``market_review_runs``，单次查询，避免 N+1）：
+
+    - ``publication_kind = market_review``、``scope_type/scope_key = market/market``
+    - ``superseded_by IS NULL``（live universe）
+    - ``market_review_runs.id = data_run_id``（pointer → run 必须真实存在）
+    - ``run.status = published`` 且 ``run.published_at IS NOT NULL``
+
+    返回 ``ORDER BY trade_date DESC LIMIT :limit``。
+
+    与 ``list_published_review_dates`` 的关系：后者是 **LIVE POINTER OWNER**
+    （只有前三个条件），本函数在其之上追加 run formal state，是用户 endpoint
+    唯一应使用的"正式已发布日期"来源。本函数**不改变** admin/debug 路径的
+    partial 可见语义。
+    """
+    stmt = (
+        select(FactorPublication.trade_date)
+        .join(MarketReviewRun, MarketReviewRun.id == FactorPublication.data_run_id)
+        .where(
+            FactorPublication.scope_type == SCOPE_TYPE_REVIEW,
+            FactorPublication.scope_key == SCOPE_KEY_REVIEW,
+            FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
+            FactorPublication.superseded_by.is_(None),
+            MarketReviewRun.status == "published",
+            MarketReviewRun.published_at.is_not(None),
         )
         .order_by(FactorPublication.trade_date.desc())
         .limit(limit)

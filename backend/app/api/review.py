@@ -71,6 +71,7 @@ from app.services.review_observation_persistence_service import (
 from app.services.review_publication_service import (
     get_published_review_run_id,
     is_formally_published_review_run,
+    list_formally_published_review_dates,
     list_published_review_dates,
 )
 
@@ -164,9 +165,18 @@ async def _get_published_run_or_404(
 ) -> MarketReviewRun | None:
     """读取已发布 review run；无已发布 run 时返回 None（不抛 404）。
 
-    供 Discovery 列表/详情端点使用：列表端点在无发布 run 时返回空列表
-    （HTTP 200），详情端点随后显式抛 404。与 _get_published_run 的区别是
-    本函数对“无已发布 run”返回 None 而非抛异常。
+    与 _get_published_run 的区别是本函数对“无已发布 run”返回 None 而非抛异常。
+
+    [PHASE C1 FINAL §7] P2 DEFERRED（记录，不在本轮修改）：
+    - 本函数当前**无任何 production caller**（legacy Discovery 服务与用户端点
+      已随 REVIEW-BACKEND-FINAL-CLOSURE Phase 5 退休）。全仓检索只剩本定义处，
+      因此不存在“用户正式 caller 吞掉 500”的实际风险，本轮不做清理性删除
+      （避免为清洁代码扩大范围）。
+    - 潜在缺陷（若未来被复用必须先行修复）：``except HTTPException: return None``
+      会把 `_get_published_run` 抛出的 **500 data-integrity error（§4 case B/C：
+      live pointer 指向缺失 run / 未正式发布 run）一并吞成 None**。用户正式
+      caller 复用本函数时，必须改为只把真正的 **404 no publication** 转为 None，
+      500 必须继续向上抛。
     """
     try:
         return await _get_published_run(session, trade_date)
@@ -263,9 +273,15 @@ async def get_review_dates(
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
 ) -> ReviewDatesResponse:
-    """已发布复盘交易日列表（降序）。"""
+    """已**正式发布**复盘交易日列表（降序）。
+
+    [PHASE C1 FINAL §4] 名义语义 = "已正式发布 Review 的交易日"，因此不得只验证
+    live pointer：pointer 指向缺失 / ``status != published`` / ``published_at IS NULL``
+    的 ``MarketReviewRun`` 时，该 T 不得列为正式已发布日期。全部条件由
+    ``list_formally_published_review_dates`` 在 DB 层（pointer JOIN run）完成。
+    """
     _ = ctx
-    dates = await list_published_review_dates(db, limit=200)
+    dates = await list_formally_published_review_dates(db, limit=200)
     return ReviewDatesResponse(
         trade_dates=[d.isoformat() for d in dates],
         latest_trade_date=dates[0].isoformat() if dates else None,
@@ -277,7 +293,21 @@ async def get_latest_review(
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability(REVIEW_CAPABILITY)),
 ) -> ReviewLatestResponse:
-    """最新已发布复盘 run 基本信息。"""
+    """最新已**正式发布**复盘 run 基本信息。
+
+    [PHASE C1 FINAL §3] 禁止自行 ``pointer → db.get → return``。本端点与
+    overview/scopes/detail 共享同一个 FORMAL_REVIEW_READ_OWNER：
+
+    1. 先用 ``list_published_review_dates``（LIVE POINTER OWNER）取候选最新
+       交易日；
+    2. 再经 ``_get_published_run``（统一 formal guard）校验
+       ``ReviewRun.status == published`` 且 ``published_at IS NOT NULL``。
+
+    因此：broken pointer（pointer → 缺失 run）= fail-closed 500；
+    ``status != published`` = fail-closed 500；``published_at IS NULL`` =
+    fail-closed 500。**绝不**回退到 latest ReviewRun，也**不**跳过到更早的
+    交易日（与 §8 CASE A 一致）。
+    """
     _ = ctx
     dates = await list_published_review_dates(db, limit=1)
     if not dates:
@@ -286,18 +316,8 @@ async def get_latest_review(
             detail="无已发布复盘",
         )
     trade_date = dates[0]
-    run_id = await get_published_review_run_id(db, trade_date)
-    if run_id is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"trade_date={trade_date} 缺少 publication pointer",
-        )
-    run = await db.get(MarketReviewRun, run_id)
-    if run is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"run_id={run_id} 不存在",
-        )
+    # 复用统一正式 read-owner guard：404/500 语义与 overview/scopes/detail 完全一致。
+    run = await _get_published_run(db, trade_date)
     return ReviewLatestResponse(
         review_run_id=str(run.id),
         trade_date=run.trade_date.isoformat(),

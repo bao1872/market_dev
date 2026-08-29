@@ -1,6 +1,6 @@
-# Map: Review Backend/API Contract Closure (PHASE C1 + C1 CONTINUATION)
+# Map: Review Backend/API Contract Closure (PHASE C1 + C1 CONTINUATION + C1 FINAL)
 
-> **本文件状态：ACTIVE CONTRACT MAP — PHASE C1 审计 + C1 CONTINUATION 修复产出（2026-08-27）**
+> **本文件状态：ACTIVE CONTRACT MAP — PHASE C1 审计 + C1 CONTINUATION 修复 + C1 FINAL 统一正式读边界（2026-08-28）**
 >
 > 目标：回答"Review 产品从数据库到 API 是否已拥有稳定、显式、可供前端消费的合同"。
 > 范围：仅 Review 域；不触及 Phase B snapshot migration / Core publication cleanup / same-day rerun / frontend redesign / 生产部署。
@@ -24,6 +24,17 @@
 | MULTI_RUN_API_DETERMINISM | PASS |
 | SOURCE_CORE_LINEAGE | PASS |
 | CORE_PUBLICATION_DEPENDENCY | 0 |
+| LIVE_POINTER_OWNER | PASS |
+| FORMAL_REVIEW_READ_OWNER | PASS（5/5 用户端点统一） |
+| DATES_FORMAL_ONLY | PASS |
+| LATEST_FORMAL_ONLY | PASS |
+| SCOPES_FORMAL_ONLY | PASS |
+| DETAIL_FORMAL_ONLY | PASS |
+| BROKEN_POINTER_OVERVIEW | FAIL_CLOSED |
+| BROKEN_POINTER_LATEST | FAIL_CLOSED |
+| BROKEN_POINTER_DATES | EXCLUDED |
+| C1_EXACT_PG | PASS |
+| FULL_TARGETED_PG | NOT_RUN_BY_SCOPE（known pre-deploy debt = 5 legacy failures，未触及） |
 | DISPLAY_STALE_POINTER_BLOCKS_REVIEW | NO |
 | API_EMPTY_STATUS_CONTRACT | DEFINED |
 | FRONTEND_DATA_CONTRACT | DEFINED |
@@ -83,6 +94,20 @@ created → computing → partial → signals_ready → published
 - 解析函数：`get_published_review_run_id(session, T)` → `_get_publication(...).data_run_id`。
 - 这是 **Review 产品自己的正式 publication owner**，与已退役的 `stock_core` 同步 gate 完全分离（见 §6）。
 
+### 3.1 LIVE POINTER OWNER ≠ FORMAL REVIEW READ OWNER（PHASE C1 FINAL §5）
+
+两者**不是同一个概念**，误用会产生"pointer 存在 ⇒ 已正式发布"的假绿：
+
+| | LIVE POINTER OWNER | FORMAL REVIEW READ OWNER |
+|---|---|---|
+| 回答的问题 | T 的 live pointer 指向哪个 `run_id`？ | T 是否可以作为**正式用户 Review** 返回？ |
+| 判定条件 | `(kind=market_review, trade_date=T, superseded_by IS NULL)` | live pointer 存在 **AND** `MarketReviewRun` 存在 **AND** `status == published` **AND** `published_at IS NOT NULL` |
+| 实现 | `get_published_review_run_id`、`list_published_review_dates` | `app.api.review._get_published_run`（统一 guard，内含 `is_formally_published_review_run`）、`list_formally_published_review_dates`（DB 层 JOIN） |
+| 允许的用户用途 | 仅用于**定位**候选 run / 候选交易日，其后**必须**再走 formal guard | 用户正式 endpoint 的唯一判定依据 |
+| 禁止 | **不得**把非 None 返回值单独当作 `FORMALLY_PUBLISHED = TRUE` | — |
+
+**关键**：pointer 是发布动作写入的，但 run 行本身可以被后台流程/异常状态改写。因此 pointer 存在只是"曾经发布过"，run formal state 才是"当前仍是正式发布"。`/v1/review/dates` 与 `/v1/review/latest` 在 C1 FINAL 之前只用了 LIVE POINTER OWNER，属于同一类假绿，本轮统一收口。
+
 ---
 
 ## 4. REVIEW_API_OWNER（EXPLICIT）+ MULTI_RUN_DETERMINISM（PASS）
@@ -93,8 +118,8 @@ created → computing → partial → signals_ready → published
 
 | METHOD | PATH | service | 响应 schema | run owner 解析 | trade_date 处理 | 空行为 |
 |---|---|---|---|---|---|---|
-| GET | `/api/v1/review/dates` | list_published_review_dates | ReviewDatesResponse | — | — | 空列表 200 |
-| GET | `/api/v1/review/latest` | get_published_review_run_id | ReviewLatestResponse | 指针解析 | — | 无发布→404 |
+| GET | `/api/v1/review/dates` | **list_formally_published_review_dates**（C1 FINAL：DB 层 pointer JOIN run） | ReviewDatesResponse | — | — | 空列表 200 |
+| GET | `/api/v1/review/latest` | list_published_review_dates 定位候选日 **+ `_get_published_run` formal guard**（C1 FINAL §3） | ReviewLatestResponse | 指针解析 + run formal state | — | 无 live pointer→404；broken pointer→500 |
 | GET | `/api/v1/review/{trade_date}/overview` | get_published_review_run_id | ReviewOverviewResponse | 指针解析 | 路径参数(422 若格式错) | 无发布→404 |
 | GET | `/api/v1/review/{trade_date}/scopes` | get_published_review_run_id | ReviewScopeListResponse | 指针解析 | 路径参数 | 无发布→404 |
 | GET | `/api/v1/review/{trade_date}/scopes/{scope_type}/{scope_key}` | get_published_review_run_id | ReviewScopeCompositionDetailResponse | 指针解析 | 路径参数 | 无发布→404 |
@@ -128,6 +153,44 @@ created → computing → partial → signals_ready → published
 - **B. live pointer 指向不存在的 run** → `500 data-integrity`，**绝不**回退 latest run。
 - **C. live pointer 指向 run，但 `status != published` 或 `published_at IS NULL`** → `500 data-integrity`，不得作为正式 Review 返回。
 - `include_partial=True`（admin/调试）跳过 guard，回退到任意 run。
+
+### 4.4 用户 endpoint FORMAL OWNER GUARD 审计（PHASE C1 FINAL §6）
+
+审计范围：**仅 5 个用户正式 endpoint**。admin/debug endpoint（`admin_review.py` 的 `include_partial` 可见语义）按 §4 明确不在本审计内，其 partial 可见语义保持不变。
+
+| 用户 endpoint | formal owner 实现 | FORMAL OWNER GUARD |
+|---|---|---|
+| `/v1/review/dates` | `list_formally_published_review_dates`（DB 层 `factor_publications JOIN market_review_runs`，一次性过滤 `status=published AND published_at IS NOT NULL`） | **YES** |
+| `/v1/review/latest` | `list_published_review_dates`（定位候选最新交易日）→ `_get_published_run`（统一 formal guard） | **YES** |
+| `/v1/review/{T}/overview` | `_get_published_run` | **YES** |
+| `/v1/review/{T}/scopes` | `_get_published_run` | **YES** |
+| `/v1/review/{T}/scopes/{type}/{key}` | `_get_published_run` | **YES** |
+
+**审计结论：5/5 全部 YES**（C1 FINAL 之前为 3/5，`/dates` 与 `/latest` 只验证 pointer，不符合 FORMAL_REVIEW_READ_OWNER）。
+
+`/dates` 合同（§4）：名义语义 = "已正式发布 Review 的交易日"，因此 live pointer 指向 invalid / missing / non-published `MarketReviewRun` 的 T **不得**列入。全部条件在 DB query 层完成：
+
+```
+publication_kind = market_review
+AND scope_type = market AND scope_key = market
+AND superseded_by IS NULL
+AND JOIN market_review_runs run ON run.id = data_run_id
+AND run.status = published
+AND run.published_at IS NOT NULL
+ORDER BY trade_date DESC
+```
+
+→ 单次 JOIN 查询，**无 N+1**（不为每个 T 单独 `db.get` run）。
+
+`/latest` 合同（§3）：**禁止**自行 `pointer → db.get(MarketReviewRun) → return`，必须与 overview/scopes/detail 复用同一 formal guard：
+
+- `list_published_review_dates(limit=1)` 只用于取**候选**最新交易日（LIVE POINTER OWNER）；
+- 随后 `_get_published_run(T)` 执行 formal guard：
+  - broken pointer（pointer → 缺失 run）→ **500 fail-closed**
+  - `status != published` → **500 fail-closed**
+  - `published_at IS NULL` → **500 fail-closed**
+  - 无 live pointer → 404
+- **绝不**回退到 latest `MarketReviewRun`，**也绝不**跳过到更早交易日。
 
 ---
 
@@ -224,30 +287,41 @@ created → computing → partial → signals_ready → published
 | live pointer 误用 latest timestamp | **C1 CONTINUATION 已修** | `_get_publication` / `list_published_review_dates` 显式 `superseded_by IS NULL` |
 | 非发布 run 可被当作正式 Review 返回 | **C1 CONTINUATION 已修** | `_get_published_run` 增加 `is_formally_published_review_run` guard（case A/B/C） |
 | source_core_run_id 注释误指 stock_core | **C1 CONTINUATION 已修** | 改为显式 `StockFeatureSnapshotRun.id` lineage |
+| `/v1/review/dates` 只验证 pointer、不验证 run formal state | **C1 FINAL 已修（§4）** | 改用 `list_formally_published_review_dates`（DB 层 pointer JOIN run，单次查询无 N+1） |
+| `/v1/review/latest` 自行 `pointer → db.get → return`，未走 formal guard | **C1 FINAL 已修（§3）** | 改为 `list_published_review_dates` 定位候选日 + `_get_published_run` formal guard；broken pointer fail-closed |
+| `_get_published_run_or_404` 的 `except HTTPException: return None` 会吞掉 500 data-integrity | **P2 DEFERRED（§7，本轮不修）** | 当前**无任何 production caller**（legacy Discovery 服务与用户端点已随 REVIEW-BACKEND-FINAL-CLOSURE Phase 5 退休；全仓检索仅剩定义处）。为不为清洁代码扩大范围，本轮只记录不删除；**复用前必须**改为只把真正的 404 no publication 转 None，500 必须继续上抛 |
 
 无重大 product schema / 跨域 owner 缺口 → 无需 checkpoint+STOP。
 
 ---
 
-## 11. C1 + C1 CONTINUATION 代码变更
+## 11. C1 + C1 CONTINUATION + C1 FINAL 代码变更
 
-C1（上一轮，注释一致性，锁定 `CORE_PUBLICATION_DEPENDENCY=0`）：
+C1（注释一致性，锁定 `CORE_PUBLICATION_DEPENDENCY=0`）：
 
 - `review_publication_service.py`：注释 —— "source_core_run_id 必须匹配 stock_core pointer" → "必须引用已存在且 succeeded 的 CoreRun"。
 - `review_orchestrator_service.py`：注释与错误信息 —— `source_core_run_id` 缺失即 fail-closed，绝不回退 stock_core pointer。
 
-C1 CONTINUATION（本轮，运行时行为修复，均为 Review 域内最小改动）：
+C1 CONTINUATION（运行时行为修复，均为 Review 域内最小改动）：
 
 - `review_observation_persistence_service.py`：`list_scope_observation_facts` 新增 `review_run_id` 参数，SQL 层 `WHERE review_run_id = :run_id` —— **BLOCKER A fix**，杜绝 overview 同日多 run 事实聚合污染（原调用仅按 trade_date 区间扫描）。
 - `app/api/review.py`：`get_review_overview` 调用改为 `list_scope_observation_facts(db, review_run_id=run.id, from_date=run.trade_date, to_date=run.trade_date)`；`_get_published_run` 增加 `is_formally_published_review_run` guard，区分 case A(404)/B(500)/C(500) fail-closed，绝不回退 latest run。
 - `review_publication_service.py`：`_get_publication` 与 `list_published_review_dates` 显式 `WHERE superseded_by IS NULL`，移除 `ORDER BY published_at DESC LIMIT 1` —— live universe 唯一性由 partial unique index 保证，不靠 latest timestamp 猜 owner。
 - `app/models/market_review.py`：`MarketReviewRun.source_core_run_id` 注释由 "输入 stock_core snapshot_run_id（factor_publications.data_run_id）" 改为显式 `StockFeatureSnapshotRun.id` lineage。
 
+C1 FINAL（统一 FORMAL_REVIEW_READ_OWNER，运行时行为修复，Review 域内最小改动）：
+
+- `app/services/review_publication_service.py`：新增 `list_formally_published_review_dates` —— DB 层 `factor_publications INNER JOIN market_review_runs ON run.id = data_run_id`，一次性过滤 `publication_kind=market_review` + `scope=market/market` + `superseded_by IS NULL` + `run.status = published` + `run.published_at IS NOT NULL`，`ORDER BY trade_date DESC`（**单次查询，无 N+1**）。
+- `app/services/review_publication_service.py`：`get_published_review_run_id` / `list_published_review_dates` docstring 显式标注为 **LIVE POINTER OWNER**（只回答 pointer identity，不单独证明 run formal state；用户 endpoint 不得据此判定 `FORMALLY_PUBLISHED`）。
+- `app/api/review.py` `/dates`：改用 `list_formally_published_review_dates`，不再只验证 pointer。
+- `app/api/review.py` `/latest`：删除自行 `pointer → db.get → return` 的实现，改为 `list_published_review_dates`（定位候选最新交易日）+ `_get_published_run`（复用与 overview/scopes/detail 完全相同的 formal guard）。broken pointer / 未正式发布 run → 500 fail-closed，绝不回退 latest ReviewRun、绝不跳过到更早交易日。
+- `app/api/review.py` `_get_published_run_or_404`：仅更新 docstring 记录 §7 的 P2 deferred 风险（**不改行为、不删除**：当前无 production caller）。
+
 ---
 
-## 12. 测试要求（T1 / T2 / 多 run 假绿 / superseded / broken）
+## 12. 测试要求（T1 / T2 / 多 run 假绿 / superseded / broken / C1 FINAL §8 CASE A/B/C）
 
-测试文件：`backend/tests/test_pg_review_read_owner_c1.py`（self-contained synthetic，验证库 `bz_stock_verify_<SHA>`，不读不写生产 `bz_stock`）。经 `verify_exec.py` 正式通道运行：**5 passed**。
+测试文件：`backend/tests/test_pg_review_read_owner_c1.py`（self-contained synthetic，验证库 `bz_stock_verify_<SHA>`，不读不写生产 `bz_stock`）。经 `verify_exec.py` / targeted-pg 验证数据库正式通道运行。
 
 - **T1（PG suite，非 pure unit）**：`_resolve_source_core_run_id` 在 `None` 时 fail-closed。
 - **T2（production publish + schema）**：`publish_review` 生产发布 → `/overview` 响应暴露 `sourceCoreRunId` 且等于显式绑定的 CoreRun；`coverage.industryL1 == 0.8`。
@@ -255,7 +329,15 @@ C1 CONTINUATION（本轮，运行时行为修复，均为 Review 域内最小改
 - **§7（superseded pointer 假绿）**：同 T 制造 historical H(superseded) + live L；H.published_at 更晚，但 `get_published_review_run_id` 返回 L；仅 superseded history、无 live pointer → T 不视为当前 owner。
 - **§8（broken pointer fail-closed）**：live pointer → run `status=signals_ready` / `published_at=NULL` → 用户正式 read path `500` fail-closed，不得返回 200 正式 Review。
 
-**禁止**自制 `_publish_pointer()` 复制生产 SQL；全部调用生产 `publish_review(...)` 构造最小合法 publishable ReviewRun（source CoreRun exists + succeeded + trade_date 匹配 + algorithm_version 正式 + status=signals_ready + expected_scope_count>0 + coverage≥gate + canonical_composition_readiness 非空 ready + 非 canary/非 provisional/无 run item）。
+C1 FINAL 新增（§8 CASE A/B/C，统一正式读边界）：
+
+- **CASE A（broken live pointer = 唯一 live pointer）**：`/overview` → 500 fail-closed；`/latest` → 500 fail-closed（不回退同日其它 run、不跳过到更早交易日）；`/dates` 不把 T 列为正式已发布日期。同时断言 `T ∈ list_published_review_dates`（live pointer 仍存在）且 `T ∉ list_formally_published_review_dates` —— **直接证明排除来自 run formal state，而非 pointer 缺失**。
+- **CASE B（valid published run，生产 `publish_review` 路径）**：`/dates` 包含 T 且 `latest_trade_date == T`；`/latest` 返回该正式 run（`status == "published"`）。
+- **CASE C（T 仅剩 superseded historical pointer）**：historical run 自身是正式发布态（`status=published` + `published_at` 非空），被排除的唯一原因是其 pointer 已被 supersede；`/dates` 不包含 T、包含次新正式发布日 `T_PREV`；`/latest` 返回 `T_PREV` 的 run，**不 resurrect** historical run。
+
+`/latest` 语义 = live pointer 中最大 `trade_date`。CASE A/B/C 使用 sentinel 日期 `2099-12-31` / `2099-12-30`（远大于本文件其它用例的 `2026-08-xx`），确保"该 T 必为 `/latest` 命中目标"确定成立，**不依赖 pytest 执行顺序或其它测试文件残留**。
+
+**禁止**自制 `_publish_pointer()` 复制生产 SQL；正常 owner case 全部调用生产 `publish_review(...)` 构造最小合法 publishable ReviewRun（source CoreRun exists + succeeded + trade_date 匹配 + algorithm_version 正式 + status=signals_ready + expected_scope_count>0 + coverage≥gate + canonical_composition_readiness 非空 ready + 非 canary/非 provisional/无 run item）。仅在**人工制造 corrupt / superseded 异常 DB 状态**时允许 fixture 直接插表（`superseded_by` 列无 FK 约束）—— 因为测试目标本身就是异常状态，不存在正常发布路径可以产生它。
 
 ---
 
@@ -265,4 +347,4 @@ C1 CONTINUATION（本轮，运行时行为修复，均为 Review 域内最小改
 - 前端：`frontend/src/features/review/types.ts`、`frontend/src/features/review/api.ts`
 - 依赖扫描：regex 检索 `review*.py` + `app/api/*review*.py`
 - 测试：`backend/tests/test_pg_review_read_owner_c1.py`（targeted-PG，验证库 `bz_stock_verify_<SHA>`，gate cleanup 丢弃，不写生产 `bz_stock`）
-- 本 map 完整核验：2026-08-27（PHASE C1 + C1 CONTINUATION）
+- 本 map 完整核验：2026-08-28（PHASE C1 + C1 CONTINUATION + C1 FINAL）
