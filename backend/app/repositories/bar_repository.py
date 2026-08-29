@@ -49,12 +49,18 @@ from app.services.adjustment_factor_calculator import (
     AdjustmentFactorDataError,
     calculate_adjustment_factor_series,
 )
+
+# [F1B-1] provider I/O 边界（spawn-safe，无 DB 依赖）
+from app.services.bars_fetch_worker import fetch_daily_provider_inputs
 from app.services.bars_validator import validate_bars
 
 if TYPE_CHECKING:
     from typing import Protocol
 
     from sqlalchemy.sql.expression import Executable
+
+    # [F1B-1] 仅类型引用，避免 repository → services 运行期循环依赖
+    from app.services.bars_fetch_worker import DailyProviderPayload
 
     class _AdjFactorAdapterLike(Protocol):
         """_calculate_adj_factor 所需的 pytdx 适配器接口（结构化类型）。"""
@@ -539,6 +545,85 @@ async def _upsert_minute_bars(
     return len(records)
 
 
+def _compute_adj_factor_from_xdxr(
+    symbol: str,
+    raw_df: pd.DataFrame,
+    xdxr_df: pd.DataFrame | None,
+    supplement_df: pd.DataFrame | None = None,
+) -> list[float]:
+    """[F1B-1] adj_factor **纯计算段**：不含任何 provider I/O。
+
+    算法唯一 owner 仍是 ``calculate_adjustment_factor_series``；本函数只负责
+    组装它的输入（必要时用已取回的 supplement 补齐事件日 close），
+    并把结果映射回 raw_df 的行序。
+
+    serial path（``_calculate_adj_factor``）与 provider-boundary path
+    （``prepare_daily_bars``）**必须共用本函数** —— 禁止出现第二套除权算法。
+
+    Args:
+        symbol: 股票代码（仅用于日志）
+        raw_df: pytdx 原始日线，含 datetime 列
+        xdxr_df: xdxr provider 原始结果（可为 None / 空）
+        supplement_df: 事件日 close 缺失时补拉的日线（可为 None / 空）
+
+    Returns:
+        与 raw_df 行一一对应的 adj_factor 列表
+    """
+    if raw_df.empty:
+        return []
+
+    default_factors = [1.0] * len(raw_df)
+    if xdxr_df is None or xdxr_df.empty:
+        return default_factors
+
+    exc_events = xdxr_df[xdxr_df["category"] == 1].copy()
+    if exc_events.empty:
+        return default_factors
+
+    close_map: dict[date, float] = {}
+    for _, row in raw_df.iterrows():
+        close_map[pd.Timestamp(row["datetime"]).date()] = float(row["close"])
+
+    missing_dates: list[date] = []
+    for _, event in exc_events.iterrows():
+        event_date = pd.Timestamp(event["date"]).date()
+        if event_date not in close_map:
+            missing_dates.append(event_date)
+
+    extended_raw_df = raw_df
+    if missing_dates and supplement_df is not None and not supplement_df.empty:
+        extended_raw_df = (
+            pd.concat([raw_df, supplement_df], ignore_index=True)
+            .drop_duplicates(subset=["datetime"])
+            .sort_values("datetime")
+            .reset_index(drop=True)
+        )
+
+    try:
+        all_factors = calculate_adjustment_factor_series(extended_raw_df, xdxr_df)
+    except AdjustmentFactorDataError as exc:
+        logger.warning(
+            "纯函数计算失败 symbol=%s: %s，使用默认 1.0", symbol, exc,
+        )
+        return default_factors
+
+    if len(extended_raw_df) == len(raw_df):
+        return all_factors
+
+    extended_df = extended_raw_df.copy()
+    extended_df["_factor"] = all_factors
+    extended_df["_date"] = extended_df["datetime"].apply(
+        lambda x: pd.Timestamp(x).date()
+    )
+    factor_map = dict(
+        zip(extended_df["_date"], extended_df["_factor"], strict=True)
+    )
+    original_dates = raw_df["datetime"].apply(
+        lambda x: pd.Timestamp(x).date()
+    ).tolist()
+    return [factor_map.get(d, 1.0) for d in original_dates]
+
+
 def _calculate_adj_factor(
     symbol: str,
     raw_df: pd.DataFrame,
@@ -605,6 +690,8 @@ def _calculate_adj_factor(
     # 新代码（rebuild_adj_factors / compute_expected_adj_factors）不补齐，
     # 数据缺失时抛 AdjustmentFactorDataError，由调用方决定 degraded 或 re-raise
     extended_raw_df = raw_df
+    # 显式初始化：无 missing_dates 时，下方委托仍会引用 supplement_df
+    supplement_df: pd.DataFrame | None = None
     if missing_dates:
         all_event_dates = [
             pd.Timestamp(e["date"]).date() for _, e in exc_events.iterrows()
@@ -628,32 +715,97 @@ def _calculate_adj_factor(
                 symbol, fetch_start, max_d, exc,
             )
 
-    # 调纯函数（算法唯一入口）
+    # [F1B-1] 调纯计算段 —— 与 provider-boundary path 共用同一算法 owner
+    return _compute_adj_factor_from_xdxr(symbol, raw_df, xdxr_df, supplement_df)
+
+
+def prepare_daily_bars(
+    payload: DailyProviderPayload,
+) -> pd.DataFrame:
+    """[F1B-1] parent/canonical 侧：用 provider payload 做**纯计算 + 校验**。
+
+    provider I/O 已在 ``bars_fetch_worker`` 完成；本函数不含任何网络调用，
+    可在 parent（或未来的 multiprocess parent）中安全执行。
+
+    adj_factor 计算委托 ``_compute_adj_factor_from_xdxr`` —— 与 legacy
+    ``_calculate_adj_factor`` **共用同一算法 owner**（``calculate_adjustment_factor_series``）。
+
+    Args:
+        payload: 来自 provider 边界的 daily 结果
+
+    Returns:
+        已带 adj_factor 列的 DataFrame 副本；raw 为空时返回空 DataFrame。
+        （数据校验在 ``persist_daily_bars`` 内完成，与既有
+        ``_upsert_daily_bars`` 的"校验失败 → 不落库但仍返回结果"语义一致。）
+    """
+    raw_df = payload.raw_df
+    if raw_df is None or raw_df.empty:
+        return pd.DataFrame()
+
+    raw_df = raw_df.copy()
+
+    # 与既有 contract 一致：计算异常（非 AdjustmentFactorDataError）也降级为 1.0
     try:
-        all_factors = calculate_adjustment_factor_series(extended_raw_df, xdxr_df)
-    except AdjustmentFactorDataError as exc:
-        logger.warning(
-            "纯函数计算失败 symbol=%s: %s，使用默认 1.0", symbol, exc,
+        adj_factors = _compute_adj_factor_from_xdxr(
+            payload.symbol, raw_df, payload.xdxr_df, payload.supplement_df,
         )
-        return default_factors
+    except Exception as exc:  # noqa: BLE001 - 保持既有 degraded 语义
+        logger.warning("计算 adj_factor 失败 symbol=%s: %s，使用默认 1.0", payload.symbol, exc)
+        adj_factors = [1.0] * len(raw_df)
 
-    # 只返回与原 raw_df 行对应的 factor
-    if len(extended_raw_df) == len(raw_df):
-        return all_factors
+    raw_df["adj_factor"] = adj_factors
+    return raw_df
 
-    # extended_raw_df 包含 supplement_df 的行，通过 datetime 匹配提取原 raw_df 的 factor
-    extended_df = extended_raw_df.copy()
-    extended_df["_factor"] = all_factors
-    extended_df["_date"] = extended_df["datetime"].apply(
-        lambda x: pd.Timestamp(x).date()
+
+async def persist_daily_bars(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    prepared_df: pd.DataFrame,
+) -> int:
+    """[F1B-1] parent/canonical 侧：**只做持久化**，不含 provider I/O 与纯计算。
+
+    Returns:
+        写入记录数；空 DataFrame 或**数据校验失败**时返回 0（不落库）。
+
+    Raises:
+        Exception: 写入失败时 re-raise（不吞没，与既有 ``_upsert_daily_bars`` 一致）
+    """
+    if prepared_df.empty:
+        return 0
+
+    # 写入前校验数据质量（与既有 _upsert_daily_bars 完全一致）
+    validation = validate_bars(prepared_df, "", "d")
+    if not validation.is_valid:
+        logger.error("日线数据校验失败 errors=%s", validation.errors[:5])
+        return 0
+
+    records = _df_to_upsert_records(
+        prepared_df, instrument_id, is_daily=True, volume_multiplier=Decimal("1")
     )
-    factor_map = dict(
-        zip(extended_df["_date"], extended_df["_factor"], strict=True)
-    )
-    original_dates = raw_df["datetime"].apply(
-        lambda x: pd.Timestamp(x).date()
-    ).tolist()
-    return [factor_map.get(d, 1.0) for d in original_dates]
+
+    try:
+        stmt = pg_insert(BarDaily).values(records)
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["instrument_id", "trade_date"],
+            set_={
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+                "amount": stmt.excluded.amount,
+                "adj_factor": stmt.excluded.adj_factor,
+            },
+        )
+        await session.execute(stmt)
+        await session.commit()
+    except Exception as exc:
+        logger.warning("upsert bars_daily 失败 instrument_id=%s: %s", instrument_id, exc)
+        await session.rollback()
+        raise
+
+    logger.info("upsert bars_daily: instrument_id=%s records=%d", instrument_id, len(records))
+    return len(records)
 
 
 async def _get_adj_factor_df(
@@ -1228,19 +1380,25 @@ async def refresh_daily_bars(
 
     pytdx = adapter or get_pytdx_adapter()
     try:
-        raw_df = await asyncio.to_thread(
-            pytdx.get_daily_bars, symbol, start_date, end_date
+        # [F1B-1] serial path 走 canonical provider boundary：
+        # raw bars + xdxr + 必要时 supplement 全部在 provider 层完成
+        payload = await asyncio.to_thread(
+            fetch_daily_provider_inputs,
+            str(instrument_id), symbol, start_date, end_date, pytdx,
         )
     except Exception as exc:
         logger.warning("pytdx 刷新日线失败 symbol=%s: %s", symbol, exc)
         raise
 
-    if raw_df.empty:
-        return raw_df
+    if payload.raw_empty:
+        return payload.raw_df
 
-    await _upsert_daily_bars(session, instrument_id, raw_df, symbol, pytdx, start_date)
+    prepared = prepare_daily_bars(payload)
+    await persist_daily_bars(session, instrument_id, prepared)
 
-    result_df = raw_df.set_index("datetime")
+    # 旧实现 _upsert_daily_bars 会原地给 raw_df 补 adj_factor 列；
+    # 这里改用 prepared（副本，已含 adj_factor），保持返回列一致。
+    result_df = prepared.set_index("datetime")
     result_df.index.name = "trade_date"
     return result_df
 
