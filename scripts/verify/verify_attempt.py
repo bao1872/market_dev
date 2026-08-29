@@ -483,7 +483,18 @@ class VerifyAttempt:
              # T1 _resolve_source_core_run_id fail-closed；T2 overview schema lineage；
              # 多 run 假绿（同日 Core A/B + Review Y(A)/Z(B)，指针唯一覆盖，非 latest-Z）。
              # 自包含 synthetic universe，写入验证库 bz_stock_verify_<SHA>，不读 bz_stock。
-             "tests/test_pg_review_read_owner_c1.py"],
+             "tests/test_pg_review_read_owner_c1.py",
+
+             # PHASE C2 — Review HTTP Runtime + Client Contract Closure：
+             # 真实 app.main.app + ASGI HTTP client（httpx.ASGITransport），不直接调用
+             # endpoint function。路由注册（route table + OpenAPI）、auth 矩阵
+             # （401/403/200/admin bypass，只 override 身份来源 get_current_active_user，
+             #   require_capability 保持生产实现）、include_partial 权限、5 个用户
+             # endpoint 的真实 HTTP JSON 字段与 null/0/[] 语义、Review Y -> Core X
+             # lineage、404/422/500 错误 body 可被 frontend extractReviewError 解析。
+             # 自包含 synthetic universe，写入验证库 bz_stock_verify_<SHA>，不读 bz_stock。
+             # 仅追加本单文件；不动态 discovery，不扩大为全量 -m postgres。
+             "tests/test_pg_review_http_runtime_c2.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:
