@@ -590,12 +590,35 @@ async def withdraw_review_publication(
 def is_formally_published_review_run(
     run: MarketReviewRun,
     live_pointer_run_id: uuid.UUID | None,
+    *,
+    expected_trade_date: date,
 ) -> bool:
-    """仅当历史状态和当前正式 pointer 同时成立时才允许复用。"""
+    """FORMAL REVIEW READ OWNER 的**唯一**布尔判定（PHASE C1 FINAL-IDENTITY §5）。
+
+    四个条件必须**同时**成立才算正式发布：
+
+    1. ``run.status == "published"``
+    2. ``run.published_at IS NOT NULL``
+    3. ``live_pointer_run_id == run.id``（pointer identity：live pointer 指向本 run）
+    4. ``run.trade_date == expected_trade_date``（**pointer/run 交易日一致**）
+
+    第 4 条是本轮新增的 identity invariant。缺少它时，一个
+    ``FactorPublication(T_ALIAS) → MarketReviewRun(T_REAL)`` 的 cross-date
+    pointer 会通过全部 formal 检查，被当作 T_ALIAS 的正式 Review 返回
+    （且 ``status``/``published_at`` 均合法），构成无法从 run 自身状态发现的假绿。
+
+    ``expected_trade_date`` 是 **keyword-only 且必填**：调用方必须显式声明
+    "我要求这个 run 属于哪个交易日"，避免在调用点悄悄退化成只校验前三条、
+    从而与本文档形成第二个彼此冲突的 formal 定义。
+
+    用户正式 endpoint 只允许经本函数（或其唯一包装
+    ``app.api.review._get_published_run``）判定，不得自行拆分条件。
+    """
     return (
         run.status == "published"
         and run.published_at is not None
         and live_pointer_run_id == run.id
+        and run.trade_date == expected_trade_date
     )
 
 
@@ -670,6 +693,8 @@ async def list_formally_published_review_dates(
     - ``publication_kind = market_review``、``scope_type/scope_key = market/market``
     - ``superseded_by IS NULL``（live universe）
     - ``market_review_runs.id = data_run_id``（pointer → run 必须真实存在）
+    - ``factor_publications.trade_date = market_review_runs.trade_date``
+      （**cross-date pointer 排除**：pointer 的 T 必须就是 run 的 T）
     - ``run.status = published`` 且 ``run.published_at IS NOT NULL``
 
     返回 ``ORDER BY trade_date DESC LIMIT :limit``。
@@ -687,6 +712,9 @@ async def list_formally_published_review_dates(
             FactorPublication.scope_key == SCOPE_KEY_REVIEW,
             FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
             FactorPublication.superseded_by.is_(None),
+            # PHASE C1 FINAL-IDENTITY §3：pointer 的交易日必须就是 run 的交易日；
+            # T_ALIAS pointer → ReviewRun(T_REAL) 不得把 T_ALIAS 列为正式日期。
+            FactorPublication.trade_date == MarketReviewRun.trade_date,
             MarketReviewRun.status == "published",
             MarketReviewRun.published_at.is_not(None),
         )

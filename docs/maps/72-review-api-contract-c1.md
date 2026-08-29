@@ -33,7 +33,12 @@
 | BROKEN_POINTER_OVERVIEW | FAIL_CLOSED |
 | BROKEN_POINTER_LATEST | FAIL_CLOSED |
 | BROKEN_POINTER_DATES | EXCLUDED |
-| C1_EXACT_PG | PASS（8/8，见 §14） |
+| FORMAL_POINTER_RUN_DATE_MATCH | PASS |
+| CROSS_DATE_DATES_EXCLUDED | PASS |
+| CROSS_DATE_OVERVIEW | FAIL_CLOSED |
+| CROSS_DATE_LATEST | FAIL_CLOSED |
+| LIVE_POINTER_LAYER | PASS |
+| C1_EXACT_PG | PASS（9/9，见 §14） |
 | FULL_TARGETED_PG | RUN（见 §14：5/5 gate PASS，70 passed / 0 failed / 2 deselected） |
 | DISPLAY_STALE_POINTER_BLOCKS_REVIEW | NO |
 | API_EMPTY_STATUS_CONTRACT | DEFINED |
@@ -101,10 +106,37 @@ created → computing → partial → signals_ready → published
 | | LIVE POINTER OWNER | FORMAL REVIEW READ OWNER |
 |---|---|---|
 | 回答的问题 | T 的 live pointer 指向哪个 `run_id`？ | T 是否可以作为**正式用户 Review** 返回？ |
-| 判定条件 | `(kind=market_review, trade_date=T, superseded_by IS NULL)` | live pointer 存在 **AND** `MarketReviewRun` 存在 **AND** `status == published` **AND** `published_at IS NOT NULL` |
-| 实现 | `get_published_review_run_id`、`list_published_review_dates` | `app.api.review._get_published_run`（统一 guard，内含 `is_formally_published_review_run`）、`list_formally_published_review_dates`（DB 层 JOIN） |
+| 判定条件 | `(kind=market_review, trade_date=T, superseded_by IS NULL)` | 见下方"FORMAL_REVIEW_READ_OWNER 最终定义"（六条全成立） |
+| 实现 | `get_published_review_run_id`、`list_published_review_dates` | `app.api.review._get_published_run`（唯一包装，内含 `is_formally_published_review_run`）、`list_formally_published_review_dates`（DB 层 JOIN） |
 | 允许的用户用途 | 仅用于**定位**候选 run / 候选交易日，其后**必须**再走 formal guard | 用户正式 endpoint 的唯一判定依据 |
 | 禁止 | **不得**把非 None 返回值单独当作 `FORMALLY_PUBLISHED = TRUE` | — |
+
+### 3.2 FORMAL_REVIEW_READ_OWNER 最终定义（PHASE C1 FINAL-IDENTITY §11）
+
+T 可以作为正式用户 Review 返回，**当且仅当**以下六条**全部**成立：
+
+```
+1. LIVE POINTER 存在
+     FactorPublication(publication_kind=market_review,
+                       scope_type=market, scope_key=market,
+                       trade_date=T, superseded_by IS NULL)
+2. run exists              MarketReviewRun 行存在
+3. run.id == data_run_id   pointer 指向的 run 就是被校验的 run
+4. run.trade_date == pointer.trade_date（== T）   ← 本轮新增 identity invariant
+5. run.status == published
+6. run.published_at IS NOT NULL
+```
+
+第 4 条（**pointer ↔ run 交易日 identity**）是本轮收口的最后一个缺口。缺少它时，
+`FactorPublication(T_ALIAS) → MarketReviewRun(T_REAL)` 的 cross-date pointer 会让
+T_ALIAS 通过第 1/2/3/5/6 条全部检查：run 自身是干净的正式发布态，异常只存在于
+pointer 的 trade_date 与 run 的 trade_date 不一致 —— 无法从 run 状态本身发现。
+
+**单一 owner**：布尔判定由 `is_formally_published_review_run(run, live_pointer_run_id, *, expected_trade_date)` 独占（status + published_at + pointer identity + trade_date 四合一）。
+`expected_trade_date` 为 **keyword-only 且必填**，调用方必须显式声明期望交易日，
+防止在调用点悄悄退化成"只校验状态"的第二个彼此冲突的 formal 定义。
+`_get_published_run` 是该函数在 API 层的**唯一包装**；它额外的 `mismatch` 分支只做
+错误 detail 诊断，**不**构成第二套判定。
 
 **关键**：pointer 是发布动作写入的，但 run 行本身可以被后台流程/异常状态改写。因此 pointer 存在只是"曾经发布过"，run formal state 才是"当前仍是正式发布"。`/v1/review/dates` 与 `/v1/review/latest` 在 C1 FINAL 之前只用了 LIVE POINTER OWNER，属于同一类假绿，本轮统一收口。
 
@@ -175,6 +207,7 @@ publication_kind = market_review
 AND scope_type = market AND scope_key = market
 AND superseded_by IS NULL
 AND JOIN market_review_runs run ON run.id = data_run_id
+AND factor_publications.trade_date = run.trade_date   -- cross-date pointer 排除
 AND run.status = published
 AND run.published_at IS NOT NULL
 ORDER BY trade_date DESC
@@ -189,7 +222,10 @@ ORDER BY trade_date DESC
   - broken pointer（pointer → 缺失 run）→ **500 fail-closed**
   - `status != published` → **500 fail-closed**
   - `published_at IS NULL` → **500 fail-closed**
+  - **cross-date pointer（`run.trade_date != T`）→ 500 fail-closed**
   - 无 live pointer → 404
+  - `/latest` 收到上述任何 500 时**不**跳过到更早交易日（cross-date 场景 T_ALIAS 是
+    最大 live-pointer date，直接 500，不返回 `ReviewRun(T_REAL)`）
 - **绝不**回退到 latest `MarketReviewRun`，**也绝不**跳过到更早交易日。
 
 ---
@@ -317,6 +353,14 @@ C1 FINAL（统一 FORMAL_REVIEW_READ_OWNER，运行时行为修复，Review 域�
 - `app/api/review.py` `/latest`：删除自行 `pointer → db.get → return` 的实现，改为 `list_published_review_dates`（定位候选最新交易日）+ `_get_published_run`（复用与 overview/scopes/detail 完全相同的 formal guard）。broken pointer / 未正式发布 run → 500 fail-closed，绝不回退 latest ReviewRun、绝不跳过到更早交易日。
 - `app/api/review.py` `_get_published_run_or_404`：仅更新 docstring 记录 §7 的 P2 deferred 风险（**不改行为、不删除**：当前无 production caller）。
 
+C1 FINAL-IDENTITY（pointer ↔ run 交易日 identity，最后一个 formal guard 缺口）：
+
+- `app/services/review_publication_service.py` `is_formally_published_review_run`：新增 **keyword-only 且必填**的 `expected_trade_date`，成为 FORMAL_REVIEW_READ_OWNER 的**唯一**布尔 owner（status + published_at + pointer identity + trade_date 四合一）。选 §5 选项 A 而非 B，避免在 `_get_published_run` 里出现第二套并行判定。
+- `app/services/review_publication_service.py` `list_formally_published_review_dates`：WHERE 增加 `FactorPublication.trade_date == MarketReviewRun.trade_date`，继续单 SQL / 无 N+1。
+- `app/api/review.py` `_get_published_run`：传入 `expected_trade_date=trade_date`；失败 detail 在 `run.trade_date != trade_date` 时显式输出 "pointer trade_date 与 ReviewRun trade_date 不一致（cross-date pointer）"。该 `mismatch` 分支**只做诊断**，gate 仍由 helper 单一拥有。
+- `app/services/after_close_orchestrator.py`（唯一另一个 production caller）：传入 `expected_trade_date=trade_date` —— cross-date pointer 不得让编排器把别的交易日的 run 当成本交易日"已正式发布"而跳过计算与发布。
+- `backend/tests/test_review_publication_safety.py`：同步 helper 调用签名，并新增一条 cross-date 断言（`expected_trade_date` 不等于 run 交易日时返回 False）。
+
 ---
 
 ## 12. 测试要求（T1 / T2 / 多 run 假绿 / superseded / broken / C1 FINAL §8 CASE A/B/C）
@@ -347,7 +391,29 @@ C1 FINAL 新增（§8 CASE A/B/C，统一正式读边界）：
 - 前端：`frontend/src/features/review/types.ts`、`frontend/src/features/review/api.ts`
 - 依赖扫描：regex 检索 `review*.py` + `app/api/*review*.py`
 - 测试：`backend/tests/test_pg_review_read_owner_c1.py`（targeted-PG，验证库 `bz_stock_verify_<SHA>`，gate cleanup 丢弃，不写生产 `bz_stock`）
-- 本 map 完整核验：2026-08-28（PHASE C1 + C1 CONTINUATION + C1 FINAL）
+- 本 map 完整核验：2026-08-28（PHASE C1 + C1 CONTINUATION + C1 FINAL + C1 FINAL-IDENTITY）
+
+---
+
+## 15. C1 FINAL-IDENTITY 补充（cross-date pointer）
+
+新增用例 `test_c1_final_identity_cross_date_pointer_fail_closed`（`test_pg_review_read_owner_c1.py`，第 9 个用例）：
+
+- `T_ALIAS = 2099-12-31`（最大 live-pointer date，确保 `/latest` 必定命中），`T_REAL = 2020-01-02`。
+- `ReviewRun R`：`trade_date = T_REAL`、`status = published`、`published_at` 非空 —— **自身完全合法**。
+- `FactorPublication`：`trade_date = T_ALIAS`、`data_run_id = R.id`、`superseded_by = NULL` —— 唯一的异常就是 pointer 日期与 run 日期不一致（人工插表，因为测试目标就是异常 DB 状态；正常 `publish_review()` 不可能产生该状态）。
+- 同时用**生产** `publish_review()` 建立 `T_REAL` 自己的合法 run `V`，用于 §7 的正向对照。
+
+断言：
+
+| 检查 | 期望 | 说明 |
+|---|---|---|
+| `get_published_review_run_id(T_ALIAS)` | `== R.id` | §9：LIVE pointer 确实存在（live pointer exists ≠ formal review exists） |
+| `list_formally_published_review_dates` | 不含 `T_ALIAS`，含 `T_REAL` | §3 / §7：cross-date 排除，且 T_REAL 自己的合法 pointer 不受影响 |
+| `/dates` | 不含 `T_ALIAS`，含 `T_REAL` | 同上（端点层） |
+| `/overview/T_ALIAS` | **500** 且 detail 含 "不一致" | §8：不得返回 `tradeDate=T_REAL` 的 200 payload |
+| `/latest` | **500** | §6：不得返回 `T_REAL`、不得跳过到更早日期、不得把 alias 当正式日期 |
+| `/overview/T_REAL` | 200 且 `reviewRunId == V.id` | §7 正向对照：合法同日 pointer 完全不受影响 |
 
 ---
 

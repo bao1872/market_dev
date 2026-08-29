@@ -105,23 +105,41 @@ async def _get_published_run(
         MarketReviewRun ORM 对象
 
     Raises:
-        HTTPException 404: 无已发布 run
+        HTTPException 404: 无 live pointer（无已发布复盘）
+        HTTPException 500: live pointer 指向缺失 run，或该 run 不满足
+            FORMAL_REVIEW_READ_OWNER（status != published / published_at IS NULL /
+            run.trade_date != trade_date）—— data-integrity fail-closed
     """
     run_id = await get_published_review_run_id(session, trade_date)
     if run_id is not None:
         run = await session.get(MarketReviewRun, run_id)
         if run is not None:
             # §4 formal publication guard（用户正式路径）：live pointer 指向的 run
-            # 必须已正式发布（status=published 且 published_at IS NOT NULL），否则 fail-closed。
-            if include_partial or is_formally_published_review_run(run, run_id):
+            # 必须已正式发布（status=published 且 published_at IS NOT NULL）。
+            # [C1 FINAL-IDENTITY §4/§5] guard 由 is_formally_published_review_run
+            # **单一拥有**（status + published_at + pointer identity + trade_date），
+            # 此处不另设第二套判定；下方 detail 只做精确诊断，不改变 gate 语义。
+            if include_partial or is_formally_published_review_run(
+                run, run_id, expected_trade_date=trade_date,
+            ):
                 return run
-            # §4 case C: live pointer 指向 run，但 status!=published 或 published_at IS NULL
+            # §4 case C: live pointer 指向 run，但不满足 FORMAL_REVIEW_READ_OWNER
+            # （status!=published / published_at IS NULL / run.trade_date != T）
             # → data-integrity fail-closed，不得作为正式 Review 返回。
+            # 禁止 404 / fallback / 回退 latest / 跳过到其它日期。
+            mismatch = ""
+            if run.trade_date != trade_date:
+                mismatch = (
+                    f"pointer trade_date={trade_date} 与 ReviewRun trade_date="
+                    f"{run.trade_date} 不一致（cross-date pointer）；"
+                )
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=(
+                    f"{mismatch}"
                     f"trade_date={trade_date} 的正式 Review pointer 指向 run={run_id}，"
-                    f"但该 run 未正式发布（status={run.status}, published_at={run.published_at}），"
+                    f"但该 run 不满足正式发布合同（status={run.status}, "
+                    f"published_at={run.published_at}, run.trade_date={run.trade_date}），"
                     "数据一致性异常，拒绝作为正式 Review 返回"
                 ),
             )

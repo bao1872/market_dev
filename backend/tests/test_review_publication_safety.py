@@ -564,8 +564,26 @@ class TestWithdrawal:
         live_run_id = await get_published_review_run_id(
             pointer_session, date(2026, 7, 31),
         )
-        assert is_formally_published_review_run(run, live_run_id) is False
-        assert is_formally_published_review_run(run, run.id) is True
+        # [C1 FINAL-IDENTITY §5] expected_trade_date 必填：pointer 日 == run 日
+        assert (
+            is_formally_published_review_run(
+                run, live_run_id, expected_trade_date=date(2026, 7, 31),
+            )
+            is False
+        )
+        assert (
+            is_formally_published_review_run(
+                run, run.id, expected_trade_date=date(2026, 7, 31),
+            )
+            is True
+        )
+        # cross-date pointer：run 属于 2026-07-31，但被要求以 2026-07-30 的身份复用
+        assert (
+            is_formally_published_review_run(
+                run, run.id, expected_trade_date=date(2026, 7, 30),
+            )
+            is False
+        )
 
     async def test_dry_run_pointer_switch_is_rejected(self):
         run = _make_run(status="published", published_at=datetime.now(UTC))

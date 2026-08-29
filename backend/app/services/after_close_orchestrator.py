@@ -2472,7 +2472,12 @@ async def _execute_review_step(
                         review_db, trade_date,
                     )
                     is_formally_published = is_formally_published_review_run(
-                        review_run, published_review_run_id,
+                        review_run,
+                        published_review_run_id,
+                        # [C1 FINAL-IDENTITY §5] 显式声明期望交易日：cross-date
+                        # pointer（T_ALIAS → ReviewRun(T_REAL)）不得被判为"本交易日
+                        # 已正式发布"而跳过计算与发布。
+                        expected_trade_date=trade_date,
                     )
                     if is_formally_published:
                         _review_status = "published_already"

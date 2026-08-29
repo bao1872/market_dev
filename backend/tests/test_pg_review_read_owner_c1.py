@@ -23,6 +23,12 @@ PHASE C1 FINAL 追加（统一 FORMAL_REVIEW_READ_OWNER，§3/§4/§8）：
 - CASE C 仅 superseded historical pointer：/dates 不包含 T、/latest 不得 resurrect
        historical run（返回次新的正式发布日）
 
+PHASE C1 FINAL-IDENTITY 追加（pointer ↔ run 交易日 identity）：
+- cross-date corruption：pointer(T_ALIAS) → ReviewRun(T_REAL) 且 T_ALIAS != T_REAL，
+       ReviewRun 自身完全合法（status=published + published_at NOT NULL）；
+       LIVE pointer 存在但 /dates 排除 T_ALIAS、/overview 500、/latest 500，
+       而 T_REAL 自己的合法同日 pointer 不受影响
+
 /latest 语义 = live pointer 中最大 trade_date，因此 CASE A/B/C 使用远大于本文件
 其它用例（2026-08-xx）的日期（2099-12-31 / 2099-12-30），确保"该 T 必为 /latest
 命中目标"这一前提确定成立，不依赖 pytest 执行顺序或其它测试文件残留。
@@ -363,7 +369,12 @@ async def test_t8_broken_pointer_fail_closed():
         s.add(live_pub)
         await s.commit()
 
-        assert is_formally_published_review_run(broken, broken.id) is False
+        assert (
+            is_formally_published_review_run(
+                broken, broken.id, expected_trade_date=T8,
+            )
+            is False
+        )
         # 用户正式 read path 必须 fail-closed（500 data-integrity），不得返回 200 正式 Review
         with pytest.raises(HTTPException) as exc:
             await get_review_overview(str(T8), include_partial=False, db=s, ctx=_ctx())
@@ -447,7 +458,12 @@ async def test_c1_final_case_b_valid_published_dates_and_latest():
         await publish_review(s, run)  # 生产发布路径，绝不复制 SQL
         await s.commit()
 
-        assert is_formally_published_review_run(run, run.id) is True
+        assert (
+            is_formally_published_review_run(
+                run, run.id, expected_trade_date=T_MAX,
+            )
+            is True
+        )
 
         dates_resp = await get_review_dates(db=s, ctx=_ctx())
         assert T_MAX.isoformat() in dates_resp.trade_dates, (
@@ -527,4 +543,113 @@ async def test_c1_final_case_c_superseded_only_excluded():
 
         await _clean_pointers(s, T_MAX)
         await _clean_pointers(s, T_PREV)
+        await s.commit()
+
+
+# ---------------------------------------------------------------------------
+# PHASE C1 FINAL-IDENTITY §6-§10 — cross-date pointer corruption
+# ---------------------------------------------------------------------------
+
+# T_ALIAS 复用 sentinel 最大日期，确保 /latest 必定命中这个 cross-date pointer；
+# T_REAL 是 ReviewRun 自己真正所属的交易日。
+T_ALIAS = date(2099, 12, 31)
+T_REAL = date(2020, 1, 2)
+
+
+@pytest.mark.asyncio
+async def test_c1_final_identity_cross_date_pointer_fail_closed():
+    """cross-date corruption：pointer(T_ALIAS) → ReviewRun(T_REAL)，T_ALIAS != T_REAL。
+
+    ReviewRun 自身完全合法（status=published + published_at NOT NULL），唯一异常是
+    pointer 的交易日与 run 的交易日不一致。因此：
+
+    - ``get_published_review_run_id(T_ALIAS) == R.id`` —— **LIVE pointer 确实存在**
+      （§9：live pointer exists ≠ formal review exists，owner 分层保持清晰）；
+    - ``list_formally_published_review_dates`` / ``/dates`` **不包含 T_ALIAS**（§3/§7）；
+    - ``/overview/T_ALIAS`` → 500 fail-closed，**不得**返回 ``tradeDate=T_REAL`` 的
+      200 payload（§8）；
+    - ``/latest`` → 500 fail-closed（§6：T_ALIAS 为最大 live-pointer date），
+      **不得**返回 T_REAL、不得跳过到更早日期、不得把 alias 当正式日期；
+    - T_REAL 自己另有合法同日 pointer 时，**T_REAL 仍正常存在**（§7）。
+    """
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, T_ALIAS)
+        await _clean_pointers(s, T_REAL)
+
+        core_a = _make_core_run(T_REAL)
+        core_b = _make_core_run(T_REAL)
+        s.add(core_a)
+        s.add(core_b)
+        await s.flush()
+
+        # R：被 cross-date pointer 指向的 run。自身是正式发布态，只有 pointer 日期错位。
+        run_r = _make_publishable_review_run(core_a.id, T_REAL)
+        run_r.status = "published"
+        run_r.published_at = datetime.now(timezone.utc)
+        s.add(run_r)
+        await s.flush()
+
+        # V：T_REAL 自己的合法正式发布 run（生产 publish_review 路径）。
+        run_v = _make_publishable_review_run(core_b.id, T_REAL)
+        s.add(run_v)
+        await s.flush()
+        s.add(_make_fact(run_v.id, T_REAL, 100, 80))
+        await s.flush()
+        await publish_review(s, run_v)  # 生产发布路径，绝不复制 SQL
+
+        # 人工插入 corrupt cross-date pointer（测试目标就是异常 DB 状态）
+        s.add(
+            _insert_pointer(
+                s,
+                run_r.id,
+                T_ALIAS,
+                superseded_by=None,
+                published_at=datetime.now(timezone.utc),
+            )
+        )
+        await s.commit()
+
+        # ---- §9 LIVE POINTER LAYER：pointer 确实存在，但这不构成 formal review ----
+        assert await get_published_review_run_id(s, T_ALIAS) == run_r.id, (
+            "live pointer 存在（LIVE POINTER RESOLVER 仍可解析 run_id）"
+        )
+        assert await get_published_review_run_id(s, T_REAL) == run_v.id
+        # 同一 run_r 在**自己**的交易日上下文里也满足 status/published_at，
+        # 证明下面的排除确实来自 trade_date identity，而非 run 状态。
+        assert run_r.status == "published" and run_r.published_at is not None
+
+        # ---- §3/§7 /dates：T_ALIAS 不得列入，T_REAL 正常存在 ----
+        formal = await list_formally_published_review_dates(s, limit=500)
+        assert T_ALIAS not in formal, "cross-date pointer 的 T_ALIAS 不得列为正式已发布日期"
+        assert T_REAL in formal, "T_REAL 自己的合法同日 pointer 不受影响"
+
+        dates_resp = await get_review_dates(db=s, ctx=_ctx())
+        assert T_ALIAS.isoformat() not in dates_resp.trade_dates
+        assert T_REAL.isoformat() in dates_resp.trade_dates
+
+        # ---- §8 /overview/T_ALIAS → 500 fail-closed ----
+        with pytest.raises(HTTPException) as exc_o:
+            await get_review_overview(str(T_ALIAS), include_partial=False, db=s, ctx=_ctx())
+        assert exc_o.value.status_code == 500, (
+            f"cross-date pointer 的 /overview 必须 fail-closed，got {exc_o.value.status_code}"
+        )
+        assert "不一致" in str(exc_o.value.detail), "detail 必须明确指出 trade_date 不一致"
+
+        # ---- §6 /latest → 500 fail-closed（T_ALIAS 为最大 live-pointer date）----
+        with pytest.raises(HTTPException) as exc_l:
+            await get_latest_review(db=s, ctx=_ctx())
+        assert exc_l.value.status_code == 500, (
+            f"/latest 遇到 cross-date pointer 必须 fail-closed，got {exc_l.value.status_code}"
+        )
+
+        # ---- §7 正向对照：T_REAL 自己的 overview 仍是 200 且返回 V ----
+        resp_real = await get_review_overview(
+            str(T_REAL), include_partial=False, db=s, ctx=_ctx(),
+        )
+        assert resp_real.reviewRunId == str(run_v.id)
+        assert resp_real.tradeDate == T_REAL.isoformat()
+
+        await _clean_pointers(s, T_ALIAS)
+        await _clean_pointers(s, T_REAL)
         await s.commit()
