@@ -631,3 +631,200 @@ frontend `extractReviewError` 在 500 分支为 `requestId ? \`（request_id=...
 > 诚实性说明：`app/api/review.py` 仍在使用 `status.HTTP_422_UNPROCESSABLE_ENTITY`，运行时产生
 > `DeprecationWarning: Use HTTP_422_UNPROCESSABLE_CONTENT instead`。该告警**修改前既有**，且替换常量会
 > 与旧版 FastAPI 不兼容，本轮未修（非合同 mismatch，不在 §13 授权范围内），记为 deferred debt。
+
+---
+
+# PHASE D1 — Review Frontend Product Flow Closure
+
+后端已证明"API 可达 / 权限正确 / JSON 正确 / lineage 正确"（C2）。D1 回答：
+**用户打开 Review 页面后，现有 UI 是否完整消费这些 API。**
+
+## D1.0 结论速览
+
+| 判定项 | 结果 |
+|---|---|
+| FRONTEND_FLOW_OWNER | PASS（见 D1.1 调用链） |
+| DATE_OWNER | **SINGLE**（URL 是 SSOT；切日期清 scopeKey + page） |
+| INITIAL_LOAD | PASS（dates → 回填 latest → overview → scopes） |
+| DATE_SWITCH | PASS（整工作区重载，无 cross-date mixed world） |
+| SCOPE_SWITCH | PASS（仅 detail 区 loading，Overview/列表不清空） |
+| EMPTY_STATE | PASS（`尚无已发布复盘`） |
+| AUTH_401 | HANDLED（全局 apiClient：单例 refresh + 失败跳 /login） |
+| CAPABILITY_403 | HANDLED（全局 apiClient toast + 页面错误态） |
+| NOT_PUBLISHED_404 | HANDLED（`{T} 复盘尚未发布`） |
+| INTEGRITY_500 | HANDLED（错误态 + **本轮新增 retry**） |
+| DEGRADED_REASON | VISIBLE（ReviewHeader 降级横幅） |
+| NULL_SEMANTICS | PASS（`reviewFormat` 全量 null-safe） |
+| SCOPE_LIST | PASS（**限制见 D1.5**：全族快照 + 前端分页） |
+| SCOPE_DETAIL | PASS |
+| MEMBER_DIRECTORY | PASS（`displayMember` 唯一 owner） |
+| DEEP_OPTIONAL_FIELDS | GRACEFUL（见 D1.7 分类） |
+| FRONTEND_TYPES | PASS（本轮未改 types.ts） |
+| FRONTEND_TESTS | PASS（930/930，新增 13） |
+| BACKEND_CHANGED | **NO** |
+
+## D1.1 REVIEW_FRONTEND_FLOW_MAP（§2）
+
+```
+route  /review  (guard=capability research_replay, shell=user)   [src/navigation/routeStructure.ts:62]
+  └─ page  src/pages/ReviewPage.tsx                       ← 唯一页面 owner / 日期 owner
+       ├─ state SSOT : URL searchParams
+       │     decodeReviewUrl / encodeReviewUrl            [features/review/urlState.ts]
+       │     withReviewDateChange | withReviewFamilyChange | withReviewFilterChange | withReviewPageChange
+       ├─ API  useQuery(reviewKeys.dates())   → GET /v1/review/dates      [features/review/api.ts]
+       │     无 date 时回填 latest_trade_date（replace，不污染历史）
+       ├─ API  useQuery(reviewKeys.overview(T)) → GET /v1/review/{T}/overview
+       │     computing 状态才轮询（5s）
+       ├─ component  ReviewHeader                          ← 日期选择唯一入口 / 降级横幅 / lineage
+       └─ component  ScopeExplorerWorkspace                ← 列表 + 详情工作区
+            ├─ hook  useReviewScopeFamilySnapshot(T, family)
+            │          → loadFamilySnapshot(分页聚合, fail-closed) → GET /v1/review/{T}/scopes
+            ├─ vm     scopeExplorerViewModel（q/phase/sort/分页，纯前端）
+            ├─ component ScopeExplorerToolbar / ScopeExplorerTable / ScopeTrajectoryView
+            └─ component ScopeDetailWorkspace               ← 详情唯一 owner
+                 ├─ hook useReviewScopeDetail({T, scopeType, scopeKey})
+                 │        → GET /v1/review/{T}/scopes/{type}/{key}   （scopeKey=null 不发请求）
+                 ├─ parse scopeDetailContract（唯一解析 owner）
+                 └─ ScopeDetailTabs → ScopeCurrentObservationWorkspace / ScopeDynamicsPanel /
+                                      ScopeInternalStructurePanel / ScopeLeadershipPanel /
+                                      ScopeMemberAttributionPanel / ScopeRawFactsPanel
+       （浏览器实际路径 /api/v1/review/... —— /api 来自 apiClient baseURL + Vite proxy，
+         后端 router 本身是 /v1/review/...，C2 已断言后端路由不含 /api 前缀）
+```
+
+## D1.2 Date State Owner（§4）
+
+`selectedTradeDate` **唯一 owner = URL**（`urlState.date`）。
+
+- 页面派生：`urlState.date ?? datesQuery.data?.latest_trade_date ?? ''`。
+  `latest_trade_date` 只在 URL 尚无 `date` 的**首个渲染帧**作为回填来源，随后
+  `useEffect` 立即 `setSearchParams(..., {replace:true})` 把 `date` 写回 URL —— 收敛为单一 owner。
+- **切换日期 `withReviewDateChange`：`{...state, date, scopeKey: null, page: 1}`** ——
+  清空已选 scope + 重置页码，**不存在** "Header 显示 8/29、Scope 表还是 8/28" 的 mixed world。
+- 切换 family 同样 `scopeKey: null`（`withReviewFamilyChange`）。
+- React Query key 含 `tradeDate`（`reviewKeys.overview/familySnapshot/scopeDetail`），
+  跨日期**不可能**复用旧数据。
+
+## D1.3 Loading Contract（§5）
+
+| 场景 | 行为 |
+|---|---|
+| 首次页面加载 | 页面级 loading：`renderDatesGate` → `加载复盘日期` → `加载复盘总览` |
+| 切换 scope | **仅 detail 区** loading（`ScopeDetailWorkspace` 的 `detail.isLoading`）；Overview 与 Scope 列表不清空 |
+| 切换日期 | `overviewQuery` key 变化 → 整个工作区替换为 `加载复盘总览`。旧日期 detail **不会**短暂显示成新日期数据 |
+| computing 轮询 | 仅 `COMPUTING_STATUSES`（created/computing/signals_ready）5s 轮询 |
+
+不是"一个 boolean 管全部"：dates / overview / snapshot / detail 是四个独立 `useQuery`，
+各自独立 loading 与 error。
+
+## D1.4 错误与权限（§6–§9 / §15）
+
+| 场景 | 处理 | owner |
+|---|---|---|
+| `/dates` 空列表 | `尚无已发布复盘` 确定 product state；`tradeDate === ''` → overview/scopes/detail 全部 `enabled=false` | ReviewPage `renderDatesGate` |
+| 401 | 全局 apiClient 响应拦截器：单例 refresh + 重试一次；refresh 失败 → logout + 跳 `/login`。**Review 不自建第二套登录** | `src/api/client.ts` |
+| 403 | 全局 apiClient toast `权限不足` + reject；页面错误态兜底。**Review 不自建订阅/权限系统** | `src/api/client.ts` |
+| 404 | `复盘尚未发布` 确定状态；**不偷偷读另一天** | ReviewPage |
+| 422 | `extractReviewError` → `参数校验失败：{detail}` | api.ts |
+| 500 | 明确错误态 + **retry 按钮**（D1 新增）；`requestId` 允许为 null | ReviewPage / ScopeExplorerWorkspace / ScopeDetailWorkspace |
+| requestId | C2 实测 app 不产出 `x-request-id`（owner = gateway）。`extractReviewError` 的 500 分支在 `requestId` 为空时退化为 `服务器错误`，**不要求** Review API 返回该 header | api.ts |
+
+**§9 缓存污染防线**：所有 Review queryKey 都含 `tradeDate`（detail 还含 `scopeType/scopeKey`），
+旧数据不可能被当作当前日期/当前 scope 的正式数据继续展示。
+
+## D1.5 Scope List（§12）—— 当前真实行为（不假装分页已闭环）
+
+`useReviewScopeFamilySnapshot` 是**全族快照 + 前端分页**，不是真正的服务端分页：
+
+- 以 `page_size=100` 拉第 1 页，`total > 100` 时并行拉剩余页；
+- **completeness fail-closed**：跨页 `total` 漂移 / 合并 `items.length !== total` / `(scopeType, scopeKey)`
+  重复 → 直接抛错，**绝不**把部分快照当完整快照渲染（否则前端搜索/排序会作用在残缺集合上）；
+- UI 分页、搜索、排序、phase 过滤全部作用在完整快照上（`scopeExplorerViewModel`）。
+
+**限制（诚实记录）**：后端 `page` / `page_size` 仅用于 transport aggregation；
+`ReviewScopeListResponse.has_more` 在 types.ts 中声明但**当前未被前端消费**。
+V1 采用全族快照是必要取舍（跨全族的搜索/排序无法靠逐页服务端分页实现）。
+若某族 Scope 数量增长到需要服务端分页，属后续独立任务。
+
+**UI 表格不请求 detail**：`detail` 只由已选 `scopeKey` 驱动（`useReviewScopeDetail`），
+表格/轨迹行不发 detail 请求，无 N+1。
+
+## D1.6 Scope Detail 与 memberDirectory（§13）
+
+- `observation` / `observationGroups`：Current Tab 由 `ScopeCurrentObservationWorkspace` 消费；
+  C2 已证明 `observationGroups` 键集合 == 前端 `ObservationGroups` 的固定 8 组。
+- `composition === null` 时显示 `Canonical Composition 不可用；Objective Observation 仍可用`，
+  **不**说成 failed/broken/error（R3A Fact-only detail 是合法状态）。
+- `memberDirectory` → `displayMember(memberId, directory)` 是**成员展示唯一 owner**：
+  `name + symbol` → `名称 · 代码`；仅 symbol → symbol；目录缺失该 id → 回退 id（不伪造名称）。
+  排行榜/归因面板均传 `directory`，**不直接把 UUID 暴露为主展示文本**。
+
+## D1.7 深层可选字段分类（§14）
+
+C2 的合成 composition 只真正覆盖了 `leadership` 与 9-key 顶层结构。据此分类，**不允许"字段存在 = UI 正确"**：
+
+| 层 | 分类 | 说明 |
+|---|---|---|
+| `observation`（L1 payload）、`observationGroups`（8 组） | **ACTIVE_AND_TESTABLE** | C2 真实 HTTP 已验证键集合与取值 |
+| `composition.leadership` | **ACTIVE_AND_TESTABLE** | C2 合成数据真实产出，含 `current/previous_leader_ids` |
+| `memberDirectory` | **ACTIVE_AND_TESTABLE** | C2 已验证真实解析出 `{symbol, name}` |
+| `historical_dynamics` | **OPTIONAL / NOT_YET_PROVEN** | 无真实 producer evidence；`parseDynamicsLayer` 缺失返回 null → 面板显示 `本期暂无历史动态数据` |
+| `internal_structure_facts` | **OPTIONAL / NOT_YET_PROVEN** | 缺失 → `该层当前不可用（无 internal_structure_facts）`；任一 ratio 为 null → 不画假 100% 堆叠 |
+| `member_attribution` | **OPTIONAL / NOT_YET_PROVEN** | `parseAttribution` 缺失返回全 null 结构；Unavailable 分组有独立文案 |
+| `chipCoverage` 叶子、`capability`、`scope_observation` | **OPTIONAL / NOT_YET_PROVEN** | 类型化为 nullable，缺值展示 `—` |
+
+这些未证明层的 UI 正确性是 **Phase F（真实交易日数据）** 的验证对象，D1 只保证 **graceful unavailable**。
+
+## D1.8 NULL 语义审计（§11）
+
+`reviewFormat.ts` 是展示格式化唯一 owner，**全部函数对 `null / undefined / NaN` 返回 `—`**：
+
+- `formatPercentNullable(null) === '—'`，`formatPercentNullable(0) === '0.0%'`
+  → **`0%` 与 `null` 严格区分**：`0%` = 有数据且覆盖率为零；`—` = 不可用。
+- `formatNumberNullable` / `formatPosition` / `formatPhaseLabel` / `formatReadiness` /
+  `formatContributionFraction`（分母为 0 → `—`，绝不伪造 0% 或 100%）/
+  `formatMultipleNullable` / `formatPercentileNullable` / `formatZScoreNullable` 同样 null-safe。
+- C2 实测的 `coverage.market === null` → 表格/头部显示 `—`，不是 `0%`。
+
+已审计的**非** null→0 用法：`scopePriceTrendContract` 的 `denominatorZero` 只用于切换
+"无有效趋势状态成员"这个**可用性文案**（不渲染任何百分比），null 分母与真 0 都导向同一 unavailable 文案，不构成 null→0。
+
+## D1.9 测试证据（§16 / §17 / §20）
+
+新增 `frontend/src/features/review/__tests__/reviewFlowContract.test.ts`（13 用例），
+已注册进 `npm run test:contract`。
+
+- mock 方式：替换 `apiClient.defaults.adapter`（不发明 payload，payload 全部为 **C2 实测 JSON** 的
+  canonical fixture，含 C2 的 tradeDate / runId / 20 键 overview / 10 键 detail / 8 组 observationGroups）。
+- 覆盖：A dates empty、B dates→overview→scopes→detail 全链路、C 切日期、D 切 scope（tab 不进 key）、
+  E 403、F 404、G 500（requestId 为 null 时 graceful）、H degraded、I null≠0、
+  + memberDirectory 命中/缺失、family snapshot completeness fail-closed（部分/漂移/重复）、
+  + 日期 owner URL 往返、切 family 清 scopeKey。
+
+**测试层级诚实声明**：本仓库前端**没有** vitest / jsdom / @testing-library 等组件渲染能力
+（现有栈 = `tsx --test` 纯逻辑 + playwright e2e）。因此 D1 覆盖的是
+`route → state owner → query identity → API → 解析/格式化` 这一层，
+**不含 JSX 渲染断言**。以下项目由代码审查 + typecheck/eslint 保证，未在测试中渲染验证：
+
+- retry 按钮的实际渲染（D1 新增的 UI 改动）
+- 降级横幅的实际渲染
+- loading 分区的实际视觉表现
+
+组件渲染级验证属 **Phase G（Browser Acceptance）**；若需提前补齐，应作为独立任务引入
+组件测试栈，不得在 D1 顺带引入新依赖。
+
+**§20 验证结果**：`npx tsc -b` 通过；修改范围 `eslint` 0 error（1 条**既有** warning：
+`ScopeDetailWorkspace.tsx:94 useMemo` 多余依赖，本轮未动）；`npm run test:contract` **930 pass / 0 fail**（原 917 + 新增 13）。
+
+## D1.10 本轮改动（BACKEND_CHANGED = NO）
+
+仅前端：
+
+- `src/pages/ReviewPage.tsx`：`StateBox` 新增可选 `onRetry` + 重试按钮；dates / overview 错误态接入 `refetch()`。
+- `src/features/review/ScopeExplorerWorkspace.tsx`：`StateBox` 新增 `onRetry`；scope 列表错误态接入 `snapshotQuery.refetch()`。
+- `src/features/review/ScopeDetailWorkspace.tsx`：详情错误态新增重试按钮（`detail.refetch()`）。
+- `src/features/review/__tests__/reviewFlowContract.test.ts`：新增（13 用例）。
+- `package.json`：`test:contract` 注册新测试文件。
+
+**无** `api.ts` / `types.ts` 改动（C2 已证明二者与后端 JSON 一致，无需修）。
+**无** backend 改动 → frozen backend baseline 仍为 **C2 77/0**。

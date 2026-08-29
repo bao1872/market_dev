@@ -129,7 +129,14 @@ export default function ReviewPage() {
     }
     if (datesQuery.isError) {
       const err = extractReviewError(datesQuery.error)
-      return <StateBox title="复盘日期加载失败" desc={err.message} requestId={err.requestId} />
+      return (
+        <StateBox
+          title="复盘日期加载失败"
+          desc={err.message}
+          requestId={err.requestId}
+          onRetry={() => void datesQuery.refetch()}
+        />
+      )
     }
     return (
       <StateBox
@@ -159,7 +166,17 @@ export default function ReviewPage() {
           />
         )
       }
-      return <StateBox title="复盘总览加载失败" desc={err.message} requestId={err.requestId} />
+      // 500 data-integrity fail-closed：必须给出明确错误态 + retry，
+      // 绝不能把上一交易日的缓存数据继续当作当前日期的正式数据展示
+      //（queryKey 含 tradeDate，React Query 不会跨日期复用数据）。
+      return (
+        <StateBox
+          title="复盘总览加载失败"
+          desc={err.message}
+          requestId={err.requestId}
+          onRetry={() => void overviewQuery.refetch()}
+        />
+      )
     }
 
     const status = overviewQuery.data?.status
@@ -203,21 +220,31 @@ export default function ReviewPage() {
   )
 }
 
-/** 通用状态盒子（加载/空/异常） */
+/** 通用状态盒子（加载/空/异常）+ 可选 retry。
+
+[PHASE D1 §9] 数据 integrity 500 必须"显示明确错误态 + 允许 retry"；
+request_id 允许为 null（C2 实测：app 不产出 x-request-id，owner 是 gateway）。 */
 function StateBox({
   title,
   desc,
   requestId,
+  onRetry,
 }: {
   title: string
   desc: string
   requestId?: string | null
+  onRetry?: () => void
 }) {
   return (
     <div className={styles.stateBox}>
       <div className={styles.stateTitle}>{title}</div>
       <div className={styles.stateDesc}>{desc}</div>
       {requestId && <div className={styles.stateRequestId}>request_id={requestId}</div>}
+      {onRetry && (
+        <button type="button" className={styles.btn} onClick={onRetry}>
+          重试
+        </button>
+      )}
     </div>
   )
 }

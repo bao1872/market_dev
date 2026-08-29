@@ -117,6 +117,11 @@ export default function ScopeDetailWorkspace({
           {err.message}
           {err.requestId ? `（request_id=${err.requestId}）` : ''}
         </div>
+        {/* [PHASE D1 §9] 明确错误态 + retry；不得把其它 Scope / 其它日期的缓存
+            详情继续当作当前 Scope 的正式数据展示（queryKey 含 tradeDate+scopeKey）。 */}
+        <button type="button" className={styles.btn} onClick={() => void detail.refetch()}>
+          重试
+        </button>
       </div>
     )
   }

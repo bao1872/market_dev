@@ -37,11 +37,24 @@ export interface ScopeExplorerWorkspaceProps {
   onTabChange: (tab: ReviewDetailTab) => void
 }
 
-function StateBox({ title, desc }: { title: string; desc: string }) {
+function StateBox({
+  title,
+  desc,
+  onRetry,
+}: {
+  title: string
+  desc: string
+  onRetry?: () => void
+}) {
   return (
     <div className={styles.stateBox}>
       <div className={styles.stateTitle}>{title}</div>
       <div className={styles.stateDesc}>{desc}</div>
+      {onRetry && (
+        <button type="button" className={styles.btn} onClick={onRetry}>
+          重试
+        </button>
+      )}
     </div>
   )
 }
@@ -95,6 +108,7 @@ export default function ScopeExplorerWorkspace({
       <StateBox
         title="Scope 列表加载失败"
         desc={`${err.message}${err.requestId ? `（request_id=${err.requestId}）` : ''}`}
+        onRetry={() => void snapshotQuery.refetch()}
       />
     )
   }
