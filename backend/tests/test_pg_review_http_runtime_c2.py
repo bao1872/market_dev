@@ -80,6 +80,25 @@ L2_GROUP_KEYS = {
     "volume_anomaly",
 }
 
+# 顶层 JSON 键集合（§9：与 frontend/types.ts 的 interface 字段逐一对齐）。
+# 任何 alias 漂移 / 字段新增或丢失都会在这里被抓到。
+LATEST_TOP_LEVEL_KEYS = {
+    "review_run_id", "trade_date", "status", "algorithm_version", "filter_version",
+}
+OVERVIEW_TOP_LEVEL_KEYS = {
+    "reviewRunId", "tradeDate", "status", "sourceCoreRunId", "sourceBoardRunId",
+    "sourceChipRunId", "degradedReasons", "chipCoverage", "algorithmVersion",
+    "filterVersion", "baselineWindow", "coverage", "coverageRatio",
+    "expectedScopeCount", "succeededScopeCount", "failedScopeCount", "signalCount",
+    "startedAt", "completedAt", "publishedAt",
+}
+SCOPE_LIST_TOP_LEVEL_KEYS = {"items", "total", "page", "page_size", "has_more"}
+DETAIL_TOP_LEVEL_KEYS = {
+    "reviewRunId", "tradeDate", "scopeType", "scopeKey", "scopeName",
+    "algorithmVersion", "observation", "observationGroups", "composition",
+    "memberDirectory",
+}
+
 REVIEW_USER_PREFIX = "/v1/review"
 EXPECTED_USER_ROUTES = {
     "/v1/review/dates",
@@ -529,11 +548,9 @@ async def test_c2_http_success_matrix(published_review):
         r = await c.get(f"{REVIEW_USER_PREFIX}/latest")
         assert r.status_code == 200
         latest = r.json()
-        for key in (
-            "review_run_id", "trade_date", "status",
-            "algorithm_version", "filter_version",
-        ):
-            assert key in latest, f"/latest JSON 缺字段 {key}"
+        assert set(latest.keys()) == LATEST_TOP_LEVEL_KEYS, (
+            f"/latest 顶层键漂移: {sorted(set(latest.keys()) ^ LATEST_TOP_LEVEL_KEYS)}"
+        )
         assert latest["review_run_id"] == run_id
         assert latest["trade_date"] == td
         assert latest["status"] == "published"
@@ -542,14 +559,9 @@ async def test_c2_http_success_matrix(published_review):
         r = await c.get(f"{REVIEW_USER_PREFIX}/{td}/overview")
         assert r.status_code == 200
         ov = r.json()
-        for key in (
-            "reviewRunId", "tradeDate", "status", "sourceCoreRunId",
-            "sourceBoardRunId", "sourceChipRunId", "degradedReasons",
-            "algorithmVersion", "coverage", "coverageRatio",
-            "expectedScopeCount", "succeededScopeCount", "failedScopeCount",
-            "publishedAt",
-        ):
-            assert key in ov, f"/overview JSON 缺字段 {key}"
+        assert set(ov.keys()) == OVERVIEW_TOP_LEVEL_KEYS, (
+            f"/overview 顶层键漂移: {sorted(set(ov.keys()) ^ OVERVIEW_TOP_LEVEL_KEYS)}"
+        )
 
         # HTTP_LINEAGE：Review Y -> Core X
         assert ov["reviewRunId"] == run_id, "overview 必须返回正式 Review Y"
@@ -568,8 +580,10 @@ async def test_c2_http_success_matrix(published_review):
         r = await c.get(f"{REVIEW_USER_PREFIX}/{td}/scopes")
         assert r.status_code == 200
         scopes = r.json()
-        for key in ("items", "total", "page", "page_size", "has_more"):
-            assert key in scopes, f"/scopes JSON 缺字段 {key}"
+        assert set(scopes.keys()) == SCOPE_LIST_TOP_LEVEL_KEYS, (
+            f"/scopes 顶层键漂移: "
+            f"{sorted(set(scopes.keys()) ^ SCOPE_LIST_TOP_LEVEL_KEYS)}"
+        )
         assert scopes["total"] == 1 and len(scopes["items"]) == 1
         item = scopes["items"][0]
         for key in (
@@ -588,12 +602,10 @@ async def test_c2_http_success_matrix(published_review):
         r = await c.get(f"{REVIEW_USER_PREFIX}/{td}/scopes/{SCOPE_TYPE}/{SCOPE_KEY}")
         assert r.status_code == 200
         detail = r.json()
-        for key in (
-            "reviewRunId", "tradeDate", "scopeType", "scopeKey", "scopeName",
-            "algorithmVersion", "observation", "observationGroups",
-            "composition", "memberDirectory",
-        ):
-            assert key in detail, f"scope detail JSON 缺字段 {key}"
+        assert set(detail.keys()) == DETAIL_TOP_LEVEL_KEYS, (
+            f"scope detail 顶层键漂移: "
+            f"{sorted(set(detail.keys()) ^ DETAIL_TOP_LEVEL_KEYS)}"
+        )
         assert detail["reviewRunId"] == run_id
         assert detail["tradeDate"] == td
         assert isinstance(detail["observation"], dict)
@@ -709,6 +721,12 @@ async def test_c2_error_contract_and_request_id():
         )
         assert resp.headers["content-type"].startswith("application/json")
 
-    # §19 request-id：只观察，不在 Review 内实现
-    request_id_present = any("x-request-id" in r.headers for r in observed.values())
-    print(f"[C2-OBSERVABILITY] app_provides_x_request_id={request_id_present}")
+    # §19 request-id：真实 HTTP 证据（本地与验证环境均已实测）。
+    # app.main.app **不**产出 x-request-id —— 它只在 app/api/auth.py 等处**读取**
+    # 上游 header，从不写入。因此该 header 属 gateway/middleware owner，
+    # 不在 Review API 内实现（frontend extractReviewError 已容忍 requestId=null）。
+    for status, resp in observed.items():
+        assert "x-request-id" not in resp.headers, (
+            f"HTTP {status} 出现了 app 自产的 x-request-id；若已新增 request-id "
+            "middleware，请更新本合同并确认 owner 不是 Review endpoint"
+        )

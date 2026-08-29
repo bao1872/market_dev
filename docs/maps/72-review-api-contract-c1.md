@@ -1,6 +1,6 @@
-# Map: Review Backend/API Contract Closure (PHASE C1 + C1 CONTINUATION + C1 FINAL)
+# Map: Review Backend/API Contract Closure (PHASE C1 + C1 CONTINUATION + C1 FINAL + C1 FINAL-IDENTITY + C2)
 
-> **本文件状态：ACTIVE CONTRACT MAP — PHASE C1 审计 + C1 CONTINUATION 修复 + C1 FINAL 统一正式读边界（2026-08-28）**
+> **本文件状态：ACTIVE CONTRACT MAP — PHASE C1 审计 + C1 CONTINUATION 修复 + C1 FINAL 统一正式读边界 + C1 FINAL-IDENTITY 交易日 identity + PHASE C2 HTTP Runtime（2026-08-28）**
 >
 > 目标：回答"Review 产品从数据库到 API 是否已拥有稳定、显式、可供前端消费的合同"。
 > 范围：仅 Review 域；不触及 Phase B snapshot migration / Core publication cleanup / same-day rerun / frontend redesign / 生产部署。
@@ -460,3 +460,174 @@ T0：`ruff` + `py_compile` 在修改范围内全绿；`PURE_UNIT_TEST=1 pytest t
 > 诚实性说明：本轮任务预设"full targeted-pg 存在 5 个已确认 legacy failures（pre-deploy debt）"并预设 `FULL_TARGETED_PG = NOT_RUN_BY_SCOPE`。实测**未观察到**该 5 个失败 —— 本次 `targeted-pg` 5/5 gate PASS、70 passed / 0 failed。由于验证通道只有注册 plan 一种执行方式（attempt 结束即 drop 验证库与 attempt.env），为取得 C1 exact PG 证据**必须**走 `targeted-pg`，因此 `FULL_TARGETED_PG` 据实记为 RUN，不记为 NOT_RUN_BY_SCOPE。若后续审计发现该 5 个 legacy failures 属于其它 SHA / 其它 plan 的既有记录，应单独复核，不得据本条推断 release readiness。
 
 **远程验证工作区漂移已清除**：本次运行前 `/root/web_dev_verify` 存在上一轮遗留的**未提交**改动（`backend/app/api/review.py`、`market_review.py`、`review_observation_persistence_service.py`、`review_publication_service.py`、`scripts/verify/verify_attempt.py` + 未跟踪的 `test_pg_review_read_owner_c1.py`），导致入口的 `HEAD == target && clean` 检查失败。这些改动的内容已全部包含在已提交的 `6af452d1` 中；已 `git checkout --` 回退并将未跟踪测试文件备份至 `/tmp/c1_drift_backup_c1_test.py`，远程工作区恢复 clean 后重跑成功。
+
+---
+
+# PHASE C2 — Review HTTP Runtime + Client Contract Closure
+
+C1 回答"数据库里该读谁"（直接调用 handler / service）。C2 回答"整条 HTTP 链是否一致"：
+
+```
+real ASGI HTTP request
+-> app.main.app（真实 router / prometheus middleware / DI）
+-> require_capability("research_replay") 真实检查
+-> 真实 DB（bz_stock_verify_<SHA>）
+-> Review formal owner（C1 合同，未重新设计）
+-> Pydantic response_model 真实 JSON 序列化
+-> HTTP status / headers / JSON body
+-> frontend api.ts + types.ts
+```
+
+## C2.0 结论速览
+
+| 判定项 | 结果 |
+|---|---|
+| ROUTE_REGISTRATION | PASS（5/5 用户路由 + admin 仍在 `/v1/admin/review/...`） |
+| HTTP_REAL_APP | PASS（`app.main.app` + `httpx.ASGITransport`） |
+| AUTH_UNAUTHENTICATED | 401 |
+| AUTH_NO_RESEARCH_REPLAY | 403（expired 与 missing 两种） |
+| AUTH_RESEARCH_REPLAY | PASS |
+| AUTH_ADMIN_BYPASS | PASS |
+| INCLUDE_PARTIAL_MEMBER | 403（admin 200） |
+| DATES_HTTP / LATEST_HTTP / OVERVIEW_HTTP / SCOPES_HTTP / DETAIL_HTTP | PASS |
+| HTTP_LINEAGE | PASS（overview `reviewRunId == Y`、`sourceCoreRunId == X`） |
+| HTTP_SERIALIZATION | PASS（顶层键集合机器级比对 + null/0/[] 语义） |
+| EMPTY_404 | PASS（overview / scopes / detail） |
+| INVALID_DATE_422 | PASS |
+| BROKEN_POINTER_HTTP | FAIL_CLOSED（500） |
+| FRONTEND_API_PATHS | MATCH |
+| FRONTEND_TYPES | MATCH |
+| REQUEST_ID_CONTRACT | **GAP_OUTSIDE_REVIEW**（app 不产出 `x-request-id`） |
+| C2_HTTP_FALSE_GREEN | CLOSED |
+| TARGETED_PG | 0 FAILED |
+
+## C2.1 测试文件与 false-green 防线
+
+`backend/tests/test_pg_review_http_runtime_c2.py`（6 个用例，已最小注册进 `verify_attempt.py` 的 pg_contract curated 列表）。
+
+| false-green 防线 | 本文件做法 |
+|---|---|
+| 不用真实 app | 只用 `app.main.app` + `httpx.ASGITransport`；不新建只 include review_router 的小 app |
+| 权限假绿 | **只** override 身份来源 `get_current_active_user`；`require_capability` / `require_authenticated` / `get_access_context` 保持生产实现。绝不成"永远通过"stub |
+| 直调 endpoint | 无。全部经 HTTP |
+| 只看 Pydantic 字段 | 断言 `response.json()` 的**顶层键集合**与值，不看 `model_fields` |
+| 只看 HTTP 200 | 逐字段断言 + null/0/[] 区分 + 错误 body 断言 |
+| DB 身份 | 测试自身 fail-closed：`APP_ENV == verification` 且 `current_database()` 匹配 `^bz_stock_verify_[0-9a-f]{40}$` 且 `!= bz_stock` |
+
+用户 fixture：真实 `User` + `Role/UserRole` + `UserCapability` 行写入验证库，override 内部用**生产同一个** `_fetch_user_with_roles` 重新加载（roles 真实来自 DB），再 `expunge`。
+
+## C2.2 路由注册（§4）
+
+通过**递归遍历真实 route 树** + `app.openapi()` 双重验证。
+
+> **实测坑（已被正式 gate 抓到）**：FastAPI 0.141 的 `include_router` 在 `app.routes` 中放置的是
+> `fastapi.routing._IncludedRouter` **延迟包装对象**，它本身**没有** `path` 属性；真实路由在其
+> `original_router.routes` 内。只遍历顶层 `{r.path for r in app.routes if hasattr(r,"path")}`
+> 会把 5 个已真实注册的 Review 路由全部判为"缺失"（假阴性）。必须下钻
+> `routes` / `router` / `original_router`。
+
+同时断言：任何含 `review` 的后端路由都**不得**以 gateway 前缀 `/api` 开头（backend router 本身是 `/v1/review/...`，`/api` 只来自 apiClient baseURL / Vite proxy）。admin Review 路由仍在 `/v1/admin/review/...`。
+
+## C2.3 权限矩阵（§5 / §6）
+
+| 场景 | 身份来源 | 期望 | 实测 |
+|---|---|---|---|
+| AUTH-1 未认证 | 不 override（真实 HTTPBearer） | 401 | 401 + `WWW-Authenticate: Bearer` |
+| AUTH-2a research_replay **已过期** | override 身份，capability 真实 | 403 | 403 |
+| AUTH-2b 无任何 research_replay capability 行 | override 身份，capability 真实 | 403 | 403，detail 含 `research_replay` |
+| AUTH-3 research_replay active | override 身份 | 200 | 200 |
+| AUTH-4 admin（无 capability 行） | override 身份 | 200（bypass） | 200 |
+| `?include_partial=true` 普通 member | override 身份 | 403 | 403 |
+| `?include_partial=true` admin | override 身份 | 200 | 200 |
+
+## C2.4 HTTP 成功矩阵与序列化（§8 / §9）
+
+`/overview` 与 `/scopes/...` 顶层为 **camelCase**；`/dates`、`/latest`、`/scopes` 分页字段为 **snake_case**。前端 `types.ts` 与之一一对应（两种风格各自 MATCH，见 C2.6）。
+
+已用机器级键集合断言锁定（任何 alias 漂移立即失败）：
+
+- `/latest` 5 键：`review_run_id, trade_date, status, algorithm_version, filter_version`
+- `/overview` 20 键：`reviewRunId, tradeDate, status, sourceCoreRunId, sourceBoardRunId, sourceChipRunId, degradedReasons, chipCoverage, algorithmVersion, filterVersion, baselineWindow, coverage, coverageRatio, expectedScopeCount, succeededScopeCount, failedScopeCount, signalCount, startedAt, completedAt, publishedAt`
+- `/scopes` 5 键：`items, total, page, page_size, has_more`
+- `/scopes/{t}/{k}` 10 键：`reviewRunId, tradeDate, scopeType, scopeKey, scopeName, algorithmVersion, observation, observationGroups, composition, memberDirectory`
+
+null / 0 / [] 语义（真实 JSON 断言，非 model 检查）：
+
+| 字段 | 实测值 | 语义 |
+|---|---|---|
+| `sourceBoardRunId` / `sourceChipRunId` | `null` | core-only run 的正确常态，不是缺失 |
+| `degradedReasons` | `[]` | 无降级是空数组，不是 `null` |
+| `coverage.market` | `null` | 未激活家族覆盖率，不是 `0` |
+| `coverage.industryL1` | `0.8` | 真实覆盖率 |
+| `summary` / `observationSummary` | 非 null | 存在 Composition / Fact 时不为空 |
+| `observationGroups` | 固定 8 键 | 与 `types.ts ObservationGroups` 键集合完全相等 |
+| `memberDirectory` | `{uuid: {symbol, name}}` | 后端一次批量查询解析出真实 Instrument，非空 |
+
+## C2.5 错误契约（§10 / §11）
+
+| 场景 | HTTP | body |
+|---|---|---|
+| 无正式 Review 的 T（overview / scopes / detail） | 404 | `detail` 非空字符串 |
+| `/review/not-a-date/overview` | 422 | `detail` 非空字符串 |
+| 正式 Review 存在但该 scope 无 Fact | 404 | `detail` 非空字符串 |
+| broken formal pointer（live pointer → 未正式发布 run） | **500** | `detail` 非空字符串 |
+
+frontend `extractReviewError` 读 `response.data.detail`（string）→ 全部四种状态码均满足。
+
+## C2.6 FRONTEND_API_CONTRACT_MATRIX（§12）
+
+`frontend/src/features/review/api.ts` 与 `types.ts` 与 C2 实测 HTTP JSON 的 machine-level 对照。
+`api.ts` / `types.ts` 本轮**未修改**（§18 静态校验：`tsc -b` exit 0、`eslint` clean、`npm run test:contract` 917 pass）。
+
+| frontend function | frontend path（apiClient baseURL `/api`） | backend HTTP path | TypeScript 响应类型 | HTTP JSON 实测 | 判定 |
+|---|---|---|---|---|---|
+| `getReviewDates` | `/v1/review/dates` | `/v1/review/dates` | `ReviewDatesResponse` | `{trade_dates: string[], latest_trade_date: string\|null}` | **MATCH** |
+| `getReviewLatest` | `/v1/review/latest` | `/v1/review/latest` | `ReviewLatestResponse` | snake_case 5 键 | **MATCH** |
+| `getReviewOverview` | `/v1/review/{td}/overview` | `/v1/review/{trade_date}/overview` | `ReviewOverview` | camelCase 20 键，`sourceCoreRunId: string` 非空 | **MATCH** |
+| `getReviewScopes` | `/v1/review/{td}/scopes` | `/v1/review/{trade_date}/scopes` | `ReviewScopeListResponse` | `page_size` / `has_more` 为 snake_case（与 TS 一致） | **MATCH** |
+| `getReviewScopeDetail` | `/v1/review/{td}/scopes/{st}/{sk}` | `/v1/review/{trade_date}/scopes/{scope_type}/{scope_key}` | `ReviewScopeCompositionDetailResponse` | camelCase 10 键 + 固定 8 组 `observationGroups` | **MATCH** |
+
+二级结构对照：
+
+| TS 类型 | 关键字段 | HTTP JSON | 判定 |
+|---|---|---|---|
+| `ReviewOverviewCoverage` | `market` / `indices` / `styles` / `industryL1` 均 `number\|null` | 4 键齐全，未激活为 `null` | **MATCH** |
+| `ReviewScopeListItem` | `scopeType` / `scopeKey` / `scopeName` / `readiness` / `status` / `eligibleCount` / `providedCount` / `coverageRatio` / `summary` / `observationSummary` | 10 键齐全 | **MATCH** |
+| `ObservationGroups` | 固定 8 键 | 键集合完全相等 | **MATCH** |
+| `ReviewScopeComposition` | 9-key（`scope` / `trade_date` / `capability` / `scope_observation` / `historical_dynamics` / `internal_structure_facts` / `leadership` / `member_attribution` / `composition_readiness`），内层 snake_case | `composition.composition_readiness == "ready"` | **MATCH** |
+| `memberDirectory` | `Record<string, {symbol, name}>` | 真实解析出 `{uuid: {symbol, name}}` | **MATCH** |
+
+`ReviewScopeListParams`：`scope_type` / `include_partial` / `page` / `page_size` —— 后端 `/scopes` 均接受；`getReviewScopeDetail` 额外传 `include_partial`，后端亦接受。
+
+> **未覆盖声明**：C2 只机检了上表列出的键与值。`ReviewOverview.chipCoverage` 的**内部叶子结构**、
+> `ReviewChipCoverage` 各字段取值、`ScopeDynamicsLayer` / `ScopeMemberAttributionLayer` 等深层嵌套
+> 在合成数据下没有真实 producer 输出（本轮 synthetic composition 只填了 `leadership`），
+> 因此**未**由 C2 HTTP 验证。它们属 Phase D / F（真实交易日数据）范围，不得据本表推断为已闭环。
+
+## C2.7 REQUEST_ID_CONTRACT（§11 / §19）— GAP_OUTSIDE_REVIEW
+
+真实 HTTP 实测（`app.main.app` 直接响应，未过 gateway）：**app 不产出 `x-request-id`**。
+
+- `app/main.py` 只有一个 `prometheus_middleware`，无 request-id middleware、无自定义 exception handler。
+- `app/api/auth.py` 等处只是**读取**上游 `x-request-id`，从不写入。
+- 因此 `x-request-id` 的 owner 是 **gateway / 反向代理**，不在 Review endpoint。
+
+frontend `extractReviewError` 在 500 分支为 `requestId ? \`（request_id=...）\` : ''`，已容忍 `null` → 消息退化为 `服务器错误`。**无前端缺陷**，无需修改 `api.ts`。
+
+按 §19：记录 dependency，**不在 Review endpoint 内局部实现 request-id**。若后续要补齐，应作为独立 middleware 任务，owner 为 gateway/middleware，不得塞进 Review。
+
+## C2.8 验证证据（§20）
+
+- 入口：`scripts/ops/panji-verify run --sha <C2_SHA> --plan targeted-pg`
+- 5/5 gate PASS；`pg_tests` **77 passed / 0 failed / 2 deselected**（C1 基线 71 + C2 新增 6）
+- C2 文件用例数 6，全部 PASS
+- 最小注册：只向 `verify_attempt.py` 的 pg_contract curated 列表追加 `tests/test_pg_review_http_runtime_c2.py` 一个文件，未扩大为全量 discovery
+
+**过程中被正式 gate 抓到的两个测试缺陷（均已在同轮修掉，非生产缺陷）**：
+
+1. 路由注册用例只遍历顶层 `app.routes`，在 FastAPI 0.141 的 `_IncludedRouter` 延迟包装下把 5 个已注册路由全部判为缺失 → 改为递归下钻（详见 C2.2）。
+2. `published_review` fixture 使用固定 `symbol="C2TST"`，同 session 第二次调用撞 `instruments_symbol_key` 唯一约束，导致 2 个用例 ERROR → symbol 改为每次 fixture 调用唯一。
+
+> 诚实性说明：`app/api/review.py` 仍在使用 `status.HTTP_422_UNPROCESSABLE_ENTITY`，运行时产生
+> `DeprecationWarning: Use HTTP_422_UNPROCESSABLE_CONTENT instead`。该告警**修改前既有**，且替换常量会
+> 与旧版 FastAPI 不兼容，本轮未修（非合同 mismatch，不在 §13 授权范围内），记为 deferred debt。
