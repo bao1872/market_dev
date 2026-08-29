@@ -111,6 +111,29 @@ def _client() -> httpx.AsyncClient:
     )
 
 
+def _collect_registered_paths() -> set[str]:
+    """从真实 app 递归收集全部已注册路径。
+
+    注意（C2 实测）：FastAPI 0.141 的 ``include_router`` 在 ``app.routes`` 中放置的是
+    ``fastapi.routing._IncludedRouter`` **延迟包装对象**，它本身没有 ``path``；
+    真实路由在其 ``original_router.routes`` 内。只遍历顶层 ``app.routes`` 会得到
+    空结果（假阴性），必须下钻。
+    """
+    out: set[str] = set()
+
+    def _walk(routes) -> None:
+        for route in routes or []:
+            if hasattr(route, "path"):
+                out.add(route.path)
+            for attr in ("routes", "router", "original_router"):
+                inner = getattr(route, attr, None)
+                if inner is not None:
+                    _walk(getattr(inner, "routes", None) or inner)
+
+    _walk(app.routes)
+    return out
+
+
 @pytest.fixture(autouse=True)
 def _clean_overrides():
     """每个用例后清空 dependency_overrides，避免跨用例污染。"""
@@ -335,9 +358,11 @@ async def published_review():
         s.add(run)
         await s.flush()
         s.add(_make_fact(run.id, T))
+        # symbol 全局唯一（instruments_symbol_key）：fixture 每次调用生成新符号，
+        # 否则同一 pytest session 内第二次使用本 fixture 会撞唯一约束。
         inst = Instrument(
             id=uuid.uuid4(),
-            symbol="C2TST",
+            symbol=f"C2{uuid.uuid4().hex[:8].upper()}",
             name="C2 测试标的",
             market="SH",
             status="active",
@@ -369,9 +394,13 @@ async def published_review():
 @pytest.mark.asyncio
 async def test_c2_route_registration_on_real_app():
     """§4：5 个用户 Review 路由真实注册在 app.main.app 上；admin 仍在 /v1/admin/review/..."""
-    paths = {r.path for r in app.routes if hasattr(r, "path")}
+    paths = _collect_registered_paths()
     missing = EXPECTED_USER_ROUTES - paths
     assert not missing, f"app.main.app 缺少 Review 用户路由: {sorted(missing)}"
+    # backend router 本身必须是 /v1/review/...，不得把 gateway 的 /api 前缀写进后端路由
+    assert not any(p.startswith("/api/") for p in paths if "review" in p), (
+        "backend 路由不得包含 gateway 前缀 /api"
+    )
 
     # 真实 OpenAPI 也必须与 route table 一致（证明 response_model 已挂上）
     spec = app.openapi()
