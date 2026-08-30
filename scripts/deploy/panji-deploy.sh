@@ -1065,6 +1065,29 @@ _job_name_filter() {
     IFS=,; echo "${quoted[*]}"
 }
 
+_state_filter() {
+    local -n _arr="$1"
+    local quoted=() st
+    for st in "${_arr[@]}"; do
+        quoted+=("'${st}'")
+    done
+    IFS=,; echo "${quoted[*]}"
+}
+
+# [E2.1 P1-B] 部署阻塞状态 = **worker 会 pickup 的全部状态** + 正在执行。
+#
+# 背景：旧门禁只查 status='running'，但 worker 主循环在容器起来的第一个
+# 5s 轮询就会 claim `queued` / `resume_queued` 任务 —— 部署把 worker 拉起
+# 等于授权它捡走积压任务（2026-08-29 生产事故：08-27 积压 43 小时的 queued
+# 任务在部署后 9 秒被领取并执行）。因此 pending 状态必须与 running 同等阻塞。
+#
+# 权威 owner：backend/app/worker.py::_after_close_poll_once 的 claim 条件
+#   WHERE job_name='after_close_orchestrator' AND status IN ('queued','resume_queued')
+# 本列表**不得**独立演化：
+# scripts/ops/test-panji-test-deploy-contracts.sh 用测试锁定
+# PICKUP_ELIGIBLE_JOB_STATES ⊇ worker owner 的 claim 状态集合。
+PICKUP_ELIGIBLE_JOB_STATES=(running queued resume_queued)
+
 guard_active_after_close_jobs() {
     if ! _backend_runtime_will_mutate; then
         log "backend runtime 不变化（不重启 Python 服务），跳过活跃盘后任务门禁"
@@ -1083,20 +1106,47 @@ guard_active_after_close_jobs() {
     # 构造 IN 列表：'a','b',...
     local blocking_filter
     blocking_filter="$(_job_name_filter BLOCKING_AFTER_CLOSE_JOB_NAMES)"
+    local state_filter
+    state_filter="$(_state_filter PICKUP_ELIGIBLE_JOB_STATES)"
+
+    # [E2.1 P1-B §9] pre-deploy visibility：按状态分别统计，给 operator 足够上下文
+    local count_out=""
+    if ! count_out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
+        -tA -F ':' \
+        -c "SELECT status, count(*) FROM scheduler_job_runs \
+            WHERE status IN (${state_filter}) AND job_name IN (${blocking_filter}) \
+            GROUP BY status ORDER BY status" 2>/dev/null)"; then
+        fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法统计 scheduler_job_runs（psql 失败），拒绝部署（fail-closed）"
+    fi
+    log "PRE_DEPLOY_PENDING_VISIBILITY（state must be pickup-eligible，见 PICKUP_ELIGIBLE_JOB_STATES）:"
+    local _st _n _s _c
+    for _st in "${PICKUP_ELIGIBLE_JOB_STATES[@]}"; do
+        _n=0
+        while IFS=: read -r _s _c; do
+            [[ "${_s}" == "${_st}" ]] && _n="${_c}"
+        done <<< "${count_out}"
+        log "  ${_st}_COUNT=${_n}"
+    done
+
     local blocking_out=""
     if ! blocking_out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
         -tA -F ' | ' \
-        -c "SELECT id, job_name, business_date, heartbeat_at \
+        -c "SELECT id, job_name, business_date, status, heartbeat_at \
             FROM scheduler_job_runs \
-            WHERE status = 'running' AND job_name IN (${blocking_filter}) \
+            WHERE status IN (${state_filter}) AND job_name IN (${blocking_filter}) \
             ORDER BY started_at" 2>/dev/null)"; then
         fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法查询 scheduler_job_runs（psql 失败），拒绝部署（fail-closed）"
     fi
 
     if [[ -n "${blocking_out}" ]]; then
-        log "!!! 检测到强制阻塞类 worker-after-close 活跃长任务，拒绝部署（fail-closed） !!!"
+        log "!!! 检测到 worker-after-close 待处理/正在执行的任务，拒绝部署（fail-closed） !!!"
+        log "DEPLOYMENT_BLOCKED_PENDING_AFTER_CLOSE=TRUE"
         log "错误码: ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY"
-        log "请等待业务任务完成，或使用权威恢复操作（如 /v1/admin/review/bootstrap/{id}/resume）后再部署"
+        log "阻塞状态集合（pickup-eligible）: ${PICKUP_ELIGIBLE_JOB_STATES[*]}"
+        log "说明：queued / resume_queued 会被 worker 主循环在第一个轮询 claim；"
+        log "      部署拉起容器等于授权其捡走积压任务，因此与 running 同等阻塞。"
+        log "[E2.1 §11] 部署工具**不会** kill / cancel / reset 正在推进的业务任务，仅阻止部署。"
+        log "请等待业务任务自然完成，或由 operator 按正式 runbook 另行处理后再部署"
         log "blocking_active_jobs:"
         while IFS= read -r row; do
             [[ -n "${row}" ]] && log "  ${row}"

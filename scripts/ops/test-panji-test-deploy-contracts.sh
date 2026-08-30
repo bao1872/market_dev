@@ -52,7 +52,18 @@ cat > "${MOCK_BIN}/sysctl" <<'EOF'
 [[ "${1:-}" == "-n" && "${2:-}" == "hw.memsize" ]] || exit 2
 printf '17179869184\n'
 EOF
-chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl"
+# [E2.1-R] df mock：部署脚本的"根分区可用 >= 20GB / 使用率上限"是**合法生产安全约束**，
+# 不得在脚本侧放宽。开发机根分区常常不足 20GB（本机约 16GB），会让几乎所有走
+# preflight 的 dry-run 在资源预算门禁处失败，从而掩盖真正要验证的
+# runtime SHA / image identity / rollback 合同。因此这里 mock 出一个充足的
+# 根分区，使本 harness 只验证合同本身，不验证宿主机磁盘容量。
+# 格式对齐 `df -Pk /`（脚本用 awk 'NR==2 {print $4}' 取 Available，$5 取 Capacity）。
+cat > "${MOCK_BIN}/df" <<'EOF'
+#!/usr/bin/env bash
+printf 'Filesystem 1024-blocks      Used Available Capacity Mounted on\n'
+printf '/dev/mock   971350180  400000000  571350180      42%% /\n'
+EOF
+chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df"
 
 TARGET_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 ENV_FILE="${TMP_ROOT}/market.env"
