@@ -880,12 +880,12 @@ async def compute_run(
     # metadata_json 是普通 JSONB mapped_column（无 MutableDict），必须整体重赋值。
     run.metadata_json = {
         **(getattr(run, "metadata_json", None) or {}),
-        "scope_execution": {
-            "declared": len(scopes),
-            "succeeded": succeeded,
-            "skipped": skipped,
-            "failed": failed,
-        },
+        "scope_execution": build_scope_execution_metadata(
+            declared=len(scopes),
+            succeeded=succeeded,
+            skipped=skipped,
+            failed=failed,
+        ),
     }
     # [AUD-06 2026-08-07] coverage_ratio 表达真实有效样本覆盖率（数据口径），
     # 不再是 scope 执行成功率；执行率由 succeeded/expected 两列独立表达。
@@ -1924,12 +1924,12 @@ async def resume_run(
     # [F1C-A] 与 compute_run 同口径：declared == succeeded + skipped + failed
     run.metadata_json = {
         **(getattr(run, "metadata_json", None) or {}),
-        "scope_execution": {
-            "declared": int(run.expected_scope_count or 0),
-            "succeeded": final_succeeded,
-            "skipped": final_skipped,
-            "failed": final_failed,
-        },
+        "scope_execution": build_scope_execution_metadata(
+            declared=int(run.expected_scope_count or 0),
+            succeeded=final_succeeded,
+            skipped=final_skipped,
+            failed=final_failed,
+        ),
     }
     # [AUD-06 2026-08-07] 与主路径同口径：真实有效样本覆盖率
     run.coverage_ratio = await _aggregate_run_data_coverage(session, run)
@@ -1957,6 +1957,37 @@ async def resume_run(
         # [AUD-06] coverage_ratio = 真实有效样本覆盖率；执行率单独表达
         "coverage_ratio": float(run.coverage_ratio),
         "scope_execution_rate": _scope_execution_rate(run),
+    }
+
+
+def build_scope_execution_metadata(
+    *,
+    declared: int,
+    succeeded: int,
+    skipped: int,
+    failed: int,
+) -> dict[str, int | float]:
+    """[F1C] scope 执行记账的**单一 owner**（纯函数，便于直接验证）。
+
+    合同：
+    - ``declared`` = 本次枚举 universe（772），**不是**"应落库数量"
+    - ``eligible = declared - skipped`` —— 合法跳过不计入覆盖率分母
+    - ``execution_success_ratio = succeeded / eligible``
+      （eligible == 0 时取 1.0，与"无可执行 scope 不构成失败"一致）
+    - 不变量：``declared == succeeded + skipped + failed``
+
+    注意：``coverage_ratio`` 是 **DATA COVERAGE**（有效样本覆盖率），
+    与本函数的 **SCOPE EXECUTION RATE** 是两个不同口径，不得互换。
+    """
+    eligible = declared - skipped
+    ratio = 1.0 if eligible == 0 else succeeded / eligible
+    return {
+        "declared": declared,
+        "eligible": eligible,
+        "succeeded": succeeded,
+        "skipped": skipped,
+        "failed": failed,
+        "execution_success_ratio": ratio,
     }
 
 
