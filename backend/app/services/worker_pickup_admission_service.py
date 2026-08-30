@@ -4,8 +4,10 @@
 
 ## Linearization boundary
 
-worker claim 的 canonical owner 是 `claim_next_job_run()`：在同一个 PostgreSQL
-事务内 `SELECT ... FOR UPDATE SKIP LOCKED → running → commit`。
+worker claim 的 canonical owner 是 `worker.py::_after_close_poll_once`：在同一个
+PostgreSQL `AsyncSessionLocal()` 事务内做
+`SELECT ... FOR UPDATE SKIP LOCKED → running → commit`。`claim_next_job_run`
+是另一条（Chip-consensus）claim 路径，**不是** after-close 生产 pickup owner。
 
 因此 admission 判定**必须**发生在同一个事务内，并以 `FOR UPDATE` 锁住本服务的
 singleton 行。谁先拿到行锁，谁就 linearize 在先：
@@ -21,13 +23,23 @@ singleton 行。谁先拿到行锁，谁就 linearize 在先：
 
 这留下 check→claim 的 TOCTOU。
 
-## 无行的语义
+## 缺行语义（admission-aware runtime）
 
-`worker_pickup_admission` 中**不存在**该 scope 的行 == 尚未安装 admission control。
-这是 MODE A（bootstrap）之前的合法状态：旧 runtime 不认识这张表，
-其 pickup 由既有 graceful drain 机制关闭，而不是由本服务关闭。
-因此缺行时视为 **admitted**，而不是 fail-closed —— 否则会在 migration 之前
-让所有 worker 停止领取任务。bootstrap 流程会先 drain、再建表并置 PAUSED。
+`migration 093` 在 upgrade 时**插入** singleton 行 `after_close_orchestrator`
+（paused=false）。因此 admission-aware worker 启动时该行已存在。
+
+admission-aware worker 中：
+- ROW ACTIVE  → 允许 claim
+- ROW PAUSED  → 不允许 claim（job 保持 queued/resume_queued）
+- ROW MISSING → **FAIL CLOSED**（不允许 claim）
+- DB ERROR    → **FAIL CLOSED**（不允许 claim）
+
+缺行 / 查询错误**绝不**再视为 admitted：否则 "PAUSE 成功后不得有新 claim" 的
+linearization 在缺行场景下根本不持有行锁（SELECT ... FOR UPDATE 返回 0 行），
+整个不变量失效。
+
+旧（legacy）worker 不读取本表，其 pickup 由既有 drain 机制在 first-deploy 时隔离，
+与本服务语义无关（见 deploy runbook）。
 
 ## PAUSE 业务语义
 
@@ -38,6 +50,7 @@ PAUSE ACTIVE 时：
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from datetime import datetime
@@ -47,6 +60,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.worker_pickup_admission import WorkerPickupAdmission
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,17 +139,29 @@ async def is_pickup_admitted(db: AsyncSession, scope: str) -> bool:
     """worker claim 前调用：是否允许领取新的 queued / resume_queued。
 
     必须在与 claim **同一个事务**内调用，否则不具 linearization 意义。
-    缺行（未安装 admission control）视为 admitted，见模块 docstring。
+    admission-aware runtime 下（migration 093 已插入 singleton 行）：
+    - ROW ACTIVE → True（允许 claim）
+    - ROW PAUSED → False（job 保持 queued/resume_queued 原状态）
+    - ROW MISSING / DB ERROR → False（**FAIL CLOSED**，绝不视为 admitted）
     """
-    row = (
-        await db.execute(
-            select(WorkerPickupAdmission).where(
-                WorkerPickupAdmission.scope == scope
-            ).with_for_update()
+    try:
+        row = (
+            await db.execute(
+                select(WorkerPickupAdmission).where(
+                    WorkerPickupAdmission.scope == scope
+                ).with_for_update()
+            )
+        ).scalar_one_or_none()
+    except Exception:  # noqa: BLE001 - admission 读取失败必须 fail-closed
+        logger.exception(
+            "[admission] pickup admission 读取失败，fail-closed 拒绝 claim: scope=%s",
+            scope,
         )
-    ).scalar_one_or_none()
+        return False
     if row is None:
-        return True
+        # 该行应由 migration 093 upgrade 创建；admission-aware worker 下缺行
+        # 视为异常状态，FAIL CLOSED 而非 admitted（否则不持有行锁，linearization 失效）。
+        return False
     return not row.paused
 
 

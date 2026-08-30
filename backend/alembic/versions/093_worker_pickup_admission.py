@@ -20,8 +20,9 @@
 
 upgrade：
 1. CREATE TABLE worker_pickup_admission（幂等：已存在则跳过）。
-2. 不预置任何行：无行 == 未安装 admission control，属合法 bootstrap 前状态。
-   由 MODE A bootstrap 流程在 drain 完成后显式创建并置 PAUSED。
+2. 预置 singleton 行 after_close_orchestrator（paused=false）：admission-aware worker
+   启动时该行必须已存在（缺行在 admission-aware runtime 下 FAIL CLOSED，见 service 语义）。
+   legacy worker 不读此表，由 first-deploy drain 隔离，不依赖本服务创建。
 
 downgrade：
 - DROP TABLE。仅在确认无部署进行中时执行；本 migration 不自动判断运行态。
@@ -43,29 +44,39 @@ depends_on: str | None = None
 def upgrade() -> None:
     bind = op.get_bind()
     inspector = sa.inspect(bind)
-    if "worker_pickup_admission" in inspector.get_table_names():
-        return
+    if "worker_pickup_admission" not in inspector.get_table_names():
+        op.create_table(
+            "worker_pickup_admission",
+            sa.Column("scope", sa.String(length=128), nullable=False),
+            sa.Column(
+                "paused",
+                sa.Boolean(),
+                nullable=False,
+                server_default=sa.false(),
+            ),
+            sa.Column("pause_token", sa.String(length=128), nullable=True),
+            sa.Column("paused_by", sa.String(length=128), nullable=True),
+            sa.Column("reason", sa.Text(), nullable=True),
+            sa.Column("paused_at", sa.DateTime(), nullable=True),
+            sa.Column(
+                "updated_at",
+                sa.DateTime(),
 
-    op.create_table(
-        "worker_pickup_admission",
-        sa.Column("scope", sa.String(length=128), nullable=False),
-        sa.Column(
-            "paused",
-            sa.Boolean(),
-            nullable=False,
-            server_default=sa.false(),
-        ),
-        sa.Column("pause_token", sa.String(length=128), nullable=True),
-        sa.Column("paused_by", sa.String(length=128), nullable=True),
-        sa.Column("reason", sa.Text(), nullable=True),
-        sa.Column("paused_at", sa.DateTime(), nullable=True),
-        sa.Column(
-            "updated_at",
-            sa.DateTime(),
-            nullable=False,
-            server_default=sa.func.now(),
-        ),
-        sa.PrimaryKeyConstraint("scope"),
+                nullable=False,
+                server_default=sa.func.now(),
+            ),
+            sa.PrimaryKeyConstraint("scope"),
+        )
+
+    # [E2.1 P1-C] 插入 singleton owner 行，保证 admission-aware worker 启动前该行已存在。
+    # admission-aware runtime 下缺行视为 FAIL CLOSED（见 service 语义），
+    # 因此 upgrade 必须创建此行，而非依赖 lazy-create（lazy-create 在缺行时拿不到行锁）。
+    op.execute(
+        sa.text(
+            "INSERT INTO worker_pickup_admission (scope, paused) "
+            "VALUES ('after_close_orchestrator', false) "
+            "ON CONFLICT (scope) DO NOTHING"
+        )
     )
 
 

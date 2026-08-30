@@ -5,7 +5,7 @@
 ## 为什么需要独立控制表
 
 worker claim 的 canonical owner 在 PostgreSQL 事务内
-（`claim_next_job_run`：SELECT ... FOR UPDATE SKIP LOCKED → running → commit）。
+（`worker.py::_after_close_poll_once`：SELECT ... FOR UPDATE SKIP LOCKED → running → commit）。
 要让 "PAUSE 成功返回后不得再有新的 claim commit" 成为**机器可证明**的不变量，
 pause 判定必须与 claim 共享同一个 ownership boundary —— 即被同一事务以
 `FOR UPDATE` 锁住的 **singleton 行**。
