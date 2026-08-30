@@ -786,6 +786,188 @@ else
     bad "shared image_ref collision fails closed without tagging"
 fi
 
+
+# ============================================================
+# §5 / §6 / §7 — 行为级：真正**调用** owner 函数，不是 grep 源码
+#
+# manifest 记录了 4 类 owner；若 verify 只校验其中一部分，rollback 会假通过。
+# 这里逐个破坏 mandatory owner，证明校验与 manifest 对称。
+# ============================================================
+VERIFY_LIB="${TMP_ROOT}/verify-lib.sh"
+sed -n '/^verify_rollback_owner() {/,/^}/p' "${SERVER_SCRIPT}" > "${VERIFY_LIB}"
+PIN_LIB="${TMP_ROOT}/pin-lib.sh"
+sed -n '/^_pin_predeploy_image_refs() {/,/^}/p' "${SERVER_SCRIPT}" > "${PIN_LIB}"
+
+BEHAV_MOCK="${TMP_ROOT}/behav-mock"
+mkdir -p "${BEHAV_MOCK}"
+BEHAV_TAG_LOG="${TMP_ROOT}/behav-tags.log"
+: > "${BEHAV_TAG_LOG}"
+cat > "${BEHAV_MOCK}/docker" <<'MOCKEOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "inspect" ]]; then
+  var="BEHAV_IMG_${2//-/_}"
+  printf '%s\n' "${!var:-}"
+  exit 0
+fi
+if [[ "${1:-}" == "compose" ]]; then
+  printf '%s\n' "${BEHAV_COMPOSE_OUT:-}"
+  exit 0
+fi
+if [[ "${1:-}" == "tag" ]]; then
+  printf '%s -> %s\n' "${2}" "${3}" >> "${BEHAV_TAG_LOG}"
+  exit 0
+fi
+exit 0
+MOCKEOF
+chmod +x "${BEHAV_MOCK}/docker"
+
+# repo/live identity owner 需要一个真实 git repo
+BEHAV_REPO="${TMP_ROOT}/behav-repo"
+mkdir -p "${BEHAV_REPO}"
+git -C "${BEHAV_REPO}" init -q
+git -C "${BEHAV_REPO}" config user.email t@example.com
+git -C "${BEHAV_REPO}" config user.name t
+echo a > "${BEHAV_REPO}/f"
+git -C "${BEHAV_REPO}" add f
+git -C "${BEHAV_REPO}" commit -q -m a
+BEHAV_REPO_SHA="$(git -C "${BEHAV_REPO}" rev-parse HEAD)"
+BEHAV_LIVE="${TMP_ROOT}/behav-live"
+mkdir -p "${BEHAV_LIVE}"
+BEHAV_MANIFEST="${TMP_ROOT}/behav-manifest"
+BEHAV_RT_SHA="aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111"
+BEHAV_CONTENT_A="compose-content-A"
+BEHAV_DIGEST_A="$(printf '%s\n' "${BEHAV_CONTENT_A}" | shasum -a 256 | awk '{print $1}')"
+
+write_behav_manifest() {
+  cat > "${BEHAV_MANIFEST}" <<EOF
+PRE_DEPLOY_REPO_SHA=$1
+PRE_DEPLOY_RUNTIME_SHA=$2
+PRE_DEPLOY_COMPOSE_DIGEST=$3
+PRE_DEPLOY_IMAGE_ID:backend=$4
+PRE_DEPLOY_IMAGE_ID:worker-after-close=$5
+PRE_DEPLOY_IMAGE_ID:frontend=$6
+EOF
+}
+
+run_behav_verify() {
+  PATH="${BEHAV_MOCK}:${PATH}" \
+  BEHAV_TAG_LOG="${BEHAV_TAG_LOG}" \
+  bash -c "
+    log() { printf 'V: %s\n' \"\$1\"; }
+    REPO_ROOT='${BEHAV_REPO}'
+    LIVE_ROOT='${BEHAV_LIVE}'
+    COMPOSE_CMD='docker compose -f docker-compose.prod.yml'
+    PRE_DEPLOY_MANIFEST_FILE='${BEHAV_MANIFEST}'
+    source '${VERIFY_LIB}'
+    verify_rollback_owner
+  "
+}
+
+# ---- happy path：四个 owner 全部恢复 → 必须 PASS ----
+printf '%s\n' "${BEHAV_RT_SHA}" > "${BEHAV_LIVE}/RUNTIME_SHA"
+write_behav_manifest "${BEHAV_REPO_SHA}" "${BEHAV_RT_SHA}" "${BEHAV_DIGEST_A}" \
+  IMG_BACKEND_A IMG_WORKER_A IMG_FRONTEND_A
+if BEHAV_IMG_backend=IMG_BACKEND_A BEHAV_IMG_worker_after_close=IMG_WORKER_A \
+   BEHAV_IMG_frontend=IMG_FRONTEND_A BEHAV_COMPOSE_OUT="${BEHAV_CONTENT_A}" \
+   run_behav_verify >/dev/null 2>&1; then
+  ok "rollback verify PASSES when all four owners restored"
+else
+  bad "rollback verify PASSES when all four owners restored"
+fi
+
+# ---- A. RUNTIME_SHA 错误 → FAIL ----
+printf '%s\n' "dead2222dead2222dead2222dead2222dead2222" > "${BEHAV_LIVE}/RUNTIME_SHA"
+if BEHAV_IMG_backend=IMG_BACKEND_A BEHAV_IMG_worker_after_close=IMG_WORKER_A \
+   BEHAV_IMG_frontend=IMG_FRONTEND_A BEHAV_COMPOSE_OUT="${BEHAV_CONTENT_A}" \
+   run_behav_verify >/dev/null 2>&1; then
+  bad "rollback verify FAILS on wrong RUNTIME_SHA"
+else
+  ok "rollback verify FAILS on wrong RUNTIME_SHA"
+fi
+printf '%s\n' "${BEHAV_RT_SHA}" > "${BEHAV_LIVE}/RUNTIME_SHA"
+
+# ---- B. compose digest 错误 → FAIL ----
+if BEHAV_IMG_backend=IMG_BACKEND_A BEHAV_IMG_worker_after_close=IMG_WORKER_A \
+   BEHAV_IMG_frontend=IMG_FRONTEND_A BEHAV_COMPOSE_OUT="other-content" \
+   run_behav_verify >/dev/null 2>&1; then
+  bad "rollback verify FAILS on wrong compose digest"
+else
+  ok "rollback verify FAILS on wrong compose digest"
+fi
+
+# ---- C. 单个 service immutable image 错误 → FAIL ----
+if BEHAV_IMG_backend=IMG_BACKEND_A BEHAV_IMG_worker_after_close=WRONG_IMG \
+   BEHAV_IMG_frontend=IMG_FRONTEND_A BEHAV_COMPOSE_OUT="${BEHAV_CONTENT_A}" \
+   run_behav_verify >/dev/null 2>&1; then
+  bad "rollback verify FAILS on wrong per-service image"
+else
+  ok "rollback verify FAILS on wrong per-service image"
+fi
+
+# ---- D. repo/live identity 错误 → FAIL ----
+write_behav_manifest "0000000000000000000000000000000000000abc" "${BEHAV_RT_SHA}" \
+  "${BEHAV_DIGEST_A}" IMG_BACKEND_A IMG_WORKER_A IMG_FRONTEND_A
+if BEHAV_IMG_backend=IMG_BACKEND_A BEHAV_IMG_worker_after_close=IMG_WORKER_A \
+   BEHAV_IMG_frontend=IMG_FRONTEND_A BEHAV_COMPOSE_OUT="${BEHAV_CONTENT_A}" \
+   run_behav_verify >/dev/null 2>&1; then
+  bad "rollback verify FAILS on wrong repo/live identity"
+else
+  ok "rollback verify FAILS on wrong repo/live identity"
+fi
+
+# ============================================================
+# §6 per-service exact restore：backend→IMAGE_A, worker→IMAGE_B, frontend→IMAGE_C
+#    任一串线（例如 worker 被钉到 IMAGE_A）都必须 FAIL。
+# ============================================================
+cat > "${BEHAV_MANIFEST}" <<'EOF'
+PRE_DEPLOY_IMAGE_ID:backend=IMAGE_A
+PRE_DEPLOY_IMAGE_ID:worker-after-close=IMAGE_B
+PRE_DEPLOY_IMAGE_ID:frontend=IMAGE_C
+PRE_DEPLOY_IMAGE_REF:backend=repo/backend:old
+PRE_DEPLOY_IMAGE_REF:worker-after-close=repo/worker:old
+PRE_DEPLOY_IMAGE_REF:frontend=repo/frontend:old
+EOF
+: > "${BEHAV_TAG_LOG}"
+PATH="${BEHAV_MOCK}:${PATH}" BEHAV_TAG_LOG="${BEHAV_TAG_LOG}" bash -c "
+  log() { printf 'P: %s\n' \"\$1\"; }
+  PRE_DEPLOY_MANIFEST_FILE='${BEHAV_MANIFEST}'
+  source '${PIN_LIB}'
+  _pin_predeploy_image_refs
+" >/dev/null 2>&1 || true
+if grep -q '^IMAGE_A -> repo/backend:old$' "${BEHAV_TAG_LOG}" \
+  && grep -q '^IMAGE_B -> repo/worker:old$' "${BEHAV_TAG_LOG}" \
+  && grep -q '^IMAGE_C -> repo/frontend:old$' "${BEHAV_TAG_LOG}"; then
+  ok "per-service exact restore maps each service to its own immutable image"
+else
+  bad "per-service exact restore maps each service to its own immutable image"
+  sed 's/^/    /' "${BEHAV_TAG_LOG}" >&2
+fi
+
+# ============================================================
+# §7 shared image_ref 冲突：同一 REF 对应 IMAGE_A + IMAGE_B
+#    必须 non-zero 且 docker tag count = 0（禁止静默覆盖）。
+# ============================================================
+cat > "${BEHAV_MANIFEST}" <<'EOF'
+PRE_DEPLOY_IMAGE_ID:backend=IMAGE_A
+PRE_DEPLOY_IMAGE_ID:worker-after-close=IMAGE_B
+PRE_DEPLOY_IMAGE_REF:backend=repo/shared:old
+PRE_DEPLOY_IMAGE_REF:worker-after-close=repo/shared:old
+EOF
+: > "${BEHAV_TAG_LOG}"
+PIN_COLLISION_RC=0
+PATH="${BEHAV_MOCK}:${PATH}" BEHAV_TAG_LOG="${BEHAV_TAG_LOG}" bash -c "
+  log() { printf 'P: %s\n' \"\$1\"; }
+  PRE_DEPLOY_MANIFEST_FILE='${BEHAV_MANIFEST}'
+  source '${PIN_LIB}'
+  _pin_predeploy_image_refs
+" >/dev/null 2>&1 || PIN_COLLISION_RC=$?
+if [[ "${PIN_COLLISION_RC}" -ne 0 ]] && [[ ! -s "${BEHAV_TAG_LOG}" ]]; then
+  ok "image_ref collision fails closed with zero docker tag (rc=${PIN_COLLISION_RC})"
+else
+  bad "image_ref collision fails closed with zero docker tag (rc=${PIN_COLLISION_RC})"
+  sed 's/^/    /' "${BEHAV_TAG_LOG}" >&2
+fi
+
 echo "----------------------------------------"
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]
