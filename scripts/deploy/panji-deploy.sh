@@ -129,6 +129,7 @@ IMAGES_BUILT=false
 #                            可被测试/环境覆盖为 mock。
 ADMISSION_OWNED=false
 ADMISSION_ROLLBACK_FAILED=false
+ADMISSION_RELEASE_FAILED=false
 ADMISSION_TOKEN=""
 PANJI_ADMISSION_CLI="${PANJI_ADMISSION_CLI:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../ops/panji-admission}"
 
@@ -1235,6 +1236,39 @@ guard_active_after_close_jobs() {
 # 已存在的他人/先前 operator pause 不得被本次 deploy 擅自释放或借用。
 # 操作面统一走 PANJI_ADMISSION_CLI（canonical service），禁止 shell 直接 UPDATE 表。
 # ---------------------------------------------------------------------------
+_admission_installed() {
+    # admission 表是否已安装（singleton row 是否存在）。
+    # 首次部署（migration 093 尚未执行）时返回非 0；steady-state 部署返回 0。
+    # status 命令总是以退出码 0 打印 JSON（含 installed 字段），故必须解析 installed 字段，
+    # 不能依赖退出码。这是 FIRST-INSTALL bootstrap 的关键判断：表不存在时不得调用
+    # steady-state acquire，否则会 FAIL CLOSED 导致 migration 093 永远走不到（deadlock）。
+    local out
+    out="$("${PANJI_ADMISSION_CLI}" status --scope after_close_orchestrator 2>/dev/null)" || return 1
+    [[ "$(printf '%s' "${out}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("installed",False))' 2>/dev/null)" == "True" ]]
+}
+
+_after_close_running_count() {
+    # POST-PAUSE 语义只关心 running 任务数（queued/resume_queued 允许留队，已被 PAUSED 拦截）。
+    local pg_user pg_db
+    pg_user="$(_pg_conn_var "POSTGRES_USER" "bz")"
+    pg_db="$(_pg_conn_var "POSTGRES_DB" "bz_stock")"
+    [[ -n "${pg_user}" && -n "${pg_db}" ]] || return 1
+    local out
+    if ! out="$(docker exec trading-postgres psql -U "${pg_user}" -d "${pg_db}" \
+        -tA -F ':' \
+        -c "SELECT count(*) FROM scheduler_job_runs \
+            WHERE status = 'running' AND job_name IN ($(_job_name_filter BLOCKING_AFTER_CLOSE_JOB_NAMES))" 2>/dev/null)"; then
+        return 1
+    fi
+    printf '%s' "${out}" | head -1
+}
+
+_admission_running_zero() {
+    local n
+    n="$(_after_close_running_count 2>/dev/null)" || return 1
+    [[ "${n:-0}" == "0" ]]
+}
+
 _admission_acquire() {
     local out token
     out="$("${PANJI_ADMISSION_CLI}" acquire \
@@ -1251,13 +1285,27 @@ _admission_acquire() {
 }
 
 _admission_secondary_gate() {
+    # [E2.1 P1-C] POST-PAUSE 二次门禁（在 FIRST file mutation 之前）：own pause 仍有效 + running=0。
+    # queued/resume_queued 允许留在 queue（已被 PAUSED 拦截，不再被 claim）——与 pre-pause 完整门禁不同。
     [[ "${ADMISSION_OWNED}" == "true" ]] || return 0
     if ! "${PANJI_ADMISSION_CLI}" verify-own \
         --scope after_close_orchestrator --token "${ADMISSION_TOKEN}" >/dev/null 2>&1; then
         fail "ADMISSION_SECONDARY_GATE_FAILED: own pause 校验失败（可能已被释放/抢占），拒绝 runtime mutation（fail-closed）"
     fi
-    guard_active_after_close_jobs || return 1
-    log "ADMISSION_SECONDARY_GATE_PASS: own pause 仍有效且 running=0，进入 runtime mutation"
+    if ! _admission_running_zero; then
+        fail "ADMISSION_SECONDARY_GATE_FAILED: running(after_close_orchestrator)>0，拒绝 runtime mutation（fail-closed）"
+    fi
+    log "ADMISSION_SECONDARY_GATE_PASS: own pause 仍有效且 running=0（queued/resume_queued 允许留队）"
+}
+
+_admission_restart_gate() {
+    # 重启前最终门禁：若本次 deploy 已持有 own pause（POST-PAUSE 语义），只查 running=0；
+    # 否则（未 acquire，如 first-install bootstrap）用完整 pre-pause 门禁（running+queued+resume_queued）。
+    if [[ "${ADMISSION_OWNED}" == "true" ]]; then
+        _admission_running_zero || return 1
+    else
+        guard_active_after_close_jobs || return 1
+    fi
 }
 
 _admission_release() {
@@ -1269,10 +1317,13 @@ _admission_release() {
     if "${PANJI_ADMISSION_CLI}" release \
         --scope after_close_orchestrator --token "${ADMISSION_TOKEN}" >/dev/null 2>&1; then
         log "ADMISSION_PAUSE_RELEASED: scope=after_close_orchestrator（本次 deploy 释放自己拥有的 pause）"
+        ADMISSION_OWNED="false"
     else
-        log "ADMISSION_RELEASE_FAILED: 释放 own pause 失败，需人工确认（不致命）"
+        # 释放失败：不得静默当成成功。运行健康时不回滚，但 admission lifecycle 不完整，
+        # 标记 DEGRADED + MANUAL_INTERVENTION_REQUIRED，由成功路径据以报告 degraded（不宣称 CLOSED）。
+        ADMISSION_RELEASE_FAILED="true"
+        log "ADMISSION_RELEASE_FAILED: 释放 own pause 失败，MANUAL_INTERVENTION_REQUIRED（DEGRADED，不得宣称 admission lifecycle 完整成功）"
     fi
-    ADMISSION_OWNED="false"
 }
 
 # ---------------------------------------------------------------------------
@@ -1500,9 +1551,11 @@ deploy() {
     FAILURE_STAGE="active_job_gate"
     guard_active_after_close_jobs
 
-    # [E2.1 P1-C] 部署临界区：acquire own admission pause，使 after_close worker 停止领取
-    # 新的 queued / resume_queued。与 worker claim 共享同一 PostgreSQL 行锁 linearization point。
-    if _backend_runtime_will_mutate; then
+    # [E2.1 P1-C] 部署临界区：acquire own admission pause（仅当 admission 表已安装）。
+    # 首次部署（migration 093 尚未执行，表不存在）时跳过，待 migration 创建表后再 acquire，
+    # 避免 steady-state acquire 在表缺失时 FAIL CLOSED 导致 migration 永远走不到（bootstrap deadlock）。
+    # 与 worker claim 共享同一 PostgreSQL 行锁 linearization point。
+    if _backend_runtime_will_mutate && _admission_installed; then
         _admission_acquire || return 1
     fi
 
@@ -1569,6 +1622,12 @@ deploy() {
     if [[ "${MIGRATION_CHANGED}" == "true" ]]; then
         FAILURE_STAGE="migration"
         run_migration || return 1
+        # [E2.1 P1-C] first-install bootstrap：migration 093 已创建 admission 表与 singleton row，
+        # 此时 acquire own pause，使随后启动的 admission-aware worker 在部署临界区内不领取新任务。
+        # 若 early acquire 已执行（steady-state，表早已存在）则 ADMISSION_OWNED=true，此处跳过。
+        if _backend_runtime_will_mutate && [[ "${ADMISSION_OWNED}" != "true" ]] && _admission_installed; then
+            _admission_acquire || return 1
+        fi
     else
         log "migration_changed=false，跳过 alembic upgrade"
     fi
@@ -1615,7 +1674,7 @@ deploy() {
         # 显式 || return 1，保证门禁失败（存在活跃 after-close 强制任务）即 fail-closed 阻止重启，
         # 不依赖外层 set -e。
         FAILURE_STAGE="active_job_gate_pre_restart"
-        guard_active_after_close_jobs || return 1
+        _admission_restart_gate || return 1
         FAILURE_STAGE="restart"
         # [E2.1 P1-A §6] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
         _mark_containers_mutated
@@ -1632,7 +1691,7 @@ deploy() {
         # 故仍需 final guard 拦截 reconcile 前新接纳的活跃 after-close 任务。
         # 显式 || return 1，保证门禁失败即 fail-closed 阻止配置对账。
         FAILURE_STAGE="active_job_gate_pre_reconcile"
-        guard_active_after_close_jobs || return 1
+        _admission_restart_gate || return 1
         FAILURE_STAGE="compose_reconcile"
         reconcile_compose_runtime "${PYTHON_SERVICES[@]}" frontend || return 1
     elif [[ ${#restart_list[@]} -eq 0 ]]; then
@@ -2258,6 +2317,13 @@ main() {
 
         save_state "${TARGET_SHA}"
 
+        # [E2.1 P1-C] 部署完整成功：释放本次 deploy 自己拥有的 pause。
+        _admission_release
+        if [[ "${ADMISSION_RELEASE_FAILED}" == "true" ]]; then
+            # 运行健康：不回滚健康候选；但 admission lifecycle 未完整成功，报告 DEGRADED。
+            fail "ADMISSION_RELEASE_FAILED: 部署运行成功但 pickup pause 释放失败，MANUAL_INTERVENTION_REQUIRED（DEGRADED，未回滚健康候选）"
+        fi
+
         log "部署成功: ${TARGET_SHA}"
         log "  deployment_mode=live"
         log "  first_live_deploy=${FIRST_LIVE_DEPLOY}"
@@ -2265,9 +2331,6 @@ main() {
         log "  migration_attempted=${MIGRATION_ATTEMPTED} migration_succeeded=${MIGRATION_SUCCEEDED}"
         log "  images_built=${IMAGES_BUILT} services_restarted=${SERVICES_RESTARTED}"
         log "  repo HEAD = RUNTIME_SHA = version.runtime_git_sha = ${TARGET_SHA}"
-
-        # [E2.1 P1-C] 部署完整成功：释放本次 deploy 自己拥有的 pause。
-        _admission_release
 
     ) 200>"${LOCK_FILE}"
 }

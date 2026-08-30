@@ -60,8 +60,28 @@ async def _acquire(scope: str, actor: str, reason: str | None) -> int:
 
 
 async def _status(scope: str) -> int:
-    async with AsyncSessionLocal() as db:
-        st = await get_status(db, scope)
+    from sqlalchemy.exc import ProgrammingError
+
+    try:
+        async with AsyncSessionLocal() as db:
+            st = await get_status(db, scope)
+    except ProgrammingError:
+        # 表尚未安装（如 first-install bootstrap 前）：installed=false，不视为错误。
+        # 部署侧 _admission_installed 据此跳过 steady-state acquire，先跑 migration 093。
+        print(
+            json.dumps(
+                {
+                    "installed": False,
+                    "paused": False,
+                    "pause_token": None,
+                    "paused_by": None,
+                    "reason": None,
+                    "paused_at": None,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
     print(
         json.dumps(
             {

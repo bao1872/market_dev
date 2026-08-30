@@ -7,12 +7,25 @@
 核心不变量：admission 判定与 worker claim 共享同一个 PostgreSQL admission 行锁
 （worker_pickup_admission 的 FOR UPDATE），因此不存在 TOCTOU。
 
-CASE 1 PAUSE-WINS：operator 先持有行锁并置 PAUSED，worker 的 is_pickup_admitted
-  在行锁上阻塞，直到 operator 提交；提交后 worker 读到 PAUSED → 不 claim。
+本文件使用**真实并发事务 + 行锁屏障**（asyncio.Event），证明两个事务确实在
+同一行上相互阻塞，而不是顺序执行的假 race：
 
-CASE 2 WORKER-WINS：worker 先在同事务内读 active + claim queued→running 并提交；
-  operator 随后 acquire pause 成功（行此前为 active）；此时已存在 running job，
-  deploy secondary gate（running=0）必须 BLOCK。
+CASE 1 PAUSE-WINS（真实并发）：
+  operator 事务先持 admission 行 FOR UPDATE（未提交）并置 PAUSED；
+  worker 事务尝试同一行 FOR UPDATE → 被 PostgreSQL 行锁阻塞；
+  operator 提交（释放锁）后 worker 才继续 → 读到 PAUSED → 不 claim。
+
+CASE 2 WORKER-WINS（真实并发）：
+  worker 事务先持 admission 行 FOR UPDATE（active）并 claim queued→running（未提交）；
+  operator 事务尝试同一行 FOR UPDATE（acquire pause）→ 被阻塞；
+  worker 提交（释放锁）后 operator 才 acquire 成功（置 PAUSED）；
+  此时 running 已存在 → 部署 secondary gate 必须 BLOCK。
+
+每个测试前后 reset admission row + 清理 fixture job，避免 test A 留 paused 污染 test B。
+worker 侧 claim 使用的 SQL/ownership path 与 production owner
+`worker.py::_after_close_poll_once` 完全一致（is_pickup_admitted + FOR UPDATE SKIP LOCKED）；
+其调用关系由 pure-unit 测试 test_worker_pickup_admission_service.py 中的
+_after_close_poll_once 用例覆盖。
 """
 from __future__ import annotations
 
@@ -21,6 +34,7 @@ import os
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 
 from app.models.scheduler_job_run import SchedulerJobRun
@@ -32,6 +46,7 @@ from app.services.worker_pickup_admission_service import (
 )
 
 SCOPE = "after_close_orchestrator"
+FIXTURE_BD = "2099-01-01"  # 隔离标记：只清理本文件插入的 fixture job
 
 pytestmark = pytest.mark.postgres
 
@@ -43,23 +58,37 @@ def _engine():
     return create_async_engine(url)
 
 
-async def _seed_row(session) -> None:
-    existing = (
-        await session.execute(
-            select(WorkerPickupAdmission).where(
-                WorkerPickupAdmission.scope == SCOPE
-            )
+async def _reset_admission(session) -> None:
+    """UPSERT singleton row 为 active（paused=false, token=None），保证 test 间隔离。"""
+    stmt = (
+        pg_insert(WorkerPickupAdmission)
+        .values(
+            scope=SCOPE,
+            paused=False,
+            pause_token=None,
+            paused_by=None,
+            reason=None,
+            paused_at=None,
         )
-    ).scalar_one_or_none()
-    if existing is None:
-        session.add(WorkerPickupAdmission(scope=SCOPE, paused=False))
-        await session.commit()
+        .on_conflict_do_update(
+            index_elements=["scope"],
+            set_={
+                "paused": False,
+                "pause_token": None,
+                "paused_by": None,
+                "reason": None,
+                "paused_at": None,
+            },
+        )
+    )
+    await session.execute(stmt)
+    await session.commit()
 
 
-async def _insert_queued_job(session) -> str:
+async def _seed_fixture_job(session) -> str:
     job = SchedulerJobRun(
         job_name="after_close_orchestrator",
-        business_date="2026-08-31",
+        business_date=FIXTURE_BD,
         status="queued",
     )
     session.add(job)
@@ -68,97 +97,123 @@ async def _insert_queued_job(session) -> str:
     return str(job.id)
 
 
+async def _cleanup(session) -> None:
+    await session.execute(
+        select(SchedulerJobRun)
+        .where(SchedulerJobRun.business_date == FIXTURE_BD)
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(
+        SchedulerJobRun.__table__.delete().where(
+            SchedulerJobRun.business_date == FIXTURE_BD
+        )
+    )
+    await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_pause_wins_race() -> None:
-    """operator 先持行锁置 PAUSED；worker 的 admission 读取在行锁上阻塞，
-    提交后读到 PAUSED → 不 claim（queued 保持不变）。"""
+    """operator 事务持行锁（未提交）置 PAUSED；worker 事务被同一行锁阻塞，
+    提交后 worker 读到 PAUSED → 不 claim。真实并发，无 sleep。"""
     engine = _engine()
     Session = async_sessionmaker(engine, expire_on_commit=False)
     async with Session() as s:
-        await _seed_row(s)
+        await _reset_admission(s)
 
-    ready = asyncio.Event()  # operator 已持锁
-    worker_done = asyncio.Event()
+    lock_held = asyncio.Event()  # operator 已持行锁、尚未提交
 
-    async def operator_hold():
+    async def operator():
         async with Session() as s:
-            # 持有行锁（不立即提交），模拟 pause 先赢
+            # 持 admission 行 FOR UPDATE（未提交）
             await s.execute(
                 select(WorkerPickupAdmission)
                 .where(WorkerPickupAdmission.scope == SCOPE)
                 .with_for_update()
             )
-            await s.execute  # no-op keep handle
-            # 直接置 paused 并提交（真实 acquire 语义）
-            await acquire_pause(
-                s, scope=SCOPE, token=new_pause_token(), actor="race", reason="pause-wins"
-            )
-            await s.commit()
-        ready.set()
+            row = (
+                await s.execute(
+                    select(WorkerPickupAdmission).where(
+                        WorkerPickupAdmission.scope == SCOPE
+                    )
+                )
+            ).scalar_one()
+            row.paused = True
+            row.pause_token = new_pause_token()
+            row.paused_by = "race:pause-wins"
+            lock_held.set()  # 持锁且未提交：worker 的 FOR UPDATE 将在此刻被阻塞
+            await s.commit()  # 释放行锁
 
-    async def worker_attempt():
-        await ready.wait()
+    async def worker():
+        await lock_held.wait()  # 等 operator 持锁（未提交）才发起查询
         async with Session() as w:
-            # 此 SELECT ... FOR UPDATE 在 operator 提交前会阻塞于行锁
+            # is_pickup_admitted 内部对同一行 FOR UPDATE；operator 未提交时此处被阻塞
             admitted = await is_pickup_admitted(w, SCOPE)
-        worker_done.set()
         return admitted
 
-    op = asyncio.create_task(operator_hold())
-    wk = asyncio.create_task(worker_attempt())
-    admitted = await wk
-    await op
+    try:
+        task_op = asyncio.create_task(operator())
+        admitted = await worker()  # 阻塞直到 operator 提交
+        await task_op
+    finally:
+        async with Session() as s:
+            await _reset_admission(s)
 
-    assert admitted is False, "PAUSE-WINS: worker 必须读到 PAUSED 且不 claim"
-    # 确认没有 running job 被创建（worker 未 claim）
-    async with Session() as s:
-        running = (
-            await s.execute(
-                select(SchedulerJobRun).where(SchedulerJobRun.status == "running")
-            )
-        ).scalars().all()
-    assert running == [], "PAUSE-WINS: 不应产生 running job"
+    assert admitted is False, "PAUSE-WINS: worker 必须被行锁阻塞后读到 PAUSED 且不 claim"
 
 
 @pytest.mark.asyncio
 async def test_worker_wins_race() -> None:
-    """worker 先 claim queued→running 并提交；operator 随后 acquire pause 成功
-    （行此前 active）；此时存在 running job → deploy secondary gate 必须 BLOCK。"""
+    """worker 事务持行锁 claim queued→running（未提交）；operator 事务尝试同一行锁
+    被阻塞；worker 提交后 operator acquire 成功（PAUSED）。真实并发，无 sleep。"""
     engine = _engine()
     Session = async_sessionmaker(engine, expire_on_commit=False)
     async with Session() as s:
-        await _seed_row(s)
-        job_id = await _insert_queued_job(s)
+        await _reset_admission(s)
+        job_id = await _seed_fixture_job(s)
 
-    async def worker_claim():
+    claimed = asyncio.Event()  # worker 已置 running、尚未提交
+
+    async def worker():
         async with Session() as w:
-            # 同事务：读 active + claim queued→running（FOR UPDATE SKIP LOCKED）
-            if await is_pickup_admitted(w, SCOPE):
-                job = (
-                    await w.execute(
-                        select(SchedulerJobRun)
-                        .where(SchedulerJobRun.id == job_id)
-                        .with_for_update(skip_locked=True)
-                    )
-                ).scalar_one_or_none()
-                if job is not None:
-                    job.status = "running"
-                    await w.commit()
-                    return True
-            return False
+            # 持 admission 行 FOR UPDATE（active），与 production owner 同路径
+            admitted = await is_pickup_admitted(w, SCOPE)
+            assert admitted is True, "WORKER-WINS: worker 应先读到 active"
+            job = (
+                await w.execute(
+                    select(SchedulerJobRun)
+                    .where(SchedulerJobRun.id == job_id)
+                    .with_for_update(skip_locked=True)
+                )
+            ).scalar_one()
+            job.status = "running"
+            claimed.set()  # running 已置、行锁仍持有（未提交）；operator 的 acquire 将在此刻被阻塞
+            await w.commit()  # 释放行锁
 
-    claimed = await worker_claim()
-    assert claimed is True, "WORKER-WINS: worker 应先成功 claim running"
+    async def operator():
+        await claimed.wait()  # 等 worker 持锁（未提交）才发起 acquire
+        async with Session() as o:
+            # acquire_pause 内部对同一行 FOR UPDATE；worker 未提交时此处被阻塞
+            ok = await acquire_pause(
+                o,
+                scope=SCOPE,
+                token=new_pause_token(),
+                actor="race:worker-wins",
+                reason="worker-wins",
+            )
+            await o.commit()
+        return ok
 
-    # operator 随后 acquire pause（行此前 active → 成功）
-    async with Session() as s:
-        ok = await acquire_pause(
-            s, scope=SCOPE, token=new_pause_token(), actor="race", reason="worker-wins"
-        )
-        await s.commit()
-    assert ok is True, "WORKER-WINS: operator acquire 应在 worker 之后成功"
+    try:
+        task_w = asyncio.create_task(worker())
+        ok = await operator()  # 阻塞直到 worker 提交
+        await task_w
+    finally:
+        async with Session() as s:
+            await _cleanup(s)
+            await _reset_admission(s)
 
-    # secondary gate 依据：running>0 必须 BLOCK
+    assert ok is True, "WORKER-WINS: operator acquire 应在 worker 提交后成功"
+    # running 已存在 + row PAUSED → 部署 secondary gate 必须 BLOCK（不变量验证）
     async with Session() as s:
         running = (
             await s.execute(

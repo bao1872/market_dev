@@ -51,15 +51,26 @@ scripts/ops/panji-admission release --scope after_close_orchestrator --token "${
 ## 3. First-deploy 兼容（legacy worker 隔离）
 
 新机制首次部署到 production 时，旧 worker 不读取 `worker_pickup_admission` 表。隔离靠
-既有 worker lifecycle，不复建 bootstrap subsystem：
+既有 worker lifecycle + 部署自身门禁，不复建 bootstrap subsystem：
 
-1. 复用既有 graceful drain（`docker compose stop <worker-after-close>` = SIGTERM，非 kill -9）。
-2. 已有 running job 自然完成；绝不以强杀换取推进。
-3. 机器验证 `running(after_close_orchestrator) == 0` 且旧 worker 不再 accepting work。
-4. migration 093 创建 singleton row（`after_close_orchestrator`，active）。
-5. admission-aware worker 启动后同事务读该行：active → 可 claim；paused → 不 claim；
+1. **部署自身门禁保证无强杀**：`guard_active_after_close_jobs`（active-job gate）要求
+   `running == 0 && queued == 0 && resume_queued == 0` 才允许任何 runtime mutation；
+   否则部署在 mutation 之前 fail-closed 停止。**部署工具不会 kill/cancel/reset 正在推进的业务任务**，
+   因此 progressing job 不会被部署强杀。
+2. **旧 worker 停止接新 pickup**：`docker compose stop worker-after-close` 发送 SIGTERM，
+   `worker.py::_after_close_poll_once` 在领取新任务前检查 `_shutdown`，收到 SIGTERM 后不再
+   领取新 item，并 drain 当前 item 到 terminal（应用层不裸取消 progressing job）。
+3. **running job 自然完成**：由于步骤 1 的部署门禁在 `running > 0` 时拒绝推进，部署会等待
+   running 自然降到 0；旧 worker 的 drain 把当前 item 跑完。应用层 drain 不会强杀 progressing job。
+4. **残留风险（如实声明）**：若单个 item 超过 Docker `stop_grace_period`，容器会被 SIGKILL，
+   遗留 naked orphan running job；此时部署门禁因 `running > 0` 持续阻塞直到人工介入，
+   **不会**由部署去强杀它。这正是既有硬规则"progressing job 不得为部署被 timeout 强杀"的体现。
+5. **admission 表创建后再 acquire**：migration 093 创建 singleton row
+   （`after_close_orchestrator`，active）；部署在 migration 之后才 acquire own pause，
+   使随后启动的 admission-aware worker 在部署临界区内不领取新任务（首次部署队列本就为空，无 claim 可发生）。
+6. admission-aware worker 启动后同事务读该行：active → 可 claim；paused → 不 claim；
    缺行 / 查询错误 → **FAIL CLOSED（不 claim）**。
-6. 确认 `OLD_AFTER_CLOSE_PICKUP_DISABLED=TRUE` 且 `RUNNING_CONFLICT_COUNT=0` 后，
+7. 确认 `OLD_AFTER_CLOSE_PICKUP_DISABLED=TRUE` 且 `RUNNING_CONFLICT_COUNT=0` 后，
    才进入 admission-aware runtime。
 
 ## 4. 故障
@@ -70,5 +81,7 @@ scripts/ops/panji-admission release --scope after_close_orchestrator --token "${
   或 running 不为 0。部署已 fail-closed 停止；检查 worker 是否仍在 claim、running 任务状态。
 - **回滚验证失败**：保持 paused，打印 `MANUAL_INTERVENTION_REQUIRED`；人工确认后，
   持自己 token 的 owner 才能 release。
-- **release 失败（ADMISSION_RELEASE_FAILED）**：best-effort 告警，不致命；确认 pause 状态，
-  必要时用自己 token 手动 release。
+- **release 失败（ADMISSION_RELEASE_FAILED）**：**DEGRADED，非静默成功**。运行健康时不强制
+  回滚健康候选，但 admission lifecycle 不完整：`MANUAL_INTERVENTION_REQUIRED=TRUE`，
+  部署 workflow 不得报告完全 CLOSED。持自己 token 的 owner 必须手动 release 后再确认
+  `OLD_AFTER_CLOSE_PICKUP_DISABLED=FALSE`。

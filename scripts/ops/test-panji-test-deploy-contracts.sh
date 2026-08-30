@@ -68,7 +68,11 @@ if [[ "${1:-}" == "exec" ]]; then
     exit 1
   fi
   if printf '%s' "$*" | grep -q 'count('; then
-    [[ -n "${PANJI_MOCK_PSQL_COUNTS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_COUNTS}"
+    if [[ -n "${PANJI_MOCK_PSQL_COUNTS:-}" ]]; then
+      printf '%s\n' "${PANJI_MOCK_PSQL_COUNTS}"
+    else
+      printf '0\n'
+    fi
     exit 0
   fi
   [[ -n "${PANJI_MOCK_PSQL_ROWS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_ROWS}"
@@ -123,6 +127,11 @@ CALL_LOG="${PANJI_ADMISSION_CALL_LOG:-/tmp/panji_admission_calls.log}"
 echo "panji-admission $*" >>"${CALL_LOG}"
 sub="${1:-}"
 if [[ "${sub}" == "acquire" ]]; then
+  if [[ "${PANJI_MOCK_ADMISSION_NOT_INSTALLED:-0}" == "1" ]]; then
+    # first-install bootstrap 前：表尚不存在，steady-state acquire 必须失败（不得假装成功）。
+    echo '{"acquired":false,"paused":false,"pause_token":null,"paused_by":null}' >&2
+    exit 2
+  fi
   if [[ "${PANJI_MOCK_ADMISSION_FOREIGN:-0}" == "1" ]]; then
     echo '{"acquired":false,"paused":true,"pause_token":"foreign-token","paused_by":"operator:x"}' >&2
     exit 2
@@ -139,7 +148,11 @@ if [[ "${sub}" == "release" ]]; then
   exit 0
 fi
 if [[ "${sub}" == "status" ]]; then
-  echo '{"installed":true,"paused":true,"pause_token":"x","paused_by":"x","reason":null,"paused_at":null}'
+  if [[ "${PANJI_MOCK_ADMISSION_NOT_INSTALLED:-0}" == "1" ]]; then
+    echo '{"installed":false,"paused":false,"pause_token":null,"paused_by":null,"reason":null,"paused_at":null}'
+  else
+    echo '{"installed":true,"paused":true,"pause_token":"x","paused_by":"x","reason":null,"paused_at":null}'
+  fi
   exit 0
 fi
 exit 0
@@ -495,7 +508,38 @@ else
   bad "foreign/active pause blocks deploy (fail-closed, never releases)"
 fi
 
-# D. 全部为 0 时放行（沿用 first-live dry-run succeeds 的成功路径 + 显式计数为 0）
+# C. first-install bootstrap：admission 表尚不存在时，steady-state acquire 不得被调用，
+#    部署应先走 migration 093 再 acquire（不得 FAIL CLOSED 卡死在表缺失）。
+: > "${ADM_LOG}"
+BOOT_LOG="${TMP_ROOT}/bootstrap.log"
+rc=0
+PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+  PANJI_MOCK_ADMISSION_NOT_INSTALLED=1 \
+  run_deploy "${TARGET_SHA}" --dry-run >"${BOOT_LOG}" 2>&1 || rc=$?
+if [[ "${rc}" -eq 0 ]] \
+   && ! grep -q 'ADMISSION_PAUSE_ACQUIRED' "${BOOT_LOG}" \
+   && ! grep -q 'ADMISSION_ACQUIRE_FAILED' "${BOOT_LOG}"; then
+  ok "first-install bootstrap: table absent -> no steady-state acquire, deploy proceeds to migration"
+else
+  bad "first-install bootstrap: table absent -> no steady-state acquire, deploy proceeds to migration"
+fi
+
+# D. POST-PAUSE secondary gate：running>0 必须 BLOCK（即使 queued 允许留队）。
+: > "${ADM_LOG}"
+RUN_LOG="${TMP_ROOT}/post-pause-running.log"
+rc=0
+PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+  PANJI_MOCK_PSQL_COUNTS="running:1" \
+  run_deploy "${TARGET_SHA}" --dry-run >"${RUN_LOG}" 2>&1 || rc=$?
+if [[ "${rc}" -ne 0 ]] \
+   && grep -q 'ADMISSION_SECONDARY_GATE_FAILED' "${RUN_LOG}" \
+   && ! grep -q 'ADMISSION_PAUSE_RELEASED' "${RUN_LOG}"; then
+  ok "POST-PAUSE secondary gate blocks on running>0 (fail-closed, no release)"
+else
+  bad "POST-PAUSE secondary gate blocks on running>0 (fail-closed, no release)"
+fi
+
+# E. 全部为 0 时放行（沿用 first-live dry-run succeeds 的成功路径 + 显式计数为 0）
 PANJI_MOCK_NO_LIVE_MOUNT=1 \
 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
 PANJI_MOCK_PSQL_COUNTS="running:0
