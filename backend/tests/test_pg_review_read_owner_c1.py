@@ -47,7 +47,7 @@ from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import text
+from sqlalchemy import select, text
 
 from app.api.review import get_latest_review, get_review_dates, get_review_overview
 from app.db import AsyncSessionLocal
@@ -652,4 +652,253 @@ async def test_c1_final_identity_cross_date_pointer_fail_closed():
 
         await _clean_pointers(s, T_ALIAS)
         await _clean_pointers(s, T_REAL)
+        await s.commit()
+
+
+# ===========================================================================
+# PHASE F1C — PG canary（附加在本已注册的 Review PG owner 文件内，
+# 不修改受保护 verifier registry）
+#
+# 目的：在隔离 verification PostgreSQL 上证明 3 个合同：
+#   1. 3-scope 记账：declared=3 / eligible=2 / succeeded=2 / skipped=1 / failed=0
+#   2. publication：legal skip 不阻塞；real failure 阻塞（由真实 owner 判定）
+#   3. cross-run：Y1/Y2 事实与组合不混串；formal pointer 指向 exact owner
+#
+# 与 PRODUCTION_OBSERVED（772/749/23）是**两个独立证据来源**，不得混写。
+# ===========================================================================
+
+F1C_T = date(2099, 12, 20)
+F1C_SCOPE_A = "f1c_a"
+F1C_SCOPE_B = "f1c_b"
+F1C_SCOPE_C = "f1c_c_skipped"
+
+
+async def _build_f1c_run(db, *, td: date, with_failure: bool = False):
+    """Core X → Review Y + 3 个 metrics run item。
+
+    A = succeeded（eligible，已落 canonical Fact/Composition）
+    B = succeeded；with_failure 时为 failed
+    C = **合法跳过**（诊断性终态，不得落 Fact/Composition）
+
+    readiness 只覆盖真正 eligible 且已落 canonical fact 的 scope；
+    skipped scope **不进** readiness（它没有 canonical fact）。
+    """
+    from app.models.market_review import MarketReviewRunItem
+    from app.services.review_orchestrator_service import (
+        ITEM_FAILED,
+        ITEM_SKIPPED,
+        ITEM_SUCCEEDED,
+        PHASE_METRICS,
+    )
+
+    core = _make_core_run(td)
+    db.add(core)
+    await db.flush()
+
+    run = _make_publishable_review_run(core.id, td)
+    run.expected_scope_count = 3
+    run.succeeded_scope_count = 1 if with_failure else 2
+    run.failed_scope_count = 1 if with_failure else 0
+    run.metadata_json = {
+        "canonical_composition_readiness": {
+            F1C_SCOPE_A: "ready",
+            **({} if with_failure else {F1C_SCOPE_B: "ready"}),
+        },
+    }
+    db.add(run)
+    await db.flush()
+
+    def _item(key: str, status: str) -> MarketReviewRunItem:
+        return MarketReviewRunItem(
+            review_run_id=run.id,
+            scope_type="concept",
+            scope_key=key,
+            phase=PHASE_METRICS,
+            status=status,
+            attempt_count=1,
+        )
+
+    db.add(_item(F1C_SCOPE_A, ITEM_SUCCEEDED))
+    db.add(_item(F1C_SCOPE_B, ITEM_FAILED if with_failure else ITEM_SUCCEEDED))
+    db.add(_item(F1C_SCOPE_C, ITEM_SKIPPED))
+    await db.flush()
+    return core, run
+
+
+@pytest.mark.asyncio
+async def test_f1c_pg_three_scope_legal_skip_contract():
+    """§8/§9 3-scope canary：真实 DB 上验证记账合同与发布许可。"""
+    from app.services.review_orchestrator_service import (
+        _count_scope_status,
+        build_scope_execution_metadata,
+    )
+
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, F1C_T)
+        await s.commit()
+
+        core, run = await _build_f1c_run(s, td=F1C_T)
+        await s.commit()
+
+        # --- 真实 DB 三态重算（不是 fake session）---
+        succeeded, skipped, failed = await _count_scope_status(s, run.id)
+        assert (succeeded, skipped, failed) == (2, 1, 0), (
+            "legal skipped 不得被计入 succeeded"
+        )
+
+        # --- metadata 单一 owner 合同 ---
+        meta = build_scope_execution_metadata(
+            declared=run.expected_scope_count,
+            succeeded=succeeded,
+            skipped=skipped,
+            failed=failed,
+        )
+        assert meta == {
+            "declared": 3,
+            "eligible": 2,
+            "succeeded": 2,
+            "skipped": 1,
+            "failed": 0,
+            "execution_success_ratio": 1.0,
+        }
+
+        # --- §10 formal publication：legal skip 不得阻塞 ---
+        from app.services.review_publication_service import publish_review
+
+        pub = await publish_review(s, run)
+        assert pub is not None, "legal skip 不得阻塞正式发布"
+        await s.commit()
+
+        assert pub.data_run_id == run.id, "publication 必须精确指向 Review Y"
+        assert pub.trade_date == F1C_T
+        assert run.source_core_run_id == core.id, (
+            "Review.source_core_run_id 必须精确绑定 Core X"
+        )
+        assert run.status == "published"
+
+        # --- 清理 ---
+        await _clean_pointers(s, F1C_T)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_f1c_pg_publication_real_failure_blocked():
+    """§5/§6 负向对照：真实 failed item 必须被真实 owner 阻塞。
+
+    预期**不是**测试发明的：evaluate_publish_gate 查询
+    MarketReviewRunItem.status in (failed, pending, running)；
+    skipped 被显式排除（诊断性终态，不阻塞）。
+    """
+    from app.services.review_publication_service import (
+        ReviewPublishBlockError,
+        publish_review,
+    )
+
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, F1C_T)
+        await s.commit()
+
+        _core, run = await _build_f1c_run(s, td=F1C_T, with_failure=True)
+        await s.commit()
+
+        with pytest.raises(ReviewPublishBlockError) as exc:
+            await publish_review(s, run)
+        blockers = list(exc.value.blockers)
+        assert blockers, "真实失败必须给出 blockers，不得 false-green 发布"
+        assert any("failed" in str(b).lower() for b in blockers), (
+            f"blockers 必须点明失败项: {blockers}"
+        )
+        await s.rollback()
+
+        await _clean_pointers(s, F1C_T)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_f1c_pg_cross_run_isolation_and_pointer_owner():
+    """§11-§14 cross-run：同 trade_date 两个 Review，事实不混串。
+
+    Y1 的 created_at **刻意更晚**，但 formal pointer 必须由正式发布动作
+    决定 —— 因此最终 owner 是 Y2（被正式发布的那一个），而不是 created_at
+    最新的那一个（anti-latest negative control）。
+    """
+    from app.services.review_publication_service import publish_review
+
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean_pointers(s, F1C_T)
+        await s.commit()
+
+        core1, run1 = await _build_f1c_run(s, td=F1C_T)
+        await s.commit()
+        core2, run2 = await _build_f1c_run(s, td=F1C_T)
+        await s.commit()
+
+        # --- 让两套数据可机器区分（§12）---
+        # 每个 run 一条 canonical fact，用 pit_member_count / provided
+        # 区分，混串可被直接检出。
+        s.add(_make_fact(run1.id, F1C_T, 100, 80))
+        s.add(_make_fact(run2.id, F1C_T, 200, 160))
+        await s.commit()
+
+        # Y1 created_at 更晚（易误判形状）
+        run1.created_at = datetime.now(timezone.utc) + timedelta(hours=2)
+        run2.created_at = datetime.now(timezone.utc) - timedelta(hours=2)
+        await s.commit()
+
+        # 只正式发布 Y2
+        pub = await publish_review(s, run2)
+        assert pub is not None
+        await s.commit()
+
+        # --- formal pointer 必须指向 Y2（不是 created_at 最新的 Y1）---
+        live = await get_published_review_run_id(s, F1C_T)
+        assert live == run2.id, "formal pointer 必须由发布动作决定，不是 created_at"
+        assert live != run1.id
+
+        # --- facts / compositions 不混串 ---
+        f1 = (
+            await s.execute(
+                select(ReviewScopeObservationFact).where(
+                    ReviewScopeObservationFact.review_run_id == run1.id
+                )
+            )
+        ).scalars().all()
+        f2 = (
+            await s.execute(
+                select(ReviewScopeObservationFact).where(
+                    ReviewScopeObservationFact.review_run_id == run2.id
+                )
+            )
+        ).scalars().all()
+
+        assert len(f1) == 1 and len(f2) == 1, "每个 run 必须各有一条 canonical fact"
+        assert all(f.review_run_id == run1.id for f in f1)
+        assert all(f.review_run_id == run2.id for f in f2)
+        assert not ({f.id for f in f1} & {f.id for f in f2}), "fact 不得跨 run 混串"
+        # §12：数值可区分，证明读到的确实是各自 run 的数据
+        assert f1[0].pit_member_count == 100
+        assert f2[0].pit_member_count == 200
+
+        # --- lineage 精确绑定各自 Core ---
+        await s.refresh(run1)
+        await s.refresh(run2)
+        assert run1.source_core_run_id == core1.id
+        assert run2.source_core_run_id == core2.id
+        assert core1.id != core2.id
+
+        # --- §15 不得引入 stock_core 作为 Review 前置 ---
+        sc = (
+            await s.execute(
+                select(FactorPublication).where(
+                    FactorPublication.trade_date == F1C_T,
+                    FactorPublication.publication_kind == "stock_core",
+                )
+            )
+        ).scalars().all()
+        assert sc == [], "Review 成功不得依赖 stock_core publication"
+
+        await _clean_pointers(s, F1C_T)
         await s.commit()
