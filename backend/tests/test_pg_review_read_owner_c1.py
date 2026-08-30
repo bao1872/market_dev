@@ -53,7 +53,11 @@ from app.api.review import get_latest_review, get_review_dates, get_review_overv
 from app.db import AsyncSessionLocal
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
 from app.models.factor_publication import FactorPublication
-from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
+from app.models.market_review import (
+    MarketReviewRun,
+    ReviewScopeCompositionSnapshot,
+    ReviewScopeObservationFact,
+)
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.schemas.review import ReviewOverviewResponse
 from app.services.access_control_service import AccessContext
@@ -672,6 +676,73 @@ F1C_SCOPE_A = "f1c_a"
 F1C_SCOPE_B = "f1c_b"
 F1C_SCOPE_C = "f1c_c_skipped"
 
+# 与 run item 保持一致：run item 使用 scope_type="concept"
+F1C_SCOPE_TYPE = "concept"
+
+
+def _f1c_fact(
+    run_id: uuid.UUID, td: date, scope_key: str, *, eligible: int = 100,
+) -> ReviewScopeObservationFact:
+    """canonical ObservationFact 的 **persistence fixture**。
+
+    注意：本 canary 证明的是 **persistence contract**（谁能落库、落几条），
+    不是 producer 计算正确性 —— producer 计算验证不在 F1C 范围。
+    """
+    return ReviewScopeObservationFact(
+        review_run_id=run_id,
+        trade_date=td,
+        scope_type=F1C_SCOPE_TYPE,
+        scope_key=scope_key,
+        pit_member_count=eligible,
+        pit_member_count_t1=eligible,
+        provided_member_count=eligible,
+        t1_membership_available=True,
+        pit_status_t="ready",
+        pit_status_t1="ready",
+        readiness="ready",
+        observation_payload={"f1c_persistence_canary": scope_key},
+        diagnostics=[],
+        algorithm_version=REVIEW_ALGORITHM_VERSION,
+    )
+
+
+def _f1c_composition(
+    run_id: uuid.UUID, td: date, scope_key: str, *, leadership_coverage: float,
+) -> ReviewScopeCompositionSnapshot:
+    """canonical Composition 的 persistence fixture。
+
+    可区分字段使用**正式模型字段**：
+      - 列：scope_key
+      - payload 正式字段：leadership.coverage
+    不 invent 任何 test-only column。
+    """
+    return ReviewScopeCompositionSnapshot(
+        review_run_id=run_id,
+        scope_type=F1C_SCOPE_TYPE,
+        scope_key=scope_key,
+        trade_date=td,
+        algorithm_version=REVIEW_ALGORITHM_VERSION,
+        composition_payload={
+            "scope": {"scope_type": F1C_SCOPE_TYPE, "scope_key": scope_key},
+            "trade_date": td.isoformat(),
+            "capability": {},
+            "scope_observation": None,
+            "historical_dynamics": None,
+            "internal_structure_facts": None,
+            "leadership": {
+                "status": "ready",
+                "reason": None,
+                "coverage": leadership_coverage,
+                "current_leader_ids": [],
+                "previous_leader_ids": [],
+                "entrant_ids": [],
+                "exit_ids": [],
+            },
+            "member_attribution": None,
+            "composition_readiness": "ready",
+        },
+    )
+
 
 async def _build_f1c_run(db, *, td: date, with_failure: bool = False):
     """Core X → Review Y + 3 个 metrics run item。
@@ -741,6 +812,14 @@ async def test_f1c_pg_three_scope_legal_skip_contract():
         core, run = await _build_f1c_run(s, td=F1C_T)
         await s.commit()
 
+        # --- §3 persistence fixture：A/B 各 1 Fact + 1 Composition；
+        #     C（legal skipped）**不建任何 canonical 行** ---
+        s.add(_f1c_fact(run.id, F1C_T, F1C_SCOPE_A, eligible=100))
+        s.add(_f1c_fact(run.id, F1C_T, F1C_SCOPE_B, eligible=120))
+        s.add(_f1c_composition(run.id, F1C_T, F1C_SCOPE_A, leadership_coverage=0.9))
+        s.add(_f1c_composition(run.id, F1C_T, F1C_SCOPE_B, leadership_coverage=0.8))
+        await s.commit()
+
         # --- 真实 DB 三态重算（不是 fake session）---
         succeeded, skipped, failed = await _count_scope_status(s, run.id)
         assert (succeeded, skipped, failed) == (2, 1, 0), (
@@ -762,6 +841,43 @@ async def test_f1c_pg_three_scope_legal_skip_contract():
             "failed": 0,
             "execution_success_ratio": 1.0,
         }
+
+        # --- §4 direct DB assertions（exact，不是 <=）---
+        facts = (
+            await s.execute(
+                select(ReviewScopeObservationFact).where(
+                    ReviewScopeObservationFact.review_run_id == run.id
+                )
+            )
+        ).scalars().all()
+        comps = (
+            await s.execute(
+                select(ReviewScopeCompositionSnapshot).where(
+                    ReviewScopeCompositionSnapshot.review_run_id == run.id
+                )
+            )
+        ).scalars().all()
+
+        assert len(facts) == 2, f"Fact 必须 exact 2 条，got {len(facts)}"
+        assert len(comps) == 2, f"Composition 必须 exact 2 条，got {len(comps)}"
+        assert {f.scope_key for f in facts} == {F1C_SCOPE_A, F1C_SCOPE_B}
+        assert {c.scope_key for c in comps} == {F1C_SCOPE_A, F1C_SCOPE_B}
+
+        # --- §6 negative control：C 不得存在任何 canonical 行 ---
+        assert [f for f in facts if f.scope_key == F1C_SCOPE_C] == [], (
+            "legal skipped scope 不得产生 Fact"
+        )
+        assert [c for c in comps if c.scope_key == F1C_SCOPE_C] == [], (
+            "legal skipped scope 不得产生 Composition"
+        )
+
+        # --- §5 metadata ↔ persistence reconciliation ---
+        assert meta["eligible"] == meta["succeeded"] == 2
+        assert meta["succeeded"] == len(facts), "succeeded 必须等于 Fact 条数"
+        assert meta["succeeded"] == len(comps), "succeeded 必须等于 Composition 条数"
+        assert meta["declared"] > len(facts), (
+            "declared > persisted 必须保持可见（不得伪装成全部成功）"
+        )
 
         # --- §10 formal publication：legal skip 不得阻塞 ---
         from app.services.review_publication_service import publish_review
@@ -841,10 +957,13 @@ async def test_f1c_pg_cross_run_isolation_and_pointer_owner():
         await s.commit()
 
         # --- 让两套数据可机器区分（§12）---
-        # 每个 run 一条 canonical fact，用 pit_member_count / provided
-        # 区分，混串可被直接检出。
-        s.add(_make_fact(run1.id, F1C_T, 100, 80))
-        s.add(_make_fact(run2.id, F1C_T, 200, 160))
+        # 每个 run 一条 canonical Fact + 一条 canonical Composition。
+        # 可区分字段全部使用**正式模型字段**：列 scope_key，
+        # payload 正式字段 leadership.coverage。
+        s.add(_f1c_fact(run1.id, F1C_T, "f1c_y1", eligible=100))
+        s.add(_f1c_composition(run1.id, F1C_T, "f1c_y1", leadership_coverage=0.11))
+        s.add(_f1c_fact(run2.id, F1C_T, "f1c_y2", eligible=200))
+        s.add(_f1c_composition(run2.id, F1C_T, "f1c_y2", leadership_coverage=0.22))
         await s.commit()
 
         # Y1 created_at 更晚（易误判形状）
@@ -885,6 +1004,37 @@ async def test_f1c_pg_cross_run_isolation_and_pointer_owner():
         # §12：数值可区分，证明读到的确实是各自 run 的数据
         assert f1[0].pit_member_count == 100
         assert f2[0].pit_member_count == 200
+        assert {f.scope_key for f in f1} == {"f1c_y1"}
+        assert {f.scope_key for f in f2} == {"f1c_y2"}
+
+        # --- §7/§8 Composition cross-run isolation ---
+        c1 = (
+            await s.execute(
+                select(ReviewScopeCompositionSnapshot).where(
+                    ReviewScopeCompositionSnapshot.review_run_id == run1.id
+                )
+            )
+        ).scalars().all()
+        c2 = (
+            await s.execute(
+                select(ReviewScopeCompositionSnapshot).where(
+                    ReviewScopeCompositionSnapshot.review_run_id == run2.id
+                )
+            )
+        ).scalars().all()
+
+        assert len(c1) >= 1, "Y1 必须至少一条 Composition"
+        assert len(c2) >= 1, "Y2 必须至少一条 Composition"
+        assert all(c.review_run_id == run1.id for c in c1)
+        assert all(c.review_run_id == run2.id for c in c2)
+        assert not ({c.id for c in c1} & {c.id for c in c2}), (
+            "Composition 不得跨 run 混串"
+        )
+        assert {c.scope_key for c in c1} == {"f1c_y1"}
+        assert {c.scope_key for c in c2} == {"f1c_y2"}
+        # 业务可区分字段（正式 payload 字段，非 test-only column）
+        assert c1[0].composition_payload["leadership"]["coverage"] == 0.11
+        assert c2[0].composition_payload["leadership"]["coverage"] == 0.22
 
         # --- lineage 精确绑定各自 Core ---
         await s.refresh(run1)
