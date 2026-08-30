@@ -1272,9 +1272,10 @@ resolve_pre_deploy_runtime_owner() {
     #    必须取 checkout **之前**捕获的 old runtime，而不是当前（已 checkout 到
     #    TARGET_SHA 的）candidate。见 capture_pre_checkout_repo_owners。
     repo_sha="${PRE_CHECKOUT_REPO_SHA:-}"
-    if [[ -z "${repo_sha}" ]]; then
-        repo_sha="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || true)"
-    fi
+    # [E2.1 P1-A §2] 捕获值为空 = mandatory owner missing，FAIL CLOSED。
+    # 严禁 fallback 到 `git rev-parse HEAD`：本函数在 checkout_target **之后**运行，
+    # 此时 HEAD 已是 candidate(B)。fallback 会让 B 冒充 PRE_DEPLOY A，而
+    # verify_rollback_owner 是对着 manifest 比对的 —— 将产生 false-green 回滚。
     [[ -z "${repo_sha}" ]] && missing+=("PRE_DEPLOY_REPO_SHA")
     _write_manifest PRE_DEPLOY_REPO_SHA "${repo_sha}"
 
@@ -1320,11 +1321,8 @@ resolve_pre_deploy_runtime_owner() {
     # 非零退出，会在 set -e 下直接中断脚本，从而绕过 fail-closed 报告。
     #    同理必须取 checkout 之前的 compose 定义（compose 文件来自 repo 树）。
     compose_digest="${PRE_CHECKOUT_COMPOSE_DIGEST:-}"
-    if [[ -z "${compose_digest}" ]]; then
-        compose_digest="$(
-            cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
-        )" || compose_digest=""
-    fi
+    # [E2.1 P1-A §2] 同理严禁 fallback：compose 文件来自 repo 树，此刻已是
+    # candidate(B) 的定义，fallback 会把 DIGEST_B 记为 PRE_DEPLOY owner。
     [[ -z "${compose_digest}" ]] && missing+=("PRE_DEPLOY_COMPOSE_DIGEST")
     _write_manifest PRE_DEPLOY_COMPOSE_DIGEST "${compose_digest}"
 
