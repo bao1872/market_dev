@@ -590,6 +590,7 @@ else
 fi
 
 # §5-b 真实 A→B 负向对照：A = HEAD，B = HEAD~1（两个真实可区分 SHA）
+AB_FIXTURE_RAN=false
 ORDER_LOG="${TMP_ROOT}/capture-order.log"
 SHA_A="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 SHA_B="$(git -C "${REPO_ROOT}" rev-parse HEAD~1)"
@@ -598,6 +599,9 @@ if [[ "${SHA_A}" != "${SHA_B}" ]] && [[ -z "$(git -C "${REPO_ROOT}" status --por
 queued:0
 resume_queued:0" \
         run_deploy "${SHA_B}" --dry-run >"${ORDER_LOG}" 2>&1 || true
+    # 仅当 fixture 真正执行过才需要在末尾恢复仓库（恢复本身会 checkout -f，
+    # 无条件执行会连带还原仓库里**其它**未提交的 tracked 改动）。
+    AB_FIXTURE_RAN=true
     MANIFEST_REPO_SHA="$(grep -E '^  PRE_DEPLOY_REPO_SHA=' "${ORDER_LOG}" | head -1 | sed 's/^  PRE_DEPLOY_REPO_SHA=//')"
     if [[ "${MANIFEST_REPO_SHA}" == "${SHA_A}" ]]; then
         ok "A->B capture records old runtime A as PRE_DEPLOY_REPO_SHA"
@@ -614,9 +618,18 @@ elif [[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no)" ]]
 else
     bad "A->B fixture requires clean tracked worktree (it performs git checkout -f)"
 fi
-# 恢复仓库到测试前状态（run_deploy 内部会真的 checkout 到 TARGET_SHA）
-git -C "${REPO_ROOT}" checkout -f "${SHA_A}" >/dev/null 2>&1 || true
-git -C "${REPO_ROOT}" checkout -f dev >/dev/null 2>&1 || true
+# 恢复仓库到测试前状态（run_deploy 内部会真的 checkout 到 TARGET_SHA）。
+# 必须仅在 fixture 真正跑过时才恢复：否则 `checkout -f` 会无条件还原仓库中
+# 其它未提交的 tracked 改动，静默销毁正在进行的工作。
+if [[ "${AB_FIXTURE_RAN}" == "true" ]]; then
+    git -C "${REPO_ROOT}" checkout -f "${SHA_A}" >/dev/null 2>&1 || true
+    git -C "${REPO_ROOT}" checkout -f dev >/dev/null 2>&1 || true
+    if [[ "$(git -C "${REPO_ROOT}" rev-parse HEAD)" == "${SHA_A}" ]]; then
+        ok "A->B fixture restores repo branch/SHA after real checkout"
+    else
+        bad "A->B fixture restores repo branch/SHA after real checkout"
+    fi
+fi
 
 # ============================================================
 # §7 pre-file failure 负向对照
