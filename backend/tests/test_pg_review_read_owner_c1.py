@@ -858,7 +858,7 @@ async def test_f1c_pg_three_scope_legal_skip_contract():
             )
         ).scalars().all()
 
-        assert len(facts) == 999, "MUTATION-PROBE-F1C-A"
+        assert len(facts) == 2, f"Fact 必须 exact 2 条，got {len(facts)}"
         assert len(comps) == 2, f"Composition 必须 exact 2 条，got {len(comps)}"
         assert {f.scope_key for f in facts} == {F1C_SCOPE_A, F1C_SCOPE_B}
         assert {c.scope_key for c in comps} == {F1C_SCOPE_A, F1C_SCOPE_B}
@@ -1033,7 +1033,7 @@ async def test_f1c_pg_cross_run_isolation_and_pointer_owner():
         assert {c.scope_key for c in c1} == {"f1c_y1"}
         assert {c.scope_key for c in c2} == {"f1c_y2"}
         # 业务可区分字段（正式 payload 字段，非 test-only column）
-        assert c1[0].composition_payload["leadership"]["coverage"] == 9.99, "MUTATION-PROBE-F1C-B"
+        assert c1[0].composition_payload["leadership"]["coverage"] == 0.11
         assert c2[0].composition_payload["leadership"]["coverage"] == 0.22
 
         # --- lineage 精确绑定各自 Core ---
