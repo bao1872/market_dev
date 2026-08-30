@@ -24,11 +24,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 
-# [E2.1 P1-C] pickup admission owner：pause 与 claim 共享同一行锁，
-# 因此必须在 claim 的同一事务内调用（见 claim_next_job_run 的 admission_scope）。
-# 仅依赖 models，无循环导入风险。
-from app.services.worker_pickup_admission_service import is_pickup_admitted
-
 logger = logging.getLogger(__name__)
 _TZ = ZoneInfo("Asia/Shanghai")
 
@@ -60,25 +55,9 @@ async def claim_next_job_run(
     lease_seconds: int,
     eligible_statuses: tuple[str, ...] = ("queued", "resume_queued"),
     now: datetime | None = None,
-    admission_scope: str | None = None,
 ) -> ClaimedFencedJob | None:
-    """Atomically claim the oldest eligible job and increment its fence epoch.
-
-    [E2.1 P1-C] ``admission_scope`` 非空时，pickup admission 判定与 claim
-    发生在**同一个事务**内：先以 ``FOR UPDATE`` 锁住 admission singleton 行，
-    再执行 claim 的 ``FOR UPDATE SKIP LOCKED``。
-
-    两者顺序不可颠倒，也**禁止**拆成两个事务
-    （"事务 A 读 paused、事务 B claim" 会留下 check→claim 的 TOCTOU，
-    使 "PAUSE 成功返回后不得再有新的 claim commit" 无法成立）。
-
-    admission 暂停时返回 ``None``：作业保持 queued / resume_queued 原状态，
-    不被 claim、不被 cancel、不被删除。
-    """
+    """Atomically claim the oldest eligible job and increment its fence epoch."""
     claimed_at = now or datetime.now(_TZ)
-    if admission_scope is not None:
-        if not await is_pickup_admitted(db, admission_scope):
-            return None
     result = await db.execute(
         select(SchedulerJobRun)
         .where(
