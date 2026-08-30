@@ -91,6 +91,11 @@ class FakeBarsProvider:
         base_close: float = 10.0,
         daily_empty: bool = False,
         abrupt_exit_symbol: str | None = None,
+        # [F1B-2 P1-A] per-symbol deterministic failure policy
+        fail_symbols: list[str] | None = None,
+        transient_fail_symbols: list[str] | None = None,
+        empty_symbols: list[str] | None = None,
+        attempt_dir: str | None = None,
     ) -> None:
         self.xdxr_mode = xdxr_mode
         self.latency_seconds = latency_seconds
@@ -99,7 +104,33 @@ class FakeBarsProvider:
         self.base_close = base_close
         self.daily_empty = daily_empty
         self.abrupt_exit_symbol = abrupt_exit_symbol
+        self.fail_symbols = list(fail_symbols or [])
+        self.transient_fail_symbols = list(transient_fail_symbols or [])
+        self.empty_symbols = list(empty_symbols or [])
+        self.attempt_dir = attempt_dir
         self.calls: list[str] = []
+        self._local_attempts: dict[str, int] = {}
+
+    # --- [F1B-2 P1-A] deterministic per-symbol failure policy ---
+    # 计数器走共享文件（attempt_dir），因此 parallel 重试落到**另一个 child
+    # provider 实例**时仍保持"首次失败、之后成功"的确定性语义。
+    def _bump_attempt(self, key: str) -> int:
+        if not self.attempt_dir:
+            self._local_attempts[key] = self._local_attempts.get(key, 0) + 1
+            return self._local_attempts[key]
+        path = Path(self.attempt_dir) / f"attempt_{key}.count"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a", encoding="utf-8") as fh:
+            fh.write("x")
+        return len(path.read_text(encoding="utf-8"))
+
+    def _gate(self, symbol: str, method: str) -> None:
+        """按策略决定是否抛 provider 异常（等价于真实 I/O 失败）。"""
+        attempt = self._bump_attempt(f"{symbol}_{method}")
+        if symbol in self.fail_symbols:
+            raise RuntimeError(f"fake provider permanent failure: {method} {symbol}")
+        if symbol in self.transient_fail_symbols and attempt == 1:
+            raise RuntimeError(f"fake provider transient failure: {method} {symbol} attempt={attempt}")
 
     # --- tracing（用于证明真实并发与 process-local adapter）---
     def _trace(self, event: str, **extra: object) -> None:
@@ -121,11 +152,12 @@ class FakeBarsProvider:
         if symbol == self.abrupt_exit_symbol:
             os._exit(91)
         self.calls.append(f"get_daily_bars:{symbol}:{start_date}~{end_date}")
+        self._gate(symbol, "get_daily_bars")
         t0 = time.time()  # wall clock：跨进程可比，用于证明执行区间 overlap
         self._sleep()
         t1 = time.time()
         self._trace("daily", symbol=symbol, start=str(start_date), end=str(end_date), t0=t0, t1=t1)
-        if self.daily_empty:
+        if self.daily_empty or symbol in self.empty_symbols:
             return pd.DataFrame(columns=DAILY_COLUMNS)
         return _daily_frame(start_date, end_date, base_close=self.base_close)
 
@@ -141,18 +173,24 @@ class FakeBarsProvider:
 
     def get_15min_bars(self, symbol: str, count: int) -> pd.DataFrame:
         self.calls.append(f"get_15min_bars:{symbol}:{count}")
+        self._gate(symbol, "get_15min_bars")
         t0 = time.time()
         self._sleep()
         t1 = time.time()
         self._trace("15m", symbol=symbol, count=count, t0=t0, t1=t1)
+        if symbol in self.empty_symbols:
+            return pd.DataFrame(columns=DAILY_COLUMNS)
         return _minute_frame(count, base_close=self.base_close)
 
     def get_60min_bars(self, symbol: str, count: int) -> pd.DataFrame:
         self.calls.append(f"get_60min_bars:{symbol}:{count}")
+        self._gate(symbol, "get_60min_bars")
         t0 = time.time()
         self._sleep()
         t1 = time.time()
         self._trace("60m", symbol=symbol, count=count, t0=t0, t1=t1)
+        if symbol in self.empty_symbols:
+            return pd.DataFrame(columns=DAILY_COLUMNS)
         return _minute_frame(count, base_close=self.base_close)
 
 

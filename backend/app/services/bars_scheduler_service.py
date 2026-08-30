@@ -122,6 +122,21 @@ class PoolFatalError(RuntimeError):
     """The process pool cannot safely continue and must fail closed."""
 
 
+class InstrumentRefreshExhaustedError(RuntimeError):
+    """[F1B-2 P1-A] provider retries exhausted for one instrument/period.
+
+    Raised by :meth:`BarsSchedulerService._refresh_one_period_with_retry` after
+    ``MAX_RETRIES`` consecutive provider exceptions so callers can record a real
+    failure.
+
+    This signal is **deliberately explicit**: failure must never be inferred from
+    ``upsert_count == 0``. A legitimate empty provider result is a *successful*
+    refresh with 0 rows and must keep counting as ``succeeded``. Raising keeps the
+    serial (workers=1) and parallel (workers>1) accounting identical: both turn an
+    exhausted instrument into ``failed += 1`` plus an entry in ``failed_symbols``.
+    """
+
+
 @dataclass(frozen=True)
 class _InstrumentItem:
     order: int
@@ -1451,7 +1466,11 @@ class BarsSchedulerService:
             start_date: 日线回补起始日期（None 时使用 count 模式）
 
         Returns:
-            RefreshResult: 刷新结果
+            RefreshResult: 刷新结果（任一周期重试耗尽 → success=False + error）
+
+        Note:
+            [F1B-2 P1-A] 重试耗尽由 ``InstrumentRefreshExhaustedError`` 显式信号化，
+            本函数转换为 RefreshResult.success=False，不再静默上报 success=True + 0 行。
         """
         result = RefreshResult(instrument_id=instrument_id, symbol=symbol, success=True)
 
@@ -1459,14 +1478,23 @@ class BarsSchedulerService:
         active_periods = [p for p in self.PERIODS if p in counts]
         for period in active_periods:
             count = counts[period]
-            upsert_count = await self._refresh_one_period_with_retry(
-                instrument_id=instrument_id,
-                symbol=symbol,
-                period=period,
-                count=count,
-                db_session=db_session,
-                start_date=start_date,
-            )
+            try:
+                upsert_count = await self._refresh_one_period_with_retry(
+                    instrument_id=instrument_id,
+                    symbol=symbol,
+                    period=period,
+                    count=count,
+                    db_session=db_session,
+                    start_date=start_date,
+                )
+            except InstrumentRefreshExhaustedError as exc:
+                result.success = False
+                result.error = str(exc)
+                logger.error(
+                    "refresh_one_instrument 失败 symbol=%s period=%s: %s",
+                    symbol, period, exc,
+                )
+                break
             result.upsert_counts[period] = upsert_count
 
         return result
@@ -1491,7 +1519,11 @@ class BarsSchedulerService:
             start_date: 日线回补起始日期（None 时使用 count 模式）
 
         Returns:
-            upsert 记录数（失败返回 0）
+            upsert 记录数（合法空 provider 返回 0，仍视为成功）
+
+        Raises:
+            InstrumentRefreshExhaustedError: 连续 MAX_RETRIES 次 provider 异常后抛出。
+                调用方据此计 failed；**禁止**用 upsert 记录数 == 0 推断失败。
         """
         refresh_fn = self._REFRESH_FUNCS[period]
         adapter = get_pytdx_adapter()
@@ -1536,9 +1568,14 @@ class BarsSchedulerService:
                         "拉取失败 symbol=%s period=%s attempt=%d/%d: %s，放弃",
                         symbol, period, attempt, self.MAX_RETRIES, exc,
                     )
-                    return 0
+                    raise InstrumentRefreshExhaustedError(
+                        f"symbol={symbol} period={period} 连续 {self.MAX_RETRIES} 次拉取失败: {exc}"
+                    ) from exc
 
-        return 0
+        # 防御：MAX_RETRIES <= 0 等异常配置下不得静默返回 0（0 是合法空结果）
+        raise InstrumentRefreshExhaustedError(
+            f"symbol={symbol} period={period} 未执行任何拉取（MAX_RETRIES={self.MAX_RETRIES}）"
+        )
 
     async def _get_active_instruments(
         self,

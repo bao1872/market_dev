@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import cast
@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
-from sqlalchemy import func, select, text
+from sqlalchemy import delete, func, select, text
 
 from app.core.pytdx_adapter import PytdxAdapter
 from app.models.bar import Bar15Min, Bar60Min, BarDaily
@@ -345,51 +345,180 @@ async def _bars_snapshot(db_session, instrument_ids: list[uuid.UUID]) -> dict[st
     return snapshots
 
 
+# ---------------------------------------------------------------------------
+# [F1B-2 P1-B] PostgreSQL non-false-green parallel write proof
+# ---------------------------------------------------------------------------
+
+_PG_SYMBOLS = ["009911", "009912", "009913", "009914"]
+_PG_BASE_CLOSE = 21.0
+# 固定业务日 → daily 回看窗口可精确推导（shanghai_business_date 被 monkeypatch）
+_PG_FIXED_END = date(2026, 8, 28)
+_PG_DAILY_LOOKBACK = 5
+
+# 精确期望行数（4 个 synthetic 标的）：
+#   d   : bdate_range(2026-08-23, 2026-08-28) = 5 个交易日 × 4
+#   15m : DAILY_COUNTS["15m"] = 50 行 × 4
+#   60m : DAILY_COUNTS["60m"] = 10 行 × 4
+EXPECTED_D_ROWS = 20
+EXPECTED_15M_ROWS = 200
+EXPECTED_60M_ROWS = 40
+
+
+async def _count_many(db_session, model, instrument_ids: list[uuid.UUID]) -> int:
+    value = await db_session.scalar(
+        select(func.count())
+        .select_from(model)
+        .where(model.instrument_id.in_(instrument_ids))
+    )
+    return int(value or 0)
+
+
+async def _row_counts(
+    db_session, instrument_ids: list[uuid.UUID]
+) -> tuple[int, int, int]:
+    return (
+        await _count_many(db_session, BarDaily, instrument_ids),
+        await _count_many(db_session, Bar15Min, instrument_ids),
+        await _count_many(db_session, Bar60Min, instrument_ids),
+    )
+
+
+async def _delete_bars(db_session, instrument_ids: list[uuid.UUID]) -> None:
+    """[§8-B] 显式删除这批 synthetic 标的三张行情表数据（仅 verification DB）。
+
+    parallel 必须从**空表**证明自己真的写入；禁止依赖 serial 预写数据。
+    """
+    for model in (BarDaily, Bar15Min, Bar60Min):
+        await db_session.execute(
+            delete(model).where(model.instrument_id.in_(instrument_ids))
+        )
+    await db_session.commit()
+
+
+async def _assert_value_contract(
+    db_session, instrument_ids: list[uuid.UUID]
+) -> None:
+    """[§10] 字段级校验：OHLCV / amount / adj_factor / trade_date / trade_time。"""
+    target = instrument_ids[0]
+
+    # --- daily ---
+    daily_rows = (
+        await db_session.execute(
+            select(BarDaily)
+            .where(BarDaily.instrument_id == target)
+            .order_by(BarDaily.trade_date)
+        )
+    ).scalars().all()
+    expected_dates = [
+        ts.date()
+        for ts in pd.bdate_range(
+            _PG_FIXED_END - timedelta(days=_PG_DAILY_LOOKBACK), _PG_FIXED_END
+        )
+    ]
+    assert [row.trade_date for row in daily_rows] == expected_dates
+    for index, row in enumerate(daily_rows):
+        close = _PG_BASE_CLOSE + index * 0.5
+        assert float(row.open) == pytest.approx(close)
+        assert float(row.close) == pytest.approx(close)
+        assert float(row.high) == pytest.approx(round(close * 1.01, 4))
+        assert float(row.low) == pytest.approx(round(close * 0.99, 4))
+        assert float(row.volume) == pytest.approx(1000.0)
+        assert float(row.amount) == pytest.approx(round(close * 1000.0, 4))
+        # xdxr 为 NONE → 无除权事件 → adj_factor 恒为 1.0
+        assert float(row.adj_factor) == pytest.approx(1.0)
+
+    # --- minute (15m / 60m) ---
+    for model, expected_rows in ((Bar15Min, 50), (Bar60Min, 10)):
+        rows = (
+            await db_session.execute(
+                select(model)
+                .where(model.instrument_id == target)
+                .order_by(model.trade_time)
+            )
+        ).scalars().all()
+        assert len(rows) == expected_rows
+        times = [row.trade_time for row in rows]
+        assert all(time is not None for time in times)
+        assert len(set(times)) == expected_rows  # trade_time 唯一，无重复行
+        assert times == sorted(times)
+        first = rows[0]
+        assert float(first.close) == pytest.approx(_PG_BASE_CLOSE)
+        assert float(first.open) == pytest.approx(_PG_BASE_CLOSE)
+        assert float(first.volume) == pytest.approx(100.0)
+        assert float(first.amount) == pytest.approx(round(_PG_BASE_CLOSE * 100.0, 4))
+        assert float(first.adj_factor) == pytest.approx(1.0)
+
+
 @pytest.mark.asyncio
 async def test_f1b2_scheduler_spawn_postgres_equivalence_and_idempotency(
     db_session, monkeypatch, tmp_path
 ) -> None:
+    """[F1B-2 §8-§11] parallel 必须证明自己从空表真实写入，且幂等。
+
+    non-false-green 关键：旧版先 serial 写入、再 parallel 覆写同一批行，
+    即便 parallel 一行未写，snapshot 比较也会通过。本版先**清空**再跑 parallel，
+    parallel 若未真实写入，行数断言必然失败。
+    """
     db_name = await db_session.scalar(text("SELECT current_database()"))
     assert db_name != "bz_stock"
     assert str(db_name).startswith("bz_stock_verify_")
 
-    symbols = ["009911", "009912", "009913", "009914"]
     instrument_ids = [
-        await _add_instrument(db_session, symbol=symbol) for symbol in symbols
+        await _add_instrument(db_session, symbol=symbol) for symbol in _PG_SYMBOLS
     ]
     instruments = [
         SimpleNamespace(id=instrument_id, symbol=symbol)
-        for instrument_id, symbol in zip(instrument_ids, symbols, strict=True)
+        for instrument_id, symbol in zip(instrument_ids, _PG_SYMBOLS, strict=True)
     ]
     monkeypatch.setattr(
         scheduler_module, "is_trading_day_async", AsyncMock(return_value=True)
     )
+    # 固定业务日：使 daily 回看窗口与期望行数可精确推导
+    monkeypatch.setattr(
+        scheduler_module, "shanghai_business_date", lambda: _PG_FIXED_END
+    )
     monkeypatch.setattr(
         scheduler_module,
         "get_pytdx_adapter",
-        lambda: FakeBarsProvider(base_close=21.0),
+        lambda: FakeBarsProvider(base_close=_PG_BASE_CLOSE),
     )
 
     async def no_post_d(*_args, **_kwargs):
         return None
 
+    # === A. serial run → capture serial_snapshot ===
     serial = BarsSchedulerService(fetch_processes=1)
     monkeypatch.setattr(
         serial, "_get_active_instruments", AsyncMock(return_value=instruments)
     )
     monkeypatch.setattr(serial, "_run_post_daily_phase", no_post_d)
     serial_result = await serial.refresh_all_instruments(
-        date(2026, 8, 28), db_session=db_session, trigger_dsa=False
+        _PG_FIXED_END, db_session=db_session, trigger_dsa=False
     )
     assert serial_result.failed == 0
+    assert serial_result.period_counts == {
+        "d": EXPECTED_D_ROWS,
+        "15m": EXPECTED_15M_ROWS,
+        "60m": EXPECTED_60M_ROWS,
+    }
     serial_snapshot = await _bars_snapshot(db_session, instrument_ids)
     assert all(serial_snapshot[period] for period in ("d", "15m", "60m"))
+    assert await _row_counts(db_session, instrument_ids) == (
+        EXPECTED_D_ROWS,
+        EXPECTED_15M_ROWS,
+        EXPECTED_60M_ROWS,
+    )
 
+    # === B/C. 清空 → 确认 row_count == 0（parallel 的起点必须是空表）===
+    await _delete_bars(db_session, instrument_ids)
+    assert await _row_counts(db_session, instrument_ids) == (0, 0, 0)
+
+    # === D/E/F. parallel workers=2 从空表写入 → 精确行数断言 ===
     adapter_spec = {
         "module": "tests.support.bars_fake_provider",
         "attr": "build_fake_provider",
         "kwargs": {
-            "base_close": 21.0,
+            "base_close": _PG_BASE_CLOSE,
             "latency_seconds": 0.05,
             "trace_dir": str(tmp_path / "pg-spawn-trace"),
         },
@@ -401,18 +530,47 @@ async def test_f1b2_scheduler_spawn_postgres_equivalence_and_idempotency(
     monkeypatch.setattr(parallel, "_run_post_daily_phase", no_post_d)
 
     first_parallel = await parallel.refresh_all_instruments(
-        date(2026, 8, 28), db_session=db_session, trigger_dsa=False
+        _PG_FIXED_END, db_session=db_session, trigger_dsa=False
     )
-    parallel_snapshot = await _bars_snapshot(db_session, instrument_ids)
     assert first_parallel.failed == 0
+    # parallel 真的写了：行数 > 0 且等于精确期望
+    counts_after_first = await _row_counts(db_session, instrument_ids)
+    assert all(count > 0 for count in counts_after_first), (
+        f"parallel 未写入任何行情行: {counts_after_first}"
+    )
+    assert counts_after_first == (
+        EXPECTED_D_ROWS,
+        EXPECTED_15M_ROWS,
+        EXPECTED_60M_ROWS,
+    )
+    # §10：period_counts 与实际写入规模相符
+    assert first_parallel.period_counts == {
+        "d": EXPECTED_D_ROWS,
+        "15m": EXPECTED_15M_ROWS,
+        "60m": EXPECTED_60M_ROWS,
+    }
+
+    # === G. parallel_snapshot == serial_snapshot（此时才是有意义的等价）===
+    parallel_snapshot = await _bars_snapshot(db_session, instrument_ids)
     assert parallel_snapshot == serial_snapshot
+
+    # 真实 spawn ProcessPool 证据
     assert parallel.last_process_metrics["pool_creations"] == 1
     assert parallel.last_process_metrics["max_inflight_observed"] <= 4
     assert len(parallel.last_process_metrics["distinct_child_pids"]) >= 2
 
+    # === §10 字段级校验（OHLCV / amount / adj_factor / trade_date / trade_time）===
+    await _assert_value_contract(db_session, instrument_ids)
+
+    # === H/§11. 第二次 parallel → 幂等（不增长、snapshot 一致）===
     second_parallel = await parallel.refresh_all_instruments(
-        date(2026, 8, 28), db_session=db_session, trigger_dsa=False
+        _PG_FIXED_END, db_session=db_session, trigger_dsa=False
+    )
+    assert second_parallel.failed == 0
+    assert await _row_counts(db_session, instrument_ids) == (
+        EXPECTED_D_ROWS,
+        EXPECTED_15M_ROWS,
+        EXPECTED_60M_ROWS,
     )
     idempotent_snapshot = await _bars_snapshot(db_session, instrument_ids)
-    assert second_parallel.failed == 0
     assert idempotent_snapshot == serial_snapshot
