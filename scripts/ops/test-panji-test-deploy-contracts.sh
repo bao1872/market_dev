@@ -59,6 +59,21 @@ if [[ "${1:-}" == "ps" ]]; then
   fi
   exit 0
 fi
+# [E2.1 P1-B] 伪造容器内 psql，用于注入 after-close job 门禁 fixture。
+#   PANJI_MOCK_PSQL_COUNTS : 统计查询输出，每行 "status:count"
+#   PANJI_MOCK_PSQL_ROWS   : 明细查询输出，每行 "id | job | business_date | status | heartbeat"
+#   PANJI_MOCK_PSQL_FAIL=1 : 模拟门禁查询不可用（必须 fail-closed）
+if [[ "${1:-}" == "exec" ]]; then
+  if [[ "${PANJI_MOCK_PSQL_FAIL:-0}" == "1" ]]; then
+    exit 1
+  fi
+  if printf '%s' "$*" | grep -q 'count('; then
+    [[ -n "${PANJI_MOCK_PSQL_COUNTS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_COUNTS}"
+    exit 0
+  fi
+  [[ -n "${PANJI_MOCK_PSQL_ROWS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_ROWS}"
+  exit 0
+fi
 exit 0
 EOF
 cat > "${MOCK_BIN}/flock" <<'EOF'
@@ -336,6 +351,111 @@ grep -q "全部 11 个 Python 服务 Mounts" "${OUTPUT_FILE}" \
   || bad "verification plan covers all 11 python services"
 grep -q '无运行环境变化，跳过镜像构建' "${OUTPUT_FILE}" \
   && ok "no environment change means zero build" || bad "no environment change means zero build"
+
+# --- E2.1 P1-B：部署冲突任务门禁（pending visibility + fail-closed）---
+echo "== E2.1 P1-B deployment conflict job gate =="
+
+WORKER_SRC="${REPO_ROOT}/backend/app/worker.py"
+
+# A. worker 正式 claim owner 必须声明 queued / resume_queued
+CLAIM_OWNER_LINE="$(grep -n 'SchedulerJobRun.status.in_(' "${WORKER_SRC}" 2>/dev/null | head -1 || true)"
+# 注意：源码使用双引号字符串，这里按标识符匹配，不绑定引号风格
+if [[ -n "${CLAIM_OWNER_LINE}" ]] \
+    && grep -q '"queued"' <<<"${CLAIM_OWNER_LINE}" \
+    && grep -q '"resume_queued"' <<<"${CLAIM_OWNER_LINE}"; then
+    ok "worker claim owner declares queued and resume_queued"
+else
+    bad "worker claim owner declares queued and resume_queued"
+fi
+
+# B. 部署脚本两套状态集合必须与 owner 一致（结构化读取数组定义，非随机 grep）
+DEPLOY_CLAIM_LINE="$(grep -E '^WORKER_CLAIMABLE_STATES=' "${SERVER_SCRIPT}" | head -1 || true)"
+DEPLOY_CONFLICT_LINE="$(grep -E '^DEPLOYMENT_CONFLICT_STATES=' "${SERVER_SCRIPT}" | head -1 || true)"
+if [[ -n "${DEPLOY_CLAIM_LINE}" ]] \
+    && grep -q 'queued' <<<"${DEPLOY_CLAIM_LINE}" \
+    && grep -q 'resume_queued' <<<"${DEPLOY_CLAIM_LINE}"; then
+    ok "deploy WORKER_CLAIMABLE_STATES matches worker owner"
+else
+    bad "deploy WORKER_CLAIMABLE_STATES matches worker owner"
+fi
+# conflict 必须是 claimable 的超集并额外包含 running
+if [[ -n "${DEPLOY_CONFLICT_LINE}" ]] \
+    && grep -q 'running' <<<"${DEPLOY_CONFLICT_LINE}" \
+    && grep -q 'queued' <<<"${DEPLOY_CONFLICT_LINE}" \
+    && grep -q 'resume_queued' <<<"${DEPLOY_CONFLICT_LINE}"; then
+    ok "deploy DEPLOYMENT_CONFLICT_STATES supersedes claimable + running"
+else
+    bad "deploy DEPLOYMENT_CONFLICT_STATES supersedes claimable + running"
+fi
+
+# C. 逐个状态都必须阻止部署（当前无 pause 阶段）
+#    用 first-live fixture 强制 backend_runtime_changed=true，使门禁真正执行
+CONFLICT_LOG="${TMP_ROOT}/conflict.log"
+for st in running queued resume_queued; do
+    rc=0
+    # 本场景**期望**非零退出（阻塞部署）。`set -e` 下必须用 `|| rc=$?` 捕获，
+    # 否则 harness 会在第一条预期失败处直接终止。
+    PANJI_MOCK_NO_LIVE_MOUNT=1 \
+    PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+    PANJI_MOCK_PSQL_COUNTS="${st}:1" \
+    PANJI_MOCK_PSQL_ROWS="11111111-2222-3333-4444-555555555555 | after_close_orchestrator | 2026-08-28 | ${st} | 2026-08-30 10:00:00" \
+        run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.${st}" 2>&1 || rc=$?
+    if [[ "${rc}" -ne 0 ]] \
+        && grep -q 'DEPLOYMENT_BLOCKED_PENDING_AFTER_CLOSE=TRUE' "${CONFLICT_LOG}.${st}" \
+        && grep -q 'ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY' "${CONFLICT_LOG}.${st}"; then
+        ok "conflict state ${st} blocks deployment"
+    else
+        bad "conflict state ${st} blocks deployment"
+    fi
+
+    # E. 输出必须包含 count + job id + business_date + status（operator 上下文）
+    if grep -q "${st}_COUNT=1" "${CONFLICT_LOG}.${st}" \
+        && grep -q '11111111-2222-3333-4444-555555555555' "${CONFLICT_LOG}.${st}" \
+        && grep -q '2026-08-28' "${CONFLICT_LOG}.${st}"; then
+        ok "conflict state ${st} output carries job id / business_date / status"
+    else
+        bad "conflict state ${st} output carries job id / business_date / status"
+    fi
+done
+
+# D. 全部为 0 时放行（沿用 first-live dry-run succeeds 的成功路径 + 显式计数为 0）
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.zero" 2>&1
+if [[ $? -eq 0 ]] && grep -q '无强制阻塞盘后长任务，继续部署' "${CONFLICT_LOG}.zero"; then
+    ok "all-zero conflict counts allow deployment"
+else
+    bad "all-zero conflict counts allow deployment"
+fi
+
+# C-2. 门禁查询不可用时必须 fail-closed
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_PSQL_FAIL=1 \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.unavailable" 2>&1 || unavailable_rc=$?
+unavailable_rc="${unavailable_rc:-0}"
+if [[ "${unavailable_rc}" -ne 0 ]] && grep -q 'ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE' "${CONFLICT_LOG}.unavailable"; then
+    ok "unavailable job gate fails closed"
+else
+    bad "unavailable job gate fails closed"
+fi
+
+# F. guard 必须只读：门禁函数体内不得出现任何写操作
+GUARD_BODY="$(sed -n '/^guard_active_after_close_jobs() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${GUARD_BODY}" | grep -qiE '^\s*(UPDATE|DELETE|INSERT|psql[^\n]*-c\s*"\s*(UPDATE|DELETE|INSERT))'; then
+    bad "job gate is read-only (no queue mutation)"
+else
+    ok "job gate is read-only (no queue mutation)"
+fi
+# 只允许 SELECT 形态的 psql 调用
+if printf '%s' "${GUARD_BODY}" | grep -q 'FROM scheduler_job_runs'; then
+    ok "job gate queries scheduler_job_runs read path"
+else
+    bad "job gate queries scheduler_job_runs read path"
+fi
 
 echo "----------------------------------------"
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"

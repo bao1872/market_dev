@@ -1074,19 +1074,27 @@ _state_filter() {
     IFS=,; echo "${quoted[*]}"
 }
 
-# [E2.1 P1-B] 部署阻塞状态 = **worker 会 pickup 的全部状态** + 正在执行。
+# [E2.1 P1-B] 两套状态必须严格区分，不得混为同一个名字：
 #
-# 背景：旧门禁只查 status='running'，但 worker 主循环在容器起来的第一个
-# 5s 轮询就会 claim `queued` / `resume_queued` 任务 —— 部署把 worker 拉起
-# 等于授权它捡走积压任务（2026-08-29 生产事故：08-27 积压 43 小时的 queued
-# 任务在部署后 9 秒被领取并执行）。因此 pending 状态必须与 running 同等阻塞。
+# WORKER_CLAIMABLE_STATES
+#   = worker 主循环**会主动领取**的状态（claim 语义）
+#   权威 owner：backend/app/worker.py::_after_close_poll_once
+#     WHERE job_name='after_close_orchestrator'
+#       AND status IN ('queued','resume_queued')
+#   本列表不得独立演化，由 scripts/ops/test-panji-test-deploy-contracts.sh
+#   用结构化读取 worker.py 锁定。
 #
-# 权威 owner：backend/app/worker.py::_after_close_poll_once 的 claim 条件
-#   WHERE job_name='after_close_orchestrator' AND status IN ('queued','resume_queued')
-# 本列表**不得**独立演化：
-# scripts/ops/test-panji-test-deploy-contracts.sh 用测试锁定
-# PICKUP_ELIGIBLE_JOB_STATES ⊇ worker owner 的 claim 状态集合。
-PICKUP_ELIGIBLE_JOB_STATES=(running queued resume_queued)
+# DEPLOYMENT_CONFLICT_STATES
+#   = 部署临界区内**不允许存在**的状态（冲突语义）
+#   = WORKER_CLAIMABLE_STATES ∪ { running }
+#   running 不是"可被领取"，而是"正在执行"：部署不得杀掉它，
+#   因此它同样构成部署冲突（§14 DO NOT KILL REAL PROGRESS）。
+#
+# 背景：旧门禁只查 status='running'，但 worker 在容器起来的第一个 5s 轮询
+# 就会 claim queued / resume_queued —— 部署把 worker 拉起等于授权它捡走积压
+# 任务（2026-08-29 生产事故：积压 43 小时的 queued 任务在部署后 9 秒被领取）。
+WORKER_CLAIMABLE_STATES=(queued resume_queued)
+DEPLOYMENT_CONFLICT_STATES=(running queued resume_queued)
 
 guard_active_after_close_jobs() {
     if ! _backend_runtime_will_mutate; then
@@ -1107,7 +1115,7 @@ guard_active_after_close_jobs() {
     local blocking_filter
     blocking_filter="$(_job_name_filter BLOCKING_AFTER_CLOSE_JOB_NAMES)"
     local state_filter
-    state_filter="$(_state_filter PICKUP_ELIGIBLE_JOB_STATES)"
+    state_filter="$(_state_filter DEPLOYMENT_CONFLICT_STATES)"
 
     # [E2.1 P1-B §9] pre-deploy visibility：按状态分别统计，给 operator 足够上下文
     local count_out=""
@@ -1118,9 +1126,9 @@ guard_active_after_close_jobs() {
             GROUP BY status ORDER BY status" 2>/dev/null)"; then
         fail "ACTIVE_AFTER_CLOSE_JOB_GATE_UNAVAILABLE: 无法统计 scheduler_job_runs（psql 失败），拒绝部署（fail-closed）"
     fi
-    log "PRE_DEPLOY_PENDING_VISIBILITY（state must be pickup-eligible，见 PICKUP_ELIGIBLE_JOB_STATES）:"
+    log "PRE_DEPLOY_PENDING_VISIBILITY（见 DEPLOYMENT_CONFLICT_STATES / WORKER_CLAIMABLE_STATES）:"
     local _st _n _s _c
-    for _st in "${PICKUP_ELIGIBLE_JOB_STATES[@]}"; do
+    for _st in "${DEPLOYMENT_CONFLICT_STATES[@]}"; do
         _n=0
         while IFS=: read -r _s _c; do
             [[ "${_s}" == "${_st}" ]] && _n="${_c}"
@@ -1142,7 +1150,8 @@ guard_active_after_close_jobs() {
         log "!!! 检测到 worker-after-close 待处理/正在执行的任务，拒绝部署（fail-closed） !!!"
         log "DEPLOYMENT_BLOCKED_PENDING_AFTER_CLOSE=TRUE"
         log "错误码: ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY"
-        log "阻塞状态集合（pickup-eligible）: ${PICKUP_ELIGIBLE_JOB_STATES[*]}"
+        log "worker 可领取状态（claimable）: ${WORKER_CLAIMABLE_STATES[*]}"
+        log "部署冲突状态（conflict）: ${DEPLOYMENT_CONFLICT_STATES[*]}"
         log "说明：queued / resume_queued 会被 worker 主循环在第一个轮询 claim；"
         log "      部署拉起容器等于授权其捡走积压任务，因此与 running 同等阻塞。"
         log "[E2.1 §11] 部署工具**不会** kill / cancel / reset 正在推进的业务任务，仅阻止部署。"
