@@ -100,6 +100,22 @@ FIRST_LIVE_DEPLOY=false
 
 # 部署执行状态机（用于区分 migration 失败与重启后失败两类回滚路径）
 SERVICES_RESTARTED=false
+
+# [E2.1 P1-A §3] 真实 runtime mutation 阶段 owner。
+#
+# SERVICES_RESTARTED 只表示**容器是否已 restart/recreate**，它无法回答
+# env / live files / RUNTIME_SHA 是否已经被改写。旧 failure handler 正是
+# 用 `SERVICES_RESTARTED == true` 的**反面**去推断"文件被改过需要恢复"，
+# 导致在任何 mutation 都还没开始的失败（例如 rollback owner 解析失败）
+# 下仍主动执行 restore_files_to_previous_sha，凭空制造出
+# market.env / live rsync / RUNTIME_SHA 三处 mutation。
+#
+# 因此这里建立独立、source-backed 的阶段状态，由真实 mutation 点推进，
+# 供 failure handler 做正确分派：
+#   none       —— 尚无任何 runtime mutation（pre-mutation failure）
+#   files      —— env/live files/RUNTIME_SHA 已 mutation，容器未 restart
+#   containers —— 容器已 recreate/restart
+MUTATION_STAGE="none"
 FAILURE_STAGE=""
 MIGRATION_ATTEMPTED=false
 MIGRATION_SUCCEEDED=false
@@ -1252,6 +1268,12 @@ resolve_pre_deploy_runtime_owner() {
             missing+=("PRE_DEPLOY_IMAGE_ID:${service}")
         fi
         _write_manifest "PRE_DEPLOY_IMAGE_ID:${service}" "${image_id}"
+        # 同时记录 compose 会解析的 **镜像引用**（repo:tag，如 market-dev-backend:<sha>）。
+        # content ID 是 source of truth，但 compose 用 tag 寻址，rollback 必须能把
+        # 该 tag 重新钉到捕获的 content ID（禁止 latest / candidate / 重建旧源码）。
+        local image_ref=""
+        image_ref="$(docker inspect "${service}" --format '{{.Config.Image}}' 2>/dev/null || true)"
+        _write_manifest "PRE_DEPLOY_IMAGE_REF:${service}" "${image_ref}"
     done
 
     # D. effective compose runtime definition digest（不用文件 mtime）
@@ -1290,6 +1312,15 @@ verify_rollback_owner() {
         return 1
     fi
 
+    # A. repo / live-mounted 代码 identity
+    key="PRE_DEPLOY_REPO_SHA"
+    expected="$(sed -n "s/^${key}=//p" "${PRE_DEPLOY_MANIFEST_FILE}")"
+    actual="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || true)"
+    if [[ -n "${expected}" && "${actual}" != "${expected}" ]]; then
+        log "ROLLBACK_STATUS=FAILED: repo/live 代码 identity 未恢复（expected=${expected} actual=${actual}）"
+        rc=1
+    fi
+
     # B. RUNTIME_SHA
     key="PRE_DEPLOY_RUNTIME_SHA"
     expected="$(sed -n "s/^${key}=//p" "${PRE_DEPLOY_MANIFEST_FILE}")"
@@ -1297,6 +1328,19 @@ verify_rollback_owner() {
     [[ -f "${LIVE_ROOT}/RUNTIME_SHA" ]] && actual="$(tr -d '[:space:]' <"${LIVE_ROOT}/RUNTIME_SHA")"
     if [[ -n "${expected}" && "${actual}" != "${expected}" ]]; then
         log "ROLLBACK_STATUS=FAILED: RUNTIME_SHA 未恢复（expected=${expected} actual=${actual}）"
+        rc=1
+    fi
+
+    # D. effective compose runtime definition digest
+    #    恢复机制是文件层恢复（compose 文件属于 repo/live 文件 owner），
+    #    因此这里重新计算 digest 并与 manifest 对称比对。
+    key="PRE_DEPLOY_COMPOSE_DIGEST"
+    expected="$(sed -n "s/^${key}=//p" "${PRE_DEPLOY_MANIFEST_FILE}")"
+    actual="$(
+        cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
+    )" || actual=""
+    if [[ -n "${expected}" && "${actual}" != "${expected}" ]]; then
+        log "ROLLBACK_STATUS=FAILED: effective compose runtime definition 未恢复（expected=${expected} actual=${actual}）"
         rc=1
     fi
 
@@ -1336,6 +1380,9 @@ deploy() {
     #    migration / restart；任一 mandatory owner 无法解析即 STOP（fail-closed）。
     FAILURE_STAGE="pre_deploy_rollback_owner"
     resolve_pre_deploy_runtime_owner || return 1
+
+    # [E2.1 P1-A §3] 从这里开始进入 runtime mutation 区间（文件层）。
+    MUTATION_STAGE="files"
 
     # 1. 运行环境镜像：任意 environment_changed → 按同一 GIT_SHA tag 组整体构建。
     #    无 environment_changed → 零构建，GIT_SHA 保持不变。
@@ -1429,6 +1476,8 @@ deploy() {
         FAILURE_STAGE="active_job_gate_pre_restart"
         guard_active_after_close_jobs || return 1
         FAILURE_STAGE="restart"
+        # [E2.1 P1-A §3] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
+        MUTATION_STAGE="containers"
         restart_services "${restart_list[@]}" || return 1
     fi
 
@@ -1725,6 +1774,39 @@ handle_migration_failure() {
     log "结论: migration_failed_requires_inspection"
 }
 
+# [E2.1 P1-A §6/§7] 用捕获的 **immutable image content ID** 精确恢复每个受影响服务的运行时。
+#
+# compose 用 repo:tag 寻址（`market-dev-backend:${GIT_SHA}`），但 tag 是可变的；
+# source of truth 必须是部署前捕获的 immutable content ID。因此这里把 compose
+# 会解析的 image ref 重新 `docker tag` 钉到该 content ID。
+#
+# 明令禁止的 rollback target（§6）：
+#   latest / 当前 mutable tag / 重新 build previous source / "compose up 后希望它碰巧还是旧 image"
+#
+# 逐服务处理，不得假设所有服务共用同一个 image（§7：backend/worker/frontend 可能不同）。
+_pin_predeploy_image_refs() {
+    [[ -n "${PRE_DEPLOY_MANIFEST_FILE}" && -f "${PRE_DEPLOY_MANIFEST_FILE}" ]] || return 0
+
+    local rc=0 line service image_id image_ref
+    while IFS= read -r line; do
+        service="${line#PRE_DEPLOY_IMAGE_REF:}"
+        service="${service%%=*}"
+        image_ref="${line#*=}"
+        [[ -n "${image_ref}" ]] || continue
+        image_id="$(sed -n "s/^PRE_DEPLOY_IMAGE_ID:${service}=//p" "${PRE_DEPLOY_MANIFEST_FILE}" | head -1)"
+        [[ -n "${image_id}" ]] || continue
+
+        if ! docker tag "${image_id}" "${image_ref}" >/dev/null 2>&1; then
+            log "!! 无法把 ${service} 钉回 pre-deploy immutable image（id=${image_id} ref=${image_ref}）!!"
+            rc=1
+            continue
+        fi
+        log "  已恢复 ${service} 镜像引用 ${image_ref} → immutable image ${image_id}"
+    done < <(grep '^PRE_DEPLOY_IMAGE_REF:' "${PRE_DEPLOY_MANIFEST_FILE}")
+
+    return "${rc}"
+}
+
 # 服务已重启后（health / SHA 核验失败）才允许做容器级回滚。
 rollback() {
     log "!!! 部署失败，执行容器级回滚 !!!"
@@ -1735,7 +1817,16 @@ rollback() {
         return 1
     fi
 
+    # 文件层恢复同时恢复了 compose 定义（compose 文件属于 repo/live 文件 owner），
+    # 这就是 PRE_DEPLOY_COMPOSE_DIGEST 的恢复机制（§8）。
     restore_files_to_previous_sha
+
+    # [E2.1 P1-A §6/§7] 逐服务把 image ref 钉回 pre-deploy immutable content ID；
+    # 任一项失败即中止，不允许"compose up 后希望它碰巧还是旧 image"。
+    if ! _pin_predeploy_image_refs; then
+        log "!! pre-deploy immutable image owner 恢复失败，回滚中止（保持 fail-closed）!!"
+        return 1
+    fi
 
     cd "${REPO_ROOT}"
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \
@@ -1855,23 +1946,42 @@ main() {
         checkout_target
 
         if ! deploy; then
-            # 区分两类失败路径：
-            #   migration 失败（服务未重启）→ 只恢复文件，不动容器；
-            #   其他阶段失败 → 按是否已重启决定容器级回滚。
+            # [E2.1 P1-A §4] failure handler matrix：由**真实 mutation 阶段**分派，
+            # 不再用 `SERVICES_RESTARTED == true` 的反面粗粒度推断"文件需要恢复"
+            # ——那会在任何 mutation 都还没发生的失败下凭空制造 restore mutation。
+            #
+            #   migration  → 既有特殊合同：不 recreate 容器，不 false-claim DB rollback
+            #   none       → pre-mutation failure：零 restore、零 runtime mutation
+            #   files      → 仅恢复文件/live/RUNTIME_SHA owner，不动容器
+            #   containers → 精确容器级回滚（per-service immutable image owner）
             if [[ "${FAILURE_STAGE}" == "migration" ]]; then
                 handle_migration_failure
                 fail "migration_failed_requires_inspection：migration 失败，服务未重启，数据库状态需人工确认"
             fi
 
-            if [[ "${SERVICES_RESTARTED}" == "true" ]]; then
-                rollback
-                fail "部署失败（阶段: ${FAILURE_STAGE}）并已执行容器级回滚"
-            fi
-
-            if [[ -n "${PREVIOUS_SHA}" ]]; then
-                restore_files_to_previous_sha
-            fi
-            fail "部署失败（阶段: ${FAILURE_STAGE}），服务未重启，已恢复文件层"
+            case "${MUTATION_STAGE}" in
+                none)
+                    # pre-mutation failure：没有任何 runtime 状态被改写，
+                    # 因此**不存在**可恢复对象；主动 restore 反而会制造 mutation。
+                    log "部署在任何 runtime mutation 之前失败（mutation_stage=none）："
+                    log "  market.env / live files / RUNTIME_SHA / 容器 均未改动"
+                    log "  不执行任何文件层恢复，也不执行容器级回滚"
+                    fail "部署失败（阶段: ${FAILURE_STAGE}），mutation_stage=none，未产生任何 runtime mutation"
+                    ;;
+                files)
+                    if [[ -n "${PREVIOUS_SHA}" ]]; then
+                        restore_files_to_previous_sha
+                    fi
+                    fail "部署失败（阶段: ${FAILURE_STAGE}），服务未重启，已恢复文件层"
+                    ;;
+                containers)
+                    rollback
+                    fail "部署失败（阶段: ${FAILURE_STAGE}）并已执行容器级回滚"
+                    ;;
+                *)
+                    fail "部署失败（阶段: ${FAILURE_STAGE}），未知 mutation_stage=${MUTATION_STAGE}，保持 fail-closed"
+                    ;;
+            esac
         fi
 
         if ! verify_deployment; then
