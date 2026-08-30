@@ -2029,13 +2029,6 @@ main() {
         # 不受 checkout 影响，但统一在此处一次捕获，保证 manifest 属于同一时刻的
         # old runtime 快照。
         #
-        # 此处失败 = 尚未 checkout = 零 runtime mutation，直接 fail，不进入 deploy()。
-        FAILURE_STAGE="pre_deploy_rollback_owner"
-        resolve_pre_deploy_runtime_owner || {
-            log "!!! PRE_DEPLOY owner 捕获失败：尚未 checkout，零 runtime mutation !!!"
-            fail "pre_deploy_rollback_owner_unresolved：PRE_DEPLOY owner 无法完整解析，已停止（未产生任何 runtime mutation）"
-        }
-
         checkout_target
 
         if ! deploy; then
