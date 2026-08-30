@@ -10,7 +10,9 @@ import os
 import uuid
 from datetime import date
 from decimal import Decimal
+from types import SimpleNamespace
 from typing import cast
+from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
@@ -20,6 +22,8 @@ from app.core.pytdx_adapter import PytdxAdapter
 from app.models.bar import Bar15Min, Bar60Min, BarDaily
 from app.models.instrument import Instrument
 from app.repositories import bar_repository as repo
+from app.services import bars_scheduler_service as scheduler_module
+from app.services.bars_scheduler_service import BarsSchedulerService
 from tests.support.bars_fake_provider import (
     XDXR_ROWS,
     FakeBarsProvider,
@@ -311,3 +315,104 @@ async def test_f1b1_daily_persistence_exception_rolls_back(db_session) -> None:
         )
 
     assert await _count(db_session, BarDaily, instrument_id) == 0
+
+
+async def _bars_snapshot(db_session, instrument_ids: list[uuid.UUID]) -> dict[str, list[tuple]]:
+    snapshots: dict[str, list[tuple]] = {}
+    for name, model, time_column in (
+        ("d", BarDaily, BarDaily.trade_date),
+        ("15m", Bar15Min, Bar15Min.trade_time),
+        ("60m", Bar60Min, Bar60Min.trade_time),
+    ):
+        rows = (
+            await db_session.execute(
+                select(
+                    model.instrument_id,
+                    time_column,
+                    model.open,
+                    model.high,
+                    model.low,
+                    model.close,
+                    model.volume,
+                    model.amount,
+                    model.adj_factor,
+                )
+                .where(model.instrument_id.in_(instrument_ids))
+                .order_by(model.instrument_id, time_column)
+            )
+        ).all()
+        snapshots[name] = [tuple(row) for row in rows]
+    return snapshots
+
+
+@pytest.mark.asyncio
+async def test_f1b2_scheduler_spawn_postgres_equivalence_and_idempotency(
+    db_session, monkeypatch, tmp_path
+) -> None:
+    db_name = await db_session.scalar(text("SELECT current_database()"))
+    assert db_name != "bz_stock"
+    assert str(db_name).startswith("bz_stock_verify_")
+
+    symbols = ["009911", "009912", "009913", "009914"]
+    instrument_ids = [
+        await _add_instrument(db_session, symbol=symbol) for symbol in symbols
+    ]
+    instruments = [
+        SimpleNamespace(id=instrument_id, symbol=symbol)
+        for instrument_id, symbol in zip(instrument_ids, symbols, strict=True)
+    ]
+    monkeypatch.setattr(
+        scheduler_module, "is_trading_day_async", AsyncMock(return_value=True)
+    )
+    monkeypatch.setattr(
+        scheduler_module,
+        "get_pytdx_adapter",
+        lambda: FakeBarsProvider(base_close=21.0),
+    )
+
+    async def no_post_d(*_args, **_kwargs):
+        return None
+
+    serial = BarsSchedulerService(fetch_processes=1)
+    monkeypatch.setattr(
+        serial, "_get_active_instruments", AsyncMock(return_value=instruments)
+    )
+    monkeypatch.setattr(serial, "_run_post_daily_phase", no_post_d)
+    serial_result = await serial.refresh_all_instruments(
+        date(2026, 8, 28), db_session=db_session, trigger_dsa=False
+    )
+    assert serial_result.failed == 0
+    serial_snapshot = await _bars_snapshot(db_session, instrument_ids)
+    assert all(serial_snapshot[period] for period in ("d", "15m", "60m"))
+
+    adapter_spec = {
+        "module": "tests.support.bars_fake_provider",
+        "attr": "build_fake_provider",
+        "kwargs": {
+            "base_close": 21.0,
+            "latency_seconds": 0.05,
+            "trace_dir": str(tmp_path / "pg-spawn-trace"),
+        },
+    }
+    parallel = BarsSchedulerService(fetch_processes=2, adapter_spec=adapter_spec)
+    monkeypatch.setattr(
+        parallel, "_get_active_instruments", AsyncMock(return_value=instruments)
+    )
+    monkeypatch.setattr(parallel, "_run_post_daily_phase", no_post_d)
+
+    first_parallel = await parallel.refresh_all_instruments(
+        date(2026, 8, 28), db_session=db_session, trigger_dsa=False
+    )
+    parallel_snapshot = await _bars_snapshot(db_session, instrument_ids)
+    assert first_parallel.failed == 0
+    assert parallel_snapshot == serial_snapshot
+    assert parallel.last_process_metrics["pool_creations"] == 1
+    assert parallel.last_process_metrics["max_inflight_observed"] <= 4
+    assert len(parallel.last_process_metrics["distinct_child_pids"]) >= 2
+
+    second_parallel = await parallel.refresh_all_instruments(
+        date(2026, 8, 28), db_session=db_session, trigger_dsa=False
+    )
+    idempotent_snapshot = await _bars_snapshot(db_session, instrument_ids)
+    assert second_parallel.failed == 0
+    assert idempotent_snapshot == serial_snapshot

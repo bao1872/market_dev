@@ -26,6 +26,8 @@ from __future__ import annotations
 import importlib
 import logging
 import os
+import resource
+import sys
 import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -337,6 +339,11 @@ def fetch_period_bars_task(request: dict[str, Any]) -> dict[str, Any]:
         "raw_df": payload.raw_df,
         "provider_elapsed_seconds": payload.provider_elapsed_seconds,
         "provider_calls": payload.provider_calls,
+        "child_max_rss_kb": (
+            resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 1024
+            if sys.platform == "darwin"
+            else resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        ),
     }
     if isinstance(payload, DailyProviderPayload):
         out.update(
@@ -349,3 +356,27 @@ def fetch_period_bars_task(request: dict[str, Any]) -> dict[str, Any]:
             }
         )
     return out
+
+
+def decode_period_bars_result(
+    result: dict[str, Any],
+) -> DailyProviderPayload | MinuteProviderPayload:
+    """Parent-side decode for a child result; contains no provider or DB I/O."""
+    common = {
+        "instrument_id": result["instrument_id"],
+        "symbol": result["symbol"],
+        "pid": result["pid"],
+        "raw_df": result["raw_df"],
+        "provider_elapsed_seconds": result.get("provider_elapsed_seconds", 0.0),
+        "provider_calls": result.get("provider_calls", []),
+    }
+    if result["period"] == DAILY_PERIOD:
+        return DailyProviderPayload(
+            **common,
+            xdxr_df=result.get("xdxr_df"),
+            xdxr_status=result["xdxr_status"],
+            xdxr_error=result.get("xdxr_error"),
+            supplement_df=result.get("supplement_df"),
+            supplement_error=result.get("supplement_error"),
+        )
+    return MinuteProviderPayload(period=result["period"], **common)

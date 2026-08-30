@@ -90,6 +90,7 @@ class FakeBarsProvider:
         xdxr_event_dates: list[str] | None = None,
         base_close: float = 10.0,
         daily_empty: bool = False,
+        abrupt_exit_symbol: str | None = None,
     ) -> None:
         self.xdxr_mode = xdxr_mode
         self.latency_seconds = latency_seconds
@@ -97,6 +98,7 @@ class FakeBarsProvider:
         self.xdxr_event_dates = xdxr_event_dates or []
         self.base_close = base_close
         self.daily_empty = daily_empty
+        self.abrupt_exit_symbol = abrupt_exit_symbol
         self.calls: list[str] = []
 
     # --- tracing（用于证明真实并发与 process-local adapter）---
@@ -116,6 +118,8 @@ class FakeBarsProvider:
 
     # --- provider API（与 PytdxAdapter 对应方法同名）---
     def get_daily_bars(self, symbol: str, start_date, end_date) -> pd.DataFrame:
+        if symbol == self.abrupt_exit_symbol:
+            os._exit(91)
         self.calls.append(f"get_daily_bars:{symbol}:{start_date}~{end_date}")
         t0 = time.time()  # wall clock：跨进程可比，用于证明执行区间 overlap
         self._sleep()

@@ -3,13 +3,14 @@
 功能：
 - 每个交易日 16:00 自动拉取全市场 active 股票的 d/15m/1h 行情
 - 按周期分阶段处理：日线优先 → 覆盖率检查 → DSA 触发 → 15min → 60min
-- 串行拉取（pytdx 不支持并发）
+- 默认串行；显式配置后仅将同周期 provider I/O 放入有界 spawn ProcessPool
 - 分批 upsert，幂等：upsert on_conflict_do_update
 - 进度：tqdm 进度条（底部固定）
 - 回补：使用 start_date 参数控制日线回补范围（默认 2023-01-01），15min/60min 使用 BACKFILL_COUNTS
 
 设计说明：
-- pytdx 不支持并发，所有拉取通过 asyncio.to_thread 串行桥接
+- workers=1 复用 F1B-1 串行路径；workers>1 每次每日刷新复用一个 spawn pool
+- d/post-d/15m/60m 严格分阶段，DB prepare/persistence 始终由 parent 串行执行
 - 每日增量更新使用小 count（5/50/10），将耗时从约 2h 降至约 1.8h
 - 回补使用大 count（500/15000/4000），耗时约 11.1h
 - 失败重试 3 次，间隔 5 秒，不中断整体流程
@@ -22,10 +23,15 @@
 from __future__ import annotations
 
 import asyncio
+import heapq
 import logging
+import multiprocessing
+import pickle
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from typing import TYPE_CHECKING, Any
@@ -36,14 +42,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 if TYPE_CHECKING:
     import pandas as pd
 
+from app.config import get_settings
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.time import shanghai_business_date
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
+    persist_daily_bars,
+    persist_minute_provider_payload,
+    prepare_daily_bars,
     refresh_15min_bars,
     refresh_60min_bars,
     refresh_daily_bars,
+)
+from app.services.bars_fetch_worker import (
+    DailyProviderPayload,
+    decode_period_bars_result,
+    fetch_period_bars_task,
+    init_worker,
 )
 from app.services.calendar_service import is_trading_day_async
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
@@ -102,6 +118,32 @@ class BatchResult:
     factor_audit: dict[str, int] | None = None
 
 
+class PoolFatalError(RuntimeError):
+    """The process pool cannot safely continue and must fail closed."""
+
+
+@dataclass(frozen=True)
+class _InstrumentItem:
+    order: int
+    instrument_id: uuid.UUID
+    symbol: str
+
+
+@dataclass
+class _ParallelPhaseResult:
+    succeeded: int = 0
+    failed: int = 0
+    upsert_count: int = 0
+    failed_symbols: list[str] = field(default_factory=list)
+    distinct_child_pids: set[int] = field(default_factory=set)
+    submitted: int = 0
+    attempts_completed: int = 0
+    terminal_completed: int = 0
+    max_inflight_observed: int = 0
+    child_max_rss_kb: float = 0.0
+    elapsed_seconds: float = 0.0
+
+
 class BarsSchedulerService:
     """多周期行情调度服务。
 
@@ -128,6 +170,7 @@ class BarsSchedulerService:
     # 失败重试
     MAX_RETRIES = 3
     RETRY_DELAY = 5  # 秒
+    MAX_INFLIGHT_MULTIPLIER = 2
 
     # 周期 → refresh 函数映射
     # 日线使用日期范围接口，15min/60min 使用 count 接口
@@ -137,6 +180,41 @@ class BarsSchedulerService:
         "60m": refresh_60min_bars,
     }
 
+    def __init__(
+        self,
+        *,
+        fetch_processes: int | None = None,
+        adapter_spec: dict[str, Any] | None = None,
+    ) -> None:
+        configured = (
+            get_settings().bars_fetch_processes
+            if fetch_processes is None
+            else fetch_processes
+        )
+        if configured < 1 or configured > 8:
+            raise ValueError("fetch_processes must be between 1 and 8")
+        self.fetch_processes = configured
+        self.adapter_spec = adapter_spec
+        self._reset_process_metrics()
+
+    def _reset_process_metrics(self) -> None:
+        self.last_process_metrics: dict[str, Any] = {
+            "workers": self.fetch_processes,
+            "pool_creations": 0,
+            "max_inflight_observed": 0,
+            "distinct_child_pids": set(),
+            "periods": {},
+        }
+
+    def _create_process_pool(self) -> ProcessPoolExecutor:
+        context = multiprocessing.get_context("spawn")
+        return ProcessPoolExecutor(
+            max_workers=self.fetch_processes,
+            mp_context=context,
+            initializer=init_worker,
+            initargs=(self.adapter_spec,),
+        )
+
     async def refresh_all_instruments(
         self,
         trade_date: date,
@@ -145,7 +223,7 @@ class BarsSchedulerService:
         *,
         trigger_dsa: bool = True,
     ) -> BatchResult:
-        """每日增量更新：串行拉取全市场 active 股票的最新行情。
+        """每日增量更新：默认串行，可配置有界 provider ProcessPool。
 
         使用 DAILY_COUNTS，耗时约 1.8 小时。
 
@@ -161,6 +239,7 @@ class BarsSchedulerService:
         Returns:
             BatchResult: 批量刷新结果
         """
+        self._reset_process_metrics()
         logger.info("开始每日增量更新 trade_date=%s trigger_dsa=%s", trade_date, trigger_dsa)
         return await self._process_all_instruments(
             trade_date=trade_date,
@@ -262,146 +341,78 @@ class BarsSchedulerService:
 
         is_daily_refresh = task_name == "每日增量更新"
 
-        for phase_idx, period in enumerate(active_periods):
-            phase_name = f"{task_name} [{period}]"
-            logger.info(
-                "Phase %d/%d 开始: 周期=%s, 标的数=%d",
-                phase_idx + 1, len(active_periods), period, total,
-            )
+        parallel_enabled = is_daily_refresh and self.fetch_processes > 1
+        process_pool = self._create_process_pool() if parallel_enabled else None
+        if process_pool is not None:
+            self.last_process_metrics["pool_creations"] = 1
+        items = [
+            _InstrumentItem(i, instrument.id, instrument.symbol)
+            for i, instrument in enumerate(instruments)
+        ]
 
-            # 使用 tqdm 进度条（底部固定）
-            try:
-                from tqdm import tqdm
-                pbar = tqdm(
-                    instruments,
-                    desc=phase_name,
-                    position=0,
-                    leave=True,
-                    dynamic_ncols=True,
+        try:
+            for phase_idx, period in enumerate(active_periods):
+                phase_name = f"{task_name} [{period}]"
+                logger.info(
+                    "Phase %d/%d 开始: period=%s instruments=%d workers=%d",
+                    phase_idx + 1,
+                    len(active_periods),
+                    period,
+                    total,
+                    self.fetch_processes if process_pool is not None else 1,
                 )
-            except ImportError:
-                pbar = None
-
-            phase_succeeded = 0
-            phase_failed = 0
-
-            for instrument in (pbar or instruments):
-                symbol = instrument.symbol
-                try:
-                    upsert_count = await self._refresh_one_period_with_retry(
-                        instrument_id=instrument.id,
-                        symbol=symbol,
+                if process_pool is None:
+                    phase_succeeded, phase_failed = await self._run_serial_period(
+                        instruments,
+                        period=period,
+                        count=counts[period],
+                        db_session=db_session,
+                        start_date=start_date,
+                        result=result,
+                        phase_name=phase_name,
+                    )
+                else:
+                    phase = await self._run_parallel_period(
+                        process_pool,
+                        items,
                         period=period,
                         count=counts[period],
                         db_session=db_session,
                         start_date=start_date,
                     )
-                    result.period_counts[period] += upsert_count
-                    phase_succeeded += 1
-                except Exception as exc:
-                    phase_failed += 1
-                    if symbol not in result.failed_symbols:
-                        result.failed_symbols.append(symbol)
-                    logger.warning(
-                        "%s 异常 symbol=%s period=%s: %s",
-                        phase_name, symbol, period, exc,
-                    )
+                    phase_succeeded = phase.succeeded
+                    phase_failed = phase.failed
+                    result.period_counts[period] += phase.upsert_count
+                    result.failed_symbols.extend(phase.failed_symbols)
+                    self._record_parallel_metrics(period, phase)
 
-                if pbar is not None:
-                    pbar.set_postfix(
-                        ok=phase_succeeded,
-                        fail=phase_failed,
-                        total=total,
-                    )
-
-            if pbar is not None:
-                pbar.close()
-
-            logger.info(
-                "Phase %d/%d 完成: 周期=%s, succeeded=%d, failed=%d, upsert=%d",
-                phase_idx + 1, len(active_periods), period,
-                phase_succeeded, phase_failed, result.period_counts[period],
-            )
-
-            # [BarsScheduler] - 日线阶段完成后：
-            #   1. [CHANGE-20260717-002 SSOT] 重建复权因子序列（公司行为变化时）
-            #      必须在覆盖率门禁/DSA 前，保证 DSA/snapshot 使用最新因子
-            #   2. 检查覆盖率并触发/复用 DSA run
-            if is_daily_refresh and period == "d":
-                # 1. 因子重建（单股失败不阻断；整体异常不阻断后续 DSA/snapshot，
-                #    DSA/snapshot 可基于旧因子 degraded 运行）
-                try:
-                    rebuild_result = await self._rebuild_factors_if_needed(
-                        trade_date, instruments, db_session, job_run_id=job_run_id,
-                    )
-                    logger.info(
-                        "[BarsScheduler] 因子重建阶段完成: checked=%d changed=%d "
-                        "rebuilt=%d failed=%d",
-                        rebuild_result["checked"], rebuild_result["changed"],
-                        rebuild_result["rebuilt"], rebuild_result["failed"],
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[BarsScheduler] 因子重建阶段异常（不阻断后续）: %s", exc,
-                        exc_info=True,
-                    )
-
-                # [S3.1 CHANGE-20260718-007] - 1.5. 因子一致性审计 + 串行重建
-                # 审计发现 _rebuild_factors_if_needed 漏掉的不一致股票（legacy 错误、
-                # fingerprint 未变但存量错误、1.0 伪装成功等），立即串行重建。
-                # 必须在覆盖率门禁/DSA 前，保证 DSA/snapshot 使用一致因子。
-                # 软失败：审计/重建异常不阻断 DSA（DSA 可基于旧因子 degraded 运行），
-                # 但失败清单写入 job_run_event 留下诊断痕迹。
-                try:
-                    audit_result = await self._audit_and_rebuild_factors(
-                        trade_date, instruments, db_session, job_run_id=job_run_id,
-                    )
-                    result.factor_audit = audit_result
-                    logger.info(
-                        "[BarsScheduler] 因子审计阶段完成: audited=%d consistent=%d "
-                        "needs_rebuild=%d rebuilt=%d failed=%d errors=%d",
-                        audit_result["total_audited"], audit_result["consistent"],
-                        audit_result["needs_rebuild"], audit_result["rebuilt"],
-                        audit_result["failed"], audit_result["errors"],
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "[BarsScheduler] 因子审计阶段异常（不阻断后续）: %s", exc,
-                        exc_info=True,
-                    )
-
-                # 2. 覆盖率门禁 + DSA 触发
-                # [Phase8A] trigger_dsa=False 时仅计算覆盖率写DAILY_DONE，不创建DSA run
-                # （orchestrator调用时使用，DSA由orchestrator在computing_features创建）
-                try:
-                    result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
-                        trade_date, db_session, job_run_id=job_run_id, result=result,
+                logger.info(
+                    "Phase %d/%d 完成: period=%s succeeded=%d failed=%d upsert=%d",
+                    phase_idx + 1,
+                    len(active_periods),
+                    period,
+                    phase_succeeded,
+                    phase_failed,
+                    result.period_counts[period],
+                )
+                if is_daily_refresh and period == "d":
+                    await self._run_post_daily_phase(
+                        trade_date,
+                        instruments,
+                        db_session,
+                        job_run_id,
+                        result,
                         trigger_dsa=trigger_dsa,
                     )
-                    # [JobRunEvent] - 日线阶段完成后写入 DAILY_DONE 事件（含覆盖率）
-                    if job_run_id is not None and result.daily_coverage is not None:
-                        await self._append_daily_done_event(
-                            db_session, job_run_id, result,
-                        )
-                except Exception as exc:
-                    # [BarsScheduler] - DSA 触发异常不中断日线刷新后续周期，
-                    # 但必须写 DSA_TRIGGER_FAILED error 事件留下诊断痕迹（禁止静默吞没）
-                    logger.warning(
-                        "[BarsScheduler] 日线覆盖率检查/DSA 触发异常: %s", exc,
-                        exc_info=True,
-                    )
-                    if job_run_id is not None:
-                        try:
-                            await self._append_dsa_trigger_failed_event(
-                                db_session, job_run_id, exc,
-                            )
-                        except Exception as inner_exc:
-                            logger.warning(
-                                "[BarsScheduler] 写 DSA_TRIGGER_FAILED 事件失败: %s",
-                                inner_exc,
-                            )
+        finally:
+            if process_pool is not None:
+                await asyncio.to_thread(
+                    process_pool.shutdown, wait=True, cancel_futures=True
+                )
 
         # 汇总 succeeded/failed（按标的维度：任一周期失败即计为 failed）
+        failed_set = set(result.failed_symbols)
+        result.failed_symbols = [item.symbol for item in items if item.symbol in failed_set]
         result.succeeded = total - len(result.failed_symbols)
         result.failed = len(result.failed_symbols)
 
@@ -410,6 +421,364 @@ class BarsSchedulerService:
             task_name, result.total, result.succeeded, result.failed, result.period_counts,
         )
         return result
+
+    async def _run_serial_period(
+        self,
+        instruments: list[Instrument],
+        *,
+        period: str,
+        count: int,
+        db_session: AsyncSession | None,
+        start_date: date | None,
+        result: BatchResult,
+        phase_name: str,
+    ) -> tuple[int, int]:
+        """F1B-1 serial fallback; no ProcessPool is created for workers=1/backfill."""
+        succeeded = 0
+        failed = 0
+        for instrument in instruments:
+            try:
+                upsert_count = await self._refresh_one_period_with_retry(
+                    instrument_id=instrument.id,
+                    symbol=instrument.symbol,
+                    period=period,
+                    count=count,
+                    db_session=db_session,
+                    start_date=start_date,
+                )
+                result.period_counts[period] += upsert_count
+                succeeded += 1
+            except Exception as exc:
+                failed += 1
+                result.failed_symbols.append(instrument.symbol)
+                logger.warning(
+                    "%s 异常 symbol=%s period=%s: %s",
+                    phase_name,
+                    instrument.symbol,
+                    period,
+                    exc,
+                )
+        return succeeded, failed
+
+    @staticmethod
+    def _build_provider_request(
+        item: _InstrumentItem,
+        *,
+        period: str,
+        count: int,
+        start_date: date | None,
+    ) -> dict[str, Any]:
+        request: dict[str, Any] = {
+            "instrument_id": str(item.instrument_id),
+            "symbol": item.symbol,
+            "period": period,
+            "count": count,
+        }
+        if period == "d":
+            end_date = shanghai_business_date()
+            request["start_date"] = (
+                start_date if start_date is not None else end_date - timedelta(days=count)
+            )
+            request["end_date"] = end_date
+        return request
+
+    @staticmethod
+    def _is_pool_fatal(exc: BaseException) -> bool:
+        if isinstance(
+            exc,
+            (BrokenProcessPool, pickle.PicklingError, BrokenPipeError, EOFError),
+        ):
+            return True
+        message = str(exc).lower()
+        return any(
+            marker in message
+            for marker in (
+                "cannot pickle",
+                "can't pickle",
+                "process pool is not usable",
+                "process in the process pool was terminated abruptly",
+            )
+        )
+
+    async def _persist_provider_result(
+        self,
+        item: _InstrumentItem,
+        raw_result: dict[str, Any],
+        db_session: AsyncSession | None,
+    ) -> int:
+        try:
+            payload = decode_period_bars_result(raw_result)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PoolFatalError(f"child payload decode failed: {exc}") from exc
+        if payload.instrument_id != str(item.instrument_id) or payload.symbol != item.symbol:
+            raise PoolFatalError("child payload identity mismatch")
+
+        async def _persist(session: AsyncSession) -> int:
+            if isinstance(payload, DailyProviderPayload):
+                prepared = prepare_daily_bars(payload)
+                return await persist_daily_bars(
+                    session, item.instrument_id, prepared, symbol=item.symbol
+                )
+            return await persist_minute_provider_payload(
+                session, item.instrument_id, payload
+            )
+
+        if db_session is not None:
+            return await _persist(db_session)
+        async with AsyncSessionLocal() as session:
+            return await _persist(session)
+
+    async def _run_parallel_period(
+        self,
+        pool: ProcessPoolExecutor,
+        items: list[_InstrumentItem],
+        *,
+        period: str,
+        count: int,
+        db_session: AsyncSession | None,
+        start_date: date | None,
+    ) -> _ParallelPhaseResult:
+        """Bounded provider dispatcher; persistence remains serial in this parent."""
+        max_inflight = self.fetch_processes * self.MAX_INFLIGHT_MULTIPLIER
+        phase_started = time.monotonic()
+        phase = _ParallelPhaseResult()
+        retry_heap: list[tuple[float, int, int, _InstrumentItem]] = [
+            (0.0, item.order, 1, item) for item in items
+        ]
+        heapq.heapify(retry_heap)
+        inflight: dict[
+            asyncio.Future[dict[str, Any]],
+            tuple[Future[dict[str, Any]], _InstrumentItem, int],
+        ] = {}
+
+        def schedule_retry_or_fail(item: _InstrumentItem, attempt: int, exc: BaseException) -> None:
+            if attempt < self.MAX_RETRIES:
+                heapq.heappush(
+                    retry_heap,
+                    (time.monotonic() + self.RETRY_DELAY, item.order, attempt + 1, item),
+                )
+                logger.warning(
+                    "parallel retry queued symbol=%s period=%s attempt=%d/%d error=%s",
+                    item.symbol,
+                    period,
+                    attempt,
+                    self.MAX_RETRIES,
+                    exc,
+                )
+            else:
+                phase.failed += 1
+                phase.terminal_completed += 1
+                phase.failed_symbols.append(item.symbol)
+                logger.warning(
+                    "parallel retry exhausted symbol=%s period=%s attempts=%d error=%s",
+                    item.symbol,
+                    period,
+                    attempt,
+                    exc,
+                )
+
+        try:
+            while retry_heap or inflight:
+                now = time.monotonic()
+                while (
+                    retry_heap
+                    and len(inflight) < max_inflight
+                    and retry_heap[0][0] <= now
+                ):
+                    _, _, attempt, item = heapq.heappop(retry_heap)
+                    request = self._build_provider_request(
+                        item, period=period, count=count, start_date=start_date
+                    )
+                    try:
+                        concurrent_future = pool.submit(fetch_period_bars_task, request)
+                    except Exception as exc:
+                        if self._is_pool_fatal(exc):
+                            raise PoolFatalError(
+                                f"process pool submission failed: {exc}"
+                            ) from exc
+                        schedule_retry_or_fail(item, attempt, exc)
+                        continue
+                    wrapped = asyncio.wrap_future(concurrent_future)
+                    inflight[wrapped] = (concurrent_future, item, attempt)
+                    phase.submitted += 1
+                    phase.max_inflight_observed = max(
+                        phase.max_inflight_observed, len(inflight)
+                    )
+
+                if not inflight:
+                    if retry_heap:
+                        await asyncio.sleep(
+                            max(0.0, retry_heap[0][0] - time.monotonic())
+                        )
+                    continue
+
+                timeout = None
+                if retry_heap and len(inflight) < max_inflight:
+                    timeout = max(0.0, retry_heap[0][0] - time.monotonic())
+                done, _ = await asyncio.wait(
+                    inflight,
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for wrapped in done:
+                    _, item, attempt = inflight.pop(wrapped)
+                    phase.attempts_completed += 1
+                    try:
+                        raw_result = wrapped.result()
+                    except Exception as exc:
+                        if self._is_pool_fatal(exc):
+                            raise PoolFatalError(
+                                f"process pool failed during {period}: {exc}"
+                            ) from exc
+                        schedule_retry_or_fail(item, attempt, exc)
+                        continue
+
+                    try:
+                        child_pid = int(raw_result["pid"])
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise PoolFatalError(
+                            f"child payload PID is invalid: {exc}"
+                        ) from exc
+                    phase.distinct_child_pids.add(child_pid)
+                    phase.child_max_rss_kb = max(
+                        phase.child_max_rss_kb,
+                        float(raw_result.get("child_max_rss_kb", 0.0)),
+                    )
+                    try:
+                        upsert_count = await self._persist_provider_result(
+                            item, raw_result, db_session
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        if isinstance(exc, PoolFatalError):
+                            raise
+                        schedule_retry_or_fail(item, attempt, exc)
+                        continue
+
+                    phase.upsert_count += upsert_count
+                    phase.succeeded += 1
+                    phase.terminal_completed += 1
+
+                logger.info(
+                    "parallel progress period=%s workers=%d total=%d submitted=%d "
+                    "completed=%d succeeded=%d failed=%d in_flight=%d elapsed=%.2fs",
+                    period,
+                    self.fetch_processes,
+                    len(items),
+                    phase.submitted,
+                    phase.terminal_completed,
+                    phase.succeeded,
+                    phase.failed,
+                    len(inflight),
+                    time.monotonic() - phase_started,
+                )
+        except asyncio.CancelledError:
+            for wrapped, (concurrent_future, _, _) in inflight.items():
+                wrapped.cancel()
+                concurrent_future.cancel()
+            raise
+        except BaseException:
+            for wrapped, (concurrent_future, _, _) in inflight.items():
+                wrapped.cancel()
+                concurrent_future.cancel()
+            raise
+
+        phase.elapsed_seconds = time.monotonic() - phase_started
+        return phase
+
+    def _record_parallel_metrics(
+        self, period: str, phase: _ParallelPhaseResult
+    ) -> None:
+        period_metrics = {
+            "submitted": phase.submitted,
+            "attempts_completed": phase.attempts_completed,
+            "completed": phase.terminal_completed,
+            "succeeded": phase.succeeded,
+            "failed": phase.failed,
+            "max_inflight_observed": phase.max_inflight_observed,
+            "distinct_child_pids": set(phase.distinct_child_pids),
+            "child_max_rss_kb": phase.child_max_rss_kb,
+            "elapsed_seconds": phase.elapsed_seconds,
+        }
+        self.last_process_metrics["periods"][period] = period_metrics
+        self.last_process_metrics["max_inflight_observed"] = max(
+            self.last_process_metrics["max_inflight_observed"],
+            phase.max_inflight_observed,
+        )
+        self.last_process_metrics["distinct_child_pids"].update(
+            phase.distinct_child_pids
+        )
+
+    async def _run_post_daily_phase(
+        self,
+        trade_date: date,
+        instruments: list[Instrument],
+        db_session: AsyncSession | None,
+        job_run_id: uuid.UUID | None,
+        result: BatchResult,
+        *,
+        trigger_dsa: bool,
+    ) -> None:
+        """Run the existing post-d sequence only after all d persistence is terminal."""
+        try:
+            rebuild_result = await self._rebuild_factors_if_needed(
+                trade_date, instruments, db_session, job_run_id=job_run_id
+            )
+            logger.info(
+                "[BarsScheduler] 因子重建完成 checked=%d changed=%d rebuilt=%d failed=%d",
+                rebuild_result["checked"],
+                rebuild_result["changed"],
+                rebuild_result["rebuilt"],
+                rebuild_result["failed"],
+            )
+        except Exception as exc:
+            logger.warning("[BarsScheduler] 因子重建阶段异常（不阻断后续）: %s", exc, exc_info=True)
+
+        try:
+            audit_result = await self._audit_and_rebuild_factors(
+                trade_date, instruments, db_session, job_run_id=job_run_id
+            )
+            result.factor_audit = audit_result
+            logger.info(
+                "[BarsScheduler] 因子审计完成 audited=%d consistent=%d "
+                "needs_rebuild=%d rebuilt=%d failed=%d errors=%d",
+                audit_result["total_audited"],
+                audit_result["consistent"],
+                audit_result["needs_rebuild"],
+                audit_result["rebuilt"],
+                audit_result["failed"],
+                audit_result["errors"],
+            )
+        except Exception as exc:
+            logger.warning("[BarsScheduler] 因子审计阶段异常（不阻断后续）: %s", exc, exc_info=True)
+
+        try:
+            result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
+                trade_date,
+                db_session,
+                job_run_id=job_run_id,
+                result=result,
+                trigger_dsa=trigger_dsa,
+            )
+            if job_run_id is not None and result.daily_coverage is not None:
+                await self._append_daily_done_event(db_session, job_run_id, result)
+        except Exception as exc:
+            logger.warning(
+                "[BarsScheduler] 日线覆盖率检查/DSA 触发异常: %s",
+                exc,
+                exc_info=True,
+            )
+            if job_run_id is not None:
+                try:
+                    await self._append_dsa_trigger_failed_event(
+                        db_session, job_run_id, exc
+                    )
+                except Exception as inner_exc:
+                    logger.warning(
+                        "[BarsScheduler] 写 DSA_TRIGGER_FAILED 事件失败: %s",
+                        inner_exc,
+                    )
 
     async def _check_daily_coverage_and_trigger_dsa(
         self,
@@ -1126,18 +1495,19 @@ class BarsSchedulerService:
         """
         refresh_fn = self._REFRESH_FUNCS[period]
         adapter = get_pytdx_adapter()
+        request = self._build_provider_request(
+            _InstrumentItem(0, instrument_id, symbol),
+            period=period,
+            count=count,
+            start_date=start_date,
+        )
 
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
                 # 日线使用日期范围接口，15min/60min 使用 count 接口
                 if period == "d":
-                    end_date = shanghai_business_date()
-                    if start_date is not None:
-                        # 回补模式：使用 start_date 参数控制日线回补范围
-                        actual_start = start_date
-                    else:
-                        # 每日增量模式：使用 count 回看天数
-                        actual_start = end_date - timedelta(days=count)
+                    actual_start = request["start_date"]
+                    end_date = request["end_date"]
                     if db_session is not None:
                         df = await refresh_fn(db_session, instrument_id, actual_start, end_date, adapter)
                     else:
@@ -1145,10 +1515,14 @@ class BarsSchedulerService:
                             df = await refresh_fn(session, instrument_id, actual_start, end_date, adapter)
                 else:
                     if db_session is not None:
-                        df = await refresh_fn(db_session, instrument_id, count, adapter)
+                        df = await refresh_fn(
+                            db_session, instrument_id, request["count"], adapter
+                        )
                     else:
                         async with AsyncSessionLocal() as session:
-                            df = await refresh_fn(session, instrument_id, count, adapter)
+                            df = await refresh_fn(
+                                session, instrument_id, request["count"], adapter
+                            )
                 return 0 if df.empty else len(df)
             except Exception as exc:
                 if attempt < self.MAX_RETRIES:

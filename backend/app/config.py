@@ -44,7 +44,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse, urlunparse
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -457,6 +457,15 @@ class Settings(BaseSettings):
     bars_redis_cache_ttl_seconds: int = Field(
         default_factory=lambda: _load_py_config().get("BARS_REDIS_CACHE_TTL_SECONDS", 60),
         description="Redis 缓存 TTL（秒）",
+    )
+    bars_fetch_processes: int = Field(
+        default_factory=lambda: _load_py_config().get("PANJI_BARS_FETCH_PROCESSES", 1),
+        validation_alias=AliasChoices(
+            "PANJI_BARS_FETCH_PROCESSES", "bars_fetch_processes"
+        ),
+        ge=1,
+        le=8,
+        description="盘后行情 provider spawn 进程数；1 保持串行，合法范围 1-8",
     )
 
     # 板块同步开关（CHANGE-20260716-007：pywencai provider 已上线）

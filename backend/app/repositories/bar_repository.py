@@ -63,7 +63,7 @@ if TYPE_CHECKING:
     from sqlalchemy.sql.expression import Executable
 
     # [F1B-1] 仅类型引用，避免 repository → services 运行期循环依赖
-    from app.services.bars_fetch_worker import DailyProviderPayload
+    from app.services.bars_fetch_worker import DailyProviderPayload, MinuteProviderPayload
 
     class _AdjFactorAdapterLike(Protocol):
         """_calculate_adj_factor 所需的 pytdx 适配器接口（结构化类型）。"""
@@ -2024,6 +2024,26 @@ async def _refresh_minute_period_canonical(
     result_df = raw_df.set_index("datetime")
     result_df.index.name = "trade_time"
     return result_df
+
+
+async def persist_minute_provider_payload(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    payload: MinuteProviderPayload,
+) -> int:
+    """Persist one canonical child minute payload in the parent process only."""
+    raw_df = payload.raw_df
+    if payload.raw_empty:
+        return 0
+    if payload.period == "15m":
+        return await _upsert_15min_bars(
+            session, instrument_id, raw_df, symbol=payload.symbol
+        )
+    if payload.period == "60m":
+        return await _upsert_60min_bars(
+            session, instrument_id, raw_df, symbol=payload.symbol
+        )
+    raise ValueError(f"unsupported minute period: {payload.period}")
 
 
 async def refresh_15min_bars(

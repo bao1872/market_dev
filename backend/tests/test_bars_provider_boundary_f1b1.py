@@ -391,13 +391,14 @@ def test_t13_fake_provider_buildable_without_db_env():
 # ===========================================================================
 
 
-def test_t14_scheduler_has_no_process_pool_wired():
-    """F1B-1 明确不接 ProcessPool：scheduler 不得引入 executor/pool 符号。"""
+def test_t14_scheduler_default_keeps_serial_fallback(monkeypatch):
+    """F1B-2 默认 workers=1 时继续使用已验证的 F1B-1 串行路径。"""
     from app.services import bars_scheduler_service as svc
 
-    assert not hasattr(svc, "ProcessPoolExecutor")
-    assert not hasattr(svc, "bars_fetch_processes")
-    assert not hasattr(svc.BarsSchedulerService, "fetch_processes")
+    monkeypatch.setattr(svc, "get_settings", lambda: SimpleNamespace(bars_fetch_processes=1))
+    service = svc.BarsSchedulerService()
+    assert service.fetch_processes == 1
+    assert service.last_process_metrics["pool_creations"] == 0
 
 
 def test_t14_refresh_daily_bars_uses_canonical_boundary():
