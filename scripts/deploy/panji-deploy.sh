@@ -1240,6 +1240,27 @@ _write_manifest() {
     printf '%s=%s\n' "$1" "$2" >>"${PRE_DEPLOY_MANIFEST_FILE}"
 }
 
+# [E2.1 P1-A §4] 在 checkout_target **之前**捕获 repo 派生的 PRE_DEPLOY owner。
+#
+# PRE_DEPLOY_REPO_SHA 与 PRE_DEPLOY_COMPOSE_DIGEST 都从 REPO_ROOT 读取
+# （git rev-parse HEAD / compose config）。一旦 checkout 到 TARGET_SHA，读到的就是
+# candidate(B)，而不是真正 mutation 前的 old runtime(A)。manifest 会在「回滚依据」
+# 的名义下记录 B，而 verify_rollback_owner 是对着 manifest 比对的 —— 于是 rollback
+# 会**假通过**，这比没有 manifest 更危险。
+#
+# 这里只捕获、**不做** fail-closed 判定：判定仍由 deploy() 内的
+# resolve_pre_deploy_runtime_owner 统一负责。若在 checkout 之前就 fail 退出，
+# deploy() 根本不会执行，会把构建 / 同步 / 门禁 / 回滚全部短路掉。
+capture_pre_checkout_repo_owners() {
+    PRE_CHECKOUT_REPO_SHA="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || true)"
+    # 取不到时优雅留空，交给 resolve 的显式 missing 判定，避免 set -e 中断。
+    PRE_CHECKOUT_COMPOSE_DIGEST="$(
+        cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
+    )" || PRE_CHECKOUT_COMPOSE_DIGEST=""
+    log "pre-checkout owner 捕获: repo_sha=${PRE_CHECKOUT_REPO_SHA:-<none>}"
+    log "pre-checkout owner 捕获: compose_digest=${PRE_CHECKOUT_COMPOSE_DIGEST:-<none>}"
+}
+
 resolve_pre_deploy_runtime_owner() {
     PRE_DEPLOY_MANIFEST_FILE="${PRE_DEPLOY_MANIFEST_FILE:-$(mktemp)}"
     : >"${PRE_DEPLOY_MANIFEST_FILE}"
@@ -1248,7 +1269,12 @@ resolve_pre_deploy_runtime_owner() {
     local repo_sha runtime_sha service image_id compose_digest
 
     # A. repo code identity
-    repo_sha="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || true)"
+    #    必须取 checkout **之前**捕获的 old runtime，而不是当前（已 checkout 到
+    #    TARGET_SHA 的）candidate。见 capture_pre_checkout_repo_owners。
+    repo_sha="${PRE_CHECKOUT_REPO_SHA:-}"
+    if [[ -z "${repo_sha}" ]]; then
+        repo_sha="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || true)"
+    fi
     [[ -z "${repo_sha}" ]] && missing+=("PRE_DEPLOY_REPO_SHA")
     _write_manifest PRE_DEPLOY_REPO_SHA "${repo_sha}"
 
@@ -1292,9 +1318,13 @@ resolve_pre_deploy_runtime_owner() {
     compose_digest=""
     # 取不到时必须**优雅**地留空并交给下面的显式 missing 判定处理；若让命令替换以
     # 非零退出，会在 set -e 下直接中断脚本，从而绕过 fail-closed 报告。
-    compose_digest="$(
-        cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
-    )" || compose_digest=""
+    #    同理必须取 checkout 之前的 compose 定义（compose 文件来自 repo 树）。
+    compose_digest="${PRE_CHECKOUT_COMPOSE_DIGEST:-}"
+    if [[ -z "${compose_digest}" ]]; then
+        compose_digest="$(
+            cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
+        )" || compose_digest=""
+    fi
     [[ -z "${compose_digest}" ]] && missing+=("PRE_DEPLOY_COMPOSE_DIGEST")
     _write_manifest PRE_DEPLOY_COMPOSE_DIGEST "${compose_digest}"
 
@@ -2026,9 +2056,14 @@ main() {
         # ——比没有 manifest 更危险，因为它会让 verify 假通过。
         #
         # 其余 owner（RUNTIME_SHA / container image identity）读的是 live runtime，
-        # 不受 checkout 影响，但统一在此处一次捕获，保证 manifest 属于同一时刻的
-        # old runtime 快照。
+        # 不受 checkout 影响。
         #
+        # 注意：这里只**捕获** repo 派生 owner，不做 fail-closed 判定 —— 判定仍在
+        # deploy() 内由 resolve_pre_deploy_runtime_owner 统一负责。若在 checkout
+        # 之前就 fail 退出，deploy() 根本不会执行，会把构建 / 同步 / 门禁 / 回滚
+        # 全部短路掉。
+        capture_pre_checkout_repo_owners
+
         checkout_target
 
         if ! deploy; then
