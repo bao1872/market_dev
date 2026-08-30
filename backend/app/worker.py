@@ -1423,8 +1423,21 @@ async def _after_close_poll_once() -> bool:
         _ORCHESTRATOR_LEASE_SECONDS,
         execute_after_close_run,
     )
+    from app.services.worker_pickup_admission_service import is_pickup_admitted
 
     async with AsyncSessionLocal() as db:
+        # [E2.1 P1-C] pickup admission：必须与 claim 在**同一个事务**内判定。
+        # 先以 FOR UPDATE 锁住 admission singleton 行，再 claim 的 FOR UPDATE SKIP LOCKED。
+        # 顺序不可颠倒，也不得拆成两个事务（那会留下 check→claim 的 TOCTOU，
+        # 使 "PAUSE 成功返回后不得再有新的 claim commit" 无法成立）。
+        # paused 时不得领取：job 保持 queued/resume_queued 原状态，不被 cancel/删除。
+        if not await is_pickup_admitted(db, "after_close_orchestrator"):
+            logger.info(
+                "[AfterCloseWorker] pickup 被 admission 暂停: scope=after_close_orchestrator"
+            )
+            await db.rollback()
+            return False
+
         # [AfterCloseWorker] - FOR UPDATE SKIP LOCKED 领取一个 queued 或 resume_queued 任务
         # [JOB-01] resume_queued 任务由 auto_resume_interrupted_after_close_runs 自动转换
         stmt = (
