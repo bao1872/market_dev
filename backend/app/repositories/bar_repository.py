@@ -51,7 +51,10 @@ from app.services.adjustment_factor_calculator import (
 )
 
 # [F1B-1] provider I/O 边界（spawn-safe，无 DB 依赖）
-from app.services.bars_fetch_worker import fetch_daily_provider_inputs
+from app.services.bars_fetch_worker import (
+    fetch_daily_provider_inputs,
+    fetch_period_provider_inputs,
+)
 from app.services.bars_validator import validate_bars
 
 if TYPE_CHECKING:
@@ -761,6 +764,7 @@ async def persist_daily_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
     prepared_df: pd.DataFrame,
+    symbol: str,
 ) -> int:
     """[F1B-1] parent/canonical 侧：**只做持久化**，不含 provider I/O 与纯计算。
 
@@ -774,9 +778,14 @@ async def persist_daily_bars(
         return 0
 
     # 写入前校验数据质量（与既有 _upsert_daily_bars 完全一致）
-    validation = validate_bars(prepared_df, "", "d")
+    # [F1B-1 correction] 保留 symbol 上下文，恢复旧 observability contract：
+    # 校验失败日志必须能定位到具体标的，不得退化为空字符串。
+    validation = validate_bars(prepared_df, symbol, "d")
     if not validation.is_valid:
-        logger.error("日线数据校验失败 errors=%s", validation.errors[:5])
+        logger.error(
+            "日线数据校验失败 symbol=%s errors=%s",
+            symbol, validation.errors[:5],
+        )
         return 0
 
     records = _df_to_upsert_records(
@@ -1394,7 +1403,7 @@ async def refresh_daily_bars(
         return payload.raw_df
 
     prepared = prepare_daily_bars(payload)
-    await persist_daily_bars(session, instrument_id, prepared)
+    await persist_daily_bars(session, instrument_id, prepared, symbol=symbol)
 
     # 旧实现 _upsert_daily_bars 会原地给 raw_df 补 adj_factor 列；
     # 这里改用 prepared（副本，已含 adj_factor），保持返回列一致。
@@ -1970,6 +1979,53 @@ async def fetch_15min_bars(
     return filtered if not filtered.empty else result_df
 
 
+async def _refresh_minute_period_canonical(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    symbol: str,
+    period: str,
+    count: int,
+    adapter: PytdxAdapter | None,
+) -> pd.DataFrame:
+    """[F1B-1 correction] 15m / 60m serial 统一走 canonical provider boundary。
+
+    与 serial d 一样使用 ``fetch_period_provider_inputs``（ONE CANONICAL
+    PROVIDER BOUNDARY）；persistence 继续复用既有 canonical
+    ``_upsert_15min_bars`` / ``_upsert_60min_bars`` —— 不新增第二套分钟
+    persistence（禁止 parallel_upsert_15m / parallel_upsert_60m）。
+
+    provider 异常语义与旧实现一致：log warning 后 re-raise，不新增 silent
+    fallback；empty provider result 直接返回空 DataFrame。
+
+    未来 workers>1 时，只需把**同一个** provider task 换到 spawn child 执行，
+    provider semantics 必须保持不变（SERIAL vs MULTIPROCESS 仅执行位置不同）。
+    """
+    pytdx = adapter or get_pytdx_adapter()
+    try:
+        payload = await asyncio.to_thread(
+            fetch_period_provider_inputs,
+            period, str(instrument_id), symbol, count=count, adapter=pytdx,
+        )
+    except Exception as exc:
+        logger.warning("pytdx 刷新 %s 失败 symbol=%s: %s", period, symbol, exc)
+        raise
+
+    raw_df = payload.raw_df
+    if payload.raw_empty:
+        return raw_df
+
+    if period == "15m":
+        await _upsert_15min_bars(session, instrument_id, raw_df, symbol, pytdx)
+    elif period == "60m":
+        await _upsert_60min_bars(session, instrument_id, raw_df, symbol, pytdx)
+    else:
+        raise ValueError(f"unsupported minute period: {period}")
+
+    result_df = raw_df.set_index("datetime")
+    result_df.index.name = "trade_time"
+    return result_df
+
+
 async def refresh_15min_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
@@ -1977,6 +2033,9 @@ async def refresh_15min_bars(
     adapter: PytdxAdapter | None = None,
 ) -> pd.DataFrame:
     """强制从 pytdx 拉取 15 分钟线并 upsert（供调度服务使用）。
+
+    [F1B-1 correction] provider I/O 经 canonical boundary 执行；
+    外部 signature 与返回契约不变，仍为串行（无 ProcessPool）。
 
     Args:
         session: 异步会话
@@ -1993,21 +2052,9 @@ async def refresh_15min_bars(
         logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
         return pd.DataFrame()
 
-    pytdx = adapter or get_pytdx_adapter()
-    try:
-        raw_df = await asyncio.to_thread(pytdx.get_15min_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("pytdx 刷新 15min 失败 symbol=%s: %s", symbol, exc)
-        raise
-
-    if raw_df.empty:
-        return raw_df
-
-    await _upsert_15min_bars(session, instrument_id, raw_df, symbol, pytdx)
-
-    result_df = raw_df.set_index("datetime")
-    result_df.index.name = "trade_time"
-    return result_df
+    return await _refresh_minute_period_canonical(
+        session, instrument_id, symbol, "15m", count, adapter,
+    )
 
 
 # ----- 60分钟线 -----
@@ -2203,21 +2250,9 @@ async def refresh_60min_bars(
         logger.warning("instrument 不存在 instrument_id=%s", instrument_id)
         return pd.DataFrame()
 
-    pytdx = adapter or get_pytdx_adapter()
-    try:
-        raw_df = await asyncio.to_thread(pytdx.get_60min_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("pytdx 刷新 60min 失败 symbol=%s: %s", symbol, exc)
-        raise
-
-    if raw_df.empty:
-        return raw_df
-
-    await _upsert_60min_bars(session, instrument_id, raw_df, symbol, pytdx)
-
-    result_df = raw_df.set_index("datetime")
-    result_df.index.name = "trade_time"
-    return result_df
+    return await _refresh_minute_period_canonical(
+        session, instrument_id, symbol, "60m", count, adapter,
+    )
 
 
 def apply_adj_factor_to_bars(

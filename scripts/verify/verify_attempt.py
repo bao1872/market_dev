@@ -494,7 +494,14 @@ class VerifyAttempt:
              # lineage、404/422/500 错误 body 可被 frontend extractReviewError 解析。
              # 自包含 synthetic universe，写入验证库 bz_stock_verify_<SHA>，不读 bz_stock。
              # 仅追加本单文件；不动态 discovery，不扩大为全量 -m postgres。
-             "tests/test_pg_review_http_runtime_c2.py"],
+             "tests/test_pg_review_http_runtime_c2.py",
+
+             # [F1B-1 CORRECTION / 2026-08-30] Bars canonical provider boundary
+             # persistence canary：daily/15m/60m insert+read-back、daily ON CONFLICT
+             # update/idempotency、minute adj_factor 映射、invalid/empty 零写入、
+             # persistence exception rollback。自包含 synthetic instrument，显式校验
+             # bz_stock_verify_<SHA> 且 != bz_stock；仅追加本文件，不动态 discovery。
+             "tests/test_pg_bars_provider_persistence_f1b1.py"],
             timeout=self.plan.timeouts["tests"],
         )
         if code != 0:

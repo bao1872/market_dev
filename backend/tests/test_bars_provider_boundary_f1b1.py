@@ -18,6 +18,8 @@ import pickle
 from concurrent.futures import ProcessPoolExecutor
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pandas as pd
 import pytest
@@ -405,3 +407,135 @@ def test_t14_refresh_daily_bars_uses_canonical_boundary():
     assert "fetch_daily_provider_inputs" in body, "refresh_daily_bars 必须走 provider boundary"
     assert "prepare_daily_bars" in body
     assert "persist_daily_bars" in body
+
+
+# ===========================================================================
+# F1B-1 correction — serial d/15m/60m actual call trace
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_serial_daily_refresh_calls_canonical_provider_boundary(monkeypatch):
+    instrument_id = "12345678-1234-1234-1234-123456789012"
+    provider = _provider(xdxr_mode=XDXR_NONE)
+    get_symbol = AsyncMock(return_value="000001")
+    persist = AsyncMock(return_value=10)
+    monkeypatch.setattr(repo, "_get_symbol", get_symbol)
+    monkeypatch.setattr(repo, "persist_daily_bars", persist)
+
+    result = await repo.refresh_daily_bars(
+        AsyncMock(), instrument_id, START, END, adapter=provider,
+    )
+
+    assert any(call.startswith("get_daily_bars:000001:") for call in provider.calls)
+    assert "get_xdxr_info:000001" in provider.calls
+    get_symbol.assert_awaited_once()
+    persist.assert_awaited_once()
+    assert persist.await_args.kwargs["symbol"] == "000001"
+    assert result.index.name == "trade_date"
+
+
+@pytest.mark.parametrize(
+    ("period", "refresh_name", "upsert_name", "provider_call", "count"),
+    [
+        ("15m", "refresh_15min_bars", "_upsert_15min_bars", "get_15min_bars", 8),
+        ("60m", "refresh_60min_bars", "_upsert_60min_bars", "get_60min_bars", 6),
+    ],
+)
+@pytest.mark.asyncio
+async def test_serial_minute_refresh_calls_canonical_provider_boundary(
+    monkeypatch, period, refresh_name, upsert_name, provider_call, count,
+):
+    instrument_id = "12345678-1234-1234-1234-123456789012"
+    provider = _provider()
+    get_symbol = AsyncMock(return_value="000001")
+    upsert = AsyncMock(return_value=count)
+    monkeypatch.setattr(repo, "_get_symbol", get_symbol)
+    monkeypatch.setattr(repo, upsert_name, upsert)
+
+    result = await getattr(repo, refresh_name)(
+        AsyncMock(), instrument_id, count=count, adapter=provider,
+    )
+
+    assert f"{provider_call}:000001:{count}" in provider.calls
+    get_symbol.assert_awaited_once()
+    upsert.assert_awaited_once()
+    assert upsert.await_args.args[1] == instrument_id
+    assert upsert.await_args.args[3] == "000001"
+    assert result.index.name == "trade_time"
+    assert len(result) == count
+
+
+@pytest.mark.parametrize(
+    "refresh_name",
+    [
+        "refresh_15min_bars",
+        "refresh_60min_bars",
+    ],
+)
+@pytest.mark.asyncio
+async def test_serial_minute_provider_exception_is_logged_and_raised(
+    monkeypatch, refresh_name,
+):
+    class RaisingProvider(FakeBarsProvider):
+        def get_15min_bars(self, symbol, count):
+            raise RuntimeError("minute provider failure")
+
+        def get_60min_bars(self, symbol, count):
+            raise RuntimeError("minute provider failure")
+
+    monkeypatch.setattr(repo, "_get_symbol", AsyncMock(return_value="000001"))
+    provider = RaisingProvider()
+
+    with pytest.raises(RuntimeError, match="minute provider failure"):
+        await getattr(repo, refresh_name)(AsyncMock(), "iid-1", adapter=provider)
+
+
+@pytest.mark.parametrize(
+    ("refresh_name", "upsert_name"),
+    [
+        ("refresh_15min_bars", "_upsert_15min_bars"),
+        ("refresh_60min_bars", "_upsert_60min_bars"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_serial_minute_empty_provider_result_writes_nothing(
+    monkeypatch, refresh_name, upsert_name,
+):
+    class EmptyProvider(FakeBarsProvider):
+        def get_15min_bars(self, symbol, count):
+            return pd.DataFrame()
+
+        def get_60min_bars(self, symbol, count):
+            return pd.DataFrame()
+
+    upsert = AsyncMock()
+    monkeypatch.setattr(repo, "_get_symbol", AsyncMock(return_value="000001"))
+    monkeypatch.setattr(repo, upsert_name, upsert)
+
+    result = await getattr(repo, refresh_name)(
+        AsyncMock(), "iid-1", adapter=EmptyProvider(),
+    )
+
+    assert result.empty
+    upsert.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_daily_validation_preserves_symbol_context(monkeypatch, caplog):
+    prepared = _provider().get_daily_bars("000001", START, END)
+    prepared["adj_factor"] = 1.0
+    validate = lambda frame, symbol, period: SimpleNamespace(  # noqa: E731
+        is_valid=False,
+        errors=[f"invalid fixture symbol={symbol} period={period}"],
+    )
+    monkeypatch.setattr(repo, "validate_bars", validate)
+    session = AsyncMock()
+
+    written = await repo.persist_daily_bars(
+        session, "iid-1", prepared, symbol="000001",
+    )
+
+    assert written == 0
+    session.execute.assert_not_awaited()
+    assert "symbol=000001" in caplog.text
