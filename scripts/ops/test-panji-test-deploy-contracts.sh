@@ -589,6 +589,21 @@ else
     bad "deploy() fallback cannot re-capture candidate as PRE_DEPLOY owner"
 fi
 
+# [E2.1 P1-A §2] resolve 内严禁存在 post-checkout fallback：
+# 本函数在 checkout_target 之后运行，任何重新推导都会拿到 candidate(B)。
+# 必须先剥离注释再判定：源码里的说明文字同样包含这些命令名。
+RESOLVE_CODE="$(printf '%s' "${RESOLVE_BODY}" | sed 's/#.*//')"
+if printf '%s' "${RESOLVE_CODE}" | grep -q 'git rev-parse HEAD'; then
+    bad "resolve has no post-checkout git rev-parse fallback"
+else
+    ok "resolve has no post-checkout git rev-parse fallback"
+fi
+if printf '%s' "${RESOLVE_CODE}" | grep -q 'COMPOSE_CMD} config'; then
+    bad "resolve has no post-checkout compose config fallback"
+else
+    ok "resolve has no post-checkout compose config fallback"
+fi
+
 # §5-b 真实 A→B 负向对照：A = HEAD，B = HEAD~1（两个真实可区分 SHA）
 AB_FIXTURE_RAN=false
 ORDER_LOG="${TMP_ROOT}/capture-order.log"
@@ -612,6 +627,59 @@ resume_queued:0" \
         ok "A->B capture does not record candidate B as PRE_DEPLOY_REPO_SHA"
     else
         bad "A->B capture does not record candidate B as PRE_DEPLOY_REPO_SHA (captured B=${SHA_B})"
+    fi
+
+    # ---- §4 compose A→B 行为级证明 ----
+    # compose 文件在 HEAD 与 HEAD~1 之间**无差异**，且 docker 是 mock，
+    # 因此无法用真实 compose 内容区分 A/B。这里构造 deterministic fixture：
+    # mock `docker compose config` 输出当前 `git rev-parse HEAD`，于是
+    #   捕获发生在 checkout 前（repo=A）→ digest = sha256(SHA_A)
+    #   若在 checkout 后 fallback 重算（repo=B）→ digest = sha256(SHA_B)
+    # 两者必然不同，因此可**行为级**判定捕获时机，而不只是 grep 源码。
+    COMPOSE_AB_MOCK="${TMP_ROOT}/compose-ab-mock"
+    mkdir -p "${COMPOSE_AB_MOCK}"
+    cp -a "${MOCK_BIN}/." "${COMPOSE_AB_MOCK}/"
+    cp "${MOCK_BIN}/docker" "${COMPOSE_AB_MOCK}/docker-orig"
+    cat > "${COMPOSE_AB_MOCK}/docker" <<'MOCKEOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "compose" ]]; then
+  git rev-parse HEAD 2>/dev/null || echo "no-head"
+  exit 0
+fi
+exec "$(dirname "$0")/docker-orig" "$@"
+MOCKEOF
+    chmod +x "${COMPOSE_AB_MOCK}/docker"
+
+    COMPOSE_AB_LOG="${TMP_ROOT}/compose-ab.log"
+    PATH="${COMPOSE_AB_MOCK}:${PATH}" \
+    PANJI_REPO_ROOT="${REPO_ROOT}" \
+    PANJI_LIVE_ROOT="${LIVE_ROOT}" \
+    PANJI_ENV_FILE="${ENV_FILE}" \
+    PANJI_STATE_FILE="${STATE_FILE}" \
+    PANJI_LOCK_FILE="${LOCK_FILE}" \
+    PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+        bash "${SERVER_SCRIPT}" "${SHA_B}" --dry-run >"${COMPOSE_AB_LOG}" 2>&1 || true
+
+    DIGEST_A="$(printf '%s\n' "${SHA_A}" | shasum -a 256 | awk '{print $1}')"
+    DIGEST_B="$(printf '%s\n' "${SHA_B}" | shasum -a 256 | awk '{print $1}')"
+    MANIFEST_DIGEST="$(grep -E '^  PRE_DEPLOY_COMPOSE_DIGEST=' "${COMPOSE_AB_LOG}" \
+        | head -1 | sed 's/^  PRE_DEPLOY_COMPOSE_DIGEST=//')"
+    if [[ "${DIGEST_A}" != "${DIGEST_B}" ]]; then
+        ok "compose A->B fixture is deterministic (DIGEST_A != DIGEST_B)"
+    else
+        bad "compose A->B fixture is deterministic (DIGEST_A != DIGEST_B)"
+    fi
+    if [[ -n "${MANIFEST_DIGEST}" && "${MANIFEST_DIGEST}" == "${DIGEST_A}" ]]; then
+        ok "compose capture records old runtime DIGEST_A"
+    else
+        bad "compose capture records old runtime DIGEST_A (manifest=${MANIFEST_DIGEST} A=${DIGEST_A})"
+    fi
+    if [[ "${MANIFEST_DIGEST}" != "${DIGEST_B}" ]]; then
+        ok "compose capture does not fall back to candidate DIGEST_B"
+    else
+        bad "compose capture does not fall back to candidate DIGEST_B (captured B=${DIGEST_B})"
     fi
 elif [[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no)" ]]; then
     bad "A->B fixture requires A != B"
