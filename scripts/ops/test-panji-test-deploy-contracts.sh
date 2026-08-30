@@ -554,6 +554,157 @@ else
     bad "rollback verification failure is fail-closed"
 fi
 
+
+# ============================================================
+# E2.1 P1-A 捕获顺序修正（§4 / §5）
+#
+# 独立审计发现：resolve_pre_deploy_runtime_owner 原先位于 deploy() 内，
+# 而 main() 的顺序是 checkout_target → deploy()，因此
+#   PRE_DEPLOY_REPO_SHA       = git rev-parse HEAD  → 读到 candidate(B)
+#   PRE_DEPLOY_COMPOSE_DIGEST = compose config      → 读到 candidate(B)
+# manifest 于是在「回滚依据」的名义下记录了 B。这比没有 manifest 更危险：
+# verify_rollback_owner 是对着 manifest 比对的，会**假通过**。
+# ============================================================
+
+# §5-a 结构锁：main() 中 pre-checkout 捕获点必须严格早于 checkout_target
+CAPTURE_LINE="$(grep -n '^        capture_pre_checkout_repo_owners$' "${SERVER_SCRIPT}" | head -1 | cut -d: -f1)"
+CHECKOUT_LINE="$(grep -n '^        checkout_target$' "${SERVER_SCRIPT}" | head -1 | cut -d: -f1)"
+if [[ -n "${CAPTURE_LINE}" && -n "${CHECKOUT_LINE}" ]] && [[ "${CAPTURE_LINE}" -lt "${CHECKOUT_LINE}" ]]; then
+    ok "PRE_DEPLOY capture point precedes checkout_target (capture@${CAPTURE_LINE} < checkout@${CHECKOUT_LINE})"
+else
+    bad "PRE_DEPLOY capture point precedes checkout_target (capture=${CAPTURE_LINE} checkout=${CHECKOUT_LINE})"
+fi
+# resolve 必须优先使用 pre-checkout 捕获值，而不是重新读（已 checkout 的）repo
+RESOLVE_BODY="$(sed -n '/^resolve_pre_deploy_runtime_owner() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${RESOLVE_BODY}" | grep -q 'PRE_CHECKOUT_REPO_SHA' \
+    && printf '%s' "${RESOLVE_BODY}" | grep -q 'PRE_CHECKOUT_COMPOSE_DIGEST'; then
+    ok "resolve uses pre-checkout captured owners instead of re-reading candidate"
+else
+    bad "resolve uses pre-checkout captured owners instead of re-reading candidate"
+fi
+# deploy() 内的兜底调用必须带 skip-if-resolved 守卫，否则会把 candidate 重新捕获
+if grep -q 'PRE_DEPLOY_RUNTIME_OWNER_RESOLVED}" != "true"' "${SERVER_SCRIPT}"; then
+    ok "deploy() fallback cannot re-capture candidate as PRE_DEPLOY owner"
+else
+    bad "deploy() fallback cannot re-capture candidate as PRE_DEPLOY owner"
+fi
+
+# §5-b 真实 A→B 负向对照：A = HEAD，B = HEAD~1（两个真实可区分 SHA）
+ORDER_LOG="${TMP_ROOT}/capture-order.log"
+SHA_A="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
+SHA_B="$(git -C "${REPO_ROOT}" rev-parse HEAD~1)"
+if [[ "${SHA_A}" != "${SHA_B}" ]] && [[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no)" ]]; then
+    PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+        run_deploy "${SHA_B}" --dry-run >"${ORDER_LOG}" 2>&1 || true
+    MANIFEST_REPO_SHA="$(grep -E '^  PRE_DEPLOY_REPO_SHA=' "${ORDER_LOG}" | head -1 | sed 's/^  PRE_DEPLOY_REPO_SHA=//')"
+    if [[ "${MANIFEST_REPO_SHA}" == "${SHA_A}" ]]; then
+        ok "A->B capture records old runtime A as PRE_DEPLOY_REPO_SHA"
+    else
+        bad "A->B capture records old runtime A as PRE_DEPLOY_REPO_SHA (manifest=${MANIFEST_REPO_SHA} A=${SHA_A})"
+    fi
+    if [[ "${MANIFEST_REPO_SHA}" != "${SHA_B}" ]]; then
+        ok "A->B capture does not record candidate B as PRE_DEPLOY_REPO_SHA"
+    else
+        bad "A->B capture does not record candidate B as PRE_DEPLOY_REPO_SHA (captured B=${SHA_B})"
+    fi
+elif [[ -z "$(git -C "${REPO_ROOT}" status --porcelain --untracked-files=no)" ]]; then
+    bad "A->B fixture requires A != B"
+else
+    bad "A->B fixture requires clean tracked worktree (it performs git checkout -f)"
+fi
+# 恢复仓库到测试前状态（run_deploy 内部会真的 checkout 到 TARGET_SHA）
+git -C "${REPO_ROOT}" checkout -f "${SHA_A}" >/dev/null 2>&1 || true
+git -C "${REPO_ROOT}" checkout -f dev >/dev/null 2>&1 || true
+
+# ============================================================
+# §7 pre-file failure 负向对照
+#
+# 与「owner missing → zero mutation」是**不同**的场景：
+# 这里 rollback owner 已正确捕获成功，只是在第一笔 live-file mutation
+# （update_env_file）之前就失败（活跃任务门禁拦截）。
+# 要求：runtime mutation = 0 且 restore_files_to_previous_sha = 0。
+# 若 MUTATION_STAGE 被提前标成 files，handler 会误判并主动 restore，
+# 凭空制造 env / rsync / RUNTIME_SHA 三处 mutation —— 正是要闭合的缺陷。
+# ============================================================
+PRE_FILE_LOG="${TMP_ROOT}/pre-file-failure.log"
+PRE_FILE_RC=0
+# 必须用 SHA_B（HEAD~1）而非 TARGET_SHA：active job gate 仅在 backend runtime
+# 会变更时启用；TARGET_SHA==HEAD 无任何变更，门禁根本不会执行，fixture 无效。
+PANJI_MOCK_PSQL_COUNTS="running:1
+queued:0
+resume_queued:0" \
+    run_deploy "${SHA_B}" --dry-run >"${PRE_FILE_LOG}" 2>&1 || PRE_FILE_RC=$?
+# fixture 说明：dry-run 下 active job gate 是否启用取决于是否检测到 backend 变更，
+# 难以稳定构造出「owner 已捕获 + 门禁拦截」的运行场景。因此这里锁定 handler 的
+# pre-mutation(none) 分支语义（源码级），并用可稳定复现的 runtime 断言锁住
+# 「restore 未被调用」—— 后者正是提前标 files 会违反的性质。
+HANDLER_NONE="$(sed -n '/case "${MUTATION_STAGE}" in/,/esac/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${HANDLER_NONE}" | grep -q 'none)'; then
+    ok "failure handler has explicit pre-mutation (none) branch"
+else
+    bad "failure handler has explicit pre-mutation (none) branch"
+fi
+if printf '%s' "${HANDLER_NONE}" | grep -q '不执行任何文件层恢复，也不执行容器级回滚'; then
+    ok "pre-mutation branch performs no file restore and no container rollback"
+else
+    bad "pre-mutation branch performs no file restore and no container rollback"
+fi
+if grep -qE '恢复代码与运行文件到 previous SHA|文件层已恢复到' "${PRE_FILE_LOG}"; then
+    bad "pre-file failure performs zero restore_files_to_previous_sha"
+    grep -E '恢复代码与运行文件到 previous SHA|文件层已恢复到' "${PRE_FILE_LOG}" >&2
+else
+    ok "pre-file failure performs zero restore_files_to_previous_sha"
+fi
+if printf '%s' "${HANDLER_NONE}" | grep -q 'mutation_stage=none'; then
+    ok "pre-file failure reports real mutation stage owner (stage=none)"
+else
+    bad "pre-file failure reports real mutation stage owner (stage=none)"
+fi
+
+# ============================================================
+# §6 mutation stage 线性化：不得在 build / 纯检查 / 分类之前提前标 files
+# ============================================================
+MUT_HELPER="$(sed -n '/^_mark_files_mutated() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${MUT_HELPER}" | grep -q 'MUTATION_STAGE="files"'; then
+    ok "file mutation stage is advanced by a dedicated owner"
+else
+    bad "file mutation stage is advanced by a dedicated owner"
+fi
+DEPLOY_HEAD="$(sed -n '/^deploy() {/,/^    # 1\. 运行环境镜像/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${DEPLOY_HEAD}" | grep -q 'MUTATION_STAGE="files"'; then
+    bad "deploy() does not pre-mark stage=files before build"
+else
+    ok "deploy() does not pre-mark stage=files before build"
+fi
+mut_all=true
+for mut in update_env_file sync_backend_runtime sync_frontend_runtime write_runtime_sha; do
+    mut_body="$(sed -n "/^${mut}() {/,/^}/p" "${SERVER_SCRIPT}")"
+    printf '%s' "${mut_body}" | grep -q '_mark_files_mutated' || mut_all=false
+done
+if [[ "${mut_all}" == "true" ]]; then
+    ok "all file-layer mutators advance mutation stage themselves"
+else
+    bad "all file-layer mutators advance mutation stage themselves"
+fi
+
+# ============================================================
+# §9 shared image_ref 冲突契约：禁止顺序 docker tag 静默覆盖
+# ============================================================
+PIN_BODY="$(sed -n '/^_pin_predeploy_image_refs() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${PIN_BODY}" | grep -q 'ref_to_id\[' \
+    && printf '%s' "${PIN_BODY}" | grep -q 'conflict'; then
+    ok "shared image_ref collision is detected before any tag"
+else
+    bad "shared image_ref collision is detected before any tag"
+fi
+if printf '%s' "${PIN_BODY}" | grep -q '禁止用一个服务覆盖另一个服务的镜像引用'; then
+    ok "shared image_ref collision fails closed without tagging"
+else
+    bad "shared image_ref collision fails closed without tagging"
+fi
+
 echo "----------------------------------------"
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]
