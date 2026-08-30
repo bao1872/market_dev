@@ -140,14 +140,14 @@ async def test_f1b1_serial_provider_to_postgres_contract(db_session) -> None:
         adapter=cast(PytdxAdapter, updated_provider),
     )
     assert await _count(db_session, BarDaily, instrument_id) == original_count
-    first_daily = await db_session.scalar(
-        select(BarDaily)
+    first_daily_close = await db_session.scalar(
+        select(BarDaily.close)
         .where(BarDaily.instrument_id == instrument_id)
         .order_by(BarDaily.trade_date)
         .limit(1)
     )
-    assert first_daily is not None
-    assert float(first_daily.close) == pytest.approx(float(updated_result.iloc[0]["close"]))
+    assert first_daily_close is not None
+    assert float(first_daily_close) == pytest.approx(float(updated_result.iloc[0]["close"]))
 
     db_session.add(
         BarDaily(
