@@ -698,6 +698,9 @@ sync_backend_runtime() {
         return 0
     fi
 
+    # [E2.1 P1-A §6] 由此 mutator 自己推进 mutation stage（dry-run 已提前 return）。
+    _mark_files_mutated
+
     mkdir -p "${LIVE_ROOT}/backend"
 
     rsync -a --delete \
@@ -728,6 +731,9 @@ sync_frontend_runtime() {
 
     [[ -d "${REPO_ROOT}/frontend/dist" ]] || fail "frontend/dist 不存在，前端构建可能失败"
 
+    # [E2.1 P1-A §6] 由此 mutator 自己推进 mutation stage（dry-run 已提前 return）。
+    _mark_files_mutated
+
     mkdir -p "${LIVE_ROOT}/frontend"
     rsync -a --delete \
         --exclude='.gitkeep' \
@@ -751,6 +757,9 @@ write_runtime_sha() {
         log "[dry-run] 原地写入 ${sha_file} = ${TARGET_SHA}（完整 SHA，保持 inode）"
         return 0
     fi
+
+    # [E2.1 P1-A §6] 由此 mutator 自己推进 mutation stage（dry-run 已提前 return）。
+    _mark_files_mutated
 
     mkdir -p "${LIVE_ROOT}"
 
@@ -813,6 +822,9 @@ update_env_file() {
     local tmp_file
     tmp_file="$(mktemp "${ENV_FILE}.XXXXXX")" || fail "无法创建临时文件"
     cp "${ENV_FILE}" "${tmp_file}"
+
+    # [E2.1 P1-A §6] 由此 mutator 自己推进 mutation stage（dry-run 已提前 return）。
+    _mark_files_mutated
 
     if [[ "${update_git_sha}" == "true" ]]; then
         awk -v sha="${short_sha}" -v bt="${build_time}" '
@@ -1367,6 +1379,32 @@ verify_rollback_owner() {
     return "${rc}"
 }
 
+# [E2.1 P1-A §6] 真实 runtime mutation 阶段的线性化标记。
+#
+# 只能由**真正执行写入**的 mutator 自己推进。禁止在任何预检 / 分类 / 构建 /
+# 纯检查步骤之前提前标 files —— 否则这些步骤失败时，failure handler 会误判
+# "文件已被改动、需要恢复"，从而主动执行 restore，凭空制造出 env / live rsync /
+# RUNTIME_SHA 三处 mutation。这正是 P1-A 要闭合的缺陷，提前标记等于把它换个位置
+# 重新引入。
+#
+# 因此：
+#   build_environment_images / build_frontend_dist 属**构建**，不推进 stage；
+#   update_env_file / sync_* / write_runtime_sha 属**文件层写入**，推进到 files；
+#   restart / recreate 属**容器层写入**，推进到 containers。
+_mark_files_mutated() {
+    if [[ "${MUTATION_STAGE}" == "none" ]]; then
+        MUTATION_STAGE="files"
+        log "  [mutation] 进入文件层 runtime mutation 区间（stage=files）"
+    fi
+}
+
+_mark_containers_mutated() {
+    if [[ "${MUTATION_STAGE}" != "containers" ]]; then
+        MUTATION_STAGE="containers"
+        log "  [mutation] 进入容器层 runtime mutation 区间（stage=containers）"
+    fi
+}
+
 deploy() {
     # 0. 活跃盘后任务 fail-closed 门禁（FIX B）：
     #    仅在 backend runtime 会变更时启用，并在任何 live runtime mutation
@@ -1379,12 +1417,15 @@ deploy() {
     #    必须早于 update_env_file / build / sync / write_runtime_sha /
     #    migration / restart；任一 mandatory owner 无法解析即 STOP（fail-closed）。
     FAILURE_STAGE="pre_deploy_rollback_owner"
-    resolve_pre_deploy_runtime_owner || return 1
-
-    # [E2.1 P1-A §3] 从这里开始进入 runtime mutation 区间（文件层）。
-    MUTATION_STAGE="files"
+    # 主流程已在 checkout_target 之前完成捕获（见 main 中 §4 捕获点），此处仅作
+    # 防御性兜底：已解析则跳过，避免重复捕获把 candidate 当成 PRE_DEPLOY owner。
+    if [[ "${PRE_DEPLOY_RUNTIME_OWNER_RESOLVED}" != "true" ]]; then
+        resolve_pre_deploy_runtime_owner || return 1
+    fi
 
     # 1. 运行环境镜像：任意 environment_changed → 按同一 GIT_SHA tag 组整体构建。
+    #    注意：MUTATION_STAGE 不在这里提前推进——构建属**非文件层写入**，
+    #    真正的 mutation stage 由各 mutator 自己推进（见 _mark_files_mutated）。
     #    无 environment_changed → 零构建，GIT_SHA 保持不变。
     FAILURE_STAGE="environment_images"
     if environment_changed; then
@@ -1476,8 +1517,8 @@ deploy() {
         FAILURE_STAGE="active_job_gate_pre_restart"
         guard_active_after_close_jobs || return 1
         FAILURE_STAGE="restart"
-        # [E2.1 P1-A §3] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
-        MUTATION_STAGE="containers"
+        # [E2.1 P1-A §6] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
+        _mark_containers_mutated
         restart_services "${restart_list[@]}" || return 1
     fi
 
@@ -1787,7 +1828,40 @@ handle_migration_failure() {
 _pin_predeploy_image_refs() {
     [[ -n "${PRE_DEPLOY_MANIFEST_FILE}" && -f "${PRE_DEPLOY_MANIFEST_FILE}" ]] || return 0
 
-    local rc=0 line service image_id image_ref
+    # [E2.1 P1-A §9] shared image_ref 冲突必须先判定，再决定如何恢复。
+    #
+    # 允许：A. service 级精确恢复（各服务 ref 互不相同，可逐个钉回）
+    #       B. pre-mutation / pre-restore fail closed
+    # 禁止：顺序 docker tag 同一个 ref —— 最后一个会静默覆盖前面所有服务，
+    #       使 rollback 表面上成功、实际只恢复了其中一个服务。
+    #
+    # 因此：同一 ref 对应多个不同 immutable image_id 时，无法确定唯一正确目标，
+    # 选 B：立即 fail closed，不做任何 tag。
+    local -A ref_to_id=()
+    local conflict=0
+    while IFS= read -r line; do
+        service="${line#PRE_DEPLOY_IMAGE_REF:}"
+        service="${service%%=*}"
+        image_ref="${line#*=}"
+        [[ -n "${image_ref}" ]] || continue
+        image_id="$(sed -n "s/^PRE_DEPLOY_IMAGE_ID:${service}=//p" "${PRE_DEPLOY_MANIFEST_FILE}" | head -1)"
+        [[ -n "${image_id}" ]] || continue
+
+        if [[ -n "${ref_to_id[${image_ref}]:-}" && "${ref_to_id[${image_ref}]}" != "${image_id}" ]]; then
+            log "!! shared image_ref 冲突：ref=${image_ref} 同时对应 ${ref_to_id[${image_ref}]} 与 ${image_id}（service=${service}）!!"
+            conflict=1
+            continue
+        fi
+        ref_to_id["${image_ref}"]="${image_id}"
+    done < <(grep '^PRE_DEPLOY_IMAGE_REF:' "${PRE_DEPLOY_MANIFEST_FILE}")
+
+    if [[ "${conflict}" -ne 0 ]]; then
+        log "ROLLBACK_STATUS=FAILED: shared image_ref 冲突，无法确定唯一 immutable 恢复目标"
+        log "  未执行任何 docker tag —— 禁止用一个服务覆盖另一个服务的镜像引用"
+        return 1
+    fi
+
+    local rc=0
     while IFS= read -r line; do
         service="${line#PRE_DEPLOY_IMAGE_REF:}"
         service="${service%%=*}"
@@ -1942,6 +2016,25 @@ main() {
         }
         classify_changes
         apply_first_live_deploy_override
+
+        # [E2.1 P1-A §4] PRE_DEPLOY owner 的**唯一**捕获点，必须早于 checkout_target。
+        #
+        # 原因：PRE_DEPLOY_REPO_SHA 与 PRE_DEPLOY_COMPOSE_DIGEST 都从 REPO_ROOT 读取
+        # （git rev-parse HEAD / compose config）。一旦 checkout 到 TARGET_SHA，
+        # 读到的就是 candidate(B) 而不是真正 mutation 前的 old runtime(A)。
+        # 那样 manifest 会在「回滚依据」的名义下把 B 记成旧版本，rollback 随即失效
+        # ——比没有 manifest 更危险，因为它会让 verify 假通过。
+        #
+        # 其余 owner（RUNTIME_SHA / container image identity）读的是 live runtime，
+        # 不受 checkout 影响，但统一在此处一次捕获，保证 manifest 属于同一时刻的
+        # old runtime 快照。
+        #
+        # 此处失败 = 尚未 checkout = 零 runtime mutation，直接 fail，不进入 deploy()。
+        FAILURE_STAGE="pre_deploy_rollback_owner"
+        resolve_pre_deploy_runtime_owner || {
+            log "!!! PRE_DEPLOY owner 捕获失败：尚未 checkout，零 runtime mutation !!!"
+            fail "pre_deploy_rollback_owner_unresolved：PRE_DEPLOY owner 无法完整解析，已停止（未产生任何 runtime mutation）"
+        }
 
         checkout_target
 
