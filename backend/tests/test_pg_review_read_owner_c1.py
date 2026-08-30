@@ -807,9 +807,13 @@ async def test_f1c_pg_publication_real_failure_blocked():
             await publish_review(s, run)
         blockers = list(exc.value.blockers)
         assert blockers, "真实失败必须给出 blockers，不得 false-green 发布"
-        assert any("failed" in str(b).lower() for b in blockers), (
-            f"blockers 必须点明失败项: {blockers}"
+        # blocker 文案由真实 owner 提供（中文），断言其**语义**而非固定英文子串：
+        # 必须点明"未成功终态项 / system-level failure"，并给出失败项数量。
+        joined = " ".join(str(b) for b in blockers)
+        assert "未成功终态项" in joined or "system-level" in joined.lower(), (
+            f"blockers 必须点明未成功终态项: {blockers}"
         )
+        assert "1" in joined, f"blocker 必须含未成功项数量: {blockers}"
         await s.rollback()
 
         await _clean_pointers(s, F1C_T)
