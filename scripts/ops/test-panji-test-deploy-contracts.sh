@@ -74,6 +74,14 @@ if [[ "${1:-}" == "exec" ]]; then
   [[ -n "${PANJI_MOCK_PSQL_ROWS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_ROWS}"
   exit 0
 fi
+# [E2.1 P1-A] compose config：用于 effective compose runtime definition digest。
+#   PANJI_MOCK_COMPOSE_FAIL=1 模拟无法取得 compose owner（必须 fail-closed）。
+if [[ "${1:-}" == "compose" ]]; then
+  if [[ "${PANJI_MOCK_COMPOSE_FAIL:-0}" == "1" ]]; then
+    exit 1
+  fi
+  exit 0
+fi
 exit 0
 EOF
 cat > "${MOCK_BIN}/flock" <<'EOF'
@@ -455,6 +463,95 @@ if printf '%s' "${GUARD_BODY}" | grep -q 'FROM scheduler_job_runs'; then
     ok "job gate queries scheduler_job_runs read path"
 else
     bad "job gate queries scheduler_job_runs read path"
+fi
+
+# --- E2.1 P1-A：pre-deploy runtime manifest / rollback owner ---
+echo "== E2.1 P1-A pre-deploy rollback owner =="
+
+MANIFEST_LOG="${TMP_ROOT}/manifest.log"
+
+# A. 正常路径必须在任何 mutation 之前解析出完整 manifest
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${MANIFEST_LOG}" 2>&1
+if grep -q 'ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=PASS' "${MANIFEST_LOG}"; then
+    ok "pre-deploy rollback owner resolved before mutation"
+else
+    bad "pre-deploy rollback owner resolved before mutation"
+fi
+# 复合 owner 必须都出现在 manifest 中（Live-Mount 不是"一个 image tag"）
+manifest_ok=true
+for key in PRE_DEPLOY_REPO_SHA PRE_DEPLOY_RUNTIME_SHA PRE_DEPLOY_COMPOSE_DIGEST; do
+    grep -q "^  ${key}=" "${MANIFEST_LOG}" || manifest_ok=false
+done
+# per-service immutable container runtime identity（不得只记 backend）
+service_image_keys="$(grep -cE '^  PRE_DEPLOY_IMAGE_ID:[A-Za-z0-9_-]+=' "${MANIFEST_LOG}")"
+if [[ "${manifest_ok}" == "true" ]] && [[ "${service_image_keys}" -ge 2 ]]; then
+    ok "manifest records composite runtime owners incl. per-service image ids"
+else
+    bad "manifest records composite runtime owners incl. per-service image ids (keys=${service_image_keys})"
+fi
+
+# B. 缺失 mandatory owner ⇒ STOP BEFORE MUTATION，且 mutation 计数为 0
+MISSING_LOG="${TMP_ROOT}/missing-owner.log"
+missing_rc=0
+PANJI_MOCK_COMPOSE_FAIL=1 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${MISSING_LOG}" 2>&1 || missing_rc=$?
+if [[ "${missing_rc}" -ne 0 ]] \
+    && grep -q 'ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=FAIL' "${MISSING_LOG}" \
+    && grep -q 'PRE_DEPLOY_COMPOSE_DIGEST' "${MISSING_LOG}"; then
+    ok "missing rollback owner stops deployment"
+else
+    bad "missing rollback owner stops deployment"
+fi
+# 真正的负向对照：不得触达任何 **runtime** mutation 步骤。
+# 注意：`git checkout -f <sha>` 发生在 deploy() 之前的 validate/classify 阶段，
+# 只改动远端仓库源码树（分类变更范围所必需），**不属于** runtime mutation；
+# runtime owner 是 env 文件 / live mount rsync / RUNTIME_SHA / 容器重建。
+if grep -qE '\[dry-run\] 原地写入|\[dry-run\] 将更新 .*market\.env|\[dry-run\] rsync|\[dry-run\] 将执行: docker compose.{0,80}up' "${MISSING_LOG}"; then
+    bad "missing owner performs zero runtime mutation"
+    grep -E '\[dry-run\] 原地写入|\[dry-run\] 将更新 .*market\.env|\[dry-run\] rsync|\[dry-run\] 将执行: docker compose.{0,80}up' "${MISSING_LOG}" >&2
+else
+    ok "missing owner performs zero runtime mutation"
+fi
+
+# C. migration 失败专用路径：服务未 mutation 前不得 recreate 容器
+MIGRATION_BODY="$(sed -n '/^handle_migration_failure() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${MIGRATION_BODY}" | grep -qE 'compose.{0,40}up|force-recreate'; then
+    bad "migration failure path does not recreate containers"
+else
+    ok "migration failure path does not recreate containers"
+fi
+if printf '%s' "${MIGRATION_BODY}" | grep -q '服务未重启'; then
+    ok "migration failure path states runtime untouched"
+else
+    bad "migration failure path states runtime untouched"
+fi
+# 不得 false-claim 数据库已回滚
+if printf '%s' "${MIGRATION_BODY}" | grep -q '没有也不会自动回滚数据库'; then
+    ok "migration failure does not claim DB rollback"
+else
+    bad "migration failure does not claim DB rollback"
+fi
+
+# D. rollback 完成调用 ≠ success：必须有独立 verify owner
+ROLLBACK_BODY="$(sed -n '/^rollback() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${ROLLBACK_BODY}" | grep -q 'verify_rollback_owner'; then
+    ok "rollback calls independent verify owner"
+else
+    bad "rollback calls independent verify owner"
+fi
+# 验证失败时不得打印"回滚完成"（该语义属于独立 verify owner）
+VERIFY_ROLLBACK_BODY="$(sed -n '/^verify_rollback_owner() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${VERIFY_ROLLBACK_BODY}" | grep -q 'MANUAL_INTERVENTION_REQUIRED=TRUE' \
+    && printf '%s' "${ROLLBACK_BODY}" | grep -q '保持 fail-closed，不声称回滚完成'; then
+    ok "rollback verification failure is fail-closed"
+else
+    bad "rollback verification failure is fail-closed"
 fi
 
 echo "----------------------------------------"

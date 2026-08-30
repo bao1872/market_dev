@@ -1188,6 +1188,141 @@ guard_active_after_close_jobs() {
     log "无强制阻塞盘后长任务，继续部署"
 }
 
+# ---------------------------------------------------------------------------
+# [E2.1 P1-A] Pre-deploy runtime manifest —— Live-Mount composite rollback owner
+#
+# 当前是 Live-Mount 运行时，**运行中的 runtime 由多个 owner 复合决定**：
+#   A. repo / live-mounted 代码 identity
+#   B. RUNTIME_SHA（Live Mount 运行时标识）
+#   C. 每个受影响服务的 container runtime identity（immutable image content ID，
+#      **不是** mutable tag —— Phase E 已实测运行镜像组可能既非 target 也非
+#      previous deploy SHA，会被 cleanup_resources() 精确回收）
+#   D. effective compose runtime definition digest
+#
+# 因此 "git checkout PREVIOUS_SHA" **不等于**恢复部署前真实 runtime。
+# 必须在任何 destructive runtime mutation 之前一次性解析并固化上述 owner；
+# 任一项 mandatory owner 无法解析 → STOP BEFORE MUTATION，不允许
+# "先部署、失败后再想办法"，也禁止通过 latest / 当前 mutable tag /
+# 重新 build 旧源码来猜 rollback target。
+# ---------------------------------------------------------------------------
+PRE_DEPLOY_MANIFEST_FILE=""
+PRE_DEPLOY_RUNTIME_OWNER_RESOLVED=false
+
+_write_manifest() {
+    printf '%s=%s\n' "$1" "$2" >>"${PRE_DEPLOY_MANIFEST_FILE}"
+}
+
+resolve_pre_deploy_runtime_owner() {
+    PRE_DEPLOY_MANIFEST_FILE="${PRE_DEPLOY_MANIFEST_FILE:-$(mktemp)}"
+    : >"${PRE_DEPLOY_MANIFEST_FILE}"
+
+    local missing=()
+    local repo_sha runtime_sha service image_id compose_digest
+
+    # A. repo code identity
+    repo_sha="$(cd "${REPO_ROOT}" && git rev-parse HEAD 2>/dev/null || true)"
+    [[ -z "${repo_sha}" ]] && missing+=("PRE_DEPLOY_REPO_SHA")
+    _write_manifest PRE_DEPLOY_REPO_SHA "${repo_sha}"
+
+    # B. RUNTIME_SHA
+    #    语义分层：
+    #      - LIVE_ROOT 目录都不存在 → **无前 live runtime**（如 dry-run、尚未挂载），
+    #        没有可回滚对象，属合法无前状态，不强制；
+    #      - LIVE_ROOT 存在但 RUNTIME_SHA 缺失 → 异常，必须 fail-closed；
+    #      - 首次 Live Mount → 合法无前状态。
+    runtime_sha=""
+    if [[ -f "${LIVE_ROOT}/RUNTIME_SHA" ]]; then
+        runtime_sha="$(tr -d '[:space:]' <"${LIVE_ROOT}/RUNTIME_SHA")"
+    fi
+    if [[ -d "${LIVE_ROOT}" && ! -f "${LIVE_ROOT}/RUNTIME_SHA" \
+        && "${FIRST_LIVE_DEPLOY}" != "true" ]]; then
+        missing+=("PRE_DEPLOY_RUNTIME_SHA")
+    fi
+    if [[ ! -d "${LIVE_ROOT}" ]]; then
+        _write_manifest PRE_DEPLOY_NO_PRIOR_LIVE_RUNTIME true
+    fi
+    _write_manifest PRE_DEPLOY_RUNTIME_SHA "${runtime_sha}"
+
+    # C. per-service immutable container runtime identity
+    #    首次 Live Mount 时容器尚不存在，属合法无前状态。
+    local services=("${PYTHON_SERVICES[@]}" frontend)
+    for service in "${services[@]}"; do
+        image_id="$(docker inspect "${service}" --format '{{.Image}}' 2>/dev/null || true)"
+        if [[ -z "${image_id}" && "${FIRST_LIVE_DEPLOY}" != "true" ]]; then
+            missing+=("PRE_DEPLOY_IMAGE_ID:${service}")
+        fi
+        _write_manifest "PRE_DEPLOY_IMAGE_ID:${service}" "${image_id}"
+    done
+
+    # D. effective compose runtime definition digest（不用文件 mtime）
+    compose_digest=""
+    # 取不到时必须**优雅**地留空并交给下面的显式 missing 判定处理；若让命令替换以
+    # 非零退出，会在 set -e 下直接中断脚本，从而绕过 fail-closed 报告。
+    compose_digest="$(
+        cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
+    )" || compose_digest=""
+    [[ -z "${compose_digest}" ]] && missing+=("PRE_DEPLOY_COMPOSE_DIGEST")
+    _write_manifest PRE_DEPLOY_COMPOSE_DIGEST "${compose_digest}"
+
+    if [[ "${#missing[@]}" -gt 0 ]]; then
+        log "!!! PRE-DEPLOY ROLLBACK OWNER 无法完整解析，STOP BEFORE MUTATION !!!"
+        log "ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=FAIL"
+        log "缺失 mandatory owner:"
+        local m
+        for m in "${missing[@]}"; do log "  ${m}"; done
+        return 1
+    fi
+
+    PRE_DEPLOY_RUNTIME_OWNER_RESOLVED=true
+    log "ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=PASS"
+    log "pre-deploy runtime manifest:"
+    sed 's/^/  /' "${PRE_DEPLOY_MANIFEST_FILE}"
+    return 0
+}
+
+# rollback() 完成调用 ≠ rollback successful。必须由独立 verify owner 判定。
+verify_rollback_owner() {
+    local rc=0
+    local key expected actual
+
+    if [[ -z "${PRE_DEPLOY_MANIFEST_FILE}" || ! -f "${PRE_DEPLOY_MANIFEST_FILE}" ]]; then
+        log "ROLLBACK_STATUS=FAILED: 无 pre-deploy manifest，无法验证恢复"
+        return 1
+    fi
+
+    # B. RUNTIME_SHA
+    key="PRE_DEPLOY_RUNTIME_SHA"
+    expected="$(sed -n "s/^${key}=//p" "${PRE_DEPLOY_MANIFEST_FILE}")"
+    actual=""
+    [[ -f "${LIVE_ROOT}/RUNTIME_SHA" ]] && actual="$(tr -d '[:space:]' <"${LIVE_ROOT}/RUNTIME_SHA")"
+    if [[ -n "${expected}" && "${actual}" != "${expected}" ]]; then
+        log "ROLLBACK_STATUS=FAILED: RUNTIME_SHA 未恢复（expected=${expected} actual=${actual}）"
+        rc=1
+    fi
+
+    # C. per-service container runtime identity
+    while IFS= read -r line; do
+        local service exp act
+        service="${line#PRE_DEPLOY_IMAGE_ID:}"
+        service="${service%%=*}"
+        exp="${line#*=}"
+        [[ -z "${exp}" ]] && continue
+        act="$(docker inspect "${service}" --format '{{.Image}}' 2>/dev/null || true)"
+        if [[ "${act}" != "${exp}" ]]; then
+            log "ROLLBACK_STATUS=FAILED: ${service} 容器运行时未恢复（expected=${exp} actual=${act}）"
+            rc=1
+        fi
+    done < <(grep '^PRE_DEPLOY_IMAGE_ID:' "${PRE_DEPLOY_MANIFEST_FILE}")
+
+    if [[ "${rc}" -eq 0 ]]; then
+        log "ROLLBACK_STATUS=SUCCESS"
+    else
+        log "ROLLBACK_STATUS=FAILED"
+        log "MANUAL_INTERVENTION_REQUIRED=TRUE"
+    fi
+    return "${rc}"
+}
+
 deploy() {
     # 0. 活跃盘后任务 fail-closed 门禁（FIX B）：
     #    仅在 backend runtime 会变更时启用，并在任何 live runtime mutation
@@ -1195,6 +1330,12 @@ deploy() {
     #    以及替换 /opt/panji-live/backend/app 之前执行。活跃任务 → 立即停止部署。
     FAILURE_STAGE="active_job_gate"
     guard_active_after_close_jobs
+
+    # [E2.1 P1-A] 在任何 destructive runtime mutation 之前固化 rollback owner。
+    #    必须早于 update_env_file / build / sync / write_runtime_sha /
+    #    migration / restart；任一 mandatory owner 无法解析即 STOP（fail-closed）。
+    FAILURE_STAGE="pre_deploy_rollback_owner"
+    resolve_pre_deploy_runtime_owner || return 1
 
     # 1. 运行环境镜像：任意 environment_changed → 按同一 GIT_SHA tag 组整体构建。
     #    无 environment_changed → 零构建，GIT_SHA 保持不变。
@@ -1600,7 +1741,15 @@ rollback() {
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \
         "${PYTHON_SERVICES[@]}" frontend
 
-    log "回滚完成（已恢复到 ${PREVIOUS_SHA}）"
+    # [E2.1 P1-A] rollback() 完成调用 ≠ rollback successful。
+    # 必须由独立 verify owner 逐项核对 pre-deploy manifest 后才允许声称成功；
+    # 验证失败必须保持 fail-closed，不得打印"回滚完成"后继续。
+    if verify_rollback_owner; then
+        log "回滚完成（已恢复到 ${PREVIOUS_SHA}）"
+        return 0
+    fi
+    log "!!! 回滚验证未通过，保持 fail-closed，不声称回滚完成 !!!"
+    return 1
 }
 
 # 资源清理边界：
