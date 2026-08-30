@@ -968,6 +968,60 @@ else
   sed 's/^/    /' "${BEHAV_TAG_LOG}" >&2
 fi
 
+
+# ============================================================
+# §8 captured immutable owner survivability
+#
+# manifest 记住的 image ID 必须在 capture → 可能的 rollback 之间仍然存在。
+# 两个删除向量：
+#   (1) `docker image prune -f` 删除 dangling image —— 容器重建到新镜像后，
+#       旧 owner 可能已无任何 tag 引用；
+#   (2) 旧 SHA 镜像组回收 `docker rmi market-dev-*:<sha>`。
+# ============================================================
+CLEANUP_BODY="$(sed -n '/^cleanup_resources() {/,/^}/p' "${SERVER_SCRIPT}")"
+
+# --- 行为级：protect owner 必须给每个 captured ID 打上稳定保护标签 ---
+PROTECT_LIB="${TMP_ROOT}/protect-lib.sh"
+sed -n '/^protect_pre_deploy_image_owners() {/,/^}/p' "${SERVER_SCRIPT}" > "${PROTECT_LIB}"
+: > "${BEHAV_TAG_LOG}"
+cat > "${BEHAV_MANIFEST}" <<'EOF'
+PRE_DEPLOY_IMAGE_ID:backend=sha256:AAA
+PRE_DEPLOY_IMAGE_ID:worker-after-close=sha256:BBB
+EOF
+PATH="${BEHAV_MOCK}:${PATH}" BEHAV_TAG_LOG="${BEHAV_TAG_LOG}" bash -c "
+  log() { :; }
+  run_cmd() { \"\$@\"; }
+  PRE_DEPLOY_MANIFEST_FILE='${BEHAV_MANIFEST}'
+  source '${PROTECT_LIB}'
+  protect_pre_deploy_image_owners
+" >/dev/null 2>&1 || true
+if grep -q '^sha256:AAA -> panji-rollback-keep:backend-AAA$' "${BEHAV_TAG_LOG}" \
+  && grep -q '^sha256:BBB -> panji-rollback-keep:worker-after-close-BBB$' "${BEHAV_TAG_LOG}"; then
+  ok "captured immutable owners receive stable rollback protection tags"
+else
+  bad "captured immutable owners receive stable rollback protection tags"
+  sed 's/^/    /' "${BEHAV_TAG_LOG}" >&2
+fi
+
+# --- 行为级：保护必须先于 destructive prune（顺序即 invariant） ---
+PROTECT_AT="$(printf '%s' "${CLEANUP_BODY}" | grep -n 'protect_pre_deploy_image_owners' | head -1 | cut -d: -f1)"
+PRUNE_AT="$(printf '%s' "${CLEANUP_BODY}" | grep -n 'docker image prune' | head -1 | cut -d: -f1)"
+if [[ -n "${PROTECT_AT}" && -n "${PRUNE_AT}" && "${PROTECT_AT}" -lt "${PRUNE_AT}" ]]; then
+  ok "owner protection runs before destructive image prune (${PROTECT_AT} < ${PRUNE_AT})"
+else
+  bad "owner protection runs before destructive image prune (protect=${PROTECT_AT} prune=${PRUNE_AT})"
+fi
+
+# --- 旧 SHA 组回收必须按 content ID 跳过受保护的 owner ---
+# SHA tag 与 image content 并非一一对应（tag 可被重新指向别的 content），
+# 因此只有 content ID 才是可靠判据。
+if printf '%s' "${CLEANUP_BODY}" | grep -q 'KEEP_IMAGE_IDS' \
+  && printf '%s' "${CLEANUP_BODY}" | grep -q '跳过回收'; then
+  ok "old image reclamation skips captured rollback owners by content id"
+else
+  bad "old image reclamation skips captured rollback owners by content id"
+fi
+
 echo "----------------------------------------"
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]

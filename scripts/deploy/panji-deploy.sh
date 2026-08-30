@@ -1959,6 +1959,33 @@ _disk_free_mb() {
     df -Pk / | awk 'NR==2 {print $4}' 2>/dev/null || echo 0
 }
 
+# [E2.1 P1-A §8] 保护 manifest 记住的 immutable image owner 不被 cleanup 删除。
+#
+# 从 capture 到可能发生的 rollback 之间，cleanup_resources 会执行：
+#   - `docker image prune -f`：删除 **dangling**（无 tag 引用）镜像；
+#   - 旧 SHA 镜像组回收 `docker rmi market-dev-*:<sha>`。
+# 此时容器已被重建到新镜像，manifest 记住的旧 image 若只被一个不在保留集合里的
+# tag 引用（甚至完全没有 tag），就会被删除。那样 rollback 会拿着一个**已不存在**
+# 的 image ID 去恢复，而 verify 只会看到 mismatch —— 等于 manifest 记住了一个
+# 不可恢复的目标。
+#
+# 因此这里给每个 captured immutable owner 打上稳定的回滚保护标签，
+# 使其不再是 dangling，从而不会被 prune 回收。
+protect_pre_deploy_image_owners() {
+    [[ -n "${PRE_DEPLOY_MANIFEST_FILE}" && -f "${PRE_DEPLOY_MANIFEST_FILE}" ]] || return 0
+
+    local line service image_id
+    while IFS= read -r line; do
+        service="${line#PRE_DEPLOY_IMAGE_ID:}"
+        service="${service%%=*}"
+        image_id="${line#*=}"
+        [[ -n "${image_id}" ]] || continue
+        # 打稳定保护标签：source of truth 仍是 immutable content ID。
+        run_cmd docker tag "${image_id}" \
+            "panji-rollback-keep:${service}-${image_id#sha256:}" >/dev/null 2>&1 || true
+    done < <(grep '^PRE_DEPLOY_IMAGE_ID:' "${PRE_DEPLOY_MANIFEST_FILE}")
+}
+
 cleanup_resources() {
     if [[ "${IMAGES_BUILT}" != "true" ]]; then
         log "本轮未构建任何镜像（images_built=false），跳过资源清理"
@@ -1973,6 +2000,11 @@ cleanup_resources() {
     log "cleanup_disk_before_mb=${disk_before_mb}"
 
     run_cmd docker builder prune -f
+    # [E2.1 P1-A §8] 顺序至关重要：必须先保护 captured immutable owner，
+    # 再做任何 destructive cleanup —— prune 会删除 dangling image，而此时
+    # 容器已重建到新镜像，旧 owner 可能已无任何 tag 引用。
+    protect_pre_deploy_image_owners
+
     run_cmd docker image prune -f
 
     # 构造保留集合：当前运行 SHA、上一成功部署 SHA、rollback 标签、基础镜像。
@@ -1982,7 +2014,18 @@ cleanup_resources() {
             keep_sha="${keep_sha} ${candidate}"
         fi
     done
+    # [E2.1 P1-A §8] 除 SHA 保留集合外，还必须按 **content ID** 保护 manifest
+    # 记住的 immutable owner：SHA tag 与 image content 并非一一对应
+    # （tag 可被重新指向别的 content），因此只有 content ID 才是可靠判据。
+    KEEP_IMAGE_IDS=""
+    if [[ -n "${PRE_DEPLOY_MANIFEST_FILE}" && -f "${PRE_DEPLOY_MANIFEST_FILE}" ]]; then
+        while IFS= read -r _line; do
+            _id="${_line#*=}"
+            [[ -n "${_id}" ]] && KEEP_IMAGE_IDS="${KEEP_IMAGE_IDS} ${_id}"
+        done < <(grep '^PRE_DEPLOY_IMAGE_ID:' "${PRE_DEPLOY_MANIFEST_FILE}")
+    fi
     log "  旧 SHA 回收：保留 SHA 集合 =${keep_sha}，及所有 *-rollback 标签与基础镜像"
+    log "  受保护的 immutable rollback owner: ${KEEP_IMAGE_IDS}"
 
     local reclaimed=()
     # 枚举 market-dev-{backend,capture,frontend}:<sha> 的完整 SHA 组，仅在整组不在保留集合时删除。
@@ -2009,6 +2052,14 @@ cleanup_resources() {
         c_count="$(docker images -q "${capture_tag}" 2>/dev/null | wc -l | tr -d ' ')"
         f_count="$(docker images -q "${frontend_tag}" 2>/dev/null | wc -l | tr -d ' ')"
         if [[ "${b_count}" != "0" && "${c_count}" != "0" && "${f_count}" != "0" ]]; then
+            # [E2.1 P1-A §8] 若该组镜像正是 manifest 记住的 immutable owner，
+            # 删除它会让 rollback 指向一个已被删除的 image → 必须跳过。
+            local group_id
+            group_id="$(docker images -q --no-trunc "${backend_tag}" 2>/dev/null | head -1)"
+            if [[ -n "${group_id}" && "${KEEP_IMAGE_IDS}" == *"${group_id}"* ]]; then
+                log "  跳过回收（captured rollback owner 受保护）: ${sha}"
+                continue
+            fi
             log "  回收旧 SHA 镜像组: ${sha} (backend/capture/frontend)"
             run_cmd docker rmi "${backend_tag}" "${capture_tag}" "${frontend_tag}" >/dev/null 2>&1 || true
             reclaimed+=("${sha}")
