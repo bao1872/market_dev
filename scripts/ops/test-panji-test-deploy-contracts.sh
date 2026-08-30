@@ -114,7 +114,37 @@ code="${PANJI_MOCK_HEALTH_CODE:-200}"
 printf '%s' "${code}"
 exit 0
 EOF
-chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df" "${MOCK_BIN}/curl"
+# [E2.1 P1-C] worker pickup admission 操作面 mock。
+#   记录每次调用到 PANJI_ADMISSION_CALL_LOG；PANJI_MOCK_ADMISSION_FOREIGN=1 模拟
+#   已被他人/先前 pause 持有（acquire 失败 -> deploy 必须 fail-closed）。
+cat > "${MOCK_BIN}/panji-admission" <<'EOF'
+#!/usr/bin/env bash
+CALL_LOG="${PANJI_ADMISSION_CALL_LOG:-/tmp/panji_admission_calls.log}"
+echo "panji-admission $*" >>"${CALL_LOG}"
+sub="${1:-}"
+if [[ "${sub}" == "acquire" ]]; then
+  if [[ "${PANJI_MOCK_ADMISSION_FOREIGN:-0}" == "1" ]]; then
+    echo '{"acquired":false,"paused":true,"pause_token":"foreign-token","paused_by":"operator:x"}' >&2
+    exit 2
+  fi
+  tok="$(python3 -c 'import uuid;print(uuid.uuid4())' 2>/dev/null || echo "mock-$$")"
+  echo "{\"acquired\":true,\"token\":\"${tok}\",\"paused\":true}"
+  exit 0
+fi
+if [[ "${sub}" == "verify-own" ]]; then
+  exit 0
+fi
+if [[ "${sub}" == "release" ]]; then
+  echo '{"released":true}'
+  exit 0
+fi
+if [[ "${sub}" == "status" ]]; then
+  echo '{"installed":true,"paused":true,"pause_token":"x","paused_by":"x","reason":null,"paused_at":null}'
+  exit 0
+fi
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df" "${MOCK_BIN}/curl" "${MOCK_BIN}/panji-admission"
 
 TARGET_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 ENV_FILE="${TMP_ROOT}/market.env"
@@ -133,6 +163,8 @@ run_deploy() {
   PANJI_ENV_FILE="${ENV_FILE}" \
   PANJI_STATE_FILE="${STATE_FILE}" \
   PANJI_LOCK_FILE="${LOCK_FILE}" \
+  PANJI_ADMISSION_CLI="${MOCK_BIN}/panji-admission" \
+  PANJI_ADMISSION_CALL_LOG="${TMP_ROOT}/admission_calls.log" \
   bash "${SERVER_SCRIPT}" "$@"
 }
 
@@ -425,6 +457,43 @@ for st in running queued resume_queued; do
         bad "conflict state ${st} output carries job id / business_date / status"
     fi
 done
+
+# --- E2.1 P1-C：deploy admission 临界区（acquire / secondary gate / safe release）---
+echo "== E2.1 P1-C deployment admission critical section =="
+ADM_LOG="${TMP_ROOT}/admission_calls.log"
+: > "${ADM_LOG}"
+
+# A. first-live 部署（backend_runtime_changed=true）必须 acquire 并在成功后 release own pause，
+#    且 secondary gate 必须在第一笔 file mutation 前通过。
+FIRST_LOG="${TMP_ROOT}/first-live.log"
+PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+  run_deploy "${TARGET_SHA}" --dry-run >"${FIRST_LOG}" 2>&1 || true
+if grep -q 'ADMISSION_PAUSE_ACQUIRED' "${FIRST_LOG}" \
+   && grep -q 'ADMISSION_PAUSE_RELEASED' "${FIRST_LOG}"; then
+  ok "first-live deploy acquires then releases own pickup pause"
+else
+  bad "first-live deploy acquires then releases own pickup pause"
+fi
+if grep -q 'ADMISSION_SECONDARY_GATE_PASS' "${FIRST_LOG}"; then
+  ok "first-live deploy passes secondary pre-mutation gate"
+else
+  bad "first-live deploy passes secondary pre-mutation gate"
+fi
+
+# B. 已有他人/先前 pause（foreign）-> acquire 失败 -> 部署 fail-closed，且不得 release。
+: > "${ADM_LOG}"
+FOREIGN_LOG="${TMP_ROOT}/foreign.log"
+rc=0
+PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+  PANJI_MOCK_ADMISSION_FOREIGN=1 \
+  run_deploy "${TARGET_SHA}" --dry-run >"${FOREIGN_LOG}" 2>&1 || rc=$?
+if [[ "${rc}" -ne 0 ]] \
+   && grep -q 'ADMISSION_ACQUIRE_FAILED' "${FOREIGN_LOG}" \
+   && ! grep -q 'ADMISSION_PAUSE_RELEASED' "${FOREIGN_LOG}"; then
+  ok "foreign/active pause blocks deploy (fail-closed, never releases)"
+else
+  bad "foreign/active pause blocks deploy (fail-closed, never releases)"
+fi
 
 # D. 全部为 0 时放行（沿用 first-live dry-run succeeds 的成功路径 + 显式计数为 0）
 PANJI_MOCK_NO_LIVE_MOUNT=1 \

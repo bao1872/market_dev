@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# [E2.1 P1-C] worker pickup admission 操作面封装。
+# 统一调用 canonical admission service（backend/scripts/worker_pickup_admission.py），
+# 禁止 deploy shell / operator 直接 UPDATE worker_pickup_admission 表。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+BACKEND_DIR="${REPO_ROOT}/backend"
+
+PYTHON="${PANJI_BACKEND_PYTHON:-${BACKEND_DIR}/.venv/bin/python}"
+if [[ ! -x "${PYTHON}" ]]; then
+  PYTHON="$(command -v python3 || command -v python)"
+fi
+
+cd "${BACKEND_DIR}"
+exec "${PYTHON}" scripts/worker_pickup_admission.py "$@"

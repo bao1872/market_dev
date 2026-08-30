@@ -121,6 +121,17 @@ MIGRATION_ATTEMPTED=false
 MIGRATION_SUCCEEDED=false
 IMAGES_BUILT=false
 
+# [E2.1 P1-C] pickup admission 部署临界区 owner
+#   ADMISSION_OWNED      —— 本次 deploy 是否成功 acquire 了自己的 pause
+#   ADMISSION_ROLLBACK_FAILED —— 容器级回滚验证是否失败（失败则保持 paused，不释放）
+#   ADMISSION_TOKEN       —— 本次 acquire 得到的 pause token（release 仅匹配此 token）
+#   PANJI_ADMISSION_CLI   —— 操作面（canonical service），禁止 shell 直接 UPDATE 表；
+#                            可被测试/环境覆盖为 mock。
+ADMISSION_OWNED=false
+ADMISSION_ROLLBACK_FAILED=false
+ADMISSION_TOKEN=""
+PANJI_ADMISSION_CLI="${PANJI_ADMISSION_CLI:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../ops/panji-admission}"
+
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
 }
@@ -1217,6 +1228,54 @@ guard_active_after_close_jobs() {
 }
 
 # ---------------------------------------------------------------------------
+# [E2.1 P1-C] worker pickup admission 部署临界区（deployment safety）
+#
+# 与 after_close worker 共享同一个 PostgreSQL admission owner 行（worker_pickup_admission），
+# 行锁即 linearization point。deploy 只能 acquire / release "自己拥有"的 pause；
+# 已存在的他人/先前 operator pause 不得被本次 deploy 擅自释放或借用。
+# 操作面统一走 PANJI_ADMISSION_CLI（canonical service），禁止 shell 直接 UPDATE 表。
+# ---------------------------------------------------------------------------
+_admission_acquire() {
+    local out token
+    out="$("${PANJI_ADMISSION_CLI}" acquire \
+        --scope after_close_orchestrator \
+        --actor "deploy:${TARGET_SHA}" \
+        --reason "deployment ${TARGET_SHA}" 2>&1)" || {
+        fail "ADMISSION_ACQUIRE_FAILED: 无法获取 after-close pickup pause（DB 不可用或已有他人/先前 pause），拒绝部署（fail-closed）"
+    }
+    token="$(printf '%s' "${out}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
+    [[ -n "${token}" ]] || fail "ADMISSION_ACQUIRE_FAILED: 无法解析 pause token，拒绝部署（fail-closed）"
+    ADMISSION_TOKEN="${token}"
+    ADMISSION_OWNED="true"
+    log "ADMISSION_PAUSE_ACQUIRED: scope=after_close_orchestrator token=${token:0:8}...（deploy 获得 pickup 暂停所有权）"
+}
+
+_admission_secondary_gate() {
+    [[ "${ADMISSION_OWNED}" == "true" ]] || return 0
+    if ! "${PANJI_ADMISSION_CLI}" verify-own \
+        --scope after_close_orchestrator --token "${ADMISSION_TOKEN}" >/dev/null 2>&1; then
+        fail "ADMISSION_SECONDARY_GATE_FAILED: own pause 校验失败（可能已被释放/抢占），拒绝 runtime mutation（fail-closed）"
+    fi
+    guard_active_after_close_jobs || return 1
+    log "ADMISSION_SECONDARY_GATE_PASS: own pause 仍有效且 running=0，进入 runtime mutation"
+}
+
+_admission_release() {
+    [[ "${ADMISSION_OWNED}" == "true" ]] || return 0
+    if [[ "${ADMISSION_ROLLBACK_FAILED}" == "true" ]]; then
+        log "ADMISSION_KEEP_PAUSED: 回滚验证失败，保持 paused（MANUAL_INTERVENTION_REQUIRED），不释放"
+        return 0
+    fi
+    if "${PANJI_ADMISSION_CLI}" release \
+        --scope after_close_orchestrator --token "${ADMISSION_TOKEN}" >/dev/null 2>&1; then
+        log "ADMISSION_PAUSE_RELEASED: scope=after_close_orchestrator（本次 deploy 释放自己拥有的 pause）"
+    else
+        log "ADMISSION_RELEASE_FAILED: 释放 own pause 失败，需人工确认（不致命）"
+    fi
+    ADMISSION_OWNED="false"
+}
+
+# ---------------------------------------------------------------------------
 # [E2.1 P1-A] Pre-deploy runtime manifest —— Live-Mount composite rollback owner
 #
 # 当前是 Live-Mount 运行时，**运行中的 runtime 由多个 owner 复合决定**：
@@ -1441,6 +1500,12 @@ deploy() {
     FAILURE_STAGE="active_job_gate"
     guard_active_after_close_jobs
 
+    # [E2.1 P1-C] 部署临界区：acquire own admission pause，使 after_close worker 停止领取
+    # 新的 queued / resume_queued。与 worker claim 共享同一 PostgreSQL 行锁 linearization point。
+    if _backend_runtime_will_mutate; then
+        _admission_acquire || return 1
+    fi
+
     # [E2.1 P1-A] 在任何 destructive runtime mutation 之前固化 rollback owner。
     #    必须早于 update_env_file / build / sync / write_runtime_sha /
     #    migration / restart；任一 mandatory owner 无法解析即 STOP（fail-closed）。
@@ -1455,6 +1520,13 @@ deploy() {
     #    注意：MUTATION_STAGE 不在这里提前推进——构建属**非文件层写入**，
     #    真正的 mutation stage 由各 mutator 自己推进（见 _mark_files_mutated）。
     #    无 environment_changed → 零构建，GIT_SHA 保持不变。
+    # [E2.1 P1-C] 二次门禁：必须紧邻第一笔实际 runtime mutation（update_env_file，属文件层写入）
+    # 之前，再次确认 own pause 仍有效且 running=0，缩小 acquire→mutation 之间的 TOCTOU 窗口。
+    # 注意：不是仅放在 _mark_containers_mutated 之前——env/live 文件写入已属 runtime mutation。
+    if _backend_runtime_will_mutate; then
+        _admission_secondary_gate || return 1
+    fi
+
     FAILURE_STAGE="environment_images"
     if environment_changed; then
         update_env_file true
@@ -2136,17 +2208,27 @@ main() {
                     log "部署在任何 runtime mutation 之前失败（mutation_stage=none）："
                     log "  market.env / live files / RUNTIME_SHA / 容器 均未改动"
                     log "  不执行任何文件层恢复，也不执行容器级回滚"
+                    # [E2.1 P1-C] 未发生任何 runtime mutation，释放本次 own pause（无 restart，安全）。
+                    _admission_release
                     fail "部署失败（阶段: ${FAILURE_STAGE}），mutation_stage=none，未产生任何 runtime mutation"
                     ;;
                 files)
                     if [[ -n "${PREVIOUS_SHA}" ]]; then
                         restore_files_to_previous_sha
                     fi
+                    # [E2.1 P1-C] 文件层已恢复、服务未重启：释放本次 own pause。
+                    _admission_release
                     fail "部署失败（阶段: ${FAILURE_STAGE}），服务未重启，已恢复文件层"
                     ;;
                 containers)
-                    rollback
-                    fail "部署失败（阶段: ${FAILURE_STAGE}）并已执行容器级回滚"
+                    if rollback; then
+                        # [E2.1 P1-C] 回滚验证通过：释放本次 own pause。
+                        _admission_release
+                        fail "部署失败（阶段: ${FAILURE_STAGE}）并已执行容器级回滚"
+                    fi
+                    # [E2.1 P1-C] 回滚验证未通过：保持 paused，不释放（MANUAL_INTERVENTION_REQUIRED）。
+                    ADMISSION_ROLLBACK_FAILED=true
+                    fail "部署失败（阶段: ${FAILURE_STAGE}）回滚验证未通过，保持 paused（MANUAL_INTERVENTION_REQUIRED）"
                     ;;
                 *)
                     fail "部署失败（阶段: ${FAILURE_STAGE}），未知 mutation_stage=${MUTATION_STAGE}，保持 fail-closed"
@@ -2156,13 +2238,21 @@ main() {
 
         if ! verify_deployment; then
             # 核验发生在重启之后，属于容器级回滚场景。
-            rollback
+            if rollback; then
+                _admission_release
+            else
+                ADMISSION_ROLLBACK_FAILED=true
+            fi
             fail "部署核验失败并已回滚"
         fi
 
         if ! cleanup_resources; then
             # 清理后资源复检失败（OOM / 资源跌破阈值 / 限制未生效）→ 判部署失败。
-            rollback
+            if rollback; then
+                _admission_release
+            else
+                ADMISSION_ROLLBACK_FAILED=true
+            fi
             fail "部署后清理与资源复检失败（failure_stage=${FAILURE_STAGE}）并已回滚"
         fi
 
@@ -2175,6 +2265,9 @@ main() {
         log "  migration_attempted=${MIGRATION_ATTEMPTED} migration_succeeded=${MIGRATION_SUCCEEDED}"
         log "  images_built=${IMAGES_BUILT} services_restarted=${SERVICES_RESTARTED}"
         log "  repo HEAD = RUNTIME_SHA = version.runtime_git_sha = ${TARGET_SHA}"
+
+        # [E2.1 P1-C] 部署完整成功：释放本次 deploy 自己拥有的 pause。
+        _admission_release
 
     ) 200>"${LOCK_FILE}"
 }
