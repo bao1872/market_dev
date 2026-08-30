@@ -221,6 +221,7 @@ async def test_f1b1_serial_provider_to_postgres_contract(db_session) -> None:
         count=6,
         adapter=cast(PytdxAdapter, updated_minute_provider),
     )
+    db_session.expire_all()
     assert await _count(db_session, Bar15Min, instrument_id) == 8
     assert await _count(db_session, Bar60Min, instrument_id) == 6
     first_15m = await db_session.scalar(
