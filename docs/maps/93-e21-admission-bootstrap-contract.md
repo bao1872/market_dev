@@ -195,5 +195,49 @@ MANUAL_INTERVENTION_REQUIRED = TRUE
 
 ## 9. 当前实现状态
 
-本文为设计契约。实现与测试进行中；
-PRODUCTION_DB_MIGRATION = NO（migration 只在 verification DB 执行）。
+- canonical owner：`worker.py::_after_close_poll_once`（生产 after-close claim path；
+  内联 `SELECT ... FOR UPDATE SKIP LOCKED → running → commit`）。
+  `fenced_job_run_service.claim_next_job_run` 是 **Chip-consensus** claim helper，
+  **不是** after-close 生产 pickup path，不挂载 admission（已撤销扩张）。
+- admission 判定在同一事务首部：`is_pickup_admitted(db, "after_close_orchestrator")`
+  （service 内 `SELECT ... FOR UPDATE`），paused → 不执行 claim SELECT、正常返回。
+- migration 093：upgrade 建表并插入 singleton 行 `after_close_orchestrator`（active），
+  保证 admission-aware worker 启动前该行已存在；downgrade 删表。
+- operator / deploy 操作面：`backend/scripts/worker_pickup_admission.py` +
+  `scripts/ops/panji-admission`（canonical service），deploy 不得裸 UPDATE 表。
+- 测试证据：纯单元 13 passed；deploy 合同测试 P1-C 段 3 passed（acquire→release /
+  secondary gate / foreign pause fail-closed）；确定性 race 在 verification PostgreSQL 执行。
+- PRODUCTION_DB_MIGRATION = NO（migration 只在 verification DB 执行）。
+
+---
+
+## 10. FINDING (C) — Deployment Safety / P1
+
+- **SHOULD**：部署 admission 正式 PAUSED 后，after_close worker 不得再把
+  `queued` / `resume_queued` 转为 `running`；已 running 的任务继续自然完成。
+- **ACTUAL**：引用 `_after_close_poll_once` 当前 transaction（claim 与 admission 判定
+  在同一 `AsyncSessionLocal()` 事务、同一 singleton 行 `FOR UPDATE`）。
+- **GAP**：此前不存在与这个 claim transaction 共享 ownership boundary 的 admission state——
+  admission 判定与 claim 分属不同控制路径，存在 check→claim 的 TOCTOU 窗口。
+- **CLASS**：Deployment Safety
+- **SEVERITY**：P1
+- **CLOSED BY**：本实现——admission 行锁即唯一 linearization point；deploy acquire own pause
+  使 worker 在 deployment critical section 内停止领取新 queued/resume_queued；secondary
+  pre-mutation gate 在第一次实际 runtime mutation 前二次校验。
+
+---
+
+## 11. 缺行 / DB 错误 = FAIL CLOSED（审计 P1 修正）
+
+admission-aware runtime 下（migration 093 已插入 singleton 行）：
+
+- ROW ACTIVE  → 允许 claim
+- ROW PAUSED  → 不允许 claim（job 保持 queued / resume_queued）
+- ROW MISSING → **FAIL CLOSED**（不允许 claim）
+- DB ERROR    → **FAIL CLOSED**（不允许 claim）
+
+`SELECT ... FOR UPDATE` 在缺行时返回 0 行、根本不持有行锁；若把缺行视为 admitted，
+则 "PAUSE 成功后不得有新 claim" 的 linearization 不变量在缺行场景下完全失效。
+因此缺行 / 查询错误一律 fail-closed，绝不视为 admitted。
+
+旧（legacy）worker 不读取本表，其 pickup 由 §3 first-deploy drain 隔离，与本服务语义无关。
