@@ -41,6 +41,24 @@ if [[ "${1:-}" == "inspect" ]]; then
   printf '%s /var/lib/postgresql \n' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
   exit 0
 fi
+# [E2.1-R] `docker ps --filter "name=<c>" --format '{{.Names}}'` 用于 Scheduler
+# 单实例校验（count 必须 == 1）。默认 docker mock 不输出任何容器会让该校验
+# 恒为 0 并把 dry-run 判失败。这里按 --filter 回显一行容器名，使 count==1；
+# 置 PANJI_MOCK_PS_EMPTY=1 可模拟"容器不存在"。
+if [[ "${1:-}" == "ps" ]]; then
+  name=""
+  args=("$@")
+  for ((i = 0; i < ${#args[@]}; i++)); do
+    if [[ "${args[$i]}" == "--filter" ]]; then
+      name="${args[$((i + 1))]}"
+      name="${name#name=}"
+    fi
+  done
+  if [[ -n "${name}" && "${PANJI_MOCK_PS_EMPTY:-0}" != "1" ]]; then
+    printf '%s\n' "${name}"
+  fi
+  exit 0
+fi
 exit 0
 EOF
 cat > "${MOCK_BIN}/flock" <<'EOF'
@@ -63,7 +81,17 @@ cat > "${MOCK_BIN}/df" <<'EOF'
 printf 'Filesystem 1024-blocks      Used Available Capacity Mounted on\n'
 printf '/dev/mock   971350180  400000000  571350180      42%% /\n'
 EOF
-chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df"
+# [E2.1-R] curl mock：部署脚本用 `curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/v1/health`
+# 轮询等待 backend 健康（超时 120s）。开发机 8000 端口没有服务，真实 curl 会
+# 每次跑满 120s 超时并把 dry-run 判为失败，既掩盖合同验证也让 harness 极慢。
+# 这里 mock 出健康响应；可用 PANJI_MOCK_HEALTH_CODE 覆盖以模拟健康检查失败路径。
+cat > "${MOCK_BIN}/curl" <<'EOF'
+#!/usr/bin/env bash
+code="${PANJI_MOCK_HEALTH_CODE:-200}"
+printf '%s' "${code}"
+exit 0
+EOF
+chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df" "${MOCK_BIN}/curl"
 
 TARGET_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 ENV_FILE="${TMP_ROOT}/market.env"
