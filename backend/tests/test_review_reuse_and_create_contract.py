@@ -288,7 +288,8 @@ async def test_t7_resume_run_only_pending_skips_succeeded_scopes():
         patch.object(
             ros, "_compute_canonical_composition_phase", AsyncMock(return_value=None),
         ) as m_metrics,
-        patch.object(ros, "_count_scope_status", AsyncMock(return_value=(1, 1))),
+        # [F1C-A] _count_scope_status 现返回 (succeeded, skipped, failed)
+        patch.object(ros, "_count_scope_status", AsyncMock(return_value=(1, 0, 1))),
         patch.object(
             ros, "_aggregate_run_data_coverage", AsyncMock(return_value=0),
         ),
@@ -339,7 +340,8 @@ async def test_t7_resume_run_only_pending_false_includes_succeeded():
         patch.object(
             ros, "_compute_canonical_composition_phase", AsyncMock(return_value=None),
         ) as m_metrics,
-        patch.object(ros, "_count_scope_status", AsyncMock(return_value=(2, 0))),
+        # [F1C-A] _count_scope_status 现返回 (succeeded, skipped, failed)
+        patch.object(ros, "_count_scope_status", AsyncMock(return_value=(2, 0, 0))),
         patch.object(
             ros, "_aggregate_run_data_coverage", AsyncMock(return_value=0),
         ),

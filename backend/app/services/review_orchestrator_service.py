@@ -771,6 +771,11 @@ async def compute_run(
 
     succeeded = 0
     failed = 0
+    # [F1C-A] 合法跳过（非激活家族 / A 级概念 / 成员过小 / 当日无观察）必须与真实成功分开计数。
+    # 旧实现只要没抛异常就 succeeded += 1，导致 succeeded_scope_count = 全部 declared
+    # （生产 772），而持久化事实/组合只有 749 —— 把 23 个"按合同本就不落库"的 scope
+    # 计成成功，构成 false-green（PRD/发布门禁均把 skipped 定义为诊断性终态，非成功）。
+    skipped = 0
     # M4 post-prep attribution: after the instrumented chunked prep we enter
     # phases that previously had NO RSS boundary.  Each candidate owner below
     # (Historical Dynamics / Leadership / composition loop) gets its own marker.
@@ -811,7 +816,7 @@ async def compute_run(
     _log_rss("composition-loop-start", scope_count=len(scopes))
     for scope_idx, scope in enumerate(scopes, start=1):
         try:
-            await _compute_canonical_composition_phase(
+            composition = await _compute_canonical_composition_phase(
                 session,
                 run,
                 scope,
@@ -819,7 +824,12 @@ async def compute_run(
                 dynamics_map=dynamics_map,
                 leadership_map=leadership_map,
             )
-            succeeded += 1
+            # [F1C-A] 返回值是唯一成功判据：非 None = 已落库 canonical Fact + Composition；
+            # None = 合法跳过（run item 已被终态化为 SKIPPED），不得计入 succeeded。
+            if composition is None:
+                skipped += 1
+            else:
+                succeeded += 1
         except Exception as exc:  # noqa: BLE001
             failed += 1
             logger.exception(
@@ -864,6 +874,19 @@ async def compute_run(
     run.succeeded_scope_count = succeeded
     run.failed_scope_count = failed
     run.completed_at = datetime.now(UTC)
+    # [F1C-A] 显式记录四元计数，合同：declared == succeeded + skipped + failed。
+    # skipped 是**合法跳过**（诊断性终态，非成功也非失败），此前无任何计数位承载，
+    # 只能被错误并进 succeeded，掩盖 declared(772) 与 persisted(749) 的差额。
+    # metadata_json 是普通 JSONB mapped_column（无 MutableDict），必须整体重赋值。
+    run.metadata_json = {
+        **(getattr(run, "metadata_json", None) or {}),
+        "scope_execution": {
+            "declared": len(scopes),
+            "succeeded": succeeded,
+            "skipped": skipped,
+            "failed": failed,
+        },
+    }
     # [AUD-06 2026-08-07] coverage_ratio 表达真实有效样本覆盖率（数据口径），
     # 不再是 scope 执行成功率；执行率由 succeeded/expected 两列独立表达。
     run.coverage_ratio = await _aggregate_run_data_coverage(session, run)
@@ -1893,9 +1916,21 @@ async def resume_run(
     run.completed_at = datetime.now(UTC)
 
     # 重新统计 succeeded/failed scope（基于 item 状态）
-    final_succeeded, final_failed = await _count_scope_status(session, run.id)
+    final_succeeded, final_skipped, final_failed = await _count_scope_status(
+        session, run.id
+    )
     run.succeeded_scope_count = final_succeeded
     run.failed_scope_count = final_failed
+    # [F1C-A] 与 compute_run 同口径：declared == succeeded + skipped + failed
+    run.metadata_json = {
+        **(getattr(run, "metadata_json", None) or {}),
+        "scope_execution": {
+            "declared": int(run.expected_scope_count or 0),
+            "succeeded": final_succeeded,
+            "skipped": final_skipped,
+            "failed": final_failed,
+        },
+    }
     # [AUD-06 2026-08-07] 与主路径同口径：真实有效样本覆盖率
     run.coverage_ratio = await _aggregate_run_data_coverage(session, run)
 
@@ -1928,10 +1963,18 @@ async def resume_run(
 async def _count_scope_status(
     session: AsyncSession,
     run_id: uuid.UUID,
-) -> tuple[int, int]:
-    """统计 run 中 succeeded / failed scope 数（按 metrics phase 判定）。
+) -> tuple[int, int, int]:
+    """统计 run 中 succeeded / skipped / failed scope 数（按 metrics phase 判定）。
 
-    一个 scope 视为 succeeded 当 metrics phase 为 succeeded/skipped。
+    [F1C-A] 只有 metrics phase == succeeded 才算**真实成功**（该 scope 已落库
+    canonical Fact + Composition）。skipped 是**合法跳过的诊断性终态**
+    （非激活家族 market/major_index/style、A 级概念、成员数过小、当日无观察），
+    **不得**计入 succeeded —— 旧实现把 skipped 与 succeeded 合并计数，导致
+    succeeded_scope_count == declared(772) 而持久化事实/组合只有 749，
+    把 23 个按合同本就不落库的 scope 计成成功，构成 false-green。
+
+    Returns:
+        (succeeded, skipped, failed)
     """
     stmt = (
         select(
@@ -1946,13 +1989,16 @@ async def _count_scope_status(
     )
     result = await session.execute(stmt)
     succeeded = 0
+    skipped = 0
     failed = 0
     for _st, _sk, item_status in result:
-        if item_status in (ITEM_SUCCEEDED, ITEM_SKIPPED):
+        if item_status == ITEM_SUCCEEDED:
             succeeded += 1
+        elif item_status == ITEM_SKIPPED:
+            skipped += 1
         elif item_status == ITEM_FAILED:
             failed += 1
-    return succeeded, failed
+    return succeeded, skipped, failed
 
 
 async def _aggregate_run_data_coverage(

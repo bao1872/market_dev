@@ -406,7 +406,8 @@ class TestResumeLifecycle:
         ), patch.object(
             orch, "_compute_family_dynamics_maps", AsyncMock(return_value={}),
         ), patch.object(
-            orch, "_count_scope_status", AsyncMock(return_value=(len(items), 0)),
+            # [F1C-A] _count_scope_status 现返回 (succeeded, skipped, failed)
+            orch, "_count_scope_status", AsyncMock(return_value=(len(items), 0, 0)),
         ), patch.object(
             orch, "_aggregate_run_data_coverage", AsyncMock(return_value=0),
         ):

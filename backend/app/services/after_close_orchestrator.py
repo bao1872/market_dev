@@ -2955,6 +2955,52 @@ async def resolve_stock_core_published(
     return (False, True)
 
 
+_TERMINAL_STEP_FAILURE_STATUSES = frozenset(
+    {"failed", "unavailable", "timed_out", "interrupted"}
+)
+
+
+def _derive_after_close_final_status(
+    step_summary: dict[str, object],
+) -> tuple[AfterCloseRunStatus, list[str]]:
+    """[F1C-B] 盘后编排**整体终态**的单一纯 owner。
+
+    输入**只有**当前工作流的 ``metadata.step_summary`` —— 不含任何已退休信号
+    （``stock_core_published`` / ``_stock_core_superseded`` 等），因此可以机器级
+    证明 stock_core 对终态**完全没有输入权**。
+
+    语义（与既有 Step Contract 一致，不重新设计状态机）：
+    - mandatory step（``optional`` 为假）处于失败类终态 → ``FAILED``
+    - 仅 optional step 失败 → ``PARTIAL_SUCCESS``
+    - 全部成功 → ``SUCCEEDED``
+
+    Args:
+        step_summary: 形如 ``{step_name: {"status": ..., "optional": bool, ...}}``
+
+    Returns:
+        ``(final_status, optional_failures)``；``optional_failures`` 为失败的可选
+        步骤名列表（顺序按 step_summary 遍历顺序，与既有实现一致）。
+    """
+    optional_failures: list[str] = []
+    mandatory_failures: list[str] = []
+
+    for name, item in step_summary.items():
+        if not isinstance(item, dict):
+            continue
+        if item.get("status") not in _TERMINAL_STEP_FAILURE_STATUSES:
+            continue
+        if item.get("optional"):
+            optional_failures.append(name)
+        else:
+            mandatory_failures.append(name)
+
+    if mandatory_failures:
+        return AfterCloseRunStatus.FAILED, optional_failures
+    if optional_failures:
+        return AfterCloseRunStatus.PARTIAL_SUCCESS, optional_failures
+    return AfterCloseRunStatus.SUCCEEDED, optional_failures
+
+
 async def execute_after_close_run(
     job_run_id: uuid.UUID,
     trade_date: date,
@@ -4379,20 +4425,23 @@ async def execute_after_close_run(
             # 禁止再用早期（publishing 阶段）的 stale 值或多个分散的 _*_status 变量各算一遍。
             # 这样保证 job_run.status、meta.partial_success、meta.optional_failures 三者
             # 必然一致（同源同刻）。
-            optional_failures = [
-                name
-                for name, item in step_summary.items()
-                if isinstance(item, dict)
-                and item.get("optional")
-                and item.get("status") in {"failed", "unavailable", "timed_out", "interrupted"}
-            ]
-            # stock_core 被 superseded（pointer 指向其他 run）也视为部分成功。
-            _optional_failed = bool(optional_failures) or _stock_core_superseded
-            final_status = (
-                AfterCloseRunStatus.PARTIAL_SUCCESS
-                if _optional_failed
-                else AfterCloseRunStatus.SUCCEEDED
+            # [F1C-B] optional_failures 由 _derive_after_close_final_status 单一产出，
+            # 此处不再各算一遍（否则又出现多个分散 owner）。
+            # [F1C-B] stock_core publication 已从 Core→Review 主链退休，
+            # 其 absent / superseded **不再是 whole-run success 前提**。
+            # 旧实现把 `_stock_core_superseded` OR 进 _optional_failed，使已退役的
+            # stock_core pointer 状态仍能单独把整轮降级为 partial_success ——
+            # 与"Core→Review 直连、stock_core 非前置"的现行架构矛盾。
+            # 现最终状态**只由当前 mandatory/optional 工作流的 step_summary 决定**：
+            # mandatory 失败 → failed；optional 失败 → partial_success；全部成功 → succeeded。
+            # stock_core_published / stock_core_superseded 仍写入 metadata 供审计追溯，
+            # 但不得参与任何状态判定（§10/§12）。
+            # [F1C-B] 单一 owner 下沉为纯函数，便于直接验证"stock_core 缺失不降级"
+            # 与"optional 失败才降级"两条合同（§14/§15/§21）。
+            final_status, optional_failures = _derive_after_close_final_status(
+                step_summary
             )
+            _optional_failed = bool(optional_failures)
             success_message = (
                 f"盘后编排{'部分成功' if _optional_failed else '成功完成'}: "
                 f"dsa_run_id={dsa_run_id}"
@@ -4945,10 +4994,10 @@ async def reconcile_after_close_run(
     # 3) [Phase0-Fix#6] 核验真实产物 pointer，暴露"产物与任务状态矛盾"
     artifacts = await _inspect_run_artifacts(db, job_run)
     contradictions: list[str] = []
-    if job_run.status in {"failed", "interrupted"} and artifacts.get("stock_core_published"):
-        contradictions.append("STOCK_CORE_PUBLISHED_BUT_RUN_NOT_SUCCEEDED")
-    if job_run.status == "succeeded" and not artifacts.get("stock_core_published"):
-        contradictions.append("RUN_SUCCEEDED_BUT_NO_STOCK_CORE_PUBLICATION")
+    # [F1C-B] stock_core publication 已退休：其存在/缺失**不再构成**与整轮状态的矛盾。
+    # 旧实现会产出 "RUN_SUCCEEDED_BUT_NO_STOCK_CORE_PUBLICATION"，把已退役的
+    # stock_core 语义重新引入终态对账（与 §10/§12 冲突）。artifacts 仍保留
+    # stock_core_published 字段供人工审计，但不参与 contradictions 判定。
     meta["reconcile_artifacts"] = artifacts
     meta["reconcile_contradictions"] = contradictions
     if contradictions:
