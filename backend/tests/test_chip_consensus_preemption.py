@@ -16,6 +16,7 @@ E. ownership fencing：requeue 后旧 token 的 fenced 写入（lock_owned_job_r
 """
 from __future__ import annotations
 
+import itertools
 import json
 import os
 import uuid
@@ -25,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from sqlalchemy import select
 
+from app.models.instrument import Instrument
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.services.after_close_chip_consensus_service import (
@@ -129,6 +131,25 @@ async def _seed_snapshot(
         await db.commit()
 
 
+# stock_chip_consensus_snapshots.instrument_id 外键引用 instruments.id，
+# 凡会被 upsert 为 snapshot 的 instrument_id 必须先在该库存在 instruments 行。
+_SYM_SEQ = itertools.count(1)
+
+
+async def _seed_instrument(session_factory, instrument_id: uuid.UUID) -> None:
+    sym = f"P{next(_SYM_SEQ):010d}"
+    inst = Instrument(
+        id=instrument_id,
+        symbol=sym,
+        name=f"preempt-seed-{sym}",
+        market="SH",
+        status="active",
+    )
+    async with session_factory() as db:
+        db.add(inst)
+        await db.commit()
+
+
 # ---------------------------------------------------------------------------
 # A. 正常执行不受影响（shutdown_check=None）
 # ---------------------------------------------------------------------------
@@ -143,6 +164,7 @@ async def test_normal_execution_unaffected_by_shutdown_check():
         TestAsyncSessionLocal, status="running", worker_instance_id=_WORKER_A,
     )
     inst = uuid.uuid4()
+    await _seed_instrument(TestAsyncSessionLocal, inst)
     daily = MagicMock()
     daily.empty = False
 
@@ -193,6 +215,8 @@ async def test_shutdown_raises_at_safe_boundary_and_requeues():
         lease_seconds=_CHIP_LEASE_SECONDS,
     )
     inst0, inst1 = uuid.uuid4(), uuid.uuid4()
+    await _seed_instrument(TestAsyncSessionLocal, inst0)
+    await _seed_instrument(TestAsyncSessionLocal, inst1)
     daily = MagicMock()
     daily.empty = False
     calls = {"n": 0}
@@ -258,6 +282,8 @@ async def test_resume_queued_reclaimed_and_skips_succeeded():
     )
     inst0, inst1, inst2 = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
     # inst0 / inst1 已成功 -> 续算应跳过；inst2 待处理
+    await _seed_instrument(TestAsyncSessionLocal, inst0)
+    await _seed_instrument(TestAsyncSessionLocal, inst1)
     await _seed_snapshot(TestAsyncSessionLocal, instrument_id=inst0, trade_date=_TRADE_DATE, core_run_id=core_run_id, status="succeeded")
     await _seed_snapshot(TestAsyncSessionLocal, instrument_id=inst1, trade_date=_TRADE_DATE, core_run_id=core_run_id, status="succeeded")
 
