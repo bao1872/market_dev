@@ -17,6 +17,11 @@ expect_success() { if "$@"; then ok "$1"; else bad "$1"; fi; }
 
 MOCK_BIN="${TMP_ROOT}/bin"
 mkdir -p "${MOCK_BIN}"
+# worker-after-close 容器状态文件（supervisor-drain fence 合同用）。
+# `docker compose stop -t -1 worker-after-close` 将其置 exited，`up ... worker-after-close`
+# 置 running；mock `docker inspect ... State.Status` 读取此文件。
+WORKER_STATE_FILE="${TMP_ROOT}/worker_state"
+reset_worker_state() { printf '%s' "$1" > "${WORKER_STATE_FILE}"; }
 export PANJI_REAL_GIT="$(command -v git)"
 
 cat > "${MOCK_BIN}/git" <<'EOF'
@@ -32,13 +37,31 @@ exec "${PANJI_REAL_GIT}" "$@"
 EOF
 # docker mock：默认让 inspect 报告 Live Mount 已建立（非首次部署）。
 # PANJI_MOCK_NO_LIVE_MOUNT=1 时 inspect 返回空，模拟首次 Live Mount 部署。
+# worker-after-close 容器状态经 PANJI_MOCK_WORKER_STATE 状态文件模拟。
 cat > "${MOCK_BIN}/docker" <<'EOF'
 #!/usr/bin/env bash
+WORKER_STATE="${PANJI_MOCK_WORKER_STATE:-/tmp/panji_worker_state}"
 if [[ "${1:-}" == "inspect" ]]; then
-  if [[ "${PANJI_MOCK_NO_LIVE_MOUNT:-0}" == "1" ]]; then
-    exit 1
+  if printf '%s' "$*" | grep -q 'State.Status'; then
+    # worker-after-close 容器状态探针（supervisor-drain fence 线性化点）
+    if [[ -f "${WORKER_STATE}" ]]; then
+      cat "${WORKER_STATE}"
+    else
+      printf 'exited'
+    fi
+    exit 0
   fi
-  printf '%s /var/lib/postgresql \n' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
+  if printf '%s' "$*" | grep -q 'Mounts'; then
+    # Live Mount 探针
+    if [[ "${PANJI_MOCK_NO_LIVE_MOUNT:-0}" == "1" ]]; then
+      exit 1
+    fi
+    printf '%s /var/lib/postgresql \n' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
+    exit 0
+  fi
+  # 其它 inspect（Config.Image / Image / OOMKilled / RestartCount / Memory ...）
+  # 返回非空占位（模拟原 mock 的 Live Mount 路径），使镜像 ID / owner 解析可拿到非空值。
+  printf '%s' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
   exit 0
 fi
 # [E2.1-R] `docker ps --filter "name=<c>" --format '{{.Names}}'` 用于 Scheduler
@@ -59,15 +82,17 @@ if [[ "${1:-}" == "ps" ]]; then
   fi
   exit 0
 fi
-# [E2.1 P1-B] 伪造容器内 psql，用于注入 after-close job 门禁 fixture。
-#   PANJI_MOCK_PSQL_COUNTS : 统计查询输出，每行 "status:count"
-#   PANJI_MOCK_PSQL_ROWS   : 明细查询输出，每行 "id | job | business_date | status | heartbeat"
+# [E2.1 P1-B / P1-C] 伪造容器内 psql，用于注入 after-close 任务门禁 fixture。
+#   PANJI_MOCK_PSQL_COUNTS : GROUP BY status 统计（"status:count" 每行）
+#   PANJI_MOCK_PSQL_RUNNING: 仅 running 的 count(*)（fence 线性化点）
+#   PANJI_MOCK_PSQL_ROWS   : 明细查询（"id | job | business_date | status | heartbeat"）
 #   PANJI_MOCK_PSQL_FAIL=1 : 模拟门禁查询不可用（必须 fail-closed）
 if [[ "${1:-}" == "exec" ]]; then
   if [[ "${PANJI_MOCK_PSQL_FAIL:-0}" == "1" ]]; then
     exit 1
   fi
-  if printf '%s' "$*" | grep -q 'count('; then
+  if printf '%s' "$*" | grep -q 'status, count'; then
+    # GROUP BY status 可见性查询
     if [[ -n "${PANJI_MOCK_PSQL_COUNTS:-}" ]]; then
       printf '%s\n' "${PANJI_MOCK_PSQL_COUNTS}"
     else
@@ -75,14 +100,33 @@ if [[ "${1:-}" == "exec" ]]; then
     fi
     exit 0
   fi
-  [[ -n "${PANJI_MOCK_PSQL_ROWS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_ROWS}"
+  if printf '%s' "$*" | grep -q 'count('; then
+    # 普通 count(*) → fence running 计数（single number）
+    printf '%s\n' "${PANJI_MOCK_PSQL_RUNNING:-0}"
+    exit 0
+  fi
+  if printf '%s' "$*" | grep -q 'id, job_name'; then
+    [[ -n "${PANJI_MOCK_PSQL_ROWS:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_ROWS}"
+    exit 0
+  fi
+  # preempt 明细查询（status='running' 的 Chip），无 fixture 时为空
+  [[ -n "${PANJI_MOCK_PSQL_ROWS_PREEMPT:-}" ]] && printf '%s\n' "${PANJI_MOCK_PSQL_ROWS_PREEMPT}"
   exit 0
 fi
 # [E2.1 P1-A] compose config：用于 effective compose runtime definition digest。
 #   PANJI_MOCK_COMPOSE_FAIL=1 模拟无法取得 compose owner（必须 fail-closed）。
+#   stop -t -1 worker-after-close → 状态文件置 exited；up ... worker-after-close → running。
 if [[ "${1:-}" == "compose" ]]; then
   if [[ "${PANJI_MOCK_COMPOSE_FAIL:-0}" == "1" ]]; then
     exit 1
+  fi
+  if printf '%s' "$*" | grep -q 'worker-after-close'; then
+    if printf '%s' "$*" | grep -q 'stop'; then
+      printf 'exited' > "${WORKER_STATE}"
+    fi
+    if printf '%s' "$*" | grep -q 'up'; then
+      printf 'running' > "${WORKER_STATE}"
+    fi
   fi
   exit 0
 fi
@@ -118,46 +162,7 @@ code="${PANJI_MOCK_HEALTH_CODE:-200}"
 printf '%s' "${code}"
 exit 0
 EOF
-# [E2.1 P1-C] worker pickup admission 操作面 mock。
-#   记录每次调用到 PANJI_ADMISSION_CALL_LOG；PANJI_MOCK_ADMISSION_FOREIGN=1 模拟
-#   已被他人/先前 pause 持有（acquire 失败 -> deploy 必须 fail-closed）。
-cat > "${MOCK_BIN}/panji-admission" <<'EOF'
-#!/usr/bin/env bash
-CALL_LOG="${PANJI_ADMISSION_CALL_LOG:-/tmp/panji_admission_calls.log}"
-echo "panji-admission $*" >>"${CALL_LOG}"
-sub="${1:-}"
-if [[ "${sub}" == "acquire" ]]; then
-  if [[ "${PANJI_MOCK_ADMISSION_NOT_INSTALLED:-0}" == "1" ]]; then
-    # first-install bootstrap 前：表尚不存在，steady-state acquire 必须失败（不得假装成功）。
-    echo '{"acquired":false,"paused":false,"pause_token":null,"paused_by":null}' >&2
-    exit 2
-  fi
-  if [[ "${PANJI_MOCK_ADMISSION_FOREIGN:-0}" == "1" ]]; then
-    echo '{"acquired":false,"paused":true,"pause_token":"foreign-token","paused_by":"operator:x"}' >&2
-    exit 2
-  fi
-  tok="$(python3 -c 'import uuid;print(uuid.uuid4())' 2>/dev/null || echo "mock-$$")"
-  echo "{\"acquired\":true,\"token\":\"${tok}\",\"paused\":true}"
-  exit 0
-fi
-if [[ "${sub}" == "verify-own" ]]; then
-  exit 0
-fi
-if [[ "${sub}" == "release" ]]; then
-  echo '{"released":true}'
-  exit 0
-fi
-if [[ "${sub}" == "status" ]]; then
-  if [[ "${PANJI_MOCK_ADMISSION_NOT_INSTALLED:-0}" == "1" ]]; then
-    echo '{"installed":false,"paused":false,"pause_token":null,"paused_by":null,"reason":null,"paused_at":null}'
-  else
-    echo '{"installed":true,"paused":true,"pause_token":"x","paused_by":"x","reason":null,"paused_at":null}'
-  fi
-  exit 0
-fi
-exit 0
-EOF
-chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df" "${MOCK_BIN}/curl" "${MOCK_BIN}/panji-admission"
+chmod +x "${MOCK_BIN}/git" "${MOCK_BIN}/docker" "${MOCK_BIN}/flock" "${MOCK_BIN}/sysctl" "${MOCK_BIN}/df" "${MOCK_BIN}/curl"
 
 TARGET_SHA="$(git -C "${REPO_ROOT}" rev-parse HEAD)"
 ENV_FILE="${TMP_ROOT}/market.env"
@@ -176,8 +181,7 @@ run_deploy() {
   PANJI_ENV_FILE="${ENV_FILE}" \
   PANJI_STATE_FILE="${STATE_FILE}" \
   PANJI_LOCK_FILE="${LOCK_FILE}" \
-  PANJI_ADMISSION_CLI="${MOCK_BIN}/panji-admission" \
-  PANJI_ADMISSION_CALL_LOG="${TMP_ROOT}/admission_calls.log" \
+  PANJI_MOCK_WORKER_STATE="${WORKER_STATE_FILE}" \
   bash "${SERVER_SCRIPT}" "$@"
 }
 
@@ -441,120 +445,159 @@ else
     bad "deploy DEPLOYMENT_CONFLICT_STATES supersedes claimable + running"
 fi
 
-# C. 逐个状态都必须阻止部署（当前无 pause 阶段）
-#    用 first-live fixture 强制 backend_runtime_changed=true，使门禁真正执行
+# C. 状态语义（P1-B 可见性而非阻塞）：
+#    queued / resume_queued 仅可见、不阻塞部署（由 supervisor-drain fence 容忍留队）；
+#    running 由 supervisor-drain fence 在 backend runtime 变更时拦截（running 必须自然 drain）。
+#    用 first-live fixture（PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1）强制门禁/fence 真正执行。
 CONFLICT_LOG="${TMP_ROOT}/conflict.log"
-for st in running queued resume_queued; do
-    rc=0
-    # 本场景**期望**非零退出（阻塞部署）。`set -e` 下必须用 `|| rc=$?` 捕获，
-    # 否则 harness 会在第一条预期失败处直接终止。
-    PANJI_MOCK_NO_LIVE_MOUNT=1 \
-    PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
-    PANJI_MOCK_PSQL_COUNTS="${st}:1" \
-    PANJI_MOCK_PSQL_ROWS="11111111-2222-3333-4444-555555555555 | after_close_orchestrator | 2026-08-28 | ${st} | 2026-08-30 10:00:00" \
-        run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.${st}" 2>&1 || rc=$?
-    if [[ "${rc}" -ne 0 ]] \
-        && grep -q 'DEPLOYMENT_BLOCKED_PENDING_AFTER_CLOSE=TRUE' "${CONFLICT_LOG}.${st}" \
-        && grep -q 'ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY' "${CONFLICT_LOG}.${st}"; then
-        ok "conflict state ${st} blocks deployment"
-    else
-        bad "conflict state ${st} blocks deployment"
-    fi
 
-    # E. 输出必须包含 count + job id + business_date + status（operator 上下文）
-    if grep -q "${st}_COUNT=1" "${CONFLICT_LOG}.${st}" \
-        && grep -q '11111111-2222-3333-4444-555555555555' "${CONFLICT_LOG}.${st}" \
-        && grep -q '2026-08-28' "${CONFLICT_LOG}.${st}"; then
-        ok "conflict state ${st} output carries job id / business_date / status"
-    else
-        bad "conflict state ${st} output carries job id / business_date / status"
-    fi
-done
-
-# --- E2.1 P1-C：deploy admission 临界区（acquire / secondary gate / safe release）---
-echo "== E2.1 P1-C deployment admission critical section =="
-ADM_LOG="${TMP_ROOT}/admission_calls.log"
-: > "${ADM_LOG}"
-
-# A. first-live 部署（backend_runtime_changed=true）必须 acquire 并在成功后 release own pause，
-#    且 secondary gate 必须在第一笔 file mutation 前通过。
-FIRST_LOG="${TMP_ROOT}/first-live.log"
-PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
-  run_deploy "${TARGET_SHA}" --dry-run >"${FIRST_LOG}" 2>&1 || true
-if grep -q 'ADMISSION_PAUSE_ACQUIRED' "${FIRST_LOG}" \
-   && grep -q 'ADMISSION_PAUSE_RELEASED' "${FIRST_LOG}"; then
-  ok "first-live deploy acquires then releases own pickup pause"
-else
-  bad "first-live deploy acquires then releases own pickup pause"
-fi
-if grep -q 'ADMISSION_SECONDARY_GATE_PASS' "${FIRST_LOG}"; then
-  ok "first-live deploy passes secondary pre-mutation gate"
-else
-  bad "first-live deploy passes secondary pre-mutation gate"
-fi
-
-# B. 已有他人/先前 pause（foreign）-> acquire 失败 -> 部署 fail-closed，且不得 release。
-: > "${ADM_LOG}"
-FOREIGN_LOG="${TMP_ROOT}/foreign.log"
-rc=0
-PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
-  PANJI_MOCK_ADMISSION_FOREIGN=1 \
-  run_deploy "${TARGET_SHA}" --dry-run >"${FOREIGN_LOG}" 2>&1 || rc=$?
-if [[ "${rc}" -ne 0 ]] \
-   && grep -q 'ADMISSION_ACQUIRE_FAILED' "${FOREIGN_LOG}" \
-   && ! grep -q 'ADMISSION_PAUSE_RELEASED' "${FOREIGN_LOG}"; then
-  ok "foreign/active pause blocks deploy (fail-closed, never releases)"
-else
-  bad "foreign/active pause blocks deploy (fail-closed, never releases)"
-fi
-
-# C. first-install bootstrap：admission 表尚不存在时，steady-state acquire 不得被调用，
-#    部署应先走 migration 093 再 acquire（不得 FAIL CLOSED 卡死在表缺失）。
-: > "${ADM_LOG}"
-BOOT_LOG="${TMP_ROOT}/bootstrap.log"
-rc=0
-PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
-  PANJI_MOCK_ADMISSION_NOT_INSTALLED=1 \
-  run_deploy "${TARGET_SHA}" --dry-run >"${BOOT_LOG}" 2>&1 || rc=$?
-if [[ "${rc}" -eq 0 ]] \
-   && ! grep -q 'ADMISSION_PAUSE_ACQUIRED' "${BOOT_LOG}" \
-   && ! grep -q 'ADMISSION_ACQUIRE_FAILED' "${BOOT_LOG}"; then
-  ok "first-install bootstrap: table absent -> no steady-state acquire, deploy proceeds to migration"
-else
-  bad "first-install bootstrap: table absent -> no steady-state acquire, deploy proceeds to migration"
-fi
-
-# D. POST-PAUSE secondary gate：running>0 必须 BLOCK（即使 queued 允许留队）。
-: > "${ADM_LOG}"
-RUN_LOG="${TMP_ROOT}/post-pause-running.log"
-rc=0
-PANJI_MOCK_NO_LIVE_MOUNT=1 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
-  PANJI_MOCK_PSQL_COUNTS="running:1" \
-  run_deploy "${TARGET_SHA}" --dry-run >"${RUN_LOG}" 2>&1 || rc=$?
-if [[ "${rc}" -ne 0 ]] \
-   && grep -q 'ADMISSION_SECONDARY_GATE_FAILED' "${RUN_LOG}" \
-   && ! grep -q 'ADMISSION_PAUSE_RELEASED' "${RUN_LOG}"; then
-  ok "POST-PAUSE secondary gate blocks on running>0 (fail-closed, no release)"
-else
-  bad "POST-PAUSE secondary gate blocks on running>0 (fail-closed, no release)"
-fi
-
-# E. 全部为 0 时放行（沿用 first-live dry-run succeeds 的成功路径 + 显式计数为 0）
+# C1. queued 存在但无 running → 部署放行（可见性日志，不 fail-closed）
+reset_worker_state exited
+Q_LOG="${TMP_ROOT}/conflict.queued"
 PANJI_MOCK_NO_LIVE_MOUNT=1 \
 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:1
+resume_queued:0" \
+PANJI_MOCK_PSQL_ROWS="11111111-2222-3333-4444-555555555555 | after_close_orchestrator | 2026-08-28 | queued | 2026-08-30 10:00:00" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${Q_LOG}" 2>&1 && rc=0 || rc=$?
+if [[ "${rc}" -eq 0 ]] \
+    && grep -q 'DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE' "${Q_LOG}" \
+    && grep -q 'queued_COUNT=1' "${Q_LOG}" \
+    && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${Q_LOG}"; then
+    ok "queued state is visible but does NOT block deployment (fence proceeds)"
+else
+    bad "queued state is visible but does NOT block deployment (fence proceeds)"
+fi
+
+# C2. resume_queued 同理
+reset_worker_state exited
+RQ_LOG="${TMP_ROOT}/conflict.resume"
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:1" \
+PANJI_MOCK_PSQL_ROWS="11111111-2222-3333-4444-555555555555 | after_close_orchestrator | 2026-08-28 | resume_queued | 2026-08-30 10:00:00" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${RQ_LOG}" 2>&1 && rc=0 || rc=$?
+if [[ "${rc}" -eq 0 ]] \
+    && grep -q 'DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE' "${RQ_LOG}" \
+    && grep -q 'resume_queued_COUNT=1' "${RQ_LOG}" \
+    && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${RQ_LOG}"; then
+    ok "resume_queued state is visible but does NOT block deployment (fence proceeds)"
+else
+    bad "resume_queued state is visible but does NOT block deployment (fence proceeds)"
+fi
+
+# C3. running 存在且 worker running → supervisor-drain fence 拦截（fail-closed，不 SIGKILL）
+reset_worker_state running
+RUN_LOG="${TMP_ROOT}/conflict.running"
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=1 \
+PANJI_MOCK_PSQL_COUNTS="running:1
+queued:0
+resume_queued:0" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${RUN_LOG}" 2>&1 && rc=0 || rc=$?
+if [[ "${rc}" -ne 0 ]] \
+    && grep -q 'AFTER_CLOSE_FENCE_RUNNING_REMAINS=1' "${RUN_LOG}"; then
+    ok "running job blocked by supervisor-drain fence (fail-closed, no SIGKILL)"
+else
+    bad "running job blocked by supervisor-drain fence (fail-closed, no SIGKILL)"
+fi
+
+# --- E2.1 P1-C：supervisor-drain 进程 fence 合同（stop -t -1 / 线性化 / NOT-fenced fail-closed / owned-aware restore）---
+echo "== E2.1 P1-C supervisor-drain fence contract =="
+
+# A. worker running → 部署以 stop -t -1 自然 drain（绝不 SIGKILL），线性化点 = EXITED 且 running==0，
+#    成功后由本 deploy 自己 owned 恢复（AFTER_CLOSE_PICKUP_RESTORED）。
+#    注：AFTER_CLOSE_WAS_RUNNING / AFTER_CLOSE_FENCE_OWNED 仅为内部状态变量（不落日志），
+#    以可观测行为佐证：出现 "stop -t -1" + RESTORED 即证明本 deploy 拥有并恢复了该 worker。
+reset_worker_state running
+P1C_A_LOG="${TMP_ROOT}/p1c-fence-owned.log"
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
 PANJI_MOCK_PSQL_COUNTS="running:0
 queued:0
 resume_queued:0" \
-    run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.zero" 2>&1
-if [[ $? -eq 0 ]] && grep -q '无强制阻塞盘后长任务，继续部署' "${CONFLICT_LOG}.zero"; then
-    ok "all-zero conflict counts allow deployment"
+    run_deploy "${TARGET_SHA}" --dry-run >"${P1C_A_LOG}" 2>&1 && rc=0 || rc=$?
+if [[ "${rc}" -eq 0 ]] \
+   && grep -q 'stop -t -1' "${P1C_A_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${P1C_A_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${P1C_A_LOG}"; then
+  ok "P1-C: running worker fenced via stop -t -1 and restored by owner"
 else
-    bad "all-zero conflict counts allow deployment"
+  bad "P1-C: running worker fenced via stop -t -1 and restored by owner"
 fi
 
-# C-2. 门禁查询不可用时必须 fail-closed
+# B. 进入部署时 worker 已 exited/missing → 本 deploy 不拥有恢复权，成功也不得擅自 up。
+#    可观测行为：不得出现 "stop -t -1"（说明未将其视为 running），且 RESTORE_SKIPPED_NOT_OWNED
+#    出现、RESTORED 不出现。
+reset_worker_state exited
+P1C_B_LOG="${TMP_ROOT}/p1c-not-owned.log"
 PANJI_MOCK_NO_LIVE_MOUNT=1 \
 PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${P1C_B_LOG}" 2>&1 && rc=0 || rc=$?
+if [[ "${rc}" -eq 0 ]] \
+   && ! grep -q 'stop -t -1' "${P1C_B_LOG}" \
+   && grep -q 'AFTER_CLOSE_RESTORE_SKIPPED_NOT_OWNED=true' "${P1C_B_LOG}" \
+   && ! grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${P1C_B_LOG}"; then
+  ok "P1-C: pre-stopped worker is NOT restored by this deploy (owned-aware)"
+else
+  bad "P1-C: pre-stopped worker is NOT restored by this deploy (owned-aware)"
+fi
+
+# C. NOT-fenced 必须 refuse runtime mutation（fail-closed 二次线性化门禁）。
+#    通过源码级断言确认：AFTER_CLOSE_PICKUP_NOT_FENCED 门禁存在于首笔 file mutation 之前。
+P1C_C_BODY="$(sed -n '/^deploy() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${P1C_C_BODY}" | grep -q 'AFTER_CLOSE_PICKUP_NOT_FENCED' \
+   && printf '%s' "${P1C_C_BODY}" | grep -q '拒绝 runtime mutation'; then
+  ok "P1-C: secondary linearization gate refuses mutation when not fenced"
+else
+  bad "P1-C: secondary linearization gate refuses mutation when not fenced"
+fi
+
+# D. fence 不得 SIGKILL：脚本代码中不存在 docker kill / SIGKILL 形式的强制终止
+#    （先剥离注释，避免注释中的"绝不 SIGKILL"字样造成误判）。
+if printf '%s' "$(sed 's/#.*//' "${SERVER_SCRIPT}")" | grep -qE 'docker +kill|SIGKILL'; then
+  bad "P1-C: no SIGKILL / docker kill in deploy script"
+else
+  ok "P1-C: no SIGKILL / docker kill in deploy script"
+fi
+
+# E. 全部为 0 且 worker exited → 正常放行（沿用 first-live dry-run 成功路径 + 显式计数为 0）
+reset_worker_state exited
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.zero" 2>&1 && rc=0 || rc=$?
+if [[ "${rc}" -eq 0 ]] && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CONFLICT_LOG}.zero"; then
+    ok "all-zero counts with exited worker allow deployment (fenced)"
+else
+    bad "all-zero counts with exited worker allow deployment (fenced)"
+fi
+
+# F. 门禁查询不可用时必须 fail-closed（psql 失败 → 拒绝部署）。
+reset_worker_state exited
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
 PANJI_MOCK_PSQL_FAIL=1 \
     run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.unavailable" 2>&1 || unavailable_rc=$?
 unavailable_rc="${unavailable_rc:-0}"
@@ -564,7 +607,7 @@ else
     bad "unavailable job gate fails closed"
 fi
 
-# F. guard 必须只读：门禁函数体内不得出现任何写操作
+# G. guard 必须只读：门禁函数体内不得出现任何写操作
 GUARD_BODY="$(sed -n '/^guard_active_after_close_jobs() {/,/^}/p' "${SERVER_SCRIPT}")"
 if printf '%s' "${GUARD_BODY}" | grep -qiE '^\s*(UPDATE|DELETE|INSERT|psql[^\n]*-c\s*"\s*(UPDATE|DELETE|INSERT))'; then
     bad "job gate is read-only (no queue mutation)"

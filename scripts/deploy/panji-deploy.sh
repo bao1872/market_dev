@@ -121,17 +121,14 @@ MIGRATION_ATTEMPTED=false
 MIGRATION_SUCCEEDED=false
 IMAGES_BUILT=false
 
-# [E2.1 P1-C] pickup admission 部署临界区 owner
-#   ADMISSION_OWNED      —— 本次 deploy 是否成功 acquire 了自己的 pause
-#   ADMISSION_ROLLBACK_FAILED —— 容器级回滚验证是否失败（失败则保持 paused，不释放）
-#   ADMISSION_TOKEN       —— 本次 acquire 得到的 pause token（release 仅匹配此 token）
-#   PANJI_ADMISSION_CLI   —— 操作面（canonical service），禁止 shell 直接 UPDATE 表；
-#                            可被测试/环境覆盖为 mock。
-ADMISSION_OWNED=false
-ADMISSION_ROLLBACK_FAILED=false
-ADMISSION_RELEASE_FAILED=false
-ADMISSION_TOKEN=""
-PANJI_ADMISSION_CLI="${PANJI_ADMISSION_CLI:-$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/../ops/panji-admission}"
+# [E2.1 P1-C] supervisor-drain 进程 fence owner
+#   AFTER_CLOSE_WAS_RUNNING   —— 进入部署时 worker-after-close 是否 running
+#   AFTER_CLOSE_FENCE_OWNED   —— 本次 deploy 是否真正 stop -t -1 停掉了 running worker
+#                                  （仅 owned 的 worker 才在成功/rollback 后由本 deploy 恢复）
+#   AFTER_CLOSE_PICKUP_FENCED —— 线性化点已建立：容器 EXITED/missing 且 after_close running==0
+AFTER_CLOSE_WAS_RUNNING=false
+AFTER_CLOSE_FENCE_OWNED=false
+AFTER_CLOSE_PICKUP_FENCED=false
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -1071,6 +1068,8 @@ PREEMPTIBLE_AFTER_CLOSE_JOB_NAMES=(
 # 本次部署是否会变更 backend runtime / 重启 Python 服务（含 worker-after-close）。
 # 仅在为 true 时才启用活跃盘后任务门禁；frontend-only 部署不受无关活跃任务阻塞（FIX F CASE 6）。
 _backend_runtime_will_mutate() {
+    # [test-hook] 合同测试可强制视为 backend runtime 将变更（否则需真实 git diff）
+    [[ "${PANJI_MOCK_BACKEND_RUNTIME_CHANGED:-0}" == "1" ]] && return 0
     [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
         || "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
         || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" \
@@ -1187,20 +1186,17 @@ guard_active_after_close_jobs() {
     fi
 
     if [[ -n "${blocking_out}" ]]; then
-        log "!!! 检测到 worker-after-close 待处理/正在执行的任务，拒绝部署（fail-closed） !!!"
-        log "DEPLOYMENT_BLOCKED_PENDING_AFTER_CLOSE=TRUE"
-        log "错误码: ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY"
+        log "!!! 检测到 worker-after-close 待处理/正在执行的任务（仅可见性；由 supervisor-drain fence 处理，不阻塞部署） !!!"
+        log "DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE"
         log "worker 可领取状态（claimable）: ${WORKER_CLAIMABLE_STATES[*]}"
         log "部署冲突状态（conflict）: ${DEPLOYMENT_CONFLICT_STATES[*]}"
-        log "说明：queued / resume_queued 会被 worker 主循环在第一个轮询 claim；"
-        log "      部署拉起容器等于授权其捡走积压任务，因此与 running 同等阻塞。"
-        log "[E2.1 §11] 部署工具**不会** kill / cancel / reset 正在推进的业务任务，仅阻止部署。"
-        log "请等待业务任务自然完成，或由 operator 按正式 runbook 另行处理后再部署"
+        log "说明：queued / resume_queued 由 supervisor-drain fence 容忍（fence 后不得被 claim，"
+        log "      fence 前已合法 claim 的可 running→terminal）；running 由 fence 经 stop -t -1 自然 drain。"
+        log "[E2.1 §11] 部署工具**不会** kill / cancel / reset 正在推进的业务任务。"
         log "blocking_active_jobs:"
         while IFS= read -r row; do
             [[ -n "${row}" ]] && log "  ${row}"
         done <<< "${blocking_out}"
-        fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY: worker-after-close 存在强制阻塞类活跃长任务，部署已在任何 runtime mutation 之前停止"
     fi
 
     # (2) 可抢占增强类（仅 Chip）：运行不阻塞部署，仅记录并继续（不 fail）。
@@ -1229,26 +1225,31 @@ guard_active_after_close_jobs() {
 }
 
 # ---------------------------------------------------------------------------
-# [E2.1 P1-C] worker pickup admission 部署临界区（deployment safety）
+# [E2.1 P1-C] supervisor-drain 进程 fence —— 单 owner 进程 fence
 #
-# 与 after_close worker 共享同一个 PostgreSQL admission owner 行（worker_pickup_admission），
-# 行锁即 linearization point。deploy 只能 acquire / release "自己拥有"的 pause；
-# 已存在的他人/先前 operator pause 不得被本次 deploy 擅自释放或借用。
-# 操作面统一走 PANJI_ADMISSION_CLI（canonical service），禁止 shell 直接 UPDATE 表。
+# 唯一 after-close pickup actor 是 worker-after-close（单 service / 单进程 / 单 poll loop），
+# 其 claim 已 inline FOR UPDATE SKIP LOCKED（worker.py::_after_close_poll_once）。
+# SIGTERM 已令 _shutdown=True 停止新 claim，当前 job 自然 drain 到 terminal（非 kill）。
+# 故 fence 只需在 backend runtime mutation 前 `stop -t -1` 停掉整个进程（覆盖 60s grace，
+# 永不 SIGKILL），并等待容器 EXITED/missing 且 after_close running==0（线性化点）。
+# 不依赖 admission 表/锁/migration。queued/resume_queued 允许留队（fence 后不得被 claim，
+# fence 前已合法 claim 的可 running→terminal）。
 # ---------------------------------------------------------------------------
-_admission_installed() {
-    # admission 表是否已安装（singleton row 是否存在）。
-    # 首次部署（migration 093 尚未执行）时返回非 0；steady-state 部署返回 0。
-    # status 命令总是以退出码 0 打印 JSON（含 installed 字段），故必须解析 installed 字段，
-    # 不能依赖退出码。这是 FIRST-INSTALL bootstrap 的关键判断：表不存在时不得调用
-    # steady-state acquire，否则会 FAIL CLOSED 导致 migration 093 永远走不到（deadlock）。
-    local out
-    out="$("${PANJI_ADMISSION_CLI}" status --scope after_close_orchestrator 2>/dev/null)" || return 1
-    [[ "$(printf '%s' "${out}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("installed",False))' 2>/dev/null)" == "True" ]]
+
+_after_close_container_status() {
+    # 输出 running / exited / created / missing / unknown
+    local name="trading-worker-after-close"
+    local s
+    s="$(docker inspect -f '{{.State.Status}}' "${name}" 2>/dev/null)" || { printf 'missing'; return 0; }
+    case "${s}" in
+        running|exited|created) printf '%s' "${s}" ;;
+        paused|restarting) printf 'running' ;;   # 视为活跃，需要 stop
+        *) printf 'unknown' ;;
+    esac
 }
 
 _after_close_running_count() {
-    # POST-PAUSE 语义只关心 running 任务数（queued/resume_queued 允许留队，已被 PAUSED 拦截）。
+    # after_close running 任务数（queued/resume_queued 不算）
     local pg_user pg_db
     pg_user="$(_pg_conn_var "POSTGRES_USER" "bz")"
     pg_db="$(_pg_conn_var "POSTGRES_DB" "bz_stock")"
@@ -1263,67 +1264,74 @@ _after_close_running_count() {
     printf '%s' "${out}" | head -1
 }
 
-_admission_running_zero() {
+_after_close_container_exited_or_missing() {
+    local status
+    status="$(_after_close_container_status)" || return 1
+    [[ "${status}" == "exited" || "${status}" == "missing" ]]
+}
+
+_fence_after_close_worker() {
+    # 线性化点 = 容器 EXITED/missing 且 after_close running==0（非 SIGTERM）。
+    # running → stop -t -1（无限 graceful，覆盖 60s grace，绝不 SIGKILL），FENCE_OWNED=true。
+    # exited/created/missing → WAS_RUNNING=false（owned=false）。
+    # 无 fixed business timeout：仅 deploy 级 fail-closed 看门狗，绝不 SIGKILL。
+    local status
+    status="$(_after_close_container_status)" || { log "FENCE_INSPECT_FAILED=true"; return 1; }
+    case "${status}" in
+        running)
+            AFTER_CLOSE_WAS_RUNNING=true
+            log "[E2.1 P1-C] fencing worker-after-close: stop -t -1（graceful drain，绝不 SIGKILL）"
+            if ! ${COMPOSE_CMD} stop -t -1 worker-after-close; then
+                log "AFTER_CLOSE_FENCE_STOP_FAILED=true"; return 1
+            fi
+            AFTER_CLOSE_FENCE_OWNED=true
+            ;;
+        exited|created|missing)
+            AFTER_CLOSE_WAS_RUNNING=false
+            AFTER_CLOSE_FENCE_OWNED=false
+            ;;
+        *) log "FENCE_UNKNOWN_WORKER_STATE=${status}"; return 1 ;;
+    esac
+
+    # 等待容器 EXITED/missing（无 fixed business timeout；deploy 级看门狗仅在 truly stuck 时
+    # fail-closed，绝不 SIGKILL）。
+    local waited=0
+    while ! _after_close_container_exited_or_missing; do
+        if [[ ${waited} -ge ${PANJI_FENCE_MAX_WAIT_SECONDS:-1800} ]]; then
+            log "AFTER_CLOSE_FENCE_WAIT_TIMEOUT=true（deploy 级看门狗，未 SIGKILL）"; return 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+
+    # 线性化点：容器已退出且 after_close running==0
     local n
-    n="$(_after_close_running_count 2>/dev/null)" || return 1
-    [[ "${n:-0}" == "0" ]]
+    n="$(_after_close_running_count 2>/dev/null)" || { log "FENCE_RUNNING_COUNT_UNAVAILABLE=true"; return 1; }
+    if [[ "${n:-0}" != "0" ]]; then
+        log "AFTER_CLOSE_FENCE_RUNNING_REMAINS=${n}"; return 1
+    fi
+    AFTER_CLOSE_PICKUP_FENCED=true
+    log "AFTER_CLOSE_PICKUP_FENCED=true（worker-after-close 已 drained，after_close running=0）"
 }
 
-_admission_acquire() {
-    local out token
-    out="$("${PANJI_ADMISSION_CLI}" acquire \
-        --scope after_close_orchestrator \
-        --actor "deploy:${TARGET_SHA}" \
-        --reason "deployment ${TARGET_SHA}" 2>&1)" || {
-        fail "ADMISSION_ACQUIRE_FAILED: 无法获取 after-close pickup pause（DB 不可用或已有他人/先前 pause），拒绝部署（fail-closed）"
-    }
-    token="$(printf '%s' "${out}" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("token",""))' 2>/dev/null || true)"
-    [[ -n "${token}" ]] || fail "ADMISSION_ACQUIRE_FAILED: 无法解析 pause token，拒绝部署（fail-closed）"
-    ADMISSION_TOKEN="${token}"
-    ADMISSION_OWNED="true"
-    log "ADMISSION_PAUSE_ACQUIRED: scope=after_close_orchestrator token=${token:0:8}...（deploy 获得 pickup 暂停所有权）"
-}
-
-_admission_secondary_gate() {
-    # [E2.1 P1-C] POST-PAUSE 二次门禁（在 FIRST file mutation 之前）：own pause 仍有效 + running=0。
-    # queued/resume_queued 允许留在 queue（已被 PAUSED 拦截，不再被 claim）——与 pre-pause 完整门禁不同。
-    [[ "${ADMISSION_OWNED}" == "true" ]] || return 0
-    if ! "${PANJI_ADMISSION_CLI}" verify-own \
-        --scope after_close_orchestrator --token "${ADMISSION_TOKEN}" >/dev/null 2>&1; then
-        fail "ADMISSION_SECONDARY_GATE_FAILED: own pause 校验失败（可能已被释放/抢占），拒绝 runtime mutation（fail-closed）"
+_restore_after_close_pickup_if_owned() {
+    # 仅本 deploy 真正 stop -t -1 停掉的 worker 才恢复（owned-aware）。
+    # 进入部署时 worker 原本 stopped/missing 则成功/rollback 都不得擅自 up。
+    [[ "${AFTER_CLOSE_FENCE_OWNED}" == "true" ]] || { log "AFTER_CLOSE_RESTORE_SKIPPED_NOT_OWNED=true"; return 0; }
+    log "[E2.1 P1-C] restoring worker-after-close（本 deploy 自己 fenced 的 worker）"
+    if ! ${COMPOSE_CMD} up -d --force-recreate worker-after-close; then
+        log "AFTER_CLOSE_PICKUP_RESTORE_FAILED=true"; log "MANUAL_INTERVENTION_REQUIRED=true"; return 1
     fi
-    if ! _admission_running_zero; then
-        fail "ADMISSION_SECONDARY_GATE_FAILED: running(after_close_orchestrator)>0，拒绝 runtime mutation（fail-closed）"
-    fi
-    log "ADMISSION_SECONDARY_GATE_PASS: own pause 仍有效且 running=0（queued/resume_queued 允许留队）"
-}
-
-_admission_restart_gate() {
-    # 重启前最终门禁：若本次 deploy 已持有 own pause（POST-PAUSE 语义），只查 running=0；
-    # 否则（未 acquire，如 first-install bootstrap）用完整 pre-pause 门禁（running+queued+resume_queued）。
-    if [[ "${ADMISSION_OWNED}" == "true" ]]; then
-        _admission_running_zero || return 1
-    else
-        guard_active_after_close_jobs || return 1
-    fi
-}
-
-_admission_release() {
-    [[ "${ADMISSION_OWNED}" == "true" ]] || return 0
-    if [[ "${ADMISSION_ROLLBACK_FAILED}" == "true" ]]; then
-        log "ADMISSION_KEEP_PAUSED: 回滚验证失败，保持 paused（MANUAL_INTERVENTION_REQUIRED），不释放"
-        return 0
-    fi
-    if "${PANJI_ADMISSION_CLI}" release \
-        --scope after_close_orchestrator --token "${ADMISSION_TOKEN}" >/dev/null 2>&1; then
-        log "ADMISSION_PAUSE_RELEASED: scope=after_close_orchestrator（本次 deploy 释放自己拥有的 pause）"
-        ADMISSION_OWNED="false"
-    else
-        # 释放失败：不得静默当成成功。运行健康时不回滚，但 admission lifecycle 不完整，
-        # 标记 DEGRADED + MANUAL_INTERVENTION_REQUIRED，由成功路径据以报告 degraded（不宣称 CLOSED）。
-        ADMISSION_RELEASE_FAILED="true"
-        log "ADMISSION_RELEASE_FAILED: 释放 own pause 失败，MANUAL_INTERVENTION_REQUIRED（DEGRADED，不得宣称 admission lifecycle 完整成功）"
-    fi
+    local waited=0
+    while [[ "$(_after_close_container_status)" != "running" ]]; do
+        if [[ ${waited} -ge ${PANJI_FENCE_MAX_WAIT_SECONDS:-1800} ]]; then
+            log "AFTER_CLOSE_RESTORE_WAIT_TIMEOUT=true"; return 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    AFTER_CLOSE_FENCE_OWNED=false
+    log "AFTER_CLOSE_PICKUP_RESTORED=true"
 }
 
 # ---------------------------------------------------------------------------
@@ -1551,12 +1559,11 @@ deploy() {
     FAILURE_STAGE="active_job_gate"
     guard_active_after_close_jobs
 
-    # [E2.1 P1-C] 部署临界区：acquire own admission pause（仅当 admission 表已安装）。
-    # 首次部署（migration 093 尚未执行，表不存在）时跳过，待 migration 创建表后再 acquire，
-    # 避免 steady-state acquire 在表缺失时 FAIL CLOSED 导致 migration 永远走不到（bootstrap deadlock）。
-    # 与 worker claim 共享同一 PostgreSQL 行锁 linearization point。
-    if _backend_runtime_will_mutate && _admission_installed; then
-        _admission_acquire || return 1
+    # [E2.1 P1-C] supervisor-drain 进程 fence：在 backend runtime mutation 前 stop -t -1
+    # 停掉 worker-after-close（覆盖 60s grace，永不 SIGKILL），线性化点 = 容器 EXITED
+    # 且 after_close running==0。仅当 backend runtime 会变更时才需要（frontend-only 不动 worker）。
+    if _backend_runtime_will_mutate; then
+        _fence_after_close_worker || return 1
     fi
 
     # [E2.1 P1-A] 在任何 destructive runtime mutation 之前固化 rollback owner。
@@ -1573,11 +1580,13 @@ deploy() {
     #    注意：MUTATION_STAGE 不在这里提前推进——构建属**非文件层写入**，
     #    真正的 mutation stage 由各 mutator 自己推进（见 _mark_files_mutated）。
     #    无 environment_changed → 零构建，GIT_SHA 保持不变。
-    # [E2.1 P1-C] 二次门禁：必须紧邻第一笔实际 runtime mutation（update_env_file，属文件层写入）
-    # 之前，再次确认 own pause 仍有效且 running=0，缩小 acquire→mutation 之间的 TOCTOU 窗口。
-    # 注意：不是仅放在 _mark_containers_mutated 之前——env/live 文件写入已属 runtime mutation。
+    # [E2.1 P1-C] 线性化点门禁：紧邻第一笔 runtime mutation（update_env_file）之前，
+    # 再次确认 AFTER_CLOSE_PICKUP_FENCED=true（容器已 EXITED 且 after_close running==0）。
+    # queued/resume_queued 允许留队，不作为 blocker。
     if _backend_runtime_will_mutate; then
-        _admission_secondary_gate || return 1
+        if [[ "${AFTER_CLOSE_PICKUP_FENCED}" != "true" ]]; then
+            fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 runtime mutation（fail-closed）"
+        fi
     fi
 
     FAILURE_STAGE="environment_images"
@@ -1622,12 +1631,8 @@ deploy() {
     if [[ "${MIGRATION_CHANGED}" == "true" ]]; then
         FAILURE_STAGE="migration"
         run_migration || return 1
-        # [E2.1 P1-C] first-install bootstrap：migration 093 已创建 admission 表与 singleton row，
-        # 此时 acquire own pause，使随后启动的 admission-aware worker 在部署临界区内不领取新任务。
-        # 若 early acquire 已执行（steady-state，表早已存在）则 ADMISSION_OWNED=true，此处跳过。
-        if _backend_runtime_will_mutate && [[ "${ADMISSION_OWNED}" != "true" ]] && _admission_installed; then
-            _admission_acquire || return 1
-        fi
+        # [E2.1 P1-C] supervisor-drain fence 已在 deploy() 开头建立（早于 migration），
+        # 无需 first-install bootstrap acquire；migration 后重启会由 owned-aware restore 处理。
     else
         log "migration_changed=false，跳过 alembic upgrade"
     fi
@@ -1649,7 +1654,14 @@ deploy() {
     FAILURE_STAGE="restart"
     local restart_list=()
     if [[ "${need_backend}" == "true" ]]; then
-        restart_list+=("${PYTHON_SERVICES[@]}")
+        # [E2.1 P1-C] worker-after-close 由 owned-aware restore 处理，不在此通用重启中 recreate
+        local _py_filtered=()
+        local _s
+        for _s in "${PYTHON_SERVICES[@]}"; do
+            [[ "${_s}" == "worker-after-close" ]] && continue
+            _py_filtered+=("${_s}")
+        done
+        restart_list+=("${_py_filtered[@]}")
         RESTARTED_PYTHON=true
     fi
     if [[ "${need_frontend}" == "true" ]]; then
@@ -1674,7 +1686,9 @@ deploy() {
         # 显式 || return 1，保证门禁失败（存在活跃 after-close 强制任务）即 fail-closed 阻止重启，
         # 不依赖外层 set -e。
         FAILURE_STAGE="active_job_gate_pre_restart"
-        _admission_restart_gate || return 1
+        if [[ "${AFTER_CLOSE_PICKUP_FENCED}" != "true" ]]; then
+            fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝重启 worker-after-close（fail-closed）"
+        fi
         FAILURE_STAGE="restart"
         # [E2.1 P1-A §6] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
         _mark_containers_mutated
@@ -1691,9 +1705,17 @@ deploy() {
         # 故仍需 final guard 拦截 reconcile 前新接纳的活跃 after-close 任务。
         # 显式 || return 1，保证门禁失败即 fail-closed 阻止配置对账。
         FAILURE_STAGE="active_job_gate_pre_reconcile"
-        _admission_restart_gate || return 1
+        if [[ "${AFTER_CLOSE_PICKUP_FENCED}" != "true" ]]; then
+            fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 Compose 对账（fail-closed）"
+        fi
         FAILURE_STAGE="compose_reconcile"
-        reconcile_compose_runtime "${PYTHON_SERVICES[@]}" frontend || return 1
+        local _recon_filtered=()
+        local _rs
+        for _rs in "${PYTHON_SERVICES[@]}"; do
+            [[ "${_rs}" == "worker-after-close" ]] && continue
+            _recon_filtered+=("${_rs}")
+        done
+        reconcile_compose_runtime "${_recon_filtered[@]}" frontend || return 1
     elif [[ ${#restart_list[@]} -eq 0 ]]; then
         log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
     fi
@@ -2062,8 +2084,16 @@ rollback() {
     fi
 
     cd "${REPO_ROOT}"
+    # [E2.1 P1-C] worker-after-close 由 owned-aware restore 处理，回滚不擅自 recreate
+    # （避免启动原本停着的 worker）
+    local _rb_filtered=()
+    local _rb
+    for _rb in "${PYTHON_SERVICES[@]}"; do
+        [[ "${_rb}" == "worker-after-close" ]] && continue
+        _rb_filtered+=("${_rb}")
+    done
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \
-        "${PYTHON_SERVICES[@]}" frontend
+        "${_rb_filtered[@]}" frontend
 
     # [E2.1 P1-A] rollback() 完成调用 ≠ rollback successful。
     # 必须由独立 verify owner 逐项核对 pre-deploy manifest 后才允许声称成功；
@@ -2268,7 +2298,7 @@ main() {
                     log "  market.env / live files / RUNTIME_SHA / 容器 均未改动"
                     log "  不执行任何文件层恢复，也不执行容器级回滚"
                     # [E2.1 P1-C] 未发生任何 runtime mutation，释放本次 own pause（无 restart，安全）。
-                    _admission_release
+                    _restore_after_close_pickup_if_owned
                     fail "部署失败（阶段: ${FAILURE_STAGE}），mutation_stage=none，未产生任何 runtime mutation"
                     ;;
                 files)
@@ -2276,18 +2306,19 @@ main() {
                         restore_files_to_previous_sha
                     fi
                     # [E2.1 P1-C] 文件层已恢复、服务未重启：释放本次 own pause。
-                    _admission_release
+                    _restore_after_close_pickup_if_owned
                     fail "部署失败（阶段: ${FAILURE_STAGE}），服务未重启，已恢复文件层"
                     ;;
                 containers)
                     if rollback; then
                         # [E2.1 P1-C] 回滚验证通过：释放本次 own pause。
-                        _admission_release
+                        _restore_after_close_pickup_if_owned
                         fail "部署失败（阶段: ${FAILURE_STAGE}）并已执行容器级回滚"
                     fi
-                    # [E2.1 P1-C] 回滚验证未通过：保持 paused，不释放（MANUAL_INTERVENTION_REQUIRED）。
-                    ADMISSION_ROLLBACK_FAILED=true
-                    fail "部署失败（阶段: ${FAILURE_STAGE}）回滚验证未通过，保持 paused（MANUAL_INTERVENTION_REQUIRED）"
+                    # [E2.1 P1-C] 回滚验证未通过：本 deploy fenced 的 worker 不自动恢复，
+                    # 保持停止（MANUAL_INTERVENTION_REQUIRED）。
+                    log "AFTER_CLOSE_PICKUP_RESTORE_SKIPPED_ROLLBACK_FAILED=true"
+                    fail "部署失败（阶段: ${FAILURE_STAGE}）回滚验证未通过，worker-after-close 保持停止（MANUAL_INTERVENTION_REQUIRED）"
                     ;;
                 *)
                     fail "部署失败（阶段: ${FAILURE_STAGE}），未知 mutation_stage=${MUTATION_STAGE}，保持 fail-closed"
@@ -2298,9 +2329,9 @@ main() {
         if ! verify_deployment; then
             # 核验发生在重启之后，属于容器级回滚场景。
             if rollback; then
-                _admission_release
+                _restore_after_close_pickup_if_owned
             else
-                ADMISSION_ROLLBACK_FAILED=true
+                log "AFTER_CLOSE_PICKUP_RESTORE_SKIPPED_ROLLBACK_FAILED=true"
             fi
             fail "部署核验失败并已回滚"
         fi
@@ -2308,9 +2339,9 @@ main() {
         if ! cleanup_resources; then
             # 清理后资源复检失败（OOM / 资源跌破阈值 / 限制未生效）→ 判部署失败。
             if rollback; then
-                _admission_release
+                _restore_after_close_pickup_if_owned
             else
-                ADMISSION_ROLLBACK_FAILED=true
+                log "AFTER_CLOSE_PICKUP_RESTORE_SKIPPED_ROLLBACK_FAILED=true"
             fi
             fail "部署后清理与资源复检失败（failure_stage=${FAILURE_STAGE}）并已回滚"
         fi
@@ -2318,12 +2349,7 @@ main() {
         save_state "${TARGET_SHA}"
 
         # [E2.1 P1-C] 部署完整成功：释放本次 deploy 自己拥有的 pause。
-        _admission_release
-        if [[ "${ADMISSION_RELEASE_FAILED}" == "true" ]]; then
-            # 运行健康：不回滚健康候选；但 admission lifecycle 未完整成功，报告 DEGRADED。
-            fail "ADMISSION_RELEASE_FAILED: 部署运行成功但 pickup pause 释放失败，MANUAL_INTERVENTION_REQUIRED（DEGRADED，未回滚健康候选）"
-        fi
-
+        _restore_after_close_pickup_if_owned
         log "部署成功: ${TARGET_SHA}"
         log "  deployment_mode=live"
         log "  first_live_deploy=${FIRST_LIVE_DEPLOY}"
