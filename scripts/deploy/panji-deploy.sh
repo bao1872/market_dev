@@ -240,6 +240,12 @@ check_static_resource_budget() {
 check_deployment_memory_headroom() {
     local mem_kb mem_mb
     if [[ -n "${PANJI_MOCK_MEM_AVAILABLE_KB:-}" ]]; then
+        # 测试 seam 仅在 dry-run / 正式契约测试下允许覆盖真实 MemAvailable。
+        # 真实部署中若存在该变量，视为环境泄漏，fail-closed 拒绝使用，强制读取真实 /proc/meminfo。
+        if [[ "${DRY_RUN}" != "true" ]]; then
+            log "检测到 PANJI_MOCK_MEM_AVAILABLE_KB，但当前为真实部署（非 dry-run）；测试 seam 不能覆盖真实 MemAvailable，拒绝使用"
+            return 1
+        fi
         mem_kb="${PANJI_MOCK_MEM_AVAILABLE_KB}"
     elif [[ -r /proc/meminfo ]]; then
         mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)"
@@ -1361,6 +1367,9 @@ _restore_after_close_pickup_if_owned() {
         waited=$((waited + 5))
     done
     AFTER_CLOSE_FENCE_OWNED=false
+    # 状态机一致性：恢复成功后 worker 正在运行（容器非 EXITED/missing、running!=0），
+    # 故 PICKUP_FENCED 必须回到 false，否则该变量会与真实容器状态背离（状态机缺口）。
+    AFTER_CLOSE_PICKUP_FENCED=false
     log "AFTER_CLOSE_PICKUP_RESTORED=true"
 }
 
@@ -2394,11 +2403,28 @@ main() {
         fi
 
         # 最终稳态 runtime 资源健康（DS-104）：此时 worker 已恢复运行，检查的是真实稳态，
-        # 而非 fence 停掉 worker 时的临时状态。失败 → 回滚路径需在 backend runtime mutation
-        # 前重新建立 worker fence（CASE H）。
+        # 而非 fence 停掉 worker 时的临时状态。
         if ! post_deploy_resource_check; then
+            FAILURE_STAGE="final_steady_state_resource"
+            # [E3 CASE H] 最终稳态健康失败 → 回滚 backend runtime mutation 前必须重新建立
+            # supervisor-drain fence。否则 live-mounted 文件被回滚改写时，candidate after-close
+            # Python 进程仍在运行，形成混合 runtime（P1-C supervisor-drain 要消灭的情况）。
+            # frontend-only 未 fence 过 worker，无需重新 fence。
+            if _backend_runtime_will_mutate; then
+                if ! _fence_after_close_worker; then
+                    log "MANUAL_INTERVENTION_REQUIRED=true（最终稳态资源失败且无法重新 fence after-close worker）"
+                    fail "最终稳态资源健康复检失败，且无法重新建立 after-close 盘后任务门禁（failure_stage=${FAILURE_STAGE}）"
+                fi
+            fi
             if rollback; then
-                _restore_after_close_pickup_if_owned
+                # 回滚成功：在 OLD runtime 上恢复 worker；restore 会清掉 PICKUP_FENCED，使状态与
+                # 真实容器（running）一致。若 restore 失败，保持 fail-closed + 人工干预。
+                if ! _restore_after_close_pickup_if_owned; then
+                    log "MANUAL_INTERVENTION_REQUIRED=true（回滚成功但无法恢复 OLD after-close worker）"
+                fi
+            else
+                # 回滚失败：保持 fenced 状态，等待人工干预，绝不在 worker 仍 running 时静默放过。
+                log "回滚失败，after-close worker 保持 fenced 状态（MANUAL_INTERVENTION_REQUIRED=true）"
             fi
             fail "最终稳态资源健康复检失败（failure_stage=${FAILURE_STAGE}）"
         fi

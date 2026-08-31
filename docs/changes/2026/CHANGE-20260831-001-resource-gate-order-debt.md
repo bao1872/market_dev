@@ -66,3 +66,38 @@ fence worker-after-close → worker 退出并释放 ~942MB anon → 再检查部
 - P1_A_ROLLBACK_OWNER = CLOSED
 - P1_B_PENDING_QUEUE_VISIBILITY = CLOSED
 - P1_C_SUPERVISOR_DRAIN = CLOSED
+
+## 后续独立审计补充修正（同一 E3 blocker，非新 phase）
+
+独立审计发现 3 个剩余缺口，已全部收口：
+
+1. **FINAL_HEALTH_FAILURE_REFENCE（P1）**：最终稳态资源检查失败时，原路径直接 `rollback()`，
+   但 `rollback()` 首动作即 `restore_files_to_previous_sha`，且把 `worker-after-close` 排除在
+   recreate 之外——于是 live-mounted 文件被回滚改写时，candidate 的 after-close Python 进程
+   仍在运行，形成 P1-C supervisor-drain 要消灭的**混合 runtime**。
+   修复：`main()` 最终健康失败分支中，先（backend runtime 路径）`_fence_after_close_worker`
+   重新建立 supervisor-drain fence（running==0 才继续），再做 `rollback()`；rollback 成功后在
+   OLD runtime 上恢复 worker；rollback 失败则保持 fenced + 人工干预，绝不在 worker 仍 running
+   时静默放过。re-fence 仅加在最终失败路径，不污染其它 rollback 调用方。
+
+2. **AFTER_CLOSE_PICKUP_FENCED 状态机缺口**：owned restore 成功后 worker 已 running，但
+   `AFTER_CLOSE_PICKUP_FENCED` 仍残留 `true`，与真实容器状态背离。
+   修复：`_restore_after_close_pickup_if_owned` 成功时同步置
+   `AFTER_CLOSE_PICKUP_FENCED=false`（FENCE_OWNED=false 一并）。仅 owned restore 才清，
+   worker 原本 stopped/missing 且非本 deploy 拥有的分支不擅自清。
+
+3. **PRODUCTION_MOCK_MEMORY_BYPASS（P1）**：`check_deployment_memory_headroom` 的测试 seam
+   `PANJI_MOCK_MEM_AVAILABLE_KB` 可无条件覆盖真实 `/proc/meminfo`，等于给刚修好的 4096 gate
+   开了隐藏 bypass。
+   修复：seam 仅在 `DRY_RUN=true`（dry-run / 正式契约测试）下生效；真实部署遇到该变量视为
+   环境泄漏，fail-closed 拒绝使用并强制读取真实 `/proc/meminfo`。
+
+### 契约测试补充
+
+- CASE H 由 false-green 结构化断言重写为**行为级**：自定义 curl mock 在 worker running 时返 500，
+  仅命中最终稳态健康检查；验证「第一次 restore → 第二次 fence（drain）→ 回滚文件 mutation」
+  顺序，且回滚成功后 worker 在 OLD runtime 上恢复 running、状态机复位。
+- CASE J（行为级）：owned restore 后日志含 `AFTER_CLOSE_PICKUP_FENCED=false`。
+- FIX F（行为级，隔离 `check_deployment_memory_headroom`）：真实部署 + seam 变量 → 拒绝通过；
+  dry-run + seam → 仍可使用 mock 值。
+- 保留原有 CASE A-G/I 与 P1-A/B/C 回归门禁。

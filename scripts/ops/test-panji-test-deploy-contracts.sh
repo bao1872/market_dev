@@ -1223,14 +1223,7 @@ else
     bad "CASE I: save_state occurs only AFTER worker restore AND final runtime health PASS"
 fi
 
-# CASE H: final health 失败 → 回滚路径需在 backend runtime mutation 前重新建立 worker fence
-FINAL_BLOCK="$(printf '%s' "${MAIN_BODY_RG}" | sed -n '/最终稳态 runtime 资源健康/,/save_state/p')"
-if printf '%s' "${FINAL_BLOCK}" | grep -q 'rollback' \
-   && printf '%s' "${FINAL_BLOCK}" | grep -q '_restore_after_close_pickup_if_owned'; then
-    ok "CASE H: final health failure re-establishes worker fence via rollback before backend mutation"
-else
-    bad "CASE H: final health failure re-establishes worker fence via rollback before backend mutation"
-fi
+# CASE H 已提升为行为级契约（见下方“行为级”段），这里不再用结构化 grep 假证明（false-green）。
 
 # ---- 行为级：真正调用 owner，验证 headroom 在 fence 之后按注入内存判定 ----
 # CASE A: backend runtime 部署，worker running，fence 后 MemAvailable=4300 → 允许；首笔 mutation 在 fence 之后
@@ -1314,6 +1307,93 @@ if [[ "${CASE_E_RC}" -ne 0 ]] \
 else
     bad "CASE E: frontend-only below headroom FAILs WITHOUT stopping worker-after-close (rc=${CASE_E_RC})"
     sed 's/^/    /' "${CASE_E_LOG}" >&2
+fi
+
+# ---- CASE H（行为级，替代原 false-green 结构化断言）----
+# 最终稳态健康检查失败时，必须在回滚 backend runtime mutation 之前重新建立 after-close fence。
+echo "== CASE H: final steady-state health FAIL → re-fence before rollback file mutation (behavioral) =="
+CASE_H_MOCK="${TMP_ROOT}/case-h-mock"
+mkdir -p "${CASE_H_MOCK}"
+cp -a "${MOCK_BIN}/." "${CASE_H_MOCK}/"
+# 自定义 curl：worker 处于 running 时返回 500（仅命中最终稳态健康检查），
+# fenced/exited 时返回 200（verify_deployment / cleanup 的检查仍通过）。
+cat > "${CASE_H_MOCK}/curl" <<'MOCKEOF'
+#!/usr/bin/env bash
+STATE_FILE="${PANJI_MOCK_WORKER_STATE:-/tmp/panji_worker_state}"
+if [[ -r "${STATE_FILE}" ]] && [[ "$(cat "${STATE_FILE}")" == "running" ]]; then
+  printf '500'
+  exit 0
+fi
+printf '%s' "${PANJI_MOCK_HEALTH_CODE:-200}"
+exit 0
+MOCKEOF
+chmod +x "${CASE_H_MOCK}/curl"
+reset_worker_state "running"
+CASE_H_LOG="${TMP_ROOT}/case-h.log"
+CASE_H_RC=0
+PATH="${CASE_H_MOCK}:${MOCK_BIN}:${PATH}" \
+PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${LIVE_ROOT}" \
+PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${STATE_FILE}" PANJI_LOCK_FILE="${LOCK_FILE}" \
+PANJI_MOCK_WORKER_STATE="${WORKER_STATE_FILE}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
+    bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${CASE_H_LOG}" 2>&1 || CASE_H_RC=$?
+if [[ "${CASE_H_RC}" -ne 0 ]] \
+   && grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_H_LOG}" \
+   && grep -q '恢复代码与运行文件到 previous SHA' "${CASE_H_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=false' "${CASE_H_LOG}"; then
+    ok "CASE H: final-health FAIL drives re-fence before rollback (rc!=0, rollback ran, state reset)"
+else
+    bad "CASE H: final-health FAIL drives re-fence before rollback (rc=${CASE_H_RC})"
+    sed 's/^/    /' "${CASE_H_LOG}" >&2
+fi
+# 顺序契约：第一次 restore（worker 回到 running）之后，第二次 fence 必须出现在回滚文件 mutation 之前
+H_RESTORE1="$(grep -n 'AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_H_LOG}" | head -1 | cut -d: -f1)"
+H_FENCE2="$(grep -n 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_H_LOG}" | tail -1 | cut -d: -f1)"
+H_ROLLBACK="$(grep -n '恢复代码与运行文件到 previous SHA' "${CASE_H_LOG}" | head -1 | cut -d: -f1)"
+if [[ -n "${H_RESTORE1}" && -n "${H_FENCE2}" && -n "${H_ROLLBACK}" \
+      && "${H_RESTORE1}" -lt "${H_FENCE2}" && "${H_FENCE2}" -lt "${H_ROLLBACK}" ]]; then
+    ok "CASE H: second fence (drain) precedes rollback file mutation (no mixed runtime)"
+else
+    bad "CASE H: second fence (drain) precedes rollback file mutation (restore1=${H_RESTORE1} fence2=${H_FENCE2} rollback=${H_ROLLBACK})"
+fi
+if [[ "$(cat "${WORKER_STATE_FILE}")" == "running" ]]; then
+    ok "CASE H: worker restored to running on OLD runtime after rollback"
+else
+    bad "CASE H: worker restored to running on OLD runtime after rollback (state=$(cat "${WORKER_STATE_FILE}"))"
+fi
+
+# ---- CASE J（行为级）：owned restore 后 PICKUP_FENCED 必须与真实容器状态一致 ----
+echo "== CASE J: owned restore resets AFTER_CLOSE_PICKUP_FENCED=false (state machine) =="
+if [[ -f "${CASE_A_LOG}" ]] && grep -q 'AFTER_CLOSE_PICKUP_FENCED=false' "${CASE_A_LOG}"; then
+    ok "CASE J: owned restore clears AFTER_CLOSE_PICKUP_FENCED (worker running, not fenced)"
+else
+    bad "CASE J: owned restore clears AFTER_CLOSE_PICKUP_FENCED (worker running, not fenced)"
+fi
+
+# ---- FIX F（行为级）：测试 seam 不得在真实部署中绕过真实 MemAvailable ----
+echo "== FIX F: mock memory seam rejected in production deploy (fail-closed) =="
+HEADROOM_LIB="${TMP_ROOT}/headroom-lib.sh"
+sed -n '/^check_deployment_memory_headroom() {/,/^}/p' "${SERVER_SCRIPT}" > "${HEADROOM_LIB}"
+if DRY_RUN=false PANJI_MOCK_MEM_AVAILABLE_KB=99999999 bash -c "
+  log() { :; }
+  MIN_MEM_MB=4096
+  source '${HEADROOM_LIB}'
+  check_deployment_memory_headroom
+" >/dev/null 2>&1; then
+  bad "FIX F: production deploy with mock memory seam must NOT pass headroom"
+else
+  ok "FIX F: production deploy with mock memory seam is rejected fail-closed"
+fi
+if DRY_RUN=true PANJI_MOCK_MEM_AVAILABLE_KB=4403200 bash -c "
+  log() { :; }
+  MIN_MEM_MB=4096
+  source '${HEADROOM_LIB}'
+  check_deployment_memory_headroom
+" >/dev/null 2>&1; then
+  ok "FIX F: dry-run still honors mock memory seam"
+else
+  bad "FIX F: dry-run still honors mock memory seam"
 fi
 
 echo "----------------------------------------"
