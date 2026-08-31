@@ -3,7 +3,7 @@
 覆盖 Phase 0 验收门中除执行器之外的部分：
 - board_soft_failure_truthful：板块软失败必须让 step summary 为 failed
 - review_failure_checkpoint_not_advanced：Review 失败不得推进 last_completed_step
-- chip_enqueue_before_final_status：chip 入队是终态之前的正式步骤
+- chip_automatic_enqueue_retired：盘后主链不再自动创建 chip job（CHIP-RETIRE 2026-09-01）
 - status_api_contract_complete：watchdog 字段完整进入 API 响应
 
 全部为真实行为断言，不使用 inspect.getsource() 字符串检查。
@@ -16,7 +16,6 @@ import pytest
 
 from app.services import after_close_orchestrator
 from app.services.after_close_orchestrator import (
-    _enqueue_chip_job_step,
     _is_terminal_review_short_circuit,
     _update_heartbeat_and_step,
     execute_orchestrator_step,
@@ -135,80 +134,6 @@ async def test_update_heartbeat_with_step_advances_checkpoint():
 
     meta = after_close_orchestrator._parse_metadata(job_run)
     assert meta["last_completed_step"] == "computing_review"
-
-
-# ---------------------------------------------------------------------------
-# Gate: chip_enqueue_before_final_status
-# ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_enqueue_chip_job_step_skipped_when_no_snapshot_run():
-    """snapshot_run_id 缺失 → skipped（不是 failed，不应拉低主任务终态）。"""
-    from datetime import date
-
-    with patch.object(
-        after_close_orchestrator, "_persist_step_summary", new=AsyncMock(),
-    ) as persist:
-        status, job_id = await _enqueue_chip_job_step(
-            job_run_id=uuid.uuid4(),
-            worker_id="w1",
-            lease_epoch=1,
-            trade_date=date(2026, 7, 31),
-            snapshot_run_id=None,
-            expected_count=100,
-        )
-
-    assert status == "skipped"
-    assert job_id is None
-    # 必须留下 step summary（chip 是正式步骤，不能无声跳过）
-    persist.assert_awaited_once()
-    summary = persist.await_args.args[1]
-    assert summary["step"] == "enqueue_chip_job"
-    assert summary["status"] == "skipped"
-    assert summary["skip_reason"] == "SNAPSHOT_RUN_ID_MISSING"
-
-
-@pytest.mark.asyncio
-async def test_enqueue_chip_job_step_failure_returns_failed_status():
-    """chip 入队抛异常 → 返回 failed，供主任务判定 partial_success。
-
-    修复前 chip 在终态之后创建，失败只 warn，永远无法进入 partial_success。
-    """
-    from datetime import date
-
-    with (
-        patch.object(
-            after_close_orchestrator,
-            "create_after_close_chip_consensus_job",
-            new=AsyncMock(side_effect=RuntimeError("db down")),
-        ),
-        patch.object(after_close_orchestrator, "AsyncSessionLocal"),
-        patch.object(
-            after_close_orchestrator, "_make_step_progress_callback",
-            return_value=None,
-        ),
-        patch.object(
-            after_close_orchestrator, "_make_step_heartbeat", return_value=None,
-        ),
-        patch.object(
-            after_close_orchestrator, "_make_step_cancellation_check",
-            return_value=None,
-        ),
-        patch.object(
-            after_close_orchestrator, "_persist_step_summary", new=AsyncMock(),
-        ),
-    ):
-        status, _job_id = await _enqueue_chip_job_step(
-            job_run_id=uuid.uuid4(),
-            worker_id="w1",
-            lease_epoch=1,
-            trade_date=date(2026, 7, 31),
-            snapshot_run_id=uuid.uuid4(),
-            expected_count=100,
-        )
-
-    assert status == "failed"
 
 
 # ---------------------------------------------------------------------------
@@ -497,8 +422,9 @@ async def test_terminal_review_short_circuit_detection():
     cancelled / interrupted 必须短路（保持终态、不覆盖总任务终态）；
     succeeded / failed / timed_out / unavailable 不得短路（走 partial_success 判定）。
 
-    [AUD-08 2026-08-07] 短路语义已与 chip 解耦：chip 在 stock_core 发布后即入队，
-    早于本判定，短路不再影响 chip 是否存在。
+    [AUD-08 2026-08-07] 短路语义已与 chip 解耦。
+    [CHIP-RETIRE 2026-09-01] 自动 chip 入队已整体退役，短路判定与 chip 再无任何
+    交集（主链不再创建 chip job）。
     """
     from app.services.after_close_orchestrator import AfterCloseRunStatus
 
@@ -577,11 +503,10 @@ async def test_cancelled_run_preserves_checkpoint():
       → orchestrator_status = cancelled
       → last_completed_step 仍为 publishing（未被覆写）
 
-    [CORRECTION-02] chip 是 post-core enhancement，readiness owner 为 CoreRun 显式绑定
-    （snapshot_run_id），与 Review 终态无因果关系：Review 取消/中断不得撤销已入队的 chip，
-    且 chip 不会因 stock_core publication 缺失而悄悄跳过（见
-    test_chip_enqueue_gated_on_core_readiness_not_publication 与
-    test_chip_runs_after_review_and_survives_publication_absence）。
+    [CHIP-RETIRE 2026-09-01] 原 [CORRECTION-02] 的 chip readiness 段落已作废：
+    自动 chip 入队整体退役后主链不再创建 chip job，Review 终态与 chip 之间不存在
+    任何因果关系可言。相关退役合同见
+    tests/test_after_close_chip_retirement.py。
     """
     from app.services import after_close_orchestrator as orch
     from app.services.after_close_orchestrator import AfterCloseRunStatus
@@ -671,87 +596,14 @@ def test_execute_after_close_run_short_circuit_uses_enum_and_none_checkpoint():
     )
 
 
-# ---------------------------------------------------------------------------
-# Gate: chip_forks_after_core_readiness
-# [CORRECTION-02] chip 的 readiness owner 是 CoreRun 显式绑定（snapshot_run_id），
-# 不再依赖 stock_core publication；chip 是 post-core enhancement，位于 Review 之后。
-# ---------------------------------------------------------------------------
-
-
-def test_chip_enqueue_gated_on_core_readiness_not_publication():
-    """[CORRECTION-02] chip 守卫基于 snapshot_run_id(Core X)，而非 stock_core publication。
-
-    关键不变式：Core X succeeded（无 stock_core publication）→ chip 仍入队。
-    chip 不得因 _stock_core_published=False 而悄悄永不执行（原 P0 回归）。
-    """
-    import inspect
-    import re
-
-    from app.services import after_close_orchestrator as orch
-
-    src = inspect.getsource(orch.execute_after_close_run)
-
-    idx = src.find("chip 入队（non-blocking post-core）")
-    assert idx != -1, "未找到 chip 注释块"
-    block = src[idx: idx + 400]
-    m = re.search(r"\n\s*if (.*?):\n", block)
-    assert m is not None, "未找到 chip 守卫"
-    cond = m.group(1).strip()
-    # [CORRECTION-03 升级] 门控升级为 canonical CORE_READY（真实 CoreRun 行校验后置位）
-    assert cond == "core_ready", (
-        f"chip 守卫必须基于 canonical CORE_READY（core_ready），实际为: {cond}"
-    )
-    assert "snapshot_run_id is not None" != cond, (
-        "仅凭 snapshot_run_id 非空不足以证明 Core Ready（running/failed 均可能）"
-    )
-
-
-def test_chip_runs_after_review_and_survives_publication_absence():
-    """[CORRECTION-02] chip 是 post-core enhancement（Review 之后），且
-    Review 短路/取消不得撤销已入队的 chip。
-
-    结构性保证：chip 入队位于 Review 终态短路块之后（post-core），
-    但其 readiness 只依赖 snapshot_run_id，与 publication 无关。
-    """
-    import inspect
-    import re
-
-    from app.services import after_close_orchestrator as orch
-
-    src = inspect.getsource(orch.execute_after_close_run)
-
-    def _exec_pos(step: str) -> int:
-        m = re.search(r'execute_orchestrator_step\(\s*\n?\s*"' + step + '"', src)
-        assert m is not None, f"未找到 {step} 执行器提交"
-        return m.start()
-
-    review_pos = _exec_pos("computing_review")
-    chip_pos = src.find("_enqueue_chip_job_step(")
-    short_circuit_pos = src.find("if _is_terminal_review_short_circuit(")
-
-    assert short_circuit_pos != -1, "未找到终态短路块"
-    # chip 入队位于短路块之后（post-core）：无论短路是否触发，chip 段都执行
-    # （短路块 raise 前不会执行 chip；但正常路径下 chip 段在 Review 之后运行）
-    assert chip_pos > review_pos, (
-        "chip 入队必须位于 Review 步骤之后（post-core enhancement）"
-    )
-
-    # 短路块内不得有任何撤销/删除 chip 的动作
-    block = re.search(
-        r'if _is_terminal_review_short_circuit\(.*?raise AfterCloseCancelledError',
-        src,
-        re.DOTALL,
-    )
-    assert block is not None
-    body = block.group(0).lower()
-    for forbidden in ("cancel_chip", "delete_chip", "revoke_chip"):
-        assert forbidden not in body, (
-            f"短路块不得撤销已入队的 chip（发现 {forbidden}）"
-        )
-
-
 def test_chip_enqueue_is_idempotent_for_resume():
-    """[AUD-08] chip 前移的可行性依据：入队本身幂等，断点恢复重跑安全。
+    """[CHIP-RETIRE 2026-09-01 / 历史兼容] 保留的 chip 服务仍保证入队幂等。
+
+    自动入队已退役，但 `create_after_close_chip_consensus_job` 作为历史/手工
+    重算入口保留（NON-GOAL：不删服务实现）。本测试锁定其幂等性未被回退波及，
+    确保历史 chip job 重放安全。
+
+    [AUD-08 原始语境] chip 前移的可行性依据：入队本身幂等，断点恢复重跑安全。
 
     create_after_close_chip_consensus_job 通过确定性 run_key
     （`chip_consensus:<trade_date>`）走 acquire_job_run_lock 取锁，

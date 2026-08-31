@@ -48,9 +48,6 @@ from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
-from app.services.after_close_chip_consensus_service import (
-    create_after_close_chip_consensus_job,
-)
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
@@ -115,8 +112,6 @@ _STEP_TIMEOUT_SECONDS: dict[str, float | None] = {
     "computing_history": None,
     "computing_review": 1800,
     "auction_anchor": _AUCTION_ANCHOR_TIMEOUT_SECONDS,
-    # [Phase0-Fix#8] chip 只做入队（不等计算），超时应短
-    "enqueue_chip_job": 120,
 }
 
 
@@ -550,107 +545,6 @@ def _make_history_executor_progress(
             )
 
     return _cb
-
-
-async def _enqueue_chip_job_step(
-    *,
-    job_run_id: uuid.UUID,
-    worker_id: str | None,
-    lease_epoch: int | None,
-    trade_date: date,
-    snapshot_run_id: uuid.UUID | None,
-    expected_count: int | None,
-) -> tuple[str, uuid.UUID | None]:
-    """[Phase0-Fix#8] 正式步骤 `enqueue_chip_job`：把 chip 入队纳入统一执行合同。
-
-    语义：
-    - 只负责"入队"，不 await chip 计算（chip 由独立 Worker 异步执行）；
-    - 通过统一执行器产生 step summary（可选步骤，失败不炸主链）；
-    - 返回 (status, chip_job_id) 供主任务终态计算 partial_success。
-
-    [CHANGE-20260729-006 ID 合同统一] chip.core_run_id 必须指向 snapshot_run_id
-    （StockFeatureSnapshotRun.id，数据版本），不再指向 job_run_id。
-
-    Returns:
-        (status, chip_job_id)，status ∈ {succeeded, skipped, failed}
-    """
-    if snapshot_run_id is None:
-        summary = {
-            "step": "enqueue_chip_job",
-            "status": "skipped",
-            "skip_reason": "SNAPSHOT_RUN_ID_MISSING",
-            "optional": True,
-            "error_code": None,
-            "error_message": None,
-        }
-        await _persist_step_summary(job_run_id, summary)
-        logger.warning(
-            "[AfterClose] snapshot_run_id 为 None，跳过 chip consensus job 入队: "
-            "trade_date=%s", trade_date,
-        )
-        return "skipped", None
-
-    captured: dict[str, Any] = {}
-
-    async def _enqueue() -> dict[str, Any]:
-        async with AsyncSessionLocal() as db:
-            chip_job, chip_is_new = await create_after_close_chip_consensus_job(
-                db=db,
-                trade_date=trade_date,
-                core_run_id=snapshot_run_id,
-                scope="all_a_share",
-                expected_count=expected_count,
-            )
-            await db.commit()
-        if chip_job is None:
-            # 返回 None 视为业务软失败（下方统一转 failed）
-            return {"status": "failed", "reason": "CHIP_JOB_CREATE_RETURNED_NONE"}
-        captured["job_id"] = chip_job.id
-        return {
-            "status": "succeeded",
-            "job_id": str(chip_job.id),
-            "is_new": chip_is_new,
-        }
-
-    result, summary = await execute_orchestrator_step(
-        "enqueue_chip_job",
-        _enqueue,
-        timeout_seconds=_step_timeout("enqueue_chip_job"),
-        optional=True,
-        heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-        progress=_make_step_progress_callback(job_run_id, worker_id),
-        cancellation_check=_make_step_cancellation_check(job_run_id),
-    )
-
-    # [Mypy-fix 2026-08-04] 先窄化 result 为 dict，避免 union-attr（result 可能为 None）
-    if isinstance(result, dict):
-        business_status = result.get("status")
-        business_reason = result.get("reason")
-    else:
-        business_status = None
-        business_reason = None
-    if summary["status"] == "succeeded" and business_status == "failed":
-        # 业务软失败如实反映到 step summary（不得出现 business=failed/step=succeeded）
-        summary["status"] = "failed"
-        summary["error_code"] = "CHIP_ENQUEUE_FAILED"
-        summary["error_message"] = str(business_reason)
-        await _persist_step_summary(job_run_id, summary)
-
-    chip_job_id = captured.get("job_id")
-    if summary["status"] == "succeeded":
-        logger.info(
-            "[AfterClose] chip consensus job 已入队（独立 Worker 异步执行）: "
-            "chip_run_id=%s, snapshot_run_id=%s, expected_count=%s",
-            chip_job_id, snapshot_run_id, expected_count,
-        )
-        return "succeeded", chip_job_id
-
-    logger.warning(
-        "[AfterClose] chip consensus job 入队未成功（主 run 将记 partial_success）: "
-        "step_status=%s, trade_date=%s, snapshot_run_id=%s, error=%s",
-        summary["status"], trade_date, snapshot_run_id, summary.get("error_message"),
-    )
-    return "failed", chip_job_id
 
 
 def _make_step_heartbeat(
@@ -3762,6 +3656,8 @@ async def execute_after_close_run(
         # 分支判定之前），保证 normal publish 分支（下方 post-core 分叉点赋值）与
         # skip_publish 断点恢复分支（显式置 skipped）引用时均已定义，
         # 避免 skip_publish 路径 UnboundLocalError。
+        # [CHIP-RETIRE 2026-09-01] 自动 chip 入队已退役：二者不再被主链赋值，
+        # 恒为默认值（"skipped" / None），仅用于 metadata 与日志如实表达"未入队"。
         _chip_enqueue_status: str = "skipped"
         _chip_job_id: uuid.UUID | None = None
         # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] core_ready 的唯一置位点在
@@ -4052,7 +3948,7 @@ async def execute_after_close_run(
             raise AfterCloseCancelledError(_terminal_status)
 
         # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] post-core OPTIONAL DSA 兼容性投影
-        # —— 统一执行器顶层步骤（与 refreshing_daily / computing_review / enqueue_chip_job 同级）。
+        # —— 统一执行器顶层步骤（与 refreshing_daily / computing_review 同级）。
         # Core 已就绪（core_ready）→ Review → History 后执行；经 execute_orchestrator_step(
         # optional=True) 由统一执行器拥有 status/timeout/heartbeat/cancel/step summary/
         # optional failure，不再维护第二套手写状态机。其失败不得标记 Core failed、不得阻断
@@ -4366,41 +4262,12 @@ async def execute_after_close_run(
                     "error": str(event_exc),
                 })
 
-        # [P1-2][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] chip 入队（non-blocking post-core）
-        # readiness owner 改为 canonical CORE_READY（CoreRun 真实 status==succeeded），
-        # 不再依赖 snapshot_run_id 非空或 stock_core publication。
-        # 幂等依据：create_after_close_chip_consensus_job 以
-        # (trade_date, core_run_id=snapshot_run_id) 幂等，重复调用返回既有 job（chip_is_new=False）。
-        if core_ready:
-            try:
-                _chip_enqueue_status, _chip_job_id = await _enqueue_chip_job_step(
-                    job_run_id=job_run_id,
-                    worker_id=worker_id,
-                    lease_epoch=lease_epoch,
-                    trade_date=trade_date,
-                    snapshot_run_id=snapshot_run_id,
-                    expected_count=(
-                        len(cached_instrument_ids)
-                        if cached_instrument_ids is not None
-                        else None
-                    ),
-                )
-                logger.info(
-                    "[BOUNDARY-P6] after chip-enqueue job=%s chip_status=%s pid=%s",
-                    str(job_run_id), _chip_enqueue_status, os.getpid(),
-                )
-            except Exception as chip_exc:
-                _chip_enqueue_status = "failed"
-                logger.warning(
-                    "[AfterClose] chip 实时计算入队失败（optional，不影响 core）: "
-                    "job=%s, error=%s",
-                    str(job_run_id), chip_exc, exc_info=True,
-                )
-
-        # [AUD-08 2026-08-07][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02]
-        # chip 入队已在上方 post-core enhancement 段执行（readiness owner = snapshot_run_id X，
-        # 不再依赖 stock_core 发布），此处不再重复。chip 入队仍是正式步骤、失败仍纳入
-        # partial_success 判定（见下方 _optional_failed）。
+        # [CHIP-RETIRE 2026-09-01] 自动 chip consensus 入队已退役：
+        # 盘后主链不再创建 after_close_chip_consensus job
+        # （canonical chain = Core → Review → History → complete），
+        # 故此处不再执行 chip 入队步骤。_chip_enqueue_status 恒为 "skipped"、
+        # _chip_job_id 恒为 None，仅用于 metadata/日志如实表达"未入队"（消费方无变更）。
+        # 历史 chip 快照 / 服务实现 / SchedulerJobRun 行全部保留，不做迁移。
 
         # ---- 步骤 5: succeeded ----
         async with AsyncSessionLocal() as db:

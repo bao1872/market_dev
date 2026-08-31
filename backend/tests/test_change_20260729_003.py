@@ -462,41 +462,36 @@ class TestCoreDoesNotCallNodeCluster:
 class TestMainRunDoesNotWaitForChip:
     """[P0-7/10 修复 2026-07-29] 验证 chip consensus job 接口合同。
 
-    新合同（替换原"execute 抛 NotImplementedError"）：
-    1. execute_after_close_chip_consensus 已实现（P0-10），由独立 Worker 领取执行
-    2. after_close_orchestrator 主 run 只调用 create_after_close_chip_consensus_job（创建 queued 任务）
-    3. after_close_orchestrator 不导入/调用 execute_after_close_chip_consensus（不 await 执行）
-    4. chip 失败/部分成功通过 metadata.chip_status=partial 记录，主 status 保持 succeeded
+    [CHIP-RETIRE 2026-09-01] 自动 chip consensus 已退役，本类合同相应变更：
+    1. after_close_orchestrator 不再导入/调用 create_after_close_chip_consensus_job
+       （盘后主链不再自动创建 chip job）
+    2. after_close_orchestrator 仍不导入/调用 execute_after_close_chip_consensus
+       （主 run 不 await chip 执行）
+    3. create/execute 两个服务函数本身保留（历史兼容，可由独立调试入口执行）
     """
 
-    def test_orchestrator_only_imports_create_not_execute(self):
-        """after_close_orchestrator 只导入 create_after_close_chip_consensus_job，
-        不导入 execute_after_close_chip_consensus（主 run 不等待 chip 执行）。
-        """
+    def test_orchestrator_imports_neither_create_nor_execute(self):
+        """[CHIP-RETIRE] 盘后主链既不创建也不等待 chip。"""
         import inspect
 
         from app.services import after_close_orchestrator as orch
 
-        # 验证 orchestrator 导入 create 函数
-        assert hasattr(orch, "create_after_close_chip_consensus_job"), (
-            "orchestrator 必须导入 create_after_close_chip_consensus_job"
+        # 退役后：orchestrator 不再导入 create（主链不再自动创建 chip job）
+        assert not hasattr(orch, "create_after_close_chip_consensus_job"), (
+            "自动 chip 已退役：orchestrator 不得再导入 "
+            "create_after_close_chip_consensus_job"
         )
-        # 验证 orchestrator 不导入 execute 函数（主 run 不等待 chip 执行）
+        # 仍不导入 execute（主 run 不 await chip 执行）
         assert not hasattr(orch, "execute_after_close_chip_consensus"), (
             "orchestrator 不得导入 execute_after_close_chip_consensus（主 run 不等待 chip）"
         )
 
-        # 验证主编排全链路（含 chip 入队步骤）不引用 execute_after_close_chip_consensus
-        # [Phase0-Fix#8] chip 入队已抽为正式步骤 _enqueue_chip_job_step，
-        # 并在主任务终态之前执行；因此需连同该步骤一起检查。
-        source = inspect.getsource(orch.execute_after_close_run) + inspect.getsource(
-            orch._enqueue_chip_job_step
-        )
+        source = inspect.getsource(orch.execute_after_close_run)
         assert "execute_after_close_chip_consensus" not in source, (
             "主编排不得调用 execute_after_close_chip_consensus（不得 await chip 执行）"
         )
-        assert "create_after_close_chip_consensus_job" in source, (
-            "主编排必须调用 create_after_close_chip_consensus_job 完成 chip 入队"
+        assert "create_after_close_chip_consensus_job" not in source, (
+            "自动 chip 已退役：主编排不得再调用 create_after_close_chip_consensus_job"
         )
 
     def test_chip_execute_is_implemented(self):

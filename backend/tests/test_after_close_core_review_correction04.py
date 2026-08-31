@@ -520,10 +520,16 @@ def build_harness(
 
         return _op
 
-    async def fake_create_chip_consensus_job(**kwargs):
-        rec["chip"].append(kwargs)
+    async def fake_create_chip_consensus_job(*args, **kwargs):
+        # [CHIP-RETIRE 2026-09-01] 自动 chip 已退役：服务函数本身仍保留（历史兼容），
+        # 因此此处仍在**真实服务模块**上安装录制替身 —— rec["chip"] 为空是
+        # 「主链未调用」的有效证据，而非「符号不存在」的空断言。
+        rec["chip"].append(kwargs or args)
         return hist_stub, True
 
+    chip_mod = __import__(
+        "app.services.after_close_chip_consensus_service", fromlist=["x"],
+    )
     state_events_mod = __import__("app.services.state_event_service", fromlist=["x"])
     fss_mod = __import__("app.services.feature_snapshot_service", fromlist=["x"])
 
@@ -611,7 +617,7 @@ def build_harness(
         __import__("unittest").mock.patch.object(
             orch, "_make_history_step", make_history),
         __import__("unittest").mock.patch.object(
-            orch, "create_after_close_chip_consensus_job",
+            chip_mod, "create_after_close_chip_consensus_job",
             fake_create_chip_consensus_job,
         ),
         __import__("unittest").mock.patch.object(
@@ -687,7 +693,12 @@ async def _run_main(job_id, trade_date=T_DATE):
 
 @pytest.mark.asyncio
 async def test_case_A_core_ready_full_chain_executes(monkeypatch):
-    """Case A: Core succeeded → gate PASS → Review/History/DSA/events/chip 全部被调用。"""
+    """Case A: Core succeeded → gate PASS → Review/History/DSA/events 全部被调用。
+
+    [CHIP-RETIRE 2026-09-01] chip 自动入队已退役：同一条成功主链中
+    chip 步骤不得出现、chip create 服务不得被调用（rec["chip"] 由真实服务
+    模块上的录制替身供证，见 build_harness）。
+    """
     h = build_harness(monkeypatch)
     from contextlib import ExitStack
 
@@ -700,12 +711,13 @@ async def test_case_A_core_ready_full_chain_executes(monkeypatch):
     assert "computing_review" in steps
     assert "computing_history" in steps
     assert "dsa_compatibility" in steps
-    assert "enqueue_chip_job" in steps
-    # KPI-1：整条链没有任何环节重新清零 core_ready —— events/chip 均已产生副作用
+    # KPI-1：整条链没有任何环节重新清零 core_ready —— state_events 已产生副作用
     assert h["rec"]["events"], "state_events 必须为 X 执行"
-    assert h["rec"]["chip"], "chip 必须入队"
-    assert h["rec"]["chip"][0].get("snapshot_run_id") == h["snap_id"] or \
-        h["rec"]["chip"][0], "chip 幂等键携带 Core X"
+    # CHIP-RETIRE：成功主链不得再产生 chip 步骤或 chip job
+    assert "enqueue_chip_job" not in steps, "chip 步骤已退役，不得出现在主链"
+    assert h["rec"]["chip"] == [], (
+        "自动 chip 已退役：正常成功主链不得调用 create_after_close_chip_consensus_job"
+    )
 
 
 @pytest.mark.asyncio

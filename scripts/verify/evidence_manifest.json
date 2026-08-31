@@ -114,15 +114,6 @@
       "required": true,
       "test_selectors": ["tests/test_pg_bars_provider_persistence_f1b1.py"],
       "claim": "Serial and bounded-spawn Bars scheduler paths persist equivalent daily and minute facts idempotently."
-    },
-    {
-      "contract_id": "after_close_chip_preemption",
-      "governance_level": 2,
-      "semantic_owner": "app.services.after_close_chip_consensus_service",
-      "gate": ["targeted-pg", "full-closure"],
-      "required": true,
-      "test_selectors": ["tests/test_chip_consensus_preemption.py"],
-      "claim": "Chip consensus is preemptible under SIGTERM: a safe per-instrument boundary raises ChipPreemptedForShutdown and the worker requeues the owned run to resume_queued (releasing lease/ownership) without orphaning the running chip."
     }
   ]
 }

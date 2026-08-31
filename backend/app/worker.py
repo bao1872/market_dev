@@ -1562,29 +1562,25 @@ async def run_after_close_orchestrator_worker() -> None:
     - Auction 轮询异常隔离在 co-process 内，不影响主 Worker
     - SIGTERM 时 _shutdown=True，co-process 检查后退出，主 Worker await drain
 
-    [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING] Chip 独立 co-process：
-    - 本进程同时启动 Chip consensus co-process（_chip_co_process_task），复用已有
-      run_chip_consensus_worker（其内部每轮调用 _chip_consensus_poll_once）。
-    - mandatory 主循环**只**领取/执行 after_close_orchestrator，
-      不再串行 fallback 到 _chip_consensus_poll_once。
-    - 因此一个长时 chip 任务不得占用 mandatory after-close / Review 唯一 executor：
-      当新的 after_close orchestrator 进入 queued / resume_queued 时，主循环可直接领取，
-      无需等待 chip 任务自然完成（executor-level execution isolation）。
-    - Chip co-process 独立 while 循环、共享 _shutdown、异常隔离在 co-process 内。
-    - SIGTERM 时 mandatory 与三个 co-process（Auction / Chip / ReviewBootstrap）统一 drain。
+    [CHIP-RETIRE 2026-09-01] Chip 独立 co-process 已退役：
+    - 本进程不再启动 Chip consensus co-process（原 _chip_co_process_task）。
+    - 盘后主链不再创建 after_close_chip_consensus job，故不存在"长时 chip 任务占用
+      mandatory executor"的对头阻塞问题；mandatory 主循环只领取/执行
+      after_close_orchestrator。
+    - SIGTERM 时仅 mandatory 与 Auction co-process 统一 drain。
 
     [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] Review bootstrap 独立 co-process 已退休：
     - run_review_bootstrap_worker / _review_bootstrap_poll_once 已物理删除，本进程不再启动
       bootstrap co-process；历史回填由 canonical history replay（prepare_scope / canonical
       history run）接管，不再有独立的 bootstrap worker 入口。
-    - mandatory 主循环只领取/执行 after_close_orchestrator；Chip 为独立 co-process。
+    - mandatory 主循环只领取/执行 after_close_orchestrator（Chip co-process 已退役）。
 
     [SIGTERM drain] - 优雅退出（不强制中断当前 run，drain 到当前业务 item terminal）：
     - SIGTERM/SIGINT 由 _handle_shutdown 设置 _shutdown=True（全局标志）
     - 主循环在领取新任务前检查 _shutdown，若为 True 则不再领取新 item
     - 当前正在执行的 execute_after_close_run 完成后才退出（同步 await，不强制中断）；
       checkpoint（run status + heartbeat）由 execute_after_close_run 内部写入
-    - 各 co-process（Auction / Chip / ReviewBootstrap）检查 _shutdown 后，在各自当前业务
+    - 各 co-process（Auction）检查 _shutdown 后，在各自当前业务
       item 完成后退出（drain 到 terminal）；父进程对它们只 await，不裸 Task.cancel，
       避免在 DB 中遗留 ownership 不清的 running job（naked orphan）。
     - 完成后立即退出（不再 sleep），退出码 0（main 自然退出）
@@ -1602,15 +1598,10 @@ async def run_after_close_orchestrator_worker() -> None:
         "[AfterCloseWorker] Auction Scheduler co-process 已启动（生产入口，无需单独 WORKER_TYPE=auction_scheduler）",
     )
 
-    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING]
-    # 启动 Chip consensus 独立 co-process（同进程，共享 _shutdown）。
-    # 复用已有 run_chip_consensus_worker（内部独立 while 循环每轮 _chip_consensus_poll_once）。
-    # mandatory 主循环不再串行 fallback 到 _chip_consensus_poll_once，
-    # 因此长时 chip 任务不会阻塞 mandatory after-close / Review executor。
-    _chip_co_process_task = asyncio.create_task(run_chip_consensus_worker())
-    logger.info(
-        "[AfterCloseWorker] Chip consensus co-process 已启动（独立执行 loop，不阻塞 mandatory orchestrator）",
-    )
+    # [CHIP-RETIRE 2026-09-01] 自动 chip consensus 已退役：本进程不再启动 Chip
+    # co-process（原 _chip_co_process_task）。盘后主链不再创建 after_close_chip_consensus
+    # job，故 after-close worker 无需 chip 执行器（executor isolation 问题随之消失）。
+    # 历史 chip 数据 / 服务实现 / 独立 WORKER_TYPE=chip_consensus 调试入口均保留。
 
     # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] Review bootstrap co-process 已退休：
     # run_review_bootstrap_worker / _review_bootstrap_poll_once 物理删除，不再启动。
@@ -1654,11 +1645,11 @@ async def run_after_close_orchestrator_worker() -> None:
             await asyncio.sleep(WORKER_INTERVAL)
     finally:
         # [SIGTERM drain] 逐个等待 co-process 自然退出（drain 到当前业务 item terminal）。
-        # 禁止裸 Task.cancel()：长时 chip / review bootstrap 当前 item 必须到达 terminal，
+        # [CHIP-RETIRE 2026-09-01] chip / review bootstrap co-process 均已退役，此处仅剩 Auction。
+        # 禁止裸 Task.cancel()：co-process 当前 item 必须到达 terminal，
         # 避免在 DB 中遗留 ownership 不清的 running job（naked orphan）。
         # 各 co-process 检查共享 _shutdown 后在当前 item 完成后退出循环。
         await _drain_co_process(_auction_co_process_task, "Auction")
-        await _drain_co_process(_chip_co_process_task, "Chip")
 
     # [SIGTERM drain complete] - 当前 item 已完成，worker 正常退出（退出码 0）
     logger.info("[AfterCloseWorker] SIGTERM drain complete, finished current item")
@@ -1689,7 +1680,6 @@ async def _chip_consensus_poll_once() -> bool:
 
     from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
     from app.services.after_close_chip_consensus_service import (
-        ChipPreemptedForShutdown,
         _CHIP_LEASE_SECONDS,
         CHIP_CONSENSUS_JOB_NAME,
         execute_after_close_chip_consensus,
@@ -1709,7 +1699,6 @@ async def _chip_consensus_poll_once() -> bool:
         claim_next_job_run,
         finalize_job_run,
         merge_job_run_metadata,
-        requeue_owned_job_to_resume,
     )
 
     async with AsyncSessionLocal() as db:
@@ -1873,7 +1862,6 @@ async def _chip_consensus_poll_once() -> bool:
             worker_id=_WORKER_INSTANCE_ID,
             lease_epoch=current_lease_epoch,
             ownership_check=heartbeat.ensure_owned,
-            shutdown_check=lambda: _shutdown,
         )
         heartbeat.ensure_owned()
         chip_status = str(chip_result_summary.get("status", "failed"))
@@ -2044,26 +2032,6 @@ async def _chip_consensus_poll_once() -> bool:
             "[ChipConsensusWorker] 已失去租约，禁止终态或后续写入: job_run_id=%s, error=%s",
             job_run_id, exc,
         )
-        return True
-    except ChipPreemptedForShutdown as exc:
-        logger.info(
-            "[ChipConsensusWorker] SIGTERM 优雅抢占：chip 已在安全边界停止，"
-            "job_run_id=%s 转 resume_queued，worker 退出",
-            job_run_id,
-        )
-        try:
-            requeued = await requeue_owned_job_to_resume(lease_token)
-            if not requeued:
-                logger.warning(
-                    "[ChipConsensusWorker] 抢占 requeue 未命中（租约已转移？）："
-                    "job_run_id=%s",
-                    job_run_id,
-                )
-        except Exception as req_exc:
-            logger.exception(
-                "[ChipConsensusWorker] 抢占 requeue 异常：job_run_id=%s, error=%s",
-                job_run_id, req_exc,
-            )
         return True
     except Exception as exc:
         logger.exception(

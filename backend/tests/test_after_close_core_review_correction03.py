@@ -10,8 +10,9 @@ Core 路径）的生产 owner/路由行为。全部使用 fake/injected session/
 - _run_dsa_compatibility_projection：OPTIONAL（Case E/K 行为）——
   失败返回 failed 且绝不向调用方抛异常（Core 不被标记 failed）；
   成功调用 publish_run 并返回 succeeded。
-- _enqueue_chip_job_step：chip 失败返回 failed（Case I），Review 不受影响。
-- Case J/K：DSA 兼容性 / chip 路径与 stock_core publication 零交互
+- Case I [CHIP-RETIRE 2026-09-01]：自动 chip 入队已退役，
+  `_enqueue_chip_job_step` 不再存在（原「chip 失败返回 failed」合同随之作废）。
+- Case J/K：DSA 兼容性路径与 stock_core publication 零交互
   （spy 整个 feature_snapshot_service），publish_stock_core_atomically 符号已不存在。
 """
 
@@ -163,42 +164,28 @@ def test_publish_stock_core_atomically_symbol_absent():
 
 
 # ---------------------------------------------------------------------------
-# Case I: chip failure is optional & truthful
+# Case I (CHIP-RETIRE 2026-09-01): chip optional step 已整体退役
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_chip_failure_returns_failed_not_raise():
-    """Case I: chip 入队抛异常 → 返回 ('failed', None)，不阻断 Review/partial_success 判定。"""
-    summary_recorder = []
+def test_chip_optional_step_retired_from_orchestrator():
+    """Case I（退役）：chip 不再是盘后主链的 optional 步骤。
 
-    async def _record(run_id, steps):
-        summary_recorder.append((run_id, steps))
-
-    with (
-        patch.object(
-            orch, "create_after_close_chip_consensus_job",
-            new=_async_raise(RuntimeError("db down")),
-        ),
-        patch.object(orch, "AsyncSessionLocal"),
-        patch.object(orch, "_persist_step_summary", new=_record),
-    ):
-        status, jid = await orch._enqueue_chip_job_step(
-            job_run_id=object(),
-            worker_id="w1",
-            lease_epoch=1,
-            trade_date=T,
-            snapshot_run_id="CORE-RUN-ID",
-            expected_count=100,
-        )
-    assert status == "failed"
-
-
-def _async_raise(exc):
-    async def _f(*a, **k):
-        raise exc
-
-    return _f
+    退役前：`_enqueue_chip_job_step` 作为 post-core optional 步骤存在，
+    其失败返回 ('failed', None) 且不阻断 Review。
+    退役后：该步骤连同 `create_after_close_chip_consensus_job` 导入一并移除，
+    step timeout 预算中不再登记 `enqueue_chip_job`，
+    canonical chain = Core → Review → History → complete。
+    """
+    assert not hasattr(orch, "_enqueue_chip_job_step"), (
+        "chip optional 步骤应随自动 chip 一并退役"
+    )
+    assert not hasattr(orch, "create_after_close_chip_consensus_job"), (
+        "orchestrator 不得再导入 chip create 函数"
+    )
+    assert "enqueue_chip_job" not in orch._STEP_TIMEOUT_SECONDS, (
+        "step timeout 预算不得再登记已退役的 enqueue_chip_job"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +239,7 @@ async def test_state_events_failure_surface_is_exception_case_H():
 
 
 def test_state_events_routed_under_core_ready_gate_supplementary():
-    """补充源码守卫（非唯一证据）：state_events/chip 位于 if core_ready 门控下。"""
+    """补充源码守卫（非唯一证据）：state_events 位于 if core_ready 门控下。"""
     src = inspect.getsource(orch.execute_after_close_run)
     idx = src.find("state events（non-blocking post-core）")
     assert idx != -1

@@ -106,107 +106,35 @@ def test_state_events_gate_on_core_readiness():
 
 
 # ---------------------------------------------------------------------------
-# Case C: chip enqueue gated on snapshot_run_id (Core X), not publication
+# Case C (CHIP-RETIRE 2026-09-01): 自动 chip 入队已从盘后主链退役
 # ---------------------------------------------------------------------------
 
 
-def test_chip_gate_on_core_readiness():
-    """Case C: chip 以 snapshot_run_id(Core X) 为 readiness owner。
+def test_automatic_chip_enqueue_retired_from_main_chain():
+    """Case C (退役): 盘后主链不再自动创建 after_close_chip_consensus job。
 
-    锁定：chip 守卫为 `if snapshot_run_id is not None:`，
-    且不得依赖 _stock_core_published / published_at。
+    退役前：主链在 `if core_ready:` 下调用 _enqueue_chip_job_step →
+    create_after_close_chip_consensus_job（core_run_id = snapshot_run_id）。
+    退役后：orchestrator 不再持有 create 函数、不再定义 chip 入队步骤，
+    canonical chain = Core → Review → History → complete。
     """
     src = _main_src()
-    idx = src.find("chip 入队（non-blocking post-core）")
-    assert idx != -1, "未找到 chip 注释块"
-    block = src[idx: idx + 400]
-    m = re.search(r'\n\s*if (.*?):\n', block)
-    assert m is not None, "未找到 chip 守卫"
-    cond = m.group(1).strip()
-    # [CORRECTION-03 升级] 门控进一步升级为 canonical CORE_READY
-    # （由 _validate_core_ready 校验真实 CoreRun 行后置位）
-    assert cond == "core_ready", (
-        f"chip 守卫必须基于 canonical CORE_READY（core_ready），实际为: {cond}"
+
+    assert not hasattr(orch, "create_after_close_chip_consensus_job"), (
+        "自动 chip 已退役：orchestrator 不得再导入 create_after_close_chip_consensus_job"
     )
-    assert "_stock_core_published" not in cond, (
-        "chip 不得再依赖 _stock_core_published"
+    assert not hasattr(orch, "_enqueue_chip_job_step"), (
+        "chip 入队步骤 _enqueue_chip_job_step 应随自动 chip 一并退役"
     )
-
-
-@pytest.mark.asyncio
-async def test_chip_enqueue_called_with_core_run_id():
-    """Case C (行为): chip 入队以 snapshot_run_id 作为 core_run_id 幂等依据。
-
-    直接调用 _enqueue_chip_job_step 并 stub create_after_close_chip_consensus_job，
-    验证 core_run_id == snapshot_run_id。
-    """
-    from datetime import date
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock, patch
-
-    snap = object()  # 用对象 identity 验证透传
-    captured = {}
-
-    class _FakeJob:
-        id = "job-xyz"
-
-    async def fake_create(**kwargs):
-        captured.update(kwargs)
-        return _FakeJob(), True
-
-    with (
-        patch.object(
-            orch, "create_after_close_chip_consensus_job", new=fake_create,
-        ),
-        patch.object(orch, "AsyncSessionLocal"),
-        patch.object(orch, "_persist_step_summary", new=AsyncMock()),
-    ):
-        status, _jid = await orch._enqueue_chip_job_step(
-            job_run_id=object(),
-            worker_id="w1",
-            lease_epoch=1,
-            trade_date=date(2026, 7, 31),
-            snapshot_run_id=snap,
-            expected_count=100,
-        )
-
-    assert status == "succeeded"
-    # core_run_id 必须透传 snapshot_run_id（幂等依据）
-    assert captured.get("core_run_id") is snap
+    assert "_enqueue_chip_job_step" not in src, "主链不得再调用 chip 入队步骤"
+    assert "create_after_close_chip_consensus_job" not in src, (
+        "主链不得再创建 chip job"
+    )
 
 
 # ---------------------------------------------------------------------------
 # Case D / E: state_events / chip failure → Review unaffected, truthful
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_chip_failure_does_not_revoke_review():
-    """Case E: chip 入队抛异常 → 返回 failed，供 partial_success 判定。
-
-    Review 在 chip 之前已完成（post-core 顺序），chip 失败不影响 Review 有效性。
-    """
-    from datetime import date
-    from unittest.mock import AsyncMock, patch
-
-    with (
-        patch.object(
-            orch, "create_after_close_chip_consensus_job",
-            new=AsyncMock(side_effect=RuntimeError("db down")),
-        ),
-        patch.object(orch, "AsyncSessionLocal"),
-        patch.object(orch, "_persist_step_summary", new=AsyncMock()),
-    ):
-        status, _jid = await orch._enqueue_chip_job_step(
-            job_run_id=object(),
-            worker_id="w1",
-            lease_epoch=1,
-            trade_date=date(2026, 7, 31),
-            snapshot_run_id=object(),
-            expected_count=100,
-        )
-
-    assert status == "failed"
 
 
 def test_optional_failure_drives_partial_success():

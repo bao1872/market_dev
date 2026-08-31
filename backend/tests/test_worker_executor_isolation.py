@@ -25,6 +25,21 @@
 运行：
     cd backend
     PURE_UNIT_TEST=1 .venv/bin/python -m pytest tests/test_worker_executor_isolation.py -v
+
+[状态注记 2026-09-01]
+- 本文件 TEST 1/2/4 当前为 RED，根因**与 chip 无关**：
+  `run_review_bootstrap_worker` / `_review_bootstrap_poll_once` 已由
+  REVIEW-BACKEND-FINAL-CLOSURE Phase 5 物理删除，而这三个测试仍 patch 该符号。
+  修复属于 review bootstrap 退役的遗留债，需独立任务处理（本文件未作改动）。
+- [CHIP-RETIRE 2026-09-01] 自动 chip 已退役：after-close worker 不再启动 Chip
+  co-process，因此 TEST 1（chip 未 terminal 时 mandatory 可领取）与 TEST 4
+  （chip poll 仅由唯一 co-process 驱动）所依赖的「after-close worker 启动
+  chip co-process」前提已作废，待上述遗留债修复时一并重写。
+  退役后的 worker 侧行为合同由
+  tests/test_after_close_chip_retirement.py::test_B1_* / test_B2_* 覆盖。
+- TEST 3（`test_chip_co_process_still_executes_without_mandatory`）仍然有效且
+  为 GREEN：它直接驱动 `run_chip_consensus_worker`，证明 chip 专用 worker 入口
+  在退役后依然可执行（历史兼容），是 CHIP-RETIRE 要求③的证据之一。
 """
 from __future__ import annotations
 

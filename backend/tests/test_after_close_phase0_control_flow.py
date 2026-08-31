@@ -10,6 +10,11 @@ publishing checkpoint）** 与 **skip_publish 断点恢复路径** 的分支归�
 PARTIAL_SUCCESS 判定。相关测试断言已同步为「aggregation 必须不被调用、
 Review 只依赖已发布 stock_core」。
 
+[CHIP-RETIRE 2026-09-01] 自动 after_close_chip_consensus 入队已退役：
+canonical chain = Core → Review → History → complete。chip spy 改挂在仍
+保留的服务函数 `create_after_close_chip_consensus_job` 上，全部 chip 断言
+统一为「必须不被调用」。
+
 绝不依赖 inspect.getsource() 或脆弱的 AsyncSession 行为模拟；只断言业务步骤
 是否真正被调用（spy on service 函数）。
 
@@ -103,7 +108,11 @@ def _install_patches(job_run, *, resolve_side_effect):
         "published": 1,
     })
     spies["events"] = AsyncMock(return_value={})
-    spies["chip"] = AsyncMock(return_value=("succeeded", uuid.uuid4()))
+    # [CHIP-RETIRE 2026-09-01] 自动 chip 入队已退役。orchestrator 侧的
+    # _enqueue_chip_job_step 已不存在，故 spy 改挂在**仍保留的**服务函数
+    # create_after_close_chip_consensus_job 上（历史兼容），使「不得被调用」
+    # 成为有效断言而非符号缺失导致的空断言。
+    spies["chip"] = AsyncMock(return_value=(MagicMock(id=uuid.uuid4()), True))
     spies["compute_review_core"] = AsyncMock(return_value=MagicMock())
 
     # 内部 helper
@@ -141,7 +150,8 @@ def _install_patches(job_run, *, resolve_side_effect):
               new=spies["compute_review_core"]),
         patch("app.services.state_event_service.generate_events_for_run",
               new=spies["events"]),
-        patch("app.services.after_close_orchestrator._enqueue_chip_job_step",
+        patch("app.services.after_close_chip_consensus_service."
+              "create_after_close_chip_consensus_job",
               new=spies["chip"]),
         patch("app.services.after_close_orchestrator._update_heartbeat_and_step",
               new=spies["heartbeat_step"]),
@@ -210,8 +220,10 @@ async def test_normal_publish_pointer_current_triggers_auction_but_no_board_aggr
             len(c.args) >= 3 and c.args[2] == AfterCloseRunStatus.PUBLISHING.value
             for c in spies["heartbeat_step"].call_args_list
         ), "normal publish 应推进 publishing 检查点"
-        # chip 入队（pointer 已发布）
-        assert spies["chip"].called, "normal publish 应入队 chip"
+        # [CHIP-RETIRE 2026-09-01] 自动 chip 入队已退役：即便 pointer 已发布，
+        # 主链也不得创建 chip job
+        assert not spies["chip"].called, \
+            "自动 chip 已退役，normal publish 不得入队 chip"
         # 状态事件生成（pointer 已发布、未 superseded）
         assert spies["events"].called, "normal publish 应生成 state events"
     finally:
@@ -244,8 +256,9 @@ async def test_skip_publish_pointer_current_recovers_but_no_normal_publish_steps
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=True)
-        # skip_publish 断点恢复：pointer 已恢复 → chip 重新入队
-        assert spies["chip"].called, "skip_publish 恢复应重新入队 chip"
+        # [CHIP-RETIRE 2026-09-01] skip_publish 断点恢复同样不得再入队 chip
+        assert not spies["chip"].called, \
+            "自动 chip 已退役，skip_publish 恢复不得入队 chip"
         # normal publish 专属步骤（auction / publishing 检查点）不得错误翻转到 resume
         assert not spies["auction"].called, \
             "skip_publish 不得执行 auction anchor"
@@ -419,15 +432,15 @@ async def test_rb011_retired_aggregation_skipped_in_final_status_and_no_partial_
 
 # ---------------------------------------------------------------------------
 # [P1-2 2026-08-07 / Slice 4A9] post-core 依赖顺序收口（V2.1 PC-8）
-# Chip / State Events 不依赖 Board Aggregation：
+# State Events 不依赖 Board Aggregation：
 #   stock_core published
 #     ├─ state events
-#     ├─ enqueue chip
 #     ├─ auction anchor
 #     └─ DSA projection
 #           ↓
 #         review
 # [Slice 4A9] legacy board aggregation 已退役，不再出现在该链中。
+# [CHIP-RETIRE 2026-09-01] enqueue chip 已退役，不再出现在该链中。
 # ---------------------------------------------------------------------------
 def _install_patches_with_order(job_run, *, resolve_side_effect):
     """与 _install_patches 相同，但记录各 step 的真实调用顺序到 return 元组。"""
@@ -452,15 +465,18 @@ def _install_patches_with_order(job_run, *, resolve_side_effect):
     return spies, patchers, record
 
 
-async def test_p1_2_chip_enqueue_and_no_board_aggregation():
-    """normal stock_core publication：chip 入队正常执行；board aggregation 已退役
-    不得出现在执行序列中。"""
+async def test_p1_2_chip_retired_and_no_board_aggregation():
+    """[CHIP-RETIRE 2026-09-01] normal stock_core publication：chip 自动入队已退役，
+    不得出现在执行序列中；board aggregation 同样已退役。"""
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
     spies, patchers, record = _install_patches_with_order(
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
-        assert spies["chip"].called, "normal publish 应入队 chip"
+        assert not spies["chip"].called, "自动 chip 已退役，不得入队 chip"
+        assert "chip" not in record, (
+            f"[CHIP-RETIRE] 执行序列不得出现 chip，实际: {record}"
+        )
         assert not spies["aggregation"].called, \
             "[Slice 4A9] board aggregation 已退役，不得被调用"
         assert "aggregation" not in record, (
