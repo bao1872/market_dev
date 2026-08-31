@@ -84,6 +84,26 @@ test('UX2. tooltip 无价值判断词（中性事实措辞）', () => {
   }
 })
 
+// ------------------------------------------------------------
+// T1-CORRECTION-01 Fix B/C：velocity / capitalTilt tooltip 严格 Source Contract
+// 不得把正负值方向解释为"分位正在上移/下移"或"成交额集中在涨/跌成员"。
+// ------------------------------------------------------------
+test('UX10. velocity/capitalTilt tooltip 严格 Source Contract（无方向过度解释）', () => {
+  // Velocity 唯一真实公式：EMA5(Position) - EMA20(Position)
+  const v = REVIEW_TERMS.velocity.help ?? ''
+  assert.ok(v.includes('EMA5'), 'velocity.help 须含 Source Contract 公式 EMA5')
+  assert.ok(v.includes('EMA20'), 'velocity.help 须含 Source Contract 公式 EMA20')
+  assert.ok(!v.includes('分位在上移'), 'velocity.help 不得声称"分位在上移"')
+  assert.ok(!v.includes('分位在下移'), 'velocity.help 不得声称"分位在下移"')
+
+  // Capital Tilt 唯一真实公式：Amount-weighted Return - Equal-weight Return
+  const c = REVIEW_TERMS.capitalTilt.help ?? ''
+  assert.ok(c.includes('成交额加权涨跌幅'), 'capitalTilt.help 须含 Source Contract 公式（成交额加权涨跌幅）')
+  assert.ok(c.includes('等权涨跌幅'), 'capitalTilt.help 须含 Source Contract 公式（等权涨跌幅）')
+  assert.ok(!c.includes('集中在涨幅较大的成员'), 'capitalTilt.help 不得声称"集中在涨幅较大的成员"')
+  assert.ok(!c.includes('集中在跌幅较大的成员'), 'capitalTilt.help 不得声称"集中在跌幅较大的成员"')
+})
+
 // ============================================================
 // 2. Phase / Readiness / Sort / Tab 精确中文
 // ============================================================

@@ -53,20 +53,20 @@ interface ColumnConfig {
 
 /** Direction 列：return_1d + contribution */
 const DIRECTION_COLUMNS: ColumnConfig[] = [
-  { value: '收益', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
+  { value: '涨跌幅', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
   { value: '贡献值', field: 'contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
 
 /** Capital Tilt 列：return_1d + tilt_contribution + aw_weight */
 const CAPITAL_COLUMNS: ColumnConfig[] = [
-  { value: '收益', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
-  { value: '资金偏向贡献', field: 'tilt_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: '涨跌幅', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
+  { value: '成交加权差贡献', field: 'tilt_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
   { value: '成交额权重', field: 'aw_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
 
 /** Breadth 列：member 信息即事实，展示 return_1d */
 const BREADTH_COLUMNS: ColumnConfig[] = [
-  { value: '收益', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
+  { value: '涨跌幅', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
 ]
 
 /** Concentration 列：concentration_weight + hhi_contribution */
@@ -100,14 +100,14 @@ const GROUP_LABELS: Readonly<Record<string, string>> = {
 function metaLabel(key: string): string {
   const map: Readonly<Record<string, string>> = {
     sum_contribution: '贡献合计',
-    sum_tilt_contribution: '资金偏向贡献合计',
-    canonical_aw_return: '成交额加权收益基准',
-    canonical_ew_return: '等权收益基准',
+    sum_tilt_contribution: '成交加权差贡献合计',
+    canonical_aw_return: '成交额加权涨跌幅基准',
+    canonical_ew_return: '等权涨跌幅基准',
     price_universe: '价格有效样本数',
     aw_universe: '成交额有效样本数',
     sum_hhi: 'HHI 贡献合计',
-    raw_hhi: '原始集中度',
-    normalized_hhi: '标准化集中度',
+    raw_hhi: '原始 HHI',
+    normalized_hhi: '标准化 HHI',
     denominator: '有效成员数',
   }
   return map[key] ?? key
