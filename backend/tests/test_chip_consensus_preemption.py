@@ -28,6 +28,7 @@ from sqlalchemy import select
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.services.after_close_chip_consensus_service import (
+    CHIP_CONSENSUS_ALGORITHM_VERSION,
     ChipPreemptedForShutdown,
     _CHIP_LEASE_SECONDS,
     execute_after_close_chip_consensus,
@@ -118,6 +119,7 @@ async def _seed_snapshot(
         instrument_id=instrument_id,
         trade_date=trade_date,
         core_run_id=core_run_id,
+        algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
         status=status,
         chip_hash="seed",
         chip_payload={},
@@ -149,10 +151,10 @@ async def test_normal_execution_unaffected_by_shutdown_check():
     daily = MagicMock()
     daily.empty = False
 
-    with patch(
-        "app.services.after_close_chip_consensus_service.refresh_15m_batch",
-        new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
-    ), patch(
+        with patch(
+            "app.services.chip_bars_refresh_coordinator.refresh_15m_batch",
+            new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
+        ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(return_value=(daily, None)),  # 15m 不足 -> skipped 路径，无需 compute
     ):
@@ -203,10 +205,10 @@ async def test_shutdown_raises_at_safe_boundary_and_requeues():
         calls["n"] += 1
         return calls["n"] > 1  # 第 1 个 instrument 处理完，第 2 个顶部 preempt
 
-    with patch(
-        "app.services.after_close_chip_consensus_service.refresh_15m_batch",
-        new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
-    ), patch(
+        with patch(
+            "app.services.chip_bars_refresh_coordinator.refresh_15m_batch",
+            new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
+        ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(return_value=(daily, None)),
     ):
