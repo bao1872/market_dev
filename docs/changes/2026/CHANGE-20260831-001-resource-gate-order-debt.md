@@ -94,9 +94,12 @@ fence worker-after-close → worker 退出并释放 ~942MB anon → 再检查部
 
 ### 契约测试补充
 
-- CASE H 由 false-green 结构化断言重写为**行为级**：自定义 curl mock 在 worker running 时返 500，
-  仅命中最终稳态健康检查；验证「第一次 restore → 第二次 fence（drain）→ 回滚文件 mutation」
-  顺序，且回滚成功后 worker 在 OLD runtime 上恢复 running、状态机复位。
+- CASE H 由 false-green 结构化断言重写为**行为级**：使用 dry-run-only seam
+  `PANJI_MOCK_POST_DEPLOY_FAIL_FINAL`（仅当 after-close worker 已恢复 running，即最终稳态复检
+  阶段时触发），强制最终资源复检失败；验证「第一次 restore → 第二次 fence（drain）→ 回滚文件
+  mutation」顺序，且回滚成功后 worker 在 OLD runtime 上恢复 running、状态机复位。
+  （dry-run 下 `verify_deployment` 直接短路返回 0 且不调 curl，故不能靠 curl mock 触发最终失败；
+  该 seam 是复用既有 `PANJI_MOCK_*` dry-run-only 范式的窄接口。）
 - CASE J（行为级）：owned restore 后日志含 `AFTER_CLOSE_PICKUP_FENCED=false`。
 - FIX F（行为级，隔离 `check_deployment_memory_headroom`）：真实部署 + seam 变量 → 拒绝通过；
   dry-run + seam → 仍可使用 mock 值。

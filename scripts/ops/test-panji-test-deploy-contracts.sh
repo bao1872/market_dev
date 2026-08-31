@@ -1312,30 +1312,15 @@ fi
 # ---- CASE H（行为级，替代原 false-green 结构化断言）----
 # 最终稳态健康检查失败时，必须在回滚 backend runtime mutation 之前重新建立 after-close fence。
 echo "== CASE H: final steady-state health FAIL → re-fence before rollback file mutation (behavioral) =="
-CASE_H_MOCK="${TMP_ROOT}/case-h-mock"
-mkdir -p "${CASE_H_MOCK}"
-cp -a "${MOCK_BIN}/." "${CASE_H_MOCK}/"
-# 自定义 curl：worker 处于 running 时返回 500（仅命中最终稳态健康检查），
-# fenced/exited 时返回 200（verify_deployment / cleanup 的检查仍通过）。
-cat > "${CASE_H_MOCK}/curl" <<'MOCKEOF'
-#!/usr/bin/env bash
-STATE_FILE="${PANJI_MOCK_WORKER_STATE:-/tmp/panji_worker_state}"
-if [[ -r "${STATE_FILE}" ]] && [[ "$(cat "${STATE_FILE}")" == "running" ]]; then
-  printf '500'
-  exit 0
-fi
-printf '%s' "${PANJI_MOCK_HEALTH_CODE:-200}"
-exit 0
-MOCKEOF
-chmod +x "${CASE_H_MOCK}/curl"
 reset_worker_state "running"
 CASE_H_LOG="${TMP_ROOT}/case-h.log"
 CASE_H_RC=0
-PATH="${CASE_H_MOCK}:${MOCK_BIN}:${PATH}" \
+PATH="${MOCK_BIN}:${PATH}" \
 PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${LIVE_ROOT}" \
 PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${STATE_FILE}" PANJI_LOCK_FILE="${LOCK_FILE}" \
 PANJI_MOCK_WORKER_STATE="${WORKER_STATE_FILE}" \
 PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_POST_DEPLOY_FAIL_FINAL=1 \
 PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
     bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${CASE_H_LOG}" 2>&1 || CASE_H_RC=$?
 if [[ "${CASE_H_RC}" -ne 0 ]] \

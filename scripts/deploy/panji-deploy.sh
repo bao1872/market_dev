@@ -1938,6 +1938,19 @@ verify_deployment() {
 post_deploy_resource_check() {
     log "部署后资源复检..."
 
+    # [test-seam, dry-run only] 强制最终稳态资源复检失败：仅当 after-close worker 已恢复运行
+    # （即处于 main() 成功路径的最终复检阶段）时触发，用于验证最终健康失败后的 re-fence + rollback。
+    # 真实部署不受影响（DRY_RUN!=true 时跳过）。
+    if [[ "${DRY_RUN}" == "true" && "${PANJI_MOCK_POST_DEPLOY_FAIL_FINAL:-0}" == "1" ]]; then
+        local _ws
+        _ws="$(cat "${PANJI_MOCK_WORKER_STATE:-/tmp/panji_worker_state}" 2>/dev/null || echo "")"
+        if [[ "${_ws}" == "running" ]]; then
+            log "PANJI_MOCK_POST_DEPLOY_FAIL_FINAL: 强制最终稳态资源复检失败（仅 dry-run 测试）"
+            FAILURE_STAGE="post_deploy_resource"
+            return 1
+        fi
+    fi
+
     # 1. 主机资源 OBSERVATION（不是稳态 host MemAvailable>=4096 门槛）。
     #    deployment headroom 已在 fence 之后单独检查；此处仅观测 host 内存，
     #    不因此判失败（避免把"worker 被 fence 停掉时的临时状态"误判为稳态失败）。
