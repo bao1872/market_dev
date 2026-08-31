@@ -1370,6 +1370,7 @@ _restore_after_close_pickup_if_owned() {
     # 状态机一致性：恢复成功后 worker 正在运行（容器非 EXITED/missing、running!=0），
     # 故 PICKUP_FENCED 必须回到 false，否则该变量会与真实容器状态背离（状态机缺口）。
     AFTER_CLOSE_PICKUP_FENCED=false
+    log "AFTER_CLOSE_PICKUP_FENCED=false（worker 已恢复运行，after_close running!=0）"
     log "AFTER_CLOSE_PICKUP_RESTORED=true"
 }
 
