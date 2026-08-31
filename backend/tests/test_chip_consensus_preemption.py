@@ -28,9 +28,9 @@ from sqlalchemy import select
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.services.after_close_chip_consensus_service import (
+    _CHIP_LEASE_SECONDS,
     CHIP_CONSENSUS_ALGORITHM_VERSION,
     ChipPreemptedForShutdown,
-    _CHIP_LEASE_SECONDS,
     execute_after_close_chip_consensus,
     get_pending_chip_instruments,
 )
@@ -75,7 +75,7 @@ async def _make_job(
     worker_instance_id: str | None,
     lease_epoch: int = 1,
     trade_date: date = _TRADE_DATE,
-) -> SchedulerJobRun:
+) -> tuple[SchedulerJobRun, uuid.UUID]:
     core_run_id = uuid.uuid4()
     now = datetime.now(_TZ)
     meta = {
@@ -136,25 +136,20 @@ async def _seed_snapshot(
 
 @pytest.mark.asyncio
 async def test_normal_execution_unaffected_by_shutdown_check():
-    from tests.conftest import TestAsyncSessionLocal
     """shutdown_check=None 时 execute 应正常完成、不抛抢占异常。"""
+    from tests.conftest import TestAsyncSessionLocal
+
     job_run, core_run_id = await _make_job(
         TestAsyncSessionLocal, status="running", worker_instance_id=_WORKER_A,
-    )
-    token = FencedJobToken(
-        job_run_id=job_run.id,
-        worker_instance_id=_WORKER_A,
-        lease_epoch=job_run.lease_epoch,
-        lease_seconds=_CHIP_LEASE_SECONDS,
     )
     inst = uuid.uuid4()
     daily = MagicMock()
     daily.empty = False
 
-        with patch(
-            "app.services.chip_bars_refresh_coordinator.refresh_15m_batch",
-            new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
-        ), patch(
+    with patch(
+        "app.services.chip_bars_refresh_coordinator.refresh_15m_batch",
+        new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
+    ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(return_value=(daily, None)),  # 15m 不足 -> skipped 路径，无需 compute
     ):
@@ -181,12 +176,13 @@ async def test_normal_execution_unaffected_by_shutdown_check():
 
 @pytest.mark.asyncio
 async def test_shutdown_raises_at_safe_boundary_and_requeues():
-    from tests.conftest import TestAsyncSessionLocal
     """shutdown_check 在第 2 个 instrument 顶部返回 True：
     - 第 1 个 instrument 的快照已持久化（安全边界）
     - execute 抛 ChipPreemptedForShutdown
     - 调用方 requeue_owned_job_to_resume 将 running -> resume_queued（释放 ownership）
     """
+    from tests.conftest import TestAsyncSessionLocal
+
     job_run, core_run_id = await _make_job(
         TestAsyncSessionLocal, status="running", worker_instance_id=_WORKER_A,
     )
@@ -205,10 +201,10 @@ async def test_shutdown_raises_at_safe_boundary_and_requeues():
         calls["n"] += 1
         return calls["n"] > 1  # 第 1 个 instrument 处理完，第 2 个顶部 preempt
 
-        with patch(
-            "app.services.chip_bars_refresh_coordinator.refresh_15m_batch",
-            new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
-        ), patch(
+    with patch(
+        "app.services.chip_bars_refresh_coordinator.refresh_15m_batch",
+        new=AsyncMock(return_value=MagicMock(to_dict=lambda: {})),
+    ), patch(
         "app.services.after_close_chip_consensus_service._fetch_chip_bars",
         new=AsyncMock(return_value=(daily, None)),
     ):
@@ -254,8 +250,9 @@ async def test_shutdown_raises_at_safe_boundary_and_requeues():
 
 @pytest.mark.asyncio
 async def test_resume_queued_reclaimed_and_skips_succeeded():
-    from tests.conftest import TestAsyncSessionLocal
     """resume_queued 任务被新 worker 领取（running），get_pending 只返回未完成项。"""
+    from tests.conftest import TestAsyncSessionLocal
+
     job_run, core_run_id = await _make_job(
         TestAsyncSessionLocal, status="resume_queued", worker_instance_id=None,
     )
@@ -306,11 +303,12 @@ async def test_resume_queued_reclaimed_and_skips_succeeded():
 
 @pytest.mark.asyncio
 async def test_ownership_fence_after_requeue():
-    from tests.conftest import TestAsyncSessionLocal
     """running -> resume_queued 后：
     - 旧 token 的 lock_owned_job_run 抛 JobLeaseLostError（禁止后续写入）
     - 非 owner token 的 requeue_owned_job_to_resume 返回 False（不动行）
     """
+    from tests.conftest import TestAsyncSessionLocal
+
     job_run, _ = await _make_job(
         TestAsyncSessionLocal, status="running", worker_instance_id=_WORKER_A,
     )
