@@ -42,17 +42,24 @@ from app.services.fenced_job_run_service import (
 )
 
 # CI 环境标识（与 conftest.py / test_chip_consensus_worker.py 一致）
+# 额外包含 PANJI_REMOTE_VERIFY_DB_TEST：远程验证容器（panji-verify-python）设置该标志
+# 而非 PANJI_CI_DB_TEST，否则本文件在 verify 模式下会被 skip（false-green）。
 _CI_ENV = (
     os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
     or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
+    or os.environ.get("PANJI_REMOTE_VERIFY_DB_TEST", "").lower() in ("1", "true", "yes")
 )
 
 # 本测试文件全部为 PG 集成测试，只在 CI/远程验证 Postgres 中运行；
 # 本地 PURE_UNIT_TEST=1 自动 skip（与既有 chip worker 测试约定一致）。
-pytestmark = pytest.mark.skipif(
-    not _CI_ENV,
-    reason="chip preemption 测试为 PG 集成测试，只在 CI/远程验证 Postgres 中运行；本地请用 PURE_UNIT_TEST=1",
-)
+# 同时显式标注 postgres（conftest 偏好作者显式标记，供 -m postgres 精确切分）。
+pytestmark = [
+    pytest.mark.skipif(
+        not _CI_ENV,
+        reason="chip preemption 测试为 PG 集成测试，只在 CI/远程验证 Postgres 中运行；本地请用 PURE_UNIT_TEST=1",
+    ),
+    pytest.mark.postgres,
+]
 
 _TZ = __import__("zoneinfo").ZoneInfo("Asia/Shanghai")
 _TRADE_DATE = date(2026, 6, 25)
