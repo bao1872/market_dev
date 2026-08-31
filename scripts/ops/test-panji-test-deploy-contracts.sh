@@ -1560,5 +1560,108 @@ else
 fi
 
 echo "----------------------------------------"
+set +e  # E3 区块内允许预期内的非零退出（deploy 失败 / grep -c 返回 0）；其余区块仍受 harness 既有 set -euo 约束
+echo "== E3 owner-before-fence ordering closure =="
+
+# --- A. 缺失 owner → 真实部署在任意 mutation 之前失败，且零容器 + 零文件 mutation ---
+A_LIVE="${TMP_ROOT}/live-ownerA"
+mkdir -p "${A_LIVE}"
+printf '%s' "${TARGET_SHA}" > "${A_LIVE}/RUNTIME_SHA"
+A_MUT="${TMP_ROOT}/mut-A.log"; : >"${A_MUT}"
+A_LOG="${TMP_ROOT}/ownerA.log"
+PATH="${MOCK_BIN}:${PATH}" \
+PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${A_LIVE}" \
+PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${STATE_FILE}" PANJI_LOCK_FILE="${LOCK_FILE}" \
+PANJI_MOCK_WORKER_STATE="${WORKER_STATE_FILE}" \
+PANJI_MUT_LOG="${A_MUT}" \
+PANJI_MOCK_COMPOSE_FAIL=1 \
+    bash "${SERVER_SCRIPT}" "${TARGET_SHA}" >"${A_LOG}" 2>&1 && A_RC=0 || A_RC=$?
+A_STOP_N="$(grep -c '^compose-stop' "${A_MUT}")"
+A_UP_N="$(grep -c '^compose-up' "${A_MUT}")"
+A_FILE_MUT="$(grep -cE '原子更新|rsync|原地写入|同步 backend 运行代码|将更新 .*market\.env' "${A_LOG}")"
+if [[ "${A_RC}" -ne 0 ]] \
+   && grep -q 'ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=FAIL' "${A_LOG}" \
+   && [[ "${A_STOP_N}" -eq 0 && "${A_UP_N}" -eq 0 ]] \
+   && [[ "${A_FILE_MUT}" -eq 0 ]]; then
+  ok "A: missing owner fails before any mutation (stop=${A_STOP_N} up=${A_UP_N} file=${A_FILE_MUT})"
+else
+  bad "A: missing owner fails before any mutation (rc=${A_RC} stop=${A_STOP_N} up=${A_UP_N} file=${A_FILE_MUT})"
+  sed 's/^/    /' "${A_LOG}" >&2
+fi
+
+# --- B. owner → fence → headroom → first mutation 顺序（源码结构 + dry-run 行为）---
+DEPLOY_BODY="$(sed -n '/^deploy() {/,/^}/p' "${SERVER_SCRIPT}")"
+_owner_ln=$(printf '%s\n' "${DEPLOY_BODY}" | grep -nE '^[[:space:]]*resolve_pre_deploy_runtime_owner' | head -1 | cut -d: -f1)
+_fence_ln=$(printf '%s\n' "${DEPLOY_BODY}" | grep -nE '^[[:space:]]*_fence_after_close_worker' | head -1 | cut -d: -f1)
+_head_ln=$(printf '%s\n' "${DEPLOY_BODY}" | grep -nE '^[[:space:]]*check_deployment_memory_headroom' | head -1 | cut -d: -f1)
+_mut_ln=$(printf '%s\n' "${DEPLOY_BODY}" | grep -nE '^[[:space:]]*update_env_file' | head -1 | cut -d: -f1)
+if [[ "${_owner_ln}" -lt "${_fence_ln}" && "${_fence_ln}" -lt "${_head_ln}" && "${_head_ln}" -lt "${_mut_ln}" ]]; then
+  ok "B-src: owner(${_owner_ln}) < fence(${_fence_ln}) < headroom(${_head_ln}) < first-mutation(${_mut_ln})"
+else
+  bad "B-src: owner/fence/headroom/mutation order wrong (owner=${_owner_ln} fence=${_fence_ln} head=${_head_ln} mut=${_mut_ln})"
+fi
+
+B_LOG="${TMP_ROOT}/order-B.log"
+B_MUT="${TMP_ROOT}/mut-B.log"; : >"${B_MUT}"
+reset_worker_state running
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+PANJI_MUT_LOG="${B_MUT}" \
+    run_deploy "${TARGET_SHA}" --dry-run >"${B_LOG}" 2>&1 && B_RC=0 || B_RC=$?
+B_OWNER_LN="$(grep -n 'ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=PASS' "${B_LOG}" | head -1 | cut -d: -f1)"
+B_FENCE_LN="$(grep -n 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${B_LOG}" | head -1 | cut -d: -f1)"
+B_HEAD_LN="$(grep -n 'deployment memory headroom deferred' "${B_LOG}" | head -1 | cut -d: -f1)"
+B_MUT_MARK_LN="$(grep -nE '\[dry-run\] 将更新 .*market\.env|\[dry-run\] rsync' "${B_LOG}" | head -1 | cut -d: -f1)"
+B_STOP_N="$(grep -c '^compose-stop' "${B_MUT}")"
+B_UP_N="$(grep -c '^compose-up' "${B_MUT}")"
+if [[ "${B_RC}" -eq 0 ]] \
+   && [[ -n "${B_OWNER_LN}" && -n "${B_FENCE_LN}" && -n "${B_HEAD_LN}" && -n "${B_MUT_MARK_LN}" ]] \
+   && [[ "${B_OWNER_LN}" -lt "${B_FENCE_LN}" && "${B_FENCE_LN}" -lt "${B_HEAD_LN}" && "${B_HEAD_LN}" -lt "${B_MUT_MARK_LN}" ]] \
+   && [[ "${B_STOP_N}" -eq 0 && "${B_UP_N}" -eq 0 ]]; then
+  ok "B-behavior: owner < simulated-fence < headroom < first-mutation; zero container mutation (stop=${B_STOP_N} up=${B_UP_N})"
+else
+  bad "B-behavior: owner<fence<headroom<mutation order or zero-mutation violated (rc=${B_RC} owner=${B_OWNER_LN} fence=${B_FENCE_LN} head=${B_HEAD_LN} mut=${B_MUT_MARK_LN} stop=${B_STOP_N} up=${B_UP_N})"
+  sed 's/^/    /' "${B_LOG}" >&2
+fi
+
+# --- C. owner PASS → fence 失败（unknown worker 状态，真实部署先于 stop 返回）---
+C_LIVE="${TMP_ROOT}/live-ownerC"
+mkdir -p "${C_LIVE}"
+printf '%s' "${TARGET_SHA}" > "${C_LIVE}/RUNTIME_SHA"
+C_MUT="${TMP_ROOT}/mut-C.log"; : >"${C_MUT}"
+C_LOG="${TMP_ROOT}/ownerC.log"
+printf 'unknown' > "${WORKER_STATE_FILE}"
+PATH="${MOCK_BIN}:${PATH}" \
+PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${C_LIVE}" \
+PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${STATE_FILE}" PANJI_LOCK_FILE="${LOCK_FILE}" \
+PANJI_MOCK_WORKER_STATE="${WORKER_STATE_FILE}" \
+PANJI_MUT_LOG="${C_MUT}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+    bash "${SERVER_SCRIPT}" "${TARGET_SHA}" >"${C_LOG}" 2>&1 && C_RC=0 || C_RC=$?
+C_STOP_N="$(grep -c '^compose-stop' "${C_MUT}")"
+C_UP_N="$(grep -c '^compose-up' "${C_MUT}")"
+C_FILE_MUT="$(grep -cE '原子更新|rsync|原地写入|同步 backend 运行代码|将更新 .*market\.env' "${C_LOG}")"
+C_OWNER_LN="$(grep -n 'ROLLBACK_OWNER_RESOLVED_BEFORE_MUTATION=PASS' "${C_LOG}" | head -1 | cut -d: -f1)"
+C_FENCE_FAIL_LN="$(grep -n 'FENCE_UNKNOWN_WORKER_STATE' "${C_LOG}" | head -1 | cut -d: -f1)"
+if [[ "${C_RC}" -ne 0 ]] \
+   && [[ -n "${C_OWNER_LN}" && -n "${C_FENCE_FAIL_LN}" ]] \
+   && [[ "${C_OWNER_LN}" -lt "${C_FENCE_FAIL_LN}" ]] \
+   && [[ "${C_STOP_N}" -eq 0 && "${C_UP_N}" -eq 0 && "${C_FILE_MUT}" -eq 0 ]]; then
+  ok "C: owner PASS then fence fails; owner captured before fence; zero container+file mutation (stop=${C_STOP_N} up=${C_UP_N} file=${C_FILE_MUT})"
+else
+  bad "C: owner-before-fence guarantee on fence failure (rc=${C_RC} owner=${C_OWNER_LN} fencefail=${C_FENCE_FAIL_LN} stop=${C_STOP_N} up=${C_UP_N} file=${C_FILE_MUT})"
+  sed 's/^/    /' "${C_LOG}" >&2
+fi
+
+
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]
