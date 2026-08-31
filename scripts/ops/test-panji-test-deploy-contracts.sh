@@ -1264,10 +1264,10 @@ fi
 echo "== CASE B: backend-runtime deploy, worker running, post-fence MemAvailable=3800 → FAIL, zero mutation, worker restored =="
 reset_worker_state "running"
 CASE_B_LOG="${TMP_ROOT}/case-b.log"
+CASE_B_RC=0
 PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
 PANJI_MOCK_MEM_AVAILABLE_KB=3891200 \
-    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_B_LOG}" 2>&1
-CASE_B_RC=$?
+    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_B_LOG}" 2>&1 || CASE_B_RC=$?
 if [[ "${CASE_B_RC}" -ne 0 ]] \
    && grep -q 'DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true' "${CASE_B_LOG}" \
    && ! grep -qE 'rsync|原地写入 RUNTIME_SHA|\[dry-run\] 将更新' "${CASE_B_LOG}" \
@@ -1302,10 +1302,10 @@ fi
 echo "== CASE E: frontend-only, MemAvailable=3800 < 4096 → FAIL before frontend mutation; worker NOT stopped =="
 reset_worker_state "running"
 CASE_E_LOG="${TMP_ROOT}/case-e.log"
+CASE_E_RC=0
 PANJI_MOCK_FRONTEND_RUNTIME_CHANGED=1 \
 PANJI_MOCK_MEM_AVAILABLE_KB=3891200 \
-    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_E_LOG}" 2>&1
-CASE_E_RC=$?
+    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_E_LOG}" 2>&1 || CASE_E_RC=$?
 if [[ "${CASE_E_RC}" -ne 0 ]] \
    && ! grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_E_LOG}" \
    && ! grep -q 'stop -t -1' "${CASE_E_LOG}" \
