@@ -173,7 +173,7 @@ Exploration 要求：
 
 远程验证执行遵守以下硬约束（单可复用运行时 CHANGE-20260806-012）：
 
-- 唯一正式入口 `scripts/ops/panji-verify`；废弃第二入口 `panji-verify-run` 不得恢复；
+- 唯一正式入口是 `scripts/ops/panji-verify`，禁止增加第二入口；
 - 单可复用验证容器 `panji-verify-python`，常驻空闲（`sleep infinity`），固定 Compose project `panji-verify`，不发布 host port；
 - attempt env 由 `prepare_verify_environment.py` 生成并注入 `attempt.env`（0600）；容器常驻 env 只持有稳定变量；
 - Migration / PG / Seed / E2E 各 gate 串行以 `docker exec panji-verify-python verify_exec.py <cmd>` 运行 fresh process；

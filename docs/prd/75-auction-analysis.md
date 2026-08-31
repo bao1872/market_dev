@@ -43,7 +43,7 @@ provider class           = MootdxAuctionQuoteProvider（legacy 类名，实质 P
 - 禁止新代码把 `"mootdx"` 当作独立数据源语义；它是 provider abstraction 的 legacy 名称。
 - 历史回补数据进入 `historical_backfill` 隔离 namespace，不进入 live `verified_consensus` truth 链。
 - 多源验证要求：外部竞价 truth 需 ≥2 个**独立 provider family**；pytdx/mootdx 属同一供应链
-  （见 `rules/90-deprecated-forbidden.md` 与 runbook `auction-analysis.md`），不得冒充第二独立 family。
+  （见 `rules/90-forbidden.md` 与 runbook `auction-analysis.md`），不得冒充第二独立 family。
 
 
 ### 0.0 正式分析链（Canonical Auction Analysis Pipeline）

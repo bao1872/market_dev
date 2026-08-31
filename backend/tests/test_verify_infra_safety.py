@@ -583,9 +583,10 @@ def test_evidence_manifest_registers_required_contracts() -> None:
         "dsa_compatibility_publication",
         "after_close_crash_resume",
         "bars_provider_persistence",
+        "history_v3_materialization",
     } <= ids
     assert all(contract.required for contract in contracts)
-    assert len(manifest.selectors_for_gate("targeted-pg")) == 13
+    assert len(manifest.selectors_for_gate("targeted-pg")) == 14
 
 
 def _contract_for_evaluation(tmp_path: Path):

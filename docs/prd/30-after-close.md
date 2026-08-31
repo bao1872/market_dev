@@ -317,7 +317,7 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 - `stock_core` publication service / schema 作为 legacy 兼容路径保留（KPI-10），仅用于断点恢复（skip_publish）兼容和历史数据查询，**不属于正常 AfterClose Core→Review DAG**；
 - 若 legacy 路径仍执行 `factor_publication_service.publish_stock_core`，它必须是 stock_core 正式发布的唯一入口（禁止跳过该步骤直接依赖 `published_at IS NOT NULL`），pointer 切换失败只重试该 service，不重新计算数据；
 - **Review 启动不再依赖 `stock_core` pointer**：Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`，`snapshot_run_id` 可用）即可进入 `computing_review`，通过 `ReviewRun.source_core_run_id = snapshot_run_id` 显式绑定；
-- 失败恢复必须走正式 service/CLI，禁止裸 SQL 改状态（详见 `rules/80-deployment-data-safety.md` "手工恢复走正式 service/CLI"）。
+- 失败恢复必须走正式 service/CLI，禁止裸 SQL 改状态（详见 `rules/80-deployment-migration.md`）。
 
 ### AC-18：chip_consensus Worker
 

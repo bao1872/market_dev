@@ -191,7 +191,7 @@ Without explicit current-task authorization, never:
 - use mock, fallback, stale data, or another SHA as formal evidence;
 - manually patch a remote checkout or schema to make verification pass;
 - delete persistent data, shared containers, networks, volumes, or unknown resources;
-- restore deprecated verification, deployment, or governance paths.
+- introduce a second verification, deployment, or governance path.
 
 Local/CI database tests are forbidden. Pure tests use `PURE_UNIT_TEST=1`. Formal PG
 tests use the registered `scripts/ops/panji-verify` plans against only
@@ -199,7 +199,7 @@ tests use the registered `scripts/ops/panji-verify` plans against only
 
 Remote server, database, port, path, identity, migration, resource, cleanup, and
 deployment details are owned by `rules/30-security-data-safety.md`,
-`rules/80-deployment-migration.md`, `rules/90-deprecated-forbidden.md`, the verified
+`rules/80-deployment-migration.md`, `rules/90-forbidden.md`, the verified
 runtime Map, and the current Runbook. Do not reconstruct them from chat memory.
 
 ## 10. Rule router
@@ -215,7 +215,7 @@ runtime Map, and the current Runbook. Do not reconstruct them from chat memory.
 | Runtime/API/frontend acceptance | `rules/60-runtime-frontend-acceptance.md` |
 | Release/hardening trigger | `rules/70-hardening-release.md` |
 | Migration, remote verification, deployment, cleanup | `rules/80-deployment-migration.md` |
-| Deprecated or forbidden paths | `rules/90-deprecated-forbidden.md` |
+| Forbidden paths | `rules/90-forbidden.md` |
 
 The more specific safety or business invariant wins. Exploration routing can reduce
 unrelated process, never correctness, evidence truthfulness, security, or data safety.

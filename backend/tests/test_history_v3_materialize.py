@@ -10,15 +10,15 @@ import datetime
 import uuid
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy import select, text
 
-from app.models.base import Base
 from app.models.first_pyramid_history import (
     FirstPyramidHistoryDailyState,
     FirstPyramidHistoryEvent,
 )
+from app.models.instrument import Instrument
 from app.services.first_pyramid_history_service import materialize_history_v3_from_core
+from tests.conftest import TestAsyncSessionLocal
 
 pytestmark = pytest.mark.postgres
 
@@ -39,20 +39,30 @@ def _make_core_flat():
 @pytest.mark.asyncio
 async def test_v3_materialize_idempotent_no_duplicate_events():
     """重复 materialize 不重复 event/state（crash/resume 幂等）。"""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
-
-    iid = uuid.UUID("00000000-0000-0000-0000-000000000009")
+    iid = uuid.uuid4()
     td = datetime.date(2026, 8, 25)
+    symbol = f"H3{uuid.uuid4().hex[:8]}"
 
-    async with factory() as s1:
+    async with TestAsyncSessionLocal() as s1:
+        db_name = (await s1.execute(text("SELECT current_database()"))).scalar_one()
+        assert db_name.startswith("bz_stock_verify_")
+        assert db_name != "bz_stock"
+        s1.add(
+            Instrument(
+                id=iid,
+                symbol=symbol,
+                name=f"history_v3_{symbol}",
+                market="SZ",
+                status="active",
+                listing_date=datetime.date(2010, 1, 4),
+            )
+        )
+        await s1.flush()
         await materialize_history_v3_from_core(s1, iid, td, _make_core_flat())
         await materialize_history_v3_from_core(s1, iid, td, _make_core_flat())
         await s1.commit()
 
-    async with factory() as s2:
+    async with TestAsyncSessionLocal() as s2:
         states = (await s2.execute(
             select(FirstPyramidHistoryDailyState).where(
                 FirstPyramidHistoryDailyState.instrument_id == iid,
@@ -62,7 +72,6 @@ async def test_v3_materialize_idempotent_no_duplicate_events():
         events = (await s2.execute(
             select(FirstPyramidHistoryEvent).where(
                 FirstPyramidHistoryEvent.instrument_id == iid,
-                FirstPyramidHistoryEvent.trade_date == td,
             )
         )).scalars().all()
 

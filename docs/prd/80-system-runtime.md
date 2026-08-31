@@ -5,7 +5,7 @@
 对应 Map：`../maps/80-system-runtime.md`  
 需求所有权：本地原生开发、远程容器运行、Git、数据库、Redis、Scheduler、服务和部署边界
 
-> 本文件拥有开发、验证和稳定运行三平面的产品要求。远程临时验证数据库 `bz_stock_verify_<sha>` 与独立验证栈的安全合同见 [`rules/80-deployment-data-safety.md`](../../rules/80-deployment-data-safety.md) DS-110 / DS-111 / DS-112；业务闭环的证据状态见 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。
+> 本文件拥有开发、验证和稳定运行三平面的产品要求。远程临时验证数据库 `bz_stock_verify_<sha>` 与正式验证运行时的安全合同见 [`rules/80-deployment-migration.md`](../../rules/80-deployment-migration.md)；业务闭环的证据状态见 [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) §11。
 
 ## 1. 运行位置与承载方式
 
@@ -92,7 +92,7 @@ IDE 不是运行环境。任何 IDE、编码助手或自动化 Agent 都只是�
 运行模式、健康端点、挂载来源、关键容器和 Scheduler 单实例；失败恢复上一成功代码和应用容器，
 但不自动 downgrade 数据库；永不删除 PostgreSQL/Redis Volume，也不自动执行任何业务数据动作。
 
-GitHub Actions 不包含部署动作。详细合同见 `rules/80-deployment-data-safety.md`。
+GitHub Actions 不包含部署动作。详细合同见 `rules/80-deployment-migration.md`。
 
 ### SR-15 本地参考/传输目录不得进入仓库
 

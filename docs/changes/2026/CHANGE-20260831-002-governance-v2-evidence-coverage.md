@@ -16,6 +16,8 @@ machine-readable answer for which required contract was registered and executed.
   Contract-Sensitive, and Level 3 Operational/Destructive routing.
 - Long-term rules protect repeated failure modes and project invariants, not generic
   language/framework style advice.
+- Removed governance compatibility files and historical routing prose; the repository
+  exposes only the current rule set and current machine gates.
 - PRD remains user-initiated. Verified Maps and Runbooks may follow implementation
   facts without a second authorization; they never create deployment or data authority.
 - Formal PG evidence is selected by `scripts/verify/evidence_manifest.json`.
@@ -32,16 +34,22 @@ machine-readable answer for which required contract was registered and executed.
 - Added checker and pure-unit negative cases for duplicate IDs, missing selectors,
   globs, unknown gates, zero collection, skip, deselect, missing report, and restored
   hardcoded selection.
-- Corrected the runtime Map and deployment Runbook from the retired per-SHA
-  `verify-test` topology to the single reusable `panji-verify-python` runtime.
+- Corrected the runtime Map and deployment Runbook to the single reusable
+  `panji-verify-python` runtime.
+- Replaced a History v3 test-owned local database engine with the formal PostgreSQL
+  fixture and registered that persistence contract in the evidence manifest.
 
 ## Evidence
 
-- Governance and verification pure-unit: 68 passed.
+- Governance/architecture/docs tool tests: 47 passed.
+- Verification and affected backend tests in pure mode: 36 passed, 10 PostgreSQL
+  tests correctly skipped for formal remote execution.
 - Pytest plugin smoke: one collected nodeid with setup/call/teardown all passed.
 - Ruff: passed for changed Python files.
 - Target Mypy: passed for five implementation/checker files.
 - Governance checker: passed.
+- Architecture checker: passed, including the SQLite/aiosqlite prohibition.
+- Docs consistency and pytest xfail allowlist: passed.
 - Exact-SHA `targeted-pg`: pending candidate push.
 
 ## Deferred triggers

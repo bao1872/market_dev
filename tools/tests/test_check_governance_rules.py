@@ -79,11 +79,11 @@ def test_correctness_gate_cannot_be_removed(governance_repo: Path) -> None:
     assert any("missing correctness gate" in error for error in errors)
 
 
-def test_compatibility_alias_cannot_become_second_authority(governance_repo: Path) -> None:
+def test_forbidden_rule_file_cannot_be_restored(governance_repo: Path) -> None:
     p = governance_repo / "rules/30-access-security.md"
-    p.write_text("# old authority\n" + "rule\n" * 30)
+    p.write_text("# second authority\n")
     errors = check(governance_repo)
-    assert any("compatibility alias" in error for error in errors)
+    assert any("forbidden governance file exists" in error for error in errors)
 
 
 def test_hardening_rule_must_remain_triggered_only(governance_repo: Path) -> None:

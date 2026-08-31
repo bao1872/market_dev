@@ -152,8 +152,7 @@ restore 在 dry-run 下不 `up`；内存 headroom 在 dry-run 且无测试 seam 
 - `docs/maps/80-system-runtime.md`：新增部署门禁顺序调用图与 rollback owner 容器解析拓扑。
 
 **诚实说明**：审计输入中"现行规则要求在任何状态修改前 `MemAvailable >= 4096`"这一表述，
-在 authoritative `rules/80-deployment-migration.md`（`rules/80-deployment-data-safety.md`
-仅为兼容别名 stub）中**并不存在**——该文件此前完全没有内存条款。真实冲突只有一处：
+在 authoritative `rules/80-deployment-migration.md` 中**并不存在**——该文件此前完全没有内存条款。真实冲突只有一处：
 runbook DS-104 把**部署后**主机内存写成失败门槛，而源码已改为 observation-only。
 本轮只修正这一真实冲突并补齐缺失条款，未虚构"前置状态阈值"规则。
 

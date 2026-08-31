@@ -68,6 +68,15 @@
       "claim": "Concurrent history progress writers preserve updates and checkpoint visibility."
     },
     {
+      "contract_id": "history_v3_materialization",
+      "governance_level": 2,
+      "semantic_owner": "app.services.first_pyramid_history_service.materialize_history_v3_from_core",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_history_v3_materialize.py"],
+      "claim": "History v3 projection materializes idempotently through the production PostgreSQL persistence contract."
+    },
+    {
       "contract_id": "review_current_fact_lineage",
       "governance_level": 2,
       "semantic_owner": "app.services.market_review_service",

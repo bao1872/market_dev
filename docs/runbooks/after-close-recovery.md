@@ -1,6 +1,6 @@
 # 盘后失败恢复 Runbook
 
-本 Runbook 描述盘后链路各阶段失败的正式恢复路径。所有恢复操作必须走正式 service / CLI / admin API，禁止裸 SQL、`/tmp` Python、`docker cp` 或 `docker exec ... python -c "..."` 写入。详见 `rules/80-deployment-data-safety.md` "远程开发修改与部署版本合同"。
+本 Runbook 描述盘后链路各阶段失败的正式恢复路径。所有恢复操作必须走正式 service / CLI / admin API，禁止裸 SQL、`/tmp` Python、`docker cp` 或 `docker exec ... python -c "..."` 写入。详见 `rules/80-deployment-migration.md`。
 
 ## 前置条件
 
@@ -202,7 +202,7 @@ scripts/ops/panji-prod-ssh "docker exec trading-backend python -m scripts.board_
 
 ## 安全边界
 
-- 所有恢复操作必须走正式 service / CLI / admin API，**禁止裸 SQL、`/tmp` Python、`docker cp`、`docker exec ... python -c "..." 写入**（详见 `rules/80-deployment-data-safety.md` "远程开发修改与部署版本合同"）；
+- 所有恢复操作必须走正式 service / CLI / admin API，**禁止裸 SQL、`/tmp` Python、`docker cp`、`docker exec ... python -c "..."` 写入**（详见 `rules/80-deployment-migration.md`）；
 - 恢复前必须先只读确认失败 run 的当前状态和根因；
 - 恢复后必须按 `rules/40-testing-quality.md` TQ-98 "成功判定三要素" 验证：pointer + 版本 + 真实数据证据；
 - pointer 切换失败只重试发布，不重算数据；

@@ -46,18 +46,8 @@ schema、manifest、test、checker 或 runner 证明的合同，不在多个 Mar
 | `60-runtime-frontend-acceptance.md` | 真实 Runtime、API→前端绑定、代表性样本、人工产品验收 | Always On when applicable |
 | `70-hardening-release.md` | full RTM、full closure、全面回归、release certification | Triggered Only |
 | `80-deployment-migration.md` | 远程部署唯一性、Migration 风险分级、运行身份、资源安全 | Always On; heavy gates risk-based |
-| `90-deprecated-forbidden.md` | 已废弃路径和永久禁止项 | Always On |
+| `90-forbidden.md` | 永久禁止项 | Always On |
 | `PROTECTED_GOVERNANCE_FILES.json` | 受保护治理变更域 | Always On |
-
-### 3.1 Compatibility Alias
-
-为避免历史 PRD/Map/Change/Runbook 链接在一次治理迁移中全部失效，以下旧文件名暂时保留为只读跳转文件，不再承载独立规则：
-
-- `30-access-security.md` → `30-security-data-safety.md`
-- `80-deployment-data-safety.md` → `80-deployment-migration.md`
-- `81-remote-deployment-only.md` → `80-deployment-migration.md`
-
-兼容文件不得新增业务、测试、部署或安全合同；新代码、新文档和新治理引用统一使用新文件名。
 
 ## 4. 冲突与优先级
 

@@ -28,16 +28,14 @@ ACTIVE_RULES = {
     "60-runtime-frontend-acceptance.md",
     "70-hardening-release.md",
     "80-deployment-migration.md",
+    "90-forbidden.md",
+}
+
+FORBIDDEN_RULE_FILES = {
+    "30-access-security.md",
+    "80-deployment-data-safety.md",
+    "81-remote-deployment-only.md",
     "90-deprecated-forbidden.md",
-}
-
-COMPATIBILITY_ALIASES = {
-    "30-access-security.md": "30-security-data-safety.md",
-    "80-deployment-data-safety.md": "80-deployment-migration.md",
-    "81-remote-deployment-only.md": "80-deployment-migration.md",
-}
-
-REMOVED_RULES = {
     "60-trae-work.md",
     "70-trae-cn.md",
     "85-server-directory-boundaries.md",
@@ -81,7 +79,7 @@ ROUTING_MARKERS = (
 )
 
 TOOL_NAMES = ("TRAE CN", "TRAE Work", "CodeBuddy", "Codex", "Cursor", "Copilot")
-TOOL_NEUTRAL_CONTEXT = ("不按", "不区分", "同一套", "已废弃", "禁止恢复", "工具专属")
+TOOL_NEUTRAL_CONTEXT = ("不按", "不区分", "同一套", "禁止", "工具专属")
 
 FORBIDDEN_EXECUTABLE_TOKENS = (
     "docker system prune -a",
@@ -108,24 +106,15 @@ def _executable_shell(path: Path) -> str:
 def _check_rule_layout(root: Path, errors: list[str]) -> None:
     rules_dir = root / "rules"
     actual = {p.name for p in rules_dir.glob("*.md")}
-    expected = ACTIVE_RULES | set(COMPATIBILITY_ALIASES)
+    expected = ACTIVE_RULES
 
     for name in sorted(expected - actual):
         errors.append(f"missing rule file: rules/{name}")
     for name in sorted(actual - expected):
         errors.append(f"unregistered rule file: rules/{name}")
-    for name in REMOVED_RULES:
+    for name in FORBIDDEN_RULE_FILES:
         if (rules_dir / name).exists():
-            errors.append(f"removed governance file restored: rules/{name}")
-
-    for alias, target in COMPATIBILITY_ALIASES.items():
-        text = _read(rules_dir / alias)
-        if "Compatibility Alias" not in text:
-            errors.append(f"compatibility alias lacks alias marker: rules/{alias}")
-        if f"rules/{target}" not in text:
-            errors.append(f"compatibility alias points to wrong target: rules/{alias}")
-        if len(text.splitlines()) > 20:
-            errors.append(f"compatibility alias contains duplicate authority: rules/{alias}")
+            errors.append(f"forbidden governance file exists: rules/{name}")
 
 
 def _check_agents(root: Path, errors: list[str]) -> None:
@@ -191,7 +180,7 @@ def _check_rule_semantics(root: Path, errors: list[str]) -> None:
             # [Phase 4D.4] long-running business batch 不得由 generic fixed absolute timeout 判失败
             "long-running business batch",
         ),
-        "90-deprecated-forbidden.md": ("每轮默认重型闭环", "不得用历史规则"),
+        "90-forbidden.md": ("永久禁止项", "SQLite 或 aiosqlite"),
     }
     for name, markers in required_markers.items():
         text = _read(rules / name)

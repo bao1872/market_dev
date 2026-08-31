@@ -8,9 +8,8 @@ readiness.
 
 真实 PostgreSQL 验证（远程 verify 库 bz_stock_verify_<sha>）：
 - 断言 current_database() == bz_stock_verify_<sha> 且 != bz_stock（KPI-6）；
-- 不自行创建 SQLite engine（旧实现用 sqlite+aiosqlite 自创建，违反仓库测试规则，
-  本次已改为复用 conftest 的 TestAsyncSessionLocal，由 PANJI_REMOTE_VERIFY_DB_TEST
-  指向 verify 库）。
+- 复用 conftest 的 TestAsyncSessionLocal，由 PANJI_REMOTE_VERIFY_DB_TEST 指向
+  verify 库，不创建任何本地数据库 engine。
 
 运行：
     PANJI_REMOTE_VERIFY_DB_TEST=1 .venv/bin/python -m pytest \
@@ -23,7 +22,6 @@ import uuid
 import pytest
 from sqlalchemy import text
 
-from tests.conftest import TestAsyncSessionLocal
 from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
@@ -31,6 +29,7 @@ from app.services.observation_prep import _BOARD_CURRENT_FLAT_KEY
 from app.services.review_observation_prep_service import (
     _load_current_only_snapshot_facts,
 )
+from tests.conftest import TestAsyncSessionLocal
 
 pytestmark = pytest.mark.postgres
 
