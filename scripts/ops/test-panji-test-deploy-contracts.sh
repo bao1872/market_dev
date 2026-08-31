@@ -1201,9 +1201,11 @@ else
 fi
 
 # CASE F / G / I: restore worker before save_state; final health after restore; save_state last
-RESTORE_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n '_restore_after_close_pickup_if_owned' | tail -1 | cut -d: -f1)"
-SAVE_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n 'save_state "${TARGET_SHA}"' | head -1 | cut -d: -f1)"
+# 最终稳态健康检查（main 成功路径）出现处的相对行号
 FINAL_HEALTH_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n 'post_deploy_resource_check' | tail -1 | cut -d: -f1)"
+# 取"严格位于最终健康检查之前"的最后一次 restore（即成功路径 restore，而非健康失败分支内嵌 restore）
+RESTORE_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n '_restore_after_close_pickup_if_owned' | awk -F: -v h="${FINAL_HEALTH_AT}" '$1 < h {last=$1} END{print last}')"
+SAVE_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n 'save_state "${TARGET_SHA}"' | head -1 | cut -d: -f1)"
 if [[ -n "${RESTORE_AT}" && -n "${SAVE_AT}" && "${RESTORE_AT}" -lt "${SAVE_AT}" ]]; then
     ok "CASE F: worker-after-close restored BEFORE save_state (restore failure → no success declared)"
 else
