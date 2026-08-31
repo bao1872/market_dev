@@ -195,39 +195,69 @@ check_prerequisites() {
     fi
 }
 
-check_resource_budget() {
-    log "检查资源预算（任何状态修改之前）..."
+# [RESOURCE_GATE_ORDER_DEBT] 把原 check_resource_budget 拆成两个语义独立的 owner：
+#
+#   check_static_resource_budget —— 在任何生产状态变更之前可静态判定：
+#       · 阈值配置健全性（MIN_DISK_GB / MAX_DISK_PCT / MIN_MEM_MB 不得被调低）
+#       · 主机磁盘余量（合法生产安全约束，不得在脚本侧放宽）
+#       不判断当前 MemAvailable >= 4096：那是"部署工作集 headroom"，必须先让
+#       supervisor-drain fence 释放 worker-after-close 之后才算数。
+#
+#   check_deployment_memory_headroom —— 部署临界区内存余量：
+#       必须在 fence 之后、首笔 runtime mutation 之前检查。fence 释放的 ~942MB anon
+#       才是本次部署真实可用 working set。MIN_MEM_MB 继续作为保守部署 headroom 参数，
+#       本轮不降低、也不重新定义为稳态 host 空闲下限（那是不同概念）。
+check_static_resource_budget() {
+    log "检查静态资源预算（任何状态修改之前，不含 MemAvailable 稳态门槛）..."
 
     [[ "${MIN_DISK_GB}" =~ ^[0-9]+$ && "${MIN_DISK_GB}" -ge 20 ]] \
         || fail "PANJI_MIN_DISK_GB 只能保持或提高 20 GB 下限"
     [[ "${MAX_DISK_PCT}" =~ ^[0-9]+$ && "${MAX_DISK_PCT}" -le 82 ]] \
         || fail "PANJI_MAX_DISK_PCT 只能保持或收紧 82% 上限"
     [[ "${MIN_MEM_MB}" =~ ^[0-9]+$ && "${MIN_MEM_MB}" -ge 4096 ]] \
-        || fail "PANJI_MIN_MEM_MB 只能保持或提高 4096 MB 下限"
+        || fail "PANJI_MIN_MEM_MB 只能保持或提高 4096 MB 下限（部署 headroom，非稳态 host 空闲下限）"
 
-    local available_kb available_gb used_pct mem_kb mem_mb
+    local available_kb available_gb used_pct
     available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
     used_pct="$(df -Pk / | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
-    if [[ -r /proc/meminfo ]]; then
-        mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)"
-    elif command -v sysctl >/dev/null 2>&1; then
-        mem_kb="$(( $(sysctl -n hw.memsize) / 1024 ))"
-    else
-        fail "无法读取 MemAvailable"
-    fi
-    [[ "${available_kb}" =~ ^[0-9]+$ && "${used_pct}" =~ ^[0-9]+$ && "${mem_kb}" =~ ^[0-9]+$ ]] \
-        || fail "无法读取磁盘或内存预算"
+    [[ "${available_kb}" =~ ^[0-9]+$ && "${used_pct}" =~ ^[0-9]+$ ]] \
+        || fail "无法读取磁盘预算"
     available_gb=$((available_kb / 1024 / 1024))
-    mem_mb=$((mem_kb / 1024))
 
     [[ "${available_gb}" -ge "${MIN_DISK_GB}" ]] \
         || fail "根分区可用 ${available_gb} GB，低于 ${MIN_DISK_GB} GB"
     [[ "${used_pct}" -le "${MAX_DISK_PCT}" ]] \
         || fail "根分区使用率 ${used_pct}%，高于 ${MAX_DISK_PCT}%"
-    [[ "${mem_mb}" -ge "${MIN_MEM_MB}" ]] \
-        || fail "MemAvailable ${mem_mb} MB，低于 ${MIN_MEM_MB} MB"
 
-    log "资源预算通过: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB"
+    log "静态资源预算通过: disk_free=${available_gb}GB disk_used=${used_pct}%"
+}
+
+# 部署工作集内存 headroom：fence 之后、首笔 runtime mutation 之前检查。
+# PANJI_MOCK_MEM_AVAILABLE_KB 仅供契约测试注入（模拟 fence 前后不同 MemAvailable），
+# 生产环境不设置时走真实 /proc/meminfo（Linux）或 sysctl hw.memsize（macOS）。
+# 注意：本函数不足门槛时 return 1（不 fail），以便 deploy() 走 failure matrix
+# 恢复被本 deploy fenced 的 worker-after-close。
+check_deployment_memory_headroom() {
+    local mem_kb mem_mb
+    if [[ -n "${PANJI_MOCK_MEM_AVAILABLE_KB:-}" ]]; then
+        mem_kb="${PANJI_MOCK_MEM_AVAILABLE_KB}"
+    elif [[ -r /proc/meminfo ]]; then
+        mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo)"
+    elif command -v sysctl >/dev/null 2>&1; then
+        mem_kb="$(( $(sysctl -n hw.memsize) / 1024 ))"
+    else
+        log "错误: 无法读取 MemAvailable"
+        return 1
+    fi
+    [[ "${mem_kb}" =~ ^[0-9]+$ ]] || { log "错误: 无法读取 MemAvailable"; return 1; }
+    mem_mb=$((mem_kb / 1024))
+
+    log "deployment headroom: mem_available=${mem_mb}MB min=${MIN_MEM_MB}MB (after fence, before first runtime mutation)"
+
+    [[ "${mem_mb}" -ge "${MIN_MEM_MB}" ]] || {
+        log "DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true (mem_available=${mem_mb}MB < min=${MIN_MEM_MB}MB)"
+        return 1
+    }
 }
 
 ensure_state_directory() {
@@ -1559,11 +1589,19 @@ deploy() {
     FAILURE_STAGE="active_job_gate"
     guard_active_after_close_jobs
 
-    # [E2.1 P1-C] supervisor-drain 进程 fence：在 backend runtime mutation 前 stop -t -1
-    # 停掉 worker-after-close（覆盖 60s grace，永不 SIGKILL），线性化点 = 容器 EXITED
-    # 且 after_close running==0。仅当 backend runtime 会变更时才需要（frontend-only 不动 worker）。
+    # [RESOURCE_GATE_ORDER_DEBT] 部署内存 headroom 必须在 supervisor-drain fence 之后、
+    # 首笔 runtime mutation 之前检查。fence 释放 worker-after-close 的 ~942MB anon 后，
+    # 才是本次部署真实可用的 working set；不得在任何 fence 之前用 MemAvailable 门槛阻止部署
+    # （那会阻止本可安全回收内存的部署）。MIN_MEM_MB 仍是保守部署 headroom，本轮不降低。
     if _backend_runtime_will_mutate; then
         _fence_after_close_worker || return 1
+        FAILURE_STAGE="deployment_memory_headroom"
+        check_deployment_memory_headroom || return 1
+    else
+        # frontend-only / 非 backend runtime 变更：不 fence worker（不得停止生产服务），
+        # 但首笔内存密集 mutation（frontend build/dist）前仍需 headroom 门槛。
+        FAILURE_STAGE="deployment_memory_headroom"
+        check_deployment_memory_headroom || return 1
     fi
 
     # [E2.1 P1-A] 在任何 destructive runtime mutation 之前固化 rollback owner。
@@ -1891,17 +1929,20 @@ verify_deployment() {
 post_deploy_resource_check() {
     log "部署后资源复检..."
 
-    # 1. 主机资源（复用 check_resource_budget 的阈值，但允许只读采集不修改）
+    # 1. 主机资源 OBSERVATION（不是稳态 host MemAvailable>=4096 门槛）。
+    #    deployment headroom 已在 fence 之后单独检查；此处仅观测 host 内存，
+    #    不因此判失败（避免把"worker 被 fence 停掉时的临时状态"误判为稳态失败）。
+    #    若未来确有 catastrophic host memory 阈值，应复用已有权威阈值；本 slice 不新设数字。
     local available_kb available_gb used_pct mem_kb mem_mb
     available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
     used_pct="$(df -Pk / | awk 'NR==2 {gsub(/%/, "", $5); print $5}')"
     mem_kb="$(awk '/^MemAvailable:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo 0)"
     available_gb=$((available_kb / 1024 / 1024))
     mem_mb=$((mem_kb / 1024))
-    log "  host: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB"
-    if [[ "${available_gb}" -lt "${MIN_DISK_GB}" || "${used_pct}" -gt "${MAX_DISK_PCT}" || "${mem_mb}" -lt "${MIN_MEM_MB}" ]]; then
+    log "  host observation: disk_free=${available_gb}GB disk_used=${used_pct}% mem_available=${mem_mb}MB (observed, not a steady-state gate)"
+    if [[ "${available_gb}" -lt "${MIN_DISK_GB}" || "${used_pct}" -gt "${MAX_DISK_PCT}" ]]; then
         FAILURE_STAGE="post_deploy_host_resource"
-        log "错误: 部署后主机资源跌破阈值"
+        log "错误: 部署后主机磁盘资源跌破阈值"
         return 1
     fi
 
@@ -2238,7 +2279,7 @@ cleanup_resources() {
 main() {
     parse_args "$@"
     check_prerequisites
-    check_resource_budget
+    check_static_resource_budget
 
     (
         flock -n 200 || fail "另一个部署正在进行中"
@@ -2346,10 +2387,24 @@ main() {
             fail "部署后清理与资源复检失败（failure_stage=${FAILURE_STAGE}）并已回滚"
         fi
 
+        # [RESOURCE_GATE_ORDER_DEBT] 在 save_state / 宣布成功之前，先恢复本 deploy 拥有的
+        # worker-after-close（最终稳态必须包含它在运行）；恢复失败则不得宣布成功（CASE F）。
+        if ! _restore_after_close_pickup_if_owned; then
+            fail "worker-after-close 恢复失败，不宣布部署成功（MANUAL_INTERVENTION_REQUIRED）"
+        fi
+
+        # 最终稳态 runtime 资源健康（DS-104）：此时 worker 已恢复运行，检查的是真实稳态，
+        # 而非 fence 停掉 worker 时的临时状态。失败 → 回滚路径需在 backend runtime mutation
+        # 前重新建立 worker fence（CASE H）。
+        if ! post_deploy_resource_check; then
+            if rollback; then
+                _restore_after_close_pickup_if_owned
+            fi
+            fail "最终稳态资源健康复检失败（failure_stage=${FAILURE_STAGE}）"
+        fi
+
         save_state "${TARGET_SHA}"
 
-        # [E2.1 P1-C] 部署完整成功：释放本次 deploy 自己拥有的 pause。
-        _restore_after_close_pickup_if_owned
         log "部署成功: ${TARGET_SHA}"
         log "  deployment_mode=live"
         log "  first_live_deploy=${FIRST_LIVE_DEPLOY}"

@@ -1178,6 +1178,142 @@ else
   bad "old image reclamation skips captured rollback owners by content id"
 fi
 
+# ============================================================
+# §10 RESOURCE_GATE_ORDER_DEBT 修复契约（E3 前发现的部署脚本缺陷）
+#
+# 核心不变量：部署内存 headroom 必须在 supervisor-drain fence 之后、首笔
+# runtime mutation 之前检查；不得在 fence 之前用 MemAvailable 门槛阻止部署。
+# post-deploy 不得把"worker 被 fence 停掉时的临时状态"当作稳态 host 空闲下限。
+# worker-after-close 必须在 save_state / 宣布成功之前恢复运行。
+# ============================================================
+echo "== RESOURCE_GATE_ORDER_DEBT 修复契约 =="
+
+DEPLOY_BODY_RG="$(sed -n '/^deploy() {/,/^}/p' "${SERVER_SCRIPT}")"
+MAIN_BODY_RG="$(sed -n '/^main() {/,/^}/p' "${SERVER_SCRIPT}")"
+
+# CASE C: headroom 检查必须位于 fence 之后（fence 失败 → headroom 永不授权 mutation）
+FENCE_CALL_AT="$(printf '%s' "${DEPLOY_BODY_RG}" | grep -n '_fence_after_close_worker' | head -1 | cut -d: -f1)"
+HEADROOM_AT="$(printf '%s' "${DEPLOY_BODY_RG}" | grep -n 'check_deployment_memory_headroom' | head -1 | cut -d: -f1)"
+if [[ -n "${FENCE_CALL_AT}" && -n "${HEADROOM_AT}" && "${FENCE_CALL_AT}" -lt "${HEADROOM_AT}" ]]; then
+    ok "CASE C: headroom check placed AFTER fence (fence fail → headroom never authorizes mutation)"
+else
+    bad "CASE C: headroom check placed AFTER fence (fence=${FENCE_CALL_AT} headroom=${HEADROOM_AT})"
+fi
+
+# CASE F / G / I: restore worker before save_state; final health after restore; save_state last
+RESTORE_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n '_restore_after_close_pickup_if_owned' | tail -1 | cut -d: -f1)"
+SAVE_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n 'save_state "${TARGET_SHA}"' | head -1 | cut -d: -f1)"
+FINAL_HEALTH_AT="$(printf '%s' "${MAIN_BODY_RG}" | grep -n 'post_deploy_resource_check' | tail -1 | cut -d: -f1)"
+if [[ -n "${RESTORE_AT}" && -n "${SAVE_AT}" && "${RESTORE_AT}" -lt "${SAVE_AT}" ]]; then
+    ok "CASE F: worker-after-close restored BEFORE save_state (restore failure → no success declared)"
+else
+    bad "CASE F: worker-after-close restored BEFORE save_state (restore=${RESTORE_AT} save=${SAVE_AT})"
+fi
+if [[ -n "${RESTORE_AT}" && -n "${FINAL_HEALTH_AT}" && "${RESTORE_AT}" -lt "${FINAL_HEALTH_AT}" ]]; then
+    ok "CASE G: final steady-state runtime health check runs AFTER worker restore"
+else
+    bad "CASE G: final steady-state runtime health check runs AFTER worker restore"
+fi
+if [[ -n "${RESTORE_AT}" && -n "${FINAL_HEALTH_AT}" && -n "${SAVE_AT}" \
+      && "${RESTORE_AT}" -lt "${FINAL_HEALTH_AT}" && "${FINAL_HEALTH_AT}" -lt "${SAVE_AT}" ]]; then
+    ok "CASE I: save_state occurs only AFTER worker restore AND final runtime health PASS"
+else
+    bad "CASE I: save_state occurs only AFTER worker restore AND final runtime health PASS"
+fi
+
+# CASE H: final health 失败 → 回滚路径需在 backend runtime mutation 前重新建立 worker fence
+FINAL_BLOCK="$(printf '%s' "${MAIN_BODY_RG}" | sed -n '/最终稳态 runtime 资源健康/,/save_state/p')"
+if printf '%s' "${FINAL_BLOCK}" | grep -q 'rollback' \
+   && printf '%s' "${FINAL_BLOCK}" | grep -q '_restore_after_close_pickup_if_owned'; then
+    ok "CASE H: final health failure re-establishes worker fence via rollback before backend mutation"
+else
+    bad "CASE H: final health failure re-establishes worker fence via rollback before backend mutation"
+fi
+
+# ---- 行为级：真正调用 owner，验证 headroom 在 fence 之后按注入内存判定 ----
+# CASE A: backend runtime 部署，worker running，fence 后 MemAvailable=4300 → 允许；首笔 mutation 在 fence 之后
+echo "== CASE A: backend-runtime deploy, worker running, post-fence MemAvailable=4300 → allowed, fence before mutation =="
+reset_worker_state "running"
+CASE_A_LOG="${TMP_ROOT}/case-a.log"
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_A_LOG}" 2>&1
+CASE_A_RC=$?
+if [[ "${CASE_A_RC}" -eq 0 ]] \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_A_LOG}" \
+   && grep -q 'deployment headroom: mem_available=4300' "${CASE_A_LOG}" \
+   && grep -q '部署成功' "${CASE_A_LOG}"; then
+    ok "CASE A: backend deploy proceeds after post-fence headroom PASS (fence before mutation)"
+else
+    bad "CASE A: backend deploy proceeds after post-fence headroom PASS (rc=${CASE_A_RC})"
+    sed 's/^/    /' "${CASE_A_LOG}" >&2
+fi
+A_FENCE="$(grep -n 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
+A_HEAD="$(grep -n 'deployment headroom: mem_available=4300' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
+A_SUCC="$(grep -n '部署成功' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
+if [[ -n "${A_FENCE}" && -n "${A_HEAD}" && -n "${A_SUCC}" \
+      && "${A_FENCE}" -lt "${A_HEAD}" && "${A_HEAD}" -lt "${A_SUCC}" ]]; then
+    ok "CASE A: fence precedes headroom check precedes success"
+else
+    bad "CASE A: fence precedes headroom check precedes success (fence=${A_FENCE} head=${A_HEAD} succ=${A_SUCC})"
+fi
+
+# CASE B: backend runtime 部署，worker running，fence 后 MemAvailable=3800 → FAIL；零 mutation；worker 被恢复
+echo "== CASE B: backend-runtime deploy, worker running, post-fence MemAvailable=3800 → FAIL, zero mutation, worker restored =="
+reset_worker_state "running"
+CASE_B_LOG="${TMP_ROOT}/case-b.log"
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_MEM_AVAILABLE_KB=3891200 \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_B_LOG}" 2>&1
+CASE_B_RC=$?
+if [[ "${CASE_B_RC}" -ne 0 ]] \
+   && grep -q 'DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true' "${CASE_B_LOG}" \
+   && ! grep -qE 'rsync|原地写入 RUNTIME_SHA|\[dry-run\] 将更新' "${CASE_B_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_B_LOG}"; then
+    ok "CASE B: post-fence insufficient headroom → zero runtime mutation + worker restored"
+else
+    bad "CASE B: post-fence insufficient headroom → zero runtime mutation + worker restored (rc=${CASE_B_RC})"
+    sed 's/^/    /' "${CASE_B_LOG}" >&2
+fi
+
+# CASE D: queued/resume_queued 可见，backend 部署，MemAvailable=4300 → 不阻塞（queue 不被 mutate）
+echo "== CASE D: queued visible, backend deploy, MemAvailable=4300 → proceeds (queue untouched) =="
+reset_worker_state "exited"
+CASE_D_LOG="${TMP_ROOT}/case-d.log"
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:1
+resume_queued:0" \
+PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_D_LOG}" 2>&1
+CASE_D_RC=$?
+if [[ "${CASE_D_RC}" -eq 0 ]] \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_D_LOG}" \
+   && ! grep -q 'DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true' "${CASE_D_LOG}"; then
+    ok "CASE D: queued jobs do not block deploy; fence still linearizes"
+else
+    bad "CASE D: queued jobs do not block deploy (rc=${CASE_D_RC})"
+    sed 's/^/    /' "${CASE_D_LOG}" >&2
+fi
+
+# CASE E: frontend-only，MemAvailable=3800 < 4096 → FAIL；不得停止 worker-after-close
+echo "== CASE E: frontend-only, MemAvailable=3800 < 4096 → FAIL before frontend mutation; worker NOT stopped =="
+reset_worker_state "running"
+CASE_E_LOG="${TMP_ROOT}/case-e.log"
+PANJI_MOCK_FRONTEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_MEM_AVAILABLE_KB=3891200 \
+    run_deploy "${TARGET_SHA}" --dry-run >"${CASE_E_LOG}" 2>&1
+CASE_E_RC=$?
+if [[ "${CASE_E_RC}" -ne 0 ]] \
+   && ! grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_E_LOG}" \
+   && ! grep -q 'stop -t -1' "${CASE_E_LOG}" \
+   && grep -q 'DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true' "${CASE_E_LOG}"; then
+    ok "CASE E: frontend-only below headroom FAILs WITHOUT stopping worker-after-close"
+else
+    bad "CASE E: frontend-only below headroom FAILs WITHOUT stopping worker-after-close (rc=${CASE_E_RC})"
+    sed 's/^/    /' "${CASE_E_LOG}" >&2
+fi
+
 echo "----------------------------------------"
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]
