@@ -430,6 +430,195 @@ assert_code_contains "DEFECT2 纯 Compose 变化走 reconcile（CASE A）" \
     'if \[\[ "\$\{COMPOSE_RUNTIME_CHANGED\}" == "true" \]\]; then' "${SERVER_SCRIPT}"
 
 # ---------------------------------------------------------------------------
+# == P1-A / P1-B 行为测试 ==
+#
+# 位置约束（不可移到文件末尾）：后续 11/11 小节在直接调用 deploy() 时会命中被测源码的
+# fail()（内部 exit 1），整个套件在那里终止。若把本节放在其后，断言将永不执行（假覆盖）。
+#
+# 隔离约束：本节整体在**子 shell** 中执行——
+#   1) docker stub PATH / DRY_RUN / LIVE_ROOT / 函数覆盖不污染后续小节；
+#   2) 万一被测源码 fail()，只终止子 shell，不吞掉本节其余断言之外的套件。
+# 断言结果以 `RESULT|PASS|label` 行回传，由父 shell 统一用 ok/bad 计数；
+# 同时校验断言条数（防子 shell 早退造成静默漏跑）。
+echo "== P1-A/P1-B rollback owner 真实拓扑 + dry-run 零容器 mutation =="
+_P1_RESULTS="$(mktemp -t panji-p1-results.XXXXXX)"
+export _P1_RESULTS
+(
+    set +e
+    _emit() { printf 'RESULT|%s|%s\n' "$1" "$2" >>"${_P1_RESULTS}"; }
+
+    # ---- 真实 Compose 拓扑建模 ----
+    #   docker inspect <bare_service>                    -> "No such object"（生产事实：容器名为 trading-<svc>）
+    #   docker inspect -f ... trading-worker-after-close -> running（状态探针）
+    #   docker compose <...> ps -q <svc>                 -> CID_<svc>
+    #   docker inspect CID_<svc>                         -> IMAGE_<svc>
+    #   docker compose <...> config                      -> 稳定文本（供 digest 对称计算）
+    _STUB="$(mktemp -d -t panji-p1-stub.XXXXXX)"
+    cat >"${_STUB}/docker" <<'DOCKEREOF'
+#!/usr/bin/env bash
+LOG="${PANJI_DOCKER_CALL_LOG:-/tmp/panji_docker_call.log}"
+case "$1" in
+  inspect)
+    if [[ "$*" == *"trading-worker-after-close"* && "$*" == *"-f"* ]]; then
+      echo "running"; exit 0
+    fi
+    arg="$2"
+    if [[ "${arg}" == CID_* ]]; then
+      echo "IMAGE_${arg#CID_}"
+    else
+      echo "Error: No such object: ${arg}" >&2
+      exit 1
+    fi
+    ;;
+  compose)
+    if [[ "$*" == *"stop -t -1 worker-after-close"* ]]; then
+      echo "stop" >>"${LOG}"; echo "Stopping worker-after-close"; exit 0
+    fi
+    if [[ "$*" == *"up -d --force-recreate worker-after-close"* ]]; then
+      echo "up" >>"${LOG}"; echo "Recreating worker-after-close"; exit 0
+    fi
+    for a in "$@"; do
+      if [[ "${a}" == "config" ]]; then echo "COMPOSE_DEF"; exit 0; fi
+    done
+    prev=""
+    for a in "$@"; do
+      if [[ "${prev}" == "-q" ]]; then svc="$a"; fi
+      prev="$a"
+    done
+    if [[ -n "${svc:-}" ]]; then echo "CID_${svc}"; fi
+    ;;
+esac
+DOCKEREOF
+    chmod +x "${_STUB}/docker"
+    cat >"${_STUB}/git" <<'GITEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "rev-parse" ]]; then echo "sha_pre"; exit 0; fi
+if [[ "$1" == "diff" && "$2" == "--name-only" ]]; then exit 0; fi
+exit 0
+GITEOF
+    chmod +x "${_STUB}/git"
+    PATH="${_STUB}:${PATH}"
+    PANJI_DOCKER_CALL_LOG="$(mktemp -t panji-p1-calls.XXXXXX.log)"
+    export PANJI_DOCKER_CALL_LOG
+
+    # ---- P1-A：capture / verify 必须共用 compose service → container ID resolver ----
+    # FIRST_LIVE_DEPLOY=false → per-service image ID 属 mandatory owner；
+    # 若 resolver 仍用 bare service name，本节必然 FAIL（真实拓扑反向证明）。
+    _LIVE="$(mktemp -d -t panji-p1-live.XXXXXX)"
+    printf 'exp_sha\n' >"${_LIVE}/RUNTIME_SHA"
+    LIVE_ROOT="${_LIVE}"
+    FIRST_LIVE_DEPLOY=false
+    PRE_CHECKOUT_REPO_SHA="sha_pre"
+    # 与 verify_rollback_owner 内部完全同一条管线计算，保证对称。
+    PRE_CHECKOUT_COMPOSE_DIGEST="$(
+        cd "${REPO_ROOT}" && ${COMPOSE_CMD} config 2>/dev/null | sha256sum | awk '{print $1}'
+    )"
+    PRE_DEPLOY_RUNTIME_OWNER_RESOLVED=false
+    PRE_DEPLOY_MANIFEST_FILE="$(mktemp -t panji-p1-manifest.XXXXXX)"
+
+    if [[ -n "${PRE_CHECKOUT_COMPOSE_DIGEST}" ]]; then
+        _emit PASS "P1-A 前置: compose digest 可对称计算（sha256sum 可用）"
+    else
+        _emit FAIL "P1-A 前置: compose digest 为空（sha256sum 不可用，无法做对称校验）"
+    fi
+
+    resolve_pre_deploy_runtime_owner
+    _rc=$?
+    _b="$(grep '^PRE_DEPLOY_IMAGE_ID:backend=' "${PRE_DEPLOY_MANIFEST_FILE}" | cut -d= -f2-)"
+    _w="$(grep '^PRE_DEPLOY_IMAGE_ID:worker-after-close=' "${PRE_DEPLOY_MANIFEST_FILE}" | cut -d= -f2-)"
+    _f="$(grep '^PRE_DEPLOY_IMAGE_ID:frontend=' "${PRE_DEPLOY_MANIFEST_FILE}" | cut -d= -f2-)"
+    if [[ "${_rc}" == "0" && "${_b}" == "IMAGE_backend" \
+        && "${_w}" == "IMAGE_worker-after-close" && "${_f}" == "IMAGE_frontend" ]]; then
+        _emit PASS "P1-A capture: resolver 经 compose ps -q 解析真实容器 ID（backend/worker-after-close/frontend）"
+    else
+        _emit FAIL "P1-A capture: rc=${_rc} backend=${_b} worker=${_w} frontend=${_f}"
+    fi
+
+    verify_rollback_owner
+    _vrc=$?
+    if [[ "${_vrc}" == "0" ]]; then
+        _emit PASS "P1-A verify: rollback owner 对称校验 PASS（capture/verify 共用同一 resolver）"
+    else
+        _emit FAIL "P1-A verify: rc=${_vrc}（capture 与 verify resolver 不对称）"
+    fi
+
+    # 反向证明：bare inspect 在真实拓扑下必须失败，否则上面的 PASS 是假绿。
+    _dout="$(docker inspect backend 2>&1)"
+    _drc=$?
+    if [[ "${_drc}" != "0" && "${_dout}" == *"No such object"* ]]; then
+        _emit PASS "P1-A 反向: bare 'docker inspect backend' 在真实拓扑下失败（resolver 未走 bare name）"
+    else
+        _emit FAIL "P1-A 反向: bare 'docker inspect backend' 竟成功（${_dout}）—— 拓扑建模错误"
+    fi
+
+    # ---- P1-B：dry-run 零容器 mutation ----
+    _after_close_running_count() { printf '0'; }   # 只读查询隔离
+    AFTER_CLOSE_WAS_RUNNING=false
+    AFTER_CLOSE_FENCE_OWNED=false
+    AFTER_CLOSE_PICKUP_FENCED=false
+    AFTER_CLOSE_PICKUP_FENCE_SIMULATED=false
+    DRY_RUN=true
+    : >"${PANJI_DOCKER_CALL_LOG}"
+
+    # (1) fence：不得 compose stop；置 SIMULATED=true 且不得伪装真实 FENCED。
+    _fence_after_close_worker
+    _frc=$?
+    _stopn="$(grep -c '^stop$' "${PANJI_DOCKER_CALL_LOG}")"
+    if [[ "${_frc}" == "0" && "${_stopn}" == "0" \
+        && "${AFTER_CLOSE_PICKUP_FENCE_SIMULATED}" == "true" \
+        && "${AFTER_CLOSE_FENCE_OWNED}" == "false" \
+        && "${AFTER_CLOSE_PICKUP_FENCED}" == "false" ]]; then
+        _emit PASS "P1-B dry-run fence: 零 compose stop（count=${_stopn}），SIMULATED=true，未伪装 FENCED"
+    else
+        _emit FAIL "P1-B dry-run fence: rc=${_frc} stop=${_stopn} SIM=${AFTER_CLOSE_PICKUP_FENCE_SIMULATED} OWNED=${AFTER_CLOSE_FENCE_OWNED} FENCED=${AFTER_CLOSE_PICKUP_FENCED}"
+    fi
+
+    # (2) headroom：无 mock seam → deferred（不读取/不断言真实 MemAvailable）。
+    PANJI_MOCK_MEM_AVAILABLE_KB=""
+    check_deployment_memory_headroom
+    _hrc=$?
+    if [[ "${_hrc}" == "0" ]]; then
+        _emit PASS "P1-B dry-run headroom: 无 seam 时 deferred（rc=0，不读取真实 MemAvailable）"
+    else
+        _emit FAIL "P1-B dry-run headroom: rc=${_hrc}（应 deferred 返回 0）"
+    fi
+
+    # (3) 临界区门禁：dry-run 下由 SIMULATED 满足，与真实 FENCED 严格区分。
+    _backend_pickup_boundary_ready
+    _brc=$?
+    if [[ "${_brc}" == "0" ]]; then
+        _emit PASS "P1-B dry-run 边界门禁: SIMULATED=true 满足（不与真实 FENCED 混用）"
+    else
+        _emit FAIL "P1-B dry-run 边界门禁: rc=${_brc}（SIMULATED 应被接受）"
+    fi
+
+    # (4) restore：即便 FENCE_OWNED 被误置 true，dry-run 也不得 compose up。
+    AFTER_CLOSE_FENCE_OWNED=true
+    _restore_after_close_pickup_if_owned
+    _upn="$(grep -c '^up$' "${PANJI_DOCKER_CALL_LOG}")"
+    if [[ "${_upn}" == "0" ]]; then
+        _emit PASS "P1-B dry-run restore: 零 compose up（count=${_upn}）"
+    else
+        _emit FAIL "P1-B dry-run restore: 竟调用 compose up（count=${_upn}）"
+    fi
+
+    rm -rf "${_STUB}" "${_LIVE}" "${PANJI_DOCKER_CALL_LOG}" "${PRE_DEPLOY_MANIFEST_FILE}"
+)
+
+_P1_EXPECTED=8
+_P1_ACTUAL="$(grep -c '^RESULT|' "${_P1_RESULTS}" || true)"
+while IFS='|' read -r _tag _st _label; do
+    [[ "${_tag}" == "RESULT" ]] || continue
+    if [[ "${_st}" == "PASS" ]]; then ok "${_label}"; else bad "${_label}"; fi
+done <"${_P1_RESULTS}"
+if [[ "${_P1_ACTUAL}" == "${_P1_EXPECTED}" ]]; then
+    ok "P1-A/P1-B 断言全部执行（${_P1_ACTUAL}/${_P1_EXPECTED}，子 shell 未早退）"
+else
+    bad "P1-A/P1-B 断言条数异常（${_P1_ACTUAL}/${_P1_EXPECTED}，子 shell 早退或断言漏跑）"
+fi
+rm -f "${_P1_RESULTS}"
+
+# ---------------------------------------------------------------------------
 echo "== 11/11 DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE =="
 # 复用现有 owner guard_active_after_close_jobs，在 deploy() 每个实际 runtime action 前分别
 # 做 fresh fail-closed 门禁：

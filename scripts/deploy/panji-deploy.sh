@@ -126,9 +126,12 @@ IMAGES_BUILT=false
 #   AFTER_CLOSE_FENCE_OWNED   —— 本次 deploy 是否真正 stop -t -1 停掉了 running worker
 #                                  （仅 owned 的 worker 才在成功/rollback 后由本 deploy 恢复）
 #   AFTER_CLOSE_PICKUP_FENCED —— 线性化点已建立：容器 EXITED/missing 且 after_close running==0
+#   AFTER_CLOSE_PICKUP_FENCE_SIMULATED —— dry-run 仅模拟 fence（绝不实际 stop/recreate
+#       生产容器）；与真实 FENCED 严格区分，dry-run 不得伪装成 FENCED。
 AFTER_CLOSE_WAS_RUNNING=false
 AFTER_CLOSE_FENCE_OWNED=false
 AFTER_CLOSE_PICKUP_FENCED=false
+AFTER_CLOSE_PICKUP_FENCE_SIMULATED=false
 
 log() {
     printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"
@@ -238,6 +241,15 @@ check_static_resource_budget() {
 # 注意：本函数不足门槛时 return 1（不 fail），以便 deploy() 走 failure matrix
 # 恢复被本 deploy fenced 的 worker-after-close。
 check_deployment_memory_headroom() {
+    # [DRY-RUN ZERO-MUTATION CONTRACT] dry-run 无法在不停止 worker 的情况下知道真实
+    # post-fence MemAvailable，因此**不读取也不断言**真实 MemAvailable；仅记录
+    # "deferred to real fence" 并继续部署**计划**模拟。只有显式测试 seam
+    # （PANJI_MOCK_MEM_AVAILABLE_KB）存在时，dry-run 才按 seam 值验证 3800/4300 行为。
+    if [[ "${DRY_RUN}" == "true" && -z "${PANJI_MOCK_MEM_AVAILABLE_KB:-}" ]]; then
+        log "[dry-run] deployment memory headroom deferred until real supervisor fence（不读取/不断言真实 MemAvailable）"
+        return 0
+    fi
+
     local mem_kb mem_mb
     if [[ -n "${PANJI_MOCK_MEM_AVAILABLE_KB:-}" ]]; then
         # 测试 seam 仅在 dry-run / 正式契约测试下允许覆盖真实 MemAvailable。
@@ -1311,8 +1323,34 @@ _fence_after_close_worker() {
     # running → stop -t -1（无限 graceful，覆盖 60s grace，绝不 SIGKILL），FENCE_OWNED=true。
     # exited/created/missing → WAS_RUNNING=false（owned=false）。
     # 无 fixed business timeout：仅 deploy 级 fail-closed 看门狗，绝不 SIGKILL。
+    #
+    # [DRY-RUN ZERO-MUTATION CONTRACT] dry-run 不得 stop/recreate 生产容器。
+    # 仅读取当前 worker 状态（只读 inspect）并置 SIMULATED=true，供 deploy() 边界门禁用；
+    # 绝不得伪装成 AFTER_CLOSE_PICKUP_FENCED=true（那只有真实 fence 才有）。
     local status
     status="$(_after_close_container_status)" || { log "FENCE_INSPECT_FAILED=true"; return 1; }
+
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] would fence worker-after-close（不实际 stop/recreate 生产容器）"
+        log "[dry-run] current worker-after-close state=${status}"
+        AFTER_CLOSE_WAS_RUNNING=$( [[ "${status}" == "running" ]] && echo true || echo false )
+        AFTER_CLOSE_FENCE_OWNED=false
+        AFTER_CLOSE_PICKUP_FENCED=false
+        AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true
+        # 机器可读契约字段：dry-run 只允许出现 SIMULATED=true，
+        # 绝不允许出现 AFTER_CLOSE_PICKUP_FENCED=true（真实 fence 专属）。
+        log "AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true"
+        # [DRY-RUN ZERO-MUTATION] 仍须校验部署临界区可行性（只读查询，非 mutation）：
+        # 若 after_close 仍有 running 任务，真实部署会 fail-closed，干跑同样返回非零以反映该计划结果。
+        local n
+        n="$(_after_close_running_count 2>/dev/null)" || { log "FENCE_RUNNING_COUNT_UNAVAILABLE=true"; return 1; }
+        if [[ "${n:-0}" != "0" ]]; then
+            log "AFTER_CLOSE_FENCE_RUNNING_REMAINS=${n}（[dry-run] 计划结果：真实部署将 fail-closed）"
+            return 1
+        fi
+        return 0
+    fi
+
     case "${status}" in
         running)
             AFTER_CLOSE_WAS_RUNNING=true
@@ -1353,6 +1391,27 @@ _fence_after_close_worker() {
 _restore_after_close_pickup_if_owned() {
     # 仅本 deploy 真正 stop -t -1 停掉的 worker 才恢复（owned-aware）。
     # 进入部署时 worker 原本 stopped/missing 则成功/rollback 都不得擅自 up。
+    #
+    # [DRY-RUN ZERO-MUTATION CONTRACT] dry-run 绝不得 up/recreate 生产容器。
+    # dry-run 下 fence 只置 SIMULATED（FENCE_OWNED=false），本函数本就 early-return；
+    # 此处再加显式 dry-run 守卫，双重 fail-safe 拒绝任何容器级恢复动作。
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] 跳过 worker-after-close 恢复（不实际 up/recreate 生产容器）；fence 为模拟态"
+        # 状态机一致性（模拟态）：干跑从未真正持有 pickup fence，恢复步骤之后
+        # 必须显式回落到"未持有"，且关闭本次模拟 fence。这两个字段是事实陈述，
+        # 不得输出 AFTER_CLOSE_PICKUP_RESTORED=true（那意味着真的 up 过容器）。
+        AFTER_CLOSE_PICKUP_FENCED=false
+        AFTER_CLOSE_PICKUP_FENCE_SIMULATED=false
+        log "AFTER_CLOSE_PICKUP_FENCED=false（[dry-run] 模拟态，未持有真实 fence）"
+        # owned-aware 计划可观测性：干跑没有真正 stop 过任何容器，但进入部署时的
+        # worker 状态（只读 inspect）已决定真实部署是否拥有恢复权，据实陈述该计划结论。
+        if [[ "${AFTER_CLOSE_WAS_RUNNING}" == "true" ]]; then
+            log "[dry-run] 计划：真实部署将恢复由本次 fence 停止的 worker-after-close（owned）"
+        else
+            log "AFTER_CLOSE_RESTORE_SKIPPED_NOT_OWNED=true"
+        fi
+        return 0
+    fi
     [[ "${AFTER_CLOSE_FENCE_OWNED}" == "true" ]] || { log "AFTER_CLOSE_RESTORE_SKIPPED_NOT_OWNED=true"; return 0; }
     log "[E2.1 P1-C] restoring worker-after-close（本 deploy 自己 fenced 的 worker）"
     if ! ${COMPOSE_CMD} up -d --force-recreate worker-after-close; then
@@ -1419,6 +1478,38 @@ capture_pre_checkout_repo_owners() {
     log "pre-checkout owner 捕获: compose_digest=${PRE_CHECKOUT_COMPOSE_DIGEST:-<none>}"
 }
 
+# [P1-A] Compose service → concrete container ID resolver。
+#
+# 逻辑 Compose service（backend / worker-after-close / frontend ...）是 canonical owner，
+# 但生产容器名为 trading-<service> 且由 compose project 管理；bare service name 直查
+# docker inspect 在生产拓扑下解析不到（"No such object"）。必须由同一 COMPOSE_CMD 解析
+# 实际 container ID 后再 inspect，使 Compose topology 成为 SSOT。capture 与 verify 共用。
+_compose_container_id_for_service() {
+    local service="$1"
+    local cid
+    cid="$(
+        cd "${REPO_ROOT}" &&
+        ${COMPOSE_CMD} ps -q "${service}" 2>/dev/null |
+        head -1
+    )" || return 1
+    [[ -n "${cid}" ]] || return 1
+    printf '%s' "${cid}"
+}
+
+_container_image_id_for_service() {
+    local service="$1"
+    local cid
+    cid="$(_compose_container_id_for_service "${service}")" || return 1
+    docker inspect "${cid}" --format '{{.Image}}' 2>/dev/null
+}
+
+_container_image_ref_for_service() {
+    local service="$1"
+    local cid
+    cid="$(_compose_container_id_for_service "${service}")" || return 1
+    docker inspect "${cid}" --format '{{.Config.Image}}' 2>/dev/null
+}
+
 resolve_pre_deploy_runtime_owner() {
     PRE_DEPLOY_MANIFEST_FILE="${PRE_DEPLOY_MANIFEST_FILE:-$(mktemp)}"
     : >"${PRE_DEPLOY_MANIFEST_FILE}"
@@ -1458,9 +1549,14 @@ resolve_pre_deploy_runtime_owner() {
 
     # C. per-service immutable container runtime identity
     #    首次 Live Mount 时容器尚不存在，属合法无前状态。
+    #    [P1-A] 逻辑 Compose service 是 canonical owner；必须经同一 COMPOSE_CMD 解析
+    #    实际 container ID 后再 docker inspect，绝不得用 bare service name 直查
+    #    （生产容器名为 trading-<service>，bare name 在真实拓扑下解析不到 "No such object"）。
+    #    capture 与 verify_rollback_owner 必须共用同一 resolver，否则会 capture PASS /
+    #    verify FAIL 不对称。
     local services=("${PYTHON_SERVICES[@]}" frontend)
     for service in "${services[@]}"; do
-        image_id="$(docker inspect "${service}" --format '{{.Image}}' 2>/dev/null || true)"
+        image_id="$(_container_image_id_for_service "${service}" || true)"
         if [[ -z "${image_id}" && "${FIRST_LIVE_DEPLOY}" != "true" ]]; then
             missing+=("PRE_DEPLOY_IMAGE_ID:${service}")
         fi
@@ -1468,8 +1564,7 @@ resolve_pre_deploy_runtime_owner() {
         # 同时记录 compose 会解析的 **镜像引用**（repo:tag，如 market-dev-backend:<sha>）。
         # content ID 是 source of truth，但 compose 用 tag 寻址，rollback 必须能把
         # 该 tag 重新钉到捕获的 content ID（禁止 latest / candidate / 重建旧源码）。
-        local image_ref=""
-        image_ref="$(docker inspect "${service}" --format '{{.Config.Image}}' 2>/dev/null || true)"
+        image_ref="$(_container_image_ref_for_service "${service}" || true)"
         _write_manifest "PRE_DEPLOY_IMAGE_REF:${service}" "${image_ref}"
     done
 
@@ -1549,7 +1644,7 @@ verify_rollback_owner() {
         service="${service%%=*}"
         exp="${line#*=}"
         [[ -z "${exp}" ]] && continue
-        act="$(docker inspect "${service}" --format '{{.Image}}' 2>/dev/null || true)"
+        act="$(_container_image_id_for_service "${service}" || true)"
         if [[ "${act}" != "${exp}" ]]; then
             log "ROLLBACK_STATUS=FAILED: ${service} 容器运行时未恢复（expected=${exp} actual=${act}）"
             rc=1
@@ -1589,6 +1684,18 @@ _mark_containers_mutated() {
         MUTATION_STAGE="containers"
         log "  [mutation] 进入容器层 runtime mutation 区间（stage=containers）"
     fi
+}
+
+# [DRY-RUN ZERO-MUTATION CONTRACT] 部署临界区边界判定：
+#   - 真实部署：要求 AFTER_CLOSE_PICKUP_FENCED=true（worker 已被真实 drained）。
+#   - dry-run：要求 AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true（仅为模拟态，
+#       绝不得是真实 FENCED）。二者不可混用——dry-run 不得伪装成真实 fence。
+_backend_pickup_boundary_ready() {
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        [[ "${AFTER_CLOSE_PICKUP_FENCE_SIMULATED}" == "true" ]]
+        return
+    fi
+    [[ "${AFTER_CLOSE_PICKUP_FENCED}" == "true" ]]
 }
 
 deploy() {
@@ -1632,9 +1739,8 @@ deploy() {
     # 再次确认 AFTER_CLOSE_PICKUP_FENCED=true（容器已 EXITED 且 after_close running==0）。
     # queued/resume_queued 允许留队，不作为 blocker。
     if _backend_runtime_will_mutate; then
-        if [[ "${AFTER_CLOSE_PICKUP_FENCED}" != "true" ]]; then
+        _backend_pickup_boundary_ready || \
             fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 runtime mutation（fail-closed）"
-        fi
     fi
 
     FAILURE_STAGE="environment_images"
@@ -1734,9 +1840,8 @@ deploy() {
         # 显式 || return 1，保证门禁失败（存在活跃 after-close 强制任务）即 fail-closed 阻止重启，
         # 不依赖外层 set -e。
         FAILURE_STAGE="active_job_gate_pre_restart"
-        if [[ "${AFTER_CLOSE_PICKUP_FENCED}" != "true" ]]; then
+        _backend_pickup_boundary_ready || \
             fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝重启 worker-after-close（fail-closed）"
-        fi
         FAILURE_STAGE="restart"
         # [E2.1 P1-A §6] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
         _mark_containers_mutated
@@ -1753,9 +1858,8 @@ deploy() {
         # 故仍需 final guard 拦截 reconcile 前新接纳的活跃 after-close 任务。
         # 显式 || return 1，保证门禁失败即 fail-closed 阻止配置对账。
         FAILURE_STAGE="active_job_gate_pre_reconcile"
-        if [[ "${AFTER_CLOSE_PICKUP_FENCED}" != "true" ]]; then
+        _backend_pickup_boundary_ready || \
             fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 Compose 对账（fail-closed）"
-        fi
         FAILURE_STAGE="compose_reconcile"
         local _recon_filtered=()
         local _rs

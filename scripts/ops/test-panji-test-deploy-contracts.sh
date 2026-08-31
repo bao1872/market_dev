@@ -42,6 +42,16 @@ cat > "${MOCK_BIN}/docker" <<'EOF'
 #!/usr/bin/env bash
 WORKER_STATE="${PANJI_MOCK_WORKER_STATE:-/tmp/panji_worker_state}"
 if [[ "${1:-}" == "inspect" ]]; then
+  # 目标必须按参数扫描解析，不能取 $2：真实调用形式包含 flag 与 format，
+  # 例如 `docker inspect -f '{{.HostConfig.Memory}}' trading-backend`（$2 是 -f）。
+  # 规则：跳过 inspect 自身、以 - 开头的 flag、以及含 {{ 的 format 串，取最后一个剩余参数。
+  target=""
+  for _a in "$@"; do
+    [[ "${_a}" == "inspect" ]] && continue
+    [[ "${_a}" == -* ]] && continue
+    [[ "${_a}" == *'{{'* ]] && continue
+    target="${_a}"
+  done
   if printf '%s' "$*" | grep -q 'State.Status'; then
     # worker-after-close 容器状态探针（supervisor-drain fence 线性化点）
     if [[ -f "${WORKER_STATE}" ]]; then
@@ -59,10 +69,28 @@ if [[ "${1:-}" == "inspect" ]]; then
     printf '%s /var/lib/postgresql \n' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
     exit 0
   fi
-  # 其它 inspect（Config.Image / Image / OOMKilled / RestartCount / Memory ...）
-  # 返回非空占位（模拟原 mock 的 Live Mount 路径），使镜像 ID / owner 解析可拿到非空值。
-  printf '%s' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
-  exit 0
+  # [P1-A] 拓扑感知的 inspect：
+  #   - CID_*           → resolver 已解析出真实容器 ID，返回 image 占位（非空）。
+  #   - trading-*       → post-deploy 健康/限制复检按真实容器名 inspect，按字段返回语义值。
+  #   - bare 逻辑 service 名（backend / worker-after-close / frontend ...）
+  #                     → 真实拓扑中不存在（容器名为 trading-<svc>），
+  #                       必须失败以暴露 resolver 误用 bare name（P1-A 反向证明）。
+  if [[ "${target}" == CID_* ]]; then
+    printf 'sha256:image-%s\n' "${target}"
+    exit 0
+  fi
+  if [[ "${target}" == trading-* ]]; then
+    # 按查询字段返回语义值（不再统一返回路径占位——那会让 limits 检查形同虚设）。
+    if printf '%s' "$*" | grep -q 'OOMKilled'; then printf 'false\n'; exit 0; fi
+    if printf '%s' "$*" | grep -q 'RestartCount'; then printf '0\n'; exit 0; fi
+    if printf '%s' "$*" | grep -q 'HostConfig.Memory'; then printf '2147483648\n'; exit 0; fi
+    if printf '%s' "$*" | grep -q 'PidsLimit'; then printf '512\n'; exit 0; fi
+    if printf '%s' "$*" | grep -q 'NanoCpus'; then printf '1000000000\n'; exit 0; fi
+    printf '%s' "${PANJI_LIVE_ROOT:-/opt/panji-live}"
+    exit 0
+  fi
+  echo "Error: No such object: ${target}" >&2
+  exit 1
 fi
 # [E2.1-R] `docker ps --filter "name=<c>" --format '{{.Names}}'` 用于 Scheduler
 # 单实例校验（count 必须 == 1）。默认 docker mock 不输出任何容器会让该校验
@@ -119,6 +147,18 @@ fi
 if [[ "${1:-}" == "compose" ]]; then
   if [[ "${PANJI_MOCK_COMPOSE_FAIL:-0}" == "1" ]]; then
     exit 1
+  fi
+  # [P1-A] compose ps -q <service> → 真实容器 ID（建模 Compose 拓扑为 SSOT；
+  #   resolver 据此再 docker inspect 真实容器 ID，bare service name 不会解析到）。
+  if printf '%s' "$*" | grep -q 'ps -q'; then
+    svc=""
+    prev=""
+    for a in "$@"; do
+      if [[ "${prev}" == "-q" ]]; then svc="$a"; fi
+      prev="$a"
+    done
+    if [[ -n "${svc}" ]]; then printf 'CID_%s\n' "${svc}"; fi
+    exit 0
   fi
   if printf '%s' "$*" | grep -q 'worker-after-close'; then
     if printf '%s' "$*" | grep -q 'stop'; then
@@ -221,10 +261,22 @@ else
   ok "dirty remote worktree is rejected"
 fi
 
-if PANJI_MIN_MEM_MB=999999 run_deploy "${TARGET_SHA}" --dry-run >/dev/null 2>&1; then
-  bad "resource budget failure blocks before deployment"
+# [RESOURCE_GATE_ORDER_DEBT + DRY-RUN ZERO-MUTATION]
+# 内存 headroom 不再是"任何状态修改之前"的静态门槛，而是 fence 之后、首笔 mutation 之前的门槛；
+# 且 dry-run 默认不读取真实 MemAvailable（deferred）。因此本用例必须显式注入 mock seam，
+# 才能在干跑中真正驱动该门槛——否则断言会退化为"dry-run 恰好失败"的假绿。
+if PANJI_MIN_MEM_MB=999999 PANJI_MOCK_MEM_AVAILABLE_KB=3500000 \
+    run_deploy "${TARGET_SHA}" --dry-run >/dev/null 2>&1; then
+  bad "memory headroom failure blocks before first mutation (via mock seam)"
 else
-  ok "resource budget failure blocks before deployment"
+  ok "memory headroom failure blocks before first mutation (via mock seam)"
+fi
+
+# 反向：无 seam 时干跑必须 deferred（不读真实 MemAvailable、不用不可达门槛否决干跑）。
+if PANJI_MIN_MEM_MB=999999 run_deploy "${TARGET_SHA}" --dry-run >/dev/null 2>&1; then
+  ok "dry-run defers memory headroom when no mock seam (does not read real MemAvailable)"
+else
+  bad "dry-run defers memory headroom when no mock seam (does not read real MemAvailable)"
 fi
 
 # --- 首次 Live Mount 部署行为 ---
@@ -466,7 +518,7 @@ PANJI_MOCK_PSQL_ROWS="11111111-2222-3333-4444-555555555555 | after_close_orchest
 if [[ "${rc}" -eq 0 ]] \
     && grep -q 'DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE' "${Q_LOG}" \
     && grep -q 'queued_COUNT=1' "${Q_LOG}" \
-    && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${Q_LOG}"; then
+    && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${Q_LOG}"; then
     ok "queued state is visible but does NOT block deployment (fence proceeds)"
 else
     bad "queued state is visible but does NOT block deployment (fence proceeds)"
@@ -487,7 +539,7 @@ PANJI_MOCK_PSQL_ROWS="11111111-2222-3333-4444-555555555555 | after_close_orchest
 if [[ "${rc}" -eq 0 ]] \
     && grep -q 'DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE' "${RQ_LOG}" \
     && grep -q 'resume_queued_COUNT=1' "${RQ_LOG}" \
-    && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${RQ_LOG}"; then
+    && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${RQ_LOG}"; then
     ok "resume_queued state is visible but does NOT block deployment (fence proceeds)"
 else
     bad "resume_queued state is visible but does NOT block deployment (fence proceeds)"
@@ -529,12 +581,12 @@ queued:0
 resume_queued:0" \
     run_deploy "${TARGET_SHA}" --dry-run >"${P1C_A_LOG}" 2>&1 && rc=0 || rc=$?
 if [[ "${rc}" -eq 0 ]] \
-   && grep -q 'stop -t -1' "${P1C_A_LOG}" \
-   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${P1C_A_LOG}" \
-   && grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${P1C_A_LOG}"; then
-  ok "P1-C: running worker fenced via stop -t -1 and restored by owner"
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${P1C_A_LOG}" \
+   && ! grep -q 'stop -t -1' "${P1C_A_LOG}" \
+   && ! grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${P1C_A_LOG}"; then
+  ok "P1-C: dry-run simulates fence (zero container mutation); real fence preserved in source"
 else
-  bad "P1-C: running worker fenced via stop -t -1 and restored by owner"
+  bad "P1-C: dry-run simulates fence (zero container mutation); real fence preserved in source"
 fi
 
 # B. 进入部署时 worker 已 exited/missing → 本 deploy 不拥有恢复权，成功也不得擅自 up。
@@ -577,6 +629,17 @@ else
   ok "P1-C: no SIGKILL / docker kill in deploy script"
 fi
 
+# P1-C A': 真实（非 dry-run）fence 仍实际 stop + 恢复 worker（源码为 source-of-truth；
+#   dry-run 已改为模拟，故真实 mutation 只能从源码结构证明，避免脆弱的真实部署沙箱运行）。
+FENCE_SRC="$(sed -n '/^_fence_after_close_worker() {/,/^}/p' "${SERVER_SCRIPT}")"
+RESTORE_SRC="$(sed -n '/^_restore_after_close_pickup_if_owned() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${FENCE_SRC}" | grep -q 'stop -t -1 worker-after-close' \
+   && printf '%s' "${RESTORE_SRC}" | grep -q 'up -d --force-recreate worker-after-close'; then
+  ok "P1-C: real (non-dry-run) fence still stops & restores worker (source-of-truth)"
+else
+  bad "P1-C: real fence mutation commands missing in source"
+fi
+
 # E. 全部为 0 且 worker exited → 正常放行（沿用 first-live dry-run 成功路径 + 显式计数为 0）
 reset_worker_state exited
 PANJI_MOCK_NO_LIVE_MOUNT=1 \
@@ -587,7 +650,7 @@ PANJI_MOCK_PSQL_COUNTS="running:0
 queued:0
 resume_queued:0" \
     run_deploy "${TARGET_SHA}" --dry-run >"${CONFLICT_LOG}.zero" 2>&1 && rc=0 || rc=$?
-if [[ "${rc}" -eq 0 ]] && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CONFLICT_LOG}.zero"; then
+if [[ "${rc}" -eq 0 ]] && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CONFLICT_LOG}.zero"; then
     ok "all-zero counts with exited worker allow deployment (fenced)"
 else
     bad "all-zero counts with exited worker allow deployment (fenced)"
@@ -950,7 +1013,11 @@ fi
 # 这里逐个破坏 mandatory owner，证明校验与 manifest 对称。
 # ============================================================
 VERIFY_LIB="${TMP_ROOT}/verify-lib.sh"
-sed -n '/^verify_rollback_owner() {/,/^}/p' "${SERVER_SCRIPT}" > "${VERIFY_LIB}"
+# [P1-A] verify 已改为经 compose service → container ID → image ID 解析，
+# 因此行为级 lib 必须连同两个 resolver helper 一起抽取，否则只是 command-not-found 假红。
+sed -n '/^_compose_container_id_for_service() {/,/^}/p' "${SERVER_SCRIPT}" > "${VERIFY_LIB}"
+sed -n '/^_container_image_id_for_service() {/,/^}/p' "${SERVER_SCRIPT}" >> "${VERIFY_LIB}"
+sed -n '/^verify_rollback_owner() {/,/^}/p' "${SERVER_SCRIPT}" >> "${VERIFY_LIB}"
 PIN_LIB="${TMP_ROOT}/pin-lib.sh"
 sed -n '/^_pin_predeploy_image_refs() {/,/^}/p' "${SERVER_SCRIPT}" > "${PIN_LIB}"
 
@@ -961,11 +1028,27 @@ BEHAV_TAG_LOG="${TMP_ROOT}/behav-tags.log"
 cat > "${BEHAV_MOCK}/docker" <<'MOCKEOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "inspect" ]]; then
-  var="BEHAV_IMG_${2//-/_}"
+  # [P1-A] 目标是 compose ps -q 解析出的容器 ID（CID_<service>），不是 bare service 名。
+  target=""
+  for a in "$@"; do
+    [[ "${a}" == "inspect" ]] && continue
+    [[ "${a}" == -* ]] && continue
+    [[ "${a}" == *'{{'* ]] && continue
+    target="${a}"
+  done
+  svc="${target#CID_}"
+  var="BEHAV_IMG_${svc//-/_}"
   printf '%s\n' "${!var:-}"
   exit 0
 fi
 if [[ "${1:-}" == "compose" ]]; then
+  # `compose ps -q <svc>` → 容器 ID；其余（config 等）→ compose 定义内容。
+  prev=""; svc=""
+  for a in "$@"; do
+    [[ "${prev}" == "-q" ]] && svc="${a}"
+    prev="${a}"
+  done
+  if [[ -n "${svc}" ]]; then printf 'CID_%s\n' "${svc}"; exit 0; fi
   printf '%s\n' "${BEHAV_COMPOSE_OUT:-}"
   exit 0
 fi
@@ -1235,7 +1318,8 @@ PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
     run_deploy "${TARGET_SHA}" --dry-run >"${CASE_A_LOG}" 2>&1
 CASE_A_RC=$?
 if [[ "${CASE_A_RC}" -eq 0 ]] \
-   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_A_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CASE_A_LOG}" \
+   && ! grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_A_LOG}" \
    && grep -q 'deployment headroom: mem_available=4300' "${CASE_A_LOG}" \
    && grep -q '部署成功' "${CASE_A_LOG}"; then
     ok "CASE A: backend deploy proceeds after post-fence headroom PASS (fence before mutation)"
@@ -1243,7 +1327,7 @@ else
     bad "CASE A: backend deploy proceeds after post-fence headroom PASS (rc=${CASE_A_RC})"
     sed 's/^/    /' "${CASE_A_LOG}" >&2
 fi
-A_FENCE="$(grep -n 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
+A_FENCE="$(grep -n 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
 A_HEAD="$(grep -n 'deployment headroom: mem_available=4300' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
 A_SUCC="$(grep -n '部署成功' "${CASE_A_LOG}" | head -1 | cut -d: -f1)"
 if [[ -n "${A_FENCE}" && -n "${A_HEAD}" && -n "${A_SUCC}" \
@@ -1264,8 +1348,8 @@ PANJI_MOCK_MEM_AVAILABLE_KB=3891200 \
 if [[ "${CASE_B_RC}" -ne 0 ]] \
    && grep -q 'DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true' "${CASE_B_LOG}" \
    && ! grep -qE 'rsync|原地写入 RUNTIME_SHA|\[dry-run\] 将更新' "${CASE_B_LOG}" \
-   && grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_B_LOG}"; then
-    ok "CASE B: post-fence insufficient headroom → zero runtime mutation + worker restored"
+   && ! grep -qE 'stop -t -1|up .*force-recreate|AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_B_LOG}"; then
+    ok "CASE B: post-fence insufficient headroom → zero runtime mutation (dry-run restores nothing)"
 else
     bad "CASE B: post-fence insufficient headroom → zero runtime mutation + worker restored (rc=${CASE_B_RC})"
     sed 's/^/    /' "${CASE_B_LOG}" >&2
@@ -1283,9 +1367,9 @@ PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
     run_deploy "${TARGET_SHA}" --dry-run >"${CASE_D_LOG}" 2>&1
 CASE_D_RC=$?
 if [[ "${CASE_D_RC}" -eq 0 ]] \
-   && grep -q 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_D_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CASE_D_LOG}" \
    && ! grep -q 'DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true' "${CASE_D_LOG}"; then
-    ok "CASE D: queued jobs do not block deploy; fence still linearizes"
+    ok "CASE D: queued jobs do not block deploy; dry-run fence simulated"
 else
     bad "CASE D: queued jobs do not block deploy (rc=${CASE_D_RC})"
     sed 's/^/    /' "${CASE_D_LOG}" >&2
@@ -1324,17 +1408,17 @@ PANJI_MOCK_POST_DEPLOY_FAIL_FINAL=1 \
 PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
     bash "${SERVER_SCRIPT}" "${TARGET_SHA}" --dry-run >"${CASE_H_LOG}" 2>&1 || CASE_H_RC=$?
 if [[ "${CASE_H_RC}" -ne 0 ]] \
-   && grep -q 'AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_H_LOG}" \
+   && grep -q 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CASE_H_LOG}" \
    && grep -q '恢复代码与运行文件到 previous SHA' "${CASE_H_LOG}" \
    && grep -q 'AFTER_CLOSE_PICKUP_FENCED=false' "${CASE_H_LOG}"; then
-    ok "CASE H: final-health FAIL drives re-fence before rollback (rc!=0, rollback ran, state reset)"
+    ok "CASE H: final-health FAIL drives re-fence (simulated) before rollback (rc!=0, rollback ran, state reset)"
 else
-    bad "CASE H: final-health FAIL drives re-fence before rollback (rc=${CASE_H_RC})"
+    bad "CASE H: final-health FAIL drives re-fence (simulated) before rollback (rc=${CASE_H_RC})"
     sed 's/^/    /' "${CASE_H_LOG}" >&2
 fi
-# 顺序契约：第一次 restore（worker 回到 running）之后，第二次 fence 必须出现在回滚文件 mutation 之前
-H_RESTORE1="$(grep -n 'AFTER_CLOSE_PICKUP_RESTORED=true' "${CASE_H_LOG}" | head -1 | cut -d: -f1)"
-H_FENCE2="$(grep -n 'AFTER_CLOSE_PICKUP_FENCED=true' "${CASE_H_LOG}" | tail -1 | cut -d: -f1)"
+# 顺序契约：第一次 simulate fence 之后，第二次 simulate fence 必须出现在回滚文件 mutation 之前
+H_RESTORE1="$(grep -n 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CASE_H_LOG}" | head -1 | cut -d: -f1)"
+H_FENCE2="$(grep -n 'AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true' "${CASE_H_LOG}" | tail -1 | cut -d: -f1)"
 H_ROLLBACK="$(grep -n '恢复代码与运行文件到 previous SHA' "${CASE_H_LOG}" | head -1 | cut -d: -f1)"
 if [[ -n "${H_RESTORE1}" && -n "${H_FENCE2}" && -n "${H_ROLLBACK}" \
       && "${H_RESTORE1}" -lt "${H_FENCE2}" && "${H_FENCE2}" -lt "${H_ROLLBACK}" ]]; then
