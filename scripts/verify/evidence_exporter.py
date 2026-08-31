@@ -8,7 +8,8 @@
     manifest.json       — attempt 身份模型（target_sha/attempt_id/verify_database/
                           compose_project/evidence_dir/verify_db_url/compose_file/env_file）
     gates.json          — 各阶段门禁结果（preflight/migration/pg_tests/seed_twice/e2e）
-    pytest-report.xml   — pytest 原始报告（如存在）
+    evidence-coverage.json — required contract 的真实 nodeid 与七态结果
+    pytest-evidence.json — pytest plugin 原始执行报告（如存在）
     logs.txt            — 运行日志快照
     resources-<phase>.json — 各阶段创建的资源清单（容器/网络/库/目录）
     cleanup.json        — cleanup_runner 输出（由 cleanup_runner 写入）
@@ -20,12 +21,8 @@ from __future__ import annotations
 
 import argparse
 import json
-import logging
-import shutil
 import subprocess
 import sys
-
-logger = logging.getLogger("verify.evidence")
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +30,8 @@ from typing import Any
 GATES_JSON = "gates.json"
 MANIFEST_JSON = "manifest.json"
 SUMMARY_MD = "summary.md"
+COVERAGE_JSON = "evidence-coverage.json"
+PYTEST_EVIDENCE_JSON = "pytest-evidence.json"
 MAX_LOG_BYTES = 64 * 1024
 MAX_EVIDENCE_BYTES = 2 * 1024 * 1024
 
@@ -50,6 +49,8 @@ class EvidenceExporter:
         self.gates: list[dict[str, Any]] = []
         self.logs: list[str] = []
         self.resources: dict[str, list[str]] = {}
+        self.coverage: list[dict[str, Any]] = []
+        self.pytest_evidence: dict[str, Any] | None = None
 
     def record_gate(self, name: str, passed: bool, *, detail: str = "", extra: dict | None = None) -> None:
         self.gates.append({
@@ -65,6 +66,12 @@ class EvidenceExporter:
 
     def record_resource(self, phase: str, resource: str) -> None:
         self.resources.setdefault(phase, []).append(resource)
+
+    def record_coverage(
+        self, coverage: list[dict[str, Any]], *, pytest_evidence: dict[str, Any] | None
+    ) -> None:
+        self.coverage = coverage
+        self.pytest_evidence = pytest_evidence
 
     def export(self) -> Path:
         self.evidence_dir.mkdir(parents=True, exist_ok=True)
@@ -89,13 +96,14 @@ class EvidenceExporter:
                 json.dumps(items, indent=2, ensure_ascii=False)
             )
 
-        # pytest-report.xml（若存在则复制）
-        src_report = self.manifest.get("pytest_report_src")
-        if src_report:
-            try:
-                shutil.copy(src_report, self.evidence_dir / "pytest-report.xml")
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("复制 pytest-report.xml 失败（尽力而为）: %s", exc)
+        if self.coverage:
+            (self.evidence_dir / COVERAGE_JSON).write_text(
+                json.dumps(self.coverage, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+        if self.pytest_evidence is not None:
+            (self.evidence_dir / PYTEST_EVIDENCE_JSON).write_text(
+                json.dumps(self.pytest_evidence, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
 
         # summary.md
         self._write_summary()
@@ -122,6 +130,24 @@ class EvidenceExporter:
         for g in self.gates:
             mark = "PASS" if g["passed"] else "FAIL"
             lines.append(f"- [{mark}] {g['gate']}: {g['detail']}")
+        if self.coverage:
+            lines.append("")
+            lines.append("## Required contract evidence")
+            lines.append("")
+            status_counts: dict[str, int] = {}
+            for item in self.coverage:
+                status = str(item.get("status", "blocked"))
+                status_counts[status] = status_counts.get(status, 0) + 1
+                lines.append(
+                    f"- [{status}] {item.get('contract_id', 'unknown')}: "
+                    f"{len(item.get('nodeids', []))} nodeids; {item.get('reason', '')}"
+                )
+            lines.append("")
+            lines.append(
+                "coverage_status_counts: `"
+                + json.dumps(status_counts, ensure_ascii=False, sort_keys=True)
+                + "`"
+            )
         lines.append("")
         lines.append("## 创建资源")
         lines.append("")

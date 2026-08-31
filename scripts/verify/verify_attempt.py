@@ -46,6 +46,7 @@ finally 合同（失败也必须执行）：
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -60,6 +61,7 @@ sys.path.insert(0, str(_SCRIPT_DIR))
 
 from cleanup_runner import _verify_db_re, cleanup_attempt
 from evidence_exporter import EvidenceExporter
+from evidence_manifest import evaluate_contract_coverage, load_evidence_manifest
 from verification_plan import VerificationPlan, load_plan
 
 VERIFY_DB_RE = _verify_db_re()
@@ -69,6 +71,8 @@ COMPOSE_PROJECT = "panji-verify"
 VERIFY_CONTAINER = "panji-verify-python"
 VERIFY_EXEC = "/app/scripts/verify/verify_exec.py"  # Live Mount 内路径
 ATTEMPT_ENV_IN_CONTAINER = "/run/panji-verify/attempt.env"  # 只读 mount 进容器
+EVIDENCE_MANIFEST = _SCRIPT_DIR / "evidence_manifest.json"
+REPO_ROOT = _SCRIPT_DIR.parents[1]
 
 
 def _utcnow() -> str:
@@ -243,6 +247,7 @@ class VerifyAttempt:
         self.compose_project = compose_project
         self.verify_container = verify_container
         self.plan = plan
+        self.evidence_manifest = load_evidence_manifest(EVIDENCE_MANIFEST, repo_root=REPO_ROOT)
         self.attempt_id = _gen_attempt_id(target_sha)
         self.evidence_dir = Path(evidence_root) / self.attempt_id
         self.manifest: dict[str, Any] = {
@@ -317,6 +322,7 @@ class VerifyAttempt:
         执行 `upgrade head` 一次并断言 revision（Exploration 默认轻量 Migration 证据）。
         """
         self.exporter.log("migration_round_trip: 开始")
+        steps: tuple[tuple[str, str], ...]
         if self.plan.needs_migration_round_trip:
             steps = (("upgrade", "head"), ("downgrade", "-1"), ("upgrade", "head"), ("upgrade", "head"))
             detail = "upgrade/downgrade/upgrade round-trip succeeded"
@@ -412,130 +418,70 @@ class VerifyAttempt:
             self.exporter.log(f"assert_identity {label}:\n{diagnostic}")
 
     def run_self_contained_pg_tests(self) -> None:
-        """运行自包含基础 PG 测试（fresh process in panji-verify-python）。
-
-        基础 PG Gate 职责：atomic publication / projection lifecycle / 100-stock call counts。
-        closure 场景测试（PG-1~PG-8 runtime-blocker 收口）由 VERIFY-COVERAGE-01 注册进本 gate，
-        作为已授权 closure suite 的一部分（最小追加，不扩大为全量 -m postgres）。
-        Review Canonical Observation L1 persistence contract 由 3C 轮最小追加注册（显式文件，
-        不动态 discovery、不改为全量 pytest -m postgres）。
-        """
-        self.exporter.log("run_self_contained_pg_tests: 开始")
+        """Run manifest-selected PG contracts and prove which nodeids ran."""
+        contracts = self.evidence_manifest.contracts_for_gate(self.plan.name)
+        selectors = self.evidence_manifest.selectors_for_gate(self.plan.name)
+        report_path = f"/tmp/{self.attempt_id}-pytest-evidence.json"
+        self.exporter.log(
+            f"run_self_contained_pg_tests: {len(contracts)} contracts, "
+            f"{len(selectors)} explicit selectors"
+        )
         code, out, err = _run(
-            [*self.gate_base, "pytest", "-m", "postgres",
-             "tests/test_pg_atomic_publication.py",
-             "tests/test_pg_projection_lifecycle.py",
-             "tests/test_pg_100_stock_call_counts.py",
-             # [VERIFY-COVERAGE-01 / 2026-08-09] 注册已授权的 PG-1~PG-8 closure suite。
-             # 仅追加，不删除/不替换原 3 文件；不改为动态 discovery 或全量 -m postgres。
-             "tests/test_pg_review_runtime_blocker_closure.py",
-
-            # [TARGETED-PG / 2026-08-26] 盘后 crash-resume A-H closure：
-            # A crash-after-publishing -> same-run resume / B state_events failure ->
-            # truthful partial_success / C DSA projection failure cannot revoke
-            # stock_core / D same-slot incarnation fast recover / E different-slot
-            # cannot steal / F legacy hostname:pid compatibility / G atomic epoch
-            # fence / H reconcile date 2026-08-25 regression。仅注册此单文件，不动态
-            # discovery，不扩大为全量 -m postgres。
-            "tests/test_pg_after_close_crash_resume_closure.py",
-
-             # [3C / CHANGE-013] Review Canonical Observation L1 persistence contract:
-             # insert / read-back / idempotent update / date|scope|family isolation /
-             # diagnostics+readiness round-trip / legacy P/Q/U/C/V isolation /
-             # canonical new payload uses price.amount / normalized HHI JSONB round-trip /
-             # legacy top-level amount save rejected. 显式注册文件；不改 verification plan
-             # schema；不改 CLI；不动态 discovery；不扩大为全量 -m postgres。
-             "tests/test_review_observation_persistence_pg.py",
-
-             # [SLICE-01-CORRECTION-05 / 2026-08-25] History concurrent progress lost-update
-             # closure：LU-1 并发 executor+business、LU-2 反转方向、LU-3 高压 10 轮、LU-4
-             # checkpoint 重新读最新 metadata。证明两个独立 writer 经 SELECT ... FOR UPDATE
-             # 串行化，不丢更新。仅追加，不删除/替换已有文件；不动态 discovery；不扩大为
-             # 全量 -m postgres。
-             "tests/test_pg_history_progress_lost_update_closure.py",
-
-             # [REPROCESS-OWNER-CLOSURE-01 / 2026-08-25] 盘后 daily_ready restart 修复的
-             # 契约收口（P0-1 起点合同 / P0-2 mainchain_stage / P0-3 真正能抓缺陷的测试）：
-             #   Contract A producer/consumer 身份（child.job_name==after_close_orchestrator
-             #     且真实 worker selector 领取）、Contract B daily_ready 跳过 refreshing_daily
-             #     可达 computing_history/review、Contract C 正常 run 仍执行 refreshing_daily、
-             #     Contract D resume/lease_epoch/last_completed_step 语义不被 mainchain_stage 改坏。
-             #   仅追加，不删除/替换已有文件；不动态 discovery；不扩大为全量 -m postgres。
-             "tests/test_pg_after_close_restart_closure.py",
-
-             # [SLICE-01-CORRECTION / 2026-08-26] REVIEW-CURRENT-OWNER-01 修正：Review(T)
-             # 当前第一金字塔事实归 Core(T)（StockFeatureSnapshot 锁定 source_core_run_id），
-             # 不消费 History(T)。本文件断言 verify DB 身份（bz_stock_verify_<sha> 且 != bz_stock）
-             # 并证明 same-day 两 run 只读取 source_core_run_id；错误/缺失 run fail-closed 不
-             # fallback。仅追加，不删除/替换已有文件；不动态 discovery；不扩大为全量 -m postgres。
-             "tests/test_slice1_current_facts_lock.py",
-
-             # [CORRECTION-04-PG-GATE / 2026-08-26] 盘后 DSA compatibility contract 收口：
-             # PG-A required_compatibility create_batch_run lineage/universe、
-             # PG-B 完整生产持久化链（真实 codec artifact → project → persist → quality →
-             # publish_run(db,run_id) → commit → 新 session 读回 published），
-             # PG-C projection 失败时 Core succeeded / Review lineage 保持。
-             # 自包含 synthetic universe（calendar/instruments/bars/released version/artifact），
-             # 不读 bz_stock。仅追加，不删除/替换既有文件；不动态 discovery；
-             # 不扩大为全量 -m postgres。
-             "tests/test_pg_dsa_compat_after_close04.py",
-             # PHASE C1 — Review read-owner / API 合同契约：
-             # T1 _resolve_source_core_run_id fail-closed；T2 overview schema lineage；
-             # 多 run 假绿（同日 Core A/B + Review Y(A)/Z(B)，指针唯一覆盖，非 latest-Z）。
-             # 自包含 synthetic universe，写入验证库 bz_stock_verify_<SHA>，不读 bz_stock。
-             "tests/test_pg_review_read_owner_c1.py",
-
-             # PHASE C2 — Review HTTP Runtime + Client Contract Closure：
-             # 真实 app.main.app + ASGI HTTP client（httpx.ASGITransport），不直接调用
-             # endpoint function。路由注册（route table + OpenAPI）、auth 矩阵
-             # （401/403/200/admin bypass，只 override 身份来源 get_current_active_user，
-             #   require_capability 保持生产实现）、include_partial 权限、5 个用户
-             # endpoint 的真实 HTTP JSON 字段与 null/0/[] 语义、Review Y -> Core X
-             # lineage、404/422/500 错误 body 可被 frontend extractReviewError 解析。
-             # 自包含 synthetic universe，写入验证库 bz_stock_verify_<SHA>，不读 bz_stock。
-             # 仅追加本单文件；不动态 discovery，不扩大为全量 -m postgres。
-             "tests/test_pg_review_http_runtime_c2.py",
-
-             # [F1B-1 CORRECTION / 2026-08-30] Bars canonical provider boundary
-             # persistence canary：daily/15m/60m insert+read-back、daily ON CONFLICT
-             # update/idempotency、minute adj_factor 映射、invalid/empty 零写入、
-             # persistence exception rollback。自包含 synthetic instrument，显式校验
-             # bz_stock_verify_<SHA> 且 != bz_stock；仅追加本文件，不动态 discovery。
-             "tests/test_pg_bars_provider_persistence_f1b1.py"],
+            [
+                *self.gate_base,
+                "python",
+                "-m",
+                "pytest",
+                "-p",
+                "scripts.verify.pytest_evidence_plugin",
+                f"--panji-evidence-report={report_path}",
+                *selectors,
+            ],
             timeout=self.plan.timeouts["tests"],
         )
-        if code != 0:
-            diagnostic = _redact_output(out, err, str(self.attempt_env_file))
+        report = self._read_and_remove_pytest_evidence(report_path)
+        coverage = evaluate_contract_coverage(contracts, report)
+        self.exporter.record_coverage(coverage, pytest_evidence=report)
+        required_failures = [
+            item for item in coverage
+            if item["required"] and item["status"] != "passed"
+        ]
+        diagnostic = _redact_output(out, err, str(self.attempt_env_file))
+        if code != 0 or required_failures:
+            statuses = ", ".join(
+                f"{item['contract_id']}={item['status']}" for item in required_failures
+            ) or f"pytest_exit={code}"
+            detail = f"required evidence not closed: {statuses}"
             self.exporter.log(f"pg_tests failure output:\n{diagnostic}")
-            self.exporter.record_gate("pg_tests", False, detail=diagnostic[-2000:])
-            raise RuntimeError(f"自包含 PG 测试失败 (exit={code})")
-        # [R1.4a] 三个 mandatory PG 测试禁止 SKIP 假绿：failed/errors/skipped>0 或
-        # summary 无法解析 → fail-closed，绝不 record_gate(True)。
-        counts = _parse_pytest_summary(out)
-        if counts is None:
-            detail = "pg_tests 退出码 0 但无法解析 pytest summary（fail-closed，见 logs）"
-            self.exporter.record_gate("pg_tests", False, detail=detail)
-            raise RuntimeError(detail)
-        # [R1.4b-P0] 规则：passed > 0 且 skipped == 0 且 failed == 0 且 errors == 0
-        # 才允许 PASS。不要求 pytest 显式输出 "0 skipped / 0 failed"。
-        if counts["passed"] <= 0 or counts["failed"] > 0 or counts["errors"] > 0 or counts["skipped"] > 0:
-            detail = (
-                f"pg_tests mandatory tests 未全部真实 PASS（fail-closed）："
-                f"{counts['passed']} passed, {counts['skipped']} skipped, "
-                f"{counts['failed']} failed, {counts['errors']} error"
+            self.exporter.record_gate(
+                "pg_tests", False, detail=detail, extra={"coverage": coverage}
             )
-            self.exporter.log(
-                f"run_self_contained_pg_tests: 拒绝假绿\n"
-                f"{_extract_pytest_summary(out)}\n{detail}"
-            )
-            self.exporter.record_gate("pg_tests", False, detail=detail)
             raise RuntimeError(detail)
+
         self.manifest["status"] = "pg_tests_ok"
-        # 全部真实 passed 才 PASS（保留 bounded 真实 summary，SKIP 已在上方 fail-closed）。
         summary = _extract_pytest_summary(out)
-        detail = summary if summary else f"{counts['passed']} passed, 0 skipped, 0 failed"
-        self.exporter.log(f"run_self_contained_pg_tests: 通过，pytest summary:\n{detail}")
-        self.exporter.record_gate("pg_tests", True, detail=detail)
+        detail = summary or f"{len(contracts)} required contracts passed"
+        self.exporter.log(f"run_self_contained_pg_tests: passed\n{detail}")
+        self.exporter.record_gate(
+            "pg_tests", True, detail=detail, extra={"coverage": coverage}
+        )
+
+    def _read_and_remove_pytest_evidence(self, report_path: str) -> dict[str, Any] | None:
+        """Read an attempt-owned container report and remove that exact temp file."""
+        code, out, _err = _run(
+            ["docker", "exec", self.verify_container, "cat", report_path], timeout=30
+        )
+        _run(
+            ["docker", "exec", self.verify_container, "rm", "-f", "--", report_path],
+            timeout=30,
+        )
+        if code != 0:
+            return None
+        try:
+            payload = json.loads(out)
+        except json.JSONDecodeError:
+            return None
+        return payload if isinstance(payload, dict) else None
 
     def run_synthetic_seed_twice(self) -> None:
         """运行 100% synthetic Seed 两次，验证幂等（第二次不冲突）。"""

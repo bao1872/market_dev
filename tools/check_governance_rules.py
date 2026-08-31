@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 try:
-    import yaml
+    import yaml  # type: ignore[import-untyped]
 except ImportError:  # pragma: no cover - Compose 门禁在缺少 PyYAML 时跳过并告警
     yaml = None
 
@@ -63,20 +63,21 @@ REQUIRED_PLANS = {
 
 STAGE_MARKERS = (
     "PROJECT_STAGE = EXPLORATION",
-    "FAST_ITERATION / EXPLORATION MODE",
-    "Hardening Trigger",
+    "Level 1 - Normal Exploration",
+    "Level 2 - Contract-Sensitive",
+    "Level 3 - Operational / Destructive",
 )
 CORRECTNESS_MARKERS = (
-    "业务逻辑正确性必须确认",
-    "代码逻辑必须审查",
-    "单元测试必须完成",
-    "API → Frontend 技术绑定必须验证",
-    "禁止结果污染",
+    "One semantic, one owner",
+    "Evidence must match the claim",
+    "Tests consume production contracts",
+    "Classify failures before changing production",
+    "No false-green",
 )
 ROUTING_MARKERS = (
-    "Value Before Governance",
-    "Correctness Before Visibility",
-    "Hypothesis Slice 完成即 STOP",
+    "Risk determines process strength",
+    "When more than one level applies, the highest level wins",
+    "STOP is a scope boundary",
 )
 
 TOOL_NAMES = ("TRAE CN", "TRAE Work", "CodeBuddy", "Codex", "Cursor", "Copilot")
@@ -145,7 +146,7 @@ def _check_agents(root: Path, errors: list[str]) -> None:
         if f"rules/{name}" not in text:
             errors.append(f"AGENTS.md missing active rule reference: rules/{name}")
 
-    if "项目阶段或治理模式的变化不得自动触发 PRD 重写" not in text:
+    if "Implementation never rewrites confirmed product behavior" not in text:
         errors.append("AGENTS.md missing governance-vs-PRD separation rule")
 
 
@@ -176,9 +177,13 @@ def _check_rule_semantics(root: Path, errors: list[str]) -> None:
     required_markers = {
         "00-core-governance.md": ("Hypothesis Slice", "P0", "Two-Strike Architecture Rule"),
         "20-market-data-computation.md": ("future leakage", "Canonical", "daily Core 不依赖"),
-        "25-engineering-implementation.md": ("MUST", "Two-Strike Architecture Rule", "不拥有"),
+        "25-engineering-implementation.md": (
+            "Existing owner first", "One semantic, one machine owner", "Production path reuse",
+        ),
         "30-security-data-safety.md": ("Exploration 不降低安全门槛", "bz_stock"),
-        "40-testing-quality.md": ("Fast Iteration 不是少测试", "Modified-Scope Unit", "Full PURE_UNIT"),
+        "40-testing-quality.md": (
+            "Production Contract Reuse", "STALE_TEST", "Gate Truthfulness Contract",
+        ),
         "60-runtime-frontend-acceptance.md": ("API", "frontend", "用户负责"),
         "70-hardening-release.md": ("不是 Exploration 默认流程", "Full RTM", "Release Decision"),
         "80-deployment-migration.md": (
@@ -248,6 +253,95 @@ def _check_verification_plans(root: Path, errors: list[str]) -> None:
     for token in FORBIDDEN_EXECUTABLE_TOKENS:
         if token in runner:
             errors.append(f"verification runner contains forbidden destructive command: {token}")
+
+
+def _check_evidence_manifest(root: Path, errors: list[str]) -> None:
+    path = root / "scripts/verify/evidence_manifest.json"
+    if not path.is_file():
+        errors.append("missing evidence manifest: scripts/verify/evidence_manifest.json")
+        return
+    try:
+        data = json.loads(_read(path))
+    except json.JSONDecodeError:
+        errors.append("invalid JSON: scripts/verify/evidence_manifest.json")
+        return
+    if set(data) != {"schema_version", "contracts"} or data.get("schema_version") != 1:
+        errors.append("evidence manifest must use closed schema_version=1")
+        return
+    contracts = data.get("contracts")
+    if not isinstance(contracts, list) or not contracts:
+        errors.append("evidence manifest must contain contracts")
+        return
+
+    required_keys = {
+        "contract_id", "governance_level", "semantic_owner", "gate", "required",
+        "test_selectors", "claim",
+    }
+    ids: set[str] = set()
+    required_by_gate = {"targeted-pg": 0, "full-closure": 0}
+    for contract in contracts:
+        if not isinstance(contract, dict) or set(contract) != required_keys:
+            errors.append("evidence contract has unsupported or missing keys")
+            continue
+        contract_id = contract.get("contract_id")
+        if not isinstance(contract_id, str) or not contract_id:
+            errors.append("evidence contract_id must be non-empty")
+            continue
+        if contract_id in ids:
+            errors.append(f"duplicate evidence contract_id: {contract_id}")
+        ids.add(contract_id)
+        if contract.get("governance_level") not in {1, 2, 3}:
+            errors.append(f"invalid evidence governance_level: {contract_id}")
+        if not isinstance(contract.get("semantic_owner"), str) or not contract["semantic_owner"]:
+            errors.append(f"missing semantic owner: {contract_id}")
+        if not isinstance(contract.get("claim"), str) or not contract["claim"]:
+            errors.append(f"missing evidence claim: {contract_id}")
+        gates = contract.get("gate")
+        if not isinstance(gates, list) or not gates or any(
+            gate not in {"targeted-pg", "migration-roundtrip", "full-closure"} for gate in gates
+        ):
+            errors.append(f"invalid evidence gate: {contract_id}")
+            gates = []
+        if contract.get("required") is True:
+            for gate in required_by_gate:
+                if gate in gates:
+                    required_by_gate[gate] += 1
+        selectors = contract.get("test_selectors")
+        if not isinstance(selectors, list) or not selectors:
+            errors.append(f"evidence contract has no selectors: {contract_id}")
+            continue
+        for selector in selectors:
+            if not isinstance(selector, str) or any(token in selector for token in "*?[]{}"):
+                errors.append(f"evidence selector must be explicit: {contract_id}")
+                continue
+            file_part = selector.split("::", 1)[0]
+            if not file_part.startswith("tests/") or not file_part.endswith(".py"):
+                errors.append(f"evidence selector must target backend tests: {selector}")
+            elif not (root / "backend" / file_part).is_file():
+                errors.append(f"registered evidence selector is missing: {selector}")
+    for gate, count in required_by_gate.items():
+        if count == 0:
+            errors.append(f"verification gate has no required evidence: {gate}")
+
+    runner = _read(root / "scripts/verify/verify_attempt.py")
+    for marker in (
+        "load_evidence_manifest", "selectors_for_gate", "evaluate_contract_coverage",
+        "pytest_evidence_plugin", "record_coverage",
+    ):
+        if marker not in runner:
+            errors.append(f"verification attempt missing evidence contract: {marker}")
+    pg_method = runner.partition("def run_self_contained_pg_tests")[2].partition(
+        "def run_synthetic_seed_twice"
+    )[0]
+    if re.search(r"['\"]tests/test[^'\"]+\.py", pg_method):
+        errors.append("verify_attempt.py must not hardcode test selectors")
+    plugin = _read(root / "scripts/verify/pytest_evidence_plugin.py")
+    for marker in (
+        "pytest_collection_finish", "pytest_deselected", "pytest_runtest_logreport",
+        "pytest_sessionfinish",
+    ):
+        if marker not in plugin:
+            errors.append(f"pytest evidence plugin missing hook: {marker}")
 
 
 def _check_ci_is_manual(root: Path, errors: list[str]) -> None:
@@ -358,12 +452,11 @@ PROHIBITION_MARKERS = (
 
 # 15,16: explicit authorization gates (governance/PRD/Maps/Runbooks + plan-scoped doc).
 AUTH_GATES = {
-    "只有用户在当前任务中明确要求调整治理体系": "governance change authorization",
-    "只有用户在当前任务中明确要求新增、修改或校准 PRD": "PRD change authorization",
-    "只有用户在当前任务中明确要求更新 Maps": "Maps change authorization",
-    "只有用户在当前任务中明确要求更新 Runbooks": "Runbooks change authorization",
-    "计划授权不得隐式覆盖 PRD、Maps、Runbooks 或治理文档": "plan-scoped document gate",
-    "每次远程验证或调试尝试结束后，无论成功、失败、取消或超时": "per-attempt verification cleanup",
+    "only with explicit current-task governance authorization": "governance change authorization",
+    "PRD:** modify only when the user explicitly starts or authorizes a PRD task": "PRD change authorization",
+    "Maps:** may be updated with a code task when verified implementation": "verified Map fact channel",
+    "Runbooks:** may be updated when commands or operating steps have been exercised": "verified Runbook fact channel",
+    "Factual Map/Runbook synchronization does not authorize deployment or data access": "document safety boundary",
 }
 
 # 17: verification cleanup fail-closed + single-entry + no forbidden exec.
@@ -510,6 +603,7 @@ def check(root: Path) -> list[str]:
     _check_rule_semantics(root, errors)
     _check_tool_neutrality(root, errors)
     _check_verification_plans(root, errors)
+    _check_evidence_manifest(root, errors)
     _check_ci_is_manual(root, errors)
     _check_always_on_safety(root, errors)
     return errors
@@ -523,7 +617,7 @@ def main() -> int:
         for error in errors:
             print(f"- {error}")
         return 1
-    print("Governance check PASS: stage-aware Exploration/Hardening contract is consistent.")
+    print("Governance check PASS: failure-mode and risk-level contracts are consistent.")
     return 0
 
 

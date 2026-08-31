@@ -33,6 +33,8 @@ def governance_repo(tmp_path: Path) -> Path:
         "scripts/verify/run_remote_verification.sh",
         "scripts/verify/verification_plan.py",
         "scripts/verify/verify_attempt.py",
+        "scripts/verify/evidence_manifest.json",
+        "scripts/verify/pytest_evidence_plugin.py",
         "scripts/verify/cleanup_runner.py",
         "scripts/verify/prepare_verify_environment.py",
         "scripts/verify/plans/targeted-pg.json",
@@ -45,6 +47,11 @@ def governance_repo(tmp_path: Path) -> Path:
         ".github/workflows/ci.yml",
     ):
         _copy(ROOT / relative, target / relative)
+    manifest = json.loads((ROOT / "scripts/verify/evidence_manifest.json").read_text())
+    for contract in manifest["contracts"]:
+        for selector in contract["test_selectors"]:
+            relative = Path("backend") / selector.split("::", 1)[0]
+            _copy(ROOT / relative, target / relative)
     # Protected manifest references these unchanged repository files. Minimal placeholders
     # make the fixture structurally equivalent without testing their implementation here.
     for relative in ("docker-compose.verify.yml",):
@@ -67,7 +74,7 @@ def test_missing_exploration_stage_is_rejected(governance_repo: Path) -> None:
 
 def test_correctness_gate_cannot_be_removed(governance_repo: Path) -> None:
     p = governance_repo / "AGENTS.md"
-    p.write_text(p.read_text().replace("单元测试必须完成", "单元测试可选"))
+    p.write_text(p.read_text().replace("Evidence must match the claim", "Evidence is optional"))
     errors = check(governance_repo)
     assert any("missing correctness gate" in error for error in errors)
 
@@ -100,15 +107,57 @@ def test_engineering_implementation_rule_routing(governance_repo: Path) -> None:
     # 篡改 AGENTS.md 移除 25 引用，必须被 _check_agents 检出。
     agents = governance_repo / "AGENTS.md"
     agents.write_text(agents.read_text().replace(
-        "rules/25-engineering-implementation.md`：通用工程实现规范", "rules/99-missing.md`：占位"))
+        "rules/25-engineering-implementation.md", "rules/99-missing.md"))
     errors = check(governance_repo)
     assert any("missing active rule reference: rules/25-engineering-implementation.md" in e for e in errors)
 
-    # 篡改 25 内容移除 Two-Strike Architecture Rule marker，必须被语义闸门检出。
+    # 篡改 25 内容移除 production-path owner marker，必须被语义闸门检出。
     rule = governance_repo / "rules/25-engineering-implementation.md"
-    rule.write_text(rule.read_text().replace("Two-Strike Architecture Rule", "One-Strike Rule"))
+    rule.write_text(rule.read_text().replace("Production path reuse", "Copied test path"))
     errors = check(governance_repo)
     assert any("25-engineering-implementation.md missing contract marker" in e for e in errors)
+
+
+def test_evidence_manifest_duplicate_contract_is_rejected(governance_repo: Path) -> None:
+    path = governance_repo / "scripts/verify/evidence_manifest.json"
+    data = json.loads(path.read_text())
+    data["contracts"].append(dict(data["contracts"][0]))
+    path.write_text(json.dumps(data))
+    assert any("duplicate evidence contract_id" in e for e in check(governance_repo))
+
+
+def test_evidence_manifest_missing_selector_is_rejected(governance_repo: Path) -> None:
+    path = governance_repo / "scripts/verify/evidence_manifest.json"
+    data = json.loads(path.read_text())
+    data["contracts"][0]["test_selectors"] = ["tests/test_missing_contract.py"]
+    path.write_text(json.dumps(data))
+    assert any("registered evidence selector is missing" in e for e in check(governance_repo))
+
+
+def test_evidence_manifest_glob_is_rejected(governance_repo: Path) -> None:
+    path = governance_repo / "scripts/verify/evidence_manifest.json"
+    data = json.loads(path.read_text())
+    data["contracts"][0]["test_selectors"] = ["tests/test_pg_*.py"]
+    path.write_text(json.dumps(data))
+    assert any("selector must be explicit" in e for e in check(governance_repo))
+
+
+def test_evidence_manifest_gate_requires_evidence(governance_repo: Path) -> None:
+    path = governance_repo / "scripts/verify/evidence_manifest.json"
+    data = json.loads(path.read_text())
+    for contract in data["contracts"]:
+        contract["gate"] = ["targeted-pg"]
+    path.write_text(json.dumps(data))
+    assert any("full-closure" in e and "no required evidence" in e for e in check(governance_repo))
+
+
+def test_verify_attempt_cannot_restore_hardcoded_selector(governance_repo: Path) -> None:
+    path = governance_repo / "scripts/verify/verify_attempt.py"
+    path.write_text(path.read_text().replace(
+        '"pytest",\n                "-p",',
+        '"pytest",\n                "tests/test_pg_legacy.py",\n                "-p",',
+    ))
+    assert any("must not hardcode test selectors" in e for e in check(governance_repo))
 
 
 def test_protected_manifest_still_guards_verification(governance_repo: Path) -> None:

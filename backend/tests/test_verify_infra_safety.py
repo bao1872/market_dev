@@ -28,6 +28,12 @@ if str(_VERIFY_DIR) not in sys.path:
 
 import cleanup_runner as cr  # noqa: E402
 from evidence_exporter import EvidenceExporter  # noqa: E402
+from evidence_manifest import (  # noqa: E402
+    EvidenceContract,
+    EvidenceManifest,
+    evaluate_contract_coverage,
+    load_evidence_manifest,
+)
 from prepare_verify_environment import prepare  # noqa: E402
 from verification_plan import load_plan  # noqa: E402
 
@@ -129,6 +135,14 @@ def test_evidence_exporter_writes_manifest_and_gates() -> None:
         manifest = {"attempt_id": "verify-abc", "target_sha": "26544de", "status": "created"}
         exporter = EvidenceExporter(ev_dir, manifest)
         exporter.record_gate("preflight", True, detail="ok")
+        exporter.record_coverage([
+            {
+                "contract_id": "contract",
+                "status": "passed",
+                "nodeids": ["tests/test_contract.py::test_contract"],
+                "reason": "all collected tests passed",
+            }
+        ], pytest_evidence={"schema_version": 1})
         exporter.log("hello")
         exporter.record_resource("db", f"bz_stock_verify_{FULL_SHA}")
         out = exporter.export()
@@ -136,6 +150,8 @@ def test_evidence_exporter_writes_manifest_and_gates() -> None:
         assert (out / "gates.json").exists()
         assert (out / "summary.md").exists()
         assert (out / "logs.txt").exists()
+        assert (out / "evidence-coverage.json").exists()
+        assert (out / "pytest-evidence.json").exists()
         assert (out / "resources-db.json").exists()
         gates = json.loads((out / "gates.json").read_text())
         assert gates[0]["gate"] == "preflight" and gates[0]["passed"] is True
@@ -461,15 +477,19 @@ class _FakeExporter:
     def __init__(self):
         self.gates = []
         self.logs = []
+        self.coverage = []
 
     def log(self, msg):
         self.logs.append(msg)
 
-    def record_gate(self, name, ok, detail=None):
+    def record_gate(self, name, ok, detail=None, extra=None):
         self.gates.append((name, ok, detail))
 
+    def record_coverage(self, coverage, *, pytest_evidence):
+        self.coverage = coverage
 
-def _make_pg_tests_attempt(monkeypatch, code, out):
+
+def _make_pg_tests_attempt(monkeypatch, code, out, test_status):
     """构造一个仅含 run_self_contained_pg_tests 所需属性的 VerifyAttempt 测试替身。
 
     [R1.4b-P0] gate-level targeted test：不建完整 VerifyAttempt（避免依赖真实
@@ -484,8 +504,28 @@ def _make_pg_tests_attempt(monkeypatch, code, out):
     att.gate_base = ["docker", "exec", "panji-verify-python", "python3", "verify_exec.py"]
     att.attempt_env_file = "/tmp/fake-attempt.env"
     att.manifest = {"status": "running"}
+    att.attempt_id = "verify-fake"
+    att.verify_container = "panji-verify-python"
+    contract = EvidenceContract(
+        contract_id="contract",
+        governance_level=2,
+        semantic_owner="app.owner",
+        gates=("targeted-pg",),
+        required=True,
+        test_selectors=("tests/test_contract.py",),
+        claim="claim",
+    )
+    att.evidence_manifest = EvidenceManifest(schema_version=1, contracts=(contract,))
+    nodeid = "tests/test_contract.py::test_contract"
+    att._read_and_remove_pytest_evidence = lambda _path: {
+        "schema_version": 1,
+        "collected": [nodeid],
+        "deselected": [],
+        "tests": {nodeid: {"status": test_status}},
+    }
 
     class _Plan:
+        name = "targeted-pg"
         timeouts = {"tests": 1800}
 
     att.plan = _Plan()
@@ -494,6 +534,7 @@ def _make_pg_tests_attempt(monkeypatch, code, out):
         return code, out, ""
 
     monkeypatch.setattr(va, "_run", _fake_run)
+    monkeypatch.setattr(va, "_redact_output", lambda stdout, stderr, _path: stdout + stderr)
     return att, exporter
 
 
@@ -505,7 +546,7 @@ def test_pg_gate_all_passed_records_true(monkeypatch) -> None:
         "tests/test_pg_100_stock_call_counts.py::test_100 PASSED\n"
         "===== 3 passed in 42.5s =====\n"
     )
-    att, exporter = _make_pg_tests_attempt(monkeypatch, 0, out)
+    att, exporter = _make_pg_tests_attempt(monkeypatch, 0, out, "passed")
     att.run_self_contained_pg_tests()
     assert exporter.gates[-1][0] == "pg_tests"
     assert exporter.gates[-1][1] is True  # 全真实 passed → PASS
@@ -518,7 +559,7 @@ def test_pg_gate_with_skip_records_false_and_raises(monkeypatch) -> None:
         "tests/test_pg_100_stock_call_counts.py::test_100 SKIPPED\n"
         "===== 2 passed, 1 skipped in 1.5s =====\n"
     )
-    att, exporter = _make_pg_tests_attempt(monkeypatch, 0, out)
+    att, exporter = _make_pg_tests_attempt(monkeypatch, 0, out, "skipped")
     try:
         att.run_self_contained_pg_tests()
         raise AssertionError("应 fail-closed 抛 RuntimeError")
@@ -529,41 +570,102 @@ def test_pg_gate_with_skip_records_false_and_raises(monkeypatch) -> None:
     assert "skipped" in exporter.gates[-1][2]
 
 
-def test_pg_contract_list_includes_closure_suite() -> None:
-    """[VERIFY-COVERAGE-01] 静态断言 targeted-pg 的 pg_contract curated 列表包含已授权 closure suite。
-
-    仅做 AST 静态检查：解析 verify_attempt.py，定位 run_self_contained_pg_tests 方法内
-    `pytest -m postgres` 的参数列表，确认 test_pg_review_runtime_blocker_closure.py 存在。
-    不执行真实 pytest、不连库。防止 closure suite 被意外移出 curated 列表（false-green 回归）。
-    """
-    import verify_attempt as va
-
-    src = Path(va.__file__).read_text(encoding="utf-8")
-    tree = ast.parse(src)
-
-    closure_file = "tests/test_pg_review_runtime_blocker_closure.py"
-    found = False
-    for node in ast.walk(tree):
-        if isinstance(node, ast.FunctionDef) and node.name == "run_self_contained_pg_tests":
-            # 收集该方法内所有字符串常量，检查 closure 文件是否被 pytest 参数引用
-            strings = [
-                n.value
-                for n in ast.walk(node)
-                if isinstance(n, ast.Constant) and isinstance(n.value, str)
-            ]
-            found = closure_file in strings
-            break
-
-    assert found, (
-        f"pg_contract curated 列表缺少已授权 closure suite: {closure_file}。"
-        "VERIFY-COVERAGE-01 要求该文件必须被 targeted-pg 的 pg_tests gate 注册。"
+def test_evidence_manifest_registers_required_contracts() -> None:
+    root = Path(__file__).resolve().parents[2]
+    manifest = load_evidence_manifest(
+        _VERIFY_DIR / "evidence_manifest.json", repo_root=root
     )
-    # 同时确认原 3 个基线文件仍保留（最小追加，不替换）
-    baseline = {
-        "tests/test_pg_atomic_publication.py",
-        "tests/test_pg_projection_lifecycle.py",
-        "tests/test_pg_100_stock_call_counts.py",
+    contracts = manifest.contracts_for_gate("targeted-pg")
+    ids = {contract.contract_id for contract in contracts}
+    assert {
+        "atomic_publication",
+        "review_current_fact_lineage",
+        "dsa_compatibility_publication",
+        "after_close_crash_resume",
+        "bars_provider_persistence",
+    } <= ids
+    assert all(contract.required for contract in contracts)
+    assert len(manifest.selectors_for_gate("targeted-pg")) == 13
+
+
+def _contract_for_evaluation(tmp_path: Path):
+    test_file = tmp_path / "backend/tests/test_contract.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_contract(): pass\n")
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "contracts": [{
+            "contract_id": "contract",
+            "governance_level": 2,
+            "semantic_owner": "app.owner",
+            "gate": ["targeted-pg"],
+            "required": True,
+            "test_selectors": ["tests/test_contract.py"],
+            "claim": "claim",
+        }],
+    }))
+    return load_evidence_manifest(path, repo_root=tmp_path).contracts[0]
+
+
+@pytest.mark.parametrize(
+    ("test_status", "expected"),
+    [("passed", "passed"), ("failed", "failed"), ("skipped", "skipped"), ("not_run", "not_run")],
+)
+def test_evidence_coverage_preserves_test_status(
+    tmp_path: Path, test_status: str, expected: str
+) -> None:
+    contract = _contract_for_evaluation(tmp_path)
+    nodeid = "tests/test_contract.py::test_contract"
+    report = {
+        "schema_version": 1,
+        "collected": [nodeid],
+        "deselected": [],
+        "tests": {nodeid: {"status": test_status}},
     }
-    src_all = src
-    for b in baseline:
-        assert b in src_all, f"pg_contract 不应删除基线文件: {b}"
+    assert evaluate_contract_coverage((contract,), report)[0]["status"] == expected
+
+
+def test_evidence_coverage_rejects_zero_collection(tmp_path: Path) -> None:
+    contract = _contract_for_evaluation(tmp_path)
+    report = {"schema_version": 1, "collected": [], "deselected": [], "tests": {}}
+    result = evaluate_contract_coverage((contract,), report)[0]
+    assert result["status"] == "not_registered"
+
+
+def test_evidence_coverage_rejects_required_deselection(tmp_path: Path) -> None:
+    contract = _contract_for_evaluation(tmp_path)
+    nodeid = "tests/test_contract.py::test_contract"
+    report = {
+        "schema_version": 1,
+        "collected": [],
+        "deselected": [nodeid],
+        "tests": {},
+    }
+    assert evaluate_contract_coverage((contract,), report)[0]["status"] == "deselected"
+
+
+def test_evidence_coverage_blocks_missing_report(tmp_path: Path) -> None:
+    contract = _contract_for_evaluation(tmp_path)
+    assert evaluate_contract_coverage((contract,), None)[0]["status"] == "blocked"
+
+
+def test_evidence_manifest_rejects_unknown_gate(tmp_path: Path) -> None:
+    test_file = tmp_path / "backend/tests/test_contract.py"
+    test_file.parent.mkdir(parents=True)
+    test_file.write_text("def test_contract(): pass\n")
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps({
+        "schema_version": 1,
+        "contracts": [{
+            "contract_id": "contract",
+            "governance_level": 2,
+            "semantic_owner": "app.owner",
+            "gate": ["unknown"],
+            "required": True,
+            "test_selectors": ["tests/test_contract.py"],
+            "claim": "claim",
+        }],
+    }))
+    with pytest.raises(ValueError, match="invalid gate registration"):
+        load_evidence_manifest(path, repo_root=tmp_path)

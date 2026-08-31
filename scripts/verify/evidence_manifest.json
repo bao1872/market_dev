@@ -1,0 +1,110 @@
+{
+  "schema_version": 1,
+  "contracts": [
+    {
+      "contract_id": "atomic_publication",
+      "governance_level": 2,
+      "semantic_owner": "app.repositories.publication_repository",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_atomic_publication.py"],
+      "claim": "Atomic publication and pointer persistence use real PostgreSQL semantics."
+    },
+    {
+      "contract_id": "projection_lifecycle",
+      "governance_level": 2,
+      "semantic_owner": "app.services.strategy_batch_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_projection_lifecycle.py"],
+      "claim": "Projection lifecycle state and persistence remain internally consistent."
+    },
+    {
+      "contract_id": "stock_call_count_boundary",
+      "governance_level": 2,
+      "semantic_owner": "app.services.strategy_batch_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_100_stock_call_counts.py"],
+      "claim": "Batch provider and computation call counts remain bounded for a representative universe."
+    },
+    {
+      "contract_id": "review_runtime_blocker_closure",
+      "governance_level": 2,
+      "semantic_owner": "app.services.product_readiness_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_review_runtime_blocker_closure.py"],
+      "claim": "Review runtime blocker states close truthfully against PostgreSQL."
+    },
+    {
+      "contract_id": "after_close_crash_resume",
+      "governance_level": 2,
+      "semantic_owner": "app.services.after_close_orchestrator",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_pg_after_close_crash_resume_closure.py",
+        "tests/test_pg_after_close_restart_closure.py"
+      ],
+      "claim": "AfterClose crash, restart, fencing, checkpoint, and resume semantics do not false-green or duplicate downstream work."
+    },
+    {
+      "contract_id": "review_observation_persistence",
+      "governance_level": 2,
+      "semantic_owner": "app.repositories.market_review_repository",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_review_observation_persistence_pg.py"],
+      "claim": "Canonical Review observations round-trip and remain idempotent in PostgreSQL."
+    },
+    {
+      "contract_id": "history_progress_concurrency",
+      "governance_level": 2,
+      "semantic_owner": "app.repositories.first_pyramid_history_repository",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_history_progress_lost_update_closure.py"],
+      "claim": "Concurrent history progress writers preserve updates and checkpoint visibility."
+    },
+    {
+      "contract_id": "review_current_fact_lineage",
+      "governance_level": 2,
+      "semantic_owner": "app.services.market_review_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_slice1_current_facts_lock.py",
+        "tests/test_pg_review_read_owner_c1.py"
+      ],
+      "claim": "Review current facts bind to the selected same-day Core run and fail closed without legacy fallback."
+    },
+    {
+      "contract_id": "dsa_compatibility_publication",
+      "governance_level": 2,
+      "semantic_owner": "app.services.dsa_projection_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_dsa_compat_after_close04.py"],
+      "claim": "DSA compatibility projection and publication remain an explicit, independently persisted consumer."
+    },
+    {
+      "contract_id": "review_http_runtime",
+      "governance_level": 2,
+      "semantic_owner": "app.api.v1.endpoints.review",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_review_http_runtime_c2.py"],
+      "claim": "Review HTTP routing, authorization, lineage, errors, and client-facing fields use the production app contract."
+    },
+    {
+      "contract_id": "bars_provider_persistence",
+      "governance_level": 2,
+      "semantic_owner": "app.services.bars_scheduler_service.BarsSchedulerService",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_bars_provider_persistence_f1b1.py"],
+      "claim": "Serial and bounded-spawn Bars scheduler paths persist equivalent daily and minute facts idempotently."
+    }
+  ]
+}
