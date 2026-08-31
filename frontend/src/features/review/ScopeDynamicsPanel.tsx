@@ -151,7 +151,7 @@ export default function ScopeDynamicsPanel({ dynamics }: { dynamics: ScopeDynami
     [dynamics?.accelerationDates, dynamics?.acceleration],
   )
   if (!dynamics) {
-    return <div className={styles.panelUnavailable}>本期暂无收益动态数据</div>
+    return <div className={styles.panelUnavailable}>本期暂无等权涨跌动态数据</div>
   }
   const current = currentPhaseFact(dynamics)
   return (

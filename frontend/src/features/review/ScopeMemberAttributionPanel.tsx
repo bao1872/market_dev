@@ -69,10 +69,16 @@ const BREADTH_COLUMNS: ColumnConfig[] = [
   { value: '涨跌幅', field: 'return_1d', format: (v) => formatPercentNullable(v as number | null, 2) },
 ]
 
-/** Concentration 列：concentration_weight + hhi_contribution */
-const CONCENTRATION_COLUMNS: ColumnConfig[] = [
-  { value: '权重', field: 'concentration_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
-  { value: '集中度贡献', field: 'hhi_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+/** Concentration 列（Price 子组）：绝对涨跌幅权重 + HHI 贡献 */
+const PRICE_CONCENTRATION_COLUMNS: ColumnConfig[] = [
+  { value: '绝对涨跌幅权重', field: 'concentration_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: 'HHI 贡献', field: 'hhi_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
+]
+
+/** Concentration 列（Amount 子组）：成交额权重 + HHI 贡献 */
+const AMOUNT_CONCENTRATION_COLUMNS: ColumnConfig[] = [
+  { value: '成交额权重', field: 'concentration_weight', format: (v) => formatNumberNullable(v as number | null, 4) },
+  { value: 'HHI 贡献', field: 'hhi_contribution', format: (v) => formatNumberNullable(v as number | null, 4) },
 ]
 
 /** Leadership 列：aligned_contribution */
@@ -89,8 +95,8 @@ const GROUP_LABELS: Readonly<Record<string, string>> = {
   Decline: '下跌成员',
   Unchanged: '平盘成员',
   Unavailable: '数据不可用',
-  Price: '价格侧',
-  Amount: '成交额侧',
+  Price: '涨跌幅集中度',
+  Amount: '成交额集中度',
   Retained: '留存成员',
   Entrants: '新进入成员',
   Exits: '退出成员',
@@ -103,8 +109,8 @@ function metaLabel(key: string): string {
     sum_tilt_contribution: '成交加权差贡献合计',
     canonical_aw_return: '成交额加权涨跌幅基准',
     canonical_ew_return: '等权涨跌幅基准',
-    price_universe: '价格有效样本数',
-    aw_universe: '成交额有效样本数',
+    price_universe: '涨跌幅有效样本数',
+    aw_universe: '成交额加权有效样本数',
     sum_hhi: 'HHI 贡献合计',
     raw_hhi: '原始 HHI',
     normalized_hhi: '标准化 HHI',
@@ -246,32 +252,32 @@ function renderConcentration(sub: ScopeAttributionParsed['concentration'], direc
     <>
       {sub.price && (
         <>
-          <GroupTable members={sub.price.members} groupLabel="Price" columns={CONCENTRATION_COLUMNS} directory={directory} />
+          <GroupTable members={sub.price.members} groupLabel="Price" columns={PRICE_CONCENTRATION_COLUMNS} directory={directory} />
           <MetaRow>
             {sub.price.sumHhi !== null && sub.price.sumHhi !== undefined && (
-              <span>价格侧 {metaLabel('sum_hhi')} {formatNumberNullable(sub.price.sumHhi, 4)}</span>
+              <span>涨跌幅 {metaLabel('sum_hhi')} {formatNumberNullable(sub.price.sumHhi, 4)}</span>
             )}
             {sub.price.canonicalRawHhi !== null && sub.price.canonicalRawHhi !== undefined && (
-              <span>价格侧 {metaLabel('raw_hhi')} {formatNumberNullable(sub.price.canonicalRawHhi, 4)}</span>
+              <span>涨跌幅 {metaLabel('raw_hhi')} {formatNumberNullable(sub.price.canonicalRawHhi, 4)}</span>
             )}
             {sub.price.canonicalNormalizedHhi !== null && sub.price.canonicalNormalizedHhi !== undefined && (
-              <span>价格侧 {metaLabel('normalized_hhi')} {formatNumberNullable(sub.price.canonicalNormalizedHhi, 4)}</span>
+              <span>涨跌幅 {metaLabel('normalized_hhi')} {formatNumberNullable(sub.price.canonicalNormalizedHhi, 4)}</span>
             )}
           </MetaRow>
         </>
       )}
       {sub.amount && (
         <>
-          <GroupTable members={sub.amount.members} groupLabel="Amount" columns={CONCENTRATION_COLUMNS} directory={directory} />
+          <GroupTable members={sub.amount.members} groupLabel="Amount" columns={AMOUNT_CONCENTRATION_COLUMNS} directory={directory} />
           <MetaRow>
             {sub.amount.sumHhi !== null && sub.amount.sumHhi !== undefined && (
-              <span>成交额侧 {metaLabel('sum_hhi')} {formatNumberNullable(sub.amount.sumHhi, 4)}</span>
+              <span>成交额 {metaLabel('sum_hhi')} {formatNumberNullable(sub.amount.sumHhi, 4)}</span>
             )}
             {sub.amount.canonicalRawHhi !== null && sub.amount.canonicalRawHhi !== undefined && (
-              <span>成交额侧 {metaLabel('raw_hhi')} {formatNumberNullable(sub.amount.canonicalRawHhi, 4)}</span>
+              <span>成交额 {metaLabel('raw_hhi')} {formatNumberNullable(sub.amount.canonicalRawHhi, 4)}</span>
             )}
             {sub.amount.canonicalNormalizedHhi !== null && sub.amount.canonicalNormalizedHhi !== undefined && (
-              <span>成交额侧 {metaLabel('normalized_hhi')} {formatNumberNullable(sub.amount.canonicalNormalizedHhi, 4)}</span>
+              <span>成交额 {metaLabel('normalized_hhi')} {formatNumberNullable(sub.amount.canonicalNormalizedHhi, 4)}</span>
             )}
           </MetaRow>
         </>

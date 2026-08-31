@@ -85,10 +85,10 @@ function TechnicalCell({ obs }: { obs: ReviewScopeListItem['observationSummary']
   // P1-E：普通表格使用用户可理解的中文简称；完整解释见列头 ReviewTerm tooltip。
   // 不改变任何 canonical 数据与算法，仅展示标签中文化。
   const parts = [
-    hhi === null || hhi === undefined ? null : { label: '集中度', value: hhi.toFixed(3) },
-    top5 === NULL_DISPLAY ? null : { label: '头部贡献', value: top5 },
-    gap === null || gap === undefined ? null : { label: '主导-中位差', value: gap.toFixed(2) },
-    leader === null || leader === undefined ? null : { label: '主导成员', value: leader },
+    hhi === null || hhi === undefined ? null : { label: '强度集中度', value: hhi.toFixed(3) },
+    top5 === NULL_DISPLAY ? null : { label: '前5强度占比', value: top5 },
+    gap === null || gap === undefined ? null : { label: '最高-中位强度差', value: gap.toFixed(2) },
+    leader === null || leader === undefined ? null : { label: '技术强度最高成员', value: leader },
   ].filter((p): p is { label: string; value: string } => p !== null)
   if (parts.length === 0) return <span className={styles.neutral}>{NULL_DISPLAY}</span>
   return (

@@ -68,7 +68,7 @@ function EventRow({ cell, denominator }: { cell: LeveledStructureEventCell; deno
 function BreakTurnSection({ vm }: { vm: StructureBreakTurnVM }) {
   return (
     <div className={styles.structSection}>
-      <div className={styles.structSectionTitle}>结构破位 / 转折</div>
+      <div className={styles.structSectionTitle}>结构突破与转折</div>
       {vm.contractInvalid ? (
         <div className={styles.structContractInvalid}>结构事件合同异常（status/denominator 不可用或非法）</div>
       ) : vm.availability === 'unavailable' ? (
@@ -222,7 +222,7 @@ function DistCell({ label, value }: { label: string; value: number | null }) {
 function EvolutionSection({ vm }: { vm: StructureEvolutionPositionVM }) {
   return (
     <div className={styles.structSection}>
-      <div className={styles.structSectionTitle}>结构演化 / 位置</div>
+      <div className={styles.structSectionTitle}>结构演化与位置</div>
 
       {/* events (independent fact) */}
       <div className={styles.structSubBlock}>

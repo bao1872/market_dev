@@ -34,7 +34,7 @@ function TrendStateSection({ vm }: { vm: TrendStateVM }) {
   const dir = vm.direction
   return (
     <div className={styles.trendSection}>
-      <div className={styles.trendSectionTitle}>趋势状态</div>
+      <div className={styles.trendSectionTitle}>成员趋势方向与强度</div>
       {vm.denominatorZero || !dir ? (
         <div className={styles.trendUnavailable}>无有效趋势状态成员</div>
       ) : (
@@ -47,7 +47,7 @@ function TrendStateSection({ vm }: { vm: TrendStateVM }) {
       )}
       <div className={styles.trendStateRow}>
         <Analytic termKey="trendStrength" label="趋势强度" value={vm.trendStrength} />
-        <Analytic termKey="dsaVwapDev" label="VWAP 偏离" value={vm.dsaVwapDevPct} tone={vm.dsaVwapDevTone} />
+        <Analytic termKey="dsaVwapDev" label="趋势段 VWAP 偏离" value={vm.dsaVwapDevPct} tone={vm.dsaVwapDevTone} />
       </div>
     </div>
   )
@@ -91,9 +91,9 @@ function TrendProgressSection({ vm }: { vm: TrendProgressVM }) {
         <Analytic termKey="segmentBars" label="趋势段长度" value={vm.segmentBars} />
         <Analytic termKey="segmentChange" label="趋势段涨跌幅" value={vm.segmentChangePct} tone={vm.segmentChangeTone} />
         <Analytic termKey="segmentSlope" label="趋势段斜率" value={vm.segmentSlope} tone={vm.segmentSlopeTone} />
-        <Analytic termKey="vwapRetTotal" label="趋势段 VWAP 累计收益" value={vm.vwapRetTotal} tone={vm.vwapRetTotalTone} />
-        <Analytic termKey="volumeRatio" label="成交量比" value={vm.volumeRatio} />
-        <Analytic termKey="amountRatio" label="成交额比" value={vm.amountRatio} />
+        <Analytic termKey="vwapRetTotal" label="VWAP 累计收益" value={vm.vwapRetTotal} tone={vm.vwapRetTotalTone} />
+        <Analytic termKey="segmentVolumeMeanRatio" label="趋势段均量比" value={vm.volumeRatio} />
+        <Analytic termKey="segmentAmountMeanRatio" label="趋势段均额比" value={vm.amountRatio} />
       </div>
     </div>
   )
@@ -107,8 +107,8 @@ function TrendVolumeSection({ vm }: { vm: TrendVolumeConfirmationVM }) {
     <div className={styles.trendSection}>
       <div className={styles.trendSectionTitle}>趋势量能确认</div>
       <div className={styles.trendVolumeRatioRow}>
-        <Analytic termKey="volumeRatio" label="成交量比" value={vm.volumeRatio} />
-        <Analytic termKey="amountRatio" label="成交额比" value={vm.amountRatio} />
+        <Analytic termKey="segmentVolumeMeanRatio" label="趋势段均量比" value={vm.volumeRatio} />
+        <Analytic termKey="segmentAmountMeanRatio" label="趋势段均额比" value={vm.amountRatio} />
       </div>
       <div className={styles.trendMvrBlock}>
         <div className={styles.trendMvrTitle}>动量与量能关系</div>

@@ -113,7 +113,7 @@ const ScopeMomentumObservation: FC<Props> = ({ vm }) => {
         <div className={styles.mvNote}>无量纲宽度比率，非百分比（不 ×100）</div>
       </div>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>释放量比</div>
+        <div className={styles.mvSectionTitle}>释放量能比</div>
         <CurrentOnlyBlock title="" dist={vm.releaseVolumeRatio} unit="multiple" />
         <div className={styles.mvNote}>无量纲倍数（×），无方向配色</div>
       </div>

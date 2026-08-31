@@ -80,8 +80,8 @@ export const REVIEW_TERMS = {
     help: '最近发生的技术事件数量与时间衰减后的密度',
   },
   technical: {
-    label: '技术事件结构',
-    help: '技术事件的集中度、头部贡献、主导成员与中位成员差距等事实汇总',
+    label: '技术强度结构',
+    help: '技术强度的集中度（强度集中度）、前5强度占比、技术强度最高成员与中位成员差距等事实汇总',
   },
   amountWeightedReturn: {
     label: '成交额加权涨跌幅',
@@ -96,8 +96,8 @@ export const REVIEW_TERMS = {
     help: '当前板块有效成员的成交额合计',
   },
   priceConcentration: {
-    label: '价格侧集中度',
-    help: '衡量价格侧贡献是否集中在少数成员上',
+    label: '涨跌幅集中度',
+    help: '衡量成员当日涨跌幅绝对变化的分布是否集中在少数成员上（权重来自 abs(return_1d) / Σabs(return_1d)）',
   },
   amountConcentration: {
     label: '成交额集中度',
@@ -124,12 +124,12 @@ export const REVIEW_TERMS = {
     help: '根据板块等权涨跌分位及其分位动能、动能偏离状态，由后端计算得到的当前阶段',
   },
   upperOccupancy: {
-    label: '高分位占比',
-    help: '分析窗口内处于高分位区域的占比，直接展示后端计算结果',
+    label: '近20日高分位占比',
+    help: '固定 20 日窗口内处于高分位区域的占比，直接展示后端计算结果',
   },
   lowerOccupancy: {
-    label: '低分位占比',
-    help: '分析窗口内处于低分位区域的占比，直接展示后端计算结果',
+    label: '近20日低分位占比',
+    help: '固定 20 日窗口内处于低分位区域的占比，直接展示后端计算结果',
   },
   returnCapital: {
     label: '涨跌与成交',
@@ -140,8 +140,8 @@ export const REVIEW_TERMS = {
     help: '衡量板块内成员在价格或成交额侧的分布集中程度',
   },
   priceHhi: {
-    label: '价格侧集中度',
-    help: '衡量价格侧贡献是否集中在少数成员上',
+    label: '涨跌幅集中度',
+    help: '衡量成员当日涨跌幅绝对变化的分布是否集中在少数成员上（权重来自 abs(return_1d) / Σabs(return_1d)）',
   },
   amountHhi: {
     label: '成交额集中度',
@@ -228,8 +228,8 @@ export const REVIEW_TERMS = {
     help: '衡量当前趋势方向的强弱程度。数值越高表示趋势方向越明确、持续性越强',
   },
   dsaVwapDev: {
-    label: 'VWAP 偏离',
-    help: 'DSA（动态结构分析）相对 VWAP 均价的偏离百分比。正值表示价格位于均价上方，负值表示下方',
+    label: '趋势段 VWAP 偏离',
+    help: '当前趋势连续段相对 VWAP 均价的偏离百分比。正值表示价格位于均价上方，负值表示下方',
   },
   segmentBars: {
     label: '趋势段长度',
@@ -244,7 +244,7 @@ export const REVIEW_TERMS = {
     help: '趋势连续段的价格变化速率，反映趋势推进的陡缓',
   },
   vwapRetTotal: {
-    label: '趋势段 VWAP 累计收益',
+    label: 'VWAP 累计收益',
     help: '自趋势段开始以来相对 VWAP 均价的累计收益',
   },
   volumeRatio: {
@@ -274,6 +274,27 @@ export const REVIEW_TERMS = {
   percentile: {
     label: '历史分位',
     help: '指标值在其历史分布中所处的百分位置（0–100），用于判断当前处于常态还是极端区间',
+  },
+  // ---- 展示层专用拆分 term（与量能异源指标区分，避免同名异义；canonical field 不变） ----
+  segmentVolumeMeanRatio: {
+    label: '趋势段均量比',
+    help: '当前趋势连续段的平均成交量与上一已完成趋势段的平均成交量之比，反映趋势段量能是否放大',
+  },
+  segmentAmountMeanRatio: {
+    label: '趋势段均额比',
+    help: '当前趋势连续段的平均成交额与上一已完成趋势段的平均成交额之比，反映趋势段资金是否放大',
+  },
+  volumePercentile: {
+    label: '成交量历史分位',
+    help: '当前成交量在其自身历史分布中的百分位置（0–100），用于判断当前成交处于常态还是极端区间',
+  },
+  volumeZScore: {
+    label: '成交量 Z 分数',
+    help: '成交量相对其历史分布的标准化偏离程度（标准差倍数），用于判断当前成交处于常态还是极端',
+  },
+  releaseVolumeRatio: {
+    label: '释放量能比',
+    help: '压缩释放时段的量能倍数（×），反映压缩突破时的放量程度，无方向配色',
   },
 } as const
 
@@ -307,14 +328,14 @@ export const SORT_LABELS: Readonly<Record<string, string>> = {
   coverage_desc: '成员数据覆盖率 ↓',
   freshness_density_desc: '事件衰减密度 ↓',
   freshness_today_desc: '今日技术事件数 ↓',
-  technical_hhi_desc: '技术事件集中度 ↓',
-  leader_median_gap_desc: '主导-中位差 ↓',
+  technical_hhi_desc: '技术强度集中度 ↓',
+  leader_median_gap_desc: '最高-中位强度差 ↓',
 }
 
 /** 详情 Tab canonical value → 中文 label */
 export const DETAIL_TAB_LABELS: Readonly<Record<string, string>> = {
   current: '当日事实',
-  dynamics: '收益动态',
+  dynamics: '等权涨跌动态',
   internal: '横截面结构',
   leadership: '主导成员更替',
   attribution: '成员贡献',

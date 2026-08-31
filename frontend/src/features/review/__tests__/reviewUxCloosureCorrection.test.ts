@@ -99,10 +99,10 @@ test('source: 普通 UI 不显示 backend path（observation.structure.current_s
 
 test('source: 表格 Technical cell 使用中文简称，不再使用 cryptic 单字母', () => {
   const src = readSource('ScopeExplorerTable.tsx')
-  assert.ok(/label: '集中度'/.test(src), '缺少 集中度 中文简称')
-  assert.ok(/label: '头部贡献'/.test(src), '缺少 头部贡献 中文简称')
-  assert.ok(/label: '主导-中位差'/.test(src), '缺少 主导-中位差 中文简称')
-  assert.ok(/label: '主导成员'/.test(src), '缺少 主导成员 中文简称')
+  assert.ok(/label: '强度集中度'/.test(src), '缺少 强度集中度 中文简称')
+  assert.ok(/label: '前5强度占比'/.test(src), '缺少 前5强度占比 中文简称')
+  assert.ok(/label: '最高-中位强度差'/.test(src), '缺少 最高-中位强度差 中文简称')
+  assert.ok(/label: '技术强度最高成员'/.test(src), '缺少 技术强度最高成员 中文简称')
   // 不得再出现 cryptic 前缀
   assert.ok(!/HHI \$/.test(src), '仍存在 HHI 单字母')
   assert.ok(!/Top5 \$/.test(src), '仍存在 Top5 单字母')
@@ -122,7 +122,7 @@ test('source: P0-1 普通 UI 不显示 historical_dynamics（改为中文 unavai
   // 旧的可视 unavailable 文案已移除（不再把 backend canonical 名称作为普通用户文本）
   assert.ok(!/该层当前不可用（无 historical_dynamics）/.test(dyn), '旧 historical_dynamics 可视文案仍存在')
   // 主视觉已改为中文
-  assert.ok(/本期暂无收益动态数据/.test(dyn), '缺少中文 unavailable 文案')
+  assert.ok(/本期暂无等权涨跌动态数据/.test(dyn), '缺少中文 unavailable 文案')
   // canonical 技术 identity 仅允许出现在注释/tooltip，不应作为主视觉文本
 })
 

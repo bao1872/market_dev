@@ -159,7 +159,7 @@ test('UX5. SORT_LABELS 覆盖全部 canonical 排序值且为中文', () => {
 
 test('UX6. DETAIL_TAB_LABELS 精确映射六个 tab', () => {
   assert.equal(DETAIL_TAB_LABELS.current, '当日事实')
-  assert.equal(DETAIL_TAB_LABELS.dynamics, '收益动态')
+  assert.equal(DETAIL_TAB_LABELS.dynamics, '等权涨跌动态')
   assert.equal(DETAIL_TAB_LABELS.internal, '横截面结构')
   assert.equal(DETAIL_TAB_LABELS.leadership, '主导成员更替')
   assert.equal(DETAIL_TAB_LABELS.attribution, '成员贡献')
