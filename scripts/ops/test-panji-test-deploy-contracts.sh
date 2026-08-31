@@ -862,6 +862,14 @@ resume_queued:0" \
     cat > "${COMPOSE_AB_MOCK}/docker" <<'MOCKEOF'
 #!/usr/bin/env bash
 if [[ "${1:-}" == "compose" ]]; then
+  # [P1-A] `compose ps -q <svc>` 是容器解析链的一环，必须返回容器 ID；
+  # 只有 compose 定义查询（config）才用 HEAD 充当 A/B 可判别内容。
+  prev=""; svc=""
+  for a in "$@"; do
+    [[ "${prev}" == "-q" ]] && svc="${a}"
+    prev="${a}"
+  done
+  if [[ -n "${svc}" ]]; then printf 'CID_%s\n' "${svc}"; exit 0; fi
   git rev-parse HEAD 2>/dev/null || echo "no-head"
   exit 0
 fi
