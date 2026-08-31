@@ -56,6 +56,33 @@ scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]
   -> health / ready / version / mount / scheduler-singleton verification
 ```
 
+### 部署门禁顺序（`panji-deploy.sh` 内部）
+
+```text
+静态资源预算（阈值健全性 + 磁盘；无 MemAvailable）
+  -> rollback owner 捕获（只读）
+  -> 活跃盘后任务门禁 + supervisor-drain fence（真实部署 stop worker-after-close；dry-run 只模拟）
+  -> 部署内存 headroom（MemAvailable >= PANJI_MIN_MEM_MB，fail-closed）
+  -> 首笔 runtime mutation（checkout / sync / build / restart / reconcile）
+  -> owned-aware restore worker-after-close
+  -> health / SHA / Mount 核验 -> 部署后资源复检 -> 写成功状态
+```
+
+`--dry-run` 只模拟 fence（只读探测容器状态与活跃任务计数），不 `stop` / `up` /
+`--force-recreate` 任何容器；无测试 seam 时内存 headroom 显示 `deferred`。
+
+### rollback owner 的容器解析拓扑
+
+Compose **逻辑服务名**（`backend` / `worker-after-close` / `frontend`）与**实际容器名**
+（`trading-<service>`）不同，因此 `docker inspect <service>` 在真实拓扑下必然
+`No such object`。pre-deploy 捕获与 rollback 后核验**共用同一解析链**：
+
+```text
+docker compose ps -q <service>  -> 容器 ID  -> docker inspect <容器 ID> --format '{{.Image}}'
+```
+
+不得硬编码 `trading-${service}` 前缀（容器命名由 Compose project 决定，Compose 是 SSOT）。
+
 ## 远程验证框架
 
 当前仓库的正式本地控制入口为 `scripts/ops/panji-verify`；旧
@@ -172,6 +199,8 @@ strategy、calendar、monitor、strategy-batch、outbox、delivery、after-close
 部署成功后应在状态文件 / Map 记录以下结构化字段（`key=value`），便于 grep 与预算收紧对账：
 
 - `post_deploy_oom_killed=<true|false>`：任一关键容器 OOMKilled 为 true 即部署失败；
+- `mem_available_mb=<value>`：部署后主机可用内存，**observation-only**（不是失败门槛，
+  也不是"稳态必须空闲 `PANJI_MIN_MEM_MB`"的指标；该阈值只用于 fence 之后的部署期 headroom）；
 - `post_deploy_restart_count=<int>`：异常重启计数；
 - `stats_mem_usage_mb_<service>=<value>`：各服务 `docker stats --no-stream` 高水位；
 - `mem_limit_effective=<true|false>`：`docker inspect` 校验 `Memory`/`PidsLimit`/`NanoCpus` 已生效；

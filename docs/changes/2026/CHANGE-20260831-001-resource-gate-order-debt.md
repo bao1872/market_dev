@@ -63,7 +63,7 @@ fence worker-after-close → worker 退出并释放 ~942MB anon → 再检查部
 
 ## 回归门禁
 
-- P1_A_ROLLBACK_OWNER = CLOSED
+- P1_A_ROLLBACK_OWNER = CLOSED（**已更正为过早收口**，见文末第二轮审计 P1_A）
 - P1_B_PENDING_QUEUE_VISIBILITY = CLOSED
 - P1_C_SUPERVISOR_DRAIN = CLOSED
 
@@ -104,3 +104,72 @@ fence worker-after-close → worker 退出并释放 ~942MB anon → 再检查部
 - FIX F（行为级，隔离 `check_deployment_memory_headroom`）：真实部署 + seam 变量 → 拒绝通过；
   dry-run + seam → 仍可使用 mock 值。
 - 保留原有 CASE A-G/I 与 P1-A/B/C 回归门禁。
+
+## 第二轮独立审计：3 个 P1 收口（同一 E3 blocker，非新 phase）
+
+> 状态：`implemented_unconfirmed`。本轮**未连接远程**、**未部署**、**未执行远程 dry-run**，
+> 仅本地源码 + 测试 + 治理文档。上一轮标记的 `P1_A_ROLLBACK_OWNER = CLOSED` 属**过早收口**，
+> 本节予以更正。
+
+### P1_A — ROLLBACK_OWNER_SERVICE_NAME_DEFECT（假绿修正）
+
+pre-deploy 捕获与 rollback 后核验都用 `docker inspect "${service}"`（bare Compose 逻辑服务名）。
+真实拓扑中容器名是 `trading-<service>`，该调用必然 `No such object` → image ID 为空 →
+在非 first-live 部署中 rollback owner 缺失/核验失效。此前契约测试的 docker mock 对任意
+inspect 目标都返回非空占位，因此**掩盖**了该缺陷（false-green）。
+
+修复：新增两个 helper，capture 与 verify **共用同一解析链**，不硬编码容器名前缀
+（Compose 是容器命名 SSOT）：
+
+```
+_compose_container_id_for_service  : compose ps -q <service> -> 容器 ID
+_container_image_id_for_service    : docker inspect <容器 ID> --format '{{.Image}}'
+_container_image_ref_for_service   : docker inspect <容器 ID> --format '{{.Config.Image}}'
+```
+
+### P1_B — DRY_RUN_PRODUCTION_MUTATION（P1，dry-run 修改了生产容器）
+
+`--dry-run` 在建立部署临界区时执行了真实 `compose stop -t -1 worker-after-close`
+（失败路径再 `up --force-recreate`），违反 dry-run 零 mutation 合同。
+
+修复：dry-run 下 fence 变为**模拟态**——只做只读探测（容器状态 + 活跃盘后任务计数），
+置 `AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true`，**不**置真实 `AFTER_CLOSE_PICKUP_FENCED`；
+restore 在 dry-run 下不 `up`；内存 headroom 在 dry-run 且无测试 seam 时 **deferred**
+（不读真实 `MemAvailable`，避免用不可达门槛否决纯计划）。三处临界区门禁统一改用
+`_backend_pickup_boundary_ready`（真实部署要求真实 FENCED，dry-run 接受 SIMULATED），
+避免"某处判 FENCED、某处判模拟"的分叉。
+
+### P1_C — 治理未与源码对齐（本轮按已批准架构对齐治理，不回退源码）
+
+对齐结果（无新增数值阈值，`PANJI_MIN_MEM_MB` 维持 4096 且不下调）：
+
+- `rules/80-deployment-migration.md` 新增 §11.1（资源门禁顺序：静态预算无 `MemAvailable`；
+  headroom 位于 fence 之后、首笔 mutation 之前；部署后主机内存 observation-only；
+  禁止把 4096 解释为宿主机稳态空闲要求）与 §11.2（dry-run 零 mutation，含禁止真实 fence）。
+- `docs/runbooks/development-deployment.md`：Dry Run 段落补充"只模拟 fence / headroom deferred /
+  只允许出现模拟态字段"；新增「部署资源门禁顺序」；DS-104 复检中主机内存由**门禁**改为
+  **observation-only**（磁盘与容器级 OOMKilled / RestartCount / limits 生效性仍 fail-closed）。
+- `docs/maps/80-system-runtime.md`：新增部署门禁顺序调用图与 rollback owner 容器解析拓扑。
+
+**诚实说明**：审计输入中"现行规则要求在任何状态修改前 `MemAvailable >= 4096`"这一表述，
+在 authoritative `rules/80-deployment-migration.md`（`rules/80-deployment-data-safety.md`
+仅为兼容别名 stub）中**并不存在**——该文件此前完全没有内存条款。真实冲突只有一处：
+runbook DS-104 把**部署后**主机内存写成失败门槛，而源码已改为 observation-only。
+本轮只修正这一真实冲突并补齐缺失条款，未虚构"前置状态阈值"规则。
+
+### 验证（本地，无远程）
+
+- `scripts/deploy/panji-deploy.test.sh`：112 PASS / 6 FAIL。6 个 FAIL 在 BASE
+  `b06c7d7b506890eb9945d86ca5485c8f474c5cfa` 上逐条一致（既有问题，delta=0）。
+  另记录既有缺陷：该套件在 `11/11 DEPLOY ACTIVE-JOB GATE` 处因被测源码 `fail()` 内部 `exit`
+  而中断，BASE 同样中断；因此本轮 P1-A/P1-B 行为断言被放在该小节**之前**并置于子 shell 隔离，
+  否则永不执行（假覆盖）。断言条数自校验（8/8）防子 shell 早退。
+- `scripts/ops/test-panji-test-deploy-contracts.sh`：新增/改写断言——
+  P1-A 拓扑感知 mock（bare service inspect 必须失败，作为反向证明）+ capture/verify 对称；
+  dry-run 零 mutation（无 `stop -t -1` / `up --force-recreate` / `RESTORED=true`，
+  只允许 `AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true`）；headroom 有 seam 才驱动、无 seam 必 deferred；
+  P1-C A' 结构断言证明**真实**部署路径仍保留 `stop -t -1` + `up -d --force-recreate`。
+  修正了两处 mock 建模缺陷：`docker inspect` 目标必须按参数扫描（真实调用形如
+  `inspect -f '{{...}}' trading-backend`，`$2` 是 flag）；行为级 verify lib 必须连同两个
+  resolver helper 一起抽取，否则只是 command-not-found 假红。
+- 未执行：远程 dry-run、真实部署。`E3_RESOURCE_GATE_BLOCKER` 仍待独立审计后再授权。

@@ -59,8 +59,19 @@ scripts/ops/panji-test-deploy <FULL_SHA> --dry-run
 ```
 
 dry-run 必须保持远端工作树、运行目录、容器、环境文件、数据库和部署状态文件不变。
+其中"容器不变"包含部署临界区：dry-run **只模拟** supervisor-drain fence（只读探测 worker
+容器状态与活跃盘后任务计数），**不得** `stop` / `up` / `--force-recreate`
+`worker-after-close`；日志中只允许出现模拟态字段
+`AFTER_CLOSE_PICKUP_FENCE_SIMULATED=true`，不允许出现真实 fence 字段
+`AFTER_CLOSE_PICKUP_FENCED=true` 或 `AFTER_CLOSE_PICKUP_RESTORED=true`。
+dry-run 也不读取真实 `MemAvailable`（内存 headroom 延后到真实部署 fence 之后执行，
+日志显示 `deferred`）；rollback owner 解析等只读步骤仍会真实执行。
+
 检查输出中的目标 SHA、上一成功 SHA、变更分类、镜像构建计划、migration 判定、同步目录、
 重启服务和最终验证计划。任一项与实际 diff 不一致时停止。
+
+若 dry-run 过程中实际发生了容器状态变化，即为合同违反：必须如实记录受影响容器与恢复动作，
+不得在报告中写成"零生产修改"。
 
 ## 执行
 
@@ -165,11 +176,26 @@ migration 始终早于任何服务重启。migration 失败时：
 若没有上一成功 SHA、migration 已产生无法自动恢复的外部影响，或回滚验证失败，必须停止并
 报告真实状态，不能继续重试或用手工覆盖掩盖。
 
+## 部署资源门禁顺序
+
+资源门禁分两阶段，顺序是合同（详见 `rules/80-deployment-migration.md` §11.1）：
+
+1. **静态资源预算**（任何状态修改之前，fail-closed）：阈值配置健全性 + 主机磁盘余量。
+   此阶段**不判定** `MemAvailable`。
+2. **部署内存 headroom**（fail-closed）：在 supervisor-drain fence 之后、**首笔 runtime
+   mutation 之前**读取 `MemAvailable`，要求 ≥ `PANJI_MIN_MEM_MB`。fence 释放长任务 worker
+   常驻内存后才是本次部署真实可用的 working set，因此不得把该门槛提前到 fence 之前。
+
+`PANJI_MIN_MEM_MB` 是部署期 headroom，不是"宿主机稳态必须空闲"的指标。
+
 ## 部署后资源复检（DS-104）
 
 部署成功（SHA / health / Mount 核验通过）后，在写成功状态**之前**必须复检资源，任一失败即判部署失败：
 
-- **主机**：磁盘可用 ≥ `PANJI_MIN_DISK_GB`、使用率 ≤ `PANJI_MAX_DISK_PCT`、`MemAvailable` ≥ `PANJI_MIN_MEM_MB`；
+- **主机（门禁）**：磁盘可用 ≥ `PANJI_MIN_DISK_GB`、使用率 ≤ `PANJI_MAX_DISK_PCT`；
+- **主机内存（observation-only）**：记录 `MemAvailable` 作为收紧预算的证据，**不作为失败门槛**
+  ——部署完成后 worker 已恢复常驻，此时的空闲内存不代表异常；真正的内存异常由下面的容器级
+  `OOMKilled` / `RestartCount` / limits 生效性门禁捕获；
 - **容器**：任一关键容器 `State.OOMKilled=true` 或异常 `RestartCount` → 失败；
 - **配置生效**：`docker inspect` 读取关键容器 `Memory` / `PidsLimit` / `NanoCpus` 非 0（未生效）→ 失败；
 - **高水位**：`docker stats --no-stream` 采集各服务内存，按 `key=value` 记录，作为后续收紧预算的证据；

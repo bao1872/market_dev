@@ -204,6 +204,41 @@ Exploration 要求：
 
 资源清理必须精确指向本轮可确认的临时/旧 SHA 资产。
 
+### 11.1 部署资源门禁顺序
+
+部署资源门禁分两个语义独立的阶段，**顺序本身是合同**：
+
+1. **静态资源预算**（任何状态修改之前，fail-closed）：阈值配置健全性 + 主机磁盘余量。
+   该阶段**不含** `MemAvailable` 判定。
+2. **部署内存 headroom**（fail-closed）：必须在 supervisor-drain fence 之后、
+   **首笔 runtime mutation 之前**读取 `MemAvailable`，要求 `>= PANJI_MIN_MEM_MB`。
+
+禁止：
+
+- 在任何 fence 之前用 `MemAvailable` 门槛否决部署——fence 释放长任务 worker 的常驻内存后
+  才是本次部署真实可用的 working set，提前判定会阻止本可安全回收内存的部署；
+- 把 `PANJI_MIN_MEM_MB` 解释为"宿主机稳态必须空闲"的指标，或据此新增第二个数值阈值；
+- 由容器 `mem_limit`（单容器允许使用的上限）反推宿主机必须空闲的内存。
+
+`PANJI_MIN_MEM_MB` 是**部署期**保守 headroom，本阶段不下调。
+
+**部署后主机内存为 observation-only**：只作为收紧预算的证据记录，不作为失败门槛。
+部署后仍然 fail-closed 的是：磁盘门槛、容器健康（`OOMKilled` / 异常 `RestartCount` /
+`Memory`·`PidsLimit`·`NanoCpus` 是否实际生效）、health 与 SHA/Mount 核验。
+
+内存 headroom 的测试 seam 只允许在 dry-run 生效；真实部署遇到该变量必须 fail-closed 拒绝。
+
+### 11.2 dry-run 零 mutation
+
+`--dry-run` 必须是**纯计划**：不得修改远端工作树、运行目录、容器、环境文件、数据库或部署状态文件。
+
+- 不得 `stop` / `up` / `--force-recreate` 任何生产容器，**包括**为建立部署临界区而停止
+  长任务 worker；dry-run 只能**模拟** supervisor-drain fence（只读探测容器状态与活跃任务计数）。
+- 模拟态不得冒充真实 fence 的状态字段：真实 fence 专属字段只允许在真实部署中出现。
+- 无测试 seam 时 dry-run 不读取真实 `MemAvailable`，该门槛延后到真实部署 fence 之后执行。
+- rollback owner 解析、变更分类、计划核验等**只读**步骤仍必须真实执行，不得跳过。
+- dry-run 若发生了任何容器状态变化，即属违反本条，必须按事故如实记录，不得写成"零生产修改"。
+
 ## 12. 基础镜像
 
 受保护基础镜像不得因普通清理删除。
