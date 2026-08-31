@@ -1705,12 +1705,22 @@ deploy() {
     #    以及替换 /opt/panji-live/backend/app 之前执行。活跃任务 → 立即停止部署。
     FAILURE_STAGE="active_job_gate"
     guard_active_after_close_jobs
+    # [E2.1 P1-A] 在任何 destructive runtime mutation（含 supervisor-drain fence 的真实 stop）之前固化 rollback owner。
+    #    必须早于 update_env_file / build / sync / write_runtime_sha /
+    #    migration / restart；任一 mandatory owner 无法解析即 STOP（fail-closed）。
+    FAILURE_STAGE="pre_deploy_rollback_owner"
+    # 主流程已在 checkout_target 之前完成捕获（见 main 中 §4 捕获点），此处仅作
+    # 防御性兜底：已解析则跳过，避免重复捕获把 candidate 当成 PRE_DEPLOY owner。
+    if [[ "${PRE_DEPLOY_RUNTIME_OWNER_RESOLVED}" != "true" ]]; then
+        resolve_pre_deploy_runtime_owner || return 1
+    fi
 
-    # [RESOURCE_GATE_ORDER_DEBT] 部署内存 headroom 必须在 supervisor-drain fence 之后、
+    # [RESOURCE_GATE_ORDER] 部署内存 headroom 在 supervisor-drain fence 之后、
     # 首笔 runtime mutation 之前检查。fence 释放 worker-after-close 的 ~942MB anon 后，
     # 才是本次部署真实可用的 working set；不得在任何 fence 之前用 MemAvailable 门槛阻止部署
     # （那会阻止本可安全回收内存的部署）。MIN_MEM_MB 仍是保守部署 headroom，本轮不降低。
     if _backend_runtime_will_mutate; then
+        FAILURE_STAGE="after_close_fence"
         _fence_after_close_worker || return 1
         FAILURE_STAGE="deployment_memory_headroom"
         check_deployment_memory_headroom || return 1
@@ -1721,15 +1731,6 @@ deploy() {
         check_deployment_memory_headroom || return 1
     fi
 
-    # [E2.1 P1-A] 在任何 destructive runtime mutation 之前固化 rollback owner。
-    #    必须早于 update_env_file / build / sync / write_runtime_sha /
-    #    migration / restart；任一 mandatory owner 无法解析即 STOP（fail-closed）。
-    FAILURE_STAGE="pre_deploy_rollback_owner"
-    # 主流程已在 checkout_target 之前完成捕获（见 main 中 §4 捕获点），此处仅作
-    # 防御性兜底：已解析则跳过，避免重复捕获把 candidate 当成 PRE_DEPLOY owner。
-    if [[ "${PRE_DEPLOY_RUNTIME_OWNER_RESOLVED}" != "true" ]]; then
-        resolve_pre_deploy_runtime_owner || return 1
-    fi
 
     # 1. 运行环境镜像：任意 environment_changed → 按同一 GIT_SHA tag 组整体构建。
     #    注意：MUTATION_STAGE 不在这里提前推进——构建属**非文件层写入**，
