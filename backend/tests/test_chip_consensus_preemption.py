@@ -24,11 +24,12 @@ from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from app.models.instrument import Instrument
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
+from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.after_close_chip_consensus_service import (
     _CHIP_LEASE_SECONDS,
     CHIP_CONSENSUS_ALGORITHM_VERSION,
@@ -101,8 +102,16 @@ async def _make_job(
         lease_epoch=lease_epoch,
         metadata_json=json.dumps(meta, ensure_ascii=False),
     )
+    # stock_chip_consensus_snapshots.core_run_id 外键引用 stock_feature_snapshot_runs.id
+    core_run = StockFeatureSnapshotRun(
+        id=core_run_id,
+        trade_date=trade_date,
+        run_type="after_close",
+        status="succeeded",
+    )
     async with session_factory() as db:
         db.add(job_run)
+        db.add(core_run)
         await db.commit()
         await db.refresh(job_run)
         # 返回 core_run_id 供 snapshot 关联
@@ -286,6 +295,17 @@ async def test_resume_queued_reclaimed_and_skips_succeeded():
     await _seed_instrument(TestAsyncSessionLocal, inst1)
     await _seed_snapshot(TestAsyncSessionLocal, instrument_id=inst0, trade_date=_TRADE_DATE, core_run_id=core_run_id, status="succeeded")
     await _seed_snapshot(TestAsyncSessionLocal, instrument_id=inst1, trade_date=_TRADE_DATE, core_run_id=core_run_id, status="succeeded")
+
+    # 隔离：claim_next_job_run 按 created_at 取最旧 eligible job；删除本测试外的
+    # after_close_chip_consensus 任务（含 B 测试收尾残留的 resume_queued），确保抢到的是本 job。
+    async with TestAsyncSessionLocal() as db:
+        await db.execute(
+            delete(SchedulerJobRun).where(
+                SchedulerJobRun.job_name == "after_close_chip_consensus",
+                SchedulerJobRun.id != job_run.id,
+            )
+        )
+        await db.commit()
 
     claim = await claim_next_job_run(
         TestAsyncSessionLocal,
