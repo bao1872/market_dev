@@ -1,5 +1,8 @@
 # 50 Git 与开发流程
 
+流程强度由 `AGENTS.md` 的 Level 1/2/3 路由决定。Git 安全始终生效，但事故期 checkpoint、
+STOP、exact-SHA 和大报告不得成为 Level 1 的默认 ceremony。
+
 ## 1. 分支模型
 
 仓库长期分支：
@@ -28,7 +31,8 @@
 3. 确认本地与 `origin/dev` 的祖先关系
 4. 检查工作树是否存在用户已有未提交修改
 
-若无法安全 fast-forward / 对齐，STOP 并报告。
+若无法安全 fast-forward / 对齐，暂停编辑并报告。Level 1 不要求工作期间始终
+`HEAD == origin/dev`；Level 2/3 的正式远程证据必须绑定已提交且可解析的 exact SHA。
 
 ## 3. 修改范围
 
@@ -83,7 +87,7 @@ Push `dev` 本身不自动等同于：
 
 ## 7. Checkpoint
 
-长任务可以在自然阶段建立 checkpoint commit。
+长任务或高风险修改可以在自然阶段建立 checkpoint commit。Level 1 默认不要求 checkpoint。
 
 checkpoint 用于：
 
@@ -104,7 +108,15 @@ checkpoint 用于：
 
 禁止每次重新做全仓审计或重新规划已完成工作。
 
-## 9. Plan-Scoped Authorization
+## 9. Risk-based completion
+
+- **Level 1**：聚焦提交、modified-scope evidence、按任务要求 push。
+- **Level 2**：提交说明 contract owner、affected chain 和 evidence；需要 PG 时使用 exact SHA。
+- **Level 3**：exact identity、明确授权、正式 runner、资源证据和清理结果均属于完成条件。
+
+STOP 只表示当前 slice 已完成或遇到真实 blocker 后不扩张范围，不是普通提交前的第二审批。
+
+## 10. Plan-Scoped Authorization
 
 用户批准包含以下内容的执行计划：
 
@@ -123,7 +135,7 @@ checkpoint 用于：
 - destructive / irreversible 行为；
 - 发现数据损坏。
 
-## 10. 临时产物
+## 11. 临时产物
 
 仅当本轮确实创建临时产物时，任务结束前：
 
@@ -133,7 +145,7 @@ checkpoint 用于：
 
 如果本轮没有创建临时资源，不要求输出形式化“四清单”。
 
-## 11. 禁止提交
+## 12. 禁止提交
 
 默认不得提交：
 

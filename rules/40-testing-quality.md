@@ -13,6 +13,17 @@ Exploration 只减少与当前改动无关的测试和 release ceremony；受影
 3. 哪些测试足以证明当前修改？
 4. 是否还需要真实数据 / PG / API / Frontend 技术证据？
 
+测试是 evidence，不因其存在而天然成为 truth。测试必须证明生产合同，而不是用手写
+fixture 或复制算法建立第二套看似合理的合同。
+
+### 1.1 Production Contract Reuse
+
+涉及 artifact、serialization、lineage、status、identity、version、readiness 或 publication 的测试，
+优先复用正式 encoder、decoder、repository、domain factory 和 identity helper。
+
+禁止手抄生产 payload/schema 后用同一手抄结构断言成功。只有 malformed/legacy payload
+本身是测试目标时，才允许直接构造非生产输入，并必须明确标注该目的。
+
 ## 2. 默认验证层级
 
 ### T0 — Syntax / Static
@@ -248,7 +259,18 @@ marker 不能作为失败免责机制；如果是代码断言错误仍必须修�
 
 是否需要生产数据 clone 由 `80-deployment-migration.md` 的风险等级决定，不是所有 migration 默认要求。
 
-## 11. 失败纪律
+## 11. 失败分类与纪律
+
+测试失败后，在修改生产逻辑前必须分类：
+
+- `STALE_TEST`：测试仍断言已废弃或错误合同；
+- `INVALID_FIXTURE`：fixture 不满足生产 reader、identity、FK、时间或可见性合同；
+- `RUNTIME_BUG`：生产 owner 在有效输入和真实路径下行为错误；
+- `INFRA_BUG`：runner、环境、依赖、数据库身份或资源故障；
+- `UNKNOWN`：证据不足。
+
+`UNKNOWN` 不允许直接修改生产行为。分类必须由生产 owner、真实 reader/decoder、调用链和
+运行证据支持，不能仅根据失败测试的期望推断。
 
 - 删除测试以适配错误实现：禁止；
 - 修改断言来掩盖业务错误：禁止；
@@ -292,6 +314,19 @@ marker 不能作为失败免责机制；如果是代码断言错误仍必须修�
 - complete release evidence。
 
 Exploration 不得为了证明一个局部 hypothesis 自动要求 Hardening 证据包。
+
+### 13.1 Gate Truthfulness Contract
+
+正式 Gate 必须回答 required contract 是否实际执行，而不只回答 pytest 是否 exit 0。
+
+状态固定为 `passed`、`failed`、`skipped`、`deselected`、`not_registered`、
+`not_run`、`blocked`。
+
+Required evidence 只有实际收集、执行并通过才可记为 `passed`。测试文件存在、未失败、被
+marker 排除、未注册、未运行或依赖 Gate 被阻塞，都不能计入 closure。
+
+`scripts/verify/evidence_manifest.json` 是正式远程 Gate 的 contract -> selector -> gate 声明 owner。
+选择必须显式、无 glob、无动态全仓 discovery。验证框架必须输出逐 contract 的机器证据。
 
 ## 14. 质量工具
 

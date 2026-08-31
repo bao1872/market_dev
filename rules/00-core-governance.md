@@ -11,11 +11,13 @@
 文档冲突时：先判断是目标行为还是当前实现；查看对应权威来源；用代码或运行证据核验；
 修正文档而不是自行猜测。不得把假设、计划或未验证结果表述为事实。
 
-## 2. 阶段路由
+## 2. 风险路由
 
-当前默认 `PROJECT_STAGE = EXPLORATION`。`AGENTS.md` 定义了 Exploration 默认执行链、Correctness Gates 和 Hardening Trigger。
+当前默认 `PROJECT_STAGE = EXPLORATION`。`AGENTS.md` 唯一定义 Level 1 Normal Exploration、
+Level 2 Contract-Sensitive 和 Level 3 Operational/Destructive 路由。
 
-Exploration 只减少与当前 hypothesis 无关的全域验证与治理完备性，不减少正确性、测试、数据安全和真实运行证据。
+任务命中多个等级时取最高等级。Exploration 只减少与当前 hypothesis 无关的全域验证与
+治理完备性，不减少正确性、测试、数据安全和真实运行证据。
 
 ## 3. Hypothesis Slice
 
@@ -39,6 +41,9 @@ Exploration 只减少与当前 hypothesis 无关的全域验证与治理完备�
 - 计划执行的测试和真实运行验证；
 - 需要用户授权但尚未获得的部分。
 
+Level 1 使用一段简短说明即可；不得要求事故期格式、固定章节或第二审计。Level 2/3
+按契约和操作风险补充 owner、identity、failure mode 与证据范围。
+
 ## 5. 严重度分级
 
 - **P0**：数据损坏、安全泄漏、契约破坏、时间因果错误、真实业务结果错误。不得在探索模式下静默兜底。
@@ -46,15 +51,18 @@ Exploration 只减少与当前 hypothesis 无关的全域验证与治理完备�
 - **P2**：局部体验、次要一致性问题、与当前 slice 无关的标准化。
 - **P3**：低影响工程债务，触发条件满足前 Deferred。
 
-## 6. 文档授权门
+## 6. 文档授权与事实同步
 
 - **PRD 门**：只有用户明确发起 PRD 任务才修改 `docs/prd/`。
-- **Maps 门**：只有用户验收后明确授权同步 Maps 才修改 `docs/maps/`。
-- **Runbooks 门**：只有真实操作验收后明确授权同步才修改 `docs/runbooks/`。
+- **Maps 事实通道**：已核验实现入口、owner、数据流、契约或运行事实改变，且旧 Map
+  会误导后续开发时，可随代码任务同步，无需第二次授权。
+- **Runbooks 事实通道**：命令或操作步骤已真实执行成功，或已由经过验证的自动化合同
+  覆盖时，可随任务同步，无需第二次授权。
 - **Changes 通道**：重要行为/契约/Schema/运行方式变化时，代码任务可新增或更新唯一相关 Change，必须诚实标注实现/验收状态。
 - **治理门**：只有用户明确授权治理调整才修改 `AGENTS.md`、`rules/`、`tools/check_governance_rules.py` 及其治理测试，以及 `rules/PROTECTED_GOVERNANCE_FILES.json` 列出的受保护文件。
 
-普通开发任务默认不修改 PRD/Maps/Runbooks/治理。
+Maps/Runbooks 同步不得写计划为事实，不得改变产品语义，也不构成部署、生产数据或
+远程运行授权。局部实现细节、样式、文案和不影响操作的修复不要求同步。
 
 ## 7. Two-Strike Architecture Rule
 
@@ -66,6 +74,8 @@ Exploration 只减少与当前 hypothesis 无关的全域验证与治理完备�
 - 不得用 mock 冒充真实结果；
 - 不得用“测试通过”掩盖真实运行错误；
 - 任何与真实数据、远程验证、migration、部署相关的结论，必须有对应证据或明确标注未执行。
+- Gate 必须区分 `passed`、`failed`、`skipped`、`deselected`、`not_registered`、
+  `not_run` 和 `blocked`；`not failed` 不等于 `passed`。
 
 ## 9. Hypothesis 成熟度
 
