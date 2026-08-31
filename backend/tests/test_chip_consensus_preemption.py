@@ -307,12 +307,14 @@ async def test_resume_queued_reclaimed_and_skips_succeeded():
         )
         await db.commit()
 
-    claim = await claim_next_job_run(
-        TestAsyncSessionLocal,
-        job_name="after_close_chip_consensus",
-        worker_instance_id=_WORKER_B,
-        lease_seconds=_CHIP_LEASE_SECONDS,
-    )
+    async with TestAsyncSessionLocal() as db:
+        claim = await claim_next_job_run(
+            db,
+            job_name="after_close_chip_consensus",
+            worker_instance_id=_WORKER_B,
+            lease_seconds=_CHIP_LEASE_SECONDS,
+        )
+        await db.commit()
     assert claim is not None
     assert claim.token.job_run_id == job_run.id
     assert claim.previous_status == "resume_queued"
