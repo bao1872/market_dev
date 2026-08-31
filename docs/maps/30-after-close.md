@@ -1,9 +1,9 @@
 # 盘后任务 Map
 
-核验状态：已基于代码审计更新（Phase 4）；Phase 5A 已修复 AC-04 日线 readiness 冲突并核验 P0 Redis 隔离
-最后核验日期：2026-07-27
+核验状态：已基于代码审计更新（Phase 4）；Phase 5A 已修复 AC-04 日线 readiness 冲突并核验 P0 Redis 隔离；[2026-09-01] `after_close_chip_consensus` 已退役（SHA 2adc9c32）：正常 AfterClose 不再自动创建/调度/执行 chip，canonical chain = Core → Review → History → complete。
+最后核验日期：2026-09-01
 核验分支：dev
-核验提交：72dcd6c074212c0935090ce86acc7e48ba619dcb（Phase 4）；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`
+核验提交：2adc9c3261bdf23d7a2b8cb7ba17aad4fc2af155（chip 退役）；Phase 4 见 `72dcd6c074212c0935090ce86acc7e48ba619dcb`；Phase 5A 修复见 `docs/changes/2026/CHANGE-20260727-002-after-close-daily-readiness.md`
 事实所有权：Scheduler、readiness、Orchestrator、Worker、run、校验和发布链路
 
 > 本文件必须基于真实代码、数据、日志或运行结果填写。不得根据 PRD 推测实现已经存在。
@@ -239,7 +239,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 
 ### 11.7 15m 门槛澄清（CHANGE-20260729-009）
 
-盘后 core 的 coverage 门禁已移除 15m，仅表示 stock_core/review core 不等待 15m；筹码共识仍消费 `bars_15min`。`after_close_chip_consensus_service` 在每只股票计算前调用 `refresh_15min_bars(count=4000)`，再由 MDAS 读取 canonical QFQ bars，并校验目标交易日 16 根、最后一根到 15:00、历史最少 500 根；刷新失败、日期陈旧、时段不完整和历史不足均写结构化 skipped，不反改 core。
+盘后 core 的 coverage 门禁已移除 15m，仅表示 stock_core/review core 不等待 15m。筹码共识（chip）历史上消费 `bars_15min`，由 `after_close_chip_consensus_service` 在每只股票计算前调用 `refresh_15min_bars(count=4000)`，再由 MDAS 读取 canonical QFQ bars 并校验目标交易日 16 根/最后一根到 15:00/历史最少 500 根；该任务已退役（见 §13.3），不再自动运行，`after_close_chip_consensus_service` 实现仍保留供手工/历史触发。
 
 `first_pyramid_service.py` 中两个 15m 门槛的权威定义：
 
@@ -247,6 +247,8 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 |---|---|---|---|
 | `_CHIP_MIN_15M_BARS` | `500` | 批量服务最低门槛（degraded） | `after_close_chip_consensus_service` 批量计算 |
 | `NODE_CLUSTER_LOW_BARS` | `4000` | Node Cluster 完整质量门槛（250日×16根/日） | 个股详情实时计算 `compute_chip_status_for_stock` |
+
+> **[RETIRED]** 上述 chip 15m 门槛常量属于已退役的 `after_close_chip_consensus`；其实现与历史 `StockChipConsensusSnapshot` 仍保留，但不再由正常 AfterClose 自动调用（见 §13.3）。
 
 - 000021 15m bars=354，不满足 500 最低门槛 → `chip_status=skipped + reason_code=M15_BARS_INSUFFICIENT + actual_bars=354 + required_bars=500`
 
@@ -332,7 +334,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
   RETURNING id;
   ```
 - `lease_epoch` fencing：仅持有当前 `lease_epoch` 的 worker 才能成功刷新 heartbeat；旧 worker（已被 re-claim 抢占）的 UPDATE 影响 0 行，立即退出。
-- `after_close_chip_consensus` 使用共享 `fenced_job_run_service` 每约 30 秒刷新 heartbeat 和 lease；刷新、snapshot 写入与终态写入统一匹配 job id、`status=running`、worker instance、`lease_epoch`。
+- [RETIRED] `after_close_chip_consensus` 历史上使用共享 `fenced_job_run_service` 每约 30 秒刷新 heartbeat 和 lease；该任务已退役，不再自动运行（`fenced_job_run_service` 的通用 fencing 原语仍保留供其他 job 使用）。
 - scheduler watchdog 使用 90 秒 heartbeat 健康阈值，但只有 `lease_expires_at` 已过期且 heartbeat 同时不健康时才把 run 标记为 `interrupted`，不会接管仍有健康 heartbeat 的长任务。
 
 ### 12.2 item lease（14400s）+ fencing_epoch
@@ -453,7 +455,9 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - 测试：`backend/tests/test_dsa_recovery_service.py`（10+ 用例覆盖复用/创建/lease 拒绝/超上限等）；
 - **CLI / admin API 尚未实现**：当前需通过 service 调用，待新增 `backend/scripts/dsa_recovery_cli.py` 或 admin 端点。
 
-### 13.3 worker.py chip_consensus 分支
+### 13.3 worker.py chip_consensus 分支（[RETIRED] 2026-09-01，SHA 2adc9c32）
+
+> **[RETIRED]** 该分支已退役：after-close worker 不再启动 chip co-process，`after_close_orchestrator` 不再入队 `after_close_chip_consensus`。以下仅作历史实现记录，描述退役前的 worker 行为，不约束当前自动盘后链路；chip 专用 worker（`WORKER_TYPE=chip_consensus`）入口仍保留供手工/历史触发。
 
 - 模块：`backend/app/worker.py::_chip_consensus_poll_once`（L1529-L1620）；
 - 行为：
@@ -464,9 +468,9 @@ worker 收到 SIGTERM 信号时的 drain 流程：
   - 执行中由 `fenced_job_run_service.FencedJobHeartbeat` 每 30 秒续租，所有 snapshot upsert 在同一事务内先锁定并验证当前 job owner；
   - 终态由 `finalize_job_run` fenced 写入 `finished_at`、计数、结构化原因并释放 lease；全成功/部分成功/全 skipped/系统性失败分别形成 `succeeded/succeeded`、`succeeded/partial`、`succeeded/skipped`、`failed/failed`；
   - heartbeat、成功、失败、取消和失租路径均清理后台 heartbeat task；失租 worker 不执行 auction anchor 回调；
-- **不新增常驻容器**：chip_consensus worker 在现有 after-close worker 容器内通过 `WORKER_TYPE` 分支执行；
+- **[RETIRED] 不新增常驻容器**：chip_consensus worker 历史上在现有 after-close worker 容器内通过 `WORKER_TYPE` 分支执行；该 co-process 现已移除，after-close worker 不再启动 chip。
 - watchdog：`auto_resume_interrupted_after_close_runs`（`scheduler_job_run_recovery_service.py:L169`）同时扫描 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次；
-- chip 入队：`after_close_orchestrator.py` 的正式步骤 `enqueue_chip_job`（`_enqueue_chip_job_step`）在**主任务终态提交之前**调用 `create_after_close_chip_consensus_job`（只入队，不 await chip 计算，chip 由独立 Worker 异步执行）。入队失败计入 `partial_success` 判定，metadata 记录 `chip_enqueue_status / chip_job_id`；chip.core_run_id 指向 `snapshot_run_id`（数据版本）。
+- **[RETIRED] chip 入队**：历史上 `after_close_orchestrator.py` 的正式步骤 `enqueue_chip_job`（`_enqueue_chip_job_step`）在主任务终态提交之前调用 `create_after_close_chip_consensus_job`；该步骤与 `_enqueue_chip_job_step` 已于 [2026-09-01, SHA 2adc9c32] 删除，chip 不再由主编排入队（`create_after_close_chip_consensus_job` 服务实现仍保留供手工/历史触发）。
 
 ### 13.4 聚合依赖闭环：stock_core pointer → board aggregation（Historical/Non-Normative：legacy V1 链路，Board 非当前 Review 前置）
 
@@ -477,7 +481,7 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - `board_analysis_service` 输入门禁：必须存在已发布 `stock_core` pointer，否则拒绝计算（PRD §5 BA-01）；
 - 聚合失败只重跑聚合，不影响已发布 `stock_core`；
 - 依赖顺序：`stock_core published` → `market_aggregation` / `board_analysis` 可触发 → `review` 可触发；
-- `after_close_orchestrator` 当前止于 stock_core + chip_consensus 创建，**market aggregation 和 board_analysis 不在主编排内自动触发**，需通过 CLI / admin API 单独触发（见 `docs/runbooks/after-close-remote-development-run.md` §9）。
+- `after_close_orchestrator` 当前止于 `computing_history`（History 闭包），**market aggregation 和 board_analysis 不在主编排内自动触发**，`after_close_chip_consensus` 亦已退役（不再由主编排创建）；需触发聚合/板块分析或历史 chip 重算时，通过 CLI / admin API / 专用 worker 单独进行（见 `docs/runbooks/after-close-remote-development-run.md` §9）。
 
 ### 13.5 统一步骤执行器 / watchdog / reconcile（Phase 0 收口，2026-08-03 核验）
 
@@ -488,7 +492,7 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - **运行中取消**：`_run_with_cancellation` 把 operation 建为独立 task，周期调用 `cancellation_check`，命中时 `op_task.cancel()` + `await` 终止业务协程；`_StepCancelledError` 转 `cancelled` summary 不炸穿 Worker。
 - 步骤终态集合：`{succeeded, skipped, unavailable, failed, timed_out, cancelled, interrupted}`；非可选步骤超时/异常会 `raise`，可选步骤降级不抛。
 
-顶层步骤（经执行器）顺序：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → enqueue_chip_job(可选)`。
+顶层步骤（经执行器）顺序：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → computing_history`。`enqueue_chip_job` 步骤已于 [2026-09-01, SHA 2adc9c32] 退役，不再属于正常 AfterClose 步骤（canonical chain = Core → Review → History → complete）。
 
 **`computing_review`（AC-02，2026-08-03 收口）**：复盘业务体抽为模块级协程 `_execute_review_step(...)`，由 `execute_orchestrator_step("computing_review", lambda: _execute_review_step(...), optional=True, ...)` 包装，满足 AC-02「所有顶层步骤必须通过统一步骤执行器」。`_execute_review_step` 内部保留既有幂等 create_run / compute_run / resume_run / publish_run 语义与 publication pointer 唯一事实源，软失败（gate_blocked/计算失败）不抛异常，仅返回 `result["failed"]=True`；调用方将业务软失败如实映射到 step summary（`REVIEW_SOFT_FAILURE`）并 `_persist_step_summary`，并据此把主任务收为 `partial_success`（core 已发布）。检查点语义不变：失败时 `_execute_review_step` 内部传 `None` 不推进 `last_completed_step`（见 §12.1）。
 
@@ -575,14 +579,16 @@ Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `s
 `after_close_orchestrator` 在 stock_core 发布后、market_aggregation 之前插入 auction_anchor 生成：
 
 ```
-stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → market_aggregation → review
+[RETIRED] 历史流程：`stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → market_aggregation → review`（chip_consensus 已于 [2026-09-01, SHA 2adc9c32] 退役，不再位于该自动链；当前 canonical chain = Core → Review → History → complete）。
 ```
 
 ### 统一入口
 
 盘后编排、Admin、恢复入口统一调用 `generate_and_publish_auction_anchors`（`backend/app/services/auction_anchor_service.py`），在一个事务边界内完成锚点生成+校验+publication 切换。**禁止盘后只 generate 不 publish**。
 
-### Chip 软失败语义（[P0-2]）
+### Chip 软失败语义（[P0-2]）[RETIRED] 2026-09-01，SHA 2adc9c32
+
+> **[RETIRED]** chip 已退役，不再由正常 AfterClose 自动运行或触发 auction 升级；下表为历史 chip→auction_anchor 软失败语义记录。
 
 | chip 状态 | auction_anchor 行为 |
 |---|---|
@@ -608,7 +614,7 @@ stock_core 发布 → chip_consensus 结果 → auction_anchor 生成发布 → 
 ### 当前实现状态
 
 - `after_close_orchestrator.py` 已接入 `generate_and_publish_auction_anchors` 调用
-- `after_close_chip_consensus_service.py` 在 chip 完成回调中触发锚点重建
+- [RETIRED] `after_close_chip_consensus_service.py` 历史上在 chip 完成回调中触发锚点重建；chip 已退役，该自动回调不再发生（auction_anchor 自身状态见上文 RETIRED 注记）
 - `auction_scheduler_service.py` 提供 09:25/10:00 任务创建与执行
 - 详见 `docs/maps/75-auction-analysis.md`
 
@@ -714,10 +720,9 @@ _PIPELINE_STEPS（7步展示序列）：
 
 ### 13.1 进入点（entry functions）
 
-- **chip 正式发布指针**：`factor_publication_service.publish_chip_consensus`
+- **[RETIRED] chip 正式发布指针**：`factor_publication_service.publish_chip_consensus`
   （见 maps/20-quant-model.md §13.1 与 `backend/app/services/factor_publication_service.py`）。
-  在 `ChipConsensusRun` 达到可发布终态（`succeeded`/`partial`）后原子写入
-  `PUBLICATION_KIND_CHIP_CONSENSUS` 发布指针，并强制 lineage。
+  `after_close_chip_consensus` 已退役（[2026-09-01, SHA 2adc9c32]），不再由正常 AfterClose 自动发布 chip 指针；该发布函数与历史 `ChipConsensusRun` 实现仍保留供手工/历史触发。
 - **ProductReadiness 聚合/闭包**：`ProductReadinessService.evaluate_for_trade_date` /
   `collect_states`（`backend/app/services/product_readiness_service.py`）。
 - **治理报告**：`evaluate_governance`（同文件，纯函数）。
@@ -736,12 +741,12 @@ _PIPELINE_STEPS（7步展示序列）：
 | board_aggregation | mandatory | `market_aggregation` publication pointer |
 | review | mandatory | 正式发布指针（`MarketReviewRun.published_at` 非空）；run 自称 published 但 `published_at` 为空 → `degraded + REVIEW_NOT_PUBLISHED` |
 | dsa_projection | enhancement（派生投影） | 真实产物核验：当日 `stock_feature_snapshots` 行数 > 0；无产物 → `NO_PROJECTION` |
-| chip | enhancement | `chip_consensus` publication pointer；run succeeded 但无 pointer → `degraded + CHIP_PUBLICATION_MISSING` |
+| chip | enhancement（[RETIRED] 2026-09-01） | `chip_consensus` publication pointer（仅历史/手工触发，正常 AfterClose 不再自动产生）；run succeeded 但无 pointer → `degraded + CHIP_PUBLICATION_MISSING` |
 | state_events | enhancement（派生投影） | 真实产物核验：当日 `StockStateEvent` 按 `event_type` 计数 > 0；无事件 → `NO_STATE_EVENTS` |
-| auction_anchor | enhancement | `auction_anchor` publication pointer；`structure_only` → `degraded + stale + AUCTION_STRUCTURE_ONLY`（等待 chip 升级） |
+| auction_anchor | enhancement | `auction_anchor` publication pointer；`structure_only` → `degraded + stale + AUCTION_STRUCTURE_ONLY`（chip 已退役，该升级不再自动发生） |
 
 > [Corrective-3 §三] 修改前 `dsa_projection` / `state_events` 随 stock_core 自动 ready、
-> `review` 仅看 run.status、`chip` succeeded 即 ready、`auction structure_only` 与
+> `review` 仅看 run.status、`chip` succeeded 即 ready（chip 已退役，此条不再适用于自动链）、`auction structure_only` 与
 > succeeded 同样呈现 fresh/ready；这四处均会掩盖真实缺口，已按真实产物/指针核验修正。
 
 闭包状态语义（`evaluate_closure`）：`pending` / `blocked` / `core_ready` /
@@ -751,7 +756,9 @@ mandatory 全部就绪后分 fully_ready / degraded_ready。
 
 **目标差距（2026-08-06）**：PRD31 PC-51 新增 `mandatory_ready_enhancing`，用于 mandatory 已 ready 但增强任务仍 active/stale、尚未完成对账的阶段。当前 `evaluate_closure` 尚无该状态，容易过早落入 `degraded_ready`，需在后续代码修复及 DTO/前端合同中统一补齐。
 
-### 13.3 chip 发布与血统（Commit D，[Corrective-3] 重写）
+### 13.3 chip 发布与血统（Commit D，[Corrective-3] 重写）[RETIRED] 2026-09-01，SHA 2adc9c32
+
+> **[RETIRED]** `after_close_chip_consensus` 已退役，不再由正常 AfterClose 自动发布 chip 指针或触发 auction 升级；以下为历史实现记录，不约束当前自动盘后链路。
 
 **关键历史事实**：在 Corrective-3 之前，**没有任何生产路径向 `chip_consensus_runs`
 写入过数据**（`after_close_chip_consensus_service` 只写

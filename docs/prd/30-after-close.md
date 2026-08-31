@@ -27,7 +27,7 @@
 
 ### AC-04 日线盘后计算
 
-盘后 core 主链不以 15m 数据作为发布门禁，趋势、结构、动量和 review core 主要基于日线计算。盘后仍必须刷新并保留 15m 行情，因为独立 `after_close_chip_consensus` 使用当日收盘后的 15m 数据计算筹码共识。15m 不得阻塞 stock_core 发布，但必须成为 chip 阶段自己的 readiness 输入。
+盘后 core 主链不以 15m 数据作为发布门禁，趋势、结构、动量和 review core 主要基于日线计算。15m 行情仍可在其他产品/链路中保留独立价值（例如其他需要收盘后高频维度的计算），但其刷新/保留**不再作为 AfterClose 的任何 requirement**——`after_close_chip_consensus` 已退役，不再由正常 AfterClose 自动创建/调度/执行，故 15m 不再是其 readiness 输入。15m 不得阻塞 stock_core 发布。
 
 ### AC-05 固定参数一次计算
 
@@ -146,27 +146,28 @@
 - `is_stale` 真源为 `bars_daily.max(trade_date)`，不是 `StockFeatureSnapshot.max(trade_date)`。
 
 ### AC-14：独立任务与核心保护
-- 市场聚合、事件、chip、通知为独立任务，失败只重试自身，不反改核心。
+- 市场聚合、事件、通知为独立任务，失败只重试自身，不反改核心。`after_close_chip_consensus` 已退役（**不再由正常 AfterClose 自动创建/调度/执行**），保留服务实现、历史数据与专用手动入口；本条「独立任务」语义仅适用于仍在自动链中的聚合/事件/通知。
 - 主编排在 Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`，`snapshot_run_id` 可用）后即可标记 `core_published` 并允许复盘；**[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01]** 不再要求 `stock_core` FactorPublication pointer 已发布。Review 通过显式 `source_core_run_id = snapshot_run_id` 绑定本次 CoreRun。
 - 最终状态可为 `completed_with_errors`，但不得因 optional 失败反改 core。
-- chip.core_run_id = snapshot_run_id（不指向 SchedulerJobRun.id）。
-- chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配。
+- [HISTORICAL] chip.core_run_id = snapshot_run_id（不指向 SchedulerJobRun.id）——chip 退役后仅具历史记录意义，用于核对历史 `StockChipConsensusSnapshot`。
+- [HISTORICAL] chip 严格按 instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded 匹配——chip 退役后仅用于历史数据核对。
 
 #### AC-14b：ENHANCEMENT EXECUTION ISOLATION（增量强化，2026-08-11）
-- `chip_consensus`、`review_bootstrap` 等 low-priority / enhancement long-running job
-  不得占用 mandatory after-close / Review 的**唯一 executor**。
+- low-priority / enhancement long-running job 不得占用 mandatory after-close / Review 的**唯一 executor**。
+  （`chip_consensus` 已退役，不再作为当前 enhancement executor，本条款不再对其施加
+  executor 级隔离要求；下述通用强化仅对仍在自动链中的 enhancement 生效。）
 - 必须保证：当 mandatory after-close run 进入 `queued` / `resume_queued` 时，
-  其启动不得等待一个已领取的 Chip / Bootstrap job 自然完成。
+  其启动不得等待一个已领取的 enhancement job 自然完成。
 - 合法实现包括（等价即可）：
-  - independent async executor/task（如 `run_after_close_orchestrator_worker`
-    内以独立 co-process 运行 `run_chip_consensus_worker`，mandatory 主循环独立领取）；
+  - independent async executor/task（如 after-close worker 内以独立 co-process
+    运行某 enhancement worker，mandatory 主循环独立领取）；
   - independent worker process / container；
   - cooperative yielding / preemption；
   - 或其它等效隔离。
-- **仅有 poll / claim 顺序（core → chip）不能视为满足“不阻塞”合同。** 若 chip
-  领取后被串行 `await` 到 terminal（head-of-line blocking），则 mandatory
+- **仅有 poll / claim 顺序（core → enhancement）不能视为满足“不阻塞”合同。** 若
+  enhancement job 领取后被串行 `await` 到 terminal（head-of-line blocking），则 mandatory
   after-close / Review 启动会受阻，违反本条合同。
-- 本条不改变 AC-04 / PRD31「chip 不阻断 Review」语义，仅将其落为 executor 级硬合同。
+- 本条为通用 enhancement executor 隔离硬合同；`chip_consensus` 已退役不再适用，其余仍在自动链中的 enhancement 继续受本条约束。
 
 ## 5. 板块分析 V1（CHANGE-20260730-011）— [Slice 4A9] 已退役
 
@@ -319,19 +320,12 @@ pointer 本身**不得把 partial run 伪装成 succeeded**：`pointer.data_run_
 - **Review 启动不再依赖 `stock_core` pointer**：Core 计算完成（`StockFeatureSnapshotRun.status == succeeded`，`snapshot_run_id` 可用）即可进入 `computing_review`，通过 `ReviewRun.source_core_run_id = snapshot_run_id` 显式绑定；
 - 失败恢复必须走正式 service/CLI，禁止裸 SQL 改状态（详见 `rules/80-deployment-migration.md`）。
 
-### AC-18：chip_consensus Worker
+### AC-18：chip_consensus Worker（[RETIRED] 2026-09-01，SHA 2adc9c32）
 
-- chip job 进入逐股计算前，必须先完成一次运行级、有界、可观测的 `bars_15min` 刷新阶段，再通过 MDAS 批量读取 canonical 数据；不得在逐股计算循环内执行无界全历史刷新；
-- 刷新阶段必须校验目标交易日、最后完成 bar、预期时段覆盖、最低输入根数及数据来源，并保存 coverage 和失败明细；
-- 15m 不新鲜或不足时必须记录结构化 reason、actual/required bars 和 source cutoff，不得回退到旧交易日 15m 或伪造成功；该结果只影响 chip readiness，不反改已经发布的 stock_core/review core；
-- chip_consensus 任务在现有 after-close worker 容器内领取执行，**不新增常驻容器**；
-- worker 使用 `SELECT ... FOR UPDATE SKIP LOCKED` 领取 `queued` / `resume_queued` 的 `after_close_chip_consensus` 任务，`lease_epoch` fencing 防止旧 worker 覆盖新 worker 状态；
-- worker 每约 30 秒以 job id、`status=running`、worker instance 和 `lease_epoch` 的完整 fencing 条件刷新 heartbeat 与 lease；刷新失败即失去所有权，旧 worker 不得再写 snapshot 或终态；
-- watchdog 只有在 lease 已过期且 heartbeat 不健康时才回收任务，健康长任务不得因执行超过 90 秒被接管；
-- 断点续算：`resume_queued` 任务只重试未成功 instrument，已 `succeeded` 或合法 `skipped` 的 instrument 不重算；
-- chip_consensus 失败只重试自身，不反改 core（`execute_after_close_chip_consensus` 内部已隔离）；
-- 终态必须写 `finished_at`、释放 lease 并保存 succeeded/failed/skipped 计数与结构化原因；全成功、部分成功、全部合法 skipped、系统性失败分别映射为 `succeeded/succeeded`、`succeeded/partial`、`succeeded/skipped`、`failed/failed`（主 status / `metadata.chip_status`）；
-- `auto_resume_interrupted_after_close_runs` 同时处理 `after_close_orchestrator` 和 `after_close_chip_consensus` 两类 `interrupted` 任务，最多恢复 3 次。
+> **[RETIRED]** `after_close_chip_consensus` 已退役：正常 AfterClose 不再自动创建、调度或执行该任务。canonical chain = `Core → Review → History → complete`。本条款仅作历史合同保留，不约束当前自动盘后链路；chip 专用 worker（`WORKER_TYPE=chip_consensus`）入口仍保留，可用于历史重算/手工触发，但不自动运行。
+
+- chip 服务实现（`create_after_close_chip_consensus_job` / `execute_after_close_chip_consensus`）、`CHIP_CONSENSUS_JOB_NAME` 字面量、快照模型、专用手动入口（`run_chip_consensus_worker` / `_chip_consensus_poll_once`）与历史 `SchedulerJobRun` 行均保留，不自动运行。
+- 历史数据核对仍可按原合同执行（退役前语义，供核对历史 `StockChipConsensusSnapshot`）：chip 按 `instrument_id + trade_date + snapshot_run_id + algorithm_version + status=succeeded` 匹配，`chip.core_run_id = snapshot_run_id`；逐股计算前刷新 `bars_15min`、校验目标交易日/时段覆盖/最低根数；终态写 `finished_at`、释放 lease 并保存 succeeded/failed/skipped 计数与结构化原因；`auto_resume_interrupted_after_close_runs` 历史上同时处理 `after_close_orchestrator` 与 `after_close_chip_consensus` 两类 interrupted 任务。
 
 ### AC-19：聚合依赖合同（[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 重锚）
 
