@@ -133,7 +133,8 @@ async def _seed_snapshot(
 
 
 @pytest.mark.asyncio
-async def test_normal_execution_unaffected_by_shutdown_check(TestAsyncSessionLocal):
+async def test_normal_execution_unaffected_by_shutdown_check():
+    from tests.conftest import TestAsyncSessionLocal
     """shutdown_check=None 时 execute 应正常完成、不抛抢占异常。"""
     job_run, core_run_id = await _make_job(
         TestAsyncSessionLocal, status="running", worker_instance_id=_WORKER_A,
@@ -177,7 +178,8 @@ async def test_normal_execution_unaffected_by_shutdown_check(TestAsyncSessionLoc
 
 
 @pytest.mark.asyncio
-async def test_shutdown_raises_at_safe_boundary_and_requeues(TestAsyncSessionLocal):
+async def test_shutdown_raises_at_safe_boundary_and_requeues():
+    from tests.conftest import TestAsyncSessionLocal
     """shutdown_check 在第 2 个 instrument 顶部返回 True：
     - 第 1 个 instrument 的快照已持久化（安全边界）
     - execute 抛 ChipPreemptedForShutdown
@@ -232,7 +234,7 @@ async def test_shutdown_raises_at_safe_boundary_and_requeues(TestAsyncSessionLoc
     assert inst1 not in done
 
     # worker 侧：run 仍在 running（execute 未终态），owner 仍可 requeue
-    requeued = await requeue_owned_job_to_resume(token)
+    requeued = await requeue_owned_job_to_resume(token, session_factory=TestAsyncSessionLocal)
     assert requeued is True
 
     async with TestAsyncSessionLocal() as db:
@@ -249,7 +251,8 @@ async def test_shutdown_raises_at_safe_boundary_and_requeues(TestAsyncSessionLoc
 
 
 @pytest.mark.asyncio
-async def test_resume_queued_reclaimed_and_skips_succeeded(TestAsyncSessionLocal):
+async def test_resume_queued_reclaimed_and_skips_succeeded():
+    from tests.conftest import TestAsyncSessionLocal
     """resume_queued 任务被新 worker 领取（running），get_pending 只返回未完成项。"""
     job_run, core_run_id = await _make_job(
         TestAsyncSessionLocal, status="resume_queued", worker_instance_id=None,
@@ -300,7 +303,8 @@ async def test_resume_queued_reclaimed_and_skips_succeeded(TestAsyncSessionLocal
 
 
 @pytest.mark.asyncio
-async def test_ownership_fence_after_requeue(TestAsyncSessionLocal):
+async def test_ownership_fence_after_requeue():
+    from tests.conftest import TestAsyncSessionLocal
     """running -> resume_queued 后：
     - 旧 token 的 lock_owned_job_run 抛 JobLeaseLostError（禁止后续写入）
     - 非 owner token 的 requeue_owned_job_to_resume 返回 False（不动行）
@@ -314,7 +318,7 @@ async def test_ownership_fence_after_requeue(TestAsyncSessionLocal):
         lease_epoch=job_run.lease_epoch,
         lease_seconds=_CHIP_LEASE_SECONDS,
     )
-    requeued = await requeue_owned_job_to_resume(owner_token)
+    requeued = await requeue_owned_job_to_resume(owner_token, session_factory=TestAsyncSessionLocal)
     assert requeued is True
 
     # 旧 owner token 现在状态已非 running -> fenced 锁失败
@@ -329,7 +333,7 @@ async def test_ownership_fence_after_requeue(TestAsyncSessionLocal):
         lease_epoch=job_run.lease_epoch,
         lease_seconds=_CHIP_LEASE_SECONDS,
     )
-    assert await requeue_owned_job_to_resume(stranger_token) is False
+    assert await requeue_owned_job_to_resume(stranger_token, session_factory=TestAsyncSessionLocal) is False
 
     async with TestAsyncSessionLocal() as db:
         jr = await db.get(SchedulerJobRun, job_run.id)
