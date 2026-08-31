@@ -2,7 +2,7 @@
 
 ## Status
 
-`verified_code_pending_remote_evidence`
+`verified`
 
 ## Why
 
@@ -50,7 +50,14 @@ machine-readable answer for which required contract was registered and executed.
 - Governance checker: passed.
 - Architecture checker: passed, including the SQLite/aiosqlite prohibition.
 - Docs consistency and pytest xfail allowlist: passed.
-- Exact-SHA `targeted-pg`: pending candidate push.
+- Exact-SHA `targeted-pg` on `47ad71a4505d8fa15e2f106c5cd39803333c8c0d`:
+  86 passed; all 12 required contracts passed with 86 collected nodeids and no
+  required skip, deselect, not-run, or blocked status.
+- Migration reached `092_review_core_only_identity (head)` in
+  `bz_stock_verify_47ad71a4505d8fa15e2f106c5cd39803333c8c0d`.
+- Attempt `verify-47ad71a4505d-1788186759-451133a9` completed cleanup: the exact
+  verification database and attempt state files are absent; the reusable verification
+  container and shared PostgreSQL container remain running.
 
 ## Deferred triggers
 
