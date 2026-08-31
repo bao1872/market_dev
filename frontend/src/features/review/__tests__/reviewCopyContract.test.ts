@@ -89,12 +89,12 @@ test('UX2. tooltip 无价值判断词（中性事实措辞）', () => {
 // ============================================================
 
 test('UX3. formatPhaseLabel 精确中文映射（canonical 值不变）', () => {
-  assert.equal(formatPhaseLabel('Early Lift'), '初步抬升')
-  assert.equal(formatPhaseLabel('Strengthening'), '增强中')
-  assert.equal(formatPhaseLabel('Sustained'), '持续中')
-  assert.equal(formatPhaseLabel('Decelerating'), '动能放缓')
-  assert.equal(formatPhaseLabel('Weakening'), '走弱中')
-  assert.equal(formatPhaseLabel('Repairing'), '修复中')
+  assert.equal(formatPhaseLabel('Early Lift'), '低分位启动')
+  assert.equal(formatPhaseLabel('Strengthening'), '动能增强')
+  assert.equal(formatPhaseLabel('Sustained'), '高分位延续')
+  assert.equal(formatPhaseLabel('Decelerating'), '高分位减速')
+  assert.equal(formatPhaseLabel('Weakening'), '动能走弱')
+  assert.equal(formatPhaseLabel('Repairing'), '低分位修复')
   // canonical 值本身保持英文 raw（no translation of enum）
   assert.ok(PHASE_LABELS['Early Lift'] !== 'Early Lift', '展示 label 必须与 canonical 不同')
   assert.equal('Early Lift' in PHASE_LABELS, true)
@@ -138,21 +138,21 @@ test('UX5. SORT_LABELS 覆盖全部 canonical 排序值且为中文', () => {
 })
 
 test('UX6. DETAIL_TAB_LABELS 精确映射六个 tab', () => {
-  assert.equal(DETAIL_TAB_LABELS.current, '当日观察')
-  assert.equal(DETAIL_TAB_LABELS.dynamics, '历史动态')
-  assert.equal(DETAIL_TAB_LABELS.internal, '内部结构')
-  assert.equal(DETAIL_TAB_LABELS.leadership, '龙头迁移')
-  assert.equal(DETAIL_TAB_LABELS.attribution, '成员归因')
-  assert.equal(DETAIL_TAB_LABELS.facts, '原始数据')
+  assert.equal(DETAIL_TAB_LABELS.current, '当日事实')
+  assert.equal(DETAIL_TAB_LABELS.dynamics, '收益动态')
+  assert.equal(DETAIL_TAB_LABELS.internal, '横截面结构')
+  assert.equal(DETAIL_TAB_LABELS.leadership, '主导成员更替')
+  assert.equal(DETAIL_TAB_LABELS.attribution, '成员贡献')
+  assert.equal(DETAIL_TAB_LABELS.facts, '底层事实')
   assert.deepEqual(Object.keys(DETAIL_TAB_LABELS).sort(), ['attribution', 'current', 'dynamics', 'facts', 'internal', 'leadership'])
 })
 
 test('UX7. ATTRIBUTION_SUBTAB_LABELS 精确映射', () => {
   assert.equal(ATTRIBUTION_SUBTAB_LABELS.direction, '涨跌贡献')
-  assert.equal(ATTRIBUTION_SUBTAB_LABELS.capital, '资金偏向贡献')
-  assert.equal(ATTRIBUTION_SUBTAB_LABELS.breadth, '涨跌分布')
+  assert.equal(ATTRIBUTION_SUBTAB_LABELS.capital, '成交加权差贡献')
+  assert.equal(ATTRIBUTION_SUBTAB_LABELS.breadth, '成员涨跌')
   assert.equal(ATTRIBUTION_SUBTAB_LABELS.concentration, '集中度贡献')
-  assert.equal(ATTRIBUTION_SUBTAB_LABELS.leadership, '龙头贡献')
+  assert.equal(ATTRIBUTION_SUBTAB_LABELS.leadership, '主导贡献')
 })
 
 test('UX8. FACT_GROUP_ALIASES 覆盖 canonical 顶层分组（展示别名，key 不变）', () => {
@@ -184,7 +184,7 @@ test('UX9. canonical phase/readiness/sort 值原样保留（URL SSOT）', () => 
   assert.equal(dec.readiness, 'ready')
   assert.equal(dec.sort, 'velocity_desc')
   // URL 中不得出现中文 phase label（canonical 必须保持英文）
-  assert.ok(!enc.toString().includes('初步抬升'), 'URL 不得包含中文展示 label')
+  assert.ok(!enc.toString().includes('低分位启动'), 'URL 不得包含中文展示 label')
 })
 
 test('UX10. 前端不硬编码 canonical 8-group 中文 label map（R3B-FE-7 延续）', () => {

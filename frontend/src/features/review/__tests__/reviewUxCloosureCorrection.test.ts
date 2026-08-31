@@ -101,8 +101,8 @@ test('source: 表格 Technical cell 使用中文简称，不再使用 cryptic �
   const src = readSource('ScopeExplorerTable.tsx')
   assert.ok(/label: '集中度'/.test(src), '缺少 集中度 中文简称')
   assert.ok(/label: '头部贡献'/.test(src), '缺少 头部贡献 中文简称')
-  assert.ok(/label: '龙头差'/.test(src), '缺少 龙头差 中文简称')
-  assert.ok(/label: '龙头'/.test(src), '缺少 龙头 中文简称')
+  assert.ok(/label: '主导-中位差'/.test(src), '缺少 主导-中位差 中文简称')
+  assert.ok(/label: '主导成员'/.test(src), '缺少 主导成员 中文简称')
   // 不得再出现 cryptic 前缀
   assert.ok(!/HHI \$/.test(src), '仍存在 HHI 单字母')
   assert.ok(!/Top5 \$/.test(src), '仍存在 Top5 单字母')

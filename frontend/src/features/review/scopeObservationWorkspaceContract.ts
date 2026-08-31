@@ -11,7 +11,7 @@
 // - 不创建 generic fact-kind detector（detectFactKind / inferDistribution / inferCategorical）。
 // - 前端不维护第二份 canonical 8-group 中文 label map（label 只能来自 backend group.label）。
 //
-// 区域标题（价格与资金 / 趋势 / 结构 / 动量 / 成交量 / 数据背景）是 UI IA 标签，
+// 区域标题（涨跌与成交 / 趋势状态 / 技术结构 / 压缩与释放 / 量能异常 / 数据状态）是 UI IA 标签，
 // 不是新的业务 semantic owner；区域内部 group heading 必须渲染 backend group.label。
 // REVIEW-UX-CN-01：areaTitle 已中文化；areaKey / groupKeys / canonical group_key 不变。
 //
@@ -55,32 +55,32 @@ export interface ObservationWorkspaceArea {
 export const OBSERVATION_WORKSPACE_AREAS: ReadonlyArray<ObservationWorkspaceArea> = [
   {
     areaKey: 'price',
-    areaTitle: '价格与资金',
+    areaTitle: '涨跌与成交',
     groupKeys: ['price_capital'],
   },
   {
     areaKey: 'trend',
-    areaTitle: '趋势',
+    areaTitle: '趋势状态',
     groupKeys: ['trend_state', 'trend_progress', 'trend_volume_confirmation'],
   },
   {
     areaKey: 'structure',
-    areaTitle: '结构',
+    areaTitle: '技术结构',
     groupKeys: ['structure_break_turn', 'structure_evolution_position'],
   },
   {
     areaKey: 'momentum',
-    areaTitle: '动量',
+    areaTitle: '压缩与释放',
     groupKeys: ['momentum_squeeze_release'],
   },
   {
     areaKey: 'volume',
-    areaTitle: '成交量',
+    areaTitle: '量能异常',
     groupKeys: ['volume_anomaly'],
   },
   {
     areaKey: 'context',
-    areaTitle: '数据背景',
+    areaTitle: '数据状态',
     groupKeys: [],
   },
 ]

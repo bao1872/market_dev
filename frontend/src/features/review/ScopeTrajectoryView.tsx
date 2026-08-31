@@ -111,7 +111,7 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
           </text>
         ))}
         <text x={(PAD_L + W - PAD_R) / 2} y={H - 6} textAnchor="middle" className={styles.trajAxisLabel}>
-          历史位置（0–100）
+          等权涨跌分位（0–100）
         </text>
         {/* 节点（含 acceleration 中性字形） */}
         {plottable.map((r) => {
@@ -137,7 +137,7 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
               role="button"
               aria-label={`板块 ${r.scopeName ?? r.scopeKey}`}
             >
-              <title>{`${r.scopeName ?? r.scopeKey} · 变化速度 ${vel.toFixed(2)}`}</title>
+              <title>{`${r.scopeName ?? r.scopeKey} · 分位动能 ${vel.toFixed(2)}`}</title>
               <circle cx={cx} cy={cy} r={rNode} />
               {accel !== null && (
                 <text
@@ -160,18 +160,18 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
           transform={`rotate(-90 14 ${(PAD_T + H - PAD_B) / 2})`}
           className={styles.trajAxisLabel}
         >
-          变化速度
+          分位动能
         </text>
       </svg>
       <div className={styles.trajLegend}>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>▲</span> 正向变化加速度
+          <span className={styles.accelGlyph}>▲</span> 正向动能偏离
         </span>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>▼</span> 负向变化加速度
+          <span className={styles.accelGlyph}>▼</span> 负向动能偏离
         </span>
         <span className={styles.trajLegendItem}>
-          <span className={styles.accelGlyph}>■</span> 零变化加速度
+          <span className={styles.accelGlyph}>■</span> 零动能偏离
         </span>
         <span className={styles.trajLegendItem}>● 节点中性色（选中为品牌描边）</span>
       </div>

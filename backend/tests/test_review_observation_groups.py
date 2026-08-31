@@ -166,13 +166,13 @@ def test_l2_has_exactly_8_fixed_groups_in_order():
     assert len(l2) == 8
 
     expected_labels = [
-        "价格与资金表现",
-        "趋势状态",
-        "趋势进程",
-        "趋势量能确认",
+        "涨跌与成交",
+        "趋势方向与强度",
+        "趋势进展",
+        "趋势与量能",
         "结构突破与转折",
         "结构演化与位置",
-        "动量与压缩释放",
+        "压缩与释放",
         "量能异常",
     ]
     for spec, key, label in zip(L2_GROUP_SPECS, expected_keys, expected_labels, strict=True):

@@ -54,7 +54,7 @@ class ObservationGroupSpec:
 # Fixed 8-group specification (PRD §7.7)
 # ---------------------------------------------------------------------------
 
-# Group 1 — 价格与资金表现
+# Group 1 — 涨跌与成交（价格侧与成交额侧的表现事实）
 _PRICE_CAPITAL_FACTS = (
     ObservationGroupFactRef("equal_weight_return", ("price", "equal_weight_return")),
     ObservationGroupFactRef("amount_weighted_return", ("price", "amount_weighted_return")),
@@ -64,14 +64,14 @@ _PRICE_CAPITAL_FACTS = (
     ObservationGroupFactRef("amount_hhi", ("price", "amount", "concentration")),
 )
 
-# Group 2 — 趋势状态
+# Group 2 — 趋势方向与强度
 _TREND_STATE_FACTS = (
     ObservationGroupFactRef("trend_direction_member_ratio", ("trend", "state")),
     ObservationGroupFactRef("trend_strength", ("trend", "continuous", "regime_strength")),
     ObservationGroupFactRef("dsa_vwap_dev_pct", ("trend", "continuous", "dsa_vwap_dev_pct")),
 )
 
-# Group 3 — 趋势进程
+# Group 3 — 趋势进展
 _TREND_PROGRESS_FACTS = (
     ObservationGroupFactRef("current_segment_bars", ("trend", "continuous", "segment_bars")),
     ObservationGroupFactRef("segment_change_pct", ("trend", "continuous", "segment_change_pct")),
@@ -85,7 +85,7 @@ _TREND_PROGRESS_FACTS = (
     ObservationGroupFactRef("vwap_ret_total", ("trend", "continuous", "vwap_ret_total")),
 )
 
-# Group 4 — 趋势量能确认 (reuses segment volume/amount mean ratio from Group 3)
+# Group 4 — 趋势与量能 (reuses segment volume/amount mean ratio from Group 3)
 _TREND_VOLUME_CONFIRMATION_FACTS = (
     ObservationGroupFactRef(
         "segment_volume_mean_ratio", ("trend", "continuous", "segment_volume_mean_ratio")
@@ -115,7 +115,7 @@ _STRUCTURE_EVOLUTION_POSITION_FACTS = (
     ),
 )
 
-# Group 7 — 动量与压缩释放
+# Group 7 — 压缩与释放
 _MOMENTUM_SQUEEZE_RELEASE_FACTS = (
     ObservationGroupFactRef("squeeze_state", ("momentum", "squeeze_state")),
     ObservationGroupFactRef("bb_position", ("momentum", "bb_position")),
@@ -133,16 +133,18 @@ _VOLUME_ANOMALY_FACTS = (
     ObservationGroupFactRef("volume_zscore200", ("participation", "volume", "zscore200")),
 )
 
+# [REVIEW-UX-TERMINOLOGY-01 / T1] label 为唯一用户可见中文 owner（前端不得另建映射）。
+# 只允许调整 label 与分组注释；group_key / facts / source_path / projection 一律不变。
 L2_GROUP_SPECS: tuple[ObservationGroupSpec, ...] = (
-    ObservationGroupSpec("price_capital", "价格与资金表现", _PRICE_CAPITAL_FACTS),
-    ObservationGroupSpec("trend_state", "趋势状态", _TREND_STATE_FACTS),
-    ObservationGroupSpec("trend_progress", "趋势进程", _TREND_PROGRESS_FACTS),
-    ObservationGroupSpec("trend_volume_confirmation", "趋势量能确认", _TREND_VOLUME_CONFIRMATION_FACTS),
+    ObservationGroupSpec("price_capital", "涨跌与成交", _PRICE_CAPITAL_FACTS),
+    ObservationGroupSpec("trend_state", "趋势方向与强度", _TREND_STATE_FACTS),
+    ObservationGroupSpec("trend_progress", "趋势进展", _TREND_PROGRESS_FACTS),
+    ObservationGroupSpec("trend_volume_confirmation", "趋势与量能", _TREND_VOLUME_CONFIRMATION_FACTS),
     ObservationGroupSpec("structure_break_turn", "结构突破与转折", _STRUCTURE_BREAK_TURN_FACTS),
     ObservationGroupSpec(
         "structure_evolution_position", "结构演化与位置", _STRUCTURE_EVOLUTION_POSITION_FACTS
     ),
-    ObservationGroupSpec("momentum_squeeze_release", "动量与压缩释放", _MOMENTUM_SQUEEZE_RELEASE_FACTS),
+    ObservationGroupSpec("momentum_squeeze_release", "压缩与释放", _MOMENTUM_SQUEEZE_RELEASE_FACTS),
     ObservationGroupSpec("volume_anomaly", "量能异常", _VOLUME_ANOMALY_FACTS),
 )
 

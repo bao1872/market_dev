@@ -1157,7 +1157,7 @@ test('P0-6: ReviewTerm tooltip 经 React Portal 到 document.body，非 absolute
 // P0-1 补充：Phase 列普通用户文案应为“阶段”（非 Phase），来自 REVIEW_TERMS.phase.label
 test('P0-1 补充: 阶段列中文文案为“阶段”', () => {
   const rc = read('reviewCopy.ts')
-  assert.match(rc, /phase:\s*\{\s*label:\s*'阶段'/, 'REVIEW_TERMS.phase.label 必须为中文“阶段”')
+  assert.match(rc, /phase:\s*\{\s*label:\s*'动态阶段'/, 'REVIEW_TERMS.phase.label 必须为中文“动态阶段”')
 })
 
 

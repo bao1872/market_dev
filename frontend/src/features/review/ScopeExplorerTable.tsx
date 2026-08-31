@@ -87,8 +87,8 @@ function TechnicalCell({ obs }: { obs: ReviewScopeListItem['observationSummary']
   const parts = [
     hhi === null || hhi === undefined ? null : { label: '集中度', value: hhi.toFixed(3) },
     top5 === NULL_DISPLAY ? null : { label: '头部贡献', value: top5 },
-    gap === null || gap === undefined ? null : { label: '龙头差', value: gap.toFixed(2) },
-    leader === null || leader === undefined ? null : { label: '龙头', value: leader },
+    gap === null || gap === undefined ? null : { label: '主导-中位差', value: gap.toFixed(2) },
+    leader === null || leader === undefined ? null : { label: '主导成员', value: leader },
   ].filter((p): p is { label: string; value: string } => p !== null)
   if (parts.length === 0) return <span className={styles.neutral}>{NULL_DISPLAY}</span>
   return (

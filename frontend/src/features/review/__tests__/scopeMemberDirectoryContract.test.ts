@@ -79,7 +79,7 @@ const LEADERSHIP_SRC = read('ScopeLeadershipPanel.tsx')
 const ATTRIBUTION_SRC = read('ScopeMemberAttributionPanel.tsx')
 
 test('PC7. Leadership 面板接入 displayMember（不展示裸 UUID）', () => {
-  assert.ok(LEADERSHIP_SRC.includes('displayMember(id, directory)'), '龙头 chip 走 displayMember')
+  assert.ok(LEADERSHIP_SRC.includes('displayMember(id, directory)'), '主导成员 chip 走 displayMember')
   assert.ok(LEADERSHIP_SRC.includes('title={id}'), 'UUID 仅保留在 title 技术 hover')
   assert.doesNotMatch(LEADERSHIP_SRC, /\{ids\.map\(\(id\) => \(\s*<span[^>]*>\{id\}<\/span>/)
 })

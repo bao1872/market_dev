@@ -27,13 +27,13 @@ function makeGroup(key: string, label: string, facts: Record<string, unknown> = 
 
 function makeValidGroups(): ObservationGroups {
   return {
-    price_capital: makeGroup('price_capital', '价格与资金表现', { equal_weight_return: 0.01 }),
-    trend_state: makeGroup('trend_state', '趋势状态', { trend_direction_member_ratio: {} }),
-    trend_progress: makeGroup('trend_progress', '趋势进程', { segment_bars: 14 }),
-    trend_volume_confirmation: makeGroup('trend_volume_confirmation', '趋势量能确认', { segment_volume_mean_ratio: 1.2 }),
+    price_capital: makeGroup('price_capital', '涨跌与成交', { equal_weight_return: 0.01 }),
+    trend_state: makeGroup('trend_state', '趋势方向与强度', { trend_direction_member_ratio: {} }),
+    trend_progress: makeGroup('trend_progress', '趋势进展', { segment_bars: 14 }),
+    trend_volume_confirmation: makeGroup('trend_volume_confirmation', '趋势与量能', { segment_volume_mean_ratio: 1.2 }),
     structure_break_turn: makeGroup('structure_break_turn', '结构突破与转折', { bos_choch_events: {} }),
     structure_evolution_position: makeGroup('structure_evolution_position', '结构演化与位置', { ob_and_eq_events: {} }),
-    momentum_squeeze_release: makeGroup('momentum_squeeze_release', '动量与压缩释放', { squeeze_state: 'NONE' }),
+    momentum_squeeze_release: makeGroup('momentum_squeeze_release', '压缩与释放', { squeeze_state: 'NONE' }),
     volume_anomaly: makeGroup('volume_anomaly', '量能异常', { volume_ratio20: 1.0 }),
   }
 }
@@ -52,8 +52,8 @@ test('R3B-FE-5: exactly 8 canonical groups present', () => {
 // R3B-FE-6：group heading uses backend group.label
 test('R3B-FE-6: group label comes from backend', () => {
   const model = buildObservationWorkspaceModel(makeValidGroups())
-  assert.equal(model.allGroups[0].label, '价格与资金表现')
-  assert.equal(model.allGroups[1].label, '趋势状态')
+  assert.equal(model.allGroups[0].label, '涨跌与成交')
+  assert.equal(model.allGroups[1].label, '趋势方向与强度')
 })
 
 // R3B-FE-8：Trend contains exactly trend_state/trend_progress/trend_volume_confirmation
