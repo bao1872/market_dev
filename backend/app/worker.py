@@ -1689,6 +1689,7 @@ async def _chip_consensus_poll_once() -> bool:
 
     from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
     from app.services.after_close_chip_consensus_service import (
+        ChipPreemptedForShutdown,
         _CHIP_LEASE_SECONDS,
         CHIP_CONSENSUS_JOB_NAME,
         execute_after_close_chip_consensus,
@@ -1708,6 +1709,7 @@ async def _chip_consensus_poll_once() -> bool:
         claim_next_job_run,
         finalize_job_run,
         merge_job_run_metadata,
+        requeue_owned_job_to_resume,
     )
 
     async with AsyncSessionLocal() as db:
@@ -1871,6 +1873,7 @@ async def _chip_consensus_poll_once() -> bool:
             worker_id=_WORKER_INSTANCE_ID,
             lease_epoch=current_lease_epoch,
             ownership_check=heartbeat.ensure_owned,
+            shutdown_check=lambda: _shutdown,
         )
         heartbeat.ensure_owned()
         chip_status = str(chip_result_summary.get("status", "failed"))
@@ -2041,6 +2044,26 @@ async def _chip_consensus_poll_once() -> bool:
             "[ChipConsensusWorker] 已失去租约，禁止终态或后续写入: job_run_id=%s, error=%s",
             job_run_id, exc,
         )
+        return True
+    except ChipPreemptedForShutdown as exc:
+        logger.info(
+            "[ChipConsensusWorker] SIGTERM 优雅抢占：chip 已在安全边界停止，"
+            "job_run_id=%s 转 resume_queued，worker 退出",
+            job_run_id,
+        )
+        try:
+            requeued = await requeue_owned_job_to_resume(lease_token)
+            if not requeued:
+                logger.warning(
+                    "[ChipConsensusWorker] 抢占 requeue 未命中（租约已转移？）："
+                    "job_run_id=%s",
+                    job_run_id,
+                )
+        except Exception as req_exc:
+            logger.exception(
+                "[ChipConsensusWorker] 抢占 requeue 异常：job_run_id=%s, error=%s",
+                job_run_id, req_exc,
+            )
         return True
     except Exception as exc:
         logger.exception(

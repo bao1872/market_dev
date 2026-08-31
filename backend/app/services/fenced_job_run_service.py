@@ -201,6 +201,47 @@ async def finalize_job_run(
         return True
 
 
+async def requeue_owned_job_to_resume(
+    token: FencedJobToken,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
+    now: datetime | None = None,
+) -> bool:
+    """Atomically yield a currently-owned running job back to the queue.
+
+    Used for graceful preemption: the owning worker received SIGTERM and finished
+    its current safe batch, so it releases ownership and re-enqueues the job as
+    ``resume_queued`` for another worker to continue from pending instruments.
+
+    Only succeeds if ``token`` is still the live owner (status == 'running' and
+    both ``worker_instance_id`` and ``lease_epoch`` still match) — this is the
+    ownership fence that prevents a stale worker from writing after requeue.
+
+    Returns:
+        True if the job was requeued (rowcount == 1); False if ownership no longer
+        matches (e.g. a watchdog already transferred it).
+    """
+    requeued_at = now or datetime.now(_TZ)
+    async with session_factory() as db:
+        result = await db.execute(
+            update(SchedulerJobRun)
+            .where(*_owned_job_predicates(token))
+            .values(
+                status="resume_queued",
+                worker_instance_id=None,
+                lease_expires_at=None,
+                finished_at=None,
+                heartbeat_at=requeued_at,
+                updated_at=requeued_at,
+            )
+        )
+        if getattr(result, "rowcount", 0) != 1:
+            await db.rollback()
+            return False
+        await db.commit()
+        return True
+
+
 async def merge_job_run_metadata(
     job_run_id: uuid.UUID,
     metadata_updates: dict[str, Any],

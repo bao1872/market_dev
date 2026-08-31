@@ -22,6 +22,8 @@
                      → failed（全部失败或不可恢复错误）
     running → interrupted（watchdog 检测 lease 过期）
     interrupted → resume_queued（auto-resume，仅重试未成功项）
+    running → resume_queued（SIGTERM 优雅抢占：当前 instrument 前批次已持久化，
+                主动 yield ownership，新 worker 从 pending 继续，不重算）
     部分成功：主 status=succeeded，metadata.chip_status="partial"
 
 幂等键：
@@ -34,6 +36,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from datetime import date, time
 from typing import Any
 
@@ -49,6 +52,23 @@ from app.services.first_pyramid_flatten import flatten_chip_fields
 from app.services.idempotency_service import acquire_job_run_lock
 
 logger = logging.getLogger(__name__)
+
+
+class ChipPreemptedForShutdown(RuntimeError):
+    """Raised when a shutdown signal is observed at a safe per-instrument checkpoint.
+
+    The owning worker catches this and requeues the job (running -> resume_queued)
+    so another worker can continue from pending instruments. This makes chip
+    consensus genuinely preemptible under SIGTERM (matching its declared contract)
+    instead of blocking worker shutdown until the full run completes.
+    """
+
+    def __init__(self, job_run_id: uuid.UUID) -> None:
+        self.job_run_id = job_run_id
+        super().__init__(
+            f"chip consensus preempted for shutdown at safe checkpoint: job_run_id={job_run_id}"
+        )
+
 
 # =============================================================================
 # 常量与状态合同
@@ -285,8 +305,9 @@ async def execute_after_close_chip_consensus(
     worker_id: str | None = None,
     lease_epoch: int | None = None,
     ownership_check: Any | None = None,
-    batch_size: int = _CHIP_BATCH_SIZE,
-    _diag_sink: dict[str, Any] | None = None,
+        batch_size: int = _CHIP_BATCH_SIZE,
+        shutdown_check: Callable[[], bool] | None = None,
+        _diag_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """[CHANGE-20260729-003] 执行盘后筹码共识独立任务。
 
@@ -371,6 +392,16 @@ async def execute_after_close_chip_consensus(
         for instrument_id in batch:
             if ownership_check is not None:
                 ownership_check()
+            if shutdown_check is not None and shutdown_check():
+                # [Graceful preemption] 当前 instrument 尚未处理；上一 instrument 的
+                # 快照已在 _upsert_chip_snapshot 内 commit，故此处为安全边界。
+                # 主动 preempt → 由调用方将 job 转 resume_queued 后退出。
+                logger.info(
+                    "[ChipConsensus] SIGTERM 安全边界：当前 instrument 前批次已持久化，"
+                    "主动 preempt job_run_id=%s → resume_queued",
+                    job_run_id,
+                )
+                raise ChipPreemptedForShutdown(job_run_id=job_run_id)
             try:
                 # 获取 daily + 15m bars（point-in-time <= trade_date）
                 # [Phase 3 / GAP-08] compute loop 不再逐股 refresh（运行级 refresh 已提前完成）
