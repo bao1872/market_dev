@@ -85,26 +85,29 @@ docker compose ps -q <service>  -> 容器 ID  -> docker inspect <容器 ID> --fo
 
 ## 远程验证框架
 
-当前仓库的正式本地控制入口为 `scripts/ops/panji-verify`；旧
-`scripts/ops/panji-verify-run` 仅委托给该入口。`full-closure` 计划由
-`scripts/verify/plans/full-closure.json` 选择注册 profile，
-`scripts/verify/verification_plan.py` 拒绝未知字段与未注册值。
+唯一正式入口是 `scripts/ops/panji-verify`；旧 `panji-verify-run` 已删除，不得恢复。
+注册计划为：`targeted-pg`（upgrade head + PG contracts）、`migration-roundtrip`
+（upgrade/downgrade/upgrade）和 `full-closure`（PG + synthetic seed + closure E2E）。
 
-远端编排位于 `scripts/verify/verify_attempt.py`：完整 SHA 派生精确数据库和 Compose project，
-全局非阻塞锁阻止并发 attempt；数据库创建和删除都通过维护库连接；Migration 执行
-upgrade/downgrade/upgrade/重复 upgrade；PG 由 Compose 的一次性 `verify-test` 运行；finally 导出
-证据、精确清理并复检。`cleanup_runner.py` 不执行 volume/image/global prune，证据目录不随清理删除；
-`evidence_exporter.py` 对日志和总证据设上限。以上为已通过本地合同测试和静态检查的代码事实，
-尚未在远程 PostgreSQL 完整实跑，因此 `remote_verification_verified=false`。
+远端固定 Compose project 为 `panji-verify`，只保留长期空闲容器
+`panji-verify-python`。容器使用 `panji-verify-runtime:current`，依赖哈希不变时复用；
+每个 gate 由 `verify_exec.py` 启动 fresh process。容器不运行 Scheduler、Worker、Uvicorn
+或常驻 pytest，也不连接 Redis。
 
-正式入口只把 SHA 与登记计划交给 `run_remote_verification.sh`。后者调用
-`prepare_verify_environment.py`，从既有容器身份生成仓库外、权限 `0600` 的单次环境文件并设置
-trap 删除；数据库 URL 不进入 SSH 命令、进程参数、manifest 或 Git。建删库通过 PostgreSQL 容器，
-Migration、PG、Seed 与 Synthetic E2E 通过一次性 `verify-test` 执行，不依赖宿主机 Python/PG 工具。
-验证环境分别生成 asyncpg `DATABASE_URL` 与 psycopg `MIGRATION_DATABASE_URL`；Alembic 优先读取
-后者，应用与 PG 测试继续使用前者。
-`verify-test` 使用 `backend/Dockerfile` 的 `verification` target：继承运行镜像内容，但在构建阶段加入
-锁定的 `.[dev]` 测试依赖，tag 为 `panji-verify-test:<完整SHA>`，attempt 结束后精确删除。
+Single-flight lock 覆盖完整 attempt。完整 SHA 派生唯一 `bz_stock_verify_<40SHA>`，
+该库位于既有 `trading-postgres`，不创建 PostgreSQL 容器或 Volume。仓库外的 attempt env
+权限为 `0600`；秘密不进入命令参数、manifest 或 Git。
+
+PG selection 由 `scripts/verify/evidence_manifest.json` 唯一声明，使用显式 selector，
+禁止 glob 与动态全仓 discovery。pytest plugin 记录 collected/deselected nodeid 和
+setup/call/teardown 结果；`evidence-coverage.json` 逐 contract 输出
+`passed/failed/skipped/deselected/not_registered/not_run/blocked`。只有 required contracts
+全部实际执行并通过，PG Gate 才能 PASS；pytest exit code 0 本身不是 closure。
+
+Attempt 无论成功、失败、取消或超时，都会先导出 bounded evidence，再精确 drop 本次验证库、
+清除 attempt 临时状态并复检。Cleanup 不删除长期容器、镜像、共享网络、Volume 或 evidence，
+不执行 global prune、Compose down 或 Redis flush。远程结果以每次 evidence 目录中的
+summary、coverage 与 cleanup 为准。
 
 实现边界：
 

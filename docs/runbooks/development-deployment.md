@@ -1,7 +1,7 @@
 # 开发部署 Runbook
 
 本文件是盘迹唯一的当前部署 Runbook。硬约束见
-`rules/80-deployment-data-safety.md`，运行事实见 `docs/maps/80-system-runtime.md`。
+`rules/80-deployment-migration.md`，运行事实见 `docs/maps/80-system-runtime.md`。
 
 ## 适用边界
 
@@ -21,28 +21,33 @@
 
 ### remote verification（远程验证，不等同于稳定运行部署）
 
-- 目标：把同一 SHA 部署到独立验证栈；正式 runner 在仓库外生成单次环境文件，操作 `bz_stock_verify_<sha>`。
+- 目标：用 exact SHA 的代码在固定验证 runtime 中操作一次性 `bz_stock_verify_<40SHA>`。
 - 约束（详见 `rules/80` DS-110/111/112）：
-  - 独立 Compose project（`panji-verify`），不复用正式容器；
-  - 端口仅绑定 `127.0.0.1`，只经 SSH Tunnel 访问；
-  - `APP_ENV=verification`、独立 Redis DB/前缀；
-  - 自动 Scheduler 关闭（`PANJI_SCHEDULER_ENABLED=false`）；
-  - 只启动必要 Worker（after-close / chip / watchdog），不加入正式 Nginx 公网入口；
-  - **绝不连接 `bz_stock`**。
-- 唯一正式入口：`scripts/ops/panji-verify`；`panji-verify-run` 仅为兼容适配器，低层脚本不得被拼装成另一条正式流程。
-- 连接校验：验证栈启动后执行 `SELECT current_database()`，非 `bz_stock_verify_<sha>` 立即中止。
+  - 固定 Compose project `panji-verify` 与长期空闲容器 `panji-verify-python`；
+  - 不发布 host port，不启动 Scheduler/Worker/Uvicorn，不连接 Redis；
+  - 复用 `trading-postgres` 网络，但绝不连接或读取 `bz_stock`；
+  - `current_database()` 必须全等于 SHA 派生验证库；
+  - 每个 gate 由 `verify_exec.py` 运行 fresh process。
+- 唯一正式入口：`scripts/ops/panji-verify`；不得恢复第二入口或拼装低层脚本。
 - 验证栈不得替代正式运行栈；验收通过后才允许同 SHA 申请部署正式栈。验证授权不自动包含正式栈部署授权。
 
-已准备好远程验证环境变量和用户授权后，从本地执行：
+按目标选择一个注册计划：
 
 ```bash
+scripts/ops/panji-verify run --sha <FULL_40_SHA> --plan targeted-pg
+scripts/ops/panji-verify run --sha <FULL_40_SHA> --plan migration-roundtrip
 scripts/ops/panji-verify run --sha <FULL_40_SHA> --plan full-closure
 ```
 
-入口先执行 preflight，再通过受控 SSH 调用目标 SHA 的远端 runner。无需也不得手工提供数据库
-URL 或验证环境文件；runner 创建 `0600` 单次文件并在退出时删除。`full-closure` 是当前唯一登记计划；不得
-添加临时命令、pytest 参数或插件。结束后检查 evidence 中 target/repo/runtime SHA、数据库、
-revision、gate 与 cleanup 状态；`blocked_cleanup` 时停止新的验证尝试并按精确资源名处理。
+Exploration 的 PostgreSQL 合同使用 `targeted-pg`；Migration 专项使用
+`migration-roundtrip`；`full-closure` 只用于明确 Hardening/Release 或完整 closure。
+
+入口先执行 preflight，再经受控 SSH 调用目标 SHA 的 runner。不得手工提供数据库 URL、
+环境文件、pytest 参数或插件。PG 测试由 `evidence_manifest.json` 的显式 selector 注册。
+结束后检查 target SHA/数据库身份、required contracts 全部 `passed`，不存在 required
+`skipped/deselected/not_registered/not_run/blocked`，并确认 `cleanup.json` 中验证库
+`dropped=true`、`blocked_cleanup=false`。清理阻塞时停止新 attempt，只按 manifest
+中的精确资源身份处理。
 
 ## 部署前
 
