@@ -24,7 +24,7 @@ function SqueezeStateBlock({ squeeze }: { squeeze: SqueezeStateVM | null }) {
     return <div className={styles.mvNeutral}>暂无压缩状态分布</div>
   }
   if (squeeze.unavailable) {
-    return <div className={styles.mvUnavailable}>无有效成员（denominator=0）→ 全部占比不可用，非 0%</div>
+    return <div className={styles.mvUnavailable}>无有效成员（有效成员数=0）→ 全部占比不可用，非 0%</div>
   }
   return (
     <div className={styles.mvSqueezeGrid}>
@@ -35,7 +35,7 @@ function SqueezeStateBlock({ squeeze }: { squeeze: SqueezeStateVM | null }) {
           <span className={styles.mvSqueezeCount}>n={c.count}</span>
         </div>
       ))}
-      <div className={styles.mvDenominator}>denominator (有效成员) = {squeeze.denominator}</div>
+      <div className={styles.mvDenominator}>有效成员数 = {squeeze.denominator}</div>
     </div>
   )
 }
@@ -63,7 +63,7 @@ function CurrentOnlyBlock({
       <div className={styles.mvBlock}>
         <div className={styles.mvBlockTitle}>{title}</div>
         <div className={styles.mvUnavailable}>
-          不可用{dist.reason ? `：${dist.reason}` : ''}（valid_count=0）
+          不可用{dist.reason ? `：${dist.reason}` : ''}（有效数为 0）
         </div>
       </div>
     )
@@ -103,12 +103,12 @@ const ScopeMomentumObservation: FC<Props> = ({ vm }) => {
         <SqueezeStateBlock squeeze={vm.squeeze} />
       </div>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>BB 位置</div>
+        <div className={styles.mvSectionTitle}>布林带位置</div>
         <CurrentOnlyBlock title="" dist={vm.bbPosition} unit="raw" />
         <div className={styles.mvNote}>0 = 下轨 / 1 = 上轨；轨道外值合法，不做 clamp</div>
       </div>
       <div className={styles.mvSection}>
-        <div className={styles.mvSectionTitle}>BB 宽度</div>
+        <div className={styles.mvSectionTitle}>布林带宽度</div>
         <CurrentOnlyBlock title="" dist={vm.bbWidth} unit="raw" />
         <div className={styles.mvNote}>无量纲宽度比率，非百分比（不 ×100）</div>
       </div>

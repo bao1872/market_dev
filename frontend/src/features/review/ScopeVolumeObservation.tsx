@@ -49,9 +49,9 @@ function MatrixCell({ d, kind }: { d: VolumeDistributionVM | null; kind: MetricK
 
 const ScopeVolumeObservation: FC<Props> = ({ vm }) => {
   const rows: { label: string; termKey: ReviewTermKey; kind: MetricKind; k20: keyof VolumeObservationVM; k200: keyof VolumeObservationVM }[] = [
-    { label: '量比', termKey: 'volumeRatio', kind: 'ratio', k20: 'ratio20', k200: 'ratio200' },
-    { label: '分位数', termKey: 'percentile', kind: 'percentile', k20: 'percentile20', k200: 'percentile200' },
-    { label: 'Z分数', termKey: 'zScore', kind: 'zscore', k20: 'zscore20', k200: 'zscore200' },
+    { label: '成交量比', termKey: 'volumeRatio', kind: 'ratio', k20: 'ratio20', k200: 'ratio200' },
+    { label: '历史分位', termKey: 'percentile', kind: 'percentile', k20: 'percentile20', k200: 'percentile200' },
+    { label: 'Z 分数', termKey: 'zScore', kind: 'zscore', k20: 'zscore20', k200: 'zscore200' },
   ]
   return (
     <div className={styles.mvRoot}>
@@ -62,11 +62,11 @@ const ScopeVolumeObservation: FC<Props> = ({ vm }) => {
           <div className={styles.mvMatrixHead}>20日</div>
           <div className={styles.mvMatrixHead}>200日</div>
           {rows.map((r) => (
-            <FragmentRow key={r.label} label={r.label} termKey={r.termKey} kind={r.kind} d20={vm[r.k20]} d200={vm[r.k200]} />
+            <FragmentRow key={r.label} termKey={r.termKey} kind={r.kind} d20={vm[r.k20]} d200={vm[r.k200]} />
           ))}
         </div>
         <div className={styles.mvNote}>
-          量比 → ×；分位数 → 原值（0–100）；Z分数 → 原始 z。均为中性分析语气，无方向配色。
+          成交量比 → ×；历史分位 → 原值（0–100）；Z 分数 → 原始 z。均为中性分析语气，无方向配色。
           200日不可用时显示 “—”（上游 200日就绪条件未满足），不回填 0 或 20日。
         </div>
       </div>
@@ -75,13 +75,11 @@ const ScopeVolumeObservation: FC<Props> = ({ vm }) => {
 }
 
 function FragmentRow({
-  label,
   termKey,
   kind,
   d20,
   d200,
 }: {
-  label: string
   termKey: ReviewTermKey
   kind: MetricKind
   d20: VolumeDistributionVM | null
@@ -90,7 +88,7 @@ function FragmentRow({
   return (
     <>
       <div className={styles.mvMatrixRowLabel}>
-        <ReviewTerm termKey={termKey} label={label} />
+        <ReviewTerm termKey={termKey} />
       </div>
       <MatrixCell d={d20} kind={kind} />
       <MatrixCell d={d200} kind={kind} />

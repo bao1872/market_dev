@@ -122,14 +122,14 @@ test('source: P0-1 普通 UI 不显示 historical_dynamics（改为中文 unavai
   // 旧的可视 unavailable 文案已移除（不再把 backend canonical 名称作为普通用户文本）
   assert.ok(!/该层当前不可用（无 historical_dynamics）/.test(dyn), '旧 historical_dynamics 可视文案仍存在')
   // 主视觉已改为中文
-  assert.ok(/本期暂无历史动态数据/.test(dyn), '缺少中文 unavailable 文案')
+  assert.ok(/本期暂无收益动态数据/.test(dyn), '缺少中文 unavailable 文案')
   // canonical 技术 identity 仅允许出现在注释/tooltip，不应作为主视觉文本
 })
 
 test('source: P0-2 普通错误标题不显示 backend canonical 名称（Current Observation）', () => {
   const cur = readSource('ScopeCurrentObservationWorkspace.tsx')
   assert.ok(!/Current Observation 合同无效/.test(cur), '普通错误标题仍含 backend canonical 名称')
-  assert.ok(/当日观察数据格式异常/.test(cur), '缺少中文错误主标题')
+  assert.ok(/当日事实数据格式异常/.test(cur), '缺少中文错误主标题')
   // err.message 仅作为技术细节，不作为主视觉文本（已放入 panelErrorDetail）
   assert.ok(/技术细节：\{err\.message\}/.test(cur), 'err.message 未降级为技术细节')
 })
