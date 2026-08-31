@@ -11,9 +11,11 @@
 - 不对 after_close_orchestrator 状态机做语义扩展。
 - overall_status 与系统概览的 PIPELINE_STATUS_* 是两套枚举，不可混用。
 [Phase8A] 步骤序列：refreshing_daily → syncing_boards → checking_coverage
-  → computing_features → publishing → watchlist_ready
+  → computing_features → computing_review → computing_history → watchlist_ready
   旧四状态（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
   映射到 computing_features，仅历史 run 兼容读取。
+  [CHANGE-20260831-ADMIN-TIMELINE] publishing 已从 current canonical DAG 移除：
+  不为当前 run 合成 publishing；仅当历史 run 真实存在 publishing 事件时如实呈现。
 """
 
 from __future__ import annotations
@@ -69,11 +71,16 @@ _PIPELINE_STEPS = [
     AfterCloseRunStatus.SYNCING_BOARDS.value,
     AfterCloseRunStatus.CHECKING_COVERAGE.value,
     AfterCloseRunStatus.COMPUTING_FEATURES.value,
-    AfterCloseRunStatus.PUBLISHING.value,
-    AfterCloseRunStatus.COMPUTING_HISTORY.value,
     AfterCloseRunStatus.COMPUTING_REVIEW.value,
+    AfterCloseRunStatus.COMPUTING_HISTORY.value,
     "watchlist_ready",
 ]
+
+# [CHANGE-20260831-ADMIN-TIMELINE] 历史 run 中可能出现的真实 legacy 步骤。
+# 仅用于事件识别（真实发生过的事件不得被吞掉），不进入 current canonical 默认序列。
+_LEGACY_EVENT_STEPS = frozenset({
+    AfterCloseRunStatus.PUBLISHING.value,
+})
 
 # [Phase8A] 旧四状态 → computing_features 的映射（历史 run 兼容读取）
 _LEGACY_STATUS_MAP = {
@@ -99,10 +106,14 @@ _COMPLETED_STEP_INDEX = {
     AfterCloseRunStatus.SYNCING_BOARDS.value: 1,
     AfterCloseRunStatus.CHECKING_COVERAGE.value: 2,
     AfterCloseRunStatus.COMPUTING_FEATURES.value: 3,
-    AfterCloseRunStatus.PUBLISHING.value: 4,
+    AfterCloseRunStatus.COMPUTING_REVIEW.value: 4,
     AfterCloseRunStatus.COMPUTING_HISTORY.value: 5,
-    AfterCloseRunStatus.COMPUTING_REVIEW.value: 6,
-    AfterCloseRunStatus.SUCCEEDED.value: 7,
+    AfterCloseRunStatus.SUCCEEDED.value: 6,
+    # legacy token：历史 run 的 last_completed_step 可能为 publishing（stock_core 发布步骤）。
+    # 与 orchestrator._COMPLETED_STEPS["publishing"] 语义一致：核心（features）已完成，
+    # 但 computing_review / computing_history 未完成，故映射回 computing_features 完成度（=3）；
+    # 不得因 publishing 不在 current canonical 序列中而丢失历史 run 的真实进度。
+    AfterCloseRunStatus.PUBLISHING.value: 3,
     # 旧四状态映射到 computing_features 的索引（历史 run 兼容）
     AfterCloseRunStatus.CREATING_DSA.value: 3,
     AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
@@ -285,7 +296,11 @@ def _resolve_event_step(event: JobRunEvent) -> str | None:
         if step in _LEGACY_STATUS_MAP:
             step = _LEGACY_STATUS_MAP[step]
     # 只关注 pipeline step
-    if step not in _PIPELINE_STEPS and step not in _ATTEMPT_BOUNDARY_STEPS:
+    if (
+        step not in _PIPELINE_STEPS
+        and step not in _LEGACY_EVENT_STEPS
+        and step not in _ATTEMPT_BOUNDARY_STEPS
+    ):
         return None
     return step
 
@@ -363,7 +378,10 @@ def _aggregate_step_events(
                 if isinstance(err_step, str):
                     if err_step in _LEGACY_STATUS_MAP:
                         err_step = _LEGACY_STATUS_MAP[err_step]
-                    if err_step in _PIPELINE_STEPS:
+                    if (
+                        err_step in _PIPELINE_STEPS
+                        or err_step in _LEGACY_EVENT_STEPS
+                    ):
                         step_error[err_step] = e.message or step_error.get(err_step, "")
 
             # terminal 事件：succeeded/failed 视为结束
@@ -374,7 +392,10 @@ def _aggregate_step_events(
                 terminal_at = t
                 continue
 
-            if not resolved_step or resolved_step not in _PIPELINE_STEPS:
+            if not resolved_step or (
+                resolved_step not in _PIPELINE_STEPS
+                and resolved_step not in _LEGACY_EVENT_STEPS
+            ):
                 continue
 
             # 同一 step 的后续事件更新 counts；不重复记录进入时间
@@ -604,6 +625,38 @@ def _compute_step_states(
             "error_message": stats.get("error_message"),
             "warnings": warnings_list if warnings_list else None,
         })
+
+    # [CHANGE-20260831-ADMIN-TIMELINE] legacy 兼容：历史 run 若真实产生过 publishing 事件，
+    # 必须如实呈现（不得吞掉）。publishing 不再是 current canonical 默认步骤，
+    # 因此仅在真实事件存在时补入，位置沿用 legacy DAG（computing_features 之后）。
+    if AfterCloseRunStatus.PUBLISHING.value in step_events:
+        pub_stats = step_events[AfterCloseRunStatus.PUBLISHING.value]
+        pub_started = pub_stats.get("started_at")
+        pub_finished = pub_stats.get("finished_at")
+        if pub_finished is not None:
+            pub_status = "completed"
+        elif pub_started is not None:
+            pub_status = "running"
+        else:
+            pub_status = "pending"
+        steps.insert(
+            _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value) + 1,
+            {
+                "step": AfterCloseRunStatus.PUBLISHING.value,
+                "status": pub_status,
+                "started_at": _format_dt(pub_started),
+                "finished_at": _format_dt(pub_finished),
+                "duration_seconds": (
+                    None
+                    if pub_status == "running"
+                    else pub_stats.get("duration_seconds")
+                ),
+                "counts": pub_stats.get("counts", {}),
+                "error_message": pub_stats.get("error_message"),
+                "warnings": None,
+            },
+        )
+
     return steps
 
 
@@ -919,27 +972,35 @@ if __name__ == "__main__":
     assert "computing_history" in _PIPELINE_STEPS, (
         "_PIPELINE_STEPS 必须包含 computing_history（历史状态推进阶段）"
     )
-    assert len(_PIPELINE_STEPS) == 8, (
-        f"8 步序列（含 computing_history / computing_review），实际={len(_PIPELINE_STEPS)}"
+    assert len(_PIPELINE_STEPS) == 7, (
+        f"7 步 canonical 序列（含 computing_history / computing_review），实际={len(_PIPELINE_STEPS)}"
     )
-    # 顺序：computing_history 在 publishing 之后、computing_review 之前；review 在 watchlist_ready 之前
-    pub_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.PUBLISHING.value)
-    hist_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_HISTORY.value)
+    # publishing 不再为 current canonical DAG 合成，但历史真实事件不得被吞掉
+    assert AfterCloseRunStatus.PUBLISHING.value not in _PIPELINE_STEPS, (
+        "publishing 不再是 current canonical 步骤，不得为当前 run 合成"
+    )
+    assert AfterCloseRunStatus.PUBLISHING.value in _LEGACY_EVENT_STEPS, (
+        "publishing 必须保留在 _LEGACY_EVENT_STEPS 中，避免历史真实事件被吞掉"
+    )
+    # 顺序：computing_review 在 computing_features 之后、computing_history 之前
+    feat_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value)
     rev_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_REVIEW.value)
+    hist_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_HISTORY.value)
     wl_idx = _PIPELINE_STEPS.index("watchlist_ready")
-    assert pub_idx < hist_idx < rev_idx < wl_idx, (
-        f"顺序必须为 publishing < computing_history < computing_review < watchlist_ready："
-        f"pub={pub_idx}, hist={hist_idx}, rev={rev_idx}, wl={wl_idx}"
+    assert feat_idx < rev_idx < hist_idx < wl_idx, (
+        f"顺序必须为 computing_features < computing_review < computing_history < watchlist_ready："
+        f"feat={feat_idx}, rev={rev_idx}, hist={hist_idx}, wl={wl_idx}"
     )
     # 旧四状态映射到 computing_features 索引（=3）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
-    # 新状态机索引（8 步：publishing=4, computing_history=5, computing_review=6, succeeded=7）
+    # 新状态机索引（7 步：computing_review=4, computing_history=5, succeeded=6）
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 3
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 4
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 4
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 5
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 6
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 7
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 6
+    # legacy publishing token：映射回 computing_features 完成度（核心已完成，review/history 未完成）
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 3
     # 旧四状态映射
     assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
     # 时区归一化 + 负耗时防御：_normalize_to_shanghai 基本行为

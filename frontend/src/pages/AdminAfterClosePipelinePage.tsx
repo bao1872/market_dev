@@ -360,9 +360,9 @@ export default function AdminAfterClosePipelinePage() {
             <div>
               <div className="card-title">步骤时间线</div>
               <div className="card-sub">
-                {/* [CHANGE-20260801-REVIEW-CLOSURE] 7 步序列（含复盘阶段） */}
+                {/* [CHANGE-20260831-ADMIN-TIMELINE] 7 步 current canonical 序列（含复盘/历史阶段） */}
                 refreshing_daily → syncing_boards → checking_coverage →
-                computing_features → publishing → computing_review → watchlist_ready
+                computing_features → computing_review → computing_history → watchlist_ready
               </div>
             </div>
           </div>

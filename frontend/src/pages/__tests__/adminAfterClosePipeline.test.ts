@@ -89,8 +89,9 @@ test('1b. getStepKeys: API 返回乱序 steps 时保持 API 顺序（不重排�
 test('1c. getStepKeys: API 返回空数组时用 DEFAULT_STEP_ORDER 兜底', () => {
   const keys = getStepKeys([])
   assert.deepEqual(keys, DEFAULT_STEP_ORDER)
-  // [SLICE-01-CORRECTION-02] 新 8 步（publishing → computing_history → computing_review → watchlist_ready）
-  assert.ok(keys.length === 8, `默认步骤应为 8 步（含 computing_history/computing_review），实际: ${keys.length}`)
+  // [CHANGE-20260831-ADMIN-TIMELINE] current canonical 7 步
+  // （computing_features → computing_review → computing_history → watchlist_ready）
+  assert.ok(keys.length === 7, `默认步骤应为 7 步（含 computing_history/computing_review），实际: ${keys.length}`)
   assert.ok(
     keys.includes('computing_history'),
     'DEFAULT_STEP_ORDER 必须包含 computing_history（历史状态推进阶段）',
@@ -134,14 +135,14 @@ test('2c2. computing_review: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS 且中�
   // computing_review 只出现一次
   const occurrences = DEFAULT_STEP_ORDER.filter((k) => k === 'computing_review').length
   assert.strictEqual(occurrences, 1, 'computing_review 在 DEFAULT_STEP_ORDER 中应仅出现一次')
-  // 顺序：publishing 之后，watchlist_ready 之前
-  const pubIdx = DEFAULT_STEP_ORDER.indexOf('publishing')
+  // 顺序：computing_features → computing_review → computing_history → watchlist_ready
+  const featIdx = DEFAULT_STEP_ORDER.indexOf('computing_features')
   const histIdx = DEFAULT_STEP_ORDER.indexOf('computing_history')
   const revIdx = DEFAULT_STEP_ORDER.indexOf('computing_review')
   const wlIdx = DEFAULT_STEP_ORDER.indexOf('watchlist_ready')
-  assert.ok(histIdx > pubIdx, 'computing_history 应在 publishing 之后')
-  assert.ok(revIdx > histIdx, 'computing_review 应在 computing_history 之后')
-  assert.ok(revIdx < wlIdx, 'computing_review 应在 watchlist_ready 之前')
+  assert.ok(revIdx > featIdx, 'computing_review 应在 computing_features 之后')
+  assert.ok(histIdx > revIdx, 'computing_history 应在 computing_review 之后')
+  assert.ok(histIdx < wlIdx, 'computing_history 应在 watchlist_ready 之前')
 })
 
 // [SLICE-01-CORRECTION-02] 新增历史状态推进阶段断言
@@ -407,4 +408,51 @@ test('formatDurationSeconds: 正数且无异常 → 正常格式化', () => {
   assert.strictEqual(formatDurationSeconds(3600, 'completed'), '60m 0s')
   // 无 warnings 参数也正常显示
   assert.strictEqual(formatDurationSeconds(125), '2m 5s')
+})
+
+// ============================================================
+// 7. [CHANGE-20260831-ADMIN-TIMELINE] current canonical 时间线合同
+// ============================================================
+
+test('7a. current/default pipeline 不含 publishing（legacy 步不再作为默认步骤）', () => {
+  assert.ok(
+    !DEFAULT_STEP_ORDER.includes('publishing'),
+    'current canonical DEFAULT_STEP_ORDER 不得包含 publishing',
+  )
+  const keys = getStepKeys([])
+  assert.ok(!keys.includes('publishing'), '兜底步骤序列不得包含 publishing')
+})
+
+test('7b. current/default 顺序: computing_features < computing_review < computing_history < watchlist_ready', () => {
+  const keys = getStepKeys([])
+  const featIdx = keys.indexOf('computing_features')
+  const revIdx = keys.indexOf('computing_review')
+  const histIdx = keys.indexOf('computing_history')
+  const wlIdx = keys.indexOf('watchlist_ready')
+  assert.ok(
+    featIdx >= 0 && revIdx >= 0 && histIdx >= 0 && wlIdx >= 0,
+    '四个关键步骤必须都存在',
+  )
+  assert.ok(featIdx < revIdx, 'computing_features 应在 computing_review 之前')
+  assert.ok(revIdx < histIdx, 'computing_review 应在 computing_history 之前')
+  assert.ok(histIdx < wlIdx, 'computing_history 应在 watchlist_ready 之前')
+  assert.strictEqual(keys.length, 7, `current canonical 应为 7 步，实际: ${keys.length}`)
+})
+
+test('7c. legacy 兼容: API 显式返回 publishing 时仍显示"发布结果"且不被重排', () => {
+  const apiSteps: PipelineStep[] = [
+    makeStep('refreshing_daily', 'completed'),
+    makeStep('computing_features', 'completed'),
+    makeStep('publishing', 'completed'),
+    makeStep('computing_review', 'running'),
+  ]
+  const keys = getStepKeys(apiSteps)
+  // 以 API 顺序为准，publishing 原样保留（历史 legacy run 兼容展示）
+  assert.deepEqual(keys, [
+    'refreshing_daily',
+    'computing_features',
+    'publishing',
+    'computing_review',
+  ])
+  assert.strictEqual(stepLabel('publishing'), '发布结果')
 })

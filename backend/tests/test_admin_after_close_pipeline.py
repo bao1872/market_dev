@@ -280,7 +280,7 @@ async def test_pipeline_running_current_step(
 ):
     """[Phase8A] after_close running 且处于 computing_features 步骤 → 当前 step 正确。
 
-    旧 feature_snapshot/quality_gate 已收敛为 computing_features（6 步状态机）。
+    旧 feature_snapshot/quality_gate 已收敛为 computing_features（7 步 canonical 状态机）。
     """
     now = datetime(2026, 6, 24, 18, 0, tzinfo=SHANGHAI)
     started_at = now - timedelta(minutes=10)
@@ -326,7 +326,11 @@ async def test_pipeline_running_current_step(
     steps = {step["step"]: step for step in data["steps"]}
     assert steps[AfterCloseRunStatus.COMPUTING_FEATURES.value]["status"] == "running"
     assert steps[AfterCloseRunStatus.REFRESHING_DAILY.value]["status"] == "completed"
-    assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
+    # [CHANGE-20260831-ADMIN-TIMELINE] publishing 不再是 current canonical 步骤：
+    # 当前 run 不得合成 publishing（legacy 步仅在历史 run 真实事件存在时才呈现）
+    assert AfterCloseRunStatus.PUBLISHING.value not in steps
+    assert steps[AfterCloseRunStatus.COMPUTING_REVIEW.value]["status"] == "pending"
+    assert steps[AfterCloseRunStatus.COMPUTING_HISTORY.value]["status"] == "pending"
     assert steps["watchlist_ready"]["status"] == "pending"
 
 
@@ -392,7 +396,10 @@ async def test_pipeline_interrupted_with_running_snapshot(
     steps = {step["step"]: step for step in data["steps"]}
     assert steps[AfterCloseRunStatus.COMPUTING_FEATURES.value]["status"] == "running"
     assert steps[AfterCloseRunStatus.CHECKING_COVERAGE.value]["status"] == "completed"
-    assert steps[AfterCloseRunStatus.PUBLISHING.value]["status"] == "pending"
+    # [CHANGE-20260831-ADMIN-TIMELINE] publishing 不再是 current canonical 步骤
+    assert AfterCloseRunStatus.PUBLISHING.value not in steps
+    assert steps[AfterCloseRunStatus.COMPUTING_REVIEW.value]["status"] == "pending"
+    assert steps[AfterCloseRunStatus.COMPUTING_HISTORY.value]["status"] == "pending"
     assert steps["watchlist_ready"]["status"] == "pending"
 
 
