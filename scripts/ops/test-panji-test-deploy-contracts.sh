@@ -160,14 +160,35 @@ if [[ "${1:-}" == "compose" ]]; then
     if [[ -n "${svc}" ]]; then printf 'CID_%s\n' "${svc}"; fi
     exit 0
   fi
-  if printf '%s' "$*" | grep -q 'worker-after-close'; then
-    if printf '%s' "$*" | grep -q 'stop'; then
+  if printf '%s' "$*" | grep -q 'stop'; then
+    printf 'compose-stop\n' >> "${PANJI_MUT_LOG:-/dev/null}"
+    if printf '%s' "$*" | grep -q 'worker-after-close'; then
       printf 'exited' > "${WORKER_STATE}"
     fi
-    if printf '%s' "$*" | grep -q 'up'; then
+  fi
+  if printf '%s' "$*" | grep -q 'up'; then
+    printf 'compose-up\n' >> "${PANJI_MUT_LOG:-/dev/null}"
+    if printf '%s' "$*" | grep -q 'worker-after-close'; then
       printf 'running' > "${WORKER_STATE}"
     fi
   fi
+  exit 0
+fi
+# [E3] 记录所有生产 mutator 调用，供 dry-run 零副作用断言（默认 /dev/null，不影响既有用例）。
+if [[ "${1:-}" == "tag" ]]; then
+  printf 'tag %s %s\n' "${2:-}" "${3:-}" >> "${PANJI_MUT_LOG:-/dev/null}"
+  exit 0
+fi
+if [[ "${1:-}" == "rmi" ]]; then
+  printf 'rmi %s\n' "$*" >> "${PANJI_MUT_LOG:-/dev/null}"
+  exit 0
+fi
+if [[ "${1:-}" == "image" && "${2:-}" == "prune" ]]; then
+  printf 'image-prune\n' >> "${PANJI_MUT_LOG:-/dev/null}"
+  exit 0
+fi
+if [[ "${1:-}" == "system" && "${2:-}" == "prune" ]]; then
+  printf 'system-prune\n' >> "${PANJI_MUT_LOG:-/dev/null}"
   exit 0
 fi
 exit 0
@@ -1215,6 +1236,52 @@ else
   sed 's/^/    /' "${BEHAV_TAG_LOG}" >&2
 fi
 
+# ============================================================
+# [E3] dry-run / real 双向控制：_pin_predeploy_image_refs 必须服从统一 dry-run mutation owner
+#   - DRY_RUN=true  → docker tag 调用次数 = 0（不修改生产镜像 metadata）
+#   - DRY_RUN=false → docker tag 真实执行且映射精确（real rollback 语义不被误伤）
+# ============================================================
+E3_MANIFEST="${TMP_ROOT}/e3-manifest"
+cat > "${E3_MANIFEST}" <<'EOF'
+PRE_DEPLOY_IMAGE_ID:backend=IMAGE_A
+PRE_DEPLOY_IMAGE_ID:worker-after-close=IMAGE_B
+PRE_DEPLOY_IMAGE_ID:frontend=IMAGE_C
+PRE_DEPLOY_IMAGE_REF:backend=repo/backend:old
+PRE_DEPLOY_IMAGE_REF:worker-after-close=repo/worker:old
+PRE_DEPLOY_IMAGE_REF:frontend=repo/frontend:old
+EOF
+
+# 正向（dry-run）：零 docker tag
+: > "${BEHAV_TAG_LOG}"
+PATH="${BEHAV_MOCK}:${PATH}" BEHAV_TAG_LOG="${BEHAV_TAG_LOG}" DRY_RUN=true bash -c "
+  log() { printf 'P: %s\n' \"\$1\"; }
+  PRE_DEPLOY_MANIFEST_FILE='${E3_MANIFEST}'
+  source '${PIN_LIB}'
+  _pin_predeploy_image_refs
+" >/dev/null 2>&1 || true
+if [[ ! -s "${BEHAV_TAG_LOG}" ]]; then
+  ok "E3: dry-run _pin_predeploy_image_refs executes zero docker tag (DRY_RUN=true)"
+else
+  bad "E3: dry-run _pin_predeploy_image_refs executes zero docker tag (saw: $(cat "${BEHAV_TAG_LOG}"))"
+fi
+
+# 负向（real）：docker tag 真实执行且逐服务精确映射
+: > "${BEHAV_TAG_LOG}"
+PATH="${BEHAV_MOCK}:${PATH}" BEHAV_TAG_LOG="${BEHAV_TAG_LOG}" DRY_RUN=false bash -c "
+  log() { printf 'P: %s\n' \"\$1\"; }
+  PRE_DEPLOY_MANIFEST_FILE='${E3_MANIFEST}'
+  source '${PIN_LIB}'
+  _pin_predeploy_image_refs
+" >/dev/null 2>&1 || true
+if grep -q '^IMAGE_A -> repo/backend:old$' "${BEHAV_TAG_LOG}" \
+  && grep -q '^IMAGE_B -> repo/worker:old$' "${BEHAV_TAG_LOG}" \
+  && grep -q '^IMAGE_C -> repo/frontend:old$' "${BEHAV_TAG_LOG}"; then
+  ok "REAL_ROLLBACK_DOCKER_TAG_EXECUTES: real rollback tags each service to its immutable image (DRY_RUN=false)"
+else
+  bad "REAL_ROLLBACK_DOCKER_TAG_EXECUTES: real rollback tags each service to its immutable image (DRY_RUN=false)"
+  sed 's/^/    /' "${BEHAV_TAG_LOG}" >&2
+fi
+
 
 # ============================================================
 # §8 captured immutable owner survivability
@@ -1406,11 +1473,14 @@ fi
 echo "== CASE H: final steady-state health FAIL → re-fence before rollback file mutation (behavioral) =="
 reset_worker_state "running"
 CASE_H_LOG="${TMP_ROOT}/case-h.log"
+CASE_H_MUT_LOG="${TMP_ROOT}/case-h-mut.log"
+: > "${CASE_H_MUT_LOG}"
 CASE_H_RC=0
 PATH="${MOCK_BIN}:${PATH}" \
 PANJI_REPO_ROOT="${REPO_ROOT}" PANJI_LIVE_ROOT="${LIVE_ROOT}" \
 PANJI_ENV_FILE="${ENV_FILE}" PANJI_STATE_FILE="${STATE_FILE}" PANJI_LOCK_FILE="${LOCK_FILE}" \
 PANJI_MOCK_WORKER_STATE="${WORKER_STATE_FILE}" \
+PANJI_MUT_LOG="${CASE_H_MUT_LOG}" \
 PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
 PANJI_MOCK_POST_DEPLOY_FAIL_FINAL=1 \
 PANJI_MOCK_MEM_AVAILABLE_KB=4403200 \
@@ -1438,6 +1508,22 @@ if [[ "$(cat "${WORKER_STATE_FILE}")" == "running" ]]; then
     ok "CASE H: worker restored to running on OLD runtime after rollback"
 else
     bad "CASE H: worker restored to running on OLD runtime after rollback (state=$(cat "${WORKER_STATE_FILE}"))"
+fi
+# [E3] dry-run rollback 路径零生产 mutation：不 grep 源码，直接数 mock mutator 日志。
+CASE_H_TAG_N="$(grep -c '^tag ' "${CASE_H_MUT_LOG}" 2>/dev/null || true)"
+CASE_H_STOP_N="$(grep -c '^compose-stop' "${CASE_H_MUT_LOG}" 2>/dev/null || true)"
+CASE_H_UP_N="$(grep -c '^compose-up' "${CASE_H_MUT_LOG}" 2>/dev/null || true)"
+if [[ "${CASE_H_TAG_N}" -eq 0 ]]; then
+    ok "DRY_RUN_ROLLBACK_DOCKER_TAG_ZERO: dry-run rollback executes zero docker tag (tag=${CASE_H_TAG_N})"
+else
+    bad "DRY_RUN_ROLLBACK_DOCKER_TAG_ZERO: dry-run rollback executes zero docker tag (tag=${CASE_H_TAG_N})"
+    sed 's/^/    /' "${CASE_H_MUT_LOG}" >&2
+fi
+if [[ "${CASE_H_STOP_N}" -eq 0 && "${CASE_H_UP_N}" -eq 0 ]]; then
+    ok "DRY_RUN_FAILURE_ZERO_CONTAINER_MUTATION: dry-run rollback zero container stop/up (stop=${CASE_H_STOP_N} up=${CASE_H_UP_N})"
+else
+    bad "DRY_RUN_FAILURE_ZERO_CONTAINER_MUTATION: dry-run rollback zero container stop/up (stop=${CASE_H_STOP_N} up=${CASE_H_UP_N})"
+    sed 's/^/    /' "${CASE_H_MUT_LOG}" >&2
 fi
 
 # ---- CASE J（行为级）：owned restore 后 PICKUP_FENCED 必须与真实容器状态一致 ----

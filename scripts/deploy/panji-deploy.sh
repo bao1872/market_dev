@@ -2219,6 +2219,14 @@ _pin_predeploy_image_refs() {
         image_id="$(sed -n "s/^PRE_DEPLOY_IMAGE_ID:${service}=//p" "${PRE_DEPLOY_MANIFEST_FILE}" | head -1)"
         [[ -n "${image_id}" ]] || continue
 
+        # [DRY-RUN ZERO-MUTATION CONTRACT] image-ref 钉回是生产镜像 metadata mutation，
+        # 必须服从与 stop/up/tag 同一套 dry-run 门禁。dry-run 下只记录意图，绝不执行
+        # 真实 `docker tag`——否则 rollback failure path 会改到生产镜像引用。
+        if [[ "${DRY_RUN}" == "true" ]]; then
+            log "[dry-run] 将恢复 ${service} 镜像引用 ${image_ref} → immutable image ${image_id}（不执行 docker tag）"
+            continue
+        fi
+
         if ! docker tag "${image_id}" "${image_ref}" >/dev/null 2>&1; then
             log "!! 无法把 ${service} 钉回 pre-deploy immutable image（id=${image_id} ref=${image_ref}）!!"
             rc=1
