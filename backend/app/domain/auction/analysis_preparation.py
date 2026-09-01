@@ -482,9 +482,21 @@ def prepare_v32_analysis(
                 ],
                 "leaders": [str(x) for x in leadership.leaders],
             "leadership_migration": leadership.migration,
-                "retained": [str(x) for x in leadership.retained],
-                "entrants": [str(x) for x in leadership.entrants],
-                "exits": [str(x) for x in leadership.exits],
+                "retained": (
+                    None
+                    if leadership.retained is None
+                    else [str(x) for x in leadership.retained]
+                ),
+                "entrants": (
+                    None
+                    if leadership.entrants is None
+                    else [str(x) for x in leadership.entrants]
+                ),
+                "exits": (
+                    None
+                    if leadership.exits is None
+                    else [str(x) for x in leadership.exits]
+                ),
                 "jaccard": leadership.jaccard,
             },
             diagnostics={

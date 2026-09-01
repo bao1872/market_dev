@@ -148,44 +148,46 @@ async def persist_v32_scope_results(
     coverage: ScanCoverage,
     truth_status: str,
 ) -> uuid.UUID:
-    """Persist one V3.2 run.  No commit here — the caller owns the transaction.
-
-    The algorithm version is fixed to the V3.2 owner; it is intentionally not a
-    parameter so a caller cannot create a non-V3.2 run under this path.
-    """
-    algorithm_version = V32_ALGORITHM_VERSION
     """Atomically persist one V3.2 run: scan run -> scope results -> publication.
 
-    Everything happens in a single transaction, so a partially written result
-    set is never visible.  Returns the created scan_run_id.
+    Everything happens in a single transaction that the CALLER commits, so a
+    partially written result set is never visible.  Returns the created
+    scan_run_id.  This function never calls ``session.commit()``.
+
+    The algorithm version is fixed to the V3.2 owner
+    (:mod:`app.domain.auction.version`); it is intentionally not a parameter, so
+    a caller cannot create a non-V3.2 run under this path.
 
     ``truth_status`` / ``capture_source`` / ``test_namespace`` are inherited
     from the real capture run and truth gate (no defaults, never fabricated).
     """
+    # Validate and normalise EVERY payload BEFORE the run row is created, so a
+    # malformed or foreign payload cannot leave a half-built run behind.
+    prepared_rows = [
+        build_scope_result_kwargs(
+            scan_run_id=None,  # filled in once the run id exists
+            trade_date=trade_date,
+            scope_type=row["scope_type"],
+            scope_id=row.get("scope_id"),
+            scope_name=row.get("scope_name"),
+            payload=row["payload"],
+            reason_codes=row.get("reason_codes"),
+        )
+        for row in scope_results
+    ]
+
     run = AuctionScanRun(
         **build_scan_run_kwargs(
             trade_date=trade_date,
             coverage=coverage,
-            algorithm_version=algorithm_version,
         )
     )
     session.add(run)
     await session.flush()  # materialise run.id before children reference it
 
-    for row in scope_results:
-        session.add(
-            AuctionScopeResult(
-                **build_scope_result_kwargs(
-                    scan_run_id=run.id,
-                    trade_date=trade_date,
-                    scope_type=row["scope_type"],
-                    scope_id=row.get("scope_id"),
-                    scope_name=row.get("scope_name"),
-                    payload=row["payload"],
-                    reason_codes=row.get("reason_codes"),
-                )
-            )
-        )
+    for kwargs in prepared_rows:
+        kwargs["scan_run_id"] = run.id
+        session.add(AuctionScopeResult(**kwargs))
 
     # KPI-1: the publication row is created by the EXISTING formal owner.
     # It re-reads ScanRun / CaptureRun / ScopeResult and evaluates the gate;

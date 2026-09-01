@@ -235,3 +235,64 @@ def test_non_v32_payload_fails_before_persistence(fx: _Fixture) -> None:
             scope_name=None,
             payload=tampered,
         )
+
+
+# ---------------------------------------------------------------------------
+# P1: previous-unavailable must null EVERY comparison field, including when
+# the current side is empty (the two facts are independent)
+# ---------------------------------------------------------------------------
+def test_previous_unavailable_with_nonempty_current_nulls_all_comparisons(
+    fx: _Fixture,
+) -> None:
+    result = fx.prepare()
+    attribution = _by_key(result, INDUSTRY_KEY).payload["member_attribution"]
+    assert attribution["leaders"], "current leaders must exist for this case"
+    assert attribution["retained"] is None
+    assert attribution["entrants"] is None
+    assert attribution["exits"] is None
+    assert attribution["jaccard"] is None
+    assert attribution["leadership_migration"] is None
+
+
+def test_previous_unavailable_with_empty_current_keeps_the_state() -> None:
+    """Current side empty must not swallow the previous-unavailable fact."""
+    from app.domain.auction.leadership import (
+        _REASON_DIRECTION_UNAVAILABLE,
+        compute_leadership,
+    )
+
+    unknown = compute_leadership(contributions=[], ew_gap=None, previous_leaders=None)
+    assert unknown.leaders == ()
+    assert unknown.retained is None
+    assert unknown.entrants is None
+    assert unknown.exits is None
+    assert unknown.jaccard is None
+    assert unknown.migration is None
+    assert _REASON_DIRECTION_UNAVAILABLE in unknown.reason_codes
+    # the previous-unavailable evidence survives an empty current side
+    assert "PREVIOUS_LEADERS_UNAVAILABLE" in unknown.reason_codes
+
+
+def test_previous_computed_empty_with_empty_current_is_not_unavailable() -> None:
+    """Empty previous + empty current is EMPTY_LEADER_SETS, not 'unknown'."""
+    from app.domain.auction.leadership import compute_leadership
+
+    both_empty = compute_leadership(contributions=[], ew_gap=None, previous_leaders=())
+    assert both_empty.retained == ()
+    assert both_empty.entrants == ()
+    assert both_empty.exits == ()
+    assert "PREVIOUS_LEADERS_UNAVAILABLE" not in both_empty.reason_codes
+
+
+def test_previous_computed_empty_entrants_equal_current_leaders(
+    fx: _Fixture,
+) -> None:
+    empty = {FAMILY_INDUSTRY: {INDUSTRY_KEY: frozenset()}}
+    attribution = _by_key(
+        fx.prepare(previous_leader_sets=empty), INDUSTRY_KEY
+    ).payload["member_attribution"]
+
+    assert attribution["leaders"]
+    assert set(attribution["entrants"]) == set(attribution["leaders"])
+    assert attribution["exits"] == []
+    assert attribution["retained"] == []

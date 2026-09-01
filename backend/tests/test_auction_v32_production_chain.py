@@ -328,8 +328,10 @@ def test_previous_leader_set_enters_todays_migration(fx: _Fixture) -> None:
     assert exits == prev_ids - current
     assert entrants == current - prev_ids
 
-    # with no previous set there is nothing to have exited
-    assert b["exits"] == []
+    # with no previous set the comparison fields are unavailable, not empty
+    assert b["exits"] is None
+    assert b["entrants"] is None
+    assert b["retained"] is None
 
 
 # 11 -----------------------------------------------------------------------

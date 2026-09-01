@@ -54,15 +54,44 @@ class LeadershipResult:
     leaders: tuple[UUID, ...]
     aligned_total: float | None
     explained_ratio: float | None
-    retained: tuple[UUID, ...]
-    entrants: tuple[UUID, ...]
-    exits: tuple[UUID, ...]
+    #: Comparison fields are ``None`` when the previous leader set is UNKNOWN —
+    #: never a fake empty tuple.  An empty tuple means "yesterday really had no
+    #: leaders", which is a different fact.
+    retained: tuple[UUID, ...] | None
+    entrants: tuple[UUID, ...] | None
+    exits: tuple[UUID, ...] | None
     jaccard: float | None
     migration: float | None
     reason_codes: tuple[str, ...]
 
 
-def _empty(direction: int, codes: tuple[str, ...], previous: Sequence[UUID]) -> LeadershipResult:
+def _empty(
+    direction: int,
+    codes: tuple[str, ...],
+    previous: Sequence[UUID] | None,
+    *,
+    previous_unavailable: bool = False,
+) -> LeadershipResult:
+    """Empty CURRENT leader set (direction unavailable or nothing aligned).
+
+    ``previous_unavailable`` keeps the previous-unknown state visible even when
+    today produced no leaders: the two facts are independent and must not be
+    conflated into "no change".
+    """
+    if previous_unavailable:
+        return LeadershipResult(
+            direction=direction,
+            leaders=(),
+            aligned_total=None,
+            explained_ratio=None,
+            retained=None,
+            entrants=None,
+            exits=None,
+            jaccard=None,
+            migration=None,
+            reason_codes=codes + (_REASON_PREVIOUS_UNAVAILABLE,),
+        )
+    prev = tuple(previous or ())
     return LeadershipResult(
         direction=direction,
         leaders=(),
@@ -70,9 +99,9 @@ def _empty(direction: int, codes: tuple[str, ...], previous: Sequence[UUID]) -> 
         explained_ratio=None,
         retained=(),
         entrants=(),
-        exits=tuple(sorted(set(previous), key=str)),
-        jaccard=None if not previous else 0.0,
-        migration=None if not previous else 1.0,
+        exits=tuple(sorted(set(prev), key=str)),
+        jaccard=None if not prev else 0.0,
+        migration=None if not prev else 1.0,
         reason_codes=codes,
     )
 
@@ -99,7 +128,9 @@ def compute_leadership(
     prev = tuple(sorted(set(previous_leaders or ()), key=str))
 
     if ew_gap is None or ew_gap == 0:
-        return _empty(0, (_REASON_DIRECTION_UNAVAILABLE,), prev)
+        return _empty(
+            0, (_REASON_DIRECTION_UNAVAILABLE,), prev, previous_unavailable=previous_unavailable
+        )
 
     direction = 1 if ew_gap > 0 else -1
 
@@ -112,7 +143,9 @@ def compute_leadership(
             aligned.append((c.instrument_id, value))
 
     if not aligned:
-        return _empty(direction, (_REASON_NO_ALIGNED,), prev)
+        return _empty(
+            direction, (_REASON_NO_ALIGNED,), prev, previous_unavailable=previous_unavailable
+        )
 
     aligned.sort(key=lambda item: (-item[1], str(item[0])))
     total = sum(v for _, v in aligned)
@@ -143,7 +176,12 @@ def compute_leadership(
         codes = ()
 
     if previous_unavailable:
-        # today's leaders stand on their own; migration is undefined, NOT 0/1
+        # Today's leaders stand on their own.  Every comparison field is
+        # unavailable — including retained/entrants/exits, which must NOT be
+        # reported as empty (empty would mean "we compared and found none").
+        retained = None
+        entrants = None
+        exits = None
         jaccard = None
         migration = None
         codes = codes + (_REASON_PREVIOUS_UNAVAILABLE,)
