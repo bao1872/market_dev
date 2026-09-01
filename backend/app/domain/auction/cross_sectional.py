@@ -26,6 +26,7 @@ from app.domain.shared.historical_position import percentile_rank
 __all__ = [
     "AXES",
     "CrossSectionalPositions",
+    "AXIS_PRIMARY_METRIC",
     "axis_primary_metric",
     "axis_primary_positions",
     "compute_cross_sectional",
@@ -74,31 +75,44 @@ def _collect(values_by_scope: Sequence[Mapping[str, Any]], key: str) -> list[flo
     return out
 
 
-def axis_primary_metric(axis: str) -> str:
-    """Return the representative metric for one cross-sectional axis.
+#: Explicit list-column representative for each cross-sectional axis.
+#:
+#: Deliberately an explicit mapping, NOT "first entry of the AXES tuple" —
+#: tuple order is an implementation detail and must not silently encode
+#: product semantics.
+#:
+#: ``concentration`` is intentionally ABSENT: no single concentration
+#: representative has been frozen in the product contract.  Inventing one here
+#: would create a canonical fact with no owner, so the list column stays
+#: unavailable while the detail view keeps every concentration percentile.
+AXIS_PRIMARY_METRIC: Mapping[str, str] = {
+    "repricing": "equal_weight_gap",
+    "breadth": "positive_gap_breadth",
+    "participation": "amount_historical_position",
+}
 
-    The rule is "the first metric declared for that axis" — a single,
-    self-maintaining rule owned here.  The API must never pick a metric on its
-    own, and the list DTO carries ONE position per axis.
-    """
-    return AXES[axis][0]
+
+def axis_primary_metric(axis: str) -> str | None:
+    """Representative metric for one axis, or None when none is frozen."""
+    return AXIS_PRIMARY_METRIC.get(axis)
 
 
 def axis_primary_positions(
     axis_positions: Mapping[str, Any],
 ) -> dict[str, float | None]:
-    """Flatten axis -> metric -> position into axis -> primary position.
+    """Flatten axis -> metric -> position into axis -> representative position.
 
-    Used for list display, where the UI shows one cross-sectional position per
-    axis (涨跌 / 扩散 / 成交 / 集中度).  Missing stays ``None``, never 0.
+    Axes without a frozen representative (concentration) yield ``None`` —
+    unavailable, never 0 and never a silently invented proxy.
     """
     flat: dict[str, float | None] = {}
     for axis in AXES:
+        metric = axis_primary_metric(axis)
         metrics = axis_positions.get(axis)
-        if not isinstance(metrics, Mapping):
+        if metric is None or not isinstance(metrics, Mapping):
             flat[axis] = None
             continue
-        flat[axis] = metrics.get(axis_primary_metric(axis))
+        flat[axis] = metrics.get(metric)
     return flat
 
 

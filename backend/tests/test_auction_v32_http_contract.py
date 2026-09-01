@@ -256,11 +256,12 @@ def test_scopes_with_capability_returns_200_and_schema(
     assert row["amount_historical_position"] == pytest.approx(88.0)
     assert row["price_valid_count"] == 20
     # the list DTO exposes ONE cross-sectional position per axis (flat)
+    # concentration has NO frozen representative, so it stays unavailable
     assert row["cross_sectional"] == {
         "repricing": pytest.approx(80.0),
         "breadth": pytest.approx(70.0),
         "participation": pytest.approx(88.0),
-        "concentration": pytest.approx(60.0),
+        "concentration": None,
     }
 
 

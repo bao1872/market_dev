@@ -80,11 +80,16 @@ def compute_leadership(
     *,
     contributions: Sequence[MemberContribution],
     ew_gap: float | None,
-    previous_leaders: Sequence[UUID] = (),
+    previous_leaders: Sequence[UUID] | None = (),
     min_explained_ratio: float = MIN_EXPLAINED_RATIO,
 ) -> LeadershipResult:
-    """Select today's core members and measure migration vs yesterday."""
-    prev = tuple(sorted(set(previous_leaders), key=str))
+    """Select today's core members and measure migration vs yesterday.
+
+    ``previous_leaders=None`` means "no previous leader set is known" and is
+    treated as empty — it is NOT the same as an empty leader set produced by
+    yesterday's computation, but both yield no retained members.
+    """
+    prev = tuple(sorted(set(previous_leaders or ()), key=str))
 
     if ew_gap is None or ew_gap == 0:
         return _empty(0, (_REASON_DIRECTION_UNAVAILABLE,), prev)

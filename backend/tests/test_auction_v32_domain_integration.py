@@ -1,24 +1,14 @@
-"""T3 targeted business-chain evidence for Auction V3.2 (KPI-8).
+"""Auction V3.2 domain-owner integration regression (LOWER LEVEL, not T3).
 
-The previous tests were mostly isolated helpers.  This file proves one
-CONTINUOUS vertical chain using the real owners:
+This file is deliberately NOT the T3 business-chain closure.  It wires the
+domain owners directly, by hand, to catch regressions in each owner in
+isolation.  The T3 closure lives in
+``test_auction_v32_production_chain.py`` and calls the single production
+preparation owner instead, so it cannot drift from what production actually
+runs.
 
-    AuctionFinalQuote-derived observations
-      -> member history evidence (strictly pre-T)
-      -> PIT scope membership
-      -> L1 scope facts (the single calculator)
-      -> historical dynamics
-      -> cross-section
-      -> contribution (with machine reconciliation)
-      -> leadership
-      -> canonical payload
-      -> persistence preparation
-      -> publication gate owner
-      -> publication read model
-
-Because every input originates from an AuctionFinalQuote row plus PIT
-membership, the chain also demonstrates KPI-5 legacy isolation: no
-AuctionAnchor / Structure / Chip / legacy median_change_pct participates.
+Kept because the hand-wired path still exercises owner combinations that the
+preparation owner collapses into one call.
 """
 
 from __future__ import annotations

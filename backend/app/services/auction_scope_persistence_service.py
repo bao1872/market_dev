@@ -34,7 +34,11 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.auction.coverage import ScanCoverage
-from app.domain.auction.scope_payload import SCHEMA_VERSION, parse_scope_payload
+from app.domain.auction.scope_payload import (
+    SCHEMA_VERSION,
+    canonical_scope_name,
+    parse_scope_payload,
+)
 from app.domain.auction.version import V32_ALGORITHM_VERSION
 from app.models.auction import (
     AuctionScanRun,
@@ -109,6 +113,17 @@ def build_scope_result_kwargs(
     """
     # Fail fast on a malformed payload before anything is persisted.
     parse_scope_payload(payload)
+    # The canonical display name lives in payload.identity.scope_name only.
+    # A caller-supplied scope_name must agree; when absent it is DERIVED from
+    # the canonical payload, never invented.  The DB column is a compatibility
+    # projection, not a business owner.
+    canonical_name = canonical_scope_name(payload)
+    if scope_name is not None and scope_name != canonical_name:
+        raise ValueError(
+            f"scope_name drift: caller supplied {scope_name!r} but the canonical "
+            f"payload identity says {canonical_name!r}"
+        )
+    scope_name = canonical_name
     return {
         "scan_run_id": scan_run_id,
         "trade_date": trade_date,
@@ -177,7 +192,7 @@ async def persist_v32_scope_results(
         test_namespace=test_namespace,
     )
 
-    await session.commit()
+    # No commit here: the caller/orchestrator owns the single transaction.
     return run.id
 
 

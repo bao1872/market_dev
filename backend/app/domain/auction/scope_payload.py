@@ -18,6 +18,8 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
+from app.domain.auction.version import V32_ALGORITHM_VERSION
+
 __all__ = [
     "SCHEMA_VERSION",
     "build_scope_payload",
@@ -114,6 +116,16 @@ def parse_scope_payload(payload: Any) -> dict[str, Any]:
         raise ValueError(
             f"unsupported auction scope payload schema_version: {schema_version!r} "
             f"(expected {SCHEMA_VERSION!r})"
+        )
+
+    # Algorithm binding: a payload may only be read as V3.2 if it was produced
+    # by the V3.2 algorithm.  Missing or a different version is a hard reject —
+    # the caller may not nominate an arbitrary version.
+    algorithm_version = payload.get("algorithm_version")
+    if algorithm_version != V32_ALGORITHM_VERSION:
+        raise ValueError(
+            f"unsupported auction scope payload algorithm_version: "
+            f"{algorithm_version!r} (expected {V32_ALGORITHM_VERSION!r})"
         )
 
     required = (
