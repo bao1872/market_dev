@@ -22,6 +22,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "build_scope_payload",
     "parse_scope_payload",
+    "validate_scope_identity",
     "canonical_scope_key",
     "canonical_scope_name",
 ]
@@ -65,16 +66,30 @@ def build_scope_payload(
     }
 
 
+def validate_scope_identity(identity: Any) -> str:
+    """Validate a canonical scope identity and return its scope_key.
+
+    Fail-closed rules:
+      - identity must be a Mapping;
+      - scope_key must be a non-empty string (never a UUID, never empty);
+      - scope_name is a display label only and is never required as identity.
+    """
+    if not isinstance(identity, Mapping):
+        raise ValueError("auction scope payload identity must be a mapping")
+    scope_key = identity.get("scope_key")
+    if not isinstance(scope_key, str) or not scope_key.strip():
+        raise ValueError(
+            "auction scope payload identity.scope_key must be a non-empty string"
+        )
+    return scope_key
+
 def canonical_scope_key(payload: Mapping[str, Any]) -> str:
     """Read the canonical ``scope_key`` from a validated V3.2 payload.
 
     Never falls back to ``scope_name`` and never falls back to a UUID: guessing
     the identity at the API layer is exactly the defect this owner prevents.
     """
-    identity = payload.get("identity")
-    if not isinstance(identity, Mapping) or not identity.get("scope_key"):
-        raise ValueError("payload is missing canonical identity.scope_key")
-    return str(identity["scope_key"])
+    return validate_scope_identity(payload.get("identity"))
 
 
 def canonical_scope_name(payload: Mapping[str, Any]) -> str | None:
@@ -113,4 +128,8 @@ def parse_scope_payload(payload: Any) -> dict[str, Any]:
     if missing:
         raise ValueError(f"auction scope payload missing groups: {missing}")
 
+    # Fail-closed on identity: a payload that reaches persistence must already
+    # carry a usable canonical scope_key, otherwise persistence would accept it
+    # and only the API reader would fail later.
+    validate_scope_identity(payload["identity"])
     return payload

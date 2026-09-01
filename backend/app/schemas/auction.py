@@ -386,7 +386,8 @@ class AuctionScopeListItemOut(BaseModel):
     # leadership
     leadership_migration: float | None = None
 
-    price_valid_count: int = 0
+    #: Unavailable stays None (Missing != Zero) — never default to 0.
+    price_valid_count: int | None = None
 
 
 class AuctionScopeListOut(BaseModel):

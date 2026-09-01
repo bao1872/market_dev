@@ -1084,7 +1084,7 @@ async def list_auction_scopes(
                 normalized_hhi=i.normalized_hhi,
                 cross_sectional=i.cross_sectional,
                 leadership_migration=i.leadership_migration,
-                price_valid_count=int(i.price_valid_count or 0),
+                price_valid_count=i.price_valid_count,
             )
             for i in items
         ],
@@ -1101,10 +1101,11 @@ async def get_auction_scope_detail(
 ) -> AuctionScopeDetailOut:
     """Five canonical groups for one PUBLISHED scope, plus diagnostics."""
     from app.domain.auction.publication_read import (
-        V32_ALGORITHM_VERSION,
+        find_scope_result_by_key,
         read_published_scope_results,
         to_scope_detail,
     )
+    from app.domain.auction.version import V32_ALGORITHM_VERSION
 
     _ = ctx
     resolved = _resolve_trade_date(trade_date)
@@ -1117,7 +1118,7 @@ async def get_auction_scope_detail(
         family=family,
         algorithm_version=V32_ALGORITHM_VERSION,
     )
-    match = next((r for r in published_rows if r.scope_name == scope_key), None)
+    match = find_scope_result_by_key(published_rows, scope_key)
     if match is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1139,6 +1140,18 @@ async def get_auction_scope_detail(
     )
 
 
+async def _load_all_publications(db: AsyncSession) -> list[Any]:
+    """Load every publication row (used by meta/dates).
+
+    Isolated so the date list can be produced without reaching into a session
+    from tests, and so the endpoint contains no query details of its own.
+    """
+    from app.models.auction import AuctionAnalysisPublication
+
+    rows = (await db.execute(select(AuctionAnalysisPublication))).scalars().all()
+    return list(rows)
+
+
 @router.get("/meta/dates", response_model=AuctionMetaDatesOut)
 async def list_auction_scope_dates(
     db: AsyncSession = Depends(get_db),
@@ -1150,9 +1163,8 @@ async def list_auction_scope_dates(
     page exists for that day (PRD AU-04-6).
     """
     from app.domain.auction.publication_read import published_dates
-    from app.models.auction import AuctionAnalysisPublication
 
     _ = ctx
-    publications = (await db.execute(select(AuctionAnalysisPublication))).scalars().all()
-    dates = published_dates(list(publications))
+    publications = await _load_all_publications(db)
+    dates = published_dates(publications)
     return AuctionMetaDatesOut(trade_dates=dates, latest=dates[0] if dates else None)

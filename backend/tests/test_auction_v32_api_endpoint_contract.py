@@ -101,18 +101,24 @@ async def test_without_capability_is_403() -> None:
     assert exc.value.status_code == 403
 
 
-def test_with_capability_passes() -> None:
+async def test_with_capability_passes() -> None:
+    """Must actually await the guard and prove the SAME ctx is returned.
+
+    Merely calling the async dependency yields a coroutine that is never None,
+    which would be a false green.
+    """
     dep = require_capability("research_replay")
-    ctx = dep(
-        ctx=_ctx(capabilities={"research_replay": {"active": True}}),
-    )
-    assert ctx is not None
+    given = _ctx(capabilities={"research_replay": {"active": True}})
+    result = await dep(ctx=given)
+    assert result is given
 
 
-def test_admin_is_exempt() -> None:
+async def test_admin_is_exempt() -> None:
+    """Admin bypass must be proven by awaiting, not by a non-None coroutine."""
     dep = require_capability("research_replay")
-    ctx = dep(ctx=_ctx(is_admin=True, capabilities={}))
-    assert ctx is not None
+    given = _ctx(is_admin=True, capabilities={})
+    result = await dep(ctx=given)
+    assert result is given
 
 
 async def test_inactive_capability_is_403() -> None:

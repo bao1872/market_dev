@@ -30,11 +30,13 @@ from datetime import date
 from typing import Any, Protocol
 from uuid import UUID
 
+from app.domain.auction.cross_sectional import axis_primary_positions
 from app.domain.auction.scope_payload import (
     canonical_scope_key,
     canonical_scope_name,
     parse_scope_payload,
 )
+from app.domain.auction.version import V32_ALGORITHM_VERSION
 
 __all__ = [
     "V32_ALGORITHM_VERSION",
@@ -47,7 +49,7 @@ __all__ = [
     "find_scope_result_by_key",
 ]
 
-V32_ALGORITHM_VERSION = "auction-v3.2"
+
 
 
 class PublicationRow(Protocol):
@@ -181,9 +183,9 @@ class ScopeListItem:
         self.total_auction_amount = participation.get("total_auction_amount")
         self.normalized_hhi = participation.get("amount_normalized_hhi")
         self.top3_amount_share = participation.get("top3_amount_share")
-        self.cross_sectional = cross_sectional
+        self.cross_sectional = axis_primary_positions(cross_sectional)
         self.leadership_migration = attribution.get("leadership_migration")
-        self.price_valid_count = repricing.get("price_valid_count") or 0
+        self.price_valid_count = repricing.get("price_valid_count")
 
 
 def to_scope_list_items(

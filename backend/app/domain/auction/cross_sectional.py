@@ -26,6 +26,8 @@ from app.domain.shared.historical_position import percentile_rank
 __all__ = [
     "AXES",
     "CrossSectionalPositions",
+    "axis_primary_metric",
+    "axis_primary_positions",
     "compute_cross_sectional",
 ]
 
@@ -70,6 +72,34 @@ def _collect(values_by_scope: Sequence[Mapping[str, Any]], key: str) -> list[flo
             continue
         out.append(float(v))
     return out
+
+
+def axis_primary_metric(axis: str) -> str:
+    """Return the representative metric for one cross-sectional axis.
+
+    The rule is "the first metric declared for that axis" — a single,
+    self-maintaining rule owned here.  The API must never pick a metric on its
+    own, and the list DTO carries ONE position per axis.
+    """
+    return AXES[axis][0]
+
+
+def axis_primary_positions(
+    axis_positions: Mapping[str, Any],
+) -> dict[str, float | None]:
+    """Flatten axis -> metric -> position into axis -> primary position.
+
+    Used for list display, where the UI shows one cross-sectional position per
+    axis (涨跌 / 扩散 / 成交 / 集中度).  Missing stays ``None``, never 0.
+    """
+    flat: dict[str, float | None] = {}
+    for axis in AXES:
+        metrics = axis_positions.get(axis)
+        if not isinstance(metrics, Mapping):
+            flat[axis] = None
+            continue
+        flat[axis] = metrics.get(axis_primary_metric(axis))
+    return flat
 
 
 def compute_cross_sectional(

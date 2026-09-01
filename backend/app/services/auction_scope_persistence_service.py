@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.auction.coverage import ScanCoverage
 from app.domain.auction.scope_payload import SCHEMA_VERSION, parse_scope_payload
+from app.domain.auction.version import V32_ALGORITHM_VERSION
 from app.models.auction import (
     AuctionScanRun,
     AuctionScopeResult,
@@ -52,7 +53,7 @@ __all__ = [
 
 #: V3.2 algorithm identity.  A distinct value keeps the V3.2 publication row
 #: separate from legacy publications on the same trade_date.
-V32_ALGORITHM_VERSION = "auction-v3.2"
+
 
 _DEFAULT_PRICE_ADJUSTMENT_VERSION = "none"
 

@@ -12,10 +12,9 @@ build succeeds" assertion was a false green and is gone.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -267,3 +266,62 @@ def test_member_valid_on_either_formal_axis_counts() -> None:
 def test_coverage_ratio_is_zero_not_none_when_empty() -> None:
     assert compute_scan_coverage([]).coverage_ratio == 0.0
     assert compute_scope_coverage([]).coverage_ratio == 0.0
+
+
+# ---------------------------------------------------------------------------
+# A2: parse_scope_payload must fail CLOSED on identity (before persistence)
+# ---------------------------------------------------------------------------
+def _valid_payload_copy() -> dict:
+    return build_scope_payload(
+        algorithm_version=V32_ALGORITHM_VERSION,
+        identity={"scope_key": "CPT_ROBOT", "scope_name": "机器人"},
+        **_EMPTY_GROUPS,
+    )
+
+
+def test_parser_rejects_empty_identity_mapping() -> None:
+    bad = _valid_payload_copy()
+    bad["identity"] = {}
+    with pytest.raises(ValueError, match="scope_key"):
+        parse_scope_payload(bad)
+
+
+def test_parser_rejects_blank_scope_key() -> None:
+    bad = _valid_payload_copy()
+    bad["identity"] = {"scope_key": "   ", "scope_name": "机器人"}
+    with pytest.raises(ValueError, match="scope_key"):
+        parse_scope_payload(bad)
+
+
+def test_parser_rejects_non_mapping_identity() -> None:
+    bad = _valid_payload_copy()
+    bad["identity"] = "CPT_ROBOT"
+    with pytest.raises(ValueError, match="mapping"):
+        parse_scope_payload(bad)
+
+
+def test_parser_rejects_missing_scope_key() -> None:
+    bad = _valid_payload_copy()
+    bad["identity"] = {"scope_name": "机器人"}
+    with pytest.raises(ValueError, match="scope_key"):
+        parse_scope_payload(bad)
+
+
+def test_parser_accepts_valid_identity() -> None:
+    parsed = parse_scope_payload(_valid_payload_copy())
+    assert canonical_scope_key(parsed) == "CPT_ROBOT"
+
+
+def test_persistence_rejects_malformed_identity_before_write() -> None:
+    """The failure must happen at persistence preparation, not at API read."""
+    bad = _valid_payload_copy()
+    bad["identity"] = {}
+    with pytest.raises(ValueError):
+        build_scope_result_kwargs(
+            scan_run_id=uuid4(),
+            trade_date=_T,
+            scope_type="concept",
+            scope_id=uuid4(),
+            scope_name="机器人",
+            payload=bad,
+        )
