@@ -30,7 +30,11 @@ from datetime import date
 from typing import Any, Protocol
 from uuid import UUID
 
-from app.domain.auction.scope_payload import parse_scope_payload
+from app.domain.auction.scope_payload import (
+    canonical_scope_key,
+    canonical_scope_name,
+    parse_scope_payload,
+)
 
 __all__ = [
     "V32_ALGORITHM_VERSION",
@@ -40,6 +44,7 @@ __all__ = [
     "ScopeListItem",
     "to_scope_list_items",
     "to_scope_detail",
+    "find_scope_result_by_key",
 ]
 
 V32_ALGORITHM_VERSION = "auction-v3.2"
@@ -190,8 +195,11 @@ def to_scope_list_items(
         payload = parse_scope_payload(row.payload)
         items.append(
             ScopeListItem(
-                scope_key=row.scope_name or str(row.scope_id),
-                scope_name=row.scope_name,
+                # KPI-3: the stable business identity lives in the canonical
+                # payload.  scope_name is a display label, the UUID is
+                # diagnostics-only — neither may serve as the product key.
+                scope_key=canonical_scope_key(payload),
+                scope_name=canonical_scope_name(payload),
                 repricing=payload["repricing"],
                 dynamics=payload["historical_dynamics"],
                 participation=payload["participation"],
@@ -202,6 +210,22 @@ def to_scope_list_items(
     return items
 
 
+def find_scope_result_by_key(
+    rows: Sequence[ScopeResultRow],
+    scope_key: str,
+) -> ScopeResultRow | None:
+    """Find a published scope row by its CANONICAL scope_key.
+
+    Matching on ``scope_name`` (or a UUID) is forbidden: only the canonical
+    identity carried inside the payload is authoritative.
+    """
+    for row in rows:
+        payload = parse_scope_payload(row.payload)
+        if canonical_scope_key(payload) == scope_key:
+            return row
+    return None
+
+
 def to_scope_detail(row: ScopeResultRow) -> dict[str, Any]:
     """Return the five canonical groups plus diagnostics (read-only)."""
     payload = parse_scope_payload(row.payload)
@@ -210,6 +234,8 @@ def to_scope_detail(row: ScopeResultRow) -> dict[str, Any]:
     diagnostics.setdefault("scope_id", str(row.scope_id))
     diagnostics.setdefault("scan_run_id", str(row.scan_run_id))
     return {
+        "scope_key": canonical_scope_key(payload),
+        "scope_name": canonical_scope_name(payload),
         "repricing": payload["repricing"],
         "historical_dynamics": payload["historical_dynamics"],
         "participation": payload["participation"],

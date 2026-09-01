@@ -36,16 +36,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.auction.coverage import ScanCoverage
 from app.domain.auction.scope_payload import SCHEMA_VERSION, parse_scope_payload
 from app.models.auction import (
-    AuctionAnalysisPublication,
     AuctionScanRun,
     AuctionScopeResult,
 )
+
+# KPI-1: the formal publication owner — the ONLY creator of publication rows.
+from app.services.auction_publication_service import publish_auction_analysis
 
 __all__ = [
     "V32_ALGORITHM_VERSION",
     "build_scan_run_kwargs",
     "build_scope_result_kwargs",
-    "build_publication_kwargs",
     "persist_v32_scope_results",
 ]
 
@@ -118,55 +119,6 @@ def build_scope_result_kwargs(
     }
 
 
-def build_publication_kwargs(
-    *,
-    trade_date: date,
-    scan_run_id: uuid.UUID,
-    capture_run_id: uuid.UUID,
-    coverage_ratio: float,
-    test_namespace: str,
-    truth_status: str,
-    capture_source: str,
-    algorithm_version: str = V32_ALGORITHM_VERSION,
-    gate_evidence: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Assemble the V3.2 publication row — the ONLY visibility boundary.
-
-    ``truth_status`` / ``test_namespace`` / ``capture_source`` are REQUIRED and
-    must be INHERITED from the real capture run and truth gate.  They
-    deliberately have no default: defaulting ``truth_status`` to ``"verified"``
-    would forge a multi-source consensus claim that a single-family
-    (pytdx/tongdaxin) source cannot make — PRD §0.0-A freezes that pytdx/mootdx
-    are ONE supply chain and must never count as two independent provider
-    families (``AuctionTruthPolicy.min_independent_sources = 2``).
-
-    ``capture_source`` records the lane (``verified_consensus`` for today's live
-    consensus run, ``historical_backfill`` for a historical day) so provenance
-    stays auditable inside ``gate_evidence``.
-    """
-    if not truth_status:
-        raise ValueError("truth_status must be inherited from the real capture run")
-    if not test_namespace:
-        raise ValueError("test_namespace must be inherited from the real capture run")
-
-    evidence = dict(gate_evidence or {})
-    evidence.setdefault("capture_source", capture_source)
-    evidence.setdefault("algorithm_version", algorithm_version)
-
-    return {
-        "trade_date": trade_date,
-        "scan_run_id": scan_run_id,
-        # REAL acquisition identity supplied by the caller; never fabricated.
-        "capture_run_id": capture_run_id,
-        "algorithm_version": algorithm_version,
-        "test_namespace": test_namespace,
-        "coverage_ratio": coverage_ratio,
-        "truth_status": truth_status,
-        "gate_evidence": evidence,
-        "published_at": datetime.now(UTC),
-    }
-
-
 async def persist_v32_scope_results(
     session: AsyncSession,
     *,
@@ -177,8 +129,6 @@ async def persist_v32_scope_results(
     coverage: ScanCoverage,
     algorithm_version: str = V32_ALGORITHM_VERSION,
     truth_status: str,
-    capture_source: str,
-    gate_evidence: dict[str, Any] | None = None,
 ) -> uuid.UUID:
     """Atomically persist one V3.2 run: scan run -> scope results -> publication.
 
@@ -213,20 +163,17 @@ async def persist_v32_scope_results(
             )
         )
 
-    session.add(
-        AuctionAnalysisPublication(
-            **build_publication_kwargs(
-                trade_date=trade_date,
-                scan_run_id=run.id,
-                capture_run_id=capture_run_id,
-                coverage_ratio=coverage.coverage_ratio,
-                test_namespace=test_namespace,
-                algorithm_version=algorithm_version,
-                truth_status=truth_status,
-                capture_source=capture_source,
-                gate_evidence=gate_evidence,
-            )
-        )
+    # KPI-1: the publication row is created by the EXISTING formal owner.
+    # It re-reads ScanRun / CaptureRun / ScopeResult and evaluates the gate;
+    # V3.2 must NOT interpret capture_source, coverage thresholds, namespace
+    # or truth_status semantics itself.  It only flushes, so the single
+    # transaction is closed by the commit below.
+    await publish_auction_analysis(
+        session,
+        scan_run_id=run.id,
+        capture_run_id=capture_run_id,
+        truth_status=truth_status,
+        test_namespace=test_namespace,
     )
 
     await session.commit()

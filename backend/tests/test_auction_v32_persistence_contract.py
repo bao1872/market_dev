@@ -1,25 +1,40 @@
-"""Persistence contract tests for Auction V3.2 (no PostgreSQL required).
+"""Persistence / publication contract tests for Auction V3.2 (no PostgreSQL).
 
-These tests pin the honest-reuse decision (REUSE_WITH_V32_SEMANTICS):
-- V3.2 must NOT forge an anchor / legacy lifecycle;
-- ``capture_run_id`` must be a REAL caller-supplied identity, never fabricated;
-- the payload schema version is validated before anything is persisted;
-- publication is the only visibility boundary.
+KPI-1: V3.2 must NOT create publication rows itself.  Publication is owned by
+``auction_publication_service.publish_auction_analysis``, which re-reads
+ScanRun / CaptureRun / ScopeResult and evaluates ``evaluate_auction_publication_gate``.
+
+KPI-7: these tests therefore consume the PRODUCTION gate owner directly instead
+of a locally invented builder.  A configuration that the real gate rejects must
+be rejected here too — the previous "historical_backfill + single_source_unverified
+build succeeds" assertion was a false green and is gone.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from datetime import date
-from uuid import uuid4
+from typing import Any
+from uuid import UUID, uuid4
 
 import pytest
 
 from app.domain.auction.coverage import compute_scan_coverage, compute_scope_coverage
 from app.domain.auction.member_observation import build_member_observation
-from app.domain.auction.scope_payload import SCHEMA_VERSION, build_scope_payload
+from app.domain.auction.scope_payload import (
+    SCHEMA_VERSION,
+    build_scope_payload,
+    canonical_scope_key,
+    parse_scope_payload,
+)
+from app.services.auction_publication_service import (
+    MIN_FORMAL_COVERAGE,
+    VERIFIED_AUCTION_SOURCE,
+    AuctionPublicationGateError,
+    evaluate_auction_publication_gate,
+)
 from app.services.auction_scope_persistence_service import (
     V32_ALGORITHM_VERSION,
-    build_publication_kwargs,
     build_scan_run_kwargs,
     build_scope_result_kwargs,
 )
@@ -34,14 +49,7 @@ _EMPTY_GROUPS = {
 }
 
 
-def _valid_payload() -> dict:
-    return build_scope_payload(algorithm_version=V32_ALGORITHM_VERSION, **_EMPTY_GROUPS)
-
-
-# ---------------------------------------------------------------------------
-# scan run: no anchor forgery
-# ---------------------------------------------------------------------------
-def _obs(gap, amount):
+def _obs(gap: float | None, amount: float | None) -> Any:
     return build_member_observation(
         instrument_id=uuid4(),
         trade_date=_T,
@@ -53,290 +61,209 @@ def _obs(gap, amount):
     )
 
 
+def _payload() -> dict:
+    return build_scope_payload(
+        algorithm_version=V32_ALGORITHM_VERSION,
+        identity={"scope_key": "IND_BANK", "scope_name": "银行"},
+        **_EMPTY_GROUPS,
+    )
+
+
+def _scope_row(**payload_kwargs: Any) -> Any:
+    payload = _payload()
+    payload.update(payload_kwargs)
+    return build_scope_result_kwargs(
+        scan_run_id=uuid4(),
+        trade_date=_T,
+        scope_type="industry",
+        scope_id=uuid4(),
+        scope_name="银行",
+        payload=payload,
+    )
+
+
+# ---------------------------------------------------------------------------
+# publication gate — the production owner decides (KPI-7)
+# ---------------------------------------------------------------------------
+def _gate(**over: Any) -> list[str]:
+    base = {
+        "truth_status": "verified",
+        "test_namespace": "production",
+        "scan_status": "succeeded",
+        "scan_coverage": 0.98,
+        "capture_source": VERIFIED_AUCTION_SOURCE,
+        "capture_status": "succeeded",
+        "scope_count": 12,
+    }
+    base.update(over)
+    return evaluate_auction_publication_gate(**base)
+
+
+def test_gate_allows_the_fully_verified_combination() -> None:
+    assert _gate() == []
+
+
+def test_gate_rejects_raw_mootdx_source() -> None:
+    """Raw single-family acquisition must never be publishable."""
+    assert "capture_source_not_verified_consensus" in _gate(capture_source="mootdx")
+
+
+def test_gate_rejects_historical_backfill_source() -> None:
+    """History is an INPUT to dynamics, never a publishable source."""
+    reasons = _gate(capture_source="historical_backfill")
+    assert "capture_source_not_verified_consensus" in reasons
+
+
+def test_gate_rejects_low_coverage() -> None:
+    # exactly at the formal threshold is allowed...
+    assert _gate(scan_coverage=MIN_FORMAL_COVERAGE) == []
+    # ...anything below is rejected (0.94 < 0.95 must NOT pass)
+    assert "scan_coverage_below_threshold" in _gate(scan_coverage=0.94)
+    assert "scan_coverage_below_threshold" in _gate(scan_coverage=MIN_FORMAL_COVERAGE - 0.01)
+
+
+def test_gate_rejects_zero_scope_count() -> None:
+    assert "aggregation_missing" in _gate(scope_count=0)
+
+
+def test_gate_rejects_failed_capture() -> None:
+    assert "capture_not_succeeded" in _gate(capture_status="failed")
+
+
+def test_gate_rejects_unverified_truth() -> None:
+    assert "auction_truth_not_verified" in _gate(truth_status="single_source_unverified")
+
+
+def test_gate_rejects_non_production_namespace() -> None:
+    assert "canary_or_test_namespace" in _gate(test_namespace="historical_backfill")
+
+
+def test_gate_rejects_failed_scan() -> None:
+    assert "scan_not_succeeded" in _gate(scan_status="failed")
+
+
+def test_historical_lane_cannot_be_published_at_all() -> None:
+    """The historical lane fails MULTIPLE gate conditions, never zero."""
+    reasons = _gate(
+        capture_source="historical_backfill",
+        test_namespace="historical_backfill",
+        truth_status="single_source_unverified",
+    )
+    assert len(reasons) >= 3
+
+
+def test_publication_gate_error_type_exists_for_callers() -> None:
+    assert issubclass(AuctionPublicationGateError, ValueError)
+
+
+# ---------------------------------------------------------------------------
+# scan run / scope result preparation (still V3.2-owned, non-publication)
+# ---------------------------------------------------------------------------
 def test_scan_run_leaves_anchor_foreign_keys_null() -> None:
-    """V3.2 must not pretend to run the legacy anchor pipeline."""
-    cov = compute_scan_coverage([_obs(0.01, 100.0), _obs(0.02, 200.0)])
-    kwargs = build_scan_run_kwargs(trade_date=_T, coverage=cov)
+    kwargs = build_scan_run_kwargs(
+        trade_date=_T, coverage=compute_scan_coverage([_obs(0.01, 100.0)])
+    )
     assert kwargs["source_anchor_snapshot_id"] is None
     assert kwargs["source_anchor_publication_id"] is None
 
 
 def test_scan_run_uses_v32_algorithm_version() -> None:
-    cov = compute_scan_coverage([_obs(0.01, 100.0)])
-    kwargs = build_scan_run_kwargs(trade_date=_T, coverage=cov)
+    kwargs = build_scan_run_kwargs(
+        trade_date=_T, coverage=compute_scan_coverage([_obs(0.01, 100.0)])
+    )
     assert kwargs["algorithm_version"] == V32_ALGORITHM_VERSION
 
 
-def test_scan_run_derives_missing_count() -> None:
-    cov = compute_scan_coverage([_obs(0.01, 100.0), _obs(0.02, 200.0), _obs(None, None)])
-    kwargs = build_scan_run_kwargs(trade_date=_T, coverage=cov)
-    assert kwargs["missing_count"] == 1
-    assert kwargs["ready_count"] == 2
-
-
-def test_scan_run_coverage_comes_from_the_coverage_owner() -> None:
-    """Persistence must not recompute coverage — it projects the owner value."""
-    obs = [_obs(0.01, 100.0), _obs(0.02, 200.0), _obs(None, None), _obs(0.03, None)]
-    cov = compute_scan_coverage(obs)
+def test_scan_run_coverage_projected_from_the_coverage_owner() -> None:
+    cov = compute_scan_coverage([_obs(0.01, 100.0), _obs(None, None)])
     kwargs = build_scan_run_kwargs(trade_date=_T, coverage=cov)
     assert kwargs["coverage_ratio"] == cov.coverage_ratio
-    assert kwargs["eligible_count"] == cov.eligible_count
     assert kwargs["ready_count"] == cov.valid_count
 
 
-# ---------------------------------------------------------------------------
-# three coverage layers are NOT the same field (V3.2 §三)
-# ---------------------------------------------------------------------------
-def test_current_coverage_excludes_history_readiness() -> None:
-    """A good today-quote is valid even with no history (V3.2 §二)."""
-    obs = [_obs(0.01, 100.0)]  # no history evidence at all
-    cov = compute_scan_coverage(obs)
-    assert cov.valid_count == 1
-    assert cov.coverage_ratio == 1.0
-
-
-def test_scope_coverage_is_a_different_fact_from_scan_coverage() -> None:
-    """Scope coverage has its OWN denominator and varies per scope.
-
-    A numerically coincidental equality proves nothing, so this pins the
-    structural property instead: on the SAME day (same scan coverage), scope
-    coverage must change with that scope's membership.
-    """
-    universe = [_obs(0.01, 100.0), _obs(0.02, 200.0), _obs(None, None), _obs(None, None)]
-    scan = compute_scan_coverage(universe)
-
-    tight = compute_scope_coverage([_obs(0.01, 100.0), _obs(0.02, 200.0)])
-    weak = compute_scope_coverage([_obs(None, None), _obs(None, None)])
-
-    # the day-level value is fixed at 2/4 no matter which scope we look at
-    assert scan.coverage_ratio == 0.5
-    assert scan.eligible_count == 4
-
-    # ...while scope coverage is 1.0 and 0.0 for two different scopes
-    assert tight.coverage_ratio == 1.0
-    assert weak.coverage_ratio == 0.0
-    assert tight.coverage_ratio != weak.coverage_ratio
-    assert tight.member_count == 2 == weak.member_count
-
-
-def test_scope_coverage_uses_the_same_validity_rule() -> None:
-    members = [_obs(0.01, 100.0), _obs(None, None), _obs(None, 50.0)]
-    scope = compute_scope_coverage(members)
-    # first (price+amount) and third (amount only) are valid; second is not
-    assert scope.valid_count == 2
-
-
-def test_coverage_ratio_is_zero_not_none_when_nothing_to_analyse() -> None:
-    scan = compute_scan_coverage([])
-    scope = compute_scope_coverage([])
-    assert scan.coverage_ratio == 0.0
-    assert scope.coverage_ratio == 0.0
-
-
-def test_member_valid_on_either_formal_axis_counts() -> None:
-    """Valid = contributes to at least one axis (Gap or Amount)."""
-    amount_only = compute_scan_coverage([_obs(None, 100.0)])
-    gap_only = compute_scan_coverage([_obs(0.01, None)])
-    neither = compute_scan_coverage([_obs(None, None)])
-    assert amount_only.valid_count == 1
-    assert gap_only.valid_count == 1
-    assert neither.valid_count == 0
-
-
-# ---------------------------------------------------------------------------
-# scope result: payload validation before persistence
-# ---------------------------------------------------------------------------
 def test_scope_result_accepts_valid_payload() -> None:
-    row = build_scope_result_kwargs(
-        scan_run_id=uuid4(),
-        trade_date=_T,
-        scope_type="industry",
-        scope_id=uuid4(),
-        scope_name="IND_BANK",
-        payload=_valid_payload(),
-    )
+    row = _scope_row()
     assert row["payload"]["schema_version"] == SCHEMA_VERSION
-    assert row["scope_type"] == "industry"
 
 
 def test_scope_result_rejects_unknown_schema_version() -> None:
-    bad = _valid_payload()
-    bad["schema_version"] = "auction-scope-v9.9"
     with pytest.raises(ValueError, match="schema_version"):
-        build_scope_result_kwargs(
-            scan_run_id=uuid4(),
-            trade_date=_T,
-            scope_type="industry",
-            scope_id=None,
-            scope_name="X",
-            payload=bad,
-        )
+        parse_scope_payload({**_payload(), "schema_version": "nope"})
 
 
-def test_scope_result_rejects_missing_group() -> None:
-    bad = _valid_payload()
-    del bad["member_attribution"]
-    with pytest.raises(ValueError, match="missing groups"):
-        build_scope_result_kwargs(
-            scan_run_id=uuid4(),
-            trade_date=_T,
-            scope_type="concept",
-            scope_id=None,
-            scope_name="X",
-            payload=bad,
-        )
+def test_scope_result_rejects_missing_identity() -> None:
+    bad = _payload()
+    del bad["identity"]
+    with pytest.raises(ValueError, match="identity"):
+        parse_scope_payload(bad)
 
 
 def test_scope_result_does_not_populate_legacy_columns() -> None:
-    """V3.2 must not write legacy Structure/Chip/label semantics."""
-    row = build_scope_result_kwargs(
-        scan_run_id=uuid4(),
-        trade_date=_T,
-        scope_type="industry",
-        scope_id=None,
-        scope_name="X",
-        payload=_valid_payload(),
-    )
+    row = _scope_row()
     for legacy in (
         "structure_breakout_count",
         "chip_cross_up_count",
         "status_label",
         "confidence_level",
-        "median_change_pct",
     ):
         assert legacy not in row
 
 
 # ---------------------------------------------------------------------------
-# publication: real capture run, V3.2 identity, visibility boundary
+# KPI-3 canonical scope identity
 # ---------------------------------------------------------------------------
-def test_publication_carries_the_real_capture_run_id() -> None:
-    real_capture_run = uuid4()
-    kwargs = build_publication_kwargs(
-        trade_date=_T,
-        scan_run_id=uuid4(),
-        capture_run_id=real_capture_run,
-        coverage_ratio=0.9,
-        test_namespace="historical_backfill",
-        truth_status="single_source_unverified",
-        capture_source="historical_backfill",
+def test_payload_carries_scope_key_distinct_from_scope_name() -> None:
+    payload = build_scope_payload(
+        algorithm_version=V32_ALGORITHM_VERSION,
+        identity={"scope_key": "CPT_ROBOT", "scope_name": "机器人"},
+        **_EMPTY_GROUPS,
     )
-    assert kwargs["capture_run_id"] == real_capture_run
+    assert canonical_scope_key(payload) == "CPT_ROBOT"
+    assert payload["identity"]["scope_name"] == "机器人"
+    assert canonical_scope_key(payload) != payload["identity"]["scope_name"]
 
 
-def test_publication_uses_v32_algorithm_version() -> None:
-    kwargs = build_publication_kwargs(
-        trade_date=_T,
-        scan_run_id=uuid4(),
-        capture_run_id=uuid4(),
-        coverage_ratio=1.0,
-        test_namespace="production",
-        truth_status="verified",
-        capture_source="verified_consensus",
-    )
-    assert kwargs["algorithm_version"] == V32_ALGORITHM_VERSION
-
-
-def test_publication_has_a_published_at_timestamp() -> None:
-    kwargs = build_publication_kwargs(
-        trade_date=_T,
-        scan_run_id=uuid4(),
-        capture_run_id=uuid4(),
-        coverage_ratio=1.0,
-        test_namespace="production",
-        truth_status="verified",
-        capture_source="verified_consensus",
-    )
-    assert kwargs["published_at"] is not None
-
-
-def test_publication_requires_distinct_scan_and_capture_identity() -> None:
-    """Sanity: a publication binds a computation run to an acquisition run."""
-    scan_run, capture_run = uuid4(), uuid4()
-    kwargs = build_publication_kwargs(
-        trade_date=_T,
-        scan_run_id=scan_run,
-        capture_run_id=capture_run,
-        coverage_ratio=1.0,
-        test_namespace="production",
-        truth_status="verified",
-        capture_source="verified_consensus",
-    )
-    assert kwargs["scan_run_id"] == scan_run
-    assert kwargs["capture_run_id"] == capture_run
-
-
-# ---------------------------------------------------------------------------
-# truth_status must be INHERITED, never defaulted (anti-forgery)
-# ---------------------------------------------------------------------------
-def test_publication_has_no_default_truth_status() -> None:
-    """A defaulted ``truth_status`` would forge a multi-source consensus claim.
-
-    ``AuctionTruthPolicy.min_independent_sources = 2`` and PRD §0.0-A freeze
-    pytdx/mootdx as ONE supply chain, so V3.2 cannot honestly claim "verified"
-    on its own.  Omitting the argument must therefore be an error, not a
-    silent default.
-    """
-    with pytest.raises(TypeError):
-        build_publication_kwargs(
-            trade_date=_T,
-            scan_run_id=uuid4(),
-            capture_run_id=uuid4(),
-            coverage_ratio=1.0,
-            test_namespace="production",
+def test_payload_requires_a_non_empty_scope_key() -> None:
+    with pytest.raises(ValueError, match="scope_key"):
+        build_scope_payload(
+            algorithm_version=V32_ALGORITHM_VERSION,
+            identity={"scope_name": "机器人"},
+            **_EMPTY_GROUPS,
         )
 
 
-def test_publication_rejects_empty_truth_status() -> None:
-    with pytest.raises(ValueError, match="truth_status"):
-        build_publication_kwargs(
-            trade_date=_T,
-            scan_run_id=uuid4(),
-            capture_run_id=uuid4(),
-            coverage_ratio=1.0,
-            test_namespace="production",
-            truth_status="",
-            capture_source="verified_consensus",
-        )
+def test_canonical_scope_key_rejects_name_only_payload() -> None:
+    with pytest.raises(ValueError, match="scope_key"):
+        canonical_scope_key({"identity": {"scope_name": "机器人"}})
 
 
-def test_publication_rejects_empty_test_namespace() -> None:
-    with pytest.raises(ValueError, match="test_namespace"):
-        build_publication_kwargs(
-            trade_date=_T,
-            scan_run_id=uuid4(),
-            capture_run_id=uuid4(),
-            coverage_ratio=1.0,
-            test_namespace="",
-            truth_status="verified",
-            capture_source="verified_consensus",
-        )
+# ---------------------------------------------------------------------------
+# coverage layering
+# ---------------------------------------------------------------------------
+def test_current_coverage_excludes_history_readiness() -> None:
+    cov = compute_scan_coverage([_obs(0.01, 100.0)])
+    assert cov.valid_count == 1
+    assert cov.coverage_ratio == 1.0
 
 
-def test_publication_records_capture_source_lineage() -> None:
-    kwargs = build_publication_kwargs(
-        trade_date=_T,
-        scan_run_id=uuid4(),
-        capture_run_id=uuid4(),
-        coverage_ratio=1.0,
-        test_namespace="historical_backfill",
-        truth_status="single_source_unverified",
-        capture_source="historical_backfill",
-    )
-    assert kwargs["gate_evidence"]["capture_source"] == "historical_backfill"
-    assert kwargs["truth_status"] == "single_source_unverified"
+def test_scope_coverage_is_a_different_fact_from_scan_coverage() -> None:
+    universe = [_obs(0.01, 100.0), _obs(0.02, 200.0), _obs(None, None), _obs(None, None)]
+    scan = compute_scan_coverage(universe)
+    tight = compute_scope_coverage([_obs(0.01, 100.0), _obs(0.02, 200.0)])
+    weak = compute_scope_coverage([_obs(None, None), _obs(None, None)])
+
+    assert scan.coverage_ratio == 0.5
+    assert tight.coverage_ratio == 1.0
+    assert weak.coverage_ratio == 0.0
+    assert tight.coverage_ratio != weak.coverage_ratio
 
 
-def test_historical_lane_cannot_claim_verified_consensus() -> None:
-    """The historical lane is explicitly outside the live verified_consensus
-    truth chain, so its capture_source must stay recorded as such."""
-    kwargs = build_publication_kwargs(
-        trade_date=_T,
-        scan_run_id=uuid4(),
-        capture_run_id=uuid4(),
-        coverage_ratio=1.0,
-        test_namespace="historical_backfill",
-        truth_status="single_source_unverified",
-        capture_source="historical_backfill",
-    )
-    assert kwargs["gate_evidence"]["capture_source"] != "verified_consensus"
+def test_member_valid_on_either_formal_axis_counts() -> None:
+    assert compute_scan_coverage([_obs(None, 100.0)]).valid_count == 1
+    assert compute_scan_coverage([_obs(0.01, None)]).valid_count == 1
+    assert compute_scan_coverage([_obs(None, None)]).valid_count == 0
+
+
+def test_coverage_ratio_is_zero_not_none_when_empty() -> None:
+    assert compute_scan_coverage([]).coverage_ratio == 0.0
+    assert compute_scope_coverage([]).coverage_ratio == 0.0

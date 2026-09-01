@@ -1022,6 +1022,7 @@ async def list_auction_scopes(
     trade_date: date | None = Query(default=None),
     family: str = Query(default="industry", pattern="^(industry|concept)$"),
     db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionScopeListOut:
     """COMPLETE same-family snapshot (no Top-N) for one published trade_date.
 
@@ -1035,6 +1036,7 @@ async def list_auction_scopes(
     )
     from app.domain.auction.scope_payload import SCHEMA_VERSION
 
+    _ = ctx
     resolved = _resolve_trade_date(trade_date)
     publications, results = await _load_publications_and_results(db, resolved)
 
@@ -1095,6 +1097,7 @@ async def get_auction_scope_detail(
     trade_date: date | None = Query(default=None),
     family: str = Query(default="industry", pattern="^(industry|concept)$"),
     db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionScopeDetailOut:
     """Five canonical groups for one PUBLISHED scope, plus diagnostics."""
     from app.domain.auction.publication_read import (
@@ -1103,6 +1106,7 @@ async def get_auction_scope_detail(
         to_scope_detail,
     )
 
+    _ = ctx
     resolved = _resolve_trade_date(trade_date)
     publications, results = await _load_publications_and_results(db, resolved)
 
@@ -1138,6 +1142,7 @@ async def get_auction_scope_detail(
 @router.get("/meta/dates", response_model=AuctionMetaDatesOut)
 async def list_auction_scope_dates(
     db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_capability(AUCTION_CAPABILITY)),
 ) -> AuctionMetaDatesOut:
     """Trade dates with a FORMAL V3.2 publication (newest first).
 
@@ -1147,6 +1152,7 @@ async def list_auction_scope_dates(
     from app.domain.auction.publication_read import published_dates
     from app.models.auction import AuctionAnalysisPublication
 
+    _ = ctx
     publications = (await db.execute(select(AuctionAnalysisPublication))).scalars().all()
     dates = published_dates(list(publications))
     return AuctionMetaDatesOut(trade_dates=dates, latest=dates[0] if dates else None)

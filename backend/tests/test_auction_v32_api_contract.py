@@ -115,6 +115,7 @@ def _payload(
     )
     return build_scope_payload(
         algorithm_version=V32_ALGORITHM_VERSION,
+        identity={"scope_key": "IND_BANK", "scope_name": "银行"},
         repricing=groups[0],
         historical_dynamics=groups[1],
         participation=groups[2],
@@ -135,7 +136,8 @@ def _row(
         trade_date=trade_date,
         scope_type=scope_type,
         scope_id=uuid4(),
-        scope_name=name,
+        # scope_name is only a display label; the product key lives in payload
+        scope_name=f"显示名-{name}",
         payload=_payload(**payload_kwargs),
     )
 
@@ -162,7 +164,7 @@ def test_scenario2_newer_unpublished_run_stays_invisible() -> None:
     ]
     result = read_published_scope_results(pubs, rows, trade_date=_T, family="industry")
     assert len(result) == 1
-    assert result[0].scope_name == "IND_FROM_A"
+    assert result[0].scope_name == "显示名-IND_FROM_A"
 
 
 def test_scenario3_unpublished_scope_results_are_invisible() -> None:
@@ -219,10 +221,13 @@ def test_industry_request_never_returns_concept() -> None:
         _row(run_a, "concept", "CPT_AI"),
     ]
     got = read_published_scope_results(pubs, rows, trade_date=_T, family="industry")
-    assert [r.scope_name for r in got] == ["IND_BANK"]
+    assert [r.scope_name for r in got] == ["显示名-IND_BANK"]
 
     got_concept = read_published_scope_results(pubs, rows, trade_date=_T, family="concept")
-    assert sorted(r.scope_name for r in got_concept) == ["CPT_AI", "CPT_ROBOT"]
+    assert sorted(r.scope_name for r in got_concept) == [
+        "显示名-CPT_AI",
+        "显示名-CPT_ROBOT",
+    ]
 
 
 # ---------------------------------------------------------------------------
