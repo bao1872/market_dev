@@ -1,5 +1,9 @@
 // [R3C] G1 — Price & Capital formal Observation renderer.
 // Consumes parsed PriceCapitalVM. No recomputation, no score/health/bullish.
+// [REVIEW-UX-EXPERIMENT-READINESS-01 Slice A] Current 正式指标收敛为 3 个：
+//   等权涨跌幅 / 成交额加权涨跌幅 / 总成交额（百亿元）。
+//   Total Volume 仅从正式 Current UI 移除展示；canonical total_volume、
+//   API payload、reviewCopy 词条与 PriceCapitalVM.totalVolume 均保留。
 // REVIEW-UX-CN-01：指标 label 中文化 + hover tooltip（ReviewTerm compact，无 ⓘ）。
 
 import { type FC, type ReactNode } from 'react'
@@ -58,7 +62,6 @@ const ScopePriceCapitalObservation: FC<Props> = ({ vm }) => {
       <div className={styles.pcRow}>
         <Metric label={<ReviewTerm termKey="equalWeightReturn" compact />} value={vm.equalWeightReturn} tone={vm.equalWeightReturnTone} />
         <Metric label={<ReviewTerm termKey="amountWeightedReturn" compact />} value={vm.amountWeightedReturn} tone={vm.amountWeightedReturnTone} />
-        <Metric label={<ReviewTerm termKey="totalVolume" compact />} value={vm.totalVolume} tone="neutral" />
         <Metric label={<ReviewTerm termKey="totalAmount" compact />} value={vm.totalAmount} tone="neutral" />
       </div>
       {vm.amountAvailabilityNote && (

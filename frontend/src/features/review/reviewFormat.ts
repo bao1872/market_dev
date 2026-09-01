@@ -9,6 +9,13 @@ import { PHASE_LABELS, READINESS_LABELS } from './reviewCopy'
 
 export const NULL_DISPLAY = '—'
 
+/**
+ * [REVIEW-UX-EXPERIMENT-READINESS-01 Slice A] 无 scopeName 时的产品展示占位。
+ * 空名称时绝不用内部 scopeKey / UUID 冒充正常产品名称；
+ * scopeKey 仍保留为 URL、routing、API identity、React key 与 Raw Facts 身份。
+ */
+export const UNNAMED_SCOPE_LABEL = '未命名板块'
+
 /** 百分比格式化：输入为比率（0.123 → "12.3%"）；null/NaN → "—" */
 export function formatPercentNullable(
   value: number | null | undefined,
@@ -130,6 +137,48 @@ export function formatPercentileNullable(
 ): string {
   if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
   return value.toFixed(digits)
+}
+
+/**
+ * [REVIEW-UX-EXPERIMENT-READINESS-01 Slice A] 总成交额展示单位：百亿元。
+ * 1 百亿元 = 10^10 元。
+ *
+ * A2 Unit Gate 证据链（证明 canonical amount 单位 = 人民币元）：
+ * - bar 源 = pytdx：backend/app/services/bars_validator.py:16
+ *   「df: pytdx 返回的 DataFrame，含 datetime/open/high/low/close/volume/amount 列」
+ * - pytdx → DB 无换算：backend/app/core/pytdx_adapter.py:650-651（仅 vol→volume 改名，
+ *   amount 原值传递）
+ * - pytdx amount 单位 = 元：backend/app/services/auction_quote_provider.py:51
+ *   「amount: float | None  # pytdx amount 字段（元）」（同处 vol = 手）
+ * - Review 链无换算：backend/app/domain/review/member_fact.py:432
+ *   `amount=_number(row.amount)`；backend/app/domain/review/scope_observation.py:653-657
+ *   `total_amount = sum(...)`（仅改排序保证确定性，注释「Same formula」）
+ * - 真实量级反证：402 成员 concept total_amount=312834079356
+ *   （experiments/review_real_market_acceptance/canonical_compositions.jsonl）
+ *   → 元 = 3128 亿元（≈7.8 亿元/只/日，符合 A 股量级）；
+ *     若为千元则 = 312 万亿元，超全市场日成交额约 200 倍，物理不可能。
+ */
+export const AMOUNT_UNIT_LABEL = '百亿元'
+export const RAW_YUAN_PER_BAI_YI_YUAN = 10_000_000_000
+
+/**
+ * 总成交额（百亿元）展示格式化：display = raw / 10^10。
+ * - null / undefined / NaN → NULL_DISPLAY('—')，绝不落 0；
+ * - amountAvailability === 'unavailable' 由 VM 层短路为 '—'，不进入本换算；
+ * - 真实正值但按 digits 舍入后为 0 → 显示 "<0.01" 而非 "0.00"，
+ *   避免把「有成交但极小」误显示为「零成交」。
+ */
+export function formatAmountInBaiYiYuan(
+  value: number | null | undefined,
+  digits = 2,
+): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return NULL_DISPLAY
+  const scaled = value / RAW_YUAN_PER_BAI_YI_YUAN
+  const fixed = scaled.toFixed(digits)
+  if (scaled > 0 && Number(fixed) === 0) {
+    return `<${(1 / 10 ** digits).toFixed(digits)}`
+  }
+  return fixed
 }
 
 /** Z-score 原始展示（1.35 / -1.35）；无 "%"，无方向配色。 */

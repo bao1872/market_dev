@@ -20,12 +20,18 @@
 //   - Segment Slope: %/bar -> NO x100 (formatPctPerBarNullable).
 //   - Segment Volume/Amount Ratio: dimensionless multiple -> NO x100
 //     (formatMultipleNullable).
-//   - Total Volume / Total Amount: RAW canonical sums, physical unit NOT frozen
-//     -> raw formatted number, no unit suffix, NO x100.
+//   - Total Volume: RAW canonical sum, physical unit NOT frozen -> raw formatted
+//     number, no unit suffix, NO x100. [Slice A] 仅保留在 PriceCapitalVM 供
+//     Raw Facts / diagnostics 使用；Current 正式 UI 不再展示该指标。
+//   - Total Amount: canonical unit = RMB 元（A2 Unit Gate 已证明，证据见
+//     reviewFormat.formatAmountInBaiYiYuan 注释）。展示单位 = 百亿元：
+//     display = raw / 10^10（formatAmountInBaiYiYuan）。
+//     amountAvailability === 'unavailable' 时短路为 '—'，绝不进入换算。
 
 import {
   formatPercentNullable,
   formatNumberNullable,
+  formatAmountInBaiYiYuan,
   NULL_DISPLAY,
 } from './reviewFormat'
 
@@ -79,7 +85,11 @@ export function formatMultipleNullable(
   return `${value.toFixed(digits)}×`
 }
 
-/** Raw canonical scalar sum — physical unit NOT frozen, no suffix. */
+/**
+ * Raw canonical scalar sum — physical unit NOT frozen, no suffix.
+ * [Slice A] 此后仅服务于 Total Volume（Raw Facts / diagnostics）；
+ * Total Amount 已改用 formatAmountInBaiYiYuan（单位 = 百亿元，有 A2 Unit Gate 证据）。
+ */
 export function formatRawSumNullable(
   value: number | null | undefined,
   decimals = 2,
@@ -208,7 +218,9 @@ export function buildPriceCapitalVM(facts: PriceCapitalFacts | null): PriceCapit
   // unavailable (valid_count==0) => Total Amount is NOT an observed zero.
   // Display "—" (never "0.00"); availability note carries the truth.
   const totalAmountDisplay =
-    facts.amountAvailability === 'unavailable' ? NULL_DISPLAY : formatRawSumNullable(facts.totalAmount)
+    facts.amountAvailability === 'unavailable'
+      ? NULL_DISPLAY
+      : formatAmountInBaiYiYuan(facts.totalAmount)
   return {
     equalWeightReturn: formatPercentNullable(facts.equalWeightReturn, 2),
     equalWeightReturnTone: signedTone(facts.equalWeightReturn),

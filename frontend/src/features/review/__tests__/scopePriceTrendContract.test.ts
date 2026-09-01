@@ -35,7 +35,9 @@ test('R3C formatters — numeric scale (P0: no x100 errors)', () => {
   // Volume Ratio 1.15 -> 1.15× (NO x100)
   assert.equal(formatMultipleNullable(1.15), '1.15×')
 
-  // Total Amount raw number, NO unit suffix, NO x100
+  // Total Volume raw number, NO unit suffix, NO x100
+  // [Slice A] formatRawSumNullable 此后仅服务于 Total Volume（Raw Facts / diagnostics）；
+  // Total Amount 已改用 formatAmountInBaiYiYuan（单位 = 百亿元）。
   assert.equal(formatRawSumNullable(1234567.89), '1,234,567.89')
 
   // null numeric -> — (no fake zero)
@@ -74,11 +76,30 @@ test('R3C G1 — Total Amount availability (no recomputation)', () => {
   assert.equal(vm30!.amountAvailabilityNote, null)
   assert.equal(vm30!.totalAmount, '0.00')
 
-  // total_amount=123 + valid_count>0 -> valid raw number
-  const vm123 = buildPriceCapitalVM(
-    parsePriceCapital({ ...baseFacts, total_amount: 123.45 }, obs30),
+  // [Slice A] total_amount=1 百亿元（10^10 元）→ 展示 "1.00"（单位换算，不是 raw）
+  const vm1e10 = buildPriceCapitalVM(
+    parsePriceCapital({ ...baseFacts, total_amount: 10_000_000_000 }, obs30),
   )
-  assert.equal(vm123!.totalAmount, '123.45')
+  assert.equal(vm1e10!.totalAmount, '1.00')
+
+  // [Slice A] 真实生产量级：402 成员 concept（2026-07-29）total_amount=312834079356
+  // → 31.28 百亿元。旧断言 raw '123.45' 已随单位换算失效。
+  const vmReal = buildPriceCapitalVM(
+    parsePriceCapital({ ...baseFacts, total_amount: 312_834_079_356 }, obs30),
+  )
+  assert.equal(vmReal!.totalAmount, '31.28')
+
+  // 极小正值（1e6 元 = 0.0001 百亿元）不得显示 "0.00" 冒充零成交
+  const vmTiny = buildPriceCapitalVM(
+    parsePriceCapital({ ...baseFacts, total_amount: 1_000_000 }, obs30),
+  )
+  assert.equal(vmTiny!.totalAmount, '<0.01')
+
+  // total_amount=null 且 valid_count>0 → '—'（不是 0，也不是 '0.00'）
+  const vmNullValid = buildPriceCapitalVM(
+    parsePriceCapital({ ...baseFacts, total_amount: null }, obs30),
+  )
+  assert.equal(vmNullValid!.totalAmount, '—')
 })
 
 test('R3C G1 — EW/AW direction tone', () => {

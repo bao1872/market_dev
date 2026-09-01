@@ -6,6 +6,7 @@
 // 等市场方向值，acceleration 必须用中性 muted 字形）；品牌色仅用于选中节点描边。
 // 不添加机会区标签；散点仅用于交互。
 import type { ReviewScopeListItem } from './types'
+import { NULL_DISPLAY, UNNAMED_SCOPE_LABEL } from './reviewFormat'
 import styles from './review.module.scss'
 
 const W = 760
@@ -135,9 +136,9 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
               }}
               tabIndex={0}
               role="button"
-              aria-label={`板块 ${r.scopeName ?? r.scopeKey}`}
+              aria-label={`板块 ${r.scopeName ?? UNNAMED_SCOPE_LABEL}`}
             >
-              <title>{`${r.scopeName ?? r.scopeKey} · 分位动能 ${vel.toFixed(2)}`}</title>
+              <title>{`${r.scopeName ?? UNNAMED_SCOPE_LABEL} · 分位动能 ${vel.toFixed(2)}`}</title>
               <circle cx={cx} cy={cy} r={rNode} />
               {accel !== null && (
                 <text
@@ -183,7 +184,7 @@ export default function ScopeTrajectoryView({ rows, selectedScopeKey, onSelectSc
             className={r.scopeKey === selectedScopeKey ? `${styles.trajListItem} ${styles.trajListItemSelected}` : styles.trajListItem}
             onClick={() => onSelectScope(r.scopeKey)}
           >
-            {r.scopeName ?? r.scopeKey}
+            {r.scopeName ?? NULL_DISPLAY}
             <span className={styles.trajItemAccel}>
               <AccelGlyph value={r.summary.acceleration} />
             </span>

@@ -11,6 +11,7 @@
 import type { ReviewScopeListItem } from './types'
 import {
   NULL_DISPLAY,
+  UNNAMED_SCOPE_LABEL,
   formatPercentNullable,
   formatNumberNullable,
   formatPosition,
@@ -175,21 +176,22 @@ export default function ScopeExplorerTable({ rows, selectedScopeKey, sort, onSor
                 tabIndex={0}
                 role="button"
                 aria-selected={selected}
-                aria-label={`选择板块 ${row.scopeName ?? row.scopeKey}`}
+                aria-label={`选择板块 ${row.scopeName ?? UNNAMED_SCOPE_LABEL}`}
               >
+                {/* [Slice A] Scope UUID 不再作为正常产品 UI 展示。
+                    身份仍由 key={row.scopeKey} / onSelectScope(row.scopeKey) / URL scopeKey 承载。 */}
                 <td>
                   <div className={styles.scopeCellName}>{row.scopeName ?? NULL_DISPLAY}</div>
-                  <div className={styles.scopeCellKey}>{row.scopeKey}</div>
                 </td>
                 <td>{formatPhaseLabel(s?.phase)}</td>
                 <td className={styles.numCell}>{formatPosition(s?.position)}</td>
                 <td className={styles.numCell}>{formatNumberNullable(s?.velocity)}</td>
                 <td className={styles.numCell}>{formatNumberNullable(s?.acceleration)}</td>
                 <td className={`${styles.numCell} ${directionClass(s?.equalWeightReturn)}`}>
-                  {formatPercentNullable(s?.equalWeightReturn)}
+                  {formatPercentNullable(s?.equalWeightReturn, 2)}
                 </td>
                 <td className={`${styles.numCell} ${directionClass(s?.capitalTilt)}`}>
-                  {formatPercentNullable(s?.capitalTilt)}
+                  {formatPercentNullable(s?.capitalTilt, 2)}
                 </td>
                 <td>
                   <BreadthCell summary={s} />

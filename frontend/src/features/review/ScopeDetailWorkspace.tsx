@@ -23,7 +23,7 @@ import ScopeLeadershipPanel from './ScopeLeadershipPanel'
 import ScopeMemberAttributionPanel from './ScopeMemberAttributionPanel'
 import ScopeRawFactsPanel from './ScopeRawFactsPanel'
 import ScopeCurrentObservationWorkspace from './ScopeCurrentObservationWorkspace'
-import { NULL_DISPLAY, formatReadiness } from './reviewFormat'
+import { NULL_DISPLAY, UNNAMED_SCOPE_LABEL, formatReadiness } from './reviewFormat'
 import styles from './review.module.scss'
 
 const FAMILY_LABEL: Record<ReviewScopeFamily, string> = {
@@ -57,10 +57,9 @@ function Header({
         <span className={styles.detailMeta}>{FAMILY_LABEL[family] ?? family}</span>
         <span className={styles.detailMeta}>数据状态：{formatReadiness(readiness)}</span>
       </div>
+      {/* [Slice A] Detail header 不再展示 Scope UUID；身份仍由 scopeKey 承载于
+          URL / routing / API 请求。Raw Facts 面板保留必要 identity。 */}
       <div className={styles.detailTechnical} data-tech-line>
-        <span className={styles.detailKey} title={data.scopeKey}>
-          {data.scopeKey}
-        </span>
         <span className={styles.detailMeta}>算法版本：{data.algorithmVersion}</span>
       </div>
     </div>
@@ -103,7 +102,7 @@ export default function ScopeDetailWorkspace({
     return (
       <div className={styles.detailWorkspace}>
         <div className={styles.stateTitle}>加载详细分析</div>
-        <div className={styles.stateDesc}>正在获取 {selectedScope.scopeKey} 的 Canonical Composition...</div>
+        <div className={styles.stateDesc}>正在获取 {selectedScope.scopeName ?? UNNAMED_SCOPE_LABEL} 的 Canonical Composition...</div>
       </div>
     )
   }

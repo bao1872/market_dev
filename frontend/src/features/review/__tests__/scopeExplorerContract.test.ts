@@ -518,7 +518,18 @@ test('T3. summary=null → 分析格显示 —（readiness 仍诚实展示）', 
 test('T4. EW Return 使用百分比格式（非原始比率）', () => {
   assert.equal(formatPercentNullable(0.123), '12.3%')
   const src = read('ScopeExplorerTable.tsx')
-  assert.match(src, /formatPercentNullable\(s\?\.equalWeightReturn\)/, 'EW Return 走 formatPercentNullable')
+  assert.match(src, /formatPercentNullable\(s\?\.equalWeightReturn/, 'EW Return 走 formatPercentNullable')
+  // [REVIEW-UX-EXPERIMENT-READINESS-01 Slice A / A4] EW Return 与 Capital Tilt 统一 2 位小数
+  assert.match(
+    src,
+    /formatPercentNullable\(s\?\.equalWeightReturn,\s*2\)/,
+    'EW Return 展示 2 位小数（A4）',
+  )
+  assert.match(
+    src,
+    /formatPercentNullable\(s\?\.capitalTilt,\s*2\)/,
+    'Capital Tilt 展示 2 位小数（A4）',
+  )
 })
 
 test('T5. Breadth 展示三分量（↑/↓/—），不计算 composite score', () => {

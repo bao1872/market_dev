@@ -92,8 +92,8 @@ export const REVIEW_TERMS = {
     help: '当前板块有效成员的成交量合计',
   },
   totalAmount: {
-    label: '总成交额',
-    help: '当前板块有效成员的成交额合计',
+    label: '总成交额（百亿元）',
+    help: '当前板块有效成员的成交额合计；展示单位百亿元（1 百亿元 = 10^10 元，canonical 单位为元）',
   },
   priceConcentration: {
     label: '涨跌幅集中度',
