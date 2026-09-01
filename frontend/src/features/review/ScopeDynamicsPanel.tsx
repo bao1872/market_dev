@@ -142,7 +142,16 @@ function DynamicsCharts({ configs }: { configs: DynamicsChartConfig[] }) {
       const handler = (param: MouseEventParams) => {
         const time = (param.time ?? null) as string | null
         setHoveredDate(time)
-        if (!time || syncing) return
+        if (syncing) return
+        if (!time) {
+          // [P1] 鼠标离开图表 / 事件位置不可用（Lightweight Charts 4.2 mouse-leave）：
+          // 必须清除另外两张图上的 programmatic crosshair，否则 tooltip 已复位
+          // 而另外两张图仍停在上一交易日。
+          charts.forEach((other, j) => {
+            if (j !== i) other.clearCrosshairPosition()
+          })
+          return
+        }
         syncing = true
         charts.forEach((other, j) => {
           if (j === i) return
@@ -161,7 +170,32 @@ function DynamicsCharts({ configs }: { configs: DynamicsChartConfig[] }) {
 
     charts.forEach((c) => c.timeScale().fitContent())
 
+    // [P0] 统一右侧 Y 轴宽度。
+    // 三张图各自自动计算 price-scale 宽度（0–100 / -x.xx / -x.xxx 标签宽度不同），
+    // 会导致数据绘图区宽度不同 —— 即使 logical index 相同，屏幕 X 像素仍会错开。
+    // 取三者最大宽度统一设为 minimumWidth，保证 shared logical date 映射到同一屏幕 X。
+    const syncPriceScaleWidth = () => {
+      const widths = charts.map((c) => c.priceScale('right').width())
+      const maxWidth = Math.max(...widths)
+      if (!Number.isFinite(maxWidth) || maxWidth <= 0) return
+      charts.forEach((c) => {
+        c.priceScale('right').applyOptions({ minimumWidth: maxWidth })
+      })
+    }
+    syncPriceScaleWidth()
+
+    // 容器尺寸变化后重新对齐一次（Y 轴标签宽度可能随布局改变）
+    const resizeObserver =
+      typeof ResizeObserver === 'undefined'
+        ? null
+        : new ResizeObserver(() => syncPriceScaleWidth())
+    if (resizeObserver) {
+      const el = refs[0]
+      if (el) resizeObserver.observe(el)
+    }
+
     return () => {
+      if (resizeObserver) resizeObserver.disconnect()
       charts.forEach((c, i) => {
         c.timeScale().unsubscribeVisibleLogicalRangeChange(rangeHandlers[i])
         c.unsubscribeCrosshairMove(crossHandlers[i])

@@ -889,7 +889,8 @@
 }
 
 // [REVIEW-PRODUCT-CLOSURE-01 Phase F] Explorer 表格必须显式横向滚动：
-// 12 列不得被压缩到不可读宽度。整表 min-width + Scope 首列 sticky 冻结。
+// [Slice C] 原子化后为 18 列，不得被压缩到不可读宽度。
+// 整表 min-width + Scope 首列 sticky 冻结；研究工具宁可横向滚动也不合并指标。
 .explorerScopeTable {
   width: 100%;
   min-width: 1080px;
@@ -986,24 +987,6 @@
   color: v.$color-text;
 }
 
-.scopeCellKey {
-  font-size: 11px;
-  color: v.$color-text-dim;
-  font-family: v.$font-mono;
-}
-
-.breadthCell {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.breadthPart {
-  white-space: nowrap;
-}
-
 .explorerFooter {
   display: flex;
   align-items: center;
@@ -1085,21 +1068,11 @@
   color: v.$color-text-dim;
 }
 
-.detailKey {
-  font-family: v.$font-mono;
-  color: v.$color-muted;
-  word-break: break-all;
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 .detailMeta {
   color: v.$color-text-dim;
 }
 
-// [REVIEW-PRODUCT-CLOSURE-01 Phase F #5] 技术/次级信息行：UUID + 算法版本退居
+// [Slice A] 技术/次级信息行：仅算法版本（内部 scopeKey/UUID 已从产品 UI 移除）
 // 弱化样式（更小、更淡、可截断），不再与主标题/数据状态同等突出。
 .detailTechnical {
   display: flex;
