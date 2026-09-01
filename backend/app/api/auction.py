@@ -1130,7 +1130,9 @@ async def get_auction_scope_detail(
         trade_date=resolved,
         family=family,
         scope_key=scope_key,
-        scope_name=match.scope_name,
+        # canonical owner is payload.identity.scope_name; the ORM column is a
+        # legacy compatibility projection and must never override it
+        scope_name=detail["scope_name"],
         repricing=detail["repricing"],
         historical_dynamics=detail["historical_dynamics"],
         participation=detail["participation"],

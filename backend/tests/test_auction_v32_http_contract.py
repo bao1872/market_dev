@@ -404,3 +404,43 @@ def test_meta_dates_returns_published_dates_only(
     body = response.json()
     assert body["trade_dates"] == [_TRADE_DATE.isoformat()]
     assert body["latest"] == _TRADE_DATE.isoformat()
+
+# ---------------------------------------------------------------------------
+# KPI-1D: canonical scope_name beats the legacy DB column (drift test)
+# ---------------------------------------------------------------------------
+def test_list_and_detail_ignore_legacy_db_scope_name(
+    http_client: TestClient, monkeypatch
+) -> None:
+    """The DB column is a compatibility projection, not the business owner.
+
+    A stale ``row.scope_name`` must never win over ``payload.identity.scope_name``.
+    """
+    _grant({"research_replay": {"active": True}})
+
+    async def _drifted_loader(db: Any, trade_date: date) -> tuple[list[Any], list[Any]]:
+        publications, results = _published_fixture()
+        # simulate a legacy row whose display column went stale
+        stale = FakeScopeResult(
+            scan_run_id=results[0].scan_run_id,
+            trade_date=_TRADE_DATE,
+            scope_type="concept",
+            scope_id=uuid4(),
+            scope_name="旧名字",
+            payload=results[0].payload,
+        )
+        return publications, [stale]
+
+    monkeypatch.setattr(auction_api, "_load_publications_and_results", _drifted_loader)
+
+    body = http_client.get(
+        "/v1/auction/scopes",
+        params={"trade_date": _TRADE_DATE.isoformat(), "family": "concept"},
+    ).json()
+    assert body["scopes"][0]["scope_name"] == _SCOPE_NAME  # 机器人, not 旧名字
+
+    detail = http_client.get(
+        f"/v1/auction/scopes/{_SCOPE_KEY}",
+        params={"trade_date": _TRADE_DATE.isoformat(), "family": "concept"},
+    ).json()
+    assert detail["scope_name"] == _SCOPE_NAME
+    assert detail["scope_name"] != "旧名字"

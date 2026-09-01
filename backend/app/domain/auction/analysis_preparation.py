@@ -55,11 +55,80 @@ __all__ = [
     "FAMILIES",
     "V32PreparedScope",
     "V32PreparationResult",
+    "MAX_HISTORY_SLOTS",
+    "PREVIOUS_COMPUTED_EMPTY",
+    "PREVIOUS_NONEMPTY",
+    "PREVIOUS_UNAVAILABLE",
+    "SLOT_STATUS_INSUFFICIENT_HISTORY",
+    "SLOT_STATUS_OK",
+    "SlotContract",
     "build_previous_leader_sets",
+    "canonicalize_trade_slots",
     "prepare_v32_analysis",
 ]
 
 FAMILIES = (FAMILY_INDUSTRY, FAMILY_CONCEPT)
+
+#: Bounded history window.  Fewer pre-T slots is allowed ("insufficient
+#: history"); filling up to this number by reaching back further is NOT.
+MAX_HISTORY_SLOTS = 120
+
+SLOT_STATUS_OK = "ok"
+SLOT_STATUS_INSUFFICIENT_HISTORY = "insufficient_history"
+
+#: previous-leader three-state contract (never collapse with ``or ()``)
+PREVIOUS_UNAVAILABLE = "previous_unavailable"
+PREVIOUS_COMPUTED_EMPTY = "previous_computed_empty"
+PREVIOUS_NONEMPTY = "previous_nonempty"
+
+
+@dataclass(frozen=True)
+class SlotContract:
+    """Canonical, fail-closed observation slots for one V3.2 run."""
+
+    trade_dates: tuple[date, ...]
+    pre_t_count: int
+    status: str
+
+
+def canonicalize_trade_slots(
+    trade_dates: Sequence[date], trade_date: date
+) -> SlotContract:
+    """Validate and canonicalise the observation slots (D-120 ... T).
+
+    Fail-closed rules:
+      * T must be present;
+      * no slot may be later than T (a future slot is never silently dropped);
+      * duplicates and unordered input are canonicalised deterministically;
+      * at most ``MAX_HISTORY_SLOTS`` pre-T slots, keeping the ones CLOSEST to
+        T.  Fewer is fine and reported as ``insufficient_history`` — the caller
+        must never reach back further just to top the window up.
+    """
+    unique = sorted(set(trade_dates))
+    if not unique:
+        raise ValueError("trade_dates is empty")
+
+    future = [d for d in unique if d > trade_date]
+    if future:
+        raise ValueError(
+            f"trade_dates contains slots after T={trade_date.isoformat()}: "
+            f"{[d.isoformat() for d in future[:5]]}"
+        )
+    if trade_date not in unique:
+        raise ValueError(
+            f"trade_dates must contain T={trade_date.isoformat()}"
+        )
+
+    pre_t = [d for d in unique if d < trade_date]
+    if len(pre_t) > MAX_HISTORY_SLOTS:
+        pre_t = pre_t[-MAX_HISTORY_SLOTS:]
+
+    status = SLOT_STATUS_OK if len(pre_t) >= MAX_HISTORY_SLOTS else SLOT_STATUS_INSUFFICIENT_HISTORY
+    return SlotContract(
+        trade_dates=tuple(pre_t) + (trade_date,),
+        pre_t_count=len(pre_t),
+        status=status,
+    )
 
 
 @dataclass(frozen=True)
@@ -158,10 +227,17 @@ def build_previous_leader_sets(
             index_by_instrument=index_by_instrument,
         )
         leaders: dict[str, frozenset[UUID]] = {}
+        membership = resolve_scope_members(edges, previous_trade_date, family=family)
         for key, fact in l1.items():
+            # SAME adapter as today: only the previous PIT scope members may
+            # contribute, otherwise an outsider could become a past leader.
+            scope_member_ids = {str(m) for m in membership.get(key, ())}
+            scope_observations = [
+                o for o in observations if str(o.instrument_id) in scope_member_ids
+            ]
             contributions = compute_contributions(
                 trade_date=previous_trade_date,
-                members=observations,
+                members=scope_observations,
                 ew_gap=fact.equal_weight_gap,
                 aw_gap=fact.amount_weighted_gap,
                 scope_total_amount=fact.total_auction_amount,
@@ -210,6 +286,10 @@ def prepare_v32_analysis(
             f"prepare_v32_analysis produces {V32_ALGORITHM_VERSION} only; "
             f"got {algorithm_version!r}"
         )
+
+    # Time contract is enforced HERE, not left to the loader's good behaviour.
+    slot = canonicalize_trade_slots(trade_dates, trade_date)
+    trade_dates = slot.trade_dates
 
     current = list(observations_by_date.get(trade_date, ()))
     coverage = compute_scan_coverage(current)
@@ -332,10 +412,19 @@ def prepare_v32_analysis(
             ew_gap=fact.equal_weight_gap,
             aw_gap=fact.amount_weighted_gap,
         )
+        prev_lookup = previous_leader_sets.get(family) or {}
+        if key in prev_lookup:
+            prev_for_scope = prev_lookup[key]
+            previous_status = (
+                PREVIOUS_NONEMPTY if prev_for_scope else PREVIOUS_COMPUTED_EMPTY
+            )
+        else:
+            prev_for_scope = None
+            previous_status = PREVIOUS_UNAVAILABLE
         leadership = compute_leadership(
             contributions=contributions.members,
             ew_gap=fact.equal_weight_gap,
-            previous_leaders=(previous_leader_sets.get(family) or {}).get(key),
+            previous_leaders=prev_for_scope,
         )
         cross = (cross_by_family.get(family) or {}).get(key)
 
@@ -402,6 +491,10 @@ def prepare_v32_analysis(
                 "family": family,
                 "amount_position_status": participation.get("amount_position_status"),
                 "history_valid_count": participation.get("history_valid_count"),
+                "previous_leader_status": previous_status,
+                "previous_leader_count": (
+                    None if prev_for_scope is None else len(prev_for_scope)
+                ),
             },
         )
         prepared.append(
@@ -422,6 +515,9 @@ def prepare_v32_analysis(
         "industry_scope_count": sum(1 for s in prepared if s.family == FAMILY_INDUSTRY),
         "concept_scope_count": sum(1 for s in prepared if s.family == FAMILY_CONCEPT),
         "algorithm_version": algorithm_version,
+        "slot_status": slot.status,
+        "pre_t_slot_count": slot.pre_t_count,
+        "max_history_slots": MAX_HISTORY_SLOTS,
         "coverage_eligible_count": coverage.eligible_count,
         "coverage_valid_count": coverage.valid_count,
         "coverage_ratio": coverage.coverage_ratio,

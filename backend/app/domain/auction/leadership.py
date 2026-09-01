@@ -45,6 +45,7 @@ MIN_EXPLAINED_RATIO = 0.5
 _REASON_DIRECTION_UNAVAILABLE = "DIRECTION_UNAVAILABLE"
 _REASON_NO_ALIGNED = "NO_ALIGNED_CONTRIBUTION"
 _REASON_EMPTY_BOTH = "EMPTY_LEADER_SETS"
+_REASON_PREVIOUS_UNAVAILABLE = "PREVIOUS_LEADERS_UNAVAILABLE"
 
 
 @dataclass(frozen=True)
@@ -85,10 +86,16 @@ def compute_leadership(
 ) -> LeadershipResult:
     """Select today's core members and measure migration vs yesterday.
 
-    ``previous_leaders=None`` means "no previous leader set is known" and is
-    treated as empty — it is NOT the same as an empty leader set produced by
-    yesterday's computation, but both yield no retained members.
+    Three-state previous semantics (never collapse them with ``or ()``):
+
+      * ``None``  -> PREVIOUS UNAVAILABLE.  Today's leaders are still computed,
+        but migration is undefined: ``jaccard is None`` and
+        ``migration is None``, carrying ``PREVIOUS_LEADERS_UNAVAILABLE``.
+      * ``()``    -> PREVIOUS COMPUTED EMPTY.  Yesterday really produced no
+        leaders, so with a non-empty today: ``jaccard == 0``, ``migration == 1``.
+      * non-empty -> normal Jaccard.
     """
+    previous_unavailable = previous_leaders is None
     prev = tuple(sorted(set(previous_leaders or ()), key=str))
 
     if ew_gap is None or ew_gap == 0:
@@ -134,6 +141,12 @@ def compute_leadership(
         jaccard = len(leader_set & prev_set) / union_size
         migration = 1.0 - jaccard
         codes = ()
+
+    if previous_unavailable:
+        # today's leaders stand on their own; migration is undefined, NOT 0/1
+        jaccard = None
+        migration = None
+        codes = codes + (_REASON_PREVIOUS_UNAVAILABLE,)
 
     return LeadershipResult(
         direction=direction,

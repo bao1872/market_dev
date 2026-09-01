@@ -66,10 +66,13 @@ def build_scan_run_kwargs(
     *,
     trade_date: date,
     coverage: ScanCoverage,
-    algorithm_version: str = V32_ALGORITHM_VERSION,
     auction_type: str = "scope_v32",
 ) -> dict[str, Any]:
     """Assemble a V3.2 ``AuctionScanRun`` payload (pure, no session).
+
+    The algorithm version is NOT a parameter: a caller must never be able to
+    create a V3.2 run under a different algorithm identity, or write and read
+    would drift apart.
 
     Coverage is NOT computed here: it arrives as a :class:`ScanCoverage` from the
     single coverage owner (``domain/auction/coverage.py``).  This service only
@@ -82,7 +85,7 @@ def build_scan_run_kwargs(
         # No anchor forgery: V3.2 has no anchor snapshot / anchor publication.
         "source_anchor_snapshot_id": None,
         "source_anchor_publication_id": None,
-        "algorithm_version": algorithm_version,
+        "algorithm_version": V32_ALGORITHM_VERSION,
         "price_adjustment_version": _DEFAULT_PRICE_ADJUSTMENT_VERSION,
         "status": "succeeded",
         "attempt_count": 1,
@@ -143,9 +146,14 @@ async def persist_v32_scope_results(
     capture_run_id: uuid.UUID,
     test_namespace: str,
     coverage: ScanCoverage,
-    algorithm_version: str = V32_ALGORITHM_VERSION,
     truth_status: str,
 ) -> uuid.UUID:
+    """Persist one V3.2 run.  No commit here — the caller owns the transaction.
+
+    The algorithm version is fixed to the V3.2 owner; it is intentionally not a
+    parameter so a caller cannot create a non-V3.2 run under this path.
+    """
+    algorithm_version = V32_ALGORITHM_VERSION
     """Atomically persist one V3.2 run: scan run -> scope results -> publication.
 
     Everything happens in a single transaction, so a partially written result
