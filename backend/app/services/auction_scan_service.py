@@ -370,91 +370,26 @@ async def _acquire_or_recover_scan_run(
         AuctionScanRun：可继续执行的 run（running 状态，attempt_count 已正确设置）；
         None：已 succeeded，幂等返回
     """
-    current_now = now or datetime.now(UTC)
-    new_lease_epoch = lease_epoch if lease_epoch is not None else int(current_now.timestamp())
+    # Delegated to the shared lifecycle owner so legacy and V3.2 cannot drift.
+    # Only the identity (algorithm version) and the child-cleanup adapter are
+    # consumer-specific; every status/lease/recovery rule lives in one place.
+    from app.services.auction_scan_run_lifecycle import acquire_or_recover_scan_run
 
-    # 查询现有 run（基于唯一键 trade_date + auction_type + algorithm_version）
-    existing_stmt = (
-        select(AuctionScanRun)
-        .where(
-            AuctionScanRun.trade_date == trade_date,
-            AuctionScanRun.auction_type == auction_type,
-            AuctionScanRun.algorithm_version == AUCTION_SCAN_ALGORITHM_VERSION,
-        )
-        .order_by(AuctionScanRun.created_at.desc())
-        .limit(1)
+    return await acquire_or_recover_scan_run(
+        db,
+        trade_date=trade_date,
+        auction_type=auction_type,
+        algorithm_version=AUCTION_SCAN_ALGORITHM_VERSION,
+        worker_id=worker_id,
+        lease_epoch=lease_epoch,
+        now=now,
+        clear_children=_legacy_clear_children,
     )
-    existing = (await db.execute(existing_stmt)).scalar_one_or_none()
 
-    if existing is None:
-        # 不存在，创建新 run（caller 后续填充 source_anchor_snapshot_id 等字段）
-        run = AuctionScanRun(
-            trade_date=trade_date,
-            auction_type=auction_type,
-            algorithm_version=AUCTION_SCAN_ALGORITHM_VERSION,
-            price_adjustment_version="pending",  # caller 后续填充
-            status="running",
-            attempt_count=1,
-            worker_id=worker_id,
-            lease_epoch=new_lease_epoch,
-            started_at=current_now,
-            heartbeat_at=current_now,
-        )
-        db.add(run)
-        await db.flush()
-        return run
 
-    # 已存在 — 根据状态处理
-    if existing.status == "succeeded":
-        logger.info(
-            "[AuctionScan] 幂等命中：已成功 run_id=%s trade_date=%s attempt=%d",
-            existing.id, trade_date, existing.attempt_count,
-        )
-        return None  # caller 应直接返回 _build_scan_run_summary(existing)
-
-    if existing.status == "running":
-        if not _is_lease_expired(existing.heartbeat_at, now=current_now):
-            # 租约仍有效，拒绝重复
-            raise AuctionScanConflictError(
-                f"trade_date={trade_date} auction_type={auction_type} "
-                f"run_id={existing.id} 仍在运行（worker={existing.worker_id}, "
-                f"lease_epoch={existing.lease_epoch}, heartbeat={existing.heartbeat_at}），"
-                f"拒绝重复执行"
-            )
-        # 租约过期 → fencing 接管（保留 attempt_count 不递增）
-        logger.warning(
-            "[AuctionScan] fencing 恢复过期 run_id=%s trade_date=%s "
-            "旧 worker=%s 旧 lease=%s 心跳=%s",
-            existing.id, trade_date, existing.worker_id,
-            existing.lease_epoch, existing.heartbeat_at,
-        )
-        await _clear_unpublished_scan_children(db, existing.id)
-        existing.worker_id = worker_id
-        existing.lease_epoch = new_lease_epoch
-        existing.heartbeat_at = current_now
-        existing.started_at = current_now
-        # 保持 attempt_count 不变（fencing 不算新尝试，是恢复同一次）
-        existing.error_message = None
-        await db.flush()
-        return existing
-
-    # failed/partial → 重试，递增 attempt_count
-    new_attempt = existing.attempt_count + 1
-    logger.info(
-        "[AuctionScan] 重试 %s run_id=%s trade_date=%s new_attempt=%d",
-        existing.status, existing.id, trade_date, new_attempt,
-    )
-    await _clear_unpublished_scan_children(db, existing.id)
-    existing.status = "running"
-    existing.attempt_count = new_attempt
-    existing.worker_id = worker_id
-    existing.lease_epoch = new_lease_epoch
-    existing.heartbeat_at = current_now
-    existing.started_at = current_now
-    existing.finished_at = None
-    existing.error_message = None
-    await db.flush()
-    return existing
+async def _legacy_clear_children(db: AsyncSession, scan_run_id: uuid.UUID) -> None:
+    """Legacy child-cleanup adapter for the shared lifecycle owner."""
+    await _clear_unpublished_scan_children(db, scan_run_id)
 
 
 async def _clear_unpublished_scan_children(
