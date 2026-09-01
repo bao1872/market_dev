@@ -131,6 +131,43 @@ export const REVIEW_TERMS = {
     label: '近20日低分位占比',
     help: '固定 20 日窗口内处于低分位区域的占比，直接展示后端计算结果',
   },
+  // ===== [Slice C] Explorer 原子化列词条（复合 Breadth/Freshness/Technical 拆分后新增）=====
+  advanceRatio: {
+    label: '上涨占比',
+    help: '板块内当日上涨成员占比（persisted advance_ratio），缺失显示 —',
+  },
+  declineRatio: {
+    label: '下跌占比',
+    help: '板块内当日下跌成员占比（persisted decline_ratio），缺失显示 —',
+  },
+  unchangedRatio: {
+    label: '平盘占比',
+    help: '板块内当日平盘成员占比（persisted unchanged_ratio），缺失显示 —',
+  },
+  freshnessDensity: {
+    label: '事件密度',
+    help: '近期技术事件的衰减加权密度（persisted decay_weighted_density），缺失显示 —',
+  },
+  freshnessTodayCount: {
+    label: '今日事件数',
+    help: '当日技术事件计数（persisted today_count）；0 是有效零事件，不是缺失',
+  },
+  technicalHhi: {
+    label: '技术集中度',
+    help: '技术状态强度的 HHI 集中度（persisted hhi），缺失显示 —',
+  },
+  technicalTop5Ratio: {
+    label: '前5强度占比',
+    help: '前 5 成员技术强度占比（numerator / denominator，由前端 ViewModel 单一 owner 换算）',
+  },
+  technicalLeaderMedianGap: {
+    label: '最高-中位强度差',
+    help: '最高技术强度成员与中位强度之差（persisted leader_median_gap），缺失显示 —',
+  },
+  technicalLeaderSymbol: {
+    label: '最高强度成员',
+    help: '技术强度最高的成员展示符号（字符串，不参与数值排序）',
+  },
   returnCapital: {
     label: '涨跌与成交',
     help: '板块等权涨跌幅、成交额加权涨跌幅与成交加权差',

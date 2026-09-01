@@ -10,7 +10,7 @@
 //   每个 series 的日期来自各自 fact-object 的 trade_date；缺失日 = 显式 whitespace gap。
 //   当 dates 与 values 长度不一致时，不按较短者截断——保留所有 date，缺失 value 标记为 gap。
 
-import type { LineWidth } from 'lightweight-charts'
+import type { LineWidth, Time, LogicalRange } from 'lightweight-charts'
 
 export interface ScopeDynamicsChartPoint {
   time: string
@@ -47,6 +47,98 @@ export function alignDynamicsSeries(
   }
   return out
 }
+
+/**
+ * [Dynamics shared timeline] 合并三个 series 的交易日，构造共享时间轴 domain。
+ *
+ * 硬契约保持不变：
+ * - 只决定 X 轴共同位置，不做任何插值 / 补值 / carry；
+ * - 升序去重；
+ * - 某个 series 在某日无观测 → 该 series 在该位置是 whitespace gap（见 alignToSharedDomain）。
+ *
+ * lightweigh-charts 的 ``time`` 就是交易日字符串，因此 domain 元素可直接作为 time。
+ */
+export function buildSharedTradingDates(
+  positionDates: readonly string[],
+  velocityDates: readonly string[],
+  accelerationDates: readonly string[],
+): string[] {
+  const set = new Set<string>()
+  for (const d of positionDates) if (d) set.add(d)
+  for (const d of velocityDates) if (d) set.add(d)
+  for (const d of accelerationDates) if (d) set.add(d)
+  return [...set].sort()
+}
+
+/**
+ * 按共享 domain 对齐单个 series。
+ * - domain 中该日有观测 → { time, value }；
+ * - 无观测 / null / NaN → { time }（whitespace gap，不填 0、不插值、不 carry）；
+ * - 不在 domain 中的原始日期被忽略（domain 是三图并集，正常不会发生）。
+ */
+export function alignToSharedDomain(
+  domain: readonly string[],
+  dates: readonly string[],
+  values: readonly (number | null)[],
+): ScopeDynamicsChartData {
+  const byDate = new Map<string, number | null>()
+  const n = Math.max(dates.length, values.length)
+  for (let i = 0; i < n; i += 1) {
+    const d = dates[i]
+    if (!d) continue
+    const v = values[i]
+    byDate.set(d, v === undefined || v === null || Number.isNaN(v) ? null : v)
+  }
+  const out: ScopeDynamicsChartData = []
+  for (const time of domain) {
+    const v = byDate.get(time)
+    if (v === null || v === undefined || Number.isNaN(v)) {
+      out.push({ time })
+    } else {
+      out.push({ time, value: v })
+    }
+  }
+  return out
+}
+
+/** 取某交易日的 series 值（同步 tooltip 用）；缺失/无该日期返回 null。 */
+export function valueAtDate(
+  dates: readonly string[],
+  values: readonly (number | null)[],
+  date: string | null,
+): number | null {
+  if (!date) return null
+  const i = dates.indexOf(date)
+  if (i < 0) return null
+  const v = values[i]
+  if (v === undefined || v === null || Number.isNaN(v)) return null
+  return v
+}
+
+/** 从 chart data 取某时间点的值（用于同步 crosshair 的 y 位置）；gap 返回 null。 */
+export function chartValueAtTime(
+  data: ScopeDynamicsChartData,
+  time: string | null,
+): number | null {
+  if (!time) return null
+  for (const p of data) {
+    if (p.time === time) return 'value' in p && typeof p.value === 'number' ? p.value : null
+  }
+  return null
+}
+
+/**
+ * 三图共享的 visible logical range 同步器。
+ * 返回订阅/应用函数；调用方需持有 ``syncing`` 标志防止互相触发的无限循环。
+ */
+export function shouldApplyRange(
+  range: LogicalRange | null,
+  syncing: boolean,
+): range is LogicalRange {
+  return !syncing && range !== null && Number.isFinite(range.from) && Number.isFinite(range.to)
+}
+
+export type { Time, LogicalRange }
 
 /**
  * 为 Position 图生成 autoscale 建议：

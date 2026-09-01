@@ -1029,8 +1029,13 @@ test('SRC2. Dynamics 面板有图表标题', () => {
   assert.match(src, /termKey="position" compact/, 'Position 图必须有标题')
   assert.match(src, /termKey="velocity" compact/, 'Velocity 图必须有标题')
   assert.match(src, /termKey="acceleration" compact/, 'Acceleration 图必须有标题')
-  // 必须渲染三张独立图表（SeriesChart 实例），每张带显式标题
-  assert.ok((src.match(/<SeriesChart /g) ?? []).length >= 3, '必须渲染三个 SeriesChart 图实例')
+  // [Slice B] 三张图由单个 DynamicsCharts 统一承载，共享 trading-date domain
+  assert.match(src, /<DynamicsCharts/, '必须由 DynamicsCharts 统一渲染三图')
+  for (const k of ["key: 'position'", "key: 'velocity'", "key: 'acceleration'"]) {
+    assert.ok(src.includes(k), `必须渲染 ${k} 图配置`)
+  }
+  assert.match(src, /buildSharedTradingDates\(/, '必须使用共享 trading-date domain')
+  assert.match(src, /alignToSharedDomain\(/, '各 series 必须对齐到共享 domain')
 })
 
 test('SRC3. Dynamics 面板不再 export alignDynamicsSeries（test-driven export 已移除）', () => {

@@ -242,8 +242,20 @@ test('UX11. Toolbar 全面中文化（canonical 值不变；P0-1 已删除 Readi
 test('UX12. ExplorerTable 表头经 ReviewTerm 中文化，无英文硬编码', () => {
   const src = read('ScopeExplorerTable.tsx')
   assert.ok(src.includes('termKey="scope"'))
-  assert.ok(src.includes('termKey="freshness"'))
-  assert.ok(src.includes('termKey="technical"'))
+  // [Slice C] 复合 breadth / freshness / technical 已原子化：表头改为引用原子词条
+  for (const term of [
+    'advanceRatio',
+    'declineRatio',
+    'unchangedRatio',
+    'freshnessDensity',
+    'freshnessTodayCount',
+    'technicalHhi',
+    'technicalTop5Ratio',
+    'technicalLeaderMedianGap',
+    'technicalLeaderSymbol',
+  ]) {
+    assert.ok(src.includes(`'${term}'`), `表头必须引用原子词条 ${term}`)
+  }
   assert.doesNotMatch(src, />Scope</)
   assert.doesNotMatch(src, />EW Return</)
   assert.doesNotMatch(src, />Capital Tilt</)

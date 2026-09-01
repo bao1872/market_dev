@@ -10,8 +10,9 @@
 import type {
   ReviewScopeListItem,
   ReviewDynamicsPhase,
+  ReviewScopeObservationSummary,
 } from './types'
-import { parseReviewSort, type ReviewSort } from './urlState'
+import { parseReviewSort, type ReviewSort, type ReviewSortKey } from './urlState'
 
 export interface ScopeExplorerQuery {
   q: string
@@ -55,42 +56,76 @@ const PHASE_ORDER: Readonly<Record<string, number>> = {
   Repairing: 5,
 }
 
-/** 取某 sort 对应的排序数值（persisted 字段直接读取，绝不重算）：
- *  velocity/acceleration/position/equalWeightReturn/capitalTilt/migration 来自 summary，
- *  coverage 来自行级 coverageRatio。_asc 与 _desc 取同一数值，方向由 sortScopes 决定。
- *  phase 使用 canonical phase 顺序索引参与排序。 */
-function sortValueFor(item: ReviewScopeListItem, sort: ReviewSort): number | null {
-  switch (sort) {
-    case 'velocity_desc':
-    case 'velocity_asc':
-      return finiteOrNull(item.summary?.velocity)
-    case 'acceleration_desc':
-    case 'acceleration_asc':
-      return finiteOrNull(item.summary?.acceleration)
-    case 'position_desc':
-    case 'position_asc':
+/**
+ * [Slice C] 前 5 强度占比：唯一 ratio owner（presentation-only derivation，非业务计算）。
+ *
+ * - denominator > 0 → numerator / denominator；
+ * - 其余（缺失 / NaN / denominator <= 0）→ null。
+ *
+ * 绝不把缺失伪造成 0 或 1：缺失就是 null（展示 "—"，排序 null-last）。
+ * 显示与排序必须共用本函数，杜绝「显示一个算法、排序另一个算法」。
+ */
+export function technicalTop5Ratio(
+  obs: ReviewScopeObservationSummary | null | undefined,
+): number | null {
+  if (!obs) return null
+  const num = obs.technicalTop5Numerator
+  const den = obs.technicalTop5Denominator
+  if (num === null || num === undefined || den === null || den === undefined) return null
+  if (!Number.isFinite(num) || !Number.isFinite(den)) return null
+  if (den <= 0) return null
+  return num / den
+}
+
+/**
+ * 取某 sort key 对应的排序数值（persisted 字段直接读取，绝不重算）。
+ * - velocity/acceleration/position/equalWeightReturn/capitalTilt/advance_ratio/
+ *   decline_ratio/unchanged_ratio/migration 来自 summary；
+ * - coverage 来自行级 coverageRatio；
+ * - freshness_* / technical_hhi / leader_median_gap 来自 observationSummary；
+ * - technical_top5_ratio 走 technicalTop5Ratio 单一 owner（不在此处另算一遍）；
+ * - phase 使用 canonical phase 顺序索引参与排序。
+ * asc 与 desc 取同一数值，方向由 sortScopes 决定（null 恒最后）。
+ */
+export function sortValueFor(
+  item: ReviewScopeListItem,
+  key: ReviewSortKey | null,
+): number | null {
+  switch (key) {
+    case 'position':
       return finiteOrNull(item.summary?.position)
-    case 'phase_desc':
-    case 'phase_asc': {
+    case 'velocity':
+      return finiteOrNull(item.summary?.velocity)
+    case 'acceleration':
+      return finiteOrNull(item.summary?.acceleration)
+    case 'phase': {
       const p = item.summary?.phase
       if (!p) return null
       return PHASE_ORDER[p] ?? null
     }
-    case 'equal_weight_return_desc':
+    case 'equal_weight_return':
       return finiteOrNull(item.summary?.equalWeightReturn)
-    case 'capital_tilt_desc':
+    case 'capital_tilt':
       return finiteOrNull(item.summary?.capitalTilt)
-    case 'migration_desc':
+    case 'advance_ratio':
+      return finiteOrNull(item.summary?.advanceRatio)
+    case 'decline_ratio':
+      return finiteOrNull(item.summary?.declineRatio)
+    case 'unchanged_ratio':
+      return finiteOrNull(item.summary?.unchangedRatio)
+    case 'migration':
       return finiteOrNull(item.summary?.migration)
-    case 'coverage_desc':
+    case 'coverage':
       return finiteOrNull(item.coverageRatio)
-    case 'freshness_density_desc':
+    case 'freshness_density':
       return finiteOrNull(item.observationSummary?.freshnessDecayWeightedDensity)
-    case 'freshness_today_desc':
+    case 'freshness_today':
       return finiteOrNull(item.observationSummary?.freshnessTodayCount)
-    case 'technical_hhi_desc':
+    case 'technical_hhi':
       return finiteOrNull(item.observationSummary?.technicalHhi)
-    case 'leader_median_gap_desc':
+    case 'technical_top5_ratio':
+      return technicalTop5Ratio(item.observationSummary)
+    case 'leader_median_gap':
       return finiteOrNull(item.observationSummary?.technicalLeaderMedianGap)
     default:
       return finiteOrNull(item.summary?.velocity)
@@ -129,11 +164,11 @@ export function sortScopes(
   items: ReviewScopeListItem[],
   sort: ReviewSort,
 ): ReviewScopeListItem[] {
-  const { dir } = parseReviewSort(sort)
+  const { key, dir } = parseReviewSort(sort)
   const sign = dir === 'desc' ? 1 : -1
   return [...items].sort((a, b) => {
-    const va = sortValueFor(a, sort)
-    const vb = sortValueFor(b, sort)
+    const va = sortValueFor(a, key)
+    const vb = sortValueFor(b, key)
     if (va === null && vb === null) return tieBreak(a, b)
     if (va === null) return 1
     if (vb === null) return -1

@@ -1,6 +1,7 @@
 // [ScopeDetailWorkspace] - 描述: Canonical Scope Detail 工作区（Slice E）
 //
-// 布局：无选中 → 提示；选中 → header（scopeName/scopeKey/family/readiness/algorithmVersion）+ 五个子 Tab。
+// 布局：无选中 → 提示；选中 → header（scopeName/family/readiness/algorithmVersion）+ 五个子 Tab。
+// [Slice A] header 已不再展示内部 scopeKey/UUID；scopeKey 仅作为 URL / routing / API 身份。
 // 只有一个 detail owner：useReviewScopeDetail（scopeKey 为 null 不发请求）。
 // 状态机（prompt §14）：无选中 / loading / API error / composition=null / layer unavailable / ready 混合 null facts 分开展示。
 // 解析完全走 scopeDetailContract（唯一解析 owner），组件不散落 `as SomeType`。

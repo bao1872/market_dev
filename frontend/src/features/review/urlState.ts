@@ -38,38 +38,78 @@ export type ReviewDetailTab =
   | 'facts'
 
 /**
- * 排序词表。
- * - R2A/R2B canonical 降序变体保留（向后兼容已有 URL）。
- * - 表头排序增强（P0-2）：velocity/acceleration/position/phase 额外支持 _asc 升序，
- *   该方向仅作用于前端全量排序（后端 list_review_scopes 当前不接收 sort 参数，
- *   排序始终在客户端对完整 family snapshot 进行），不改动后端 contract。
+ * [Slice C] 表头可排序列的 canonical 排序 key（不含方向）。
+ *
+ * 每个 key 都必须同时支持 asc 与 desc —— 由下方 ReviewSort 的模板字面量类型
+ * 在编译期保证，杜绝「某些字段只有 _desc / 某些 enum 存在但 UI 点不了」的半状态。
  */
-export type ReviewSort =
-  | 'velocity_desc'
-  | 'velocity_asc'
-  | 'acceleration_desc'
-  | 'acceleration_asc'
-  | 'position_desc'
-  | 'position_asc'
-  | 'phase_desc'
-  | 'phase_asc'
-  | 'equal_weight_return_desc'
-  | 'capital_tilt_desc'
-  | 'migration_desc'
-  | 'coverage_desc'
-  | 'freshness_density_desc'
-  | 'freshness_today_desc'
-  | 'technical_hhi_desc'
-  | 'leader_median_gap_desc'
+export type ReviewSortKey =
+  | 'position'
+  | 'velocity'
+  | 'acceleration'
+  | 'phase'
+  | 'equal_weight_return'
+  | 'capital_tilt'
+  | 'advance_ratio'
+  | 'decline_ratio'
+  | 'unchanged_ratio'
+  | 'migration'
+  | 'coverage'
+  | 'freshness_density'
+  | 'freshness_today'
+  | 'technical_hhi'
+  | 'technical_top5_ratio'
+  | 'leader_median_gap'
 
-/** 表头可排序列的 canonical 排序 key（用于构造 sort 值，不含方向） */
-export type ReviewSortKey = 'velocity' | 'acceleration' | 'position' | 'phase'
+/**
+ * 全部 sort key 的顺序化清单。
+ * SORT_VALUES 与测试遍历均以此唯一来源派生，避免「枚举与集合漂移」。
+ */
+export const REVIEW_SORT_KEYS: readonly ReviewSortKey[] = [
+  'position',
+  'velocity',
+  'acceleration',
+  'phase',
+  'equal_weight_return',
+  'capital_tilt',
+  'advance_ratio',
+  'decline_ratio',
+  'unchanged_ratio',
+  'migration',
+  'coverage',
+  'freshness_density',
+  'freshness_today',
+  'technical_hhi',
+  'technical_top5_ratio',
+  'leader_median_gap',
+]
 
-/** 解析 sort 字符串为 {key, dir}；非法值回退默认方向 desc */
+/**
+ * 排序词表：每个 key × {asc, desc} 的全组合。
+ *
+ * 向后兼容：既有 URL 值（velocity_desc / *_asc / equal_weight_return_desc /
+ * capital_tilt_desc / migration_desc / coverage_desc / freshness_density_desc /
+ * freshness_today_desc / technical_hhi_desc / leader_median_gap_desc）全部仍合法。
+ *
+ * 排序始终在客户端对完整 family snapshot 进行（后端 list_review_scopes 不接收
+ * sort 参数），不改动后端 contract。
+ */
+export type ReviewSort = `${ReviewSortKey}_asc` | `${ReviewSortKey}_desc`
+
+const SORT_KEY_SET: ReadonlySet<string> = new Set<string>(REVIEW_SORT_KEYS)
+
+/**
+ * 解析 sort 字符串为 {key, dir}；非法/未知值回退 { key: null, dir: 'desc' }。
+ * 用 lastIndexOf('_') 切分，以兼容含下划线的 key（如 equal_weight_return_desc）。
+ */
 export function parseReviewSort(sort: ReviewSort): { key: ReviewSortKey | null; dir: 'asc' | 'desc' } {
-  const m = /^(velocity|acceleration|position|phase)_(asc|desc)$/.exec(sort)
-  if (!m) return { key: null, dir: 'desc' }
-  return { key: m[1] as ReviewSortKey, dir: m[2] as 'asc' | 'desc' }
+  const idx = sort.lastIndexOf('_')
+  if (idx <= 0) return { key: null, dir: 'desc' }
+  const key = sort.slice(0, idx)
+  const dir = sort.slice(idx + 1)
+  if (!SORT_KEY_SET.has(key)) return { key: null, dir: 'desc' }
+  if (dir !== 'asc' && dir !== 'desc') return { key: key as ReviewSortKey, dir: 'desc' }
+  return { key: key as ReviewSortKey, dir: dir }
 }
 
 /** 由 {key, dir} 构造 sort 字符串 */
@@ -144,24 +184,10 @@ const TAB_VALUES: ReadonlySet<string> = new Set([
   'facts',
 ])
 
-const SORT_VALUES: ReadonlySet<string> = new Set([
-  'velocity_desc',
-  'velocity_asc',
-  'acceleration_desc',
-  'acceleration_asc',
-  'position_desc',
-  'position_asc',
-  'phase_desc',
-  'phase_asc',
-  'equal_weight_return_desc',
-  'capital_tilt_desc',
-  'migration_desc',
-  'coverage_desc',
-  'freshness_density_desc',
-  'freshness_today_desc',
-  'technical_hhi_desc',
-  'leader_median_gap_desc',
-])
+/** 合法 sort 集合：由 REVIEW_SORT_KEYS 派生（每个 key 的 asc + desc 全组合） */
+const SORT_VALUES: ReadonlySet<string> = new Set<string>(
+  REVIEW_SORT_KEYS.flatMap((k) => [`${k}_desc`, `${k}_asc`]),
+)
 
 const PHASE_VALUES: ReadonlySet<string> = new Set([
   'Early Lift',

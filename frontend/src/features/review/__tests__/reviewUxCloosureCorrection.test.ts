@@ -97,12 +97,17 @@ test('source: 普通 UI 不显示 backend path（observation.structure.current_s
   assert.ok(src.includes('本期暂无筹码数据'))
 })
 
-test('source: 表格 Technical cell 使用中文简称，不再使用 cryptic 单字母', () => {
+test('source: 表格 Technical 列使用中文词条（原子化后经 ReviewTerm 引用）', () => {
   const src = readSource('ScopeExplorerTable.tsx')
-  assert.ok(/label: '强度集中度'/.test(src), '缺少 强度集中度 中文简称')
-  assert.ok(/label: '前5强度占比'/.test(src), '缺少 前5强度占比 中文简称')
-  assert.ok(/label: '最高-中位强度差'/.test(src), '缺少 最高-中位强度差 中文简称')
-  assert.ok(/label: '技术强度最高成员'/.test(src), '缺少 技术强度最高成员 中文简称')
+  // [Slice C] Technical 不再塞进 composite cell，而是四条独立列，各自引用 ReviewTerm 词条
+  for (const term of ['technicalHhi', 'technicalTop5Ratio', 'technicalLeaderMedianGap', 'technicalLeaderSymbol']) {
+    assert.ok(src.includes(`'${term}'`), `表格必须引用 Technical 原子词条 ${term}`)
+  }
+  // 中文标签由 reviewCopy 词条 owner 提供
+  const copy = readSource('reviewCopy.ts')
+  for (const label of ['技术集中度', '前5强度占比', '最高-中位强度差', '最高强度成员']) {
+    assert.ok(copy.includes(`label: '${label}'`), `reviewCopy 缺少 ${label} 中文标签`)
+  }
   // 不得再出现 cryptic 前缀
   assert.ok(!/HHI \$/.test(src), '仍存在 HHI 单字母')
   assert.ok(!/Top5 \$/.test(src), '仍存在 Top5 单字母')

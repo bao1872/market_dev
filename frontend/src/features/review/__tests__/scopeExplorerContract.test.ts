@@ -469,9 +469,10 @@ test('P4. effectivePage 钳制：URL 越界页 → 实际末页；Workspace 交�
 // 6. Table：canonical 列 + 无 legacy 字段 + null 显示
 // ============================================================
 
-test('T1. Table 精确 canonical 列（12 列，无 p/q/u/c/v/signalCount）', () => {
+test('T1. Table 精确 canonical 列（原子化 18 列，无 p/q/u/c/v/signalCount）', () => {
   const src = read('ScopeExplorerTable.tsx')
-  // REVIEW-UX-CN-01：表头经 ReviewTerm termKey 渲染中文 label；canonical 列集合不变。
+  // REVIEW-UX-CN-01：表头经 ReviewTerm termKey 渲染中文 label。
+  // [Slice C] Breadth / Freshness / Technical 复合 cell 已原子化，列集合随之扩展。
   const expected = [
     'scope',
     'phase',
@@ -480,15 +481,21 @@ test('T1. Table 精确 canonical 列（12 列，无 p/q/u/c/v/signalCount）', (
     'acceleration',
     'equalWeightReturn',
     'capitalTilt',
-    'breadth',
+    'advanceRatio',
+    'declineRatio',
+    'unchangedRatio',
     'leadershipMigration',
     'coverage',
-    'freshness',
-    'technical',
+    'freshnessDensity',
+    'freshnessTodayCount',
+    'technicalHhi',
+    'technicalTop5Ratio',
+    'technicalLeaderMedianGap',
+    'technicalLeaderSymbol',
   ]
   for (const col of expected) {
-    // 列经 ReviewTerm 渲染：非排序列为 termKey="col"；排序列经 renderSortableHeader('col', 'col')
-    const ok = src.includes(`termKey="${col}"`) || src.includes(`renderSortableHeader('${col}'`)
+    // 列经 ReviewTerm 渲染：非排序列为 termKey="col"；排序列经 renderSortableHeader(..., 'col')
+    const ok = src.includes(`termKey="${col}"`) || src.includes(`'${col}'`)
     assert.ok(ok, `Table 必须含 canonical 列 ${col}`)
   }
   // 源码不得引用 legacy 指标
@@ -509,7 +516,10 @@ test('T3. summary=null → 分析格显示 —（readiness 仍诚实展示）', 
   // 单元格对 null summary 走 formatX nullable → NULL_DISPLAY
   assert.match(src, /s\?\.phase/, 'phase 用 s?.phase（null → —）')
   assert.match(src, /s\?\.position/, 'position 用 s?.position')
-  assert.match(src, /BreadthCell[\s\S]*if \(!summary\)/, 'BreadthCell 对 summary=null 显示占位符')
+  // [Slice C] Breadth 原子化后不再有 BreadthCell；三个占比各自走 formatPercentNullable → '—'
+  assert.match(src, /formatPercentNullable\(s\?\.advanceRatio, 2\)/, '上涨占比 null → —')
+  assert.match(src, /formatPercentNullable\(s\?\.declineRatio, 2\)/, '下跌占比 null → —')
+  assert.match(src, /formatPercentNullable\(s\?\.unchangedRatio, 2\)/, '平盘占比 null → —')
   assert.match(src, /formatPhaseLabel\(s\?\.phase\)/, 'phase 走 formatPhaseLabel')
   // readiness 在行级独立展示（coverageRatio 不在 summary 内）
   assert.match(src, /row\.coverageRatio/, 'coverage 使用行级 coverageRatio')
@@ -1045,9 +1055,18 @@ test('R2B-FE-11. Trajectory 与 Table 仍共用同一 selected sort', () => {
 test('R2B-FE-12. 列表渲染不新增 detail 请求', () => {
   // 源码契约：Table 仅消费 item.observationSummary（已加载薄投影），不调用 useReviewScopeDetail
   const tbl = read('ScopeExplorerTable.tsx')
-  assert.match(tbl, /FreshnessCell/, 'Table 必须渲染 FreshnessCell')
-  assert.match(tbl, /TechnicalCell/, 'Table 必须渲染 TechnicalCell')
-  assert.match(tbl, /obs=\{row\.observationSummary\}/, '单元格必须消费 observationSummary')
+  // [Slice C] Freshness / Technical 原子化：直接消费 row.observationSummary 的标量
+  for (const field of [
+    'freshnessDecayWeightedDensity',
+    'freshnessTodayCount',
+    'technicalHhi',
+    'technicalLeaderMedianGap',
+    'technicalLeaderSymbol',
+  ]) {
+    assert.ok(tbl.includes(`obs?.${field}`), `表格必须消费 observationSummary.${field}`)
+  }
+  assert.match(tbl, /technicalTop5Ratio\(obs\)/, 'Top5 占比必须走单一 ViewModel owner')
+  assert.match(tbl, /row\.observationSummary/, '单元格必须消费 observationSummary')
   // 不得出现对 detail hook 的依赖
   assert.doesNotMatch(tbl, /useReviewScopeDetail/, '列表渲染不得新增 detail 请求')
 })
