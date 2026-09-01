@@ -1,7 +1,7 @@
-# 竞价分析 PRD（Auction PRD）V3.1 — Overnight Repricing Observation
+# 竞价分析 PRD（Auction PRD）V3.2 — Overnight Repricing Observation
 
 状态：已确认
-最后更新：2026-08-17
+最后更新：2026-09-01
 对应 Map：`../maps/75-auction-analysis.md`
 条款前缀：`AU`
 需求所有权：Auction（9:25 竞价重新定价观测）的目标行为、事实定义、分析定义与边界约束
@@ -11,6 +11,19 @@
 > `provider_family = tongdaxin` 语义与 live/history 两条 lineage；明确
 > `MootdxAuctionQuoteProvider` 为 legacy 名称、实质为 pytdx/tongdaxin 实现。见下方
 > [§0.0-A Source Contract Freeze](#00-a-source-contract-freeze-v31)。
+>
+> **V3.2（2026-09-01）变更**：重对齐为「Auction Facts → Scope Current Facts → Historical Dynamics
+> → Cross-sectional Structure → Internal Structure → Member Contribution → List-first Workspace」。
+> 三项 supersede：
+> 1. **`Review(T-1) → Auction(T)` 比较被排除**（NEW/PERSIST/DECAY/REVERSE/CONFLICT/QUIET 与
+>    Attention Redistribution 不再实现）—— 见 [§14 AU-16](#14-review--auction-依赖边界au-16)；
+> 2. **「Auction 不继承 Review Dynamics」被精确拆分 supersede** —— 继承 Review 的
+>    EMA / Velocity / Acceleration / Persistence **数值方法**（作为 objective dynamics），
+>    **仍不产生** Review 的 6 阶段 Dynamics Phase 生命周期；
+> 3. **Auction Volume 降级** —— 正式分析主轴由「Gap / Volume / Amount 三类」收敛为
+>    **PRICE = Auction Gap** 与 **PARTICIPATION = Auction Amount** 两个主轴。
+> 新增 [§0.0-B V3.2 Core Contract](#00-b-v32-core-contract2026-09-01) 冻结范围、主轴、INV-01…06、
+> canonical owner 链与 API/前端目标合同。
 
 > 本文件是 Auction 的唯一需求真源。它回答：隔夜之后，9:25 当前哪里异常、昨日状态如何被重新定价、注意力重心如何变化。
 > [`31-after-close-product-closure-v2.1.md`](./31-after-close-product-closure-v2.1.md) 只定义跨域依赖与 lineage 的基本要求，不替代本文件的分析合同。
@@ -59,9 +72,110 @@ Member Facts
   → Member Attribution
 ```
 
-- Auction 正式分析输入只包括三类事实：**Gap / Price Repricing**、**Auction Volume**、**Auction Amount**。
-- Auction 使用与 Review v2.3 一致的"事实 → 观察 → 分析 → 解释"方法论，**但不继承 Review Dynamics 生命周期语义**（EMA / Velocity / Acceleration / Persistence / 6 阶段生命周期）。
+- [V3.2 修订] Auction 正式分析输入收敛为**两个业务主轴**：**PRICE = Auction Gap**、
+  **PARTICIPATION = Auction Amount**。~~Auction Volume~~ 不再是正式分析主轴 ——
+  Volume 仅保留于 raw / source contract 与 legacy persistence，可显示，但不得定义正式产品语义。
+  （V3.1 曾将 Gap / Volume / Amount 并列为三类事实，此条被 V3.2 supersede。）
+- Auction 使用与 Review v2.3 一致的"事实 → 观察 → 分析 → 解释"方法论。
+  [V3.2 修订] 原「不继承 Review Dynamics 生命周期语义（EMA / Velocity / Acceleration /
+  Persistence / 6 阶段生命周期）」被**精确拆分 supersede**：
+  - **继承**：Review 的 EMA5 / EMA20 / Velocity / Acceleration / Persistence **数值方法**，
+    作为 Auction 的 **objective dynamics**；
+  - **不继承**：Review 的 **6 阶段 Dynamics Phase 生命周期** —— V3.2 不产生、不展示 6 阶段 phase。
 - Industry 与 Concept 为平行 Scope family；Scope family 完整列表见 [§10](#10-scope-modelau-10)。
+
+
+### 0.0-B V3.2 Core Contract（2026-09-01）
+
+本小节冻结 V3.2 的产品范围、业务主轴、不变量与正式链路，是本轮实现的权威目标行为来源。
+
+#### 0.0-B-1 Scope 与业务主轴
+
+```text
+正式分析 Scope family（平行，禁止混排）：
+    industry   ↔   industry
+    concept    ↔   concept
+```
+
+- Industry 与 Concept **各自构成独立 peer cohort**；**禁止**把 Industry + Concept 合并成一个 peer ranking universe。
+- 正式业务主轴只有两个：
+  - **PRICE = Auction Gap**（`gap_ratio = auction_price(T) / previous_close(T-1) - 1`，canonical `+2.3% = 0.023`）
+  - **PARTICIPATION = Auction Amount**
+- **[GAP SCALE FROZEN] semantic unit = ratio**。见 AU-04-1：`gap = auction_price / previous_close − 1`，
+  无 `×100`，故 `+2.30%` 的 canonical 值为 **`0.023`**。
+  - 既有实现属性名 `gap_pct` 是**历史命名**，其承载的数值语义**恒为 ratio**（与 AU-04-1 一致）。
+    名称与语义不一致属于**命名问题，不是数值问题**。
+  - **禁止**对 `gap_pct` 做任何 `/100` 或 `*100` 转换；字段是否改名只按 blast radius 决定，
+    且改名**不得**伴随任何数值迁移。
+- **Auction Volume 不作正式分析主轴**：仅保留于 raw / source contract 与 legacy persistence，可显示但不得定义正式产品语义。
+
+#### 0.0-B-2 V3.2 排除项（Explicitly Excluded）
+
+- `Review(T-1) → Auction(T)` 比较：NEW / PERSIST / DECAY / REVERSE / CONFLICT / QUIET 状态迁移；
+- Attention Redistribution（注意力再分配）；
+- Review 的 6 阶段 Dynamics Phase 生命周期。
+
+V3.2 只分析 Auction 自身。
+
+#### 0.0-B-3 不变量 INV-01 … INV-06
+
+| ID | 不变量 |
+|---|---|
+| INV-01 | 一个事实一个 canonical production owner。gap_ratio、EW/AW Gap、Capital Tilt、Breadth、Amount Share、Price/Amount HHI、Historical Position / Velocity / Acceleration / Persistence、Cross-sectional Percentile、EW/AW Contribution、Leader Set / Leadership Migration 均只有一个 owner。Frontend 不重算；API 不重算；Test 不复制公式成为第二 owner。 |
+| INV-02 | Industry / Concept **同算法**。禁止按 `scope_type` 分支两套计算；正确做法是 membership adapter + 同一个 Auction Scope calculator。 |
+| INV-03 | Review 与 Auction **共享数学、不共享业务 fact**。允许两者共用 generic math primitive；禁止把 Auction Gap 填进 Review `return_1d` 后调用完整 Review calculator。 |
+| INV-04 | Missing ≠ Zero。`None != 0`、`invalid != 0`、`history_not_ready != neutral`；合法 `gap = 0` / `amount = 0` 必须与 unavailable 区分。 |
+| INV-05 | 时间因果。Historical Position(T) 的 baseline 必须严格 `< T`；严禁把 T 自身放入 baseline，严禁未来数据。 |
+| INV-06 | 5 分钟快读。publication → 一次取完整 Industry 或 Concept snapshot → 前端本地 filter / sort / paginate。禁止后端先 TopN 再让前端二次排序；禁止 Scope list 逐行 N+1 读 detail。 |
+
+#### 0.0-B-4 产品必须回答的问题
+
+1. 哪些行业 / 概念竞价最强、最弱？
+2. 这种涨跌相对自身历史异常吗？
+3. 当前历史状态是在强化还是弱化？
+4. 同类 Scope 中它处在什么位置？
+5. 是普涨 / 普跌还是少数股票推动？
+6. 大成交股票是否确认价格方向？
+7. 竞价成交是否异常？
+8. 异常成交是普遍出现还是少数股票贡献？
+9. 成交是否过度集中？
+10. 哪些股票真正推动了当前 Scope？
+11. 核心贡献成员有没有发生迁移？
+
+#### 0.0-B-5 正式链路与 Canonical Owner
+
+```text
+AuctionFinalQuote
+  → Auction Member Facts            （member_fact owner）
+  → Canonical Scope Membership      （membership adapter owner）
+  → Auction Scope L1 Facts          （scope_observation owner）
+      ├ Historical Dynamics         （historical owner）
+      ├ Cross-sectional Analysis    （cross_sectional owner）
+      └ Internal Structure Dynamics （internal structure owner）
+  → Member Attribution              （contribution owner）
+  → Leadership / Migration          （leadership owner）
+  → Auction Publication             （publication owner）
+  → Scope API                       （/v1/auction/scopes）
+  → List-first Workspace → Selected Scope Detail
+```
+
+#### 0.0-B-6 Legacy 字段处理
+
+`structure_position`、`chip_position`、`structure_breakout`、`chip_cross`、`dual_breakout`、
+`status_label`、`confidence_level`、`AuctionAnchor`、`AuctionEventTracking` **保留 schema，不删除**，
+但 **V3.2 canonical payload / API / frontend 不得再依赖它们定义正式产品**。
+
+#### 0.0-B-7 API 与前端目标合同
+
+- `GET /v1/auction/scopes?trade_date&family` —— 返回**完整 eligible family snapshot**（禁止 `.limit(top_n)`）；
+- `GET /v1/auction/scopes/{scope_key}?trade_date&family` —— 五组：repricing / historical_dynamics / participation / cross_sectional_structure / member_attribution，Diagnostics 单独；
+- `GET /v1/auction/meta/dates`。
+- 前端正式入口 `/auction` = List-first Workspace（工具条 + 左快速列表 + 右 Selected Detail）；
+  URL SSOT：`trade_date / family / scope / sort / direction / search / preset / page`；
+  所有 scalar numeric 列支持 ASC / DESC，null 恒最后；
+  6 个 preset 只由 filter + sort 构成，必须可见背后的字段；
+  正常 UI 隐藏技术 ID（publication / scan_run / source run / scope UUID），仅 Diagnostics 可见。
+
 
 ## 0. 定位与架构前提
 
@@ -261,6 +375,140 @@ invalid_rows  = [row for row in canonical_rows if classify_raw_volume(row.raw_vo
 
 > **Round 3A-2A boundary（source-day incomplete 不进入 business canonicalization）**：只有 `full_day_status == COMPLETE` 才允许进入 `canonicalize_auction_0925()` 业务层。对于 `EMPTY` / `SOURCE_ERROR` / `PAGINATION_STALLED` / `PAGINATION_LIMIT_REACHED`，正式合同要求 `canonicalization_status = None`、所有 business canonical 字段（`auction_price_raw` / `auction_volume_raw_lots` / `auction_volume_shares` / `auction_amount` / `auction_amount_source_type` / `lane_a` / `lane_b`）均 = `None`、`canonicalization_reason = "SOURCE_DAY_INCOMPLETE"`，**不得**产生 `NO_VOLUME_BEARING_0925` / `INVALID_PRICE` / `INVALID_VOLUME` / `MULTIPLE_VOLUME` 等任何 business canonicalization status。`source incomplete` 本身不是 canonicalization status，其 source truth 已完全由 `full_day_status` 表达，因此**不新增** `SOURCE_INCOMPLETE_CANONICALIZATION_STATUS`。必须严格区分两类：(a) `COMPLETE` + canonical 09:25 rows + 全部 zero valid volume → 真正的 business `NO_VOLUME_BEARING_0925`；(b) `EMPTY` source-day → `canonicalization_status = None`，两者不得混为一谈。Data Quality 的 canonicalization count（CANONICAL / NO_VOLUME / MULTIPLE_VOLUME / INVALID_VOLUME / INVALID_PRICE）只应自然来自 pagination `COMPLETE` observations，故 `COMPLETE == CANONICAL + NO_VOLUME + MULTIPLE_VOLUME + INVALID_VOLUME + INVALID_PRICE`（及任何其它明确 COMPLETE-but-not-canonical 状态），source-incomplete 本就不应进入该 denominator。
 
+### AU-04-5 V3.2 pytdx Historical SSOT — 09:25 Canonicalization 冻结（2026-09-01）
+
+> **SSOT（V3.2 §0）**：Auction 历史竞价唯一可信数据源 = **pytdx `get_history_transaction_data` 的 09:25 tick**。
+> `auction_final_quotes` / `auction_instrument_results` / `auction_scope_results` /
+> `auction_analysis_publications` / anchor / structure / chip / event lifecycle / 旧 aggregation /
+> 旧 API / 旧 frontend 语义 —— 全部为 **LEGACY / NON-AUTHORITATIVE**，V3.2 不要求兼容、不要求 parity、
+> 不得作为 historical truth。**禁止**用旧 `auction_scope_results` 作为 V3.2 Historical Dynamics 输入。
+
+#### A. 真实 pytdx payload 字段（实验证据，非推测）
+
+真实历史 tick 记录（`experiments/pytdx_auction_history/output/temporal120/2026-08-14/run1/03_raw_transaction_records.jsonl`）
+只含 **4 个** source 字段：
+
+```text
+time   price   vol   buyorsell
+```
+
+真实样例（600519 / 2026-08-14）：
+
+```json
+{"time": "09:25", "price": 1355.0, "vol": 227, "buyorsell": 2}
+{"time": "09:25", "price": 1355.0, "vol": 0,   "buyorsell": 8}
+```
+
+- **pytdx 没有 `amount` 字段**（1.26MB 真实文件中 `"amount":` 命中 0 次）；
+- **pytdx 没有 `num` 字段**（命中 0 次）；
+- PRD 中的 `raw_price` / `raw_vol` 是**概念名**，pytdx 真实键为 `price` / `vol`；
+- `buyorsell_raw = 8` 仅作 **source evidence / diagnostics**，不携带业务语义，**不得**当 sentinel。
+
+#### B. 十问冻结答案（V3.2 §2）
+
+| # | 问题 | 冻结答案 |
+|---|---|---|
+| 1 | 一只股票一个 trade_date 选哪条 tick | **唯一的 positive-volume canonical 09:25 row**（CASE B） |
+| 2 | 是否要求 `timestamp == 09:25` | **是，精确匹配** `{"09:25", "09:25:00"}` |
+| 3 | 09:25 多条时选择规则 | raw volume 三态分类（POSITIVE/ZERO/INVALID）→ CASE A/B/C/D |
+| 4 | 09:24:xx / 09:25:xx 容差 | **零容差**：`09:24:xx` → `OTHER` 完全丢弃；`09:25:01` → `NONCANONICAL_0925` 仅留证据，**不参与 canonical** |
+| 5 | 无合法 09:25 observation | `NO_VOLUME_BEARING_0925` → price/volume/amount 全 `None`；**禁止 nearest fallback** |
+| 6 | price 字段 | pytdx `price` → 归一化 `raw_price`；须 **finite AND > 0**，否则 `INVALID_PRICE_0925` |
+| 7 | amount 来源 | `DIRECT_RAW_AMOUNT = UNAVAILABLE`；`DERIVED` 接受 → `auction_amount = price × vol × 100`（`DERIVED_PRICE_X_NORMALIZED_VOLUME`） |
+| 8 | volume/amount 是否累计 | **不是**累计求和；owner 是单条 positive-volume record。`vol` 单位 = **LOT**，`×100` = shares。**禁止**写 `sum(all rows)` / `max(all rows)` |
+| 9 | 停牌 / 零成交 | 零成交 → `NO_VOLUME_BEARING_0925` 全 `None`（非 0）；volume 非法 → `INVALID_VOLUME_0925` 全 `None`（**INVALID 优先于一切**） |
+| 10 | future tick | **绝对禁止**。当前仅靠「按 `date_int` 单日查询 + MDAS `end_date=T`」隐式隔离，**本轮必须补显式 guard**（见下 §D GAP） |
+
+#### C. PREVIOUS_CLOSE_LINEAGE（V3.2 §4）
+
+```text
+source              = MDAS（MarketDataAggregationService）
+owner               = backend/app/services/market_data_aggregation_service.py :: get_bars(...)
+调用形参             = get_bars(adj="qfq", end_date=trade_date,
+                              adjustment_as_of=trade_date, limit=10)
+adjustment semantics= qfq（前复权），PIT anchor = adjustment_as_of = 目标 T
+trade-date alignment= 使用当日竞价对应的「前一交易日 canonical close」(T-1)
+missing behavior    = mdas_degraded 时 fail-closed -> pit_gap = None（不得 fallback、不得猜）
+禁止                = 从同一 09:25 tick 反推前收；前端计算；无合同的 multi-source fallback
+```
+
+#### D. 已发现冲突 / GAP（必须后续解决，本轮仅登记）
+
+1. **PRD 与代码时间戳口径冲突**：§0.0-A 写「history endpoint = 定向 `09:25:00~09:25:59` 窗口」，
+   但实现常量为 `CANONICAL_AUCTION_TIMES = {"09:25", "09:25:00"}`（精确匹配），
+   且 `auction_member_fact_backfill_kernel.py:88` 注释**显式废弃** 09:25:00~09:25:59 窗口。
+   → **本冻结以精确匹配为准**（§B-2/§B-4），§0.0-A 的窗口表述待修订。
+2. **canonicalization owner 尚未进入 backend**：`canonicalize_auction_0925()` 目前只存在于
+   `experiments/pytdx_auction_history/auction_history_semantics_validation.py:405`，
+   `backend/app` 下**无**对应实现（`classify_raw_volume` 亦无）。
+   → V3.2 正式链路需将该纯函数提升进 `backend/app/domain/auction/`，且**只能有一个 owner**。
+3. **PRD 状态词表与代码不一致**：PRD 列出 `NONCANONICAL_ONLY`，代码状态常量仅 5 项、无此状态。
+4. **future tick 无显式排除**：仅隐式隔离，需补显式 guard（§B-10）。
+5. **可复用基础设施**：`backend/app/core/pytdx_adapter.py`（`market_from_code` / 会话 / 重试 /
+   `get_history_transaction_data`）→ **REUSE**；
+   `MootdxAuctionQuoteProvider`（`get_security_quotes`）是 **live 快照**通道，非历史 09:25 tick 链路，且为 legacy 命名。
+
+### AU-04-6 V3.2 Publication 边界与 Coverage 分层（2026-09-01）
+
+#### 1. 正式 publication 边界
+
+```text
+V3.2 当前正式 publication
+=
+当前实时交易日（T）的竞价分析结果
+
+历史竞价数据
+=
+今天分析所需的历史上下文（Position / Dynamics / Amount History 的输入）
+
+历史交易日回放 / 历史日期正式 publication
+=
+DEFERRED（本轮不支持）
+```
+
+- 今天正式页面必须使用**真实 `verified_consensus` capture run** + 既有正式 truth gate；
+  **V3.2 不重新计算多源共识**。
+- `historical_backfill` capture run **只作为历史数据来源**：
+  - **不得**置 `truth_status = "verified"`；
+  - **不得**通过旧 production publication gate 发布；
+  - 原因：PRD §0.0-A 已冻结「pytdx/mootdx 属同一供应链，不得冒充第二独立 family」，
+    而 `AuctionTruthPolicy.min_independent_sources = 2`，
+    单源历史 lane 无法诚实通过共识门。
+- `GET /v1/auction/meta/dates` **只返回存在正式 V3.2 publication 的日期**
+  （`published_dates`），不返回 `historical_data_dates`，
+  避免用户误以为历史数据日期都有正式 V3.2 页面。
+
+#### 2. truth_status / test_namespace / capture_source
+
+| 项 | 规则 |
+|---|---|
+| `truth_status` | **必填、无默认值**，继承真实 capture run / truth gate 结果 |
+| `test_namespace` | **必填、无默认值**，继承 capture run 真实 namespace |
+| `capture_source` | 记录 lane（`verified_consensus` / `historical_backfill`），写入 `gate_evidence` |
+
+**禁止** persistence service 默认 `truth_status="verified"` —— 那会伪造单源数据无法主张的多源共识。
+
+#### 3. 三个 coverage 必须区分（禁止复用同一字段）
+
+| 层 | 含义 | Owner |
+|---|---|---|
+| **Capture Coverage** | 行情采集是否成功 | `AuctionQuoteCaptureRun.coverage`（采集服务写入） |
+| **Scan Coverage** | 应分析股票中多少形成了有效**当日**竞价事实 | `domain/auction/coverage.compute_scan_coverage` → `AuctionScanRun.coverage_ratio` |
+| **Scope Coverage** | 单个行业/概念自己的有效成员覆盖 | `domain/auction/coverage.compute_scope_coverage` → payload 内 |
+
+- Persistence service **不计算 coverage**，只接收已确定的 `ScanCoverage` 并投影到 run 列；
+- Publication 的 `coverage_ratio` **只读取** `scan_run.coverage_ratio`；
+- 三者不得互相替代，测试须证明 Scope 覆盖率随 scope 成员变化而 Scan 覆盖率不变。
+
+#### 4. Current Coverage ≠ Historical Readiness
+
+- `valid_count` 判定只依据**当天**是否能在任一正式轴（Gap 或 Amount）形成有效事实；
+- `gap_history_eligible` / `amount_history_eligible` **不得**计入 Scan Coverage；
+- 一只有正常今日竞价数据但历史不足 60 天的股票：
+  - 当天 **valid**（计入 coverage）；
+  - 其 `Position` / `Velocity` / `Acceleration` 为 `insufficient_history` → `None`；
+  - **不得**因为历史不足把当天数据判为无效。
+
 ## 4. Historical Abnormality（AU-05 / AU-06）
 
 ### AU-05 Gap Historical Abnormality（member-first）
@@ -410,7 +658,12 @@ Auction 正式分析输入只包括：
 2. **Auction Volume**（参与强度）；
 3. **Auction Amount**（参与强度）。
 
-Auction 使用与 Review v2.3 一致的"事实 → 观察 → 分析 → 解释"方法论，但**不继承 Review Dynamics 生命周期语义**（EMA / Velocity / Acceleration / Persistence / 6 阶段生命周期）。
+Auction 使用与 Review v2.3 一致的"事实 → 观察 → 分析 → 解释"方法论。
+  [V3.2 修订] 原「不继承 Review Dynamics 生命周期语义（EMA / Velocity / Acceleration /
+  Persistence / 6 阶段生命周期）」被**精确拆分 supersede**：
+  - **继承**：Review 的 EMA5 / EMA20 / Velocity / Acceleration / Persistence **数值方法**，
+    作为 Auction 的 **objective dynamics**；
+  - **不继承**：Review 的 **6 阶段 Dynamics Phase 生命周期** —— V3.2 不产生、不展示 6 阶段 phase。
 
 ### AU-10-2 Scope Family（平行）
 
@@ -607,6 +860,14 @@ member evidence 至少能够展示：
 - contribution / share（where applicable）。
 
 ## 14. Review → Auction 依赖边界（AU-16）
+
+> **[V3.2 SUPERSEDED（2026-09-01）]** 本节 V3.1 的「Auction 读取昨日 Review 正式 snapshot、
+> 并做 `Review(T-1) → Auction(T)` 比较」设计**已被 V3.2 明确排除**。V3.2 **只分析 Auction 自身**，
+> 不再实现：`Review(T-1) → Auction(T)` 的 NEW / PERSIST / DECAY / REVERSE / CONFLICT / QUIET
+> 状态迁移，以及 Attention Redistribution（注意力再分配）。
+>
+> 仍**保留有效**的部分：Auction 不得调用 Review 内部私有计算逻辑形成强耦合；允许 Review / Auction
+> 共用 generic math primitive（INV-03）。以下 V3.1 原文保留作历史 lineage 记录。
 
 新的 Auction 会读取昨日 Review 的**正式 snapshot / canonical evidence**。
 

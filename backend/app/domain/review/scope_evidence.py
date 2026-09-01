@@ -30,6 +30,10 @@ import math
 from datetime import date
 from typing import Any
 
+from app.domain.shared.historical_position import (
+    percentile_rank as shared_percentile_rank,
+)
+
 # PRD §7.6: fewer than 60 valid historical samples -> insufficient_history.
 HISTORICAL_MIN_SAMPLE = 60
 
@@ -200,25 +204,12 @@ def _finite_number(value: Any) -> float | None:
 
 
 def percentile_rank(value: Any, samples: list[Any]) -> float | None:
-    """Neutral percentile rank (0..100) of ``value`` within ``samples``.
+    """Thin wrapper -> shared primitive (NO_FORMULA_CHANGE, AUCTION-V3.2 §十二).
 
-    Rules (prompt §7):
-      - filters None / NaN / inf from ``samples`` and ``value``;
-      - empty (after filter) -> None (unavailable);
-      - deterministic tie behavior (values equal to ``value`` all count);
-      - output 0..100;
-      - no direction, no weight, no negative inversion, no score normalization.
-
-    Only the pure math semantic of the repo's cross-sectional rank convention is
-    extracted: ``below_or_equal / n * 100``, clamped to [0, 100].
+    Original semantic: ``below_or_equal / n * 100`` clamped to [0, 100],
+    filtering None / NaN / inf / bool.  See ``domain/shared/historical_position``.
     """
-    current = _finite_number(value)
-    finite = [float(s) for s in samples if _finite_number(s) is not None]
-    if current is None or not finite:
-        return None
-    below_or_equal = sum(1 for s in finite if s <= current)
-    return _clamp_0_100(below_or_equal / len(finite) * 100.0)
-
+    return shared_percentile_rank(value, samples)
 
 def _clamp_0_100(value: float) -> float:
     return min(100.0, max(0.0, value))

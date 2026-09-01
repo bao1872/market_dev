@@ -51,7 +51,6 @@ eligible for a historical Position.
 
 from __future__ import annotations
 
-import math
 from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
@@ -60,7 +59,12 @@ from app.domain.review.observation_primitives import (
     ObservationPrimitiveSpec,
     get_primitive,
 )
-from app.domain.review.scope_evidence import percentile_rank
+from app.domain.shared.historical_position import (
+    compute_historical_position as shared_compute_historical_position,
+)
+from app.domain.shared.historical_position import (
+    finite_number,
+)
 
 # PRD §7.9 frozen Position contract.
 POSITION_WINDOW_SIZE = 120
@@ -94,14 +98,7 @@ _SPECS: dict[str, ObservationPrimitiveSpec] = {
 # ---------------------------------------------------------------------------
 
 
-def _finite(value: Any) -> float | None:
-    """Return ``value`` as a finite float, or None when non-finite / non-numeric."""
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        number = float(value)
-        if math.isfinite(number):
-            return number
-    return None
-
+_finite = finite_number  # NO_FORMULA_CHANGE：委托共享原语（AUCTION-V3.2 §十二）
 
 def _extract_value(spec: ObservationPrimitiveSpec, payload: dict[str, Any]) -> float | None:
     """Extract the comparable scalar for ``spec`` from the canonical L1 payload.
@@ -148,45 +145,13 @@ def compute_historical_position(
     window_size: int = POSITION_WINDOW_SIZE,
     minimum_valid_history: int = POSITION_MINIMUM_VALID_HISTORY,
 ) -> dict[str, Any]:
-    """Compute one objective Historical Position fact for a single T.
-
-    Args:
-        current_value: the primitive value at T (may be None / NaN / inf).
-        pre_t_values: primitive values at observations STRICTLY BEFORE T.  Only
-            the latest ``window_size`` candidates are used; we never reach past
-            that window to accumulate more valid values.
-        window_size: candidate window length (default 120 observations).
-        minimum_valid_history: minimum valid pre-T observations for a position
-            (default 60).  ``valid_count < minimum_valid_history`` -> unavailable.
-
-    Returns (transparent fact, deterministic, non-mutating):
-        ``{"value", "position", "history": {window_size, minimum_valid_history,
-        candidate_count, valid_count}, "status"}`` where ``status`` is
-        ``"ready"`` | ``"insufficient_history"`` | ``"unavailable_current"``.
-        ``position`` is ``None`` (never 0) unless ``status == "ready"``.
-    """
-    candidates = list(pre_t_values)[-window_size:]
-    valid = [v for v in candidates if _finite(v) is not None]
-    value = _finite(current_value)
-    if value is None:
-        status = "unavailable_current"
-    elif len(valid) < minimum_valid_history:
-        status = "insufficient_history"
-    else:
-        status = "ready"
-    position = percentile_rank(value, valid) if status == "ready" else None
-    return {
-        "value": value,
-        "position": position,
-        "history": {
-            "window_size": window_size,
-            "minimum_valid_history": minimum_valid_history,
-            "candidate_count": len(candidates),
-            "valid_count": len(valid),
-        },
-        "status": status,
-    }
-
+    """Thin wrapper -> shared primitive (NO_FORMULA_CHANGE, AUCTION-V3.2 §十二)."""
+    return shared_compute_historical_position(
+        current_value,
+        pre_t_values,
+        window_size=window_size,
+        minimum_valid_history=minimum_valid_history,
+    )
 
 # ---------------------------------------------------------------------------
 # Position series (canonical: formal PrimitiveSeries input)

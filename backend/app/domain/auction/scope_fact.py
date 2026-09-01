@@ -28,6 +28,9 @@ from app.domain.auction.member_fact import (
     AuctionMemberFactConfig,
     build_auction_member_facts,
 )
+from app.domain.shared.concentration import abs_value_concentration
+from app.domain.shared.hhi import normalized_hhi, raw_hhi
+from app.domain.shared.stdev import population_stdev
 
 __all__ = ["AuctionL1ScopeFact", "compute_auction_l1_scope_facts"]
 
@@ -71,6 +74,28 @@ class AuctionL1ScopeFact:
     negative_gap_abnormal_breadth: float | None = None
     negative_gap_abnormal_breadth_num: int = 0
     negative_gap_abnormal_breadth_den: int = 0
+
+    # --- A. PRICE (V3.2 extensions, AUCTION-V3.2 §4) ---
+    # §4.1 capital tilt: AW - EW.  Consumes the two canonical facts above;
+    # it is NOT a second EW / AW owner.
+    capital_tilt: float | None = None
+
+    # §4.2 unchanged breadth: denominator is EXACTLY the current-gap denominator,
+    # so positive + negative + unchanged == cg_den holds and is machine-checkable.
+    unchanged_gap_breadth: float | None = None
+    unchanged_gap_breadth_num: int = 0
+    unchanged_gap_breadth_den: int = 0
+
+    # §4.3 gap dispersion: shared population-stdev owner (n < 2 -> None, never 0).
+    gap_dispersion: float | None = None
+    gap_dispersion_den: int = 0
+
+    # §4.4 price concentration: shared abs-value owner — same math semantics as
+    # Review price HHI (abs share over ALL price-valid members, zero-gap included).
+    price_raw_hhi: float | None = None
+    price_normalized_hhi: float | None = None
+    price_concentration_member_count: int = 0
+    price_concentration_status: str = "unavailable"
 
     # --- B. PARTICIPATION ---
     total_auction_volume: float | None = None
@@ -244,6 +269,26 @@ def compute_auction_l1_scope_facts(
             res.negative_gap_breadth_num = neg_num
             res.negative_gap_breadth_den = cg_den
             res.negative_gap_breadth = neg_num / cg_den
+
+            # §4.2 unchanged breadth — same denominator, machine-checkable identity.
+            unc_num = cg_den - pos_num - neg_num
+            res.unchanged_gap_breadth_num = unc_num
+            res.unchanged_gap_breadth_den = cg_den
+            res.unchanged_gap_breadth = unc_num / cg_den
+
+            # gap == 0.0 is a legitimate dispersion / concentration universe member.
+            eligible_gaps = s_gap[cg_mask].tolist()
+
+            # §4.3 gap dispersion — shared population stdev owner.
+            res.gap_dispersion_den = cg_den
+            res.gap_dispersion = population_stdev(eligible_gaps)
+
+            # §4.4 price concentration — shared abs-value owner.
+            conc = abs_value_concentration(eligible_gaps)
+            res.price_raw_hhi = conc["raw_hhi"]
+            res.price_normalized_hhi = conc["normalized_hhi"]
+            res.price_concentration_member_count = conc["member_count"]
+            res.price_concentration_status = conc["status"]
         else:
             res.equal_weight_gap_den = 0
             res.equal_weight_gap_num = 0
@@ -260,6 +305,12 @@ def compute_auction_l1_scope_facts(
             res.amount_weighted_gap = res.amount_weighted_gap_num / aw_wsum
         else:
             res.amount_weighted_gap = None  # not 0
+
+        # §4.1 capital tilt = AW - EW (None in, None out; Missing != Zero).
+        if res.amount_weighted_gap is not None and res.equal_weight_gap is not None:
+            res.capital_tilt = res.amount_weighted_gap - res.equal_weight_gap
+        else:
+            res.capital_tilt = None
 
         # gap abnormal breadth (history denominator)
         gh_den = int(np.count_nonzero(s_gap_hist))
@@ -374,14 +425,14 @@ def compute_auction_l1_scope_facts(
                 topk = np.partition(elig_amt, -k)[-k:]
                 res.top3_amount_share = float(np.sum(topk)) / scope_total
 
-                # raw HHI via sum(amount^2) / (sum amount)^2 (no share objects)
-                res.raw_hhi = float(np.sum(elig_amt * elig_amt)) / (scope_total * scope_total)
+                # Amount share 单一 owner -> shared HHI primitive。
+                # Σshare² 与退役的 Σamount²/(Σamount)² 内联式数学等价（NO_FORMULA_CHANGE）；
+                # shared owner 额外提供 N<=1 -> None 与越界 ValueError 守卫。
+                amount_shares = (elig_amt / scope_total).tolist()
+                res.raw_hhi = raw_hhi(amount_shares)
 
                 n = int(elig_amt.size)
-                if n <= 1:
-                    res.normalized_hhi = None  # N<=1 unavailable
-                else:
-                    res.normalized_hhi = (res.raw_hhi - 1.0 / n) / (1.0 - 1.0 / n)
+                res.normalized_hhi = normalized_hhi(res.raw_hhi, n)
         else:
             res.top1_amount_share = None
             res.top3_amount_share = None

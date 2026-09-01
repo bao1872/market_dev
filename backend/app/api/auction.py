@@ -60,6 +60,10 @@ from app.schemas.auction import (
     AuctionFinalQuoteOut,
     AuctionInstrumentPageData,
     AuctionMarketPageData,
+    AuctionMetaDatesOut,
+    AuctionScopeDetailOut,
+    AuctionScopeListItemOut,
+    AuctionScopeListOut,
     EventTrackingOut,
     InstrumentResultOut,
     ScopeResultOut,
@@ -986,3 +990,163 @@ if __name__ == "__main__":
     for p in admin_paths:
         print(f"  {p}")
     print("OK")
+
+
+# ---------------------------------------------------------------------------
+# AUCTION V3.2 — scope-first workspace endpoints
+# ---------------------------------------------------------------------------
+async def _load_publications_and_results(
+    db: AsyncSession,
+    trade_date: date,
+) -> tuple[list[Any], list[Any]]:
+    """Load publication + scope-result rows for one trade_date (two queries)."""
+    from app.models.auction import AuctionAnalysisPublication, AuctionScopeResult
+
+    publications = (
+        await db.execute(
+            select(AuctionAnalysisPublication).where(
+                AuctionAnalysisPublication.trade_date == trade_date
+            )
+        )
+    ).scalars().all()
+    results = (
+        await db.execute(
+            select(AuctionScopeResult).where(AuctionScopeResult.trade_date == trade_date)
+        )
+    ).scalars().all()
+    return list(publications), list(results)
+
+
+@router.get("/scopes", response_model=AuctionScopeListOut)
+async def list_auction_scopes(
+    trade_date: date | None = Query(default=None),
+    family: str = Query(default="industry", pattern="^(industry|concept)$"),
+    db: AsyncSession = Depends(get_db),
+) -> AuctionScopeListOut:
+    """COMPLETE same-family snapshot (no Top-N) for one published trade_date.
+
+    Read chain: (trade_date, algorithm_version) -> publication -> scan_run_id ->
+    scope results -> V3.2 payload.  Values are READ, never recomputed.
+    """
+    from app.domain.auction.publication_read import (
+        V32_ALGORITHM_VERSION,
+        read_published_scope_results,
+        to_scope_list_items,
+    )
+    from app.domain.auction.scope_payload import SCHEMA_VERSION
+
+    resolved = _resolve_trade_date(trade_date)
+    publications, results = await _load_publications_and_results(db, resolved)
+
+    published_rows = read_published_scope_results(
+        publications,
+        results,
+        trade_date=resolved,
+        family=family,
+        algorithm_version=V32_ALGORITHM_VERSION,
+    )
+    if not published_rows:
+        # No formal publication -> unavailable, never an empty ranking and
+        # never a fallback to the latest scan run.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"no published V3.2 result for trade_date={resolved.isoformat()}",
+        )
+
+    items = to_scope_list_items(published_rows)
+    return AuctionScopeListOut(
+        trade_date=resolved,
+        family=family,
+        algorithm_version=V32_ALGORITHM_VERSION,
+        schema_version=SCHEMA_VERSION,
+        total_scopes=len(items),
+        scopes=[
+            AuctionScopeListItemOut(
+                scope_key=i.scope_key,
+                scope_name=i.scope_name,
+                equal_weight_gap=i.equal_weight_gap,
+                amount_weighted_gap=i.amount_weighted_gap,
+                capital_tilt=i.capital_tilt,
+                positive_gap_breadth=i.positive_gap_breadth,
+                negative_gap_breadth=i.negative_gap_breadth,
+                unchanged_gap_breadth=i.unchanged_gap_breadth,
+                gap_dispersion=i.gap_dispersion,
+                price_normalized_hhi=i.price_normalized_hhi,
+                ew_position=i.ew_position,
+                ew_velocity=i.ew_velocity,
+                ew_acceleration=i.ew_acceleration,
+                amount_historical_position=i.amount_historical_position,
+                amount_multiple=i.amount_multiple,
+                amount_abnormal_breadth=i.amount_abnormal_breadth,
+                total_auction_amount=i.total_auction_amount,
+                normalized_hhi=i.normalized_hhi,
+                cross_sectional=i.cross_sectional,
+                leadership_migration=i.leadership_migration,
+                price_valid_count=int(i.price_valid_count or 0),
+            )
+            for i in items
+        ],
+    )
+
+
+@router.get("/scopes/{scope_key}", response_model=AuctionScopeDetailOut)
+async def get_auction_scope_detail(
+    scope_key: str,
+    trade_date: date | None = Query(default=None),
+    family: str = Query(default="industry", pattern="^(industry|concept)$"),
+    db: AsyncSession = Depends(get_db),
+) -> AuctionScopeDetailOut:
+    """Five canonical groups for one PUBLISHED scope, plus diagnostics."""
+    from app.domain.auction.publication_read import (
+        V32_ALGORITHM_VERSION,
+        read_published_scope_results,
+        to_scope_detail,
+    )
+
+    resolved = _resolve_trade_date(trade_date)
+    publications, results = await _load_publications_and_results(db, resolved)
+
+    published_rows = read_published_scope_results(
+        publications,
+        results,
+        trade_date=resolved,
+        family=family,
+        algorithm_version=V32_ALGORITHM_VERSION,
+    )
+    match = next((r for r in published_rows if r.scope_name == scope_key), None)
+    if match is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"auction scope not found or not published: {family}/{scope_key}",
+        )
+
+    detail = to_scope_detail(match)
+    return AuctionScopeDetailOut(
+        trade_date=resolved,
+        family=family,
+        scope_key=scope_key,
+        scope_name=match.scope_name,
+        repricing=detail["repricing"],
+        historical_dynamics=detail["historical_dynamics"],
+        participation=detail["participation"],
+        cross_sectional=detail["cross_sectional"],
+        member_attribution=detail["member_attribution"],
+        diagnostics=detail["diagnostics"],
+    )
+
+
+@router.get("/meta/dates", response_model=AuctionMetaDatesOut)
+async def list_auction_scope_dates(
+    db: AsyncSession = Depends(get_db),
+) -> AuctionMetaDatesOut:
+    """Trade dates with a FORMAL V3.2 publication (newest first).
+
+    Historical-data dates are excluded: having history does not mean a V3.2
+    page exists for that day (PRD AU-04-6).
+    """
+    from app.domain.auction.publication_read import published_dates
+    from app.models.auction import AuctionAnalysisPublication
+
+    publications = (await db.execute(select(AuctionAnalysisPublication))).scalars().all()
+    dates = published_dates(list(publications))
+    return AuctionMetaDatesOut(trade_dates=dates, latest=dates[0] if dates else None)

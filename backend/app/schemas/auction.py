@@ -342,3 +342,83 @@ class AuctionBackflowData(BaseModel):
         description="当日竞价事件，按 formed_at desc 排序，限 50 条",
     )
     reason_codes: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# AUCTION V3.2 — scope-first workspace contracts
+# ---------------------------------------------------------------------------
+class AuctionScopeListItemOut(BaseModel):
+    """One row of the full family snapshot (list-first workspace).
+
+    Every numeric field is nullable: unavailable is ``None``, never 0.
+    Technical identifiers (run / publication / scope UUID) are intentionally
+    absent here — they belong to the diagnostics block only.
+    """
+
+    scope_key: str = Field(description="Business scope identity (MarketBoard.externalCode)")
+    scope_name: str | None = None
+
+    # repricing
+    equal_weight_gap: float | None = None
+    amount_weighted_gap: float | None = None
+    capital_tilt: float | None = None
+    positive_gap_breadth: float | None = None
+    negative_gap_breadth: float | None = None
+    unchanged_gap_breadth: float | None = None
+    gap_dispersion: float | None = None
+    price_normalized_hhi: float | None = None
+
+    # historical dynamics
+    ew_position: float | None = None
+    ew_velocity: float | None = None
+    ew_acceleration: float | None = None
+
+    # participation
+    amount_historical_position: float | None = None
+    amount_multiple: float | None = None
+    amount_abnormal_breadth: float | None = None
+    total_auction_amount: float | None = None
+    normalized_hhi: float | None = None
+
+    # cross-sectional (same-family 0..100 positions)
+    cross_sectional: dict[str, float | None] = Field(default_factory=dict)
+
+    # leadership
+    leadership_migration: float | None = None
+
+    price_valid_count: int = 0
+
+
+class AuctionScopeListOut(BaseModel):
+    """COMPLETE family snapshot — never a backend Top-N slice.
+
+    The frontend filters/sorts/paginates locally so the user can switch
+    sort keys instantly inside the 09:25-09:30 window.
+    """
+
+    trade_date: date
+    family: str
+    algorithm_version: str
+    schema_version: str
+    total_scopes: int
+    scopes: list[AuctionScopeListItemOut]
+
+
+class AuctionScopeDetailOut(BaseModel):
+    """Selected scope detail: five canonical groups + diagnostics."""
+
+    trade_date: date
+    family: str
+    scope_key: str
+    scope_name: str | None = None
+    repricing: dict[str, Any] = Field(default_factory=dict)
+    historical_dynamics: dict[str, Any] = Field(default_factory=dict)
+    participation: dict[str, Any] = Field(default_factory=dict)
+    cross_sectional: dict[str, Any] = Field(default_factory=dict)
+    member_attribution: dict[str, Any] = Field(default_factory=dict)
+    diagnostics: dict[str, Any] = Field(default_factory=dict)
+
+
+class AuctionMetaDatesOut(BaseModel):
+    trade_dates: list[date]
+    latest: date | None = None

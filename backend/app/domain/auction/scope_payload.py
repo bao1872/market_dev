@@ -1,0 +1,81 @@
+"""Auction V3.2 canonical payload assembly + read-back (zero schema change).
+
+Persistence decision (V3.2 §十四): the existing ``auction_scope_results`` table
+already offers ``scope_type`` (which carries the family), ``scope_id``,
+``scope_name``, ``payload`` (JSONB) and ``reason_codes``, and
+``auction_analysis_publications`` already offers ``algorithm_version``.
+
+Therefore V3.2 needs **no migration**: the whole canonical payload is carried
+inside ``payload``, and both ``schema_version`` and ``algorithm_version`` are
+recorded inside it.  The publication pointer stays the visibility owner.
+
+This module is pure: it builds/validates dicts and touches no ORM session.
+The service layer decides how to persist them.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+__all__ = [
+    "SCHEMA_VERSION",
+    "build_scope_payload",
+    "parse_scope_payload",
+]
+
+#: Bumped whenever the canonical payload shape changes.  Readers MUST refuse a
+#: payload whose schema_version they do not understand (never silently guess).
+SCHEMA_VERSION = "auction-scope-v3.2"
+
+
+def build_scope_payload(
+    *,
+    algorithm_version: str,
+    repricing: dict[str, Any],
+    historical_dynamics: dict[str, Any],
+    participation: dict[str, Any],
+    cross_sectional: dict[str, Any],
+    member_attribution: dict[str, Any],
+    diagnostics: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Assemble the five canonical V3.2 groups into one versioned payload."""
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "algorithm_version": algorithm_version,
+        "repricing": dict(repricing),
+        "historical_dynamics": dict(historical_dynamics),
+        "participation": dict(participation),
+        "cross_sectional": dict(cross_sectional),
+        "member_attribution": dict(member_attribution),
+        "diagnostics": dict(diagnostics or {}),
+    }
+
+
+def parse_scope_payload(payload: Any) -> dict[str, Any]:
+    """Validate and return a V3.2 canonical payload.
+
+    Fails fast on an unknown schema_version instead of guessing at keys —
+    a payload written by a different contract must never be read as V3.2.
+    """
+    if not isinstance(payload, dict):
+        raise ValueError("auction scope payload must be a JSON object")
+
+    schema_version = payload.get("schema_version")
+    if schema_version != SCHEMA_VERSION:
+        raise ValueError(
+            f"unsupported auction scope payload schema_version: {schema_version!r} "
+            f"(expected {SCHEMA_VERSION!r})"
+        )
+
+    required = (
+        "repricing",
+        "historical_dynamics",
+        "participation",
+        "cross_sectional",
+        "member_attribution",
+    )
+    missing = [key for key in required if key not in payload]
+    if missing:
+        raise ValueError(f"auction scope payload missing groups: {missing}")
+
+    return payload

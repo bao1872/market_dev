@@ -51,6 +51,9 @@ from app.domain.first_pyramid_semantics import (
     SqueezeState,
     VolumeBadge,
 )
+from app.domain.shared.concentration import abs_value_concentration
+from app.domain.shared.hhi import normalized_hhi, raw_hhi
+from app.domain.shared.stdev import population_stdev
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 
 _EPSILON = 1e-12
@@ -258,18 +261,7 @@ def _sum(values: Sequence[float | None]) -> float | None:
     return sum(finite)
 
 
-def _stdev(values: Sequence[float]) -> float | None:
-    """Population stdev over a finite subsequence (used for Return Dispersion).
-
-    Returns ``None`` when fewer than 2 finite values (no dispersion space).
-    """
-    finite = sorted(v for v in values if v is not None and math.isfinite(v))
-    n = len(finite)
-    if n < 2:
-        return None
-    mean = sum(finite) / n
-    var = sum((x - mean) ** 2 for x in finite) / n
-    return var ** 0.5
+_stdev = population_stdev  # NO_FORMULA_CHANGE：委托共享原语（AUCTION-V3.2 §4.3）
 
 
 def _collect(values: Sequence[float | None]) -> list[float]:
@@ -518,92 +510,20 @@ def _price_breadth(returns: Sequence[float], denominator: int) -> dict[str, Any]
     }
 
 
-def _raw_hhi(shares: Sequence[float]) -> float:
-    return sum(share * share for share in sorted(shares))
+_raw_hhi = raw_hhi  # NO_FORMULA_CHANGE：委托共享原语（AUCTION-V3.2 §22）
 
 
 def _normalized_hhi(
-    raw_hhi: float | None,
+    raw_hhi_value: float | None,
     member_count: int,
 ) -> float | None:
-    """Member-count-normalized HHI (ACCEPTED CONTRACT, PRD §7.2).
-
-    ``normalized_hhi = (raw_hhi - 1/N) / (1 - 1/N)``, N = member_count > 1.
-
-    Equal distribution -> 0; single-member-dominant -> 1; removes the mechanical
-    lower bound that raw HHI imposes on a larger N.  Boundaries (frozen):
-    - ``raw_hhi is None`` -> None (unavailable upstream);
-    - ``member_count <= 1`` -> None (no internal concentration space, denominator 0);
-    - ``1 - 1/N <= _EPSILON`` -> None (numerical degenerate floor);
-    - ``raw_hhi`` out of [0, 1] after extraction -> ``ValueError`` (never silent).
-    Only floating-point rounding near the endpoints is clamped to [0, 1]; a
-    genuinely out-of-range value is a real error and must surface.
-    """
-    if raw_hhi is None:
-        return None
-
-    if member_count <= 1:
-        return None
-
-    floor = 1.0 / member_count
-    denominator = 1.0 - floor
-
-    if denominator <= _EPSILON:
-        return None
-
-    value = (raw_hhi - floor) / denominator
-
-    # Only float-rounding near endpoints; must NOT mask an algorithmic error.
-    if value < 0.0 and value >= -_EPSILON:
-        value = 0.0
-    elif value > 1.0 and value <= 1.0 + _EPSILON:
-        value = 1.0
-
-    if value < 0.0 or value > 1.0:
-        raise ValueError(
-            f"normalized HHI out of range: "
-            f"raw_hhi={raw_hhi}, member_count={member_count}, value={value}"
-        )
-
-    return value
+    """Thin wrapper -> shared primitive (NO_FORMULA_CHANGE, AUCTION-V3.2 §22)."""
+    return normalized_hhi(raw_hhi_value, member_count)
 
 
 def _price_concentration(returns: Sequence[float]) -> dict[str, Any]:
-    """abs-price-change share based raw + normalized HHI over the price universe.
-
-    A zero-return member is still a valid price-concentration universe member, so
-    ``member_count = len(returns)`` (all price-valid members), NOT the
-    positive-return count.
-    """
-    abs_returns = sorted(abs(r) for r in returns)
-    member_count = len(returns)
-    total = sum(abs_returns)
-
-    if total <= _EPSILON:
-        return {
-            "raw_hhi": None,
-            "normalized_hhi": None,
-            "member_count": member_count,
-            "status": "zero_abs_return",
-        }
-
-    shares = [value / total for value in abs_returns]
-    raw_hhi = _raw_hhi(shares)
-
-    if member_count <= 1:
-        return {
-            "raw_hhi": raw_hhi,
-            "normalized_hhi": None,
-            "member_count": member_count,
-            "status": "insufficient_member_count",
-        }
-
-    return {
-        "raw_hhi": raw_hhi,
-        "normalized_hhi": _normalized_hhi(raw_hhi, member_count),
-        "member_count": member_count,
-        "status": "ready",
-    }
+    """Thin wrapper -> shared primitive (NO_FORMULA_CHANGE, AUCTION-V3.2 §4.4)."""
+    return abs_value_concentration(returns)
 
 
 @dataclass(frozen=True)
