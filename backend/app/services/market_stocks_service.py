@@ -8,7 +8,7 @@
 1. instruments + is_watchlisted + 分页（scope=market 用 EXISTS，scope=watchlist 用 INNER JOIN）
 2. count 查询（相同 WHERE 条件，含 industry/concept EXISTS 子查询）
 3. 最新 2 根日线（rn <= 2）批量按 instrument_ids 查询 → latest_price + change_pct
-4. 最新 stock_feature_snapshot（rn = 1）批量 → dsa_state + structure_state
+4. 当前 canonical CoreRun 的 stock_feature_snapshot（rn = 1）批量 → dsa_state + structure_state
 5. 板块归属批量查询 → industry + concepts
 6. boards_as_of — MAX(market_boards.updated_at) 标量查询
 7. price_as_of — MAX(bar_daily.trade_date) 全局标量（不随分页变化）
@@ -56,6 +56,7 @@ from app.models.market_board import MarketBoard
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
+from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
 from app.repositories.board_filter_helper import build_board_filter_conditions
@@ -467,14 +468,16 @@ def _needs_chip_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSor
 
 
 def _build_snap_lateral(*, snapshot_run_id: UUID | None = None):
-    """构建最新 snapshot 的 LATERAL 子查询（每个 instrument 一行最新快照）。
+    """构建 snapshot 的 LATERAL 子查询（每个 instrument 一行快照）。
 
-    [CHANGE-20260729-008] 优先绑定 publication pointer.data_run_id：
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 绑定 CURRENT canonical CoreRun：
     - snapshot_run_id 非 None：只读取该 run 的 snapshot（统一发布版本，禁止跨 run 混读）
-    - snapshot_run_id 为 None：回退到每股 latest（仅在 DB 无 pointer 时兼容）
+    - snapshot_run_id 为 None：回退到每股 latest（无 canonical CoreRun 时的既有行为）
 
     Args:
-        snapshot_run_id: 已发布 stock_core pointer.data_run_id（None 时回退 latest）
+        snapshot_run_id: CURRENT canonical CoreRun.id（由
+            ``current_core_run_service.resolve_current_core_run`` 解析；
+            None 时保持既有"每股最新"行为）
     """
     stmt = (
         select(
@@ -499,6 +502,56 @@ def _build_snap_lateral(*, snapshot_run_id: UUID | None = None):
         # 兼容回退：无 pointer 时按每股 latest
         stmt = stmt.order_by(StockFeatureSnapshot.trade_date.desc()).limit(1)
     return stmt.lateral("latest_snap")
+
+
+def _build_display_snapshot_query(
+    instrument_ids: list[UUID],
+    *,
+    canonical_core_run_id: UUID | None = None,
+):
+    """Query 4：按分页 instrument_ids 批量读取 snapshot（含 first_pyramid）。
+
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 必须与 Query 1 的 snap LATERAL 消费
+    **同一个** canonical CoreRun：``canonical_core_run_id`` 非 None 时严格
+    ``source_run_id == canonical_core_run_id``，禁止再按"每股 trade_date 最新"
+    另选一套 snapshot——那会让 display（first_pyramid / fp_trade_date /
+    data_run_id）与 filter/sort/count 分裂。
+
+    Args:
+        instrument_ids: 当前分页的 instrument id 列表
+        canonical_core_run_id: CURRENT canonical CoreRun.id；
+            None 时保持既有"每股最新"行为（不新增 fallback）
+    """
+    where_clauses = [
+        StockFeatureSnapshot.instrument_id.in_(instrument_ids),
+        # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
+        StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
+    ]
+    if canonical_core_run_id is not None:
+        where_clauses.append(
+            StockFeatureSnapshot.source_run_id == canonical_core_run_id
+        )
+    snap_subq = (
+        select(
+            StockFeatureSnapshot.instrument_id,
+            StockFeatureSnapshot.summary_payload,
+            StockFeatureSnapshot.created_at,
+            StockFeatureSnapshot.trade_date,
+            StockFeatureSnapshot.source_run_id,
+            func.row_number()
+            .over(
+                partition_by=StockFeatureSnapshot.instrument_id,
+                order_by=(
+                    StockFeatureSnapshot.trade_date.desc(),
+                    StockFeatureSnapshot.created_at.desc(),
+                ),
+            )
+            .label("rn"),
+        )
+        .where(*where_clauses)
+        .subquery()
+    )
+    return select(snap_subq).where(snap_subq.c.rn == 1)
 
 
 def _build_chip_lateral(snap_subq: Any):
@@ -796,27 +849,33 @@ async def get_market_stocks(
     )
     needs_chip = _needs_chip_lateral(fp_filter_specs, fp_sort_spec)
 
-    # [CHANGE-20260729-008] 优先读取已发布 stock_core pointer.data_run_id
-    # 存在 pointer 时严格绑定该 run，禁止跨 run 混读；无 pointer 时回退每股 latest
-    from app.services.factor_publication_service import (
-        PUBLICATION_KIND_STOCK_CORE,
-        SCOPE_TYPE_MARKET,
-        get_publication,
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT canonical CoreRun 单一身份。
+    # 一次请求内的 fp_filter / fp_sort / count / display 必须消费同一个 CoreRun。
+    #
+    # 禁止再以 factor_publications(kind=stock_core) 为 CURRENT authority：
+    # 该 pointer 自 2026-08-27 起不再推进（生产停在 2026-08-26 / ca5c3dd2），
+    # 会导致 filter/sort 用旧 run、而 display 用每股最新 snapshot 的分裂
+    # （表现为筛选条件与返回值不一致）。
+    #
+    # 与 /first-pyramid 共用同一个 service-level owner，禁止复制第二套判定。
+    # 无论是否需要 FP filter/sort 都要解析：Query 4（display）同样消费 first_pyramid，
+    # 若它另按"每股最新"选 snapshot 就会与 filter/sort 的 LATERAL 分裂。
+    # 解析只做一次，整个请求复用该身份。
+    from app.services.current_core_run_service import resolve_current_core_run
+
+    canonical_core_run: StockFeatureSnapshotRun | None = await resolve_current_core_run(db)
+    canonical_core_run_id: UUID | None = (
+        canonical_core_run.id if canonical_core_run is not None else None
     )
-
-    published_core_run_id: UUID | None = None
-    if needs_snap:
-        pub = await get_publication(
-            db,
-            scope_type=SCOPE_TYPE_MARKET,
-            scope_key="market",
-            trade_date=None,  # 取最新 pointer，不限定 trade_date
-            publication_kind=PUBLICATION_KIND_STOCK_CORE,
+    if canonical_core_run_id is None:
+        # 无 canonical CoreRun：保持 _build_snap_lateral / Query 4 既有的
+        # "每股最新"行为，不新增 latest fallback（不掩盖 lineage 问题）。
+        logger.warning(
+            "[market-stocks] 无 CURRENT canonical CoreRun，snap 读取回退既有的"
+            "每股最新语义（不新增 fallback）",
         )
-        if pub is not None:
-            published_core_run_id = pub.data_run_id
 
-    snap_subq = _build_snap_lateral(snapshot_run_id=published_core_run_id) if needs_snap else None
+    snap_subq = _build_snap_lateral(snapshot_run_id=canonical_core_run_id) if needs_snap else None
     chip_subq = _build_chip_lateral(snap_subq) if needs_chip else None
     max_trade_date_subq = _build_max_trade_date_subquery() if needs_snap else None
     # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建
@@ -1001,31 +1060,13 @@ async def get_market_stocks(
             latest, _ = existing
             price_map[inst_id] = (latest, close_val)
 
-    # ===== Query 4: 最新 feature snapshot（批量，含 first_pyramid） =====
+    # ===== Query 4: 当前 canonical CoreRun 的 feature snapshot（批量，含 first_pyramid） =====
     # [PRD §三 列表视图第一金字塔全量字段] summary_payload.first_pyramid 已在盘后写入，
     # 此处批量读取后扁平化为 99 个 fp_ 键，禁止 N+1 逐股请求。
-    snap_subq = (
-        select(
-            StockFeatureSnapshot.instrument_id,
-            StockFeatureSnapshot.summary_payload,
-            StockFeatureSnapshot.created_at,
-            StockFeatureSnapshot.trade_date,
-            StockFeatureSnapshot.source_run_id,
-            func.row_number()
-            .over(
-                partition_by=StockFeatureSnapshot.instrument_id,
-                order_by=StockFeatureSnapshot.trade_date.desc(),
-            )
-            .label("rn"),
-        )
-        .where(
-            StockFeatureSnapshot.instrument_id.in_(instrument_ids),
-            # [CHANGE-20260718-007] 使用 _SCHEMA_VERSION，禁止硬编码
-            StockFeatureSnapshot.schema_version == _SCHEMA_VERSION,
-        )
-        .subquery()
+    #
+    snap_stmt = _build_display_snapshot_query(
+        instrument_ids, canonical_core_run_id=canonical_core_run_id,
     )
-    snap_stmt = select(snap_subq).where(snap_subq.c.rn == 1)
     snap_result = await db.execute(snap_stmt)
 
     state_map: dict[UUID, tuple[str | None, str | None, dict[str, Any] | None, date | None, UUID | None, datetime | None]] = {}
