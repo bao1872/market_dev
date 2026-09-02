@@ -44,6 +44,7 @@ from app.models.auction import (
     AuctionScopeResult,
 )
 from app.services.auction_scan_run_lifecycle import V32_AUCTION_TYPE
+from app.services.auction_scan_run_terminal import assert_run_ownership
 
 # KPI-1: the formal publication owner — the ONLY creator of publication rows.
 
@@ -135,17 +136,29 @@ async def persist_v32_scope_results(
     run: AuctionScanRun,
     trade_date: date,
     scope_results: list[dict[str, Any]],
+    expected_worker_id: str | None = None,
+    expected_lease_epoch: int | None = None,
 ) -> uuid.UUID:
     """Persist V3.2 scope results into an EXISTING run.
 
     This function does NOT create, complete or publish a run — the single
-    lifecycle owner does that.  It only validates the run identity, writes the
-    scope result children, and flushes.
+    lifecycle owner does that.  It validates the run identity and the caller's
+    lease ownership, writes the scope result children, and flushes.
+
+    Ownership is validated against the AUTHORITATIVE row, not the ``run``
+    object handed in: a worker whose lease was taken over may still be holding
+    a stale ORM instance, and must not be allowed to write children.
 
     Everything happens in the caller's transaction; ``session.commit()`` is
     never called here.
     """
     validate_v32_run_identity(run, trade_date=trade_date)
+    await assert_run_ownership(
+        session,
+        run,
+        expected_worker_id=expected_worker_id,
+        expected_lease_epoch=expected_lease_epoch,
+    )
     # Validate and normalise EVERY payload before touching the session, so a
     # malformed payload cannot leave half-written children behind.
     prepared_rows = [

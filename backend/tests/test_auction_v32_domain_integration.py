@@ -54,10 +54,8 @@ from app.models.auction import AuctionScanRun
 from app.services.auction_publication_service import (
     evaluate_auction_publication_gate,
 )
-from app.services.auction_scan_run_lifecycle import (
-    V32_AUCTION_TYPE,
-    complete_scan_run,
-)
+from app.services.auction_scan_run_lifecycle import V32_AUCTION_TYPE
+from app.services.auction_scan_run_terminal import complete_scan_run
 from app.services.auction_scope_persistence_service import (
     build_scope_result_kwargs,
 )

@@ -32,7 +32,8 @@ from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.auction.version import V32_ALGORITHM_VERSION
@@ -40,8 +41,6 @@ from app.models.auction import AuctionScanRun
 
 __all__ = [
     "AuctionScanConflictError",
-    "complete_scan_run",
-    "mark_scan_run_failed",
     "LEASE_EXPIRED_SECONDS",
     "V32_AUCTION_TYPE",
     "is_lease_expired",
@@ -90,6 +89,23 @@ def _now(now: datetime | None) -> datetime:
     return now or datetime.now(UTC)
 
 
+async def _select_existing(
+    db: AsyncSession, trade_date: Any, auction_type: str, algorithm_version: str
+) -> AuctionScanRun | None:
+    """Read the authoritative run row for one identity."""
+    stmt = (
+        select(AuctionScanRun)
+        .where(
+            AuctionScanRun.trade_date == trade_date,
+            AuctionScanRun.auction_type == auction_type,
+            AuctionScanRun.algorithm_version == algorithm_version,
+        )
+        .order_by(AuctionScanRun.created_at.desc())
+        .limit(1)
+    )
+    return (await db.execute(stmt)).scalar_one_or_none()
+
+
 async def acquire_or_recover_scan_run(
     db: AsyncSession,
     *,
@@ -125,35 +141,118 @@ async def acquire_or_recover_scan_run(
     existing = (await db.execute(stmt)).scalar_one_or_none()
 
     if existing is None:
-        run = AuctionScanRun(
-            trade_date=trade_date,
-            auction_type=auction_type,
-            algorithm_version=algorithm_version,
-            price_adjustment_version="pending",
-            status="running",
-            attempt_count=1,
-            worker_id=worker_id,
-            lease_epoch=new_lease_epoch,
-            started_at=current_now,
-            heartbeat_at=current_now,
-        )
-        db.add(run)
-        await db.flush()
-        return run
+        # B1: two workers may both observe "none".  The loser is decided by the
+        # unique key, NOT by a bare IntegrityError: we insert inside a
+        # SAVEPOINT so the outer transaction stays usable, then re-read the
+        # authoritative row and fall through to the normal lifecycle decision.
+        try:
+            async with db.begin_nested():
+                run = AuctionScanRun(
+                    trade_date=trade_date,
+                    auction_type=auction_type,
+                    algorithm_version=algorithm_version,
+                    price_adjustment_version="pending",
+                    status="running",
+                    attempt_count=1,
+                    worker_id=worker_id,
+                    lease_epoch=new_lease_epoch,
+                    started_at=current_now,
+                    heartbeat_at=current_now,
+                )
+                db.add(run)
+                await db.flush()
+            return run
+        except IntegrityError:
+            # savepoint rolled back; outer transaction intact
+            existing = await _select_existing(
+                db, trade_date, auction_type, algorithm_version
+            )
+            if existing is None:
+                raise
+            return await _resolve_existing(
+                db,
+                existing=existing,
+                worker_id=worker_id,
+                new_lease_epoch=new_lease_epoch,
+                current_now=current_now,
+                clear_children=clear_children,
+            )
 
+    return await _resolve_existing(
+        db,
+        existing=existing,
+        worker_id=worker_id,
+        new_lease_epoch=new_lease_epoch,
+        current_now=current_now,
+        clear_children=clear_children,
+    )
+
+
+def _conflict(  # noqa: D401
+    run: AuctionScanRun, trade_date: Any, auction_type: str
+) -> AuctionScanConflictError:
+    """Build the conflict error for a run that is legitimately owned."""
+    return AuctionScanConflictError(
+        f"trade_date={trade_date} auction_type={auction_type} "
+        f"run_id={run.id} 仍在运行（worker={run.worker_id}, "
+        f"lease_epoch={run.lease_epoch}, heartbeat={run.heartbeat_at}），"
+        f"拒绝重复执行"
+    )
+
+
+async def _resolve_existing(
+    db: AsyncSession,
+    *,
+    existing: AuctionScanRun,
+    worker_id: str | None,
+    new_lease_epoch: int,
+    current_now: datetime,
+    clear_children: ClearChildren,
+) -> AuctionScanRun | None:
+    """The single decision table for an already-existing run.
+
+    Shared by the sequential path and by the first-create race loser, so both
+    behave identically.
+    """
     if existing.status == "succeeded":
-        # Idempotent hit: do not create a second run, do not recompute.
-        return None
+        return None  # idempotent hit
 
     if existing.status == "running":
         if not is_lease_expired(existing.heartbeat_at, now=current_now):
-            raise AuctionScanConflictError(
-                f"trade_date={trade_date} auction_type={auction_type} "
-                f"run_id={existing.id} 仍在运行（worker={existing.worker_id}, "
-                f"lease_epoch={existing.lease_epoch}, heartbeat={existing.heartbeat_at}），"
-                f"拒绝重复执行"
+            raise _conflict(existing, existing.trade_date, existing.auction_type)
+
+        # B2: atomic compare-and-swap takeover.  Only the worker whose observed
+        # lease_epoch/worker_id still match can claim the new lease, so two
+        # workers cannot both take over the same stale row.
+        stmt = (
+            update(AuctionScanRun)
+            .where(
+                AuctionScanRun.id == existing.id,
+                AuctionScanRun.lease_epoch == existing.lease_epoch,
+                AuctionScanRun.worker_id == existing.worker_id,
+                AuctionScanRun.status == "running",
             )
-        # stale lease -> fencing takeover; this is a recovery, not a new attempt
+            .values(
+                worker_id=worker_id,
+                lease_epoch=new_lease_epoch,
+                heartbeat_at=current_now,
+                started_at=current_now,
+                error_message=None,
+            )
+        )
+        result = await db.execute(stmt)
+        if not result.rowcount:
+            # someone else took it over first
+            fresh = await _select_existing(
+                db, existing.trade_date, existing.auction_type, existing.algorithm_version
+            )
+            if fresh is None:
+                raise AuctionScanConflictError("run disappeared during takeover")
+            if fresh.worker_id == worker_id:
+                return fresh
+            raise _conflict(fresh, existing.trade_date, existing.auction_type)
+
+        # take ownership on the authoritative row, then clear children
         await clear_children(db, existing.id)
         existing.worker_id = worker_id
         existing.lease_epoch = new_lease_epoch
@@ -161,7 +260,7 @@ async def acquire_or_recover_scan_run(
         existing.started_at = current_now
         existing.error_message = None
         await db.flush()
-        return existing
+        return existing  # attempt_count unchanged: recovery, not a new attempt
 
     # failed / partial / queued -> recover as a new attempt
     await clear_children(db, existing.id)
@@ -175,65 +274,6 @@ async def acquire_or_recover_scan_run(
     existing.error_message = None
     await db.flush()
     return existing
-
-
-# ---------------------------------------------------------------------------
-# Completion / failure: owned here so no consumer invents a second terminal
-# status transition (and so publication always sees a consistent run status).
-# ---------------------------------------------------------------------------
-
-
-def _coverage_fields(coverage: Any) -> dict[str, Any]:
-    """Project the coverage OWNER's values onto run columns.
-
-    The lifecycle owner never recomputes coverage — it only projects what the
-    coverage owner already determined.
-    """
-    if coverage is None:
-        return {}
-    return dict(coverage.as_scan_run_fields())
-
-
-async def complete_scan_run(
-    db: AsyncSession,
-    run: AuctionScanRun,
-    *,
-    coverage: Any = None,
-    finished_at: datetime | None = None,
-) -> AuctionScanRun:
-    """Mark a run succeeded and project its coverage columns.
-
-    Must be called BEFORE publication: the formal publication gate reads
-    ``scan_run.status``, so publishing an unfinished run would be incoherent.
-    """
-    fields = _coverage_fields(coverage)
-    if fields:
-        run.eligible_count = fields["eligible_count"]
-        run.ready_count = fields["ready_count"]
-        run.coverage_ratio = fields["coverage_ratio"]
-        run.missing_count = fields["missing_count"]
-        run.missing_reasons = fields["missing_reasons"]
-
-    run.status = "succeeded"
-    run.finished_at = finished_at or datetime.now(UTC)
-    run.error_message = None
-    await db.flush()
-    return run
-
-
-async def mark_scan_run_failed(
-    db: AsyncSession,
-    run: AuctionScanRun,
-    *,
-    error_message: str,
-    finished_at: datetime | None = None,
-) -> AuctionScanRun:
-    """Mark a run failed on the SAME identity (never a second run row)."""
-    run.status = "failed"
-    run.finished_at = finished_at or datetime.now(UTC)
-    run.error_message = error_message[:4000]
-    await db.flush()
-    return run
 
 
 async def v32_clear_children(db: AsyncSession, scan_run_id: UUID) -> None:

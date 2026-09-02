@@ -38,6 +38,8 @@ from app.services import auction_scope_persistence_service as persistence
 from app.services.auction_scan_run_lifecycle import (
     V32_AUCTION_TYPE,
     acquire_v32_scan_run,
+)
+from app.services.auction_scan_run_terminal import (
     complete_scan_run,
     mark_scan_run_failed,
 )
@@ -55,6 +57,21 @@ class FakeResult:
         return self._value
 
 
+
+
+class _NestedTransaction:
+    """Fake savepoint: keeps the acquire code path faithful to production."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> _NestedTransaction:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
 class FakeAsyncSession:
     """Minimal async session: records side effects, materialises PKs."""
 
@@ -65,7 +82,15 @@ class FakeAsyncSession:
         self.commit_count = 0
 
     async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> FakeResult:
-        return FakeResult(self.existing)
+        """Return the authoritative row: an explicitly staged one, else the
+        run this session created (so ownership re-reads can find it)."""
+        value = self.existing
+        if value is None:
+            for obj in self.added:
+                if isinstance(obj, AuctionScanRun):
+                    value = obj
+                    break
+        return FakeResult(value)
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -75,6 +100,9 @@ class FakeAsyncSession:
         for obj in self.added:
             if getattr(obj, "id", None) is None:
                 obj.id = uuid4()
+
+    def begin_nested(self) -> _NestedTransaction:
+        return _NestedTransaction(self)
 
     async def commit(self) -> None:
         self.commit_count += 1

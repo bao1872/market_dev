@@ -91,6 +91,10 @@ from app.services.auction_scan_run_lifecycle import (  # noqa: E402,F401
     AuctionScanConflictError,
     is_lease_expired,
 )
+from app.services.auction_scan_run_terminal import (  # noqa: E402
+    finalize_scan_run,
+    mark_scan_run_failed,
+)
 
 # [P0-5 修复 2026-07-31] 生命周期扩展：支持 confirmed → continued/weakened/failed/transformed/expired
 LIFECYCLE_TERMINAL_STATES = frozenset({"failed", "transformed", "expired"})
@@ -1038,13 +1042,18 @@ async def run_auction_scan(
 
         if not instrument_ids:
             logger.warning("[AuctionScan] 无活跃 A 股 instrument")
-            run.status = "succeeded"
-            run.eligible_count = 0
-            run.ready_count = 0
-            run.coverage_ratio = 0.0
-            run.missing_count = 0
-            run.finished_at = datetime.now(UTC)
-            await db.flush()
+            # terminal state is owned by the shared lifecycle terminal owner
+            await finalize_scan_run(
+                db,
+                run,
+                status="succeeded",
+                metrics={
+                    "eligible_count": 0,
+                    "ready_count": 0,
+                    "coverage_ratio": 0.0,
+                    "missing_count": 0,
+                },
+            )
             return {
                 "run_id": run_id,
                 "status": "succeeded",
@@ -1282,14 +1291,20 @@ async def run_auction_scan(
         else:
             final_status = "succeeded"
 
-        run.status = final_status
-        run.eligible_count = eligible_count
-        run.ready_count = ready_count
-        run.coverage_ratio = round(coverage_ratio, 6)
-        run.missing_count = eligible_count - valid_count
-        run.missing_reasons = dict(missing_reasons)
-        run.finished_at = datetime.now(UTC)
-        await db.flush()
+        # metrics are computed HERE (legacy business logic) and only PROJECTED
+        # by the shared terminal owner, which never recomputes them.
+        await finalize_scan_run(
+            db,
+            run,
+            status=final_status,
+            metrics={
+                "eligible_count": eligible_count,
+                "ready_count": ready_count,
+                "coverage_ratio": round(coverage_ratio, 6),
+                "missing_count": eligible_count - valid_count,
+                "missing_reasons": dict(missing_reasons),
+            },
+        )
 
         logger.info(
             "[AuctionScan] 扫描完成: trade_date=%s run_id=%s status=%s "
@@ -1316,10 +1331,7 @@ async def run_auction_scan(
             trade_date, run_id, exc,
             exc_info=True,
         )
-        run.status = "failed"
-        run.error_message = str(exc)[:1000]
-        run.finished_at = datetime.now(UTC)
-        await db.flush()
+        await mark_scan_run_failed(db, run, error_message=str(exc)[:1000])
         return {
             "run_id": run_id,
             "status": "failed",

@@ -35,6 +35,8 @@ from app.services.auction_publication_service import (
 from app.services.auction_scan_run_lifecycle import (
     V32_AUCTION_TYPE,
     acquire_v32_scan_run,
+)
+from app.services.auction_scan_run_terminal import (
     complete_scan_run,
 )
 from app.services.auction_scope_persistence_service import (
@@ -162,6 +164,16 @@ def test_publication_gate_error_type_exists_for_callers() -> None:
 # ---------------------------------------------------------------------------
 # scan run / scope result preparation (still V3.2-owned, non-publication)
 # ---------------------------------------------------------------------------
+class _NestedTransaction:
+    """Fake savepoint so the acquire path stays faithful to production."""
+
+    async def __aenter__(self) -> _NestedTransaction:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
+
+
 class _FlushOnlySession:
     """Minimal session: no existing run, records nothing."""
 
@@ -184,6 +196,9 @@ class _FlushOnlySession:
                 import uuid
 
                 obj.id = uuid.uuid4()
+
+    def begin_nested(self) -> _NestedTransaction:
+        return _NestedTransaction()
 
 
 async def _acquired_run():

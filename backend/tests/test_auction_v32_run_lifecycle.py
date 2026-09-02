@@ -35,11 +35,28 @@ _T = date(2026, 8, 14)
 
 
 class FakeResult:
-    def __init__(self, value: Any) -> None:
+    def __init__(self, value: Any, rowcount: int = 1) -> None:
         self._value = value
+        # rowcount is what the compare-and-swap takeover inspects
+        self.rowcount = rowcount
 
     def scalar_one_or_none(self) -> Any:
         return self._value
+
+
+
+
+class _NestedTransaction:
+    """Fake savepoint: keeps the acquire code path faithful to production."""
+
+    def __init__(self, session: Any) -> None:
+        self._session = session
+
+    async def __aenter__(self) -> _NestedTransaction:
+        return self
+
+    async def __aexit__(self, *exc_info: Any) -> bool:
+        return False
 
 
 class FakeSession:
@@ -50,10 +67,13 @@ class FakeSession:
         self.added: list[Any] = []
         self.executed: list[Any] = []
         self.flush_count = 0
+        #: rows reported for UPDATE statements; 0 simulates losing the CAS race
+        self.update_rowcount = 1
 
     async def execute(self, stmt: Any, *args: Any, **kwargs: Any) -> FakeResult:
         self.executed.append(stmt)
-        return FakeResult(self.existing)
+        rowcount = self.update_rowcount
+        return FakeResult(self.existing, rowcount=rowcount)
 
     def add(self, obj: Any) -> None:
         self.added.append(obj)
@@ -63,6 +83,9 @@ class FakeSession:
         for obj in self.added:
             if getattr(obj, "id", None) is None:
                 obj.id = uuid4()
+
+    def begin_nested(self) -> _NestedTransaction:
+        return _NestedTransaction(self)
 
 
 def _run(status: str, *, attempt: int = 1, heartbeat: datetime | None = None):
