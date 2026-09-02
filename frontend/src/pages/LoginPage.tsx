@@ -59,6 +59,11 @@ export default function LoginPage() {
   const [regTerms, setRegTerms] = useState(false)
   const [registerError, setRegisterError] = useState('')
 
+  // [CHANGE-20260902] 三个密码输入框独立显示/隐藏（每个字段独立 state，不改变 value）
+  const [showLoginPassword, setShowLoginPassword] = useState(false)
+  const [showRegPassword, setShowRegPassword] = useState(false)
+  const [showRegPassword2, setShowRegPassword2] = useState(false)
+
   // 邀请码实时校验：长度 >= 8 视为格式有效（实际校验由后端完成）
   const inviteValid = regInvite.length >= 8
 
@@ -227,6 +232,12 @@ export default function LoginPage() {
     setRegInvite(e.target.value.toUpperCase())
   }
 
+  // [CHANGE-20260902] 忘记密码：当前无邮件找回 / reset token / forgot-password API，
+  // 禁止临时建设半套自助找回，也不假装发送邮件成功；明确提示联系管理员重置。
+  function handleForgotPassword() {
+    useToast.getState().show('暂不支持自助找回', '请联系管理员重置密码')
+  }
+
   return (
     <div className="login-page auth-page">
       {/* 左侧视觉区 */}
@@ -304,13 +315,25 @@ export default function LoginPage() {
               </div>
               <div className="form-row">
                 <label className="form-label">密码</label>
-                <input
-                  className="input"
-                  type="password"
-                  value={loginPassword}
-                  onChange={(e) => setLoginPassword(e.target.value)}
-                  placeholder="密码"
-                />
+                <div className="password-field">
+                  <input
+                    className="input"
+                    type={showLoginPassword ? 'text' : 'password'}
+                    value={loginPassword}
+                    onChange={(e) => setLoginPassword(e.target.value)}
+                    placeholder="密码"
+                    autoComplete="current-password"
+                  />
+                  <button
+                    type="button"
+                    className="password-toggle"
+                    aria-label={showLoginPassword ? '隐藏密码' : '显示密码'}
+                    title={showLoginPassword ? '隐藏密码' : '显示密码'}
+                    onClick={() => setShowLoginPassword((v) => !v)}
+                  >
+                    {showLoginPassword ? '隐藏' : '显示'}
+                  </button>
+                </div>
               </div>
               <div className="toggle-row">
                 <label>
@@ -322,7 +345,13 @@ export default function LoginPage() {
                   />
                   保持登录
                 </label>
-                <a className="forgot-link">忘记密码</a>
+                <button
+                  type="button"
+                  className="forgot-link"
+                  onClick={handleForgotPassword}
+                >
+                  忘记密码
+                </button>
               </div>
               <button
                 className="btn primary auth-submit"
@@ -384,7 +413,8 @@ export default function LoginPage() {
                 <h2>注册会员</h2>
                 <p className="page-desc">邀请码验证通过后自动获得30天会员</p>
                 <form onSubmit={handleRegisterSubmit} noValidate>
-                  <div className="form-grid auth-form-grid">
+                  {/* [CHANGE-20260902] 注册表单清晰单列：邮箱/密码/确认密码/邀请码 垂直对齐 */}
+                  <div className="form-grid auth-form-grid" style={{ gridTemplateColumns: '1fr', gap: '14px' }}>
                     <div className="form-row">
                       <label className="form-label">邮箱</label>
                       <input
@@ -397,23 +427,47 @@ export default function LoginPage() {
                     </div>
                     <div className="form-row">
                       <label className="form-label">密码</label>
-                      <input
-                        className="input"
-                        type="password"
-                        value={regPassword}
-                        onChange={(e) => setRegPassword(e.target.value)}
-                        placeholder="至少 8 位"
-                      />
+                      <div className="password-field">
+                        <input
+                          className="input"
+                          type={showRegPassword ? 'text' : 'password'}
+                          value={regPassword}
+                          onChange={(e) => setRegPassword(e.target.value)}
+                          placeholder="至少 8 位"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          className="password-toggle"
+                          aria-label={showRegPassword ? '隐藏密码' : '显示密码'}
+                          title={showRegPassword ? '隐藏密码' : '显示密码'}
+                          onClick={() => setShowRegPassword((v) => !v)}
+                        >
+                          {showRegPassword ? '隐藏' : '显示'}
+                        </button>
+                      </div>
                     </div>
                     <div className="form-row">
                       <label className="form-label">确认密码</label>
-                      <input
-                        className="input"
-                        type="password"
-                        value={regPassword2}
-                        onChange={(e) => setRegPassword2(e.target.value)}
-                        placeholder="再次输入密码"
-                      />
+                      <div className="password-field">
+                        <input
+                          className="input"
+                          type={showRegPassword2 ? 'text' : 'password'}
+                          value={regPassword2}
+                          onChange={(e) => setRegPassword2(e.target.value)}
+                          placeholder="再次输入密码"
+                          autoComplete="new-password"
+                        />
+                        <button
+                          type="button"
+                          className="password-toggle"
+                          aria-label={showRegPassword2 ? '隐藏密码' : '显示密码'}
+                          title={showRegPassword2 ? '隐藏密码' : '显示密码'}
+                          onClick={() => setShowRegPassword2((v) => !v)}
+                        >
+                          {showRegPassword2 ? '隐藏' : '显示'}
+                        </button>
+                      </div>
                     </div>
                     <div className="form-row full">
                       <label className="form-label">

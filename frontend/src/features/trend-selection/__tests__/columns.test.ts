@@ -248,3 +248,35 @@ test('renderStock 函数只显示名称/代码/市场，不渲染行内涨跌幅
   assert.ok(body.includes('symbol'), 'renderStock 必须显示代码')
   assert.ok(body.includes('market'), 'renderStock 必须显示市场')
 })
+
+// ===== [CHANGE-20260902] B1 排序合同：仅数值字段可排序 =====
+test('stock 列（文本/股票名称）sortable=false，filterable 保留', () => {
+  const src = readSource(COLUMNS_PATH)
+  const block = extractColumnBlock(src, 'stock')
+  assert.ok(block, '找不到 stock 列定义')
+  assert.ok(/sortable:\s*false/.test(block), 'stock 列 sortable 必须为 false（股票名称不可排序）')
+  assert.ok(/filterable:\s*true/.test(block), 'stock 列 filterable 必须保留为 true')
+})
+
+test('industry 列（文本/enum）sortable=false，filterable 保留', () => {
+  const src = readSource(COLUMNS_PATH)
+  const block = extractColumnBlock(src, 'industry')
+  assert.ok(block, '找不到 industry 列定义')
+  assert.ok(/sortable:\s*false/.test(block), 'industry 列 sortable 必须为 false（行业不可排序）')
+  assert.ok(/filterable:\s*true/.test(block), 'industry 列 filterable 必须保留为 true')
+})
+
+test('price 列（number）sortable=true，filterable=true', () => {
+  const src = readSource(COLUMNS_PATH)
+  const block = extractColumnBlock(src, 'price')
+  assert.ok(block, '找不到 price 列定义')
+  assert.ok(/sortable:\s*true/.test(block), 'price 列 sortable 必须为 true（现价可排序）')
+  assert.ok(/filterable:\s*true/.test(block), 'price 列 filterable 必须为 true')
+})
+
+test('change_pct 列（percent）sortable=true 保持不变', () => {
+  const src = readSource(COLUMNS_PATH)
+  const block = extractColumnBlock(src, 'change_pct')
+  assert.ok(block, '找不到 change_pct 列定义')
+  assert.ok(/sortable:\s*true/.test(block), 'change_pct 列 sortable 必须为 true')
+})

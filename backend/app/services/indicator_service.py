@@ -1121,6 +1121,49 @@ async def compute_all_indicators(
     })
     data["sqzmom_lb"] = _to_json_safe(_truncate_lists(sqzmom_renamed, bars))
 
+    # [BB 全局图层] - 个股详情/通用图表复用 canonical bollinger 产出 layer_id="bb"
+    # 与 watchlist_monitor 的 _adapt_watchlist_bb 共用同一 canonical BB 计算（algorithm_id="bollinger"），
+    # 不新建第二套 Bollinger 算法；字段名映射到前端 BB 渲染约定（bb_upper/bb_mid/bb_lower/bb_pos/bb_width）。
+    # [CHANGE-20260902] chart-snapshot 路径此前不产出 bb 图层（manifest 在 CHANGE-20260728-010 移除 bb），
+    #   导致前端 boll toggle 打开后无图层可渲染；此处最小接回通用 BB 图层，所有复用 chart-snapshot 的页面受益。
+    if macd_bars is not None and not macd_bars.empty:
+        try:
+            bb_canonical = await CanonicalComputationService.compute(
+                algorithm_id="bollinger",
+                instrument_id=instrument_id or uuid.UUID(int=0),
+                as_of=str(adjustment_as_of) if adjustment_as_of else str(today),
+                source_bar_hash=source_bar_hash,
+                adj_factor_hash=macd_agg.adj_factor_hash if macd_agg is not None else None,
+                bars=macd_bars,
+                length=20,
+                mult=2.0,
+            )
+            bb_result = bb_canonical.payload  # DataFrame: bb_upper/bb_mid/bb_lower/bb_pos_01/bb_width_norm
+            bb_renamed = {
+                "bb_upper": bb_result["bb_upper"],
+                "bb_mid": bb_result["bb_mid"],
+                "bb_lower": bb_result["bb_lower"],
+                "bb_pos": bb_result["bb_pos_01"],
+                "bb_width": bb_result["bb_width_norm"],
+                "time": macd_time_list,
+            }
+            layers.append({
+                "strategy_id": "bb",
+                "strategy_name": "Bollinger",
+                "layer_id": "bb",
+                "layer_name": "Bollinger",
+                "renderer": "bollinger",
+                "pane": "price",
+                "color": "#9aa7bd",
+                "direction_colored": False,
+                "fields": ["bb_upper", "bb_mid", "bb_lower", "bb_pos", "bb_width"],
+                "hover_fields": ["bb_upper", "bb_mid", "bb_lower"],
+            })
+            data["bb"] = _to_json_safe(_truncate_lists(bb_renamed, bars))
+        except Exception as exc:
+            errors["bb"] = str(exc)
+            logger.warning("BB 指标计算失败 instrument_id=%s: %s", instrument_id, exc)
+
     # [CHANGE-20260715-007 SMC view adapter] - 按需计算 SMC 指标（include_smc=False 时跳过，0 CPU）
     # SMC 是独立图层，不进入 DSA、Node 监控、Capture 或右栏 context；
     # 完全排除 FVG（不计算、不返回、不缓存、不渲染）；

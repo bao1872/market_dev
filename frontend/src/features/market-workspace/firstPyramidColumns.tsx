@@ -11,11 +11,10 @@
 //
 // 不变量：
 //   - 列 key 必须与后端 first_pyramid_flatten.FP_ALL_KEYS 完全一致（99 个 fp_ 键）
-//   - [CHANGE-20260729-004 P0-1] 全部启用 sortable/filterable，服务端分页前完成排序/筛选
+//   - [CHANGE-20260729-004 P0-1] 服务端分页前完成排序/筛选（后端 FP_QUERY_FIELD_SPECS 白名单 + JSON 路径标量子查询执行）
 //     - 排序/筛选值通过 sortValue/filterValue 取出原始值（非渲染文本）
-//     - 后端通过 FP_QUERY_FIELD_SPECS 白名单 + JSON 路径标量子查询执行
-//     - 服务端无 JSON 路径的字段（事件/计算字段）在 sortValue/filterValue 中返回 undefined，
-//       后端会拒绝并返回 422（前端 StrategyDataTable 仍允许 UI 但请求会被拒绝）
+//   - [CHANGE-20260902] 排序合同：仅 number/percent 字段 sortable=true；text/datetime/enum/boolean 一律 false。
+//     422 不是产品交互，故前端不再为非数值字段暴露排序入口（见 getFirstPyramidColumns 中 sortable 推导）。
 //   - null 值统一渲染 "—"，不得补 0 或其他占位
 //   - 方向类字段用中文标签 + A 股颜色（涨红跌绿）
 //   - 分位/BB 位置用 0~1 数值显示（后端已规范）
@@ -1129,9 +1128,8 @@ function toColumnFilterSpec(spec: {
 /**
  * 获取第一金字塔 99 列定义（唯一实现）。
  *
- * [CHANGE-20260729-004 P0-1] 全部启用 sortable/filterable：
- * - sortValue/filterValue 取出原始值（非渲染文本）供 StrategyDataTable UI 显示
- * - 实际排序/筛选由后端 /market/stocks 通过 fp_filter/fp_sort 参数执行（分页前完成）
+ * [CHANGE-20260729-004 P0-1] 排序/筛选由后端 /market/stocks 通过 fp_filter/fp_sort 参数执行（分页前完成）
+ * - sortValue/filterValue 取出原始值（非渲染文本）供 StrategyDataTable 使用
  * - 列设置面板按 FP_FIELD_GROUPS 分组显示，支持隐藏/拖拽排序
  * - 默认可见键见 DEFAULT_FP_VISIBLE_KEYS（约 20 个核心列）
  *
@@ -1141,9 +1139,10 @@ function toColumnFilterSpec(spec: {
  *   enum → 下拉单选/多选；boolean → true/false 下拉；datetime → 日期选择器；number → 数字输入
  * - 不传 specs 时回退到原有 dataType 默认操作符（向后兼容）
  *
- * 注意：服务端无 JSON 路径的字段（事件/计算字段）UI 仍允许排序/筛选点击，
- * 但请求会被后端拒绝并返回 422；这是预期行为（前端不预过滤这些字段，
- * 用户感知到字段不支持后端筛选后应改用前端列设置隐藏或换字段）。
+ * [CHANGE-20260902] 排序合同（重要）：仅 number/percent 列 sortable=true；text/datetime/enum/boolean 列
+ * sortable=false。判断依据为 COLUMN_DEFS 原始 def.dataType（非转换后的 tableDataType，后者把 percent
+ * 误映射成 number 会漏判）。422 不是产品交互，故前端不再为非数值字段暴露排序入口
+ * （见下方 getFirstPyramidColumns 中 sortable 推导）；所有列 filterable=true 保持不变。
  */
 export function getFirstPyramidColumns(
   specs?: FpFieldSpecs | null,
@@ -1165,7 +1164,12 @@ export function getFirstPyramidColumns(
       title: def.title,
       shortTitle: def.shortTitle,
       dataType: tableDataType,
-      sortable: true,
+      // [CHANGE-20260902] 排序合同：仅真正数值型字段允许排序。
+      // 使用 COLUMN_DEFS 原始 def.dataType 判断（不能用上面转换后的 tableDataType，
+      // 因为它把 percent 误映射成 number 会漏判）。
+      // 允许：number / percent；禁止：text / datetime / enum / boolean。
+      // 422 不是产品交互，因此前端在 UI 上也不暴露非数值字段的排序入口。
+      sortable: def.dataType === 'number' || def.dataType === 'percent',
       filterable: true,
       width: def.width,
       helpText: def.helpText,

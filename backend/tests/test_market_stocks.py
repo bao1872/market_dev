@@ -488,6 +488,9 @@ async def test_sort_invalid_direction_returns_422(market_stocks_client) -> None:
         "dsa_state:desc",
         "latest_event_time:asc",
         "latest_event_time:desc",
+        # [CHANGE-20260902] price 正式支持排序（最新 BarDaily.close）
+        "price:asc",
+        "price:desc",
     ],
 )
 async def test_sort_whitelist_accepted(market_stocks_client, sort_param: str) -> None:
@@ -497,6 +500,26 @@ async def test_sort_whitelist_accepted(market_stocks_client, sort_param: str) ->
         "/v1/market/stocks", params={"scope": "market", "sort": sort_param}
     )
     assert response.status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_sort_price_orders_by_latest_close(market_stocks_client) -> None:
+    """price 排序按最新 BarDaily.close 升/降序，且使用最新一根（非历史）。"""
+    client, _, _ = market_stocks_client
+    asc = await client.get(
+        "/v1/market/stocks", params={"scope": "market", "sort": "price:asc"}
+    )
+    desc = await client.get(
+        "/v1/market/stocks", params={"scope": "market", "sort": "price:desc"}
+    )
+    assert asc.status_code == 200 and desc.status_code == 200
+    asc_prices = [row["latest_price"] for row in asc.json()["rows"] if row.get("latest_price") is not None]
+    desc_prices = [row["latest_price"] for row in desc.json()["rows"] if row.get("latest_price") is not None]
+    # 升序应为非递减，降序应为非递增
+    assert all(asc_prices[i] <= asc_prices[i + 1] for i in range(len(asc_prices) - 1)), "price:asc 应非递减"
+    assert all(desc_prices[i] >= desc_prices[i + 1] for i in range(len(desc_prices) - 1)), "price:desc 应非递增"
+    # 升序与降序的 priced 子集应互为反转（顺序相反）
+    assert asc_prices == desc_prices[::-1], "price:asc 与 price:desc 应互为反转"
 
 
 # ===== P1: as_of 时间戳字段 =====

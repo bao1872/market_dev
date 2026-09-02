@@ -228,3 +228,49 @@ test('P0-5: 新行情追加自动跟随逻辑', () => {
   assert.equal(followedVp3.fromIndex, 223)
   assert.equal(followedVp3.toIndex - followedVp3.fromIndex, 30, '保持原可见根数')
 })
+
+// ===== [CHANGE-20260902] E5: 视区 limits 覆盖全局 30/250，支持 15m/1h 远超 250、月线低于 30 =====
+test('E5: 15m 60日=960 不被 MAX_VISIBLE_BARS(250) clamp', () => {
+  const vp = createDefaultViewport(4000, 960, { min: 16, max: 1000 })
+  assert.equal(vp.toIndex - vp.fromIndex, 960, '15m 60日应展示 960 根（不受 250 限制）')
+  assert.equal(vp.toIndex, 4000)
+})
+
+test('E5: 1h 60日=240 不被 clamp', () => {
+  const vp = createDefaultViewport(1200, 240, { min: 4, max: 1200 })
+  assert.equal(vp.toIndex - vp.fromIndex, 240, '1h 60日应展示 240 根')
+})
+
+test('E5: 月线 3月=3 不被 MIN_VISIBLE_BARS(30) clamp', () => {
+  const vp = createDefaultViewport(120, 3, { min: 3, max: 120 })
+  assert.equal(vp.toIndex - vp.fromIndex, 3, '月线 3月应展示 3 根（不受 30 限制）')
+})
+
+test('E5: 月线不同窗口明显不同（3月=3 / 6月=6 / 1年=12 / 3年=36）', () => {
+  const limits = { min: 3, max: 120 }
+  const v3 = createDefaultViewport(120, 3, limits)
+  const v6 = createDefaultViewport(120, 6, limits)
+  const v12 = createDefaultViewport(120, 12, limits)
+  const v36 = createDefaultViewport(120, 36, limits)
+  assert.equal(v3.toIndex - v3.fromIndex, 3)
+  assert.equal(v6.toIndex - v6.fromIndex, 6)
+  assert.equal(v12.toIndex - v12.fromIndex, 12)
+  assert.equal(v36.toIndex - v36.fromIndex, 36)
+  assert.notEqual(v3.toIndex - v3.fromIndex, v6.toIndex - v6.fromIndex)
+})
+
+test('E5: 全部 = 当前已加载全部（不套 MAX_VISIBLE_BARS）', () => {
+  const vp = createDefaultViewport(4000, 4000, { min: 16, max: 4000 })
+  assert.equal(vp.fromIndex, 0)
+  assert.equal(vp.toIndex, 4000)
+  assert.equal(vp.toIndex - vp.fromIndex, 4000)
+})
+
+test('E5: zoom 后不跳回 250（15m 960 缩放仍受 limits.max 约束）', () => {
+  const limits = { min: 16, max: 4000 }
+  const base = createDefaultViewport(4000, 960, limits)
+  const zoomed = zoomAtAnchor(base, Math.floor((base.fromIndex + base.toIndex) / 2), 1.2, 4000, limits)
+  const visible = zoomed.toIndex - zoomed.fromIndex
+  assert.ok(visible <= 1000, '缩放后可见数不超过 limits.max(1000)')
+  assert.ok(visible > 250, '缩放后不应被全局 250 限制跳回')
+})

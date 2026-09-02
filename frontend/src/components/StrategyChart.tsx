@@ -17,12 +17,66 @@ import {
   MAX_VISIBLE_BARS,
   MIN_VISIBLE_BARS,
   type ChartViewport,
+  type ViewportLimits,
   clampViewport,
   createDefaultViewport,
   panViewport,
   zoomAtAnchor,
 } from './chartViewport'
 import type { ChartLayerVisibility } from '../features/stock-research/stockResearchTypes'
+
+// [CHANGE-20260902] 各周期时间范围预设（按钮文案与实际 bar 窗口严格一致）。
+// 数据加载量见 BARS_COUNT_BY_TIMEFRAME（15m=4000 / 1h=1200 / 1d=250 / 1w=260 / 1mo=120），
+// 因此以下窗口在已加载数据内均可展示；'all' = 当前已加载全部。
+const RANGE_PRESETS: Record<string, { label: string; bars: number | 'all' }[]> = {
+  '15m': [
+    { label: '1日', bars: 16 },
+    { label: '5日', bars: 80 },
+    { label: '20日', bars: 320 },
+    { label: '60日', bars: 960 },
+    { label: '全部', bars: 'all' },
+  ],
+  '1h': [
+    { label: '1日', bars: 4 },
+    { label: '5日', bars: 20 },
+    { label: '20日', bars: 80 },
+    { label: '60日', bars: 240 },
+    { label: '全部', bars: 'all' },
+  ],
+  '1d': [
+    { label: '1月', bars: 22 },
+    { label: '3月', bars: 66 },
+    { label: '6月', bars: 132 },
+    { label: '1年', bars: 250 },
+    { label: '全部', bars: 'all' },
+  ],
+  '1w': [
+    { label: '1月', bars: 4 },
+    { label: '3月', bars: 13 },
+    { label: '6月', bars: 26 },
+    { label: '1年', bars: 52 },
+    { label: '全部', bars: 'all' },
+  ],
+  '1mo': [
+    { label: '3月', bars: 3 },
+    { label: '6月', bars: 6 },
+    { label: '1年', bars: 12 },
+    { label: '3年', bars: 36 },
+    { label: '全部', bars: 'all' },
+  ],
+}
+
+// [CHANGE-20260902] 各周期视区上下限（覆盖全局 MIN/MAX_VISIBLE_BARS）：
+// - 15m/1h 需要可见数远超 250（15m 60日=960）；
+// - 月线/周线可低于 30（月线 3月=3、周线 1月=4）。
+// 不全局改 30/250，避免影响日线等默认缩放体验。
+const VIEWPORT_LIMITS: Record<string, ViewportLimits> = {
+  '15m': { min: 16, max: 4000 },
+  '1h': { min: 4, max: 1200 },
+  '1d': { min: 22, max: 250 },
+  '1w': { min: 4, max: 260 },
+  '1mo': { min: 3, max: 120 },
+}
 import {
   getIndicatorViewLayerPreset,
 } from '../features/stock-research/stockResearchTypes'
@@ -2839,22 +2893,25 @@ export function StrategyChart({
     return addIndicators(bars.slice(-win))
   }, [bars, timeframe])
 
+  // [CHANGE-20260902] 当前周期视区上下限（传入 chartViewport helper，避免 15m/月线被全局 30/250 clamp）
+  const viewportLimits = VIEWPORT_LIMITS[timeframe]
+
   // [chartViewport] - 当前 viewport：优先使用父组件受控值，否则用 displayBars 构造末尾视区
   //   切换周期时父组件清空 viewportProp，自动回退到默认末尾视区（advice.md 第三节问题 3）
   const viewport: ChartViewport = useMemo(() => {
-    if (viewportProp) return clampViewport(viewportProp, calc.length)
+    if (viewportProp) return clampViewport(viewportProp, calc.length, viewportLimits)
     const visibleCount = clamp(displayBars, MIN_VISIBLE_BARS, Math.min(MAX_VISIBLE_BARS, calc.length))
-    return createDefaultViewport(calc.length, visibleCount)
-  }, [viewportProp, calc.length, displayBars])
+    return createDefaultViewport(calc.length, visibleCount, viewportLimits)
+  }, [viewportProp, calc.length, displayBars, viewportLimits])
 
   // [chartViewport] - 当 viewportProp 失效（超出 calc 范围）时通知父组件 clamp 后的值
   useEffect(() => {
     if (!onViewportChange || !viewportProp || !calc.length) return
-    const clamped = clampViewport(viewportProp, calc.length)
+    const clamped = clampViewport(viewportProp, calc.length, viewportLimits)
     if (clamped.fromIndex !== viewportProp.fromIndex || clamped.toIndex !== viewportProp.toIndex) {
       onViewportChange(clamped)
     }
-  }, [viewportProp, calc.length, onViewportChange])
+  }, [viewportProp, calc.length, onViewportChange, viewportLimits])
 
   // [chartViewport] - 新行情追加自动跟随：calc.length 增长且用户位于最右端时，
   //   自动平移到最新 bar 并保持原可见根数；用户已主动平移到历史区域时不强制拉回。
@@ -3090,12 +3147,12 @@ export function StrategyChart({
       if (e.shiftKey) {
         // Shift+滚轮：水平平移（deltaY > 0 向右/未来，< 0 向左/过去）
         const deltaBars = e.deltaY > 0 ? 5 : -5
-        const newVp = panViewport(viewport, deltaBars, calc.length)
+        const newVp = panViewport(viewport, deltaBars, calc.length, viewportLimits)
         if (onViewportChange) onViewportChange(newVp)
       } else {
         // 普通滚轮：缩放（deltaY < 0 放大，> 0 缩小）
         const zoom = e.deltaY < 0 ? 1.15 : 1 / 1.15
-        const newVp = zoomAtAnchor(viewport, anchorIndex, zoom, calc.length)
+        const newVp = zoomAtAnchor(viewport, anchorIndex, zoom, calc.length, viewportLimits)
         if (onViewportChange) onViewportChange(newVp)
       }
     }
@@ -3129,7 +3186,7 @@ export function StrategyChart({
       const deltaBars = -Math.round(deltaPx / step)
       // 点击阈值：移动超过 4px 视为拖动
       if (Math.abs(deltaPx) > 4) dragMovedRef.current = true
-      const newVp = panViewport(dragRef.current.startViewport, deltaBars, calc.length)
+      const newVp = panViewport(dragRef.current.startViewport, deltaBars, calc.length, viewportLimits)
       if (onViewportChange) onViewportChange(newVp)
     }
 
@@ -3153,7 +3210,7 @@ export function StrategyChart({
     //   [2026-07-21 反馈] 飞书舞台传 defaultVisibleBars=90 时，双击恢复也用 90
     const handleDoubleClick = () => {
       if (onViewportChange) {
-        onViewportChange(createDefaultViewport(calc.length, initialVisibleBars))
+        onViewportChange(createDefaultViewport(calc.length, initialVisibleBars, viewportLimits))
       }
     }
 
@@ -3177,7 +3234,7 @@ export function StrategyChart({
         if (ratio > 1.1 || ratio < 0.9) {
           const zoom = ratio > 1 ? 1.1 : 1 / 1.1
           const anchor = Math.floor((viewport.fromIndex + viewport.toIndex) / 2)
-          const newVp = zoomAtAnchor(pinchRef.current.startViewport, anchor, zoom, calc.length)
+          const newVp = zoomAtAnchor(pinchRef.current.startViewport, anchor, zoom, calc.length, viewportLimits)
           if (onViewportChange) onViewportChange(newVp)
           pinchRef.current.startDist = dist
           pinchRef.current.startViewport = newVp
@@ -3215,7 +3272,7 @@ export function StrategyChart({
       canvas.removeEventListener('touchmove', handleTouchMove)
       canvas.removeEventListener('touchend', handleTouchEnd)
     }
-  }, [draw, calc.length, viewport, onViewportChange, display.length])
+  }, [draw, calc.length, viewport, onViewportChange, display.length, initialVisibleBars, viewportLimits])
 
   // CHANGE-20260716-006: ResizeObserver 改为下一帧立即 draw + trailing draw
   // 旧 120ms 纯防抖在快速切周期/全屏时中间宽度绘制导致右边界错位
@@ -3266,7 +3323,7 @@ export function StrategyChart({
   const zoomIn = () => {
     const anchor = Math.floor((viewport.fromIndex + viewport.toIndex) / 2)
     if (onViewportChange) {
-      onViewportChange(zoomAtAnchor(viewport, anchor, 1.2, calc.length))
+      onViewportChange(zoomAtAnchor(viewport, anchor, 1.2, calc.length, viewportLimits))
     } else {
       setDisplayBars(n => Math.max(MIN_VISIBLE_BARS, n - 15))
     }
@@ -3274,14 +3331,14 @@ export function StrategyChart({
   const zoomOut = () => {
     const anchor = Math.floor((viewport.fromIndex + viewport.toIndex) / 2)
     if (onViewportChange) {
-      onViewportChange(zoomAtAnchor(viewport, anchor, 1 / 1.2, calc.length))
+      onViewportChange(zoomAtAnchor(viewport, anchor, 1 / 1.2, calc.length, viewportLimits))
     } else {
       setDisplayBars(n => Math.min(MAX_VISIBLE_BARS, n + 15))
     }
   }
   const resetZoom = () => {
     if (onViewportChange) {
-      onViewportChange(createDefaultViewport(calc.length, initialVisibleBars))
+      onViewportChange(createDefaultViewport(calc.length, initialVisibleBars, viewportLimits))
     } else {
       setDisplayBars(initialVisibleBars)
     }
@@ -3339,23 +3396,25 @@ export function StrategyChart({
         <button className="btn small" onClick={zoomOut} title="缩小">−</button>
         <button className="btn small" onClick={resetZoom} title="复位">复位</button>
         <button className="btn small" onClick={zoomIn} title="放大">+</button>
-        {/* [Task 16] 范围按钮：日线 1月/3月/6月/1年/全部；15m/1h 1日/5日/20日/60日 */}
+        {/* [CHANGE-20260902] 时间范围按钮：timeframe-specific range preset（RANGE_PRESETS），
+            按钮名称与实际 bar 窗口严格一致；15m/1h 可见数远超 250、月线可低于 30，
+            故 createDefaultViewport 传入 per-timeframe limits（不过全局 clamp）。
+            '全部' = 当前已加载全部数据（不套 MAX_VISIBLE_BARS）。 */}
         <div className="tv-range-group">
-          {(timeframe === '1d' || timeframe === '1w' || timeframe === '1mo'
-            ? [{ label: '1月', bars: 22 }, { label: '3月', bars: 66 }, { label: '6月', bars: 132 }, { label: '1年', bars: 250 }, { label: '全部', bars: MAX_VISIBLE_BARS }]
-            : [{ label: '1日', bars: 24 }, { label: '5日', bars: 120 }, { label: '20日', bars: 240 }, { label: '60日', bars: 240 }]
-          ).map(opt => {
+          {(RANGE_PRESETS[timeframe] ?? []).map((opt) => {
+            const total = calc.length
+            const targetVisible = opt.bars === 'all' ? total : Math.min(opt.bars, total)
             const visibleCount = viewport.toIndex - viewport.fromIndex
-            const targetVisible = Math.min(opt.bars, calc.length, MAX_VISIBLE_BARS)
-            const isActive = viewport.toIndex === calc.length && visibleCount === targetVisible
+            const atEnd = viewport.toIndex === total
+            const isActive = atEnd && visibleCount === targetVisible
             return (
               <button
                 key={opt.label}
                 className={clsx('tv-range-btn', isActive && 'active')}
                 onClick={() => {
-                  const visible = Math.min(opt.bars, calc.length, MAX_VISIBLE_BARS)
+                  const visible = opt.bars === 'all' ? total : Math.min(opt.bars, total)
                   if (onViewportChange) {
-                    onViewportChange(createDefaultViewport(calc.length, Math.max(MIN_VISIBLE_BARS, visible)))
+                    onViewportChange(createDefaultViewport(total, visible, viewportLimits))
                   }
                 }}
               >

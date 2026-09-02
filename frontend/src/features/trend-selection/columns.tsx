@@ -138,7 +138,8 @@ export function getTrendSelectionColumns(
       key: 'stock',
       title: '股票',
       dataType: 'text',
-      sortable: true,
+      // [CHANGE-20260902] 文本/股票名称不允许排序（仅数值字段可排序），筛选保留
+      sortable: false,
       filterable: true,
       width: inlineWatchlistToggle ? 170 : 150,
       sortValue: (row) => getStockDisplay(row).name,
@@ -192,7 +193,8 @@ export function getTrendSelectionColumns(
       title: '行业',
       shortTitle: '行业',
       dataType: 'text',
-      sortable: true,
+      // [CHANGE-20260902] 行业为文本/enum 类字段，不允许排序；筛选保留
+      sortable: false,
       filterable: true,
       width: 90,
       sortValue: (row) => row.industry ?? '',

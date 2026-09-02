@@ -3,6 +3,7 @@
 // 必需能力：三态排序、逐列筛选、服务端分页、固定表头首列、列设置、空态/错误态/过期态
 // 所有用户端和管理员端数据表必须使用同一表格组件
 import { useState, useMemo, useCallback, useEffect, useRef, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { TablePresetMenu } from './TablePresetMenu'
@@ -748,6 +749,76 @@ function ColumnManager({
   )
 }
 
+// [CHANGE-20260902] 排序合同统一校验（实现见 ./sortGuard，纯函数便于单测）
+import { resolveValidSort } from './sortGuard'
+
+// [CHANGE-20260902] 表头 ? 帮助 tooltip：Portal 到 document.body，避免被 table-scroll/table-shell 的
+// overflow 裁剪（单纯加 z-index 无效）。position: fixed 基于触发元素的 getBoundingClientRect；
+// 靠近视口顶部时显示在下方；左右边缘 clamp 不跑出 viewport；hover 与键盘 focus 均可触发，leave/blur 关闭。
+const HELP_TOOLTIP_WIDTH = 260
+function ColumnHelpTooltip({ text, title }: { text: string; title?: string }) {
+  const triggerRef = useRef<HTMLSpanElement>(null)
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number; placement: 'top' | 'bottom' }>({
+    top: 0,
+    left: 0,
+    placement: 'top',
+  })
+
+  const show = () => {
+    const el = triggerRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    let left = rect.left + rect.width / 2 - HELP_TOOLTIP_WIDTH / 2
+    left = Math.max(8, Math.min(left, window.innerWidth - HELP_TOOLTIP_WIDTH - 8))
+    const placement: 'top' | 'bottom' = rect.top < 140 ? 'bottom' : 'top'
+    const top = placement === 'top' ? rect.top : rect.bottom
+    setPos({ top, left, placement })
+    setOpen(true)
+  }
+
+  return (
+    <>
+      <span
+        ref={triggerRef}
+        className="th-help"
+        tabIndex={0}
+        role="button"
+        aria-label={title ? `${title} 说明` : '列说明'}
+        onMouseEnter={show}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={show}
+        onBlur={() => setOpen(false)}
+      >
+        ?
+      </span>
+      {open &&
+        createPortal(
+          <div
+            className={`th-help-portal ${pos.placement === 'bottom' ? 'th-help-bottom' : 'th-help-top'}`}
+            style={{
+              position: 'fixed',
+              top: pos.top,
+              left: pos.left,
+              width: HELP_TOOLTIP_WIDTH,
+              zIndex: 9999,
+              transform:
+                pos.placement === 'top'
+                  ? 'translateY(calc(-100% - 8px))'
+                  : 'translateY(8px)',
+            }}
+            onMouseEnter={() => setOpen(true)}
+            onMouseLeave={() => setOpen(false)}
+          >
+            {title && <div className="th-help-title">{title}</div>}
+            <div className="th-help-body">{text}</div>
+          </div>,
+          document.body,
+        )}
+    </>
+  )
+}
+
 export function StrategyDataTable<Row extends Record<string, unknown>>(
   props: DataTableProps<Row>,
 ) {
@@ -838,9 +909,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
       urlHadStateRef.current = true
     }
     if (state.sort) {
-      const idx = columns.findIndex((c) => c.key === state.sort!.key)
-      if (idx >= 0) {
-        setSortColumn(idx)
+      // [CHANGE-20260902] 统一校验：非法（非 sortable）的排序键忽略，不发给 API
+      const validIdx = resolveValidSort(state.sort, columns)
+      if (validIdx >= 0) {
+        setSortColumn(validIdx)
         setSortDirection(state.sort.direction)
       }
     }
@@ -1050,8 +1122,9 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     setGlobalQuery(config.keyword ?? '')
     if (onKeywordChange) onKeywordChange(config.keyword ?? '')
     if (config.sort) {
-      const idx = columns.findIndex((c) => c.key === config.sort!.key)
-      setSortColumn(idx >= 0 ? idx : null)
+      // [CHANGE-20260902] 统一校验：非法（非 sortable）的排序键忽略，不发给 API
+      const validIdx = resolveValidSort(config.sort, columns)
+      setSortColumn(validIdx >= 0 ? validIdx : null)
       setSortDirection(config.sort.direction)
     } else {
       setSortColumn(null)
@@ -1471,10 +1544,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                         </span>
                       )}
                       {col.helpText && (
-                        <span className="th-help" title={col.helpText}>
-                          ?
-                          <span className="th-help-tooltip">{col.helpText}</span>
-                        </span>
+                        <ColumnHelpTooltip text={col.helpText} title={col.title} />
                       )}
                       {col.filterable && (
                         <button

@@ -91,7 +91,10 @@ from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 logger = logging.getLogger("market_stocks_service")
 
 # 排序字段白名单（防止 SQL 注入）
-_SORTABLE_FIELDS = {"name", "symbol", "change_pct", "dsa_state", "latest_event_time"}
+# [CHANGE-20260902] 增加 "price"：现价（最新一根 BarDaily.close）正式支持排序，
+# 与前端 /market 现价列（dataType=number）一致；其余非数值字段（name/symbol 为文本，
+# 仅历史兼容保留）不暴露为 UI 排序入口。
+_SORTABLE_FIELDS = {"name", "symbol", "change_pct", "dsa_state", "latest_event_time", "price"}
 _SORT_DIRECTIONS = {"asc", "desc"}
 
 # [CHANGE-20260729-004 P0-1] fp_filter/fp_sort 操作符合法值（保留供校验引用）
@@ -220,7 +223,7 @@ def _build_search_conditions(keyword: str | None) -> tuple[list[ColumnElement[bo
 def _parse_sort(sort: str | None) -> SortSpec | None:
     """解析 sort=field:direction 参数，返回 SortSpec 或 None。
 
-    支持字段：name, symbol, change_pct, dsa_state, latest_event_time。
+    支持字段：name, symbol, change_pct, dsa_state, latest_event_time, price。
     方向：asc, desc（默认 asc）。
     非法字段或方向抛出 ValueError（由 API 层转为 422）。
     """
@@ -242,10 +245,22 @@ def _parse_sort(sort: str | None) -> SortSpec | None:
 
 
 def _build_sort_expression(field: str) -> ColumnElement:
-    """构建排序标量表达式（用于 change_pct/dsa_state/latest_event_time）。
+    """构建排序标量表达式（用于 change_pct/dsa_state/latest_event_time/price）。
 
     name/symbol 直接使用 Instrument 列，不经过此函数。
+
+    price：与列表页 latest_price 同一语义——取该 instrument 最新一根 BarDaily.close
+    （与 Query 3 的 price_map 口径一致，禁止读取旧 DSA payload / 第二套 price 来源）。
     """
+    if field == "price":
+        return (
+            select(BarDaily.close)
+            .where(BarDaily.instrument_id == Instrument.id)
+            .order_by(BarDaily.trade_date.desc())
+            .limit(1)
+            .scalar_subquery()
+        )
+
     if field == "change_pct":
         latest_close = (
             select(BarDaily.close)
