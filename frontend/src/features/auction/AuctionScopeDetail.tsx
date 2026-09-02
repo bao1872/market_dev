@@ -160,7 +160,6 @@ export function AuctionScopeDetail({ detail, loading, error }: Props) {
           <table className={styles.scopeTable}>
             <thead>
               <tr>
-                <th>个股</th>
                 <th className={styles.numHead}>Gap</th>
                 <th className={styles.numHead}>EW贡献</th>
                 <th className={styles.numHead}>AW贡献</th>
@@ -171,7 +170,6 @@ export function AuctionScopeDetail({ detail, loading, error }: Props) {
             <tbody>
               {detail.member_attribution.members.map((m) => (
                 <tr key={m.instrument_id}>
-                  <td>{m.instrument_id}</td>
                   <td className={`${styles.numCell} ${gapTone(m.gap_ratio)}`}>
                     {formatRatioAsPercent(m.gap_ratio)}
                   </td>

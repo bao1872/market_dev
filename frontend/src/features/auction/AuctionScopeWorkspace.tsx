@@ -8,6 +8,7 @@ import {
   useAuctionScopes,
   useAuctionScopeDetail,
   useAuctionScopeDates,
+  extractAuctionError,
 } from './api'
 import {
   AUCTION_PRESETS,
@@ -36,11 +37,12 @@ export function AuctionScopeWorkspace() {
     state.tradeDate,
   )
   const { data: dates } = useAuctionScopeDates()
-  const { data: detail, isLoading: detailLoading } = useAuctionScopeDetail(
-    state.family,
-    state.scope,
-    state.tradeDate,
-  )
+  const {
+    data: detail,
+    isLoading: detailLoading,
+    isError: detailIsError,
+    error: detailError,
+  } = useAuctionScopeDetail(state.family, state.scope, state.tradeDate)
 
   const rows = useMemo(() => toScopeRows(list), [list])
   const view = useMemo(
@@ -166,7 +168,7 @@ export function AuctionScopeWorkspace() {
             <div className={styles.stateBox}>
               <span className={styles.stateTitle}>无法加载板块列表</span>
               <span className={styles.stateDesc}>
-                {(error as Error)?.message ?? '未知错误'}
+                {extractAuctionError(error).message}
               </span>
             </div>
           )}
@@ -210,8 +212,8 @@ export function AuctionScopeWorkspace() {
             detail={detail}
             loading={detailLoading && !!state.scope}
             error={
-              state.scope && !detail && !detailLoading
-                ? '未找到该板块的已发布结果'
+              state.scope && detailIsError
+                ? extractAuctionError(detailError).message
                 : null
             }
           />

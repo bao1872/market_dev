@@ -1,7 +1,8 @@
 // [AuctionTypes] - 描述: 竞价分析模块 TypeScript 类型定义
 // 对应后端 schemas/auction.py（字段命名与后端 JSON 序列化保持一致：snake_case）
-// 规则：前端不重算业务结论，只承载结构化展示；接口必须显示 trade_date、algorithm_version、
-// publication_id、source run IDs、coverage 和 reason_codes
+// 规则：前端不重算业务结论，只承载结构化展示；
+// legacy 接口仍暴露 trade_date/algorithm_version/publication_id/source run IDs/coverage/reason_codes；
+// V3.2 scope workspace 正常 DTO 隐藏技术 ID，技术信息仅留 diagnostics。
 //
 // 后端用户侧 GET 接口权限为 require_authenticated（任何登录用户可读），不触发计算
 

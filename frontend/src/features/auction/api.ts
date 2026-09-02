@@ -5,7 +5,8 @@
 // 规则：
 // - 用户侧只读 DB，不触发计算（POST /admin/auction/scan 与 /admin/auction/anchors 由管理员后台触发）
 // - 默认查询当日（上海业务日）数据，trade_date 可显式指定
-// - 接口必须返回 trade_date、algorithm_version、publication_id、source run IDs、coverage 和 reason_codes
+// - legacy 用户侧 GET 接口（/v1/auction 等）仍返回 publication_id、source run IDs 等技术 lineage 字段
+// - V3.2 scope workspace（/v1/auction/scopes*）正常 DTO 隐藏技术 ID，技术信息仅留 diagnostics
 // - 前端不得重算业务结论
 // - 404/422/500 由调用方通过 extractAuctionError 解析明确原因与 request_id
 import { useQuery } from '@tanstack/react-query'
