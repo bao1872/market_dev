@@ -206,6 +206,133 @@ async def _find_run_by_trade_date(
     return result.scalar_one_or_none()
 
 
+# [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 consumer migration] CURRENT 第一金字塔
+# Core run 解析的 formal Review 交易日回看窗口（传给
+# list_formally_published_review_dates 的 limit）。
+_CURRENT_CORE_REVIEW_LOOKBACK = 200
+
+
+async def _resolve_current_core_run(
+    session: AsyncSession,
+    as_of: date | None = None,
+) -> StockFeatureSnapshotRun | None:
+    """解析 CURRENT 第一金字塔的 canonical CoreRun（formal Review 血统）。
+
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 consumer migration]
+    AfterClose 自 ``60c5d267``（2026-08-27 05:28 +0800）起不再推进
+    ``stock_core`` FactorPublication，该 pointer 只保留 **LEGACY compatibility**。
+    ``stock_context`` 若继续以其为 CURRENT authority，第一金字塔会被永久 pin 在
+    最后一次旧架构发布日（生产证据：2026-08-26 / run ``ca5c3dd2``）。
+
+    CURRENT lineage（PRD31：Core Compute Once → Core Ready → Review(X) → History）：
+
+        formal MarketReview publication
+          → MarketReviewRun
+          → MarketReviewRun.source_core_run_id
+          → 校验通过后得到 canonical StockFeatureSnapshotRun
+
+    复用 formal Review read owner，**不复制其 publication 判定条件**：
+      - ``list_formally_published_review_dates``：FORMAL REVIEW READ OWNER
+      - ``get_published_review_run_id``：LIVE POINTER RESOLVER
+      - ``is_formally_published_review_run``：唯一布尔判定 owner
+
+    Args:
+        session: 异步 DB 会话
+        as_of: 截止日期（point-in-time，含当天）。None 表示取最新正式 Review。
+
+    Returns:
+        通过全部 lineage 校验的 ``StockFeatureSnapshotRun``；
+        任一环节不成立返回 ``None``（fail-closed）。
+        **禁止**回退到 arbitrary latest succeeded Core，也**禁止**读
+        ``stock_core`` FactorPublication 作为 CURRENT authority。
+    """
+    from app.models.market_review import MarketReviewRun
+    from app.services.review_publication_service import (
+        get_published_review_run_id,
+        is_formally_published_review_run,
+        list_formally_published_review_dates,
+    )
+
+    formal_dates = await list_formally_published_review_dates(
+        session, limit=_CURRENT_CORE_REVIEW_LOOKBACK,
+    )
+    if as_of is not None:
+        formal_dates = [d for d in formal_dates if d <= as_of]
+    if not formal_dates:
+        logger.info(
+            "[first-pyramid] 无正式发布 Review，CURRENT Core 解析失败 as_of=%s", as_of,
+        )
+        return None
+
+    # formal_dates 为降序，首项即 point-in-time 下最新的正式 Review 交易日
+    review_trade_date = formal_dates[0]
+
+    review_run_id = await get_published_review_run_id(session, review_trade_date)
+    if review_run_id is None:
+        logger.warning(
+            "[first-pyramid] 正式 Review 交易日 %s 无 live pointer，CURRENT Core 解析失败",
+            review_trade_date,
+        )
+        return None
+
+    review_run = await session.get(MarketReviewRun, review_run_id)
+    if review_run is None:
+        logger.error(
+            "[first-pyramid] Review pointer %s 指向不存在的 run=%s，fail-closed",
+            review_trade_date, review_run_id,
+        )
+        return None
+
+    if not is_formally_published_review_run(
+        review_run, review_run_id, expected_trade_date=review_trade_date,
+    ):
+        logger.error(
+            "[first-pyramid] run=%s 不满足正式发布合同（status=%s, published_at=%s, "
+            "run.trade_date=%s, expected=%s），fail-closed",
+            review_run_id, review_run.status, review_run.published_at,
+            review_run.trade_date, review_trade_date,
+        )
+        return None
+
+    core_run_id = review_run.source_core_run_id
+    if core_run_id is None:
+        logger.error(
+            "[first-pyramid] Review run=%s 无 source_core_run_id，fail-closed", review_run_id,
+        )
+        return None
+
+    core_run = await session.get(StockFeatureSnapshotRun, core_run_id)
+    if core_run is None:
+        logger.error(
+            "[first-pyramid] Review run=%s 的 source_core_run_id=%s 不存在，fail-closed",
+            review_run_id, core_run_id,
+        )
+        return None
+
+    if core_run.status != STATUS_SUCCEEDED:
+        logger.error(
+            "[first-pyramid] Core run=%s status=%s != succeeded，fail-closed",
+            core_run_id, core_run.status,
+        )
+        return None
+
+    if core_run.trade_date != review_run.trade_date:
+        logger.error(
+            "[first-pyramid] Core run=%s trade_date=%s 与 Review trade_date=%s 不一致，fail-closed",
+            core_run_id, core_run.trade_date, review_run.trade_date,
+        )
+        return None
+
+    if core_run.schema_version != _SCHEMA_VERSION:
+        logger.error(
+            "[first-pyramid] Core run=%s schema_version=%s != %s，fail-closed",
+            core_run_id, core_run.schema_version, _SCHEMA_VERSION,
+        )
+        return None
+
+    return core_run
+
+
 async def _get_snapshot_for_instrument(
     session: AsyncSession,
     instrument_id: UUID,
@@ -726,6 +853,12 @@ async def get_first_pyramid(
       status=succeeded
     - 不再读 review-core 的 chipConsensus（与列表 API 同口径）
 
+    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT Core run 解析走 formal Review
+    血统（见 ``_resolve_current_core_run``）：
+      formal MarketReview publication → MarketReviewRun.source_core_run_id → CoreRun
+    ``stock_core`` FactorPublication 只是 LEGACY compatibility，不再是 CURRENT authority。
+    血统任一环校验失败 → fail-closed 返回 None，落到下方 bars 实时计算分支。
+
     权限：require_active_subscription（admin 豁免，member 需有效订阅）。
     数据：只读，从最新已发布 snapshot 或实时 bars 计算，不写库。
     """
@@ -744,10 +877,12 @@ async def get_first_pyramid(
     instrument = await _get_instrument_by_symbol(db, symbol)
 
     # 优先从已发布 snapshot 读取（如果 summary_payload 含 first_pyramid）
-    if as_of is not None:
-        run = await _find_run_by_trade_date(db, as_of)
-    else:
-        run = await _find_latest_succeeded_run(db)
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT 第一金字塔走 formal Review 血统：
+    #   formal Review → source_core_run_id → CoreRun → exact snapshot。
+    # 不再使用 _find_latest_succeeded_run / _find_run_by_trade_date——两者以
+    # stock_core FactorPublication 为 authority，该 pointer 自 2026-08-27 起不再推进，
+    # 会把第一金字塔永久 pin 在 2026-08-26。
+    run = await _resolve_current_core_run(db, as_of=as_of)
     if run is not None:
         snapshot, _ = await _get_snapshot_for_instrument(db, instrument.id, run)
         if snapshot is not None:
