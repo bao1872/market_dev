@@ -1139,12 +1139,13 @@ async def compute_all_indicators(
                 mult=2.0,
             )
             bb_result = bb_canonical.payload  # DataFrame: bb_upper/bb_mid/bb_lower/bb_pos_01/bb_width_norm
+            # 注意：必须转 np.ndarray（.values），_to_json_safe 不处理 pandas.Series，否则响应序列化 500
             bb_renamed = {
-                "bb_upper": bb_result["bb_upper"],
-                "bb_mid": bb_result["bb_mid"],
-                "bb_lower": bb_result["bb_lower"],
-                "bb_pos": bb_result["bb_pos_01"],
-                "bb_width": bb_result["bb_width_norm"],
+                "bb_upper": bb_result["bb_upper"].values,
+                "bb_mid": bb_result["bb_mid"].values,
+                "bb_lower": bb_result["bb_lower"].values,
+                "bb_pos": bb_result["bb_pos_01"].values,
+                "bb_width": bb_result["bb_width_norm"].values,
                 "time": macd_time_list,
             }
             layers.append({
