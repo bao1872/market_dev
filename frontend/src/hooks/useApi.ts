@@ -559,6 +559,95 @@ export function useTestNotificationChannel() {
   })
 }
 
+// ============================================================================
+// 管理员代管用户通知渠道（per-user Feishu）
+// 与用户自助 hook 的区别：作用域是管理员指定的 target user_id，
+// 后端是同一套 notification_service 的薄包装，target_config 由后端统一脱敏。
+// ============================================================================
+
+/** 管理员查看指定用户的通知渠道列表 */
+export function useAdminUserChannels(userId: string | null, enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['admin', 'users', userId, 'notification-channels'],
+    queryFn: () => api.adminListUserChannels(userId as string),
+    staleTime: STALE_PLANS,
+    enabled: enabled && !!userId,
+  })
+}
+
+/** 管理员为指定用户创建通知渠道 */
+export function useAdminCreateUserChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params: { userId: string; data: CreateChannelRequest }) =>
+      api.adminCreateUserChannel(params.userId, params.data),
+    onSuccess: (_data, params) => {
+      queryClient.invalidateQueries({
+        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
+      })
+    },
+  })
+}
+
+/** 管理员更新指定用户的通知渠道 */
+export function useAdminUpdateUserChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params: {
+      userId: string
+      channelId: string
+      data: { display_name?: string; target_config?: Record<string, unknown> }
+    }) => api.adminUpdateUserChannel(params.userId, params.channelId, params.data),
+    onSuccess: (_data, params) => {
+      queryClient.invalidateQueries({
+        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
+      })
+    },
+  })
+}
+
+/** 管理员删除指定用户的通知渠道 */
+export function useAdminDeleteUserChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params: { userId: string; channelId: string }) =>
+      api.adminDeleteUserChannel(params.userId, params.channelId),
+    onSuccess: (_data, params) => {
+      queryClient.invalidateQueries({
+        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
+      })
+    },
+  })
+}
+
+/** 管理员验证指定用户的通知渠道 */
+export function useAdminVerifyUserChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params: { userId: string; channelId: string }) =>
+      api.adminVerifyUserChannel(params.userId, params.channelId),
+    onSuccess: (_data, params) => {
+      queryClient.invalidateQueries({
+        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
+      })
+    },
+  })
+}
+
+/** 管理员对指定用户的通知渠道发送测试消息 */
+export function useAdminTestUserChannel() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: (params: { userId: string; channelId: string }) =>
+      api.adminTestUserChannel(params.userId, params.channelId),
+    onSuccess: (_data, params) => {
+      queryClient.invalidateQueries({
+        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
+      })
+    },
+  })
+}
+
 /** 最近事件实测变更 */
 export function useTestNotificationChannelLatestEvent() {
   return useMutation({
@@ -1028,6 +1117,19 @@ export function useAdminDisableUser() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
+    },
+  })
+}
+
+/** 管理员重置用户密码（设置新密码；不读取、不返回旧密码） */
+export function useAdminResetUserPassword() {
+  const queryClient = useQueryClient()
+  return useMutation({
+    mutationFn: ({ userId, newPassword }: { userId: string; newPassword: string }) =>
+      api.adminResetUserPassword(userId, { new_password: newPassword }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
+      queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs'] })
     },
   })
 }

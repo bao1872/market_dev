@@ -28,6 +28,9 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
+
+# [密码重置] canonical 密码哈希 owner（bcrypt），禁止在本模块另写一套哈希实现
+from app.core.security import get_password_hash
 from app.models.access_audit_log import AccessAuditLog
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.subscription import Subscription
@@ -100,11 +103,23 @@ class ChangeRoleRequest(BaseModel):
     role: str = Field(..., description="目标角色：admin/member")
 
 
+class ResetPasswordRequest(BaseModel):
+    """管理员重置用户密码请求。
+
+    密码长度约束与注册（``UserRegister.password``）保持一致：8-128 字符。
+    "确认新密码"只在前端校验，不作为本请求字段，避免在网络层多传一份明文。
+    """
+
+    new_password: str = Field(
+        ..., min_length=8, max_length=128, description="新密码（8-128 字符）"
+    )
+
+
 class ResetPasswordResponse(BaseModel):
-    """管理员重置用户密码响应（当前仅记录审计日志，密码重置链路后续实现）。"""
+    """管理员重置用户密码响应。"""
 
     user_id: UUID = Field(..., description="用户 ID")
-    message: str = Field(default="密码重置请求已记录", description="操作提示")
+    message: str = Field(default="密码已重置", description="操作提示")
 
 
 class AuditLogListItem(BaseModel):
@@ -688,27 +703,48 @@ async def enable_user(
 @router.post(
     "/users/{user_id}/reset-password",
     response_model=ResetPasswordResponse,
-    deprecated=True,
-    description="[DEPRECATED] 重置用户密码链路尚未实现。为避免“仅写审计却向管理员显示已重置”的误导，本端点 fail-closed 返回 501；前端不得展示重置入口。",
+    description="管理员为指定用户设置新密码（不读取、不返回旧密码）。",
 )
 async def reset_user_password(
     user_id: UUID,
+    payload: ResetPasswordRequest,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> ResetPasswordResponse:
-    """管理员重置用户密码（当前仅记录审计日志，重置链路后续实现）。
+    """管理员重置用户密码。
 
-    [PRD §8.4.8] 未真实实现前：
-    - 前端必须隐藏该按钮；
-    - 后端接口标记 deprecated；
-    - 不得只写审计却向管理员显示“已重置”。
-    因此本端点直接 fail-closed，不写“成功”审计，也不伪装已重置。
+    语义：**设置新密码**，不是读取原密码——系统只存 bcrypt 哈希，
+    管理员无法也不应知道用户的旧密码。
+
+    密码哈希必须复用唯一正式 owner ``get_password_hash``（bcrypt），
+    禁止在本层另写一套哈希实现。
+
+    审计约束：审计日志**不得**包含明文密码、password_hash 或密码长度，
+    只记录"发生过一次重置"这一事实。
+
+    已知边界：当前 JWT 为无状态（payload 仅 sub/exp/type，无
+    token_version / session 表），因此重置后用户已持有的 token 在到期前
+    仍可通过校验。本轮不为该需求建设 revocation 机制。
     """
-    await _fetch_user_or_404(db, user_id)
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail="密码重置能力尚未实现，该入口已废弃，请勿使用",
+    user = await _fetch_user_or_404(db, user_id)
+
+    user.password_hash = get_password_hash(payload.new_password)
+    user.updated_at = datetime.now(UTC)
+    await db.flush()
+
+    await write_audit_log(
+        db=db,
+        actor_user_id=current_user.id,
+        action="user.reset_password",
+        target_type="user",
+        target_id=str(user.id),
+        before_data=None,
+        # 严禁写入明文密码 / password_hash / 密码长度等任何密码相关信息
+        after_data={"password_reset": True},
     )
+    await db.commit()
+
+    return ResetPasswordResponse(user_id=user.id, message="密码已重置")
 
 
 @router.post("/users/{user_id}/change-role", response_model=UserResponse)

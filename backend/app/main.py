@@ -35,8 +35,9 @@ from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_beta_applications import router as admin_beta_applications_router
 from app.api.admin_incremental_publish import router as admin_incremental_publish_router
-from app.api.admin_review import router as admin_review_router
+from app.api.admin_notifications import router as admin_notifications_router
 from app.api.admin_readiness import router as admin_readiness_router
+from app.api.admin_review import router as admin_review_router
 from app.api.admin_subscription import router as admin_subscription_router
 from app.api.admin_visitors import router as admin_visitors_router
 from app.api.auction import admin_router as auction_admin_router
@@ -199,6 +200,8 @@ app.include_router(notifications_router)
 app.include_router(admin_subscription_router)
 # 内测申请管理后台路由（Task 4，需 admin 角色）
 app.include_router(admin_beta_applications_router)
+# 管理员代管用户通知渠道路由（薄包装 notification_service，需 admin 角色）
+app.include_router(admin_notifications_router)
 # 盘后编排管理路由（Task 2.3，需 admin 角色）
 app.include_router(admin_after_close_router)
 # [CHANGE-20260729-008] 增量发布状态管理路由（需 admin 角色）

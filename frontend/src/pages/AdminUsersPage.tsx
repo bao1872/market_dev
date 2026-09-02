@@ -34,6 +34,13 @@ import {
   useUserCapabilities,
   useAdminGrantCapability,
   useAdminRevokeCapability,
+  useAdminResetUserPassword,
+  useAdminUserChannels,
+  useAdminCreateUserChannel,
+  useAdminUpdateUserChannel,
+  useAdminDeleteUserChannel,
+  useAdminVerifyUserChannel,
+  useAdminTestUserChannel,
 } from '@/hooks/useApi'
 import { StrategyDataTable } from '@/components/StrategyDataTable'
 import type { DataTableColumn } from '@/components/StrategyDataTable'
@@ -298,7 +305,9 @@ export default function AdminUsersPage() {
     !!selectedMember,
   )
 
-  const plans = plansQuery.data ?? []
+  // useMemo 稳定引用：plans 被多处 useMemo/useCallback 依赖，
+  // `?? []` 每次渲染都会产生新数组，导致下游 hook 依赖抖动（ESLint exhaustive-deps）。
+  const plans = useMemo(() => plansQuery.data ?? [], [plansQuery.data])
   // 抽屉表单编辑状态
   const [accountStatusEdit, setAccountStatusEdit] = useState('有效')
   const [membershipStatusEdit, setMembershipStatusEdit] = useState('有效')
@@ -328,6 +337,32 @@ export default function AdminUsersPage() {
   )
   const grantCapabilityMut = useAdminGrantCapability()
   const revokeCapabilityMut = useAdminRevokeCapability()
+
+  // 管理员重置密码
+  const resetPasswordMut = useAdminResetUserPassword()
+  const [resetPwdOpen, setResetPwdOpen] = useState(false)
+  const [resetPwdNew, setResetPwdNew] = useState('')
+  const [resetPwdConfirm, setResetPwdConfirm] = useState('')
+
+  // 管理员代管该用户的飞书通知渠道（per-user，target_config 由后端脱敏）
+  const userChannelsQuery = useAdminUserChannels(
+    selectedMember?.user_id ?? null,
+    !!selectedMember,
+  )
+  const createUserChannelMut = useAdminCreateUserChannel()
+  const updateUserChannelMut = useAdminUpdateUserChannel()
+  const deleteUserChannelMut = useAdminDeleteUserChannel()
+  const verifyUserChannelMut = useAdminVerifyUserChannel()
+  const testUserChannelMut = useAdminTestUserChannel()
+  const [feishuFormOpen, setFeishuFormOpen] = useState(false)
+  const [feishuEditing, setFeishuEditing] = useState(false)
+  const [feishuForm, setFeishuForm] = useState({
+    display_name: '',
+    app_id: '',
+    app_secret: '',
+    receive_id: '',
+    receive_id_type: 'user_id',
+  })
 
   // 抽屉内 capability 编辑表单状态（per-capability 独立）
   const [capGrantCapability, setCapGrantCapability] = useState<
@@ -581,6 +616,249 @@ export default function AdminUsersPage() {
       handleCloseDrawer()
     }
   }, [selectedMember, accountStatusEdit, disableUser, enableUser, toast, handleCloseDrawer])
+
+  /** 打开重置密码弹窗 */
+  const handleOpenResetPassword = useCallback(() => {
+    setResetPwdNew('')
+    setResetPwdConfirm('')
+    setResetPwdOpen(true)
+  }, [])
+
+  /** 关闭重置密码弹窗 */
+  const handleCloseResetPassword = useCallback(() => {
+    setResetPwdOpen(false)
+    setResetPwdNew('')
+    setResetPwdConfirm('')
+  }, [])
+
+  /** 提交重置密码：confirm 仅前端校验，不发送到后端 */
+  const handleSubmitResetPassword = useCallback(() => {
+    if (!selectedMember) return
+    if (resetPwdNew.length < 8) {
+      toast.show('校验失败', '新密码至少 8 个字符')
+      return
+    }
+    if (resetPwdNew !== resetPwdConfirm) {
+      toast.show('校验失败', '两次输入的密码不一致')
+      return
+    }
+    resetPasswordMut.mutate(
+      { userId: selectedMember.user_id, newPassword: resetPwdNew },
+      {
+        onSuccess: () => {
+          toast.show(
+            '密码已重置',
+            '现有已登录会话不会立即退出（当前 JWT 为无状态，旧 token 到期前仍可用）。',
+          )
+          handleCloseResetPassword()
+        },
+        onError: (err: unknown) => {
+          const axiosErr = err as { response?: { data?: { detail?: unknown } } }
+          const detail = axiosErr.response?.data?.detail
+          const message =
+            typeof detail === 'string' ? detail : '密码重置失败'
+          toast.show('重置失败', message)
+        },
+      },
+    )
+  }, [
+    selectedMember,
+    resetPwdNew,
+    resetPwdConfirm,
+    resetPasswordMut,
+    toast,
+    handleCloseResetPassword,
+  ])
+
+  // ===== 管理员代管飞书通知渠道 =====
+
+  /** 打开飞书配置表单（新增或编辑） */
+  const handleOpenFeishuForm = useCallback(
+    (mode: 'create' | 'edit') => {
+      if (mode === 'edit') {
+        const ch = (userChannelsQuery.data?.items ?? [])[0]
+        if (!ch) return
+        const cfg = (ch.target_config ?? {}) as Record<string, unknown>
+        const rawSecret = String(cfg.app_secret ?? '')
+        setFeishuForm({
+          display_name: ch.display_name ?? '',
+          app_id: String(cfg.app_id ?? ''),
+          // 脱敏值（****xxxx）不回填输入框，留空表示"保持原值不变"
+          app_secret: rawSecret.startsWith('****') ? '' : rawSecret,
+          receive_id: String(cfg.receive_id ?? ''),
+          receive_id_type: String(cfg.receive_id_type ?? 'user_id'),
+        })
+        setFeishuEditing(true)
+      } else {
+        setFeishuForm({
+          display_name: '',
+          app_id: '',
+          app_secret: '',
+          receive_id: '',
+          receive_id_type: 'user_id',
+        })
+        setFeishuEditing(false)
+      }
+      setFeishuFormOpen(true)
+    },
+    [userChannelsQuery.data],
+  )
+
+  /** 关闭飞书配置表单 */
+  const handleCloseFeishuForm = useCallback(() => {
+    setFeishuFormOpen(false)
+  }, [])
+
+  /** 提交飞书配置：绝不把脱敏值（****xxxx）当作真实 app_secret 提交 */
+  const handleSubmitFeishu = useCallback(() => {
+    if (!selectedMember) return
+    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    if (feishuEditing && !ch) return
+
+    if (!feishuForm.display_name.trim()) {
+      toast.show('保存失败', '请填写渠道名称')
+      return
+    }
+    if (!feishuForm.app_id.trim()) {
+      toast.show('保存失败', '请填写飞书 App ID')
+      return
+    }
+    if (!feishuForm.receive_id.trim()) {
+      toast.show('保存失败', '请填写 Receive ID')
+      return
+    }
+
+    // 脱敏值 / 空值一律不下发，由后端保留原 secret
+    const secretLooksMasked =
+      feishuForm.app_secret.startsWith('****') || feishuForm.app_secret.trim() === ''
+    const target_config: Record<string, unknown> = {
+      app_id: feishuForm.app_id.trim(),
+      receive_id: feishuForm.receive_id.trim(),
+      receive_id_type: feishuForm.receive_id_type,
+    }
+    if (!secretLooksMasked) {
+      target_config.app_secret = feishuForm.app_secret
+    }
+
+    const onError = (err: unknown) => {
+      const axiosErr = err as { response?: { data?: { detail?: unknown } } }
+      const detail = axiosErr.response?.data?.detail
+      toast.show(
+        '保存失败',
+        typeof detail === 'string' ? detail : '飞书配置保存失败',
+      )
+    }
+
+    if (feishuEditing && ch) {
+      updateUserChannelMut.mutate(
+        {
+          userId: selectedMember.user_id,
+          channelId: ch.id,
+          data: { display_name: feishuForm.display_name.trim(), target_config },
+        },
+        {
+          onSuccess: () => {
+            toast.show('已保存', '飞书配置已更新，需重新验证后启用')
+            handleCloseFeishuForm()
+          },
+          onError,
+        },
+      )
+    } else {
+      createUserChannelMut.mutate(
+        {
+          userId: selectedMember.user_id,
+          data: {
+            adapter_type: 'feishu_platform_app',
+            display_name: feishuForm.display_name.trim(),
+            target_config,
+          },
+        },
+        {
+          onSuccess: () => {
+            toast.show('已创建', '飞书渠道已创建，需验证后启用')
+            handleCloseFeishuForm()
+          },
+          onError,
+        },
+      )
+    }
+  }, [
+    selectedMember,
+    userChannelsQuery.data,
+    feishuEditing,
+    feishuForm,
+    updateUserChannelMut,
+    createUserChannelMut,
+    toast,
+    handleCloseFeishuForm,
+  ])
+
+  /** 验证飞书渠道 */
+  const handleVerifyFeishu = useCallback(() => {
+    if (!selectedMember) return
+    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    if (!ch) return
+    verifyUserChannelMut.mutate(
+      { userId: selectedMember.user_id, channelId: ch.id },
+      {
+        onSuccess: (updated) => {
+          toast.show(
+            updated.status === 'active' ? '验证通过' : '验证失败',
+            updated.status === 'active'
+              ? '飞书渠道已启用'
+              : `渠道状态：${updated.status}`,
+          )
+        },
+        onError: (err: unknown) => {
+          const axiosErr = err as { response?: { data?: { detail?: unknown } } }
+          const detail = axiosErr.response?.data?.detail
+          toast.show('验证失败', typeof detail === 'string' ? detail : '渠道验证失败')
+        },
+      },
+    )
+  }, [selectedMember, userChannelsQuery.data, verifyUserChannelMut, toast])
+
+  /** 发送测试消息 */
+  const handleTestFeishu = useCallback(() => {
+    if (!selectedMember) return
+    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    if (!ch) return
+    testUserChannelMut.mutate(
+      { userId: selectedMember.user_id, channelId: ch.id },
+      {
+        onSuccess: (res) => {
+          toast.show(
+            res.delivery.success ? '测试消息已发送' : '测试发送失败',
+            res.delivery.error_message ?? '请检查渠道配置',
+          )
+        },
+        onError: (err: unknown) => {
+          const axiosErr = err as { response?: { data?: { detail?: unknown } } }
+          const detail = axiosErr.response?.data?.detail
+          toast.show('测试失败', typeof detail === 'string' ? detail : '测试消息发送失败')
+        },
+      },
+    )
+  }, [selectedMember, userChannelsQuery.data, testUserChannelMut, toast])
+
+  /** 删除飞书渠道 */
+  const handleDeleteFeishu = useCallback(() => {
+    if (!selectedMember) return
+    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    if (!ch) return
+    deleteUserChannelMut.mutate(
+      { userId: selectedMember.user_id, channelId: ch.id },
+      {
+        onSuccess: () => toast.show('已删除', '飞书渠道已删除'),
+        onError: (err: unknown) => {
+          const axiosErr = err as { response?: { data?: { detail?: unknown } } }
+          const detail = axiosErr.response?.data?.detail
+          toast.show('删除失败', typeof detail === 'string' ? detail : '飞书渠道删除失败')
+        },
+      },
+    )
+  }, [selectedMember, userChannelsQuery.data, deleteUserChannelMut, toast])
 
   /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_months 默认 1） */
   const handlePlanChange = useCallback(
@@ -913,18 +1191,16 @@ export default function AdminUsersPage() {
         render: (row) => {
           const status = getInviteStatusPill(row.status)
           if (status.label === '未使用') {
+            // [邀请码明文不落库] 系统只在生成时返回一次明文，列表接口不返回明文，
+            // 因此列表页不提供"复制"（旧实现传空串必然失败）。
+            // 需要明文请从生成弹窗的「新邀请码」结果里复制。
             return (
-              <>
-                <button className="btn small" onClick={() => handleCopyCode('')}>
-                  复制
-                </button>
-                <button
-                  className="btn small danger"
-                  onClick={() => handleRevoke(row.id)}
-                >
-                  作废
-                </button>
-              </>
+              <button
+                className="btn small danger"
+                onClick={() => handleRevoke(row.id)}
+              >
+                作废
+              </button>
             )
           }
           if (status.label === '已使用') {
@@ -941,7 +1217,8 @@ export default function AdminUsersPage() {
         },
       },
     ],
-    [handleCopyCode, handleRevoke, toast, plans],
+    // 列表页已不再使用 handleCopyCode（明文不落库，复制只在生成弹窗内可用）
+    [handleRevoke, toast, plans],
   )
 
   // ===== 兑换记录时间线 =====
@@ -981,11 +1258,11 @@ export default function AdminUsersPage() {
           </div>
         </div>
         <div className="actions">
-          {activeTab === 'inviteList' && (
-            <button className="btn primary" onClick={handleOpenModal}>
-              ＋ 生成邀请码
-            </button>
-          )}
+          {/* [邀请码入口] 主操作常显：管理员无需先切到「邀请码管理」tab 才能创建。
+              点击后仍复用现有生成弹窗与 /v1/admin/invite-codes API。 */}
+          <button className="btn primary" onClick={handleOpenModal}>
+            ＋ 生成邀请码
+          </button>
         </div>
       </div>
 
@@ -1231,6 +1508,12 @@ export default function AdminUsersPage() {
                 >
                   审计
                 </div>
+                <div
+                  className={clsx('tab', drawerTab === 'feishu' && 'active')}
+                  onClick={() => setDrawerTab('feishu')}
+                >
+                  飞书通知
+                </div>
               </div>
 
               {/* 账户 tab */}
@@ -1288,6 +1571,133 @@ export default function AdminUsersPage() {
                   <div className="notice drawer-notice">
                     手工修改到期日仅用于异常修正；正常注册和续期必须通过邀请码兑换记录完成。
                   </div>
+
+                  {/* 重置密码：独立操作，不并入上方"保存账户信息" */}
+                  <div className="form-row reset-password-row">
+                    <label className="form-label">登录密码</label>
+                    <div className="reset-password-actions">
+                      <button className="btn small" onClick={handleOpenResetPassword}>
+                        重置密码
+                      </button>
+                      <small className="reset-password-hint">
+                        为安全起见系统只保存哈希，管理员无法查看原密码，只能设置新密码。
+                      </small>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* 飞书通知 tab：管理员代管该用户的飞书渠道（per-user，后端已脱敏） */}
+              {drawerTab === 'feishu' && (
+                <div className="tab-panel active drawer-tab-panel">
+                  {userChannelsQuery.isLoading && (
+                    <div className="empty">加载飞书配置中…</div>
+                  )}
+                  {userChannelsQuery.isError && (
+                    <div className="empty">
+                      飞书配置加载失败：
+                      {(userChannelsQuery.error as Error)?.message ?? '未知错误'}
+                    </div>
+                  )}
+                  {!userChannelsQuery.isLoading && !userChannelsQuery.isError && (
+                    <>
+                      {(() => {
+                        const ch = (userChannelsQuery.data?.items ?? [])[0]
+                        if (!ch) {
+                          return (
+                            <div className="empty">
+                              <div>尚未配置飞书</div>
+                              <button
+                                className="btn primary"
+                                onClick={() => handleOpenFeishuForm('create')}
+                              >
+                                ＋ 添加飞书配置
+                              </button>
+                            </div>
+                          )
+                        }
+                        const cfg = (ch.target_config ?? {}) as Record<string, unknown>
+                        return (
+                          <div className="form-grid">
+                            <div className="form-row">
+                              <label className="form-label">状态</label>
+                              <span className={`status-pill ${ch.status === 'active' ? 'ok' : 'off'}`}>
+                                {ch.status === 'active' ? '已启用' : ch.status}
+                              </span>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">渠道名称</label>
+                              <div className="form-static">{ch.display_name}</div>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">App ID</label>
+                              <div className="form-static">{String(cfg.app_id ?? '—')}</div>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">App Secret</label>
+                              <div className="form-static">
+                                {String(cfg.app_secret ?? '—')}
+                              </div>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">Receive ID</label>
+                              <div className="form-static">{String(cfg.receive_id ?? '—')}</div>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">Receive ID Type</label>
+                              <div className="form-static">
+                                {String(cfg.receive_id_type ?? '—')}
+                              </div>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">最近验证</label>
+                              <div className="form-static">
+                                {ch.last_verified_at
+                                  ? new Date(ch.last_verified_at).toLocaleString('zh-CN')
+                                  : '—'}
+                              </div>
+                            </div>
+                            <div className="form-row">
+                              <label className="form-label">操作</label>
+                              <div className="reset-password-actions">
+                                <button
+                                  className="btn small"
+                                  onClick={() => handleOpenFeishuForm('edit')}
+                                >
+                                  编辑配置
+                                </button>
+                                <button
+                                  className="btn small"
+                                  onClick={handleVerifyFeishu}
+                                  disabled={verifyUserChannelMut.isPending}
+                                >
+                                  验证
+                                </button>
+                                <button
+                                  className="btn small"
+                                  onClick={handleTestFeishu}
+                                  disabled={testUserChannelMut.isPending}
+                                >
+                                  发送测试
+                                </button>
+                                <button
+                                  className="btn small danger"
+                                  onClick={handleDeleteFeishu}
+                                  disabled={deleteUserChannelMut.isPending}
+                                >
+                                  删除
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        )
+                      })()}
+                      <div className="notice drawer-notice">
+                        App Secret 由后端脱敏返回（仅末 4 位）。留空提交表示保持原值不变。
+                        同一用户最多一条启用中的飞书渠道。
+                      </div>
+                    </>
+                  )}
                 </div>
               )}
 
@@ -1666,6 +2076,156 @@ export default function AdminUsersPage() {
                 disabled={createInviteCodes.isPending}
               >
                 {createInviteCodes.isPending ? '生成中...' : '生成邀请码'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 重置密码弹窗：confirm 仅前端校验，只向后端发送 new_password */}
+      {resetPwdOpen && selectedMember && (
+        <div className="modal-backdrop" onClick={handleCloseResetPassword}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">重置密码</div>
+            <div className="modal-body">
+              <div className="form-grid">
+                <div className="form-row">
+                  <label className="form-label">用户</label>
+                  <div className="form-static">{selectedMember.email}</div>
+                </div>
+                <div className="form-row">
+                  <label className="form-label">新密码</label>
+                  <input
+                    className="input"
+                    type="password"
+                    autoComplete="new-password"
+                    value={resetPwdNew}
+                    onChange={(e) => setResetPwdNew(e.target.value)}
+                    placeholder="至少 8 个字符"
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">确认新密码</label>
+                  <input
+                    className="input"
+                    type="password"
+                    autoComplete="new-password"
+                    value={resetPwdConfirm}
+                    onChange={(e) => setResetPwdConfirm(e.target.value)}
+                    placeholder="再次输入新密码"
+                  />
+                </div>
+              </div>
+              <div className="notice modal-notice">
+                新密码至少 8 个字符。重置后该用户需使用新密码登录；
+                现有已登录会话不会立即退出。
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn" onClick={handleCloseResetPassword}>
+                取消
+              </button>
+              <button
+                className="btn primary"
+                onClick={handleSubmitResetPassword}
+                disabled={resetPasswordMut.isPending}
+              >
+                {resetPasswordMut.isPending ? '处理中...' : '确认重置'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 飞书配置弹窗：字段沿用 SettingsPage 的 feishu_platform_app 行为 */}
+      {feishuFormOpen && selectedMember && (
+        <div className="modal-backdrop" onClick={handleCloseFeishuForm}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              {feishuEditing ? '编辑飞书配置' : '添加飞书配置'}
+            </div>
+            <div className="modal-body">
+              <div className="form-grid">
+                <div className="form-row">
+                  <label className="form-label">渠道名称</label>
+                  <input
+                    className="input"
+                    value={feishuForm.display_name}
+                    onChange={(e) =>
+                      setFeishuForm((p) => ({ ...p, display_name: e.target.value }))
+                    }
+                    placeholder="如：小Z飞书"
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">App ID</label>
+                  <input
+                    className="input"
+                    value={feishuForm.app_id}
+                    onChange={(e) =>
+                      setFeishuForm((p) => ({ ...p, app_id: e.target.value }))
+                    }
+                    placeholder="cli_xxxxxx"
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">App Secret</label>
+                  <input
+                    className="input"
+                    type="password"
+                    autoComplete="off"
+                    value={feishuForm.app_secret}
+                    onChange={(e) =>
+                      setFeishuForm((p) => ({ ...p, app_secret: e.target.value }))
+                    }
+                    placeholder={feishuEditing ? '留空表示保持原值不变' : '飞书应用 Secret'}
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">Receive ID</label>
+                  <input
+                    className="input"
+                    value={feishuForm.receive_id}
+                    onChange={(e) =>
+                      setFeishuForm((p) => ({ ...p, receive_id: e.target.value }))
+                    }
+                    placeholder="ou_xxxxxx / oc_xxxxxx"
+                  />
+                </div>
+                <div className="form-row">
+                  <label className="form-label">Receive ID Type</label>
+                  <select
+                    className="select"
+                    value={feishuForm.receive_id_type}
+                    onChange={(e) =>
+                      setFeishuForm((p) => ({ ...p, receive_id_type: e.target.value }))
+                    }
+                  >
+                    <option value="user_id">user_id</option>
+                    <option value="open_id">open_id</option>
+                    <option value="chat_id">chat_id</option>
+                  </select>
+                </div>
+              </div>
+              <div className="notice modal-notice">
+                App Secret 由后端脱敏返回（****末 4 位），脱敏值不会被当作真实密钥提交。
+                保存后需重新验证才会启用。
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button className="btn" onClick={handleCloseFeishuForm}>
+                取消
+              </button>
+              <button
+                className="btn primary"
+                onClick={handleSubmitFeishu}
+                disabled={
+                  createUserChannelMut.isPending || updateUserChannelMut.isPending
+                }
+              >
+                {createUserChannelMut.isPending || updateUserChannelMut.isPending
+                  ? '保存中...'
+                  : '保存'}
               </button>
             </div>
           </div>

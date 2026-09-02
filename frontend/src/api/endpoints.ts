@@ -950,6 +950,13 @@ export interface CreateChannelRequest {
   secret_ref?: string
 }
 
+/** 更新通知渠道请求（字段均可选；target_config 未提交的敏感字段由后端保留） */
+export interface UpdateChannelRequest {
+  display_name?: string
+  target_config?: Record<string, unknown>
+  secret_ref?: string
+}
+
 /** 消息预览请求 */
 export interface NotificationPreviewRequest {
   message_type: string
@@ -2143,6 +2150,76 @@ export async function revokeInviteCode(inviteCodeId: string): Promise<InviteCode
   return data
 }
 
+// ===== 管理员代管用户通知渠道（薄包装 notification_service，target_config 已脱敏） =====
+
+/** 查询指定用户的通知渠道列表（admin） */
+export async function adminListUserChannels(
+  userId: string,
+): Promise<NotificationChannelListResponse> {
+  const { data } = await apiClient.get<NotificationChannelListResponse>(
+    `/v1/admin/users/${userId}/notification-channels`,
+  )
+  return data
+}
+
+/** 为指定用户创建通知渠道（admin） */
+export async function adminCreateUserChannel(
+  userId: string,
+  payload: CreateChannelRequest,
+): Promise<NotificationChannel> {
+  const { data } = await apiClient.post<NotificationChannel>(
+    `/v1/admin/users/${userId}/notification-channels`,
+    payload,
+  )
+  return data
+}
+
+/** 更新指定用户的通知渠道（admin） */
+export async function adminUpdateUserChannel(
+  userId: string,
+  channelId: string,
+  payload: UpdateChannelRequest,
+): Promise<NotificationChannel> {
+  const { data } = await apiClient.put<NotificationChannel>(
+    `/v1/admin/users/${userId}/notification-channels/${channelId}`,
+    payload,
+  )
+  return data
+}
+
+/** 删除指定用户的通知渠道（admin，软删除） */
+export async function adminDeleteUserChannel(
+  userId: string,
+  channelId: string,
+): Promise<NotificationChannel> {
+  const { data } = await apiClient.delete<NotificationChannel>(
+    `/v1/admin/users/${userId}/notification-channels/${channelId}`,
+  )
+  return data
+}
+
+/** 验证指定用户的通知渠道（admin） */
+export async function adminVerifyUserChannel(
+  userId: string,
+  channelId: string,
+): Promise<NotificationChannel> {
+  const { data } = await apiClient.post<NotificationChannel>(
+    `/v1/admin/users/${userId}/notification-channels/${channelId}/verify`,
+  )
+  return data
+}
+
+/** 对指定用户的通知渠道发送测试消息（admin） */
+export async function adminTestUserChannel(
+  userId: string,
+  channelId: string,
+): Promise<ChannelTestResponse> {
+  const { data } = await apiClient.post<ChannelTestResponse>(
+    `/v1/admin/users/${userId}/notification-channels/${channelId}/test`,
+  )
+  return data
+}
+
 /** 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListResponse 为 V1.6 API 遗留命名） */
 export async function getMembers(params?: PaginationParams): Promise<MemberListResponse> {
   const { data } = await apiClient.get<MemberListResponse>('/v1/admin/members', { params })
@@ -2176,6 +2253,18 @@ export async function adminEnableUser(userId: string): Promise<UserResponse> {
 /** 停用用户账户（admin） */
 export async function adminDisableUser(userId: string): Promise<UserResponse> {
   const { data } = await apiClient.post<UserResponse>(`/v1/admin/users/${userId}/disable`)
+  return data
+}
+
+/** 管理员重置用户密码（设置新密码，不读取旧密码） */
+export async function adminResetUserPassword(
+  userId: string,
+  payload: { new_password: string },
+): Promise<{ user_id: string; message: string }> {
+  const { data } = await apiClient.post<{ user_id: string; message: string }>(
+    `/v1/admin/users/${userId}/reset-password`,
+    payload,
+  )
   return data
 }
 
