@@ -369,3 +369,135 @@ export interface AuctionBackflowData {
   backflow_events: EventTracking[]
   reason_codes: string[]
 }
+
+// ============================================================
+// V3.2 Scope Observation Workspace（List-first，PRD V3.2 / schema_version=auction-scope-v3.2）
+// 这些类型与后端 AuctionScopeListOut / AuctionScopeDetailOut / AuctionMetaDatesOut 严格对齐。
+// 前端只承载展示，绝不重算业务指标。
+// ============================================================
+
+/** 列表行：只读 payload 取值。所有 numeric 字段可空（Missing ≠ Zero）。技术 ID 不在本层。 */
+export interface AuctionScopeListItemOut {
+  scope_key: string
+  scope_name: string
+  equal_weight_gap: number | null
+  amount_weighted_gap: number | null
+  capital_tilt: number | null
+  positive_gap_breadth: number | null
+  negative_gap_breadth: number | null
+  unchanged_gap_breadth: number | null
+  gap_dispersion: number | null
+  price_normalized_hhi: number | null
+  ew_position: number | null
+  ew_velocity: number | null
+  ew_acceleration: number | null
+  amount_historical_position: number | null
+  amount_multiple: number | null
+  amount_abnormal_breadth: number | null
+  total_auction_amount: number | null
+  normalized_hhi: number | null
+  /** axis → 0..100 位置（repricing/breadth/participation/concentration）；concentration 轴常为空 */
+  cross_sectional: {
+    repricing: number | null
+    breadth: number | null
+    participation: number | null
+    concentration: number | null
+  }
+  leadership_migration: number | null
+  price_valid_count: number | null
+}
+
+/** GET /v1/auction/scopes 响应 — 完整同 family snapshot（无 Top-N） */
+export interface AuctionScopeListOut {
+  trade_date: string
+  family: 'industry' | 'concept'
+  algorithm_version: string
+  schema_version: string
+  total_scopes: number
+  scopes: AuctionScopeListItemOut[]
+}
+
+/** 详细五组 + diagnostics */
+export interface AuctionScopeRepricingGroup {
+  equal_weight_gap: number | null
+  amount_weighted_gap: number | null
+  capital_tilt: number | null
+  positive_gap_breadth: number | null
+  negative_gap_breadth: number | null
+  unchanged_gap_breadth: number | null
+  gap_dispersion: number | null
+  price_normalized_hhi: number | null
+  price_valid_count: number | null
+}
+
+/**
+ * Historical Dynamics（当前态标量）。
+ * 后端 payload 仅暴露 latest 标量 + latest_trade_date，不含历史时间序列；
+ * 因此前端以当前态读数呈现，不臆造时间序列图。
+ */
+export interface AuctionScopeHistoricalDynamics {
+  position: number | null
+  ema_fast: number | null
+  ema_slow: number | null
+  velocity: number | null
+  signal: string | null
+  acceleration: number | null
+  latest_trade_date: string | null
+}
+
+export interface AuctionScopeParticipationGroup {
+  amount_position: number | null
+  amount_multiple: number | null
+  amount_abnormal_breadth: number | null
+  top1_amount_share: number | null
+  top3_amount_share: number | null
+  amount_normalized_hhi: number | null
+}
+
+export interface AuctionScopeCrossSectionalGroup {
+  repricing: Record<string, number | null>
+  breadth: Record<string, number | null>
+  participation: Record<string, number | null>
+  concentration: Record<string, number | null>
+}
+
+export interface AuctionScopeMemberAttributionMember {
+  instrument_id: string
+  gap_ratio: number | null
+  ew_contribution: number | null
+  auction_amount: number | null
+  amount_share: number | null
+  aw_contribution: number | null
+}
+
+export interface AuctionScopeMemberAttribution {
+  members: AuctionScopeMemberAttributionMember[]
+}
+
+export interface AuctionScopeDiagnostics {
+  family?: string
+  amount_position_status?: string | null
+  history_valid_count?: number | null
+  previous_leader_status?: string | null
+  previous_leader_count?: number | null
+  [key: string]: unknown
+}
+
+export interface AuctionScopeDetailOut {
+  trade_date: string
+  family: 'industry' | 'concept'
+  scope_key: string
+  scope_name: string
+  repricing: AuctionScopeRepricingGroup
+  historical_dynamics: AuctionScopeHistoricalDynamics
+  participation: AuctionScopeParticipationGroup
+  cross_sectional: AuctionScopeCrossSectionalGroup
+  member_attribution: AuctionScopeMemberAttribution
+  diagnostics: AuctionScopeDiagnostics
+}
+
+/** GET /v1/auction/meta/dates 响应 */
+export interface AuctionMetaDatesOut {
+  trade_dates: string[]
+  latest: string | null
+}

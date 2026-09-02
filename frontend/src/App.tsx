@@ -35,9 +35,11 @@ const LandingPage = lazy(() => import('./pages/LandingPage'))
 
 // [Auction] - 竞价分析三级页面 lazy 加载（市场/板块/个股）
 // 受保护路由 require_capability("research_replay")：竞价与复盘同属一项权益（GET /v1/auction/*）
-const AuctionMarketPage = lazy(() => import('./features/auction/AuctionMarketPage'))
+
 const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
 const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))
+// [Auction V3.2] - List-first Scope Observation Workspace
+const AuctionScopeWorkspace = lazy(() => import('./features/auction/AuctionScopeWorkspace'))
 
 // 门户页加载占位
 function LandingFallback() {
@@ -280,7 +282,7 @@ export const routeConfig: RouteObject[] = [
                 path: '/auction',
                 element: (
                   <Suspense fallback={<AuctionFallback />}>
-                    <AuctionMarketPage />
+                    <AuctionScopeWorkspace />
                   </Suspense>
                 ),
               },

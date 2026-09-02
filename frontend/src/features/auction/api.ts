@@ -11,6 +11,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/api/client'
 import type {
+  AuctionScopeListOut,
+  AuctionScopeDetailOut,
+  AuctionMetaDatesOut,
+} from './types'
+import type {
   AnchorStatusResponse,
   AuctionBackflowData,
   AuctionBoardPageData,
@@ -163,6 +168,11 @@ export const auctionKeys = {
     [...auctionKeys.all, 'anchors', tradeDate] as const,
   backflow: (tradeDate: string, topEvents = 50) =>
     [...auctionKeys.all, 'backflow', tradeDate, topEvents] as const,
+  scopes: (family: string, tradeDate?: string) =>
+    [...auctionKeys.all, 'scopes', family, tradeDate ?? 'latest'] as const,
+  scopeDetail: (family: string, scopeKey: string, tradeDate?: string) =>
+    [...auctionKeys.all, 'scope-detail', family, scopeKey, tradeDate ?? 'latest'] as const,
+  metaDates: () => [...auctionKeys.all, 'meta-dates'] as const,
 } as const
 
 // ============================================================
@@ -260,5 +270,91 @@ export function useAuctionBackflow(
     queryFn: () => getAuctionBackflow(tradeDate as string, topEvents),
     enabled: enabled && !!tradeDate,
     staleTime: 60 * 1000,
+  })
+}
+
+// ============================================================
+// V3.2 Scope Observation Workspace（List-first）
+// GET /v1/auction/scopes — 完整同 family snapshot（无 Top-N）
+// GET /v1/auction/scopes/{scope_key} — 单个已发布 scope 五组 + diagnostics
+// GET /v1/auction/meta/dates — 拥有正式 V3.2 publication 的交易日
+// ============================================================
+
+/** GET /v1/auction/scopes — 完整同 family snapshot（无 Top-N） */
+export async function getAuctionScopes(
+  family: 'industry' | 'concept',
+  tradeDate?: string,
+): Promise<AuctionScopeListOut> {
+  const { data } = await apiClient.get<AuctionScopeListOut>('/v1/auction/scopes', {
+    params: { trade_date: tradeDate, family },
+  })
+  return data
+}
+
+/** GET /v1/auction/scopes/{scope_key} — 单个已发布 scope 五组 + diagnostics */
+export async function getAuctionScopeDetail(
+  family: 'industry' | 'concept',
+  scopeKey: string,
+  tradeDate?: string,
+): Promise<AuctionScopeDetailOut> {
+  const { data } = await apiClient.get<AuctionScopeDetailOut>(
+    `/v1/auction/scopes/${encodeURIComponent(scopeKey)}`,
+    { params: { trade_date: tradeDate, family } },
+  )
+  return data
+}
+
+/** GET /v1/auction/meta/dates — 拥有正式 V3.2 publication 的交易日 */
+export async function getAuctionScopeDates(): Promise<AuctionMetaDatesOut> {
+  const { data } = await apiClient.get<AuctionMetaDatesOut>('/v1/auction/meta/dates')
+  return data
+}
+
+/**
+ * V3.2 scope 列表 hook（完整 family snapshot）
+ * family 必填；trade_date 省略时后端默认当日
+ */
+export function useAuctionScopes(
+  family: 'industry' | 'concept',
+  tradeDate?: string,
+  options: { enabled?: boolean } = {},
+) {
+  const { enabled = true } = options
+  return useQuery({
+    queryKey: auctionKeys.scopes(family, tradeDate),
+    queryFn: () => getAuctionScopes(family, tradeDate),
+    enabled,
+    staleTime: 30 * 1000,
+  })
+}
+
+/**
+ * V3.2 scope 详情 hook（五组 + diagnostics）
+ */
+export function useAuctionScopeDetail(
+  family: 'industry' | 'concept',
+  scopeKey: string | null | undefined,
+  tradeDate?: string,
+  options: { enabled?: boolean } = {},
+) {
+  const { enabled = true } = options
+  return useQuery({
+    queryKey: scopeKey
+      ? auctionKeys.scopeDetail(family, scopeKey, tradeDate)
+      : ['auction', 'scope-detail', 'disabled'],
+    queryFn: () => getAuctionScopeDetail(family, scopeKey as string, tradeDate),
+    enabled: enabled && !!scopeKey,
+    staleTime: 30 * 1000,
+  })
+}
+
+/** V3.2 可选交易日 hook */
+export function useAuctionScopeDates(options: { enabled?: boolean } = {}) {
+  const { enabled = true } = options
+  return useQuery({
+    queryKey: auctionKeys.metaDates(),
+    queryFn: () => getAuctionScopeDates(),
+    enabled,
+    staleTime: 5 * 60 * 1000,
   })
 }
