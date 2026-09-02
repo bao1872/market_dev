@@ -101,6 +101,7 @@ async def run_verified_auction_pipeline(
         aggregate_auction_truth,
         fetch_quote_sources,
     )
+    from app.services.auction_v32_analysis_service import run_v32_auction_analysis
 
     if expected_symbols is None:
         rows = (await db.execute(select(Instrument.symbol, Instrument.market).where(
@@ -160,6 +161,28 @@ async def run_verified_auction_pipeline(
         worker_id=worker_id,
         expected_symbols=expected_symbols,
     )
+    # ------------------------------------------------------------------
+    # V3.2 lane — INDEPENDENT of legacy Anchor / Structure / Chip.
+    # It is triggered by "verified consensus capture ready" alone, so a legacy
+    # Anchor failure can never prevent V3.2 from running.  The two lanes report
+    # separate statuses; neither masquerades as the other.
+    # ------------------------------------------------------------------
+    v32_outcome = await run_v32_auction_analysis(
+        db,
+        trade_date=trade_date,
+        capture_run_id=consensus_capture["capture_run_id"],
+        worker_id=worker_id,
+        lease_epoch=lease_epoch,
+        truth_status="verified",
+        test_namespace=test_namespace,
+    )
+    v32_fields = {
+        "v32_status": v32_outcome.status,
+        "v32_run_id": v32_outcome.run_id,
+        "v32_scope_count": v32_outcome.scope_count,
+        "v32_detail": v32_outcome.detail,
+    }
+
     scan = await run_auction_scan(
         db,
         trade_date,
@@ -169,7 +192,13 @@ async def run_verified_auction_pipeline(
     )
     run_id = scan.get("run_id")
     if run_id is None or scan.get("status") not in ("succeeded", "partial"):
-        return {**scan, "truth_status": "verified", "capture_run_id": consensus_capture["capture_run_id"]}
+        # legacy lane failed/skipped: V3.2 has ALREADY run and keeps its own status
+        return {
+            **scan,
+            **v32_fields,
+            "truth_status": "verified",
+            "capture_run_id": consensus_capture["capture_run_id"],
+        }
 
     aggregation = await compute_auction_aggregation(db, run_id)
     publication = await publish_auction_analysis(
@@ -181,6 +210,7 @@ async def run_verified_auction_pipeline(
     )
     return {
         **scan,
+        **v32_fields,
         "truth_status": "verified",
         "truth_coverage": truth["coverage"],
         "capture_run_id": consensus_capture["capture_run_id"],

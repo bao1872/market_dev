@@ -1053,6 +1053,9 @@ async def run_auction_scan(
                     "coverage_ratio": 0.0,
                     "missing_count": 0,
                 },
+                # fencing: only the worker that acquired this run may finalize it
+                expected_worker_id=run.worker_id,
+                expected_lease_epoch=run.lease_epoch,
             )
             return {
                 "run_id": run_id,
@@ -1304,6 +1307,8 @@ async def run_auction_scan(
                 "missing_count": eligible_count - valid_count,
                 "missing_reasons": dict(missing_reasons),
             },
+            expected_worker_id=run.worker_id,
+            expected_lease_epoch=run.lease_epoch,
         )
 
         logger.info(
@@ -1331,7 +1336,13 @@ async def run_auction_scan(
             trade_date, run_id, exc,
             exc_info=True,
         )
-        await mark_scan_run_failed(db, run, error_message=str(exc)[:1000])
+        await mark_scan_run_failed(
+            db,
+            run,
+            error_message=str(exc)[:1000],
+            expected_worker_id=run.worker_id,
+            expected_lease_epoch=run.lease_epoch,
+        )
         return {
             "run_id": run_id,
             "status": "failed",

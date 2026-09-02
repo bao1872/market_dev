@@ -56,6 +56,13 @@ class FakeResult:
     def scalar_one_or_none(self) -> Any:
         return self._value
 
+    def first(self) -> Any:
+        """Multi-column ownership select -> (worker_id, lease_epoch, status)."""
+        value = self._value
+        if value is None:
+            return None
+        return (value.worker_id, value.lease_epoch, value.status)
+
 
 
 
@@ -164,7 +171,7 @@ async def test_chain_produces_exactly_one_scan_run() -> None:
     run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="w1")
 
     await persistence.persist_v32_scope_results(
-        session, run=run, trade_date=_T, scope_results=_scope_rows()
+        session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
     )
     await complete_scan_run(session, run, coverage=_coverage())
 
@@ -179,7 +186,7 @@ async def test_persist_does_not_create_a_second_run() -> None:
     added_after_acquire = len(session.added)
 
     await persistence.persist_v32_scope_results(
-        session, run=run, trade_date=_T, scope_results=_scope_rows()
+        session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
     )
 
     runs = [o for o in session.added if isinstance(o, AuctionScanRun)]
@@ -192,7 +199,7 @@ async def test_scope_results_are_bound_to_the_same_run() -> None:
     run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="w1")
 
     await persistence.persist_v32_scope_results(
-        session, run=run, trade_date=_T, scope_results=_scope_rows()
+        session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
     )
 
     results = [o for o in session.added if isinstance(o, AuctionScopeResult)]
@@ -206,7 +213,7 @@ async def test_run_is_succeeded_before_publication_and_bound_to_it(
     session = FakeAsyncSession()
     run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="w1")
     await persistence.persist_v32_scope_results(
-        session, run=run, trade_date=_T, scope_results=_scope_rows()
+        session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
     )
 
     # publication may only happen once the run is actually succeeded
@@ -262,7 +269,7 @@ async def test_persist_rejects_a_run_of_the_wrong_type() -> None:
 
     with pytest.raises(ValueError, match="auction_type mismatch"):
         await persistence.persist_v32_scope_results(
-            session, run=run, trade_date=_T, scope_results=_scope_rows()
+            session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
         )
 
 
@@ -273,7 +280,7 @@ async def test_persist_rejects_a_run_of_the_wrong_algorithm() -> None:
 
     with pytest.raises(ValueError, match="algorithm_version mismatch"):
         await persistence.persist_v32_scope_results(
-            session, run=run, trade_date=_T, scope_results=_scope_rows()
+            session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
         )
 
 
@@ -283,7 +290,7 @@ async def test_persist_rejects_a_run_of_another_trade_date() -> None:
 
     with pytest.raises(ValueError, match="trade_date mismatch"):
         await persistence.persist_v32_scope_results(
-            session, run=run, trade_date=date(2026, 8, 15), scope_results=_scope_rows()
+            session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=date(2026, 8, 15), scope_results=_scope_rows()
         )
 
 
@@ -294,7 +301,7 @@ async def test_persist_rejects_a_run_that_is_not_running() -> None:
 
     with pytest.raises(ValueError, match="must be running"):
         await persistence.persist_v32_scope_results(
-            session, run=run, trade_date=_T, scope_results=_scope_rows()
+            session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
         )
 
 
@@ -318,7 +325,7 @@ async def test_non_v32_payload_fails_before_anything_is_added() -> None:
     tampered["algorithm_version"] = "auction-v999"
     with pytest.raises(ValueError, match="algorithm_version"):
         await persistence.persist_v32_scope_results(
-            session, run=run, trade_date=_T, scope_results=_scope_rows(tampered)
+            session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows(tampered)
         )
     assert len(session.added) == before
 
@@ -330,7 +337,7 @@ async def test_scope_name_drift_is_rejected_before_write() -> None:
 
     with pytest.raises(ValueError, match="drift"):
         await persistence.persist_v32_scope_results(
-            session, run=run, trade_date=_T, scope_results=_scope_rows(scope_name="旧名字")
+            session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows(scope_name="旧名字")
         )
     assert len(session.added) == before
 
@@ -340,7 +347,7 @@ async def test_persist_does_not_own_the_transaction() -> None:
     run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="w1")
 
     await persistence.persist_v32_scope_results(
-        session, run=run, trade_date=_T, scope_results=_scope_rows()
+        session, run=run, worker_id=run.worker_id, lease_epoch=run.lease_epoch, trade_date=_T, scope_results=_scope_rows()
     )
     assert session.commit_count == 0, "the orchestrator must own the commit"
     assert session.flush_count >= 1

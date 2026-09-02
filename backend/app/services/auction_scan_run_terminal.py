@@ -58,13 +58,26 @@ def _now(now: datetime | None) -> datetime:
     return now or datetime.now(UTC)
 
 
-async def _authoritative_row(db: AsyncSession, run: AuctionScanRun) -> AuctionScanRun:
-    """Re-read the run row instead of trusting a possibly-stale ORM object."""
-    stmt = select(AuctionScanRun).where(AuctionScanRun.id == run.id)
-    row = (await db.execute(stmt)).scalar_one_or_none()
+async def _authoritative_ownership(
+    db: AsyncSession, run: AuctionScanRun
+) -> tuple[str | None, int | None, str | None]:
+    """Read the OWNERSHIP COLUMNS straight from the database.
+
+    Selecting scalar columns rather than the entity avoids the SQLAlchemy
+    identity map: a full-entity select can hand back the very same stale Python
+    object the caller already holds, which would make the check vacuous.
+
+    Returns ``(worker_id, lease_epoch, status)``.
+    """
+    stmt = select(
+        AuctionScanRun.worker_id,
+        AuctionScanRun.lease_epoch,
+        AuctionScanRun.status,
+    ).where(AuctionScanRun.id == run.id)
+    row = (await db.execute(stmt)).first()
     if row is None:
         raise AuctionScanLeaseLostError(f"scan run {run.id} no longer exists")
-    return row
+    return row[0], row[1], row[2]
 
 
 async def assert_run_ownership(
@@ -81,18 +94,18 @@ async def assert_run_ownership(
     object was loaded.  This reads the row back and compares fencing tokens, so
     a deposed worker is rejected at every write boundary.
     """
-    row = await _authoritative_row(db, run)
-    if expected_worker_id is not None and row.worker_id != expected_worker_id:
+    worker_id, lease_epoch, _status = await _authoritative_ownership(db, run)
+    if expected_worker_id is not None and worker_id != expected_worker_id:
         raise AuctionScanLeaseLostError(
-            f"scan run {row.id} is owned by worker {row.worker_id!r}, "
+            f"scan run {run.id} is owned by worker {worker_id!r}, "
             f"not {expected_worker_id!r}"
         )
-    if expected_lease_epoch is not None and row.lease_epoch != expected_lease_epoch:
+    if expected_lease_epoch is not None and lease_epoch != expected_lease_epoch:
         raise AuctionScanLeaseLostError(
-            f"scan run {row.id} lease moved to epoch {row.lease_epoch!r}, "
+            f"scan run {run.id} lease moved to epoch {lease_epoch!r}, "
             f"caller holds {expected_lease_epoch!r}"
         )
-    return row
+    return run
 
 
 async def finalize_scan_run(
@@ -124,15 +137,13 @@ async def finalize_scan_run(
         )
 
     if expected_worker_id is not None or expected_lease_epoch is not None:
-        # write onto the authoritative row, not the caller's stale object
-        target = await assert_run_ownership(
+        # validate against the authoritative DB scalars before writing
+        await assert_run_ownership(
             db,
             run,
             expected_worker_id=expected_worker_id,
             expected_lease_epoch=expected_lease_epoch,
         )
-    else:
-        target = run
 
     if metrics:
         for column in (
@@ -143,14 +154,14 @@ async def finalize_scan_run(
             "missing_reasons",
         ):
             if column in metrics:
-                setattr(target, column, metrics[column])
+                setattr(run, column, metrics[column])
 
-    target.status = status
-    target.finished_at = _now(now)
-    target.error_message = (error_message or None) if status == "failed" else None
+    run.status = status
+    run.finished_at = _now(now)
+    run.error_message = (error_message or None) if status == "failed" else None
 
     await db.flush()
-    return target
+    return run
 
 
 async def complete_scan_run(

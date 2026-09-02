@@ -22,6 +22,7 @@ from app.services.auction_scan_run_lifecycle import (
 )
 from app.services.auction_scan_run_terminal import (
     AuctionScanLeaseLostError,
+    assert_run_ownership,
     complete_scan_run,
     finalize_scan_run,
     mark_scan_run_failed,
@@ -51,6 +52,12 @@ class FakeResult:
 
     def scalar_one_or_none(self) -> Any:
         return self._value
+
+    def first(self) -> Any:
+        """Multi-column ownership select -> (worker_id, lease_epoch, status)."""
+        if self._value is None:
+            return None
+        return (self._value.worker_id, self._value.lease_epoch, self._value.status)
 
 
 class FakeSession:
@@ -206,8 +213,8 @@ async def test_deposed_worker_cannot_persist() -> None:
             run=run,
             trade_date=_T,
             scope_results=[],
-            expected_worker_id="worker-A",
-            expected_lease_epoch=lease,
+            worker_id="worker-A",
+            lease_epoch=lease,
         )
 
 
@@ -285,3 +292,55 @@ async def test_error_message_is_only_kept_for_failures() -> None:
     run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="w")
     await finalize_scan_run(session, run, status="succeeded", error_message="noise")
     assert run.error_message is None
+
+
+# ===========================================================================
+# KPI-2 small fixes: authoritative scalars, legacy tokens, required tokens
+# ===========================================================================
+async def test_stale_orm_object_is_rejected_by_db_scalars() -> None:
+    """The caller's ORM object may be stale; DB scalars must decide."""
+    session = FakeSession()
+    run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="worker-A")
+    stale = run  # the object worker-A still holds
+
+    # the DB says the lease moved on
+    authoritative = _run("running", worker="worker-B")
+    authoritative.id = stale.id
+    authoritative.lease_epoch = stale.lease_epoch + 1
+    deposed = FakeSession(existing=authoritative)
+
+    with pytest.raises(AuctionScanLeaseLostError):
+        await assert_run_ownership(
+            deposed,
+            stale,
+            expected_worker_id="worker-A",
+            expected_lease_epoch=stale.lease_epoch,
+        )
+
+
+def test_legacy_terminal_call_sites_pass_fencing_tokens() -> None:
+    """Every legacy terminal transition must present the tokens it acquired.
+
+    This is a call-site contract check; the runtime behaviour of the fencing
+    itself is proven by the async tests above.
+    """
+    import inspect
+
+    from app.services import auction_scan_service as svc
+
+    src = inspect.getsource(svc.run_auction_scan)
+    assert "expected_worker_id=run.worker_id" in src
+    assert "expected_lease_epoch=run.lease_epoch" in src
+    # empty-universe / normal finish / exception — all three
+    assert src.count("expected_worker_id=run.worker_id") >= 3
+
+
+async def test_v32_persistence_requires_fencing_tokens() -> None:
+    """A caller that forgets the tokens must fail loudly, not write unfenced."""
+    session = FakeSession()
+    run = await acquire_v32_scan_run(session, trade_date=_T, worker_id="worker-A")
+
+    with pytest.raises(TypeError):
+        await persist_v32_scope_results(
+            session, run=run, trade_date=_T, scope_results=[]  # tokens omitted
+        )

@@ -136,8 +136,8 @@ async def persist_v32_scope_results(
     run: AuctionScanRun,
     trade_date: date,
     scope_results: list[dict[str, Any]],
-    expected_worker_id: str | None = None,
-    expected_lease_epoch: int | None = None,
+    worker_id: str,
+    lease_epoch: int,
 ) -> uuid.UUID:
     """Persist V3.2 scope results into an EXISTING run.
 
@@ -153,11 +153,14 @@ async def persist_v32_scope_results(
     never called here.
     """
     validate_v32_run_identity(run, trade_date=trade_date)
+    # fencing tokens are REQUIRED: the V3.2 writer must always present the
+    # identity it acquired, so a forgotten token is a contract error rather
+    # than a silently unfenced write.
     await assert_run_ownership(
         session,
         run,
-        expected_worker_id=expected_worker_id,
-        expected_lease_epoch=expected_lease_epoch,
+        expected_worker_id=worker_id,
+        expected_lease_epoch=lease_epoch,
     )
     # Validate and normalise EVERY payload before touching the session, so a
     # malformed payload cannot leave half-written children behind.
