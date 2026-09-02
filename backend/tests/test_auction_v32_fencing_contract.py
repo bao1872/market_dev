@@ -344,3 +344,40 @@ async def test_v32_persistence_requires_fencing_tokens() -> None:
         await persist_v32_scope_results(
             session, run=run, trade_date=_T, scope_results=[]  # tokens omitted
         )
+
+
+# ===========================================================================
+# P1: authoritative status must be "running" to accept a write
+# ===========================================================================
+async def test_ownership_rejected_when_authoritative_run_is_terminal() -> None:
+    """Same worker + same lease, but the DB says the run already finished.
+
+    A stale in-memory object (still showing ``running``) must not let a caller
+    write to an already-closed run.
+    """
+    _session, run = await _acquired()
+    finished = _run("succeeded", worker="worker-A")
+    finished.id = run.id
+    finished.lease_epoch = run.lease_epoch
+    session = FakeSession(existing=finished)
+
+    with pytest.raises(AuctionScanLeaseLostError):
+        await assert_run_ownership(
+            session,
+            run,
+            expected_worker_id="worker-A",
+            expected_lease_epoch=run.lease_epoch,
+        )
+
+
+async def test_ownership_allowed_when_authoritative_run_is_running() -> None:
+    _session, run = await _acquired()
+    session = FakeSession(existing=run)  # authoritative status == running
+
+    # must not raise
+    await assert_run_ownership(
+        session,
+        run,
+        expected_worker_id="worker-A",
+        expected_lease_epoch=run.lease_epoch,
+    )

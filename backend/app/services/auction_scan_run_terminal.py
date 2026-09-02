@@ -94,7 +94,15 @@ async def assert_run_ownership(
     object was loaded.  This reads the row back and compares fencing tokens, so
     a deposed worker is rejected at every write boundary.
     """
-    worker_id, lease_epoch, _status = await _authoritative_ownership(db, run)
+    worker_id, lease_epoch, status = await _authoritative_ownership(db, run)
+    if status != "running":
+        # the run has already reached a terminal state (succeeded / failed /
+        # partial) on the authoritative row; a stale in-memory object must not
+        # be allowed to write to a closed run.
+        raise AuctionScanLeaseLostError(
+            f"scan run {run.id} is no longer running (authoritative status="
+            f"{status!r}); refusing to write"
+        )
     if expected_worker_id is not None and worker_id != expected_worker_id:
         raise AuctionScanLeaseLostError(
             f"scan run {run.id} is owned by worker {worker_id!r}, "

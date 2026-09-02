@@ -14,6 +14,7 @@ loop, so no N+1.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import date
 from uuid import UUID
@@ -29,6 +30,7 @@ from app.domain.auction.membership_pit import (
     FAMILY_CONCEPT,
     FAMILY_INDUSTRY,
     MembershipEdge,
+    definition_version_effective_in_window,
 )
 from app.models.auction import AuctionFinalQuote, AuctionQuoteCaptureRun
 from app.models.board_taxonomy import (
@@ -148,13 +150,31 @@ async def load_official_trade_slots(
 # ---------------------------------------------------------------------------
 # 2.2 expected universe
 # ---------------------------------------------------------------------------
+def _is_active_ashare(symbol: str | None, status: str | None) -> bool:
+    """Active A-share口径 — shared with the Auction capture / consensus path.
+
+    An instrument is in-scope only when ``status == active`` AND its symbol is a
+    6-digit numeric code.  ``Instrument.market`` is ``SH`` / ``SZ`` / ``BJ``, not
+    a single ``"A"`` value, so filtering on ``market == "A"`` would empty the
+    universe and silently move every missing stock out of the coverage
+    denominator.
+    """
+    if status != "active":
+        return False
+    return re.fullmatch(r"\d{6}", symbol or "") is not None
+
+
 async def load_expected_universe(db: AsyncSession) -> tuple[UUID, ...]:
-    """The formal expected active A-share universe (coverage denominator)."""
+    """The formal expected active A-share universe (coverage denominator).
+
+    Uses the active-A-share口径 from the capture / consensus path
+    (``status == active`` AND a 6-digit symbol), never ``Instrument.market``.
+    """
     stmt = (
         select(Instrument.id)
         .where(
-            Instrument.market == "A",
             Instrument.status == "active",
+            Instrument.symbol.op("~")(r"^\d{6}$"),
         )
     )
     return tuple((await db.execute(stmt)).scalars().all())
@@ -227,6 +247,12 @@ async def _load_membership_edges(
 ) -> tuple[MembershipEdge, ...]:
     """One bounded join; PIT validity is ``[effective_from, effective_to)``.
 
+    Both the membership row AND its ``BoardDefinitionVersion`` must overlap the
+    window ``[window_start, T]`` (half-open on both ends).  A membership row can
+    still overlap while the board definition that created it has already ended,
+    which would leak a stale board into the scope — so the definition version's
+    own PIT window is enforced too.
+
     ``scope_key`` is ``MarketBoard.externalCode`` (the business identity); the
     board UUID never becomes a product key.
     """
@@ -238,6 +264,8 @@ async def _load_membership_edges(
             BoardMembershipHistory.instrument_id,
             BoardMembershipHistory.effective_from,
             BoardMembershipHistory.effective_to,
+            BoardDefinitionVersion.effective_from,
+            BoardDefinitionVersion.effective_to,
         )
         .join(
             BoardDefinitionVersion,
@@ -246,19 +274,38 @@ async def _load_membership_edges(
         .join(MarketBoard, MarketBoard.id == BoardDefinitionVersion.board_id)
         .where(
             BoardDefinitionVersion.board_type.in_(FAMILIES),
-            # overlapping the whole window, so one query covers every slot:
-            # [effective_from, effective_to) with NULL meaning "still effective"
+            # membership row overlaps the whole window
             BoardMembershipHistory.effective_from <= trade_date,
             or_(
                 BoardMembershipHistory.effective_to.is_(None),
                 BoardMembershipHistory.effective_to > window_start,
+            ),
+            # BoardDefinitionVersion overlaps the window too
+            BoardDefinitionVersion.effective_from <= trade_date,
+            or_(
+                BoardDefinitionVersion.effective_to.is_(None),
+                BoardDefinitionVersion.effective_to > window_start,
             ),
         )
     )
     rows = (await db.execute(stmt)).all()
 
     edges: list[MembershipEdge] = []
-    for external_code, name, board_type, instrument_id, eff_from, eff_to in rows:
+    for (
+        external_code,
+        name,
+        board_type,
+        instrument_id,
+        eff_from,
+        eff_to,
+        def_from,
+        def_to,
+    ) in rows:
+        # defense-in-depth: the pure, unit-tested helper mirrors the SQL above
+        if not definition_version_effective_in_window(
+            def_from, def_to, trade_date, window_start
+        ):
+            continue
         edges.append(
             MembershipEdge(
                 instrument_id=instrument_id,

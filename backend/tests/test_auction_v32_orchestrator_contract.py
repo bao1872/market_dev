@@ -263,3 +263,99 @@ def test_scheduler_reports_v32_status_independently_of_legacy() -> None:
     )
     # both exits carry the V3.2 fields
     assert src.count('**v32_fields') >= 2
+
+
+# ===========================================================================
+# P0-2: a legacy Anchor precondition failure must NOT roll back the V3.2 lane
+# ===========================================================================
+class _NilResult:
+    def scalars(self):
+        return self
+
+    def all(self):
+        return []
+
+    def scalar_one_or_none(self):
+        return None
+
+
+class _CommitSession:
+    """Minimal session: the pipeline's DB collaborators are all monkeypatched,
+    so only ``commit`` needs to be plausible."""
+
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def execute(self, *args, **kwargs):
+        return _NilResult()
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+async def test_pipeline_keeps_v32_when_legacy_anchor_unpublished(
+    monkeypatch,
+) -> None:
+    """The legacy lane raises AnchorNotPublishedError; the pipeline must return
+    normally (carrying v32_status='succeeded') so the outer caller can commit
+    V3.2 — it must NOT propagate and roll the V3.2 writes back.
+    """
+    from uuid import uuid4
+
+    from app.services import (
+        auction_aggregation_service,
+        auction_publication_service,
+        auction_quote_capture_service,
+        auction_scan_service,
+        auction_truth_service,
+        auction_v32_analysis_service,
+    )
+    from app.services.auction_scheduler_service import run_verified_auction_pipeline
+
+    cap_id = uuid4()
+
+    async def _capture(db, *a, **k):
+        return {"capture_run_id": cap_id}
+
+    async def _v32(db, **k):
+        return writer.V32RunOutcome(
+            "succeeded", run_id=uuid4(), capture_run_id=cap_id, scope_count=3
+        )
+
+    def _truth(*a, **k):
+        return {
+            "status": "verified",
+            "coverage": 1.0,
+            "verified_quotes": [],
+            "decisions": [],
+        }
+
+    async def _sources(*a, **k):
+        return []
+
+    async def _raise_anchor(db, *a, **k):
+        raise auction_scan_service.AnchorNotPublishedError("no published anchor")
+
+    monkeypatch.setattr(
+        auction_quote_capture_service, "capture_auction_final_quotes", _capture
+    )
+    monkeypatch.setattr(
+        auction_v32_analysis_service, "run_v32_auction_analysis", _v32
+    )
+    monkeypatch.setattr(auction_truth_service, "aggregate_auction_truth", _truth)
+    monkeypatch.setattr(auction_truth_service, "fetch_quote_sources", _sources)
+    monkeypatch.setattr(auction_scan_service, "run_auction_scan", _raise_anchor)
+    # referenced for completeness; never reached because legacy raises
+    _ = (auction_aggregation_service, auction_publication_service)
+
+    session = _CommitSession()
+    result = await run_verified_auction_pipeline(
+        session, _T, expected_symbols=[], test_namespace="production"
+    )
+
+    assert result["v32_status"] == "succeeded"
+    assert result["legacy_status"] == "unavailable"
+    assert result["legacy_reason"] == "anchor_not_published"
+    assert result["status"] == "legacy_unavailable"
+    # the pipeline returned, so the outer caller is free to commit
+    assert session.commits == 0  # the pipeline itself never commits

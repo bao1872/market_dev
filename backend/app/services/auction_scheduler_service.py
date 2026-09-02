@@ -94,7 +94,11 @@ async def run_verified_auction_pipeline(
     from app.services.auction_publication_service import publish_auction_analysis
     from app.services.auction_quote_capture_service import capture_auction_final_quotes
     from app.services.auction_quote_provider import MootdxAuctionQuoteProvider
-    from app.services.auction_scan_service import run_auction_scan
+    from app.services.auction_scan_service import (
+        AnchorExpiredError,
+        AnchorNotPublishedError,
+        run_auction_scan,
+    )
     from app.services.auction_truth_service import (
         StaticAuctionQuoteProvider,
         VerifiedAuctionQuoteProvider,
@@ -162,9 +166,9 @@ async def run_verified_auction_pipeline(
         expected_symbols=expected_symbols,
     )
     # ------------------------------------------------------------------
-    # V3.2 lane — INDEPENDENT of legacy Anchor / Structure / Chip.
-    # It is triggered by "verified consensus capture ready" alone, so a legacy
-    # Anchor failure can never prevent V3.2 from running.  The two lanes report
+    # V3.2 lane — committed in the SAME transaction as the pipeline.  A legacy
+    # Anchor *precondition* failure (AnchorNotPublishedError / AnchorExpiredError)
+    # is isolated below so it cannot roll V3.2 back.  The two lanes report
     # separate statuses; neither masquerades as the other.
     # ------------------------------------------------------------------
     v32_outcome = await run_v32_auction_analysis(
@@ -183,13 +187,33 @@ async def run_verified_auction_pipeline(
         "v32_detail": v32_outcome.detail,
     }
 
-    scan = await run_auction_scan(
-        db,
-        trade_date,
-        auction_type="final",
-        worker_id=worker_id,
-        lease_epoch=lease_epoch,
-    )
+    # Legacy lane runs AFTER V3.2.  V3.2 has already flushed its ScopeResult
+    # and publication into this same transaction, so a legacy Anchor *precondition*
+    # failure must NOT abort the pipeline: that would roll back V3.2 too.  Only
+    # these two known legacy precondition errors are isolated; everything else
+    # (including AuctionScanConflictError) is left to propagate to the caller.
+    try:
+        scan = await run_auction_scan(
+            db,
+            trade_date,
+            auction_type="final",
+            worker_id=worker_id,
+            lease_epoch=lease_epoch,
+        )
+    except (AnchorNotPublishedError, AnchorExpiredError) as exc:
+        return {
+            **v32_fields,
+            "status": "legacy_unavailable",
+            "legacy_status": "unavailable",
+            "legacy_reason": (
+                "anchor_not_published"
+                if isinstance(exc, AnchorNotPublishedError)
+                else "anchor_expired"
+            ),
+            "truth_status": "verified",
+            "capture_run_id": consensus_capture["capture_run_id"],
+        }
+
     run_id = scan.get("run_id")
     if run_id is None or scan.get("status") not in ("succeeded", "partial"):
         # legacy lane failed/skipped: V3.2 has ALREADY run and keeps its own status

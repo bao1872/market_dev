@@ -64,6 +64,27 @@ def is_effective_at(edge: MembershipEdge, trade_date: date) -> bool:
     return edge.effective_to > trade_date
 
 
+def definition_version_effective_in_window(
+    effective_from: date | None,
+    effective_to: date | None,
+    trade_date: date,
+    window_start: date,
+) -> bool:
+    """A ``BoardDefinitionVersion`` is usable for the window iff it overlaps
+    ``[window_start, T]`` (half-open on both ends, mirroring the membership rule).
+
+    A membership row can still overlap the window while the board definition that
+    created it has already ended; without this check the stale board would leak
+    into the scope.  Used by the V3.2 loader in addition to the equivalent SQL
+    predicate so the rule is unit-testable without a database.
+    """
+    if effective_from is None or effective_from > trade_date:
+        return False
+    if effective_to is not None and effective_to <= window_start:
+        return False
+    return True
+
+
 def resolve_scope_members(
     edges: Sequence[MembershipEdge],
     trade_date: date,
