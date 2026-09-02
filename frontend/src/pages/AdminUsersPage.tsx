@@ -2089,7 +2089,7 @@ export default function AdminUsersPage() {
 
       {/* 重置密码弹窗：confirm 仅前端校验，只向后端发送 new_password */}
       {resetPwdOpen && selectedMember && (
-        <div className="modal-backdrop" onClick={handleCloseResetPassword}>
+        <div className="modal-backdrop open" onClick={handleCloseResetPassword}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">重置密码</div>
             <div className="modal-body">
@@ -2144,7 +2144,7 @@ export default function AdminUsersPage() {
 
       {/* 飞书配置弹窗：字段沿用 SettingsPage 的 feishu_platform_app 行为 */}
       {feishuFormOpen && selectedMember && (
-        <div className="modal-backdrop" onClick={handleCloseFeishuForm}>
+        <div className="modal-backdrop open" onClick={handleCloseFeishuForm}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
             <div className="modal-head">
               {feishuEditing ? '编辑飞书配置' : '添加飞书配置'}

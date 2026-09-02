@@ -1153,11 +1153,12 @@ async def compute_all_indicators(
                 "strategy_name": "Bollinger",
                 "layer_id": "bb",
                 "layer_name": "Bollinger",
-                "renderer": "bollinger",
+                "renderer": "band",
                 "pane": "price",
                 "color": "#9aa7bd",
                 "direction_colored": False,
-                "fields": ["bb_upper", "bb_mid", "bb_lower", "bb_pos", "bb_width"],
+                # 字段顺序须对齐前端 renderIndicatorBand：fields[0]=upper, [1]=lower, [2]=middle
+                "fields": ["bb_upper", "bb_lower", "bb_mid", "bb_pos", "bb_width"],
                 "hover_fields": ["bb_upper", "bb_mid", "bb_lower"],
             })
             data["bb"] = _to_json_safe(_truncate_lists(bb_renamed, bars))
