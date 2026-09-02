@@ -16,6 +16,7 @@ import pytest
 from app.domain.auction.analysis_preparation import V32PreparationResult, V32PreparedScope
 from app.domain.auction.coverage import ScanCoverage
 from app.services import auction_v32_analysis_service as writer
+from app.services.auction_publication_service import AuctionPublicationGateError
 from app.services.auction_scan_run_lifecycle import AuctionScanConflictError
 from app.services.auction_v32_input_loader import V32InputUnavailableError
 
@@ -196,6 +197,52 @@ async def test_failure_marks_run_failed_and_does_not_publish(
     assert calls["failed"], "the SAME run must be marked failed"
     assert calls["failed"][0]["run"].id == _RUN_ID
     assert calls["publish"] == []
+
+
+async def test_publication_gate_after_success_is_unavailable_not_failed(
+    session: _Session, monkeypatch
+) -> None:
+    """complete succeeded -> publication gate rejects -> run stays succeeded.
+
+    A formally-gated publication (e.g. scan coverage < 0.95) must NOT rewrite the
+    already-terminal run to ``failed``; it returns a truthful ``unavailable``.
+    """
+    calls = _install(monkeypatch)
+
+    async def _gate(db, **kwargs):
+        calls["publish"].append(kwargs)
+        raise AuctionPublicationGateError("scan_coverage_below_threshold")
+
+    monkeypatch.setattr(writer, "publish_auction_analysis", _gate)
+
+    outcome = await writer.run_v32_auction_analysis(
+        session, trade_date=_T, capture_run_id=_CAPTURE, worker_id="worker-A"
+    )
+    assert outcome.status == "unavailable"
+    assert outcome.detail.startswith("publication_gate:")
+    assert "scan_coverage_below_threshold" in outcome.detail
+    assert outcome.scope_count == 2
+    assert outcome.run_id == _RUN_ID
+    assert calls["failed"] == [], "terminal run must not be re-marked failed"
+    assert calls["publish"], "publication was attempted"
+
+
+async def test_unexpected_publication_error_is_reraised_not_swallowed(
+    session: _Session, monkeypatch
+) -> None:
+    """A non-gate publication failure must propagate — never false-green."""
+    calls = _install(monkeypatch)
+
+    async def _boom(db, **kwargs):
+        raise RuntimeError("db connection lost")
+
+    monkeypatch.setattr(writer, "publish_auction_analysis", _boom)
+
+    with pytest.raises(RuntimeError):
+        await writer.run_v32_auction_analysis(
+            session, trade_date=_T, capture_run_id=_CAPTURE, worker_id="worker-A"
+        )
+    assert calls["failed"] == [], "unexpected errors must not be hidden as 'failed'"
 
 
 async def test_unavailable_inputs_are_reported_separately(

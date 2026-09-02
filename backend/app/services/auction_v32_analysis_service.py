@@ -28,7 +28,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.auction.analysis_preparation import prepare_v32_analysis
 from app.domain.auction.member_fact import AuctionMemberFactConfig
-from app.services.auction_publication_service import publish_auction_analysis
+from app.services.auction_publication_service import (
+    AuctionPublicationGateError,
+    publish_auction_analysis,
+)
 from app.services.auction_scan_run_lifecycle import (
     AuctionScanConflictError,
     acquire_v32_scan_run,
@@ -153,22 +156,6 @@ async def run_v32_auction_analysis(
             expected_lease_epoch=lease,
         )
 
-        # 6. formal publication owner (only after the run is succeeded)
-        await publish_auction_analysis(
-            db,
-            scan_run_id=run.id,
-            capture_run_id=capture_run_id,
-            truth_status=truth_status,
-            test_namespace=test_namespace,
-        )
-
-        return V32RunOutcome(
-            _STATUS_SUCCEEDED,
-            run_id=run.id,
-            capture_run_id=capture_run_id,
-            scope_count=len(prepared.scopes),
-        )
-
     except V32InputUnavailableError as exc:
         await mark_scan_run_failed(
             db,
@@ -188,6 +175,35 @@ async def run_v32_auction_analysis(
             expected_lease_epoch=lease,
         )
         return V32RunOutcome(_STATUS_FAILED, run_id=run.id, detail=str(exc))
+
+    # --- Phase 2: publication is a SEPARATE state layer, after terminal success ---
+    # The run is already ``succeeded``; a publication gate failure must NOT rewrite
+    # it to ``failed`` (that would also re-trigger authoritative fencing and mask
+    # the real gate reason).  An unexpected publication error is left to propagate
+    # so the outer transaction rolls back instead of going false-green.
+    try:
+        await publish_auction_analysis(
+            db,
+            scan_run_id=run.id,
+            capture_run_id=capture_run_id,
+            truth_status=truth_status,
+            test_namespace=test_namespace,
+        )
+    except AuctionPublicationGateError as exc:
+        return V32RunOutcome(
+            _STATUS_UNAVAILABLE,
+            run_id=run.id,
+            capture_run_id=capture_run_id,
+            scope_count=len(prepared.scopes),
+            detail=f"publication_gate:{exc}",
+        )
+
+    return V32RunOutcome(
+        _STATUS_SUCCEEDED,
+        run_id=run.id,
+        capture_run_id=capture_run_id,
+        scope_count=len(prepared.scopes),
+    )
 
 
 def _default_config() -> AuctionMemberFactConfig:

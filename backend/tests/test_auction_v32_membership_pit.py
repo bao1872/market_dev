@@ -14,7 +14,6 @@ from app.domain.auction.membership_pit import (
     FAMILY_CONCEPT,
     FAMILY_INDUSTRY,
     MembershipEdge,
-    definition_version_effective_in_window,
     is_effective_at,
     resolve_scope_members,
     resolve_scope_members_bulk,
@@ -146,31 +145,7 @@ def test_empty_edges_yield_no_scopes() -> None:
 # ---------------------------------------------------------------------------
 # P1: BoardDefinitionVersion PIT window (not just membership row)
 # ---------------------------------------------------------------------------
-def test_definition_version_overlapping_window_is_effective() -> None:
-    assert definition_version_effective_in_window(
-        date(2026, 1, 1), None, date(2026, 8, 14), _D0
-    ) is True
-    # boundary: definition version begins exactly at window_start
-    assert definition_version_effective_in_window(
-        _D0, None, date(2026, 8, 14), _D0
-    ) is True
-    # boundary: definition version still open at window_start
-    assert definition_version_effective_in_window(
-        date(2026, 1, 1), date(2026, 12, 31), date(2026, 8, 14), _D0
-    ) is True
-
-
-def test_definition_version_ended_before_window_is_not_effective() -> None:
-    """Counterexample: membership row overlaps, but its board definition ended
-    before the window — the scope must not be built from a stale board."""
-    assert definition_version_effective_in_window(
-        date(2026, 1, 1), date(2026, 3, 31),
-        date(2026, 8, 14), _D0,
-    ) is False
-
-
-def test_definition_version_starting_after_trade_date_is_not_effective() -> None:
-    assert definition_version_effective_in_window(
-        date(2026, 9, 1), None,
-        date(2026, 8, 14), _D0,
-    ) is False
+# NOTE: BoardDefinitionVersion PIT is now enforced as the *intersection* of the
+# membership and definition-version intervals in the loader
+# (``_load_membership_edges``); regression coverage lives in
+# tests/test_auction_v32_input_loader.py (mid-window start / end + history series).

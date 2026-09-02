@@ -14,7 +14,6 @@ loop, so no N+1.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from datetime import date
 from uuid import UUID
@@ -30,7 +29,6 @@ from app.domain.auction.membership_pit import (
     FAMILY_CONCEPT,
     FAMILY_INDUSTRY,
     MembershipEdge,
-    definition_version_effective_in_window,
 )
 from app.models.auction import AuctionFinalQuote, AuctionQuoteCaptureRun
 from app.models.board_taxonomy import (
@@ -150,34 +148,30 @@ async def load_official_trade_slots(
 # ---------------------------------------------------------------------------
 # 2.2 expected universe
 # ---------------------------------------------------------------------------
-def _is_active_ashare(symbol: str | None, status: str | None) -> bool:
-    """Active A-share口径 — shared with the Auction capture / consensus path.
+def expected_active_ashare_stmt():
+    """Active A-share口径 — the single production owner, shared with the Auction
+    capture / consensus path.
 
-    An instrument is in-scope only when ``status == active`` AND its symbol is a
-    6-digit numeric code.  ``Instrument.market`` is ``SH`` / ``SZ`` / ``BJ``, not
-    a single ``"A"`` value, so filtering on ``market == "A"`` would empty the
-    universe and silently move every missing stock out of the coverage
-    denominator.
+    ``status == active`` AND a 6-digit numeric symbol.  ``Instrument.market`` is
+    ``SH`` / ``SZ`` / ``BJ``, never a single ``"A"`` value, so filtering on
+    ``market == "A"`` would empty the universe and silently move every missing
+    stock out of the coverage denominator.
     """
-    if status != "active":
-        return False
-    return re.fullmatch(r"\d{6}", symbol or "") is not None
-
-
-async def load_expected_universe(db: AsyncSession) -> tuple[UUID, ...]:
-    """The formal expected active A-share universe (coverage denominator).
-
-    Uses the active-A-share口径 from the capture / consensus path
-    (``status == active`` AND a 6-digit symbol), never ``Instrument.market``.
-    """
-    stmt = (
+    return (
         select(Instrument.id)
         .where(
             Instrument.status == "active",
             Instrument.symbol.op("~")(r"^\d{6}$"),
         )
     )
-    return tuple((await db.execute(stmt)).scalars().all())
+
+
+async def load_expected_universe(db: AsyncSession) -> tuple[UUID, ...]:
+    """The formal expected active A-share universe (coverage denominator).
+
+    Consumes :func:`expected_active_ashare_stmt` — never ``Instrument.market``.
+    """
+    return tuple((await db.execute(expected_active_ashare_stmt())).scalars().all())
 
 
 def _to_observation(row: AuctionFinalQuote) -> AuctionMemberObservation:
@@ -301,10 +295,14 @@ async def _load_membership_edges(
         def_from,
         def_to,
     ) in rows:
-        # defense-in-depth: the pure, unit-tested helper mirrors the SQL above
-        if not definition_version_effective_in_window(
-            def_from, def_to, trade_date, window_start
-        ):
+        # The effective edge interval is the INTERSECTION of the membership row
+        # and its BoardDefinitionVersion PIT intervals.  Keeping only the
+        # membership interval (the previous bug) leaked future / stale definition
+        # versions into historical Scope Facts — a point-in-time violation.
+        edge_from = eff_from if eff_from >= def_from else def_from
+        edge_to = _earliest_non_null(eff_to, def_to)
+        if edge_to is not None and edge_to <= edge_from:
+            # the two PIT intervals do not actually overlap
             continue
         edges.append(
             MembershipEdge(
@@ -312,11 +310,20 @@ async def _load_membership_edges(
                 scope_key=external_code,
                 scope_name=name,
                 family=board_type,
-                effective_from=eff_from,
-                effective_to=eff_to,
+                effective_from=edge_from,
+                effective_to=edge_to,
             )
         )
     return tuple(edges)
+
+
+def _earliest_non_null(a: date | None, b: date | None) -> date | None:
+    """Return the earlier of two (possibly ``None``) exclusive end dates."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return a if a < b else b
 
 
 # ---------------------------------------------------------------------------
