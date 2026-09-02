@@ -349,6 +349,11 @@ export default function AdminUsersPage() {
     selectedMember?.user_id ?? null,
     !!selectedMember,
   )
+  // delete_channel 是软删除（status=inactive），而 list_user_channels 仍会返回它
+  // （既有 service 语义，不改动）。UI 视 inactive 为"未配置"。
+  const userChannel = (userChannelsQuery.data?.items ?? []).find(
+    (c) => c.status !== 'inactive',
+  )
   const createUserChannelMut = useAdminCreateUserChannel()
   const updateUserChannelMut = useAdminUpdateUserChannel()
   const deleteUserChannelMut = useAdminDeleteUserChannel()
@@ -676,7 +681,7 @@ export default function AdminUsersPage() {
   const handleOpenFeishuForm = useCallback(
     (mode: 'create' | 'edit') => {
       if (mode === 'edit') {
-        const ch = (userChannelsQuery.data?.items ?? [])[0]
+        const ch = userChannel
         if (!ch) return
         const cfg = (ch.target_config ?? {}) as Record<string, unknown>
         const rawSecret = String(cfg.app_secret ?? '')
@@ -701,7 +706,7 @@ export default function AdminUsersPage() {
       }
       setFeishuFormOpen(true)
     },
-    [userChannelsQuery.data],
+    [userChannel],
   )
 
   /** 关闭飞书配置表单 */
@@ -712,7 +717,7 @@ export default function AdminUsersPage() {
   /** 提交飞书配置：绝不把脱敏值（****xxxx）当作真实 app_secret 提交 */
   const handleSubmitFeishu = useCallback(() => {
     if (!selectedMember) return
-    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    const ch = userChannel
     if (feishuEditing && !ch) return
 
     if (!feishuForm.display_name.trim()) {
@@ -785,7 +790,7 @@ export default function AdminUsersPage() {
     }
   }, [
     selectedMember,
-    userChannelsQuery.data,
+    userChannel,
     feishuEditing,
     feishuForm,
     updateUserChannelMut,
@@ -797,7 +802,7 @@ export default function AdminUsersPage() {
   /** 验证飞书渠道 */
   const handleVerifyFeishu = useCallback(() => {
     if (!selectedMember) return
-    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    const ch = userChannel
     if (!ch) return
     verifyUserChannelMut.mutate(
       { userId: selectedMember.user_id, channelId: ch.id },
@@ -817,12 +822,12 @@ export default function AdminUsersPage() {
         },
       },
     )
-  }, [selectedMember, userChannelsQuery.data, verifyUserChannelMut, toast])
+  }, [selectedMember, userChannel, verifyUserChannelMut, toast])
 
   /** 发送测试消息 */
   const handleTestFeishu = useCallback(() => {
     if (!selectedMember) return
-    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    const ch = userChannel
     if (!ch) return
     testUserChannelMut.mutate(
       { userId: selectedMember.user_id, channelId: ch.id },
@@ -840,12 +845,12 @@ export default function AdminUsersPage() {
         },
       },
     )
-  }, [selectedMember, userChannelsQuery.data, testUserChannelMut, toast])
+  }, [selectedMember, userChannel, testUserChannelMut, toast])
 
   /** 删除飞书渠道 */
   const handleDeleteFeishu = useCallback(() => {
     if (!selectedMember) return
-    const ch = (userChannelsQuery.data?.items ?? [])[0]
+    const ch = userChannel
     if (!ch) return
     deleteUserChannelMut.mutate(
       { userId: selectedMember.user_id, channelId: ch.id },
@@ -858,7 +863,7 @@ export default function AdminUsersPage() {
         },
       },
     )
-  }, [selectedMember, userChannelsQuery.data, deleteUserChannelMut, toast])
+  }, [selectedMember, userChannel, deleteUserChannelMut, toast])
 
   /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_months 默认 1） */
   const handlePlanChange = useCallback(
@@ -1602,7 +1607,7 @@ export default function AdminUsersPage() {
                   {!userChannelsQuery.isLoading && !userChannelsQuery.isError && (
                     <>
                       {(() => {
-                        const ch = (userChannelsQuery.data?.items ?? [])[0]
+                        const ch = userChannel
                         if (!ch) {
                           return (
                             <div className="empty">
