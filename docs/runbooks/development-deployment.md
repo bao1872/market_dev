@@ -9,9 +9,17 @@
 - 唯一本地入口是 `scripts/ops/panji-test-deploy`；
 - 唯一服务器实现是 `scripts/deploy/panji-deploy.sh`；
 - 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`；
-- 本 Runbook 不授权远程开发部署、migration 或业务数据操作，执行这些动作仍需用户在当前任务明确授权。
+- 本 Runbook 不授权 stable deployment、migration 或业务数据操作；source-only Live Refresh
+  仅在用户要求查看或验证远程效果时执行，并继承代码改动的治理等级。
 
-## 两条独立远程流程
+## 三条独立远程流程
+
+### live refresh（开发运行刷新）
+
+- 目标：把 source-only 改动同步到已建立的 Live Mount，并只刷新受影响进程；
+- 触发：用户要求查看或验证远程效果；
+- 边界：不 build environment image、不 recreate container、不 Migration、不写业务数据；
+- 入口与身份：仍使用正式入口和 `origin/dev` exact SHA，不允许单文件热修。
 
 ### stable runtime deployment（稳定运行部署）
 
@@ -54,7 +62,7 @@ Exploration 的 PostgreSQL 合同使用 `targeted-pg`；Migration 专项使用
 1. 确认当前分支为 `dev`，工作树内容已经精确提交并推送到 `origin/dev`。
 2. 确认目标 SHA 是完整 40 位 commit，且 `git merge-base --is-ancestor <SHA> origin/dev` 成功。
 3. 完成修改范围内的本地纯单元测试、静态检查和部署合同测试。
-4. 确认没有正在运行的正式盘后任务或其他会被服务重启中断的业务任务。
+4. Backend Live Refresh 或 Operational Deployment 前，确认没有会被受影响进程刷新中断的正式任务。
 5. 不在命令中加入数据库 apply、业务 run、publish、withdrawal 或临时恢复脚本。
 
 ## Dry Run
@@ -80,7 +88,7 @@ dry-run 也不读取真实 `MemAvailable`（内存 headroom 延后到真实部�
 
 ## 执行
 
-获得本轮明确远程开发部署授权后执行：
+用户要求查看/验证远程效果，或明确授权 stable deployment 后执行：
 
 ```bash
 scripts/ops/panji-test-deploy <FULL_SHA>
@@ -94,8 +102,9 @@ scripts/ops/panji-test-deploy <FULL_SHA>
 
 | 变化 | 动作 |
 |---|---|
-| 普通 Backend 代码 | 同步到 `/opt/panji-live/backend`，不构建镜像，重启 Python 服务 |
-| 普通 Frontend 代码 | 构建并同步 `frontend/dist`，不构建镜像，重启 frontend |
+| Backend API-only | 同步到 `/opt/panji-live/backend`，不构建/不 recreate，只 `restart backend` |
+| Backend shared/worker/影响不确定 | 同步，不构建/不 recreate，刷新相关 Python 服务（不确定时保守刷新全部） |
+| 普通 Frontend 代码 | 构建并同步 `frontend/dist`，不构建镜像，不重启 frontend |
 | Backend 依赖或 Dockerfile | 构建完整环境镜像 tag 组，仍以 Live Mount 运行 |
 | Frontend 依赖、Dockerfile 或 Nginx 运行环境 | 安装锁定依赖、构建 dist，并构建完整环境镜像 tag 组，仍以 Live Mount 运行 |
 | Capture Dockerfile | 构建完整环境镜像 tag 组，仍以 Live Mount 运行 |
@@ -103,6 +112,8 @@ scripts/ops/panji-test-deploy <FULL_SHA>
 | 纯文档/治理变化 | 不构建镜像、不执行 migration、不重启服务，只更新并核验目标 SHA |
 
 镜像构建口径：普通代码变化**零构建**（Live Mount 直接生效）。
+source-only backend 使用 `docker compose restart` 刷新现有进程，不使用
+`docker compose up --force-recreate`；frontend source-only 依靠 dist bind mount 直接生效。
 `docker-compose.prod.yml` 中 backend / frontend / worker-capture 共用同一个 `GIT_SHA` image tag，
 因此只要发生**任意**环境级变化，就必须把这三个镜像作为**同一 tag 组整体构建**，
 不存在"只构建受影响的那一个镜像"。构建完成后仍以 prod + live 叠加启动，
@@ -146,7 +157,7 @@ dry-run 或任何失败都会恢复原始 REF（分支名或 detached 完整 SHA
 - `/v1/health` 与 `/v1/health/ready` 通过；
 - `trading-backend` 的 Mounts 包含 `/opt/panji-live`（无条件核验）；
 - `trading-frontend` 的 Mounts 包含 `/opt/panji-live/frontend/dist`（无条件核验）；
-- 当 backend / migration / 首次 Live Mount 触发 Python 重启时，
+- 当 backend / migration / 首次 Live Mount 触发 Python refresh/recreate 时，
   全部 11 个共用 Live Mount 的 Python 服务（backend、worker-bars-scheduler、
   worker-strategy-scheduler、worker-calendar、worker-monitor、worker-strategy-batch、
   worker-outbox、worker-delivery、worker-after-close、worker-watchdog、worker-capture）

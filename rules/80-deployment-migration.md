@@ -36,6 +36,19 @@
 
 Exploration 不自动要求全域 Scheduler/Worker/Readiness release certification。
 
+### 3.1 Live Refresh 与 Operational Deployment
+
+在已核验的 Live Mount 开发运行栈中：
+
+- **Code Sync**：同步 backend source 或 frontend dist；
+- **Live Refresh**：Code Sync 后只 restart 受影响的应用进程；frontend source-only 不 restart；
+- **Operational Deployment**：container recreate、environment image build、Compose/runtime env
+  变化、Migration 或 stable Release。
+
+source-only Code Sync / Live Refresh 继承代码改动的 Level，不因远程同步或进程 restart 单独
+升级为 Level 3。它们仍必须经唯一正式入口、绑定 origin/dev exact SHA、保留 rollback owner、
+通过当前 claim 所需 health/smoke。Operational Deployment 继续执行 Level 3 门禁。
+
 ## 4. 正式部署方式
 
 运行方式、Live Mount/镜像模式、Compose、构建流程以当前 `docs/maps/80-system-runtime.md` 与正式 Runbook 为准。
@@ -295,6 +308,13 @@ Exploration 要求：
 - full release smoke；
 - 所有 Worker；
 - full closure。
+
+source-only Live Refresh 的动作范围：
+
+- frontend source：远端 build dist → sync，Nginx 容器不 restart；
+- backend API-only：sync → restart backend → endpoint/health smoke；
+- shared backend 或影响范围无法确定：sync → restart 相关 Python services → targeted smoke；
+- dependency/Dockerfile/runtime env/Compose/Migration：不得降级为 Live Refresh，走现有严格路径。
 
 ## 15. Hardening 部署
 

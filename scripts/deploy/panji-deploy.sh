@@ -76,6 +76,10 @@ PYTHON_SERVICES=(
     worker-capture
 )
 
+# source-only backend Live Refresh 的最小进程范围，由 classify_changes 计算。
+# API 层文件只影响 backend；shared/worker/未知 backend 代码保守刷新全部 Python 进程。
+BACKEND_LIVE_REFRESH_SERVICES=()
+
 DRY_RUN=false
 TARGET_SHA=""
 PREVIOUS_SHA=""
@@ -562,6 +566,8 @@ classify_changes() {
 
     cd "${REPO_ROOT}"
 
+    BACKEND_LIVE_REFRESH_SERVICES=()
+
     # 首次未知基线：四级解析全部失败，无法算 diff，只能全量同步。
     # 此时 migration 状态同样未知，必须执行 alembic upgrade head（幂等）。
     if [[ -z "${PREVIOUS_SHA}" ]]; then
@@ -569,6 +575,7 @@ classify_changes() {
         BACKEND_RUNTIME_CHANGED=true
         FRONTEND_RUNTIME_CHANGED=true
         MIGRATION_CHANGED=true
+        BACKEND_LIVE_REFRESH_SERVICES=("${PYTHON_SERVICES[@]}")
         return
     fi
 
@@ -582,6 +589,17 @@ classify_changes() {
     # backend 运行代码（Live Mount 同步范围）
     if echo "${changed_files}" | grep -qE '^backend/(app/|alembic/|alembic\.ini)'; then
         BACKEND_RUNTIME_CHANGED=true
+    fi
+
+    if [[ "${BACKEND_RUNTIME_CHANGED}" == "true" ]]; then
+        local backend_runtime_files
+        backend_runtime_files="$(echo "${changed_files}" | grep -E '^backend/(app/|alembic/|alembic\.ini)' || true)"
+        if [[ -n "${backend_runtime_files}" ]] \
+            && ! echo "${backend_runtime_files}" | grep -qvE '^backend/app/api/'; then
+            BACKEND_LIVE_REFRESH_SERVICES=(backend)
+        else
+            BACKEND_LIVE_REFRESH_SERVICES=("${PYTHON_SERVICES[@]}")
+        fi
     fi
 
     # frontend 运行代码（需要 build dist）
@@ -626,6 +644,7 @@ classify_changes() {
     log "  frontend_environment_changed=${FRONTEND_ENVIRONMENT_CHANGED}"
     log "  capture_environment_changed=${CAPTURE_ENVIRONMENT_CHANGED}"
     log "  compose_runtime_changed=${COMPOSE_RUNTIME_CHANGED}"
+    log "  backend_live_refresh_services=${BACKEND_LIVE_REFRESH_SERVICES[*]:-none}"
 }
 
 # 首次 Live Mount 部署强制覆盖：必须完整同步 Python 与前端运行代码并重建挂载，
@@ -1013,6 +1032,60 @@ restart_services() {
     return 0
 }
 
+# source-only Live Mount 快速刷新：容器定义与镜像均未变化，只重启现有进程，
+# 不执行 compose up / recreate。波次保持有界，backend 与 scheduler 仍做必要健康检查。
+live_refresh_services() {
+    local services=("$@")
+    if [[ ${#services[@]} -eq 0 ]]; then
+        log "无需 Live Refresh 任何服务"
+        return 0
+    fi
+    log "按波次 Live Refresh 服务（不 recreate）: ${services[*]}"
+    cd "${REPO_ROOT}"
+    SERVICES_RESTARTED=true
+
+    _wave_refresh() {
+        local wave_name="$1"; shift
+        local wave_services=("$@")
+        if [[ ${#wave_services[@]} -eq 0 ]]; then
+            return 0
+        fi
+        log "  Live Refresh 波次 [${wave_name}]: ${wave_services[*]}"
+        run_with_timeout "compose_restart_${wave_name}" "${TIMEOUT_COMPOSE_UP_SECONDS}" -- \
+            ${COMPOSE_CMD} restart "${wave_services[@]}" || return 1
+    }
+
+    local wave_backend=() wave_scheduler=() wave_workers=() wave_recovery=() wave_capture=()
+    local service
+    for service in "${services[@]}"; do
+        case "${service}" in
+            backend) wave_backend+=("${service}") ;;
+            worker-bars-scheduler|worker-strategy-scheduler|worker-calendar)
+                wave_scheduler+=("${service}") ;;
+            worker-capture) wave_capture+=("${service}") ;;
+            worker-after-close|worker-watchdog) wave_recovery+=("${service}") ;;
+            worker-monitor|worker-strategy-batch|worker-outbox|worker-delivery)
+                wave_workers+=("${service}") ;;
+            postgres|redis|umami|frontend)
+                log "  跳过非 Python Live Refresh 服务: ${service}"
+                ;;
+            *) wave_workers+=("${service}") ;;
+        esac
+    done
+
+    _wave_refresh backend "${wave_backend[@]}" || return 1
+    if [[ ${#wave_backend[@]} -gt 0 ]]; then
+        _wait_health || return 1
+    fi
+    _wave_refresh scheduler "${wave_scheduler[@]}" || return 1
+    if [[ ${#wave_scheduler[@]} -gt 0 ]]; then
+        _check_scheduler_single_instance || return 1
+    fi
+    _wave_refresh workers "${wave_workers[@]}" || return 1
+    _wave_refresh recovery "${wave_recovery[@]}" || return 1
+    _wave_refresh capture "${wave_capture[@]}" || return 1
+}
+
 # [ROUND2 / P1-B] Compose-only 运行时配置对账：不 --force-recreate，交给 Docker
 # Compose 自身判断哪些服务配置变化并仅重创那些。与 restart_services 的 force-recreate
 # 语义解耦（后者仍用于真正的代码/环境/Migration 重启）。不重启数据服务。
@@ -1125,6 +1198,25 @@ _backend_runtime_will_mutate() {
         || "${COMPOSE_RUNTIME_CHANGED}" == "true" ]]
 }
 
+# 本次动作是否会刷新 worker-after-close 进程。API-only source refresh 只重启 backend，
+# 不应为了无关进程建立 supervisor-drain fence；shared/unknown backend、环境、Migration、
+# Compose 与首次 Live Mount 仍会影响 after-close runtime，必须保留完整 fence。
+_after_close_process_will_refresh() {
+    [[ "${PANJI_MOCK_BACKEND_RUNTIME_CHANGED:-0}" == "1" ]] && return 0
+    [[ "${FIRST_LIVE_DEPLOY}" == "true" \
+        || "${BACKEND_ENVIRONMENT_CHANGED}" == "true" \
+        || "${CAPTURE_ENVIRONMENT_CHANGED}" == "true" \
+        || "${MIGRATION_CHANGED}" == "true" \
+        || "${COMPOSE_RUNTIME_CHANGED}" == "true" ]] && return 0
+    if [[ "${BACKEND_RUNTIME_CHANGED}" == "true" ]]; then
+        local service
+        for service in "${BACKEND_LIVE_REFRESH_SERVICES[@]}"; do
+            [[ "${service}" == "worker-after-close" ]] && return 0
+        done
+    fi
+    return 1
+}
+
 # 从 ENV_FILE 读取 compose 的 POSTGRES_USER / POSTGRES_DB（未定义时回退默认 bz / bz_stock）。
 _pg_conn_var() {
     local key="$1"
@@ -1184,8 +1276,8 @@ WORKER_CLAIMABLE_STATES=(queued resume_queued)
 DEPLOYMENT_CONFLICT_STATES=(running queued resume_queued)
 
 guard_active_after_close_jobs() {
-    if ! _backend_runtime_will_mutate; then
-        log "backend runtime 不变化（不重启 Python 服务），跳过活跃盘后任务门禁"
+    if ! _after_close_process_will_refresh; then
+        log "worker-after-close runtime 不变化，跳过活跃盘后任务门禁"
         return 0
     fi
 
@@ -1719,7 +1811,7 @@ deploy() {
     # 首笔 runtime mutation 之前检查。fence 释放 worker-after-close 的 ~942MB anon 后，
     # 才是本次部署真实可用的 working set；不得在任何 fence 之前用 MemAvailable 门槛阻止部署
     # （那会阻止本可安全回收内存的部署）。MIN_MEM_MB 仍是保守部署 headroom，本轮不降低。
-    if _backend_runtime_will_mutate; then
+    if _after_close_process_will_refresh; then
         FAILURE_STAGE="after_close_fence"
         _fence_after_close_worker || return 1
         FAILURE_STAGE="deployment_memory_headroom"
@@ -1739,7 +1831,7 @@ deploy() {
     # [E2.1 P1-C] 线性化点门禁：紧邻第一笔 runtime mutation（update_env_file）之前，
     # 再次确认 AFTER_CLOSE_PICKUP_FENCED=true（容器已 EXITED 且 after_close running==0）。
     # queued/resume_queued 允许留队，不作为 blocker。
-    if _backend_runtime_will_mutate; then
+    if _after_close_process_will_refresh; then
         _backend_pickup_boundary_ready || \
             fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 runtime mutation（fail-closed）"
     fi
@@ -1792,7 +1884,8 @@ deploy() {
         log "migration_changed=false，跳过 alembic upgrade"
     fi
 
-    # 6. 重启：Python 服务与 frontend 分别判定；postgres/redis/umami 永不重启
+    # 6. Runtime action：source-only backend 走 Live Refresh；环境/首次挂载/Migration
+    #    才 recreate。frontend source-only 已由 bind-mounted dist 生效，不重启 Nginx。
     #
     # [DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE] 在每个可能
     # restart / recreate worker-after-close 的 runtime action 之前，复用同一
@@ -1807,21 +1900,40 @@ deploy() {
     # 若本次只有一种 runtime action，则不会产生无意义第三次检查。
     # guard 自身已在 backend runtime 不变化时直接放行（frontend-only 不被无关活跃任务阻塞）。
     FAILURE_STAGE="restart"
+    local refresh_list=()
     local restart_list=()
     if [[ "${need_backend}" == "true" ]]; then
-        # [E2.1 P1-C] worker-after-close 由 owned-aware restore 处理，不在此通用重启中 recreate
+        # worker-after-close 由 owned-aware restore 处理，不在通用 refresh/recreate 列表中。
         local _py_filtered=()
         local _s
-        for _s in "${PYTHON_SERVICES[@]}"; do
+        local _backend_action_services=("${PYTHON_SERVICES[@]}")
+        if [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
+            && "${BACKEND_ENVIRONMENT_CHANGED}" == "false" \
+            && "${CAPTURE_ENVIRONMENT_CHANGED}" == "false" \
+            && "${MIGRATION_CHANGED}" == "false" \
+            && "${FIRST_LIVE_DEPLOY}" == "false" ]]; then
+            _backend_action_services=("${BACKEND_LIVE_REFRESH_SERVICES[@]}")
+        fi
+        for _s in "${_backend_action_services[@]}"; do
             [[ "${_s}" == "worker-after-close" ]] && continue
             _py_filtered+=("${_s}")
         done
-        restart_list+=("${_py_filtered[@]}")
+        if [[ "${BACKEND_RUNTIME_CHANGED}" == "true" \
+            && "${BACKEND_ENVIRONMENT_CHANGED}" == "false" \
+            && "${CAPTURE_ENVIRONMENT_CHANGED}" == "false" \
+            && "${MIGRATION_CHANGED}" == "false" \
+            && "${FIRST_LIVE_DEPLOY}" == "false" ]]; then
+            refresh_list+=("${_py_filtered[@]}")
+        else
+            restart_list+=("${_py_filtered[@]}")
+        fi
         RESTARTED_PYTHON=true
     fi
-    if [[ "${need_frontend}" == "true" ]]; then
+    if [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" || "${FIRST_LIVE_DEPLOY}" == "true" ]]; then
         restart_list+=(frontend)
         RESTARTED_FRONTEND=true
+    elif [[ "${need_frontend}" == "true" ]]; then
+        log "  frontend source-only：dist 已同步到 bind mount，不重启 frontend 容器"
     fi
 
     # [ROUND2 / P1-B] Compose 运行配置变化（prod/live overlay）属纯配置对账，
@@ -1835,14 +1947,30 @@ deploy() {
         log "  Compose 运行配置变化：应用容器将以新 Compose 配置对账（PYTHON_SERVICES + frontend，不 force-recreate）"
     fi
 
-    # 代码/环境/Migration 运行变化：restart_services（force-recreate）为权威路径。
+    # source-only backend：docker compose restart，不 recreate。
+    if [[ ${#refresh_list[@]} -gt 0 ]]; then
+        FAILURE_STAGE="active_job_gate_pre_live_refresh"
+        if _after_close_process_will_refresh && ! _backend_pickup_boundary_ready; then
+            log "错误: AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 Live Refresh（fail-closed）"
+            return 1
+        fi
+        FAILURE_STAGE="live_refresh"
+        _mark_containers_mutated
+        live_refresh_services "${refresh_list[@]}" || return 1
+    fi
+
+    # 环境/Migration/首次挂载变化：restart_services（force-recreate）为权威路径。
     if [[ ${#restart_list[@]} -gt 0 ]]; then
         # final guard：紧邻 restart_services（--force-recreate）之前，复用同一 owner。
         # 显式 || return 1，保证门禁失败（存在活跃 after-close 强制任务）即 fail-closed 阻止重启，
         # 不依赖外层 set -e。
         FAILURE_STAGE="active_job_gate_pre_restart"
-        _backend_pickup_boundary_ready || \
-            fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝重启 worker-after-close（fail-closed）"
+        if _after_close_process_will_refresh; then
+            if ! _backend_pickup_boundary_ready; then
+                log "错误: AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝重启 Python runtime（fail-closed）"
+                return 1
+            fi
+        fi
         FAILURE_STAGE="restart"
         # [E2.1 P1-A §6] 容器级 mutation 起点：此后失败必须走容器级精确回滚。
         _mark_containers_mutated
@@ -1859,8 +1987,10 @@ deploy() {
         # 故仍需 final guard 拦截 reconcile 前新接纳的活跃 after-close 任务。
         # 显式 || return 1，保证门禁失败即 fail-closed 阻止配置对账。
         FAILURE_STAGE="active_job_gate_pre_reconcile"
-        _backend_pickup_boundary_ready || \
-            fail "AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 Compose 对账（fail-closed）"
+        if ! _backend_pickup_boundary_ready; then
+            log "错误: AFTER_CLOSE_PICKUP_NOT_FENCED: 部署临界区未建立，拒绝 Compose 对账（fail-closed）"
+            return 1
+        fi
         FAILURE_STAGE="compose_reconcile"
         local _recon_filtered=()
         local _rs
@@ -1869,7 +1999,7 @@ deploy() {
             _recon_filtered+=("${_rs}")
         done
         reconcile_compose_runtime "${_recon_filtered[@]}" frontend || return 1
-    elif [[ ${#restart_list[@]} -eq 0 ]]; then
+    elif [[ ${#restart_list[@]} -eq 0 && ${#refresh_list[@]} -eq 0 ]]; then
         log "无运行代码变化，不重启任何服务（仅刷新 RUNTIME_SHA 与核验）"
     fi
 

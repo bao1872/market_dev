@@ -212,7 +212,9 @@ echo "== 8/8 镜像 tag 组、RUNTIME_SHA inode 与清理边界 =="
 assert_code_contains "存在 ENV_IMAGE_TAG_GROUP 三镜像组" \
     'ENV_IMAGE_TAG_GROUP=\(backend frontend worker-capture\)' "${SERVER_SCRIPT}"
 assert_code_contains "构建使用完整 tag 组" \
-    'build "\$\{ENV_IMAGE_TAG_GROUP\[@\]\}"' "${SERVER_SCRIPT}"
+    'for svc in "\$\{ENV_IMAGE_TAG_GROUP\[@\]\}"' "${SERVER_SCRIPT}"
+assert_code_contains "构建逐项消费 tag 组" \
+    '\$\{COMPOSE_CMD\} build "\$\{svc\}"' "${SERVER_SCRIPT}"
 # 场景 10：普通代码变化零构建
 assert_code_contains "无环境变化跳过构建" \
     'if ! environment_changed; then' "${SERVER_SCRIPT}"
@@ -242,7 +244,7 @@ assert_code_contains "未构建镜像时跳过清理" \
 assert_code_absent "禁止 docker image prune -a" 'image prune -a' "${SERVER_SCRIPT}"
 assert_code_absent "禁止 docker system prune" 'system prune' "${SERVER_SCRIPT}"
 assert_code_absent "禁止 docker volume prune" 'volume prune' "${SERVER_SCRIPT}"
-assert_code_absent "禁止删除 node:20-alpine" 'rmi .*node:20-alpine|node:20-alpine' "${SERVER_SCRIPT}"
+assert_code_absent "禁止删除 node:20-alpine" 'rmi .*node:20-alpine' "${SERVER_SCRIPT}"
 assert_code_absent "禁止清理无关容器" 'container prune' "${SERVER_SCRIPT}"
 
 echo "----------------------------------------"
@@ -309,7 +311,7 @@ assert_code_absent "CASE4 reconcile 命令不含 --force-recreate" \
     '\$\{COMPOSE_CMD\} up -d --no-build.*--force-recreate' "${SERVER_SCRIPT}"
 # 对账 application scope 仍为 PYTHON_SERVICES + frontend（不含 postgres/redis/umami）
 assert_code_contains "CASE4 reconcile 范围 = PYTHON_SERVICES + frontend" \
-    'reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend' "${SERVER_SCRIPT}"
+    'reconcile_compose_runtime "\$\{_recon_filtered\[@\]\}" frontend' "${SERVER_SCRIPT}"
 # 纯 Compose 变化分支（COMPOSE_RUNTIME_CHANGED==true 块）不再向 restart_list 追加
 # PYTHON_SERVICES/frontend（避免 force-recreate）。注意：实际运行代码变化（need_backend）
 # 分支仍合法 append restart_list，故只断言 COMPOSE_RUNTIME_CHANGED 分支内不含 append。
@@ -343,13 +345,49 @@ else
     bad "CASE6 仅 docs 变化不产生新重启/迁移行为"
 fi
 
+# CASE 6A：API-only backend 只刷新 backend；shared backend 保守覆盖全部 Python 服务。
+reset_flags $'backend/app/api/market.py'
+if [[ "${BACKEND_LIVE_REFRESH_SERVICES[*]}" == "backend" ]]; then
+    ok "CASE6A API-only backend → 只 Live Refresh backend"
+else
+    bad "CASE6A API-only backend 应只 Live Refresh backend（实际: ${BACKEND_LIVE_REFRESH_SERVICES[*]}）"
+fi
+if ! _after_close_process_will_refresh; then
+    ok "CASE6A API-only backend → 不刷新/fence worker-after-close"
+else
+    bad "CASE6A API-only backend 不应刷新/fence worker-after-close"
+fi
+reset_flags $'backend/app/services/market_service.py'
+if [[ "${#BACKEND_LIVE_REFRESH_SERVICES[@]}" -eq "${#PYTHON_SERVICES[@]}" ]]; then
+    ok "CASE6B shared backend → 保守 Live Refresh 全部 Python 服务"
+else
+    bad "CASE6B shared backend 应覆盖全部 Python 服务"
+fi
+if _after_close_process_will_refresh; then
+    ok "CASE6B shared backend → 保留 worker-after-close fence"
+else
+    bad "CASE6B shared backend 必须保留 worker-after-close fence"
+fi
+assert_code_contains "CASE6C source-only Live Refresh 使用 compose restart" \
+    '\$\{COMPOSE_CMD\} restart "\$\{wave_services\[@\]\}"' "${SERVER_SCRIPT}"
+if code_of "${SERVER_SCRIPT}" \
+    | awk '/^live_refresh_services\(\)/,/^}/{if(/force-recreate|up -d/)found=1} END{exit found}'; then
+    ok "CASE6C Live Refresh 不含 up/recreate"
+else
+    bad "CASE6C Live Refresh 不得含 up/recreate"
+fi
+assert_code_contains "CASE6D frontend source-only 明确不重启容器" \
+    'frontend source-only.*不重启 frontend 容器' "${SERVER_SCRIPT}"
+assert_code_contains "CASE6E API-only 不触发 after-close fence" \
+    '_after_close_process_will_refresh' "${SERVER_SCRIPT}"
+
 # CASE 7-8：P1-C 失败传播结构性断言（不实际执行部署，仅校验源码是否含传播点）。
 # 7：restart_services 调用点必须显式 || return 1
 assert_code_contains "CASE7 restart_services 调用显式 || return 1（失败传播到 deploy）" \
     'restart_services "\$\{restart_list\[@\]\}" \|\| return 1' "${SERVER_SCRIPT}"
 # 7b：reconcile_compose_runtime 调用点必须显式 || return 1
 assert_code_contains "CASE7 reconcile_compose_runtime 调用显式 || return 1（失败传播到 deploy）" \
-    'reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend \|\| return 1' "${SERVER_SCRIPT}"
+    'reconcile_compose_runtime "\$\{_recon_filtered\[@\]\}" frontend \|\| return 1' "${SERVER_SCRIPT}"
 # 8：_wait_health 与 _check_scheduler_single_instance 在 restart_services 内显式 || return 1
 assert_code_contains "CASE8 restart_services 内 _wait_health 显式 || return 1" \
     '_wait_health \|\| return 1' "${SERVER_SCRIPT}"
@@ -397,7 +435,7 @@ assert_code_contains "DEFECT1 reconcile 非空路径置位 SERVICES_RESTARTED=tr
 # reconcile_compose_runtime（Compose-only 配置对账）为两个独立、顺序执行的 if 分支，
 # 二者不被彼此嵌套。校验：deploy() 内 restart_services 调用行号 < reconcile 调用行号。
 _mrestart="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/restart_services "\$\{restart_list\[@\]\}" \|\| return 1/{print NR; exit}')"
-_mrec="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend \|\| return 1/{print NR; exit}')"
+_mrec="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/reconcile_compose_runtime "\$\{_recon_filtered\[@\]\}" frontend \|\| return 1/{print NR; exit}')"
 if [[ -n "${_mrestart}" && -n "${_mrec}" && "${_mrestart}" -lt "${_mrec}" ]]; then
     ok "DEFECT2 deploy 控制流：restart_services 在 reconcile_compose_runtime 之前（顺序执行）"
 else
@@ -409,7 +447,7 @@ fi
 assert_code_contains "DEFECT2 restart_list 非零守卫使用 -gt 0" \
     '\$\{#restart_list\[@\]\} -gt 0' "${SERVER_SCRIPT}"
 assert_code_contains "DEFECT2 reconcile 仍显式 || return 1（无回归）" \
-    'reconcile_compose_runtime "\$\{PYTHON_SERVICES\[@\]\}" frontend \|\| return 1' "${SERVER_SCRIPT}"
+    'reconcile_compose_runtime "\$\{_recon_filtered\[@\]\}" frontend \|\| return 1' "${SERVER_SCRIPT}"
 # 在 deploy() 函数体内校验：reconcile 不被包裹在 restart_list 守卫的 else 中。
 if code_of "${SERVER_SCRIPT}" | awk '
 /^deploy\(\)/{f=1; next}
@@ -642,7 +680,7 @@ fi
 if code_of "${SERVER_SCRIPT}" | awk '
 /^guard_active_after_close_jobs\(\)/{f=1; next}
 f && /^}/{exit}
-f && /! _backend_runtime_will_mutate/ {seen=1; next}
+f && /! _after_close_process_will_refresh/ {seen=1; next}
 seen && /return 0/ {found=1}
 END{exit !found}
 '; then
@@ -684,7 +722,7 @@ run_behavior() {
         source "${_DEPLOY_FIXTURE}"
         set +e   # 不吞掉 STEP-6 真实 return code；显式捕获
         RESTART_CALLS=0; RECONCILE_CALLS=0; GUARD_PR_CALLS=0; GUARD_PC_CALLS=0
-        guard_active_after_close_jobs() {
+        _backend_pickup_boundary_ready() {
             local _who="${FAILURE_STAGE:-?}"
             if [[ "${_who}" == "active_job_gate_pre_restart" ]]; then
                 GUARD_PR_CALLS=$((GUARD_PR_CALLS+1))

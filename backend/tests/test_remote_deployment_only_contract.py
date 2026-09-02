@@ -27,12 +27,12 @@ def _active_shell_lines(source: str) -> list[str]:
 
 def test_remote_deployment_rule_is_indexed_and_explicit() -> None:
     rules_index = _read("rules/README.md")
-    rule = _read("rules/81-remote-deployment-only.md")
+    rule = _read("rules/80-deployment-migration.md")
 
-    assert "81-remote-deployment-only.md" in rules_index
-    assert "盘迹所有部署只能发生在远程运行服务器 `panji-prod`" in rule
-    assert "本地执行 `scripts/ops/panji-test-deploy` 只是发起远程部署控制流程" in rule
-    assert "实际部署使用的 `frontend/dist` 必须由远程服务器" in rule
+    assert "80-deployment-migration.md" in rules_index
+    assert "盘迹实际运行部署只发生在远程运行服务器 `panji-prod`" in rule
+    assert "Live Refresh" in rule
+    assert "origin/dev exact SHA" in rule
 
 
 def test_local_controller_contains_no_deployment_implementation() -> None:
@@ -167,20 +167,19 @@ def test_active_job_gate_runs_before_worker_after_close_recreate() -> None:
     assert gate < restart
 
 
-def test_gate_fail_closed_blocks_and_allows_when_no_active_jobs() -> None:
-    """CASE 4: 无活跃任务 → 门禁继续部署；有强制阻塞活跃任务 → fail-closed 带证据停止。"""
+def test_gate_reports_conflicts_for_supervisor_drain() -> None:
+    """冲突任务先可见化，再由 supervisor-drain 自然排空，不在只读检查中伪造完成。"""
     body = _guard_body()
     assert "status = 'running'" in body, "活跃过滤必须以 SchedulerJobRun.status='running' 为真值"
-    assert "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY" in body
-    # 无强制阻塞活跃任务时有明确的继续路径（非 fail），而不是任何非空都拒绝。
+    assert "DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE" in body
+    assert "supervisor-drain fence" in body
     assert "无强制阻塞盘后长任务，继续部署" in body
     # 查询为只读 SELECT，不允许业务写入。
     for forbidden in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER"):
         assert forbidden not in body, f"门禁查询不得包含写操作: {forbidden}"
-    # 失败路径仅在检测到强制阻塞活跃任务时触发。
-    fail_idx = _line(body, 'fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY')
     active_idx = _line(body, '[[ -n "${blocking_out}" ]]')
-    assert active_idx < fail_idx, "fail 必须位于强制阻塞活跃检测分支之后"
+    visibility_idx = _line(body, 'log "DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE"')
+    assert active_idx < visibility_idx
 
 
 # =============================================================================
@@ -204,12 +203,11 @@ def test_gate_splits_blocking_and_preemptible_job_sets() -> None:
     assert "after_close_orchestrator" in blocking_arr
     assert "after_close_chip_consensus" not in blocking_arr
     assert "after_close_chip_consensus" in preempt_arr
-    # 门禁函数体只引用集合名，不内联 Chip/orchestrator 字面量到失败分支。
+    # 门禁函数体只引用集合名；强制任务交给 supervisor-drain，Chip 只记录增强任务证据。
     body = _guard_body()
     assert "PREEMPTIBLE_ENHANCEMENT_ACTIVE" in body
-    # 函数体内唯一的 fail 仅由 BLOCKING 检测触发（blocking_out），PREEMPTIBLE 分支不 fail。
-    assert 'fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY' in body
     assert "[[ -n \"${blocking_out}\" ]]" in body
+    assert "DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE" in body
     # PREEMPTIBLE 分支不得包含任何 fail 调用。
     preempt_section = body.split("PREEMPTIBLE_ENHANCEMENT_ACTIVE")[1]
     assert "fail " not in preempt_section, "PREEMPTIBLE 分支不得触发 fail"
@@ -226,17 +224,16 @@ def test_gate_allows_when_only_chip_running() -> None:
     assert "PREEMPTIBLE_ENHANCEMENT_ACTIVE" in body
 
 
-def test_gate_fail_closed_when_orchestrator_running() -> None:
-    """CASE 2: after_close_orchestrator = running → 部署门禁 fail-closed。"""
+def test_gate_routes_orchestrator_running_to_drain_visibility() -> None:
+    """orchestrator running 必须可见，并由后续 supervisor-drain 安全排空。"""
     script = _script()
-    # orchestrator 属于 BLOCKING 集合，其 running 命中 blocking_out → fail。
+    # orchestrator 属于 blocking 集合，其状态必须进入 drain visibility。
     blocking_arr = script.split("BLOCKING_AFTER_CLOSE_JOB_NAMES=(")[1].split(")")[0]
     assert "after_close_orchestrator" in blocking_arr
     body = _guard_body()
     assert "BLOCKING_AFTER_CLOSE_JOB_NAMES" in body
-    # 失败证据必须包含 orchestrator 类任务并触发 fail。
-    fail_idx = _line(body, 'fail "ACTIVE_AFTER_CLOSE_JOB_BLOCKS_DEPLOY')
-    assert fail_idx >= 0
+    assert "DEPLOYMENT_PENDING_AFTER_CLOSE_VISIBLE=TRUE" in body
+    assert "supervisor-drain fence" in body
 
 
 def test_gate_allows_when_chip_running_and_orchestrator_queued() -> None:
@@ -259,8 +256,8 @@ def test_gate_allows_when_no_active_jobs() -> None:
 def test_gate_frontend_only_unchanged() -> None:
     """CASE 5: frontend-only 部署不受 worker-after-close 活跃任务阻塞（不变）。"""
     body = _guard_body()
-    assert "_backend_runtime_will_mutate" in body, "门禁必须由 backend mutation 判定守卫"
-    guard_idx = _line(body, "_backend_runtime_will_mutate")
+    assert "_after_close_process_will_refresh" in body, "门禁必须由 after-close process impact 判定守卫"
+    guard_idx = _line(body, "_after_close_process_will_refresh")
     query_idx = _line(body, "psql")
     assert guard_idx < query_idx, "必须在执行查询前先判定本次是否变更 backend runtime"
     # 门禁覆盖全部 worker-after-close 业务任务（FIX A）：job_name 集合定义在脚本内。

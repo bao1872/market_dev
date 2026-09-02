@@ -126,8 +126,13 @@ summary、coverage 与 cleanup 为准。
 - 首次 Live Mount 部署由 `docker inspect` 判定（`trading-backend` / `trading-frontend`
   是否挂载 `/opt/panji-live`）。判定为首次时强制全量同步 Python 与前端运行代码以建立挂载，
   但**不会**据此设置 `migration_changed`；
-- 普通 Backend 代码只同步 Live Mount，不构建镜像；
-- 普通 Frontend 代码在服务器生成 `dist` 后同步，不构建镜像；
+- 普通 Backend 代码只同步 Live Mount，不构建镜像、不 recreate：API-only 只执行
+  `docker compose restart backend`；shared/worker/影响不确定时 refresh 相关 Python 服务，
+  不确定范围保守取全部 Python 服务；
+- 普通 Frontend 代码在服务器生成 `dist` 后同步，不构建镜像、不重启 frontend，
+  由 Nginx 的 dist bind mount 直接读取新产物；
+- dependency/Dockerfile/runtime environment、首次 Live Mount、Migration 仍走容器重建或现有
+  严格路径；Compose 变化由 Compose 对账，不归入 source-only Live Refresh；
 - backend / frontend / worker-capture 三个镜像共用同一 `GIT_SHA` tag。依赖、Dockerfile、
   系统依赖或必须烘焙的 Nginx 配置变化时，必须把三者作为**同一 tag 组整体构建**，
   不存在只构建其中一个的做法；

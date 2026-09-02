@@ -80,7 +80,9 @@ An independent audit may be requested when ownership or blast radius is unclear.
 
 Triggered by:
 
-- Migration, deployment, production runtime mutation, or worker restart;
+- Migration or production data mutation;
+- dependency/runtime-environment, Dockerfile, Compose, secrets, or permission changes;
+- runtime recreate, environment-image build, or stable release deployment;
 - `bz_stock` access that can write or mutate data;
 - bootstrap, backfill, repair, withdrawal, deletion, or destructive cleanup;
 - secrets, permissions, protected Owner data, or irreversible operations.
@@ -94,6 +96,14 @@ Required path:
 5. Re-authorization if the action exceeds the approved target or scope.
 
 When more than one level applies, the highest level wins.
+
+In `EXPLORATION`, source-only synchronization into the registered Live Mount and a
+restart of only the affected application process are a **Live Refresh**. A Live
+Refresh inherits the governance level of the code change and is not Level 3 solely
+because source files or a process are refreshed. It must still use the registered
+runtime entry, preserve exact identity and rollback, and run the smoke evidence
+required by the claim. Runtime recreate, environment build, Migration, data
+operation, and stable release remain Level 3.
 
 ## 4. Authority map
 
@@ -183,7 +193,9 @@ Without explicit current-task authorization, never:
 
 - perform destructive or irreversible actions with unclear scope;
 - write, migrate, repair, backfill, or delete data in `bz_stock`;
-- deploy or mutate the stable remote runtime;
+- recreate/build/migrate or deploy the stable remote runtime;
+- Live Refresh the remote development runtime unless the user asked to see or
+  validate the change there;
 - restart workers, trigger Scheduler/AfterClose/full-market jobs, or publish results;
 - alter protected Owner identity, credentials, roles, permissions, or subscriptions;
 - expose or commit secrets, passwords, private keys, or production credentials;

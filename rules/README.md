@@ -28,8 +28,10 @@ schema、manifest、test、checker 或 runner 证明的合同，不在多个 Mar
 - **Level 1 Normal Exploration**：局部非契约改动；modified-scope evidence。
 - **Level 2 Contract-Sensitive**：owner、canonical、lineage、readiness、workflow、resume、
   idempotency、artifact、shared contract、evidence registration。
-- **Level 3 Operational / Destructive**：migration、deployment、production data/runtime、
-  repair、withdraw、bootstrap、destructive cleanup。
+- **Level 3 Operational / Destructive**：migration、runtime/environment rebuild or recreate、
+  stable release deployment、production data mutation、repair、withdraw、bootstrap、destructive cleanup。
+
+source-only Code Sync / Live Refresh 继承代码改动等级，不因同步或受影响进程 restart 单独升级。
 
 多个条件命中时取最高等级。详细路由由 `AGENTS.md` 唯一拥有。
 
@@ -83,11 +85,16 @@ schema、manifest、test、checker 或 runner 证明的合同，不在多个 Mar
 
 ## 5. Exploration 的默认 Definition of Done
 
-一个 hypothesis iteration 只有在以下工程门槛全部满足后，才进入用户产品判断：
+一个 hypothesis iteration 先完成：
 
-`PRD/业务逻辑 → 代码逻辑 → modified-scope unit → 必要 contract/integration → 真实 runtime → API → frontend binding`
+`PRD/业务逻辑 → 代码逻辑 → modified-scope correctness → claim 所需的最小证据`
 
-然后由用户判断：
+证据边界由本轮 completion claim 决定，不机械展开完整纵向链：纯函数/算法内部通常到
+targeted unit；API bug 到 unit + endpoint smoke；UI 数据绑定到 contract + API + frontend；
+纯样式到 lint/build + 页面；持久化合同到 unit/contract + 必要 targeted PG。只有 claim
+本身涉及真实 runtime、API 或 frontend binding 时才闭合对应链路。
+
+当当前 hypothesis 需要用户产品判断时，再把所需真实结果送达用户，由用户判断：
 
 - 视觉表达是否合适；
 - 研究价值是否成立；

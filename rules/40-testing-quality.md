@@ -97,6 +97,9 @@ fixture 或复制算法建立第二套看似合理的合同。
 - milestone / hardening；
 - modified-scope 无法合理界定。
 
+运行 full suite 前必须声明一个具体 `FULL_TEST_TRIGGER`，且只能来自上述条件。无法给出
+trigger 时停留在 modified-scope；不得以“更稳妥”“审计需要”或已有全量设施为理由升级。
+
 ### T7 — Remote PG / Synthetic E2E
 
 用于证明：
@@ -132,9 +135,9 @@ Exploration 只运行需要的 profile/gate，不默认 full-closure。
 
 通常：
 
-`T0 → T1 → [T2] → [T3] → [T4] → [T5/T7 only if required] → Runtime/Frontend`
+`T0 → T1 → [T2] → [T3] → [T4] → [T5/T7] → [Runtime/API/Frontend]`
 
-方括号表示按风险选择。
+方括号表示仅在本轮 claim 需要时选择。
 
 禁止默认追加：
 
@@ -143,6 +146,16 @@ Exploration 只运行需要的 profile/gate，不默认 full-closure。
 - production clone；
 - full regression；
 - 与当前 slice 无关的 E2E。
+
+## 3.1 Change Review 默认边界
+
+日常审查默认是 change-scope review：检查本次 diff、风险等级、correctness/contract/regression
+风险以及已有 evidence 是否覆盖 claim，只补最小缺失证据，然后给出 blocker / non-blocker
+并停止。审查优先消费绑定同一 diff/SHA 且身份可核验的既有 evidence，不因“独立审查”
+机械重复执行。
+
+全仓正式审计、第二次审计、full suite、部署或重新部署都不是 change review 的默认动作；
+只有命中明确 Hardening/Release trigger 或用户明确要求时才能升级。
 
 ## 4. 本地与远程测试模式
 

@@ -38,9 +38,7 @@
 - 业务逻辑；
 - 代码逻辑；
 - unit / contract / integration；
-- Runtime；
-- API；
-- frontend 数据绑定；
+- claim 涉及时的 Runtime / API / frontend 数据绑定；
 - build/targeted frontend test；
 - 提供访问路径与推荐样本。
 
@@ -60,6 +58,11 @@ IDE 不应把“用户先打开浏览器”作为完成工程技术验收的前�
 Exploration Runtime 的目标是：
 
 **证明当前 hypothesis slice 在真实环境和真实数据上工作。**
+
+Runtime 不是每个修改的默认完成门。只有 completion claim 涉及真实运行行为、真实数据、
+API 或 frontend 消费，或用户需要查看真实效果时才进入 Runtime。source-only Live Mount 同步
+及受影响应用进程刷新属于 Live Refresh，治理等级继承代码改动；环境/容器重建、Migration、
+数据操作和 Release 不属于 Live Refresh。
 
 不自动要求：
 
@@ -137,9 +140,9 @@ Exploration Runtime 的目标是：
 
 - 当前 slice correctness 通过；
 - required tests 通过；
-- 真实 runtime 通过；
-- API/前端技术绑定通过；
-- 用户已经可以开始产品判断；
+- claim 要求的真实 runtime 通过（如适用）；
+- claim 要求的 API/前端技术绑定通过（如适用）；
+- 需要产品判断时，用户已经可以开始判断；
 
 立即 STOP。
 
