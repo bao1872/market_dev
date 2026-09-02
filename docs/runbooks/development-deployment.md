@@ -103,7 +103,7 @@ scripts/ops/panji-test-deploy <FULL_SHA>
 | 变化 | 动作 |
 |---|---|
 | Backend API-only | 同步到 `/opt/panji-live/backend`，不构建/不 recreate，只 `restart backend` |
-| Backend shared/worker/影响不确定 | 同步，不构建/不 recreate，刷新相关 Python 服务（不确定时保守刷新全部） |
+| 其他 Backend runtime source | 同步，不构建/不 recreate，当前保守 classifier 刷新全部 Python services；`worker-after-close` 继续走既有 owned fence/restore |
 | 普通 Frontend 代码 | 构建并同步 `frontend/dist`，不构建镜像，不重启 frontend |
 | Backend 依赖或 Dockerfile | 构建完整环境镜像 tag 组，仍以 Live Mount 运行 |
 | Frontend 依赖、Dockerfile 或 Nginx 运行环境 | 安装锁定依赖、构建 dist，并构建完整环境镜像 tag 组，仍以 Live Mount 运行 |
@@ -114,6 +114,8 @@ scripts/ops/panji-test-deploy <FULL_SHA>
 镜像构建口径：普通代码变化**零构建**（Live Mount 直接生效）。
 source-only backend 使用 `docker compose restart` 刷新现有进程，不使用
 `docker compose up --force-recreate`；frontend source-only 依靠 dist bind mount 直接生效。
+当前 backend classifier 只有两档：API-only 刷新 `backend`，其他 backend runtime source
+保守刷新全部 Python services；不承诺细粒度“相关 worker”分析。
 `docker-compose.prod.yml` 中 backend / frontend / worker-capture 共用同一个 `GIT_SHA` image tag，
 因此只要发生**任意**环境级变化，就必须把这三个镜像作为**同一 tag 组整体构建**，
 不存在"只构建受影响的那一个镜像"。构建完成后仍以 prod + live 叠加启动，

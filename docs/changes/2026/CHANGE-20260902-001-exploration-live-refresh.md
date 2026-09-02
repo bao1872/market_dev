@@ -14,8 +14,14 @@ source-only 业务修改仍可能自动升级为完整 runtime closure 与容器
 - source-only Code Sync / Live Refresh 继承代码改动等级，不因 restart 单独升级 Level 3；
 - frontend source-only：build dist → sync，不 restart Nginx；
 - backend API-only：sync → `docker compose restart backend`；
-- shared/worker/影响不确定 backend：sync → refresh 相关 Python services，不确定时保守全量；
+- 其他 backend runtime source：当前保守 classifier refresh 全部 Python services；
+  `worker-after-close` 继续走既有 owned fence/restore；当前不提供细粒度“相关 worker”分析；
 - environment image、container recreate、Compose、Migration、数据操作、Release 继续走 Level 3。
+
+Exploration completion evidence 只记录 claim 适用的 surface；runtime target/sample 与
+API/DB/frontend evidence 仅在对应 surface 属于 claim 时要求，否则标记 `N/A` 且无需执行。
+用户要求在 remote development runtime 查看或验证当前 change 时，该授权一次性覆盖注册
+classifier 选出的 process restarts，但不覆盖 job execution、publish、Migration 或数据操作。
 
 ## 安全边界
 

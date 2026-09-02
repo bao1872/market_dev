@@ -127,8 +127,9 @@ summary、coverage 与 cleanup 为准。
   是否挂载 `/opt/panji-live`）。判定为首次时强制全量同步 Python 与前端运行代码以建立挂载，
   但**不会**据此设置 `migration_changed`；
 - 普通 Backend 代码只同步 Live Mount，不构建镜像、不 recreate：API-only 只执行
-  `docker compose restart backend`；shared/worker/影响不确定时 refresh 相关 Python 服务，
-  不确定范围保守取全部 Python 服务；
+  `docker compose restart backend`；其他 backend runtime source 由当前保守 classifier
+  refresh 全部 Python services，`worker-after-close` 继续走既有 owned fence/restore；
+  当前不提供细粒度“相关 worker”分析；
 - 普通 Frontend 代码在服务器生成 `dist` 后同步，不构建镜像、不重启 frontend，
   由 Nginx 的 dist bind mount 直接读取新产物；
 - dependency/Dockerfile/runtime environment、首次 Live Mount、Migration 仍走容器重建或现有

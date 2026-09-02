@@ -308,13 +308,17 @@ marker 不能作为失败免责机制；如果是代码断言错误仍必须修�
 
 ### Exploration
 
-最低要求：
+证据只记录本轮 completion claim 实际覆盖的范围。最低要求：
 
-- exact commit SHA；
-- test command / test set；
-- PASS/FAIL；
-- runtime target date / sample；
-- 关键 API/DB/前端绑定证据。
+- completion claim 与 modified scope；
+- 实际运行的 test command / test set，以及 PASS/FAIL；未运行的 surface 必须如实标为
+  `N/A` 或 `not run`，不得伪装已验证；
+- exact commit SHA 仅在证据绑定已提交代码、远程 runtime 或正式 gate 时要求；
+- runtime target date / sample 仅在 claim 涉及 runtime 或真实数据时要求；
+- API、DB、frontend 绑定证据仅在对应 surface 属于 claim 时要求。
+
+不属于 completion claim 的 runtime、API、DB 或 frontend surface 标为 `N/A` 即可，
+不得仅为填充证据清单而执行对应验证。
 
 ### Hardening
 

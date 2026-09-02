@@ -313,7 +313,10 @@ source-only Live Refresh 的动作范围：
 
 - frontend source：远端 build dist → sync，Nginx 容器不 restart；
 - backend API-only：sync → restart backend → endpoint/health smoke；
-- shared backend 或影响范围无法确定：sync → restart 相关 Python services → targeted smoke；
+- 其他 backend runtime source：sync → 当前保守 classifier restart 全部 Python services →
+  targeted smoke；`worker-after-close` 继续走既有 owned fence/restore；
+- 当前 classifier 只提供上述两档，不要求 dependency graph、自动 import analysis 或
+  细粒度“相关 worker”影响矩阵；
 - dependency/Dockerfile/runtime env/Compose/Migration：不得降级为 Live Refresh，走现有严格路径。
 
 ## 15. Hardening 部署

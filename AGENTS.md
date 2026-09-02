@@ -189,6 +189,13 @@ Detailed flow is owned by `rules/50-git-development-flow.md`.
 
 ## 9. Highest safety boundaries
 
+For a registered Live Refresh, a current-task request to see or validate the
+current change on the remote development runtime authorizes the classifier-selected
+process restarts as one scoped action. It does not authorize classifier-external
+restart/recreate, Scheduler/AfterClose/full-market job execution, publication,
+Migration, backfill, repair, or data writes. Re-authorization is required if the
+classifier result exceeds the current change scope.
+
 Without explicit current-task authorization, never:
 
 - perform destructive or irreversible actions with unclear scope;
@@ -196,7 +203,8 @@ Without explicit current-task authorization, never:
 - recreate/build/migrate or deploy the stable remote runtime;
 - Live Refresh the remote development runtime unless the user asked to see or
   validate the change there;
-- restart workers, trigger Scheduler/AfterClose/full-market jobs, or publish results;
+- restart workers outside an authorized registered Live Refresh;
+- trigger Scheduler/AfterClose/full-market jobs or publish results;
 - alter protected Owner identity, credentials, roles, permissions, or subscriptions;
 - expose or commit secrets, passwords, private keys, or production credentials;
 - create unregistered local/CI/remote test databases;
