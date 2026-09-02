@@ -29,5 +29,6 @@ claim 所需 smoke。
 - governance/docs：已实现；
 - deploy fast path 与分类合同：已实现；
 - 本地 modified-scope contract：governance checker PASS；governance/deploy Python contracts
-  47 passed；deploy shell structure contracts 130 passed；完整 dry-run contract 待 clean SHA 复验；
+  47 passed；deploy shell structure contracts 130 passed；exact SHA `8ff747c9` 完整 deploy
+  dry-run contracts 110 passed；
 - remote Live Refresh / stable deployment：未执行，本任务只要求 push `dev`。
