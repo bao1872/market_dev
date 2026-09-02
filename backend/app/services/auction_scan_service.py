@@ -83,8 +83,14 @@ OPENING_TIME = time(9, 30)
 # [P0-4 修复 2026-07-31] 租约与 fencing 配置
 SCAN_RUN_LEASE_SECONDS = 1800  # 30 分钟（最终竞价扫描一般 5-10 分钟内完成）
 SCAN_RUN_HEARTBEAT_INTERVAL_SECONDS = 60
-# 租约过期判定：heartbeat_at距今超过此值则视为租约失效
-_LEASE_EXPIRED_SECONDS = 1800
+# 租约过期判定：语义 owner 现在是共享 lifecycle owner，此处仅薄引用以兼容旧 import。
+from app.services.auction_scan_run_lifecycle import (  # noqa: E402
+    LEASE_EXPIRED_SECONDS as _LEASE_EXPIRED_SECONDS,
+)
+from app.services.auction_scan_run_lifecycle import (  # noqa: E402,F401
+    AuctionScanConflictError,
+    is_lease_expired,
+)
 
 # [P0-5 修复 2026-07-31] 生命周期扩展：支持 confirmed → continued/weakened/failed/transformed/expired
 LIFECYCLE_TERMINAL_STATES = frozenset({"failed", "transformed", "expired"})
@@ -113,8 +119,8 @@ class AnchorExpiredError(ValueError):
     """锚点快照已过期，禁止扫描。"""
 
 
-class AuctionScanConflictError(ValueError):
-    """[P0-4] 同日 scan run 仍在运行且租约有效，拒绝重复执行。"""
+# [P0-4] 同日 scan run 仍在运行且租约有效，拒绝重复执行。
+# 语义 owner 已迁至共享 lifecycle owner；此处薄 re-export 以兼容既有 import 契约。
 
 
 class AuctionScanAlreadySucceededError(ValueError):
@@ -310,22 +316,12 @@ def _is_lease_expired(
 ) -> bool:
     """判定租约是否已过期。
 
-    Args:
-        heartbeat_at: 上次心跳时间
-        now: 当前时间（None 取 datetime.now(UTC)）
-        expired_seconds: 过期阈值（秒）
-
-    Returns:
-        True 表示租约已过期，可被 fencing 接管
+    规则本体已迁至共享 lifecycle owner（``auction_scan_run_lifecycle``）；
+    这里保留薄委托，legacy 调用点与自测无需改动，且不存在第二份判定逻辑。
     """
-    if heartbeat_at is None:
-        return True
-    current = now or datetime.now(UTC)
-    # 统一时区比较
-    if heartbeat_at.tzinfo is None:
-        heartbeat_at = heartbeat_at.replace(tzinfo=UTC)
-    delta = (current - heartbeat_at).total_seconds()
-    return delta > expired_seconds
+    return is_lease_expired(
+        heartbeat_at, now=now, expired_seconds=expired_seconds
+    )
 
 
 def _build_scan_run_summary(run: AuctionScanRun) -> dict[str, Any]:

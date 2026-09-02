@@ -32,9 +32,13 @@ from app.services.auction_publication_service import (
     AuctionPublicationGateError,
     evaluate_auction_publication_gate,
 )
+from app.services.auction_scan_run_lifecycle import (
+    V32_AUCTION_TYPE,
+    acquire_v32_scan_run,
+    complete_scan_run,
+)
 from app.services.auction_scope_persistence_service import (
     V32_ALGORITHM_VERSION,
-    build_scan_run_kwargs,
     build_scope_result_kwargs,
 )
 
@@ -158,26 +162,59 @@ def test_publication_gate_error_type_exists_for_callers() -> None:
 # ---------------------------------------------------------------------------
 # scan run / scope result preparation (still V3.2-owned, non-publication)
 # ---------------------------------------------------------------------------
-def test_scan_run_leaves_anchor_foreign_keys_null() -> None:
-    kwargs = build_scan_run_kwargs(
-        trade_date=_T, coverage=compute_scan_coverage([_obs(0.01, 100.0)])
-    )
-    assert kwargs["source_anchor_snapshot_id"] is None
-    assert kwargs["source_anchor_publication_id"] is None
+class _FlushOnlySession:
+    """Minimal session: no existing run, records nothing."""
+
+    def __init__(self) -> None:
+        self.added: list = []
+
+    async def execute(self, stmt, *args, **kwargs):
+        class _R:
+            def scalar_one_or_none(self):
+                return None
+
+        return _R()
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
+
+    async def flush(self) -> None:
+        for obj in self.added:
+            if getattr(obj, "id", None) is None:
+                import uuid
+
+                obj.id = uuid.uuid4()
 
 
-def test_scan_run_uses_v32_algorithm_version() -> None:
-    kwargs = build_scan_run_kwargs(
-        trade_date=_T, coverage=compute_scan_coverage([_obs(0.01, 100.0)])
-    )
-    assert kwargs["algorithm_version"] == V32_ALGORITHM_VERSION
+async def _acquired_run():
+    """A V3.2 run produced by the single lifecycle owner."""
+    return await acquire_v32_scan_run(_FlushOnlySession(), trade_date=_T, worker_id="w-test")
 
 
-def test_scan_run_coverage_projected_from_the_coverage_owner() -> None:
+async def test_scan_run_leaves_anchor_foreign_keys_null() -> None:
+    """V3.2 has no anchor: no anchor snapshot / publication may be fabricated."""
+    run = await _acquired_run()
+    assert run.source_anchor_snapshot_id is None
+    assert run.source_anchor_publication_id is None
+
+
+async def test_scan_run_uses_v32_algorithm_version() -> None:
+    run = await _acquired_run()
+    assert run.algorithm_version == V32_ALGORITHM_VERSION
+    assert run.auction_type == V32_AUCTION_TYPE
+
+
+async def test_scan_run_coverage_projected_from_the_coverage_owner() -> None:
+    """Completion PROJECTS coverage; it never recomputes it."""
     cov = compute_scan_coverage([_obs(0.01, 100.0), _obs(None, None)])
-    kwargs = build_scan_run_kwargs(trade_date=_T, coverage=cov)
-    assert kwargs["coverage_ratio"] == cov.coverage_ratio
-    assert kwargs["ready_count"] == cov.valid_count
+    run = await _acquired_run()
+
+    await complete_scan_run(_FlushOnlySession(), run, coverage=cov)
+
+    assert run.coverage_ratio == cov.coverage_ratio
+    assert run.ready_count == cov.valid_count
+    assert run.eligible_count == cov.eligible_count
+    assert run.missing_count == cov.missing_count
 
 
 def test_scope_result_accepts_valid_payload() -> None:

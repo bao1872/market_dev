@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
+from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
@@ -38,7 +39,12 @@ from app.domain.auction.version import V32_ALGORITHM_VERSION
 from app.models.auction import AuctionScanRun
 
 __all__ = [
+    "AuctionScanConflictError",
+    "complete_scan_run",
+    "mark_scan_run_failed",
+    "LEASE_EXPIRED_SECONDS",
     "V32_AUCTION_TYPE",
+    "is_lease_expired",
     "acquire_or_recover_scan_run",
     "acquire_v32_scan_run",
     "v32_clear_children",
@@ -47,6 +53,35 @@ __all__ = [
 #: V3.2 run identity component.  Combined with
 #: ``(trade_date, V32_ALGORITHM_VERSION)`` it is the unique run key.
 V32_AUCTION_TYPE = "scope_v32"
+
+#: Lease expiry threshold (seconds).  A single owner: legacy used to hold its
+#: own copy and the capture service still has a separate one, which is out of
+#: scope here — this value is the auction SCAN run contract.
+LEASE_EXPIRED_SECONDS = 1800
+
+
+class AuctionScanConflictError(ValueError):
+    """A run for the same identity is already running under a valid lease.
+
+    Raised instead of stealing another worker's run; the caller treats this as
+    "someone else owns it", never as a failure of the current execution.
+    """
+
+
+def is_lease_expired(
+    heartbeat_at: datetime | None,
+    *,
+    now: datetime | None = None,
+    expired_seconds: int = LEASE_EXPIRED_SECONDS,
+) -> bool:
+    """Whether a run's lease has expired and may be taken over (fencing)."""
+    if heartbeat_at is None:
+        return True
+    current = now or datetime.now(UTC)
+    if heartbeat_at.tzinfo is None:
+        heartbeat_at = heartbeat_at.replace(tzinfo=UTC)
+    return (current - heartbeat_at).total_seconds() > expired_seconds
+
 
 ClearChildren = Callable[[AsyncSession, UUID], Awaitable[None]]
 
@@ -72,13 +107,6 @@ async def acquire_or_recover_scan_run(
     succeeded (caller must then return the existing result instead of
     recomputing — idempotency is a return value, never an IntegrityError catch).
     """
-    # Imported lazily: auction_scan_service imports this module, so a
-    # module-level import would be circular.
-    from app.services.auction_scan_service import (
-        AuctionScanConflictError,
-        _is_lease_expired,
-    )
-
     current_now = _now(now)
     new_lease_epoch = (
         lease_epoch if lease_epoch is not None else int(current_now.timestamp())
@@ -118,7 +146,7 @@ async def acquire_or_recover_scan_run(
         return None
 
     if existing.status == "running":
-        if not _is_lease_expired(existing.heartbeat_at, now=current_now):
+        if not is_lease_expired(existing.heartbeat_at, now=current_now):
             raise AuctionScanConflictError(
                 f"trade_date={trade_date} auction_type={auction_type} "
                 f"run_id={existing.id} 仍在运行（worker={existing.worker_id}, "
@@ -147,6 +175,65 @@ async def acquire_or_recover_scan_run(
     existing.error_message = None
     await db.flush()
     return existing
+
+
+# ---------------------------------------------------------------------------
+# Completion / failure: owned here so no consumer invents a second terminal
+# status transition (and so publication always sees a consistent run status).
+# ---------------------------------------------------------------------------
+
+
+def _coverage_fields(coverage: Any) -> dict[str, Any]:
+    """Project the coverage OWNER's values onto run columns.
+
+    The lifecycle owner never recomputes coverage — it only projects what the
+    coverage owner already determined.
+    """
+    if coverage is None:
+        return {}
+    return dict(coverage.as_scan_run_fields())
+
+
+async def complete_scan_run(
+    db: AsyncSession,
+    run: AuctionScanRun,
+    *,
+    coverage: Any = None,
+    finished_at: datetime | None = None,
+) -> AuctionScanRun:
+    """Mark a run succeeded and project its coverage columns.
+
+    Must be called BEFORE publication: the formal publication gate reads
+    ``scan_run.status``, so publishing an unfinished run would be incoherent.
+    """
+    fields = _coverage_fields(coverage)
+    if fields:
+        run.eligible_count = fields["eligible_count"]
+        run.ready_count = fields["ready_count"]
+        run.coverage_ratio = fields["coverage_ratio"]
+        run.missing_count = fields["missing_count"]
+        run.missing_reasons = fields["missing_reasons"]
+
+    run.status = "succeeded"
+    run.finished_at = finished_at or datetime.now(UTC)
+    run.error_message = None
+    await db.flush()
+    return run
+
+
+async def mark_scan_run_failed(
+    db: AsyncSession,
+    run: AuctionScanRun,
+    *,
+    error_message: str,
+    finished_at: datetime | None = None,
+) -> AuctionScanRun:
+    """Mark a run failed on the SAME identity (never a second run row)."""
+    run.status = "failed"
+    run.finished_at = finished_at or datetime.now(UTC)
+    run.error_message = error_message[:4000]
+    await db.flush()
+    return run
 
 
 async def v32_clear_children(db: AsyncSession, scan_run_id: UUID) -> None:

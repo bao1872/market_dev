@@ -28,12 +28,11 @@ through the publication row.  Nothing here falls back to "latest succeeded run".
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, date, datetime
+from datetime import date
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.domain.auction.coverage import ScanCoverage
 from app.domain.auction.scope_payload import (
     SCHEMA_VERSION,
     canonical_scope_name,
@@ -44,13 +43,12 @@ from app.models.auction import (
     AuctionScanRun,
     AuctionScopeResult,
 )
+from app.services.auction_scan_run_lifecycle import V32_AUCTION_TYPE
 
 # KPI-1: the formal publication owner — the ONLY creator of publication rows.
-from app.services.auction_publication_service import publish_auction_analysis
 
 __all__ = [
     "V32_ALGORITHM_VERSION",
-    "build_scan_run_kwargs",
     "build_scope_result_kwargs",
     "persist_v32_scope_results",
 ]
@@ -61,42 +59,6 @@ __all__ = [
 
 _DEFAULT_PRICE_ADJUSTMENT_VERSION = "none"
 
-
-def build_scan_run_kwargs(
-    *,
-    trade_date: date,
-    coverage: ScanCoverage,
-    auction_type: str = "scope_v32",
-) -> dict[str, Any]:
-    """Assemble a V3.2 ``AuctionScanRun`` payload (pure, no session).
-
-    The algorithm version is NOT a parameter: a caller must never be able to
-    create a V3.2 run under a different algorithm identity, or write and read
-    would drift apart.
-
-    Coverage is NOT computed here: it arrives as a :class:`ScanCoverage` from the
-    single coverage owner (``domain/auction/coverage.py``).  This service only
-    projects the already-determined values onto the run columns.
-    """
-    fields = coverage.as_scan_run_fields()
-    return {
-        "trade_date": trade_date,
-        "auction_type": auction_type,
-        # No anchor forgery: V3.2 has no anchor snapshot / anchor publication.
-        "source_anchor_snapshot_id": None,
-        "source_anchor_publication_id": None,
-        "algorithm_version": V32_ALGORITHM_VERSION,
-        "price_adjustment_version": _DEFAULT_PRICE_ADJUSTMENT_VERSION,
-        "status": "succeeded",
-        "attempt_count": 1,
-        "eligible_count": fields["eligible_count"],
-        "ready_count": fields["ready_count"],
-        "coverage_ratio": fields["coverage_ratio"],
-        "missing_count": fields["missing_count"],
-        "missing_reasons": fields["missing_reasons"],
-        "started_at": datetime.now(UTC),
-        "finished_at": datetime.now(UTC),
-    }
 
 def build_scope_result_kwargs(
     *,
@@ -138,34 +100,57 @@ def build_scope_result_kwargs(
     }
 
 
+def validate_v32_run_identity(run: Any, *, trade_date: date) -> None:
+    """Fail-closed identity check for the run V3.2 results are written into.
+
+    AuctionScanRun has exactly ONE lifecycle owner
+    (:mod:`app.services.auction_scan_run_lifecycle`).  This function never
+    creates a run; it only refuses a run that is not the V3.2 run for
+    ``trade_date``, which would otherwise collide with
+    ``UNIQUE(trade_date, auction_type, algorithm_version)``.
+    """
+    if run.trade_date != trade_date:
+        raise ValueError(
+            f"scan run trade_date mismatch: run={run.trade_date} expected={trade_date}"
+        )
+    if run.auction_type != V32_AUCTION_TYPE:
+        raise ValueError(
+            f"scan run auction_type mismatch: {run.auction_type!r} "
+            f"expected {V32_AUCTION_TYPE!r}"
+        )
+    if run.algorithm_version != V32_ALGORITHM_VERSION:
+        raise ValueError(
+            f"scan run algorithm_version mismatch: {run.algorithm_version!r} "
+            f"expected {V32_ALGORITHM_VERSION!r}"
+        )
+    if run.status != "running":
+        raise ValueError(
+            f"scan run must be running to receive results, got {run.status!r}"
+        )
+
+
 async def persist_v32_scope_results(
     session: AsyncSession,
     *,
+    run: AuctionScanRun,
     trade_date: date,
     scope_results: list[dict[str, Any]],
-    capture_run_id: uuid.UUID,
-    test_namespace: str,
-    coverage: ScanCoverage,
-    truth_status: str,
 ) -> uuid.UUID:
-    """Atomically persist one V3.2 run: scan run -> scope results -> publication.
+    """Persist V3.2 scope results into an EXISTING run.
 
-    Everything happens in a single transaction that the CALLER commits, so a
-    partially written result set is never visible.  Returns the created
-    scan_run_id.  This function never calls ``session.commit()``.
+    This function does NOT create, complete or publish a run — the single
+    lifecycle owner does that.  It only validates the run identity, writes the
+    scope result children, and flushes.
 
-    The algorithm version is fixed to the V3.2 owner
-    (:mod:`app.domain.auction.version`); it is intentionally not a parameter, so
-    a caller cannot create a non-V3.2 run under this path.
-
-    ``truth_status`` / ``capture_source`` / ``test_namespace`` are inherited
-    from the real capture run and truth gate (no defaults, never fabricated).
+    Everything happens in the caller's transaction; ``session.commit()`` is
+    never called here.
     """
-    # Validate and normalise EVERY payload BEFORE the run row is created, so a
-    # malformed or foreign payload cannot leave a half-built run behind.
+    validate_v32_run_identity(run, trade_date=trade_date)
+    # Validate and normalise EVERY payload before touching the session, so a
+    # malformed payload cannot leave half-written children behind.
     prepared_rows = [
         build_scope_result_kwargs(
-            scan_run_id=None,  # filled in once the run id exists
+            scan_run_id=run.id,
             trade_date=trade_date,
             scope_type=row["scope_type"],
             scope_id=row.get("scope_id"),
@@ -176,31 +161,9 @@ async def persist_v32_scope_results(
         for row in scope_results
     ]
 
-    run = AuctionScanRun(
-        **build_scan_run_kwargs(
-            trade_date=trade_date,
-            coverage=coverage,
-        )
-    )
-    session.add(run)
-    await session.flush()  # materialise run.id before children reference it
-
     for kwargs in prepared_rows:
-        kwargs["scan_run_id"] = run.id
         session.add(AuctionScopeResult(**kwargs))
-
-    # KPI-1: the publication row is created by the EXISTING formal owner.
-    # It re-reads ScanRun / CaptureRun / ScopeResult and evaluates the gate;
-    # V3.2 must NOT interpret capture_source, coverage thresholds, namespace
-    # or truth_status semantics itself.  It only flushes, so the single
-    # transaction is closed by the commit below.
-    await publish_auction_analysis(
-        session,
-        scan_run_id=run.id,
-        capture_run_id=capture_run_id,
-        truth_status=truth_status,
-        test_namespace=test_namespace,
-    )
+    await session.flush()
 
     # No commit here: the caller/orchestrator owns the single transaction.
     return run.id

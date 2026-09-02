@@ -50,11 +50,15 @@ from app.domain.auction.scope_payload import (
     canonical_scope_key,
 )
 from app.domain.auction.version import V32_ALGORITHM_VERSION
+from app.models.auction import AuctionScanRun
 from app.services.auction_publication_service import (
     evaluate_auction_publication_gate,
 )
+from app.services.auction_scan_run_lifecycle import (
+    V32_AUCTION_TYPE,
+    complete_scan_run,
+)
 from app.services.auction_scope_persistence_service import (
-    build_scan_run_kwargs,
     build_scope_result_kwargs,
 )
 
@@ -72,6 +76,24 @@ _SCOPE_KEY = "IND_BANK"
 _SCOPE_NAME = "银行"
 
 
+class _FlushOnlySession:
+    """Minimal session for the lifecycle owner (no existing run)."""
+
+    def __init__(self) -> None:
+        self.added: list = []
+
+    async def execute(self, stmt, *args, **kwargs):
+        class _R:
+            def scalar_one_or_none(self):
+                return None
+
+        return _R()
+
+    def add(self, obj) -> None:
+        self.added.append(obj)
+
+    async def flush(self) -> None:
+        return None
 @dataclass
 class FakeScopeResultRow:
     scan_run_id: UUID
@@ -471,12 +493,18 @@ def test_chain_inputs_are_quote_rows_and_pit_membership_only() -> None:
     assert set(resolve_scope_members(concept_edges, _T, family=FAMILY_CONCEPT)["CPT_ROBOT"]) == set(members)
 
 
-def test_scan_coverage_is_produced_from_observations_not_history() -> None:
+async def test_scan_coverage_is_produced_from_observations_not_history() -> None:
     chain = _build_chain()
     coverage = compute_scan_coverage(chain["current"])
     assert coverage.eligible_count == 5
     assert coverage.valid_count == 5
     assert coverage.coverage_ratio == pytest.approx(1.0)
 
-    kwargs = build_scan_run_kwargs(trade_date=_T, coverage=coverage)
-    assert kwargs["coverage_ratio"] == coverage.coverage_ratio
+    # coverage projection is owned by the lifecycle owner's completion step
+    run = AuctionScanRun(
+        trade_date=_T,
+        auction_type=V32_AUCTION_TYPE,
+        algorithm_version=V32_ALGORITHM_VERSION,
+    )
+    await complete_scan_run(_FlushOnlySession(), run, coverage=coverage)
+    assert run.coverage_ratio == coverage.coverage_ratio
