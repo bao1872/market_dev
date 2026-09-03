@@ -451,9 +451,11 @@ class ReviewScopeCompositionDetailResponse(BaseModel):
             "[DSA closure] 成员身份目录（ADDITIVE display metadata，不写回、不改写 persisted "
             "Observation/Composition）：``{instrument_uuid: {symbol, name}}``。"
             "ref IDs = Composition leadership/attribution 引用 UNION "
-            "observation.trend.transition.changed_members 引用；ONE bulk Instrument query "
-            "（去重后一次性查）。Composition=null 不意味着目录一定为空：只要 Observation 含 "
-            "changed-member UUID，目录也能生成。前端唯一展示 owner ``displayMember(id)`` 用其解析 名称+代码。"
+            "observation.trend.transition.changed_members UNION "
+            "observation.structure.swing.transition.changed_members UNION "
+            "observation.structure.internal.transition.changed_members；ONE bulk Instrument query "
+            "（去重后一次性查）。Composition=null 不意味着目录一定为空：只要 Observation 任一 transition "
+            "含 changed-member UUID，目录也能生成。前端唯一展示 owner ``displayMember(id)`` 用其解析 名称+代码。"
         ),
     )
     history: ReviewScopeHistoryDTO | None = Field(

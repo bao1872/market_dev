@@ -29,6 +29,20 @@ import type {
 
 type Json = Record<string, unknown>
 
+// [SMC FINAL CORRECTION §2] SMC 页面投影 whitelist。
+// canonical raw Observation 仍允许保存其它事件（如 SQZ_RELEASE），但 SMC 投影只接入下列类型：
+// - Primary（BOS/CHoCH）→ bosChoch
+// - Secondary（OB_CREATED / OB_ENTERED / OB_MITIGATED / EQH / EQL）→ secondary
+// 任何非 whitelist 事件一律不进入 SMC VM。
+const SMC_PRIMARY_EVENT_TYPES = new Set(['BOS', 'CHoCH'])
+const SMC_SECONDARY_EVENT_TYPES = new Set([
+  'OB_CREATED',
+  'OB_ENTERED',
+  'OB_MITIGATED',
+  'EQH',
+  'EQL',
+])
+
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v)
 }
@@ -59,6 +73,24 @@ export interface SmcChangedMember {
   memberId: string
   previousState: string
   currentState: string
+}
+
+export type SmcTransitionState = 'unavailable' | 'no_changes' | 'changed'
+
+/**
+ * [SMC FINAL CORRECTION §1] 按 transition denominator 区分 Swing/Internal 迁移展示态：
+ * - denominator == null || denominator <= 0 → unavailable（T-1/T 共同有效成员不足，迁移数据不可用）
+ * - denominator > 0 && changedMembers 为空 → no_changes（无成员发生结构状态变化）
+ * - denominator > 0 && changedMembers 非空 → changed（展示变化成员）
+ * 不得仅用 changedMembers.length 判断。
+ */
+export function classifyTransition(
+  denominator: number | null,
+  changedMembers: SmcChangedMember[],
+): SmcTransitionState {
+  if (denominator == null || denominator <= 0) return 'unavailable'
+  if (changedMembers.length === 0) return 'no_changes'
+  return 'changed'
 }
 
 export interface SmcAlignmentFacts {
@@ -203,11 +235,13 @@ function parseEvents(node: unknown): SmcEventFacts | null {
       memberCount: isFiniteNumber(c['member_count']) ? (c['member_count'] as number) : null,
       memberRatio: isFiniteNumber(c['member_ratio']) ? (c['member_ratio'] as number) : null,
     }
-    if (et === 'BOS' || et === 'CHoCH') bosChoch.push(item)
-    else secondary.push(item)
+    if (SMC_PRIMARY_EVENT_TYPES.has(et)) bosChoch.push(item)
+    else if (SMC_SECONDARY_EVENT_TYPES.has(et)) secondary.push(item)
+    // 非 whitelist 事件（如 SQZ_RELEASE）一律不进入 SMC VM。
   }
   for (const [key, cell] of Object.entries(extreme)) {
     if (!cell || typeof cell !== 'object') continue
+    if (!SMC_SECONDARY_EVENT_TYPES.has(key)) continue // 非 whitelist 事件不进入 SMC
     const c = cell as Json
     secondary.push({
       eventType: key,
@@ -316,10 +350,12 @@ function buildStateVM(state: SmcStateFacts | null): SmcStateVM | null {
 }
 
 function buildTrailingVM(t: SmcTrailingDistance | null): SmcTrailingVM {
+  // [SMC FINAL CORRECTION §4] 单位 = percentage points：2.50 → "2.50%"，绝不 x100。
+  // React component 只消费本 VM 字符串，不在组件内做单位换算。
   return {
-    median: t?.median == null ? NULL_DISPLAY : formatNumberNullable(t.median, 2),
-    p25: t?.p25 == null ? NULL_DISPLAY : formatNumberNullable(t.p25, 2),
-    p75: t?.p75 == null ? NULL_DISPLAY : formatNumberNullable(t.p75, 2),
+    median: t?.median == null ? NULL_DISPLAY : `${formatNumberNullable(t.median, 2)}%`,
+    p25: t?.p25 == null ? NULL_DISPLAY : `${formatNumberNullable(t.p25, 2)}%`,
+    p75: t?.p75 == null ? NULL_DISPLAY : `${formatNumberNullable(t.p75, 2)}%`,
   }
 }
 
@@ -416,11 +452,13 @@ function rawEventsToFacts(raw: ReviewStructureEvents | null): SmcEventFacts | nu
       memberCount: isFiniteNumber(c['member_count']) ? (c['member_count'] as number) : null,
       memberRatio: isFiniteNumber(c['member_ratio']) ? (c['member_ratio'] as number) : null,
     }
-    if (et === 'BOS' || et === 'CHoCH') bosChoch.push(item)
-    else secondary.push(item)
+    if (SMC_PRIMARY_EVENT_TYPES.has(et)) bosChoch.push(item)
+    else if (SMC_SECONDARY_EVENT_TYPES.has(et)) secondary.push(item)
+    // 非 whitelist 事件（如 SQZ_RELEASE）一律不进入 SMC VM。
   }
   for (const [key, cell] of Object.entries(extreme)) {
     if (!cell || typeof cell !== 'object') continue
+    if (!SMC_SECONDARY_EVENT_TYPES.has(key)) continue // 非 whitelist 事件不进入 SMC
     const c = cell as Json
     secondary.push({
       eventType: key,

@@ -4,6 +4,7 @@ import {
   buildSmcVM,
   parseSmcHistory,
   smcDisplayMember,
+  classifyTransition,
   type SmcVM,
   type SmcChangedMember,
   type SmcHistoryStateEntry,
@@ -92,13 +93,17 @@ function ChangedMembersList({
   denominator: number | null
   memberDirectory?: MemberDirectory | null
 }) {
+  // [SMC FINAL CORRECTION §1] 按 denominator 区分，不得仅用 members.length 判断。
+  const transitionState = classifyTransition(denominator, members)
   return (
     <div style={{ marginBottom: 8 }}>
       <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>
         {title} <span style={{ fontWeight: 400, color: '#94a3b8' }}>(denom {denominator ?? '—'})</span>
       </div>
-      {members.length === 0 ? (
-        <div style={{ fontSize: 12, color: '#94a3b8' }}>今日无成员发生结构状态迁移</div>
+      {transitionState === 'unavailable' ? (
+        <div style={{ fontSize: 12, color: '#f59e0b' }}>迁移数据不可用（T-1/T 共同有效成员不足）</div>
+      ) : transitionState === 'no_changes' ? (
+        <div style={{ fontSize: 12, color: '#94a3b8' }}>无成员发生结构状态变化</div>
       ) : (
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
           {members.map((m) => (

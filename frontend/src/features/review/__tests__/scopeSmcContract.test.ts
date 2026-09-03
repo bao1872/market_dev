@@ -6,6 +6,7 @@ import {
   buildSmcVM,
   parseSmcHistory,
   smcDisplayMember,
+  classifyTransition,
 } from '../scopeSmcContract'
 import type { ReviewScopeSmcHistoryDTO, ReviewStructureEvents } from '../types'
 import type { MemberDirectory } from '../reviewFormat'
@@ -172,8 +173,8 @@ test('SMC 6: null / unavailable / gap 必须保留（不得写成 0 或“无事
   assert.equal(h.swingState[0].vm, null, 'gap 日 swing_state vm 必须为 null')
 })
 
-test('SMC 7: SQZ_RELEASE 等 Momentum 事件不得混入 SMC BOS/CHoCH tape', () => {
-  // canonical 不会把 SQZ_RELEASE 放进 cells.leveled；即使出现也必须是 secondary，不得升级为 primary
+test('SMC 7: SQZ_RELEASE 等 Momentum 事件不得进入 SMC 任何投影（既非 bosChoch 也非 secondary）', () => {
+  // canonical 仍允许保存 SQZ_RELEASE（不在此处改）；但 SMC 投影按 whitelist 过滤。
   const vm = buildSmcVM(
     parseSmcObservation(
       eventsObs({
@@ -188,12 +189,85 @@ test('SMC 7: SQZ_RELEASE 等 Momentum 事件不得混入 SMC BOS/CHoCH tape', ()
       }),
     ),
   )
+  // SQZ_RELEASE（Momentum 事件，不在 SMC whitelist）既不进入 primary（BOS/CHoCH），也不进入 secondary。
   assert.equal(
     vm.events!.bosChoch.find((c) => c.eventType === 'SQZ_RELEASE'),
     undefined,
-    'SQZ_RELEASE 不得作为 SMC 主事件',
+    'SQZ_RELEASE 不得作为 SMC 主事件 (bosChoch)',
   )
-  assert.ok(vm.events!.secondary.find((c) => c.eventType === 'SQZ_RELEASE'), 'SQZ_RELEASE 若现身应归 secondary')
+  assert.equal(
+    vm.events!.secondary.find((c) => c.eventType === 'SQZ_RELEASE'),
+    undefined,
+    'SQZ_RELEASE 不得进入 SMC secondary（canonical raw Observation 仍允许保存该事件）',
+  )
+})
+
+test('SMC 9: Swing/Internal transition 必须按 denominator 区分 unavailable / no_changes / changed', () => {
+  // 构造仅含 swing/internal transition 的最小 observation（state 留空不影响 classification）。
+  function transitionObs(swing: Json, internal: Json): Json {
+    return { structure: { swing: { state: {}, transition: swing }, internal: { state: {}, transition: internal } } }
+  }
+  const changed = [{ member_id: 'm001', previous_state: 'Up', current_state: 'Down' }]
+
+  // 场景 A：denominator == 0（ready 但 T-1/T 共同有效成员不足）→ unavailable
+  const zeroObs = transitionObs(
+    { denominator: 0, changed_members: [] },
+    { denominator: 0, changed_members: [] },
+  )
+  const zeroFacts = parseSmcObservation(zeroObs)
+  assert.equal(classifyTransition(zeroFacts.transitionDenominator.swing, zeroFacts.swingChangedMembers), 'unavailable')
+  assert.equal(classifyTransition(zeroFacts.transitionDenominator.internal, zeroFacts.internalChangedMembers), 'unavailable')
+
+  // 场景 B：denominator > 0 且无变化成员 → no_changes
+  const noChangeObs = transitionObs(
+    { denominator: 8, changed_members: [] },
+    { denominator: 8, changed_members: [] },
+  )
+  const noChangeFacts = parseSmcObservation(noChangeObs)
+  assert.equal(classifyTransition(noChangeFacts.transitionDenominator.swing, noChangeFacts.swingChangedMembers), 'no_changes')
+  assert.equal(classifyTransition(noChangeFacts.transitionDenominator.internal, noChangeFacts.internalChangedMembers), 'no_changes')
+
+  // 场景 C：denominator > 0 且有变化成员 → changed
+  const changedObs = transitionObs(
+    { denominator: 8, changed_members: changed },
+    { denominator: 8, changed_members: changed },
+  )
+  const changedFacts = parseSmcObservation(changedObs)
+  assert.equal(classifyTransition(changedFacts.transitionDenominator.swing, changedFacts.swingChangedMembers), 'changed')
+  assert.equal(classifyTransition(changedFacts.transitionDenominator.internal, changedFacts.internalChangedMembers), 'changed')
+  assert.equal(changedFacts.swingChangedMembers[0].memberId, 'm001')
+  assert.equal(changedFacts.internalChangedMembers[0].memberId, 'm001')
+
+  // denominator == null 同样判为 unavailable（覆盖不可用）
+  assert.equal(classifyTransition(null, []), 'unavailable')
+})
+
+test('SMC 10: SMC 事件 whitelist 路由（BOS/CHoCH→primary，OB_*/EQH/EQL→secondary）', () => {
+  const vm = buildSmcVM(parseSmcObservation(obs))
+  assert.ok(vm.events)
+  // primary 仅含 whitelist primary
+  const primaryTypes = vm.events!.bosChoch.map((c) => c.eventType).sort()
+  assert.deepEqual(primaryTypes, ['BOS', 'CHoCH'])
+  // secondary 含 whitelist secondary（OB_CREATED / EQH / EQL）
+  const secondaryTypes = vm.events!.secondary.map((c) => c.eventType).sort()
+  assert.deepEqual(secondaryTypes, ['EQH', 'EQL', 'OB_CREATED'])
+  // 任何非 whitelist 事件都不得出现在 SMC VM
+  for (const c of [...vm.events!.bosChoch, ...vm.events!.secondary]) {
+    assert.ok(
+      ['BOS', 'CHoCH', 'OB_CREATED', 'OB_ENTERED', 'OB_MITIGATED', 'EQH', 'EQL'].includes(c.eventType),
+      `SMC VM 不得含非 whitelist 事件 ${c.eventType}`,
+    )
+  }
+})
+
+test('SMC 11: trailing distance 按 percentage points 显示（2.5 → "2.50%"，绝不 x100）', () => {
+  const vm = buildSmcVM(parseSmcObservation(obs))
+  // fixture: distance_to_trailing_top_pct.median = 2.5, p25 = 1.0, p75 = 4.0
+  assert.equal(vm.trailingTop.median, '2.50%')
+  assert.equal(vm.trailingTop.p25, '1.00%')
+  assert.equal(vm.trailingTop.p75, '4.00%')
+  // bottom 同样为 percentage points（负中位 -1.5 → "-1.50%"）
+  assert.equal(vm.trailingBottom.median, '-1.50%')
 })
 
 test('SMC 8: ScopeSmcPanel 必须消费 scopeSmcContract（不得 deepGet raw observation）', () => {
