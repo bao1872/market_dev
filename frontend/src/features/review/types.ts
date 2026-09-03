@@ -564,6 +564,7 @@ export interface ReviewScopeHistoryDTO {
   availability: Record<string, unknown>
   fields: Record<string, ReviewScopeHistoryFieldDTO>
   smc: ReviewScopeSmcHistoryDTO | null
+  momentumVolume: ReviewScopeMomentumVolumeHistoryDTO | null
 }
 
 /** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。 */
@@ -623,6 +624,19 @@ export interface ReviewScopeSmcHistoryDTO {
   swing_state: Array<ReviewStructureState | null>
   internal_state: Array<ReviewStructureState | null>
   event_tape: Array<ReviewStructureEvents | null>
+}
+
+/** [R3 History / Momentum+Volume] 窄动量+量能历史投影 DTO（每日 persisted Observation direct projection）。 */
+export interface ReviewScopeMomentumVolumeHistoryDTO {
+  dates: string[]
+  momentum_state: Array<Record<string, unknown> | null>
+  momentum_change: Array<Record<string, unknown> | null>
+  squeeze_state: Array<Record<string, unknown> | null>
+  release_volume_ratio: Array<Record<string, unknown> | null>
+  momentum_volume_relation: Array<Record<string, unknown> | null>
+  volume_percentile20: Array<Record<string, unknown> | null>
+  volume_percentile200: Array<Record<string, unknown> | null>
+  sqzmom_mean: Array<number | null>
 }
 
 /**

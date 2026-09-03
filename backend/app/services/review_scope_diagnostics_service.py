@@ -252,6 +252,71 @@ def _build_smc_projection(
     }
 
 
+def _build_momentum_volume_projection(
+    canonical: dict[date, dict[str, Any] | None],
+    dates: list[date],
+) -> dict[str, Any]:
+    """Narrow Momentum+Volume history projection (Slice 3).
+
+    复用同一 published-run 安全日序列（``canonical``）+ 已解析的正式日期轴 ``dates``，
+    直接从每个日期的 persisted Observation 投影动量+量能事实；不重新查询 / 不重算
+    canonical。每个日期槽保留（None = 该日正式 run 无 fact，显示 gap）。
+
+    OPEN categorical ``momentum_volume_relation`` 原样保留（不建立固定 enum、不丢未知
+    category）。Release Volume Ratio 取每日 member-first median（非 event-weighted）。
+    SQZ_RELEASE 是结构事件流，绝不作为 release_volume_ratio 来源。
+    """
+    momentum_state: list[Any] = []
+    momentum_change: list[Any] = []
+    squeeze_state: list[Any] = []
+    release_volume_ratio: list[Any] = []
+    momentum_volume_relation: list[Any] = []
+    volume_percentile20: list[Any] = []
+    volume_percentile200: list[Any] = []
+    sqzmom_mean: list[float | None] = []
+    for d in dates:
+        payload = canonical.get(d)
+        if not isinstance(payload, dict):
+            momentum_state.append(None)
+            momentum_change.append(None)
+            squeeze_state.append(None)
+            release_volume_ratio.append(None)
+            momentum_volume_relation.append(None)
+            volume_percentile20.append(None)
+            volume_percentile200.append(None)
+            sqzmom_mean.append(None)
+            continue
+        momentum = payload.get("momentum")
+        m = momentum if isinstance(momentum, dict) else None
+        participation = payload.get("participation")
+        vol = (
+            participation.get("volume")
+            if isinstance(participation, dict)
+            else None
+        )
+        v = vol if isinstance(vol, dict) else None
+        momentum_state.append(m.get("state") if m else None)
+        momentum_change.append(m.get("change") if m else None)
+        squeeze_state.append(m.get("squeeze_state") if m else None)
+        release_volume_ratio.append(m.get("release_volume_ratio") if m else None)
+        momentum_volume_relation.append(m.get("momentum_volume_relation") if m else None)
+        sqzmom = m.get("sqzmom") if m else None
+        sqzmom_mean.append(sqzmom.get("mean") if isinstance(sqzmom, dict) else None)
+        volume_percentile20.append(v.get("percentile20") if v else None)
+        volume_percentile200.append(v.get("percentile200") if v else None)
+    return {
+        "dates": [d.isoformat() for d in dates],
+        "momentum_state": momentum_state,
+        "momentum_change": momentum_change,
+        "squeeze_state": squeeze_state,
+        "release_volume_ratio": release_volume_ratio,
+        "momentum_volume_relation": momentum_volume_relation,
+        "volume_percentile20": volume_percentile20,
+        "volume_percentile200": volume_percentile200,
+        "sqzmom_mean": sqzmom_mean,
+    }
+
+
 # ---------------------------------------------------------------------------
 # service owner (DB)
 # ---------------------------------------------------------------------------
@@ -283,6 +348,7 @@ async def get_scope_diagnostics(
             },
             "fields": {},
             "smc": None,
+            "momentumVolume": None,
         }
 
     from_date = trade_date - timedelta(
@@ -349,6 +415,7 @@ async def get_scope_diagnostics(
     )
     display_dates = [d.isoformat() for d in display_window_dates]
     smc = _build_smc_projection(canonical, display_window_dates)
+    momentum_volume = _build_momentum_volume_projection(canonical, display_window_dates)
     total = len(window_dates)
     availability = {
         "status": "ready" if total > 0 else "empty",
@@ -365,6 +432,7 @@ async def get_scope_diagnostics(
         "availability": availability,
         "fields": fields_out,
         "smc": smc,
+        "momentumVolume": momentum_volume,
     }
 
 

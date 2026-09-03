@@ -243,6 +243,20 @@ export function parseVolumeObservation(raw: unknown): VolumeObservationVM {
   }
 }
 
+// Canonical L1 participation.volume 使用无前缀键（ratio20 / percentile20 / ...），
+// 与 L2 volume_anomaly 组的 volume_ratio20 前缀不同。
+export function parseParticipationVolume(raw: unknown): VolumeObservationVM {
+  const o = asRecord(raw) ?? {}
+  return {
+    ratio20: parseVolumeDistribution(o['ratio20']),
+    ratio200: parseVolumeDistribution(o['ratio200']),
+    percentile20: parseVolumeDistribution(o['percentile20']),
+    percentile200: parseVolumeDistribution(o['percentile200']),
+    zscore20: parseVolumeDistribution(o['zscore20']),
+    zscore200: parseVolumeDistribution(o['zscore200']),
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Display formatters (explicit, non-overlapping semantics)
 // ---------------------------------------------------------------------------
@@ -263,4 +277,332 @@ const SQUEEZE_LABELS_INV: Record<SqueezeStateCategory, string> = {
   Squeeze: 'Squeeze',
   Squeeze_Release: 'Squeeze Release',
   Non_Squeeze: 'Non Squeeze',
+}
+
+// ---------------------------------------------------------------------------
+// Helpers (extended)
+// ---------------------------------------------------------------------------
+
+import type { ReviewScopeHistoryDTO } from './types'
+
+function deepGet(root: unknown, path: readonly string[]): unknown {
+  let node: unknown = root
+  for (const key of path) {
+    if (node === null || typeof node !== 'object' || !(key in (node as Record<string, unknown>))) {
+      return undefined
+    }
+    node = (node as Record<string, unknown>)[key]
+  }
+  return node
+}
+
+function numOrZero(v: unknown): number {
+  return typeof v === 'number' && Number.isFinite(v) && v >= 0 ? Math.floor(v) : 0
+}
+
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
+}
+
+/** 比率 -> 百分比显示；null 保持 "—"（绝不 0%）。 */
+export function fmtRatioPct(ratio: number | null): string {
+  if (ratio === null) return NULL_DISPLAY
+  return `${(ratio * 100).toFixed(1)}%`
+}
+
+// ---------------------------------------------------------------------------
+// A. Momentum State（Expanding / Flat / Contracting）
+// ---------------------------------------------------------------------------
+
+export type MomentumStateCategory = 'Expanding' | 'Flat' | 'Contracting'
+
+export interface MomentumStateCategoryVM {
+  category: MomentumStateCategory
+  count: number
+  /** null when denominator === 0（NOT 0%） */
+  ratio: number | null
+}
+
+export interface MomentumStateVM {
+  denominator: number | null
+  unavailable: boolean
+  categories: MomentumStateCategoryVM[]
+}
+
+export function parseMomentumState(raw: unknown): MomentumStateVM | null {
+  const o = asRecord(raw)
+  if (!o) return null
+  const denomRaw = o['denominator']
+  const denominator = typeof denomRaw === 'number' && Number.isFinite(denomRaw) && denomRaw >= 0
+    ? Math.floor(denomRaw)
+    : null
+  const defs: { key: string; cat: MomentumStateCategory }[] = [
+    { key: 'expanding', cat: 'Expanding' },
+    { key: 'flat', cat: 'Flat' },
+    { key: 'contracting', cat: 'Contracting' },
+  ]
+  const categories = defs.map(({ key, cat }) => ({
+    category: cat,
+    count: numOrZero(o[`${key}_count`]),
+    ratio: isFiniteNumber(o[`${key}_ratio`]) ? (o[`${key}_ratio`] as number) : null,
+  }))
+  return {
+    denominator,
+    unavailable: denominator === null || denominator === 0,
+    categories,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// B. Momentum Change（enhancing / weakening / flat）
+// ---------------------------------------------------------------------------
+
+export interface MomentumChangeVM {
+  enhancingCount: number
+  weakeningCount: number
+  flatCount: number
+  /** Board parity：missing/unrecognized momentum_change 已计入 flat，不得重定义 */
+  denominator: number | null
+}
+
+export function parseMomentumChange(raw: unknown): MomentumChangeVM | null {
+  const o = asRecord(raw)
+  if (!o) return null
+  return {
+    enhancingCount: numOrZero(o['enhancing_count']),
+    weakeningCount: numOrZero(o['weakening_count']),
+    flatCount: numOrZero(o['flat_count']),
+    denominator: numOrNull(o['denominator']),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// E. SqzMom（mean + valid_count）
+// ---------------------------------------------------------------------------
+
+export interface SqzmomVM {
+  mean: number | null
+  validCount: number | null
+}
+
+export function parseSqzmom(raw: unknown): SqzmomVM | null {
+  const o = asRecord(raw)
+  if (!o) return null
+  return {
+    mean: numOrNull(o['mean']),
+    validCount: numOrNull(o['valid_count']),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// F. Momentum × Volume Relation（OPEN categorical，verbatim，不建固定 enum）
+// ---------------------------------------------------------------------------
+
+export interface RelationCategoryVM {
+  category: string
+  count: number
+  /** null when denominator === 0 */
+  ratio: number | null
+}
+
+export interface MomentumVolumeRelationVM {
+  denominator: number | null
+  unavailable: boolean
+  categories: RelationCategoryVM[]
+}
+
+export function parseMomentumVolumeRelation(raw: unknown): MomentumVolumeRelationVM | null {
+  const o = asRecord(raw)
+  if (!o) return null
+  if (o['status'] === 'unavailable') {
+    return { denominator: 0, unavailable: true, categories: [] }
+  }
+  const denominator = numOrNull(o['denominator'])
+  const categories: RelationCategoryVM[] = []
+  for (const key of Object.keys(o)) {
+    if (!key.endsWith('_count')) continue
+    const category = key.slice(0, -'_count'.length)
+    categories.push({
+      category,
+      count: numOrZero(o[key]),
+      ratio: isFiniteNumber(o[`${category}_ratio`]) ? (o[`${category}_ratio`] as number) : null,
+    })
+  }
+  // 稳定排序，未知 category 也保留（不丢）
+  categories.sort((a, b) => a.category.localeCompare(b.category))
+  return {
+    denominator,
+    unavailable: denominator === null || denominator === 0,
+    categories,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// H. Volume Badge（high / low / normal / unknown）
+// ---------------------------------------------------------------------------
+
+export interface VolumeBadgeVM {
+  highCount: number
+  lowCount: number
+  normalCount: number
+  unknownCount: number
+  total: number | null
+}
+
+export function parseVolumeBadge(raw: unknown): VolumeBadgeVM | null {
+  const o = asRecord(raw)
+  if (!o) return null
+  const high = numOrZero(o['high_count'])
+  const low = numOrZero(o['low_count'])
+  const normal = numOrZero(o['normal_count'])
+  const unknown = numOrZero(o['unknown_count'])
+  return { highCount: high, lowCount: low, normalCount: normal, unknownCount: unknown, total: high + low + normal + unknown }
+}
+
+// ---------------------------------------------------------------------------
+// I. Percentile histogram（canonical 5 bins）
+// ---------------------------------------------------------------------------
+
+export interface VolumeHistogramBin {
+  label: string
+  count: number
+}
+
+export interface VolumeHistogramVM {
+  bins: VolumeHistogramBin[]
+}
+
+const HIST_BINS: ReadonlyArray<readonly [string, string]> = [
+  ['lt20', '0–20'],
+  ['20_40', '20–40'],
+  ['40_60', '40–60'],
+  ['60_80', '60–80'],
+  ['gte80', '80–100'],
+]
+
+export function parseVolumeHistogram(raw: unknown): VolumeHistogramVM | null {
+  const o = asRecord(raw)
+  if (!o) return null
+  return { bins: HIST_BINS.map(([k, label]) => ({ label, count: numOrZero(o[k]) })) }
+}
+
+// ---------------------------------------------------------------------------
+// Combined VM（detail momentum tab 唯一解析 owner）
+// ---------------------------------------------------------------------------
+
+export interface MomentumVolumeVM {
+  state: MomentumStateVM | null
+  change: MomentumChangeVM | null
+  squeeze: SqueezeStateVM | null
+  bbPosition: CurrentOnlyDistributionVM | null
+  bbWidth: CurrentOnlyDistributionVM | null
+  releaseVolumeRatio: CurrentOnlyDistributionVM | null
+  sqzmom: SqzmomVM | null
+  relation: MomentumVolumeRelationVM | null
+  volume: VolumeObservationVM | null
+  volumeBadge: VolumeBadgeVM | null
+  ratio20Mean: number | null
+  ratio200Mean: number | null
+  percentile20Histogram: VolumeHistogramVM | null
+  percentile200Histogram: VolumeHistogramVM | null
+}
+
+export function parseMomentumVolumeObservation(observation: Record<string, unknown> | null | undefined): MomentumVolumeVM {
+  const momentum = asRecord(deepGet(observation, ['momentum']))
+  const participation = asRecord(deepGet(observation, ['participation']))
+  const vol = asRecord(participation ? participation['volume'] : null)
+  return {
+    state: momentum ? parseMomentumState(momentum['state']) : null,
+    change: momentum ? parseMomentumChange(momentum['change']) : null,
+    squeeze: momentum ? parseSqueezeState(momentum['squeeze_state']) : null,
+    bbPosition: momentum ? parseCurrentOnlyMomentumDistribution(momentum['bb_position']) : null,
+    bbWidth: momentum ? parseCurrentOnlyMomentumDistribution(momentum['bb_width']) : null,
+    releaseVolumeRatio: momentum ? parseCurrentOnlyMomentumDistribution(momentum['release_volume_ratio']) : null,
+    sqzmom: momentum ? parseSqzmom(momentum['sqzmom']) : null,
+    relation: momentum ? parseMomentumVolumeRelation(momentum['momentum_volume_relation']) : null,
+    volume: parseParticipationVolume(vol),
+    volumeBadge: parseVolumeBadge(vol ? vol['badge'] : null),
+    ratio20Mean: vol ? numOrNull(vol['ratio20_mean']) : null,
+    ratio200Mean: vol ? numOrNull(vol['ratio200_mean']) : null,
+    percentile20Histogram: parseVolumeHistogram(vol ? vol['percentile20_histogram'] : null),
+    percentile200Histogram: parseVolumeHistogram(vol ? vol['percentile200_histogram'] : null),
+  }
+}
+
+// ---------------------------------------------------------------------------
+// History（history.momentumVolume direct projection）
+// ---------------------------------------------------------------------------
+
+export interface MomentumStateHistoryEntry {
+  date: string
+  vm: MomentumStateVM | null
+}
+export interface MomentumChangeHistoryEntry {
+  date: string
+  vm: MomentumChangeVM | null
+}
+export interface SqueezeStateHistoryEntry {
+  date: string
+  vm: SqueezeStateVM | null
+}
+export interface CurrentOnlyHistoryEntry {
+  date: string
+  vm: CurrentOnlyDistributionVM | null
+}
+export interface VolumeHistoryEntry {
+  date: string
+  vm: VolumeDistributionVM | null
+}
+export interface MomentumVolumeRelationHistoryEntry {
+  date: string
+  vm: MomentumVolumeRelationVM | null
+}
+export interface SqzmomHistoryEntry {
+  date: string
+  mean: number | null
+}
+
+export interface MomentumVolumeHistoryVM {
+  dates: string[]
+  momentumState: MomentumStateHistoryEntry[]
+  momentumChange: MomentumChangeHistoryEntry[]
+  squeezeState: SqueezeStateHistoryEntry[]
+  releaseVolumeRatio: CurrentOnlyHistoryEntry[]
+  relation: MomentumVolumeRelationHistoryEntry[]
+  volumePercentile20: VolumeHistoryEntry[]
+  volumePercentile200: VolumeHistoryEntry[]
+  sqzmomMean: SqzmomHistoryEntry[]
+}
+
+function at<T>(arr: T[] | undefined, i: number): T | null {
+  return arr && i < arr.length ? arr[i] : null
+}
+
+export function parseMomentumVolumeHistory(history: ReviewScopeHistoryDTO | null | undefined): MomentumVolumeHistoryVM {
+  if (!history || typeof history !== 'object') {
+    return {
+      dates: [],
+      momentumState: [],
+      momentumChange: [],
+      squeezeState: [],
+      releaseVolumeRatio: [],
+      relation: [],
+      volumePercentile20: [],
+      volumePercentile200: [],
+      sqzmomMean: [],
+    }
+  }
+  const dates = Array.isArray(history.dates) ? history.dates : []
+  const mv = history.momentumVolume
+  return {
+    dates,
+    momentumState: dates.map((d, i) => ({ date: d, vm: parseMomentumState(at(mv?.momentum_state, i)) })),
+    momentumChange: dates.map((d, i) => ({ date: d, vm: parseMomentumChange(at(mv?.momentum_change, i)) })),
+    squeezeState: dates.map((d, i) => ({ date: d, vm: parseSqueezeState(at(mv?.squeeze_state, i)) })),
+    releaseVolumeRatio: dates.map((d, i) => ({ date: d, vm: parseCurrentOnlyMomentumDistribution(at(mv?.release_volume_ratio, i)) })),
+    relation: dates.map((d, i) => ({ date: d, vm: parseMomentumVolumeRelation(at(mv?.momentum_volume_relation, i)) })),
+    volumePercentile20: dates.map((d, i) => ({ date: d, vm: parseVolumeDistribution(at(mv?.volume_percentile20, i)) })),
+    volumePercentile200: dates.map((d, i) => ({ date: d, vm: parseVolumeDistribution(at(mv?.volume_percentile200, i)) })),
+    sqzmomMean: dates.map((d, i) => ({ date: d, mean: at(mv?.sqzmom_mean, i) })),
+  }
 }

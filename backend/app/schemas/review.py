@@ -375,6 +375,46 @@ class ReviewScopeSmcHistoryDTO(BaseModel):
     )
 
 
+class ReviewScopeMomentumVolumeHistoryDTO(BaseModel):
+    """[R3 History / Momentum+Volume] 窄动量+量能历史投影（published-run 安全日序列
+    query-time 构建）。与 ReviewScopeHistoryDTO 共享同一正式 published 日期轴。
+
+    各数组均为每日 persisted Observation 的 direct projection（不重新查询 / 不重算
+    canonical）：momentum_state / momentum_change / squeeze_state / release_volume_ratio /
+    momentum_volume_relation / volume_percentile20 / volume_percentile200 / sqzmom_mean。
+    缺失该日 fact 为 None（保留 date slot，显示 gap）。BB Position/Width 与 Volume
+    ratio20/200/zscore20/200 复用同一 history.fields，不在此重复投影。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    dates: list[str] = Field(default_factory=list, description="display-window 交易日（升序，共享 history 日期轴）")
+    momentum_state: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 momentum.state 分布（expanding/flat/contracting ratio + denominator）；缺失为 null"
+    )
+    momentum_change: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 momentum.change（enhancing/weakening/flat count + denominator）；缺失为 null"
+    )
+    squeeze_state: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 momentum.squeeze_state 分布；缺失为 null"
+    )
+    release_volume_ratio: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 momentum.release_volume_ratio（member-first median 分布）；缺失为 null"
+    )
+    momentum_volume_relation: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 momentum.momentum_volume_relation（OPEN categorical verbatim）；缺失为 null"
+    )
+    volume_percentile20: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 participation.volume.percentile20 分布（direct projection）；缺失为 null"
+    )
+    volume_percentile200: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每日 participation.volume.percentile200 分布（direct projection）；缺失为 null"
+    )
+    sqzmom_mean: list[float | None] = Field(
+        default_factory=list, description="每日 momentum.sqzmom.mean（可选 central value）；缺失为 null"
+    )
+
+
 class ReviewScopeHistoryDTO(BaseModel):
     """[R3 History] 20D 历史诊断 DTO（由 published-run 安全日序列 query-time 构建）。"""
 
@@ -394,6 +434,14 @@ class ReviewScopeHistoryDTO(BaseModel):
         description=(
             "[R3 History / SMC] 窄 SMC 历史投影（structure swing/internal state + event tape），"
             "复用同一 published-run 安全日序列；非 activated scope_type 为 None"
+        ),
+    )
+    momentumVolume: ReviewScopeMomentumVolumeHistoryDTO | None = Field(
+        None,
+        description=(
+            "[R3 History / Momentum+Volume] 窄动量+量能历史投影（momentum state/change/"
+            "squeeze_state/release_volume_ratio/momentum_volume_relation + volume percentile20/200/"
+            "sqzmom_mean），复用同一 published-run 安全日序列；非 activated scope_type 为 None"
         ),
     )
 
