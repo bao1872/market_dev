@@ -51,6 +51,7 @@ from app.schemas.review import (
     ReviewLatestResponse,
     ReviewOverviewCoverageDTO,
     ReviewOverviewResponse,
+    ReviewScopeCompareFactsDTO,
     ReviewScopeCompositionDetailResponse,
     ReviewScopeListResponse,
     ReviewScopeObservationSummaryDTO,
@@ -76,6 +77,7 @@ from app.services.review_publication_service import (
     list_published_review_dates,
 )
 from app.services.review_scope_diagnostics_service import get_scope_diagnostics
+from app.services.review_scope_explorer_service import list_review_scope_compare
 
 logger = logging.getLogger("api.review")
 
@@ -209,6 +211,7 @@ def _summary_row_to_dto(
     *,
     composition_readiness: dict[str, str] | None = None,
     canonical_coverage: dict[str, dict[str, Any]] | None = None,
+    compare_facts: dict[str, Any] | None = None,
 ) -> ReviewCanonicalScopeResponse:
     """[REVIEW-CANONICAL-SLICE-B] projected summary row → canonical list DTO。
 
@@ -269,6 +272,9 @@ def _summary_row_to_dto(
         coverageRatio=float(provided / eligible) if eligible > 0 else None,
         summary=summary,
         observationSummary=observation_summary,
+        compareFacts=(
+            ReviewScopeCompareFactsDTO(**compare_facts) if compare_facts else None
+        ),
     )
 
 
@@ -505,11 +511,26 @@ async def list_review_scopes(
         limit=page_size,
     )
 
+    # [SLICE 5 / Explorer] compare facts：ONE extra batch query（不是 N+1）。
+    # 同一 formally published run + 同一 family 过滤；cross-sectional peer percentile
+    # 在该查询的结果集上以 canonical math owner 批量计算，绝不 per-scope 调用
+    # get_cross_sectional()。
+    compare_map: dict[str, dict] = {}
+    if summaries:
+        compare_map = await list_review_scope_compare(
+            db,
+            review_run_id=run.id,
+            trade_date=td,
+            scope_type=scope_type,
+            scope_keys={row.scope_key for row in summaries},
+        )
+
     items = [
         _summary_row_to_dto(
             row,
             composition_readiness=readiness,
             canonical_coverage=canonical_coverage,
+            compare_facts=compare_map.get(row.scope_key),
         )
         for row in summaries
     ]

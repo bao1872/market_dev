@@ -285,6 +285,84 @@ class ReviewScopeObservationSummaryDTO(BaseModel):
     technicalMemberCount: int | None = None
 
 
+class ReviewScopeCompareDsaDTO(BaseModel):
+    """[SLICE 5 / Explorer] DSA compare facts（canonical Observation 直取）。
+
+    ``durationBars`` = ``trend.continuous.dsa_dir_bars``（scope 级 canonical
+    scalar，非从成员分布反推）。``vwapDevPct`` 已是 percentage points（不 ×100）。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    regimeStrength: float | None = Field(None, description="trend.continuous.regime_strength")
+    regimeStrengthPeerPercentile: float | None = Field(None, description="同 family C1 peer percentile（0-100）")
+    durationBars: float | None = Field(None, description="trend.continuous.dsa_dir_bars（scope 级 scalar）")
+    vwapDevPct: float | None = Field(None, description="trend.continuous.dsa_vwap_dev_pct（已是 percentage points）")
+
+
+class ReviewScopeCompareSmcDTO(BaseModel):
+    """[SLICE 5 / Explorer] 单条 SMC 显示事件（纯 display priority，非 score）。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    eventType: str | None = Field(None, description="BOS / CHoCH；无事件时为 None")
+    structureLevel: str | None = Field(None, description="Swing / Internal")
+    direction: str | None = Field(None, description="Up / Down")
+    memberRatio: float | None = Field(None, description="事件成员占比")
+    availability: str = Field("unavailable", description="ready / unavailable")
+    reason: str | None = Field(None, description="unavailable 原因")
+
+
+class ReviewScopeCompareMomentumDTO(BaseModel):
+    """[SLICE 5 / Explorer] Momentum change（producer ratio + denominator verbatim）。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    enhancingRatio: float | None = Field(None, description="momentum.change.enhancing_ratio")
+    weakeningRatio: float | None = Field(None, description="momentum.change.weakening_ratio")
+    denominator: float | None = Field(None, description="producer-owned denominator（前端不得重定义）")
+
+
+class ReviewScopeCompareVolumeDTO(BaseModel):
+    """[SLICE 5 / Explorer] Volume ratio20 central value。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    ratio20: float | None = Field(None, description="participation.volume.ratio20.p50（ratio，不 ×100）")
+
+
+class ReviewScopeComparePriceDTO(BaseModel):
+    """[SLICE 5 / Explorer] Price compare facts（decimal return 空间）。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    equalWeightReturn: float | None = Field(None, description="price.equal_weight_return（decimal return）")
+    equalWeightReturnPeerPercentile: float | None = Field(None, description="同 family C1 peer percentile（0-100）")
+    advanceRatio: float | None = Field(None, description="price.breadth.advance_ratio")
+
+
+class ReviewScopeCompareCompositionDTO(BaseModel):
+    """[SLICE 5 / Explorer] persisted Composition facts（不重算）。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    capitalTilt: float | None = Field(None, description="internal_structure_facts.capital_tilt.capital_tilt（persisted，非 AW-EW）")
+    migration: float | None = Field(None, description="leadership.migration（persisted，非 1-Jaccard）")
+
+
+class ReviewScopeCompareFactsDTO(BaseModel):
+    """[SLICE 5 / Explorer] 紧凑 compare facts（不复制 distribution / transition / events / history）。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    dsa: ReviewScopeCompareDsaDTO | None = Field(None, description="DSA compare facts")
+    smc: ReviewScopeCompareSmcDTO | None = Field(None, description="SMC 显示事件（display priority）")
+    momentum: ReviewScopeCompareMomentumDTO | None = Field(None, description="Momentum change")
+    volume: ReviewScopeCompareVolumeDTO | None = Field(None, description="Volume ratio20")
+    price: ReviewScopeComparePriceDTO | None = Field(None, description="Price compare facts")
+    composition: ReviewScopeCompareCompositionDTO | None = Field(None, description="persisted Composition facts")
+
+
 class ReviewCanonicalScopeResponse(BaseModel):
     """GET /api/v1/review/{trade_date}/scopes 单条记录（canonical）。
 
@@ -316,6 +394,13 @@ class ReviewCanonicalScopeResponse(BaseModel):
         description=(
             "persisted Observation Fact 薄投影（R2B）；仅含 freshness / technical "
             "标量，独立于 summary。Fact 存在即填充，不依赖 Composition"
+        ),
+    )
+    compareFacts: ReviewScopeCompareFactsDTO | None = Field(
+        None,
+        description=(
+            "[SLICE 5 / Explorer] 紧凑横截面对比事实（DSA / SMC / Momentum / Volume / "
+            "Price / Composition），由单一 batch read-model 提供；不复制完整 Observation"
         ),
     )
 
