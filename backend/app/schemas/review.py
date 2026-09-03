@@ -418,11 +418,12 @@ class ReviewScopeCompositionDetailResponse(BaseModel):
     memberDirectory: dict[str, dict[str, str]] = Field(
         default_factory=dict,
         description=(
-            "[REVIEW-PRODUCT-CLOSURE-01 Phase C] 追加显示元数据（ADDITIVE，不写回、不改写"
-            "persisted Composition）：``{instrument_uuid: {symbol, name}}``。一次批量查询覆盖"
-            "composition.leadership（current/previous/entrant/exit ids）与 "
-            "composition.member_attribution（member_id）引用的全部成员；前端唯一展示 owner "
-            "``displayMember(id)`` 用其解析 名称+代码。Composition 缺失 / 无成员引用时为空 dict。"
+            "[DSA closure] 成员身份目录（ADDITIVE display metadata，不写回、不改写 persisted "
+            "Observation/Composition）：``{instrument_uuid: {symbol, name}}``。"
+            "ref IDs = Composition leadership/attribution 引用 UNION "
+            "observation.trend.transition.changed_members 引用；ONE bulk Instrument query "
+            "（去重后一次性查）。Composition=null 不意味着目录一定为空：只要 Observation 含 "
+            "changed-member UUID，目录也能生成。前端唯一展示 owner ``displayMember(id)`` 用其解析 名称+代码。"
         ),
     )
     history: ReviewScopeHistoryDTO | None = Field(

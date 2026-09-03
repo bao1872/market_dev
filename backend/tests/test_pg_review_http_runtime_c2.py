@@ -96,7 +96,7 @@ SCOPE_LIST_TOP_LEVEL_KEYS = {"items", "total", "page", "page_size", "has_more"}
 DETAIL_TOP_LEVEL_KEYS = {
     "reviewRunId", "tradeDate", "scopeType", "scopeKey", "scopeName",
     "algorithmVersion", "observation", "observationGroups", "composition",
-    "memberDirectory",
+    "memberDirectory", "history", "crossSection",
 }
 
 REVIEW_USER_PREFIX = "/v1/review"
@@ -279,7 +279,24 @@ _OBSERVATION_PAYLOAD = {
 }
 
 
-def _make_fact(run_id: uuid.UUID, td: date) -> ReviewScopeObservationFact:
+def _make_fact(run_id, td, changed_member_ids=()) -> ReviewScopeObservationFact:
+    """最小合法 Fact；``changed_member_ids`` 注入 observation.trend.transition.changed_members，
+    用于验证 memberDirectory = Composition refs UNION Observation changed-member refs。"""
+    payload = dict(_OBSERVATION_PAYLOAD)
+    if changed_member_ids:
+        payload = dict(payload)
+        payload["trend"] = dict(payload["trend"])
+        payload["trend"]["transition"] = {
+            "denominator": len(changed_member_ids),
+            "changed_members": [
+                {
+                    "member_id": str(mid),
+                    "previous_state": "Neutral",
+                    "current_state": "Up",
+                }
+                for mid in changed_member_ids
+            ],
+        }
     return ReviewScopeObservationFact(
         review_run_id=run_id,
         trade_date=td,
@@ -292,7 +309,7 @@ def _make_fact(run_id: uuid.UUID, td: date) -> ReviewScopeObservationFact:
         pit_status_t="ready",
         pit_status_t1="ready",
         readiness="ready",
-        observation_payload=dict(_OBSERVATION_PAYLOAD),
+        observation_payload=payload,
         diagnostics=[],
         algorithm_version=REVIEW_ALGORITHM_VERSION,
     )
@@ -376,19 +393,32 @@ async def published_review():
         run = _make_publishable_review_run(core.id, T)
         s.add(run)
         await s.flush()
-        s.add(_make_fact(run.id, T))
         # symbol 全局唯一（instruments_symbol_key）：fixture 每次调用生成新符号，
         # 否则同一 pytest session 内第二次使用本 fixture 会撞唯一约束。
-        inst = Instrument(
+        # A：仅被 Composition leadership 引用；B：仅被 observation.trend.transition.changed_members 引用。
+        inst_a = Instrument(
             id=uuid.uuid4(),
-            symbol=f"C2{uuid.uuid4().hex[:8].upper()}",
-            name="C2 测试标的",
+            symbol=f"C2A{uuid.uuid4().hex[:8].upper()}",
+            name="C2 领导标的",
             market="SH",
             status="active",
         )
-        s.add(inst)
+        s.add(inst_a)
         await s.flush()
-        s.add(_make_composition(run.id, T, inst.id))
+        inst_b = Instrument(
+            id=uuid.uuid4(),
+            symbol=f"C2B{uuid.uuid4().hex[:8].upper()}",
+            name="C2 仅变化成员标的",
+            market="SH",
+            status="active",
+        )
+        s.add(inst_b)
+        await s.flush()
+        # composition 只引用 A（不引用 B）
+        s.add(_make_composition(run.id, T, inst_a.id))
+        await s.flush()
+        # observation.changed_members 只引用 B（验证 UNION 不依赖 composition）
+        s.add(_make_fact(run.id, T, changed_member_ids=[inst_b.id]))
         await s.flush()
         await publish_review(s, run)  # 生产发布路径
         await s.commit()
@@ -396,8 +426,10 @@ async def published_review():
             "trade_date": T,
             "core_id": core.id,
             "run_id": run.id,
-            "instrument_id": inst.id,
-            "symbol": inst.symbol,
+            "instrument_a_id": inst_a.id,
+            "symbol_a": inst_a.symbol,
+            "instrument_b_id": inst_b.id,
+            "symbol_b": inst_b.symbol,
         }
     yield data
     async with AsyncSessionLocal() as s:
@@ -614,12 +646,24 @@ async def test_c2_http_success_matrix(published_review):
         )
         assert isinstance(detail["composition"], dict)
         assert detail["composition"]["composition_readiness"] == "ready"
-        assert detail["memberDirectory"] == {
-            str(published_review["instrument_id"]): {
-                "symbol": published_review["symbol"],
-                "name": "C2 测试标的",
-            }
-        }, "memberDirectory 必须按批量查询解析 composition 引用的成员"
+
+        # memberDirectory = Composition leadership refs UNION Observation changed-member refs
+        # -> ONE bulk Instrument query 响应。A 仅被 composition 引用；B 仅被 observation
+        # transition.changed_members 引用（composition 不引用 B）。两者都必须出现，证明 UNION。
+        md = detail["memberDirectory"]
+        a_id = str(published_review["instrument_a_id"])
+        b_id = str(published_review["instrument_b_id"])
+        assert a_id in md, "memberDirectory 必须包含 composition leadership 引用的成员 A"
+        assert b_id in md, "memberDirectory 必须包含 Observation changed_members 引用的成员 B（UNION 不依赖 composition）"
+        assert md[a_id] == {
+            "symbol": published_review["symbol_a"],
+            "name": "C2 领导标的",
+        }, "A 必须按批量查询解析出 symbol/name"
+        assert md[b_id] == {
+            "symbol": published_review["symbol_b"],
+            "name": "C2 仅变化成员标的",
+        }, "B 必须按批量查询解析出 symbol/name"
+        assert len(md) == 2, f"memberDirectory 必须是 A∪B 两项，无额外泄漏: {sorted(md)}"
 
 
 # ===========================================================================

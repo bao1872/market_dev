@@ -601,10 +601,11 @@ export interface ReviewScopeCompositionDetailResponse {
   observationGroups: ObservationGroups
   composition: ReviewScopeComposition | null
   /**
-   * [REVIEW-PRODUCT-CLOSURE-01 Phase C] 成员身份目录（ADDITIVE display metadata）。
-   * ``{instrument_uuid: {symbol, name}}`` —— 后端一次批量查询解析 composition.leadership /
-   * member_attribution 引用的全部成员。前端唯一展示 owner displayMember(id) 消费它，
-   * 绝不二次发 metadata 请求。Composition 缺失 / 无引用成员时为空 dict。
+   * [DSA closure] 成员身份目录（ADDITIVE display metadata）。
+   * ``{instrument_uuid: {symbol, name}}`` —— 后端 ref IDs = Composition leadership/attribution
+   * 引用 UNION observation.trend.transition.changed_members 引用；ONE bulk Instrument query
+   * （去重）。Composition=null 时只要 Observation 含 changed-member UUID，目录仍能生成。
+   * 前端唯一展示 owner displayMember(id) 消费它，绝不二次发 metadata 请求。
    */
   memberDirectory: Record<string, { symbol: string; name: string }>
   /**
