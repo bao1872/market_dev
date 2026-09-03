@@ -37,6 +37,7 @@ from sqlalchemy import text
 
 from app.db import AsyncSessionLocal
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
+from app.models.factor_publication import FactorPublication
 from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.services.review_cross_sectional_service import get_cross_sectional
@@ -209,7 +210,9 @@ async def test_history_and_cross_section_use_published_run_only():
             s, trade_date=T, scope_type=SCOPE_TYPE, scope_key=SCOPE_X,
         )
         assert history["availability"]["status"] == "ready"
-        assert history["dates"] == [T.isoformat()]
+        # [P1-2] 日期轴 = 正式 published Review 日期；共享 verify 库可能有其它正式
+        # 日期，故只断言目标日 T 位于轴末位且取值为 A（不假设轴恰好只有 [T]）。
+        assert history["dates"][-1] == T.isoformat()
         regime_series = history["fields"]["regime_strength"]["series"]
         assert regime_series[-1] == A_REGIME_X, (
             f"history 必须取 published run A 的 regime_strength={A_REGIME_X}，"
@@ -237,4 +240,78 @@ async def test_history_and_cross_section_use_published_run_only():
 
         # 清理
         await _clean(s, T)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_history_excludes_broken_pointer_date():
+    """[P1-3/Blocker 3] pointer 存在但 run 未正式发布（broken pointer）的日期
+    不得进入 history 轴 — 历史日期轴必须复用 FORMAL REVIEW READ OWNER，而非仅
+    验证 pointer。
+
+    场景：
+    - t_bad 存在一个 FactorPublication pointer 指向 run_c；
+    - run_c 的 status == signals_ready 且 published_at is None（未正式发布）；
+    - run_c 为 SCOPE_X 在 t_bad 写出 fact。
+    断言：
+    - list_formally_published_review_dates 排除 t_bad（formal owner 已拒）；
+    - get_scope_diagnostics(t_bad) 的 dates 不含 t_bad。
+    """
+    assert SCOPE_TYPE in ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES
+    t_bad = date(2099, 9, 13)  # 隔离日期
+
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        await _clean(s, t_bad)
+        await s.commit()
+
+        # run_c：未正式发布
+        core_c = _make_core_run(t_bad)
+        s.add(core_c)
+        await s.flush()
+        run_c = _make_review_run(core_c.id, t_bad)
+        run_c.status = "signals_ready"  # 保持未发布
+        s.add(run_c)
+        await s.flush()
+        s.add(_make_fact(run_c.id, t_bad, SCOPE_X, 0.77))
+        await s.flush()
+        # 模拟 broken pointer：直接写 FactorPublication 指向未发布 run
+        s.add(
+            FactorPublication(
+                scope_type=SCOPE_TYPE_REVIEW,
+                scope_key=SCOPE_KEY_REVIEW,
+                trade_date=t_bad,
+                publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
+                data_run_id=run_c.id,
+                coverage_ratio=__import__("decimal").Decimal("1.0"),
+                published_at=None,
+                metadata_json={},
+            )
+        )
+        await s.commit()
+
+        # 防御性：LIVE POINTER 确实存在（否则 lineage 测试无意义）
+        from app.services.review_publication_service import (
+            get_published_review_run_id,
+            list_formally_published_review_dates,
+        )
+
+        ptr = await get_published_review_run_id(s, t_bad)
+        assert ptr == run_c.id, "broken pointer 必须存在（否则测试无意义）"
+
+        # formal owner 必须在日期轴层排除 broken pointer
+        formal = await list_formally_published_review_dates(s)
+        assert t_bad not in formal, (
+            "broken pointer 日期不得进入正式发布日期轴（否则 history 会误纳）"
+        )
+
+        # history：该日期不得出现在轴中（即便 run_c 为该 scope 写了 fact）
+        history = await get_scope_diagnostics(
+            s, trade_date=t_bad, scope_type=SCOPE_TYPE, scope_key=SCOPE_X,
+        )
+        assert t_bad.isoformat() not in history["dates"], (
+            "broken pointer 日期不得进入 history 轴（formal owner 已排除）"
+        )
+
+        await _clean(s, t_bad)
         await s.commit()

@@ -218,6 +218,8 @@ test('B7. ReviewScopeCompositionDetailResponse 含 observation + observationGrou
       volume_anomaly: { group_key: 'volume_anomaly', label: '量能异常', facts: {} },
     },
     composition: null,
+    history: null,
+    crossSection: null,
   }
   assert.equal(detail.composition, null)
   assert.ok(detail.observation !== null)
@@ -312,9 +314,9 @@ test('D5. 非法 view → table', () => {
   assert.equal(decodeReviewUrl(new URLSearchParams('view=bogus')).view, 'table')
 })
 
-test('D6. [R3A] 非法 tab → current', () => {
-  assert.equal(normalizeDetailTab('bogus'), 'current')
-  assert.equal(decodeReviewUrl(new URLSearchParams('tab=bogus')).tab, 'current')
+test('D6. [R3A] 非法 tab → dsa（默认研究 tab）', () => {
+  assert.equal(normalizeDetailTab('bogus'), 'dsa')
+  assert.equal(decodeReviewUrl(new URLSearchParams('tab=bogus')).tab, 'dsa')
 })
 
 // ============================================================
@@ -328,10 +330,10 @@ test('CURRENT-1. current tab 被 URL decoder/encoder 接受并往返', () => {
   assert.equal(normalizeDetailTab('current'), 'current', 'normalizeDetailTab 接受 current')
 })
 
-test('CURRENT-2. [R3A] 默认 detail tab 为 current', () => {
-  assert.equal(defaultReviewUrlState().tab, 'current', '默认 tab = current')
-  assert.equal(normalizeDetailTab(undefined), 'current')
-  assert.equal(decodeReviewUrl(new URLSearchParams('')).tab, 'current')
+test('CURRENT-2. [R3A] 默认 detail tab 为 dsa', () => {
+  assert.equal(defaultReviewUrlState().tab, 'dsa', '默认 tab = dsa')
+  assert.equal(normalizeDetailTab(undefined), 'dsa')
+  assert.equal(decodeReviewUrl(new URLSearchParams('')).tab, 'dsa')
 })
 
 test('D7. 非法 phase → null（不 fallback 映射）', () => {
@@ -643,6 +645,8 @@ test('G4. Detail observation 是原始 payload（Record<string, unknown>），�
       volume_anomaly: { group_key: 'volume_anomaly', label: '量能异常', facts: {} },
     },
     composition: null,
+    history: null,
+    crossSection: null,
   }
   // observation 接受任意原始 payload（成功响应中 NON-NULL）
   assert.equal(typeof detail.observation, 'object')
@@ -875,6 +879,8 @@ test('H6. canonical Scope 类型仍编译并保留关键字段', () => {
       volume_anomaly: { group_key: 'volume_anomaly', label: '量能异常', facts: {} },
     },
     composition: null,
+    history: null,
+    crossSection: null,
   }
   assert.equal(detail.composition, null)
   assert.ok(detail.observation !== null)

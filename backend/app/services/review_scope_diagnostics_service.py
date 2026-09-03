@@ -35,7 +35,10 @@ from app.services.review_observation_persistence_service import (
     ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES,
     list_scope_observation_facts,
 )
-from app.services.review_publication_service import get_published_review_run_id
+from app.services.review_publication_service import (
+    get_published_review_run_id,
+    list_formally_published_review_dates,
+)
 
 HISTORY_DISPLAY_WINDOW = 20
 HISTORY_WARMUP_TOTAL = 40
@@ -109,7 +112,8 @@ _HISTORY_FIELD_SPECS: tuple[tuple[str, tuple[str, ...], Any, str, str | None], .
      "上涨成员比", "ratio"),
     ("trend_down_ratio", ("trend", "state", "down_ratio"), _scalar_direct,
      "下跌成员比", "ratio"),
-    ("trend_range_ratio", ("trend", "state", "range_ratio"), _scalar_direct,
+    # Sideways 映射成 Neutral；canonical producer 产出 neutral_ratio（非 range_ratio）。
+    ("trend_range_ratio", ("trend", "state", "neutral_ratio"), _scalar_direct,
      "横盘成员比", "ratio"),
 )
 
@@ -135,6 +139,38 @@ def _select_published_facts(
         if isinstance(payload, dict):
             # unique grain (review_run_id, trade_date, scope) -> single row per date
             canonical[row.trade_date] = payload
+    return canonical
+
+
+def build_canonical_by_date(
+    formal_dates: list[date],
+    run_id_by_date: dict[date, Any],
+    fact_by_run: dict[Any, dict[str, Any]],
+) -> dict[date, dict[str, Any] | None]:
+    """Lineage-safe canonical payload per *formal published* date (P1-2 fix).
+
+    The history date axis is the set of formally published Review trading dates,
+    NOT the set of dates that happen to have a persisted Scope Fact. Each date
+    keeps its slot; the value is:
+
+    - ``None`` when no fact was persisted for the published run of that date
+      (e.g. scope not ready that day). The slot is preserved — never dropped,
+      never forward-filled, never compressed.
+    - the fact payload when present.
+
+    Pure + unit-testable (no DB needed). The ``run_id_by_date`` must already be
+    resolved through the FORMAL REVIEW READ OWNER (``list_formally_published_
+    review_dates``), so a broken pointer (pointer exists but run not formally
+    published) never reaches this function — it is excluded upstream by the date
+    axis itself.
+    """
+    canonical: dict[date, dict[str, Any] | None] = {}
+    for d in formal_dates:
+        run_id = run_id_by_date.get(d)
+        if run_id is None:
+            canonical[d] = None
+            continue
+        canonical[d] = fact_by_run.get(run_id)  # None when fact missing for run
     return canonical
 
 
@@ -220,23 +256,38 @@ async def get_scope_diagnostics(
         to_date=trade_date,
     )
 
-    present_dates = sorted({row.trade_date for row in rows})
-    published_by_date: dict[date, Any] = {}
-    for d in present_dates:
-        published_by_date[d] = await get_published_review_run_id(db, d)
+    # [P1-2] 日期轴 = 正式 published Review 交易日（复用 FORMAL REVIEW READ OWNER），
+    # 而非“已有 Scope Fact 的日期”。formal published 的判定（status==published /
+    # published_at not null / pointer identity / trade_date 一致）全部在
+    # list_formally_published_review_dates 的 DB JOIN 内完成；broken pointer（pointer
+    # 存在但 run 未正式发布）直接被排除，不会进入历史轴。
+    formal_desc = await list_formally_published_review_dates(
+        db, limit=display_window + warmup_total + 100
+    )
+    candidate_dates = [d for d in reversed(formal_desc) if from_date <= d <= trade_date]
 
-    canonical = _select_published_facts(rows, published_by_date)
-    ordered_dates = sorted(canonical.keys())
+    # 每个正式日期解析其 published run_id（已由 formal owner 保证）。
+    run_id_by_date: dict[date, Any] = {}
+    for d in candidate_dates:
+        run_id_by_date[d] = await get_published_review_run_id(db, d)
+
+    # 事实按 run_id 索引；lineage 门控：只取 published run 的 fact。
+    fact_by_run: dict[Any, dict[str, Any]] = {}
+    for row in rows:
+        if isinstance(row.observation_payload, dict):
+            fact_by_run[row.review_run_id] = row.observation_payload
+
+    canonical = build_canonical_by_date(candidate_dates, run_id_by_date, fact_by_run)
     window_dates = (
-        ordered_dates[-(display_window + warmup_total):]
-        if len(ordered_dates) > (display_window + warmup_total)
-        else ordered_dates
+        candidate_dates[-(display_window + warmup_total):]
+        if len(candidate_dates) > (display_window + warmup_total)
+        else candidate_dates
     )
 
     fields_out: dict[str, Any] = {}
     for key, path, extractor, label, unit in _HISTORY_FIELD_SPECS:
         full_series = [
-            extractor(_deep_get(canonical[d], path)) if d in canonical else None
+            extractor(_deep_get(canonical[d], path)) if canonical.get(d) is not None else None
             for d in window_dates
         ]
         rolling = _compute_field_rolling(full_series, ROLLING_WINDOW)
@@ -277,5 +328,6 @@ __all__ = [
     "HISTORY_DISPLAY_WINDOW",
     "HISTORY_WARMUP_TOTAL",
     "_select_published_facts",
+    "build_canonical_by_date",
     "_compute_field_rolling",
 ]

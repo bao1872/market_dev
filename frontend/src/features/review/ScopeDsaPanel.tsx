@@ -1,41 +1,23 @@
-// [ScopeDsaPanel] - 描述: R3 Slice 1 DSA 趋势与结构研究页。
+// [ScopeDsaPanel] - R3 Slice 1 DSA 趋势与结构研究页。
 //
-// 仅承载后端三类数据，前端不重算：
-// - current：observation.trend.continuous（regime_strength / dsa_vwap_dev_pct / segment）
-//   + trend.state（up/down/range 成员比）+ trend.transition（T-1→T 迁移）。
+// 仅承载三类数据，前端不重算：
+// - current：由 scopeDsaContract 解析（复用 R3C 数值刻度 owner，绝不 x100）。
 // - history：后端 20D 滚动诊断（series / mean20 / std20 / zscore20 / percentile20）。
 // - crossSection：C1 empirical percentile（published-run lineage cohort）。
 //
-// 图表用内联 SVG sparkline（不引图表库）；缺失值 = null，绝不显示 0。
+// 图表用内联 SVG sparkline；缺失值 = null，遇 null 断开分段（绝不跨 null 连线）。
+// 组件不再 deepGet canonical payload，也不再自建单位 formatter。
 import type { ReviewCrossSectionDTO, ReviewScopeHistoryDTO } from './types'
+import {
+  parseDsaObservation,
+  buildDsaVM,
+  splitSeriesByGap,
+} from './scopeDsaContract'
 import styles from './review.module.scss'
 
 type Json = Record<string, unknown>
 
-function num(v: unknown): number | null {
-  return typeof v === 'number' && Number.isFinite(v) ? v : null
-}
-
-function deepGet(root: unknown, path: string[]): unknown {
-  let node: unknown = root
-  for (const key of path) {
-    if (node && typeof node === 'object' && key in (node as Json)) {
-      node = (node as Json)[key]
-    } else {
-      return null
-    }
-  }
-  return node
-}
-
-function fmtPct(v: number | null): string {
-  return v == null ? '—' : `${(v * 100).toFixed(1)}%`
-}
-function fmtNum(v: number | null, digits = 2): string {
-  return v == null ? '—' : v.toFixed(digits)
-}
-
-/** 内联 sparkline：series 折线 + 可选 mean±std 参考带。 */
+/** 内联 sparkline：遇 null 断开为多个 segment，绝不跨缺失槽连线（P1-3）。 */
 function Sparkline({
   series,
   mean,
@@ -49,21 +31,18 @@ function Sparkline({
   width?: number
   height?: number
 }) {
-  const vals = series.filter((v): v is number => v != null)
-  if (vals.length === 0) {
+  const segments = splitSeriesByGap(series)
+  const allVals = segments.flatMap((seg) => seg.map((p) => p.v))
+  if (allVals.length === 0) {
     return <span className={styles.kvVal}>—</span>
   }
-  const min = Math.min(...vals)
-  const max = Math.max(...vals)
+  const min = Math.min(...allVals)
+  const max = Math.max(...allVals)
   const span = max - min || 1
   const pad = 4
   const n = series.length
   const x = (i: number) => pad + (i / Math.max(1, n - 1)) * (width - 2 * pad)
   const y = (v: number) => pad + (1 - (v - min) / span) * (height - 2 * pad)
-  const pts = series
-    .map((v, i) => (v == null ? '' : `${x(i).toFixed(1)},${y(v).toFixed(1)}`))
-    .filter(Boolean)
-    .join(' ')
   // mean±std 参考带（取末点）
   const lastMean = mean ? mean[mean.length - 1] : null
   const lastStd = std ? std[std.length - 1] : null
@@ -76,7 +55,20 @@ function Sparkline({
   return (
     <svg width={width} height={height} role="img" aria-label="20日序列" style={{ display: 'block' }}>
       {band && <polygon points={band} fill="rgba(120,160,255,0.14)" />}
-      <polyline points={pts} fill="none" stroke="#4f8cff" strokeWidth={1.5} />
+      {segments.map((seg, idx) => {
+        const pts = seg
+          .map((p) => `${x(p.i).toFixed(1)},${y(p.v).toFixed(1)}`)
+          .join(' ')
+        return (
+          <polyline
+            key={idx}
+            points={pts}
+            fill="none"
+            stroke="#4f8cff"
+            strokeWidth={1.5}
+          />
+        )
+      })}
     </svg>
   )
 }
@@ -91,7 +83,7 @@ function HistoryRow({ f }: { f: ReviewScopeHistoryDTO['fields'][string] }) {
       <span className={styles.kvKey}>{f.label}</span>
       <Sparkline series={f.series} mean={f.mean20} std={f.std20} />
       <span className={styles.kvVal}>
-        值 {fmtNum(cur)} · Z {fmtNum(z)} · 分位 {p == null ? '—' : p.toFixed(0)}
+        值 {cur == null ? '—' : cur.toFixed(2)} · Z {z == null ? '—' : z.toFixed(1)} · 分位 {p == null ? '—' : p.toFixed(0)}
       </span>
     </div>
   )
@@ -104,20 +96,7 @@ export interface ScopeDsaPanelProps {
 }
 
 export default function ScopeDsaPanel({ observation, history, crossSection }: ScopeDsaPanelProps) {
-  const continuous = deepGet(observation, ['trend', 'continuous']) as Json | null
-  const trendState = deepGet(observation, ['trend', 'state']) as Json | null
-  const transition = deepGet(observation, ['trend', 'transition']) as Json | null
-
-  const regime = num(deepGet(continuous, ['regime_strength']))
-  const vwapDev = num(deepGet(continuous, ['dsa_vwap_dev_pct']))
-  const segBars = num(deepGet(continuous, ['segment_bars']))
-  const segSlope = num(deepGet(continuous, ['segment_slope']))
-  const segChange = num(deepGet(continuous, ['segment_change_pct']))
-
-  const upRatio = num(deepGet(trendState, ['up_ratio']))
-  const downRatio = num(deepGet(trendState, ['down_ratio']))
-  const rangeRatio = num(deepGet(trendState, ['range_ratio']))
-
+  const vm = buildDsaVM(parseDsaObservation(observation))
   const csRegime = crossSection?.fields.find((f) => f.field_key === 'trend.continuous.regime_strength')
 
   const histFields = history?.fields ?? {}
@@ -129,31 +108,53 @@ export default function ScopeDsaPanel({ observation, history, crossSection }: Sc
         <div className={styles.panelTitle}>当前 DSA 趋势与结构</div>
         <div className={styles.kvRow}>
           <span className={styles.kvKey}>Regime Strength</span>
-          <span className={styles.kvVal}>{fmtNum(regime)}</span>
+          <span className={styles.kvVal}>{vm.regimeStrength}</span>
         </div>
         <div className={styles.kvRow}>
           <span className={styles.kvKey}>趋势段 VWAP 偏离</span>
-          <span className={styles.kvVal}>{fmtPct(vwapDev)}</span>
+          <span className={styles.kvVal}>{vm.dsaVwapDevPct}</span>
         </div>
         <div className={styles.kvRow}>
           <span className={styles.kvKey}>趋势段</span>
           <span className={styles.kvVal}>
-            {segBars == null ? '—' : `${segBars.toFixed(0)} 根`}
-            {segSlope != null ? ` · 斜率 ${fmtNum(segSlope)}` : ''}
-            {segChange != null ? ` · 涨跌 ${fmtPct(segChange)}` : ''}
+            {vm.segmentBars} 根
+            {vm.segmentSlope !== '—' ? ` · 斜率 ${vm.segmentSlope}` : ''}
+            {vm.segmentChangePct !== '—' ? ` · 涨跌 ${vm.segmentChangePct}` : ''}
           </span>
         </div>
         <div className={styles.kvRow}>
           <span className={styles.kvKey}>成员构成</span>
           <span className={styles.kvVal}>
-            涨 {fmtPct(upRatio)} · 跌 {fmtPct(downRatio)} · 横 {fmtPct(rangeRatio)}
+            涨 {vm.upRatio} · 横 {vm.neutralRatio} · 跌 {vm.downRatio}
           </span>
         </div>
-        {transition && (
-          <div className={styles.kvRow}>
-            <span className={styles.kvKey}>T-1→T 迁移</span>
-            <span className={styles.kvVal}>{JSON.stringify(transition)}</span>
-          </div>
+      </section>
+
+      {/* 当前横截面分布（canonical：trend_strength_distribution / dsa_vwap_dev_pct_distribution） */}
+      <section className={styles.detailCard}>
+        <div className={styles.panelTitle}>当前分布（成员级 percentile 描述）</div>
+        <div className={styles.kvRow}>
+          <span className={styles.kvKey}>趋势强度分布</span>
+          <span className={styles.kvVal}>{vm.trendStrengthDist}</span>
+        </div>
+        <div className={styles.kvRow}>
+          <span className={styles.kvKey}>DSA VWAP 偏离分布</span>
+          <span className={styles.kvVal}>{vm.dsaVwapDevDist}</span>
+        </div>
+      </section>
+
+      {/* T-1 → T 变化（canonical transition：仅真实发生的迁移比例，sparse，无 key=0） */}
+      <section className={styles.detailCard}>
+        <div className={styles.panelTitle}>T-1 → T 状态迁移</div>
+        {vm.transitions.length > 0 ? (
+          vm.transitions.map((tr) => (
+            <div key={tr.key} className={styles.kvRow}>
+              <span className={styles.kvKey}>{tr.key}</span>
+              <span className={styles.kvVal}>{tr.ratio}</span>
+            </div>
+          ))
+        ) : (
+          <div className={styles.kvVal}>无状态迁移（成员状态稳定）</div>
         )}
       </section>
 

@@ -114,6 +114,15 @@
       "required": true,
       "test_selectors": ["tests/test_pg_bars_provider_persistence_f1b1.py"],
       "claim": "Serial and bounded-spawn Bars scheduler paths persist equivalent daily and minute facts idempotently."
+    },
+    {
+      "contract_id": "review_scope_diagnostics_lineage",
+      "governance_level": 2,
+      "semantic_owner": "app.services.review_scope_diagnostics_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_review_diagnostics_lineage.py"],
+      "claim": "Review scope history/cross-sectional are built from the formal published-Review date axis (reuse of FORMAL REVIEW READ OWNER), preserve missing-date slots as null, and exclude broken-pointer dates."
     }
   ]
 }
