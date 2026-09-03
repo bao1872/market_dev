@@ -37,9 +37,9 @@ from sqlalchemy import text
 
 from app.db import AsyncSessionLocal
 from app.domain.review.versions import REVIEW_ALGORITHM_VERSION
-from app.models.factor_publication import FactorPublication
 from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+from app.services.review_cross_sectional_service import get_cross_sectional
 from app.services.review_observation_persistence_service import (
     ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES,
 )
@@ -50,7 +50,6 @@ from app.services.review_publication_service import (
     publish_review,
 )
 from app.services.review_scope_diagnostics_service import get_scope_diagnostics
-from app.services.review_cross_sectional_service import get_cross_sectional
 
 pytestmark = pytest.mark.postgres
 
