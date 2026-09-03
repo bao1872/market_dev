@@ -620,6 +620,11 @@ async def get_review_scope_composition(
     #   Composition 引用成员  UNION  observation.trend.transition.changed_members 成员。
     # 仍是 ONE bulk Instrument query（去重后一次性查）。composition=null 时只要
     # Observation 有 changed-member UUID，目录也必须能生成（不依赖 Composition）。
+    # [R3 History] query-time 20D rolling diagnostics from published-run safe series.
+    # 提前到 memberDirectory 之前：Price 历史 leader id 需要并入同一次 bulk 查询。
+    history = await get_scope_diagnostics(
+        db, trade_date=td, scope_type=scope_type, scope_key=scope_key,
+    )
     ref_ids: list[str] = []
     if composition_ok:
         ref_ids.extend(
@@ -627,6 +632,9 @@ async def get_review_scope_composition(
             if is_uuid(mid)
         )
     ref_ids.extend(_collect_changed_member_ids(observation))
+    # [SLICE 4 / Price] UNION price history current_leader_ids。
+    # 仍是 ONE bulk Instrument query（去重后一次性查），绝不逐个成员发请求。
+    ref_ids.extend(_collect_price_history_leader_ids(history))
     ref_ids = list(dict.fromkeys(ref_ids))  # 稳定去重
     if ref_ids:
         id_uuids = [uuid.UUID(mid) for mid in ref_ids]
@@ -642,10 +650,6 @@ async def get_review_scope_composition(
             for inst_id, symbol, name in inst_rows
         }
 
-    # [R3 History] query-time 20D rolling diagnostics from published-run safe series.
-    history = await get_scope_diagnostics(
-        db, trade_date=td, scope_type=scope_type, scope_key=scope_key,
-    )
     # [R3 Cross-sectional P0] published-run lineage cross-sectional position evidence.
     cross_section = await get_cross_sectional(db, td, scope_type, scope_key)
 
@@ -663,6 +667,32 @@ async def get_review_scope_composition(
         history=history,
         crossSection=cross_section,
     )
+
+
+def _collect_price_history_leader_ids(history: Any) -> list[str]:
+    """[SLICE 4 / Price] 从 history.price.leadership 收集 current_leader_ids。
+
+    并入 memberDirectory 的同一批 ref IDs —— 仍是 ONE bulk Instrument query
+    （去重后一次性查），绝不逐个成员发请求。非 dict / 缺字段 / 非 UUID 一律跳过，
+    绝不抛错；history 为 None（非 activated scope_type）时返回空。
+    """
+    ids: list[str] = []
+    price = getattr(history, "price", None)
+    if price is None:
+        return ids
+    leadership = getattr(price, "leadership", None)
+    if not isinstance(leadership, list):
+        return ids
+    for item in leadership:
+        if item is None:
+            continue
+        raw_ids = getattr(item, "current_leader_ids", None)
+        if not isinstance(raw_ids, list):
+            continue
+        for mid in raw_ids:
+            if isinstance(mid, str) and is_uuid(mid):
+                ids.append(mid)
+    return ids
 
 
 def _collect_changed_member_ids(observation: Any) -> list[str]:

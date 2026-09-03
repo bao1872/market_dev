@@ -1008,8 +1008,12 @@ test('REG-P. Leadership attribution 使用 aligned_contribution', () => {
 })
 
 test('REG-Q. Velocity/Acceleration 图表包含 zero price line', () => {
-  const src = read('ScopeDynamicsPanel.tsx')
-  assert.match(src, /buildZeroReferenceLine|createPriceLine/, 'offset 图表必须使用 zero reference line')
+  // [SLICE 4 / Price] 三图 renderer 抽为共享组件 ScopeDynamicsCharts（窄块抽取，
+  // 行为不变）；zero reference line 由该 engine 拥有，面板复用它。
+  const engine = read('ScopeDynamicsCharts.tsx')
+  assert.match(engine, /buildZeroReferenceLine|createPriceLine/, 'offset 图表必须使用 zero reference line')
+  const panel = read('ScopeDynamicsPanel.tsx')
+  assert.match(panel, /from '\.\/ScopeDynamicsCharts'/, '面板必须复用共享三图 renderer')
 })
 
 // ============================================================

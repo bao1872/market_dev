@@ -28,6 +28,26 @@ def safe_mean(values: Sequence[float | None]) -> float | None:
     return sum(finite) / len(finite)
 
 
+def safe_variance(values: Sequence[float | None]) -> float | None:
+    """Population variance of finite values; ``None`` when < 2 finite values.
+
+    [SLICE 4 / Price] Same owner + same population definition as ``safe_std`` so
+    the two are mathematically consistent (``std == sqrt(variance)``). The
+    frontend must NEVER derive variance as ``std ** 2`` — variance is a
+    first-class backend fact.
+
+    - null / non-finite are EXCLUDED (never coerced to 0);
+    - population (``/ n``), not sample (``/ (n - 1)``);
+    - ``n < 2`` -> ``None``.
+    """
+    finite = [v for v in values if v is not None and math.isfinite(v)]
+    n = len(finite)
+    if n < 2:
+        return None
+    m = sum(finite) / n
+    return sum((x - m) ** 2 for x in finite) / n
+
+
 def safe_std(values: Sequence[float | None]) -> float | None:
     """Population std of finite values; ``None`` when < 2 finite values."""
     finite = [v for v in values if v is not None and math.isfinite(v)]

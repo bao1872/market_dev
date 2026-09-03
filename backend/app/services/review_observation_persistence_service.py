@@ -496,6 +496,39 @@ async def list_scope_composition_snapshots(
     return list((await db.execute(stmt)).scalars())
 
 
+async def list_scope_composition_snapshots_for_dates(
+    db: AsyncSession,
+    *,
+    scope_type: str,
+    scope_key: str,
+    from_date: date,
+    to_date: date,
+) -> list[ReviewScopeCompositionSnapshot]:
+    """[SLICE 4 / Price] Narrow read-model query: one scope's Composition rows
+    over a calendar date window.
+
+    This is a calendar-window scan ONLY — it is deliberately NOT the lineage
+    gate. The caller must resolve each date's *formally published* ``review_run_id``
+    through the FORMAL REVIEW READ OWNER (``list_formally_published_review_dates``
+    + ``get_published_review_run_id``) and keep only rows whose ``review_run_id``
+    matches (``_select_published_compositions``). That is what makes a later
+    same-day *unpublished* run unable to enter the Price history.
+
+    No new table, no member-history reconstruction, no canonical recompute.
+    """
+    stmt = (
+        select(ReviewScopeCompositionSnapshot)
+        .where(
+            ReviewScopeCompositionSnapshot.scope_type == scope_type,
+            ReviewScopeCompositionSnapshot.scope_key == scope_key,
+            ReviewScopeCompositionSnapshot.trade_date >= from_date,
+            ReviewScopeCompositionSnapshot.trade_date <= to_date,
+        )
+        .order_by(ReviewScopeCompositionSnapshot.trade_date)
+    )
+    return list((await db.execute(stmt)).scalars())
+
+
 # =============================================================================
 # Scope Summary Projection（Slice B — Thin Scope List Read Model）
 # =============================================================================

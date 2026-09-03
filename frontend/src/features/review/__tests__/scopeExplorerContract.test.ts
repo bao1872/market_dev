@@ -1141,9 +1141,11 @@ test('P0-2: 排序作用于完整 family snapshot（跨分页），而非仅当�
 
 // P0-3：TradingView logo 关闭 + attribution 保留
 test('P0-3: 图表关闭 Lightweight Charts attribution logo，并保留许可归属文本', () => {
+  // [SLICE 4 / Price] 三图 engine 抽为 ScopeDynamicsCharts；attribution 文本仍留在面板。
+  const engine = read('ScopeDynamicsCharts.tsx')
   const dp = read('ScopeDynamicsPanel.tsx')
-  assert.match(dp, /attributionLogo:\s*false/, '必须设置 layout.attributionLogo=false 关闭 TV logo')
-  assert.doesNotMatch(dp, /display:\s*none[^\n]*logo|mask|overlay/, '禁止用 CSS/overlay 强盖 logo')
+  assert.match(engine, /attributionLogo:\s*false/, '必须设置 layout.attributionLogo=false 关闭 TV logo')
+  assert.doesNotMatch(engine, /display:\s*none[^\n]*logo|mask|overlay/, '禁止用 CSS/overlay 强盖 logo')
   assert.match(dp, /chartAttribution/, '面板必须保留 TradingView 许可归属文本（非干扰区）')
 })
 

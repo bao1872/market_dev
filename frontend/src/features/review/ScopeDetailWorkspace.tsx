@@ -27,6 +27,7 @@ import ScopeCurrentObservationWorkspace from './ScopeCurrentObservationWorkspace
 import ScopeDsaPanel from './ScopeDsaPanel'
 import ScopeSmcPanel from './ScopeSmcPanel'
 import ScopeMomentumVolumePanel from './ScopeMomentumVolumePanel'
+import ScopePriceAnalysisPanel from './ScopePriceAnalysisPanel'
 import { NULL_DISPLAY, UNNAMED_SCOPE_LABEL, formatReadiness } from './reviewFormat'
 import styles from './review.module.scss'
 
@@ -179,7 +180,16 @@ export default function ScopeDetailWorkspace({
             crossSection={detail.data?.crossSection ?? null}
           />
         )}
-        {tab === 'price' && <div className={styles.detailEmpty}>涨跌幅分布研究中，即将上线</div>}
+        {tab === 'price' && (
+          <ScopePriceAnalysisPanel
+            observation={detail.data?.observation ?? null}
+            history={detail.data?.history ?? null}
+            dynamics={panels.dynamics}
+            internal={panels.internal}
+            crossSection={detail.data?.crossSection ?? null}
+            memberDirectory={detail.data?.memberDirectory ?? null}
+          />
+        )}
         {tab === 'current' && (
           <ScopeCurrentObservationWorkspace
             observationGroups={detail.data?.observationGroups ?? null}

@@ -119,7 +119,9 @@ test('source: TradingView attribution 是真实 <a> 链接', () => {
   const src = readSource('ScopeDynamicsPanel.tsx')
   assert.ok(/href="https:\/\/www\.tradingview\.com\/"/.test(src), '缺少 TradingView 真实链接')
   assert.ok(/<a[\s\S]*TradingView Lightweight Charts[\s\S]*<\/a>/.test(src), 'attribution 不是真实 <a> 元素')
-  assert.ok(/attributionLogo:\s*false/.test(src), 'attributionLogo 未保持 false')
+  // [SLICE 4 / Price] createChart 归共享三图 renderer 拥有
+  const engine = readSource('ScopeDynamicsCharts.tsx')
+  assert.ok(/attributionLogo:\s*false/.test(engine), 'attributionLogo 未保持 false')
 })
 
 test('source: P0-1 普通 UI 不显示 historical_dynamics（改为中文 unavailable 文案）', () => {

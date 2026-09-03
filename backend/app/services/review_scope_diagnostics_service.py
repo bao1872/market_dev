@@ -28,11 +28,13 @@ from app.domain.review.analysis.observation_stats import (
     empirical_percentile,
     safe_mean,
     safe_std,
+    safe_variance,
     zscore,
 )
 from app.models.market_review import ReviewScopeObservationFact
 from app.services.review_observation_persistence_service import (
     ACTIVATED_OBSERVATION_PERSISTENCE_SCOPE_TYPES,
+    list_scope_composition_snapshots_for_dates,
     list_scope_observation_facts,
 )
 from app.services.review_publication_service import (
@@ -174,6 +176,94 @@ def build_canonical_by_date(
     return canonical
 
 
+def _select_published_compositions(
+    rows: list[Any],
+    published_by_date: dict[date, Any],
+) -> dict[date, dict[str, Any]]:
+    """[SLICE 4 / Price] Lineage-safe Composition selection (mirrors
+    ``_select_published_facts``).
+
+    Keeps only the Composition row whose ``review_run_id`` equals the *formally
+    published* run of its trade_date. A later same-day run (unpublished) is
+    DROPPED; a date with no published pointer yields no Composition. Pure +
+    unit-testable (no DB needed) — this function IS the guarantee that an
+    unpublished same-day run cannot pollute the Price history.
+    """
+    canonical: dict[date, dict[str, Any]] = {}
+    for row in rows:
+        pub = published_by_date.get(row.trade_date)
+        if pub is None:
+            continue
+        if row.review_run_id != pub:
+            continue
+        payload = row.composition_payload
+        if isinstance(payload, dict):
+            canonical[row.trade_date] = payload
+    return canonical
+
+
+def _build_price_projection(
+    compositions: dict[date, dict[str, Any] | None],
+    dates: list[date],
+) -> dict[str, Any]:
+    """[SLICE 4 / Price] Narrow Composition history projection (pure).
+
+    Every date slot is preserved; a date whose published Composition is missing
+    yields ``None`` (never forward-filled, never back-derived from the current
+    Composition). Values are read VERBATIM from the persisted Composition:
+
+    - ``capital_tilt`` = ``internal_structure_facts.capital_tilt.capital_tilt``
+      (persisted fact — the frontend must NOT compute AW - EW)
+    - leadership: ``status`` / ``reason`` / ``jaccard_stability`` / ``migration`` /
+      ``current_leader_count`` / ``current_leader_ids`` (verbatim; ``[]`` vs ``None``
+      for the leader-id list must be preserved).
+    """
+    capital_tilt: list[float | None] = []
+    leadership: list[dict[str, Any] | None] = []
+    for d in dates:
+        comp = compositions.get(d)
+        if not isinstance(comp, dict):
+            capital_tilt.append(None)
+            leadership.append(None)
+            continue
+        tilt = _deep_get(comp, ("internal_structure_facts", "capital_tilt", "capital_tilt"))
+        capital_tilt.append(tilt if isinstance(tilt, (int, float)) and not isinstance(tilt, bool) else None)
+        lead = comp.get("leadership")
+        if not isinstance(lead, dict):
+            leadership.append(None)
+            continue
+        ids = lead.get("current_leader_ids")
+        leadership.append(
+            {
+                "status": lead.get("status") if isinstance(lead.get("status"), str) else None,
+                "reason": lead.get("reason") if isinstance(lead.get("reason"), str) else None,
+                "jaccard_stability": _num_or_none(lead.get("jaccard_stability")),
+                "migration": _num_or_none(lead.get("migration")),
+                "current_leader_count": (
+                    int(lead.get("current_leader_count"))
+                    if isinstance(lead.get("current_leader_count"), int)
+                    and not isinstance(lead.get("current_leader_count"), bool)
+                    else None
+                ),
+                # [] (empty leader set) is a REAL fact and must not collapse to null.
+                "current_leader_ids": ids if isinstance(ids, list) else None,
+            }
+        )
+    return {
+        "dates": [d.isoformat() for d in dates],
+        "capital_tilt": capital_tilt,
+        "leadership": leadership,
+    }
+
+
+def _num_or_none(v: Any) -> float | None:
+    """Numeric passthrough; non-finite / non-numeric -> None (never 0)."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return None
+    f = float(v)
+    return f if math.isfinite(f) else None
+
+
 def _compute_field_rolling(
     full_series: list[float | None], window: int = ROLLING_WINDOW
 ) -> dict[str, list[float | None | int]]:
@@ -182,9 +272,15 @@ def _compute_field_rolling(
     ``full_series`` is the value aligned to the FULL warmup window (ascending).
     ``baseline(i)`` = finite values in ``full_series[max(0, i-window) : i]``
     (strictly before i -> excludes T). Returns arrays aligned to ``full_series``.
+
+    [SLICE 4 / Price] ``variance20`` is a first-class backend fact (population
+    variance of the same lagged baseline). It shares the owner + definition with
+    ``safe_std`` (``std == sqrt(variance)``); ``None`` when the baseline holds
+    fewer than 2 finite values. The frontend must never derive it as ``std ** 2``.
     """
     n = len(full_series)
     mean20: list[float | None] = []
+    variance20: list[float | None] = []
     std20: list[float | None] = []
     z20: list[float | None] = []
     p20: list[float | None] = []
@@ -196,9 +292,11 @@ def _compute_field_rolling(
             if full_series[j] is not None
         ]
         m = safe_mean(baseline)
+        var = safe_variance(baseline)
         s = safe_std(baseline)
         v = full_series[i]
         mean20.append(m)
+        variance20.append(var)
         std20.append(s)
         z20.append(zscore(v, m, s))
         window_samples = baseline + ([v] if v is not None else [])
@@ -206,6 +304,7 @@ def _compute_field_rolling(
         bcount.append(len(baseline))
     return {
         "mean20": mean20,
+        "variance20": variance20,
         "std20": std20,
         "zscore20": z20,
         "percentile20": p20,
@@ -349,6 +448,7 @@ async def get_scope_diagnostics(
             "fields": {},
             "smc": None,
             "momentumVolume": None,
+            "price": None,
         }
 
     from_date = trade_date - timedelta(
@@ -404,6 +504,7 @@ async def get_scope_diagnostics(
             "unit": unit,
             "series": full_series[start:],
             "mean20": rolling["mean20"][start:],
+            "variance20": rolling["variance20"][start:],
             "std20": rolling["std20"][start:],
             "zscore20": rolling["zscore20"][start:],
             "percentile20": rolling["percentile20"][start:],
@@ -416,6 +517,17 @@ async def get_scope_diagnostics(
     display_dates = [d.isoformat() for d in display_window_dates]
     smc = _build_smc_projection(canonical, display_window_dates)
     momentum_volume = _build_momentum_volume_projection(canonical, display_window_dates)
+    # [SLICE 4 / Price] 窄 Composition 历史（capital_tilt + leadership）：同一正式
+    # published 日期轴 + 同一 published-run lineage 门控（纯选择器丢弃同日未发布 run）。
+    composition_rows = await list_scope_composition_snapshots_for_dates(
+        db,
+        scope_type=scope_type,
+        scope_key=scope_key,
+        from_date=window_dates[0] if window_dates else trade_date,
+        to_date=window_dates[-1] if window_dates else trade_date,
+    )
+    compositions = _select_published_compositions(composition_rows, run_id_by_date)
+    price = _build_price_projection(compositions, display_window_dates)
     total = len(window_dates)
     availability = {
         "status": "ready" if total > 0 else "empty",
@@ -433,6 +545,7 @@ async def get_scope_diagnostics(
         "fields": fields_out,
         "smc": smc,
         "momentumVolume": momentum_volume,
+        "price": price,
     }
 
 
@@ -443,4 +556,6 @@ __all__ = [
     "_select_published_facts",
     "build_canonical_by_date",
     "_compute_field_rolling",
+    "_select_published_compositions",
+    "_build_price_projection",
 ]

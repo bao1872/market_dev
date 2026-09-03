@@ -551,10 +551,38 @@ export interface ReviewScopeHistoryFieldDTO {
   unit: string | null
   series: Array<number | null>
   mean20: Array<number | null>
+  /**
+   * [SLICE 4 / Price] lagged baseline population variance（后端 first-class fact）。
+   * 与 std20 同一 owner / 同一 population 定义；finite<2 → null。
+   * 前端禁止 std ** 2 反推 variance。
+   */
+  variance20: Array<number | null>
   std20: Array<number | null>
   zscore20: Array<number | null>
   percentile20: Array<number | null>
   baselineCount: Array<number | null>
+}
+
+/** [SLICE 4 / Price] 单日 persisted Composition.leadership 窄投影（verbatim）。 */
+export interface ReviewScopePriceLeadershipHistoryItemDTO {
+  status: string | null
+  reason: string | null
+  jaccard_stability: number | null
+  migration: number | null
+  current_leader_count: number | null
+  /** 空集合为 []（真实事实），缺失为 null —— 两者语义不同，不得合并 */
+  current_leader_ids: string[] | null
+}
+
+/**
+ * [SLICE 4 / Price] 窄 Composition 历史投影（capital_tilt + leadership）。
+ * 复用同一正式 published 日期轴；某日 Composition 缺失 → 该槽为 null。
+ * EW / AW / Breadth / Dispersion 不在此 —— 继续从 history.fields 消费，不复制第二套。
+ */
+export interface ReviewScopePriceHistoryDTO {
+  dates: string[]
+  capital_tilt: Array<number | null>
+  leadership: Array<ReviewScopePriceLeadershipHistoryItemDTO | null>
 }
 
 /** [R3 History] 20D 历史诊断 DTO（由 published-run 安全日序列 query-time 构建）。 */
@@ -565,6 +593,7 @@ export interface ReviewScopeHistoryDTO {
   fields: Record<string, ReviewScopeHistoryFieldDTO>
   smc: ReviewScopeSmcHistoryDTO | null
   momentumVolume: ReviewScopeMomentumVolumeHistoryDTO | null
+  price: ReviewScopePriceHistoryDTO | null
 }
 
 /** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。

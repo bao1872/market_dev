@@ -346,6 +346,13 @@ class ReviewScopeHistoryFieldDTO(BaseModel):
     unit: str | None = Field(None, description="pct / ratio / None")
     series: list[float | None] = Field(default_factory=list, description="display-window 原始值")
     mean20: list[float | None] = Field(default_factory=list, description="lagged baseline mean(T-20..T-1)")
+    variance20: list[float | None] = Field(
+        default_factory=list,
+        description=(
+            "[SLICE 4 / Price] lagged baseline population variance（与 std20 同一 owner/"
+            "同一 population 定义；finite<2 → None）。前端禁止 std**2 反推"
+        ),
+    )
     std20: list[float | None] = Field(default_factory=list, description="lagged baseline population std")
     zscore20: list[float | None] = Field(default_factory=list, description="(v-mean20)/std20，std==0→None")
     percentile20: list[float | None] = Field(default_factory=list, description="自身在 trailing 窗口的经验分位 [0,100]")
@@ -415,6 +422,49 @@ class ReviewScopeMomentumVolumeHistoryDTO(BaseModel):
     )
 
 
+class ReviewScopePriceLeadershipHistoryItemDTO(BaseModel):
+    """[SLICE 4 / Price] 单日 persisted Composition.leadership 窄投影（verbatim）。
+
+    只投影 Price 页实际消费的字段；unavailable / status / reason 原样保留，
+    empty leader set 与 null 必须区分（`current_leader_ids` 为 ``[]`` 与 ``None`` 语义不同）。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    status: str | None = Field(None, description="leadership 层 status（unavailable 时为字符串，非 null）")
+    reason: str | None = Field(None, description="unavailable 原因（CURRENT_* / NO_* 等），ready 时为 null")
+    jaccard_stability: float | None = Field(None, description="T-1→T leader set 重合度")
+    migration: float | None = Field(None, description="T-1→T leader set 迁移率")
+    current_leader_count: int | None = Field(None, description="当期 leader 数量")
+    current_leader_ids: list[str] | None = Field(
+        None, description="当期 leader instrument id 列表；空集合为 []，缺失为 null"
+    )
+
+
+class ReviewScopePriceHistoryDTO(BaseModel):
+    """[SLICE 4 / Price] 窄 Composition 历史投影（capital_tilt + leadership）。
+
+    与 ReviewScopeHistoryDTO 共享同一正式 published 日期轴；每日值取自该日
+    **formally published run** 的 persisted Composition（同一 published-run
+    lineage read path）。某日 Composition 缺失 → 该槽为 None（保留 date slot，
+    绝不 forward-fill / 从当前 Composition 回推）。
+
+    EW / AW / Breadth / Dispersion 不在本 DTO —— 它们继续从 ``history.fields``
+    消费（Observation facts），不复制第二套。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    dates: list[str] = Field(default_factory=list, description="display-window 交易日（升序，共享 history 日期轴）")
+    capital_tilt: list[float | None] = Field(
+        default_factory=list,
+        description="每日 persisted internal_structure_facts.capital_tilt.capital_tilt（verbatim，不重算 AW-EW）；缺失为 null",
+    )
+    leadership: list[ReviewScopePriceLeadershipHistoryItemDTO | None] = Field(
+        default_factory=list, description="每日 persisted leadership 窄投影；缺失为 null"
+    )
+
+
 class ReviewScopeHistoryDTO(BaseModel):
     """[R3 History] 20D 历史诊断 DTO（由 published-run 安全日序列 query-time 构建）。"""
 
@@ -442,6 +492,13 @@ class ReviewScopeHistoryDTO(BaseModel):
             "[R3 History / Momentum+Volume] 窄动量+量能历史投影（momentum state/change/"
             "squeeze_state/release_volume_ratio/momentum_volume_relation + volume percentile20/200/"
             "sqzmom_mean），复用同一 published-run 安全日序列；非 activated scope_type 为 None"
+        ),
+    )
+    price: ReviewScopePriceHistoryDTO | None = Field(
+        None,
+        description=(
+            "[SLICE 4 / Price] 窄 Composition 历史投影（capital_tilt + leadership），"
+            "复用同一 published-run 安全日序列；非 activated scope_type 为 None"
         ),
     )
 
