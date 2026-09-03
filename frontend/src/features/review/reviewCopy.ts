@@ -131,6 +131,32 @@ export const REVIEW_TERMS = {
     label: '近20日低分位占比',
     help: '固定 20 日窗口内处于低分位区域的占比，直接展示后端计算结果',
   },
+  // ===== [SLICE 5 / Explorer] compare-first 核心列词条（表头短，tooltip 完整）=====
+  dsaStrength: {
+    label: 'DSA强度',
+    help: 'DSA 趋势强度（trend.continuous.regime_strength，无量纲原值）。'
+      + '次行为同 family 横截面分位（Pxx，0–100，非百分比）。',
+  },
+  dsaDuration: {
+    label: '持续Bars',
+    help: 'DSA 趋势持续 bar 数（trend.continuous.dsa_dir_bars，scope 级中位数）。'
+      + 'canonical median 可能带小数，不假装一定是整数。',
+  },
+  // dsaVwapDev 复用既有词条（REVIEW_TERMS 单一 owner，不重复定义）
+  smcEvent: {
+    label: '结构事件',
+    help: '当日最值得知道的结构事件（仅 BOS / CHoCH，固定展示优先级）。'
+      + '次行为事件成员占比；unavailable 显示 —，ready 但无事件显示「无」。',
+  },
+  momentumChange: {
+    label: '动量变化',
+    help: '成员动量状态变化占比（momentum.change 的 enhancing / weakening producer ratio）。'
+      + '分母只展示 canonical value，前端不重算。',
+  },
+  volumeRatio20: {
+    label: '量比20D',
+    help: '成交量相对 20 日基准的比值（participation.volume.ratio20 中位值，ratio 展示为 ×）。',
+  },
   // ===== [Slice C] Explorer 原子化列词条（复合 Breadth/Freshness/Technical 拆分后新增）=====
   advanceRatio: {
     label: '上涨占比',

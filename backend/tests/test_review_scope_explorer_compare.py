@@ -27,6 +27,7 @@ from typing import Any
 from app.services.review_scope_explorer_service import (
     build_compare_facts,
     build_peer_percentiles,
+    build_peer_percentiles_by_family,
     select_smc_display_event,
 )
 
@@ -316,6 +317,76 @@ def test_e14_cohort_is_scoped_by_caller_not_cross_family():
     assert len(b_values) == 1
     # B 的分位不受 A 影响（A 的最高值 0.6 < B 的 0.9，若串 family B 会变）
     assert next(iter(b_values)) is not None
+
+
+def test_e17_family_percentile_never_crosses_family():
+    """[SLICE 5 finalization] /scopes 的 scope_type 可省略 → 一次传入混合 family。
+
+    真实 grouping helper（不是“caller 分两次调用”）必须保证：
+    industry_l1 的 scope 只在 industry_l1 cohort 内排名，concept 同理。
+    """
+    # concept 的值整体远小于 industry_l1 —— 若串 family，industry 分位会被压低
+    rows = [
+        (f"i{i}", "industry_l1", {"regime_strength": 0.80 + 0.01 * i}, {"equal_weight_return": 0.020 + 0.001 * i})
+        for i in range(8)
+    ] + [
+        (f"c{i}", "concept", {"regime_strength": 0.10 + 0.01 * i}, {"equal_weight_return": 0.001 + 0.0001 * i})
+        for i in range(8)
+    ]
+    pct = build_peer_percentiles_by_family(rows)
+
+    i_vals = [pct[f"i{i}"]["regimeStrengthPeerPercentile"] for i in range(8)]
+    c_vals = [pct[f"c{i}"]["regimeStrengthPeerPercentile"] for i in range(8)]
+    assert all(v is not None for v in i_vals + c_vals), "两个 family 各自样本都足够"
+
+    # 各 family 内部单调
+    assert i_vals == sorted(i_vals)
+    assert c_vals == sorted(c_vals)
+    # 关键：两族最低值拿到相同的“族内最低分位”（说明各自独立排名，而非混算）
+    assert i_vals[0] == c_vals[0]
+    assert i_vals[-1] == c_vals[-1]
+
+    # 反证：若把同一批 rows 当单一 cohort，industry_l1 最低值会被 concept 压到很低
+    merged_single = build_peer_percentiles(
+        [(k, tc, pr) for k, _fam, tc, pr in rows]
+    )
+    # 串 family 后 industry_l1 最低值（0.80）会压过全部 concept 低值，分位被抬高
+    assert merged_single["i0"]["regimeStrengthPeerPercentile"] != i_vals[0], (
+        "串/不串 family 必须产生不同结果，否则本测试无意义"
+    )
+    assert merged_single["i0"]["regimeStrengthPeerPercentile"] > i_vals[0], (
+        "串 family 会把 industry_l1 分位抬高（concept 低值垫底）；"
+        "family 分组必须阻止这种跨族污染"
+    )
+
+
+def test_e18_family_grouping_matches_separate_calls():
+    """grouping helper 与“分族各调一次”结果一致（等价性锁）。"""
+    rows = [
+        (f"i{i}", "industry_l1", {"regime_strength": 0.5 + 0.01 * i}, {"equal_weight_return": 0.01 + 0.001 * i})
+        for i in range(6)
+    ] + [
+        (f"c{i}", "concept", {"regime_strength": 0.2 + 0.01 * i}, {"equal_weight_return": 0.002 + 0.0001 * i})
+        for i in range(6)
+    ]
+    grouped = build_peer_percentiles_by_family(rows)
+    separate: dict[str, dict[str, float | None]] = {}
+    separate.update(
+        build_peer_percentiles([(k, tc, pr) for k, f, tc, pr in rows if f == "industry_l1"])
+    )
+    separate.update(
+        build_peer_percentiles([(k, tc, pr) for k, f, tc, pr in rows if f == "concept"])
+    )
+    assert grouped == separate
+
+
+def test_e19_single_family_request_still_one_group():
+    # 请求已带 scope_type 时自然只有一个 group，语义不变
+    rows = [(f"s{i}", "industry_l1", {"regime_strength": 0.1 * (i + 1)}, {"equal_weight_return": 0.001 * (i + 1)}) for i in range(6)]
+    pct = build_peer_percentiles_by_family(rows)
+    assert set(pct.keys()) == {f"s{i}" for i in range(6)}
+    vals = [pct[f"s{i}"]["regimeStrengthPeerPercentile"] for i in range(6)]
+    assert vals == sorted(vals)
 
 
 def test_e16_no_duplicated_percentile_formula():

@@ -1,42 +1,34 @@
-// [ScopeExplorerTable] - 描述: Scope Explorer 表格视图（Slice D + R2B + Slice C 原子化）
+// [ScopeExplorerTable] - 描述: Scope Explorer 表格视图
+// [SLICE 5 / Explorer] 默认 compare-first 11 列（一屏横向比较）。
 //
-// 精确用户可见列 —— 全部原子化，不再有复合 cell：
-//   Scope / Phase / Position / Velocity / Acceleration /
-//   EW Return / Capital Tilt /
-//   上涨占比 / 下跌占比 / 平盘占比 /
-//   Leadership Migration / Coverage /
-//   事件密度 / 今日事件数 /
-//   技术集中度 / 前5强度占比 / 最高-中位强度差 / 最高强度成员
+// 默认可见列（严格 11 列）：
+//   Scope / DSA Strength / DSA Duration / DSA VWAP Dev / SMC Event /
+//   Momentum / Vol20 / EW / Breadth / Capital Tilt / Migration
 //
-// 规则：
-// - Position 为 0–100 percentile，直接展示原值（绝不乘 100）。
-// - 每个「可见 scalar numeric 列」都可点击 asc/desc；最高强度成员是字符串，不排序。
-// - 缺失（null）显示 '—'，绝不填 0、不插值、不 carry。
-// - Freshness / Technical 为中性 analytics，不使用方向色（§15）。
-// - A股红涨绿跌：EW Return / Capital Tilt 正=红 负=绿；品牌色仅用于选中行。
-// - 研究工具宁愿横向滚动，也不把不同指标塞回一个 cell。
-// - 表头经 reviewCopy + ReviewTerm 中文化；单元格不重算任何 canonical 字段。
+// 默认**不再**展示（canonical owner 仍存在，display 替换 != 删除）：
+//   Phase / Position / Velocity / Acceleration / Decline / Unchanged /
+//   Coverage / Freshness / HHI / Top5 / Leader Gap / Leader Symbol
+//   （旧 canonical owner 与旧 sort key 保留，清理放 Slice 6）
+//
+// 硬规则：
+// - 一切展示值来自 row.compareFacts（backend 单一 batch read-model），
+//   绝不读取 raw Observation、绝不调用 detail、绝不 N+1。
+// - 单位/方向色/null 文案一律由 scopeExplorerContract（唯一 typed owner）提供；
+//   本组件只 render 与处理排序交互。
+// - 缺失显示 '—'，绝不填 0、不插值、不 carry。
+// - 无综合评分、无加权排序、无机会/风险判断（仅展示与排序 canonical compare 事实）。
+// - 表头经 reviewCopy + ReviewTerm 中文化（无裸英文 header）。
 import type { ReviewScopeListItem } from './types'
 import {
-  NULL_DISPLAY,
-  UNNAMED_SCOPE_LABEL,
-  formatPercentNullable,
-  formatNumberNullable,
-  formatPosition,
-  formatPhaseLabel,
-} from './reviewFormat'
-import { technicalTop5Ratio } from './scopeExplorerViewModel'
+  DIRECTION_COLOR,
+  buildExplorerRowVM,
+  directionTone,
+} from './scopeExplorerContract'
+import { UNNAMED_SCOPE_LABEL } from './reviewFormat'
 import ReviewTerm from './ReviewTerm'
 import { parseReviewSort, reviewSortToggle, type ReviewSort, type ReviewSortKey } from './urlState'
 import type { ReviewTermKey } from './reviewCopy'
 import styles from './review.module.scss'
-
-function directionClass(value: number | null | undefined): string {
-  if (value === null || value === undefined || Number.isNaN(value)) return styles.neutral
-  if (value > 0) return styles.up
-  if (value < 0) return styles.down
-  return styles.neutral
-}
 
 export interface ScopeExplorerTableProps {
   rows: ReviewScopeListItem[]
@@ -54,11 +46,15 @@ export default function ScopeExplorerTable({ rows, selectedScopeKey, sort, onSor
     onSortChange(reviewSortToggle(key, sort))
   }
 
-  const renderSortableHeader = (key: ReviewSortKey, termKey: ReviewTermKey) => {
+  /** 可排序 compare 列表头（表头走 ReviewTerm，中文短 label + 完整 tooltip） */
+  const renderCompareHeader = (key: ReviewSortKey, termKey: ReviewTermKey) => {
     const active = activeKey === key
     const arrow = active ? (activeDir === 'desc' ? ' ↓' : ' ↑') : ''
     return (
-      <th className={`${styles.numCell} ${styles.sortableHeader}`} aria-sort={active ? (activeDir === 'desc' ? 'descending' : 'ascending') : 'none'}>
+      <th
+        className={`${styles.numCell} ${styles.sortableHeader}`}
+        aria-sort={active ? (activeDir === 'desc' ? 'descending' : 'ascending') : 'none'}
+      >
         <button
           type="button"
           className={styles.sortHeaderBtn}
@@ -73,43 +69,35 @@ export default function ScopeExplorerTable({ rows, selectedScopeKey, sort, onSor
     )
   }
 
-  /** 非排序列表头（字符串列：最高强度成员） */
-  const renderPlainHeader = (termKey: ReviewTermKey) => (
-    <th>
-      <ReviewTerm termKey={termKey} />
-    </th>
-  )
-
   return (
     <div className={styles.explorerTableWrap}>
       <table className={styles.explorerScopeTable}>
         <thead>
           <tr>
-            <th><ReviewTerm termKey="scope" /></th>
-            {renderSortableHeader('phase', 'phase')}
-            {renderSortableHeader('position', 'position')}
-            {renderSortableHeader('velocity', 'velocity')}
-            {renderSortableHeader('acceleration', 'acceleration')}
-            {renderSortableHeader('equal_weight_return', 'equalWeightReturn')}
-            {renderSortableHeader('capital_tilt', 'capitalTilt')}
-            {renderSortableHeader('advance_ratio', 'advanceRatio')}
-            {renderSortableHeader('decline_ratio', 'declineRatio')}
-            {renderSortableHeader('unchanged_ratio', 'unchangedRatio')}
-            {renderSortableHeader('migration', 'leadershipMigration')}
-            {renderSortableHeader('coverage', 'coverage')}
-            {renderSortableHeader('freshness_density', 'freshnessDensity')}
-            {renderSortableHeader('freshness_today', 'freshnessTodayCount')}
-            {renderSortableHeader('technical_hhi', 'technicalHhi')}
-            {renderSortableHeader('technical_top5_ratio', 'technicalTop5Ratio')}
-            {renderSortableHeader('leader_median_gap', 'technicalLeaderMedianGap')}
-            {renderPlainHeader('technicalLeaderSymbol')}
+            <th className={styles.scopeColSticky}><ReviewTerm termKey="scope" /></th>
+            {renderCompareHeader('dsa_strength', 'dsaStrength')}
+            {renderCompareHeader('dsa_duration', 'dsaDuration')}
+            {renderCompareHeader('dsa_vwap_dev', 'dsaVwapDev')}
+            {renderCompareHeader('smc_member_ratio', 'smcEvent')}
+            {renderCompareHeader('momentum_enhancing', 'momentumChange')}
+            {renderCompareHeader('volume_ratio20', 'volumeRatio20')}
+            {renderCompareHeader('equal_weight_return', 'equalWeightReturn')}
+            {renderCompareHeader('advance_ratio', 'advanceRatio')}
+            {renderCompareHeader('capital_tilt', 'capitalTilt')}
+            {renderCompareHeader('migration', 'leadershipMigration')}
           </tr>
         </thead>
         <tbody>
           {rows.map((row) => {
             const selected = row.scopeKey === selectedScopeKey
-            const s = row.summary
-            const obs = row.observationSummary
+            const vm = buildExplorerRowVM(row.compareFacts ?? null)
+            const ewTone = directionTone(vm.equalWeightReturn)
+            const tiltTone = directionTone(vm.capitalTilt)
+            const vwapTone = directionTone(vm.dsaVwapDev)
+            const smcTone =
+              vm.smcAvailability === 'ready' && vm.smcPrimaryText !== '无'
+                ? (vm.smcPrimaryText.includes('↑') ? 'positive' : vm.smcPrimaryText.includes('↓') ? 'negative' : 'neutral')
+                : 'neutral'
             return (
               <tr
                 key={row.scopeKey}
@@ -126,39 +114,58 @@ export default function ScopeExplorerTable({ rows, selectedScopeKey, sort, onSor
                 aria-selected={selected}
                 aria-label={`选择板块 ${row.scopeName ?? UNNAMED_SCOPE_LABEL}`}
               >
-                {/* [Slice A] Scope UUID 不再作为正常产品 UI 展示；
-                    身份仍由 key={row.scopeKey} / onSelectScope / URL scopeKey 承载。 */}
-                <td>
-                  <div className={styles.scopeCellName}>{row.scopeName ?? NULL_DISPLAY}</div>
+                {/* [Slice A] Scope UUID 不再作为正常产品 UI 展示 */}
+                <td className={styles.scopeColSticky}>
+                  <div className={styles.explorerPrimary}>{row.scopeName ?? UNNAMED_SCOPE_LABEL}</div>
                 </td>
-                <td>{formatPhaseLabel(s?.phase)}</td>
-                <td className={styles.numCell}>{formatPosition(s?.position)}</td>
-                <td className={styles.numCell}>{formatNumberNullable(s?.velocity)}</td>
-                <td className={styles.numCell}>{formatNumberNullable(s?.acceleration)}</td>
-                <td className={`${styles.numCell} ${directionClass(s?.equalWeightReturn)}`}>
-                  {formatPercentNullable(s?.equalWeightReturn, 2)}
-                </td>
-                <td className={`${styles.numCell} ${directionClass(s?.capitalTilt)}`}>
-                  {formatPercentNullable(s?.capitalTilt, 2)}
-                </td>
-                {/* Breadth 原子化：三分量各自独立成列，不再合成一格 */}
-                <td className={styles.numCell}>{formatPercentNullable(s?.advanceRatio, 2)}</td>
-                <td className={styles.numCell}>{formatPercentNullable(s?.declineRatio, 2)}</td>
-                <td className={styles.numCell}>{formatPercentNullable(s?.unchangedRatio, 2)}</td>
-                <td className={styles.numCell}>{formatNumberNullable(s?.migration)}</td>
+                {/* DSA Strength + peer percentile（secondary text） */}
                 <td className={styles.numCell}>
-                  {row.coverageRatio !== null && row.coverageRatio !== undefined
-                    ? formatPercentNullable(row.coverageRatio, 2)
-                    : NULL_DISPLAY}
+                  <div className={styles.explorerPrimary}>{vm.dsaStrengthText}</div>
+                  <div className={styles.explorerSecondary}>{vm.dsaPeerText}</div>
                 </td>
-                {/* Freshness 原子化：密度 / 今日事件数各自独立成列 */}
-                <td className={styles.numCell}>{formatNumberNullable(obs?.freshnessDecayWeightedDensity, 3)}</td>
-                <td className={styles.numCell}>{formatNumberNullable(obs?.freshnessTodayCount, 0)}</td>
-                {/* Technical 原子化：HHI / Top5 占比 / 差值 / 最高成员各自独立成列 */}
-                <td className={styles.numCell}>{formatNumberNullable(obs?.technicalHhi, 3)}</td>
-                <td className={styles.numCell}>{formatPercentNullable(technicalTop5Ratio(obs), 2)}</td>
-                <td className={styles.numCell}>{formatNumberNullable(obs?.technicalLeaderMedianGap, 2)}</td>
-                <td>{obs?.technicalLeaderSymbol ?? NULL_DISPLAY}</td>
+                {/* DSA Duration */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary}>{vm.dsaDurationText}</div>
+                </td>
+                {/* DSA VWAP Dev（已是 percentage points，不 ×100） */}
+                <td className={styles.numCell} style={{ color: DIRECTION_COLOR[vwapTone] }}>
+                  <div className={styles.explorerPrimary}>{vm.dsaVwapDevText}</div>
+                </td>
+                {/* SMC Event（compact） */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary} style={{ color: DIRECTION_COLOR[smcTone] }}>
+                    {vm.smcPrimaryText}
+                  </div>
+                  <div className={styles.explorerSecondary}>{vm.smcSecondaryText}</div>
+                </td>
+                {/* Momentum：增强 / 减弱 两侧 */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary}>{vm.momentumText}</div>
+                  <div className={styles.explorerSecondary}>{vm.momentumSecondaryText}</div>
+                </td>
+                {/* Vol20 */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary}>{vm.volumeRatio20Text}</div>
+                </td>
+                {/* EW + peer percentile */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary} style={{ color: DIRECTION_COLOR[ewTone] }}>
+                    {vm.equalWeightReturnText}
+                  </div>
+                  <div className={styles.explorerSecondary}>{vm.ewPeerText}</div>
+                </td>
+                {/* Breadth */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary}>{vm.advanceRatioText}</div>
+                </td>
+                {/* Capital Tilt（persisted fact） */}
+                <td className={styles.numCell} style={{ color: DIRECTION_COLOR[tiltTone] }}>
+                  <div className={styles.explorerPrimary}>{vm.capitalTiltText}</div>
+                </td>
+                {/* Migration（persisted fact，raw 0–1） */}
+                <td className={styles.numCell}>
+                  <div className={styles.explorerPrimary}>{vm.migrationText}</div>
+                </td>
               </tr>
             )
           })}

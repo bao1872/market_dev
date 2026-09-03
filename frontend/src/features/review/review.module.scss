@@ -888,12 +888,36 @@
   min-height: 0;
 }
 
+// [SLICE 5 / Explorer] compare-first 单元格两档排版（primary + secondary）。
+// 目标：primary 12–13px，secondary 10–11px 且 neutral，数字 tabular-nums。
+.explorerPrimary {
+  font-size: 0.82rem; // ~13px
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+  color: v.$color-text;
+}
+
+.explorerSecondary {
+  font-size: 0.68rem; // ~11px
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  color: v.$color-text-dim;
+}
+
+// [SLICE 5 / Explorer] Scope 首列 sticky 冻结（横向滚动时保持身份可见）。
+.scopeColSticky {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: v.$color-bg-card;
+}
+
 // [REVIEW-PRODUCT-CLOSURE-01 Phase F] Explorer 表格必须显式横向滚动：
-// [Slice C] 原子化后为 18 列，不得被压缩到不可读宽度。
+// [SLICE 5] compare-first 为 11 列，仍不得被压缩到不可读宽度。
 // 整表 min-width + Scope 首列 sticky 冻结；研究工具宁可横向滚动也不合并指标。
 .explorerScopeTable {
   width: 100%;
-  min-width: 1080px;
+  min-width: 1000px;
   border-collapse: separate;
   border-spacing: 0;
 

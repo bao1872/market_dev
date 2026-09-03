@@ -341,9 +341,11 @@ test('D7. 非法 phase → null（不 fallback 映射）', () => {
   assert.equal(decodeReviewUrl(new URLSearchParams('phase=bogus')).phase, null)
 })
 
-test('D8. 非法 sort → velocity_desc', () => {
-  assert.equal(normalizeSort('bogus'), 'velocity_desc')
-  assert.equal(decodeReviewUrl(new URLSearchParams('sort=bogus')).sort, 'velocity_desc')
+test('D8. 非法 sort → 默认（compare-first 后为 dsa_strength_desc）', () => {
+  // [SLICE 5 / Explorer] 默认排序不再是 velocity_desc；legacy 值仍可解析。
+  assert.equal(normalizeSort('bogus'), 'dsa_strength_desc')
+  assert.equal(decodeReviewUrl(new URLSearchParams('sort=bogus')).sort, 'dsa_strength_desc')
+  assert.equal(normalizeSort('velocity_desc'), 'velocity_desc', 'legacy URL 仍兼容')
 })
 
 test('D9. 非法 page → 1；越界 page → 1', () => {

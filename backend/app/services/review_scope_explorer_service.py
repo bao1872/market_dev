@@ -233,12 +233,20 @@ def build_peer_percentiles(
     """Per-scope peer percentile for the Explorer's two C1 fields (pure).
 
     Uses the canonical ``compute_cross_sectional`` owner (no duplicated percentile
-    formula). ``rows`` = ``[(scope_key, trend_continuous, price), ...]`` for the
-    WHOLE cohort of one published run (family already scoped by the caller).
+    formula). ``rows`` = ``[(scope_key, trend_continuous, price), ...]`` for
+    **one family's** cohort.  Callers with mixed families MUST use
+    ``build_peer_percentiles_by_family`` — this function treats every row as
+    belonging to the same cohort.
     """
     peer_payloads: dict[str, dict[str, Any]] = {
         key: _cohort_stub(tc, pr) for key, tc, pr in rows
     }
+    return _percentiles_for_cohort(peer_payloads)
+
+
+def _percentiles_for_cohort(
+    peer_payloads: dict[str, dict[str, Any]],
+) -> dict[str, dict[str, float | None]]:
     out: dict[str, dict[str, float | None]] = {}
     for scope_key in peer_payloads:
         entry: dict[str, float | None] = dict.fromkeys(_PEER_FIELDS.values())
@@ -261,6 +269,33 @@ def build_peer_percentiles(
 # ---------------------------------------------------------------------------
 # Narrow batch read (ONE query)
 # ---------------------------------------------------------------------------
+
+
+def build_peer_percentiles_by_family(
+    rows: list[tuple[str, str, Any, Any]],
+) -> dict[str, dict[str, float | None]]:
+    """Family-scoped peer percentiles — the ONLY safe entry for mixed families.
+
+    ``rows`` = ``[(scope_key, scope_type, trend_continuous, price), ...]``.
+
+    [SLICE 5 finalization] ``/scopes`` has an OPTIONAL ``scope_type``: when it is
+    omitted the query returns every family at once, so the cohort MUST be grouped
+    by family before any percentile is computed — otherwise an industry_l1 scope
+    would be ranked against concept scopes and the DTO's "同 family percentile"
+    contract would be violated.
+
+    Each family group is computed independently via the canonical owner; results
+    are merged by scope_key. Never writes family info into any score/rank.
+    """
+    groups: dict[str, list[tuple[str, Any, Any]]] = {}
+    for scope_key, scope_type, tc, pr in rows:
+        groups.setdefault(scope_type, []).append((scope_key, tc, pr))
+
+    merged: dict[str, dict[str, float | None]] = {}
+    for family_rows in groups.values():
+        cohort = {key: _cohort_stub(tc, pr) for key, tc, pr in family_rows}
+        merged.update(_percentiles_for_cohort(cohort))
+    return merged
 
 
 def _compare_stmt(
@@ -286,6 +321,7 @@ def _compare_stmt(
         filters.append(fact.scope_type == scope_type)
     return (
         select(
+            fact.scope_type.label("scope_type"),
             fact.scope_key.label("scope_key"),
             fact_payload["trend"]["continuous"].label("trend_continuous"),
             fact_payload["structure"]["events"].label("structure_events"),
@@ -323,10 +359,11 @@ async def list_review_scope_compare(
     if not rows:
         return {}
 
-    cohort: list[tuple[str, Any, Any]] = [
-        (r.scope_key, r.trend_continuous, r.price) for r in rows
+    # 按 family 分组算 percentile（scope_type 可省略 → 结果集可能含多个 family）
+    cohort: list[tuple[str, str, Any, Any]] = [
+        (r.scope_key, r.scope_type, r.trend_continuous, r.price) for r in rows
     ]
-    percentile_map = build_peer_percentiles(cohort)
+    percentile_map = build_peer_percentiles_by_family(cohort)
 
     out: dict[str, dict[str, Any]] = {}
     for r in rows:

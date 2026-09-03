@@ -25,9 +25,26 @@ import {
   applyScopeExplorerPipeline,
   findScopeById,
   computeEffectivePage,
+  sortValueFor,
 } from '../scopeExplorerViewModel'
 import { loadFamilySnapshot, FAMILY_SNAPSHOT_PAGE_SIZE } from '../useReviewScopeFamilySnapshot'
-import { formatPosition, formatPercentNullable, formatContributionFraction, NULL_DISPLAY } from '../reviewFormat'
+import { formatContributionFraction, NULL_DISPLAY } from '../reviewFormat'
+import {
+  VISIBLE_SORT_KEYS,
+  buildExplorerRowVM,
+  formatBreadthRatio,
+  formatDecimalReturnSigned,
+  formatDsaStrength,
+  formatDsaVwapDev,
+  formatDurationBars,
+  formatMigration,
+  formatMomentumRatio,
+  formatPeerPercentile,
+  formatVolumeRatio20,
+  type ExplorerRowVM,
+} from '../scopeExplorerContract'
+import { buildReviewSort } from '../urlState'
+import type { ReviewScopeCompareFacts, ReviewScopeCompareSmc } from '../types'
 import {
   DEFAULT_REVIEW_VIEW,
   DEFAULT_REVIEW_SORT,
@@ -469,88 +486,100 @@ test('P4. effectivePage 钳制：URL 越界页 → 实际末页；Workspace 交�
 // 6. Table：canonical 列 + 无 legacy 字段 + null 显示
 // ============================================================
 
-test('T1. Table 精确 canonical 列（原子化 18 列，无 p/q/u/c/v/signalCount）', () => {
+// [SLICE 5 / Explorer] 默认 compare-first 11 列（旧 18 列合同已正式迁移）。
+test('T1. Table 精确 compare-first 11 列（Scope + 10 个业务 compare 列）', () => {
   const src = read('ScopeExplorerTable.tsx')
-  // REVIEW-UX-CN-01：表头经 ReviewTerm termKey 渲染中文 label。
-  // [Slice C] Breadth / Freshness / Technical 复合 cell 已原子化，列集合随之扩展。
   const expected = [
     'scope',
-    'phase',
-    'position',
-    'velocity',
-    'acceleration',
+    'dsaStrength',
+    'dsaDuration',
+    'dsaVwapDev',
+    'smcEvent',
+    'momentumChange',
+    'volumeRatio20',
     'equalWeightReturn',
-    'capitalTilt',
     'advanceRatio',
-    'declineRatio',
-    'unchangedRatio',
+    'capitalTilt',
     'leadershipMigration',
-    'coverage',
-    'freshnessDensity',
-    'freshnessTodayCount',
-    'technicalHhi',
-    'technicalTop5Ratio',
-    'technicalLeaderMedianGap',
-    'technicalLeaderSymbol',
   ]
   for (const col of expected) {
-    // 列经 ReviewTerm 渲染：非排序列为 termKey="col"；排序列经 renderSortableHeader(..., 'col')
     const ok = src.includes(`termKey="${col}"`) || src.includes(`'${col}'`)
-    assert.ok(ok, `Table 必须含 canonical 列 ${col}`)
+    assert.ok(ok, `Table 必须含 compare 列 ${col}`)
   }
-  // 源码不得引用 legacy 指标
-  assert.doesNotMatch(src, /\.p\b|\.q\b|\.u\b|\.c\b|\.v\b|signalCount/, 'Table 不得引用 p/q/u/c/v/signalCount')
+  // 列数严格 11：1 个 Scope 列 + 10 个 renderCompareHeader 生成的 compare 列
+  const thead = /<thead>[\s\S]*?<\/thead>/.exec(src)
+  assert.ok(thead, 'thead 必须存在')
+  // 注意：<thead> 本身含 "<th" 子串，必须用 <th 后跟空白或 > 来精确匹配单元格
+  const literalTh = (thead[0].match(/<th[\s>]/g) ?? []).length
+  const compareHeaders = (thead[0].match(/renderCompareHeader\(/g) ?? []).length
+  assert.equal(literalTh + compareHeaders, 11, '默认表必须恰好 11 列')
+  // 旧列不再出现在默认 table（canonical owner 仍存在，display 替换 != 删除）
+  for (const gone of [
+    'phase', 'position', 'velocity', 'acceleration', 'declineRatio',
+    'unchangedRatio', 'coverage', 'freshnessDensity', 'freshnessTodayCount',
+    'technicalHhi', 'technicalTop5Ratio', 'technicalLeaderMedianGap',
+    'technicalLeaderSymbol',
+  ]) {
+    assert.doesNotMatch(
+      src,
+      new RegExp(`termKey="${gone}"`),
+      `默认表不再展示 ${gone}（owner 保留，清理放 Slice 6）`,
+    )
+  }
+  assert.doesNotMatch(src, /signalCount/, 'Table 不得引用 signalCount')
 })
 
-test('T2. Position 75 显示 "75"（0–100 percentile，绝不乘 100）', () => {
-  assert.equal(formatPosition(75), '75')
-  assert.equal(formatPosition(0), '0')
-  assert.equal(formatPosition(100), '100')
-  assert.equal(formatPosition(null), NULL_DISPLAY)
+test('T2. DSA peer percentile 82 → P82（0–100 position，绝不乘 100）', () => {
+  assert.equal(formatPeerPercentile(82), 'P82')
+  assert.equal(formatPeerPercentile(82.4), 'P82')
+  assert.equal(formatPeerPercentile(0), 'P0')
+  assert.equal(formatPeerPercentile(null), NULL_DISPLAY)
+  assert.notEqual(formatPeerPercentile(82), 'P8200')
   const src = read('ScopeExplorerTable.tsx')
-  assert.match(src, /formatPosition\(/, 'Table 必须使用 formatPosition 展示 Position')
+  assert.match(src, /vm\.dsaPeerText/, 'Table 必须展示 DSA peer percentile')
 })
 
-test('T3. summary=null → 分析格显示 —（readiness 仍诚实展示）', () => {
-  const src = read('ScopeExplorerTable.tsx')
-  // 单元格对 null summary 走 formatX nullable → NULL_DISPLAY
-  assert.match(src, /s\?\.phase/, 'phase 用 s?.phase（null → —）')
-  assert.match(src, /s\?\.position/, 'position 用 s?.position')
-  // [Slice C] Breadth 原子化后不再有 BreadthCell；三个占比各自走 formatPercentNullable → '—'
-  assert.match(src, /formatPercentNullable\(s\?\.advanceRatio, 2\)/, '上涨占比 null → —')
-  assert.match(src, /formatPercentNullable\(s\?\.declineRatio, 2\)/, '下跌占比 null → —')
-  assert.match(src, /formatPercentNullable\(s\?\.unchangedRatio, 2\)/, '平盘占比 null → —')
-  assert.match(src, /formatPhaseLabel\(s\?\.phase\)/, 'phase 走 formatPhaseLabel')
-  // readiness 在行级独立展示（coverageRatio 不在 summary 内）
-  assert.match(src, /row\.coverageRatio/, 'coverage 使用行级 coverageRatio')
+test('T3. compareFacts=null → 各 compare 格显示 —（不填 0）', () => {
+  const vm = buildExplorerRowVM(null)
+  assert.equal(vm.dsaStrengthText, NULL_DISPLAY)
+  assert.equal(vm.dsaDurationText, NULL_DISPLAY)
+  assert.equal(vm.dsaVwapDevText, NULL_DISPLAY)
+  assert.equal(vm.volumeRatio20Text, NULL_DISPLAY)
+  assert.equal(vm.equalWeightReturnText, NULL_DISPLAY)
+  assert.equal(vm.advanceRatioText, NULL_DISPLAY)
+  assert.equal(vm.capitalTiltText, NULL_DISPLAY)
+  assert.equal(vm.migrationText, NULL_DISPLAY)
+  assert.equal(vm.smcPrimaryText, NULL_DISPLAY)
+  const empty = buildExplorerRowVM({
+    dsa: null, smc: null, momentum: null, volume: null, price: null, composition: null,
+  })
+  assert.equal(empty.dsaStrengthText, NULL_DISPLAY)
+  assert.equal(empty.capitalTiltText, NULL_DISPLAY)
 })
 
-test('T4. EW Return 使用百分比格式（非原始比率）', () => {
-  assert.equal(formatPercentNullable(0.123), '12.3%')
+test('T4. EW Return 使用百分比格式（decimal return → %，带符号）', () => {
+  assert.equal(formatDecimalReturnSigned(0.012), '+1.20%')
+  assert.equal(formatDecimalReturnSigned(-0.012), '-1.20%')
+  assert.equal(formatDecimalReturnSigned(null), NULL_DISPLAY)
   const src = read('ScopeExplorerTable.tsx')
-  assert.match(src, /formatPercentNullable\(s\?\.equalWeightReturn/, 'EW Return 走 formatPercentNullable')
-  // [REVIEW-UX-EXPERIMENT-READINESS-01 Slice A / A4] EW Return 与 Capital Tilt 统一 2 位小数
-  assert.match(
-    src,
-    /formatPercentNullable\(s\?\.equalWeightReturn,\s*2\)/,
-    'EW Return 展示 2 位小数（A4）',
-  )
-  assert.match(
-    src,
-    /formatPercentNullable\(s\?\.capitalTilt,\s*2\)/,
-    'Capital Tilt 展示 2 位小数（A4）',
-  )
+  assert.match(src, /vm\.equalWeightReturnText/, 'EW 走 typed owner 的 decimal-return formatter')
+  assert.doesNotMatch(src, /formatPercentNullable\(s\?\.equalWeightReturn/, 'EW 不得再读 summary')
 })
 
-test('T5. Breadth 展示三分量（↑/↓/—），不计算 composite score', () => {
+test('T5. Capital Tilt 读 persisted fact（decimal return spread，非 AW-EW）', () => {
+  assert.equal(formatDecimalReturnSigned(0.006), '+0.60%')
+  assert.equal(formatDecimalReturnSigned(-0.006), '-0.60%')
+  const c: ReviewScopeCompareFacts = {
+    dsa: null, smc: null, momentum: null, volume: null, price: null,
+    composition: { capitalTilt: 0.004, migration: null },
+  }
+  assert.equal(buildExplorerRowVM(c).capitalTiltText, '+0.40%')
   const src = read('ScopeExplorerTable.tsx')
-  // 分别读取三个分量，而非合成一个 score
-  assert.match(src, /advanceRatio/, 'Breadth 使用 advanceRatio')
-  assert.match(src, /declineRatio/, 'Breadth 使用 declineRatio')
-  assert.match(src, /unchangedRatio/, 'Breadth 使用 unchangedRatio')
-  // 不得把三者相加/平均成单一 breadth score
+  assert.match(src, /vm\.capitalTiltText/, 'Capital Tilt 走 typed owner')
+  assert.doesNotMatch(src, /amountWeightedReturn - equalWeightReturn/, '不得计算 AW - EW')
+  // Breadth 只展示 advanceRatio（compare-first 单一分量），不合成 composite score
   assert.ok(
-    !/advanceRatio\s*\+\s*declineRatio|advanceRatio\s*\/\s*2|compositeBreadth|breadthScore/.test(src),
+    !/advanceRatio\s*\+\s*declineRatio|compositeBreadth|breadthScore/.test(src),
     'Breadth 不得计算 composite score',
   )
 })
@@ -724,18 +753,22 @@ test('SORT-2. 每个非默认 sort 的 encode/decode 往返一致', () => {
   }
 })
 
-test('SORT-3. velocity_desc 仍是默认且从 URL 省略', () => {
-  assert.equal(DEFAULT_REVIEW_SORT, 'velocity_desc')
-  const url = encodeReviewUrl({ ...defaultReviewUrlState(), sort: 'velocity_desc' })
+test('SORT-3. dsa_strength_desc 是默认且从 URL 省略（不再是不可见的 Velocity）', () => {
+  // [SLICE 5 / Explorer] 新默认表不显示 Velocity，不能让新用户默认按看不见的列排序。
+  // 这不是综合机会排序，只是默认按第一个业务 compare 列排序。
+  assert.equal(DEFAULT_REVIEW_SORT, 'dsa_strength_desc')
+  const url = encodeReviewUrl({ ...defaultReviewUrlState(), sort: DEFAULT_REVIEW_SORT })
   assert.ok(!url.toString().includes('sort='), '默认 sort 不得出现在 URL 中')
-  // 无 sort 的 URL 解码回默认
-  assert.equal(decodeReviewUrl(new URLSearchParams('?family=industry_l1')).sort, 'velocity_desc')
+  assert.equal(decodeReviewUrl(new URLSearchParams('?family=industry_l1')).sort, 'dsa_strength_desc')
 })
 
-test('SORT-4. 非法 sort 回退 velocity_desc', () => {
+test('SORT-4. 非法 sort 回退默认（legacy velocity_desc 仍可解析）', () => {
   const back = decodeReviewUrl(new URLSearchParams('?sort=not_a_real_sort'))
-  assert.equal(back.sort, 'velocity_desc', '非法 sort 必须回退默认')
-  assert.equal(normalizeSort('bogus' as ReviewSort), 'velocity_desc')
+  assert.equal(back.sort, 'dsa_strength_desc', '非法 sort 必须回退默认')
+  assert.equal(normalizeSort('bogus' as ReviewSort), 'dsa_strength_desc')
+  // legacy URL backward compatibility：旧排序值仍合法并恢复原排序
+  assert.equal(normalizeSort('velocity_desc'), 'velocity_desc')
+  assert.equal(normalizeSort('equal_weight_return_desc'), 'equal_weight_return_desc')
 })
 
 test('SORT-5. sort 变化经由 withReviewFilterChange 时重置 page=1 但保留 scopeKey', () => {
@@ -758,7 +791,7 @@ function makeContradictoryItems(): ReviewScopeListItem[] {
   //  - itemE：capitalTilt 最大
   //  - itemF：migration 最大
   //  - itemG：coverageRatio 最大
-  return [
+  const items: ReviewScopeListItem[] = [
     makeItem('A', {
       coverageRatio: 0.1,
       summary: makeSummary({ velocity: 99, acceleration: 1, position: 2, equalWeightReturn: 0.01, capitalTilt: 0.1, migration: 0.1 }),
@@ -788,6 +821,27 @@ function makeContradictoryItems(): ReviewScopeListItem[] {
       summary: makeSummary({ velocity: 6, acceleration: 7, position: 7, equalWeightReturn: 0.07, capitalTilt: 0.7, migration: 0.7 }),
     }),
   ]
+  // [SLICE 5 / Explorer] visible compare 排序键只读 compareFacts：
+  // fixture 必须同时提供 compareFacts（与 summary 同值），否则显示 owner 与
+  // 排序 owner 会分裂。另见下方 owner-divergence lock（两者冲突时 compareFacts 胜）。
+  return items.map((it) => ({
+    ...it,
+    compareFacts: {
+      dsa: { regimeStrength: null, regimeStrengthPeerPercentile: null, durationBars: null, vwapDevPct: null },
+      smc: { eventType: null, structureLevel: null, direction: null, memberRatio: null, availability: 'ready', reason: null },
+      momentum: { enhancingRatio: null, weakeningRatio: null, denominator: null },
+      volume: { ratio20: null },
+      price: {
+        equalWeightReturn: it.summary?.equalWeightReturn ?? null,
+        equalWeightReturnPeerPercentile: null,
+        advanceRatio: it.summary?.advanceRatio ?? null,
+      },
+      composition: {
+        capitalTilt: it.summary?.capitalTilt ?? null,
+        migration: it.summary?.migration ?? null,
+      },
+    },
+  }))
 }
 
 test('SORT-6. velocity_desc 降序，null 最后，且只读 velocity', () => {
@@ -836,13 +890,33 @@ function itemsForSortField(field: keyof NonNullable<ReviewScopeListItem['summary
     migration: null,
   } as const
   const withField = (v: number | null) => ({ ...base, [field]: v })
-  return [
+  const raw = [
     makeItem('pos', { summary: makeSummary(withField(0.5) as Record<string, number | null>) }),
     makeItem('zero', { summary: makeSummary(withField(0) as Record<string, number | null>) }),
     makeItem('neg', { summary: makeSummary(withField(-0.2) as Record<string, number | null>) }),
     makeItem('nullv', { summary: makeSummary(withField(null) as Record<string, number | null>) }),
     makeItem('noval', { summary: null }),
   ]
+  // [SLICE 5 / Explorer] visible compare 字段（EW / capitalTilt / migration）同样
+  // 注入 compareFacts，保证排序读取路径与生产一致。
+  return raw.map((it) => ({
+    ...it,
+    compareFacts: {
+      dsa: { regimeStrength: null, regimeStrengthPeerPercentile: null, durationBars: null, vwapDevPct: null },
+      smc: { eventType: null, structureLevel: null, direction: null, memberRatio: null, availability: 'ready', reason: null },
+      momentum: { enhancingRatio: null, weakeningRatio: null, denominator: null },
+      volume: { ratio20: null },
+      price: {
+        equalWeightReturn: it.summary?.equalWeightReturn ?? null,
+        equalWeightReturnPeerPercentile: null,
+        advanceRatio: null,
+      },
+      composition: {
+        capitalTilt: it.summary?.capitalTilt ?? null,
+        migration: it.summary?.migration ?? null,
+      },
+    },
+  }))
 }
 
 test('SORT-6..12 共同：每个排序字段含正/零/负/null 时 null 恒最后', () => {
@@ -1052,10 +1126,24 @@ test('R2B-FE-11. Trajectory 与 Table 仍共用同一 selected sort', () => {
   assert.doesNotMatch(src, /sortVelocityDesc/, 'Workspace 不得保留旧 sortVelocityDesc')
 })
 
-test('R2B-FE-12. 列表渲染不新增 detail 请求', () => {
-  // 源码契约：Table 仅消费 item.observationSummary（已加载薄投影），不调用 useReviewScopeDetail
+test('R2B-FE-12. 列表渲染不新增 detail 请求（compare-first 后迁移）', () => {
   const tbl = read('ScopeExplorerTable.tsx')
-  // [Slice C] Freshness / Technical 原子化：直接消费 row.observationSummary 的标量
+  // [SLICE 5 / Explorer] 产品合同已变：默认表改为 compare-first，不再展示
+  // Freshness / Technical 列。canonical observationSummary owner 必须仍然存在：
+  const item: ReviewScopeListItem = {
+    scopeType: 'industry_l1', scopeKey: 'k', scopeName: 'n',
+    readiness: 'ready', status: 'ready', eligibleCount: 1, providedCount: 1,
+    coverageRatio: null, summary: null,
+    observationSummary: {
+      freshnessTodayCount: 3, freshnessDecayWeightedDensity: 0.5,
+      technicalHhi: 0.1, technicalTop5Numerator: 1, technicalTop5Denominator: 4,
+      technicalLeaderMedianGap: 0.2, technicalLeaderSymbol: 'A', technicalMemberCount: 5,
+    },
+    compareFacts: null,
+  }
+  assert.equal(item.observationSummary?.freshnessTodayCount, 3)
+  assert.equal(item.observationSummary?.technicalHhi, 0.1)
+  // 默认表不再消费这些字段（display 替换，不是删除 canonical owner）
   for (const field of [
     'freshnessDecayWeightedDensity',
     'freshnessTodayCount',
@@ -1063,12 +1151,15 @@ test('R2B-FE-12. 列表渲染不新增 detail 请求', () => {
     'technicalLeaderMedianGap',
     'technicalLeaderSymbol',
   ]) {
-    assert.ok(tbl.includes(`obs?.${field}`), `表格必须消费 observationSummary.${field}`)
+    assert.ok(!tbl.includes(`obs?.${field}`), `默认表不再消费 observationSummary.${field}`)
   }
-  assert.match(tbl, /technicalTop5Ratio\(obs\)/, 'Top5 占比必须走单一 ViewModel owner')
-  assert.match(tbl, /row\.observationSummary/, '单元格必须消费 observationSummary')
-  // 不得出现对 detail hook 的依赖
+  // 默认表只消费 compareFacts（backend 单一 batch read-model）
+  assert.match(tbl, /row\.compareFacts/, '单元格必须消费 compareFacts')
+  assert.match(tbl, /buildExplorerRowVM\(/, '展示走 scopeExplorerContract typed owner')
+  // 绝对不得出现 detail hook / detail API 依赖（no N+1）
   assert.doesNotMatch(tbl, /useReviewScopeDetail/, '列表渲染不得新增 detail 请求')
+  assert.doesNotMatch(tbl, /getReviewScopeDetail/, '列表渲染不得调用 detail API')
+  assert.doesNotMatch(tbl, /useQuery|fetch\(/, '列表渲染不得发起 row-level 请求')
 })
 
 // ============================================================
@@ -1193,3 +1284,167 @@ test('P0-1 补充: 阶段列中文文案为“阶段”', () => {
 })
 
 
+
+// ============================================================
+// [SLICE 5 / Explorer] targeted contract（§13，16 锁）
+// ============================================================
+
+test('EX-1. DSA VWAP 4.2 → "4.20%"（已是 percentage points，不 ×100）', () => {
+  assert.equal(formatDsaVwapDev(4.2), '+4.20%')
+  assert.equal(formatDsaVwapDev(-4.2), '-4.20%')
+  assert.notEqual(formatDsaVwapDev(4.2), '420.00%')
+  assert.equal(formatDsaVwapDev(null), NULL_DISPLAY)
+})
+
+test('EX-2. EW decimal return → %（0.012 → +1.20%）', () => {
+  assert.equal(formatDecimalReturnSigned(0.012), '+1.20%')
+  assert.equal(formatDecimalReturnSigned(-0.012), '-1.20%')
+  assert.equal(formatDecimalReturnSigned(null), NULL_DISPLAY)
+})
+
+test('EX-3. Volume Ratio20 → ×（1.35 → "1.35×"）', () => {
+  assert.equal(formatVolumeRatio20(1.35), '1.35×')
+  assert.notEqual(formatVolumeRatio20(1.35), '135.00%')
+})
+
+test('EX-4. Breadth ratio → %（0.62 → "62%"）', () => {
+  assert.equal(formatBreadthRatio(0.62), '62%')
+})
+
+test('EX-5. Capital Tilt decimal spread → %（0.006 → +0.60%）', () => {
+  assert.equal(formatDecimalReturnSigned(0.006), '+0.60%')
+  assert.equal(formatDecimalReturnSigned(-0.006), '-0.60%')
+})
+
+test('EX-6. peer percentile 82 → "P82"（不 ×100，不带 %）', () => {
+  assert.equal(formatPeerPercentile(82), 'P82')
+  assert.equal(formatPeerPercentile(76.3), 'P76')
+  assert.ok(!formatPeerPercentile(82).includes('%'))
+  assert.notEqual(formatPeerPercentile(82), 'P8200')
+})
+
+test('EX-7. null → —（统一，不填 0）', () => {
+  const fs = [formatDsaStrength, formatDsaVwapDev, formatDurationBars, formatVolumeRatio20,
+    formatBreadthRatio, formatMigration, formatPeerPercentile, formatDecimalReturnSigned, formatMomentumRatio]
+  for (const f of fs) {
+    assert.equal(f(null), NULL_DISPLAY, 'null 必须显示 —')
+    assert.notEqual(f(null), '0', 'null 绝不当 0')
+  }
+  assert.equal(formatDurationBars(Number.NaN), NULL_DISPLAY)
+})
+
+function vmWith(smc: ReviewScopeCompareSmc | null): ExplorerRowVM {
+  return buildExplorerRowVM({
+    dsa: null, smc, momentum: null, volume: null, price: null, composition: null,
+  })
+}
+
+test('EX-8. SMC unavailable → —（不写“无事件”）', () => {
+  const vm = vmWith({ eventType: null, structureLevel: null, direction: null, memberRatio: null, availability: 'unavailable', reason: 'CURRENT_EVENTS_UNAVAILABLE' })
+  assert.equal(vm.smcPrimaryText, NULL_DISPLAY)
+  assert.equal(vm.smcAvailability, 'unavailable')
+  assert.notEqual(vm.smcPrimaryText, '无事件')
+})
+
+test('EX-9. SMC ready + 无事件 → "无"', () => {
+  const vm = vmWith({ eventType: null, structureLevel: null, direction: null, memberRatio: null, availability: 'ready', reason: null })
+  assert.equal(vm.smcPrimaryText, '无')
+  assert.equal(vm.smcAvailability, 'ready')
+})
+
+test('EX-10. SMC compact label 正确（S/I × CHoCH/BOS + 方向 + ratio）', () => {
+  const mk = (t: string, l: string, d: string, r: number | null) =>
+    vmWith({ eventType: t, structureLevel: l, direction: d, memberRatio: r, availability: 'ready', reason: null })
+  assert.equal(mk('CHoCH', 'Swing', 'Up', 0.12).smcPrimaryText, 'S-CHoCH ↑')
+  assert.equal(mk('BOS', 'Swing', 'Up', 0.12).smcPrimaryText, 'S-BOS ↑')
+  assert.equal(mk('CHoCH', 'Internal', 'Down', 0.12).smcPrimaryText, 'I-CHoCH ↓')
+  assert.equal(mk('BOS', 'Internal', 'Down', 0.12).smcPrimaryText, 'I-BOS ↓')
+  assert.equal(mk('CHoCH', 'Swing', 'Up', 0.12).smcSecondaryText, '12%')
+  for (const bad of ['OB', 'EQH', 'EQL', 'SQZ_RELEASE']) {
+    assert.equal(mk(bad, 'Swing', 'Up', 0.5).smcPrimaryText, '无', `${bad} 不得显示`)
+  }
+})
+
+test('EX-11. Momentum 使用 producer ratios（不前端重算）', () => {
+  const vm = buildExplorerRowVM({
+    dsa: null, smc: null, volume: null, price: null, composition: null,
+    momentum: { enhancingRatio: 0.42, weakeningRatio: 0.18, denominator: 20 },
+  })
+  assert.equal(vm.momentumText, '增强 42%')
+  assert.equal(vm.momentumSecondaryText, '减弱 18%')
+  assert.notEqual(vm.momentumEnhancing, 5 / 20, 'producer ratio 与 count/denominator 不一致时仍用 producer 值')
+})
+
+test('EX-12. sort null 恒最后（每个 visible key）', () => {
+  for (const key of VISIBLE_SORT_KEYS) {
+    const row = (v: number | null, k: string): ReviewScopeListItem => ({
+      scopeType: 'industry_l1', scopeKey: k, scopeName: `n-${k}`, readiness: 'ready',
+      status: 'ready', eligibleCount: 1, providedCount: 1, coverageRatio: null,
+      summary: null, observationSummary: null,
+      compareFacts: {
+        dsa: {
+          regimeStrength: key === 'dsa_strength' ? v : null,
+          regimeStrengthPeerPercentile: null,
+          durationBars: key === 'dsa_duration' ? v : null,
+          vwapDevPct: key === 'dsa_vwap_dev' ? v : null,
+        },
+        smc: { eventType: key === 'smc_member_ratio' ? 'BOS' : null, structureLevel: 'Swing', direction: 'Up', memberRatio: key === 'smc_member_ratio' ? v : null, availability: 'ready', reason: null },
+        momentum: { enhancingRatio: key === 'momentum_enhancing' ? v : null, weakeningRatio: null, denominator: null },
+        volume: { ratio20: key === 'volume_ratio20' ? v : null },
+        price: { equalWeightReturn: key === 'equal_weight_return' ? v : null, equalWeightReturnPeerPercentile: null, advanceRatio: key === 'advance_ratio' ? v : null },
+        composition: { capitalTilt: key === 'capital_tilt' ? v : null, migration: key === 'migration' ? v : null },
+      },
+    })
+    const desc = sortScopes([row(null, 'n'), row(2, 'hi'), row(1, 'lo')], buildReviewSort(key, 'desc'))
+    assert.deepEqual(desc.map((i) => i.scopeKey), ['hi', 'lo', 'n'], `${key}: desc null 最后`)
+  }
+})
+
+test('EX-13. visible sort 只读 compareFacts（owner-divergence lock）', () => {
+  const divergent: ReviewScopeListItem = {
+    scopeType: 'industry_l1', scopeKey: 'x', scopeName: 'n-x', readiness: 'ready',
+    status: 'ready', eligibleCount: 1, providedCount: 1, coverageRatio: null,
+    summary: makeSummary({ equalWeightReturn: 0.99, capitalTilt: 0.99, migration: 0.99, advanceRatio: 0.99 }),
+    observationSummary: null,
+    compareFacts: {
+      dsa: null, smc: null, momentum: null, volume: null,
+      price: { equalWeightReturn: 0.01, equalWeightReturnPeerPercentile: null, advanceRatio: 0.01 },
+      composition: { capitalTilt: 0.01, migration: 0.01 },
+    },
+  }
+  assert.equal(sortValueFor(divergent, 'equal_weight_return'), 0.01, 'EW 必须取 compareFacts（非 summary 0.99）')
+  assert.equal(sortValueFor(divergent, 'capital_tilt'), 0.01)
+  assert.equal(sortValueFor(divergent, 'migration'), 0.01)
+  assert.equal(sortValueFor(divergent, 'advance_ratio'), 0.01)
+  const noCompare: ReviewScopeListItem = { ...divergent, compareFacts: null }
+  assert.equal(sortValueFor(noCompare, 'equal_weight_return'), null, 'compareFacts 缺失不得回退 summary')
+})
+
+test('EX-14. component 不请求 detail（no N+1）', () => {
+  const src = read('ScopeExplorerTable.tsx')
+  assert.doesNotMatch(src, /useReviewScopeDetail/, '不得使用 detail hook')
+  assert.doesNotMatch(src, /getReviewScopeDetail/, '不得调用 detail API')
+  assert.doesNotMatch(src, /useQuery|fetch\(|axios/, '不得发起 row-level 请求')
+  const loader = read('useReviewScopeFamilySnapshot.ts')
+  assert.doesNotMatch(loader, /useReviewScopeDetail/, 'family loader 不得调用 detail')
+})
+
+test('EX-15. component 不访问 raw Observation', () => {
+  const src = read('ScopeExplorerTable.tsx')
+  assert.equal(src.includes('deepGet'), false, '不得 deepGet canonical payload')
+  assert.doesNotMatch(src, /observationPayload|observation_payload/, '不得读 raw Observation payload')
+  assert.match(src, /buildExplorerRowVM\(/, '必须经 scopeExplorerContract typed owner')
+})
+
+test('EX-16. 无 score / rank / weighted 综合公式', () => {
+  const src = read('ScopeExplorerTable.tsx')
+  for (const bad of ['score', 'weightedScore', 'opportunity', 'riskScore', 'composite']) {
+    assert.doesNotMatch(src, new RegExp(bad, 'i'), `不得出现 ${bad}`)
+  }
+  const cs = read('scopeExplorerContract.ts')
+  for (const bad of ['weightedScore', 'opportunity', 'riskScore']) {
+    assert.doesNotMatch(cs, new RegExp(bad, 'i'), `contract 不得出现 ${bad}`)
+  }
+  assert.doesNotMatch(cs, /amountWeightedReturn\s*-\s*equalWeightReturn/, 'contract 不得算 AW-EW')
+  assert.doesNotMatch(cs, /1\s*-\s*jaccard/i, 'contract 不得由 Jaccard 推 migration')
+})

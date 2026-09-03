@@ -13,6 +13,7 @@ import {
   buildReviewSort,
   reviewSortToggle,
   normalizeSort,
+  DEFAULT_REVIEW_SORT,
   type ReviewSort,
   type ReviewSortKey,
 } from '../urlState'
@@ -62,25 +63,61 @@ function emptyObs(): ReviewScopeObservationSummary {
 }
 
 /** 构造「只有 key 对应字段有值」的 item，用于表驱动排序验证 */
+/** [SLICE 5 / Explorer] 空 compareFacts（10 个 visible 排序字段的注入载体） */
+function emptyCompare(): NonNullable<ReviewScopeListItem['compareFacts']> {
+  return {
+    dsa: { regimeStrength: null, regimeStrengthPeerPercentile: null, durationBars: null, vwapDevPct: null },
+    smc: { eventType: null, structureLevel: null, direction: null, memberRatio: null, availability: 'ready', reason: null },
+    momentum: { enhancingRatio: null, weakeningRatio: null, denominator: null },
+    volume: { ratio20: null },
+    price: { equalWeightReturn: null, equalWeightReturnPeerPercentile: null, advanceRatio: null },
+    composition: { capitalTilt: null, migration: null },
+  }
+}
+
+/**
+ * 构造「只有 key 对应字段有值」的 item，用于表驱动排序验证。
+ *
+ * [SLICE 5 / Explorer] 10 个 visible compare 键注入到 compareFacts
+ * （与 sortValueFor / ScopeExplorerTable 的读取 owner 一致）；
+ * legacy 键继续注入 summary / observationSummary。
+ */
 function itemWith(key: ReviewSortKey, value: number | null, scopeKey = 'k'): ReviewScopeListItem {
   const s = emptySummary()
   const o = emptyObs()
+  const c = emptyCompare()
   const item: ReviewScopeListItem = {
     scopeType: 'industry_l1', scopeKey, scopeName: `N-${scopeKey}`,
     readiness: 'ready', status: 'ready', eligibleCount: 10, providedCount: 10,
-    coverageRatio: null, summary: s, observationSummary: o,
+    coverageRatio: null, summary: s, observationSummary: o, compareFacts: c,
   }
   switch (key) {
+    // ---- visible compare keys：注入 compareFacts ----
+    case 'dsa_strength': if (c.dsa) c.dsa.regimeStrength = value; break
+    case 'dsa_duration': if (c.dsa) c.dsa.durationBars = value; break
+    case 'dsa_vwap_dev': if (c.dsa) c.dsa.vwapDevPct = value; break
+    case 'smc_member_ratio':
+      if (c.smc) {
+        c.smc.memberRatio = value
+        c.smc.availability = value === null ? 'ready' : 'ready'
+        c.smc.eventType = value === null ? null : 'BOS'
+      }
+      break
+    case 'momentum_enhancing': if (c.momentum) c.momentum.enhancingRatio = value; break
+    case 'volume_ratio20': if (c.volume) c.volume.ratio20 = value; break
+    case 'equal_weight_return': if (c.price) c.price.equalWeightReturn = value; break
+    case 'advance_ratio': if (c.price) c.price.advanceRatio = value; break
+    case 'capital_tilt': if (c.composition) c.composition.capitalTilt = value; break
+    case 'migration': if (c.composition) c.composition.migration = value; break
+    // ---- legacy keys ----
     case 'position': s.position = value; break
     case 'velocity': s.velocity = value; break
     case 'acceleration': s.acceleration = value; break
     case 'phase': s.phase = value === null ? null : PHASES[value]; break
-    case 'equal_weight_return': s.equalWeightReturn = value; break
-    case 'capital_tilt': s.capitalTilt = value; break
-    case 'advance_ratio': s.advanceRatio = value; break
+    // equal_weight_return / capital_tilt / advance_ratio / migration 已上移到
+    // visible compare 分支（compareFacts），此处不再注入 summary。
     case 'decline_ratio': s.declineRatio = value; break
     case 'unchanged_ratio': s.unchangedRatio = value; break
-    case 'migration': s.migration = value; break
     case 'coverage': item.coverageRatio = value; break
     case 'freshness_density': o.freshnessDecayWeightedDensity = value; break
     case 'freshness_today': o.freshnessTodayCount = value; break
@@ -209,14 +246,18 @@ test('URL: 旧 sort 值向后兼容（已有分享链接不得失效）', () => 
 })
 
 test('URL: 非法 sort 回退默认；含下划线 key 不得被切错', () => {
-  assert.equal(normalizeSort('bogus_sort_value'), 'velocity_desc')
-  assert.equal(normalizeSort(''), 'velocity_desc')
-  assert.equal(normalizeSort(null), 'velocity_desc')
+  // [SLICE 5 / Explorer] 默认排序改为 dsa_strength_desc（不再是不可见的 Velocity）。
+  // legacy URL velocity_desc 仍必须可解析（见上方 legacy 兼容测试）。
+  assert.equal(normalizeSort('bogus_sort_value'), DEFAULT_REVIEW_SORT)
+  assert.equal(normalizeSort(''), DEFAULT_REVIEW_SORT)
+  assert.equal(normalizeSort(null), DEFAULT_REVIEW_SORT)
+  assert.equal(DEFAULT_REVIEW_SORT, 'dsa_strength_desc')
   assert.deepEqual(parseReviewSort('equal_weight_return_desc'), { key: 'equal_weight_return', dir: 'desc' })
 })
 
 test('URL: REVIEW_SORT_KEYS 无重复且与合法集合无漂移', () => {
-  assert.equal(REVIEW_SORT_KEYS.length, 16, 'sortable key 数量')
+  // 16 legacy + 6 个新 visible compare key
+  assert.equal(REVIEW_SORT_KEYS.length, 22, 'sortable key 数量')
   assert.equal(new Set(REVIEW_SORT_KEYS).size, REVIEW_SORT_KEYS.length, 'key 不得重复')
 })
 

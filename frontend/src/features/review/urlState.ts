@@ -52,6 +52,13 @@ export type ReviewSortKey =
   | 'velocity'
   | 'acceleration'
   | 'phase'
+  // [SLICE 5 / Explorer] 6 个新 visible compare 列（每个都支持 asc + desc）
+  | 'dsa_strength'
+  | 'dsa_duration'
+  | 'dsa_vwap_dev'
+  | 'smc_member_ratio'
+  | 'momentum_enhancing'
+  | 'volume_ratio20'
   | 'equal_weight_return'
   | 'capital_tilt'
   | 'advance_ratio'
@@ -74,6 +81,12 @@ export const REVIEW_SORT_KEYS: readonly ReviewSortKey[] = [
   'velocity',
   'acceleration',
   'phase',
+  'dsa_strength',
+  'dsa_duration',
+  'dsa_vwap_dev',
+  'smc_member_ratio',
+  'momentum_enhancing',
+  'volume_ratio20',
   'equal_weight_return',
   'capital_tilt',
   'advance_ratio',
@@ -163,7 +176,12 @@ export const DEFAULT_REVIEW_VIEW: ReviewExplorerView = 'table'
 /** 默认详情 Tab = dsa（R3 研究页第一入口；旧 current/dynamics 等保留但退居其后） */
 export const DEFAULT_REVIEW_TAB: ReviewDetailTab = 'dsa'
 export const DEFAULT_REVIEW_PHASE: ReviewDynamicsPhase | null = null
-export const DEFAULT_REVIEW_SORT: ReviewSort = 'velocity_desc'
+/**
+ * [SLICE 5 / Explorer] 默认排序改为第一个业务 compare 列（DSA Strength 降序）。
+ * 这不是“综合机会排序”——只是不让新用户默认按一个**看不见的列**（Velocity）排序。
+ * 旧 URL（?sort=velocity_desc 等）仍合法并继续恢复原排序（backward compatible）。
+ */
+export const DEFAULT_REVIEW_SORT: ReviewSort = 'dsa_strength_desc'
 export const DEFAULT_REVIEW_READINESS: ReviewCompositionReadiness | null = null
 export const DEFAULT_REVIEW_PAGE = 1
 export const DEFAULT_REVIEW_PAGE_SIZE = 50

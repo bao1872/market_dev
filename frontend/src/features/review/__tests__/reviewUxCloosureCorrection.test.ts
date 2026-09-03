@@ -97,16 +97,21 @@ test('source: 普通 UI 不显示 backend path（observation.structure.current_s
   assert.ok(src.includes('本期暂无筹码数据'))
 })
 
-test('source: 表格 Technical 列使用中文词条（原子化后经 ReviewTerm 引用）', () => {
+test('source: 默认表 compare-first，Technical/Freshness 词条保留但不再默认展示', () => {
   const src = readSource('ScopeExplorerTable.tsx')
-  // [Slice C] Technical 不再塞进 composite cell，而是四条独立列，各自引用 ReviewTerm 词条
+  // [SLICE 5 / Explorer] 产品合同已变：默认 compare-first 11 列，不再展示
+  // Technical / Freshness 列。但 canonical 词条 owner 必须仍然存在（不删除）。
   for (const term of ['technicalHhi', 'technicalTop5Ratio', 'technicalLeaderMedianGap', 'technicalLeaderSymbol']) {
-    assert.ok(src.includes(`'${term}'`), `表格必须引用 Technical 原子词条 ${term}`)
+    assert.ok(!src.includes(`'${term}'`), `默认表不再引用 Technical 词条 ${term}`)
   }
-  // 中文标签由 reviewCopy 词条 owner 提供
+  // 中文标签仍由 reviewCopy 词条 owner 提供（owner 保留，只是不再默认展示）
   const copy = readSource('reviewCopy.ts')
   for (const label of ['技术集中度', '前5强度占比', '最高-中位强度差', '最高强度成员']) {
-    assert.ok(copy.includes(`label: '${label}'`), `reviewCopy 缺少 ${label} 中文标签`)
+    assert.ok(copy.includes(`label: '${label}'`), `reviewCopy 缺少 ${label} 中文标签（owner 必须保留）`)
+  }
+  // 默认表改为引用 compare 词条
+  for (const term of ['dsaStrength', 'dsaDuration', 'dsaVwapDev', 'smcEvent', 'momentumChange', 'volumeRatio20']) {
+    assert.ok(src.includes(`'${term}'`), `默认表必须引用 compare 词条 ${term}`)
   }
   // 不得再出现 cryptic 前缀
   assert.ok(!/HHI \$/.test(src), '仍存在 HHI 单字母')

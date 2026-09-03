@@ -239,27 +239,37 @@ test('UX11. Toolbar 全面中文化（canonical 值不变；P0-1 已删除 Readi
   assert.ok(types.includes("'ready'"), 'readiness canonical 值仍保留')
 })
 
-test('UX12. ExplorerTable 表头经 ReviewTerm 中文化，无英文硬编码', () => {
+test('UX12. ExplorerTable 表头经 ReviewTerm 中文化，无英文硬编码（compare-first）', () => {
   const src = read('ScopeExplorerTable.tsx')
   assert.ok(src.includes('termKey="scope"'))
-  // [Slice C] 复合 breadth / freshness / technical 已原子化：表头改为引用原子词条
+  // [SLICE 5 / Explorer] 默认 compare-first 表头引用新 compare 词条（中文短 label）
   for (const term of [
+    'dsaStrength',
+    'dsaDuration',
+    'dsaVwapDev',
+    'smcEvent',
+    'momentumChange',
+    'volumeRatio20',
+    'equalWeightReturn',
     'advanceRatio',
-    'declineRatio',
-    'unchangedRatio',
-    'freshnessDensity',
-    'freshnessTodayCount',
-    'technicalHhi',
-    'technicalTop5Ratio',
-    'technicalLeaderMedianGap',
-    'technicalLeaderSymbol',
+    'capitalTilt',
+    'leadershipMigration',
   ]) {
-    assert.ok(src.includes(`'${term}'`), `表头必须引用原子词条 ${term}`)
+    assert.ok(src.includes(`'${term}'`), `表头必须引用 compare 词条 ${term}`)
   }
+  // 表头一律经 ReviewTerm 渲染，禁止裸英文
   assert.doesNotMatch(src, />Scope</)
   assert.doesNotMatch(src, />EW Return</)
   assert.doesNotMatch(src, />Capital Tilt</)
   assert.doesNotMatch(src, />Leadership Migration</)
+  assert.doesNotMatch(src, />DSA Strength</)
+  assert.doesNotMatch(src, />SMC Event</)
+  assert.doesNotMatch(src, />Momentum</)
+  // 新词条必须已在 reviewCopy 注册（单一词条 owner）
+  const copy = read('reviewCopy.ts')
+  for (const term of ['dsaStrength', 'dsaDuration', 'smcEvent', 'momentumChange', 'volumeRatio20']) {
+    assert.ok(copy.includes(`${term}: {`), `reviewCopy 必须注册词条 ${term}`)
+  }
 })
 
 test('UX13. DetailTabs label 全部来自 DETAIL_TAB_LABELS（无英文硬编码）', () => {

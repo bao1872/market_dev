@@ -213,6 +213,65 @@ export interface ReviewScopeListItem {
   coverageRatio: number | null
   summary: ReviewScopeSummary | null
   observationSummary: ReviewScopeObservationSummary | null
+  /**
+   * [SLICE 5 / Explorer] 紧凑横截面对比事实（backend 单一 batch read-model 提供）。
+   * optional + null 兼容历史 fixture 与 unavailable payload；
+   * 前端绝不从 summary 反向构造 compareFacts。
+   */
+  compareFacts?: ReviewScopeCompareFacts | null
+}
+
+/**
+ * [SLICE 5 / Explorer] DSA compare facts。
+ * durationBars = trend.continuous.dsa_dir_bars（scope 级 canonical scalar）。
+ * canonical median 可能带小数（如 12.5），UI 不得假装一定是整数。
+ */
+export interface ReviewScopeCompareDsa {
+  regimeStrength: number | null
+  regimeStrengthPeerPercentile: number | null
+  durationBars: number | null
+  vwapDevPct: number | null
+}
+
+/** [SLICE 5 / Explorer] SMC 显示事件（backend 已完成 selection，前端只 render） */
+export interface ReviewScopeCompareSmc {
+  eventType: string | null
+  structureLevel: string | null
+  direction: string | null
+  memberRatio: number | null
+  availability: string
+  reason: string | null
+}
+
+export interface ReviewScopeCompareMomentum {
+  /** producer ratio（0.42 = 42%），denominator 只展示 producer value */
+  enhancingRatio: number | null
+  weakeningRatio: number | null
+  denominator: number | null
+}
+
+export interface ReviewScopeCompareVolume {
+  ratio20: number | null
+}
+
+export interface ReviewScopeComparePrice {
+  equalWeightReturn: number | null
+  equalWeightReturnPeerPercentile: number | null
+  advanceRatio: number | null
+}
+
+export interface ReviewScopeCompareComposition {
+  capitalTilt: number | null
+  migration: number | null
+}
+
+export interface ReviewScopeCompareFacts {
+  dsa: ReviewScopeCompareDsa | null
+  smc: ReviewScopeCompareSmc | null
+  momentum: ReviewScopeCompareMomentum | null
+  volume: ReviewScopeCompareVolume | null
+  price: ReviewScopeComparePrice | null
+  composition: ReviewScopeCompareComposition | null
 }
 
 /** 列表分页响应 */

@@ -12,7 +12,13 @@ import type {
   ReviewDynamicsPhase,
   ReviewScopeObservationSummary,
 } from './types'
-import { parseReviewSort, type ReviewSort, type ReviewSortKey } from './urlState'
+import { compareSortValue, isVisibleSortKey } from './scopeExplorerContract'
+import {
+  DEFAULT_REVIEW_SORT,
+  parseReviewSort,
+  type ReviewSort,
+  type ReviewSortKey,
+} from './urlState'
 
 export interface ScopeExplorerQuery {
   q: string
@@ -91,6 +97,12 @@ export function sortValueFor(
   item: ReviewScopeListItem,
   key: ReviewSortKey | null,
 ): number | null {
+  // [SLICE 5 / Explorer] 10 个 visible compare 列：只读 compareFacts
+  // （即便 summary 里也有 EW / Tilt / Breadth / Migration，显示 owner 与排序
+  //   owner 必须同为 compareFacts，避免分裂）。
+  if (key !== null && isVisibleSortKey(key)) {
+    return compareSortValue(item.compareFacts ?? null, key)
+  }
   switch (key) {
     case 'position':
       return finiteOrNull(item.summary?.position)
@@ -103,18 +115,13 @@ export function sortValueFor(
       if (!p) return null
       return PHASE_ORDER[p] ?? null
     }
-    case 'equal_weight_return':
-      return finiteOrNull(item.summary?.equalWeightReturn)
-    case 'capital_tilt':
-      return finiteOrNull(item.summary?.capitalTilt)
-    case 'advance_ratio':
-      return finiteOrNull(item.summary?.advanceRatio)
+    // equal_weight_return / capital_tilt / advance_ratio / migration 已上移到
+    // visible compare 分支（只读 compareFacts），此处不再重复，避免显示 owner
+    // 与排序 owner 分裂。
     case 'decline_ratio':
       return finiteOrNull(item.summary?.declineRatio)
     case 'unchanged_ratio':
       return finiteOrNull(item.summary?.unchangedRatio)
-    case 'migration':
-      return finiteOrNull(item.summary?.migration)
     case 'coverage':
       return finiteOrNull(item.coverageRatio)
     case 'freshness_density':
@@ -210,7 +217,7 @@ export function applyScopeExplorerPipeline(
   query: ScopeExplorerQuery,
   page: number,
   pageSize: number,
-  sort: ReviewSort = 'velocity_desc',
+  sort: ReviewSort = DEFAULT_REVIEW_SORT,
 ): PaginatedScopes {
   const filtered = filterScopes(snapshot, query)
   const sorted = sortScopes(filtered, sort)
