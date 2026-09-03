@@ -315,8 +315,10 @@ def test_removed_member_not_counted_as_transition() -> None:
     transition = _run(members, pit_member_ids_t1=["a"])["trend"]["transition"]
     assert transition["denominator"] == 1
     assert transition["Neutral→Up"]["count"] == 1
+    # `changed_members` 是 Slice 2 SMC 新增的列表型 key（非 count cell），求和时排除。
     assert sum(
-        v["count"] for k, v in transition.items() if k != "denominator"
+        v["count"] for k, v in transition.items()
+        if k not in ("denominator", "changed_members")
     ) == 1
 
 
@@ -577,7 +579,11 @@ def test_removed_member_excluded_from_transition() -> None:
         pit_member_ids_t1=["a", "gone"],
     )["trend"]["transition"]
     assert transition["denominator"] == 1
-    assert sum(v["count"] for k, v in transition.items() if k != "denominator") == 1
+    # `changed_members` 是 Slice 2 SMC 新增的列表型 key（非 count cell），求和时排除。
+    assert sum(
+        v["count"] for k, v in transition.items()
+        if k not in ("denominator", "changed_members")
+    ) == 1
 
 
 def test_newly_added_member_with_exact_t1_price_enters_price() -> None:
@@ -1180,7 +1186,7 @@ def _ev(member_id: str, event_type: str, direction: str, internal: bool) -> Any:
 
 def test_smc_swing_transition_changed_members_deterministic() -> None:
     """Swing transition 必须产出 changed_members（按 member_id 稳定排序，只列真变化）。"""
-    m1 = _m("m001", swing=Direction.UP, t1_swing=Direction.NEUTRAL)
+    m1 = _m("m001", swing=Direction.UP, t1_swing=Direction.SIDEWAYS)
     m2 = _m("m002", swing=Direction.DOWN, t1_swing=Direction.UP)
     m3 = _m("m003", swing=Direction.UP, t1_swing=Direction.UP)  # stable -> 不列
     out = _run([m1, m2, m3], pit_member_ids_t1=["m001", "m002", "m003"])
@@ -1227,7 +1233,7 @@ def test_smc_changed_members_excludes_unavailable_t1() -> None:
 def test_smc_event_projection_preserves_member_count_and_event_count() -> None:
     """event 投影必须分别保留 member_count 与 event_count（不得混成一个数字）。"""
     evs = [_ev("a", "BOS", "Up", False), _ev("a", "BOS", "Up", False), _ev("b", "BOS", "Up", False)]
-    out = _aggregate_structure_events(evs, {"a", "b"}, "electronics", None)
+    out = _aggregate_structure_events(evs, {"a", "b"})
     cell = out["cells"]["leveled"]["BOS_Up_Swing"]
     assert cell["event_count"] == 3, "3 次 tick"
     assert cell["member_count"] == 2, "来自 2 个成员"
@@ -1236,10 +1242,10 @@ def test_smc_event_projection_preserves_member_count_and_event_count() -> None:
 
 def test_smc_event_denominator_zero_vs_unavailable() -> None:
     """coverage=None -> unavailable（denominator=null）；空 coverage set -> ready + 0（非 unavailable）。"""
-    unavail = _aggregate_structure_events([], None, "electronics", None)
+    unavail = _aggregate_structure_events([], None)
     assert unavail["status"] == "unavailable"
     assert unavail["denominator"] is None
-    ready = _aggregate_structure_events([], set(), "electronics", None)
+    ready = _aggregate_structure_events([], set())
     assert ready["status"] == "ready"
     assert ready["denominator"] == 0
     assert ready["cells"]["leveled"] == {}
