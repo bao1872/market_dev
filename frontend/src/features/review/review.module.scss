@@ -1150,6 +1150,61 @@
   border-bottom-color: v.$color-brand;
 }
 
+// Slice 6：一级 Tab 收口后，「原始事实」等调试入口退居「更多」disclosure。
+// 不属于 role="tablist"，避免破坏 tablist 键盘模型。
+.detailMore {
+  position: relative;
+  display: flex;
+  align-items: stretch;
+}
+
+.detailMoreSummary {
+  display: inline-flex;
+  align-items: center;
+  padding: 7px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  color: v.$color-muted;
+  white-space: nowrap;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  list-style: none;
+  user-select: none;
+
+  &::-webkit-details-marker {
+    display: none;
+  }
+
+  &:hover {
+    color: v.$color-text;
+  }
+
+  &:focus-visible {
+    outline: 2px solid v.$color-brand;
+    outline-offset: -2px;
+  }
+}
+
+.detailMoreMenu {
+  position: absolute;
+  top: 100%;
+  right: 0;
+  z-index: 12;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  background: v.$color-surface;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 6px;
+  box-shadow: 0 6px 18px rgb(0 0 0 / 16%);
+
+  .detailTab {
+    width: 100%;
+    text-align: left;
+  }
+}
+
 .detailContent {
   flex: 1;
   overflow: auto;

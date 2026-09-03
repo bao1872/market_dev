@@ -157,14 +157,17 @@ test('UX5. SORT_LABELS 覆盖全部 canonical 排序值且为中文', () => {
   assert.deepEqual(Object.keys(SORT_LABELS).sort(), canonicalSorts.sort())
 })
 
-test('UX6. DETAIL_TAB_LABELS 精确映射六个 tab', () => {
-  assert.equal(DETAIL_TAB_LABELS.current, '当日事实')
-  assert.equal(DETAIL_TAB_LABELS.dynamics, '等权涨跌动态')
-  assert.equal(DETAIL_TAB_LABELS.internal, '横截面结构')
-  assert.equal(DETAIL_TAB_LABELS.leadership, '主导成员更替')
-  assert.equal(DETAIL_TAB_LABELS.attribution, '成员贡献')
-  assert.equal(DETAIL_TAB_LABELS.facts, '底层事实')
-  assert.deepEqual(Object.keys(DETAIL_TAB_LABELS).sort(), ['attribution', 'current', 'dynamics', 'facts', 'internal', 'leadership'])
+test('UX6. DETAIL_TAB_LABELS 精确映射 Review v1 收口后的 canonical tab', () => {
+  assert.equal(DETAIL_TAB_LABELS.dsa, 'DSA趋势')
+  assert.equal(DETAIL_TAB_LABELS.smc, 'SMC结构')
+  assert.equal(DETAIL_TAB_LABELS.momentum, '动量+成交量')
+  assert.equal(DETAIL_TAB_LABELS.price, '涨跌幅分析')
+  assert.equal(DETAIL_TAB_LABELS.facts, '原始事实')
+  // 旧 tab（current/dynamics/internal/leadership/attribution）已退出一级导航，不再登记 label
+  assert.deepEqual(
+    Object.keys(DETAIL_TAB_LABELS).sort(),
+    ['dsa', 'facts', 'momentum', 'price', 'smc'],
+  )
 })
 
 test('UX7. ATTRIBUTION_SUBTAB_LABELS 精确映射', () => {
@@ -274,7 +277,11 @@ test('UX12. ExplorerTable 表头经 ReviewTerm 中文化，无英文硬编码（
 
 test('UX13. DetailTabs label 全部来自 DETAIL_TAB_LABELS（无英文硬编码）', () => {
   const src = read('ScopeDetailTabs.tsx')
-  assert.ok(src.includes('DETAIL_TAB_LABELS.current'))
+  // Review v1 收口：一级 Tab = dsa/smc/momentum/price；facts 在「更多」调试入口
+  assert.ok(src.includes('DETAIL_TAB_LABELS.dsa'))
+  assert.ok(src.includes('DETAIL_TAB_LABELS.smc'))
+  assert.ok(src.includes('DETAIL_TAB_LABELS.momentum'))
+  assert.ok(src.includes('DETAIL_TAB_LABELS.price'))
   assert.ok(src.includes('DETAIL_TAB_LABELS.facts'))
   assert.doesNotMatch(src, /label: 'Current'|label: 'Dynamics'|label: 'Facts'/)
 })

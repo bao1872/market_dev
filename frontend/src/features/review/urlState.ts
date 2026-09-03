@@ -7,7 +7,7 @@
 //     &family=industry_l1
 //     &scopeKey=<board_id>
 //     &view=table
-//     &tab=dynamics
+//     &tab=dsa
 //     &phase=Strengthening
 //     &readiness=ready
 //     &sort=velocity_desc
@@ -29,6 +29,14 @@ import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness
 
 export type ReviewExplorerView = 'table' | 'trajectory'
 
+/**
+ * [Slice 6 收口] Review Detail 子 Tab。
+ * - canonical 一级 Tab（普通用户可见）：dsa / smc / momentum / price。
+ * - facts：降级为「更多 › 原始事实」调试入口，仍合法但仍不在一级导航。
+ * - legacy Tab（current / dynamics / internal / leadership / attribution）：其核⼼信息已并入
+ *   price 等 canonical Tab，已退出一级导航；此处保留为合法 URL 值仅作旧书签兼容
+ *   （直接访问旧 URL 仍可回放对应面板），normalizeDetailTab 对非法值 fail-safe 到 'dsa'。
+ */
 export type ReviewDetailTab =
   | 'dsa'
   | 'smc'

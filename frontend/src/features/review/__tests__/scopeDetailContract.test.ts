@@ -793,32 +793,34 @@ test('N2. 只有 detail owner 调用 getReviewScopeDetail', () => {
 // 11. URL tab SSOT
 // ============================================================
 
-test('URL1. [R3A] 默认 detail tab 为 current', () => {
-  assert.equal(DEFAULT_REVIEW_TAB, 'current')
+test('URL1. [Slice 6] 默认 detail tab 为 dsa（canonical 一级 Tab）', () => {
+  assert.equal(DEFAULT_REVIEW_TAB, 'dsa')
 })
 
-test('URL2. [R3A FE-9] 缺失 tab → current', () => {
+test('URL2. [Slice 6] 缺失 tab → dsa', () => {
   const st = defaultReviewUrlState()
-  assert.equal(st.tab, 'current')
+  assert.equal(st.tab, 'dsa')
 })
 
-test('URL3. [R3A FE-8] 默认/显式 current 一致', () => {
+test('URL3. [R3A FE-8] 默认/显式 current 一致（legacy URL 仍合法）', () => {
   assert.equal(normalizeDetailTab('current'), 'current')
 })
 
-test('URL4. [R3A FE-10] 非法/缺失 tab → current', () => {
-  assert.equal(normalizeDetailTab('bogus'), 'current')
-  assert.equal(normalizeDetailTab(null), 'current')
-  assert.equal(normalizeDetailTab(undefined), 'current')
+test('URL4. [Slice 6] 非法/缺失 tab → dsa（fail-safe 到 canonical 默认）', () => {
+  assert.equal(normalizeDetailTab('bogus'), 'dsa')
+  assert.equal(normalizeDetailTab(null), 'dsa')
+  assert.equal(normalizeDetailTab(undefined), 'dsa')
 })
 
-function detailState(tab: 'current' | 'dynamics'): ReviewUrlState {
+function detailState(tab: ReviewUrlState['tab']): ReviewUrlState {
   return { ...defaultReviewUrlState(), date: '2026-08-21', family: 'industry_l1', scopeKey: 'bank', tab }
 }
 
-test('URL5. [R3A FE-11] current 编码省略 tab 参数', () => {
-  const url = buildReviewUrl(detailState('current'))
-  assert.ok(!url.includes('tab='), `current 不应编码 tab，实际：${url}`)
+test('URL5. [Slice 6] 默认 dsa 省略 tab 参数；legacy tab 仍编码（兼容旧书签）', () => {
+  const dsaUrl = buildReviewUrl(detailState('dsa'))
+  assert.ok(!dsaUrl.includes('tab='), `dsa 不应编码 tab，实际：${dsaUrl}`)
+  const legacyUrl = buildReviewUrl(detailState('current'))
+  assert.ok(legacyUrl.includes('tab=current'), `legacy current 仍编码 tab，实际：${legacyUrl}`)
 })
 
 test('URL6. [R3A FE-12] dynamics 编码保留 tab=dynamics 且可 round-trip', () => {

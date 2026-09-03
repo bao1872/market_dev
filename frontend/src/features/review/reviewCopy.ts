@@ -395,32 +395,33 @@ export const SORT_LABELS: Readonly<Record<string, string>> = {
   leader_median_gap_desc: '最高-中位强度差 ↓',
 }
 
-/** 详情 Tab canonical value → 中文 label */
+/**
+ * 详情 Tab canonical value → 中文 label（Review v1 收口，Slice 6）。
+ *
+ * 正式一级 Tab 只保留 4 个 canonical：dsa / smc / momentum / price。
+ * `facts`（原始事实）降级为「更多 › 原始事实」调试入口，仍在 DETAIL_TAB_LABELS
+ * 中保留 label，但退出普通一级导航。
+ *
+ * 旧 tab（current / dynamics / internal / leadership / attribution）已退出一级导航：
+ * 其核心信息已并入 price 等 canonical Tab；它们仍作为 legacy URL 兼容值保留在
+ * urlState 的合法集合内（直接访问旧书签仍可回放对应面板），但不再有 UI 入口，
+ * 故不再登记 label（避免普通用户看到 10 个 Tab）。
+ */
 export const DETAIL_TAB_LABELS: Readonly<Record<string, string>> = {
-  dsa: '趋势与结构',
-  smc: '结构演化',
-  momentum: '动量与量能',
-  price: '涨跌幅分布',
-  current: '当日事实',
-  dynamics: '等权涨跌动态',
-  internal: '横截面结构',
-  leadership: '主导成员更替',
-  attribution: '成员贡献',
-  facts: '底层事实',
+  dsa: 'DSA趋势',
+  smc: 'SMC结构',
+  momentum: '动量+成交量',
+  price: '涨跌幅分析',
+  facts: '原始事实',
 }
 
 /** 详情 Tab tooltip（hover tab 显示） */
 export const DETAIL_TAB_HELP: Readonly<Record<string, string>> = {
-  dsa: 'DSA 趋势：Regime Strength、趋势段 VWAP 偏离、趋势成员构成与 T-1→T 迁移，叠加 20D 滚动位置与横截面分位',
-  smc: 'SMC 结构演化：swing/internal 状态、对齐、BOS/CHoCH/OB 事件时间线（建设中）',
-  momentum: '动量与量能：方向/状态、增强/减弱、 squeeze、BB 位置/宽度、量能 Z 与释放量（建设中）',
-  price: '涨跌幅分布：等权/金额加权收益、涨跌/走平比、收益离散度、集中度、主导迁移与 Jaccard（建设中）',
-  current: '当前交易日已落库的价格、趋势、结构、动量与成交量事实',
-  dynamics: '板块等权涨跌分位，以及分位动能与动能偏离随时间的演变',
-  internal: '成员涨跌分布、成交加权差与集中度等横截面结构',
-  leadership: '前一日到当日主导成员集合的留存、新进入与退出',
-  attribution: '哪些成员对板块涨跌、成交加权差、集中度与主导结构贡献最大',
-  facts: '后端保存的底层原始事实，主要用于研究与诊断',
+  dsa: 'DSA 趋势：Regime Strength、趋势段 VWAP 偏离、趋势成员构成与 T-1→T 迁移，叠加 20D 滚动位置与同 family 横截面分位',
+  smc: 'SMC 结构：swing/internal 状态、对齐、BOS/CHoCH/OB 事件时间线',
+  momentum: '动量 + 成交量：方向/状态、增强/减弱、squeeze、BB 位置/宽度、量能 Z 与释放量',
+  price: '涨跌幅分析：等权/金额加权收益、涨跌/走平比、收益离散度、集中度、主导迁移与 Jaccard',
+  facts: '后端保存的底层原始事实，主要用于研究与诊断（调试入口）',
 }
 
 /** Attribution 子 Tab canonical value → 中文 label */
