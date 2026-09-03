@@ -99,7 +99,7 @@ export interface ScopeDsaPanelProps {
 
 export default function ScopeDsaPanel({ observation, history, crossSection, memberDirectory }: ScopeDsaPanelProps) {
   const vm = buildDsaVM(parseDsaObservation(observation))
-  const csRegime = crossSection?.fields.find((f) => f.field_key === 'trend.continuous.regime_strength')
+  const csRegime = crossSection?.fields.find((f) => f.field === 'trend.continuous.regime_strength')
 
   const histFields = history?.fields ?? {}
 

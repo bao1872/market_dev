@@ -11,6 +11,7 @@ import {
   splitSeriesByGap,
 } from '../scopeDsaContract'
 import { displayMember } from '../reviewFormat'
+import type { ReviewCrossSectionDTO } from '../types'
 
 // canonical observation payload (matches scope_observation.compute_scope_observation)
 const OBS = {
@@ -208,4 +209,50 @@ test('Sparkline gap — null splits segments (P1-3 #5)', () => {
 
   // all null -> no segments (component renders —)
   assert.deepEqual(splitSeriesByGap([null, null]), [])
+})
+
+test('DSA cross-section consumer reads canonical `field` key (API_CLIENT_CONTRACT_MISMATCH fix)', () => {
+  // Canonical backend CrossSectionalFieldResult.to_dict() 输出 "field"，
+  // 不是 "field_key"（field_key 只是 ObservationPrimitiveSpec 的 Python alias，不是 API JSON key）。
+  // 以真实 API 形状（field）构建 fixture，断言 DSA 消费者能定位该字段；
+  // 不得使用 field_key fixture（否则会再次制造 false-green）。
+  const crossSection: ReviewCrossSectionDTO = {
+    fields: [
+      {
+        field: 'trend.continuous.regime_strength',
+        value: 0.72,
+        percentile: 80,
+        peer_count: 20,
+        valid_peer_count: 19,
+      },
+    ],
+  }
+
+  // 与 ScopeDsaPanel 消费者逻辑完全一致：按 canonical field 定位
+  const csRegime = crossSection.fields.find(
+    (f) => f.field === 'trend.continuous.regime_strength',
+  )
+  assert.ok(csRegime, 'canonical field 必须能被 DSA 消费者定位')
+  assert.equal(csRegime.percentile, 80)
+  assert.equal(csRegime.peer_count, 20)
+
+  // 反向：canonical 契约不含 field_key，按 field_key 读取必须失败
+  const wrongKey = crossSection.fields.find(
+    (f) => (f as unknown as Record<string, unknown>).field_key === 'trend.continuous.regime_strength',
+  )
+  assert.equal(wrongKey, undefined, 'canonical 契约不含 field_key，反向读取必须失败')
+
+  // 锁住消费者/类型契约：ScopeDsaPanel 必须按 canonical field 定位，且不用 field_key
+  const panelSrc = readFileSync(
+    new URL('../ScopeDsaPanel.tsx', import.meta.url),
+    'utf8',
+  )
+  assert.ok(
+    panelSrc.includes("f.field === 'trend.continuous.regime_strength'"),
+    'ScopeDsaPanel 消费者必须按 canonical field 定位',
+  )
+  assert.ok(
+    !panelSrc.includes('f.field_key'),
+    'ScopeDsaPanel 不得按 field_key 读取（已与 canonical owner 对齐）',
+  )
 })

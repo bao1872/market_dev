@@ -226,7 +226,7 @@ async def test_history_and_cross_section_use_published_run_only():
         cs = await get_cross_sectional(s, T, SCOPE_TYPE, SCOPE_X)
         assert cs is not None, "published run 存在时 crossSection 不得为 None"
         regime_field = next(
-            (f for f in cs["fields"] if f["field_key"] == "trend.continuous.regime_strength"),
+            (f for f in cs["fields"] if f["field"] == "trend.continuous.regime_strength"),
             None,
         )
         assert regime_field is not None

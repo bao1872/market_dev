@@ -567,7 +567,7 @@ export interface ReviewScopeHistoryDTO {
 
 /** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。 */
 export interface ReviewCrossSectionFieldDTO {
-  field_key: string
+  field: string
   value: number | null
   percentile: number | null
   peer_count: number
