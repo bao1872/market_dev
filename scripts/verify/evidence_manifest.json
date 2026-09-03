@@ -123,6 +123,15 @@
       "required": true,
       "test_selectors": ["tests/test_pg_review_diagnostics_lineage.py"],
       "claim": "Review scope history/cross-sectional are built from the formal published-Review date axis (reuse of FORMAL REVIEW READ OWNER), preserve missing-date slots as null, and exclude broken-pointer dates."
+    },
+    {
+      "contract_id": "review_price_history_composition_lineage",
+      "governance_level": 2,
+      "semantic_owner": "app.services.review_scope_diagnostics_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_pg_review_price_history_lineage.py"],
+      "claim": "Price Composition history (capital_tilt + leadership) is read only from the formally published run of each date; an unpublished same-day run cannot pollute it, and a published date without that scope's Composition keeps a null date slot."
     }
   ]
 }
