@@ -515,14 +515,14 @@ async def list_review_scopes(
     # 同一 formally published run + 同一 family 过滤；cross-sectional peer percentile
     # 在该查询的结果集上以 canonical math owner 批量计算，绝不 per-scope 调用
     # get_cross_sectional()。
-    compare_map: dict[str, dict] = {}
+    compare_map: dict[tuple[str, str], dict] = {}
     if summaries:
         compare_map = await list_review_scope_compare(
             db,
             review_run_id=run.id,
             trade_date=td,
             scope_type=scope_type,
-            scope_keys={row.scope_key for row in summaries},
+            scope_keys={(row.scope_type, row.scope_key) for row in summaries},
         )
 
     items = [
@@ -530,7 +530,7 @@ async def list_review_scopes(
             row,
             composition_readiness=readiness,
             canonical_coverage=canonical_coverage,
-            compare_facts=compare_map.get(row.scope_key),
+            compare_facts=compare_map.get((row.scope_type, row.scope_key)),
         )
         for row in summaries
     ]

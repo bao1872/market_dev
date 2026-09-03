@@ -178,6 +178,7 @@ export interface ExplorerRowVM {
   smcPrimaryText: string
   smcSecondaryText: string
   smcAvailability: string
+  smcTone: DirectionTone
 
   momentumEnhancing: number | null
   momentumWeakening: number | null
@@ -230,6 +231,7 @@ export function buildExplorerRowVM(c: ReviewScopeCompareFacts | null | undefined
     smcPrimaryText: smc.primary,
     smcSecondaryText: smc.secondary,
     smcAvailability: smc.availability,
+    smcTone: smc.tone,
 
     momentumEnhancing,
     momentumWeakening,

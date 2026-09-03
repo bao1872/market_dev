@@ -184,7 +184,7 @@ export function sortScopes(
   })
 }
 
-/** 兼容别名：velocity_desc 仍是默认排序 */
+/** legacy compatibility helper：真实默认排序已是 dsa_strength_desc */
 export const sortVelocityDesc = (
   items: ReviewScopeListItem[],
 ): ReviewScopeListItem[] => sortScopes(items, 'velocity_desc')

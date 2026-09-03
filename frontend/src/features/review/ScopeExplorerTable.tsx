@@ -94,10 +94,9 @@ export default function ScopeExplorerTable({ rows, selectedScopeKey, sort, onSor
             const ewTone = directionTone(vm.equalWeightReturn)
             const tiltTone = directionTone(vm.capitalTilt)
             const vwapTone = directionTone(vm.dsaVwapDev)
-            const smcTone =
-              vm.smcAvailability === 'ready' && vm.smcPrimaryText !== '无'
-                ? (vm.smcPrimaryText.includes('↑') ? 'positive' : vm.smcPrimaryText.includes('↓') ? 'negative' : 'neutral')
-                : 'neutral'
+            // SMC 方向色来自 typed owner 的 smc.tone（scopeExplorerContract），
+            // 不再从展示字符串反推方向。
+            const smcTone = vm.smcTone
             return (
               <tr
                 key={row.scopeKey}

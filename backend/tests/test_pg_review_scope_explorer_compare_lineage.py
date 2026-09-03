@@ -17,6 +17,9 @@ PURE_UNIT_TEST=1 下由 conftest 自动 skip。
    - Composition LEFT JOIN 只匹配 A 的 review_run_id（B 的 composition 不得 JOIN 进来）。
 2. family cohort：industry_l1 与 concept 同时存在时，peer percentile 分 family 计算，
    不得跨 family（industry_l1 的 scope 不得拿 concept 的 scope 当 peer）。
+3. [SLICE 5 identity] 正式身份是复合 (scope_type, scope_key)：industry_l1 与 concept
+   可共用同一 scope_key（shared_scope），两份 facts 必须完全独立、percentile 各自
+   family 内计算，绝不互相覆盖。
 
 DB identity（fail-closed）：APP_ENV==verification 且 current_database() 匹配
 ^bz_stock_verify_[0-9a-f]{40}$ 且 != bz_stock。
@@ -62,11 +65,18 @@ _VERIFY_DB_RE = re.compile(r"^bz_stock_verify_[0-9a-f]{40}$")
 T = date(2099, 9, 6)
 IND = "industry_l1"
 CON = "concept"
+SHARED = "shared_scope"  # 两 family 共用 scope_key，验证复合身份
 
 # 6 个 / family（compute_cross_sectional 要求 valid_peer_count>=5，即排除自身后
 # 至少 5 个 peer，故每 family 至少 6 个 scope 才能拿到 ready percentile）。
 IND_KEYS = [f"exp_cmp_ind_{c}" for c in "abcdef"]
 CON_KEYS = [f"exp_cmp_con_{c}" for c in "abcdef"]
+# A 全量 scope 身份（含 shared_scope 两 family，共 14 个）
+ALL_IDS = (
+    {(IND, k) for k in IND_KEYS}
+    | {(CON, k) for k in CON_KEYS}
+    | {(IND, SHARED), (CON, SHARED)}
+)
 
 # A=published 的 regime_strength（两 family 明显分离，使"分 family"与"跨 family"
 # 算出的 percentile 一定不同）。
@@ -80,6 +90,9 @@ IND_CT = [0.004, 0.006, 0.008, 0.010, 0.012, 0.014]
 CON_CT = [0.104, 0.106, 0.108, 0.110, 0.112, 0.114]
 IND_MIG = [0.11, 0.13, 0.15, 0.17, 0.19, 0.21]
 CON_MIG = [0.31, 0.33, 0.35, 0.37, 0.39, 0.41]
+# A=published 的 shared_scope（落在各自 family 分布内，确保 ready percentile）
+SHARED_RS_IND, SHARED_EWR_IND, SHARED_CT_IND, SHARED_MIG_IND = 0.25, 0.025, 0.007, 0.16
+SHARED_RS_CON, SHARED_EWR_CON, SHARED_CT_CON, SHARED_MIG_CON = 0.72, 0.122, 0.107, 0.36
 
 # B=未发布 的极端值：若 lineage 失效，Explorer 会误读这些 0.99。
 B_RS = 0.99
@@ -109,7 +122,9 @@ def _make_core_run(td: date) -> StockFeatureSnapshotRun:
 
 def _make_review_run(core_id: uuid.UUID, td: date) -> MarketReviewRun:
     # 发布门禁只消费 canonical composition readiness（空 dict = 空壳，禁止发布）。
-    readiness = dict.fromkeys((*IND_KEYS, *CON_KEYS), "ready")
+    readiness = dict.fromkeys(
+        (k for _, k in ALL_IDS), "ready"
+    )
     return MarketReviewRun(
         trade_date=td,
         source_core_run_id=core_id,
@@ -118,8 +133,8 @@ def _make_review_run(core_id: uuid.UUID, td: date) -> MarketReviewRun:
         degraded_reasons=[],
         algorithm_version=REVIEW_ALGORITHM_VERSION,
         filter_version="filters-1.0.0",
-        expected_scope_count=12,
-        succeeded_scope_count=12,
+        expected_scope_count=14,
+        succeeded_scope_count=14,
         failed_scope_count=0,
         signal_count=0,
         coverage_ratio=__import__("decimal").Decimal("1.0"),
@@ -162,7 +177,7 @@ def _make_fact(
             "participation": {"volume": {"ratio20": {"p50": 1.0}}},
             "price": {
                 "equal_weight_return": equal_weight_return,
-                "amount_weighted_return": equal_weight_return,
+                "amount_weight_return": equal_weight_return,
                 "breadth": {"advance_ratio": 0.5, "decline_ratio": 0.3, "unchanged_ratio": 0.2},
             },
         },
@@ -263,14 +278,15 @@ async def test_explorer_compare_uses_published_run_only():
     - FORMAL REVIEW READ OWNER 只解析到 A（B 未发布）；
     - compareFacts 全部来自 A（regime_strength / equal_weight_return / capital_tilt
       / migration 都不是 B 的极端值）；
-    - Composition LEFT JOIN 只匹配 A 的 review_run_id（B 的 composition 不得污染）。
+    - Composition LEFT JOIN 只匹配 A 的 review_run_id（B 的 composition 不得污染）；
+    - 复合身份：industry_l1/shared_scope 与 concept/shared_scope 完全独立。
     """
     async with AsyncSessionLocal() as s:
         await _assert_verify_db(s)
         await _clean(s, T)
         await s.commit()
 
-        # --- A: 正式发布 ---
+        # --- A: 正式发布（含 shared_scope 两 family，各写不同 A 值）---
         core_a = _make_core_run(T)
         s.add(core_a)
         await s.flush()
@@ -283,6 +299,10 @@ async def test_explorer_compare_uses_published_run_only():
         for i, k in enumerate(CON_KEYS):
             s.add(_make_fact(run_a.id, T, CON, k, regime_strength=CON_RS[i], equal_weight_return=CON_EWR[i]))
             s.add(_make_composition(run_a.id, T, CON, k, capital_tilt=CON_CT[i], migration=CON_MIG[i]))
+        s.add(_make_fact(run_a.id, T, IND, SHARED, regime_strength=SHARED_RS_IND, equal_weight_return=SHARED_EWR_IND))
+        s.add(_make_composition(run_a.id, T, IND, SHARED, capital_tilt=SHARED_CT_IND, migration=SHARED_MIG_IND))
+        s.add(_make_fact(run_a.id, T, CON, SHARED, regime_strength=SHARED_RS_CON, equal_weight_return=SHARED_EWR_CON))
+        s.add(_make_composition(run_a.id, T, CON, SHARED, capital_tilt=SHARED_CT_CON, migration=SHARED_MIG_CON))
         await s.flush()
         await publish_review(s, run_a)
         await s.commit()
@@ -297,10 +317,13 @@ async def test_explorer_compare_uses_published_run_only():
         s.add(run_b)
         await s.flush()
         for k in IND_KEYS + CON_KEYS:
-            s.add(_make_fact(run_b.id, T, (IND if k.startswith("exp_cmp_ind") else CON), k,
-                             regime_strength=B_RS, equal_weight_return=B_EWR))
-            s.add(_make_composition(run_b.id, T, (IND if k.startswith("exp_cmp_ind") else CON), k,
-                                    capital_tilt=B_CT, migration=B_MIG))
+            fam = IND if k.startswith("exp_cmp_ind") else CON
+            s.add(_make_fact(run_b.id, T, fam, k, regime_strength=B_RS, equal_weight_return=B_EWR))
+            s.add(_make_composition(run_b.id, T, fam, k, capital_tilt=B_CT, migration=B_MIG))
+        s.add(_make_fact(run_b.id, T, IND, SHARED, regime_strength=B_RS, equal_weight_return=B_EWR))
+        s.add(_make_composition(run_b.id, T, IND, SHARED, capital_tilt=B_CT, migration=B_MIG))
+        s.add(_make_fact(run_b.id, T, CON, SHARED, regime_strength=B_RS, equal_weight_return=B_EWR))
+        s.add(_make_composition(run_b.id, T, CON, SHARED, capital_tilt=B_CT, migration=B_MIG))
         await s.commit()
         run_b_id = run_b.id
 
@@ -313,7 +336,7 @@ async def test_explorer_compare_uses_published_run_only():
                 )
             )
         ).scalars().all()
-        assert len(b_facts) == 12, "B 必须写出 12 条 fact"
+        assert len(b_facts) == 14, "B 必须写出 14 条 fact"
         b_comps = (
             await s.execute(
                 select(ReviewScopeCompositionSnapshot).where(
@@ -322,7 +345,7 @@ async def test_explorer_compare_uses_published_run_only():
                 )
             )
         ).scalars().all()
-        assert len(b_comps) == 12, "B 必须写出 12 条 composition"
+        assert len(b_comps) == 14, "B 必须写出 14 条 composition"
 
         # === FORMAL REVIEW READ OWNER 只解析到 A ===
         resolved_id = await get_published_review_run_id(s, T)
@@ -332,35 +355,56 @@ async def test_explorer_compare_uses_published_run_only():
         assert is_formally_published_review_run(run, resolved_id, expected_trade_date=T)
 
         # === Explorer read（真实 LEFT JOIN SQL，parameterized by A 的 run_id）===
-        all_keys = set(IND_KEYS) | set(CON_KEYS)
         compare = await list_review_scope_compare(
-            s, review_run_id=run_a_id, trade_date=T, scope_type=None, scope_keys=all_keys,
+            s, review_run_id=run_a_id, trade_date=T, scope_type=None, scope_keys=ALL_IDS,
         )
-        assert set(compare.keys()) == all_keys, "compareFacts 必须覆盖全部 12 个 scope"
+        assert set(compare.keys()) == ALL_IDS, "compareFacts 必须覆盖全部 14 个复合身份"
 
         # 每个 scope：只来自 A，B 不得污染
         plans = [
-            (IND_KEYS, IND_RS, IND_EWR, IND_CT, IND_MIG),
-            (CON_KEYS, CON_RS, CON_EWR, CON_CT, CON_MIG),
+            (IND, IND_KEYS, IND_RS, IND_EWR, IND_CT, IND_MIG),
+            (CON, CON_KEYS, CON_RS, CON_EWR, CON_CT, CON_MIG),
         ]
-        for keys, rs, ewr, ct, mig in plans:
+        for fam, keys, rs, ewr, ct, mig in plans:
             for i, k in enumerate(keys):
-                f = compare[k]
+                f = compare[(fam, k)]
                 assert f["dsa"]["regimeStrength"] == rs[i], (
-                    f"{k}.regimeStrength 必须取 A={rs[i]}，实际={f['dsa']['regimeStrength']}"
+                    f"{fam}/{k}.regimeStrength 必须取 A={rs[i]}，实际={f['dsa']['regimeStrength']}"
                     f"（lineage 失效，误取未发布的 B）"
                 )
-                assert f["dsa"]["regimeStrength"] != B_RS, f"{k} 不得取未发布的 B"
-                assert f["price"]["equalWeightReturn"] == ewr[i], f"{k}.equalWeightReturn 必须取 A"
-                assert f["price"]["equalWeightReturn"] != B_EWR, f"{k} 不得取未发布的 B"
+                assert f["dsa"]["regimeStrength"] != B_RS, f"{fam}/{k} 不得取未发布的 B"
+                assert f["price"]["equalWeightReturn"] == ewr[i], f"{fam}/{k}.equalWeightReturn 必须取 A"
+                assert f["price"]["equalWeightReturn"] != B_EWR, f"{fam}/{k} 不得取未发布的 B"
                 # Composition LEFT JOIN 只匹配 A 的 review_run_id
                 assert f["composition"]["capitalTilt"] == ct[i], (
-                    f"{k}.capitalTilt 必须取 A 的 composition={ct[i]}，"
+                    f"{fam}/{k}.capitalTilt 必须取 A 的 composition={ct[i]}，"
                     f"实际={f['composition']['capitalTilt']}（JOIN 误匹配 B）"
                 )
-                assert f["composition"]["capitalTilt"] != B_CT, f"{k} 不得 JOIN 到未发布的 B"
-                assert f["composition"]["migration"] == mig[i], f"{k}.migration 必须取 A"
-                assert f["composition"]["migration"] != B_MIG, f"{k} 不得取未发布的 B"
+                assert f["composition"]["capitalTilt"] != B_CT, f"{fam}/{k} 不得 JOIN 到未发布的 B"
+                assert f["composition"]["migration"] == mig[i], f"{fam}/{k}.migration 必须取 A"
+                assert f["composition"]["migration"] != B_MIG, f"{fam}/{k} 不得取未发布的 B"
+
+        # === 复合身份碰撞：industry_l1/shared_scope 与 concept/shared_scope 完全独立 ===
+        ind_shared = compare[(IND, SHARED)]
+        con_shared = compare[(CON, SHARED)]
+        assert ind_shared["dsa"]["regimeStrength"] == SHARED_RS_IND
+        assert con_shared["dsa"]["regimeStrength"] == SHARED_RS_CON
+        assert ind_shared["dsa"]["regimeStrength"] != con_shared["dsa"]["regimeStrength"], (
+            "两 family 的 shared_scope 必须互不串"
+        )
+        assert ind_shared["dsa"]["regimeStrength"] != B_RS
+        assert con_shared["dsa"]["regimeStrength"] != B_RS
+        assert ind_shared["price"]["equalWeightReturn"] == SHARED_EWR_IND
+        assert con_shared["price"]["equalWeightReturn"] == SHARED_EWR_CON
+        assert ind_shared["composition"]["capitalTilt"] == SHARED_CT_IND
+        assert con_shared["composition"]["capitalTilt"] == SHARED_CT_CON
+        assert ind_shared["composition"]["capitalTilt"] != con_shared["composition"]["capitalTilt"], (
+            "两 family 的 shared_scope composition 必须互不串"
+        )
+        assert ind_shared["composition"]["capitalTilt"] != B_CT
+        assert con_shared["composition"]["capitalTilt"] != B_CT
+        assert ind_shared["composition"]["migration"] == SHARED_MIG_IND
+        assert con_shared["composition"]["migration"] == SHARED_MIG_CON
 
         await _clean(s, T)
         await s.commit()
@@ -371,7 +415,8 @@ async def test_explorer_compare_peer_percentile_per_family():
     """industry_l1 与 concept 同时存在：peer percentile 分 family 计算，不得跨 family。
 
     每 family 6 个 scope（valid_peer_count>=5 → ready）。用 canonical math owner 直接
-    算"分 family"与"跨 family"两套 percentile，证明 Explorer 返回的是分 family 结果。
+    算"分 family"与"跨 family"两套 percentile，证明 Explorer 返回的是分 family 结果；
+    对 shared_scope 同样要求分 family（不跨 family）。
     """
     async with AsyncSessionLocal() as s:
         await _assert_verify_db(s)
@@ -388,23 +433,34 @@ async def test_explorer_compare_peer_percentile_per_family():
             s.add(_make_fact(run_a.id, T, IND, k, regime_strength=IND_RS[i], equal_weight_return=IND_EWR[i]))
         for i, k in enumerate(CON_KEYS):
             s.add(_make_fact(run_a.id, T, CON, k, regime_strength=CON_RS[i], equal_weight_return=CON_EWR[i]))
+        s.add(_make_fact(run_a.id, T, IND, SHARED, regime_strength=SHARED_RS_IND, equal_weight_return=SHARED_EWR_IND))
+        s.add(_make_fact(run_a.id, T, CON, SHARED, regime_strength=SHARED_RS_CON, equal_weight_return=SHARED_EWR_CON))
         await s.flush()
         await publish_review(s, run_a)
         await s.commit()
 
         ind_stubs = {
-            k: _stub(IND_RS[i], IND_EWR[i]) for i, k in enumerate(IND_KEYS)
+            **{k: _stub(IND_RS[i], IND_EWR[i]) for i, k in enumerate(IND_KEYS)},
+            SHARED: _stub(SHARED_RS_IND, SHARED_EWR_IND),
         }
         con_stubs = {
-            k: _stub(CON_RS[i], CON_EWR[i]) for i, k in enumerate(CON_KEYS)
+            **{k: _stub(CON_RS[i], CON_EWR[i]) for i, k in enumerate(CON_KEYS)},
+            SHARED: _stub(SHARED_RS_CON, SHARED_EWR_CON),
         }
-        all_stubs = {**ind_stubs, **con_stubs}
+        # 跨 family：用前缀 key 避免 scope_key 碰撞，才能正确表达"混算"
+        cross_stubs = {
+            **{f"ind|{k}": v for k, v in ind_stubs.items()},
+            **{f"con|{k}": v for k, v in con_stubs.items()},
+        }
+        all_stubs = {**ind_stubs, **con_stubs}  # 无碰撞 key（除 SHARED 被 con 覆盖，仅供IND非碰撞key用）
 
         # canonical owner 直接算：分 family vs 跨 family
         ind_a_per_family = _regime_pct(ind_stubs, IND_KEYS[0])
         ind_a_cross_family = _regime_pct(all_stubs, IND_KEYS[0])
         con_a_per_family = _regime_pct(con_stubs, CON_KEYS[0])
         con_a_cross_family = _regime_pct(all_stubs, CON_KEYS[0])
+        shared_ind_per_family = _regime_pct(ind_stubs, SHARED)
+        shared_ind_cross_family = _regime_pct(cross_stubs, f"ind|{SHARED}")
         assert ind_a_per_family is not None and ind_a_cross_family is not None
         assert con_a_per_family is not None and con_a_cross_family is not None
         # 两 family 分布明显分离 → 分 family 与跨 family percentile 必不同
@@ -413,19 +469,30 @@ async def test_explorer_compare_peer_percentile_per_family():
 
         # Explorer 返回的是分 family 结果
         compare = await list_review_scope_compare(
-            s, review_run_id=run_a.id, trade_date=T, scope_type=None,
-            scope_keys=set(IND_KEYS) | set(CON_KEYS),
+            s, review_run_id=run_a.id, trade_date=T, scope_type=None, scope_keys=ALL_IDS,
         )
-        assert compare[IND_KEYS[0]]["dsa"]["regimeStrengthPeerPercentile"] == ind_a_per_family, (
+        assert compare[(IND, IND_KEYS[0])]["dsa"]["regimeStrengthPeerPercentile"] == ind_a_per_family, (
             "Explorer 必须返回 industry_l1 分 family 的 peer percentile"
         )
-        assert compare[IND_KEYS[0]]["dsa"]["regimeStrengthPeerPercentile"] != ind_a_cross_family, (
+        assert compare[(IND, IND_KEYS[0])]["dsa"]["regimeStrengthPeerPercentile"] != ind_a_cross_family, (
             "Explorer 不得把 concept 当 industry_l1 的 peer（跨 family 污染）"
         )
-        assert compare[CON_KEYS[0]]["dsa"]["regimeStrengthPeerPercentile"] == con_a_per_family, (
+        assert compare[(CON, CON_KEYS[0])]["dsa"]["regimeStrengthPeerPercentile"] == con_a_per_family, (
             "Explorer 必须返回 concept 分 family 的 peer percentile"
         )
-        assert compare[CON_KEYS[0]]["dsa"]["regimeStrengthPeerPercentile"] != con_a_cross_family
+        assert compare[(CON, CON_KEYS[0])]["dsa"]["regimeStrengthPeerPercentile"] != con_a_cross_family
+
+        # shared_scope 同样分 family：industry_l1/shared_scope 的 percentile 等于
+        # 仅 industry_l1 cohort 的结果，且不等于跨族混算（证明 identity 隔离 + 不跨 family）
+        assert compare[(IND, SHARED)]["dsa"]["regimeStrengthPeerPercentile"] == shared_ind_per_family, (
+            "shared_scope 必须返回 industry_l1 分 family 的 peer percentile"
+        )
+        assert compare[(IND, SHARED)]["dsa"]["regimeStrengthPeerPercentile"] != shared_ind_cross_family, (
+            "shared_scope 不得跨 family 与 concept 混算"
+        )
+        assert compare[(IND, SHARED)]["dsa"]["regimeStrengthPeerPercentile"] != (
+            compare[(CON, SHARED)]["dsa"]["regimeStrengthPeerPercentile"]
+        ), "两 family 的 shared_scope percentile 必须各自独立"
 
         await _clean(s, T)
         await s.commit()

@@ -335,8 +335,8 @@ def test_e17_family_percentile_never_crosses_family():
     ]
     pct = build_peer_percentiles_by_family(rows)
 
-    i_vals = [pct[f"i{i}"]["regimeStrengthPeerPercentile"] for i in range(8)]
-    c_vals = [pct[f"c{i}"]["regimeStrengthPeerPercentile"] for i in range(8)]
+    i_vals = [pct[("industry_l1", f"i{i}")]["regimeStrengthPeerPercentile"] for i in range(8)]
+    c_vals = [pct[("concept", f"c{i}")]["regimeStrengthPeerPercentile"] for i in range(8)]
     assert all(v is not None for v in i_vals + c_vals), "两个 family 各自样本都足够"
 
     # 各 family 内部单调
@@ -361,7 +361,7 @@ def test_e17_family_percentile_never_crosses_family():
 
 
 def test_e18_family_grouping_matches_separate_calls():
-    """grouping helper 与“分族各调一次”结果一致（等价性锁）。"""
+    """grouping helper 与“分族各调一次”结果一致（等价性锁，复合身份 key）。"""
     rows = [
         (f"i{i}", "industry_l1", {"regime_strength": 0.5 + 0.01 * i}, {"equal_weight_return": 0.01 + 0.001 * i})
         for i in range(6)
@@ -370,23 +370,68 @@ def test_e18_family_grouping_matches_separate_calls():
         for i in range(6)
     ]
     grouped = build_peer_percentiles_by_family(rows)
-    separate: dict[str, dict[str, float | None]] = {}
-    separate.update(
-        build_peer_percentiles([(k, tc, pr) for k, f, tc, pr in rows if f == "industry_l1"])
-    )
-    separate.update(
-        build_peer_percentiles([(k, tc, pr) for k, f, tc, pr in rows if f == "concept"])
-    )
+    separate: dict[tuple[str, str], dict[str, float | None]] = {}
+    for fam in ("industry_l1", "concept"):
+        sm = build_peer_percentiles([(k, tc, pr) for k, f, tc, pr in rows if f == fam])
+        for k, v in sm.items():
+            separate[(fam, k)] = v
     assert grouped == separate
 
 
 def test_e19_single_family_request_still_one_group():
-    # 请求已带 scope_type 时自然只有一个 group，语义不变
+    # 请求已带 scope_type 时自然只有一个 group，语义不变（复合身份 key）
     rows = [(f"s{i}", "industry_l1", {"regime_strength": 0.1 * (i + 1)}, {"equal_weight_return": 0.001 * (i + 1)}) for i in range(6)]
     pct = build_peer_percentiles_by_family(rows)
-    assert set(pct.keys()) == {f"s{i}" for i in range(6)}
-    vals = [pct[f"s{i}"]["regimeStrengthPeerPercentile"] for i in range(6)]
+    assert set(pct.keys()) == {("industry_l1", f"s{i}") for i in range(6)}
+    vals = [pct[("industry_l1", f"s{i}")]["regimeStrengthPeerPercentile"] for i in range(6)]
     assert vals == sorted(vals)
+
+
+def test_e20_composite_identity_avoids_scope_key_collision():
+    """[SLICE 5 identity] (scope_type, scope_key) 防止 family 间 scope_key 碰撞。
+
+    必须在**旧 scope_key-only 实现**下失败：旧实现把 industry_l1/same_key 与
+    concept/same_key 映射到同一个 dict key 互相覆盖（pct["same_key"] 仅剩一份），
+    本测试访问 pct[("industry_l1","same_key")] / pct[("concept","same_key")] 会
+    KeyError 或取到被覆盖值。新实现下两份 facts 完全独立、percentile 各自 family。
+    """
+    # 两 family 共用 scope_key="same_key"，但分布完全不同（每族额外 6 个 peer 兜底）
+    big = [
+        (f"same_key_{i}", "industry_l1", {"regime_strength": 0.80 + 0.01 * i}, {"equal_weight_return": 0.020 + 0.001 * i})
+        for i in range(6)
+    ] + [
+        (f"same_key_{i}", "concept", {"regime_strength": 0.10 + 0.01 * i}, {"equal_weight_return": 0.001 + 0.0001 * i})
+        for i in range(6)
+    ]
+    # 碰撞 key：industry_l1 高值、concept 低值
+    big.append(("same_key", "industry_l1", {"regime_strength": 0.95}, {"equal_weight_return": 0.025}))
+    big.append(("same_key", "concept", {"regime_strength": 0.05}, {"equal_weight_return": 0.0005}))
+
+    pct = build_peer_percentiles_by_family(big)
+
+    # 1) 复合 key 互不串：两个 family 的 same_key 都存在且是不同对象
+    ind = pct[("industry_l1", "same_key")]
+    con = pct[("concept", "same_key")]
+    assert ind is not con
+    assert ind["regimeStrengthPeerPercentile"] is not None
+    assert con["regimeStrengthPeerPercentile"] is not None
+
+    # 2) 各自 family 内排名（family 隔离锁）：industry_l1/same_key 的 percentile
+    #    必须等于“仅 industry_l1 cohort”的计算，concept 同理；绝不等于跨族混算。
+    ind_only = build_peer_percentiles(
+        [(k, tc, pr) for k, f, tc, pr in big if f == "industry_l1"]
+    )
+    con_only = build_peer_percentiles(
+        [(k, tc, pr) for k, f, tc, pr in big if f == "concept"]
+    )
+    assert pct[("industry_l1", "same_key")] == ind_only["same_key"], (
+        "industry_l1/same_key 必须只在 industry_l1 cohort 内排名"
+    )
+    assert pct[("concept", "same_key")] == con_only["same_key"], (
+        "concept/same_key 必须只在 concept cohort 内排名"
+    )
+    # 跨族混算必定产生不同结果（否则本测试无意义）
+    assert ind_only["same_key"] != con_only["same_key"]
 
 
 def test_e16_no_duplicated_percentile_formula():

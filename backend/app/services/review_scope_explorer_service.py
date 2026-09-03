@@ -29,6 +29,11 @@ from app.models.market_review import (
     ReviewScopeObservationFact,
 )
 
+# Formal composite scope identity. A scope is uniquely identified by
+# (scope_type, scope_key); two families may legitimately share a scope_key, so
+# every read-model map MUST be keyed by this tuple, never by scope_key alone.
+ScopeIdentity = tuple[str, str]
+
 # ---------------------------------------------------------------------------
 # SMC display priority (§十) — pure list DISPLAY projection, NOT a score.
 # ---------------------------------------------------------------------------
@@ -273,7 +278,7 @@ def _percentiles_for_cohort(
 
 def build_peer_percentiles_by_family(
     rows: list[tuple[str, str, Any, Any]],
-) -> dict[str, dict[str, float | None]]:
+) -> dict[ScopeIdentity, dict[str, float | None]]:
     """Family-scoped peer percentiles — the ONLY safe entry for mixed families.
 
     ``rows`` = ``[(scope_key, scope_type, trend_continuous, price), ...]``.
@@ -285,16 +290,20 @@ def build_peer_percentiles_by_family(
     contract would be violated.
 
     Each family group is computed independently via the canonical owner; results
-    are merged by scope_key. Never writes family info into any score/rank.
+    are merged back under the formal composite identity ``(scope_type, scope_key)``
+    — never by scope_key alone, because two families may legitimately share a
+    scope_key (collision). Never writes family info into any score/rank.
     """
     groups: dict[str, list[tuple[str, Any, Any]]] = {}
     for scope_key, scope_type, tc, pr in rows:
         groups.setdefault(scope_type, []).append((scope_key, tc, pr))
 
-    merged: dict[str, dict[str, float | None]] = {}
-    for family_rows in groups.values():
+    merged: dict[ScopeIdentity, dict[str, float | None]] = {}
+    for family, family_rows in groups.items():
         cohort = {key: _cohort_stub(tc, pr) for key, tc, pr in family_rows}
-        merged.update(_percentiles_for_cohort(cohort))
+        scope_key_map = _percentiles_for_cohort(cohort)
+        for scope_key, entry in scope_key_map.items():
+            merged[(family, scope_key)] = entry
     return merged
 
 
@@ -346,14 +355,15 @@ async def list_review_scope_compare(
     review_run_id: UUID,
     trade_date: date,
     scope_type: str | None,
-    scope_keys: set[str],
-) -> dict[str, dict[str, Any]]:
+    scope_keys: set[ScopeIdentity],
+) -> dict[ScopeIdentity, dict[str, Any]]:
     """Explorer compare facts for the requested page keys — **ONE query**.
 
     The cohort for peer percentiles is the whole result set of this same query
     (already scoped to the published run + family), so no second round-trip and
-    no per-scope cross-sectional call. Only the requested ``scope_keys`` get a
-    full compare-facts block built.
+    no per-scope cross-sectional call. Only the requested ``scope_keys`` (formal
+    composite identity ``(scope_type, scope_key)``) get a full compare-facts
+    block built.
     """
     rows = list((await db.execute(_compare_stmt(review_run_id, trade_date, scope_type))).all())
     if not rows:
@@ -365,9 +375,10 @@ async def list_review_scope_compare(
     ]
     percentile_map = build_peer_percentiles_by_family(cohort)
 
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[ScopeIdentity, dict[str, Any]] = {}
     for r in rows:
-        if r.scope_key not in scope_keys:
+        identity = (r.scope_type, r.scope_key)
+        if identity not in scope_keys:
             continue
         obs_stub = {
             "trend": {"continuous": r.trend_continuous if isinstance(r.trend_continuous, dict) else {}},
@@ -383,8 +394,8 @@ async def list_review_scope_compare(
             comp_stub["leadership"] = {"migration": r.migration}
 
         facts = build_compare_facts(obs_stub, comp_stub if comp_stub else None)
-        pct = percentile_map.get(r.scope_key) or {}
+        pct = percentile_map.get(identity) or {}
         facts["dsa"]["regimeStrengthPeerPercentile"] = pct.get("regimeStrengthPeerPercentile")
         facts["price"]["equalWeightReturnPeerPercentile"] = pct.get("equalWeightReturnPeerPercentile")
-        out[r.scope_key] = facts
+        out[identity] = facts
     return out
