@@ -567,13 +567,21 @@ export interface ReviewScopeHistoryDTO {
   momentumVolume: ReviewScopeMomentumVolumeHistoryDTO | null
 }
 
-/** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。 */
+/** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。
+ *
+ * 与 canonical ``CrossSectionalFieldResult.to_dict()`` 严格对齐：
+ * ready / unavailable（reason: CURRENT_FIELD_UNAVAILABLE / NO_PEERS /
+ * INSUFFICIENT_PEER_SAMPLE）。unavailable 时 percentile 为 null，
+ * 前端不得把 null 吞成模糊的“P—”，必须展示 unavailable + reason。
+ */
 export interface ReviewCrossSectionFieldDTO {
   field: string
   value: number | null
   percentile: number | null
   peer_count: number
   valid_peer_count: number
+  status: string
+  reason: string | null
 }
 
 /** [R3 Cross-sectional] 横截面位置证据 DTO（published-run lineage 安全 cohort）。 */

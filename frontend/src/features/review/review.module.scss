@@ -2788,7 +2788,8 @@
 }
 .mvMatrix {
   display: grid;
-  grid-template-columns: 120px 1fr 1fr;
+  // 5 columns: label + P25 / P50 / P75 / n（成交量矩阵为 5 列，勿改回 3 列）
+  grid-template-columns: minmax(110px, 140px) repeat(4, minmax(0, 1fr));
   gap: 8px 16px;
   align-items: baseline;
 }

@@ -357,22 +357,44 @@ export function parseMomentumState(raw: unknown): MomentumStateVM | null {
 // B. Momentum Change（enhancing / weakening / flat）
 // ---------------------------------------------------------------------------
 
+export type MomentumChangeCategory = 'Enhancing' | 'Flat' | 'Weakening'
+
+export interface MomentumChangeCategoryVM {
+  category: MomentumChangeCategory
+  count: number
+  /** 纯展示派生（count / denominator），非 canonical 指标；denominator=0 时为 null */
+  ratio: number | null
+}
+
 export interface MomentumChangeVM {
   enhancingCount: number
   weakeningCount: number
   flatCount: number
   /** Board parity：missing/unrecognized momentum_change 已计入 flat，不得重定义 */
   denominator: number | null
+  /** 展示用类别（Panel 只 render，不自行做 n / denominator） */
+  categories: MomentumChangeCategoryVM[]
 }
 
 export function parseMomentumChange(raw: unknown): MomentumChangeVM | null {
   const o = asRecord(raw)
   if (!o) return null
+  const denominator = numOrNull(o['denominator'])
+  const counts: { category: MomentumChangeCategory; key: string }[] = [
+    { category: 'Enhancing', key: 'enhancing_count' },
+    { category: 'Flat', key: 'flat_count' },
+    { category: 'Weakening', key: 'weakening_count' },
+  ]
+  const denom = denominator != null && denominator > 0 ? denominator : null
   return {
     enhancingCount: numOrZero(o['enhancing_count']),
     weakeningCount: numOrZero(o['weakening_count']),
     flatCount: numOrZero(o['flat_count']),
-    denominator: numOrNull(o['denominator']),
+    denominator,
+    categories: counts.map(({ category, key }) => {
+      const count = numOrZero(o[key])
+      return { category, count, ratio: denom == null ? null : count / denom }
+    }),
   }
 }
 
@@ -441,12 +463,23 @@ export function parseMomentumVolumeRelation(raw: unknown): MomentumVolumeRelatio
 // H. Volume Badge（high / low / normal / unknown）
 // ---------------------------------------------------------------------------
 
+export type VolumeBadgeCategory = 'High' | 'Normal' | 'Low' | 'Unknown'
+
+export interface VolumeBadgeCategoryVM {
+  category: VolumeBadgeCategory
+  count: number
+  /** 纯展示派生（count / total），非 canonical 指标；total=0 时为 null */
+  ratio: number | null
+}
+
 export interface VolumeBadgeVM {
   highCount: number
   lowCount: number
   normalCount: number
   unknownCount: number
   total: number | null
+  /** 展示用类别（Panel 只 render，不自行做 count / total） */
+  entries: VolumeBadgeCategoryVM[]
 }
 
 export function parseVolumeBadge(raw: unknown): VolumeBadgeVM | null {
@@ -456,7 +489,14 @@ export function parseVolumeBadge(raw: unknown): VolumeBadgeVM | null {
   const low = numOrZero(o['low_count'])
   const normal = numOrZero(o['normal_count'])
   const unknown = numOrZero(o['unknown_count'])
-  return { highCount: high, lowCount: low, normalCount: normal, unknownCount: unknown, total: high + low + normal + unknown }
+  const total = high + low + normal + unknown
+  const entries: VolumeBadgeCategoryVM[] = [
+    { category: 'High', count: high, ratio: total > 0 ? high / total : null },
+    { category: 'Normal', count: normal, ratio: total > 0 ? normal / total : null },
+    { category: 'Low', count: low, ratio: total > 0 ? low / total : null },
+    { category: 'Unknown', count: unknown, ratio: total > 0 ? unknown / total : null },
+  ]
+  return { highCount: high, lowCount: low, normalCount: normal, unknownCount: unknown, total, entries }
 }
 
 // ---------------------------------------------------------------------------

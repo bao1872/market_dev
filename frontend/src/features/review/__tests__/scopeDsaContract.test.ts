@@ -224,6 +224,8 @@ test('DSA cross-section consumer reads canonical `field` key (API_CLIENT_CONTRAC
         percentile: 80,
         peer_count: 20,
         valid_peer_count: 19,
+        status: 'ready',
+        reason: null,
       },
     ],
   }

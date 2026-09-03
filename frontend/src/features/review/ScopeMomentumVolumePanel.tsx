@@ -12,6 +12,8 @@ import {
   type VolumeDistributionVM,
   type CurrentOnlyDistributionVM,
 } from './scopeMomentumVolumeContract'
+// 与 DSA 同一 gap helper（单一 owner）：null 处断开，绝不跨 gap 连线。
+import { splitSeriesByGap } from './scopeDsaContract'
 import {
   formatMultipleNullable,
   formatRawDimensionlessNullable,
@@ -120,6 +122,8 @@ function DistributionRow({ label, d, kind }: { label: string; d: VolumeDistribut
 }
 
 // ---- mini line (history) ----
+// null 处断开分段：每段独立 polyline，x 仍按原始 index 定位（保留 date slot，不压缩）。
+// 禁止 forward fill / interpolation。
 function MiniLine({ values, color }: { values: Array<number | null>; color: string }) {
   const w = 100
   const h = 30
@@ -129,18 +133,21 @@ function MiniLine({ values, color }: { values: Array<number | null>; color: stri
   const max = Math.max(...present)
   const span = max - min || 1
   const n = values.length
-  const pts = values
-    .map((v, i) => {
-      if (v == null) return ''
-      const x = n <= 1 ? 0 : (i / (n - 1)) * w
-      const y = h - ((v - min) / span) * (h - 4) - 2
-      return `${x.toFixed(1)},${y.toFixed(1)}`
-    })
-    .filter(Boolean)
-    .join(' ')
+  const xOf = (i: number) => (n <= 1 ? 0 : (i / (n - 1)) * w)
+  const yOf = (v: number) => h - ((v - min) / span) * (h - 4) - 2
+  const segments = splitSeriesByGap(values)
   return (
     <svg viewBox={`0 0 ${w} ${h}`} preserveAspectRatio="none" style={{ width: '100%', height: h, display: 'block' }}>
-      <polyline points={pts} fill="none" stroke={color} strokeWidth={1.5} vectorEffect="non-scaling-stroke" />
+      {segments.map((seg, si) => (
+        <polyline
+          key={si}
+          points={seg.map((p) => `${xOf(p.i).toFixed(1)},${yOf(p.v).toFixed(1)}`).join(' ')}
+          fill="none"
+          stroke={color}
+          strokeWidth={1.5}
+          vectorEffect="non-scaling-stroke"
+        />
+      ))}
     </svg>
   )
 }
@@ -195,17 +202,13 @@ export default function ScopeMomentumVolumePanel({ observation, history, crossSe
   const vm = useMemo(() => parseMomentumVolumeObservation(observation), [observation])
   const historyVm = useMemo(() => parseMomentumVolumeHistory(history), [history])
 
-  const changeRows: CategoryRow[] = (() => {
-    const c = vm.change
-    if (!c) return []
-    const denom = c.denominator && c.denominator > 0 ? c.denominator : null
-    const ratio = (n: number) => (denom ? n / denom : null)
-    return [
-      { label: 'Enhancing', count: c.enhancingCount, ratio: ratio(c.enhancingCount), color: CHANGE_COLORS.Enhancing },
-      { label: 'Flat', count: c.flatCount, ratio: ratio(c.flatCount), color: CHANGE_COLORS.Flat },
-      { label: 'Weakening', count: c.weakeningCount, ratio: ratio(c.weakeningCount), color: CHANGE_COLORS.Weakening },
-    ]
-  })()
+  // 展示 ratio 由 typed VM 提供（contract 内派生），组件只 render。
+  const changeRows: CategoryRow[] = (vm.change?.categories ?? []).map((c) => ({
+    label: c.category,
+    count: c.count,
+    ratio: c.ratio,
+    color: CHANGE_COLORS[c.category],
+  }))
 
   const squeezeRows: CategoryRow[] = (vm.squeeze?.categories ?? []).map((c) => ({
     label: fmtSqueezeCategory(c.category),
@@ -312,17 +315,13 @@ export default function ScopeMomentumVolumePanel({ observation, history, crossSe
           <div className={styles.mvBlockTitle}>Badge</div>
           {vm.volumeBadge ? (
             <div className={styles.mvSqueezeGrid}>
-              {(['High', 'Normal', 'Low', 'Unknown'] as const).map((k) => {
-                const cnt = k === 'High' ? vm.volumeBadge!.highCount : k === 'Normal' ? vm.volumeBadge!.normalCount : k === 'Low' ? vm.volumeBadge!.lowCount : vm.volumeBadge!.unknownCount
-                const ratio = vm.volumeBadge!.total ? cnt / vm.volumeBadge!.total : null
-                return (
-                  <div key={k} className={styles.mvSqueezeRow}>
-                    <span className={styles.mvSqueezeCat}>{k}</span>
-                    <span className={styles.mvSqueezeRatio}>{fmtRatioPct(ratio)}</span>
-                    <span className={styles.mvSqueezeCount}>n={cnt}</span>
-                  </div>
-                )
-              })}
+              {vm.volumeBadge.entries.map((e) => (
+                <div key={e.category} className={styles.mvSqueezeRow}>
+                  <span className={styles.mvSqueezeCat}>{e.category}</span>
+                  <span className={styles.mvSqueezeRatio}>{fmtRatioPct(e.ratio)}</span>
+                  <span className={styles.mvSqueezeCount}>n={e.count}</span>
+                </div>
+              ))}
             </div>
           ) : (
             <div className={styles.mvNeutral}>暂无 Badge</div>
@@ -349,15 +348,34 @@ export default function ScopeMomentumVolumePanel({ observation, history, crossSe
       {csFields.length === 0 ? (
         <div className={styles.mvNeutral}>无横截面位置证据（market scope 无 peer）</div>
       ) : (
-        <div className={styles.mvSqueezeGrid} style={{ maxWidth: 520 }}>
+        <div className={styles.mvSqueezeGrid} style={{ maxWidth: 620 }}>
           {CS_KEYS.map((key) => {
             const f = csMap.get(key)
-            if (!f) return <div key={key} className={styles.mvSqueezeRow}><span className={styles.mvSqueezeCat}>{key}</span><span className={styles.mvSqueezeRatio}>{NULL_DISPLAY}</span></div>
+            if (!f) {
+              return (
+                <div key={key} className={styles.mvSqueezeRow}>
+                  <span className={styles.mvSqueezeCat}>{key}</span>
+                  <span className={styles.mvSqueezeRatio}>{NULL_DISPLAY}</span>
+                </div>
+              )
+            }
+            // unavailable 不得被吞掉：明确展示 unavailable + canonical reason。
+            if (f.status === 'unavailable') {
+              return (
+                <div key={key} className={styles.mvSqueezeRow}>
+                  <span className={styles.mvSqueezeCat}>{key}</span>
+                  <span className={styles.mvSqueezeRatio} title={f.reason ?? undefined}>
+                    不可用{f.reason ? ` · ${f.reason}` : ''}
+                  </span>
+                  <span className={styles.mvSqueezeCount}>valid peers {f.valid_peer_count} / {f.peer_count}</span>
+                </div>
+              )
+            }
             return (
               <div key={key} className={styles.mvSqueezeRow}>
                 <span className={styles.mvSqueezeCat}>{key}</span>
                 <span className={styles.mvSqueezeRatio}>P{f.percentile == null ? NULL_DISPLAY : formatNumberNullable(f.percentile, 1)}</span>
-                <span className={styles.mvSqueezeCount}>peer={f.peer_count}</span>
+                <span className={styles.mvSqueezeCount}>valid peers {f.valid_peer_count} / {f.peer_count}</span>
               </div>
             )
           })}
@@ -380,11 +398,11 @@ export default function ScopeMomentumVolumePanel({ observation, history, crossSe
         title="Momentum Change"
         labels={['Enhancing', 'Flat', 'Weakening']}
         colors={[CHANGE_COLORS.Enhancing, CHANGE_COLORS.Flat, CHANGE_COLORS.Weakening]}
-        perDateRatios={historyVm.momentumChange.map((e) => {
-          const denom = e.vm?.denominator && e.vm.denominator > 0 ? e.vm.denominator : null
-          const r = (n: number) => (denom ? n / denom : null)
-          return e.vm ? [r(e.vm.enhancingCount), r(e.vm.flatCount), r(e.vm.weakeningCount)] : [null, null, null]
-        })}
+        perDateRatios={historyVm.momentumChange.map((e) => [
+          e.vm?.categories.find((c) => c.category === 'Enhancing')?.ratio ?? null,
+          e.vm?.categories.find((c) => c.category === 'Flat')?.ratio ?? null,
+          e.vm?.categories.find((c) => c.category === 'Weakening')?.ratio ?? null,
+        ])}
       />
       <CompositionMultiples
         title="Squeeze State"
@@ -420,21 +438,6 @@ export default function ScopeMomentumVolumePanel({ observation, history, crossSe
       {/* 历史 UI 5：SqzMom Mean */}
       <SectionTitle>20D SqzMom Mean</SectionTitle>
       <HistoryRow label="SqzMom Mean" values={historyVm.sqzmomMean.map((e) => e.mean)} color="#db2777" />
-
-      {/* 历史 Relation（OPEN categorical，轻量） */}
-      <SectionTitle>20D Momentum × Volume Relation</SectionTitle>
-      <div style={{ fontSize: 12, color: '#475569' }}>
-        {historyVm.relation.length === 0
-          ? '无关系历史'
-          : historyVm.relation[historyVm.relation.length - 1]?.vm?.categories.map((c) => `${c.category} ${fmtRatioPct(c.ratio)}`).join(' · ') ?? '—'}
-      </div>
-
-      {/* 五、Historical Position（不阻塞本页：由 Dynamics 承载） */}
-      <SectionTitle>Historical Position</SectionTitle>
-      <div className={styles.mvNote}>
-        ratio20 / ratio200 的历史 percentile 位置由 Scope Dynamics 承载；本页不重复计算，亦不扩大
-        Dynamics architecture。若 detail API 未接线则标记 unavailable / deferred，不影响本页其它事实。
-      </div>
     </div>
   )
 }

@@ -24,7 +24,8 @@ import {
   parseVolumeBadge,
   fmtSqueezeCategory,
 } from '../scopeMomentumVolumeContract'
-import type { ReviewScopeHistoryDTO } from '../types'
+import { splitSeriesByGap } from '../scopeDsaContract'
+import type { ReviewScopeHistoryDTO, ReviewCrossSectionFieldDTO } from '../types'
 
 // ---------------------------------------------------------------------------
 // G7 — squeeze_state
@@ -452,4 +453,126 @@ test('R3E-SLICE3 ScopeMomentumVolumePanel 不 deepGet raw observation（解析�
 test('R3E-SLICE3 ScopeMomentumVolumePanel 横截面使用 canonical `field`（非 field_key）', () => {
   assert.equal(panelSrc.includes('field_key'), false, '不得用 field_key')
   assert.ok(/\.field\b/.test(panelSrc), '使用 crossSection 的 field 键')
+})
+
+// ===========================================================================
+// R3E-SLICE3 CORRECTION — 审计 P1/P2 收口
+// ===========================================================================
+
+// P1-1: 历史折线不跨 null 连线（与 DSA 同一 gap helper）
+test('R3E-SLICE3-CORR P1-1 历史图 null 处断开分段（不跨 gap 连线）', () => {
+  const segs = splitSeriesByGap([1, 2, null, null, 8])
+  assert.equal(segs.length, 2)
+  assert.deepEqual(segs.map((s) => s.map((p) => p.i)), [[0, 1], [4]])
+  // 单元 null 也断开
+  const segs2 = splitSeriesByGap([5, null, 9])
+  assert.equal(segs2.length, 2)
+  // 组件必须以分段渲染，禁止单条 polyline 跨 gap
+  assert.ok(panelSrc.includes('splitSeriesByGap'), 'MiniLine 必须使用 splitSeriesByGap')
+  assert.ok(/segments\.map/.test(panelSrc), '每段独立 polyline')
+  // 禁止 forward fill / interpolation
+  assert.equal(/filter\(Boolean\)/.test(panelSrc), false, '不得用 filter(Boolean) 跳过 null 后连线')
+})
+
+// P1-2: 成交量矩阵 5 列（JSX 单元数 + SCSS grid 列数）
+test('R3E-SLICE3-CORR P1-2 成交量矩阵 5 列：JSX 单元 + SCSS grid-template-columns', () => {
+  // JSX：1 空表头 + P25/P50/P75/n = 5 列
+  assert.equal((panelSrc.match(/styles\.mvMatrixHead/g) ?? []).length, 5)
+  // 每行：1 label + 4 数值单元 = 5 列
+  assert.equal((panelSrc.match(/styles\.mvMatrixCell/g) ?? []).length, 4)
+  assert.equal((panelSrc.match(/styles\.mvMatrixRowLabel/g) ?? []).length, 2)
+  // SCSS：label 列 + repeat(4) = 5 列（旧 scaffold 的 3 列必须已被修正）
+  const scss = readFileSync(join(__dirname, '..', 'review.module.scss'), 'utf8')
+  const mvMatrix = /\.mvMatrix\s*\{([^}]*)\}/.exec(scss)
+  assert.ok(mvMatrix, '.mvMatrix 必须存在')
+  assert.ok(/grid-template-columns:\s*minmax\(110px,\s*140px\)\s+repeat\(4,/.test(mvMatrix[1]), '.mvMatrix 必须为 5 列')
+  assert.equal(/grid-template-columns:\s*120px\s+1fr\s+1fr/.test(mvMatrix[1]), false, '不得回退为 3 列')
+})
+
+// P1-3: CrossSection 完整 frontend contract（status / reason，unavailable 不被吞）
+test('R3E-SLICE3-CORR P1-3 CrossSection ready / unavailable(reason) 完整契约', () => {
+  const fields: ReviewCrossSectionFieldDTO[] = [
+    {
+      field: 'momentum.bb_position', value: 0.5, percentile: 80,
+      peer_count: 20, valid_peer_count: 19, status: 'ready', reason: null,
+    },
+    {
+      field: 'participation.volume.ratio20', value: 1.2, percentile: null,
+      peer_count: 3, valid_peer_count: 2, status: 'unavailable', reason: 'INSUFFICIENT_PEER_SAMPLE',
+    },
+    {
+      field: 'momentum.bb_width', value: null, percentile: null,
+      peer_count: 0, valid_peer_count: 0, status: 'unavailable', reason: 'NO_PEERS',
+    },
+    {
+      field: 'participation.volume.ratio200', value: null, percentile: null,
+      peer_count: 20, valid_peer_count: 0, status: 'unavailable', reason: 'CURRENT_FIELD_UNAVAILABLE',
+    },
+  ]
+  const ready = fields[0]
+  assert.equal(ready.status, 'ready')
+  assert.equal(ready.percentile, 80)
+  // 三种 unavailable reason 全部保留，不得被吞成模糊的 P—
+  const unavailable = fields.filter((f) => f.status === 'unavailable')
+  assert.equal(unavailable.length, 3)
+  assert.ok(unavailable.every((f) => f.percentile === null))
+  assert.ok(unavailable.every((f) => f.reason !== null), 'unavailable 必须带 reason')
+  assert.deepEqual(
+    unavailable.map((f) => f.reason),
+    ['INSUFFICIENT_PEER_SAMPLE', 'NO_PEERS', 'CURRENT_FIELD_UNAVAILABLE'],
+  )
+  // Panel 必须按 status 分支，并展示 reason 与 valid/total peers
+  assert.ok(panelSrc.includes("f.status === 'unavailable'"), 'panel 必须按 status 分支')
+  assert.ok(panelSrc.includes('f.reason'), 'panel 必须展示 reason')
+  assert.ok(/valid peers \{f\.valid_peer_count\} \/ \{f\.peer_count\}/.test(panelSrc), '展示 valid/total peers')
+  assert.equal(panelSrc.includes('field_key'), false, 'canonical key 为 field')
+})
+
+// P1-4: 删除假“20D Relation”（只显示最后一天）
+test('R3E-SLICE3-CORR P1-4 页面不再存在伪 20D Relation 区块', () => {
+  assert.equal(panelSrc.includes('20D Momentum × Volume Relation'), false, '不得再用 20D 标题展示单日关系')
+  assert.equal(/historyVm\.relation\[/.test(panelSrc), false, '不得只取 relation 最后一天')
+  // Current 的 OPEN categorical 关系仍完整保留
+  assert.ok(panelSrc.includes('Momentum × Volume Relation'), 'Current 关系必须保留')
+})
+
+// P2-A: 展示 ratio 由 typed VM 提供，组件不做 n / denominator
+test('R3E-SLICE3-CORR P2-A 展示 ratio 由 typed VM 提供（组件不做除法派生）', () => {
+  const change = parseMomentumChange({ enhancing_count: 5, weakening_count: 3, flat_count: 12, denominator: 20 })
+  const enh = change!.categories.find((c) => c.category === 'Enhancing')!
+  assert.equal(enh.count, 5)
+  assert.equal(enh.ratio, 0.25) // 5 / 20
+  const wk = change!.categories.find((c) => c.category === 'Weakening')!
+  assert.equal(wk.ratio, 0.15) // 3 / 20
+
+  const badge = parseVolumeBadge({ high_count: 4, low_count: 3, normal_count: 10, unknown_count: 1 })
+  const hi = badge!.entries.find((e) => e.category === 'High')!
+  assert.equal(hi.count, 4)
+  assert.equal(hi.ratio, 4 / 18)
+  const unk = badge!.entries.find((e) => e.category === 'Unknown')!
+  assert.equal(unk.count, 1)
+  assert.equal(unk.ratio, 1 / 18)
+
+  // denominator=0 / total=0 -> ratio null（不 0%）
+  const zero = parseMomentumChange({ enhancing_count: 0, weakening_count: 0, flat_count: 0, denominator: 0 })
+  assert.equal(zero!.categories[0].ratio, null)
+  const emptyBadge = parseVolumeBadge({ high_count: 0, low_count: 0, normal_count: 0, unknown_count: 0 })
+  assert.equal(emptyBadge!.entries[0].ratio, null)
+
+  // 组件不得自行做业务除法派生
+  assert.equal(/\/\s*denom/.test(panelSrc), false, '组件不得 n / denom')
+  assert.equal(/\/\s*denominator/.test(panelSrc), false, '组件不得 n / denominator')
+  assert.equal(/\/\s*total/.test(panelSrc), false, '组件不得 count / total')
+  // 组件消费 VM 提供的 ratio
+  assert.ok(/vm\.change\?\.categories/.test(panelSrc), 'change 消费 VM categories')
+  assert.ok(/vm\.volumeBadge\s*\?\s*\n?\s*<div[\s\S]{0,80}volumeBadge\.entries|volumeBadge\.entries\.map/.test(panelSrc), 'badge 消费 VM entries')
+  assert.ok(/e\.ratio/.test(panelSrc) && /c\.ratio/.test(panelSrc), '消费 VM ratio')
+})
+
+// P2-B: 不把开发状态写给产品用户
+test('R3E-SLICE3-CORR P2-B 页面不含开发说明（deferred / 未接线 / architecture）', () => {
+  assert.equal(/Historical Position/.test(panelSrc), false, '不得展示 Historical Position 开发说明')
+  assert.equal(/deferred/.test(panelSrc), false, '不得展示 deferred 开发术语')
+  assert.equal(/Dynamics architecture/.test(panelSrc), false, '不得展示架构说明')
+  assert.equal(/未接线/.test(panelSrc), false, '不得展示 API 未接线说明')
 })
