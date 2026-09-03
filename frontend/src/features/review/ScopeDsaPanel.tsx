@@ -13,6 +13,7 @@ import {
   buildDsaVM,
   splitSeriesByGap,
 } from './scopeDsaContract'
+import { displayMember, type MemberDirectory } from './reviewFormat'
 import styles from './review.module.scss'
 
 type Json = Record<string, unknown>
@@ -93,9 +94,10 @@ export interface ScopeDsaPanelProps {
   observation: Json | null
   history: ReviewScopeHistoryDTO | null
   crossSection: ReviewCrossSectionDTO | null
+  memberDirectory?: MemberDirectory | null
 }
 
-export default function ScopeDsaPanel({ observation, history, crossSection }: ScopeDsaPanelProps) {
+export default function ScopeDsaPanel({ observation, history, crossSection, memberDirectory }: ScopeDsaPanelProps) {
   const vm = buildDsaVM(parseDsaObservation(observation))
   const csRegime = crossSection?.fields.find((f) => f.field_key === 'trend.continuous.regime_strength')
 
@@ -165,7 +167,7 @@ export default function ScopeDsaPanel({ observation, history, crossSection }: Sc
           <div className={styles.changedList}>
             {vm.changedMembers.map((m) => (
               <div key={m.memberId} className={styles.kvRow}>
-                <span className={styles.kvKey}>{m.memberId}</span>
+                <span className={styles.kvKey}>{displayMember(m.memberId, memberDirectory)}</span>
                 <span className={styles.kvVal}>
                   {m.previousState} → {m.currentState}
                 </span>

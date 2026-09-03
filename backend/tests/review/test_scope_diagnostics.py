@@ -10,17 +10,22 @@ date window) is a targeted-PG claim and is NOT RUN here (see task report).
 """
 from __future__ import annotations
 
+import types
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
 
+from app.domain.first_pyramid_semantics import Direction
 from app.domain.review.analysis.observation_stats import (
     empirical_percentile,
     safe_mean,
     safe_std,
     zscore,
 )
-from app.domain.review.scope_observation import _duration_buckets
+from app.domain.review.scope_observation import (
+    _build_changed_members,
+    _duration_buckets,
+)
 from app.services.review_scope_diagnostics_service import (
     _compute_field_rolling,
     _select_published_facts,
@@ -134,23 +139,58 @@ def test_build_canonical_by_date_broken_pointer_excluded_upstream():
 
 
 def test_duration_buckets_histogram_edges():
-    """[P1-4] dsa_dir_bars 直方图必须落在已确认的 duration bucket 边界上，纯直方图无新算法。"""
+    """[P1-4] dsa_dir_bars 直方图必须落在已确认的 7 档 duration bucket 合同上，纯直方图无新算法。"""
     values = [1, 2, 3, 4, 6, 7, 12, 13, 24, 30, None, float("nan")]
     buckets = _duration_buckets(values)
-    # 边界 (3,6,12,24) -> 5 个桶
     labels = [b["label"] for b in buckets]
-    assert labels == ["≤3", "4-6", "7-12", "13-24", ">24"], labels
-    total = sum(b["count"] for b in buckets)
+    # 已确认合同：≤2 / 3-4 / 5-9 / 10-19 / 20-29 / 30-59 / ≥60
+    assert labels == ["≤2", "3-4", "5-9", "10-19", "20-29", "30-59", "≥60"], labels
+    counts = [b["count"] for b in buckets]
+    total = sum(counts)
     # None / NaN 不计入有限样本
     assert total == 10, total
-    assert buckets[0]["count"] == 3  # 1,2,3
-    assert buckets[1]["count"] == 2  # 4,6
-    assert buckets[2]["count"] == 2  # 7,12
-    assert buckets[3]["count"] == 2  # 13,24
-    assert buckets[4]["count"] == 1  # 30
+    assert counts[0] == 2  # ≤2: 1,2
+    assert counts[1] == 2  # 3-4: 3,4
+    assert counts[2] == 2  # 5-9: 6,7
+    assert counts[3] == 2  # 10-19: 12,13
+    assert counts[4] == 1  # 20-29: 24
+    assert counts[5] == 1  # 30-59: 30
+    assert counts[6] == 0  # ≥60: 无
     # 空输入 -> 全 0 桶，不报错
     empty = _duration_buckets([])
     assert sum(b["count"] for b in empty) == 0
+
+
+def test_changed_members_deterministic_by_member_id():
+    """[DSA] canonical changed_members 必须按 member_id 稳定排序，与 supplier/DB 返回顺序无关。"""
+    labels = {
+        Direction.UP: "Up",
+        Direction.DOWN: "Down",
+        Direction.SIDEWAYS: "Neutral",
+    }
+
+    def mk(mid, cur, prev):
+        return types.SimpleNamespace(member_id=mid, trend=cur, t1_trend=prev)
+
+    t1_set = {"A", "B", "C"}
+    # 两组相同业务成员，不同输入顺序
+    order1 = [
+        mk("A", Direction.UP, Direction.SIDEWAYS),
+        mk("B", Direction.DOWN, Direction.UP),
+        mk("C", Direction.UP, Direction.DOWN),
+    ]
+    order2 = [
+        mk("C", Direction.UP, Direction.DOWN),
+        mk("A", Direction.UP, Direction.SIDEWAYS),
+        mk("B", Direction.DOWN, Direction.UP),
+    ]
+    out1 = _build_changed_members(order1, t1_set, labels)
+    out2 = _build_changed_members(order2, t1_set, labels)
+    # 输入顺序不同，但 canonical payload 必须完全一致（按 member_id 排序）
+    assert out1 == out2
+    assert [m["member_id"] for m in out1] == ["A", "B", "C"]
+    # 仅状态变化的成员进入；stable 成员排除
+    assert all(m["current_state"] != m["previous_state"] for m in out1)
 
 
 # ---------------------------------------------------------------------------

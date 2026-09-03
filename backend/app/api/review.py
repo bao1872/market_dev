@@ -616,24 +616,31 @@ async def get_review_scope_composition(
     # [R3A-BE2] snapshot may be None (composition missing) -> keep empty directory,
     # do NOT touch snapshot.composition_payload. composition stays null, endpoint 200.
     composition_ok = snapshot is not None and isinstance(snapshot.composition_payload, dict)
+    # [DSA correction] memberDirectory ref IDs =
+    #   Composition 引用成员  UNION  observation.trend.transition.changed_members 成员。
+    # 仍是 ONE bulk Instrument query（去重后一次性查）。composition=null 时只要
+    # Observation 有 changed-member UUID，目录也必须能生成（不依赖 Composition）。
+    ref_ids: list[str] = []
     if composition_ok:
-        ref_ids = [
+        ref_ids.extend(
             mid for mid in collect_composition_member_ids(snapshot.composition_payload)
             if is_uuid(mid)
-        ]
-        if ref_ids:
-            id_uuids = [uuid.UUID(mid) for mid in ref_ids]
-            inst_rows = (
-                await db.execute(
-                    select(Instrument.id, Instrument.symbol, Instrument.name).where(
-                        Instrument.id.in_(id_uuids)
-                    )
+        )
+    ref_ids.extend(_collect_changed_member_ids(observation))
+    ref_ids = list(dict.fromkeys(ref_ids))  # 稳定去重
+    if ref_ids:
+        id_uuids = [uuid.UUID(mid) for mid in ref_ids]
+        inst_rows = (
+            await db.execute(
+                select(Instrument.id, Instrument.symbol, Instrument.name).where(
+                    Instrument.id.in_(id_uuids)
                 )
-            ).all()
-            member_directory = {
-                str(inst_id): {"symbol": symbol, "name": name}
-                for inst_id, symbol, name in inst_rows
-            }
+            )
+        ).all()
+        member_directory = {
+            str(inst_id): {"symbol": symbol, "name": name}
+            for inst_id, symbol, name in inst_rows
+        }
 
     # [R3 History] query-time 20D rolling diagnostics from published-run safe series.
     history = await get_scope_diagnostics(
@@ -656,6 +663,31 @@ async def get_review_scope_composition(
         history=history,
         crossSection=cross_section,
     )
+
+
+def _collect_changed_member_ids(observation: Any) -> list[str]:
+    """从 canonical Observation 收集 T-1→T 变化成员 ID（用于 memberDirectory 批量解析）。
+
+    仅取 observation.trend.transition.changed_members[].member_id（已为 UUID 字符串）。
+    非 dict / 缺字段 / 非 UUID 一律跳过，绝不抛错。
+    """
+    ids: list[str] = []
+    try:
+        changed = (
+            observation.get("trend", {})
+            .get("transition", {})
+            .get("changed_members", [])
+        )
+    except AttributeError:
+        return ids
+    if not isinstance(changed, list):
+        return ids
+    for m in changed:
+        if isinstance(m, dict):
+            mid = m.get("member_id")
+            if isinstance(mid, str) and is_uuid(mid):
+                ids.append(mid)
+    return ids
 
 
 # =============================================================================

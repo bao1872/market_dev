@@ -160,6 +160,7 @@ export default function ScopeDetailWorkspace({
             observation={detail.data?.observation ?? null}
             history={detail.data?.history ?? null}
             crossSection={detail.data?.crossSection ?? null}
+            memberDirectory={detail.data?.memberDirectory}
           />
         )}
         {tab === 'smc' && <div className={styles.detailEmpty}>结构演化（SMC）研究中，即将上线</div>}

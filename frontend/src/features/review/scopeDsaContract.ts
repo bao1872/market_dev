@@ -269,10 +269,13 @@ export function buildDsaVM(facts: DsaObservationFacts): DsaVM {
   const fmtDist = (d: DsaDistributionFacts | null): string => {
     if (!d) return NULL_DISPLAY
     if (d.p50 == null) return NULL_DISPLAY
+    // 已确认 UI 合同：median(P50) + mean 突出；P25/P75 辅助；valid_count 显式。
     const parts: string[] = []
+    parts.push(`中位数 ${d.p50.toFixed(2)}`)
+    if (d.mean != null) parts.push(`均值 ${d.mean.toFixed(2)}`)
     if (d.p25 != null) parts.push(`P25 ${d.p25.toFixed(2)}`)
-    parts.push(`P50 ${d.p50.toFixed(2)}`)
     if (d.p75 != null) parts.push(`P75 ${d.p75.toFixed(2)}`)
+    if (d.validCount != null) parts.push(`n=${d.validCount}`)
     return parts.join(' · ')
   }
   const fmtBuckets = (d: DsaDistributionFacts | null): DsaBucketVM[] => {

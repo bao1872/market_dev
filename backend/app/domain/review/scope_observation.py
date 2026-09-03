@@ -769,22 +769,23 @@ def _participation_distribution(values: Sequence[float | None]) -> dict[str, Any
     }
 
 
-# 趋势持续时间（dsa_dir_bars）分布桶边界（单位：交易 bars）。这是已确认的 DSA
-# 持续时间分布桶合同：已有成员事实 dsa_dir_bars -> 当前横截面直方图，不另建算法。
-_DURATION_BUCKET_EDGES = (3, 6, 12, 24)
+# 趋势持续时间（dsa_dir_bars）分布桶边界（单位：交易 bars）—— 已确认 7 档合同：
+# ≤2 / 3-4 / 5-9 / 10-19 / 20-29 / 30-59 / ≥60
+_DURATION_BUCKET_EDGES = (2, 4, 9, 19, 29, 59)
 
 
 def _duration_buckets(values: Sequence[float | None]) -> list[dict[str, Any]]:
-    """Bar-count histogram of ``dsa_dir_bars`` over the adopted duration buckets.
+    """Bar-count histogram of ``dsa_dir_bars`` over the confirmed 7 duration buckets.
 
     Pure histogram of an existing member fact; no new metric, no scoring.
+    Bucket edges are the confirmed product contract (NOT inventable).
     """
     finite = [float(v) for v in values if v is not None and math.isfinite(v)]
     edges = _DURATION_BUCKET_EDGES
     labels = (
         [f"≤{edges[0]}"]
         + [f"{edges[i - 1] + 1}-{edges[i]}" for i in range(1, len(edges))]
-        + [f">{edges[-1]}"]
+        + [f"≥{edges[-1] + 1}"]
     )
     counts = [0] * (len(edges) + 1)
     for v in finite:
@@ -796,6 +797,38 @@ def _duration_buckets(values: Sequence[float | None]) -> list[dict[str, Any]]:
         {"label": label, "count": count, "ratio": _safe_ratio(count, len(finite))}
         for label, count in zip(labels, counts, strict=True)
     ]
+
+
+def _build_changed_members(
+    member_list: Sequence[Any],
+    t1_set: set[Any],
+    direction_labels: dict[Any, str],
+) -> list[dict[str, str]]:
+    """[DSA] T-1→T 状态变化成员列表（deterministic by member_id）。
+
+    member_id 由同一 transition owner 直接产出（复用 ``trend_transition`` 的
+    PIT(T)∩PIT(T-1)∩valid 口径），不另建算法。仅列真正发生状态迁移的成员，
+    stable members 不重复列。
+
+    按 ``member_id`` 稳定排序：首个直接进 canonical persisted payload 的成员数组，
+    必须不随 supplier/DB 返回顺序漂移（order-insensitive 结果也可能因顺序变化
+    变成不同 payload，违反 determinism）。
+    """
+    return sorted(
+        [
+            {
+                "member_id": m.member_id,
+                "previous_state": direction_labels[m.t1_trend],
+                "current_state": direction_labels[m.trend],
+            }
+            for m in member_list
+            if m.member_id in t1_set
+            and m.trend is not None
+            and m.t1_trend is not None
+            and m.trend != m.t1_trend
+        ],
+        key=lambda x: x["member_id"],
+    )
 
 
 # ----------------------------------------------------------------------
@@ -1550,18 +1583,8 @@ def compute_scope_observation(
     # [DSA correction] T-1 -> T 变化成员证据：仅列真的发生状态迁移的成员，
     # stable members 不重复列。member_id 由同一 transition owner 直接产出
     # （复用 trend_transition 的 PIT(T) ∩ PIT(T-1) ∩ valid 口径），不另建算法。
-    trend_changed_members = [
-        {
-            "member_id": m.member_id,
-            "previous_state": direction_labels[m.t1_trend],
-            "current_state": direction_labels[m.trend],
-        }
-        for m in member_list
-        if m.member_id in t1_set
-        and m.trend is not None
-        and m.t1_trend is not None
-        and m.trend != m.t1_trend
-    ]
+    # 输出按 member_id 稳定排序（canonical persisted payload 不随 supplier 顺序漂移）。
+    trend_changed_members = _build_changed_members(member_list, t1_set, direction_labels)
     squeeze_labels = {
         SqueezeState.SQUEEZE: "Squeeze",
         SqueezeState.RELEASED: "Squeeze_Release",
