@@ -559,6 +559,69 @@ save_state() {
     fi
 }
 
+# ---------------------------------------------------------------------------
+# frontend_package_environment_changed — 语义化判定 frontend/package.json 是否发生
+# 「运行环境相关」字段变化（需要 build frontend 镜像 / npm ci）。
+#
+# 背景（DEPLOY-INFRA FIX）：classify_changes 原先对 frontend/package.json 任意 diff
+# 都置 FRONTEND_ENVIRONMENT_CHANGED=true，导致 scripts/version/name 等非环境变化
+# 误触发整前端镜像重建。本函数把 package.json 拆分为 ENVIRONMENT-RELEVANT 与
+# NON-ENV/SOURCE-TOOLING 两类：
+#   ENVIRONMENT-RELEVANT: dependencies / devDependencies / optionalDependencies /
+#                          peerDependencies / engines / packageManager
+#   NON-ENV:              scripts / name / version / private / 纯 test 命令注册
+# 仅 ENVIRONMENT-RELEVANT 字段变化才返回 0（环境变化）。
+#
+# 退出码（与 shell 布尔约定一致，便于 if 使用）：
+#   0 = 环境变化（需要 rebuild）
+#   1 = 环境未变化（source-only / dist-only 即可）
+# Fail closed：任一 commit 的 package.json 无法读取或解析 → 退出码 0（视为环境变化）。
+#
+# 不依赖网络、不依赖服务器已有 node_modules、不复制 npm dependency resolution。
+frontend_package_environment_changed() {
+    local prev_sha="$1" targ_sha="$2"
+    local rc=0
+    python3 - "${prev_sha}" "${targ_sha}" <<'PYEOF' >/dev/null 2>&1 || rc=$?
+import json, subprocess, sys
+
+PREV, TARG = sys.argv[1], sys.argv[2]
+# 仅比较 environment-relevant 字段；其余字段（scripts/name/version/private 等）
+# 视为 non-env，变化不触发镜像重建。
+ENV_FIELDS = ["dependencies", "devDependencies", "optionalDependencies",
+              "peerDependencies", "engines", "packageManager"]
+
+def load(sha):
+    try:
+        out = subprocess.check_output(
+            ["git", "show", "%s:frontend/package.json" % sha],
+            stderr=subprocess.DEVNULL)
+    except Exception:
+        return None
+    try:
+        return json.loads(out.decode("utf-8"))
+    except Exception:
+        return None
+
+prev = load(PREV)
+targ = load(TARG)
+# fail closed：任一不可读/不可解析 → 环境变化
+if prev is None or targ is None:
+    sys.exit(0)
+prev_env = {k: prev.get(k) for k in ENV_FIELDS}
+targ_env = {k: targ.get(k) for k in ENV_FIELDS}
+if prev_env != targ_env:
+    sys.exit(0)   # environment-relevant 字段变化
+sys.exit(1)       # 仅 non-env 字段变化（或完全无 env 字段且一致）
+PYEOF
+    if [[ "${rc}" -eq 0 ]]; then
+        return 0          # python 判定环境变化
+    fi
+    if [[ "${rc}" -eq 1 ]]; then
+        return 1          # python 判定环境未变化
+    fi
+    return 0              # fail closed：python 缺失/异常 → 视为环境变化
+}
+
 # 变更分类：使用「上一部署 SHA → 目标 SHA」的差异，禁止使用 HEAD~1
 # （一次部署可能跨多个 commit，HEAD~1 会漏判）。
 classify_changes() {
@@ -602,8 +665,9 @@ classify_changes() {
         fi
     fi
 
-    # frontend 运行代码（需要 build dist）
-    if echo "${changed_files}" | grep -qE '^frontend/(src/|public/|index\.html|vite\.config|tsconfig)'; then
+    # frontend 运行代码（需要 build dist）—— package.json 任意变化都视为运行代码目标变化
+    # （scripts/tooling/source tree target 已改变）；是否触发镜像重建由下方语义 classifier 决定。
+    if echo "${changed_files}" | grep -qE '^frontend/(src/|public/|index\.html|vite\.config|tsconfig|package\.json)'; then
         FRONTEND_RUNTIME_CHANGED=true
     fi
 
@@ -617,9 +681,22 @@ classify_changes() {
         BACKEND_ENVIRONMENT_CHANGED=true
     fi
 
-    # frontend 运行环境（依赖 / Dockerfile / Nginx / entrypoint → 需要 build frontend 镜像）
-    if echo "${changed_files}" | grep -qE '^frontend/(Dockerfile|package\.json|package-lock\.json|nginx\.conf|docker-entrypoint\.sh|logrotate-nginx)'; then
+    # frontend 运行环境（依赖 / Dockerfile / Nginx / entrypoint → 需要 build frontend 镜像）。
+    # package.json 不在此处直接置位：仅当 environment-relevant 字段
+    # （dependencies / devDependencies / optionalDependencies / peerDependencies /
+    #  engines / packageManager）变化时，才经 frontend_package_environment_changed 语义判定为
+    #  运行环境变化，避免 scripts/version/name 等 non-env 变化误触发整镜像重建。
+    # package-lock.json 仍保守视为环境变化（依赖解析可能变化）。
+    if echo "${changed_files}" | grep -qE '^frontend/(Dockerfile|package-lock\.json|nginx\.conf|docker-entrypoint\.sh|logrotate-nginx)'; then
         FRONTEND_ENVIRONMENT_CHANGED=true
+    fi
+    if echo "${changed_files}" | grep -qE '^frontend/package\.json'; then
+        if frontend_package_environment_changed "${PREVIOUS_SHA}" "${TARGET_SHA}"; then
+            FRONTEND_ENVIRONMENT_CHANGED=true
+            log "  frontend package.json environment-relevant 字段变化 → FRONTEND_ENVIRONMENT_CHANGED=true"
+        else
+            log "  frontend package.json 仅 non-env 字段变化（scripts/version/name 等）→ 不触发镜像重建"
+        fi
     fi
 
     # capture 运行环境（浏览器环境 → 需要 build capture 镜像）
