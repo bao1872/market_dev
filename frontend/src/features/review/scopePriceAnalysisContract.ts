@@ -12,7 +12,6 @@ import {
   NULL_DISPLAY,
   formatNumberNullable,
   formatPercentNullable,
-  formatRawDimensionlessNullable,
   formatZScoreNullable,
 } from './reviewFormat'
 import type {
@@ -82,9 +81,14 @@ export function formatRatioPct(value: number | null | undefined, digits = 1): st
   return formatPercentNullable(value, digits)
 }
 
-/** return_dispersion：canonical unit = None（无量纲原始标量），绝不 ×100 */
+/**
+ * return_dispersion：canonical producer 为 ``_stdev(member return_1d)``，
+ * 与 EW / AW 同处 **decimal-return 空间** → 收益率百分比（0.03 → "3.00%"）。
+ *
+ * 锁：0.03 → "3.00%"；不得 "0.03"（无量纲原值），不得 "300.00%"（多乘一次 100）。
+ */
 export function formatReturnDispersion(value: number | null | undefined): string {
-  return formatRawDimensionlessNullable(value)
+  return formatDecimalReturn(value)
 }
 
 // ---------------------------------------------------------------------------

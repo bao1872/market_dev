@@ -89,4 +89,4 @@ def empirical_percentile(
     return (less + 0.5 * equal) / n * 100.0
 
 
-__all__ = ["safe_mean", "safe_std", "zscore", "empirical_percentile"]
+__all__ = ["safe_mean", "safe_std", "safe_variance", "zscore", "empirical_percentile"]

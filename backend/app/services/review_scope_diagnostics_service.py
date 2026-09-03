@@ -96,8 +96,11 @@ _HISTORY_FIELD_SPECS: tuple[tuple[str, tuple[str, ...], Any, str, str | None], .
      "下跌比率", "ratio"),
     ("unchanged_ratio", ("price", "breadth", "unchanged_ratio"), _scalar_direct,
      "走平比率", "ratio"),
+    # [SLICE 4 correction] return_dispersion = std(member return_1d)，与 EW/AW 同处
+    # decimal-return 空间 → unit 为 pct（0.03 展示为 3.00%）。仅修 unit metadata，
+    # 不改任何 dispersion 计算公式。
     ("return_dispersion", ("price", "return_dispersion"), _scalar_direct,
-     "收益离散度", None),
+     "收益离散度", "pct"),
     ("price_hhi", ("price", "concentration", "normalized_hhi"), _scalar_direct,
      "价格集中度 HHI", None),
     ("bb_position", ("momentum", "bb_position"), _scalar_central, "BB 位置", "pct"),

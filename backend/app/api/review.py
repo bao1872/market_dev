@@ -677,16 +677,22 @@ def _collect_price_history_leader_ids(history: Any) -> list[str]:
     绝不抛错；history 为 None（非 activated scope_type）时返回空。
     """
     ids: list[str] = []
-    price = getattr(history, "price", None)
+    # get_scope_diagnostics() 明确返回普通 dict（不是 pydantic 模型）。
+    # getattr(dict, "price", None) 恒为 None —— 必须按真实 dict shape 读取，
+    # 否则历史 leader id 一个都收不到、前端只能 fallback 到裸 ID。
+    if isinstance(history, dict):
+        price = history.get("price")
+    else:  # 防御：万一上游改为对象，仍保持可用（不抛错）
+        price = getattr(history, "price", None)
     if price is None:
         return ids
-    leadership = getattr(price, "leadership", None)
+    leadership = price.get("leadership") if isinstance(price, dict) else getattr(price, "leadership", None)
     if not isinstance(leadership, list):
         return ids
     for item in leadership:
-        if item is None:
+        if not isinstance(item, dict):
             continue
-        raw_ids = getattr(item, "current_leader_ids", None)
+        raw_ids = item.get("current_leader_ids")
         if not isinstance(raw_ids, list):
             continue
         for mid in raw_ids:

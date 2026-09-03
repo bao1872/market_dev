@@ -196,10 +196,11 @@ test('PRICE 12: leadership status/reason/unavailable 保留（不吞掉）', () 
 })
 
 // 13. leader 名称经 memberDirectory（ONE bulk query，不逐个请求）
-test('PRICE 13: leader 展示经 memberDirectory（不逐个成员请求）', () => {
+test('PRICE 13: leader 展示经 memberDirectory / displayMember（不逐个成员请求）', () => {
   assert.ok(panelSrc.includes('memberDirectory'), '必须消费 memberDirectory')
   assert.equal(/fetch\(|useQuery|axios/.test(panelSrc), false, '不得在组件内发成员请求')
-  assert.ok(/memberDirectory\?\.\[id\]|memberDirectory\?\.\w+\[/.test(panelSrc), '按 id 查目录')
+  // 成员展示唯一 owner = displayMember（名称 · 代码；目录缺失才 fallback 裸 id）
+  assert.ok(/displayMember\(/.test(panelSrc), '必须复用 displayMember 展示 owner')
 })
 
 // 14. 组件只消费 typed owner
@@ -260,6 +261,62 @@ test('PRICE 组合：parsePriceAnalysis 消费 persisted facts', () => {
   assert.equal(vm.leadership.points[2].reason, 'NO_PEERS')
   // disperson 不 x100
   assert.equal(vm.dispersion.values[0], 0.03)
+})
+
+// ===========================================================================
+// PRICE FINAL CORRECTION — 审计 3 个 P1 + 3 个 P2
+// ===========================================================================
+
+// P1-2: return_dispersion 与 EW/AW 同处 decimal-return 空间
+test('PRICE-CORR P1-2: return_dispersion 0.03 → 3.00%（不是 0.03 / 300.00%）', () => {
+  assert.equal(formatReturnDispersion(0.03), '3.00%')
+  assert.notEqual(formatReturnDispersion(0.03), '0.03', '不得按无量纲原值展示')
+  assert.notEqual(formatReturnDispersion(0.03), '300.00%', '不得多乘一次 100')
+  assert.equal(formatReturnDispersion(null), '—')
+  // 与 EW 同一 formatter 口径（同 decimal-return 空间）
+  assert.equal(formatReturnDispersion(0.03), formatDecimalReturn(0.03))
+})
+
+// P1-3: 复用共享三图 renderer 后必须保留 TradingView attribution
+test('PRICE-CORR P1-3: 复用 DynamicsCharts 时保留真实 TradingView attribution', () => {
+  const engineSrc = readFileSync(join(__dirname, '..', 'ScopeDynamicsCharts.tsx'), 'utf8')
+  // 共享 renderer 关闭了 logo
+  assert.ok(/attributionLogo:\s*false/.test(engineSrc), '共享 renderer 关闭了 TV logo')
+  // 因此每个复用者都必须保留真实 <a> 归属
+  assert.ok(panelSrc.includes("from './ScopeDynamicsCharts'"), 'Price 页复用了共享 renderer')
+  assert.ok(
+    /href="https:\/\/www\.tradingview\.com\/"/.test(panelSrc),
+    'Price 页缺少 TradingView 真实链接（P1-F contract）',
+  )
+  assert.ok(
+    /<a[\s\S]*TradingView Lightweight Charts[\s\S]*<\/a>/.test(panelSrc),
+    'Price 页 attribution 不是真实 <a> 元素',
+  )
+  assert.ok(/chartAttribution/.test(panelSrc), 'Price 页必须保留归属容器')
+})
+
+// P2-A: Breadth 不得 null→0 再重新归一化
+test('PRICE-CORR P2-A: Breadth null 保留 gap（不 null→0、不重新归一化）', () => {
+  // 三项本身就是 canonical ratio，直接使用
+  assert.equal(formatRatioPct(0.5), '50.0%')
+  // renderer 契约：缺少任一项 → 该列渲染为 gap 容器，不是归一化后的 0 高柱
+  assert.ok(/data-breadth-gap/.test(panelSrc), '缺失日期必须渲染为 gap 列')
+  // 不得存在「先 fmtPct(null)->0 再按 total 归一化」的旧实现
+  assert.equal(/fmtPct/.test(panelSrc), false, '不得再用 null→0 的 fmtPct')
+  assert.equal(/1\s*\/\s*total|total\s*>\s*0\s*\?\s*1/.test(panelSrc), false, '不得重新归一化三项')
+  // 仍保留 clamp01（仅用于已确认非 null 的 ratio）
+  assert.ok(/clamp01/.test(panelSrc), '保留 [0,1] 收敛（不用于 null）')
+})
+
+// P2-B: A 股 positive 红 / negative 绿
+test('PRICE-CORR P2-B: A 股配色（Advance 红 / Decline 绿 / Unchanged neutral）', () => {
+  const adv = /ADV_COLOR\s*=\s*'#dc2626'/.test(panelSrc)
+  const dec = /DEC_COLOR\s*=\s*'#16a34a'/.test(panelSrc)
+  assert.ok(adv, 'Advance 必须为红（A 股 positive red）')
+  assert.ok(dec, 'Decline 必须为绿（A 股 negative green）')
+  // 不得仍是 Advance 绿 / Decline 红
+  assert.equal(/ADV_COLOR\s*=\s*'#16a34a'/.test(panelSrc), false, '不得仍是 Advance 绿')
+  assert.equal(/DEC_COLOR\s*=\s*'#dc2626'/.test(panelSrc), false, '不得仍是 Decline 红')
 })
 
 test('PRICE: parsePriceCurrent 缺失保持 null（不 0）', () => {

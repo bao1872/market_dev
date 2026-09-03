@@ -1,9 +1,10 @@
 """Modified-scope pure/unit tests for SLICE 4 / Price backend contracts.
 
-No DB, no network. Two narrow owners are locked:
+No DB, no network. Three narrow owners are locked:
 
 1. ``_compute_field_rolling`` variance20 (SLICE 4 §三)
 2. ``_select_published_compositions`` + ``_build_price_projection`` (SLICE 4 §七/§八)
+3. ``_collect_price_history_leader_ids`` dict-shape 读取（PRICE FINAL CORRECTION P1-1）
 
 Locks (from the Slice 4 spec §十三):
  1. variance baseline excludes T
@@ -23,6 +24,7 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
+from app.api.review import _collect_price_history_leader_ids
 from app.services.review_scope_diagnostics_service import (
     _build_price_projection,
     _compute_field_rolling,
@@ -191,3 +193,76 @@ def test_ph10_leadership_verbatim_including_empty_vs_null_ids():
     assert got2["reason"] is None
     assert got2["current_leader_ids"] is None
     assert got2["jaccard_stability"] is None
+
+
+# ---------------------------------------------------------------------------
+# P1-1: _collect_price_history_leader_ids（真实 dict shape）
+# ---------------------------------------------------------------------------
+
+UUID_A = "11111111-1111-4111-8111-111111111111"
+UUID_B = "22222222-2222-4222-8222-222222222222"
+
+
+def test_pm1_collects_leader_ids_from_dict_shaped_history():
+    """回归锁：get_scope_diagnostics() 返回普通 dict。
+
+    早期实现用 getattr(dict, "price", None) → 恒为 None，导致历史 leader id
+    一个都收不到（前端只能 fallback 裸 UUID）。此测试必须在旧实现下失败。
+    """
+    history = {
+        "dates": ["2024-01-02"],
+        "fields": {},
+        "smc": None,
+        "momentumVolume": None,
+        "price": {
+            "dates": ["2024-01-02"],
+            "capital_tilt": [0.004],
+            "leadership": [
+                {
+                    "status": "ready",
+                    "reason": None,
+                    "jaccard_stability": 0.4,
+                    "migration": 0.6,
+                    "current_leader_count": 2,
+                    "current_leader_ids": [UUID_A, UUID_B],
+                }
+            ],
+        },
+    }
+    assert _collect_price_history_leader_ids(history) == [UUID_A, UUID_B]
+
+
+def test_pm2_collect_is_fail_soft_and_order_stable():
+    # 非 dict item / 缺字段 / 非 UUID 一律跳过，绝不抛错
+    messy = {
+        "price": {
+            "leadership": [
+                {"current_leader_ids": [UUID_A, "not-a-uuid"]},
+                None,
+                "invalid-item",
+                {},
+                {"current_leader_ids": None},
+                {"current_leader_ids": [UUID_B]},
+            ]
+        }
+    }
+    assert _collect_price_history_leader_ids(messy) == [UUID_A, UUID_B]
+
+    # history=None / price=None / leadership 缺失 -> 空列表
+    assert _collect_price_history_leader_ids(None) == []
+    assert _collect_price_history_leader_ids({}) == []
+    assert _collect_price_history_leader_ids({"price": None}) == []
+    assert _collect_price_history_leader_ids({"price": {}}) == []
+    assert _collect_price_history_leader_ids({"price": {"leadership": None}}) == []
+
+
+def test_pm3_empty_leader_set_yields_no_ids_but_not_error():
+    history = {
+        "price": {
+            "leadership": [
+                {"status": "unavailable", "current_leader_ids": []},
+            ]
+        }
+    }
+    # [] 是真实事实，但不含任何 id 可收集
+    assert _collect_price_history_leader_ids(history) == []

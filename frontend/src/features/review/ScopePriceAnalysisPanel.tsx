@@ -12,7 +12,7 @@ import {
   parsePriceAnalysis,
   type PriceAnalysisVM,
 } from './scopePriceAnalysisContract'
-import { NULL_DISPLAY } from './reviewFormat'
+import { NULL_DISPLAY, displayMember, type MemberDirectory } from './reviewFormat'
 import { splitSeriesByGap } from './scopeDsaContract'
 import type { ScopeDynamicsParsed } from './scopeDetailContract'
 import type { ScopeInternalParsed } from './scopeDetailContract'
@@ -35,7 +35,7 @@ interface ScopePriceAnalysisPanelProps {
   dynamics: ScopeDynamicsParsed | null
   internal: ScopeInternalParsed | null
   crossSection: ReviewCrossSectionDTO | null
-  memberDirectory: Record<string, { symbol: string; name: string }> | null
+  memberDirectory: MemberDirectory | null
 }
 
 const EW_COLOR = '#2563eb'
@@ -44,9 +44,10 @@ const BAND_COLOR = 'rgba(37,99,235,0.14)'
 const AW_COLOR = '#7c3aed'
 const TILT_COLOR = '#0891b2'
 const DISP_COLOR = '#d97706'
-const ADV_COLOR = '#16a34a'
-const DEC_COLOR = '#dc2626'
-const UNC_COLOR = '#9ca3af'
+// [P2-B] A 股展示合同：positive 红 / negative 绿；走平 neutral。
+const ADV_COLOR = '#dc2626' // 上涨 → 红
+const DEC_COLOR = '#16a34a' // 下跌 → 绿
+const UNC_COLOR = '#9ca3af' // 走平 → neutral
 const JACCARD_COLOR = '#2563eb'
 const MIGRATION_COLOR = '#db2777'
 
@@ -65,8 +66,9 @@ function StatRow({ label, value }: { label: string; value: string }) {
 
 const EMPTY_DATES: string[] = []
 
-function fmtPct(v: number | null | undefined): number {
-  if (v == null || !Number.isFinite(v)) return 0
+/** 仅用于把已确认非 null 的 canonical ratio 收敛到 [0,1] 画高；绝不把 null 当 0。 */
+function clamp01(v: number): number {
+  if (!Number.isFinite(v)) return 0
   return Math.max(0, Math.min(1, v))
 }
 
@@ -196,7 +198,13 @@ function BandChart({
   )
 }
 
-/** 100% composition timeline（Breadth：Advance / Decline / Unchanged） */
+/**
+ * 100% composition timeline（Breadth：Advance / Decline / Unchanged）。
+ *
+ * [P2-A] 三项本身就是 canonical ratio，直接使用、不再归一化。
+ * 任一项 unavailable → 该日期列显示 gap（不插值、不把 null 当 0、
+ * 不得「null→0 后重新归一化剩下两项」）。
+ */
 function CompositionTimeline({
   points,
   height = 90,
@@ -207,13 +215,22 @@ function CompositionTimeline({
   return (
     <div style={{ display: 'flex', gap: 1, height, alignItems: 'stretch', background: '#f1f5f9' }}>
       {points.map((p, i) => {
-        const total = fmtPct(p.advance) + fmtPct(p.decline) + fmtPct(p.unchanged)
-        const norm = total > 0 ? 1 / total : 0
+        const ready = p.advance != null && p.decline != null && p.unchanged != null
+        if (!ready) {
+          return (
+            <div
+              key={i}
+              style={{ flex: 1, minWidth: 0 }}
+              title="该日期 breadth 不可用（保留 gap，不插值）"
+              data-breadth-gap="true"
+            />
+          )
+        }
         return (
           <div key={i} style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column-reverse' }}>
-            <div style={{ height: `${fmtPct(p.advance) * norm * 100}%`, background: ADV_COLOR }} />
-            <div style={{ height: `${fmtPct(p.unchanged) * norm * 100}%`, background: UNC_COLOR }} />
-            <div style={{ height: `${fmtPct(p.decline) * norm * 100}%`, background: DEC_COLOR }} />
+            <div style={{ height: `${clamp01(p.advance as number) * 100}%`, background: ADV_COLOR }} />
+            <div style={{ height: `${clamp01(p.unchanged as number) * 100}%`, background: UNC_COLOR }} />
+            <div style={{ height: `${clamp01(p.decline as number) * 100}%`, background: DEC_COLOR }} />
           </div>
         )
       })}
@@ -309,7 +326,22 @@ export default function ScopePriceAnalysisPanel({
       {/* 第二段：Historical Position（仅三图，不展示阶段标签） */}
       <SectionTitle>Historical Position</SectionTitle>
       {dynamics ? (
-        <DynamicsCharts configs={dynamicsConfigs} />
+        <>
+          <DynamicsCharts configs={dynamicsConfigs} />
+          {/* P1-F / P1-3：共享 renderer 关闭了 attributionLogo（false），
+              因此每个复用它的页面都必须保留真实 TradingView 许可归属 <a>。
+              与 ScopeDynamicsPanel 同一合同，不得省略。 */}
+          <div className={styles.chartAttribution}>
+            <a
+              href="https://www.tradingview.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className={styles.chartAttributionLink}
+            >
+              Charts by TradingView Lightweight Charts
+            </a>
+          </div>
+        </>
       ) : (
         <div className={styles.mvNeutral}>本期暂无等权涨跌动态数据</div>
       )}
@@ -380,9 +412,7 @@ export default function ScopePriceAnalysisPanel({
               <>
                 <span className={styles.mvSqueezeRatio}>n={p.currentLeaderCount ?? NULL_DISPLAY}</span>
                 <span className={styles.mvSqueezeCount}>
-                  {(p.currentLeaderIds ?? [])
-                    .map((id) => memberDirectory?.[id]?.symbol ?? id)
-                    .join(', ') || '空'}
+                  {(p.currentLeaderIds ?? []).map((id) => displayMember(id, memberDirectory)).join(', ') || '空'}
                 </span>
               </>
             )}
