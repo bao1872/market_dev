@@ -330,6 +330,44 @@ class ReviewScopeListResponse(BaseModel):
     has_more: bool = Field(False, description="是否有下一页")
 
 
+class ReviewScopeHistoryFieldDTO(BaseModel):
+    """One canonical field's 20D rolling diagnostics (aligned to ``history.dates``).
+
+    ``series`` / ``mean20`` / ``std20`` / ``zscore20`` / ``percentile20`` /
+    ``baselineCount`` are all aligned to the same display-window axis (ascending).
+    Missing canonical values are ``None`` (never 0). ``zscore20`` is ``None`` when
+    the lagged baseline std == 0 or has < 2 finite samples.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    key: str = Field(..., description="curated history field key")
+    label: str = Field(..., description="展示标签")
+    unit: str | None = Field(None, description="pct / ratio / None")
+    series: list[float | None] = Field(default_factory=list, description="display-window 原始值")
+    mean20: list[float | None] = Field(default_factory=list, description="lagged baseline mean(T-20..T-1)")
+    std20: list[float | None] = Field(default_factory=list, description="lagged baseline population std")
+    zscore20: list[float | None] = Field(default_factory=list, description="(v-mean20)/std20，std==0→None")
+    percentile20: list[float | None] = Field(default_factory=list, description="自身在 trailing 窗口的经验分位 [0,100]")
+    baselineCount: list[int | None] = Field(default_factory=list, description="每个点 lagged baseline 的有限样本数")
+
+
+class ReviewScopeHistoryDTO(BaseModel):
+    """[R3 History] 20D 历史诊断 DTO（由 published-run 安全日序列 query-time 构建）。"""
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    dates: list[str] = Field(default_factory=list, description="display-window 交易日（升序）")
+    displayWindow: int = Field(20, description="展示窗口（默认 20 交易日）")
+    availability: dict[str, Any] = Field(
+        default_factory=dict,
+        description="状态：ready / empty / not_activated；含 totalSnapshots / fromDate / toDate",
+    )
+    fields: dict[str, ReviewScopeHistoryFieldDTO] = Field(
+        default_factory=dict, description="curated 历史字段 -> 滚动诊断"
+    )
+
+
 class ReviewScopeCompositionDetailResponse(BaseModel):
     """GET /api/v1/review/{trade_date}/scopes/{scope_type}/{scope_key} 完整响应。
 
@@ -385,6 +423,22 @@ class ReviewScopeCompositionDetailResponse(BaseModel):
             "composition.leadership（current/previous/entrant/exit ids）与 "
             "composition.member_attribution（member_id）引用的全部成员；前端唯一展示 owner "
             "``displayMember(id)`` 用其解析 名称+代码。Composition 缺失 / 无成员引用时为空 dict。"
+        ),
+    )
+    history: ReviewScopeHistoryDTO | None = Field(
+        None,
+        description=(
+            "[R3 History] 由 published-run 安全日序列 query-time 构建的 20D 滚动诊断 "
+            "(regime_strength / vwap_dev / returns / breadth / dispersion / hhi / "
+            "bb_position / bb_width / volume ratio+zscore / trend composition)。"
+            "非 activated scope_type 为 None；不足历史为 availability.empty。"
+        ),
+    )
+    crossSection: dict[str, Any] | None = Field(
+        None,
+        description=(
+            "[R3 Cross-sectional P0] published-run lineage 安全的横截面位置证据 "
+            "(C1 empirical percentile)。market scope 无 peer -> None。"
         ),
     )
 

@@ -32,9 +32,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.domain.review.analysis.cross_sectional import compute_cross_sectional
 from app.services.review_observation_persistence_service import (
-    get_scope_observation_fact,
+    get_scope_observation_fact_by_run,
     list_scope_observation_facts,
 )
+from app.services.review_publication_service import get_published_review_run_id
 
 
 async def get_cross_sectional(
@@ -45,13 +46,21 @@ async def get_cross_sectional(
 ) -> dict[str, Any] | None:
     """Read persisted L1 facts and compute C1 cross-sectional evidence.
 
-    Returns ``None`` when no persisted fact exists for the current grain
-    (same contract as the underlying L1 read-back).  The cross-sectional result
-    is derived purely from the canonical ``observation_payload`` of each cohort
-    member; no recomputation occurs here.
+    [R3 Cross-sectional P0] Published-run lineage: the current scope fact AND the
+    comparable peer cohort are resolved through the *published* ReviewRun for
+    ``trade_date`` (``review_run_id`` gate).  This replaces the previous
+    ``get_scope_observation_fact`` + same-day global ``list_scope_observation_facts``
+    path, which could mix a later same-day run into the published cohort
+    (run-lineage contamination).  No recomputation occurs here.
+
+    Returns ``None`` when no published run / fact exists for the current grain.
     """
-    current_fact = await get_scope_observation_fact(
-        db, trade_date, scope_type, scope_key
+    run_id = await get_published_review_run_id(db, trade_date)
+    if run_id is None:
+        return None
+
+    current_fact = await get_scope_observation_fact_by_run(
+        db, run_id, trade_date, scope_type, scope_key
     )
     if current_fact is None:
         return None
@@ -59,10 +68,11 @@ async def get_cross_sectional(
     if not isinstance(current_payload, dict):
         return None
 
-    # Assemble the comparable peer cohort: all persisted facts of the same
-    # scope_type on the same trade_date (includes the current scope itself).
+    # Comparable peer cohort: same published run + same family + same trade_date
+    # (includes the current scope itself, per C1 peer universe contract).
     cohort_facts = await list_scope_observation_facts(
         db,
+        review_run_id=run_id,
         scope_type=scope_type,
         from_date=trade_date,
         to_date=trade_date,

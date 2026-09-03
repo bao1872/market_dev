@@ -61,6 +61,7 @@ from app.services.access_control_service import (
     require_admin,
     require_capability,
 )
+from app.services.review_cross_sectional_service import get_cross_sectional
 from app.services.review_observation_persistence_service import (
     ReviewScopeSummaryRow,
     get_scope_composition_snapshot,
@@ -74,6 +75,7 @@ from app.services.review_publication_service import (
     list_formally_published_review_dates,
     list_published_review_dates,
 )
+from app.services.review_scope_diagnostics_service import get_scope_diagnostics
 
 logger = logging.getLogger("api.review")
 
@@ -633,6 +635,13 @@ async def get_review_scope_composition(
                 for inst_id, symbol, name in inst_rows
             }
 
+    # [R3 History] query-time 20D rolling diagnostics from published-run safe series.
+    history = await get_scope_diagnostics(
+        db, trade_date=td, scope_type=scope_type, scope_key=scope_key,
+    )
+    # [R3 Cross-sectional P0] published-run lineage cross-sectional position evidence.
+    cross_section = await get_cross_sectional(db, td, scope_type, scope_key)
+
     return ReviewScopeCompositionDetailResponse(
         reviewRunId=str(run.id),
         tradeDate=fact.trade_date.isoformat(),
@@ -644,6 +653,8 @@ async def get_review_scope_composition(
         observationGroups=observation_groups,
         composition=(snapshot.composition_payload if snapshot is not None else None),
         memberDirectory=member_directory,
+        history=history,
+        crossSection=cross_section,
     )
 
 
