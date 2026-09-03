@@ -108,6 +108,8 @@ def _make_core_run(td: date) -> StockFeatureSnapshotRun:
 
 
 def _make_review_run(core_id: uuid.UUID, td: date) -> MarketReviewRun:
+    # 发布门禁只消费 canonical composition readiness（空 dict = 空壳，禁止发布）。
+    readiness = dict.fromkeys((*IND_KEYS, *CON_KEYS), "ready")
     return MarketReviewRun(
         trade_date=td,
         source_core_run_id=core_id,
@@ -122,7 +124,7 @@ def _make_review_run(core_id: uuid.UUID, td: date) -> MarketReviewRun:
         signal_count=0,
         coverage_ratio=__import__("decimal").Decimal("1.0"),
         status="signals_ready",
-        metadata_json={"canonical_composition_readiness": {}},
+        metadata_json={"canonical_composition_readiness": readiness},
     )
 
 
