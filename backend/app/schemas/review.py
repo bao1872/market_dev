@@ -352,6 +352,29 @@ class ReviewScopeHistoryFieldDTO(BaseModel):
     baselineCount: list[int | None] = Field(default_factory=list, description="每个点 lagged baseline 的有限样本数")
 
 
+class ReviewScopeSmcHistoryDTO(BaseModel):
+    """[R3 History / SMC] 窄 SMC 历史投影（published-run 安全日序列 query-time 构建）。
+
+    与 ReviewScopeHistoryDTO 共享同一正式 published 日期轴。swing_state / internal_state
+    每个日期槽为结构状态分布（up/neutral/down ratio + denominator），缺失该日 fact 为 null
+    （保留 date slot，显示 gap）。event_tape 每个日期槽为 canonical structure.events
+    （status / cells），缺失为 null。不重新查询 / 不重算 canonical SMC。
+    """
+
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
+
+    dates: list[str] = Field(default_factory=list, description="display-window 交易日（升序，共享 history 日期轴）")
+    swing_state: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每个日期槽 Swing 状态分布（up/neutral/down ratio + denominator）；缺失为 null"
+    )
+    internal_state: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每个日期槽 Internal 状态分布；缺失为 null"
+    )
+    event_tape: list[dict[str, Any] | None] = Field(
+        default_factory=list, description="每个日期槽 canonical structure.events；缺失为 null"
+    )
+
+
 class ReviewScopeHistoryDTO(BaseModel):
     """[R3 History] 20D 历史诊断 DTO（由 published-run 安全日序列 query-time 构建）。"""
 
@@ -365,6 +388,13 @@ class ReviewScopeHistoryDTO(BaseModel):
     )
     fields: dict[str, ReviewScopeHistoryFieldDTO] = Field(
         default_factory=dict, description="curated 历史字段 -> 滚动诊断"
+    )
+    smc: ReviewScopeSmcHistoryDTO | None = Field(
+        None,
+        description=(
+            "[R3 History / SMC] 窄 SMC 历史投影（structure swing/internal state + event tape），"
+            "复用同一 published-run 安全日序列；非 activated scope_type 为 None"
+        ),
     )
 
 

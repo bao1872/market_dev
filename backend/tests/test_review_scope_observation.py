@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import math
 from datetime import date
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -17,6 +18,7 @@ from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.scope_observation import (
     MemberObservation,
     StructureEvent,
+    _aggregate_structure_events,
     compute_scope_observation,
 )
 
@@ -1163,3 +1165,81 @@ def test_canonical_scope_payload_excludes_turnover() -> None:
     assert "turnover" not in out["price"]
     payload = json.dumps(out)
     assert '"turnover"' not in payload
+
+
+# ---------------------------------------------------------------------------
+# [Slice 2 SMC] structure.swing/internal.transition.changed_members + events
+# (pure unit; 直接调用 canonical owner，无 DB)
+# ---------------------------------------------------------------------------
+
+
+def _ev(member_id: str, event_type: str, direction: str, internal: bool) -> Any:
+    """构造 _aggregate_structure_events 消费的事件记录（只用到 event_type/member_id/direction/internal）。"""
+    return SimpleNamespace(member_id=member_id, event_type=event_type, direction=direction, internal=internal)
+
+
+def test_smc_swing_transition_changed_members_deterministic() -> None:
+    """Swing transition 必须产出 changed_members（按 member_id 稳定排序，只列真变化）。"""
+    m1 = _m("m001", swing=Direction.UP, t1_swing=Direction.NEUTRAL)
+    m2 = _m("m002", swing=Direction.DOWN, t1_swing=Direction.UP)
+    m3 = _m("m003", swing=Direction.UP, t1_swing=Direction.UP)  # stable -> 不列
+    out = _run([m1, m2, m3], pit_member_ids_t1=["m001", "m002", "m003"])
+    swing_tr = out["structure"]["swing"]["transition"]
+    assert "changed_members" in swing_tr, "swing transition 必须含 changed_members（Slice 2 SMC）"
+    changed = swing_tr["changed_members"]
+    assert [c["member_id"] for c in changed] == ["m001", "m002"], "changed_members 按 member_id 稳定排序"
+    assert changed[0] == {"member_id": "m001", "previous_state": "Neutral", "current_state": "Up"}
+    assert changed[1] == {"member_id": "m002", "previous_state": "Up", "current_state": "Down"}
+
+
+def test_smc_internal_transition_changed_members_deterministic() -> None:
+    """Internal transition 必须产出 changed_members（与 swing 同口径）。"""
+    m1 = _m("m001", internal=Direction.DOWN, t1_internal=Direction.UP)
+    m2 = _m("m002", internal=Direction.UP, t1_internal=Direction.UP)  # stable -> 不列
+    out = _run([m1, m2], pit_member_ids_t1=["m001", "m002"])
+    internal_tr = out["structure"]["internal"]["transition"]
+    assert "changed_members" in internal_tr
+    assert [c["member_id"] for c in internal_tr["changed_members"]] == ["m001"]
+    assert internal_tr["changed_members"][0] == {
+        "member_id": "m001",
+        "previous_state": "Up",
+        "current_state": "Down",
+    }
+
+
+def test_smc_changed_members_excludes_unavailable_t1() -> None:
+    """T-1 membership 不可用 -> changed_members 不得伪造（denominator 语义保持）。"""
+    m1 = _m("m001", swing=Direction.UP, t1_swing=Direction.DOWN)
+    # T-1 可用：正常列出
+    out = _run([m1], pit_member_ids_t1=["m001"])
+    assert out["structure"]["swing"]["transition"]["changed_members"] == [
+        {"member_id": "m001", "previous_state": "Down", "current_state": "Up"}
+    ]
+    # T-1 membership 不可用：changed_members 必须为空（绝不伪造 T-1→T）
+    out_unavail = compute_scope_observation(
+        scope_type="industry", scope_key="electronics", trade_date=TRADE_DATE,
+        pit_member_ids=["m001"], pit_member_ids_t1=["m001"], members=[m1],
+        events=[], event_coverage_member_ids=None, t1_membership_available=False,
+    )
+    assert out_unavail["structure"]["swing"]["transition"]["changed_members"] == []
+
+
+def test_smc_event_projection_preserves_member_count_and_event_count() -> None:
+    """event 投影必须分别保留 member_count 与 event_count（不得混成一个数字）。"""
+    evs = [_ev("a", "BOS", "Up", False), _ev("a", "BOS", "Up", False), _ev("b", "BOS", "Up", False)]
+    out = _aggregate_structure_events(evs, {"a", "b"}, "electronics", None)
+    cell = out["cells"]["leveled"]["BOS_Up_Swing"]
+    assert cell["event_count"] == 3, "3 次 tick"
+    assert cell["member_count"] == 2, "来自 2 个成员"
+    assert cell["member_count"] != cell["event_count"]
+
+
+def test_smc_event_denominator_zero_vs_unavailable() -> None:
+    """coverage=None -> unavailable（denominator=null）；空 coverage set -> ready + 0（非 unavailable）。"""
+    unavail = _aggregate_structure_events([], None, "electronics", None)
+    assert unavail["status"] == "unavailable"
+    assert unavail["denominator"] is None
+    ready = _aggregate_structure_events([], set(), "electronics", None)
+    assert ready["status"] == "ready"
+    assert ready["denominator"] == 0
+    assert ready["cells"]["leveled"] == {}

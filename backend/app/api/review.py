@@ -668,25 +668,34 @@ async def get_review_scope_composition(
 def _collect_changed_member_ids(observation: Any) -> list[str]:
     """从 canonical Observation 收集 T-1→T 变化成员 ID（用于 memberDirectory 批量解析）。
 
-    仅取 observation.trend.transition.changed_members[].member_id（已为 UUID 字符串）。
+    ref IDs = Composition leadership/attribution 引用 UNION
+    trend.transition.changed_members UNION structure.swing.transition.changed_members
+    UNION structure.internal.transition.changed_members（ONE bulk Instrument query，去重）。
     非 dict / 缺字段 / 非 UUID 一律跳过，绝不抛错。
     """
     ids: list[str] = []
     try:
-        changed = (
-            observation.get("trend", {})
-            .get("transition", {})
-            .get("changed_members", [])
+        trend_changed = (
+            observation.get("trend", {}).get("transition", {}).get("changed_members", [])
+        )
+        swing_changed = (
+            observation.get("structure", {}).get("swing", {})
+            .get("transition", {}).get("changed_members", [])
+        )
+        internal_changed = (
+            observation.get("structure", {}).get("internal", {})
+            .get("transition", {}).get("changed_members", [])
         )
     except AttributeError:
         return ids
-    if not isinstance(changed, list):
-        return ids
-    for m in changed:
-        if isinstance(m, dict):
-            mid = m.get("member_id")
-            if isinstance(mid, str) and is_uuid(mid):
-                ids.append(mid)
+    for changed in (trend_changed, swing_changed, internal_changed):
+        if not isinstance(changed, list):
+            continue
+        for m in changed:
+            if isinstance(m, dict):
+                mid = m.get("member_id")
+                if isinstance(mid, str) and is_uuid(mid):
+                    ids.append(mid)
     return ids
 
 

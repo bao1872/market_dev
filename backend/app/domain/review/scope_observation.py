@@ -799,6 +799,37 @@ def _duration_buckets(values: Sequence[float | None]) -> list[dict[str, Any]]:
     ]
 
 
+def _build_changed_members_for_state(
+    member_list: Sequence[Any],
+    t1_set: set[Any],
+    direction_labels: dict[Any, str],
+    cur_attr: str,
+    prev_attr: str,
+) -> list[dict[str, str]]:
+    """T-1→T 状态变化成员（Swing / Internal / Momentum 复用；deterministic by member_id）。
+
+    member_id 由同一 transition owner 直接产出（PIT(T)∩PIT(T-1)∩valid 口径），不另建算法。
+    仅列真正发生状态迁移的成员，stable members 不重复列。按 ``member_id`` 稳定排序：
+    首个直接进 canonical persisted payload 的成员数组，必须不随 supplier/DB 返回顺序
+    漂移（order-insensitive 结果也可能因顺序变化变成不同 payload，违反 determinism）。
+    """
+    return sorted(
+        [
+            {
+                "member_id": m.member_id,
+                "previous_state": direction_labels[prev],
+                "current_state": direction_labels[cur],
+            }
+            for m in member_list
+            if m.member_id in t1_set
+            and (cur := getattr(m, cur_attr)) is not None
+            and (prev := getattr(m, prev_attr)) is not None
+            and cur != prev
+        ],
+        key=lambda x: x["member_id"],
+    )
+
+
 def _build_changed_members(
     member_list: Sequence[Any],
     t1_set: set[Any],
@@ -806,28 +837,11 @@ def _build_changed_members(
 ) -> list[dict[str, str]]:
     """[DSA] T-1→T 状态变化成员列表（deterministic by member_id）。
 
-    member_id 由同一 transition owner 直接产出（复用 ``trend_transition`` 的
-    PIT(T)∩PIT(T-1)∩valid 口径），不另建算法。仅列真正发生状态迁移的成员，
-    stable members 不重复列。
-
-    按 ``member_id`` 稳定排序：首个直接进 canonical persisted payload 的成员数组，
-    必须不随 supplier/DB 返回顺序漂移（order-insensitive 结果也可能因顺序变化
-    变成不同 payload，违反 determinism）。
+    委托给 ``_build_changed_members_for_state``（trend 状态属性）。口径与 Swing /
+    Internal 完全一致（PIT(T)∩PIT(T-1)∩valid，仅列真变化，member_id 稳定排序）。
     """
-    return sorted(
-        [
-            {
-                "member_id": m.member_id,
-                "previous_state": direction_labels[m.t1_trend],
-                "current_state": direction_labels[m.trend],
-            }
-            for m in member_list
-            if m.member_id in t1_set
-            and m.trend is not None
-            and m.t1_trend is not None
-            and m.trend != m.t1_trend
-        ],
-        key=lambda x: x["member_id"],
+    return _build_changed_members_for_state(
+        member_list, t1_set, direction_labels, "trend", "t1_trend"
     )
 
 
@@ -1585,6 +1599,12 @@ def compute_scope_observation(
     # （复用 trend_transition 的 PIT(T) ∩ PIT(T-1) ∩ valid 口径），不另建算法。
     # 输出按 member_id 稳定排序（canonical persisted payload 不随 supplier 顺序漂移）。
     trend_changed_members = _build_changed_members(member_list, t1_set, direction_labels)
+    swing_changed_members = _build_changed_members_for_state(
+        member_list, t1_set, direction_labels, "swing", "t1_swing"
+    )
+    internal_changed_members = _build_changed_members_for_state(
+        member_list, t1_set, direction_labels, "internal", "t1_internal"
+    )
     squeeze_labels = {
         SqueezeState.SQUEEZE: "Squeeze",
         SqueezeState.RELEASED: "Squeeze_Release",
@@ -1666,19 +1686,25 @@ def compute_scope_observation(
         "structure": {
             "swing": {
                 "state": _categorical_state_distribution(swing_values, direction_labels),
-                "transition": _transition_distribution(
-                    [c for c, _ in swing_transition],
-                    [p for _, p in swing_transition],
-                    direction_labels,
-                ),
+                "transition": {
+                    **_transition_distribution(
+                        [c for c, _ in swing_transition],
+                        [p for _, p in swing_transition],
+                        direction_labels,
+                    ),
+                    "changed_members": swing_changed_members,
+                },
             },
             "internal": {
                 "state": _categorical_state_distribution(internal_values, direction_labels),
-                "transition": _transition_distribution(
-                    [c for c, _ in internal_transition],
-                    [p for _, p in internal_transition],
-                    direction_labels,
-                ),
+                "transition": {
+                    **_transition_distribution(
+                        [c for c, _ in internal_transition],
+                        [p for _, p in internal_transition],
+                        direction_labels,
+                    ),
+                    "changed_members": internal_changed_members,
+                },
             },
             "alignment": _categorical_state_distribution(
                 structure_alignment_values,

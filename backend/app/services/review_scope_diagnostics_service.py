@@ -213,6 +213,45 @@ def _compute_field_rolling(
     }
 
 
+def _build_smc_projection(
+    canonical: dict[date, dict[str, Any] | None],
+    dates: list[date],
+) -> dict[str, Any]:
+    """Narrow SMC history projection (Slice 2 SMC).
+
+    复用同一 published-run 安全日序列（``canonical``）+ 已解析的正式日期轴 ``dates``，
+    直接从每个日期的 persisted Observation 投影结构事实；不重新查询 / 不重算 canonical
+    SMC。每个日期槽保留（None = 该日正式 run 无 fact，显示 gap）。
+    """
+    swing_state: list[Any] = []
+    internal_state: list[Any] = []
+    event_tape: list[Any] = []
+    for d in dates:
+        payload = canonical.get(d)
+        if not isinstance(payload, dict):
+            swing_state.append(None)
+            internal_state.append(None)
+            event_tape.append(None)
+            continue
+        structure = payload.get("structure")
+        if not isinstance(structure, dict):
+            swing_state.append(None)
+            internal_state.append(None)
+            event_tape.append(None)
+            continue
+        swing = structure.get("swing")
+        internal = structure.get("internal")
+        swing_state.append(swing.get("state") if isinstance(swing, dict) else None)
+        internal_state.append(internal.get("state") if isinstance(internal, dict) else None)
+        event_tape.append(structure.get("events"))
+    return {
+        "dates": [d.isoformat() for d in dates],
+        "swing_state": swing_state,
+        "internal_state": internal_state,
+        "event_tape": event_tape,
+    }
+
+
 # ---------------------------------------------------------------------------
 # service owner (DB)
 # ---------------------------------------------------------------------------
@@ -243,6 +282,7 @@ async def get_scope_diagnostics(
                 "reason": "scope_type not persisted historically",
             },
             "fields": {},
+            "smc": None,
         }
 
     from_date = trade_date - timedelta(
@@ -304,7 +344,11 @@ async def get_scope_diagnostics(
             "baselineCount": rolling["baselineCount"][start:],
         }
 
-    display_dates = [d.isoformat() for d in window_dates[-display_window:]]
+    display_window_dates = (
+        window_dates[-display_window:] if len(window_dates) >= display_window else window_dates
+    )
+    display_dates = [d.isoformat() for d in display_window_dates]
+    smc = _build_smc_projection(canonical, display_window_dates)
     total = len(window_dates)
     availability = {
         "status": "ready" if total > 0 else "empty",
@@ -320,6 +364,7 @@ async def get_scope_diagnostics(
         "displayWindow": display_window,
         "availability": availability,
         "fields": fields_out,
+        "smc": smc,
     }
 
 

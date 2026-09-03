@@ -25,6 +25,7 @@ import ScopeMemberAttributionPanel from './ScopeMemberAttributionPanel'
 import ScopeRawFactsPanel from './ScopeRawFactsPanel'
 import ScopeCurrentObservationWorkspace from './ScopeCurrentObservationWorkspace'
 import ScopeDsaPanel from './ScopeDsaPanel'
+import ScopeSmcPanel from './ScopeSmcPanel'
 import { NULL_DISPLAY, UNNAMED_SCOPE_LABEL, formatReadiness } from './reviewFormat'
 import styles from './review.module.scss'
 
@@ -163,7 +164,13 @@ export default function ScopeDetailWorkspace({
             memberDirectory={detail.data?.memberDirectory}
           />
         )}
-        {tab === 'smc' && <div className={styles.detailEmpty}>结构演化（SMC）研究中，即将上线</div>}
+        {tab === 'smc' && (
+          <ScopeSmcPanel
+            observation={detail.data?.observation ?? null}
+            history={detail.data?.history ?? null}
+            memberDirectory={detail.data?.memberDirectory ?? null}
+          />
+        )}
         {tab === 'momentum' && <div className={styles.detailEmpty}>动量与量能研究中，即将上线</div>}
         {tab === 'price' && <div className={styles.detailEmpty}>涨跌幅分布研究中，即将上线</div>}
         {tab === 'current' && (

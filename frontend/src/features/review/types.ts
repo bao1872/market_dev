@@ -563,6 +563,7 @@ export interface ReviewScopeHistoryDTO {
   displayWindow: number
   availability: Record<string, unknown>
   fields: Record<string, ReviewScopeHistoryFieldDTO>
+  smc: ReviewScopeSmcHistoryDTO | null
 }
 
 /** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。 */
@@ -577,6 +578,51 @@ export interface ReviewCrossSectionFieldDTO {
 /** [R3 Cross-sectional] 横截面位置证据 DTO（published-run lineage 安全 cohort）。 */
 export interface ReviewCrossSectionDTO {
   fields: ReviewCrossSectionFieldDTO[]
+}
+
+// ============================================================
+// [R3 History / SMC] 窄 SMC 历史投影（published-run 安全日序列 query-time 构建）
+// 与 ReviewScopeHistoryDTO 共享同一正式 published 日期轴。
+// 前端只承载、不重算；缺失该日 fact = null（保留 date slot，显示 gap）。
+// ============================================================
+
+/** 结构状态分布（swing/internal state；up/neutral/down ratio + denominator）。 */
+export interface ReviewStructureState {
+  up_count: number | null
+  up_ratio: number | null
+  neutral_count: number | null
+  neutral_ratio: number | null
+  down_count: number | null
+  down_ratio: number | null
+  denominator: number | null
+}
+
+/** 单个结构事件 cell（canonical structure.events.cells.leveled / cells.extreme）。 */
+export interface ReviewStructureEventCell {
+  event_type: string | null
+  direction: string | null
+  structure_level: string | null
+  event_count: number | null
+  member_count: number | null
+  member_ratio: number | null
+}
+
+/** 横截面结构事件（canonical structure.events）。 */
+export interface ReviewStructureEvents {
+  status: string | null
+  denominator: number | null
+  cells: {
+    leveled: Record<string, ReviewStructureEventCell>
+    extreme: Record<string, ReviewStructureEventCell>
+  } | null
+}
+
+/** [R3 History / SMC] 窄 SMC 历史投影 DTO。 */
+export interface ReviewScopeSmcHistoryDTO {
+  dates: string[]
+  swing_state: Array<ReviewStructureState | null>
+  internal_state: Array<ReviewStructureState | null>
+  event_tape: Array<ReviewStructureEvents | null>
 }
 
 /**
