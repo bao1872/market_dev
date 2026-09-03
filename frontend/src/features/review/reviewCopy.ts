@@ -371,6 +371,10 @@ export const SORT_LABELS: Readonly<Record<string, string>> = {
 
 /** 详情 Tab canonical value → 中文 label */
 export const DETAIL_TAB_LABELS: Readonly<Record<string, string>> = {
+  dsa: '趋势与结构',
+  smc: '结构演化',
+  momentum: '动量与量能',
+  price: '涨跌幅分布',
   current: '当日事实',
   dynamics: '等权涨跌动态',
   internal: '横截面结构',
@@ -381,6 +385,10 @@ export const DETAIL_TAB_LABELS: Readonly<Record<string, string>> = {
 
 /** 详情 Tab tooltip（hover tab 显示） */
 export const DETAIL_TAB_HELP: Readonly<Record<string, string>> = {
+  dsa: 'DSA 趋势：Regime Strength、趋势段 VWAP 偏离、趋势成员构成与 T-1→T 迁移，叠加 20D 滚动位置与横截面分位',
+  smc: 'SMC 结构演化：swing/internal 状态、对齐、BOS/CHoCH/OB 事件时间线（建设中）',
+  momentum: '动量与量能：方向/状态、增强/减弱、 squeeze、BB 位置/宽度、量能 Z 与释放量（建设中）',
+  price: '涨跌幅分布：等权/金额加权收益、涨跌/走平比、收益离散度、集中度、主导迁移与 Jaccard（建设中）',
   current: '当前交易日已落库的价格、趋势、结构、动量与成交量事实',
   dynamics: '板块等权涨跌分位，以及分位动能与动能偏离随时间的演变',
   internal: '成员涨跌分布、成交加权差与集中度等横截面结构',

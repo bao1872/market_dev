@@ -2820,3 +2820,34 @@
   color: v.$color-text-dim;
 }
 
+// ===== R3 DSA 研究页 =====
+.dsaPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.panelTitle {
+  font-size: 0.82rem;
+  font-weight: 600;
+  color: v.$color-text;
+  margin-bottom: 6px;
+}
+.kvRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 5px 0;
+  border-bottom: 1px dashed v.$color-border;
+  font-size: 0.8rem;
+}
+.kvKey {
+  flex: 0 0 120px;
+  color: v.$color-text-dim;
+}
+.kvVal {
+  flex: 1 1 auto;
+  color: v.$color-text;
+  font-variant-numeric: tabular-nums;
+  word-break: break-all;
+}
+

@@ -541,6 +541,45 @@ export interface ObservationGroups {
 }
 
 /**
+ * [R3 History] 单 curated 字段的 20D rolling 诊断（与后端 ReviewScopeHistoryFieldDTO 对齐）。
+ * series / mean20 / std20 / zscore20 / percentile20 / baselineCount 均对齐同一 display-window 轴（升序）。
+ * 缺失 canonical 值 = null（绝不 0）。zscore20 在 lagged baseline std==0 或样本<2 时为 null。
+ */
+export interface ReviewScopeHistoryFieldDTO {
+  key: string
+  label: string
+  unit: string | null
+  series: Array<number | null>
+  mean20: Array<number | null>
+  std20: Array<number | null>
+  zscore20: Array<number | null>
+  percentile20: Array<number | null>
+  baselineCount: Array<number | null>
+}
+
+/** [R3 History] 20D 历史诊断 DTO（由 published-run 安全日序列 query-time 构建）。 */
+export interface ReviewScopeHistoryDTO {
+  dates: string[]
+  displayWindow: number
+  availability: Record<string, unknown>
+  fields: Record<string, ReviewScopeHistoryFieldDTO>
+}
+
+/** [R3 Cross-sectional] 单可比字段的横截面位置证据（C1 empirical percentile）。 */
+export interface ReviewCrossSectionFieldDTO {
+  field_key: string
+  value: number | null
+  percentile: number | null
+  peer_count: number
+  valid_peer_count: number
+}
+
+/** [R3 Cross-sectional] 横截面位置证据 DTO（published-run lineage 安全 cohort）。 */
+export interface ReviewCrossSectionDTO {
+  fields: ReviewCrossSectionFieldDTO[]
+}
+
+/**
  * 详情响应：对应后端 ReviewScopeCompositionDetailResponse（R3A Fact-first）。
  *
  * R3A 契约：
@@ -568,6 +607,16 @@ export interface ReviewScopeCompositionDetailResponse {
    * 绝不二次发 metadata 请求。Composition 缺失 / 无引用成员时为空 dict。
    */
   memberDirectory: Record<string, { symbol: string; name: string }>
+  /**
+   * [R3 History] published-run lineage 安全日序列 query-time 构建的 20D 滚动诊断。
+   * 非 activated scope_type（market / major_index / style）为 null；历史不足为 availability.empty。
+   */
+  history: ReviewScopeHistoryDTO | null
+  /**
+   * [R3 Cross-sectional P0] published-run lineage 安全的横截面位置证据（C1 empirical percentile）。
+   * market scope 无 peer -> null。
+   */
+  crossSection: ReviewCrossSectionDTO | null
 }
 
 // ------------------------------------------------------------

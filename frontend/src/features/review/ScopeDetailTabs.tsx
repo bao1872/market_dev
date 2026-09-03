@@ -19,6 +19,10 @@ export interface ScopeDetailTabDef {
 }
 
 export const SCOPE_DETAIL_TABS: ReadonlyArray<ScopeDetailTabDef> = [
+  { value: 'dsa', label: DETAIL_TAB_LABELS.dsa, help: DETAIL_TAB_HELP.dsa },
+  { value: 'smc', label: DETAIL_TAB_LABELS.smc, help: DETAIL_TAB_HELP.smc },
+  { value: 'momentum', label: DETAIL_TAB_LABELS.momentum, help: DETAIL_TAB_HELP.momentum },
+  { value: 'price', label: DETAIL_TAB_LABELS.price, help: DETAIL_TAB_HELP.price },
   { value: 'current', label: DETAIL_TAB_LABELS.current, help: DETAIL_TAB_HELP.current },
   { value: 'dynamics', label: DETAIL_TAB_LABELS.dynamics, help: DETAIL_TAB_HELP.dynamics },
   { value: 'internal', label: DETAIL_TAB_LABELS.internal, help: DETAIL_TAB_HELP.internal },

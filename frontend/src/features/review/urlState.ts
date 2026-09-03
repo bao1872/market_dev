@@ -30,6 +30,10 @@ import type { ReviewScopeFamily, ReviewDynamicsPhase, ReviewCompositionReadiness
 export type ReviewExplorerView = 'table' | 'trajectory'
 
 export type ReviewDetailTab =
+  | 'dsa'
+  | 'smc'
+  | 'momentum'
+  | 'price'
   | 'current'
   | 'dynamics'
   | 'internal'
@@ -156,8 +160,8 @@ export interface ReviewUrlState {
 
 export const DEFAULT_REVIEW_FAMILY: ReviewScopeFamily = 'industry_l1'
 export const DEFAULT_REVIEW_VIEW: ReviewExplorerView = 'table'
-/** 默认详情 Tab = current（R3A：Canonical Observation 是第一层，current 优先于 dynamics） */
-export const DEFAULT_REVIEW_TAB: ReviewDetailTab = 'current'
+/** 默认详情 Tab = dsa（R3 研究页第一入口；旧 current/dynamics 等保留但退居其后） */
+export const DEFAULT_REVIEW_TAB: ReviewDetailTab = 'dsa'
 export const DEFAULT_REVIEW_PHASE: ReviewDynamicsPhase | null = null
 export const DEFAULT_REVIEW_SORT: ReviewSort = 'velocity_desc'
 export const DEFAULT_REVIEW_READINESS: ReviewCompositionReadiness | null = null
@@ -176,6 +180,10 @@ const FAMILY_VALUES: ReadonlySet<string> = new Set([
 const VIEW_VALUES: ReadonlySet<string> = new Set(['table', 'trajectory'])
 
 const TAB_VALUES: ReadonlySet<string> = new Set([
+  'dsa',
+  'smc',
+  'momentum',
+  'price',
   'current',
   'dynamics',
   'internal',
