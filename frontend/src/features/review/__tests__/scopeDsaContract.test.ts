@@ -45,8 +45,26 @@ const OBS = {
       valid_count: 100,
       mean: 4.5,
     },
+    dsa_dir_bars_distribution: {
+      p25: 2,
+      p50: 8,
+      p75: 20,
+      valid_count: 100,
+      mean: 9.5,
+      buckets: [
+        { label: '≤3', count: 10, ratio: 0.1 },
+        { label: '4-6', count: 30, ratio: 0.3 },
+        { label: '7-12', count: 40, ratio: 0.4 },
+        { label: '13-24', count: 15, ratio: 0.15 },
+        { label: '>24', count: 5, ratio: 0.05 },
+      ],
+    },
     transition: {
       denominator: 41,
+      changed_members: [
+        { member_id: '600000.SH', previous_state: 'Neutral', current_state: 'Up' },
+        { member_id: '000001.SZ', previous_state: 'Down', current_state: 'Neutral' },
+      ],
       'Neutral→Up': { count: 5, ratio: 0.12 },
       'Up→Down': { count: 3, ratio: 0.07 },
     },
@@ -97,6 +115,42 @@ test('DSA transition decode lists only real migrations (P1-4)', () => {
   assert.equal(vm.transitions[0].ratio, '12.00%')
   // canonical transition has NO member IDs — verified by absence; honest display
   // of ratio is the confirmed T-1→T change view.
+})
+
+test('DSA duration distribution reads canonical percentile + buckets (P1-4)', () => {
+  const vm = buildDsaVM(parseDsaObservation(OBS as unknown as Record<string, unknown>))
+  assert.equal(vm.dsaDirBarsDist, 'P25 2.00 · P50 8.00 · P75 20.00')
+  assert.equal(vm.dsaDirBarsBuckets.length, 5)
+  assert.equal(vm.dsaDirBarsBuckets[0].label, '≤3')
+  assert.equal(vm.dsaDirBarsBuckets[2].count, 40)
+  assert.equal(vm.dsaDirBarsBuckets[2].ratio, '40.0%')
+})
+
+test('DSA changed members parsed; denominator drives empty-state (P1-4 / D)', () => {
+  const vm = buildDsaVM(parseDsaObservation(OBS as unknown as Record<string, unknown>))
+  // denominator > 0 且存在变化成员
+  assert.equal(vm.transitionDenominator, 41)
+  assert.equal(vm.changedMembers.length, 2)
+  assert.equal(vm.changedMembers[0].memberId, '600000.SH')
+  assert.equal(vm.changedMembers[0].previousState, 'Neutral')
+  assert.equal(vm.changedMembers[0].currentState, 'Up')
+  assert.equal(vm.changedMembers[1].currentState, 'Neutral')
+})
+
+test('DSA transition denominator=0 => unavailable (not "stable") (D)', () => {
+  const zeroDenom = {
+    trend: {
+      transition: {
+        denominator: 0,
+        changed_members: [],
+        'Neutral→Up': { count: 0, ratio: 0 },
+      },
+    },
+  }
+  const vm = buildDsaVM(parseDsaObservation(zeroDenom as unknown as Record<string, unknown>))
+  assert.equal(vm.transitionDenominator, 0)
+  assert.equal(vm.changedMembers.length, 0)
+  // 面板据此渲染“迁移数据不可用”，而非错误地显示“无成员发生状态变化”
 })
 
 test('Sparkline gap — null splits segments (P1-3 #5)', () => {

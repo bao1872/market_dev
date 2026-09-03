@@ -27,6 +27,7 @@ DB identity（fail-closed）：APP_ENV==verification 且 current_database() 匹�
 # ruff: noqa: UP017  (验证容器 Python<3.11，datetime.UTC 不可用，使用 timezone.utc)
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -48,6 +49,7 @@ from app.services.review_publication_service import (
     PUBLICATION_KIND_MARKET_REVIEW,
     SCOPE_KEY_REVIEW,
     SCOPE_TYPE_REVIEW,
+    list_formally_published_review_dates,
     publish_review,
 )
 from app.services.review_scope_diagnostics_service import get_scope_diagnostics
@@ -275,7 +277,9 @@ async def test_history_excludes_broken_pointer_date():
         await s.flush()
         s.add(_make_fact(run_c.id, t_bad, SCOPE_X, 0.77))
         await s.flush()
-        # 模拟 broken pointer：直接写 FactorPublication 指向未发布 run
+        # 模拟 broken pointer：直接写 FactorPublication 指向未发布 run。
+        # broken 条件由 run_c.status != published / published_at is None 提供，
+        # FactorPublication 本身必须符合真实 ORM（algorithm_version + Text metadata_json）。
         s.add(
             FactorPublication(
                 scope_type=SCOPE_TYPE_REVIEW,
@@ -284,8 +288,8 @@ async def test_history_excludes_broken_pointer_date():
                 publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
                 data_run_id=run_c.id,
                 coverage_ratio=__import__("decimal").Decimal("1.0"),
-                published_at=None,
-                metadata_json={},
+                algorithm_version=REVIEW_ALGORITHM_VERSION,
+                metadata_json=json.dumps({}),
             )
         )
         await s.commit()
@@ -314,4 +318,71 @@ async def test_history_excludes_broken_pointer_date():
         )
 
         await _clean(s, t_bad)
+        await s.commit()
+
+
+@pytest.mark.asyncio
+async def test_formal_dates_to_date_anchors_old_target():
+    """[P1-2 replay boundary] 存在 newer published 日期时，旧 target 仍以 target
+    为末点取得历史轴（to_date 在 LIMIT 之前过滤），支持历史复盘。
+
+    场景：
+    - old_target 正式发布；
+    - newer_1 / newer_2 正式发布（全库最新日期，会先吃掉 LIMIT）；
+    - limit=1, to_date=old_target。
+    断言：
+    - 无 to_date + limit=1 拿到的是 newer（old_target 被吃掉）—— 证明需要 to_date；
+    - 有 to_date=old_target：结果锚定在 old_target，不含任何 > old_target 的日期。
+    """
+    old_target = date(2099, 1, 5)
+    newer_1 = date(2099, 12, 1)
+    newer_2 = date(2099, 12, 2)
+
+    async with AsyncSessionLocal() as s:
+        await _assert_verify_db(s)
+        for d in (old_target, newer_1, newer_2):
+            await _clean(s, d)
+        await s.commit()
+
+        now = datetime.now(timezone.utc)
+        for d in (old_target, newer_1, newer_2):
+            core = _make_core_run(d)
+            s.add(core)
+            await s.flush()
+            run = _make_review_run(core.id, d)
+            run.status = "published"
+            run.published_at = now
+            s.add(run)
+            await s.flush()
+            s.add(
+                FactorPublication(
+                    scope_type=SCOPE_TYPE_REVIEW,
+                    scope_key=SCOPE_KEY_REVIEW,
+                    trade_date=d,
+                    publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
+                    data_run_id=run.id,
+                    coverage_ratio=__import__("decimal").Decimal("1.0"),
+                    algorithm_version=REVIEW_ALGORITHM_VERSION,
+                    metadata_json=json.dumps({}),
+                )
+            )
+        await s.commit()
+
+        # 无 to_date：limit=1 只拿到全库最新（newer_2），old_target 被吃掉
+        latest_only = await list_formally_published_review_dates(s, limit=1)
+        assert old_target not in latest_only, (
+            "无 to_date 时 LIMIT 会吃掉旧 target（验证修复前会出此 bug）"
+        )
+
+        # 有 to_date=old_target：锚定在旧 target，不返回 newer 日期
+        anchored = await list_formally_published_review_dates(
+            s, to_date=old_target, limit=1
+        )
+        assert old_target in anchored, "to_date 必须锚定旧 target"
+        assert all(d <= old_target for d in anchored), (
+            "to_date 不得返回 newer 日期（历史复盘必须 anchored）"
+        )
+
+        for d in (old_target, newer_1, newer_2):
+            await _clean(s, d)
         await s.commit()

@@ -679,6 +679,7 @@ async def list_formally_published_review_dates(
     session: AsyncSession,
     *,
     limit: int = 100,
+    to_date: date | None = None,
 ) -> list[date]:
     """列出**已正式发布**复盘的交易日（降序）—— FORMAL REVIEW READ OWNER。
 
@@ -699,6 +700,10 @@ async def list_formally_published_review_dates(
 
     返回 ``ORDER BY trade_date DESC LIMIT :limit``。
 
+    ``to_date``：可选锚点。传入时 query 在 LIMIT 之前额外过滤
+    ``trade_date <= :to_date``，从而以目标 T 为末点向前取历史（支持历史复盘）。
+    不传则行为完全不变（用于 ``/v1/review/dates`` 等取全库最新正式日期）。
+
     与 ``list_published_review_dates`` 的关系：后者是 **LIVE POINTER OWNER**
     （只有前三个条件），本函数在其之上追加 run formal state，是用户 endpoint
     唯一应使用的"正式已发布日期"来源。本函数**不改变** admin/debug 路径的
@@ -718,9 +723,12 @@ async def list_formally_published_review_dates(
             MarketReviewRun.status == "published",
             MarketReviewRun.published_at.is_not(None),
         )
-        .order_by(FactorPublication.trade_date.desc())
-        .limit(limit)
     )
+    if to_date is not None:
+        # 以目标 T 为锚点向前取历史：LIMIT 之前先过滤 trade_date <= to_date，
+        # 否则 LIMIT 会先吃掉全库最新日期，导致旧 target 的历史复盘返回空。
+        stmt = stmt.where(MarketReviewRun.trade_date <= to_date)
+    stmt = stmt.order_by(FactorPublication.trade_date.desc()).limit(limit)
     result = await session.execute(stmt)
     return [row[0] for row in result]
 

@@ -2851,3 +2851,30 @@
   word-break: break-all;
 }
 
+// [DSA] 持续时间分布桶 + T-1→T 变化成员列表
+.bucketRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.bucketChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: v.$color-border-soft;
+  border: 1px solid v.$color-border;
+  font-size: 0.72rem;
+  color: v.$color-text-dim;
+  font-variant-numeric: tabular-nums;
+}
+.changedList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+

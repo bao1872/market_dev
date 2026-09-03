@@ -69,12 +69,19 @@ export interface DsaStateFacts {
   denominator: number | null
 }
 
+export interface DsaDistributionBucket {
+  label: string
+  count: number
+  ratio: number | null
+}
+
 export interface DsaDistributionFacts {
   p25: number | null
   p50: number | null
   p75: number | null
   mean: number | null
   validCount: number | null
+  buckets: DsaDistributionBucket[] | null
 }
 
 export interface DsaTransitionFact {
@@ -83,12 +90,21 @@ export interface DsaTransitionFact {
   count: number | null
 }
 
+export interface DsaChangedMember {
+  memberId: string
+  previousState: string
+  currentState: string
+}
+
 export interface DsaObservationFacts {
   trend: DsaTrendFacts | null
   state: DsaStateFacts | null
   trendStrengthDist: DsaDistributionFacts | null
   dsaVwapDevDist: DsaDistributionFacts | null
+  dsaDirBarsDist: DsaDistributionFacts | null
+  transitionDenominator: number | null
   transitions: DsaTransitionFact[]
+  changedMembers: DsaChangedMember[]
 }
 
 // ---------------------------------------------------------------------------
@@ -134,33 +150,61 @@ function parseDistribution(observation: Json | undefined, path: readonly string[
   const d = node as Json
   const num = (k: string): number | null =>
     isFiniteNumber(d[k]) ? (d[k] as number) : null
+  let buckets: DsaDistributionBucket[] | null = null
+  if (Array.isArray(d['buckets'])) {
+    buckets = (d['buckets'] as Json[]).map((b) => ({
+      label: typeof b['label'] === 'string' ? (b['label'] as string) : '',
+      count: isFiniteNumber(b['count']) ? (b['count'] as number) : 0,
+      ratio: isFiniteNumber(b['ratio']) ? (b['ratio'] as number) : null,
+    }))
+  }
+  // 兼容：无 buckets 字段的分布返回 null（UI 仅 percentile 展示）
   return {
     p25: num('p25'),
     p50: num('p50'),
     p75: num('p75'),
     mean: num('mean'),
     validCount: num('valid_count'),
+    buckets,
   }
 }
 
-function parseTransitions(observation: Json | undefined): DsaTransitionFact[] {
+interface ParsedTransition {
+  denominator: number | null
+  transitions: DsaTransitionFact[]
+  changedMembers: DsaChangedMember[]
+}
+
+function parseTransition(observation: Json | undefined): ParsedTransition {
   const node = deepGet(observation, ['trend', 'transition'])
-  if (!node || typeof node !== 'object') return []
+  if (!node || typeof node !== 'object') {
+    return { denominator: null, transitions: [], changedMembers: [] }
+  }
   const t = node as Json
-  const out: DsaTransitionFact[] = []
+  const denominator = isFiniteNumber(t['denominator']) ? (t['denominator'] as number) : null
+  const transitions: DsaTransitionFact[] = []
   for (const [key, value] of Object.entries(t)) {
-    if (key === 'denominator') continue
+    if (key === 'denominator' || key === 'changed_members') continue
     if (!value || typeof value !== 'object') continue
     const item = value as Json
-    out.push({
+    transitions.push({
       key,
       ratio: isFiniteNumber(item['ratio']) ? (item['ratio'] as number) : null,
       count: isFiniteNumber(item['count']) ? (item['count'] as number) : null,
     })
   }
-  // 按 ratio 降序，仅展示真实发生的迁移（canonical transition 是 sparse，无 key=0）。
-  out.sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1))
-  return out
+  // 按 ratio 降序，仅展示真实发生的迁移（canonical transition 是 sparse，无 key=0）
+  transitions.sort((a, b) => (b.ratio ?? -1) - (a.ratio ?? -1))
+  const rawMembers = Array.isArray(t['changed_members']) ? (t['changed_members'] as Json[]) : []
+  const changedMembers: DsaChangedMember[] = rawMembers.map((m) => ({
+    memberId:
+      typeof m['member_id'] === 'string'
+        ? (m['member_id'] as string)
+        : String(m['member_id'] ?? ''),
+    previousState: typeof m['previous_state'] === 'string' ? (m['previous_state'] as string) : '',
+    currentState: typeof m['current_state'] === 'string' ? (m['current_state'] as string) : '',
+  }))
+  return { denominator, transitions, changedMembers }
 }
 
 export function parseDsaObservation(observation: Json | null | undefined): DsaObservationFacts {
@@ -170,21 +214,34 @@ export function parseDsaObservation(observation: Json | null | undefined): DsaOb
       state: null,
       trendStrengthDist: null,
       dsaVwapDevDist: null,
+      dsaDirBarsDist: null,
+      transitionDenominator: null,
       transitions: [],
+      changedMembers: [],
     }
   }
+  const tr = parseTransition(observation)
   return {
     trend: parseTrend(observation),
     state: parseState(observation),
     trendStrengthDist: parseDistribution(observation, ['trend', 'trend_strength_distribution']),
     dsaVwapDevDist: parseDistribution(observation, ['trend', 'dsa_vwap_dev_pct_distribution']),
-    transitions: parseTransitions(observation),
+    dsaDirBarsDist: parseDistribution(observation, ['trend', 'dsa_dir_bars_distribution']),
+    transitionDenominator: tr.denominator,
+    transitions: tr.transitions,
+    changedMembers: tr.changedMembers,
   }
 }
 
 // ---------------------------------------------------------------------------
 // ViewModel strings (format with the shared numeric-scale contract)
 // ---------------------------------------------------------------------------
+
+export interface DsaBucketVM {
+  label: string
+  count: number
+  ratio: string
+}
 
 export interface DsaVM {
   regimeStrength: string
@@ -199,7 +256,11 @@ export interface DsaVM {
   downRatio: string
   trendStrengthDist: string
   dsaVwapDevDist: string
+  dsaDirBarsDist: string
+  dsaDirBarsBuckets: DsaBucketVM[]
+  transitionDenominator: number | null
   transitions: Array<{ key: string; ratio: string }>
+  changedMembers: DsaChangedMember[]
 }
 
 export function buildDsaVM(facts: DsaObservationFacts): DsaVM {
@@ -213,6 +274,14 @@ export function buildDsaVM(facts: DsaObservationFacts): DsaVM {
     parts.push(`P50 ${d.p50.toFixed(2)}`)
     if (d.p75 != null) parts.push(`P75 ${d.p75.toFixed(2)}`)
     return parts.join(' · ')
+  }
+  const fmtBuckets = (d: DsaDistributionFacts | null): DsaBucketVM[] => {
+    if (!d?.buckets) return []
+    return d.buckets.map((b) => ({
+      label: b.label,
+      count: b.count,
+      ratio: b.ratio == null ? NULL_DISPLAY : formatPercentNullable(b.ratio, 1),
+    }))
   }
   return {
     // unitless / percentage-points / per-bar / multiple — explicit, no x100 surprise
@@ -229,10 +298,14 @@ export function buildDsaVM(facts: DsaObservationFacts): DsaVM {
     downRatio: formatPercentNullable(s?.downRatio, 2),
     trendStrengthDist: fmtDist(facts.trendStrengthDist),
     dsaVwapDevDist: fmtDist(facts.dsaVwapDevDist),
+    dsaDirBarsDist: fmtDist(facts.dsaDirBarsDist),
+    dsaDirBarsBuckets: fmtBuckets(facts.dsaDirBarsDist),
+    transitionDenominator: facts.transitionDenominator,
     transitions: facts.transitions.map((tr) => ({
       key: tr.key,
       ratio: formatPercentNullable(tr.ratio, 2),
     })),
+    changedMembers: facts.changedMembers,
   }
 }
 

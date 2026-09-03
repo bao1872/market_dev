@@ -130,7 +130,7 @@ export default function ScopeDsaPanel({ observation, history, crossSection }: Sc
         </div>
       </section>
 
-      {/* 当前横截面分布（canonical：trend_strength_distribution / dsa_vwap_dev_pct_distribution） */}
+      {/* 当前横截面分布（canonical：trend_strength_distribution / dsa_vwap_dev_pct_distribution / dsa_dir_bars_distribution） */}
       <section className={styles.detailCard}>
         <div className={styles.panelTitle}>当前分布（成员级 percentile 描述）</div>
         <div className={styles.kvRow}>
@@ -141,20 +141,39 @@ export default function ScopeDsaPanel({ observation, history, crossSection }: Sc
           <span className={styles.kvKey}>DSA VWAP 偏离分布</span>
           <span className={styles.kvVal}>{vm.dsaVwapDevDist}</span>
         </div>
+        <div className={styles.kvRow}>
+          <span className={styles.kvKey}>趋势持续时间分布</span>
+          <span className={styles.kvVal}>{vm.dsaDirBarsDist}</span>
+        </div>
+        {vm.dsaDirBarsBuckets.length > 0 && (
+          <div className={styles.bucketRow}>
+            {vm.dsaDirBarsBuckets.map((b) => (
+              <span key={b.label} className={styles.bucketChip} title={`${b.label} bars`}>
+                {b.label}：{b.count}（{b.ratio}）
+              </span>
+            ))}
+          </div>
+        )}
       </section>
 
-      {/* T-1 → T 变化（canonical transition：仅真实发生的迁移比例，sparse，无 key=0） */}
+      {/* T-1 → T 变化（canonical transition：先展示变化成员，ratio 为辅助） */}
       <section className={styles.detailCard}>
-        <div className={styles.panelTitle}>T-1 → T 状态迁移</div>
-        {vm.transitions.length > 0 ? (
-          vm.transitions.map((tr) => (
-            <div key={tr.key} className={styles.kvRow}>
-              <span className={styles.kvKey}>{tr.key}</span>
-              <span className={styles.kvVal}>{tr.ratio}</span>
-            </div>
-          ))
+        <div className={styles.panelTitle}>T-1 → T 变化成员</div>
+        {vm.transitionDenominator == null || vm.transitionDenominator === 0 ? (
+          <div className={styles.kvVal}>迁移数据不可用（T-1/T 共同有效成员不足）</div>
+        ) : vm.changedMembers.length > 0 ? (
+          <div className={styles.changedList}>
+            {vm.changedMembers.map((m) => (
+              <div key={m.memberId} className={styles.kvRow}>
+                <span className={styles.kvKey}>{m.memberId}</span>
+                <span className={styles.kvVal}>
+                  {m.previousState} → {m.currentState}
+                </span>
+              </div>
+            ))}
+          </div>
         ) : (
-          <div className={styles.kvVal}>无状态迁移（成员状态稳定）</div>
+          <div className={styles.kvVal}>无成员发生状态变化（成员状态稳定）</div>
         )}
       </section>
 

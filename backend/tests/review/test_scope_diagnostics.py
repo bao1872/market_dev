@@ -20,6 +20,7 @@ from app.domain.review.analysis.observation_stats import (
     safe_std,
     zscore,
 )
+from app.domain.review.scope_observation import _duration_buckets
 from app.services.review_scope_diagnostics_service import (
     _compute_field_rolling,
     _select_published_facts,
@@ -130,6 +131,26 @@ def test_build_canonical_by_date_broken_pointer_excluded_upstream():
     canonical = build_canonical_by_date(formal_dates, run_id_by_date, fact_by_run)
     assert d_bad not in canonical
     assert canonical[d1] == {"v": 1.0}
+
+
+def test_duration_buckets_histogram_edges():
+    """[P1-4] dsa_dir_bars 直方图必须落在已确认的 duration bucket 边界上，纯直方图无新算法。"""
+    values = [1, 2, 3, 4, 6, 7, 12, 13, 24, 30, None, float("nan")]
+    buckets = _duration_buckets(values)
+    # 边界 (3,6,12,24) -> 5 个桶
+    labels = [b["label"] for b in buckets]
+    assert labels == ["≤3", "4-6", "7-12", "13-24", ">24"], labels
+    total = sum(b["count"] for b in buckets)
+    # None / NaN 不计入有限样本
+    assert total == 10, total
+    assert buckets[0]["count"] == 3  # 1,2,3
+    assert buckets[1]["count"] == 2  # 4,6
+    assert buckets[2]["count"] == 2  # 7,12
+    assert buckets[3]["count"] == 2  # 13,24
+    assert buckets[4]["count"] == 1  # 30
+    # 空输入 -> 全 0 桶，不报错
+    empty = _duration_buckets([])
+    assert sum(b["count"] for b in empty) == 0
 
 
 # ---------------------------------------------------------------------------

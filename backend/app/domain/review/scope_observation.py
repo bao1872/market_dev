@@ -769,6 +769,35 @@ def _participation_distribution(values: Sequence[float | None]) -> dict[str, Any
     }
 
 
+# 趋势持续时间（dsa_dir_bars）分布桶边界（单位：交易 bars）。这是已确认的 DSA
+# 持续时间分布桶合同：已有成员事实 dsa_dir_bars -> 当前横截面直方图，不另建算法。
+_DURATION_BUCKET_EDGES = (3, 6, 12, 24)
+
+
+def _duration_buckets(values: Sequence[float | None]) -> list[dict[str, Any]]:
+    """Bar-count histogram of ``dsa_dir_bars`` over the adopted duration buckets.
+
+    Pure histogram of an existing member fact; no new metric, no scoring.
+    """
+    finite = [float(v) for v in values if v is not None and math.isfinite(v)]
+    edges = _DURATION_BUCKET_EDGES
+    labels = (
+        [f"≤{edges[0]}"]
+        + [f"{edges[i - 1] + 1}-{edges[i]}" for i in range(1, len(edges))]
+        + [f">{edges[-1]}"]
+    )
+    counts = [0] * (len(edges) + 1)
+    for v in finite:
+        idx = 0
+        while idx < len(edges) and v > edges[idx]:
+            idx += 1
+        counts[idx] += 1
+    return [
+        {"label": label, "count": count, "ratio": _safe_ratio(count, len(finite))}
+        for label, count in zip(labels, counts, strict=True)
+    ]
+
+
 # ----------------------------------------------------------------------
 # Slice 4A1 — Board current-state capability helpers.
 # These mirror the Board producer's statistics (board_summary_helpers) EXACTLY
@@ -1517,6 +1546,22 @@ def compute_scope_observation(
         -1.0: _STATE_LABELS[Direction.DOWN],
         0.0: _STATE_LABELS[Direction.SIDEWAYS],
     }
+
+    # [DSA correction] T-1 -> T 变化成员证据：仅列真的发生状态迁移的成员，
+    # stable members 不重复列。member_id 由同一 transition owner 直接产出
+    # （复用 trend_transition 的 PIT(T) ∩ PIT(T-1) ∩ valid 口径），不另建算法。
+    trend_changed_members = [
+        {
+            "member_id": m.member_id,
+            "previous_state": direction_labels[m.t1_trend],
+            "current_state": direction_labels[m.trend],
+        }
+        for m in member_list
+        if m.member_id in t1_set
+        and m.trend is not None
+        and m.t1_trend is not None
+        and m.trend != m.t1_trend
+    ]
     squeeze_labels = {
         SqueezeState.SQUEEZE: "Squeeze",
         SqueezeState.RELEASED: "Squeeze_Release",
@@ -1553,11 +1598,14 @@ def compute_scope_observation(
         },
         "trend": {
             "state": _categorical_state_distribution(trend_values, direction_labels),
-            "transition": _transition_distribution(
-                [c for c, _ in trend_transition],
-                [p for _, p in trend_transition],
-                direction_labels,
-            ),
+            "transition": {
+                **_transition_distribution(
+                    [c for c, _ in trend_transition],
+                    [p for _, p in trend_transition],
+                    direction_labels,
+                ),
+                "changed_members": trend_changed_members,
+            },
             "continuous": trend_continuous,
             "segment_direction": _categorical_state_distribution(
                 segment_direction_values, segment_direction_labels
@@ -1576,6 +1624,20 @@ def compute_scope_observation(
             "dsa_vwap_dev_pct_distribution": {
                 **_participation_distribution(vwap_dev_values),
                 "mean": _mean(vwap_dev_values),
+            },
+            # [DSA correction] 趋势持续时间分布：已有成员事实 dsa_dir_bars ->
+            # 当前横截面分布（percentile + 已确认 duration buckets）。不另建算法。
+            "dsa_dir_bars_distribution": {
+                **_participation_distribution(
+                    [m.dsa_dir_bars for m in member_list]
+                ),
+                "mean": _mean([
+                    b for b in (m.dsa_dir_bars for m in member_list)
+                    if b is not None and math.isfinite(b)
+                ]),
+                "buckets": _duration_buckets(
+                    [m.dsa_dir_bars for m in member_list]
+                ),
             },
         },
         "structure": {

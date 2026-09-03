@@ -262,7 +262,7 @@ async def get_scope_diagnostics(
     # list_formally_published_review_dates 的 DB JOIN 内完成；broken pointer（pointer
     # 存在但 run 未正式发布）直接被排除，不会进入历史轴。
     formal_desc = await list_formally_published_review_dates(
-        db, limit=display_window + warmup_total + 100
+        db, to_date=trade_date, limit=display_window + warmup_total + 100
     )
     candidate_dates = [d for d in reversed(formal_desc) if from_date <= d <= trade_date]
 
