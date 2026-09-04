@@ -224,6 +224,19 @@ class MemberObservation:
     latest_ob_direction: Direction | None = None
     latest_eqh_present: bool = False
     latest_eql_present: bool = False
+    # CURRENT SMC owner (REVIEW-CURRENT-SMC-OWNER / MIXED_CONTRACT_BUG resolution):
+    # exact-T SMC facts consumed from the published Core(T) snapshot
+    # (``first_pyramid_flat`` ``fp_latest_*`` / ``fp_structure_event_*``), independent
+    # of History(T) event coverage.  CURRENT STATE owner (PRD §7.4 D): Current SMC
+    # = Core(T), immutable event evidence = History.  ``None``/``False`` when the
+    # exact-T Core snapshot is absent -> member contributes nothing to the Current
+    # SMC owner (never a History fallback).
+    latest_bos_level: str | None = None
+    latest_choch_level: str | None = None
+    current_structure_event_type: str | None = None
+    current_structure_event_direction: str | None = None
+    current_structure_event_level: str | None = None
+    current_only_present: bool = False
 
 
 def _safe_ratio(numerator: int, denominator: int) -> float | None:
@@ -1021,6 +1034,37 @@ def _structure_level_label(internal: bool | None) -> str | None:
     return "Internal" if internal else "Swing"
 
 
+def _normalize_structure_level(value: Any) -> str | None:
+    """Canonicalize a Core(T) structure-level string to the PRD-frozen
+    ``"Swing"`` / ``"Internal"`` case used by :func:`_structure_level_label` so a
+    Current SMC cell key matches ``structure.events`` (History) exactly."""
+    if value is None:
+        return None
+    s = str(value).strip().lower()
+    if s == "swing":
+        return "Swing"
+    if s == "internal":
+        return "Internal"
+    return None
+
+
+# Canonical event-direction string stored by the immutable event stream
+# (``bullish`` / ``bearish``); reverses the ``Direction`` normalization so
+# ``structure.current`` cells share the exact ``direction`` format as
+# ``structure.events`` (History).
+_CURRENT_EVENT_DIR: dict[Direction, str] = {
+    Direction.UP: "bullish",
+    Direction.DOWN: "bearish",
+    Direction.SIDEWAYS: "neutral",
+}
+
+
+def _canonical_event_direction(direction: Direction | None) -> str | None:
+    if direction is None:
+        return None
+    return _CURRENT_EVENT_DIR.get(direction, str(direction))
+
+
 def _aggregate_structure_events(
     events: Sequence[StructureEvent],
     valid_event_members: set[str] | None,
@@ -1133,6 +1177,114 @@ def _aggregate_structure_events(
         "cells": cells_out,
         "denominator": denominator,
     }
+
+
+def _aggregate_current_smc_events(
+    members: Sequence[MemberObservation], pit_set: set[str]
+) -> dict[str, Any]:
+    """Aggregate CURRENT SMC STATE from Core(T) exact-T member facts (PRD §7.4 D,
+    REVIEW-CURRENT-SMC-OWNER / MIXED_CONTRACT_BUG).
+
+    CURRENT STATE owner = Core(T).  The immutable event stream stays owned by
+    ``structure.events`` (History).  This block is the CURRENT owner: its
+    availability is driven by the exact-T Core(T) snapshot, INDEPENDENT of
+    History(T) event coverage.
+
+    Denominator = PIT(T) ∩ {members with a consumable exact-T Core(T) SMC fact}
+    (``current_only_present``).  Cell shape mirrors :func:`_aggregate_structure_events`
+    so the Explorer selection (:func:`select_smc_display_event`) is reused verbatim.
+
+    Status:
+    - ``ready`` when ≥1 PIT(T) member has a consumable Core(T) SMC fact
+      (BOS/CHoCH/OB/EQH/EQL).  A legal zero-event day -> ready + empty cells.
+    - ``unavailable`` (``CURRENT_SOURCE_UNAVAILABLE``) when no PIT(T) member has a
+      consumable Core(T) snapshot SMC fact.  This is a missing CURRENT SOURCE, not a
+      missing algorithm; immutable evidence is served separately by ``events``.
+    """
+    current_members = [
+        m for m in members if m.member_id in pit_set and m.current_only_present
+    ]
+    denominator = len(current_members)
+    if denominator == 0:
+        return {
+            "status": "unavailable",
+            "reason": (
+                "CURRENT_SOURCE_UNAVAILABLE: no PIT(T) member has a consumable "
+                "exact-T Core(T) snapshot SMC fact"
+            ),
+            "denominator": 0,
+            "cells": {"leveled": {}, "extreme": {}},
+        }
+
+    cells: dict[tuple[Any, ...], set[str]] = {}
+    cells_event_count: dict[tuple[Any, ...], int] = {}
+    for m in current_members:
+        if m.latest_bos_direction is not None:
+            _add_current_cell(cells, cells_event_count, (
+                "BOS", _canonical_event_direction(m.latest_bos_direction),
+                m.latest_bos_level or "Swing",
+            ), m.member_id)
+        if m.latest_choch_direction is not None:
+            _add_current_cell(cells, cells_event_count, (
+                "CHoCH", _canonical_event_direction(m.latest_choch_direction),
+                m.latest_choch_level or "Swing",
+            ), m.member_id)
+        if m.latest_ob_direction is not None:
+            # Core flat carries no OB structure level; represent as Swing OB_CREATED.
+            _add_current_cell(cells, cells_event_count, (
+                "OB_CREATED", _canonical_event_direction(m.latest_ob_direction), "Swing",
+            ), m.member_id)
+        if (
+            m.current_structure_event_type in ("BOS", "CHoCH")
+            and m.current_structure_event_direction is not None
+        ):
+            # Exact-T structure event (fp_structure_event_type) as a Current cell.
+            _add_current_cell(cells, cells_event_count, (
+                m.current_structure_event_type,
+                m.current_structure_event_direction,
+                m.current_structure_event_level or "Swing",
+            ), m.member_id)
+        if m.latest_eqh_present:
+            _add_current_cell(cells, cells_event_count, ("EQH",), m.member_id)
+        if m.latest_eql_present:
+            _add_current_cell(cells, cells_event_count, ("EQL",), m.member_id)
+
+    cells_out: dict[str, Any] = {"leveled": {}, "extreme": {}}
+    for key, member_ids in cells.items():
+        member_count = len(member_ids)
+        event_count = cells_event_count[key]
+        if len(key) == 3:
+            cell_name = f"{key[0]}_{key[1]}_{key[2]}"
+            cells_out["leveled"][cell_name] = {
+                "event_type": key[0],
+                "direction": key[1],
+                "structure_level": key[2],
+                "event_count": event_count,
+                "member_count": member_count,
+                "member_ratio": _safe_ratio(member_count, denominator),
+            }
+        else:
+            cells_out["extreme"][key[0]] = {
+                "event_count": event_count,
+                "member_count": member_count,
+                "member_ratio": _safe_ratio(member_count, denominator),
+            }
+
+    return {
+        "status": "ready",
+        "cells": cells_out,
+        "denominator": denominator,
+    }
+
+
+def _add_current_cell(
+    cells: dict[tuple[Any, ...], set[str]],
+    counts: dict[tuple[Any, ...], int],
+    key: tuple[Any, ...],
+    member_id: str,
+) -> None:
+    cells.setdefault(key, set()).add(member_id)
+    counts[key] = counts.get(key, 0) + 1
 
 
 def _reject_if_invalid_members(
@@ -1577,6 +1729,10 @@ def compute_scope_observation(
         list(events) if events is not None else [],
         valid_event_members,
     )
+    # CURRENT SMC STATE (REVIEW-CURRENT-SMC-OWNER): exact-T Core(T) owner,
+    # INDEPENDENT of History(T) event coverage.  Immutable evidence stays in
+    # ``event_facts``.  A missing History(T) coverage must NOT suppress Current.
+    current_smc_facts = _aggregate_current_smc_events(member_list, pit_set)
 
     direction_labels = {
         Direction.UP: _STATE_LABELS[Direction.UP],
@@ -1753,6 +1909,7 @@ def compute_scope_observation(
                 trailing_bottom_values
             ),
             "events": event_facts,
+            "current": current_smc_facts,
         },
         "momentum": {
             "state": _categorical_state_distribution(momentum_values, momentum_labels),

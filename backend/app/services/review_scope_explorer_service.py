@@ -164,6 +164,13 @@ def build_compare_facts(
 
     structure = obs.get("structure")
     events = structure.get("events") if isinstance(structure, dict) else None
+    # CURRENT SMC owner (REVIEW-CURRENT-SMC-OWNER): prefer the exact-T Core(T)
+    # ``current`` block over the History immutable evidence (``events``).  For
+    # historical dates ``current`` is absent -> fall back to ``events``.  There is
+    # NO History fallback when ``current`` is present but unavailable (no frontend
+    # synthesis, no History(T) re-gate for Current).
+    current = structure.get("current") if isinstance(structure, dict) else None
+    smc_source = current if isinstance(current, dict) else events
 
     momentum = obs.get("momentum")
     change = momentum.get("change") if isinstance(momentum, dict) else None
@@ -193,7 +200,7 @@ def build_compare_facts(
             "durationBars": _num(continuous.get("dsa_dir_bars")),
             "vwapDevPct": _num(continuous.get("dsa_vwap_dev_pct")),
         },
-        "smc": select_smc_display_event(events),
+        "smc": select_smc_display_event(smc_source),
         "momentum": {
             # Board parity: denominator is producer-owned; frontend must not redefine it.
             "enhancingRatio": _num(change.get("enhancing_ratio")),

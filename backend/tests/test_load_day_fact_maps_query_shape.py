@@ -1,7 +1,7 @@
 """Review-v2 load_day_fact_maps 契约 / 回归 / lineage / memory-bound 测试。
 
 覆盖：
-- P1-B VERSION：REVIEW_ALGORITHM_VERSION == review-2.0.0；同版本 history 仍 eligible
+- P1-B VERSION：REVIEW_ALGORITHM_VERSION == review-2.0.1；同版本 history 仍 eligible
 - P1-C HISTORY_STATE lineage：CURRENT T 状态为权威；NULL/不一致 fail closed
 - P1-D MEMORY BOUND：history 查询 bounded（无 <= T 全扫描）；Bar 窗口分块
 - P2 SNAPSHOT parity：stock_core 模式错误 trade_date fail closed
@@ -164,15 +164,15 @@ def _run(**kw):
 # P1-B VERSION COMPATIBILITY
 # =====================================================================
 class TestReviewAlgorithmVersion:
-    def test_version_is_review_2_0_0(self) -> None:
-        assert REVIEW_ALGORITHM_VERSION == "review-2.0.0"
+    def test_version_is_review_2_0_1(self) -> None:
+        assert REVIEW_ALGORITHM_VERSION == "review-2.0.1"
 
     def test_same_version_history_eligible(self) -> None:
         # load_metric_history 用 algorithm_version == run.algorithm_version 过滤；
         # 同版本历史系列保持 eligible（不创建隔离）。
         from app.services.review_metric_observation_service import load_metric_history
         assert callable(load_metric_history)
-        assert REVIEW_ALGORITHM_VERSION == "review-2.0.0"
+        assert REVIEW_ALGORITHM_VERSION == "review-2.0.1"
 
 
 # =====================================================================

@@ -36,7 +36,11 @@ from typing import Any
 import pandas as pd
 
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
-from app.domain.review.scope_observation import MemberObservation
+from app.domain.review.scope_observation import (
+    MemberObservation,
+    _canonical_event_direction,
+    _normalize_structure_level,
+)
 from app.services.first_pyramid_semantic_adapter import FirstPyramidSemanticAdapter
 from app.services.volume_context import (
     VolumeContextData,
@@ -457,6 +461,39 @@ def build_member_observation_from_facts(
             if _board_flat is not None
             else False
         ),
+        # CURRENT SMC owner (REVIEW-CURRENT-SMC-OWNER): exact-T SMC facts from the
+        # published Core(T) snapshot (``first_pyramid_flat``).  Leveled Swing/Internal
+        # from ``fp_latest_bos_level`` / ``fp_latest_choch_level``; the exact-T
+        # structure event from ``fp_structure_event_type`` / ``*_direction`` /
+        # ``*_level``.  These feed the Current SMC owner (independent of History(T)
+        # event coverage).  ``current_only_present`` flags whether this member had a
+        # consumable exact-T Core snapshot (drives the Current SMC denominator).
+        latest_bos_level=_normalize_structure_level(
+            _board_flat.get("fp_latest_bos_level")
+        )
+        if _board_flat is not None
+        else None,
+        latest_choch_level=_normalize_structure_level(
+            _board_flat.get("fp_latest_choch_level")
+        )
+        if _board_flat is not None
+        else None,
+        current_structure_event_type=(
+            _categorical(_board_flat.get("fp_structure_event_type"))
+            if _board_flat is not None
+            else None
+        ),
+        current_structure_event_direction=_canonical_event_direction(
+            _board_adapter.event_direction("fp_structure_event_direction")
+            if _board_adapter is not None
+            else None
+        ),
+        current_structure_event_level=_normalize_structure_level(
+            _board_flat.get("fp_structure_event_level")
+        )
+        if _board_flat is not None
+        else None,
+        current_only_present=raw.current_only is not None,
     )
 
 
