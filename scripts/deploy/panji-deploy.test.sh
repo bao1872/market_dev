@@ -478,6 +478,97 @@ assert_code_contains "DEFECT2 纯 Compose 变化走 reconcile（CASE A）" \
 #   2) 万一被测源码 fail()，只终止子 shell，不吞掉本节其余断言之外的套件。
 # 断言结果以 `RESULT|PASS|label` 行回传，由父 shell 统一用 ok/bad 计数；
 # 同时校验断言条数（防子 shell 早退造成静默漏跑）。
+# ---------------------------------------------------------------------------
+echo "== 11/11 frontend artifact identity (DEPLOY-4, artifact owner) =="
+# 纯 shell 契约镜像：manifest 是 frontend 唯一身份来源，且只能由 build 生成。
+# deployment SHA ≠ 必然等于 frontend artifact SHA：只有 FRONTEND_CHANGED 时才要求 == TARGET_SHA。
+_fe_sha() {
+    local f="$1"
+    [[ -f "$f" ]] || { echo ""; return; }
+    python3 -c 'import sys,json; print(json.load(open(sys.argv[1])).get("git_sha",""))' "$f" 2>/dev/null || echo ""
+}
+# 镜像 verify_deployment CASE A/B 的 identity 决策（repo/live/container/http 四层）
+_fe_verify() {
+    # $1=FRONTEND_CHANGED(t/f) $2=TARGET_SHA $3=PREDEPLOY_FRONTEND_SHA $4=repo $5=live $6=container $7=http
+    local changed="$1" target="$2" predeploy="$3" repo="$4" live="$5" cont="$6" http="$7" expect
+    if [[ "$changed" == "t" ]]; then
+        expect="$target"
+        [[ "$(_fe_sha "$repo")" == "$expect" ]] || return 1
+    else
+        if [[ -z "$predeploy" ]]; then return 1; fi   # legacy bootstrap → fail-closed
+        expect="$predeploy"
+    fi
+    [[ "$(_fe_sha "$live")" == "$expect" ]] || return 1
+    [[ "$(_fe_sha "$cont")" == "$expect" ]] || return 1
+    [[ "$(_fe_sha "$http")" == "$expect" ]] || return 1
+    return 0
+}
+_fe_mk() { printf '{"git_sha":"%s","build_time":"t"}' "$1" > "$2"; }
+
+# ---- 静态契约：源码实现 artifact owner 语义 ----
+assert_code_contains "build 物化 manifest git_sha=TARGET_SHA" 'git_sha.*TARGET_SHA' "${SERVER_SCRIPT}"
+assert_code_contains "FRONTEND_CHANGED 由 runtime||environment 决定" 'FRONTEND_CHANGED=true' "${SERVER_SCRIPT}"
+assert_code_contains "部署前只读捕获 PREDEPLOY_FRONTEND_SHA" 'capture_predeploy_frontend_identity' "${SERVER_SCRIPT}"
+assert_code_contains "verify CASE A 用 TARGET_SHA" 'fe_expect="\$\{TARGET_SHA\}"' "${SERVER_SCRIPT}"
+assert_code_contains "verify CASE B 用 PREDEPLOY_FRONTEND_SHA" 'fe_expect="\$\{PREDEPLOY_FRONTEND_SHA\}"' "${SERVER_SCRIPT}"
+assert_code_contains "legacy bootstrap fail-closed" 'FRONTEND_ARTIFACT_IDENTITY_MISSING' "${SERVER_SCRIPT}"
+
+_FE_TMP="$(mktemp -d -t panji-fe-owner.XXXXXX)"
+_T="7fb5cf1b5abaa5ae8fb12dde0a051f299cdd46e1"
+_P="59ad8938bb23588ba049e091a8cec8dee80aa0f8"
+
+# 1. changed frontend: build manifest == TARGET_SHA
+_fe_mk "${_T}" "${_FE_TMP}/repo.json"
+[[ "$(_fe_sha "${_FE_TMP}/repo.json")" == "${_T}" ]] && ok "1. changed: build manifest == TARGET_SHA" || bad "1. changed: build manifest == TARGET_SHA"
+
+# 2. changed frontend: repo/live/container/http == TARGET_SHA (PASS)
+_fe_mk "${_T}" "${_FE_TMP}/live.json"; _fe_mk "${_T}" "${_FE_TMP}/cont.json"; _fe_mk "${_T}" "${_FE_TMP}/http.json"
+_fe_verify t "${_T}" "${_P}" "${_FE_TMP}/repo.json" "${_FE_TMP}/live.json" "${_FE_TMP}/cont.json" "${_FE_TMP}/http.json" \
+    && ok "2. changed: repo/live/container/http == TARGET_SHA" || bad "2. changed: repo/live/container/http == TARGET_SHA"
+
+# 3. unchanged frontend: TARGET_SHA != PREDEPLOY, verify PASS
+_fe_mk "${_P}" "${_FE_TMP}/live2.json"; _fe_mk "${_P}" "${_FE_TMP}/cont2.json"; _fe_mk "${_P}" "${_FE_TMP}/http2.json"
+_fe_verify f "${_T}" "${_P}" "" "${_FE_TMP}/live2.json" "${_FE_TMP}/cont2.json" "${_FE_TMP}/http2.json" \
+    && ok "3. unchanged: TARGET_SHA!=PREDEPLOY, verify PASS" || bad "3. unchanged: TARGET_SHA!=PREDEPLOY, verify PASS"
+
+# 4. unchanged frontend: live/container/http mismatch → FAIL
+_fe_mk "${_P}" "${_FE_TMP}/live3.json"; _fe_mk "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" "${_FE_TMP}/cont3.json"; _fe_mk "${_P}" "${_FE_TMP}/http3.json"
+_fe_verify f "${_T}" "${_P}" "" "${_FE_TMP}/live3.json" "${_FE_TMP}/cont3.json" "${_FE_TMP}/http3.json" \
+    && bad "4. unchanged: mismatch 应 FAIL" || ok "4. unchanged: live/container/http mismatch → FAIL"
+
+# 5. unchanged frontend: predeploy manifest missing → FAIL CLOSED
+_fe_verify f "${_T}" "" "" "${_FE_TMP}/live.json" "${_FE_TMP}/cont.json" "${_FE_TMP}/http.json" \
+    && bad "5. unchanged: predeploy missing 应 FAIL" || ok "5. unchanged: predeploy manifest missing → FAIL CLOSED"
+
+# 6. missing manifest → FAIL
+_fe_verify t "${_T}" "${_P}" "${_FE_TMP}/nope.json" "${_FE_TMP}/live.json" "${_FE_TMP}/cont.json" "${_FE_TMP}/http.json" \
+    && bad "6. missing manifest 应 FAIL" || ok "6. missing manifest → FAIL"
+
+# 7. malformed → FAIL
+printf 'not json {' > "${_FE_TMP}/bad.json"
+_fe_verify t "${_T}" "${_P}" "${_FE_TMP}/bad.json" "${_FE_TMP}/live.json" "${_FE_TMP}/cont.json" "${_FE_TMP}/http.json" \
+    && bad "7. malformed 应 FAIL" || ok "7. malformed → FAIL"
+
+# 8. changed frontend wrong SHA → FAIL
+_fe_mk "1111111111111111111111111111111111111111" "${_FE_TMP}/repo8.json"
+_fe_verify t "${_T}" "${_P}" "${_FE_TMP}/repo8.json" "${_FE_TMP}/live.json" "${_FE_TMP}/cont.json" "${_FE_TMP}/http.json" \
+    && bad "8. changed wrong SHA 应 FAIL" || ok "8. changed frontend wrong SHA → FAIL"
+
+# 9. restore with frontend changed: rebuild previous artifact, manifest == PREVIOUS_SHA（同源）
+assert_code_contains "9. restore changed: 真实 build_frontend_dist" 'FRONTEND_CHANGED}"' "${SERVER_SCRIPT}"
+assert_code_contains "9. restore changed: build 用 TARGET_SHA(=PREVIOUS_SHA)" 'git_sha.*TARGET_SHA' "${SERVER_SCRIPT}"
+
+# 10. restore with frontend unchanged: frontend manifest untouched（不调用禁止的改写 helper）
+assert_code_absent "10. restore unchanged: 无 rewrite-manifest helper" 'set_frontend_manifest_sha' "${SERVER_SCRIPT}"
+
+# 11. 显式断言：不存在只改写 manifest git_sha 而不 rebuild artifact 的 helper
+assert_code_absent "11. 禁止只改写 manifest 而不 build" 'set_frontend_manifest_sha' "${SERVER_SCRIPT}"
+
+# 12. DEPLOY-1 package classifier remains green
+assert_code_contains "12. DEPLOY-1 frontend_package_environment_changed 仍生效" 'frontend_package_environment_changed' "${SERVER_SCRIPT}"
+
+rm -rf "${_FE_TMP}"
+
 echo "== P1-A/P1-B rollback owner 真实拓扑 + dry-run 零容器 mutation =="
 _P1_RESULTS="$(mktemp -t panji-p1-results.XXXXXX)"
 export _P1_RESULTS

@@ -95,6 +95,10 @@ FRONTEND_RUNTIME_CHANGED=false
 MIGRATION_CHANGED=false
 BACKEND_ENVIRONMENT_CHANGED=false
 FRONTEND_ENVIRONMENT_CHANGED=false
+# [DEPLOY-4] artifact owner 语义：本轮是否实际 rebuild/sync frontend artifact。
+FRONTEND_CHANGED=false
+# [DEPLOY-4] 部署前（mutation 前只读捕获）live frontend artifact 身份；legacy bootstrap 时为空。
+PREDEPLOY_FRONTEND_SHA=""
 CAPTURE_ENVIRONMENT_CHANGED=false
 COMPOSE_RUNTIME_CHANGED=false
 
@@ -714,6 +718,13 @@ classify_changes() {
         COMPOSE_RUNTIME_CHANGED=true
     fi
 
+    # [DEPLOY-4] artifact owner 语义：FRONTEND_CHANGED 决定本轮是否 rebuild/sync frontend artifact。
+    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+        FRONTEND_CHANGED=true
+    else
+        FRONTEND_CHANGED=false
+    fi
+
     log "  backend_runtime_changed=${BACKEND_RUNTIME_CHANGED}"
     log "  frontend_runtime_changed=${FRONTEND_RUNTIME_CHANGED}"
     log "  migration_changed=${MIGRATION_CHANGED}"
@@ -828,6 +839,10 @@ build_frontend_dist() {
     # 产物落到 ${REPO_ROOT}/frontend/dist（与 frontend/Dockerfile 同一基础镜像，
     # 同为远端服务器上生成，非本地 dist）。
     local node_image="node:20-alpine@sha256:fb4cd12c85ee03686f6af5362a0b0d56d50c58a04632e6c0fb8363f609372293"
+    # [DEPLOY-4] 构建身份：显式注入部署 runner 明确提供的 TARGET_SHA 与一次性 BUILD_TIME。
+    # 禁止回退到 dev / 根据 repo HEAD / asset filename 猜版本；manifest 是生产身份唯一来源。
+    local build_time
+    build_time="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cd "${REPO_ROOT}/frontend"
     if [[ "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
         log "前端依赖或构建环境变化，先执行 npm ci（node:20-alpine 容器内）"
@@ -839,8 +854,57 @@ build_frontend_dist() {
     run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
         docker run --rm -v "${REPO_ROOT}/frontend:/app" -w /app \
         -e NODE_OPTIONS=--max-old-space-size=1024 \
+        -e GIT_SHA="${TARGET_SHA}" \
+        -e BUILD_TIME="${build_time}" \
         "${node_image}" npm run build || return 1
     cd "${REPO_ROOT}"
+
+    # [DEPLOY-4] 物化构建身份 manifest：git_sha 必须来自显式注入的 TARGET_SHA。
+    # 该文件是后续 pre-sync / post-sync / container / HTTP 四层 identity gate 的唯一判据来源。
+    local manifest="${REPO_ROOT}/frontend/dist/panji-build.json"
+    cat > "${manifest}" <<EOF
+{
+  "git_sha": "${TARGET_SHA}",
+  "build_time": "${build_time}"
+}
+EOF
+    log "已生成 frontend 构建身份 manifest: ${manifest} (git_sha=${TARGET_SHA}, build_time=${build_time})"
+}
+
+# [DEPLOY-4] frontend 构建身份 manifest 校验 / 改写。
+# manifest 是生产 frontend artifact 的唯一身份来源；其 git_sha 必须显式等于注入的 TARGET_SHA。
+verify_frontend_manifest() {
+    # $1=manifest 路径  $2=期望 git_sha
+    local manifest="$1" expected="$2" git_sha
+    [[ -f "${manifest}" ]] || { log "frontend build manifest 缺失: ${manifest}"; return 1; }
+    git_sha="$(python3 -c 'import sys,json; print(json.load(open(sys.argv[1])).get("git_sha",""))' "${manifest}" 2>/dev/null || echo "")"
+    if [[ -z "${git_sha}" ]]; then
+        log "frontend build manifest 无 git_sha 或 JSON 非法: ${manifest}"
+        return 1
+    fi
+    if [[ "${git_sha}" != "${expected}" ]]; then
+        log "frontend build manifest git_sha 不匹配: 期望 ${expected}, 实际 ${git_sha}"
+        return 1
+    fi
+    return 0
+}
+
+# [DEPLOY-4] 读取 frontend manifest 的 git_sha（缺失/非法输出空串，不 return 非0，便于上层判等）。
+_read_frontend_manifest_sha() {
+    local manifest="$1"
+    [[ -f "${manifest}" ]] || { echo ""; return; }
+    python3 -c 'import sys,json; print(json.load(open(sys.argv[1])).get("git_sha",""))' "${manifest}" 2>/dev/null || echo ""
+}
+
+# [DEPLOY-4] 只读捕获部署前 live frontend artifact 身份；manifest 缺失/非法时 PREDEPLOY_FRONTEND_SHA 留空
+# （legacy bootstrap 状态，绝不假装等于 PREVIOUS_SHA 或 TARGET_SHA）。
+capture_predeploy_frontend_identity() {
+    PREDEPLOY_FRONTEND_SHA=""
+    local manifest="${LIVE_ROOT}/frontend/dist/panji-build.json"
+    if [[ -f "${manifest}" ]]; then
+        PREDEPLOY_FRONTEND_SHA="$(_read_frontend_manifest_sha "${manifest}")"
+    fi
+    log "[DEPLOY-4] 部署前 live frontend artifact 身份: ${PREDEPLOY_FRONTEND_SHA:-空(legacy bootstrap / manifest 缺失)}"
 }
 
 sync_backend_runtime() {
@@ -882,6 +946,11 @@ sync_frontend_runtime() {
         return 0
     fi
 
+    # [DEPLOY-4] PRE-SYNC GATE：repo dist 必须携带 git_sha == TARGET_SHA 的 manifest，
+    # 否则拒绝 rsync（避免把无身份 / 旧身份 artifact 推上线 → false-green）。
+    verify_frontend_manifest "${REPO_ROOT}/frontend/dist/panji-build.json" "${TARGET_SHA}" \
+        || fail "PRE-SYNC GATE 失败：repo dist/panji-build.json 缺失/非法/SHA 不匹配，拒绝 sync"
+
     [[ -d "${REPO_ROOT}/frontend/dist" ]] || fail "frontend/dist 不存在，前端构建可能失败"
 
     # [E2.1 P1-A §6] 由此 mutator 自己推进 mutation stage（dry-run 已提前 return）。
@@ -893,6 +962,16 @@ sync_frontend_runtime() {
         "${REPO_ROOT}/frontend/dist/" "${LIVE_ROOT}/frontend/dist/"
     # capture 静态目录是 frontend nginx 的嵌套挂载点，必须存在
     mkdir -p "${LIVE_ROOT}/frontend/dist/static/captures"
+
+    # [DEPLOY-4] POST-SYNC GATE + index.html hash 一致性（repo == live）。
+    verify_frontend_manifest "${LIVE_ROOT}/frontend/dist/panji-build.json" "${TARGET_SHA}" \
+        || fail "POST-SYNC GATE 失败：live dist/panji-build.json git_sha 不匹配 TARGET_SHA"
+    local repo_idx live_idx
+    repo_idx="$(sha256sum "${REPO_ROOT}/frontend/dist/index.html" 2>/dev/null | awk '{print $1}')"
+    live_idx="$(sha256sum "${LIVE_ROOT}/frontend/dist/index.html" 2>/dev/null | awk '{print $1}')"
+    if [[ -n "${repo_idx}" && -n "${live_idx}" && "${repo_idx}" != "${live_idx}" ]]; then
+        fail "frontend index.html hash 不一致（repo != live）：repo=${repo_idx} live=${live_idx}"
+    fi
 
     log "frontend dist 同步完成"
 }
@@ -1923,10 +2002,13 @@ deploy() {
     # 无环境变化时只记录「零构建」决策，不执行任何 build。
     build_environment_images
 
+    # [DEPLOY-4] 只读捕获部署前 live frontend artifact 身份（legacy bootstrap 时为空的合法状态）。
+    capture_predeploy_frontend_identity
+
     # 2. 前端 dist（运行代码 / 运行环境 / 首次 Live Mount 都需要重新产出 dist）
     FAILURE_STAGE="frontend_build"
     local need_frontend=false
-    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+    if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
         need_frontend=true
         build_frontend_dist
         sync_frontend_runtime
@@ -2099,6 +2181,14 @@ verify_deployment() {
         log "[dry-run]   trading-backend Mounts 包含 ${LIVE_ROOT}"
         log "[dry-run]   trading-frontend Mounts 包含 ${LIVE_ROOT}/frontend/dist"
         log "[dry-run]   全部 ${#PYTHON_SERVICES[@]} 个 Python 服务 Mounts 包含 ${LIVE_ROOT}"
+        if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
+            log "[dry-run]   frontend 重建：repo/live/container/HTTP manifest git_sha == TARGET_SHA"
+        else
+            log "[dry-run]   frontend 未变：live/container/HTTP manifest git_sha == PREDEPLOY_FRONTEND_SHA"
+            if [[ -z "${PREDEPLOY_FRONTEND_SHA}" ]]; then
+                log "[dry-run]   （legacy bootstrap：PREDEPLOY_FRONTEND_SHA 为空 → 真实部署将 FRONTEND_ARTIFACT_IDENTITY_MISSING fail-closed）"
+            fi
+        fi
         return 0
     fi
 
@@ -2228,6 +2318,77 @@ verify_deployment() {
     done
     log "关键容器检查通过"
 
+    # [DEPLOY-4] frontend artifact identity gates（artifact owner 语义）。
+    # CASE A — 本轮 frontend 实际重建（FRONTEND_CHANGED=true）：
+    #   repo / live / container / HTTP 的 manifest.git_sha 必须 == TARGET_SHA。
+    # CASE B — 本轮 frontend 未变（FRONTEND_CHANGED=false）：
+    #   live / container / HTTP 的 manifest.git_sha 必须 == PREDEPLOY_FRONTEND_SHA（部署前记录的 live 身份），
+    #   不要求 == TARGET_SHA（deployment SHA ≠ 必然等于 frontend artifact SHA）。
+    #   PREDEPLOY_FRONTEND_SHA 为空（manifest missing）→ legacy bootstrap，fail-closed。
+    local fe_expect fe_repo_sha fe_live_sha fe_container_sha fe_http_sha
+    if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
+        fe_expect="${TARGET_SHA}"
+        fe_repo_sha="$(_read_frontend_manifest_sha "${REPO_ROOT}/frontend/dist/panji-build.json")"
+        if [[ "${fe_repo_sha}" != "${fe_expect}" ]]; then
+            log "frontend repo manifest git_sha 不匹配（CASE A 应 == TARGET_SHA）: 期望 ${fe_expect}, 实际 ${fe_repo_sha:-空}"
+            return 1
+        fi
+        log "frontend repo manifest git_sha 一致: ${fe_repo_sha}"
+    else
+        if [[ -z "${PREDEPLOY_FRONTEND_SHA}" ]]; then
+            log "FRONTEND_ARTIFACT_IDENTITY_MISSING: frontend 本轮未变但部署前 live 无 panji-build.json manifest（legacy bootstrap 状态）"
+            return 1
+        fi
+        fe_expect="${PREDEPLOY_FRONTEND_SHA}"
+        log "frontend 本轮未变：以 PREDEPLOY_FRONTEND_SHA=${fe_expect} 校验 live/container/HTTP 三层一致性"
+    fi
+
+    # live 层（bind mount 源）
+    fe_live_sha="$(_read_frontend_manifest_sha "${LIVE_ROOT}/frontend/dist/panji-build.json")"
+    if [[ "${fe_live_sha}" != "${fe_expect}" ]]; then
+        log "frontend live manifest git_sha 不匹配: 期望 ${fe_expect}, 实际 ${fe_live_sha:-空}"
+        return 1
+    fi
+    log "frontend live manifest git_sha 一致: ${fe_live_sha}"
+
+    # container 层（mount 内容，证明不是旧版本）
+    local fe_container_manifest
+    fe_container_manifest="$(docker exec trading-frontend cat /usr/share/nginx/html/panji-build.json 2>/dev/null || echo "")"
+    if [[ -z "${fe_container_manifest}" ]]; then
+        log "trading-frontend 内 panji-build.json 不可读（mount 缺失或内容未同步）"
+        return 1
+    fi
+    fe_container_sha="$(echo "${fe_container_manifest}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("git_sha",""))' 2>/dev/null || echo "")"
+    if [[ "${fe_container_sha}" != "${fe_expect}" ]]; then
+        log "frontend container manifest git_sha 不匹配（mount 内容可能为旧版本）: 期望 ${fe_expect}, 实际 ${fe_container_sha:-空}"
+        return 1
+    fi
+    log "trading-frontend manifest git_sha 一致: ${fe_container_sha}"
+
+    # HTTP 层（nginx 静态 serve 最终 owner）
+    local fe_http_manifest
+    fe_http_manifest="$(curl -sf http://127.0.0.1/panji-build.json 2>/dev/null || echo "")"
+    if [[ -z "${fe_http_manifest}" ]]; then
+        log "HTTP /panji-build.json 不可达（nginx 未提供静态 manifest）"
+        return 1
+    fi
+    fe_http_sha="$(echo "${fe_http_manifest}" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("git_sha",""))' 2>/dev/null || echo "")"
+    if [[ "${fe_http_sha}" != "${fe_expect}" ]]; then
+        log "HTTP /panji-build.json git_sha 不匹配（最终 static serve 可能为旧版本）: 期望 ${fe_expect}, 实际 ${fe_http_sha:-空}"
+        return 1
+    fi
+    log "HTTP /panji-build.json git_sha 一致: ${fe_http_sha}"
+
+    # repo/live index.html hash 一致性（仅 CASE A 需要；CASE B 不 rebuild，repo 无新 index）
+    if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
+        local repo_idx live_idx
+        repo_idx="$(sha256sum "${REPO_ROOT}/frontend/dist/index.html" 2>/dev/null | awk '{print $1}')"
+        live_idx="$(sha256sum "${LIVE_ROOT}/frontend/dist/index.html" 2>/dev/null | awk '{print $1}')"
+        if [[ -n "${repo_idx}" && -n "${live_idx}" && "${repo_idx}" != "${live_idx}" ]]; then
+            fail "frontend index.html hash 不一致（repo != live）：repo=${repo_idx} live=${live_idx}"
+        fi
+    fi
+
     local scheduler_names=(trading-worker-bars-scheduler trading-worker-strategy-scheduler trading-worker-calendar)
     for s in "${scheduler_names[@]}"; do
         local count
@@ -2341,11 +2502,17 @@ restore_files_to_previous_sha() {
     fi
 
     sync_backend_runtime
-    if [[ "${FRONTEND_RUNTIME_CHANGED}" == "true" || "${FRONTEND_ENVIRONMENT_CHANGED}" == "true" ]]; then
+    if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
         build_frontend_dist
         sync_frontend_runtime
     fi
     write_runtime_sha
+
+    # [DEPLOY-4] restore 契约：frontend artifact 身份由 build_frontend_dist 同源生成。
+    # 若本轮 frontend 实际变化（FRONTEND_CHANGED=true），上方已 git checkout PREVIOUS_SHA 并
+    # build_frontend_dist（TARGET_SHA 临时=PREVIOUS_SHA）→ manifest 与 bundle 同源=PREVIOUS_SHA；
+    # 若本轮 frontend 未变化（FRONTEND_CHANGED=false），则不触碰 frontend artifact / manifest
+    # （保留 PREDEPLOY_FRONTEND_SHA 身份）。禁止只改写 panji-build.json git_sha 而不重建 artifact。
 
     TARGET_SHA="${saved_target_sha}"
     log "文件层已恢复到 ${PREVIOUS_SHA}"
