@@ -62,6 +62,12 @@ CORE_FLAT = {
     "fp_trend_strength": 0.85,
     "fp_trend_bars": 7,
     "fp_dsa_vwap_dev_pct": -1.23,
+    # Segment continuous facts the Core flat carries (segment_bars /
+    # segment_change_pct / segment_slope) — added 2026-09-04 to exercise the
+    # segment mapping-gap fix.
+    "fp_segment_bars": 12,
+    "fp_segment_change_pct": 3.4,
+    "fp_segment_slope": -0.021,
 }
 
 # A conflicting History(T) state_payload.  If Current(T) were owned by History,
@@ -76,6 +82,10 @@ HISTORY_STATE = {
     "volume_ratio_20": 0.5,
     "volume_percentile_20": 10,
     "price_position_120d": 0.2,
+    # Conflicting Segment values — must NOT leak into Current(T) (Core owns it).
+    "segment_bars": 99,
+    "segment_change_pct": -9.9,
+    "segment_slope": 0.5,
 }
 
 
@@ -119,6 +129,10 @@ def test_current_independent_of_history_presence():
     assert cont_with["volume_ratio_20"] == 1.34   # from Core fp_volume_ratio20, NOT History 0.5
     assert cont_with["sqzmom_val"] == 0.42        # from Core fp_sqzmom_value
     assert cont_with["momentum_direction"] == "扩张"  # from Core, NOT History down
+    # Segment Current facts come from Core flat, NOT History state_payload.
+    assert cont_with["segment_bars"] == 12          # from Core fp_segment_bars, NOT History 99
+    assert cont_with["segment_change_pct"] == 3.4  # from Core fp_segment_change_pct, NOT -9.9
+    assert cont_with["segment_slope"] == -0.021    # from Core fp_segment_slope, NOT 0.5
 
 
 def test_history_raw_keys_not_consumed_for_current():
@@ -329,3 +343,95 @@ def test_build_member_observations_dsa_independent_of_history_presence():
     assert with_hist[0].regime_strength == without_hist[0].regime_strength == 0.85
     assert with_hist[0].dsa_dir_bars == without_hist[0].dsa_dir_bars == 7
     assert with_hist[0].dsa_vwap_dev_pct == without_hist[0].dsa_vwap_dev_pct == -1.23
+
+
+# ---------------------------------------------------------------------------
+# REVIEW SEGMENT MAPPER GAP FIX (2026-09-04) — parallel test layers to the DSA
+# fix above. Root cause: snapshot_flat_to_continuous omitted fp_segment_bars /
+# fp_segment_change_pct / fp_segment_slope, so Current(T) segment_bars /
+# segment_change_pct / segment_slope were always None even when the Core snapshot
+# was present. Same mapping-gap class as DSA.
+# ---------------------------------------------------------------------------
+
+
+def test_snapshot_flat_to_continuous_maps_segment_from_core_flat():
+    """Layer 1 (mapper unit): Core flat Segment keys MUST map into continuous."""
+    cont = snapshot_flat_to_continuous(CORE_FLAT)
+    assert cont["segment_bars"] == 12
+    assert cont["segment_change_pct"] == 3.4
+    assert cont["segment_slope"] == -0.021
+
+
+def test_snapshot_flat_to_continuous_segment_none_when_absent_or_nonfinite():
+    """Layer 1 (mapper unit): Segment stays None (never History / 0) when the Core
+    flat lacks the key or the value is non-finite.
+    """
+    partial = {"fp_trend_direction": "上行"}  # no segment keys
+    cont = snapshot_flat_to_continuous(partial)
+    assert cont["segment_bars"] is None
+    assert cont["segment_change_pct"] is None
+    assert cont["segment_slope"] is None
+
+    nonfinite = {
+        "fp_segment_bars": "not-a-number",
+        "fp_segment_change_pct": None,
+        "fp_segment_slope": float("nan"),
+    }
+    cont2 = snapshot_flat_to_continuous(nonfinite)
+    assert cont2["segment_bars"] is None       # _number rejects non-numeric
+    assert cont2["segment_change_pct"] is None
+    assert cont2["segment_slope"] is None       # _number rejects nan
+
+
+def test_build_member_observations_segment_owned_by_core_not_history():
+    """Layer 2 (current-owner path contract): Current Segment must come from the
+    Core(T) flat, NOT a conflicting History(T) state_payload.
+    """
+    inst = uuid.uuid4()
+    td = datetime.date(2026, 8, 25)
+
+    # History(T) claims OPPOSITE Segment values.
+    history_state_t = {
+        "segment_bars": 999,
+        "segment_change_pct": -50.0,
+        "segment_slope": 42.0,
+    }
+    current_only = {str(inst): {_BOARD_CURRENT_FLAT_KEY: dict(CORE_FLAT)}}
+
+    members = _build_member_observations(
+        [inst],
+        trade_date=td,
+        t1=None,
+        states_t={inst: history_state_t},   # conflicting History present
+        states_t1={},
+        bars={inst: _MockBars()},
+        current_only_facts=current_only,
+    )
+    assert len(members) == 1
+    obs = members[0]
+    # Segment from Core flat (12 / 3.4 / -0.021), NOT History (999 / -50 / 42).
+    assert obs.segment_bars == 12
+    assert obs.segment_change_pct == 3.4
+    assert obs.segment_slope == -0.021
+
+
+def test_build_member_observations_segment_independent_of_history_presence():
+    """Layer 2 (KPI-1 for Segment): same Core flat -> same Current Segment whether
+    or not a (conflicting) History(T) state exists.  No fallback to History.
+    """
+    inst = uuid.uuid4()
+    td = datetime.date(2026, 8, 25)
+    current_only = {str(inst): {_BOARD_CURRENT_FLAT_KEY: dict(CORE_FLAT)}}
+
+    with_hist = _build_member_observations(
+        [inst], trade_date=td, t1=None,
+        states_t={inst: {"segment_bars": 999, "segment_change_pct": -50.0, "segment_slope": 42.0}},
+        states_t1={}, bars={inst: _MockBars()}, current_only_facts=current_only,
+    )
+    without_hist = _build_member_observations(
+        [inst], trade_date=td, t1=None,
+        states_t={}, states_t1={}, bars={inst: _MockBars()}, current_only_facts=current_only,
+    )
+    assert with_hist[0].segment_bars == without_hist[0].segment_bars == 12
+    assert with_hist[0].segment_change_pct == without_hist[0].segment_change_pct == 3.4
+    assert with_hist[0].segment_slope == without_hist[0].segment_slope == -0.021

@@ -384,6 +384,13 @@ _SNAPSHOT_CONTINUOUS_MAP: tuple[tuple[str, str], ...] = (
     ("fp_volume_zscore20", "volume_zscore_20"),
     ("fp_segment_volume_ratio", "current_vs_prev_volume_mean_ratio"),
     ("fp_prev_segment_volume", "prev_segment_volume_mean"),
+    # Segment Current structure facts (Core-owned). [REVIEW SEGMENT MAPPER GAP FIX
+    # 2026-09-04] first_pyramid_flat emits fp_segment_bars / fp_segment_change_pct /
+    # fp_segment_slope but the continuous map omitted them, so Current(T) segment_*
+    # stayed None. Same mapping-gap class as the DSA fix.
+    ("fp_segment_bars", "segment_bars"),
+    ("fp_segment_change_pct", "segment_change_pct"),
+    ("fp_segment_slope", "segment_slope"),
     # DSA Trend/Strength/Deviation facts — the Core flat DOES carry these
     # (flatten_first_pyramid emits fp_trend_strength / fp_trend_bars /
     # fp_dsa_vwap_dev_pct), so Current(T) DSA is owned by Core(T).  Previously
