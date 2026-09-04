@@ -2,7 +2,8 @@
 // PRD §6.1 + AGENTS §12.2：/market 是 published DSA 结果的统一筛选入口。
 // [CHANGE-20260729-009] 数据流：useMarketStocks(scope=all|watchlist) → adaptMarketStockToTrendRow → StrategyDataTable + getTrendSelectionColumns(inlineWatchlistToggle=true)
 //   旧双分页架构（useStrategyRunResults + useMarketStocks 按 instrument_id 合并）已删除。
-//   usePublishedRuns 仅用于导出 activeRunId（导出仍走 /strategy-runs/{run_id}/results/export）。
+//   usePublishedRuns 仅用于顶部"批次信息"面板展示当前已发布批次（run_id/状态/交易日）；
+//   /market Excel 导出改走 /v1/market/export，不再依赖 run_id（CHANGE-20260904）。
 // 明确禁止：不得挂载 StockResearchWorkspace、StrategyChart 或任何K线。
 // URL 状态：scope/selected 由本页管理；sort/dir/keyword/filters/page/page_size 由 StrategyDataTable 内置 screenerUrlState 管理。
 // 顶部搜索框是 /market 唯一全文搜索入口（searchable=false 关闭表格内置搜索），keyword 通过 externalKeyword 受控注入。

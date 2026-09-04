@@ -202,20 +202,23 @@ test('前端 ExportContext 含 visibleColumns/keyword/industry/concept/metricFil
   assert.ok(src.includes('onExport'), 'StrategyDataTable 必须支持 onExport prop')
 })
 
-test('MarketWorkspacePage handleExport 复用 convertFiltersToMetricFilters 避免第二套筛选口径', () => {
+test('MarketWorkspacePage handleExport 走 /v1/market/export 复用 /market/stocks 查询语义（fp_filter/fp_sort，非 DSA 旧路径）', () => {
   const src = readSource(PAGE_PATH)
+  // [CHANGE-20260904] /market Excel 导出复用 /market/stocks 同一查询 owner（get_market_stocks）：
+  // fp 筛选/排序走 fp_filter/fp_sort（与列表页同源），不再转 DSA 旧路径 metric_filters（fp_* 不在
+  // manifest.filterable 白名单 → 422）。前端用 buildMarketExportRequest 构建与列表页同源的请求体。
   assert.ok(
-    src.includes('convertFiltersToMetricFilters'),
-    'handleExport 必须复用 convertFiltersToMetricFilters，禁止第二套筛选口径',
+    src.includes('buildMarketExportRequest'),
+    'handleExport 必须复用 buildMarketExportRequest（与 /market/stocks 同源，禁止第二套筛选口径）',
   )
   assert.ok(
-    src.includes('/v1/strategy-runs/') && src.includes('/results/export'),
-    'handleExport 必须调用 POST /v1/strategy-runs/{run_id}/results/export',
+    src.includes("/v1/market/export"),
+    'handleExport 必须调用 POST /v1/market/export（不再走 /strategy-runs/{run_id}/results/export 旧 DSA 路径）',
   )
-  // 不导出操作列：stock 列 payload_key 为 null
+  // 旧 DSA 旧路径不再用于 /market 导出（fp_* 不在 manifest.filterable 白名单会 422）
   assert.ok(
-    src.includes("col.key === 'stock'") && src.includes('null'),
-    '导出列转换：stock 列 payload_key 返回 null（不导出操作列）',
+    !src.includes('/results/export'),
+    'MarketWorkspacePage 不得再引用 /strategy-runs/{run_id}/results/export 旧 DSA 导出路径',
   )
 })
 
