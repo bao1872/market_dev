@@ -909,7 +909,7 @@
   position: sticky;
   left: 0;
   z-index: 1;
-  background: v.$color-bg-card;
+  background: v.$color-bg;
 }
 
 // [REVIEW-PRODUCT-CLOSURE-01 Phase F] Explorer 表格必须显式横向滚动：
@@ -1194,7 +1194,7 @@
   flex-direction: column;
   gap: 2px;
   padding: 4px;
-  background: v.$color-surface;
+  background: v.$color-panel;
   border: 1px solid v.$color-border-soft;
   border-radius: 6px;
   box-shadow: 0 6px 18px rgb(0 0 0 / 16%);
