@@ -41,10 +41,11 @@ import { buildStockDetailUrl } from '@/features/stock-research/stockDetailNaviga
 import {
   decodeMarketWorkspaceUrl,
   buildMarketReturnToUrl,
-  convertFiltersToMetricFilters,
-  extractStockNameFilter,
+  buildMarketExportRequest,
   type MarketScope,
   type MarketListContext,
+  type MarketListFilter,
+  type MarketExportColumn,
 } from './marketWorkspaceUrlState'
 import {
   getFirstPyramidColumns,
@@ -152,57 +153,32 @@ export default function MarketWorkspacePage() {
   const activeRunId = runs[0]?.id || ''
   const activeRun = runs[0]
 
-  // CHANGE-20260713-010: 导出 Excel（POST /strategy-runs/{run_id}/results/export）
-  // 必须导出当前完整筛选结果（filtered_total），不是当前页；通过 ExportContext 收集可见列与查询状态。
-  // 复用 convertFiltersToMetricFilters 与 buildStrategyResultQueryParams 同口径转换，避免第二套筛选逻辑。
+  // CHANGE-20260904: 导出 Excel（POST /v1/market/export）
+  // 复用 /market/stocks 同一查询语义与 canonical 行源（first_pyramid）；fp 筛选/排序走 fp_filter/fp_sort，
+  // 不再转成 DSA 旧路径 metric_filters（旧路径根因：fp_* 不在 manifest.filterable 白名单 → 422）。
+  // 必须导出当前完整筛选结果（非当前页）；通过 ExportContext 收集可见列与查询状态。
   const handleExport = useCallback(
     async (ctx: ExportContext) => {
-      if (!activeRunId) {
-        toast.show('无可导出的批次', '请先选择已发布的运行批次')
-        return
-      }
       try {
-        const visibleColumns = ctx.visibleColumns.map((col) => ({
+        const visibleColumns: MarketExportColumn[] = ctx.visibleColumns.map((col) => ({
           key: col.key,
           title: col.title,
-          data_type:
+          dataType:
             col.dataType === 'number' ? 'number' : col.dataType === 'percent' ? 'percent' : 'text',
-          payload_key: col.key === 'stock' ? null : col.key,
         }))
-        const metricFilters = convertFiltersToMetricFilters(
-          ctx.metricFilters.map((f) => ({
-            key: f.key,
-            operator: f.operator,
-            value: f.value,
-            value2: f.value2,
-          })),
-        )
-        // CHANGE-20260713-011: 剥离 stock 列筛选，转为 stock_name + stock_name_op
-        const stockNameFilter = extractStockNameFilter(
-          ctx.metricFilters.map((f) => ({
-            key: f.key,
-            operator: f.operator,
-            value: f.value,
-            value2: f.value2,
-          })),
-        )
-        const body = {
-          universe: scope === 'watchlist' ? 'watchlist' : 'all',
-          keyword: ctx.keyword || null,
-          industry: ctx.industry || null,
-          concept: ctx.concept || null,
-          metric_filters: metricFilters.length > 0 ? metricFilters : null,
-          stock_name: stockNameFilter?.stock_name ?? null,
-          stock_name_op: stockNameFilter?.stock_name_op ?? null,
-          sort_by: ctx.sortBy,
-          sort_desc: ctx.sortDesc,
-          visible_columns: visibleColumns,
-        }
-        const resp = await apiClient.post(
-          `/v1/strategy-runs/${activeRunId}/results/export`,
-          body,
-          { responseType: 'blob' },
-        )
+        // 复用 /market/stocks 同一口径：fp 走 fp_filter/fp_sort，基础排序走 sort=key:direction
+        const body = buildMarketExportRequest({
+          scope,
+          keyword: ctx.keyword ?? null,
+          industry: ctx.industry ?? null,
+          concept: ctx.concept ?? null,
+          sortBy: ctx.sortBy,
+          sortDesc: ctx.sortDesc,
+          // DataTableFilter 与 MarketListFilter 结构兼容（key/operator/value/value2）
+          filters: (ctx.metricFilters ?? []) as unknown as MarketListFilter[],
+          visibleColumns,
+        })
+        const resp = await apiClient.post('/v1/market/export', body, { responseType: 'blob' })
         const contentDisp = resp.headers['content-disposition'] || ''
         let filename = '导出结果.xlsx'
         const match = contentDisp.match(/filename\*=UTF-8''([^;]+)/)
@@ -237,7 +213,7 @@ export default function MarketWorkspacePage() {
         }
       }
     },
-    [activeRunId, scope, toast],
+    [scope, toast],
   )
 
   // 自选列表（页面只请求一次，按 instrument_id 建 Set）

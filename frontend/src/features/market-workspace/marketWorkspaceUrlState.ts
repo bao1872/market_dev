@@ -10,6 +10,7 @@
 
 // CHANGE-20260715-007: 从 detailSourceContext.ts re-export（消除重复真源）
 import { canonicalizeFilterOperator } from '../../components/filterOperators.ts'
+import { serializeFpFilters, serializeFpSort, isFpKey } from './firstPyramidQuerySerializer'
 
 export {
   normalizeResearchSource,
@@ -460,4 +461,81 @@ export function buildMarketReturnToUrl(ctx: MarketListContext, selectedSymbol: s
     params.set('preset', 'none')
   }
   return `/market?${params.toString()}`
+}
+
+
+// ===== CHANGE-20260904: 行情 Excel 导出请求体（复用 /market/stocks 同一查询语义）=====
+// 旧导出把 fp 筛选转成 DSA 旧路径 metric_filters（→ 422）；新导出走 /v1/market/export，
+// fp 筛选/排序用 fp_filter / fp_sort（FP_QUERY_FIELD_SPECS 白名单），与 /market/stocks 同源。
+// 本文件为纯 TS（无 React / 无 @/ 别名），保留可被 node --test 直接运行。
+
+
+export interface MarketExportColumn {
+  key: string
+  title: string
+  dataType: 'text' | 'number' | 'percent'
+}
+
+export interface MarketExportRequestShape {
+  scope: string
+  keyword: string | null
+  industry: string | null
+  concept: string | null
+  state: string | null
+  fp_filter: string | null
+  fp_sort: string | null
+  sort: string | null
+  stock_name: string | null
+  stock_name_op: string | null
+  visible_columns: MarketExportColumn[]
+}
+
+/**
+ * 构建 /v1/market/export 请求体（CHANGE-20260904 MARKET EXCEL EXPORT FIX）。
+ *
+ * 复用 /market/stocks 同一查询语义：
+ * - fp 筛选 → fp_filter（serializeFpFilters，FP_QUERY_FIELD_SPECS 白名单）
+ * - fp 排序 → fp_sort（serializeFpSort）；基础排序 → sort=key:direction
+ * - 不再转成 DSA 旧路径的 metric_filters（旧路径根因：fp_* 不在 manifest.filterable 白名单 → 422）
+ *
+ * @param params.scope        市场范围（market | watchlist）
+ * @param params.filters      StrategyDataTable 列筛选（DataTableFilter 结构兼容 MarketListFilter）
+ * @param params.sortBy       当前排序字段（fp 字段走 fp_sort，否则走 sort）
+ * @param params.sortDesc     是否降序
+ * @param params.visibleColumns 可见列（key/title/dataType）
+ */
+export function buildMarketExportRequest(params: {
+  scope: MarketScope
+  keyword: string | null
+  industry: string | null
+  concept: string | null
+  sortBy: string | null
+  sortDesc: boolean
+  filters: MarketListFilter[]
+  visibleColumns: MarketExportColumn[]
+  state?: string | null
+}): MarketExportRequestShape {
+  const fpFilter = serializeFpFilters(params.filters as unknown as Parameters<typeof serializeFpFilters>[0])
+  const stockNameFilter = extractStockNameFilter(params.filters as unknown as Parameters<typeof extractStockNameFilter>[0])
+  const isFpSort = params.sortBy ? isFpKey(params.sortBy) : false
+  const fpSort =
+    isFpSort && params.sortBy
+      ? serializeFpSort({ key: params.sortBy, direction: params.sortDesc ? 'desc' : 'asc' })
+      : null
+  const sort = !isFpSort && params.sortBy
+    ? `${params.sortBy}:${params.sortDesc ? 'desc' : 'asc'}`
+    : null
+  return {
+    scope: params.scope,
+    keyword: params.keyword || null,
+    industry: params.industry || null,
+    concept: params.concept || null,
+    state: params.state ?? null,
+    fp_filter: fpFilter ?? null,
+    fp_sort: fpSort ?? null,
+    sort,
+    stock_name: stockNameFilter?.stock_name ?? null,
+    stock_name_op: stockNameFilter?.stock_name_op ?? null,
+    visible_columns: params.visibleColumns,
+  }
 }

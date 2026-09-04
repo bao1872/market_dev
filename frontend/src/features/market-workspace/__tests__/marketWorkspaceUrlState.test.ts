@@ -26,6 +26,7 @@ import {
   buildStrategyResultQueryParams,
   buildMarketReturnToUrl,
   resolveDetailSourceContext,
+  buildMarketExportRequest,
   DEFAULT_MARKET_SCOPE,
   type MarketWorkspaceUrlState,
   type MarketListContext,
@@ -470,4 +471,55 @@ test('旧 filter operator 仅兼容输入，URL hydration 返回 canonical 名�
     'has_any',
     'has_all',
   ])
+})
+
+// ===== CHANGE-20260904: 行情 Excel 导出请求体契约测试（MARKET EXCEL EXPORT FIX）=====
+// 验证 buildMarketExportRequest 复用 /market/stocks 同一查询语义：
+//   - fp 筛选 → fp_filter（不再转 DSA 旧路径 metric_filters）
+//   - fp 排序 → fp_sort；基础排序 → sort=key:direction
+//   - 不再下发 metric_filters / universe / sort_by / sort_desc 等旧字段
+
+test('CHANGE-20260904-1: fp 筛选走 fp_filter，不再转 metric_filters', () => {
+  const req = buildMarketExportRequest({
+    scope: 'market',
+    keyword: null,
+    industry: null,
+    concept: null,
+    sortBy: null,
+    sortDesc: false,
+    filters: [{ key: 'fp_volume_zscore20', operator: 'gt', value: 0.5 }],
+    visibleColumns: [{ key: 'stock', title: '股票', dataType: 'text' }],
+  })
+  assert.equal(req.fp_filter, 'fp_volume_zscore20:gt:0.5')
+  assert.equal((req as unknown as Record<string, unknown>).metric_filters, undefined)
+})
+
+test('CHANGE-20260904-2: fp 排序走 fp_sort，基础排序为 null', () => {
+  const req = buildMarketExportRequest({
+    scope: 'market',
+    keyword: null,
+    industry: null,
+    concept: null,
+    sortBy: 'fp_trend_strength',
+    sortDesc: true,
+    filters: [],
+    visibleColumns: [{ key: 'fp_trend_strength', title: '强度', dataType: 'number' }],
+  })
+  assert.equal(req.fp_sort, 'fp_trend_strength:desc')
+  assert.equal(req.sort, null)
+})
+
+test('CHANGE-20260904-3: 基础排序走 sort，fp_sort 为 null', () => {
+  const req = buildMarketExportRequest({
+    scope: 'market',
+    keyword: null,
+    industry: null,
+    concept: null,
+    sortBy: 'change_pct',
+    sortDesc: true,
+    filters: [],
+    visibleColumns: [{ key: 'change_pct', title: '涨跌幅', dataType: 'number' }],
+  })
+  assert.equal(req.sort, 'change_pct:desc')
+  assert.equal(req.fp_sort, null)
 })

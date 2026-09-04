@@ -297,3 +297,36 @@ def extract_row_data(
         else:
             row_data[col.key] = payload.get(col.key) if payload else None
     return row_data
+
+
+def extract_market_row_data(market_row: Any, columns: list[ExportColumn]) -> dict[str, Any]:
+    """从 /market/stocks canonical 行（MarketStockRow）提取导出单元格。
+
+    与旧 export 的 extract_row_data（读旧 DSA payload，已 deprecate 为 None）不同：
+    - fp_* 列从 ``market_row.first_pyramid``（canonical 第一金字塔 99 键）读取，与列表页同源；
+    - 基础列（stock/change_pct/price/industry/...）从 MarketStockRow 字段读取；
+    - 不读取旧 payload，避免 fp 列恒为空。
+
+    Args:
+        market_row: MarketStockRow（Pydantic 模型，含 first_pyramid 等字段）
+        columns: 导出列定义（ExportColumn）
+
+    Returns:
+        dict: column.key -> 单元格值（Null 保留为 None，交由 generate_xlsx 处理）
+    """
+    row_data: dict[str, Any] = {}
+    fp = market_row.first_pyramid or {}
+    for col in columns:
+        k = col.key
+        if k == "stock":
+            name = market_row.name or ""
+            symbol = market_row.symbol or ""
+            row_data[k] = f"{name}({symbol})" if name and symbol else name or symbol
+        elif k.startswith("fp_"):
+            row_data[k] = fp.get(k)
+        else:
+            value = getattr(market_row, k, None)
+            if isinstance(value, list):
+                value = ", ".join(str(v) for v in value)
+            row_data[k] = value
+    return row_data

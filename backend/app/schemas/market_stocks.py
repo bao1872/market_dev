@@ -23,6 +23,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
+from app.schemas.export import ExportColumn
+
 
 class MarketStockRow(BaseModel):
     """行情列表单行 - 包含页面展示所需的全部字段。
@@ -97,6 +99,38 @@ class MarketStocksResponse(BaseModel):
     price_as_of: str | None = Field(None, description="最新日线 trade_date ISO（定价所用 bar 日期）")
     state_as_of: str | None = Field(None, description="最新特征快照 created_at ISO")
     boards_as_of: str | None = Field(None, description="板块数据时间戳 ISO（qstock 同步前 null）")
+
+
+class MarketExportRequest(BaseModel):
+    """导出请求 body（POST /v1/market/export）。
+
+    复用 /market/stocks 同一查询语义与 canonical 行源（MarketStockRow.first_pyramid），
+    不再走旧 DSA selector 路径（/strategy-runs/{run_id}/results/export 的 metric_filters
+    经 StrategyVersion.manifest.outputs.filterable 白名单校验，导致 fp_* 字段 422）。
+
+    - fp_filter / fp_sort：第一金字塔字段筛选/排序，由 get_market_stocks 内部按
+      FP_QUERY_FIELD_SPECS 白名单校验（非法字段/操作符 → 422），与 /market/stocks 同源。
+    - sort：基础排序字段:方向（name/symbol/change_pct/dsa_state/latest_event_time/price）。
+    - visible_columns：可见列（按此顺序导出）；fp_* 列从 first_pyramid 读取，基础列从行字段读取。
+    """
+
+    scope: str = Field("market", description="范围：market | watchlist")
+    keyword: str | None = Field(None, description="搜索关键词（代码/名称/拼音首字母）")
+    industry: str | None = Field(None, description="行业板块")
+    concept: str | None = Field(None, description="概念板块")
+    state: str | None = Field(None, description="状态筛选（up/down/sideways）")
+    fp_filter: str | None = Field(None, description="第一金字塔字段服务端筛选（FP_QUERY_FIELD_SPECS 白名单）")
+    fp_sort: str | None = Field(
+        None, description="第一金字塔字段服务端排序（FP_QUERY_FIELD_SPECS 白名单）"
+    )
+    sort: str | None = Field(
+        None, description="基础排序字段:方向（如 change_pct:desc）；fp 排序请用 fp_sort"
+    )
+    stock_name: str | None = Field(None, description="股票名称独立筛选值")
+    stock_name_op: str | None = Field(
+        None, description="股票名称筛选操作符: contains | not_contains | eq"
+    )
+    visible_columns: list[ExportColumn] = Field(..., description="可见列定义（按此顺序导出）")
 
 
 # ===== 板块目录 API schemas（C9: 行业/概念筛选下拉支持）=====
