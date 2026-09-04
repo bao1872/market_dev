@@ -326,9 +326,12 @@ def state_to_continuous(state: dict[str, Any] | None) -> dict[str, Any]:
 #   * History(T) is NEVER read for the Current(T) flat_t / continuous.
 #   * Keys absent from the Core flat stay None (Current(T) has no History(T)
 #     owner for them) — no latest / same-day-other-run fallback.
-#   * Raw DSA/segment/OB/sqzmom-delta keys that the History payload carries but
-#     the Core ``fp_*`` flat does not are intentionally None for Current(T)
-#     (they are Historical <T-only facts, served by states_t1).
+#   * DSA Trend/Strength/Deviation continuous facts ARE surfaced from the Core
+#     ``fp_*`` flat (``fp_trend_strength`` -> ``regime_strength``,
+#     ``fp_trend_bars`` -> ``dsa_dir_bars``, ``fp_dsa_vwap_dev_pct`` ->
+#     ``dsa_vwap_dev_pct``).  Remaining Historical <T-only keys not yet mapped
+#     stay None for Current(T) — Current(T) has no History(T) owner for them —
+#     no latest / same-day-other-run fallback.
 # ----------------------------------------------------------------------------
 
 # Core(T) ``fp_*`` flat key -> previous_state_to_flat output key (1:1, same name).
@@ -381,6 +384,14 @@ _SNAPSHOT_CONTINUOUS_MAP: tuple[tuple[str, str], ...] = (
     ("fp_volume_zscore20", "volume_zscore_20"),
     ("fp_segment_volume_ratio", "current_vs_prev_volume_mean_ratio"),
     ("fp_prev_segment_volume", "prev_segment_volume_mean"),
+    # DSA Trend/Strength/Deviation facts — the Core flat DOES carry these
+    # (flatten_first_pyramid emits fp_trend_strength / fp_trend_bars /
+    # fp_dsa_vwap_dev_pct), so Current(T) DSA is owned by Core(T).  Previously
+    # omitted -> regime_strength / dsa_dir_bars / dsa_vwap_dev_pct were always
+    # None even when the Core snapshot was present (mapping-gap bug, 2026-09-04).
+    ("fp_trend_strength", "regime_strength"),
+    ("fp_trend_bars", "dsa_dir_bars"),
+    ("fp_dsa_vwap_dev_pct", "dsa_vwap_dev_pct"),
 )
 
 
@@ -389,9 +400,10 @@ def snapshot_flat_to_continuous(snapshot_flat: object) -> dict[str, Any]:
     output-key space for Current(T) continuous Trend / Structure / Momentum /
     Volume facts.
 
-    Only keys present in the Core ``fp_*`` flat are surfaced; raw DSA/segment/OB/
-    sqzmom-delta keys the History payload carries (but the Core flat does not)
-    stay None — they are Historical <T-only, served by states_t1.
+    Only keys present in the Core ``fp_*`` flat are surfaced.  DSA Trend/Strength/
+    Deviation facts (``fp_trend_strength`` / ``fp_trend_bars`` / ``fp_dsa_vwap_dev_pct``)
+    ARE mapped from Core; other Historical <T-only keys not yet mapped stay None —
+    Current(T) has no History(T) owner for them.
     """
     out: dict[str, Any] = dict.fromkeys(_CONTINUOUS_STATE_KEYS)
     flat = snapshot_flat if isinstance(snapshot_flat, dict) else None

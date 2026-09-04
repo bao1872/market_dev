@@ -26,6 +26,8 @@ from app.services.review_observation_prep_service import (
     _build_member_observations,
 )
 
+pytestmark = pytest.mark.pure_unit
+
 
 # A representative Core(T) first_pyramid_flat (the fp_* keys flatten_first_pyramid
 # produces and the Board producer consumes).  This IS Core(T).  Labels use the
@@ -55,6 +57,11 @@ CORE_FLAT = {
     "fp_prev_segment_volume": 800000.0,
     "fp_sqzmom_value": 0.42,
     "fp_volume_zscore20": 0.81,
+    # DSA continuous facts the Core flat carries (regime_strength / dsa_dir_bars /
+    # dsa_vwap_dev_pct) — added 2026-09-04 to exercise the mapping-gap fix.
+    "fp_trend_strength": 0.85,
+    "fp_trend_bars": 7,
+    "fp_dsa_vwap_dev_pct": -1.23,
 }
 
 # A conflicting History(T) state_payload.  If Current(T) were owned by History,
@@ -227,3 +234,98 @@ def test_build_member_observations_history_absent_same_as_present():
     assert with_hist[0].momentum == without_hist[0].momentum
     assert with_hist[0].vol_ratio20 == without_hist[0].vol_ratio20
     assert with_hist[0].internal == without_hist[0].internal
+
+
+# ---------------------------------------------------------------------------
+# DSA mapping-gap regression (2026-09-04)
+#
+# Root cause: snapshot_flat_to_continuous omitted fp_trend_strength /
+# fp_trend_bars / fp_dsa_vwap_dev_pct, so Current(T) DSA (regime_strength /
+# dsa_dir_bars / dsa_vwap_dev_pct) was always None even when the Core snapshot
+# was present.  These tests lock source-ownership + adapter mapping so the drift
+# cannot silently return.
+# ---------------------------------------------------------------------------
+
+def test_snapshot_flat_to_continuous_maps_dsa_from_core_flat():
+    """Layer 1 (mapper unit): Core flat DSA keys MUST map into continuous."""
+    cont = snapshot_flat_to_continuous(CORE_FLAT)
+    assert cont["regime_strength"] == 0.85
+    assert cont["dsa_dir_bars"] == 7
+    assert cont["dsa_vwap_dev_pct"] == -1.23
+
+
+def test_snapshot_flat_to_continuous_dsa_none_when_absent_or_nonfinite():
+    """Layer 1 (mapper unit): DSA stays None (never History / 0) when the Core
+    flat lacks the key or the value is non-finite.
+    """
+    partial = {"fp_trend_direction": "上行"}  # no DSA keys
+    cont = snapshot_flat_to_continuous(partial)
+    assert cont["regime_strength"] is None
+    assert cont["dsa_dir_bars"] is None
+    assert cont["dsa_vwap_dev_pct"] is None
+
+    nonfinite = {
+        "fp_trend_strength": "not-a-number",
+        "fp_trend_bars": None,
+        "fp_dsa_vwap_dev_pct": float("nan"),
+    }
+    cont2 = snapshot_flat_to_continuous(nonfinite)
+    assert cont2["regime_strength"] is None       # _number rejects non-numeric
+    assert cont2["dsa_dir_bars"] is None
+    assert cont2["dsa_vwap_dev_pct"] is None      # _number rejects nan
+
+
+def test_build_member_observations_dsa_owned_by_core_not_history():
+    """Layer 2 (current-owner path contract): Current DSA must come from the
+    Core(T) flat, NOT a conflicting History(T) state_payload.  This is the exact
+    bug class (source-ownership + adapter mapping drift) a mapper-only test misses.
+    """
+    inst = uuid.uuid4()
+    td = datetime.date(2026, 8, 25)
+
+    # History(T) claims OPPOSITE DSA values.
+    history_state_t = {
+        "regime_strength": 999.0,
+        "dsa_dir_bars": 50,
+        "dsa_vwap_dev_pct": 42.0,
+        "regime_value": "down",
+    }
+    current_only = {str(inst): {_BOARD_CURRENT_FLAT_KEY: dict(CORE_FLAT)}}
+
+    members = _build_member_observations(
+        [inst],
+        trade_date=td,
+        t1=None,
+        states_t={inst: history_state_t},   # conflicting History present
+        states_t1={},
+        bars={inst: _MockBars()},
+        current_only_facts=current_only,
+    )
+    assert len(members) == 1
+    obs = members[0]
+    # DSA from Core flat (0.85 / 7 / -1.23), NOT History (999 / 50 / 42).
+    assert obs.regime_strength == 0.85
+    assert obs.dsa_dir_bars == 7
+    assert obs.dsa_vwap_dev_pct == -1.23
+
+
+def test_build_member_observations_dsa_independent_of_history_presence():
+    """Layer 2 (KPI-1 for DSA): same Core flat -> same Current DSA whether or not
+    a (conflicting) History(T) state exists.  No fallback to History when absent.
+    """
+    inst = uuid.uuid4()
+    td = datetime.date(2026, 8, 25)
+    current_only = {str(inst): {_BOARD_CURRENT_FLAT_KEY: dict(CORE_FLAT)}}
+
+    with_hist = _build_member_observations(
+        [inst], trade_date=td, t1=None,
+        states_t={inst: {"regime_strength": 999.0, "dsa_dir_bars": 50, "dsa_vwap_dev_pct": 42.0}},
+        states_t1={}, bars={inst: _MockBars()}, current_only_facts=current_only,
+    )
+    without_hist = _build_member_observations(
+        [inst], trade_date=td, t1=None,
+        states_t={}, states_t1={}, bars={inst: _MockBars()}, current_only_facts=current_only,
+    )
+    assert with_hist[0].regime_strength == without_hist[0].regime_strength == 0.85
+    assert with_hist[0].dsa_dir_bars == without_hist[0].dsa_dir_bars == 7
+    assert with_hist[0].dsa_vwap_dev_pct == without_hist[0].dsa_vwap_dev_pct == -1.23
