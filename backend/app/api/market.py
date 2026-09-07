@@ -159,33 +159,35 @@ from app.services.market_stocks_service import get_market_stocks  # noqa: E402
 _VALID_STATE_FILTERS = {"up", "down", "sideways"}
 
 
-def require_market_stocks_capability(
-    scope: str = Query("market", description="范围：market | watchlist"),
-):
-    """[P0 安全修复] /market/stocks 与 /market/export 的作用域感知守卫。
+def _authorize_market_scope(ctx: AccessContext, scope: str) -> AccessContext:
+    """[P0 安全修复] 纯授权函数：校验 ctx 是否可访问指定 market scope。
 
-    - scope=watchlist：self_selection 或 market_data 均可（自选列表是 self_selection 核心功能，
-      不得因收紧 market_data 而误伤）
-    - scope=market（全市场）：仅 market_data（严禁 self_selection 隐式获得全市场行情）
-    - admin 豁免
+    权限模型（三类 capability 严格独立，禁止隐式继承）：
+    - admin：豁免，一律放行。
+    - scope=market（全市场行情）：仅 market_data 授权。self_selection-only 严禁隐式获得全市场。
+    - scope=watchlist：/market/stocks?scope=watchlist 返回完整 MarketStockRow（含
+      latest_price/change_pct/dsa_state/first_pyramid 等行情/分析字段，并非自选最小 summary），
+      因此按数据边界要求 self_selection AND market_data 两项同时具备；
+      self_selection-only 或 market_data-only 均拒绝，禁止任一单向继承。
+
+    注意：本函数是纯逻辑（同步），由下方 FastAPI dependency 在真实请求上下文中调用，
+    禁止以 factory 形式返回内层 dependency（会破坏 FastAPI DI，导致 _check 被当作返回值注入）。
+
+    Args:
+        ctx: 已解析的权限上下文（由 require_authenticated 注入）。
+        scope: 规范化后的 scope（"market" | "watchlist"）。
+
+    Returns:
+        校验通过返回原 ctx。
+
+    Raises:
+        HTTPException 403: 权限不足。
     """
+    normalized = "watchlist" if scope == "watchlist" else "market"
+    if ctx.is_admin:
+        return ctx
 
-    async def _check(
-        ctx: AccessContext = Depends(require_authenticated),
-    ) -> AccessContext:
-        normalized = "watchlist" if scope == "watchlist" else "market"
-        if ctx.is_admin:
-            return ctx
-        if normalized == "watchlist":
-            if (
-                ctx.capabilities.get("self_selection", {}).get("active")
-                or ctx.capabilities.get("market_data", {}).get("active")
-            ):
-                return ctx
-            raise HTTPException(
-                status_code=403,
-                detail="需要 self_selection 或 market_data 权限以查看自选列表",
-            )
+    if normalized == "market":
         if ctx.capabilities.get("market_data", {}).get("active"):
             return ctx
         raise HTTPException(
@@ -193,7 +195,40 @@ def require_market_stocks_capability(
             detail="需要 market_data 权限以查看全市场行情",
         )
 
-    return _check
+    # normalized == "watchlist"
+    has_self_selection = bool(ctx.capabilities.get("self_selection", {}).get("active"))
+    has_market_data = bool(ctx.capabilities.get("market_data", {}).get("active"))
+    if has_self_selection and has_market_data:
+        return ctx
+    raise HTTPException(
+        status_code=403,
+        detail="自选列表完整行情需要 self_selection 与 market_data 两项权限",
+    )
+
+
+async def require_market_stocks_access(
+    scope: str = Query("market", description="范围：market | watchlist"),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> AccessContext:
+    """[P0 安全修复] /market/stocks 的 FastAPI 授权依赖（scope 来自 query，与查询执行同源）。
+
+    与 GET /market/stocks 的 scope query 参数绑定（单一事实源），
+    在 get_market_stocks 执行前完成授权。admin 豁免。
+    """
+    return _authorize_market_scope(ctx, scope)
+
+
+async def require_market_export_access(
+    request: MarketExportRequest,
+    ctx: AccessContext = Depends(require_authenticated),
+) -> AccessContext:
+    """[P0 安全修复] /market/export 的 FastAPI 授权依赖（scope 来自 request body，与查询执行同源）。
+
+    必须使用与 get_market_stocks 实际执行完全相同的 request.scope 做授权，
+    禁止用 query scope 授权 body scope（避免 authorization 与 execution 双 SSOT）。
+    admin 豁免。
+    """
+    return _authorize_market_scope(ctx, request.scope)
 
 
 @router.get("/stocks", response_model=MarketStocksResponse)
@@ -228,7 +263,7 @@ async def list_market_stocks(
         ),
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_market_stocks_capability),
+    ctx: AccessContext = Depends(require_market_stocks_access),
 ) -> MarketStocksResponse:
     """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
 
@@ -288,7 +323,7 @@ async def list_market_stocks(
 async def export_market_stocks(
     request: MarketExportRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_market_stocks_capability),
+    ctx: AccessContext = Depends(require_market_export_access),
 ) -> Response:
     """导出行情筛选结果为 .xlsx（复用 /market/stocks 同一查询语义）。
 
