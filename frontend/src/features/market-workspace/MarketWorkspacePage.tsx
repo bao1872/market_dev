@@ -26,18 +26,11 @@ import {
   useMarketBoards,
   useMarketStocks,
   useMarketFilterSpecs,
-  useWatchlistMonitorStatus,
 } from '@/hooks/useApi'
-import {
-  WatchlistMonitorTable,
-  adaptWatchlistMonitorStatusItem,
-  type WatchlistMonitorRow,
-} from '@/features/watchlist-monitor'
-import type { WatchlistMonitorStatusItem } from '@/api/endpoints'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { apiClient } from '@/api/client'
-import type { MarketStocksQueryParams } from '@/api/endpoints'
+import type { MarketStocksQueryParams, WatchlistSummaryItem } from '@/api/endpoints'
 import {
   adaptMarketStockToTrendRow,
   getTrendSelectionColumns,
@@ -330,9 +323,9 @@ export default function MarketWorkspacePage() {
   // [P0 后续] self_selection-only 用户移除自选（走 /v1/watchlist/{id}，仅要求 self_selection）。
   // 复用 removeMutation（onSuccess 已 invalidate watchlist + monitor-status），移除后该行从列表消失。
   const handleRemoveSelfSelectionWatchlist = useCallback(
-    (row: WatchlistMonitorRow) => {
-      if (!row.instrument_id) return
-      removeMutation.mutate(row.instrument_id, {
+    (item: WatchlistSummaryItem) => {
+      if (!item.instrument_id) return
+      removeMutation.mutate(item.instrument_id, {
         onSuccess: () => toast.show('已移除自选', ''),
         onError: () => toast.show('移除自选失败', '请稍后重试'),
       })
@@ -399,22 +392,19 @@ export default function MarketWorkspacePage() {
   )
   // [P0 安全修复] capability 未就绪（accessStatus !== 'ready'）时不发 market request，
   // 从源头杜绝「self_selection-only 用户先发 scope=market 再被 403」的竞态。
-  // [P0 后续] self_selection-only 用户不发 /market/stocks（后端 403），改走 monitor-status。
+  // [P0 后续] self_selection-only 用户不发 /market/stocks（后端 403），改走 metadata-only 自选。
   const marketStocksQuery = useMarketStocks(marketStocksParams, {
     enabled: accessReady && !isSelfSelectionOnly,
   })
 
-  // [P0 后续] self_selection-only 用户的自选列表数据源（/v1/watchlist/monitor-status，仅要求 self_selection）。
-  // 交易时段 1s 自动刷新（useWatchlistMonitorStatus 内置），与 /market/stocks 完全解耦。
-  const watchlistMonitorStatusQuery = useWatchlistMonitorStatus({
+  // [P0 后续] self_selection-only 用户的自选列表数据源（GET /v1/watchlist，metadata-only，
+  // 仅要求 self_selection，返回 instrument 元数据 + 加入时间，无任何行情/策略指标）。
+  const selfSelectionOnlyWatchlistQuery = useWatchlist({
     enabled: isSelfSelectionOnly,
   })
-  const selfSelectionOnlyRows: WatchlistMonitorRow[] = useMemo(
-    () =>
-      (watchlistMonitorStatusQuery.data?.items ?? []).map((item: WatchlistMonitorStatusItem) =>
-        adaptWatchlistMonitorStatusItem(item),
-      ),
-    [watchlistMonitorStatusQuery.data],
+  const selfSelectionOnlyItems = useMemo(
+    () => selfSelectionOnlyWatchlistQuery.data?.items ?? [],
+    [selfSelectionOnlyWatchlistQuery.data?.items],
   )
 
   // 行数据：MarketStockRow → TrendSelectionRow（单次转换，包含 first_pyramid/payload/chip_status）
@@ -558,29 +548,60 @@ export default function MarketWorkspacePage() {
   // selected symbol 用于右栏 AtomicFactsPanel
   const selectedSymbol = selected || undefined
 
-  // [P0 后续] self_selection-only 用户渲染独立自选监控视图：
-  //   - 数据源 /v1/watchlist/monitor-status（仅要求 self_selection，不再触发 /market/stocks 403）
+  // [P0 后续] self_selection-only 用户渲染独立 metadata-only 自选视图：
+  //   - 数据源 GET /v1/watchlist（仅要求 self_selection，返回 instrument 元数据，无行情/策略指标）
   //   - 不渲染行情专属 UI（MarketToolbar 板块筛选 / 右栏 / 导出 / 批次信息均依赖 market_data）
-  //   - 提供「移出自选」；「详情」不可用（无 market_data 无法进入个股详情页）
+  //   - 仅展示 股票/市场/加入时间 + 移出自选；无详情导航、无价格/涨跌幅/BB/POC/event 等行情字段
   if (isSelfSelectionOnly) {
     return (
       <div className={styles.marketPage}>
         <div className={styles.tableArea}>
           <div className={styles.tableWrapper}>
-            <WatchlistMonitorTable
-              tableId="self-selection-watchlist"
-              rows={selfSelectionOnlyRows}
-              loading={watchlistMonitorStatusQuery.isLoading}
-              error={
-                watchlistMonitorStatusQuery.isError
-                  ? '自选列表加载失败，请刷新重试'
-                  : null
-              }
-              emptyText="暂无自选股票"
-              searchable
-              onRemove={handleRemoveSelfSelectionWatchlist}
-              removePending={removeMutation.isPending}
-            />
+            {selfSelectionOnlyWatchlistQuery.isLoading && (
+              <div className="empty">加载中…</div>
+            )}
+            {selfSelectionOnlyWatchlistQuery.isError && (
+              <div className="empty">自选列表加载失败，请刷新重试</div>
+            )}
+            {!selfSelectionOnlyWatchlistQuery.isLoading &&
+              !selfSelectionOnlyWatchlistQuery.isError &&
+              selfSelectionOnlyItems.length === 0 && (
+                <div className="empty">暂无自选股票</div>
+              )}
+            {!selfSelectionOnlyWatchlistQuery.isLoading &&
+              !selfSelectionOnlyWatchlistQuery.isError &&
+              selfSelectionOnlyItems.length > 0 && (
+                <table className="compact-table self-selection-watchlist-table">
+                  <thead>
+                    <tr>
+                      <th>股票</th>
+                      <th>代码</th>
+                      <th>市场</th>
+                      <th>加入时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selfSelectionOnlyItems.map((item) => (
+                      <tr key={item.watchlist_item_id}>
+                        <td>{item.name}</td>
+                        <td>{item.symbol}</td>
+                        <td>{item.market}</td>
+                        <td>{item.created_at}</td>
+                        <td>
+                          <button
+                            className="btn small danger"
+                            onClick={() => handleRemoveSelfSelectionWatchlist(item)}
+                            disabled={removeMutation.isPending}
+                          >
+                            移出自选
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
           </div>
         </div>
       </div>

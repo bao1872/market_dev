@@ -57,6 +57,7 @@ __all__ = [
     "require_quota",
     "require_capability",
     "require_any_capability",
+    "require_all_capabilities",
     "require_watchlist_limit",
 ]
 
@@ -470,6 +471,53 @@ def require_any_capability(*capabilities: str) -> Callable[..., Coroutine[Any, A
         )
 
     return _check_any_capability
+
+
+def require_all_capabilities(*capabilities: str) -> Callable[..., Coroutine[Any, Any, AccessContext]]:
+    """Capability 全部检查依赖工厂（AND 语义，admin 豁免）。
+
+    返回一个 FastAPI 依赖函数，检查 ctx.capabilities 是否包含全部指定 capability 且 active。
+    admin 自动豁免（所有 capability active=True）。
+
+    用途（P0 数据边界）：
+    - 当端点返回的数据跨多个 capability 边界时，要求同时具备全部相关 capability。
+      例如 /v1/watchlist/monitor-status 返回 full metrics + 行情字段，要求
+      self_selection AND market_data（禁止 self_selection-only 隐式获得 market_data）。
+
+    用法：
+        @router.get("/watchlist/monitor-status")
+        async def get_monitor_status(
+            ctx: AccessContext = Depends(require_all_capabilities("self_selection", "market_data")),
+        ): ...
+
+    Args:
+        capabilities: 权限类型列表（至少一个，全部必须 active）
+
+    Returns:
+        FastAPI 依赖函数，校验通过返回原 ctx，否则 403
+
+    Raises:
+        ValueError: 未传入任何 capability
+    """
+    if not capabilities:
+        raise ValueError("require_all_capabilities 需要至少一个 capability")
+
+    async def _check_all_capabilities(
+        ctx: AccessContext = Depends(require_authenticated),
+    ) -> AccessContext:
+        """检查 ctx 是否具备全部指定 capability 且 active（admin 豁免）。"""
+        if ctx.is_admin:
+            return ctx
+        for cap in capabilities:
+            cap_info = ctx.capabilities.get(cap)
+            if cap_info is None or not cap_info.get("active"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail=f"需要权限: {cap}",
+                )
+        return ctx
+
+    return _check_all_capabilities
 
 
 def require_watchlist_limit() -> Callable[..., Coroutine[Any, Any, int | None]]:

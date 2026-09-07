@@ -54,13 +54,15 @@ from app.models.watchlist import UserWatchlistItem
 from app.schemas.watchlist import (
     WatchlistAddRequest,
     WatchlistItemResponse,
-    WatchlistListResponse,
+    WatchlistSummaryItem,
+    WatchlistSummaryResponse,
     WatchlistMonitorStatusItem,
     WatchlistMonitorStatusResponse,
 )
 from app.services.access_control_service import (
     AccessContext,
     require_capability,
+    require_all_capabilities,
     require_watchlist_limit,
 )
 from app.services.calendar_service import (
@@ -178,17 +180,22 @@ async def _resolve_expected_snapshot_trade_date(
     return await get_most_recent_trading_day_async(db, today)
 
 
-@router.get("", response_model=WatchlistListResponse)
+@router.get("", response_model=WatchlistSummaryResponse)
 async def list_watchlist(
     db: AsyncSession = Depends(get_db),
     ctx: AccessContext = Depends(require_capability("self_selection")),
-) -> WatchlistListResponse:
-    """查询当前用户的自选列表（仅 active=true）。
+) -> WatchlistSummaryResponse:
+    """查询当前用户的自选列表（metadata-only summary，仅 active=true）。
+
+    数据边界（P0 后续）：本端点只返回 instrument 元数据（symbol/name/market）+ 加入时间，
+    禁止任何行情/策略指标（current_price/change_pct/metrics/latest_event/BB/node/POC 等），
+    使 self_selection-only 用户能管理自选但不泄露 market_data。
 
     user_id 由权限上下文注入，不接受查询参数传入。
     """
     stmt = (
-        select(UserWatchlistItem)
+        select(UserWatchlistItem, Instrument)
+        .join(Instrument, UserWatchlistItem.instrument_id == Instrument.id)
         .where(
             UserWatchlistItem.user_id == UUID(ctx.user_id),
             UserWatchlistItem.active.is_(True),
@@ -196,11 +203,20 @@ async def list_watchlist(
         .order_by(UserWatchlistItem.created_at.desc())
     )
     result = await db.execute(stmt)
-    items = result.scalars().all()
-    return WatchlistListResponse(
-        items=[WatchlistItemResponse.model_validate(item) for item in items],
-        total=len(items),
-    )
+    rows = result.all()
+    items = [
+        WatchlistSummaryItem(
+            watchlist_item_id=item.id,
+            instrument_id=instrument.id,
+            symbol=instrument.symbol,
+            name=instrument.name,
+            market=instrument.market,
+            source=item.source,
+            created_at=item.created_at,
+        )
+        for item, instrument in rows
+    ]
+    return WatchlistSummaryResponse(items=items, total=len(items))
 
 
 @router.post("", response_model=WatchlistItemResponse, status_code=status.HTTP_201_CREATED)
@@ -293,9 +309,14 @@ async def add_to_watchlist(
 @router.get("/monitor-status", response_model=WatchlistMonitorStatusResponse)
 async def get_watchlist_monitor_status(
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability("self_selection")),
+    ctx: AccessContext = Depends(require_all_capabilities("self_selection", "market_data")),
 ) -> WatchlistMonitorStatusResponse:
     """查询当前用户自选股+监控状态聚合数据。
+
+    权限（P0 后续数据边界）：本端点返回 full metrics（StockFeatureSnapshot.summary_payload）
+    + latest_event + 行情字段，跨 self_selection 与 market_data 两个 capability 边界，
+    故要求 self_selection AND market_data。self_selection-only / market_data-only 均 403，
+    防止 self_selection-only 通过本端点隐式获得 market_data（独立泄露缺口）。
 
     返回当前用户所有 active 自选股，附带最新 released watchlist_monitor 版本的
     MonitorEvaluation（评估状态）与 StockFeatureSnapshot（指标数据）。

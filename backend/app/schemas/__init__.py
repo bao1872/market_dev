@@ -48,6 +48,8 @@ from app.schemas.watchlist import (
     WatchlistAddRequest,
     WatchlistItemResponse,
     WatchlistListResponse,
+    WatchlistSummaryItem,
+    WatchlistSummaryResponse,
 )
 
 __all__ = [
@@ -75,4 +77,6 @@ __all__ = [
     "WatchlistAddRequest",
     "WatchlistItemResponse",
     "WatchlistListResponse",
+    "WatchlistSummaryItem",
+    "WatchlistSummaryResponse",
 ]

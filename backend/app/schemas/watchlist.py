@@ -55,6 +55,30 @@ class WatchlistListResponse(BaseModel):
     total: int = Field(..., description="总记录数")
 
 
+class WatchlistSummaryItem(BaseModel):
+    """自选股 metadata-only summary（单条）。
+
+    数据边界（P0 后续）：仅 instrument 元数据 + 加入时间，禁止任何行情/策略指标。
+    self_selection-only 用户通过 GET /v1/watchlist 只能取得此 metadata，
+    不暴露 current_price/change_pct/metrics/latest_event/bars/BB/node/POC/DSA/first_pyramid。
+    """
+
+    watchlist_item_id: UUID = Field(..., description="自选记录 ID")
+    instrument_id: UUID = Field(..., description="股票 ID")
+    symbol: str = Field(..., description="股票代码")
+    name: str = Field(..., description="股票名称")
+    market: str = Field(..., description="市场（SH/SZ/BJ）")
+    source: str = Field(..., description="加入来源")
+    created_at: datetime = Field(..., description="加入时间")
+
+
+class WatchlistSummaryResponse(BaseModel):
+    """自选股 metadata-only summary 列表响应（GET /v1/watchlist 专用）。"""
+
+    items: list[WatchlistSummaryItem] = Field(default_factory=list, description="自选 metadata 列表")
+    total: int = Field(..., description="总记录数")
+
+
 class WatchlistMonitorStatusItem(BaseModel):
     """自选股+监控状态聚合响应（单条）。"""
 
@@ -115,6 +139,8 @@ if __name__ == "__main__":
     print(f"WatchlistAddRequest fields={list(WatchlistAddRequest.model_fields.keys())}")
     print(f"WatchlistItemResponse fields={list(WatchlistItemResponse.model_fields.keys())}")
     print(f"WatchlistListResponse fields={list(WatchlistListResponse.model_fields.keys())}")
+    print(f"WatchlistSummaryItem fields={list(WatchlistSummaryItem.model_fields.keys())}")
+    print(f"WatchlistSummaryResponse fields={list(WatchlistSummaryResponse.model_fields.keys())}")
     print(f"WatchlistMonitorStatusItem fields={list(WatchlistMonitorStatusItem.model_fields.keys())}")
     print(f"WatchlistMonitorStatusResponse fields={list(WatchlistMonitorStatusResponse.model_fields.keys())}")
     # 验证 user_id 不在请求体中（安全约束）

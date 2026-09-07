@@ -1,18 +1,21 @@
 // [SelfSelectionOnlyContract] - 描述: self_selection-only 用户自选 UI 契约测试（源码级）
 // 用法：./node_modules/.bin/tsx --test src/features/market-workspace/__tests__/selfSelectionOnlyContract.test.ts
 //
-// 背景（P0 后续任务）：
-//   P0 授权修复后，/market/stocks（无论 scope=market 还是 scope=watchlist）要求 market_data，
-//   self_selection-only 用户（有 self_selection、无 market_data）访问该端点会 403。
-//   因此 MarketWorkspacePage 必须为这类用户提供独立自选视图，数据源改走
-//   /v1/watchlist/monitor-status（仅要求 self_selection），不再发 /market/stocks。
+// 背景（P0 后续任务，外部审核修正）：
+//   P0 授权修复后，/market/stocks（无论 scope）要求 market_data，self_selection-only
+//   用户访问会 403。但 self_selection-only 不得通过 /v1/watchlist/monitor-status
+//   （返回 full metrics/price/event）隐式重新获得 market_data —— 那是换端点重开泄露。
+//
+// 正确边界：self_selection-only 用户只能看到 metadata-only 自选列表
+//   （GET /v1/watchlist，仅 symbol/name/market/加入时间），不展示任何行情/策略指标。
 //
 // 契约：
 //   1. 存在 isSelfSelectionOnly 判定（!isAdmin && hasSelfSelection && !hasMarketData）
-//   2. self_selection-only 时 useMarketStocks 被禁用（enabled 含 !isSelfSelectionOnly），杜绝 403
-//   3. self_selection-only 时 useWatchlistMonitorStatus 被启用（enabled 含 isSelfSelectionOnly）
-//   4. self_selection-only 分支渲染 WatchlistMonitorTable，不渲染 MarketToolbar（行情专属 UI）
-//   5. 移除自选走 handleRemoveSelfSelectionWatchlist（复用 /v1/watchlist/{id}，仅要求 self_selection）
+//   2. self_selection-only 时禁用 useMarketStocks（enabled 含 !isSelfSelectionOnly）
+//   3. self_selection-only 时使用 metadata-only useWatchlist（不使用 useWatchlistMonitorStatus）
+//   4. self_selection-only 分支渲染极简 metadata 表格，不渲染 WatchlistMonitorTable/MarketToolbar
+//   5. 移除自选走 handleRemoveSelfSelectionWatchlist（复用 removeMutation）
+//   6. 禁止 import/使用 WatchlistMonitorTable / useWatchlistMonitorStatus / adaptWatchlistMonitorStatusItem
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -38,31 +41,35 @@ test('SELFONLY-1: 存在 isSelfSelectionOnly 判定（!isAdmin && hasSelfSelecti
 
 test('SELFONLY-2: self_selection-only 时禁用 useMarketStocks（enabled 含 !isSelfSelectionOnly）', () => {
   const src = readSource(PAGE_PATH)
-  // useMarketStocks 的 enabled 必须包含 !isSelfSelectionOnly，从源头杜绝 /market/stocks 403
-  const marketStocksMatch = src.match(/useMarketStocks\(marketStocksParams,\s*\{[\s\S]*?enabled:\s*(accessReady\s*&&\s*!isSelfSelectionOnly)[\s\S]*?\}\)/)
-  assert.ok(marketStocksMatch, 'useMarketStocks 的 enabled 必须包含 accessReady && !isSelfSelectionOnly')
+  const m = src.match(/useMarketStocks\(marketStocksParams,\s*\{[\s\S]*?enabled:\s*(accessReady\s*&&\s*!isSelfSelectionOnly)[\s\S]*?\}\)/)
+  assert.ok(m, 'useMarketStocks 的 enabled 必须包含 accessReady && !isSelfSelectionOnly')
 })
 
-test('SELFONLY-3: self_selection-only 时启用 useWatchlistMonitorStatus（enabled 含 isSelfSelectionOnly）', () => {
+test('SELFONLY-3: self_selection-only 使用 metadata-only useWatchlist（不使用 useWatchlistMonitorStatus）', () => {
   const src = readSource(PAGE_PATH)
-  const monitorMatch = src.match(/useWatchlistMonitorStatus\(\{[\s\S]*?enabled:\s*isSelfSelectionOnly[\s\S]*?\}\)/)
-  assert.ok(monitorMatch, 'useWatchlistMonitorStatus 的 enabled 必须为 isSelfSelectionOnly')
+  // 必须存在为 self_selection-only 启用的 useWatchlist
+  const w = src.match(/useWatchlist\(\{[\s\S]*?enabled:\s*isSelfSelectionOnly[\s\S]*?\}\)/)
+  assert.ok(w, 'self_selection-only 必须使用 useWatchlist({ enabled: isSelfSelectionOnly })')
+  // 禁止使用 useWatchlistMonitorStatus（返回 full metrics，会重开 self_selection→market_data 泄露）
+  assert.ok(!/useWatchlistMonitorStatus/.test(src), '禁止使用 useWatchlistMonitorStatus')
 })
 
-test('SELFONLY-4: self_selection-only 分支渲染 WatchlistMonitorTable 而非 MarketToolbar', () => {
+test('SELFONLY-4: self_selection-only 分支渲染极简 metadata 表格，不渲染 WatchlistMonitorTable/MarketToolbar', () => {
   const src = readSource(PAGE_PATH)
-  // 定位 isSelfSelectionOnly 早退分支（if (isSelfSelectionOnly) { return (...)}）
   const branchIdx = src.indexOf('if (isSelfSelectionOnly)')
   assert.ok(branchIdx >= 0, '必须存在 if (isSelfSelectionOnly) 早退分支')
-  // 精确切片：从 if (isSelfSelectionOnly) 到主 return 之前（"\n  return (" 是主 return 的起始标记）
   const mainReturnIdx = src.indexOf('\n  return (', branchIdx)
   assert.ok(mainReturnIdx > branchIdx, '自选分支后必须存在主 return')
   const branchBlock = src.slice(branchIdx, mainReturnIdx)
-  assert.ok(/<WatchlistMonitorTable/.test(branchBlock), '自选分支必须渲染 WatchlistMonitorTable')
-  // 用 <MarketToolbar（JSX 元素，带 < 前缀）精确匹配，排除注释提及
-  assert.ok(!/<MarketToolbar/.test(branchBlock), '自选分支不得渲染 MarketToolbar（行情专属 UI）')
+  // 极简表格：展示 name/symbol/market，不展示行情字段
+  assert.ok(/item\.name/.test(branchBlock), '自选分支必须渲染股票名称 item.name')
+  assert.ok(/item\.symbol/.test(branchBlock), '自选分支必须渲染代码 item.symbol')
+  assert.ok(/item\.market/.test(branchBlock), '自选分支必须渲染市场 item.market')
+  // 禁止渲染行情/策略组件与字段
+  assert.ok(!/WatchlistMonitorTable/.test(branchBlock), '自选分支禁止渲染 WatchlistMonitorTable')
+  assert.ok(!/<MarketToolbar/.test(branchBlock), '自选分支禁止渲染 MarketToolbar（行情专属 UI）')
   // 移除自选回调必须绑定
-  assert.ok(/onRemove=\{handleRemoveSelfSelectionWatchlist\}/.test(branchBlock), '自选分支必须绑定 onRemove={handleRemoveSelfSelectionWatchlist}')
+  assert.ok(/onClick=\{\(\) => handleRemoveSelfSelectionWatchlist\(item\)\}/.test(branchBlock), '自选分支必须绑定 handleRemoveSelfSelectionWatchlist(item)')
 })
 
 test('SELFONLY-5: 移除自选复用 removeMutation（/v1/watchlist/{id}，仅要求 self_selection）', () => {
@@ -70,12 +77,12 @@ test('SELFONLY-5: 移除自选复用 removeMutation（/v1/watchlist/{id}，仅�
   const defIdx = src.indexOf('handleRemoveSelfSelectionWatchlist = useCallback')
   assert.ok(defIdx >= 0, '必须存在 handleRemoveSelfSelectionWatchlist = useCallback 定义')
   const block = src.slice(defIdx, defIdx + 600)
-  assert.ok(/removeMutation\.mutate\(row\.instrument_id/.test(block), '移除必须调用 removeMutation.mutate(row.instrument_id)')
+  assert.ok(/removeMutation\.mutate\(item\.instrument_id/.test(block), '移除必须调用 removeMutation.mutate(item.instrument_id)')
 })
 
-test('SELFONLY-6: import WatchlistMonitorTable 与 adaptWatchlistMonitorStatusItem', () => {
+test('SELFONLY-6: 禁止 import WatchlistMonitorTable / useWatchlistMonitorStatus / adaptWatchlistMonitorStatusItem', () => {
   const src = readSource(PAGE_PATH)
-  assert.ok(/WatchlistMonitorTable/.test(src), '必须 import WatchlistMonitorTable')
-  assert.ok(/adaptWatchlistMonitorStatusItem/.test(src), '必须 import adaptWatchlistMonitorStatusItem')
-  assert.ok(/useWatchlistMonitorStatus/.test(src), '必须 import useWatchlistMonitorStatus')
+  assert.ok(!/WatchlistMonitorTable/.test(src), '禁止 import/使用 WatchlistMonitorTable')
+  assert.ok(!/useWatchlistMonitorStatus/.test(src), '禁止 import/使用 useWatchlistMonitorStatus')
+  assert.ok(!/adaptWatchlistMonitorStatusItem/.test(src), '禁止 import/使用 adaptWatchlistMonitorStatusItem')
 })

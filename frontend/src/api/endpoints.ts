@@ -578,6 +578,24 @@ export interface WatchlistListResponse {
   total: number
 }
 
+/** 自选股 metadata-only summary 项（与 backend WatchlistSummaryItem 对齐）
+ *  P0 后续数据边界：仅 instrument 元数据 + 加入时间，禁止行情/策略指标 */
+export interface WatchlistSummaryItem {
+  watchlist_item_id: string
+  instrument_id: string
+  symbol: string
+  name: string
+  market: string
+  source: string
+  created_at: string
+}
+
+/** 自选股 metadata-only summary 列表响应（GET /v1/watchlist 专用） */
+export interface WatchlistSummaryResponse {
+  items: WatchlistSummaryItem[]
+  total: number
+}
+
 /** 自选股+监控状态聚合项（与 backend/app/schemas/watchlist.py WatchlistMonitorStatusItem 对齐） */
 export interface WatchlistMonitorStatusItem {
   watchlist_item_id: string
@@ -1543,9 +1561,9 @@ export async function retryMessageDelivery(deliveryId: string): Promise<MessageD
 // ===== Watchlist 端点 =====
 // ============================================================
 
-/** 查询当前用户的自选列表（仅 active=true） */
-export async function getWatchlist(): Promise<WatchlistListResponse> {
-  const { data } = await apiClient.get<WatchlistListResponse>('/v1/watchlist')
+/** 查询当前用户的自选列表（metadata-only summary，仅 active=true） */
+export async function getWatchlist(): Promise<WatchlistSummaryResponse> {
+  const { data } = await apiClient.get<WatchlistSummaryResponse>('/v1/watchlist')
   return data
 }
 
