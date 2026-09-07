@@ -54,6 +54,10 @@ Case 矩阵：
       无 self_selection/market_data → resource guard 403）
 - L: market_data-only → 非法 timeframe/primary_timeframe → 400（正向 guard evidence，
      证明 guard 通过后业务校验已触达，防 deny-all false-green）
+- M: symbol-scope（stocks/{symbol}/context + first-pyramid）+ send-feishu resource guard：
+     context 无 run 时 DB-only 200（正向）；first-pyramid 负向 403（不碰 provider）；
+     send-feishu 已自选→404 CHANNEL_NOT_FOUND（guard 通过停在纯 DB channel lookup）、
+     未自选→403、research_replay-only→403、匿名→401
 
 注意：
 - 不覆盖 C10（legacy plan→market_data 推导）、C2（quota fail-closed）——这两者属独立 change set，
@@ -658,3 +662,111 @@ async def test_case_l_market_data_positive_guard_evidence(
         headers=headers,
     )
     assert r_temporal.status_code == 400, r_temporal.text
+
+
+@pytest.mark.asyncio
+async def test_case_m_symbol_scope_and_feishu_resource_guard(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """Case M：symbol-scope 端点（context / first-pyramid）+ send-feishu 的 resource-scope 授权。
+
+    Commit A corrective（审核 blocker）：
+    - context / first-pyramid 改接 require_stock_symbol_market_access（symbol → Instrument →
+      authorize_instrument_market_access），此前 formal matrix 未覆盖，属 false-green 缺口。
+    - send-feishu 是「个股详情完整数据的主动导出路径」，此前仅 get_current_active_user，
+      可对任意 instrument 创建详情分享，绕开 PA-13；现接 require_instrument_market_access。
+
+    确定性 evidence（禁止 mock/fallback/provider）：
+    - /context 无 published full run → _empty_atomic_response（reason_code=no_published_full_run）
+      纯 DB 200。self-selection-only + 已自选 → 200（正向 resource-scope 证据）。
+    - /first-pyramid 不造正向 200（无 published pyramid 会 fallback 到 MarketDataAggregationService
+      即时计算，可能碰行情 provider）→ 仅负向 403/401 作 route-wiring 证据，正向 resource owner
+      已由 /context 的 200 路径经同一 require_stock_symbol_market_access 证明。
+    - /send-feishu：guard 通过后停在纯 DB channel lookup（用户无 active Feishu channel →
+      ChannelNotFoundError → 404），未碰 capture worker / snapshot provider。故：
+        self-selection-only + 已自选 → 404 CHANNEL_NOT_FOUND（guard 通过）
+        self-selection-only + 未自选 → 403（guard 拒绝）
+        research_replay-only → 403；匿名 → 401
+    """
+    # self_selection-only 用户
+    self_only = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}m1-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "self_selection", "months": 1, "watchlist_limit": 20}],
+    )
+    inst = await _create_instrument(db_session)
+    other_inst = await _create_instrument(db_session)
+    self_headers = _auth(self_only)
+
+    # 把 inst 加入本人自选（POST /v1/watchlist 仅要求 self_selection）
+    r_add = await client.post(
+        "/v1/watchlist",
+        json={"instrument_id": str(inst.id), "source": "manual"},
+        headers=self_headers,
+    )
+    assert r_add.status_code == 201, r_add.text
+
+    # /context：已自选 → 200（无 published full run → DB-only empty atomic response）
+    r_ctx_ok = await client.get(
+        f"/v1/stocks/{inst.symbol}/context", headers=self_headers
+    )
+    assert r_ctx_ok.status_code == 200, r_ctx_ok.text
+
+    # /context：未自选 other_inst → 403
+    r_ctx_denied = await client.get(
+        f"/v1/stocks/{other_inst.symbol}/context", headers=self_headers
+    )
+    assert r_ctx_denied.status_code == 403, r_ctx_denied.text
+
+    # /first-pyramid：已自选 → 不硬要求 200（可能碰 provider）；只断言未自选 → 403
+    r_fp_denied = await client.get(
+        f"/v1/stocks/{other_inst.symbol}/first-pyramid", headers=self_headers
+    )
+    assert r_fp_denied.status_code == 403, r_fp_denied.text
+
+    # /send-feishu：已自选 inst → guard 通过 → 无 Feishu channel → 404 CHANNEL_NOT_FOUND
+    r_feishu_ok = await client.post(
+        f"/v1/instruments/{inst.id}/send-feishu", json={}, headers=self_headers
+    )
+    assert r_feishu_ok.status_code == 404, r_feishu_ok.text
+    assert (
+        r_feishu_ok.json()["detail"]["error_code"] == "CHANNEL_NOT_FOUND"
+    ), r_feishu_ok.text
+
+    # /send-feishu：未自选 other_inst → 403（resource guard 拒绝）
+    r_feishu_denied = await client.post(
+        f"/v1/instruments/{other_inst.id}/send-feishu", json={}, headers=self_headers
+    )
+    assert r_feishu_denied.status_code == 403, r_feishu_denied.text
+
+    # research_replay-only → symbol 端点 + send-feishu 均 403
+    replay_only = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}m2-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "research_replay", "months": 1}],
+    )
+    replay_headers = _auth(replay_only)
+    assert (
+        await client.get(f"/v1/stocks/{inst.symbol}/context", headers=replay_headers)
+    ).status_code == 403
+    assert (
+        await client.get(
+            f"/v1/stocks/{inst.symbol}/first-pyramid", headers=replay_headers
+        )
+    ).status_code == 403
+    assert (
+        await client.post(
+            f"/v1/instruments/{inst.id}/send-feishu", json={}, headers=replay_headers
+        )
+    ).status_code == 403
+
+    # 匿名 → symbol 端点 + send-feishu 均 401
+    assert (
+        await client.get(f"/v1/stocks/{inst.symbol}/context")
+    ).status_code == 401
+    assert (
+        await client.get(f"/v1/stocks/{inst.symbol}/first-pyramid")
+    ).status_code == 401
+    assert (
+        await client.post(f"/v1/instruments/{inst.id}/send-feishu", json={})
+    ).status_code == 401

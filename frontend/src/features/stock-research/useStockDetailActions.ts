@@ -29,6 +29,7 @@ import {
   getStockDisplay,
 } from '@/features/trend-selection'
 import { useToast } from '@/store/toast'
+import { useAuthStore } from '@/store/auth'
 import type { ResearchSource } from './stockResearchTypes'
 import type { StrategyResultQueryParams, MarketStocksQueryParams } from '@/api/endpoints'
 import { buildStockDetailUrl, type OriginScope, type MarketCanonicalQuery } from './stockDetailNavigation'
@@ -67,6 +68,8 @@ export interface SourceStockItem {
 export type SourceListKind = 'market' | 'watchlist'
 
 export interface StockDetailActions {
+  // 自选管理权限（Commit A：admin || self_selection；market_data-only 无自选权）
+  canManageWatchlist: boolean
   // 自选状态
   inWatchlist: boolean
   handleToggleWatchlist: () => void
@@ -116,6 +119,14 @@ export function useStockDetailActions({
 }: StockDetailActionsParams): StockDetailActions {
   const navigate = useNavigate()
   const showToast = useToast((s) => s.show)
+
+  // [Commit A] 自选管理权限：admin 或 self_selection。market_data-only 用户无自选权，
+  // 详情页不得轮询 monitor-status（后端已改为 self_selection only，会 403）也不得显示自选按钮。
+  const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
+  const hasSelfSelection = useAuthStore(
+    (s) => !!s.user?.capabilities?.self_selection?.active,
+  )
+  const canManageWatchlist = isAdmin || hasSelfSelection
 
   // [DetailSourceContextV2] 来源列表类型：market → market；watchlist/direct → watchlist
   // direct 时 UI 隐藏左栏（StockDetailPage 根据 origin==='direct' 判断）
@@ -188,7 +199,11 @@ export function useStockDetailActions({
 
   // [DetailSourceContextV2] useWatchlistMonitorStatus 仅用于 inWatchlist 状态判断
   // 禁止用作来源列表数据源（V1 根因：watchlist 来源用 monitor-status API，与列表页 dsa_selector universe=watchlist 不同链）
-  const monitorStatusQuery = useWatchlistMonitorStatus()
+  // [Commit A] market_data-only 无 self_selection，后端 monitor-status 403；enabled gate 阻止
+  // 交易时段 1s 一次的 403 轮询噪音。
+  const monitorStatusQuery = useWatchlistMonitorStatus({
+    enabled: canManageWatchlist,
+  })
 
   // 自选变更操作
   const addWatchlist = useAddToWatchlist()
@@ -231,9 +246,9 @@ export function useStockDetailActions({
     if (watchlistOverride === serverInWatchlist) setWatchlistOverride(null)
   }, [serverInWatchlist, watchlistOverride])
 
-  // 操作：加入/移出自选
+  // 操作：加入/移出自选（fail-closed：无自选管理权限时直接 no-op，避免 POST/DELETE 403）
   const handleToggleWatchlist = useCallback(() => {
-    if (!instrumentId) return
+    if (!canManageWatchlist || !instrumentId) return
     const target = !inWatchlist
     setWatchlistOverride(target)
     if (inWatchlist) {
@@ -256,7 +271,7 @@ export function useStockDetailActions({
         },
       )
     }
-  }, [instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])
+  }, [canManageWatchlist, instrumentId, inWatchlist, removeWatchlist, addWatchlist, source, showToast])
 
   // [DetailSourceContextV2] 来源列表状态
   // - mcq 有效：marketStocksQuery.isLoading/error/empty
@@ -298,6 +313,7 @@ export function useStockDetailActions({
   }, [canNavigate, currentIndex, sourceStocks, navigate, origin, returnTo, timeframe, marketCanonicalQueryRaw])
 
   return {
+    canManageWatchlist,
     inWatchlist,
     handleToggleWatchlist,
     addWatchlistPending: addWatchlist.isPending,

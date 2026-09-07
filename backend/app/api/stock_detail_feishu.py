@@ -25,6 +25,10 @@ from app.constants.indicator_view import INDICATOR_VIEW_VALUES
 from app.core.deps import get_current_active_user, get_db
 from app.models.user import User
 from app.schemas.notification import MessageDeliveryResponse
+from app.services.access_control_service import (
+    AccessContext,
+    require_instrument_market_access,
+)
 from app.services.notification_service import (
     ChannelNotFoundError,
     NotificationServiceError,
@@ -173,7 +177,7 @@ async def send_stock_detail_feishu_endpoint(
     instrument_id: uuid.UUID,
     payload: SendFeishuRequest | None = None,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_active_user),
+    ctx: AccessContext = Depends(require_instrument_market_access),
 ) -> SendFeishuResponse:
     """发送个股详情到飞书（普通用户可用，走 Outbox 异步链路）。
 
@@ -208,7 +212,7 @@ async def send_stock_detail_feishu_endpoint(
         result = await send_stock_detail_to_feishu(
             db=db,
             instrument_id=instrument_id,
-            user_id=current_user.id,
+            user_id=uuid.UUID(ctx.user_id),
             frontend_base_url=settings.frontend_base_url,
             capture_worker_url=settings.capture_worker_url,
             capture_token_ttl_seconds=settings.jwt_capture_ttl_seconds,

@@ -365,7 +365,7 @@ export default function StockDetailPage() {
                     const inSourceList = detailActions.sourceStocks.some(s => s.symbol === symbol)
                     const sourceListVisible = showSourceList && !sourceContextInvalid && detailActions.sourceStocks.length > 0
                     const showFallback = !sourceListVisible || !inSourceList
-                    return showFallback ? (
+                    return showFallback && detailActions.canManageWatchlist ? (
                       <WatchlistToggleButton
                         inWatchlist={detailActions.inWatchlist}
                         pending={detailActions.addWatchlistPending || detailActions.removeWatchlistPending}
@@ -631,8 +631,8 @@ export default function StockDetailPage() {
               >
                 <div className="tv-source-name-row">
                   <span className="tv-source-name">{s.name}</span>
-                  {/* [CHANGE-20260729-007] 活动行紧凑自选按钮 */}
-                  {s.symbol === symbol && (
+                  {/* [CHANGE-20260729-007] 活动行紧凑自选按钮（Commit A：仅 canManageWatchlist 显示） */}
+                  {s.symbol === symbol && detailActions.canManageWatchlist && (
                     <WatchlistToggleButton
                       inWatchlist={detailActions.inWatchlist}
                       pending={detailActions.addWatchlistPending || detailActions.removeWatchlistPending}

@@ -168,7 +168,8 @@ test('CHANGE-005-10: useStockDetailActions 以 mcq 为来源列表数据源（PR
   // 禁止 fresh usePublishedRuns 重新推导 activeRunId（避免新 run 发布后来源列表漂移）
   assert.ok(!/usePublishedRuns\(/.test(src), '禁止使用 usePublishedRuns（用固定入口快照替代）')
   // useWatchlistMonitorStatus 仅用于 inWatchlist，禁止充当来源列表数据源
-  assert.ok(/useWatchlistMonitorStatus\(\)/.test(src), '必须使用 useWatchlistMonitorStatus（仅用于 inWatchlist）')
+  // [Commit A] enabled gate 绑定 canManageWatchlist（market_data-only 不轮询 monitor-status）
+  assert.ok(/useWatchlistMonitorStatus\(\{[\s\S]*?enabled:\s*canManageWatchlist[\s\S]*?\}\)/.test(src), '必须使用 useWatchlistMonitorStatus({ enabled: canManageWatchlist })（仅用于 inWatchlist，market-only 不轮询）')
   // 接收 origin + mcq 参数（旧 DSA sourceRunId/canonicalQuery 仅 deprecated 兼容保留）
   assert.ok(/origin:\s*OriginScope/.test(src), 'StockDetailActionsParams 必须接收 origin: OriginScope')
   assert.ok(/marketCanonicalQuery:\s*MarketCanonicalQuery \| null/.test(src), 'StockDetailActionsParams 必须接收 marketCanonicalQuery: MarketCanonicalQuery | null')
@@ -224,3 +225,24 @@ test('CHANGE-007-dedup: detailSourceContext.ts 为 normalizeResearchSource/defau
   assert.ok(!/^export function defaultStrategyForSource\(/m.test(typesSrc), 'stockResearchTypes.ts 不得定义 defaultStrategyForSource（应 re-export）')
   assert.ok(/from '\.\/detailSourceContext\.ts'/.test(typesSrc), 'stockResearchTypes.ts 必须从 detailSourceContext.ts re-export')
 })
+
+// [Commit A corrective] market_data-only 详情不得有自选噪音：
+// canManageWatchlist = isAdmin || hasSelfSelection；market_data-only 不轮询 monitor-status、
+// 不显示自选按钮、toggle fail-closed。
+test('CHANGE-A-corrective: canManageWatchlist 门控自选能力（market_data-only 无自选 UI/轮询）', () => {
+  const actionsSrc = readSource(USE_DETAIL_ACTIONS)
+  const pageSrc = readSource(STOCK_DETAIL_PAGE)
+
+  // canManageWatchlist 派生：isAdmin || hasSelfSelection
+  assert.ok(/canManageWatchlist\s*=\s*isAdmin \|\| hasSelfSelection/.test(actionsSrc), 'useStockDetailActions 必须派生 canManageWatchlist = isAdmin || hasSelfSelection')
+  // 从 auth store 读 self_selection capability
+  assert.ok(/capabilities\?\.self_selection\?\.active/.test(actionsSrc), '必须从 auth store 读 capabilities.self_selection.active')
+  // toggle fail-closed：无权限或 instrumentId 缺失直接返回
+  assert.ok(/if \(!canManageWatchlist \|\| !instrumentId\) return/.test(actionsSrc), 'handleToggleWatchlist 必须 fail-closed（!canManageWatchlist || !instrumentId 返回）')
+  // 返回值暴露 canManageWatchlist
+  assert.ok(/return \{\s*canManageWatchlist,/.test(actionsSrc), 'StockDetailActions 返回值必须暴露 canManageWatchlist')
+  // StockDetailPage 两处自选按钮均由 canManageWatchlist 门控
+  assert.ok(/showFallback && detailActions\.canManageWatchlist/.test(pageSrc), 'fallback 自选按钮必须由 canManageWatchlist 门控')
+  assert.ok(/s\.symbol === symbol && detailActions\.canManageWatchlist/.test(pageSrc), '活动行自选按钮必须由 canManageWatchlist 门控')
+})
+
