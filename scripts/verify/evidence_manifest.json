@@ -141,6 +141,15 @@
       "required": true,
       "test_selectors": ["tests/test_pg_review_scope_explorer_compare_lineage.py"],
       "claim": "Explorer compare-first read (ReviewScopeObservationFact LEFT JOIN ReviewScopeCompositionSnapshot) takes compareFacts only from the formally published run; an unpublished same-day run cannot pollute facts or the Composition LEFT JOIN. When industry_l1 and concept coexist, peer percentile is computed per family, never cross-family."
+    },
+    {
+      "contract_id": "self_selection_market_capability_boundary",
+      "governance_level": 2,
+      "semantic_owner": "app.api.market",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_permission_matrix_p0.py"],
+      "claim": "self_selection, market_data, and research_replay capabilities remain strictly independent at the market-data boundary: scope=market requires market_data; scope=watchlist (full MarketStockRow) requires self_selection AND market_data; /bars /quote and stock-detail endpoints require market_data; export authorization uses body.scope as the single source of truth. Anonymous access is 401 and self_selection-only access to market data is 403."
     }
   ]
 }
