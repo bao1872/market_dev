@@ -28,8 +28,11 @@
 因此：
 - /quote 正向授权用「确定不存在的 instrument UUID」→ 404（require_capability 通过后
   业务逻辑执行 → instrument lookup → 404），精确证明 authorization PASS 且不依赖行情数据。
-- /bars 只保留 negative 证据（self_selection-only / research_replay-only → 403，anonymous → 401），
-  不硬要求 positive 200（避免把 market-data provider contract 拉进权限测试）。
+- /bars 及详情四端点正向授权用「非法 timeframe / primary_timeframe」→ 400（require_capability
+  通过后 endpoint 本地参数校验抛 400），证明 guard 已通过、业务校验已触达，
+  不碰 Pytdx / Redis / Bars DB / fallback / 当前时间。避免 deny-all false-green。
+- 不硬要求 /bars 的 positive 200（/bars 默认 include_realtime=True，DB miss 触发外部
+  fetch_daily_bars，verification_replay 下 fail-closed，结果不可确定）。
 - /market/stocks、/export 的空数据 200 是纯 DB 路径（不碰外部行情 provider），确定性成立。
 
 Case 矩阵（仅 P0）：
@@ -37,12 +40,14 @@ Case 矩阵（仅 P0）：
 - A: admin → /market/stocks market/watchlist 200；/quote 不存在 UUID 404（admin 豁免后业务 404）
 - B: market_data → market 200；scope=watchlist 403（权限独立性）；/quote 不存在 UUID 404
 - C: self_selection-only → market 403；watchlist 403；/bars /quote 及详情四端点全 403
-- D: 匿名 → market/stocks 401、bars 401、quote 401
+- D: 匿名 → market/stocks(market+watchlist) 401、bars 401、quote 401、详情四端点 401、export 401
 - F: 匿名直接 API bypass → /bars /quote 401（匿名泄露闭合）
 - H: 权限撤销（admin_revoke market_data）→ 全市场立即 403
 - I: export 授权 SSOT（body.scope 授权；query scope 不改变结论；精确 200 断言，无弱断言）
 - J: both（self_selection + market_data）→ market/watchlist 200（真实 HTTP 双权限成功路径）
 - K: research_replay-only → 全 market 端点 403（三类 capability 严格独立）
+- L: market_data-only → 非法 timeframe/primary_timeframe → 400（正向 guard evidence，
+     证明 require_capability("market_data") 通过后业务校验已触达，防 deny-all false-green）
 
 注意：
 - 不覆盖 C10（legacy plan→market_data 推导）、C2（quota fail-closed）——这两者属独立 change set，
@@ -300,10 +305,12 @@ async def test_case_c_self_selection_only_denied_market(
 
 @pytest.mark.asyncio
 async def test_case_d_anonymous_denied(db_session: AsyncSession, client: AsyncClient) -> None:
-    """Case D：未登录（匿名）访问行情端点 → 401（含详情四端点，补全匿名 detail matrix）。"""
+    """Case D：未登录（匿名）访问行情端点 → 401（含详情四端点 + watchlist + export，补全匿名完整矩阵）。"""
     inst = await _create_instrument(db_session)
 
     assert (await client.get("/v1/market/stocks?scope=market")).status_code == 401
+    # 匿名 watchlist 也 401（claim「Anonymous access is 401」覆盖 watchlist scope）
+    assert (await client.get("/v1/market/stocks?scope=watchlist")).status_code == 401
     assert (await client.get(f"/v1/instruments/{inst.id}/bars")).status_code == 401
     assert (await client.get(f"/v1/instruments/{inst.id}/quote")).status_code == 401
     # 详情四端点匿名也 401（claim「Anonymous access is 401」需覆盖 stock-detail endpoints）
@@ -311,6 +318,20 @@ async def test_case_d_anonymous_denied(db_session: AsyncSession, client: AsyncCl
     assert (await client.get(f"/v1/instruments/{inst.id}/indicators")).status_code == 401
     assert (await client.get(f"/v1/instruments/{inst.id}/structural-factors")).status_code == 401
     assert (await client.get(f"/v1/instruments/{inst.id}/temporal-features")).status_code == 401
+
+    # 匿名 export（body.scope=market / watchlist）→ 401（合法完整 body，无 DB/provider 依赖）
+    def _body(scope: str) -> dict:
+        return {
+            "scope": scope,
+            "visible_columns": [{"key": "symbol", "title": "代码", "data_type": "text"}],
+        }
+
+    assert (
+        await client.post("/v1/market/export", json=_body("market"))
+    ).status_code == 401
+    assert (
+        await client.post("/v1/market/export", json=_body("watchlist"))
+    ).status_code == 401
 
 
 @pytest.mark.asyncio
@@ -511,3 +532,69 @@ async def test_case_k_research_replay_only_denied_market(
     assert r_exp_market.status_code == 403, r_exp_market.text
     r_exp_watch = await client.post("/v1/market/export", json=_body("watchlist"), headers=headers)
     assert r_exp_watch.status_code == 403, r_exp_watch.text
+
+
+@pytest.mark.asyncio
+async def test_case_l_market_data_positive_guard_evidence(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """Case L：market_data-only 用户正向 guard evidence —— 非法参数 → 400，证明授权已通过。
+
+    这是「deny-all false-green」的防护：若某个端点被误改成「所有人一律 403」，
+    这些正向 case 会失败。400 来自 endpoint 在 require_capability("market_data") 之后的
+    本地参数校验（timeframe / primary_timeframe 非法），不碰 Pytdx / Redis / Bars DB /
+    fallback / 当前交易时间，完全 deterministic。
+
+    对照表（审核给定）：
+      /quote           → nonexistent UUID → 404（见 Case B）
+      /bars            → ?timeframe=INVALID → 400
+      /chart-snapshot  → ?timeframe=INVALID → 400
+      /indicators      → ?timeframe=INVALID → 400
+      /structural-factors → ?primary_timeframe=INVALID → 400
+      /temporal-features  → ?primary_timeframe=INVALID → 400
+    """
+    user = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}l-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "market_data", "months": 1}],
+    )
+    inst = await _create_instrument(db_session)
+    headers = _auth(user)
+
+    # /bars 非法 timeframe → 400（guard 通过后业务校验）
+    r_bars = await client.get(
+        f"/v1/instruments/{inst.id}/bars", params={"timeframe": "INVALID"}, headers=headers
+    )
+    assert r_bars.status_code == 400, r_bars.text
+
+    # /chart-snapshot 非法 timeframe → 400
+    r_chart = await client.get(
+        f"/v1/instruments/{inst.id}/chart-snapshot",
+        params={"timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_chart.status_code == 400, r_chart.text
+
+    # /indicators 非法 timeframe → 400
+    r_indicators = await client.get(
+        f"/v1/instruments/{inst.id}/indicators",
+        params={"timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_indicators.status_code == 400, r_indicators.text
+
+    # /structural-factors 非法 primary_timeframe → 400
+    r_struct = await client.get(
+        f"/v1/instruments/{inst.id}/structural-factors",
+        params={"primary_timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_struct.status_code == 400, r_struct.text
+
+    # /temporal-features 非法 primary_timeframe → 400
+    r_temporal = await client.get(
+        f"/v1/instruments/{inst.id}/temporal-features",
+        params={"primary_timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_temporal.status_code == 400, r_temporal.text

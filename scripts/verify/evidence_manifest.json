@@ -149,7 +149,7 @@
       "gate": ["targeted-pg", "full-closure"],
       "required": true,
       "test_selectors": ["tests/test_permission_matrix_p0.py"],
-      "claim": "self_selection, market_data, and research_replay capabilities remain strictly independent at the market-data boundary: scope=market requires market_data; scope=watchlist (full MarketStockRow) requires self_selection AND market_data; /bars /quote and stock-detail endpoints require market_data; export authorization uses body.scope as the single source of truth. Anonymous access is 401 and self_selection-only access to market data is 403."
+      "claim": "For users resolved from explicit user_capabilities (legacy_plan_fallback / C10 excluded from this contract), self_selection, market_data, and research_replay are enforced independently at the market-data boundary: scope=market requires market_data; scope=watchlist (full MarketStockRow) requires self_selection AND market_data; /bars /quote and stock-detail endpoints require market_data; export authorization uses body.scope as the single source of truth. Anonymous access is 401, self_selection-only / research_replay-only access to market data is 403, and a market_data user passes the guard before business validation (invalid timeframe -> 400 / nonexistent instrument -> 404)."
     }
   ]
 }
