@@ -143,7 +143,8 @@ async def test_login_returns_capabilities_and_watchlist_next_route(
 
 @pytest.mark.asyncio
 async def test_api_guard_200_and_403(db_session: AsyncSession, client: AsyncClient) -> None:
-    """require_any_capability 真实 200（有 self_selection）；无权限用户 403。"""
+    """[P0 作用域感知] self_selection 用户：scope=watchlist 放行(200/422)，scope=market 必须 403；
+    无权限用户任意 scope 均 403。"""
     email_ok = f"{_TEST_EMAIL_PREFIX}guard-ok-{uuid.uuid4().hex[:8]}@test.local"
     user_ok = await _register_with_invite(
         db_session,
@@ -170,16 +171,24 @@ async def test_api_guard_200_and_403(db_session: AsyncSession, client: AsyncClie
     await db_session.flush()
     token_none = create_access_token(str(user_none.id))
 
+    # self_selection + scope=watchlist：放行（200 或参数校验）
     ok = await client.get(
-        "/v1/market/stocks?page=1&page_size=1",
+        "/v1/market/stocks?scope=watchlist&page=1&page_size=1",
         headers={"Authorization": f"Bearer {token_ok}"},
     )
     none = await client.get(
-        "/v1/market/stocks?page=1&page_size=1",
+        "/v1/market/stocks?scope=watchlist&page=1&page_size=1",
         headers={"Authorization": f"Bearer {token_none}"},
     )
     assert ok.status_code in (200, 422)  # 200 或参数校验（权限已放行）
     assert none.status_code == 403
+
+    # [P0] self_selection + scope=market（全市场行情）：必须 403（禁止隐式获得 market_data）
+    market = await client.get(
+        "/v1/market/stocks?scope=market&page=1&page_size=1",
+        headers={"Authorization": f"Bearer {token_ok}"},
+    )
+    assert market.status_code == 403, market.text
 
 
 @pytest.mark.asyncio

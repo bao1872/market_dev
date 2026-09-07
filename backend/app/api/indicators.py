@@ -43,6 +43,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.services.access_control_service import AccessContext, require_capability
 from app.models.bar import BarDaily
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.services import indicator_cache
@@ -152,6 +153,7 @@ async def get_indicators(
     include_realtime: bool = Query(True, description="是否包含实时 partial bar（默认 True，与 bars API 默认对齐）"),
     completed_only: bool = Query(False, description="只返回已完成 bar（True 时强制 include_realtime=False）"),
     adjustment_as_of: date | None = Query(None, description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）"),
+    ctx: AccessContext = Depends(require_capability("market_data")),
     db: AsyncSession = Depends(get_db),
     *,
     response: Response,

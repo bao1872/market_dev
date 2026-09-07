@@ -58,6 +58,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.bars import _df_to_responses
 from app.core.deps import get_db
+from app.services.access_control_service import AccessContext, require_capability
 from app.core.time import now_shanghai
 from app.schemas.bar import BarListResponse
 from app.services.calendar_service import is_trading_day_async
@@ -284,6 +285,7 @@ async def get_chart_snapshot(
         None,
         description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日）",
     ),
+    ctx: AccessContext = Depends(require_capability("market_data")),
     db: AsyncSession = Depends(get_db),
     *,
     response: Response,

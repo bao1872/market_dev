@@ -31,6 +31,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.services.access_control_service import AccessContext, require_capability
 from app.services.structural_factor_service import compute_structural_factors
 
 logger = logging.getLogger("api.structural_factors")
@@ -52,6 +53,7 @@ async def get_structural_factors(
     ),
     adj: str = Query("qfq", description="复权方式: qfq | none"),
     as_of: str = Query("latest", description="截止时间（默认 latest）"),
+    ctx: AccessContext = Depends(require_capability("market_data")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """获取双周期结构状态因子。

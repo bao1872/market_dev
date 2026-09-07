@@ -75,7 +75,7 @@ export interface AppNavItem {
 // [Round 2026-07-28-4] 自选升级为一级导航，复用 /market?scope=watchlist
 // [CHANGE-20260802-002] 复盘与竞价同属 research_replay 权益，导航同显同隐
 export const USER_NAV_ITEMS: AppNavItem[] = [
-  { path: APP_ROUTES.market, label: '行情' },
+  { path: APP_ROUTES.market, label: '行情', requiredCapability: 'market_data' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选', requiredCapability: 'self_selection' },
   { path: APP_ROUTES.review, label: '复盘', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
   { path: APP_ROUTES.auction, label: '竞价', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },

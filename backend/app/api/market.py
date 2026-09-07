@@ -151,13 +151,49 @@ from app.schemas.market_stocks import (  # noqa: E402
 )
 from app.services.access_control_service import (  # noqa: E402
     AccessContext,
-    require_any_capability,
     require_authenticated,
 )
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
 
 # Phase 4: state 筛选合法值（up=上行, down=下行, sideways=震荡）
 _VALID_STATE_FILTERS = {"up", "down", "sideways"}
+
+
+def require_market_stocks_capability(
+    scope: str = Query("market", description="范围：market | watchlist"),
+):
+    """[P0 安全修复] /market/stocks 与 /market/export 的作用域感知守卫。
+
+    - scope=watchlist：self_selection 或 market_data 均可（自选列表是 self_selection 核心功能，
+      不得因收紧 market_data 而误伤）
+    - scope=market（全市场）：仅 market_data（严禁 self_selection 隐式获得全市场行情）
+    - admin 豁免
+    """
+
+    async def _check(
+        ctx: AccessContext = Depends(require_authenticated),
+    ) -> AccessContext:
+        normalized = "watchlist" if scope == "watchlist" else "market"
+        if ctx.is_admin:
+            return ctx
+        if normalized == "watchlist":
+            if (
+                ctx.capabilities.get("self_selection", {}).get("active")
+                or ctx.capabilities.get("market_data", {}).get("active")
+            ):
+                return ctx
+            raise HTTPException(
+                status_code=403,
+                detail="需要 self_selection 或 market_data 权限以查看自选列表",
+            )
+        if ctx.capabilities.get("market_data", {}).get("active"):
+            return ctx
+        raise HTTPException(
+            status_code=403,
+            detail="需要 market_data 权限以查看全市场行情",
+        )
+
+    return _check
 
 
 @router.get("/stocks", response_model=MarketStocksResponse)
@@ -192,7 +228,7 @@ async def list_market_stocks(
         ),
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_any_capability("self_selection", "market_data")),
+    ctx: AccessContext = Depends(require_market_stocks_capability),
 ) -> MarketStocksResponse:
     """查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
 
@@ -252,7 +288,7 @@ async def list_market_stocks(
 async def export_market_stocks(
     request: MarketExportRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_any_capability("self_selection", "market_data")),
+    ctx: AccessContext = Depends(require_market_stocks_capability),
 ) -> Response:
     """导出行情筛选结果为 .xlsx（复用 /market/stocks 同一查询语义）。
 

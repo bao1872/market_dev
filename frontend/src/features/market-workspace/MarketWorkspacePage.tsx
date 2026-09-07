@@ -69,6 +69,9 @@ export default function MarketWorkspacePage() {
   // Hooks 必须无条件调用（不能与 isAdmin 短路），再在普通 JS 层做 || 合并
   const hasMarketData = useAuthStore((s) => !!s.user?.capabilities?.market_data?.active)
   const hasSelfSelection = useAuthStore((s) => !!s.user?.capabilities?.self_selection?.active)
+  // [P0 安全修复] capability 未解析完成（accessStatus !== 'ready'）时，user.capabilities 不可信，
+  // 禁止发出任何 market request（否则 self_selection-only 用户可能先发 scope=market 再被后端 403）。
+  const accessReady = useAuthStore((s) => s.accessStatus === 'ready')
   // - canAccessStockDetail: market_data capability（详情按钮可点击；false 时股票名仅展示文本）
   // - canAccessWatchlist: self_selection capability（显示自选 scope + 自选操作列；false 时隐藏）
   const canAccessStockDetail = isAdmin || hasMarketData
@@ -77,7 +80,14 @@ export default function MarketWorkspacePage() {
   // 从 URL 解析状态（仅 scope + selected；sort/filters/page 由 StrategyDataTable 管理）
   const urlState = useMemo(() => decodeMarketWorkspaceUrl(searchParams), [searchParams])
   // [Gate2 PRD60 PA-11] 无自选权限时强制 scope=market（禁止 watchlist scope）
-  const scope: MarketScope = (!canAccessWatchlist && urlState.scope === 'watchlist') ? 'market' : urlState.scope
+  // [P0 安全修复] 仅 self_selection（无 market_data）用户强制 scope=watchlist：
+  //   全市场行情对其禁止（后端 /market/stocks?scope=market 亦返回 403），前端不得渲染全市场列表。
+  const scope: MarketScope =
+    !canAccessWatchlist && urlState.scope === 'watchlist'
+      ? 'market'
+      : urlState.scope === 'market' && hasSelfSelection && !hasMarketData
+        ? 'watchlist'
+        : urlState.scope
   const selected = urlState.selected
 
   // 顶部搜索框 keyword（单一真源，通过 externalKeyword 注入表格）
@@ -363,7 +373,9 @@ export default function MarketWorkspacePage() {
     },
     [scope, keyword, query.page, query.pageSize, query.sort, query.filters, industry, concept],
   )
-  const marketStocksQuery = useMarketStocks(marketStocksParams)
+  // [P0 安全修复] capability 未就绪（accessStatus !== 'ready'）时不发 market request，
+  // 从源头杜绝「self_selection-only 用户先发 scope=market 再被 403」的竞态。
+  const marketStocksQuery = useMarketStocks(marketStocksParams, { enabled: accessReady })
 
   // 行数据：MarketStockRow → TrendSelectionRow（单次转换，包含 first_pyramid/payload/chip_status）
   const rows: TrendSelectionRow[] = useMemo(

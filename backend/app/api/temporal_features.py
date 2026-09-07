@@ -32,6 +32,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
+from app.services.access_control_service import AccessContext, require_capability
 from app.services.temporal_feature_service import compute_temporal_features
 
 logger = logging.getLogger("api.temporal_features")
@@ -54,6 +55,7 @@ async def get_temporal_features(
     ),
     adj: str = Query("qfq", description="复权方式: qfq | none"),
     as_of: str = Query("latest", description="截止时间（V1 只支持 latest）"),
+    ctx: AccessContext = Depends(require_capability("market_data")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """获取双周期时序特征。
