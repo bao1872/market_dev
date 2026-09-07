@@ -46,7 +46,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import INDICATOR_BARS
 from app.core.deps import get_db, require_roles
-from app.services.access_control_service import AccessContext, require_capability
+from app.services.access_control_service import AccessContext, require_instrument_market_access
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_redis
 from app.core.route_utils import get_route_paths
@@ -445,7 +445,7 @@ async def get_bars(
     # adjustment_as_of 指定 point-in-time 复权锚点（None=最新，历史回算传业务日）
     completed_only: bool = Query(False, description="只返回已完成 bar（True 时强制 include_realtime=False）"),
     adjustment_as_of: date | None = Query(None, description="复权锚点 YYYY-MM-DD（None=最新；历史回算传业务日，禁止未来除权事件泄漏）"),
-    ctx: AccessContext = Depends(require_capability("market_data")),
+    ctx: AccessContext = Depends(require_instrument_market_access),
     session: AsyncSession = Depends(get_db),
     *,
     response: Response,
@@ -670,7 +670,7 @@ async def get_bars(
 )
 async def get_instrument_quote(
     instrument_id: uuid.UUID,
-    ctx: AccessContext = Depends(require_capability("market_data")),
+    ctx: AccessContext = Depends(require_instrument_market_access),
     session: AsyncSession = Depends(get_db),
 ) -> QuoteResponse:
     """获取标的实时报价，明确返回数据来源、实时性、新鲜度与降级状态。

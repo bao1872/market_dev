@@ -62,7 +62,6 @@ from app.schemas.watchlist import (
 from app.services.access_control_service import (
     AccessContext,
     require_capability,
-    require_all_capabilities,
     require_watchlist_limit,
 )
 from app.services.calendar_service import (
@@ -309,14 +308,15 @@ async def add_to_watchlist(
 @router.get("/monitor-status", response_model=WatchlistMonitorStatusResponse)
 async def get_watchlist_monitor_status(
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_all_capabilities("self_selection", "market_data")),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> WatchlistMonitorStatusResponse:
     """查询当前用户自选股+监控状态聚合数据。
 
-    权限（P0 后续数据边界）：本端点返回 full metrics（StockFeatureSnapshot.summary_payload）
-    + latest_event + 行情字段，跨 self_selection 与 market_data 两个 capability 边界，
-    故要求 self_selection AND market_data。self_selection-only / market_data-only 均 403，
-    防止 self_selection-only 通过本端点隐式获得 market_data（独立泄露缺口）。
+    权限（Commit A 权限模型纠偏，PA-13 resource-scope 合同）：本端点只暴露「当前用户
+    自己的 active 自选集合」的 full metrics（universe 由内部查询以
+    UserWatchlistItem.user_id==current_user AND active.is_(True) 强制），不存在跨用户
+    数据泄漏，因此仅需 self_selection 单权限；不叠加 market_data（不再把 self_selection
+    only 用户拦在自选监控之外）。
 
     返回当前用户所有 active 自选股，附带最新 released watchlist_monitor 版本的
     MonitorEvaluation（评估状态）与 StockFeatureSnapshot（指标数据）。

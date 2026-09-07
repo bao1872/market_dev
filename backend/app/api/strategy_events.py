@@ -29,6 +29,10 @@ from app.schemas.strategy_event import (
     StrategyEventListResponse,
     StrategyEventResponse,
 )
+from app.services.access_control_service import (
+    AccessContext,
+    require_instrument_market_access,
+)
 
 router = APIRouter(prefix="/v1", tags=["strategy-events"])
 
@@ -89,8 +93,14 @@ async def get_instrument_events(
     end_time: datetime | None = Query(None, description="事件时间 <= end_time"),
     limit: int = Query(100, ge=1, le=500, description="最大返回数"),
     db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_instrument_market_access),
 ) -> StrategyEventListResponse:
-    """查询某股票的策略事件。"""
+    """查询某股票的策略事件。
+
+    [Commit A 权限模型纠偏] instrument 级 resource guard：admin/market_data 任意；
+    self_selection-only 仅限本人 active 自选；匿名/无权限 403。
+    """
+    _ = ctx  # 权限守卫，不直接使用
     events = await query_events(
         db,
         instrument_id=instrument_id,

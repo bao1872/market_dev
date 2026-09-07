@@ -160,15 +160,16 @@ _VALID_STATE_FILTERS = {"up", "down", "sideways"}
 
 
 def _authorize_market_scope(ctx: AccessContext, scope: str) -> AccessContext:
-    """[P0 安全修复] 纯授权函数：校验 ctx 是否可访问指定 market scope。
+    """[Commit A 权限模型纠偏] 纯授权函数：校验 ctx 是否可访问指定 market scope。
 
-    权限模型（三类 capability 严格独立，禁止隐式继承）：
+    权限模型（三类 capability 严格独立，按 scope 授权、禁止隐式继承）：
     - admin：豁免，一律放行。
     - scope=market（全市场行情）：仅 market_data 授权。self_selection-only 严禁隐式获得全市场。
-    - scope=watchlist：/market/stocks?scope=watchlist 返回完整 MarketStockRow（含
-      latest_price/change_pct/dsa_state/first_pyramid 等行情/分析字段，并非自选最小 summary），
-      因此按数据边界要求 self_selection AND market_data 两项同时具备；
-      self_selection-only 或 market_data-only 均拒绝，禁止任一单向继承。
+    - scope=watchlist：仅 self_selection 授权。watchlist universe 由
+      market_stocks_service 以「current user + active UserWatchlistItem INNER JOIN」强制，
+      返回的是该用户自己 active 自选集合的完整 MarketStockRow（含行情/分析字段），
+      不存在跨用户数据泄漏，因此不再叠加 market_data（PA-13 resource-scope 合同：
+      self_selection 用户对「自己的自选集合」拥有完整使用权）。
 
     注意：本函数是纯逻辑（同步），由下方 FastAPI dependency 在真实请求上下文中调用，
     禁止以 factory 形式返回内层 dependency（会破坏 FastAPI DI，导致 _check 被当作返回值注入）。
@@ -196,13 +197,11 @@ def _authorize_market_scope(ctx: AccessContext, scope: str) -> AccessContext:
         )
 
     # normalized == "watchlist"
-    has_self_selection = bool(ctx.capabilities.get("self_selection", {}).get("active"))
-    has_market_data = bool(ctx.capabilities.get("market_data", {}).get("active"))
-    if has_self_selection and has_market_data:
+    if ctx.capabilities.get("self_selection", {}).get("active"):
         return ctx
     raise HTTPException(
         status_code=403,
-        detail="自选列表完整行情需要 self_selection 与 market_data 两项权限",
+        detail="自选列表行情需要 self_selection 权限",
     )
 
 

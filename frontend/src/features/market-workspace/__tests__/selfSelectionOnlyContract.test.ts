@@ -1,21 +1,23 @@
-// [SelfSelectionOnlyContract] - 描述: self_selection-only 用户自选 UI 契约测试（源码级）
+// [SelfSelectionOnlyContract] - 描述: self_selection-only 用户完整自选 workspace 契约测试（源码级）
 // 用法：./node_modules/.bin/tsx --test src/features/market-workspace/__tests__/selfSelectionOnlyContract.test.ts
 //
-// 背景（P0 后续任务，外部审核修正）：
-//   P0 授权修复后，/market/stocks（无论 scope）要求 market_data，self_selection-only
-//   用户访问会 403。但 self_selection-only 不得通过 /v1/watchlist/monitor-status
-//   （返回 full metrics/price/event）隐式重新获得 market_data —— 那是换端点重开泄露。
-//
-// 正确边界：self_selection-only 用户只能看到 metadata-only 自选列表
-//   （GET /v1/watchlist，仅 symbol/name/market/加入时间），不展示任何行情/策略指标。
+// 背景（Commit A 权限模型纠偏，base 4c4f0fd3）：
+//   上一轮把 self_selection-only 用户错误地砍成了 metadata-only 表格（早退分支），并把
+//   /market/stocks?scope=watchlist、monitor-status、详情端点全部叠上 market_data AND 约束，
+//   导致 self_selection-only 用户无法使用完整自选体验。Commit A 恢复正确语义：
+//   - scope=market → market_data；scope=watchlist → self_selection（universe 由服务端
+//     current user + active UserWatchlistItem 强制，不存在跨用户泄漏）。
+//   - self_selection-only 用户在行情页使用完整 StrategyDataTable（scope 强制 watchlist），
+//     不再有 metadata-only 早退分支；自选股票的个股详情走后端 resource guard 放行。
 //
 // 契约：
-//   1. 存在 isSelfSelectionOnly 判定（!isAdmin && hasSelfSelection && !hasMarketData）
-//   2. self_selection-only 时禁用 useMarketStocks（enabled 含 !isSelfSelectionOnly）
-//   3. self_selection-only 时使用 metadata-only useWatchlist（不使用 useWatchlistMonitorStatus）
-//   4. self_selection-only 分支渲染极简 metadata 表格，不渲染 WatchlistMonitorTable/MarketToolbar
-//   5. 移除自选走 handleRemoveSelfSelectionWatchlist（复用 removeMutation）
-//   6. 禁止 import/使用 WatchlistMonitorTable / useWatchlistMonitorStatus / adaptWatchlistMonitorStatusItem
+//   1. 禁止 isSelfSelectionOnly metadata-only 早退分支（if (isSelfSelectionOnly) return 极简表格）
+//   2. useMarketStocks enabled 仅含 accessReady（self-only 也发 watchlist scope 请求）
+//   3. 不存在 handleRemoveSelfSelectionWatchlist（随早退分支删除）
+//   4. scope 归一化强制：self_selection-only（无 market_data）→ scope=watchlist
+//   5. canAccessStockDetail = isAdmin || hasMarketData || (hasSelfSelection && scope==='watchlist')
+//   6. 不渲染 WatchlistMonitorTable / useWatchlistMonitorStatus / adaptWatchlistMonitorStatusItem
+//      （完整 workspace 使用 StrategyDataTable + MarketRightPanel）
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -31,58 +33,60 @@ function readSource(p: string): string {
   return readFileSync(p, 'utf-8')
 }
 
-test('SELFONLY-1: 存在 isSelfSelectionOnly 判定（!isAdmin && hasSelfSelection && !hasMarketData）', () => {
+test('SELFONLY-1: 禁止 isSelfSelectionOnly 变量与 metadata-only 早退分支', () => {
   const src = readSource(PAGE_PATH)
   assert.ok(
-    /const isSelfSelectionOnly\s*=\s*!isAdmin\s*&&\s*hasSelfSelection\s*&&\s*!hasMarketData/.test(src),
-    '必须定义 isSelfSelectionOnly = !isAdmin && hasSelfSelection && !hasMarketData',
+    !/const isSelfSelectionOnly\s*=/.test(src),
+    'Commit A 已删除 isSelfSelectionOnly（self-only 用户走完整 workspace，不再降级 metadata-only）',
+  )
+  assert.ok(
+    !/if\s*\(\s*isSelfSelectionOnly\s*\)/.test(src),
+    '必须不存在 if (isSelfSelectionOnly) 早退分支',
   )
 })
 
-test('SELFONLY-2: self_selection-only 时禁用 useMarketStocks（enabled 含 !isSelfSelectionOnly）', () => {
+test('SELFONLY-2: useMarketStocks enabled 仅含 accessReady（self-only 也发 watchlist scope）', () => {
   const src = readSource(PAGE_PATH)
-  const m = src.match(/useMarketStocks\(marketStocksParams,\s*\{[\s\S]*?enabled:\s*(accessReady\s*&&\s*!isSelfSelectionOnly)[\s\S]*?\}\)/)
-  assert.ok(m, 'useMarketStocks 的 enabled 必须包含 accessReady && !isSelfSelectionOnly')
+  const m = src.match(/useMarketStocks\(marketStocksParams,\s*\{[\s\S]*?enabled:\s*(accessReady)[\s\S]*?\}\)/)
+  assert.ok(m, 'useMarketStocks 的 enabled 必须为 accessReady（不得含 !isSelfSelectionOnly）')
+  assert.ok(
+    !/enabled:\s*accessReady\s*&&\s*!isSelfSelectionOnly/.test(src),
+    '不得再把 self-only 排除在 /market/stocks 之外',
+  )
 })
 
-test('SELFONLY-3: self_selection-only 使用 metadata-only useWatchlist（不使用 useWatchlistMonitorStatus）', () => {
+test('SELFONLY-3: 不存在 handleRemoveSelfSelectionWatchlist / selfSelectionOnlyWatchlistQuery（随早退分支删除）', () => {
   const src = readSource(PAGE_PATH)
-  // 必须存在为 self_selection-only 启用的 useWatchlist
-  const w = src.match(/useWatchlist\(\{[\s\S]*?enabled:\s*isSelfSelectionOnly[\s\S]*?\}\)/)
-  assert.ok(w, 'self_selection-only 必须使用 useWatchlist({ enabled: isSelfSelectionOnly })')
-  // 禁止使用 useWatchlistMonitorStatus（返回 full metrics，会重开 self_selection→market_data 泄露）
-  assert.ok(!/useWatchlistMonitorStatus/.test(src), '禁止使用 useWatchlistMonitorStatus')
+  assert.ok(!/handleRemoveSelfSelectionWatchlist/.test(src), 'metadata-only 早退分支已删除，不得残留其回调')
+  assert.ok(!/selfSelectionOnlyWatchlistQuery/.test(src), '不得残留 selfSelectionOnlyWatchlistQuery')
+  assert.ok(!/selfSelectionOnlyItems/.test(src), '不得残留 selfSelectionOnlyItems')
 })
 
-test('SELFONLY-4: self_selection-only 分支渲染极简 metadata 表格，不渲染 WatchlistMonitorTable/MarketToolbar', () => {
+test('SELFONLY-4: scope 归一化强制 self-only → watchlist（无 market_data 不得渲染全市场）', () => {
   const src = readSource(PAGE_PATH)
-  const branchIdx = src.indexOf('if (isSelfSelectionOnly)')
-  assert.ok(branchIdx >= 0, '必须存在 if (isSelfSelectionOnly) 早退分支')
-  const mainReturnIdx = src.indexOf('\n  return (', branchIdx)
-  assert.ok(mainReturnIdx > branchIdx, '自选分支后必须存在主 return')
-  const branchBlock = src.slice(branchIdx, mainReturnIdx)
-  // 极简表格：展示 name/symbol/market，不展示行情字段
-  assert.ok(/item\.name/.test(branchBlock), '自选分支必须渲染股票名称 item.name')
-  assert.ok(/item\.symbol/.test(branchBlock), '自选分支必须渲染代码 item.symbol')
-  assert.ok(/item\.market/.test(branchBlock), '自选分支必须渲染市场 item.market')
-  // 禁止渲染行情/策略组件与字段
-  assert.ok(!/WatchlistMonitorTable/.test(branchBlock), '自选分支禁止渲染 WatchlistMonitorTable')
-  assert.ok(!/<MarketToolbar/.test(branchBlock), '自选分支禁止渲染 MarketToolbar（行情专属 UI）')
-  // 移除自选回调必须绑定
-  assert.ok(/onClick=\{\(\) => handleRemoveSelfSelectionWatchlist\(item\)\}/.test(branchBlock), '自选分支必须绑定 handleRemoveSelfSelectionWatchlist(item)')
+  assert.ok(
+    /urlState\.scope === 'market'\s*&&\s*hasSelfSelection\s*&&\s*!hasMarketData/.test(src),
+    'self_selection-only（无 market_data）必须把 scope 强制为 watchlist',
+  )
 })
 
-test('SELFONLY-5: 移除自选复用 removeMutation（/v1/watchlist/{id}，仅要求 self_selection）', () => {
+test('SELFONLY-5: canAccessStockDetail 允许 self-only + watchlist scope（A6）', () => {
   const src = readSource(PAGE_PATH)
-  const defIdx = src.indexOf('handleRemoveSelfSelectionWatchlist = useCallback')
-  assert.ok(defIdx >= 0, '必须存在 handleRemoveSelfSelectionWatchlist = useCallback 定义')
-  const block = src.slice(defIdx, defIdx + 600)
-  assert.ok(/removeMutation\.mutate\(item\.instrument_id/.test(block), '移除必须调用 removeMutation.mutate(item.instrument_id)')
+  assert.ok(
+    /const canAccessStockDetail\s*=\s*isAdmin\s*\|\|\s*hasMarketData\s*\|\|\s*\(hasSelfSelection\s*&&\s*scope === 'watchlist'\)/.test(src),
+    'canAccessStockDetail = isAdmin || hasMarketData || (hasSelfSelection && scope === "watchlist")',
+  )
 })
 
-test('SELFONLY-6: 禁止 import WatchlistMonitorTable / useWatchlistMonitorStatus / adaptWatchlistMonitorStatusItem', () => {
+test('SELFONLY-6: 完整 workspace 使用 StrategyDataTable + MarketRightPanel；禁止 metadata-only 组件', () => {
   const src = readSource(PAGE_PATH)
+  assert.ok(/<StrategyDataTable/.test(src), '主渲染必须包含 StrategyDataTable（完整行情表格）')
+  assert.ok(/<MarketRightPanel/.test(src), '主渲染必须包含 MarketRightPanel（右栏）')
   assert.ok(!/WatchlistMonitorTable/.test(src), '禁止 import/使用 WatchlistMonitorTable')
   assert.ok(!/useWatchlistMonitorStatus/.test(src), '禁止 import/使用 useWatchlistMonitorStatus')
   assert.ok(!/adaptWatchlistMonitorStatusItem/.test(src), '禁止 import/使用 adaptWatchlistMonitorStatusItem')
+  assert.ok(
+    !/self-selection-watchlist-table/.test(src),
+    '不得残留 metadata-only 极简表格样式类',
+  )
 })

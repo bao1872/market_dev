@@ -1,14 +1,17 @@
-"""P0 权限矩阵测试 — self_selection → market 越权泄露闭合（Capability Boundary）。
+"""P0 权限矩阵测试 — capability boundary + Commit A resource-scope 纠偏。
 
-覆盖修复（仅 P0 Capability Boundary，不含 C10 Plan→Authorization / C2 Quota cleanup）：
+覆盖修复（Commit A 权限模型纠偏 + P0 Capability Boundary，不含 C10 Plan→Authorization / C2 Quota cleanup）：
 - C7：/market/stocks、/market/export 作用域感知授权
   - scope=market → market_data（self_selection-only 严禁隐式获得全市场）
-  - scope=watchlist → self_selection AND market_data（scope=watchlist 返回完整 MarketStockRow
-    含 latest_price/change_pct/dsa_state/first_pyramid 等行情字段，非自选最小 summary，
-    故数据边界要求两项同时具备，禁止 market_data-only 或 self_selection-only 单向隐式继承）
+  - scope=watchlist → self_selection（Commit A：universe 由 market_stocks_service 以
+    current user + active UserWatchlistItem INNER JOIN 强制，self-only 用户可看自己自选集合的
+    完整行情；不再要求 market_data）
   - export 授权 scope 与执行 scope 同源（body.scope），禁止 query scope 授权 body scope（P0-4 SSOT）
-- C11：/bars、/quote、chart-snapshot、indicators、structural-factors、temporal-features
-       全部 require_capability("market_data")（匿名→401，self_selection-only/research_replay-only→403）
+- C11：/bars、/quote、chart-snapshot、indicators、structural-factors、temporal-features、
+       /instruments/{id}/events 接统一 instrument resource guard（Commit A A3/A4）：
+  - 匿名 → 401；无 self_selection 也无 market_data（research_replay-only / 无权限）→ 403
+  - market_data → 任意 instrument（404/400 业务证据）
+  - self_selection-only → 仅本人 active watchlist 内 instrument（resource-scope；未自选 → 403）
 
 运行模式：PANJI_REMOTE_VERIFY_DB_TEST=1，仅连接 `bz_stock_verify_<sha>`。
 使用 conftest 的 `client` / `db_session` fixture（自动 override get_db 复用同一 db_session，
@@ -26,28 +29,31 @@
 
 权限测试真正要证明的是「capability → authorization」，而非「行情 provider → 成功返回行情」。
 因此：
-- /quote 正向授权用「确定不存在的 instrument UUID」→ 404（require_capability 通过后
-  业务逻辑执行 → instrument lookup → 404），精确证明 authorization PASS 且不依赖行情数据。
-- /bars 及详情四端点正向授权用「非法 timeframe / primary_timeframe」→ 400（require_capability
-  通过后 endpoint 本地参数校验抛 400），证明 guard 已通过、业务校验已触达，
-  不碰 Pytdx / Redis / Bars DB / fallback / 当前时间。避免 deny-all false-green。
-- 不硬要求 /bars 的 positive 200（/bars 默认 include_realtime=True，DB miss 触发外部
-  fetch_daily_bars，verification_replay 下 fail-closed，结果不可确定）。
+- /quote 正向授权用「确定不存在的 instrument UUID」→ 404（guard 通过后业务逻辑执行 →
+  instrument lookup → 404），精确证明 authorization PASS 且不依赖行情数据。
+- /bars 及详情端点正向授权用「非法 timeframe / primary_timeframe」→ 400（guard 通过后
+  endpoint 本地参数校验抛 400），证明 guard 已通过、业务校验已触达，不碰行情 provider。
+- self_selection-only 的 resource-scope 正向证据：先把 instrument 加入本人 active watchlist
+  （POST /v1/watchlist），再以非法参数访问详情端点 → 400（guard 通过 + watchlist membership）；
+  未加入自选的 instrument → 403。确定性成立、不依赖行情数据。
+- 不硬要求 /bars 的 positive 200（同上原因）。
 - /market/stocks、/export 的空数据 200 是纯 DB 路径（不碰外部行情 provider），确定性成立。
 
-Case 矩阵（仅 P0）：
+Case 矩阵：
 - 纯逻辑：_authorize_market_scope 授权矩阵（admin 豁免 / market / watchlist / neither）
 - A: admin → /market/stocks market/watchlist 200；/quote 不存在 UUID 404（admin 豁免后业务 404）
-- B: market_data → market 200；scope=watchlist 403（权限独立性）；/quote 不存在 UUID 404
-- C: self_selection-only → market 403；watchlist 403；/bars /quote 及详情四端点全 403
-- D: 匿名 → market/stocks(market+watchlist) 401、bars 401、quote 401、详情四端点 401、export 401
+- B: market_data → market 200；scope=watchlist 403（无 self_selection）；/quote 不存在 UUID 404
+- C: self_selection-only → market 403；scope=watchlist 200（own rows）；详情端点：
+      未自选 instrument → 403；本人 watchlist 内 instrument → 非法参数 400（resource guard PASS）
+- D: 匿名 → market/stocks(market+watchlist) 401、bars 401、quote 401、详情端点 401、export 401
 - F: 匿名直接 API bypass → /bars /quote 401（匿名泄露闭合）
 - H: 权限撤销（admin_revoke market_data）→ 全市场立即 403
 - I: export 授权 SSOT（body.scope 授权；query scope 不改变结论；精确 200 断言，无弱断言）
 - J: both（self_selection + market_data）→ market/watchlist 200（真实 HTTP 双权限成功路径）
-- K: research_replay-only → 全 market 端点 403（三类 capability 严格独立）
+- K: research_replay-only → 全 market 端点 403（三类 capability 严格独立；详情端点因
+      无 self_selection/market_data → resource guard 403）
 - L: market_data-only → 非法 timeframe/primary_timeframe → 400（正向 guard evidence，
-     证明 require_capability("market_data") 通过后业务校验已触达，防 deny-all false-green）
+     证明 guard 通过后业务校验已触达，防 deny-all false-green）
 
 注意：
 - 不覆盖 C10（legacy plan→market_data 推导）、C2（quota fail-closed）——这两者属独立 change set，
@@ -151,7 +157,7 @@ def _make_ctx(is_admin: bool, caps: dict[str, dict]) -> AccessContext:
 
 
 def test_authorize_market_scope_pure():
-    """P0-1/P0-2/P0-3：_authorize_market_scope 纯授权函数矩阵（三类 capability 严格独立）。
+    """P0-1/P0-2/P0-3 + Commit A：_authorize_market_scope 纯授权函数矩阵（scope 感知 + 纠偏）。
 
     注意：这是纯逻辑验证，不替代真实 HTTP integration test（见下方端到端 case）。
     仅用于快速锁定授权矩阵正确性。
@@ -174,10 +180,13 @@ def test_authorize_market_scope_pure():
         _authorize_market_scope(ctx(caps={"self_selection": dict(cap_self)}), "market")
     assert exc.value.status_code == 403
 
-    # scope=watchlist：self_selection AND market_data（禁止单向隐式继承）
-    with pytest.raises(Exception) as exc:
+    # scope=watchlist（Commit A 纠偏）：仅 self_selection。
+    # universe 由 market_stocks_service 以 current user + active UserWatchlistItem 强制，
+    # self-only 用户对其自选集合拥有完整使用权；market_data-only 仍 403（无自选权）。
+    assert (
         _authorize_market_scope(ctx(caps={"self_selection": dict(cap_self)}), "watchlist")
-    assert exc.value.status_code == 403
+        is not None
+    )
     with pytest.raises(Exception) as exc:
         _authorize_market_scope(ctx(caps={"market_data": dict(cap_market)}), "watchlist")
     assert exc.value.status_code == 403
@@ -231,7 +240,8 @@ async def test_case_b_market_data_user_access(
 ) -> None:
     """Case B：market_data 用户可访问全市场；scope=watchlist 403；/quote 不存在 UUID 404。
 
-    权限独立性（P0-2）：market_data-only 不得隐式获得 watchlist（full MarketStockRow）。
+    权限独立性（P0-2 + Commit A）：market_data-only 无 self_selection，scope=watchlist
+    （需 self_selection）→ 403。market_data 在 resource guard 下仍可访问任意 instrument 详情。
     /quote 正向授权用不存在 UUID → 404 证明 market_data 授权通过（业务逻辑执行后标的不存在）。
     """
     user = await _register_with_capabilities(
@@ -249,19 +259,22 @@ async def test_case_b_market_data_user_access(
     )
     assert r_quote.status_code == 404, r_quote.text
 
-    # 权限独立性：market_data-only 不得获得 watchlist（需 self_selection AND market_data）
+    # 权限独立性：market_data-only 无 self_selection，scope=watchlist 403
     r_watch = await client.get("/v1/market/stocks?scope=watchlist", headers=headers)
     assert r_watch.status_code == 403, r_watch.text
 
 
 @pytest.mark.asyncio
-async def test_case_c_self_selection_only_denied_market(
+async def test_case_c_self_selection_only_watchlist_access(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
-    """Case C：self_selection-only 用户 → 全市场 403；full watchlist MarketStockRow 403；
-    /bars /quote 及详情四端点全 403。
+    """Case C：self_selection-only 用户 → 全市场 403；scope=watchlist 200（own rows）。
 
-    这是本次 P0 的核心回归：self_selection 不得通过任何路径取得 market_data。
+    Commit A 权限模型纠偏：self_selection 用户对其「自己 active 自选集合」拥有完整使用权。
+    - /market/stocks?scope=market → 403（严禁隐式获得全市场）
+    - /market/stocks?scope=watchlist → 200（universe 由服务端 current user + active watchlist 强制）
+    - instrument resource guard：未加入自选的 instrument 详情 → 403；本人 watchlist 内 → 放行
+      （非法参数 400 作正向 evidence，不碰行情 provider）
     """
     user = await _register_with_capabilities(
         db_session,
@@ -269,38 +282,80 @@ async def test_case_c_self_selection_only_denied_market(
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 20}],
     )
     inst = await _create_instrument(db_session)
+    other_inst = await _create_instrument(db_session)
     headers = _auth(user)
 
     # 全市场行情：必须 403（核心泄露闭合）
     r_market = await client.get("/v1/market/stocks?scope=market", headers=headers)
     assert r_market.status_code == 403, r_market.text
-    # full watchlist MarketStockRow（含行情字段）：self_selection-only 必须 403
-    #   （P0-3 数据边界：scope=watchlist 返回完整行情，需 self_selection AND market_data）
+    # watchlist scope（Commit A）：仅 self_selection → 200（当前无自选也 200，空 own universe）
     r_watch = await client.get("/v1/market/stocks?scope=watchlist", headers=headers)
-    assert r_watch.status_code == 403, r_watch.text
-    # K线 / 实时报价：必须 403（market_data 端点）
-    r_bars = await client.get(f"/v1/instruments/{inst.id}/bars", headers=headers)
-    assert r_bars.status_code == 403, r_bars.text
-    r_quote = await client.get(f"/v1/instruments/{inst.id}/quote", headers=headers)
-    assert r_quote.status_code == 403, r_quote.text
+    assert r_watch.status_code == 200, r_watch.text
 
-    # 个股详情四端点：必须 403（market_data，self_selection-only 不得触达）
+    # 先把 inst 加入本人自选（POST /v1/watchlist 仅要求 self_selection → 201）
+    r_add = await client.post(
+        "/v1/watchlist",
+        json={"instrument_id": str(inst.id), "source": "manual"},
+        headers=headers,
+    )
+    assert r_add.status_code == 201, r_add.text
+
+    # resource guard：已自选 inst 详情 → 放行（非法参数 → 400，正向 evidence）
+    r_bars_ok = await client.get(
+        f"/v1/instruments/{inst.id}/bars", params={"timeframe": "INVALID"}, headers=headers
+    )
+    assert r_bars_ok.status_code == 400, r_bars_ok.text
+    r_chart_ok = await client.get(
+        f"/v1/instruments/{inst.id}/chart-snapshot",
+        params={"timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_chart_ok.status_code == 400, r_chart_ok.text
+    r_indicators_ok = await client.get(
+        f"/v1/instruments/{inst.id}/indicators",
+        params={"timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_indicators_ok.status_code == 400, r_indicators_ok.text
+    r_struct_ok = await client.get(
+        f"/v1/instruments/{inst.id}/structural-factors",
+        params={"primary_timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_struct_ok.status_code == 400, r_struct_ok.text
+    r_temporal_ok = await client.get(
+        f"/v1/instruments/{inst.id}/temporal-features",
+        params={"primary_timeframe": "INVALID"},
+        headers=headers,
+    )
+    assert r_temporal_ok.status_code == 400, r_temporal_ok.text
+
+    # resource guard：未自选 other_inst 详情 → 403（self_selection-only 不得访问非自选股票详情）
+    r_bars = await client.get(f"/v1/instruments/{other_inst.id}/bars", headers=headers)
+    assert r_bars.status_code == 403, r_bars.text
+    r_quote = await client.get(f"/v1/instruments/{other_inst.id}/quote", headers=headers)
+    assert r_quote.status_code == 403, r_quote.text
     r_chart = await client.get(
-        f"/v1/instruments/{inst.id}/chart-snapshot", headers=headers
+        f"/v1/instruments/{other_inst.id}/chart-snapshot", headers=headers
     )
     assert r_chart.status_code == 403, r_chart.text
     r_indicators = await client.get(
-        f"/v1/instruments/{inst.id}/indicators", headers=headers
+        f"/v1/instruments/{other_inst.id}/indicators", headers=headers
     )
     assert r_indicators.status_code == 403, r_indicators.text
     r_struct = await client.get(
-        f"/v1/instruments/{inst.id}/structural-factors", headers=headers
+        f"/v1/instruments/{other_inst.id}/structural-factors", headers=headers
     )
     assert r_struct.status_code == 403, r_struct.text
     r_temporal = await client.get(
-        f"/v1/instruments/{inst.id}/temporal-features", headers=headers
+        f"/v1/instruments/{other_inst.id}/temporal-features", headers=headers
     )
     assert r_temporal.status_code == 403, r_temporal.text
+    # events（A4 同 guard）：已自选 inst → 200（DB 空结果，确定性）；未自选 other_inst → 403
+    r_events_ok = await client.get(f"/v1/instruments/{inst.id}/events", headers=headers)
+    assert r_events_ok.status_code == 200, r_events_ok.text
+    r_events = await client.get(f"/v1/instruments/{other_inst.id}/events", headers=headers)
+    assert r_events.status_code == 403, r_events.text
 
 
 @pytest.mark.asyncio
@@ -318,6 +373,8 @@ async def test_case_d_anonymous_denied(db_session: AsyncSession, client: AsyncCl
     assert (await client.get(f"/v1/instruments/{inst.id}/indicators")).status_code == 401
     assert (await client.get(f"/v1/instruments/{inst.id}/structural-factors")).status_code == 401
     assert (await client.get(f"/v1/instruments/{inst.id}/temporal-features")).status_code == 401
+    # events（A4 同 guard）：匿名 401
+    assert (await client.get(f"/v1/instruments/{inst.id}/events")).status_code == 401
 
     # 匿名 export（body.scope=market / watchlist）→ 401（合法完整 body，无 DB/provider 依赖）
     def _body(scope: str) -> dict:
@@ -435,15 +492,16 @@ async def test_case_i_export_scope_ssot(db_session: AsyncSession, client: AsyncC
     )
     assert r2.status_code == 403, r2.text
 
-    # self_selection-only + body.scope=watchlist → 403（完整导出需 self_selection AND market_data）
+    # self_selection-only + body.scope=watchlist → 200（Commit A：export watchlist 仅要求
+    # self_selection，universe 强制为该用户 own active watchlist；空自选导出空 xlsx，确定性）
     r3 = await client.post("/v1/market/export", json=_body("watchlist"), headers=_auth(self_only))
-    assert r3.status_code == 403, r3.text
+    assert r3.status_code == 200, r3.text
 
     # market_data-only + body.scope=market → 200（精确断言，非弱断言）
     r4 = await client.post("/v1/market/export", json=_body("market"), headers=_auth(market_only))
     assert r4.status_code == 200, r4.text
 
-    # market_data-only + body.scope=watchlist → 403（权限独立性）
+    # market_data-only + body.scope=watchlist → 403（无 self_selection，权限独立性）
     r5 = await client.post("/v1/market/export", json=_body("watchlist"), headers=_auth(market_only))
     assert r5.status_code == 403, r5.text
 
@@ -520,6 +578,8 @@ async def test_case_k_research_replay_only_denied_market(
     assert (await client.get(f"/v1/instruments/{inst.id}/indicators", headers=headers)).status_code == 403
     assert (await client.get(f"/v1/instruments/{inst.id}/structural-factors", headers=headers)).status_code == 403
     assert (await client.get(f"/v1/instruments/{inst.id}/temporal-features", headers=headers)).status_code == 403
+    # events（A4 同 guard）：research_replay-only → 403
+    assert (await client.get(f"/v1/instruments/{inst.id}/events", headers=headers)).status_code == 403
 
     # export body.scope=market / watchlist 均 403
     def _body(scope: str) -> dict:

@@ -37,20 +37,23 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
         shell: 'user',
         children: [
           // [Phase 5B-2 PRD60 PA-01] 三类独立 capability 守卫（替代旧 SubscriberRoute）
-          // CapabilityRoute: self_selection
+          // CapabilityAnyRoute: self_selection | market_data（Commit A A7：/market 与 /stock/:symbol
+          // 同级任一放行——self-only 可进行情页(watchlist scope)+自选详情，market_data 全市场+任意详情）
           {
             guard: 'capability',
             shell: 'user',
             children: [
               { path: '/market', guard: 'capability', shell: 'user' },
+              { path: '/stock/:symbol', guard: 'capability', shell: 'user' },
             ],
           },
-          // CapabilityRoute: market_data
+          // CapabilityRoute: market_data（/boards 板块分析 = 全市场 cross-section，仅 market_data）
           {
             guard: 'capability',
             shell: 'user',
             children: [
-              { path: '/stock/:symbol', guard: 'capability', shell: 'user' },
+              { path: '/boards', guard: 'capability', shell: 'user' },
+              { path: '/boards/:boardId', guard: 'capability', shell: 'user' },
             ],
           },
           // CapabilityRoute: research_replay = 复盘与竞价（CHANGE-20260802-002）

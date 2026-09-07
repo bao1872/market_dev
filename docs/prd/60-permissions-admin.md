@@ -35,8 +35,8 @@
 
 - 可查看和管理自选；
 - 可使用盘中监控；
-- 可见行情标签下的列表视图；
-- 是否可进入个股详情由其其他权限决定。
+- 可见行情标签下的列表视图（scope=watchlist，即自己的自选集合）；
+- 个股详情访问权按 resource-scope 合同（PA-13）：仅可进入自己 active 自选集合内的股票详情。
 
 ### PA-11 行情管理
 
@@ -55,9 +55,25 @@
 - 任一无 `research_replay` 权限用户，前后端均不得呈现竞价入口，直接访问 URL 由后端 `require_capability("research_replay")` 拒绝（与复盘 403 契约一致）；
 - 管理员（admin）豁免，可直接访问。
 
-### PA-13 详情访问
+### PA-13 详情访问（resource-scope 合同）
 
-仅拥有自选管理权限的用户可以看行情标签下的列表视图，但不能直接进入个股详情查看明细，除非同时拥有行情管理权限。
+个股详情数据按「股票范围」授权，两条授权路径严格独立、互不继承：
+
+- `market_data`（行情管理，PA-11）：可访问任意个股详情。
+- `self_selection`（自选管理，PA-10）：仅可访问「自己 active 自选集合内」的股票详情
+  （instrument 属于 `user_watchlist_items(user_id=当前用户, active=true)`）。不在自选集合 → 403；
+  从自选移除后，详情访问立即失效（后端以当前 active watchlist 实时判定，不缓存）。
+- 两条路径不叠加 AND、也不做单向继承：self_selection-only 用户无需 market_data 即可查看
+  自己自选股票的详情；market_data 用户不因具备行情权限而获得自选管理能力。
+- 无任一授权路径的用户（如 research_replay-only / 无权限）一律 403。
+- 后端实现：instrument 端点统一经 `require_instrument_market_access` / symbol 端点经
+  `require_stock_symbol_market_access`（access_control_service 统一 resource guard），
+  禁止各 API 自行复制 watchlist 成员查询 SQL。
+
+对应行为：
+- self_selection-only 用户在行情列表（scope=watchlist）可正常进入自选股票详情；
+- 全局搜索中：已自选股票可进详情（origin=direct），未自选股票仅可加自选、不可进详情；
+- market_data 用户在全市场列表/全局搜索可进入任意个股详情。
 
 ## 3. 邀请码
 

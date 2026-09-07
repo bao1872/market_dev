@@ -1,16 +1,16 @@
-"""P0 后续数据边界测试 — self_selection-only 不通过 monitor-status 隐式获得 market_data。
+"""自选能力边界测试 — monitor-status 按 self_selection 授权（Commit A 权限模型纠偏）。
 
-背景（外部审核修正 43e9e632 的方向错误）：
-- /v1/watchlist/monitor-status 返回 full metrics（StockFeatureSnapshot.summary_payload）
-  + latest_event + 行情字段，跨 self_selection 与 market_data 两个 capability 边界。
-- 修复：其 guard 改为 require_all_capabilities("self_selection", "market_data")，
-  禁止 self_selection-only / market_data-only 单向隐式继承。
-- GET /v1/watchlist 改为 metadata-only summary（symbol/name/market/source/created_at），
+背景（Commit A 纠偏 b22a2491→4c4f0fd3 的过度收紧）：
+- /v1/watchlist/monitor-status 只暴露「当前用户自己的 active 自选集合」的 full metrics，
+  universe 由端点内部以 UserWatchlistItem.user_id==current_user AND active.is_(True) 强制，
+  不存在跨用户数据泄漏 → 按 PA-13 resource-scope 合同仅要求 self_selection 单权限，
+  不再叠加 market_data（self_selection-only 用户应能正常使用自选盘中监控）。
+- GET /v1/watchlist 保持 metadata-only summary（symbol/name/market/source/created_at），
   仅要求 self_selection，不暴露任何行情/策略指标。
 
 覆盖矩阵（monitor-status 四态）：
-- self_selection-only → 403（核心：不通过 monitor-status 重开 market_data 泄露）
-- market_data-only → 403
+- self_selection-only → 200（自选监控对其开放，只返回该用户自己的自选）
+- market_data-only → 403（无 self_selection，端点不向其开放）
 - both（self_selection + market_data）→ 200
 - admin → 200（豁免）
 
@@ -94,24 +94,28 @@ def _auth(user: User) -> dict[str, str]:
 
 
 @pytest.mark.asyncio
-async def test_monitor_status_self_selection_only_403(
+async def test_monitor_status_self_selection_only_200(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
-    """self_selection-only → monitor-status 403（核心：不通过 monitor-status 重开 market_data 泄露）。"""
+    """self_selection-only → monitor-status 200（Commit A：自选监控对 self_selection-only 开放）。
+
+    该端点 universe 仅限当前用户 active 自选（端点内部强制），self_selection-only
+    用户可正常使用自己的盘中监控，无需 market_data。
+    """
     user = await _register_with_capabilities(
         db_session,
         f"{_TEST_EMAIL_PREFIX}self-{uuid.uuid4().hex[:8]}@test.local",
         [{"capability": "self_selection", "months": 1, "watchlist_limit": 20}],
     )
     r = await client.get("/v1/watchlist/monitor-status", headers=_auth(user))
-    assert r.status_code == 403, r.text
+    assert r.status_code == 200, r.text
 
 
 @pytest.mark.asyncio
 async def test_monitor_status_market_data_only_403(
     db_session: AsyncSession, client: AsyncClient
 ) -> None:
-    """market_data-only → monitor-status 403（需 self_selection AND market_data）。"""
+    """market_data-only → monitor-status 403（端点要求 self_selection）。"""
     user = await _register_with_capabilities(
         db_session,
         f"{_TEST_EMAIL_PREFIX}market-{uuid.uuid4().hex[:8]}@test.local",

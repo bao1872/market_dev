@@ -33,6 +33,7 @@ from __future__ import annotations
 from collections.abc import Callable, Coroutine
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -41,9 +42,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import _get_user_roles, get_current_active_user
 from app.db import get_db
+from app.models.instrument import Instrument
 from app.models.subscription import Subscription
 from app.models.user import User
 from app.models.user_capability import ALL_CAPABILITIES
+from app.models.watchlist import UserWatchlistItem
 from app.services.plan_service import get_plan
 from app.services.subscription_service import get_effective_subscription_status
 
@@ -59,7 +62,18 @@ __all__ = [
     "require_any_capability",
     "require_all_capabilities",
     "require_watchlist_limit",
+    "authorize_instrument_market_access",
+    "require_instrument_market_access",
+    "require_stock_symbol_market_access",
 ]
+
+# [Commit A 权限模型纠偏] - 统一的 capability active 判定 helper（避免各 API 复制判断）。
+def has_active_capability(ctx: AccessContext, capability: str) -> bool:
+    """判定 ctx 是否具备指定 capability 且 active（admin 豁免由调用方决定）。
+
+    只读取 ctx.capabilities[capability].active，不触发额外 DB 查询。
+    """
+    return bool(ctx.capabilities.get(capability, {}).get("active"))
 
 
 class AccessContext(BaseModel):
@@ -479,16 +493,11 @@ def require_all_capabilities(*capabilities: str) -> Callable[..., Coroutine[Any,
     返回一个 FastAPI 依赖函数，检查 ctx.capabilities 是否包含全部指定 capability 且 active。
     admin 自动豁免（所有 capability active=True）。
 
-    用途（P0 数据边界）：
-    - 当端点返回的数据跨多个 capability 边界时，要求同时具备全部相关 capability。
-      例如 /v1/watchlist/monitor-status 返回 full metrics + 行情字段，要求
-      self_selection AND market_data（禁止 self_selection-only 隐式获得 market_data）。
-
-    用法：
-        @router.get("/watchlist/monitor-status")
-        async def get_monitor_status(
-            ctx: AccessContext = Depends(require_all_capabilities("self_selection", "market_data")),
-        ): ...
+    注意（Commit A 权限模型纠偏）：这是通用的 AND 组合 guard，仅供明确需要「同时具备
+    多个 capability」的端点使用。个股详情类端点请改用 require_instrument_market_access /
+    require_stock_symbol_market_access（resource-scope 合同，PA-13）；/v1/watchlist/monitor-status
+    已改回仅 require_capability("self_selection")（其 universe 由服务端强制为该用户 own watchlist，
+    不再使用本函数）。
 
     Args:
         capabilities: 权限类型列表（至少一个，全部必须 active）
@@ -571,6 +580,114 @@ def require_watchlist_limit() -> Callable[..., Coroutine[Any, Any, int | None]]:
         )
 
     return _get_watchlist_limit
+
+
+async def authorize_instrument_market_access(
+    *,
+    db: AsyncSession,
+    ctx: AccessContext,
+    instrument_id: UUID,
+) -> AccessContext:
+    """[Commit A 权限模型纠偏] 统一 instrument 级 resource-scope 授权（PA-13 新合同）。
+
+    个股行情/详情数据的访问权按「股票范围」判定，三类 capability 严格独立、禁止隐式继承：
+    - admin：豁免，任意 instrument 放行。
+    - market_data：任意 instrument 放行（全市场行情授权，PA-11/PA-13）。
+    - 无 self_selection 也无 market_data（如 research_replay-only / 无权限）：403。
+    - self_selection-only：仅当 instrument 属于该用户 active watchlist 才放行，
+      否则 403（详情数据不随自选列表之外泄漏）。
+
+    调用约定：各 instrument 端点统一通过 require_instrument_market_access /
+    require_stock_symbol_market_access（FastAPI dependency）间接调用本函数，
+    禁止在 API 层复制 watchlist 成员查询 SQL。
+
+    Args:
+        db: 异步数据库会话（由调用方/依赖注入）。
+        ctx: 已解析的权限上下文（由 require_authenticated 注入）。
+        instrument_id: 目标 instrument UUID。
+
+    Returns:
+        校验通过返回原 ctx（保持链式传递语义）。
+
+    Raises:
+        HTTPException 403: 无权访问该 instrument。
+    """
+    if ctx.is_admin:
+        return ctx
+    if has_active_capability(ctx, "market_data"):
+        return ctx
+    if not has_active_capability(ctx, "self_selection"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要 market_data 或 self_selection 权限以访问个股数据",
+        )
+    # self_selection-only：仅 own active watchlist 放行（resource-scope 合同核心）。
+    wl_stmt = (
+        select(UserWatchlistItem.id)
+        .where(
+            UserWatchlistItem.user_id == UUID(ctx.user_id),
+            UserWatchlistItem.instrument_id == instrument_id,
+            UserWatchlistItem.active.is_(True),
+        )
+        .limit(1)
+    )
+    wl_result = await db.execute(wl_stmt)
+    if wl_result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="该股票不在您的自选列表中，无法访问详情",
+        )
+    return ctx
+
+
+async def require_instrument_market_access(
+    instrument_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> AccessContext:
+    """[Commit A 权限模型纠偏] instrument_id 变体 FastAPI dependency。
+
+    供 /v1/instruments/{instrument_id}/... 系列端点使用（chart-snapshot / bars /
+    quote / indicators / structural-factors / temporal-features / events）。
+
+    注意：instrument_id 为 path 参数（与端点同源），由 FastAPI 解析后传入；
+    本 dependency 不做 instrument 存在性预检（不存在由端点内部查询自然返回），
+    仅负责 capability + watchlist resource-scope 授权。
+    """
+    return await authorize_instrument_market_access(
+        db=db,
+        ctx=ctx,
+        instrument_id=instrument_id,
+    )
+
+
+async def require_stock_symbol_market_access(
+    symbol: str,
+    db: AsyncSession = Depends(get_db),
+    ctx: AccessContext = Depends(require_authenticated),
+) -> AccessContext:
+    """[Commit A 权限模型纠偏] symbol 变体 FastAPI dependency。
+
+    供 /v1/stocks/{symbol}/... 系列端点使用（context / first-pyramid 等）。
+
+    与 instrument_id 变体的差异：必须先按 symbol 解析 instrument——
+    symbol 不存在时统一 404（resource 不存在优先于 capability 403），
+    解析成功后再委托 authorize_instrument_market_access 做 resource-scope 授权。
+    禁止在 endpoint 层重复解析 symbol（保持单一授权路径）。
+    """
+    inst_stmt = select(Instrument).where(Instrument.symbol == symbol)
+    inst_result = await db.execute(inst_stmt)
+    instrument = inst_result.scalar_one_or_none()
+    if instrument is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"股票代码不存在: {symbol}",
+        )
+    return await authorize_instrument_market_access(
+        db=db,
+        ctx=ctx,
+        instrument_id=instrument.id,
+    )
 
 
 if __name__ == "__main__":

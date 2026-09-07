@@ -30,7 +30,7 @@ import {
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { apiClient } from '@/api/client'
-import type { MarketStocksQueryParams, WatchlistSummaryItem } from '@/api/endpoints'
+import type { MarketStocksQueryParams } from '@/api/endpoints'
 import {
   adaptMarketStockToTrendRow,
   getTrendSelectionColumns,
@@ -72,26 +72,26 @@ export default function MarketWorkspacePage() {
   // [P0 安全修复] capability 未解析完成（accessStatus !== 'ready'）时，user.capabilities 不可信，
   // 禁止发出任何 market request（否则 self_selection-only 用户可能先发 scope=market 再被后端 403）。
   const accessReady = useAuthStore((s) => s.accessStatus === 'ready')
-  // - canAccessStockDetail: market_data capability（详情按钮可点击；false 时股票名仅展示文本）
   // - canAccessWatchlist: self_selection capability（显示自选 scope + 自选操作列；false 时隐藏）
-  const canAccessStockDetail = isAdmin || hasMarketData
   const canAccessWatchlist = isAdmin || hasSelfSelection
-  // [P0 后续] self_selection-only（有自选、无 market_data、非 admin）用户：
-  //   /market/stocks（无论 scope）P0 后要求 market_data，对其 403。此类用户的自选视图
-  //   必须改走 /v1/watchlist/monitor-status（仅要求 self_selection），不能复用行情列表数据源。
-  const isSelfSelectionOnly = !isAdmin && hasSelfSelection && !hasMarketData
+  // - canAccessStockDetail（A6, Commit A）: 由 resource-scope 合同决定，定义在 scope 归一化之后
+  //   （依赖 scope === 'watchlist'，不能在此提前计算）
 
   // 从 URL 解析状态（仅 scope + selected；sort/filters/page 由 StrategyDataTable 管理）
   const urlState = useMemo(() => decodeMarketWorkspaceUrl(searchParams), [searchParams])
   // [Gate2 PRD60 PA-11] 无自选权限时强制 scope=market（禁止 watchlist scope）
-  // [P0 安全修复] 仅 self_selection（无 market_data）用户强制 scope=watchlist：
-  //   全市场行情对其禁止（后端 /market/stocks?scope=market 亦返回 403），前端不得渲染全市场列表。
+  // [Commit A 权限模型纠偏] 仅 self_selection（无 market_data）用户强制 scope=watchlist：
+  //   全市场行情对其禁止（后端 /market/stocks?scope=market 返回 403），但 scope=watchlist 现在
+  //   仅要求 self_selection（A1），self-only 用户可正常使用完整自选行情表格（不再是 metadata-only）。
   const scope: MarketScope =
     !canAccessWatchlist && urlState.scope === 'watchlist'
       ? 'market'
       : urlState.scope === 'market' && hasSelfSelection && !hasMarketData
         ? 'watchlist'
         : urlState.scope
+  // [A6 Commit A] 详情访问 UX：admin/market_data 任意可进详情；
+  // self_selection-only 用户仅当当前 scope 为其自选集合（watchlist）时可进详情（后端 resource guard 兜底）。
+  const canAccessStockDetail = isAdmin || hasMarketData || (hasSelfSelection && scope === 'watchlist')
   const selected = urlState.selected
 
   // 顶部搜索框 keyword（单一真源，通过 externalKeyword 注入表格）
@@ -320,19 +320,6 @@ export default function MarketWorkspacePage() {
     [watchlistPendingIds, addMutation, removeMutation, toast],
   )
 
-  // [P0 后续] self_selection-only 用户移除自选（走 /v1/watchlist/{id}，仅要求 self_selection）。
-  // 复用 removeMutation（onSuccess 已 invalidate watchlist + monitor-status），移除后该行从列表消失。
-  const handleRemoveSelfSelectionWatchlist = useCallback(
-    (item: WatchlistSummaryItem) => {
-      if (!item.instrument_id) return
-      removeMutation.mutate(item.instrument_id, {
-        onSuccess: () => toast.show('已移除自选', ''),
-        onError: () => toast.show('移除自选失败', '请稍后重试'),
-      })
-    },
-    [removeMutation, toast],
-  )
-
   // 服务端分页/筛选/排序状态（由 StrategyDataTable 通过 onQueryChange 回调驱动）
   const [query, setQuery] = useState<DataTableQuery>({
     page: 1,
@@ -392,20 +379,11 @@ export default function MarketWorkspacePage() {
   )
   // [P0 安全修复] capability 未就绪（accessStatus !== 'ready'）时不发 market request，
   // 从源头杜绝「self_selection-only 用户先发 scope=market 再被 403」的竞态。
-  // [P0 后续] self_selection-only 用户不发 /market/stocks（后端 403），改走 metadata-only 自选。
+  // [Commit A] self_selection-only 用户发 scope=watchlist（scope 已在上方强制），后端仅要求
+  // self_selection（A1），返回其自选集合的完整 MarketStockRow，不再走 metadata-only 分支。
   const marketStocksQuery = useMarketStocks(marketStocksParams, {
-    enabled: accessReady && !isSelfSelectionOnly,
+    enabled: accessReady,
   })
-
-  // [P0 后续] self_selection-only 用户的自选列表数据源（GET /v1/watchlist，metadata-only，
-  // 仅要求 self_selection，返回 instrument 元数据 + 加入时间，无任何行情/策略指标）。
-  const selfSelectionOnlyWatchlistQuery = useWatchlist({
-    enabled: isSelfSelectionOnly,
-  })
-  const selfSelectionOnlyItems = useMemo(
-    () => selfSelectionOnlyWatchlistQuery.data?.items ?? [],
-    [selfSelectionOnlyWatchlistQuery.data?.items],
-  )
 
   // 行数据：MarketStockRow → TrendSelectionRow（单次转换，包含 first_pyramid/payload/chip_status）
   const rows: TrendSelectionRow[] = useMemo(
@@ -499,8 +477,9 @@ export default function MarketWorkspacePage() {
   const filterSpecs = filterSpecsQuery.data ?? null
 
   // 列定义：DSA 列（复用 features/trend-selection 共享模块） + 99 个第一金字塔列
-  // [Gate2 PRD60 PA-10/11/13] capability 决定回调传递：
-  // - canAccessStockDetail=false（仅 self_selection）：不传 onNavigateToStock，股票名渲染为纯文本
+  // [Gate2 PRD60 PA-10/11/13 + Commit A] capability + scope 决定回调传递：
+  // - canAccessStockDetail=false（无 market_data 且不在 watchlist scope）：不传 onNavigateToStock，
+  //   股票名渲染为纯文本（self_selection-only 在 watchlist scope 下为 true，可正常进入详情）
   // - canAccessWatchlist=false（仅 market_data）：不传 onToggleWatchlist，操作列返回 null
   //
   // [PRD §三 列表视图第一金字塔全量字段] 在基础列后追加 99 个 fp_ 列，操作列固定末尾。
@@ -547,66 +526,6 @@ export default function MarketWorkspacePage() {
 
   // selected symbol 用于右栏 AtomicFactsPanel
   const selectedSymbol = selected || undefined
-
-  // [P0 后续] self_selection-only 用户渲染独立 metadata-only 自选视图：
-  //   - 数据源 GET /v1/watchlist（仅要求 self_selection，返回 instrument 元数据，无行情/策略指标）
-  //   - 不渲染行情专属 UI（MarketToolbar 板块筛选 / 右栏 / 导出 / 批次信息均依赖 market_data）
-  //   - 仅展示 股票/市场/加入时间 + 移出自选；无详情导航、无价格/涨跌幅/BB/POC/event 等行情字段
-  if (isSelfSelectionOnly) {
-    return (
-      <div className={styles.marketPage}>
-        <div className={styles.tableArea}>
-          <div className={styles.tableWrapper}>
-            {selfSelectionOnlyWatchlistQuery.isLoading && (
-              <div className="empty">加载中…</div>
-            )}
-            {selfSelectionOnlyWatchlistQuery.isError && (
-              <div className="empty">自选列表加载失败，请刷新重试</div>
-            )}
-            {!selfSelectionOnlyWatchlistQuery.isLoading &&
-              !selfSelectionOnlyWatchlistQuery.isError &&
-              selfSelectionOnlyItems.length === 0 && (
-                <div className="empty">暂无自选股票</div>
-              )}
-            {!selfSelectionOnlyWatchlistQuery.isLoading &&
-              !selfSelectionOnlyWatchlistQuery.isError &&
-              selfSelectionOnlyItems.length > 0 && (
-                <table className="compact-table self-selection-watchlist-table">
-                  <thead>
-                    <tr>
-                      <th>股票</th>
-                      <th>代码</th>
-                      <th>市场</th>
-                      <th>加入时间</th>
-                      <th>操作</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {selfSelectionOnlyItems.map((item) => (
-                      <tr key={item.watchlist_item_id}>
-                        <td>{item.name}</td>
-                        <td>{item.symbol}</td>
-                        <td>{item.market}</td>
-                        <td>{item.created_at}</td>
-                        <td>
-                          <button
-                            className="btn small danger"
-                            onClick={() => handleRemoveSelfSelectionWatchlist(item)}
-                            disabled={removeMutation.isPending}
-                          >
-                            移出自选
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-          </div>
-        </div>
-      </div>
-    )
-  }
 
   return (
     <div className={styles.marketPage}>

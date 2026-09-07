@@ -17,8 +17,13 @@ export function GlobalStockSearch() {
 
   const isAdmin = useAuthStore((s) => s.user?.is_admin === true)
   const capabilities = useAuthStore((s) => s.user?.capabilities)
-  const canAccessStockDetail = isAdmin || !!capabilities?.market_data?.active
-  const canManageWatchlist = isAdmin || !!capabilities?.self_selection?.active
+  // [Commit A A8] resource-scope 详情导航：
+  // - market_data（或 admin）任意结果可进详情（originScope=market，左栏 /market 上下文）
+  // - self_selection-only：仅「已自选」结果可进详情（originScope=direct，隐藏左栏，后端 resource guard 放行 own watchlist）；
+  //   未自选结果主体点击不导航（只保留 ☆ 加自选）
+  const hasMarketData = !!capabilities?.market_data?.active
+  const hasSelfSelection = !!capabilities?.self_selection?.active
+  const canManageWatchlist = isAdmin || hasSelfSelection
 
   const addToWatchlist = useAddToWatchlist()
   const removeFromWatchlist = useRemoveFromWatchlist()
@@ -65,12 +70,22 @@ export function GlobalStockSearch() {
   }, [])
 
   const handleMainClick = (item: Instrument) => {
-    if (!canAccessStockDetail) {
-      useToast.getState().show('无权限', '当前账户无权查看个股详情')
+    // [Commit A A8] market_data/admin：任意结果可进详情
+    if (isAdmin || hasMarketData) {
+      const url = buildStockDetailUrl(item.symbol, { originScope: 'market' })
+      navigate(url)
       return
     }
-    const url = buildStockDetailUrl(item.symbol, { originScope: 'market' })
-    navigate(url)
+    // self_selection-only：仅已自选结果可进详情（direct：隐藏左栏，后端 resource guard 校验 own watchlist）
+    if (hasSelfSelection && watchlistInstrumentIds.has(item.id)) {
+      const url = buildStockDetailUrl(item.symbol, { originScope: 'direct' })
+      navigate(url)
+      return
+    }
+    // 未自选（或完全无权限）：主体不进详情，仅保留 ☆ 加自选能力
+    useToast
+      .getState()
+      .show(hasSelfSelection ? '未在自选列表' : '无权限', '加入自选后可查看该股票详情')
   }
 
   const handleStarClick = (item: Instrument, e: React.MouseEvent) => {

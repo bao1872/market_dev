@@ -252,20 +252,21 @@ export const routeConfig: RouteObject[] = [
       {
         element: <UserAppShell />,
         children: [
-          // [Gate2 PRD60] /market 允许 self_selection 或 market_data 任一进入
-          // 仅 self_selection 用户可看行情列表+自选+盘中，但详情按钮禁用（API 403）
-          // 仅 market_data 用户可看行情+详情，但隐藏自选/盘中入口
+          // [Gate2 PRD60 + Commit A A7] /market 与 /stock/:symbol 允许 self_selection 或 market_data 任一进入
+          // - self_selection-only 用户可进行情页（scope 强制 watchlist）+ 进入自选股票详情
+          //   （详情后端走 resource guard：仅 own active watchlist 放行，未自选股票仍 403）
+          // - market_data 用户可看全市场行情 + 任意个股详情
           {
             element: <CapabilityAnyRoute capabilities={['self_selection', 'market_data']} />,
             children: [
               { path: '/market', element: <MarketWorkspacePage /> },
+              { path: '/stock/:symbol', element: <StockDetailPage /> },
             ],
           },
-          // market_data: 行情数据+个股详情（/stock/:symbol）
+          // market_data: 板块分析（BoardAnalysis 是全市场 cross-section，仅 market_data 可读）
           {
             element: <CapabilityRoute capability="market_data" />,
             children: [
-              { path: '/stock/:symbol', element: <StockDetailPage /> },
               // [CHANGE-20260730-011] 板块分析 V1 页面（任何 market_data 用户可读）
               { path: '/boards', element: <BoardAnalysisPage /> },
               { path: '/boards/:boardId', element: <BoardAnalysisPage /> },

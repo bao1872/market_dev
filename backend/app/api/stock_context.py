@@ -44,7 +44,7 @@ from app.schemas.stock_state import (
 from app.services.access_control_service import (
     AccessContext,
     require_admin,
-    require_capability,
+    require_stock_symbol_market_access,
 )
 from app.services.atomic_fact_contract_service import (
     AFC_PAYLOAD_VERSION,
@@ -687,7 +687,7 @@ async def get_stock_context(
     symbol: str,
     as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability("market_data")),
+    ctx: AccessContext = Depends(require_stock_symbol_market_access),
 ) -> AtomicFactsContextResponse:
     """获取个股原子事实上下文（只读，需登录 + 有效订阅）。
 
@@ -742,7 +742,7 @@ async def get_first_pyramid(
     symbol: str,
     as_of: date | None = Query(None, description="截止日期 ISO（如 2026-07-10），默认最新"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_capability("market_data")),
+    ctx: AccessContext = Depends(require_stock_symbol_market_access),
 ) -> dict[str, Any]:
     """获取个股第一金字塔统一快照（趋势→结构→动量→筹码共识）。
 

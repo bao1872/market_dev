@@ -1,13 +1,14 @@
 // [GlobalStockSearch] - 描述: Global Stock Search 契约测试（源码级）
 // 用法：node --experimental-strip-types --test src/features/market-workspace/__tests__/globalStockSearch.test.ts
 //
-// 覆盖（Round 2 R01/R03/R04/R15/R16 + Round 2.1 修复 + 顶部搜索数据源修正）：
+// 覆盖（Round 2 R01/R03/R04/R15/R16 + Round 2.1 修复 + 顶部搜索数据源修正 + Commit A A8）：
 // 1. GlobalStockSearch 组件存在并被 UserAppShell 挂载于 Global Header
-// 2. 主点击进入 Market-source 个股详情（buildStockDetailUrl originScope='market'）
+// 2. 主点击：market_data/admin → originScope='market'；self_selection-only 且已自选 →
+//    originScope='direct'（A8 resource-scope）；未自选 → 不导航（仅 ☆ 可加自选）
 // 3. 主点击不触发 watchlist mutation
 // 4. ☆/★ 与股票主点击为两个独立 action，不触发 navigation
 // 5. ☆/★ 复用 canonical watchlist mutation（useAddToWatchlist/useRemoveFromWatchlist）
-// 6. 无 market_data 时主点击不可导航（权限 split）
+// 6. 权限 split（A8）：market_data → 任意结果可进详情；self_selection-only → 仅已自选可进
 // 7. 无 self_selection 时 ☆/★ 不可操作（权限 split）
 // 8. 查询源为 instrument discovery（useInstruments / GET /v1/instruments），
 //    禁止 useMarketStocks（/v1/market/stocks 要求 market_data，self_selection-only 会 403）
@@ -49,13 +50,26 @@ test('GlobalStockSearch 存在且被 UserAppShell 挂载', () => {
   )
 })
 
-// ===== 2. 主点击进入 Market-source 详情 =====
-test('GlobalStockSearch 主点击使用 originScope=market 的 canonical navigation', () => {
+// ===== 2. 主点击进入详情（A8：market_data→market；self-only 已自选→direct）=====
+test('GlobalStockSearch 主点击按 resource-scope 导航（market_data→market / self-only 已自选→direct）', () => {
   const src = readSource(SEARCH_PATH)
+  const mainClickIdx = src.indexOf('const handleMainClick =')
+  const mainClickBlock = src.slice(mainClickIdx, src.indexOf('const handleStarClick ='))
   assert.ok(
-    src.includes("originScope: 'market'") &&
-      src.includes('buildStockDetailUrl'),
-    'GlobalStockSearch 主点击必须复用 buildStockDetailUrl(symbol, { originScope: "market" })',
+    mainClickBlock.includes('originScope: \'market\''),
+    'market_data/admin 分支必须使用 originScope="market"',
+  )
+  assert.ok(
+    mainClickBlock.includes('originScope: \'direct\''),
+    'self_selection-only 已自选分支必须使用 originScope="direct"（隐藏左栏，后端 resource guard 放行 own watchlist）',
+  )
+  assert.ok(
+    mainClickBlock.includes('buildStockDetailUrl'),
+    '主点击必须复用 buildStockDetailUrl canonical navigation',
+  )
+  assert.ok(
+    mainClickBlock.includes('watchlistInstrumentIds.has(item.id)'),
+    'self_selection-only 分支必须以 watchlistInstrumentIds.has(item.id) 判定是否可进详情',
   )
 })
 
@@ -64,8 +78,8 @@ test('GlobalStockSearch 主点击使用 originScope=market 的 canonical navigat
 // 否则 slice 会得到空串/错误区间，导致假阳性 PASS。
 test('GlobalStockSearch 主点击不调用 add/remove watchlist mutation', () => {
   const src = readSource(SEARCH_PATH)
-  const mainClickIdx = src.indexOf('handleMainClick =')
-  const starIdx = src.indexOf('handleStarClick =')
+  const mainClickIdx = src.indexOf('const handleMainClick =')
+  const starIdx = src.indexOf('const handleStarClick =')
   assert.ok(mainClickIdx >= 0, '必须找到 handleMainClick handler 定义')
   assert.ok(starIdx > mainClickIdx, 'handleStarClick 必须位于 handleMainClick 之后')
   const region = src.slice(mainClickIdx, starIdx)
@@ -79,7 +93,7 @@ test('GlobalStockSearch 主点击不调用 add/remove watchlist mutation', () =>
 // ===== 4. ☆/★ 不触发 navigation =====
 test('GlobalStockSearch ☆/★ 不触发 navigation（独立 action）', () => {
   const src = readSource(SEARCH_PATH)
-  const start = src.indexOf('handleStarClick =')
+  const start = src.indexOf('const handleStarClick =')
   const region = start >= 0 ? src.slice(start) : ''
   assert.ok(
     !region.includes('navigate('),
@@ -103,14 +117,25 @@ test('GlobalStockSearch ☆/★ 复用 useAddToWatchlist/useRemoveFromWatchlist'
   )
 })
 
-// ===== 6. market_data 权限 split（主点击） =====
-test('GlobalStockSearch 无 market_data 时主点击不可导航', () => {
+// ===== 6. 权限 split（A8：market_data 任意 / self-only 仅已自选） =====
+test('GlobalStockSearch 详情导航权限 split（A8 resource-scope）', () => {
   const src = readSource(SEARCH_PATH)
+  // market_data 或 admin：任意结果可进详情
   assert.ok(
-    src.includes('canAccessStockDetail') &&
-      src.includes('market_data') &&
-      (src.includes('canAccessStockDetail)') || src.includes('!canAccessStockDetail')),
-    'GlobalStockSearch 必须按 market_data（或 admin）控制主点击导航',
+    /if\s*\(\s*isAdmin\s*\|\|\s*hasMarketData\s*\)/.test(src),
+    'market_data/admin 分支必须存在（if (isAdmin || hasMarketData)）',
+  )
+  // self_selection-only：已自选可进（direct），未自选被拦下 toast
+  assert.ok(
+    /hasSelfSelection\s*&&\s*watchlistInstrumentIds\.has\(item\.id\)/.test(src),
+    'self_selection-only 分支必须要求已自选才可进详情',
+  )
+  // 未自选/无权限：主点击不得 navigate（fallthrough toast 拦截）
+  const mainClickIdx = src.indexOf('const handleMainClick =')
+  const mainClickBlock = src.slice(mainClickIdx, src.indexOf('const handleStarClick ='))
+  assert.ok(
+    mainClickBlock.includes('.show('),
+    '未自选/无权限路径必须 toast 拦截（不导航）',
   )
 })
 
@@ -200,7 +225,7 @@ test('GlobalStockSearch Toast 使用 positional contract', () => {
     'GlobalStockSearch 不得出现 useToast().show({ ... }) 错误调用模式',
   )
   assert.ok(
-    src.includes("useToast.getState().show('无权限'") &&
+    src.includes("useToast.getState().show(") &&
       src.includes("useToast.getState().show('操作失败'"),
     'GlobalStockSearch 必须使用 useToast.getState().show(title, message) 形式',
   )
