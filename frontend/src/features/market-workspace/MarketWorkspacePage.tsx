@@ -26,7 +26,14 @@ import {
   useMarketBoards,
   useMarketStocks,
   useMarketFilterSpecs,
+  useWatchlistMonitorStatus,
 } from '@/hooks/useApi'
+import {
+  WatchlistMonitorTable,
+  adaptWatchlistMonitorStatusItem,
+  type WatchlistMonitorRow,
+} from '@/features/watchlist-monitor'
+import type { WatchlistMonitorStatusItem } from '@/api/endpoints'
 import { useAuthStore } from '@/store/auth'
 import { useToast } from '@/store/toast'
 import { apiClient } from '@/api/client'
@@ -76,6 +83,10 @@ export default function MarketWorkspacePage() {
   // - canAccessWatchlist: self_selection capability（显示自选 scope + 自选操作列；false 时隐藏）
   const canAccessStockDetail = isAdmin || hasMarketData
   const canAccessWatchlist = isAdmin || hasSelfSelection
+  // [P0 后续] self_selection-only（有自选、无 market_data、非 admin）用户：
+  //   /market/stocks（无论 scope）P0 后要求 market_data，对其 403。此类用户的自选视图
+  //   必须改走 /v1/watchlist/monitor-status（仅要求 self_selection），不能复用行情列表数据源。
+  const isSelfSelectionOnly = !isAdmin && hasSelfSelection && !hasMarketData
 
   // 从 URL 解析状态（仅 scope + selected；sort/filters/page 由 StrategyDataTable 管理）
   const urlState = useMemo(() => decodeMarketWorkspaceUrl(searchParams), [searchParams])
@@ -316,6 +327,19 @@ export default function MarketWorkspacePage() {
     [watchlistPendingIds, addMutation, removeMutation, toast],
   )
 
+  // [P0 后续] self_selection-only 用户移除自选（走 /v1/watchlist/{id}，仅要求 self_selection）。
+  // 复用 removeMutation（onSuccess 已 invalidate watchlist + monitor-status），移除后该行从列表消失。
+  const handleRemoveSelfSelectionWatchlist = useCallback(
+    (row: WatchlistMonitorRow) => {
+      if (!row.instrument_id) return
+      removeMutation.mutate(row.instrument_id, {
+        onSuccess: () => toast.show('已移除自选', ''),
+        onError: () => toast.show('移除自选失败', '请稍后重试'),
+      })
+    },
+    [removeMutation, toast],
+  )
+
   // 服务端分页/筛选/排序状态（由 StrategyDataTable 通过 onQueryChange 回调驱动）
   const [query, setQuery] = useState<DataTableQuery>({
     page: 1,
@@ -375,7 +399,23 @@ export default function MarketWorkspacePage() {
   )
   // [P0 安全修复] capability 未就绪（accessStatus !== 'ready'）时不发 market request，
   // 从源头杜绝「self_selection-only 用户先发 scope=market 再被 403」的竞态。
-  const marketStocksQuery = useMarketStocks(marketStocksParams, { enabled: accessReady })
+  // [P0 后续] self_selection-only 用户不发 /market/stocks（后端 403），改走 monitor-status。
+  const marketStocksQuery = useMarketStocks(marketStocksParams, {
+    enabled: accessReady && !isSelfSelectionOnly,
+  })
+
+  // [P0 后续] self_selection-only 用户的自选列表数据源（/v1/watchlist/monitor-status，仅要求 self_selection）。
+  // 交易时段 1s 自动刷新（useWatchlistMonitorStatus 内置），与 /market/stocks 完全解耦。
+  const watchlistMonitorStatusQuery = useWatchlistMonitorStatus({
+    enabled: isSelfSelectionOnly,
+  })
+  const selfSelectionOnlyRows: WatchlistMonitorRow[] = useMemo(
+    () =>
+      (watchlistMonitorStatusQuery.data?.items ?? []).map((item: WatchlistMonitorStatusItem) =>
+        adaptWatchlistMonitorStatusItem(item),
+      ),
+    [watchlistMonitorStatusQuery.data],
+  )
 
   // 行数据：MarketStockRow → TrendSelectionRow（单次转换，包含 first_pyramid/payload/chip_status）
   const rows: TrendSelectionRow[] = useMemo(
@@ -517,6 +557,35 @@ export default function MarketWorkspacePage() {
 
   // selected symbol 用于右栏 AtomicFactsPanel
   const selectedSymbol = selected || undefined
+
+  // [P0 后续] self_selection-only 用户渲染独立自选监控视图：
+  //   - 数据源 /v1/watchlist/monitor-status（仅要求 self_selection，不再触发 /market/stocks 403）
+  //   - 不渲染行情专属 UI（MarketToolbar 板块筛选 / 右栏 / 导出 / 批次信息均依赖 market_data）
+  //   - 提供「移出自选」；「详情」不可用（无 market_data 无法进入个股详情页）
+  if (isSelfSelectionOnly) {
+    return (
+      <div className={styles.marketPage}>
+        <div className={styles.tableArea}>
+          <div className={styles.tableWrapper}>
+            <WatchlistMonitorTable
+              tableId="self-selection-watchlist"
+              rows={selfSelectionOnlyRows}
+              loading={watchlistMonitorStatusQuery.isLoading}
+              error={
+                watchlistMonitorStatusQuery.isError
+                  ? '自选列表加载失败，请刷新重试'
+                  : null
+              }
+              emptyText="暂无自选股票"
+              searchable
+              onRemove={handleRemoveSelfSelectionWatchlist}
+              removePending={removeMutation.isPending}
+            />
+          </div>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className={styles.marketPage}>
