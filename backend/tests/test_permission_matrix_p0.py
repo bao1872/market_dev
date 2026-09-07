@@ -57,6 +57,7 @@ Case 矩阵：
 - M: symbol-scope（stocks/{symbol}/context + first-pyramid）+ send-feishu resource guard：
      context 无 run 时 DB-only 200（正向）；first-pyramid 负向 403（不碰 provider）；
      send-feishu 已自选→404 CHANNEL_NOT_FOUND（guard 通过停在纯 DB channel lookup）、
+     market_data-only→任意 instrument 404 CHANNEL_NOT_FOUND（防 future false-green）、
      未自选→403、research_replay-only→403、匿名→401
 
 注意：
@@ -685,6 +686,7 @@ async def test_case_m_symbol_scope_and_feishu_resource_guard(
     - /send-feishu：guard 通过后停在纯 DB channel lookup（用户无 active Feishu channel →
       ChannelNotFoundError → 404），未碰 capture worker / snapshot provider。故：
         self-selection-only + 已自选 → 404 CHANNEL_NOT_FOUND（guard 通过）
+        market_data-only + 任意 instrument → 404 CHANNEL_NOT_FOUND（guard 通过，防 future false-green）
         self-selection-only + 未自选 → 403（guard 拒绝）
         research_replay-only → 403；匿名 → 401
     """
@@ -738,6 +740,24 @@ async def test_case_m_symbol_scope_and_feishu_resource_guard(
         f"/v1/instruments/{other_inst.id}/send-feishu", json={}, headers=self_headers
     )
     assert r_feishu_denied.status_code == 403, r_feishu_denied.text
+
+    # market_data-only → 任意真实 instrument 的 resource guard 应通过；
+    # 测试用户无 Feishu channel，因此停在纯 DB channel lookup → 404 CHANNEL_NOT_FOUND
+    market_only = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}m-market-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "market_data", "months": 1}],
+    )
+    market_headers = _auth(market_only)
+    r_feishu_market = await client.post(
+        f"/v1/instruments/{other_inst.id}/send-feishu",
+        json={},
+        headers=market_headers,
+    )
+    assert r_feishu_market.status_code == 404, r_feishu_market.text
+    assert (
+        r_feishu_market.json()["detail"]["error_code"] == "CHANNEL_NOT_FOUND"
+    ), r_feishu_market.text
 
     # research_replay-only → symbol 端点 + send-feishu 均 403
     replay_only = await _register_with_capabilities(
