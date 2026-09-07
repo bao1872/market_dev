@@ -252,3 +252,49 @@ async def test_get_watchlist_both_200(
     )
     r = await client.get("/v1/watchlist", headers=_auth(user))
     assert r.status_code == 200, r.text
+
+
+# ============================================================
+# market_data-only 写入口 403（POST / DELETE 均要求 self_selection）
+# ============================================================
+
+
+@pytest.mark.asyncio
+async def test_post_watchlist_market_data_only_403(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """market_data-only → POST /v1/watchlist 403（加自选仍要求 self_selection）。
+
+    使用真实存在的 instrument，证明即使请求本身合法也被鉴权拒绝（403 先于业务），
+    而非 404/400 之类的业务错误。
+    """
+    user = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}wpost-market-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "market_data", "months": 1}],
+    )
+    inst = await _create_instrument(db_session)
+    r = await client.post(
+        "/v1/watchlist",
+        json={"instrument_id": str(inst.id), "source": "manual"},
+        headers=_auth(user),
+    )
+    assert r.status_code == 403, r.text
+
+
+@pytest.mark.asyncio
+async def test_delete_watchlist_market_data_only_403(
+    db_session: AsyncSession, client: AsyncClient
+) -> None:
+    """market_data-only → DELETE /v1/watchlist/{instrument_id} 403（删自选仍要求 self_selection）。
+
+    使用真实存在的 instrument，证明即使请求本身合法也被鉴权拒绝（403 先于业务）。
+    """
+    user = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}wdel-market-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "market_data", "months": 1}],
+    )
+    inst = await _create_instrument(db_session)
+    r = await client.delete(f"/v1/watchlist/{inst.id}", headers=_auth(user))
+    assert r.status_code == 403, r.text

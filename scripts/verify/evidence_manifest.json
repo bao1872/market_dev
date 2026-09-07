@@ -150,6 +150,15 @@
       "required": true,
       "test_selectors": ["tests/test_permission_matrix_p0.py"],
       "claim": "For users resolved from explicit user_capabilities (legacy_plan_fallback / C10 excluded from this contract), self_selection, market_data, and research_replay are enforced independently at the market-data boundary: scope=market requires market_data; scope=watchlist (full MarketStockRow) requires self_selection AND market_data; /bars /quote and stock-detail endpoints require market_data; export authorization uses body.scope as the single source of truth. Anonymous access is 401, self_selection-only / research_replay-only access to market data is 403, and a market_data user passes the guard before business validation (invalid timeframe -> 400 / nonexistent instrument -> 404)."
+    },
+    {
+      "contract_id": "watchlist_capability_boundary",
+      "governance_level": 2,
+      "semantic_owner": "app.api.watchlist",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_watchlist_metadata_boundary.py"],
+      "claim": "For users resolved from explicit user_capabilities (legacy_plan_fallback / C10 excluded from this contract), /v1/watchlist/monitor-status requires self_selection AND market_data (403 for self_selection-only and market_data-only, 200 for both, 200 for admin); GET /v1/watchlist requires self_selection only (403 for market_data-only); POST and DELETE /v1/watchlist require self_selection only (403 for market_data-only). GET /v1/watchlist returns metadata-only summary items (watchlist_item_id/instrument_id/symbol/name/market/source/created_at) and never exposes market/strategy metrics (price, change_pct, metrics, latest_event, BB, node, POC, first_pyramid, bars)."
     }
   ]
 }
