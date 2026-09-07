@@ -1,7 +1,7 @@
 // [GlobalStockSearch] - 描述: Global Stock Search 契约测试（源码级）
 // 用法：node --experimental-strip-types --test src/features/market-workspace/__tests__/globalStockSearch.test.ts
 //
-// 覆盖（Round 2 R01/R03/R04/R15/R16 + Round 2.1 修复）：
+// 覆盖（Round 2 R01/R03/R04/R15/R16 + Round 2.1 修复 + 顶部搜索数据源修正）：
 // 1. GlobalStockSearch 组件存在并被 UserAppShell 挂载于 Global Header
 // 2. 主点击进入 Market-source 个股详情（buildStockDetailUrl originScope='market'）
 // 3. 主点击不触发 watchlist mutation
@@ -9,9 +9,12 @@
 // 5. ☆/★ 复用 canonical watchlist mutation（useAddToWatchlist/useRemoveFromWatchlist）
 // 6. 无 market_data 时主点击不可导航（权限 split）
 // 7. 无 self_selection 时 ☆/★ 不可操作（权限 split）
-// 8. 查询源固定为 Market（useMarketStocks scope='market'），不依赖 workspace scope
+// 8. 查询源为 instrument discovery（useInstruments / GET /v1/instruments），
+//    禁止 useMarketStocks（/v1/market/stocks 要求 market_data，self_selection-only 会 403）
+// 9. useInstruments 参数 keyword/page/page_size 映射 + searchQuery.length>0 门控
 // A. useWatchlist 受 canManageWatchlist 门控（无 self_selection 不请求 /watchlist）
-// B. useMarketStocks 受 searchQuery.length>0 门控（空输入不请求 /market/stocks）
+// B. /v1/instruments 返回 Instrument.id，直接消费 item.id（key/has/add/remove），
+//    禁止 unsafe cast 掩盖 id/instrument_id 字段差异
 // C. Toast 使用 positional contract，不出现 .show({ 错误调用
 // D. UserAppShell topbar z-index 高于 moduleNav
 
@@ -121,12 +124,18 @@ test('GlobalStockSearch 无 self_selection 时 ☆/★ 不可操作', () => {
   )
 })
 
-// ===== 8. 查询源固定为 Market =====
-test('GlobalStockSearch 查询源固定为 Market（scope=market）', () => {
+// ===== 8. 查询源 = instrument discovery（禁止 /market/stocks）=====
+test('GlobalStockSearch 查询源为 useInstruments，禁止 useMarketStocks', () => {
   const src = readSource(SEARCH_PATH)
   assert.ok(
-    src.includes('useMarketStocks') && src.includes("scope: 'market'"),
-    'GlobalStockSearch 必须复用 useMarketStocks(scope="market")',
+    src.includes('useInstruments'),
+    'GlobalStockSearch 必须使用 useInstruments（GET /v1/instruments）',
+  )
+  // 精确断言 import/调用层（组件注释可解释性文字不受误伤）
+  assert.ok(
+    !/import\s*\{[^}]*useMarketStocks/.test(src) &&
+      !/useMarketStocks\s*\(/.test(src),
+    'GlobalStockSearch 禁止 import 或调用 useMarketStocks（/v1/market/stocks）',
   )
 })
 
@@ -140,17 +149,46 @@ test('GlobalStockSearch useWatchlist 受 canManageWatchlist 门控', () => {
   )
 })
 
-// ===== B. market search 受 searchQuery.length>0 门控 =====
-test('GlobalStockSearch useMarketStocks 受 searchQuery.length>0 门控', () => {
+// ===== 9. useInstruments 参数映射 + searchQuery.length>0 门控 =====
+test('GlobalStockSearch useInstruments 受 searchQuery.length>0 门控且 keyword 映射正确', () => {
   const src = readSource(SEARCH_PATH)
-  assert.ok(
-    src.includes('useMarketStocks(') &&
-      src.includes('enabled: searchQuery.length > 0'),
-    'GlobalStockSearch 必须在 searchQuery 非空时才请求 /market/stocks',
-  )
+  const m = src.match(/useInstruments\s*\([^)]*?keyword:\s*searchQuery\s*\|\|\s*undefined[^)]*?page:\s*1[^)]*?page_size:\s*8[^)]*?enabled:\s*searchQuery\.length\s*>\s*0/)
+  assert.ok(m, 'useInstruments 参数必须为 { keyword: searchQuery || undefined, page: 1, page_size: 8 } 且 enabled: searchQuery.length > 0')
   assert.ok(
     src.includes('const searchQuery = input.trim()'),
     'GlobalStockSearch 必须基于输入 trim 计算 searchQuery',
+  )
+})
+
+// ===== B. Instrument.id 字段处理（禁止 unsafe cast）=====
+test('GlobalStockSearch 直接消费 Instrument.id，禁止 id/instrument_id unsafe cast', () => {
+  const src = readSource(SEARCH_PATH)
+  // 直接消费 Instrument 类型
+  assert.ok(
+    /const results:\s*Instrument\[\]\s*=\s*data\?\.items\s*\?\?\s*\[\]/.test(src),
+    'results 必须声明为 Instrument[]（直接消费 /v1/instruments 返回类型）',
+  )
+  // 禁止 as StockSearchItem[] cast 掩盖字段差异
+  assert.ok(
+    !/as\s+StockSearchItem/.test(src),
+    '禁止 as StockSearchItem[] 掩盖 id/instrument_id 字段差异',
+  )
+  // item.id 统一用于 key / 自选判定 / add / remove
+  assert.ok(
+    src.includes('key={item.id}') &&
+      src.includes('watchlistInstrumentIds.has(item.id)') &&
+      src.includes('removeFromWatchlist.mutate(item.id') &&
+      src.includes('{ instrument_id: item.id }'),
+    '必须统一使用 item.id 作为 key/has/remove 标识，add 用 { instrument_id: item.id }',
+  )
+  // 不得残留 item.instrument_id（undefined 泄漏点）。
+  // 注意：useWatchlist 自选摘要项（watchlistData 循环）的 instrument_id 是合法字段，
+  // 因此仅检查搜索消费区域（handleMainClick 之后）。
+  const searchRegion = src.slice(src.indexOf('const handleMainClick ='))
+  assert.ok(
+    searchRegion.includes('const handleMainClick') &&
+      !searchRegion.includes('item.instrument_id'),
+    '搜索结果消费区禁止残留 item.instrument_id（/v1/instruments 无此字段，会变 undefined）',
   )
 })
 
