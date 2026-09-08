@@ -143,6 +143,18 @@ for (const key of DIRECTION_KEYS) {
   })
 }
 
+// ===== 多选已选提示兜底：历史兼容/非法旧值不得泄露 raw code（最后 blocker 闭环）=====
+test('多选 enum 已选含非法旧值 up/__UNKNOWN__：提示显示 未知选项，DOM 不泄露 raw code', () => {
+  const html = renderFilterFor('fp_node_event_direction', DIRECTION_SPECS, 'in', 'up,__UNKNOWN__')
+  const text = visibleText(html)
+  assert.ok(text.includes('未知选项'), '非法旧值（不在 selectOptions 中）应显示 未知选项')
+  assert.ok(!text.includes('up'), '用户可见文字不得出现 up')
+  assert.ok(!text.includes('__UNKNOWN__'), '用户可见文字不得出现 __UNKNOWN__')
+  // 历史兼容值不进 UI：不存在对应 checkbox / option value 属性
+  assert.ok(!html.includes('value="up"'), '不得提交历史兼容值 up')
+  assert.ok(!html.includes('value="__UNKNOWN__"'), '不得提交 __UNKNOWN__')
+})
+
 // ===== boolean =====
 test('boolean 筛选：option 显示 是/否，value 提交 true/false', () => {
   const cols = getFirstPyramidColumns({

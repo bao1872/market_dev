@@ -557,7 +557,10 @@ export function FilterPopover({
           <div className="filter-enum-hint">
             已选：{selected.size > 0
               ? [...selected]
-                  .map((v) => selectOptions.find((o) => o.value === v)?.label ?? v)
+                  // [P0 corrective / 最后 blocker] 禁止 ?? v：历史兼容值（up/down/__UNKNOWN__）
+                  // 不在 selectOptions 中匹配时不得原样吐给用户，必须显式表达为"未知选项"，
+                  // 与 presentationSemantics 的 UNKNOWN 语义一致（绝不把内部 code 露进 DOM）。
+                  .map((v) => selectOptions.find((o) => o.value === v)?.label ?? '未知选项')
                   .join('、')
               : '（无）'}
           </div>
