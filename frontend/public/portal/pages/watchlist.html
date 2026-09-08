@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>自选管理｜盘迹使用说明</title>
-<meta name="description" content="通过真实页面动画演示学习加入自选、切换自选范围、搜索自选股票、查看右侧状态和移除自选。">
+<meta name="description" content="通过真实页面动画学习加入与管理自选，并了解结构、筹码共识盘中事件如何形成站内记录和飞书通知。">
 <link rel="stylesheet" href="../assets/css/site.css">
 <style>
   .article-wrap{--demo-green:#51e77d;--demo-red:#f47770;--demo-bg:#071015}
@@ -100,6 +100,22 @@
   .note-card{display:grid;grid-template-columns:40px 1fr;gap:13px;padding:18px;border:1px solid var(--border);border-radius:14px;background:var(--surface)}
   .note-icon{width:40px;height:40px;display:grid;place-items:center;border-radius:11px;background:rgba(81,231,125,.08);color:var(--demo-green);font-weight:850}
   .note-card h3{margin:0 0 6px;font-size:15px}.note-card p{margin:0;color:var(--muted);font-size:12px;line-height:1.7}
+  .monitor-case{overflow:hidden;border:1px solid rgba(44,211,172,.3);border-radius:18px;background:linear-gradient(145deg,rgba(11,39,38,.58),rgba(5,13,18,.95) 42%);box-shadow:0 22px 70px rgba(0,0,0,.32)}
+  .monitor-head{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:17px 18px;border-bottom:1px solid rgba(44,211,172,.17)}
+  .monitor-identity{display:flex;align-items:center;gap:12px;min-width:0}.monitor-mark{width:36px;height:36px;display:grid;place-items:center;border-radius:11px;background:rgba(45,225,185,.1);color:#34e4c0;font-weight:900}.monitor-identity strong{display:block;font-size:15px}.monitor-identity span{display:block;margin-top:3px;color:#78939a;font-size:10px}
+  .monitor-badge{flex:0 0 auto;padding:7px 11px;border:1px solid rgba(45,225,185,.32);border-radius:999px;color:#98ead9;background:rgba(45,225,185,.06);font-size:10px}
+  .monitor-stage{display:grid;grid-template-columns:minmax(0,1fr) 220px;min-height:410px}
+  .monitor-chart{position:relative;min-width:0;padding:18px 14px 16px;background:#081017;overflow:hidden}
+  .monitor-chart-head{display:flex;align-items:end;justify-content:space-between;gap:14px;margin-bottom:12px}.monitor-chart-head strong{font-size:23px}.monitor-chart-head small{color:#758890;font-size:10px}.monitor-quote{text-align:right}.monitor-quote b{display:block;color:#f06464;font-size:20px}.monitor-quote span{color:#91a1a8;font-size:10px}
+  .price-canvas{position:relative;height:292px;border:1px solid #1f3039;border-radius:10px;background:linear-gradient(rgba(32,48,59,.55) 1px,transparent 1px),linear-gradient(90deg,rgba(32,48,59,.55) 1px,transparent 1px),#0a1119;background-size:100% 25%,12.5% 100%;overflow:hidden}
+  .price-canvas svg{position:absolute;inset:0;width:100%;height:100%}.candle{opacity:.2;transform:translateY(8px);transition:opacity .35s,transform .35s}.monitor-case[data-stage="0"] .candle:nth-child(-n+8),.monitor-case[data-stage="1"] .candle:nth-child(-n+12),.monitor-case[data-stage="2"] .candle,.monitor-case[data-stage="3"] .candle{opacity:1;transform:none}
+  .event-level{opacity:.12;transition:opacity .4s}.consensus-zone{opacity:.08;transition:opacity .4s}.profile-bar{transform:scaleX(.12);transform-origin:right center;opacity:.16;transition:transform .5s,opacity .4s}.event-pin{opacity:0;transform:translateY(7px);transition:opacity .35s,transform .35s}
+  .monitor-case[data-stage="1"] .event-level,.monitor-case[data-stage="2"] .event-level,.monitor-case[data-stage="3"] .event-level{opacity:1}.monitor-case[data-stage="1"] .event-pin,.monitor-case[data-stage="2"] .event-pin,.monitor-case[data-stage="3"] .event-pin{opacity:1;transform:none}.monitor-case[data-stage="2"] .consensus-zone,.monitor-case[data-stage="3"] .consensus-zone{opacity:1}.monitor-case[data-stage="2"] .profile-bar,.monitor-case[data-stage="3"] .profile-bar{transform:scaleX(1);opacity:.82}
+  .event-pulse{position:absolute;left:55%;top:49%;width:18px;height:18px;border:2px solid #ff6666;border-radius:50%;opacity:0}.monitor-case[data-stage="1"] .event-pulse,.monitor-case[data-stage="2"] .event-pulse,.monitor-case[data-stage="3"] .event-pulse{animation:eventPulse 1.5s ease-out infinite}@keyframes eventPulse{0%{opacity:.9;transform:scale(.35)}100%{opacity:0;transform:scale(2)}}
+  .monitor-timeline{display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:11px}.monitor-step{min-height:54px;padding:8px;border:1px solid #23343d;border-radius:9px;background:#0d171e;color:#81939b;text-align:left;font-size:9px;line-height:1.45}.monitor-step strong{display:block;margin-bottom:3px;color:#c7d4d7;font-size:10px}.monitor-step.active{border-color:rgba(45,225,185,.48);background:rgba(45,225,185,.08);color:#b4d9d1}.monitor-step.active strong{color:#45e1bd}
+  .monitor-side{display:flex;flex-direction:column;border-left:1px solid #1d2d35;background:#0b151b}.monitor-side-head{padding:15px;border-bottom:1px solid #1d2d35}.monitor-side-head span{display:block;color:#789097;font-size:9px}.monitor-side-head strong{display:block;margin-top:5px;font-size:13px}.event-card{margin:12px;padding:13px;border:1px solid #253740;border-radius:11px;background:#101c22;opacity:.32;transform:translateY(5px);transition:opacity .35s,transform .35s,border-color .35s}.event-card strong{display:block;margin:7px 0 5px;font-size:12px}.event-card p{margin:0;color:#8fa0a7;font-size:9px;line-height:1.6}.event-kind{display:inline-flex;padding:4px 7px;border-radius:6px;background:rgba(74,130,255,.12);color:#73a1ff;font-size:8px}.event-kind.consensus{background:rgba(45,225,185,.1);color:#53d9bd}.monitor-case[data-stage="1"] .event-structure,.monitor-case[data-stage="2"] .event-structure,.monitor-case[data-stage="3"] .event-structure{opacity:1;transform:none;border-color:rgba(74,130,255,.38)}.monitor-case[data-stage="2"] .event-consensus,.monitor-case[data-stage="3"] .event-consensus{opacity:1;transform:none;border-color:rgba(45,225,185,.34)}
+  .delivery-card{margin:auto 12px 12px;padding:13px;border:1px solid #263740;border-radius:11px;background:#0c171d;opacity:.28;transform:translateY(8px);transition:opacity .4s,transform .4s}.monitor-case[data-stage="3"] .delivery-card{opacity:1;transform:none}.delivery-row{display:flex;justify-content:space-between;gap:10px;padding:6px 0;border-top:1px solid #1c2a32;color:#819198;font-size:9px}.delivery-row:first-child{border-top:0}.delivery-row b{color:#cdd9dc}.delivery-ok{color:#44d69d!important}
+  .monitor-caption{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 18px;border-top:1px solid rgba(45,225,185,.15);background:rgba(8,19,23,.88)}.monitor-caption strong{display:block;font-size:13px}.monitor-caption span{display:block;margin-top:4px;color:#8da0a6;font-size:10px;line-height:1.55}.monitor-controls{display:flex;gap:7px}.monitor-control{width:34px;height:34px;display:grid;place-items:center;border:1px solid #2a3d45;border-radius:8px;background:#111e24;color:#d8e5e4}.monitor-control:hover,.monitor-control:focus-visible{border-color:#36d6b4;color:#56e5c6;outline:0}
   .boundary-compact{display:grid;grid-template-columns:auto 1fr;gap:14px;padding:18px;border:1px solid rgba(228,187,97,.37);border-radius:14px;background:rgba(228,187,97,.08)}
   .boundary-icon{width:36px;height:36px;display:grid;place-items:center;border-radius:10px;background:rgba(228,187,97,.15);color:#ebcc87;font-weight:850}
   .boundary-compact strong{display:block;margin-bottom:5px;color:#f0dba6}.boundary-compact p{margin:0;color:#c7b98f;font-size:12px;line-height:1.7}
@@ -114,15 +130,15 @@
     .mock-app.panel-open{grid-template-columns:minmax(710px,1fr) 250px}
     .mock-toolbar{grid-template-columns:120px 190px 150px 140px}
     .panel-open .panel-toggle{right:250px}
-    .interaction-grid,.note-grid,.next-grid{grid-template-columns:1fr}
+    .interaction-grid,.note-grid,.next-grid{grid-template-columns:1fr}.monitor-stage{grid-template-columns:1fr}.monitor-side{border-left:0;border-top:1px solid #1d2d35}.monitor-timeline{grid-template-columns:repeat(2,1fr)}
   }
   @media(max-width:520px){
     .demo-head{align-items:flex-start}.demo-title-wrap span{display:none}.demo-controls{flex-shrink:0}
     .demo-caption{grid-template-columns:36px 1fr}.caption-no{width:34px;height:34px}
-    .step-strip{grid-template-columns:1fr 1fr}
+    .step-strip{grid-template-columns:1fr 1fr}.monitor-head,.monitor-caption{align-items:flex-start}.monitor-badge{display:none}.monitor-chart-head strong{font-size:19px}.price-canvas{height:250px}.monitor-caption{display:block}.monitor-controls{margin-top:12px}
   }
   @media(prefers-reduced-motion:reduce){
-    .demo-cursor{display:none}.mock-app,.right-panel,.scope-btn,.mock-table td,.mock-table tbody tr,.toast-demo{transition:none!important}
+    .demo-cursor{display:none}.mock-app,.right-panel,.scope-btn,.mock-table td,.mock-table tbody tr,.toast-demo,.candle,.event-level,.consensus-zone,.profile-bar,.event-pin,.event-card,.delivery-card{transition:none!important}.event-pulse{animation:none!important;opacity:.8!important}
   }
 </style>
 </head>
@@ -160,8 +176,8 @@
 <article class="article-wrap">
   <div class="breadcrumb">帮助中心 / <strong>自选管理</strong></div>
   <h1 class="article-title">自选管理</h1>
-  <p class="article-lead">把自己决定持续观察的股票加入自选，并在自选范围中集中查看、快速观察或移除。</p>
-  <div class="watch-intro"><span>个人观察列表</span><span>5 个核心动作</span><span>加入与移除即时生效</span><span>脱敏示例数据</span></div>
+  <p class="article-lead">把自己决定持续观察的股票加入自选，在同一工作区管理观察范围；盘中出现结构或筹码共识事件时，再通过站内记录和已启用的飞书渠道回到完整上下文。</p>
+  <div class="watch-intro"><span>真实 Workspace 结构</span><span>个人观察列表</span><span>结构 + 筹码共识监控</span><span>站内记录与飞书通知</span></div>
 
   <section class="visual-section" id="demo">
     <div class="visual-title"><h2>一分钟看懂自选管理</h2><p>自动播放完整操作闭环，也可以点击下方步骤单独查看。</p></div>
@@ -281,7 +297,62 @@
     <div class="visual-title"><h2>自选数量与监控</h2><p>以当前账号的实际权限和系统状态为准。</p></div>
     <div class="note-grid">
       <article class="note-card"><div class="note-icon">#</div><div><h3>自选数量</h3><p>当前账号可以添加的自选数量由账号权限决定。达到上限后，可以先移除不再观察的股票；对权限有疑问时联系管理员。</p></div></article>
-      <article class="note-card"><div class="note-icon">◎</div><div><h3>相关监控</h3><p>加入自选后，系统会按照当前账号权限处理相关监控。当前页面没有单独的手动监控开关，是否启用以账号权限和系统状态为准。</p></div></article>
+      <article class="note-card"><div class="note-icon">◎</div><div><h3>盘中监控</h3><p>盘中监控属于自选管理权限，当前页面没有单独的手动开关。正式触发事件只有结构和筹码共识两类，是否运行以账号权限和系统状态为准。</p></div></article>
+    </div>
+  </section>
+
+  <section class="visual-section" id="monitor-case">
+    <div class="visual-title"><h2>一个盘中事件怎样回到你的视野</h2><p>以下案例完全由 HTML、CSS 和 SVG 重建，用来解释动态过程，不是原始截图。</p></div>
+    <div class="monitor-case" id="monitorCase" data-stage="0">
+      <div class="monitor-head">
+        <div class="monitor-identity"><span class="monitor-mark">⌁</span><div><strong>东方钽业 · 000962</strong><span>历史事件案例 · 2026-09-07 13:15</span></div></div>
+        <span class="monitor-badge">结构 + 筹码共识组合视图</span>
+      </div>
+      <div class="monitor-stage">
+        <div class="monitor-chart">
+          <div class="monitor-chart-head"><div><strong>53.58</strong><small>日线 · 已完成周期与盘中事件示意</small></div><div class="monitor-quote"><b>+4.20%</b><span>案例时点涨跌幅</span></div></div>
+          <div class="price-canvas" role="img" aria-label="东方钽业历史案例的K线、结构位置、筹码共识区和成交分布动态示意图">
+            <svg viewBox="0 0 720 292" preserveAspectRatio="none" aria-hidden="true">
+              <g stroke-linecap="round">
+                <g class="candle"><line x1="32" y1="232" x2="32" y2="196" stroke="#36b8ad"/><rect x="27" y="207" width="10" height="18" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="63" y1="220" x2="63" y2="182" stroke="#ef5f62"/><rect x="58" y="190" width="10" height="24" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="94" y1="202" x2="94" y2="158" stroke="#ef5f62"/><rect x="89" y="166" width="10" height="28" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="125" y1="184" x2="125" y2="132" stroke="#36b8ad"/><rect x="120" y="145" width="10" height="30" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="156" y1="171" x2="156" y2="118" stroke="#ef5f62"/><rect x="151" y="130" width="10" height="29" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="187" y1="142" x2="187" y2="90" stroke="#ef5f62"/><rect x="182" y="101" width="10" height="32" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="218" y1="115" x2="218" y2="50" stroke="#ef5f62"/><rect x="213" y="63" width="10" height="41" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="249" y1="76" x2="249" y2="21" stroke="#36b8ad"/><rect x="244" y="34" width="10" height="31" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="280" y1="45" x2="280" y2="150" stroke="#36b8ad"/><rect x="275" y="67" width="10" height="63" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="311" y1="111" x2="311" y2="191" stroke="#36b8ad"/><rect x="306" y="129" width="10" height="45" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="342" y1="159" x2="342" y2="236" stroke="#36b8ad"/><rect x="337" y="176" width="10" height="42" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="373" y1="184" x2="373" y2="226" stroke="#ef5f62"/><rect x="368" y="191" width="10" height="24" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="404" y1="194" x2="404" y2="241" stroke="#36b8ad"/><rect x="399" y="205" width="10" height="23" fill="#36b8ad"/></g>
+                <g class="candle"><line x1="435" y1="182" x2="435" y2="224" stroke="#ef5f62"/><rect x="430" y="191" width="10" height="24" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="466" y1="173" x2="466" y2="215" stroke="#ef5f62"/><rect x="461" y="181" width="10" height="25" fill="#ef5f62"/></g>
+                <g class="candle"><line x1="497" y1="184" x2="497" y2="222" stroke="#36b8ad"/><rect x="492" y="193" width="10" height="20" fill="#36b8ad"/></g>
+              </g>
+              <g class="event-level"><line x1="16" y1="184" x2="560" y2="184" stroke="#4e80ff" stroke-width="2" stroke-dasharray="4 4"/><text x="22" y="176" fill="#6f98ff" font-size="12">共识价 54.73</text><line x1="16" y1="236" x2="560" y2="236" stroke="#4e80ff" stroke-width="2" stroke-dasharray="4 4"/><text x="22" y="228" fill="#6f98ff" font-size="12">下方结构位 46.35</text></g>
+              <g class="consensus-zone"><rect x="17" y="181" width="542" height="13" fill="rgba(45,225,185,.12)"/><line x1="17" y1="190" x2="559" y2="190" stroke="#2de1b9" stroke-width="2"/><text x="388" y="207" fill="#ff6b67" font-size="12">短线结构拐点</text></g>
+              <g class="event-pin"><circle cx="404" cy="190" r="5" fill="#ff6666"/><path d="M404 190 438 160" stroke="#ff6666"/><rect x="436" y="145" width="90" height="24" rx="5" fill="#381d23" stroke="#ff6666"/><text x="446" y="161" fill="#ff8d89" font-size="11">结构事件形成</text></g>
+              <g transform="translate(570 17)"><line x1="0" y1="0" x2="0" y2="258" stroke="#293b44"/><g class="profile-bar" fill="#24b7a6"><rect x="1" y="176" width="85" height="8"/><rect x="1" y="187" width="116" height="8"/><rect x="1" y="198" width="102" height="8"/><rect x="1" y="209" width="72" height="8"/><rect x="1" y="220" width="94" height="8"/><rect x="1" y="231" width="61" height="8"/></g><g class="profile-bar" fill="#dd5659" opacity=".75"><rect x="1" y="66" width="39" height="7"/><rect x="1" y="77" width="53" height="7"/><rect x="1" y="88" width="48" height="7"/><rect x="1" y="99" width="66" height="7"/></g><text x="9" y="252" fill="#73878e" font-size="10">成交分布</text></g>
+            </svg>
+            <span class="event-pulse" aria-hidden="true"></span>
+          </div>
+          <div class="monitor-timeline" role="tablist" aria-label="盘中事件案例步骤">
+            <button class="monitor-step active" type="button" role="tab" aria-selected="true" data-monitor-step="0"><strong>1 周期完成</strong>进入监控判断</button>
+            <button class="monitor-step" type="button" role="tab" aria-selected="false" data-monitor-step="1"><strong>2 结构事件</strong>关键关系变化</button>
+            <button class="monitor-step" type="button" role="tab" aria-selected="false" data-monitor-step="2"><strong>3 组合视图</strong>叠加筹码共识</button>
+            <button class="monitor-step" type="button" role="tab" aria-selected="false" data-monitor-step="3"><strong>4 形成消息</strong>站内记录与投递</button>
+          </div>
+        </div>
+        <aside class="monitor-side" aria-label="事件和通知状态">
+          <div class="monitor-side-head"><span>当前自选股票</span><strong>事件与通知状态</strong></div>
+          <article class="event-card event-structure"><span class="event-kind">结构</span><strong>BOS / CHoCH 等结构关系变化</strong><p>事件文字只描述实际触发的结构事实；不预测下一步价格。</p></article>
+          <article class="event-card event-consensus"><span class="event-kind consensus">筹码共识</span><strong>组合图同时展示筹码位置</strong><p>无论哪类正式事件触发，图片固定展示结构与筹码共识上下文。</p></article>
+          <div class="delivery-card"><div class="delivery-row"><span>站内消息</span><b class="delivery-ok">已记录</b></div><div class="delivery-row"><span>飞书渠道</span><b>按配置投递</b></div><div class="delivery-row"><span>交易结论</span><b>不提供</b></div></div>
+        </aside>
+      </div>
+      <div class="monitor-caption" aria-live="polite"><div><strong id="monitorTitle">先等待当前周期完成</strong><span id="monitorText">盘中监控使用已经完成的分钟周期进行判断，不是逐笔成交级盘口工具。</span></div><div class="monitor-controls"><button class="monitor-control" id="monitorPrev" type="button" aria-label="上一个案例步骤">‹</button><button class="monitor-control" id="monitorPlay" type="button" aria-label="暂停案例动画">Ⅱ</button><button class="monitor-control" id="monitorNext" type="button" aria-label="下一个案例步骤">›</button></div></div>
     </div>
   </section>
 
@@ -291,6 +362,8 @@
     <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么不能继续加入自选？</span><span>⌄</span></button><div class="faq-answer">当前账号可能已经达到可用数量上限，也可能没有自选管理权限。请先检查现有自选或联系管理员。</div></div>
     <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么点击股票后没有进入详情？</span><span>⌄</span></button><div class="faq-answer">只有点击股票名称才会进入详情。点击行内其他区域只会更新右侧状态面板。</div></div>
     <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>为什么右侧没有内容？</span><span>⌄</span></button><div class="faq-answer">请确认已经展开右侧面板并选中一只股票。当前周期无可用数据时，也可能显示暂无数据。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>加入自选后，为什么没有“开启监控”按钮？</span><span>⌄</span></button><div class="faq-answer">当前页面没有单独的手动监控开关。盘中监控属于自选管理权限，是否运行以当前账号权限和系统状态为准。</div></div>
+    <div class="faq-item"><button class="faq-button" type="button" aria-expanded="false"><span>盘中监控会提醒哪些变化？</span><span>⌄</span></button><div class="faq-answer">正式触发事件只有两类：结构事件，以及筹码共识的节点触及。趋势、动量、量能等状态可以用于阅读上下文，但不会因此单独触发盘中事件。</div></div>
   </section>
 
   <section class="visual-section" id="boundary">
@@ -312,11 +385,12 @@
     <a class="rail-link active" data-anchor href="#demo">一分钟看懂</a>
     <a class="rail-link" data-anchor href="#clicks">点击位置</a>
     <a class="rail-link" data-anchor href="#limits">数量与监控</a>
+    <a class="rail-link" data-anchor href="#monitor-case">盘中事件案例</a>
     <a class="rail-link" data-anchor href="#faq">常见问题</a>
     <a class="rail-link" data-anchor href="#boundary">使用边界</a>
     <a class="rail-link" data-anchor href="#next">下一步</a>
   </nav></section>
-  <section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年7月21日</div></section>
+  <section class="rail-card"><h3>更新时间</h3><div class="update-date">2026年9月8日</div></section>
   <section class="rail-card"><h3>相关教程</h3><nav class="rail-list">
     <a class="rail-link" href="../pages/market.html">行情查看</a>
     <a class="rail-link" href="../pages/stock-detail.html">个股详情</a>
@@ -460,6 +534,37 @@
   document.getElementById('panelToggle').addEventListener('click',()=>app.classList.toggle('panel-open'));
   showStep(0,false);restart();
   document.addEventListener('visibilitychange',()=>document.hidden?clearInterval(timer):restart());
+})();
+</script>
+<script>
+(function(){
+  const root=document.getElementById('monitorCase');
+  const buttons=[...document.querySelectorAll('[data-monitor-step]')];
+  const title=document.getElementById('monitorTitle');
+  const text=document.getElementById('monitorText');
+  const play=document.getElementById('monitorPlay');
+  const reduced=window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const copy=[
+    ['先等待当前周期完成','盘中监控使用已经完成的分钟周期进行判断，不是逐笔成交级盘口工具。'],
+    ['结构关系发生可记录的变化','BOS、CHoCH、EQH、EQL 或 Order Block 首次触及等结构事件形成后，系统记录实际触发事实。'],
+    ['用组合视图补足上下文','每个正式事件的图片固定同时展示结构与筹码共识；筹码位置不是另一条交易结论。'],
+    ['站内记录与外部投递分开处理','消息先保存在站内；已启用的飞书渠道再尝试投递，外部发送失败不等于事件没有形成。']
+  ];
+  let index=0,playing=!reduced,timer=null;
+  function render(next,manual){
+    index=(next+copy.length)%copy.length;
+    root.dataset.stage=String(index);
+    title.textContent=copy[index][0];text.textContent=copy[index][1];
+    buttons.forEach((button,i)=>{button.classList.toggle('active',i===index);button.setAttribute('aria-selected',String(i===index))});
+    if(manual&&playing)restart();
+  }
+  function restart(){clearInterval(timer);if(playing)timer=setInterval(()=>render(index+1,false),4400)}
+  buttons.forEach(button=>button.addEventListener('click',()=>render(Number(button.dataset.monitorStep),true)));
+  document.getElementById('monitorPrev').addEventListener('click',()=>render(index-1,true));
+  document.getElementById('monitorNext').addEventListener('click',()=>render(index+1,true));
+  play.addEventListener('click',()=>{playing=!playing;play.textContent=playing?'Ⅱ':'▶';play.setAttribute('aria-label',playing?'暂停案例动画':'播放案例动画');restart()});
+  document.addEventListener('visibilitychange',()=>document.hidden?clearInterval(timer):restart());
+  render(0,false);restart();
 })();
 </script>
 </body>

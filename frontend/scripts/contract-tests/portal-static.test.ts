@@ -335,3 +335,16 @@ test('12. /api、Capture(SPA fallback) 合同未被删除', () => {
   // resolver 保留
   assert.ok(conf.includes('resolver 127.0.0.11'), 'resolver 被删除')
 })
+
+test('13. 自选教程使用代码重建盘中事件案例并保持监控正式语义', () => {
+  const watchlist = readText('pages/watchlist.html')
+  const boundaries = readText('pages/boundaries.html')
+
+  assert.ok(watchlist.includes('id="monitorCase"'), '自选教程缺少盘中事件动态案例')
+  assert.ok(watchlist.includes('data-monitor-step="3"'), '盘中事件案例缺少完整四步流程')
+  assert.ok(watchlist.includes('结构 + 筹码共识组合视图'), '案例必须展示固定结构 + 筹码共识组合视图')
+  assert.ok(watchlist.includes('站内记录与外部投递分开处理'), '案例必须区分站内记录与外部投递')
+  assert.ok(!watchlist.includes('codex-clipboard-'), '不得直接引用用户提供的截图')
+  assert.ok(!watchlist.includes('data:image/'), '盘中事件案例不得以内嵌图片替代 HTML/SVG 重建')
+  assert.ok(boundaries.includes('正式触发事件只有结构和筹码共识两类'), '使用边界必须锁定两类正式盘中事件')
+})

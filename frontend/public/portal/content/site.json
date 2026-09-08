@@ -1,8 +1,8 @@
 {
   "site": {
     "name": "盘迹使用说明",
-    "version": "0.5.1",
-    "updated": "2026-07-22"
+    "version": "0.6.0",
+    "updated": "2026-09-08"
   },
   "pages": [
     {
@@ -31,7 +31,7 @@
       "title": "自选管理",
       "path": "pages/watchlist.html",
       "status": "implemented",
-      "keywords": "加入 移除 自选 数量 权限"
+      "keywords": "加入 移除 自选 数量 权限 盘中监控 结构 筹码共识 飞书"
     },
     {
       "id": "stock",
@@ -73,7 +73,7 @@
       "title": "使用边界",
       "path": "pages/boundaries.html",
       "status": "implemented",
-      "keywords": "边界 风险 数据 建议"
+      "keywords": "边界 风险 数据 建议 盘中监控 结构 筹码共识"
     },
     {
       "id": "customization",
