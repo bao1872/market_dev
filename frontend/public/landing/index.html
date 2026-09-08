@@ -1,545 +1,1786 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8" />
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0A0F14">
+<!-- PANJI Portal v4 · 2026-09-08 corrections -->
+<title>盘迹｜看一眼就知道怎么用</title>
+<meta name="description" content="盘迹：从全市场发现变化，理解个股状态，把值得继续看的股票留在自选并持续观察。">
+<link rel="icon" href="/landing/assets/images/logo_symbol_128.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,700;12..96,800&family=JetBrains+Mono:wght@400;600&display=swap">
+<meta property="og:type" content="website">
+<meta property="og:title" content="盘迹｜看一眼就知道怎么用">
+<meta property="og:description" content="盘迹：从全市场发现变化，理解个股状态，把值得继续看的股票留在自选并持续观察。">
+<meta property="og:image" content="/landing/assets/images/poster_img1.webp">
+<meta name="twitter:card" content="summary_large_image">
+<style>
+:root{
+  --bg:#0A0F14;
+  --bg-2:#070B0F;
+  --panel:#111A23;
+  --panel2:#161F29;
+  --panel3:#1A2433;
+  --border:#263440;
+  --border-soft:#1D2832;
+  --text:#F2F6F8;
+  --muted:#98A1B3;
+  --dim:#8493A0;
+  --brand:#00F6C2;
+  --brand-hover:#39F5CF;
+  --brand-deep:#00B28A;
+  --info:#3882F6;
+  --warning:#F59E0B;
+  --up:#FF4D4F;
+  --down:#22C55E;
+  --shadow:0 18px 55px rgba(0,0,0,.32);
+  --radius:12px;
+  --ease:cubic-bezier(.22,.61,.36,1);
+  --sans:"Bricolage Grotesque","MiSans","HarmonyOS Sans SC","PingFang SC","Noto Sans CJK SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{
+  margin:0;
+  background:
+    radial-gradient(circle at 82% 6%,rgba(0,246,194,.11),transparent 30rem),
+    radial-gradient(circle at 10% 102%,rgba(56,130,246,.055),transparent 26rem),
+    linear-gradient(rgba(255,255,255,.018) 1px,transparent 1px) 0 0/46px 46px,
+    linear-gradient(90deg,rgba(255,255,255,.018) 1px,transparent 1px) 0 0/46px 46px,
+    var(--bg);
+  color:var(--text);
+  font-family:var(--sans);
+  -webkit-font-smoothing:antialiased;
+}
+button,input,select{font:inherit}
+button{cursor:pointer}
+a{color:inherit;text-decoration:none}
+.container{width:min(1180px,calc(100vw - 42px));margin:auto}
+.section{padding:98px 0;border-top:1px solid rgba(255,255,255,.045)}
+h1,h2,h3,p{margin-top:0}
+h1,h2,h3{letter-spacing:-.035em}
+.section-copy{max-width:760px}
+.section-copy h2{font-size:clamp(35px,4.3vw,58px);line-height:1.08;margin:0 0 16px}
+.section-copy p{color:var(--muted);font-size:16px;line-height:1.8;margin:0}
+.mini-label{font-size:12px;color:var(--brand);font-weight:750;letter-spacing:.1em;margin-bottom:14px}
+.muted{color:var(--muted)}
+.dim{color:var(--dim)}
+.btn{
+  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+  min-height:40px;padding:0 15px;border:1px solid var(--border);
+  border-radius:9px;background:var(--panel2);color:var(--text);font-size:13px;font-weight:700;
+  transition:.16s ease;
+}
+.btn:hover{border-color:#405363;transform:translateY(-1px)}
+.btn-primary{background:var(--brand);border-color:var(--brand);color:#04231b}
+.btn-ghost{background:transparent}
+.icon-btn{width:34px;height:34px;padding:0;border-radius:8px}
+.site-header{
+  position:sticky;top:0;z-index:50;
+  background:rgba(10,15,20,.84);backdrop-filter:blur(18px);
+  border-bottom:1px solid rgba(255,255,255,.055)
+}
+.header-inner{height:64px;display:flex;align-items:center;gap:24px}
+.brand{display:flex;align-items:center;gap:10px;min-width:max-content}
+.brand img{width:30px;height:30px;border-radius:8px}
+.brand strong{font-size:17px}
+.brand small{font-size:11px;color:var(--dim);margin-left:3px}
+.site-nav{display:flex;gap:22px;margin-left:auto;color:#aab5c3;font-size:13px}
+.site-nav a:hover{color:var(--text)}
+.header-actions{display:flex;gap:8px}
+.mobile-note{display:none}
 
-  <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1, viewport-fit=cover"
-  />
+/* hero */
+.hero{padding:78px 0 82px;min-height:calc(100vh - 64px);display:flex;align-items:center}
+.hero-grid{display:grid;grid-template-columns:.82fr 1.18fr;gap:55px;align-items:center}
+.hero h1{font-size:clamp(48px,5.5vw,76px);line-height:1.04;margin:0 0 24px;font-weight:820}
+.hero h1 em{font-style:normal;color:var(--brand)}
+.hero p{color:#A9B3C1;font-size:17px;line-height:1.85;max-width:600px;margin-bottom:28px}
+.hero-actions{display:flex;gap:10px;flex-wrap:wrap}
+.hero-proof{display:flex;gap:18px;flex-wrap:wrap;margin-top:27px;color:var(--dim);font-size:11px}
+.hero-proof span::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--brand);margin-right:7px;vertical-align:1px}
+.hero-demo{
+  border:1px solid var(--border);border-radius:15px;background:#081017;box-shadow:var(--shadow);overflow:hidden;
+  transform:perspective(1300px) rotateY(-2deg);
+}
+.demo-topbar{height:45px;padding:0 10px;display:flex;align-items:center;gap:11px;background:#101920;border-bottom:1px solid var(--border)}
+.mini-brand{display:flex;align-items:center;gap:6px;font-size:10px;font-weight:800}
+.mini-brand img{width:22px;height:22px;border-radius:6px}
+.hero-scope{display:flex;gap:3px}
+.hero-scope button{border:0;background:transparent;color:#7E8C99;font-size:9px;padding:6px 8px;border-radius:5px}
+.hero-scope button.active{background:var(--panel3);color:var(--brand)}
+.hero-search{margin-left:auto;width:190px;height:31px;border:1px solid var(--border);background:#091117;border-radius:6px;color:#C8D2DA;padding:0 10px;font-size:11px}
+.hero-clock{font-size:10px;color:#71808D}
+.hero-toolbar{display:grid;grid-template-columns:1.2fr 1fr auto;gap:8px;padding:10px;background:#111A23;border-bottom:1px solid var(--border)}
+.hero-control{height:31px;border:1px solid var(--border);background:#0A1218;color:#9CAAB3;border-radius:6px;padding:0 9px;font-size:10px}
+.hero-demo table{width:100%;border-collapse:collapse;font-size:11px}
+.hero-demo th{background:#111A23;color:#7F8C99;text-align:left;font-weight:600;padding:8px;border-bottom:1px solid var(--border)}
+.hero-demo td{padding:8px;border-bottom:1px solid var(--border-soft);color:#BCC8D0}
+.hero-demo tbody tr:hover{background:rgba(0,246,194,.04)}
+.demo-stock{color:#E4EDF0;font-weight:700}
+.demo-stock small{display:block;color:#63727F;font-size:9px;margin-top:2px}
+.up{color:var(--up)!important}.down{color:var(--down)!important}.brandc{color:var(--brand)!important}
+.hero-star{
+  width:22px;height:22px;border:1px solid rgba(0,246,194,.28);border-radius:5px;background:rgba(0,246,194,.05);color:var(--brand);font-size:11px;
+}
+.hero-star.on{background:rgba(245,158,11,.12);border-color:rgba(245,158,11,.3);color:var(--warning)}
+.hero-demo-foot{display:flex;justify-content:space-between;align-items:center;padding:8px 10px;background:#0E171E;color:#667684;font-size:8px}
+.live-dot{width:5px;height:5px;border-radius:50%;background:var(--brand);display:inline-block;margin-right:5px;box-shadow:0 0 8px var(--brand)}
 
-  <title>盘迹｜股票筛选与状态观察</title>
+/* problem rail */
+.problem-rail{border-top:1px solid var(--border-soft);border-bottom:1px solid var(--border-soft);background:rgba(17,26,35,.5)}
+.problem-grid{display:grid;grid-template-columns:repeat(3,1fr)}
+.problem-item{padding:25px 26px;border-right:1px solid var(--border-soft)}
+.problem-item:last-child{border-right:0}
+.problem-item b{display:block;font-size:15px;margin-bottom:5px}
+.problem-item span{color:var(--muted);font-size:12px}
 
-  <meta
-    name="description"
-    content="盘迹帮助用户从全市场发现趋势、结构、动量、量能和筹码状态变化，并通过自选、盘中监控和飞书推送持续观察。"
-  />
+/* guided workspace */
+.guide-layout{display:grid;grid-template-columns:270px minmax(0,1fr);gap:22px;margin-top:42px;align-items:start}
+.guide-list{position:sticky;top:84px;display:grid;gap:8px}
+.guide-step{
+  width:100%;text-align:left;padding:15px;border:1px solid var(--border);border-radius:10px;
+  background:var(--panel);color:var(--muted);transition:.16s;
+}
+.guide-step:hover{border-color:#38505d}
+.guide-step.active{border-color:rgba(0,246,194,.52);background:rgba(0,246,194,.065)}
+.guide-step .n{display:block;color:var(--brand);font-size:10px;font-family:var(--mono);margin-bottom:5px}
+.guide-step b{display:block;color:var(--text);font-size:14px;margin-bottom:4px}
+.guide-step span{font-size:11px;line-height:1.55}
+.guide-note{margin-top:10px;padding:12px 14px;border-left:2px solid var(--brand);background:rgba(0,246,194,.04);color:#84939F;font-size:11px;line-height:1.65}
+.workspace-shell{border:1px solid var(--border);border-radius:13px;overflow:hidden;background:#091117;box-shadow:var(--shadow);position:relative}
+.app-topbar{height:48px;display:flex;align-items:center;padding:0 12px;gap:12px;background:#101920;border-bottom:1px solid var(--border)}
+.app-brand{display:flex;align-items:center;gap:6px;font-size:11px;font-weight:800}
+.app-brand img{width:23px;height:23px;border-radius:6px}
+.app-nav{display:flex;align-items:center;gap:3px}
+.app-nav button{border:0;background:transparent;color:#7C8C98;padding:7px 10px;border-radius:6px;font-size:10px}
+.app-nav button.active{background:var(--panel3);color:var(--brand)}
+.global-search{margin-left:auto;width:220px;height:31px;border:1px solid var(--border);background:#081017;color:#DCE6EA;border-radius:6px;padding:0 10px;font-size:10px;outline:none}
+.global-search:focus{border-color:var(--brand)}
+.app-status{font-size:8px;color:#71808B;white-space:nowrap}
+.account{position:relative}
+.account button{border:1px solid var(--border);background:#0A1218;color:#A8B5BD;border-radius:7px;height:31px;padding:0 9px;font-size:9px}
+.account-menu{
+  position:absolute;right:0;top:36px;width:138px;padding:5px;border:1px solid var(--border);border-radius:8px;background:var(--panel);box-shadow:var(--shadow);
+  opacity:0;pointer-events:none;transform:translateY(-5px);transition:.15s;z-index:30;
+}
+.account-menu.open{opacity:1;pointer-events:auto;transform:none}
+.account-menu button{width:100%;border:0;background:transparent;text-align:left;color:#9AA9B3}
+.account-menu button:hover{background:var(--panel3);color:var(--text)}
+.market-view,.detail-view,.message-view{display:none}
+.market-view.active,.detail-view.active,.message-view.active{display:block}
+.market-toolbar{
+  display:grid;grid-template-columns:210px 180px auto auto auto;gap:8px;padding:8px 12px;background:var(--panel);border-bottom:1px solid var(--border)
+}
+.market-toolbar select,.market-toolbar input{
+  height:33px;border:1px solid var(--border);background:#081017;color:#AEBAC2;border-radius:6px;padding:0 9px;font-size:10px;outline:none
+}
+.market-toolbar select:focus,.market-toolbar input:focus{border-color:var(--brand)}
+.small-action{height:32px;border:1px solid var(--border);border-radius:6px;background:var(--panel2);color:#98A7B0;font-size:10px;padding:0 9px}
+.small-action:hover{border-color:#3A4C59;color:var(--text)}
+.table-meta{display:flex;align-items:center;justify-content:space-between;padding:7px 12px;background:#0E171E;border-bottom:1px solid var(--border-soft);color:#768591;font-size:10px}
+.table-meta b{color:#D5E0E5}
+.table-wrap{overflow:auto;max-height:430px}
+.market-table{width:100%;min-width:960px;border-collapse:separate;border-spacing:0;font-size:11px}
+.market-table thead{position:sticky;top:0;z-index:2}
+.market-table th{background:var(--panel);color:#84929E;text-align:left;padding:8px 9px;border-bottom:1px solid var(--border);white-space:nowrap;font-weight:600}
+.market-table td{padding:9px;border-bottom:1px solid var(--border-soft);white-space:nowrap;color:#B9C6CE}
+.market-table tbody tr{transition:.1s;cursor:pointer}
+.market-table tbody tr:hover,.market-table tbody tr.selected{background:var(--panel2)}
+.market-table .namecol{position:sticky;left:0;background:#091117;z-index:1}
+.market-table tr:hover .namecol,.market-table tr.selected .namecol{background:var(--panel2)}
+.stock-link{color:var(--info);font-weight:700}
+.stock-link small{display:block;color:#63717D;font-size:8px;margin-top:2px;font-weight:400}
+.watch-toggle{
+  width:24px;height:24px;border:1px solid rgba(0,246,194,.28);border-radius:5px;background:rgba(0,246,194,.05);color:var(--brand);font-size:13px;line-height:1
+}
+.watch-toggle.on{border-color:rgba(245,158,11,.33);background:rgba(245,158,11,.08);color:var(--warning)}
+.state-text{font-size:9px}
+.row-empty{display:none;padding:70px 20px;text-align:center;color:#70808B;font-size:11px}
+.row-empty.show{display:block}
+.workspace-footer{height:31px;display:flex;align-items:center;justify-content:space-between;padding:0 12px;border-top:1px solid var(--border);background:#0E171E;color:#687783;font-size:8px}
+.demo-banner{
+  position:absolute;top:56px;right:10px;z-index:20;padding:5px 8px;border:1px solid rgba(245,158,11,.28);border-radius:6px;background:rgba(245,158,11,.08);color:#DDBE74;font-size:8px
+}
+.focus-ring{box-shadow:inset 0 0 0 2px var(--brand)!important;background:rgba(0,246,194,.055)!important}
 
-  <meta
-    name="theme-color"
-    content="#0A0F14"
-  />
+/* detail */
+.detail-head{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#111A23;border-bottom:1px solid var(--border)}
+.back-btn{height:29px;border:1px solid var(--border);border-radius:6px;background:#0A1218;color:#9CAAB4;font-size:9px;padding:0 9px}
+.quote-main{display:flex;align-items:baseline;gap:8px}
+.quote-main b{font-size:16px}
+.quote-code{color:#697885;font-size:9px;font-family:var(--mono)}
+.quote-price{margin-left:auto;font-size:16px;font-weight:800}
+.quote-change{font-size:10px}
+.quote-strip{display:flex;gap:15px;padding:6px 12px;background:#0E171E;border-bottom:1px solid var(--border-soft);color:#798994;font-size:8px}
+.chart-toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:8px 10px;background:#0E171E;border-bottom:1px solid var(--border)}
+.toolbar-label{color:#667784;font-size:8px}
+.tf-group,.layer-group{display:flex;gap:4px}
+.tf-btn,.layer-btn{height:25px;border:1px solid var(--border);border-radius:5px;background:#0A1218;color:#84949F;padding:0 7px;font-size:8px}
+.tf-btn.active,.layer-btn.active{border-color:rgba(0,246,194,.45);color:#C5FFF3;background:rgba(0,246,194,.07)}
+.detail-workspace{display:grid;grid-template-columns:minmax(0,1fr) 290px;min-height:425px}
+.chart-pane{min-width:0;background:#071015;border-right:1px solid var(--border);position:relative}
+.chart-svg{width:100%;height:355px;display:block}
+.chart-status{height:32px;padding:0 10px;display:flex;align-items:center;gap:13px;border-top:1px solid var(--border-soft);color:#657581;font-size:8px}
+.fp-panel{background:#0D161D;padding:10px;overflow:auto}
+.fp-head{display:flex;align-items:center;justify-content:space-between;padding-bottom:8px;border-bottom:1px solid var(--border);font-size:10px}
+.fp-head b{font-size:11px}.fp-head span{color:#70808A;font-size:8px}
+.state-ribbon{display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin:8px 0}
+.ribbon{padding:6px 4px;text-align:center;border:1px solid var(--border);border-radius:5px;background:var(--panel2);font-size:8px}
+.ribbon.pos{color:#FF8B8D}.ribbon.neg{color:#6BDB96}.ribbon.neu{color:#AAB5BC}
+.volume-level{padding:8px;border:1px solid var(--border);border-radius:7px;background:#101920;margin-bottom:7px}
+.volume-level-head{display:flex;justify-content:space-between;color:#87959F;font-size:8px;margin-bottom:7px}
+.water{height:5px;background:#222E38;border-radius:4px;overflow:hidden}.water i{display:block;height:100%;width:72%;background:var(--brand)}
+.fp-card{padding:8px;border:1px solid var(--border);border-radius:7px;background:#101920;margin-top:7px}
+.fp-card h4{font-size:9px;margin:0 0 7px;color:#D7E2E6}
+.fp-row{display:flex;justify-content:space-between;gap:8px;padding:4px 0;border-top:1px solid var(--border-soft);color:#75848F;font-size:8px}
+.fp-row:first-of-type{border-top:0}.fp-row b{color:#D2DEE3}
+.event-chip{display:inline-flex;margin:2px 2px 0 0;padding:3px 5px;border-radius:4px;background:rgba(0,246,194,.065);border:1px solid rgba(0,246,194,.18);color:#A6EBDD;font-size:7px}
 
-  <link
-    rel="stylesheet"
-    href="/landing/assets/css/landing.css"
-  />
+/* message view */
+.message-page{padding:12px;background:#091117;min-height:430px}
+.message-title{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:10px}
+.message-title h3{font-size:16px;margin-bottom:4px}.message-title p{font-size:9px;color:#75848F;margin:0}
+.message-list{display:grid;gap:7px}
+.message-item{display:grid;grid-template-columns:34px 1fr auto;gap:9px;align-items:center;padding:10px;border:1px solid var(--border);border-radius:8px;background:#0F181F}
+.msg-icon{width:34px;height:34px;border-radius:8px;display:grid;place-items:center;background:rgba(0,246,194,.08);color:var(--brand);font-weight:800;font-size:10px}
+.message-item strong{display:block;font-size:10px;margin-bottom:3px}.message-item p{font-size:8px;color:#768690;margin:0}.message-item time{font-size:7px;color:#5F707C}
+.message-new{border-color:rgba(0,246,194,.28);background:rgba(0,246,194,.03)}
+
+/* how-to-use */
+.quickstart-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-top:38px}
+.quick-card{padding:20px;border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+.quick-card .num{width:27px;height:27px;border-radius:7px;display:grid;place-items:center;background:rgba(0,246,194,.1);color:var(--brand);font-family:var(--mono);font-size:10px;margin-bottom:17px}
+.quick-card h3{font-size:16px;margin-bottom:6px}.quick-card p{color:var(--muted);font-size:11px;line-height:1.65;margin:0}
+.howto-grid{display:grid;grid-template-columns:1.05fr .95fr;gap:26px;margin-top:50px;align-items:start}
+.howto-list{display:grid;gap:1px;border-top:1px solid var(--border)}
+.howto-item{border-bottom:1px solid var(--border)}
+.howto-item button{width:100%;padding:17px 0;border:0;background:transparent;color:var(--text);display:flex;justify-content:space-between;text-align:left;font-weight:700;font-size:14px}
+.howto-item button span{color:var(--dim)}
+.howto-body{max-height:0;overflow:hidden;transition:max-height .25s ease;color:var(--muted);font-size:12px;line-height:1.75}
+.howto-item.open .howto-body{max-height:180px;padding-bottom:17px}
+.howto-aside{padding:22px;border:1px solid rgba(0,246,194,.18);border-radius:10px;background:rgba(0,246,194,.035)}
+.howto-aside h3{font-size:20px;margin-bottom:9px}.howto-aside p{color:#8999A5;font-size:12px;line-height:1.7}
+.route{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin-top:18px}
+.route span{padding:7px 9px;border:1px solid var(--border);border-radius:6px;background:#0B141B;color:#AEBAC2;font-size:10px}.route i{font-style:normal;color:var(--brand)}
+
+/* boundaries/faq */
+.boundary-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:32px}
+.boundary-card{padding:22px;border:1px solid var(--border);border-radius:10px;background:var(--panel)}
+.boundary-card h3{font-size:17px;margin-bottom:13px}
+.boundary-card ul{list-style:none;padding:0;margin:0;display:grid;gap:9px}
+.boundary-card li{padding-left:17px;position:relative;color:var(--muted);font-size:11px}
+.boundary-card li::before{content:"";position:absolute;left:0;top:.65em;width:6px;height:6px;border-radius:50%;background:var(--brand)}
+.boundary-card.no li::before{background:#667885}
+.faq{margin-top:45px;border-top:1px solid var(--border)}
+.faq-item{border-bottom:1px solid var(--border)}
+.faq-q{width:100%;border:0;background:transparent;color:var(--text);padding:18px 0;display:flex;justify-content:space-between;text-align:left;font-weight:700;font-size:14px}
+.faq-a{max-height:0;overflow:hidden;transition:max-height .25s;color:var(--muted);font-size:12px;line-height:1.75}
+.faq-item.open .faq-a{max-height:160px;padding-bottom:18px}
+.cta{margin-top:48px;padding:34px;border:1px solid rgba(0,246,194,.18);border-radius:12px;background:linear-gradient(135deg,rgba(0,246,194,.055),rgba(255,255,255,.01));display:flex;align-items:center;justify-content:space-between;gap:24px}
+.cta h3{font-size:27px;margin-bottom:5px}.cta p{margin:0;color:var(--muted);font-size:12px}
+footer{padding:28px 0 35px;border-top:1px solid var(--border-soft);color:#64747F;font-size:10px}
+.footer-inner{display:flex;justify-content:space-between;gap:20px}
+
+/* responsive */
+@media(max-width:1000px){
+  .site-nav{display:none}
+  .hero-grid{grid-template-columns:1fr}.hero{min-height:auto}
+  .hero-demo{transform:none}
+  .guide-layout{grid-template-columns:1fr}.guide-list{position:static;grid-template-columns:repeat(5,1fr)}
+  .guide-step{padding:11px}.guide-step span{display:none}
+  .detail-workspace{grid-template-columns:1fr}.fp-panel{border-top:1px solid var(--border)}
+  .quickstart-grid{grid-template-columns:repeat(2,1fr)}
+}
+@media(max-width:720px){
+  .container{width:calc(100vw - 26px)}
+  .header-actions .btn-ghost{display:none}
+  .brand small{display:none}
+  .hero{padding:58px 0 64px}.hero h1{font-size:43px}.hero p{font-size:15px}
+  .problem-grid{grid-template-columns:1fr}.problem-item{border-right:0;border-bottom:1px solid var(--border-soft)}
+  .problem-item:last-child{border-bottom:0}
+  .guide-list{grid-template-columns:1fr 1fr}.guide-step:last-child{grid-column:1/-1}
+  .workspace-shell{overflow-x:auto}.app-topbar,.market-view,.detail-view,.message-view{min-width:760px}
+  .quickstart-grid{grid-template-columns:1fr}
+  .howto-grid,.boundary-grid{grid-template-columns:1fr}
+  .cta{align-items:flex-start;flex-direction:column}
+  .footer-inner{flex-direction:column}
+  .mobile-note{display:block;color:var(--dim);font-size:9px;margin-top:8px}
+}
+@media(prefers-reduced-motion:reduce){*{scroll-behavior:auto!important;transition:none!important}}
+
+/* ===== V3 incremental additions ===== */
+.site-nav{gap:18px}
+.filter-drawer{
+  display:none;padding:10px 12px;border-bottom:1px solid var(--border);
+  background:linear-gradient(90deg,rgba(0,246,194,.045),transparent 55%),#0D161D
+}
+.filter-drawer.open{display:block}
+.filter-title{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:9px}
+.filter-title b{font-size:10px}.filter-title span{display:block;color:#73848F;font-size:8px;margin-top:2px}
+.condition-list{display:grid;gap:6px}
+.condition-row{display:grid;grid-template-columns:170px 82px 150px 1fr;gap:6px;align-items:center}
+.condition-box{height:29px;display:flex;align-items:center;padding:0 8px;border:1px solid var(--border);border-radius:6px;background:#081017;color:#B7C4CC;font-size:8px}
+.condition-box.key{font-family:var(--mono);color:#9DDCCF}
+.condition-explain{color:#667783;font-size:8px}
+.filter-presets{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px}
+.preset-btn{height:29px;padding:0 9px;border:1px solid var(--border);border-radius:6px;background:var(--panel2);color:#9EADB6;font-size:8px}
+.preset-btn.active{border-color:rgba(0,246,194,.45);background:rgba(0,246,194,.07);color:#B7F6E9}
+.filter-correction{margin-top:8px;padding:8px 10px;border-left:2px solid var(--warning);background:rgba(245,158,11,.05);color:#A99B78;font-size:8px;line-height:1.55}
+.market-view{position:relative}
+.market-table-area{display:grid;grid-template-columns:minmax(0,1fr) 0;transition:grid-template-columns .25s}
+.market-table-area.context-open{grid-template-columns:minmax(0,1fr) 250px}
+.market-context{overflow:hidden;min-width:0;border-left:1px solid var(--border);background:#0D161D;opacity:0;transform:translateX(8px);transition:.25s}
+.context-open .market-context{opacity:1;transform:none}
+.context-head{display:flex;align-items:center;justify-content:space-between;height:34px;padding:0 9px;border-bottom:1px solid var(--border);font-size:9px}
+.context-head button{width:24px;height:24px;border:1px solid var(--border);background:#111A23;color:#84939E;border-radius:5px}
+.context-body{padding:9px}
+.context-name{font-size:12px;font-weight:800;margin-bottom:2px}.context-code{font-family:var(--mono);color:#667783;font-size:8px}
+.context-ribbon{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin:9px 0}
+.context-tag{padding:6px;border:1px solid var(--border);border-radius:5px;background:#111A23;color:#A6B4BD;font-size:8px}
+.context-fact{display:flex;justify-content:space-between;gap:7px;padding:6px 0;border-top:1px solid var(--border-soft);font-size:8px;color:#71828D}
+.context-fact b{color:#D4E0E5}
+
+/* Field dictionary */
+.field-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:28px 0 14px}
+.field-search{flex:1;min-width:250px;height:38px;border:1px solid var(--border);background:#081017;color:var(--text);border-radius:8px;padding:0 11px;outline:none}
+.field-search:focus{border-color:var(--brand)}
+.field-toggle{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+.field-toggle button{height:36px;border:0;border-right:1px solid var(--border);padding:0 12px;background:#101920;color:#80919C;font-size:10px}
+.field-toggle button:last-child{border-right:0}.field-toggle button.active{background:rgba(0,246,194,.08);color:var(--brand)}
+.field-count{color:#71828D;font-size:10px}
+.field-groups{border-top:1px solid var(--border)}
+.field-group{border-bottom:1px solid var(--border)}
+.field-group-head{width:100%;display:grid;grid-template-columns:1fr auto auto;gap:12px;align-items:center;padding:16px 0;border:0;background:transparent;color:var(--text);text-align:left}
+.field-group-head b{font-size:15px}.field-group-head small{color:#6D7F8B;font-size:9px}.field-group-head span{color:var(--brand);font-size:15px}
+.field-group-body{display:none;padding-bottom:14px}.field-group.open .field-group-body{display:block}
+.field-table-wrap{overflow:auto;border:1px solid var(--border);border-radius:8px}
+.field-table{width:100%;min-width:920px;border-collapse:collapse;font-size:10px}
+.field-table th{padding:9px;text-align:left;background:#111A23;color:#82919C;border-bottom:1px solid var(--border);font-weight:600}
+.field-table td{padding:10px 9px;vertical-align:top;border-bottom:1px solid var(--border-soft);color:#AEBBC3;line-height:1.6}
+.field-table tr:last-child td{border-bottom:0}.field-key{font-family:var(--mono);color:#79C8B8!important;white-space:nowrap}.field-title-cell b{display:block;color:#E1EBEE;font-size:10px}.core-badge{display:inline-block;margin-top:4px;padding:2px 5px;border:1px solid rgba(0,246,194,.18);border-radius:4px;color:#8EDBCB;font-size:7px}
+.field-tip{margin:13px 0 0;padding:12px 14px;border-left:2px solid var(--brand);background:rgba(0,246,194,.035);color:#82929D;font-size:10px;line-height:1.7}
+
+/* Feishu */
+.feishu-grid{display:grid;grid-template-columns:1.08fr .92fr;gap:18px;margin-top:38px;align-items:stretch}
+.notify-app{border:1px solid var(--border);border-radius:12px;background:#091117;overflow:hidden;box-shadow:var(--shadow)}
+.notify-top{height:44px;padding:0 11px;display:flex;align-items:center;justify-content:space-between;background:#101920;border-bottom:1px solid var(--border)}
+.notify-top b{font-size:10px}.notify-top span{color:#6E7F8A;font-size:8px}
+.notify-page{padding:12px}
+.notify-title{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:10px}
+.notify-title h3{font-size:15px;margin:0 0 3px}.notify-title p{font-size:8px;color:#70818D;margin:0}
+.channel-card-v3{display:grid;grid-template-columns:38px 1fr auto;gap:10px;align-items:center;padding:11px;border:1px solid var(--border);border-radius:8px;background:#0D161D}
+.feishu-logo{width:38px;height:38px;display:grid;place-items:center;border-radius:9px;background:rgba(56,130,246,.11);color:#9BC6FF;font-weight:900;font-size:10px}
+.channel-card-v3 strong{display:block;font-size:10px;margin-bottom:3px}.channel-card-v3 small{color:#71828D;font-size:8px}
+.channel-status{padding:4px 7px;border-radius:999px;background:rgba(152,161,179,.09);color:#8A99A3;font-size:7px}
+.channel-status.saved{background:rgba(245,158,11,.09);color:#D8B66A}.channel-status.enabled{background:rgba(0,246,194,.08);color:#9DEDDD}
+.channel-actions{display:flex;gap:6px;margin-top:9px;flex-wrap:wrap}
+.channel-actions button{height:29px;padding:0 9px;border:1px solid var(--border);border-radius:6px;background:#111A23;color:#9EADB6;font-size:8px}
+.channel-actions button.primary{border-color:rgba(0,246,194,.35);background:rgba(0,246,194,.06);color:#A9F0E1}
+.setup-flow{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:12px}
+.setup-step-v3{padding:8px;border:1px solid var(--border);border-radius:7px;background:#0D161D}.setup-step-v3 b{display:block;color:#D7E2E6;font-size:8px;margin-bottom:3px}.setup-step-v3 span{color:#70818C;font-size:7px;line-height:1.45}
+.feishu-preview{border:1px solid var(--border);border-radius:12px;background:#0B141B;padding:17px;display:flex;flex-direction:column}
+.preview-kicker{color:#6F808B;font-size:8px}.push-card{margin:auto 0;border:1px solid #2A3A46;border-radius:10px;background:#111A23;overflow:hidden;box-shadow:var(--shadow)}
+.push-head{padding:12px 13px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center}.push-head b{font-size:11px}.push-head span{font-size:7px;color:#72828E}
+.push-body{padding:12px}.push-stock{font-size:17px;font-weight:850;margin-bottom:2px}.push-sub{color:#73848F;font-size:8px;margin-bottom:10px}
+.push-preset{display:inline-block;padding:4px 6px;border-radius:5px;background:rgba(0,246,194,.07);color:#A1EADD;border:1px solid rgba(0,246,194,.16);font-size:8px;margin-bottom:9px}
+.push-row{display:flex;justify-content:space-between;gap:10px;padding:7px 0;border-top:1px solid var(--border-soft);font-size:8px;color:#758691}.push-row b{color:#D6E1E6}
+.push-foot{padding:10px 12px;background:#0D161D;color:#6D7E89;font-size:7px;border-top:1px solid var(--border)}
+.feishu-modal{display:none;margin-top:9px;padding:10px;border:1px solid #31424F;border-radius:8px;background:#0A131A}.feishu-modal.open{display:block}
+.form-row{margin-top:7px}.form-row:first-child{margin-top:0}.form-row label{display:block;margin-bottom:4px;color:#84939D;font-size:8px}.form-row input{width:100%;height:31px;border:1px solid var(--border);border-radius:6px;background:#081017;color:#D8E4E8;padding:0 8px;font-size:8px}
+.notify-toast{opacity:0;transform:translateY(-4px);transition:.18s;margin-top:8px;padding:8px 9px;border:1px solid rgba(0,246,194,.25);border-radius:7px;background:rgba(0,246,194,.05);color:#A7EBDD;font-size:8px}.notify-toast.show{opacity:1;transform:none}
+
+/* Contact */
+.contact-section{padding:74px 0;border-top:1px solid var(--border-soft);background:linear-gradient(180deg,transparent,rgba(0,246,194,.025))}
+.contact-card{display:grid;grid-template-columns:1fr 260px;gap:36px;align-items:center;padding:30px;border:1px solid var(--border);border-radius:12px;background:#111A23}
+.contact-card h2{font-size:34px;margin-bottom:10px}.contact-card p{color:var(--muted);font-size:13px;line-height:1.8;max-width:650px}
+.contact-points{display:grid;gap:7px;margin-top:18px;color:#A6B3BC;font-size:11px}.contact-points span::before{content:"";display:inline-block;width:5px;height:5px;border-radius:50%;background:var(--brand);margin-right:8px;vertical-align:2px}
+.qq-shot{width:100%;aspect-ratio:981/1728;object-fit:contain;border-radius:10px;border:1px solid #303C47;background:#25252A}
+@media(max-width:1000px){.guide-list{grid-template-columns:repeat(3,1fr)}.feishu-grid{grid-template-columns:1fr}.contact-card{grid-template-columns:1fr 220px}}
+@media(max-width:720px){
+  .condition-row{grid-template-columns:1fr 72px 120px}.condition-explain{grid-column:1/-1}
+  .market-table-area,.market-table-area.context-open{grid-template-columns:minmax(0,1fr) 0}
+  .market-toolbar{overflow-x:auto;white-space:nowrap}
+  .field-tools{align-items:stretch}.field-search{min-width:100%}
+  .setup-flow{grid-template-columns:1fr}.contact-card{grid-template-columns:1fr}.qq-shot{max-width:260px;margin:auto}
+}
+
+
+/* v4 corrections: image notification + cropped QR + Chinese-first labels */
+.feishu-image-preview{justify-content:flex-start}
+.image-delivery-flow{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin:12px 0 14px;color:#7F919D;font-size:8px}
+.image-delivery-flow span{padding:5px 7px;border:1px solid var(--border);border-radius:999px;background:#0D161D;color:#AEBBC3}
+.image-delivery-flow i{font-style:normal;color:var(--brand)}
+.feishu-shot-wrap{width:min(100%,430px);margin:0 auto;border:1px solid #2A3A46;border-radius:12px;padding:7px;background:#050A0D;box-shadow:var(--shadow)}
+.feishu-shot{display:block;width:100%;height:auto;border-radius:8px}
+.feishu-shot-note{display:grid;gap:5px;margin-top:12px;padding:10px 12px;border-left:2px solid var(--brand);background:rgba(0,246,194,.035);font-size:8px;line-height:1.65;color:#7F919D}
+.feishu-shot-note b{color:#CFE7E3;font-size:9px}
+.qq-shot{aspect-ratio:auto;object-fit:contain;background:#25252A;padding:0}
+.xueqiu-note{margin-top:18px;padding:12px 14px;border:1px solid rgba(0,246,194,.18);border-radius:8px;background:rgba(0,246,194,.045);color:#AFC4C1;font-size:12px;line-height:1.6}
+.xueqiu-note b{color:#E4F7F3;font-size:13px}
+.field-table{min-width:760px}
+
+
+/* ===== V4.1 Feishu HTML poster, matching the supplied image-message layout ===== */
+.poster-shell{
+  width:min(100%,520px);margin:14px auto 0;aspect-ratio:1440/2560;
+  background:#020A0D;border:1px solid #123537;border-radius:8px;overflow:hidden;
+  display:flex;flex-direction:column;box-shadow:0 20px 50px rgba(0,0,0,.42)
+}
+.poster-brand{
+  flex:0 0 6.6%;display:flex;align-items:center;justify-content:space-between;
+  padding:0 4.2%;background:radial-gradient(circle at 88% 30%,rgba(0,246,194,.08),transparent 28%),#020D10
+}
+.poster-brand-left{display:flex;align-items:center;gap:10px;min-width:0}
+.poster-brand-left b{display:block;color:#F1F7F7;font-size:14px;line-height:1.05}
+.poster-brand-left small{display:block;color:#6C8589;font-size:6.5px;margin-top:4px;white-space:nowrap}
+.poster-spark{position:relative;width:24px;height:17px;display:block}
+.poster-spark:before{
+  content:"";position:absolute;left:0;top:9px;width:24px;height:2px;background:#00E7C1;
+  transform:rotate(-24deg);transform-origin:left center
+}
+.poster-spark i{position:absolute;width:4px;height:4px;border-radius:50%;background:#00F0C6}
+.poster-spark i:nth-child(1){left:0;top:11px}.poster-spark i:nth-child(2){left:8px;top:5px}
+.poster-spark i:nth-child(3){left:16px;top:8px}.poster-spark i:nth-child(4){right:0;top:0}
+.poster-mode{
+  padding:7px 9px;border:1px solid rgba(0,246,194,.33);border-radius:999px;
+  color:#A9E9DC;font-size:7.5px;white-space:nowrap
+}
+.poster-stockbar{
+  flex:0 0 8%;margin:0 2.7% 1.2%;padding:0 2.5%;border:1px solid #123136;
+  border-radius:10px;background:#06151A;display:flex;align-items:center;justify-content:space-between;gap:8px
+}
+.poster-stockname{display:flex;align-items:baseline;gap:8px}
+.poster-stockname b{font-size:23px;letter-spacing:-1px;color:#F3F8F8}
+.poster-stockname span{font-family:var(--mono);color:#6A828B;font-size:9px}
+.poster-quote{display:grid;grid-template-columns:auto auto auto;align-items:end;gap:8px;text-align:right}
+.poster-quote small{grid-column:1/3;color:#6C848C;font-size:6px;align-self:start}
+.poster-quote strong{grid-column:1/3;color:#FF5B61;font-size:23px;line-height:.95}
+.poster-quote span{
+  grid-row:1/3;grid-column:3;color:#F1F5F5;font-size:16px;padding-left:8px;
+  border-left:1px solid #123136
+}
+.poster-quote em{display:block;color:#789097;font-size:6px;font-style:normal;margin-bottom:3px}
+.poster-chart{
+  flex:1;min-height:0;margin:0 2.4%;border:1px solid #123136;border-radius:10px;
+  overflow:hidden;background:#0D131B
+}
+.poster-chart img{width:100%;height:100%;display:block;object-fit:cover;object-position:center}
+.poster-learn{
+  flex:0 0 12.2%;margin:1.7% 3%;padding:2.2%;border:1px solid #00A996;border-radius:9px;
+  display:flex;align-items:center;gap:14px;
+  background:radial-gradient(circle at 88% 50%,rgba(0,246,194,.10),transparent 34%),#04191A
+}
+.poster-learn img{height:82%;aspect-ratio:1/1;object-fit:cover;border-radius:5px;background:#fff}
+.poster-learn b{display:block;color:#F4F8F8;font-size:13px;margin-bottom:8px}
+.poster-learn span{color:#00E5C0;font-size:8px}
+.poster-learn i{
+  display:inline-grid;place-items:center;width:18px;height:18px;border:1px solid #00B99E;
+  border-radius:50%;font-style:normal;margin-left:7px
+}
+.poster-disclaimer{
+  flex:0 0 3.4%;display:flex;align-items:center;justify-content:center;
+  color:#60777C;font-size:7px
+}
+.poster-caption{
+  width:min(100%,520px);margin:12px auto 0;padding:10px 12px;border-left:2px solid var(--brand);
+  background:rgba(0,246,194,.035);color:#81939D;font-size:9px;line-height:1.65
+}
+.poster-caption b{color:#BFD8D3}
+@media(max-width:720px){
+  .poster-stockname b{font-size:18px}.poster-quote strong{font-size:18px}.poster-learn b{font-size:10px}
+}
+
+
+/* ===== redesign accents (v4_1 base, visual upgrade only) ===== */
+.section{padding:112px 0}
+#demo,#fields{background:rgba(17,26,35,.30)}
+#feishu{background:rgba(0,246,194,.018)}
+.btn-primary{box-shadow:0 8px 22px rgba(0,246,194,.22)}
+.hero-grid>div:first-child{animation:fadeUp .8s var(--ease) both}
+@keyframes fadeUp{from{opacity:0;transform:translateY(18px)}to{opacity:1;transform:none}}
+@media(prefers-reduced-motion:reduce){.hero-grid>div:first-child{animation:none}}
+
+</style>
 </head>
-
 <body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="brand" href="#top">
+      <img src="/landing/assets/images/logo_symbol_128.png" alt="">
+      <strong>盘迹</strong><small>看见市场留下的轨迹</small>
+    </a>
+    <nav class="site-nav">
+      <a href="#demo">看怎么用</a>
+      <a href="#quickstart">第一次使用</a>
+      <a href="#fields">字段字典</a>
+      <a href="#feishu">飞书通知</a>
+      <a href="#faq">常见问题</a>
+      <a href="#contact">邀请码</a>
+    </nav>
+    <div class="header-actions">
+      <a class="btn btn-ghost" href="#demo">体验演示</a>
+      <a class="btn btn-primary" href="/login">登录盘迹</a>
+    </div>
+  </div>
+</header>
 
-  <!-- ========================================
-       HEADER
-  ========================================= -->
-
-  <header class="site-header">
-
-    <div class="container header-inner">
-
-      <a
-        class="brand"
-        href="/"
-        aria-label="盘迹首页"
-      >
-        <img
-          class="brand-logo"
-          src="/landing/assets/images/logo_symbol_128.png"
-          width="44"
-          height="44"
-          alt=""
-          aria-hidden="true"
-        />
-
-        <div class="brand-copy">
-
-          <span class="brand-name">
-            盘迹
-          </span>
-
-          <span class="brand-slogan">
-            看见市场留下的轨迹
-          </span>
-
-        </div>
-      </a>
-
-
-      <nav
-        class="site-nav"
-        aria-label="网站导航"
-      >
-
-        <a href="#capabilities">
-          主要能力
-        </a>
-
-        <a href="#workflow">
-          怎么使用
-        </a>
-
-        <a href="/portal/index.html">
-          使用说明
-        </a>
-
-        <a
-          class="nav-login"
-          href="/login"
-        >
-          登录盘迹
-        </a>
-
-      </nav>
-
+<main id="top">
+<section class="hero">
+  <div class="container hero-grid">
+    <div>
+      <h1>从全市场<em>发现变化</em>，<br>把真正值得看的股票留下来。</h1>
+      <p>盘迹把趋势、结构、动量、量能和筹码状态放进同一个研究流程：先缩小范围，再看懂个股，最后用自选持续观察。页面不复杂，看一遍演示基本就会用。</p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="#demo">30 秒看懂怎么用</a>
+        <a class="btn" href="/login">进入盘迹</a>
+      </div>
+      <div class="hero-proof">
+        <span>全市场筛选</span><span>个股状态研究</span><span>自选持续观察</span><span>消息 / 飞书提醒</span>
+      </div>
     </div>
 
-  </header>
+    <div class="hero-demo" aria-label="盘迹行情交互预览">
+      <div class="demo-topbar">
+        <div class="mini-brand"><img src="/landing/assets/images/logo_symbol_128.png" alt="">盘迹</div>
+        <div class="hero-scope"><button class="active">行情</button><button>自选</button></div>
+        <input class="hero-search" id="heroSearch" placeholder="搜索股票 / 代码">
+        <span class="hero-clock"><i class="live-dot"></i>A股已收盘</span>
+      </div>
+      <div class="hero-toolbar">
+        <select class="hero-control" id="heroIndustry"><option value="">搜索行业关键词</option><option>半导体</option><option>汽车零部件</option><option>电气设备</option></select>
+        <select class="hero-control"><option>概念</option><option>AI 算力</option><option>机器人</option></select>
+        <button class="hero-control" id="heroReset">重置</button>
+      </div>
+      <table>
+        <thead><tr><th>股票</th><th>涨跌</th><th>趋势</th><th>结构</th><th>动量</th><th>筹码</th><th>自选</th></tr></thead>
+        <tbody id="heroRows">
+          <tr data-industry="半导体"><td class="demo-stock">示例科技 A<small>DEMO001</small></td><td class="up">+3.26%</td><td class="up">上行</td><td>结构向上突破</td><td class="up">正向</td><td>核心共识价上方</td><td><button class="hero-star">+</button></td></tr>
+          <tr data-industry="汽车零部件"><td class="demo-stock">示例制造 B<small>DEMO002</small></td><td class="up">+1.18%</td><td>震荡</td><td>内部转强</td><td>释放</td><td>接近核心共识价</td><td><button class="hero-star">+</button></td></tr>
+          <tr data-industry="电气设备"><td class="demo-stock">示例设备 C<small>DEMO003</small></td><td class="down">-0.76%</td><td class="down">下行</td><td>短线修复</td><td class="down">偏弱</td><td>密集区下方</td><td><button class="hero-star">+</button></td></tr>
+        </tbody>
+      </table>
+      <div class="hero-demo-foot"><span>演示数据 · 仅复刻真实产品交互结构</span><span>趋势 · 结构 · 动量 · 量能 · 筹码</span></div>
+    </div>
+  </div>
+</section>
 
+<section class="problem-rail">
+  <div class="container problem-grid">
+    <div class="problem-item"><b>股票太多</b><span>先用行情筛选把全市场缩到真正需要看的范围。</span></div>
+    <div class="problem-item"><b>只看涨跌不够</b><span>进入详情，把价格放回趋势、结构和市场成本中理解。</span></div>
+    <div class="problem-item"><b>关注会丢</b><span>加入自选持续观察，状态重新变化时再回来。</span></div>
+  </div>
+</section>
 
-  <main>
+<section class="section" id="demo">
+  <div class="container">
+    <div class="section-copy">
+      <div class="mini-label">30 秒上手</div>
+      <h2>不用读一套说明书，点一遍就知道怎么用。</h2>
+      <p>下面这个演示按当前 Git 里的真实页面结构重建。左边选择步骤，右边的产品界面会直接切换到相应状态。</p>
+      <div class="mobile-note">手机上产品演示区域可横向滚动。</div>
+    </div>
 
-    <!-- ========================================
-         HERO
-    ========================================= -->
-
-    <section class="hero">
-
-      <div class="container hero-layout">
-
-
-        <div class="hero-copy">
-
-          <h1>
-            先找到变化，
-            <br />
-            再跟进变化。
-          </h1>
-
-          <p class="hero-description">
-            从全市场定位趋势、结构、动量、量能和筹码正在发生变化的股票，
-            把值得继续看的留下，并持续观察盘中状态变化。
-          </p>
-
-          <div class="hero-actions">
-
-            <a
-              class="button button-primary"
-              href="/login"
-            >
-              登录盘迹
-            </a>
-
-            <a
-              class="button button-secondary"
-              href="/portal/index.html"
-            >
-              查看使用说明
-            </a>
-
-          </div>
-
-        </div>
-
-
-        <!--
-          真实产品界面是首屏主视觉。
-          不加假浏览器窗口，不加手机壳，不加 fake dashboard。
-        -->
-
-        <div
-          class="product-visual"
-          aria-label="盘迹实际产品界面"
-        >
-
-          <figure class="market-preview">
-
-            <img
-              src="/landing/assets/images/market-workspace.webp"
-              width="1080"
-              height="549"
-              alt="盘迹全市场行情筛选界面"
-              loading="eager"
-              fetchpriority="high"
-            />
-
-          </figure>
-
-
-          <figure class="monitor-preview">
-
-            <img
-              src="/landing/assets/images/intraday-monitor.webp"
-              width="608"
-              height="1080"
-              alt="盘迹盘中监控界面"
-              loading="eager"
-            />
-
-          </figure>
-
-        </div>
-
+    <div class="guide-layout">
+      <div class="guide-list">
+        <button class="guide-step active" data-step="1"><span class="n">01</span><b>搜索股票</b><span>名称、代码、行业和概念先定位范围。</span></button>
+        <button class="guide-step" data-step="2"><span class="n">02</span><b>条件筛选</b><span>用第一金字塔字段组合成明确条件。</span></button>
+        <button class="guide-step" data-step="3"><span class="n">03</span><b>读状态列</b><span>重点比较趋势、结构、动量、筹码和量能。</span></button>
+        <button class="guide-step" data-step="4"><span class="n">04</span><b>进入详情</b><span>周期和图层可切换，右侧看第一金字塔。</span></button>
+        <button class="guide-step" data-step="5"><span class="n">05</span><b>加入自选</b><span>真正值得继续看的股票才留下。</span></button>
+        <button class="guide-step" data-step="6"><span class="n">06</span><b>变化后再看</b><span>站内消息留痕，飞书把变化推到你面前。</span></button>
+        <div class="guide-note" id="guideNote">先搜索和定位范围。行业使用关键词匹配，概念使用明确选择；不要从全市场逐只翻。</div>
       </div>
 
-    </section>
-
-
-    <!-- ========================================
-         CAPABILITIES
-    ========================================= -->
-
-    <section
-      class="capability-section"
-      id="capabilities"
-    >
-
-      <div class="container">
-
-        <div class="section-heading">
-
-          <h2>
-            从发现，到持续观察
-          </h2>
-
-          <p>
-            盘迹不是让你看更多数据，
-            而是更快缩小需要关注的范围。
-          </p>
-
+      <div class="workspace-shell" id="workspace">
+        <div class="demo-banner">交互演示 · 非真实行情数据</div>
+        <div class="app-topbar">
+          <div class="app-brand"><img src="/landing/assets/images/logo_symbol_128.png" alt="">盘迹</div>
+          <div class="app-nav">
+            <button id="navMarket" class="active">行情</button>
+            <button id="navWatch">自选</button>
+          </div>
+          <input class="global-search" id="globalSearch" placeholder="搜索股票名称或代码">
+          <span class="app-status"><i class="live-dot"></i>A股已收盘 · 15:00</span>
+          <div class="account">
+            <button id="accountBtn">Demo ▾</button>
+            <div class="account-menu" id="accountMenu">
+              <button id="openMessages">消息中心 <span>3</span></button>
+              <button id="openNotifySettings">通知与设置</button>
+            </div>
+          </div>
         </div>
 
-
-        <div class="capability-rail">
-
-
-          <article class="capability-item">
-
-            <span class="capability-number">
-              01
-            </span>
-
-            <div>
-
-              <h3>
-                全市场筛选
-              </h3>
-
-              <p>
-                从所有股票里找到正在发生变化的标的。
-              </p>
-
+        <div class="market-view active" id="marketView">
+          <div class="market-toolbar" id="marketToolbar">
+            <select id="industryFilter">
+              <option value="">搜索行业关键词</option>
+              <option>半导体</option><option>汽车零部件</option><option>有色材料</option><option>医疗服务</option><option>电气设备</option>
+            </select>
+            <select id="conceptFilter">
+              <option value="">概念</option>
+              <option>AI 算力</option><option>机器人</option><option>新材料</option><option>创新药</option><option>电网</option>
+            </select>
+            <button class="small-action" id="openAdvancedFilter">条件筛选</button>
+            <button class="small-action" id="showColumns">列设置</button>
+            <button class="small-action" id="resetFilters">重置</button>
+          </div>
+          <div class="filter-drawer" id="filterDrawer">
+            <div class="filter-title">
+              <div><b>条件筛选 · 第一金字塔字段</b><span>把“想找什么状态”翻译成可以验证的字段条件。</span></div>
+              <button class="small-action" id="closeAdvancedFilter">收起</button>
             </div>
-
-          </article>
-
-
-          <article class="capability-item">
-
-            <span class="capability-number">
-              02
-            </span>
-
-            <div>
-
-              <h3>
-                盘中监控
-              </h3>
-
-              <p>
-                关注新的趋势、结构、动量和量能变化。
-              </p>
-
+            <div class="condition-list">
+              <div class="condition-row">
+                <span class="condition-box key">趋势方向</span>
+                <span class="condition-box">=</span>
+                <span class="condition-box">1 · 上行</span>
+                <span class="condition-explain">当前趋势方向已经确认为上行。</span>
+              </div>
+              <div class="condition-row">
+                <span class="condition-box key">20日量能异常度</span>
+                <span class="condition-box">&gt;</span>
+                <span class="condition-box">2.0</span>
+                <span class="condition-explain">当前成交量高于近20期均值超过 2 个标准差，属于异常放量。</span>
+              </div>
+              <div class="condition-row reversal-only" style="display:none">
+                <span class="condition-box key">趋势持续周期</span>
+                <span class="condition-box">&lt;=</span>
+                <span class="condition-box">3</span>
+                <span class="condition-explain">限制为刚确认的新趋势，避免把持续很久的上行误叫“反转”。</span>
+              </div>
+              <div class="condition-row reversal-only" style="display:none">
+                <span class="condition-box key">结构事件新鲜度</span>
+                <span class="condition-box">&lt;=</span>
+                <span class="condition-box">3</span>
+                <span class="condition-explain">再要求近期出现结构事件，为“疑似反转”增加结构证据。</span>
+              </div>
             </div>
-
-          </article>
-
-
-          <article class="capability-item">
-
-            <span class="capability-number">
-              03
-            </span>
-
-            <div>
-
-              <h3>
-                筹码共识
-              </h3>
-
-              <p>
-                观察成交密集区和市场成本集中位置。
-              </p>
-
+            <div class="filter-presets">
+              <button class="preset-btn active" id="presetBasic">案例 A · 上行 + 异常放量</button>
+              <button class="preset-btn" id="presetReversal">案例 B · 疑似反转放量（增强）</button>
+              <button class="preset-btn" id="clearAdvanced">清除高级条件</button>
             </div>
-
-          </article>
-
-
-          <article class="capability-item">
-
-            <span class="capability-number">
-              04
-            </span>
-
+            <div class="filter-correction"><b>口径修正：</b>仅“方向=1 + 20日量能异常度&gt;2”只能说明<strong>上行趋势 + 异常放量</strong>。它不能单独证明趋势发生了反转。若要更接近“疑似反转放量”，至少再加入趋势新鲜度和结构事件新鲜度。</div>
+          </div>
+          <div class="table-meta"><span>结果 <b id="resultCount">5</b> 只 · 默认展示核心状态列</span><span>排序 / 筛选均作用于完整结果集</span></div>
+          <div class="market-table-area" id="marketTableArea">
             <div>
-
-              <h3>
-                自选持续观察
-              </h3>
-
-              <p>
-                把值得继续看的股票留下持续跟踪。
-              </p>
-
+              <div class="table-wrap">
+                <table class="market-table">
+                  <thead>
+                    <tr>
+                      <th class="namecol">股票</th><th>涨跌幅</th><th>行业</th><th class="status-col">趋势</th><th class="status-col">连续天</th><th class="status-col">20日量能异常度</th><th class="status-col">结构</th><th class="status-col">结构事件</th><th class="status-col">动量</th><th class="status-col">筹码</th><th class="status-col">量能</th><th>自选</th>
+                    </tr>
+                  </thead>
+                  <tbody id="marketBody"></tbody>
+                </table>
+              </div>
+              <div class="row-empty" id="emptyState">没有符合当前筛选条件的演示标的。</div>
             </div>
-
-          </article>
-
-
-          <article class="capability-item">
-
-            <span class="capability-number">
-              05
-            </span>
-
-            <div>
-
-              <h3>
-                飞书即时推送
-              </h3>
-
-              <p>
-                新状态出现后及时把注意力拉回来。
-              </p>
-
-            </div>
-
-          </article>
-
-
+            <aside class="market-context" id="marketContext">
+              <div class="context-head"><b>紧凑状态</b><button id="closeContext">×</button></div>
+              <div class="context-body">
+                <div class="context-name" id="ctxName">示例科技 A</div>
+                <div class="context-code" id="ctxCode">DEMO001</div>
+                <div class="context-ribbon">
+                  <span class="context-tag" id="ctxTrend">趋势 · 上行</span>
+                  <span class="context-tag" id="ctxMomentum">动量 · 正向</span>
+                  <span class="context-tag" id="ctxStructure">结构 · 偏多</span>
+                  <span class="context-tag" id="ctxChip">筹码 · 核心共识价上方</span>
+                </div>
+                <div class="context-fact"><span>趋势连续</span><b id="ctxBars">2 根</b></div>
+                <div class="context-fact"><span>20日量能异常度</span><b id="ctxZ">2.56</b></div>
+                <div class="context-fact"><span>结构事件</span><b id="ctxEvent">向上突破 · 2根前</b></div>
+                <div class="context-fact"><span>提示</span><b>点名称进完整详情</b></div>
+              </div>
+            </aside>
+          </div>
+          <div class="workspace-footer"><span>名称列固定 · 表格可横向滚动</span><span>点击股票名称进入详情</span></div>
         </div>
 
+        <div class="detail-view" id="detailView">
+          <div class="detail-head">
+            <button class="back-btn" id="backMarket">← 返回列表</button>
+            <div class="quote-main"><b id="detailName">示例科技 A</b><span class="quote-code" id="detailCode">DEMO001</span></div>
+            <span class="quote-price up" id="detailPrice">23.48</span><span class="quote-change up" id="detailChange">+3.26%</span>
+          </div>
+          <div class="quote-strip">
+            <span>开 22.86</span><span>高 23.72</span><span>低 22.63</span><span>量比 1.84x</span><span>前复权</span><span>Asia/Shanghai</span>
+          </div>
+          <div class="chart-toolbar" id="chartToolbar">
+            <span class="toolbar-label">周期</span>
+            <div class="tf-group" id="tfGroup">
+              <button class="tf-btn">15m</button><button class="tf-btn">1h</button><button class="tf-btn active">1d</button><button class="tf-btn">1w</button><button class="tf-btn">1mo</button>
+            </div>
+            <span class="toolbar-label">主图</span>
+            <div class="layer-group">
+              <button class="layer-btn active" data-layer="node">筹码共识价</button>
+              <button class="layer-btn active" data-layer="boll">布林带</button>
+              <button class="layer-btn" data-layer="structure">结构</button>
+            </div>
+            <span class="toolbar-label">副图</span>
+            <div class="layer-group">
+              <button class="layer-btn active" data-layer="volume">成交量</button>
+              <button class="layer-btn" data-layer="macd">MACD</button>
+              <button class="layer-btn" data-layer="squeeze">挤压动量</button>
+            </div>
+          </div>
+          <div class="detail-workspace">
+            <div class="chart-pane">
+              <svg class="chart-svg" id="chartSvg" viewBox="0 0 720 355" preserveAspectRatio="none" aria-label="交互式演示K线图"></svg>
+              <div class="chart-status"><span style="color:var(--brand)">● 数据就绪</span><span>图层仅控制显隐</span><span>算法参数不可在这里修改</span></div>
+            </div>
+            <aside class="fp-panel" id="fpPanel">
+              <div class="fp-head"><b>第一金字塔</b><span>演示快照 · 2026-09-08</span></div>
+              <div class="state-ribbon">
+                <span class="ribbon pos">趋势·偏多</span><span class="ribbon pos">结构·偏多</span><span class="ribbon pos">动量·释放</span><span class="ribbon neu">筹码·上方</span>
+              </div>
+              <div class="volume-level"><div class="volume-level-head"><span>量能水位 · 20日</span><b>72%</b></div><div class="water"><i></i></div></div>
+              <div class="fp-card">
+                <h4>趋势</h4>
+                <div class="fp-row"><span>方向</span><b class="up">偏多</b></div>
+                <div class="fp-row"><span>持续</span><b>8 根</b></div>
+                <div class="fp-row"><span>距成本均线</span><b class="up">+4.8%</b></div>
+              </div>
+              <div class="fp-card">
+                <h4>结构</h4>
+                <div class="fp-row"><span>主要结构</span><b class="up">偏多</b></div>
+                <div class="fp-row"><span>短线结构</span><b class="up">偏多</b></div>
+                <div><span class="event-chip">向上突破</span><span class="event-chip">内部</span><span class="event-chip">3 根前</span></div>
+              </div>
+              <div class="fp-card">
+                <h4>动量 / 筹码</h4>
+                <div class="fp-row"><span>挤压状态</span><b>已释放</b></div>
+                <div class="fp-row"><span>布林位置</span><b>0.78</b></div>
+                <div class="fp-row"><span>筹码位置</span><b>核心共识价上方</b></div>
+              </div>
+            </aside>
+          </div>
+        </div>
+
+        <div class="message-view" id="messageView">
+          <div class="message-page">
+            <div class="message-title"><div><h3>消息中心</h3><p>状态变化是事件记录；飞书只是可配置的投递渠道。</p></div><button class="btn" id="backFromMessages">返回行情</button></div>
+            <div class="message-list" id="messageList">
+              <article class="message-item message-new"><div class="msg-icon">变</div><div><strong>示例科技 A · 结构状态变化</strong><p>内部结构出现新事件，已重新进入观察视野。</p></div><time>14:37</time></article>
+              <article class="message-item"><div class="msg-icon">量</div><div><strong>示例制造 B · 量能状态变化</strong><p>20日量能水位进入较高区间。</p></div><time>13:52</time></article>
+              <article class="message-item"><div class="msg-icon">筹</div><div><strong>示例设备 C · 筹码位置变化</strong><p>价格重新进入成交密集区域。</p></div><time>10:18</time></article>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="section" id="quickstart">
+  <div class="container">
+    <div class="section-copy">
+      <div class="mini-label">第一次使用</div>
+      <h2>真正需要记住的流程只有四步。</h2>
+      <p>原来的帮助中心内容较多，但核心使用路径并不复杂。这里把首次使用和日常操作直接并进门户。</p>
+    </div>
+
+    <div class="quickstart-grid">
+      <article class="quick-card"><div class="num">01</div><h3>拿到邀请码</h3><p>使用管理员提供的正式地址和邀请码完成邀请注册。邀请码和账号只供本人使用。</p></article>
+      <article class="quick-card"><div class="num">02</div><h3>登录盘迹</h3><p>登录后看到哪些功能，以账号实际开放的范围为准。行情和自选是日常使用入口。</p></article>
+      <article class="quick-card"><div class="num">03</div><h3>筛选 → 详情</h3><p>先用关键词、行业、概念和状态列缩小范围，再进入个股详情确认上下文。</p></article>
+      <article class="quick-card"><div class="num">04</div><h3>加入自选</h3><p>把值得持续看的股票留下。以后不必重新寻找，状态变化后再回来看。</p></article>
+    </div>
+
+    <div class="howto-grid" id="principle">
+      <div class="howto-list">
+        <div class="howto-item open">
+          <button>行情页怎么用？ <span>−</span></button>
+          <div class="howto-body">顶部全局搜索用于股票名称或代码；行情工作区里再按行业关键词和概念缩小范围。表格中的核心状态列用于比较，不需要一次把所有列都打开。</div>
+        </div>
+        <div class="howto-item">
+          <button>个股详情重点看什么？ <span>＋</span></button>
+          <div class="howto-body">详情页以 K 线研究区为核心。周期可以在 15m / 1h / 1d / 1w / 1mo 之间切换；趋势、筹码共识价、布林带、结构、成交量、MACD、挤压动量都是图层显隐，不会改变底层算法参数。</div>
+        </div>
+        <div class="howto-item">
+          <button>第一金字塔是什么？ <span>＋</span></button>
+          <div class="howto-body">它把趋势、结构、动量、筹码和量能压缩成一个状态面板。重点是描述“现在处于什么状态”，不是给股票打一个综合分，更不是自动生成买卖建议。</div>
+        </div>
+        <div class="howto-item">
+          <button>自选和消息是什么关系？ <span>＋</span></button>
+          <div class="howto-body">加入自选表示你希望继续观察这只股票。后续状态发生变化时，系统产生事件记录；站内消息用于查看历史，飞书可以作为额外通知渠道。</div>
+        </div>
       </div>
 
-    </section>
+      <aside class="howto-aside">
+        <h3>日常只需要这一条路径</h3>
+        <p>不要把盘迹当成一个需要学很多按钮的软件。它更像一个缩小注意力范围的工作流。</p>
+        <div class="route"><span>搜索</span><i>→</i><span>条件筛选</span><i>→</i><span>个股详情</span><i>→</i><span>加入自选</span><i>→</i><span>变化后再看</span></div>
+      </aside>
+    </div>
+  </div>
+</section>
 
 
-    <!-- ========================================
-         WORKFLOW
-    ========================================= -->
+<section class="section" id="fields">
+  <div class="container">
+    <div class="section-copy">
+      <div class="mini-label">第一金字塔 · 字段字典</div>
+      <h2>99 个字段不用背。按维度折叠，需要时再展开。</h2>
+      <p>行情页默认只给你看最重要的一小部分中文状态。下面保留全部 99 个状态项，按照快照、趋势、结构、结构事件、动量、动量事件、筹码和成交量归类。页面只展示通俗中文名称，并说明“它是什么”和“怎么用”。</p>
+    </div>
+    <div class="field-tools">
+      <input class="field-search" id="fieldSearch" placeholder="搜索中文字段或原理，例如：量能异常度 / 结构转折 / 核心共识价">
+      <div class="field-toggle"><button class="active" data-field-mode="core">核心字段</button><button data-field-mode="all">全部 99</button></div>
+      <span class="field-count" id="fieldCount">19 / 99</span>
+    </div>
+    <div class="field-tip"><b>先核心、后审计：</b>日常筛选先用方向、新鲜度、量能和筹码位置等核心字段；只有当你要解释为什么入选、精细比较或排查数据时，再展开全部字段。</div>
+    <div class="field-groups" id="fieldGroups">
+<div class="field-group" data-group="快照">
+  <button class="field-group-head"><div><b>快照</b><small>数据日期、来源和可追溯性。先确认“这是谁、哪一天、哪一批数据”。</small></div><small class="group-visible-count">7 / 7</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_trade_date" data-title="快照交易日" data-core="否">
+<td class="field-title-cell"><b>快照交易日</b></td>
+<td>这组状态快照对应的交易日，是判断数据是否仍然有效的时间基准。</td>
+<td>任何异常状态都先确认它对应哪一天，避免把历史状态误当今天。</td>
+</tr><tr class="field-row" data-key="fp_data_source" data-title="数据来源" data-core="否">
+<td class="field-title-cell"><b>数据来源</b></td>
+<td>标记快照由哪条数据/计算链产生，用于追溯而不是用于选股。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_is_stale" data-title="是否过期" data-core="否">
+<td class="field-title-cell"><b>是否过期</b></td>
+<td>当快照交易日早于系统最新日线交易日时标记为过期。</td>
+<td>若为 是，先确认数据日期，不要继续用旧快照做当前判断。</td>
+</tr><tr class="field-row" data-key="fp_calculated_at" data-title="计算时间" data-core="否">
+<td class="field-title-cell"><b>计算时间</b></td>
+<td>记录快照真正完成计算和写入的时间。</td>
+<td>用于排查数据是否刚更新，以及不同页面状态是否来自同一轮计算。</td>
+</tr><tr class="field-row" data-key="fp_run_id" data-title="快照 run id" data-core="否">
+<td class="field-title-cell"><b>快照 批次编号</b></td>
+<td>批量计算任务的唯一标识，用来定位同一批次的数据。</td>
+<td>主要用于审计和问题定位，普通筛选不需要用它。</td>
+</tr><tr class="field-row" data-key="fp_summary" data-title="金字塔总览" data-core="否">
+<td class="field-title-cell"><b>金字塔总览</b></td>
+<td>把多个维度压缩成一段中文状态摘要，便于快速扫读。</td>
+<td>适合扫读，但最终判断应回到具体字段，避免摘要掩盖维度之间的分歧。</td>
+</tr><tr class="field-row" data-key="fp_chip_available" data-title="筹码是否可用" data-core="否">
+<td class="field-title-cell"><b>筹码是否可用</b></td>
+<td>筹码共识依赖成交量分布数据；该字段说明这一维是否具备可用数据。</td>
+<td>不可用时只忽略筹码维度，不能把缺失解释成中性或无筹码压力。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group open" data-group="趋势">
+  <button class="field-group-head"><div><b>趋势</b><small>当前趋势方向、持续时间、趋势段幅度、斜率和段内资金参与度。</small></div><small class="group-visible-count">18 / 18</small><span>−</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="趋势方向" data-title="趋势方向" data-core="是">
+<td class="field-title-cell"><b>趋势方向</b><span class="core-badge">核心字段</span></td>
+<td>趋势识别后的方向结果。用户界面直接显示上行、下行或震荡。</td>
+<td>先做方向筛选。例如上行可作为候选集合的一层，但不能单独等同于买入信号。</td>
+</tr><tr class="field-row" data-key="趋势连续周期" data-title="趋势连续天数" data-core="是">
+<td class="field-title-cell"><b>趋势连续天数</b><span class="core-badge">核心字段</span></td>
+<td>当前已确认趋势方向连续维持了多少根 K 线。数值越小，方向越新。</td>
+<td>和趋势方向一起用。若上行且连续天数很小，说明方向刚确认；连续很久则更像趋势延续而非“刚反转”。</td>
+</tr><tr class="field-row" data-key="fp_dsa_vwap_dev_pct" data-title="距趋势参考价" data-core="是">
+<td class="field-title-cell"><b>距趋势参考价</b><span class="core-badge">核心字段</span></td>
+<td>当前价相对趋势参考成本价的百分比偏离。</td>
+<td>观察价格离趋势参考成本有多远。偏离过大时要意识到状态可能已经走得较充分。</td>
+</tr><tr class="field-row" data-key="fp_segment_change_pct" data-title="趋势段涨跌" data-core="是">
+<td class="field-title-cell"><b>趋势段涨跌</b><span class="core-badge">核心字段</span></td>
+<td>当前趋势段从起点到当前/终点的累计价格变化。</td>
+<td>用来判断当前趋势段累计移动幅度，和趋势新鲜度结合避免只看方向。</td>
+</tr><tr class="field-row" data-key="fp_segment_slope" data-title="趋势段斜率" data-core="否">
+<td class="field-title-cell"><b>趋势段斜率</b></td>
+<td>对当前趋势段价格路径做线性拟合后的斜率，描述推进速度和方向。</td>
+<td>适合做同一方向股票之间的推进速度比较；不要跨价格尺度机械比较绝对斜率。</td>
+</tr><tr class="field-row" data-key="fp_trend_strength" data-title="趋势强度" data-core="否">
+<td class="field-title-cell"><b>趋势强度</b></td>
+<td>系统对当前趋势段强弱的综合度量；用于相对比较，不等于未来收益概率。</td>
+<td>适合排序/筛选后做相对比较；仍需回到结构、量能确认。</td>
+</tr><tr class="field-row" data-key="fp_segment_start_date" data-title="趋势段起始日" data-core="否">
+<td class="field-title-cell"><b>趋势段起始日</b></td>
+<td>记录“趋势段起始日”对应的交易日期，用于把状态放回时间轴。</td>
+<td>用于核对事件/趋势段发生时间，和新鲜度字段一起确认是否仍有当前意义。</td>
+</tr><tr class="field-row" data-key="fp_segment_end_date" data-title="趋势段结束日" data-core="否">
+<td class="field-title-cell"><b>趋势段结束日</b></td>
+<td>记录“趋势段结束日”对应的交易日期，用于把状态放回时间轴。</td>
+<td>用于核对事件/趋势段发生时间，和新鲜度字段一起确认是否仍有当前意义。</td>
+</tr><tr class="field-row" data-key="fp_segment_start_price" data-title="趋势段起始价" data-core="否">
+<td class="field-title-cell"><b>趋势段起始价</b></td>
+<td>记录“趋势段起始价”对应的价格位置，用于和当前价比较。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_segment_end_price" data-title="趋势段结束价" data-core="否">
+<td class="field-title-cell"><b>趋势段结束价</b></td>
+<td>记录“趋势段结束价”对应的价格位置，用于和当前价比较。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_segment_bars" data-title="趋势持续周期" data-core="否">
+<td class="field-title-cell"><b>趋势持续周期</b></td>
+<td>第一金字塔中的“趋势持续周期”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_segment_volume_ratio" data-title="段量比" data-core="否">
+<td class="field-title-cell"><b>段量比</b></td>
+<td>当前趋势段成交量与前一趋势段成交量的比值。</td>
+<td>大于 1 表示当前趋势段量能高于前段，适合验证当前段是否获得更多参与。</td>
+</tr><tr class="field-row" data-key="fp_segment_amount_ratio" data-title="段额比" data-core="否">
+<td class="field-title-cell"><b>段额比</b></td>
+<td>当前趋势段成交额与前一趋势段成交额的比值。</td>
+<td>和段量比一起看，可区分只是股数放大还是成交金额也同步放大。</td>
+</tr><tr class="field-row" data-key="fp_segment_avg_volume" data-title="段均量" data-core="否">
+<td class="field-title-cell"><b>段均量</b></td>
+<td>对对应阶段取平均，形成“段均量”这一比较基准。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_segment_avg_amount" data-title="段均额" data-core="否">
+<td class="field-title-cell"><b>段均额</b></td>
+<td>对对应阶段取平均，形成“段均额”这一比较基准。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_prev_segment_volume" data-title="前段总量" data-core="否">
+<td class="field-title-cell"><b>前段总量</b></td>
+<td>记录前一阶段的对应值，作为当前阶段的对照组。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_prev_segment_amount" data-title="前段总额" data-core="否">
+<td class="field-title-cell"><b>前段总额</b></td>
+<td>记录前一阶段的对应值，作为当前阶段的对照组。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_vwap_ret_total" data-title="本轮 vwap 收益" data-core="否">
+<td class="field-title-cell"><b>本轮参考价收益</b></td>
+<td>当前这一轮趋势相对参考成本价的累计变化，用来判断趋势已经走了多远。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group" data-group="结构">
+  <button class="field-group-head"><div><b>结构</b><small>主要结构、短线结构及价格相对近期高低点/承接压制区的位置。</small></div><small class="group-visible-count">8 / 8</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_swing_direction" data-title="主要结构方向" data-core="是">
+<td class="field-title-cell"><b>主要结构方向</b><span class="core-badge">核心字段</span></td>
+<td>较大级别的价格摆动结构方向，用来描述主要结构背景。</td>
+<td>把它当作大结构背景；短线事件最好不要脱离主要结构单独解读。</td>
+</tr><tr class="field-row" data-key="fp_internal_direction" data-title="短线结构方向" data-core="是">
+<td class="field-title-cell"><b>短线结构方向</b><span class="core-badge">核心字段</span></td>
+<td>更短周期的内部结构方向，用来观察短线是否先于主要结构发生变化。</td>
+<td>用于捕捉短线先行变化。若它先翻转、主要结构尚未翻转，只能说出现早期变化。</td>
+</tr><tr class="field-row" data-key="fp_structure_alignment" data-title="结构对齐" data-core="是">
+<td class="field-title-cell"><b>结构对齐</b><span class="core-badge">核心字段</span></td>
+<td>比较主要结构和短线结构是否同向；同向代表结构一致，分歧代表不同级别在打架。</td>
+<td>同向可提高状态一致性；分歧时说明多周期结构尚未收敛。</td>
+</tr><tr class="field-row" data-key="fp_active_ob_count" data-title="有效承接/压制区数" data-core="是">
+<td class="field-title-cell"><b>有效承接/压制区数</b><span class="core-badge">核心字段</span></td>
+<td>当前仍未失效的承接/压制区域数量。</td>
+<td>数量多并不自动更好，重点看价格与最近有效区域的关系和新鲜度。</td>
+</tr><tr class="field-row" data-key="fp_trailing_top" data-title="近期高点" data-core="否">
+<td class="field-title-cell"><b>近期高点</b></td>
+<td>结构算法识别出的近期主要摆动高点。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_trailing_bottom" data-title="近期低点" data-core="否">
+<td class="field-title-cell"><b>近期低点</b></td>
+<td>结构算法识别出的近期主要摆动低点。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_distance_to_trailing_top_pct" data-title="距高顶%" data-core="否">
+<td class="field-title-cell"><b>距高顶%</b></td>
+<td>第一金字塔中的“距高顶%”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_distance_to_trailing_bottom_pct" data-title="距低底%" data-core="否">
+<td class="field-title-cell"><b>距低底%</b></td>
+<td>第一金字塔中的“距低底%”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group" data-group="结构事件">
+  <button class="field-group-head"><div><b>结构事件</b><small>结构突破、结构转折、承接/压制区、双顶/双底等最近结构事件及其新鲜度。</small></div><small class="group-visible-count">21 / 21</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_structure_event_type" data-title="最新结构事件" data-core="是">
+<td class="field-title-cell"><b>最新结构事件</b><span class="core-badge">核心字段</span></td>
+<td>最近一次结构事件的类型，例如结构突破、结构转折或承接/压制区事件。</td>
+<td>先识别发生了什么，再看方向、级别和新鲜度，不要只看到一个事件名。</td>
+</tr><tr class="field-row" data-key="fp_structure_event_direction" data-title="结构事件方向" data-core="否">
+<td class="field-title-cell"><b>结构事件方向</b></td>
+<td>最近结构事件偏向多头还是空头。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_structure_event_level" data-title="结构事件级别" data-core="否">
+<td class="field-title-cell"><b>结构事件级别</b></td>
+<td>区分事件发生在主要结构还是短线结构。</td>
+<td>区分主要与短线级别，避免把小级别事件误当成大结构改变。</td>
+</tr><tr class="field-row" data-key="结构事件新鲜度" data-title="结构事件新鲜度" data-core="是">
+<td class="field-title-cell"><b>结构事件新鲜度</b><span class="core-badge">核心字段</span></td>
+<td>事件距离当前有多少根 K 线；越小越新。</td>
+<td>常用于筛选“最近刚发生”的事件，例如 &lt;=3；越旧越不适合作为当前催化。</td>
+</tr><tr class="field-row" data-key="fp_structure_event_date" data-title="结构事件日期" data-core="否">
+<td class="field-title-cell"><b>结构事件日期</b></td>
+<td>记录“结构事件日期”对应的交易日期，用于把状态放回时间轴。</td>
+<td>用于核对事件/趋势段发生时间，和新鲜度字段一起确认是否仍有当前意义。</td>
+</tr><tr class="field-row" data-key="fp_structure_event_price" data-title="结构事件价" data-core="否">
+<td class="field-title-cell"><b>结构事件价</b></td>
+<td>记录“结构事件价”对应的价格位置，用于和当前价比较。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_structure_event_volume_badge" data-title="结构事件量徽标" data-core="否">
+<td class="field-title-cell"><b>结构事件量徽标</b></td>
+<td>把结构事件发生时的量能状态标记为放量、缩量或常态。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_latest_structure_break_direction" data-title="最新结构突破方向" data-core="否">
+<td class="field-title-cell"><b>最新结构突破方向</b></td>
+<td>最近一次结构突破的方向。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_latest_structure_break_freshness" data-title="距结构突破周期" data-core="否">
+<td class="field-title-cell"><b>距结构突破周期</b></td>
+<td>最近一次结构突破距离当前的 K 线数量。</td>
+<td>和结构突破方向一起看；越新的突破越适合作为当前结构确认信息。</td>
+</tr><tr class="field-row" data-key="fp_latest_structure_break_level" data-title="结构突破级别" data-core="否">
+<td class="field-title-cell"><b>结构突破级别</b></td>
+<td>标记“结构突破级别”属于主要级别还是短线级别。</td>
+<td>区分主要与短线级别，避免把小级别事件误当成大结构改变。</td>
+</tr><tr class="field-row" data-key="fp_latest_structure_turn_direction" data-title="最新结构转折方向" data-core="否">
+<td class="field-title-cell"><b>最新结构转折方向</b></td>
+<td>最近一次结构转折的方向。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_latest_structure_turn_freshness" data-title="距结构转折周期" data-core="否">
+<td class="field-title-cell"><b>距结构转折周期</b></td>
+<td>最近一次结构转折距离当前的 K 线数量。</td>
+<td>若要讨论“疑似反转”，较新的结构转折通常比单纯趋势方向更有证据价值。</td>
+</tr><tr class="field-row" data-key="fp_latest_structure_turn_level" data-title="结构转折级别" data-core="否">
+<td class="field-title-cell"><b>结构转折级别</b></td>
+<td>标记“结构转折级别”属于主要级别还是短线级别。</td>
+<td>区分主要与短线级别，避免把小级别事件误当成大结构改变。</td>
+</tr><tr class="field-row" data-key="fp_latest_ob_direction" data-title="承接/压制区方向" data-core="否">
+<td class="field-title-cell"><b>承接/压制区方向</b></td>
+<td>最近承接/压制区域对应的方向属性。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_latest_ob_freshness" data-title="距承接/压制区事件周期" data-core="否">
+<td class="field-title-cell"><b>距承接/压制区事件周期</b></td>
+<td>最近承接/压制区事件距离当前的 K 线数量。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr><tr class="field-row" data-key="fp_latest_ob_high" data-title="承接/压制区上沿" data-core="否">
+<td class="field-title-cell"><b>承接/压制区上沿</b></td>
+<td>第一金字塔中的“承接/压制区上沿”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_latest_ob_low" data-title="承接/压制区下沿" data-core="否">
+<td class="field-title-cell"><b>承接/压制区下沿</b></td>
+<td>第一金字塔中的“承接/压制区下沿”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_latest_eqh_freshness" data-title="距双顶压力周期" data-core="否">
+<td class="field-title-cell"><b>距双顶压力周期</b></td>
+<td>最近双顶压力结构距离当前的 K 线数量。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr><tr class="field-row" data-key="fp_latest_eqh_price" data-title="双顶压力价" data-core="否">
+<td class="field-title-cell"><b>双顶压力价</b></td>
+<td>记录“双顶压力价”对应的价格位置，用于和当前价比较。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_latest_eql_freshness" data-title="距双底支撑周期" data-core="否">
+<td class="field-title-cell"><b>距双底支撑周期</b></td>
+<td>最近双底支撑结构距离当前的 K 线数量。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr><tr class="field-row" data-key="fp_latest_eql_price" data-title="双底支撑价" data-core="否">
+<td class="field-title-cell"><b>双底支撑价</b></td>
+<td>记录“双底支撑价”对应的价格位置，用于和当前价比较。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group" data-group="动量">
+  <button class="field-group-head"><div><b>动量</b><small>挤压、释放、布林带位置与动量数值变化。</small></div><small class="group-visible-count">13 / 13</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_momentum_direction" data-title="动量方向" data-core="是">
+<td class="field-title-cell"><b>动量方向</b><span class="core-badge">核心字段</span></td>
+<td>挤压动量当前的方向性状态，描述动量偏多、偏空或中性。</td>
+<td>与趋势方向同向时看作共振；反向时提示推进可能在减弱或发生切换。</td>
+</tr><tr class="field-row" data-key="fp_squeeze_state" data-title="挤压状态" data-core="是">
+<td class="field-title-cell"><b>挤压状态</b><span class="core-badge">核心字段</span></td>
+<td>描述波动是否处于收窄挤压，以及是否已经从挤压状态释放。</td>
+<td>挤压本身不是方向信号；释放后再看方向、量能和结构。</td>
+</tr><tr class="field-row" data-key="fp_momentum_change" data-title="动量变化值" data-core="否">
+<td class="field-title-cell"><b>动量变化值</b></td>
+<td>当前挤压动量值减去上一周期值；它是数值变化，不应简单等同于“增强/减弱”。</td>
+<td>只表示数值差，最好结合当前/前值及方向，不要用正负号机械解释。</td>
+</tr><tr class="field-row" data-key="fp_sqzmom_value" data-title="挤压动量值" data-core="否">
+<td class="field-title-cell"><b>挤压动量值</b></td>
+<td>挤压动量指标的当前原始值，用于观察方向和强弱变化。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_sqzmom_prev" data-title="上一周期挤压动量值" data-core="否">
+<td class="field-title-cell"><b>上一周期挤压动量值</b></td>
+<td>上一周期挤压动量值，和当前值一起用于判断变化斜率。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_bb_position" data-title="布林带位置" data-core="是">
+<td class="field-title-cell"><b>布林带位置</b><span class="core-badge">核心字段</span></td>
+<td>当前价在布林带上下轨之间的相对位置，规范到约 0–1。</td>
+<td>接近 1 说明价格靠近上轨，接近 0 靠近下轨；它描述位置，不直接表达高估/低估。</td>
+</tr><tr class="field-row" data-key="fp_bb_width" data-title="布林带宽度" data-core="否">
+<td class="field-title-cell"><b>布林带宽度</b></td>
+<td>布林带上下轨之间的相对宽度，用于观察波动收窄或扩张。</td>
+<td>低位收窄可帮助识别挤压环境，快速扩张说明波动已经释放。</td>
+</tr><tr class="field-row" data-key="fp_bb_upper" data-title="布林带上轨" data-core="否">
+<td class="field-title-cell"><b>布林带上轨</b></td>
+<td>记录“布林带上轨”的上边界价格。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_bb_middle" data-title="布林带中轨" data-core="否">
+<td class="field-title-cell"><b>布林带中轨</b></td>
+<td>第一金字塔中的“布林带中轨”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_bb_lower" data-title="布林带下轨" data-core="否">
+<td class="field-title-cell"><b>布林带下轨</b></td>
+<td>记录“布林带下轨”的下边界价格。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_squeeze_avg_volume" data-title="挤压期均量" data-core="否">
+<td class="field-title-cell"><b>挤压期均量</b></td>
+<td>处于挤压阶段时的平均成交量，作为释放后的量能比较基准。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_release_volume_ratio" data-title="释放量比" data-core="否">
+<td class="field-title-cell"><b>释放量比</b></td>
+<td>释放阶段成交量相对挤压期均量的比值。</td>
+<td>&gt;1 说明释放阶段比挤压期更活跃；和动量方向一起看更有意义。</td>
+</tr><tr class="field-row" data-key="fp_momentum_volume_relation" data-title="动量量能关系" data-core="否">
+<td class="field-title-cell"><b>动量量能关系</b></td>
+<td>系统总结动量变化和量能变化是共振还是背离。</td>
+<td>共振时说明动量与参与度同步；背离时需要降低对单一动量信号的信任。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group" data-group="动量事件">
+  <button class="field-group-head"><div><b>动量事件</b><small>最近一次挤压释放或动量扩散，以及事件时间、方向和量能。</small></div><small class="group-visible-count">9 / 9</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_momentum_event_type" data-title="动量事件类型" data-core="是">
+<td class="field-title-cell"><b>动量事件类型</b><span class="core-badge">核心字段</span></td>
+<td>最近一次动量事件，例如挤压释放或动量扩散。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_momentum_event_direction" data-title="动量事件方向" data-core="否">
+<td class="field-title-cell"><b>动量事件方向</b></td>
+<td>最近动量事件的方向。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_momentum_event_freshness" data-title="动量事件新鲜度" data-core="是">
+<td class="field-title-cell"><b>动量事件新鲜度</b><span class="core-badge">核心字段</span></td>
+<td>最近动量事件距离当前的 K 线数量。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr><tr class="field-row" data-key="fp_momentum_event_date" data-title="动量事件日期" data-core="否">
+<td class="field-title-cell"><b>动量事件日期</b></td>
+<td>记录“动量事件日期”对应的交易日期，用于把状态放回时间轴。</td>
+<td>用于核对事件/趋势段发生时间，和新鲜度字段一起确认是否仍有当前意义。</td>
+</tr><tr class="field-row" data-key="fp_momentum_event_price" data-title="动量事件价" data-core="否">
+<td class="field-title-cell"><b>动量事件价</b></td>
+<td>记录“动量事件价”对应的价格位置，用于和当前价比较。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr><tr class="field-row" data-key="fp_momentum_event_volume_badge" data-title="动量事件量徽标" data-core="否">
+<td class="field-title-cell"><b>动量事件量徽标</b></td>
+<td>第一金字塔中的“动量事件量徽标”状态字段，用于描述当前市场状态而不是预测未来。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_latest_sqz_off_freshness" data-title="挤压释放新鲜度" data-core="否">
+<td class="field-title-cell"><b>挤压释放新鲜度</b></td>
+<td>最近一次从挤压状态释放距离当前的 K 线数量。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr><tr class="field-row" data-key="fp_latest_diffusion_direction" data-title="最新扩散方向" data-core="否">
+<td class="field-title-cell"><b>最新扩散方向</b></td>
+<td>最近一次动量扩散的方向。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_latest_diffusion_freshness" data-title="扩散新鲜度" data-core="否">
+<td class="field-title-cell"><b>扩散新鲜度</b></td>
+<td>最近一次动量扩散距今的 周期 数。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group" data-group="筹码">
+  <button class="field-group-head"><div><b>筹码</b><small>成交量分布形成的主要成交密集价、价值区与节点事件；不是股东真实持仓成本。</small></div><small class="group-visible-count">10 / 10</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_chip_state" data-title="筹码状态" data-core="是">
+<td class="field-title-cell"><b>筹码状态</b><span class="core-badge">核心字段</span></td>
+<td>把价格相对成交密集区的位置关系压缩成状态文字。</td>
+<td>先看价格是在密集区上方、内部还是下方，再结合趋势/结构判断。</td>
+</tr><tr class="field-row" data-key="fp_poc_price" data-title="主要成交密集价" data-core="否">
+<td class="field-title-cell"><b>主要成交密集价</b></td>
+<td>历史成交最集中的价格区域中心。它反映成交重心，不代表股东真实持仓成本。</td>
+<td>把 主要成交密集价 当作历史成交重心代理。可观察价格是否围绕其接受、脱离或重新回到密集区。</td>
+</tr><tr class="field-row" data-key="fp_poc_distance_pct" data-title="距主要成交密集价" data-core="是">
+<td class="field-title-cell"><b>距主要成交密集价</b><span class="core-badge">核心字段</span></td>
+<td>当前价格相对 主要成交密集价 的百分比距离。</td>
+<td>距离很小表示价格靠近成交重心；距离很大说明已经明显离开主要成交密集价。</td>
+</tr><tr class="field-row" data-key="fp_peak_node_count" data-title="成交密集区数量" data-core="否">
+<td class="field-title-cell"><b>成交密集区数量</b></td>
+<td>成交量分布中被识别出的主要密集节点数量。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_vah_price" data-title="主要成交区上沿" data-core="否">
+<td class="field-title-cell"><b>主要成交区上沿</b></td>
+<td>主要成交密集区域的上边界。</td>
+<td>用作主要成交区上边界参考；突破或回落都要结合结构和量能。</td>
+</tr><tr class="field-row" data-key="fp_val_price" data-title="主要成交区下沿" data-core="否">
+<td class="field-title-cell"><b>主要成交区下沿</b></td>
+<td>主要成交密集区域的下边界。</td>
+<td>用作主要成交区下边界参考；它不是天然止损/支撑点。</td>
+</tr><tr class="field-row" data-key="fp_node_event_type" data-title="成交密集区事件类型" data-core="否">
+<td class="field-title-cell"><b>成交密集区事件类型</b></td>
+<td>价格与成交密集区发生关系变化时记录的最近事件类型。</td>
+<td>用于补充对应维度的上下文；先看核心字段，需要审计或精细筛选时再展开这一项。</td>
+</tr><tr class="field-row" data-key="fp_node_event_direction" data-title="成交密集区事件方向" data-core="否">
+<td class="field-title-cell"><b>成交密集区事件方向</b></td>
+<td>最近成交密集区事件的方向。</td>
+<td>和趋势、结构、动量其它方向字段做交叉验证，重点看是否一致或刚发生切换。</td>
+</tr><tr class="field-row" data-key="fp_node_event_freshness" data-title="成交密集区事件新鲜度" data-core="否">
+<td class="field-title-cell"><b>成交密集区事件新鲜度</b></td>
+<td>最近成交密集区事件距今的 周期 数。</td>
+<td>适合设成 &lt;=N 做“新鲜事件”筛选，并与事件方向/级别配套使用。</td>
+</tr><tr class="field-row" data-key="fp_node_event_price" data-title="成交密集区事件价" data-core="否">
+<td class="field-title-cell"><b>成交密集区事件价</b></td>
+<td>最近成交密集区事件发生时对应的价格。</td>
+<td>把它当作位置参照，与当前价格距离结合看，不要单独当成机械买卖线。</td>
+</tr></tbody>
+  </table></div></div>
+</div>
+<div class="field-group" data-group="成交量">
+  <button class="field-group-head"><div><b>成交量</b><small>量、额、换手、均量、量比、分位和 Z 分，用不同窗口衡量参与度异常。</small></div><small class="group-visible-count">13 / 13</small><span>＋</span></button>
+  <div class="field-group-body"><div class="field-table-wrap"><table class="field-table">
+    <thead><tr><th style="width:190px">中文字段</th><th>简单原理</th><th>怎么用</th></tr></thead>
+    <tbody><tr class="field-row" data-key="fp_volume_badge" data-title="量能徽标" data-core="是">
+<td class="field-title-cell"><b>量能徽标</b><span class="core-badge">核心字段</span></td>
+<td>将当前量能概括成放量、缩量或常态，便于扫表。</td>
+<td>用于第一眼辨别量能环境，再用量比、分位、Z 分看异常程度。</td>
+</tr><tr class="field-row" data-key="fp_volume" data-title="成交量" data-core="否">
+<td class="field-title-cell"><b>成交量</b></td>
+<td>当前 周期/交易日的原始成交量。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_amount" data-title="成交额" data-core="否">
+<td class="field-title-cell"><b>成交额</b></td>
+<td>当前 周期/交易日的成交金额。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_turnover_rate" data-title="换手率" data-core="否">
+<td class="field-title-cell"><b>换手率</b></td>
+<td>当前成交量相对可流通规模形成的换手比例。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_volume_ma20" data-title="20日均量" data-core="否">
+<td class="field-title-cell"><b>20日均量</b></td>
+<td>最近 20 个周期成交量的平均值，是短期量能基准。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_volume_ma200" data-title="200日均量" data-core="否">
+<td class="field-title-cell"><b>200日均量</b></td>
+<td>最近 200 个周期成交量的平均值，是较长期量能基准。</td>
+<td>用于判断市场参与度和异常程度，最好和价格方向、结构事件一起验证。</td>
+</tr><tr class="field-row" data-key="fp_volume_ratio20" data-title="20日量比" data-core="是">
+<td class="field-title-cell"><b>20日量比</b><span class="core-badge">核心字段</span></td>
+<td>当前成交量 ÷ 20期均量。</td>
+<td>&gt;1 代表高于20期均量；适合做直观量能比较。</td>
+</tr><tr class="field-row" data-key="fp_volume_ratio200" data-title="200日量比" data-core="否">
+<td class="field-title-cell"><b>200日量比</b></td>
+<td>当前成交量 ÷ 200期均量。</td>
+<td>用较长尺度判断当前参与度是否高于长期常态。</td>
+</tr><tr class="field-row" data-key="fp_volume_percentile20" data-title="20日量分位" data-core="否">
+<td class="field-title-cell"><b>20日量分位</b></td>
+<td>当前成交量在最近 20 期中的分位位置，越接近 1 越靠近高位。</td>
+<td>适合筛选近期量能处于高分位的标的，但分位高不代表方向。</td>
+</tr><tr class="field-row" data-key="fp_volume_percentile200" data-title="200日量分位" data-core="否">
+<td class="field-title-cell"><b>200日量分位</b></td>
+<td>当前成交量在最近 200 期中的分位位置。</td>
+<td>用于辨别当前量能在更长历史里的稀缺程度。</td>
+</tr><tr class="field-row" data-key="20日量Z分" data-title="20日量 z 分" data-core="否">
+<td class="field-title-cell"><b>20日量能异常度 分</b></td>
+<td>(当前量 − 20期均量) ÷ 20期成交量标准差；&gt;2 表示相对近 20 期属于显著异常放量。</td>
+<td>案例可设 &gt;2，表示显著异常放量。仅和趋势方向=上行组合，应叫“上行 + 异常放量”，不能直接称为趋势反转。</td>
+</tr><tr class="field-row" data-key="20日量Z分0" data-title="200日量 z 分" data-core="否">
+<td class="field-title-cell"><b>200日量 Z 分</b></td>
+<td>(当前量 − 200期均量) ÷ 200期成交量标准差；用于判断较长历史尺度的异常程度。</td>
+<td>适合寻找长期尺度真正罕见的量能变化，避免只因20日窗口过低而显得异常。</td>
+</tr><tr class="field-row" data-key="fp_volume_ready" data-title="量能就绪" data-core="否">
+<td class="field-title-cell"><b>量能就绪</b></td>
+<td>量能窗口是否已经有足够样本完成计算。</td>
+<td>若为 否，涉及量比分位/Z分的结论都应视为不可用，而不是补 0。</td>
+</tr></tbody>
+  </table></div></div>
+</div></div>
+  </div>
+</section>
 
-    <section
-      class="workflow-section"
-      id="workflow"
-    >
 
-      <div class="container">
-
-
-        <div class="workflow-heading">
-
-          <h2>
-            不需要把全市场一只只翻完
-          </h2>
-
-          <p>
-            复盘先找到变化，
-            盘中再继续跟进变化。
-          </p>
-
+<section class="section" id="feishu">
+  <div class="container">
+    <div class="section-copy">
+      <div class="mini-label">状态变化 → 通知</div>
+      <h2>飞书不是另一个功能入口，而是把“该重新看了”送到你面前。</h2>
+      <p>Git 里的通知流程是：配置通知渠道 → 保存 → 测试 → 启用。真正被推送的是自选股票的状态变化；飞书只是投递渠道。通知内容先由 HTML 海报模板渲染成图片，再作为飞书图片消息发送。右侧按附件的实际成图结构还原 HTML 海报模板，不再用网页消息卡片代替。</p>
+    </div>
+    <div class="feishu-grid">
+      <div class="notify-app">
+        <div class="notify-top"><b>通知与设置</b><span>交互演示 · 凭证不会发送</span></div>
+        <div class="notify-page">
+          <div class="notify-title">
+            <div><h3>通知渠道</h3><p>配置后，状态变化可以同步投递到飞书。</p></div>
+            <button class="small-action" id="configureFeishu">配置渠道</button>
+          </div>
+          <div class="channel-card-v3">
+            <div class="feishu-logo">飞书</div>
+            <div><strong>飞书应用通知</strong><small id="channelDesc">尚未配置 · 仅站内消息可用</small></div>
+            <span class="channel-status" id="channelStatus">未配置</span>
+          </div>
+          <div class="feishu-modal" id="feishuModal">
+            <div class="form-row"><label>应用凭证（演示）</label><input id="feishuCredential" placeholder="仅本页本地演示，不会上传"></div>
+            <div class="form-row"><label>接收目标</label><input id="feishuTarget" value="盘迹研究提醒"></div>
+            <div class="channel-actions"><button id="saveFeishu" class="primary">保存配置</button><button id="cancelFeishu">取消</button></div>
+          </div>
+          <div class="channel-actions">
+            <button id="testFeishu">发送测试</button>
+            <button id="enableFeishu" class="primary">启用通知</button>
+            <button id="editFeishu">编辑</button>
+            <button id="deleteFeishu">删除</button>
+          </div>
+          <div class="setup-flow">
+            <div class="setup-step-v3"><b>1 · 配置</b><span>填写应用通知所需凭证和接收目标。</span></div>
+            <div class="setup-step-v3"><b>2 · 测试</b><span>先发送测试消息，确认接收链路正确。</span></div>
+            <div class="setup-step-v3"><b>3 · 启用</b><span>测试成功后再正式开启状态变化通知。</span></div>
+          </div>
+          <div class="notify-toast" id="notifyToast">测试消息已模拟发送。</div>
         </div>
-
-
-        <!-- STEP 01 -->
-
-        <article class="workflow-block workflow-market">
-
-          <div class="workflow-copy">
-
-            <span class="workflow-index">
-              01 · 复盘
-            </span>
-
-            <h3>
-              趋势反转，
-              <br />
-              第一时间定位
-            </h3>
-
-            <p>
-              趋势、结构、动量、量能和筹码状态可以直接用于全市场筛选，
-              让刚发生变化的股票更早进入候选池。
-            </p>
-
-          </div>
-
-
-          <figure class="workflow-market-image">
-
-            <img
-              src="/landing/assets/images/market-workspace.webp"
-              width="1080"
-              height="549"
-              alt="盘迹行情全市场筛选界面"
-              loading="lazy"
-            />
-
-          </figure>
-
-        </article>
-
-
-        <!-- STEP 02 -->
-
-        <article class="workflow-block workflow-monitor">
-
-
-          <div class="monitor-stage">
-
-            <figure class="workflow-monitor-image">
-
-              <img
-                src="/landing/assets/images/intraday-monitor.webp"
-                width="608"
-                height="1080"
-                alt="盘迹盘中监控界面"
-                loading="lazy"
-              />
-
-            </figure>
-
-          </div>
-
-
-          <div class="workflow-copy">
-
-            <span class="workflow-index">
-              02 · 盘中
-            </span>
-
-            <h3>
-              变化出现后，
-              <br />
-              不只看涨跌
-            </h3>
-
-            <p>
-              把价格重新放回趋势参考、关键结构和成交密集区里看。
-              当新的状态变化真正发生时，
-              再把这只股票重新推回视野。
-            </p>
-
-          </div>
-
-
-        </article>
-
       </div>
+      
+      <div class="feishu-preview feishu-image-preview">
+        <div class="preview-kicker">飞书图片消息 · 对应附件中的 HTML 海报模板</div>
+        <div class="image-delivery-flow"><span>状态变化</span><i>→</i><span>HTML 海报渲染</span><i>→</i><span>PNG 图片</span><i>→</i><span>飞书发图</span></div>
 
-    </section>
+        <div class="poster-shell" id="pushCard">
+          <div class="poster-brand">
+            <div class="poster-brand-left">
+              <span class="poster-spark"><i></i><i></i><i></i><i></i></span>
+              <div><b>小Z说股事</b><small>用数据拆解市场和价格背后的结构</small></div>
+            </div>
+            <span class="poster-mode">结构 + 筹码共识</span>
+          </div>
 
+          <div class="poster-stockbar">
+            <div class="poster-stockname"><b>陕西煤业</b><span>601225</span></div>
+            <div class="poster-quote">
+              <small>当天涨跌幅</small>
+              <strong>+0.08%</strong>
+              <span><em>现价</em>25.71</span>
+            </div>
+          </div>
 
-    <!-- ========================================
-         CLOSING
-    ========================================= -->
+          <div class="poster-chart">
+            <img src="/landing/assets/images/poster_img1.webp" loading="lazy" alt="陕西煤业结构与筹码共识图表示例">
+          </div>
 
-    <section class="closing-section">
+          <div class="poster-learn">
+            <img src="/landing/assets/images/poster_img2.webp" loading="lazy" alt="查看指标原理页二维码">
+            <div>
+              <b>扫码了解原理和解读方法</b>
+              <span>查看指标原理页 <i>›</i></span>
+            </div>
+          </div>
 
-      <div class="container closing-layout">
-
-
-        <div class="closing-copy">
-
-          <h2>
-            把注意力留给真正发生变化的股票
-          </h2>
-
-          <p>
-            行情负责发现，
-            自选负责持续观察；
-            盘中状态发生变化后，
-            再把注意力拉回来。
-          </p>
-
+          <div class="poster-disclaimer">内容仅做科普，不构成投资建议</div>
         </div>
 
-
-        <div class="closing-actions">
-
-          <a
-            class="button button-primary"
-            href="/login"
-          >
-            登录盘迹
-          </a>
-
-          <a
-            class="button button-secondary"
-            href="/portal/index.html"
-          >
-            使用说明
-          </a>
-
+        <div class="poster-caption">
+          <b>这才是飞书收到的内容：</b>
+          页面状态变化后，系统用固定 HTML 海报模板生成研究图片，再把图片发送到飞书。这里的标题、股票信息、图表区、原理二维码和免责声明都属于图片模板本身，不是网页消息卡片。
         </div>
-
-
+        <button class="btn" id="simulatePush" style="margin-top:12px">模拟一次图片通知</button>
       </div>
-
-    </section>
-
-  </main>
-
-
-  <!-- ========================================
-       FOOTER
-  ========================================= -->
-
-  <footer class="site-footer">
-
-    <div class="container footer-main">
+    </div>
+  </div>
+</section>
 
 
+<section class="section" id="faq">
+  <div class="container">
+    <div class="section-copy">
+      <div class="mini-label">边界与常见问题</div>
+      <h2>会操作只是第一步，更重要的是不要误读。</h2>
+      <p>盘迹整理市场状态，但不会替用户完成投资判断。</p>
+    </div>
+
+    <div class="boundary-grid">
+      <article class="boundary-card">
+        <h3>盘迹做什么</h3>
+        <ul><li>从全市场缩小观察范围</li><li>整理趋势、结构、动量、量能和筹码状态</li><li>提供个股研究上下文</li><li>持续跟踪用户自己加入的自选</li><li>记录并通知新的状态变化</li></ul>
+      </article>
+      <article class="boundary-card no">
+        <h3>盘迹不做什么</h3>
+        <ul><li>不推荐具体股票</li><li>不预测未来涨跌</li><li>不提供具体买卖点</li><li>不执行自动交易</li><li>不承诺任何收益</li></ul>
+      </article>
+    </div>
+
+    <div class="faq">
+      <div class="faq-item open"><button class="faq-q">为什么我登录后看不到某个功能？ <span>−</span></button><div class="faq-a">不同账号的开放范围可能不同，以管理员实际分配为准。门户只展示对外开放的核心使用流程，不展示内部研究模块。</div></div>
+      <div class="faq-item"><button class="faq-q">提醒是不是预测？ <span>＋</span></button><div class="faq-a">不是。提醒只表示某个规则定义的状态变化已经发生，不表示价格之后必然上涨或下跌。</div></div>
+      <div class="faq-item"><button class="faq-q">加入自选是不是盘迹推荐？ <span>＋</span></button><div class="faq-a">不是。加入自选只是用户自己决定继续观察该股票，平台不因此表达股票优劣判断。</div></div>
+      <div class="faq-item"><button class="faq-q">飞书是不是必须配置？ <span>＋</span></button><div class="faq-a">不是。站内消息是事件记录入口；飞书只是可选的通知渠道，用来在状态变化时把注意力拉回来。</div></div>
+    </div>
+
+    <div class="cta">
+      <div><h3>看懂页面后，直接开始用。</h3><p>搜索 → 条件筛选 → 个股详情 → 自选持续观察。</p></div>
+      <a class="btn btn-primary" href="/login">登录盘迹</a>
+    </div>
+  </div>
+</section>
+</main>
+
+
+<section class="contact-section" id="contact">
+  <div class="container">
+    <div class="contact-card">
       <div>
-
-        <div class="footer-brand">
-          盘迹
-        </div>
-
-        <p class="footer-description">
-          股票筛选与市场状态观察工具
-        </p>
-
+        <div class="mini-label">获取邀请码</div>
+        <h2>需要邀请码？扫码添加 QQ 联系。</h2>
+        <p>盘迹采用邀请注册。请扫描右侧 QQ 二维码添加好友，并在验证信息中注明“盘迹邀请码”。账号、邀请码和通知配置请只用于本人，不要转发或共用。</p>
+        <div class="contact-points"><span>备注：盘迹邀请码</span><span>注册后使用本人账号登录</span><span>遇到邀请码或权限问题，也通过同一 QQ 联系</span></div><div class="xueqiu-note">雪球搜索 <b>小Z说事</b>，关注每日早晚复盘。</div>
       </div>
-
-
-      <div class="footer-links">
-
-        <a href="/login">
-          登录盘迹
-        </a>
-
-        <a href="/portal/index.html">
-          使用说明
-        </a>
-
-        <span>
-          雪球搜索「小Z说事」
-        </span>
-
-      </div>
-
-
+      <img class="qq-shot" src="/landing/assets/images/qq_shot.png" loading="lazy" alt="QQ 联系二维码">
     </div>
+  </div>
+</section>
 
 
-    <div class="container footer-boundary">
+<footer><div class="container footer-inner"><span>© 2026 PANJI · 股票筛选与市场状态观察工具</span><span>门户内交互数据均为演示数据，不构成投资建议。</span></div></footer>
 
-      盘迹提供市场状态和研究工具，不直接给买卖答案。
-      趋势、结构、动量、量能和筹码描述当前市场状态，
-      不代表未来必然涨跌。
+<script>
+const demoRows = [
+  {name:'示例科技 A',code:'DEMO001',price:'23.48',change:3.26,industry:'半导体',concept:'AI 算力',trend:'上行',trendDir:1,trendBars:2,volZ20:2.56,structureFresh:2,structure:'主要偏多 / 短线偏多',event:'向上突破 · 2根前',momentum:'已释放 · 正向',chip:'核心共识价上方',volume:'明显放量 · 异常度 2.56',watched:false,seed:1},
+  {name:'示例制造 B',code:'DEMO002',price:'16.72',change:1.18,industry:'汽车零部件',concept:'机器人',trend:'震荡',trendDir:0,trendBars:6,volZ20:0.74,structureFresh:5,structure:'主要震荡 / 短线转强',event:'结构转强 · 5根前',momentum:'释放 · 转强',chip:'接近核心共识价',volume:'常态量能 · 异常度 0.74',watched:true,seed:2},
+  {name:'示例材料 C',code:'DEMO003',price:'31.06',change:-0.76,industry:'有色材料',concept:'新材料',trend:'下行',trendDir:-1,trendBars:8,volZ20:-0.31,structureFresh:2,structure:'主要偏空 / 短线修复',event:'内部 向上突破 · 2根前',momentum:'偏弱',chip:'密集区下方',volume:'偏缩量 · 异常度 -0.31',watched:false,seed:3},
+  {name:'示例医疗 D',code:'DEMO004',price:'42.55',change:2.04,industry:'医疗服务',concept:'创新药',trend:'上行',trendDir:1,trendBars:11,volZ20:1.18,structureFresh:4,structure:'主要偏多 / 短线震荡',event:'结构延续 · 4根前',momentum:'挤压中',chip:'VAH 附近',volume:'略高于常态 · 异常度 1.18',watched:false,seed:4},
+  {name:'示例设备 E',code:'DEMO005',price:'12.91',change:4.62,industry:'电气设备',concept:'电网',trend:'上行',trendDir:1,trendBars:9,volZ20:3.12,structureFresh:7,structure:'主要偏多 / 短线偏多',event:'向上突破 · 7根前',momentum:'释放 · 强',chip:'核心共识价上方',volume:'明显放量 · 异常度 3.12',watched:true,seed:5},
+];
+let selected = demoRows[0];
+let scope = 'market';
+let activeGuide = 1;
+let advancedMode = 'none';
 
-    </div>
+const marketBody = document.getElementById('marketBody');
+const resultCount = document.getElementById('resultCount');
+const industryFilter = document.getElementById('industryFilter');
+const conceptFilter = document.getElementById('conceptFilter');
+const globalSearch = document.getElementById('globalSearch');
+const emptyState = document.getElementById('emptyState');
+const marketView = document.getElementById('marketView');
+const detailView = document.getElementById('detailView');
+const messageView = document.getElementById('messageView');
+const navMarket = document.getElementById('navMarket');
+const navWatch = document.getElementById('navWatch');
 
-  </footer>
+function filteredRows(){
+  const kw = globalSearch.value.trim().toLowerCase();
+  const ind = industryFilter.value;
+  const con = conceptFilter.value;
+  return demoRows.filter(r => {
+    if(scope==='watchlist' && !r.watched) return false;
+    if(kw && !(r.name.toLowerCase().includes(kw) || r.code.toLowerCase().includes(kw))) return false;
+    if(ind && r.industry!==ind) return false;
+    if(con && r.concept!==con) return false;
+    if(advancedMode==='basic' && !(r.trendDir===1 && r.volZ20>2)) return false;
+    if(advancedMode==='reversal' && !(r.trendDir===1 && r.volZ20>2 && r.trendBars<=3 && r.structureFresh<=3)) return false;
+    return true;
+  });
+}
+function clsChange(v){return v>0?'up':v<0?'down':''}
+function clsTrend(v){return v==='上行'?'up':v==='下行'?'down':''}
+function renderRows(){
+  const rows = filteredRows();
+  resultCount.textContent = rows.length;
+  marketBody.innerHTML = rows.map(r=>`
+    <tr data-code="${r.code}" class="${selected.code===r.code?'selected':''}">
+      <td class="namecol"><button class="stock-link" data-detail="${r.code}" style="border:0;background:transparent;padding:0;text-align:left">${r.name}<small>${r.code}</small></button></td>
+      <td class="${clsChange(r.change)}">${r.change>0?'+':''}${r.change.toFixed(2)}%</td>
+      <td>${r.industry}</td>
+      <td class="status-col ${clsTrend(r.trend)}">${r.trend}</td>
+      <td class="status-col">${r.trendBars}</td>
+      <td class="status-col ${r.volZ20>2?'brandc':''}">${r.volZ20.toFixed(2)}</td>
+      <td class="status-col">${r.structure}</td>
+      <td class="status-col brandc">${r.event}</td>
+      <td class="status-col">${r.momentum}</td>
+      <td class="status-col">${r.chip}</td>
+      <td class="status-col">${r.volume}</td>
+      <td><button class="watch-toggle ${r.watched?'on':''}" data-watch="${r.code}" title="${r.watched?'移出自选':'加入自选'}">${r.watched?'★':'+'}</button></td>
+    </tr>
+  `).join('');
+  emptyState.classList.toggle('show', rows.length===0);
+  attachRowEvents();
+}
+function attachRowEvents(){
+  document.querySelectorAll('[data-detail]').forEach(btn=>{
+    btn.onclick=(e)=>{
+      e.stopPropagation();
+      selected=demoRows.find(r=>r.code===btn.dataset.detail)||demoRows[0];
+      openDetail(selected);
+    };
+  });
+  document.querySelectorAll('[data-watch]').forEach(btn=>{
+    btn.onclick=(e)=>{
+      e.stopPropagation();
+      const r=demoRows.find(x=>x.code===btn.dataset.watch);
+      r.watched=!r.watched;
+      selected=r;
+      renderRows();
+    };
+  });
+  marketBody.querySelectorAll('tr').forEach(tr=>{
+    tr.onclick=()=>{
+      selected=demoRows.find(r=>r.code===tr.dataset.code)||selected;
+      renderRows();
+      openContext(selected);
+    }
+  });
+}
+function openContext(r){
+  document.getElementById('marketTableArea').classList.add('context-open');
+  document.getElementById('ctxName').textContent=r.name;
+  document.getElementById('ctxCode').textContent=r.code;
+  document.getElementById('ctxTrend').textContent='趋势 · '+r.trend;
+  document.getElementById('ctxMomentum').textContent='动量 · '+r.momentum.split(' · ')[0];
+  document.getElementById('ctxStructure').textContent='结构 · '+(r.structure.includes('偏多')?'偏多':r.structure.includes('偏空')?'偏空':'震荡');
+  document.getElementById('ctxChip').textContent='筹码 · '+r.chip;
+  document.getElementById('ctxBars').textContent=r.trendBars+' 根';
+  document.getElementById('ctxZ').textContent=r.volZ20.toFixed(2);
+  document.getElementById('ctxEvent').textContent=r.event;
+}
+document.getElementById('closeContext').onclick=()=>document.getElementById('marketTableArea').classList.remove('context-open');
 
+function showView(view){
+  [marketView,detailView,messageView].forEach(v=>v.classList.remove('active'));
+  view.classList.add('active');
+}
+function setScope(next){
+  scope=next;
+  navMarket.classList.toggle('active',next==='market');
+  navWatch.classList.toggle('active',next==='watchlist');
+  showView(marketView);renderRows();
+}
+navMarket.onclick=()=>setScope('market');
+navWatch.onclick=()=>setScope('watchlist');
+[industryFilter,conceptFilter].forEach(el=>el.onchange=renderRows);
+globalSearch.oninput=renderRows;
+document.getElementById('resetFilters').onclick=()=>{industryFilter.value='';conceptFilter.value='';globalSearch.value='';advancedMode='none';syncAdvancedUI();renderRows()};
+
+const filterDrawer=document.getElementById('filterDrawer');
+function syncAdvancedUI(){
+  document.getElementById('presetBasic').classList.toggle('active',advancedMode==='basic');
+  document.getElementById('presetReversal').classList.toggle('active',advancedMode==='reversal');
+  document.querySelectorAll('.reversal-only').forEach(x=>x.style.display=advancedMode==='reversal'?'grid':'none');
+}
+document.getElementById('openAdvancedFilter').onclick=()=>filterDrawer.classList.add('open');
+document.getElementById('closeAdvancedFilter').onclick=()=>filterDrawer.classList.remove('open');
+document.getElementById('presetBasic').onclick=()=>{advancedMode='basic';syncAdvancedUI();renderRows()};
+document.getElementById('presetReversal').onclick=()=>{advancedMode='reversal';syncAdvancedUI();renderRows()};
+document.getElementById('clearAdvanced').onclick=()=>{advancedMode='none';syncAdvancedUI();renderRows()};
+syncAdvancedUI();
+
+document.getElementById('showColumns').onclick=()=>{
+  const cols=[...document.querySelectorAll('.status-col')];
+  cols.forEach(c=>c.classList.add('focus-ring'));
+  setTimeout(()=>cols.forEach(c=>c.classList.remove('focus-ring')),1200);
+};
+
+document.getElementById('accountBtn').onclick=()=>document.getElementById('accountMenu').classList.toggle('open');
+document.getElementById('openMessages').onclick=()=>{document.getElementById('accountMenu').classList.remove('open');showView(messageView)};
+document.getElementById('openNotifySettings').onclick=()=>{document.getElementById('accountMenu').classList.remove('open');document.getElementById('feishu').scrollIntoView({behavior:'smooth'})};
+document.getElementById('backFromMessages').onclick=()=>showView(marketView);
+document.getElementById('backMarket').onclick=()=>showView(marketView);
+
+function openDetail(r){
+  document.getElementById('detailName').textContent=r.name;
+  document.getElementById('detailCode').textContent=r.code;
+  document.getElementById('detailPrice').textContent=r.price;
+  const dc=document.getElementById('detailChange');
+  dc.textContent=(r.change>0?'+':'')+r.change.toFixed(2)+'%';
+  document.getElementById('detailPrice').className='quote-price '+clsChange(r.change);
+  dc.className='quote-change '+clsChange(r.change);
+  showView(detailView);
+  drawChart(r.seed, document.querySelector('.tf-btn.active')?.textContent||'1d');
+}
+
+document.querySelectorAll('.tf-btn').forEach(btn=>{
+  btn.onclick=()=>{
+    document.querySelectorAll('.tf-btn').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+    drawChart(selected.seed,btn.textContent);
+  }
+});
+document.querySelectorAll('.layer-btn').forEach(btn=>{
+  btn.onclick=()=>{
+    btn.classList.toggle('active');
+    drawChart(selected.seed,document.querySelector('.tf-btn.active')?.textContent||'1d');
+  }
+});
+
+function rng(seed){
+  let s=seed*9173+11;
+  return ()=>{s=(s*9301+49297)%233280;return s/233280}
+}
+function drawChart(seed,tf){
+  const svg=document.getElementById('chartSvg');
+  const rnd=rng(seed + {'15m':1,'1h':3,'1d':7,'1w':13,'1mo':19}[tf]);
+  const W=720,H=355, top=18, priceH=245, volTop=276, volH=54, n=44;
+  let price=100+seed*3, bars=[];
+  for(let i=0;i<n;i++){
+    const drift=(seed%2?0.22:-0.05)+(rnd()-.47)*1.8;
+    const o=price,c=o+drift,h=Math.max(o,c)+rnd()*1.5,l=Math.min(o,c)-rnd()*1.5;
+    const v=20+rnd()*55;price=c;bars.push({o,c,h,l,v});
+  }
+  const lo=Math.min(...bars.map(b=>b.l))-1, hi=Math.max(...bars.map(b=>b.h))+1;
+  const y=p=>top+(hi-p)/(hi-lo)*priceH;
+  const x=i=>20+i*(W-40)/n;
+  const bw=Math.max(4,(W-40)/n*.58);
+  let grid='';
+  for(let i=0;i<6;i++){const yy=top+i*priceH/5;grid+=`<line x1="0" y1="${yy}" x2="${W}" y2="${yy}" stroke="#17232C" stroke-width="1"/>`}
+  for(let i=0;i<8;i++){const xx=i*W/7;grid+=`<line x1="${xx}" y1="0" x2="${xx}" y2="${H}" stroke="#111D25" stroke-width="1"/>`}
+  let candles='', vols='';
+  bars.forEach((b,i)=>{
+    const xx=x(i), up=b.c>=b.o, color=up?'#FF4D4F':'#22C55E';
+    candles+=`<line x1="${xx}" y1="${y(b.h)}" x2="${xx}" y2="${y(b.l)}" stroke="${color}" stroke-width="1"/>`;
+    candles+=`<rect x="${xx-bw/2}" y="${Math.min(y(b.o),y(b.c))}" width="${bw}" height="${Math.max(1,Math.abs(y(b.o)-y(b.c)))}" fill="${color}" opacity=".9"/>`;
+    vols+=`<rect x="${xx-bw/2}" y="${volTop+volH-b.v/80*volH}" width="${bw}" height="${b.v/80*volH}" fill="${color}" opacity=".45"/>`;
+  });
+  const active=id=>document.querySelector(`[data-layer="${id}"]`)?.classList.contains('active');
+  let overlays='';
+  if(active('boll')){
+    const pts=bars.map((b,i)=>`${x(i)},${y((b.c+b.o)/2+2.2)}`).join(' ');
+    const pts2=bars.map((b,i)=>`${x(i)},${y((b.c+b.o)/2-2.2)}`).join(' ');
+    overlays+=`<polyline points="${pts}" fill="none" stroke="#8B5CF6" stroke-width="1.1" opacity=".65"/><polyline points="${pts2}" fill="none" stroke="#8B5CF6" stroke-width="1.1" opacity=".65"/>`;
+  }
+  if(active('node')){
+    const py=y((hi+lo)/2);
+    overlays+=`<rect x="485" y="${py-17}" width="185" height="34" rx="3" fill="rgba(0,246,194,.07)" stroke="#00B28A" stroke-dasharray="3 3"/><line x1="430" y1="${py}" x2="695" y2="${py}" stroke="#00F6C2" stroke-width="1.2"/><text x="625" y="${py-5}" fill="#77CBB8" font-size="8">核心共识价 / 成交密集区</text>`;
+  }
+  if(active('structure')){
+    overlays+=`<line x1="165" y1="${y(bars[10].h)+2}" x2="265" y2="${y(bars[10].h)+2}" stroke="#F59E0B" stroke-width="1.2"/><text x="168" y="${y(bars[10].h)-5}" fill="#F2C66C" font-size="8">向上突破</text>`;
+    overlays+=`<rect x="330" y="${y(bars[21].o)-8}" width="92" height="24" fill="rgba(56,130,246,.08)" stroke="#3882F6" stroke-dasharray="3 2"/>`;
+  }
+  let sub='';
+  if(active('volume'))sub+=vols;
+  if(active('macd')){
+    const pts=bars.map((b,i)=>`${x(i)},${310+(rnd()-.5)*25}`).join(' ');
+    sub+=`<polyline points="${pts}" fill="none" stroke="#3882F6" stroke-width="1"/>`;
+  }
+  if(active('squeeze')){
+    bars.forEach((b,i)=>{const hh=(rnd()-.5)*26;sub+=`<rect x="${x(i)-2}" y="${316-Math.max(0,hh)}" width="4" height="${Math.max(2,Math.abs(hh))}" fill="${hh>0?'#FF4D4F':'#22C55E'}" opacity=".6"/>`});
+  }
+  svg.innerHTML=`<rect width="${W}" height="${H}" fill="#071015"/>${grid}${candles}${overlays}<line x1="0" y1="${volTop-7}" x2="${W}" y2="${volTop-7}" stroke="#263440"/>${sub}<text x="12" y="348" fill="#5F707C" font-size="8">${tf} · 演示图形，不是真实行情</text>`;
+}
+
+const notes={
+  1:'先搜索和定位范围。行业使用关键词匹配，概念使用明确选择；不要从全市场逐只翻。',
+  2:'把想法翻译成字段条件。方向=1 + 20日量能异常度>2 只能叫“上行 + 异常放量”；要更接近疑似反转，再加趋势/结构新鲜度。',
+  3:'表格核心是状态比较。单击行先看右侧紧凑状态；点股票名称才进入完整详情。',
+  4:'详情页切周期和图层，第一金字塔负责压缩趋势、结构、动量、筹码和量能上下文。',
+  5:'自选不是平台推荐，而是你自己的持续观察池。加入后切到“自选”只看自己的列表。',
+  6:'状态变化先形成站内事件记录，再按配置投递到飞书。飞书负责送达，不负责产生信号。'
+};
+function runGuide(step){
+  activeGuide=step;
+  document.querySelectorAll('.guide-step').forEach(b=>b.classList.toggle('active',Number(b.dataset.step)===step));
+  document.getElementById('guideNote').textContent=notes[step];
+  document.querySelectorAll('.focus-ring').forEach(x=>x.classList.remove('focus-ring'));
+  document.getElementById('marketTableArea').classList.remove('context-open');
+  if(step===1){
+    advancedMode='none';syncAdvancedUI();filterDrawer.classList.remove('open');setScope('market');industryFilter.value='半导体';conceptFilter.value='';globalSearch.value='';renderRows();
+    document.getElementById('marketToolbar').classList.add('focus-ring');
+  }else if(step===2){
+    setScope('market');industryFilter.value='';conceptFilter.value='';globalSearch.value='';advancedMode='basic';syncAdvancedUI();filterDrawer.classList.add('open');renderRows();
+    filterDrawer.classList.add('focus-ring');
+  }else if(step===3){
+    advancedMode='none';syncAdvancedUI();filterDrawer.classList.remove('open');setScope('market');industryFilter.value='';conceptFilter.value='';renderRows();
+    document.querySelectorAll('.status-col').forEach(x=>x.classList.add('focus-ring'));
+    openContext(demoRows[0]);document.getElementById('marketContext').classList.add('focus-ring');
+  }else if(step===4){
+    selected=demoRows[0];openDetail(selected);document.getElementById('chartToolbar').classList.add('focus-ring');document.getElementById('fpPanel').classList.add('focus-ring');
+  }else if(step===5){
+    selected=demoRows[0];selected.watched=true;setScope('watchlist');renderRows();
+    const btn=document.querySelector(`[data-watch="${selected.code}"]`);if(btn)btn.classList.add('focus-ring');
+  }else if(step===6){
+    showView(messageView);document.querySelector('.message-new').classList.add('focus-ring');
+  }
+}
+document.querySelectorAll('.guide-step').forEach(btn=>btn.onclick=()=>runGuide(Number(btn.dataset.step)));
+
+/* hero mini demo */
+document.querySelectorAll('.hero-star').forEach(btn=>btn.onclick=()=>{btn.classList.toggle('on');btn.textContent=btn.classList.contains('on')?'★':'+'});
+document.getElementById('heroIndustry').onchange=function(){
+  document.querySelectorAll('#heroRows tr').forEach(r=>r.style.display=(!this.value||r.dataset.industry===this.value)?'':'none')
+};
+document.getElementById('heroReset').onclick=()=>{document.getElementById('heroIndustry').value='';document.querySelectorAll('#heroRows tr').forEach(r=>r.style.display='')};
+document.getElementById('heroSearch').oninput=function(){
+  const q=this.value.toLowerCase();
+  document.querySelectorAll('#heroRows tr').forEach(r=>r.style.display=r.textContent.toLowerCase().includes(q)?'':'none');
+};
+
+/* accordions */
+document.querySelectorAll('.howto-item button').forEach(btn=>btn.onclick=()=>{
+  const item=btn.parentElement;item.classList.toggle('open');btn.querySelector('span').textContent=item.classList.contains('open')?'−':'＋'
+});
+document.querySelectorAll('.faq-q').forEach(btn=>btn.onclick=()=>{
+  const item=btn.parentElement;item.classList.toggle('open');btn.querySelector('span').textContent=item.classList.contains('open')?'−':'＋'
+});
+document.addEventListener('click',e=>{if(!e.target.closest('.account'))document.getElementById('accountMenu').classList.remove('open')});
+
+
+/* 第一金字塔 99 字段字典 */
+let fieldMode='core';
+const fieldSearch=document.getElementById('fieldSearch');
+function applyFieldFilter(){
+  const q=fieldSearch.value.trim().toLowerCase();
+  let shown=0;
+  document.querySelectorAll('.field-group').forEach(group=>{
+    let groupShown=0;
+    group.querySelectorAll('.field-row').forEach(row=>{
+      const matchText=(row.dataset.key+' '+row.dataset.title+' '+row.textContent).toLowerCase().includes(q);
+      const matchMode=fieldMode==='all'||row.dataset.core==='true';
+      const visible=matchText&&matchMode;
+      row.style.display=visible?'':'none';
+      if(visible){shown++;groupShown++}
+    });
+    group.querySelector('.group-visible-count').textContent=groupShown+' / '+group.querySelectorAll('.field-row').length;
+    group.style.display=groupShown?'':'none';
+    if(q&&groupShown)group.classList.add('open');
+    const icon=group.querySelector('.field-group-head > span');
+    if(icon)icon.textContent=group.classList.contains('open')?'−':'＋';
+  });
+  document.getElementById('fieldCount').textContent=shown+' / 99';
+}
+document.querySelectorAll('[data-field-mode]').forEach(btn=>btn.onclick=()=>{
+  fieldMode=btn.dataset.fieldMode;
+  document.querySelectorAll('[data-field-mode]').forEach(b=>b.classList.toggle('active',b===btn));
+  applyFieldFilter();
+});
+fieldSearch.oninput=applyFieldFilter;
+document.querySelectorAll('.field-group-head').forEach(btn=>btn.onclick=()=>{
+  const g=btn.parentElement;g.classList.toggle('open');btn.querySelector(':scope > span').textContent=g.classList.contains('open')?'−':'＋';
+});
+applyFieldFilter();
+
+/* 飞书通知设置演示 */
+let feishuState='off';
+const feishuModal=document.getElementById('feishuModal');
+const channelStatus=document.getElementById('channelStatus');
+const channelDesc=document.getElementById('channelDesc');
+const notifyToast=document.getElementById('notifyToast');
+function showNotifyToast(msg){
+  notifyToast.textContent=msg;notifyToast.classList.add('show');setTimeout(()=>notifyToast.classList.remove('show'),1700);
+}
+function syncFeishu(){
+  channelStatus.className='channel-status '+(feishuState==='enabled'?'enabled':feishuState==='saved'?'saved':'');
+  channelStatus.textContent=feishuState==='enabled'?'已启用':feishuState==='saved'?'已保存':'未配置';
+  channelDesc.textContent=feishuState==='enabled'?'通知链路已启用':feishuState==='saved'?'配置已保存 · 建议先测试':'尚未配置 · 仅站内消息可用';
+}
+document.getElementById('configureFeishu').onclick=()=>feishuModal.classList.add('open');
+document.getElementById('editFeishu').onclick=()=>feishuModal.classList.add('open');
+document.getElementById('cancelFeishu').onclick=()=>feishuModal.classList.remove('open');
+document.getElementById('saveFeishu').onclick=()=>{feishuState='saved';feishuModal.classList.remove('open');syncFeishu();showNotifyToast('配置已保存在本页演示状态中')};
+document.getElementById('testFeishu').onclick=()=>{if(feishuState==='off'){showNotifyToast('请先保存配置');return}showNotifyToast('测试图片消息已模拟发送');document.getElementById('pushCard').classList.add('focus-ring');setTimeout(()=>document.getElementById('pushCard').classList.remove('focus-ring'),1000)};
+document.getElementById('enableFeishu').onclick=()=>{if(feishuState==='off'){showNotifyToast('请先保存并测试配置');return}feishuState='enabled';syncFeishu();showNotifyToast('飞书图片通知已模拟启用')};
+document.getElementById('deleteFeishu').onclick=()=>{feishuState='off';syncFeishu();document.getElementById('feishuCredential').value='';showNotifyToast('演示配置已删除')};
+document.getElementById('simulatePush').onclick=()=>{document.getElementById('pushCard').classList.add('focus-ring');showNotifyToast('已模拟发送一张研究图片到飞书');setTimeout(()=>document.getElementById('pushCard').classList.remove('focus-ring'),1100)};
+syncFeishu();
+
+
+renderRows();
+drawChart(1,'1d');
+(function(){
+  var links=Array.prototype.slice.call(document.querySelectorAll('.site-nav a'));
+  if(!links.length||!('IntersectionObserver'in window))return;
+  var map={};
+  links.forEach(function(a){var id=a.getAttribute('href');if(id&&id.charAt(0)==='#')map[id.slice(1)]=a;});
+  var obs=new IntersectionObserver(function(es){es.forEach(function(e){if(e.isIntersecting){links.forEach(function(a){a.classList.remove('active')});var a=map[e.target.id];if(a)a.classList.add('active');}});},{rootMargin:'-45% 0px -50% 0px',threshold:0});
+  Object.keys(map).forEach(function(id){var el=document.getElementById(id);if(el)obs.observe(el);});
+})();
+</script>
 </body>
 </html>
