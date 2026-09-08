@@ -1149,6 +1149,12 @@ const ENUM_OPTIONS_BY_KEY: Record<string, Array<{ value: string; label: string }
   fp_latest_bos_direction: EVENT_DIRECTION_OPTIONS,
   fp_latest_choch_direction: EVENT_DIRECTION_OPTIONS,
   fp_latest_ob_direction: EVENT_DIRECTION_OPTIONS,
+  // [P0 corrective / 筛选器方向枚举补线] 后端这 3 列同样是 enum，
+  // enum_values = bullish/bearish/up/down；不接线会让单元格显示"多头"而筛选器泄露 raw code。
+  // 覆盖后：所有 7 个使用 _ENUM_VALUES_EVENT_DIRECTION 的列均走同一展示语义。
+  fp_momentum_event_direction: EVENT_DIRECTION_OPTIONS,
+  fp_latest_diffusion_direction: EVENT_DIRECTION_OPTIONS,
+  fp_node_event_direction: EVENT_DIRECTION_OPTIONS,
   fp_latest_bos_level: STRUCTURE_LEVEL_OPTIONS,
   fp_latest_choch_level: STRUCTURE_LEVEL_OPTIONS,
   fp_structure_alignment: ALIGNMENT_OPTIONS,

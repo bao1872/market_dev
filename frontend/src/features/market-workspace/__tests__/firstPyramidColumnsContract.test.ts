@@ -101,6 +101,60 @@ test('成交密集区事件方向列 bullish → 多头', () => {
   assert.equal(col('fp_node_event_direction').render?.(row), '多头')
 })
 
+// ===== P0 corrective / 筛选器方向枚举补线：单元格与筛选器不得双轨 =====
+// 后端 fp_momentum_event_direction / fp_latest_diffusion_direction / fp_node_event_direction
+// 均为 enum（enum_values = bullish/bearish/up/down）。行内已中文化，筛选器必须同步。
+const DIRECTION_ENUM_KEYS = [
+  'fp_structure_event_direction',
+  'fp_latest_bos_direction',
+  'fp_latest_choch_direction',
+  'fp_latest_ob_direction',
+  'fp_momentum_event_direction',
+  'fp_latest_diffusion_direction',
+  'fp_node_event_direction',
+] as const
+
+test('动量事件方向筛选器 enumOptions：bullish→多头（提交仍为 canonical）', () => {
+  const opts = col('fp_momentum_event_direction').enumOptions ?? []
+  const hit = opts.find((o) => o.value === 'bullish')
+  assert.ok(hit, 'bullish 必须出现在 enumOptions')
+  assert.equal(hit?.label, '多头')
+  assert.equal(hit?.value, 'bullish')
+})
+
+test('最新扩散方向筛选器 enumOptions：bearish→空头（提交仍为 canonical）', () => {
+  const opts = col('fp_latest_diffusion_direction').enumOptions ?? []
+  const hit = opts.find((o) => o.value === 'bearish')
+  assert.ok(hit, 'bearish 必须出现在 enumOptions')
+  assert.equal(hit?.label, '空头')
+  assert.equal(hit?.value, 'bearish')
+})
+
+test('成交密集区事件方向筛选器 enumOptions：bullish→多头（提交仍为 canonical）', () => {
+  const opts = col('fp_node_event_direction').enumOptions ?? []
+  const hit = opts.find((o) => o.value === 'bullish')
+  assert.ok(hit, 'bullish 必须出现在 enumOptions')
+  assert.equal(hit?.label, '多头')
+  assert.equal(hit?.value, 'bullish')
+})
+
+test('全部方向 enum 列：enumOptions 已接线，且不向用户暴露 up/down，label 不泄露 raw code', () => {
+  for (const key of DIRECTION_ENUM_KEYS) {
+    const opts = col(key).enumOptions
+    assert.ok(opts && opts.length > 0, `列 ${key} 必须接线 enumOptions（否则筛选器回退 raw enum_values）`)
+    assert.deepEqual(
+      opts.map((o) => o.value),
+      ['bullish', 'bearish'],
+      `列 ${key} 提交值必须为 canonical bullish/bearish，且不得暴露 up/down`,
+    )
+    for (const o of opts) {
+      for (const leak of ['bullish', 'bearish', 'up', 'down']) {
+        assert.ok(!o.label.includes(leak), `列 ${key} 的 label 不得泄露 raw code ${leak}`)
+      }
+    }
+  }
+})
+
 // ===== P0 corrective / Blocker 4：残留缩写已清除（列设置可见标题也中文化）=====
 test('P0-6 残留缩写已清除：结构突破/转折/承接压制区/双顶双底/布林带/挤压动量', () => {
   assert.equal(col('fp_latest_bos_direction').title, '最新结构突破方向')

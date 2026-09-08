@@ -30,13 +30,19 @@ const SPECS = {
   },
 } as unknown as Parameters<typeof getFirstPyramidColumns>[0]
 
-function renderFilter(operator: string, value: string): string {
-  const cols = getFirstPyramidColumns(SPECS)
-  const column = cols.find((c) => c.key === 'fp_structure_event_type') as unknown as Parameters<typeof FilterPopover>[0]['column']
+function renderFilterFor(
+  key: string,
+  specs: Parameters<typeof getFirstPyramidColumns>[0],
+  operator: string,
+  value: string,
+): string {
+  const cols = getFirstPyramidColumns(specs)
+  const column = cols.find((c) => c.key === key) as unknown as Parameters<typeof FilterPopover>[0]['column']
+  if (!column) throw new Error(`column ${key} 缺失`)
   return renderToStaticMarkup(
     createElement(FilterPopover as never, {
       column,
-      current: { key: 'fp_structure_event_type', operator, value },
+      current: { key, operator, value },
       anchor: {
         getBoundingClientRect: () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }),
       } as never,
@@ -45,6 +51,15 @@ function renderFilter(operator: string, value: string): string {
       onClose: () => {},
     }),
   )
+}
+
+function renderFilter(operator: string, value: string): string {
+  return renderFilterFor('fp_structure_event_type', SPECS, operator, value)
+}
+
+// 用户可见文本 = 去掉所有标签与属性后的纯文本（属性里的 canonical value 不是可见文字）
+function visibleText(html: string): string {
+  return html.replace(/<[^>]*>/g, '\u0001')
 }
 
 // ===== 多选提交值（纯逻辑）=====
@@ -79,6 +94,54 @@ test('单选 enum（eq）：option label 中文 结构转折，value 提交 cano
   assert.ok(html.includes('value="CHoCH"'), 'option value 必须为 canonical CHoCH')
   assert.ok(!html.includes('>CHoCH<'), '可见文字不得为原始 CHoCH')
 })
+
+// ===== 事件方向筛选器 SSR：可见文字全中文，提交值仍 canonical，且不暴露 up/down =====
+// 后端 enum_values 含历史兼容值 up/down；前端 enumOptions 只暴露正式 bullish/bearish。
+const DIRECTION_SPEC = {
+  data_type: 'enum',
+  operators: ['eq', 'neq', 'in', 'not_in'],
+  enum_values: ['bullish', 'bearish', 'up', 'down'],
+  input_control: 'multi_select',
+  value_normalizer: '',
+}
+
+const DIRECTION_KEYS = [
+  'fp_momentum_event_direction',
+  'fp_latest_diffusion_direction',
+  'fp_node_event_direction',
+] as const
+
+const DIRECTION_SPECS = Object.fromEntries(
+  DIRECTION_KEYS.map((k) => [k, DIRECTION_SPEC]),
+) as unknown as Parameters<typeof getFirstPyramidColumns>[0]
+
+for (const key of DIRECTION_KEYS) {
+  test(`${key} 多选（in）：显示 多头/空头，可见文字不出现 bullish/bearish/up/down`, () => {
+    const html = renderFilterFor(key, DIRECTION_SPECS, 'in', '')
+    assert.ok(html.includes('多头'), '应显示 多头 label')
+    assert.ok(html.includes('空头'), '应显示 空头 label')
+    const text = visibleText(html)
+    for (const leak of ['bullish', 'bearish', 'up', 'down']) {
+      assert.ok(!text.includes(leak), `用户可见文字不得出现 ${leak}`)
+    }
+    // option/checkbox 只允许两个正式值，历史兼容值不进 UI
+    assert.ok(!html.includes('value="up"'), '不得提交历史兼容值 up')
+    assert.ok(!html.includes('value="down"'), '不得提交历史兼容值 down')
+  })
+
+  test(`${key} 单选（eq）：label 中文，option value 仍为 canonical bullish/bearish`, () => {
+    const html = renderFilterFor(key, DIRECTION_SPECS, 'eq', '')
+    assert.ok(html.includes('value="bullish"'), 'option value 必须为 canonical bullish')
+    assert.ok(html.includes('value="bearish"'), 'option value 必须为 canonical bearish')
+    assert.ok(!html.includes('value="up"'), '不得暴露 up')
+    assert.ok(!html.includes('value="down"'), '不得暴露 down')
+    const text = visibleText(html)
+    assert.ok(text.includes('多头') && text.includes('空头'), '可见文字应为 多头/空头')
+    for (const leak of ['bullish', 'bearish', 'up', 'down']) {
+      assert.ok(!text.includes(leak), `用户可见文字不得出现 ${leak}`)
+    }
+  })
+}
 
 // ===== boolean =====
 test('boolean 筛选：option 显示 是/否，value 提交 true/false', () => {
