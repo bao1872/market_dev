@@ -62,6 +62,7 @@ __all__ = [
     "require_any_capability",
     "require_all_capabilities",
     "require_watchlist_limit",
+    "lock_and_resolve_watchlist_limit_for_mutation",
     "authorize_instrument_market_access",
     "require_instrument_market_access",
     "require_stock_symbol_market_access",
@@ -688,6 +689,90 @@ async def require_stock_symbol_market_access(
         ctx=ctx,
         instrument_id=instrument.id,
     )
+
+
+async def lock_and_resolve_watchlist_limit_for_mutation(
+    db: AsyncSession,
+    *,
+    user_id: UUID,
+    is_admin: bool,
+) -> int | None:
+    """[Commit B1] Watchlist mutation 的最终额度解析（事务内唯一 owner）。
+
+    背景（配额并发漏洞）：``POST /v1/watchlist`` 若走「dependency 阶段先解析额度 →
+    再 COUNT → 再 INSERT」，则 COUNT 与 INSERT 之间没有任何数据库锁：
+
+        A: COUNT=2 (limit=3)  ┐
+        B: COUNT=2 (limit=3)  ├─ 两者都判定 2 < 3 → 都放行 → 最终 4 只
+        A: INSERT             │
+        B: INSERT             ┘
+
+    且 dependency 阶段读到的额度在真正写入时可能已被管理员下调（旧额度残留）。
+
+    合同：
+    1. 先 ``SELECT User ... FOR UPDATE`` 锁定 User 行——与管理员 capability mutation
+       （``subscription_service._lock_and_materialize_legacy``）使用**同一个并发序列点**，
+       使「Add vs Add」「Add vs 管理员改额度」两条竞态共用一把锁；
+    2. 锁内重新调用 capability 唯一解析 owner ``resolve_effective_access``，
+       **不信任** dependency 阶段（AccessContext / ``require_watchlist_limit``）缓存的
+       watchlist_limit；
+    3. 禁止在此手写 ``SELECT UserCapability`` 自行推导 expiry/source/legacy
+       （会产生第二套权限算法），必须复用 canonical owner；
+    4. 调用方必须在**同一事务**内完成 COUNT → INSERT/restore → 单次 commit，
+       期间不得提前 commit（提前 commit 会提前释放行锁并重新引入竞态）。
+
+    Args:
+        db: 当前请求的 AsyncSession（调用方事务）
+        user_id: 当前用户 ID
+        is_admin: ``ctx.is_admin``（admin 无额度限制）
+
+    Returns:
+        int: self_selection 的 watchlist_limit；None: admin 无限制（但仍已持锁）。
+
+    Raises:
+        HTTPException 401: User 行不存在（认证上下文失效）
+        HTTPException 403: self_selection 未激活 / watchlist_limit 未配置
+    """
+    result = await db.execute(
+        select(User).where(User.id == user_id).with_for_update()
+    )
+    locked_user = result.scalar_one_or_none()
+
+    if locked_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="用户不存在",
+        )
+
+    # admin 无额度限制。注意：此处**已经持有** User 行锁，仍保持同一用户的所有
+    # watchlist POST mutation 串行（含 admin 自身），避免不同 instrument 并发突破额度。
+    if is_admin:
+        return None
+
+    # 锁内重新解析（canonical owner）。
+    # 注：locked_user 未必挂载 ``_roles``，resolve_effective_access 内部因此恒按
+    # 非 admin 解析；admin 已由调用方 ctx.is_admin 在此前 return，两条路径一致。
+    from app.services.effective_access_service import (
+        CAP_SELF_SELECTION,
+        resolve_effective_access,
+    )
+
+    profile = await resolve_effective_access(db, locked_user)
+
+    cap = profile.capabilities.get(CAP_SELF_SELECTION)
+    if cap is None or not cap.active:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="需要权限: self_selection",
+        )
+
+    if cap.watchlist_limit is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="自选数量限制未配置，禁止加入自选",
+        )
+
+    return int(cap.watchlist_limit)
 
 
 if __name__ == "__main__":
