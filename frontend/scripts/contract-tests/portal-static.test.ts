@@ -26,6 +26,14 @@ const __dirname = dirname(__filename)
 const PORTAL_DIR = join(__dirname, '..', '..', 'public', 'portal')
 // nginx.conf：frontend/nginx.conf
 const NGINX_CONF = join(__dirname, '..', '..', 'nginx.conf')
+// landing 目录：frontend/public/landing
+const LANDING_DIR = join(
+  __dirname,
+  '..',
+  '..',
+  'public',
+  'landing',
+)
 
 function readText(rel: string): string {
   return readFileSync(join(PORTAL_DIR, rel), 'utf-8')
@@ -302,24 +310,169 @@ test('10. 摘要包含已选因子、输出选项与六项输入', () => {
   assert.ok(html.includes("'未填写'") || html.includes("'未填写'"), '六项空值应显示「未填写」')
 })
 
-test('11. Nginx 根路径精确分流存在', () => {
-  const conf = readFileSync(NGINX_CONF, 'utf-8')
-  // 根路径精确匹配：公开产品官网（PANJI PUBLIC SITE V2, 2026-09-08）
-  // / 现分流到 /landing/index.html；/portal/ 仍保留为 Help Center。
-  assert.ok(conf.includes('location = /'), '缺少 location = / 精确分流')
-  assert.ok(
-    conf.includes('try_files /landing/index.html =404'),
-    '根路径未分流到公开产品官网 /landing/index.html',
-  )
-  // 公开官网首页与静态资源
-  assert.ok(conf.includes('location = /landing/index.html'), '缺少 /landing/index.html 规则')
-  assert.ok(conf.includes('location /landing/assets/'), '缺少 /landing/assets/ 静态资源规则')
-  // Help Center 仍保留（未被删除）
-  assert.ok(conf.includes('location = /portal/index.html'), '缺少 /portal/index.html 规则')
-  assert.ok(conf.includes('location ~ ^/portal/pages/.*\\.html$'), '缺少 /portal/pages/*.html 规则')
-  assert.ok(conf.includes('location /portal/'), '缺少 /portal/ 静态资源规则')
-  assert.ok(conf.includes('no-store, no-cache, must-revalidate'), '门户/官网 HTML 应禁缓存')
-})
+test(
+  '10b. PANJI public landing 静态合同',
+  () => {
+    const required = [
+      'index.html',
+      'assets/css/landing.css',
+      'assets/images/logo_symbol_128.png',
+      'assets/images/market-workspace.webp',
+      'assets/images/intraday-monitor.webp',
+    ]
+
+    for (const rel of required) {
+      assert.ok(
+        existsSync(
+          join(
+            LANDING_DIR,
+            rel,
+          ),
+        ),
+        `landing 缺少必需文件：${rel}`,
+      )
+    }
+
+    const html = readFileSync(
+      join(
+        LANDING_DIR,
+        'index.html',
+      ),
+      'utf-8',
+    )
+
+    assert.ok(
+      html.includes(
+        '先找到变化',
+      ),
+      'Landing 缺少核心价值主张',
+    )
+
+    assert.ok(
+      html.includes(
+        '全市场筛选',
+      ),
+      'Landing 缺少全市场筛选能力',
+    )
+
+    assert.ok(
+      html.includes(
+        '盘中监控',
+      ),
+      'Landing 缺少盘中监控能力',
+    )
+
+    assert.ok(
+      html.includes(
+        '筹码共识',
+      ),
+      'Landing 缺少筹码共识能力',
+    )
+
+    assert.ok(
+      html.includes(
+        '自选持续观察',
+      ),
+      'Landing 缺少自选持续观察能力',
+    )
+
+    assert.ok(
+      html.includes(
+        '飞书即时推送',
+      ),
+      'Landing 缺少飞书即时推送能力',
+    )
+
+    assert.ok(
+      html.includes(
+        'href="/login"',
+      ),
+      'Landing 缺少登录入口',
+    )
+
+    assert.ok(
+      html.includes(
+        'href="/portal/index.html"',
+      ),
+      'Landing 缺少 Help Center 入口',
+    )
+
+    const forbiddenTerms = [
+      /\bDSA\b/i,
+      /\bSMC\b/i,
+      /\bBOS\b/i,
+      /\bCHoCH\b/i,
+      /\bSQZMOM\b/i,
+      /\bbullish\b/i,
+      /\bbearish\b/i,
+      /\bOB\b/i,
+      /\bEQH\b/i,
+      /\bEQL\b/i,
+      /¥/,
+      /套餐/,
+      /价格方案/,
+      /立即购买/,
+      /订阅价格/,
+    ]
+
+    for (
+      const pattern
+      of forbiddenTerms
+    ) {
+      assert.ok(
+        !pattern.test(html),
+        `Landing 出现禁止公开内容：${pattern}`,
+      )
+    }
+  },
+)
+
+test(
+  '11. Nginx 根路径精确分流到 PANJI landing',
+  () => {
+    const conf = readFileSync(
+      NGINX_CONF,
+      'utf-8',
+    )
+
+    const rootLocation =
+      conf.match(
+        /location\s*=\s*\/\s*\{([\s\S]*?)\n\s*\}/,
+      )
+
+    assert.ok(
+      rootLocation,
+      '缺少 location = / 精确分流',
+    )
+
+    assert.match(
+      rootLocation[1],
+      /try_files\s+\/landing\/index\.html\s+=404;/,
+      '根路径未精确分流到 /landing/index.html',
+    )
+
+    assert.ok(
+      conf.includes(
+        'location = /portal/index.html',
+      ),
+      'Help Center /portal/index.html 被删除',
+    )
+
+    assert.ok(
+      conf.includes(
+        'location /portal/',
+      ),
+      'Help Center /portal/ 被删除',
+    )
+
+    assert.ok(
+      conf.includes(
+        'location /landing/assets/',
+      ),
+      'Landing assets location 缺失',
+    )
+  },
+)
 
 test('12. /api、Capture(SPA fallback) 合同未被删除', () => {
   const conf = readFileSync(NGINX_CONF, 'utf-8')
