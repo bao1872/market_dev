@@ -97,3 +97,26 @@
 - 当前真实二维码 `assets/images/wechat-qr.png`（SHA256=`65f75211cf91cec0079455e20b65f43ddf0d6cb89a1fb093821fdaa99fa7db25`，PNG 860×860），13 处引用全部更新，alt 文案为「管理员微信二维码」。
 - 来源：`/root/web_dev/ref/iShot_2026-07-23_18.28.18.png`（用户提供）。
 - 测试环境可正常上线，用户扫码可联系真实管理员。
+
+## 7. 公开官网拆分（2026-09-08）
+
+> 对应变更：`docs/changes/records/CHANGE-20260908-001.md`
+
+公开根路径 `/` 从 Help Center（`/portal/index.html`）拆分为独立产品官网（`/landing/index.html`）。
+Help Center 继续保留在 `/portal/`，二者职责分离。
+
+- 公开根路径 `/` 现指向 PANJI 产品官网（`frontend/public/landing/index.html`）。
+- `/portal/` 继续作为使用说明中心（Help Center），未删除任何页面或 DOM 结构。
+- 公开官网刻意**不含任何价格信息**：Hero / 核心能力 / Workflow / Footer 只传达
+  「全市场筛选、盘中监控、筹码共识、自选持续观察、飞书即时推送」五类能力，
+  不出现 ¥、套餐、订阅价格、购买等私下费用信息。
+- 官网使用的两张产品截图（`market-workspace.webp`、`intraday-monitor.webp`）
+  为**真实产品 UI**，由 `scripts/prepare_landing_assets.py` 从用户提供原图
+  （`ref/landing-market.png`、`ref/landing-monitor.png`）导出 WebP；
+  盘中监控截图底部的二维码已做**马赛克匿名化**处理，不泄露真实联系方式。
+- 官网品牌资产直接复制仓库批准资产 `frontend/src/assets/brand/logo_symbol_128.png`
+  → `frontend/public/landing/assets/images/logo_symbol_128.png`，未重新导出、重绘或改色。
+- Help Center 视觉规范第一阶段仅统一 `:root` 设计 token（旧 `--accent:#50e37d` 绿
+  → 盘迹品牌青 `--accent:#00F6C2`），未重构 Help Center DOM；
+  nginx 路由除根路径与新增 `/landing/` 外，其余 `/portal/`、`/api/`、`/umami/`、
+  `/capture/`、SPA fallback 均保持不变。

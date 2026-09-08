@@ -11,7 +11,7 @@
 // 8. JS 与 JSON 因子数据一致
 // 9. 新因子六项输入存在
 // 10. 摘要包含已选因子、输出选项与六项输入
-// 11. Nginx 根路径精确分流存在（location = / → /portal/index.html）
+// 11. Nginx 根路径精确分流存在（location = / → /landing/index.html；/portal/ 保留为 Help Center，PANJI PUBLIC SITE V2 2026-09-08）
 // 12. /api、Capture(SPA fallback) 合同未被删除
 
 import { strict as assert } from 'node:assert'
@@ -304,14 +304,21 @@ test('10. 摘要包含已选因子、输出选项与六项输入', () => {
 
 test('11. Nginx 根路径精确分流存在', () => {
   const conf = readFileSync(NGINX_CONF, 'utf-8')
-  // 根路径精确匹配，返回 /portal/index.html
+  // 根路径精确匹配：公开产品官网（PANJI PUBLIC SITE V2, 2026-09-08）
+  // / 现分流到 /landing/index.html；/portal/ 仍保留为 Help Center。
   assert.ok(conf.includes('location = /'), '缺少 location = / 精确分流')
-  assert.ok(conf.includes('try_files /portal/index.html =404'), '根路径未分流到 /portal/index.html')
-  // 门户首页与说明页禁缓存
+  assert.ok(
+    conf.includes('try_files /landing/index.html =404'),
+    '根路径未分流到公开产品官网 /landing/index.html',
+  )
+  // 公开官网首页与静态资源
+  assert.ok(conf.includes('location = /landing/index.html'), '缺少 /landing/index.html 规则')
+  assert.ok(conf.includes('location /landing/assets/'), '缺少 /landing/assets/ 静态资源规则')
+  // Help Center 仍保留（未被删除）
   assert.ok(conf.includes('location = /portal/index.html'), '缺少 /portal/index.html 规则')
   assert.ok(conf.includes('location ~ ^/portal/pages/.*\\.html$'), '缺少 /portal/pages/*.html 规则')
   assert.ok(conf.includes('location /portal/'), '缺少 /portal/ 静态资源规则')
-  assert.ok(conf.includes('no-store, no-cache, must-revalidate'), '门户 HTML 应禁缓存')
+  assert.ok(conf.includes('no-store, no-cache, must-revalidate'), '门户/官网 HTML 应禁缓存')
 })
 
 test('12. /api、Capture(SPA fallback) 合同未被删除', () => {

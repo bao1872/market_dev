@@ -1,11 +1,30 @@
 
-:root{
- --bg:#061015;--bg-deep:#03090d;--surface:#0c171d;--surface-2:#101d24;--surface-3:#14242c;
- --border:#22343d;--border-strong:#35505a;--text:#f3f7f5;--soft:#c2ccd1;--muted:#8d9ba3;
- --accent:#50e37d;--accent-strong:#29ca61;--accent-soft:rgba(80,227,125,.105);--warning:#e3ba60;
- --radius-sm:10px;--radius:14px;--radius-lg:20px;--shadow:0 20px 60px rgba(0,0,0,.28);
- --header-h:72px;--sidebar-w:242px;--rail-w:246px;--content-max:900px;
- --font:-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",Arial,sans-serif;
+/* [PANJI PUBLIC SITE V2, 2026-09-08] 统一 Help Center 视觉规范到盘迹当前调色板：
+   仅替换 :root token 值，不重构 DOM。旧 --accent:#50e37d（绿）统一为品牌青 --accent:#00F6C2。 */
+:root {
+  --bg: #0A0F14;
+  --bg-deep: #070B0F;
+  --surface: #111A23;
+  --surface-2: #161F29;
+  --surface-3: #1B2631;
+  --border: #263440;
+  --border-strong: #3A4A57;
+  --text: #F2F6F8;
+  --soft: #C5CDD2;
+  --muted: #98A1B3;
+  --accent: #00F6C2;
+  --accent-strong: #00B28A;
+  --accent-soft: rgba(0, 246, 194, 0.08);
+  --warning: #E3BA60;
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 18px;
+  --shadow: 0 20px 60px rgba(0, 0, 0, 0.28);
+  --header-h: 72px;
+  --sidebar-w: 242px;
+  --rail-w: 246px;
+  --content-max: 900px;
+  --font: "HarmonyOS Sans SC", "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", -apple-system, BlinkMacSystemFont, sans-serif;
 }
 *{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;min-height:100vh;font-family:var(--font);color:var(--text);background:radial-gradient(circle at 48% -12%,rgba(57,129,102,.14),transparent 36%),linear-gradient(180deg,var(--bg),var(--bg-deep))}a{color:inherit;text-decoration:none}button,input{font:inherit}button{cursor:pointer}
 .site-header{position:sticky;top:0;z-index:60;height:var(--header-h);display:grid;grid-template-columns:var(--sidebar-w) minmax(280px,620px) 1fr;align-items:center;gap:22px;padding:0 26px;border-bottom:1px solid var(--border);background:rgba(3,9,13,.95);backdrop-filter:blur(16px)}
