@@ -75,69 +75,203 @@ def _remove_dsa_lookahead(
     dir_series: pd.Series,
     cfg: DSAConfig | None = None,
 ) -> tuple[pd.Series, pd.Series]:
-    """消除 DSA VWAP 与方向序列的前视偏差。
+    """Remove historical DSA repaint from full-history calculation.
 
-    原理：全量计算时，方向翻转点 T 处，vwap_out[anchor..T] 被新方向的
-    回填递推覆盖，dir_series 也可能因未来翻转而回溯修正。但 anchor 到 T-1 的
-    bar 在实时中不可能知道方向会翻转，这些 bar 的 VWAP 和方向应该是旧方向的
-    递推结果。
+    dynamic_swing_anchored_vwap() legitimately detects a direction
+    flip at bar T using information available at T, but at that point
+    it rewrites VWAP values from the new anchor through T.
 
-    解决：找到所有方向翻转点，对每个翻转点用截断到 T-1 的数据重算 DSA，
-    用截断结果替换被覆盖的值（anchor 到 T-1 之间的 bar）。
+    Those rewritten values are valid for visualization after T, but
+    they are NOT the values that were available historically at bars
+    before T.
 
-    注意：此函数需调用 features/ 的 dynamic_swing_anchored_vwap，无法向量化。
-    翻转点数量通常很少（< 10），性能影响可控。
+    Important:
+    corrections must be applied from the LATEST flip backwards.
 
-    Args:
-        daily_df: 日线数据 DataFrame
-        vwap_series: 全量计算的 VWAP 序列
-        dir_series: 方向序列（1/-1）
-        cfg: DSA 配置
+    If flips are processed oldest -> newest, a later truncated
+    calculation already contains the repaint created by earlier flips
+    and can re-introduce that historical lookahead.
 
-    Returns:
-        (修正后的 VWAP 序列, 修正后的方向序列)
+    Reverse chronological processing gives each historical region the
+    value that was actually available at that time.
     """
-    dir_vals = dir_series.fillna(0).astype(int)
-    flip_mask = dir_vals != dir_vals.shift(1)
-    # 排除第一个 bar（无前一个方向可比较）
-    flip_mask.iloc[0] = False
-    flip_indices = daily_df.index[flip_mask].tolist()
+    dir_vals = (
+        dir_series
+        .fillna(0)
+        .astype(int)
+    )
+
+    flip_mask = (
+        dir_vals
+        != dir_vals.shift(1)
+    )
+
+    if len(flip_mask):
+        flip_mask.iloc[0] = False
+
+    flip_indices = (
+        daily_df.index[
+            flip_mask
+        ]
+        .tolist()
+    )
 
     if not flip_indices:
-        return vwap_series, dir_series
+        return (
+            vwap_series,
+            dir_series,
+        )
 
     if cfg is None:
         cfg = DSAConfig()
 
-    vwap_corrected = vwap_series.copy()
-    dir_corrected = dir_series.copy()
+    vwap_corrected = (
+        vwap_series.copy()
+    )
 
-    for flip_idx in flip_indices:
-        loc = daily_df.index.get_loc(flip_idx)
+    dir_corrected = (
+        dir_series.copy()
+    )
+
+    # CRITICAL:
+    # newest -> oldest.
+    #
+    # A later prefix contains earlier flips.
+    # Therefore the earlier historical region must be corrected LAST.
+    for flip_idx in reversed(
+        flip_indices
+    ):
+        loc = daily_df.index.get_loc(
+            flip_idx
+        )
+
         if loc < 2:
             continue
 
-        # 截断到翻转点前一个 bar（T-1），此时方向还没翻转
-        truncated_df = daily_df.iloc[:loc]
+        # Information set immediately BEFORE the flip.
+        # This is what bars < T could actually have known.
+        truncated_df = (
+            daily_df.iloc[:loc]
+        )
+
         try:
-            vwap_trunc, dir_trunc, _, _ = dynamic_swing_anchored_vwap(truncated_df, cfg)
+            (
+                vwap_trunc,
+                dir_trunc,
+                _,
+                _,
+            ) = (
+                dynamic_swing_anchored_vwap(
+                    truncated_df,
+                    cfg,
+                )
+            )
+
         except Exception as exc:
-            logger.debug("截断 DSA 计算异常 flip_idx=%s: %s", flip_idx, exc)
+            logger.debug(
+                "截断 DSA 计算异常 "
+                "flip_idx=%s: %s",
+                flip_idx,
+                exc,
+            )
             continue
 
-        # 截断结果中每个 bar 的 VWAP/dir 是该 bar 时刻的"实时值"（无前视偏差）
-        # 用截断结果替换全量结果中被回填覆盖的值
-        common_idx = vwap_trunc.index.intersection(vwap_corrected.index)
-        # 向量化比较：只替换差异超过阈值的值
-        trunc_vals = vwap_trunc.loc[common_idx].astype(float)
-        corrected_vals = vwap_corrected.loc[common_idx].astype(float)
-        valid_mask = trunc_vals.notna() & corrected_vals.notna()
-        diff_mask = (trunc_vals[valid_mask] - corrected_vals[valid_mask]).abs() > 0.001
-        replace_idx = diff_mask[diff_mask].index
-        vwap_corrected.loc[replace_idx] = trunc_vals.loc[replace_idx]
-        dir_corrected.loc[replace_idx] = dir_trunc.loc[replace_idx]
+        common_idx = (
+            vwap_trunc.index
+            .intersection(
+                vwap_corrected.index
+            )
+        )
 
-    return vwap_corrected, dir_corrected
+        if len(common_idx) == 0:
+            continue
+
+        trunc_v = (
+            vwap_trunc.loc[
+                common_idx
+            ]
+            .astype(float)
+            .to_numpy()
+        )
+
+        corrected_v = (
+            vwap_corrected.loc[
+                common_idx
+            ]
+            .astype(float)
+            .to_numpy()
+        )
+
+        trunc_d = (
+            pd.to_numeric(
+                dir_trunc.loc[
+                    common_idx
+                ],
+                errors="coerce",
+            )
+            .to_numpy(float)
+        )
+
+        corrected_d = (
+            pd.to_numeric(
+                dir_corrected.loc[
+                    common_idx
+                ],
+                errors="coerce",
+            )
+            .to_numpy(float)
+        )
+
+        vwap_same = np.isclose(
+            trunc_v,
+            corrected_v,
+            rtol=0.0,
+            atol=1e-12,
+            equal_nan=True,
+        )
+
+        dir_same = np.isclose(
+            trunc_d,
+            corrected_d,
+            rtol=0.0,
+            atol=0.0,
+            equal_nan=True,
+        )
+
+        replace_mask = ~(
+            vwap_same
+            & dir_same
+        )
+
+        if not replace_mask.any():
+            continue
+
+        replace_idx = (
+            common_idx[
+                replace_mask
+            ]
+        )
+
+        vwap_corrected.loc[
+            replace_idx
+        ] = (
+            vwap_trunc.loc[
+                replace_idx
+            ]
+        )
+
+        dir_corrected.loc[
+            replace_idx
+        ] = (
+            dir_trunc.loc[
+                replace_idx
+            ]
+        )
+
+    return (
+        vwap_corrected,
+        dir_corrected,
+    )
 
 
 def _compute_change_pct(daily_df: pd.DataFrame) -> float | None:
