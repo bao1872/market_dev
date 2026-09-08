@@ -27,11 +27,18 @@ const UNKNOWN = {
   state: '未知状态',
 } as const
 
-// ===== 结构事件方向（多头/空头，非 偏多/偏空）=====
-export function formatStructureDirection(raw: unknown): string {
+// ===== 事件方向（通用：bullish/up→多头，bearish/down→空头；历史 up/down 兼容）=====
+// 用于所有"事件方向"列：结构事件方向 / 动量事件方向 / 扩散方向 / 节点事件方向
+export function formatEventDirection(raw: unknown): string {
   if (raw === 'bullish' || raw === 'up') return '多头'
   if (raw === 'bearish' || raw === 'down') return '空头'
   return UNKNOWN.direction
+}
+
+// ===== 结构事件方向（多头/空头，非 偏多/偏空）=====
+// 内部复用 formatEventDirection（同一套 bullish/bearish → 多头/空头 映射）
+export function formatStructureDirection(raw: unknown): string {
+  return formatEventDirection(raw)
 }
 
 // ===== 结构事件级别（主要级别/短线级别）=====
@@ -57,11 +64,27 @@ export function formatStructureEvent(input: {
       direction: (input.direction ?? undefined) as SmcDirectionInput,
     }).label
   }
+  // [P0 corrective / Blocker 1] OB 生命周期必须用显式 allowlist，禁止 startsWith('OB') 一刀切：
+  // 否则 OB_CREATED/OB_ENTERED/OB_MITIGATED 全部显示成"承接/压制区"会让用户分不清
+  // 刚形成 / 首次回踩 / 已失效（违反"用户不能产生歧义"原则）；且未知 OB 子码会被误判为合法。
   if (typeof type === 'string' && type.startsWith('OB')) {
-    return formatSmcOrderBlock({
+    const base = formatSmcOrderBlock({
       structureLevel: input.level ?? undefined,
       direction: (input.direction ?? undefined) as SmcDirectionInput,
-    }).label
+    })
+    switch (type) {
+      case 'OB_CREATED':
+        return `${base.label}形成`
+      case 'OB_ENTERED':
+        return `${base.label}首次回踩`
+      case 'OB_MITIGATED':
+        return `${base.label}失效`
+      case 'OB_ENTRY':
+        // 仅历史兼容：旧数据可能产出 OB_ENTRY（进入），给明确历史语义而非"形成"
+        return `${base.label}进入`
+      default:
+        return UNKNOWN.structure
+    }
   }
   return UNKNOWN.structure
 }
@@ -100,7 +123,7 @@ export function formatAlignment(raw: unknown): string {
 
 // ===== 筹码节点事件类型 =====
 export function formatNodeEventType(raw: unknown): string {
-  if (raw === 'node_cluster_touch') return '节点簇触及'
+  if (raw === 'node_cluster_touch') return '触及成交密集区'
   return UNKNOWN.state
 }
 
@@ -125,18 +148,19 @@ export function formatTrendDirection(raw: unknown): string {
 export const STRUCTURE_EVENT_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'BOS', label: '结构突破' },
   { value: 'CHoCH', label: '结构转折' },
-  { value: 'OB_CREATED', label: '承接/压制区(建)' },
-  { value: 'OB_ENTERED', label: '承接/压制区(入)' },
-  { value: 'OB_MITIGATED', label: '承接/压制区(消)' },
+  { value: 'OB_CREATED', label: '承接/压制区形成' },
+  { value: 'OB_ENTERED', label: '承接/压制区首次回踩' },
+  { value: 'OB_MITIGATED', label: '承接/压制区失效' },
   { value: 'EQH', label: '双顶压力' },
   { value: 'EQL', label: '双底支撑' },
 ]
 
+// [P0 corrective / Blocker 3] 普通用户可选项只保留正式值 bullish/bearish；
+// up/down 仅后端 parser 历史兼容，不作为用户 UI 选项（避免下拉出现两个"多头/空头"歧义）。
+// formatEventDirection 仍识别 up/down（历史兼容），但前端下拉不暴露。
 export const EVENT_DIRECTION_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'bullish', label: '多头' },
   { value: 'bearish', label: '空头' },
-  { value: 'up', label: '多头' },
-  { value: 'down', label: '空头' },
 ]
 
 export const STRUCTURE_LEVEL_OPTIONS: Array<{ value: string; label: string }> = [
@@ -161,5 +185,5 @@ export const ALIGNMENT_OPTIONS: Array<{ value: string; label: string }> = [
 ]
 
 export const NODE_EVENT_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
-  { value: 'node_cluster_touch', label: '节点簇触及' },
+  { value: 'node_cluster_touch', label: '触及成交密集区' },
 ]

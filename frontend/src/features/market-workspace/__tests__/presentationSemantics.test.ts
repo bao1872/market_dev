@@ -20,6 +20,7 @@ import {
   formatStructureEvent,
   formatStructureDirection,
   formatStructureLevel,
+  formatEventDirection,
   formatMomentumDirection,
   formatMomentumEvent,
   formatSqueezeState,
@@ -27,6 +28,8 @@ import {
   formatNodeEventType,
   formatBoolean,
   formatTrendDirection,
+  STRUCTURE_EVENT_TYPE_OPTIONS,
+  EVENT_DIRECTION_OPTIONS,
 } from '../presentationSemantics.ts'
 
 const UNKNOWN_CODE = '__INTERNAL_UNKNOWN_CODE__'
@@ -109,8 +112,75 @@ test('结构对齐映射（仅 fp_structure_alignment）', () => {
   assert.equal(formatAlignment('背离'), '长短结构分歧')
 })
 
-test('筹码节点事件类型映射', () => {
-  assert.equal(formatNodeEventType('node_cluster_touch'), '节点簇触及')
+test('筹码节点事件类型映射（P0 corrective：节点簇→成交密集区）', () => {
+  assert.equal(formatNodeEventType('node_cluster_touch'), '触及成交密集区')
+})
+
+// ===== P0 corrective / Blocker 1：OB 生命周期 allowlist（禁止 startsWith('OB') 一刀切）=====
+test('OB_CREATED + bullish + swing → 主要·多头承接区形成', () => {
+  assert.equal(
+    formatStructureEvent({ type: 'OB_CREATED', level: 'swing', direction: 'bullish' }),
+    '主要·多头承接区形成',
+  )
+})
+
+test('OB_ENTERED + bullish + swing → 主要·多头承接区首次回踩', () => {
+  assert.equal(
+    formatStructureEvent({ type: 'OB_ENTERED', level: 'swing', direction: 'bullish' }),
+    '主要·多头承接区首次回踩',
+  )
+})
+
+test('OB_MITIGATED + bearish + internal → 短线·空头压制区失效', () => {
+  assert.equal(
+    formatStructureEvent({ type: 'OB_MITIGATED', level: 'internal', direction: 'bearish' }),
+    '短线·空头压制区失效',
+  )
+})
+
+test('OB_ENTRY（历史兼容）→ 主要·多头承接区进入', () => {
+  assert.equal(
+    formatStructureEvent({ type: 'OB_ENTRY', level: 'swing', direction: 'bullish' }),
+    '主要·多头承接区进入',
+  )
+})
+
+test('OB 未知子码 → 结构未知（禁止误判为合法 OB）', () => {
+  assert.equal(
+    formatStructureEvent({ type: 'OB_SOME_UNKNOWN_INTERNAL_CODE', level: 'swing', direction: 'bullish' }),
+    '结构未知',
+  )
+})
+
+// ===== P0 corrective / Blocker 2：通用事件方向 formatter =====
+test('formatEventDirection：bullish/bearish → 多头/空头，up/down 历史兼容', () => {
+  assert.equal(formatEventDirection('bullish'), '多头')
+  assert.equal(formatEventDirection('bearish'), '空头')
+  assert.equal(formatEventDirection('up'), '多头')
+  assert.equal(formatEventDirection('down'), '空头')
+  assert.equal(formatEventDirection(UNKNOWN_CODE), '方向未知')
+})
+
+test('formatStructureDirection 复用 formatEventDirection（多头/空头一致）', () => {
+  assert.equal(formatStructureDirection('bullish'), formatEventDirection('bullish'))
+  assert.equal(formatStructureDirection('bearish'), formatEventDirection('bearish'))
+  assert.equal(formatStructureDirection('up'), '多头')
+})
+
+// ===== P0 corrective / Blocker 3：方向下拉选项只暴露正式值 =====
+test('EVENT_DIRECTION_OPTIONS 仅 bullish/bearish（up/down 历史兼容不进用户 UI）', () => {
+  assert.deepEqual(
+    EVENT_DIRECTION_OPTIONS.map((o) => o.value),
+    ['bullish', 'bearish'],
+  )
+})
+
+// ===== P0 corrective / Blocker 1：OB 筛选器 label 去除缩写括号 =====
+test('OB 筛选 label：承接/压制区形成 / 首次回踩 / 失效', () => {
+  const map = Object.fromEntries(STRUCTURE_EVENT_TYPE_OPTIONS.map((o) => [o.value, o.label]))
+  assert.equal(map['OB_CREATED'], '承接/压制区形成')
+  assert.equal(map['OB_ENTERED'], '承接/压制区首次回踩')
+  assert.equal(map['OB_MITIGATED'], '承接/压制区失效')
 })
 
 test('布尔映射', () => {

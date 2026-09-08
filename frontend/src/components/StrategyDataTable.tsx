@@ -232,6 +232,20 @@ function normalizeFilterValue(value: string, normalizer: string | undefined): st
   }
 }
 
+// [P0 corrective / Blocker 3] 多选枚举值切换：返回去重、去空、逗号分隔的 canonical 值串
+// 用户全程只看到 label（中文），内部状态与提交值均为 canonical code，DOM 不泄露原始 enum
+export function toggleMultiEnumValue(current: string, value: string): string {
+  const set = new Set(
+    (current || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean),
+  )
+  if (set.has(value)) set.delete(value)
+  else set.add(value)
+  return [...set].join(',')
+}
+
 // 解析可比较值（对应原型 parseComparable）
 function parseComparable(text: string): { type: 'number' | 'text'; value: number | string } {
   const clean = String(text).replace(/,/g, '').trim()
@@ -343,12 +357,13 @@ function matchFilter(text: string, filter: DataTableFilter): boolean {
 // 列筛选弹窗
 // [CHANGE-20260730-013] 根据 filterSpec.data_type/input_control/enum_values 动态生成控件：
 // - enum/single_select + eq/neq → 下拉单选
-// - enum + in/not_in → 多选（逗号分隔文本 + datalist 提示）
+// - enum + in/not_in/has_any... → 多选（checkbox，显示 label，提交 canonical value）
 // - boolean/boolean_toggle + eq → true/false 下拉
 // - datetime/date_picker + date_eq/before/after/between → 日期输入
 // - number/percent/number_input → 数字输入
 // - text/text_input → 文本输入
-function FilterPopover({
+// [P0 corrective] 导出 FilterPopover 以便契约测试（SSR 渲染验证多选 label / 无 raw code 泄露）
+export function FilterPopover({
   column,
   current,
   anchor,
@@ -521,25 +536,30 @@ function FilterPopover({
       )
     }
 
-    // enum 多选（in/not_in）：逗号分隔文本 + datalist 提示可选值
-    if (isEnumMultiSelect && enumValues.length > 0) {
+    // [P0 corrective / Blocker 3] enum 多选（in/not_in/has_any...）：
+    // 真·多选 checkbox，显示 label（中文），内部状态/提交值均为 canonical code，DOM 不泄露原始 enum
+    if (isEnumMultiSelect && selectOptions.length > 0) {
+      const selected = new Set(
+        value ? value.split(',').map((s) => s.trim()).filter(Boolean) : [],
+      )
       return (
-        <div>
-          <input
-            className="input filter-value"
-            placeholder="多个值用逗号分隔"
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            autoFocus
-            list={`filter-enum-list-${column.key}`}
-          />
-          <datalist id={`filter-enum-list-${column.key}`}>
-            {enumValues.map((v) => (
-              <option key={v} value={v} />
-            ))}
-          </datalist>
+        <div className="filter-enum-multi">
+          {selectOptions.map((o) => (
+            <label key={o.value} className="filter-enum-multi-item">
+              <input
+                type="checkbox"
+                checked={selected.has(o.value)}
+                onChange={() => setValue(toggleMultiEnumValue(value, o.value))}
+              />
+              <span>{o.label}</span>
+            </label>
+          ))}
           <div className="filter-enum-hint">
-            可选值：{selectOptions.map((o) => o.label).join(' / ')}
+            已选：{selected.size > 0
+              ? [...selected]
+                  .map((v) => selectOptions.find((o) => o.value === v)?.label ?? v)
+                  .join('、')
+              : '（无）'}
           </div>
         </div>
       )

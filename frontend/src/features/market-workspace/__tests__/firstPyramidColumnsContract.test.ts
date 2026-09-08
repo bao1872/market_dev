@@ -84,3 +84,51 @@ test('动量方向筛选器 enumOptions：扩张→偏多 / 收缩→偏空 / �
   assert.equal(map['收缩'], '偏空')
   assert.equal(map['平缓'], '中性')
 })
+
+// ===== P0 corrective / Blocker 2：三个"事件方向"列必须走事件方向 formatter =====
+test('动量事件方向列 bullish → 多头（不再 方向未知）', () => {
+  const row = { firstPyramid: { fp_momentum_event_direction: 'bullish' } } as unknown as TrendSelectionRow
+  assert.equal(col('fp_momentum_event_direction').render?.(row), '多头')
+})
+
+test('最新扩散方向列 bearish → 空头', () => {
+  const row = { firstPyramid: { fp_latest_diffusion_direction: 'bearish' } } as unknown as TrendSelectionRow
+  assert.equal(col('fp_latest_diffusion_direction').render?.(row), '空头')
+})
+
+test('成交密集区事件方向列 bullish → 多头', () => {
+  const row = { firstPyramid: { fp_node_event_direction: 'bullish' } } as unknown as TrendSelectionRow
+  assert.equal(col('fp_node_event_direction').render?.(row), '多头')
+})
+
+// ===== P0 corrective / Blocker 4：残留缩写已清除（列设置可见标题也中文化）=====
+test('P0-6 残留缩写已清除：结构突破/转折/承接压制区/双顶双底/布林带/挤压动量', () => {
+  assert.equal(col('fp_latest_bos_direction').title, '最新结构突破方向')
+  assert.equal(col('fp_latest_choch_direction').title, '最新结构转折方向')
+  assert.equal(col('fp_latest_ob_direction').title, '承接/压制区方向')
+  assert.equal(col('fp_latest_eqh_price').title, '双顶压力价')
+  assert.equal(col('fp_latest_eql_price').title, '双底支撑价')
+  assert.equal(col('fp_bb_upper').title, '布林带上轨')
+  assert.equal(col('fp_bb_middle').title, '布林带中轨')
+  assert.equal(col('fp_bb_lower').title, '布林带下轨')
+  assert.equal(col('fp_sqzmom_prev').title, '上一周期挤压动量值')
+  assert.equal(col('fp_peak_node_count').title, '成交密集区数量')
+})
+
+// ===== P0 corrective / Blocker 4：列文案契约（单一 ColumnRegistry 全量扫描，非仓库扫描）=====
+// 用户明确 token：BOS / CHoCH / OB / EQH / EQL / BB / SQZMOM 不得出现在任何用户可见标题/缩写/tooltip
+test('列文案契约：99 列 title/shortTitle/helpText 不得出现 BOS/CHoCH/OB/EQH/EQL/BB/SQZMOM', () => {
+  const banned = ['BOS', 'CHoCH', 'OB', 'EQH', 'EQL', 'BB', 'SQZMOM']
+  const cols = getFirstPyramidColumns()
+  assert.equal(cols.length, 99)
+  for (const c of cols) {
+    for (const field of [c.title, c.shortTitle ?? '', c.helpText ?? ''] as string[]) {
+      for (const tok of banned) {
+        assert.ok(
+          !field.includes(tok),
+          `列 ${c.key} 用户文案不得包含 ${tok}（实际片段：${field}）`,
+        )
+      }
+    }
+  }
+})
