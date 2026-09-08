@@ -196,7 +196,9 @@ _DEFAULT_VALUE_NORMALIZER: dict[str, str] = {
 _ENUM_VALUES_DIRECTION_LABEL = ["上行", "下行", "震荡"]
 _ENUM_VALUES_ALIGNMENT = ["共振", "背离"]
 _ENUM_VALUES_SQUEEZE_STATE = ["挤压中", "已释放", "无挤压"]
-_ENUM_VALUES_MOMENTUM_DIRECTION = ["扩张", "收缩"]
+# [Commit C / P0-4 2026-09-08] 补齐真实已有值 "平缓"（producer 在 sqzmom_val==0 时产出 FLAT→平缓），
+# 否则 filter enum 无法选择该真实状态。仅补值，不改算法/存储语义/sqzmom_val/producer。
+_ENUM_VALUES_MOMENTUM_DIRECTION = ["扩张", "收缩", "平缓"]
 _ENUM_VALUES_STRUCTURE_EVENT_TYPE = [
     "BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "EQH", "EQL",
 ]

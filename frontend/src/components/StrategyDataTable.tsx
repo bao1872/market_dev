@@ -384,6 +384,12 @@ function FilterPopover({
   const enumValues = spec?.enum_values ?? []
   const inputControl = spec?.input_control ?? ''
   const normalizer = spec?.value_normalizer
+  // [Commit C / P0-3] 展示 label 映射：列携带 enumOptions 时优先用（提交仍为 canonical value），
+  // 否则回退到后端 enum_values（后端已下发中文的枚举会原样显示中文）。
+  const selectOptions = useMemo(() => {
+    if (column.enumOptions && column.enumOptions.length > 0) return column.enumOptions
+    return enumValues.map((v) => ({ value: v, label: v }))
+  }, [column, enumValues])
   // enum 字段且操作符为 eq/neq 时使用下拉单选
   const isEnumSingleSelect =
     (inputControl === 'single_select' || enumValues.length > 0) &&
@@ -492,8 +498,8 @@ function FilterPopover({
           autoFocus
         >
           <option value="">请选择</option>
-          {enumValues.map((v) => (
-            <option key={v} value={v}>{v}</option>
+          {selectOptions.map((o) => (
+            <option key={o.value} value={o.value}>{o.label}</option>
           ))}
         </select>
       )
@@ -509,8 +515,8 @@ function FilterPopover({
           autoFocus
         >
           <option value="">请选择</option>
-          <option value="true">是 (true)</option>
-          <option value="false">否 (false)</option>
+          <option value="true">是</option>
+          <option value="false">否</option>
         </select>
       )
     }
@@ -533,7 +539,7 @@ function FilterPopover({
             ))}
           </datalist>
           <div className="filter-enum-hint">
-            可选值：{enumValues.join(' / ')}
+            可选值：{selectOptions.map((o) => o.label).join(' / ')}
           </div>
         </div>
       )

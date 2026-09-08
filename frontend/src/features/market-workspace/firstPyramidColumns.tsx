@@ -26,6 +26,25 @@ import type { ReactNode } from 'react'
 import type { DataTableColumn, ColumnFilterSpec } from '@/components/StrategyDataTable'
 import type { FpFieldSpecs } from '@/api/endpoints'
 import type { TrendSelectionRow } from '@/features/trend-selection/types'
+// [Commit C / P0-1] 展示语义唯一中枢：所有用户可见 label 走此层，禁止在各列散写中文字符串
+import {
+  formatStructureEvent,
+  formatStructureDirection,
+  formatStructureLevel,
+  formatMomentumDirection,
+  formatMomentumEvent,
+  formatSqueezeState,
+  formatAlignment,
+  formatNodeEventType,
+  formatTrendDirection,
+  STRUCTURE_EVENT_TYPE_OPTIONS,
+  EVENT_DIRECTION_OPTIONS,
+  STRUCTURE_LEVEL_OPTIONS,
+  MOMENTUM_DIRECTION_OPTIONS,
+  MOMENTUM_EVENT_TYPE_OPTIONS,
+  ALIGNMENT_OPTIONS,
+  NODE_EVENT_TYPE_OPTIONS,
+} from './presentationSemantics'
 
 // ===== 99 列 key 定义（与后端 FP_ALL_KEYS 一一对应）=====
 
@@ -100,11 +119,10 @@ if (FP_ALL_KEYS.length !== 99) {
   throw new Error(`FP_ALL_KEYS must have 99 keys, got ${FP_ALL_KEYS.length}`)
 }
 
-// ===== 默认可见键（约 20 个核心金字塔列）=====
+// ===== 默认可见键（约 19 个核心金字塔列）=====
 // 设计：覆盖 8 个分组中各自最具代表性的字段；其余默认隐藏但可在列设置中开启
+// [Commit C / P0-5] fp_summary 移出默认显示（99 字段合同继续保留，用户手工选列仍可看到）
 export const DEFAULT_FP_VISIBLE_KEYS: readonly string[] = [
-  // 快照（1）
-  'fp_summary',
   // 趋势（4）
   'fp_trend_direction', 'fp_trend_bars', 'fp_dsa_vwap_dev_pct', 'fp_segment_change_pct',
   // 结构（4）
@@ -155,14 +173,23 @@ function fmtText(val: unknown): string {
 
 function fmtDirection(val: unknown): ReactNode {
   if (val === null || val === undefined) return <span className="market-flat">{NULL_DISPLAY}</span>
-  const s = String(val)
-  if (s === '上行' || s === 'up' || s === 'bullish') {
-    return <span className="market-up">{s === 'up' || s === 'bullish' ? '上行' : s}</span>
-  }
-  if (s === '下行' || s === 'down' || s === 'bearish') {
-    return <span className="market-down">{s === 'down' || s === 'bearish' ? '下行' : s}</span>
-  }
+  // [Commit C / P0-7] fail-closed：未知趋势方向不再原样输出内部 code
+  const s = formatTrendDirection(val)
+  if (s === '上行') return <span className="market-up">上行</span>
+  if (s === '下行') return <span className="market-down">下行</span>
+  if (s === '震荡') return <span className="market-flat">震荡</span>
   return <span className="market-flat">{s}</span>
+}
+
+/** 语义列渲染：null/undefined 统一显示 "—"，否则交给 formatter（formatter 内部已 fail-closed）。 */
+function renderSemantic(
+  row: TrendSelectionRow,
+  key: string,
+  fn: (v: unknown) => string,
+): string {
+  const v = pickFp(row, key)
+  if (v === null || v === undefined) return NULL_DISPLAY
+  return fn(v)
 }
 
 /** 涨红跌绿：用于百分比方向字段（如 dsa_vwap_dev_pct、distance_pct） */
@@ -260,7 +287,7 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '趋势',
     dataType: 'text',
     width: 80,
-    helpText: 'DSA 趋势方向（上行/下行/震荡）',
+    helpText: '趋势方向（上行/下行/震荡）',
     render: (row) => fmtDirection(pickFp(row, 'fp_trend_direction')),
   },
   {
@@ -274,11 +301,11 @@ const COLUMN_DEFS: FpColumnDef[] = [
   },
   {
     key: 'fp_dsa_vwap_dev_pct',
-    title: '距DSA-VWAP',
-    shortTitle: 'VWAP差',
+    title: '距趋势参考价',
+    shortTitle: '参考价偏离',
     dataType: 'percent',
     width: 86,
-    helpText: '当前价相对 DSA VWAP 偏离百分比',
+    helpText: '当前价相对趋势参考价偏离百分比',
     render: (row) => fmtSignedPct(pickFp(row, 'fp_dsa_vwap_dev_pct')),
   },
   {
@@ -346,11 +373,11 @@ const COLUMN_DEFS: FpColumnDef[] = [
   },
   {
     key: 'fp_segment_bars',
-    title: '趋势段bar数',
-    shortTitle: '段bars',
+    title: '趋势持续周期',
+    shortTitle: '持续周期',
     dataType: 'number',
     width: 80,
-    helpText: '当前趋势段 bar 数量',
+    helpText: '当前趋势段持续 bar 数量',
     render: (row) => fmtNum(pickFp(row, 'fp_segment_bars'), 0),
   },
   {
@@ -442,16 +469,16 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '对齐',
     dataType: 'text',
     width: 70,
-    helpText: '主要结构与短线方向是否一致（共振/背离）',
-    render: (row) => fmtText(pickFp(row, 'fp_structure_alignment')),
+    helpText: '主要结构与短线方向是否一致（长短结构同向/长短结构分歧）',
+    render: (row) => renderSemantic(row, 'fp_structure_alignment', formatAlignment),
   },
   {
     key: 'fp_active_ob_count',
-    title: '活跃OB数',
-    shortTitle: 'OB数',
+    title: '有效承接/压制区数',
+    shortTitle: '承接/压制区数',
     dataType: 'number',
     width: 76,
-    helpText: '未 mitigated 的 Order Block 数量',
+    helpText: '未失效的承接/压制区（Order Block）数量',
     render: (row) => fmtNum(pickFp(row, 'fp_active_ob_count'), 0),
   },
   {
@@ -494,12 +521,22 @@ const COLUMN_DEFS: FpColumnDef[] = [
   // ===== 结构事件 (21) =====
   {
     key: 'fp_structure_event_type',
-    title: '结构事件类型',
+    title: '最新结构事件',
     shortTitle: '事件',
     dataType: 'text',
-    width: 90,
-    helpText: '最近一次结构事件类型（BOS/CHoCH/OB_CREATED/OB_ENTERED/OB_MITIGATED/EQH/EQL）',
-    render: (row) => fmtText(pickFp(row, 'fp_structure_event_type')),
+    width: 110,
+    helpText: '最近一次结构事件完整语义（事件类型+方向+级别，如 主要·多头突破）',
+    render: (row) => {
+      const type = pickFp(row, 'fp_structure_event_type')
+      if (type === null || type === undefined) return NULL_DISPLAY
+      const dir = pickFp(row, 'fp_structure_event_direction')
+      const level = pickFp(row, 'fp_structure_event_level')
+      return formatStructureEvent({
+        type: String(type),
+        direction: dir == null ? null : String(dir),
+        level: level == null ? null : String(level),
+      })
+    },
   },
   {
     key: 'fp_structure_event_direction',
@@ -507,8 +544,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '事件向',
     dataType: 'text',
     width: 80,
-    helpText: '最近一次结构事件方向',
-    render: (row) => fmtDirection(pickFp(row, 'fp_structure_event_direction')),
+    helpText: '最近一次结构事件方向（多头/空头）',
+    render: (row) => renderSemantic(row, 'fp_structure_event_direction', formatStructureDirection),
   },
   {
     key: 'fp_structure_event_level',
@@ -516,8 +553,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '级别',
     dataType: 'text',
     width: 70,
-    helpText: 'swing 或 internal',
-    render: (row) => fmtText(pickFp(row, 'fp_structure_event_level')),
+    helpText: '结构级别（主要级别/短线级别）',
+    render: (row) => renderSemantic(row, 'fp_structure_event_level', formatStructureLevel),
   },
   {
     key: 'fp_structure_event_freshness',
@@ -561,8 +598,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'BOS向',
     dataType: 'text',
     width: 80,
-    helpText: '最近一次 BOS 事件方向',
-    render: (row) => fmtDirection(pickFp(row, 'fp_latest_bos_direction')),
+    helpText: '最近一次 BOS 事件方向（多头/空头）',
+    render: (row) => renderSemantic(row, 'fp_latest_bos_direction', formatStructureDirection),
   },
   {
     key: 'fp_latest_bos_freshness',
@@ -579,8 +616,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'BOS级',
     dataType: 'text',
     width: 70,
-    helpText: '最近 BOS 级别（swing/internal）',
-    render: (row) => fmtText(pickFp(row, 'fp_latest_bos_level')),
+    helpText: '最近 BOS 级别（主要级别/短线级别）',
+    render: (row) => renderSemantic(row, 'fp_latest_bos_level', formatStructureLevel),
   },
   {
     key: 'fp_latest_choch_direction',
@@ -588,8 +625,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'CHoCH向',
     dataType: 'text',
     width: 86,
-    helpText: '最近一次 CHoCH 事件方向',
-    render: (row) => fmtDirection(pickFp(row, 'fp_latest_choch_direction')),
+    helpText: '最近一次 CHoCH 事件方向（多头/空头）',
+    render: (row) => renderSemantic(row, 'fp_latest_choch_direction', formatStructureDirection),
   },
   {
     key: 'fp_latest_choch_freshness',
@@ -606,8 +643,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'CHoCH级',
     dataType: 'text',
     width: 76,
-    helpText: '最近 CHoCH 级别',
-    render: (row) => fmtText(pickFp(row, 'fp_latest_choch_level')),
+    helpText: '最近 CHoCH 级别（主要级别/短线级别）',
+    render: (row) => renderSemantic(row, 'fp_latest_choch_level', formatStructureLevel),
   },
   {
     key: 'fp_latest_ob_direction',
@@ -615,8 +652,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: 'OB向',
     dataType: 'text',
     width: 80,
-    helpText: '最近一次 OB 生命周期事件方向（OB_CREATED/OB_ENTERED/OB_MITIGATED）',
-    render: (row) => fmtDirection(pickFp(row, 'fp_latest_ob_direction')),
+    helpText: '最近一次 OB 生命周期事件方向（多头/空头）',
+    render: (row) => renderSemantic(row, 'fp_latest_ob_direction', formatStructureDirection),
   },
   {
     key: 'fp_latest_ob_freshness',
@@ -689,8 +726,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '动量',
     dataType: 'text',
     width: 76,
-    helpText: '扩张/收缩',
-    render: (row) => fmtText(pickFp(row, 'fp_momentum_direction')),
+    helpText: '动量方向（偏多/偏空/中性）',
+    render: (row) => renderSemantic(row, 'fp_momentum_direction', formatMomentumDirection),
   },
   {
     key: 'fp_squeeze_state',
@@ -699,24 +736,24 @@ const COLUMN_DEFS: FpColumnDef[] = [
     dataType: 'text',
     width: 80,
     helpText: '挤压中/已释放/无挤压',
-    render: (row) => fmtText(pickFp(row, 'fp_squeeze_state')),
+    render: (row) => renderSemantic(row, 'fp_squeeze_state', formatSqueezeState),
   },
   {
     key: 'fp_momentum_change',
-    title: '动量变化',
-    shortTitle: '动量变',
+    title: '动量变化值',
+    shortTitle: '动量变值',
     dataType: 'number',
     width: 80,
-    helpText: 'SQZMOM 当前值 - 前值',
+    helpText: 'SQZMOM 当前值减前值（数值；不等同于增强/减弱）',
     render: (row) => fmtNum(pickFp(row, 'fp_momentum_change'), 4),
   },
   {
     key: 'fp_sqzmom_value',
-    title: 'SQZMOM值',
-    shortTitle: 'SQZMOM',
+    title: '挤压动量值',
+    shortTitle: '挤压动量',
     dataType: 'number',
     width: 86,
-    helpText: 'SQZMOM 指标当前值',
+    helpText: '挤压动量（SQZMOM）指标当前值',
     render: (row) => fmtNum(pickFp(row, 'fp_sqzmom_value'), 4),
   },
   {
@@ -730,8 +767,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
   },
   {
     key: 'fp_bb_position',
-    title: 'BB位置',
-    shortTitle: 'BB位',
+    title: '布林带位置',
+    shortTitle: '布林带位',
     dataType: 'number',
     width: 76,
     helpText: '当前价在布林带中位置（0~1）',
@@ -739,8 +776,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
   },
   {
     key: 'fp_bb_width',
-    title: 'BB宽度',
-    shortTitle: 'BB宽',
+    title: '布林带宽度',
+    shortTitle: '布林带宽',
     dataType: 'number',
     width: 76,
     helpText: '布林带宽度',
@@ -808,8 +845,8 @@ const COLUMN_DEFS: FpColumnDef[] = [
     shortTitle: '动量事件',
     dataType: 'text',
     width: 90,
-    helpText: '最近一次动量事件类型（SQZ_OFF/MOMENTUM_DIFFUSION）',
-    render: (row) => fmtText(pickFp(row, 'fp_momentum_event_type')),
+    helpText: '最近一次动量事件类型（挤压释放/动量扩散）',
+    render: (row) => renderSemantic(row, 'fp_momentum_event_type', formatMomentumEvent),
   },
   {
     key: 'fp_momentum_event_direction',
@@ -896,20 +933,20 @@ const COLUMN_DEFS: FpColumnDef[] = [
   },
   {
     key: 'fp_poc_price',
-    title: 'POC价格',
-    shortTitle: 'POC',
+    title: '主要成交密集价',
+    shortTitle: '成交密集价',
     dataType: 'number',
     width: 80,
-    helpText: 'Point of Control 价格',
+    helpText: '主要成交密集价（Point of Control）价格',
     render: (row) => fmtNum(pickFp(row, 'fp_poc_price')),
   },
   {
     key: 'fp_poc_distance_pct',
-    title: '距POC%',
-    shortTitle: '距POC',
+    title: '距主要成交密集价',
+    shortTitle: '距密集价',
     dataType: 'percent',
     width: 80,
-    helpText: '当前价距 POC 百分比',
+    helpText: '当前价距主要成交密集价百分比',
     render: (row) => fmtSignedPct(pickFp(row, 'fp_poc_distance_pct')),
   },
   {
@@ -923,20 +960,20 @@ const COLUMN_DEFS: FpColumnDef[] = [
   },
   {
     key: 'fp_vah_price',
-    title: 'VAH价格',
-    shortTitle: 'VAH',
+    title: '主要成交区上沿',
+    shortTitle: '成交区上沿',
     dataType: 'number',
     width: 80,
-    helpText: 'Value Area High 价格',
+    helpText: '主要成交区上沿（Value Area High）价格',
     render: (row) => fmtNum(pickFp(row, 'fp_vah_price')),
   },
   {
     key: 'fp_val_price',
-    title: 'VAL价格',
-    shortTitle: 'VAL',
+    title: '主要成交区下沿',
+    shortTitle: '成交区下沿',
     dataType: 'number',
     width: 80,
-    helpText: 'Value Area Low 价格',
+    helpText: '主要成交区下沿（Value Area Low）价格',
     render: (row) => fmtNum(pickFp(row, 'fp_val_price')),
   },
   {
@@ -946,7 +983,7 @@ const COLUMN_DEFS: FpColumnDef[] = [
     dataType: 'text',
     width: 90,
     helpText: '最近一次筹码节点事件类型',
-    render: (row) => fmtText(pickFp(row, 'fp_node_event_type')),
+    render: (row) => renderSemantic(row, 'fp_node_event_type', formatNodeEventType),
   },
   {
     key: 'fp_node_event_direction',
@@ -1101,6 +1138,24 @@ if (COLUMN_DEFS.length !== 99) {
   throw new Error(`COLUMN_DEFS must have 99 entries, got ${COLUMN_DEFS.length}`)
 }
 
+// ===== 筛选器 enumOptions（canonical value → 展示 label；提交仍为 canonical value）=====
+// [Commit C / P0-3] 仅对下发英文/canonical 枚举值的列提供中文 label 映射；
+// 后端已下发中文的枚举（挤压状态/量能徽标/量价关系/趋势方向）不在此列，FilterPopover 回退用 enum_values。
+const ENUM_OPTIONS_BY_KEY: Record<string, Array<{ value: string; label: string }> | undefined> = {
+  fp_structure_event_type: STRUCTURE_EVENT_TYPE_OPTIONS,
+  fp_structure_event_direction: EVENT_DIRECTION_OPTIONS,
+  fp_structure_event_level: STRUCTURE_LEVEL_OPTIONS,
+  fp_latest_bos_direction: EVENT_DIRECTION_OPTIONS,
+  fp_latest_choch_direction: EVENT_DIRECTION_OPTIONS,
+  fp_latest_ob_direction: EVENT_DIRECTION_OPTIONS,
+  fp_latest_bos_level: STRUCTURE_LEVEL_OPTIONS,
+  fp_latest_choch_level: STRUCTURE_LEVEL_OPTIONS,
+  fp_structure_alignment: ALIGNMENT_OPTIONS,
+  fp_momentum_direction: MOMENTUM_DIRECTION_OPTIONS,
+  fp_momentum_event_type: MOMENTUM_EVENT_TYPE_OPTIONS,
+  fp_node_event_type: NODE_EVENT_TYPE_OPTIONS,
+}
+
 // ===== 导出：唯一列定义函数 =====
 
 /**
@@ -1164,6 +1219,8 @@ export function getFirstPyramidColumns(
       title: def.title,
       shortTitle: def.shortTitle,
       dataType: tableDataType,
+      // [Commit C / P0-3] 筛选器中文 label 映射（提交仍为 canonical value）
+      enumOptions: ENUM_OPTIONS_BY_KEY[def.key],
       // [CHANGE-20260902] 排序合同：仅真正数值型字段允许排序。
       // 使用 COLUMN_DEFS 原始 def.dataType 判断（不能用上面转换后的 tableDataType，
       // 因为它把 percent 误映射成 number 会漏判）。

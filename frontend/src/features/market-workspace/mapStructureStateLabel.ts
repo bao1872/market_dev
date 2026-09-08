@@ -16,7 +16,7 @@ export function mapStructureStateLabel(code: string | null | undefined): string 
     above_upper_node: '高于上方节点',
     below_lower_node: '低于下方节点',
   }
-  return map[code] ?? code
+  return map[code] ?? '未知状态'
 }
 
 /**
@@ -34,5 +34,5 @@ export function mapDsaStateLabel(code: string | null | undefined): string {
     '0': '震荡',
     '-1': '下行',
   }
-  return map[code] ?? code
+  return map[code] ?? '未知状态'
 }
