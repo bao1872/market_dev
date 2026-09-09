@@ -10,22 +10,56 @@ export const BRAND = {
     '从全市场发现变化，理解个股状态，把值得继续看的股票留在自选并持续观察。',
 }
 
+// 顶部导航（参考图 #1 对齐）：
+// - 5 项菜单 + 品牌副标 "从零了解盘迹" + 绿色 CTA "立即使用"。
+// - 锚点指向当前 section；公众号文章为占位（M4 接入真实外链）。
+// - 不得出现 99/字段级入口（营销契约测试守住，详见 __tests__/marketingCopy.test.ts）。
 export const NAV = {
+  tagline: '从零了解盘迹',
   items: [
-    { label: '怎么发现', href: '#discovery' },
-    { label: '怎么用', href: '#workflow' },
-    { label: '看什么', href: '#market-language' },
+    { label: '产品', href: '#hero' },
+    { label: '特性速览', href: '#hero-screener' },
+    { label: '标的语境', href: '#discovery' },
+    { label: '监控自选', href: '#workflow' },
+    { label: '公众号文章', href: '#feishu-articles', note: 'M4 接入' },
   ],
-  loginHref: '/login',
-  loginLabel: '登录盘迹',
+  ctaLabel: '立即使用',
+  ctaHref: '/login',
+}
+
+// Hero（参考图 #2 对齐）：
+// - 左侧标题 + 副标题 + 大字 stat "1000+ 行业图" + 2 CTA；
+// - 右侧 HeroScreener 静态表（见 data/heroScreener.ts）；
+// - 底部 statusBadges：双行状态条（多市场同步 / 持续数据刷新）。
+// 硬约束：表格为演示数据（heroScreener.NOTE），不接实时行情。
+export interface HeroStatusBadge {
+  readonly dot: 'green' | 'blue'
+  readonly text: string
+}
+
+export interface HeroStat {
+  readonly value: string
+  readonly label: string
 }
 
 export const HERO = {
   eyebrow: BRAND.slogan,
   title: '从全市场发现变化，\n把真正值得看的股票留下来。',
   subtitle: BRAND.description,
-  primaryCta: { label: '登录盘迹', href: '/login' },
-  secondaryCta: { label: '看它怎么用', href: '#workflow' },
+  stat: {
+    value: '1000+',
+    label: '行业图',
+  } as HeroStat,
+  primaryCta: { label: '开始体验', href: '/login' },
+  secondaryCta: {
+    label: '查看完整演示',
+    duration: '0:19',
+    href: '#workflow',
+  },
+  statusBadges: [
+    { dot: 'green', text: '多市场状态实时同步' },
+    { dot: 'blue', text: '盘中持续数据刷新' },
+  ] as readonly HeroStatusBadge[],
 }
 
 // 两种机会入口：全市场扫描 + 小Z说事（内容驱动）

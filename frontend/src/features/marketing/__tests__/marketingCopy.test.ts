@@ -142,3 +142,58 @@ test('首页 numbered section 序号严格为 01→05', () => {
   ]
   assert.deepEqual(indexes, ['01', '02', '03', '04', '05'])
 })
+
+// ===== Slice A：Hero + Nav 视觉对齐（参考图 #1 / #2）=====
+
+test('NAV 含 5 项菜单 + 副标 + 立即使用 CTA', () => {
+  assert.equal(NAV.tagline, '从零了解盘迹')
+  assert.equal(NAV.ctaLabel, '立即使用')
+  assert.equal(NAV.ctaHref, '/login')
+  assert.equal(NAV.items.length, 5)
+  const labels = NAV.items.map((i) => i.label)
+  for (const expected of [
+    '产品',
+    '特性速览',
+    '标的语境',
+    '监控自选',
+    '公众号文章',
+  ]) {
+    assert.ok(
+      labels.includes(expected),
+      `导航菜单缺少: ${expected}`,
+    )
+  }
+})
+
+test('HERO 含 1000+ 大字 stat + 开始体验 + 0:19 演示', () => {
+  assert.equal(HERO.stat.value, '1000+')
+  assert.equal(HERO.stat.label, '行业图')
+  assert.equal(HERO.primaryCta.label, '开始体验')
+  assert.equal(HERO.secondaryCta.label, '查看完整演示')
+  assert.equal(HERO.secondaryCta.duration, '0:19')
+})
+
+test('HERO 底部两条状态徽章（多市场同步 / 盘中持续刷新）', () => {
+  assert.equal(HERO.statusBadges.length, 2)
+  const texts = HERO.statusBadges.map((b) => b.text)
+  assert.ok(
+    texts.some((t) => t.includes('多市场')),
+    '缺少"多市场"相关徽章',
+  )
+  assert.ok(
+    texts.some((t) => t.includes('持续')),
+    '缺少"持续数据刷新"相关徽章',
+  )
+})
+
+test('公开文案整体不含历史遗留语义术语（Slice A 后仍守住）', () => {
+  // 旧测试已覆盖；这里重复一遍以确保新增 HERO.stat / statusBadges 不引入禁用词
+  const raw = JSON.stringify({
+    nav: NAV,
+    hero: HERO,
+    statusBadges: HERO.statusBadges,
+  })
+  for (const term of ['BOS', 'CHoCH', 'Order Block', ' breaker']) {
+    assert.ok(!raw.includes(term), `营销文案不得出现旧语义术语: ${term}`)
+  }
+})

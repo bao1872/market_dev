@@ -807,3 +807,244 @@ $marketing-section-y-narrow: 64px;
     transform: none;
   }
 }
+
+// ===== Slice A 视觉（参考图 #1 + #2 对齐）=====
+// 新增 token 与布局类，不改既有变量。
+
+// ----- Nav 品牌副标 -----
+.navTagline {
+  margin-left: 10px;
+  font-size: 12px;
+  color: v.$color-muted;
+  letter-spacing: 0.4px;
+
+  @media (max-width: v.$bp-narrow) {
+    display: none;
+  }
+}
+
+// ----- Nav 右侧组（CTA + 汉堡）-----
+.navRight {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+// ----- 汉堡按钮（窄屏）-----
+.navBurger {
+  display: none;
+  width: 40px;
+  height: 40px;
+  align-items: center;
+  justify-content: center;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  color: v.$color-text;
+  font-size: 18px;
+  cursor: pointer;
+  transition: border-color 0.16s ease;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    display: inline-flex;
+  }
+}
+
+// ----- Hero 两栏布局 -----
+.heroGrid {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: 56px;
+  align-items: start;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: 1fr;
+    gap: 40px;
+  }
+}
+
+.heroLeft {
+  min-width: 0;
+}
+
+.heroRight {
+  min-width: 0;
+}
+
+// ----- Hero "1000+ 行业图" 大字 stat -----
+.heroStat {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin: 8px 0 28px;
+}
+
+.heroStatValue {
+  font-family: v.$font-mono;
+  font-size: clamp(36px, 4.4vw, 52px);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -1px;
+  color: v.$color-brand;
+}
+
+.heroStatLabel {
+  font-size: 14px;
+  color: v.$color-muted;
+}
+
+// ----- 次级按钮内的时长徽章 -----
+.btnDuration {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-left: 10px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+}
+
+// ----- Hero 底部 status badges -----
+.statusBadges {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin: 36px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  font-size: 13px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+}
+
+.statusBadgeDot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: v.$color-brand;
+  box-shadow: 0 0 6px currentColor;
+}
+
+.statusBadgeGreen .statusBadgeDot {
+  background: v.$color-down;
+  color: v.$color-down;
+}
+
+.statusBadgeBlue .statusBadgeDot {
+  background: #4f8ef7;
+  color: #4f8ef7;
+}
+
+// ----- HeroScreener 静态股票筛选表 -----
+.heroScreener {
+  position: relative;
+  padding: 18px 18px 14px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
+}
+
+.heroScreenerHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.heroScreenerTitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.heroScreenerNote {
+  font-size: 11px;
+  color: v.$color-text-dim;
+  letter-spacing: 0.3px;
+}
+
+.heroScreenerTableWrap {
+  width: 100%;
+  overflow-x: auto;
+}
+
+.heroScreenerTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+
+  th,
+  td {
+    padding: 10px 8px;
+    border-bottom: 1px solid v.$color-border-soft;
+    color: v.$color-text;
+    text-align: left;
+    white-space: nowrap;
+  }
+
+  th {
+    font-size: 11px;
+    font-weight: 500;
+    color: v.$color-muted;
+    letter-spacing: 0.4px;
+    text-transform: uppercase;
+    border-bottom-color: v.$color-border;
+  }
+
+  tbody tr:last-child td {
+    border-bottom: 0;
+  }
+
+  tbody tr[data-direction='up']:hover,
+  tbody tr[data-direction='down']:hover {
+    background: rgba(255, 255, 255, 0.02);
+  }
+}
+
+.heroScreenerRight {
+  text-align: right;
+}
+
+.heroScreenerCode {
+  font-family: v.$font-mono;
+  letter-spacing: 0.3px;
+}
+
+.heroScreenerPrice {
+  font-family: v.$font-mono;
+}
+
+// A 股惯例：涨红 / 跌绿（参考 styles/variables.scss $color-up/$color-down）
+.heroScreenerUp {
+  font-family: v.$font-mono;
+  color: v.$color-up;
+}
+
+.heroScreenerDown {
+  font-family: v.$font-mono;
+  color: v.$color-down;
+}
