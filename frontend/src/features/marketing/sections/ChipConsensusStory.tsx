@@ -1,3 +1,8 @@
+// ChipConsensusStory（Full Alignment V1 视觉升级）：
+// 与 StructureStory 同一视觉体系，但左右镜像（避免整页重复）：
+//   左：K线 + 成交分布（VolumeProfile），成交密集价以品牌实色高亮 + 动态细线标出
+//   右：竖向 timeline（4 阶段）
+// 逻辑保持 deterministic 教学剧本不变。
 import { useMemo } from 'react'
 import { KlineStoryChart } from '../components/KlineStoryChart'
 import SectionHeading from '../components/SectionHeading'
@@ -16,9 +21,8 @@ import { VolumeProfile } from './VolumeProfile'
 import styles from '../marketing.module.scss'
 
 const STAGE_ENDS = CHIP_STAGES.map((stage) => stage.endFrame)
-const CHART_HEIGHT = 320
+const CHART_HEIGHT = 300
 
-// 教学动画：deterministic 剧本，不接实时行情，不使用生产筹码算法。
 export default function ChipConsensusStory() {
   const { ref, inView } = useInViewport<HTMLDivElement>()
 
@@ -62,42 +66,32 @@ export default function ChipConsensusStory() {
         />
         <ScrollReveal>
           <div className={styles.storyGrid} ref={ref}>
-            <ol className={styles.storyStages}>
-              {CHIP_STAGES.map((item, index) => {
-                const active = index === player.stageIndex
-                return (
-                  <li
-                    key={item.id}
-                    className={active ? styles.storyStageActive : styles.storyStage}
-                    aria-current={active ? 'step' : undefined}
-                  >
-                    <span className={styles.storyStageIndex}>
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                    <span className={styles.storyStageTitle}>{item.title}</span>
-                    <span className={styles.storyStageSummary}>{item.summary}</span>
-                  </li>
-                )
-              })}
-            </ol>
-
-            <div className={styles.storyVisual}>
-              <div className={styles.chipVisual}>
-                <KlineStoryChart
-                  candles={CHIP_CANDLES}
-                  frame={player.frame}
-                  height={CHART_HEIGHT}
-                />
+            {/* 左：K线 + 成交分布 */}
+            <div className={styles.storyVisualSolo}>
+              <div className={styles.chipProfileHead}>
+                <span className={styles.consensusLabel}>
+                  {CHIP_CONSENSUS_STORY.consensusLabel}
+                </span>
+                <span className={styles.consensusValue}>{format(consensusPrice)}</span>
+                <span className={styles.consensusFrom}>
+                  起始 {format(initialConsensusPrice)} ↓ 当前 {format(consensusPrice)}
+                </span>
+              </div>
+              {/* 动态细线：主要成交密集价（随 frame 变化） */}
+              <div className={styles.consensusLine} aria-hidden="true">
+                <span className={styles.consensusLineLabel}>
+                  主要成交密集价 {format(consensusPrice)}
+                </span>
+              </div>
+              <div className={styles.chipVisualMirror}>
+                <div className={styles.storyChart}>
+                  <KlineStoryChart
+                    candles={CHIP_CANDLES}
+                    frame={player.frame}
+                    height={CHART_HEIGHT}
+                  />
+                </div>
                 <div className={styles.profilePanel}>
-                  <div className={styles.consensusReadout}>
-                    <span className={styles.consensusLabel}>
-                      {CHIP_CONSENSUS_STORY.consensusLabel}
-                    </span>
-                    <span className={styles.consensusValue}>{format(consensusPrice)}</span>
-                    <span className={styles.consensusFrom}>
-                      起始 {format(initialConsensusPrice)} ↓ 当前 {format(consensusPrice)}
-                    </span>
-                  </div>
                   <VolumeProfile
                     profile={profile}
                     minPrice={minPrice}
@@ -112,6 +106,29 @@ export default function ChipConsensusStory() {
                 <p className={styles.storyExplainText}>{stage.explanation}</p>
               </div>
             </div>
+
+            {/* 右：竖向 timeline */}
+            <ol className={styles.structureTimeline}>
+              {CHIP_STAGES.map((item, index) => {
+                const active = index === player.stageIndex
+                return (
+                  <li
+                    key={item.id}
+                    className={active ? styles.structureTimelineActive : styles.structureTimelineStep}
+                    aria-current={active ? 'step' : undefined}
+                  >
+                    <span className={styles.structureTimelineDot} aria-hidden="true" />
+                    <div className={styles.structureTimelineBody}>
+                      <span className={styles.structureTimelineIndex}>
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                      <span className={styles.structureTimelineTitle}>{item.title}</span>
+                      <span className={styles.structureTimelineSummary}>{item.summary}</span>
+                    </div>
+                  </li>
+                )
+              })}
+            </ol>
           </div>
 
           <StoryControls

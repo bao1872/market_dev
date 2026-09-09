@@ -1,7 +1,6 @@
 // 营销门户文案契约测试
 // 目的：防止营销侧重新定义产品语义、防止公开门户越界暴露内部能力（评审 M0 / M1 审查要求）。
-// M1.1 新增：公开产品边界（不得暴露 /review、/auction、/portal/index.html）、
-//           第一金字塔渐进披露（不得出现在主导航、不得作为 numbered section）。
+// Full Alignment V1 更新：6 步工作流、3 卡发现、删除未证实 claim（1000+ / 多市场实时 / 0:19 / 公众号文章）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
@@ -49,17 +48,17 @@ test('市场语言每个维度都有非空描述', () => {
   }
 })
 
-test('工作流五步顺序固定为 发现→筛选→理解→自选→跟踪', () => {
+test('工作流六步顺序固定为 发现→筛选→理解→加入自选→持续跟踪→状态提醒', () => {
   assert.deepEqual(
     WORKFLOW.steps.map((s) => s.title),
-    ['发现', '筛选', '理解', '自选', '跟踪'],
+    ['发现', '筛选', '理解', '加入自选', '持续跟踪', '状态提醒'],
   )
 })
 
-test('两种机会入口为 全市场 + 小Z说事', () => {
+test('三种机会入口为 全市场 + 板块 + 小Z说事', () => {
   assert.deepEqual(
     DISCOVERY.entries.map((e) => e.key),
-    ['market', 'story'],
+    ['market', 'section', 'story'],
   )
 })
 
@@ -143,51 +142,64 @@ test('首页 numbered section 序号严格为 01→05', () => {
   assert.deepEqual(indexes, ['01', '02', '03', '04', '05'])
 })
 
-// ===== Slice A：Hero + Nav 视觉对齐（参考图 #1 / #2）=====
+// ===== Full Alignment V1：Hero + Nav 文案对齐（参考图 #1 / #2）=====
 
-test('NAV 含 5 项菜单 + 副标 + 立即使用 CTA', () => {
+test('NAV 含 5 项真实菜单 + 副标 + 开始使用 CTA（无公众号文章）', () => {
   assert.equal(NAV.tagline, '从零了解盘迹')
-  assert.equal(NAV.ctaLabel, '立即使用')
+  assert.equal(NAV.ctaLabel, '开始使用')
   assert.equal(NAV.ctaHref, '/login')
   assert.equal(NAV.items.length, 5)
   const labels = NAV.items.map((i) => i.label)
   for (const expected of [
     '产品',
-    '特性速览',
-    '标的语境',
-    '监控自选',
-    '公众号文章',
+    '怎么工作',
+    '经典场景',
+    '小Z说事',
+    '状态提醒',
   ]) {
-    assert.ok(
-      labels.includes(expected),
-      `导航菜单缺少: ${expected}`,
-    )
+    assert.ok(labels.includes(expected), `导航菜单缺少: ${expected}`)
+  }
+  // 禁止「公众号文章」回流
+  assert.ok(
+    !labels.includes('公众号文章'),
+    '导航不得出现「公众号文章」，应使用「小Z说事 / 雪球」',
+  )
+})
+
+test('HERO 无未证实 claim：无 1000+、无 0:19、次级 CTA 指向 #how-it-works', () => {
+  // 删除 Slice A 假 claim
+  assert.ok(
+    !('stat' in HERO) || (HERO as Record<string, unknown>).stat === undefined,
+    'HERO 不得再含 1000+ 行业图 stat',
+  )
+  assert.ok(
+    !('duration' in (HERO.secondaryCta as Record<string, unknown>)),
+    'HERO 次级 CTA 不得含 0:19 时长',
+  )
+  assert.equal(HERO.primaryCta.label, '开始使用')
+  assert.equal(HERO.secondaryCta.label, '看盘迹怎么工作')
+  assert.equal(HERO.secondaryCta.href, '#how-it-works')
+  // 文案整体不得出现被禁止的未证实 claim
+  const heroRaw = JSON.stringify(HERO)
+  for (const claim of ['1000+', '多市场状态实时同步', '盘中持续数据刷新', '0:19']) {
+    assert.ok(!heroRaw.includes(claim), `HERO 不得含未证实 claim: ${claim}`)
   }
 })
 
-test('HERO 含 1000+ 大字 stat + 开始体验 + 0:19 演示', () => {
-  assert.equal(HERO.stat.value, '1000+')
-  assert.equal(HERO.stat.label, '行业图')
-  assert.equal(HERO.primaryCta.label, '开始体验')
-  assert.equal(HERO.secondaryCta.label, '查看完整演示')
-  assert.equal(HERO.secondaryCta.duration, '0:19')
-})
-
-test('HERO 底部两条状态徽章（多市场同步 / 盘中持续刷新）', () => {
+test('HERO 底部两条诚实状态条（演示数据 / 看状态）', () => {
   assert.equal(HERO.statusBadges.length, 2)
   const texts = HERO.statusBadges.map((b) => b.text)
   assert.ok(
-    texts.some((t) => t.includes('多市场')),
-    '缺少"多市场"相关徽章',
+    texts.some((t) => t.includes('演示数据')),
+    '缺少「演示数据」相关诚实状态条',
   )
   assert.ok(
-    texts.some((t) => t.includes('持续')),
-    '缺少"持续数据刷新"相关徽章',
+    texts.some((t) => t.includes('看状态')),
+    '缺少「看状态，不替你做判断」诚实状态条',
   )
 })
 
-test('公开文案整体不含历史遗留语义术语（Slice A 后仍守住）', () => {
-  // 旧测试已覆盖；这里重复一遍以确保新增 HERO.stat / statusBadges 不引入禁用词
+test('公开文案不含未证实的产品 claim（Full Alignment V1 守住）', () => {
   const raw = JSON.stringify({
     nav: NAV,
     hero: HERO,
@@ -195,5 +207,8 @@ test('公开文案整体不含历史遗留语义术语（Slice A 后仍守住）
   })
   for (const term of ['BOS', 'CHoCH', 'Order Block', ' breaker']) {
     assert.ok(!raw.includes(term), `营销文案不得出现旧语义术语: ${term}`)
+  }
+  for (const claim of ['1000+', '多市场状态实时同步', '盘中持续数据刷新', '0:19', '公众号文章']) {
+    assert.ok(!raw.includes(claim), `营销文案不得含未证实/越界 claim: ${claim}`)
   }
 })

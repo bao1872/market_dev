@@ -1,7 +1,7 @@
-// Hero（参考图 #2 对齐）：
-// - 左侧：标题 + 副标题 + "1000+ 行业图" 大字 stat + 主次按钮；
-// - 右侧：HeroScreener 静态股票筛选表（data/heroScreener.ts）；
-// - 底部：statusBadges 状态条（多市场同步 / 盘中持续刷新）。
+// Hero（Full Alignment V1）：
+// - 左：eyebrow + 标题 + 副标题 + 六维 proof chips + 主次 CTA + 诚实状态条
+// - 右：HeroScreener 盘迹式筛选表（数据/逻辑见 components/HeroScreener）
+// 已删除 Slice A 的未证实 claim（大字数字 / 实时同步 / 视频时长徽章）。
 // 数据来源：data/copy.ts HERO + data/heroScreener.ts；样式在 marketing.module.scss。
 import clsx from 'clsx'
 import GlowBackground from '../components/GlowBackground'
@@ -19,19 +19,22 @@ export default function Hero() {
       <GlowBackground />
       <div className={styles.container}>
         <div className={styles.heroGrid}>
-          {/* 左：标题 + 副标题 + stat + CTA */}
+          {/* 左：文案 + proof + CTA + 状态条 */}
           <div className={styles.heroLeft}>
-            <span className={styles.index}>{HERO.eyebrow}</span>
+            <span className={styles.eyebrow}>{HERO.eyebrow}</span>
             <h1 className={styles.heroTitle}>{HERO.title}</h1>
             <p className={styles.heroSub}>{HERO.subtitle}</p>
 
-            <div className={styles.heroStat} data-testid="marketing-hero-stat">
-              <span className={styles.heroStatValue}>
-                {HERO.stat.value}
-              </span>
-              <span className={styles.heroStatLabel}>
-                {HERO.stat.label}
-              </span>
+            {/* 六维 proof：不编造数字，只描述盘迹看什么 */}
+            <div className={styles.heroProof} aria-label={HERO.proof.label}>
+              <span className={styles.heroProofLabel}>{HERO.proof.label}</span>
+              <ul className={styles.heroProofDims}>
+                {HERO.proof.dims.map((dim) => (
+                  <li key={dim} className={styles.heroProofDim}>
+                    {dim}
+                  </li>
+                ))}
+              </ul>
             </div>
 
             <div className={styles.ctaRow}>
@@ -47,27 +50,24 @@ export default function Hero() {
                 href={HERO.secondaryCta.href}
                 data-testid="marketing-hero-cta-secondary"
               >
-                <span>{HERO.secondaryCta.label}</span>
-                <span
-                  className={styles.btnDuration}
-                  aria-label={`演示时长 ${HERO.secondaryCta.duration}`}
-                >
-                  {HERO.secondaryCta.duration}
+                {HERO.secondaryCta.label}
+                <span className={styles.btnArrow} aria-hidden="true">
+                  ↓
                 </span>
               </a>
             </div>
           </div>
 
-          {/* 右：静态股票筛选表 */}
+          {/* 右：盘迹式筛选表 */}
           <div className={styles.heroRight} id="hero-screener">
             <HeroScreener />
           </div>
         </div>
 
-        {/* 底部：status badges */}
+        {/* 诚实状态条：演示数据 + 看状态不替判断（无实时同步假 claim） */}
         <ul
           className={styles.statusBadges}
-          aria-label="实时状态"
+          aria-label="状态说明"
           data-testid="marketing-hero-status"
         >
           {HERO.statusBadges.map((badge) => (

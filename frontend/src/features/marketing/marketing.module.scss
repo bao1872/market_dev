@@ -190,7 +190,7 @@ $marketing-section-y-narrow: 64px;
 
 .btnPrimary {
   background: v.$color-brand;
-  color: #04140f;
+  color: v.$color-bg;
 
   &:hover {
     background: v.$color-brand-hover;
@@ -879,43 +879,6 @@ $marketing-section-y-narrow: 64px;
   min-width: 0;
 }
 
-// ----- Hero "1000+ 行业图" 大字 stat -----
-.heroStat {
-  display: flex;
-  align-items: baseline;
-  gap: 10px;
-  margin: 8px 0 28px;
-}
-
-.heroStatValue {
-  font-family: v.$font-mono;
-  font-size: clamp(36px, 4.4vw, 52px);
-  font-weight: 800;
-  line-height: 1;
-  letter-spacing: -1px;
-  color: v.$color-brand;
-}
-
-.heroStatLabel {
-  font-size: 14px;
-  color: v.$color-muted;
-}
-
-// ----- 次级按钮内的时长徽章 -----
-.btnDuration {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  margin-left: 10px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  font-family: v.$font-mono;
-  font-size: 12px;
-  color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.22);
-}
-
 // ----- Hero 底部 status badges -----
 .statusBadges {
   position: relative;
@@ -953,8 +916,8 @@ $marketing-section-y-narrow: 64px;
 }
 
 .statusBadgeBlue .statusBadgeDot {
-  background: #4f8ef7;
-  color: #4f8ef7;
+  background: v.$color-info;
+  color: v.$color-info;
 }
 
 // ----- HeroScreener 静态股票筛选表 -----
@@ -1047,4 +1010,956 @@ $marketing-section-y-narrow: 64px;
 .heroScreenerDown {
   font-family: v.$font-mono;
   color: v.$color-down;
+}
+
+// ============================================================
+// Full Alignment V1 — section-organized additions
+// 仅使用 variables.scss token；莹感绿只用于 active / CTA / focus / 重要数字。
+// ============================================================
+
+// ----- Hero 六维 proof -----
+.heroProof {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 0 0 28px;
+}
+
+.heroProofLabel {
+  font-size: 13px;
+  color: v.$color-muted;
+  letter-spacing: 0.4px;
+}
+
+.heroProofDims {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.heroProofDim {
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.08);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+}
+
+.btnArrow {
+  margin-left: 6px;
+  font-size: 13px;
+}
+
+// ----- HeroScreener 盘迹式外壳 -----
+.heroScreenerShell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-bottom: 12px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
+.heroScreenerSearch {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: v.$color-muted;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+}
+
+.heroScreenerSearchDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: v.$color-brand;
+  box-shadow: 0 0 6px v.$color-brand;
+}
+
+.heroScreenerChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.heroScreenerChip {
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: v.$color-muted;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border-soft;
+}
+
+.heroScreenerChipActive {
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border-color: rgba(0, 246, 194, 0.30);
+}
+
+.heroScreenerName {
+  font-weight: 600;
+  color: v.$color-text;
+}
+
+.heroScreenerCell {
+  font-size: 13px;
+  color: v.$color-text;
+}
+
+.heroScreenerRecent {
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+.heroScreenerRecentOn {
+  color: v.$color-brand;
+  font-weight: 600;
+}
+
+.heroScreenerRecentOff {
+  color: v.$color-text-dim;
+}
+
+// ----- Discovery 3 卡 + mini flow -----
+.discoveryGrid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.discoveryCard {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 26px 24px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+    transform: translateY(-2px);
+  }
+}
+
+.discoveryCardTop {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+.discoveryCardIndex {
+  font-family: v.$font-mono;
+  font-size: 13px;
+  color: v.$color-brand;
+}
+
+.discoveryCardTitle {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.discoveryFlow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 4px;
+  margin: 0 0 18px;
+  padding: 14px;
+  list-style: none;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border-soft;
+  border-radius: v.$radius-base;
+}
+
+.discoveryFlowStep {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.discoveryFlowArrow {
+  color: v.$color-brand;
+  flex-shrink: 0;
+}
+
+.discoveryFlowNode {
+  font-size: 12px;
+  color: v.$color-muted;
+  white-space: nowrap;
+}
+
+// ----- Workflow 6 图标 + flow line -----
+.workflowGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.workflowCell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  height: 100%;
+  padding: 22px 18px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  transition: border-color 0.2s ease;
+}
+
+.workflowIcon {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 12px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.08);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+  border-radius: v.$radius-base;
+}
+
+.workflowStepIndex {
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-brand;
+  margin-bottom: 8px;
+}
+
+.workflowFlow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 4px;
+  margin-top: 28px;
+  padding-top: 22px;
+  border-top: 1px solid v.$color-border-soft;
+}
+
+.workflowFlowNode {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.workflowFlowArrow {
+  color: v.$color-brand;
+  font-size: 14px;
+}
+
+.workflowFlowLabel {
+  font-size: 14px;
+  color: v.$color-muted;
+}
+
+// ----- Structure / Chip 竖向 timeline -----
+.structureTimeline {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.structureTimelineStep,
+.structureTimelineActive {
+  position: relative;
+  padding: 0 0 22px 26px;
+
+  // 竖向细线
+  &::before {
+    content: '';
+    position: absolute;
+    left: 6px;
+    top: 14px;
+    bottom: 0;
+    width: 2px;
+    background: v.$color-border;
+  }
+
+  &:last-child::before {
+    display: none;
+  }
+}
+
+.structureTimelineActive {
+  &::before {
+    background: linear-gradient(v.$color-brand, v.$color-border);
+  }
+}
+
+.structureTimelineDot {
+  position: absolute;
+  left: 0;
+  top: 4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: v.$color-panel;
+  border: 2px solid v.$color-border;
+}
+
+.structureTimelineActive .structureTimelineDot {
+  background: v.$color-brand;
+  border-color: v.$color-brand;
+  box-shadow: 0 0 10px rgba(0, 246, 194, 0.5);
+}
+
+.structureTimelineBody {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.structureTimelineIndex {
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+.structureTimelineActive .structureTimelineIndex {
+  color: v.$color-brand;
+}
+
+.structureTimelineTitle {
+  font-size: 15px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.structureTimelineSummary {
+  font-size: 13px;
+  line-height: 1.7;
+  color: v.$color-muted;
+}
+
+// K线主角（薄卡，不套厚背景）
+.storyVisualSolo {
+  min-width: 0;
+}
+
+.storyChart {
+  padding: 8px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  overflow: hidden;
+}
+
+.storyEventFloat {
+  display: inline-block;
+  margin-bottom: 10px;
+  padding: 6px 12px;
+  border-radius: v.$radius-base;
+  font-size: 12px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+}
+
+// Chip 镜像布局
+.chipProfileHead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 10px;
+  margin-bottom: 8px;
+}
+
+.consensusLine {
+  height: 1px;
+  margin: 0 0 10px;
+  background: linear-gradient(90deg, transparent, v.$color-brand, transparent);
+}
+
+.consensusLineLabel {
+  display: block;
+  margin-top: 6px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-brand;
+  text-align: center;
+}
+
+.consensusValue {
+  font-family: v.$font-mono;
+  font-size: 20px;
+  color: v.$color-brand;
+}
+
+.chipVisualMirror {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 160px;
+  gap: 12px;
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+// 复用的共识读出来自既有 .consensusLabel / .consensusFrom / .profilePanel
+
+// ----- Market Language 居中句 + 横向六维 -----
+.marketCenter {
+  max-width: 760px;
+  margin: 8px auto 40px;
+  text-align: center;
+  font-size: clamp(20px, 2.6vw, 30px);
+  line-height: 1.5;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.langRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.langCell {
+  flex: 1 1 140px;
+  padding: 20px 18px;
+  text-align: center;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border-soft;
+  border-radius: v.$radius-base;
+  transition: border-color 0.2s ease;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+  }
+}
+
+.langWord {
+  margin: 0 0 8px;
+  font-size: 22px;
+  font-weight: 800;
+  color: v.$color-brand;
+}
+
+.langDesc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: v.$color-muted;
+}
+
+// ----- StrategyLab 交互 -----
+.labTabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 28px;
+}
+
+.labTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  font-size: 14px;
+  color: v.$color-muted;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  cursor: pointer;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+
+  &:hover {
+    color: v.$color-text;
+    border-color: v.$color-brand-deep;
+  }
+}
+
+.labTabActive {
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.08);
+  border-color: rgba(0, 246, 194, 0.40);
+}
+
+.labWorkspace {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr 1fr;
+  gap: 24px;
+  align-items: start;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.labLogic {
+  padding: 22px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+}
+
+.labLogicTitle {
+  margin: 0 0 10px;
+  font-size: 17px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.labLogicText {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.8;
+  color: v.$color-muted;
+}
+
+.labChips,
+.labFunnel {
+  padding: 22px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+}
+
+.labChipsLabel,
+.labFunnelLabel {
+  display: block;
+  margin-bottom: 14px;
+  font-size: 12px;
+  letter-spacing: 0.4px;
+  color: v.$color-muted;
+  text-transform: uppercase;
+}
+
+.labChipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.labChip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 13px;
+  color: v.$color-muted;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+}
+
+.labChipActive {
+  color: v.$color-bg;
+  font-weight: 600;
+  background: v.$color-brand;
+  border-color: v.$color-brand;
+}
+
+.labFunnelList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.labFunnelRow,
+.xiaozFunnelRow {
+  display: grid;
+  grid-template-columns: 1fr 70px 56px;
+  align-items: center;
+  gap: 10px;
+}
+
+.labFunnelName,
+.xiaozFunnelRow > span:first-child {
+  font-size: 13px;
+  color: v.$color-muted;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.labFunnelBarWrap {
+  position: relative;
+  height: 8px;
+  background: v.$color-panel-2;
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.labFunnelBar {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, v.$color-brand-deep, v.$color-brand);
+}
+
+.labFunnelCount {
+  font-family: v.$font-mono;
+  font-size: 13px;
+  text-align: right;
+  color: v.$color-text;
+}
+
+.labNote {
+  margin: 24px 0 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: v.$color-text-dim;
+  text-align: center;
+}
+
+// ----- 小Z说事 → 盘迹 -----
+.xiaozGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  align-items: start;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.xiaozCard {
+  padding: 24px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+}
+
+.xiaozCardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.xiaozSource {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.xiaozBadge {
+  padding: 3px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  color: v.$color-warning;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.30);
+}
+
+.xiaozSnippet {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.85;
+  color: v.$color-muted;
+}
+
+.xiaozCta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 14px;
+  font-weight: 600;
+  color: v.$color-brand;
+  text-decoration: none;
+
+  &:hover {
+    color: v.$color-brand-hover;
+  }
+}
+
+.xiaozHighlight {
+  margin: 16px 0 8px;
+  padding: 12px 14px;
+  border-radius: v.$radius-base;
+  font-size: 15px;
+  font-weight: 700;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+}
+
+.xiaozCore {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.7;
+  color: v.$color-muted;
+}
+
+// ----- Watch + Notify -----
+.watchGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 40px;
+  align-items: center;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.watchSteps {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 16px;
+  padding: 0;
+  list-style: none;
+  counter-reset: step;
+}
+
+.watchStep {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
+.watchStepIndex {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.08);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+  border-radius: 50%;
+}
+
+.watchStepLabel {
+  font-size: 15px;
+  color: v.$color-text;
+}
+
+.watchStepArrow {
+  margin-left: auto;
+  color: v.$color-brand;
+}
+
+.watchNote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: v.$color-text-dim;
+}
+
+.watchFrame {
+  display: flex;
+  justify-content: center;
+}
+
+.watchPhone {
+  width: 100%;
+  max-width: 320px;
+  padding: 12px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 24px;
+  box-shadow: v.$shadow-card;
+}
+
+.watchImg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 14px;
+}
+
+// ----- Final CTA -----
+.finalCta {
+  position: relative;
+  padding: 96px 0;
+  text-align: center;
+  background:
+    radial-gradient(60% 80% at 50% 0%, rgba(0, 246, 194, 0.10), transparent 70%),
+    v.$color-panel;
+  border-top: 1px solid v.$color-border-soft;
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
+.finalCtaInner {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.finalCtaTitle {
+  margin: 0 0 12px;
+  font-size: clamp(30px, 4vw, 44px);
+  line-height: 1.25;
+  font-weight: 800;
+  color: v.$color-text;
+}
+
+.finalCtaSubtitle {
+  margin: 0 0 28px;
+  font-size: 16px;
+  line-height: 1.8;
+  color: v.$color-muted;
+}
+
+.finalCtaBtn {
+  min-width: 150px;
+}
+
+.finalInvite {
+  margin-top: 40px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+}
+
+.finalInviteTitle {
+  font-size: 14px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.finalInviteImgWrap {
+  width: 200px;
+  height: 200px;
+  overflow: hidden;
+  border-radius: v.$radius-card;
+  border: 1px solid v.$color-border;
+}
+
+.finalInviteImg {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: center;
+}
+
+.finalInviteNote {
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+// ----- 第一金字塔 Drawer 搜索 + pending -----
+.fieldSearch {
+  margin-bottom: 18px;
+}
+
+.fieldSearchInput {
+  width: 100%;
+  height: 40px;
+  padding: 0 14px;
+  font-size: 14px;
+  color: v.$color-text;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+
+  &::placeholder {
+    color: v.$color-text-dim;
+  }
+
+  &:focus {
+    outline: none;
+    border-color: v.$color-brand;
+  }
+}
+
+.fieldGroupActive {
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border-color: rgba(0, 246, 194, 0.40);
+}
+
+.fieldPending {
+  margin-top: 22px;
+  padding: 16px;
+  border: 1px dashed v.$color-border;
+  border-radius: v.$radius-base;
+  background: v.$color-panel-2;
+}
+
+.fieldPendingTag {
+  display: inline-block;
+  margin-bottom: 8px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.5px;
+  color: v.$color-warning;
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.30);
+}
+
+// ----- 移动端导航面板（真正可用）-----
+.mobileNavPanel {
+  position: fixed;
+  top: 64px;
+  left: 0;
+  right: 0;
+  z-index: 19;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 16px 24px 24px;
+  background: rgba(10, 15, 20, 0.96);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid v.$color-border;
+}
+
+.mobileNavLinks {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.mobileNavLink {
+  padding: 14px 12px;
+  font-size: 16px;
+  color: v.$color-text;
+  text-decoration: none;
+  border-radius: v.$radius-base;
+
+  &:hover {
+    background: v.$color-panel-2;
+    color: v.$color-brand;
+  }
+}
+
+.mobileNavCta {
+  margin-top: 10px;
+  width: 100%;
 }

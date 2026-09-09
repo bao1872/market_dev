@@ -1,3 +1,8 @@
+// StructureStory（Full Alignment V1 视觉升级）：
+// 逻辑保持 deterministic 教学剧本不变，仅改视觉：
+//   左：竖向 timeline（4 阶段，active = 品牌绿 dot + 细线）
+//   右：K线成为视觉主角（薄卡），事件在 chart 上方浮出
+//   控件收敛为 ← 播放/暂停 → 重新播放，frame 1/24 为极小辅助信息
 import { KlineStoryChart } from '../components/KlineStoryChart'
 import SectionHeading from '../components/SectionHeading'
 import ScrollReveal from '../components/ScrollReveal'
@@ -10,7 +15,6 @@ import styles from '../marketing.module.scss'
 
 const STAGE_ENDS = STRUCTURE_STAGES.map((stage) => stage.endFrame)
 
-// 教学动画：deterministic 剧本，不接实时行情，不复制生产算法。
 export default function StructureStory() {
   const { ref, inView } = useInViewport<HTMLDivElement>()
 
@@ -39,39 +43,46 @@ export default function StructureStory() {
         />
         <ScrollReveal>
           <div className={styles.storyGrid} ref={ref}>
-            <ol className={styles.storyStages}>
+            {/* 左：竖向 timeline */}
+            <ol className={styles.structureTimeline}>
               {STRUCTURE_STAGES.map((item, index) => {
                 const active = index === player.stageIndex
                 return (
                   <li
                     key={item.id}
-                    className={active ? styles.storyStageActive : styles.storyStage}
+                    className={active ? styles.structureTimelineActive : styles.structureTimelineStep}
                     aria-current={active ? 'step' : undefined}
                   >
-                    <span className={styles.storyStageIndex}>
-                      {String(index + 1).padStart(2, '0')}
-                    </span>
-                    <span className={styles.storyStageTitle}>{item.title}</span>
-                    <span className={styles.storyStageSummary}>{item.summary}</span>
+                    <span className={styles.structureTimelineDot} aria-hidden="true" />
+                    <div className={styles.structureTimelineBody}>
+                      <span className={styles.structureTimelineIndex}>
+                        {String(index + 1).padStart(2, '0')}
+                      </span>
+                      <span className={styles.structureTimelineTitle}>{item.title}</span>
+                      <span className={styles.structureTimelineSummary}>{item.summary}</span>
+                    </div>
                   </li>
                 )
               })}
             </ol>
 
-            <div className={styles.storyVisual}>
-              <KlineStoryChart
-                candles={STRUCTURE_CANDLES}
-                frame={player.frame}
-                events={STRUCTURE_EVENTS}
-              />
+            {/* 右：K线主角 + 事件浮出 + 说明 */}
+            <div className={styles.storyVisualSolo}>
+              {latestEvent ? (
+                <div className={styles.storyEventFloat}>
+                  {STRUCTURE_STORY.eventLabel}：{latestEvent.label}
+                </div>
+              ) : null}
+              <div className={styles.storyChart}>
+                <KlineStoryChart
+                  candles={STRUCTURE_CANDLES}
+                  frame={player.frame}
+                  events={STRUCTURE_EVENTS}
+                />
+              </div>
               <div className={styles.storyExplain}>
                 <h3 className={styles.storyExplainTitle}>{stage.title}</h3>
                 <p className={styles.storyExplainText}>{stage.explanation}</p>
-                {latestEvent ? (
-                  <span className={styles.eventTag}>
-                    {STRUCTURE_STORY.eventLabel}：{latestEvent.label}
-                  </span>
-                ) : null}
               </div>
             </div>
           </div>

@@ -1,3 +1,6 @@
+// 第一金字塔 Drawer（Full Alignment V1）：
+// UI shell 做到完整：搜索框 + 8 个维度分组 tab。
+// 具体 99 字段由 M3.5 共享 presentation registry 接入，本轮明确标注 DATA PENDING，不伪造。
 import { useEffect } from 'react'
 import { FIRST_PYRAMID } from '../data/copy'
 import styles from '../marketing.module.scss'
@@ -7,8 +10,6 @@ type Props = {
   onClose: () => void
 }
 
-// 右侧 Drawer：默认不渲染，未打开时不占主体 layout height。
-// M1.1 仅渲染外壳与维度分组；禁止在此复制 99 字段定义——M3.5 从产品侧共享 presentation registry 接入。
 export default function FirstPyramidDrawerShell({ open, onClose }: Props) {
   useEffect(() => {
     if (!open) return
@@ -59,14 +60,33 @@ export default function FirstPyramidDrawerShell({ open, onClose }: Props) {
           </button>
         </div>
         <div className={styles.fieldDrawerBody}>
+          {/* 搜索 shell（V1 仅外壳，字段内容 M3.5 接入） */}
+          <div className={styles.fieldSearch}>
+            <input
+              type="search"
+              className={styles.fieldSearchInput}
+              placeholder={drawer.searchPlaceholder}
+              aria-label={drawer.searchPlaceholder}
+            />
+          </div>
+
+          {/* 8 个维度分组 tab */}
           <ul className={styles.fieldGroups}>
-            {drawer.groups.map((g) => (
-              <li key={g.key} className={styles.fieldGroup}>
+            {drawer.groups.map((g, i) => (
+              <li
+                key={g.key}
+                className={i === 0 ? styles.fieldGroupActive : styles.fieldGroup}
+              >
                 {g.label}
               </li>
             ))}
           </ul>
-          <p className={styles.fieldNote}>{drawer.placeholder}</p>
+
+          {/* DATA PENDING：不伪造 99 项 */}
+          <div className={styles.fieldPending} role="note">
+            <span className={styles.fieldPendingTag}>DATA PENDING</span>
+            <p className={styles.fieldNote}>{drawer.pendingNote}</p>
+          </div>
         </div>
       </aside>
     </div>
