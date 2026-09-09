@@ -90,40 +90,14 @@ export default function LandingPage() {
           href="/login"
           style={{
             color: '#F2F6F8',
-
             background: '#161F29',
-
-            border:
-              '1px solid #263440',
-
+            border: '1px solid #263440',
             padding: '10px 18px',
-
             borderRadius: 10,
-
             textDecoration: 'none',
           }}
         >
           登录盘迹
-        </a>
-
-        <a
-          href="/portal/index.html"
-          style={{
-            color: '#F2F6F8',
-
-            background: '#161F29',
-
-            border:
-              '1px solid #263440',
-
-            padding: '10px 18px',
-
-            borderRadius: 10,
-
-            textDecoration: 'none',
-          }}
-        >
-          使用说明
         </a>
       </nav>
     </div>

@@ -234,8 +234,9 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 
 ### 10.1 架构事实
 - 生产 frontend 静态根：`/opt/panji-live/frontend/dist` 经 live bind mount → 容器 `/usr/share/nginx/html`。
-- 正式门户 HTML 写入 `/opt/panji-live/frontend/dist/portal/index.html`（与服务器实际运行 `location = / → /portal/index.html` 一致），Nginx 经 live mount 立即可见，**无需 restart frontend、无需碰 backend/worker/database**。
+- 正式门户 HTML 写入 `/opt/panji-live/frontend/dist/site/index.html`（与服务器实际运行 `location = / → /site/index.html` 一致；产品官网唯一部署槽位，只由 Marketing 轻部署写入），Nginx 经 live mount 立即可见，**无需 restart frontend、无需碰 backend/worker/database**。
 - Marketing Site 资源落在独立静态目录 `/opt/panji-live/frontend/dist/marketing-assets/`（**不是第二个门户入口**）；`/marketing-assets/` 下不得存在 `index.html`。
+- 旧「使用说明」portal（`frontend/public/portal`）已彻底退役并从仓库删除：全量前端 build（vite 拷贝 `public/**`）不再产出 `dist/portal/*`；nginx `location = /` 不再指向 `/portal/index.html`，`/portal/` 一律 301 到根路径；全量部署（`panji-deploy.sh`）`rsync --delete` 显式 `--exclude='site/'` 与 `--exclude='marketing-assets/'`，确保任意顺序部署后 `/` 都是产品官网。
 
 ### 10.2 构建入口
 - 新增独立 root：`frontend/marketing-site/index.html`（entry = `../src/features/marketing/site.tsx`）。
@@ -247,7 +248,7 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 - `scripts/ops/panji-marketing-site-deploy <FULL_SHA>`：唯一允许的 Site 部署器。
 - 服务器用独立 git worktree `/opt/panji-marketing-site-src`（从目标 SHA `--detach`）构建，**不改 `/root/web_dev` 当前 production deployment state**。
 - node_modules 走 Docker named volume `panji-marketing-site-node-modules` 缓存；仅当 `package-lock.json` 哈希变化才 `npm ci`（node:20-alpine 容器内）。
-- 部署顺序：先 `rsync` assets 到 `/marketing-assets/` 再 `install` index 到 `/portal/index.html`；随后**退役 `/marketing-preview/` 为 redirect tombstone**（301 行为，未来由 nginx 升级为 HTTP 301）。
+- 部署顺序：先 `rsync` assets 到 `/marketing-assets/` 再 `install` index 到 `/site/index.html`；随后**退役 `/marketing-preview/` 为 redirect tombstone**（301 行为，未来由 nginx 升级为 HTTP 301）。旧 `/portal/` 由 nginx tombstone 到根路径。
 - 硬断言：主 SPA `index.html` sha256 与 `trading-frontend` 容器 `StartedAt` 部署前后一致（证明无改主 SPA、无重启）。
 - 禁止：scp/docker cp、改 backend/DB/RUNTIME_SHA/market.env/nginx.conf、restart 容器、执行 `panji-deploy.sh`。
 

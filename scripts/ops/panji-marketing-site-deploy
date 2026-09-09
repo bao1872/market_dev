@@ -7,8 +7,9 @@
 #   - 只构建 Marketing Site 小 bundle（vite build marketing-site），不重建整站 SPA；
 #   - 只写入：
 #       /opt/panji-live/frontend/dist/marketing-assets/   （JS/CSS 资源目录）
-#       /opt/panji-live/frontend/dist/portal/index.html   （根门户 HTML）
+#       /opt/panji-live/frontend/dist/site/index.html   （根门户 HTML，产品官网唯一槽位）
 #   - 旧 /marketing-preview/ 退役为 redirect tombstone（301 行为，未来由 nginx 升级为 HTTP 301）；
+#   - 旧「使用说明」portal（/portal/）已彻底退役：nginx tombstones 到根路径；
 #   - 不执行 scripts/deploy/panji-deploy.sh；
 #   - 不碰 backend / worker / database / RUNTIME_SHA / market.env / nginx.conf；
 #   - 不 restart 任何容器；只靠 Nginx 对 dist 的 live bind mount 立即生效。
@@ -21,7 +22,13 @@
 #   - 硬断言：主 SPA index.html 哈希 + trading-frontend 容器 StartedAt 部署前后一致。
 #
 # 用法:
-#   scripts/ops/panji-marketing-site-deploy <FULL_SHA> [--dry-run]
+#   scripts/ops/panji-marketing-site-deploy <FULL_SHA> [--dry-run] [--prepare-only]
+#
+#   --prepare-only   CUTOVER 预置模式：仅构建并写入 marketing-assets/ + site/index.html，
+#                    以磁盘文件为准确认 /site/index.html 就绪后退出。
+#                    不要求根 / 已切到它（old nginx 可能 SPA fallback /portal 槽位）。
+#                    用于「第一次 panji-test-deploy 切 Nginx 前」预置官网，避免根 / 短暂 404。
+#                    不改 nginx / backend / database / container / main SPA。
 #
 # 退出码：0 成功，1 失败，2 配置/前置错误
 
@@ -40,13 +47,14 @@ NODE_VOLUME="${PANJI_NODE_VOLUME:-panji-marketing-site-node-modules}"
 NODE_IMAGE="${PANJI_NODE_IMAGE:-node:20-alpine}"
 FRONTEND_CONTAINER="${PANJI_FRONTEND_CONTAINER:-trading-frontend}"
 
-# 部署目标（与 repo nginx.conf `location = /` -> /portal/index.html 一致）
+# 部署目标（与 repo nginx.conf `location = /` -> /site/index.html 一致；产品官网唯一槽位）
 SITE_ASSET_TARGET="${LIVE_ROOT}/frontend/dist/marketing-assets"
-CURRENT_ROOT_HTML="${LIVE_ROOT}/frontend/dist/portal/index.html"
+CURRENT_ROOT_HTML="${LIVE_ROOT}/frontend/dist/site/index.html"
 LEGACY_PREVIEW_TARGET="${LIVE_ROOT}/frontend/dist/marketing-preview"
 
 TARGET_SHA=""
 DRY_RUN=false
+PREPARE_ONLY=false
 
 log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
 fail() { log "错误: $*" >&2; exit 1; }
@@ -55,14 +63,15 @@ fail() { log "错误: $*" >&2; exit 1; }
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --dry-run) DRY_RUN=true; shift ;;
-    -h|--help) echo "usage: $0 <SHA> [--dry-run]"; exit 2 ;;
+    --prepare-only) PREPARE_ONLY=true; shift ;;
+    -h|--help) echo "usage: $0 <SHA> [--dry-run] [--prepare-only]"; exit 2 ;;
     -*) fail "未知选项: $1" ;;
     *)
       [[ -z "${TARGET_SHA}" ]] || fail "只能指定一个 SHA"
       TARGET_SHA="$1"; shift ;;
   esac
 done
-[[ -n "${TARGET_SHA}" ]] || { echo "usage: $0 <SHA> [--dry-run]" >&2; exit 2; }
+[[ -n "${TARGET_SHA}" ]] || { echo "usage: $0 <SHA> [--dry-run] [--prepare-only]" >&2; exit 2; }
 
 cd "${REPO_ROOT}"
 
@@ -86,11 +95,18 @@ Q_LIVE_ROOT="$(q "${LIVE_ROOT}")"
 Q_NODE_VOLUME="$(q "${NODE_VOLUME}")"
 Q_NODE_IMAGE="$(q "${NODE_IMAGE}")"
 Q_FRONTEND_CONTAINER="$(q "${FRONTEND_CONTAINER}")"
+Q_PREPARE_ONLY="$(q "${PREPARE_ONLY}")"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
-  log "[dry-run] 计划：在 ${SITE_SRC} worktree 从 ${TARGET_SHA} 构建 marketing-site，"
-  log "[dry-run]       仅 rsync 到 ${SITE_ASSET_TARGET}/ 并 install 到 ${CURRENT_ROOT_HTML}，"
-  log "[dry-run]       退役 ${LEGACY_PREVIEW_TARGET}/ 为 redirect tombstone。不改主 SPA / 容器 / nginx。"
+  if [[ "${PREPARE_ONLY}" == "true" ]]; then
+    log "[dry-run] 预置模式：在 ${SITE_SRC} worktree 从 ${TARGET_SHA} 构建 marketing-site，"
+    log "[dry-run]       仅 rsync 到 ${SITE_ASSET_TARGET}/ 并 install 到 ${CURRENT_ROOT_HTML}，"
+    log "[dry-run]       验证 /site/index.html 就绪后结束。不要求根 / 已切换，不改 nginx / 主 SPA / 容器。"
+  else
+    log "[dry-run] 计划：在 ${SITE_SRC} worktree 从 ${TARGET_SHA} 构建 marketing-site，"
+    log "[dry-run]       仅 rsync 到 ${SITE_ASSET_TARGET}/ 并 install 到 ${CURRENT_ROOT_HTML}，"
+    log "[dry-run]       退役 ${LEGACY_PREVIEW_TARGET}/ 为 redirect tombstone。不改主 SPA / 容器 / nginx。"
+  fi
   exit 0
 fi
 
@@ -109,6 +125,7 @@ LIVE_ROOT=${Q_LIVE_ROOT}
 NODE_VOLUME=${Q_NODE_VOLUME}
 NODE_IMAGE=${Q_NODE_IMAGE}
 FRONTEND_CONTAINER=${Q_FRONTEND_CONTAINER}
+PREPARE_ONLY=${Q_PREPARE_ONLY}
 
 echo "[site] 校验 SHA 属 origin/dev 祖先（服务器侧）"
 git -C "\${PROD_REPO}" fetch origin dev --no-tags
@@ -177,6 +194,8 @@ mkdir -p "\${SITE_ASSET_TARGET}/assets"
 rsync -a --delete "\${BUILD_DIR}/assets/" "\${SITE_ASSET_TARGET}/assets/"
 mkdir -p "\${SITE_ASSET_TARGET}/media"
 rsync -a --delete "\${BUILD_DIR}/media/" "\${SITE_ASSET_TARGET}/media/"
+# 产品官网唯一部署槽位为 site/（旧 portal 槽位已废弃）。父目录可能尚不存在（首次预置），先创建。
+mkdir -p "$(dirname "\${CURRENT_ROOT_HTML}")"
 install -m 0644 "\${BUILD_DIR}/index.html" "\${CURRENT_ROOT_HTML}"
 
 # 6. 退役 /marketing-preview/：删除后重建 redirect tombstone
@@ -215,19 +234,69 @@ if [[ "\${FRONTEND_STARTED_BEFORE}" != "\${FRONTEND_STARTED_AFTER}" ]]; then
 fi
 echo "[safety] 主 SPA 未改 + 容器未重启：断言通过"
 
-# 9. 验证
+# 9a. PREPARE-ONLY（CUTOVER 预置模式）
+# 意义：先保证 /site/index.html 已就绪，但暂不要求根 / 已切到它。
+#       用于「第一次切 Nginx 前」预置官网，避免根 / 短暂 404。
+# 约束：本分支不修改 nginx / backend / database / container / main SPA（safety AFTER 已锁）。
+# 注意：cutover 前旧 nginx 对 /site/index.html 会走 SPA fallback 返回主 SPA（200 但非官网内容），
+#       故本站验证以磁盘文件（真正部署目标 site/）为准，不依赖尚未切换的 nginx 路由内容。
+if [[ "${PREPARE_ONLY}" == "true" ]]; then
+  echo "=== prepare verify (site slot ==/==> disk) ==="
+  [[ -f "${CURRENT_ROOT_HTML}" ]] || {
+    echo "PREPARE FAIL: 产物 ${CURRENT_ROOT_HTML} 不存在" >&2
+    exit 1
+  }
+  echo "site slot: ${CURRENT_ROOT_HTML} ($(wc -c < "${CURRENT_ROOT_HTML}") bytes)"
+
+  SITE_HTML="$(cat "${CURRENT_ROOT_HTML}")"
+  echo "site title: $(echo "${SITE_HTML}" | grep -o '<title>[^<]*</title>')"
+
+  echo "${SITE_HTML}" | grep -q '/marketing-assets/' || {
+    echo "PREPARE FAIL: site/index.html 未引用 /marketing-assets/" >&2
+    exit 1
+  }
+
+  echo "${SITE_HTML}" | grep -Eq '使用说明首页|盘迹使用说明中心|快速开始|帮助中心' && {
+    echo "PREPARE FAIL: site/index.html 出现旧 Help Center 文案" >&2
+    exit 1
+  }
+
+  for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg xiaoz-xueqiu.png zhongji-xuchuang-300308-1d-2y.json; do
+    if [[ -f "${SITE_ASSET_TARGET}/media/${f}" ]]; then
+      echo "media ${f}: OK ($(wc -c < "${SITE_ASSET_TARGET}/media/${f}") bytes)"
+    else
+      echo "PREPARE FAIL: media 产物 ${SITE_ASSET_TARGET}/media/${f} 缺失" >&2
+      exit 1
+    fi
+  done
+
+  # 软校验：curl 状态应为 200（此处不判内容，旧 nginx 可能 SPA fallback 返回主 SPA）
+  SITE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/site/index.html || echo 000)"
+  echo "/site/index.html curl HTTP (soft): ${SITE_HTTP}"
+
+  echo "[prepare] site/index.html ready（CUTOVER 预置完成；根 / 尚未切换，旧 nginx 行为保持不变）"
+  exit 0
+fi
+
+# 9. 验证（正常 / CUTOVER 后模式：根 / 必须已是产品官网）
 echo "=== verify ==="
 ROOT_HTML="\$(curl -s http://127.0.0.1/)"
 HTTP_ROOT="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
 echo "root / HTTP: \${HTTP_ROOT}"
 echo "root title: \$(echo "\${ROOT_HTML}" | grep -o '<title>[^<]*</title>')"
 
-if echo "\${ROOT_HTML}" | grep -q '/marketing-preview/'; then
+if echo "${ROOT_HTML}" | grep -q '/marketing-preview/'; then
   echo "VERIFY FAIL: 根 HTML 仍含 /marketing-preview/" >&2
   exit 1
 fi
-if ! echo "\${ROOT_HTML}" | grep -q '/marketing-assets/'; then
+if ! echo "${ROOT_HTML}" | grep -q '/marketing-assets/'; then
   echo "VERIFY FAIL: 根 HTML 缺少 /marketing-assets/" >&2
+  exit 1
+fi
+# [V3] 防回归 SSOT：根必须是产品官网，绝不能是旧「使用说明」帮助中心
+if echo "${ROOT_HTML}" | grep -qE '使用说明首页|盘迹使用说明中心|快速开始|帮助中心|/portal/'; then
+  echo "VERIFY FAIL: 根 HTML 被旧使用说明 portal 覆盖：" >&2
+  echo "  title=$(echo "${ROOT_HTML}" | grep -o '<title>[^<]*</title>')" >&2
   exit 1
 fi
 

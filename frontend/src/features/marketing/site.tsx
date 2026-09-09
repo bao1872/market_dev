@@ -5,7 +5,7 @@
 // - 不挂载 RouterProvider / QueryClientProvider / Toast / App.tsx；
 // - 不依赖任何产品运行时，因此无需整站 SPA runtime。
 // 产物经 scripts/ops/panji-marketing-site-deploy 同步到
-// /opt/panji-live/frontend/dist/portal/index.html（根路径），由 Nginx live mount 直接可见，
+// /opt/panji-live/frontend/dist/site/index.html（根路径产品官网唯一槽位），由 Nginx live mount 直接可见，
 // 资源落在 /opt/panji-live/frontend/dist/marketing-assets/，无需 restart frontend / backend / 改 nginx。
 
 import React from 'react'

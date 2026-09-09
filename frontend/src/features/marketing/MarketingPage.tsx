@@ -1,5 +1,5 @@
 // 盘迹营销门户（Full Alignment V1）
-// 挂载路径：/（生产由 nginx 服务 portal/index.html；轻部署走 panji-marketing-site-deploy）
+// 挂载路径：/（生产由 nginx 服务 site/index.html；轻部署走 panji-marketing-site-deploy）
 // 约束：全部 deterministic，不接实时行情；不复制产品侧字段定义；零新增依赖。
 import { useState } from 'react'
 import MarketingNav from './sections/MarketingNav'

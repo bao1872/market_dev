@@ -79,7 +79,7 @@ test('E. Marketing Site entry 指向 site.tsx（非 preview.tsx）', () => {
   )
 })
 
-test('F. 部署器用 build:marketing-site 构建，target 为 marketing-assets + portal/index.html（不再用 marketing-preview 作为构建目标）', () => {
+test('F. 部署器用 build:marketing-site 构建，target 为 marketing-assets + site/index.html（不再用 marketing-preview 或 portal/index.html 作为构建目标）', () => {
   assert.ok(
     deployScript.includes('build:marketing-site'),
     '部署器未使用 build:marketing-site 作为构建命令',
@@ -93,7 +93,11 @@ test('F. 部署器用 build:marketing-site 构建，target 为 marketing-assets 
     '部署器未引用 marketing-assets 资源目录',
   )
   assert.ok(
-    deployScript.includes('portal/index.html'),
-    '部署器未把根门户 HTML 安装到 portal/index.html',
+    deployScript.includes('site/index.html'),
+    '部署器未把根门户 HTML 安装到 site/index.html',
+  )
+  assert.ok(
+    !deployScript.includes('dist/portal/index.html'),
+    '部署器不得再把根门户 HTML 安装到旧 portal/index.html 槽位',
   )
 })

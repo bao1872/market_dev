@@ -944,8 +944,14 @@ sync_frontend_runtime() {
     _mark_files_mutated
 
     mkdir -p "${LIVE_ROOT}/frontend"
+    # [CHANGE-20260909-002] SSOT 保护：site/ 与 marketing-assets/ 只由 Marketing 轻部署
+    # （scripts/ops/panji-marketing-site-deploy）写入。全量 build 不产出这两个目录，
+    # 若不 --exclude，--delete 会清掉产品官网 site/index.html 与 marketing-assets/*，
+    # 破坏「任意顺序部署后 / 都必须是产品官网」的 SSOT 不变量。故显式排除。
     rsync -a --delete \
         --exclude='.gitkeep' \
+        --exclude='site/' \
+        --exclude='marketing-assets/' \
         "${REPO_ROOT}/frontend/dist/" "${LIVE_ROOT}/frontend/dist/"
     # capture 静态目录是 frontend nginx 的嵌套挂载点，必须存在
     mkdir -p "${LIVE_ROOT}/frontend/dist/static/captures"

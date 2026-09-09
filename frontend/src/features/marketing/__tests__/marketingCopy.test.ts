@@ -24,8 +24,9 @@ const FORBIDDEN_LEGACY_TERMS = ['BOS', 'CHoCH', 'Order Block', ' breaker']
 // 不对外开放、门户不得宣传的内部路由
 const INTERNAL_ROUTES = ['/review', '/auction']
 
-// 使用说明已裁定融合进门户，不再把用户送回旧 Help Center
-const LEGACY_HELP_ROUTES = ['/portal/index.html']
+// 旧使用说明 Help Center 已彻底退役（frontend/public/portal 已删除，nginx 301 到 /）；
+// 营销 footer 不得再链接任何 /portal/ 入口
+const LEGACY_HELP_ROUTES = ['/portal/']
 
 function footerHrefs(): string[] {
   return FOOTER.columns

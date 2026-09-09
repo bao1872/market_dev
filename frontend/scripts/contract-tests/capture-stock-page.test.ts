@@ -642,58 +642,45 @@ test('global.scss mobile-stage 元素字号符合 PROMPT.md §5.3.4 规范表', 
 })
 
 // ============================================================================
-// [CHANGE-20260724-002] MobileIndicatorStage 二维码页脚契约测试
-// 三类 indicator_view (node_cluster / bollinger / smc) 共用同一二维码页脚
-// 仅正常成功截图显示二维码区域；loading/error/mismatch 状态不渲染此页脚
+// [CHANGE-20260909] MobileIndicatorStage 页脚契约测试
+// 旧「使用说明」portal 已彻底退役：指标原理 QR 页脚（guide-card/guide-qr/guide-copy/guide-visual）
+// 一并移除，仅保留免责声明。三类 indicator_view 共用同一页脚（仅正常态渲染）。
 // ============================================================================
 
-// ===== 26. MobileIndicatorStage 正常态包含二维码页脚 DOM 结构 =====
-test('MobileIndicatorStage 正常态包含二维码页脚 DOM 结构（CHANGE-20260724-002）', () => {
+// ===== 26. MobileIndicatorStage 正常态页脚结构（QR 已随 portal 退役移除）=====
+test('MobileIndicatorStage 正常态页脚 DOM 结构（旧使用说明 QR 已移除）', () => {
   const src = readSource(MOBILE_STAGE_PATH)
   // 页脚容器
   assert.ok(/className="mobile-stage-footer"/.test(src),
     'MobileIndicatorStage 必须包含 <footer className="mobile-stage-footer">')
-  // 引导卡
-  assert.ok(/className="mobile-stage-guide-card"/.test(src),
-    'MobileIndicatorStage 必须包含 <section className="mobile-stage-guide-card">')
-  // 二维码容器
-  assert.ok(/className="mobile-stage-guide-qr"/.test(src),
-    'MobileIndicatorStage 必须包含 <div className="mobile-stage-guide-qr">')
-  // 文案容器
-  assert.ok(/className="mobile-stage-guide-copy"/.test(src),
-    'MobileIndicatorStage 必须包含 <div className="mobile-stage-guide-copy">')
-  // 装饰容器
-  assert.ok(/className="mobile-stage-guide-visual"/.test(src),
-    'MobileIndicatorStage 必须包含 <div className="mobile-stage-guide-visual">')
   // 风险提示
   assert.ok(/className="mobile-stage-risk-notice"/.test(src),
     'MobileIndicatorStage 必须包含 <div className="mobile-stage-risk-notice">')
+  // 旧使用说明 portal 已彻底退役：引导卡/二维码/文案/装饰容器必须移除
+  assert.ok(!/className="mobile-stage-guide-card"/.test(src),
+    'MobileIndicatorStage 不得残留旧使用说明 bootstrap 卡 mobile-stage-guide-card')
+  assert.ok(!/className="mobile-stage-guide-qr"/.test(src),
+    'MobileIndicatorStage 不得残留旧使用说明二维码 mobile-stage-guide-qr')
+  assert.ok(!/className="mobile-stage-guide-copy"/.test(src),
+    'MobileIndicatorStage 不得残留 mobile-stage-guide-copy')
+  assert.ok(!/className="mobile-stage-guide-visual"/.test(src),
+    'MobileIndicatorStage 不得残留 mobile-stage-guide-visual')
 })
 
-// ===== 27. 二维码图片路径 + 主文案精确匹配 =====
-test('MobileIndicatorStage 二维码图片路径与主文案精确匹配（CHANGE-20260724-002）', () => {
+// ===== 27. 旧使用说明 QR 静态资源已完全移除 =====
+test('MobileIndicatorStage 不再引用已退役的 /portal/ 静态资源（CHANGE-20260909）', () => {
   const src = readSource(MOBILE_STAGE_PATH)
-  // QR 图片必须使用项目本地静态资源路径
+  // 不再引用任何待部署的 /portal 图片 src（注释中的历史说明可保留）
   assert.ok(
-    src.includes('src="/portal/assets/images/indicator-principles-qr.png"'),
-    'MobileIndicatorStage 二维码 img src 必须为 /portal/assets/images/indicator-principles-qr.png（本地静态资源）',
+    !/src="\/portal\//.test(src),
+    'MobileIndicatorStage 不得再引用已退役的 /portal/ 静态资源（indicator-principles-qr.png 已删除）',
   )
   // 禁止第三方二维码服务
   assert.ok(
     !/https?:\/\/(api\.qrserver|qrserver|quickchart|googleapis|chart\?)/.test(src),
     'MobileIndicatorStage 禁止请求第三方二维码服务',
   )
-  // 主文案必须严格为「扫码了解原理和解读方法」
-  assert.ok(
-    src.includes('扫码了解原理和解读方法'),
-    'MobileIndicatorStage 主文案必须包含「扫码了解原理和解读方法」',
-  )
-  // 禁止营销或投资引导含义文案
-  const forbiddenCopy = ['扫码关注', '获取信号', '查看买卖点', '立即购买', '加入会员']
-  for (const bad of forbiddenCopy) {
-    assert.ok(!src.includes(bad), `MobileIndicatorStage 禁止出现营销文案：${bad}`)
-  }
-  // 免责声明文案
+  // 免责声明文案（保留）
   assert.ok(
     src.includes('内容仅做科普，不构成投资建议'),
     'MobileIndicatorStage 必须包含免责声明「内容仅做科普，不构成投资建议」',
