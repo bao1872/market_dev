@@ -1,15 +1,13 @@
 import { useEffect } from 'react'
 
-const LANDING_PATH =
-  '/landing/index.html'
+const PUBLIC_SITE_PATH =
+  import.meta.env.DEV ? '/marketing-site/' : '/'
 
 export default function LandingPage() {
   useEffect(() => {
-    if (import.meta.env.DEV) {
-      window.location.replace(
-        LANDING_PATH,
-      )
-    }
+    window.location.replace(
+      PUBLIC_SITE_PATH,
+    )
   }, [])
 
   return (
@@ -70,7 +68,7 @@ export default function LandingPage() {
         }}
       >
         <a
-          href={LANDING_PATH}
+          href={PUBLIC_SITE_PATH}
           style={{
             color: '#041611',
 

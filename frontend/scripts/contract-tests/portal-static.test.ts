@@ -11,7 +11,7 @@
 // 8. JS 与 JSON 因子数据一致
 // 9. 新因子六项输入存在
 // 10. 摘要包含已选因子、输出选项与六项输入
-// 11. Nginx 根路径精确分流存在（location = / → /landing/index.html；/portal/ 保留为 Help Center，PANJI PUBLIC SITE V2 2026-09-08）
+// 11. Nginx 根路径精确分流存在（location = / → /portal/index.html 即产品官网根；/landing 与 /marketing-preview 收口为 301 到 /，PANJI PUBLIC SITE V2 2026-09-09 收口）
 // 12. /api、Capture(SPA fallback) 合同未被删除
 
 import { strict as assert } from 'node:assert'
@@ -315,10 +315,7 @@ test(
   () => {
     const required = [
       'index.html',
-      'assets/css/landing.css',
       'assets/images/logo_symbol_128.png',
-      'assets/images/market-workspace.webp',
-      'assets/images/intraday-monitor.webp',
     ]
 
     for (const rel of required) {
@@ -343,44 +340,44 @@ test(
 
     assert.ok(
       html.includes(
-        '先找到变化',
+        '从全市场发现变化',
       ),
       'Landing 缺少核心价值主张',
     )
 
     assert.ok(
       html.includes(
-        '全市场筛选',
+        '演示数据',
       ),
-      'Landing 缺少全市场筛选能力',
+      'Landing 应标注为演示数据',
     )
 
     assert.ok(
       html.includes(
-        '盘中监控',
+        '第一金字塔',
       ),
-      'Landing 缺少盘中监控能力',
+      'Landing 缺少第一金字塔概念',
     )
 
     assert.ok(
       html.includes(
-        '筹码共识',
+        '飞书',
       ),
-      'Landing 缺少筹码共识能力',
+      'Landing 缺少飞书通知能力',
     )
 
     assert.ok(
       html.includes(
-        '自选持续观察',
+        '消息中心',
       ),
-      'Landing 缺少自选持续观察能力',
+      'Landing 缺少消息中心',
     )
 
     assert.ok(
       html.includes(
-        '飞书即时推送',
+        '99',
       ),
-      'Landing 缺少飞书即时推送能力',
+      'Landing 缺少字段字典（99 字段）',
     )
 
     assert.ok(
@@ -390,13 +387,13 @@ test(
       'Landing 缺少登录入口',
     )
 
+    // 使用本地 logo，不依赖远程 raw.githubusercontent 资源
     assert.ok(
-      html.includes(
-        'href="/portal/index.html"',
-      ),
-      'Landing 缺少 Help Center 入口',
+      !/raw\.githubusercontent\.com/.test(html),
+      'Landing 不应引用远程 github 资源',
     )
 
+    const htmlClean = html.replace(/data:image\/[^;]+;base64,[^"'`]+/g, '')
     const forbiddenTerms = [
       /\bDSA\b/i,
       /\bSMC\b/i,
@@ -420,7 +417,7 @@ test(
       of forbiddenTerms
     ) {
       assert.ok(
-        !pattern.test(html),
+        !pattern.test(htmlClean),
         `Landing 出现禁止公开内容：${pattern}`,
       )
     }
@@ -447,8 +444,8 @@ test(
 
     assert.match(
       rootLocation[1],
-      /try_files\s+\/landing\/index\.html\s+=404;/,
-      '根路径未精确分流到 /landing/index.html',
+      /try_files\s+\/portal\/index\.html\s+=404;/,
+      '根路径未精确分流到 /portal/index.html（产品官网）',
     )
 
     assert.ok(
