@@ -122,8 +122,9 @@ export const WORKFLOW = {
   ],
 }
 
-// 真实结构回放（V1.2）：不再使用 synthetic 教学 K 线，
+// 真实结构回放（V1.3）：不再使用 synthetic 教学 K 线，
 // 而播放中际旭创 300308 近两年真实日线 + canonical SMC（盘迹真实结构计算代码）。
+// V1.3 达到「动画讲成故事」：平滑 K 线推进 + 右侧动态解释当前结构状态。
 export const STRUCTURE_STORY = {
   index: '03',
   eyebrow: '结构怎么形成',
@@ -133,9 +134,17 @@ export const STRUCTURE_STORY = {
   instrumentLabel: '中际旭创 · 300308',
   timeframeLabel: '日线 · 近2年',
   dataLabel: '真实历史数据',
+  // 播放控制（V1.3：用户理解的是「关键节点」，不再暴露 canonical frame）。
   playLabel: '播放',
   pauseLabel: '暂停',
   replayLabel: '重新播放',
+  previousKeyLabel: '上一个关键节点',
+  nextKeyLabel: '下一个关键节点',
+  // 右侧解释面板标题。
+  narrationTitle: '现在发生什么',
+  // 进度标签（V1.3：显示百分比，不再显示 32/101 内部编号）。
+  progressLabel: '播放进度',
+  currentDateLabel: '当前日期',
 }
 
 export const CHIP_CONSENSUS_STORY = {

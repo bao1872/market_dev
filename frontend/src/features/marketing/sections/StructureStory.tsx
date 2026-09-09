@@ -1,9 +1,8 @@
-// StructureStory（V1.2）— 真实结构回放。
-// 不再使用 synthetic STRUCTURE_CANDLES/EVENTS/STAGES，
-// 而是播放中际旭创 300308 近两年真实日线 + canonical SMC（一次性 frozen JSON）。
-// - 数据从 MARKETING_MEDIA.structureReplay（静态 JSON）same-origin fetch，绝不调用公开行情接口
-// - 每帧构建 IndicatorResponse，复用生产 StrategyChart + smcLabels 画结构标签
-// - 滚动窗口用生产 createDefaultViewport(currentBars.length, 120)
+// StructureStory（V1.3）— 真实结构回放「动画讲成故事」。
+// - 数据仍从 MARKETING_MEDIA.structureReplay（静态 frozen JSON）same-origin fetch。
+// - 播放改用 useSmoothMarketReplay：K 线平滑推进，canonical frame 只负责结构计算状态。
+// - 解释层复用生产 DTO（events/order_blocks）→ buildStructureNarrativeBeats，
+//   右侧面板随结构事件动态讲解（承接/压制、突破/跌破、转强/转弱）。
 import { useEffect, useMemo, useState } from 'react'
 import { createDefaultViewport } from '@/components/chartViewport'
 import type { IndicatorResponse } from '@/api/endpoints'
@@ -11,14 +10,19 @@ import SectionHeading from '../components/SectionHeading'
 import ScrollReveal from '../components/ScrollReveal'
 import RealStructureReplay from '../components/RealStructureReplay'
 import { useInViewport } from '../hooks/useInViewport'
-import { useTimedMarketReplay } from '../hooks/useTimedMarketReplay'
+import { useSmoothMarketReplay } from '../hooks/useSmoothMarketReplay'
+import {
+  buildStructureNarrativeBeats,
+  findCanonicalFrameIndex,
+  STRUCTURE_GUIDE,
+} from '../data/structureReplayNarration'
+import type { StructureBeat } from '../data/structureReplayNarration'
 import { MARKETING_MEDIA, STRUCTURE_STORY } from '../data/copy'
 import type { MarketingStructureReplay } from '../data/structureReplayTypes'
 import styles from '../marketing.module.scss'
 
 // 显示 preset 需要的指标视图。SMC DTO 由后端 canonical 直接产出，
-// 与前端 IndicatorResponse['data'] 的泛型签名不同构，因此在数据边界做一次窄化 cast，
-// 不再把整份 snapshot 塞成 as unknown as（详见 spec §Y adapter helper）。
+// 与前端 IndicatorResponse['data'] 的泛型签名不同构，因此在数据边界做一次窄化 cast。
 function buildReplayIndicators(
   replay: MarketingStructureReplay,
   frame: MarketingStructureReplay['frames'][number],
@@ -29,6 +33,14 @@ function buildReplayIndicators(
     errors: {},
     timeframe: replay.timeframe,
   }
+}
+
+const DEFAULT_NARRATION = {
+  title: 'K线正在逐步推进',
+  meaning: '结构从真实数据长出',
+  explanation:
+    '前一小段K线用于让结构计算热身，随后承接/压制、突破/跌破、转强/转弱会随价格逐步被确认。',
+  watch: '继续播放，观察结构一步一步怎样形成。',
 }
 
 export default function StructureStory() {
@@ -58,16 +70,35 @@ export default function StructureStory() {
     }
   }, [inView, replay, error])
 
-  const player = useTimedMarketReplay({
-    frameCount: replay?.frames.length ?? 0,
+  const beats = useMemo(() => {
+    if (!replay) return [] as StructureBeat[]
+    return buildStructureNarrativeBeats(replay)
+  }, [replay])
+
+  const firstEndIndex = replay?.frames[0]?.endIndex ?? 0
+  const barCount = replay?.bars.length ?? 0
+
+  const smooth = useSmoothMarketReplay({
+    startEndIndex: firstEndIndex,
+    endEndIndex: barCount,
     enabled: inView && !!replay,
   })
 
-  const frame = replay?.frames[player.frameIndex]
+  const canonicalFrameIndex = useMemo(
+    // 无未来：只取 endIndex <= 当前可见位置的最大 canonical 帧；
+    // 首帧之前不存在可用结构帧（返回 -1），回放总是从首帧开始，故安全收敛到 0。
+    () =>
+      replay
+        ? Math.max(0, findCanonicalFrameIndex(replay.frames, smooth.visibleEndIndex))
+        : 0,
+    [replay, smooth.visibleEndIndex],
+  )
+
+  const frame = replay?.frames[canonicalFrameIndex]
 
   const currentBars = useMemo(
-    () => (replay && frame ? replay.bars.slice(0, frame.endIndex) : []),
-    [replay, frame],
+    () => (replay ? replay.bars.slice(0, smooth.visibleEndIndex) : []),
+    [replay, smooth.visibleEndIndex],
   )
 
   const indicators = useMemo(
@@ -77,8 +108,31 @@ export default function StructureStory() {
 
   const viewport = useMemo(() => {
     if (!currentBars.length) return undefined
-    return createDefaultViewport(currentBars.length, 120)
+    return createDefaultViewport(currentBars.length, 180)
   }, [currentBars.length])
+
+  // 当前叙事：取 atEndIndex <= 当前可见位置的最后一个 beat；无则用默认说明。
+  const activeBeat = useMemo(() => {
+    let best: StructureBeat | undefined
+    for (const b of beats) {
+      if (b.atEndIndex <= smooth.visibleEndIndex) best = b
+    }
+    return best
+  }, [beats, smooth.visibleEndIndex])
+
+  const prevBeat = useMemo(() => {
+    if (!activeBeat) return undefined
+    let target: StructureBeat | undefined
+    for (const b of beats) {
+      if (b.atEndIndex < activeBeat.atEndIndex) target = b
+    }
+    return target
+  }, [beats, activeBeat])
+
+  const nextBeat = useMemo(() => {
+    if (!activeBeat) return beats[0]
+    return beats.find((b) => b.atEndIndex > activeBeat.atEndIndex)
+  }, [beats, activeBeat])
 
   return (
     <section
@@ -110,14 +164,16 @@ export default function StructureStory() {
               bars={currentBars}
               indicators={indicators}
               viewport={viewport}
-              frameIndex={player.frameIndex}
-              frameCount={replay.frames.length}
-              playing={player.playing}
-              onPlay={player.play}
-              onPause={player.pause}
-              onReplay={player.replay}
-              onPrevious={player.previous}
-              onNext={player.next}
+              progress={smooth.progress}
+              playing={smooth.playing}
+              onPlay={smooth.play}
+              onPause={smooth.pause}
+              onReplay={smooth.replay}
+              guide={STRUCTURE_GUIDE}
+              narration={activeBeat}
+              onPreviousKey={prevBeat ? () => smooth.seekToEndIndex(prevBeat.atEndIndex) : undefined}
+              onNextKey={nextBeat ? () => smooth.seekToEndIndex(nextBeat.atEndIndex) : undefined}
+              defaultNarration={DEFAULT_NARRATION}
             />
           )}
         </ScrollReveal>

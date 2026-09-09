@@ -1,8 +1,16 @@
-"""导出中际旭创真实结构回放 frozen JSON（营销门户 V1.2）。
+"""导出中际旭创真实结构回放 frozen JSON（营销门户 V1.3）。
 
-一次性离线导出：读取中际旭创（300308）近两年真实 qfq 日线，复用生产 SMC 链路
+一次性离线导出：读取中际旭创（300308）真实 qfq 日线，复用生产 SMC 链路
 （非 reimplement），为每个回放帧生成「截至该历史前缀」的 canonical SMC 展示 DTO，
 保证无未来函数（no look-ahead）：结构确认只使用该帧之前已存在的 bar。
+
+V1.3 关键变化 —— 显式分离 VISIBLE 与 WARMUP：
+  - VISIBLE_BARS = 500：真正展示的近两年日线（bars 输出即这 500 根）。
+  - WARMUP_BARS  = 300：只用于算法 warmup（ATR200 等），不直接展示。
+  - 每个 canonical 帧对「300 warmup + 当前 visible 前缀」做 SMC 计算，但
+    display_bars=visible_end、total_bars=prefix_end（>display），
+    由生产 view adapter 把结构索引重基准到展示窗口，前端 K 线从第 1 根 \u2192 第 500 根平滑推进。
+  - 回放从 START_VISIBLE_BARS=30 根开始，到 500 根结束，共 CANONICAL_FRAME_COUNT=101 帧。
 
 用法（注册 verify runtime，只读 bz_stock，不写库）：
     cd /root/web_dev/backend && .venv/bin/python -m scripts.export_marketing_structure_replay
@@ -11,7 +19,7 @@
   - MarketDataAggregationService.get_bars(adj='qfq', completed_only=True)
         -> 真实 qfq 日线（production indicator_service 同款 deterministic 查询）
   - CanonicalComputationService.compute(algorithm_id='smc', bars=<prefix_df>,
-        display_bars=<len(prefix_df)>) -> 展示窗口 DTO（smc_view_adapter）
+        as_of=<该帧日期>, display_bars=<visible_end>) -> 展示窗口 DTO（smc_view_adapter）
   - smc 图层描述符复制自 indicator_service 的 layers.append（同一 shape）
 
 输出：
@@ -44,12 +52,14 @@ from app.models.instrument import Instrument
 from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 
-# ===== 导出参数 =====
+# ===== 导出参数（V1.3：VISIBLE 与 WARMUP 显式分离）=====
 SYMBOL = "300308"          # 中际旭创
 MARKET = "SZ"              # 300xx 为创业板（深圳）
-TARGET_BARS = 500          # 近两年日线：约 500 根（约 2 年）
-FRAME_COUNT = 51           # 回放帧数 -> playback interval = 50s/(FRAME_COUNT-1)
-SMC_WARMUP_START = 250     # SMC 需 warmup（ATR200 等），从该前缀开始出稳定结构
+VISIBLE_BARS = 500         # 真正展示的近两年日线约 500 根
+WARMUP_BARS = 300          # 仅用于 SMC 算法 warmup（ATR200 等），不直接展示
+START_VISIBLE_BARS = 30    # 第一帧从该 visible 前缀开始（约 30 根）
+CANONICAL_FRAME_COUNT = 101  # 结构计算状态帧数（与视觉播放解耦）
+LOAD_BARS = VISIBLE_BARS + WARMUP_BARS  # 从库加载根数
 
 TIME_FRAME = "1d"
 ADJ = "qfq"
@@ -135,14 +145,17 @@ async def _load_bars(session: Any, instrument_id: Any, limit: int) -> pd.DataFra
         if col not in result.bars.columns:
             raise SystemExit(f"bars 缺列: {col}")
     df = result.bars.sort_index()
-    # 只取最近 TARGET_BARS 根（近两年）
     return df.iloc[-limit:]
 
 
 def _plan_frames(end_indexes: list[int]) -> None:
-    """前置校验：endIndex 严格单调递增、范围合法。"""
-    if len(end_indexes) != FRAME_COUNT:
-        raise ValueError(f"帧数应为 {FRAME_COUNT}，实际 {len(end_indexes)}")
+    """前置校验：endIndex 严格单调递增、落入 visible 范围。"""
+    if len(end_indexes) != CANONICAL_FRAME_COUNT:
+        raise ValueError(f"帧数应为 {CANONICAL_FRAME_COUNT}，实际 {len(end_indexes)}")
+    if end_indexes[0] > 40:
+        raise ValueError(f"第一帧应从接近 0 开头（<=40），实际 {end_indexes[0]}")
+    if end_indexes[-1] != VISIBLE_BARS:
+        raise ValueError(f"最后一帧必须是 {VISIBLE_BARS}，实际 {end_indexes[-1]}")
     prev = 0
     for e in end_indexes:
         if e <= prev:
@@ -150,58 +163,74 @@ def _plan_frames(end_indexes: list[int]) -> None:
         prev = e
 
 
-async def export(symbol: str, market: str, target_bars: int) -> dict[str, Any]:
+async def export() -> dict[str, Any]:
     async with AsyncSessionLocal() as session:
-        inst = await _resolve_instrument(session, symbol, market)
-        full_df = await _load_bars(session, inst.id, target_bars)
-        n = len(full_df)
-        if n < SMC_WARMUP_START:
-            raise SystemExit(f"可用日线不足 {SMC_WARMUP_START} 根，实际 {n}")
+        inst = await _resolve_instrument(session, SYMBOL, MARKET)
+        history_df = await _load_bars(session, inst.id, LOAD_BARS)
+        if len(history_df) < LOAD_BARS:
+            raise SystemExit(
+                f"可用日线不足 {LOAD_BARS} 根（VISIBLE+WARMUP），实际 {len(history_df)}"
+            )
 
-        # 帧 endIndex：从 warmup 起点均匀推进到 N（约 51 帧，每帧间隔约 5 根）。
-        step_total = max(1, n - SMC_WARMUP_START)
-        step = max(1, math.floor(step_total / (FRAME_COUNT - 1)))
-        end_indexes = list(range(SMC_WARMUP_START, n + 1, step))
-        if len(end_indexes) > FRAME_COUNT:
-            end_indexes = end_indexes[:FRAME_COUNT]
-        if end_indexes[-1] != n:
-            end_indexes[-1] = n
-        # 单调性修正（step 兜底后仍可能因取整产生非严格递增，仅发生在 step=1 且重叠时）
-        end_indexes = list(dict.fromkeys(end_indexes))
-        _plan_frames(end_indexes)
+        # 显式分离：真正展示的近两年 = 最近 VISIBLE_BARS 根；其余只做 warmup。
+        visible_df = history_df.iloc[-VISIBLE_BARS:]
+        visible_offset = len(history_df) - len(visible_df)
 
-        today = datetime.now(UTC).date()
-        frames: list[dict[str, Any]] = []
+        # 帧 endIndex（visible 坐标，从 START 平滑推进到 VISIBLE_BARS）。
+        span = VISIBLE_BARS - START_VISIBLE_BARS
+        end_indexes = [
+            round(
+                START_VISIBLE_BARS
+                + i * span / (CANONICAL_FRAME_COUNT - 1)
+            )
+            for i in range(CANONICAL_FRAME_COUNT)
+        ]
+        # 严格单调（取整可能产生相等），fail-closed。
+        cleaned: list[int] = []
         for e in end_indexes:
-            prefix = full_df.iloc[:e]
+            if not cleaned or e > cleaned[-1]:
+                cleaned.append(e)
+        cleaned[-1] = VISIBLE_BARS
+        _plan_frames(cleaned)
+        end_indexes = cleaned
+
+        frames: list[dict[str, Any]] = []
+        for visible_end in end_indexes:
+            prefix_end = visible_offset + visible_end
+            prefix = history_df.iloc[:prefix_end]
+            frame_as_of = prefix.index[-1].date().isoformat()
+
             # 生产统一入口：CanonicalComputationService.compute(algorithm_id="smc")
             result = await CanonicalComputationService.compute(
                 algorithm_id="smc",
                 instrument_id=inst.id,
-                as_of=str(today),
+                as_of=frame_as_of,
                 bars=prefix,
-                display_bars=e,
+                display_bars=visible_end,
             )
             smc_dto = _sanitize(result.payload)
-            # fail-closed：display_bars/total_bars 必须等于该前缀长度，offset 为 0，
-            # 证明 SMC 只用前缀窗口（无未来 bar），索引与展示 bars 对齐。
+            # fail-closed：display_bars 必须 = 该帧展示窗口长，total_bars 必须 = 前缀长，
+            # 证明 SMC 只用前缀窗口（无未来 bar），且展示与 bars 对齐、存在历史 warmup。
             view = smc_dto.get("view", {})
-            if int(view.get("display_bars", -1)) != e or int(view.get("total_bars", -1)) != e:
+            if int(view.get("display_bars", -1)) != visible_end:
                 raise SystemExit(
-                    f"帧 {e} SMC 窗口不对齐: display_bars={view.get('display_bars')} "
-                    f"total_bars={view.get('total_bars')} (期望 {e})"
+                    f"帧 {visible_end} display_bars 不对齐: {view.get('display_bars')} (期望 {visible_end})"
+                )
+            if int(view.get("total_bars", -1)) != prefix_end:
+                raise SystemExit(
+                    f"帧 {visible_end} total_bars 不对齐: {view.get('total_bars')} (期望 {prefix_end})"
                 )
             frames.append(
                 {
-                    "endIndex": e,
-                    "endTime": prefix.index[-1].isoformat(),
+                    "endIndex": visible_end,
+                    "endTime": visible_df.index[visible_end - 1].isoformat(),
                     "smc": smc_dto,
                 }
             )
 
         bars = [
             _bar_to_json(idx, row)
-            for idx, row in full_df.iterrows()
+            for idx, row in visible_df.iterrows()
         ]
 
         return {
@@ -225,42 +254,43 @@ async def export(symbol: str, market: str, target_bars: int) -> dict[str, Any]:
 def _validate(payload: dict[str, Any]) -> None:
     """fail-closed 校验导出产物，防止把非法结构提交上去。"""
     n = len(payload["bars"])
-    if n < SMC_WARMUP_START:
-        raise ValueError(f"bars 不足 warmup: {n}")
+    if n != VISIBLE_BARS:
+        raise ValueError(f"bars 应为 {VISIBLE_BARS}，实际 {n}")
     times = [b["time"] for b in payload["bars"]]
     if times != sorted(times):
         raise ValueError("bars time 必须单调递增")
+    if len(payload["frames"]) != CANONICAL_FRAME_COUNT:
+        raise ValueError(f"帧数应为 {CANONICAL_FRAME_COUNT}")
     prev = 0
     for f in payload["frames"]:
         e = int(f["endIndex"])
-        if e > n or e <= prev:
+        if e <= prev or e > n:
             raise ValueError(f"帧 endIndex 非法: {e}")
         if f["endTime"] != times[e - 1]:
             raise ValueError(f"帧 {e} endTime 与 bars 不对齐")
-        if int(f["smc"]["view"]["display_bars"]) != e:
+        view = f["smc"]["view"]
+        if int(view["display_bars"]) != e:
             raise ValueError(f"帧 {e} display_bars 与 endIndex 不一致")
+        if int(view["total_bars"]) <= int(view["display_bars"]):
+            raise ValueError(f"帧 {e} 缺少历史 warmup：total_bars 必须 > display_bars")
         prev = e
-    if len(payload["frames"]) != FRAME_COUNT:
-        raise ValueError(f"帧数应为 {FRAME_COUNT}")
+    if payload["frames"][0]["endIndex"] > 40:
+        raise ValueError("第一帧应从接近 0 开头（<=40）")
+    if payload["frames"][-1]["endIndex"] != n:
+        raise ValueError("最后一帧 endIndex 必须等于 bars 长度")
 
 
 async def main_async() -> None:
     parser = argparse.ArgumentParser(description="导出中际旭创真实结构回放 JSON")
-    parser.add_argument("--symbol", default=SYMBOL)
-    parser.add_argument("--market", default=MARKET)
-    parser.add_argument("--bars", type=int, default=TARGET_BARS)
-    parser.add_argument(
-        "--out",
-        default=str(
-            Path(__file__)
-            .resolve()
-            .parents[2]
-            / "frontend/public/marketing-media/zhongji-xuchuang-300308-1d-2y.json"
-        ),
-    )
+    parser.add_argument("--out", default=str(
+        Path(__file__)
+        .resolve()
+        .parents[2]
+        / "frontend/public/marketing-media/zhongji-xuchuang-300308-1d-2y.json"
+    ))
     args = parser.parse_args()
 
-    payload = await export(args.symbol, args.market, args.bars)
+    payload = await export()
     _validate(payload)
 
     out = Path(args.out)

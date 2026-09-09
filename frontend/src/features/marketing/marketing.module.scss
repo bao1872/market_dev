@@ -624,11 +624,137 @@ $marketing-section-y-mobile: 52px;
   color: v.$color-muted;
 }
 
+.realReplayBtn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .realReplayCaption {
   margin-top: 16px;
   text-align: center;
   font-size: 12px;
   color: v.$color-text-dim;
+}
+
+// ===== 真实结构回放（V1.3）=====
+
+// 结构导读：3 个解释卡片，进入动画前先建立语义。
+.structureGuide {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 20px;
+}
+
+.structureGuideItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 14px;
+}
+
+.structureGuideLabel {
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-text;
+}
+
+.structureGuideMeaning {
+  font-size: 15px;
+  font-weight: 760;
+  color: v.$color-brand;
+}
+
+.structureGuideDesc {
+  font-size: 12px;
+  line-height: 1.6;
+  color: v.$color-muted;
+}
+
+// 左图右解工作区。
+.realReplayWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 20px;
+  align-items: stretch;
+}
+
+.realReplayChartPanel {
+  min-width: 0;
+  padding: 14px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 14px;
+}
+
+// 进度改为百分比文本，不再暴露内部帧编号。
+.realReplayProgressText {
+  font-family: v.$font-mono;
+  font-size: 13px;
+  color: v.$color-text;
+}
+
+// 右侧解释面板。
+.structureNarration {
+  display: flex;
+  flex-direction: column;
+  padding: 20px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: 14px;
+}
+
+.structureNarrationEyebrow {
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+.structureNarrationKind {
+  margin-top: 12px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-brand;
+}
+
+.structureNarrationTitle {
+  margin: 10px 0 4px;
+  font-size: 18px;
+  font-weight: 760;
+  line-height: 1.35;
+}
+
+.structureNarrationMeaning {
+  margin-bottom: 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: v.$color-brand;
+}
+
+.structureNarrationText,
+.structureNarrationWatch {
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+.structureNarrationWatch {
+  margin-top: auto;
+  padding-top: 16px;
+  border-top: 1px solid v.$color-border-soft;
+  color: v.$color-muted;
+}
+
+@media (max-width: 900px) {
+  .realReplayWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .structureGuide {
+    grid-template-columns: 1fr;
+  }
 }
 
 // ===== HeroScreener =====
