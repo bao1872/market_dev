@@ -225,3 +225,35 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 - ✅ M5 → DEFERRED，移出阻塞
 
 **M1 已授权开工。**
+
+---
+
+## 10. Marketing Preview 轻部署通道（Preview Lane）
+
+2026-09-09 用户裁定：门户影子页（`/marketing-preview`）迭代**不再走 `panji-test-deploy` whole-system runner**，改为独立轻通道，push 后直接部署供 Owner 视觉验收，不再等 ChatGPT UI PASS。
+
+### 10.1 架构事实
+- 生产 frontend 静态根：`/opt/panji-live/frontend/dist` 经 live bind mount → 容器 `/usr/share/nginx/html`。
+- 因此 Preview 只需写入独立子目录：`/opt/panji-live/frontend/dist/marketing-preview/`，Nginx 经 live mount 立即可见，**无需 restart frontend、无需碰 backend/worker/database**。
+- 正式 `/` 仍由 Nginx `location = /` 服务现有静态门户（`/landing/index.html`），CUTOVER 前不变。
+
+### 10.2 构建入口
+- 新增独立 root：`frontend/marketing-preview/index.html`（entry = `../src/features/marketing/preview.tsx`）。
+- `frontend/src/features/marketing/preview.tsx`：仅 `createRoot(<MarketingPage/>)`，无 RouterProvider / QueryClientProvider / Toast / App.tsx（MarketingPage 为 fully deterministic 静态页，零产品运行时依赖）。
+- `package.json` 脚本 `build:marketing-preview`：`vite build marketing-preview --config ./vite.config.ts --base /marketing-preview/ --outDir ../dist-marketing-preview`（复用现有 vite 配置，不重建整站 SPA，产物落 `frontend/dist-marketing-preview/`）。
+
+### 10.3 部署入口
+- `scripts/ops/panji-marketing-preview-deploy <FULL_SHA>`：唯一允许的 Preview 部署器。
+- 服务器用独立 git worktree `/opt/panji-marketing-preview-src`（从目标 SHA `--detach`）构建，**不改 `/root/web_dev` 当前 production deployment state**。
+- node_modules 走 Docker named volume `panji-marketing-preview-node-modules` 缓存；仅当 `package-lock.json` 哈希变化才 `npm ci`（node:20-alpine 容器内）。
+- 部署顺序：先 `rsync` assets 再 `install` index（`preview-build.json` 记录 git_sha + scope）。
+- 硬断言：主 SPA `index.html` sha256 与 `trading-frontend` 容器 `StartedAt` 部署前后一致（证明无改主 SPA、无重启）。
+- 禁止：sccp/docker cp、改 backend/DB/RUNTIME_SHA/market.env/nginx.conf、restart 容器、执行 `panji-deploy.sh`。
+
+### 10.4 保留预部署 Gate 的三类改动（不属 Preview Lane）
+1. **涉及产品共用代码**（如 M3.5 `firstPyramidViewModel`/`FirstPyramidPanel`/共享 presentation registry）→ IDE push → 用户审 diff → 再部署。
+2. **CUTOVER / backend / nginx / Capture**（如 `/` 正式切门户、`nginx.conf`、后端 API、数据库、`CaptureStockPage`、飞书真实产出链）→ 继续严格 Gate。
+3. 普通 Marketing 改动（Hero/文案/StructureStory/ChipConsensusStory/StrategyLab/CSS/deterministic 数据）→ push 后直接部署 preview，Owner 先看。
+
+### 10.5 版本编号
+`Preview M2 (SHA f650c61d)` → Owner 视觉反馈 → `Preview M2.1 (SHA ...)` → ... → `Owner Visual PASS` → 才进入 M3。

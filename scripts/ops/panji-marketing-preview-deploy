@@ -1,0 +1,218 @@
+#!/usr/bin/env bash
+# panji-marketing-preview-deploy — Marketing Preview 轻部署通道（独立静态 artifact）
+#
+# 权威来源：M0_ARCHITECTURE_CONTRACT.md §Preview Lane
+#
+# 与 scripts/ops/panji-test-deploy（whole-system runner）的严格区分：
+#   - 只构建 Marketing Preview 小 bundle（vite build marketing-preview），不重建整站 SPA；
+#   - 只写入 /opt/panji-live/frontend/dist/marketing-preview/ 子目录；
+#   - 不执行 scripts/deploy/panji-deploy.sh；
+#   - 不碰 backend / worker / database / RUNTIME_SHA / market.env / nginx.conf；
+#   - 不 restart 任何容器；只靠 Nginx 对 dist 的 live bind mount 立即生效。
+#
+# 设计要点：
+#   - 服务器用独立 git worktree（/opt/panji-marketing-preview-src）从目标 SHA 构建，
+#     不改 /root/web_dev 当前 production deployment state；
+#   - node_modules 走 Docker named volume 缓存，仅当 package-lock 哈希变化才 npm ci；
+#   - 部署顺序：先 rsync assets 再 install index（避免短暂引用不存在的新 asset）；
+#   - 硬断言：主 SPA index.html 哈希 + trading-frontend 容器 StartedAt 部署前后一致。
+#
+# 用法:
+#   scripts/ops/panji-marketing-preview-deploy <FULL_SHA> [--dry-run]
+#
+# 退出码：0 成功，1 失败，2 配置/前置错误
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+SSH_WRAPPER="${SCRIPT_DIR}/panji-prod-ssh"
+
+# 可调环境变量（默认值对齐生产部署事实）
+LIVE_ROOT="${PANJI_LIVE_ROOT:-/opt/panji-live}"
+PROD_REPO="${PANJI_PROD_REPO:-/root/web_dev}"
+PREVIEW_SRC="${PANJI_PREVIEW_SRC:-/opt/panji-marketing-preview-src}"
+PREVIEW_CACHE="${PANJI_PREVIEW_CACHE:-/opt/panji-marketing-preview-cache}"
+NODE_VOLUME="${PANJI_NODE_VOLUME:-panji-marketing-preview-node-modules}"
+NODE_IMAGE="${PANJI_NODE_IMAGE:-node:20-alpine}"
+FRONTEND_CONTAINER="${PANJI_FRONTEND_CONTAINER:-trading-frontend}"
+
+PREVIEW_TARGET="${LIVE_ROOT}/frontend/dist/marketing-preview"
+
+TARGET_SHA=""
+DRY_RUN=false
+
+log()  { printf '[%s] %s\n' "$(date '+%H:%M:%S')" "$*"; }
+fail() { log "错误: $*" >&2; exit 1; }
+
+# ===== 参数解析 =====
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=true; shift ;;
+    -h|--help) echo "usage: $0 <SHA> [--dry-run]"; exit 2 ;;
+    -*) fail "未知选项: $1" ;;
+    *)
+      [[ -z "${TARGET_SHA}" ]] || fail "只能指定一个 SHA"
+      TARGET_SHA="$1"; shift ;;
+  esac
+done
+[[ -n "${TARGET_SHA}" ]] || { echo "usage: $0 <SHA> [--dry-run]" >&2; exit 2; }
+
+cd "${REPO_ROOT}"
+
+# ===== 本地校验：40 位 SHA + 属 origin/dev 祖先 =====
+[[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "必须提供 40 位完整 SHA"
+git fetch origin dev --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin dev 失败"
+if ! git merge-base --is-ancestor "${TARGET_SHA}" origin/dev 2>/dev/null; then
+  fail "SHA ${TARGET_SHA} 不是 origin/dev 的祖先。请先 push dev 并确认已上库。"
+fi
+log "SHA 校验通过（origin/dev 祖先）: ${TARGET_SHA}"
+
+# ===== 转义（注入远端命令前）=====
+q() { printf '%q' "$1"; }
+Q_PREVIEW_SRC="$(q "${PREVIEW_SRC}")"
+Q_PROD_REPO="$(q "${PROD_REPO}")"
+Q_PREVIEW_TARGET="$(q "${PREVIEW_TARGET}")"
+Q_PREVIEW_CACHE="$(q "${PREVIEW_CACHE}")"
+Q_LIVE_ROOT="$(q "${LIVE_ROOT}")"
+Q_NODE_VOLUME="$(q "${NODE_VOLUME}")"
+Q_NODE_IMAGE="$(q "${NODE_IMAGE}")"
+Q_FRONTEND_CONTAINER="$(q "${FRONTEND_CONTAINER}")"
+
+if [[ "${DRY_RUN}" == "true" ]]; then
+  log "[dry-run] 计划：在 ${PREVIEW_SRC} worktree 从 ${TARGET_SHA} 构建 marketing-preview，"
+  log "[dry-run]       仅 rsync 到 ${PREVIEW_TARGET}/，不改主 SPA / 容器 / nginx。"
+  exit 0
+fi
+
+# ===== 远端执行（经唯一 SSH wrapper）=====
+read -r -d '' REMOTE_CMD <<REMOTE_SCRIPT || true
+set -euo pipefail
+
+TARGET_SHA=${TARGET_SHA}
+PROD_REPO=${Q_PROD_REPO}
+PREVIEW_SRC=${Q_PREVIEW_SRC}
+PREVIEW_TARGET=${Q_PREVIEW_TARGET}
+PREVIEW_CACHE=${Q_PREVIEW_CACHE}
+LIVE_ROOT=${Q_LIVE_ROOT}
+NODE_VOLUME=${Q_NODE_VOLUME}
+NODE_IMAGE=${Q_NODE_IMAGE}
+FRONTEND_CONTAINER=${Q_FRONTEND_CONTAINER}
+
+echo "[preview] 校验 SHA 属 origin/dev 祖先（服务器侧）"
+git -C "\${PROD_REPO}" fetch origin dev --no-tags
+if ! git -C "\${PROD_REPO}" merge-base --is-ancestor "\${TARGET_SHA}" origin/dev; then
+  echo "SHA 不是 origin/dev 祖先，拒绝自举" >&2
+  exit 2
+fi
+
+# 1. 独立 preview worktree（不改 PROD_REPO 当前工作树）
+if [[ -f "\${PREVIEW_SRC}/.git" ]]; then
+  echo "[preview] worktree 已存在，reset --hard \${TARGET_SHA}"
+  git -C "\${PREVIEW_SRC}" reset --hard "\${TARGET_SHA}" >/dev/null
+else
+  echo "[preview] 首次创建 worktree: \${PREVIEW_SRC}"
+  git -C "\${PROD_REPO}" worktree add --detach "\${PREVIEW_SRC}" "\${TARGET_SHA}"
+fi
+
+BUILD_DIR="\${PREVIEW_SRC}/frontend/dist-marketing-preview"
+
+# 2. node_modules 缓存：仅在 volume 缺失或 package-lock 变化时才 npm ci
+mkdir -p "\${PREVIEW_CACHE}"
+LOCK="\${PREVIEW_SRC}/frontend/package-lock.json"
+HASH_NOW="\$(sha256sum "\${LOCK}" | awk '{print \$1}')"
+CACHE_FILE="\${PREVIEW_CACHE}/package-lock.sha256"
+HASH_CACHED="\$(cat "\${CACHE_FILE}" 2>/dev/null || echo '')"
+NEED_CI=0
+if ! docker volume inspect "\${NODE_VOLUME}" >/dev/null 2>&1; then
+  NEED_CI=1
+elif [[ "\${HASH_NOW}" != "\${HASH_CACHED}" ]]; then
+  NEED_CI=1
+fi
+
+# 3. 清理旧 build 产物（worktree 内未跟踪目录，安全删除）
+rm -rf "\${BUILD_DIR}"
+
+BUILD_CMD="npm run build:marketing-preview"
+if [[ "\${NEED_CI}" -eq 1 ]]; then
+  echo "[preview] package-lock 变化或缓存缺失，执行 npm ci（node image: \${NODE_IMAGE}）"
+  BUILD_CMD="npm ci && npm run build:marketing-preview"
+  echo "\${HASH_NOW}" > "\${CACHE_FILE}"
+else
+  echo "[preview] node_modules 缓存命中，跳过 npm ci"
+fi
+
+echo "[preview] 构建 marketing-preview bundle（docker run \${NODE_IMAGE}）"
+docker run --rm \
+  -v "\${PREVIEW_SRC}/frontend:/app" \
+  -v "\${NODE_VOLUME}:/app/node_modules" \
+  -w /app \
+  "\${NODE_IMAGE}" \
+  sh -c "\${BUILD_CMD}"
+
+if [[ ! -f "\${BUILD_DIR}/index.html" ]]; then
+  echo "preview build 产物缺失，构建可能失败" >&2
+  exit 1
+fi
+
+# 4. 硬安全断言 BEFORE（主 SPA 与容器状态）
+MAIN_INDEX_BEFORE="\$(sha256sum "\${LIVE_ROOT}/frontend/dist/index.html" 2>/dev/null | awk '{print \$1}')"
+FRONTEND_STARTED_BEFORE="\$(docker inspect "\${FRONTEND_CONTAINER}" --format '{{.State.StartedAt}}' 2>/dev/null || echo N/A)"
+echo "[safety] MAIN_INDEX_BEFORE=\${MAIN_INDEX_BEFORE}"
+echo "[safety] FRONTEND_STARTED_BEFORE=\${FRONTEND_STARTED_BEFORE}"
+
+# 5. 部署：先 assets 后 index
+mkdir -p "\${PREVIEW_TARGET}/assets"
+rsync -a --delete "\${BUILD_DIR}/assets/" "\${PREVIEW_TARGET}/assets/"
+install -m 0644 "\${BUILD_DIR}/index.html" "\${PREVIEW_TARGET}/index.html"
+cat > "\${PREVIEW_TARGET}/preview-build.json" <<JSON
+{
+  "git_sha": "\${TARGET_SHA}",
+  "scope": "marketing-preview"
+}
+JSON
+
+# 6. 硬安全断言 AFTER
+MAIN_INDEX_AFTER="\$(sha256sum "\${LIVE_ROOT}/frontend/dist/index.html" 2>/dev/null | awk '{print \$1}')"
+FRONTEND_STARTED_AFTER="\$(docker inspect "\${FRONTEND_CONTAINER}" --format '{{.State.StartedAt}}' 2>/dev/null || echo N/A)"
+if [[ "\${MAIN_INDEX_BEFORE}" != "\${MAIN_INDEX_AFTER}" ]]; then
+  echo "SAFETY FAIL: 主 SPA index.html 被修改（\${MAIN_INDEX_BEFORE} -> \${MAIN_INDEX_AFTER}）" >&2
+  exit 1
+fi
+if [[ "\${FRONTEND_STARTED_BEFORE}" != "\${FRONTEND_STARTED_AFTER}" ]]; then
+  echo "SAFETY FAIL: frontend 容器被 restart（\${FRONTEND_STARTED_BEFORE} -> \${FRONTEND_STARTED_AFTER}）" >&2
+  exit 1
+fi
+echo "[safety] 主 SPA 未改 + 容器未重启：断言通过"
+
+# 7. 验证
+echo "=== verify ==="
+HTTP_PREVIEW="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/marketing-preview/)"
+echo "preview HTTP: \${HTTP_PREVIEW}"
+echo "preview-build.json:"
+curl -s http://127.0.0.1/marketing-preview/preview-build.json
+echo ""
+HTTP_ROOT="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
+echo "root / HTTP: \${HTTP_ROOT}"
+HTTP_MARKET="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/market)"
+echo "/market HTTP: \${HTTP_MARKET}"
+
+if [[ "\${HTTP_PREVIEW}" != "200" ]]; then
+  echo "验证失败：/marketing-preview 非 200" >&2
+  exit 1
+fi
+echo "[preview] 部署完成：\${PREVIEW_TARGET}"
+REMOTE_SCRIPT
+
+log "通过 panji-prod-ssh 执行轻部署（SHA ${TARGET_SHA}）..."
+set +e
+"${SSH_WRAPPER}" -o BatchMode=yes -o ConnectTimeout=30 "${REMOTE_CMD}"
+SSH_RC=$?
+set -e
+
+if [[ "${SSH_RC}" -ne 0 ]]; then
+  fail "远端轻部署失败（SSH rc=${SSH_RC}）。生产主 SPA / 容器未被改动（脚本在断言失败前即退出）。"
+fi
+
+log "panji-marketing-preview-deploy 完成：${TARGET_SHA}"
+exit 0
