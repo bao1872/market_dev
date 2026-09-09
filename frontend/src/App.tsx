@@ -33,6 +33,11 @@ import AdminDiagnosticsPage from './pages/AdminDiagnosticsPage'
 // 门户页 lazy 加载，避免门户动画代码进入业务页面首包
 const LandingPage = lazy(() => import('./pages/LandingPage'))
 
+// [Marketing] Route D 影子开发入口：新 React 营销门户。
+// 生产 / 仍由 nginx `location = /` 直接服务 /landing/index.html，
+// 因此在 CUTOVER 修改 nginx.conf 之前，本入口不会改变任何正式首页行为。
+const MarketingPage = lazy(() => import('./features/marketing/MarketingPage'))
+
 // [Auction] - 竞价分析三级页面 lazy 加载（市场/板块/个股）
 // 受保护路由 require_capability("research_replay")：竞价与复盘同属一项权益（GET /v1/auction/*）
 
@@ -44,6 +49,11 @@ const AuctionScopeWorkspace = lazy(() => import('./features/auction/AuctionScope
 // 门户页加载占位
 function LandingFallback() {
   return <div style={{ minHeight: '100vh', background: '#030915' }} />
+}
+
+// [Marketing] 营销门户加载占位（与产品页背景 token #0A0F14 对齐）
+function MarketingFallback() {
+  return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
 }
 
 // [Auction] - 竞价页面 lazy 加载占位（与 UserAppShell 视觉对齐）
@@ -234,6 +244,16 @@ function OldStockDebugRedirect() {
 export const routeConfig: RouteObject[] = [
   // 公开路由
   { path: '/', element: <Suspense fallback={<LandingFallback />}><LandingPage /></Suspense> },
+  // [Marketing] Route D Phase 2：影子预览入口。
+  // CUTOVER 后由 nginx 将 / 指向 SPA、由 MarketingPage 承载；本路由保留一个 release 周期再移除。
+  {
+    path: '/marketing-preview',
+    element: (
+      <Suspense fallback={<MarketingFallback />}>
+        <MarketingPage />
+      </Suspense>
+    ),
+  },
   { path: '/login', element: <LoginPage /> },
   // [Auth] - 描述: /subscription-expired 为 canonical 路由，/membership-expired 重定向到此（向后兼容）
   { path: '/subscription-expired', element: <SubscriptionExpiredPage /> },

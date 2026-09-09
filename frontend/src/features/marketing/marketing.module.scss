@@ -1,0 +1,552 @@
+// 盘迹营销门户样式（M1 骨架）
+// 变量真源：src/styles/variables.scss（盘迹品牌视觉资产包 V1.0）
+// 禁止引入新色板；禁止硬编码颜色，一律使用 token。
+// CSS Modules：类名自动 camelCase（vite.config localsConvention: camelCaseOnly）
+@use '../../styles/variables' as v;
+
+// ===== 营销专属布局 token（不污染全局）=====
+$marketing-container: 1200px;
+$marketing-section-y: 96px;
+$marketing-section-y-narrow: 64px;
+
+.page {
+  min-height: 100vh;
+  background: v.$color-bg;
+  color: v.$color-text;
+  font-family: v.$font-sans;
+  overflow-x: hidden;
+}
+
+.container {
+  width: 100%;
+  max-width: $marketing-container;
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+.section {
+  position: relative;
+  padding: $marketing-section-y 0;
+
+  @media (max-width: v.$bp-narrow) {
+    padding: $marketing-section-y-narrow 0;
+  }
+}
+
+.sectionAlt {
+  background: linear-gradient(180deg, transparent, rgba(17, 26, 35, 0.55), transparent);
+}
+
+// ===== 标题体系 =====
+.sectionHead {
+  max-width: 760px;
+  margin: 0 0 48px;
+}
+
+.index {
+  display: inline-block;
+  font-family: v.$font-mono;
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: v.$color-brand;
+  margin-bottom: 14px;
+}
+
+.eyebrow {
+  font-size: 13px;
+  letter-spacing: 1.5px;
+  color: v.$color-muted;
+  margin-bottom: 12px;
+}
+
+.title {
+  margin: 0 0 16px;
+  font-size: clamp(26px, 3.4vw, 40px);
+  line-height: 1.28;
+  font-weight: 700;
+  letter-spacing: -0.2px;
+  white-space: pre-line;
+}
+
+.subtitle {
+  margin: 0;
+  font-size: 15px;
+  line-height: 1.8;
+  color: v.$color-muted;
+}
+
+// ===== 导航 =====
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  background: rgba(10, 15, 20, 0.82);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
+.navInner {
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  height: 64px;
+}
+
+.navBrand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+.navLinks {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+
+  @media (max-width: v.$bp-narrow) {
+    display: none;
+  }
+}
+
+.navLink {
+  padding: 8px 14px;
+  border-radius: 8px;
+  font-size: 14px;
+  color: v.$color-muted;
+  transition: color 0.18s ease, background 0.18s ease;
+
+  &:hover {
+    color: v.$color-text;
+    background: v.$color-panel-2;
+  }
+}
+
+.navCta {
+  flex-shrink: 0;
+
+  // 窄屏隐藏导航项后，CTA 需要靠右对齐
+  @media (max-width: v.$bp-narrow) {
+    margin-left: auto;
+  }
+}
+
+// ===== Hero =====
+.hero {
+  position: relative;
+  padding: 120px 0 96px;
+
+  @media (max-width: v.$bp-narrow) {
+    padding: 72px 0 56px;
+  }
+}
+
+.heroInner {
+  position: relative;
+  z-index: 1;
+  max-width: 820px;
+}
+
+.heroTitle {
+  margin: 16px 0 20px;
+  font-size: clamp(32px, 5vw, 56px);
+  line-height: 1.22;
+  font-weight: 800;
+  letter-spacing: -0.6px;
+  white-space: pre-line;
+}
+
+.heroSub {
+  margin: 0 0 32px;
+  font-size: 16px;
+  line-height: 1.85;
+  color: v.$color-muted;
+  max-width: 620px;
+}
+
+.ctaRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  padding: 0 22px;
+  border-radius: v.$radius-base;
+  font-size: 15px;
+  font-weight: 600;
+  border: 1px solid transparent;
+  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
+
+  &:hover {
+    transform: translateY(-1px);
+  }
+}
+
+.btnPrimary {
+  background: v.$color-brand;
+  color: #04140f;
+
+  &:hover {
+    background: v.$color-brand-hover;
+  }
+}
+
+.btnGhost {
+  background: v.$color-panel-2;
+  color: v.$color-text;
+  border-color: v.$color-border;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+  }
+}
+
+// ===== 背景光斑 =====
+.glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(90px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.glowA {
+  top: -160px;
+  right: -120px;
+  width: 460px;
+  height: 460px;
+  background: rgba(0, 246, 194, 0.10);
+}
+
+.glowB {
+  bottom: -180px;
+  left: -140px;
+  width: 420px;
+  height: 420px;
+  background: rgba(56, 130, 246, 0.10);
+}
+
+// ===== 栅格与卡片 =====
+.grid {
+  display: grid;
+  gap: 20px;
+}
+
+.grid2 {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.grid3 {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.card {
+  position: relative;
+  padding: 28px 26px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  transition: border-color 0.2s ease, transform 0.2s ease;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+    transform: translateY(-2px);
+  }
+}
+
+.cardTitle {
+  margin: 0 0 10px;
+  font-size: 18px;
+  font-weight: 700;
+}
+
+.cardDesc {
+  margin: 0 0 18px;
+  font-size: 14px;
+  line-height: 1.8;
+  color: v.$color-muted;
+}
+
+.bullets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.bullet {
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+}
+
+// ===== 流程步骤 =====
+.steps {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 16px;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.step {
+  position: relative;
+  padding: 24px 20px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+}
+
+.stepIndex {
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-brand;
+  margin-bottom: 10px;
+}
+
+.stepTitle {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.stepDesc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: v.$color-muted;
+}
+
+// ===== 市场语言六维度 =====
+.dims {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.dim {
+  padding: 22px 20px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border-soft;
+  border-radius: v.$radius-base;
+  transition: border-color 0.2s ease;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+  }
+}
+
+.dimTitle {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.dimDesc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: v.$color-muted;
+}
+
+// ===== 99 字段 Drawer（M1 shell）=====
+.drawer {
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  background: v.$color-panel;
+  overflow: hidden;
+}
+
+.drawerTrigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 20px 24px;
+  background: transparent;
+  border: 0;
+  color: v.$color-text;
+  font-size: 15px;
+  font-weight: 600;
+  text-align: left;
+
+  &:hover {
+    background: v.$color-panel-2;
+  }
+}
+
+.drawerCaret {
+  color: v.$color-brand;
+  font-family: v.$font-mono;
+  font-size: 13px;
+}
+
+.drawerBody {
+  padding: 0 24px 24px;
+  border-top: 1px solid v.$color-border-soft;
+}
+
+.drawerGroups {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 20px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drawerGroup {
+  padding: 8px 16px;
+  border-radius: v.$radius-base;
+  font-size: 14px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+}
+
+.drawerNote {
+  margin: 18px 0 0;
+  font-size: 13px;
+  line-height: 1.75;
+  color: v.$color-text-dim;
+}
+
+// ===== 页脚 =====
+.footer {
+  border-top: 1px solid v.$color-border-soft;
+  padding: 56px 0 32px;
+  background: v.$color-panel;
+}
+
+.footerInner {
+  display: grid;
+  grid-template-columns: 1.5fr 1fr 1fr 1.2fr;
+  gap: 32px;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.footerTitle {
+  margin: 0 0 14px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.footerList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.footerLink {
+  font-size: 13px;
+  color: v.$color-muted;
+  transition: color 0.16s ease;
+
+  &:hover {
+    color: v.$color-brand;
+  }
+}
+
+.footerDesc {
+  margin: 12px 0 0;
+  font-size: 13px;
+  line-height: 1.8;
+  color: v.$color-muted;
+  max-width: 320px;
+}
+
+.footerBottom {
+  margin-top: 40px;
+  padding-top: 20px;
+  border-top: 1px solid v.$color-border-soft;
+  font-size: 12px;
+  color: v.$color-text-dim;
+  text-align: center;
+}
+
+.inviteTitle {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+// ===== 进场动画 =====
+.reveal {
+  opacity: 0;
+  transform: translateY(18px);
+  transition: opacity 0.55s ease, transform 0.55s ease;
+}
+
+.revealIn {
+  opacity: 1;
+  transform: none;
+}
+
+// ScrollReveal 作为 grid item 时撑满单元格，使内部卡片等高
+.revealFill {
+  display: flex;
+  flex-direction: column;
+
+  > * {
+    flex: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .btn:hover,
+  .card:hover {
+    transform: none;
+  }
+}
