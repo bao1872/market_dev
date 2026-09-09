@@ -16,10 +16,25 @@ export default function MarketingFooter() {
               <h3 className={styles.footerTitle}>{col.title}</h3>
               <ul className={styles.footerList}>
                 {col.links.map((link) => (
-                  <li key={`${link.href}-${link.label}`}>
-                    <a className={styles.footerLink} href={link.href}>
-                      {link.label}
-                    </a>
+                  <li key={`${link.href ?? 'text'}-${link.label}`}>
+                    {link.href ? (
+                      <a
+                        className={styles.footerLink}
+                        href={link.href}
+                        {...(link.external
+                          ? { target: '_blank', rel: 'noopener noreferrer' }
+                          : {})}
+                      >
+                        {link.label}
+                      </a>
+                    ) : (
+                      <span className={styles.footerText}>
+                        {link.label}
+                        {link.note ? (
+                          <em className={styles.footerNote}>{link.note}</em>
+                        ) : null}
+                      </span>
+                    )}
                   </li>
                 ))}
               </ul>

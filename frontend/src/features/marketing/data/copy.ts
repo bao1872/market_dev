@@ -15,7 +15,6 @@ export const NAV = {
     { label: '怎么发现', href: '#discovery' },
     { label: '怎么用', href: '#workflow' },
     { label: '看什么', href: '#market-language' },
-    { label: '99 个字段', href: '#fields' },
   ],
   loginHref: '/login',
   loginLabel: '登录盘迹',
@@ -82,15 +81,16 @@ export const MARKET_LANGUAGE = {
   ],
 }
 
-// M1 只渲染 Drawer shell，不复制 99 字段定义（M3.5 接共享 registry）
+// 第一金字塔：渐进披露，不作为首页 numbered section，也不出现在主导航。
+// M1.1 只保留 Drawer 外壳与维度分组；M3.5 从产品侧共享 presentation registry 接入具体字段。
 export const FIRST_PYRAMID = {
-  index: '04',
-  eyebrow: '99 个字段',
-  title: '99 个字段不用背。按维度折叠，需要时再展开。',
-  subtitle: '平时只看到结论，需要追细节的时候再一层层打开。',
   drawer: {
-    triggerLabel: '展开字段结构',
-    // M1 占位：仅展示维度分组外壳，具体字段由 M3.5 共享 registry 提供
+    ariaLabel: '第一金字塔字段字典',
+    triggerLabel: '第一金字塔字段字典',
+    title: '99 个字段不用背',
+    subtitle: '按维度折叠，需要时再展开。平时只看到结论，需要追细节的时候再一层层打开。',
+    closeLabel: '关闭',
+    // M1.1 占位：仅展示维度分组外壳，具体字段由 M3.5 共享 registry 提供
     groups: [
       { key: 'trend', label: '趋势' },
       { key: 'structure', label: '结构' },
@@ -102,28 +102,49 @@ export const FIRST_PYRAMID = {
   },
 }
 
+// 营销页对外链接。href 缺失时渲染为纯文本说明，不制造假链接。
+export type MarketingLink = {
+  label: string
+  href?: string
+  external?: boolean
+  note?: string
+}
+
+type FooterColumn = {
+  title: string
+  links: MarketingLink[]
+}
+
+// 内容入口唯一对外链接：雪球搜索「小Z说事」。
+// 不做雪球抓取、不做自动 NLP——这里只是一个跳转，内容场景由 reviewExamples 维护。
+export const XUEQIU_SEARCH_URL = 'https://xueqiu.com/k?q=%E5%B0%8FZ%E8%AF%B4%E4%BA%8B'
+
 export const FOOTER = {
   brand: BRAND,
   columns: [
     {
       title: '产品',
       links: [
-        { label: '全市场', href: '/market' },
-        { label: '板块', href: '/boards' },
-        { label: '复盘', href: '/review' },
+        // 「复盘」仅作为内容品牌语境出现（见下方内容栏），不作为产品路由对外暴露：
+        // /review 与 /auction 不对外开放，公开门户不宣传。
+        { label: '行情', href: '/market' },
+        { label: '自选', href: '/market?scope=watchlist' },
       ],
     },
     {
-      title: '说明',
+      title: '内容',
       links: [
-        { label: '使用说明', href: '/portal/index.html' },
-        { label: '常见问题', href: '/portal/index.html' },
+        { label: '雪球搜索「小Z说事」', href: XUEQIU_SEARCH_URL, external: true },
+        {
+          label: '关注每日早晚复盘',
+          note: '每日早晚各一篇，讲当天市场发生了什么。',
+        },
       ],
     },
-  ],
+  ] as FooterColumn[],
   invitation: {
     title: '需要邀请码？',
-    desc: '扫码添加 QQ 联系。',
+    desc: '扫码添加 QQ 联系。（二维码资产在后续视觉阶段接入）',
   },
   copyright: '盘迹 · 看一眼就知道怎么用',
 }

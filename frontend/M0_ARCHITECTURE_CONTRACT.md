@@ -148,6 +148,14 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 | `WatchAndNotify` | 自选→变化→飞书图片 | **静态 poster 图** |
 | `Invitation` / `Footer` | QQ 邀请码 + 雪球 | 静态 |
 
+### 6.1 公开门户边界（M1.1 修订）
+
+- ❌ footer / nav 一律不得暴露 `/review`、`/auction`（不对外开放，门户不宣传）
+- ❌ 不得再链回 `/portal/index.html`——使用说明已裁定融合进门户
+- ✅ 产品入口收敛为：`行情 /market`、`自选 /market?scope=watchlist`
+- ✅ 内容入口：雪球搜索「小Z说事」+ 「关注每日早晚复盘」文案（「复盘」仅作内容语境，不作为产品路由）
+- 「第一金字塔」为**渐进披露**：不在主导航、不占 section index，仅在 MarketLanguage 底部保留低调入口 → 右侧 Drawer
+
 ---
 
 ## 7. 里程碑（v2 重排）
@@ -156,6 +164,7 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 |---|---|---|
 | **M0** | 本契约 + Route D 冻结 | ✅ 已完成 |
 | **M1** | `/marketing-preview` 骨架：Nav / Hero / Discovery / Workflow / MarketLanguage / **Drawer shell** / Footer | `tsc -b` PASS |
+| **M1.1** | 公开边界修正（去掉 `/review`、`/auction`、`/portal/index.html`）+ 第一金字塔渐进披露（去主导航、去 numbered section、改为右侧 Drawer）+ marketing contract 接入 `test:contract` | `npm run test:contract` PASS |
 | **M2** | StructureStory + ChipConsensusStory（自动播放/上一步/下一步/暂停/reduced-motion/每阶段中文解释） | `tsc -b` + contract test |
 | **M3** | StrategyLab + 小Z说事→板块→盘迹 | `tsc -b` + demo 数据 contract |
 | **M3.5** | First Pyramid presentation registry 抽取（**Refactor only**：禁止改字段名/排序/分组/语义），原 contract 全 PASS 后 Marketing Drawer 接入 | 原契约全 PASS |
@@ -171,6 +180,7 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 **M1–M4 允许**：
 1. 新增 `src/features/marketing/**`
 2. `src/App.tsx` — **仅新增 `/marketing-preview` 公开路由**，不动 `/`、不动任何产品路由
+3. `package.json` — **仅允许**向现有 `test:contract` 显式枚举**追加** marketing contract tests；禁止依赖变化、禁止其它 script 语义变化（M1.1 已追加 `src/features/marketing/__tests__/marketingCopy.test.ts`）
 
 **M3.5 允许**：新增 `src/features/first-pyramid/presentation.ts`；改动 `stock-research/` 相关文件（refactor only）
 

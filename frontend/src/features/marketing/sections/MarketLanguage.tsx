@@ -1,10 +1,14 @@
 import clsx from 'clsx'
 import ScrollReveal from '../components/ScrollReveal'
 import SectionHeading from '../components/SectionHeading'
-import { MARKET_LANGUAGE } from '../data/copy'
+import { FIRST_PYRAMID, MARKET_LANGUAGE } from '../data/copy'
 import styles from '../marketing.module.scss'
 
-export default function MarketLanguage() {
+type Props = {
+  onOpenFieldDictionary: () => void
+}
+
+export default function MarketLanguage({ onOpenFieldDictionary }: Props) {
   return (
     <section
       className={styles.section}
@@ -27,6 +31,18 @@ export default function MarketLanguage() {
               </div>
             </ScrollReveal>
           ))}
+        </div>
+        {/* 第一金字塔渐进披露：低调入口，不在主导航、不占 section index */}
+        <div className={styles.dictionaryLinkRow}>
+          <button
+            type="button"
+            className={styles.dictionaryLink}
+            onClick={onOpenFieldDictionary}
+            data-testid="marketing-field-dictionary-trigger"
+          >
+            {FIRST_PYRAMID.drawer.triggerLabel}
+            <span aria-hidden="true">→</span>
+          </button>
         </div>
       </div>
     </section>
