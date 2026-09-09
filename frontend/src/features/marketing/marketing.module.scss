@@ -386,6 +386,184 @@ $marketing-section-y-narrow: 64px;
   color: v.$color-muted;
 }
 
+// ===== 教学动画（M2）=====
+.storyGrid {
+  display: grid;
+  grid-template-columns: 280px minmax(0, 1fr);
+  gap: 32px;
+  align-items: start;
+
+  @media (max-width: v.$bp-wide) {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+}
+
+.storyStages {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.storyStage,
+.storyStageActive {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: v.$radius-base;
+  background: v.$color-panel;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+// 当前阶段：brand 细边框 + 微光，不做大面积铺底
+.storyStageActive {
+  border-color: v.$color-brand-deep;
+  box-shadow: 0 0 18px rgba(0, 246, 194, 0.08);
+}
+
+.storyStageIndex {
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-brand;
+}
+
+.storyStageTitle {
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.storyStageSummary {
+  font-size: 13px;
+  line-height: 1.7;
+  color: v.$color-muted;
+}
+
+.storyVisual {
+  padding: 16px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+}
+
+.chipVisual {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 180px;
+  gap: 12px;
+
+  @media (max-width: v.$bp-narrow) {
+    grid-template-columns: 1fr;
+  }
+}
+
+.storyExplain {
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid v.$color-border-soft;
+}
+
+.storyExplainTitle {
+  margin: 0 0 8px;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.storyExplainText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.8;
+  color: v.$color-muted;
+}
+
+.eventTag {
+  display: inline-block;
+  margin-top: 12px;
+  padding: 6px 12px;
+  border-radius: v.$radius-base;
+  font-size: 12px;
+  color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.22);
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.controlBtn {
+  min-height: 36px;
+  padding: 8px 16px;
+  font-size: 13px;
+  color: v.$color-text;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-base;
+  transition: border-color 0.16s ease;
+
+  &:hover {
+    border-color: v.$color-brand-deep;
+  }
+}
+
+.frameReadout {
+  margin-left: auto;
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+// ===== 教学成交分布（SVG）=====
+.profilePanel {
+  display: flex;
+  flex-direction: column;
+}
+
+.consensusReadout {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
+}
+
+.consensusLabel {
+  font-size: 12px;
+  color: v.$color-muted;
+}
+
+.consensusValue {
+  font-family: v.$font-mono;
+  font-size: 20px;
+  color: v.$color-brand;
+}
+
+.consensusFrom {
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+.profileSvg {
+  display: block;
+  width: 100%;
+}
+
+.profileBin {
+  fill: var(--brand);
+  opacity: 0.22;
+}
+
+.profileBinMax {
+  fill: var(--brand);
+  opacity: 1;
+}
+
 // ===== 第一金字塔渐进披露（M1.1）=====
 // 低调入口：放在六维度卡片下方，不占 section index，不在主导航出现
 .dictionaryLinkRow {

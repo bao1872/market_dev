@@ -7,6 +7,8 @@ import MarketingNav from './sections/MarketingNav'
 import Hero from './sections/Hero'
 import Discovery from './sections/Discovery'
 import Workflow from './sections/Workflow'
+import StructureStory from './sections/StructureStory'
+import ChipConsensusStory from './sections/ChipConsensusStory'
 import MarketLanguage from './sections/MarketLanguage'
 import FirstPyramidDrawerShell from './sections/FirstPyramidDrawerShell'
 import MarketingFooter from './sections/MarketingFooter'
@@ -23,6 +25,8 @@ export default function MarketingPage() {
         <Hero />
         <Discovery />
         <Workflow />
+        <StructureStory />
+        <ChipConsensusStory />
         <MarketLanguage onOpenFieldDictionary={() => setFieldDrawerOpen(true)} />
       </main>
       <MarketingFooter />

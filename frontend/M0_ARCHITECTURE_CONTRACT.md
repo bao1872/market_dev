@@ -197,6 +197,25 @@ React 18 + TypeScript + Vite 5 + **SCSS Modules** + lightweight-charts@^4.2 + Re
 
 ---
 
+## 8.5 KNOWN BASELINE TEST DEBT
+
+**baseline SHA**：`879a042186ec2a2f592a57b1642e622a4aca5f56`
+
+以下 2 项为**继承失败**（inherited failures），在 baseline SHA 上即已存在，与 Marketing 无关：
+
+1. `P0-5: StrategyChart range/reset 按钮以 calc.length 为右边界`
+2. `P0-5: StrategyChart 无 viewportProp 时回退到 createDefaultViewport(calc.length)`
+
+成因：`scripts/contract-tests/viewport-reset.test.ts` 仍断言 `src/components/StrategyChart.tsx` 中的旧源码字符串（`createDefaultViewport(calc.length, initialVisibleBars)`、`if (viewportProp) return clampViewport(...)`），而该组件已演进；属 **STALE_TEST**，不是 RUNTIME_BUG。
+
+规则：
+- M2 及后续里程碑**禁止顺手修**这两项（不改 `StrategyChart.tsx`、不改 `viewport-reset.test.ts`）
+- full `test:contract` **不得出现第三个失败**
+- Marketing 自身 contract 必须全绿
+- 该 stale contract 由**单独治理任务**处理
+
+---
+
 ## 9. 已关闭的待办
 
 - ✅ 第 0 号问题 → Route D

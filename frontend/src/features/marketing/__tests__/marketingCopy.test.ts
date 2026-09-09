@@ -5,12 +5,14 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import {
+  CHIP_CONSENSUS_STORY,
   DISCOVERY,
   FIRST_PYRAMID,
   FOOTER,
   HERO,
   MARKET_LANGUAGE,
   NAV,
+  STRUCTURE_STORY,
   WORKFLOW,
 } from '../data/copy'
 
@@ -119,6 +121,8 @@ test('公开文案整体不含历史遗留语义术语', () => {
     hero: HERO,
     discovery: DISCOVERY,
     workflow: WORKFLOW,
+    structureStory: STRUCTURE_STORY,
+    chipConsensusStory: CHIP_CONSENSUS_STORY,
     marketLanguage: MARKET_LANGUAGE,
     footer: FOOTER,
     firstPyramid: FIRST_PYRAMID,
@@ -128,10 +132,13 @@ test('公开文案整体不含历史遗留语义术语', () => {
   }
 })
 
-test('各 section 序号唯一且非空', () => {
-  const indexes = [DISCOVERY.index, WORKFLOW.index, MARKET_LANGUAGE.index]
-  assert.equal(new Set(indexes).size, indexes.length, 'section 序号必须唯一')
-  for (const i of indexes) {
-    assert.ok(i.trim().length > 0, 'section 序号不得为空')
-  }
+test('首页 numbered section 序号严格为 01→05', () => {
+  const indexes = [
+    DISCOVERY.index,
+    WORKFLOW.index,
+    STRUCTURE_STORY.index,
+    CHIP_CONSENSUS_STORY.index,
+    MARKET_LANGUAGE.index,
+  ]
+  assert.deepEqual(indexes, ['01', '02', '03', '04', '05'])
 })

@@ -65,9 +65,32 @@ export const WORKFLOW = {
   ],
 }
 
+// 两个教学动画（M2）：deterministic 教学剧本，不接实时行情、不复制生产算法。
+// 阶段文案与 demo/structureStory.ts 的 STRUCTURE_STAGES 一一对应。
+export const STRUCTURE_STORY = {
+  index: '03',
+  eyebrow: '结构怎么形成',
+  title: '结构不是一个标签，\n是价格一步一步走出来的。',
+  subtitle: '同一段行情，逐根看，才能看清状态是怎么变化的。',
+  playLabel: '播放结构演示',
+  pauseLabel: '暂停结构演示',
+  eventLabel: '当前事件',
+}
+
+// 阶段文案与 demo/chipConsensusStory.ts 的 CHIP_STAGES 一一对应。
+export const CHIP_CONSENSUS_STORY = {
+  index: '04',
+  eyebrow: '共识怎么形成',
+  title: '筹码共识不是画出来的一条线，\n是成交一点一点堆出来的。',
+  subtitle: '成交出现在什么价位，共识就在什么价位慢慢形成。',
+  playLabel: '播放筹码共识演示',
+  pauseLabel: '暂停筹码共识演示',
+  consensusLabel: '主要成交密集价',
+}
+
 // 盘迹产品语言六维度（与产品页一致，营销侧不重新定义）
 export const MARKET_LANGUAGE = {
-  index: '03',
+  index: '05',
   eyebrow: '盘迹看什么',
   title: '盘迹看的不是孤立的涨跌数字，\n而是完整的市场状态。',
   subtitle: '六个维度，描述一只股票现在到底处在什么位置。',
