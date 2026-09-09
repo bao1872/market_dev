@@ -195,7 +195,7 @@ rsync -a --delete "\${BUILD_DIR}/assets/" "\${SITE_ASSET_TARGET}/assets/"
 mkdir -p "\${SITE_ASSET_TARGET}/media"
 rsync -a --delete "\${BUILD_DIR}/media/" "\${SITE_ASSET_TARGET}/media/"
 # 产品官网唯一部署槽位为 site/（旧 portal 槽位已废弃）。父目录可能尚不存在（首次预置），先创建。
-mkdir -p "$(dirname "\${CURRENT_ROOT_HTML}")"
+mkdir -p "\$(dirname "\${CURRENT_ROOT_HTML}")"
 install -m 0644 "\${BUILD_DIR}/index.html" "\${CURRENT_ROOT_HTML}"
 
 # 6. 退役 /marketing-preview/：删除后重建 redirect tombstone
@@ -240,39 +240,39 @@ echo "[safety] 主 SPA 未改 + 容器未重启：断言通过"
 # 约束：本分支不修改 nginx / backend / database / container / main SPA（safety AFTER 已锁）。
 # 注意：cutover 前旧 nginx 对 /site/index.html 会走 SPA fallback 返回主 SPA（200 但非官网内容），
 #       故本站验证以磁盘文件（真正部署目标 site/）为准，不依赖尚未切换的 nginx 路由内容。
-if [[ "${PREPARE_ONLY}" == "true" ]]; then
-  echo "=== prepare verify (site slot ==/==> disk) ==="
-  [[ -f "${CURRENT_ROOT_HTML}" ]] || {
-    echo "PREPARE FAIL: 产物 ${CURRENT_ROOT_HTML} 不存在" >&2
+if [[ "\${PREPARE_ONLY}" == "true" ]]; then
+  echo "=== prepare verify (site slot read from disk) ==="
+  [[ -f "\${CURRENT_ROOT_HTML}" ]] || {
+    echo "PREPARE FAIL: 产物 \${CURRENT_ROOT_HTML} 不存在" >&2
     exit 1
   }
-  echo "site slot: ${CURRENT_ROOT_HTML} ($(wc -c < "${CURRENT_ROOT_HTML}") bytes)"
+  echo "site slot: \${CURRENT_ROOT_HTML} (\$(wc -c < "\${CURRENT_ROOT_HTML}") bytes)"
 
-  SITE_HTML="$(cat "${CURRENT_ROOT_HTML}")"
-  echo "site title: $(echo "${SITE_HTML}" | grep -o '<title>[^<]*</title>')"
+  SITE_HTML="\$(cat "\${CURRENT_ROOT_HTML}")"
+  echo "site title: \$(echo "\${SITE_HTML}" | grep -o '<title>[^<]*</title>')"
 
-  echo "${SITE_HTML}" | grep -q '/marketing-assets/' || {
+  echo "\${SITE_HTML}" | grep -q '/marketing-assets/' || {
     echo "PREPARE FAIL: site/index.html 未引用 /marketing-assets/" >&2
     exit 1
   }
 
-  echo "${SITE_HTML}" | grep -Eq '使用说明首页|盘迹使用说明中心|快速开始|帮助中心' && {
+  echo "\${SITE_HTML}" | grep -Eq '使用说明首页|盘迹使用说明中心|快速开始|帮助中心' && {
     echo "PREPARE FAIL: site/index.html 出现旧 Help Center 文案" >&2
     exit 1
   }
 
   for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg xiaoz-xueqiu.png zhongji-xuchuang-300308-1d-2y.json; do
-    if [[ -f "${SITE_ASSET_TARGET}/media/${f}" ]]; then
-      echo "media ${f}: OK ($(wc -c < "${SITE_ASSET_TARGET}/media/${f}") bytes)"
+    if [[ -f "\${SITE_ASSET_TARGET}/media/\${f}" ]]; then
+      echo "media \${f}: OK (\$(wc -c < "\${SITE_ASSET_TARGET}/media/\${f}") bytes)"
     else
-      echo "PREPARE FAIL: media 产物 ${SITE_ASSET_TARGET}/media/${f} 缺失" >&2
+      echo "PREPARE FAIL: media 产物 \${SITE_ASSET_TARGET}/media/\${f} 缺失" >&2
       exit 1
     fi
   done
 
   # 软校验：curl 状态应为 200（此处不判内容，旧 nginx 可能 SPA fallback 返回主 SPA）
-  SITE_HTTP="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/site/index.html || echo 000)"
-  echo "/site/index.html curl HTTP (soft): ${SITE_HTTP}"
+  SITE_HTTP="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/site/index.html || echo 000)"
+  echo "/site/index.html curl HTTP (soft): \${SITE_HTTP}"
 
   echo "[prepare] site/index.html ready（CUTOVER 预置完成；根 / 尚未切换，旧 nginx 行为保持不变）"
   exit 0
@@ -285,18 +285,18 @@ HTTP_ROOT="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/)"
 echo "root / HTTP: \${HTTP_ROOT}"
 echo "root title: \$(echo "\${ROOT_HTML}" | grep -o '<title>[^<]*</title>')"
 
-if echo "${ROOT_HTML}" | grep -q '/marketing-preview/'; then
+if echo "\${ROOT_HTML}" | grep -q '/marketing-preview/'; then
   echo "VERIFY FAIL: 根 HTML 仍含 /marketing-preview/" >&2
   exit 1
 fi
-if ! echo "${ROOT_HTML}" | grep -q '/marketing-assets/'; then
+if ! echo "\${ROOT_HTML}" | grep -q '/marketing-assets/'; then
   echo "VERIFY FAIL: 根 HTML 缺少 /marketing-assets/" >&2
   exit 1
 fi
 # [V3] 防回归 SSOT：根必须是产品官网，绝不能是旧「使用说明」帮助中心
-if echo "${ROOT_HTML}" | grep -qE '使用说明首页|盘迹使用说明中心|快速开始|帮助中心|/portal/'; then
+if echo "\${ROOT_HTML}" | grep -qE '使用说明首页|盘迹使用说明中心|快速开始|帮助中心|/portal/'; then
   echo "VERIFY FAIL: 根 HTML 被旧使用说明 portal 覆盖：" >&2
-  echo "  title=$(echo "${ROOT_HTML}" | grep -o '<title>[^<]*</title>')" >&2
+  echo "  title=\$(echo "\${ROOT_HTML}" | grep -o '<title>[^<]*</title>')" >&2
   exit 1
 fi
 
