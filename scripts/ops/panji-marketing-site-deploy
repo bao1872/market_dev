@@ -242,8 +242,8 @@ echo "asset \${ASSET} HTTP: \${HTTP_ASSET}"
 HTTP_MARKET="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/market)"
 echo "/market HTTP: \${HTTP_MARKET}"
 
-# /marketing-assets/media/* 必须 200（V1.1 真实图片部署修复：飞书 poster + 两张 workspace）
-for f in poster_img1.webp intraday-monitor.webp market-workspace.webp; do
+# /marketing-assets/media/* 必须 200（V1.1 真实图片部署 + V1.2 真实产品素材）
+for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg xiaoz-xueqiu.png zhongji-xuchuang-300308-1d-2y.json; do
   MEDIA_HTTP="\$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/marketing-assets/media/\${f}")"
   echo "/marketing-assets/media/\${f} HTTP: \${MEDIA_HTTP}"
   if [[ "\${MEDIA_HTTP}" != "200" ]]; then

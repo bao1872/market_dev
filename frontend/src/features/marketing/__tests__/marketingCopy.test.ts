@@ -186,16 +186,21 @@ test('HERO 无未证实 claim：无 1000+、无 0:19、次级 CTA 指向 #how-it
   }
 })
 
-test('HERO 底部两条诚实状态条（演示数据 / 看状态）', () => {
+test('HERO 底部两条诚实状态条（真实产品界面 / 历史示例仅用于功能说明）', () => {
   assert.equal(HERO.statusBadges.length, 2)
   const texts = HERO.statusBadges.map((b) => b.text)
   assert.ok(
-    texts.some((t) => t.includes('演示数据')),
-    '缺少「演示数据」相关诚实状态条',
+    texts.some((t) => t.includes('真实产品界面')),
+    '缺少「真实产品界面」诚实状态条',
   )
   assert.ok(
-    texts.some((t) => t.includes('看状态')),
-    '缺少「看状态，不替你做判断」诚实状态条',
+    texts.some((t) => t.includes('历史示例仅用于功能说明')),
+    '缺少「历史示例仅用于功能说明」诚实状态条',
+  )
+  // 已删除旧假数据表语义：不再自称「演示数据 · 非实时行情」
+  assert.ok(
+    !texts.some((t) => t.includes('演示数据')),
+    'Hero 已改真实产品大屏，不得再标注「演示数据 · 非实时行情」',
   )
 })
 

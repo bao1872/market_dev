@@ -33,10 +33,18 @@ export const NAV = {
 // 真实图片在 build:marketing-site 步骤 cp 到 dist-marketing-site/media/，
 // 由 panji-marketing-site-deploy rsync 到生产目录并 verify 200。
 // 不再依赖旧 landing 静态目录里的图片（轻部署通道不发布该目录）。
+// [V1.2] 媒体/回放数据 SSOT：Marketing 组件只允许消费这里声明的路径，
+//   不得自己写 media/data URL。ref/ 被 .gitignore 排除，无法作为 runtime asset，
+//   必须引用这些入库的 canonical Marketing media。
 export const MARKETING_MEDIA = {
   feishuPoster: '/marketing-assets/media/poster_img1.webp',
-  intradayMonitor: '/marketing-assets/media/intraday-monitor.webp',
-  marketWorkspace: '/marketing-assets/media/market-workspace.webp',
+  desktopProduct: '/marketing-assets/media/panji-desktop-product.png',
+  mobileResearch: '/marketing-assets/media/panji-mobile-research.jpg',
+  xiaozXueqiu: '/marketing-assets/media/xiaoz-xueqiu.png',
+  // [V1.2] 中际旭创真实结构回放 frozen JSON。轻部署只 serve /marketing-assets/media/
+  //   （deploy rsync BUILD_DIR}/media -> SITE_ASSET_TARGET}/media），不放 /data/ 以免 404。
+  structureReplay:
+    '/marketing-assets/media/zhongji-xuchuang-300308-1d-2y.json',
 } as const
 
 export interface HeroStatusBadge {
@@ -59,10 +67,10 @@ export const HERO = {
   primaryCta: { label: '开始使用', href: '/login' },
   // 次级 CTA：真实锚点，无时长徽章（无 0:19 视频）
   secondaryCta: { label: '看盘迹怎么工作', href: '#how-it-works' },
-  // 诚实状态条：演示数据 + 看状态不替判断（无实时同步假 claim）
+  // 诚实状态条：真实产品界面 + 历史示例仅用于功能说明（看状态不替判断，无实时同步假 claim）
   statusBadges: [
-    { dot: 'green', text: '演示数据 · 非实时行情' },
-    { dot: 'green', text: '看状态，不替你做判断' },
+    { dot: 'green', text: '真实产品界面' },
+    { dot: 'green', text: '历史示例仅用于功能说明' },
   ] as readonly HeroStatusBadge[],
 }
 
@@ -91,6 +99,7 @@ export const DISCOVERY = {
       title: '从小Z说事进入',
       desc: '别人已经在讨论的方向，直接落到对应板块继续找个股。',
       flow: ['每日早晚复盘', '发现市场方向', '在盘迹继续找个股'],
+      media: MARKETING_MEDIA.xiaozXueqiu,
     },
   ],
 }
@@ -113,15 +122,20 @@ export const WORKFLOW = {
   ],
 }
 
-// 两个教学动画（M2）：deterministic，不接实时行情、不复制生产算法。
+// 真实结构回放（V1.2）：不再使用 synthetic 教学 K 线，
+// 而播放中际旭创 300308 近两年真实日线 + canonical SMC（盘迹真实结构计算代码）。
 export const STRUCTURE_STORY = {
   index: '03',
   eyebrow: '结构怎么形成',
-  title: '结构不是一个标签，\n是价格一步一步走出来的。',
-  subtitle: '同一段行情，逐根看，才能看清状态是怎么变化的。',
-  playLabel: '播放结构演示',
-  pauseLabel: '暂停结构演示',
-  eventLabel: '当前事件',
+  title: '用中际旭创近两年的真实日线，\n看结构怎样一步一步被确认。',
+  subtitle:
+    '播放使用盘迹真实图表和真实结构计算结果。历史演示只用于理解产品，不代表未来走势。',
+  instrumentLabel: '中际旭创 · 300308',
+  timeframeLabel: '日线 · 近2年',
+  dataLabel: '真实历史数据',
+  playLabel: '播放',
+  pauseLabel: '暂停',
+  replayLabel: '重新播放',
 }
 
 export const CHIP_CONSENSUS_STORY = {
@@ -266,16 +280,13 @@ export const STRATEGY_LAB = {
 }
 
 // 小Z说事 → 盘迹（雪球内容入口，非盘迹 /review 产品能力；公开页禁止暴露 /review）。
+// [V1.2] 左侧为真实雪球截图（xiaozXueqiu），不再渲染虚构文章卡。
 export const XIAOZ = {
   index: '07',
   eyebrow: '复盘之后',
   title: '复盘发现方向以后，下一步怎么办？',
-  article: {
-    source: '小Z说事 · 雪球',
-    badge: '今日观察',
-    snippet: '机器人方向重新活跃，资金从高位向低位扩散，板块内部开始出现结构分化……',
-    ctaLabel: '在盘迹查看机器人',
-  },
+  imageSrc: MARKETING_MEDIA.xiaozXueqiu,
+  imageAlt: '小Z说事雪球内容页真实截图',
   // 漏斗：从板块到「值得研究」
   funnel: [
     { label: '机器人', count: 86, unit: '只' },

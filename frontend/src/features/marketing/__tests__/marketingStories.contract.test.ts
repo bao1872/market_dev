@@ -1,6 +1,8 @@
-// 营销教学动画契约测试（M2）
-// 目的：锁死两个 story 的 deterministic 教学语义，防止以后为了视觉效果把逻辑改坏，
-//       同防止内部术语 / 生产算法 / 实时数据回流到门户教学动画里。
+// 营销教学动画契约测试（M2，V1.2 更新）
+// 目的：锁死 ChipConsensusStory 的 deterministic 教学语义，防止以后为了视觉效果把逻辑改坏，
+//       同时防止内部术语 / 生产算法 / 实时数据回流到门户教学动画里。
+// [V1.2] StructureStory 已改为真实产品结构回放（real replay，见 marketingStructureReplay.contract.test.ts），
+//        不再属于 synthetic 教学模型，因此本文件的 structure 断言已移除。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
@@ -13,11 +15,6 @@ import {
   buildTeachingVolumeProfile,
   getPrimaryConsensusPrice,
 } from '../demo/chipConsensusStory'
-import {
-  STRUCTURE_CANDLES,
-  STRUCTURE_EVENTS,
-  STRUCTURE_STAGES,
-} from '../demo/structureStory'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const DEMO_DIR = join(__dirname, '../demo')
@@ -31,52 +28,14 @@ function demoSources(): { name: string; source: string }[] {
     .map((file) => ({ name: file, source: readFileSync(join(DEMO_DIR, file), 'utf-8') }))
 }
 
-function assertMonotonic(stages: { id: string; endFrame: number }[], label: string) {
-  for (let i = 1; i < stages.length; i += 1) {
-    assert.ok(
-      stages[i].endFrame > stages[i - 1].endFrame,
-      `${label} 阶段 endFrame 必须严格单调递增: ${stages[i - 1].endFrame} -> ${stages[i].endFrame}`,
-    )
-  }
-}
-
-// ===== A / B. Structure story =====
-test('structure 阶段 endFrame 严格单调递增', () => {
-  assertMonotonic(STRUCTURE_STAGES, 'structure')
-})
-
-test('structure 最后一个 endFrame 等于 candles.length', () => {
-  assert.equal(
-    STRUCTURE_STAGES[STRUCTURE_STAGES.length - 1].endFrame,
-    STRUCTURE_CANDLES.length,
-  )
-})
-
-test('structure 每个阶段都有标题、摘要与解释', () => {
-  for (const stage of STRUCTURE_STAGES) {
-    assert.ok(stage.title.length > 0, `阶段 ${stage.id} 缺少标题`)
-    assert.ok(stage.summary.length > 0, `阶段 ${stage.id} 缺少摘要`)
-    assert.ok(stage.explanation.length > 0, `阶段 ${stage.id} 缺少解释`)
-  }
-})
-
-test('structure 事件 frame 对应真实存在的 K 线', () => {
-  for (const event of STRUCTURE_EVENTS) {
-    assert.ok(
-      event.frame >= 1 && event.frame <= STRUCTURE_CANDLES.length,
-      `事件 frame 越界: ${event.frame}`,
-    )
-    assert.equal(
-      STRUCTURE_CANDLES[event.frame - 1].close,
-      event.price,
-      `事件价格应落在该 K 线收盘价上: ${event.label}`,
-    )
-  }
-})
-
-// ===== C / D. Chip consensus story =====
+// ===== Chip consensus story =====
 test('chip 阶段 endFrame 严格单调递增且收尾于 candles.length', () => {
-  assertMonotonic(CHIP_STAGES, 'chip')
+  for (let i = 1; i < CHIP_STAGES.length; i += 1) {
+    assert.ok(
+      CHIP_STAGES[i].endFrame > CHIP_STAGES[i - 1].endFrame,
+      `chip 阶段 endFrame 必须严格单调递增: ${CHIP_STAGES[i - 1].endFrame} -> ${CHIP_STAGES[i].endFrame}`,
+    )
+  }
   assert.equal(CHIP_STAGES[CHIP_STAGES.length - 1].endFrame, CHIP_CANDLES.length)
 })
 
@@ -103,19 +62,16 @@ test('chip 中段缩量：价格上行但成交重心仍在低位', () => {
   assert.equal(stageOne, stageTwo)
 })
 
-// ===== E. 术语禁用 =====
-test('story 数据不含内部结构术语', () => {
-  const raw = JSON.stringify({
-    structure: { STRUCTURE_STAGES, STRUCTURE_EVENTS },
-    chip: { CHIP_STAGES },
-  })
+// ===== 术语禁用 =====
+test('demo 数据不含内部结构术语', () => {
+  const raw = JSON.stringify({ chip: { CHIP_STAGES } })
 
   for (const term of FORBIDDEN_TERMS) {
-    assert.ok(!raw.includes(term), `story 数据不得包含内部术语: ${term}`)
+    assert.ok(!raw.includes(term), `demo 数据不得包含内部术语: ${term}`)
   }
 })
 
-// ===== F. demo 源码禁用随机 / 实时数据 =====
+// ===== demo 源码禁用随机 / 实时数据 =====
 test('demo 源码不使用 Math.random / Date.now / 实时接口', () => {
   for (const { name, source } of demoSources()) {
     assert.ok(!source.includes('Math.random'), `${name} 不得使用 Math.random`)
@@ -141,8 +97,4 @@ test('demo 源码声明为教学模型（非生产算法）', () => {
       `${name} 必须声明 Marketing educational model only`,
     )
   }
-})
-
-test('两个 story 的 K 线数量一致，便于统一播放节奏', () => {
-  assert.equal(STRUCTURE_CANDLES.length, CHIP_CANDLES.length)
 })

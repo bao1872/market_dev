@@ -1,8 +1,9 @@
-// 营销 Hero + Nav 布局契约测试（Full Alignment V1）
+// 营销 Hero + Nav 布局契约测试（Full Alignment V1 + V1.2）
 // 目的：通过源码静态扫描，保证 Hero/Nav 已按参考图 #1 / #2 对齐：
-//   - Hero 含 HeroScreener 组件、六维 proof、诚实 status badges、#how-it-works 次级 CTA
+//   - V1.2：Hero 主视觉为 ProductDeviceStage 真实产品大屏（MacBook + iPhone），
+//     六维 proof、诚实 status badges、#how-it-works 次级 CTA
 //   - Nav 含 5 项菜单 + tagline + 绿色 CTA + 窄屏汉堡 + 真正可用的移动端面板
-//   - 不引入实时行情、不引新依赖、不暴露内部研究路由、不出现硬编码 hex
+//   - 不引入实时行情（Hero/Nav 不 fetch）、不引新依赖、不暴露内部研究路由、不出现硬编码 hex
 //
 // 读源：__dirname 解析以定位 frontend/ 根目录。
 import { test } from 'node:test'
@@ -20,19 +21,26 @@ function readSrc(relPath: string): string {
 
 const heroSrc = readSrc('src/features/marketing/sections/Hero.tsx')
 const navSrc = readSrc('src/features/marketing/sections/MarketingNav.tsx')
-const heroScreenerSrc = readSrc(
-  'src/features/marketing/components/HeroScreener.tsx',
-)
-const heroScreenerDataSrc = readSrc(
-  'src/features/marketing/data/heroScreener.ts',
+const deviceStageSrc = readSrc(
+  'src/features/marketing/components/ProductDeviceStage.tsx',
 )
 const copySrc = readSrc('src/features/marketing/data/copy.ts')
 const scssSrc = readSrc('src/features/marketing/marketing.module.scss')
 const packageJson = readSrc('package.json')
 
-test('A1. Hero 包含 HeroScreener 组件 + 六维 proof + status badges + #hero 锚点', () => {
-  assert.ok(/import\s+HeroScreener/.test(heroSrc), 'Hero.tsx 必须 import HeroScreener')
-  assert.ok(/<HeroScreener\s*\/>/.test(heroSrc), 'Hero.tsx 必须渲染 <HeroScreener />')
+test('A1. Hero 包含 ProductDeviceStage 真实产品大屏 + 六维 proof + status badges + #hero 锚点', () => {
+  assert.ok(
+    /import\s+ProductDeviceStage/.test(heroSrc),
+    'Hero.tsx 必须 import ProductDeviceStage',
+  )
+  assert.ok(
+    /<ProductDeviceStage\s*\/>/.test(heroSrc),
+    'Hero.tsx 必须渲染 <ProductDeviceStage />',
+  )
+  assert.ok(
+    /import\s+HeroScreener/.test(heroSrc) === false,
+    'Hero.tsx 不得再引用假筛选表 HeroScreener',
+  )
   assert.ok(/heroProof/.test(heroSrc), 'Hero.tsx 必须含六维 proof')
   assert.ok(
     /marketing-hero-status/.test(heroSrc),
@@ -49,7 +57,6 @@ test('A2. Hero 次级 CTA 指向 #how-it-works，且无 0:19 时长徽章', () =
     /secondaryCta/.test(heroSrc),
     'Hero.tsx 必须渲染次级 CTA',
   )
-  // #how-it-works 字面量在 copy.ts（HERO.secondaryCta.href），Hero 通过 HERO.secondaryCta.href 消费
   assert.ok(
     /HERO\.secondaryCta\.href/.test(heroSrc),
     'Hero 必须消费 HERO.secondaryCta.href',
@@ -58,38 +65,28 @@ test('A2. Hero 次级 CTA 指向 #how-it-works，且无 0:19 时长徽章', () =
     /#how-it-works/.test(copySrc),
     'HERO.secondaryCta.href 必须指向 #how-it-works',
   )
-  // 不得出现 Slice A 的 0:19 假 affordance
-  assert.ok(
-    !/btnDuration/.test(heroSrc),
-    'Hero 不得再渲染 0:19 时长徽章',
-  )
-  assert.ok(
-    !/0:19/.test(heroSrc),
-    'Hero 不得含 0:19 假时长',
-  )
+  assert.ok(!/btnDuration/.test(heroSrc), 'Hero 不得再渲染 0:19 时长徽章')
+  assert.ok(!/0:19/.test(heroSrc), 'Hero 不得含 0:19 假时长')
 })
 
-test('A3. HeroScreener 用确定性 mock + 盘迹式列 + "演示数据" 标注 + A股惯例', () => {
+test('A3. 真实产品大屏用 MARKETING_MEDIA 三张真实截图（desktop + mobile + xueqiu），无假 Screener', () => {
   assert.ok(
-    /HERO_SCREENER_ROWS/.test(heroScreenerSrc),
-    'HeroScreener 必须消费 HERO_SCREENER_ROWS',
+    /MARKETING_MEDIA\.desktopProduct/.test(deviceStageSrc),
+    'ProductDeviceStage 必须消费 MARKETING_MEDIA.desktopProduct',
   )
   assert.ok(
-    /演示数据/.test(heroScreenerDataSrc) || /非实时行情/.test(heroScreenerDataSrc),
-    'heroScreener.ts 必须明确标注"演示数据/非实时行情"',
+    /MARKETING_MEDIA\.mobileResearch/.test(deviceStageSrc),
+    'ProductDeviceStage 必须消费 MARKETING_MEDIA.mobileResearch',
   )
-  // 盘迹式列：趋势/结构/动量/量能/筹码/最近变化（区别于普通行情表）
-  for (const col of ['趋势', '结构', '动量', '量能', '筹码', '最近变化']) {
-    assert.ok(
-      heroScreenerSrc.includes(col),
-      `HeroScreener 必须含盘迹式列: ${col}`,
-    )
-  }
-  // A 股惯例：涨红跌绿
   assert.ok(
-    /color-up/.test(scssSrc) || /heroScreenerUp/.test(scssSrc),
-    'Screener 必须使用 A 股惯例（涨红 / 跌绿）',
+    /macbookMock/.test(deviceStageSrc) && /iphoneMock/.test(deviceStageSrc),
+    'ProductDeviceStage 必须包含 MacBook + iPhone 双层设备外壳',
   )
+  assert.ok(
+    /MARKETING_MEDIA\.xiaozXueqiu/.test(copySrc),
+    'copy.ts DISCOVERY/XIAOZ 必须消费 MARKETING_MEDIA.xiaozXueqiu 真实雪球截图',
+  )
+  // A 股惯例涨红跌绿仍由 scss token 体系保证（screen 图来自真实产品，不再自造市场表）
 })
 
 test('A4. Nav 含 tagline + 5 项 + 绿色 CTA + 窄屏汉堡 + 真正可用的移动端面板', () => {
@@ -100,7 +97,6 @@ test('A4. Nav 含 tagline + 5 项 + 绿色 CTA + 窄屏汉堡 + 真正可用的�
     'Nav 必须消费 NAV.ctaHref + NAV.ctaLabel',
   )
   assert.ok(/navBurger/.test(navSrc), 'Nav 必须含窄屏汉堡按钮')
-  // 移动端面板必须真正渲染（fixed 展开、点击锚点收起）
   assert.ok(/mobileNavPanel/.test(navSrc), 'Nav 必须含移动端面板')
   assert.ok(
     /mobileOpen && \(/.test(navSrc) || /mobileOpen \?/.test(navSrc),
@@ -113,27 +109,28 @@ test('A4. Nav 含 tagline + 5 项 + 绿色 CTA + 窄屏汉堡 + 真正可用的�
   assert.ok(/Escape/.test(navSrc), 'Nav 必须支持 Escape 关闭移动端面板')
 })
 
-test('A5. SCSS 已为 Full Alignment V1 新增所有视觉类（无硬编码 hex）', () => {
+test('A5. SCSS 已为 V1.2 新增真实产品大屏 / 回放视觉类（无硬编码 hex）', () => {
   const required = [
     'navTagline',
     'navBurger',
     'mobileNavPanel',
-    'heroGrid',
+    'heroIntro',
     'heroProof',
     'statusBadges',
     'statusBadgeDot',
-    'heroScreener',
-    'heroScreenerTable',
-    'heroScreenerUp',
-    'heroScreenerDown',
+    'deviceStage',
+    'macbookMock',
+    'iphoneMock',
     'discoveryGrid',
     'discoveryFlow',
+    'discoveryMedia',
     'workflowGrid',
-    'structureTimeline',
     'marketCenter',
     'labTab',
     'labFunnelBar',
-    'xiaozCard',
+    'xiaozScreenshotFrame',
+    'realReplayFrame',
+    'realReplayProgressFill',
     'watchPhone',
     'finalCta',
     'fieldSearchInput',
@@ -144,7 +141,7 @@ test('A5. SCSS 已为 Full Alignment V1 新增所有视觉类（无硬编码 hex
       `marketing.module.scss 缺少 .${cls}`,
     )
   }
-  // 禁止新增硬编码 hex（历史 #4f8ef7 已改为 token）
+  // 禁止新增硬编码 hex（历史 #4f8ef7 已改为 token），新样式一律用 token/rgba
   const hexMatches = scssSrc.match(/#[0-9a-fA-F]{6}/g) ?? []
   const allowed = new Set([
     '#0A0F14',
@@ -173,7 +170,7 @@ test('A5. SCSS 已为 Full Alignment V1 新增所有视觉类（无硬编码 hex
   }
 })
 
-test('A6. 不引新依赖；不出现实时行情相关 API 字段', () => {
+test('A6. 不引新依赖；Hero / Nav / 设备大屏不调用实时行情 API', () => {
   const deps = JSON.parse(packageJson).dependencies as Record<string, string>
   const allowed = new Set([
     '@tanstack/react-query',
@@ -189,11 +186,11 @@ test('A6. 不引新依赖；不出现实时行情相关 API 字段', () => {
     assert.ok(allowed.has(dep), `不允许新增依赖: ${dep}`)
   }
 
-  const combined = heroSrc + navSrc + heroScreenerSrc + heroScreenerDataSrc
-  assert.ok(!/\bfetch\s*\(/.test(combined), 'Hero / Nav / Screener 不得调用 fetch')
-  assert.ok(!/\baxios\s*\(/.test(combined), 'Hero / Nav / Screener 不得调用 axios')
+  const combined = heroSrc + navSrc + deviceStageSrc
+  assert.ok(!/\bfetch\s*\(/.test(combined), 'Hero / Nav / DeviceStage 不得调用 fetch')
+  assert.ok(!/\baxios\s*\(/.test(combined), 'Hero / Nav / DeviceStage 不得调用 axios')
   assert.ok(
     !/\buseQuery\s*\(/.test(combined),
-    'Hero / Nav / Screener 不得调用 useQuery',
+    'Hero / Nav / DeviceStage 不得调用 useQuery',
   )
 })

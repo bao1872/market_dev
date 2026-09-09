@@ -406,6 +406,231 @@ $marketing-section-y-mobile: 52px;
   background: v.$color-info;
 }
 
+// ===== Hero 文案区（V1.2 去掉假筛选表后）=====
+.heroIntro {
+  max-width: 720px;
+}
+
+// ===== 真实产品大屏（V1.2 ProductDeviceStage）=====
+.deviceStage {
+  position: relative;
+  width: 100%;
+  max-width: 1120px;
+  margin: 50px auto 0;
+  padding: 16px 74px 64px 12px;
+}
+
+.macbookMock {
+  position: relative;
+  width: 94%;
+  margin: 0 auto;
+}
+
+.macbookLid {
+  position: relative;
+  padding: 9px 9px 13px;
+  overflow: hidden;
+  background: v.$color-panel-3;
+  border: 1px solid v.$color-border;
+  border-radius: 18px 18px 8px 8px;
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.38);
+}
+
+.macbookScreen {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1874 / 1008;
+  object-fit: contain;
+  background: v.$color-bg;
+  border-radius: 9px;
+}
+
+.macbookBase {
+  position: relative;
+  width: 106%;
+  height: 18px;
+  margin-left: -3%;
+  background: linear-gradient(
+    180deg,
+    v.$color-panel-3,
+    v.$color-border
+  );
+  border-radius: 2px 2px 18px 18px;
+  box-shadow: 0 12px 24px rgba(0, 0, 0, 0.28);
+}
+
+.iphoneMock {
+  position: absolute;
+  right: 0;
+  bottom: 20px;
+  z-index: 3;
+  width: clamp(190px, 23%, 260px);
+  aspect-ratio: 9 / 16;
+  padding: 7px;
+  overflow: hidden;
+  background: v.$color-panel-3;
+  border: 1px solid v.$color-border;
+  border-radius: 34px;
+  box-shadow: 0 28px 60px rgba(0, 0, 0, 0.48);
+}
+
+.iphoneScreen {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 27px;
+}
+
+.iphoneIsland {
+  position: absolute;
+  top: 13px;
+  left: 50%;
+  z-index: 2;
+  width: 32%;
+  height: 13px;
+  transform: translateX(-50%);
+  border-radius: 999px;
+  background: v.$color-bg;
+}
+
+.deviceCaption {
+  margin-top: 28px;
+  text-align: center;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+@media (max-width: 760px) {
+  .deviceStage {
+    padding: 0;
+  }
+
+  .macbookMock {
+    width: 100%;
+  }
+
+  .iphoneMock {
+    position: relative;
+    right: auto;
+    bottom: auto;
+    width: min(58vw, 260px);
+    margin: -24px 20px 0 auto;
+  }
+}
+
+// ===== 真实结构回放（V1.2）=====
+.realReplayFrame {
+  margin: 0;
+}
+
+.realReplayMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.realReplayMeta span {
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-text;
+}
+
+.realReplayHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.realReplayDate {
+  font-family: v.$font-mono;
+  font-size: 13px;
+  color: v.$color-muted;
+}
+
+.realReplayFrameIndex {
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+.realReplayProgressBg {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  margin-bottom: 12px;
+}
+
+.realReplayProgressFill {
+  height: 100%;
+  border-radius: 999px;
+  background: v.$color-brand;
+  transition: width 0.3s linear;
+}
+
+.realReplayLoading {
+  min-height: 260px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px dashed v.$color-border;
+  border-radius: 14px;
+  color: v.$color-text-dim;
+  font-size: 14px;
+}
+
+.realReplayControls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+}
+
+.realReplayBtn,
+.realReplayBtnPrimary,
+.realReplayBtnGhost {
+  font-family: v.$font-mono;
+  font-size: 13px;
+  cursor: pointer;
+  border-radius: 999px;
+}
+
+.realReplayBtn {
+  padding: 8px 14px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid v.$color-border-soft;
+  color: v.$color-text;
+}
+
+.realReplayBtnPrimary {
+  padding: 8px 20px;
+  background: v.$color-brand;
+  border: 1px solid transparent;
+  color: v.$color-bg;
+  font-weight: 700;
+}
+
+.realReplayBtnGhost {
+  padding: 8px 14px;
+  background: transparent;
+  border: 1px solid v.$color-border-soft;
+  color: v.$color-muted;
+}
+
+.realReplayCaption {
+  margin-top: 16px;
+  text-align: center;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
 // ===== HeroScreener =====
 .heroScreener {
   padding: 18px;
@@ -615,6 +840,30 @@ $marketing-section-y-mobile: 52px;
 
 .discoveryFlowNode {
   white-space: nowrap;
+}
+
+// ===== Discovery 真实截图卡（V1.2：小Z说事第三卡用真实雪球截图）=====
+.discoveryMedia {
+  position: relative;
+  margin: 18px 0 16px;
+  overflow: hidden;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 8px;
+}
+
+.discoveryMedia img {
+  display: block;
+  width: 100%;
+  height: 200px;
+  object-fit: cover;
+  object-position: top;
+}
+
+.discoveryMediaFade {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 55%, rgba(10, 15, 20, 0.72) 100%);
 }
 
 .cardDesc {
@@ -1226,6 +1475,24 @@ $marketing-section-y-mobile: 52px;
   &:hover {
     color: v.$color-brand-hover;
   }
+}
+
+// ===== Xiaoz 真实雪球截图帧（V1.2，替代虚构文章卡）=====
+.xiaozScreenshotFrame {
+  margin: 0;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid v.$color-border;
+  background: v.$color-panel;
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.26);
+}
+
+.xiaozScreenshotFrame img {
+  display: block;
+  width: 100%;
+  max-height: 620px;
+  object-fit: cover;
+  object-position: top;
 }
 
 .xiaozFunnel {

@@ -36,21 +36,32 @@ export default function Discovery() {
                   <h3 className={styles.discoveryCardTitle}>{entry.title}</h3>
                 </div>
 
-                {/* mini flow 可视化：3 步 + 箭头 */}
-                <ol className={styles.discoveryFlow}>
-                  {entry.flow.map((step, j) => (
-                    <li key={step} className={styles.discoveryFlowStep}>
-                      {j > 0 ? (
-                        <IconArrowRight
-                          className={styles.discoveryFlowArrow}
-                          width={16}
-                          height={16}
-                        />
-                      ) : null}
-                      <span className={styles.discoveryFlowNode}>{step}</span>
-                    </li>
-                  ))}
-                </ol>
+                {/* story 卡以真实雪球截图为主角；其余用 3 步 mini flow */}
+                {entry.media ? (
+                  <div className={styles.discoveryMedia}>
+                    <img
+                      src={entry.media}
+                      alt="小Z说事雪球真实内容页面"
+                      loading="lazy"
+                    />
+                    <span className={styles.discoveryMediaFade} aria-hidden="true" />
+                  </div>
+                ) : (
+                  <ol className={styles.discoveryFlow}>
+                    {entry.flow.map((step, j) => (
+                      <li key={step} className={styles.discoveryFlowStep}>
+                        {j > 0 ? (
+                          <IconArrowRight
+                            className={styles.discoveryFlowArrow}
+                            width={16}
+                            height={16}
+                          />
+                        ) : null}
+                        <span className={styles.discoveryFlowNode}>{step}</span>
+                      </li>
+                    ))}
+                  </ol>
+                )}
 
                 <p className={styles.cardDesc}>{entry.desc}</p>
               </article>

@@ -33,10 +33,13 @@ const buildScript = (JSON.parse(packageJson).scripts as Record<string, string>)[
 assert.ok(buildScript, 'package.json 必须定义 build:marketing-site')
 
 // 实际发布到 /marketing-assets/media/ 的真实媒体（与 build/deploy 步骤一致）
+// [V1.2] 替换已退役的 intraday-monitor/market-workspace 旧示意图为真实产品素材 + 回放 JSON
 const SHIPPED_MEDIA = [
   'poster_img1.webp',
-  'intraday-monitor.webp',
-  'market-workspace.webp',
+  'panji-desktop-product.png',
+  'panji-mobile-research.jpg',
+  'xiaoz-xueqiu.png',
+  'zhongji-xuchuang-300308-1d-2y.json',
 ]
 
 test('V1.1-1. copy.ts 不得引用 /landing/assets，必须引用 /marketing-assets/media/', () => {
@@ -90,13 +93,15 @@ test('V1.1-3. deploy 脚本必须 rsync media 并 verify /marketing-assets/media
     deploySrc.includes('BUILD_DIR}/media') && deploySrc.includes('SITE_ASSET_TARGET}/media'),
     'deploy 脚本必须 rsync BUILD_DIR}/media -> SITE_ASSET_TARGET}/media',
   )
-  assert.ok(
-    deploySrc.includes('poster_img1.webp'),
-    'deploy 脚本必须 verify media/poster_img1.webp',
-  )
+  for (const file of SHIPPED_MEDIA) {
+    assert.ok(
+      deploySrc.includes(file),
+      `deploy 脚本必须 verify media/${file} = 200`,
+    )
+  }
 })
 
-test('V1.1-4. Chip 用 chipStoryGrid(1fr+300px)，Structure 用 structureStoryGrid(240px+1fr)；禁止 .storyGrid', () => {
+test('V1.1-4(V1.2). Chip 用 chipStoryGrid(1fr+300px)；StructureStory 改真实回放 RealStructureReplay；禁止 .storyGrid', () => {
   assert.ok(
     /styles\.chipStoryGrid/.test(
       readSrc('src/features/marketing/sections/ChipConsensusStory.tsx'),
@@ -104,20 +109,23 @@ test('V1.1-4. Chip 用 chipStoryGrid(1fr+300px)，Structure 用 structureStoryGr
     'ChipConsensusStory 必须使用 styles.chipStoryGrid（图在宽列）',
   )
   assert.ok(
-    /styles\.structureStoryGrid/.test(
-      readSrc('src/features/marketing/sections/StructureStory.tsx'),
-    ),
-    'StructureStory 必须使用 styles.structureStoryGrid',
-  )
-  assert.ok(
     /\.chipStoryGrid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*300px/.test(
       scssSrc.replace(/\s+/g, ' '),
     ),
     'chipStoryGrid 必须是 minmax(0,1fr) 300px（修复筹码图被挤窄）',
   )
+  // [V1.2] StructureStory 已不在双栏网格中：改为 full-width 真实回放工作区。
   assert.ok(
-    /\.structureStoryGrid\s*\{[^}]*240px/.test(scssSrc),
-    'structureStoryGrid 必须是 240px + 1fr',
+    /RealStructureReplay/.test(
+      readSrc('src/features/marketing/sections/StructureStory.tsx'),
+    ),
+    'StructureStory 必须渲染 RealStructureReplay（真实结构回放）',
+  )
+  assert.ok(
+    /styles\.structureStoryGrid/.test(
+      readSrc('src/features/marketing/sections/StructureStory.tsx'),
+    ) === false,
+    'StructureStory V1.2 不得再使用双栏 structureStoryGrid',
   )
   assert.ok(
     !/\.storyGrid\s*\{/.test(scssSrc),
