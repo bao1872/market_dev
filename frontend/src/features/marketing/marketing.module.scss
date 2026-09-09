@@ -302,7 +302,94 @@ $marketing-section-y-mobile: 52px;
 // ===== 04 hero =====
 .hero {
   position: relative;
-  padding: 88px 0 72px;
+  // V1.4：产品视觉改为绝对定位背景层，因此首屏高度收敛，不再被产品图撑高。
+  min-height: 660px;
+  padding: 72px 0 40px;
+  overflow: hidden;
+}
+
+// V1.4：产品视觉作为右后方大背景，不占正常文档流；左侧正文压在其上。
+.heroProductBackdrop {
+  position: absolute;
+  z-index: 1;
+  top: 68px;
+  right: max(-120px, calc((100vw - 1184px) / 2 - 160px));
+  width: min(78vw, 1040px);
+  pointer-events: none;
+  opacity: 0.76;
+  // 左→右渐变透明，保证左侧正文可读；右侧产品保持清晰。
+  mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.12) 12%,
+    rgba(0, 0, 0, 0.72) 37%,
+    #000 58%
+  );
+  -webkit-mask-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(0, 0, 0, 0.12) 12%,
+    rgba(0, 0, 0, 0.72) 37%,
+    #000 58%
+  );
+}
+
+// V1.4：背景模式下设备舞台随 heroProductBackdrop 布局（去掉 standalone 的 margin/padding）。
+.deviceStageBackdrop {
+  position: relative;
+  width: 100%;
+  margin: 0;
+  padding: 0 72px 50px 0;
+}
+
+// 再加一层暗幕，而不是降低整张图清晰度。
+.hero::after {
+  content: '';
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    v.$color-bg 0%,
+    rgba(10, 15, 20, 0.96) 31%,
+    rgba(10, 15, 20, 0.56) 52%,
+    rgba(10, 15, 20, 0.08) 78%
+  );
+}
+
+.hero > .container {
+  position: relative;
+  z-index: 3;
+}
+
+@media (max-width: 900px) {
+  .hero {
+    display: flex;
+    flex-direction: column;
+    min-height: auto;
+    padding: 48px 0 28px;
+  }
+
+  // 手机端恢复「文字 ↓ 产品图」正常文档流，且二者不得重叠。
+  .heroProductBackdrop {
+    position: relative;
+    inset: auto;
+    order: 2;
+    width: 100%;
+    margin-top: 32px;
+    opacity: 1;
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
+
+  .hero > .container {
+    order: 1;
+  }
+
+  .hero::after {
+    display: none;
+  }
 }
 
 .heroGrid {
@@ -406,9 +493,11 @@ $marketing-section-y-mobile: 52px;
   background: v.$color-info;
 }
 
-// ===== Hero 文案区（V1.2 去掉假筛选表后）=====
+// ===== Hero 文案区（V1.2 去掉假筛选表后；V1.4 置于背景层之上）=====
 .heroIntro {
   max-width: 720px;
+  position: relative;
+  z-index: 3;
 }
 
 // ===== 真实产品大屏（V1.2 ProductDeviceStage）=====
@@ -904,12 +993,15 @@ $marketing-section-y-mobile: 52px;
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
+  align-items: stretch;
 }
 
+// V1.4：三卡严格同构且等高（编号/标题 + flow + 解释三段纵向分布）。
 .discoveryCard {
-  min-height: 210px;
-  display: flex;
-  flex-direction: column;
+  height: 100%;
+  min-height: 270px;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
   padding: 24px;
   background: linear-gradient(180deg, v.$color-panel-2, v.$color-panel);
   border: 1px solid v.$color-border;
@@ -942,6 +1034,8 @@ $marketing-section-y-mobile: 52px;
   align-items: center;
   flex-wrap: wrap;
   gap: 8px;
+  align-self: center;
+  min-height: 84px;
   margin: 18px 0 16px;
   padding: 12px;
   background: rgba(255, 255, 255, 0.018);
@@ -966,30 +1060,6 @@ $marketing-section-y-mobile: 52px;
 
 .discoveryFlowNode {
   white-space: nowrap;
-}
-
-// ===== Discovery 真实截图卡（V1.2：小Z说事第三卡用真实雪球截图）=====
-.discoveryMedia {
-  position: relative;
-  margin: 18px 0 16px;
-  overflow: hidden;
-  border: 1px solid v.$color-border-soft;
-  border-radius: 8px;
-}
-
-.discoveryMedia img {
-  display: block;
-  width: 100%;
-  height: 200px;
-  object-fit: cover;
-  object-position: top;
-}
-
-.discoveryMediaFade {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(0, 0, 0, 0) 55%, rgba(10, 15, 20, 0.72) 100%);
 }
 
 .cardDesc {
@@ -1318,8 +1388,9 @@ $marketing-section-y-mobile: 52px;
 
 // ===== 09 language =====
 .marketCenter {
-  max-width: 760px;
-  margin: 8px 0 22px;
+  max-width: 860px;
+  // V1.4：真正相对 6 卡 grid 的中心轴居中（block 级 margin-inline:auto）。
+  margin: 20px auto 30px;
   font-size: clamp(20px, 2.2vw, 28px);
   line-height: 1.45;
   font-weight: 700;
@@ -1332,13 +1403,26 @@ $marketing-section-y-mobile: 52px;
   display: grid;
   grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 12px;
+  align-items: stretch;
   list-style: none;
   margin: 0;
   padding: 0;
 }
 
+.langRow > * {
+  height: 100%;
+}
+
+// V1.4：六卡等宽等高——内部文字用 flex 垂直居中，解释区给相同空间。
 .langCell {
-  padding: 22px 14px;
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 142px;
+  padding: 20px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
   background: v.$color-panel;
   border: 1px solid v.$color-border;
   border-radius: 10px;
@@ -1346,7 +1430,8 @@ $marketing-section-y-mobile: 52px;
 }
 
 .langWord {
-  margin: 0 0 6px;
+  margin: 0;
+  min-height: 28px;
   font-size: 20px;
   font-weight: 780;
   letter-spacing: -0.02em;
@@ -1355,6 +1440,10 @@ $marketing-section-y-mobile: 52px;
 
 .langDesc {
   margin: 0;
+  min-height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   font-size: 12px;
   line-height: 1.55;
   color: v.$color-muted;
@@ -1542,108 +1631,153 @@ $marketing-section-y-mobile: 52px;
   font-family: v.$font-mono;
 }
 
-// ===== 11 xiaoz =====
-.xiaozGrid {
+// ===== 11 xiaoz（V1.4 三段路径：小Z发现方向 → 盘迹按审美筛 → 候选）=====
+.xiaozJourney {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 24px;
-  align-items: start;
+  grid-template-columns:
+    minmax(0, 0.9fr)
+    36px
+    minmax(0, 1.2fr)
+    36px
+    minmax(0, 0.9fr);
+  align-items: stretch;
+  gap: 14px;
 }
 
-.xiaozCard {
-  padding: 22px;
+.xiaozJourneyStep {
+  min-width: 0;
+  min-height: 420px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
   background: v.$color-panel;
   border: 1px solid v.$color-border;
-  border-radius: 12px;
+  border-radius: 14px;
 }
 
-.xiaozCardHead {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
+// 中间「盘迹」卡为视觉主角。
+.xiaozJourneyPrimary {
+  border-color: rgba(0, 246, 194, 0.38);
+  background: linear-gradient(180deg, rgba(0, 246, 194, 0.055), v.$color-panel 48%);
 }
 
-.xiaozSource {
+.xiaozStepIndex {
+  margin-bottom: 14px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: v.$color-brand;
+}
+
+.xiaozStepEyebrow {
+  margin-bottom: 6px;
   font-family: v.$font-mono;
   font-size: 11px;
   letter-spacing: 0.12em;
   color: v.$color-muted;
 }
 
-.xiaozBadge {
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.4);
-  color: v.$color-brand;
-  font-family: v.$font-mono;
-  font-size: 11px;
-}
-
-.xiaozSnippet {
-  margin: 0 0 14px;
-  font-size: 14px;
-  line-height: 1.7;
+.xiaozStepTitle {
+  margin: 0 0 12px;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
   color: v.$color-text;
 }
 
-.xiaozCta {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  color: v.$color-brand;
-  text-decoration: none;
+.xiaozStepText {
+  margin: 0 0 18px;
   font-size: 13px;
-  font-weight: 600;
-
-  &:hover {
-    color: v.$color-brand-hover;
-  }
+  line-height: 1.7;
+  color: v.$color-muted;
 }
 
-// ===== Xiaoz 真实雪球截图帧（V1.2，替代虚构文章卡）=====
-.xiaozScreenshotFrame {
-  margin: 0;
-  border-radius: 14px;
+// 雪球截图降级为低权重 evidence，小窗不高于 1/3 卡高。
+.xiaozEvidence {
+  margin: auto 0 0;
+  height: 132px;
   overflow: hidden;
-  border: 1px solid v.$color-border;
-  background: v.$color-panel;
-  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.26);
+  border-radius: 10px;
+  border: 1px solid v.$color-border-soft;
 }
 
-.xiaozScreenshotFrame img {
-  display: block;
+.xiaozEvidence img {
   width: 100%;
-  max-height: 620px;
+  height: 100%;
   object-fit: cover;
   object-position: top;
 }
 
-.xiaozFunnel {
-  padding: 22px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: 12px;
+.xiaozSignal {
+  margin-top: 10px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-muted;
 }
 
-.xiaozFunnelRow {
-  border-bottom: 1px solid v.$color-border-soft;
+.xiaozJourneyArrow {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: v.$color-brand;
+  font-size: 22px;
 }
 
-.xiaozHighlight {
-  margin-top: 14px;
-  padding: 12px 14px;
-  background: rgba(0, 246, 194, 0.06);
-  border: 1px solid rgba(0, 246, 194, 0.3);
-  border-radius: 10px;
+.xiaozPreferenceGrid {
+  margin-top: 24px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.preference,
+.preferenceActive {
+  min-height: 44px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  border: 1px solid v.$color-border-soft;
+  background: transparent;
+  color: v.$color-muted;
+  text-align: left;
+}
+
+.preferenceActive {
+  border-color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.08);
+  color: v.$color-brand;
+}
+
+.xiaozResult {
+  margin: auto 0 22px;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 14px;
+}
+
+.xiaozResultColumn {
+  text-align: center;
+}
+
+.xiaozResultNum {
+  display: block;
+  font-family: v.$font-mono;
+  font-size: 36px;
+  color: v.$color-brand;
+}
+
+.xiaozResultArrow {
+  color: v.$color-brand;
+  font-size: 20px;
+}
+
+.xiaozResultColumn > span {
   font-size: 12px;
-  color: v.$color-text;
+  color: v.$color-muted;
 }
 
-.xiaozCore {
-  margin: 12px 0 0;
+.xiaozResultNote {
+  margin: 0;
   font-size: 13px;
   line-height: 1.7;
   color: v.$color-muted;

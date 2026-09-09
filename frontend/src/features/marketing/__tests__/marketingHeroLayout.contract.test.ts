@@ -34,8 +34,12 @@ test('A1. Hero 包含 ProductDeviceStage 真实产品大屏 + 六维 proof + sta
     'Hero.tsx 必须 import ProductDeviceStage',
   )
   assert.ok(
-    /<ProductDeviceStage\s*\/>/.test(heroSrc),
-    'Hero.tsx 必须渲染 <ProductDeviceStage />',
+    /<ProductDeviceStage\b[^>]*\/>/.test(heroSrc),
+    'Hero.tsx 必须渲染 <ProductDeviceStage />（V1.4 为 mode="backdrop" 背景层）',
+  )
+  assert.ok(
+    /heroProductBackdrop/.test(heroSrc),
+    'Hero.tsx 必须用 heroProductBackdrop 容器包住背景产品大屏',
   )
   assert.ok(
     /import\s+HeroScreener/.test(heroSrc) === false,
@@ -119,16 +123,19 @@ test('A5. SCSS 已为 V1.2 新增真实产品大屏 / 回放视觉类（无硬�
     'statusBadges',
     'statusBadgeDot',
     'deviceStage',
+    'deviceStageBackdrop',
+    'heroProductBackdrop',
     'macbookMock',
     'iphoneMock',
     'discoveryGrid',
     'discoveryFlow',
-    'discoveryMedia',
+    'xiaozJourney',
+    'preferenceActive',
     'workflowGrid',
     'marketCenter',
     'labTab',
     'labFunnelBar',
-    'xiaozScreenshotFrame',
+    'xiaozEvidence',
     'realReplayFrame',
     'realReplayProgressFill',
     'watchPhone',

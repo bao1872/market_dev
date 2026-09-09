@@ -75,7 +75,8 @@ export const HERO = {
 }
 
 // 三种机会入口：全市场 / 板块 / 小Z说事。
-// 每张卡带 3 步 mini flow 用于可视化（非纯文字）。
+// [V1.4] 三卡严格同构（编号 + 标题 + 三步 flow + 解释）：一律用 mini flow，
+//   不再让 story 卡塞真实截图（截图只在 XiaozToPanji 作为低权重 evidence）。故 entries 无 media 字段。
 export const DISCOVERY = {
   index: '01',
   eyebrow: '机会从哪里来',
@@ -85,21 +86,20 @@ export const DISCOVERY = {
     {
       key: 'market',
       title: '全市场发现',
-      desc: '按六个维度，把当天真正发生变化的地方挑出来。',
-      flow: ['数千只股票', '条件筛选', '候选范围'],
+      desc: '不知道今天看什么时，从全市场发生的变化开始。',
+      flow: ['市场发生变化', '六维条件筛选', '留下候选'],
     },
     {
       key: 'section',
       title: '从板块进入',
-      desc: '从今天关注的板块出发，在板块内部继续用同一套维度筛选。',
-      flow: ['今日关注板块', '限定概念', '板块内筛选'],
+      desc: '已经有关注方向时，直接在板块内部继续筛。',
+      flow: ['今天关注板块', '限定板块范围', '板块内找个股'],
     },
     {
       key: 'story',
       title: '从小Z说事进入',
-      desc: '别人已经在讨论的方向，直接落到对应板块继续找个股。',
-      flow: ['每日早晚复盘', '发现市场方向', '在盘迹继续找个股'],
-      media: MARKETING_MEDIA.xiaozXueqiu,
+      desc: '复盘先回答今天市场在交易什么，再把方向带进盘迹。',
+      flow: ['复盘发现方向', '进入对应板块', '按自己的标准找个股'],
     },
   ],
 }
@@ -289,22 +289,55 @@ export const STRATEGY_LAB = {
 }
 
 // 小Z说事 → 盘迹（雪球内容入口，非盘迹 /review 产品能力；公开页禁止暴露 /review）。
-// [V1.2] 左侧为真实雪球截图（xiaozXueqiu），不再渲染虚构文章卡。
+// [V1.2] 保留真实雪球截图（xiaozXueqiu）作为证据小窗。
+// [V1.4] 产品叙事改为「小Z说事发现方向 → 盘迹按用户自己的审美筛 → 得到候选」三段。
+//   删除固定漏斗（机器人→趋势上行→结构一致→成交不缩量）——那会误导为产品内置唯一方法。
+//   雪球截图只作为 01 卡的低权重 evidence，不再是主视觉；条件与数量均为示例（example/demo），不冒充实时。
 export const XIAOZ = {
   index: '07',
-  eyebrow: '复盘之后',
-  title: '复盘发现方向以后，下一步怎么办？',
+  eyebrow: '从方向到个股',
+  title: '小Z说事发现方向，盘迹帮你找符合自己审美的个股。',
+  subtitle: '复盘先解决今天市场在交易什么。进入盘迹以后，条件由你自己决定。',
   imageSrc: MARKETING_MEDIA.xiaozXueqiu,
   imageAlt: '小Z说事雪球内容页真实截图',
-  // 漏斗：从板块到「值得研究」
-  funnel: [
-    { label: '机器人', count: 86, unit: '只' },
-    { label: '+ 趋势上行', count: 34 },
-    { label: '+ 结构一致', count: 16 },
-    { label: '+ 成交未明显萎缩', count: 9 },
+  sourceExample: { direction: '机器人', note: '进入今日关注方向' },
+  // 三段路径：① 发现方向 → ② 进入盘迹用自己的审美筛 → ③ 得到候选。
+  steps: [
+    {
+      index: '01',
+      eyebrow: '小Z说事',
+      title: '先发现今天值得研究的方向',
+      text: '每日复盘先从市场结构、资金和事件中，找出今天市场真正围绕什么方向交易。',
+    },
+    {
+      index: '02',
+      eyebrow: '进入盘迹',
+      title: '用你自己的选股审美继续筛',
+      text: '盘迹不替你定义什么叫好股票。你决定自己重视趋势、结构、成交量还是筹码。',
+    },
+    {
+      index: '03',
+      eyebrow: '候选范围',
+      title: '留下符合自己审美的股票',
+      text: '不是答案，是把范围压缩到符合你自己研究标准的候选。',
+    },
   ],
-  highlight: '9 只值得进一步研究',
-  core: '不是替你选答案，而是把范围压缩。',
+  // 选股审美 chips：仅为交互示例，前三个标为 active；不声明为固定策略。
+  preferences: [
+    { label: '趋势刚开始', active: true },
+    { label: '结构转强', active: true },
+    { label: '成交放大', active: true },
+    { label: '筹码重心上移', active: false },
+    { label: '结构事件近期发生', active: false },
+    { label: '动量增强', active: false },
+  ],
+  // 结果仅为示例，不冒充实时数量。
+  resultExample: {
+    before: 86,
+    beforeLabel: '板块股票',
+    after: 9,
+    afterLabel: '符合当前条件',
+  },
 }
 
 // 自选 + 通知（Watch + Notify）：流程 + 真实产品产出截图。

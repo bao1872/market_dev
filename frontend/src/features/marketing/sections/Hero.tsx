@@ -1,7 +1,7 @@
-// Hero（Full Alignment V1 + V1.2 真实产品大屏）：
+// Hero（Full Alignment V1 + V1.2 真实产品大屏 + V1.4 background 化）：
 // - 上方：eyebrow + 标题 + 副标题 + 六维 proof chips + 主次 CTA + 诚实状态条
-// - 下方：ProductDeviceStage 真实产品大屏（MacBook + iPhone 叠放）
-// 已删除 HeroScreener 假筛选表；真实产品截图才是第二视觉层。
+// - V1.4：产品视觉降为 Hero 的绝对定位背景层（右侧大背景），文字压在它上面；
+//   移动端（<=900）恢复为「文字 ↓ 产品图」的正常文档流。
 // 数据来源：data/copy.ts HERO + MARKETING_MEDIA；样式在 marketing.module.scss。
 import clsx from 'clsx'
 import GlowBackground from '../components/GlowBackground'
@@ -17,6 +17,12 @@ export default function Hero() {
       id="hero"
     >
       <GlowBackground />
+
+      {/* V1.4：产品视觉作为背景层，不占正常文档流（aria-hidden） */}
+      <div className={styles.heroProductBackdrop} aria-hidden="true">
+        <ProductDeviceStage mode="backdrop" />
+      </div>
+
       <div className={styles.container}>
         <div className={styles.heroIntro}>
           <span className={styles.eyebrow}>{HERO.eyebrow}</span>
@@ -77,9 +83,6 @@ export default function Hero() {
             ))}
           </ul>
         </div>
-
-        {/* 真实产品大屏：MacBook + iPhone */}
-        <ProductDeviceStage />
       </div>
     </section>
   )

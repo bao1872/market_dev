@@ -1,6 +1,6 @@
-// Discovery（Full Alignment V1）：3 张机会入口卡。
-// 每张卡：顶部编号 + 标题，中部 3 步 mini flow（带箭头），底部一句解释。
-// 视觉节奏：与 Hero 两栏、Workflow 6 图标、Story 双栏交替，避免连续同尺寸卡片网格。
+// Discovery（Full Alignment V1 + V1.4）：3 张机会入口卡，严格同构。
+// V1.4：删除 story 卡的真实雪球截图，三卡统一为「编号 + 标题 + 三步 flow + 解释」，
+//   一等高；截图只在 XiaozToPanji 作为低权重 evidence。
 import ScrollReveal from '../components/ScrollReveal'
 import SectionHeading from '../components/SectionHeading'
 import { IconArrowRight } from '../components/MarketingIcons'
@@ -36,32 +36,21 @@ export default function Discovery() {
                   <h3 className={styles.discoveryCardTitle}>{entry.title}</h3>
                 </div>
 
-                {/* story 卡以真实雪球截图为主角；其余用 3 步 mini flow */}
-                {entry.media ? (
-                  <div className={styles.discoveryMedia}>
-                    <img
-                      src={entry.media}
-                      alt="小Z说事雪球真实内容页面"
-                      loading="lazy"
-                    />
-                    <span className={styles.discoveryMediaFade} aria-hidden="true" />
-                  </div>
-                ) : (
-                  <ol className={styles.discoveryFlow}>
-                    {entry.flow.map((step, j) => (
-                      <li key={step} className={styles.discoveryFlowStep}>
-                        {j > 0 ? (
-                          <IconArrowRight
-                            className={styles.discoveryFlowArrow}
-                            width={16}
-                            height={16}
-                          />
-                        ) : null}
-                        <span className={styles.discoveryFlowNode}>{step}</span>
-                      </li>
-                    ))}
-                  </ol>
-                )}
+                {/* V1.4：三卡同构，一律三步 flow，不再有 media 分支 */}
+                <ol className={styles.discoveryFlow}>
+                  {entry.flow.map((step, j) => (
+                    <li key={step} className={styles.discoveryFlowStep}>
+                      {j > 0 ? (
+                        <IconArrowRight
+                          className={styles.discoveryFlowArrow}
+                          width={16}
+                          height={16}
+                        />
+                      ) : null}
+                      <span className={styles.discoveryFlowNode}>{step}</span>
+                    </li>
+                  ))}
+                </ol>
 
                 <p className={styles.cardDesc}>{entry.desc}</p>
               </article>
