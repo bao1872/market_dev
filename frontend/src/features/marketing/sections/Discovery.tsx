@@ -1,7 +1,6 @@
 // Discovery（Full Alignment V1）：3 张机会入口卡。
 // 每张卡：顶部编号 + 标题，中部 3 步 mini flow（带箭头），底部一句解释。
 // 视觉节奏：与 Hero 两栏、Workflow 6 图标、Story 双栏交替，避免连续同尺寸卡片网格。
-import clsx from 'clsx'
 import ScrollReveal from '../components/ScrollReveal'
 import SectionHeading from '../components/SectionHeading'
 import { IconArrowRight } from '../components/MarketingIcons'
@@ -22,7 +21,7 @@ export default function Discovery() {
           title={DISCOVERY.title}
           subtitle={DISCOVERY.subtitle}
         />
-        <div className={clsx(styles.grid, styles.discoveryGrid)}>
+        <div className={styles.discoveryGrid}>
           {DISCOVERY.entries.map((entry, i) => (
             <ScrollReveal
               key={entry.key}

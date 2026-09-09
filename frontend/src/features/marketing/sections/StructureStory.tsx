@@ -42,7 +42,7 @@ export default function StructureStory() {
           subtitle={STRUCTURE_STORY.subtitle}
         />
         <ScrollReveal>
-          <div className={styles.storyGrid} ref={ref}>
+          <div className={styles.structureStoryGrid} ref={ref}>
             {/* 左：竖向 timeline */}
             <ol className={styles.structureTimeline}>
               {STRUCTURE_STAGES.map((item, index) => {

@@ -1,1035 +1,350 @@
-// 盘迹营销门户样式（M1 骨架）
+// PANJI Marketing Site Visual System V1.1
+// One visual source of truth.
 // 变量真源：src/styles/variables.scss（盘迹品牌视觉资产包 V1.0）
 // 禁止引入新色板；禁止硬编码颜色，一律使用 token。
 // CSS Modules：类名自动 camelCase（vite.config localsConvention: camelCaseOnly）
 @use '../../styles/variables' as v;
 
-// ===== 营销专属布局 token（不污染全局）=====
-$marketing-container: 1200px;
-$marketing-section-y: 96px;
-$marketing-section-y-narrow: 64px;
+// ===== 01 foundation =====
+$marketing-container: 1184px;
+$marketing-section-y: 72px;
+$marketing-section-y-mobile: 52px;
 
 .page {
   min-height: 100vh;
+  overflow-x: clip;
   background: v.$color-bg;
   color: v.$color-text;
   font-family: v.$font-sans;
-  overflow-x: hidden;
 }
 
 .container {
-  width: 100%;
-  max-width: $marketing-container;
-  margin: 0 auto;
-  padding: 0 24px;
+  width: min(calc(100% - 48px), $marketing-container);
+  margin-inline: auto;
+
+  @media (max-width: v.$bp-narrow) {
+    width: min(calc(100% - 32px), $marketing-container);
+  }
 }
 
 .section {
   position: relative;
-  padding: $marketing-section-y 0;
+  padding-block: $marketing-section-y;
+  border-top: 1px solid v.$color-border-soft;
+  background: transparent;
 
   @media (max-width: v.$bp-narrow) {
-    padding: $marketing-section-y-narrow 0;
+    padding-block: $marketing-section-y-mobile;
   }
 }
 
-.sectionAlt {
-  background: linear-gradient(180deg, transparent, rgba(17, 26, 35, 0.55), transparent);
+// 软表面：≤ 1 屏 / 2 屏使用一次，禁止大面积
+.sectionAlt,
+.sectionSoft {
+  background:
+    linear-gradient(
+      180deg,
+      rgba(17, 26, 35, 0.55),
+      rgba(17, 26, 35, 0.18) 60%,
+      transparent
+    );
 }
 
-// ===== 标题体系 =====
+// ===== 02 typography =====
 .sectionHead {
-  max-width: 760px;
-  margin: 0 0 48px;
+  max-width: 720px;
+  margin-bottom: 30px;
 }
 
 .index {
-  display: inline-block;
+  display: block;
+  margin-bottom: 8px;
   font-family: v.$font-mono;
-  font-size: 13px;
-  letter-spacing: 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
   color: v.$color-brand;
-  margin-bottom: 14px;
 }
 
 .eyebrow {
+  margin-bottom: 10px;
   font-size: 13px;
-  letter-spacing: 1.5px;
   color: v.$color-muted;
-  margin-bottom: 12px;
 }
 
 .title {
-  margin: 0 0 16px;
-  font-size: clamp(26px, 3.4vw, 40px);
-  line-height: 1.28;
-  font-weight: 700;
-  letter-spacing: -0.2px;
+  margin: 0 0 12px;
+  max-width: 780px;
+  font-size: clamp(30px, 3.25vw, 44px);
+  line-height: 1.16;
+  font-weight: 780;
+  letter-spacing: -0.025em;
   white-space: pre-line;
 }
 
 .subtitle {
   margin: 0;
-  font-size: 15px;
-  line-height: 1.8;
-  color: v.$color-muted;
-}
-
-// ===== 导航 =====
-.nav {
-  position: sticky;
-  top: 0;
-  z-index: 20;
-  background: rgba(10, 15, 20, 0.82);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid v.$color-border-soft;
-}
-
-.navInner {
-  display: flex;
-  align-items: center;
-  gap: 24px;
-  height: 64px;
-}
-
-.navBrand {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-shrink: 0;
-}
-
-.navLinks {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-
-  @media (max-width: v.$bp-narrow) {
-    display: none;
-  }
-}
-
-.navLink {
-  padding: 8px 14px;
-  border-radius: 8px;
+  max-width: 680px;
   font-size: 14px;
+  line-height: 1.75;
   color: v.$color-muted;
-  transition: color 0.18s ease, background 0.18s ease;
+}
+
+// ===== buttons / cta row / reveal / glow =====
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1;
+  text-decoration: none;
+  transition: background 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+
+.btnPrimary {
+  background: v.$color-brand;
+  color: v.$color-bg;
+  border: 1px solid v.$color-brand;
 
   &:hover {
-    color: v.$color-text;
-    background: v.$color-panel-2;
+    background: v.$color-brand-hover;
+    border-color: v.$color-brand-hover;
   }
 }
 
-.navCta {
-  flex-shrink: 0;
+.btnGhost {
+  background: transparent;
+  color: v.$color-text;
+  border: 1px solid v.$color-border;
 
-  // 窄屏隐藏导航项后，CTA 需要靠右对齐
-  @media (max-width: v.$bp-narrow) {
-    margin-left: auto;
+  &:hover {
+    border-color: v.$color-brand;
+    color: v.$color-brand;
   }
 }
 
-// ===== Hero =====
-.hero {
-  position: relative;
-  padding: 120px 0 96px;
-
-  @media (max-width: v.$bp-narrow) {
-    padding: 72px 0 56px;
-  }
-}
-
-.heroInner {
-  position: relative;
-  z-index: 1;
-  max-width: 820px;
-}
-
-.heroTitle {
-  margin: 16px 0 20px;
-  font-size: clamp(32px, 5vw, 56px);
-  line-height: 1.22;
-  font-weight: 800;
-  letter-spacing: -0.6px;
-  white-space: pre-line;
-}
-
-.heroSub {
-  margin: 0 0 32px;
-  font-size: 16px;
-  line-height: 1.85;
-  color: v.$color-muted;
-  max-width: 620px;
+.btnArrow {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
 }
 
 .ctaRow {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
-}
-
-.btn {
-  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  height: 44px;
-  padding: 0 22px;
-  border-radius: v.$radius-base;
-  font-size: 15px;
-  font-weight: 600;
-  border: 1px solid transparent;
-  transition: transform 0.16s ease, background 0.16s ease, border-color 0.16s ease;
-
-  &:hover {
-    transform: translateY(-1px);
-  }
-}
-
-.btnPrimary {
-  background: v.$color-brand;
-  color: v.$color-bg;
-
-  &:hover {
-    background: v.$color-brand-hover;
-  }
-}
-
-.btnGhost {
-  background: v.$color-panel-2;
-  color: v.$color-text;
-  border-color: v.$color-border;
-
-  &:hover {
-    border-color: v.$color-brand-deep;
-  }
-}
-
-// ===== 背景光斑 =====
-.glow {
-  position: absolute;
-  border-radius: 50%;
-  filter: blur(90px);
-  pointer-events: none;
-  z-index: 0;
-}
-
-.glowA {
-  top: -160px;
-  right: -120px;
-  width: 460px;
-  height: 460px;
-  background: rgba(0, 246, 194, 0.10);
-}
-
-.glowB {
-  bottom: -180px;
-  left: -140px;
-  width: 420px;
-  height: 420px;
-  background: rgba(56, 130, 246, 0.10);
-}
-
-// ===== 栅格与卡片 =====
-.grid {
-  display: grid;
-  gap: 20px;
-}
-
-.grid2 {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.grid3 {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.card {
-  position: relative;
-  padding: 28px 26px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-  transition: border-color 0.2s ease, transform 0.2s ease;
-
-  &:hover {
-    border-color: v.$color-brand-deep;
-    transform: translateY(-2px);
-  }
-}
-
-.cardTitle {
-  margin: 0 0 10px;
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.cardDesc {
-  margin: 0 0 18px;
-  font-size: 14px;
-  line-height: 1.8;
-  color: v.$color-muted;
-}
-
-.bullets {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.bullet {
-  padding: 4px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.22);
-}
-
-// ===== 流程步骤 =====
-.steps {
-  display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
-  gap: 16px;
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.step {
-  position: relative;
-  padding: 24px 20px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-}
-
-.stepIndex {
-  font-family: v.$font-mono;
-  font-size: 12px;
-  color: v.$color-brand;
-  margin-bottom: 10px;
-}
-
-.stepTitle {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-.stepDesc {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.75;
-  color: v.$color-muted;
-}
-
-// ===== 市场语言六维度 =====
-.dims {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.dim {
-  padding: 22px 20px;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border-soft;
-  border-radius: v.$radius-base;
-  transition: border-color 0.2s ease;
-
-  &:hover {
-    border-color: v.$color-brand-deep;
-  }
-}
-
-.dimTitle {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-.dimDesc {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.75;
-  color: v.$color-muted;
-}
-
-// ===== 教学动画（M2）=====
-.storyGrid {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 32px;
-  align-items: start;
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: 1fr;
-    gap: 24px;
-  }
-}
-
-.storyStages {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.storyStage,
-.storyStageActive {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 14px 16px;
-  border: 1px solid v.$color-border-soft;
-  border-radius: v.$radius-base;
-  background: v.$color-panel;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-// 当前阶段：brand 细边框 + 微光，不做大面积铺底
-.storyStageActive {
-  border-color: v.$color-brand-deep;
-  box-shadow: 0 0 18px rgba(0, 246, 194, 0.08);
-}
-
-.storyStageIndex {
-  font-family: v.$font-mono;
-  font-size: 12px;
-  color: v.$color-brand;
-}
-
-.storyStageTitle {
-  font-size: 15px;
-  font-weight: 600;
-}
-
-.storyStageSummary {
-  font-size: 13px;
-  line-height: 1.7;
-  color: v.$color-muted;
-}
-
-.storyVisual {
-  padding: 16px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-}
-
-.chipVisual {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 180px;
-  gap: 12px;
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.storyExplain {
-  margin-top: 14px;
-  padding-top: 14px;
-  border-top: 1px solid v.$color-border-soft;
-}
-
-.storyExplainTitle {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 700;
-}
-
-.storyExplainText {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.8;
-  color: v.$color-muted;
-}
-
-.eventTag {
-  display: inline-block;
-  margin-top: 12px;
-  padding: 6px 12px;
-  border-radius: v.$radius-base;
-  font-size: 12px;
-  color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.22);
-}
-
-.controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px;
-  margin-top: 20px;
-}
-
-.controlBtn {
-  min-height: 36px;
-  padding: 8px 16px;
-  font-size: 13px;
-  color: v.$color-text;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-base;
-  transition: border-color 0.16s ease;
-
-  &:hover {
-    border-color: v.$color-brand-deep;
-  }
-}
-
-.frameReadout {
-  margin-left: auto;
-  font-family: v.$font-mono;
-  font-size: 12px;
-  color: v.$color-text-dim;
-}
-
-// ===== 教学成交分布（SVG）=====
-.profilePanel {
-  display: flex;
-  flex-direction: column;
-}
-
-.consensusReadout {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 8px;
-}
-
-.consensusLabel {
-  font-size: 12px;
-  color: v.$color-muted;
-}
-
-.consensusValue {
-  font-family: v.$font-mono;
-  font-size: 20px;
-  color: v.$color-brand;
-}
-
-.consensusFrom {
-  font-size: 11px;
-  color: v.$color-text-dim;
-}
-
-.profileSvg {
-  display: block;
-  width: 100%;
-}
-
-.profileBin {
-  fill: var(--brand);
-  opacity: 0.22;
-}
-
-.profileBinMax {
-  fill: var(--brand);
-  opacity: 1;
-}
-
-// ===== 第一金字塔渐进披露（M1.1）=====
-// 低调入口：放在六维度卡片下方，不占 section index，不在主导航出现
-.dictionaryLinkRow {
-  display: flex;
-  justify-content: flex-end;
-  margin-top: 20px;
-
-  @media (max-width: v.$bp-narrow) {
-    justify-content: flex-start;
-  }
-}
-
-.dictionaryLink {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0;
-  background: transparent;
-  border: 0;
-  font-size: 13px;
-  color: v.$color-text-dim;
-  transition: color 0.16s ease;
-
-  &:hover {
-    color: v.$color-brand;
-  }
-}
-
-// 右侧 Drawer：未打开时不渲染，不占主体 layout height
-.drawerOverlay {
-  position: fixed;
-  inset: 0;
-  z-index: 80;
-  display: flex;
-  justify-content: flex-end;
-  background: rgba(3, 9, 21, 0.62);
-  backdrop-filter: blur(2px);
-}
-
-.fieldDrawer {
-  display: flex;
-  flex-direction: column;
-  width: min(480px, 92vw);
-  height: 100dvh;
-  background: v.$color-panel;
-  border-left: 1px solid v.$color-border;
-  box-shadow: -24px 0 48px rgba(0, 0, 0, 0.45);
-
-  @media (max-width: v.$bp-narrow) {
-    width: 100vw;
-  }
-}
-
-.fieldDrawerHead {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 24px;
-  border-bottom: 1px solid v.$color-border-soft;
-}
-
-.fieldDrawerTitle {
-  margin: 0 0 8px;
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.fieldDrawerSubtitle {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.75;
-  color: v.$color-muted;
-}
-
-.fieldDrawerClose {
-  flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  display: grid;
-  place-items: center;
-  font-size: 20px;
-  line-height: 1;
-  color: v.$color-muted;
-  background: transparent;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-base;
-
-  &:hover {
-    color: v.$color-text;
-    border-color: v.$color-brand-deep;
-  }
-}
-
-.fieldDrawerBody {
-  flex: 1;
-  overflow-y: auto;
-  padding: 24px;
-}
-
-.fieldGroups {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.fieldGroup {
-  padding: 8px 16px;
-  border-radius: v.$radius-base;
-  font-size: 14px;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border;
-}
-
-.fieldNote {
-  margin: 18px 0 0;
-  font-size: 13px;
-  line-height: 1.75;
-  color: v.$color-text-dim;
-}
-
-// ===== 页脚 =====
-.footer {
-  border-top: 1px solid v.$color-border-soft;
-  padding: 56px 0 32px;
-  background: v.$color-panel;
-}
-
-.footerInner {
-  display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr 1.2fr;
-  gap: 32px;
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.footerTitle {
-  margin: 0 0 14px;
-  font-size: 14px;
-  font-weight: 700;
-}
-
-.footerList {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.footerLink {
-  font-size: 13px;
-  color: v.$color-muted;
-  transition: color 0.16s ease;
-
-  &:hover {
-    color: v.$color-brand;
-  }
-}
-
-// 无 href 的说明项：不制造成可点击的假链接
-.footerText {
-  display: block;
-  font-size: 13px;
-  color: v.$color-muted;
-}
-
-.footerNote {
-  display: block;
-  margin-top: 2px;
-  font-size: 12px;
-  font-style: normal;
-  line-height: 1.7;
-  color: v.$color-text-dim;
-}
-
-.footerDesc {
-  margin: 12px 0 0;
-  font-size: 13px;
-  line-height: 1.8;
-  color: v.$color-muted;
-  max-width: 320px;
-}
-
-.footerBottom {
-  margin-top: 40px;
-  padding-top: 20px;
-  border-top: 1px solid v.$color-border-soft;
-  font-size: 12px;
-  color: v.$color-text-dim;
-  text-align: center;
-}
-
-.inviteTitle {
-  margin: 0 0 8px;
-  font-size: 16px;
-  font-weight: 700;
 }
 
-// ===== 进场动画 =====
 .reveal {
   opacity: 0;
-  transform: translateY(18px);
-  transition: opacity 0.55s ease, transform 0.55s ease;
+  transform: translate3d(0, 12px, 0);
+  transition: opacity 480ms ease, transform 480ms ease;
 }
 
 .revealIn {
   opacity: 1;
-  transform: none;
+  transform: translate3d(0, 0, 0);
 }
 
-// ScrollReveal 作为 grid item 时撑满单元格，使内部卡片等高
 .revealFill {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.glow {
+  position: absolute;
+  pointer-events: none;
+  filter: blur(80px);
+  opacity: 0.22;
+}
+
+.glowA {
+  top: 12%;
+  left: -10%;
+  width: 480px;
+  height: 480px;
+  background: v.$color-brand;
+}
+
+.glowB {
+  top: 48%;
+  right: -12%;
+  width: 520px;
+  height: 520px;
+  background: v.$color-info;
+  opacity: 0.16;
+}
+
+// ===== 03 nav =====
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  padding: 18px 0;
+  background: rgba(10, 15, 20, 0.72);
+  backdrop-filter: saturate(140%) blur(14px);
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
+.navInner {
   display: flex;
-  flex-direction: column;
-
-  > * {
-    flex: 1;
-  }
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .reveal {
-    opacity: 1;
-    transform: none;
-    transition: none;
-  }
-
-  .btn:hover,
-  .card:hover {
-    transform: none;
-  }
+.navBrand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: v.$color-text;
+  text-decoration: none;
+  font-weight: 700;
+  letter-spacing: -0.01em;
 }
 
-// ===== Slice A 视觉（参考图 #1 + #2 对齐）=====
-// 新增 token 与布局类，不改既有变量。
-
-// ----- Nav 品牌副标 -----
 .navTagline {
-  margin-left: 10px;
-  font-size: 12px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid v.$color-border-soft;
   color: v.$color-muted;
-  letter-spacing: 0.4px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  font-weight: 500;
+}
 
-  @media (max-width: v.$bp-narrow) {
+.navLinks {
+  display: flex;
+  gap: 22px;
+
+  @media (max-width: v.$bp-wide) {
     display: none;
   }
 }
 
-// ----- Nav 右侧组（CTA + 汉堡）-----
+.navLink {
+  color: v.$color-muted;
+  text-decoration: none;
+  font-size: 14px;
+
+  &:hover {
+    color: v.$color-text;
+  }
+}
+
 .navRight {
   display: flex;
   align-items: center;
   gap: 12px;
-  margin-left: auto;
-  flex-shrink: 0;
 }
 
-// ----- 汉堡按钮（窄屏）-----
+.navCta {
+  padding: 8px 16px;
+  font-size: 13px;
+}
+
 .navBurger {
   display: none;
-  width: 40px;
-  height: 40px;
-  align-items: center;
-  justify-content: center;
-  background: v.$color-panel-2;
+  width: 36px;
+  height: 36px;
+  background: transparent;
   border: 1px solid v.$color-border;
-  border-radius: v.$radius-base;
-  color: v.$color-text;
-  font-size: 18px;
+  border-radius: 8px;
   cursor: pointer;
-  transition: border-color 0.16s ease;
 
-  &:hover {
-    border-color: v.$color-brand-deep;
-  }
-
-  @media (max-width: v.$bp-narrow) {
+  @media (max-width: v.$bp-wide) {
     display: inline-flex;
+    align-items: center;
+    justify-content: center;
   }
 }
 
-// ----- Hero 两栏布局 -----
-.heroGrid {
-  position: relative;
-  z-index: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
-  gap: 56px;
-  align-items: start;
+.mobileNavPanel {
+  display: none;
 
   @media (max-width: v.$bp-wide) {
-    grid-template-columns: 1fr;
-    gap: 40px;
+    display: block;
+    padding: 14px 0;
+    border-top: 1px solid v.$color-border-soft;
   }
+}
+
+.mobileNavLinks {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.mobileNavLink {
+  color: v.$color-text;
+  text-decoration: none;
+  font-size: 15px;
+  padding: 8px 0;
+  border-bottom: 1px solid v.$color-border-soft;
+
+  &:last-child {
+    border-bottom: 0;
+  }
+}
+
+.mobileNavCta {
+  margin-top: 10px;
+  align-self: flex-start;
+}
+
+// ===== 04 hero =====
+.hero {
+  position: relative;
+  padding: 88px 0 72px;
+}
+
+.heroGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 0.82fr) minmax(560px, 1.18fr);
+  align-items: center;
+  gap: 64px;
 }
 
 .heroLeft {
   min-width: 0;
 }
 
-.heroRight {
-  min-width: 0;
+.heroTitle {
+  margin: 12px 0 18px;
+  max-width: 570px;
+  font-size: clamp(44px, 4.8vw, 62px);
+  line-height: 1.08;
+  letter-spacing: -0.045em;
+  font-weight: 820;
+  white-space: pre-line;
 }
 
-// ----- Hero 底部 status badges -----
-.statusBadges {
-  position: relative;
-  z-index: 1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
-  margin: 36px 0 0;
-  padding: 0;
-  list-style: none;
+.heroSub {
+  max-width: 520px;
+  margin: 0 0 22px;
+  font-size: 15px;
+  line-height: 1.8;
+  color: v.$color-muted;
 }
 
-.statusBadge {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  border-radius: 999px;
-  font-size: 13px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-}
-
-.statusBadgeDot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: v.$color-brand;
-  box-shadow: 0 0 6px currentColor;
-}
-
-.statusBadgeGreen .statusBadgeDot {
-  background: v.$color-down;
-  color: v.$color-down;
-}
-
-.statusBadgeBlue .statusBadgeDot {
-  background: v.$color-info;
-  color: v.$color-info;
-}
-
-// ----- HeroScreener 静态股票筛选表 -----
-.heroScreener {
-  position: relative;
-  padding: 18px 18px 14px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-  box-shadow: 0 12px 36px rgba(0, 0, 0, 0.35);
-}
-
-.heroScreenerHead {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 12px;
-  margin-bottom: 12px;
-}
-
-.heroScreenerTitle {
-  font-size: 14px;
-  font-weight: 700;
-  color: v.$color-text;
-}
-
-.heroScreenerNote {
-  font-size: 11px;
-  color: v.$color-text-dim;
-  letter-spacing: 0.3px;
-}
-
-.heroScreenerTableWrap {
-  width: 100%;
-  overflow-x: auto;
-}
-
-.heroScreenerTable {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 13px;
-
-  th,
-  td {
-    padding: 10px 8px;
-    border-bottom: 1px solid v.$color-border-soft;
-    color: v.$color-text;
-    text-align: left;
-    white-space: nowrap;
-  }
-
-  th {
-    font-size: 11px;
-    font-weight: 500;
-    color: v.$color-muted;
-    letter-spacing: 0.4px;
-    text-transform: uppercase;
-    border-bottom-color: v.$color-border;
-  }
-
-  tbody tr:last-child td {
-    border-bottom: 0;
-  }
-
-  tbody tr[data-direction='up']:hover,
-  tbody tr[data-direction='down']:hover {
-    background: rgba(255, 255, 255, 0.02);
-  }
-}
-
-.heroScreenerRight {
-  text-align: right;
-}
-
-.heroScreenerCode {
-  font-family: v.$font-mono;
-  letter-spacing: 0.3px;
-}
-
-.heroScreenerPrice {
-  font-family: v.$font-mono;
-}
-
-// A 股惯例：涨红 / 跌绿（参考 styles/variables.scss $color-up/$color-down）
-.heroScreenerUp {
-  font-family: v.$font-mono;
-  color: v.$color-up;
-}
-
-.heroScreenerDown {
-  font-family: v.$font-mono;
-  color: v.$color-down;
-}
-
-// ============================================================
-// Full Alignment V1 — section-organized additions
-// 仅使用 variables.scss token；莹感绿只用于 active / CTA / focus / 重要数字。
-// ============================================================
-
-// ----- Hero 六维 proof -----
 .heroProof {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 10px 14px;
-  margin: 0 0 28px;
+  margin-bottom: 24px;
 }
 
 .heroProofLabel {
-  font-size: 13px;
+  display: block;
+  margin-bottom: 8px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
   color: v.$color-muted;
-  letter-spacing: 0.4px;
 }
 
 .heroProofDims {
@@ -1042,47 +357,93 @@ $marketing-section-y-narrow: 64px;
 }
 
 .heroProofDim {
-  padding: 4px 12px;
+  padding: 6px 12px;
   border-radius: 999px;
-  font-size: 13px;
-  color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.08);
-  border: 1px solid rgba(0, 246, 194, 0.22);
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-text;
 }
 
-.btnArrow {
-  margin-left: 6px;
-  font-size: 13px;
+.heroRight {
+  min-width: 0;
 }
 
-// ----- HeroScreener 盘迹式外壳 -----
+.statusBadges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-muted;
+}
+
+.statusBadgeDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: v.$color-muted;
+  display: inline-block;
+}
+
+.statusBadgeGreen .statusBadgeDot {
+  background: v.$color-down;
+}
+
+.statusBadgeBlue .statusBadgeDot {
+  background: v.$color-info;
+}
+
+// ===== HeroScreener =====
+.heroScreener {
+  padding: 18px;
+  background: linear-gradient(180deg, v.$color-panel-2, v.$color-panel);
+  border: 1px solid v.$color-border;
+  border-radius: 14px;
+  box-shadow: 0 20px 54px rgba(0, 0, 0, 0.26);
+}
+
 .heroScreenerShell {
   display: flex;
-  flex-direction: column;
-  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding-bottom: 12px;
-  margin-bottom: 12px;
   border-bottom: 1px solid v.$color-border-soft;
+  margin-bottom: 12px;
 }
 
 .heroScreenerSearch {
-  display: flex;
+  display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
-  font-size: 13px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
+  font-size: 12px;
   color: v.$color-muted;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-base;
 }
 
 .heroScreenerSearchDot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
   background: v.$color-brand;
-  box-shadow: 0 0 6px v.$color-brand;
+  display: inline-block;
 }
 
 .heroScreenerChips {
@@ -1092,18 +453,66 @@ $marketing-section-y-narrow: 64px;
 }
 
 .heroScreenerChip {
-  padding: 3px 9px;
+  padding: 4px 10px;
   border-radius: 999px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
   font-size: 11px;
   color: v.$color-muted;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border-soft;
 }
 
 .heroScreenerChipActive {
   color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.10);
-  border-color: rgba(0, 246, 194, 0.30);
+  border-color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.08);
+}
+
+.heroScreenerHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.heroScreenerTitle {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.heroScreenerNote {
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+.heroScreenerTableWrap {
+  overflow-x: auto;
+}
+
+.heroScreenerTable {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+
+  th,
+  td {
+    padding: 8px 10px;
+    border-bottom: 1px solid v.$color-border-soft;
+    text-align: left;
+  }
+
+  th {
+    font-family: v.$font-mono;
+    font-weight: 500;
+    color: v.$color-muted;
+    font-size: 11px;
+  }
+}
+
+.heroScreenerRight {
+  text-align: right;
 }
 
 .heroScreenerName {
@@ -1112,63 +521,61 @@ $marketing-section-y-narrow: 64px;
 }
 
 .heroScreenerCell {
-  font-size: 13px;
-  color: v.$color-text;
+  color: v.$color-muted;
+}
+
+.heroScreenerUp {
+  color: v.$color-up;
+}
+
+.heroScreenerDown {
+  color: v.$color-down;
+}
+
+.heroScreenerNeutral {
+  color: v.$color-muted;
 }
 
 .heroScreenerRecent {
-  font-size: 12px;
-  color: v.$color-text-dim;
+  font-family: v.$font-mono;
 }
 
 .heroScreenerRecentOn {
   color: v.$color-brand;
-  font-weight: 600;
 }
 
 .heroScreenerRecentOff {
   color: v.$color-text-dim;
 }
 
-// ----- Discovery 3 卡 + mini flow -----
+// ===== 05 discovery =====
 .discoveryGrid {
+  display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
+  gap: 18px;
 }
 
 .discoveryCard {
+  min-height: 210px;
   display: flex;
   flex-direction: column;
-  height: 100%;
-  padding: 26px 24px;
-  background: v.$color-panel;
+  padding: 24px;
+  background: linear-gradient(180deg, v.$color-panel-2, v.$color-panel);
   border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-  transition: border-color 0.2s ease, transform 0.2s ease;
-
-  &:hover {
-    border-color: v.$color-brand-deep;
-    transform: translateY(-2px);
-  }
+  border-radius: 12px;
 }
 
 .discoveryCardTop {
   display: flex;
   align-items: baseline;
-  gap: 10px;
+  gap: 12px;
   margin-bottom: 16px;
 }
 
 .discoveryCardIndex {
   font-family: v.$font-mono;
-  font-size: 13px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
   color: v.$color-brand;
 }
 
@@ -1176,159 +583,170 @@ $marketing-section-y-narrow: 64px;
   margin: 0;
   font-size: 18px;
   font-weight: 700;
-  color: v.$color-text;
+  letter-spacing: -0.01em;
 }
 
 .discoveryFlow {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 4px 4px;
-  margin: 0 0 18px;
-  padding: 14px;
-  list-style: none;
-  background: v.$color-panel-2;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0 16px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.018);
   border: 1px solid v.$color-border-soft;
-  border-radius: v.$radius-base;
+  border-radius: 8px;
+  list-style: none;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-muted;
 }
 
 .discoveryFlowStep {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
+  gap: 8px;
 }
 
 .discoveryFlowArrow {
+  display: inline-block;
   color: v.$color-brand;
-  flex-shrink: 0;
 }
 
 .discoveryFlowNode {
-  font-size: 12px;
-  color: v.$color-muted;
   white-space: nowrap;
 }
 
-// ----- Workflow 6 图标 + flow line -----
+.cardDesc {
+  margin: auto 0 0;
+  font-size: 13px;
+  line-height: 1.65;
+  color: v.$color-muted;
+}
+
+// ===== 06 workflow =====
 .workflowGrid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid v.$color-border;
+  border-radius: 14px;
+  background: v.$color-panel;
 }
 
 .workflowCell {
+  min-height: 172px;
+  padding: 24px 18px;
+  background: transparent;
+  border: 0;
+  border-right: 1px solid v.$color-border-soft;
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  height: 100%;
-  padding: 22px 18px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-  transition: border-color 0.2s ease;
+}
+
+.workflowCell:last-child {
+  border-right: 0;
 }
 
 .workflowIcon {
-  display: grid;
-  place-items: center;
-  width: 40px;
-  height: 40px;
-  margin-bottom: 12px;
+  width: 34px;
+  height: 34px;
+  margin-bottom: 18px;
   color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.08);
-  border: 1px solid rgba(0, 246, 194, 0.22);
-  border-radius: v.$radius-base;
+  background: transparent;
+  border: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .workflowStepIndex {
   font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-muted;
+  letter-spacing: 0.12em;
+  margin-bottom: 6px;
+}
+
+.stepTitle {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.stepDesc {
+  margin: 0;
   font-size: 12px;
-  color: v.$color-brand;
-  margin-bottom: 8px;
+  line-height: 1.55;
+  color: v.$color-muted;
 }
 
 .workflowFlow {
   display: flex;
-  flex-wrap: wrap;
   align-items: center;
-  gap: 6px 4px;
-  margin-top: 28px;
-  padding-top: 22px;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 20px;
+  padding-top: 18px;
   border-top: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
+  font-size: 12px;
+  color: v.$color-muted;
 }
 
 .workflowFlowNode {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
 }
 
 .workflowFlowArrow {
   color: v.$color-brand;
-  font-size: 14px;
 }
 
 .workflowFlowLabel {
-  font-size: 14px;
-  color: v.$color-muted;
+  white-space: nowrap;
 }
 
-// ----- Structure / Chip 竖向 timeline -----
+// ===== 07 structure story =====
+.structureStoryGrid {
+  display: grid;
+  grid-template-columns: 240px minmax(0, 1fr);
+  gap: 44px;
+  align-items: start;
+}
+
 .structureTimeline {
-  display: flex;
-  flex-direction: column;
-  gap: 0;
   margin: 0;
   padding: 0;
   list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  border-left: 1px solid v.$color-border-soft;
+  padding-left: 14px;
 }
 
 .structureTimelineStep,
 .structureTimelineActive {
   position: relative;
-  padding: 0 0 22px 26px;
-
-  // 竖向细线
-  &::before {
-    content: '';
-    position: absolute;
-    left: 6px;
-    top: 14px;
-    bottom: 0;
-    width: 2px;
-    background: v.$color-border;
-  }
-
-  &:last-child::before {
-    display: none;
-  }
-}
-
-.structureTimelineActive {
-  &::before {
-    background: linear-gradient(v.$color-brand, v.$color-border);
-  }
+  padding: 6px 0 6px 4px;
 }
 
 .structureTimelineDot {
   position: absolute;
-  left: 0;
-  top: 4px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: v.$color-panel;
-  border: 2px solid v.$color-border;
+  left: -22px;
+  top: 12px;
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: v.$color-border;
+  border: 2px solid v.$color-bg;
 }
 
 .structureTimelineActive .structureTimelineDot {
   background: v.$color-brand;
-  border-color: v.$color-brand;
-  box-shadow: 0 0 10px rgba(0, 246, 194, 0.5);
+  box-shadow: 0 0 0 4px rgba(0, 246, 194, 0.18);
 }
 
 .structureTimelineBody {
@@ -1339,222 +757,326 @@ $marketing-section-y-narrow: 64px;
 
 .structureTimelineIndex {
   font-family: v.$font-mono;
-  font-size: 12px;
-  color: v.$color-text-dim;
-}
-
-.structureTimelineActive .structureTimelineIndex {
-  color: v.$color-brand;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
 }
 
 .structureTimelineTitle {
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 700;
   color: v.$color-text;
 }
 
 .structureTimelineSummary {
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 12px;
+  line-height: 1.55;
   color: v.$color-muted;
 }
 
-// K线主角（薄卡，不套厚背景）
 .storyVisualSolo {
   min-width: 0;
-}
-
-.storyChart {
-  padding: 8px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
 }
 
 .storyEventFloat {
-  display: inline-block;
-  margin-bottom: 10px;
+  align-self: flex-start;
   padding: 6px 12px;
-  border-radius: v.$radius-base;
-  font-size: 12px;
-  color: v.$color-brand;
+  border-radius: 999px;
   background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.22);
+  border: 1px solid rgba(0, 246, 194, 0.4);
+  color: v.$color-brand;
+  font-family: v.$font-mono;
+  font-size: 11px;
 }
 
-// Chip 镜像布局
+.storyChart {
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 12px;
+}
+
+.storyExplain {
+  padding: 14px 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid v.$color-border-soft;
+  border-radius: 10px;
+}
+
+.storyExplainTitle {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.storyExplainText {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: v.$color-muted;
+}
+
+// ===== StoryControls =====
+.controls {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 10px 14px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.controlBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: transparent;
+  border: 1px solid v.$color-border-soft;
+  color: v.$color-text;
+  cursor: pointer;
+
+  &:hover {
+    border-color: v.$color-brand;
+    color: v.$color-brand;
+  }
+}
+
+.frameReadout {
+  margin-left: auto;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-muted;
+}
+
+// ===== 08 chip story =====
+.chipStoryGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 44px;
+  align-items: start;
+}
+
 .chipProfileHead {
   display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 4px 10px;
-  margin-bottom: 8px;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 10px;
+}
+
+.consensusLabel {
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
+}
+
+.consensusValue {
+  font-size: 22px;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+  color: v.$color-brand;
+}
+
+.consensusFrom {
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-text-dim;
 }
 
 .consensusLine {
   height: 1px;
-  margin: 0 0 10px;
-  background: linear-gradient(90deg, transparent, v.$color-brand, transparent);
+  background: linear-gradient(90deg, v.$color-brand, transparent);
 }
 
 .consensusLineLabel {
   display: block;
-  margin-top: 6px;
+  margin-top: 4px;
   font-family: v.$font-mono;
   font-size: 11px;
-  color: v.$color-brand;
-  text-align: center;
-}
-
-.consensusValue {
-  font-family: v.$font-mono;
-  font-size: 20px;
-  color: v.$color-brand;
+  color: v.$color-muted;
 }
 
 .chipVisualMirror {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 160px;
-  gap: 12px;
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 14px;
+  align-items: stretch;
 }
 
-// 复用的共识读出来自既有 .consensusLabel / .consensusFrom / .profilePanel
+.profilePanel {
+  min-width: 0;
+  padding: 0;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 12px;
+  overflow: hidden;
+}
 
-// ----- Market Language 居中句 + 横向六维 -----
+.profileSvg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.profileBin {
+  fill: rgba(0, 246, 194, 0.35);
+  stroke: rgba(0, 246, 194, 0.55);
+}
+
+.profileBinMax {
+  fill: v.$color-brand;
+  stroke: v.$color-brand;
+}
+
+// ===== 09 language =====
 .marketCenter {
   max-width: 760px;
-  margin: 8px auto 40px;
-  text-align: center;
-  font-size: clamp(20px, 2.6vw, 30px);
-  line-height: 1.5;
+  margin: 8px 0 22px;
+  font-size: clamp(20px, 2.2vw, 28px);
+  line-height: 1.45;
   font-weight: 700;
+  letter-spacing: -0.015em;
   color: v.$color-text;
+  text-align: center;
 }
 
 .langRow {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 14px;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
 }
 
 .langCell {
-  flex: 1 1 140px;
-  padding: 20px 18px;
+  padding: 22px 14px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 10px;
   text-align: center;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border-soft;
-  border-radius: v.$radius-base;
-  transition: border-color 0.2s ease;
-
-  &:hover {
-    border-color: v.$color-brand-deep;
-  }
 }
 
 .langWord {
-  margin: 0 0 8px;
-  font-size: 22px;
-  font-weight: 800;
-  color: v.$color-brand;
+  margin: 0 0 6px;
+  font-size: 20px;
+  font-weight: 780;
+  letter-spacing: -0.02em;
+  color: v.$color-text;
 }
 
 .langDesc {
   margin: 0;
-  font-size: 13px;
-  line-height: 1.7;
+  font-size: 12px;
+  line-height: 1.55;
   color: v.$color-muted;
 }
 
-// ----- StrategyLab 交互 -----
+.dictionaryLinkRow {
+  display: flex;
+  justify-content: center;
+  margin-top: 22px;
+}
+
+.dictionaryLink {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 16px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid v.$color-border-soft;
+  color: v.$color-muted;
+  font-size: 13px;
+  cursor: pointer;
+
+  &:hover {
+    color: v.$color-brand;
+    border-color: v.$color-brand;
+  }
+}
+
+// ===== 10 strategy =====
 .labTabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-bottom: 28px;
+  gap: 8px;
+  margin-bottom: 18px;
 }
 
 .labTab {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 10px 16px;
-  font-size: 14px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid v.$color-border-soft;
   color: v.$color-muted;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-base;
+  font-size: 13px;
   cursor: pointer;
-  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
 
   &:hover {
     color: v.$color-text;
-    border-color: v.$color-brand-deep;
+    border-color: v.$color-border;
   }
 }
 
 .labTabActive {
-  color: v.$color-brand;
   background: rgba(0, 246, 194, 0.08);
-  border-color: rgba(0, 246, 194, 0.40);
+  border-color: v.$color-brand;
+  color: v.$color-brand;
 }
 
 .labWorkspace {
   display: grid;
-  grid-template-columns: 1.1fr 1fr 1fr;
-  gap: 24px;
+  grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: 16px;
   align-items: start;
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  @media (max-width: v.$bp-narrow) {
-    grid-template-columns: 1fr;
-  }
 }
 
-.labLogic {
-  padding: 22px;
+.labLogic,
+.labChips,
+.labFunnel {
+  padding: 18px;
   background: v.$color-panel;
   border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
+  border-radius: 12px;
 }
 
 .labLogicTitle {
-  margin: 0 0 10px;
-  font-size: 17px;
+  margin: 0 0 6px;
+  font-size: 15px;
   font-weight: 700;
-  color: v.$color-text;
 }
 
 .labLogicText {
   margin: 0;
-  font-size: 14px;
-  line-height: 1.8;
+  font-size: 13px;
+  line-height: 1.65;
   color: v.$color-muted;
 }
 
-.labChips,
-.labFunnel {
-  padding: 22px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-}
-
-.labChipsLabel,
-.labFunnelLabel {
+.labChipsLabel {
   display: block;
-  margin-bottom: 14px;
-  font-size: 12px;
-  letter-spacing: 0.4px;
+  margin-bottom: 10px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
   color: v.$color-muted;
-  text-transform: uppercase;
 }
 
 .labChipRow {
@@ -1566,17 +1088,26 @@ $marketing-section-y-narrow: 64px;
 .labChip {
   padding: 6px 12px;
   border-radius: 999px;
-  font-size: 13px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid v.$color-border-soft;
+  font-family: v.$font-mono;
+  font-size: 12px;
   color: v.$color-muted;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border;
 }
 
 .labChipActive {
-  color: v.$color-bg;
-  font-weight: 600;
-  background: v.$color-brand;
+  color: v.$color-brand;
   border-color: v.$color-brand;
+  background: rgba(0, 246, 194, 0.10);
+}
+
+.labFunnelLabel {
+  display: block;
+  margin-bottom: 10px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
 }
 
 .labFunnelList {
@@ -1585,30 +1116,31 @@ $marketing-section-y-narrow: 64px;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
-.labFunnelRow,
-.xiaozFunnelRow {
+.labFunnelRow {
   display: grid;
-  grid-template-columns: 1fr 70px 56px;
+  grid-template-columns: 1fr auto auto;
   align-items: center;
   gap: 10px;
+  padding: 6px 0;
+  border-bottom: 1px solid v.$color-border-soft;
+
+  &:last-child {
+    border-bottom: 0;
+  }
 }
 
-.labFunnelName,
-.xiaozFunnelRow > span:first-child {
-  font-size: 13px;
-  color: v.$color-muted;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.labFunnelName {
+  font-size: 12px;
+  color: v.$color-text;
 }
 
 .labFunnelBarWrap {
-  position: relative;
-  height: 8px;
-  background: v.$color-panel-2;
+  width: 80px;
+  height: 6px;
+  background: rgba(255, 255, 255, 0.04);
   border-radius: 999px;
   overflow: hidden;
 }
@@ -1616,42 +1148,38 @@ $marketing-section-y-narrow: 64px;
 .labFunnelBar {
   display: block;
   height: 100%;
+  background: v.$color-brand;
   border-radius: 999px;
-  background: linear-gradient(90deg, v.$color-brand-deep, v.$color-brand);
 }
 
 .labFunnelCount {
   font-family: v.$font-mono;
-  font-size: 13px;
+  font-size: 12px;
+  color: v.$color-muted;
+  min-width: 44px;
   text-align: right;
-  color: v.$color-text;
 }
 
 .labNote {
-  margin: 24px 0 0;
+  margin: 18px 0 0;
   font-size: 12px;
-  line-height: 1.7;
   color: v.$color-text-dim;
-  text-align: center;
+  font-family: v.$font-mono;
 }
 
-// ----- 小Z说事 → 盘迹 -----
+// ===== 11 xiaoz =====
 .xiaozGrid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 32px;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 24px;
   align-items: start;
-
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: 1fr;
-  }
 }
 
 .xiaozCard {
-  padding: 24px;
+  padding: 22px;
   background: v.$color-panel;
   border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
+  border-radius: 12px;
 }
 
 .xiaozCardHead {
@@ -1659,112 +1187,122 @@ $marketing-section-y-narrow: 64px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-bottom: 14px;
+  margin-bottom: 12px;
 }
 
 .xiaozSource {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 14px;
-  font-weight: 700;
-  color: v.$color-text;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
 }
 
 .xiaozBadge {
   padding: 3px 10px;
   border-radius: 999px;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.4);
+  color: v.$color-brand;
+  font-family: v.$font-mono;
   font-size: 11px;
-  color: v.$color-warning;
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.30);
 }
 
 .xiaozSnippet {
-  margin: 0 0 18px;
+  margin: 0 0 14px;
   font-size: 14px;
-  line-height: 1.85;
-  color: v.$color-muted;
+  line-height: 1.7;
+  color: v.$color-text;
 }
 
 .xiaozCta {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  font-size: 14px;
-  font-weight: 600;
   color: v.$color-brand;
   text-decoration: none;
+  font-size: 13px;
+  font-weight: 600;
 
   &:hover {
     color: v.$color-brand-hover;
   }
 }
 
+.xiaozFunnel {
+  padding: 22px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 12px;
+}
+
+.xiaozFunnelRow {
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
 .xiaozHighlight {
-  margin: 16px 0 8px;
+  margin-top: 14px;
   padding: 12px 14px;
-  border-radius: v.$radius-base;
-  font-size: 15px;
-  font-weight: 700;
-  color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.22);
+  background: rgba(0, 246, 194, 0.06);
+  border: 1px solid rgba(0, 246, 194, 0.3);
+  border-radius: 10px;
+  font-size: 12px;
+  color: v.$color-text;
 }
 
 .xiaozCore {
-  margin: 0;
+  margin: 12px 0 0;
   font-size: 13px;
   line-height: 1.7;
   color: v.$color-muted;
 }
 
-// ----- Watch + Notify -----
+// ===== 12 notify =====
 .watchGrid {
   display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 40px;
+  grid-template-columns: minmax(0, 0.9fr) minmax(300px, 1.1fr);
+  gap: 72px;
   align-items: center;
+}
 
-  @media (max-width: v.$bp-wide) {
-    grid-template-columns: 1fr;
-  }
+.watchCopy {
+  min-width: 0;
 }
 
 .watchSteps {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0 0 16px;
+  margin: 0;
   padding: 0;
   list-style: none;
-  counter-reset: step;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 
 .watchStep {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 0;
-  border-bottom: 1px solid v.$color-border-soft;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid v.$color-border-soft;
+  border-radius: 10px;
 }
 
 .watchStepIndex {
-  display: grid;
-  place-items: center;
-  width: 28px;
-  height: 28px;
-  flex-shrink: 0;
-  font-family: v.$font-mono;
-  font-size: 12px;
+  width: 24px;
+  height: 24px;
+  border-radius: 999px;
+  background: rgba(0, 246, 194, 0.10);
+  border: 1px solid rgba(0, 246, 194, 0.4);
   color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.08);
-  border: 1px solid rgba(0, 246, 194, 0.22);
-  border-radius: 50%;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
 }
 
 .watchStepLabel {
-  font-size: 15px;
+  font-size: 14px;
   color: v.$color-text;
 }
 
@@ -1774,10 +1312,10 @@ $marketing-section-y-narrow: 64px;
 }
 
 .watchNote {
-  margin: 0;
+  margin: 14px 0 0;
   font-size: 12px;
-  line-height: 1.7;
-  color: v.$color-text-dim;
+  color: v.$color-muted;
+  font-family: v.$font-mono;
 }
 
 .watchFrame {
@@ -1786,110 +1324,157 @@ $marketing-section-y-narrow: 64px;
 }
 
 .watchPhone {
-  width: 100%;
-  max-width: 320px;
-  padding: 12px;
+  width: min(100%, 300px);
+  aspect-ratio: 9 / 16;
+  padding: 8px;
+  overflow: hidden;
   background: v.$color-panel;
   border: 1px solid v.$color-border;
-  border-radius: 24px;
-  box-shadow: v.$shadow-card;
+  border-radius: 28px;
+  margin-inline: auto;
 }
 
 .watchImg {
-  display: block;
   width: 100%;
-  height: auto;
-  border-radius: 14px;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  border-radius: 20px;
 }
 
-// ----- Final CTA -----
+// ===== 13 final cta =====
 .finalCta {
-  position: relative;
-  padding: 96px 0;
-  text-align: center;
-  background:
-    radial-gradient(60% 80% at 50% 0%, rgba(0, 246, 194, 0.10), transparent 70%),
-    v.$color-panel;
+  padding: 72px 0;
   border-top: 1px solid v.$color-border-soft;
-  border-bottom: 1px solid v.$color-border-soft;
+  background:
+    linear-gradient(
+      180deg,
+      transparent,
+      rgba(17, 26, 35, 0.5) 70%,
+      transparent
+    );
 }
 
 .finalCtaInner {
-  max-width: 720px;
-  margin: 0 auto;
+  max-width: 760px;
 }
 
 .finalCtaTitle {
   margin: 0 0 12px;
-  font-size: clamp(30px, 4vw, 44px);
-  line-height: 1.25;
+  font-size: clamp(28px, 3vw, 40px);
+  line-height: 1.15;
   font-weight: 800;
-  color: v.$color-text;
+  letter-spacing: -0.025em;
 }
 
 .finalCtaSubtitle {
-  margin: 0 0 28px;
-  font-size: 16px;
-  line-height: 1.8;
+  margin: 0 0 22px;
+  font-size: 15px;
+  line-height: 1.75;
   color: v.$color-muted;
 }
 
 .finalCtaBtn {
-  min-width: 150px;
+  font-size: 14px;
 }
 
 .finalInvite {
-  margin-top: 40px;
+  margin-top: 30px;
+  padding: 18px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid v.$color-border-soft;
+  border-radius: 12px;
   display: flex;
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
+  gap: 10px;
 }
 
 .finalInviteTitle {
-  font-size: 14px;
-  font-weight: 700;
-  color: v.$color-text;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
 }
 
-.finalInviteImgWrap {
-  width: 200px;
-  height: 200px;
-  overflow: hidden;
-  border-radius: v.$radius-card;
-  border: 1px solid v.$color-border;
-}
-
-.finalInviteImg {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  object-position: center;
+.finalInviteCta {
+  align-self: flex-start;
+  font-size: 13px;
 }
 
 .finalInviteNote {
   font-size: 12px;
+  line-height: 1.6;
   color: v.$color-text-dim;
 }
 
-// ----- 第一金字塔 Drawer 搜索 + pending -----
+// ===== 14 drawer =====
+.drawerOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  justify-content: flex-end;
+}
+
+.fieldDrawer {
+  width: min(520px, 100%);
+  height: 100%;
+  background: v.$color-panel;
+  border-left: 1px solid v.$color-border;
+  display: flex;
+  flex-direction: column;
+}
+
+.fieldDrawerHead {
+  padding: 18px 22px;
+  border-bottom: 1px solid v.$color-border-soft;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.fieldDrawerTitle {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.fieldDrawerSubtitle {
+  margin: 0;
+  font-size: 12px;
+  color: v.$color-muted;
+}
+
+.fieldDrawerClose {
+  width: 32px;
+  height: 32px;
+  background: transparent;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 8px;
+  color: v.$color-text;
+  cursor: pointer;
+}
+
+.fieldDrawerBody {
+  flex: 1;
+  overflow-y: auto;
+  padding: 16px 22px 22px;
+}
+
 .fieldSearch {
-  margin-bottom: 18px;
+  margin-bottom: 12px;
 }
 
 .fieldSearchInput {
   width: 100%;
-  height: 40px;
-  padding: 0 14px;
-  font-size: 14px;
+  padding: 9px 12px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid v.$color-border-soft;
   color: v.$color-text;
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-base;
-
-  &::placeholder {
-    color: v.$color-text-dim;
-  }
+  font-size: 13px;
 
   &:focus {
     outline: none;
@@ -1897,69 +1482,243 @@ $marketing-section-y-narrow: 64px;
   }
 }
 
+.fieldGroups {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.fieldGroup,
+.fieldGroupActive {
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  cursor: pointer;
+  color: v.$color-muted;
+  border: 1px solid transparent;
+}
+
+.fieldGroup:hover {
+  color: v.$color-text;
+}
+
 .fieldGroupActive {
   color: v.$color-brand;
-  background: rgba(0, 246, 194, 0.10);
-  border-color: rgba(0, 246, 194, 0.40);
+  background: rgba(0, 246, 194, 0.08);
+  border-color: rgba(0, 246, 194, 0.3);
 }
 
 .fieldPending {
-  margin-top: 22px;
-  padding: 16px;
-  border: 1px dashed v.$color-border;
-  border-radius: v.$radius-base;
-  background: v.$color-panel-2;
+  margin-top: 16px;
+  padding: 14px 16px;
+  background: rgba(56, 130, 246, 0.06);
+  border: 1px solid rgba(56, 130, 246, 0.3);
+  border-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .fieldPendingTag {
-  display: inline-block;
-  margin-bottom: 8px;
-  padding: 2px 8px;
-  border-radius: 4px;
+  display: inline-flex;
+  align-self: flex-start;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(56, 130, 246, 0.12);
+  border: 1px solid rgba(56, 130, 246, 0.5);
+  color: v.$color-info;
   font-family: v.$font-mono;
   font-size: 11px;
-  letter-spacing: 0.5px;
-  color: v.$color-warning;
-  background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.30);
+  letter-spacing: 0.12em;
 }
 
-// ----- 移动端导航面板（真正可用）-----
-.mobileNavPanel {
-  position: fixed;
-  top: 64px;
-  left: 0;
-  right: 0;
-  z-index: 19;
+.fieldNote {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: v.$color-muted;
+}
+
+// ===== 15 footer =====
+.footer {
+  padding: 40px 0 24px;
+  border-top: 1px solid v.$color-border-soft;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.footerInner {
+  display: grid;
+  grid-template-columns: 1.5fr 0.65fr 1fr 1fr;
+  gap: 36px;
+  align-items: start;
+}
+
+.footerDesc {
+  margin: 8px 0 0;
+  font-size: 12px;
+  line-height: 1.65;
+  color: v.$color-muted;
+  max-width: 320px;
+}
+
+.footerTitle {
+  margin: 0 0 10px;
+  font-size: 12px;
+  font-family: v.$font-mono;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
+}
+
+.footerList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  padding: 16px 24px 24px;
-  background: rgba(10, 15, 20, 0.96);
-  backdrop-filter: blur(12px);
-  border-bottom: 1px solid v.$color-border;
 }
 
-.mobileNavLinks {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.mobileNavLink {
-  padding: 14px 12px;
-  font-size: 16px;
+.footerLink {
   color: v.$color-text;
   text-decoration: none;
-  border-radius: v.$radius-base;
+  font-size: 13px;
 
   &:hover {
-    background: v.$color-panel-2;
     color: v.$color-brand;
   }
 }
 
-.mobileNavCta {
-  margin-top: 10px;
-  width: 100%;
+.footerText {
+  font-size: 13px;
+  color: v.$color-text;
+}
+
+.footerNote {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+.inviteTitle {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-family: v.$font-mono;
+  letter-spacing: 0.12em;
+  color: v.$color-muted;
+}
+
+.footerBottom {
+  margin-top: 28px;
+  padding-top: 14px;
+  border-top: 1px solid v.$color-border-soft;
+  font-size: 11px;
+  color: v.$color-text-dim;
+  font-family: v.$font-mono;
+}
+
+// ===== 16 responsive =====
+@media (max-width: v.$bp-wide) {
+  .heroGrid {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+
+  .heroLeft {
+    max-width: 720px;
+  }
+
+  .workflowGrid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .workflowCell {
+    border-right: 1px solid v.$color-border-soft;
+    border-bottom: 1px solid v.$color-border-soft;
+  }
+
+  .workflowCell:nth-child(3n) {
+    border-right: 0;
+  }
+
+  .workflowCell:nth-last-child(-n+3) {
+    border-bottom: 0;
+  }
+
+  .chipStoryGrid,
+  .structureStoryGrid {
+    grid-template-columns: 1fr;
+    gap: 24px;
+  }
+
+  .labWorkspace {
+    grid-template-columns: 1fr;
+  }
+
+  .xiaozGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .watchGrid {
+    grid-template-columns: 1fr;
+    gap: 36px;
+  }
+
+  .langRow {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .discoveryGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: v.$bp-narrow) {
+  .workflowGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .workflowCell:nth-child(3n) {
+    border-right: 1px solid v.$color-border-soft;
+  }
+
+  .workflowCell:nth-child(2n) {
+    border-right: 0;
+  }
+
+  .workflowCell:nth-last-child(-n+3) {
+    border-bottom: 1px solid v.$color-border-soft;
+  }
+
+  .workflowCell:nth-last-child(-n+2) {
+    border-bottom: 0;
+  }
+
+  .langRow {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .footerInner {
+    grid-template-columns: 1fr 1fr;
+  }
+}
+
+// ===== 17 reduced-motion =====
+@media (prefers-reduced-motion: reduce) {
+  .reveal {
+    opacity: 1;
+    transform: none;
+    transition: none;
+  }
+
+  .btn,
+  .btnPrimary,
+  .btnGhost,
+  .navLink,
+  .dictionaryLink {
+    transition: none;
+  }
 }

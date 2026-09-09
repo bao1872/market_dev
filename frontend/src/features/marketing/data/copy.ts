@@ -29,6 +29,16 @@ export const NAV = {
   ctaHref: '/login',
 }
 
+// 营销页媒体资产统一前缀：/marketing-assets/media/
+// 真实图片在 build:marketing-site 步骤 cp 到 dist-marketing-site/media/，
+// 由 panji-marketing-site-deploy rsync 到生产目录并 verify 200。
+// 不再依赖旧 landing 静态目录里的图片（轻部署通道不发布该目录）。
+export const MARKETING_MEDIA = {
+  feishuPoster: '/marketing-assets/media/poster_img1.webp',
+  intradayMonitor: '/marketing-assets/media/intraday-monitor.webp',
+  marketWorkspace: '/marketing-assets/media/market-workspace.webp',
+} as const
+
 export interface HeroStatusBadge {
   readonly dot: 'green' | 'blue'
   readonly text: string
@@ -284,8 +294,8 @@ export const WATCH_NOTIFY = {
   title: '不用一直盯着盘迹。',
   subtitle: '值得重新看的时候，再把它送到你面前。',
   steps: ['发现候选', '加入自选', '状态变化', '生成研究图片', '推送飞书'],
-  // 优先真实飞书截图 poster_img1；备选 intraday-monitor。
-  imageSrc: '/landing/assets/images/poster_img1.webp',
+  // 真实飞书推送研究图（build:marketing-site 拷贝至 /marketing-assets/media/）。
+  imageSrc: MARKETING_MEDIA.feishuPoster,
   imageAlt: '盘迹推送到飞书的研究图片（真实产出示意）',
   imageNote: '图片为盘迹真实产出示意，非产品截图合成。',
 }
@@ -304,10 +314,11 @@ export const FINAL_CTA = {
     external: true,
   },
   invite: {
-    title: 'QQ 邀请码',
-    imageSrc: '/landing/assets/images/qq_shot.png',
-    imageAlt: '扫码添加 QQ 获取邀请码',
-    note: '截图裁剪展示邀请码区域。',
+    title: '内容入口',
+    ctaLabel: '雪球搜索「小Z说事」→',
+    href: XUEQIU_SEARCH_URL,
+    external: true,
+    note: '盘迹当前对外内容入口：雪球搜索「小Z说事」。QQ 邀请码等后续通道开放后接入。',
   },
 }
 
@@ -348,8 +359,8 @@ export const FOOTER = {
     },
   ] as FooterColumn[],
   invitation: {
-    title: '需要邀请码？',
-    desc: '扫码添加 QQ 联系。（二维码资产在后续视觉阶段接入）',
+    title: '关注小Z说事',
+    desc: '盘迹每日复盘在雪球发布，搜索「小Z说事」即可关注。',
   },
   copyright: '盘迹 · 看一眼就知道怎么用',
 }

@@ -65,7 +65,7 @@ export default function ChipConsensusStory() {
           subtitle={CHIP_CONSENSUS_STORY.subtitle}
         />
         <ScrollReveal>
-          <div className={styles.storyGrid} ref={ref}>
+          <div className={styles.chipStoryGrid} ref={ref}>
             {/* 左：K线 + 成交分布 */}
             <div className={styles.storyVisualSolo}>
               <div className={styles.chipProfileHead}>

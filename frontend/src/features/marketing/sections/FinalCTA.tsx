@@ -1,6 +1,7 @@
-// FinalCTA（Full Alignment V1 · 新增，位于 footer 之前）：
-// 大 CTA section：标题 + 副标题 + 主/次按钮 + QQ 邀请码。
-// 不使用普通 footer 直接结束。
+// FinalCTA（Visual System V1.1 · 位于 footer 之前）：
+// 大 CTA section：标题 + 副标题 + 主/次按钮 + 内容入口（无伪造二维码图）。
+// V1.1 变更：移除伪造「QQ 邀请码」截图（qq_shot.png 为聊天 mockup，无真实 QR），
+// invite 改为诚实文本入口，指向真实「小Z说事 · 雪球」。
 import clsx from 'clsx'
 import { FINAL_CTA } from '../data/copy'
 import styles from '../marketing.module.scss'
@@ -31,17 +32,18 @@ export default function FinalCTA() {
             </a>
           </div>
 
-          {/* QQ 邀请码：复用已有截图，CSS 裁剪突出邀请码区域 */}
-          <div className={styles.finalInvite}>
+          {/* 内容入口：诚实文本 CTA（无伪造二维码图） */}
+          <div className={styles.finalInvite} data-testid="marketing-final-invite">
             <span className={styles.finalInviteTitle}>{FINAL_CTA.invite.title}</span>
-            <div className={styles.finalInviteImgWrap}>
-              <img
-                className={styles.finalInviteImg}
-                src={FINAL_CTA.invite.imageSrc}
-                alt={FINAL_CTA.invite.imageAlt}
-                loading="lazy"
-              />
-            </div>
+            <a
+              className={clsx(styles.btn, styles.btnGhost, styles.finalInviteCta)}
+              href={FINAL_CTA.invite.href}
+              {...(FINAL_CTA.invite.external
+                ? { target: '_blank', rel: 'noopener noreferrer' }
+                : {})}
+            >
+              {FINAL_CTA.invite.ctaLabel}
+            </a>
             <span className={styles.finalInviteNote}>{FINAL_CTA.invite.note}</span>
           </div>
         </div>
