@@ -16,7 +16,6 @@ function readSrc(relPath: string): string {
 }
 
 const scssSrc = readSrc('src/features/marketing/marketing.module.scss')
-const copySrc = readSrc('src/features/marketing/data/copy.ts')
 
 // ===== A. caseStage 不得有固定 min-height =====
 
