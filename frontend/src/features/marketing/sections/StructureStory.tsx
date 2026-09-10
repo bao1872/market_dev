@@ -13,10 +13,10 @@ import { useInViewport } from '../hooks/useInViewport'
 import { useSmoothMarketReplay } from '../hooks/useSmoothMarketReplay'
 import {
   buildStructureNarrativeBeats,
-  findCanonicalFrameIndex,
   STRUCTURE_GUIDE,
 } from '../data/structureReplayNarration'
 import type { StructureBeat } from '../data/structureReplayNarration'
+import { findCanonicalFrameIndex } from '../data/replayFrameUtils'
 import { MARKETING_MEDIA, STRUCTURE_STORY } from '../data/copy'
 import type { MarketingStructureReplay } from '../data/structureReplayTypes'
 import styles from '../marketing.module.scss'

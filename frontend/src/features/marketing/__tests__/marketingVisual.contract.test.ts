@@ -40,6 +40,7 @@ const SHIPPED_MEDIA = [
   'panji-mobile-research.jpg',
   'xiaoz-xueqiu.png',
   'zhongji-xuchuang-300308-1d-2y.json',
+  'nearshore-protein-688137-chip-consensus-1d-250d.json',
 ]
 
 test('V1.1-1. copy.ts 不得引用 /landing/assets，必须引用 /marketing-assets/media/', () => {
@@ -101,18 +102,24 @@ test('V1.1-3. deploy 脚本必须 rsync media 并 verify /marketing-assets/media
   }
 })
 
-test('V1.1-4(V1.2). Chip 用 chipStoryGrid(1fr+300px)；StructureStory 改真实回放 RealStructureReplay；禁止 .storyGrid', () => {
+test('V1.1-4(V1.4). Chip 用 realChipWorkspace(1fr+300px) 真实回放；Structure 用 RealStructureReplay；禁止 .storyGrid', () => {
+  assert.ok(
+    /RealChipConsensusReplay/.test(
+      readSrc('src/features/marketing/sections/ChipConsensusStory.tsx'),
+    ),
+    'ChipConsensusStory 必须渲染 RealChipConsensusReplay（真实筹码共识回放）',
+  )
+  assert.ok(
+    /\.realChipWorkspace\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*300px/.test(
+      scssSrc.replace(/\s+/g, ' '),
+    ),
+    'realChipWorkspace 必须是 minmax(0,1fr) 300px（左图宽列右解）',
+  )
   assert.ok(
     /styles\.chipStoryGrid/.test(
       readSrc('src/features/marketing/sections/ChipConsensusStory.tsx'),
-    ),
-    'ChipConsensusStory 必须使用 styles.chipStoryGrid（图在宽列）',
-  )
-  assert.ok(
-    /\.chipStoryGrid\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s*300px/.test(
-      scssSrc.replace(/\s+/g, ' '),
-    ),
-    'chipStoryGrid 必须是 minmax(0,1fr) 300px（修复筹码图被挤窄）',
+    ) === false,
+    'ChipConsensusStory V1.4 不得再使用教学 demo 的 chipStoryGrid',
   )
   // [V1.2] StructureStory 已不在双栏网格中：改为 full-width 真实回放工作区。
   assert.ok(

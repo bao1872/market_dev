@@ -10,10 +10,10 @@ import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import {
   buildStructureNarrativeBeats,
-  findCanonicalFrameIndex,
   keyOfEvent,
   STRUCTURE_GUIDE,
 } from '../data/structureReplayNarration'
+import { findCanonicalFrameIndex } from '../data/replayFrameUtils'
 
 interface FixtureEvent {
   type: string

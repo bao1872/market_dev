@@ -45,6 +45,9 @@ export const MARKETING_MEDIA = {
   //   （deploy rsync BUILD_DIR}/media -> SITE_ASSET_TARGET}/media），不放 /data/ 以免 404。
   structureReplay:
     '/marketing-assets/media/zhongji-xuchuang-300308-1d-2y.json',
+  // [V1.4] 近岸蛋白真实筹码共识回放 frozen JSON（production node_cluster canonical）。
+  chipConsensusReplay:
+    '/marketing-assets/media/nearshore-protein-688137-chip-consensus-1d-250d.json',
 } as const
 
 export interface HeroStatusBadge {
@@ -147,14 +150,40 @@ export const STRUCTURE_STORY = {
   currentDateLabel: '当前日期',
 }
 
+// 真实筹码共识回放（V1.4）：不再使用 synthetic 教学 K 线，
+// 而播放近岸蛋白 688137 近 250 个交易日的真实日线 + canonical node_cluster
+// （盘迹真实筹码共识计算代码）。播放 42s、64 个真实 node snapshot。
+// 原则：只解释 production POC 区间关系（区域重叠/迁移），不用固定价格阈值定义状态。
 export const CHIP_CONSENSUS_STORY = {
   index: '04',
   eyebrow: '共识怎么形成',
-  title: '筹码共识不是画出来的一条线，\n是成交一点一点堆出来的。',
-  subtitle: '成交出现在什么价位，共识就在什么价位慢慢形成。',
-  playLabel: '播放筹码共识演示',
-  pauseLabel: '暂停筹码共识演示',
-  consensusLabel: '主要成交密集价',
+  title: '用近岸蛋白的真实历史成交，\n看市场共识怎样一点一点迁移。',
+  subtitle:
+    '成交密集价来自历史成交分布。它描述市场交易最集中的位置，不等同于股东真实持仓成本。',
+  instrumentLabel: '近岸蛋白 · 688137',
+  timeframeLabel: '日线 · 250个交易日',
+  dataLabel: '真实历史数据',
+  // 播放控制：关键节点 = narrative beat（不是 canonical frame）。
+  playLabel: '播放',
+  pauseLabel: '暂停',
+  replayLabel: '重新播放',
+  previousKeyLabel: '上一个关键节点',
+  nextKeyLabel: '下一个关键节点',
+  // 右侧解释面板标题。
+  narrationTitle: '现在发生什么',
+  progressLabel: '播放进度',
+  currentDateLabel: '当前日期',
+  // 顶部指标条（M17：语义是区域关系，不是百分比）。
+  currentPriceLabel: '当前价',
+  consensusPriceLabel: '主要成交密集价',
+  positionLabel: '位置关系',
+  positionAbove: '高于共识区',
+  positionInside: '位于共识区',
+  positionBelow: '低于共识区',
+  distancePrefix: '距共识价',
+  // 底部共识轨迹（M19：真实 POC 的离散 step track）。
+  consensusTrackLabel: '主要成交密集价轨迹',
+  caption: '历史数据演示 · 使用盘迹真实筹码共识计算代码（不构成投资建议）',
 }
 
 // 盘迹产品语言六维度（与产品页一致，营销侧不重新定义）。

@@ -18,6 +18,9 @@ import type {
   SmcEvent,
   SmcOrderBlock,
 } from '@/components/smcRendering'
+import { findCanonicalFrameIndex } from './replayFrameUtils'
+
+export { findCanonicalFrameIndex }
 
 export type BeatKind = 'context' | 'battle' | 'continuation' | 'reversal'
 
@@ -119,25 +122,7 @@ export function overlaps(bar: ReplayBarLike, ob: SmcOrderBlock): boolean {
   return bar.low <= ob.bar_high && bar.high >= ob.bar_low
 }
 
-/** 取给定 endIndex 下最大的 canonical frame（endIndex <= visibleEndIndex），禁止未来帧。 */
-export function findCanonicalFrameIndex(
-  frames: ReadonlyArray<{ endIndex: number }>,
-  visibleEndIndex: number,
-): number {
-  let lo = 0
-  let hi = frames.length - 1
-  let best = -1
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2)
-    if (frames[mid].endIndex <= visibleEndIndex) {
-      best = mid
-      lo = mid + 1
-    } else {
-      hi = mid - 1
-    }
-  }
-  return best
-}
+// findCanonicalFrameIndex 已迁至 replayFrameUtils.ts，本模块 re-export 保持单一实现来源。
 
 function obStructureLevel(ob: SmcOrderBlock): 'swing' | 'internal' | undefined {
   if (ob.structureLevel) return ob.structureLevel

@@ -725,6 +725,86 @@ $marketing-section-y-mobile: 52px;
   color: v.$color-text-dim;
 }
 
+// ===== 真实筹码共识回放（V1.4）=====
+// 与结构回放同一视觉家族（复用 realReplay*/structureGuide/structureNarration），
+// 但版式不同：顶部有 metrics strip，workspace 左图右解，底部再叠一条共识迁移轨迹。
+
+// 顶部指标条：当前日期 / 当前价 / 主要成交密集价 / 位置关系。
+.realChipMetricsStrip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.realChipMetricsItem {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 12px 14px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 12px;
+}
+
+.realChipMetricsLabel {
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+.realChipMetricsValue {
+  font-family: v.$font-mono;
+  font-size: 15px;
+  font-weight: 700;
+  color: v.$color-text;
+  overflow-wrap: anywhere;
+}
+
+// 位置关系：语义是区域关系（高于/位于/低于共识区）。
+.realChipMetricsPosition {
+  font-family: v.$font-mono;
+  font-size: 15px;
+  font-weight: 700;
+  color: v.$color-brand;
+  overflow-wrap: anywhere;
+}
+
+// 左图右解工作区（M18）：与结构回放同族但独立类名，允许单独演进。
+.realChipWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 300px;
+  gap: 20px;
+  align-items: stretch;
+}
+
+// 共识迁移轨迹（M19）：横跨图表底部，真实 POC 离散 step track。
+.realChipConsensusTrackWrap {
+  margin-top: 16px;
+  padding: 12px 14px;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
+  border-radius: 14px;
+}
+
+.realChipConsensusTrackLabel {
+  display: block;
+  margin-bottom: 8px;
+  font-family: v.$font-mono;
+  font-size: 11px;
+  color: v.$color-text-dim;
+}
+
+@media (max-width: 900px) {
+  .realChipMetricsStrip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .realChipWorkspace {
+    grid-template-columns: 1fr;
+  }
+}
+
 // ===== 真实结构回放（V1.3）=====
 
 // 结构导读：3 个解释卡片，进入动画前先建立语义。
@@ -1264,126 +1344,6 @@ $marketing-section-y-mobile: 52px;
   font-size: 13px;
   line-height: 1.6;
   color: v.$color-muted;
-}
-
-// ===== StoryControls =====
-.controls {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-top: 14px;
-  padding: 10px 14px;
-  border: 1px solid v.$color-border-soft;
-  border-radius: 10px;
-  background: rgba(255, 255, 255, 0.02);
-}
-
-.controlBtn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 32px;
-  height: 32px;
-  border-radius: 8px;
-  background: transparent;
-  border: 1px solid v.$color-border-soft;
-  color: v.$color-text;
-  cursor: pointer;
-
-  &:hover {
-    border-color: v.$color-brand;
-    color: v.$color-brand;
-  }
-}
-
-.frameReadout {
-  margin-left: auto;
-  font-family: v.$font-mono;
-  font-size: 11px;
-  color: v.$color-muted;
-}
-
-// ===== 08 chip story =====
-.chipStoryGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 300px;
-  gap: 44px;
-  align-items: start;
-}
-
-.chipProfileHead {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 14px 16px;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: 10px;
-}
-
-.consensusLabel {
-  font-family: v.$font-mono;
-  font-size: 11px;
-  letter-spacing: 0.12em;
-  color: v.$color-muted;
-}
-
-.consensusValue {
-  font-size: 22px;
-  font-weight: 780;
-  letter-spacing: -0.02em;
-  color: v.$color-brand;
-}
-
-.consensusFrom {
-  font-family: v.$font-mono;
-  font-size: 11px;
-  color: v.$color-text-dim;
-}
-
-.consensusLine {
-  height: 1px;
-  background: linear-gradient(90deg, v.$color-brand, transparent);
-}
-
-.consensusLineLabel {
-  display: block;
-  margin-top: 4px;
-  font-family: v.$font-mono;
-  font-size: 11px;
-  color: v.$color-muted;
-}
-
-.chipVisualMirror {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 150px;
-  gap: 14px;
-  align-items: stretch;
-}
-
-.profilePanel {
-  min-width: 0;
-  padding: 0;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: 12px;
-  overflow: hidden;
-}
-
-.profileSvg {
-  display: block;
-  width: 100%;
-  height: auto;
-}
-
-.profileBin {
-  fill: rgba(0, 246, 194, 0.35);
-  stroke: rgba(0, 246, 194, 0.55);
-}
-
-.profileBinMax {
-  fill: v.$color-brand;
-  stroke: v.$color-brand;
 }
 
 // ===== 09 language =====
