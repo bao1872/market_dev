@@ -394,17 +394,6 @@ $marketing-section-y-mobile: 52px;
   }
 }
 
-.heroGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 0.82fr) minmax(560px, 1.18fr);
-  align-items: center;
-  gap: 64px;
-}
-
-.heroLeft {
-  min-width: 0;
-}
-
 .heroTitle {
   margin: 12px 0 18px;
   max-width: 570px;
@@ -1860,15 +1849,6 @@ $marketing-section-y-mobile: 52px;
 
 // ===== 16 responsive =====
 @media (max-width: v.$bp-wide) {
-  .heroGrid {
-    grid-template-columns: 1fr;
-    gap: 36px;
-  }
-
-  .heroLeft {
-    max-width: 720px;
-  }
-
   .workflowGrid {
     grid-template-columns: repeat(3, 1fr);
   }
