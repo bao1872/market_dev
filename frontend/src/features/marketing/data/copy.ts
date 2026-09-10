@@ -377,8 +377,6 @@ export const WATCH_NOTIFY = {
 export const XUEQIU_PROFILE_URL =
   'https://xueqiu.com/u/6601870666?scene=1036&share_uid=6601870666'
 
-// 最终 CTA（在大 footer 之前）：只做产品转化 + 社区轻入口。
-// [V1.5] 次级 CTA 改为「加入交流」锚点，不再重复雪球搜索入口（社区出口已收束进 Footer 双二维码）。
 // 营销页对外链接。href 缺失时渲染为纯文本说明，不制造假链接。
 export type MarketingLink = {
   label: string
