@@ -87,8 +87,8 @@ test('A3. 真实产品大屏用 MARKETING_MEDIA 三张真实截图（desktop + m
     'ProductDeviceStage 必须包含 MacBook + iPhone 双层设备外壳',
   )
   assert.ok(
-    /MARKETING_MEDIA\.xiaozXueqiu/.test(copySrc),
-    'copy.ts DISCOVERY/XIAOZ 必须消费 MARKETING_MEDIA.xiaozXueqiu 真实雪球截图',
+    !/MARKETING_MEDIA\.xiaozXueqiu/.test(copySrc),
+    'copy.ts 不得消费已删除的 MARKETING_MEDIA.xiaozXueqiu（V1.5 移除）',
   )
   // A 股惯例涨红跌绿仍由 scss token 体系保证（screen 图来自真实产品，不再自造市场表）
 })
@@ -129,13 +129,18 @@ test('A5. SCSS 已为 V1.2 新增真实产品大屏 / 回放视觉类（无硬�
     'iphoneMock',
     'discoveryGrid',
     'discoveryFlow',
-    'xiaozJourney',
-    'preferenceActive',
     'workflowGrid',
     'marketCenter',
-    'labTab',
-    'labFunnelBar',
-    'xiaozEvidence',
+    'caseTabs',
+    'caseTab',
+    'caseStage',
+    'caseScreenshot',
+    'caseExplanation',
+    'exploreStage',
+    'exploreExamples',
+    'footerCommunity',
+    'footerQrGrid',
+    'footerQrCard',
     'realReplayFrame',
     'realReplayProgressFill',
     'watchPhone',

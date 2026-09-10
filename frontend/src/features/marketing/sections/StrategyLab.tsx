@@ -1,22 +1,20 @@
-// StrategyLab（Full Alignment V1 · 新增核心交互）：
-// 4 个经典场景 tab；选中场景展示：
-//   左：逻辑说明
-//   中：实际 filter chips（绿色 = 已选）
-//   右：候选数量漏斗
-// 约束：不宣称「精确实现经典道氏123」，统一写「道氏123风格」（字段为可编程近似）。
+// StrategyLab（Full Alignment V1.5 · 真实玩法案例）：
+// 4 个玩法 tab（道氏123风格 / 趋势跟踪 / 双底支撑 / 更多玩法）。
+// 前三为「真实产品截图 + 文字说明」的大案例舞台（桌面截图约 68% + 解释约 32%），
+// 第四为「更多玩法待你探索」的探索板（不伪造第四张截图、不显示空白图片区）。
+// 边界（owner 裁决）：统一用「道氏123风格 / 思路」，不宣称精确实现经典定义；
+// 不虚构候选数量漏斗；盘迹是一套状态语言，不是一套固定策略。
 import { useState } from 'react'
 import clsx from 'clsx'
 import ScrollReveal from '../components/ScrollReveal'
 import SectionHeading from '../components/SectionHeading'
-import { SCENARIO_ICONS, type ScenarioIconKey } from '../components/MarketingIcons'
-import { STRATEGY_LAB } from '../data/copy'
+import { STRATEGY_LAB, type RealStrategyCase, type ExploreStrategyCase } from '../data/copy'
 import styles from '../marketing.module.scss'
 
 export default function StrategyLab() {
-  const [activeId, setActiveId] = useState(STRATEGY_LAB.scenarios[0].id)
-  const active =
-    STRATEGY_LAB.scenarios.find((s) => s.id === activeId) ?? STRATEGY_LAB.scenarios[0]
-  const maxCount = active.funnel[0]?.count ?? 1
+  const [activeId, setActiveId] = useState<string>(STRATEGY_LAB.cases[0].id)
+  const active: RealStrategyCase | ExploreStrategyCase =
+    STRATEGY_LAB.cases.find((item) => item.id === activeId) ?? STRATEGY_LAB.cases[0]
 
   return (
     <section
@@ -32,78 +30,96 @@ export default function StrategyLab() {
           subtitle={STRATEGY_LAB.subtitle}
         />
 
-        {/* 场景 tab 行 */}
-        <div className={styles.labTabs} role="tablist" aria-label="经典场景">
-          {STRATEGY_LAB.scenarios.map((sc) => {
-            const Icon = SCENARIO_ICONS[sc.icon as ScenarioIconKey]
-            return (
-              <button
-                key={sc.id}
-                type="button"
-                role="tab"
-                aria-selected={sc.id === activeId}
-                className={clsx(styles.labTab, sc.id === activeId && styles.labTabActive)}
-                onClick={() => setActiveId(sc.id)}
-              >
-                {Icon ? <Icon width={18} height={18} /> : null}
-                <span>{sc.name}</span>
-              </button>
-            )
-          })}
+        {/* 玩法 tab 行 */}
+        <div className={styles.caseTabs} role="tablist" aria-label="盘迹真实玩法案例">
+          {STRATEGY_LAB.cases.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              role="tab"
+              aria-selected={active.id === item.id}
+              className={clsx(styles.caseTab, active.id === item.id && styles.caseTabActive)}
+              onClick={() => setActiveId(item.id)}
+            >
+              {item.tabLabel}
+            </button>
+          ))}
         </div>
 
         <ScrollReveal>
-          <div className={styles.labWorkspace}>
-            {/* 左：逻辑说明 */}
-            <div className={styles.labLogic}>
-              <h3 className={styles.labLogicTitle}>{active.name}</h3>
-              <p className={styles.labLogicText}>{active.logic}</p>
-            </div>
-
-            {/* 中：filter chips */}
-            <div className={styles.labChips}>
-              <span className={styles.labChipsLabel}>筛选条件</span>
-              <div className={styles.labChipRow}>
-                {active.chips.map((chip) => (
-                  <span
-                    key={chip.label}
-                    className={clsx(
-                      styles.labChip,
-                      chip.active && styles.labChipActive,
-                    )}
-                  >
-                    {chip.active ? '✓ ' : ''}
-                    {chip.label}
-                  </span>
-                ))}
-              </div>
-            </div>
-
-            {/* 右：候选数量漏斗 */}
-            <div className={styles.labFunnel}>
-              <span className={styles.labFunnelLabel}>候选数量</span>
-              <ul className={styles.labFunnelList}>
-                {active.funnel.map((row) => (
-                  <li key={row.label} className={styles.labFunnelRow}>
-                    <span className={styles.labFunnelName}>{row.label}</span>
-                    <span className={styles.labFunnelBarWrap}>
-                      <span
-                        className={styles.labFunnelBar}
-                        style={{
-                          width: `${Math.max(6, (row.count / maxCount) * 100)}%`,
-                        }}
-                      />
-                    </span>
-                    <span className={styles.labFunnelCount}>{row.count.toLocaleString()}</span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          </div>
+          {active.kind === 'case' ? (
+            <RealCaseStage data={active} />
+          ) : (
+            <ExploreStage data={active} />
+          )}
         </ScrollReveal>
-
-        <p className={styles.labNote}>{STRATEGY_LAB.note}</p>
       </div>
     </section>
+  )
+}
+
+// 真实产品截图案例：桌面截图 68% + 解释 32%。
+function RealCaseStage({ data }: { data: RealStrategyCase }) {
+  return (
+    <article className={styles.caseStage}>
+      <figure className={styles.caseScreenshot}>
+        <div className={styles.caseImageMeta}>
+          <span>真实产品截图</span>
+          <span>历史案例</span>
+        </div>
+        <img src={data.imageSrc} alt={data.imageAlt} loading="lazy" />
+      </figure>
+
+      <aside className={styles.caseExplanation}>
+        <span className={styles.caseStock}>
+          {data.stock} · {data.symbol}
+        </span>
+        <h3 className={styles.casePlaybook}>{data.playbook}</h3>
+        <p className={styles.caseLead}>{data.lead}</p>
+
+        <div className={styles.caseExplainBlock}>
+          <span>这个案例在看什么</span>
+          <p>{data.what}</p>
+        </div>
+
+        <div className={styles.caseExplainBlock}>
+          <span>盘迹怎么参与</span>
+          <p>{data.panji}</p>
+        </div>
+
+        <p className={styles.caseDisclaimer}>{data.note}</p>
+      </aside>
+    </article>
+  )
+}
+
+// 更多玩法探索板：不显示空白图片区，直接给出状态语言组合。
+function ExploreStage({ data }: { data: ExploreStrategyCase }) {
+  return (
+    <article className={styles.exploreStage}>
+      <div className={styles.exploreFormula}>
+        <span>趋势</span>
+        <b>×</b>
+        <span>结构</span>
+        <b>×</b>
+        <span>动量</span>
+        <b>×</b>
+        <span>成交量</span>
+        <b>×</b>
+        <span>筹码</span>
+        <b>×</b>
+        <span>事件</span>
+      </div>
+
+      <h3>{data.playbook}</h3>
+      <p className={styles.exploreLead}>{data.lead}</p>
+      <p className={styles.exploreText}>{data.text}</p>
+
+      <div className={styles.exploreExamples}>
+        {data.examples.map((example) => (
+          <span key={example}>{example}</span>
+        ))}
+      </div>
+    </article>
   )
 }

@@ -10,7 +10,6 @@ import StructureStory from './sections/StructureStory'
 import ChipConsensusStory from './sections/ChipConsensusStory'
 import MarketLanguage from './sections/MarketLanguage'
 import StrategyLab from './sections/StrategyLab'
-import XiaozToPanji from './sections/XiaozToPanji'
 import WatchAndNotify from './sections/WatchAndNotify'
 import FinalCTA from './sections/FinalCTA'
 import MarketingFooter from './sections/MarketingFooter'
@@ -19,7 +18,7 @@ import styles from './marketing.module.scss'
 
 // 页面顺序严格锁定（合同 S）：
 // MarketingNav → Hero → Discovery → Workflow → StructureStory → ChipConsensusStory
-// → MarketLanguage → StrategyLab → XiaozToPanji → WatchAndNotify → FinalCTA
+// → MarketLanguage → StrategyLab → WatchAndNotify → FinalCTA
 // → MarketingFooter → FirstPyramidDrawer
 export default function MarketingPage() {
   const [fieldDrawerOpen, setFieldDrawerOpen] = useState(false)
@@ -35,7 +34,6 @@ export default function MarketingPage() {
         <ChipConsensusStory />
         <MarketLanguage onOpenFieldDictionary={() => setFieldDrawerOpen(true)} />
         <StrategyLab />
-        <XiaozToPanji />
         <WatchAndNotify />
         <FinalCTA />
       </main>

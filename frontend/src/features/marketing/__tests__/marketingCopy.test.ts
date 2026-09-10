@@ -3,17 +3,27 @@
 // Full Alignment V1 更新：6 步工作流、3 卡发现、删除未证实 claim（1000+ / 多市场实时 / 0:19 / 公众号文章）。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { dirname, resolve } from 'node:path'
 import {
   CHIP_CONSENSUS_STORY,
   DISCOVERY,
+  FINAL_CTA,
   FIRST_PYRAMID,
   FOOTER,
   HERO,
+  MARKETING_MEDIA,
   MARKET_LANGUAGE,
   NAV,
+  STRATEGY_LAB,
   STRUCTURE_STORY,
   WORKFLOW,
+  XUEQIU_PROFILE_URL,
 } from '../data/copy'
+
+const __dirname = dirname(fileURLToPath(import.meta.url))
+const FRONTEND_ROOT = resolve(__dirname, '../../../../') // frontend/
 
 // 盘迹产品语言六维度：顺序与命名由产品侧定义，营销侧只能消费不能重定义
 const EXPECTED_DIMENSIONS = ['趋势', '结构', '动量', '成交量', '筹码', '事件']
@@ -155,11 +165,15 @@ test('NAV 含 5 项真实菜单 + 副标 + 开始使用 CTA（无公众号文章
     '产品',
     '怎么工作',
     '经典场景',
-    '小Z说事',
+    '交流',
     '状态提醒',
   ]) {
     assert.ok(labels.includes(expected), `导航菜单缺少: ${expected}`)
   }
+  // [V1.5] 导航用「交流 → #community」替代「小Z说事 → #xiaoz」；雪球出口收束进 Footer 二维码
+  assert.ok(!labels.includes('小Z说事'), '导航不得再出现「小Z说事」独立入口')
+  const communityItem = NAV.items.find((i) => i.label === '交流')
+  assert.ok(communityItem?.href === '#community', '「交流」必须指向 #community')
   // 禁止「公众号文章」回流
   assert.ok(
     !labels.includes('公众号文章'),
@@ -218,3 +232,86 @@ test('公开文案不含未证实的产品 claim（Full Alignment V1 守住）',
     assert.ok(!raw.includes(claim), `营销文案不得含未证实/越界 claim: ${claim}`)
   }
 })
+
+// ===== V1.5 真实玩法案例（StrategyLab）=====
+
+test('V1.5-A. STRATEGY_LAB 恰好 4 个玩法 tab，前三为 case、第四为 explore', () => {
+  assert.equal(STRATEGY_LAB.cases.length, 4)
+  const kinds = STRATEGY_LAB.cases.map((c) => c.kind)
+  assert.deepEqual(
+    kinds,
+    ['case', 'case', 'case', 'explore'],
+    '前三必须为 case，第四为 explore',
+  )
+  const [g, n, j, explore] = STRATEGY_LAB.cases as [
+    RealCase,
+    RealCase,
+    RealCase,
+    ExploreCase,
+  ]
+  // 前三对应的真实个股与代码
+  assert.equal(g.stock + g.symbol, '国创高新' + '002377')
+  assert.equal(n.stock + n.symbol, '南亚新材' + '688519')
+  assert.equal(j.stock + j.symbol, '精智达' + '688627')
+  // 统一用「道氏123风格 / 思路」，不宣称精确实现经典
+  assert.ok(g.playbook.includes('道氏123'), `国创高新玩法须含道氏123: ${g.playbook}`)
+  assert.ok(!g.playbook.includes('经典道氏123'), '不得宣称精确实现经典道氏123')
+  // 每一真实案例都消费 MARKETING_MEDIA 中存在的图像
+  assert.ok(String(MARKETING_MEDIA.caseGuochuangDow123).includes(g.imageSrc))
+  assert.ok(String(MARKETING_MEDIA.caseNanyaTrend).includes(n.imageSrc))
+  assert.ok(String(MARKETING_MEDIA.caseJingzhidaDoubleBottom).includes(j.imageSrc))
+  for (const c of [g, n, j]) {
+    assert.ok(c.imageSrc.startsWith('/marketing-assets/media/'), `case 图须在 media 目录: ${c.imageSrc}`)
+    assert.ok(c.note.length > 0, '每一真实案例必须有免责 note')
+  }
+  assert.equal(explore.kind, 'explore')
+  assert.ok(Array.isArray(explore.examples) && explore.examples.length >= 6, 'explore 需给足示例组合')
+  // 不得虚构候选数量漏斗
+  const raw = JSON.stringify(STRATEGY_LAB)
+  for (const term of ['funnel', 'candidateCount', '86→34']) {
+    assert.ok(!raw.includes(term), `STRATEGY_LAB 不得包含候选漏斗语义: ${term}`)
+  }
+})
+
+// ===== V1.5 页面顺序 / Footer 社区出口 / FinalCTA =====
+
+const MARKETING_PAGE = readFileSync(
+  resolve(FRONTEND_ROOT, 'src/features/marketing/MarketingPage.tsx'),
+  'utf-8',
+)
+
+test('V1.5-B. MarketingPage 不再存在 XiaozToPanji / #xiaoz', () => {
+  assert.ok(
+    !MARKETING_PAGE.includes('XiaozToPanji'),
+    'MarketingPage 不得再渲染 XiaozToPanji',
+  )
+  const raw = JSON.stringify(NAV)
+  assert.ok(!raw.includes('#xiaoz'), 'NAV 不得再有 #xiaoz 死锚点')
+})
+
+test('V1.5-C. Footer is community；恰好 2 张社区二维码；雪球 URL 精确', () => {
+  assert.equal(FOOTER.community.id, 'community')
+  assert.equal(FOOTER.community.cards.length, 2)
+  const qq = FOOTER.community.cards.find((c) => c.id === 'qq')
+  const xq = FOOTER.community.cards.find((c) => c.id === 'xueqiu')
+  assert.ok(qq, '必须存在 QQ 群卡')
+  assert.ok(xq, '必须存在雪球卡')
+  assert.ok(qq.subtitle.includes('364121472'), 'QQ 群号必须为 364121472')
+  assert.equal(xq.href, XUEQIU_PROFILE_URL, '雪球 href 必须是精确 URL')
+  for (const c of FOOTER.community.cards) {
+    assert.ok(
+      c.imageSrc.startsWith('/marketing-assets/media/'),
+      `社区二维码须在 media 目录: ${c.imageSrc}`,
+    )
+  }
+})
+
+test('V1.5-D. FINAL_CTA 不再含 invite，次级 CTA 为「加入交流 → #community」', () => {
+  const any = FINAL_CTA as { invite?: unknown }
+  assert.equal(any.invite, undefined, 'FINAL_CTA.invite 必须删除')
+  assert.equal(FINAL_CTA.secondaryCta.label, '加入交流')
+  assert.equal(FINAL_CTA.secondaryCta.href, '#community')
+})
+
+type RealCase = Extract<(typeof STRATEGY_LAB.cases)[number], { kind: 'case' }>
+type ExploreCase = Extract<(typeof STRATEGY_LAB.cases)[number], { kind: 'explore' }>

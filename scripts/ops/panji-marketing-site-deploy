@@ -261,7 +261,7 @@ if [[ "\${PREPARE_ONLY}" == "true" ]]; then
     exit 1
   }
 
-  for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg xiaoz-xueqiu.png zhongji-xuchuang-300308-1d-2y.json nearshore-protein-688137-chip-consensus-1d-250d.json; do
+  for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg zhongji-xuchuang-300308-1d-2y.json nearshore-protein-688137-chip-consensus-1d-250d.json case-guochuang-002377-dow123.webp case-nanya-688519-trend.webp case-jingzhida-688627-double-bottom.webp community-qq-group-qr.png community-xueqiu-qr.png; do
     if [[ -f "\${SITE_ASSET_TARGET}/media/\${f}" ]]; then
       echo "media \${f}: OK (\$(wc -c < "\${SITE_ASSET_TARGET}/media/\${f}") bytes)"
     else
@@ -312,7 +312,7 @@ HTTP_MARKET="\$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1/market)"
 echo "/market HTTP: \${HTTP_MARKET}"
 
 # /marketing-assets/media/* 必须 200（V1.1 真实图片部署 + V1.2 真实产品素材）
-for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg xiaoz-xueqiu.png zhongji-xuchuang-300308-1d-2y.json nearshore-protein-688137-chip-consensus-1d-250d.json; do
+for f in poster_img1.webp panji-desktop-product.png panji-mobile-research.jpg zhongji-xuchuang-300308-1d-2y.json nearshore-protein-688137-chip-consensus-1d-250d.json case-guochuang-002377-dow123.webp case-nanya-688519-trend.webp case-jingzhida-688627-double-bottom.webp community-qq-group-qr.png community-xueqiu-qr.png; do
   MEDIA_HTTP="\$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1/marketing-assets/media/\${f}")"
   echo "/marketing-assets/media/\${f} HTTP: \${MEDIA_HTTP}"
   if [[ "\${MEDIA_HTTP}" != "200" ]]; then

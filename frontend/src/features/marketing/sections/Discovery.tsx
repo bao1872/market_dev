@@ -1,6 +1,5 @@
 // Discovery（Full Alignment V1 + V1.4）：3 张机会入口卡，严格同构。
-// V1.4：删除 story 卡的真实雪球截图，三卡统一为「编号 + 标题 + 三步 flow + 解释」，
-//   一等高；截图只在 XiaozToPanji 作为低权重 evidence。
+// V1.4：删除 story 卡的真实雪球截图，三卡统一为「编号 + 标题 + 三步 flow + 解释」，一等高。
 import ScrollReveal from '../components/ScrollReveal'
 import SectionHeading from '../components/SectionHeading'
 import { IconArrowRight } from '../components/MarketingIcons'

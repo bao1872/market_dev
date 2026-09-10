@@ -34,13 +34,18 @@ assert.ok(buildScript, 'package.json 必须定义 build:marketing-site')
 
 // 实际发布到 /marketing-assets/media/ 的真实媒体（与 build/deploy 步骤一致）
 // [V1.2] 替换已退役的 intraday-monitor/market-workspace 旧示意图为真实产品素材 + 回放 JSON
+// [V1.5] 移除 xiaoz-xueqiu.png；新增 3 案例截图 + 2 社区二维码
 const SHIPPED_MEDIA = [
   'poster_img1.webp',
   'panji-desktop-product.png',
   'panji-mobile-research.jpg',
-  'xiaoz-xueqiu.png',
   'zhongji-xuchuang-300308-1d-2y.json',
   'nearshore-protein-688137-chip-consensus-1d-250d.json',
+  'case-guochuang-002377-dow123.webp',
+  'case-nanya-688519-trend.webp',
+  'case-jingzhida-688627-double-bottom.webp',
+  'community-qq-group-qr.png',
+  'community-xueqiu-qr.png',
 ]
 
 test('V1.1-1. copy.ts 不得引用 /landing/assets，必须引用 /marketing-assets/media/', () => {
@@ -191,13 +196,13 @@ test('V1.1-6. 单一视觉系统：文件头 V1.1、无遗留三代叠加 layout
   }
 })
 
-test('V1.1-7. FinalCTA 不再渲染伪造二维码图（text-only 入口）', () => {
+test('V1.1-7. FinalCTA 不再渲染 invite 入口（社区出口收束进 Footer 双二维码）', () => {
   assert.ok(
-    !/finalInviteImg/.test(finalCtaSrc),
-    'FinalCTA 不得再渲染 invite 图片（qq_shot mockup 移除）',
+    !/finalInvite/.test(finalCtaSrc),
+    'FinalCTA 不得再渲染 finalInvite 文本入口（V1.5 已删除）',
   )
   assert.ok(
-    /invite\.href/.test(finalCtaSrc) && /invite\.ctaLabel/.test(finalCtaSrc),
-    'FinalCTA 必须以真实链接渲染 invite CTA',
+    !finalCtaSrc.includes('FINAL_CTA.invite'),
+    'FinalCTA 不得引用 FINAL_CTA.invite（V1.5 已删除）',
   )
 })

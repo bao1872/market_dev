@@ -22,7 +22,7 @@ export const NAV = {
     { label: '产品', href: '#hero' },
     { label: '怎么工作', href: '#how-it-works' },
     { label: '经典场景', href: '#strategy-lab' },
-    { label: '小Z说事', href: '#xiaoz' },
+    { label: '交流', href: '#community' },
     { label: '状态提醒', href: '#watch-notify' },
   ],
   ctaLabel: '开始使用',
@@ -40,7 +40,16 @@ export const MARKETING_MEDIA = {
   feishuPoster: '/marketing-assets/media/poster_img1.webp',
   desktopProduct: '/marketing-assets/media/panji-desktop-product.png',
   mobileResearch: '/marketing-assets/media/panji-mobile-research.jpg',
-  xiaozXueqiu: '/marketing-assets/media/xiaoz-xueqiu.png',
+  // [V1.5] 真实玩法案例截图（真实产品截图，仅裁边/resize/WebP，不造界面）。
+  caseGuochuangDow123:
+    '/marketing-assets/media/case-guochuang-002377-dow123.webp',
+  caseNanyaTrend:
+    '/marketing-assets/media/case-nanya-688519-trend.webp',
+  caseJingzhidaDoubleBottom:
+    '/marketing-assets/media/case-jingzhida-688627-double-bottom.webp',
+  // [V1.5] 社区出口二维码（QQ 群 + 雪球主页，真实可扫）。
+  communityQqQr: '/marketing-assets/media/community-qq-group-qr.png',
+  communityXueqiuQr: '/marketing-assets/media/community-xueqiu-qr.png',
   // [V1.2] 中际旭创真实结构回放 frozen JSON。轻部署只 serve /marketing-assets/media/
   //   （deploy rsync BUILD_DIR}/media -> SITE_ASSET_TARGET}/media），不放 /data/ 以免 404。
   structureReplay:
@@ -78,8 +87,8 @@ export const HERO = {
 }
 
 // 三种机会入口：全市场 / 板块 / 小Z说事。
-// [V1.4] 三卡严格同构（编号 + 标题 + 三步 flow + 解释）：一律用 mini flow，
-//   不再让 story 卡塞真实截图（截图只在 XiaozToPanji 作为低权重 evidence）。故 entries 无 media 字段。
+// [V1.4] 三卡严格同构（编号 + 标题 + 三步 flow + 解释）：一律用 mini flow，entries 无 media 字段。
+// [V1.5] 独立 XiaozToPanji section 已删除，雪球不再独占页面；社区出口统一收束进 Footer 双二维码。
 export const DISCOVERY = {
   index: '01',
   eyebrow: '机会从哪里来',
@@ -230,148 +239,108 @@ export const FIRST_PYRAMID = {
   },
 }
 
-// 经典场景（StrategyLab）：首页核心交互。4 个场景，每个含
-// 左：逻辑说明；中：实际 filter chips（绿色=已选）；右：候选数量漏斗。
-// 约束：不宣称「精确实现经典道氏123」，统一写「道氏123风格」（现有字段为可编程近似）。
-export const STRATEGY_LAB = {
-  index: '06',
-  eyebrow: '经典场景',
-  title: '把范围压缩到值得继续看的那几只。',
-  subtitle: '选几个经典场景，看盘迹怎么把全市场一步步收窄。',
-  note: '以上为可编程近似，不是对经典理论的精确复刻；具体字段以产品内为准。',
-  scenarios: [
-    {
-      id: 'dow123',
-      icon: 'trend',
-      name: '道氏123风格 · 反转确认',
-      logic: '价格形成主要高低点，短线结构先转强，主要结构再被突破——对应一段可能的反转。',
-      chips: [
-        { label: '趋势方向 = 上行', active: true },
-        { label: '结构事件近期发生', active: true },
-        { label: '趋势连续周期 <= 3', active: false },
-        { label: '成交量异常', active: false },
-      ],
-      funnel: [
-        { label: '全市场', count: 5267 },
-        { label: '趋势方向 = 上行', count: 683 },
-        { label: '结构事件近期发生', count: 147 },
-        { label: '趋势连续周期 <= 3', count: 42 },
-        { label: '成交量异常', count: 18 },
-      ],
-    },
-    {
-      id: 'trend-follow',
-      icon: 'filter',
-      name: '趋势跟踪',
-      logic: '已经形成主要上行结构，且短线结构仍在顺着原方向推进的标的。',
-      chips: [
-        { label: '趋势方向 = 上行', active: true },
-        { label: '主要结构确认', active: true },
-        { label: '短线结构未转弱', active: true },
-        { label: '成交量未明显萎缩', active: false },
-      ],
-      funnel: [
-        { label: '全市场', count: 5267 },
-        { label: '趋势方向 = 上行', count: 683 },
-        { label: '主要结构确认', count: 312 },
-        { label: '短线结构未转弱', count: 198 },
-        { label: '成交量未明显萎缩', count: 121 },
-      ],
-    },
-    {
-      id: 'new-trend-volume',
-      icon: 'bolt',
-      name: '新趋势 + 异常放量',
-      logic: '价格刚突破原有结构，同时成交量明显放大，变化更有可能是真的。',
-      chips: [
-        { label: '结构事件近期发生', active: true },
-        { label: '成交量异常', active: true },
-        { label: '趋势方向 = 上行', active: true },
-        { label: '短线结构转强', active: false },
-      ],
-      funnel: [
-        { label: '全市场', count: 5267 },
-        { label: '结构事件近期发生', count: 147 },
-        { label: '成交量异常', count: 18 },
-        { label: '趋势方向 = 上行', count: 9 },
-      ],
-    },
-    {
-      id: 'sector',
-      icon: 'layers',
-      name: '板块内寻找机会',
-      logic: '先锁定一个板块，再在板块内部用同一套维度，找出相对更强的几只。',
-      chips: [
-        { label: '限定板块', active: true },
-        { label: '趋势方向 = 上行', active: true },
-        { label: '结构一致', active: true },
-        { label: '成交未明显萎缩', active: false },
-      ],
-      funnel: [
-        { label: '机器人板块', count: 86 },
-        { label: '趋势上行', count: 34 },
-        { label: '结构一致', count: 16 },
-        { label: '成交未明显萎缩', count: 9 },
-      ],
-    },
-  ],
+// 真实玩法案例（StrategyLab V1.5）：不再是「教学式逻辑 + 筛选 chips + 候选漏斗」。
+// 改为 4 个玩法 tab + 一张大案例舞台：前三为真实产品截图案例，第四为「更多玩法待探索」。
+// 边界（owner 裁决）：不宣称精确实现经典道氏123，统一用「道氏123风格 / 思路」；
+// 不虚构候选数量、不声明固定策略；盘迹是一套状态语言，不是一套策略。
+export type RealStrategyCase = {
+  readonly id: string
+  readonly kind: 'case'
+  readonly tabLabel: string
+  readonly stock: string
+  readonly symbol: string
+  readonly playbook: string
+  readonly imageSrc: string
+  readonly imageAlt: string
+  readonly lead: string
+  readonly what: string
+  readonly panji: string
+  readonly note: string
 }
 
-// 小Z说事 → 盘迹（雪球内容入口，非盘迹 /review 产品能力；公开页禁止暴露 /review）。
-// [V1.2] 保留真实雪球截图（xiaozXueqiu）作为证据小窗。
-// [V1.4] 产品叙事改为「小Z说事发现方向 → 盘迹按用户自己的审美筛 → 得到候选」三段。
-//   删除固定漏斗（机器人→趋势上行→结构一致→成交不缩量）——那会误导为产品内置唯一方法。
-//   雪球截图只作为 01 卡的低权重 evidence，不再是主视觉；条件与数量均为示例（example/demo），不冒充实时。
-export const XIAOZ = {
-  index: '07',
-  eyebrow: '从方向到个股',
-  title: '小Z说事发现方向，盘迹帮你找符合自己审美的个股。',
-  subtitle: '复盘先解决今天市场在交易什么。进入盘迹以后，条件由你自己决定。',
-  imageSrc: MARKETING_MEDIA.xiaozXueqiu,
-  imageAlt: '小Z说事雪球内容页真实截图',
-  sourceExample: { direction: '机器人', note: '进入今日关注方向' },
-  // 三段路径：① 发现方向 → ② 进入盘迹用自己的审美筛 → ③ 得到候选。
-  steps: [
-    {
-      index: '01',
-      eyebrow: '小Z说事',
-      title: '先发现今天值得研究的方向',
-      text: '每日复盘先从市场结构、资金和事件中，找出今天市场真正围绕什么方向交易。',
-    },
-    {
-      index: '02',
-      eyebrow: '进入盘迹',
-      title: '用你自己的选股审美继续筛',
-      text: '盘迹不替你定义什么叫好股票。你决定自己重视趋势、结构、成交量还是筹码。',
-    },
-    {
-      index: '03',
-      eyebrow: '候选范围',
-      title: '留下符合自己审美的股票',
-      text: '不是答案，是把范围压缩到符合你自己研究标准的候选。',
-    },
-  ],
-  // 选股审美 chips：仅为交互示例，前三个标为 active；不声明为固定策略。
-  preferences: [
-    { label: '趋势刚开始', active: true },
-    { label: '结构转强', active: true },
-    { label: '成交放大', active: true },
-    { label: '筹码重心上移', active: false },
-    { label: '结构事件近期发生', active: false },
-    { label: '动量增强', active: false },
-  ],
-  // 结果仅为示例，不冒充实时数量。
-  resultExample: {
-    before: 86,
-    beforeLabel: '板块股票',
-    after: 9,
-    afterLabel: '符合当前条件',
-  },
+export type ExploreStrategyCase = {
+  readonly id: string
+  readonly kind: 'explore'
+  readonly tabLabel: string
+  readonly playbook: string
+  readonly lead: string
+  readonly text: string
+  readonly examples: readonly string[]
 }
+
+export type StrategyCase = RealStrategyCase | ExploreStrategyCase
+
+export const STRATEGY_LAB = {
+  index: '06',
+  eyebrow: '真实玩法',
+  title: '同一套盘迹，\n不止一种玩法。',
+  subtitle:
+    '趋势、结构、动量、成交量和筹码不是一套固定答案。不同的人，可以用同一套状态语言表达自己的交易思路。',
+  cases: [
+    {
+      id: 'dow123',
+      kind: 'case',
+      tabLabel: '道氏123风格',
+      stock: '国创高新',
+      symbol: '002377',
+      playbook: '道氏123风格 · 反转确认',
+      imageSrc: MARKETING_MEDIA.caseGuochuangDow123,
+      imageAlt: '盘迹国创高新道氏123风格历史案例截图',
+      lead: '先不猜底，等市场自己给出变化。',
+      what: '这个案例用盘迹表达道氏123的思路：先观察原有趋势是否开始失去延续性，再看关键结构有没有改变，最后观察新的方向能不能继续维持。',
+      panji: '盘迹不是因为出现一个点就给出答案，而是把趋势、结构、动量和成交量放到一起，让反转确认更容易被观察。',
+      note: '历史案例只用于说明方法，不代表后续走势。',
+    },
+    {
+      id: 'trend',
+      kind: 'case',
+      tabLabel: '趋势跟踪',
+      stock: '南亚新材',
+      symbol: '688519',
+      playbook: '趋势跟踪',
+      imageSrc: MARKETING_MEDIA.caseNanyaTrend,
+      imageAlt: '盘迹南亚新材趋势跟踪历史案例截图',
+      lead: '趋势出现以后，重点不是继续猜还能涨多少，而是判断它有没有结束。',
+      what: '主图用趋势变化表达方向，下方成交量和动量帮助观察这段趋势有没有继续得到市场参与。',
+      panji: '趋势跟踪关注的是状态还在不在。盘迹把趋势、量能和动量放在同一个工作区持续观察，而不是每天重新预测涨跌。',
+      note: '历史案例只用于说明方法，不代表后续走势。',
+    },
+    {
+      id: 'double-bottom',
+      kind: 'case',
+      tabLabel: '双底支撑',
+      stock: '精智达',
+      symbol: '688627',
+      playbook: '双底支撑 · 形态筛选',
+      imageSrc: MARKETING_MEDIA.caseJingzhidaDoubleBottom,
+      imageAlt: '盘迹精智达双底支撑历史案例截图',
+      lead: '有些机会不是从趋势开始，而是从形态开始。',
+      what: '这个案例先从双底和支撑区域找到值得研究的位置，再观察第二次回踩以后，关键区域有没有守住、结构有没有改善。',
+      panji: '形态只是入口。盘迹继续用结构、成交量和动量帮助验证这个形态是否仍然值得观察。',
+      note: '历史案例只用于说明方法，不代表后续走势。',
+    },
+    {
+      id: 'explore',
+      kind: 'explore',
+      tabLabel: '更多玩法',
+      playbook: '更多玩法，待你来探索',
+      lead: '盘迹不是一套固定策略，而是一套描述市场状态的语言。',
+      text: '相同的六个维度，可以组合成完全不同的观察方法。你的选股审美，决定盘迹怎么被使用。',
+      examples: [
+        '板块内寻找机会',
+        '新趋势 + 异常放量',
+        '筹码重心迁移',
+        '结构事件近期发生',
+        '趋势 + 量能验证',
+        '自己的条件组合',
+      ],
+    },
+  ],
+} as const
 
 // 自选 + 通知（Watch + Notify）：流程 + 真实产品产出截图。
 export const WATCH_NOTIFY = {
-  index: '08',
+  index: '07',
   eyebrow: '不用一直盯着',
   title: '不用一直盯着盘迹。',
   subtitle: '值得重新看的时候，再把它送到你面前。',
@@ -385,22 +354,19 @@ export const WATCH_NOTIFY = {
 // 营销页对外链接（雪球搜索「小Z说事」）。
 export const XUEQIU_SEARCH_URL = 'https://xueqiu.com/k?q=%E5%B0%8FZ%E8%AF%B4%E4%BA%8B'
 
-// 最终 CTA（在大 footer 之前）。
+// [V1.5] 雪球主页精确 URL（Owner 指定，用于社区二维码与整图可点击链接）。
+export const XUEQIU_PROFILE_URL =
+  'https://xueqiu.com/u/6601870666?scene=1036&share_uid=6601870666'
+
+// 最终 CTA（在大 footer 之前）：只做产品转化 + 社区轻入口。
+// [V1.5] 次级 CTA 改为「加入交流」锚点，不再重复雪球搜索入口（社区出口已收束进 Footer 双二维码）。
 export const FINAL_CTA = {
   title: '开始使用盘迹',
   subtitle: '盘迹负责压缩信息，不替你做判断。',
   primaryCta: { label: '开始使用', href: '/login' },
   secondaryCta: {
-    label: '雪球搜索「小Z说事」',
-    href: XUEQIU_SEARCH_URL,
-    external: true,
-  },
-  invite: {
-    title: '内容入口',
-    ctaLabel: '雪球搜索「小Z说事」→',
-    href: XUEQIU_SEARCH_URL,
-    external: true,
-    note: '盘迹当前对外内容入口：雪球搜索「小Z说事」。QQ 邀请码等后续通道开放后接入。',
+    label: '加入交流',
+    href: '#community',
   },
 }
 
@@ -415,6 +381,17 @@ export type MarketingLink = {
 type FooterColumn = {
   title: string
   links: MarketingLink[]
+}
+
+// [V1.5] 社区二维码卡：href 存在时整图可点击（PC 用户不扫码也能打开）。
+export type FooterCommunityCard = {
+  id: string
+  title: string
+  subtitle: string
+  note: string
+  imageSrc: string
+  imageAlt: string
+  href?: string
 }
 
 // 内容入口唯一对外链接见上方 XUEQIU_SEARCH_URL 声明。
@@ -443,6 +420,32 @@ export const FOOTER = {
   invitation: {
     title: '关注小Z说事',
     desc: '盘迹每日复盘在雪球发布，搜索「小Z说事」即可关注。',
+  },
+  // [V1.5] 社区出口：两张真实可扫的二维码（QQ 群 + 雪球主页），收束「小Z说事 / QQ 邀请码」。
+  //   card.href 存在时整图可点击（PC 用户不扫码也能打开）。
+  community: {
+    id: 'community',
+    title: '一起交流',
+    desc: '交流盘迹的使用方法，也可以在群里获取邀请码。',
+    cards: [
+      {
+        id: 'qq',
+        title: '加入盘迹交流群',
+        subtitle: 'QQ群 · 364121472',
+        note: '交流使用方法 · 获取邀请码',
+        imageSrc: MARKETING_MEDIA.communityQqQr,
+        imageAlt: '小Z说股事QQ群二维码，群号364121472',
+      },
+      {
+        id: 'xueqiu',
+        title: '关注小Z说股事',
+        subtitle: '雪球 · 每日市场复盘',
+        note: '扫码或点击打开雪球主页',
+        imageSrc: MARKETING_MEDIA.communityXueqiuQr,
+        imageAlt: '小Z说股事雪球主页二维码',
+        href: XUEQIU_PROFILE_URL,
+      },
+    ] as FooterCommunityCard[],
   },
   copyright: '盘迹 · 看一眼就知道怎么用',
 }
