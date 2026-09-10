@@ -1,6 +1,7 @@
 // Marketing Site 独立入口（Lightweight Deployment Lane）
 //
-// 设计约束（见 M0_ARCHITECTURE_CONTRACT.md §Public Marketing Site Lightweight Lane）：
+// 当前部署与操作边界：docs/runbooks/development-deployment.md（Public Marketing Site 轻量静态部署）
+// 历史架构演进：docs/changes/records/CHANGE-20260909-002.md
 // - 该入口只渲染 MarketingPage，且 MarketingPage 为 fully deterministic 静态页；
 // - 不挂载 RouterProvider / QueryClientProvider / Toast / App.tsx；
 // - 不依赖任何产品运行时，因此无需整站 SPA runtime。

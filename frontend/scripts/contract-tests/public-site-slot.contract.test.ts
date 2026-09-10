@@ -153,18 +153,35 @@ test('7. nginx 对 /portal 精确与前缀均 301 到根（彻底 tombstone）',
 
 test('8. 部署器支持 CUTOVER 预置 --prepare-only（锁 site 槽位、不要求根已切换、不碰旧 portal）', () => {
   const deploy = readFileSync(MARKETING_DEPLOY, 'utf-8')
-  // 参数：必须有 --prepare-only 分支
+  // (1) 参数解析：必须存在 --prepare-only 分支，置 PREPARE_ONLY=true
   assert.ok(/--prepare-only\)\s*PREPARE_ONLY=true/.test(deploy),
     '部署器必须支持 --prepare-only 选项分支，置 PREPARE_ONLY=true')
-  // 部署：prepare-only 仍 install 产品官网到 site/index.html（产品官网唯一槽位）
-  assert.ok(deploy.includes("CURRENT_ROOT_HTML=\"${LIVE_ROOT}/frontend/dist/site/index.html\"")
-      || deploy.includes('dist/site/index.html'),
-    '部署器必须把产品官网根 HTML 安装到 site/index.html')
-  // prepare-only 不得回写任何 /portal/index.html / portal 槽位
+
+  // (2) PREPARE_ONLY=true 真值分支真实存在（兼容 remote heredoc 转义形式 \${PREPARE_ONLY}）。
+  //     锁分支语义而非源码字符距离：找到紧邻磁盘槽位校验前的 PREPARE_ONLY 分支开启点。
+  const opener = 'if [[ "\\${PREPARE_ONLY}" == "true" ]]; then'
+  const diskCheck = '[[ -f "\\${CURRENT_ROOT_HTML}" ]]'
+  const openerIdx = deploy.lastIndexOf(opener, deploy.indexOf(diskCheck))
+  assert.ok(openerIdx >= 0,
+    '部署器必须存在 PREPARE_ONLY=true 真值分支（if [[ "${PREPARE_ONLY}" == "true" ]]; then ... fi）')
+
+  // (3) 分支内部确实检查产品官网磁盘槽位是否存在（CURRENT_ROOT_HTML，兼容转义 \${...}）
+  const diskIdx = deploy.indexOf(diskCheck)
+  assert.ok(diskIdx >= 0 && diskIdx > openerIdx,
+    'PREPARE_ONLY 分支必须以磁盘存在性校验 ${CURRENT_ROOT_HTML} 就绪（[[ -f ... ]]）')
+  assert.ok(deploy.slice(openerIdx, diskIdx).includes('PREPARE_ONLY'),
+    '磁盘槽位校验必须位于 PREPARE_ONLY 分支内部')
+
+  // (4) 该检查发生在 prepare-only 成功退出（exit 0）之前：取 diskIdx 之后的第一个 exit 0
+  const exitIdx = deploy.indexOf('exit 0', diskIdx)
+  assert.ok(exitIdx > diskIdx,
+    'PREPARE_ONLY 分支的成功退出（exit 0）必须位于磁盘槽位存在性校验之后')
+
+  // (5) 部署目标仍是 dist/site/index.html（产品官网唯一槽位，不回退旧 portal）
+  assert.ok(deploy.includes('frontend/dist/site/index.html'),
+    '部署器部署目标必须是 dist/site/index.html（产品官网唯一槽位）')
+
+  // (6) 不写 dist/portal/index.html（旧使用说明 portal 槽位彻底退役）
   assert.ok(!/install[^\n]*portal\/index\.html/.test(deploy),
     '部署器不得再把任何 HTML install 到 portal/index.html 槽位')
-  // prepare-only 必须以磁盘文件为准确认 site 就绪（不要求根 / 已切换、不依赖旧 nginx 路由）
-  assert.ok(/\bPREPARE_ONLY\b.{0,400}site\/index\.html/.test(deploy)
-      || /\bPREPARE_ONLY\b[\s\S]{0,400}"\$\{CURRENT_ROOT_HTML\}"/.test(deploy),
-    'prepare-only 必须校验 site/index.html 就绪')
 })

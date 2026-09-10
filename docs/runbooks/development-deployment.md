@@ -307,7 +307,10 @@ Marketing lane **不**：
 - 主 SPA `dist/index.html` sha256 **before == after**（证明无改主 SPA）；
 - `trading-frontend` 容器 `StartedAt` **before == after**（证明无重启）。
 
-任一不一致即退出非零、不写官网。
+任一 AFTER assertion 不一致即退出非零并判部署失败。
+注意：这些 AFTER assertions 位于 Marketing artifact 写入（rsync assets / install site/index.html / 写 tombstone）之后，
+因此失败不等于零写入——当前脚本不自动回滚已写入的 `site/` 与 `marketing-assets/`。
+失败时必须如实报告实际发生的 artifact 写入与失败状态，不得声称“未写官网”。
 
 ### SSOT 不变量（whole-system 与 Marketing lane 互不为敌）
 
