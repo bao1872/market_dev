@@ -1,5 +1,4 @@
-// [V1.6.1] Watch + Notify：盘中监控，1.08/0.92fr 左右栏，phone 顶部对齐 heading。
-// 不再 import SectionHeading（核心定位：用户场景而非功能流程）。
+// [V1.6.2] Watch + Notify — promise 已迁回 copy.ts，组件消费 SSOT。
 import ScrollReveal from '../components/ScrollReveal'
 import { WATCH_NOTIFY } from '../data/copy'
 import styles from '../marketing.module.scss'
@@ -24,9 +23,7 @@ export default function WatchAndNotify() {
               </p>
 
               <strong className={styles.watchPromise}>
-                你不用一直盯着屏幕。
-                <br />
-                盘迹盯的是状态有没有变化。
+                {WATCH_NOTIFY.promise}
               </strong>
 
               <div className={styles.watchScenarios}>

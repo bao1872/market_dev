@@ -9,7 +9,6 @@ import { dirname, resolve } from 'node:path'
 import {
   CHIP_CONSENSUS_STORY,
   DISCOVERY,
-  FINAL_CTA,
   FIRST_PYRAMID,
   FOOTER,
   HERO,
@@ -307,12 +306,6 @@ test('V1.5-C. Footer is community；恰好 2 张社区二维码；雪球 URL 精
   }
 })
 
-test('V1.5-D. FINAL_CTA 不再含 invite，次级 CTA 为「加入交流 → #community」', () => {
-  const any = FINAL_CTA as { invite?: unknown }
-  assert.equal(any.invite, undefined, 'FINAL_CTA.invite 必须删除')
-  assert.equal(FINAL_CTA.secondaryCta.label, '加入交流群')
-  assert.equal(FINAL_CTA.secondaryCta.href, '#community')
-})
 
 type RealCase = Extract<(typeof STRATEGY_LAB.cases)[number], { kind: 'case' }>
 type ExploreCase = Extract<(typeof STRATEGY_LAB.cases)[number], { kind: 'explore' }>
@@ -331,7 +324,6 @@ test('V1.5.1-A. 全页核心中文语义句锁定（拒绝翻译腔回流）', (
     chipConsensusStory: CHIP_CONSENSUS_STORY,
     strategyLab: STRATEGY_LAB,
     watchNotify: WATCH_NOTIFY,
-    finalCta: FINAL_CTA,
     footer: FOOTER,
   })
   for (const phrase of [
