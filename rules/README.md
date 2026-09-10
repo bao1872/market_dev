@@ -23,17 +23,10 @@
 无法说明保护哪类 failure mode 的要求，不应升级为长期治理。能由 production owner、
 schema、manifest、test、checker 或 runner 证明的合同，不在多个 Markdown 文件重复表达。
 
-## 2. Risk router
+## 2. 风险路由
 
-- **Level 1 Normal Exploration**：局部非契约改动；modified-scope evidence。
-- **Level 2 Contract-Sensitive**：owner、canonical、lineage、readiness、workflow、resume、
-  idempotency、artifact、shared contract、evidence registration。
-- **Level 3 Operational / Destructive**：migration、runtime/environment rebuild or recreate、
-  stable release deployment、production data mutation、repair、withdraw、bootstrap、destructive cleanup。
-
-source-only Code Sync / Live Refresh 继承代码改动等级，不因同步或受影响进程 restart 单独升级。
-
-多个条件命中时取最高等级。详细路由由 `AGENTS.md` 唯一拥有。
+风险等级、触发条件与优先级由根目录 `AGENTS.md` 的 Governance Level Router 唯一拥有。
+`rules/` 不复制治理等级定义；各规则只描述命中该领域后必须保持的不变量。
 
 ## 3. 权威文件
 

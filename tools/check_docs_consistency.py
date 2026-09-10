@@ -22,13 +22,6 @@ ACTIVE_TOP_LEVEL_DIRS = {
     "maps",
     "changes",
     "runbooks",
-    "contracts",
-    "decisions",
-    "acceptance",
-    "evidence",
-    "work",
-    "archive",
-    "current",  # legacy compatibility only
 }
 
 BASELINE_RE = re.compile(

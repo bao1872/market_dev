@@ -101,3 +101,25 @@ def test_acceptance_matrix_selected_by_filename_date_not_mtime(tmp_path: Path, m
     latest = cdc._latest_acceptance_matrix()
     assert latest is not None
     assert "2026-08-08" in latest.name
+
+
+# ---------------------------------------------------------------------------
+# Anti-regression: docs authority allowlist must stay exactly {prd, maps,
+# changes, runbooks}. Any historical second-authority directory (contracts /
+# decisions / acceptance / evidence / work / archive / current) must be
+# rejected by the checker so the governance model cannot silently re-inflate.
+# ---------------------------------------------------------------------------
+
+def test_allowed_top_level_dirs_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup_repo(tmp_path, monkeypatch)
+    assert cdc.check_top_level_dirs() == []
+
+
+def test_rejected_top_level_dirs_are_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    setup_repo(tmp_path, monkeypatch)
+    rejected = ("contracts", "decisions", "acceptance", "evidence", "work", "archive", "current")
+    for name in rejected:
+        (tmp_path / "docs" / name).mkdir()
+    errors = cdc.check_top_level_dirs()
+    assert len(errors) == len(rejected)
+    assert all(e.startswith("unregistered docs top-level directory") for e in errors)
