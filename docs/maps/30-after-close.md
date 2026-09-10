@@ -196,8 +196,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 2. **lease_epoch fencing**：`mark_item_*` 支持 `lease_epoch` 参数，旧 Worker 写入被拒绝
 3. **coverage 门禁**：`CORE_PUBLICATION_MIN_COVERAGE = 0.98`，低于抛 `CoverageBelowThresholdError`
 4. **原子指针切换**：`pg_insert(...).on_conflict_do_update(constraint="uq_factor_publications_scope_date_kind")`
-5. **兼容回退**：`get_published_snapshot_run_id` 优先读 publication pointer，无 pointer 时回退 `published_at IS NOT NULL`
-6. **[007] 读取端接入 pointer**：`stock_context.py` 的 `_find_latest_succeeded_run` / `_find_run_by_trade_date` 优先读 `factor_publications`（stock_core kind），无 pointer 时回退 `published_at IS NOT NULL`
+5-6. **Historical / Superseded（2026-09-02 前架构，非 CURRENT authority）**：原 `get_published_snapshot_run_id` 与 `stock_context.py` 的 `_find_latest_succeeded_run` / `_find_run_by_trade_date` 以 `factor_publications(stock_core)` pointer 为读取来源、无 pointer 时回退 `published_at IS NOT NULL`。自 2026-09-02（commit `ef5c3a76`）起，CURRENT canonical CoreRun owner 已收口为 `current_core_run_service.resolve_current_core_run`（formal Review → `source_core_run_id` → `StockFeatureSnapshotRun`，见 §11.6）；`FactorPublication(kind=stock_core)` 仅为 legacy 兼容（pointer 停在 2026-08-26、不再推进），**不得作为 CURRENT authority**（`current_core_run_service.py:71` / `market_stocks_service.py:870` 明文禁止）。`get_published_snapshot_run_id` 作为 legacy helper 保留；`_find_latest_succeeded_run` / `_find_run_by_trade_date` 仍作 atomic-fact 响应回退路径（`stock_context.py:585-588`），但 CURRENT 第一金字塔显示归属走 `_resolve_current_core_run`，不再经此二函数（`stock_context.py:787-790`）。
 
 ### 11.5 当前限制（CHANGE-008 后状态）
 
@@ -249,7 +248,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 
 详见 `docs/changes/2026/CHANGE-20260729-008-incremental-publish-full-closure.md`。
 
-### 11.6 History 版本一致性审计结论（CHANGE-20260729-009）
+### 11.7 History 版本一致性审计结论（CHANGE-20260729-009）
 
 **核验状态：已基于共享开发业务数据库只读审计确认（2026-07-29）**
 
@@ -267,7 +266,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 
 **结论**：本轮无需执行 History repair run，所有版本一致。已发布 pointer `5e222b38` 与最新 Core `a546defb` 匹配，无需切换。
 
-### 11.7 15m 门槛澄清（CHANGE-20260729-009）
+### 11.8 15m 门槛澄清（CHANGE-20260729-009）
 
 盘后 core 的 coverage 门禁已移除 15m，仅表示 stock_core/review core 不等待 15m。筹码共识（chip）历史上消费 `bars_15min`，由 `after_close_chip_consensus_service` 在每只股票计算前调用 `refresh_15min_bars(count=4000)`，再由 MDAS 读取 canonical QFQ bars 并校验目标交易日 16 根/最后一根到 15:00/历史最少 500 根；该任务已退役（见 §13.3），不再自动运行，`after_close_chip_consensus_service` 实现仍保留供手工/历史触发。
 
@@ -286,7 +285,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - 错误消息明确两个门槛的用途，避免混淆
 - 不修改门槛值，只统一文档与文案
 
-### 11.8 板块分析 V1（CHANGE-20260730-011）
+### 11.9 板块分析 V1（CHANGE-20260730-011）
 
 **核验状态：已基于代码核验（2026-07-30）**
 

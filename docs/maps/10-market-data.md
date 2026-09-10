@@ -30,7 +30,7 @@
 | MD-10 | 参见 `technical/data-storage.md` | 未核验 | 未核验 |
 | MD-11 | 修复和回填入口待核验 | 未核验 | 未核验 |
 | MD-12 | `bars_daily` / `bars_hourly` / `bars_15min` 及各 provider、刷新任务待完整核验 | 部分已知 | 现有表和调用路径存在；独立生命周期与来源合同未完整核验 |
-| MD-13 | 日线 core 见盘后编排；15m chip 见 `after_close_chip_consensus_service`；1h 消费方待核验 | 部分实现，有目标差距 | `maps/30-after-close.md` §11.7；PRD31 PC-03/PC-20 |
+| MD-13 | 日线 core 见盘后编排；15m chip 见 `after_close_chip_consensus_service`；1h 消费方待核验 | 部分实现，有目标差距 | `maps/30-after-close.md` §11.8；PRD31 PC-03/PC-20 |
 
 ## 3. 数据源
 
