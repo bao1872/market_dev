@@ -1,9 +1,6 @@
-// Watch + Notify（V1.6 · 重定位为盘中监控）：
-// 左侧：一句 promise + 3 个用户场景（不是 5 条抽象流程） + 紧凑 flow；
-// 右侧：真实飞书研究图 poster，视觉重量与左侧接近，不制造中间真空。
+// [V1.6.1] Watch + Notify：盘中监控，1.08/0.92fr 左右栏，phone 顶部对齐 heading。
+// 不再 import SectionHeading（核心定位：用户场景而非功能流程）。
 import ScrollReveal from '../components/ScrollReveal'
-import SectionHeading from '../components/SectionHeading'
-import { IconArrowRight } from '../components/MarketingIcons'
 import { WATCH_NOTIFY } from '../data/copy'
 import styles from '../marketing.module.scss'
 
@@ -15,16 +12,17 @@ export default function WatchAndNotify() {
       data-testid="marketing-watch-notify"
     >
       <div className={styles.container}>
-        <SectionHeading
-          index={WATCH_NOTIFY.index}
-          eyebrow={WATCH_NOTIFY.eyebrow}
-          title={WATCH_NOTIFY.title}
-          subtitle={WATCH_NOTIFY.subtitle}
-        />
         <ScrollReveal>
-          <div className={styles.watchStage}>
-            {/* 左：promise + 3 个用户场景 + 紧凑 flow */}
-            <div className={styles.watchScenarioSide}>
+          <div className={styles.watchLayout}>
+            <div className={styles.watchContent}>
+              <span className={styles.watchHeadingEyebrow}>
+                {WATCH_NOTIFY.eyebrow}
+              </span>
+              <h2 className={styles.watchHeading}>{WATCH_NOTIFY.title}</h2>
+              <p className={styles.watchHeadingSubtitle}>
+                {WATCH_NOTIFY.subtitle}
+              </p>
+
               <strong className={styles.watchPromise}>
                 你不用一直盯着屏幕。
                 <br />
@@ -32,45 +30,24 @@ export default function WatchAndNotify() {
               </strong>
 
               <div className={styles.watchScenarios}>
-                {WATCH_NOTIFY.scenarios.map((item, index) => (
-                  <article
-                    key={item.title}
-                    className={styles.watchScenario}
-                  >
-                    <span>{String(index + 1).padStart(2, '0')}</span>
-                    <div>
-                      <h3>{item.title}</h3>
-                      <p>{item.text}</p>
-                    </div>
+                {WATCH_NOTIFY.scenarios.map((s) => (
+                  <article key={s.title} className={styles.watchScenario}>
+                    <span>{s.title}</span>
+                    <p>{s.text}</p>
                   </article>
                 ))}
               </div>
 
-              <div className={styles.watchCompactFlow}>
-                {WATCH_NOTIFY.flow.map((step, index) => (
-                  <div key={step} className={styles.watchFlowNode}>
-                    <span
-                      className={
-                        step === '盘中持续跟踪'
-                          ? styles.watchFlowPrimary
-                          : undefined
-                      }
-                    >
-                      {step}
-                    </span>
-                    {index < WATCH_NOTIFY.flow.length - 1 && (
-                      <IconArrowRight
-                        width={14}
-                        height={14}
-                        aria-hidden="true"
-                      />
-                    )}
-                  </div>
+              <div className={styles.watchFlow}>
+                {WATCH_NOTIFY.flow.map((step, i) => (
+                  <span key={step}>
+                    {step}
+                    {i < WATCH_NOTIFY.flow.length - 1 ? ' → ' : ''}
+                  </span>
                 ))}
               </div>
             </div>
 
-            {/* 右：真实飞书研究图 */}
             <figure className={styles.watchVisual}>
               <div className={styles.watchPhone}>
                 <img

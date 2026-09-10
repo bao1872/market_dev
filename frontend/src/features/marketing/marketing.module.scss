@@ -1664,90 +1664,7 @@ $marketing-section-y-mobile: 52px;
 }
 
 // ===== 12 notify =====
-.watchGrid {
-  display: grid;
-  grid-template-columns: minmax(0, 0.9fr) minmax(300px, 1.1fr);
-  gap: 72px;
-  align-items: center;
-}
 
-.watchCopy {
-  min-width: 0;
-}
-
-.watchSteps {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.watchStep {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  padding: 10px 12px;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid v.$color-border-soft;
-  border-radius: 10px;
-}
-
-.watchStepIndex {
-  width: 24px;
-  height: 24px;
-  border-radius: 999px;
-  background: rgba(0, 246, 194, 0.10);
-  border: 1px solid rgba(0, 246, 194, 0.4);
-  color: v.$color-brand;
-  font-family: v.$font-mono;
-  font-size: 11px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-}
-
-.watchStepLabel {
-  font-size: 14px;
-  color: v.$color-text;
-}
-
-.watchStepArrow {
-  margin-left: auto;
-  color: v.$color-brand;
-}
-
-.watchNote {
-  margin: 14px 0 0;
-  font-size: 12px;
-  color: v.$color-muted;
-  font-family: v.$font-mono;
-}
-
-.watchFrame {
-  display: flex;
-  justify-content: center;
-}
-
-.watchPhone {
-  width: min(100%, 300px);
-  aspect-ratio: 9 / 16;
-  padding: 8px;
-  overflow: hidden;
-  background: v.$color-panel;
-  border: 1px solid v.$color-border;
-  border-radius: 28px;
-  margin-inline: auto;
-}
-
-.watchImg {
-  width: 100%;
-  height: 100%;
-  display: block;
-  object-fit: cover;
-  border-radius: 20px;
-}
 
 // ===== 13 final cta =====
 .finalCta {
@@ -1962,17 +1879,7 @@ $marketing-section-y-mobile: 52px;
 
 // V1.5.2 UNIFIED FOOTER：去掉独立 boxed footerCommunity 大卡片，
 // 合并为一整块——所有文字集中左侧/左下，两个小二维码位于右下。
-.footerUnified {
-  min-height: 230px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 56px;
-  align-items: end;
-}
 
-.footerLeft {
-  min-width: 0;
-}
 
 .footerMain {
   display: grid;
@@ -2034,41 +1941,6 @@ $marketing-section-y-mobile: 52px;
   color: v.$color-text-dim;
 }
 
-.footerCommunityCopy {
-  max-width: 620px;
-  margin-top: 38px;
-
-  h3 {
-    margin: 0 0 8px;
-    font-size: 17px;
-    line-height: 1.2;
-  }
-
-  p {
-    margin: 0;
-    max-width: 560px;
-    font-size: 12px;
-    line-height: 1.7;
-    color: v.$color-muted;
-    white-space: pre-line;
-  }
-}
-
-.footerCommunityTitle {
-  margin: 0 0 8px;
-  font-size: 17px;
-  line-height: 1.2;
-  color: v.$color-text;
-}
-
-.footerCommunityDesc {
-  margin: 0;
-  max-width: 560px;
-  font-size: 12px;
-  line-height: 1.7;
-  color: v.$color-muted;
-  white-space: pre-line;
-}
 
 // 小二维码（V1.5.2：二维码下仅保留 title + subtitle，不再显示 note；
 // 说明信息已在左侧 community copy 承担）
@@ -2175,11 +2047,6 @@ $marketing-section-y-mobile: 52px;
     border-bottom: 1px solid v.$color-border-soft;
   }
 
-  .watchGrid {
-    grid-template-columns: 1fr;
-    gap: 36px;
-  }
-
   .langRow {
     grid-template-columns: repeat(3, 1fr);
   }
@@ -2215,11 +2082,6 @@ $marketing-section-y-mobile: 52px;
   }
 
   // V1.5.2 430：文字在上、两个约 104px 二维码并排在最下。
-  .footerUnified {
-    grid-template-columns: 1fr;
-    gap: 28px;
-    min-height: 0;
-  }
 
   .footerMain {
     grid-template-columns: 1fr 1fr;
@@ -2306,306 +2168,443 @@ $marketing-section-y-mobile: 52px;
 }
 // ============ [V1.6] AudienceProblems (hero 后第二屏 · 不编号) ============
 
-.audienceSection {
-  position: relative;
-  padding: 120px 0;
-  background: linear-gradient(180deg, v.$color-panel 0%, v.$color-bg 100%);
-
-  @media (max-width: 767px) {
-    padding: 80px 0;
-  }
-}
-
-.audienceHead {
-  text-align: center;
-  max-width: 720px;
-  margin: 0 auto 64px;
-
-  h2 {
-    margin: 16px 0 20px;
-    font-size: clamp(28px, 4vw, 40px);
-    font-weight: 700;
-    line-height: 1.25;
-    letter-spacing: -0.02em;
-    white-space: pre-line;
-  }
-
-  p {
-    font-size: 16px;
-    line-height: 1.7;
-    color: v.$color-muted;
-    white-space: pre-line;
-  }
-}
-
-.audienceEyebrow {
-  display: inline-block;
-  font-size: 13px;
-  font-weight: 500;
-  color: v.$color-brand;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
-  padding: 6px 14px;
-  background: rgba(0, 246, 194, 0.12);
-  border-radius: 100px;
-}
-
-.audienceGrid {
-  display: grid;
-  grid-template-columns: repeat(2, 1fr);
-  gap: 24px;
-
-  @media (max-width: 767px) {
-    grid-template-columns: 1fr;
-  }
-}
-
-.audienceCard {
-  position: relative;
-  padding: 32px 28px 28px;
-  background: #fff;
-  border: 1px solid v.$color-border;
-  border-radius: 16px;
-  transition: transform 0.2s ease, box-shadow 0.2s ease;
-
-  &:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.06);
-  }
-
-  h3 {
-    margin: 12px 0 10px;
-    font-size: 17px;
-    font-weight: 600;
-    line-height: 1.4;
-    color: v.$color-text;
-  }
-
-  p {
-    margin: 0 0 16px;
-    font-size: 14px;
-    line-height: 1.7;
-    color: v.$color-muted;
-  }
-
-  strong {
-    display: inline-block;
-    font-size: 13px;
-    font-weight: 600;
-    color: v.$color-brand;
-    padding: 4px 12px;
-    background: rgba(0, 246, 194, 0.12);
-    border-radius: 8px;
-  }
-}
-
-.audienceIndex {
-  font-size: 12px;
-  font-weight: 700;
-  font-family: var(--font-mono);
-  color: v.$color-brand;
-  letter-spacing: 0.05em;
-}
-
-.audienceFit {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: 8px 12px;
-  margin-top: 48px;
-  font-size: 13px;
-  color: v.$color-text-dim;
-
-  span {
-    font-weight: 500;
-    margin-right: 4px;
-  }
-
-  em {
-    font-style: normal;
-    padding: 4px 12px;
-    background: v.$color-panel-2;
-    border: 1px solid v.$color-border;
-    border-radius: 100px;
-    color: v.$color-muted;
-  }
-}
 
 // ============ [V1.6] WatchAndNotify — 场景化 layout（原 steps 流程化） ============
 
-.watchStage {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 64px;
-  align-items: center;
 
-  @media (max-width: 767px) {
+// ============ [V1.6] Footer 顶部 CTA 行 ============
+
+
+// ============ [V1.6.1] AudienceProblems — 0.88/1.12fr left-right ============
+
+.audienceSection {
+  padding: 100px 0 80px;
+}
+
+.audienceLayout {
+  display: grid;
+  grid-template-columns: 0.88fr 1.12fr;
+  gap: 78px;
+  align-items: start;
+
+  @media (max-width: 760px) {
     grid-template-columns: 1fr;
     gap: 40px;
   }
 }
 
-.watchScenarioSide {
+.audienceIntro {
+  position: sticky;
+  top: 80px;
+  padding-top: 8px;
+
+  h2 {
+    margin: 14px 0 18px;
+    font-size: clamp(28px, 4vw, 42px);
+    line-height: 1.22;
+    letter-spacing: -0.02em;
+    white-space: pre-line;
+  }
+
+  p {
+    margin: 0 0 24px;
+    font-size: 15px;
+    line-height: 1.7;
+    color: v.$color-muted;
+    white-space: pre-line;
+  }
+
+  @media (max-width: 760px) {
+    position: static;
+  }
+}
+
+.audienceEyebrow {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  color: v.$color-brand;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.audienceFit {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 12px;
+
+  span {
+    font-weight: 500;
+    color: v.$color-muted;
+  }
+
+  em {
+    font-style: normal;
+    padding: 3px 10px;
+    background: v.$color-panel;
+    border: 1px solid v.$color-border-soft;
+    border-radius: 100px;
+    color: v.$color-text;
+  }
+}
+
+.audienceProblemList {
+  list-style: none;
+  padding: 0;
+  margin: 0;
   display: flex;
   flex-direction: column;
-  gap: 32px;
+  gap: 0;
+}
+
+.audienceProblemRow {
+  display: grid;
+  grid-template-columns: 44px 1fr auto;
+  gap: 16px;
+  align-items: start;
+  padding: 28px 0;
+  border-bottom: 1px solid v.$color-border-soft;
+
+  &:first-child {
+    padding-top: 8px;
+  }
+
+  @media (max-width: 760px) {
+    grid-template-columns: 32px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    padding: 22px 0;
+  }
+}
+
+.audienceProblemNo {
+  font-size: 11px;
+  font-weight: 700;
+  font-family: v.$font-mono;
+  color: v.$color-brand;
+  padding-top: 3px;
+}
+
+.audienceProblemBody {
+  h3 {
+    margin: 0 0 6px;
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.35;
+  }
+
+  p {
+    margin: 0;
+    font-size: 13px;
+    line-height: 1.7;
+    color: v.$color-muted;
+  }
+
+  @media (max-width: 760px) {
+    grid-column: 2;
+  }
+}
+
+.audienceProblemAnswer {
+  font-size: 11px;
+  font-weight: 700;
+  color: v.$color-brand;
+  padding: 4px 10px;
+  background: rgba(0, 246, 194, 0.08);
+  border-radius: 6px;
+  white-space: nowrap;
+  align-self: center;
+
+  @media (max-width: 760px) {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin-top: 6px;
+  }
+}
+
+.audienceNotFor {
+  margin-top: 28px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  font-size: 11px;
+
+  span {
+    color: v.$color-text-dim;
+  }
+
+  em {
+    font-style: normal;
+    padding: 2px 8px;
+    color: v.$color-text-dim;
+    border-radius: 4px;
+    background: rgba(255, 77, 79, 0.06);
+  }
+}
+
+// ============ [V1.6.1] WatchAndNotify — 盘中监控 1.08/0.92fr ============
+
+.watchLayout {
+  display: grid;
+  grid-template-columns: 1.08fr 0.92fr;
+  gap: 54px;
+  align-items: start;
+
+  @media (max-width: 760px) {
+    grid-template-columns: 1fr;
+    gap: 32px;
+  }
+}
+
+.watchContent {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+.watchHeadingEyebrow {
+  font-size: 11px;
+  font-weight: 600;
+  color: v.$color-brand;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.watchHeading {
+  margin: 0;
+  font-size: clamp(28px, 3.8vw, 38px);
+  font-weight: 700;
+  line-height: 1.25;
+  letter-spacing: -0.02em;
+  white-space: pre-line;
+}
+
+.watchHeadingSubtitle {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.75;
+  color: v.$color-muted;
+  white-space: pre-line;
 }
 
 .watchPromise {
-  font-size: 18px;
+  font-size: 15px;
   font-weight: 600;
   line-height: 1.6;
-  color: v.$color-text;
-  padding-left: 16px;
-  border-left: 3px solid v.$color-brand;
+  padding-left: 14px;
+  border-left: 2px solid v.$color-brand;
 }
 
 .watchScenarios {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 0;
 }
 
 .watchScenario {
-  display: flex;
-  gap: 16px;
-  padding: 16px 0;
-  border-bottom: 1px dashed v.$color-border;
+  padding: 14px 0;
+  border-bottom: 1px solid v.$color-border-soft;
 
-  &:last-child {
-    border-bottom: none;
-  }
+  &:first-child { padding-top: 4px; }
 
-  > span {
-    flex-shrink: 0;
-    font-size: 12px;
-    font-weight: 700;
-    font-family: var(--font-mono);
-    color: v.$color-brand;
-    padding-top: 3px;
-  }
-
-  h3 {
-    margin: 0 0 4px;
-    font-size: 15px;
+  span {
+    display: block;
+    font-size: 13px;
     font-weight: 600;
     color: v.$color-text;
+    margin-bottom: 2px;
   }
 
   p {
     margin: 0;
-    font-size: 14px;
-    line-height: 1.6;
+    font-size: 12px;
+    line-height: 1.65;
     color: v.$color-muted;
   }
 }
 
-.watchCompactFlow {
+.watchFlow {
+  padding: 11px 14px;
   display: flex;
   flex-wrap: wrap;
-  gap: 8px 4px;
-  align-items: center;
-  padding: 14px 18px;
-  background: v.$color-panel-2;
-  border-radius: 12px;
-  font-size: 12px;
-  font-family: var(--font-mono);
-}
-
-.watchFlowNode {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
+  gap: 6px;
+  font-size: 11px;
+  font-family: v.$font-mono;
   color: v.$color-muted;
-
-  svg {
-    color: v.$color-text-dim;
-  }
-}
-
-.watchFlowPrimary {
-  font-weight: 700;
-  color: v.$color-brand;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .watchVisual {
   margin: 0;
-  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding-top: 0;
+
+  figcaption {
+    margin-top: 8px;
+    font-size: 10px;
+    color: v.$color-text-dim;
+  }
 }
 
 .watchPhone {
-  position: relative;
-  max-width: 320px;
-  margin: 0 auto;
-  padding: 16px;
+  width: min(360px, 100%);
+  padding: 8px;
+  border: 1px solid v.$color-border;
+  border-radius: 28px;
   background: v.$color-panel;
-  border-radius: 36px;
-  box-shadow:
-    0 24px 64px rgba(0, 0, 0, 0.2),
-    0 2px 8px rgba(0, 0, 0, 0.1);
 
   img {
     display: block;
     width: 100%;
     height: auto;
+    object-fit: contain;
     border-radius: 20px;
-    object-fit: cover;
+  }
+
+  @media (max-width: 760px) {
+    width: min(320px, 86vw);
   }
 }
 
-.watchVisual figcaption {
-  margin-top: 12px;
-  font-size: 12px;
-  color: v.$color-text-dim;
+// ============ [V1.6.1] Footer — 3 层：Action / Body / Bottom ============
+
+.footer {
+  padding: 0;
+  border-top: 1px solid v.$color-border-soft;
+  background: rgba(255, 255, 255, 0.012);
 }
 
-// ============ [V1.6] Footer 顶部 CTA 行 ============
-
-.footerCtaRow {
-  display: flex;
+.footerAction {
+  padding: 30px 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 28px;
   align-items: center;
-  justify-content: space-between;
-  gap: 32px;
-  padding: 48px 0 32px;
+  border-bottom: 1px solid v.$color-border-soft;
 
   h2 {
-    margin: 0 0 8px;
-    font-size: clamp(22px, 2.6vw, 28px);
+    margin: 0 0 6px;
+    font-size: 24px;
     font-weight: 700;
-    letter-spacing: -0.01em;
-    line-height: 1.3;
+    line-height: 1.25;
   }
 
   p {
     margin: 0;
-    font-size: 14px;
+    font-size: 12px;
     color: v.$color-muted;
   }
 
-  @media (max-width: 767px) {
-    flex-direction: column;
-    align-items: flex-start;
-    gap: 20px;
-    padding: 32px 0 24px;
-
-    h2 {
-      font-size: 22px;
-    }
+  @media (max-width: 760px) {
+    grid-template-columns: 1fr;
+    gap: 16px;
+    padding: 24px 0;
   }
 }
 
-.footerCtaBtn {
-  flex-shrink: 0;
-  @media (max-width: 767px) {
-    align-self: flex-start;
+.footerBody {
+  padding: 30px 0 24px;
+  display: grid;
+  grid-template-columns: minmax(260px, 1.35fr) 100px 190px auto;
+  gap: 44px;
+  align-items: start;
+
+  @media (max-width: 760px) {
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    padding: 24px 0 20px;
   }
 }
 
-.footerDivider {
-  height: 1px;
-  background: v.$color-border;
-  margin-bottom: 48px;
-  @media (max-width: 767px) {
-    margin-bottom: 32px;
+.footerBrand {
+  @media (max-width: 760px) {
+    grid-column: 1 / -1;
   }
+}
+
+.footerDesc {
+  margin: 10px 0 0;
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.65;
+  color: v.$color-muted;
+}
+
+.footerColumn {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+
+  h3 {
+    margin: 0 0 3px;
+    font-size: 11px;
+    color: v.$color-muted;
+  }
+
+  a, span {
+    font-size: 12px;
+    line-height: 1.5;
+    color: v.$color-text;
+    text-decoration: none;
+  }
+}
+
+.footerCommunity {
+  display: flex;
+  justify-content: flex-end;
+  gap: 14px;
+
+  @media (max-width: 760px) {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+}
+
+.footerQrCompact {
+  width: 104px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  text-align: center;
+  text-decoration: none;
+  color: inherit;
+
+  strong { font-size: 11px; }
+  > span { font-size: 9px; color: v.$color-muted; }
+
+  @media (max-width: 760px) {
+    width: 96px;
+  }
+}
+
+.footerQrImage {
+  width: 96px;
+  height: 96px;
+  display: grid;
+  place-items: center;
+  background: #fff;
+
+  img {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+  }
+
+  @media (max-width: 760px) {
+    width: 92px;
+    height: 92px;
+  }
+}
+
+.footerBottom {
+  padding: 13px 0 17px;
+  border-top: 1px solid v.$color-border-soft;
+  font-size: 10px;
+  color: v.$color-text-dim;
 }

@@ -139,7 +139,6 @@ test('A5. SCSS 已为 V1.2 新增真实产品大屏 / 回放视觉类（无硬�
     'exploreStage',
     'exploreExamples',
     // V1.5.2 UNIFIED FOOTER：去掉独立 boxed footerCommunity / footerQrCard 大卡片类
-    'footerUnified',
     'footerMain',
     'footerQrGrid',
     'footerQrCompact',

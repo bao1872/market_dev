@@ -132,18 +132,26 @@ test('V1.5.2-P6. 关键定义锁定（量能 / 结构事件新鲜度 / 主要成
 
 // ===== UNIFIED FOOTER =====
 
-test('V1.5.2-F1. Footer 已合并为 footerUnified，无独立 boxed footerCommunity', () => {
-  assert.ok(footerSrc.includes('styles.footerUnified'), 'Footer 必须有 footerUnified')
-  assert.match(scssSrc, /\.footerUnified\s*\{/, 'SCSS 必须有 .footerUnified')
+// [V1.6.1] Footer 彻底重排为 3 层（Action / Body / Bottom）
+test('V1.6.1-F1. Footer 为 footerAction/footerBody/footerCommunity canonical，无 V1.5 legacy', () => {
+  assert.ok(footerSrc.includes('styles.footerAction'), 'Footer 必须有 footerAction')
+  assert.ok(footerSrc.includes('styles.footerBody'), 'Footer 必须有 footerBody')
+  assert.match(scssSrc, /\.footerAction\s*\{/, 'SCSS 必须有 .footerAction')
+  assert.match(scssSrc, /\.footerBody\s*\{/, 'SCSS 必须有 .footerBody')
 
-  // 不再有独立 boxed 大卡片（footerCommunityCopy/Title/Desc 为文字类名，允许保留）
-  assert.ok(!/\n\.footerCommunity\s*\{/.test(scssSrc), 'SCSS 不得再有 .footerCommunity 大卡片规则')
-  assert.ok(!/styles\.footerCommunity\b/.test(footerSrc), 'Footer 不得再用 boxed footerCommunity 布局')
+  // V1.5 / V1.6 legacy 类名全部删除（单一 generation）
+  assert.ok(!footerSrc.includes('footerUnified'), 'Footer 不得再用 footerUnified')
+  assert.ok(!scssSrc.includes('.footerUnified'), 'SCSS 已删除 .footerUnified')
+  assert.ok(!footerSrc.includes('footerCtaRow'), 'Footer 不得再用 footerCtaRow')
+  assert.ok(!scssSrc.includes('.footerCtaRow'), 'SCSS 已删除 .footerCtaRow')
+  assert.ok(!footerSrc.includes('footerDivider'), 'Footer 不得再用 footerDivider')
+  assert.ok(!scssSrc.includes('.footerDivider'), 'SCSS 已删除 .footerDivider')
+  assert.ok(!footerSrc.includes('footerCommunityCopy'), 'Footer 不得再用 footerCommunityCopy')
+  assert.ok(!scssSrc.includes('.footerCommunityCopy'), 'SCSS 已删除 .footerCommunityCopy')
   assert.ok(!footerSrc.includes('footerInner'), 'Footer 已弃用 footerInner')
   assert.ok(!scssSrc.includes('.footerInner'), 'SCSS 已移除 .footerInner')
   assert.ok(!footerSrc.includes('footerQrCard'), 'Footer 已弃用 footerQrCard')
   assert.ok(!scssSrc.includes('.footerQrCard'), 'SCSS 已移除 .footerQrCard')
-  assert.ok(!footerSrc.includes('card.note'), '二维码下不得再显示 card.note')
 })
 
 test('V1.5.2-F2. QR object-fit contain、desktop <=128px、QQ 仍为 922×922', () => {

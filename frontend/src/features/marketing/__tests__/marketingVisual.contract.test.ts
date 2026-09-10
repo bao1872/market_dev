@@ -35,7 +35,7 @@ assert.ok(buildScript, 'package.json 必须定义 build:marketing-site')
 // [V1.2] 替换已退役的 intraday-monitor/market-workspace 旧示意图为真实产品素材 + 回放 JSON
 // [V1.5] 移除 xiaoz-xueqiu.png；新增 3 案例截图 + 2 社区二维码
 const SHIPPED_MEDIA = [
-  'poster_img1.webp',
+  'panji-watch-research.webp',
   'panji-desktop-product.png',
   'panji-mobile-research.jpg',
   'zhongji-xuchuang-300308-1d-2y.json',
@@ -75,17 +75,21 @@ test('V1.1-1. copy.ts 不得引用 /landing/assets，必须引用 /marketing-ass
   )
 })
 
-test('V1.1-2. build:marketing-site 必须把真实媒体 cp 进 dist-marketing-site/media/', () => {
+// [V1.6.1] Build source 统一：public/marketing-media/ → dist-marketing-site/media/
+// 不再从 public/landing/assets/images/ 偷文件；不再 per-file cp。
+test('V1.6.1-MEDIA-BUILD. build:marketing-site 统一 cp -R public/marketing-media/', () => {
   assert.ok(
     buildScript.includes('dist-marketing-site/media'),
-    'build 脚本必须 mkdir/cp dist-marketing-site/media',
+    'build 脚本必须 mkdir dist-marketing-site/media',
   )
-  for (const file of SHIPPED_MEDIA) {
-    assert.ok(
-      buildScript.includes(file),
-      `build 脚本必须 cp ${file} 到 media 目录`,
-    )
-  }
+  assert.ok(
+    buildScript.includes('cp -R public/marketing-media/.'),
+    'build 脚本必须 cp -R public/marketing-media/. dist-marketing-site/media/（canonical 单源）',
+  )
+  assert.ok(
+    !buildScript.includes('public/landing/assets/images/poster_img1.webp'),
+    'build 脚本不得再从 landing 目录偷 poster 文件',
+  )
   // 不得把整套 public/landing 拷贝进去（只拷贝实际使用资产）
   assert.ok(
     !buildScript.includes('-r public/landing') && !buildScript.includes('cp -r public/landing'),

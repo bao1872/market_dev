@@ -37,7 +37,7 @@ export const NAV = {
 //   不得自己写 media/data URL。ref/ 被 .gitignore 排除，无法作为 runtime asset，
 //   必须引用这些入库的 canonical Marketing media。
 export const MARKETING_MEDIA = {
-  feishuPoster: '/marketing-assets/media/poster_img1.webp',
+  feishuPoster: '/marketing-assets/media/panji-watch-research.webp',
   desktopProduct: '/marketing-assets/media/panji-desktop-product.png',
   mobileResearch: '/marketing-assets/media/panji-mobile-research.jpg',
   // [V1.5] 真实玩法案例截图（真实产品截图，仅裁边/resize/WebP，不造界面）。
@@ -70,16 +70,22 @@ export interface HeroStatusBadge {
 // [V1.6] 第二屏（不编号）：用户问题视角，放在 Hero 之后、Discovery 之前。
 export const AUDIENCE_PROBLEMS = {
   eyebrow: '先说为什么需要它',
-  title: '你不是缺更多指标，\n是没时间把该看的都看完。',
-  subtitle: '盘迹更适合已经有自己判断方法，\n但每天面对太多股票、太多信息、太少时间的人。',
+  title: '你不是缺更多指标，\n而是根本看不完。',
+  subtitle: '每天真正难的不是不会用工具，\n是每天有几千只股票在动，时间却有限。',
+  intro: {
+    eyebrow: '为什么先谈问题',
+    lead: '盘迹不是另一张指标表。',
+  },
   problems: [
-    { title: '不知道今天先看谁', text: '全市场几千只股票都在动。一只只翻，时间很容易花在根本不值得研究的地方。', answer: '先把范围缩小，再研究。' },
-    { title: '有自己的方法，但每天筛一遍太累', text: '你知道自己偏好趋势、结构、放量还是筹码变化，但没必要每天重新从几千只股票开始找。', answer: '把自己的标准留下来。' },
-    { title: '自选越来越多，盘中根本盯不过来', text: '上班、开会、通勤时不可能一直看屏幕。十几只、几十只股票，也不可能同时盯。', answer: '有变化的时候再回来。' },
-    { title: '不想让软件替你下结论', text: '你需要的是更快找到候选、看清它现在是什么状态，不是让一个分数告诉你应该买还是卖。', answer: '判断仍然自己做。' },
+    { title: '每天不知道先看谁', text: '全市场几千只股票都在动。一只只翻，时间很容易花在根本不值得研究的地方。', answer: '先把范围缩小，再研究。' },
+    { title: '每天都在重复筛', text: '你知道自己偏好趋势、结构、放量还是筹码变化，但没必要每天重新从几千只股票开始找。', answer: '把自己的标准留下来。' },
+    { title: '盘中根本盯不过来', text: '上班、开会、通勤时不可能一直看屏幕。自选十几只、几十只，不可能同时盯。', answer: '有变化的时候再回来。' },
+    { title: '不想让软件替你做决定', text: '你需要的是更快找到候选、看清它现在是什么状态，不是让一个分数告诉你该买还是卖。', answer: '判断仍然自己做。' },
   ],
-  fit: ['有自己选股标准的人','每天需要看很多股票的人','习惯从板块或复盘进入个股的人','希望减少无效盯盘的人'],
+  notFor: ['想让软件替自己做决定的人', '只看一个固定板块的人'],
+  forWhom: ['每天看很多股票的人', '已经有自己选股方法的人'],
 } as const
+
 export const HERO = {
   eyebrow: '盘迹 · 全市场状态终端',
   title: '先把全市场的变化找出来，\n再盯真正值得盯的。',
@@ -358,18 +364,19 @@ export const STRATEGY_LAB = {
 export const WATCH_NOTIFY = {
   index: '07',
   eyebrow: '盘中监控',
-  title: '没法一直盯盘，\n就只看真正发生变化的时候。',
-  subtitle: '上班、开会、通勤，或者自选太多时，不可能一直盯着每一只股票。\n把真正想看的留进自选，盘迹持续跟踪状态；有变化，再把研究图送到飞书。',
+  title: '不方便盯盘的时候，\n把真正值得跟的留下。',
+  subtitle: '上班、开会、通勤，自选十几只、几十只时，\n不可能一直盯着每一只股票。\n盘迹帮你持续跟踪状态；盘中持续跟踪，状态变化时再把研究图送到飞书。',
   scenarios: [
-    { title: '上班没法一直看盘', text: '不需要隔几分钟切回来刷一次行情。' },
-    { title: '自选太多，根本盯不过来', text: '真正需要跟踪的留下，盘迹继续看它们的状态。' },
-    { title: '只想等重要变化', text: '没变化就不用处理；状态变了，再打开研究图看发生了什么。' },
+    { title: '上班', text: '不需要隔几分钟切回来刷一次行情。' },
+    { title: '开会', text: '重要的事先做完，真正有变化的再回来。' },
+    { title: '通勤', text: '碎片时间打开时，只看值得看的那几只。' },
   ],
   flow: ['加入自选','盘中持续跟踪','状态变化','生成研究图','飞书收到'],
   imageSrc: MARKETING_MEDIA.feishuPoster,
   imageAlt: '盘迹状态变化后发送到飞书的真实研究图片',
   imageNote: '盘迹真实研究图示例。',
 } as const
+
 
 export const XUEQIU_PROFILE_URL =
   'https://xueqiu.com/u/6601870666?scene=1036&share_uid=6601870666'
@@ -414,11 +421,10 @@ export type FooterCommunityCard = {
 
 export const FOOTER = {
   cta: {
-    title: '先用起来，再看它合不合你的方法。',
-    subtitle: '少翻一点，看清一点。判断还是你自己做。',
+    title: '先用几天，再看它合不合你的方法。',
+    subtitle: '能不能少翻一点、看清一点，用自己的股票试最清楚。',
     button: { label: '开始使用', href: '/login' },
   },
-
   brand: BRAND,
   columns: [
     { title: '产品', links: [{ label: '行情', href: '/market' }, { label: '自选', href: '/market?scope=watchlist' }] },
@@ -427,8 +433,6 @@ export const FOOTER = {
         { label: '关注每日早晚复盘', note: '每日早晚各一篇，讲当天市场发生了什么。' },
     ] },
   ] as FooterColumn[],
-
-  // [V1.6] community.title/desc 已并入顶部 CTA + 二维码本身的 title/subtitle，不再重复。
   community: {
     id: 'community',
     cards: [
@@ -438,6 +442,5 @@ export const FOOTER = {
         imageSrc: MARKETING_MEDIA.communityXueqiuQr, imageAlt: '小Z说股事雪球主页二维码', href: XUEQIU_PROFILE_URL },
     ] as FooterCommunityCard[],
   },
-
   copyright: '盘迹 · 看一眼就知道怎么用',
 } as const
