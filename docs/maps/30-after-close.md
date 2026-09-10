@@ -204,7 +204,7 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 **[CHANGE-20260729-008 代码闭环已完成的项]**：
 
 - ✅ **Worker 已接入 run item**：`after_close_orchestrator` 主链切换到 `feature_snapshot_service.compute_review_core_with_run_items`，调用 `create_run_items` / `claim_items` / `mark_item_succeeded` / `mark_item_failed`，单股独立 AsyncSession + lease_epoch fencing
-- ✅ **market_stocks LATERAL 已接入 pointer**：`_build_snap_lateral(snapshot_run_id=...)` 严格过滤 `source_run_id == pointer.data_run_id`；`get_market_stocks` 先读 publication pointer 再构建 LATERAL；无 pointer 时回退每股 latest（兼容历史数据）
+- ✅ **market_stocks LATERAL 已接入 canonical CoreRun**：`get_market_stocks` 经 `current_core_run_service.resolve_current_core_run(db)` 取得 `canonical_core_run_id`（链路：formal Review publication → `MarketReviewRun.source_core_run_id` → `StockFeatureSnapshotRun`），`_build_snap_lateral(snapshot_run_id=canonical_core_run_id)` 严格过滤 `source_run_id == canonical_core_run_id`；`FactorPublication(kind=stock_core)` 仅 legacy 兼容，**不得作 CURRENT authority**（见 §11.6）；无 canonical run 时回退每股 latest（兼容历史数据）
 - ✅ **历史回补已接入 run/item**：`backfill_history_with_run_items` + `create_history_run` / `claim_history_items` / `mark_history_item_*` / `finish_history_run`，单股独立事务，DB-only 取数
 - ✅ **管理状态 API 已实现**：`app.api.admin_incremental_publish`，提供 `/status` / `/core/runs` / `/core/runs/{id}/progress` / `/history/runs` / `/history/runs/{id}/progress` / `/pointers`
 - ✅ **历史回补 CLI 已实现**：`scripts/first_pyramid_history_backfill_cli.py`，支持 `--canary` / `--limit` / `--all` / `--symbols` / `--resume` / `--dry-run` / `--output-bars` / `--algorithm-version`
@@ -216,6 +216,36 @@ Phase 5B-2 的 PRD60 PA-01 capability 模型变化（`user_capabilities` 表、`
 - PG 集成测试 6 项待 CI（`PURE_UNIT_TEST=1` 时 SKIP，需 CI 临时 PG 容器）
 - 远程开发部署后真实 canary 验证待执行
 - 全市场 history 回补待执行
+
+### 11.6 Snapshot Ownership 当前事实（2026-09-10 治理收口，取代根目录 PHASE_B1_* checkpoint）
+
+> 本节为 Snapshot（`stock_feature_snapshots` / `stock_feature_snapshot_runs`）存储与归属的**当前事实映射**，取代已删除的根目录 `PHASE_B1_REPORT.md` / `PHASE_B1_1_DESIGN.md`。历史设计推理见 `docs/changes/records/CHANGE-20260910-001.md`。本节只记录今天真实工作方式。
+
+**存储契约（已核验 model + migration）**
+- `stock_feature_snapshots` 唯一键：`(instrument_id, trade_date, primary_timeframe, secondary_timeframe, adj, schema_version)`（`uq_feature_snapshot_instrument_date_tf_adj_schema`，`stock_feature_snapshot.py:117`）。
+- `source_run_id`：可空 FK → `stock_feature_snapshot_runs.id`（ondelete SET NULL），**不是唯一键成员**。
+- **不存在** `uq_feature_snapshot_run_current` / `uq_feature_snapshot_legacy_base` 或功能等价的 dual partial unique index。同一 base key 下 A/B Core run 快照**不能物理共存**。
+- 迁移 `061_snapshot_source_run_id`（2026-07-11，早于 B1 文档）设计说明明确"不删除原有唯一约束"，故 B1.1 的 dual-index 提案从未落地。
+
+**Current Core 显示归属（已核验 reader）**
+- 唯一 canonical CoreRun owner：`current_core_run_service.resolve_current_core_run(db)`（`current_core_run_service.py`）。
+- 链路：formal Review publication（`MarketReviewRun`，FORMAL REVIEW READ OWNER）→ `MarketReviewRun.source_core_run_id` → `StockFeatureSnapshotRun`（校验 succeeded + trade_date 一致 + schema_version）。
+- 消费方：`market_stocks_service.get_market_stocks`（LATERAL 绑 `source_run_id == canonical_core_run_id`，`market_stocks_service.py:547/811`）、`stock_context._resolve_current_core_run`（委托同一 owner，`stock_context.py:209/236`）。
+- `FactorPublication(kind=stock_core)`：**仅 legacy 兼容**（`stock_context.py:113-177`），**不得作为 CURRENT authority**（`market_stocks_service.py:870` 明文禁止）。
+
+**已发布世界保护（application-level，非 schema-level）**
+- `create_snapshot_run(scope='full')`：若已存在 `succeeded + published + full` run，抛 `PublishedSnapshotRunExistsError`（`feature_snapshot_service.py:2198`），拒绝新 full run。
+- `upsert_snapshot` WHERE 子句（`feature_snapshot_service.py:1837-1845`）：仅当现有行 `source_run_id IS NULL` 或所指 run **非 (succeeded AND published_at IS NOT NULL)** 时才允许覆盖。即已发布 canonical 快照不被 rerun 覆盖。
+- 以上均为**应用层守卫**，不是数据库不变式；不得写成 schema-level run isolation。
+
+**当前已知限制 / 延期（DEFERRED — 未在本轮修复）**
+
+- **D1 — succeeded-but-unpublished Core rerun 缺少 schema-level run isolation。**
+  `compute_review_core_with_run_items` 为**逐股** `upsert_snapshot` + `commit`（`feature_snapshot_service.py:1490-1491`），非整 run 单事务。`upsert_snapshot` 注释（`:1822`）称"失败 run 在事务中回滚"与实际逐股提交边界**不一致**，属误写注释，待后续修正。若已有 A 为 `succeeded + unpublished`（published_at=NULL），新 run B 可逐股覆盖 A 并已 commit，B 后续失败时数据库可能留下 `股票1/2 → source_run_id=B，股票3+ → source_run_id=A` 的物理混合状态（mixed-world）。CURRENT reader 经 formal Review lineage fail-closed，不应将该物理状态误认为 canonical current world。
+- **D2 — `feature_snapshot_backfill` 仍不绑定 `source_run_id`。**
+  `backend/scripts/feature_snapshot_backfill.py` 创建 `run_records[td]`（`:508/:1016`），但调用 `compute_feature_snapshot_for_date(...)`（`:593/:867`）未传 `source_run_id=run_records[td].id`；该函数 `source_run_id: UUID | None = None` 默认 NULL，故普通 backfill 仍主动产生 `source_run_id = NULL` 的快照。即"全量 lineage 化"尚未达成，LEGACY NULL 今天仍可被产生。
+
+> 措辞边界：B1.1 的 dual partial-index 提案**未实施**；当前生产改用 application-level published 保护 + Review-lineage 显示归属。schema-level run isolation（D1）与 backfill NULL lineage（D2）**仍为延期债**，不在本轮解决，亦不宣称"dual-index 被永久否决"。
 
 详见 `docs/changes/2026/CHANGE-20260729-008-incremental-publish-full-closure.md`。
 
