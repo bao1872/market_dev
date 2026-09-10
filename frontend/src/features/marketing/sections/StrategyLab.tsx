@@ -1,8 +1,8 @@
 // StrategyLab（Full Alignment V1.5 · 真实玩法案例）：
-// 4 个玩法 tab（道氏123风格 / 趋势跟踪 / 双底支撑 / 更多玩法）。
+// 4 个玩法 tab（道氏123思路 / 趋势跟踪 / 双底支撑 / 更多用法）。
 // 前三为「真实产品截图 + 文字说明」的大案例舞台（桌面截图约 68% + 解释约 32%），
-// 第四为「更多玩法待你探索」的探索板（不伪造第四张截图、不显示空白图片区）。
-// 边界（owner 裁决）：统一用「道氏123风格 / 思路」，不宣称精确实现经典定义；
+// 第四为「更多用法待组合」的探索板（不伪造第四张截图、不显示空白图片区）。
+// 边界（owner 裁决）：统一用「道氏123思路 / 风格」，不宣称精确实现经典定义；
 // 不虚构候选数量漏斗；盘迹是一套状态语言，不是一套固定策略。
 import { useState } from 'react'
 import clsx from 'clsx'
@@ -64,7 +64,7 @@ function RealCaseStage({ data }: { data: RealStrategyCase }) {
     <article className={styles.caseStage}>
       <figure className={styles.caseScreenshot}>
         <div className={styles.caseImageMeta}>
-          <span>真实产品截图</span>
+          <span>产品实图</span>
           <span>历史案例</span>
         </div>
         <img src={data.imageSrc} alt={data.imageAlt} loading="lazy" />
@@ -78,12 +78,12 @@ function RealCaseStage({ data }: { data: RealStrategyCase }) {
         <p className={styles.caseLead}>{data.lead}</p>
 
         <div className={styles.caseExplainBlock}>
-          <span>这个案例在看什么</span>
+          <span>先看什么</span>
           <p>{data.what}</p>
         </div>
 
         <div className={styles.caseExplainBlock}>
-          <span>盘迹怎么参与</span>
+          <span>盘迹里怎么看</span>
           <p>{data.panji}</p>
         </div>
 
@@ -120,6 +120,8 @@ function ExploreStage({ data }: { data: ExploreStrategyCase }) {
           <span key={example}>{example}</span>
         ))}
       </div>
+
+      <p className={styles.exploreClosing}>{data.closing}</p>
     </article>
   )
 }

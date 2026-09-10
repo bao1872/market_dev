@@ -86,8 +86,10 @@ $marketing-section-y-mobile: 52px;
   margin: 0;
   max-width: 680px;
   font-size: 14px;
-  line-height: 1.75;
+  line-height: 1.8;
   color: v.$color-muted;
+  // V1.5.1: 中文文案自带换行，保留分行节奏。
+  white-space: pre-line;
 }
 
 // ===== buttons / cta row / reveal / glow =====
@@ -419,6 +421,7 @@ $marketing-section-y-mobile: 52px;
   font-size: 15px;
   line-height: 1.8;
   color: v.$color-muted;
+  white-space: pre-line;
 }
 
 .heroProof {
@@ -723,6 +726,7 @@ $marketing-section-y-mobile: 52px;
   text-align: center;
   font-size: 12px;
   color: v.$color-text-dim;
+  white-space: pre-line;
 }
 
 // ===== 真实筹码共识回放（V1.4）=====
@@ -1357,6 +1361,7 @@ $marketing-section-y-mobile: 52px;
   letter-spacing: -0.015em;
   color: v.$color-text;
   text-align: center;
+  white-space: pre-line;
 }
 
 .langRow {
@@ -1531,8 +1536,10 @@ $marketing-section-y-mobile: 52px;
 .caseLead {
   margin: 0 0 28px;
   font-size: 16px;
-  line-height: 1.65;
+  line-height: 1.7;
   color: v.$color-text;
+  // V1.5.1: 中文文案自带换行，保留作者分行节奏，避免挤成连句。
+  white-space: pre-line;
 }
 
 .caseExplainBlock {
@@ -1551,19 +1558,22 @@ $marketing-section-y-mobile: 52px;
 .caseExplainBlock p {
   margin: 0;
   font-size: 13px;
-  line-height: 1.75;
+  line-height: 1.85;
   color: v.$color-muted;
+  white-space: pre-line;
 }
 
 .caseDisclaimer {
   margin: auto 0 0;
   padding-top: 20px;
   font-size: 11px;
+  line-height: 1.7;
   color: v.$color-text-dim;
+  white-space: pre-line;
 }
 
-// 更多玩法探索板：不显示空白图片区，直接给状态语言组合。
-// 核心句「你的选股审美，决定盘迹怎么被使用」放大强调。
+// 更多用法探索板：不显示空白图片区，直接给状态语言组合。
+// 核心句「用法可以不同，判断标准由你自己定」放大强调。
 .exploreStage {
   min-height: 420px;
   padding: 48px 40px;
@@ -1605,20 +1615,22 @@ $marketing-section-y-mobile: 52px;
 }
 
 .exploreLead {
-  margin: 0 auto 8px;
+  margin: 0 auto 10px;
   max-width: 640px;
   font-size: 17px;
   line-height: 1.7;
   color: v.$color-text;
   font-weight: 600;
+  white-space: pre-line;
 }
 
 .exploreText {
   margin: 0 auto 28px;
   max-width: 640px;
   font-size: 13px;
-  line-height: 1.75;
+  line-height: 1.8;
   color: v.$color-muted;
+  white-space: pre-line;
 }
 
 .exploreExamples {
@@ -1635,6 +1647,17 @@ $marketing-section-y-mobile: 52px;
   background: v.$color-bg;
   font-size: 13px;
   color: v.$color-text;
+}
+
+.exploreClosing {
+  margin: 34px auto 0;
+  max-width: 640px;
+  text-align: center;
+  font-size: 18px;
+  line-height: 1.7;
+  font-weight: 600;
+  color: v.$color-text;
+  white-space: pre-line;
 }
 
 // ===== 12 notify =====
@@ -1743,16 +1766,18 @@ $marketing-section-y-mobile: 52px;
 .finalCtaTitle {
   margin: 0 0 12px;
   font-size: clamp(28px, 3vw, 40px);
-  line-height: 1.15;
+  line-height: 1.2;
   font-weight: 800;
   letter-spacing: -0.025em;
+  white-space: pre-line;
 }
 
 .finalCtaSubtitle {
   margin: 0 0 22px;
   font-size: 15px;
-  line-height: 1.75;
+  line-height: 1.8;
   color: v.$color-muted;
+  white-space: pre-line;
 }
 
 .finalCtaBtn {
@@ -1955,14 +1980,6 @@ $marketing-section-y-mobile: 52px;
   color: v.$color-text-dim;
 }
 
-.inviteTitle {
-  margin: 0 0 6px;
-  font-size: 12px;
-  font-family: v.$font-mono;
-  letter-spacing: 0.12em;
-  color: v.$color-muted;
-}
-
 .footerBottom {
   margin-top: 28px;
   padding-top: 14px;
@@ -2020,17 +2037,17 @@ $marketing-section-y-mobile: 52px;
 }
 
 .footerQrImage {
-  width: 180px;
-  height: 180px;
+  width: 204px;
+  aspect-ratio: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   margin-bottom: 6px;
   // #fff 为二维码可扫要求的白色 quiet zone backdrop（功能必需，非品牌装饰色）。
+  // V1.5.1: 二维码图片本身不圆角、不裁切（禁止 overflow hidden / border-radius 于容器），
+  //   保证 QQ 艺术码三个定位标与深色底完整保留。圆润只允许在卡片外壳上。
   background: #fff;
   border: 1px solid v.$color-border-soft;
-  border-radius: 12px;
-  overflow: hidden;
 }
 
 .footerQrImage img {

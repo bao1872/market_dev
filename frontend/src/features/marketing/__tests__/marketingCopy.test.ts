@@ -18,6 +18,7 @@ import {
   NAV,
   STRATEGY_LAB,
   STRUCTURE_STORY,
+  WATCH_NOTIFY,
   WORKFLOW,
   XUEQIU_PROFILE_URL,
 } from '../data/copy'
@@ -156,15 +157,15 @@ test('首页 numbered section 序号严格为 01→05', () => {
 // ===== Full Alignment V1：Hero + Nav 文案对齐（参考图 #1 / #2）=====
 
 test('NAV 含 5 项真实菜单 + 副标 + 开始使用 CTA（无公众号文章）', () => {
-  assert.equal(NAV.tagline, '从零了解盘迹')
+  assert.equal(NAV.tagline, '先看懂，再上手')
   assert.equal(NAV.ctaLabel, '开始使用')
   assert.equal(NAV.ctaHref, '/login')
   assert.equal(NAV.items.length, 5)
   const labels = NAV.items.map((i) => i.label)
   for (const expected of [
     '产品',
-    '怎么工作',
-    '经典场景',
+    '怎么用',
+    '真实案例',
     '交流',
     '状态提醒',
   ]) {
@@ -209,8 +210,8 @@ test('HERO 底部两条诚实状态条（真实产品界面 / 历史示例仅用
     '缺少「真实产品界面」诚实状态条',
   )
   assert.ok(
-    texts.some((t) => t.includes('历史示例仅用于功能说明')),
-    '缺少「历史示例仅用于功能说明」诚实状态条',
+    texts.some((t) => t.includes('案例均来自历史数据')),
+    '缺少「案例均来自历史数据」诚实状态条',
   )
   // 已删除旧假数据表语义：不再自称「演示数据 · 非实时行情」
   assert.ok(
@@ -309,9 +310,60 @@ test('V1.5-C. Footer is community；恰好 2 张社区二维码；雪球 URL 精
 test('V1.5-D. FINAL_CTA 不再含 invite，次级 CTA 为「加入交流 → #community」', () => {
   const any = FINAL_CTA as { invite?: unknown }
   assert.equal(any.invite, undefined, 'FINAL_CTA.invite 必须删除')
-  assert.equal(FINAL_CTA.secondaryCta.label, '加入交流')
+  assert.equal(FINAL_CTA.secondaryCta.label, '加入交流群')
   assert.equal(FINAL_CTA.secondaryCta.href, '#community')
 })
 
 type RealCase = Extract<(typeof STRATEGY_LAB.cases)[number], { kind: 'case' }>
 type ExploreCase = Extract<(typeof STRATEGY_LAB.cases)[number], { kind: 'explore' }>
+
+// ===== V1.5.1 中文文案收口（只锁核心语义句，不锁全文案逐字）=====
+
+const STRATEGY_LAB_SRC = readFileSync(
+  resolve(FRONTEND_ROOT, 'src/features/marketing/sections/StrategyLab.tsx'),
+  'utf-8',
+)
+
+test('V1.5.1-A. 全页核心中文语义句锁定（拒绝翻译腔回流）', () => {
+  const raw = JSON.stringify({
+    hero: HERO,
+    workflow: WORKFLOW,
+    chipConsensusStory: CHIP_CONSENSUS_STORY,
+    strategyLab: STRATEGY_LAB,
+    watchNotify: WATCH_NOTIFY,
+    finalCta: FINAL_CTA,
+    footer: FOOTER,
+  })
+  for (const phrase of [
+    '先把全市场的变化找出来',
+    '每天其实就做这几步',
+    '股价先走，成交重心不一定马上跟',
+    '盘迹怎么用',
+    '想聊盘迹，来这里',
+  ]) {
+    assert.ok(raw.includes(phrase), `营销文案缺少 V1.5.1 核心语义句: ${phrase}`)
+  }
+})
+
+test('V1.5.1-B. StrategyLab 中文栏目名：先看什么 / 盘迹里怎么看', () => {
+  assert.ok(STRATEGY_LAB_SRC.includes('先看什么'), 'StrategyLab 缺「先看什么」栏目名')
+  assert.ok(STRATEGY_LAB_SRC.includes('盘迹里怎么看'), 'StrategyLab 缺「盘迹里怎么看」栏目名')
+  assert.ok(
+    !STRATEGY_LAB_SRC.includes('这个案例在看什么'),
+    'StrategyLab 不得再出现翻译腔栏目名「这个案例在看什么」',
+  )
+  assert.ok(
+    !STRATEGY_LAB_SRC.includes('盘迹怎么参与'),
+    'StrategyLab 不得再出现翻译腔栏目名「盘迹怎么参与」',
+  )
+})
+
+test('V1.5.1-C. FOOTER.invitation 已删除，雪球出口不再用搜索表述', () => {
+  assert.equal(
+    (FOOTER as Record<string, unknown>).invitation,
+    undefined,
+    'FOOTER.invitation 必须删除',
+  )
+  const raw = JSON.stringify(FOOTER)
+  assert.ok(!raw.includes('搜索小Z说事'), 'Footer 不得再用雪球搜索表述')
+})

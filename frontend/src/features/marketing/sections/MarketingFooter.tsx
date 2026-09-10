@@ -1,7 +1,7 @@
-// MarketingFooter（Full Alignment V1 + V1.5 社区出口）。
-// [V1.5] Footer 升级为社区出口：id="community"，底部新增「一起交流」双二维码区
+// MarketingFooter（Full Alignment V1 + V1.5.1 社区出口）。
+// [V1.5] Footer 升级为社区出口：id="community"，底部新增「想聊盘迹，来这里」双二维码区
 // （QQ 群 + 雪球主页）。card.href 存在时整图可点击（PC 用户不扫码也能打开）。
-// 保留原有 Brand + footer columns + 底行 copyright。不 overlay 文字/mask/filter 于二维码。
+// [V1.5.1] 删除重复雪球说明（FOOTER.invitation）；二维码用 object-fit: contain，不 overlay/mask/filter/圆角。
 import BrandLogo from '@/components/BrandLogo'
 import { FOOTER } from '../data/copy'
 import styles from '../marketing.module.scss'
@@ -48,10 +48,6 @@ export default function MarketingFooter() {
               </ul>
             </div>
           ))}
-          <div>
-            <h3 className={styles.inviteTitle}>{FOOTER.invitation.title}</h3>
-            <p className={styles.footerDesc}>{FOOTER.invitation.desc}</p>
-          </div>
         </div>
 
         {/* [V1.5] 社区出口：双二维码 */}

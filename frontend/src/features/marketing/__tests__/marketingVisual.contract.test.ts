@@ -206,3 +206,33 @@ test('V1.1-7. FinalCTA 不再渲染 invite 入口（社区出口收束进 Footer
     'FinalCTA 不得引用 FINAL_CTA.invite（V1.5 已删除）',
   )
 })
+
+// ===== V1.5.1 QQ QR 裁剪和 CSS 修复契约测试 =====
+
+test('V1.5.1-1. community-qq-group-qr.png 必须是 922×922 像素（重裁自原始 IMG_3552.JPG）', () => {
+  const buf = readFileSync(
+    resolve(FRONTEND_ROOT, 'public/marketing-media/community-qq-group-qr.png'),
+  )
+  // PNG：8 字节 signature + IHDR，宽度在 offset 16..19、高度在 20..23（大端序）
+  assert.equal(buf.readUInt32BE(16), 922, 'QQ QR PNG 宽必须为 922')
+  assert.equal(buf.readUInt32BE(20), 922, 'QQ QR PNG 高必须为 922')
+})
+
+test('V1.5.1-2. QQ QR CSS 必须用 object-fit: contain，禁止裁剪二维码本身', () => {
+  const footerQrMatch = /\.footerQrImage\s+img\s*\{[^}]*object-fit:\s*contain/.test(scssSrc)
+  assert.ok(
+    footerQrMatch,
+    '.footerQrImage img 必须声明 object-fit: contain 以保证 QR 完整显示',
+  )
+  // 禁止对图片本身用 border-radius / overflow: hidden 裁切
+  const hasBorderRadiusOnImg = /\.footerQrImage\s+img[^}]*border-radius/.test(scssSrc)
+  assert.ok(
+    !hasBorderRadiusOnImg,
+    'QQ 二维码图片本身不能圆角裁切（卡片外壳可以圆角）',
+  )
+  const hasOverflowHidden = /\.footerQrImage[^}]*overflow\s*:\s*hidden/.test(scssSrc)
+  assert.ok(
+    !hasOverflowHidden,
+    '.footerQrImage 不能用 overflow: hidden 裁切二维码',
+  )
+})

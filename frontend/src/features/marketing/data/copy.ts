@@ -11,17 +11,17 @@ export const BRAND = {
   name: '盘迹',
   slogan: '看一眼就知道怎么用',
   description:
-    '从全市场发现变化，理解个股状态，把值得继续看的股票留在自选并持续观察。',
+    '先把全市场的变化找出来，\n再把值得继续看的股票留下。',
 }
 
 // 顶部导航：5 项真实入口 + 绿色「开始使用」CTA + 品牌副标。
 // 锚点指向当前 section；不出现 99/字段级入口。
 export const NAV = {
-  tagline: '从零了解盘迹',
+  tagline: '先看懂，再上手',
   items: [
     { label: '产品', href: '#hero' },
-    { label: '怎么工作', href: '#how-it-works' },
-    { label: '经典场景', href: '#strategy-lab' },
+    { label: '怎么用', href: '#how-it-works' },
+    { label: '真实案例', href: '#strategy-lab' },
     { label: '交流', href: '#community' },
     { label: '状态提醒', href: '#watch-notify' },
   ],
@@ -68,21 +68,21 @@ export interface HeroStatusBadge {
 // 删除所有未经证实的 claim：1000+ 行业图 / 多市场实时同步 / 盘中持续刷新 / 0:19。
 export const HERO = {
   eyebrow: '盘迹 · 全市场状态终端',
-  title: '从全市场发现变化，\n把真正值得看的股票留下来。',
+  title: '先把全市场的变化找出来，\n再盯真正值得盯的。',
   subtitle:
-    '盘迹不替你选股，只把几千只股票里真正发生变化的部分，压缩成几个值得继续看的状态。',
+    '趋势、结构、动量、成交量、筹码、事件——\n盘迹先帮你把范围缩下来。\n最后看哪只、怎么做，按你自己的方法。',
   // 六维 proof：不编造数字，只描述盘迹看什么
   proof: {
-    label: '盘迹描述六个维度',
+    label: '看一只股票，盘迹主要看这六件事',
     dims: ['趋势', '结构', '动量', '成交量', '筹码', '事件'],
   },
   primaryCta: { label: '开始使用', href: '/login' },
   // 次级 CTA：真实锚点，无时长徽章（无 0:19 视频）
   secondaryCta: { label: '看盘迹怎么工作', href: '#how-it-works' },
-  // 诚实状态条：真实产品界面 + 历史示例仅用于功能说明（看状态不替判断，无实时同步假 claim）
+  // 诚实状态条：真实产品界面 + 案例均来自历史数据
   statusBadges: [
     { dot: 'green', text: '真实产品界面' },
-    { dot: 'green', text: '历史示例仅用于功能说明' },
+    { dot: 'green', text: '案例均来自历史数据' },
   ] as readonly HeroStatusBadge[],
 }
 
@@ -91,27 +91,28 @@ export const HERO = {
 // [V1.5] 独立 XiaozToPanji section 已删除，雪球不再独占页面；社区出口统一收束进 Footer 双二维码。
 export const DISCOVERY = {
   index: '01',
-  eyebrow: '机会从哪里来',
-  title: '机会通常从三个地方开始。',
-  subtitle: '一种来自市场自己给出的变化，一种来自你关注的板块，一种来自别人已经讨论的方向。',
+  eyebrow: '机会从哪来',
+  title: '今天看什么，可以从三个地方找。',
+  subtitle:
+    '没方向，就先扫全市场；\n有方向，就进板块；\n看到一条值得跟的复盘，\n也可以顺着方向继续往下找。',
   entries: [
     {
       key: 'market',
-      title: '全市场发现',
-      desc: '不知道今天看什么时，从全市场发生的变化开始。',
-      flow: ['市场发生变化', '六维条件筛选', '留下候选'],
+      title: '全市场找变化',
+      desc: '先看今天哪些股票真的变了，\n别从几千只里一只只翻。',
+      flow: ['扫全市场', '找出变化', '留下候选'],
     },
     {
       key: 'section',
-      title: '从板块进入',
-      desc: '已经有关注方向时，直接在板块内部继续筛。',
-      flow: ['今天关注板块', '限定板块范围', '板块内找个股'],
+      title: '从板块里找',
+      desc: '已经知道今天想看哪个方向，\n就直接在板块里缩范围。',
+      flow: ['确定板块', '按条件筛', '挑出个股'],
     },
     {
       key: 'story',
-      title: '从小Z说事进入',
-      desc: '复盘先回答今天市场在交易什么，再把方向带进盘迹。',
-      flow: ['复盘发现方向', '进入对应板块', '按自己的标准找个股'],
+      title: '从复盘里找',
+      desc: '小Z说股事先帮你看\n市场今天在交易什么，\n盘迹再帮你往个股里找。',
+      flow: ['看复盘', '找到方向', '进盘迹筛个股'],
     },
   ],
 }
@@ -120,17 +121,17 @@ export const DISCOVERY = {
 // 与 IA 流程一致：发现 → 筛选 → 理解 → 加入自选 → 持续跟踪 → 状态提醒。
 export const WORKFLOW = {
   index: '02',
-  eyebrow: '一条路径',
+  eyebrow: '怎么用',
   id: 'how-it-works',
-  title: '每天不需要重新从几千只股票开始。',
-  subtitle: '发现 → 筛选 → 理解 → 加入自选 → 持续跟踪 → 状态提醒。',
+  title: '每天其实就做这几步。',
+  subtitle: '先找到变化，筛到几只，\n看懂状态，放进自选。\n以后只有状态变了，\n再回来处理。',
   steps: [
-    { key: 'discover', icon: 'radar', title: '发现', desc: '全市场扫描出当天发生变化的范围。' },
-    { key: 'filter', icon: 'sliders', title: '筛选', desc: '用六个维度把范围收窄到值得看的几只。' },
-    { key: 'understand', icon: 'eye', title: '理解', desc: '看清楚它现在处于什么状态，而不是只看涨跌。' },
-    { key: 'watchlist', icon: 'bookmark', title: '加入自选', desc: '把值得继续看的留下来，其余的不用再盯。' },
-    { key: 'track', icon: 'pulse', title: '持续跟踪', desc: '状态变化时再提醒你，不用一直盯着盘。' },
-    { key: 'notify', icon: 'bell', title: '状态提醒', desc: '达到你关心的条件时，推送到飞书。' },
+    { key: 'discover', icon: 'radar', title: '发现', desc: '先知道今天哪里在动。' },
+    { key: 'filter', icon: 'sliders', title: '筛选', desc: '按自己的条件，把范围缩下来。' },
+    { key: 'understand', icon: 'eye', title: '理解', desc: '看清这只票现在是什么状态。' },
+    { key: 'watchlist', icon: 'bookmark', title: '加入自选', desc: '值得继续看的，就先留下。' },
+    { key: 'track', icon: 'pulse', title: '持续跟踪', desc: '不用每天重新翻一遍。' },
+    { key: 'notify', icon: 'bell', title: '状态提醒', desc: '有变化，再把它送到你面前。' },
   ],
 }
 
@@ -139,10 +140,10 @@ export const WORKFLOW = {
 // V1.3 达到「动画讲成故事」：平滑 K 线推进 + 右侧动态解释当前结构状态。
 export const STRUCTURE_STORY = {
   index: '03',
-  eyebrow: '结构怎么形成',
-  title: '用中际旭创近两年的真实日线，\n看结构怎样一步一步被确认。',
+  eyebrow: '结构怎么走出来',
+  title: '结构不是一根K线突然变出来的。\n用中际旭创，看它怎么一步步走出来。',
   subtitle:
-    '播放使用盘迹真实图表和真实结构计算结果。历史演示只用于理解产品，不代表未来走势。',
+    '承接、压制、突破、转强或转弱，都要经过过程。\n这里按真实历史逐步重放，只看结构是怎么变化的。',
   instrumentLabel: '中际旭创 · 300308',
   timeframeLabel: '日线 · 近2年',
   dataLabel: '真实历史数据',
@@ -165,10 +166,10 @@ export const STRUCTURE_STORY = {
 // 原则：只解释 production POC 区间关系（区域重叠/迁移），不用固定价格阈值定义状态。
 export const CHIP_CONSENSUS_STORY = {
   index: '04',
-  eyebrow: '共识怎么形成',
-  title: '用近岸蛋白的真实历史成交，\n看市场共识怎样一点一点迁移。',
+  eyebrow: '成交重心怎么挪',
+  title: '股价先走，成交重心不一定马上跟。\n用近岸蛋白，看它怎么从35附近移到45附近。',
   subtitle:
-    '成交密集价来自历史成交分布。它描述市场交易最集中的位置，不等同于股东真实持仓成本。',
+    '股价涨上去了，不等于大家已经在新的位置充分成交。\n等新的区域真正堆出成交量，\n主要成交密集区才会跟着挪过去。',
   instrumentLabel: '近岸蛋白 · 688137',
   timeframeLabel: '日线 · 250个交易日',
   dataLabel: '真实历史数据',
@@ -192,24 +193,24 @@ export const CHIP_CONSENSUS_STORY = {
   distancePrefix: '距共识价',
   // 底部共识轨迹（M19：真实 POC 的离散 step track）。
   consensusTrackLabel: '主要成交密集价轨迹',
-  caption: '历史数据演示 · 使用盘迹真实筹码共识计算代码（不构成投资建议）',
+  caption: '主要成交密集价来自历史成交分布，\n不等于股东真实持仓成本。',
 }
 
 // 盘迹产品语言六维度（与产品页一致，营销侧不重新定义）。
 // 视觉：居中一句 + 横向六维（不再六个同样的 card）。
 export const MARKET_LANGUAGE = {
   index: '05',
-  eyebrow: '盘迹看什么',
-  title: '六个维度',
-  centerSentence: '盘迹不是给股票打一个分，而是描述它现在处于什么状态。',
-  subtitle: '趋势、结构、动量、成交量、筹码、事件——每个维度描述它现在的位置。',
+  eyebrow: '看一只票',
+  title: '盘迹主要看六件事。',
+  centerSentence: '六项分开看，\n比最后凑成一个总分更有用。',
+  subtitle: '趋势往哪走，结构有没有变，\n动量强不强，量有没有跟，\n筹码在哪，最近又发生了什么。',
   dimensions: [
-    { key: 'trend', title: '趋势', desc: '方向在哪，持续了多久。' },
-    { key: 'structure', title: '结构', desc: '高低点怎么移动，关键位置有没有被改变。' },
-    { key: 'momentum', title: '动量', desc: '推进的力度是变强还是变弱。' },
-    { key: 'volume', title: '成交量', desc: '这个变化有没有成交量支撑。' },
-    { key: 'chip', title: '筹码', desc: '成交集中在什么价位，共识在哪里形成。' },
-    { key: 'event', title: '事件', desc: '发生了什么，什么时候发生的。' },
+    { key: 'trend', title: '趋势', desc: '方向在哪，走了多久。' },
+    { key: 'structure', title: '结构', desc: '高低点怎么走，关键位置有没有变。' },
+    { key: 'momentum', title: '动量', desc: '这段推进是在变强，还是在变弱。' },
+    { key: 'volume', title: '成交量', desc: '这次变化，有没有量跟上。' },
+    { key: 'chip', title: '筹码', desc: '成交最密集的位置，现在在哪。' },
+    { key: 'event', title: '事件', desc: '最近有没有值得重新看的变化。' },
   ],
 }
 
@@ -266,30 +267,31 @@ export type ExploreStrategyCase = {
   readonly lead: string
   readonly text: string
   readonly examples: readonly string[]
+  readonly closing: string
 }
 
 export type StrategyCase = RealStrategyCase | ExploreStrategyCase
 
 export const STRATEGY_LAB = {
   index: '06',
-  eyebrow: '真实玩法',
-  title: '同一套盘迹，\n不止一种玩法。',
+  eyebrow: '真实案例',
+  title: '盘迹怎么用？\n先看三个真实例子。',
   subtitle:
-    '趋势、结构、动量、成交量和筹码不是一套固定答案。不同的人，可以用同一套状态语言表达自己的交易思路。',
+    '有人等反转确认，\n有人顺着趋势跟，\n也有人先从形态里找机会。\n工具一样，用法可以很不一样。',
   cases: [
     {
       id: 'dow123',
       kind: 'case',
-      tabLabel: '道氏123风格',
+      tabLabel: '道氏123思路',
       stock: '国创高新',
       symbol: '002377',
-      playbook: '道氏123风格 · 反转确认',
+      playbook: '国创高新｜道氏123思路',
       imageSrc: MARKETING_MEDIA.caseGuochuangDow123,
-      imageAlt: '盘迹国创高新道氏123风格历史案例截图',
-      lead: '先不猜底，等市场自己给出变化。',
-      what: '这个案例用盘迹表达道氏123的思路：先观察原有趋势是否开始失去延续性，再看关键结构有没有改变，最后观察新的方向能不能继续维持。',
-      panji: '盘迹不是因为出现一个点就给出答案，而是把趋势、结构、动量和成交量放到一起，让反转确认更容易被观察。',
-      note: '历史案例只用于说明方法，不代表后续走势。',
+      imageAlt: '盘迹国创高新道氏123思路历史案例截图',
+      lead: '这张图先看一件事：\n原来的下跌还在不在。',
+      what: '前面的下降趋势没被破坏之前，\n不急着猜底。\n\n等低点不再往下，\n关键结构被重新抬起来，\n再看新的方向能不能接上。',
+      panji: '盘迹把趋势和结构的变化\n直接标在图上。\n\n这里看到的是原趋势被破坏、\n结构开始转向的过程，\n不是一个“反转已经完成”的结论。',
+      note: '历史案例只用来说明\n盘迹怎么观察，\n不代表之后会怎么走。',
     },
     {
       id: 'trend',
@@ -297,13 +299,13 @@ export const STRATEGY_LAB = {
       tabLabel: '趋势跟踪',
       stock: '南亚新材',
       symbol: '688519',
-      playbook: '趋势跟踪',
+      playbook: '南亚新材｜趋势跟踪',
       imageSrc: MARKETING_MEDIA.caseNanyaTrend,
       imageAlt: '盘迹南亚新材趋势跟踪历史案例截图',
-      lead: '趋势出现以后，重点不是继续猜还能涨多少，而是判断它有没有结束。',
-      what: '主图用趋势变化表达方向，下方成交量和动量帮助观察这段趋势有没有继续得到市场参与。',
-      panji: '趋势跟踪关注的是状态还在不在。盘迹把趋势、量能和动量放在同一个工作区持续观察，而不是每天重新预测涨跌。',
-      note: '历史案例只用于说明方法，不代表后续走势。',
+      lead: '这类票不找底，\n重点是跟住已经走出来的趋势。',
+      what: '趋势向上时，\n主要看高低点有没有继续抬高，\n成交量和动量有没有明显掉下来。\n\n状态没坏，\n就不用每天重做一次判断。',
+      panji: '盘迹把趋势、量能和动量\n放在一张图里。\n\n哪一项开始变弱，\n会比只盯每天的涨跌\n更容易看出来。',
+      note: '历史案例只用来说明\n盘迹怎么观察，\n不代表之后会怎么走。',
     },
     {
       id: 'double-bottom',
@@ -311,29 +313,30 @@ export const STRATEGY_LAB = {
       tabLabel: '双底支撑',
       stock: '精智达',
       symbol: '688627',
-      playbook: '双底支撑 · 形态筛选',
+      playbook: '精智达｜双底支撑',
       imageSrc: MARKETING_MEDIA.caseJingzhidaDoubleBottom,
       imageAlt: '盘迹精智达双底支撑历史案例截图',
-      lead: '有些机会不是从趋势开始，而是从形态开始。',
-      what: '这个案例先从双底和支撑区域找到值得研究的位置，再观察第二次回踩以后，关键区域有没有守住、结构有没有改善。',
-      panji: '形态只是入口。盘迹继续用结构、成交量和动量帮助验证这个形态是否仍然值得观察。',
-      note: '历史案例只用于说明方法，不代表后续走势。',
+      lead: '双底只是把它放进候选，\n第二次回踩以后发生什么才更重要。',
+      what: '两次回到相近区域，\n第二次没有继续破低，\n随后价格重新往上走。\n\n这才是这张图里\n真正值得看的地方。',
+      panji: '可以先按形态找到它，\n再用结构、成交量和动量\n继续验证。\n\n盘迹不会替你判定\n“双底一定成立”。',
+      note: '历史案例只用来说明\n盘迹怎么观察，\n不代表之后会怎么走。',
     },
     {
       id: 'explore',
       kind: 'explore',
-      tabLabel: '更多玩法',
-      playbook: '更多玩法，待你来探索',
-      lead: '盘迹不是一套固定策略，而是一套描述市场状态的语言。',
-      text: '相同的六个维度，可以组合成完全不同的观察方法。你的选股审美，决定盘迹怎么被使用。',
+      tabLabel: '更多用法',
+      playbook: '还有很多用法，可以自己组合。',
+      lead: '盘迹不规定一套标准答案。',
+      text: '有人看趋势，有人看结构，\n也有人只想找突然放量、\n筹码迁移或刚发生结构变化的股票。\n\n六个维度都在，\n按自己的习惯组合就行。',
       examples: [
-        '板块内寻找机会',
-        '新趋势 + 异常放量',
-        '筹码重心迁移',
-        '结构事件近期发生',
-        '趋势 + 量能验证',
-        '自己的条件组合',
+        '板块里找相对强的',
+        '新趋势刚起来又放量',
+        '筹码重心刚发生迁移',
+        '结构刚出现变化',
+        '趋势没坏但量能变弱',
+        '自己组合条件',
       ],
+      closing: '用法可以不同，\n判断标准由你自己定。',
     },
   ],
 } as const
@@ -341,31 +344,28 @@ export const STRATEGY_LAB = {
 // 自选 + 通知（Watch + Notify）：流程 + 真实产品产出截图。
 export const WATCH_NOTIFY = {
   index: '07',
-  eyebrow: '不用一直盯着',
-  title: '不用一直盯着盘迹。',
-  subtitle: '值得重新看的时候，再把它送到你面前。',
-  steps: ['发现候选', '加入自选', '状态变化', '生成研究图片', '推送飞书'],
+  eyebrow: '留下来继续看',
+  title: '值得盯的留下，\n剩下的不用反复翻。',
+  subtitle: '放进自选以后，盘迹继续跟。\n状态有变化，\n再把研究图送到飞书。',
+  steps: ['找到候选', '加入自选', '状态变化', '生成研究图', '飞书收到'],
   // 真实飞书推送研究图（build:marketing-site 拷贝至 /marketing-assets/media/）。
   imageSrc: MARKETING_MEDIA.feishuPoster,
   imageAlt: '盘迹推送到飞书的研究图片（真实产出示意）',
-  imageNote: '图片为盘迹真实产出示意，非产品截图合成。',
+  imageNote: '盘迹真实产出示意。',
 }
 
-// 营销页对外链接（雪球搜索「小Z说事」）。
-export const XUEQIU_SEARCH_URL = 'https://xueqiu.com/k?q=%E5%B0%8FZ%E8%AF%B4%E4%BA%8B'
-
-// [V1.5] 雪球主页精确 URL（Owner 指定，用于社区二维码与整图可点击链接）。
+// 营销页对外链接（雪球主页精确 URL，Owner 指定，用于社区二维码与整图可点击链接）。
 export const XUEQIU_PROFILE_URL =
   'https://xueqiu.com/u/6601870666?scene=1036&share_uid=6601870666'
 
 // 最终 CTA（在大 footer 之前）：只做产品转化 + 社区轻入口。
 // [V1.5] 次级 CTA 改为「加入交流」锚点，不再重复雪球搜索入口（社区出口已收束进 Footer 双二维码）。
 export const FINAL_CTA = {
-  title: '开始使用盘迹',
-  subtitle: '盘迹负责压缩信息，不替你做判断。',
+  title: '先用起来，\n再看它合不合你的方法。',
+  subtitle: '少翻一点，看清一点。\n判断还是你自己做。',
   primaryCta: { label: '开始使用', href: '/login' },
   secondaryCta: {
-    label: '加入交流',
+    label: '加入交流群',
     href: '#community',
   },
 }
@@ -394,7 +394,7 @@ export type FooterCommunityCard = {
   href?: string
 }
 
-// 内容入口唯一对外链接见上方 XUEQIU_SEARCH_URL 声明。
+// 内容入口唯一对外链接：雪球主页精确 URL（XUEQIU_PROFILE_URL）。
 
 export const FOOTER = {
   brand: BRAND,
@@ -409,7 +409,7 @@ export const FOOTER = {
     {
       title: '内容',
       links: [
-        { label: '雪球搜索「小Z说事」', href: XUEQIU_SEARCH_URL, external: true },
+        { label: '小Z说股事', href: XUEQIU_PROFILE_URL, external: true },
         {
           label: '关注每日早晚复盘',
           note: '每日早晚各一篇，讲当天市场发生了什么。',
@@ -417,30 +417,26 @@ export const FOOTER = {
       ],
     },
   ] as FooterColumn[],
-  invitation: {
-    title: '关注小Z说事',
-    desc: '盘迹每日复盘在雪球发布，搜索「小Z说事」即可关注。',
-  },
   // [V1.5] 社区出口：两张真实可扫的二维码（QQ 群 + 雪球主页），收束「小Z说事 / QQ 邀请码」。
   //   card.href 存在时整图可点击（PC 用户不扫码也能打开）。
   community: {
     id: 'community',
-    title: '一起交流',
-    desc: '交流盘迹的使用方法，也可以在群里获取邀请码。',
+    title: '想聊盘迹，来这里。',
+    desc: '想交流怎么用、拿邀请码，进 QQ 群；\n想看每天的市场复盘，去雪球找小Z说股事。',
     cards: [
       {
         id: 'qq',
-        title: '加入盘迹交流群',
-        subtitle: 'QQ群 · 364121472',
+        title: '盘迹交流群',
+        subtitle: 'QQ群 364121472',
         note: '交流使用方法 · 获取邀请码',
         imageSrc: MARKETING_MEDIA.communityQqQr,
         imageAlt: '小Z说股事QQ群二维码，群号364121472',
       },
       {
         id: 'xueqiu',
-        title: '关注小Z说股事',
-        subtitle: '雪球 · 每日市场复盘',
-        note: '扫码或点击打开雪球主页',
+        title: '小Z说股事',
+        subtitle: '雪球 · 每日复盘',
+        note: '扫码或点击打开主页',
         imageSrc: MARKETING_MEDIA.communityXueqiuQr,
         imageAlt: '小Z说股事雪球主页二维码',
         href: XUEQIU_PROFILE_URL,
