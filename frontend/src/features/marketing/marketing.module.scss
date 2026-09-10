@@ -1470,10 +1470,11 @@ $marketing-section-y-mobile: 52px;
   background: rgba(0, 246, 194, 0.06);
 }
 
+// V1.5.3：内容驱动高度，不再硬塞 min-height 导致图片在 flex center 时上下悬空。
 .caseStage {
   display: grid;
   grid-template-columns: minmax(0, 2.1fr) minmax(300px, 1fr);
-  min-height: 520px;
+  align-items: start;
   overflow: hidden;
   background: v.$color-panel;
   border: 1px solid v.$color-border;
@@ -1485,7 +1486,7 @@ $marketing-section-y-mobile: 52px;
   margin: 0;
   min-width: 0;
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   background: v.$color-bg;
   border-right: 1px solid v.$color-border-soft;
 }
@@ -1495,6 +1496,7 @@ $marketing-section-y-mobile: 52px;
   width: 100%;
   height: auto;
   object-fit: contain;
+  object-position: top;
 }
 
 .caseImageMeta {
@@ -1516,7 +1518,7 @@ $marketing-section-y-mobile: 52px;
 }
 
 .caseExplanation {
-  padding: 30px 26px;
+  padding: 24px 24px 22px;
   display: flex;
   flex-direction: column;
 }
@@ -1528,28 +1530,28 @@ $marketing-section-y-mobile: 52px;
 }
 
 .casePlaybook {
-  margin: 8px 0 16px;
-  font-size: 24px;
+  margin: 6px 0 12px;
+  font-size: 22px;
   line-height: 1.2;
 }
 
 .caseLead {
-  margin: 0 0 28px;
-  font-size: 16px;
-  line-height: 1.7;
+  margin: 0 0 18px;
+  font-size: 15px;
+  line-height: 1.6;
   color: v.$color-text;
-  // V1.5.1: 中文文案自带换行，保留作者分行节奏，避免挤成连句。
+  // V1.5.3：文案已压缩（句子内无人工 \n），保留段落分隔。
   white-space: pre-line;
 }
 
 .caseExplainBlock {
-  padding: 18px 0;
+  padding: 14px 0;
   border-top: 1px solid v.$color-border-soft;
 }
 
 .caseExplainBlock > span {
   display: block;
-  margin-bottom: 7px;
+  margin-bottom: 6px;
   font-size: 11px;
   letter-spacing: 0.08em;
   color: v.$color-brand;
@@ -1558,24 +1560,25 @@ $marketing-section-y-mobile: 52px;
 .caseExplainBlock p {
   margin: 0;
   font-size: 13px;
-  line-height: 1.85;
+  line-height: 1.65;
   color: v.$color-muted;
   white-space: pre-line;
 }
 
 .caseDisclaimer {
-  margin: auto 0 0;
-  padding-top: 20px;
+  margin: 16px 0 0;
+  padding-top: 14px;
   font-size: 11px;
-  line-height: 1.7;
+  line-height: 1.6;
   color: v.$color-text-dim;
   white-space: pre-line;
 }
 
 // 更多用法探索板：不显示空白图片区，直接给状态语言组合。
 // 核心句「用法可以不同，判断标准由你自己定」放大强调。
+// V1.5.3：避免 4 个 tab 强行等高导致「更多用法」反而空出一块。
 .exploreStage {
-  min-height: 420px;
+  min-height: 380px;
   padding: 48px 40px;
   display: flex;
   flex-direction: column;
@@ -2243,6 +2246,28 @@ $marketing-section-y-mobile: 52px;
 
   .caseTabs {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  // V1.5.3 430：压右栏内边距，禁止横向溢出。
+  .caseExplanation {
+    padding: 20px 18px;
+  }
+
+  .casePlaybook {
+    font-size: 20px;
+  }
+
+  .caseLead {
+    margin-bottom: 14px;
+  }
+
+  .caseExplainBlock {
+    padding: 12px 0;
+  }
+
+  .caseDisclaimer {
+    margin-top: 12px;
+    padding-top: 12px;
   }
 
   // V1.5.2 430：分组改横向折行(2 列)，字段列表位于下方。
