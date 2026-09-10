@@ -6,11 +6,18 @@
 ## 适用边界
 
 - 部署来源只能是已推送到 `origin/dev` 的精确完整 SHA；
-- 唯一本地入口是 `scripts/ops/panji-test-deploy`；
-- 唯一服务器实现是 `scripts/deploy/panji-deploy.sh`；
-- 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`；
+- 本 Runbook 覆盖两个**互不竞争的部署域**，各自只有一个 owner：
+  - **Whole-system / runtime deployment**：唯一本地入口 `scripts/ops/panji-test-deploy`，
+    唯一服务器实现 `scripts/deploy/panji-deploy.sh`（负责 backend / 主 frontend SPA /
+    workers / runtime 环境 / migration（仅合同触发）/ `RUNTIME_SHA`；现有正式部署合同不变）。
+  - **Public Marketing Site 静态 artifact deployment**：唯一入口
+    `scripts/ops/panji-marketing-site-deploy <FULL_40_SHA>`，为窄范围静态 artifact lane，
+    只写 `/opt/panji-live/frontend/dist/{marketing-assets, site/index.html}`，不触碰容器 /
+    backend / DB / `RUNTIME_SHA`，详见「Public Marketing Site 轻量静态部署」一节。
+- 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`（仅 whole-system 域；
+  Marketing 域不触碰容器）；
 - 本 Runbook 不授权 stable deployment、migration 或业务数据操作；source-only Live Refresh
-  仅在用户要求查看或验证远程效果时执行，并继承代码改动的治理等级。
+  仅在用户要求查看或验证远程效果时执行，并继承代码改动的治理等级（仅适用于 whole-system 域）。
 
 ## 三条独立远程流程
 
@@ -250,3 +257,87 @@ migration 始终早于任何服务重启。migration 失败时：
 - 将 PostgreSQL、Redis、Umami 加入普通应用重启列表；
 - 同一次部署让运行代码同时来自镜像内置代码和非 Live Mount 路径；
 - 未验证完整 SHA、运行模式和挂载来源就报告成功。
+
+## Public Marketing Site 轻量静态部署
+
+> 本域与 whole-system / runtime deployment 是**两个不同部署域，各一个 owner**，互不竞争。
+> 当前操作权威即本 Runbook 本节；历史架构背景见 `docs/changes/records/CHANGE-20260909-002.md`。
+> 旧 `frontend/M0_ARCHITECTURE_CONTRACT.md` 工作台已退役（见
+> `docs/changes/records/CHANGE-20260910-002.md`）。本文件只记录当前操作 HOW，不复制脚本逐行。
+
+### 输入身份
+
+- 仅接受 **40 位完整 SHA**，且必须是 `origin/dev` 的祖先
+  （`git merge-base --is-ancestor <SHA> origin/dev` 通过；部署器本地与服务器侧均校验）。
+- 拒绝未 push 的本地工作树 / 本地提交；不得部署未上库内容。
+
+### 构建
+
+- 唯一 build owner：`npm run build:marketing-site`
+  （`vite build marketing-site --config ./vite.config.ts --base /marketing-assets/
+  --outDir ../dist-marketing-site`，并同步 canonical marketing media 到
+  `dist-marketing-site/media/`）。
+- 服务器使用独立 git worktree `/opt/panji-marketing-site-src`（从目标 SHA `--detach` 构建），
+  不改 `/root/web_dev` 当前 production deployment state。
+- node_modules 走 Docker named volume 缓存，仅当 `package-lock.json` 哈希变化才 `npm ci`；
+  具体 bash 行为以 `scripts/ops/panji-marketing-site-deploy` 当前实现为准，不逐行复制进本文件。
+
+### 写入范围
+
+- 正式 public-site HTML：`/opt/panji-live/frontend/dist/site/index.html`
+  （产品官网唯一部署槽位，只由本 lane 写入）。
+- 静态资源：`/opt/panji-live/frontend/dist/marketing-assets/`。
+- Nginx：`/ → /site/index.html`（由 `frontend/nginx.conf` 锁定，非本 lane 写入）。
+- 本地临时构建目录 `frontend/dist-marketing-site/` 仅构建产物，**不是** production serving root。
+
+### 明确不做什么（与当前脚本一致）
+
+Marketing lane **不**：
+
+- 改 backend / worker / DB / 执行 migration；
+- 更新 `RUNTIME_SHA` / `market.env`；
+- 改 `frontend/nginx.conf` / 主 SPA `dist/index.html`；
+- restart 任何容器；
+- 执行 `scripts/deploy/panji-deploy.sh`。
+
+### Safety assertions（成功边界）
+
+部署器在写入前后硬断言：
+
+- 主 SPA `dist/index.html` sha256 **before == after**（证明无改主 SPA）；
+- `trading-frontend` 容器 `StartedAt` **before == after**（证明无重启）。
+
+任一不一致即退出非零、不写官网。
+
+### SSOT 不变量（whole-system 与 Marketing lane 互不为敌）
+
+- whole-system frontend 同步（`scripts/deploy/panji-deploy.sh` 的 `sync_frontend_runtime`）
+  使用 `rsync --delete` 时**显式 `--exclude='site/'` 与 `--exclude='marketing-assets/'`**，
+  保护这两个目录（只由 Marketing lane 拥有）。
+- 因此 `panji-test-deploy` 与 `panji-marketing-site-deploy` **任意先后执行**，`/` 都必须是
+  产品官网，不得退化成主 SPA 或旧 portal——该不变量由
+  `frontend/scripts/contract-tests/public-site-slot.contract.test.ts` 锁死。
+
+### 路由兼容（用户可观察的当前 HTTP 行为）
+
+- `/marketing-preview` 与 `/marketing-preview/*` → 301 `/`；
+- `/landing`、`/landing/`、`/landing/index.html` → 301 `/`；
+- `/portal`、`/portal/*` → 301 `/`。
+
+上述 301 的**主 owner 是 `frontend/nginx.conf`**。Marketing 部署器仍维护磁盘
+`marketing-preview/index.html` redirect tombstone，属 defense-in-depth / residual
+compatibility artifact，**不得**写成 HTTP 301 的主 owner。
+
+### `--dry-run` 与 `--prepare-only`
+
+- `--dry-run`：只显示 Marketing artifact 部署计划（写目标、顺序、safety 断言），**不产生任何写入**。
+- `--prepare-only`：保留为 **CUTOVER / 恢复兼容能力**——只准备 `marketing-assets/` +
+  `site/index.html`，以磁盘文件为准确认官网就绪，**不要求根 `/` 当前已切到 site**
+  （旧 nginx 可能 SPA fallback 返回主 SPA）。当前正常架构 CUTOVER 已完成
+  （`CHANGE-20260909-002`，SHA `c79b59ef`），因此日常 Marketing 更新**不要求**先执行
+  `--prepare-only`；日常正常入口即 `scripts/ops/panji-marketing-site-deploy <FULL_SHA>`。
+
+### 授权边界
+
+本 lane 不改变部署授权模型；部署操作仍服从 `AGENTS.md`、`rules/80-deployment-migration.md`
+与本 Runbook。本轮仅文档整理，不通过文档清理扩大 live deployment 权限。
