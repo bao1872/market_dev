@@ -1,7 +1,6 @@
-// Watch + Notify（Full Alignment V1 · 新增）：
-// 标题 + 副标题 + 流程（发现候选 → 加入自选 → 状态变化 → 生成研究图片 → 飞书）。
-// 右侧使用项目已有真实素材 poster_img1.webp（真实飞书截图更接近），置于 phone frame 内。
-// 不自己画假的飞书通知卡。
+// Watch + Notify（V1.6 · 重定位为盘中监控）：
+// 左侧：一句 promise + 3 个用户场景（不是 5 条抽象流程） + 紧凑 flow；
+// 右侧：真实飞书研究图 poster，视觉重量与左侧接近，不制造中间真空。
 import ScrollReveal from '../components/ScrollReveal'
 import SectionHeading from '../components/SectionHeading'
 import { IconArrowRight } from '../components/MarketingIcons'
@@ -23,41 +22,65 @@ export default function WatchAndNotify() {
           subtitle={WATCH_NOTIFY.subtitle}
         />
         <ScrollReveal>
-          <div className={styles.watchGrid}>
-            {/* 左：流程 */}
-            <div className={styles.watchCopy}>
-              <ol className={styles.watchSteps}>
-                {WATCH_NOTIFY.steps.map((step, i) => (
-                  <li key={step} className={styles.watchStep}>
-                    <span className={styles.watchStepIndex}>
-                      {String(i + 1).padStart(2, '0')}
+          <div className={styles.watchStage}>
+            {/* 左：promise + 3 个用户场景 + 紧凑 flow */}
+            <div className={styles.watchScenarioSide}>
+              <strong className={styles.watchPromise}>
+                你不用一直盯着屏幕。
+                <br />
+                盘迹盯的是状态有没有变化。
+              </strong>
+
+              <div className={styles.watchScenarios}>
+                {WATCH_NOTIFY.scenarios.map((item, index) => (
+                  <article
+                    key={item.title}
+                    className={styles.watchScenario}
+                  >
+                    <span>{String(index + 1).padStart(2, '0')}</span>
+                    <div>
+                      <h3>{item.title}</h3>
+                      <p>{item.text}</p>
+                    </div>
+                  </article>
+                ))}
+              </div>
+
+              <div className={styles.watchCompactFlow}>
+                {WATCH_NOTIFY.flow.map((step, index) => (
+                  <div key={step} className={styles.watchFlowNode}>
+                    <span
+                      className={
+                        step === '盘中持续跟踪'
+                          ? styles.watchFlowPrimary
+                          : undefined
+                      }
+                    >
+                      {step}
                     </span>
-                    <span className={styles.watchStepLabel}>{step}</span>
-                    {i < WATCH_NOTIFY.steps.length - 1 ? (
+                    {index < WATCH_NOTIFY.flow.length - 1 && (
                       <IconArrowRight
-                        className={styles.watchStepArrow}
-                        width={16}
-                        height={16}
+                        width={14}
+                        height={14}
                         aria-hidden="true"
                       />
-                    ) : null}
-                  </li>
+                    )}
+                  </div>
                 ))}
-              </ol>
-              <p className={styles.watchNote}>{WATCH_NOTIFY.imageNote}</p>
+              </div>
             </div>
 
-            {/* 右：phone frame 内放真实截图 */}
-            <div className={styles.watchFrame}>
+            {/* 右：真实飞书研究图 */}
+            <figure className={styles.watchVisual}>
               <div className={styles.watchPhone}>
                 <img
-                  className={styles.watchImg}
                   src={WATCH_NOTIFY.imageSrc}
                   alt={WATCH_NOTIFY.imageAlt}
                   loading="lazy"
                 />
               </div>
-            </div>
+              <figcaption>{WATCH_NOTIFY.imageNote}</figcaption>
+            </figure>
           </div>
         </ScrollReveal>
       </div>

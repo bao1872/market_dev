@@ -66,6 +66,20 @@ export interface HeroStatusBadge {
 
 // Hero：两栏。左侧文案 + 六个维度 proof + CTA；右侧盘迹式筛选表。
 // 删除所有未经证实的 claim：1000+ 行业图 / 多市场实时同步 / 盘中持续刷新 / 0:19。
+
+// [V1.6] 第二屏（不编号）：用户问题视角，放在 Hero 之后、Discovery 之前。
+export const AUDIENCE_PROBLEMS = {
+  eyebrow: '先说为什么需要它',
+  title: '你不是缺更多指标，\n是没时间把该看的都看完。',
+  subtitle: '盘迹更适合已经有自己判断方法，\n但每天面对太多股票、太多信息、太少时间的人。',
+  problems: [
+    { title: '不知道今天先看谁', text: '全市场几千只股票都在动。一只只翻，时间很容易花在根本不值得研究的地方。', answer: '先把范围缩小，再研究。' },
+    { title: '有自己的方法，但每天筛一遍太累', text: '你知道自己偏好趋势、结构、放量还是筹码变化，但没必要每天重新从几千只股票开始找。', answer: '把自己的标准留下来。' },
+    { title: '自选越来越多，盘中根本盯不过来', text: '上班、开会、通勤时不可能一直看屏幕。十几只、几十只股票，也不可能同时盯。', answer: '有变化的时候再回来。' },
+    { title: '不想让软件替你下结论', text: '你需要的是更快找到候选、看清它现在是什么状态，不是让一个分数告诉你应该买还是卖。', answer: '判断仍然自己做。' },
+  ],
+  fit: ['有自己选股标准的人','每天需要看很多股票的人','习惯从板块或复盘进入个股的人','希望减少无效盯盘的人'],
+} as const
 export const HERO = {
   eyebrow: '盘迹 · 全市场状态终端',
   title: '先把全市场的变化找出来，\n再盯真正值得盯的。',
@@ -343,17 +357,20 @@ export const STRATEGY_LAB = {
 // 自选 + 通知（Watch + Notify）：流程 + 真实产品产出截图。
 export const WATCH_NOTIFY = {
   index: '07',
-  eyebrow: '留下来继续看',
-  title: '值得盯的留下，\n剩下的不用反复翻。',
-  subtitle: '放进自选以后，盘迹继续跟。\n状态有变化，\n再把研究图送到飞书。',
-  steps: ['找到候选', '加入自选', '状态变化', '生成研究图', '飞书收到'],
-  // 真实飞书推送研究图（build:marketing-site 拷贝至 /marketing-assets/media/）。
+  eyebrow: '盘中监控',
+  title: '没法一直盯盘，\n就只看真正发生变化的时候。',
+  subtitle: '上班、开会、通勤，或者自选太多时，不可能一直盯着每一只股票。\n把真正想看的留进自选，盘迹持续跟踪状态；有变化，再把研究图送到飞书。',
+  scenarios: [
+    { title: '上班没法一直看盘', text: '不需要隔几分钟切回来刷一次行情。' },
+    { title: '自选太多，根本盯不过来', text: '真正需要跟踪的留下，盘迹继续看它们的状态。' },
+    { title: '只想等重要变化', text: '没变化就不用处理；状态变了，再打开研究图看发生了什么。' },
+  ],
+  flow: ['加入自选','盘中持续跟踪','状态变化','生成研究图','飞书收到'],
   imageSrc: MARKETING_MEDIA.feishuPoster,
-  imageAlt: '盘迹推送到飞书的研究图片（真实产出示意）',
-  imageNote: '盘迹真实产出示意。',
-}
+  imageAlt: '盘迹状态变化后发送到飞书的真实研究图片',
+  imageNote: '盘迹真实研究图示例。',
+} as const
 
-// 营销页对外链接（雪球主页精确 URL，Owner 指定，用于社区二维码与整图可点击链接）。
 export const XUEQIU_PROFILE_URL =
   'https://xueqiu.com/u/6601870666?scene=1036&share_uid=6601870666'
 
@@ -396,51 +413,31 @@ export type FooterCommunityCard = {
 // 内容入口唯一对外链接：雪球主页精确 URL（XUEQIU_PROFILE_URL）。
 
 export const FOOTER = {
+  cta: {
+    title: '先用起来，再看它合不合你的方法。',
+    subtitle: '少翻一点，看清一点。判断还是你自己做。',
+    button: { label: '开始使用', href: '/login' },
+  },
+
   brand: BRAND,
   columns: [
-    {
-      title: '产品',
-      links: [
-        { label: '行情', href: '/market' },
-        { label: '自选', href: '/market?scope=watchlist' },
-      ],
-    },
-    {
-      title: '内容',
-      links: [
+    { title: '产品', links: [{ label: '行情', href: '/market' }, { label: '自选', href: '/market?scope=watchlist' }] },
+    { title: '内容', links: [
         { label: '小Z说股事', href: XUEQIU_PROFILE_URL, external: true },
-        {
-          label: '关注每日早晚复盘',
-          note: '每日早晚各一篇，讲当天市场发生了什么。',
-        },
-      ],
-    },
+        { label: '关注每日早晚复盘', note: '每日早晚各一篇，讲当天市场发生了什么。' },
+    ] },
   ] as FooterColumn[],
-  // [V1.5] 社区出口：两张真实可扫的二维码（QQ 群 + 雪球主页），收束「小Z说事 / QQ 邀请码」。
-  //   card.href 存在时整图可点击（PC 用户不扫码也能打开）。
+
+  // [V1.6] community.title/desc 已并入顶部 CTA + 二维码本身的 title/subtitle，不再重复。
   community: {
     id: 'community',
-    title: '想聊盘迹，来这里。',
-    desc: '想交流怎么用、拿邀请码，进 QQ 群；\n想看每天的市场复盘，去雪球找小Z说股事。',
     cards: [
-      {
-        id: 'qq',
-        title: '盘迹交流群',
-        subtitle: 'QQ群 364121472',
-        note: '交流使用方法 · 获取邀请码',
-        imageSrc: MARKETING_MEDIA.communityQqQr,
-        imageAlt: '小Z说股事QQ群二维码，群号364121472',
-      },
-      {
-        id: 'xueqiu',
-        title: '小Z说股事',
-        subtitle: '雪球 · 每日复盘',
-        note: '扫码或点击打开主页',
-        imageSrc: MARKETING_MEDIA.communityXueqiuQr,
-        imageAlt: '小Z说股事雪球主页二维码',
-        href: XUEQIU_PROFILE_URL,
-      },
+      { id: 'qq', title: '盘迹交流群', subtitle: 'QQ群 364121472', note: '交流使用方法 · 获取邀请码',
+        imageSrc: MARKETING_MEDIA.communityQqQr, imageAlt: '小Z说股事QQ群二维码，群号364121472' },
+      { id: 'xueqiu', title: '小Z说股事', subtitle: '雪球 · 每日复盘', note: '扫码或点击打开主页',
+        imageSrc: MARKETING_MEDIA.communityXueqiuQr, imageAlt: '小Z说股事雪球主页二维码', href: XUEQIU_PROFILE_URL },
     ] as FooterCommunityCard[],
   },
+
   copyright: '盘迹 · 看一眼就知道怎么用',
-}
+} as const

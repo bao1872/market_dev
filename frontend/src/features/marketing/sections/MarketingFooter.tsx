@@ -1,11 +1,7 @@
-// MarketingFooter（V1.5.2 统一 Footer / UNIFIED FOOTER）。
-// [V1.5] 社区出口：id="community"，底部 QQ 群 + 雪球主页双二维码。card.href 存在时可点击打开。
-// [V1.5.1] 删除重复雪球说明（FOOTER.invitation）；二维码 object-fit: contain，不 overlay/mask/filter/圆角。
-// [V1.5.2] 去掉独立 boxed footerCommunity 大卡片，并入一整块 footerUnified：
-//   桌面：所有文字集中左侧/左下，两个小二维码位于右下；
-//   430：文字在上、两个约 104px 二维码并排在最下。
-//   二维码下仅保留卡片的 title + subtitle，不再在码下附说明（说明已在左侧 community copy）。
-//   禁止重新裁 canonical QR asset（QQ 保持 922×922），这里只控制页面显示尺寸。
+// MarketingFooter（V1.6 · FinalCTA 并入）：
+// 顶部：一行 CTA（标题 + 开始使用按钮），彻底删除独立 FinalCTA section。
+// 下方：原 unified footer（brand + columns + 二维码）；删除 footerCommunityCopy 重复说明。
+import clsx from 'clsx'
 import BrandLogo from '@/components/BrandLogo'
 import { FOOTER } from '../data/copy'
 import styles from '../marketing.module.scss'
@@ -13,59 +9,64 @@ import styles from '../marketing.module.scss'
 export default function MarketingFooter() {
   return (
     <footer
-      className={styles.footer}
+      className={clsx(styles.footer, styles.footerUnified)}
       id={FOOTER.community.id}
       data-testid="marketing-footer"
     >
       <div className={styles.container}>
-        <div className={styles.footerUnified}>
-          <div className={styles.footerLeft}>
-            <div className={styles.footerMain}>
-              <div className={styles.footerBrand}>
-                <BrandLogo variant="footer" />
-                <p className={styles.footerDesc}>{FOOTER.brand.description}</p>
-              </div>
-
-              {FOOTER.columns.map((col) => (
-                <div key={col.title}>
-                  <h3 className={styles.footerTitle}>{col.title}</h3>
-                  <ul className={styles.footerList}>
-                    {col.links.map((link) => (
-                      <li key={`${link.href ?? 'text'}-${link.label}`}>
-                        {link.href ? (
-                          <a
-                            className={styles.footerLink}
-                            href={link.href}
-                            {...(link.external
-                              ? { target: '_blank', rel: 'noopener noreferrer' }
-                              : {})}
-                          >
-                            {link.label}
-                          </a>
-                        ) : (
-                          <span className={styles.footerText}>
-                            {link.label}
-                            {link.note ? (
-                              <em className={styles.footerNote}>{link.note}</em>
-                            ) : null}
-                          </span>
-                        )}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              ))}
-            </div>
-
-            <div className={styles.footerCommunityCopy}>
-              <h3 className={styles.footerCommunityTitle}>
-                {FOOTER.community.title}
-              </h3>
-              <p className={styles.footerCommunityDesc}>
-                {FOOTER.community.desc}
-              </p>
-            </div>
+        {/* [V1.6] 顶部 CTA 行 — 替代已删除的独立 FinalCTA section */}
+        <div className={styles.footerCtaRow}>
+          <div>
+            <h2>{FOOTER.cta.title}</h2>
+            <p>{FOOTER.cta.subtitle}</p>
           </div>
+          <a
+            className={clsx(styles.btn, styles.btnPrimary, styles.footerCtaBtn)}
+            href={FOOTER.cta.button.href}
+          >
+            {FOOTER.cta.button.label}
+          </a>
+        </div>
+
+        {/* 分隔线 */}
+        <div className={styles.footerDivider} />
+
+        {/* 下方 unified footer（无独立 community 说明卡片） */}
+        <div className={styles.footerMain}>
+          <div className={styles.footerBrand}>
+            <BrandLogo variant="footer" />
+            <p className={styles.footerDesc}>{FOOTER.brand.description}</p>
+          </div>
+
+          {FOOTER.columns.map((col) => (
+            <div key={col.title}>
+              <h3 className={styles.footerTitle}>{col.title}</h3>
+              <ul className={styles.footerList}>
+                {col.links.map((link) => (
+                  <li key={`${link.href ?? 'text'}-${link.label}`}>
+                    {link.href ? (
+                      <a
+                        className={styles.footerLink}
+                        href={link.href}
+                        {...(link.external
+                          ? { target: '_blank', rel: 'noopener noreferrer' }
+                          : {})}
+                      >
+                        {link.label}
+                      </a>
+                    ) : (
+                      <span className={styles.footerText}>
+                        {link.label}
+                        {link.note ? (
+                          <em className={styles.footerNote}>{link.note}</em>
+                        ) : null}
+                      </span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
 
           <div className={styles.footerQrGrid}>
             {FOOTER.community.cards.map((card) => {
@@ -82,7 +83,6 @@ export default function MarketingFooter() {
                   <span>{card.subtitle}</span>
                 </>
               )
-
               return card.href ? (
                 <a
                   key={card.id}

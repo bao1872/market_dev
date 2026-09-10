@@ -22,7 +22,6 @@ function readSrc(relPath: string): string {
 
 const copySrc = readSrc('src/features/marketing/data/copy.ts')
 const watchSrc = readSrc('src/features/marketing/sections/WatchAndNotify.tsx')
-const finalCtaSrc = readSrc('src/features/marketing/sections/FinalCTA.tsx')
 const scssSrc = readSrc('src/features/marketing/marketing.module.scss')
 const packageJson = readSrc('package.json')
 const deploySrc = readSrc('../scripts/ops/panji-marketing-site-deploy')
@@ -196,16 +195,6 @@ test('V1.1-6. 单一视觉系统：文件头 V1.1、无遗留三代叠加 layout
   }
 })
 
-test('V1.1-7. FinalCTA 不再渲染 invite 入口（社区出口收束进 Footer 双二维码）', () => {
-  assert.ok(
-    !/finalInvite/.test(finalCtaSrc),
-    'FinalCTA 不得再渲染 finalInvite 文本入口（V1.5 已删除）',
-  )
-  assert.ok(
-    !finalCtaSrc.includes('FINAL_CTA.invite'),
-    'FinalCTA 不得引用 FINAL_CTA.invite（V1.5 已删除）',
-  )
-})
 
 // ===== V1.5.1 QQ QR 裁剪和 CSS 修复契约测试 =====
 
