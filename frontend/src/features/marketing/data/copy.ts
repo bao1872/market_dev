@@ -222,10 +222,9 @@ export const FIRST_PYRAMID = {
     ariaLabel: '第一金字塔字段字典',
     triggerLabel: '第一金字塔字段字典',
     title: '第一金字塔字段字典',
-    subtitle: '按维度折叠，需要时再展开。平时只看到结论，需要追细节的时候再一层层打开。',
+    subtitle: '99个字段按8个维度整理。\n先看分组，需要时再查具体定义。',
     closeLabel: '关闭',
     searchPlaceholder: '搜索字段…',
-    pendingNote: '字段内容由产品侧统一维护（M3.5 shared registry），此处仅展示分组外壳，DATA PENDING。',
     // 8 个维度分组（非字段级复制）
     groups: [
       { key: 'snapshot', label: '快照' },

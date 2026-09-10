@@ -1,8 +1,12 @@
-// 第一金字塔 Drawer（Full Alignment V1）：
-// UI shell 做到完整：搜索框 + 8 个维度分组 tab。
-// 具体 99 字段由 M3.5 共享 presentation registry 接入，本轮明确标注 DATA PENDING，不伪造。
-import { useEffect } from 'react'
+// 第一金字塔 Drawer（Marketing V1.5.2 / M3.5 接线完成）：
+// 直接消费产品 SSOT 派生的 MARKETING_FIRST_PYRAMID_FIELDS（99 字段）。
+// 布局：左 8 个分组按钮（含字段数）→ 右侧当前分组字段 title + description。
+// 搜索跨 99 字段匹配（title + description），搜索时显示每条所属分组 label。
+// 默认打开「趋势」而不是「快照」，避免一上来就看到交易日/来源等元数据。
+// 完全静态：整个字典内容均来自 public adapter，禁止远端动态取数与外部字段规格 hook。
+import { useEffect, useMemo, useState } from 'react'
 import { FIRST_PYRAMID } from '../data/copy'
+import { MARKETING_FIRST_PYRAMID_FIELDS } from '../data/firstPyramidPublicDictionary'
 import styles from '../marketing.module.scss'
 
 type Props = {
@@ -11,6 +15,9 @@ type Props = {
 }
 
 export default function FirstPyramidDrawerShell({ open, onClose }: Props) {
+  const [query, setQuery] = useState('')
+  const [activeGroup, setActiveGroup] = useState('trend')
+
   useEffect(() => {
     if (!open) return
 
@@ -24,9 +31,26 @@ export default function FirstPyramidDrawerShell({ open, onClose }: Props) {
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [open, onClose])
 
-  if (!open) return null
-
+  // 所有 hooks 必须在条件 return 之前调用，否则 open 切换会改变 hook 数量
+  // 触发 React error #310（Rendered more hooks than during the previous render）。
   const { drawer } = FIRST_PYRAMID
+  const keyword = query.trim().toLowerCase()
+
+  const matchedFields = useMemo(() => {
+    if (!keyword) {
+      const activeLabel =
+        drawer.groups.find((group) => group.key === activeGroup)?.label ?? ''
+      return MARKETING_FIRST_PYRAMID_FIELDS.filter(
+        (field) => field.group === activeLabel,
+      )
+    }
+
+    return MARKETING_FIRST_PYRAMID_FIELDS.filter((field) =>
+      `${field.title} ${field.description}`.toLowerCase().includes(keyword),
+    )
+  }, [keyword, activeGroup, drawer.groups])
+
+  if (!open) return null
 
   return (
     <div
@@ -59,33 +83,59 @@ export default function FirstPyramidDrawerShell({ open, onClose }: Props) {
             <span aria-hidden="true">×</span>
           </button>
         </div>
+
         <div className={styles.fieldDrawerBody}>
-          {/* 搜索 shell（V1 仅外壳，字段内容 M3.5 接入） */}
           <div className={styles.fieldSearch}>
             <input
               type="search"
               className={styles.fieldSearchInput}
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
               placeholder={drawer.searchPlaceholder}
               aria-label={drawer.searchPlaceholder}
             />
           </div>
 
-          {/* 8 个维度分组 tab */}
-          <ul className={styles.fieldGroups}>
-            {drawer.groups.map((g, i) => (
-              <li
-                key={g.key}
-                className={i === 0 ? styles.fieldGroupActive : styles.fieldGroup}
-              >
-                {g.label}
-              </li>
-            ))}
-          </ul>
+          <div className={styles.fieldDictionary}>
+            <nav className={styles.fieldGroups} aria-label="第一金字塔字段分组">
+              {drawer.groups.map((group) => {
+                const count = MARKETING_FIRST_PYRAMID_FIELDS.filter(
+                  (field) => field.group === group.label,
+                ).length
 
-          {/* DATA PENDING：不伪造 99 项 */}
-          <div className={styles.fieldPending} role="note">
-            <span className={styles.fieldPendingTag}>DATA PENDING</span>
-            <p className={styles.fieldNote}>{drawer.pendingNote}</p>
+                return (
+                  <button
+                    key={group.key}
+                    type="button"
+                    className={
+                      activeGroup === group.key
+                        ? styles.fieldGroupActive
+                        : styles.fieldGroup
+                    }
+                    onClick={() => setActiveGroup(group.key)}
+                  >
+                    <span>{group.label}</span>
+                    <small>{count}</small>
+                  </button>
+                )
+              })}
+            </nav>
+
+            <div className={styles.fieldList}>
+              {matchedFields.map((field) => (
+                <article key={field.key} className={styles.fieldRow}>
+                  {keyword && (
+                    <span className={styles.fieldRowGroup}>{field.group}</span>
+                  )}
+                  <strong>{field.title}</strong>
+                  <p>{field.description}</p>
+                </article>
+              ))}
+
+              {matchedFields.length === 0 && (
+                <p className={styles.fieldEmpty}>没找到相关字段。</p>
+              )}
+            </div>
           </div>
         </div>
       </aside>

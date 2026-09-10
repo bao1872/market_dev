@@ -1795,7 +1795,7 @@ $marketing-section-y-mobile: 52px;
 }
 
 .fieldDrawer {
-  width: min(520px, 100%);
+  width: min(680px, 100%);
   height: 100%;
   background: v.$color-panel;
   border-left: 1px solid v.$color-border;
@@ -1822,6 +1822,8 @@ $marketing-section-y-mobile: 52px;
   margin: 0;
   font-size: 12px;
   color: v.$color-muted;
+  // V1.5.2: 中文文案自带换行，保留分行节奏。
+  white-space: pre-line;
 }
 
 .fieldDrawerClose {
@@ -1841,7 +1843,7 @@ $marketing-section-y-mobile: 52px;
 }
 
 .fieldSearch {
-  margin-bottom: 12px;
+  margin-bottom: 14px;
 }
 
 .fieldSearchInput {
@@ -1859,27 +1861,44 @@ $marketing-section-y-mobile: 52px;
   }
 }
 
+// V1.5.2: 字段字典两栏（左分组导航 / 右字段列表）
+.fieldDictionary {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr);
+  gap: 18px;
+}
+
 .fieldGroups {
   margin: 0;
   padding: 0;
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 5px;
 }
 
 .fieldGroup,
 .fieldGroupActive {
-  padding: 8px 12px;
+  width: 100%;
+  padding: 9px 11px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
   border-radius: 8px;
   font-size: 13px;
   cursor: pointer;
   color: v.$color-muted;
   border: 1px solid transparent;
+  background: transparent;
+
+  small {
+    font-size: 11px;
+  }
 }
 
 .fieldGroup:hover {
   color: v.$color-text;
+  background: rgba(255, 255, 255, 0.04);
 }
 
 .fieldGroupActive {
@@ -1888,49 +1907,79 @@ $marketing-section-y-mobile: 52px;
   border-color: rgba(0, 246, 194, 0.3);
 }
 
-.fieldPending {
-  margin-top: 16px;
-  padding: 14px 16px;
-  background: rgba(56, 130, 246, 0.06);
-  border: 1px solid rgba(56, 130, 246, 0.3);
+.fieldList {
+  min-width: 0;
+  border: 1px solid v.$color-border-soft;
   border-radius: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  overflow: hidden;
 }
 
-.fieldPendingTag {
-  display: inline-flex;
-  align-self: flex-start;
-  padding: 3px 10px;
-  border-radius: 999px;
-  background: rgba(56, 130, 246, 0.12);
-  border: 1px solid rgba(56, 130, 246, 0.5);
-  color: v.$color-info;
-  font-family: v.$font-mono;
-  font-size: 11px;
-  letter-spacing: 0.12em;
+.fieldRow {
+  padding: 13px 15px;
+  border-bottom: 1px solid v.$color-border-soft;
+
+  &:last-child {
+    border-bottom: 0;
+  }
+
+  strong {
+    display: block;
+    font-size: 13px;
+    color: v.$color-text;
+  }
+
+  p {
+    margin: 5px 0 0;
+    font-size: 12px;
+    line-height: 1.6;
+    color: v.$color-muted;
+  }
 }
 
-.fieldNote {
+.fieldRowGroup {
+  display: block;
+  margin-bottom: 4px;
+  font-size: 10px;
+  color: v.$color-brand;
+}
+
+.fieldEmpty {
   margin: 0;
-  font-size: 12px;
-  line-height: 1.6;
+  padding: 32px 20px;
+  text-align: center;
   color: v.$color-muted;
 }
 
 // ===== 15 footer =====
 .footer {
-  padding: 40px 0 24px;
+  padding: 42px 0 22px;
   border-top: 1px solid v.$color-border-soft;
   background: rgba(255, 255, 255, 0.015);
 }
 
-.footerInner {
+// V1.5.2 UNIFIED FOOTER：去掉独立 boxed footerCommunity 大卡片，
+// 合并为一整块——所有文字集中左侧/左下，两个小二维码位于右下。
+.footerUnified {
+  min-height: 230px;
   display: grid;
-  grid-template-columns: 1.5fr 0.65fr 1fr 1fr;
-  gap: 36px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 56px;
+  align-items: end;
+}
+
+.footerLeft {
+  min-width: 0;
+}
+
+.footerMain {
+  display: grid;
+  grid-template-columns: minmax(260px, 1.3fr) auto auto;
+  gap: 46px;
   align-items: start;
+}
+
+.footerBrand {
+  min-width: 0;
 }
 
 .footerDesc {
@@ -1939,6 +1988,8 @@ $marketing-section-y-mobile: 52px;
   line-height: 1.65;
   color: v.$color-muted;
   max-width: 320px;
+  // V1.5.2: 中文文案自带换行，保留分行节奏。
+  white-space: pre-line;
 }
 
 .footerTitle {
@@ -1980,6 +2031,95 @@ $marketing-section-y-mobile: 52px;
   color: v.$color-text-dim;
 }
 
+.footerCommunityCopy {
+  max-width: 620px;
+  margin-top: 38px;
+
+  h3 {
+    margin: 0 0 8px;
+    font-size: 17px;
+    line-height: 1.2;
+  }
+
+  p {
+    margin: 0;
+    max-width: 560px;
+    font-size: 12px;
+    line-height: 1.7;
+    color: v.$color-muted;
+    white-space: pre-line;
+  }
+}
+
+.footerCommunityTitle {
+  margin: 0 0 8px;
+  font-size: 17px;
+  line-height: 1.2;
+  color: v.$color-text;
+}
+
+.footerCommunityDesc {
+  margin: 0;
+  max-width: 560px;
+  font-size: 12px;
+  line-height: 1.7;
+  color: v.$color-muted;
+  white-space: pre-line;
+}
+
+// 小二维码（V1.5.2：二维码下仅保留 title + subtitle，不再显示 note；
+// 说明信息已在左侧 community copy 承担）
+.footerQrGrid {
+  display: grid;
+  grid-template-columns: repeat(2, 120px);
+  gap: 16px;
+  align-items: end;
+  justify-content: end;
+}
+
+.footerQrCompact {
+  width: 120px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  color: inherit;
+  text-decoration: none;
+  text-align: center;
+
+  strong {
+    font-size: 12px;
+    line-height: 1.35;
+    font-weight: 600;
+    color: v.$color-text;
+  }
+
+  span {
+    font-size: 10px;
+    line-height: 1.4;
+    color: v.$color-muted;
+  }
+}
+
+.footerQrImage {
+  width: 116px;
+  height: 116px;
+  display: grid;
+  place-items: center;
+  // #fff 为二维码可扫要求的白色 quiet zone backdrop（功能必需，非品牌装饰色）。
+  // V1.5.1/1.2: 二维码图片本身不圆角、不裁切（禁止 overflow hidden / border-radius 于容器），
+  //   保证 QQ 艺术码三个定位标与深色底完整保留。圆润只允许在卡片外壳上。
+  background: #fff;
+  border: 1px solid v.$color-border-soft;
+}
+
+.footerQrImage img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
 .footerBottom {
   margin-top: 28px;
   padding-top: 14px;
@@ -1987,89 +2127,6 @@ $marketing-section-y-mobile: 52px;
   font-size: 11px;
   color: v.$color-text-dim;
   font-family: v.$font-mono;
-}
-
-// ===== 15.5 footer community（V1.5 社区出口：双二维码）=====
-// 二维码不 overlay 文字/mask/filter；card.href 存在时整图可点击。
-.footerCommunity {
-  margin-top: 36px;
-  padding: 26px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
-  gap: 36px;
-  align-items: center;
-  background: rgba(255, 255, 255, 0.02);
-  border: 1px solid v.$color-border-soft;
-  border-radius: 14px;
-}
-
-.footerCommunityCopy {
-  min-width: 0;
-}
-
-.footerCommunityTitle {
-  margin: 0 0 8px;
-  font-size: 20px;
-  line-height: 1.2;
-}
-
-.footerCommunityDesc {
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.7;
-  color: v.$color-muted;
-  max-width: 420px;
-}
-
-.footerQrGrid {
-  display: flex;
-  gap: 22px;
-  align-items: stretch;
-}
-
-.footerQrCard {
-  width: 210px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  text-align: center;
-  gap: 6px;
-}
-
-.footerQrImage {
-  width: 204px;
-  aspect-ratio: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  margin-bottom: 6px;
-  // #fff 为二维码可扫要求的白色 quiet zone backdrop（功能必需，非品牌装饰色）。
-  // V1.5.1: 二维码图片本身不圆角、不裁切（禁止 overflow hidden / border-radius 于容器），
-  //   保证 QQ 艺术码三个定位标与深色底完整保留。圆润只允许在卡片外壳上。
-  background: #fff;
-  border: 1px solid v.$color-border-soft;
-}
-
-.footerQrImage img {
-  display: block;
-  width: 100%;
-  height: 100%;
-  object-fit: contain;
-}
-
-.footerQrCardTitle {
-  font-size: 14px;
-  color: v.$color-text;
-}
-
-.footerQrCardSubtitle {
-  font-size: 12px;
-  color: v.$color-muted;
-}
-
-.footerQrCardNote {
-  font-size: 11px;
-  color: v.$color-text-dim;
 }
 
 // ===== 16 responsive =====
@@ -2115,11 +2172,6 @@ $marketing-section-y-mobile: 52px;
     border-bottom: 1px solid v.$color-border-soft;
   }
 
-  .footerCommunity {
-    grid-template-columns: 1fr 1fr;
-    gap: 24px;
-  }
-
   .watchGrid {
     grid-template-columns: 1fr;
     gap: 36px;
@@ -2159,17 +2211,55 @@ $marketing-section-y-mobile: 52px;
     grid-template-columns: repeat(2, 1fr);
   }
 
-  .footerInner {
+  // V1.5.2 430：文字在上、两个约 104px 二维码并排在最下。
+  .footerUnified {
+    grid-template-columns: 1fr;
+    gap: 28px;
+    min-height: 0;
+  }
+
+  .footerMain {
     grid-template-columns: 1fr 1fr;
+    gap: 26px 32px;
+  }
+
+  .footerBrand {
+    grid-column: 1 / -1;
+  }
+
+  .footerQrGrid {
+    grid-template-columns: repeat(2, 108px);
+    justify-content: start;
+  }
+
+  .footerQrCompact {
+    width: 108px;
+  }
+
+  .footerQrImage {
+    width: 104px;
+    height: 104px;
   }
 
   .caseTabs {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
-  .footerQrGrid {
-    flex-direction: column;
-    align-items: stretch;
+  // V1.5.2 430：分组改横向折行(2 列)，字段列表位于下方。
+  .fieldDictionary {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .fieldGroups {
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  .fieldGroup,
+  .fieldGroupActive {
+    width: calc(50% - 3px);
   }
 }
 

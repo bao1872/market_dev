@@ -1139,6 +1139,51 @@ if (COLUMN_DEFS.length !== 99) {
   throw new Error(`COLUMN_DEFS must have 99 entries, got ${COLUMN_DEFS.length}`)
 }
 
+// ===== 纯展示 dictionary（由 COLUMN_DEFS + FP_FIELD_GROUPS 派生）=====
+// 不复制 99 条字段；只导出字段的展示语义（key/group/title/shortTitle/helpText），供
+// Marketing 字段字典等非产品表格消费。不得据此改动 render/filterSpec/sorting 行为。
+export type FirstPyramidDictionaryField = {
+  key: string
+  group: keyof typeof FP_FIELD_GROUPS
+  title: string
+  shortTitle?: string
+  helpText: string
+}
+
+const FP_GROUP_BY_FIELD = new Map<string, keyof typeof FP_FIELD_GROUPS>(
+  Object.entries(FP_FIELD_GROUPS).flatMap(([group, keys]) =>
+    (keys as readonly string[]).map(
+      (key) => [key, group] as [string, keyof typeof FP_FIELD_GROUPS],
+    ),
+  ),
+)
+
+/**
+ * 99 个第一金字塔字段的纯展示字典（唯一来源：COLUMN_DEFS + FP_FIELD_GROUPS）。
+ * Marketing 字段字典直接消费此导出，禁止另写第二份 99 字段。
+ */
+export const FIRST_PYRAMID_FIELD_DICTIONARY: readonly FirstPyramidDictionaryField[] =
+  COLUMN_DEFS.map((def) => {
+    const group = FP_GROUP_BY_FIELD.get(def.key)
+    if (!group) {
+      throw new Error(`Missing First Pyramid group for ${def.key}`)
+    }
+    return {
+      key: def.key,
+      group,
+      title: def.title,
+      shortTitle: def.shortTitle,
+      helpText: def.helpText ?? '',
+    }
+  })
+
+// 运行期断言：字典必须 = 99 字段
+if (FIRST_PYRAMID_FIELD_DICTIONARY.length !== 99) {
+  throw new Error(
+    `FIRST_PYRAMID_FIELD_DICTIONARY must have 99 fields, got ${FIRST_PYRAMID_FIELD_DICTIONARY.length}`,
+  )
+}
+
 // ===== 筛选器 enumOptions（canonical value → 展示 label；提交仍为 canonical value）=====
 // [Commit C / P0-3] 仅对下发英文/canonical 枚举值的列提供中文 label 映射；
 // 后端已下发中文的枚举（挤压状态/量能徽标/量价关系/趋势方向）不在此列，FilterPopover 回退用 enum_values。
