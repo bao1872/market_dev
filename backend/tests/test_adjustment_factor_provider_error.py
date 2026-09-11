@@ -29,7 +29,7 @@ class _FlakyAdapter:
     def __init__(self, exc: Exception) -> None:
         self._exc = exc
 
-    def get_xdxr_info(self, symbol: str) -> Any:
+    def get_xdxr_info(self, symbol: str, **kwargs: Any) -> Any:
         raise self._exc
 
 
@@ -37,7 +37,7 @@ class _EmptyAdapter:
     def __init__(self, df: pd.DataFrame) -> None:
         self._df = df
 
-    def get_xdxr_info(self, symbol: str) -> Any:
+    def get_xdxr_info(self, symbol: str, **kwargs: Any) -> Any:
         return self._df
 
 
@@ -93,3 +93,52 @@ async def test_no_company_action_returns_none(
     )
 
     assert result is None
+
+
+class _RecordingAdapter:
+    """记录 get_xdxr_info 调用时传入的 kwargs（验证 force_refresh 透传）。"""
+
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+        self.last_kwargs: dict[str, Any] = {}
+
+    def get_xdxr_info(self, symbol: str, **kwargs: Any) -> Any:
+        self.last_kwargs = kwargs
+        return self._df
+
+
+@pytest.mark.asyncio
+async def test_detect_passes_force_refresh_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """force_refresh=True 必须透传给底层 get_xdxr_info（AfterClose 首遍 fresh 检测）。"""
+    service = AdjustmentFactorService()
+    adapter = _RecordingAdapter(pd.DataFrame())
+    monkeypatch.setattr(service, "_get_stored_fingerprint", lambda iid: "")
+    monkeypatch.setattr(service, "_store_fingerprint", lambda iid, fp: None)
+
+    await service.detect_company_action_change(
+        None,  # type: ignore[arg-type]
+        uuid.uuid4(),
+        "600519",
+        adapter,  # type: ignore[arg-type]
+        force_refresh=True,
+    )
+
+    assert adapter.last_kwargs.get("force_refresh") is True
+
+
+@pytest.mark.asyncio
+async def test_detect_defaults_force_refresh_false(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认 detect 不应强制刷新（audit 阶段复用本轮已写入的缓存）。"""
+    service = AdjustmentFactorService()
+    adapter = _RecordingAdapter(pd.DataFrame())
+    monkeypatch.setattr(service, "_get_stored_fingerprint", lambda iid: "")
+    monkeypatch.setattr(service, "_store_fingerprint", lambda iid, fp: None)
+
+    await service.detect_company_action_change(
+        None,  # type: ignore[arg-type]
+        uuid.uuid4(),
+        "600519",
+        adapter,  # type: ignore[arg-type]
+    )
+
+    assert adapter.last_kwargs.get("force_refresh") is False

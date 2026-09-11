@@ -1111,7 +1111,9 @@ class PytdxAdapter(Exchange):
             logger.warning("get_realtime_quote 失败 symbol=%s: %s", symbol, exc)
             return None
 
-    def get_xdxr_info(self, symbol: str) -> pd.DataFrame:
+    def get_xdxr_info(
+        self, symbol: str, *, force_refresh: bool = False
+    ) -> pd.DataFrame:
         """获取除权除息数据（带 Redis 缓存与重试）。
 
         用于计算前复权因子。返回的 DataFrame 包含所有除权除息事件，
@@ -1122,9 +1124,12 @@ class PytdxAdapter(Exchange):
         - TTL: 24 小时（xdxr 数据变化频率低）
         - miss 时从 pytdx 拉取并回填
         - Redis 不可用时降级为直查 pytdx（捕获 RedisError，记录 warning）
+        - force_refresh=True 时跳过缓存，直接拉取远端并刷新缓存
 
         Args:
             symbol: 股票代码（如 '000001'）
+            force_refresh: 若为 True，跳过 Redis 缓存直接拉取远端并刷新缓存
+                （AfterClose 本轮因子检测首遍使用；审计阶段复用本轮写入的新缓存）。
 
         Returns:
             DataFrame: columns=[date, category, name, fenhong, peigujia, songzhuangu, peigu]
@@ -1134,9 +1139,9 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 重试后仍失败
         """
-        # 1. 尝试读缓存（仅当缓存启用时）
+        # 1. 尝试读缓存（仅当缓存启用且非强制刷新时）
         settings = get_settings()
-        if settings.bars_redis_cache_enabled:
+        if settings.bars_redis_cache_enabled and not force_refresh:
             cache_key = f"{_XDXR_CACHE_PREFIX}:{symbol}"
             try:
                 client = get_sync_redis()
@@ -1148,8 +1153,12 @@ class PytdxAdapter(Exchange):
                         # 反序列化后恢复 date 列类型
                         if "date" in df.columns:
                             df["date"] = pd.to_datetime(df["date"]).dt.tz_localize(None)
-                        logger.debug("xdxr 缓存命中 symbol=%s", symbol)
-                        return df
+                    # 重要：空 DataFrame 也属于合法 negative cache，
+                    # 不得因为 df.empty 就再次远端抓取。
+                    logger.debug(
+                        "xdxr 缓存命中 symbol=%s force_refresh=%s", symbol, force_refresh
+                    )
+                    return df
                 logger.debug("xdxr 缓存未命中 symbol=%s", symbol)
             except redis.RedisError as exc:
                 logger.warning("xdxr 缓存读取失败 symbol=%s: %s，降级直查", symbol, exc)
@@ -1159,8 +1168,9 @@ class PytdxAdapter(Exchange):
         # 2. 缓存 miss 或 Redis 不可用：从 pytdx 拉取
         df = self._fetch_xdxr_from_pytdx(symbol)
 
-        # 3. 回填缓存（仅当有数据且缓存启用时）
-        if settings.bars_redis_cache_enabled and not df.empty:
+        # 3. 回填缓存（无论是否有数据，只要缓存启用都写入；
+        #    空 DF 属合法 negative cache，避免后续审计又重新远端拉取）
+        if settings.bars_redis_cache_enabled:
             cache_key = f"{_XDXR_CACHE_PREFIX}:{symbol}"
             try:
                 client = get_sync_redis()

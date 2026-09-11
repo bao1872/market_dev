@@ -1617,7 +1617,7 @@ async def test_rebuild_factors_breaker_opens_after_consecutive_provider_failure(
 
     state = {"calls": 0}
 
-    async def fake_detect(*args: Any) -> Any:
+    async def fake_detect(*args: Any, **kwargs: Any) -> Any:
         state["calls"] += 1
         raise CorporateActionProviderError("boom")
 
@@ -1657,7 +1657,7 @@ async def test_rebuild_factors_breaker_resets_on_success(
 
     state = {"calls": 0}
 
-    async def fake_detect(*args: Any) -> Any:
+    async def fake_detect(*args: Any, **kwargs: Any) -> Any:
         state["calls"] += 1
         if state["calls"] <= 2:
             raise CorporateActionProviderError("boom")
@@ -1752,6 +1752,8 @@ async def test_factor_audit_provider_outage_blocks_core(
         needs_rebuild_count=0,
         error_count=5000,
         items=[],
+        degraded_count=0,
+        degraded_symbols=[],
     )
 
     async def fake_dry_run(self: Any, *args: Any, **kwargs: Any) -> Any:

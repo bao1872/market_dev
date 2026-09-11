@@ -340,6 +340,8 @@ class AdjustmentFactorService:
         instrument_id: uuid.UUID,
         symbol: str,
         adapter: PytdxAdapter | None = None,
+        *,
+        force_refresh: bool = False,
     ) -> date | None:
         """检测公司行为集合（xdxr category=1 事件）是否变化。
 
@@ -363,7 +365,7 @@ class AdjustmentFactorService:
         """
         pytdx = adapter or get_pytdx_adapter()
         try:
-            xdxr_df = pytdx.get_xdxr_info(symbol)
+            xdxr_df = pytdx.get_xdxr_info(symbol, force_refresh=force_refresh)
         except Exception as exc:
             logger.warning(
                 "detect_company_action_change 获取 xdxr 失败 symbol=%s: %s", symbol, exc,

@@ -43,7 +43,11 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from app.config import get_settings
-from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
+from app.core.pytdx_adapter import (
+    PytdxAdapter,
+    PytdxSourceError,
+    get_pytdx_adapter,
+)
 from app.core.time import shanghai_business_date
 from app.services.adjustment_factor_service import (
     FactorIntegrityBlockedError,
@@ -1647,6 +1651,7 @@ class BarsSchedulerService:
                     #    （detect 内部已存储新 fingerprint，rebuild 失败时需回滚）
                     earliest = await adj_service.detect_company_action_change(
                         session, instrument.id, symbol, adapter,
+                        force_refresh=True,
                     )
                     if earliest is None:
                         breaker.success()
@@ -1660,7 +1665,7 @@ class BarsSchedulerService:
                     await session.commit()
                     result["rebuilt"] += 1
                     breaker.success()
-                except CorporateActionProviderError as exc:
+                except (CorporateActionProviderError, PytdxSourceError) as exc:
                     # 源/连接/协议不可用：计入熔断，连续 limit 次则整体 fail-closed。
                     breaker.failure()
                     try:
@@ -1767,8 +1772,11 @@ class BarsSchedulerService:
         2. 若 needs_rebuild > 0: rebuild_batch 串行重建（每只股票独立事务）
         3. 写 FACTOR_AUDIT job_run_event（start + done，含 before/after hash 摘要）
 
-        软失败：审计/重建异常不阻断 DSA（DSA 可基于旧因子 degraded 运行），
-        但失败清单写入事件留下诊断痕迹。调用方已 try/except 包裹。
+        factor integrity 是 DSA/Core 的硬前置条件：
+        provider outage / audit failure / degraded / rebuild incomplete 均 fail-closed。
+        调用方（_run_post_daily_phase）对 (FactorSourceUnavailableError,
+        FactorIntegrityBlockedError) 统一 re-raise，保证 raw 日线可保留但
+        DSA/Core/Review 不执行。
 
         Args:
             trade_date: 交易日期
@@ -1788,6 +1796,8 @@ class BarsSchedulerService:
                 - failed: 重建失败数
                 - errors: 审计/重建异常计数
                 - failed_symbols: 失败股票代码列表（便于生产验证定位）
+                - degraded: 数据缺失（无法证明 factor）股票数
+                - degraded_symbols: 数据缺失股票代码列表（截断 100）
         """
         from app.services.factor_reconciliation import FactorReconciliationTask
         from app.services.job_run_event_service import append_event
@@ -1804,6 +1814,8 @@ class BarsSchedulerService:
             "failed": 0,
             "errors": 0,
             "failed_symbols": [],  # V2: 失败股票代码列表
+            "degraded": 0,
+            "degraded_symbols": [],
         }
 
         if total == 0:
@@ -1866,6 +1878,8 @@ class BarsSchedulerService:
         summary["consistent"] = plan.consistent_count
         summary["needs_rebuild"] = plan.needs_rebuild_count
         summary["errors"] = plan.error_count
+        summary["degraded"] = plan.degraded_count
+        summary["degraded_symbols"] = plan.degraded_symbols[:100]
 
         # [FACTOR-HEALTH] 审计后 fail-closed：即使 dry_run 没有抛异常，也不得把
         # 「全市场 provider 错误」当作普通软失败继续跑 Core。
@@ -1878,6 +1892,15 @@ class BarsSchedulerService:
             raise FactorSourceUnavailableError(
                 f"FACTOR_AUDIT_UNHEALTHY: errors={errors}/{audited} "
                 f"(ratio={provider_failure_ratio:.4f})"
+            )
+
+        # [FACTOR-HEALTH] degraded：某只股票数据链本身无法证明 factor 正确性。
+        # 在尚未建立「显式从 DSA/Core universe 排除 degraded 股票」机制前，
+        # degraded > 0 不得继续 Core（否则仍是 silent correctness hole）。
+        if plan.degraded_count > 0:
+            raise FactorIntegrityBlockedError(
+                f"FACTOR_AUDIT_DEGRADED: degraded={plan.degraded_count}, "
+                f"symbols={plan.degraded_symbols[:20]}"
             )
 
         logger.info(

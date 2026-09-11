@@ -29,7 +29,12 @@ import pytest
 from app.models.instrument import Instrument
 from app.models.job_run_event import JobRunEvent
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
+from app.services.bars_scheduler_service import (
+    BarsSchedulerService,
+    BatchResult,
+    FactorIntegrityBlockedError,
+    FactorSourceUnavailableError,
+)
 from app.services.factor_reconciliation import (
     ReconciliationItem,
     ReconciliationItemResult,
@@ -73,6 +78,7 @@ def _make_instruments(n: int = 3) -> list[Instrument]:
 
 def _make_plan(
     *, total_audited: int = 3, consistent: int = 2, needs_rebuild: int = 1,
+    degraded_count: int = 0, degraded_symbols: list[str] | None = None,
 ) -> ReconciliationPlan:
     """构造 dry_run 返回的 ReconciliationPlan（needs_rebuild 个 item）。"""
     items = [
@@ -91,6 +97,8 @@ def _make_plan(
         total_audited=total_audited,
         consistent_count=consistent,
         error_count=0,
+        degraded_count=degraded_count,
+        degraded_symbols=degraded_symbols or [],
     )
 
 
@@ -608,3 +616,138 @@ async def test_invalidate_downstream_caches_includes_capture_field() -> None:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v", "--tb=short"])
+
+
+# =============================================================================
+# 13. [ROUND-4] degraded_count 必须 hard-fail（不得静默继续 Core）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_audit_degraded_blocks_core() -> None:
+    """degraded_count > 0 必须 hard-fail（FactorIntegrityBlockedError），
+    禁止带着「无法证明 factor 正确性」的股票进入 DSA/Core/Review。
+
+    用 job_run_id=None + MagicMock db_session 保持纯单元（不写事件、不连 DB）；
+    degraded 检查在写 done 事件之前触发，因此 rebuild_batch 不应被调用。
+    """
+    instruments = _make_instruments(3)
+
+    plan = _make_plan(
+        total_audited=5293, consistent=5292, needs_rebuild=0,
+        degraded_count=1, degraded_symbols=["600519"],
+    )
+
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task):
+        with pytest.raises(FactorIntegrityBlockedError, match="FACTOR_AUDIT_DEGRADED"):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=instruments,
+                db_session=MagicMock(),  # job_run_id=None → 不写事件，dry_run 为 mock
+                job_run_id=None,
+            )
+
+    # 在 degraded 处已 raise，rebuild_batch 不应被调用
+    mock_task.rebuild_batch.assert_not_called()
+
+
+# =============================================================================
+# 14. [ROUND-4] AfterClose 首遍 detect 必须 force_refresh=True
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_rebuild_detect_forces_fresh_refresh(monkeypatch: pytest.MonkeyPatch) -> None:
+    """AfterClose 首遍 detect 必须 force_refresh=True，绕过 24h XDXR 缓存。
+
+    用 MagicMock session + job_run_id=None 保持纯单元，detect 全部返回 None
+    （无变化）以跳过 rebuild、避免 DB 写。只验证 detect 调用确实带 force_refresh=True。
+    """
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+    from app.services.bars_scheduler_service import BarsSchedulerService
+
+    service = BarsSchedulerService()
+    instruments = _make_instruments(3)
+
+    captured: list[tuple[str, bool]] = []
+
+    async def fake_detect(
+        session: Any, instrument_id: Any, symbol: str, adapter: Any, *,
+        force_refresh: bool = False,
+    ) -> None:
+        captured.append((symbol, force_refresh))
+        return None  # 无变化，跳过重建
+
+    mock_adj = MagicMock()
+    mock_adj.detect_company_action_change = fake_detect
+    mock_adj.rebuild_factor_series = AsyncMock()
+
+    monkeypatch.setattr(
+        "app.services.adjustment_factor_service.AdjustmentFactorService",
+        lambda: mock_adj,
+    )
+
+    result = await service._rebuild_factors_if_needed(
+        trade_date=date(2026, 9, 11),
+        instruments=instruments,
+        db_session=MagicMock(),
+        job_run_id=None,
+    )
+
+    assert result["checked"] == 3
+    assert len(captured) == 3
+    assert all(fr is True for _, fr in captured), "所有 detect 必须 force_refresh=True"
+
+
+# =============================================================================
+# 15. [ROUND-4] rebuild 内 PytdxSourceError 参与熔断
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_rebuild_pytdx_source_error_trips_breaker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """rebuild_factor_series 抛 PytdxSourceError 必须计入熔断，
+    连续 limit(=3) 次后整体 fail-closed（FactorSourceUnavailableError）。
+    """
+    from app.core.pytdx_adapter import PytdxSourceError
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+    from app.services.bars_scheduler_service import BarsSchedulerService
+
+    service = BarsSchedulerService()
+    instruments = _make_instruments(3)  # 3 只 → 恰好达到 breaker limit
+
+    mock_adj = MagicMock()
+    mock_adj.detect_company_action_change = AsyncMock(
+        side_effect=lambda *a, **k: date(2024, 1, 1)  # 有变化，触发 rebuild
+    )
+    mock_adj.rebuild_factor_series = AsyncMock(
+        side_effect=PytdxSourceError("socket dropped mid rebuild")
+    )
+
+    monkeypatch.setattr(
+        "app.services.adjustment_factor_service.AdjustmentFactorService",
+        lambda: mock_adj,
+    )
+
+    db_session = MagicMock()
+    db_session.rollback = AsyncMock()
+    db_session.commit = AsyncMock()
+
+    with pytest.raises(FactorSourceUnavailableError, match="FACTOR_SOURCE_LOST_DURING_RUN"):
+        await service._rebuild_factors_if_needed(
+            trade_date=date(2026, 9, 11),
+            instruments=instruments,
+            db_session=db_session,
+            job_run_id=None,
+        )
+
+    # 3 只全部 detect + rebuild 均被调用，第 3 只触发熔断
+    assert mock_adj.detect_company_action_change.call_count == 3
+    assert mock_adj.rebuild_factor_series.call_count == 3
+
