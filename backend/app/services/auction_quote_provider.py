@@ -241,6 +241,15 @@ class MootdxAuctionQuoteProvider:
                 for sym, mkt in batch
             ]
 
+        # 记录**实际成功**的服务器：failover 后可能不是 servers[0]。
+        # 不得再用 server list 首项伪造 source identity（否则诊断数据全是错的）。
+        connected_server = self._adapter.connected_server
+        source_server = (
+            f"{connected_server[0]}:{connected_server[1]}"
+            if connected_server is not None
+            else None
+        )
+
         if not raw_list:
             return [
                 AuctionQuoteResult(
@@ -302,7 +311,7 @@ class MootdxAuctionQuoteProvider:
                     quality_status=quality_status,
                     reason_codes=reason_codes,
                     raw_payload=raw,
-                    source_server=self._adapter._servers[0][0] if self._adapter._servers else None,
+                    source_server=source_server,
                 )
             )
 

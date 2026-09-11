@@ -393,6 +393,11 @@ class PytdxAdapter(Exchange):
         # 最近一次成功连接的服务器；disconnect 或连接失败时为 None。
         # 供 factor health probe 报告真实连通的 server（不依赖缓存命中等旁路）。
         self.connected_server: tuple[str, int] | None = None
+        # [failover] 下一次 connect() 的起始下标（环形扫描）。
+        # 正常连接成功后停在成功 host；只有 API source failure 才 advance 到下一个。
+        self._next_server_index: int = 0
+        # 当前成功连接的 host 在 self._servers 中的下标（未连接为 None）。
+        self._connected_server_index: int | None = None
 
     def __enter__(self) -> PytdxAdapter:
         self.connect()
@@ -409,40 +414,79 @@ class PytdxAdapter(Exchange):
         return self._api
 
     def connect(self) -> None:
-        """连接 pytdx 服务器，依次尝试服务器列表。
+        """连接 pytdx 服务器：从 ``_next_server_index`` 起环形扫描**一整轮**。
 
         [B1] 幂等：外部重复调用 connect() 时，若已连接则 NO-OP（不重新扫描 server list / 不新建 socket）。
         [B2] 诊断：首次连接成功 successful_connect_count += 1；真实 source failure 后
         disconnect → reconnect 成功时 successful_connect_count += 1 且 reconnect_count += 1。
+        [failover] API source failure 会通过 ``_advance_server_after_failure`` 推进
+        ``_next_server_index``，因此这里**不会**每次都回到 servers[0]。
+
+        单次调用最多完整扫描 servers 一轮；外层 ``_call_with_reconnect`` 遇到
+        operation="connect" 的失败会直接上抛，绝不出现 servers × max_retries 的重复全池扫描。
 
         Raises:
-            RuntimeError: 所有服务器连接均失败时抛出，包含最近 5 条错误信息。
+            PytdxSourceError: 完整扫描所有服务器仍无法连接时抛出（operation="connect"）。
         """
         # [P0-5] I/O 锁覆盖 connect：防止并发调用方同时建连导致 _api 状态错乱
         with self._io_lock:
             # [B1] 幂等 hardening：已连接则直接返回，绝不重复建连
             if self._api is not None:
                 return
+
+            if not self._servers:
+                raise PytdxSourceError(
+                    operation="connect",
+                    message="pytdx server list is empty",
+                )
+
             self.connected_server = None
+            self._connected_server_index = None
+
+            last_exc: Exception | None = None
+            last_server: tuple[str, int] | None = None
             last_errors: list[str] = []
-            for host, port in self._servers:
+            server_count = len(self._servers)
+
+            for offset in range(server_count):
+                idx = (self._next_server_index + offset) % server_count
+                host, port = self._servers[idx]
+                last_server = (host, port)
+
                 try:
-                    api = TdxHq_API(raise_exception=True, auto_retry=True)
+                    # Adapter 是唯一 retry owner。
+                    # 必须关闭 pytdx 内建 auto_retry：否则真实网络尝试次数会变成
+                    # adapter_max_retries × pytdx_auto_retries，且 MagicMock 测试看不见。
+                    api = TdxHq_API(raise_exception=True, auto_retry=False)
                     if api.connect(host, port, time_out=self.connect_timeout):
                         logger.info("pytdx 连接成功：%s:%d", host, port)
                         self._api = api
                         self.connected_server = (host, port)
+                        self._connected_server_index = idx
+                        # 正常连接成功后保持当前 host；
+                        # 只有 API source failure 才 advance（见 _advance_server_after_failure）。
+                        self._next_server_index = idx
                         self.successful_connect_count += 1
                         if self.successful_connect_count > 1:
                             self.reconnect_count += 1
                         return
                 except TdxConnectionError as exc:
+                    last_exc = exc
                     last_errors.append(f"{host}:{port} TdxConnectionError: {exc}")
                 except Exception as exc:
+                    last_exc = exc
                     last_errors.append(f"{host}:{port} {type(exc).__name__}: {exc}")
 
             err_summary = "; ".join(last_errors[-5:])
-            raise RuntimeError(f"pytdx 连接失败（尝试 {len(self._servers)} 个服务器）：{err_summary}")
+            raise PytdxSourceError(
+                operation="connect",
+                message=(
+                    f"pytdx connect exhausted {server_count} servers: {err_summary}"
+                ),
+                attempt=server_count,
+                server=last_server,
+                cause=last_exc,
+            ) from last_exc
 
     def disconnect(self) -> None:
         """断开连接，忽略断开时的异常（仅资源释放，不影响主流程）。"""
@@ -457,6 +501,38 @@ class PytdxAdapter(Exchange):
                     self._api = None
                     self.connected_server = None
 
+    def _advance_server_after_failure(
+        self,
+        failed_server: tuple[str, int] | None,
+    ) -> None:
+        """把下一次 connect() 的起点推进到失败服务器的下一个（环形）。
+
+        仅用于「能 connect、但 operation 失败」的场景（生产即
+        ``get_security_bars → calling function error``）：这类 host 已证明不可用，
+        下一次必须换 host，而不是重新连回同一台再失败一次。
+
+        正常主动 close / disconnect **不应**调用本方法（不要把普通 close 当 source failure）。
+        """
+        if not self._servers:
+            self._next_server_index = 0
+            return
+
+        if failed_server is None:
+            self._next_server_index = (
+                self._next_server_index + 1
+            ) % len(self._servers)
+            return
+
+        try:
+            failed_index = self._servers.index(failed_server)
+        except ValueError:
+            self._next_server_index = (
+                self._next_server_index + 1
+            ) % len(self._servers)
+            return
+
+        self._next_server_index = (failed_index + 1) % len(self._servers)
+
     def _call_with_reconnect(
         self,
         operation: str,
@@ -470,8 +546,11 @@ class PytdxAdapter(Exchange):
 
         合同：
         - network / socket / protocol / ``calling function error`` → 判定当前连接
-          不可信 → ``disconnect`` → 下一轮 ``connect`` 重连 → bounded retry →
+          不可信 → ``_advance_server_after_failure`` 轮转到下一个 host →
+          ``disconnect`` → 下一轮 ``connect``（从新 host 起）→ bounded retry →
           耗尽后抛 typed :class:`PytdxSourceError`。
+        - connect() 本身已完整扫描所有 server；其失败（operation="connect"）直接上抛，
+          不允许外层 max_retries 再把同一个全池重复扫描 N 遍。
         - 合法成功返回（含空列表 ``[]`` = 该标的确实无数据）原样返回，**不得**
           被当作 provider outage 自动重试。
         - 全程在本 adapter 的 ``_io_lock`` 内执行 ``call``，保证单 socket 串行。
@@ -492,9 +571,26 @@ class PytdxAdapter(Exchange):
                 with self._io_lock:
                     return call(self.api)
 
+            except PytdxSourceError as exc:
+                # connect() 已完整扫描所有 server。
+                # 不允许 outer max_retries 再重复 N 次全服务器扫描。
+                if exc.operation == "connect":
+                    raise PytdxSourceError(
+                        operation=operation,
+                        message="pytdx connection unavailable",
+                        symbol=symbol,
+                        market=market,
+                        period=period,
+                        attempt=attempt,
+                        server=exc.server,
+                        cause=exc,
+                    ) from exc
+                raise
+
             except Exception as exc:
                 last_exc = exc
                 failed_server = self.connected_server or last_server
+                last_server = failed_server
 
                 logger.warning(
                     "PYTDX_SOURCE_FAILURE "
@@ -511,7 +607,9 @@ class PytdxAdapter(Exchange):
                     exc,
                 )
 
-                # 当前 socket 不再可信
+                # 关键：此 host 已证明「能 connect 但 operation 失败」，
+                # 下一次必须从下一个 host 开始（A → B → C，而不是 A → A）。
+                self._advance_server_after_failure(failed_server)
                 self.disconnect()
 
                 if attempt < self.max_retries:

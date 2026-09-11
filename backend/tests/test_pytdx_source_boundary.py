@@ -263,6 +263,7 @@ def test_g_auction_provider_uses_public_api_only() -> None:
     provider = MootdxAuctionQuoteProvider()
     fake_adapter = MagicMock()
     fake_adapter._servers = [("127.0.0.1", 7709)]
+    fake_adapter.connected_server = ("127.0.0.1", 7709)
     fake_adapter.get_security_quotes.return_value = [
         {
             "market": 0,
