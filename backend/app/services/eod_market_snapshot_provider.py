@@ -160,6 +160,28 @@ class EodSnapshotRow:
         return self.updated_at.date() if self.updated_at is not None else None
 
 
+@dataclass(frozen=True)
+class SnapshotFetchBatch:
+    """一次「完整全市场 snapshot 拉取」的结果（含来源与 watermark 元数据）。
+
+    EOD 与盘中（realtime）两条链路共用同一个分页/failover 实现，只是：
+    - ``require_eod_watermark`` 不同（EOD 要求 >= 15:00，盘中不要求）；
+    - ``hosts`` 不同（EOD 允许延时源，盘中**只允许实时源**）。
+
+    元数据（source_host / captured_at / market_watermark）供上层做 freshness 与
+    数据源质量诊断，避免上层再用「服务器列表首项」伪造来源。
+    """
+
+    raw_rows: tuple[dict[str, Any], ...]
+    source_host: str
+    captured_at: datetime
+    market_watermark: datetime | None
+
+    @property
+    def raw_count(self) -> int:
+        return len(self.raw_rows)
+
+
 def classify_a_share_market(symbol: str, eastmoney_market: Any) -> str:
     """前缀 + f13 双重校验后返回市场（SH / SZ / BJ）。fail-closed。
 
@@ -259,6 +281,42 @@ def snapshot_trade_date(ts: Any) -> date | None:
     return updated_at.date() if updated_at is not None else None
 
 
+def compute_snapshot_market_watermark(
+    raw_rows: Sequence[dict[str, Any]],
+    *,
+    trade_date: date | None = None,
+) -> datetime | None:
+    """纯计算：取快照中最大的有效 f124（Asia/Shanghai），无有效值返回 None。
+
+    与 :func:`validate_snapshot_market_watermark` 的区别：本函数**不做任何收盘判定**，
+    只是把「这批数据的市场时间戳水位」算出来，供 EOD（要求 >= 15:00）与盘中
+    （只要求存在当天水位）两种不同 freshness 合同各自判断。
+
+    Args:
+        raw_rows: 原始 ``diff`` 行列表（未归一化，直接读 f124）。
+        trade_date: 只统计该交易日的时间戳；None 表示不限日期。
+
+    Returns:
+        最大 f124 时间；无任何有效时间戳时返回 None。
+    """
+    timestamps: list[datetime] = []
+
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+
+        dt = snapshot_updated_at(raw.get("f124"))
+        if dt is None:
+            continue
+
+        if trade_date is not None and dt.date() != trade_date:
+            continue
+
+        timestamps.append(dt)
+
+    return max(timestamps) if timestamps else None
+
+
 def validate_snapshot_market_watermark(
     raw_rows: Sequence[dict[str, Any]],
     trade_date: date,
@@ -278,21 +336,16 @@ def validate_snapshot_market_watermark(
     Raises:
         SnapshotProviderError: 没有任何目标日期的有效时间戳，或 watermark < 15:00。
     """
-    timestamps: list[datetime] = []
-    for raw in raw_rows:
-        if not isinstance(raw, dict):
-            continue
-        dt = snapshot_updated_at(raw.get("f124"))
-        if dt is None or dt.date() != trade_date:
-            continue
-        timestamps.append(dt)
+    watermark = compute_snapshot_market_watermark(
+        raw_rows,
+        trade_date=trade_date,
+    )
 
-    if not timestamps:
+    if watermark is None:
         raise SnapshotProviderError(
             f"snapshot has no valid timestamps for {trade_date}"
         )
 
-    watermark = max(timestamps)
     if watermark.time() < _MARKET_CLOSE_TIME:
         raise SnapshotProviderError(
             f"snapshot is not final: trade_date={trade_date}, "
@@ -487,30 +540,57 @@ async def _fetch_full_snapshot_from_host(
     return rows
 
 
-async def fetch_full_a_share_snapshot(
+async def fetch_a_share_snapshot_batch(
     client: httpx.AsyncClient,
     *,
+    hosts: Sequence[str],
     expected_trade_date: date | None = None,
+    require_eod_watermark: bool = False,
     page_size: int = DEFAULT_PAGE_SIZE,
     max_pages: int | None = None,
-) -> list[dict[str, Any]]:
-    """分页拉取全市场 A 股 snapshot（原始 diff 列表）。
+    captured_at: datetime | None = None,
+) -> SnapshotFetchBatch:
+    """通用全市场 snapshot 拉取：单个 host 完成整批 + host failover + watermark 判定。
 
-    外层 host failover：整批只用一个 host；该 host 任一页失败即换下一个 host
-    **从第 1 页重新开始**（不允许 hostA page1 + hostB page2）。
+    EOD 与盘中（realtime）两条链路共用本函数，差异只由入参表达：
+    - ``hosts``：EOD 传 :data:`EASTMONEY_CLIST_HOSTS`（允许延时源）；
+      盘中必须传实时源（见 ``realtime_market_snapshot_provider.REALTIME_CLIST_HOSTS``），
+      **绝不允许**把 ``push2delay`` 放进盘中 host 列表。
+    - ``require_eod_watermark``：True 表示要求 watermark >= 15:00（收盘终值合同）；
+      False 表示只计算水位、不判收盘（盘中合同）。
 
-    ``expected_trade_date`` 给定时，每个 host 成功拉完后立即校验 market watermark
-    （见 :func:`validate_snapshot_market_watermark`）：延时源在 15:05 仍可能只给到
-    14:50，此时必须拒绝并尝试下一个 host；所有 host 都不达标则整体 fail-closed。
+    契约（与既有 EOD 行为一致，不新建一套分页逻辑）：
+    - 整批只用一个 host；该 host 任一页失败即换下一个 host **从第 1 页重新开始**。
+    - ``total`` 漂移 / 行数不足 / payload 非法 → 该 host 作废。
+    - 所有 host 都失败 → fail-closed（禁止半截市场或跨 host 拼接）。
+
+    Args:
+        client: httpx 异步客户端。
+        hosts: 允许使用的 host 列表（按序尝试）。
+        expected_trade_date: EOD watermark 校验的目标交易日。
+        require_eod_watermark: 是否要求收盘 watermark。
+        page_size: 单页条数（clist 实测上限 100）。
+        max_pages: 最多拉取页数（None 表示不限）。
+        captured_at: 抓取时刻（None 取当前上海时间）；结构化输出用于 freshness 诊断。
 
     Returns:
-        原始 ``diff`` 字典列表，由调用方负责归一化。
+        :class:`SnapshotFetchBatch`（含 raw_rows / source_host / captured_at / market_watermark）。
 
     Raises:
-        SnapshotProviderError: 所有 host 均失败。
+        SnapshotProviderError: host 列表为空、参数不自洽、或所有 host 均失败。
     """
+    if not hosts:
+        raise SnapshotProviderError("snapshot host list is empty")
+
+    capture_time = captured_at or datetime.now(_SHANGHAI_TZ)
+    if capture_time.tzinfo is None:
+        capture_time = capture_time.replace(tzinfo=_SHANGHAI_TZ)
+    else:
+        capture_time = capture_time.astimezone(_SHANGHAI_TZ)
+
     errors: list[str] = []
-    for host in EASTMONEY_CLIST_HOSTS:
+
+    for host in hosts:
         try:
             rows = await _fetch_full_snapshot_from_host(
                 client,
@@ -518,14 +598,67 @@ async def fetch_full_a_share_snapshot(
                 page_size=page_size,
                 max_pages=max_pages,
             )
-            if expected_trade_date is not None:
-                validate_snapshot_market_watermark(rows, expected_trade_date)
-            return rows
+
+            if require_eod_watermark and expected_trade_date is None:
+                raise SnapshotProviderError(
+                    "expected_trade_date required for EOD watermark validation"
+                )
+
+            if require_eod_watermark:
+                watermark: datetime | None = validate_snapshot_market_watermark(
+                    rows,
+                    expected_trade_date,  # type: ignore[arg-type]
+                )
+            else:
+                watermark = compute_snapshot_market_watermark(rows)
+
+            return SnapshotFetchBatch(
+                raw_rows=tuple(rows),
+                source_host=host,
+                captured_at=capture_time,
+                market_watermark=watermark,
+            )
+
         except SnapshotProviderError as exc:
             errors.append(f"{host}: {exc}")
             logger.warning("snapshot host failover host=%s error=%s", host, exc)
 
-    raise SnapshotProviderError("all snapshot hosts failed: " + "; ".join(errors))
+    raise SnapshotProviderError(
+        "all snapshot hosts failed: " + "; ".join(errors)
+    )
+
+
+async def fetch_full_a_share_snapshot(
+    client: httpx.AsyncClient,
+    *,
+    expected_trade_date: date | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int | None = None,
+) -> list[dict[str, Any]]:
+    """分页拉取全市场 A 股 snapshot（原始 diff 列表）——EOD 兼容 wrapper。
+
+    行为与重构前完全一致：使用 :data:`EASTMONEY_CLIST_HOSTS`，且在
+    ``expected_trade_date`` 给定时校验收盘 watermark（>= 15:00）。
+
+    需要 host / captured_at / watermark 等元数据的新调用方请直接用
+    :func:`fetch_a_share_snapshot_batch`。
+
+    Returns:
+        原始 ``diff`` 字典列表，由调用方负责归一化。
+
+    Raises:
+        SnapshotProviderError: 所有 host 均失败。
+    """
+    batch = await fetch_a_share_snapshot_batch(
+        client,
+        hosts=EASTMONEY_CLIST_HOSTS,
+        expected_trade_date=expected_trade_date,
+        require_eod_watermark=(expected_trade_date is not None),
+        page_size=page_size,
+        max_pages=max_pages,
+    )
+
+    return list(batch.raw_rows)
 
 
 # ===== 历史日线 fallback（不复权 fqt=0） =====
