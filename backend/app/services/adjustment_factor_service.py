@@ -80,6 +80,20 @@ class FactorSourceUnavailableError(RuntimeError):
     """
 
 
+class FactorIntegrityBlockedError(RuntimeError):
+    """复权因子完整性无法证明，禁止继续 DSA / Core。
+
+    与 ``FactorSourceUnavailableError``（源/连接/协议层不可用）区分：
+    - ``FactorSourceUnavailableError``：远端 provider 明确不可达；
+    - ``FactorIntegrityBlockedError``：审计/重建阶段出现无法证明因子完整性的
+      软失效（audit 为空、error 占比超阈值、rebuild 失败、阶段异常），
+      同样必须让 AfterClose hard-fail，不再继续依赖因子的盘后流程。
+
+    上层（``_run_post_daily_phase``）对二者统一 re-raise，保证
+    raw 日线可保留、但 DSA/Core/Review 不执行。
+    """
+
+
 class AdjustmentFactorService:
     """统一复权因子服务。
 

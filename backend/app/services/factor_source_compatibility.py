@@ -25,10 +25,13 @@ Eastmoney 侧：事件日 ``preclose``（provider_preclose）/ DB 事件日前�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
+
+import httpx
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -99,15 +102,19 @@ def provider_event_factor(
     return provider_preclose / db_prev_close
 
 
+FactorEventKey = tuple[str, date]
+
+
 def compare_factor_events(
     samples: list[FactorEventSample],
-    preclose_map: dict[str, Decimal],
+    preclose_map: dict[FactorEventKey, Decimal],
 ) -> CompatibilityStats:
     """比较 DB 存储 event factor 方向 vs provider preclose 推导方向。
 
     Args:
         samples: find_factor_events 返回的 DB 事件样本。
-        preclose_map: {symbol: provider 事件日 preclose}，缺失则跳过该样本。
+        preclose_map: {(symbol, event_date): provider 事件日 preclose}，
+            缺失则该样本无法比较（不计入 fetch_success）。
 
     Returns:
         CompatibilityStats（含 p50/p95/p99/max 绝对差与阈值内计数）。
@@ -117,8 +124,12 @@ def compare_factor_events(
     for s in samples:
         if s.symbol is None:
             continue
+        key = (s.symbol, s.trade_date)
+        provider_preclose = preclose_map.get(key)
+        if provider_preclose is None:
+            # provider 未抓到该事件的 preclose：不计入成功抓取，亦不比较。
+            continue
         stats.fetch_success += 1
-        provider_preclose = preclose_map.get(s.symbol)
         stored = stored_event_factor(s.prev_factor, s.adj_factor)
         provider = provider_event_factor(provider_preclose, s.prev_close)
         if stored is None or provider is None:
@@ -221,34 +232,73 @@ async def find_factor_events(
     return samples
 
 
+async def fetch_eastmoney_event_preclose(
+    client: httpx.AsyncClient,
+    symbol: str,
+    market: str,
+    event_date: date,
+) -> Decimal | None:
+    """取 Eastmoney 事件日 preclose（不复权 close − 涨跌额）。
+
+    只接受恰好等于 event_date 的那一根 K 线；缺失或不唯一则返回 None。
+    """
+    from app.services.eod_market_snapshot_provider import fetch_eastmoney_daily_kline
+
+    rows = await fetch_eastmoney_daily_kline(
+        client, symbol, market, event_date, event_date, extended=True,
+    )
+    exact = [row for row in rows if row.get("datetime") == event_date.isoformat()]
+    if len(exact) != 1:
+        return None
+    close = Decimal(str(exact[0]["close"]))
+    change_amount = Decimal(str(exact[0]["change_amount"]))
+    return close - change_amount
+
+
 async def run_factor_event_compatibility(
     session: AsyncSession,
     limit: int = 100,
-    preclose_fetcher: object | None = None,
+    concurrency: int = 5,
 ) -> CompatibilityStats:
-    """执行只读兼容性检查主流程。
+    """执行只读兼容性检查主流程（真实并行抓取 Eastmoney preclose）。
+
+    默认实现使用共享 httpx.AsyncClient + 有界并发抓取 Eastmoney 事件日 preclose，
+    不再依赖调用方注入 fetcher（避免「什么都不抓却声称兼容」）。
 
     Args:
         session: 异步 DB 会话（只读）。
         limit: 事件样本上限（默认 100）。
-        preclose_fetcher: ``(symbol, market, event_date) -> Decimal | None`` 的可注入
-            函数，用于取 provider 事件日 preclose。默认 None（调用方需注入，避免本模块
-            直接绑定 Eastmoney 网络边界）；为 None 时所有样本视为「无 provider 数据」，
-            仅统计 sample_requested。
+        concurrency: Eastmoney 抓取在途上限（有界并发）。
 
     返回 CompatibilityStats。本函数不写库、不改 adj_factor。
     """
     samples = await find_factor_events(session, limit=limit)
-    preclose_map: dict[str, Decimal] = {}
-    if preclose_fetcher is not None and samples:
-        for s in samples:
-            if s.symbol is None or s.market is None:
-                continue
+    semaphore = asyncio.Semaphore(concurrency)
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        async def fetch_one(
+            sample: FactorEventSample,
+        ) -> tuple[FactorEventSample, Decimal | None]:
+            if sample.symbol is None or sample.market is None:
+                return sample, None
             try:
-                preclose = preclose_fetcher(s.symbol, s.market, s.trade_date)
+                async with semaphore:
+                    value = await fetch_eastmoney_event_preclose(
+                        client, sample.symbol, sample.market, sample.trade_date,
+                    )
             except Exception as exc:  # noqa: BLE001 - 诊断不因单股失败中断
-                logger.warning("factor-compat: preclose 获取失败 %s: %s", s.symbol, exc)
-                continue
-            if preclose is not None:
-                preclose_map[s.symbol] = Decimal(str(preclose))
+                logger.warning(
+                    "factor-compat: preclose 获取失败 %s/%s: %s",
+                    sample.symbol, sample.trade_date, exc,
+                )
+                return sample, None
+            return sample, value
+
+        fetched = await asyncio.gather(*(fetch_one(s) for s in samples))
+
+    preclose_map: dict[FactorEventKey, Decimal] = {
+        (sample.symbol, sample.trade_date): value
+        for sample, value in fetched
+        if sample.symbol is not None and value is not None
+    }
     return compare_factor_events(samples, preclose_map)

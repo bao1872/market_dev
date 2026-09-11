@@ -45,7 +45,10 @@ if TYPE_CHECKING:
 from app.config import get_settings
 from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
 from app.core.time import shanghai_business_date
-from app.services.adjustment_factor_service import FactorSourceUnavailableError
+from app.services.adjustment_factor_service import (
+    FactorIntegrityBlockedError,
+    FactorSourceUnavailableError,
+)
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -114,10 +117,11 @@ async def probe_factor_provider(
     会把盘后任务拖死数十小时。探测把「几秒内明确失败」提前到循环之前。
 
     探测方式：
-    1. ``connect()``（用 3 个候选服务器 + ``connect_timeout=1.0``）—— 这是**主信号**，
+    1. ``connect()``（用前 5 台候选服务器 + ``connect_timeout=1.0``）—— 这是**主信号**，
        必须真实建连，不受 Redis xdxr 缓存影响；
-    2. 再调一次 ``get_xdxr_info("600519")`` —— 捕捉「连接成功但 xdxr 调用失败」。
-       （该调用可能命中 Redis 24h 缓存，因此它只作为补充信号，不能替代第 1 步。）
+    2. 再调一次 ``probe_xdxr_uncached("600519")`` —— 强制直连远端、绕过 Redis 24h 缓存，
+       捕捉「连接成功但 xdxr 调用失败」。该调用**不会**命中缓存，因此能真实反映源可用性
+       （缓存命中时 ``get_xdxr_info`` 根本不访问远端，函数调用坏了也显示「健康」）。
 
     Args:
         adapter: 仅测试注入；默认新建一个独立探测适配器（不复用业务单例，
@@ -1108,11 +1112,14 @@ class BarsSchedulerService:
                 rebuild_result["rebuilt"],
                 rebuild_result["failed"],
             )
-        except FactorSourceUnavailableError:
-            # 熔断器触发：运行中源掉线，必须向上传播 fail-closed，禁止后续 DSA/Core。
+        except (FactorSourceUnavailableError, FactorIntegrityBlockedError):
+            # 熔断器触发 / 因子完整性无法证明：向上传播 fail-closed，禁止后续 DSA/Core。
             raise
         except Exception as exc:
-            logger.warning("[BarsScheduler] 因子重建阶段异常（不阻断后续）: %s", exc, exc_info=True)
+            logger.warning("[BarsScheduler] 因子重建阶段异常: %s", exc, exc_info=True)
+            raise FactorIntegrityBlockedError(
+                f"FACTOR_REBUILD_STAGE_FAILED: {type(exc).__name__}: {exc}"
+            ) from exc
 
         try:
             audit_result = await self._audit_and_rebuild_factors(
@@ -1129,11 +1136,14 @@ class BarsSchedulerService:
                 audit_result["failed"],
                 audit_result["errors"],
             )
-        except FactorSourceUnavailableError:
-            # 审计发现 provider outage 比例超阈值：必须向上传播 fail-closed。
+        except (FactorSourceUnavailableError, FactorIntegrityBlockedError):
+            # 审计发现 provider outage / 因子完整性无法证明：向上传播 fail-closed。
             raise
         except Exception as exc:
-            logger.warning("[BarsScheduler] 因子审计阶段异常（不阻断后续）: %s", exc, exc_info=True)
+            logger.warning("[BarsScheduler] 因子审计阶段异常: %s", exc, exc_info=True)
+            raise FactorIntegrityBlockedError(
+                f"FACTOR_AUDIT_STAGE_FAILED: {type(exc).__name__}: {exc}"
+            ) from exc
 
         try:
             result.dsa_run_id = await self._check_daily_coverage_and_trigger_dsa(
@@ -1183,11 +1193,54 @@ class BarsSchedulerService:
         Returns:
             BatchResult（含 snapshot / universe / upsert / 连续性指标）。
         """
-        result = BatchResult(total=0)
+        from app.services.calendar_service import is_trading_day_async
+        from app.services.eod_daily_refresh_service import (
+            DailyContinuityBlockedError,
+            find_missing_daily_instruments,
+        )
+        from app.services.eod_market_snapshot_provider import (
+            SnapshotProviderError,
+            can_use_same_day_eod_snapshot,
+        )
+
+        result = BatchResult(
+            total=0,
+            period_counts={"d": 0},
+            daily_mode="snapshot",
+        )
         async with AsyncSessionLocal() as db_session:
+            # 安全前置条件（公开生产 owner 必须自己拥有完整契约，不能依赖调用方保证）
+            if not await is_trading_day_async(db_session, trade_date):
+                raise SnapshotProviderError(
+                    f"trade_date is not A-share trading day: {trade_date}"
+                )
+            if not can_use_same_day_eod_snapshot(trade_date):
+                raise SnapshotProviderError(
+                    "raw-daily-only snapshot is allowed only for today's "
+                    f"post-close window (trade_date={trade_date})"
+                )
+
             await self._refresh_daily_from_market_snapshot(
                 trade_date, db_session, job_run_id, result
             )
+
+            clear_instruments_cache()
+            instruments = await self._get_active_instruments(db_session)
+            result.total = len(instruments)
+
+            # 日线连续性硬门禁（snapshot / legacy / 未来 provider 一视同仁）
+            gaps = await self._scan_daily_continuity_gate(
+                trade_date, db_session, result
+            )
+            if gaps:
+                raise DailyContinuityBlockedError(gaps)
+
+            result.failed_symbols = [
+                i.symbol
+                for i in await find_missing_daily_instruments(db_session, trade_date)
+            ]
+            result.failed = len(result.failed_symbols)
+            result.succeeded = result.total - result.failed
         return result
 
     async def _refresh_daily_from_market_snapshot(
@@ -1798,16 +1851,16 @@ class BarsSchedulerService:
                     plan = await task.dry_run(
                         session, batch_size=50, max_mismatches=20,
                     )
+        except FactorSourceUnavailableError:
+            # 审计阶段 provider outage：必须向上传播 fail-closed，禁止继续 Core。
+            raise
         except Exception as exc:
             logger.error(
                 "[BarsScheduler] 因子审计 dry_run 失败: %s", exc, exc_info=True,
             )
-            summary["errors"] = total  # 无法审计，全部计为 error
-            await self._write_audit_done_event(
-                db_session, job_run_id, summary,
-                error=f"dry_run_failed: {type(exc).__name__}: {exc}",
-            )
-            return summary
+            raise FactorIntegrityBlockedError(
+                f"FACTOR_AUDIT_FAILED: {type(exc).__name__}: {exc}"
+            ) from exc
 
         summary["total_audited"] = plan.total_audited
         summary["consistent"] = plan.consistent_count
@@ -1819,7 +1872,7 @@ class BarsSchedulerService:
         audited = summary["total_audited"]
         errors = summary["errors"]
         if audited <= 0:
-            raise RuntimeError("FACTOR_AUDIT_EMPTY")
+            raise FactorIntegrityBlockedError("FACTOR_AUDIT_EMPTY")
         provider_failure_ratio = errors / max(audited, 1)
         if provider_failure_ratio > 0.01:
             raise FactorSourceUnavailableError(
@@ -1891,25 +1944,23 @@ class BarsSchedulerService:
                     failed_list=failed_list,
                     success_before_after=success_before_after,
                 )
+            except (FactorSourceUnavailableError, FactorIntegrityBlockedError):
+                # 重建阶段 provider outage / 因子完整性无法证明：向上传播 fail-closed。
+                raise
             except Exception as exc:
                 logger.error(
                     "[BarsScheduler] 因子重建 rebuild_batch 失败: %s",
                     exc, exc_info=True,
                 )
-                summary["failed"] = plan.needs_rebuild_count  # 全部计为失败
-                # [PROMPT.md §5.4.2 V2] 失败股票代码列表（重建异常时所有 needs_rebuild 都视为失败）
-                summary["failed_symbols"] = [i.symbol for i in plan.items]
-                await self._write_audit_done_event(
-                    db_session, job_run_id, summary,
-                    error=f"rebuild_batch_failed: {type(exc).__name__}: {exc}",
-                    needs_rebuild_symbols=[i.symbol for i in plan.items],
-                )
+                raise FactorIntegrityBlockedError(
+                    f"FACTOR_REBUILD_FAILED: {type(exc).__name__}: {exc}"
+                ) from exc
         else:
             await self._write_audit_done_event(db_session, job_run_id, summary)
 
         # [FACTOR-HEALTH] 重建阶段若仍有失败（单股业务错误），不得静默继续 Core。
         if summary["failed"] > 0:
-            raise RuntimeError(
+            raise FactorIntegrityBlockedError(
                 f"FACTOR_REBUILD_INCOMPLETE: failed={summary['failed']}"
             )
 

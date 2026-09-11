@@ -757,6 +757,11 @@ class FactorReconciliationTask:
                 rebuilt_at=rebuilt_at,
             )
 
+        except (PytdxSourceError, CorporateActionProviderError) as exc:
+            # 源/连接/协议不可用：立即 abort，让上层 fail-closed，不再继续剩余重建。
+            raise FactorSourceUnavailableError(
+                f"FACTOR_REBUILD_PROVIDER_OUTAGE symbol={item.symbol}: {exc}"
+            ) from exc
         except Exception as exc:
             # 失败：不写 1.0 伪装成功，记录错误
             # rebuild_factor_series 失败时已 rollback，不会留下部分更新

@@ -1767,3 +1767,150 @@ async def test_factor_audit_provider_outage_blocks_core(
         await service._audit_and_rebuild_factors(  # noqa: SLF001
             TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
         )
+
+
+# ===========================================================================
+# 14. refresh_raw_daily_only 安全契约（trading-day / same-day / continuity gate）
+# ===========================================================================
+
+from app.services.eod_market_snapshot_provider import SnapshotProviderError
+from app.services.eod_daily_refresh_service import (
+    DailyContinuityBlockedError,
+    DailyGap,
+)
+import app.services.bars_scheduler_service as _sched_mod
+
+
+class _RawFakeSessionCtx:
+    def __init__(self, obj: Any) -> None:
+        self.obj = obj
+
+    async def __aenter__(self) -> Any:
+        return self.obj
+
+    async def __aexit__(self, *a: Any) -> bool:
+        return False
+
+
+class _RawInst:
+    def __init__(self, symbol: str) -> None:
+        self.symbol = symbol
+
+
+def _build_raw_svc(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    trading_day: bool,
+    same_day: bool,
+    continuity_gaps: list[Any],
+    instruments: list[_RawInst],
+    missing: list[Any],
+) -> BarsSchedulerService:
+    svc = BarsSchedulerService(fetch_processes=1)
+    db = object()
+    monkeypatch.setattr(
+        _sched_mod, "AsyncSessionLocal", lambda: _RawFakeSessionCtx(db)
+    )
+
+    async def fake_is_trading(*args: Any, **kwargs: Any) -> bool:
+        return trading_day
+
+    monkeypatch.setattr(
+        "app.services.calendar_service.is_trading_day_async", fake_is_trading
+    )
+
+    # can_use_same_day_eod_snapshot 在 owner 内被**同步**调用（未 await），故用同步 lambda。
+    monkeypatch.setattr(
+        "app.services.eod_market_snapshot_provider.can_use_same_day_eod_snapshot",
+        lambda *args: same_day,
+    )
+
+    async def fake_refresh(trade_date: Any, db_session: Any, job_run_id: Any, result: Any) -> None:
+        result.period_counts["d"] = len(instruments)
+        result.snapshot_upserted = len(instruments)
+
+    monkeypatch.setattr(svc, "_refresh_daily_from_market_snapshot", fake_refresh)
+
+    async def fake_get_active(db_session: Any = None) -> list[_RawInst]:
+        return instruments
+
+    monkeypatch.setattr(svc, "_get_active_instruments", fake_get_active)
+
+    async def fake_continuity(trade_date: Any, db_session: Any, result: Any) -> list[Any]:
+        return continuity_gaps
+
+    monkeypatch.setattr(svc, "_scan_daily_continuity_gate", fake_continuity)
+
+    async def fake_missing(*args: Any, **kwargs: Any) -> list[Any]:
+        return missing
+
+    monkeypatch.setattr(
+        "app.services.eod_daily_refresh_service.find_missing_daily_instruments",
+        fake_missing,
+    )
+    monkeypatch.setattr(_sched_mod, "clear_instruments_cache", lambda: None)
+    return svc
+
+
+RAW_TODAY = date(2026, 9, 11)
+
+
+@pytest.mark.asyncio
+async def test_refresh_raw_rejects_non_trading_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc = _build_raw_svc(
+        monkeypatch, trading_day=False, same_day=True,
+        continuity_gaps=[], instruments=[_RawInst("600519")], missing=[],
+    )
+    with pytest.raises(SnapshotProviderError, match="not A-share trading day"):
+        await svc.refresh_raw_daily_only(RAW_TODAY)
+
+
+@pytest.mark.asyncio
+async def test_refresh_raw_rejects_not_same_day_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    svc = _build_raw_svc(
+        monkeypatch, trading_day=True, same_day=False,
+        continuity_gaps=[], instruments=[_RawInst("600519")], missing=[],
+    )
+    with pytest.raises(SnapshotProviderError, match="post-close window"):
+        await svc.refresh_raw_daily_only(RAW_TODAY)
+
+
+@pytest.mark.asyncio
+async def test_refresh_raw_blocks_on_continuity_gap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gap = DailyGap(
+        trade_date=RAW_TODAY,
+        covered=1,
+        eligible=2,
+        coverage=0.5,
+        missing_count=1,
+        is_total_gap=False,
+    )
+    svc = _build_raw_svc(
+        monkeypatch, trading_day=True, same_day=True,
+        continuity_gaps=[gap], instruments=[_RawInst("600519")], missing=[],
+    )
+    with pytest.raises(DailyContinuityBlockedError):
+        await svc.refresh_raw_daily_only(RAW_TODAY)
+
+
+@pytest.mark.asyncio
+async def test_refresh_raw_passes_same_day_final(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    insts = [_RawInst("600519"), _RawInst("000001")]
+    svc = _build_raw_svc(
+        monkeypatch, trading_day=True, same_day=True,
+        continuity_gaps=[], instruments=insts, missing=[],
+    )
+    result = await svc.refresh_raw_daily_only(RAW_TODAY)
+    assert result.total == 2
+    assert result.period_counts["d"] == 2
+    assert result.failed == 0
+    assert result.succeeded == 2
+    assert result.succeeded + result.failed == result.total

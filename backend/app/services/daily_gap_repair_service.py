@@ -355,7 +355,6 @@ async def repair_market_wide_daily_gap(
     trade_date: date,
     *,
     consistency_report: ConsistencyReport | None = None,
-    enforce_consistency_gate: bool = True,
     concurrency: int = _DEFAULT_CONCURRENCY,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
     dry_run: bool = False,
@@ -367,18 +366,17 @@ async def repair_market_wide_daily_gap(
     设计要点见模块 docstring。``dry_run=True`` 时仍然真实拉取（用于确认 fetch 成功率），
     但不写库。
 
-    写库门禁（fail-closed）：
+    写库门禁（fail-closed，无生产绕过开关）：
         生产写入（``dry_run=False``）**强制**要求一份已通过
         :func:`validate_consistency` 的 :class:`ConsistencyReport`，且其
-        ``reference_trade_date`` 必须早于 ``trade_date``（禁止拿待修日自己验证自己）。
-        ``dry_run=True`` 或显式 ``enforce_consistency_gate=False`` 时可绕过，
-        用于只读探测 provider 成功率。
+        ``reference_trade_date`` 必须早于 ``trade_date``（禁止拿待修日自己验证自己），
+        且 ``source`` 必须是 ``"ths"``（全市场修复主源）。``dry_run=True`` 可无 report。
+        不存在 ``enforce_consistency_gate=False`` 这类生产绕过参数。
 
     Args:
         session: 异步 DB 会话。
         trade_date: 唯一目标交易日。
         consistency_report: 邻近已知完整交易日的 A/B 一致性报告（生产写入必填）。
-        enforce_consistency_gate: 是否强制执行一致性门禁（默认 True）。
         concurrency: 在途请求上限（同时限制 httpx 连接池）。默认 3（实测最优）。
         chunk_size: 每批写库的标的数（一次 insert + 一次 commit）。
         dry_run: True=只拉取与统计，不写库。
@@ -391,8 +389,8 @@ async def repair_market_wide_daily_gap(
         find_missing_daily_instruments,
     )
 
-    # —— 写库前置门禁：fail-closed ——
-    if not dry_run and enforce_consistency_gate:
+    # —— 写库前置门禁：fail-closed（无生产绕过开关）——
+    if not dry_run:
         if consistency_report is None:
             raise SourceConsistencyError(
                 "production repair requires a validated consistency report "
@@ -404,6 +402,11 @@ async def repair_market_wide_daily_gap(
                 "consistency reference date must be before repair trade_date: "
                 f"reference={consistency_report.reference_trade_date} "
                 f">= repair={trade_date}"
+            )
+        if consistency_report.source != "ths":
+            raise SourceConsistencyError(
+                "market-wide repair primary source is THS; "
+                f"consistency report source={consistency_report.source!r}"
             )
 
     started = time.monotonic()
