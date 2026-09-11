@@ -704,7 +704,9 @@ async def test_rebuild_pytdx_source_error_trips_breaker(
         side_effect=lambda *a, **k: date(2024, 1, 1)  # 有变化，触发 rebuild
     )
     mock_adj.rebuild_factor_series = AsyncMock(
-        side_effect=PytdxSourceError("socket dropped mid rebuild")
+        side_effect=PytdxSourceError(
+            operation="rebuild_factor_series", message="socket dropped mid rebuild"
+        )
     )
     mock_adj._delete_fingerprint = MagicMock()
 

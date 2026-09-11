@@ -43,7 +43,7 @@ from app.core.exchange import Exchange
 from app.core.redis_client import get_sync_redis
 
 if TYPE_CHECKING:
-    from collections.abc import Generator
+    from collections.abc import Callable, Generator, Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +54,43 @@ class PytdxSourceError(RuntimeError):
     与业务数据错误区分：socket 断开、连接超时、协议解析失败、XDXR 拉取最终失败等
     属于「源不可用」，必须让上层 fail-fast（熔断 / FactorSourceUnavailableError），
     而不是当作单股数据异常降级继续。
+
+    typed attributes（不得只拼字符串）：``operation`` / ``symbol`` / ``market`` /
+    ``period`` / ``attempt`` / ``server`` / ``cause`` 均保留为可访问字段，
+    便于上层熔断与诊断时区分「哪次操作、哪只标的、哪个服务器」失败。
     """
+
+    def __init__(
+        self,
+        *,
+        operation: str,
+        message: str,
+        symbol: str | None = None,
+        market: int | None = None,
+        period: str | None = None,
+        attempt: int | None = None,
+        server: tuple[str, int] | None = None,
+        cause: Exception | None = None,
+    ) -> None:
+        self.operation = operation
+        self.symbol = symbol
+        self.market = market
+        self.period = period
+        self.attempt = attempt
+        self.server = server
+        self.cause = cause
+
+        context = [
+            f"operation={operation}",
+            f"symbol={symbol}" if symbol is not None else None,
+            f"market={market}" if market is not None else None,
+            f"period={period}" if period is not None else None,
+            f"attempt={attempt}" if attempt is not None else None,
+            f"server={server}" if server is not None else None,
+        ]
+        super().__init__(
+            f"{message}; " + ", ".join(x for x in context if x is not None)
+        )
 
 
 @dataclass
@@ -296,6 +332,17 @@ def market_from_code(code: str) -> int:
     return 0
 
 
+def _to_float(value: Any) -> float | None:
+    """安全转换为 float；None / 非数值 / NaN 返回 None。"""
+    if value is None:
+        return None
+    try:
+        f = float(value)
+        return f if f == f else None  # NaN 检查
+    except (TypeError, ValueError):
+        return None
+
+
 class PytdxAdapter(Exchange):
     """pytdx 连接适配器，封装连接重试与资源管理。
 
@@ -340,7 +387,7 @@ class PytdxAdapter(Exchange):
         # [P0-5] I/O 锁：覆盖所有底层读取与重连。
         # 单例 adapter 在 asyncio.to_thread 调用方并发时，TdxHq_API 的 connect/disconnect/
         # _fetch_bars 共享同一 socket，必须串行；锁必须在 adapter 内部，不得只在调用方加局部锁。
-        # [P0-7] 使用 RLock（可重入）：防止 _fetch_with_retry 持锁后内部意外调用 connect/
+        # [P0-7] 使用 RLock（可重入）：防止 _call_with_reconnect 持锁后内部意外调用 connect/
         # disconnect 导致自锁。当前实现无嵌套获取，但 RLock 提供防御性安全。
         self._io_lock: threading.RLock = threading.RLock()
         # 最近一次成功连接的服务器；disconnect 或连接失败时为 None。
@@ -399,7 +446,7 @@ class PytdxAdapter(Exchange):
 
     def disconnect(self) -> None:
         """断开连接，忽略断开时的异常（仅资源释放，不影响主流程）。"""
-        # [P0-5] I/O 锁覆盖 disconnect：防止与 _fetch_with_retry 并发访问 _api
+        # [P0-5] I/O 锁覆盖 disconnect：防止与 _call_with_reconnect 并发访问 _api
         with self._io_lock:
             if self._api is not None:
                 try:
@@ -409,6 +456,77 @@ class PytdxAdapter(Exchange):
                 finally:
                     self._api = None
                     self.connected_server = None
+
+    def _call_with_reconnect(
+        self,
+        operation: str,
+        call: Callable[[TdxHq_API], Any],
+        *,
+        symbol: str | None = None,
+        market: int | None = None,
+        period: str | None = None,
+    ) -> Any:
+        """唯一 connection-level retry owner：所有 pytdx 网络调用必须经由此处。
+
+        合同：
+        - network / socket / protocol / ``calling function error`` → 判定当前连接
+          不可信 → ``disconnect`` → 下一轮 ``connect`` 重连 → bounded retry →
+          耗尽后抛 typed :class:`PytdxSourceError`。
+        - 合法成功返回（含空列表 ``[]`` = 该标的确实无数据）原样返回，**不得**
+          被当作 provider outage 自动重试。
+        - 全程在本 adapter 的 ``_io_lock`` 内执行 ``call``，保证单 socket 串行。
+
+        上层调用方收到 :class:`PytdxSourceError` 后**不得**再做同样的 socket retry
+        （禁止 adapter 3 retry × caller 3 retry = 9 次）；应记录失败标的 / 触发熔断 /
+        交给下一业务周期。
+        """
+        last_exc: Exception | None = None
+        last_server: tuple[str, int] | None = None
+
+        for attempt in range(1, self.max_retries + 1):
+            try:
+                if self._api is None:
+                    self.connect()
+                last_server = self.connected_server
+
+                with self._io_lock:
+                    return call(self.api)
+
+            except Exception as exc:
+                last_exc = exc
+                failed_server = self.connected_server or last_server
+
+                logger.warning(
+                    "PYTDX_SOURCE_FAILURE "
+                    "operation=%s symbol=%s market=%s period=%s "
+                    "attempt=%d/%d server=%s type=%s error=%s",
+                    operation,
+                    symbol,
+                    market,
+                    period,
+                    attempt,
+                    self.max_retries,
+                    failed_server,
+                    type(exc).__name__,
+                    exc,
+                )
+
+                # 当前 socket 不再可信
+                self.disconnect()
+
+                if attempt < self.max_retries:
+                    time.sleep(self.retry_delay)
+
+        raise PytdxSourceError(
+            operation=operation,
+            symbol=symbol,
+            market=market,
+            period=period,
+            attempt=self.max_retries,
+            server=last_server,
+            message="pytdx source exhausted retries",
+            cause=last_exc,
+        ) from last_exc
 
     def get_history_transaction_page(
         self,
@@ -443,33 +561,15 @@ class PytdxAdapter(Exchange):
         """
         market_int = market_from_code(symbol)
         date_int = int(trade_date.strftime("%Y%m%d"))
-        last_exc: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                # 复用已有 managed connection；未连接才 connect（connect 幂等）
-                if self._api is None:
-                    self.connect()
-                with self._io_lock:
-                    rows = self.api.get_history_transaction_data(
-                        market_int, symbol, offset, count, date_int
-                    )
-                return list(rows) if rows else []
-            except (RuntimeError, Exception) as exc:
-                last_exc = exc
-                logger.warning(
-                    "get_history_transaction_page 失败 symbol=%s date=%s "
-                    "offset=%d attempt=%d/%d: %s",
-                    symbol, trade_date.isoformat(), offset, attempt,
-                    self.max_retries, exc,
-                )
-                self.disconnect()
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_delay)
-        raise RuntimeError(
-            f"get_history_transaction_page 重试 {self.max_retries} 次后仍失败 "
-            f"symbol={symbol} trade_date={trade_date.isoformat()} "
-            f"offset={offset} count={count}: {last_exc}"
+        rows = self._call_with_reconnect(
+            "get_history_transaction_data",
+            lambda api: api.get_history_transaction_data(
+                market_int, symbol, offset, count, date_int
+            ),
+            symbol=symbol,
+            market=market_int,
         )
+        return list(rows) if rows else []
 
     def get_security_list(self, market: str, max_count: int | None = None) -> pd.DataFrame:
         """拉取指定市场的全部股票列表（参考 chanlun-pro all_stocks() 设计）。
@@ -497,14 +597,11 @@ class PytdxAdapter(Exchange):
         market_code = MARKET_NAME_TO_CODE[market]
 
         # 获取市场证券总数（参考 chanlun-pro：client.get_security_count(market)）
-        try:
-            # [P0-5] I/O 锁覆盖 self.api.* 调用
-            with self._io_lock:
-                total_count = self.api.get_security_count(market_code)
-        except Exception as exc:
-            raise RuntimeError(
-                f"pytdx get_security_count 失败：market={market}(code={market_code}), error={exc}"
-            ) from exc
+        total_count = self._call_with_reconnect(
+            "get_security_count",
+            lambda api: api.get_security_count(market_code),
+            market=market_code,
+        )
 
         if total_count <= 0:
             logger.warning("pytdx 市场 %s 证券总数为 0", market)
@@ -518,15 +615,12 @@ class PytdxAdapter(Exchange):
         all_items: list[dict[str, Any]] = []
         for i in range(pages):
             start = i * SECURITY_LIST_PAGE_SIZE
-            try:
-                # [P0-5] I/O 锁覆盖 self.api.* 调用
-                with self._io_lock:
-                    data = self.api.get_security_list(market_code, start)
-            except Exception as exc:
-                raise RuntimeError(
-                    f"pytdx get_security_list 拉取失败：market={market}(code={market_code}), "
-                    f"start={start}, error={exc}"
-                ) from exc
+            data = self._call_with_reconnect(
+                "get_security_list",
+                # 默认参数绑定本轮 start，避免闭包捕获循环变量（B023）
+                lambda api, _start=start: api.get_security_list(market_code, _start),
+                market=market_code,
+            )
 
             if not data:
                 break
@@ -597,6 +691,41 @@ class PytdxAdapter(Exchange):
 
         return result
 
+    def get_security_quotes(
+        self,
+        symbols: Sequence[str],
+    ) -> list[dict[str, Any]]:
+        """批量获取实时行情快照（正式 public API；调用方禁止再访问 ``.api``）。
+
+        这是集合竞价等消费方访问 ``get_security_quotes`` 的唯一入口：市场解析
+        （``market_from_code``）与连接 / 重连 / bounded retry 全部收敛到本方法；
+        调用方（如 auction provider）只负责按既有 batch-size 约束分批调用。
+
+        语义：
+        - 合法成功但返回空 → 返回 ``[]``（该批标的确实无行情）。
+        - provider / socket / reconnect 耗尽 → 抛 :class:`PytdxSourceError`。
+
+        Args:
+            symbols: 股票代码列表（如 ``['000001', '600519']``），
+                市场由 ``market_from_code`` 解析。
+
+        Returns:
+            原始 quote dict 列表（含 market/code/price/open/high/low/vol/amount/
+            last_close/servertime 等字段）；无数据时为空列表。
+        """
+        if not symbols:
+            return []
+
+        requests = [
+            (market_from_code(symbol), symbol)
+            for symbol in symbols
+        ]
+        rows = self._call_with_reconnect(
+            "get_security_quotes",
+            lambda api: api.get_security_quotes(requests),
+        )
+        return list(rows) if rows else []
+
     def _fetch_bars(
         self,
         symbol: str,
@@ -615,7 +744,7 @@ class PytdxAdapter(Exchange):
             无数据时返回空 DataFrame
 
         Raises:
-            RuntimeError: 拉取或解析失败（不吞没异常）
+            PytdxSourceError: provider 重连耗尽后仍失败（不吞没异常）
         """
         if period not in PERIOD_MAP:
             raise RuntimeError(
@@ -628,17 +757,16 @@ class PytdxAdapter(Exchange):
         all_bars: list[dict[str, Any]] = []
         start = 0
         while len(all_bars) < count:
-            try:
-                data = self.api.get_security_bars(cat, market, symbol, start, _FETCH_BATCH)
-            except Exception as exc:
-                # 拉取失败：补充上下文后 raise（禁止吞没，原代码此处无异常处理）
-                logger.warning(
-                    "pytdx get_security_bars 失败 symbol=%s period=%s start=%d: %s",
-                    symbol, period, start, exc,
-                )
-                raise RuntimeError(
-                    f"pytdx 拉取 K 线失败 symbol={symbol} period={period} start={start}: {exc}"
-                ) from exc
+            data = self._call_with_reconnect(
+                "get_security_bars",
+                # 默认参数绑定本轮 start，避免闭包捕获循环变量（B023）
+                lambda api, _start=start: api.get_security_bars(
+                    cat, market, symbol, _start, _FETCH_BATCH
+                ),
+                symbol=symbol,
+                market=market,
+                period=period,
+            )
 
             if not data:
                 break
@@ -698,7 +826,7 @@ class PytdxAdapter(Exchange):
         days = (end - start).days + 1
         count = min(max(days + 30, 30), 8000)
 
-        df = self._fetch_with_retry(symbol, "d", count)
+        df = self._fetch_bars(symbol, "d", count)
         if df.empty:
             return df
 
@@ -732,12 +860,12 @@ class PytdxAdapter(Exchange):
         minutes = int((end - start).total_seconds() // 60) + 1
         count = min(max(minutes + 500, 500), 8000)
 
-        df = self._fetch_with_retry(symbol, "1m", count)
+        df = self._fetch_bars(symbol, "1m", count)
         if df.empty:
             return df
 
         # 按时间范围过滤
-        # [pytdx-timezone] - _fetch_with_retry 已将 1m 数据 datetime 列显式 tz_localize(None)，
+        # [pytdx-timezone] - _fetch_bars 已将 1m 数据 datetime 列显式 tz_localize(None)，
         # 因此传入 aware start/end 时需先统一为 naive（按 Asia/Shanghai 解释），避免
         # aware Timestamp 与 datetime64[us] 比较抛出 TypeError。
         start_ts = pd.Timestamp(start)
@@ -767,7 +895,7 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 重试后仍失败
         """
-        return self._fetch_with_retry(symbol, "w", count)
+        return self._fetch_bars(symbol, "w", count)
 
     def get_monthly_bars(
         self,
@@ -787,7 +915,7 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 重试后仍失败
         """
-        return self._fetch_with_retry(symbol, "m", count)
+        return self._fetch_bars(symbol, "m", count)
 
     def get_15min_bars(
         self,
@@ -807,7 +935,7 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 重试后仍失败
         """
-        return self._fetch_with_retry(symbol, "15m", count)
+        return self._fetch_bars(symbol, "15m", count)
 
     def get_60min_bars(
         self,
@@ -827,7 +955,7 @@ class PytdxAdapter(Exchange):
         Raises:
             RuntimeError: 重试后仍失败
         """
-        return self._fetch_with_retry(symbol, "60m", count)
+        return self._fetch_bars(symbol, "60m", count)
 
     # frequency → PERIOD_MAP 键映射（klines 内部使用）
     _FREQ_TO_PERIOD: dict[str, str] = {
@@ -931,7 +1059,7 @@ class PytdxAdapter(Exchange):
             try:
                 # 拉取最近 2 页数据（2 × 700 = 1400 bars），足够覆盖增量
                 incremental_df = await asyncio.to_thread(
-                    self._fetch_with_retry, symbol, self._FREQ_TO_PERIOD[frequency], 1400
+                    self._fetch_bars, symbol, self._FREQ_TO_PERIOD[frequency], 1400
                 )
                 if incremental_df is not None and not incremental_df.empty:
                     # 转换为 DatetimeIndex 格式（与全量拉取一致）
@@ -969,7 +1097,7 @@ class PytdxAdapter(Exchange):
         effective_limit = limit if limit is not None else (count if count is not None else 250)
         fetch_count = min(effective_limit + 250, 1000)
         df = await asyncio.to_thread(
-            self._fetch_with_retry, symbol, self._FREQ_TO_PERIOD[frequency], fetch_count
+            self._fetch_bars, symbol, self._FREQ_TO_PERIOD[frequency], fetch_count
         )
         if df is None or df.empty:
             return None
@@ -1042,74 +1170,70 @@ class PytdxAdapter(Exchange):
         return result
 
     def get_realtime_quote(self, symbol: str) -> dict[str, Any] | None:
-        """获取实时行情报价（通过 pytdx 1 分钟线 + 日线）。
+        """获取实时行情报价（通过 pytdx get_security_quotes 快照）。
 
-        流程：
-        1. 拉取最新 2 根 1 分钟线，取最新 bar 的 close 作为 current_price
-        2. 拉取最近 5 根日线，取倒数第 2 根的 close 作为 prev_close（前一交易日收盘价）
-        3. 日线不足时降级为前一根 1 分钟线的 close
-        4. 计算 change_pct = (current_price - prev_close) / prev_close * 100
+        语义（严格区分「无行情」与「源不可用」）：
+        - 成功调用但返回空 → ``None``（该标的确实无报价，不伪造数据）。
+        - provider / socket / reconnect 耗尽 → 抛 :class:`PytdxSourceError`
+          （绝不 ``except Exception: return None`` 把源故障伪装成「无行情」）。
+
+        注意：本方法不再用 1m/daily K 线合成 quote；Monitor V2 亦不依赖本 API，
+        此修改只用于把既有 quote API 本身修正为统一 provider 边界。
 
         Args:
             symbol: 股票代码（如 '000001', '600519'）
 
         Returns:
             行情字典，包含 current_price/open/high/low/close/volume/prev_close/
-            change_pct/update_time/is_realtime；失败时返回 None（不静默兜底假数据）
+            change_pct/update_time/is_realtime；成功但无行情时返回 None。
         """
-        try:
-            # [实时行情] 拉取最新 2 根 1 分钟线
-            df_1m = self._fetch_with_retry(symbol, "1m", 2)
-            if df_1m.empty:
-                logger.warning("get_realtime_quote: 1 分钟线无数据 symbol=%s", symbol)
-                return None
+        rows = self.get_security_quotes([symbol])
 
-            latest = df_1m.iloc[-1]
-            current_price = float(latest["close"])
-
-            # [实时行情] 获取前一交易日收盘价：优先从日线获取
-            prev_close: float | None = None
-            try:
-                df_daily = self._fetch_with_retry(symbol, "d", 5)
-                if len(df_daily) >= 2:
-                    prev_close = float(df_daily.iloc[-2]["close"])
-            except Exception as exc:
-                logger.debug("get_realtime_quote: 日线获取失败 symbol=%s: %s", symbol, exc)
-
-            # 日线不足时，使用前一根 1 分钟线的收盘价
-            if prev_close is None and len(df_1m) >= 2:
-                prev_close = float(df_1m.iloc[-2]["close"])
-
-            # 无法计算涨跌幅时退化为 0%
-            if prev_close is None or prev_close == 0:
-                prev_close = current_price
-
-            change_pct = (current_price - prev_close) / prev_close * 100
-
-            update_time = latest["datetime"]
-            if hasattr(update_time, "isoformat"):
-                # [QuoteTrust] - 明确附加 Asia/Shanghai 时区，避免前端按本地时区解析成纽约时间
-                if hasattr(update_time, "tzinfo") and update_time.tzinfo is None:
-                    update_time = update_time.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-                update_time = update_time.isoformat()
-            else:
-                update_time = str(update_time)
-
-            return {
-                "current_price": round(current_price, 4),
-                "open": round(float(latest["open"]), 4),
-                "high": round(float(latest["high"]), 4),
-                "low": round(float(latest["low"]), 4),
-                "close": round(current_price, 4),
-                "volume": round(float(latest["volume"]), 2),
-                "prev_close": round(prev_close, 4),
-                "change_pct": round(change_pct, 2),
-                "update_time": update_time,
-                "is_realtime": True,
-            }
-        except Exception as exc:
-            logger.warning("get_realtime_quote 失败 symbol=%s: %s", symbol, exc)
+        # provider 成功，但确实没有 quote
+        if not rows:
             return None
+
+        row = rows[0]
+        if not isinstance(row, dict):
+            logger.warning("get_realtime_quote: 非预期响应类型 symbol=%s", symbol)
+            return None
+
+        price = _to_float(row.get("price"))
+        if price is None or price <= 0:
+            return None
+
+        prev_close = _to_float(row.get("last_close"))
+        open_price = _to_float(row.get("open"))
+        high = _to_float(row.get("high"))
+        low = _to_float(row.get("low"))
+        volume = _to_float(row.get("vol"))
+        amount = _to_float(row.get("amount"))
+
+        # prev_close 不可用时不伪造 0%，保持 None（调用方自行降级）
+        change_pct = None
+        if prev_close is not None and prev_close > 0:
+            change_pct = (price - prev_close) / prev_close * 100.0
+
+        # quote 无可靠交易所 watermark → 使用本地上海时区抓取时间
+        captured_at = datetime.now(ZoneInfo("Asia/Shanghai")).isoformat()
+
+        return {
+            "current_price": price,
+            "open": open_price,
+            "high": high,
+            "low": low,
+            "close": price,
+            "volume": volume,
+            "amount": amount,
+            "prev_close": prev_close,
+            "change_pct": change_pct,
+            "captured_at": captured_at,
+            # 兼容旧调用方保留 update_time；其语义为「本地抓取时间」，
+            # 不是交易所/provider 的更新时间，不得伪称 provider watermark。
+            "update_time": captured_at,
+            "update_time_semantics": "local_capture_time",
+            "is_realtime": True,
+        }
 
     def get_xdxr_info(
         self, symbol: str, *, force_refresh: bool = False
@@ -1190,15 +1314,19 @@ class PytdxAdapter(Exchange):
                     # 后续阶段读回 → 形成 freshness 漏洞。force_refresh 场景必须
                     # fail-closed，不得静默降级。
                     raise PytdxSourceError(
-                        "XDXR fresh fetch succeeded but fresh cache publish "
-                        f"failed: symbol={symbol}, error={exc}"
+                        operation="get_xdxr_info",
+                        symbol=symbol,
+                        message="XDXR fresh fetch succeeded but fresh cache publish failed",
+                        cause=exc,
                     ) from exc
                 logger.warning("xdxr 缓存写入失败 symbol=%s: %s", symbol, exc)
             except Exception as exc:
                 if force_refresh:
                     raise PytdxSourceError(
-                        "XDXR fresh fetch succeeded but fresh cache publish "
-                        f"failed: symbol={symbol}, error={exc}"
+                        operation="get_xdxr_info",
+                        symbol=symbol,
+                        message="XDXR fresh fetch succeeded but fresh cache publish failed",
+                        cause=exc,
                     ) from exc
                 logger.warning("xdxr 缓存写入异常 symbol=%s: %s", symbol, exc)
 
@@ -1232,32 +1360,18 @@ class PytdxAdapter(Exchange):
             RuntimeError: 重试后仍失败
         """
         market = market_from_code(symbol)
-        last_exc: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                if self._api is None:
-                    self.connect()
-                # [P0-5] I/O 锁覆盖 self.api.* 调用
-                with self._io_lock:
-                    raw = self.api.get_xdxr_info(market, symbol)
-                if not raw:
-                    return pd.DataFrame()
-                df = pd.DataFrame(raw)
-                # 构造日期列
-                df["date"] = pd.to_datetime(df[["year", "month", "day"]])
-                return df
-            except (RuntimeError, Exception) as exc:
-                last_exc = exc
-                logger.warning(
-                    "get_xdxr_info 失败 symbol=%s attempt=%d/%d: %s",
-                    symbol, attempt, self.max_retries, exc,
-                )
-                self.disconnect()
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_delay)
-        raise PytdxSourceError(
-            f"get_xdxr_info 重试 {self.max_retries} 次后仍失败 symbol={symbol}: {last_exc}"
-        ) from last_exc
+        raw = self._call_with_reconnect(
+            "get_xdxr_info",
+            lambda api: api.get_xdxr_info(market, symbol),
+            symbol=symbol,
+            market=market,
+        )
+        if not raw:
+            return pd.DataFrame()
+        df = pd.DataFrame(raw)
+        # 构造日期列
+        df["date"] = pd.to_datetime(df[["year", "month", "day"]])
+        return df
 
     def get_finance_info(self, symbol: str) -> dict[str, Any] | None:
         """获取股票财务信息（含总股本/流通股本）。
@@ -1289,111 +1403,41 @@ class PytdxAdapter(Exchange):
         from datetime import date as date_cls
 
         market = market_from_code(symbol)
-        last_exc: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                if self._api is None:
-                    self.connect()
-                # [P0-5] I/O 锁覆盖 self.api.* 调用
-                with self._io_lock:
-                    raw = self.api.get_finance_info(market, symbol)
-                if raw is None or not raw:
-                    return None
-                # raw 是 OrderedDict
-                zongguben = raw.get("zongguben")
-                liutongguben = raw.get("liutongguben")
-                updated_date_raw = raw.get("updated_date")
-                ipo_date_raw = raw.get("ipo_date")
-                # updated_date 是 YYYYMMDD int（如 20260425）
-                share_as_of: date_cls | None = None
-                if updated_date_raw and isinstance(updated_date_raw, (int, float)):
-                    try:
-                        d_int = int(updated_date_raw)
-                        share_as_of = date_cls(d_int // 10000, (d_int // 100) % 100, d_int % 100)
-                    except (ValueError, OverflowError):
-                        share_as_of = None
-                # ipo_date 是 YYYYMMDD int（如 19910403）；仅透传原值，
-                # 日历合法性校验交给 normalize_pytdx_ipo_date，避免此处猜边界。
-                ipo_date_value: int | None = None
-                if ipo_date_raw and isinstance(ipo_date_raw, (int, float)):
-                    try:
-                        ipo_date_value = int(ipo_date_raw)
-                    except (ValueError, OverflowError):
-                        ipo_date_value = None
-                return {
-                    "total_share": float(zongguben) if zongguben else None,
-                    "float_share": float(liutongguben) if liutongguben else None,
-                    "share_as_of": share_as_of,
-                    "ipo_date_raw": ipo_date_value,
-                }
-            except (RuntimeError, Exception) as exc:
-                last_exc = exc
-                logger.warning(
-                    "get_finance_info 失败 symbol=%s attempt=%d/%d: %s",
-                    symbol, attempt, self.max_retries, exc,
-                )
-                self.disconnect()
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_delay)
-        raise RuntimeError(
-            f"get_finance_info 重试 {self.max_retries} 次后仍失败 symbol={symbol}: {last_exc}"
+        raw = self._call_with_reconnect(
+            "get_finance_info",
+            lambda api: api.get_finance_info(market, symbol),
+            symbol=symbol,
+            market=market,
         )
-
-    def _fetch_with_retry(
-        self,
-        symbol: str,
-        period: str,
-        count: int,
-    ) -> pd.DataFrame:
-        """带重试的 K 线拉取（失败重连后重试）。
-
-        Args:
-            symbol: 股票代码
-            period: 周期键
-            count: 拉取条数
-
-        Returns:
-            DataFrame
-
-        Raises:
-            RuntimeError: 重试 max_retries 次后仍失败（不吞没异常）
-        """
-        # [P0-5] I/O 锁覆盖 _fetch_with_retry：单例 adapter 在 asyncio.to_thread 并发调用时
-        # 必须串行访问 TdxHq_API（共享 socket）；connect/disconnect 已各自持锁，但
-        # threading.Lock 不可重入，故内部调用前先释放外层锁，由内部方法各自持锁。
-        # 这里持锁范围：连接检查 + _fetch_bars 调用（原子），失败重连通过 disconnect+connect 各自持锁。
-        last_exc: Exception | None = None
-        for attempt in range(1, self.max_retries + 1):
+        if raw is None or not raw:
+            return None
+        # raw 是 OrderedDict
+        zongguben = raw.get("zongguben")
+        liutongguben = raw.get("liutongguben")
+        updated_date_raw = raw.get("updated_date")
+        ipo_date_raw = raw.get("ipo_date")
+        # updated_date 是 YYYYMMDD int（如 20260425）
+        share_as_of: date_cls | None = None
+        if updated_date_raw and isinstance(updated_date_raw, (int, float)):
             try:
-                # 确保已连接（connect 内部持锁，这里不重复持锁）
-                if self._api is None:
-                    self.connect()
-                # 持锁调用 _fetch_bars，防止并发请求污染 socket 状态
-                with self._io_lock:
-                    return self._fetch_bars(symbol, period, count)
-            except RuntimeError as exc:
-                last_exc = exc
-                logger.warning(
-                    "pytdx 拉取失败 attempt=%d/%d symbol=%s: %s",
-                    attempt, self.max_retries, symbol, exc,
-                )
-                # 重连前断开旧连接（disconnect 内部持锁，这里不重复持锁）
-                self.disconnect()
-            except Exception as exc:
-                # 未预期异常：补充上下文后 raise（禁止吞没）
-                logger.warning(
-                    "pytdx 拉取未预期异常 attempt=%d/%d symbol=%s: %s",
-                    attempt, self.max_retries, symbol, exc,
-                )
-                raise RuntimeError(
-                    f"pytdx 拉取未预期异常 symbol={symbol} period={period}: {exc}"
-                ) from exc
-
-        # 重试耗尽：raise（禁止吞没）
-        raise RuntimeError(
-            f"pytdx 拉取失败，重试 {self.max_retries} 次仍失败 symbol={symbol} period={period}: {last_exc}"
-        )
-
+                d_int = int(updated_date_raw)
+                share_as_of = date_cls(d_int // 10000, (d_int // 100) % 100, d_int % 100)
+            except (ValueError, OverflowError):
+                share_as_of = None
+        # ipo_date 是 YYYYMMDD int（如 19910403）；仅透传原值，
+        # 日历合法性校验交给 normalize_pytdx_ipo_date，避免此处猜边界。
+        ipo_date_value: int | None = None
+        if ipo_date_raw and isinstance(ipo_date_raw, (int, float)):
+            try:
+                ipo_date_value = int(ipo_date_raw)
+            except (ValueError, OverflowError):
+                ipo_date_value = None
+        return {
+            "total_share": float(zongguben) if zongguben else None,
+            "float_share": float(liutongguben) if liutongguben else None,
+            "share_as_of": share_as_of,
+            "ipo_date_raw": ipo_date_value,
+        }
 
 @contextmanager
 def connect_pytdx() -> Generator[PytdxAdapter, None, None]:

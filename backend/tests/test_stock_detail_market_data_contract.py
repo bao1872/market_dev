@@ -599,7 +599,8 @@ def test_quote_derived_from_latest_daily_quote() -> None:
 def test_pytdx_adapter_rlock_no_deadlock() -> None:
     """[P0-7] PytdxAdapter 使用 RLock，双线程并发调用不死锁。
 
-    构造场景：两个线程同时调用 _fetch_with_retry，验证都能在超时内完成。
+    构造场景：两个线程同时调用 _fetch_bars（内部经 _call_with_reconnect 持 _io_lock），
+    验证都能在超时内完成。
     RLock 保证同一线程内嵌套获取不自锁；跨线程串行执行。
     """
     from app.core.pytdx_adapter import PytdxAdapter
@@ -610,29 +611,31 @@ def test_pytdx_adapter_rlock_no_deadlock() -> None:
         "_io_lock 必须为 threading.RLock（可重入），防止嵌套自锁"
     )
 
-    # Mock _fetch_bars 模拟耗时操作
+    # Mock 底层 socket 调用模拟耗时 I/O：真实路径会经 _call_with_reconnect
+    # 在 _io_lock 内执行 api.get_security_bars，从而验证跨线程串行。
     call_order: list[str] = []
     call_lock = threading.Lock()
 
-    def _mock_fetch_bars(symbol: str, period: str, count: int) -> pd.DataFrame:
+    def _mock_get_security_bars(
+        cat: int, market: int, symbol: str, start: int, count: int
+    ) -> list[dict[str, object]]:
         with call_lock:
             call_order.append(f"start:{symbol}")
         time.sleep(0.05)  # 模拟 I/O
         with call_lock:
             call_order.append(f"end:{symbol}")
-        return pd.DataFrame()
+        return []
 
-    adapter._fetch_bars = _mock_fetch_bars  # type: ignore[assignment]
-
-    # Mock connect 不做真实连接
-    adapter._api = MagicMock()  # type: ignore[assignment]
+    api = MagicMock()
+    api.get_security_bars.side_effect = _mock_get_security_bars
+    adapter._api = api  # type: ignore[assignment]
 
     results: list[str] = []
     errors: list[Exception] = []
 
     def _worker(symbol: str) -> None:
         try:
-            adapter._fetch_with_retry(symbol, "15min", 1)
+            adapter._fetch_bars(symbol, "15m", 1)
             results.append(f"ok:{symbol}")
         except Exception as exc:
             errors.append(exc)

@@ -36,7 +36,7 @@ async def test_fetch_count_limit_250(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["count"] = count
         return _build_mock_kline_df()
 
-    monkeypatch.setattr(adapter, "_fetch_with_retry", mock_fetch)
+    monkeypatch.setattr(adapter, "_fetch_bars", mock_fetch)
     await adapter.klines("000001", "1d", limit=250)
     assert captured.get("count") == 500
 
@@ -52,7 +52,7 @@ async def test_fetch_count_limit_5000_capped(monkeypatch: pytest.MonkeyPatch) ->
         captured["count"] = count
         return _build_mock_kline_df()
 
-    monkeypatch.setattr(adapter, "_fetch_with_retry", mock_fetch)
+    monkeypatch.setattr(adapter, "_fetch_bars", mock_fetch)
     await adapter.klines("000001", "1d", limit=5000)
     assert captured.get("count") == 1000
 
@@ -68,7 +68,7 @@ async def test_fetch_count_limit_100(monkeypatch: pytest.MonkeyPatch) -> None:
         captured["count"] = count
         return _build_mock_kline_df()
 
-    monkeypatch.setattr(adapter, "_fetch_with_retry", mock_fetch)
+    monkeypatch.setattr(adapter, "_fetch_bars", mock_fetch)
     await adapter.klines("000001", "1d", limit=100)
     assert captured.get("count") == 350
 

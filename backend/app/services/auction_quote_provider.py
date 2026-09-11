@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, Protocol, runtime_checkable
 
-from app.core.pytdx_adapter import MARKET_NAME_TO_CODE, PytdxAdapter
+from app.core.pytdx_adapter import MARKET_NAME_TO_CODE, PytdxAdapter, market_from_code
 
 logger = logging.getLogger(__name__)
 
@@ -207,23 +207,26 @@ class MootdxAuctionQuoteProvider:
 
     def _fetch_batch(self, batch: list[tuple[str, str]]) -> list[AuctionQuoteResult]:
         """获取一批报价（最多 self._batch_size 只）。"""
-        # 转换为 pytdx 格式 [(market_code, code), ...]
-        pytdx_stocks: list[tuple[int, str]] = []
+        # 只允许 pytdx 支持的 SH/SZ 市场；市场码与 adapter.get_security_quotes
+        # 内部使用的 market_from_code 保持一致，避免结果映射错位。
+        pytdx_symbols: list[str] = []
         symbol_map: dict[tuple[int, str], tuple[str, str]] = {}
 
         for sym, mkt in batch:
             if mkt not in MARKET_NAME_TO_CODE:
                 logger.warning("[AuctionProvider] 未知市场: %s symbol=%s", mkt, sym)
                 continue
-            market_code = MARKET_NAME_TO_CODE[mkt]
-            pytdx_stocks.append((market_code, sym))
+            market_code = market_from_code(sym)
+            pytdx_symbols.append(sym)
             symbol_map[(market_code, sym)] = (sym, mkt)
 
-        if not pytdx_stocks:
+        if not pytdx_symbols:
             return []
 
         try:
-            raw_list = self._adapter.api.get_security_quotes(pytdx_stocks)
+            # 统一走 PytdxAdapter 的正式 public API（唯一 socket owner）；
+            # 禁止再访问 self._adapter.api.*
+            raw_list = self._adapter.get_security_quotes(pytdx_symbols)
         except Exception as exc:
             logger.error("[AuctionProvider] get_security_quotes 失败: %s", exc)
             return [

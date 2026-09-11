@@ -44,7 +44,7 @@ def test_get_minute_bars_aware_start_end_filters_naive_datetime(monkeypatch: pyt
     def mock_fetch(symbol: str, period: str, count: int) -> pd.DataFrame:
         return _build_mock_minute_df()
 
-    monkeypatch.setattr(adapter, "_fetch_with_retry", mock_fetch)
+    monkeypatch.setattr(adapter, "_fetch_bars", mock_fetch)
 
     start = datetime(2026, 7, 7, 9, 30, 0, tzinfo=SHANGHAI_TZ)
     end = datetime(2026, 7, 7, 9, 35, 0, tzinfo=SHANGHAI_TZ)
@@ -63,7 +63,7 @@ def test_get_minute_bars_naive_start_end_still_works(monkeypatch: pytest.MonkeyP
     def mock_fetch(symbol: str, period: str, count: int) -> pd.DataFrame:
         return _build_mock_minute_df()
 
-    monkeypatch.setattr(adapter, "_fetch_with_retry", mock_fetch)
+    monkeypatch.setattr(adapter, "_fetch_bars", mock_fetch)
 
     start = datetime(2026, 7, 7, 9, 30, 0)
     end = datetime(2026, 7, 7, 9, 35, 0)

@@ -169,8 +169,17 @@ async def capture_auction_final_quotes(
         provider = MootdxAuctionQuoteProvider()
         provider_owned = True
 
+    results: list[AuctionQuoteResult] = []
     try:
-        results = await _fetch_with_retry(provider, expected_symbols)
+        # [provider boundary] 本层不再做整体重试：
+        # - Provider 内部已把单批失败转成 api_error 结果（不向本层抛）；
+        # - PytdxAdapter._call_with_reconnect 已是唯一 connection-level retry owner；
+        # 在本层重试会产生 business retry × socket retry 的放大（此前为 2×3）。
+        results = await asyncio.to_thread(provider.fetch_auction_quotes, expected_symbols)
+    except Exception as exc:
+        # 保持既有契约：Provider 整体失败时记录并返回空结果（CaptureRun 标记 failed），
+        # 不向上抛异常（本服务对 CaptureRun 状态负责）。
+        logger.error("[AuctionCapture] Provider 调用失败，返回空结果: %s", exc)
     finally:
         if provider_owned:
             provider.close()
@@ -425,36 +434,6 @@ async def _resolve_instrument_ids(
     )
     result = await db.execute(stmt)
     return {(inst.symbol, inst.market): inst.id for inst in result.scalars().all()}
-
-
-async def _fetch_with_retry(
-    provider: AuctionFinalQuoteProvider,
-    symbols: list[tuple[str, str]],
-    *,
-    max_retries: int = 1,
-) -> list[AuctionQuoteResult]:
-    """调用 Provider.fetch_auction_quotes，支持简单重试。
-
-    Provider 内部已处理单批失败，本函数只在整体调用失败时重试一次。
-    """
-    last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
-        try:
-            # Provider.fetch_auction_quotes 是同步方法，使用 asyncio.to_thread 包装
-            return await asyncio.to_thread(provider.fetch_auction_quotes, symbols)
-        except Exception as exc:
-            last_exc = exc
-            logger.warning(
-                "[AuctionCapture] Provider 调用失败 (attempt=%d/%d): %s",
-                attempt + 1, max_retries + 1, exc,
-            )
-    if last_exc is not None:
-        # 最后一次失败，返回空列表并记录（CaptureRun 会被标记为 failed）
-        logger.error(
-            "[AuctionCapture] Provider 重试耗尽，返回空结果: %s", last_exc,
-        )
-        return []
-    return []
 
 
 def _parse_source_time(
