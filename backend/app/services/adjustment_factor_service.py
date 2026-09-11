@@ -49,6 +49,18 @@ _MDAS_CACHE_PREFIX = "mdas"
 _FP_PREFIX = "adj_factor_fp"
 
 
+class CorporateActionProviderError(RuntimeError):
+    """公司行为（xdxr）数据源不可用。
+
+    为什么必须显式抛出而不是返回 ``None``：``detect_company_action_change`` 的
+    ``None`` 语义是「没有公司行为变化，无需重建」。若把 provider 异常也映射成
+    ``None``，「数据源挂了」与「确实没有除权」在返回值上完全无法区分 —— 调用方会
+    把无法证明 freshness 的 qfq 序列当成正确结果继续使用。
+
+    调用方自行决定：degraded / retry / fail-closed。
+    """
+
+
 class AdjustmentFactorService:
     """统一复权因子服务。
 
@@ -309,7 +321,12 @@ class AdjustmentFactorService:
             adapter: pytdx 适配器（None 用模块单例）
 
         Returns:
-            最早受影响日期（需重建因子）或 None（无变化）
+            最早受影响日期（需重建因子）或 None（**确实没有**公司行为变化）
+
+        Raises:
+            CorporateActionProviderError: xdxr provider 不可用。**不得**把 provider
+                故障映射成 None（那会让调用方误以为「没有除权」而继续使用无法证明
+                freshness 的 qfq 序列）。
         """
         pytdx = adapter or get_pytdx_adapter()
         try:
@@ -318,7 +335,9 @@ class AdjustmentFactorService:
             logger.warning(
                 "detect_company_action_change 获取 xdxr 失败 symbol=%s: %s", symbol, exc,
             )
-            return None
+            raise CorporateActionProviderError(
+                f"xdxr provider unavailable symbol={symbol}: {exc}"
+            ) from exc
 
         if xdxr_df is None or xdxr_df.empty:
             # 无除权除息事件，fingerprint 为空串

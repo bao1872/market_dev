@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -39,7 +39,16 @@ from app.repositories import bar_repository as bar_repo
 from app.services import bars_scheduler_service as scheduler_module
 from app.services import eod_daily_refresh_service as refresh_mod
 from app.services import eod_market_snapshot_provider as prov
-from app.services.bars_scheduler_service import BarsSchedulerService
+from app.services.bars_scheduler_service import (
+    BarsSchedulerService,
+    FactorProviderHealth,
+    FactorSourceUnavailableError,
+)
+from app.services.eod_daily_refresh_service import (
+    DailyContinuityBlockedError,
+    DailyGap,
+    InstrumentSyncResult,
+)
 from app.services.eod_market_snapshot_provider import EodSnapshotRow, SnapshotProviderError
 
 TRADE_DATE = date(2026, 9, 11)
@@ -138,11 +147,15 @@ def _snap(
     volume: Any = Decimal("12345"),
     amount: Any = Decimal("6789012"),
 ) -> EodSnapshotRow:
+    # DTO 保留完整 f124 时间（updated_at），trade_date 是其日期投影。
+    updated_at = (
+        datetime.combine(trade_date, time(15, 30)) if trade_date is not None else None
+    )
     return EodSnapshotRow(
         symbol=symbol,
         name=name,
         market=market,
-        trade_date=trade_date,
+        updated_at=updated_at,
         open=open_,
         high=high,
         low=low,
@@ -167,7 +180,7 @@ async def test_universe_inserts_new_symbols_with_pinyin_and_no_listing_date() ->
     session = _ScriptedSession([[], [_instrument("920001", market="BJ")]])
     rows = [_snap("920001", name="北新科技", market="BJ"), _snap("600519", name="贵州茅台")]
 
-    result = await refresh_mod.sync_instruments_from_eod_snapshot(session, rows)  # type: ignore[arg-type]
+    result = await refresh_mod.sync_instruments_from_eod_snapshot(session, rows, TRADE_DATE)  # type: ignore[arg-type]
 
     assert result.new_symbols == ["920001", "600519"]
     assert result.updated_symbols == []
@@ -185,7 +198,7 @@ async def test_universe_updates_existing_name_and_market_but_keeps_status_active
     session = _ScriptedSession([[existing]])
 
     result = await refresh_mod.sync_instruments_from_eod_snapshot(
-        session, [_snap("600519", name="贵州茅台", market="SH")]  # type: ignore[arg-type]
+        session, [_snap("600519", name="贵州茅台", market="SH")], TRADE_DATE  # type: ignore[arg-type]
     )
 
     assert existing.name == "贵州茅台"
@@ -202,7 +215,7 @@ async def test_universe_unchanged_symbol_produces_no_update() -> None:
     session = _ScriptedSession([[existing]])
 
     result = await refresh_mod.sync_instruments_from_eod_snapshot(
-        session, [_snap("600519", name="贵州茅台", market="SH")]  # type: ignore[arg-type]
+        session, [_snap("600519", name="贵州茅台", market="SH")], TRADE_DATE  # type: ignore[arg-type]
     )
 
     assert result.updated_symbols == []
@@ -217,7 +230,7 @@ async def test_universe_does_not_delist_symbol_missing_from_snapshot() -> None:
     session = _ScriptedSession([[existing], [_instrument("920001", market="BJ")]])
 
     await refresh_mod.sync_instruments_from_eod_snapshot(
-        session, [_snap("920001", market="BJ")]  # type: ignore[arg-type]
+        session, [_snap("920001", market="BJ")], TRADE_DATE  # type: ignore[arg-type]
     )
 
     assert existing.status == "active"
@@ -228,7 +241,7 @@ async def test_universe_dedups_repeated_symbol() -> None:
     session = _ScriptedSession([[], [_instrument("600519")]])
 
     result = await refresh_mod.sync_instruments_from_eod_snapshot(
-        session, [_snap("600519"), _snap("600519")]  # type: ignore[arg-type]
+        session, [_snap("600519"), _snap("600519")], TRADE_DATE  # type: ignore[arg-type]
     )
 
     assert result.new_symbols == ["600519"]
@@ -237,10 +250,65 @@ async def test_universe_dedups_repeated_symbol() -> None:
 @pytest.mark.asyncio
 async def test_universe_empty_snapshot_is_noop() -> None:
     session = _ScriptedSession()
-    result = await refresh_mod.sync_instruments_from_eod_snapshot(session, [])  # type: ignore[arg-type]
+    result = await refresh_mod.sync_instruments_from_eod_snapshot(session, [], TRADE_DATE)  # type: ignore[arg-type]
     assert result.new_symbols == []
     assert session.select_statements == []
     assert session.insert_statements == []
+
+
+@pytest.mark.asyncio
+async def test_universe_reactivates_inactive_symbol_with_valid_today_bar() -> None:
+    """inactive 股票恢复交易：名称/市场都没变，但只要拿到有效 T 日日线就必须复活。
+
+    旧逻辑只在 name/market 变化时才置 active，导致这类股票永远回不到覆盖率分母。
+    """
+    existing = _instrument("600519", name="贵州茅台", market="SH")
+    existing.status = "inactive"
+    session = _ScriptedSession([[existing]])
+
+    result = await refresh_mod.sync_instruments_from_eod_snapshot(
+        session, [_snap("600519", name="贵州茅台", market="SH")], TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    assert existing.status == "active"
+    assert result.updated_symbols == ["600519"]
+
+
+@pytest.mark.asyncio
+async def test_universe_does_not_reactivate_inactive_symbol_without_valid_bar() -> None:
+    """停牌/空价（OHLC 缺失）的 snapshot 行不得把 inactive 股票强行置 active。"""
+    existing = _instrument("600519", name="贵州茅台", market="SH")
+    existing.status = "inactive"
+    session = _ScriptedSession([[existing]])
+    suspended = _snap(
+        "600519",
+        name="贵州茅台",
+        market="SH",
+        open_=None,
+        high=None,
+        low=None,
+        close=None,
+    )
+
+    await refresh_mod.sync_instruments_from_eod_snapshot(
+        session, [suspended], TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    assert existing.status == "inactive"
+
+
+@pytest.mark.asyncio
+async def test_universe_new_symbol_without_valid_bar_is_inactive() -> None:
+    """新 symbol 但没有任何有效 T 日行情 → 先 inactive，不进覆盖率分母。"""
+    session = _ScriptedSession([[], []])
+    suspended = _snap("920999", market="BJ", volume=None, amount=None)
+
+    await refresh_mod.sync_instruments_from_eod_snapshot(
+        session, [suspended], TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    sql = _sql_literals(session.insert_statements[0])
+    assert "'inactive'" in sql
 
 
 # ===========================================================================
@@ -378,64 +446,69 @@ def _kline_records(days: int = 3) -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_backfill_prefers_pytdx_and_skips_eastmoney(monkeypatch: pytest.MonkeyPatch) -> None:
-    import pandas as pd
+async def test_backfill_prefers_eastmoney_and_skips_pytdx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """EOD 修复的 canonical 来源是 Eastmoney fqt=0（与当日 snapshot 同源）。
 
+    pytdx 只作 disaster fallback，且必须排在 Eastmoney 之后（它是当前故障源，
+    先调它会为每只股票白付一次连接/重试代价）。
+    """
     calls: list[str] = []
 
-    async def fake_refresh(session: Any, instrument_id: Any, start: Any, end: Any, adapter: Any = None) -> Any:
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 不应被调用
         calls.append("pytdx")
-        return pd.DataFrame({"close": [1.0]})
-
-    async def fake_em(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 不应被调用
-        calls.append("eastmoney")
-        return []
-
-    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
-    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
-    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
-
-    # pytdx 写完后由 DB 查询确认（count_daily_bars > 0）
-    session = _ScriptedSession(scalar_queue=[1])
-    ok = await refresh_mod._backfill_one(  # noqa: SLF001
-        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
-    )
-
-    assert ok is True
-    assert calls == ["pytdx"]
-
-
-@pytest.mark.asyncio
-async def test_backfill_falls_back_to_eastmoney_insert_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """pytdx 失败 → Eastmoney fqt=0，且落库必须 insert-only（不覆盖既有行）。"""
-
-    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("pytdx 拉取失败 calling function error")
-
-    captured: dict[str, Any] = {}
+        raise AssertionError("Eastmoney 已成功，不得调用 pytdx")
 
     async def fake_em(client: Any, symbol: str, market: str, start: Any, end: Any) -> Any:
-        captured["symbol"] = symbol
-        captured["market"] = market
+        calls.append("eastmoney")
         return _kline_records()
 
     monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
     monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
     monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
 
-    # 第 1 次校验：pytdx 未补齐 → 走 Eastmoney；第 2 次校验：Eastmoney 已补齐
-    session = _ScriptedSession(scalar_queue=[None, 1])
+    # Eastmoney 写入后由 DB 查询确认（count_daily_bars > 0）
+    session = _ScriptedSession(scalar_queue=[1])
     ok = await refresh_mod._backfill_one(  # noqa: SLF001
-        session, _instrument("000001", market="SZ"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
     )
 
     assert ok is True
-    assert captured == {"symbol": "000001", "market": "SZ"}
+    assert calls == ["eastmoney"]
     assert len(session.insert_statements) == 1
     sql = _sql(session.insert_statements[0])
-    # insert-only：绝不覆盖既有行的 OHLCV / adj_factor
+    # Eastmoney 落库必须 insert-only：绝不覆盖既有行（含 adj_factor）
     assert "ON CONFLICT (instrument_id, trade_date) DO NOTHING" in sql
     assert "DO UPDATE SET" not in sql
+
+
+@pytest.mark.asyncio
+async def test_backfill_falls_back_to_pytdx_when_eastmoney_has_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Eastmoney 拿不到数据 → pytdx raw 兜底（仅 SH/SZ）。"""
+    calls: list[str] = []
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        calls.append("eastmoney")
+        return []
+
+    async def fake_refresh(session: Any, instrument_id: Any, start: Any, end: Any, adapter: Any = None) -> Any:
+        import pandas as pd
+
+        calls.append("pytdx")
+        return pd.DataFrame({"close": [1.0]})
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    session = _ScriptedSession(scalar_queue=[None, 1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    assert ok is True
+    assert calls == ["eastmoney", "pytdx"]
 
 
 @pytest.mark.asyncio
@@ -462,28 +535,28 @@ async def test_backfill_provider_error_is_not_silent_success(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_backfill_empty_pytdx_does_not_count_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
-    """pytdx 返回空 DataFrame 不算成功（必须继续 fallback）。"""
-    import pandas as pd
-
-    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
-        return pd.DataFrame()
+async def test_backfill_empty_results_do_not_count_as_written(monkeypatch: pytest.MonkeyPatch) -> None:
+    """两侧都返回空 → 不得算成功（必须靠 DB 目标日查询判定）。"""
 
     async def fake_em(*args: Any, **kwargs: Any) -> Any:
-        return _kline_records()
+        return []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        return pd.DataFrame()
 
     monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
     monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
     monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
 
-    # pytdx 空 → 第 1 次校验不过 → Eastmoney 写入 → 第 2 次校验通过
-    session = _ScriptedSession(scalar_queue=[None, 1])
+    session = _ScriptedSession(scalar_queue=[None, None])
     ok = await refresh_mod._backfill_one(  # noqa: SLF001
         session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
     )
 
-    assert ok is True
-    assert len(session.insert_statements) == 1
+    assert ok is False
+    assert session.insert_statements == []
 
 
 @pytest.mark.asyncio
@@ -573,7 +646,8 @@ async def test_backfill_bj_never_calls_pytdx(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
     monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
 
-    session = _ScriptedSession(scalar_queue=[None, 1])
+    # BJ 只走 Eastmoney（use_pytdx=False），因此只有一次 DB 校验
+    session = _ScriptedSession(scalar_queue=[1])
     ok = await refresh_mod._backfill_one(  # noqa: SLF001
         session,
         _instrument("920001", market="BJ"),
@@ -605,7 +679,10 @@ def test_pytdx_breaker_opens_after_consecutive_failures_and_resets() -> None:
 
 @pytest.mark.asyncio
 async def test_backfill_skips_pytdx_once_breaker_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """熔断打开后必须直接走 Eastmoney，不再为每只股票付出 pytdx 连接代价。"""
+    """Eastmoney 仍拿不到目标日时才会试 pytdx；熔断打开后必须停止 pytdx 尝试。
+
+    注意顺序：Eastmoney 是 primary，pytdx 只在 Eastmoney 无法补齐时才被调用。
+    """
     attempts = {"pytdx": 0}
 
     async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
@@ -646,7 +723,12 @@ async def test_fill_missing_uses_narrow_lookback_window(monkeypatch: pytest.Monk
         windows.append((start, end))
         return pd.DataFrame({"close": [1.0]})
 
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        return []
+
     monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
 
     inst = _instrument("600519")
     inst.listing_date = date(2020, 1, 1)
@@ -667,7 +749,16 @@ async def test_backfill_new_instruments_starts_from_listing_date(monkeypatch: py
         windows.append((start, end))
         return pd.DataFrame({"close": [1.0]})
 
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        return []
+
     monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+    monkeypatch.setattr(
+        "app.services.calendar_service.get_previous_trading_day_async",
+        AsyncMock(return_value=date(2026, 9, 10)),
+    )
 
     with_listing = _instrument("688001")     # 科创板新股
     with_listing.listing_date = date(2026, 6, 1)
@@ -718,6 +809,10 @@ def _patch_daily_harness(
 
     monkeypatch.setattr(service, "_run_serial_period", fake_serial)
     monkeypatch.setattr(service, "_run_parallel_period", fake_parallel)
+    # 连续性硬门禁：默认放行（缺口场景由专门用例覆盖）
+    monkeypatch.setattr(
+        service, "_scan_daily_continuity_gate", AsyncMock(return_value=[])
+    )
     monkeypatch.setattr(
         service, "_run_post_daily_phase", AsyncMock(return_value=None)
     )
@@ -959,6 +1054,9 @@ async def test_empty_universe_still_runs_snapshot_discovery(
     monkeypatch.setattr(service, "_refresh_daily_from_market_snapshot", snapshot)
     monkeypatch.setattr(service, "_run_post_daily_phase", AsyncMock(return_value=None))
     monkeypatch.setattr(service, "_run_serial_period", AsyncMock(return_value=(0, 0)))
+    monkeypatch.setattr(
+        service, "_scan_daily_continuity_gate", AsyncMock(return_value=[])
+    )
 
     result = await service.refresh_all_instruments(
         TRADE_DATE, db_session=object(), trigger_dsa=False, periods=("d",)
@@ -1114,3 +1212,274 @@ def test_build_provider_request_honours_explicit_end_date() -> None:
     )
     assert window["start_date"] == date(2023, 1, 1)
     assert window["end_date"] == date(2026, 9, 11)
+
+
+# ===========================================================================
+# 9. periods 参数校验 / lazy pool / snapshot 计入 d 阶段
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_periods_unknown_value_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """periods=("foo",) 必须显式报错，禁止「什么都没跑但 succeeded=全市场」。"""
+    service = BarsSchedulerService(fetch_processes=1, use_eod_snapshot=False)
+    instruments = [SimpleNamespace(id=uuid.uuid4(), symbol="600519")]
+    _patch_daily_harness(monkeypatch, service, instruments)
+
+    with pytest.raises(ValueError, match="unsupported refresh periods"):
+        await service.refresh_all_instruments(
+            TRADE_DATE, db_session=object(), trigger_dsa=False, periods=("foo",)
+        )
+
+
+@pytest.mark.asyncio
+async def test_periods_empty_tuple_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    service = BarsSchedulerService(fetch_processes=1, use_eod_snapshot=False)
+    instruments = [SimpleNamespace(id=uuid.uuid4(), symbol="600519")]
+    _patch_daily_harness(monkeypatch, service, instruments)
+
+    with pytest.raises(ValueError, match="must not be empty"):
+        await service.refresh_all_instruments(
+            TRADE_DATE, db_session=object(), trigger_dsa=False, periods=()
+        )
+
+
+@pytest.mark.asyncio
+async def test_snapshot_only_path_never_creates_process_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AfterClose 场景：periods=("d",) + 快照成功 → 根本不该创建 ProcessPool。
+
+    ProcessPool 必须在真正进入 _run_parallel_period 之前才 lazy 创建，
+    否则盘后每天白白 spawn 一批进程（且 snapshot 路径根本用不到）。
+    """
+    service = BarsSchedulerService(fetch_processes=4)
+    instruments = [SimpleNamespace(id=uuid.uuid4(), symbol="600519")]
+    _patch_daily_harness(monkeypatch, service, instruments)
+    monkeypatch.setattr(
+        service, "_refresh_daily_from_market_snapshot", AsyncMock(return_value=None)
+    )
+
+    await service.refresh_all_instruments(
+        TRADE_DATE, db_session=object(), trigger_dsa=False, periods=("d",)
+    )
+
+    assert service.last_process_metrics["pool_creations"] == 0
+
+
+@pytest.mark.asyncio
+async def test_snapshot_path_counts_upserted_rows_into_daily_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """快照成功 → period_counts["d"] 必须反映真实落库行数，不得保持 0。"""
+    service = BarsSchedulerService(fetch_processes=1)
+    inst_a = SimpleNamespace(id=uuid.uuid4(), symbol="600519")
+    inst_b = SimpleNamespace(id=uuid.uuid4(), symbol="000001")
+    session = _ScriptedSession(select_queue=[[inst_a, inst_b]])
+
+    monkeypatch.setattr(
+        prov,
+        "fetch_full_a_share_snapshot",
+        AsyncMock(return_value=[{"f12": "600519"}, {"f12": "000001"}]),
+    )
+    monkeypatch.setattr(
+        prov,
+        "normalize_snapshot_rows",
+        lambda raw: [_snap("600519"), _snap("000001", market="SZ")],
+    )
+    monkeypatch.setattr(
+        refresh_mod, "count_active_a_share_instruments", AsyncMock(return_value=5000)
+    )
+    monkeypatch.setattr(
+        refresh_mod, "check_snapshot_universe_sanity", lambda *a, **k: None
+    )
+    monkeypatch.setattr(
+        refresh_mod,
+        "sync_instruments_from_eod_snapshot",
+        AsyncMock(return_value=InstrumentSyncResult()),
+    )
+    monkeypatch.setattr(
+        refresh_mod, "upsert_raw_daily_snapshot", AsyncMock(return_value=2)
+    )
+    monkeypatch.setattr(
+        refresh_mod, "find_missing_daily_instruments", AsyncMock(return_value=[])
+    )
+
+    result = scheduler_module.BatchResult()
+    result.period_counts["d"] = 0
+    await service._refresh_daily_from_market_snapshot(  # noqa: SLF001
+        TRADE_DATE, session, None, result
+    )
+
+    assert result.snapshot_upserted == 2
+    assert result.period_counts["d"] == 2
+    assert result.daily_missing_after_fallback == 0
+
+
+# ===========================================================================
+# 10. 日线连续性硬门禁
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_continuity_gap_blocks_post_daily_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """09-10 整日空洞（coverage=0）必须阻断 Core，post-daily 调用次数为 0。"""
+    service = BarsSchedulerService(fetch_processes=1)
+    instruments = [SimpleNamespace(id=uuid.uuid4(), symbol="600519")]
+    _patch_daily_harness(monkeypatch, service, instruments)
+    monkeypatch.setattr(
+        service, "_refresh_daily_from_market_snapshot", AsyncMock(return_value=None)
+    )
+    # 本用例必须走**真实**门禁实现，去掉 harness 的放行替身
+    monkeypatch.delattr(service, "_scan_daily_continuity_gate", raising=False)
+    gap = DailyGap(
+        trade_date=date(2026, 9, 10),
+        covered=0,
+        eligible=5293,
+        coverage=0.0,
+        missing_count=5293,
+        is_total_gap=True,
+    )
+    monkeypatch.setattr(
+        refresh_mod, "scan_daily_continuity", AsyncMock(return_value=[gap])
+    )
+    post_daily = service._run_post_daily_phase  # 已被 harness 替身
+
+    with pytest.raises(DailyContinuityBlockedError) as excinfo:
+        await service.refresh_all_instruments(
+            TRADE_DATE, db_session=object(), trigger_dsa=False, periods=("d",)
+        )
+
+    assert excinfo.value.gaps[0].trade_date == date(2026, 9, 10)
+    assert post_daily.await_count == 0  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_continuity_pass_allows_post_daily_phase(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """无缺口 → 门禁放行，post-daily 正常执行一次。"""
+    service = BarsSchedulerService(fetch_processes=1)
+    instruments = [SimpleNamespace(id=uuid.uuid4(), symbol="600519")]
+    _patch_daily_harness(monkeypatch, service, instruments)
+    monkeypatch.setattr(
+        service, "_refresh_daily_from_market_snapshot", AsyncMock(return_value=None)
+    )
+    # 真实门禁 + 空缺口 → 必须放行
+    monkeypatch.delattr(service, "_scan_daily_continuity_gate", raising=False)
+    monkeypatch.setattr(
+        refresh_mod, "scan_daily_continuity", AsyncMock(return_value=[])
+    )
+    post_daily = service._run_post_daily_phase  # 已被 harness 替身
+
+    await service.refresh_all_instruments(
+        TRADE_DATE, db_session=object(), trigger_dsa=False, periods=("d",)
+    )
+
+    assert post_daily.await_count == 1  # type: ignore[attr-defined]
+
+
+# ===========================================================================
+# 11. 因子源健康门禁（禁止 TDX 挂掉时跑 5000+ 逐股 xdxr）
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_factor_provider_down_fails_closed_before_per_instrument_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """因子源探测失败 → 立即抛 FactorSourceUnavailableError，不得进入逐股循环。"""
+    service = BarsSchedulerService(fetch_processes=1)
+    unavailable = FactorProviderHealth(
+        available=False,
+        provider="pytdx",
+        latency_seconds=1.0,
+        error="calling function error",
+    )
+    monkeypatch.setattr(
+        scheduler_module, "probe_factor_provider", AsyncMock(return_value=unavailable)
+    )
+    rebuild = AsyncMock(return_value={"checked": 0, "changed": 0, "rebuilt": 0, "failed": 0})
+    monkeypatch.setattr(service, "_rebuild_factors_if_needed", rebuild)
+
+    result = scheduler_module.BatchResult()
+    with pytest.raises(FactorSourceUnavailableError, match="FACTOR_SOURCE_UNAVAILABLE"):
+        await service._run_post_daily_phase(  # noqa: SLF001
+            TRADE_DATE, [], object(), None, result, trigger_dsa=False
+        )
+
+    assert rebuild.await_count == 0
+    assert result.factor_source_available is False
+    assert result.factor_source_error == "calling function error"
+
+
+# ===========================================================================
+# 12. 新股历史补齐不得覆盖当日 canonical EOD 快照
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_new_instrument_backfill_ends_before_trade_date_when_today_bar_exists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T 日 bar 已由 snapshot 写入 → 历史补齐窗口必须止于 T-1（禁止覆盖 canonical）。"""
+    windows: list[tuple[date, date]] = []
+
+    async def fake_backfill_one(
+        session: Any, inst: Any, start: date, end: date, **kwargs: Any
+    ) -> bool:
+        windows.append((start, end))
+        return True
+
+    monkeypatch.setattr(refresh_mod, "has_daily_bar", AsyncMock(return_value=True))
+    monkeypatch.setattr(refresh_mod, "_backfill_one", fake_backfill_one)
+    monkeypatch.setattr(
+        "app.services.calendar_service.get_previous_trading_day_async",
+        AsyncMock(return_value=date(2026, 9, 10)),
+    )
+
+    inst = _instrument("688001")
+    inst.listing_date = date(2026, 6, 1)
+
+    written = await refresh_mod.backfill_new_instruments(
+        _ScriptedSession(), [inst], TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    assert written == 1
+    assert windows == [(date(2026, 6, 1), date(2026, 9, 10))]
+
+
+@pytest.mark.asyncio
+async def test_new_instrument_backfill_uses_trade_date_when_no_today_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T 日没有 canonical bar → 历史补齐照常补到 T。"""
+    windows: list[tuple[date, date]] = []
+
+    async def fake_backfill_one(
+        session: Any, inst: Any, start: date, end: date, **kwargs: Any
+    ) -> bool:
+        windows.append((start, end))
+        return True
+
+    monkeypatch.setattr(refresh_mod, "has_daily_bar", AsyncMock(return_value=False))
+    monkeypatch.setattr(refresh_mod, "_backfill_one", fake_backfill_one)
+    monkeypatch.setattr(
+        "app.services.calendar_service.get_previous_trading_day_async",
+        AsyncMock(return_value=date(2026, 9, 10)),
+    )
+
+    inst = _instrument("688001")
+    inst.listing_date = date(2026, 6, 1)
+
+    await refresh_mod.backfill_new_instruments(
+        _ScriptedSession(), [inst], TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    assert windows == [(date(2026, 6, 1), TRADE_DATE)]

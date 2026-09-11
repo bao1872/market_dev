@@ -43,7 +43,7 @@ if TYPE_CHECKING:
     import pandas as pd
 
 from app.config import get_settings
-from app.core.pytdx_adapter import get_pytdx_adapter
+from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
 from app.core.time import shanghai_business_date
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
@@ -83,6 +83,71 @@ def clear_instruments_cache() -> None:
     _instruments_cache = None
     _instruments_cache_ts = 0.0
     logger.info("股票列表内存缓存已清空")
+
+
+@dataclass(frozen=True)
+class FactorProviderHealth:
+    """[FACTOR-HEALTH] 复权因子源（pytdx xdxr）健康探测结果。"""
+
+    available: bool
+    provider: str
+    latency_seconds: float
+    error: str | None
+
+
+async def probe_factor_provider(
+    adapter: PytdxAdapter | None = None,
+) -> FactorProviderHealth:
+    """探测因子源是否可用；**快速失败**，绝不做整套 server list 重试。
+
+    为什么必须在进入全市场因子阶段前探测：``_rebuild_factors_if_needed`` 会对
+    5000+ 只股票逐只调 ``get_xdxr_info``。TDX 故障时那等于 5000+ 次 connect 重试，
+    会把盘后任务拖死数十小时。探测把「几秒内明确失败」提前到循环之前。
+
+    探测方式：
+    1. ``connect()``（用 3 个候选服务器 + ``connect_timeout=1.0``）—— 这是**主信号**，
+       必须真实建连，不受 Redis xdxr 缓存影响；
+    2. 再调一次 ``get_xdxr_info("600519")`` —— 捕捉「连接成功但 xdxr 调用失败」。
+       （该调用可能命中 Redis 24h 缓存，因此它只作为补充信号，不能替代第 1 步。）
+
+    Args:
+        adapter: 仅测试注入；默认新建一个独立探测适配器（不复用业务单例，
+            避免把探测失败状态留在单例上）。
+    """
+    from app.core.pytdx_adapter import PYTDX_SERVERS
+
+    probe = adapter or PytdxAdapter(
+        servers=PYTDX_SERVERS[:3],
+        max_retries=1,
+        retry_delay=0.0,
+        connect_timeout=1.0,
+    )
+
+    def _run_probe() -> None:
+        probe.connect()
+        probe.get_xdxr_info("600519")
+
+    started = time.monotonic()
+    try:
+        await asyncio.to_thread(_run_probe)
+        return FactorProviderHealth(
+            available=True,
+            provider="pytdx",
+            latency_seconds=time.monotonic() - started,
+            error=None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 探测失败一律视为不可用
+        return FactorProviderHealth(
+            available=False,
+            provider="pytdx",
+            latency_seconds=time.monotonic() - started,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        try:
+            await asyncio.to_thread(probe.disconnect)
+        except Exception:  # noqa: BLE001 - 探测连接清理失败不影响结论
+            pass
 
 
 @dataclass
@@ -133,6 +198,12 @@ class BatchResult:
     # [EOD-SNAPSHOT] 缺口修复模式："market_wide_gap" | "sparse_symbol_gap"
     daily_repair_mode: str | None = None
     daily_mode: str | None = None  # "snapshot" | "legacy_fallback"
+    # [FACTOR-HEALTH] 盘后因子源（pytdx xdxr）健康探测结果。
+    # available=False 时 _run_post_daily_phase 必须 fail-closed，禁止跑全市场逐股
+    # xdxr（否则 5000+ 次连接重试会把盘后拖死）。
+    factor_source_available: bool | None = None
+    factor_source_error: str | None = None
+    factor_source_latency_seconds: float | None = None
 
 
 class PoolFatalError(RuntimeError):
@@ -151,6 +222,21 @@ class InstrumentRefreshExhaustedError(RuntimeError):
     refresh with 0 rows and must keep counting as ``succeeded``. Raising keeps the
     serial (workers=1) and parallel (workers>1) accounting identical: both turn an
     exhausted instrument into ``failed += 1`` plus an entry in ``failed_symbols``.
+    """
+
+
+class FactorSourceUnavailableError(RuntimeError):
+    """[FACTOR-HEALTH] 复权因子数据源（pytdx xdxr）不可用，盘后必须快速失败。
+
+    为什么 fail-closed 而不是降级继续：
+    - canonical ``adj_factor`` 来自 XDXR + Chanlunpro preclose 公式；数据源不可用时
+      **无法证明 qfq 序列的 freshness**。
+    - ``detect_company_action_change`` 旧实现把 provider 异常吞成 ``None``，
+      使「数据源挂了」与「没有公司行为」在返回值上无法区分 —— 那会让 Core 在
+      无法证明的 qfq 数据上算指标。
+    - 同时禁止退化成「5000+ 只逐股 connect 重试」，那是把盘后拖死的主因。
+
+    原始 raw 日线可以照常更新（详情页可恢复），但依赖因子的盘后 Core 不允许继续。
     """
 
 
@@ -371,7 +457,20 @@ class BarsSchedulerService:
 
         Returns:
             BatchResult: 批量刷新结果
+
+        Raises:
+            ValueError: ``requested_periods`` 含未知周期或为空（禁止静默 no-op）。
+            DailyContinuityBlockedError: 日线连续性硬门禁未通过。
+            FactorSourceUnavailableError: 因子源不可用（盘后 fail-closed）。
         """
+        # 0. periods 参数校验：禁止「periods=("foo",) → 什么都没跑 → 全部计为成功」。
+        if requested_periods is not None:
+            unknown = set(requested_periods) - set(self.PHASE_ORDER)
+            if unknown:
+                raise ValueError(f"unsupported refresh periods: {sorted(unknown)}")
+            if not requested_periods:
+                raise ValueError("requested_periods must not be empty")
+
         # 1. 交易日检查（仅对每日增量更新，回补不检查）
         if task_name == "每日增量更新":
             if db_session is not None:
@@ -425,9 +524,18 @@ class BarsSchedulerService:
         )
 
         parallel_enabled = is_daily_refresh and self.fetch_processes > 1
-        process_pool = self._create_process_pool() if parallel_enabled else None
-        if process_pool is not None:
-            self.last_process_metrics["pool_creations"] = 1
+        # [LAZY-POOL] ProcessPool 延迟创建：snapshot-only 的盘后 daily 刷新
+        # （periods=("d",) 且快照成功）完全不进入 parallel 分支，因此不应创建 pool。
+        # 只有真的要走 _run_parallel_period 时才创建。
+        process_pool: ProcessPoolExecutor | None = None
+
+        def ensure_process_pool() -> ProcessPoolExecutor:
+            nonlocal process_pool
+            if process_pool is None:
+                process_pool = self._create_process_pool()
+                self.last_process_metrics["pool_creations"] += 1
+            return process_pool
+
         items = [
             _InstrumentItem(i, instrument.id, instrument.symbol)
             for i, instrument in enumerate(instruments)
@@ -442,7 +550,7 @@ class BarsSchedulerService:
                     len(active_periods),
                     period,
                     total,
-                    self.fetch_processes if process_pool is not None else 1,
+                    self.fetch_processes if parallel_enabled else 1,
                 )
 
                 # [EOD-SNAPSHOT] 每日增量模式：日线阶段优先走全市场快照快速路径。
@@ -495,7 +603,7 @@ class BarsSchedulerService:
                         raise RuntimeError(
                             "EMPTY_UNIVERSE_AND_SNAPSHOT_UNAVAILABLE"
                         )
-                    if process_pool is None:
+                    if not parallel_enabled:
                         phase_succeeded, phase_failed = await self._run_serial_period(
                             instruments,
                             period=period,
@@ -508,7 +616,7 @@ class BarsSchedulerService:
                         )
                     else:
                         phase = await self._run_parallel_period(
-                            process_pool,
+                            ensure_process_pool(),
                             items,
                             period=period,
                             count=counts[period],
@@ -532,6 +640,19 @@ class BarsSchedulerService:
                         result.period_counts[period],
                     )
                 if is_daily_refresh and period == "d":
+                    # [HARD GATE] 日线连续性。无论 daily 来自 snapshot、legacy 逐股还是
+                    # 未来的 provider，都必须过同一门禁，然后才允许进入
+                    # 因子重建 / 审计 / DSA / Core。
+                    from app.services.eod_daily_refresh_service import (
+                        DailyContinuityBlockedError,
+                    )
+
+                    gaps = await self._scan_daily_continuity_gate(
+                        trade_date, db_session, result
+                    )
+                    if gaps:
+                        raise DailyContinuityBlockedError(gaps)
+
                     await self._run_post_daily_phase(
                         trade_date,
                         instruments,
@@ -855,6 +976,44 @@ class BarsSchedulerService:
             phase.distinct_child_pids
         )
 
+    async def _scan_daily_continuity_gate(
+        self,
+        trade_date: date,
+        db_session: AsyncSession | None,
+        result: BatchResult,
+    ) -> list[Any]:
+        """[HARD GATE] 扫描最近 N 个交易日的日线覆盖，返回所有缺口（升序）。
+
+        只检测与记录（``result.daily_continuity_gaps``）；是否阻断由调用方决定 ——
+        当前策略是「有缺口即 raise ``DailyContinuityBlockedError``」。
+
+        为什么必须逐交易日扫描而不是看 ``max(trade_date)``：若 09-10 整日缺失、
+        09-11 正常，``max`` 仍是 09-11，整日空洞会被完全掩盖。
+        """
+        from app.services.eod_daily_refresh_service import scan_daily_continuity
+
+        own_session = db_session is None
+        session = AsyncSessionLocal() if own_session else db_session
+        try:
+            gaps = await scan_daily_continuity(session, trade_date)
+        finally:
+            if own_session:
+                await session.close()
+
+        result.daily_continuity_gaps = len(gaps)
+        if gaps:
+            logger.error(
+                "[DAILY-CONTINUITY-GATE] 阻断盘后 Core：%d 个交易日覆盖率不足（through=%s）: %s",
+                len(gaps),
+                trade_date,
+                ", ".join(
+                    f"{g.trade_date}(cov={g.coverage:.1%}, missing={g.missing_count}"
+                    f"{',TOTAL_GAP' if g.is_total_gap else ''})"
+                    for g in gaps
+                ),
+            )
+        return list(gaps)
+
     async def _run_post_daily_phase(
         self,
         trade_date: date,
@@ -865,7 +1024,30 @@ class BarsSchedulerService:
         *,
         trigger_dsa: bool,
     ) -> None:
-        """Run the existing post-d sequence only after all d persistence is terminal."""
+        """Run the existing post-d sequence only after all d persistence is terminal.
+
+        Raises:
+            FactorSourceUnavailableError: 因子源健康探测失败（fail-closed，
+                禁止跑 5000+ 逐股 xdxr）。
+        """
+        # [FACTOR-HEALTH] 因子源健康门禁：必须先于全市场逐股 xdxr 阶段。
+        health = await probe_factor_provider()
+        result.factor_source_available = health.available
+        result.factor_source_error = health.error
+        result.factor_source_latency_seconds = health.latency_seconds
+        if not health.available:
+            raise FactorSourceUnavailableError(
+                "FACTOR_SOURCE_UNAVAILABLE: pytdx xdxr unavailable; "
+                "qfq freshness cannot be proven "
+                f"(provider={health.provider}, "
+                f"latency={health.latency_seconds:.2f}s, error={health.error})"
+            )
+        logger.info(
+            "[FACTOR-HEALTH] 因子源可用 provider=%s latency=%.2fs",
+            health.provider,
+            health.latency_seconds,
+        )
+
         try:
             rebuild_result = await self._rebuild_factors_if_needed(
                 trade_date, instruments, db_session, job_run_id=job_run_id
@@ -963,7 +1145,6 @@ class BarsSchedulerService:
             fill_missing_daily_instruments,
             find_missing_daily_instruments,
             plan_daily_repair,
-            scan_daily_continuity,
             sync_instruments_from_eod_snapshot,
             upsert_raw_daily_snapshot,
         )
@@ -979,7 +1160,11 @@ class BarsSchedulerService:
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 try:
-                    raw_rows = await fetch_full_a_share_snapshot(client)
+                    # expected_trade_date：由 provider 校验「数据 watermark 已过 15:00」，
+                    # 不达标的 host 会被拒绝并尝试下一个；全部不达标则整体 fail-closed。
+                    raw_rows = await fetch_full_a_share_snapshot(
+                        client, expected_trade_date=trade_date
+                    )
                 except Exception as exc:
                     raise SnapshotProviderError(f"snapshot 拉取失败: {exc}") from exc
 
@@ -1003,7 +1188,7 @@ class BarsSchedulerService:
             )
 
             # 2. 同步 universe（新股发现必须先于行情覆盖率）
-            sync = await sync_instruments_from_eod_snapshot(session, rows)
+            sync = await sync_instruments_from_eod_snapshot(session, rows, trade_date)
             result.universe_new = len(sync.new_symbols)
             result.universe_updated = len(sync.updated_symbols)
 
@@ -1025,6 +1210,9 @@ class BarsSchedulerService:
             ]
             upserted = await upsert_raw_daily_snapshot(session, trade_date, pairs)
             result.snapshot_upserted = upserted
+            # 快照路径也必须计入当日 d 阶段的分周期统计，否则 period_counts["d"]
+            # 会错误地保持 0（看起来像「一只都没刷」）。
+            result.period_counts["d"] = result.period_counts.get("d", 0) + upserted
             logger.info("[EOD-SNAPSHOT] 当日 raw 日线 upsert=%d", upserted)
 
             # 4. 缺口：只对 snapshot 后仍未覆盖的活跃 A 股走历史源。
@@ -1056,6 +1244,7 @@ class BarsSchedulerService:
                         session, missing, trade_date, breaker=breaker
                     )
                     result.daily_fallback_succeeded = ok
+                    result.period_counts["d"] = result.period_counts.get("d", 0) + ok
                     logger.info(
                         "[EOD-SNAPSHOT] 缺口 fallback attempted=%d succeeded=%d",
                         len(missing), ok,
@@ -1073,21 +1262,9 @@ class BarsSchedulerService:
                 result.new_instrument_backfilled = backfilled
                 logger.info("[EOD-SNAPSHOT] 新股历史补齐=%d", backfilled)
 
-            # 7. 日线连续性只读扫描：max(trade_date) 无法暴露「中间某交易日整日缺失」，
-            #    例如 09-10 全空、09-11 正常时 max 仍是 09-11。此处逐交易日核对。
-            gaps = await scan_daily_continuity(session, trade_date)
-            result.daily_continuity_gaps = len(gaps)
-            for gap in gaps:
-                plan = plan_daily_repair(gap)
-                logger.warning(
-                    "[EOD-SNAPSHOT] 连续性缺口 trade_date=%s coverage=%.1f%% "
-                    "missing=%d mode=%s%s",
-                    gap.trade_date,
-                    gap.coverage * 100,
-                    gap.missing_count,
-                    plan.mode,
-                    "（整日空洞 P0）" if gap.is_total_gap else "",
-                )
+            # 7. 日线连续性扫描 **不在此处**：连续性已经是硬门禁，统一由
+            #    _process_all_instruments 在 daily 阶段落库完成后调用
+            #    _scan_daily_continuity_gate（对 snapshot / legacy / 未来 provider 一视同仁）。
         finally:
             if own_session:
                 await session.close()

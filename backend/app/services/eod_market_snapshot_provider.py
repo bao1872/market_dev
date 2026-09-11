@@ -6,9 +6,14 @@
 - 不做任何复权、不做任何指标计算。
 
 fail-closed 契约（详见各函数 docstring）：
+- **一个 snapshot 必须来自同一个 host**：禁止「第 1 页来自延时源、第 2 页来自实时源」的跨 host
+  拼接。任一页失败 → 整个 host 的快照作废，从下一个 host 的第 1 页重新开始。
 - 分页中间页网络异常必须重试；最终失败则整体 fail，禁止 ``except: break`` 半截返回。
-- ``total`` 与实拉行数不一致必须 fail-closed。
+- ``total`` 与实拉行数不一致必须 fail-closed；分页过程中 ``total`` 变化同样 fail-closed。
 - ``trade_date`` 必须来自 ``f124`` 时间戳（Asia/Shanghai），老时间戳/停牌/空价不伪造 K 线。
+- **市场 watermark 必须 >= 15:00**：只有「provider 返回的数据里最大 f124 已过收盘」才能证明
+  这是收盘终值。本机 wall-clock 到了 15:05 并不能证明 provider 数据已经到 15:00
+  （``push2delay`` 等延时源在 15:05 仍可能只给到 14:50）。
 
 禁止：
 - 不依赖 ``qstock``（项目锁定 1.3.1）。
@@ -76,7 +81,7 @@ FIELDS = ",".join([
     "f15",   # high
     "f16",   # low
     "f17",   # open
-    "f5",    # volume 手
+    "f5",    # volume 手 → 入库前 ×100 转股（SHARES_PER_LOT）
     "f6",    # amount 元
     "f18",   # previous close
     "f124",  # update timestamp（秒）
@@ -87,11 +92,29 @@ DEFAULT_PAGE_SIZE = 100
 _MAX_PAGE_RETRIES = 3
 _PAGE_RETRY_BASE_DELAY = 1.0
 
+# 【单位契约，实测确定】bars_daily（含 bars_15min/60min 之外的日线）的 canonical
+# volume 单位是 **股**，不是手。证据（见 A/B 实测）：
+#   - bars_daily 600519 2026-09-09 volume = 3_222_611；同花顺 `/00/`（不复权）该日
+#     成交量 = 3_222_611 股，两者逐位相等；000001 / 300750 同样相等。
+#   - amount / volume = 4_168_500_480 / 3_222_611 = 1293.5 元/股，与该日
+#     [1286.68, 1309.30] 的价格区间吻合 → volume 必为「股」。若按「手」解释，
+#     隐含均价会是 129 万/股。
+# 而东方财富的 f5（clist）与 f56（kline）实测为 **手**（f6 ≈ f5 × 100 × price），
+# 因此入库前必须 ×100 转成股，否则整列会缩小 100 倍。
+SHARES_PER_LOT = Decimal("100")
+
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
 # 当日快照最早可视为「收盘终值」的时刻：收盘 15:00 后留 5 分钟结算余量。
 # 该守卫的唯一目的是防止盘前/盘中把实时价写成当日最终日线。
+#
+# 注意：这是**本机 wall-clock** 守卫，单独使用不足以证明 provider 数据已收盘
+# （延时源在 15:05 仍可能只给到 14:50）。必须与
+# :func:`validate_snapshot_market_watermark` 的数据 watermark 一起使用。
 _EOD_READY_TIME = time(15, 5)
+
+# 数据 watermark 必须达到的真实收盘时刻（A 股 15:00）。
+_MARKET_CLOSE_TIME = time(15, 0)
 
 # Eastmoney secid 市场前缀（实测：沪深京统一行情下北交所亦为 0，不是 2）。
 # 见 tests/test_eod_snapshot_provider.py::test_eastmoney_secid_bj_is_zero_prefix
@@ -109,21 +132,29 @@ class SnapshotProviderError(RuntimeError):
 class EodSnapshotRow:
     """单只 A 股收盘快照（raw / 不复权）。
 
-    volume 单位「手」，amount 单位「元」。trade_date 为 Asia/Shanghai 日期，
-    取自 f124；无法判定时为 None（不伪造 K 线）。
+    volume 单位「手」，amount 单位「元」。
+
+    ``updated_at`` 保留 f124 的**完整时间**（Asia/Shanghai），而不是只保留日期：
+    只有完整时间才能构成 market watermark（判断 provider 数据是否真的已过 15:00）。
+    ``trade_date`` 是 ``updated_at`` 的日期投影；无法判定时为 None（不伪造 K 线）。
     """
 
     symbol: str
     name: str
-    market: str          # SH / SZ / BJ
-    trade_date: date | None
+    market: str                 # SH / SZ / BJ
+    updated_at: datetime | None
     open: Decimal | None
     high: Decimal | None
     low: Decimal | None
     close: Decimal | None
-    volume: Decimal | None   # 手
-    amount: Decimal | None   # 元
+    volume: Decimal | None      # 股（canonical，见 SHARES_PER_LOT）
+    amount: Decimal | None      # 元
     previous_close: Decimal | None
+
+    @property
+    def trade_date(self) -> date | None:
+        """f124 的 Asia/Shanghai 日期投影（无法判定时为 None）。"""
+        return self.updated_at.date() if self.updated_at is not None else None
 
 
 def classify_a_share_market(symbol: str, eastmoney_market: Any) -> str:
@@ -202,21 +233,69 @@ def can_use_same_day_eod_snapshot(
     return trade_date == current.date() and current.time() >= _EOD_READY_TIME
 
 
-def snapshot_trade_date(ts: Any) -> date | None:
-    """从 f124 时间戳（秒）转为 Asia/Shanghai 日期。fail-closed。
+def snapshot_updated_at(ts: Any) -> datetime | None:
+    """从 f124 时间戳（秒）转为 Asia/Shanghai **完整时间**。fail-closed。
 
     返回 None 的情形：空 / 非整数 / <=0 / 转换异常。
     """
     try:
-        ts_int = int(ts)
+        value = int(ts)
     except (TypeError, ValueError):
         return None
-    if ts_int <= 0:
+    if value <= 0:
         return None
     try:
-        return datetime.fromtimestamp(ts_int, tz=_SHANGHAI_TZ).date()
+        return datetime.fromtimestamp(value, tz=_SHANGHAI_TZ)
     except (OverflowError, OSError, ValueError):
         return None
+
+
+def snapshot_trade_date(ts: Any) -> date | None:
+    """从 f124 时间戳（秒）转为 Asia/Shanghai 日期（:func:`snapshot_updated_at` 的投影）。"""
+    updated_at = snapshot_updated_at(ts)
+    return updated_at.date() if updated_at is not None else None
+
+
+def validate_snapshot_market_watermark(
+    raw_rows: Sequence[dict[str, Any]],
+    trade_date: date,
+) -> datetime:
+    """校验快照数据 watermark：目标交易日的最大 f124 必须 >= 15:00。
+
+    为什么不能只看本机时间：``push2delay`` 等延时源在 15:05 仍可能只返回到 14:50，
+    那时所有价格都是盘中值。用**数据自身的最大时间戳**判断才能证明这是收盘终值。
+
+    Args:
+        raw_rows: 原始 ``diff`` 行列表（未归一化，直接读 f124）。
+        trade_date: 目标交易日（Asia/Shanghai）。
+
+    Returns:
+        该交易日的 watermark 时间。
+
+    Raises:
+        SnapshotProviderError: 没有任何目标日期的有效时间戳，或 watermark < 15:00。
+    """
+    timestamps: list[datetime] = []
+    for raw in raw_rows:
+        if not isinstance(raw, dict):
+            continue
+        dt = snapshot_updated_at(raw.get("f124"))
+        if dt is None or dt.date() != trade_date:
+            continue
+        timestamps.append(dt)
+
+    if not timestamps:
+        raise SnapshotProviderError(
+            f"snapshot has no valid timestamps for {trade_date}"
+        )
+
+    watermark = max(timestamps)
+    if watermark.time() < _MARKET_CLOSE_TIME:
+        raise SnapshotProviderError(
+            f"snapshot is not final: trade_date={trade_date}, "
+            f"watermark={watermark.isoformat()}"
+        )
+    return watermark
 
 
 def _parse_decimal(value: Any) -> Decimal | None:
@@ -240,6 +319,17 @@ def _parse_price(value: Any) -> Decimal | None:
     因此这里只做安全解析，**不做任何缩放**。误加 ÷100 会把价格缩小 100 倍。
     """
     return _parse_decimal(value)
+
+
+def _lots_to_shares(value: Any) -> Decimal | None:
+    """东方财富成交量（手）→ bars_daily canonical 单位（股）。
+
+    见 :data:`SHARES_PER_LOT` 的实测证据。空/非法返回 None。
+    """
+    lots = _parse_decimal(value)
+    if lots is None:
+        return None
+    return lots * SHARES_PER_LOT
 
 
 def parse_eod_snapshot_row(raw: dict[str, Any]) -> EodSnapshotRow | None:
@@ -266,12 +356,12 @@ def parse_eod_snapshot_row(raw: dict[str, Any]) -> EodSnapshotRow | None:
         symbol=symbol,
         name=name,
         market=market,
-        trade_date=snapshot_trade_date(raw.get("f124")),
+        updated_at=snapshot_updated_at(raw.get("f124")),
         open=_parse_price(raw.get("f17")),
         high=_parse_price(raw.get("f15")),
         low=_parse_price(raw.get("f16")),
         close=_parse_price(raw.get("f2")),
-        volume=_parse_decimal(raw.get("f5")),
+        volume=_lots_to_shares(raw.get("f5")),
         amount=_parse_decimal(raw.get("f6")),
         previous_close=_parse_price(raw.get("f18")),
     )
@@ -287,78 +377,91 @@ def normalize_snapshot_rows(raw_rows: Sequence[dict[str, Any]]) -> list[EodSnaps
     return out
 
 
-async def _fetch_one_page(
+async def _fetch_page_from_host(
     client: httpx.AsyncClient,
+    host: str,
     page: int,
     page_size: int,
 ) -> dict[str, Any]:
-    """拉取单页；逐主机尝试，网络异常重试 _MAX_PAGE_RETRIES 轮，耗尽抛 SnapshotProviderError。
+    """从**指定 host** 拉取单页；网络异常重试 _MAX_PAGE_RETRIES 次。
 
-    主机候选见 ``EASTMONEY_CLIST_HOSTS``：单个主机被拒（部分网络会直接断开连接）
-    时自动切换下一个，避免因单一域名不可达导致整条盘后链路失效。
+    Raises:
+        SnapshotProviderError: 该 host 在该页上重试耗尽。
     """
     last_exc: Exception | None = None
     for attempt in range(1, _MAX_PAGE_RETRIES + 1):
-        for host in EASTMONEY_CLIST_HOSTS:
-            try:
-                resp = await client.get(
-                    f"https://{host}{_CLIST_PATH}",
-                    params={
-                        "pn": page,
-                        "pz": page_size,
-                        "po": 1,
-                        "np": 1,
-                        "fltt": 2,
-                        "invt": 2,
-                        "fid": "f3",
-                        "fs": A_SHARE_FILTER,
-                        "fields": FIELDS,
-                    },
-                    timeout=15.0,
-                )
-                resp.raise_for_status()
-                return resp.json()
-            except (httpx.RequestError, httpx.HTTPStatusError) as exc:
-                last_exc = exc
-                logger.warning(
-                    "Eastmoney snapshot host=%s 第 %d 页 第 %d 轮失败: %s",
-                    host, page, attempt, exc,
-                )
-        await asyncio.sleep(min(_PAGE_RETRY_BASE_DELAY * (2 ** (attempt - 1)), 8.0))
+        try:
+            resp = await client.get(
+                f"https://{host}{_CLIST_PATH}",
+                params={
+                    "pn": page,
+                    "pz": page_size,
+                    "po": 1,
+                    "np": 1,
+                    "fltt": 2,
+                    "invt": 2,
+                    "fid": "f3",
+                    "fs": A_SHARE_FILTER,
+                    "fields": FIELDS,
+                },
+                timeout=15.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except (httpx.RequestError, httpx.HTTPStatusError) as exc:
+            last_exc = exc
+            logger.warning(
+                "Eastmoney snapshot host=%s 第 %d 页 第 %d 轮失败: %s",
+                host, page, attempt, exc,
+            )
+            await asyncio.sleep(min(_PAGE_RETRY_BASE_DELAY * (2 ** (attempt - 1)), 8.0))
     raise SnapshotProviderError(
-        f"Eastmoney snapshot 第 {page} 页在 {_MAX_PAGE_RETRIES} 轮重试后仍失败: {last_exc}"
+        f"Eastmoney snapshot host={host} 第 {page} 页重试 {_MAX_PAGE_RETRIES} 轮后仍失败: "
+        f"{last_exc}"
     )
 
 
-async def fetch_full_a_share_snapshot(
+async def _fetch_full_snapshot_from_host(
     client: httpx.AsyncClient,
+    host: str,
     *,
-    page_size: int = DEFAULT_PAGE_SIZE,
+    page_size: int,
     max_pages: int | None = None,
 ) -> list[dict[str, Any]]:
-    """分页拉取全市场 A 股 snapshot（原始 diff 列表）。
+    """从**单一 host** 拉完整分页 snapshot（禁止跨 host 拼接）。
 
-    fail-closed：
-    - 每页网络异常重试；耗尽抛 SnapshotProviderError。
-    - payload 非法（无 data dict / 无 total）抛 SnapshotProviderError。
-    - 拉取行数 < 期望 total 抛 SnapshotProviderError（禁止把中间失败伪装成「只有这么多」）。
+    契约：
+    - 全程只用 ``host``，任意一页失败即整体抛错（由外层换 host 从头再来）。
+    - 首页确定的 ``total`` 在后续所有页必须保持不变，否则 fail-closed
+      （分页期间 total 变化说明数据在流动，拼出来的不是一个一致的市场切片）。
+    - 最终 ``len(rows) < expected_total`` 必须 fail-closed。
 
-    返回原始 ``diff`` 字典列表，由调用方负责归一化（保持本模块网络/解析边界清晰）。
+    Raises:
+        SnapshotProviderError: payload 非法 / total 非法或漂移 / 行数不足。
     """
     page = 1
     rows: list[dict[str, Any]] = []
     expected_total: int | None = None
 
     while True:
-        payload = await _fetch_one_page(client, page, page_size)
+        payload = await _fetch_page_from_host(client, host, page, page_size)
         data = payload.get("data")
         if not isinstance(data, dict):
-            raise SnapshotProviderError(f"Eastmoney snapshot 非法 payload page={page}")
+            raise SnapshotProviderError(
+                f"invalid snapshot payload host={host} page={page}"
+            )
+
+        total = int(data.get("total") or 0)
+        if total <= 0:
+            raise SnapshotProviderError(f"invalid total host={host} page={page}: {total}")
 
         if expected_total is None:
-            expected_total = int(data.get("total") or 0)
-            if expected_total <= 0:
-                raise SnapshotProviderError("Eastmoney snapshot 返回非法 total")
+            expected_total = total
+        elif total != expected_total:
+            raise SnapshotProviderError(
+                f"snapshot total changed during pagination: host={host}, "
+                f"expected={expected_total}, got={total}"
+            )
 
         current = data.get("diff") or []
         if not current:
@@ -375,13 +478,61 @@ async def fetch_full_a_share_snapshot(
 
     if expected_total is None or len(rows) < expected_total:
         raise SnapshotProviderError(
-            f"Eastmoney snapshot 不完整: rows={len(rows)}, expected={expected_total}"
+            f"incomplete snapshot host={host}: rows={len(rows)}, expected={expected_total}"
         )
 
     return rows
 
 
+async def fetch_full_a_share_snapshot(
+    client: httpx.AsyncClient,
+    *,
+    expected_trade_date: date | None = None,
+    page_size: int = DEFAULT_PAGE_SIZE,
+    max_pages: int | None = None,
+) -> list[dict[str, Any]]:
+    """分页拉取全市场 A 股 snapshot（原始 diff 列表）。
+
+    外层 host failover：整批只用一个 host；该 host 任一页失败即换下一个 host
+    **从第 1 页重新开始**（不允许 hostA page1 + hostB page2）。
+
+    ``expected_trade_date`` 给定时，每个 host 成功拉完后立即校验 market watermark
+    （见 :func:`validate_snapshot_market_watermark`）：延时源在 15:05 仍可能只给到
+    14:50，此时必须拒绝并尝试下一个 host；所有 host 都不达标则整体 fail-closed。
+
+    Returns:
+        原始 ``diff`` 字典列表，由调用方负责归一化。
+
+    Raises:
+        SnapshotProviderError: 所有 host 均失败。
+    """
+    errors: list[str] = []
+    for host in EASTMONEY_CLIST_HOSTS:
+        try:
+            rows = await _fetch_full_snapshot_from_host(
+                client,
+                host,
+                page_size=page_size,
+                max_pages=max_pages,
+            )
+            if expected_trade_date is not None:
+                validate_snapshot_market_watermark(rows, expected_trade_date)
+            return rows
+        except SnapshotProviderError as exc:
+            errors.append(f"{host}: {exc}")
+            logger.warning("snapshot host failover host=%s error=%s", host, exc)
+
+    raise SnapshotProviderError("all snapshot hosts failed: " + "; ".join(errors))
+
+
 # ===== 历史日线 fallback（不复权 fqt=0） =====
+
+# fields2 基础列：日期 开 收 高 低 量(手) 额(元)
+_KLINE_FIELDS2_BASIC = "f51,f52,f53,f54,f55,f56,f57"
+# 扩展列追加：f58 振幅 / f59 涨跌幅 / f60 涨跌额 / f61 换手率。
+# 仅用于只读的 factor-event 兼容性实验（Eastmoney preclose vs canonical factor），
+# **不进入 canonical 数据写入路径**。
+_KLINE_FIELDS2_EXTENDED = "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61"
 
 
 def _eastmoney_secid(symbol: str, market: str) -> str:
@@ -398,11 +549,18 @@ async def fetch_eastmoney_daily_kline(
     market: str,
     start: date,
     end: date,
+    *,
+    extended: bool = False,
 ) -> list[dict[str, Any]]:
     """拉取单只标的日线（fqt=0 不复权），返回归一化记录列表。
 
-    字段（fields2）：f51 日期, f52 开, f53 收, f54 高, f55 低, f56 量(手), f57 额(元)。
+    字段（fields2）：f51 日期, f52 开, f53 收, f54 高, f55 低, f56 量(手→已×100 转股),
+    f57 额(元)。
     Eastmoney kline 价格直接以浮点返回（不经过 fltt×100），无需缩放。
+
+    ``extended=True`` 时额外带回 f58 振幅 / f59 涨跌幅 / f60 涨跌额 / f61 换手率，
+    只供只读诊断使用（见 daily_gap_repair_service 的 factor-event 实验）；
+    这些字段**绝不写入 bars_daily**。
 
     Raises:
         SnapshotProviderError: 网络失败或该标的无数据。
@@ -410,7 +568,7 @@ async def fetch_eastmoney_daily_kline(
     params = {
         "secid": _eastmoney_secid(symbol, market),
         "fields1": "f1,f2,f3,f4,f5,f6,f7,f8,f9,f10,f11,f12,f13",
-        "fields2": "f51,f52,f53,f54,f55,f56,f57",
+        "fields2": _KLINE_FIELDS2_EXTENDED if extended else _KLINE_FIELDS2_BASIC,
         "beg": start.strftime("%Y%m%d"),
         "end": end.strftime("%Y%m%d"),
         "rtntype": "6",
@@ -437,7 +595,7 @@ async def fetch_eastmoney_daily_kline(
                         "Eastmoney kline host=%s 返回空 klines symbol=%s", host, symbol
                     )
                     continue
-                return _parse_kline_records(klines)
+                return _parse_kline_records(klines, extended=extended)
             except (httpx.RequestError, httpx.HTTPStatusError) as exc:
                 last_exc = exc
                 logger.warning(
@@ -459,25 +617,34 @@ async def fetch_eastmoney_daily_kline(
     )
 
 
-def _parse_kline_records(klines: list[str]) -> list[dict[str, Any]]:
+def _parse_kline_records(
+    klines: list[str],
+    *,
+    extended: bool = False,
+) -> list[dict[str, Any]]:
     """klines 为 'f51,f52,...' 逗号串列表，解析为统一记录。"""
+    min_parts = 11 if extended else 7
     records: list[dict[str, Any]] = []
     for item in klines:
         parts = item.split(",")
-        if len(parts) < 7:
+        if len(parts) < min_parts:
             continue
         try:
-            records.append(
-                {
-                    "datetime": parts[0],   # YYYY-MM-DD
-                    "open": float(parts[1]),
-                    "close": float(parts[2]),
-                    "high": float(parts[3]),
-                    "low": float(parts[4]),
-                    "volume": float(parts[5]),  # 手
-                    "amount": float(parts[6]),  # 元
-                }
-            )
+            record: dict[str, Any] = {
+                "datetime": parts[0],   # YYYY-MM-DD
+                "open": float(parts[1]),
+                "close": float(parts[2]),
+                "high": float(parts[3]),
+                "low": float(parts[4]),
+                "volume": float(parts[5]) * float(SHARES_PER_LOT),  # 手 → 股
+                "amount": float(parts[6]),  # 元
+            }
+            if extended:
+                record["amplitude"] = float(parts[7])
+                record["change_pct"] = float(parts[8])   # f59 涨跌幅 %
+                record["change_amount"] = float(parts[9])  # f60 涨跌额 元
+                record["turnover_rate"] = float(parts[10])
+            records.append(record)
         except (ValueError, TypeError):
             continue
     return records

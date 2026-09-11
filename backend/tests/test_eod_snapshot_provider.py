@@ -48,7 +48,7 @@ def _row(
     high: Any = 13.00,
     low: Any = 12.00,
     open_: Any = 12.50,
-    volume: Any = 100000,     # 手
+    volume: Any = 100000,     # 手（东财 f5；parse 时 ×100 转股）
     amount: Any = 123456789,  # 元
     prev_close: Any = 12.20,
     f124: Any = TARGET_TS,
@@ -93,11 +93,41 @@ class _ScriptedClient:
     def __init__(self, script: list[Any]) -> None:
         self._script = list(script)
         self.calls: list[dict[str, Any]] = []
+        self.urls: list[str] = []
 
     async def get(self, url: str, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        self.urls.append(url)
         self.calls.append(params or {})
         idx = min(len(self.calls) - 1, len(self._script) - 1)
         item = self._script[idx]
+        if isinstance(item, Exception):
+            raise item
+        return _FakeResponse(item)
+
+
+class _HostScriptedClient:
+    """按 **(host, page)** 返回 payload；未登记的组合默认 raise 以便暴露意外请求。
+
+    用于验证「一个 snapshot 只来自一个 host」与 host 级 failover：
+    host 名从 url 里提取，page 从 params['pn'] 提取。
+    """
+
+    def __init__(self, script: dict[tuple[str, int], Any]) -> None:
+        self._script = dict(script)
+        self.calls: list[tuple[str, int]] = []
+
+    @staticmethod
+    def _host_of(url: str) -> str:
+        return url.split("//", 1)[-1].split("/", 1)[0]
+
+    async def get(self, url: str, params: Any = None, timeout: Any = None) -> _FakeResponse:
+        host = self._host_of(url)
+        page = int((params or {}).get("pn", 1))
+        self.calls.append((host, page))
+        key = (host, page)
+        if key not in self._script:
+            raise httpx.ConnectError(f"{host} page{page} not scripted")
+        item = self._script[key]
         if isinstance(item, Exception):
             raise item
         return _FakeResponse(item)
@@ -168,8 +198,27 @@ async def test_total_mismatch_fails_closed() -> None:
     p1 = [_row(f"600{i:03d}") for i in range(200)]
     client = _ScriptedClient([_page(p1, 1000), _page([], 1000)])
 
-    with pytest.raises(prov.SnapshotProviderError, match="不完整"):
+    with pytest.raises(prov.SnapshotProviderError, match="incomplete snapshot host="):
         await prov.fetch_full_a_share_snapshot(client, page_size=200)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_total_drift_fails_closed() -> None:
+    """分页期间 total 变化（数据在流动）→ 该 host 整体作废，必须 fail-closed。"""
+    p1 = [_row(f"600{i:03d}") for i in range(100)]
+    client = _HostScriptedClient(
+        {
+            (host, 1): _page(p1, 300)
+            for host in prov.EASTMONEY_CLIST_HOSTS
+        }
+        | {
+            (host, 2): _page(p1, 250)
+            for host in prov.EASTMONEY_CLIST_HOSTS
+        }
+    )
+
+    with pytest.raises(prov.SnapshotProviderError, match="total changed during pagination"):
+        await prov.fetch_full_a_share_snapshot(client, page_size=100)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -177,7 +226,7 @@ async def test_invalid_total_fails_closed() -> None:
     """total<=0 视为非法，必须 fail-closed。"""
     client = _ScriptedClient([_page([_row("600519")], 0)])
 
-    with pytest.raises(prov.SnapshotProviderError, match="非法 total"):
+    with pytest.raises(prov.SnapshotProviderError, match="invalid total host="):
         await prov.fetch_full_a_share_snapshot(client, page_size=200)  # type: ignore[arg-type]
 
 
@@ -186,8 +235,72 @@ async def test_invalid_payload_fails_closed() -> None:
     """data 非 dict（例如接口改版 / 限流返回）必须 fail-closed。"""
     client = _ScriptedClient([{"data": None}])
 
-    with pytest.raises(prov.SnapshotProviderError, match="非法 payload"):
+    with pytest.raises(prov.SnapshotProviderError, match="invalid snapshot payload host="):
         await prov.fetch_full_a_share_snapshot(client, page_size=200)  # type: ignore[arg-type]
+
+
+# =========================================================================
+# 2b. 单 host 一致性 + host 级 failover
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_all_pages_come_from_single_host() -> None:
+    """整批分页必须来自同一个 host（禁止 hostA page1 + hostB page2 拼接）。"""
+    host_a = prov.EASTMONEY_CLIST_HOSTS[0]
+    p1 = [_row(f"600{i:03d}") for i in range(100)]
+    p2 = [_row(f"601{i:03d}") for i in range(50)]
+    client = _HostScriptedClient(
+        {
+            (host_a, 1): _page(p1, 150),
+            (host_a, 2): _page(p2, 150),
+        }
+    )
+
+    rows = await prov.fetch_full_a_share_snapshot(client, page_size=100)  # type: ignore[arg-type]
+
+    assert len(rows) == 150
+    assert {h for h, _ in client.calls} == {host_a}
+    assert [p for _, p in client.calls] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_host_failover_restarts_from_page_one_not_mixed() -> None:
+    """hostA 第 2 页失败 → 整个 hostA 作废，hostB 必须**从第 1 页重新开始**。
+
+    若实现是「hostA page1 + hostB page2」，结果里会混进两个 host 的市场切片，
+    这是必须禁止的（延时源与实时源混拼）。
+    """
+    host_a, host_b = prov.EASTMONEY_CLIST_HOSTS[0], prov.EASTMONEY_CLIST_HOSTS[1]
+    a1 = [_row(f"600{i:03d}") for i in range(100)]
+    b1 = [_row(f"600{i:03d}") for i in range(100)]
+    b2 = [_row(f"601{i:03d}") for i in range(50)]
+    client = _HostScriptedClient(
+        {
+            (host_a, 1): _page(a1, 150),
+            (host_a, 2): httpx.ConnectError("hostA page2 down"),
+            (host_b, 1): _page(b1, 150),
+            (host_b, 2): _page(b2, 150),
+        }
+    )
+
+    rows = await prov.fetch_full_a_share_snapshot(client, page_size=100)  # type: ignore[arg-type]
+
+    assert len(rows) == 150
+    # hostB 必须从 page1 开始（不是 page2）
+    assert (host_b, 1) in client.calls
+    assert (host_b, 2) in client.calls
+    # 最终结果只含 hostB 的行
+    assert [r["f12"] for r in rows][100:] == [r["f12"] for r in b2]
+
+
+@pytest.mark.asyncio
+async def test_host_failover_all_hosts_failed_reports_each_host() -> None:
+    """所有 host 都失败 → 报错信息必须逐 host 列出，便于诊断。"""
+    client = _ScriptedClient([httpx.ConnectError("all down")])
+
+    with pytest.raises(prov.SnapshotProviderError, match="all snapshot hosts failed"):
+        await prov.fetch_full_a_share_snapshot(client, page_size=100)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -353,10 +466,14 @@ def test_snapshot_trade_date_fail_closed(bad: Any) -> None:
 # =========================================================================
 
 
-def test_parse_row_keeps_price_in_yuan_and_volume_amount_units() -> None:
-    """价格不得缩放（fltt=2 下已是元）；volume=手、amount=元同样不得缩放。
+def test_parse_row_keeps_price_in_yuan_and_converts_lots_to_shares() -> None:
+    """价格不得缩放（fltt=2 下已是元）；volume 手→股 ×100；amount=元 不缩放。
 
-    历史教训：曾误按「分」把价格 ÷100，被外部实测推翻（见 test_eod_external_ab）。
+    历史教训：
+    - 曾误按「分」把价格 ÷100，被外部实测推翻（见 test_eod_external_ab）。
+    - 曾把 volume 直接当「手」入库，被 A/B 实测推翻：``bars_daily.volume``
+      canonical 单位是**股**（600519 2026-09-09 DB=3_222_611 股，东财=32_226 手）。
+      因此 f5 必须 ×100 转股，否则全市场成交量缩小 100 倍。
     """
     row = prov.parse_eod_snapshot_row(_row("600519", f13=1))
     assert row is not None
@@ -367,8 +484,8 @@ def test_parse_row_keeps_price_in_yuan_and_volume_amount_units() -> None:
     assert row.high == Decimal("13.00")
     assert row.low == Decimal("12.00")
     assert row.previous_close == Decimal("12.20")
-    # volume=手、amount=元，不得缩放
-    assert row.volume == Decimal("100000")
+    # f5=手 → ×100 转股；amount=元 不缩放
+    assert row.volume == Decimal("100000") * prov.SHARES_PER_LOT
     assert row.amount == Decimal("123456789")
 
 
@@ -443,7 +560,8 @@ async def test_eastmoney_kline_requests_fqt_zero_and_parses() -> None:
             "close": 10.50,
             "high": 10.80,
             "low": 9.90,
-            "volume": 12345.0,
+            # f56 是「手」→ ×100 转股（canonical 单位）
+            "volume": 12345.0 * float(prov.SHARES_PER_LOT),
             "amount": 6789012.0,
         }
     ]
@@ -521,3 +639,115 @@ def test_can_use_same_day_eod_snapshot_converts_utc_input() -> None:
     assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=utc_1100) is False
     utc_1600 = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)  # = 16:00 CST
     assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=utc_1600) is True
+
+
+# =========================================================================
+# 8. updated_at / trade_date 投影
+# =========================================================================
+
+
+def test_snapshot_updated_at_keeps_full_time_not_just_date() -> None:
+    """必须保留完整时间：只存日期就无法判断是否已收盘（watermark 依赖它）。"""
+    ts = _ts(2026, 9, 11, 14, 50)
+    got = prov.snapshot_updated_at(ts)
+    assert got is not None
+    assert got.hour == 14 and got.minute == 50
+    assert got.tzinfo is not None
+    assert prov.snapshot_trade_date(ts) == date(2026, 9, 11)
+
+
+@pytest.mark.parametrize("bad", [None, "", "abc", 0, -1, "0"])
+def test_snapshot_updated_at_fail_closed_on_bad_input(bad: Any) -> None:
+    assert prov.snapshot_updated_at(bad) is None
+    assert prov.snapshot_trade_date(bad) is None
+
+
+def test_eod_snapshot_row_trade_date_is_projection_of_updated_at() -> None:
+    """DTO 的 trade_date 必须由 updated_at 派生，避免两份时间字段漂移。"""
+    row = prov.parse_eod_snapshot_row(_row("600519", f13=1, f124=_ts(2026, 9, 11, 15, 3)))
+    assert row is not None
+    assert row.trade_date == date(2026, 9, 11)
+    assert row.updated_at is not None and row.updated_at.hour == 15
+
+
+def test_eod_snapshot_row_trade_date_none_when_timestamp_missing() -> None:
+    """f124 缺失 → updated_at/trade_date 均为 None（由落库层判废，不伪造 K 线）。"""
+    row = prov.parse_eod_snapshot_row(_row("600519", f13=1, f124=None))
+    assert row is not None
+    assert row.updated_at is None
+    assert row.trade_date is None
+
+
+# =========================================================================
+# 9. market watermark（数据自身必须证明已收盘）
+# =========================================================================
+
+
+def test_watermark_accepts_at_or_after_close() -> None:
+    rows = [_row("600519", f13=1, f124=_ts(2026, 9, 11, 15, 0))]
+    wm = prov.validate_snapshot_market_watermark(rows, date(2026, 9, 11))
+    assert wm.time() >= prov._MARKET_CLOSE_TIME  # noqa: SLF001
+
+
+def test_watermark_rejects_intraday_even_when_wall_clock_past_1505() -> None:
+    """延时源在 15:05 仍只给 14:50 → 必须拒绝；本机时间到了不算数。"""
+    rows = [_row("600519", f13=1, f124=_ts(2026, 9, 11, 14, 50))]
+    with pytest.raises(prov.SnapshotProviderError, match="snapshot is not final"):
+        prov.validate_snapshot_market_watermark(rows, date(2026, 9, 11))
+
+
+def test_watermark_rejects_when_no_target_date_timestamps() -> None:
+    """全是老时间戳（例如全市场都还是上一交易日）→ 必须拒绝。"""
+    rows = [_row("600519", f13=1, f124=_ts(2026, 9, 10, 15, 0))]
+    with pytest.raises(prov.SnapshotProviderError, match="no valid timestamps"):
+        prov.validate_snapshot_market_watermark(rows, date(2026, 9, 11))
+
+
+def test_watermark_uses_max_across_rows_not_first() -> None:
+    """watermark 取全体最大值：少量滞后行不得把整批判为盘中。"""
+    rows = [
+        _row("600519", f13=1, f124=_ts(2026, 9, 11, 14, 50)),
+        _row("000001", f124=_ts(2026, 9, 11, 15, 2)),
+    ]
+    wm = prov.validate_snapshot_market_watermark(rows, date(2026, 9, 11))
+    assert wm.minute == 2
+
+
+@pytest.mark.asyncio
+async def test_snapshot_failover_rejects_host_with_stale_watermark() -> None:
+    """hostA 数据只到 14:50 → 整批作废并换 hostB；hostB 达标才返回。"""
+    host_a, host_b = prov.EASTMONEY_CLIST_HOSTS[0], prov.EASTMONEY_CLIST_HOSTS[1]
+    stale = [_row("600519", f13=1, f124=_ts(2026, 9, 11, 14, 50))]
+    fresh = [_row("600519", f13=1, f124=_ts(2026, 9, 11, 15, 2))]
+    client = _HostScriptedClient(
+        {
+            (host_a, 1): _page(stale, 1),
+            (host_b, 1): _page(fresh, 1),
+        }
+    )
+
+    rows = await prov.fetch_full_a_share_snapshot(
+        client,  # type: ignore[arg-type]
+        expected_trade_date=date(2026, 9, 11),
+        page_size=100,
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["f124"] == fresh[0]["f124"]
+    assert (host_a, 1) in client.calls and (host_b, 1) in client.calls
+
+
+@pytest.mark.asyncio
+async def test_snapshot_all_hosts_stale_watermark_fails_closed() -> None:
+    """所有 host 都只到 14:50 → 整体 fail-closed，绝不能把盘中价当日线。"""
+    stale = [_row("600519", f13=1, f124=_ts(2026, 9, 11, 14, 50))]
+    client = _HostScriptedClient(
+        {(_h, 1): _page(stale, 1) for _h in prov.EASTMONEY_CLIST_HOSTS}
+    )
+
+    with pytest.raises(prov.SnapshotProviderError, match="not final"):
+        await prov.fetch_full_a_share_snapshot(
+            client,  # type: ignore[arg-type]
+            expected_trade_date=date(2026, 9, 11),
+            page_size=100,
+        )

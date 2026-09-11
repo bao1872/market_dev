@@ -3,9 +3,9 @@
 职责边界：
 - 用全市场 EOD snapshot 先同步 instrument universe（新股发现必须先于行情覆盖率）。
 - 批量落当日 raw 日线（不复权；volume=手，amount=元）。
-- snapshot 之后用集合差找缺口，仅对缺失标的走历史 fallback（pytdx raw 优先，
-  BJ / pytdx 不可用 → Eastmoney fqt=0）。
-- 对本次新发现的标的做历史补齐（listing_date 或 2023-01-01 起）。
+- snapshot 之后用集合差找缺口，仅对缺失标的走历史 fallback
+  （**Eastmoney fqt=0 优先**，与当日 snapshot 同源；pytdx raw 仅作 disaster fallback，且只覆盖 SH/SZ）。
+- 对本次新发现的标的做历史补齐（listing_date 或 2023-01-01 起，且止于 T 日之前）。
 
 canonical contract（bars_daily）：
 - 仅接受 raw / 不复权 OHLCV；前复权只能通过 adj_factor 读取时计算。
@@ -97,6 +97,63 @@ class DailyGap:
     is_total_gap: bool
 
 
+class DailyContinuityBlockedError(RuntimeError):
+    """[HARD GATE] 日线序列存在整日/大面积缺口，禁止继续盘后 Core。
+
+    为什么是硬门禁而不是 warning：Core（MACD / 趋势 / 结构）建立在连续日线序列
+    之上。若 09-10 整根缺失而 09-11 正常，``max(trade_date)`` 仍是 09-11，
+    缺口会被完全掩盖 —— 结果是在**缺一根日 K 的序列**上算指标。
+
+    因此无论 daily 数据来自 snapshot、legacy 逐股还是未来 provider，都必须在进入
+    ``_run_post_daily_phase``（因子重建 / 审计 / DSA / Core / Review）之前过本门禁。
+    今天的 T 日 snapshot 允许已经写库（raw 数据有用，详情页可恢复），但整个盘后任务
+    必须失败/可恢复；补好缺口后重跑即可幂等继续。
+    """
+
+    def __init__(self, gaps: Sequence[DailyGap]) -> None:
+        self.gaps = list(gaps)
+        detail = ", ".join(
+            f"{g.trade_date}:{g.covered}/{g.eligible}({g.coverage:.1%})"
+            for g in self.gaps
+        )
+        super().__init__(f"DAILY_CONTINUITY_BLOCKED: {detail}")
+
+
+def is_valid_snapshot_daily_row(row: EodSnapshotRow, trade_date: date) -> bool:
+    """单条 snapshot 行是否可以当作 ``trade_date`` 的**有效日线**（唯一合法性 owner）。
+
+    universe 复活判定与 raw 日线落库必须共用本函数，禁止第二套规则。
+
+    拒绝的情形：
+    - ``row.trade_date != trade_date``（老时间戳 / 停牌 / 跨日）；
+    - 任一 OHLC 缺失或 <= 0；
+    - ``high < max(open, close)`` 或 ``low > min(open, close)``（数据异常）；
+    - volume / amount 缺失或 < 0。
+
+    注意：``volume == 0``（停牌当日无成交但价格有效）在这里是**允许**的；
+    本函数只排除「日期/价格结构/负值」这类不可能为真终值的情况。
+    """
+    if row.trade_date != trade_date:
+        return False
+
+    o, h, lo, c = row.open, row.high, row.low, row.close
+    if o is None or h is None or lo is None or c is None:
+        return False
+    if o <= 0 or h <= 0 or lo <= 0 or c <= 0:
+        return False
+    if h < max(o, c):
+        return False
+    if lo > min(o, c):
+        return False
+
+    if row.volume is None or row.volume < 0:
+        return False
+    if row.amount is None or row.amount < 0:
+        return False
+
+    return True
+
+
 @dataclass(frozen=True)
 class DailyRepairPlan:
     """缺口修复计划（本轮只产出计划，不执行 market_wide 回补）。"""
@@ -112,7 +169,7 @@ def plan_daily_repair(gap: DailyGap) -> DailyRepairPlan:
     """把 :class:`DailyGap` 归类为 market_wide_gap / sparse_symbol_gap。
 
     market_wide_gap 禁止用「逐股 historical provider」修复（几千次请求），
-    本轮只检测并报告。
+    必须走 ``daily_gap_repair_service.repair_market_wide_daily_gap``（批量、有界并发）。
     """
     ratio = (gap.missing_count / gap.eligible) if gap.eligible else 0.0
     mode = (
@@ -312,13 +369,22 @@ async def find_missing_daily_instruments(
 async def sync_instruments_from_eod_snapshot(
     session: AsyncSession,
     snapshot: Sequence[EodSnapshotRow],
+    trade_date: date,
 ) -> InstrumentSyncResult:
     """用 EOD snapshot 同步 instrument universe。
 
     规则：
-    - 新 symbol → INSERT（name/pinyin_initials/market/status）。
+    - 新 symbol → INSERT。status 由 :func:`is_valid_snapshot_daily_row` 决定：
+      只有拿到**有效 T 日日线**才允许 active，否则先 inactive
+      （不把还没真正开始交易的证券塞进覆盖率分母）。
     - 已存在且 name/market 变化 → UPDATE（不覆盖 listing_date，不自动 delist）。
+    - 已存在但当前 inactive、且本次拿到**有效 T 日日线** → 恢复 active。
+      旧逻辑只在 name/market 变化时才置 active，导致「停牌恢复但名称未变」的股票
+      永远回不到 active。
     - snapshot 未出现的股票保持原状（delisting 归现有 maintenance owner）。
+
+    Args:
+        trade_date: 目标交易日（用于判定 snapshot 行是否为有效 T 日日线）。
 
     调用方在返回后负责 ``clear_instruments_cache()`` 并重新读取 universe。
     """
@@ -347,6 +413,7 @@ async def sync_instruments_from_eod_snapshot(
     updated_symbols: list[str] = []
 
     for row in unique_rows:
+        valid_today = is_valid_snapshot_daily_row(row, trade_date)
         inst = existing_by_symbol.get(row.symbol)
         if inst is None:
             new_records.append(
@@ -355,18 +422,21 @@ async def sync_instruments_from_eod_snapshot(
                     "name": row.name,
                     "pinyin_initials": compute_pinyin_initials(row.name),
                     "market": row.market,
-                    "status": "active",
+                    "status": "active" if valid_today else "inactive",
                 }
             )
             new_rows.append(row)
             continue
 
-        changed = (inst.name != row.name) or (inst.market != row.market)
-        if changed:
+        identity_changed = (inst.name != row.name) or (inst.market != row.market)
+        should_reactivate = inst.status != "active" and valid_today
+
+        if identity_changed or should_reactivate:
             inst.name = row.name
             inst.market = row.market
             inst.pinyin_initials = compute_pinyin_initials(row.name)
-            inst.status = "active"
+            if should_reactivate:
+                inst.status = "active"
             updated_symbols.append(row.symbol)
 
     if new_records:
@@ -412,45 +482,26 @@ async def upsert_raw_daily_snapshot(
 ) -> int:
     """批量落当日 raw 日线。conflict 时【保留】原有 adj_factor，只更新 OHLCV。
 
-    入参 rows 为 (instrument_id, EodSnapshotRow) 序列。对以下情况跳过该行：
-    - trade_date 与请求日不一致（老时间戳/停牌不伪造）；
-    - 任意 OHLC 缺失或 <=0；
-    - high < max(open,close) 或 low > min(open,close)（数据异常）；
-    - volume/amount 缺失或 <0。
+    入参 rows 为 (instrument_id, EodSnapshotRow) 序列。合法性判定**完全复用**
+    :func:`is_valid_snapshot_daily_row`（唯一 owner），禁止在此处维护第二套规则。
 
     返回成功写入（INSERT+UPDATE）的记录数。
     """
     records: list[dict] = []
     for instrument_id, row in rows:
-        if row.trade_date != trade_date:
-            continue
-
-        o, h, lo, c = row.open, row.high, row.low, row.close
-        if o is None or h is None or lo is None or c is None:
-            continue
-        if o <= 0 or h <= 0 or lo <= 0 or c <= 0:
-            continue
-        if h < max(o, c):
-            continue
-        if lo > min(o, c):
-            continue
-
-        v, a = row.volume, row.amount
-        if v is None or v < 0:
-            continue
-        if a is None or a < 0:
+        if not is_valid_snapshot_daily_row(row, trade_date):
             continue
 
         records.append(
             {
                 "instrument_id": instrument_id,
                 "trade_date": trade_date,
-                "open": o,
-                "high": h,
-                "low": lo,
-                "close": c,
-                "volume": v,
-                "amount": a,
+                "open": row.open,
+                "high": row.high,
+                "low": row.low,
+                "close": row.close,
+                "volume": row.volume,
+                "amount": row.amount,
                 # 仅首插时使用；conflict 分支不引用该列。
                 "adj_factor": _ADJ_FACTOR_DEFAULT,
             }
@@ -537,9 +588,19 @@ async def backfill_new_instruments(
 
     仅针对本次新发现的 symbol，不是每日全市场执行。
     返回值 = 窗口内**真实存在任意日线行**的标的数。
+
+    历史窗口必须**止于 T 日之前**（若该标的的 T 日 bar 已经由当日 snapshot 写入）：
+    否则 pytdx 路径（on_conflict_do_update）会用历史口径重新 upsert T 日，覆盖
+    canonical EOD 快照写入的当日值。T 日 bar 只允许由当日 canonical 来源拥有。
     """
+    from app.services.calendar_service import get_previous_trading_day_async
+
     if not new_instruments:
         return 0
+
+    # 只在需要时查一次前一交易日（避免逐股查询）。
+    previous_trade_date = await get_previous_trading_day_async(session, trade_date)
+
     written = 0
     items = list(new_instruments)
     for idx in range(0, len(items), _FALLBACK_BATCH_SIZE):
@@ -547,9 +608,27 @@ async def backfill_new_instruments(
             start = inst.listing_date or _NEW_INSTRUMENT_HISTORY_START
             if start > trade_date:
                 start = trade_date
-            if await _backfill_one(
-                session, inst, start, trade_date, breaker=breaker
-            ):
+
+            has_today = await has_daily_bar(session, inst.id, trade_date)
+            if has_today:
+                if previous_trade_date is None:
+                    logger.warning(
+                        "新股 symbol=%s T=%s 已有 bar 但无前一交易日，跳过历史补齐"
+                        "（禁止覆盖 canonical EOD）",
+                        inst.symbol,
+                        trade_date,
+                    )
+                    continue
+                end = previous_trade_date
+            else:
+                end = trade_date
+
+            if start > end:
+                # 上市日就是 T 日本身：没有历史可补。
+                written += 1 if has_today else 0
+                continue
+
+            if await _backfill_one(session, inst, start, end, breaker=breaker):
                 written += 1
     return written
 
@@ -605,7 +684,11 @@ async def _backfill_one(
     breaker: _PytdxBreaker | None = None,
     target_trade_date: date | None = None,
 ) -> bool:
-    """单只标的回补；pytdx raw 优先，Eastmoney fqt=0 兜底。
+    """单只标的回补。**Eastmoney fqt=0 优先，pytdx raw 仅作 disaster fallback。**
+
+    数据源一致性：每日 EOD 的 canonical raw 来源是 Eastmoney（snapshot 与 historical
+    同源），因此 sparse 缺口与新股历史也优先走 Eastmoney。pytdx 只在 Eastmoney 拿不到
+    数据时兜底（SH/SZ），且它是当前故障源，必须放在后面。
 
     返回**由 DB 查询确认**的成功（见 :func:`_did_backfill`），不是 provider 是否
     返回了数据。
@@ -620,7 +703,21 @@ async def _backfill_one(
     market = inst.market
     use_pytdx = market in ("SH", "SZ")
 
-    # 1) pytdx raw 优先（仅沪深；熔断开启时跳过）
+    # 1) Eastmoney fqt=0 primary（insert-only：绝不覆盖既有行 / 既有 adj_factor）
+    try:
+        async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
+            recs = await fetch_eastmoney_daily_kline(client, symbol, market, start, end)
+        if recs:
+            await _persist_eastmoney_raw_daily(session, inst.id, symbol, recs)
+    except SnapshotProviderError as exc:
+        logger.warning("Eastmoney 回补失败 symbol=%s: %s", symbol, exc)
+    except Exception as exc:
+        logger.warning("Eastmoney 回补异常 symbol=%s: %s", symbol, exc)
+
+    if await _did_backfill(session, inst.id, start, end, target_trade_date):
+        return True
+
+    # 2) pytdx raw disaster fallback（仅沪深；熔断开启时跳过）
     if use_pytdx and (breaker is None or breaker.allow):
         try:
             df = await refresh_daily_bars(session, inst.id, start, end, adapter=None)
@@ -633,20 +730,6 @@ async def _backfill_one(
             if breaker is not None:
                 breaker.record_failure()
             logger.warning("pytdx 回补失败 symbol=%s: %s", symbol, exc)
-
-    if await _did_backfill(session, inst.id, start, end, target_trade_date):
-        return True
-
-    # 2) Eastmoney fqt=0 兜底（insert-only：绝不覆盖既有行 / 既有 adj_factor）
-    try:
-        async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
-            recs = await fetch_eastmoney_daily_kline(client, symbol, market, start, end)
-        if recs:
-            await _persist_eastmoney_raw_daily(session, inst.id, symbol, recs)
-    except SnapshotProviderError as exc:
-        logger.warning("Eastmoney 回补失败 symbol=%s: %s", symbol, exc)
-    except Exception as exc:
-        logger.warning("Eastmoney 回补异常 symbol=%s: %s", symbol, exc)
 
     return await _did_backfill(session, inst.id, start, end, target_trade_date)
 

@@ -106,6 +106,10 @@ async def _configure_scheduler(
 
     monkeypatch.setattr(service, "_persist_provider_result", persist)
     monkeypatch.setattr(service, "_run_post_daily_phase", post_d)
+    # 日线连续性硬门禁会查 DB；本用例聚焦 ProcessPool 语义，故放行门禁。
+    monkeypatch.setattr(
+        service, "_scan_daily_continuity_gate", AsyncMock(return_value=[])
+    )
 
 
 @pytest.mark.asyncio
@@ -205,6 +209,10 @@ async def test_non_trading_day_and_backfill_never_create_pool(monkeypatch) -> No
     monkeypatch.setattr(serial_service, "_run_serial_period", daily_serial_period)
     monkeypatch.setattr(
         serial_service, "_run_post_daily_phase", AsyncMock(return_value=None)
+    )
+    # 日线连续性硬门禁会查 DB；本用例验证「不该创建 pool」，故放行门禁。
+    monkeypatch.setattr(
+        serial_service, "_scan_daily_continuity_gate", AsyncMock(return_value=[])
     )
     await serial_service.refresh_all_instruments(
         date(2026, 8, 28), db_session=object()
@@ -369,6 +377,10 @@ async def test_scheduler_batch_result_is_stable_after_item_retries(monkeypatch) 
     )
     monkeypatch.setattr(
         service, "_persist_provider_result", AsyncMock(return_value=1)
+    )
+    # 放行日线连续性硬门禁（本用例验证重试后的 BatchResult 稳定性）
+    monkeypatch.setattr(
+        service, "_scan_daily_continuity_gate", AsyncMock(return_value=[])
     )
     result = await service.refresh_all_instruments(
         date(2026, 8, 28), db_session=object(), trigger_dsa=False
@@ -651,6 +663,10 @@ async def _run_batch_with_policy(
 
     monkeypatch.setattr(service, "_run_post_daily_phase", post_daily)
     monkeypatch.setattr(service, "_persist_provider_result", persist)
+    # 日线连续性硬门禁会查 DB；本用例验证 serial/parallel 等价性，故放行门禁。
+    monkeypatch.setattr(
+        service, "_scan_daily_continuity_gate", AsyncMock(return_value=[])
+    )
 
     if workers == 1:
         _install_serial_canonical_provider(

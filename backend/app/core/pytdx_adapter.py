@@ -308,6 +308,7 @@ class PytdxAdapter(Exchange):
         servers: list[tuple[str, int]] | None = None,
         max_retries: int = 3,
         retry_delay: float = 1.0,
+        connect_timeout: float = 5.0,
     ) -> None:
         """初始化适配器。
 
@@ -315,11 +316,15 @@ class PytdxAdapter(Exchange):
             servers: pytdx 服务器列表，None 使用默认 PYTDX_SERVERS
             max_retries: 数据拉取失败重试次数（含重连）
             retry_delay: 重试间隔（秒），用于 get_xdxr_info 等方法的失败重试
+            connect_timeout: 单台服务器建连超时（秒）。默认 5.0 保持历史行为；
+                盘后健康探测等需要「快速失败」的场景应显式调小（如 1.0），
+                否则被黑洞的服务器会每台各耗满一个超时。
         """
         self._servers: list[tuple[str, int]] = servers if servers is not None else PYTDX_SERVERS
         self._api: TdxHq_API | None = None
         self.max_retries = max_retries
         self.retry_delay: float = retry_delay
+        self.connect_timeout: float = connect_timeout
         # [B2] 连接诊断计数
         self.successful_connect_count: int = 0
         self.reconnect_count: int = 0
@@ -363,7 +368,7 @@ class PytdxAdapter(Exchange):
             for host, port in self._servers:
                 try:
                     api = TdxHq_API(raise_exception=True, auto_retry=True)
-                    if api.connect(host, port, time_out=5):
+                    if api.connect(host, port, time_out=self.connect_timeout):
                         logger.info("pytdx 连接成功：%s:%d", host, port)
                         self._api = api
                         self.successful_connect_count += 1
