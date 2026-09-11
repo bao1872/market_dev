@@ -54,6 +54,42 @@ _QUOTE_ROW: dict[str, Any] = {
 _SERVERS = [("server-a", 7709), ("server-b", 7709)]
 
 
+def _fake_api_factory(
+    *,
+    connect_ok: dict[str, bool],
+    api_fail_hosts: set[str],
+    connect_calls: list[str],
+    operation_calls: list[str],
+):
+    """按 host 配置的 FakeApi：可分别控制 TCP 可达性与 API 是否源失败。
+
+    TCP 不可达（connect 返回 False）与「TCP 可达但 API 源失败」是两类不同的故障，
+    本工厂用于区分并断言二者都不会导致回退到已证明有问题的 host。
+    """
+
+    class FakeApi:
+        def __init__(self, *, raise_exception: bool, auto_retry: bool) -> None:
+            assert raise_exception is True
+            assert auto_retry is False, "auto_retry 必须为 False（PytdxAdapter 是唯一 retry owner）"
+            self.host: str | None = None
+
+        def connect(self, host: str, port: int, time_out: float) -> bool:
+            connect_calls.append(host)
+            self.host = host
+            return connect_ok.get(host, False)
+
+        def disconnect(self) -> None:
+            return None
+
+        def get_security_bars(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+            operation_calls.append(self.host)
+            if self.host in api_fail_hosts:
+                raise RuntimeError("calling function error")
+            return [dict(_BAR_ROW)]
+
+    return FakeApi
+
+
 def _make_fake_api(created: list[Any], *, failing_host: str):
     """构造 FakeApi 类：failing_host 上的 operation 一律源失败，其他 host 成功。"""
 
@@ -197,6 +233,105 @@ def test_total_connect_outage_with_raising_connect_is_bounded(
         adapter._fetch_bars("000001", "d", 10)
 
     assert attempts == ["server-a", "server-b"]
+    assert ei.value.operation == "get_security_bars"
+    assert ei.value.cause is not None
+    assert ei.value.cause.operation == "connect"
+
+
+# ---------------------------------------------------------------------------
+# 边界：本次 retry cycle 内不得重用已 source-failed 的 host
+# ---------------------------------------------------------------------------
+
+
+def test_source_failed_host_not_reused_when_others_unreachable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A API 源失败，B/C TCP 全断线 → 绝不能绕回 A 再发一次 API。"""
+    connect_attempts: list[str] = []
+    operation_hosts: list[str] = []
+
+    monkeypatch.setattr(
+        pytdx_adapter_module,
+        "TdxHq_API",
+        _fake_api_factory(
+            connect_ok={"server-a": True, "server-b": False, "server-c": False},
+            api_fail_hosts={"server-a"},
+            connect_calls=connect_attempts,
+            operation_calls=operation_hosts,
+        ),
+    )
+
+    servers = [("server-a", 7709), ("server-b", 7709), ("server-c", 7709)]
+    adapter = PytdxAdapter(servers=servers, max_retries=5, retry_delay=0)
+
+    with pytest.raises(PytdxSourceError) as ei:
+        adapter._fetch_bars("000001", "d", 10)
+
+    # A 上只真正发过一次 API
+    assert operation_hosts == ["server-a"]
+    # 第二轮只尝试 B / C 的 TCP，绝不再次 connect A
+    assert connect_attempts == ["server-a", "server-b", "server-c"]
+
+    assert ei.value.operation == "get_security_bars"
+    assert ei.value.cause is not None
+    assert ei.value.cause.operation == "connect"
+
+
+def test_rotates_a_then_b_then_c(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A/B 连续 API 失败 → 严格 A → B → C，不得出现 A,B,A 或 A,A,B。"""
+    connect_attempts: list[str] = []
+    operation_hosts: list[str] = []
+
+    monkeypatch.setattr(
+        pytdx_adapter_module,
+        "TdxHq_API",
+        _fake_api_factory(
+            connect_ok={"server-a": True, "server-b": True, "server-c": True},
+            api_fail_hosts={"server-a", "server-b"},
+            connect_calls=connect_attempts,
+            operation_calls=operation_hosts,
+        ),
+    )
+
+    servers = [("server-a", 7709), ("server-b", 7709), ("server-c", 7709)]
+    adapter = PytdxAdapter(servers=servers, max_retries=3, retry_delay=0)
+
+    df = adapter._fetch_bars("000001", "d", 10)
+
+    assert not df.empty
+    assert operation_hosts == ["server-a", "server-b", "server-c"]
+    assert connect_attempts == ["server-a", "server-b", "server-c"]
+    assert adapter.connected_server == ("server-c", 7709)
+
+
+def test_all_hosts_source_failure_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A/B/C 全部 API 源失败时，即使 max_retries=10，API 也只调用 3 次（不得绕回 A）。"""
+    connect_attempts: list[str] = []
+    operation_hosts: list[str] = []
+
+    monkeypatch.setattr(
+        pytdx_adapter_module,
+        "TdxHq_API",
+        _fake_api_factory(
+            connect_ok={"server-a": True, "server-b": True, "server-c": True},
+            api_fail_hosts={"server-a", "server-b", "server-c"},
+            connect_calls=connect_attempts,
+            operation_calls=operation_hosts,
+        ),
+    )
+
+    servers = [("server-a", 7709), ("server-b", 7709), ("server-c", 7709)]
+    adapter = PytdxAdapter(servers=servers, max_retries=10, retry_delay=0)
+
+    with pytest.raises(PytdxSourceError) as ei:
+        adapter._fetch_bars("000001", "d", 10)
+
+    # 3 次，而不是 max_retries=10 下的 A→B→C→A→...
+    assert operation_hosts == ["server-a", "server-b", "server-c"]
+    assert connect_attempts == ["server-a", "server-b", "server-c"]
+
     assert ei.value.operation == "get_security_bars"
     assert ei.value.cause is not None
     assert ei.value.cause.operation == "connect"

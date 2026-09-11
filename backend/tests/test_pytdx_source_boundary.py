@@ -40,7 +40,10 @@ def _install_api(adapter: PytdxAdapter, api: MagicMock) -> None:
     adapter._api = api  # type: ignore[assignment]
     adapter.connected_server = _SERVER
 
-    def _connect() -> None:
+    def _connect(*_args: object, **_kwargs: object) -> None:
+        # 忽略 excluded_servers：本文件故意复用同一 mock server，
+        # 以便断言「底层 API 调用次数」这一契约（failover 由
+        # tests/test_pytdx_server_failover.py 用多 host Fake API 覆盖）。
         adapter._api = api  # type: ignore[assignment]
         adapter.connected_server = _SERVER
 
@@ -49,6 +52,8 @@ def _install_api(adapter: PytdxAdapter, api: MagicMock) -> None:
         adapter.connected_server = None
 
     adapter.connect = _connect  # type: ignore[method-assign]
+    # retry owner 走 _connect_excluding：必须一并 patch，否则会落到真实网络
+    adapter._connect_excluding = _connect  # type: ignore[method-assign]
     adapter.disconnect = _disconnect  # type: ignore[method-assign]
 
 
