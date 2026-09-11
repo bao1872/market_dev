@@ -3,9 +3,8 @@
 //
 // 覆盖：
 //   1. StrategyDataTable 支持 stickyHeaderMode="viewport" prop，并为 viewport 模式附加 viewport-sticky class
-//   2. ScreenerPage 对 StrategyDataTable 传入 stickyHeaderMode="viewport"
-//   3. global.scss 中 viewport-sticky 模式不抢占滚动容器（overflow 不为 auto/scroll/hidden）
-//   4. global.scss 中 thead th 的 top 使用 var(--topbar)
+//   2. global.scss 中 viewport-sticky 模式不抢占滚动容器（overflow 不为 auto/scroll/hidden）
+//   3. global.scss 中 thead th 的 top 使用 var(--topbar)
 
 import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
@@ -21,7 +20,6 @@ function readSrc(...segments: string[]): string {
 }
 
 const strategyDataTableSrc = readSrc('components', 'StrategyDataTable.tsx')
-const screenerPageSrc = readSrc('pages', 'ScreenerPage.tsx')
 const globalScss = readSrc('styles', 'global.scss')
 
 test('StrategyDataTable 支持 stickyHeaderMode 并给 viewport 模式附加 viewport-sticky class', () => {
@@ -34,14 +32,6 @@ test('StrategyDataTable 支持 stickyHeaderMode 并给 viewport 模式附加 vie
     strategyDataTableSrc,
     /clsx\(\s*['"]table-shell['"]\s*,\s*stickyHeaderMode\s*===\s*['"]viewport['"]\s*&&\s*['"]viewport-sticky['"]\s*\)/,
     '应在 stickyHeaderMode === "viewport" 时附加 viewport-sticky class',
-  )
-})
-
-test('ScreenerPage 使用 stickyHeaderMode="viewport"', () => {
-  assert.match(
-    screenerPageSrc,
-    /stickyHeaderMode\s*=\s*['"]viewport['"]/,
-    'ScreenerPage 应传入 stickyHeaderMode="viewport"',
   )
 })
 

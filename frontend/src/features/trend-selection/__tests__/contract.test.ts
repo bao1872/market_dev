@@ -4,17 +4,16 @@
 //   1. 主页趋势字段必须是趋势选股字段的子集（visibleColumnKeys 机制）
 //   2. 同 key 的标题、dataType 必须完全一致（源码扫描 columns.tsx）
 //   3. visibleColumnKeys 按 column key 过滤，不依赖数组位置
-//   4. ScreenerPage dsaColumns 必须引用共享列定义
-//   5. 颜色规则一致性：涨红跌绿（.market-up/.market-down）
-//   6. 完整列集每列含必需字段
-//   7. adapter 工具函数完整性与格式正确性
+//   4. 颜色规则一致性：涨红跌绿（.market-up/.market-down）
+//   5. 完整列集每列含必需字段
+//   6. adapter 工具函数完整性与格式正确性
 //
 // 注意：IndexPage.tsx 和 WatchlistPage.tsx 已删除（统一行情工作区改造），
-//   原 IndexPage 专属契约测试已移除，ScreenerPage 契约测试保留。
+//   原 IndexPage / ScreenerPage 专属契约测试均已移除（ScreenerPage 于 2026-07-11 正式退役，保留 /screener → /market 兼容重定向）。
 //
 // 测试策略：
 // - 运行时测试：直接导入 adapters.ts / config.ts（仅类型导入，Node --experimental-strip-types 可执行）
-// - 源码扫描测试：读取 columns.tsx / ScreenerPage.tsx 文本，正则验证契约
+// - 源码扫描测试：读取 columns.tsx 文本，正则验证契约
 //   （columns.tsx 含 JSX 无法被 Node 直接执行，改用源码扫描验证列定义契约）
 
 import { strict as assert } from 'node:assert'
@@ -39,7 +38,6 @@ import { INDEX_VISIBLE_COLUMN_KEYS, visibleColumnKeys } from '../config.ts'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const COLUMNS_PATH = join(__dirname, '..', 'columns.tsx')
-const SCREENER_PAGE_PATH = join(__dirname, '..', '..', '..', 'pages', 'ScreenerPage.tsx')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf-8')
@@ -184,16 +182,6 @@ test('导出唯一的 StrategyResult→TrendSelectionRow adapter', () => {
   // 验证 watchedIds 未传时 watched=false
   const row3 = adaptStrategyResultToTrendRow(fakeResult)
   assert.equal(row3.watched, false, 'watchedIds 未传时 watched 默认 false')
-})
-
-// ===== 6. ScreenerPage 的 dsaColumns 必须引用共享列定义 =====
-test('ScreenerPage dsaColumns 引用 features/trend-selection 共享列定义', () => {
-  const src = readSource(SCREENER_PAGE_PATH)
-  assert.ok(
-    src.includes("from '@/features/trend-selection'") ||
-      src.includes("from '@/features/trend-selection/"),
-    'ScreenerPage 必须从 @/features/trend-selection 导入共享列定义',
-  )
 })
 
 // ===== 7. 颜色规则一致性：涨红跌绿（.market-up/.market-down） =====

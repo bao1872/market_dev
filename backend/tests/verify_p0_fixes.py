@@ -331,37 +331,6 @@ def test_readiness_probe() -> None:
         _record("Readiness 异常", False, str(exc))
 
 
-# ===== 前端修复 =====
-
-
-def test_frontend_fixes() -> None:
-    """验证前端修复。"""
-    try:
-        frontend_path = _BACKEND_DIR.parent / "frontend" / "src" / "pages" / "ScreenerPage.tsx"
-        if not frontend_path.exists():
-            _record("Frontend ScreenerPage.tsx 不存在", False, str(frontend_path))
-            return
-
-        with open(frontend_path) as f:
-            content = f.read()
-
-        # 检查降级模式下 matched: false（而非 matched: true）
-        # strategyResultToRow 中应设置 matched: false
-        assert "matched: false" in content or "matched:false" in content, (
-            "前端未修复默认 matched=true"
-        )
-        _record("Frontend matched: false 修复", True)
-
-        # 检查 limit 不是 200
-        assert "limit: 200" not in content and "limit:200" not in content, (
-            "前端仍使用 limit=200"
-        )
-        _record("Frontend limit 非 200", True)
-
-    except Exception as exc:
-        _record("Frontend 异常", False, str(exc))
-
-
 # ===== 主入口 =====
 
 
@@ -376,7 +345,6 @@ def run_all_tests() -> int:
         test_timezone_fixes,
         test_1m_bar_dedup,
         test_readiness_probe,
-        test_frontend_fixes,
     ]
 
     print("=" * 60)

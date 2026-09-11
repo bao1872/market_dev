@@ -34,15 +34,6 @@ _MANIFEST_PATH = (
     / "dsa_selector.yaml"
 )
 
-# ScreenerPage.tsx 路径（用于静态扫描前端列定义）
-_SCREENER_PAGE_PATH = (
-    Path(__file__).resolve().parent.parent.parent
-    / "frontend"
-    / "src"
-    / "pages"
-    / "ScreenerPage.tsx"
-)
-
 # features/trend-selection/columns.tsx 路径（advice.md v8 Task 7 重构后列定义唯一实现位置）
 _TREND_SELECTION_COLUMNS_PATH = (
     Path(__file__).resolve().parent.parent.parent
@@ -122,7 +113,7 @@ def test_validate_metric_filters_rejects_current_trend():
     print("  _validate_metric_filters 拒绝 current_trend (422) ✓")
 
 
-def test_screener_page_does_not_restore_legacy_dsa_only_column():
+def test_shared_columns_do_not_restore_legacy_dsa_only_column():
     """验证趋势选股共享基础列不恢复旧 DSA-only 趋势列。
 
     DSA 仍由 selector manifest 提供可筛选字段，但行情列表的共享基础列已按
@@ -140,12 +131,6 @@ def test_screener_page_does_not_restore_legacy_dsa_only_column():
         "features/trend-selection/columns.tsx 不应恢复旧 dsa_dir_bars 展示列"
     )
 
-    # ScreenerPage.tsx 不应再独立定义 current_trend 列 key（防止回退）
-    with open(_SCREENER_PAGE_PATH, encoding="utf-8") as f:
-        screener_content = f.read()
-    assert "key: 'current_trend'" not in screener_content, (
-        "ScreenerPage.tsx 中不应独立定义 current_trend 列 key"
-    )
     print("  趋势选股共享基础列未恢复旧 DSA-only 列 ✓")
 
 
@@ -153,7 +138,7 @@ if __name__ == "__main__":
     print("=== 选股筛选字段契约测试 ===")
     test_dsa_dir_bars_is_filterable_output()
     test_current_trend_not_in_manifest_outputs()
-    test_screener_page_does_not_restore_legacy_dsa_only_column()
+    test_shared_columns_do_not_restore_legacy_dsa_only_column()
 
     # 以下两个测试需要导入 app 模块，standalone 运行（无 PYTHONPATH）时跳过并提示
     # 通过 PYTHONPATH=/root/web_dev/backend 或 pytest 运行可执行全部测试
