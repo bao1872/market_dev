@@ -21,6 +21,7 @@ canonical chain = Core → Review → History → complete。chip spy 改挂在�
 运行：PURE_UNIT_TEST=1 pytest backend/tests/test_after_close_phase0_control_flow.py
 """
 
+import importlib.util
 import json
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -144,8 +145,6 @@ def _install_patches(job_run, *, resolve_side_effect):
               new=spies["resolve"]),
         patch("app.services.auction_anchor_service.generate_and_publish_auction_anchors",
               new=spies["auction"]),
-        patch("app.services.board_analysis_service.compute_all_boards",
-              new=spies["aggregation"]),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items",
               new=spies["compute_review_core"]),
         patch("app.services.state_event_service.generate_events_for_run",
@@ -170,6 +169,14 @@ def _install_patches(job_run, *, resolve_side_effect):
         patch("app.services.after_close_orchestrator.get_active_a_share_instruments",
               new=AsyncMock(return_value=[])),
     ]
+    # [Slice 4A9 / aggregation-retire] `board_analysis_service` 已退役并从代码库移除，
+    # patch 目标不存在。仅在模块仍存在时安装 patcher；不存在时保持 spy 恒未被调用
+    # 的语义（下方断言 `not spies["aggregation"].called` 仍然成立且有意义）。
+    if importlib.util.find_spec("app.services.board_analysis_service") is not None:
+        patchers.append(
+            patch("app.services.board_analysis_service.compute_all_boards",
+                  new=spies["aggregation"])
+        )
     # 移除占位
     patchers = [p for p in patchers if p is not None]
     for p in patchers:
@@ -528,4 +535,52 @@ async def test_p1_2_superseded_does_not_trigger_events_chip_auction_aggregation(
             f"superseded run 不应执行任何 post-core 副作用，实际序列: {record}"
         )
     finally:
+        _stop_patches(patchers)
+
+
+# ---------------------------------------------------------------------------
+# [DAILY-ONLY] 盘后只刷新 daily
+# ---------------------------------------------------------------------------
+
+
+async def test_after_close_requests_daily_only_periods():
+    """盘后 Core 是 daily-only，orchestrator 必须只请求 periods=("d",)。
+
+    真实调用链：compute_review_core_with_run_items → compute_review_core_for_trade_date，
+    只读 timeframe="1d"。15m/60m 的更新能力保留给独立 bars scheduler / 手工更新，
+    但不得进入盘后主链（否则盘后会白白多刷两个周期）。
+
+    这里断言的是**传给 BarsSchedulerService 的真实 kwargs**，而非源码文本。
+
+    注意：本文件的 mock harness 早于当前 Core-readiness 契约（`_validate_core_ready`
+    校验 CoreRun id），refreshing_daily 之后的步骤会失败。本测试只关心 refresh 调用
+    契约，而该调用发生在失败点**之前**，故容忍后续失败。
+    """
+    job_run = _make_job_run(
+        dsa_run_id=uuid.uuid4(), snapshot_run_id=uuid.uuid4())
+    spies, patchers = _install_patches(
+        job_run, resolve_side_effect=_published_resolution)
+
+    refresh_spy = AsyncMock(return_value=MagicMock(
+        dsa_run_id=uuid.uuid4(), daily_coverage=1.0, skip_reason=None))
+    override = patch(
+        "app.services.bars_scheduler_service.BarsSchedulerService.refresh_all_instruments",
+        new=refresh_spy,
+    )
+    override.start()
+    try:
+        try:
+            await _run_orchestrator(job_run=job_run, skip_publish=False)
+        except Exception:  # noqa: BLE001 - harness 陈旧，只断言 refresh 契约
+            pass
+        assert refresh_spy.await_count == 1, (
+            "盘后刷新阶段必须调用一次 refresh_all_instruments"
+        )
+        kwargs = refresh_spy.await_args.kwargs
+        assert kwargs.get("periods") == ("d",), (
+            f"盘后必须只刷新 daily，实际 periods={kwargs.get('periods')!r}"
+        )
+        assert kwargs.get("trigger_dsa") is False, "盘后不得在刷新阶段触发 DSA"
+    finally:
+        override.stop()
         _stop_patches(patchers)

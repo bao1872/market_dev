@@ -7,11 +7,12 @@
 4. 非法 payload / 非法 total → fail-closed；
 5. 网络抖动重试后成功；
 6. SH / SZ / BJ 分类，含新北交所 920xxx；
-7. 「00 开头」沪/深同码碰撞（上证指数 000001）必须被拒绝；
+7. f13 身份校验 fail-closed（沪/深同码碰撞、f13 与市场不符、f13 缺失）；
 8. f124 → Asia/Shanghai trade_date，非目标日不得通过；
-9. 价格字段（fltt=2，分）缩放；volume=手 / amount=元 不缩放；
+9. 价格字段不缩放（fltt=2 已是元）；volume=手 / amount=元 同样不缩放；
 10. 停牌/空价行仍归一化（由落库层判废），不得抛异常；
-11. Eastmoney 历史 kline 必须 fqt=0 且不缩放价格。
+11. Eastmoney 历史 kline 必须 fqt=0 且不缩放价格；北交所 secid 前缀为 0；
+12. 当日收盘窗口守卫 can_use_same_day_eod_snapshot（盘中/过去日必须拒绝）。
 """
 
 from __future__ import annotations
@@ -278,10 +279,43 @@ def test_classify_rejects_sh_index_code_collision() -> None:
 
     若不拒绝，沪市指数会被当作深市股票写坏 000001 的行情。
     """
-    with pytest.raises(ValueError, match="collides"):
+    with pytest.raises(ValueError, match="market identity mismatch"):
         prov.classify_a_share_market("000001", 1)
     # 深市 f13=0 时正常放行
     assert prov.classify_a_share_market("000001", 0) == "SZ"
+
+
+@pytest.mark.parametrize(
+    ("symbol", "f13"),
+    [
+        ("600519", 0),   # 沪市股票必须 f13=1
+        ("688981", 0),   # 科创板同样 f13=1
+        ("000001", 1),   # 深市股票必须 f13=0
+        ("300750", 1),
+        ("920001", 1),   # 北交所 f13 实测为 0（不是 2）
+        ("920001", 2),
+        ("430047", 2),
+    ],
+)
+def test_classify_rejects_f13_mismatch(symbol: str, f13: int) -> None:
+    """f13 与代码前缀不符时必须拒绝，不能猜。"""
+    with pytest.raises(ValueError, match="market identity mismatch"):
+        prov.classify_a_share_market(symbol, f13)
+
+
+@pytest.mark.parametrize("bad_f13", [None, "", "x", "-", [], {}])
+def test_classify_rejects_missing_or_invalid_f13(bad_f13: Any) -> None:
+    """f13 缺失/不可解析 → fail-closed（外部源身份冲突时宁愿丢弃）。"""
+    with pytest.raises(ValueError, match="market identity unknown"):
+        prov.classify_a_share_market("600519", bad_f13)
+
+
+def test_classify_rejects_non_stock_by_project_rule() -> None:
+    """前缀+f13 都通过但项目规则判定非股票时（如位数不足的北交所代码）必须拒绝。"""
+    with pytest.raises(ValueError, match="not A-share stock by project rule"):
+        prov.classify_a_share_market("92001", 0)
+    with pytest.raises(ValueError, match="not A-share stock by project rule"):
+        prov.classify_a_share_market("60051", 1)
 
 
 @pytest.mark.parametrize("symbol", ["399001", "510300", "159919", "900001", "200001", "123456", ""])
@@ -434,4 +468,56 @@ async def test_eastmoney_kline_empty_is_error_not_silent_success() -> None:
 def test_eastmoney_secid_market_prefixes() -> None:
     assert prov._eastmoney_secid("600519", "SH") == "1.600519"
     assert prov._eastmoney_secid("000001", "SZ") == "0.000001"
-    assert prov._eastmoney_secid("920819", "BJ") == "2.920819"
+
+
+def test_eastmoney_secid_bj_is_zero_prefix() -> None:
+    """北交所在东财统一行情下与深市同为市场 0。
+
+    回归防护：曾写成 "2.920xxx"，导致北交所历史 K 线永远取不到数据。
+    """
+    assert prov._EM_SECID_MARKET["BJ"] == "0"
+    assert prov._eastmoney_secid("920819", "BJ") == "0.920819"
+    assert prov._eastmoney_secid("920002", "BJ") == "0.920002"
+
+
+def test_eastmoney_secid_rejects_unknown_market() -> None:
+    with pytest.raises(ValueError, match="unsupported market"):
+        prov._eastmoney_secid("920819", "US")
+
+
+# =========================================================================
+# 7. 当日收盘窗口守卫（禁止盘中快照被当成收盘日线）
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    ("when", "expected"),
+    [
+        (datetime(2026, 9, 11, 13, 0, tzinfo=_SH), False),   # 盘中 13:00
+        (datetime(2026, 9, 11, 14, 59, tzinfo=_SH), False),  # 收盘前 1 分钟
+        (datetime(2026, 9, 11, 15, 5, tzinfo=_SH), True),    # 结算余量之后
+        (datetime(2026, 9, 11, 16, 0, tzinfo=_SH), True),
+        (datetime(2026, 9, 12, 9, 0, tzinfo=_SH), False),    # 次日：不能用今日快照
+        (datetime(2026, 9, 10, 16, 0, tzinfo=_SH), False),   # 过去日：不能用今日快照
+    ],
+)
+def test_can_use_same_day_eod_snapshot(when: datetime, expected: bool) -> None:
+    assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=when) is expected
+
+
+def test_can_use_same_day_eod_snapshot_treats_naive_as_shanghai() -> None:
+    """naive datetime 必须按上海时区解释，不得当成 UTC（否则边界日会判错）。"""
+    naive_intraday = datetime(2026, 9, 11, 13, 0)   # naive
+    assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=naive_intraday) is False
+    naive_after_close = datetime(2026, 9, 11, 16, 0)
+    assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=naive_after_close) is True
+
+
+def test_can_use_same_day_eod_snapshot_converts_utc_input() -> None:
+    """UTC 输入必须换算到上海时区后再比较（03:00 UTC = 11:00 CST → 拒绝）。"""
+    from datetime import UTC
+
+    utc_1100 = datetime(2026, 9, 11, 3, 0, tzinfo=UTC)
+    assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=utc_1100) is False
+    utc_1600 = datetime(2026, 9, 11, 8, 0, tzinfo=UTC)  # = 16:00 CST
+    assert prov.can_use_same_day_eod_snapshot(date(2026, 9, 11), now=utc_1600) is True

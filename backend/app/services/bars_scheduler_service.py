@@ -126,6 +126,12 @@ class BatchResult:
     daily_fallback_attempted: int = 0
     daily_fallback_succeeded: int = 0
     new_instrument_backfilled: int = 0
+    # [EOD-SNAPSHOT] fallback 结束后仍未覆盖 T 日的活跃 A 股数（真成功判定）。
+    daily_missing_after_fallback: int = 0
+    # [EOD-SNAPSHOT] 日线连续性扫描结果（只读诊断；>0 表示历史存在整日/大面积缺口）
+    daily_continuity_gaps: int = 0
+    # [EOD-SNAPSHOT] 缺口修复模式："market_wide_gap" | "sparse_symbol_gap"
+    daily_repair_mode: str | None = None
     daily_mode: str | None = None  # "snapshot" | "legacy_fallback"
 
 
@@ -262,6 +268,7 @@ class BarsSchedulerService:
         job_run_id: uuid.UUID | None = None,
         *,
         trigger_dsa: bool = True,
+        periods: tuple[str, ...] | None = None,
     ) -> BatchResult:
         """每日增量更新：默认串行，可配置有界 provider ProcessPool。
 
@@ -275,12 +282,22 @@ class BarsSchedulerService:
             trigger_dsa: [Phase8A] True=日线完成后触发DSA（16:00独立路径）；
                 False=仅刷新行情+计算覆盖率，不触发DSA（orchestrator调用时使用，
                 DSA由orchestrator在computing_features步骤创建并inline claim）
+            periods: 显式限定刷新周期；None（默认）= DAILY_COUNTS 的全部周期
+                （d + 15m + 60m），与历史行为完全一致。
+                盘后编排（after_close_orchestrator）只传 ``("d",)``：当前盘后 Core
+                是 daily-only，15m/60m 不应在盘后主链刷新（它们的更新能力保留给
+                独立 bars scheduler 与手工更新，不是删除）。
 
         Returns:
             BatchResult: 批量刷新结果
         """
         self._reset_process_metrics()
-        logger.info("开始每日增量更新 trade_date=%s trigger_dsa=%s", trade_date, trigger_dsa)
+        logger.info(
+            "开始每日增量更新 trade_date=%s trigger_dsa=%s periods=%s",
+            trade_date,
+            trigger_dsa,
+            periods if periods is not None else tuple(self.DAILY_COUNTS),
+        )
         return await self._process_all_instruments(
             trade_date=trade_date,
             counts=self.DAILY_COUNTS,
@@ -288,6 +305,7 @@ class BarsSchedulerService:
             task_name="每日增量更新",
             job_run_id=job_run_id,
             trigger_dsa=trigger_dsa,
+            requested_periods=periods,
         )
 
     async def backfill_all_instruments(
@@ -330,6 +348,7 @@ class BarsSchedulerService:
         job_run_id: uuid.UUID | None = None,
         *,
         trigger_dsa: bool = True,
+        requested_periods: tuple[str, ...] | None = None,
     ) -> BatchResult:
         """处理全市场股票的多周期行情刷新（按周期分阶段）。
 
@@ -348,6 +367,7 @@ class BarsSchedulerService:
             job_run_id: 可选的 SchedulerJobRun.id，传入时在日线阶段完成/DSA 触发后
                 写入 job_run_events 时间线事件
             trigger_dsa: [Phase8A] False 时仅计算覆盖率不触发DSA（orchestrator调用）
+            requested_periods: 显式限定周期；None=counts 的全部周期（历史行为）
 
         Returns:
             BatchResult: 批量刷新结果
@@ -364,22 +384,45 @@ class BarsSchedulerService:
                 # [BarsScheduler] - 非交易日返回带 skip_reason 的空结果，供上游编排透传到 metadata
                 return BatchResult(skip_reason="NON_TRADING_DAY")
 
-        # 2. 查询全市场 active 股票
+        # 2. 确定运行模式与周期集合（必须在读取 universe 之前，因为
+        #    「快照发现新股」是 universe 为空时唯一能自愈的路径）。
+        is_daily_refresh = task_name == "每日增量更新"
+        active_periods = [
+            p
+            for p in self.PHASE_ORDER
+            if p in counts and (requested_periods is None or p in requested_periods)
+        ]
+        # 快照发现仅在「每日增量 + 启用快照 + 本轮真的要跑 d」时成立。
+        snapshot_discovery_enabled = (
+            is_daily_refresh and self.use_eod_snapshot and "d" in active_periods
+        )
+
+        # 3. 查询全市场 active 股票
         instruments = await self._get_active_instruments(db_session)
         if not instruments:
-            logger.warning("无 active 股票可处理")
-            return BatchResult()
+            if not snapshot_discovery_enabled:
+                logger.warning("无 active 股票可处理")
+                return BatchResult()
+            # 旧 universe 为空：唯一可行路径是快照发现。继续执行 d 阶段，
+            # 由快照失败时的 fail-closed 分支决定结果，绝不用空列表伪装成功。
+            logger.warning(
+                "[EOD-SNAPSHOT] active universe 为空，改由全市场快照发现新股"
+            )
 
         total = len(instruments)
         logger.info("%s: 共 %d 只股票，按周期分阶段处理", task_name, total)
 
-        # 3. 按周期分阶段处理
         result = BatchResult(total=total)
-        active_periods = [p for p in self.PHASE_ORDER if p in counts]
         for period in active_periods:
             result.period_counts[period] = 0
 
-        is_daily_refresh = task_name == "每日增量更新"
+        # legacy daily provider 的目标结束日（仅 period="d" 使用）：
+        # - 每日增量（start_date is None）：目标交易日 trade_date。重跑历史 T 时必须
+        #   拉 T，禁止把 end_date 悄悄写成今天（那会把历史 T 的日线污染成今天的）。
+        # - 历史回补（start_date 给定）：今天，保持「补到当前」的历史语义不变。
+        legacy_daily_end_date = (
+            shanghai_business_date() if start_date is not None else trade_date
+        )
 
         parallel_enabled = is_daily_refresh and self.fetch_processes > 1
         process_pool = self._create_process_pool() if parallel_enabled else None
@@ -405,36 +448,53 @@ class BarsSchedulerService:
                 # [EOD-SNAPSHOT] 每日增量模式：日线阶段优先走全市场快照快速路径。
                 # 成功则跳过逐股取数；失败（SnapshotProviderError）退回 legacy 逐股路径。
                 ran_fast_path = False
-                if is_daily_refresh and period == "d" and self.use_eod_snapshot:
+                if snapshot_discovery_enabled and period == "d":
                     from app.services.eod_market_snapshot_provider import (
                         SnapshotProviderError,
+                        can_use_same_day_eod_snapshot,
                     )
 
-                    try:
-                        await self._refresh_daily_from_market_snapshot(
-                            trade_date, db_session, job_run_id, result,
-                        )
-                        result.daily_mode = "snapshot"
-                        # universe 可能新增 → 清空缓存并重新读取，供后续 post-daily 阶段
-                        # 与 15m/60m 阶段使用；items/result.total 必须同步重建，
-                        # 否则后续阶段与最终统计仍按旧 universe 口径。
-                        clear_instruments_cache()
-                        instruments = await self._get_active_instruments(db_session)
-                        total = len(instruments)
-                        result.total = total
-                        items = [
-                            _InstrumentItem(i, instrument.id, instrument.symbol)
-                            for i, instrument in enumerate(instruments)
-                        ]
-                        ran_fast_path = True
-                    except SnapshotProviderError as exc:
-                        logger.warning(
-                            "[BarsScheduler] 快照 provider 失败，退回 legacy daily 路径: %s",
-                            exc,
-                        )
+                    if not can_use_same_day_eod_snapshot(trade_date):
+                        # 过去交易日重跑 / 盘中提前触发：实时快照不是 T 日终值，
+                        # 必须走 legacy（historical）路径，禁止拿今天的快照写历史日线。
                         result.daily_mode = "legacy_fallback"
+                        logger.warning(
+                            "[EOD-SNAPSHOT] trade_date=%s 不在当日收盘窗口"
+                            "（>=15:05 且为当天），跳过快照，改用 historical daily 路径",
+                            trade_date,
+                        )
+                    else:
+                        try:
+                            await self._refresh_daily_from_market_snapshot(
+                                trade_date, db_session, job_run_id, result,
+                            )
+                            result.daily_mode = "snapshot"
+                            # universe 可能新增 → 清空缓存并重新读取，供后续 post-daily
+                            # 阶段与 15m/60m 阶段使用；items/result.total 必须同步重建，
+                            # 否则后续阶段与最终统计仍按旧 universe 口径。
+                            clear_instruments_cache()
+                            instruments = await self._get_active_instruments(db_session)
+                            total = len(instruments)
+                            result.total = total
+                            items = [
+                                _InstrumentItem(i, instrument.id, instrument.symbol)
+                                for i, instrument in enumerate(instruments)
+                            ]
+                            ran_fast_path = True
+                        except SnapshotProviderError as exc:
+                            logger.warning(
+                                "[BarsScheduler] 快照 provider 失败，退回 legacy daily 路径: %s",
+                                exc,
+                            )
+                            result.daily_mode = "legacy_fallback"
 
                 if not ran_fast_path:
+                    if snapshot_discovery_enabled and period == "d" and not instruments:
+                        # 旧 universe 为空 + 快照不可用/失败：既不能发现新股，也没有
+                        # 可逐股刷新的标的。禁止返回空 BatchResult 伪装成功。
+                        raise RuntimeError(
+                            "EMPTY_UNIVERSE_AND_SNAPSHOT_UNAVAILABLE"
+                        )
                     if process_pool is None:
                         phase_succeeded, phase_failed = await self._run_serial_period(
                             instruments,
@@ -442,6 +502,7 @@ class BarsSchedulerService:
                             count=counts[period],
                             db_session=db_session,
                             start_date=start_date,
+                            end_date=legacy_daily_end_date,
                             result=result,
                             phase_name=phase_name,
                         )
@@ -453,6 +514,7 @@ class BarsSchedulerService:
                             count=counts[period],
                             db_session=db_session,
                             start_date=start_date,
+                            end_date=legacy_daily_end_date,
                         )
                         phase_succeeded = phase.succeeded
                         phase_failed = phase.failed
@@ -504,6 +566,7 @@ class BarsSchedulerService:
         count: int,
         db_session: AsyncSession | None,
         start_date: date | None,
+        end_date: date,
         result: BatchResult,
         phase_name: str,
     ) -> tuple[int, int]:
@@ -519,6 +582,7 @@ class BarsSchedulerService:
                     count=count,
                     db_session=db_session,
                     start_date=start_date,
+                    end_date=end_date,
                 )
                 result.period_counts[period] += upsert_count
                 succeeded += 1
@@ -541,6 +605,7 @@ class BarsSchedulerService:
         period: str,
         count: int,
         start_date: date | None,
+        end_date: date,
     ) -> dict[str, Any]:
         request: dict[str, Any] = {
             "instrument_id": str(item.instrument_id),
@@ -549,7 +614,8 @@ class BarsSchedulerService:
             "count": count,
         }
         if period == "d":
-            end_date = shanghai_business_date()
+            # end_date 由调用方显式传入（每日增量=trade_date，回补=今天）；
+            # 禁止在此处写死今天，否则重跑历史 T 会拉到今天的日线。
             request["start_date"] = (
                 start_date if start_date is not None else end_date - timedelta(days=count)
             )
@@ -611,6 +677,7 @@ class BarsSchedulerService:
         count: int,
         db_session: AsyncSession | None,
         start_date: date | None,
+        end_date: date,
     ) -> _ParallelPhaseResult:
         """Bounded provider dispatcher; persistence remains serial in this parent."""
         max_inflight = self.fetch_processes * self.MAX_INFLIGHT_MULTIPLIER
@@ -661,7 +728,11 @@ class BarsSchedulerService:
                 ):
                     _, _, attempt, item = heapq.heappop(retry_heap)
                     request = self._build_provider_request(
-                        item, period=period, count=count, start_date=start_date
+                        item,
+                        period=period,
+                        count=count,
+                        start_date=start_date,
+                        end_date=end_date,
                     )
                     try:
                         concurrent_future = pool.submit(fetch_period_bars_task, request)
@@ -865,22 +936,34 @@ class BarsSchedulerService:
 
         流程（详见 eod_daily_refresh_service / eod_market_snapshot_provider）：
         1. 拉全市场 A 股收盘快照（东方财富，不复权）。
+        1.5 规模防护：快照覆盖比例异常小 → fail-closed，防止 fallback storm。
         2. 先同步 instrument universe（新股发现必须先于行情覆盖率）。
         3. 批量落当日 raw 日线（conflict 保留 adj_factor）。
-        4. 集合差找缺口，仅对缺失标的走历史 fallback（pytdx / Eastmoney fqt=0）。
+        4. 集合差找缺口；仅 sparse_symbol_gap 走历史 fallback（pytdx / Eastmoney
+           fqt=0）；market_wide_gap 本轮只报告不逐股回补。
         5. 对新股历史补齐（listing_date 或 2023-01-01 起）。
+        6. 回补后重新求集合差 → ``daily_missing_after_fallback``（真成功判定）。
+        7. 日线连续性只读扫描 → ``daily_continuity_gaps``（可发现 09-10 整日空洞）。
 
         所有指标写入传入的 result（snapshot_total / universe_new / ...）。
         失败时抛 SnapshotProviderError，由 _process_all_instruments 退回 legacy 逐股路径。
+
+        调用前置条件：``can_use_same_day_eod_snapshot(trade_date)`` 为 True
+        （由 _process_all_instruments 保证），因此这里不需要再判断盘中。
         """
         import httpx
 
         from app.models.instrument import Instrument
         from app.services.eod_daily_refresh_service import (
+            DailyGap,
             _PytdxBreaker,
             backfill_new_instruments,
+            check_snapshot_universe_sanity,
+            count_active_a_share_instruments,
             fill_missing_daily_instruments,
             find_missing_daily_instruments,
+            plan_daily_repair,
+            scan_daily_continuity,
             sync_instruments_from_eod_snapshot,
             upsert_raw_daily_snapshot,
         )
@@ -903,8 +986,20 @@ class BarsSchedulerService:
             rows = normalize_snapshot_rows(raw_rows)
             result.snapshot_total = len(raw_rows)
             result.snapshot_valid_daily = len(rows)
+            if not rows:
+                # 归一化后一行都不剩说明筛选/解析契约被破坏，禁止静默当成功。
+                raise SnapshotProviderError(
+                    f"snapshot 归一化后无有效 A 股行 raw={len(raw_rows)}"
+                )
             logger.info(
                 "[EOD-SNAPSHOT] 快照拉取 raw=%d valid=%d", len(raw_rows), len(rows)
+            )
+
+            # 1.5 规模防护（落库前）：接口筛选失效 → 只返回几百只 → 若继续，
+            # 集合差会把几千只全部推入 historical fallback（fallback storm）。
+            existing_count = await count_active_a_share_instruments(session)
+            check_snapshot_universe_sanity(
+                [r.symbol for r in rows], existing_count
             )
 
             # 2. 同步 universe（新股发现必须先于行情覆盖率）
@@ -921,6 +1016,7 @@ class BarsSchedulerService:
                 )
             ).scalars().all()
             id_by_symbol = {i.symbol: i.id for i in active}
+            eligible = len(active)
 
             pairs = [
                 (id_by_symbol[r.symbol], r)
@@ -931,20 +1027,43 @@ class BarsSchedulerService:
             result.snapshot_upserted = upserted
             logger.info("[EOD-SNAPSHOT] 当日 raw 日线 upsert=%d", upserted)
 
-            # 4. 缺口 fallback：只对 snapshot 后仍未覆盖的活跃 A 股走历史源
+            # 4. 缺口：只对 snapshot 后仍未覆盖的活跃 A 股走历史源。
+            #    先分类：market_wide_gap 逐股回补等于重新制造数小时任务，本轮只报告。
             breaker = _PytdxBreaker()
             missing = await find_missing_daily_instruments(session, trade_date)
             result.daily_missing_after_snapshot = len(missing)
             if missing:
-                result.daily_fallback_attempted = len(missing)
-                ok = await fill_missing_daily_instruments(
-                    session, missing, trade_date, breaker=breaker
+                covered = max(eligible - len(missing), 0)
+                t_gap = DailyGap(
+                    trade_date=trade_date,
+                    covered=covered,
+                    eligible=eligible,
+                    coverage=(covered / eligible) if eligible else 0.0,
+                    missing_count=len(missing),
+                    is_total_gap=eligible > 0 and covered == 0,
                 )
-                result.daily_fallback_succeeded = ok
-                logger.info(
-                    "[EOD-SNAPSHOT] 缺口 fallback attempted=%d succeeded=%d",
-                    len(missing), ok,
-                )
+                plan = plan_daily_repair(t_gap)
+                result.daily_repair_mode = plan.mode
+                if plan.mode == "market_wide_gap":
+                    logger.warning(
+                        "[EOD-SNAPSHOT] T=%s 缺口为 market-wide"
+                        "（missing=%d/%d ratio=%.3f），本轮只报告，不做逐股回补",
+                        trade_date, len(missing), eligible, plan.missing_ratio,
+                    )
+                else:
+                    result.daily_fallback_attempted = len(missing)
+                    ok = await fill_missing_daily_instruments(
+                        session, missing, trade_date, breaker=breaker
+                    )
+                    result.daily_fallback_succeeded = ok
+                    logger.info(
+                        "[EOD-SNAPSHOT] 缺口 fallback attempted=%d succeeded=%d",
+                        len(missing), ok,
+                    )
+
+            # 4.5 真成功判定：回补后仍缺 T 日的数量
+            still_missing = await find_missing_daily_instruments(session, trade_date)
+            result.daily_missing_after_fallback = len(still_missing)
 
             # 5. 新股历史补齐（每只按其 listing_date 或 2023-01-01 起）
             if sync.new_instruments:
@@ -953,6 +1072,22 @@ class BarsSchedulerService:
                 )
                 result.new_instrument_backfilled = backfilled
                 logger.info("[EOD-SNAPSHOT] 新股历史补齐=%d", backfilled)
+
+            # 7. 日线连续性只读扫描：max(trade_date) 无法暴露「中间某交易日整日缺失」，
+            #    例如 09-10 全空、09-11 正常时 max 仍是 09-11。此处逐交易日核对。
+            gaps = await scan_daily_continuity(session, trade_date)
+            result.daily_continuity_gaps = len(gaps)
+            for gap in gaps:
+                plan = plan_daily_repair(gap)
+                logger.warning(
+                    "[EOD-SNAPSHOT] 连续性缺口 trade_date=%s coverage=%.1f%% "
+                    "missing=%d mode=%s%s",
+                    gap.trade_date,
+                    gap.coverage * 100,
+                    gap.missing_count,
+                    plan.mode,
+                    "（整日空洞 P0）" if gap.is_total_gap else "",
+                )
         finally:
             if own_session:
                 await session.close()
@@ -1669,6 +1804,7 @@ class BarsSchedulerService:
         count: int,
         db_session: AsyncSession | None = None,
         start_date: date | None = None,
+        end_date: date | None = None,
     ) -> int:
         """刷新单只股票单个周期，带重试。
 
@@ -1679,6 +1815,7 @@ class BarsSchedulerService:
             count: 拉取条数（日线时为回看天数，15min/60min 为拉取条数）
             db_session: 可选的 DB 会话
             start_date: 日线回补起始日期（None 时使用 count 模式）
+            end_date: 日线目标结束日；None 时回退到今天（仅供未传的旧调用点）。
 
         Returns:
             upsert 记录数（合法空 provider 返回 0，仍视为成功）
@@ -1694,6 +1831,7 @@ class BarsSchedulerService:
             period=period,
             count=count,
             start_date=start_date,
+            end_date=end_date if end_date is not None else shanghai_business_date(),
         )
 
         for attempt in range(1, self.MAX_RETRIES + 1):

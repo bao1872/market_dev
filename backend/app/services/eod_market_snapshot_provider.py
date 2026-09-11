@@ -29,7 +29,7 @@ import asyncio
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time
 from decimal import Decimal, InvalidOperation
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -89,8 +89,13 @@ _PAGE_RETRY_BASE_DELAY = 1.0
 
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 
-# Eastmoney secid 市场前缀：1=沪，0=深，2=京。
-_EM_SECID_MARKET = {"SH": "1", "SZ": "0", "BJ": "2"}
+# 当日快照最早可视为「收盘终值」的时刻：收盘 15:00 后留 5 分钟结算余量。
+# 该守卫的唯一目的是防止盘前/盘中把实时价写成当日最终日线。
+_EOD_READY_TIME = time(15, 5)
+
+# Eastmoney secid 市场前缀（实测：沪深京统一行情下北交所亦为 0，不是 2）。
+# 见 tests/test_eod_snapshot_provider.py::test_eastmoney_secid_bj_is_zero_prefix
+_EM_SECID_MARKET = {"SH": "1", "SZ": "0", "BJ": "0"}
 
 
 class SnapshotProviderError(RuntimeError):
@@ -121,31 +126,80 @@ class EodSnapshotRow:
     previous_close: Decimal | None
 
 
-def classify_a_share_market(symbol: str, eastmoney_market: int) -> str:
-    """按 A 股代码前缀分类市场（不依赖 f13，避免与项目规则漂移）。
+def classify_a_share_market(symbol: str, eastmoney_market: Any) -> str:
+    """前缀 + f13 双重校验后返回市场（SH / SZ / BJ）。fail-closed。
 
-    f13 的唯一用途：消解「00 开头」的沪/深同码碰撞。上交所指数（上证指数
-    000001、沪深300 000300 等）与深市主板股票（平安银行 000001）同码，
-    仅凭前缀会把沪市指数误判为深市股票并写坏该股票行情。因此当 symbol 以
-    "00" 开头且 f13 表明沪市（1）时，判定为非 A 股股票并拒绝。
+    单一事实源：前缀决定期望市场与期望 f13，f13 必须完全一致，最后再过一遍项目
+    现有 ``is_stock_symbol``。任一层不通过即抛 ValueError，由调用方丢弃该行。
+
+    为什么必须校验 f13（而不是只看前缀）：
+    - ``000001`` 在沪市是上证指数、在深市是平安银行，同码不同物。只按前缀会把
+      沪市指数当成深市股票写坏行情。
+    - 北交所在东财统一行情下的 f13 为 0（不是 2），secid 前缀也是 0；若按 2 拼
+      secid，北交所历史 K 线永远取不到。
 
     Args:
         symbol: 6 位 A 股代码。
-        eastmoney_market: Eastmoney f13（0=深/北，1=沪，2=京）。
+        eastmoney_market: Eastmoney f13（1=沪，0=深/北）。
 
     Raises:
-        ValueError: 非 A 股股票代码（含上述同码碰撞的沪市指数）。
+        ValueError: 前缀非 A 股、f13 与期望不符、或 is_stock_symbol 拒绝。
     """
-    if symbol.startswith("00") and eastmoney_market == 1:
-        raise ValueError(f"not A-share stock (SH code collides with SZ): {symbol}")
-
     if symbol.startswith("6"):
-        return "SH"
-    if symbol.startswith(("92", "43", "83", "87", "88")):
-        return "BJ"
-    if symbol.startswith(("00", "30", "02")):
-        return "SZ"
-    raise ValueError(f"not A-share stock: {symbol}")
+        expected: tuple[str, int] = ("SH", 1)
+    elif symbol.startswith(("92", "43", "83", "87", "88")):
+        expected = ("BJ", 0)
+    elif symbol.startswith(("00", "02", "30")):
+        expected = ("SZ", 0)
+    else:
+        raise ValueError(f"not A-share stock: {symbol}")
+
+    market, expected_f13 = expected
+
+    try:
+        actual_f13 = int(eastmoney_market)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"market identity unknown: symbol={symbol}, f13={eastmoney_market!r}"
+        ) from None
+
+    if actual_f13 != expected_f13:
+        raise ValueError(
+            f"market identity mismatch: symbol={symbol}, "
+            f"expected_f13={expected_f13}, actual_f13={actual_f13}"
+        )
+
+    if not is_stock_symbol(symbol, market):
+        raise ValueError(
+            f"not A-share stock by project rule: symbol={symbol}, market={market}"
+        )
+    return market
+
+
+def can_use_same_day_eod_snapshot(
+    trade_date: date,
+    now: datetime | None = None,
+) -> bool:
+    """判断 ``trade_date`` 是否可用「今天的实时快照」落库（fail-closed）。
+
+    返回 True 仅当：``trade_date`` 就是上海时区的当天，且当前时间 >= 15:05。
+
+    为什么需要该守卫：实时快照的 f124 在盘中同样等于今天，仅校验
+    ``row.trade_date == trade_date`` 会把 13:00 的盘中价当成当日最终日线写库。
+    盘后重跑历史交易日（trade_date 为过去）同样必须返回 False —— 不能用今天的
+    快照去补昨天的日线，那种情况必须走 historical repair 路径。
+
+    Args:
+        trade_date: 目标交易日。
+        now: 仅测试注入；默认取当前上海时间。
+    """
+    current = now or datetime.now(_SHANGHAI_TZ)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=_SHANGHAI_TZ)
+    else:
+        current = current.astimezone(_SHANGHAI_TZ)
+
+    return trade_date == current.date() and current.time() >= _EOD_READY_TIME
 
 
 def snapshot_trade_date(ts: Any) -> date | None:
@@ -191,9 +245,9 @@ def _parse_price(value: Any) -> Decimal | None:
 def parse_eod_snapshot_row(raw: dict[str, Any]) -> EodSnapshotRow | None:
     """单条 Eastmoney diff -> EodSnapshotRow；非法行返回 None。
 
-    过滤规则（唯一事实源）：先按前缀分类市场，再用项目
-    ``is_stock_symbol`` 校验，二者任一失败即丢弃（含静态 BJ_STOCKS 之外的
-    新北交所 920xxx 也会被 is_stock_symbol 正确接纳）。
+    过滤规则（唯一事实源在 :func:`classify_a_share_market`）：前缀分类 + f13 一致性
+    + 项目 ``is_stock_symbol``，任一失败即丢弃（含静态 BJ_STOCKS 之外的新北交所
+    920xxx 也会被正确接纳）。
     """
     try:
         symbol = str(raw.get("f12", "")).strip()
@@ -206,8 +260,6 @@ def parse_eod_snapshot_row(raw: dict[str, Any]) -> EodSnapshotRow | None:
     try:
         market = classify_a_share_market(symbol, em_market)
     except ValueError:
-        return None
-    if not is_stock_symbol(symbol, market):
         return None
 
     return EodSnapshotRow(
@@ -330,8 +382,6 @@ async def fetch_full_a_share_snapshot(
 
 
 # ===== 历史日线 fallback（不复权 fqt=0） =====
-
-EASTMONEY_KLINE_URL = "https://push2his.eastmoney.com/api/qt/stock/kline/get"
 
 
 def _eastmoney_secid(symbol: str, market: str) -> str:

@@ -3101,11 +3101,17 @@ async def execute_after_close_run(
             # + cancellation_check（协作式取消）+ 超时保护。
             # [JOB-02] lease_epoch 随 ContextVar 自动继承到 heartbeat 循环。
             async def _refresh_operation() -> Any:
+                # [DAILY-ONLY] 盘后 Core 是 daily-only：真实调用链为
+                # compute_review_core_with_run_items → compute_review_core_for_trade_date，
+                # 批量行情只读 timeframe="1d"；15m 字段仅是兼容保留、实际不计算。
+                # 因此盘后只刷新 d，15m/60m 的更新能力保留给独立 bars scheduler
+                # 与手工更新（不是删除）。periods=("d",) 显式收窄，默认 None 仍是 d/15m/60m。
                 return await bars_service.refresh_all_instruments(
                     trade_date=trade_date,
                     db_session=None,
                     job_run_id=job_run_id,
                     trigger_dsa=False,
+                    periods=("d",),
                 )
 
             refresh_result, refresh_summary = await execute_orchestrator_step(

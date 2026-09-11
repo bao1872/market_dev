@@ -287,6 +287,7 @@ async def test_retry_is_per_item_nonblocking_and_bounded(monkeypatch) -> None:
         count=50,
         db_session=object(),
         start_date=None,
+        end_date=date(2026, 8, 28),
     )
     assert phase.succeeded == 20
     assert phase.failed == 0
@@ -313,6 +314,7 @@ async def test_retry_exhaustion_and_persistence_retry(monkeypatch) -> None:
         count=50,
         db_session=object(),
         start_date=None,
+        end_date=date(2026, 8, 28),
     )
     assert failed.failed == 1
     assert failed.failed_symbols == ["992001"]
@@ -335,6 +337,7 @@ async def test_retry_exhaustion_and_persistence_retry(monkeypatch) -> None:
         count=10,
         db_session=object(),
         start_date=None,
+        end_date=date(2026, 8, 28),
     )
     assert recovered.succeeded == 1
     assert recovered.failed == 0
@@ -395,6 +398,7 @@ async def test_broken_pool_fails_closed(monkeypatch) -> None:
             count=5,
             db_session=object(),
             start_date=None,
+            end_date=date(2026, 8, 28),
         )
     persist.assert_not_awaited()
     assert len(pool.calls) == 1
@@ -415,6 +419,7 @@ async def test_malformed_child_payload_fails_closed(monkeypatch) -> None:
             count=5,
             db_session=object(),
             start_date=None,
+            end_date=date(2026, 8, 28),
         )
     persist.assert_not_awaited()
     assert len(malformed.calls) == 1
@@ -495,14 +500,14 @@ async def test_serial_parallel_request_builder_equivalence(monkeypatch) -> None:
     service = BarsSchedulerService(fetch_processes=1)
     item = _InstrumentItem(0, uuid.uuid4(), "994001")
     expected_daily = service._build_provider_request(
-        item, period="d", count=5, start_date=None
+        item, period="d", count=5, start_date=None, end_date=fixed_end
     )
     expected_15m = service._build_provider_request(
-        item, period="15m", count=50, start_date=None
+        item, period="15m", count=50, start_date=None, end_date=fixed_end
     )
     # [F1B-2 P2] 60m 补齐：daily refresh 用 start/end，60m 用 count=10
     expected_60m = service._build_provider_request(
-        item, period="60m", count=10, start_date=None
+        item, period="60m", count=10, start_date=None, end_date=fixed_end
     )
     assert expected_daily["symbol"] == expected_15m["symbol"] == expected_60m["symbol"] == item.symbol
     # d: start/end 由 count(回看天数) 推导；15m/60m: 原样透传 count

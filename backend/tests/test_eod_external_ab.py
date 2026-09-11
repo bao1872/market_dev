@@ -360,3 +360,39 @@ def test_eastmoney_raw_kline_vs_pytdx_raw_daily_ohlcv() -> None:
         assert 0.95 <= statistics.median(amt_ratio) <= 1.05, (
             f"amount 单位不一致：median(EM/TDX)={statistics.median(amt_ratio):.4f}"
         )
+
+
+# =========================================================================
+# 北交所 secid 真实性（0.920xxx，不是 2.920xxx）
+# =========================================================================
+
+_BJ_FILTER = "m:0+t:81+s:2048"
+
+
+def test_bj_secid_zero_prefix_returns_real_history() -> None:
+    """用真实北交所股票验证 secid = ``0.920xxx`` 能取到 fqt=0 历史日线。
+
+    单元测试只证明字符串拼装正确；这里才证明「东财统一行情确实用市场 0」。
+    若真实网络不可达则显式失败（不得把单元测试当成 BJ 已验证）。
+    """
+    with httpx.Client(timeout=20.0) as client:
+        raw = _fetch_board(client, _BJ_FILTER, pages=1)
+
+    rows = [r for r in prov.normalize_snapshot_rows(raw) if r.market == "BJ"]
+    assert rows, "北交所快照为空 —— 无法验证 BJ secid"
+
+    # 优先真实 920xxx（新代码段），否则退回任意北交所股票
+    cand = next((r for r in rows if r.symbol.startswith("920")), rows[0])
+    secid = prov._eastmoney_secid(cand.symbol, "BJ")  # noqa: SLF001
+    print(f"\n[AB-bj] symbol={cand.symbol} name={cand.name} secid={secid}")
+    assert secid == f"0.{cand.symbol}", f"BJ secid 前缀必须为 0，实际 {secid}"
+
+    with httpx.Client(timeout=20.0) as client:
+        klines = _kline(
+            client, cand.symbol, "BJ", date.today() - timedelta(days=90), date.today()
+        )
+
+    assert klines, f"BJ 历史 K 线为空：{cand.symbol}（secid={secid}）"
+    last = klines[-1]
+    print(f"[AB-bj] last_kline={last}")
+    assert float(last[2]) > 0, f"BJ 收盘价非正：{last}"
