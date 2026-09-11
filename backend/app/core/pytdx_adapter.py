@@ -454,9 +454,18 @@ class PytdxAdapter(Exchange):
 
         # [P0-5] I/O 锁覆盖 connect：防止并发调用方同时建连导致 _api 状态错乱
         with self._io_lock:
-            # [B1] 幂等 hardening：已连接则直接返回，绝不重复建连
             if self._api is not None:
-                return
+                current = self.connected_server
+
+                # [B1] 幂等：已有 socket 且该 host 对本调用 eligible → 直接复用
+                if current is not None and current not in excluded:
+                    return
+
+                # 共享 socket 恰好是本调用已判坏的 host（单例并发下，可能由其他线程
+                # 在「本线程 API failure → disconnect」之间重新连上）。
+                # 必须断开并从 eligible pool 重连，绝不复用自己已 excluded 的 host。
+                # （_io_lock 是 RLock，可重入，允许在此调用 disconnect）
+                self.disconnect()
 
             if not self._servers:
                 raise PytdxSourceError(
@@ -601,7 +610,9 @@ class PytdxAdapter(Exchange):
           中被排除，避免「环形扫描绕回已证明有问题的 host」。
         - 合法成功返回（含空列表 ``[]`` = 该标的确实无数据）原样返回，**不得**
           被当作 provider outage 自动重试。
-        - 全程在本 adapter 的 ``_io_lock`` 内执行 ``call``，保证单 socket 串行。
+        - 单次 attempt 的 socket 状态转换必须**原子**：``_connect_excluding`` +
+          ``call`` + 失败后的（标记 excluded → advance → ``disconnect``）全部在
+          同一 ``_io_lock`` 临界区内；``time.sleep`` 必须在锁外。
 
         上层调用方收到 :class:`PytdxSourceError` 后**不得**再做同样的 socket retry
         （禁止 adapter 3 retry × caller 3 retry = 9 次）；应记录失败标的 / 触发熔断 /
@@ -616,17 +627,68 @@ class PytdxAdapter(Exchange):
         source_failed_servers: set[tuple[str, int]] = set()
 
         for attempt in range(1, self.max_retries + 1):
-            try:
-                if self._api is None:
-                    self._connect_excluding(source_failed_servers)
-                last_server = self.connected_server
+            call_failed = False
 
+            try:
+                # 单次 attempt 的 socket 状态转换必须原子：
+                #   检查/建立连接 → 固定 attempt_server → 执行 API →
+                #   失败则（标记 excluded + advance + disconnect）
+                # 四步全部在同一 _io_lock 临界区内完成。
+                #
+                # 单例 adapter 被 asyncio.to_thread 并发共享 socket：若把这些步骤拆开，
+                # 其他线程可能在「API failure → disconnect」之间替换共享 socket，
+                # 导致本调用复用自己已判坏的 host，或误断别人刚建立的连接。
                 with self._io_lock:
-                    return call(self.api)
+                    # _connect_excluding 自身也获取同一把锁；_io_lock 是 RLock（可重入），不会自锁。
+                    self._connect_excluding(source_failed_servers)
+
+                    attempt_server = self.connected_server
+
+                    if attempt_server is None:
+                        raise PytdxSourceError(
+                            operation="connect",
+                            message="pytdx connected server identity unavailable",
+                        )
+
+                    last_server = attempt_server
+
+                    try:
+                        return call(self.api)
+
+                    except Exception as exc:
+                        # 仍持有同一把锁：其他线程不可能在
+                        # 「API failure → disconnect」之间替换共享 socket。
+                        last_exc = exc
+                        call_failed = True
+
+                        # 本次 operation 内该 host 已证明 source failure
+                        source_failed_servers.add(attempt_server)
+
+                        logger.warning(
+                            "PYTDX_SOURCE_FAILURE "
+                            "operation=%s symbol=%s market=%s period=%s "
+                            "attempt=%d/%d server=%s type=%s error=%s",
+                            operation,
+                            symbol,
+                            market,
+                            period,
+                            attempt,
+                            self.max_retries,
+                            attempt_server,
+                            type(exc).__name__,
+                            exc,
+                        )
+
+                        # 下一次必须从下一个 host 开始（A → B → C，而不是 A → A）
+                        self._advance_server_after_failure(attempt_server)
+
+                        # 仍在锁内：断掉的一定是本 attempt 真正失败的 socket，
+                        # 不会误伤其他线程刚建立的新连接。
+                        self.disconnect()
 
             except PytdxSourceError as exc:
-                # connect() 已完整扫描所有 server。
-                # 不允许 outer max_retries 再重复 N 次全服务器扫描。
+                # connect failure 与 API operation failure 是两类不同故障：
+                # 前者不得被当成某个 host 的 source failure 再重试。
                 if exc.operation == "connect":
                     raise PytdxSourceError(
                         operation=operation,
@@ -640,37 +702,11 @@ class PytdxAdapter(Exchange):
                     ) from exc
                 raise
 
-            except Exception as exc:
-                last_exc = exc
-                failed_server = self.connected_server or last_server
-                last_server = failed_server
-
-                # 本次 operation 内该 host 已证明 source failure，后续 retry 不得再选它
-                if failed_server is not None:
-                    source_failed_servers.add(failed_server)
-
-                logger.warning(
-                    "PYTDX_SOURCE_FAILURE "
-                    "operation=%s symbol=%s market=%s period=%s "
-                    "attempt=%d/%d server=%s type=%s error=%s",
-                    operation,
-                    symbol,
-                    market,
-                    period,
-                    attempt,
-                    self.max_retries,
-                    failed_server,
-                    type(exc).__name__,
-                    exc,
-                )
-
-                # 关键：此 host 已证明「能 connect 但 operation 失败」，
-                # 下一次必须从下一个 host 开始（A → B → C，而不是 A → A）。
-                self._advance_server_after_failure(failed_server)
-                self.disconnect()
-
+            if call_failed:
+                # sleep 必须在锁外，不得持锁休眠阻塞其他调用方
                 if attempt < self.max_retries:
                     time.sleep(self.retry_delay)
+                continue
 
         raise PytdxSourceError(
             operation=operation,

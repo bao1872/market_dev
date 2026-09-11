@@ -629,6 +629,9 @@ def test_pytdx_adapter_rlock_no_deadlock() -> None:
     api = MagicMock()
     api.get_security_bars.side_effect = _mock_get_security_bars
     adapter._api = api  # type: ignore[assignment]
+    # _connect_excluding 需要 server identity 才能做 excluded 判断；
+    # 直接注入 _api 时必须一并给出 connected_server，否则会被判定为 identity 未知而重连。
+    adapter.connected_server = ("127.0.0.1", 7709)
 
     results: list[str] = []
     errors: list[Exception] = []
