@@ -29,6 +29,18 @@ from app.services.bars_scheduler_service import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_eod_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本文件验证的是逐股 provider 的失败/重试/并行语义。
+
+    全市场快照快速路径（[EOD-SNAPSHOT]）会短路 d 阶段，使这些断言失去意义，
+    因此在此文件内统一关闭；快照路径自身由 test_eod_* 系列覆盖。
+    """
+    monkeypatch.setattr(
+        BarsSchedulerService, "USE_EOD_SNAPSHOT_DEFAULT", False
+    )
+
+
 def _instruments(count: int) -> list[SimpleNamespace]:
     return [
         SimpleNamespace(id=uuid.uuid4(), symbol=f"{990000 + index:06d}")

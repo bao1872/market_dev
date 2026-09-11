@@ -40,6 +40,16 @@ pytestmark = [
 ]
 
 
+@pytest.fixture(autouse=True)
+def _disable_eod_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本文件验证逐股 canonical provider 边界的精确落库行数。
+
+    全市场快照快速路径（[EOD-SNAPSHOT]）会短路 d 阶段并改写 period_counts，
+    使精确行数断言失效，因此在此文件内统一关闭；快照路径由 test_eod_* 覆盖。
+    """
+    monkeypatch.setattr(BarsSchedulerService, "USE_EOD_SNAPSHOT_DEFAULT", False)
+
+
 class _EmptyMinuteProvider(FakeBarsProvider):
     def get_15min_bars(self, symbol: str, count: int) -> pd.DataFrame:
         return pd.DataFrame()

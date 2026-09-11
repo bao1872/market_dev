@@ -44,6 +44,18 @@ from app.services.bars_scheduler_service import BatchResult
 from app.services.feature_snapshot_service import _SCHEMA_VERSION, has_succeeded_snapshot_run
 from app.services.strategy_batch_service import StrategyBatchService
 
+
+@pytest.fixture(autouse=True)
+def _disable_eod_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本文件验证 after-close / DSA 编排语义，不涉及全市场快照路径。
+
+    [EOD-SNAPSHOT] 快速路径会在 d 阶段发起真实外部请求与落库，与本文件的
+    编排断言无关，故统一关闭；快照路径由 test_eod_* 系列覆盖。
+    """
+    from app.services.bars_scheduler_service import BarsSchedulerService
+
+    monkeypatch.setattr(BarsSchedulerService, "USE_EOD_SNAPSHOT_DEFAULT", False)
+
 # =============================================================================
 # 共享 helpers（复用 test_after_close_orchestrator.py 模式，避免跨文件导入）
 # =============================================================================
