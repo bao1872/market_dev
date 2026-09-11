@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import io
+import redis
 from datetime import datetime
 from typing import Any, Callable
 
@@ -36,6 +37,17 @@ class _FakeRedis:
 
     def set(self, key: str, value: str, ex: int | None = None) -> None:
         self.store[key] = value
+
+
+class _FailingSetRedis(_FakeRedis):
+    """set() 抛指定异常（模拟 Redis 写入失败）。"""
+
+    def __init__(self, set_error: Exception) -> None:
+        super().__init__()
+        self._set_error = set_error
+
+    def set(self, key: str, value: str, ex: int | None = None) -> None:
+        raise self._set_error
 
 
 class _Settings:
@@ -163,3 +175,53 @@ def test_empty_xdxr_negative_cached(monkeypatch: pytest.MonkeyPatch) -> None:
     assert calls["n"] == 1
     # 空缓存确实写入（避免审计又重新远端）
     assert "xdxr:600519" in fake_redis.store
+
+
+# =============================================================================
+# 4. force_refresh 时 Redis 写入失败必须 fail-closed
+# =============================================================================
+
+
+def test_force_refresh_publish_failure_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """force_refresh=True 时远端已取到 fresh XDXR，但 Redis SET 失败：
+    必须抛 PytdxSourceError（fresh 数据未能落盘，旧 key 可能被后续读回），
+    不得静默降级返回成功 DF。
+    """
+    fake_redis = _FailingSetRedis(redis.RedisError("redis down"))
+    # 旧 key 存在：force_refresh 仍应绕过并重新拉取
+    fake_redis.store["xdxr:600519"] = _xdxr_df(["2020-01-01"]).to_json(orient="split")
+
+    def remote() -> pd.DataFrame:
+        return _xdxr_df(["2026-09-11"])
+
+    adapter, calls = _make_adapter(monkeypatch, fake_redis, remote)
+
+    from app.core.pytdx_adapter import PytdxSourceError
+
+    with pytest.raises(PytdxSourceError, match="fresh cache publish failed"):
+        adapter.get_xdxr_info("600519", force_refresh=True)
+
+    # 远端确实被调用过（绕过旧缓存），但 fresh 数据未能落盘
+    assert calls["n"] == 1
+
+
+# =============================================================================
+# 5. 普通（非 force_refresh）写缓存失败保持降级语义（warning + 返回 df）
+# =============================================================================
+
+
+def test_plain_cache_write_failure_returns_df(monkeypatch: pytest.MonkeyPatch) -> None:
+    """普通调用（force_refresh=False）写缓存失败不得强依赖 Redis：
+    缓存 miss → 拉取远端 → 写缓存失败 → 降级 warning + 返回成功 DataFrame。
+    """
+    fake_redis = _FailingSetRedis(redis.RedisError("redis down"))
+
+    def remote() -> pd.DataFrame:
+        return _xdxr_df(["2026-09-11"])
+
+    adapter, calls = _make_adapter(monkeypatch, fake_redis, remote)
+
+    # 普通调用（默认 force_refresh=False）
+    df = adapter.get_xdxr_info("600519")
+    assert not df.empty
+    assert calls["n"] == 1

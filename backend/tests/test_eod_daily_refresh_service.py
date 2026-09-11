@@ -28,7 +28,7 @@ from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy.dialects import postgresql as pg_dialect
@@ -1603,10 +1603,12 @@ async def test_probe_factor_provider_reports_uncached_and_connected(
 
 
 @pytest.mark.asyncio
-async def test_rebuild_factors_breaker_opens_after_consecutive_provider_failure(
+@pytest.mark.asyncio
+async def test_rebuild_single_symbol_provider_failure_blocks_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """连续 3 次 CorporateActionProviderError → 熔断 raise，且不再调用剩余标的。"""
+    """任意单只 detect 抛 provider error → 立即 FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED，
+    不再等待连续 N 只；后续标的不得执行。"""
     from app.services.adjustment_factor_service import (
         AdjustmentFactorService,
         CorporateActionProviderError,
@@ -1624,6 +1626,8 @@ async def test_rebuild_factors_breaker_opens_after_consecutive_provider_failure(
     monkeypatch.setattr(
         AdjustmentFactorService, "detect_company_action_change", fake_detect
     )
+    # 纯单元：避免 _delete_fingerprint 真的连 Redis（无 DB/Redis 环境）
+    monkeypatch.setattr(AdjustmentFactorService, "_delete_fingerprint", MagicMock())
 
     instruments = [
         _instrument("600519"),
@@ -1633,20 +1637,21 @@ async def test_rebuild_factors_breaker_opens_after_consecutive_provider_failure(
         _instrument("000004"),
     ]
     with pytest.raises(
-        FactorSourceUnavailableError, match="FACTOR_SOURCE_LOST_DURING_RUN"
+        FactorSourceUnavailableError, match="FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED"
     ):
         await service._rebuild_factors_if_needed(  # noqa: SLF001
             TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
         )
-    # 命中第 3 次即熔断，不得继续调用后续标的
-    assert state["calls"] == 3
+    # 第一只即 fail-closed，不继续后续标的
+    assert state["calls"] == 1
 
 
 @pytest.mark.asyncio
-async def test_rebuild_factors_breaker_resets_on_success(
+async def test_rebuild_freshness_failure_after_partial_success_blocks_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """2 次失败后第 3 次成功（无变化）→ 熔断重置，不 raise。"""
+    """前面标的成功（detect 无变化），某只抛 provider error → 立即 hard fail，
+    后续标的（C）不得执行。"""
     from app.services.adjustment_factor_service import (
         AdjustmentFactorService,
         CorporateActionProviderError,
@@ -1655,28 +1660,36 @@ async def test_rebuild_factors_breaker_resets_on_success(
     service = BarsSchedulerService(fetch_processes=1)
     monkeypatch.setattr(scheduler_module, "get_pytdx_adapter", lambda: object())
 
-    state = {"calls": 0}
+    called: list[str] = []
 
-    async def fake_detect(*args: Any, **kwargs: Any) -> Any:
-        state["calls"] += 1
-        if state["calls"] <= 2:
+    async def fake_detect(
+        self: Any, session: Any, instrument_id: Any, symbol: str, adapter: Any, *,
+        force_refresh: bool = False,
+    ) -> None:
+        called.append(symbol)
+        if symbol == "000001":
             raise CorporateActionProviderError("boom")
-        return None  # 无变化 → success
+        return None  # 无变化 → 跳过重建
 
     monkeypatch.setattr(
         AdjustmentFactorService, "detect_company_action_change", fake_detect
     )
+    # 纯单元：避免 _delete_fingerprint 真的连 Redis（无 DB/Redis 环境）
+    monkeypatch.setattr(AdjustmentFactorService, "_delete_fingerprint", MagicMock())
 
     instruments = [
-        _instrument("600519"),
-        _instrument("000001"),
-        _instrument("000002"),
+        _instrument("600519"),  # A 成功
+        _instrument("000001"),  # B 失败
+        _instrument("000002"),  # C 不应执行
     ]
-    result = await service._rebuild_factors_if_needed(  # noqa: SLF001
-        TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
-    )
-    assert result["checked"] == 3
-    assert result["failed"] == 0
+    with pytest.raises(
+        FactorSourceUnavailableError, match="FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED"
+    ):
+        await service._rebuild_factors_if_needed(  # noqa: SLF001
+            TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
+        )
+    # A 成功、B 失败即 fail-closed；C（000002）不得执行
+    assert called == ["600519", "000001"]
 
 
 @pytest.mark.asyncio

@@ -712,15 +712,16 @@ async def test_rebuild_detect_forces_fresh_refresh(monkeypatch: pytest.MonkeyPat
 async def test_rebuild_pytdx_source_error_trips_breaker(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """rebuild_factor_series 抛 PytdxSourceError 必须计入熔断，
-    连续 limit(=3) 次后整体 fail-closed（FactorSourceUnavailableError）。
+    """rebuild_factor_series 抛 PytdxSourceError → 单只 freshness 失败立即 fail-closed
+    （FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED），并回滚该票 fingerprint；
+    不等待连续 N 只、不继续后续标的。
     """
     from app.core.pytdx_adapter import PytdxSourceError
     from app.services.adjustment_factor_service import AdjustmentFactorService
     from app.services.bars_scheduler_service import BarsSchedulerService
 
     service = BarsSchedulerService()
-    instruments = _make_instruments(3)  # 3 只 → 恰好达到 breaker limit
+    instruments = _make_instruments(3)
 
     mock_adj = MagicMock()
     mock_adj.detect_company_action_change = AsyncMock(
@@ -729,17 +730,23 @@ async def test_rebuild_pytdx_source_error_trips_breaker(
     mock_adj.rebuild_factor_series = AsyncMock(
         side_effect=PytdxSourceError("socket dropped mid rebuild")
     )
+    mock_adj._delete_fingerprint = MagicMock()
 
     monkeypatch.setattr(
         "app.services.adjustment_factor_service.AdjustmentFactorService",
         lambda: mock_adj,
+    )
+    monkeypatch.setattr(
+        "app.services.bars_scheduler_service.get_pytdx_adapter", lambda: object()
     )
 
     db_session = MagicMock()
     db_session.rollback = AsyncMock()
     db_session.commit = AsyncMock()
 
-    with pytest.raises(FactorSourceUnavailableError, match="FACTOR_SOURCE_LOST_DURING_RUN"):
+    with pytest.raises(
+        FactorSourceUnavailableError, match="FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED"
+    ):
         await service._rebuild_factors_if_needed(
             trade_date=date(2026, 9, 11),
             instruments=instruments,
@@ -747,7 +754,9 @@ async def test_rebuild_pytdx_source_error_trips_breaker(
             job_run_id=None,
         )
 
-    # 3 只全部 detect + rebuild 均被调用，第 3 只触发熔断
-    assert mock_adj.detect_company_action_change.call_count == 3
-    assert mock_adj.rebuild_factor_series.call_count == 3
+    # 仅第一只触发 rebuild 失败即 fail-closed；不继续后续标的
+    assert mock_adj.detect_company_action_change.call_count == 1
+    assert mock_adj.rebuild_factor_series.call_count == 1
+    # rebuild 阶段 provider 失败必须回滚 fingerprint，避免下轮误判「无变化」
+    mock_adj._delete_fingerprint.assert_called_once_with(instruments[0].id)
 

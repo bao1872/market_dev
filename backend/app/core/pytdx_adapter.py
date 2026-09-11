@@ -1178,11 +1178,28 @@ class PytdxAdapter(Exchange):
                 df_to_cache = df.copy()
                 if "date" in df_to_cache.columns:
                     df_to_cache["date"] = df_to_cache["date"].astype(str)
-                client.set(cache_key, df_to_cache.to_json(orient="split"), ex=_XDXR_CACHE_TTL)
+                client.set(
+                    cache_key,
+                    df_to_cache.to_json(orient="split"),
+                    ex=_XDXR_CACHE_TTL,
+                )
                 logger.debug("xdxr 缓存写入 symbol=%s ttl=%ds", symbol, _XDXR_CACHE_TTL)
             except redis.RedisError as exc:
+                if force_refresh:
+                    # fresh 数据已取到但无法发布到 Redis：旧 key 可能继续存在并被
+                    # 后续阶段读回 → 形成 freshness 漏洞。force_refresh 场景必须
+                    # fail-closed，不得静默降级。
+                    raise PytdxSourceError(
+                        "XDXR fresh fetch succeeded but fresh cache publish "
+                        f"failed: symbol={symbol}, error={exc}"
+                    ) from exc
                 logger.warning("xdxr 缓存写入失败 symbol=%s: %s", symbol, exc)
             except Exception as exc:
+                if force_refresh:
+                    raise PytdxSourceError(
+                        "XDXR fresh fetch succeeded but fresh cache publish "
+                        f"failed: symbol={symbol}, error={exc}"
+                    ) from exc
                 logger.warning("xdxr 缓存写入异常 symbol=%s: %s", symbol, exc)
 
         return df

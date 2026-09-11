@@ -1557,8 +1557,10 @@ class BarsSchedulerService:
         2. fingerprint 变化的股票调用 rebuild_factor_series 重建完整因子序列
            （从最早受影响日期重算，原子 upsert，禁止只更新最新 5 根）
         3. 重建成功后精确失效该股票 MDAS 缓存（service 内部完成）
-        4. 单股失败不阻断（MDAS 会标记 degraded）：rebuild 失败时回滚 fingerprint，
-           保证下次运行重新检测重建
+        4. 单股业务数据失败（非源不可用）不阻断：标记 degraded 并回滚 fingerprint，
+           保证下次运行重新检测重建；
+        5. 单只股票 freshness 失败（detect/rebuild 抛 provider error）立即 fail-closed
+           （FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED），不等待连续 N 只、不 continue。
 
         Args:
             trade_date: 交易日期
@@ -1641,7 +1643,6 @@ class BarsSchedulerService:
             session = AsyncSessionLocal()
             should_close = True
 
-        breaker = FactorSourceBreaker()
         try:
             for instrument in (pbar or instruments):
                 symbol = instrument.symbol
@@ -1654,7 +1655,6 @@ class BarsSchedulerService:
                         force_refresh=True,
                     )
                     if earliest is None:
-                        breaker.success()
                         continue  # 无变化，跳过重建
 
                     # 2. rebuild：从最早受影响日期重算完整因子序列
@@ -1664,28 +1664,23 @@ class BarsSchedulerService:
                     )
                     await session.commit()
                     result["rebuilt"] += 1
-                    breaker.success()
                 except (CorporateActionProviderError, PytdxSourceError) as exc:
-                    # 源/连接/协议不可用：计入熔断，连续 limit 次则整体 fail-closed。
-                    breaker.failure()
+                    # [PER-SYMBOL FRESHNESS] 单只股票本轮 freshness 已无法证明：
+                    # 系统性 outage 与单只 freshness 失败是两件事——后者本身就足以
+                    # 阻断完整 Core（5000 只里有 1 只 freshness 无法证明，不得把
+                    # 完整 factor universe 宣布成功）。不再等待连续 N 只、不再 continue。
                     try:
                         await session.rollback()
                     except Exception:
                         pass
-                    logger.error(
-                        "XDXR provider failure symbol=%s consecutive=%d total=%d: %s",
-                        symbol,
-                        breaker.consecutive_provider_failures,
-                        breaker.total_provider_failures,
-                        exc,
-                    )
-                    if breaker.open:
-                        raise FactorSourceUnavailableError(
-                            "FACTOR_SOURCE_LOST_DURING_RUN: "
-                            f"consecutive_failures={breaker.consecutive_provider_failures}, "
-                            f"last_symbol={symbol}, error={exc}"
-                        ) from exc
-                    continue
+                    # detect 可能已写入新 fingerprint（freshness 失败），
+                    # 必须回滚，避免下一轮误判「无变化」而跳过重建。
+                    adj_service._delete_fingerprint(instrument.id)
+                    raise FactorSourceUnavailableError(
+                        "FACTOR_SOURCE_SYMBOL_FRESHNESS_FAILED: "
+                        f"symbol={symbol}, "
+                        f"error={type(exc).__name__}: {exc}"
+                    ) from exc
                 except Exception as exc:
                     # 单股业务数据失败（非源不可用）不阻断：rollback 保持 session 可用
                     # 回滚 fingerprint：detect 已存新值，rebuild 失败需删除，
