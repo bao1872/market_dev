@@ -2,7 +2,8 @@
 
 职责边界：
 - 用全市场 EOD snapshot 先同步 instrument universe（新股发现必须先于行情覆盖率）。
-- 批量落当日 raw 日线（不复权；volume=手，amount=元）。
+- 批量落当日 raw 日线（不复权；``volume`` 单位统一为 canonical **股**，amount 为元；
+  Eastmoney 原始 f5/f56 为「手」，在 provider boundary 已乘 :data:`SHARES_PER_LOT` 转股）。
 - snapshot 之后用集合差找缺口，仅对缺失标的走历史 fallback
   （**Eastmoney fqt=0 优先**，与当日 snapshot 同源；pytdx raw 仅作 disaster fallback，且只覆盖 SH/SZ）。
 - 对本次新发现的标的做历史补齐（listing_date 或 2023-01-01 起，且止于 T 日之前）。

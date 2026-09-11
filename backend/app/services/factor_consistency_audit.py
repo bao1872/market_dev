@@ -50,13 +50,14 @@ from app.constants.factor_contract import (
     FACTOR_COMPARISON_TOLERANCE,
     FACTOR_RECONCILIATION_VERSION,
 )
-from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
+from app.core.pytdx_adapter import PytdxAdapter, PytdxSourceError, get_pytdx_adapter
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
     compute_expected_adj_factors,
     get_adj_factor_series,
 )
 from app.services.adjustment_factor_calculator import AdjustmentFactorDataError
+from app.services.adjustment_factor_service import CorporateActionProviderError
 
 logger = logging.getLogger("services.factor_consistency_audit")
 
@@ -201,6 +202,10 @@ class FactorConsistencyAuditor:
                 missing_factor_count=0, mismatch_count=0,
                 degraded_reason=exc.degraded_reason,
             )
+        except (PytdxSourceError, CorporateActionProviderError) as exc:
+            # 源/连接/协议不可用：**必须向上传播**，让 dry_run 触发 fail-closed 熔断，
+            # 而不是被吞成单股 error 后继续跑完 5000 只。
+            raise
         except Exception as exc:
             logger.warning(
                 "audit_single_stock 重算 expected 失败 symbol=%s: %s", symbol, exc,

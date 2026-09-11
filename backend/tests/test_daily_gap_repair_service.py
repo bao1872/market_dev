@@ -14,7 +14,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock
@@ -50,9 +50,18 @@ class _FakeResult:
     def one(self) -> Any:
         return self._rows[0] if self._rows else (0, 0, 0, 0)
 
+    def fetchall(self) -> list[Any]:
+        # bulk_insert_raw_daily_repair 现在用 RETURNING 取真实写入行数。
+        return list(self._rows)
+
 
 class _RecordingSession:
-    """记录 INSERT 的 session；不带真实 DB。"""
+    """记录 INSERT 的 session；不带真实 DB。
+
+    INSERT 语句被捕获，并返回与「实际插入行数」匹配的行集合，使
+    ``bulk_insert_raw_daily_repair`` 的 ``RETURNING ... fetchall()`` 返回真实计数
+    （重跑时 conflict 跳过 → 0 行）。
+    """
 
     def __init__(self) -> None:
         self.insert_statements: list[Any] = []
@@ -61,6 +70,10 @@ class _RecordingSession:
     async def execute(self, stmt: Any) -> _FakeResult:
         if isinstance(stmt, Insert):
             self.insert_statements.append(stmt)
+            # 统计该 INSERT 的值元组个数（每个目标日 bar 一组 instrument_id_N 占位符）。
+            sql = str(stmt.compile(dialect=pg_dialect.dialect()))
+            n = sql.count("instrument_id_") if "instrument_id_" in sql else 1
+            return _FakeResult([(object(),)] * n)
         return _FakeResult([])
 
     async def commit(self) -> None:
@@ -228,6 +241,7 @@ async def test_repair_uses_single_shared_client_and_exact_target_date(
         session,  # type: ignore[arg-type]
         TRADE_DATE,
         client=sentinel_client,  # type: ignore[arg-type]
+        enforce_consistency_gate=False,
         concurrency=4,
     )
 
@@ -260,7 +274,8 @@ async def test_repair_fails_symbols_without_exactly_one_target_bar(
 
     session = _RecordingSession()
     result = await repair_market_wide_daily_gap(
-        session, TRADE_DATE, client=object()  # type: ignore[arg-type]
+        session, TRADE_DATE, client=object(),  # type: ignore[arg-type]
+        enforce_consistency_gate=False,
     )
 
     assert result.fetched == 0
@@ -294,6 +309,7 @@ async def test_repair_bounds_inflight_requests(monkeypatch: pytest.MonkeyPatch) 
         _RecordingSession(),  # type: ignore[arg-type]
         TRADE_DATE,
         client=object(),  # type: ignore[arg-type]
+        enforce_consistency_gate=False,
         concurrency=3,
         chunk_size=5,
     )
@@ -315,14 +331,16 @@ async def test_repair_is_idempotent_on_rerun(monkeypatch: pytest.MonkeyPatch) ->
 
     session = _RecordingSession()
     first = await repair_market_wide_daily_gap(
-        session, TRADE_DATE, client=object()  # type: ignore[arg-type]
+        session, TRADE_DATE, client=object(),  # type: ignore[arg-type]
+        enforce_consistency_gate=False,
     )
     # 第二次：missing 已为空
     monkeypatch.setattr(
         refresh_mod, "find_missing_daily_instruments", AsyncMock(return_value=[])
     )
     second = await repair_market_wide_daily_gap(
-        session, TRADE_DATE, client=object()  # type: ignore[arg-type]
+        session, TRADE_DATE, client=object(),  # type: ignore[arg-type]
+        enforce_consistency_gate=False,
     )
 
     assert first.inserted == 3
@@ -363,11 +381,13 @@ async def test_repair_dry_run_fetches_but_does_not_write(
 def test_validate_consistency_passes_on_clean_report() -> None:
     report = ConsistencyReport(
         trade_date=TRADE_DATE,
-        ohlc_compared=100,
+        sample_requested=200,
+        fetch_succeeded=200,
+        ohlc_compared=200,
         ohlc_bad=0,
-        volume_compared=100,
+        volume_compared=200,
         volume_bad=0,
-        amount_compared=100,
+        amount_compared=200,
         amount_bad=0,
     )
     validate_consistency(report)  # 不抛
@@ -383,7 +403,14 @@ def test_validate_consistency_passes_on_clean_report() -> None:
 )
 def test_validate_consistency_blocks_on_bad_ratio(field: str, value: float) -> None:
     """任一坏点比例 > 1% → 必须抛 SourceConsistencyError（禁止写生产）。"""
-    report = ConsistencyReport(trade_date=TRADE_DATE)
+    report = ConsistencyReport(
+        trade_date=TRADE_DATE,
+        sample_requested=200,
+        fetch_succeeded=200,
+        ohlc_compared=200,
+        volume_compared=200,
+        amount_compared=200,
+    )
     setattr(report, field, value)
 
     with pytest.raises(SourceConsistencyError, match="SOURCE_CONSISTENCY_GATE_FAILED"):
@@ -393,7 +420,16 @@ def test_validate_consistency_blocks_on_bad_ratio(field: str, value: float) -> N
 def test_validate_consistency_allows_ratio_at_limit() -> None:
     """恰好 1% 不阻断（阈值语义是「超过」）。"""
     report = ConsistencyReport(
-        trade_date=TRADE_DATE, ohlc_compared=100, ohlc_bad=1, ohlc_bad_ratio=0.01
+        trade_date=TRADE_DATE,
+        sample_requested=200,
+        fetch_succeeded=200,
+        ohlc_compared=200,
+        ohlc_bad=2,
+        ohlc_bad_ratio=0.01,
+        volume_compared=200,
+        volume_bad=0,
+        amount_compared=200,
+        amount_bad=0,
     )
     validate_consistency(report)
 
@@ -432,7 +468,8 @@ async def test_repair_prefers_ths_and_skips_eastmoney(monkeypatch: pytest.Monkey
     _patch_em(monkeypatch, fake_em)
 
     result = await repair_market_wide_daily_gap(
-        _RecordingSession(), TRADE_DATE, client=object()  # type: ignore[arg-type]
+        _RecordingSession(), TRADE_DATE, client=object(),  # type: ignore[arg-type]
+        enforce_consistency_gate=False,
     )
 
     assert calls == ["ths"] * 3
@@ -462,7 +499,9 @@ async def test_repair_falls_back_to_eastmoney_when_ths_has_no_bar(
 
     session = _RecordingSession()
     result = await repair_market_wide_daily_gap(
-        session, TRADE_DATE, client=object()  # type: ignore[arg-type]
+        session, TRADE_DATE, client=object(),  # type: ignore[arg-type]
+        use_eastmoney_fallback=True,
+        enforce_consistency_gate=False,
     )
 
     assert calls == ["ths", "eastmoney"] * 2
@@ -490,7 +529,9 @@ async def test_repair_counts_symbol_failed_when_both_sources_fail(
 
     session = _RecordingSession()
     result = await repair_market_wide_daily_gap(
-        session, TRADE_DATE, client=object()  # type: ignore[arg-type]
+        session, TRADE_DATE, client=object(),  # type: ignore[arg-type]
+        use_eastmoney_fallback=True,
+        enforce_consistency_gate=False,
     )
 
     assert result.fetched == 0
@@ -529,6 +570,7 @@ async def test_repair_can_disable_eastmoney_fallback(monkeypatch: pytest.MonkeyP
         TRADE_DATE,
         client=object(),  # type: ignore[arg-type]
         use_eastmoney_fallback=False,
+        enforce_consistency_gate=False,
     )
 
     assert calls == ["ths", "ths"]
@@ -555,3 +597,282 @@ def test_default_concurrency_is_measured_optimum() -> None:
 def test_volume_tolerance_matches_canonical_shares_unit() -> None:
     """canonical volume 单位是「股」，容差必须是 100 股量级（而非 1 手）。"""
     assert repair_mod._VOLUME_TOLERANCE == Decimal("100")
+
+
+# =========================================================================
+# 6. 一致性门禁覆盖率（A/B 必须检查 fetch/comparison coverage，3/200 也挡）
+# =========================================================================
+
+
+@pytest.mark.parametrize(
+    ("kw", "should_pass"),
+    [
+        # 189/200 = 94.5% < 95% → FAIL
+        ({"sample_requested": 200, "fetch_succeeded": 189,
+          "ohlc_compared": 189, "volume_compared": 189, "amount_compared": 189}, False),
+        # 0/200 → FAIL
+        ({"sample_requested": 200, "fetch_succeeded": 0,
+          "ohlc_compared": 0, "volume_compared": 0, "amount_compared": 0}, False),
+        # 3/200 = 1.5% → FAIL
+        ({"sample_requested": 200, "fetch_succeeded": 3,
+          "ohlc_compared": 3, "volume_compared": 3, "amount_compared": 3}, False),
+        # 200 抓到但 amount 只有 100 可比 → amount coverage 50% → FAIL
+        ({"sample_requested": 200, "fetch_succeeded": 200,
+          "ohlc_compared": 200, "volume_compared": 200, "amount_compared": 100}, False),
+        # 200/200 全可比 → PASS
+        ({"sample_requested": 200, "fetch_succeeded": 200,
+          "ohlc_compared": 200, "volume_compared": 200, "amount_compared": 200}, True),
+    ],
+)
+def test_validate_consistency_coverage_gate(kw: dict, should_pass: bool) -> None:
+    report = ConsistencyReport(trade_date=TRADE_DATE, **kw)
+    if should_pass:
+        validate_consistency(report)  # 不抛
+    else:
+        with pytest.raises(
+            SourceConsistencyError, match="SOURCE_CONSISTENCY_GATE_FAILED"
+        ):
+            validate_consistency(report)
+
+
+# =========================================================================
+# 7. Repair owner 自己强制 Gate A（生产写库必须持通过验证的 report）
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_repair_production_requires_consistency_report(monkeypatch: Any) -> None:
+    _patch_missing(monkeypatch, [[_Inst("600519")], []])
+    _patch_ths(monkeypatch, lambda *a, **k: [_record(TRADE_DATE)])
+
+    with pytest.raises(SourceConsistencyError, match="production repair requires"):
+        await repair_market_wide_daily_gap(
+            _RecordingSession(),  # type: ignore[arg-type]
+            TRADE_DATE,
+            client=object(),  # type: ignore[arg-type]
+            enforce_consistency_gate=True,  # 默认即 True
+        )
+
+
+@pytest.mark.asyncio
+async def test_repair_dry_run_without_report_allowed(monkeypatch: Any) -> None:
+    _patch_missing(monkeypatch, [[_Inst("600519")], []])
+
+    async def fake_ths(*args: Any, **kwargs: Any) -> Any:
+        return [_record(TRADE_DATE)]
+
+    _patch_ths(monkeypatch, fake_ths)
+
+    result = await repair_market_wide_daily_gap(
+        _RecordingSession(),  # type: ignore[arg-type]
+        TRADE_DATE,
+        client=object(),  # type: ignore[arg-type]
+        dry_run=True,
+    )
+    assert result.dry_run is True
+    assert result.fetched == 1
+    assert result.inserted == 0  # dry_run 不写库
+
+
+@pytest.mark.asyncio
+async def test_repair_with_failed_report_blocks(monkeypatch: Any) -> None:
+    _patch_missing(monkeypatch, [[_Inst("600519")], []])
+    _patch_ths(monkeypatch, lambda *a, **k: [_record(TRADE_DATE)])
+
+    bad_report = ConsistencyReport(
+        trade_date=TRADE_DATE,
+        reference_trade_date=TRADE_DATE,
+        sample_requested=200,
+        fetch_succeeded=3,
+        ohlc_compared=3,
+        volume_compared=3,
+        amount_compared=3,
+    )
+    with pytest.raises(
+        SourceConsistencyError, match="SOURCE_CONSISTENCY_GATE_FAILED"
+    ):
+        await repair_market_wide_daily_gap(
+            _RecordingSession(),  # type: ignore[arg-type]
+            TRADE_DATE,
+            client=object(),  # type: ignore[arg-type]
+            consistency_report=bad_report,
+        )
+
+
+@pytest.mark.parametrize("ref", [TRADE_DATE, TRADE_DATE + timedelta(days=1)])
+@pytest.mark.asyncio
+async def test_repair_rejects_reference_date_not_before(
+    monkeypatch: Any, ref: date
+) -> None:
+    _patch_missing(monkeypatch, [[_Inst("600519")], []])
+    _patch_ths(monkeypatch, lambda *a, **k: [_record(TRADE_DATE)])
+
+    report = ConsistencyReport(
+        trade_date=TRADE_DATE,
+        reference_trade_date=ref,
+        sample_requested=200,
+        fetch_succeeded=200,
+        ohlc_compared=200,
+        volume_compared=200,
+        amount_compared=200,
+    )
+    with pytest.raises(SourceConsistencyError, match="reference date must be before"):
+        await repair_market_wide_daily_gap(
+            _RecordingSession(),  # type: ignore[arg-type]
+            TRADE_DATE,
+            client=object(),  # type: ignore[arg-type]
+            consistency_report=report,
+        )
+
+
+@pytest.mark.asyncio
+async def test_repair_accepts_reference_date_before(monkeypatch: Any) -> None:
+    _patch_missing(monkeypatch, [[_Inst("600519")], []])
+
+    async def fake_ths(*args: Any, **kwargs: Any) -> Any:
+        return [_record(TRADE_DATE)]
+
+    _patch_ths(monkeypatch, fake_ths)
+
+    report = ConsistencyReport(
+        trade_date=TRADE_DATE,
+        reference_trade_date=TRADE_DATE - timedelta(days=1),
+        sample_requested=200,
+        fetch_succeeded=200,
+        ohlc_compared=200,
+        volume_compared=200,
+        amount_compared=200,
+    )
+    result = await repair_market_wide_daily_gap(
+        _RecordingSession(),  # type: ignore[arg-type]
+        TRADE_DATE,
+        client=object(),  # type: ignore[arg-type]
+        consistency_report=report,
+        enforce_consistency_gate=True,
+    )
+    assert result.fetched == 1
+
+
+# =========================================================================
+# 8. bulk_insert 真实写入行数（on_conflict 全部冲突时返回 0）
+# =========================================================================
+
+
+class _ConflictSession(_RecordingSession):
+    """模拟全部行 conflict 被跳过：RETURNING 返回 0 行。"""
+
+    async def execute(self, stmt: Any) -> _FakeResult:  # type: ignore[override]
+        if isinstance(stmt, Insert):
+            self.insert_statements.append(stmt)
+        return _FakeResult([])
+
+
+@pytest.mark.asyncio
+async def test_bulk_insert_returns_real_conflict_count() -> None:
+    session = _ConflictSession()
+    rows = [(_Inst("600519").id, _record(TRADE_DATE))]
+    inserted = await bulk_insert_raw_daily_repair(session, rows, TRADE_DATE)
+    assert inserted == 0  # 全部 conflict → 真实 0 行
+
+
+# =========================================================================
+# 9. Factor source breaker（运行中连续 provider 失败 → 熔断）
+# =========================================================================
+
+
+def test_factor_source_breaker_logic() -> None:
+    from app.services.bars_scheduler_service import FactorSourceBreaker
+
+    b = FactorSourceBreaker()
+    # 2 次失败 → 未 open
+    b.failure()
+    b.failure()
+    assert b.open is False
+    # 第 3 次连续失败 → open
+    b.failure()
+    assert b.open is True
+    # 一次成功重置
+    b.success()
+    assert b.consecutive_provider_failures == 0
+    assert b.open is False
+    # total 累计保留
+    assert b.total_provider_failures == 3
+
+
+# =========================================================================
+# 10. 复权因子事件方向一致性（只读诊断，pure 逻辑）
+# =========================================================================
+
+
+def test_factor_event_factor_direction() -> None:
+    from decimal import Decimal
+
+    from app.services.factor_source_compatibility import (
+        FactorEventSample,
+        compare_factor_events,
+        provider_event_factor,
+        stored_event_factor,
+    )
+
+    # DB 侧：事件日前 factor 含 event_factor，事件日不含 → 比值即 event_factor
+    assert stored_event_factor(Decimal("2"), Decimal("1")) == Decimal("2")
+    # Provider 侧：事件日 preclose / 事件日前 DB close
+    assert provider_event_factor(Decimal("20"), Decimal("10")) == Decimal("2")
+
+    # 方向一致（均为 2x）→ diff 极小
+    samples = [
+        FactorEventSample(
+            instrument_id="x", trade_date=date(2024, 1, 2),
+            close=None, adj_factor=Decimal("1"), prev_close=Decimal("10"),
+            prev_factor=Decimal("2"), symbol="600519", market="SH",
+        )
+    ]
+    # provider preclose=20 / db prev_close=10 = 2 == stored 2/1 = 2
+    stats = compare_factor_events(samples, {"600519": Decimal("20")})
+    assert stats.comparable == 1
+    assert stats.max_abs_diff < 1e-9
+    assert stats.within_1e6 == 1
+
+
+def test_factor_event_compatibility_detects_mismatch() -> None:
+    from decimal import Decimal
+
+    from app.services.factor_source_compatibility import (
+        compare_factor_events,
+        FactorEventSample,
+    )
+
+    samples = [
+        FactorEventSample(
+            instrument_id="x", trade_date=date(2024, 1, 2),
+            close=None, adj_factor=Decimal("1"), prev_close=Decimal("10"),
+            prev_factor=Decimal("2"), symbol="600519", market="SH",
+        )
+    ]
+    # provider 推导 event_factor = 5/10 = 0.5，与 stored 2.0 相反 → 大 diff
+    stats = compare_factor_events(samples, {"600519": Decimal("5")})
+    assert stats.comparable == 1
+    assert stats.max_abs_diff == 1.5
+    assert stats.mismatch_samples  # 记录异常样本
+
+
+# =========================================================================
+# 11. Eastmoney 原始 f5（手）归一化为 canonical 股
+# =========================================================================
+
+
+def test_eastmoney_f5_lots_to_shares() -> None:
+    from app.services.eod_market_snapshot_provider import parse_eod_snapshot_row
+
+    row = parse_eod_snapshot_row(
+        {
+            "f12": "600519", "f13": 1, "f14": "贵州茅台",
+            "f51": "2024-01-02 15:00", "f52": "1.0", "f53": "1.0",
+            "f54": "1.0", "f55": "1.0", "f5": "100", "f56": "100", "f57": "100.0",
+            "f58": "0.0", "f59": "0.0", "f60": "1.0", "f61": "0.0",
+            "f62": "0.0", "f86": "1.0",
+        }
+    )
+    # 100 手 × 100 = 10000 股
+    assert row.volume == Decimal("10000")
+

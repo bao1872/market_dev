@@ -48,6 +48,15 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+class PytdxSourceError(RuntimeError):
+    """TDX provider/socket/protocol source failure.
+
+    与业务数据错误区分：socket 断开、连接超时、协议解析失败、XDXR 拉取最终失败等
+    属于「源不可用」，必须让上层 fail-fast（熔断 / FactorSourceUnavailableError），
+    而不是当作单股数据异常降级继续。
+    """
+
+
 @dataclass
 class _KlineCacheEntry:
     """klines 进程内缓存条目（参考 chanlunpro FileCacheDB + ExchangeTDX.klines 增量更新）"""
@@ -334,6 +343,9 @@ class PytdxAdapter(Exchange):
         # [P0-7] 使用 RLock（可重入）：防止 _fetch_with_retry 持锁后内部意外调用 connect/
         # disconnect 导致自锁。当前实现无嵌套获取，但 RLock 提供防御性安全。
         self._io_lock: threading.RLock = threading.RLock()
+        # 最近一次成功连接的服务器；disconnect 或连接失败时为 None。
+        # 供 factor health probe 报告真实连通的 server（不依赖缓存命中等旁路）。
+        self.connected_server: tuple[str, int] | None = None
 
     def __enter__(self) -> PytdxAdapter:
         self.connect()
@@ -364,6 +376,7 @@ class PytdxAdapter(Exchange):
             # [B1] 幂等 hardening：已连接则直接返回，绝不重复建连
             if self._api is not None:
                 return
+            self.connected_server = None
             last_errors: list[str] = []
             for host, port in self._servers:
                 try:
@@ -371,6 +384,7 @@ class PytdxAdapter(Exchange):
                     if api.connect(host, port, time_out=self.connect_timeout):
                         logger.info("pytdx 连接成功：%s:%d", host, port)
                         self._api = api
+                        self.connected_server = (host, port)
                         self.successful_connect_count += 1
                         if self.successful_connect_count > 1:
                             self.reconnect_count += 1
@@ -394,6 +408,7 @@ class PytdxAdapter(Exchange):
                     logger.warning("pytdx 断开连接时出现异常（已忽略）：%s", exc)
                 finally:
                     self._api = None
+                    self.connected_server = None
 
     def get_history_transaction_page(
         self,
@@ -1162,6 +1177,20 @@ class PytdxAdapter(Exchange):
 
         return df
 
+    def probe_xdxr_uncached(self, symbol: str) -> pd.DataFrame:
+        """只用于 source health probe 的未缓存 XDXR 探测。
+
+        强制直接调用远端 XDXR，**不读 / 不写 Redis 缓存**。
+
+        为什么需要它：``get_xdxr_info`` 在 24h Redis 缓存命中时直接返回、
+        根本不访问远端；用 ``get_xdxr_info`` 做健康探测会被缓存骗过，
+        即使远端函数已坏也会显示「健康」。盘前/盘后因子源探测必须绕过缓存。
+
+        返回 DataFrame（空 DataFrame 代表该标的无事件，不等于失败）；
+        只有真正的源/协议/解析失败才抛 ``PytdxSourceError``。
+        """
+        return self._fetch_xdxr_from_pytdx(symbol)
+
     def _fetch_xdxr_from_pytdx(self, symbol: str) -> pd.DataFrame:
         """从 pytdx 拉取除权除息数据（带重试，无缓存）。
 
@@ -1199,9 +1228,9 @@ class PytdxAdapter(Exchange):
                 self.disconnect()
                 if attempt < self.max_retries:
                     time.sleep(self.retry_delay)
-        raise RuntimeError(
+        raise PytdxSourceError(
             f"get_xdxr_info 重试 {self.max_retries} 次后仍失败 symbol={symbol}: {last_exc}"
-        )
+        ) from last_exc
 
     def get_finance_info(self, symbol: str) -> dict[str, Any] | None:
         """获取股票财务信息（含总股本/流通股本）。

@@ -44,8 +44,12 @@ from app.constants.factor_contract import (
     FACTOR_ALGORITHM_VERSION,
     FACTOR_RECONCILIATION_VERSION,
 )
-from app.core.pytdx_adapter import PytdxAdapter
-from app.services.adjustment_factor_service import AdjustmentFactorService
+from app.core.pytdx_adapter import PytdxAdapter, PytdxSourceError
+from app.services.adjustment_factor_service import (
+    AdjustmentFactorService,
+    CorporateActionProviderError,
+    FactorSourceUnavailableError,
+)
 from app.services.factor_consistency_audit import (
     FactorAuditResult,
     FactorConsistencyAuditor,
@@ -535,9 +539,15 @@ class FactorReconciliationTask:
                     logger.warning("dry_run 股票未找到或非 active: %s", symbol)
                     continue
                 instrument_id, sym = row
-                audit_result = await self._auditor.audit_single_stock(
-                    session, instrument_id, sym, max_mismatches=max_mismatches,
-                )
+                try:
+                    audit_result = await self._auditor.audit_single_stock(
+                        session, instrument_id, sym, max_mismatches=max_mismatches,
+                    )
+                except (PytdxSourceError, CorporateActionProviderError) as exc:
+                    # 源/连接/协议不可用：审计无法继续，fail-closed 而非降级。
+                    raise FactorSourceUnavailableError(
+                        f"FACTOR_AUDIT_PROVIDER_OUTAGE symbol={sym}: {exc}"
+                    ) from exc
                 total_audited += 1
                 if audit_result.error:
                     error_count += 1
@@ -553,20 +563,26 @@ class FactorReconciliationTask:
                     items.append(self._build_item(audit_result))
         else:
             # 全市场：分批审计
-            async for audit_result in self._auditor.audit_active_stocks(
-                session, batch_size=batch_size, max_mismatches=max_mismatches,
-            ):
-                total_audited += 1
-                if audit_result.error:
-                    error_count += 1
-                elif audit_result.degraded_reason is not None:
-                    # [CHANGE-20260719-001 §1.3] 数据缺失不归类为 mismatch
-                    degraded_count += 1
-                    degraded_symbols.append(audit_result.symbol)
-                elif audit_result.is_consistent:
-                    consistent_count += 1
-                else:
-                    items.append(self._build_item(audit_result))
+            try:
+                async for audit_result in self._auditor.audit_active_stocks(
+                    session, batch_size=batch_size, max_mismatches=max_mismatches,
+                ):
+                    total_audited += 1
+                    if audit_result.error:
+                        error_count += 1
+                    elif audit_result.degraded_reason is not None:
+                        # [CHANGE-20260719-001 §1.3] 数据缺失不归类为 mismatch
+                        degraded_count += 1
+                        degraded_symbols.append(audit_result.symbol)
+                    elif audit_result.is_consistent:
+                        consistent_count += 1
+                    else:
+                        items.append(self._build_item(audit_result))
+            except (PytdxSourceError, CorporateActionProviderError) as exc:
+                # 源/连接/协议不可用：审计无法继续，fail-closed 而非降级。
+                raise FactorSourceUnavailableError(
+                    f"FACTOR_AUDIT_PROVIDER_OUTAGE: {exc}"
+                ) from exc
 
         logger.info(
             "dry_run 完成: audited=%d consistent=%d needs_rebuild=%d "

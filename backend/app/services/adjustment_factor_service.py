@@ -61,6 +61,25 @@ class CorporateActionProviderError(RuntimeError):
     """
 
 
+class FactorSourceUnavailableError(RuntimeError):
+    """[FACTOR-HEALTH] 复权因子数据源（pytdx xdxr）不可用，盘后必须快速失败。
+
+    为什么 fail-closed 而不是降级继续：
+    - canonical ``adj_factor`` 来自 XDXR + Chanlunpro preclose 公式；数据源不可用时
+      **无法证明 qfq 序列的 freshness**。
+    - ``detect_company_action_change`` 旧实现把 provider 异常吞成 ``None``，
+      使「数据源挂了」与「没有公司行为」在返回值上无法区分 —— 那会让 Core 在
+      无法证明的 qfq 数据上算指标。
+    - 同时禁止退化成「5000+ 只逐股 connect 重试」，那是把盘后拖死的主因。
+
+    原始 raw 日线可以照常更新（详情页可恢复），但依赖因子的盘后 Core 不允许继续。
+
+    本异常定义在 adjustment_factor_service 层（而非 bars_scheduler_service），
+    以便 factor_reconciliation 等下游模块在不引入循环依赖的前提下复用同一 fail-closed
+    信号。
+    """
+
+
 class AdjustmentFactorService:
     """统一复权因子服务。
 

@@ -45,6 +45,7 @@ if TYPE_CHECKING:
 from app.config import get_settings
 from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
 from app.core.time import shanghai_business_date
+from app.services.adjustment_factor_service import FactorSourceUnavailableError
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -93,6 +94,14 @@ class FactorProviderHealth:
     provider: str
     latency_seconds: float
     error: str | None
+    # 探测尝试的服务器数量（默认取前 5 台，避免「前三台挂、第五台可用」的假阴性）。
+    server_attempts: int = 0
+    # 实际连上的服务器（host, port）；None 表示未连通。绕过 Redis 缓存旁路读取，
+    # 反映真实远端连通情况。
+    connected_server: tuple[str, int] | None = None
+    # 未缓存 XDXR 探测是否成功（强制直连远端，不被 24h Redis 缓存骗过）。
+    # None 表示未执行（如 connect 阶段已失败）。
+    uncached_xdxr_ok: bool | None = None
 
 
 async def probe_factor_provider(
@@ -116,16 +125,28 @@ async def probe_factor_provider(
     """
     from app.core.pytdx_adapter import PYTDX_SERVERS
 
+    # 取前 5 台服务器探测（而非前 3 台）。最坏约 5 秒量级（connect_timeout=1.0），
+    # 但能避免「前三台挂、第五台可用」这类被前 3 台假阴性的情况。
+    _FACTOR_PROBE_SERVER_LIMIT = 5
+    _FACTOR_PROBE_CONNECT_TIMEOUT = 1.0
+
     probe = adapter or PytdxAdapter(
-        servers=PYTDX_SERVERS[:3],
+        servers=PYTDX_SERVERS[:_FACTOR_PROBE_SERVER_LIMIT],
         max_retries=1,
         retry_delay=0.0,
-        connect_timeout=1.0,
+        connect_timeout=_FACTOR_PROBE_CONNECT_TIMEOUT,
     )
 
     def _run_probe() -> None:
+        # connect() 必须真实建连，不受 Redis xdxr 缓存影响 —— 这是主信号。
         probe.connect()
-        probe.get_xdxr_info("600519")
+        # 关键：必须走未缓存直连远端的 XDXR，否则会被 24h Redis 命中骗过
+        # （缓存命中时 get_xdxr_info 根本不访问远端，函数调用坏了也显示「健康」）。
+        df = probe.probe_xdxr_uncached("600519")
+        # 空 DataFrame 代表没有事件，不能算失败；只有真正的源/协议/解析异常
+        # 才会由 _fetch_xdxr_from_pytdx 抛 PytdxSourceError。
+        if df is None:
+            raise RuntimeError("uncached XDXR probe returned None")
 
     started = time.monotonic()
     try:
@@ -135,6 +156,9 @@ async def probe_factor_provider(
             provider="pytdx",
             latency_seconds=time.monotonic() - started,
             error=None,
+            server_attempts=_FACTOR_PROBE_SERVER_LIMIT,
+            connected_server=probe.connected_server,
+            uncached_xdxr_ok=True,
         )
     except Exception as exc:  # noqa: BLE001 - 探测失败一律视为不可用
         return FactorProviderHealth(
@@ -142,6 +166,9 @@ async def probe_factor_provider(
             provider="pytdx",
             latency_seconds=time.monotonic() - started,
             error=f"{type(exc).__name__}: {exc}",
+            server_attempts=_FACTOR_PROBE_SERVER_LIMIT,
+            connected_server=probe.connected_server,
+            uncached_xdxr_ok=False,
         )
     finally:
         try:
@@ -204,6 +231,8 @@ class BatchResult:
     factor_source_available: bool | None = None
     factor_source_error: str | None = None
     factor_source_latency_seconds: float | None = None
+    factor_source_connected_server: tuple[str, int] | None = None
+    factor_source_uncached_xdxr_ok: bool | None = None
 
 
 class PoolFatalError(RuntimeError):
@@ -225,19 +254,34 @@ class InstrumentRefreshExhaustedError(RuntimeError):
     """
 
 
-class FactorSourceUnavailableError(RuntimeError):
-    """[FACTOR-HEALTH] 复权因子数据源（pytdx xdxr）不可用，盘后必须快速失败。
+@dataclass
+class FactorSourceBreaker:
+    """运行中因子源（pytdx xdxr）连续失败熔断器。
 
-    为什么 fail-closed 而不是降级继续：
-    - canonical ``adj_factor`` 来自 XDXR + Chanlunpro preclose 公式；数据源不可用时
-      **无法证明 qfq 序列的 freshness**。
-    - ``detect_company_action_change`` 旧实现把 provider 异常吞成 ``None``，
-      使「数据源挂了」与「没有公司行为」在返回值上无法区分 —— 那会让 Core 在
-      无法证明的 qfq 数据上算指标。
-    - 同时禁止退化成「5000+ 只逐股 connect 重试」，那是把盘后拖死的主因。
+    用途：``_rebuild_factors_if_needed`` 在 5000+ 只股票循环里调
+    ``detect_company_action_change``。若数据源中途掉线，应当**立即熔断**，
+    而不是继续对剩余数千只股票逐股重试（那只会产生更多 provider error 并拖死盘后）。
 
-    原始 raw 日线可以照常更新（详情页可恢复），但依赖因子的盘后 Core 不允许继续。
+    原则：
+    - 业务数据错误（单股 xdxr 计算失败）不计入熔断，单股降级即可；
+    - 连续 ``limit`` 次 ``CorporateActionProviderError``（源/连接/协议不可用）
+      触发 ``open``，调用方应 raise ``FactorSourceUnavailableError``。
     """
+
+    consecutive_provider_failures: int = 0
+    total_provider_failures: int = 0
+    limit: int = 3
+
+    def success(self) -> None:
+        self.consecutive_provider_failures = 0
+
+    def failure(self) -> None:
+        self.consecutive_provider_failures += 1
+        self.total_provider_failures += 1
+
+    @property
+    def open(self) -> bool:
+        return self.consecutive_provider_failures >= self.limit
 
 
 @dataclass(frozen=True)
@@ -1035,6 +1079,8 @@ class BarsSchedulerService:
         result.factor_source_available = health.available
         result.factor_source_error = health.error
         result.factor_source_latency_seconds = health.latency_seconds
+        result.factor_source_connected_server = health.connected_server
+        result.factor_source_uncached_xdxr_ok = health.uncached_xdxr_ok
         if not health.available:
             raise FactorSourceUnavailableError(
                 "FACTOR_SOURCE_UNAVAILABLE: pytdx xdxr unavailable; "
@@ -1043,9 +1089,12 @@ class BarsSchedulerService:
                 f"latency={health.latency_seconds:.2f}s, error={health.error})"
             )
         logger.info(
-            "[FACTOR-HEALTH] 因子源可用 provider=%s latency=%.2fs",
+            "[FACTOR-HEALTH] 因子源可用 provider=%s latency=%.2fs "
+            "connected_server=%s uncached_xdxr_ok=%s",
             health.provider,
             health.latency_seconds,
+            health.connected_server,
+            health.uncached_xdxr_ok,
         )
 
         try:
@@ -1059,6 +1108,9 @@ class BarsSchedulerService:
                 rebuild_result["rebuilt"],
                 rebuild_result["failed"],
             )
+        except FactorSourceUnavailableError:
+            # 熔断器触发：运行中源掉线，必须向上传播 fail-closed，禁止后续 DSA/Core。
+            raise
         except Exception as exc:
             logger.warning("[BarsScheduler] 因子重建阶段异常（不阻断后续）: %s", exc, exc_info=True)
 
@@ -1077,6 +1129,9 @@ class BarsSchedulerService:
                 audit_result["failed"],
                 audit_result["errors"],
             )
+        except FactorSourceUnavailableError:
+            # 审计发现 provider outage 比例超阈值：必须向上传播 fail-closed。
+            raise
         except Exception as exc:
             logger.warning("[BarsScheduler] 因子审计阶段异常（不阻断后续）: %s", exc, exc_info=True)
 
@@ -1106,6 +1161,34 @@ class BarsSchedulerService:
                         "[BarsScheduler] 写 DSA_TRIGGER_FAILED 事件失败: %s",
                         inner_exc,
                     )
+
+    async def refresh_raw_daily_only(
+        self,
+        trade_date: date,
+        *,
+        job_run_id: uuid.UUID | None = None,
+    ) -> BatchResult:
+        """[EOD-SNAPSHOT] 只跑到 raw daily 完成即停止的入口（灾难修复 / 单日 raw 补数）。
+
+        流程：snapshot → 同步 universe → raw daily upsert → sparse fallback → 连续性扫描
+        → **STOP**。
+
+        **不触发**因子重建 / DSA / Core / Review。用于「只想把某日 raw 日线补上，
+        暂不跑依赖因子的盘后 Core」的场景（如 09-11 单独补 raw daily）。
+
+        09-11 这类正常盘后 **优先用 Eastmoney 全市场快照**（单次请求覆盖全市场），
+        而不是 THS 5000 次逐股请求。若 snapshot 当前网络不可用，调用方应改用
+        :func:`repair_market_wide_daily_gap`（THS）作为 disaster repair。
+
+        Returns:
+            BatchResult（含 snapshot / universe / upsert / 连续性指标）。
+        """
+        result = BatchResult(total=0)
+        async with AsyncSessionLocal() as db_session:
+            await self._refresh_daily_from_market_snapshot(
+                trade_date, db_session, job_run_id, result
+            )
+        return result
 
     async def _refresh_daily_from_market_snapshot(
         self,
@@ -1435,7 +1518,10 @@ class BarsSchedulerService:
                 - failed: 重建失败的股票数
                 - failed_symbols: 失败股票代码列表
         """
-        from app.services.adjustment_factor_service import AdjustmentFactorService
+        from app.services.adjustment_factor_service import (
+            AdjustmentFactorService,
+            CorporateActionProviderError,
+        )
         from app.services.job_run_event_service import append_event
 
         adj_service = AdjustmentFactorService()
@@ -1498,6 +1584,7 @@ class BarsSchedulerService:
             session = AsyncSessionLocal()
             should_close = True
 
+        breaker = FactorSourceBreaker()
         try:
             for instrument in (pbar or instruments):
                 symbol = instrument.symbol
@@ -1509,6 +1596,7 @@ class BarsSchedulerService:
                         session, instrument.id, symbol, adapter,
                     )
                     if earliest is None:
+                        breaker.success()
                         continue  # 无变化，跳过重建
 
                     # 2. rebuild：从最早受影响日期重算完整因子序列
@@ -1518,8 +1606,30 @@ class BarsSchedulerService:
                     )
                     await session.commit()
                     result["rebuilt"] += 1
+                    breaker.success()
+                except CorporateActionProviderError as exc:
+                    # 源/连接/协议不可用：计入熔断，连续 limit 次则整体 fail-closed。
+                    breaker.failure()
+                    try:
+                        await session.rollback()
+                    except Exception:
+                        pass
+                    logger.error(
+                        "XDXR provider failure symbol=%s consecutive=%d total=%d: %s",
+                        symbol,
+                        breaker.consecutive_provider_failures,
+                        breaker.total_provider_failures,
+                        exc,
+                    )
+                    if breaker.open:
+                        raise FactorSourceUnavailableError(
+                            "FACTOR_SOURCE_LOST_DURING_RUN: "
+                            f"consecutive_failures={breaker.consecutive_provider_failures}, "
+                            f"last_symbol={symbol}, error={exc}"
+                        ) from exc
+                    continue
                 except Exception as exc:
-                    # 单股失败不阻断：rollback 保持 session 可用
+                    # 单股业务数据失败（非源不可用）不阻断：rollback 保持 session 可用
                     # 回滚 fingerprint：detect 已存新值，rebuild 失败需删除，
                     # 保证下次运行重新检测重建（避免因子永久停留在旧值）
                     try:
@@ -1704,6 +1814,19 @@ class BarsSchedulerService:
         summary["needs_rebuild"] = plan.needs_rebuild_count
         summary["errors"] = plan.error_count
 
+        # [FACTOR-HEALTH] 审计后 fail-closed：即使 dry_run 没有抛异常，也不得把
+        # 「全市场 provider 错误」当作普通软失败继续跑 Core。
+        audited = summary["total_audited"]
+        errors = summary["errors"]
+        if audited <= 0:
+            raise RuntimeError("FACTOR_AUDIT_EMPTY")
+        provider_failure_ratio = errors / max(audited, 1)
+        if provider_failure_ratio > 0.01:
+            raise FactorSourceUnavailableError(
+                f"FACTOR_AUDIT_UNHEALTHY: errors={errors}/{audited} "
+                f"(ratio={provider_failure_ratio:.4f})"
+            )
+
         logger.info(
             "[BarsScheduler] 因子审计 dry_run 完成: audited=%d consistent=%d "
             "needs_rebuild=%d errors=%d",
@@ -1783,6 +1906,12 @@ class BarsSchedulerService:
                 )
         else:
             await self._write_audit_done_event(db_session, job_run_id, summary)
+
+        # [FACTOR-HEALTH] 重建阶段若仍有失败（单股业务错误），不得静默继续 Core。
+        if summary["failed"] > 0:
+            raise RuntimeError(
+                f"FACTOR_REBUILD_INCOMPLETE: failed={summary['failed']}"
+            )
 
         return summary
 

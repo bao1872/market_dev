@@ -2,7 +2,9 @@
 
 职责：
 - 通过东方财富 push2 ``clist/get`` 接口分页拉取全市场 A 股收盘快照（盘后）。
-- 归一化为项目标准 :class:`EodSnapshotRow`（raw OHLCV，不复权；volume=手，amount=元）。
+- 归一化为项目标准 :class:`EodSnapshotRow`（raw OHLCV，不复权）。Eastmoney 原始 f5 以
+  「手」为单位，归一化时按 :data:`SHARES_PER_LOT` 乘 100 转成 canonical **股**；
+  ``EodSnapshotRow.volume`` 单位统一为**股**，amount 单位为元。
 - 不做任何复权、不做任何指标计算。
 
 fail-closed 契约（详见各函数 docstring）：
@@ -132,7 +134,8 @@ class SnapshotProviderError(RuntimeError):
 class EodSnapshotRow:
     """单只 A 股收盘快照（raw / 不复权）。
 
-    volume 单位「手」，amount 单位「元」。
+    ``volume`` 单位统一为 canonical **股**（Eastmoney 原始 f5 以「手」返回，
+    已按 :data:`SHARES_PER_LOT` 在 provider boundary 转股），amount 单位为元。
 
     ``updated_at`` 保留 f124 的**完整时间**（Asia/Shanghai），而不是只保留日期：
     只有完整时间才能构成 market watermark（判断 provider 数据是否真的已过 15:00）。

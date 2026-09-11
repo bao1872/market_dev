@@ -39,10 +39,10 @@ from app.repositories import bar_repository as bar_repo
 from app.services import bars_scheduler_service as scheduler_module
 from app.services import eod_daily_refresh_service as refresh_mod
 from app.services import eod_market_snapshot_provider as prov
+from app.services.adjustment_factor_service import FactorSourceUnavailableError
 from app.services.bars_scheduler_service import (
     BarsSchedulerService,
     FactorProviderHealth,
-    FactorSourceUnavailableError,
 )
 from app.services.eod_daily_refresh_service import (
     DailyContinuityBlockedError,
@@ -1483,3 +1483,287 @@ async def test_new_instrument_backfill_uses_trade_date_when_no_today_bar(
     )
 
     assert windows == [(date(2026, 6, 1), TRADE_DATE)]
+
+
+# ===========================================================================
+# 13. 因子源探测绕过 Redis 缓存 + 运行中熔断集成
+# ===========================================================================
+
+
+class _BreakerSession:
+    """最小异步 session：仅支持 breaker 路径需要的 rollback/commit。"""
+
+    async def rollback(self) -> None:  # noqa: D401
+        pass
+
+    async def commit(self) -> None:
+        pass
+
+
+def test_pytdx_probe_xdxr_uncached_bypasses_redis_cache(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """probe_xdxr_uncached 必须直连远端，不读/写 Redis 缓存。"""
+    import pandas as pd
+    from app.core.pytdx_adapter import PytdxAdapter
+
+    adapter = PytdxAdapter()
+    calls = {"uncached": 0, "cached": 0}
+
+    def fake_fetch(self: PytdxAdapter, symbol: str) -> pd.DataFrame:
+        calls["uncached"] += 1
+        return pd.DataFrame([{"date": pd.Timestamp("2024-01-02"), "category": 1}])
+
+    def fake_get(self: PytdxAdapter, symbol: str) -> pd.DataFrame:
+        calls["cached"] += 1
+        return pd.DataFrame()
+
+    monkeypatch.setattr(PytdxAdapter, "_fetch_xdxr_from_pytdx", fake_fetch)
+    monkeypatch.setattr(PytdxAdapter, "get_xdxr_info", fake_get)
+
+    df = adapter.probe_xdxr_uncached("600519")
+    assert calls["uncached"] == 1
+    assert calls["cached"] == 0  # 不得走缓存路径
+    assert df is not None
+
+
+def test_pytdx_connected_server_tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.core.pytdx_adapter import PYTDX_SERVERS, PytdxAdapter
+
+    class FakeApi:
+        def connect(self, host: str, port: int, time_out: float | None = None) -> bool:
+            return True
+
+        def disconnect(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.core.pytdx_adapter.TdxHq_API", lambda **k: FakeApi())
+    adapter = PytdxAdapter()
+    adapter.connect()
+    assert adapter.connected_server == (PYTDX_SERVERS[0][0], PYTDX_SERVERS[0][1])
+    adapter.disconnect()
+    assert adapter.connected_server is None
+
+
+def test_pytdx_connect_failover_to_live_server(monkeypatch: pytest.MonkeyPatch) -> None:
+    """前三台死、第四台活时，connect 必须落到第四台（避免前 3 台假阴性）。"""
+    from app.core.pytdx_adapter import PytdxAdapter
+
+    counter = {"n": 0}
+
+    class FakeApi:
+        def __init__(self, **k: Any) -> None:
+            pass
+
+        def connect(self, host: str, port: int, time_out: float | None = None) -> bool:
+            counter["n"] += 1
+            if counter["n"] <= 3:
+                raise RuntimeError("dead")
+            return True
+
+        def disconnect(self) -> None:
+            pass
+
+    monkeypatch.setattr("app.core.pytdx_adapter.TdxHq_API", lambda **k: FakeApi())
+    adapter = PytdxAdapter(
+        servers=[("h1", 1), ("h2", 2), ("h3", 3), ("h4", 4), ("h5", 5)],
+        max_retries=1,
+    )
+    adapter.connect()
+    assert adapter.connected_server == ("h4", 4)
+
+
+@pytest.mark.asyncio
+async def test_probe_factor_provider_reports_uncached_and_connected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """注入 adapter：probe 必须报告 server_attempts=5、connected_server、uncached_xdxr_ok。"""
+    import pandas as pd
+
+    class _FakeProbeAdapter:
+        connected_server = ("1.2.3.4", 7709)
+
+        def connect(self) -> None:
+            pass
+
+        def disconnect(self) -> None:
+            pass
+
+        def probe_xdxr_uncached(self, symbol: str) -> pd.DataFrame:
+            return pd.DataFrame([{"date": pd.Timestamp("2024-01-02")}])
+
+        def get_xdxr_info(self, symbol: str) -> pd.DataFrame:
+            raise AssertionError("probe must not use cached get_xdxr_info")
+
+    health = await scheduler_module.probe_factor_provider(adapter=_FakeProbeAdapter())
+    assert health.available is True
+    assert health.server_attempts == 5
+    assert health.connected_server == ("1.2.3.4", 7709)
+    assert health.uncached_xdxr_ok is True
+
+
+@pytest.mark.asyncio
+async def test_rebuild_factors_breaker_opens_after_consecutive_provider_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """连续 3 次 CorporateActionProviderError → 熔断 raise，且不再调用剩余标的。"""
+    from app.services.adjustment_factor_service import (
+        AdjustmentFactorService,
+        CorporateActionProviderError,
+    )
+
+    service = BarsSchedulerService(fetch_processes=1)
+    monkeypatch.setattr(scheduler_module, "get_pytdx_adapter", lambda: object())
+
+    state = {"calls": 0}
+
+    async def fake_detect(*args: Any) -> Any:
+        state["calls"] += 1
+        raise CorporateActionProviderError("boom")
+
+    monkeypatch.setattr(
+        AdjustmentFactorService, "detect_company_action_change", fake_detect
+    )
+
+    instruments = [
+        _instrument("600519"),
+        _instrument("000001"),
+        _instrument("000002"),
+        _instrument("000003"),
+        _instrument("000004"),
+    ]
+    with pytest.raises(
+        FactorSourceUnavailableError, match="FACTOR_SOURCE_LOST_DURING_RUN"
+    ):
+        await service._rebuild_factors_if_needed(  # noqa: SLF001
+            TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
+        )
+    # 命中第 3 次即熔断，不得继续调用后续标的
+    assert state["calls"] == 3
+
+
+@pytest.mark.asyncio
+async def test_rebuild_factors_breaker_resets_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """2 次失败后第 3 次成功（无变化）→ 熔断重置，不 raise。"""
+    from app.services.adjustment_factor_service import (
+        AdjustmentFactorService,
+        CorporateActionProviderError,
+    )
+
+    service = BarsSchedulerService(fetch_processes=1)
+    monkeypatch.setattr(scheduler_module, "get_pytdx_adapter", lambda: object())
+
+    state = {"calls": 0}
+
+    async def fake_detect(*args: Any) -> Any:
+        state["calls"] += 1
+        if state["calls"] <= 2:
+            raise CorporateActionProviderError("boom")
+        return None  # 无变化 → success
+
+    monkeypatch.setattr(
+        AdjustmentFactorService, "detect_company_action_change", fake_detect
+    )
+
+    instruments = [
+        _instrument("600519"),
+        _instrument("000001"),
+        _instrument("000002"),
+    ]
+    result = await service._rebuild_factors_if_needed(  # noqa: SLF001
+        TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
+    )
+    assert result["checked"] == 3
+    assert result["failed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_run_post_daily_phase_reraises_breaker_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_rebuild_factors_if_needed 抛 FactorSourceUnavailableError 必须向上传播。"""
+    service = BarsSchedulerService(fetch_processes=1)
+    healthy = FactorProviderHealth(
+        available=True, provider="pytdx", latency_seconds=0.1, error=None
+    )
+    monkeypatch.setattr(
+        scheduler_module, "probe_factor_provider", AsyncMock(return_value=healthy)
+    )
+
+    async def boom(*args: Any, **kwargs: Any) -> Any:
+        raise FactorSourceUnavailableError("FACTOR_SOURCE_LOST_DURING_RUN")
+
+    monkeypatch.setattr(service, "_rebuild_factors_if_needed", boom)
+
+    result = scheduler_module.BatchResult()
+    with pytest.raises(
+        FactorSourceUnavailableError, match="FACTOR_SOURCE_LOST_DURING_RUN"
+    ):
+        await service._run_post_daily_phase(  # noqa: SLF001
+            TRADE_DATE, [], object(), None, result, trigger_dsa=False
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_post_daily_phase_reraises_audit_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """_audit_and_rebuild_factors 抛 FactorSourceUnavailableError 必须向上传播。"""
+    service = BarsSchedulerService(fetch_processes=1)
+    healthy = FactorProviderHealth(
+        available=True, provider="pytdx", latency_seconds=0.1, error=None
+    )
+    monkeypatch.setattr(
+        scheduler_module, "probe_factor_provider", AsyncMock(return_value=healthy)
+    )
+    rebuild = AsyncMock(
+        return_value={"checked": 0, "changed": 0, "rebuilt": 0, "failed": 0}
+    )
+    monkeypatch.setattr(service, "_rebuild_factors_if_needed", rebuild)
+
+    async def audit_boom(*args: Any, **kwargs: Any) -> Any:
+        raise FactorSourceUnavailableError("FACTOR_AUDIT_UNHEALTHY")
+
+    monkeypatch.setattr(service, "_audit_and_rebuild_factors", audit_boom)
+
+    result = scheduler_module.BatchResult()
+    with pytest.raises(
+        FactorSourceUnavailableError, match="FACTOR_AUDIT_UNHEALTHY"
+    ):
+        await service._run_post_daily_phase(  # noqa: SLF001
+            TRADE_DATE, [], object(), None, result, trigger_dsa=False
+        )
+
+
+@pytest.mark.asyncio
+async def test_factor_audit_provider_outage_blocks_core(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """审计 100% provider 错误 → FACTOR_AUDIT_UNHEALTHY，禁止继续 Core。"""
+    from types import SimpleNamespace
+
+    from app.services.factor_reconciliation import FactorReconciliationTask
+
+    plan = SimpleNamespace(
+        total_audited=5000,
+        consistent_count=0,
+        needs_rebuild_count=0,
+        error_count=5000,
+        items=[],
+    )
+
+    async def fake_dry_run(self: Any, *args: Any, **kwargs: Any) -> Any:
+        return plan
+
+    monkeypatch.setattr(FactorReconciliationTask, "dry_run", fake_dry_run)
+
+    service = BarsSchedulerService(fetch_processes=1)
+    instruments = [_instrument("600519"), _instrument("000001")]
+    with pytest.raises(
+        FactorSourceUnavailableError, match="FACTOR_AUDIT_UNHEALTHY"
+    ):
+        await service._audit_and_rebuild_factors(  # noqa: SLF001
+            TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
+        )

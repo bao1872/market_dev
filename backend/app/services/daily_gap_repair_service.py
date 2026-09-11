@@ -68,6 +68,12 @@ _AMOUNT_ABS_TOLERANCE = Decimal("1000")
 _AMOUNT_REL_TOLERANCE = Decimal("0.001")
 # 一致性门禁：坏点比例超过 1% 即禁止写入。
 _CONSISTENCY_BAD_RATIO_LIMIT = 0.01
+# 一致性门禁（覆盖率）：抽到的样本里成功抓取的比例必须 >= 95%，
+# 否则「3/200 抓到也一致」这类抓取失败被误判为通过的情况必须被挡住。
+_MIN_FETCH_SUCCESS_RATIO = 0.95
+# 一致性门禁（可比覆盖率）：抓取成功样本中，OHLC/volume/amount 任一项
+# 真正参与比较的比例必须 >= 95%（例如 200 抓到但只有 100 可比，也 FAIL）。
+_MIN_COMPARISON_RATIO = 0.95
 
 # A/B 抽样规模（按市场分层；北交所不足则全取）。
 _AB_SAMPLE_SH = 80
@@ -115,6 +121,9 @@ class ConsistencyReport:
     """Eastmoney fqt=0 与 DB ``bars_daily`` 的 A/B 一致性报告（只读）。"""
 
     trade_date: date
+    # 本报告所验证的「邻近已知完整交易日」（禁止拿待修日自己验证自己）。
+    # repair owner 写生产库前会检查 reference_trade_date < 待修 trade_date。
+    reference_trade_date: date = date(2000, 1, 1)
     sample_requested: int = 0
     fetch_succeeded: int = 0
     fetch_failed: int = 0
@@ -139,6 +148,9 @@ class ConsistencyReport:
     amount_p99_rel: float = 0.0
     amount_max_rel: float = 0.0
     amount_bad_ratio: float = 0.0
+
+    # 被验证的数据源标识（"ths" / "eastmoney"），用于审计与门禁追溯。
+    source: str = ""
 
     failed_symbols: list[str] = field(default_factory=list)
     mismatches: list[str] = field(default_factory=list)
@@ -277,11 +289,13 @@ async def bulk_insert_raw_daily_repair(
     rows: Sequence[tuple[UUID, dict]],
     trade_date: date,
 ) -> int:
-    """批量 insert raw 日线（``on_conflict_do_nothing``），返回尝试插入的行数。
+    """批量 insert raw 日线（``on_conflict_do_nothing``），返回**真实写入**的行数。
 
     - 只接受 ``datetime == trade_date`` 的记录；
     - 只接受通过价格结构校验（OHLC > 0、high/low 关系、volume/amount >= 0）的记录；
-    - ``on_conflict_do_nothing``：绝不覆盖既有行（含 09-09 / 09-11 与既有 adj_factor）。
+    - ``on_conflict_do_nothing``：绝不覆盖既有行（含 09-09 / 09-11 与既有 adj_factor）；
+    - 通过 ``RETURNING`` 取回实际被插入的行的主键，**真实**计数（重跑时可能 0 行，
+      因为缺失行已在上一轮补齐、其余均 conflict 跳过）。
     """
     records: list[dict] = []
     for instrument_id, raw in rows:
@@ -327,40 +341,70 @@ async def bulk_insert_raw_daily_repair(
         return 0
 
     stmt = pg_insert(BarDaily).values(records)
-    stmt = stmt.on_conflict_do_nothing(index_elements=["instrument_id", "trade_date"])
-    await session.execute(stmt)
+    stmt = stmt.on_conflict_do_nothing(
+        index_elements=["instrument_id", "trade_date"]
+    ).returning(BarDaily.instrument_id)
+    res = await session.execute(stmt)
+    inserted = len(res.fetchall())
     await session.commit()
-    return len(records)
+    return inserted
 
 
 async def repair_market_wide_daily_gap(
     session: AsyncSession,
     trade_date: date,
     *,
+    consistency_report: ConsistencyReport | None = None,
+    enforce_consistency_gate: bool = True,
     concurrency: int = _DEFAULT_CONCURRENCY,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
     dry_run: bool = False,
     client: httpx.AsyncClient | None = None,
-    use_eastmoney_fallback: bool = True,
+    use_eastmoney_fallback: bool = False,
 ) -> MarketWideRepairResult:
     """修复某一个交易日的**整日/大面积**日线缺口（同花顺不复权，批量）。
 
     设计要点见模块 docstring。``dry_run=True`` 时仍然真实拉取（用于确认 fetch 成功率），
     但不写库。
 
+    写库门禁（fail-closed）：
+        生产写入（``dry_run=False``）**强制**要求一份已通过
+        :func:`validate_consistency` 的 :class:`ConsistencyReport`，且其
+        ``reference_trade_date`` 必须早于 ``trade_date``（禁止拿待修日自己验证自己）。
+        ``dry_run=True`` 或显式 ``enforce_consistency_gate=False`` 时可绕过，
+        用于只读探测 provider 成功率。
+
     Args:
         session: 异步 DB 会话。
         trade_date: 唯一目标交易日。
+        consistency_report: 邻近已知完整交易日的 A/B 一致性报告（生产写入必填）。
+        enforce_consistency_gate: 是否强制执行一致性门禁（默认 True）。
         concurrency: 在途请求上限（同时限制 httpx 连接池）。默认 3（实测最优）。
         chunk_size: 每批写库的标的数（一次 insert + 一次 commit）。
         dry_run: True=只拉取与统计，不写库。
         client: 复用外部 client（测试注入用）；None 时内部创建。
-        use_eastmoney_fallback: 见 :func:`_fetch_t_bar`。东财被封期间应置 False。
+        use_eastmoney_fallback: 见 :func:`_fetch_t_bar`。当前生产事实是
+            THS 主用、Eastmoney 出口被封，故默认 **False**（不靠人工记得传 False）。
     """
     from app.services.eod_daily_refresh_service import (
         count_active_a_share_instruments,
         find_missing_daily_instruments,
     )
+
+    # —— 写库前置门禁：fail-closed ——
+    if not dry_run and enforce_consistency_gate:
+        if consistency_report is None:
+            raise SourceConsistencyError(
+                "production repair requires a validated consistency report "
+                "(pass consistency_report=compare_db_vs_ths_for_date(...))"
+            )
+        validate_consistency(consistency_report)
+        if consistency_report.reference_trade_date >= trade_date:
+            raise SourceConsistencyError(
+                "consistency reference date must be before repair trade_date: "
+                f"reference={consistency_report.reference_trade_date} "
+                f">= repair={trade_date}"
+            )
 
     started = time.monotonic()
     result = MarketWideRepairResult(trade_date=trade_date, eligible=0, initially_missing=0)
@@ -490,6 +534,8 @@ async def compare_db_vs_source_for_date(
     本函数**不写任何数据**。
     """
     report = ConsistencyReport(trade_date=trade_date)
+    report.reference_trade_date = trade_date
+    report.source = source
 
     sampled: list[Instrument] = []
     for market, limit in (("SH", sh), ("SZ", sz), ("BJ", bj)):
@@ -679,10 +725,44 @@ async def compare_db_vs_eastmoney_for_date(
 def validate_consistency(report: ConsistencyReport) -> None:
     """A/B 门禁：坏点比例超过 1% 即抛 :class:`SourceConsistencyError`。
 
+    门禁分两层：
+    1. **覆盖率门禁**（本次新增，P0）：抽到的样本里成功抓取的比例必须
+       ``>= _MIN_FETCH_SUCCESS_RATIO``，且抓取成功样本中 OHLC / volume / amount
+       任一项真正可比的比例必须 ``>= _MIN_COMPARISON_RATIO``。
+       否则「200 抽 3 抓到且 3 全一致」「0/200 三个 bad_ratio 全 0」这类
+       抓取失败被误判为通过的情况必须被挡住。
+    2. **坏点门禁**：可比样本中坏点比例超过 1% 即禁止写入。
+
     Raises:
-        SourceConsistencyError: 价格 / 成交量 / 成交额 任一坏点比例超限。
+        SourceConsistencyError: 覆盖率或坏点比例任一超限。
     """
     problems: list[str] = []
+
+    if report.sample_requested <= 0:
+        problems.append("no samples requested")
+    else:
+        fetch_ratio = report.fetch_succeeded / report.sample_requested
+        if fetch_ratio < _MIN_FETCH_SUCCESS_RATIO:
+            problems.append(
+                f"fetch coverage too low: "
+                f"{report.fetch_succeeded}/{report.sample_requested}="
+                f"{fetch_ratio:.1%}"
+            )
+
+    expected_compared = report.fetch_succeeded
+
+    if expected_compared > 0:
+        ohlc_ratio = report.ohlc_compared / expected_compared
+        volume_ratio = report.volume_compared / expected_compared
+        amount_ratio = report.amount_compared / expected_compared
+
+        if ohlc_ratio < _MIN_COMPARISON_RATIO:
+            problems.append(f"OHLC comparison coverage={ohlc_ratio:.1%}")
+        if volume_ratio < _MIN_COMPARISON_RATIO:
+            problems.append(f"volume comparison coverage={volume_ratio:.1%}")
+        if amount_ratio < _MIN_COMPARISON_RATIO:
+            problems.append(f"amount comparison coverage={amount_ratio:.1%}")
+
     if report.ohlc_bad_ratio > _CONSISTENCY_BAD_RATIO_LIMIT:
         problems.append(
             f"price bad_ratio={report.ohlc_bad_ratio:.4f} "
