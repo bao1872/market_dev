@@ -1,20 +1,23 @@
 """bars_scheduler._audit_and_rebuild_factors 集成测试 (CHANGE-20260718-007 S3.1)。
 
-覆盖 S3.1 新增的因子审计 + 串行重建闭环：
+覆盖 S3.1 新增的因子审计 + 串行重建闭环，以及 fail-closed 治理契约：
 - 全部一致路径：dry_run 无 needs_rebuild，写 FACTOR_AUDIT info 事件
 - 需重建 + 全成功路径：rebuild_batch 全成功，写 done 事件含 before/after hash
-- 需重建 + 部分失败路径：写 warn 事件含 failed_list
-- dry_run 异常路径：写 error 事件，summary.errors=total，不抛出
-- rebuild_batch 异常路径：写 error 事件，summary.failed=needs_rebuild，不抛出
-- job_run_id=None 路径：不写事件但返回正确 summary
-- 空 instruments 路径：返回零 summary
+- 需重建 + 部分失败路径：failed > 0 = rebuild incomplete → 抛 FactorIntegrityBlockedError
+- dry_run 异常路径：FACTOR_AUDIT_FAILED → 抛 FactorIntegrityBlockedError（fail-closed）
+- rebuild_batch 异常路径：FACTOR_REBUILD_FAILED → 抛 FactorIntegrityBlockedError
+- job_run_id=None 路径：不写事件但审计仍执行
+- 空 instruments 路径：返回零 summary（含 degraded / degraded_symbols 字段）
+- degraded > 0 路径：FACTOR_AUDIT_DEGRADED → 抛 FactorIntegrityBlockedError
 
 设计要点：
 - FactorReconciliationTask 用 MagicMock 替换，避免连真实 pytdx/DB
-- 测试事务隔离：_audit_and_rebuild_factors 内部 append_event 后会 db.commit()，
-  为不破坏 db_session fixture 的 nested 事务，patch commit→flush
 - 验证事件 payload 含 PROMPT.md S3.1 要求的字段（before/after hash 摘要）
-- 验证软失败：dry_run/rebuild 异常被吞没，summary 返回失败计数而非抛出
+- 软失败已被移除：任何 provider outage / audit failure / degraded / rebuild
+  incomplete 必须 fail-closed（_run_post_daily_phase 对
+  (FactorSourceUnavailableError, FactorIntegrityBlockedError) 统一 re-raise，
+  保留 raw 日线但阻止 DSA/Core/Review 执行）。对应老测试（partial/dry_run/
+  rebuild 的「不抛出」断言）已改写为断言 FactorIntegrityBlockedError。
 """
 
 from __future__ import annotations
@@ -203,6 +206,9 @@ async def test_audit_all_consistent_writes_info_event(db_session) -> None:
     assert summary["rebuilt"] == 0
     assert summary["failed"] == 0
     assert summary["errors"] == 0
+    # [ROUND-5] degraded 字段必须存在且为 0（factor integrity 契约的一部分）
+    assert summary["degraded"] == 0
+    assert summary["degraded_symbols"] == []
 
     # 事件验证：start + done（info 级别，无 failed_list/needs_rebuild_symbols）
     events = await list_events(db_session, job_run.id, limit=10)
@@ -257,6 +263,9 @@ async def test_audit_needs_rebuild_all_success(db_session) -> None:
     assert summary["failed"] == 0
     assert summary["failed_symbols"] == []  # [PROMPT.md §5.4.2 V2] 无失败
     assert summary["trade_date"] == "2026-07-18"  # [PROMPT.md §5.4.2 V2]
+    # [ROUND-5] degraded 字段必须存在且为 0
+    assert summary["degraded"] == 0
+    assert summary["degraded_symbols"] == []
 
     # 事件验证：done 事件应含 success_before_after_sample
     events = await list_events(db_session, job_run.id, limit=10)
@@ -279,11 +288,14 @@ async def test_audit_needs_rebuild_all_success(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_audit_needs_rebuild_partial_failure(db_session) -> None:
-    """测试 3：重建部分失败，写 warn 事件含 failed_list。"""
-    job_run = await _create_job_run(db_session)
-    instruments = _make_instruments(5)
+async def test_audit_needs_rebuild_partial_failure_blocks_core() -> None:
+    """测试 3：重建部分失败（failed > 0 = rebuild incomplete）必须 fail-closed，
+    抛 FactorIntegrityBlockedError(FACTOR_REBUILD_INCOMPLETE)，禁止静默继续 Core。
 
+    用 MagicMock db_session + job_run_id=None 保持纯单元（不写事件、不连 DB）。
+    rebuild_batch 会实际被调用（尝试重建），但只要有任一只失败，整体即 hard-fail。
+    """
+    instruments = _make_instruments(5)
     plan = _make_plan(total_audited=5, consistent=2, needs_rebuild=3)
     report = _make_report(plan, fail_count=1)  # 3 个里 1 个失败
 
@@ -292,35 +304,19 @@ async def test_audit_needs_rebuild_partial_failure(db_session) -> None:
     mock_task.rebuild_batch = AsyncMock(return_value=report)
 
     service = BarsSchedulerService()
-    with _patch_task(mock_task), _patch_commit(db_session):
-        summary = await service._audit_and_rebuild_factors(
-            trade_date=date(2026, 7, 18),
-            instruments=instruments,
-            db_session=db_session,
-            job_run_id=job_run.id,
-        )
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_REBUILD_INCOMPLETE"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=instruments,
+                db_session=MagicMock(),
+                job_run_id=None,
+            )
 
-    # summary 验证：rebuilt=2, failed=1
-    assert summary["needs_rebuild"] == 3
-    assert summary["rebuilt"] == 2
-    assert summary["audit_rebuilt"] == 2  # [PROMPT.md §5.4.2 V2]
-    assert summary["failed"] == 1
-    # [PROMPT.md §5.4.2 V2] failed_symbols 应包含失败股票代码
-    assert isinstance(summary["failed_symbols"], list)
-    assert len(summary["failed_symbols"]) == 1
-
-    # 事件验证：done 事件应为 warn 级别（有失败）
-    events = await list_events(db_session, job_run.id, limit=10)
-    done_event = _find_audit_done_event(events)
-    assert done_event.level == "warn"
-    assert done_event.payload is not None
-    assert "failed_list" in done_event.payload
-    assert len(done_event.payload["failed_list"]) == 1
-    failed = done_event.payload["failed_list"][0]
-    assert failed["error_code"] == "rebuild_failed"
-    # 成功的 before/after hash 仍应记录
-    assert "success_before_after_sample" in done_event.payload
-    assert len(done_event.payload["success_before_after_sample"]) == 2
+    # rebuild_batch 确实被调用（尝试重建），但因 incomplete 立即 hard-fail
+    mock_task.rebuild_batch.assert_called_once()
 
 
 # =============================================================================
@@ -329,41 +325,33 @@ async def test_audit_needs_rebuild_partial_failure(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_audit_dry_run_failure_soft_fail(db_session) -> None:
-    """测试 4：dry_run 抛异常时软失败，写 error 事件，summary.errors=total。
+async def test_audit_dry_run_failure_hard_fail() -> None:
+    """测试 4：dry_run 抛异常必须 fail-closed，抛 FactorIntegrityBlockedError。
 
-    关键约束：不抛出异常（不阻断 DSA），但留下诊断痕迹。
+    关键约束：禁止软失败、禁止带着无法证明的 factor 继续 DSA/Core。
+    用 MagicMock db_session + job_run_id=None 保持纯单元（不写事件、不连 DB），
+    与生产 degraded 测试一致，可在 PURE_UNIT_TEST=1 下真正运行并验证，
+    而非被 PostgreSQL skip 遮掩。
     """
-    job_run = await _create_job_run(db_session)
     instruments = _make_instruments(3)
 
     mock_task = MagicMock()
     mock_task.dry_run = AsyncMock(side_effect=RuntimeError("pytdx 连接失败"))
 
     service = BarsSchedulerService()
-    with _patch_task(mock_task), _patch_commit(db_session):
-        # 不应抛出
-        summary = await service._audit_and_rebuild_factors(
-            trade_date=date(2026, 7, 18),
-            instruments=instruments,
-            db_session=db_session,
-            job_run_id=job_run.id,
-        )
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_FAILED"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=instruments,
+                db_session=MagicMock(),
+                job_run_id=None,
+            )
 
-    # summary 验证：errors=total（无法审计，全部计为 error）
-    assert summary["total_audited"] == 0
-    assert summary["errors"] == 3
-    assert summary["needs_rebuild"] == 0
-    assert summary["rebuilt"] == 0
-
-    # 事件验证：done 事件应为 error 级别，含 error 字段
-    events = await list_events(db_session, job_run.id, limit=10)
-    done_event = _find_audit_done_event(events)
-    assert done_event.level == "error"
-    assert done_event.payload is not None
-    assert "error" in done_event.payload
-    assert "dry_run_failed" in done_event.payload["error"]
-    assert "RuntimeError" in done_event.payload["error"]
+    # dry_run 抛异常时已 raise，rebuild_batch 不应被调用
+    mock_task.rebuild_batch.assert_not_called()
 
 
 # =============================================================================
@@ -372,11 +360,9 @@ async def test_audit_dry_run_failure_soft_fail(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_audit_rebuild_failure_soft_fail(db_session) -> None:
-    """测试 5：rebuild_batch 抛异常时软失败，写 error 事件，summary.failed=needs_rebuild。"""
-    job_run = await _create_job_run(db_session)
+async def test_audit_rebuild_failure_hard_fail() -> None:
+    """测试 5：rebuild_batch 抛异常必须 fail-closed，抛 FactorIntegrityBlockedError。"""
     instruments = _make_instruments(3)
-
     plan = _make_plan(total_audited=3, consistent=2, needs_rebuild=1)
 
     mock_task = MagicMock()
@@ -386,31 +372,16 @@ async def test_audit_rebuild_failure_soft_fail(db_session) -> None:
     )
 
     service = BarsSchedulerService()
-    with _patch_task(mock_task), _patch_commit(db_session):
-        summary = await service._audit_and_rebuild_factors(
-            trade_date=date(2026, 7, 18),
-            instruments=instruments,
-            db_session=db_session,
-            job_run_id=job_run.id,
-        )
-
-    # summary 验证：failed=needs_rebuild（全部计为失败）
-    assert summary["needs_rebuild"] == 1
-    assert summary["failed"] == 1
-    assert summary["rebuilt"] == 0
-    assert summary["audit_rebuilt"] == 0  # [PROMPT.md §5.4.2 V2]
-    # [PROMPT.md §5.4.2 V2] rebuild_batch 异常时所有 needs_rebuild 都进入 failed_symbols
-    assert isinstance(summary["failed_symbols"], list)
-    assert len(summary["failed_symbols"]) == 1
-
-    # 事件验证：done 事件应为 error 级别
-    events = await list_events(db_session, job_run.id, limit=10)
-    done_event = _find_audit_done_event(events)
-    assert done_event.level == "error"
-    assert done_event.payload is not None
-    assert "rebuild_batch_failed" in done_event.payload["error"]
-    # needs_rebuild_symbols 仍应记录（便于后续人工修复）
-    assert "needs_rebuild_symbols" in done_event.payload
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_REBUILD_FAILED"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=instruments,
+                db_session=MagicMock(),
+                job_run_id=None,
+            )
 
 
 # =============================================================================
@@ -443,6 +414,9 @@ async def test_audit_without_job_run_id(db_session) -> None:
     assert summary["total_audited"] == 3
     assert summary["needs_rebuild"] == 1
     assert summary["rebuilt"] == 1
+    # [ROUND-5] degraded 字段必须存在且为 0
+    assert summary["degraded"] == 0
+    assert summary["degraded_symbols"] == []
     # 不写事件，无异常即可
 
 
@@ -475,6 +449,7 @@ async def test_audit_empty_instruments(db_session) -> None:
         "total_audited": 0, "consistent": 0, "needs_rebuild": 0,
         "audit_rebuilt": 0, "rebuilt": 0, "failed": 0, "errors": 0,
         "failed_symbols": [],
+        "degraded": 0, "degraded_symbols": [],
     }
     # dry_run 不应被调用
     mock_task.dry_run.assert_not_called()
@@ -505,6 +480,7 @@ async def test_factor_audit_field_populated_in_result() -> None:
         "total_audited": 3, "consistent": 2, "needs_rebuild": 1,
         "audit_rebuilt": 1, "rebuilt": 1, "failed": 0, "errors": 0,
         "failed_symbols": [],
+        "degraded": 0, "degraded_symbols": [],  # [ROUND-5] 补齐 degraded 字段
     }
     assert result.factor_audit is not None
     assert result.factor_audit["total_audited"] == 3
