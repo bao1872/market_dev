@@ -386,12 +386,16 @@ class AdjustmentFactorService:
                 f"xdxr provider unavailable symbol={symbol}: {exc}"
             ) from exc
 
+        # 必须在所有分支之前初始化：即便 XDXR 为空，下方 diagnostics 也要有定义明确的
+        # cutoff（否则「stored fingerprint 非空 + fresh XDXR 为空」会 UnboundLocalError）。
+        # 空 XDXR 时**不读 factor DB**（保留优化），此时 cutoff 可能保持 None（仅诊断值）。
+        cutoff: date | None = effective_as_of
+
         if xdxr_df is None or xdxr_df.empty:
             # 无 xdxr 事件：fingerprint 恒为空串（无需触碰 DB 取 cutoff）
             current_fp: str = ""
             earliest: date | None = None
         else:
-            cutoff = effective_as_of
             if cutoff is None:
                 factor_df = await self.get_factor_series(
                     session, instrument_id, as_of=None,

@@ -366,3 +366,78 @@ async def test_detect_without_factor_baseline_returns_none(
 
     assert result is None
     assert stored[iid] == ""
+
+
+@pytest.mark.asyncio
+async def test_detect_empty_xdxr_clears_old_fingerprint_without_crashing(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """stored fingerprint 非空 + fresh XDXR 为空 → 必须安全返回 None（不得 UnboundLocalError）。
+
+    回归：旧实现在此场景下 `cutoff` 未绑定，logger 引用它 → UnboundLocalError。
+    """
+    import logging
+
+    service = AdjustmentFactorService()
+    iid = uuid.uuid4()
+    adapter = _FixedAdapter(pd.DataFrame())
+
+    # 空 XDXR 不得读取 factor DB
+    monkeypatch.setattr(
+        service,
+        "get_factor_series",
+        AsyncMock(side_effect=AssertionError("empty XDXR must not read factor cutoff")),
+    )
+    stored: dict[uuid.UUID, str] = {iid: "0123456789abcdef"}
+    monkeypatch.setattr(service, "_get_stored_fingerprint", lambda i: stored.get(i))
+    monkeypatch.setattr(
+        service, "_store_fingerprint", lambda i, fp: stored.__setitem__(i, fp)
+    )
+
+    caplog.set_level(logging.INFO, logger="services.adjustment_factor_service")
+
+    result = await service.detect_company_action_change(
+        None, iid, "600519", adapter, force_refresh=True,  # type: ignore[arg-type]
+    )
+
+    assert result is None
+    assert stored[iid] == ""          # 空 XDXR → effective fingerprint 为空串
+    # cutoff 已定义（无显式值且未读 DB → None），日志可安全记录
+    assert "cutoff=None" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_detect_empty_xdxr_with_explicit_cutoff_does_not_crash(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """显式 effective_as_of + 空 XDXR + 旧 fingerprint 非空 → 安全返回 None，cutoff 可记录。"""
+    import logging
+
+    service = AdjustmentFactorService()
+    iid = uuid.uuid4()
+    adapter = _FixedAdapter(pd.DataFrame())
+
+    monkeypatch.setattr(
+        service,
+        "get_factor_series",
+        AsyncMock(side_effect=AssertionError("empty XDXR must not read factor cutoff")),
+    )
+    stored: dict[uuid.UUID, str] = {iid: "0123456789abcdef"}
+    monkeypatch.setattr(service, "_get_stored_fingerprint", lambda i: stored.get(i))
+    monkeypatch.setattr(
+        service, "_store_fingerprint", lambda i, fp: stored.__setitem__(i, fp)
+    )
+
+    caplog.set_level(logging.INFO, logger="services.adjustment_factor_service")
+
+    result = await service.detect_company_action_change(
+        None, iid, "600519", adapter,  # type: ignore[arg-type]
+        force_refresh=True,
+        effective_as_of=date(2026, 9, 12),
+    )
+
+    assert result is None
+    assert stored[iid] == ""
+    assert "cutoff=2026-09-12" in caplog.text
