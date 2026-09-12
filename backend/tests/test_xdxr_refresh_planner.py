@@ -435,3 +435,194 @@ def test_rotation_size_invalid_raises() -> None:
         rotation_bucket("600000", 0)
     with pytest.raises(ValueError):
         rotation_bucket("600000", -1)
+
+
+# =============================================================================
+# G1B-3B1.2: planner 输入一致性 fail-closed（A-K）
+# =============================================================================
+
+
+def test_older_schedule_age_0_inconsistent_refresh() -> None:
+    # A: 旧 schedule + age=0 → 证据链矛盾 → schedule_age_inconsistent → 刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=0,  # 旧 schedule 却声称 0 天
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert decision.reasons == ("schedule_age_inconsistent",)
+
+
+def test_older_schedule_age_1_no_refresh() -> None:
+    # B: 旧 schedule + age=1 → 合法 fresh（无其他原因）→ refresh=False
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=1,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is False
+    assert decision.reasons == ()
+
+
+def test_same_day_age_999_treated_as_zero() -> None:
+    # C: 同日 + age=999 → 日期本身证明 age=0，不 stale / 不 inconsistent
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=999,  # 任意值，同日应被忽略
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is False
+    assert "schedule_age_inconsistent" not in decision.reasons
+    assert "schedule_stale" not in decision.reasons
+
+
+def test_ordinal_none_invalid() -> None:
+    # D: ordinal=None → trade_day_ordinal_invalid → 刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=None,  # type: ignore[arg-type]
+        schedule=schedule,
+        schedule_age_trade_days=0,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert decision.reasons == ("trade_day_ordinal_invalid",)
+
+
+def test_ordinal_true_invalid() -> None:
+    # E: ordinal=True（bool 不得当 int）→ invalid
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=True,  # type: ignore[arg-type]
+        schedule=schedule,
+        schedule_age_trade_days=0,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert decision.reasons == ("trade_day_ordinal_invalid",)
+
+
+def test_ordinal_minus1_invalid() -> None:
+    # F: ordinal=-1 → invalid
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=-1,
+        schedule=schedule,
+        schedule_age_trade_days=0,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert decision.reasons == ("trade_day_ordinal_invalid",)
+
+
+def test_ordinal_string_invalid() -> None:
+    # G: ordinal="1" → invalid
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal="1",  # type: ignore[arg-type]
+        schedule=schedule,
+        schedule_age_trade_days=0,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert decision.reasons == ("trade_day_ordinal_invalid",)
+
+
+def test_ordinal_invalid_and_stale_coexist() -> None:
+    # H: invalid ordinal + schedule_stale → 两个 reason 均保留
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=None,  # type: ignore[arg-type]
+        schedule=schedule,
+        schedule_age_trade_days=3,  # stale
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "trade_day_ordinal_invalid" in decision.reasons
+    assert "schedule_stale" in decision.reasons
+
+
+def test_symbol_empty_raises() -> None:
+    # I: symbol="" → ValueError
+    with pytest.raises(ValueError):
+        plan_xdxr_refresh(
+            symbol="",
+            trade_date=date(2026, 9, 1),
+            trade_day_ordinal=0,
+            schedule=None,
+            schedule_age_trade_days=0,
+            previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+            rotation_size=3,
+        )
+
+
+def test_symbol_int_raises() -> None:
+    # J: symbol=123 → ValueError（禁止隐式 str(symbol)）
+    with pytest.raises(ValueError):
+        plan_xdxr_refresh(
+            symbol=123,  # type: ignore[arg-type]
+            trade_date=date(2026, 9, 1),
+            trade_day_ordinal=0,
+            schedule=None,
+            schedule_age_trade_days=0,
+            previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+            rotation_size=3,
+        )
+
+
+def test_rotation_size3_ordinal_0_1_2_each_symbol_once() -> None:
+    # K: rotation_size=3 时，ordinal 0/1/2 中每个 symbol 恰好命中一次
+    symbol = "600000"
+    bucket = rotation_bucket(symbol, 3)
+    hits = sum(
+        1 for ordinal in (0, 1, 2)
+        if rotation_bucket(symbol, 3) == ordinal % 3
+    )
+    assert hits == 1
+    assert bucket in (0, 1, 2)

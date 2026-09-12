@@ -78,12 +78,26 @@ def classify_previous_close_signal(
     return PreviousCloseSignal.NO_ACTION_SIGNAL
 
 
+def _is_nonnegative_int(value: object) -> bool:
+    """严格非负 int 校验（planner 输入一致性守门）。
+
+    必须用 ``type(value) is int``：``isinstance(True, int)`` 为真会让 ``bool``
+    被当成合法 ``0``/``1``，而 planner 的 freshness coordinate 不接受 bool 证据。
+    """
+    return type(value) is int and value >= 0
+
+
 def rotation_bucket(symbol: str, rotation_size: int = 3) -> int:
     """稳定 rotation bucket（跨进程 / 跨调用确定性）。
 
     禁止用 ``hash(symbol)``（Python hash 进程间不稳定）。
     用 ``sha256(symbol)`` 前 8 字节对 ``rotation_size`` 取模。
+
+    ``symbol`` 必须是非空 ``str``：禁止隐式 ``str(symbol)``（``123`` / ``""`` 会被
+    静默切成不同 bucket 或异常 bucket），不合法直接 ``ValueError``。
     """
+    if not isinstance(symbol, str) or not symbol:
+        raise ValueError("symbol 必须是非空 str")
     if rotation_size <= 0:
         raise ValueError(f"rotation_size 必须 > 0，got {rotation_size}")
     digest = hashlib.sha256(symbol.encode("ascii")).digest()
@@ -118,6 +132,8 @@ def plan_xdxr_refresh(
     - ``schedule_invalid_future_scan``：``scanned_as_of`` 晚于 trade_date（异常）
     - ``schedule_age_unknown``：schedule 存在但交易日 age 无法证明（调用方未提供 /
       负数 / 非 int 如 bool）→ 不能假设 rotation 已执行，强制刷新
+    - ``schedule_age_inconsistent``：旧 schedule（``scanned_as_of < trade_date``）却声称
+      ``schedule_age_trade_days == 0``，证据链自相矛盾 → 多查一次 XDXR，不得误判成 fresh
     - ``schedule_stale``：schedule 已 ``>= rotation_size`` 个交易日未更新（服务停跑 /
       scheduler 未执行 / 部署中断）→ 必须补刷新，不能依赖「本应执行但实际没执行」的
       rotation
@@ -125,6 +141,8 @@ def plan_xdxr_refresh(
     - ``previous_close_mismatch``：previous_close 与 prior_raw_close 不等
     - ``previous_close_unknown``：previous_close 信号无法判断
     - ``rotation_refresh``：当前 rotation bucket 命中
+    - ``trade_day_ordinal_invalid``：``trade_day_ordinal`` 非非负 int（``None`` / ``True``
+      / ``-1`` / 字符串等）→ freshness coordinate 无法证明，强制刷新，不参与 rotation 运算
 
     ``schedule is None`` → 强制刷新（安全 bootstrap）。
 
@@ -145,14 +163,15 @@ def plan_xdxr_refresh(
             reasons.append("schedule_invalid_future_scan")
         else:
             if schedule.scanned_as_of == trade_date:
-                # 同日扫描：age 可直接证明为 0，无需 calendar，即使 age=None。
+                # 同日扫描：age 可直接证明为 0，无需 calendar，即使 age=None/任意值。
                 effective_age = 0
-            elif (
-                type(schedule_age_trade_days) is not int
-                or schedule_age_trade_days < 0
-            ):
+            elif not _is_nonnegative_int(schedule_age_trade_days):
                 effective_age = None
                 reasons.append("schedule_age_unknown")
+            elif schedule_age_trade_days == 0:
+                # 旧 schedule 却声称 age=0：证据链自相矛盾 → 多查一次 XDXR。
+                effective_age = None
+                reasons.append("schedule_age_inconsistent")
             else:
                 effective_age = schedule_age_trade_days
 
@@ -170,7 +189,10 @@ def plan_xdxr_refresh(
     elif previous_close_signal is PreviousCloseSignal.UNKNOWN:
         reasons.append("previous_close_unknown")
 
-    if rotation_bucket(symbol, rotation_size) == trade_day_ordinal % rotation_size:
+    if not _is_nonnegative_int(trade_day_ordinal):
+        # freshness coordinate 无法证明 → 多查一次 XDXR，绝不参与 rotation 运算。
+        reasons.append("trade_day_ordinal_invalid")
+    elif rotation_bucket(symbol, rotation_size) == trade_day_ordinal % rotation_size:
         reasons.append("rotation_refresh")
 
     return XdxrRefreshDecision(
