@@ -657,3 +657,139 @@ class TestUnifiedCanonicalFloat:
 
         with pytest.raises(SmcTargetContractError):
             m._canonicalize(object())
+
+
+# =============================================================================
+# G0.1 C3B contract correctness hardening（来自实码审查）
+# =============================================================================
+
+
+class TestStructureBiasStrict:
+    def test_swing_bias_true_error(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False), swing_bias=True)
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_swing_bias_99_error(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False), swing_bias=99)
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_internal_bias_str_error(self):
+        st = _structure(internal_bias="1")
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_bias_zero_legal(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False), swing_bias=0, internal_bias=0)
+        res = build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+        assert res.structure_context["swing_bias"] == 0
+        assert len(res.active_structure_targets) == 1
+
+
+class TestStructureSlotStrict:
+    def test_slot_missing_crossed_error(self):
+        st = _structure(swing_high={"level": 105.0, "anchor_index": 3, "anchor_time": "2026-01-04T00:00:00"})
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_slot_extra_key_error(self):
+        sh = dict(_slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False))
+        sh["extra"] = 1
+        st = _structure(swing_high=sh)
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_slot_crossed_str_error(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed="false"))
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_unformed_crossed_true_error(self):
+        st = _structure(swing_high=_slot(level=None, anchor_index=None, anchor_time=None, crossed=True))
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_anchor_index_str_error(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index="3", anchor_time="2026-01-04T00:00:00", crossed=False))
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_anchor_time_int_error(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index=3, anchor_time=123, crossed=False))
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+    def test_negative_anchor_index_error(self):
+        st = _structure(swing_high=_slot(level=105.0, anchor_index=-1, anchor_time="2026-01-04T00:00:00", crossed=False))
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
+
+
+class TestOrderBlockStrict:
+    def test_internal_str_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(internal="False")]))
+
+    def test_bias_str_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(bias="1")]))
+
+    def test_bias_zero_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(bias=0)]))
+
+    def test_anchor_index_str_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(anchor_index="1")]))
+
+    def test_confirmed_index_bool_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(confirmed_index=True)]))
+
+    def test_anchor_time_int_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(anchor_time=123)]))
+
+    def test_mitigated_index_str_error(self):
+        with pytest.raises(SmcTargetContractError):
+            build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(mitigated_index="3")]))
+
+    def test_mitigated_index_int_inactive_legal(self):
+        res = build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(mitigated_index=3)]))
+        assert res.active_order_block_targets == []
+
+
+class TestTargetSetVersionIgnoresTargetId:
+    def test_structure_target_id_change_keeps_version(self, monkeypatch):
+        import app.services.smc_monitor_target_service as m
+
+        sh = _slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False)
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        res_orig = build_smc_monitor_target_set(bars, _smc(_structure(swing_high=sh)))
+        orig_version = res_orig.target_set_version
+        monkeypatch.setattr(m, "_structure_target_id", lambda *a, **k: "different-structure-id")
+        res_patched = build_smc_monitor_target_set(bars, _smc(_structure(swing_high=sh)))
+        # monkeypatch 确实生效：target_id 改变
+        assert res_patched.active_structure_targets[0].target_id == "different-structure-id"
+        # 但 underlying content 不变 → version 必须相同
+        assert res_patched.target_set_version == orig_version
+
+    def test_ob_target_id_change_keeps_version(self, monkeypatch):
+        import app.services.smc_monitor_target_service as m
+
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        res_orig = build_smc_monitor_target_set(bars, _smc(_structure(), obs=[_ob()]))
+        orig_version = res_orig.target_set_version
+        monkeypatch.setattr(m, "_ob_target_id", lambda *a, **k: "different-ob-id")
+        res_patched = build_smc_monitor_target_set(bars, _smc(_structure(), obs=[_ob()]))
+        assert res_patched.active_order_block_targets[0].target_id == "different-ob-id"
+        assert res_patched.target_set_version == orig_version
+
+
+class TestCanonicalizerDictKeyStrict:
+    def test_non_str_dict_key_fail_closed(self):
+        import app.services.smc_monitor_target_service as m
+
+        with pytest.raises(SmcTargetContractError):
+            m._sha256_json({"params": {1: 2}})  # key 是 int 而非 str

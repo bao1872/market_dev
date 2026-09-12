@@ -36,7 +36,7 @@ SMC_MONITOR_TARGET_CONTRACT_SCHEMA_VERSION: int = 1
 
 _SMC_CONTRACT = AlgorithmRegistry.get("smc")
 
-_SMC_ALGORITHM_ID = "smc"
+_SMC_ALGORITHM_ID = _SMC_CONTRACT.algorithm_id
 _SMC_ALGORITHM_VERSION = _SMC_CONTRACT.algorithm_version
 _SMC_CONTRACT_FINGERPRINT = _SMC_CONTRACT.contract_fingerprint
 _SMC_OUTPUT_SCHEMA_VERSION = _SMC_CONTRACT.output_schema_version
@@ -83,7 +83,9 @@ def _canonicalize(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [_canonicalize(v) for v in value]
     if isinstance(value, dict):
-        return {k: _canonicalize(v) for k, v in sorted(value.items())}
+        if not all(isinstance(k, str) for k in value):
+            raise SmcTargetContractError("canonical payload dict key 必须全部为 str")
+        return {k: _canonicalize(value[k]) for k in sorted(value)}
     raise SmcTargetContractError(f"canonicalizer 不支持的类型: {type(value).__name__}")
 
 
@@ -287,41 +289,142 @@ def _ob_target_id(
 # ---------------------------------------------------------------------------
 
 
-def _slot_formed(slot: dict[str, Any]) -> bool:
-    """formed = level / anchor_index / anchor_time 三者均非 None。
+_STRUCTURE_SLOT_FIELDS = {
+    "level",
+    "anchor_index",
+    "anchor_time",
+    "crossed",
+}
 
-    partial-formed（部分非 None）→ fail closed。
+
+def _validate_lane_bias(value: Any, field: str) -> int:
+    """lane bias 必须是 -1/0/1 的精确 int（bool 是 int 子类，必须排除）。"""
+    if type(value) is not int or value not in (-1, 0, 1):
+        raise SmcTargetContractError(
+            f"{field} 必须是 -1/0/1 的 int，实际={value!r}"
+        )
+    return value
+
+
+def _validate_structure_slot(name: str, slot: Any) -> dict[str, Any]:
+    """严格校验单个 structure slot；不替上游静默修数据。
+
+    - 必须是 dict，且字段集合恰好为 level/anchor_index/anchor_time/crossed；
+    - crossed 必须是精确 bool；
+    - level/anchor_index/anchor_time 三者同进同出（partial-formed → error）；
+    - 未形成 slot 不允许 crossed=True；
+    - 形成 slot：level 有限、anchor_index 非负 int、anchor_time 非空 str。
     """
-    level = slot.get("level")
-    anchor_index = slot.get("anchor_index")
-    anchor_time = slot.get("anchor_time")
-    present = [x is not None for x in (level, anchor_index, anchor_time)]
+    if not isinstance(slot, dict):
+        raise SmcTargetContractError(f"structure slot {name} 必须是 dict")
+    if set(slot.keys()) != _STRUCTURE_SLOT_FIELDS:
+        raise SmcTargetContractError(
+            f"structure slot {name} 字段非法: {sorted(slot.keys())}"
+        )
+    crossed = slot["crossed"]
+    if type(crossed) is not bool:
+        raise SmcTargetContractError(f"{name}.crossed 必须是 bool")
+    level = slot["level"]
+    anchor_index = slot["anchor_index"]
+    anchor_time = slot["anchor_time"]
+    present = (
+        level is not None,
+        anchor_index is not None,
+        anchor_time is not None,
+    )
     if any(present) and not all(present):
-        raise SmcTargetContractError(f"partial-formed structure slot: {slot}")
-    if not all(present):
-        return False
+        raise SmcTargetContractError(f"partial-formed structure slot {name}: {slot}")
+    if not any(present):
+        if crossed is not False:
+            raise SmcTargetContractError(f"unformed slot {name} 不允许 crossed=True")
+        return dict(slot)
     if not _is_finite(level):
-        raise SmcTargetContractError(f"formed structure slot 含非有限 level: {slot}")
-    return True
+        raise SmcTargetContractError(f"{name}.level 必须是 finite number")
+    if type(anchor_index) is not int or anchor_index < 0:
+        raise SmcTargetContractError(f"{name}.anchor_index 必须是非负 int")
+    if not isinstance(anchor_time, str) or not anchor_time:
+        raise SmcTargetContractError(f"{name}.anchor_time 必须是非空 str")
+    return dict(slot)
 
 
 def _parse_structure_context(smc_result: dict[str, Any]) -> dict[str, Any]:
     state = smc_result.get("structure_target_state")
     if not isinstance(state, dict):
         raise SmcTargetContractError("smc_result 缺少 structure_target_state（需 emit_structure_target_state=True）")
-    if "swing_bias" not in state or "internal_bias" not in state:
-        raise SmcTargetContractError("structure_target_state 缺少 swing_bias/internal_bias")
-    if not isinstance(state["swing_bias"], int) or not isinstance(state["internal_bias"], int):
-        raise SmcTargetContractError("structure_target_state bias 非法（非 int）")
-    slots = state.get("slots")
-    if not isinstance(slots, dict):
+    swing_bias = _validate_lane_bias(state.get("swing_bias"), "swing_bias")
+    internal_bias = _validate_lane_bias(state.get("internal_bias"), "internal_bias")
+    slots_raw = state.get("slots")
+    if not isinstance(slots_raw, dict):
         raise SmcTargetContractError("structure_target_state.slots 缺失或非 dict")
-    if set(slots.keys()) != set(_STRUCTURE_SLOT_ORDER):
+    if set(slots_raw.keys()) != set(_STRUCTURE_SLOT_ORDER):
         raise SmcTargetContractError(
-            f"structure_target_state.slots 必须是固定四槽位 {_STRUCTURE_SLOT_ORDER}，实际: {sorted(slots.keys())}"
+            f"structure_target_state.slots 必须是固定四槽位 {_STRUCTURE_SLOT_ORDER}，实际: {sorted(slots_raw.keys())}"
         )
-    # 深拷贝，避免与 smc_result 共享引用
-    return json.loads(json.dumps(state))
+    validated_slots = {
+        name: _validate_structure_slot(name, slots_raw[name])
+        for name in _STRUCTURE_SLOT_ORDER
+    }
+    return {
+        "swing_bias": swing_bias,
+        "internal_bias": internal_bias,
+        "slots": validated_slots,
+    }
+
+
+# ---------------------------------------------------------------------------
+# OB / structure 严格类型校验 helpers（禁止 bool()/int()/str() 隐式转换）
+# ---------------------------------------------------------------------------
+
+
+def _require_int(value: Any, field: str) -> int:
+    """非负精确 int（排除 bool）。"""
+    if type(value) is not int or value < 0:
+        raise SmcTargetContractError(f"{field} 必须是非负 int，实际={value!r}")
+    return value
+
+
+def _require_bias(value: Any, field: str) -> int:
+    """OB bias 必须是 -1/1 的精确 int（排除 bool）。"""
+    if type(value) is not int or value not in (-1, 1):
+        raise SmcTargetContractError(f"{field} 必须是 -1/1，实际={value!r}")
+    return value
+
+
+def _require_bool(value: Any, field: str) -> bool:
+    if type(value) is not bool:
+        raise SmcTargetContractError(f"{field} 必须是 bool，实际={value!r}")
+    return value
+
+
+def _require_nonempty_str(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise SmcTargetContractError(f"{field} 必须是非空 str，实际={value!r}")
+    return value
+
+
+def _structure_version_content(target: SmcStructureTarget) -> dict[str, Any]:
+    """TargetSet version 仅依赖底层 canonical target content（不含派生 target_id）。"""
+    return {
+        "lane": target.lane,
+        "kind": target.kind,
+        "level": target.level,
+        "anchor_index": target.anchor_index,
+        "anchor_time": target.anchor_time,
+    }
+
+
+def _ob_version_content(target: SmcOrderBlockTarget) -> dict[str, Any]:
+    """TargetSet version 仅依赖底层 canonical target content（不含派生 target_id）。"""
+    return {
+        "internal": target.internal,
+        "bias": target.bias,
+        "bar_low": target.bar_low,
+        "bar_high": target.bar_high,
+        "anchor_index": target.anchor_index,
+        "anchor_time": target.anchor_time,
+        "confirmed_index": target.confirmed_index,
+        "confirmed_time": target.confirmed_time,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -362,13 +465,19 @@ def build_smc_monitor_target_set(
     slots = structure_context["slots"]
 
     # 4. active structure targets：formed AND crossed == False
+    #    formed = level / anchor_index / anchor_time 三者均非 None（已严格校验）
     structure_targets: list[SmcStructureTarget] = []
     for name in _STRUCTURE_SLOT_ORDER:
         slot = slots[name]
-        if not _slot_formed(slot):
+        level = slot["level"]
+        anchor_index = slot["anchor_index"]
+        anchor_time = slot["anchor_time"]
+        crossed = slot["crossed"]
+        formed = level is not None and anchor_index is not None and anchor_time is not None
+        if not formed:
             continue
-        if slot.get("crossed") is not False:
-            # formed 但已 crossed → 不是 active target，仅保留在 structure_context
+        if crossed is not False:
+            # formed 但已 crossed → 不是 active target（pending breakout candidate 已被突破）
             continue
         lane = "swing" if name.startswith("swing") else "internal"
         kind = "high" if name.endswith("high") else "low"
@@ -376,33 +485,38 @@ def build_smc_monitor_target_set(
             params_hash,
             lane,
             kind,
-            float(slot["level"]),
-            int(slot["anchor_index"]),
-            str(slot["anchor_time"]),
+            float(level),
+            int(anchor_index),
+            str(anchor_time),
         )
         structure_targets.append(
             SmcStructureTarget(
                 target_id=target_id,
                 lane=lane,
                 kind=kind,
-                level=float(slot["level"]),
-                anchor_index=int(slot["anchor_index"]),
-                anchor_time=str(slot["anchor_time"]),
+                level=float(level),
+                anchor_index=int(anchor_index),
+                anchor_time=str(anchor_time),
             )
         )
 
-    # 5. active OB targets：仅 mitigated_index 字段存在且为 None
+    # 5. active OB targets：mitigated_index 缺失→error；None→active；非负 int→inactive
     order_blocks = smc_result.get("order_blocks")
     if not isinstance(order_blocks, list):
         raise SmcTargetContractError("smc_result 缺少 order_blocks")
     ob_targets: list[SmcOrderBlockTarget] = []
     for ob in order_blocks:
-        # mitigated_index 三态：缺失 → malformed（fail closed）；None → active；非 None → inactive
+        if not isinstance(ob, dict):
+            raise SmcTargetContractError(f"order_blocks 元素必须是 dict: {ob!r}")
+        # mitigated_index 三态严格判定
         if "mitigated_index" not in ob:
             raise SmcTargetContractError(f"active OB 缺少 mitigated_index 字段（不得 silent 当 active）: {ob}")
-        if ob["mitigated_index"] is not None:
+        mi = ob["mitigated_index"]
+        if mi is not None:
+            if type(mi) is not int or mi < 0:
+                raise SmcTargetContractError(f"OB mitigated_index 必须是 None 或非负 int: {ob}")
             continue  # 已 mitigated 不参与 realtime target
-        # 必要字段校验（entered / OB_ENTERED / enter_* 不影响）
+        # active OB：严格校验 target-only 字段，禁止隐式类型转换
         for field in (
             "internal", "bias", "bar_low", "bar_high",
             "anchor_index", "anchor_time", "confirmed_index", "confirmed_time",
@@ -410,34 +524,42 @@ def build_smc_monitor_target_set(
         ):
             if field not in ob:
                 raise SmcTargetContractError(f"active OB 缺少字段 {field}: {ob}")
+        internal = _require_bool(ob["internal"], "internal")
+        bias = _require_bias(ob["bias"], "bias")
+        if not _is_finite(ob["bar_low"]):
+            raise SmcTargetContractError(f"active OB bar_low 必须是 finite number（bool 禁止）: {ob}")
+        if not _is_finite(ob["bar_high"]):
+            raise SmcTargetContractError(f"active OB bar_high 必须是 finite number（bool 禁止）: {ob}")
         bar_low = float(ob["bar_low"])
         bar_high = float(ob["bar_high"])
-        if not _is_finite(bar_low) or not _is_finite(bar_high):
-            raise SmcTargetContractError(f"active OB zone 含非有限值: {ob}")
         if bar_low > bar_high:
             raise SmcTargetContractError(f"active OB bar_low > bar_high: {ob}")
+        anchor_index = _require_int(ob["anchor_index"], "anchor_index")
+        anchor_time = _require_nonempty_str(ob["anchor_time"], "anchor_time")
+        confirmed_index = _require_int(ob["confirmed_index"], "confirmed_index")
+        confirmed_time = _require_nonempty_str(ob["confirmed_time"], "confirmed_time")
         target_id = _ob_target_id(
             params_hash,
-            bool(ob["internal"]),
-            int(ob["bias"]),
+            internal,
+            bias,
             bar_low,
             bar_high,
-            int(ob["anchor_index"]),
-            str(ob["anchor_time"]),
-            int(ob["confirmed_index"]),
-            str(ob["confirmed_time"]),
+            anchor_index,
+            anchor_time,
+            confirmed_index,
+            confirmed_time,
         )
         ob_targets.append(
             SmcOrderBlockTarget(
                 target_id=target_id,
-                internal=bool(ob["internal"]),
-                bias=int(ob["bias"]),
+                internal=internal,
+                bias=bias,
                 bar_low=bar_low,
                 bar_high=bar_high,
-                anchor_index=int(ob["anchor_index"]),
-                anchor_time=str(ob["anchor_time"]),
-                confirmed_index=int(ob["confirmed_index"]),
-                confirmed_time=str(ob["confirmed_time"]),
+                anchor_index=anchor_index,
+                anchor_time=anchor_time,
+                confirmed_index=confirmed_index,
+                confirmed_time=confirmed_time,
             )
         )
 
@@ -475,8 +597,8 @@ def build_smc_monitor_target_set(
         "daily_bars_hash": daily_bars_hash,
         "bar_count": bar_count,
         "structure_context": structure_context,
-        "active_structure_targets": [t.to_dict() for t in structure_targets],
-        "active_order_block_targets": [t.to_dict() for t in ob_targets],
+        "active_structure_targets": [_structure_version_content(t) for t in structure_targets],
+        "active_order_block_targets": [_ob_version_content(t) for t in ob_targets],
     }
     target_set_version = _sha256_json(version_payload)
 
