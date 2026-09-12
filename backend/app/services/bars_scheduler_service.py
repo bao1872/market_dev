@@ -1722,57 +1722,59 @@ class BarsSchedulerService:
                     "[BarsScheduler] 写 REBUILDING_FACTORS start 事件失败: %s", exc,
                 )
 
-        # 使用单一 session 遍历（db_session 为 None 时新建复用，减少连接开销）
-        # detect 不写 DB（仅 pytdx + Redis），rebuild 写 DB（commit per stock）
-        if db_session is not None:
-            session = db_session
-            should_close = False
-        else:
-            session = AsyncSessionLocal()
-            should_close = True
+        # [G1B-3B2.1] ownership try：planner + refresh loop 共享同一 session 生命周期。
+        # 任何阶段（planner SELECT / detect / rebuild）抛异常都通过 finally 关闭自建
+        # session；外部传入 db_session 时 should_close=False，绝不关闭调用方会话。
+        pbar = None
+        try:
+            if db_session is not None:
+                session = db_session
+                should_close = False
+            else:
+                session = AsyncSessionLocal()
+                should_close = True
 
-        # [G1B-3B2] evidence-based refresh-set：仅当 EOD previous_close 证据完整时
-        # 走 planner 批量计算；否则保持旧全市场路径（不读 schedule MGET / prior-close
-        # SQL / calendar coordinate / planner，与 ed1826db 以前完全一致）。
-        if eod_previous_close_by_symbol is None:
-            refresh_instruments: list[Instrument] = list(instruments)
-            reason_counts: Counter[str] = Counter()
-        else:
-            refresh_instruments, reason_counts = await self._plan_xdxr_refresh_set(
-                trade_date=trade_date,
-                instruments=instruments,
-                eod_previous_close_by_symbol=eod_previous_close_by_symbol,
-                adj_service=adj_service,
-                session=session,
+            # [G1B-3B2] evidence-based refresh-set：仅当 EOD previous_close 证据完整时
+            # 走 planner 批量计算；否则保持旧全市场路径（不读 schedule MGET / prior-close
+            # SQL / calendar coordinate / planner，与 ed1826db 以前完全一致）。
+            if eod_previous_close_by_symbol is None:
+                refresh_instruments: list[Instrument] = list(instruments)
+                reason_counts: Counter[str] = Counter()
+            else:
+                refresh_instruments, reason_counts = await self._plan_xdxr_refresh_set(
+                    trade_date=trade_date,
+                    instruments=instruments,
+                    eod_previous_close_by_symbol=eod_previous_close_by_symbol,
+                    adj_service=adj_service,
+                    session=session,
+                )
+
+            result["planned_total"] = total
+            result["refresh_requested"] = len(refresh_instruments)
+            result["skipped_fresh"] = total - len(refresh_instruments)
+            result["planner_mode"] = (
+                "eod_previous_close"
+                if eod_previous_close_by_symbol is not None
+                else "legacy_full_refresh"
+            )
+            result["refresh_reason_counts"] = dict(sorted(reason_counts.items()))
+
+            logger.info(
+                "[BarsScheduler] XDXR计划 planned=%d refresh=%d skipped=%d mode=%s reasons=%s",
+                total, len(refresh_instruments), total - len(refresh_instruments),
+                result["planner_mode"], result["refresh_reason_counts"],
             )
 
-        result["planned_total"] = total
-        result["refresh_requested"] = len(refresh_instruments)
-        result["skipped_fresh"] = total - len(refresh_instruments)
-        result["planner_mode"] = (
-            "eod_previous_close"
-            if eod_previous_close_by_symbol is not None
-            else "legacy_full_refresh"
-        )
-        result["refresh_reason_counts"] = dict(sorted(reason_counts.items()))
+            # tqdm 进度条
+            try:
+                from tqdm import tqdm
+                pbar = tqdm(
+                    refresh_instruments, desc="因子重建检查", position=0, leave=True,
+                    dynamic_ncols=True,
+                )
+            except ImportError:
+                pbar = None
 
-        logger.info(
-            "[BarsScheduler] XDXR计划 planned=%d refresh=%d skipped=%d mode=%s reasons=%s",
-            total, len(refresh_instruments), total - len(refresh_instruments),
-            result["planner_mode"], result["refresh_reason_counts"],
-        )
-
-        # tqdm 进度条
-        try:
-            from tqdm import tqdm
-            pbar = tqdm(
-                refresh_instruments, desc="因子重建检查", position=0, leave=True,
-                dynamic_ncols=True,
-            )
-        except ImportError:
-            pbar = None
-
-        try:
             for instrument in (pbar or refresh_instruments):
                 symbol = instrument.symbol
                 result["checked"] += 1
@@ -1839,11 +1841,10 @@ class BarsSchedulerService:
                         failed=result["failed"],
                     )
         finally:
+            if pbar is not None:
+                pbar.close()
             if should_close:
                 await session.close()
-
-        if pbar is not None:
-            pbar.close()
 
         logger.info(
             "[BarsScheduler] 因子重建检查完成: checked=%d changed=%d rebuilt=%d failed=%d",

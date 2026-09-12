@@ -8,12 +8,19 @@ due / stale / calendar-missing / MGET-outage 下都正确，且 detect 调用合
 from __future__ import annotations
 
 import uuid
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from app.services.adjustment_factor_service import CorporateActionScheduleState
+import pytest
+
+from app.core.pytdx_adapter import PytdxSourceError
+from app.services.adjustment_factor_service import (
+    CorporateActionScheduleState,
+    FactorSourceUnavailableError,
+)
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.xdxr_refresh_planner import rotation_bucket
 
@@ -30,8 +37,13 @@ class _FakeInstrument:
 class _FakeAdjService:
     """fake AdjustmentFactorService：记录 detect 调用 + 返回脚本化 schedule。"""
 
-    def __init__(self, schedule_states: dict[uuid.UUID, CorporateActionScheduleState | None]):
+    def __init__(
+        self,
+        schedule_states: dict[uuid.UUID, CorporateActionScheduleState | None],
+        detect_side_effect: BaseException | None = None,
+    ) -> None:
         self._schedule_states = schedule_states
+        self._detect_side_effect = detect_side_effect
         self.detect_calls: list[tuple[str, bool, object]] = []
         self.schedule_calls = 0
 
@@ -46,7 +58,27 @@ class _FakeAdjService:
         *, force_refresh: bool = False, effective_as_of=None,
     ) -> None:
         self.detect_calls.append((symbol, force_refresh, effective_as_of))
+        if self._detect_side_effect is not None:
+            raise self._detect_side_effect
         return None
+
+    def _delete_fingerprint(self, instrument_id: uuid.UUID) -> None:
+        # 纯单元测试：避免真实连 Redis（无 DB/Redis 环境）
+        return None
+
+
+class _OwnSessionSpy:
+    """记录 close / rollback 调用次数的 fake session（不连真实 DB）。"""
+
+    def __init__(self) -> None:
+        self.close_calls = 0
+        self.rollback_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+
+    async def rollback(self) -> None:
+        self.rollback_calls += 1
 
 
 class _Rows:
@@ -433,6 +465,7 @@ async def test_calendar_queries_fixed_vs_instruments() -> None:
     ]
     service = BarsSchedulerService()
     counts = []
+    previous_lookups = []
     for n in (9, 50):
         instruments = _build_instruments(n)
         eod = {inst.symbol: Decimal("10.00") for inst in instruments}
@@ -448,15 +481,116 @@ async def test_calendar_queries_fixed_vs_instruments() -> None:
             prior_close_rows=prior, calendar_dates=cal_dates,
             calendar_count=cal_count, calendar_trade_date=cal_trade,
         )
+        mock_previous = AsyncMock(return_value=PREV_TD)
         with patch(
             "app.services.calendar_service.get_previous_trading_day_async",
-            return_value=PREV_TD,
+            new=mock_previous,
         ):
             await service._plan_xdxr_refresh_set(
                 trade_date=TD, instruments=instruments,
                 eod_previous_close_by_symbol=eod, adj_service=fake_adj,
                 session=sess,
             )
+        # previous-trading-day lookup = 1（O(1)，不随股票数增长）
+        assert mock_previous.await_count == 1
+        previous_lookups.append(mock_previous.await_count)
         counts.append((sess.execute_calls, sess.scalar_calls, sess.scalars_calls))
-    # N=9 与 N=50：prior-close 1 次 execute；calendar 2 次 scalar + 1 次 scalars
+    # N=9 / N=50：全部 O(1)
+    assert previous_lookups == [1, 1]
+    # prior-close 1 次 execute；calendar 2 次 scalar + 1 次 scalars
     assert counts[0] == counts[1] == (1, 2, 1)
+
+
+# =============================================================================
+# G1B-3B2.1：planner / detect / rebuild 任意阶段异常都关闭自建 AsyncSession
+# =============================================================================
+
+
+async def test_planner_exception_closes_own_session() -> None:
+    instruments = _build_instruments(3)
+    eod = {inst.symbol: Decimal("10.00") for inst in instruments}
+    fake_adj = _FakeAdjService({})
+    own_session = _OwnSessionSpy()
+    service = BarsSchedulerService()
+    service._plan_xdxr_refresh_set = AsyncMock(
+        side_effect=RuntimeError("planner db failed")
+    )
+    with (
+        patch("app.services.adjustment_factor_service.AdjustmentFactorService", return_value=fake_adj),
+        patch("app.services.bars_scheduler_service.get_pytdx_adapter", return_value=MagicMock()),
+        patch("app.services.calendar_service.get_previous_trading_day_async", return_value=PREV_TD),
+        patch("app.services.bars_scheduler_service.AsyncSessionLocal", return_value=own_session),
+    ):
+        with pytest.raises(RuntimeError, match="planner db failed"):
+            await service._rebuild_factors_if_needed(
+                TD, instruments, db_session=None, eod_previous_close_by_symbol=eod,
+            )
+    # planner 抛异常 → 自建 session 仍关闭
+    assert own_session.close_calls == 1
+
+
+async def test_planner_exception_external_session_not_closed() -> None:
+    instruments = _build_instruments(3)
+    eod = {inst.symbol: Decimal("10.00") for inst in instruments}
+    fake_adj = _FakeAdjService({})
+    external_session = _OwnSessionSpy()
+    service = BarsSchedulerService()
+    service._plan_xdxr_refresh_set = AsyncMock(
+        side_effect=RuntimeError("planner db failed")
+    )
+    with (
+        patch("app.services.adjustment_factor_service.AdjustmentFactorService", return_value=fake_adj),
+        patch("app.services.bars_scheduler_service.get_pytdx_adapter", return_value=MagicMock()),
+        patch("app.services.calendar_service.get_previous_trading_day_async", return_value=PREV_TD),
+    ):
+        with pytest.raises(RuntimeError, match="planner db failed"):
+            await service._rebuild_factors_if_needed(
+                TD, instruments, db_session=external_session, eod_previous_close_by_symbol=eod,
+            )
+    # 外部传入 session：scheduler 绝不关闭调用方会话
+    assert external_session.close_calls == 0
+
+
+async def test_detect_failure_closes_own_session() -> None:
+    instruments = _build_instruments(3)
+    eod = {inst.symbol: Decimal("10.00") for inst in instruments}
+    fake_adj = _FakeAdjService(
+        {}, detect_side_effect=PytdxSourceError(operation="xdxr_detect", message="boom"),
+    )
+    own_session = _OwnSessionSpy()
+    service = BarsSchedulerService()
+    # planner 成功返回全量，触发 detect
+    service._plan_xdxr_refresh_set = AsyncMock(return_value=(list(instruments), Counter()))
+    with (
+        patch("app.services.adjustment_factor_service.AdjustmentFactorService", return_value=fake_adj),
+        patch("app.services.bars_scheduler_service.get_pytdx_adapter", return_value=MagicMock()),
+        patch("app.services.calendar_service.get_previous_trading_day_async", return_value=PREV_TD),
+        patch("app.services.bars_scheduler_service.AsyncSessionLocal", return_value=own_session),
+    ):
+        with pytest.raises(FactorSourceUnavailableError):
+            await service._rebuild_factors_if_needed(
+                TD, instruments, db_session=None, eod_previous_close_by_symbol=eod,
+            )
+    # detect fail-closed → 自建 session 仍关闭
+    assert own_session.close_calls == 1
+
+
+async def test_normal_success_closes_own_session() -> None:
+    instruments = _build_instruments(3)
+    eod = {inst.symbol: Decimal("10.00") for inst in instruments}
+    fake_adj = _FakeAdjService({})  # detect 返回 None（无变化）
+    own_session = _OwnSessionSpy()
+    service = BarsSchedulerService()
+    service._plan_xdxr_refresh_set = AsyncMock(return_value=(list(instruments), Counter()))
+    with (
+        patch("app.services.adjustment_factor_service.AdjustmentFactorService", return_value=fake_adj),
+        patch("app.services.bars_scheduler_service.get_pytdx_adapter", return_value=MagicMock()),
+        patch("app.services.calendar_service.get_previous_trading_day_async", return_value=PREV_TD),
+        patch("app.services.bars_scheduler_service.AsyncSessionLocal", return_value=own_session),
+    ):
+        result = await service._rebuild_factors_if_needed(
+            TD, instruments, db_session=None, eod_previous_close_by_symbol=eod,
+        )
+    # 正常完成 → 自建 session 关闭
+    assert own_session.close_calls == 1
+    assert result["refresh_requested"] == 3
