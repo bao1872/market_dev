@@ -146,6 +146,20 @@ PYTDX_SERVER_CAPABILITIES: tuple[PytdxServerCapability, ...] = (
 # 兼容既有导出名（factor health probe 取前 N 台，故 bars-capable 排在最前）。
 PYTDX_SERVERS: list[tuple[str, int]] = [c.server for c in PYTDX_SERVER_CAPABILITIES]
 
+@dataclass(frozen=True)
+class PytdxCallProvenance:
+    """一次成功 pytdx API 调用的来源证明（在 ``_io_lock`` 临界区内原子取得）。
+
+    - ``server``：**hostname 保持 hostname**，不保存当次 DNS resolved IP。
+    - ``connection_generation``：进程内单调递增的成功建连计数。同 hostname 断线重连后
+      DNS 后台 IP 可能已变，故 ``server`` 相同**不等于**同一次 snapshot connection；
+      generation 也必须比较。
+    """
+
+    server: tuple[str, int]
+    connection_generation: int
+
+
 # operation → capability（避免所有 public API 改签名）；None = 不限制。
 _OPERATION_CAPABILITY: dict[str, str | None] = {
     "get_security_bars": CAPABILITY_BARS,
@@ -458,6 +472,8 @@ class PytdxAdapter(Exchange):
         self._capability_health: dict[tuple[str, int], dict[str, float]] = {}
         self._connect_health: dict[tuple[str, int], float] = {}
         self.capability_cooldown_seconds = capability_cooldown_seconds
+        # 成功建连的单调计数：用于 PytdxCallProvenance（同 hostname 重连也算新 generation）。
+        self._connection_generation: int = 0
 
     def __enter__(self) -> PytdxAdapter:
         self.connect()
@@ -672,6 +688,7 @@ class PytdxAdapter(Exchange):
                         # 只有 API source failure 才 advance（见 _advance_server_after_failure）。
                         self._next_server_index = idx
                         self.successful_connect_count += 1
+                        self._connection_generation += 1
                         if self.successful_connect_count > 1:
                             self.reconnect_count += 1
                         return
@@ -749,6 +766,7 @@ class PytdxAdapter(Exchange):
         market: int | None = None,
         period: str | None = None,
         capability: str | None = None,
+        return_provenance: bool = False,
     ) -> Any:
         """唯一 connection-level retry owner：所有 pytdx 网络调用必须经由此处。
 
@@ -850,6 +868,16 @@ class PytdxAdapter(Exchange):
                         self._clear_capability_failure(
                             attempt_server, resolved_capability
                         )
+                        if return_provenance:
+                            # provenance 必须与真正执行 API 的 attempt_server 原子绑定；
+                            # 绝不允许在锁外读 connected_server 猜来源（可并发共享 adapter）。
+                            return (
+                                result,
+                                PytdxCallProvenance(
+                                    server=attempt_server,
+                                    connection_generation=self._connection_generation,
+                                ),
+                            )
                         return result
 
             except PytdxSourceError as exc:
@@ -1082,6 +1110,37 @@ class PytdxAdapter(Exchange):
             lambda api: api.get_security_quotes(requests),
         )
         return list(rows) if rows else []
+
+    def get_security_quotes_with_provenance(
+        self,
+        symbols: Sequence[str],
+    ) -> tuple[list[dict[str, Any]], PytdxCallProvenance]:
+        """与 :meth:`get_security_quotes` 相同，但**原子**返回本次调用的来源证明。
+
+        为什么必须原子返回：``PytdxAdapter`` 是可并发共享的单例，
+        「先调 API、再读 ``connected_server``」之间其它线程可能已切换 socket，
+        读到的来源会与数据不匹配。provenance 因此只能在
+        :meth:`_call_with_reconnect` 的成功临界区内产生。
+
+        Returns:
+            ``(rows, provenance)``；``rows`` 语义与 :meth:`get_security_quotes` 完全一致。
+        """
+        if not symbols:
+            return [], PytdxCallProvenance(
+                server=self.connected_server or ("", 0),
+                connection_generation=self._connection_generation,
+            )
+
+        requests = [
+            (market_from_code(symbol), symbol)
+            for symbol in symbols
+        ]
+        rows, provenance = self._call_with_reconnect(
+            "get_security_quotes",
+            lambda api: api.get_security_quotes(requests),
+            return_provenance=True,
+        )
+        return (list(rows) if rows else []), provenance
 
     def _fetch_bars(
         self,

@@ -36,7 +36,11 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from app.core.pytdx_adapter import MARKET_NAME_TO_CODE, PytdxSourceError
+from app.core.pytdx_adapter import (
+    MARKET_NAME_TO_CODE,
+    PytdxCallProvenance,
+    PytdxSourceError,
+)
 
 if TYPE_CHECKING:
     from app.core.pytdx_adapter import PytdxAdapter
@@ -132,6 +136,11 @@ class PytdxEodSnapshot:
     returned_count: int
     missing_symbols: tuple[str, ...]
     captured_at: datetime
+    # 全市场 quote 的单一来源证明：**所有 batch 必须同 server 同 connection_generation**。
+    # 任何 failover / reconnect 都使整个 snapshot 作废（见 fetch_pytdx_eod_snapshot）。
+    provenance: PytdxCallProvenance = PytdxCallProvenance(
+        server=("", 0), connection_generation=0
+    )
     source: str = "pytdx"
     volume_unit: str = PYTDX_QUOTE_VOLUME_UNIT_LOTS
 
@@ -240,6 +249,8 @@ def fetch_pytdx_eod_snapshot(
 
     batches = list(_chunks(supported, PYTDX_QUOTE_BATCH_SIZE))
     matched: list[tuple[Instrument, dict[str, Any]]] = []
+    # 全市场 snapshot 的单一来源：首批确定，后续批次必须完全一致（含 generation）。
+    snapshot_provenance: PytdxCallProvenance | None = None
 
     try:
         for batch_index, batch in enumerate(batches):
@@ -252,7 +263,18 @@ def fetch_pytdx_eod_snapshot(
                 batch_identity[key] = inst
 
             symbols = [inst.symbol for inst in batch]
-            raw_rows = adapter.get_security_quotes(symbols)
+            raw_rows, provenance = adapter.get_security_quotes_with_provenance(symbols)
+            if snapshot_provenance is None:
+                snapshot_provenance = provenance
+            elif provenance != snapshot_provenance:
+                # 数据完整性：一个 snapshot 必须来自同一次 connection。
+                # 中途 failover / reconnect（含同 hostname 重连 → DNS 后台 IP 可能已变）
+                # 都会让「2 个 sentinel 的日期证明」无法外推到其它 batch → 整体作废。
+                raise PytdxEodSnapshotError(
+                    "pytdx snapshot connection changed during fetch: "
+                    f"batch={batch_index + 1} "
+                    f"first={snapshot_provenance} now={provenance}"
+                )
 
             returned_identity: set[tuple[int, str]] = set()
             for raw in raw_rows:
@@ -302,6 +324,11 @@ def fetch_pytdx_eod_snapshot(
         returned_count=len(rows),
         missing_symbols=missing_symbols,
         captured_at=captured_at,
+        provenance=(
+            snapshot_provenance
+            if snapshot_provenance is not None
+            else PytdxCallProvenance(server=("", 0), connection_generation=0)
+        ),
         source="pytdx",
         volume_unit=PYTDX_QUOTE_VOLUME_UNIT_LOTS,
     )

@@ -245,33 +245,19 @@ def test_snapshot_volume_and_amount_units_are_shares_and_yuan() -> None:
 
 
 def _tdx_connect():
-    """连上一个可用的通达信服务器；不可用返回 None（调用方负责显式失败）。"""
-    from pytdx.hq import TdxHq_API
+    """用 **生产** ``PytdxAdapter`` 取一个可用连接（不再维护第二套 hardcoded server list）。
 
-    candidates = [
-        ("119.147.212.81", 7709),
-        ("115.238.90.165", 7709),
-        ("180.153.18.170", 7709),
-        ("218.108.98.244", 7709),
-        ("218.6.170.47", 7709),
-        ("123.125.108.14", 7709),
-        ("114.80.63.12", 7709),
-        ("218.75.126.9", 7709),
-    ]
-    for host, port in candidates:
-        api = TdxHq_API(raise_exception=False, auto_retry=False)
-        try:
-            if api.connect(host, port, time_out=4):
-                bars = api.get_security_bars(9, 1, "600519", 0, 3)
-                if bars:
-                    return api, host
-                api.disconnect()
-        except Exception:  # noqa: BLE001
-            try:
-                api.disconnect()
-            except Exception:  # noqa: BLE001
-                pass
-    return None, None
+    生产 server 选择（capability-aware + cooldown）才是被验证的对象；
+    测试自己维护 IP 列表会掩盖 pool 腐化（CHANGE-20260912-001）。
+
+    Returns:
+        ``(adapter, server_label)``；源不可用时抛 ``PytdxSourceError``（调用方显式失败）。
+    """
+    from app.core.pytdx_adapter import connect_pytdx
+
+    adapter = connect_pytdx()
+    entered = adapter.__enter__()
+    return entered, str(entered.connected_server)
 
 
 def test_eastmoney_raw_kline_vs_pytdx_raw_daily_ohlcv() -> None:
@@ -283,12 +269,7 @@ def test_eastmoney_raw_kline_vs_pytdx_raw_daily_ohlcv() -> None:
     trade_date = max((r.trade_date for r in sample if r.trade_date), default=None)
     assert trade_date is not None
 
-    api, tdx_host = _tdx_connect()
-    if api is None:
-        pytest.fail(
-            "TDX（pytdx）源不可用：所有候选服务器连接/取数均失败，"
-            "本次跨源 OHLCV 校验未完成（不得视为通过）"
-        )
+    adapter, tdx_host = _tdx_connect()
 
     market_code = {"SH": 1, "SZ": 0}
     checked = 0
@@ -311,13 +292,14 @@ def test_eastmoney_raw_kline_vs_pytdx_raw_daily_ohlcv() -> None:
                     continue
                 em = kline_today[-1]
 
-                bars = api.get_security_bars(
-                    9, market_code[row.market], row.symbol, 0, 3
-                )
-                if not bars:
+                bars = adapter.get_daily_bars(row.symbol, trade_date, trade_date)
+                if bars is None or bars.empty:
                     continue
-                tdx = bars[-1]
-                tdx_day = str(tdx.get("datetime") or "")[:10]
+                bars_today = bars[bars["datetime"].dt.date == trade_date]
+                if len(bars_today) != 1:
+                    continue
+                tdx = bars_today.iloc[0].to_dict()
+                tdx_day = trade_date.isoformat()
                 if tdx_day != trade_date.isoformat():
                     continue
 
@@ -342,7 +324,7 @@ def test_eastmoney_raw_kline_vs_pytdx_raw_daily_ohlcv() -> None:
                     amt_ratio.append(em_amt / tdx_amt)
     finally:
         try:
-            api.disconnect()
+            adapter.disconnect()
         except Exception:  # noqa: BLE001
             pass
 

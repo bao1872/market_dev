@@ -98,6 +98,18 @@ operation capability 未分离。
   （`get_daily_bars` 调用数 0）；只有 verifier 调 2 次。
 - **旧 external A/B 单位断言按事实修正**（canonical 快照 volume 已是股 → 恒等式去掉 ×100）；
   东财/网络导致的 `external_data` 失败仍为环境性，不 mock。
+- **全市场 pytdx EOD snapshot 禁止跨 connection generation 拼接**：新增
+  `PytdxCallProvenance(server, connection_generation)`，由
+  `_call_with_reconnect(..., return_provenance=True)` 在**成功临界区内原子返回**
+  （绝不在锁外读 `connected_server` 猜来源）；新增
+  `get_security_quotes_with_provenance()`。`fetch_pytdx_eod_snapshot` 要求所有 batch
+  provenance 完全一致（含 generation —— 同 hostname 断线重连后 DNS 后台 IP 可能已变，
+  故 server 相同不等于同一次 connection）。任一批不一致 → `PytdxEodSnapshotError`，
+  **整个 snapshot fail-closed、不返回半截数据**，上层重新从第 1 batch 获取。
+  `PytdxEodSnapshot.provenance` 供日志 / G1B-2B fallback / 故障审计（不保存 resolved IP）。
+- **external A/B 不再自维护 TDX server list**：`_tdx_connect()` 改为走生产
+  `connect_pytdx()` + `adapter.get_daily_bars()`（原硬编码旧 IP 列表属 STALE_TEST，
+  且会掩盖 pool 腐化）。
 
 ## 6. 未做 / 边界
 

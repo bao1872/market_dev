@@ -19,7 +19,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
-from app.core.pytdx_adapter import PytdxSourceError
+from app.core.pytdx_adapter import PytdxCallProvenance, PytdxSourceError
 from app.services.pytdx_eod_snapshot_provider import (
     PYTDX_QUOTE_BATCH_INTERVAL_SECONDS,
     PYTDX_QUOTE_BATCH_SIZE,
@@ -81,6 +81,35 @@ def _reference_row(symbol: str, volume: str, amount: str = "10000") -> object:
     )
 
 
+_PROV = PytdxCallProvenance(server=("159.75.55.232", 7709), connection_generation=1)
+
+
+def _mk_adapter() -> MagicMock:
+    """provenance-aware MagicMock adapter。
+
+    ``get_security_quotes_with_provenance`` 动态委托给 ``get_security_quotes``，
+    沿用各测试已配置的 ``return_value`` / ``side_effect``，并附加固定 provenance。
+    """
+    adapter = MagicMock()
+    adapter.get_security_quotes_with_provenance.side_effect = (
+        lambda syms: (adapter.get_security_quotes(syms), _PROV)
+    )
+    return adapter
+
+
+def _mk_prov_adapter(provs: list[PytdxCallProvenance]) -> MagicMock:
+    """按批返回脚本化 provenance 的 adapter（用于跨 connection coherence 测试）。"""
+    adapter = MagicMock()
+    pending = list(provs)
+
+    def _call(syms: list[str]):  # noqa: ANN202
+        prov = pending.pop(0) if pending else _PROV
+        return [_quote(s) for s in syms], prov
+
+    adapter.get_security_quotes_with_provenance.side_effect = _call
+    return adapter
+
+
 def test_batch_count_for_161_symbols() -> None:
     insts = [_Inst(f"{i:06d}", "SH") for i in range(161)]
     calls: list[list[str]] = []
@@ -89,7 +118,7 @@ def test_batch_count_for_161_symbols() -> None:
         calls.append(list(symbols))
         return [_quote(s) for s in symbols]
 
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.side_effect = fake_get
 
     snap = fetch_pytdx_eod_snapshot(
@@ -106,7 +135,7 @@ def test_batch_count_for_161_symbols() -> None:
 def test_bj_not_requested_but_other_market_errors() -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ"), _Inst("920808", "BJ")]
     seen: list[list[str]] = []
-    adapter = MagicMock()
+    adapter = _mk_adapter()
 
     def fake(symbols: list[str]) -> list[dict[str, object]]:
         seen.append(list(symbols))
@@ -126,7 +155,7 @@ def test_bj_not_requested_but_other_market_errors() -> None:
 
 def test_unknown_market_raises_before_network() -> None:
     insts = [_Inst("600519", "XX")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
 
     with pytest.raises(PytdxEodSnapshotError):
         fetch_pytdx_eod_snapshot(
@@ -142,7 +171,7 @@ def test_return_order_shuffled_still_aligned_by_market_code() -> None:
         _Inst("000001", "SZ"),
         _Inst("600000", "SH"),
     ]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     # 返回顺序打乱，且覆盖两种 market 值
     adapter.get_security_quotes.return_value = [
         _quote("000001", 0),
@@ -160,7 +189,7 @@ def test_return_order_shuffled_still_aligned_by_market_code() -> None:
 # ---- A. 返回 identity 越出当前 batch ----
 def test_identity_outside_current_batch_raises() -> None:
     insts = [_Inst(f"{i:06d}", "SH") for i in range(81)]  # batch1:80, batch2:1(000080)
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("000080")]  # 属于 batch2
 
     with pytest.raises(PytdxEodSnapshotError):
@@ -172,7 +201,7 @@ def test_identity_outside_current_batch_raises() -> None:
 # ---- B. code 正确但 market 错误 ----
 def test_market_mismatch_raises() -> None:
     insts = [_Inst("600519", "SH")]  # expected market 1
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", market=0)]  # wrong market
 
     with pytest.raises(PytdxEodSnapshotError):
@@ -184,7 +213,7 @@ def test_market_mismatch_raises() -> None:
 # ---- C. raw market=True（bool 不能当 int）----
 def test_raw_market_bool_raises() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", market=True)]
 
     with pytest.raises(PytdxEodSnapshotError):
@@ -196,7 +225,7 @@ def test_raw_market_bool_raises() -> None:
 # ---- D. raw row 非 Mapping ----
 def test_raw_row_non_mapping_raises() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = ["not-a-mapping"]
 
     with pytest.raises(PytdxEodSnapshotError):
@@ -208,7 +237,7 @@ def test_raw_row_non_mapping_raises() -> None:
 # ---- E. 输入重复 (market, symbol) → 网络 0 次 ----
 def test_duplicate_input_identity_raises_before_network() -> None:
     insts = [_Inst("600519", "SH"), _Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
 
     with pytest.raises(PytdxEodSnapshotError):
         fetch_pytdx_eod_snapshot(
@@ -223,7 +252,7 @@ def test_duplicate_input_identity_raises_before_network() -> None:
 
 def test_duplicate_quote_code_raises() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519"), _quote("600519")]
 
     with pytest.raises(PytdxEodSnapshotError):
@@ -234,7 +263,7 @@ def test_duplicate_quote_code_raises() -> None:
 
 def test_missing_symbol_recorded_not_faked() -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519")]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -248,7 +277,7 @@ def test_missing_symbol_recorded_not_faked() -> None:
 
 def test_provider_source_error_wrapped() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.side_effect = PytdxSourceError(
         operation="get_security_quotes", message="down"
     )
@@ -263,7 +292,7 @@ def test_provider_source_error_wrapped() -> None:
 
 def test_no_get_daily_bars() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519")]
 
     fetch_pytdx_eod_snapshot(
@@ -275,7 +304,7 @@ def test_no_get_daily_bars() -> None:
 
 def test_no_get_xdxr_info() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519")]
 
     fetch_pytdx_eod_snapshot(
@@ -287,7 +316,7 @@ def test_no_get_xdxr_info() -> None:
 
 def test_no_db_redis_handle() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519")]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -301,7 +330,7 @@ def test_no_db_redis_handle() -> None:
 
 def test_malformed_ohlc_not_silently_fixed() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [
         _quote("600519", open=-5.0, high=9.0, low=20.0, price=10.0)
     ]
@@ -320,7 +349,7 @@ def test_malformed_ohlc_not_silently_fixed() -> None:
 def test_b1_raw_volume_unit_lots_and_source_time_preserved() -> None:
     """B1（G1B-2A）：raw quote vol 单位已证实为 **手（LOTS）**；字段仍叫 raw_volume，fetch 不换算。"""
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", servertime="15:00:03")]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -337,7 +366,7 @@ def test_b1_raw_volume_unit_lots_and_source_time_preserved() -> None:
 # ---- H. Decimal("Infinity") → 字段 None，raw_payload 保留证据 ----
 def test_non_finite_parsed_none_raw_payload_kept() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     q = _quote("600519")
     q["price"] = Decimal("Infinity")
     adapter.get_security_quotes.return_value = [q]
@@ -354,7 +383,7 @@ def test_non_finite_parsed_none_raw_payload_kept() -> None:
 # ---- I. source_time 仅保存，row 无 trade_date / updated_at ----
 def test_no_trade_date_or_updated_at_on_row() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", servertime="15:00:03")]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -370,7 +399,7 @@ def test_no_trade_date_or_updated_at_on_row() -> None:
 # ---- J. 161 symbols → 3 个 quote batch，interval=0 不 sleep ----
 def test_batch_interval_zero_no_sleep() -> None:
     insts = [_Inst(f"{i:06d}", "SH") for i in range(161)]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.side_effect = lambda syms: [_quote(s) for s in syms]
 
     with patch("time.sleep") as fake_sleep:
@@ -385,7 +414,7 @@ def test_batch_interval_zero_no_sleep() -> None:
 # ---- K. 161 symbols + 真实 interval=0.3 → sleep 恰好 2 次，每次 0.3 ----
 def test_batch_interval_sleep_calls() -> None:
     insts = [_Inst(f"{i:06d}", "SH") for i in range(161)]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.side_effect = lambda syms: [_quote(s) for s in syms]
 
     with patch("time.sleep") as fake_sleep:
@@ -403,7 +432,7 @@ def test_batch_interval_sleep_calls() -> None:
 def test_compare_quote_to_daily_reference_volume_ratio() -> None:
     """A/B 诊断：raw_volume(手)=100 vs daily volume(股)=10000 → ratio≈0.01。"""
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", vol=100.0)]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -453,7 +482,7 @@ def _both_markets(adapter: MagicMock) -> None:
 # ---- B2. SH + SZ 有效 → Verified；daily 恰好 2 次 ----
 def test_b2_sh_sz_valid_produces_verified_with_two_daily_calls() -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     _both_markets(adapter)
 
     snap = _fetch(adapter, insts)
@@ -468,7 +497,7 @@ def test_b2_sh_sz_valid_produces_verified_with_two_daily_calls() -> None:
 # ---- B3 / B4. 缺 SH / 缺 SZ sentinel → fail ----
 def test_b3_missing_sh_sentinel_fails() -> None:
     insts = [_Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("000001", 0, servertime="15:30:26")]
     adapter.get_daily_bars.return_value = _daily_ok()
     snap = _fetch(adapter, insts)
@@ -479,7 +508,7 @@ def test_b3_missing_sh_sentinel_fails() -> None:
 
 def test_b4_missing_sz_sentinel_fails() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime="15:30:25")]
     adapter.get_daily_bars.return_value = _daily_ok()
     snap = _fetch(adapter, insts)
@@ -491,7 +520,7 @@ def test_b4_missing_sz_sentinel_fails() -> None:
 # ---- B5. daily exact-date 不是 requested date → fail ----
 def test_b5_daily_exact_date_missing_fails() -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     _both_markets(adapter)
     adapter.get_daily_bars.return_value = _daily_ok(dt="2026-09-10 15:00:00")
     snap = _fetch(adapter, insts)
@@ -510,19 +539,19 @@ def _verify_with_daily(adapter: MagicMock, daily: pd.DataFrame) -> None:  # noqa
 
 
 def test_b6_ohlc_mismatch_fails() -> None:
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     with pytest.raises(PytdxEodSnapshotError, match="close mismatch"):
         _verify_with_daily(adapter, _daily_ok(close=11.0))
 
 
 def test_b7_volume_mismatch_fails() -> None:
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     with pytest.raises(PytdxEodSnapshotError, match="volume mismatch"):
         _verify_with_daily(adapter, _daily_ok(volume=200000.0))
 
 
 def test_b8_amount_mismatch_fails() -> None:
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     with pytest.raises(PytdxEodSnapshotError, match="amount mismatch"):
         _verify_with_daily(adapter, _daily_ok(amount=20000.0))
 
@@ -531,7 +560,7 @@ def test_b8_amount_mismatch_fails() -> None:
 @pytest.mark.parametrize("bad", ["not-a-time", "15", "15:30", ""])
 def test_b9_source_time_malformed_fails(bad: str) -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime=bad)]
     adapter.get_daily_bars.return_value = _daily_ok()
     snap = _fetch(adapter, insts)
@@ -542,7 +571,7 @@ def test_b9_source_time_malformed_fails(bad: str) -> None:
 
 def test_b10_source_time_before_15_fails() -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime="14:59:59")]
     adapter.get_daily_bars.return_value = _daily_ok()
     snap = _fetch(adapter, insts)
@@ -555,7 +584,7 @@ def test_b10_source_time_before_15_fails() -> None:
 @pytest.mark.parametrize("bad", ["not-a-time", "14:59:59", None, ""])
 def test_b9b_converter_fails_closed_on_unusable_source_time(bad: object) -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime=bad)]
     snap = _fetch(adapter, insts)
     verified = VerifiedPytdxEodSnapshot(
@@ -569,7 +598,7 @@ def test_b9b_converter_fails_closed_on_unusable_source_time(bad: object) -> None
 # ---- B11. converter：123 手 → 12300 股 ----
 def test_b11_converter_volume_lots_to_shares() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [
         _quote("600519", 1, vol=123.0, servertime="15:30:25")
     ]
@@ -590,7 +619,7 @@ def test_b11_converter_volume_lots_to_shares() -> None:
 # ---- B12. captured_at 跨日不得泄漏进 canonical 日期 ----
 def test_b12_captured_at_cross_day_does_not_leak_into_canonical_date() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [
         _quote("600519", 1, servertime="15:30:25")
     ]
@@ -609,7 +638,7 @@ def test_b12_captured_at_cross_day_does_not_leak_into_canonical_date() -> None:
 # ---- B13. converter 拒绝未验证的 raw snapshot ----
 def test_b13_converter_rejects_raw_snapshot() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", 1)]
     snap = _fetch(adapter, insts)
 
@@ -620,7 +649,7 @@ def test_b13_converter_rejects_raw_snapshot() -> None:
 # ---- B14. raw fetch 绝不调用 get_daily_bars ----
 def test_b14_fetch_raw_never_calls_daily() -> None:
     insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     _both_markets(adapter)
 
     _fetch(adapter, insts)
@@ -631,7 +660,7 @@ def test_b14_fetch_raw_never_calls_daily() -> None:
 def test_compare_quote_to_daily_reference_amount_ratio() -> None:
     """A/B 诊断：amount ratio ≈ 1（元/元）。"""
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", vol=100.0)]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -646,7 +675,7 @@ def test_compare_quote_to_daily_reference_amount_ratio() -> None:
 
 def test_compare_quote_skips_unmatched_reference() -> None:
     insts = [_Inst("600519", "SH")]
-    adapter = MagicMock()
+    adapter = _mk_adapter()
     adapter.get_security_quotes.return_value = [_quote("600519", vol=100.0)]
 
     snap = fetch_pytdx_eod_snapshot(
@@ -656,3 +685,56 @@ def test_compare_quote_skips_unmatched_reference() -> None:
     res = compare_quote_to_daily_reference(snap.rows, [_reference_row("000001", "10000")])
 
     assert res["compared_count"] == 0
+
+
+# ══════════════════════════════════════════════════════════════════════
+# G1B-2A coherence：全市场 snapshot 禁止跨 connection generation 拼接（C1 ~ C4）
+# ══════════════════════════════════════════════════════════════════════
+_P_A7 = PytdxCallProvenance(server=("A", 7709), connection_generation=7)
+_P_B8 = PytdxCallProvenance(server=("B", 7709), connection_generation=8)
+_P_J7 = PytdxCallProvenance(server=("jstdx.gtjas.com", 7709), connection_generation=7)
+_P_J8 = PytdxCallProvenance(server=("jstdx.gtjas.com", 7709), connection_generation=8)
+
+
+def _fetch_161(adapter: MagicMock):  # noqa: ANN202
+    insts = [_Inst(f"{i:06d}", "SH") for i in range(161)]
+    return fetch_pytdx_eod_snapshot(
+        adapter, insts, trade_date=_D, batch_interval_seconds=0.0
+    )
+
+
+def test_c1_same_connection_multi_batch_passes() -> None:
+    """同一 connection 的 3 个 batch → PASS，provenance == A/gen7。"""
+    adapter = _mk_prov_adapter([_P_A7, _P_A7, _P_A7])
+
+    snap = _fetch_161(adapter)
+
+    assert snap.returned_count == 161
+    assert snap.provenance == _P_A7
+
+
+def test_c2_server_switch_mid_snapshot_fails() -> None:
+    """batch1 A/gen7 → batch2 B/gen8 → 整体作废，不返回半截 snapshot。"""
+    adapter = _mk_prov_adapter([_P_A7, _P_B8, _P_B8])
+
+    with pytest.raises(PytdxEodSnapshotError, match="connection changed"):
+        _fetch_161(adapter)
+
+
+def test_c3_same_hostname_reconnect_fails() -> None:
+    """同 hostname 但 generation 变化（DNS 集群后台 IP 可能已变）→ FAIL。"""
+    adapter = _mk_prov_adapter([_P_J7, _P_J8, _P_J8])
+
+    with pytest.raises(PytdxEodSnapshotError, match="connection changed"):
+        _fetch_161(adapter)
+
+
+def test_c4_first_batch_internal_failover_then_stable_passes() -> None:
+    """首批内部 failover（A fail → B success）→ provenance 从最终成功的 B 建立；后续稳定 → PASS。"""
+    adapter = _mk_prov_adapter([_P_B8, _P_B8, _P_B8])
+
+    snap = _fetch_161(adapter)
+
+    assert snap.returned_count == 161
+    assert snap.provenance == _P_B8
+    assert snap.provenance.connection_generation == 8
