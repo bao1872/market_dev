@@ -421,7 +421,14 @@ def test_node_cluster_input_provider_signature_rejects_display() -> None:
     params = set(sig.parameters.keys())
 
     # 允许的参数（cls 在 classmethod 签名中不可见）
-    expected = {"session", "instrument_id", "adjustment_as_of", "end_date"}
+    # C1 新增 adjustment_context：Context mode 接入点（旧 caller 不传即走 Legacy mode）
+    expected = {
+        "session",
+        "instrument_id",
+        "adjustment_as_of",
+        "end_date",
+        "adjustment_context",
+    }
     assert params == expected, (
         f"NodeClusterInputProvider.get_inputs 签名异常:\n"
         f"  期望: {expected}\n  实际: {params}\n"

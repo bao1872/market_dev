@@ -33,6 +33,7 @@ import logging
 import uuid
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -41,7 +42,33 @@ from app.constants.indicator_contract import (
     DAILY_HISTORY_BARS,
     NODE_CLUSTER_LOW_BARS,
 )
+from app.services.business_date_adjustment_context import (
+    BusinessDateAdjustmentContext,
+    BusinessDateAdjustmentService,
+)
 from app.services.market_data_aggregation_service import MarketDataAggregationService
+
+
+class NodeAdjustmentContextMismatchError(RuntimeError):
+    """Node 输入与上游传入的 BusinessDateAdjustmentContext 身份冲突（fail-closed）。
+
+    与 B2B 的 BusinessDateAdjustmentUnavailableError 区分：后者是「坐标本身不可信」，
+    本错误是「调用方传入的 Context 与本次 Node 输入请求参数不一致」（instrument_id /
+    adjustment_as_of / end_date 冲突）。两类都属于 preflight 阶段、零 MDAS I/O。
+    """
+
+    def __init__(
+        self,
+        *,
+        instrument_id: uuid.UUID,
+        reason: str,
+    ) -> None:
+        self.instrument_id = instrument_id
+        self.reason = reason
+        super().__init__(
+            "node adjustment context mismatch "
+            f"instrument_id={instrument_id} reason={reason}"
+        )
 
 logger = logging.getLogger("services.node_cluster_input_provider")
 
@@ -74,6 +101,9 @@ class NodeClusterInput:
         availability: "available" | "degraded" | "unavailable"
         degraded_reason: str | None
         adjustment_as_of: 复权锚点（回显）
+        adjustment_context_hash: 复权坐标版本身份（Context mode）；
+            Legacy mode 为 None。下一阶段 Node Target version 的输入维度之一，
+            与 daily/m15 source hash 正交：source 不变但除权坐标变 → 此值变。
     """
 
     daily_bars: pd.DataFrame
@@ -91,6 +121,7 @@ class NodeClusterInput:
     availability: str
     degraded_reason: str | None
     adjustment_as_of: date | None
+    adjustment_context_hash: str | None = None
 
 
 class NodeClusterInputProvider:
@@ -114,25 +145,150 @@ class NodeClusterInputProvider:
         *,
         adjustment_as_of: date | None = None,
         end_date: date | None = None,
+        adjustment_context: BusinessDateAdjustmentContext | None = None,
     ) -> NodeClusterInput:
-        """获取 Node Cluster 输入（固定 250 daily + 4000 15m, completed qfq）。
+        """获取 Node Cluster 输入（固定 250 daily + 4000 15m）。
 
         Node 需要计算时必须无条件加载完整 250+4000，不再依赖 needs_15min、
         页面周期或 released strategy 状态。
 
+        双模式：
+        - Legacy mode（``adjustment_context is None``）：MDAS 直接返回 completed qfq，
+          行为与历史完全一致；``adjustment_context_hash=None``。
+        - Context mode（``adjustment_context is not None``）：MDAS 只返回
+          ``adj="none"`` 的 completed raw bars，复权由 BusinessDateAdjustmentContext
+          统一施加。Context 必须由上层 orchestration 预先构建并显式传入（Provider
+          自身不构造、不触发 XDXR force refresh）。
+
         Args:
             session: 异步 DB 会话
             instrument_id: 标的 UUID
-            adjustment_as_of: 复权锚点（None=最新；date=point-in-time qfq 因子截断）
+            adjustment_as_of: 复权锚点（Legacy mode 透传给 MDAS；Context mode 必须与
+                Context.business_date 一致，否则冲突）。
             end_date: 行情截止日期（None=最新；date=point-in-time，仅返回 <= end_date 的 bar）。
-                Feature Snapshot 盘后链使用 end_date=trade_date 保证不读取未来数据。
+                Context mode 下 end_date=None 时默认取 Context.business_date，
+                保证 point-in-time 不读取未来 bars。
+            adjustment_context: 预构建的 business-date 复权坐标（C1 接入点）。
 
         Returns:
             NodeClusterInput（含 bars + hash + availability 状态机结果）
         """
         mdas = MarketDataAggregationService()
 
-        # daily: completed qfq DAILY_HISTORY_BARS=250 根（合同常量）
+        if adjustment_context is None:
+            return await cls._get_inputs_legacy(
+                mdas, session, instrument_id,
+                adjustment_as_of=adjustment_as_of, end_date=end_date,
+            )
+
+        cls._validate_adjustment_context(
+            adjustment_context, instrument_id,
+            adjustment_as_of=adjustment_as_of, end_date=end_date,
+        )
+
+        context_service = BusinessDateAdjustmentService()
+
+        # Context mode：end_date=None 时锁定为 Context.business_date（禁止未来泄漏）
+        effective_end_date = (
+            end_date if end_date is not None else adjustment_context.business_date
+        )
+
+        # MDAS 只负责唯一行情出口 + completed raw bars（adj="none"，不复权）
+        daily_agg = await mdas.get_bars(
+            session,
+            instrument_id,
+            timeframe="1d",
+            adj="none",
+            include_realtime=False,
+            completed_only=True,
+            end_date=effective_end_date,
+            limit=_NODE_DAILY_REQUIRED,
+        )
+        m15_agg = await mdas.get_bars(
+            session,
+            instrument_id,
+            timeframe="15m",
+            adj="none",
+            include_realtime=False,
+            completed_only=True,
+            end_date=effective_end_date,
+            limit=_NODE_15M_REQUIRED,
+        )
+
+        raw_daily = daily_agg.bars
+        raw_m15 = m15_agg.bars
+
+        # 复权 owner 从 MDAS canonical DB factor 切换为 BusinessDateAdjustmentContext
+        daily_bars = (
+            context_service.apply_context_qfq(
+                raw_daily, adjustment_context, intraday=False,
+            )
+            if not raw_daily.empty else raw_daily
+        )
+        bars_15m = (
+            context_service.apply_context_qfq(
+                raw_m15, adjustment_context, intraday=True,
+            )
+            if not raw_m15.empty else raw_m15
+        )
+
+        availability, degraded_reason = cls._compute_availability(
+            daily_count=len(daily_bars),
+            m15_count=len(bars_15m),
+            daily_history_exhausted=daily_agg.history_exhausted,
+            m15_history_exhausted=m15_agg.history_exhausted,
+        )
+
+        logger.info(
+            "NODE_INPUT_PROVIDER instrument_id=%s context_mode=True "
+            "daily_count=%d/%d m15_count=%d/%d "
+            "daily_history_exhausted=%s m15_history_exhausted=%s "
+            "availability=%s degraded_reason=%s "
+            "daily_source_hash=%s m15_source_hash=%s "
+            "adjustment_context_hash=%s",
+            instrument_id,
+            len(daily_bars), _NODE_DAILY_REQUIRED,
+            len(bars_15m), _NODE_15M_REQUIRED,
+            daily_agg.history_exhausted, m15_agg.history_exhausted,
+            availability, degraded_reason,
+            daily_agg.source_bar_hash, m15_agg.source_bar_hash,
+            adjustment_context.context_hash,
+        )
+
+        return NodeClusterInput(
+            daily_bars=daily_bars,
+            bars_15m=bars_15m,
+            daily_source_hash=daily_agg.source_bar_hash,
+            # Context mode：factor identity 来自 Context（daily/15m 共享 business-date 坐标）
+            daily_adj_factor_hash=adjustment_context.factor_hash,
+            m15_source_hash=m15_agg.source_bar_hash,
+            m15_adj_factor_hash=adjustment_context.factor_hash,
+            daily_count=len(daily_bars),
+            m15_count=len(bars_15m),
+            daily_requested=_NODE_DAILY_REQUIRED,
+            m15_requested=_NODE_15M_REQUIRED,
+            daily_history_exhausted=daily_agg.history_exhausted,
+            m15_history_exhausted=m15_agg.history_exhausted,
+            availability=availability,
+            degraded_reason=degraded_reason,
+            adjustment_as_of=adjustment_context.business_date,
+            adjustment_context_hash=adjustment_context.context_hash,
+        )
+
+    @classmethod
+    async def _get_inputs_legacy(
+        cls,
+        mdas: MarketDataAggregationService,
+        session: AsyncSession,
+        instrument_id: uuid.UUID,
+        *,
+        adjustment_as_of: date | None = None,
+        end_date: date | None = None,
+    ) -> NodeClusterInput:
+        """Legacy mode：MDAS 直接返回 completed qfq（与历史行为完全一致）。
+
+        C1 不修改任何 Legacy 语义；仅新增 ``adjustment_context_hash=None`` 字段。
+        """
         daily_agg = await mdas.get_bars(
             session,
             instrument_id,
@@ -145,8 +301,6 @@ class NodeClusterInputProvider:
             limit=_NODE_DAILY_REQUIRED,
         )
 
-        # 15m: completed qfq NODE_CLUSTER_LOW_BARS=4000 根（合同常量）
-        # [CP-V3-A] MDAS 内部 count-aware 回补：limit=4000 时自动扩大回看天数
         m15_agg = await mdas.get_bars(
             session,
             instrument_id,
@@ -162,7 +316,6 @@ class NodeClusterInputProvider:
         daily_bars = daily_agg.bars
         bars_15m = m15_agg.bars
 
-        # availability 三态状态机
         availability, degraded_reason = cls._compute_availability(
             daily_count=len(daily_bars),
             m15_count=len(bars_15m),
@@ -171,7 +324,7 @@ class NodeClusterInputProvider:
         )
 
         logger.info(
-            "NODE_INPUT_PROVIDER instrument_id=%s "
+            "NODE_INPUT_PROVIDER instrument_id=%s context_mode=False "
             "daily_count=%d/%d m15_count=%d/%d "
             "daily_history_exhausted=%s m15_history_exhausted=%s "
             "availability=%s degraded_reason=%s "
@@ -200,6 +353,52 @@ class NodeClusterInputProvider:
             availability=availability,
             degraded_reason=degraded_reason,
             adjustment_as_of=adjustment_as_of,
+            adjustment_context_hash=None,
+        )
+
+    @classmethod
+    def _validate_adjustment_context(
+        cls,
+        adjustment_context: BusinessDateAdjustmentContext,
+        instrument_id: uuid.UUID,
+        *,
+        adjustment_as_of: date | None,
+        end_date: date | None,
+    ) -> None:
+        """Context mode 的零 I/O preflight（任何 MDAS 调用之前）。
+
+        - instrument_id 必须一致；
+        - adjustment_as_of 若显式给出必须与 Context.business_date 一致（不静默选边）；
+        - end_date 不得晚于 Context.business_date（禁止未来泄漏）；
+        - 复用 B2B 公共消费入口 ``quote_qfq_price(Decimal("1"), context)`` 完成完整
+          integrity 校验（freshness / factor_hash / context_hash / 派生 invariant）。
+          任何 B2B 不可用 / 篡改都直接传播 BusinessDateAdjustmentUnavailableError，
+          **绝不** fallback 到 legacy MDAS qfq。
+        """
+        if adjustment_context.instrument_id != instrument_id:
+            raise NodeAdjustmentContextMismatchError(
+                instrument_id=instrument_id,
+                reason="instrument_id_mismatch",
+            )
+
+        if (
+            adjustment_as_of is not None
+            and adjustment_as_of != adjustment_context.business_date
+        ):
+            raise NodeAdjustmentContextMismatchError(
+                instrument_id=instrument_id,
+                reason="adjustment_as_of_mismatch",
+            )
+
+        if end_date is not None and end_date > adjustment_context.business_date:
+            raise NodeAdjustmentContextMismatchError(
+                instrument_id=instrument_id,
+                reason="end_date_after_context_business_date",
+            )
+
+        # 零 I/O：完整 integrity 校验，失败直接传播 B2B 错误（禁止降级为 legacy qfq）
+        BusinessDateAdjustmentService().quote_qfq_price(
+            Decimal("1"), adjustment_context,
         )
 
     @staticmethod
@@ -273,6 +472,7 @@ class NodeClusterInputProvider:
                 if node_input.adjustment_as_of is not None
                 else None
             ),
+            "adjustment_context_hash": node_input.adjustment_context_hash,
         }
 
 

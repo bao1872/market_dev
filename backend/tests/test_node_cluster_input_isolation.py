@@ -27,7 +27,10 @@ from __future__ import annotations
 
 import ast
 import inspect
-from datetime import date
+import uuid
+from contextlib import contextmanager
+from dataclasses import replace as _replace
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
@@ -38,7 +41,13 @@ from app.constants.indicator_contract import (
     INDICATOR_BARS,
     NODE_CLUSTER_LOW_BARS,
 )
+from app.services.business_date_adjustment_context import (
+    BusinessDateAdjustmentContext,
+    BusinessDateAdjustmentService,
+    BusinessDateAdjustmentUnavailableError,
+)
 from app.services.node_cluster_input_provider import (
+    NodeAdjustmentContextMismatchError,
     NodeClusterInput,
     NodeClusterInputProvider,
 )
@@ -782,6 +791,471 @@ def _run_standalone_tests() -> int:
         failures.append(f"to_dict: {e}")
 
     return len(failures)
+
+
+# =============================================================================
+# C1：NodeClusterInputProvider + BusinessDateAdjustmentContext 绑定
+# =============================================================================
+
+
+# ---- C1 测试辅助 ----
+
+
+def _wire_raw(monkeypatch, raw: pd.DataFrame) -> None:
+    """monkeypatch repository 的 raw daily 读取（不连 DB）。"""
+    monkeypatch.setattr(
+        "app.services.business_date_adjustment_context.get_raw_daily_close_series",
+        AsyncMock(return_value=raw),
+    )
+
+
+class _FakeXdxrAdapter:
+    """返回固定 XDXR DataFrame 的假 adapter。"""
+
+    def __init__(self, df: pd.DataFrame) -> None:
+        self._df = df
+
+    def get_xdxr_info(self, symbol: str, **kwargs: object) -> pd.DataFrame:
+        return self._df
+
+
+def _raw_df(pairs: list[tuple[str, float]]) -> pd.DataFrame:
+    return pd.DataFrame({
+        "datetime": [pd.Timestamp(d) for d, _ in pairs],
+        "close": [c for _, c in pairs],
+    })
+
+
+def _xdxr_df(events: list[dict]) -> pd.DataFrame:
+    rows = []
+    for e in events:
+        rows.append({
+            "date": pd.Timestamp(e["date"]),
+            "category": e.get("category", 1),
+            "fenhong": e.get("fenhong", 0.0),
+            "songzhuangu": e.get("songzhuangu", 0.0),
+            "peigu": e.get("peigu", 0.0),
+            "peigujia": e.get("peigujia", 0.0),
+        })
+    return pd.DataFrame(rows, columns=[
+        "date", "category", "fenhong", "songzhuangu", "peigu", "peigujia",
+    ])
+
+
+def _make_bar(dt: str, close: float) -> pd.DataFrame:
+    idx = pd.DatetimeIndex([pd.Timestamp(dt)])
+    idx.name = "bar_time"
+    return pd.DataFrame(
+        {
+            "open": [close],
+            "high": [close],
+            "low": [close],
+            "close": [close],
+            "volume": [1],
+        },
+        index=idx,
+    )
+
+
+def _make_named_bars(dates: list[date], close: float = 20.0) -> pd.DataFrame:
+    idx = pd.DatetimeIndex([pd.Timestamp(d) for d in dates])
+    idx.name = "bar_time"
+    return pd.DataFrame(
+        {
+            "open": [close] * len(dates),
+            "high": [close] * len(dates),
+            "low": [close] * len(dates),
+            "close": [close] * len(dates),
+            "volume": [1] * len(dates),
+        },
+        index=idx,
+    )
+
+
+async def _build_context(
+    monkeypatch,
+    *,
+    instrument_id: uuid.UUID,
+    raw: pd.DataFrame,
+    xdxr: pd.DataFrame,
+    business_date: date,
+    expected_completed_through: date,
+    symbol: str = "600519",
+) -> BusinessDateAdjustmentContext:
+    _wire_raw(monkeypatch, raw)
+    adapter = _FakeXdxrAdapter(xdxr)
+    return await BusinessDateAdjustmentService().build_business_date_adjustment_context(
+        MagicMock(),
+        instrument_id=instrument_id,
+        symbol=symbol,
+        business_date=business_date,
+        expected_completed_through=expected_completed_through,
+        adapter=adapter,
+    )
+
+
+@contextmanager
+def _patch_mdas(
+    daily_bars: pd.DataFrame,
+    m15_bars: pd.DataFrame,
+    *,
+    daily_hash: str = "daily-raw-abc",
+    m15_hash: str = "m15-raw-def",
+    daily_exhausted: bool = False,
+    m15_exhausted: bool = False,
+):
+    daily_agg = MagicMock()
+    daily_agg.bars = daily_bars
+    daily_agg.source_bar_hash = daily_hash
+    daily_agg.history_exhausted = daily_exhausted
+    daily_agg.adj_factor_hash = ""
+    m15_agg = MagicMock()
+    m15_agg.bars = m15_bars
+    m15_agg.source_bar_hash = m15_hash
+    m15_agg.history_exhausted = m15_exhausted
+    m15_agg.adj_factor_hash = ""
+
+    with patch(
+        "app.services.node_cluster_input_provider.MarketDataAggregationService"
+    ) as mock_mdas_cls:
+        mdas = mock_mdas_cls.return_value
+        mdas.get_bars = AsyncMock(side_effect=[daily_agg, m15_agg])
+        yield mdas
+
+
+# ---- C1 测试 ----
+
+
+@pytest.mark.asyncio
+async def test_legacy_mode_adj_qfq_and_context_hash_none() -> None:
+    """Legacy mode（adjustment_context=None）行为必须与历史完全一致。"""
+    daily_df = _make_bars(250)
+    m15_df = _make_bars(4000, freq="15min")
+
+    with patch(
+        "app.services.node_cluster_input_provider.MarketDataAggregationService"
+    ) as mock_mdas_cls:
+        mock_mdas = mock_mdas_cls.return_value
+        mock_mdas.get_bars = AsyncMock(
+            side_effect=[
+                _make_agg_result(daily_df, source_bar_hash="d1", adj_factor_hash="a1"),
+                _make_agg_result(m15_df, source_bar_hash="m1", adj_factor_hash="a2"),
+            ]
+        )
+        result = await NodeClusterInputProvider.get_inputs(
+            MagicMock(), uuid.UUID(int=1),
+        )
+
+    daily_call = mock_mdas.get_bars.call_args_list[0]
+    m15_call = mock_mdas.get_bars.call_args_list[1]
+    assert daily_call.kwargs["adj"] == "qfq"
+    assert m15_call.kwargs["adj"] == "qfq"
+    assert daily_call.kwargs["completed_only"] is True
+    assert daily_call.kwargs["include_realtime"] is False
+    assert daily_call.kwargs["limit"] == 250
+    assert m15_call.kwargs["limit"] == 4000
+    # Legacy 回显 MDAS adj_factor_hash
+    assert result.daily_adj_factor_hash == "a1"
+    assert result.m15_adj_factor_hash == "a2"
+    assert result.adjustment_context_hash is None
+
+
+@pytest.mark.asyncio
+async def test_context_mode_mdas_uses_adj_none_and_source_hash_passthrough(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Context mode：MDAS 必须 adj='none'，且 source hash 原样透传（不重算）。"""
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    daily_bars = _make_bar("2026-09-11", 20.0)
+    m15_bars = pd.concat([
+        _make_bar("2026-09-11", 20.0),
+        _make_bar("2026-09-12", 10.0),
+    ])
+
+    with _patch_mdas(daily_bars, m15_bars) as mdas:
+        result = await NodeClusterInputProvider.get_inputs(
+            MagicMock(), uuid.UUID(int=1),
+            adjustment_context=ctx,
+        )
+
+    daily_call = mdas.get_bars.call_args_list[0]
+    m15_call = mdas.get_bars.call_args_list[1]
+    assert daily_call.kwargs["adj"] == "none"
+    assert m15_call.kwargs["adj"] == "none"
+    # Context mode 不把 factor 锚点传给 MDAS raw 请求
+    assert "adjustment_as_of" not in daily_call.kwargs
+    assert "adjustment_as_of" not in m15_call.kwargs
+    # source hash 原样透传
+    assert result.daily_source_hash == "daily-raw-abc"
+    assert result.m15_source_hash == "m15-raw-def"
+
+
+@pytest.mark.asyncio
+async def test_context_mode_10for10_same_coordinate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """10送10：历史 daily / 历史 15m / 当日 completed 15m 都在 business-date 坐标。"""
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    daily_bars = _make_bar("2026-09-11", 20.0)
+    m15_bars = pd.concat([
+        _make_bar("2026-09-11", 20.0),
+        _make_bar("2026-09-12", 10.0),
+    ])
+
+    with _patch_mdas(daily_bars, m15_bars):
+        result = await NodeClusterInputProvider.get_inputs(
+            MagicMock(), uuid.UUID(int=1),
+            adjustment_context=ctx,
+        )
+
+    assert abs(
+        float(result.daily_bars.loc[pd.Timestamp("2026-09-11"), "close"]) - 10.0
+    ) < 1e-9
+    assert abs(
+        float(result.bars_15m.loc[pd.Timestamp("2026-09-11"), "close"]) - 10.0
+    ) < 1e-9
+    # 当日 completed 15m 在 business-date anchor(=1.0) 坐标
+    assert abs(
+        float(result.bars_15m.loc[pd.Timestamp("2026-09-12"), "close"]) - 10.0
+    ) < 1e-9
+
+
+@pytest.mark.asyncio
+async def test_context_mode_hashes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """factor_hash / context_hash 必须来自 Context；daily/15m 共享同一 factor 坐标。"""
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    daily_bars = _make_bar("2026-09-11", 20.0)
+    m15_bars = _make_bar("2026-09-11", 20.0)
+
+    with _patch_mdas(daily_bars, m15_bars):
+        result = await NodeClusterInputProvider.get_inputs(
+            MagicMock(), uuid.UUID(int=1),
+            adjustment_context=ctx,
+        )
+
+    assert result.daily_adj_factor_hash == ctx.factor_hash
+    assert result.m15_adj_factor_hash == ctx.factor_hash
+    assert result.adjustment_context_hash == ctx.context_hash
+
+    payload = NodeClusterInputProvider.to_dict(result)
+    assert payload["adjustment_context_hash"] == ctx.context_hash
+    assert payload["daily_source_hash"] == "daily-raw-abc"
+    assert payload["bars_15m_source_hash"] == "m15-raw-def"
+
+
+@pytest.mark.asyncio
+async def test_context_instrument_mismatch_zero_mdas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+    bad = _replace(ctx, instrument_id=uuid.uuid4())
+
+    with _patch_mdas(_make_bar("2026-09-11", 20.0), _make_bar("2026-09-11", 20.0)) as mdas:
+        with pytest.raises(NodeAdjustmentContextMismatchError) as ei:
+            await NodeClusterInputProvider.get_inputs(
+                MagicMock(), uuid.UUID(int=1),
+                adjustment_context=bad,
+            )
+    assert ei.value.reason == "instrument_id_mismatch"
+    mdas.get_bars.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_adjustment_as_of_mismatch_zero_mdas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    with _patch_mdas(_make_bar("2026-09-11", 20.0), _make_bar("2026-09-11", 20.0)) as mdas:
+        with pytest.raises(NodeAdjustmentContextMismatchError) as ei:
+            await NodeClusterInputProvider.get_inputs(
+                MagicMock(), uuid.UUID(int=1),
+                adjustment_as_of=date(2026, 9, 11),
+                adjustment_context=ctx,
+            )
+    assert ei.value.reason == "adjustment_as_of_mismatch"
+    mdas.get_bars.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_future_end_date_zero_mdas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    with _patch_mdas(_make_bar("2026-09-11", 20.0), _make_bar("2026-09-11", 20.0)) as mdas:
+        with pytest.raises(NodeAdjustmentContextMismatchError) as ei:
+            await NodeClusterInputProvider.get_inputs(
+                MagicMock(), uuid.UUID(int=1),
+                end_date=date(2026, 9, 13),
+                adjustment_context=ctx,
+            )
+    assert ei.value.reason == "end_date_after_context_business_date"
+    mdas.get_bars.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_freshness_proven_false_zero_mdas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B2B integrity 失败必须 zero-MDAS，且直接传播 BusinessDateAdjustmentUnavailableError。"""
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+    bad = _replace(ctx, freshness_proven=False)
+
+    with _patch_mdas(_make_bar("2026-09-11", 20.0), _make_bar("2026-09-11", 20.0)) as mdas:
+        with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+            await NodeClusterInputProvider.get_inputs(
+                MagicMock(), uuid.UUID(int=1),
+                adjustment_context=bad,
+            )
+    assert ei.value.reason == "context_freshness_not_proven"
+    mdas.get_bars.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_tampered_factor_df_zero_mdas(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """篡改 factor payload 必须 zero-MDAS，绝不 fallback 到 legacy MDAS qfq。"""
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+    ctx.factor_df.loc[0, "adj_factor"] = 123.0
+
+    with _patch_mdas(_make_bar("2026-09-11", 20.0), _make_bar("2026-09-11", 20.0)) as mdas:
+        with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+            await NodeClusterInputProvider.get_inputs(
+                MagicMock(), uuid.UUID(int=1),
+                adjustment_context=ctx,
+            )
+    assert ei.value.reason == "context_factor_hash_mismatch"
+    mdas.get_bars.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_context_mode_point_in_time_end_date_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """end_date=None 时 Context mode 必须默认取 Context.business_date（禁止未来泄漏）。"""
+    # 构造无公司行为的 context，business_date=2026-08-10
+    base_end = date(2026, 8, 9)
+    raw_dates = [base_end - timedelta(days=i) for i in range(150)]
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([(d.isoformat(), 20.0) for d in raw_dates]),
+        xdxr=_xdxr_df([]),
+        business_date=date(2026, 8, 10),
+        expected_completed_through=base_end,
+    )
+
+    daily_bars = _make_named_bars(raw_dates)
+    m15_bars = _make_named_bars(raw_dates[:144])
+
+    with _patch_mdas(daily_bars, m15_bars) as mdas:
+        await NodeClusterInputProvider.get_inputs(
+            MagicMock(), uuid.UUID(int=1),
+            adjustment_context=ctx,
+        )
+        daily_call = mdas.get_bars.call_args_list[0]
+        assert daily_call.kwargs["end_date"] == date(2026, 8, 10)
+        assert "adjustment_as_of" not in daily_call.kwargs
+
+
+@pytest.mark.asyncio
+async def test_context_mode_availability_state_machine_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """availability / history_exhausted 状态机在 context mode 下保持原合同。"""
+    base_end = date(2026, 9, 11)
+    daily_dates = [base_end - timedelta(days=i) for i in range(250)]
+    m15_dates = [base_end - timedelta(days=i) for i in range(144)]
+    ctx = await _build_context(
+        monkeypatch,
+        instrument_id=uuid.UUID(int=1),
+        raw=_raw_df([(d.isoformat(), 20.0) for d in daily_dates]),
+        xdxr=_xdxr_df([]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=base_end,
+    )
+
+    daily_bars = _make_named_bars(daily_dates)
+    m15_bars = _make_named_bars(m15_dates)
+
+    with _patch_mdas(
+        daily_bars, m15_bars, m15_exhausted=True
+    ) as mdas:
+        result = await NodeClusterInputProvider.get_inputs(
+            MagicMock(), uuid.UUID(int=1),
+            adjustment_context=ctx,
+        )
+        assert mdas.get_bars.call_args_list[0].kwargs["completed_only"] is True
+        assert mdas.get_bars.call_args_list[0].kwargs["include_realtime"] is False
+
+    assert result.daily_count == 250
+    assert result.m15_count == 144
+    assert result.m15_history_exhausted is True
+    assert result.availability == "degraded"
+    assert result.degraded_reason == "INSUFFICIENT_15M_HISTORY"
 
 
 if __name__ == "__main__":
