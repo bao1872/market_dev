@@ -875,6 +875,49 @@ async def get_adj_factor_series(
     return df
 
 
+async def get_raw_daily_close_series(
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    *,
+    end_date: date,
+) -> pd.DataFrame:
+    """公开只读 API：取某标的截至 ``end_date``（含）的 **raw 日线 close** 序列。
+
+    为什么必须只用 raw close、**不得**复用 ``_get_adj_factor_df`` / ``bars_daily.adj_factor``：
+    ``bars_daily.adj_factor`` 是 canonical 落库坐标；除权日开盘前它仍是**旧坐标**
+    （最新 factor 日期 = 昨日）。若 business-date overlay 直接消费 DB factor，
+    会得到「昨天 factor=0.5、denominator 也是 0.5」从而把除权效果抵消掉。
+    因此 overlay 必须从 raw close 重新推导 factor（见
+    ``business_date_adjustment_context``）。
+
+    本函数是纯只读查询，不写库、不调 provider。
+
+    Returns:
+        DataFrame: columns=[datetime, close]，按 trade_date 升序；无数据时为空 DataFrame。
+    """
+    try:
+        result = await session.execute(
+            select(BarDaily.trade_date, BarDaily.close)
+            .where(BarDaily.instrument_id == instrument_id)
+            .where(BarDaily.trade_date <= end_date)
+            .order_by(BarDaily.trade_date)
+        )
+        rows = result.all()
+    except Exception as exc:
+        logger.warning(
+            "查询 raw daily close 失败 instrument_id=%s: %s", instrument_id, exc,
+        )
+        raise
+
+    if not rows:
+        return pd.DataFrame(columns=["datetime", "close"])
+
+    df = pd.DataFrame(rows, columns=["trade_date", "close"])
+    df["datetime"] = pd.to_datetime(df["trade_date"])
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    return df[["datetime", "close"]].reset_index(drop=True)
+
+
 async def get_daily_bars_batch(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],
