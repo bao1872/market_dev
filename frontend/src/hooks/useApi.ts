@@ -1532,7 +1532,11 @@ export function useAfterClosePipelineRuns(
 function invalidateAfterCloseAdminQueries(queryClient: ReturnType<typeof useQueryClient>) {
   queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
   queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
-  queryClient.invalidateQueries({ queryKey: ['scheduler-job-runs'] })
+  // [FIX] 任务管理页（AdminJobsPage）实际使用 ['admin', 'scheduler-job-runs', params]。
+  // 原写法少了 'admin' 前缀，导致 after-close 变更成功后任务列表**永不刷新**，
+  // 页面继续显示旧的 running/queued，看起来像"取消没生效"。
+  // React Query 前缀失效会覆盖所有 params 版本，故这里不需要带 params。
+  queryClient.invalidateQueries({ queryKey: ['admin', 'scheduler-job-runs'] })
   queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
 }
 

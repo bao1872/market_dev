@@ -33,7 +33,9 @@ import {
   useTriggerStrategyRun,
   useBatchInstruments,
   useWorkerHeartbeats,
+  useCancelAfterCloseRun,
 } from '@/hooks/useApi'
+import { formatAdminApiError } from '@/utils/adminErrors'
 import { STRATEGY_KEYS } from '@/constants/strategyKeys'
 import type { SchedulerJobRunItem, Instrument, MessageDelivery, StrategyRun, WorkerHeartbeatItem } from '@/api/endpoints'
 import { useToast } from '@/store/toast'
@@ -171,6 +173,9 @@ function statusToText(status: string): string {
   if (s === 'pending' || s === 'queued') return '等待中'
   if (s === 'interrupted') return '已中断'
   if (s === 'published') return '已发布'
+  // [AdminJobsPage 状态合同] 不得把原始英文 cancelled 直接暴露给用户
+  if (s === 'cancelled') return '已取消'
+  if (s === 'resume_queued') return '等待恢复'
   return status
 }
 
@@ -223,6 +228,11 @@ export default function AdminJobsPage() {
 
   // ===== 查询：定时任务运行记录（SchedulerJobRun）=====
   const schedulerJobRunsQuery = useSchedulerJobRuns({ limit: 20 })
+
+  // ===== after_close 编排任务终止（复用正式 cancel Admin API）=====
+  // 语义：任务管理页看到哪个 exact SchedulerJobRun，就取消哪个 exact run，
+  // 绝不按 business_date 反查 latest run（同一天可能有多个 attempt）。
+  const cancelAfterCloseRunMutation = useCancelAfterCloseRun()
 
   // ===== 查询：策略运行记录（DSA_SELECTOR，admin 路径）=====
   const strategyRunsQuery = useAdminStrategyRuns(STRATEGY_KEYS.DSA_SELECTOR, { limit: 20 })
@@ -421,6 +431,45 @@ export default function AdminJobsPage() {
     () => jobRunRows.find((r) => r.id === selectedRunId)?.raw ?? null,
     [jobRunRows, selectedRunId],
   )
+
+  // ===== after_close 精确 run 终止门禁 =====
+  // 仅 after_close_orchestrator 且处于 queued / running 才允许终止；
+  // succeeded / failed / cancelled 等终态与其他任务一律不出现该动作。
+  const canCancelSelectedRun =
+    selectedRun?.job_name === 'after_close_orchestrator' &&
+    (selectedRun.status === 'queued' || selectedRun.status === 'running')
+
+  /**
+   * 终止当前选中的 after_close **精确** run。
+   *
+   * 合同：使用 selectedRun.id（任务页看到哪个 SchedulerJobRun 就取消哪个），
+   * 绝不按 business_date 反查 latest run —— 同一交易日可能存在多个 attempt。
+   * 必须二次确认，禁止单击直接取消。
+   */
+  const handleCancelSelectedRun = useCallback(async () => {
+    if (!selectedRun) return
+    const runId = selectedRun.id
+    const confirmed = window.confirm(
+      `确认终止该盘后编排任务？\n\n` +
+        `run_id: ${runId}\n` +
+        `业务日期: ${selectedRun.business_date ?? '-'}\n` +
+        `当前状态: ${statusToText(selectedRun.status)}\n\n` +
+        `终止后该 run 进入 cancelled；历史批次需另行按交易日重放。`,
+    )
+    if (!confirmed) return
+
+    const toast = useToast.getState()
+    try {
+      const result = await cancelAfterCloseRunMutation.mutateAsync({
+        runId,
+        reason: '管理员从任务管理页终止',
+      })
+      toast.show('终止请求已提交', result.message)
+    } catch (err: unknown) {
+      // 失败绝不把状态伪装成 cancelled：仅提示结构化错误（含 recommended_action）
+      toast.show('终止失败', formatAdminApiError(err))
+    }
+  }, [selectedRun, cancelAfterCloseRunMutation])
 
   // ===== 选中策略运行详情（抽屉展示用）=====
   const selectedStrategyRun = useMemo(
@@ -1206,6 +1255,19 @@ export default function AdminJobsPage() {
               )}
             </div>
             <div className="drawer-foot">
+              {/* 精确 run 终止：仅 after_close_orchestrator 且 queued/running 时可见 */}
+              {canCancelSelectedRun && (
+                <button
+                  className="btn small danger"
+                  onClick={handleCancelSelectedRun}
+                  disabled={cancelAfterCloseRunMutation.isPending}
+                  data-testid="admin-jobs-cancel-after-close-run"
+                  data-run-id={selectedRun?.id ?? ''}
+                  title={`终止 run ${selectedRun?.id ?? ''}`}
+                >
+                  {cancelAfterCloseRunMutation.isPending ? '终止中…' : '终止任务'}
+                </button>
+              )}
               {selectedRun && selectedRun.job_name === 'after_close_orchestrator' && (
                 <Link
                   className="btn small"
