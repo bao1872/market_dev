@@ -47,6 +47,7 @@ Auditor（只读比较）和 Rebuild（持久化）都调用本函数；禁止�
 
 from __future__ import annotations
 
+import hashlib
 import logging
 from dataclasses import dataclass
 from datetime import date
@@ -108,11 +109,108 @@ class AdjustmentFactorDataError(Exception):
         )
 
 
+def filter_effective_corporate_actions(
+    corporate_actions: pd.DataFrame | None,
+    *,
+    effective_as_of: date,
+) -> pd.DataFrame:
+    """唯一的「某个 business date 已生效的公司行为」过滤器。
+
+    effective 定义（项目唯一事实源）::
+
+        category == 1  AND  event_date <= effective_as_of
+
+    future event（``event_date > effective_as_of``）必须被排除：
+
+    - **factor 计算**：否则未生效的除权会提前进入 cumulative factor，
+      把最新 raw bar 的价格错误改写成除权后的价格。
+    - **fingerprint**：否则 future event 会污染 fingerprint —— 等它真正生效时
+      fingerprint 反而没有变化，rebuild 不再触发（永久 stale）。
+
+    Args:
+        corporate_actions: xdxr 结果（columns 至少含 date / category）。
+        effective_as_of: 有效截止日（含当日）。
+
+    Returns:
+        已生效事件（按 date 升序，index 重置）；无有效事件时返回空 DataFrame。
+    """
+    if corporate_actions is None or corporate_actions.empty:
+        return pd.DataFrame()
+
+    actions = corporate_actions.copy()
+
+    if "category" not in actions.columns or "date" not in actions.columns:
+        return pd.DataFrame()
+
+    actions["_effective_date"] = pd.to_datetime(actions["date"], errors="coerce")
+    # category 可能是 int / float / 数字字符串；非数值一律视为不生效
+    category = pd.to_numeric(actions["category"], errors="coerce")
+
+    cutoff = pd.Timestamp(effective_as_of)
+    actions = actions[
+        (category == 1)
+        & actions["_effective_date"].notna()
+        & (actions["_effective_date"] <= cutoff)
+    ].copy()
+
+    if actions.empty:
+        return actions.drop(columns=["_effective_date"], errors="ignore")
+
+    actions["date"] = actions["_effective_date"]
+    return (
+        actions.drop(columns=["_effective_date"])
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+
+def corporate_action_fingerprint(
+    corporate_actions: pd.DataFrame | None,
+    *,
+    effective_as_of: date,
+) -> tuple[str, date | None]:
+    """已生效公司行为集合的 fingerprint 与最早生效日（纯函数）。
+
+    与 :func:`filter_effective_corporate_actions` **共用同一过滤逻辑**，保证
+    「进入 factor 的事件集合」与「进入 fingerprint 的事件集合」永远一致 ——
+    若两者分叉，就会出现「factor 已变但 fingerprint 未变」的静默 stale。
+
+    字符串格式与历史实现保持一致（``date|fenhong|songzhuangu|peigu|peigujia``，
+    ``\\n`` 连接后取 sha256 前 16 位），避免无意义地洗掉已存 Redis fingerprint。
+
+    Returns:
+        (fingerprint, earliest_effective_date)；无有效事件时返回 ``("", None)``。
+    """
+    events = filter_effective_corporate_actions(
+        corporate_actions,
+        effective_as_of=effective_as_of,
+    )
+
+    if events.empty:
+        return "", None
+
+    fp_parts: list[str] = []
+    for _, row in events.iterrows():
+        fp_parts.append(
+            f"{row['date']}|{row.get('fenhong', 0)}|"
+            f"{row.get('songzhuangu', 0)}|"
+            f"{row.get('peigu', 0)}|{row.get('peigujia', 0)}"
+        )
+
+    fingerprint = hashlib.sha256(
+        "\n".join(fp_parts).encode("utf-8")
+    ).hexdigest()[:16]
+
+    earliest = pd.Timestamp(events["date"].iloc[0]).date()
+    return fingerprint, earliest
+
+
 def calculate_adjustment_factor_series(
     raw_daily_bars: pd.DataFrame,
     corporate_actions: pd.DataFrame,
     *,
     algorithm_version: str = FACTOR_ALGORITHM_VERSION,
+    effective_as_of: date | None = None,
 ) -> list[float]:
     """计算前复权因子序列（纯函数，无 IO）。
 
@@ -137,6 +235,11 @@ def calculate_adjustment_factor_series(
             - fenhong/songzhuangu/peigu/peigujia: float（NaN 视为 0）
             空 DataFrame 时返回全 1.0
         algorithm_version: 算法版本（来自 FACTOR_ALGORITHM_VERSION，用于日志和审计）
+        effective_as_of: 有效截止日（含当日）。None 时默认取 ``raw_daily_bars`` 的
+            **最新 bar 日期** —— canonical 语义只允许「截至最新 raw bar 已生效」的
+            公司行为，future event 绝不提前进入 factor。
+            显式传入用于 point-in-time / 盘前 business-date 场景（例如 raw 只到
+            9/11，但业务日=9/12，需要纳入 9/12 当日事件）。
 
     Returns:
         adj_factor 列表，与 raw_daily_bars 行一一对应；
@@ -170,8 +273,22 @@ def calculate_adjustment_factor_series(
     if corporate_actions is None or corporate_actions.empty:
         return default_factors
 
-    # 筛选 category=1 的除权除息事件
-    exc_events = corporate_actions[corporate_actions["category"] == 1].copy()
+    raw_dates = pd.to_datetime(raw_daily_bars["datetime"], errors="coerce")
+    valid_raw_dates = raw_dates.dropna()
+    if valid_raw_dates.empty:
+        return default_factors
+
+    # canonical 语义：默认只允许「截至最新 raw bar 日期已经生效」的公司行为。
+    # 这样即使 caller 不传任何参数（如 canonical rebuild），future XDXR 也不会
+    # 提前进入因子 —— 否则最新几根 bar 会被未生效的除权改写。
+    latest_raw_bar_date: date = valid_raw_dates.max().date()
+    effective_cutoff = effective_as_of or latest_raw_bar_date
+
+    # 唯一的 effective 过滤（category==1 AND event_date <= cutoff）
+    exc_events = filter_effective_corporate_actions(
+        corporate_actions,
+        effective_as_of=effective_cutoff,
+    )
     if exc_events.empty:
         return default_factors
 

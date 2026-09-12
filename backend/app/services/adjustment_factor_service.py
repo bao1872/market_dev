@@ -18,7 +18,6 @@ How to Run:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 from datetime import date
@@ -37,6 +36,7 @@ from app.services.adj_factor import (
     apply_adj_factor_intraday,
     apply_adj_factor_with_as_of,
 )
+from app.services.adjustment_factor_calculator import corporate_action_fingerprint
 
 if TYPE_CHECKING:
     from app.core.pytdx_adapter import PytdxAdapter
@@ -342,21 +342,33 @@ class AdjustmentFactorService:
         adapter: PytdxAdapter | None = None,
         *,
         force_refresh: bool = False,
+        effective_as_of: date | None = None,
     ) -> date | None:
-        """检测公司行为集合（xdxr category=1 事件）是否变化。
+        """检测**已生效**公司行为集合（xdxr category=1 且 event_date <= cutoff）是否变化。
 
-        通过 fingerprint（事件集合的 SHA256）对比 Redis 存储的上次 fingerprint。
-        若变化或无存储记录，返回最早事件日期（用于 rebuild_factor_series 的 earliest_affected）；
-        若未变化，返回 None。
+        通过 fingerprint（已生效事件集合的 SHA256）对比 Redis 存储的上次 fingerprint。
+        若变化或无存储记录，返回最早生效事件日期（用于 rebuild_factor_series 的
+        earliest_affected）；若未变化，返回 None。
+
+        cutoff（有效截止日）规则：
+        - 显式传入 ``effective_as_of`` → 直接使用（point-in-time 语义）；
+        - 未传 → 取 canonical factor series 的最新 ``trade_date``。
+          **刻意不用 ``date.today()``**：wall-clock 日期 ≠ canonical raw bar coverage，
+          补历史 / 停牌 / 盘后恢复时会错。
+
+        future event（``event_date > cutoff``）不进入 fingerprint：
+        否则它会在真正生效日「不产生变化」，rebuild 永远不触发（永久 stale）。
 
         Args:
-            session: 异步 DB 会话（保留以备未来扩展，如从 DB 读取已存事件）
+            session: 异步 DB 会话（用于读取 canonical factor cutoff）
             instrument_id: 标的 UUID
             symbol: 股票代码
             adapter: pytdx 适配器（None 用模块单例）
+            force_refresh: 是否绕过 xdxr 缓存强制拉远端
+            effective_as_of: 显式有效截止日；None 时取 factor series 最新 trade_date
 
         Returns:
-            最早受影响日期（需重建因子）或 None（**确实没有**公司行为变化）
+            最早生效事件日期（需重建因子）或 None（**确实没有**已生效的公司行为变化）
 
         Raises:
             CorporateActionProviderError: xdxr provider 不可用。**不得**把 provider
@@ -375,30 +387,31 @@ class AdjustmentFactorService:
             ) from exc
 
         if xdxr_df is None or xdxr_df.empty:
-            # 无除权除息事件，fingerprint 为空串
-            current_fp = ""
-            earliest = None
+            # 无 xdxr 事件：fingerprint 恒为空串（无需触碰 DB 取 cutoff）
+            current_fp: str = ""
+            earliest: date | None = None
         else:
-            exc_events = xdxr_df[xdxr_df["category"] == 1].copy()
-            if exc_events.empty:
-                current_fp = ""
-                earliest = None
+            cutoff = effective_as_of
+            if cutoff is None:
+                factor_df = await self.get_factor_series(
+                    session, instrument_id, as_of=None,
+                )
+                if not factor_df.empty:
+                    cutoff = pd.Timestamp(factor_df["trade_date"].max()).date()
+
+            if cutoff is None:
+                # 无已完成 raw daily 基线 → 已生效事件集合为空。
+                # 不得凭空放行（否则无基线标的会反复触发 rebuild）。
+                logger.debug(
+                    "detect_company_action_change 无 factor 基线 instrument_id=%s",
+                    instrument_id,
+                )
+                current_fp, earliest = "", None
             else:
-                exc_events = exc_events.sort_values("date")
-                # fingerprint = SHA256 of (date, fenhong, songzhuangu, peigu, peigujia) 拼接
-                fp_parts = []
-                for _, row in exc_events.iterrows():
-                    fp_parts.append(
-                        f"{row['date']}|{row.get('fenhong', 0)}|"
-                        f"{row.get('songzhuangu', 0)}|"
-                        f"{row.get('peigu', 0)}|{row.get('peigujia', 0)}"
-                    )
-                current_fp = hashlib.sha256(
-                    "\n".join(fp_parts).encode("utf-8")
-                ).hexdigest()[:16]
-                earliest = exc_events["date"].iloc[0].date() if hasattr(
-                    exc_events["date"].iloc[0], "date"
-                ) else pd.Timestamp(exc_events["date"].iloc[0]).date()
+                current_fp, earliest = corporate_action_fingerprint(
+                    xdxr_df,
+                    effective_as_of=cutoff,
+                )
 
         # 对比 Redis 存储的上次 fingerprint
         last_fp = self._get_stored_fingerprint(instrument_id)
@@ -408,11 +421,11 @@ class AdjustmentFactorService:
             )
             return None
 
-        # fingerprint 变化或首次记录：存储新 fingerprint，返回最早事件日期
+        # fingerprint 变化或首次记录：存储新 fingerprint，返回最早生效事件日期
         self._store_fingerprint(instrument_id, current_fp)
         logger.info(
-            "detect_company_action_change 检测到变化 instrument_id=%s earliest=%s",
-            instrument_id, earliest,
+            "detect_company_action_change 检测到变化 instrument_id=%s cutoff=%s earliest=%s",
+            instrument_id, cutoff, earliest,
         )
         return earliest
 
@@ -486,7 +499,8 @@ if __name__ == "__main__":
 
     sig_detect = inspect.signature(service.detect_company_action_change)
     assert list(sig_detect.parameters.keys()) == [
-        "session", "instrument_id", "symbol", "adapter"
+        "session", "instrument_id", "symbol", "adapter",
+        "force_refresh", "effective_as_of",
     ], f"detect_company_action_change 参数不匹配: {list(sig_detect.parameters.keys())}"
     print("方法签名校验 ✓")
 
