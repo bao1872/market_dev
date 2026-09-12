@@ -1722,14 +1722,16 @@ class BarsSchedulerService:
                     "[BarsScheduler] 写 REBUILDING_FACTORS start 事件失败: %s", exc,
                 )
 
-        # [G1B-3B2.1] ownership try：planner + refresh loop 共享同一 session 生命周期。
-        # 任何阶段（planner SELECT / detect / rebuild）抛异常都通过 finally 关闭自建
-        # session；外部传入 db_session 时 should_close=False，绝不关闭调用方会话。
+        # [G1B-3B2.2] ownership 边界：session / should_close 在 try 外先初始化，
+        # 避免 AsyncSessionLocal() 自身异常时 finally 读到未绑定变量（UnboundLocalError）
+        # 覆盖真实异常；任何阶段（planner SELECT / detect / rebuild）异常仍通过 finally
+        # 关闭自建 session；外部传入 db_session 时 should_close=False，绝不关闭调用方会话。
+        session: AsyncSession | None = None
+        should_close = False
         pbar = None
         try:
             if db_session is not None:
                 session = db_session
-                should_close = False
             else:
                 session = AsyncSessionLocal()
                 should_close = True
@@ -1841,10 +1843,12 @@ class BarsSchedulerService:
                         failed=result["failed"],
                     )
         finally:
-            if pbar is not None:
-                pbar.close()
-            if should_close:
-                await session.close()
+            try:
+                if pbar is not None:
+                    pbar.close()
+            finally:
+                if should_close and session is not None:
+                    await session.close()
 
         logger.info(
             "[BarsScheduler] 因子重建检查完成: checked=%d changed=%d rebuilt=%d failed=%d",

@@ -594,3 +594,71 @@ async def test_normal_success_closes_own_session() -> None:
     # 正常完成 → 自建 session 关闭
     assert own_session.close_calls == 1
     assert result["refresh_requested"] == 3
+
+
+# =============================================================================
+# G1B-3B2.2：session factory 异常 / pbar.close 异常 都不能造成 session 泄漏
+# =============================================================================
+
+
+class _BadPbar:
+    """tqdm 替身：close() 故意抛异常，验证 UI 清理失败不阻塞 DB session close。"""
+
+    def __init__(self, iterable, *args, **kwargs) -> None:
+        self._it = iterable
+
+    def __iter__(self):
+        return iter(self._it)
+
+    def set_postfix(self, **kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        raise RuntimeError("pbar close failed")
+
+
+async def test_session_factory_failure_propagates_original_error() -> None:
+    instruments = _build_instruments(3)
+    eod = {inst.symbol: Decimal("10.00") for inst in instruments}
+    fake_adj = _FakeAdjService({})
+    planner = AsyncMock()
+    service = BarsSchedulerService()
+    service._plan_xdxr_refresh_set = planner
+    with (
+        patch("app.services.adjustment_factor_service.AdjustmentFactorService", return_value=fake_adj),
+        patch("app.services.bars_scheduler_service.get_pytdx_adapter", return_value=MagicMock()),
+        patch("app.services.calendar_service.get_previous_trading_day_async", return_value=PREV_TD),
+        patch(
+            "app.services.bars_scheduler_service.AsyncSessionLocal",
+            side_effect=RuntimeError("session factory failed"),
+        ),
+    ):
+        with pytest.raises(RuntimeError, match="session factory failed"):
+            await service._rebuild_factors_if_needed(
+                TD, instruments, db_session=None, eod_previous_close_by_symbol=eod,
+            )
+    # 不能变成 UnboundLocalError；session 都没创建出来 → planner 0 calls
+    assert planner.call_count == 0
+
+
+async def test_pbar_close_failure_still_closes_session() -> None:
+    instruments = _build_instruments(3)
+    eod = {inst.symbol: Decimal("10.00") for inst in instruments}
+    fake_adj = _FakeAdjService({})  # detect 返回 None（无变化）
+    own_session = _OwnSessionSpy()
+    planner = AsyncMock(return_value=(list(instruments), Counter()))
+    service = BarsSchedulerService()
+    service._plan_xdxr_refresh_set = planner
+    with (
+        patch("app.services.adjustment_factor_service.AdjustmentFactorService", return_value=fake_adj),
+        patch("app.services.bars_scheduler_service.get_pytdx_adapter", return_value=MagicMock()),
+        patch("app.services.calendar_service.get_previous_trading_day_async", return_value=PREV_TD),
+        patch("app.services.bars_scheduler_service.AsyncSessionLocal", return_value=own_session),
+        patch("tqdm.tqdm", _BadPbar),
+    ):
+        with pytest.raises(RuntimeError, match="pbar close failed"):
+            await service._rebuild_factors_if_needed(
+                TD, instruments, db_session=None, eod_previous_close_by_symbol=eod,
+            )
+    # UI/progress 清理失败不能造成 DB session 泄漏
+    assert own_session.close_calls == 1
