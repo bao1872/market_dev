@@ -369,6 +369,120 @@ def test_eastmoney_raw_kline_vs_pytdx_raw_daily_ohlcv() -> None:
 _BJ_FILTER = "m:0+t:81+s:2048"
 
 
+# =========================================================================
+# pytdx 实时 quote → canonical EOD（G1B-2A 外部证明 quote raw_volume 倍率）
+# =========================================================================
+
+
+def test_pytdx_quote_vs_canonical_eod_snapshot() -> None:
+    """pytdx 实时 quote 的 OHLCV/amount 与 Eastmoney canonical EOD 对比。
+
+    目的（G1B-2A 必须先钉死再写转换）：
+    - quote OHLC/amount 与 canonical EOD 同刻度（元/元），日终可直接取终值；
+    - quote ``raw_volume``（手）到 canonical ``volume``（股）的倍率 ≈ 0.01，
+      即 canonical = raw_volume × 100。
+
+    pytdx 源不可用 → 显式失败（不 skip），因为本轮目的就是确认真实 provider。
+    """
+    from app.core.pytdx_adapter import connect_pytdx
+    from app.models.instrument import Instrument
+    from app.services.pytdx_eod_snapshot_provider import (
+        PytdxEodSnapshotError,
+        fetch_pytdx_eod_snapshot,
+    )
+
+    sample = _collect_sample()
+    assert len(sample) >= _MIN_SAMPLE, f"样本不足 {_MIN_SAMPLE}：{len(sample)}"
+
+    trade_date = max((r.trade_date for r in sample if r.trade_date), default=None)
+    assert trade_date is not None, "快照未提供可用 trade_date"
+
+    instruments = [
+        Instrument(symbol=r.symbol, name=r.name, market=r.market) for r in sample
+    ]
+
+    try:
+        with connect_pytdx() as adapter:
+            snap = fetch_pytdx_eod_snapshot(
+                adapter, instruments, trade_date=trade_date, batch_interval_seconds=0.0
+            )
+    except (PytdxEodSnapshotError, RuntimeError) as exc:
+        pytest.fail(
+            f"pytdx 源不可用：{type(exc).__name__}: {exc}；"
+            "本次 quote→canonical EOD 校验未完成（不得视为通过）"
+        )
+
+    quote_by_symbol = {q.symbol: q for q in snap.rows}
+
+    if snap.returned_count == 0:
+        pytest.fail(
+            f"pytdx quote feed 返回 0 行（source 已连接但无实时行情数据，"
+            f"可能处于非交易时段/周末）：requested={snap.requested_count}；"
+            "quote→canonical 校验无法取得样本（不得视为通过）"
+        )
+
+    price_mismatch: list[str] = []
+    price_abs_max: dict[str, float] = dict.fromkeys(("open", "high", "low", "close"), 0.0)
+    vol_ratios: list[float] = []
+    amt_ratios: list[float] = []
+    source_times: list[str] = []
+    checked = 0
+
+    for ref in sample:
+        if ref.market not in ("SH", "SZ"):
+            continue
+        q = quote_by_symbol.get(ref.symbol)
+        if q is None:
+            continue
+        checked += 1
+        for fld in ("open", "high", "low", "close"):
+            qv = getattr(q, fld)
+            rv = getattr(ref, fld)
+            if qv is None or rv is None:
+                continue
+            diff = abs(float(qv) - float(rv))
+            price_abs_max[fld] = max(price_abs_max[fld], diff)
+            if diff > _PRICE_TOL:
+                price_mismatch.append(
+                    f"{ref.symbol}.{fld} q={qv} ref={rv} abs={diff:.4f}"
+                )
+        if q.raw_volume is not None and ref.volume:
+            vol_ratios.append(float(q.raw_volume) / float(ref.volume))
+        if q.amount is not None and ref.amount:
+            amt_ratios.append(float(q.amount) / float(ref.amount))
+        if q.source_time:
+            source_times.append(q.source_time)
+
+    vol_median = statistics.median(vol_ratios) if vol_ratios else float("nan")
+    vol_min = min(vol_ratios) if vol_ratios else float("nan")
+    vol_max = max(vol_ratios) if vol_ratios else float("nan")
+    amt_median = statistics.median(amt_ratios) if amt_ratios else float("nan")
+
+    print(
+        f"\n[AB-pytdx-quote] trade_date={trade_date} requested={snap.requested_count}"
+        f" returned={snap.returned_count} checked={checked}"
+        f" price_mismatch={len(price_mismatch)}"
+        f" open_abs_max={price_abs_max['open']:.4f} high_abs_max={price_abs_max['high']:.4f}"
+        f" low_abs_max={price_abs_max['low']:.4f} close_abs_max={price_abs_max['close']:.4f}"
+        f" vol_ratio_median={vol_median:.5f} vol_ratio_min={vol_min:.5f} vol_ratio_max={vol_max:.5f}"
+        f" amt_ratio_median={amt_median:.4f}"
+        f" source_time_sample={sorted(set(source_times))[:5]}"
+    )
+    for line in price_mismatch[:10]:
+        print(f"[AB-pytdx-quote] PRICE MISMATCH {line}")
+
+    assert checked >= _MIN_SAMPLE, f"quote→canonical 有效比较样本不足 {_MIN_SAMPLE}：{checked}"
+    assert not price_mismatch, f"OHLC 不一致 {len(price_mismatch)} 条：{price_mismatch[:5]}"
+
+    assert 0.0095 <= vol_median <= 0.0105, (
+        f"volume 单位不符 ×100 假设：median(raw/canonical)={vol_median:.5f}"
+        f"（期望≈0.01；若≈1 表示 pytdx quote 已是股，无需 ×100）"
+    )
+    assert 0.98 <= amt_median <= 1.02, (
+        f"amount 单位不符：median(q/ref)={amt_median:.4f}（期望≈1.0）"
+    )
+
+
 def test_bj_secid_zero_prefix_returns_real_history() -> None:
     """用真实北交所股票验证 secid = ``0.920xxx`` 能取到 fqt=0 历史日线。
 
