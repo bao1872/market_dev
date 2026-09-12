@@ -106,11 +106,31 @@ class WatchlistRealtimeMonitorService:
 
             # 读取该标的前次状态与已触发 target IDs
             prev_state_dict = prev_states.get(inst.id) or {}
-            triggered_ids: set[str] = set(
-                prev_state_dict.get("triggered_target_ids") or []
-            )
 
             node_set, smc_set = target_sets.get(inst.id, (None, None))
+            curr_node_ver = node_set.target_set_version if node_set else None
+            curr_smc_ver = smc_set.target_set_version if smc_set else None
+
+            prev_node_ver = prev_state_dict.get("node_target_set_version")
+            prev_smc_ver = prev_state_dict.get("smc_target_set_version")
+
+            # 区分 node 与 smc 的已触发 target_ids
+            # 若 target_set_version 发生改变（新 Bar 完成、盘后更新、或 XDXR 公司行为导致重算），
+            # 自动清空对应旧版本的 triggered targets，由新版本重新接管
+            node_triggered: set[str] = set(prev_state_dict.get("triggered_node_target_ids") or [])
+            if prev_node_ver is not None and curr_node_ver != prev_node_ver:
+                logger.info("[%s] Node target set version rolled %s -> %s, reset triggered targets", inst.symbol, prev_node_ver, curr_node_ver)
+                node_triggered = set()
+            elif not node_triggered and prev_state_dict.get("triggered_target_ids"):
+                node_triggered = set(prev_state_dict.get("triggered_target_ids") or [])
+
+            smc_triggered: set[str] = set(prev_state_dict.get("triggered_smc_target_ids") or [])
+            if prev_smc_ver is not None and curr_smc_ver != prev_smc_ver:
+                logger.info("[%s] SMC target set version rolled %s -> %s, reset triggered targets", inst.symbol, prev_smc_ver, curr_smc_ver)
+                smc_triggered = set()
+            elif not smc_triggered and prev_state_dict.get("triggered_target_ids"):
+                smc_triggered = set(prev_state_dict.get("triggered_target_ids") or [])
+
             inst_events: list[StrategyEventDraft] = []
 
             # G4: 筹码共识区穿透
@@ -122,7 +142,7 @@ class WatchlistRealtimeMonitorService:
                         p_last,
                         p_curr,
                         captured_at,
-                        triggered_ids,
+                        node_triggered,
                     )
                     inst_events.extend(node_evts)
                 except Exception as exc:
@@ -137,7 +157,7 @@ class WatchlistRealtimeMonitorService:
                         p_last,
                         p_curr,
                         captured_at,
-                        triggered_ids,
+                        smc_triggered,
                     )
                     inst_events.extend(smc_evts)
                 except Exception as exc:
@@ -156,7 +176,11 @@ class WatchlistRealtimeMonitorService:
                 else 0.0
             )
             updated_payload["change_pct"] = change_pct
-            updated_payload["triggered_target_ids"] = list(triggered_ids)
+            updated_payload["node_target_set_version"] = curr_node_ver
+            updated_payload["smc_target_set_version"] = curr_smc_ver
+            updated_payload["triggered_node_target_ids"] = list(node_triggered)
+            updated_payload["triggered_smc_target_ids"] = list(smc_triggered)
+            updated_payload["triggered_target_ids"] = list(node_triggered | smc_triggered)
             updated_payload["market"] = {
                 "current_price": p_curr,
                 "previous_close": quote.last_close,
@@ -166,6 +190,10 @@ class WatchlistRealtimeMonitorService:
             cycle_result.updated_states[inst.id] = updated_payload
 
         return cycle_result
+
+    def reset_symbol_state(self, symbol: str) -> None:
+        """重置指定标的的内存价格追踪状态。"""
+        self.fact_service.price_tracker.reset(symbol)
 
 
 __all__ = [

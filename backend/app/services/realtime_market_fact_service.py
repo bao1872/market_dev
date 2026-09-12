@@ -75,6 +75,13 @@ class PriceTracker:
     def clear(self) -> None:
         self._last_prices.clear()
 
+    def reset(self, symbol: str | None = None) -> None:
+        """重置指定标的或全部标的前次价格。"""
+        if symbol is None:
+            self._last_prices.clear()
+        else:
+            self._last_prices.pop(symbol, None)
+
 
 class RealtimeMarketFactService:
     """盘中行情事实引擎。"""
@@ -110,10 +117,19 @@ class RealtimeMarketFactService:
         results: dict[str, RealtimeQuote] = {}
         now = datetime.now(_SHANGHAI_TZ)
 
+        # 统一规范化为 symbol 字符串
+        norm_symbols: list[str] = [
+            s.symbol if hasattr(s, "symbol") else str(s)
+            for s in symbols
+        ]
+        # 去重保持顺序
+        seen: set[str] = set()
+        clean_symbols = [s for s in norm_symbols if not (s in seen or seen.add(s))]
+
         sh_sz_symbols: list[str] = []
         bj_symbols: list[str] = []
 
-        for s in symbols:
+        for s in clean_symbols:
             if self._is_bj_symbol(s):
                 bj_symbols.append(s)
             else:
