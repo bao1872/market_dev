@@ -4,8 +4,9 @@
 - 用全市场 EOD snapshot 先同步 instrument universe（新股发现必须先于行情覆盖率）。
 - 批量落当日 raw 日线（不复权；``volume`` 单位统一为 canonical **股**，amount 为元；
   Eastmoney 原始 f5/f56 为「手」，在 provider boundary 已乘 :data:`SHARES_PER_LOT` 转股）。
-- snapshot 之后用集合差找缺口，仅对缺失标的走历史 fallback
-  （**Eastmoney fqt=0 优先**，与当日 snapshot 同源；pytdx raw 仅作 disaster fallback，且只覆盖 SH/SZ）。
+- snapshot 之后用集合差找缺口，仅对缺失标的走历史回补
+  （**SH/SZ pytdx 主源**；仅主源未完成任务、明确异常或 breaker 已打开时进入
+  Eastmoney fqt=0 备用，且只覆盖 SH/SZ；北交所直接走 Eastmoney）。
 - 对本次新发现的标的做历史补齐（listing_date 或 2023-01-01 起，且止于 T 日之前）。
 
 canonical contract（bars_daily）：
@@ -685,17 +686,19 @@ async def _backfill_one(
     breaker: _PytdxBreaker | None = None,
     target_trade_date: date | None = None,
 ) -> bool:
-    """单只标的回补。**Eastmoney fqt=0 优先，pytdx raw 仅作 disaster fallback。**
+    """单只标的回补。**SH/SZ 以 pytdx 为主源，Eastmoney fqt=0 仅作备用。**
 
-    数据源一致性：每日 EOD 的 canonical raw 来源是 Eastmoney（snapshot 与 historical
-    同源），因此 sparse 缺口与新股历史也优先走 Eastmoney。pytdx 只在 Eastmoney 拿不到
-    数据时兜底（SH/SZ），且它是当前故障源，必须放在后面。
+    源策略（与 G1A 冻结规则一致）：
+    - SH/SZ：先 pytdx；仅当主源明确异常 / 返回空 / 未完成 DB 覆盖，或 breaker 已打开时，
+      才进入 Eastmoney fqt=0 fallback。
+    - BJ：pytdx 标准接口不覆盖 BSE，直接使用 Eastmoney（不调用 pytdx，也不污染 breaker）。
+    - 主源一旦**由 DB 查询确认**真正补好（见 :func:`_did_backfill`），立即结束，
+      禁止再访问备用源（避免无意义的 provider I/O）。
 
-    返回**由 DB 查询确认**的成功（见 :func:`_did_backfill`），不是 provider 是否
-    返回了数据。
+    pytdx 连续失败由共享 ``breaker`` 熔断：连续失败达上限后本轮剩余沪深标的跳过 pytdx
+    直接走 Eastmoney；任意一次成功即复位。BJ 不计入 breaker。
 
-    北交所：pytdx 标准接口不覆盖 BSE，直接走 Eastmoney。这既省掉一次必然失败的
-    连接，也避免 BJ 连续失败把共享 breaker 熔断、连带影响后面的沪深标的。
+    返回**由 DB 查询确认**的成功（见 :func:`_did_backfill`），不是 provider 是否返回了数据。
     """
     from app.repositories.bar_repository import refresh_daily_bars
     from app.services.eod_market_snapshot_provider import fetch_eastmoney_daily_kline
@@ -704,21 +707,7 @@ async def _backfill_one(
     market = inst.market
     use_pytdx = market in ("SH", "SZ")
 
-    # 1) Eastmoney fqt=0 primary（insert-only：绝不覆盖既有行 / 既有 adj_factor）
-    try:
-        async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
-            recs = await fetch_eastmoney_daily_kline(client, symbol, market, start, end)
-        if recs:
-            await _persist_eastmoney_raw_daily(session, inst.id, symbol, recs)
-    except SnapshotProviderError as exc:
-        logger.warning("Eastmoney 回补失败 symbol=%s: %s", symbol, exc)
-    except Exception as exc:
-        logger.warning("Eastmoney 回补异常 symbol=%s: %s", symbol, exc)
-
-    if await _did_backfill(session, inst.id, start, end, target_trade_date):
-        return True
-
-    # 2) pytdx raw disaster fallback（仅沪深；熔断开启时跳过）
+    # 1) pytdx primary（仅 SH/SZ；breaker 打开时跳过）
     if use_pytdx and (breaker is None or breaker.allow):
         try:
             df = await refresh_daily_bars(session, inst.id, start, end, adapter=None)
@@ -731,6 +720,23 @@ async def _backfill_one(
             if breaker is not None:
                 breaker.record_failure()
             logger.warning("pytdx 回补失败 symbol=%s: %s", symbol, exc)
+
+        # 主源已真正完成 DB 覆盖 → 禁止再访问 fallback
+        if await _did_backfill(session, inst.id, start, end, target_trade_date):
+            return True
+
+    # 2) Eastmoney fqt=0 fallback
+    #    SH/SZ：pytdx 未完成任务 / 明确异常 / breaker 已打开
+    #    BJ：pytdx 不支持，天然进入备用 provider
+    try:
+        async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
+            recs = await fetch_eastmoney_daily_kline(client, symbol, market, start, end)
+        if recs:
+            await _persist_eastmoney_raw_daily(session, inst.id, symbol, recs)
+    except SnapshotProviderError as exc:
+        logger.warning("Eastmoney fallback 回补失败 symbol=%s: %s", symbol, exc)
+    except Exception as exc:
+        logger.warning("Eastmoney fallback 回补异常 symbol=%s: %s", symbol, exc)
 
     return await _did_backfill(session, inst.id, start, end, target_trade_date)
 

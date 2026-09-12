@@ -36,6 +36,7 @@ from sqlalchemy.dialects.postgresql import Insert
 
 from app.models.instrument import Instrument
 from app.repositories import bar_repository as bar_repo
+from app.services import bars_scheduler_service as _sched_mod
 from app.services import bars_scheduler_service as scheduler_module
 from app.services import eod_daily_refresh_service as refresh_mod
 from app.services import eod_market_snapshot_provider as prov
@@ -446,17 +447,49 @@ def _kline_records(days: int = 3) -> list[dict[str, Any]]:
 
 
 @pytest.mark.asyncio
-async def test_backfill_prefers_eastmoney_and_skips_pytdx(monkeypatch: pytest.MonkeyPatch) -> None:
-    """EOD 修复的 canonical 来源是 Eastmoney fqt=0（与当日 snapshot 同源）。
+async def test_backfill_prefers_pytdx_and_skips_eastmoney(monkeypatch: pytest.MonkeyPatch) -> None:
+    """SH/SZ 回补以 pytdx 为主源，主源完成后禁止再调 Eastmoney。
 
-    pytdx 只作 disaster fallback，且必须排在 Eastmoney 之后（它是当前故障源，
-    先调它会为每只股票白付一次连接/重试代价）。
+    pytdx 成功落库（DB 查询确认覆盖）→ 不得请求 Eastmoney（减少无意义 provider I/O）。
     """
     calls: list[str] = []
 
-    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 不应被调用
+    async def fake_refresh(session: Any, instrument_id: Any, start: Any, end: Any, adapter: Any = None) -> Any:
+        import pandas as pd
+
         calls.append("pytdx")
-        raise AssertionError("Eastmoney 已成功，不得调用 pytdx")
+        return pd.DataFrame({"close": [1.0]})
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover - 不应被调用
+        calls.append("eastmoney")
+        raise AssertionError("pytdx 已成功，不得调用 Eastmoney")
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    # pytdx 写入后由 DB 查询确认（has_daily_bar 命中）
+    session = _ScriptedSession(scalar_queue=[1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
+    )
+
+    assert ok is True
+    assert calls == ["pytdx"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_falls_back_to_eastmoney_when_pytdx_has_no_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pytdx 主源拿不到数据 → Eastmoney fqt=0 兜底（仅 SH/SZ）。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        calls.append("pytdx")
+        return pd.DataFrame()  # 主源空
 
     async def fake_em(client: Any, symbol: str, market: str, start: Any, end: Any) -> Any:
         calls.append("eastmoney")
@@ -466,49 +499,14 @@ async def test_backfill_prefers_eastmoney_and_skips_pytdx(monkeypatch: pytest.Mo
     monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
     monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
 
-    # Eastmoney 写入后由 DB 查询确认（count_daily_bars > 0）
-    session = _ScriptedSession(scalar_queue=[1])
-    ok = await refresh_mod._backfill_one(  # noqa: SLF001
-        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
-    )
-
-    assert ok is True
-    assert calls == ["eastmoney"]
-    assert len(session.insert_statements) == 1
-    sql = _sql(session.insert_statements[0])
-    # Eastmoney 落库必须 insert-only：绝不覆盖既有行（含 adj_factor）
-    assert "ON CONFLICT (instrument_id, trade_date) DO NOTHING" in sql
-    assert "DO UPDATE SET" not in sql
-
-
-@pytest.mark.asyncio
-async def test_backfill_falls_back_to_pytdx_when_eastmoney_has_no_data(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Eastmoney 拿不到数据 → pytdx raw 兜底（仅 SH/SZ）。"""
-    calls: list[str] = []
-
-    async def fake_em(*args: Any, **kwargs: Any) -> Any:
-        calls.append("eastmoney")
-        return []
-
-    async def fake_refresh(session: Any, instrument_id: Any, start: Any, end: Any, adapter: Any = None) -> Any:
-        import pandas as pd
-
-        calls.append("pytdx")
-        return pd.DataFrame({"close": [1.0]})
-
-    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
-    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
-    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
-
+    # pytdx 空 → 先判失败一次；Eastmoney 补齐后命中
     session = _ScriptedSession(scalar_queue=[None, 1])
     ok = await refresh_mod._backfill_one(  # noqa: SLF001
         session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
     )
 
     assert ok is True
-    assert calls == ["eastmoney", "pytdx"]
+    assert calls == ["pytdx", "eastmoney"]
 
 
 @pytest.mark.asyncio
@@ -679,9 +677,9 @@ def test_pytdx_breaker_opens_after_consecutive_failures_and_resets() -> None:
 
 @pytest.mark.asyncio
 async def test_backfill_skips_pytdx_once_breaker_is_open(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Eastmoney 仍拿不到目标日时才会试 pytdx；熔断打开后必须停止 pytdx 尝试。
+    """pytdx 是主源，breaker 打开后必须停止 pytdx 尝试，直接走 Eastmoney fallback。
 
-    注意顺序：Eastmoney 是 primary，pytdx 只在 Eastmoney 无法补齐时才被调用。
+    注意顺序：pytdx primary，连续失败达到 limit 后熔断，剩余沪深标的不再尝试 pytdx。
     """
     attempts = {"pytdx": 0}
 
@@ -706,6 +704,241 @@ async def test_backfill_skips_pytdx_once_breaker_is_open(monkeypatch: pytest.Mon
 
     # 只在前 2 只上尝试过 pytdx，第 3 只起熔断
     assert attempts["pytdx"] == 2
+
+
+# ===========================================================================
+# 6b. G1A source policy（pytdx 主源 / Eastmoney fallback 调用顺序）
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_backfill_pytdx_success_no_eastmoney(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[A] SH/SZ + pytdx 成功并完成 DB coverage → pytdx 1 次、Eastmoney 0 次。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        calls.append("pytdx")
+        return pd.DataFrame({"close": [1.0]})
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        calls.append("eastmoney")
+        raise AssertionError("pytdx 已成功，不得调 Eastmoney")
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    session = _ScriptedSession(scalar_queue=[1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
+    )
+    assert ok is True
+    assert calls == ["pytdx"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_pytdx_exception_triggers_fallback_and_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[B] SH/SZ + pytdx 异常 → breaker 失败 +1，且 Eastmoney fallback 被调用。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        calls.append("pytdx")
+        raise RuntimeError("pytdx down")
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        calls.append("eastmoney")
+        return _kline_records()
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    breaker = refresh_mod._PytdxBreaker(limit=3)  # noqa: SLF001
+    session = _ScriptedSession(scalar_queue=[None, 1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE,  # type: ignore[arg-type]
+        breaker=breaker,
+    )
+    assert ok is True
+    assert calls == ["pytdx", "eastmoney"]
+    assert breaker.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_pytdx_empty_falls_back_and_breaker_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[C] SH/SZ + pytdx 返回空 / 未完成 DB coverage → breaker 失败，Eastmoney 兜底。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        calls.append("pytdx")
+        return pd.DataFrame()  # 空 → 未完成任务
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        calls.append("eastmoney")
+        return _kline_records()
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    breaker = refresh_mod._PytdxBreaker(limit=3)  # noqa: SLF001
+    # pytdx 空 → _did_backfill None；Eastmoney 补齐 → 1
+    session = _ScriptedSession(scalar_queue=[None, 1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE,  # type: ignore[arg-type]
+        breaker=breaker,
+    )
+    assert ok is True
+    assert calls == ["pytdx", "eastmoney"]
+    assert breaker.consecutive_failures == 1
+
+
+@pytest.mark.asyncio
+async def test_backfill_breaker_open_skips_pytdx(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[D] breaker 已打开 → pytdx 0 次，Eastmoney 1 次。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        calls.append("pytdx")
+        raise AssertionError("breaker 已打开，不得调 pytdx")
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        calls.append("eastmoney")
+        return _kline_records()
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    breaker = refresh_mod._PytdxBreaker(limit=1)  # noqa: SLF001
+    breaker.record_failure()  # 已达上限 → allow False
+    assert breaker.allow is False
+    session = _ScriptedSession(scalar_queue=[1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE,  # type: ignore[arg-type]
+        breaker=breaker,
+    )
+    assert ok is True
+    assert calls == ["eastmoney"]
+
+
+@pytest.mark.asyncio
+async def test_backfill_bj_uses_eastmoney_and_does_not_touch_breaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[E] BJ → pytdx 0 次、Eastmoney 1 次，且 breaker 状态不变。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:  # pragma: no cover
+        calls.append("pytdx")
+        raise AssertionError("BJ 不得调用 pytdx")
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        calls.append("eastmoney")
+        return _kline_records()
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    breaker = refresh_mod._PytdxBreaker(limit=3)  # noqa: SLF001
+    session = _ScriptedSession(scalar_queue=[1])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("920001", market="BJ"), date(2026, 9, 1), TRADE_DATE,  # type: ignore[arg-type]
+        breaker=breaker,
+    )
+    assert ok is True
+    assert calls == ["eastmoney"]
+    assert breaker.consecutive_failures == 0  # BJ 不污染 breaker
+
+
+@pytest.mark.asyncio
+async def test_backfill_fallback_judged_by_db_coverage(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[F] fallback 完成后仍必须以 _did_backfill() 为成功判据（DB 真实存在）。"""
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        return pd.DataFrame()  # 主源空
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        return _kline_records()  # 写入 fallback 数据，但不含目标日
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    # Eastmoney 写入记录但不含目标日 → 两次 _did_backfill 都 None
+    session = _ScriptedSession(scalar_queue=[None, None])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session,
+        _instrument("600519"),
+        date(2026, 9, 1),
+        TRADE_DATE,
+        target_trade_date=TRADE_DATE,
+    )
+    assert ok is False
+    # 必须执行过 DB 校验查询（target_trade_date 路径）
+    assert session.scalar_statements
+    assert "trade_date" in _sql(session.scalar_statements[0])
+
+
+@pytest.mark.asyncio
+async def test_backfill_pytdx_nonempty_but_target_day_missing_goes_to_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """[G] pytdx 返回非空但目标 T 日仍不存在 → 不能误判成功，必须进入 fallback。"""
+    calls: list[str] = []
+
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        calls.append("pytdx")
+        return pd.DataFrame({"close": [1.0]})  # 有数据，但 DB 里无目标日
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        calls.append("eastmoney")
+        return _kline_records(days=3)  # 09-01~09-03，不含 09-11
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    # 两次校验都 None：目标日不在 DB → 先判 pytdx 失败，再判 fallback 失败
+    session = _ScriptedSession(scalar_queue=[None, None])
+    ok = await refresh_mod._backfill_one(  # noqa: SLF001
+        session,
+        _instrument("600519"),
+        date(2026, 9, 1),
+        TRADE_DATE,
+        target_trade_date=TRADE_DATE,
+    )
+    assert ok is False
+    assert calls == ["pytdx", "eastmoney"]  # 主源未完成任务 → 进入 fallback
+
+
+@pytest.mark.asyncio
+async def test_backfill_eastmoney_fallback_is_insert_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Eastmoney fallback 落库必须 insert-only（on_conflict_do_nothing）。"""
+    async def fake_refresh(*args: Any, **kwargs: Any) -> Any:
+        import pandas as pd
+
+        return pd.DataFrame()  # 主源空 → 走 fallback
+
+    async def fake_em(*args: Any, **kwargs: Any) -> Any:
+        return _kline_records()
+
+    monkeypatch.setattr(bar_repo, "refresh_daily_bars", fake_refresh)
+    monkeypatch.setattr(prov, "fetch_eastmoney_daily_kline", fake_em)
+    monkeypatch.setattr(refresh_mod.httpx, "AsyncClient", _DummyAsyncClient)
+
+    session = _ScriptedSession(scalar_queue=[None, 1])
+    await refresh_mod._backfill_one(  # noqa: SLF001
+        session, _instrument("600519"), date(2026, 9, 1), TRADE_DATE  # type: ignore[arg-type]
+    )
+    assert len(session.insert_statements) == 1
+    sql = _sql(session.insert_statements[0])
+    assert "ON CONFLICT (instrument_id, trade_date) DO NOTHING" in sql
+    assert "DO UPDATE SET" not in sql
 
 
 # ===========================================================================
@@ -1505,6 +1738,7 @@ def test_pytdx_probe_xdxr_uncached_bypasses_redis_cache(
 ) -> None:
     """probe_xdxr_uncached 必须直连远端，不读/写 Redis 缓存。"""
     import pandas as pd
+
     from app.core.pytdx_adapter import PytdxAdapter
 
     adapter = PytdxAdapter()
@@ -1787,13 +2021,6 @@ async def test_factor_audit_provider_outage_blocks_core(
 # ===========================================================================
 # 14. refresh_raw_daily_only 安全契约（trading-day / same-day / continuity gate）
 # ===========================================================================
-
-from app.services.eod_market_snapshot_provider import SnapshotProviderError
-from app.services.eod_daily_refresh_service import (
-    DailyContinuityBlockedError,
-    DailyGap,
-)
-import app.services.bars_scheduler_service as _sched_mod
 
 
 class _RawFakeSessionCtx:
