@@ -105,19 +105,58 @@ class _KlineCacheEntry:
 _XDXR_CACHE_PREFIX = "xdxr"
 _XDXR_CACHE_TTL = 86400  # 24 小时（秒）
 
-# pytdx 服务器列表（与原 ref/交易/datasource/pytdx_client.py 保持一致）
-PYTDX_SERVERS: list[tuple[str, int]] = [
-    ("119.147.212.81", 7709),
-    ("119.147.164.60", 7709),
-    ("14.215.128.18", 7709),
-    ("14.215.128.116", 7709),
-    ("101.133.156.38", 7709),
-    ("114.80.149.19", 7709),
-    ("115.238.90.165", 7709),
-    ("123.125.108.23", 7709),
-    ("180.153.18.170", 7709),
-    ("202.108.253.131", 7709),
-]
+# ── capability-aware 服务器池（候选配置，与运行时健康分离）───────────
+# 事实来源：2026-09-12 只读取证（本机 → 公网 TDX 主站）：
+#   1) ``scripts/pytdx_server_sweep.py``：18 台 union 逐台 capability sweep
+#   2) ``scripts/verify_pytdx_daily_contract.py``：production adapter 路径对照
+# 只写已验证事实；**未验证一律 None，不得当作 False**。
+#   - 4 台 bars + xdxr + quote 全部通过
+#     （bars 100 根；exact-date daily 40/40 且 OHLC diff=0；quote 40/40 且
+#      quote/daily volume ratio ≈ 0.01；amount ratio ≈ 1）
+#   - 6 台仅 xdxr 可用（bars 函数级 ``TdxFunctionCallError``）
+#   - 旧池 8 台 TCP 建连即失败（``TdxConnectionError``），已移出候选池
+CAPABILITY_BARS = "bars"
+CAPABILITY_XDXR = "xdxr"
+CAPABILITY_QUOTE = "quote"
+
+
+@dataclass(frozen=True)
+class PytdxServerCapability:
+    """单台 TDX server 的**静态已证** capability（运行时健康另行维护）。"""
+
+    server: tuple[str, int]
+    bars: bool
+    xdxr: bool
+    quote: bool | None
+
+
+PYTDX_SERVER_CAPABILITIES: tuple[PytdxServerCapability, ...] = (
+    PytdxServerCapability(("159.75.55.232", 7709), bars=True, xdxr=True, quote=True),
+    PytdxServerCapability(("sztdx.gtjas.com", 7709), bars=True, xdxr=True, quote=True),
+    PytdxServerCapability(("shtdx.gtjas.com", 7709), bars=True, xdxr=True, quote=True),
+    PytdxServerCapability(("jstdx.gtjas.com", 7709), bars=True, xdxr=True, quote=True),
+    PytdxServerCapability(("115.238.90.165", 7709), bars=False, xdxr=True, quote=None),
+    PytdxServerCapability(("180.153.18.170", 7709), bars=False, xdxr=True, quote=None),
+    PytdxServerCapability(("115.238.56.198", 7709), bars=False, xdxr=True, quote=None),
+    PytdxServerCapability(("218.75.126.9", 7709), bars=False, xdxr=True, quote=None),
+    PytdxServerCapability(("60.12.136.250", 7709), bars=False, xdxr=True, quote=None),
+    PytdxServerCapability(("60.191.117.167", 7709), bars=False, xdxr=True, quote=None),
+)
+
+# 兼容既有导出名（factor health probe 取前 N 台，故 bars-capable 排在最前）。
+PYTDX_SERVERS: list[tuple[str, int]] = [c.server for c in PYTDX_SERVER_CAPABILITIES]
+
+# operation → capability（避免所有 public API 改签名）；None = 不限制。
+_OPERATION_CAPABILITY: dict[str, str | None] = {
+    "get_security_bars": CAPABILITY_BARS,
+    "get_index_bars": CAPABILITY_BARS,
+    "get_security_quotes": CAPABILITY_QUOTE,
+    "get_xdxr_info": CAPABILITY_XDXR,
+    "get_history_transaction_data": None,
+    "get_security_count": None,
+    "get_security_list": None,
+    "get_finance_info": None,
+}
 
 # 市场映射：字符串标识 <-> pytdx 数字标识
 # pytdx 仅支持 SH(1) 与 SZ(0)，BJ 暂不支持（需通过其他数据源补充）
@@ -365,6 +404,8 @@ class PytdxAdapter(Exchange):
         max_retries: int = 3,
         retry_delay: float = 1.0,
         connect_timeout: float = 5.0,
+        capabilities: tuple[PytdxServerCapability, ...] | None = None,
+        capability_cooldown_seconds: float = 1800.0,
     ) -> None:
         """初始化适配器。
 
@@ -375,6 +416,13 @@ class PytdxAdapter(Exchange):
             connect_timeout: 单台服务器建连超时（秒）。默认 5.0 保持历史行为；
                 盘后健康探测等需要「快速失败」的场景应显式调小（如 1.0），
                 否则被黑洞的服务器会每台各耗满一个超时。
+            capabilities: 静态 capability 候选配置；None 用
+                :data:`PYTDX_SERVER_CAPABILITIES`。**只对已声明的服务器生效**：
+                未声明的（例如测试注入的 server）不参与 capability / health
+                过滤，保持既有行为。
+            capability_cooldown_seconds: 单 operation source failure 后该
+                ``(server, capability)`` 的 **process-local** 冷却时长（默认 30 分钟）。
+                不是永久黑名单，到期自动重新 eligible。
         """
         self._servers: list[tuple[str, int]] = servers if servers is not None else PYTDX_SERVERS
         self._api: TdxHq_API | None = None
@@ -398,6 +446,18 @@ class PytdxAdapter(Exchange):
         self._next_server_index: int = 0
         # 当前成功连接的 host 在 self._servers 中的下标（未连接为 None）。
         self._connected_server_index: int | None = None
+        # [capability] 静态候选配置：仅对已声明 server 生效（未声明 = 不限制）。
+        caps = capabilities if capabilities is not None else PYTDX_SERVER_CAPABILITIES
+        self._capabilities: dict[tuple[str, int], PytdxServerCapability] = {
+            c.server: c for c in caps
+        }
+        # [capability] 运行时健康（process-local、有 TTL、不持久化到 Redis/DB）：
+        #   _capability_health[server][capability] = monotonic 截止时间
+        #   _connect_health[server]                = monotonic 截止时间（connect 层）
+        # **按 capability 分开记**：bars 失败不得污染 xdxr / quote。
+        self._capability_health: dict[tuple[str, int], dict[str, float]] = {}
+        self._connect_health: dict[tuple[str, int], float] = {}
+        self.capability_cooldown_seconds = capability_cooldown_seconds
 
     def __enter__(self) -> PytdxAdapter:
         self.connect()
@@ -424,9 +484,85 @@ class PytdxAdapter(Exchange):
         """
         self._connect_excluding()
 
+    # ── capability / 运行时健康（process-local；不持久化）────────────
+    def _declared(self, server: tuple[str, int]) -> bool:
+        """该 server 是否在静态 capability 配置中声明（未声明→不参与过滤）。"""
+        return server in self._capabilities
+
+    def _server_supports(
+        self,
+        server: tuple[str, int],
+        capability: str | None,
+    ) -> bool:
+        """静态 capability 过滤；未声明的 server 一律放行（保持既有注入行为）。"""
+        if capability is None:
+            return True
+        cap = self._capabilities.get(server)
+        if cap is None:
+            return True
+        if capability == CAPABILITY_BARS:
+            return cap.bars
+        if capability == CAPABILITY_XDXR:
+            return cap.xdxr
+        if capability == CAPABILITY_QUOTE:
+            # quote=None 表示「未验证」：不作为 eligible（但也永不判坏）。
+            return cap.quote is True
+        return True
+
+    def _in_cooldown(self, server: tuple[str, int], capability: str | None) -> bool:
+        if not self._declared(server):
+            return False
+        now = time.monotonic()
+        until = self._connect_health.get(server)
+        if until is not None and now < until:
+            return True
+        if capability is None:
+            return False
+        cap_until = self._capability_health.get(server, {}).get(capability)
+        return cap_until is not None and now < cap_until
+
+    def _server_eligible(self, server: tuple[str, int], capability: str | None) -> bool:
+        return self._server_supports(server, capability) and not self._in_cooldown(
+            server, capability
+        )
+
+    def _mark_connect_failure(self, server: tuple[str, int]) -> None:
+        """connect 层失败 → 短期 cooldown（对该 server 的所有 operation 生效）。"""
+        if not self._declared(server) or self.capability_cooldown_seconds <= 0:
+            return
+        self._connect_health[server] = (
+            time.monotonic() + self.capability_cooldown_seconds
+        )
+
+    def _mark_capability_failure(
+        self,
+        server: tuple[str, int],
+        capability: str | None,
+    ) -> None:
+        """operation 级 source failure → **只**冷却该 capability（不得污染其它）。"""
+        if capability is None or not self._declared(server):
+            return
+        if self.capability_cooldown_seconds <= 0:
+            return
+        self._capability_health.setdefault(server, {})[capability] = (
+            time.monotonic() + self.capability_cooldown_seconds
+        )
+
+    def _clear_capability_failure(
+        self,
+        server: tuple[str, int],
+        capability: str | None,
+    ) -> None:
+        if capability is None:
+            return
+        health = self._capability_health.get(server)
+        if health is not None:
+            health.pop(capability, None)
+
     def _connect_excluding(
         self,
         excluded_servers: set[tuple[str, int]] | None = None,
+        capability: str | None = None,
     ) -> None:
         """连接 pytdx 服务器：从 ``_next_server_index`` 起环形扫描一整轮，跳过 excluded。
 
@@ -479,14 +615,18 @@ class PytdxAdapter(Exchange):
             server_count = len(self._servers)
 
             eligible_count = sum(
-                1 for server in self._servers if server not in excluded
+                1
+                for server in self._servers
+                if server not in excluded
+                and self._server_eligible(server, capability)
             )
 
             if eligible_count == 0:
                 raise PytdxSourceError(
                     operation="connect",
                     message=(
-                        "no eligible pytdx server remains after source failures"
+                        "no eligible pytdx server remains after source failures / "
+                        f"capability={capability} / cooldown"
                     ),
                     attempt=0,
                 )
@@ -503,6 +643,9 @@ class PytdxAdapter(Exchange):
 
                 # 本次业务调用内已证明 source failure 的 host，不再选中
                 if server in excluded:
+                    continue
+                # 静态 capability 不匹配，或该 capability 处于冷却期 → 跳过
+                if not self._server_eligible(server, capability):
                     continue
 
                 attempted += 1
@@ -528,9 +671,11 @@ class PytdxAdapter(Exchange):
                 except TdxConnectionError as exc:
                     last_exc = exc
                     last_errors.append(f"{host}:{port} TdxConnectionError: {exc}")
+                    self._mark_connect_failure(server)
                 except Exception as exc:
                     last_exc = exc
                     last_errors.append(f"{host}:{port} {type(exc).__name__}: {exc}")
+                    self._mark_connect_failure(server)
 
             err_summary = "; ".join(last_errors[-5:])
             raise PytdxSourceError(
@@ -596,6 +741,7 @@ class PytdxAdapter(Exchange):
         symbol: str | None = None,
         market: int | None = None,
         period: str | None = None,
+        capability: str | None = None,
     ) -> Any:
         """唯一 connection-level retry owner：所有 pytdx 网络调用必须经由此处。
 
@@ -620,6 +766,10 @@ class PytdxAdapter(Exchange):
         """
         last_exc: Exception | None = None
         last_server: tuple[str, int] | None = None
+        # capability 优先取显式入参，否则按 operation 映射（不改 public API 签名）
+        resolved_capability = (
+            capability if capability is not None else _OPERATION_CAPABILITY.get(operation)
+        )
 
         # 仅本次 operation 生命周期有效：记录「TCP 能连、但本次 operation 已 source/protocol
         # 失败」的 host。后续 retry 禁止再选中它（即使环形扫描会绕回它）。
@@ -640,7 +790,9 @@ class PytdxAdapter(Exchange):
                 # 导致本调用复用自己已判坏的 host，或误断别人刚建立的连接。
                 with self._io_lock:
                     # _connect_excluding 自身也获取同一把锁；_io_lock 是 RLock（可重入），不会自锁。
-                    self._connect_excluding(source_failed_servers)
+                    self._connect_excluding(
+                        source_failed_servers, capability=resolved_capability
+                    )
 
                     attempt_server = self.connected_server
 
@@ -653,8 +805,7 @@ class PytdxAdapter(Exchange):
                     last_server = attempt_server
 
                     try:
-                        return call(self.api)
-
+                        result = call(self.api)
                     except Exception as exc:
                         # 仍持有同一把锁：其他线程不可能在
                         # 「API failure → disconnect」之间替换共享 socket。
@@ -663,6 +814,8 @@ class PytdxAdapter(Exchange):
 
                         # 本次 operation 内该 host 已证明 source failure
                         source_failed_servers.add(attempt_server)
+                        # 只冷却该 capability：bars 失败不得污染 xdxr / quote。
+                        self._mark_capability_failure(attempt_server, resolved_capability)
 
                         logger.warning(
                             "PYTDX_SOURCE_FAILURE "
@@ -685,6 +838,12 @@ class PytdxAdapter(Exchange):
                         # 仍在锁内：断掉的一定是本 attempt 真正失败的 socket，
                         # 不会误伤其他线程刚建立的新连接。
                         self.disconnect()
+                    else:
+                        # 本次 (server, capability) 成功 → 清除该 capability 冷却
+                        self._clear_capability_failure(
+                            attempt_server, resolved_capability
+                        )
+                        return result
 
             except PytdxSourceError as exc:
                 # connect failure 与 API operation failure 是两类不同故障：
