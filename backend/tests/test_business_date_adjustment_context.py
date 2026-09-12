@@ -699,3 +699,125 @@ async def test_pristine_context_passes_integrity_gate(
 
     assert abs(float(qfq.loc[pd.Timestamp("2026-09-11"), "close"]) - 10.0) < 1e-9
     assert service.quote_qfq_price(10.0, ctx) == Decimal("10.0")
+
+
+# =============================================================================
+# 派生 invariant：**不进 context_hash** 的字段也必须语义正确
+# =============================================================================
+
+
+async def _build_basic_ctx(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """标准 10送10 场景（business_date=9/12，最新 raw=9/11 ⇒ synthetic anchor=True）。"""
+    ctx, _ = await _build(
+        monkeypatch,
+        raw=_raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)]),
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+    return ctx
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["denominator_factor", "quote_factor", "quote_qfq_ratio"],
+)
+@pytest.mark.asyncio
+async def test_quote_coordinate_tamper_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+) -> None:
+    """三个比例因子任一被篡改 → 两个消费入口都拒绝（identity 失真则不允许部分消费）。
+
+    回归重点：``quote_qfq_ratio`` 不在 context_hash 中，但 ``quote_qfq_price`` 真的消费它，
+    若不单独校验，raw 10 会静默变成 qfq 20。
+    """
+    ctx = await _build_basic_ctx(monkeypatch)
+    bad = replace(ctx, **{field: Decimal("2")})
+
+    service = BusinessDateAdjustmentService()
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        service.quote_qfq_price(10.0, bad)
+    assert ei.value.reason == "context_quote_coordinate_mismatch"
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei2:
+        service.apply_context_qfq(_daily_bars_20(), bad, intraday=False)
+    assert ei2.value.reason == "context_quote_coordinate_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_factor_freshness_date_tamper_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = await _build_basic_ctx(monkeypatch)
+    bad = replace(ctx, factor_freshness_date=date(2026, 9, 11))
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        BusinessDateAdjustmentService().quote_qfq_price(10.0, bad)
+    assert ei.value.reason == "context_factor_freshness_date_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_synthetic_anchor_metadata_tamper_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = await _build_basic_ctx(monkeypatch)
+    assert ctx.synthetic_anchor is True  # 9/11 < 9/12
+
+    bad = replace(ctx, synthetic_anchor=False)
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        BusinessDateAdjustmentService().quote_qfq_price(10.0, bad)
+    assert ei.value.reason == "context_synthetic_anchor_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_degraded_metadata_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """健康 context 的合同是 degraded_reason=None；出现 degraded 元数据不得被消费。"""
+    ctx = await _build_basic_ctx(monkeypatch)
+    assert ctx.degraded_reason is None
+
+    bad = replace(ctx, degraded_reason="fake")
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        BusinessDateAdjustmentService().apply_context_qfq(
+            _daily_bars_20(), bad, intraday=False
+        )
+    assert ei.value.reason == "context_degraded_metadata_present"
+
+
+@pytest.mark.asyncio
+async def test_business_date_anchor_not_unity_rejected_even_with_consistent_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """即使攻击者同步重算 factor_hash/context_hash，anchor != 1 仍被语义 invariant 拒绝。
+
+    证明两层防线独立：hash 只管 identity，派生语义由 invariant 把关。
+    """
+    ctx = await _build_basic_ctx(monkeypatch)
+
+    tampered = ctx.factor_df.copy()
+    ts = pd.Timestamp(ctx.business_date)
+    tampered.loc[pd.to_datetime(tampered["trade_date"]) == ts, "adj_factor"] = 0.5
+
+    new_factor_hash = ctx_mod._compute_factor_hash(tampered)
+    new_context_hash = ctx_mod._compute_context_hash(
+        business_date=ctx.business_date,
+        expected_completed_through=ctx.expected_completed_through,
+        latest_raw_trade_date=ctx.latest_raw_trade_date,
+        factor_source_fingerprint=ctx.factor_source_fingerprint,
+        factor_hash=new_factor_hash,
+    )
+    forged = replace(
+        ctx,
+        factor_df=tampered,
+        factor_hash=new_factor_hash,
+        context_hash=new_context_hash,
+    )
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        BusinessDateAdjustmentService().quote_qfq_price(10.0, forged)
+    assert ei.value.reason == "context_business_date_anchor_not_unity"

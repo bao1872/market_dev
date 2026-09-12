@@ -70,6 +70,9 @@ _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 # business-date anchor 必须精确为 1.0（浮点容差）
 _UNITY_TOLERANCE = 1e-9
 
+# business-date 坐标系的数学合同：三个比例因子恒为精确 1
+_UNITY_DECIMAL = Decimal("1")
+
 
 class BusinessDateAdjustmentUnavailableError(RuntimeError):
     """business-date 复权坐标无法被证明（fail-closed）。
@@ -258,6 +261,70 @@ def _assert_context_integrity(context: BusinessDateAdjustmentContext) -> None:
             symbol=context.symbol,
             business_date=context.business_date,
             reason="context_hash_mismatch",
+        )
+
+    # ---- 派生 invariant ----
+    # 以下字段**刻意不进入 context_hash**（它们是由已 hash 的业务字段确定出来的派生量），
+    # 因此必须在此单独校验语义，否则「版本号不变但真实价格坐标变了」仍可穿透。
+    if context.factor_freshness_date != context.business_date:
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_factor_freshness_date_mismatch",
+        )
+
+    # business-date 坐标系的数学合同：denominator/quote/quote_qfq 比例恒为 1。
+    # quote_qfq_price() 直接消费 quote_qfq_ratio —— 若不校验，replace(ratio=2)
+    # 会让 raw 10 静默变成 qfq 20。
+    if (
+        context.denominator_factor != _UNITY_DECIMAL
+        or context.quote_factor != _UNITY_DECIMAL
+        or context.quote_qfq_ratio != _UNITY_DECIMAL
+    ):
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_quote_coordinate_mismatch",
+        )
+
+    expected_synthetic_anchor = (
+        context.latest_raw_trade_date < context.business_date
+    )
+    if context.synthetic_anchor != expected_synthetic_anchor:
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_synthetic_anchor_mismatch",
+        )
+
+    # business-date anchor 在消费时重新验证（不只相信 build-time 那一次）
+    business_ts = pd.Timestamp(context.business_date)
+    business_rows = context.factor_df[
+        pd.to_datetime(context.factor_df["trade_date"]) == business_ts
+    ]
+    if business_rows.empty:
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_business_date_anchor_missing",
+        )
+
+    business_factor = float(business_rows["adj_factor"].iloc[-1])
+    if (
+        not math.isfinite(business_factor)
+        or abs(business_factor - 1.0) > _UNITY_TOLERANCE
+    ):
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_business_date_anchor_not_unity",
+        )
+
+    if context.degraded_reason is not None:
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_degraded_metadata_present",
         )
 
 
