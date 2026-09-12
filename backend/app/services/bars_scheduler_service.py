@@ -30,7 +30,7 @@ import pickle
 import time
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
@@ -72,6 +72,7 @@ from app.services.bars_fetch_worker import (
     init_worker,
 )
 from app.services.calendar_service import is_trading_day_async
+from app.services.eod_market_snapshot_provider import EodSnapshotRow
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("bars_scheduler_service")
@@ -113,6 +114,10 @@ class FactorProviderHealth:
     uncached_xdxr_ok: bool | None = None
 
 
+_FACTOR_PROBE_SERVER_LIMIT = 5
+_FACTOR_PROBE_CONNECT_TIMEOUT = 1.0
+
+
 async def probe_factor_provider(
     adapter: PytdxAdapter | None = None,
 ) -> FactorProviderHealth:
@@ -137,8 +142,6 @@ async def probe_factor_provider(
 
     # 取前 5 台服务器探测（而非前 3 台）。最坏约 5 秒量级（connect_timeout=1.0），
     # 但能避免「前三台挂、第五台可用」这类被前 3 台假阴性的情况。
-    _FACTOR_PROBE_SERVER_LIMIT = 5
-    _FACTOR_PROBE_CONNECT_TIMEOUT = 1.0
 
     probe = adapter or PytdxAdapter(
         servers=PYTDX_SERVERS[:_FACTOR_PROBE_SERVER_LIMIT],
@@ -245,6 +248,13 @@ class BatchResult:
     factor_source_uncached_xdxr_ok: bool | None = None
     # [G1B-3B2] planner 优化可观测指标（无 DB migration）：XDXR refresh-set 计划结果
     factor_xdxr_plan: dict[str, Any] | None = None
+    # [G1B-2B] 盘后日线多源编排指标（无 DB migration）
+    daily_primary_source: str | None = None
+    daily_pytdx_rows: int = 0
+    daily_eastmoney_rows: int = 0
+    daily_bj_rows: int = 0
+    universe_discovery_status: str | None = None
+
 
 
 class PoolFatalError(RuntimeError):
@@ -1249,76 +1259,138 @@ class BarsSchedulerService:
                         inner_exc,
                     )
 
-    async def refresh_raw_daily_only(
+    @staticmethod
+    def _merge_daily_snapshot_rows(
+        trade_date: date,
+        id_by_symbol: Mapping[str, uuid.UUID],
+        pytdx_rows: Sequence[EodSnapshotRow],
+        eastmoney_rows: Sequence[EodSnapshotRow],
+    ) -> tuple[dict[str, EodSnapshotRow], dict[str, str]]:
+        """[G1B-2B] 合并 pytdx primary 与 Eastmoney 行情行（唯一合并 owner）。
+
+        优先级规则：
+        1. SH/SZ symbol 优先使用有效 pytdx canonical row。
+        2. BJ 永远由 Eastmoney 提供（pytdx 不支持 BSE）。
+        3. pytdx 缺失或无效的 SH/SZ symbol 由缓存的 Eastmoney row 补充。
+
+        返回:
+            (selected_rows_by_symbol, source_by_symbol)
+        """
+        from app.services.eod_daily_refresh_service import is_valid_snapshot_daily_row
+
+        selected: dict[str, EodSnapshotRow] = {}
+        sources: dict[str, str] = {}
+
+        # 1. SH/SZ primary (pytdx)
+        for row in pytdx_rows:
+            if (
+                row.market in ("SH", "SZ")
+                and row.symbol in id_by_symbol
+                and is_valid_snapshot_daily_row(row, trade_date)
+            ):
+                selected[row.symbol] = row
+                sources[row.symbol] = "pytdx"
+
+        # 2. Eastmoney: BJ 必选；SH/SZ 仅在 pytdx 未覆盖时补入
+        for row in eastmoney_rows:
+            if row.symbol not in id_by_symbol:
+                continue
+            if not is_valid_snapshot_daily_row(row, trade_date):
+                continue
+
+            if row.market == "BJ":
+                selected[row.symbol] = row
+                sources[row.symbol] = "eastmoney_bj"
+            elif row.market in ("SH", "SZ") and row.symbol not in selected:
+                selected[row.symbol] = row
+                sources[row.symbol] = "eastmoney_fallback"
+
+        return selected, sources
+
+    async def _fetch_discovery_snapshot(
         self,
         trade_date: date,
         *,
-        job_run_id: uuid.UUID | None = None,
-    ) -> BatchResult:
-        """[EOD-SNAPSHOT] 只跑到 raw daily 完成即停止的入口（灾难修复 / 单日 raw 补数）。
+        client: Any | None = None,
+    ) -> tuple[list[dict[str, Any]], list[EodSnapshotRow]]:
+        """[G1B-2B] 拉取东方财富全市场收盘快照（一个 after-close run 最多执行一次）。
 
-        流程：snapshot → 同步 universe → raw daily upsert → sparse fallback → 连续性扫描
-        → **STOP**。
+        职责：
+        ① universe discovery / name / status
+        ② BJ 当日行情
+        ③ pytdx 失败时的内存 fallback 缓存
 
-        **不触发**因子重建 / DSA / Core / Review。用于「只想把某日 raw 日线补上，
-        暂不跑依赖因子的盘后 Core」的场景（如 09-11 单独补 raw daily）。
-
-        09-11 这类正常盘后 **优先用 Eastmoney 全市场快照**（单次请求覆盖全市场），
-        而不是 THS 5000 次逐股请求。若 snapshot 当前网络不可用，调用方应改用
-        :func:`repair_market_wide_daily_gap`（THS）作为 disaster repair。
-
-        Returns:
-            BatchResult（含 snapshot / universe / upsert / 连续性指标）。
+        返回:
+            (raw_rows, normalized_rows)
         """
-        from app.services.calendar_service import is_trading_day_async
-        from app.services.eod_daily_refresh_service import (
-            DailyContinuityBlockedError,
-            find_missing_daily_instruments,
-        )
+        import httpx
+
         from app.services.eod_market_snapshot_provider import (
-            SnapshotProviderError,
-            can_use_same_day_eod_snapshot,
+            fetch_full_a_share_snapshot,
+            normalize_snapshot_rows,
         )
 
-        result = BatchResult(
-            total=0,
-            period_counts={"d": 0},
-            daily_mode="snapshot",
+        if client is not None:
+            raw_rows = await fetch_full_a_share_snapshot(
+                client, expected_trade_date=trade_date
+            )
+        else:
+            async with httpx.AsyncClient(timeout=15.0) as http_client:
+                raw_rows = await fetch_full_a_share_snapshot(
+                    http_client, expected_trade_date=trade_date
+                )
+
+        normalized = list(normalize_snapshot_rows(raw_rows))
+        return list(raw_rows), normalized
+
+    async def _fetch_pytdx_primary_eod(
+        self,
+        trade_date: date,
+        instruments: Sequence[Instrument],
+        *,
+        adapter: Any | None = None,
+        batch_interval_seconds: float | None = None,
+    ) -> tuple[EodSnapshotRow, ...]:
+        """[G1B-2B] 批量抓取并验证 SH/SZ pytdx 盘后行情快照。
+
+        必须走已冻结的三段式合同：
+        fetch_pytdx_eod_snapshot
+        → verify_pytdx_eod_snapshot
+        → to_canonical_eod_rows
+
+        任一步骤异常均上抛，由调用方降级到 cached Eastmoney rows。
+        """
+        from app.core.pytdx_adapter import connect_pytdx
+        from app.services.pytdx_eod_snapshot_provider import (
+            PYTDX_QUOTE_BATCH_INTERVAL_SECONDS,
+            fetch_pytdx_eod_snapshot,
+            to_canonical_eod_rows,
+            verify_pytdx_eod_snapshot,
         )
-        async with AsyncSessionLocal() as db_session:
-            # 安全前置条件（公开生产 owner 必须自己拥有完整契约，不能依赖调用方保证）
-            if not await is_trading_day_async(db_session, trade_date):
-                raise SnapshotProviderError(
-                    f"trade_date is not A-share trading day: {trade_date}"
-                )
-            if not can_use_same_day_eod_snapshot(trade_date):
-                raise SnapshotProviderError(
-                    "raw-daily-only snapshot is allowed only for today's "
-                    f"post-close window (trade_date={trade_date})"
-                )
 
-            await self._refresh_daily_from_market_snapshot(
-                trade_date, db_session, job_run_id, result
+        interval = (
+            PYTDX_QUOTE_BATCH_INTERVAL_SECONDS
+            if batch_interval_seconds is None
+            else batch_interval_seconds
+        )
+
+        def _sync_fetch_and_verify(tdx_adapter: PytdxAdapter) -> tuple[EodSnapshotRow, ...]:
+            raw_snapshot = fetch_pytdx_eod_snapshot(
+                tdx_adapter,
+                instruments,
+                trade_date=trade_date,
+                batch_interval_seconds=interval,
             )
+            verified = verify_pytdx_eod_snapshot(tdx_adapter, raw_snapshot)
+            return to_canonical_eod_rows(verified)
 
-            clear_instruments_cache()
-            instruments = await self._get_active_instruments(db_session)
-            result.total = len(instruments)
+        def _worker() -> tuple[EodSnapshotRow, ...]:
+            if adapter is not None:
+                return _sync_fetch_and_verify(adapter)
+            with connect_pytdx() as conn_adapter:
+                return _sync_fetch_and_verify(conn_adapter)
 
-            # 日线连续性硬门禁（snapshot / legacy / 未来 provider 一视同仁）
-            gaps = await self._scan_daily_continuity_gate(
-                trade_date, db_session, result
-            )
-            if gaps:
-                raise DailyContinuityBlockedError(gaps)
-
-            result.failed_symbols = [
-                i.symbol
-                for i in await find_missing_daily_instruments(db_session, trade_date)
-            ]
-            result.failed = len(result.failed_symbols)
-            result.succeeded = result.total - result.failed
-        return result
+        return await asyncio.to_thread(_worker)
 
     async def _refresh_daily_from_market_snapshot(
         self,
@@ -1326,31 +1398,28 @@ class BarsSchedulerService:
         db_session: AsyncSession | None,
         job_run_id: uuid.UUID | None,
         result: BatchResult,
+        *,
+        adapter: Any | None = None,
+        pytdx_batch_interval_seconds: float | None = None,
     ) -> dict[str, Decimal | None]:
-        """[EOD-SNAPSHOT] 每日日线阶段的全市场快照快速路径 owner。
+        """[EOD-SNAPSHOT] 每日日线阶段的全市场快照快速路径 owner（G1B-2B）。
 
-        流程（详见 eod_daily_refresh_service / eod_market_snapshot_provider）：
-        1. 拉全市场 A 股收盘快照（东方财富，不复权）。
-        1.5 规模防护：快照覆盖比例异常小 → fail-closed，防止 fallback storm。
-        2. 先同步 instrument universe（新股发现必须先于行情覆盖率）。
-        3. 批量落当日 raw 日线（conflict 保留 adj_factor）。
-        4. 集合差找缺口；仅 sparse_symbol_gap 走历史 fallback（pytdx / Eastmoney
-           fqt=0）；market_wide_gap 本轮只报告不逐股回补。
-        5. 对新股历史补齐（listing_date 或 2023-01-01 起）。
-        6. 回补后重新求集合差 → ``daily_missing_after_fallback``（真成功判定）。
-        7. 日线连续性只读扫描 → ``daily_continuity_gaps``（可发现 09-10 整日空洞）。
-
-        所有指标写入传入的 result（snapshot_total / universe_new / ...）。
-        失败时抛 SnapshotProviderError，由 _process_all_instruments 退回 legacy 逐股路径。
-
-        调用前置条件：``can_use_same_day_eod_snapshot(trade_date)`` 为 True
-        （由 _process_all_instruments 保证），因此这里不需要再判断盘中。
+        流程：
+        1. 拉全市场 A 股收盘快照（东方财富，一个 run 最多执行 1 次）：
+           用于 universe discovery、BJ 行情与 pytdx 失败时的内存缓存。
+        2. 同步 universe（新股发现必须先于行情覆盖率；discovery 失败时不阻断）。
+        3. SH/SZ pytdx 批量行情快照（主源：同连接 + 2 只 sentinel 证明交易日 + 唯一 canonical 转换）。
+        4. 合并 canonical row set：SH/SZ 优先 pytdx，BJ 来自 EM，pytdx 缺失使用缓存 EM。
+        5. 单次批量落当日 raw 日线（conflict 保留 adj_factor）。
+        6. 集合差找缺口；仅 sparse_symbol_gap 走历史 fallback。
+        7. 对新股历史补齐（listing_date 或 2023-01-01 起）。
+        8. 回补后重新求集合差 → daily_missing_after_fallback。
+        9. 返回选定 row source 对应的 previous_close evidence。
         """
-        import httpx
-
         from app.models.instrument import Instrument
         from app.services.eod_daily_refresh_service import (
             DailyGap,
+            InstrumentSyncResult,
             _PytdxBreaker,
             backfill_new_instruments,
             check_snapshot_universe_sanity,
@@ -1362,51 +1431,58 @@ class BarsSchedulerService:
             sync_instruments_from_eod_snapshot,
             upsert_raw_daily_snapshot,
         )
-        from app.services.eod_market_snapshot_provider import (
-            SnapshotProviderError,
-            fetch_full_a_share_snapshot,
-            normalize_snapshot_rows,
-        )
+        from app.services.eod_market_snapshot_provider import SnapshotProviderError
         from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
         own_session = db_session is None
         session = AsyncSessionLocal() if own_session else db_session
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                try:
-                    # expected_trade_date：由 provider 校验「数据 watermark 已过 15:00」，
-                    # 不达标的 host 会被拒绝并尝试下一个；全部不达标则整体 fail-closed。
-                    raw_rows = await fetch_full_a_share_snapshot(
-                        client, expected_trade_date=trade_date
+            # 1. 东方财富 discovery 快照（全市场拉取至多 1 次）
+            em_raw_rows: list[dict[str, Any]] = []
+            em_rows: list[EodSnapshotRow] = []
+            em_discovery_success = False
+
+            try:
+                em_raw_rows, em_rows = await self._fetch_discovery_snapshot(trade_date)
+                result.snapshot_total = len(em_raw_rows)
+                result.snapshot_valid_daily = len(em_rows)
+                if not em_rows:
+                    raise SnapshotProviderError(
+                        f"snapshot 归一化后无有效 A 股行 raw={len(em_raw_rows)}"
                     )
-                except Exception as exc:
-                    raise SnapshotProviderError(f"snapshot 拉取失败: {exc}") from exc
-
-            rows = normalize_snapshot_rows(raw_rows)
-            result.snapshot_total = len(raw_rows)
-            result.snapshot_valid_daily = len(rows)
-            if not rows:
-                # 归一化后一行都不剩说明筛选/解析契约被破坏，禁止静默当成功。
-                raise SnapshotProviderError(
-                    f"snapshot 归一化后无有效 A 股行 raw={len(raw_rows)}"
+                logger.info(
+                    "[EOD-SNAPSHOT] 快照拉取 raw=%d valid=%d",
+                    len(em_raw_rows),
+                    len(em_rows),
                 )
-            logger.info(
-                "[EOD-SNAPSHOT] 快照拉取 raw=%d valid=%d", len(raw_rows), len(rows)
-            )
+                existing_count = await count_active_a_share_instruments(session)
+                check_snapshot_universe_sanity(
+                    [r.symbol for r in em_rows], existing_count
+                )
+                em_discovery_success = True
+            except Exception as exc:
+                logger.warning(
+                    "[EOD-DISCOVERY] Eastmoney universe discovery 失败: %s", exc
+                )
+                em_raw_rows = []
+                em_rows = []
+                em_discovery_success = False
 
-            # 1.5 规模防护（落库前）：接口筛选失效 → 只返回几百只 → 若继续，
-            # 集合差会把几千只全部推入 historical fallback（fallback storm）。
-            existing_count = await count_active_a_share_instruments(session)
-            check_snapshot_universe_sanity(
-                [r.symbol for r in rows], existing_count
-            )
+            # 2. 同步 universe（解耦：discovery 失败时记状态并保留 DB 已有 universe）
+            if em_discovery_success:
+                sync = await sync_instruments_from_eod_snapshot(
+                    session, em_rows, trade_date
+                )
+                result.universe_new = len(sync.new_symbols)
+                result.universe_updated = len(sync.updated_symbols)
+                result.universe_discovery_status = "success"
+            else:
+                sync = InstrumentSyncResult()
+                result.universe_new = 0
+                result.universe_updated = 0
+                result.universe_discovery_status = "failed"
 
-            # 2. 同步 universe（新股发现必须先于行情覆盖率）
-            sync = await sync_instruments_from_eod_snapshot(session, rows, trade_date)
-            result.universe_new = len(sync.new_symbols)
-            result.universe_updated = len(sync.updated_symbols)
-
-            # 重新读取 active A 股 universe（含可能的新股）
+            # 3. 读取当前活跃 A 股标的
             active = (
                 await session.execute(
                     select(Instrument)
@@ -1417,20 +1493,86 @@ class BarsSchedulerService:
             id_by_symbol = {i.symbol: i.id for i in active}
             eligible = len(active)
 
+            # 4. SH/SZ pytdx primary（BJ 永远不进入 pytdx 请求）
+            def _is_sh_sz(inst: Any) -> bool:
+                m = getattr(inst, "market", None)
+                if m in ("SH", "SZ"):
+                    return True
+                if m == "BJ":
+                    return False
+                sym = getattr(inst, "symbol", "")
+                return sym.startswith(("6", "0", "3"))
+
+            sh_sz_instruments = [
+                i for i in active if _is_sh_sz(i)
+            ]
+            pytdx_rows: tuple[EodSnapshotRow, ...] = ()
+            if sh_sz_instruments:
+                try:
+                    kwargs: dict[str, Any] = {}
+                    if adapter is not None:
+                        kwargs["adapter"] = adapter
+                    if pytdx_batch_interval_seconds is not None:
+                        kwargs["batch_interval_seconds"] = pytdx_batch_interval_seconds
+                    pytdx_rows = await self._fetch_pytdx_primary_eod(
+                        trade_date, sh_sz_instruments, **kwargs
+                    )
+                    logger.info(
+                        "[EOD-SNAPSHOT] pytdx primary 成功获取 %d 行", len(pytdx_rows)
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "[EOD-SNAPSHOT] pytdx primary 失败，降级使用 Eastmoney 缓存: %s",
+                        exc,
+                    )
+                    pytdx_rows = ()
+
+            # 5. 若 pytdx primary 与 Eastmoney discovery 均失败，快速路径不可用
+            if not pytdx_rows and not em_rows:
+                raise SnapshotProviderError(
+                    "EOD snapshot failed: both pytdx primary and Eastmoney discovery failed"
+                )
+
+            # 6. 合并行情行与 source 可观测性统计
+            selected, sources = self._merge_daily_snapshot_rows(
+                trade_date, id_by_symbol, pytdx_rows, em_rows
+            )
+            if not selected:
+                raise SnapshotProviderError(
+                    "EOD snapshot produced 0 valid daily rows after merging"
+                )
+
+            pytdx_count = sum(1 for s in sources.values() if s == "pytdx")
+            em_fallback_count = sum(1 for s in sources.values() if s == "eastmoney_fallback")
+            bj_count = sum(1 for s in sources.values() if s == "eastmoney_bj")
+
+            result.daily_pytdx_rows = pytdx_count
+            result.daily_eastmoney_rows = em_fallback_count + bj_count
+            result.daily_bj_rows = bj_count
+
+            if pytdx_count > 0 and em_fallback_count == 0:
+                result.daily_primary_source = "pytdx"
+            elif pytdx_count > 0 and em_fallback_count > 0:
+                result.daily_primary_source = "mixed"
+            elif pytdx_count == 0 and (em_fallback_count > 0 or bj_count > 0):
+                result.daily_primary_source = "eastmoney"
+            else:
+                result.daily_primary_source = None
+
+            # 7. 一次批量落当日 raw 日线
             pairs = [
-                (id_by_symbol[r.symbol], r)
-                for r in rows
-                if r.symbol in id_by_symbol and r.market in ("SH", "SZ", "BJ")
+                (id_by_symbol[symbol], row)
+                for symbol, row in selected.items()
             ]
             upserted = await upsert_raw_daily_snapshot(session, trade_date, pairs)
             result.snapshot_upserted = upserted
-            # 快照路径也必须计入当日 d 阶段的分周期统计，否则 period_counts["d"]
-            # 会错误地保持 0（看起来像「一只都没刷」）。
             result.period_counts["d"] = result.period_counts.get("d", 0) + upserted
-            logger.info("[EOD-SNAPSHOT] 当日 raw 日线 upsert=%d", upserted)
+            logger.info(
+                "[EOD-SNAPSHOT] 当日 raw 日线 upsert=%d (pytdx=%d, em_fallback=%d, bj=%d)",
+                upserted, pytdx_count, em_fallback_count, bj_count,
+            )
 
-            # 4. 缺口：只对 snapshot 后仍未覆盖的活跃 A 股走历史源。
-            #    先分类：market_wide_gap 逐股回补等于重新制造数小时任务，本轮只报告。
+            # 8. 缺口：只对 snapshot 后仍未覆盖的活跃 A 股走历史源
             breaker = _PytdxBreaker()
             missing = await find_missing_daily_instruments(session, trade_date)
             result.daily_missing_after_snapshot = len(missing)
@@ -1464,11 +1606,11 @@ class BarsSchedulerService:
                         len(missing), ok,
                     )
 
-            # 4.5 真成功判定：回补后仍缺 T 日的数量
+            # 8.5 真成功判定：回补后仍缺 T 日的数量
             still_missing = await find_missing_daily_instruments(session, trade_date)
             result.daily_missing_after_fallback = len(still_missing)
 
-            # 5. 新股历史补齐（每只按其 listing_date 或 2023-01-01 起）
+            # 9. 新股历史补齐（每只按其 listing_date 或 2023-01-01 起）
             if sync.new_instruments:
                 backfilled = await backfill_new_instruments(
                     session, sync.new_instruments, trade_date, breaker=breaker
@@ -1476,20 +1618,11 @@ class BarsSchedulerService:
                 result.new_instrument_backfilled = backfilled
                 logger.info("[EOD-SNAPSHOT] 新股历史补齐=%d", backfilled)
 
-            # 7. 日线连续性扫描 **不在此处**：连续性已经是硬门禁，统一由
-            #    _process_all_instruments 在 daily 阶段落库完成后调用
-            #    _scan_daily_continuity_gate（对 snapshot / legacy / 未来 provider 一视同仁）。
-
-            # [G1B-3B2] 收集当日 EOD previous_close 证据（仅 transient，不写新列）。
-            # 复用唯一合法性 owner is_valid_snapshot_daily_row；不另维护 snapshot validity。
+            # 10. 收集当日 EOD previous_close 证据（真正被选为本轮 canonical row 的 source）
             eod_previous_close_by_symbol = {
-                row.symbol: row.previous_close
-                for row in rows
-                if (
-                    row.symbol in id_by_symbol
-                    and row.market in ("SH", "SZ", "BJ")
-                    and is_valid_snapshot_daily_row(row, trade_date)
-                )
+                symbol: row.previous_close
+                for symbol, row in selected.items()
+                if is_valid_snapshot_daily_row(row, trade_date)
             }
             return eod_previous_close_by_symbol
         finally:
