@@ -590,3 +590,165 @@ class TestChipFailureDoesNotAffectCore:
         # chip hash 与 core inputHash 是不同字段（即使数据相同，hash 用途不同）
         assert chip.chipHash.startswith("sha256:")
         assert core.inputHash.startswith("sha256:")
+
+
+# =============================================================================
+# C3A. SMC core authoritative structure target state export（opt-in, additive）
+# 对应 C3A 实现指令：emit_structure_target_state 默认 False、零变化；
+# True 时暴露终态 4 结构 pivot 槽位 + 2 lane bias，crossed=True 槽位保留。
+# =============================================================================
+
+
+class TestStructureTargetStateExport:
+    """验证 C3A：opt-in 暴露 authoritative structure target state。"""
+
+    @staticmethod
+    def _lists(bars):
+        return (
+            bars["open"].astype(float).tolist(),
+            bars["high"].astype(float).tolist(),
+            bars["low"].astype(float).tolist(),
+            bars["close"].astype(float).tolist(),
+            [d.isoformat() for d in bars.index],
+        )
+
+    def _bars(self, n=250, trend="up", seed=0):
+        return _build_bars(n=n, trend=trend, seed=seed)
+
+    # A. legacy zero-change
+    def test_legacy_default_equals_explicit_false(self):
+        bars = self._bars(n=200, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r_default = compute_smc_pine(o, h, low, c, t)
+        r_false = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=False)
+        assert r_default == r_false
+
+    def test_legacy_keyset_unchanged_when_opt_in_dropped(self):
+        bars = self._bars(n=200, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r_default = compute_smc_pine(o, h, low, c, t)
+        r_opt = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        assert "structure_target_state" not in r_default
+        opt_copy = {k: v for k, v in r_opt.items() if k != "structure_target_state"}
+        assert r_default == opt_copy
+
+    # B. opt-in only
+    def test_opt_in_present_true_absent_default(self):
+        bars = self._bars(n=200, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r_true = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        r_false = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=False)
+        r_default = compute_smc_pine(o, h, low, c, t)
+        assert "structure_target_state" in r_true
+        assert "structure_target_state" not in r_false
+        assert "structure_target_state" not in r_default
+
+    # C. fixed four slots, no equal_*
+    def test_fixed_four_slots_no_equal(self):
+        bars = self._bars(n=200, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        slots = r["structure_target_state"]["slots"]
+        assert set(slots.keys()) == {
+            "swing_high", "swing_low", "internal_high", "internal_low",
+        }
+        assert "equal_high" not in slots
+        assert "equal_low" not in slots
+
+    # D. crossed slot must not be filtered out
+    def test_crossed_slot_not_filtered(self):
+        # seed=0/n=250/up 已探明会产生 events 且存在 crossed=True 槽位
+        bars = self._bars(n=250, trend="up", seed=0)
+        o, h, low, c, t = self._lists(bars)
+        r = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        slots = r["structure_target_state"]["slots"]
+        # 固定四个槽位，crossed 槽位绝不被删除
+        assert set(slots.keys()) == {
+            "swing_high", "swing_low", "internal_high", "internal_low",
+        }
+        crossed_count = sum(1 for s in slots.values() if s["crossed"])
+        events = r.get("events") or []
+        if events:
+            # 存在 BOS/CHoCH 事件 → 至少一个槽位已 crossed=True
+            assert crossed_count >= 1
+        # crossed 槽位仍保留（不删除）
+        for s in slots.values():
+            assert "crossed" in s
+
+    # E. per-lane bias, not merged
+    def test_per_lane_bias_maps_to_top_level(self):
+        bars = self._bars(n=200, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        sts = r["structure_target_state"]
+        # swing_bias/internal_bias 直接等于顶层权威字段（= state.*_trend.bias）
+        assert sts["swing_bias"] == r["swing_bias"]
+        assert sts["internal_bias"] == r["internal_bias"]
+        assert isinstance(sts["swing_bias"], int)
+        assert isinstance(sts["internal_bias"], int)
+
+    # F. internal reference context preserved (both lanes retrievable)
+    def test_internal_reference_context_preserved(self):
+        # osc 正弦走势可同时形成 swing_high 与 internal_high，且终态两者 level 均非 None
+        bars = self._bars(n=300, trend="osc", seed=0)
+        o, h, low, c, t = self._lists(bars)
+        r = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        slots = r["structure_target_state"]["slots"]
+        # 无论 crossed 状态，swing_high 与 internal_high 的 level 都仍可从 state 取得
+        # （internal crossing 的 eligibility 可能依赖对应 swing level，故必须同时暴露）
+        assert slots["swing_high"]["level"] is not None
+        assert slots["internal_high"]["level"] is not None
+        assert "level" in slots["swing_high"]
+        assert "level" in slots["internal_high"]
+
+    # G. deterministic
+    def test_deterministic(self):
+        bars = self._bars(n=200, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r1 = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        r2 = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        assert r1["structure_target_state"] == r2["structure_target_state"]
+
+    # 空输入：opt-in 下仍提供结构（全部 sentinel）
+    def test_empty_input_opt_in(self):
+        r = compute_smc_pine([], [], [], [], [], emit_structure_target_state=True)
+        assert "structure_target_state" in r
+        sts = r["structure_target_state"]
+        assert sts["swing_bias"] == 0
+        assert sts["internal_bias"] == 0
+        slots = sts["slots"]
+        assert set(slots.keys()) == {
+            "swing_high", "swing_low", "internal_high", "internal_low",
+        }
+        for s in slots.values():
+            assert s["level"] is None
+            assert s["anchor_index"] is None
+            assert s["anchor_time"] is None
+            assert s["crossed"] is False
+
+    # _Pivot 初始 sentinel：未形成 pivot 的槽位 NaN→None 安全序列化
+    def test_unformed_pivot_serializes_safely(self):
+        bars = self._bars(n=120, trend="up", seed=5)
+        o, h, low, c, t = self._lists(bars)
+        r = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        slots = r["structure_target_state"]["slots"]
+        for _name, s in slots.items():
+            assert isinstance(s["crossed"], bool)
+            assert s["level"] is None or isinstance(s["level"], float)
+            assert s["anchor_index"] is None or isinstance(s["anchor_index"], int)
+            assert s["anchor_time"] is None or isinstance(s["anchor_time"], str)
+
+    # 明确排除 BOS/CHoCH/OB/equal/realtime 状态
+    def test_excludes_bos_choch_ob_equal(self):
+        bars = self._bars(n=250, trend="up", seed=0)
+        o, h, low, c, t = self._lists(bars)
+        r = compute_smc_pine(o, h, low, c, t, emit_structure_target_state=True)
+        sts = r["structure_target_state"]
+        for forbidden in (
+            "BOS", "CHoCH", "confirmed_index", "confirmed_time",
+            "last_level", "equal_high", "equal_low",
+            "order_blocks", "OB", "OB_ENTERED",
+        ):
+            assert forbidden not in sts
+        for s in sts["slots"].values():
+            assert set(s.keys()) == {"level", "anchor_index", "anchor_time", "crossed"}

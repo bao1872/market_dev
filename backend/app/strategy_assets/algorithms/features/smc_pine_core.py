@@ -346,6 +346,38 @@ class _SMCPineState:
         # leg 状态缓存
         self.leg_states: dict[tuple[str, int], dict[int, int]] = {}
 
+    def _export_structure_target_state(self) -> dict[str, Any]:
+        """导出终态 authoritative structure target state（opt-in，仅观察终态）。
+
+        忠实暴露 core 已拥有的 4 个结构 pivot 槽位 + 2 个 lane bias。
+        不判断 active target、不生成 BOS/CHoCH、不处理 OB、不参与状态机。
+        run() 完成以后调用，读取的是最终状态快照。
+
+        注意：未形成 pivot 时 current_level=float("nan")、bar_index/bar_time=None、
+        crossed=False，这是 _Pivot 的真实初始状态，原样暴露（NaN 仅做 JSON 安全的
+        None 转换，不新増 valid/available 语义）。
+        """
+        def _slot(piv: _Pivot) -> dict[str, Any]:
+            level = piv.current_level
+            return {
+                # NaN 是未形成 pivot 的 sentinel；JSON 安全序列化为 None（忠实暴露）
+                "level": level if level == level else None,
+                "anchor_index": piv.bar_index,
+                "anchor_time": piv.bar_time,
+                "crossed": piv.crossed,
+            }
+
+        return {
+            "swing_bias": self.swing_trend.bias,
+            "internal_bias": self.internal_trend.bias,
+            "slots": {
+                "swing_high": _slot(self.swing_high),
+                "swing_low": _slot(self.swing_low),
+                "internal_high": _slot(self.internal_high),
+                "internal_low": _slot(self.internal_low),
+            },
+        }
+
     def _compute_parsed_high_low(self) -> tuple[list[float], list[float]]:
         """计算 parsedHigh/parsedLow（高波动 bar 互换 high/low）。
 
@@ -1014,6 +1046,21 @@ class _SMCPineState:
 # ===== 公开 API =====
 
 
+def _empty_structure_target_state() -> dict[str, Any]:
+    """空输入（n==0）下的 authoritative structure target state（与终态结构对齐）。"""
+    empty_slot = {"level": None, "anchor_index": None, "anchor_time": None, "crossed": False}
+    return {
+        "swing_bias": 0,
+        "internal_bias": 0,
+        "slots": {
+            "swing_high": dict(empty_slot),
+            "swing_low": dict(empty_slot),
+            "internal_high": dict(empty_slot),
+            "internal_low": dict(empty_slot),
+        },
+    }
+
+
 def compute_smc_pine(
     opens: list[float],
     highs: list[float],
@@ -1023,6 +1070,7 @@ def compute_smc_pine(
     params: dict[str, Any] | None = None,
     *,
     emit_timeline: bool = False,
+    emit_structure_target_state: bool = False,
 ) -> dict[str, Any]:
     """计算 SMC 指标（Pine 语义核心），完全排除 FVG。
 
@@ -1036,6 +1084,12 @@ def compute_smc_pine(
         emit_timeline: 若为 True，额外输出 state_timeline（每 bar 的 swing_bias /
             internal_bias / active_internal_ob_count / active_swing_ob_count）。
             默认 False，避免在仅需要最后状态的调用方产生开销。
+        emit_structure_target_state: 若为 True，额外输出 structure_target_state
+            （终态 4 个结构 pivot 槽位 swing_high/swing_low/internal_high/internal_low
+            各自的 level/anchor_index/anchor_time/crossed，外加 swing_bias/internal_bias）。
+            不含 equal_high/equal_low、BOS/CHoCH、confirmed_*、OB、realtime 状态。
+            crossed=True 的槽位仍被保留（internal crossing 可能仍依赖对应 swing level）。
+            默认 False：不新增任何键，所有现有 caller 返回结构完全不变。
 
     Returns:
         dict 包含：
@@ -1051,6 +1105,9 @@ def compute_smc_pine(
         - ob_lifecycle_events: list[dict] OB_CREATED/OB_ENTERED/OB_MITIGATED 事件
           （[CHANGE-20260729-002] 独立于 Pine BOS/CHoCH 事件，单次触发不可变）
         - state_timeline: list[dict] 仅 emit_timeline=True 时存在；每 bar 一条记录
+        - structure_target_state: dict 仅 emit_structure_target_state=True 时存在；
+            终态 authoritative structure target state（见 emit_structure_target_state）；
+            不含 equal_high/equal_low、BOS/CHoCH、OB、realtime 状态
 
     Raises:
         ValueError: 输入长度不一致或为空
@@ -1064,7 +1121,7 @@ def compute_smc_pine(
             f"lows={len(lows)} closes={n} times={len(times)}"
         )
     if n == 0:
-        return {
+        result: dict[str, Any] = {
             "events": [],
             "order_blocks": [],
             "equal_highs_lows": [],
@@ -1084,6 +1141,9 @@ def compute_smc_pine(
             "ob_lifecycle_events": [],
             "state_timeline": [] if emit_timeline else None,
         }
+        if emit_structure_target_state:
+            result["structure_target_state"] = _empty_structure_target_state()
+        return result
 
     state = _SMCPineState(opens, highs, lows, closes, times, actual_params, emit_timeline)
     state.run()
@@ -1116,4 +1176,7 @@ def compute_smc_pine(
     }
     if emit_timeline:
         result["state_timeline"] = state.state_timeline
+    if emit_structure_target_state:
+        # 终态 authoritative structure target state（仅观察，不参与状态机）
+        result["structure_target_state"] = state._export_structure_target_state()
     return result
