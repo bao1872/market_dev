@@ -5,14 +5,16 @@
    - 向上穿透 [P_last < target <= P_curr] 触发 node_cluster_touch (UP)；
    - 向下穿透 [P_last > target >= P_curr] 触发 node_cluster_touch (DOWN)；
    - 未穿透不触发；
-   - 一次性保证：触发后 target_id 记入已触发集合，再次经过绝不重复报警。
+   - **可重复**：不再维护永久 triggered set；同一分钟内 dedupe_key 相同
+     （由 event_key 唯一约束去重），跨分钟可再次触发，
+     最终是否写入由 600s 冷却（锚定上一次事件时间）决定。
 2. SMC 结构（BOS / CHoCH）穿透：
    - 顺势突破（high + bias=1 或 low + bias=-1）触发 BOS；
    - 逆势反转（high + bias=-1 或 low + bias=1）触发 CHoCH；
-   - 穿越即发射，触发后标记已触发，无 retest 逻辑。
-3. SMC Order Block First Touch：
-   - 价格落入或进入 [bar_low, bar_high] 触发 smc_order_block_first_touch；
-   - 首次进入后立即标记，后续停留在 OB 内绝不重复触发。
+   - 穿越即发射，触发后标记已触发，无 retest 逻辑（保持 TargetSet version 内 one-shot）。
+3. SMC Order Block：
+   - 从外部进入 [bar_low, bar_high] 触发 smc_order_block_first_touch；
+   - 停留在 OB 内不重复；离开后**重新进入**可再次触发（可重复 re-entry）。
 """
 
 from __future__ import annotations
@@ -95,34 +97,50 @@ def _make_smc_target_set(
     )
 
 
-def test_node_crossing_up_and_down() -> None:
+def test_node_crossing_is_repeatable_and_minute_scoped() -> None:
+    """Node 是可重复事件：09:40 触发 → 09:51 可再次触发（不再永久 one-shot）。"""
     inst_id = uuid.uuid4()
-    now = datetime.now(_SH_TZ)
-    target_set = _make_node_target_set([("target_10_5", 10.5), ("target_12_0", 12.0)])
-    triggered: set[str] = set()
+    t_0940 = datetime(2026, 9, 12, 9, 40, 0, tzinfo=_SH_TZ)
+    t_0940_30 = datetime(2026, 9, 12, 9, 40, 30, tzinfo=_SH_TZ)
+    t_0951 = datetime(2026, 9, 12, 9, 51, 0, tzinfo=_SH_TZ)
 
-    # 1. 向上穿透 10.5 (10.0 -> 11.0)
-    events_up = evaluate_node_crossings(inst_id, target_set, 10.0, 11.0, now, triggered)
+    target_set = _make_node_target_set([("target_10_5", 10.5), ("target_12_0", 12.0)])
+
+    # 1. 09:40 向上穿透 10.5 (10.0 -> 11.0)
+    events_up = evaluate_node_crossings(inst_id, target_set, 10.0, 11.0, t_0940)
     assert len(events_up) == 1
     assert events_up[0].event_type == EVENT_TYPE_NODE_CLUSTER_TOUCH
     assert events_up[0].payload["target_id"] == "target_10_5"
     assert events_up[0].payload["direction"] == "UP"
-    assert "target_10_5" in triggered
 
     # 2. 未穿透 12.0 (11.0 -> 11.8)
-    events_none = evaluate_node_crossings(inst_id, target_set, 11.0, 11.8, now, triggered)
-    assert len(events_none) == 0
+    assert len(evaluate_node_crossings(inst_id, target_set, 11.0, 11.8, t_0940)) == 0
 
-    # 3. 再次穿透 10.5 (11.8 -> 10.2) -> 因为是一次性事件，之前已触发过，绝不重复触发！
-    events_repeat = evaluate_node_crossings(inst_id, target_set, 11.8, 10.2, now, triggered)
-    assert len(events_repeat) == 0
+    # 3. 同一分钟内再次穿透 → dedupe_key 相同，由 event_key 唯一约束去重
+    events_same = evaluate_node_crossings(inst_id, target_set, 11.8, 10.2, t_0940_30)
+    assert len(events_same) == 1
+    assert events_same[0].dedupe_key == events_up[0].dedupe_key
 
-    # 4. 新的目标向下穿透（假设未触发的 12.0 从 12.5 跌到 11.5）
-    triggered.clear()
-    events_down = evaluate_node_crossings(inst_id, target_set, 12.5, 11.5, now, triggered)
+    # 4. 09:51 再次穿透 10.5 → 可再次触发（不再永久 one-shot），dedupe_key 不同
+    events_repeat = evaluate_node_crossings(inst_id, target_set, 11.8, 10.2, t_0951)
+    assert len(events_repeat) == 1
+    assert events_repeat[0].payload["target_id"] == "target_10_5"
+    assert events_repeat[0].payload["direction"] == "DOWN"
+    assert events_repeat[0].dedupe_key != events_up[0].dedupe_key
+
+    # 5. 新的目标向下穿透（12.0 从 12.5 跌到 11.5）
+    events_down = evaluate_node_crossings(inst_id, target_set, 12.5, 11.5, t_0940)
     assert len(events_down) == 1
     assert events_down[0].payload["target_id"] == "target_12_0"
     assert events_down[0].payload["direction"] == "DOWN"
+
+    # 6. 区间退化（P_last == P_curr）→ 绝不触发
+    assert len(evaluate_node_crossings(inst_id, target_set, 10.5, 10.5, t_0940)) == 0
+
+    # 7. dedupe_key 必须含分钟，否则跨分钟事件会被永久唯一约束吃掉
+    assert t_0951.astimezone(ZoneInfo("UTC")).strftime("%Y%m%d%H%M") in (
+        events_repeat[0].dedupe_key
+    )
 
 
 def test_smc_bos_and_choch_crossing() -> None:
@@ -174,9 +192,11 @@ def test_smc_bos_and_choch_crossing() -> None:
     assert "high_100" in triggered_b
 
 
-def test_smc_order_block_first_touch() -> None:
+def test_smc_order_block_reentry_is_repeatable() -> None:
+    """OB 可重复 re-entry：留在内部不重复，离开后重新进入可再次触发。"""
     inst_id = uuid.uuid4()
-    now = datetime.now(_SH_TZ)
+    t_0940 = datetime(2026, 9, 12, 9, 40, 0, tzinfo=_SH_TZ)
+    t_0951 = datetime(2026, 9, 12, 9, 51, 0, tzinfo=_SH_TZ)
 
     ob_target = SmcOrderBlockTarget(
         target_id="ob_demand_50_52",
@@ -193,13 +213,25 @@ def test_smc_order_block_first_touch() -> None:
     smc_set = _make_smc_target_set([], [ob_target])
     triggered: set[str] = set()
 
-    # 1. 价格从上方 54.0 下跌进入 OB 51.5 -> 首次触碰触发
-    events_touch = evaluate_smc_events(inst_id, smc_set, 54.0, 51.5, now, triggered)
+    # 1. 价格从上方 54.0 下跌进入 OB 51.5 -> 触发
+    events_touch = evaluate_smc_events(inst_id, smc_set, 54.0, 51.5, t_0940, triggered)
     assert len(events_touch) == 1
     assert events_touch[0].event_type == SMC_ORDER_BLOCK_FIRST_TOUCH
     assert events_touch[0].payload["target_id"] == "ob_demand_50_52"
-    assert "ob_demand_50_52" in triggered
+    # OB 不再进入永久 triggered set（该集合只服务 BOS/CHoCH）
+    assert "ob_demand_50_52" not in triggered
 
-    # 2. 价格仍在 OB 内部移动 (51.5 -> 51.0) -> 一次性原则，不重复触发
-    events_inside = evaluate_smc_events(inst_id, smc_set, 51.5, 51.0, now, triggered)
-    assert len(events_inside) == 0
+    # 2. 价格仍在 OB 内部移动 (51.5 -> 51.0) -> 不算 re-entry，不重复触发
+    assert len(evaluate_smc_events(inst_id, smc_set, 51.5, 51.0, t_0940, triggered)) == 0
+
+    # 3. 离开 OB (51.0 -> 54.0) -> 不触发
+    assert len(evaluate_smc_events(inst_id, smc_set, 51.0, 54.0, t_0940, triggered)) == 0
+
+    # 4. 09:51 从上方重新进入 OB (54.0 -> 51.8) -> 可再次触发，dedupe_key 带分钟
+    events_reentry = evaluate_smc_events(inst_id, smc_set, 54.0, 51.8, t_0951, triggered)
+    assert len(events_reentry) == 1
+    assert events_reentry[0].payload["target_id"] == "ob_demand_50_52"
+    assert events_reentry[0].dedupe_key != events_touch[0].dedupe_key
+
+    # 5. 从下方重新进入 (48.0 -> 50.5) -> 也算 re-entry
+    assert len(evaluate_smc_events(inst_id, smc_set, 48.0, 50.5, t_0951, triggered)) == 1

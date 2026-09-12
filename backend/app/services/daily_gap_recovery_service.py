@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import TradingCalendar
 from app.services.daily_gap_repair_service import (
+    _MIN_FETCH_SUCCESS_RATIO,
     SourceConsistencyError,
     compare_db_vs_pytdx_for_date,
     compare_db_vs_ths_for_date,
@@ -160,6 +161,28 @@ async def find_previous_complete_trade_date(
     return None
 
 
+def _is_source_unavailable(report: Any) -> bool:
+    """按 ``ConsistencyReport`` 的**失败原因**判定「源不可用」，而非「数据不一致」。
+
+    为什么不能只看异常 class：
+        provider 异常在 ``_exact_bar_from_source()`` 里已经被吞掉
+        （``except Exception: return None, "error..."``）。因此「全市场 pytdx 挂掉」
+        时 ``compare_db_vs_pytdx_for_date()`` **通常不会抛 provider 异常**，
+        而是得到 ``fetch_failed`` 很高 → 抓取覆盖率过低。
+        若只按异常分类，这种情况会被误判为「数据不一致」而 fail closed，
+        实际应当归为「源不可用 → 回退 THS」。
+
+    判定：
+        - 抓取覆盖率 < ``_MIN_FETCH_SUCCESS_RATIO`` → 源不可用（provider 侧问题）
+        - 抓取正常但 OHLC / volume / amount 不一致 → 数据合同失败（调用方 fail closed）
+    """
+    sample_requested = int(getattr(report, "sample_requested", 0) or 0)
+    fetch_succeeded = int(getattr(report, "fetch_succeeded", 0) or 0)
+    if sample_requested <= 0:
+        return True
+    return (fetch_succeeded / sample_requested) < _MIN_FETCH_SUCCESS_RATIO
+
+
 async def _recover_market_wide_day(
     session: AsyncSession,
     trade_date: date,
@@ -201,14 +224,14 @@ async def _recover_market_wide_day(
     repair_adapter = adapter
     if not dry_run:
         if adapter is not None:
+            pytdx_report = None
             try:
-                consistency_report = await compare_db_vs_pytdx_for_date(
+                pytdx_report = await compare_db_vs_pytdx_for_date(
                     session, reference, adapter=adapter
                 )
-                validate_consistency(consistency_report)
             except SourceConsistencyError:
                 logger.error(
-                    "[GAP-RECOVERY] pytdx 一致性门禁未通过，fail closed："
+                    "[GAP-RECOVERY] pytdx 数据合同失败，fail closed："
                     "target=%s reference=%s 不允许以校验失败的 pytdx 作为写库主源",
                     trade_date, reference,
                 )
@@ -219,8 +242,26 @@ async def _recover_market_wide_day(
                     "回退至 THS 门禁并把 repair 主源切换为 THS",
                     exc,
                 )
+
+            # 按 **失败原因** 分类，而不是按异常 class：
+            # provider 异常在 _exact_bar_from_source 里已被吞掉（返回 None + 原因），
+            # 所以「pytdx 全挂」通常不抛异常，而是表现为抓取覆盖率过低。
+            if pytdx_report is not None and _is_source_unavailable(pytdx_report):
+                logger.warning(
+                    "[GAP-RECOVERY] pytdx 抓取覆盖率过低 (fetch_ok=%s/%s)，"
+                    "视为源不可用，回退至 THS 门禁并把 repair 主源切换为 THS",
+                    getattr(pytdx_report, "fetch_succeeded", 0),
+                    getattr(pytdx_report, "sample_requested", 0),
+                )
+                pytdx_report = None
+
+            if pytdx_report is None:
                 repair_adapter = None
                 consistency_report = await compare_db_vs_ths_for_date(session, reference)
+                validate_consistency(consistency_report)
+            else:
+                # 抓取正常但 OHLC / volume / amount 不一致 → 数据合同失败 → fail closed
+                consistency_report = pytdx_report
                 validate_consistency(consistency_report)
         else:
             consistency_report = await compare_db_vs_ths_for_date(session, reference)

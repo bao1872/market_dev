@@ -852,6 +852,7 @@ class MonitorBatchService:
             in_cooldown = await self._check_event_cooldown(
                 db, instrument_id, draft.event_type, draft.logical_entity,
                 cooldown_key=draft.cooldown_key,
+                event_time=draft.event_time,
             )
             if in_cooldown:
                 logger.debug(
@@ -1059,11 +1060,17 @@ class MonitorBatchService:
         event_type: str,
         logical_entity: str,
         cooldown_key: str | None = None,
+        event_time: datetime | None = None,
     ) -> bool:
         """检查事件是否在冷却期内。
 
         查询 strategy_events 表：同一 instrument_id + event_type + 冷却键
         在最近 _EVENT_COOLDOWN_SECONDS 秒内是否已有记录。
+
+        [RC 冷却锚点修正] 冷却窗口锚点默认是 ``event_time``（即本次 draft 的事件
+        时间），而不是 ``datetime.now()``。这样「两次触发时间相差 > 10 分钟」
+        才严格成立 —— worker 延迟 / retry / 重启 catch-up 场景下，now 会偏离
+        事件真实时间，导致冷却窗口被错误拉伸或压缩。
 
         冷却键优先级：
         - 若提供 cooldown_key（粗粒度，如 同标的同结构类型），则忽略易变的
@@ -1082,7 +1089,11 @@ class MonitorBatchService:
         Returns:
             True 表示在冷却期内（应跳过），False 表示不在冷却期
         """
-        cutoff = datetime.now(UTC) - timedelta(seconds=_EVENT_COOLDOWN_SECONDS)
+        # 冷却锚点 = 本次事件时间（naive 视为 UTC），严格等于「两次触发时间相差 > 10 分钟」
+        anchor = event_time or datetime.now(UTC)
+        if anchor.tzinfo is None:
+            anchor = anchor.replace(tzinfo=UTC)
+        cutoff = anchor - timedelta(seconds=_EVENT_COOLDOWN_SECONDS)
         if cooldown_key is not None:
             # 粗粒度冷却：同标的同事件类型，10 分钟内共享冷却（忽略易变 logical_entity_id）。
             # 用于 logical_entity 含价格/bar_index 等易变维度、导致冷却键频繁变化、10 分钟

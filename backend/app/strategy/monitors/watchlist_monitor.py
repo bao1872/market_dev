@@ -308,10 +308,17 @@ class WatchlistMonitor(StrategyRuntime):
         """
         events: list[StrategyEventDraft] = []
 
-        # [Stage G4/G5] 优先进行目标位连续快照穿透判定（若 context 提供了 target_set）
+        # [Stage G4/G5] Node 与 SMC **各自独立**决定走「新 crossing」还是「legacy」。
+        #
+        # [P0 mixed-mode 修正] 禁止「任意一个 TargetSet 存在 → 两个子系统一起进入
+        # new-mode 并直接 return」。production 当前只注入 node_target_set、
+        # 不注入 smc_target_set，旧写法会在跑完 Node 新路径后立刻 return，
+        # 把整条 SMC legacy 事件链（含 _writeback_smc_substate）绕掉 ——
+        # 代码注释声称「SMC 仍走旧路径」，实际并没有。
         node_target_set = getattr(context, "node_target_set", None)
         smc_target_set = getattr(context, "smc_target_set", None)
 
+        # ── 新路径：只对「注入了 TargetSet」的那个子系统生效 ──────────
         if node_target_set is not None or smc_target_set is not None:
             p_curr = (
                 getattr(context, "current_price", None)
@@ -329,26 +336,21 @@ class WatchlistMonitor(StrategyRuntime):
             curr_node_ver = node_target_set.target_set_version if node_target_set else None
             curr_smc_ver = smc_target_set.target_set_version if smc_target_set else None
 
-            prev_node_ver = prev_state.state.get("node_target_set_version") if prev_state else None
             prev_smc_ver = prev_state.state.get("smc_target_set_version") if prev_state else None
 
-            is_node_ver_changed = (prev_node_ver is not None and curr_node_ver != prev_node_ver)
             is_smc_ver_changed = (prev_smc_ver is not None and curr_smc_ver != prev_smc_ver)
 
-            node_triggered: set[str] = (
-                set(prev_state.state.get("triggered_node_target_ids") or [])
-                if prev_state and not is_node_ver_changed
-                else set()
-            )
+            # smc_triggered **仅**服务 BOS / CHoCH 的「version 内 one-shot」。
+            # Node crossing 与 OB 已改为可重复事件，不再消费该集合。
             smc_triggered: set[str] = (
                 set(prev_state.state.get("triggered_smc_target_ids") or [])
                 if prev_state and not is_smc_ver_changed
                 else set()
             )
-            if prev_state and not node_triggered and not smc_triggered and not (is_node_ver_changed or is_smc_ver_changed):
-                legacy_triggered = set(prev_state.state.get("triggered_target_ids") or [])
-                node_triggered.update(legacy_triggered)
-                smc_triggered.update(legacy_triggered)
+            if prev_state and not smc_triggered and not is_smc_ver_changed:
+                smc_triggered.update(
+                    set(prev_state.state.get("triggered_target_ids") or [])
+                )
 
             evt_time = context.bar_time or datetime.now()
 
@@ -360,7 +362,6 @@ class WatchlistMonitor(StrategyRuntime):
                         float(p_last),
                         float(p_curr),
                         evt_time,
-                        node_triggered,
                     )
                     events.extend(node_evts)
                 except Exception as exc:
@@ -380,41 +381,41 @@ class WatchlistMonitor(StrategyRuntime):
                 except Exception as exc:
                     logger.warning("evaluate_smc_events 失败: %s", exc)
 
-            curr_state.state["triggered_node_target_ids"] = list(node_triggered)
             curr_state.state["triggered_smc_target_ids"] = list(smc_triggered)
-            curr_state.state["triggered_target_ids"] = list(node_triggered | smc_triggered)
+            curr_state.state["triggered_target_ids"] = list(smc_triggered)
             curr_state.state["node_target_set_version"] = curr_node_ver
             curr_state.state["smc_target_set_version"] = curr_smc_ver
             curr_state.state["price_last"] = p_last
-            return events
 
-        # 兼容旧逻辑：未提供 target_set 时回退至子 monitor 1m 判定
-        # VN 事件检测
-        try:
-            vn_prev = (
-                self._extract_sub_state(prev_state, NAMESPACE_NODE_CLUSTER)
-                if prev_state else None
-            )
-            vn_curr = self._extract_sub_state(curr_state, NAMESPACE_NODE_CLUSTER)
-            vn_events = await self._vn.detect_events(context, vn_prev, vn_curr)
-            events.extend(vn_events)
-        except Exception as exc:
-            logger.warning("VolumeNodeMonitor.detect_events 失败（不阻断其他）: %s", exc)
+        # ── legacy 路径：只对「未注入 TargetSet」的子系统生效 ─────────
+        if node_target_set is None:
+            # VN 事件检测（旧 1m 判定）
+            try:
+                vn_prev = (
+                    self._extract_sub_state(prev_state, NAMESPACE_NODE_CLUSTER)
+                    if prev_state else None
+                )
+                vn_curr = self._extract_sub_state(curr_state, NAMESPACE_NODE_CLUSTER)
+                vn_events = await self._vn.detect_events(context, vn_prev, vn_curr)
+                events.extend(vn_events)
+            except Exception as exc:
+                logger.warning("VolumeNodeMonitor.detect_events 失败（不阻断其他）: %s", exc)
 
-        # SMC 事件检测
-        try:
-            smc_prev = (
-                self._extract_sub_state(prev_state, NAMESPACE_SMC) if prev_state else None
-            )
-            smc_curr = self._extract_sub_state(curr_state, NAMESPACE_SMC)
-            smc_events = await self._smc.detect_events(context, smc_prev, smc_curr)
-            events.extend(smc_events)
+        if smc_target_set is None:
+            # SMC 事件检测（旧 episode / retest 路径）
+            try:
+                smc_prev = (
+                    self._extract_sub_state(prev_state, NAMESPACE_SMC) if prev_state else None
+                )
+                smc_curr = self._extract_sub_state(curr_state, NAMESPACE_SMC)
+                smc_events = await self._smc.detect_events(context, smc_prev, smc_curr)
+                events.extend(smc_events)
 
-            # [SMC episode 连续性修复] 显式回写 SMC 子状态到父 curr_state
-            # 包含 smc_episode_tracker 的最新值，避免子状态复制导致 episode 丢失
-            self._writeback_smc_substate(curr_state, smc_curr.state)
-        except Exception as exc:
-            logger.warning("SmcMonitor.detect_events 失败（不阻断其他）: %s", exc)
+                # [SMC episode 连续性修复] 显式回写 SMC 子状态到父 curr_state
+                # 包含 smc_episode_tracker 的最新值，避免子状态复制导致 episode 丢失
+                self._writeback_smc_substate(curr_state, smc_curr.state)
+            except Exception as exc:
+                logger.warning("SmcMonitor.detect_events 失败（不阻断其他）: %s", exc)
 
         return events
 

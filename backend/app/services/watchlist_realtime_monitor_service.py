@@ -149,13 +149,14 @@ class WatchlistRealtimeMonitorService:
             # G4: 筹码共识区穿透
             if node_set is not None:
                 try:
+                    # Node crossing 已改为可重复事件：不再传入 triggered set，
+                    # 是否真正写入由 600s 冷却（锚定上一次事件时间）判定。
                     node_evts = evaluate_node_crossings(
                         inst.id,
                         node_set,
                         p_last,
                         p_curr,
                         captured_at,
-                        node_triggered,
                     )
                     inst_events.extend(node_evts)
                 except Exception as exc:

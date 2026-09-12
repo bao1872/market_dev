@@ -210,14 +210,16 @@ async def test_watchlist_monitor_cycle_full_flow(monkeypatch: pytest.MonkeyPatch
     assert SMC_ORDER_BLOCK_FIRST_TOUCH in event_types
     assert len(result1.events_detected) == 3
 
-    # 检查状态已正确记录 triggered_target_ids
+    # 检查状态已正确记录 triggered_target_ids。
+    # [RC 生命周期] 该集合**只**服务 BOS/CHoCH 的「TargetSet version 内 one-shot」：
+    # Node crossing 与 OB 已改为可重复事件，不再写入此集合。
     state_sh = result1.updated_states[inst_sh.id]
-    assert "target_node_104.0" in state_sh["triggered_target_ids"]
+    assert "target_node_104.0" not in state_sh["triggered_target_ids"]
     assert "smc_high_103.0" in state_sh["triggered_target_ids"]
     assert state_sh["current_price"] == 105.0
 
     state_bj = result1.updated_states[inst_bj.id]
-    assert "smc_ob_15.0_16.0" in state_bj["triggered_target_ids"]
+    assert "smc_ob_15.0_16.0" not in state_bj["triggered_target_ids"]
 
     # --- 第 2 轮监控（One-Shot 契约验证）：价格维持或继续上涨，已触发 target 绝不重复触发 ---
     result2 = await service.run_monitor_cycle(

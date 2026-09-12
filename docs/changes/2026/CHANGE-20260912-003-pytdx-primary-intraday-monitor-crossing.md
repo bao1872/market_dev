@@ -127,3 +127,39 @@ G6「停止盘中重算」        ❌
 性能目标（正常日 = ≈全市场 quote batch + 2 次 sentinel daily + bulk DB write，
 而非 5000 × `get_daily_bars`）**尚未达成**。
 
+## 6. RC correctness correction（2026-09-12，final correction commit）
+
+不触碰 G8 / SMC frozen TargetSet persistence，只收 4 个阻塞部署的正确性问题：
+
+1. **Node crossing 生命周期**：由「永久 one-shot」改为**可重复**。
+   不再维护永久 `triggered_target_ids`；`dedupe_key` 增加事件分钟（否则被
+   `strategy_events.event_key` 永久唯一约束吃掉）；是否真正写入由 600s 冷却判定。
+   `09:40` 可触发 → `09:47` 被冷却挡掉 → `09:51` 可再次触发。
+2. **SMC Order Block 生命周期**：由「永久 one-shot」改为**可重复 re-entry**。
+   `was_inside = low <= p_last <= high`，`entered = not was_inside and
+   (is_inside or 从上方进入 or 从下方进入)`；留在 OB 内不重复，离开后重新进入可再触发。
+   BOS / CHoCH **保持** TargetSet version 内 one-shot，未改动。
+3. **冷却锚点**：`_check_event_cooldown(..., event_time=draft.event_time)`，
+   以 `event_time - 600s` 为 cutoff，不再用 `datetime.now()`，
+   使「两次触发时间相差 > 10 分钟」在 worker 延迟 / retry / 重启 catch-up 下严格成立。
+4. **Production mixed-mode bug（P0）**：`WatchlistMonitor.detect_events()` 原为
+   「`node_target_set` 或 `smc_target_set` 任一存在 → 两子系统一起进 new-mode 并
+   直接 return」。production 只注入 `node_target_set`，导致 SMC legacy 路径
+   （含 `_writeback_smc_substate`）被整条绕掉 —— 注释声称的「SMC 仍走旧路径」并不成立。
+   现改为**两子系统独立决策**：有 TargetSet 走新 crossing，没有则走对应 legacy。
+   于是 production 形成 `Node 新 crossing + SMC legacy 稳定路径` 共存的第一版部署候选。
+
+### 6.1 gap recovery：失败原因分类（非异常 class 分类）
+
+provider 异常在 `_exact_bar_from_source()` 内已被吞掉（`except Exception: return None, ...`），
+因此「pytdx 全挂」通常**不抛 provider 异常**，而是表现为抓取覆盖率过低。故改为按
+`ConsistencyReport` 失败原因分类：
+
+| 现象 | 判定 | 处置 |
+|---|---|---|
+| `fetch_succeeded / sample_requested < 0.95` | 源不可用 | 回退 THS 门禁 + `repair_adapter=None`（THS 主源） |
+| 抓取正常但 OHLC / volume / amount 不一致 | 数据合同失败 | `SourceConsistencyError` → fail closed |
+| `compare_db_vs_pytdx_for_date` 抛非一致性异常 | 源不可用 | 回退 THS |
+
+始终满足：**门禁证明源 == 实际写库主源**。
+

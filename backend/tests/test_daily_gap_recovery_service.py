@@ -372,7 +372,10 @@ async def test_recover_recent_daily_gaps_with_pytdx_adapter(
         find_missing_side_effect=[[], []],
         repair_result=SimpleNamespace(requested=100, fetched=98, inserted=98, failed_symbols=[]),
     )
-    mock_pytdx_gate = AsyncMock(return_value=SimpleNamespace())
+    # 抓取覆盖率正常（200/200）→ pytdx 门禁视为可用，repair 走 pytdx 主源
+    mock_pytdx_gate = AsyncMock(
+        return_value=SimpleNamespace(sample_requested=200, fetch_succeeded=200)
+    )
     monkeypatch.setattr(rec, "compare_db_vs_pytdx_for_date", mock_pytdx_gate)
 
     fake_adapter = object()
@@ -440,3 +443,38 @@ async def test_pytdx_gate_inconsistent_fails_closed(
     # 既不能回退 THS 门禁，更不能写库
     assert ths_gate.await_count == 0
     assert repair.await_count == 0
+
+
+async def test_pytdx_low_fetch_coverage_is_unavailable_and_falls_back(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pytdx 全挂表现为「抓取覆盖率过低」→ 判为源不可用 → 回退 THS（不是 fail closed）。
+
+    provider 异常在 _exact_bar_from_source 内已被吞掉，所以 pytdx 全挂时
+    compare_db_vs_pytdx_for_date 通常**不抛异常**，只是 fetch_succeeded 很低。
+    若按异常 class 分类会被误判成数据不一致而直接终止。
+    """
+    _prev, repair, _fill = _install_market_wide(
+        monkeypatch,
+        scan_before=[_mw_gap(TD)],
+        scan_after=[],
+        find_missing_side_effect=[[], []],
+    )
+    ths_gate = AsyncMock(
+        return_value=SimpleNamespace(sample_requested=200, fetch_succeeded=200)
+    )
+    monkeypatch.setattr(rec, "compare_db_vs_ths_for_date", ths_gate)
+    monkeypatch.setattr(
+        rec,
+        "compare_db_vs_pytdx_for_date",
+        AsyncMock(
+            return_value=SimpleNamespace(sample_requested=200, fetch_succeeded=10)
+        ),
+    )
+
+    # 不能抛异常终止
+    await recover_recent_daily_gaps(MagicMock(), through=TD, adapter=object())
+
+    assert ths_gate.await_count == 1
+    assert repair.await_count == 1
+    assert repair.await_args.kwargs["adapter"] is None

@@ -185,7 +185,10 @@ async def test_target_set_version_rolling_resets_triggered_ids() -> None:
     state1 = res1.updated_states[inst_id]
     assert state1["node_target_set_version"] == "node_v1"
     assert state1["smc_target_set_version"] == "smc_v1"
-    assert len(state1["triggered_target_ids"]) == 2
+    # [RC 生命周期] Node crossing 已改为可重复事件，不再进入 triggered_target_ids；
+    # 该集合只服务 BOS/CHoCH 的「TargetSet version 内 one-shot」→ 只剩 SMC 结构目标。
+    assert len(state1["triggered_target_ids"]) == 1
+    assert "smc_high_104.0" in state1["triggered_target_ids"]
 
     # --- 周期 2：维持 V1，价格依然是 105.0，One-shot 确保不再报警 ---
     res2 = await monitor.run_monitor_cycle([inst], {inst_id: (node_v1, smc_v1)}, res1.updated_states, adapter=mock_adapter)
@@ -213,7 +216,9 @@ async def test_target_set_version_rolling_resets_triggered_ids() -> None:
     assert res4.events_detected[0].event_type in ("node_cluster_touch", "smc_bos_cross")
     assert res4.events_detected[1].event_type in ("node_cluster_touch", "smc_bos_cross")
     state4 = res4.updated_states[inst_id]
-    assert len(state4["triggered_target_ids"]) == 2
+    # [RC 生命周期] 只统计 BOS/CHoCH（Node 已可重复，不再进入该集合）
+    assert len(state4["triggered_target_ids"]) == 1
+    assert "smc_high_108.0" in state4["triggered_target_ids"]
 
 
 @pytest.mark.asyncio
