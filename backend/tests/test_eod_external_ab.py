@@ -188,11 +188,16 @@ def test_snapshot_previous_close_matches_raw_kline_close() -> None:
     assert not mismatches, f"价格不一致 {len(mismatches)}/{len(abs_diffs)} 条：{mismatches[:5]}"
 
 
-def test_snapshot_volume_and_amount_units_are_lots_and_yuan() -> None:
-    """用恒等式 f6 ≈ f5 × 100 × f2 验证 f5=手、f6=元。
+def test_snapshot_volume_and_amount_units_are_shares_and_yuan() -> None:
+    """用恒等式 ``amount ≈ volume × close`` 验证 canonical ``EodSnapshotRow.volume``=股、amount=元。
+
+    单位事实（G1B-2A，2026-09-12 direct 对照证明，见 CHANGE-20260912-001）：
+    - canonical ``volume``（``EodSnapshotRow`` / ``bars_daily``）= **股**；
+    - pytdx **quote** ``vol`` = **手**（×100 才是股）——那发生在 quote→canonical 转换，
+      **不是** 本测试的 canonical 快照。
 
     差异来自盘中「价格采样时刻」与「成交额累计时刻」不同，属正常时间偏斜；
-    单位若错（股 / 万元）则会整体相差 100 或 10000 倍。
+    单位若错（手 / 万元）则会整体相差 100 或 10000 倍。
     """
     sample = _collect_sample()
     ratios: list[float] = []
@@ -203,7 +208,7 @@ def test_snapshot_volume_and_amount_units_are_lots_and_yuan() -> None:
             continue
         if row.volume <= 0 or row.close <= 0:
             continue
-        expected = float(row.volume) * 100 * float(row.close)
+        expected = float(row.volume) * float(row.close)
         if expected <= 0:
             continue
         ratio = float(row.amount) / expected
@@ -224,10 +229,10 @@ def test_snapshot_volume_and_amount_units_are_lots_and_yuan() -> None:
     for line in offenders[:10]:
         print(f"[AB-units] OFFENDER {line}")
 
-    # 单位必须是「手 × 元」：中位比接近 1；若差 100 倍说明单位判断错误。
+    # canonical 单位必须是「股 × 元」：中位比接近 1；差 100 倍即单位判断错误。
     assert 0.95 <= median <= 1.05, (
         f"volume/amount 单位假设不成立：median ratio={median:.4f}（期望≈1.0；"
-        "≈0.01 表示 volume 是股，≈100 表示 amount 单位不符）"
+        "≈0.01 表示 volume 被当成手（多乘了 100），≈100 表示 amount 单位不符）"
     )
     assert len(offenders) / len(ratios) <= 0.2, (
         f"单位一致性超差样本过多：{len(offenders)}/{len(ratios)}"

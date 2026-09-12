@@ -73,6 +73,32 @@ operation capability 未分离。
 - 可重复取证工具化：`pytdx_server_sweep.py`（capability sweep）与
   `verify_pytdx_daily_contract.py`（daily + quote 单位 direct 对照）。
 
+### 5.1 收尾 batch（同一 Change，第二批）
+
+- **修 existing-socket capability bypass**：`_connect_excluding` 复用已有 socket 时也要求
+  `_server_eligible(current, capability)`。否则「上一 operation 留在 xdxr-only / `quote=None`
+  server」会被本 operation **先复用一次再失败切换**，与「bars 只选 bars-capable」冲突。
+  A1–A3 三个跨 operation 场景已测（xdxr→bars、cooldown 中的已有 socket、quote=None→quote）。
+- **quote 原始单位冻结**：`PYTDX_QUOTE_VOLUME_UNIT_LOTS = "LOTS"` +
+  `PYTDX_QUOTE_LOT_TO_SHARES = Decimal("100")`。`raw_volume` 仍保存原始 quote vol（手），
+  fetch 阶段不换算。
+- **verified snapshot**：`VerifiedPytdxEodSnapshot(raw_snapshot, verified_trade_date,
+  sentinel_symbols)` —— `verified_trade_date` **只能**来自 exact-date daily sentinel proof，
+  绝不来自 `captured_at.date()` / `source_time`。
+- **verifier**：`verify_pytdx_eod_snapshot(adapter, snapshot)` —— 按 `rows` 稳定顺序取
+  1 只 SH + 1 只 SZ 的有效候选（不 hard-code 股票），各调 1 次 `get_daily_bars` 且要求恰好
+  1 根 requested date；价格绝对差 ≤ 0.01、数量（×100 后）相对误差 ≤ 0.2%、成交额 ≤ 2%；
+  任一失败 → `PytdxEodSnapshotError`（不产生 verified）。
+- **唯一 raw→canonical converter**：`to_canonical_eod_rows(verified)` ——
+  `volume = raw_volume × 100`（手→股），
+  `updated_at = combine(verified_trade_date, source_time, Asia/Shanghai)`；
+  传入非 `VerifiedPytdxEodSnapshot` → `TypeError`（防止绕过 verifier）；任一 row 的
+  `source_time` 缺失 / 畸形 / < 15:00 → 整 snapshot fail-closed（不静默丢行）。
+- **raw fetch 职责不变**：`fetch_pytdx_eod_snapshot` 仍只调 `get_security_quotes`
+  （`get_daily_bars` 调用数 0）；只有 verifier 调 2 次。
+- **旧 external A/B 单位断言按事实修正**（canonical 快照 volume 已是股 → 恒等式去掉 ×100）；
+  东财/网络导致的 `external_data` 失败仍为环境性，不 mock。
+
 ## 6. 未做 / 边界
 
 - 未做 Redis/DB 持久化 best-IP；未做 per-symbol 全池 sweep（筛选复杂度 O(server count)，

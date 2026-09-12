@@ -1,17 +1,24 @@
 """pytdx 批量盘后 EOD 行情快照 provider（G1B-1.1，未接入任何生产调用方）。
 
-本轮修正（G1B-1.1）：彻底移除对 canonical ``EodSnapshotRow`` 的复用，改用独立的
-**raw pytdx quote DTO** ``PytdxQuoteSnapshotRow``。原因：``EodSnapshotRow.volume`` 合同是
-canonical 股、``updated_at`` 决定 authoritative trade_date；但 pytdx 当前 ``vol`` 单位未 A/B
-证明、``servertime`` 无日期、``captured_at`` 只是本机抓取时间。把未验证事实塞进 canonical
-行会制造类型合同欺骗，不能靠注释消除。G1B-2 A/B 验证通过后再写唯一的 raw → canonical 转换。
+G1B-2A 状态（2026-09-12 完成）：raw quote DTO + **verified snapshot** + **唯一 canonical
+converter** 三段式已经落地：
 
-本轮边界（明确不做什么）：
-- 不接 scheduler / bars_scheduler_service / eod_daily_refresh_service（零 production caller）。
-- 不调 get_daily_bars / get_xdxr_info / factor / qfq / DB / Redis。
-- 不发明 volume 单位转换：``raw_volume`` 是原始 pytdx ``vol``，单位 ``volume_unit="UNVERIFIED"``，
-  由 G1B-2 的 A/B 结果确认（仓库 auction_quote_provider 注释提示为「手」）。
-- 不把 pytdx ``servertime`` 当成可靠交易所 watermark / trade_date：只以 ``source_time`` 字符串保存。
+1. :func:`fetch_pytdx_eod_snapshot` —— 只调 ``get_security_quotes``，产出 raw
+   :class:`PytdxEodSnapshot`（``raw_volume`` 保留原始 quote ``vol``）。
+2. :func:`verify_pytdx_eod_snapshot` —— 用 **1 只 SH + 1 只 SZ** 的 exact-date daily
+   sentinel 证明 ``verified_trade_date``（绝不来自 ``captured_at.date()`` / ``source_time``）。
+3. :func:`to_canonical_eod_rows` —— 唯一 raw→canonical 转换：``volume = raw_volume × 100``
+   （手→股），``updated_at = verified_trade_date + source_time``（Asia/Shanghai）。
+
+单位事实（direct 对照证明，见 docs/changes/2026/CHANGE-20260912-001）：
+- ``get_security_quotes().vol`` = **手（lots）** → canonical ×100；
+- ``get_daily_bars().volume`` = **股（shares）** → 原样，**禁止 ×100**。
+
+边界（明确不做什么）：
+- 不接 scheduler / bars_scheduler_service / eod_daily_refresh_service（G1B-2B 才接）。
+- raw fetch **不调** ``get_daily_bars``；只有 :func:`verify_pytdx_eod_snapshot` 调 2 次。
+- ``raw_volume`` 永不改名为 canonical ``volume``；换算只在 converter 发生。
+- ``servertime`` 只证明「收盘时刻」（>= 15:00），**不证明日期**。
 - identity 以「当前 batch + (market, code)」为边界；输入未知 market / 重复 identity fail-closed。
 - 复用了 auction_quote_provider 已冻结的批量上限与限流 precedent（BATCH_SIZE=80 / 0.3s）。
 """
@@ -22,15 +29,19 @@ import time
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
+from datetime import time as dt_time
 from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
+
+import pandas as pd
 
 from app.core.pytdx_adapter import MARKET_NAME_TO_CODE, PytdxSourceError
 
 if TYPE_CHECKING:
     from app.core.pytdx_adapter import PytdxAdapter
     from app.models.instrument import Instrument
+    from app.services.eod_market_snapshot_provider import EodSnapshotRow
 
 logger = logging.getLogger(__name__)
 
@@ -42,9 +53,29 @@ PYTDX_QUOTE_BATCH_SIZE = 80
 # 每批之间 sleep，防止 pytdx 连续批量请求把连接打断。
 PYTDX_QUOTE_BATCH_INTERVAL_SECONDS = 0.3
 
-# pytdx quote vol 单位本轮未证实；G1B-2 须用 A/B 确认（仓库 auction_quote_provider
-# 注释提示为「手」= lots，Eastmoney f5 已按 SHARES_PER_LOT 转股；此处不擅自转换）。
-PYTDX_QUOTE_VOLUME_UNIT_UNVERIFIED = "UNVERIFIED"
+# G1B-2A 结论（2026-09-12，direct 对照已证明）：quote ``vol`` = **手（lots）**，
+# canonical ``volume`` = 股 → ×100。
+# 证据：**同一 server、同一 symbol**，``quote.vol / daily.volume`` median = 0.00999998937
+# （4 台独立 server × 40 只，min 0.0099989839 / max 0.0100000000），``amount`` ratio = 1.0；
+# 而 ``get_daily_bars().volume`` 与 canonical DB 的 ratio median = 1.0（即 daily 已是股）。
+# 详见 docs/changes/2026/CHANGE-20260912-001。
+#
+# 注意：``PytdxQuoteSnapshotRow.raw_volume`` **仍保存原始 quote vol（手）**，fetch 阶段
+# 不做任何换算；唯一换算发生在 :func:`to_canonical_eod_rows`。
+PYTDX_QUOTE_VOLUME_UNIT_LOTS = "LOTS"
+PYTDX_QUOTE_LOT_TO_SHARES = Decimal("100")
+
+# 收盘时间严格解析的界：``servertime`` 只证明「收盘时刻」，**不证明日期**。
+_QUOTE_CLOSE_CUTOFF = dt_time(15, 0, 0)
+
+# sentinel 比较容差（G1B-2A）：
+#   价格：绝对差 <= 0.01 元；
+#   数量：converted(quote × 100) 与 daily 的相对误差 <= 0.2%（真实最坏 ~0.01%，余量充足，
+#         同时远小于「单位差 100 倍」这种量级错误）；
+#   成交额：相对误差 <= 2%。
+_PRICE_TOL = Decimal("0.01")
+_VOLUME_REL_TOL = Decimal("0.002")
+_AMOUNT_REL_TOL = Decimal("0.02")
 
 
 class PytdxEodSnapshotError(RuntimeError):
@@ -102,7 +133,7 @@ class PytdxEodSnapshot:
     missing_symbols: tuple[str, ...]
     captured_at: datetime
     source: str = "pytdx"
-    volume_unit: str = PYTDX_QUOTE_VOLUME_UNIT_UNVERIFIED
+    volume_unit: str = PYTDX_QUOTE_VOLUME_UNIT_LOTS
 
 
 def _chunks(items: Sequence[Instrument], size: int) -> Iterator[list[Instrument]]:
@@ -272,7 +303,7 @@ def fetch_pytdx_eod_snapshot(
         missing_symbols=missing_symbols,
         captured_at=captured_at,
         source="pytdx",
-        volume_unit=PYTDX_QUOTE_VOLUME_UNIT_UNVERIFIED,
+        volume_unit=PYTDX_QUOTE_VOLUME_UNIT_LOTS,
     )
 
 
@@ -341,3 +372,207 @@ def compare_quote_to_daily_reference(
         "amount_ratio_mean": _mean(amt_ratios),
         "per_symbol": per_symbol,
     }
+
+
+# ── G1B-2A：verified snapshot + 唯一 raw → canonical converter ────────
+def _parse_close_time(value: object) -> dt_time:
+    """严格解析 pytdx ``servertime``：必须是合法时间且 >= 15:00:00，否则 fail-closed。
+
+    只接受真实格式（``15:30:25`` / ``15:30:25.650``）。``servertime`` 只证明
+    「收盘时刻」，**不证明日期**（无日期分量）——日期只能来自 daily sentinel。
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise PytdxEodSnapshotError(f"quote source_time missing: {value!r}")
+    raw = value.strip()
+    parsed: dt_time | None = None
+    for fmt in ("%H:%M:%S.%f", "%H:%M:%S"):
+        try:
+            parsed = datetime.strptime(raw, fmt).time()
+            break
+        except ValueError:
+            continue
+    if parsed is None:
+        raise PytdxEodSnapshotError(f"quote source_time malformed: {value!r}")
+    if parsed < _QUOTE_CLOSE_CUTOFF:
+        raise PytdxEodSnapshotError(f"quote source_time before 15:00: {value!r}")
+    return parsed
+
+
+def _relative_error(actual: Decimal, expected: Decimal) -> Decimal:
+    base = abs(expected)
+    if base == 0:
+        return Decimal("0") if actual == 0 else Decimal("Infinity")
+    return abs(actual - expected) / base
+
+
+@dataclass(frozen=True)
+class VerifiedPytdxEodSnapshot:
+    """经 exact-date daily sentinel 证明过交易日的 raw quote 快照。
+
+    ``verified_trade_date`` **只能**来自 daily sentinel 的 exact-date proof；
+    绝不能来自 ``captured_at.date()``、``source_time`` 或任何 wall-clock 推断。
+    """
+
+    raw_snapshot: PytdxEodSnapshot
+    verified_trade_date: date
+    sentinel_symbols: tuple[str, ...]
+
+
+def _is_sentinel_candidate(row: PytdxQuoteSnapshotRow) -> bool:
+    """sentinel 候选有效性：SH/SZ + OHLC/vol/amount 有限且 > 0 + source_time >= 15:00。"""
+    if row.market not in ("SH", "SZ"):
+        return False
+    for value in (row.open, row.high, row.low, row.close, row.raw_volume, row.amount):
+        if value is None or not value.is_finite() or value <= 0:
+            return False
+    try:
+        _parse_close_time(row.source_time)
+    except PytdxEodSnapshotError:
+        return False
+    return True
+
+
+def _verify_sentinel_row(
+    adapter: PytdxAdapter,
+    row: PytdxQuoteSnapshotRow,
+    trade_date: date,
+) -> None:
+    """单个 sentinel：exact-date daily 对照（价格 / 数量 / 成交额）。"""
+    daily = adapter.get_daily_bars(row.symbol, trade_date, trade_date)
+    if daily is None or daily.empty or len(daily) != 1:
+        raise PytdxEodSnapshotError(
+            f"sentinel daily exact-date 失败 symbol={row.symbol} "
+            f"date={trade_date} rows={0 if daily is None else len(daily)}"
+        )
+    bar = daily.iloc[0]
+    bar_date = pd.Timestamp(bar["datetime"]).date()
+    if bar_date != trade_date:
+        raise PytdxEodSnapshotError(
+            f"sentinel daily date mismatch symbol={row.symbol} "
+            f"got={bar_date} expect={trade_date}"
+        )
+
+    for label, quote_value, column in (
+        ("open", row.open, "open"),
+        ("high", row.high, "high"),
+        ("low", row.low, "low"),
+        ("close", row.close, "close"),
+    ):
+        daily_value = _to_decimal(bar[column])
+        if daily_value is None or abs(quote_value - daily_value) > _PRICE_TOL:
+            raise PytdxEodSnapshotError(
+                f"sentinel {label} mismatch symbol={row.symbol} "
+                f"quote={quote_value} daily={daily_value}"
+            )
+
+    daily_volume = _to_decimal(bar["volume"])
+    if daily_volume is None or daily_volume <= 0:
+        raise PytdxEodSnapshotError(
+            f"sentinel daily volume unusable symbol={row.symbol} value={daily_volume}"
+        )
+    converted = row.raw_volume * PYTDX_QUOTE_LOT_TO_SHARES
+    if _relative_error(converted, daily_volume) > _VOLUME_REL_TOL:
+        raise PytdxEodSnapshotError(
+            f"sentinel volume mismatch symbol={row.symbol} "
+            f"converted={converted} daily={daily_volume} "
+            f"rel={_relative_error(converted, daily_volume)}"
+        )
+
+    daily_amount = _to_decimal(bar["amount"])
+    if daily_amount is None or daily_amount <= 0:
+        raise PytdxEodSnapshotError(
+            f"sentinel daily amount unusable symbol={row.symbol} value={daily_amount}"
+        )
+    if _relative_error(row.amount, daily_amount) > _AMOUNT_REL_TOL:
+        raise PytdxEodSnapshotError(
+            f"sentinel amount mismatch symbol={row.symbol} "
+            f"quote={row.amount} daily={daily_amount} "
+            f"rel={_relative_error(row.amount, daily_amount)}"
+        )
+
+
+def verify_pytdx_eod_snapshot(
+    adapter: PytdxAdapter,
+    snapshot: PytdxEodSnapshot,
+) -> VerifiedPytdxEodSnapshot:
+    """用 1 只 SH + 1 只 SZ 的 exact-date daily sentinel 证明交易日。
+
+    sentinel 选取：按 ``snapshot.rows`` 的稳定顺序，取第一只有效候选（不 hard-code 股票）。
+    SH / SZ 任一缺失，或任一 sentinel 对照失败 → :class:`PytdxEodSnapshotError`
+    （不产生 ``VerifiedPytdxEodSnapshot``，不静默降级）。
+
+    Raises:
+        PytdxEodSnapshotError: sentinel 不足 / daily exact-date 失败 / 价格或数量或成交额不符。
+    """
+    sentinels: list[PytdxQuoteSnapshotRow] = []
+    for market in ("SH", "SZ"):
+        for row in snapshot.rows:
+            if row.market == market and _is_sentinel_candidate(row):
+                sentinels.append(row)
+                break
+
+    if len(sentinels) != 2:
+        raise PytdxEodSnapshotError(
+            "sentinel 不足：需要 1 只 SH + 1 只 SZ 的有效 quote row，"
+            f"got={[r.symbol for r in sentinels]}"
+        )
+
+    for row in sentinels:
+        _verify_sentinel_row(adapter, row, snapshot.requested_trade_date)
+
+    return VerifiedPytdxEodSnapshot(
+        raw_snapshot=snapshot,
+        verified_trade_date=snapshot.requested_trade_date,
+        sentinel_symbols=tuple(row.symbol for row in sentinels),
+    )
+
+
+def to_canonical_eod_rows(
+    verified: VerifiedPytdxEodSnapshot,
+) -> tuple[EodSnapshotRow, ...]:
+    """唯一 raw → canonical 转换（必须传入 verified snapshot）。
+
+    - ``volume = raw_volume × PYTDX_QUOTE_LOT_TO_SHARES``（手 → 股）；
+    - ``updated_at = combine(verified_trade_date, source_time, Asia/Shanghai)``
+      —— **不是** ``captured_at`` 的日期；
+    - 任一 returned row 的 ``source_time`` 缺失 / 畸形 / < 15:00 → 整个 snapshot
+      fail-closed（不静默丢行）。
+
+    Raises:
+        TypeError: 传入的不是 :class:`VerifiedPytdxEodSnapshot`（防止绕过 verifier）。
+        PytdxEodSnapshotError: 任一 row 的 ``source_time`` 不可用。
+    """
+    if not isinstance(verified, VerifiedPytdxEodSnapshot):
+        raise TypeError(
+            "to_canonical_eod_rows 只接受 VerifiedPytdxEodSnapshot：必须先通过 "
+            "verify_pytdx_eod_snapshot 的 exact-date daily sentinel 证明"
+        )
+    from app.services.eod_market_snapshot_provider import EodSnapshotRow
+
+    rows: list[EodSnapshotRow] = []
+    for row in verified.raw_snapshot.rows:
+        parsed_time = _parse_close_time(row.source_time)
+        rows.append(
+            EodSnapshotRow(
+                symbol=row.symbol,
+                name=row.name,
+                market=row.market,
+                updated_at=datetime.combine(
+                    verified.verified_trade_date,
+                    parsed_time,
+                    tzinfo=ZoneInfo("Asia/Shanghai"),
+                ),
+                open=row.open,
+                high=row.high,
+                low=row.low,
+                close=row.close,
+                volume=(
+                    row.raw_volume * PYTDX_QUOTE_LOT_TO_SHARES
+                    if row.raw_volume is not None
+                    else None
+                ),
+                amount=row.amount,
+                previous_close=row.previous_close,
+            )
+        )
+    return tuple(rows)

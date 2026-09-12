@@ -40,6 +40,8 @@ class _FakeApi:
     bars_fail: set = set()
     xdxr_fail: set = set()
     connect_log: list = []
+    bars_call_log: list = []
+    quotes_call_log: list = []
 
     def __init__(self, raise_exception: bool = True, auto_retry: bool = False) -> None:
         self.host: str | None = None
@@ -52,6 +54,7 @@ class _FakeApi:
         return True
 
     def get_security_bars(self, cat, market, code, start, count):  # noqa: ANN001, ANN201
+        type(self).bars_call_log.append(self.host)
         if self.host in type(self).bars_fail:
             raise RuntimeError("calling function error")
         return [
@@ -85,6 +88,7 @@ class _FakeApi:
         ]
 
     def get_security_quotes(self, requests):  # noqa: ANN001, ANN201
+        type(self).quotes_call_log.append(self.host)
         return [{"market": m, "code": c, "price": 1.0} for m, c in requests]
 
     def disconnect(self) -> None:
@@ -97,6 +101,8 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeApi.bars_fail = set()
     _FakeApi.xdxr_fail = set()
     _FakeApi.connect_log = []
+    _FakeApi.bars_call_log = []
+    _FakeApi.quotes_call_log = []
     monkeypatch.setattr(mod, "TdxHq_API", _FakeApi)
 
 
@@ -246,6 +252,59 @@ def test_undeclared_servers_keep_legacy_behaviour() -> None:
 
     # 未声明 → 不进入 cooldown（既有 retry/rotate 语义不变）
     assert adapter._in_cooldown(("injected.example", 7709), CAPABILITY_BARS) is False  # noqa: SLF001
+
+
+# ── A1–A3. 已有 socket 不得绕过 capability 过滤（跨 operation）──────
+def test_a1_existing_xdxr_only_socket_switches_for_bars() -> None:
+    """先 XDXR 连到 xdxr-only server A；随后 bars 必须直接切 B，不得对 A 调 bars。"""
+    caps = _caps(("A", False, True, None), ("B", True, True, None))
+    adapter = PytdxAdapter(servers=[("A", 7709), ("B", 7709)], capabilities=caps, max_retries=1)
+
+    _xdxr(adapter)
+    assert adapter.connected_server == ("A", 7709)  # 环形起点 → A
+
+    _FakeApi.bars_call_log = []
+    _bars(adapter)
+
+    assert "A" not in _FakeApi.bars_call_log
+    assert "B" in _FakeApi.bars_call_log
+    assert adapter.connected_server == ("B", 7709)
+
+
+def test_a2_existing_socket_with_bars_cooldown_switches() -> None:
+    """A 已持有 socket，但其 bars 处于 cooldown → bars 必须直接切 B。"""
+    caps = _caps(("A", True, True, None), ("B", True, True, None))
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709)], capabilities=caps, max_retries=1,
+        capability_cooldown_seconds=1800,
+    )
+    _xdxr(adapter)
+    assert adapter.connected_server == ("A", 7709)
+    # 模拟 A 的 bars 已被其它路径证伪并进入冷却
+    adapter._mark_capability_failure(("A", 7709), CAPABILITY_BARS)  # noqa: SLF001
+
+    _FakeApi.bars_call_log = []
+    _bars(adapter)
+
+    assert "A" not in _FakeApi.bars_call_log
+    assert "B" in _FakeApi.bars_call_log
+
+
+def test_a3_existing_quote_unknown_socket_switches_for_quote() -> None:
+    """A 因 XDXR 已连上但 quote=None；随后 quote 必须直接切 B，A 的 quote 0 次调用。"""
+    caps = _caps(("A", True, True, None), ("B", True, True, True))
+    adapter = PytdxAdapter(servers=[("A", 7709), ("B", 7709)], capabilities=caps, max_retries=1)
+
+    _xdxr(adapter)
+    assert adapter.connected_server == ("A", 7709)
+
+    _FakeApi.quotes_call_log = []
+    rows = adapter.get_security_quotes(["600519"])
+
+    assert rows
+    assert "A" not in _FakeApi.quotes_call_log
+    assert "B" in _FakeApi.quotes_call_log
+    assert adapter.connected_server == ("B", 7709)
 
 
 # ── 静态配置事实快照（防止误改回旧池）────────────────────────────────

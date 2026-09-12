@@ -593,13 +593,20 @@ class PytdxAdapter(Exchange):
             if self._api is not None:
                 current = self.connected_server
 
-                # [B1] 幂等：已有 socket 且该 host 对本调用 eligible → 直接复用
-                if current is not None and current not in excluded:
+                # [B1] 幂等：已有 socket、该 host 未 excluded、且对本次 capability eligible
+                # → 直接复用。
+                if (
+                    current is not None
+                    and current not in excluded
+                    and self._server_eligible(current, capability)
+                ):
                     return
 
-                # 共享 socket 恰好是本调用已判坏的 host（单例并发下，可能由其他线程
-                # 在「本线程 API failure → disconnect」之间重新连上）。
-                # 必须断开并从 eligible pool 重连，绝不复用自己已 excluded 的 host。
+                # 已有 socket 对本次 capability 不 eligible 的三种情形都必须释放后重连：
+                #   1) 静态 capability 不支持（例：上一 operation 留在 xdxr-only server，
+                #      本次要 bars —— 绝不能先对它调 get_security_bars 再失败切换）；
+                #   2) 该 capability 正在 cooldown；
+                #   3) 当前调用已在 excluded 中（自己刚判坏的 host，绝不复用）。
                 # （_io_lock 是 RLock，可重入，允许在此调用 disconnect）
                 self.disconnect()
 

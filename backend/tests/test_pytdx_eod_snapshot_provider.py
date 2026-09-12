@@ -16,15 +16,21 @@ from decimal import Decimal
 from unittest.mock import MagicMock, patch
 from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 
 from app.core.pytdx_adapter import PytdxSourceError
 from app.services.pytdx_eod_snapshot_provider import (
     PYTDX_QUOTE_BATCH_INTERVAL_SECONDS,
     PYTDX_QUOTE_BATCH_SIZE,
+    PYTDX_QUOTE_LOT_TO_SHARES,
+    PYTDX_QUOTE_VOLUME_UNIT_LOTS,
     PytdxEodSnapshotError,
+    VerifiedPytdxEodSnapshot,
     compare_quote_to_daily_reference,
     fetch_pytdx_eod_snapshot,
+    to_canonical_eod_rows,
+    verify_pytdx_eod_snapshot,
 )
 
 
@@ -311,7 +317,8 @@ def test_malformed_ohlc_not_silently_fixed() -> None:
     assert row.high < row.low
 
 
-def test_raw_volume_unit_unverified_and_source_time_preserved() -> None:
+def test_b1_raw_volume_unit_lots_and_source_time_preserved() -> None:
+    """B1（G1B-2A）：raw quote vol 单位已证实为 **手（LOTS）**；字段仍叫 raw_volume，fetch 不换算。"""
     insts = [_Inst("600519", "SH")]
     adapter = MagicMock()
     adapter.get_security_quotes.return_value = [_quote("600519", servertime="15:00:03")]
@@ -320,7 +327,7 @@ def test_raw_volume_unit_unverified_and_source_time_preserved() -> None:
         adapter, insts, trade_date=date(2026, 9, 11), batch_interval_seconds=0.0
     )
 
-    assert snap.volume_unit == "UNVERIFIED"
+    assert snap.volume_unit == PYTDX_QUOTE_VOLUME_UNIT_LOTS == "LOTS"
     assert snap.rows[0].raw_volume == Decimal("1000.0")  # 字段名 raw_volume，未 ×100
     assert not hasattr(snap.rows[0], "volume")
     assert snap.rows[0].source_time == "15:00:03"
@@ -407,6 +414,233 @@ def test_compare_quote_to_daily_reference_volume_ratio() -> None:
 
     assert res["compared_count"] == 1
     assert res["volume_ratio_median"] == pytest.approx(0.01)
+
+
+# ══════════════════════════════════════════════════════════════════════
+# G1B-2A：verified snapshot + 唯一 canonical converter（B2 ~ B14）
+# ══════════════════════════════════════════════════════════════════════
+_D = date(2026, 9, 11)
+
+
+def _daily_ok(dt: str = "2026-09-11 15:00:00", **kw: object) -> pd.DataFrame:
+    """与默认 ``_quote()`` 一致的 daily 参考：vol 1000 手 → 100000 股。"""
+    base: dict[str, object] = {
+        "open": 9.9,
+        "high": 10.1,
+        "low": 9.8,
+        "close": 10.0,
+        "volume": 100000.0,
+        "amount": 10000.0,
+    }
+    base.update(kw)
+    return pd.DataFrame([{"datetime": pd.Timestamp(dt), **base}])
+
+
+def _fetch(adapter: MagicMock, insts: list, captured_at: datetime | None = None):  # noqa: ANN202
+    return fetch_pytdx_eod_snapshot(
+        adapter, insts, trade_date=_D, captured_at=captured_at, batch_interval_seconds=0.0
+    )
+
+
+def _both_markets(adapter: MagicMock) -> None:
+    adapter.get_security_quotes.return_value = [
+        _quote("600519", 1, servertime="15:30:25"),
+        _quote("000001", 0, servertime="15:30:26"),
+    ]
+    adapter.get_daily_bars.return_value = _daily_ok()
+
+
+# ---- B2. SH + SZ 有效 → Verified；daily 恰好 2 次 ----
+def test_b2_sh_sz_valid_produces_verified_with_two_daily_calls() -> None:
+    insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
+    adapter = MagicMock()
+    _both_markets(adapter)
+
+    snap = _fetch(adapter, insts)
+    verified = verify_pytdx_eod_snapshot(adapter, snap)
+
+    assert isinstance(verified, VerifiedPytdxEodSnapshot)
+    assert verified.verified_trade_date == _D
+    assert verified.sentinel_symbols == ("600519", "000001")
+    assert adapter.get_daily_bars.call_count == 2
+
+
+# ---- B3 / B4. 缺 SH / 缺 SZ sentinel → fail ----
+def test_b3_missing_sh_sentinel_fails() -> None:
+    insts = [_Inst("000001", "SZ")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("000001", 0, servertime="15:30:26")]
+    adapter.get_daily_bars.return_value = _daily_ok()
+    snap = _fetch(adapter, insts)
+
+    with pytest.raises(PytdxEodSnapshotError, match="sentinel 不足"):
+        verify_pytdx_eod_snapshot(adapter, snap)
+
+
+def test_b4_missing_sz_sentinel_fails() -> None:
+    insts = [_Inst("600519", "SH")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime="15:30:25")]
+    adapter.get_daily_bars.return_value = _daily_ok()
+    snap = _fetch(adapter, insts)
+
+    with pytest.raises(PytdxEodSnapshotError, match="sentinel 不足"):
+        verify_pytdx_eod_snapshot(adapter, snap)
+
+
+# ---- B5. daily exact-date 不是 requested date → fail ----
+def test_b5_daily_exact_date_missing_fails() -> None:
+    insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
+    adapter = MagicMock()
+    _both_markets(adapter)
+    adapter.get_daily_bars.return_value = _daily_ok(dt="2026-09-10 15:00:00")
+    snap = _fetch(adapter, insts)
+
+    with pytest.raises(PytdxEodSnapshotError, match="date mismatch"):
+        verify_pytdx_eod_snapshot(adapter, snap)
+
+
+# ---- B6 / B7 / B8. OHLC / volume / amount 不符 → fail ----
+def _verify_with_daily(adapter: MagicMock, daily: pd.DataFrame) -> None:  # noqa: ANN401
+    insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
+    _both_markets(adapter)
+    adapter.get_daily_bars.return_value = daily
+    snap = _fetch(adapter, insts)
+    verify_pytdx_eod_snapshot(adapter, snap)
+
+
+def test_b6_ohlc_mismatch_fails() -> None:
+    adapter = MagicMock()
+    with pytest.raises(PytdxEodSnapshotError, match="close mismatch"):
+        _verify_with_daily(adapter, _daily_ok(close=11.0))
+
+
+def test_b7_volume_mismatch_fails() -> None:
+    adapter = MagicMock()
+    with pytest.raises(PytdxEodSnapshotError, match="volume mismatch"):
+        _verify_with_daily(adapter, _daily_ok(volume=200000.0))
+
+
+def test_b8_amount_mismatch_fails() -> None:
+    adapter = MagicMock()
+    with pytest.raises(PytdxEodSnapshotError, match="amount mismatch"):
+        _verify_with_daily(adapter, _daily_ok(amount=20000.0))
+
+
+# ---- B9 / B10. source_time 畸形 / < 15:00 → fail ----
+@pytest.mark.parametrize("bad", ["not-a-time", "15", "15:30", ""])
+def test_b9_source_time_malformed_fails(bad: str) -> None:
+    insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime=bad)]
+    adapter.get_daily_bars.return_value = _daily_ok()
+    snap = _fetch(adapter, insts)
+
+    with pytest.raises(PytdxEodSnapshotError):
+        verify_pytdx_eod_snapshot(adapter, snap)
+
+
+def test_b10_source_time_before_15_fails() -> None:
+    insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime="14:59:59")]
+    adapter.get_daily_bars.return_value = _daily_ok()
+    snap = _fetch(adapter, insts)
+
+    with pytest.raises(PytdxEodSnapshotError):
+        verify_pytdx_eod_snapshot(adapter, snap)
+
+
+# ---- B9b. converter 对 returned row 的 source_time 一律 fail-closed ----
+@pytest.mark.parametrize("bad", ["not-a-time", "14:59:59", None, ""])
+def test_b9b_converter_fails_closed_on_unusable_source_time(bad: object) -> None:
+    insts = [_Inst("600519", "SH")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("600519", 1, servertime=bad)]
+    snap = _fetch(adapter, insts)
+    verified = VerifiedPytdxEodSnapshot(
+        raw_snapshot=snap, verified_trade_date=_D, sentinel_symbols=()
+    )
+
+    with pytest.raises(PytdxEodSnapshotError):
+        to_canonical_eod_rows(verified)
+
+
+# ---- B11. converter：123 手 → 12300 股 ----
+def test_b11_converter_volume_lots_to_shares() -> None:
+    insts = [_Inst("600519", "SH")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [
+        _quote("600519", 1, vol=123.0, servertime="15:30:25")
+    ]
+    snap = _fetch(adapter, insts)
+    verified = VerifiedPytdxEodSnapshot(
+        raw_snapshot=snap, verified_trade_date=_D, sentinel_symbols=("600519",)
+    )
+
+    rows = to_canonical_eod_rows(verified)
+
+    assert PYTDX_QUOTE_LOT_TO_SHARES == Decimal("100")
+    assert rows[0].volume == Decimal("12300")
+    assert rows[0].trade_date == _D
+    assert rows[0].updated_at.hour == 15
+    assert rows[0].updated_at.minute == 30
+
+
+# ---- B12. captured_at 跨日不得泄漏进 canonical 日期 ----
+def test_b12_captured_at_cross_day_does_not_leak_into_canonical_date() -> None:
+    insts = [_Inst("600519", "SH")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [
+        _quote("600519", 1, servertime="15:30:25")
+    ]
+    captured = datetime(2026, 9, 12, 0, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
+    snap = _fetch(adapter, insts, captured_at=captured)
+    assert snap.captured_at.date() == date(2026, 9, 12)
+
+    verified = VerifiedPytdxEodSnapshot(
+        raw_snapshot=snap, verified_trade_date=_D, sentinel_symbols=("600519",)
+    )
+    rows = to_canonical_eod_rows(verified)
+
+    assert rows[0].trade_date == _D  # 2026-09-11，不是 captured_at 的 09-12
+
+
+# ---- B13. converter 拒绝未验证的 raw snapshot ----
+def test_b13_converter_rejects_raw_snapshot() -> None:
+    insts = [_Inst("600519", "SH")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("600519", 1)]
+    snap = _fetch(adapter, insts)
+
+    with pytest.raises(TypeError):
+        to_canonical_eod_rows(snap)  # type: ignore[arg-type]
+
+
+# ---- B14. raw fetch 绝不调用 get_daily_bars ----
+def test_b14_fetch_raw_never_calls_daily() -> None:
+    insts = [_Inst("600519", "SH"), _Inst("000001", "SZ")]
+    adapter = MagicMock()
+    _both_markets(adapter)
+
+    _fetch(adapter, insts)
+
+    adapter.get_daily_bars.assert_not_called()
+
+
+def test_compare_quote_to_daily_reference_amount_ratio() -> None:
+    """A/B 诊断：amount ratio ≈ 1（元/元）。"""
+    insts = [_Inst("600519", "SH")]
+    adapter = MagicMock()
+    adapter.get_security_quotes.return_value = [_quote("600519", vol=100.0)]
+
+    snap = fetch_pytdx_eod_snapshot(
+        adapter, insts, trade_date=date(2026, 9, 11), batch_interval_seconds=0.0
+    )
+
+    res = compare_quote_to_daily_reference(snap.rows, [_reference_row("600519", "10000")])
+
+    assert res["compared_count"] == 1
     assert res["amount_ratio_median"] == pytest.approx(1.0)
 
 
