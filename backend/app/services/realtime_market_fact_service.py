@@ -83,6 +83,58 @@ class PriceTracker:
             self._last_prices.pop(symbol, None)
 
 
+def resolve_snapshot_price_range(
+    price_tracker: PriceTracker,
+    symbol: str,
+    current_price: float,
+    *,
+    prev_node_version: object = None,
+    prev_smc_version: object = None,
+    curr_node_version: object = None,
+    curr_smc_version: object = None,
+    persisted_price: float | None = None,
+) -> tuple[float, float]:
+    """[G7 唯一生命周期 owner] 解析本轮连续快照价格区间 ``[P_last, P_curr]``。
+
+    **生产（MonitorBatchService）与极速旁路（WatchlistRealtimeMonitorService）必须
+    共用这唯一一套规则**，禁止两侧各自定义生命周期语义 —— 否则修复只会落在没有成为
+    production owner 的那一侧。
+
+    规则（严格按序）：
+    1. **Target Set Version 变更**（XDXR 除权除息 / 日线滚动 / 坐标重算）→ 首帧强制
+       ``(p, p)``。严禁拿旧复权坐标的 ``P_last`` 去扫描新坐标 TargetSet，
+       否则会制造完全假的穿透。
+    2. **内存无价格**（进程重启 / 首次执行）且持久化价与当前版本一致 →
+       用持久化的 ``current_price`` 恢复 ``P_last``，支持重启窗口期的
+       catch-up 穿透（重启前 100、重启期间涨到 105、target=103 必须能命中）。
+    3. 其余情况 → 由 :class:`PriceTracker` 连续推进快照区间。
+    """
+    is_node_ver_changed = (
+        prev_node_version is not None and curr_node_version != prev_node_version
+    )
+    is_smc_ver_changed = prev_smc_version is not None and curr_smc_version != prev_smc_version
+
+    if is_node_ver_changed or is_smc_ver_changed:
+        price_tracker.set_last_price(symbol, current_price)
+        return current_price, current_price
+
+    if price_tracker.get_last_price(symbol) is None:
+        same_version = (
+            (prev_node_version == curr_node_version if curr_node_version else True)
+            and (prev_smc_version == curr_smc_version if curr_smc_version else True)
+        )
+        if persisted_price is not None and same_version:
+            try:
+                restored = float(persisted_price)
+            except (TypeError, ValueError):
+                restored = None
+            if restored is not None:
+                price_tracker.set_last_price(symbol, current_price)
+                return restored, current_price
+
+    return price_tracker.update_price(symbol, current_price)
+
+
 class RealtimeMarketFactService:
     """盘中行情事实引擎。"""
 
@@ -278,4 +330,5 @@ __all__ = [
     "PriceTracker",
     "RealtimeMarketFactService",
     "RealtimeQuote",
+    "resolve_snapshot_price_range",
 ]

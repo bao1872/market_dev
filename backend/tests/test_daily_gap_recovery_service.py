@@ -29,6 +29,7 @@ from app.services.daily_gap_recovery_service import (
     find_previous_complete_trade_date,
     recover_recent_daily_gaps,
 )
+from app.services.daily_gap_repair_service import SourceConsistencyError
 from app.services.eod_daily_refresh_service import DailyGap
 
 pytestmark = pytest.mark.pure_unit
@@ -382,3 +383,60 @@ async def test_recover_recent_daily_gaps_with_pytdx_adapter(
     assert mock_pytdx_gate.await_count == 1
     assert mock_pytdx_gate.await_args.kwargs["adapter"] is fake_adapter
     assert res.days[0].bulk_inserted == 98
+
+
+async def test_pytdx_gate_unavailable_switches_repair_to_ths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pytdx 源不可用 → 回退 THS 门禁，且 repair 主源必须同步切为 THS（adapter=None）。
+
+    门禁证明源必须与写库主源一致：禁止「THS 证明 + pytdx 写」。
+    """
+    _prev, repair, _fill = _install_market_wide(
+        monkeypatch,
+        scan_before=[_mw_gap(TD)],
+        scan_after=[],
+        find_missing_side_effect=[[], []],
+    )
+    ths_gate = AsyncMock(return_value=SimpleNamespace())
+    monkeypatch.setattr(rec, "compare_db_vs_ths_for_date", ths_gate)
+    monkeypatch.setattr(
+        rec,
+        "compare_db_vs_pytdx_for_date",
+        AsyncMock(side_effect=RuntimeError("pytdx unavailable")),
+    )
+
+    fake_adapter = object()
+    await recover_recent_daily_gaps(MagicMock(), through=TD, adapter=fake_adapter)
+
+    # THS 门禁被调用
+    assert ths_gate.await_count == 1
+    # 关键：repair 主源必须切为 THS，不能再传 pytdx adapter
+    assert repair.await_count == 1
+    assert repair.await_args.kwargs["adapter"] is None
+
+
+async def test_pytdx_gate_inconsistent_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pytdx 数据不一致 → fail closed，绝不改用 THS 证明后继续用 pytdx 写库。"""
+    _prev, repair, _fill = _install_market_wide(
+        monkeypatch,
+        scan_before=[_mw_gap(TD)],
+        scan_after=[],
+        find_missing_side_effect=[[], []],
+    )
+    ths_gate = AsyncMock(return_value=SimpleNamespace())
+    monkeypatch.setattr(rec, "compare_db_vs_ths_for_date", ths_gate)
+    monkeypatch.setattr(
+        rec,
+        "compare_db_vs_pytdx_for_date",
+        AsyncMock(side_effect=SourceConsistencyError("pytdx bad data")),
+    )
+
+    with pytest.raises(SourceConsistencyError, match="pytdx bad data"):
+        await recover_recent_daily_gaps(MagicMock(), through=TD, adapter=object())
+
+    # 既不能回退 THS 门禁，更不能写库
+    assert ths_gate.await_count == 0
+    assert repair.await_count == 0

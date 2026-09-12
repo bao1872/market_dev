@@ -95,10 +95,35 @@
 | G1 缺口修复 | ✅ | 服务可用 + 生产 owner 已注入 pytdx adapter |
 | G1C | 🟡 | 部分完成 |
 | G1D / G1E / G2 | ❌ | **保持未完成** |
-| G3 实时行情事实 | ✅ | 引擎组件 + 生产接线（MonitorBatchService 已注入 PriceTracker） |
-| G4 筹码共识穿透 | ✅ | 引擎 + 生产 Node 路径已激活 |
+| G3 实时行情事实 | 🟡 | 引擎完成（`RealtimeMarketFactService.fetch_quotes`，80 只/批）；**production batch market-fact 未接** —— `MonitorBatchService` 不调用 `fetch_quotes`，生产现价仍取 `bars_minute["close"].iloc[-1]`，只用到了 `PriceTracker` |
+| G4 筹码共识穿透 | 🟡 | crossing engine 完成；production Node 路径已激活（`detect_events` One-shot），但 `WatchlistMonitor.calculate_state()` 仍在跑旧 VN + SMC 重算 |
 | G5 SMC 事件合同 | 🟡 | 引擎合同已修正（`*_CROSS`）；SMC 生产穿透待冻结 TargetSet 编排层 |
-| G6 生产接线 | 🟡 | Node 已激活；SMC 待编排层 |
-| G7 坐标对齐 + XDXR 版本滚动 | 🟡 | 逻辑已实现并单测，生产经 `WatchlistMonitor.detect_events` 部分生效 |
+| G6 生产接线 | 🟡 | Node crossing 已接入，但旧 `calculate_state` / 重算仍存在，**「停止盘中重算」未达成**；SMC 待编排层 |
+| G7 坐标对齐 + XDXR 版本滚动 | 🟡 | 生命周期判定已下沉为唯一 owner `resolve_snapshot_price_range`，**生产 `MonitorBatchService` 已生效**（与旁路共用同一规则）；坐标对齐其余项仍待验证 |
 | G8 端到端 E2E | ❌ | dry-run 脚本存在，未宣告完整通过 |
+
+### 5.1 G3 / G6 生产性能目标仍未达成（须准确记录）
+
+生产当前仍是**逐标的循环**，不是设计的「一轮自选股 → 一次批量 pytdx quotes → shared Market Fact」：
+
+```
+for each instrument:
+    拉 1m bar
+    拉 Node daily / 15m
+    calculate_state()          ← 旧 VN + SMC 重算仍在跑
+    detect_events()
+```
+
+因此：
+
+```
+G3 引擎组件             ✅
+G3 production market fact ❌
+G4 crossing engine        ✅
+G4 production crossing    🟡
+G6「停止盘中重算」        ❌
+```
+
+性能目标（正常日 = ≈全市场 quote batch + 2 次 sentinel daily + bulk DB write，
+而非 5000 × `get_daily_bars`）**尚未达成**。
 

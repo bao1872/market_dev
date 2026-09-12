@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import TradingCalendar
 from app.services.daily_gap_repair_service import (
+    SourceConsistencyError,
     compare_db_vs_pytdx_for_date,
     compare_db_vs_ths_for_date,
     repair_market_wide_daily_gap,
@@ -189,8 +190,15 @@ async def _recover_market_wide_day(
     day.reference_trade_date = reference
 
     # 写库前置门禁：只对「早于目标日」的完整 reference 做 A/B；dry_run 无需 report。
-    # 策略：若注入了 pytdx adapter，优先以 pytdx 为主源门禁；失败或无 adapter 时回退至 THS。
+    #
+    # [P0 proof/write 对齐] 门禁主源必须与 repair 写库主源是同一个源：
+    #   pytdx 证明 → pytdx 写；THS 证明 → THS 写。
+    # 否则会出现「用 THS 证明数据合同，却用刚校验失败的 pytdx 写数据」。
+    #   - pytdx 门禁 PASS      → repair_adapter = adapter（pytdx 主源）
+    #   - pytdx 源不可用       → 回退 THS 门禁，且 repair_adapter = None（THS 主源）
+    #   - pytdx 数据不一致     → fail closed（禁止用校验失败的源继续写库）
     consistency_report = None
+    repair_adapter = adapter
     if not dry_run:
         if adapter is not None:
             try:
@@ -198,11 +206,20 @@ async def _recover_market_wide_day(
                     session, reference, adapter=adapter
                 )
                 validate_consistency(consistency_report)
+            except SourceConsistencyError:
+                logger.error(
+                    "[GAP-RECOVERY] pytdx 一致性门禁未通过，fail closed："
+                    "target=%s reference=%s 不允许以校验失败的 pytdx 作为写库主源",
+                    trade_date, reference,
+                )
+                raise
             except Exception as exc:
                 logger.warning(
-                    "[GAP-RECOVERY] compare_db_vs_pytdx_for_date 门禁未通过 (%s)，回退至 THS 门禁",
+                    "[GAP-RECOVERY] compare_db_vs_pytdx_for_date 源不可用 (%s)，"
+                    "回退至 THS 门禁并把 repair 主源切换为 THS",
                     exc,
                 )
+                repair_adapter = None
                 consistency_report = await compare_db_vs_ths_for_date(session, reference)
                 validate_consistency(consistency_report)
         else:
@@ -212,7 +229,7 @@ async def _recover_market_wide_day(
     repair = await repair_market_wide_daily_gap(
         session,
         trade_date,
-        adapter=adapter,
+        adapter=repair_adapter,
         consistency_report=consistency_report,
         dry_run=dry_run,
         use_eastmoney_fallback=False,

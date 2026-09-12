@@ -73,6 +73,7 @@ from app.services.node_monitor_target_service import (
 )
 from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
+from app.services.realtime_market_fact_service import resolve_snapshot_price_range
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
 from app.strategy.runtime import MarketDataContext, MonitorState
 
@@ -725,6 +726,19 @@ class MonitorBatchService:
             logger.debug("[%s] Node profile 计算失败，回退旧路径: %s", symbol, exc)
             node_target_set = None
 
+        # [P0 G7 生产生命周期] prev_state 必须在更新 PriceTracker **之前**读取。
+        # 若在之后读取，进程重启时内存 PriceTracker 为空，update_price 首帧恒返回 (p, p)，
+        # 持久化的 current_price 永远拿不到 → 重启窗口期的 catch-up 穿透被漏掉；
+        # XDXR / Node TargetSet version roll 时也会拿旧复权坐标的 P_last 去扫描新坐标
+        # TargetSet，制造假穿透。
+        prev_state_orm = await monitor_state_repository.get_state(
+            db, instrument_id=instrument_id, strategy_version_id=strategy_version.id,
+        )
+        prev_state = self._orm_to_runtime_state(prev_state_orm) if prev_state_orm else None
+        prev_state_dict: dict[str, Any] = (
+            (prev_state.state or {}) if prev_state is not None else {}
+        )
+
         price_last: float | None = None
         current_price: float | None = None
         if not bars_minute.empty:
@@ -733,8 +747,20 @@ class MonitorBatchService:
             except Exception:  # noqa: BLE001
                 current_price = None
         if current_price is not None:
-            price_last, current_price = self.fact_service.price_tracker.update_price(
-                symbol, current_price
+            curr_smc_set = getattr(context, "smc_target_set", None)
+            price_last, current_price = resolve_snapshot_price_range(
+                self.fact_service.price_tracker,
+                symbol,
+                current_price,
+                prev_node_version=prev_state_dict.get("node_target_set_version"),
+                prev_smc_version=prev_state_dict.get("smc_target_set_version"),
+                curr_node_version=(
+                    node_target_set.target_set_version if node_target_set else None
+                ),
+                curr_smc_version=(
+                    curr_smc_set.target_set_version if curr_smc_set is not None else None
+                ),
+                persisted_price=prev_state_dict.get("current_price"),
             )
 
         if node_target_set is not None:
@@ -788,11 +814,8 @@ class MonitorBatchService:
                 extra = instrument_extra_info.setdefault(instrument_id, {})
                 extra["smc_degraded_reason"] = smc_reason
 
-        # 获取 prev_state
-        prev_state_orm = await monitor_state_repository.get_state(
-            db, instrument_id=instrument_id, strategy_version_id=strategy_version.id,
-        )
-        prev_state = self._orm_to_runtime_state(prev_state_orm) if prev_state_orm else None
+        # prev_state 已在 [P0 G7 生产生命周期] 处提前读取（必须先于 PriceTracker 更新），
+        # 这里直接复用，不再二次查询。
 
         # detect_events
         event_drafts: list[Any] = []
