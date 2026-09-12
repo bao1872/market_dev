@@ -314,6 +314,39 @@ class _ParallelPhaseResult:
     elapsed_seconds: float = 0.0
 
 
+def _empty_factor_audit_summary(
+    trade_date: date, *, mode: str = "skipped_no_impact",
+) -> dict[str, Any]:
+    """[G1B-3A] 无影响集时的空审计摘要。
+
+    当 ``_resolve_factor_audit_symbols`` 返回空（无 changed / failed / stale），
+    盘后流程跳过第二轮全市场审计，返回此零摘要而非调用 ``_audit_and_rebuild_factors``。
+    ``audit_mode`` 标记跳过原因，供生产观测。
+
+    Args:
+        trade_date: 业务交易日
+        mode: 审计模式（默认 "skipped_no_impact"）
+
+    Returns:
+        与 ``_audit_and_rebuild_factors`` 同结构的零值摘要
+    """
+    return {
+        "trade_date": trade_date.isoformat(),
+        "total_audited": 0,
+        "consistent": 0,
+        "needs_rebuild": 0,
+        "audit_rebuilt": 0,
+        "rebuilt": 0,
+        "failed": 0,
+        "errors": 0,
+        "failed_symbols": [],
+        "degraded": 0,
+        "degraded_symbols": [],
+        "audit_mode": mode,
+        "requested_symbols": 0,
+    }
+
+
 class BarsSchedulerService:
     """多周期行情调度服务。
 
@@ -1126,13 +1159,25 @@ class BarsSchedulerService:
             ) from exc
 
         try:
-            audit_result = await self._audit_and_rebuild_factors(
-                trade_date, instruments, db_session, job_run_id=job_run_id
+            # [G1B-3A] 影响集审计：只审计 changed ∪ failed ∪ stale，无影响则跳过
+            audit_symbols = await self._resolve_factor_audit_symbols(
+                db_session, rebuild_result,
             )
+            if audit_symbols:
+                audit_result = await self._audit_and_rebuild_factors(
+                    trade_date, instruments, db_session, job_run_id=job_run_id,
+                    symbols=audit_symbols,
+                )
+            else:
+                audit_result = _empty_factor_audit_summary(
+                    trade_date, mode="skipped_no_impact",
+                )
             result.factor_audit = audit_result
             logger.info(
-                "[BarsScheduler] 因子审计完成 audited=%d consistent=%d "
-                "needs_rebuild=%d rebuilt=%d failed=%d errors=%d",
+                "[BarsScheduler] 因子审计完成 mode=%s requested=%d audited=%d "
+                "consistent=%d needs_rebuild=%d rebuilt=%d failed=%d errors=%d",
+                audit_result["audit_mode"],
+                audit_result["requested_symbols"],
                 audit_result["total_audited"],
                 audit_result["consistent"],
                 audit_result["needs_rebuild"],
@@ -1593,6 +1638,8 @@ class BarsSchedulerService:
             "changed": 0,
             "rebuilt": 0,
             "failed": 0,
+            "changed_symbols": [],   # [G1B-3A] 影响集：fingerprint 变化的股票
+            "rebuilt_symbols": [],   # [G1B-3A] 影响集：重建成功的股票（⊆ changed_symbols）
             "failed_symbols": [],
         }
 
@@ -1659,11 +1706,15 @@ class BarsSchedulerService:
 
                     # 2. rebuild：从最早受影响日期重算完整因子序列
                     result["changed"] += 1
+                    if symbol not in result["changed_symbols"]:
+                        result["changed_symbols"].append(symbol)
                     await adj_service.rebuild_factor_series(
                         session, instrument.id, symbol, earliest, adapter,
                     )
                     await session.commit()
                     result["rebuilt"] += 1
+                    if symbol not in result["rebuilt_symbols"]:
+                        result["rebuilt_symbols"].append(symbol)
                 except (CorporateActionProviderError, PytdxSourceError) as exc:
                     # [PER-SYMBOL FRESHNESS] 单只股票本轮 freshness 已无法证明：
                     # 系统性 outage 与单只 freshness 失败是两件事——后者本身就足以
@@ -1755,8 +1806,15 @@ class BarsSchedulerService:
         instruments: list[Instrument],
         db_session: AsyncSession | None = None,
         job_run_id: uuid.UUID | None = None,
+        *,
+        symbols: list[str] | None = None,
     ) -> dict[str, Any]:
         """[S3.1 CHANGE-20260718-007] - 因子一致性审计 + 串行重建。
+
+        [G1B-3A] symbols 非空时进入影响集（impact-set）审计模式：只审计指定股票，
+        并要求 dry_run 实际审计到的数量 == 请求数量（否则 FACTOR_AUDIT_SCOPE_INCOMPLETE
+        fail-closed，禁止「请求 20 只、只找到 19 只就宣称审计完成」）；成功后批量
+        stamp 整个已证明 scope。symbols=None 时维持旧全市场行为（本轮不自动全量 stamp）。
 
         在 _rebuild_factors_if_needed 之后、_check_daily_coverage_and_trigger_dsa 之前
         执行，审计 _rebuild_factors_if_needed 可能漏掉的不一致股票（legacy 错误、
@@ -1794,8 +1852,16 @@ class BarsSchedulerService:
                 - degraded: 数据缺失（无法证明 factor）股票数
                 - degraded_symbols: 数据缺失股票代码列表（截断 100）
         """
-        from app.services.factor_reconciliation import FactorReconciliationTask
+        from app.services.factor_reconciliation import (
+            FactorReconciliationTask,
+            stamp_factor_reconciliation_versions_by_symbols,
+        )
         from app.services.job_run_event_service import append_event
+
+        # [G1B-3A] impact-set 请求：提前规范化 + 记录，供 scope 完整性检查与成功 stamp 复用
+        requested_symbols: list[str] | None = None
+        if symbols is not None:
+            requested_symbols = sorted(set(symbols))
 
         total = len(instruments)
         # [PROMPT.md §5.4.2 V2] 生产审计字段完整集合
@@ -1811,6 +1877,9 @@ class BarsSchedulerService:
             "failed_symbols": [],  # V2: 失败股票代码列表
             "degraded": 0,
             "degraded_symbols": [],
+            # [G1B-3A] 诊断：审计模式与请求规模
+            "audit_mode": "impact_set" if symbols is not None else "full_market",
+            "requested_symbols": len(symbols or []),
         }
 
         if total == 0:
@@ -1851,12 +1920,12 @@ class BarsSchedulerService:
         try:
             if db_session is not None:
                 plan = await task.dry_run(
-                    db_session, batch_size=50, max_mismatches=20,
+                    db_session, symbols=symbols, batch_size=50, max_mismatches=20,
                 )
             else:
                 async with AsyncSessionLocal() as session:
                     plan = await task.dry_run(
-                        session, batch_size=50, max_mismatches=20,
+                        session, symbols=symbols, batch_size=50, max_mismatches=20,
                     )
         except FactorSourceUnavailableError:
             # 审计阶段 provider outage：必须向上传播 fail-closed，禁止继续 Core。
@@ -1875,6 +1944,16 @@ class BarsSchedulerService:
         summary["errors"] = plan.error_count
         summary["degraded"] = plan.degraded_count
         summary["degraded_symbols"] = plan.degraded_symbols[:100]
+
+        # [G1B-3A] impact-set 完整性：请求的 symbols 必须全部被审计到，
+        # 否则「请求 20 只、实际只找到 19 只」不能宣称审计完成 → fail-closed。
+        if requested_symbols is not None:
+            if plan.total_audited != len(requested_symbols):
+                raise FactorIntegrityBlockedError(
+                    "FACTOR_AUDIT_SCOPE_INCOMPLETE: "
+                    f"requested={len(requested_symbols)} "
+                    f"audited={plan.total_audited}"
+                )
 
         # [FACTOR-HEALTH] 审计后 fail-closed：即使 dry_run 没有抛异常，也不得把
         # 「全市场 provider 错误」当作普通软失败继续跑 Core。
@@ -1982,7 +2061,67 @@ class BarsSchedulerService:
                 f"FACTOR_REBUILD_INCOMPLETE: failed={summary['failed']}"
             )
 
+        # [G1B-3A] 成功 stamp 整个已证明 scope（仅 impact-set 模式）。
+        # 到达此处说明 error_count == 0、degraded_count == 0、rebuild 失败 == 0
+        # （上方 gate 已全部通过），整个 impact set 均已被证明一致，允许 stamp baseline。
+        if requested_symbols is not None:
+            if db_session is not None:
+                stamped = await stamp_factor_reconciliation_versions_by_symbols(
+                    db_session, requested_symbols,
+                )
+                if stamped != len(requested_symbols):
+                    raise FactorIntegrityBlockedError(
+                        "FACTOR_VERSION_STAMP_INCOMPLETE: "
+                        f"expected={len(requested_symbols)} stamped={stamped}"
+                    )
+                await db_session.commit()
+            else:
+                async with AsyncSessionLocal() as session:
+                    stamped = await stamp_factor_reconciliation_versions_by_symbols(
+                        session, requested_symbols,
+                    )
+                    if stamped != len(requested_symbols):
+                        raise FactorIntegrityBlockedError(
+                            "FACTOR_VERSION_STAMP_INCOMPLETE: "
+                            f"expected={len(requested_symbols)} stamped={stamped}"
+                        )
+                    await session.commit()
+
         return summary
+
+    async def _resolve_factor_audit_symbols(
+        self,
+        db_session: AsyncSession | None,
+        rebuild_result: dict[str, Any],
+    ) -> list[str]:
+        """[G1B-3A] 计算因子审计影响集。
+
+        影响集 = 本轮 XDXR 变化股票 ∪ 本轮 rebuild 失败股票 ∪ 因子版本过期/stale 股票。
+
+        ``rebuilt_symbols ⊂ changed_symbols``，故无需重复加入。结果确定性排序
+        （sorted），保证可复现与幂等。
+
+        Args:
+            db_session: 可选 DB 会话（None 时内部新建）
+            rebuild_result: ``_rebuild_factors_if_needed`` 返回的影响集（含
+                changed_symbols / failed_symbols）
+
+        Returns:
+            待审计股票代码列表（确定性排序，去重）
+        """
+        from app.services.factor_reconciliation import find_stale_version_instruments
+
+        async def _resolve(session: AsyncSession) -> list[str]:
+            stale = await find_stale_version_instruments(session)
+            symbols = {symbol for _, symbol in stale}
+            symbols.update(rebuild_result.get("changed_symbols", []))
+            symbols.update(rebuild_result.get("failed_symbols", []))
+            return sorted(symbols)
+
+        if db_session is not None:
+            return await _resolve(db_session)
+        async with AsyncSessionLocal() as session:
+            return await _resolve(session)
 
     async def _write_audit_done_event(
         self,

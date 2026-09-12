@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from sqlalchemy import text
@@ -26,9 +27,13 @@ from app.constants.factor_contract import (
     FACTOR_ALGORITHM_VERSION,
     FACTOR_RECONCILIATION_VERSION,
 )
+from app.models.instrument import Instrument
+from app.services.factor_consistency_audit import FactorAuditResult
 from app.services.factor_reconciliation import (
+    FactorReconciliationTask,
     find_stale_version_instruments,
     stamp_factor_reconciliation_version,
+    stamp_factor_reconciliation_versions_by_symbols,
 )
 
 
@@ -251,3 +256,142 @@ async def test_d_mixed_scenario_only_returns_stale(db_session) -> None:
     assert len(stale_ids_returned) == 5, (
         f"应返回 5 只 stale，实际 {len(stale_ids_returned)}"
     )
+
+
+# =============================================================================
+# [G1B-3A] 影响集识别强化 + dry_run 批量查询 + 批量 stamp
+# =============================================================================
+
+
+async def test_g1b3a_find_stale_identifies_null_reconciled_at(db_session) -> None:
+    """[G1B-3A] 版本号正确但 factor_reconciled_at IS NULL → 视为 stale。
+
+    有版本号但从未留下成功对账时间，不能视为 baseline 已证明。
+    """
+    instr = await _create_instrument(
+        db_session,
+        symbol="NULLRECON01",
+        factor_algorithm_version=FACTOR_ALGORITHM_VERSION,
+        factor_reconciliation_version=FACTOR_RECONCILIATION_VERSION,
+        factor_reconciled_at=None,  # 关键：从未留下成功对账时间
+    )
+
+    stale = await find_stale_version_instruments(db_session)
+    stale_ids = [item[0] for item in stale]
+    assert instr in stale_ids, "有版本号但无 reconciled_at 应视为 stale"
+
+
+async def test_g1b3a_dry_run_symbols_single_instrument_query(db_session) -> None:
+    """[G1B-3A] dry_run(symbols=...) 只发起 1 次 Instrument SELECT，而非 N 次。
+
+    100 只指定股票 → 单次批量查询 instrument 身份，audit 仍逐股串行。
+    """
+    syms = [f"{600000 + i:06d}" for i in range(100)]
+    for s in syms:
+        db_session.add(Instrument(symbol=s, name=s, market="SH", status="active"))
+    await db_session.flush()
+
+    # mock auditor：返回一致，不连 pytdx / DB 其他表
+    task = FactorReconciliationTask()
+    task._auditor = MagicMock()
+    task._auditor.audit_single_stock = AsyncMock(
+        return_value=FactorAuditResult(
+            instrument_id=uuid.uuid4(),
+            symbol="x",
+            is_consistent=True,
+            stored_count=1,
+            expected_count=1,
+            missing_factor_count=0,
+        )
+    )
+
+    # spy on session.execute：统计查询次数
+    calls: list[object] = []
+    orig_execute = db_session.execute
+
+    async def _spy(*args, **kwargs):
+        calls.append(args[0])
+        return await orig_execute(*args, **kwargs)
+
+    db_session.execute = _spy  # type: ignore[assignment]
+
+    plan = await task.dry_run(db_session, symbols=syms, batch_size=50, max_mismatches=20)
+
+    # 100 只全部审计到、全部一致
+    assert plan.total_audited == 100
+    assert plan.consistent_count == 100
+    # 关键：只发起了 1 次 session.execute（单次批量 Instrument SELECT）
+    assert len(calls) == 1, f"期望仅 1 次查询，实际 {len(calls)} 次"
+
+
+async def test_g1b3a_dry_run_symbols_missing_not_found(db_session) -> None:
+    """[G1B-3A] symbols 中含不存在股票 → total_audited 少于 requested。
+
+    scheduler 层据此 FACTOR_AUDIT_SCOPE_INCOMPLETE fail-closed（见
+    test_bars_scheduler_factor_audit）。
+    """
+    await _create_instrument(db_session, symbol="EXIST01")
+
+    task = FactorReconciliationTask()
+    task._auditor = MagicMock()
+    task._auditor.audit_single_stock = AsyncMock(
+        return_value=FactorAuditResult(
+            instrument_id=uuid.uuid4(),
+            symbol="x",
+            is_consistent=True,
+            stored_count=1,
+            expected_count=1,
+            missing_factor_count=0,
+        )
+    )
+
+    plan = await task.dry_run(
+        db_session,
+        symbols=["EXIST01", "GHOST99"],
+        batch_size=50,
+        max_mismatches=20,
+    )
+    # 只有 EXIST01 被审计到，GHOST99 未找到
+    assert plan.total_audited == 1
+
+
+async def test_g1b3a_stamp_symbols_dedup_and_no_commit(db_session) -> None:
+    """[G1B-3A] stamp_factor_reconciliation_versions_by_symbols 去重 + 不 commit。
+
+    去重 symbols；只 flush 不 commit（由调用方事务拥有）。
+    """
+    sym_a = "STAMPA01"
+    sym_b = "STAMPB02"
+    await _create_instrument(db_session, symbol=sym_a)
+    await _create_instrument(db_session, symbol=sym_b)
+
+    # 监控 commit 是否在本函数内被调用
+    commit_spy = MagicMock()
+    db_session.commit = commit_spy  # type: ignore[assignment]
+
+    # 含重复 symbol
+    stamped = await stamp_factor_reconciliation_versions_by_symbols(
+        db_session, [sym_a, sym_b, sym_a],
+    )
+    assert stamped == 2, f"去重后应 stamp 2 只，实际 {stamped}"
+
+    # 不 commit（仅 flush，由调用方统一提交）
+    commit_spy.assert_not_called()
+
+    # flush 后同会话内可见更新
+    db_session.expire_all()
+    fields_a = await _get_factor_version_fields(db_session, (
+        await _get_id_by_symbol(db_session, sym_a)
+    ))
+    assert fields_a["factor_algorithm_version"] == FACTOR_ALGORITHM_VERSION
+    assert fields_a["factor_reconciled_at"] is not None
+
+
+async def _get_id_by_symbol(db_session, symbol: str) -> uuid.UUID:
+    """辅助：按 symbol 查 instrument id。"""
+    from sqlalchemy import select as _select
+
+    result = await db_session.execute(
+        _select(Instrument.id).where(Instrument.symbol == symbol)
+    )
+    return result.scalar_one()

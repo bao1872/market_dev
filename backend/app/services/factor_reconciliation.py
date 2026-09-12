@@ -37,7 +37,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 
-from sqlalchemy import text
+from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.factor_contract import (
@@ -45,6 +45,7 @@ from app.constants.factor_contract import (
     FACTOR_RECONCILIATION_VERSION,
 )
 from app.core.pytdx_adapter import PytdxAdapter, PytdxSourceError
+from app.models.instrument import Instrument
 from app.services.adjustment_factor_service import (
     AdjustmentFactorService,
     CorporateActionProviderError,
@@ -102,6 +103,51 @@ async def stamp_factor_reconciliation_version(
     await session.flush()
 
 
+async def stamp_factor_reconciliation_versions_by_symbols(
+    session: AsyncSession,
+    symbols: list[str],
+    *,
+    algorithm_version: str = FACTOR_ALGORITHM_VERSION,
+    reconciliation_version: int = FACTOR_RECONCILIATION_VERSION,
+) -> int:
+    """[G1B-3A] 批量写入因子版本字段（影响集审计成功后调用）。
+
+    与 :func:`stamp_factor_reconciliation_version`（单只）不同，本函数按 symbol 列表
+    一次性 UPDATE 整个已证明 scope，避免逐股 stamp 的 N 次写。只在下列门禁全部满足后调用：
+    error_count == 0、degraded_count == 0、rebuild failure == 0（即整个 impact set 已证明一致）。
+
+    不 commit（由调用方控制事务）；调用方需在 rowcount 校验通过后统一 commit。
+
+    Args:
+        session: 异步 DB 会话
+        symbols: 待 stamp 的股票代码列表（可含重复，函数内部去重）
+        algorithm_version: 算法版本（默认 FACTOR_ALGORITHM_VERSION）
+        reconciliation_version: 对账版本（默认 FACTOR_RECONCILIATION_VERSION）
+
+    Returns:
+        实际更新的行数（int）；symbols 为空时返回 0
+    """
+    unique_symbols = sorted(set(symbols))
+    if not unique_symbols:
+        return 0
+
+    now = datetime.now(UTC)
+    stmt = (
+        update(Instrument)
+        .where(Instrument.status == "active")
+        .where(Instrument.symbol.in_(unique_symbols))
+        .values(
+            factor_algorithm_version=algorithm_version,
+            factor_reconciliation_version=reconciliation_version,
+            factor_reconciled_at=now,
+            updated_at=now,
+        )
+    )
+    result = await session.execute(stmt)
+    await session.flush()
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
 async def find_stale_version_instruments(
     session: AsyncSession,
     *,
@@ -115,19 +161,21 @@ async def find_stale_version_instruments(
 
     [CP-V3-D2] 重要安全约束：
     本函数会将 factor_algorithm_version IS NULL 识别为 stale。生产 DB 中 8272 只
-    active 股票的版本字段均为 NULL（迁移 065 添加但未 bootstrap）。**禁止**在未执行
-    `bootstrap_factor_version_baseline` 前将本函数接入 after_close 流程，否则会
-    一次性把 8272 只股票全部识别为 stale，触发无控制的全市场重建，违反资源约束。
+    active 股票的版本字段均为 NULL（迁移 065 添加但未 bootstrap）。
 
-    部署后首次盘后流程实际使用的是 `_audit_and_rebuild_factors`（基于 dry_run
-    hash 比对，不基于版本字段），所以 NULL 版本字段不会触发全市场重建。
-    本函数仅作为未来版本驱动影响集识别的预留入口。
+    [G1B-3A] 本函数现已接入 after_close 流程（经由
+    `BarsSchedulerService._resolve_factor_audit_symbols`），用于计算因子审计影响集：
+    changed ∪ failed ∪ stale。首次部署时 8000+ 只均为 NULL → stale = 全市场 →
+    影响集退化为全市场审计一次，成功后批量 stamp baseline；之后正常一天 stale≈0，
+    只审计 changed/failed/新股 NULL。这把确定重复的第二轮全市场审计砍掉，且不降低
+    因子正确性门禁（审计仍逐股串行，fail-closed 不变）。
 
     匹配条件（任一满足即视为 stale）：
     - factor_algorithm_version IS NULL（从未对账）
     - factor_algorithm_version != current_algorithm_version
     - factor_reconciliation_version IS NULL（从未对账）
     - factor_reconciliation_version != current_reconciliation_version
+    - factor_reconciled_at IS NULL（有版本号但从未留下成功对账时间，baseline 未证明）
 
     Args:
         session: 异步 DB 会话
@@ -147,6 +195,7 @@ async def find_stale_version_instruments(
                 OR factor_algorithm_version != :algo_ver
                 OR factor_reconciliation_version IS NULL
                 OR factor_reconciliation_version != :recon_ver
+                OR factor_reconciled_at IS NULL
             )
         ORDER BY symbol
         """
@@ -523,30 +572,28 @@ class FactorReconciliationTask:
         degraded_symbols: list[str] = []
 
         if symbols:
-            # 指定股票：逐只审计
-            from sqlalchemy import select
+            # 指定股票：单次批量查询 instrument 身份（避免 N 次逐股 SELECT）
+            requested = list(dict.fromkeys(symbols))
+            result_rows = await session.execute(
+                select(Instrument.id, Instrument.symbol)
+                .where(Instrument.status == "active")
+                .where(Instrument.symbol.in_(requested))
+            )
+            row_by_symbol = {row.symbol: row.id for row in result_rows.all()}
 
-            from app.models.instrument import Instrument
-
-            for symbol in symbols:
-                result_row = await session.execute(
-                    select(Instrument.id, Instrument.symbol)
-                    .where(Instrument.symbol == symbol)
-                    .where(Instrument.status == "active")
-                )
-                row = result_row.first()
-                if row is None:
+            for symbol in requested:
+                instrument_id = row_by_symbol.get(symbol)
+                if instrument_id is None:
                     logger.warning("dry_run 股票未找到或非 active: %s", symbol)
                     continue
-                instrument_id, sym = row
                 try:
                     audit_result = await self._auditor.audit_single_stock(
-                        session, instrument_id, sym, max_mismatches=max_mismatches,
+                        session, instrument_id, symbol, max_mismatches=max_mismatches,
                     )
                 except (PytdxSourceError, CorporateActionProviderError) as exc:
                     # 源/连接/协议不可用：审计无法继续，fail-closed 而非降级。
                     raise FactorSourceUnavailableError(
-                        f"FACTOR_AUDIT_PROVIDER_OUTAGE symbol={sym}: {exc}"
+                        f"FACTOR_AUDIT_PROVIDER_OUTAGE symbol={symbol}: {exc}"
                     ) from exc
                 total_audited += 1
                 if audit_result.error:
@@ -556,7 +603,7 @@ class FactorReconciliationTask:
                     # 不归类为算法不一致（mismatch），不加入 items（无法重建），
                     # 需先回补数据再重新审计
                     degraded_count += 1
-                    degraded_symbols.append(sym)
+                    degraded_symbols.append(symbol)
                 elif audit_result.is_consistent:
                     consistent_count += 1
                 else:

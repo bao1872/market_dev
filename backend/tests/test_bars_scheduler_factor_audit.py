@@ -28,7 +28,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
 import pytest
+from sqlalchemy import text
 
+from app.constants.factor_contract import (
+    FACTOR_ALGORITHM_VERSION,
+    FACTOR_RECONCILIATION_VERSION,
+)
 from app.models.instrument import Instrument
 from app.models.job_run_event import JobRunEvent
 from app.models.scheduler_job_run import SchedulerJobRun
@@ -43,6 +48,7 @@ from app.services.factor_reconciliation import (
     ReconciliationItemResult,
     ReconciliationPlan,
     ReconciliationReport,
+    find_stale_version_instruments,
 )
 from app.services.job_run_event_service import list_events
 
@@ -131,6 +137,48 @@ def _make_report(
         success_count=len(results) - fail_count,
         failure_count=fail_count,
     )
+
+
+def _seed_instrument(db_session, symbol: str, *, current: bool = True) -> None:
+    """写入一只 active Instrument（current=True 表示已 stamp 当前版本，非 stale）。"""
+    db_session.add(
+        Instrument(
+            id=uuid.uuid4(),
+            symbol=symbol,
+            name=symbol,
+            market="SH",
+            status="active",
+            factor_algorithm_version=FACTOR_ALGORITHM_VERSION if current else None,
+            factor_reconciliation_version=(
+                FACTOR_RECONCILIATION_VERSION if current else None
+            ),
+            factor_reconciled_at=datetime.now(UTC) if current else None,
+        )
+    )
+
+
+async def _get_id_by_symbol(db_session, symbol: str) -> uuid.UUID:
+    from sqlalchemy import select as _select
+
+    row = await db_session.execute(_select(Instrument.id).where(Instrument.symbol == symbol))
+    return row.scalar_one()
+
+
+async def _get_factor_version_fields(db_session, instrument_id: uuid.UUID) -> dict:
+    """读取 instrument 的 3 个因子版本字段。"""
+    row = await db_session.execute(
+        text(
+            "SELECT factor_algorithm_version, factor_reconciliation_version, "
+            "factor_reconciled_at FROM instruments WHERE id = :id"
+        ),
+        {"id": instrument_id},
+    )
+    r = row.first()
+    return {
+        "factor_algorithm_version": r.factor_algorithm_version,
+        "factor_reconciliation_version": r.factor_reconciliation_version,
+        "factor_reconciled_at": r.factor_reconciled_at,
+    }
 
 
 def _patch_task(mock_task: MagicMock):
@@ -444,12 +492,14 @@ async def test_audit_empty_instruments(db_session) -> None:
 
     # 零 summary
     # [PROMPT.md §5.4.2 V2] summary 必须包含 trade_date / audit_rebuilt / failed_symbols 字段
+    # [G1B-3A] 新增 audit_mode / requested_symbols（空 instruments 走 full_market 分支）
     assert summary == {
         "trade_date": "2026-07-18",
         "total_audited": 0, "consistent": 0, "needs_rebuild": 0,
         "audit_rebuilt": 0, "rebuilt": 0, "failed": 0, "errors": 0,
         "failed_symbols": [],
         "degraded": 0, "degraded_symbols": [],
+        "audit_mode": "full_market", "requested_symbols": 0,
     }
     # dry_run 不应被调用
     mock_task.dry_run.assert_not_called()
@@ -737,4 +787,222 @@ async def test_rebuild_pytdx_source_error_trips_breaker(
     assert mock_adj.rebuild_factor_series.call_count == 1
     # rebuild 阶段 provider 失败必须回滚 fingerprint，避免下轮误判「无变化」
     mock_adj._delete_fingerprint.assert_called_once_with(instruments[0].id)
+
+
+# =============================================================================
+# 16. [G1B-3A] 影响集解析 _resolve_factor_audit_symbols
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_resolve_impact_set_union(db_session) -> None:
+    """[G1B-3A] changed ∪ failed ∪ stale 求并集，stale 来自 find_stale_version_instruments。
+
+    changed=[A,B] + failed=[D] + stale=[C] → 影响集 = [A,B,C,D]（确定性排序）。
+    """
+    await _seed_instrument(db_session, "RSV_C", current=False)  # stale
+    await _seed_instrument(db_session, "RSV_A", current=True)
+    await _seed_instrument(db_session, "RSV_B", current=True)
+    await _seed_instrument(db_session, "RSV_D", current=True)
+
+    service = BarsSchedulerService()
+    rebuild_result = {"changed_symbols": ["RSV_A", "RSV_B"], "failed_symbols": ["RSV_D"]}
+    got = await service._resolve_factor_audit_symbols(db_session, rebuild_result)
+
+    stale = await find_stale_version_instruments(db_session)
+    expected = sorted({s for _, s in stale} | {"RSV_A", "RSV_B", "RSV_D"})
+    assert got == expected
+
+
+@pytest.mark.asyncio
+async def test_resolve_impact_set_dedup_overlap(db_session) -> None:
+    """[G1B-3A] changed 与 stale 重复 → 只审一次（集合去重，确定性排序）。"""
+    await _seed_instrument(db_session, "RSV_C", current=False)  # stale
+
+    service = BarsSchedulerService()
+    # RSV_C 既在 changed 又在 stale
+    rebuild_result = {"changed_symbols": ["RSV_C", "RSV_A"], "failed_symbols": ["RSV_B"]}
+    got = await service._resolve_factor_audit_symbols(db_session, rebuild_result)
+
+    stale = await find_stale_version_instruments(db_session)
+    expected = sorted({s for _, s in stale} | {"RSV_C", "RSV_A", "RSV_B"})
+    assert got == expected
+    assert len(got) == len(set(got)), "影响集不应含重复"
+
+
+@pytest.mark.asyncio
+async def test_resolve_impact_set_first_baseline_full_market(db_session) -> None:
+    """[G1B-3A] 首次部署全市场 NULL → stale=全市场 → 影响集=全部 active。"""
+    for s in ["BASE1", "BASE2", "BASE3"]:
+        await _seed_instrument(db_session, s, current=False)
+
+    service = BarsSchedulerService()
+    rebuild_result = {"changed_symbols": [], "failed_symbols": []}
+    got = await service._resolve_factor_audit_symbols(db_session, rebuild_result)
+
+    stale = await find_stale_version_instruments(db_session)
+    expected = sorted({s for _, s in stale})
+    assert got == expected
+    assert set(got) == {"BASE1", "BASE2", "BASE3"}
+
+
+# =============================================================================
+# 17. [G1B-3A] _run_post_daily_phase 使用影响集（无影响则跳过全市场审计）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_run_post_daily_skips_audit_when_no_impact(db_session) -> None:
+    """[G1B-3A] 无 changed/failed/stale → 不调用 _audit_and_rebuild_factors，
+    result.factor_audit 为 skipped_no_impact 零摘要。
+    """
+    from unittest.mock import AsyncMock as _AsyncMock
+
+    service = BarsSchedulerService()
+
+    health = MagicMock()
+    health.available = True
+    health.error = None
+    health.latency_seconds = 0.1
+    health.connected_server = "mock-host"
+    health.uncached_xdxr_ok = True
+    health.provider = "pytdx"
+
+    with patch(
+        "app.services.bars_scheduler_service.probe_factor_provider",
+        new=_AsyncMock(return_value=health),
+    ):
+        service._rebuild_factors_if_needed = _AsyncMock(
+            return_value={
+                "trade_date": "2026-07-18",
+                "checked": 0, "changed": 0, "rebuilt": 0, "failed": 0,
+                "changed_symbols": [], "rebuilt_symbols": [], "failed_symbols": [],
+            }
+        )
+        service._audit_and_rebuild_factors = _AsyncMock()
+        service._check_daily_coverage_and_trigger_dsa = _AsyncMock(return_value=None)
+
+        result = BatchResult(total=3)
+        await service._run_post_daily_phase(
+            date(2026, 7, 18),
+            _make_instruments(3),
+            db_session,
+            None,
+            result,
+            trigger_dsa=False,
+        )
+
+    service._audit_and_rebuild_factors.assert_not_called()
+    assert result.factor_audit is not None
+    assert result.factor_audit["audit_mode"] == "skipped_no_impact"
+    assert result.factor_audit["total_audited"] == 0
+
+
+# =============================================================================
+# 18. [G1B-3A] _audit_and_rebuild_factors impact-set 完整性 + 成功 stamp
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_audit_impact_set_scope_incomplete(db_session) -> None:
+    """[G1B-3A] 请求 3 只但 dry_run 只审到 2 只 → FACTOR_AUDIT_SCOPE_INCOMPLETE。"""
+    plan = _make_plan(total_audited=2, consistent=2, needs_rebuild=0)
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_SCOPE_INCOMPLETE"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(3),
+                db_session=MagicMock(),
+                job_run_id=None,
+                symbols=["A", "B", "C"],
+            )
+
+
+@pytest.mark.asyncio
+async def test_audit_impact_set_degraded_no_stamp(db_session) -> None:
+    """[G1B-3A] degraded > 0 → FACTOR_AUDIT_DEGRADED，不 stamp（fail-closed）。"""
+    plan = _make_plan(
+        total_audited=3, consistent=2, needs_rebuild=0,
+        degraded_count=1, degraded_symbols=["X1"],
+    )
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_DEGRADED"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(3),
+                db_session=MagicMock(),
+                job_run_id=None,
+                symbols=["A", "B", "C"],
+            )
+
+
+@pytest.mark.asyncio
+async def test_audit_impact_set_rebuild_failed_no_stamp(db_session) -> None:
+    """[G1B-3A] rebuild 失败 → FACTOR_REBUILD_INCOMPLETE，不 stamp（fail-closed）。"""
+    plan = _make_plan(total_audited=3, consistent=2, needs_rebuild=1)
+    report = _make_report(plan, fail_count=1)
+
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+    mock_task.rebuild_batch = AsyncMock(return_value=report)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_REBUILD_INCOMPLETE"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(5),
+                db_session=MagicMock(),
+                job_run_id=None,
+                symbols=["A", "B", "C"],
+            )
+
+
+@pytest.mark.asyncio
+async def test_audit_impact_set_success_stamps_scope(db_session) -> None:
+    """[G1B-3A] impact-set 全部一致 → 成功后批量 stamp 整个 scope 并 commit。
+
+    验证 stamp 生效：3 只 instrument 的 factor_reconciled_at / 版本均被写入。
+    """
+    syms = ["STMP1", "STMP2", "STMP3"]
+    for s in syms:
+        await _seed_instrument(db_session, s, current=False)  # 先 NULL（stale）
+
+    plan = _make_plan(total_audited=3, consistent=3, needs_rebuild=0)
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), _patch_commit(db_session):
+        summary = await service._audit_and_rebuild_factors(
+            trade_date=date(2026, 7, 18),
+            instruments=_make_instruments(3),
+            db_session=db_session,
+            job_run_id=None,
+            symbols=syms,
+        )
+
+    assert summary["audit_mode"] == "impact_set"
+    assert summary["requested_symbols"] == 3
+
+    for s in syms:
+        iid = await _get_id_by_symbol(db_session, s)
+        fields = await _get_factor_version_fields(db_session, iid)
+        assert fields["factor_reconciled_at"] is not None, f"{s} 应被 stamp"
+        assert fields["factor_algorithm_version"] == FACTOR_ALGORITHM_VERSION
+        assert fields["factor_reconciliation_version"] == FACTOR_RECONCILIATION_VERSION
 
