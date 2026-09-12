@@ -878,8 +878,8 @@ def test_factor_event_compatibility_detects_mismatch() -> None:
     from decimal import Decimal
 
     from app.services.factor_source_compatibility import (
-        compare_factor_events,
         FactorEventSample,
+        compare_factor_events,
     )
 
     samples = [
@@ -918,3 +918,256 @@ def test_eastmoney_f5_lots_to_shares() -> None:
     # 100 手 × 100 = 10000 股
     assert row.volume == Decimal("10000")
 
+
+# =========================================================================
+# 12. pytdx 主源 + THS 备用契约测试
+# =========================================================================
+
+
+@pytest.mark.asyncio
+async def test_repair_prefers_pytdx_when_adapter_provided(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    inst = _Inst("600519", "SH")
+    session = _RecordingSession()
+    _patch_missing(monkeypatch, [[inst], []])
+
+    ths_called = False
+
+    async def _fake_ths(*_args: Any, **_kwargs: Any) -> list[dict]:
+        nonlocal ths_called
+        ths_called = True
+        return []
+
+    _patch_ths(monkeypatch, _fake_ths)
+
+    class FakeAdapter:
+        def get_daily_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+            return pd.DataFrame(
+                [
+                    {
+                        "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                        "open": 100.0,
+                        "high": 105.0,
+                        "low": 99.0,
+                        "close": 104.0,
+                        "volume": 50000.0,
+                        "amount": 5200000.0,
+                    }
+                ]
+            )
+
+    result = await repair_market_wide_daily_gap(
+        session,  # type: ignore[arg-type]
+        TRADE_DATE,
+        adapter=FakeAdapter(),
+        dry_run=True,
+    )
+
+    assert result.pytdx_fetched == 1
+    assert result.ths_fetched == 0
+    assert not ths_called
+    assert result.fetched == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_falls_back_to_ths_when_pytdx_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    inst = _Inst("600519", "SH")
+    session = _RecordingSession()
+    _patch_missing(monkeypatch, [[inst], []])
+
+    async def _fake_ths(*_args: Any, **_kwargs: Any) -> list[dict]:
+        return [
+            {
+                "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 104.0,
+                "volume": 50000.0,
+                "amount": 5200000.0,
+            }
+        ]
+
+    _patch_ths(monkeypatch, _fake_ths)
+
+    class FailingAdapter:
+        def get_daily_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+            return pd.DataFrame()  # empty DataFrame simulates missing/failed pytdx
+
+    result = await repair_market_wide_daily_gap(
+        session,  # type: ignore[arg-type]
+        TRADE_DATE,
+        adapter=FailingAdapter(),
+        dry_run=True,
+    )
+
+    assert result.pytdx_fetched == 0
+    assert result.ths_fetched == 1
+    assert result.fetched == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_bj_skips_pytdx_uses_ths(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    inst = _Inst("920001", "BJ")
+    session = _RecordingSession()
+    _patch_missing(monkeypatch, [[inst], []])
+
+    adapter_called = False
+
+    class FakeAdapter:
+        def get_daily_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+            nonlocal adapter_called
+            adapter_called = True
+            return pd.DataFrame()
+
+    async def _fake_ths(*_args: Any, **_kwargs: Any) -> list[dict]:
+        return [
+            {
+                "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                "open": 10.0,
+                "high": 11.0,
+                "low": 9.5,
+                "close": 10.5,
+                "volume": 2000.0,
+                "amount": 21000.0,
+            }
+        ]
+
+    _patch_ths(monkeypatch, _fake_ths)
+
+    result = await repair_market_wide_daily_gap(
+        session,  # type: ignore[arg-type]
+        TRADE_DATE,
+        adapter=FakeAdapter(),
+        dry_run=True,
+    )
+
+    assert not adapter_called
+    assert result.pytdx_fetched == 0
+    assert result.ths_fetched == 1
+    assert result.fetched == 1
+
+
+@pytest.mark.asyncio
+async def test_repair_consistency_report_accepts_pytdx(monkeypatch: pytest.MonkeyPatch) -> None:
+    inst = _Inst("600519", "SH")
+    session = _RecordingSession()
+    _patch_missing(monkeypatch, [[inst], []])
+
+    report = _valid_consistency_report()
+    report.source = "pytdx"
+
+    async def _fake_ths(*_args: Any, **_kwargs: Any) -> list[dict]:
+        return [
+            {
+                "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                "open": 100.0,
+                "high": 105.0,
+                "low": 99.0,
+                "close": 104.0,
+                "volume": 50000.0,
+                "amount": 5200000.0,
+            }
+        ]
+
+    _patch_ths(monkeypatch, _fake_ths)
+
+    # 不抛 SourceConsistencyError
+    result = await repair_market_wide_daily_gap(
+        session,  # type: ignore[arg-type]
+        TRADE_DATE,
+        consistency_report=report,
+        dry_run=False,
+    )
+    assert result.fetched == 1
+
+
+@pytest.mark.asyncio
+async def test_compare_db_vs_pytdx_for_date(monkeypatch: pytest.MonkeyPatch) -> None:
+    import pandas as pd
+
+    from app.services.daily_gap_repair_service import compare_db_vs_pytdx_for_date
+
+    inst_sh = _Inst("600519", "SH")
+    inst_sz = _Inst("000001", "SZ")
+    inst_bj = _Inst("920001", "BJ")
+
+    async def _fake_samples(_session: Any, _date: date, market: str, limit: int) -> list[_Inst]:
+        if market == "SH":
+            return [inst_sh]
+        if market == "SZ":
+            return [inst_sz]
+        return [inst_bj]
+
+    monkeypatch.setattr(repair_mod, "_evenly_sample_instruments", _fake_samples)
+
+    class MockSession:
+        async def execute(self, stmt: Any) -> _FakeResult:
+            rows = [
+                (inst_sh.id, Decimal("100.0"), Decimal("105.0"), Decimal("99.0"), Decimal("104.0"), Decimal("50000"), Decimal("5200000")),
+                (inst_sz.id, Decimal("10.0"), Decimal("10.5"), Decimal("9.9"), Decimal("10.4"), Decimal("10000"), Decimal("104000")),
+                (inst_bj.id, Decimal("15.0"), Decimal("15.5"), Decimal("14.9"), Decimal("15.4"), Decimal("5000"), Decimal("77000")),
+            ]
+            return _FakeResult(rows)
+
+    class FakeAdapter:
+        def get_daily_bars(self, symbol: str, start: date, end: date) -> pd.DataFrame:
+            if symbol == "600519":
+                return pd.DataFrame([
+                    {
+                        "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                        "open": 100.0,
+                        "high": 105.0,
+                        "low": 99.0,
+                        "close": 104.0,
+                        "volume": 50000.0,
+                        "amount": 5200000.0,
+                    }
+                ])
+            return pd.DataFrame([
+                {
+                    "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                    "open": 10.0,
+                    "high": 10.5,
+                    "low": 9.9,
+                    "close": 10.4,
+                    "volume": 10000.0,
+                    "amount": 104000.0,
+                }
+            ])
+
+    async def _fake_ths(_client: Any, symbol: str, start: date, end: date, **kwargs: Any) -> list[dict]:
+        return [
+            {
+                "datetime": TRADE_DATE.strftime("%Y-%m-%d"),
+                "open": 15.0,
+                "high": 15.5,
+                "low": 14.9,
+                "close": 15.4,
+                "volume": 5000.0,
+                "amount": 77000.0,
+            }
+        ]
+
+    _patch_ths(monkeypatch, _fake_ths)
+
+    report = await compare_db_vs_pytdx_for_date(
+        MockSession(),  # type: ignore[arg-type]
+        TRADE_DATE,
+        adapter=FakeAdapter(),
+        sh=1,
+        sz=1,
+        bj=1,
+    )
+    assert report.source == "pytdx"
+    assert report.sample_requested == 3
+    assert report.fetch_succeeded == 3
+    assert report.ohlc_compared == 3
+    assert report.ohlc_bad == 0
+    assert report.volume_bad == 0
+    validate_consistency(report)

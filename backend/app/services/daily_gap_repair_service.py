@@ -106,6 +106,7 @@ class MarketWideRepairResult:
     coverage_after: float = 0.0
 
     # 按数据源统计成功取到的只数（用于判断主源是否退化）。
+    pytdx_fetched: int = 0
     ths_fetched: int = 0
     eastmoney_fetched: int = 0
     eastmoney_failed: int = 0
@@ -236,28 +237,78 @@ async def _exact_bar_from_source(
     return exact[0], None
 
 
+def fetch_pytdx_raw_daily(
+    adapter: Any,
+    symbol: str,
+    start_date: date,
+    end_date: date,
+) -> list[dict]:
+    """从 pytdx 读取 raw 日线，格式与 ths_raw_daily / eastmoney_kline 对齐。"""
+    df = adapter.get_daily_bars(symbol, start_date, end_date)
+    if df is None or df.empty:
+        return []
+    records: list[dict] = []
+    for _, row in df.iterrows():
+        dt = row.get("datetime")
+        if hasattr(dt, "strftime"):
+            dt_str = dt.strftime("%Y-%m-%d")
+        else:
+            dt_str = str(dt)[:10]
+        records.append(
+            {
+                "datetime": dt_str,
+                "open": float(row["open"]),
+                "high": float(row["high"]),
+                "low": float(row["low"]),
+                "close": float(row["close"]),
+                "volume": float(row["volume"]),
+                "amount": float(row["amount"]),
+            }
+        )
+    return records
+
+
 async def _fetch_t_bar(
     client: httpx.AsyncClient,
     semaphore: asyncio.Semaphore,
     inst: Instrument,
     trade_date: date,
     *,
+    adapter: Any | None = None,
     use_eastmoney_fallback: bool = True,
 ) -> tuple[Instrument, dict | None, str | None, str | None]:
     """拉取单只标的 T 日 bar；必须恰好 1 根 T 日记录。
 
-    数据源顺序：**同花顺不复权**优先（实测唯一可用的批量源），
-    Eastmoney ``fqt=0`` 兜底（当前生产出口被东财硬封，通常不可用）。
+    数据源顺序（G1 数据源收口契约）：
+    1. pytdx 主源（仅 SH/SZ；BJ pytdx 不支持，天然进入备用源）；
+    2. 同花顺不复权（首选备用源，或 adapter 为 None 时的测试兼容源）；
+    3. Eastmoney fqt=0 兜底（受 use_eastmoney_fallback 控制）。
 
     Args:
-        use_eastmoney_fallback: 是否启用 Eastmoney 兜底。实测东财对生产出口
-            IP 硬封时，每一次兜底都要跑满 3 轮 × 多主机重试（单只 10~20s）。
-            5293 只标的里只要有几百只走到兜底，整轮修复就会从分钟级退化到小时级。
-            因此该兜底必须可关：东财确认不可用期间由操作员显式关闭。
+        use_eastmoney_fallback: 是否启用 Eastmoney 兜底。
+        adapter: 注入的 pytdx adapter。
 
     Returns:
         (instrument, record|None, error|None, source|None)
     """
+    errors: list[str] = []
+
+    # 1. pytdx 主源（仅 SH/SZ；BJ pytdx 不支持）
+    if inst.market in ("SH", "SZ") and adapter is not None:
+        record, error = await _exact_bar_from_source(
+            lambda: asyncio.to_thread(
+                fetch_pytdx_raw_daily, adapter, inst.symbol, trade_date, trade_date
+            ),
+            client,
+            inst,
+            trade_date,
+        )
+        if record is not None:
+            return inst, record, None, "pytdx"
+        if error:
+            errors.append(f"pytdx={error}")
+
+    # 2. 同花顺不复权
     async with semaphore:
         record, error = await _exact_bar_from_source(
             lambda: fetch_ths_raw_daily(client, inst.symbol, trade_date, trade_date),
@@ -267,10 +318,13 @@ async def _fetch_t_bar(
         )
         if record is not None:
             return inst, record, None, "ths"
+        if error:
+            errors.append(f"ths={error}")
 
-        first_error = error or "no-data"
+        # 3. Eastmoney fqt=0 兜底
         if not use_eastmoney_fallback:
-            return inst, None, f"ths={first_error}", None
+            err_msg = "; ".join(errors) if errors else "no-data"
+            return inst, None, err_msg, None
         record, error = await _exact_bar_from_source(
             lambda: fetch_eastmoney_daily_kline(
                 client, inst.symbol, inst.market, trade_date, trade_date
@@ -281,7 +335,10 @@ async def _fetch_t_bar(
         )
         if record is not None:
             return inst, record, None, "eastmoney"
-        return inst, None, f"ths={first_error}; em={error or 'no-data'}", None
+        if error:
+            errors.append(f"em={error}")
+        err_msg = "; ".join(errors) if errors else "no-data"
+        return inst, None, err_msg, None
 
 
 async def bulk_insert_raw_daily_repair(
@@ -354,6 +411,7 @@ async def repair_market_wide_daily_gap(
     session: AsyncSession,
     trade_date: date,
     *,
+    adapter: Any | None = None,
     consistency_report: ConsistencyReport | None = None,
     concurrency: int = _DEFAULT_CONCURRENCY,
     chunk_size: int = _DEFAULT_CHUNK_SIZE,
@@ -361,7 +419,7 @@ async def repair_market_wide_daily_gap(
     client: httpx.AsyncClient | None = None,
     use_eastmoney_fallback: bool = False,
 ) -> MarketWideRepairResult:
-    """修复某一个交易日的**整日/大面积**日线缺口（同花顺不复权，批量）。
+    """修复某一个交易日的**整日/大面积**日线缺口（pytdx 主源，THS 备用，批量）。
 
     设计要点见模块 docstring。``dry_run=True`` 时仍然真实拉取（用于确认 fetch 成功率），
     但不写库。
@@ -370,12 +428,13 @@ async def repair_market_wide_daily_gap(
         生产写入（``dry_run=False``）**强制**要求一份已通过
         :func:`validate_consistency` 的 :class:`ConsistencyReport`，且其
         ``reference_trade_date`` 必须早于 ``trade_date``（禁止拿待修日自己验证自己），
-        且 ``source`` 必须是 ``"ths"``（全市场修复主源）。``dry_run=True`` 可无 report。
+        且 ``source`` 必须是 ``"ths"`` 或 ``"pytdx"``。``dry_run=True`` 可无 report。
         不存在 ``enforce_consistency_gate=False`` 这类生产绕过参数。
 
     Args:
         session: 异步 DB 会话。
         trade_date: 唯一目标交易日。
+        adapter: 注入的 pytdx adapter（提供时 SH/SZ 优先走 pytdx 主源）。
         consistency_report: 邻近已知完整交易日的 A/B 一致性报告（生产写入必填）。
         concurrency: 在途请求上限（同时限制 httpx 连接池）。默认 3（实测最优）。
         chunk_size: 每批写库的标的数（一次 insert + 一次 commit）。
@@ -403,9 +462,9 @@ async def repair_market_wide_daily_gap(
                 f"reference={consistency_report.reference_trade_date} "
                 f">= repair={trade_date}"
             )
-        if consistency_report.source != "ths":
+        if consistency_report.source not in ("ths", "pytdx"):
             raise SourceConsistencyError(
-                "market-wide repair primary source is THS; "
+                "market-wide repair primary source is THS or pytdx; "
                 f"consistency report source={consistency_report.source!r}"
             )
 
@@ -451,6 +510,7 @@ async def repair_market_wide_daily_gap(
                         semaphore,
                         inst,
                         trade_date,
+                        adapter=adapter,
                         use_eastmoney_fallback=use_eastmoney_fallback,
                     )
                     for inst in chunk
@@ -464,7 +524,9 @@ async def repair_market_wide_daily_gap(
                     if error is not None and len(result.error_samples) < 10:
                         result.error_samples.append(f"{inst.symbol}: {error}")
                     continue
-                if source == "ths":
+                if source == "pytdx":
+                    result.pytdx_fetched += 1
+                elif source == "ths":
                     result.ths_fetched += 1
                 elif source == "eastmoney":
                     result.eastmoney_fetched += 1
@@ -498,10 +560,11 @@ async def repair_market_wide_daily_gap(
     result.elapsed_seconds = time.monotonic() - started
 
     logger.info(
-        "[GAP-REPAIR] 完成 trade_date=%s fetched=%d (ths=%d em=%d) inserted=%d "
+        "[GAP-REPAIR] 完成 trade_date=%s fetched=%d (pytdx=%d ths=%d em=%d) inserted=%d "
         "verified=%d still_missing=%d coverage=%.4f elapsed=%.1fs",
         trade_date,
         result.fetched,
+        result.pytdx_fetched,
         result.ths_fetched,
         result.eastmoney_fetched,
         result.inserted,
@@ -518,6 +581,7 @@ async def compare_db_vs_source_for_date(
     trade_date: date,
     *,
     source: str = "ths",
+    adapter: Any | None = None,
     sh: int = _AB_SAMPLE_SH,
     sz: int = _AB_SAMPLE_SZ,
     bj: int = _AB_SAMPLE_BJ,
@@ -532,7 +596,8 @@ async def compare_db_vs_source_for_date(
     目标交易日。
 
     Args:
-        source: ``"ths"``（同花顺不复权，默认）或 ``"eastmoney"``（fqt=0）。
+        source: ``"pytdx"``（SH/SZ 主源，BJ 走 THS）、``"ths"``（同花顺不复权，默认）或 ``"eastmoney"``（fqt=0）。
+        adapter: 注入的 pytdx adapter（当 source="pytdx" 时使用）。
 
     本函数**不写任何数据**。
     """
@@ -578,6 +643,19 @@ async def compare_db_vs_source_for_date(
 
     async def fetch_one(inst: Instrument, client: httpx.AsyncClient) -> tuple[Any, Any, Any]:
         async with semaphore:
+            if source == "pytdx":
+                if inst.market in ("SH", "SZ") and adapter is not None:
+                    return await _exact_bar_from_source(
+                        lambda: asyncio.to_thread(
+                            fetch_pytdx_raw_daily, adapter, inst.symbol, trade_date, trade_date
+                        ),
+                        client, inst, trade_date,
+                    )
+                # BJ 或未注 adapter 则回退 THS
+                return await _exact_bar_from_source(
+                    lambda: fetch_ths_raw_daily(client, inst.symbol, trade_date, trade_date),
+                    client, inst, trade_date,
+                )
             if source == "eastmoney":
                 return await _exact_bar_from_source(
                     lambda: fetch_eastmoney_daily_kline(
@@ -687,6 +765,29 @@ async def compare_db_vs_source_for_date(
 
     logger.info("[AB-CONSISTENCY source=%s] %s", source, report.summary())
     return report
+
+
+async def compare_db_vs_pytdx_for_date(
+    session: AsyncSession,
+    trade_date: date,
+    *,
+    adapter: Any,
+    sh: int = _AB_SAMPLE_SH,
+    sz: int = _AB_SAMPLE_SZ,
+    bj: int = _AB_SAMPLE_BJ,
+    concurrency: int = _DEFAULT_CONCURRENCY,
+) -> ConsistencyReport:
+    """只读 A/B：DB ``bars_daily`` raw vs pytdx（SH/SZ 主源，BJ 走 THS）。"""
+    return await compare_db_vs_source_for_date(
+        session,
+        trade_date,
+        source="pytdx",
+        adapter=adapter,
+        sh=sh,
+        sz=sz,
+        bj=bj,
+        concurrency=concurrency,
+    )
 
 
 async def compare_db_vs_ths_for_date(
@@ -821,8 +922,10 @@ __all__ = [
     "SourceConsistencyError",
     "bulk_insert_raw_daily_repair",
     "compare_db_vs_eastmoney_for_date",
+    "compare_db_vs_pytdx_for_date",
     "compare_db_vs_source_for_date",
     "compare_db_vs_ths_for_date",
+    "fetch_pytdx_raw_daily",
     "read_daily_fingerprint",
     "repair_market_wide_daily_gap",
     "validate_consistency",
