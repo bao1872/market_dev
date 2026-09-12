@@ -582,6 +582,13 @@ async def fetch_a_share_snapshot_batch(
     if not hosts:
         raise SnapshotProviderError("snapshot host list is empty")
 
+    # 参数不自洽属于**调用侧错误**：必须在任何 host / 网络请求之前 fail-fast。
+    # 否则会先白白拉完整市场（~53 页 × N hosts）才发现参数错了。
+    if require_eod_watermark and expected_trade_date is None:
+        raise SnapshotProviderError(
+            "expected_trade_date required for EOD watermark validation"
+        )
+
     capture_time = captured_at or datetime.now(_SHANGHAI_TZ)
     if capture_time.tzinfo is None:
         capture_time = capture_time.replace(tzinfo=_SHANGHAI_TZ)
@@ -599,15 +606,18 @@ async def fetch_a_share_snapshot_batch(
                 max_pages=max_pages,
             )
 
-            if require_eod_watermark and expected_trade_date is None:
-                raise SnapshotProviderError(
-                    "expected_trade_date required for EOD watermark validation"
-                )
-
+            watermark: datetime | None
             if require_eod_watermark:
-                watermark: datetime | None = validate_snapshot_market_watermark(
+                eod_trade_date = expected_trade_date
+                if eod_trade_date is None:
+                    # 理论不可达：入口处已 fail-fast。保留以防未来重构破坏该不变量，
+                    # 且此处**绝不**静默退化为「不校验收盘 watermark」。
+                    raise SnapshotProviderError(
+                        "expected_trade_date required for EOD watermark validation"
+                    )
+                watermark = validate_snapshot_market_watermark(
                     rows,
-                    expected_trade_date,  # type: ignore[arg-type]
+                    eod_trade_date,
                 )
             else:
                 watermark = compute_snapshot_market_watermark(rows)

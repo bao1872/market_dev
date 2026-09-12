@@ -751,3 +751,53 @@ async def test_snapshot_all_hosts_stale_watermark_fails_closed() -> None:
             expected_trade_date=date(2026, 9, 11),
             page_size=100,
         )
+
+
+# =========================================================================
+# 13. 非法参数必须在任何网络请求之前 fail-fast（zero network I/O）
+# =========================================================================
+
+
+class _NoNetworkClient:
+    """任何 get 调用都视为违规；用于证明参数错误不会触发网络。"""
+
+    def __init__(self) -> None:
+        self.calls: list[Any] = []
+
+    async def get(self, url: str, params: Any = None, timeout: Any = None) -> Any:
+        self.calls.append((url, params))
+        raise AssertionError("invalid parameter must fail before network access")
+
+
+@pytest.mark.asyncio
+async def test_eod_watermark_requires_trade_date_before_any_network() -> None:
+    """require_eod_watermark=True 但 expected_trade_date=None 属于调用侧参数错误：
+    必须在任何 host / 网络请求之前 fail-fast（否则会白白拉 ~53 页 × N hosts）。"""
+    client = _NoNetworkClient()
+
+    with pytest.raises(
+        prov.SnapshotProviderError,
+        match="expected_trade_date required for EOD watermark validation",
+    ):
+        await prov.fetch_a_share_snapshot_batch(
+            client,  # type: ignore[arg-type]
+            hosts=("host-a", "host-b"),
+            require_eod_watermark=True,
+            expected_trade_date=None,
+        )
+
+    assert client.calls == []
+
+
+@pytest.mark.asyncio
+async def test_empty_host_list_fails_before_any_network() -> None:
+    """空 host 列表同样属于参数错误：zero network I/O。"""
+    client = _NoNetworkClient()
+
+    with pytest.raises(prov.SnapshotProviderError, match="snapshot host list is empty"):
+        await prov.fetch_a_share_snapshot_batch(
+            client,  # type: ignore[arg-type]
+            hosts=(),
+        )
+
+    assert client.calls == []
