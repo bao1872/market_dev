@@ -36,6 +36,7 @@ from app.constants.factor_contract import FACTOR_ALGORITHM_VERSION
 from app.services.adjustment_factor_calculator import (
     AdjustmentFactorDataError,
     calculate_adjustment_factor_series,
+    next_future_corporate_action_date,
 )
 
 _CALCULATOR_FILE = (
@@ -636,3 +637,68 @@ class Test603538BugPattern:
         ])
         factors = calculate_adjustment_factor_series(raw, xdxr)
         assert all(abs(f - 1.0) < 1e-10 for f in factors)
+
+
+# =============================================================================
+# G1B-3B1: next_future_corporate_action_date（未来事件日程纯函数）
+# =============================================================================
+
+
+class TestNextFutureCorporateActionDate:
+    """返回 effective_as_of 之后最早的 category=1 事件日；与 fingerprint 严格区分。"""
+
+    def test_none_corporate_actions(self):
+        assert next_future_corporate_action_date(None, effective_as_of=date(2026, 9, 1)) is None
+
+    def test_empty_corporate_actions(self):
+        empty = _xdxr_df([])
+        assert next_future_corporate_action_date(empty, effective_as_of=date(2026, 9, 1)) is None
+
+    def test_only_past_events(self):
+        xdxr = _xdxr_df([
+            {"date": "2026-08-01", "category": 1},
+            {"date": "2026-08-20", "category": 1},
+        ])
+        assert next_future_corporate_action_date(xdxr, effective_as_of=date(2026, 9, 1)) is None
+
+    def test_future_category_1_earliest(self):
+        xdxr = _xdxr_df([
+            {"date": "2026-09-05", "category": 1},
+            {"date": "2026-09-20", "category": 1},
+            {"date": "2026-08-01", "category": 1},  # past，忽略
+        ])
+        assert next_future_corporate_action_date(xdxr, effective_as_of=date(2026, 9, 1)) == date(
+            2026, 9, 5
+        )
+
+    def test_future_category_not_1_ignored(self):
+        # category != 1 的未来事件不算（仅除权除息 category=1 进入 factor）
+        xdxr = _xdxr_df([
+            {"date": "2026-09-10", "category": 2},
+            {"date": "2026-09-15", "category": 0},
+        ])
+        assert next_future_corporate_action_date(xdxr, effective_as_of=date(2026, 9, 1)) is None
+
+    def test_malformed_date_ignored(self):
+        # 日期无法解析（NaT）→ 该事件被忽略；其余有效未来事件仍返回
+        xdxr = pd.DataFrame({
+            "date": ["2026-09-10", "not-a-date"],
+            "category": [1, 1],
+            "fenhong": [2.0, 0.0],
+            "songzhuangu": [0.0, 0.0],
+            "peigu": [0.0, 0.0],
+            "peigujia": [0.0, 0.0],
+        })
+        assert next_future_corporate_action_date(xdxr, effective_as_of=date(2026, 9, 1)) == date(
+            2026, 9, 10
+        )
+
+    def test_event_on_effective_as_of_not_future(self):
+        # event_date == effective_as_of 属于「已生效」，不计入未来事件
+        xdxr = _xdxr_df([{"date": "2026-09-01", "category": 1}])
+        assert next_future_corporate_action_date(xdxr, effective_as_of=date(2026, 9, 1)) is None
+
+    def test_missing_columns(self):
+        # 缺 date / category 列 → 无法判断 → None
+        broken = pd.DataFrame({"fenhong": [1.0]})
+        assert next_future_corporate_action_date(broken, effective_as_of=date(2026, 9, 1)) is None

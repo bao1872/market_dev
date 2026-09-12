@@ -205,6 +205,52 @@ def corporate_action_fingerprint(
     return fingerprint, earliest
 
 
+def next_future_corporate_action_date(
+    corporate_actions: pd.DataFrame | None,
+    *,
+    effective_as_of: date,
+) -> date | None:
+    """返回 ``effective_as_of`` 之后最早的 category=1 公司行为日（未来事件日程）。
+
+    与 :func:`corporate_action_fingerprint` 的 effective 集合**严格区分**：
+
+    - ``event_date <= effective_as_of`` → 已生效，进入 factor / fingerprint；
+    - ``event_date > effective_as_of``  → 仅作为「未来刷新日程」，不进入 fingerprint。
+
+    为什么未来事件不能进 fingerprint：fingerprint 在事件真正生效日才应变化；若提前
+    进入，生效当天 fingerprint 反而不变，rebuild 永不触发（永久 stale）。本函数把未来
+    事件单独抽出来，供下一轮 G1B-3B2 的「已知 next_event_date 到期」刷新信号使用。
+
+    Args:
+        corporate_actions: xdxr 结果（columns 至少含 date / category）。
+        effective_as_of: 有效截止日（与 fingerprint cutoff 使用同一日期，保证一致）。
+
+    Returns:
+        最早未来事件日（``event_date > effective_as_of`` 且 ``category == 1``）；
+        无未来事件 / 空 / 缺列 / 日期非法时返回 ``None``。
+    """
+    if corporate_actions is None or corporate_actions.empty:
+        return None
+
+    if "category" not in corporate_actions.columns or "date" not in corporate_actions.columns:
+        return None
+
+    frame = corporate_actions.copy()
+    dates = pd.to_datetime(frame["date"], errors="coerce")
+    categories = pd.to_numeric(frame["category"], errors="coerce")
+
+    future = dates[
+        (categories == 1)
+        & dates.notna()
+        & (dates > pd.Timestamp(effective_as_of))
+    ]
+
+    if future.empty:
+        return None
+
+    return future.min().date()
+
+
 def calculate_adjustment_factor_series(
     raw_daily_bars: pd.DataFrame,
     corporate_actions: pd.DataFrame,

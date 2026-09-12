@@ -18,8 +18,10 @@ How to Run:
 
 from __future__ import annotations
 
+import json
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
 
@@ -36,7 +38,10 @@ from app.services.adj_factor import (
     apply_adj_factor_intraday,
     apply_adj_factor_with_as_of,
 )
-from app.services.adjustment_factor_calculator import corporate_action_fingerprint
+from app.services.adjustment_factor_calculator import (
+    corporate_action_fingerprint,
+    next_future_corporate_action_date,
+)
 
 if TYPE_CHECKING:
     from app.core.pytdx_adapter import PytdxAdapter
@@ -47,6 +52,27 @@ logger = logging.getLogger("services.adjustment_factor_service")
 _MDAS_CACHE_PREFIX = "mdas"
 # 公司行为 fingerprint 存储前缀
 _FP_PREFIX = "adj_factor_fp"
+# XDXR 未来事件日程存储前缀（G1B-3B1，与 fingerprint 完全独立的 key）
+_XDXR_SCHEDULE_PREFIX = "adj_factor_xdxr_schedule"
+
+
+@dataclass(frozen=True)
+class CorporateActionScheduleState:
+    """XDXR 未来事件日程状态（G1B-3B1，不可变）。
+
+    与 fingerprint（``adj_factor_fp:``）严格分离：fingerprint 是「已生效事件集合」
+    validity 信号，本状态是「已知未来事件的最早生效日」刷新信号。两者用途不同，
+    禁止复用/改写同一 Redis key。
+
+    Attributes:
+        scanned_as_of: 本次取得 XDXR 并确定的有效截止日（= fingerprint cutoff）。
+            不能用 wall-clock ``date.today()`` 猜（canonical raw bar coverage ≠ 今天）。
+        next_event_date: ``scanned_as_of`` 之后最早的公司行为日（category=1）。
+            None 表示「当前已知无未来事件」（但读取层 fail-closed 不会伪造此结论）。
+    """
+
+    scanned_as_of: date
+    next_event_date: date | None
 
 
 class CorporateActionProviderError(RuntimeError):
@@ -417,6 +443,22 @@ class AdjustmentFactorService:
                     effective_as_of=cutoff,
                 )
 
+        # [G1B-3B1] 保存未来事件日程（与 fingerprint 完全独立）。
+        # 即使 current fingerprint 未变（无已生效事件变化），未来事件也可能刚出现，
+        # 因此 schedule state 必须无条件更新（与下方 fingerprint 比较无关）。
+        # 仅当 cutoff 可证明时才存：scanned_as_of 不能用 wall-clock 日期猜。
+        # schedule 写失败仅 warning，不改变 detect 的 factor 检测返回语义。
+        if cutoff is not None:
+            self._store_schedule_state(
+                instrument_id,
+                CorporateActionScheduleState(
+                    scanned_as_of=cutoff,
+                    next_event_date=next_future_corporate_action_date(
+                        xdxr_df, effective_as_of=cutoff,
+                    ),
+                ),
+            )
+
         # 对比 Redis 存储的上次 fingerprint
         last_fp = self._get_stored_fingerprint(instrument_id)
         if last_fp == current_fp:
@@ -477,6 +519,112 @@ class AdjustmentFactorService:
             logger.warning(
                 "删除 fingerprint 失败 instrument_id=%s: %s", instrument_id, exc
             )
+
+    def _store_schedule_state(
+        self,
+        instrument_id: uuid.UUID,
+        state: CorporateActionScheduleState,
+    ) -> None:
+        """存储 XDXR 未来事件日程到独立 Redis key（无 TTL，长期保留）。
+
+        与 fingerprint（``adj_factor_fp:``）完全独立的新 key，禁止复用/改写。
+        schedule metadata 只是下一轮 G1B-3B2 的优化证据：写失败**仅 warning**，
+        不改变 ``detect_company_action_change`` 的 factor 检测返回语义。
+        """
+        try:
+            from app.core.redis_client import get_sync_redis
+            client = get_sync_redis()
+            payload = {
+                "scanned_as_of": state.scanned_as_of.isoformat(),
+                "next_event_date": (
+                    state.next_event_date.isoformat()
+                    if state.next_event_date is not None
+                    else None
+                ),
+            }
+            client.set(
+                f"{_XDXR_SCHEDULE_PREFIX}:{instrument_id}",
+                json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            )
+        except Exception as exc:
+            logger.warning(
+                "存储 XDXR schedule state 失败 instrument_id=%s: %s（不影响 factor 检测）",
+                instrument_id, exc,
+            )
+
+    def get_corporate_action_schedule_state(
+        self,
+        instrument_id: uuid.UUID,
+    ) -> CorporateActionScheduleState | None:
+        """读取 XDXR 未来事件日程（fail-closed，G1B-3B1）。
+
+        任何异常统一返回 ``None``：
+
+        - Redis miss（key 不存在）
+        - JSON malformed
+        - 字段缺失（scanned_as_of / next_event_date 任缺）
+        - 日期非法（非 ISO date）
+        - ``next_event_date`` 若存在且 ``<= scanned_as_of``（不是未来事件）
+        - Redis 连接/协议错误
+
+        ``None`` 语义 = 无法证明 schedule freshness → 下一轮 planner 强制刷新。
+        不得返回伪造的「无未来事件」。
+        """
+        try:
+            from app.core.redis_client import get_sync_redis
+            client = get_sync_redis()
+            key = f"{_XDXR_SCHEDULE_PREFIX}:{instrument_id}"
+            raw = client.get(key)
+        except Exception as exc:
+            logger.debug(
+                "读取 XDXR schedule state 失败 instrument_id=%s: %s", instrument_id, exc
+            )
+            return None
+
+        if raw is None:
+            return None
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+
+        try:
+            payload = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.debug(
+                "XDXR schedule state JSON 解析失败 instrument_id=%s", instrument_id
+            )
+            return None
+
+        if not isinstance(payload, dict):
+            return None
+        if "scanned_as_of" not in payload or "next_event_date" not in payload:
+            return None
+
+        try:
+            scanned_as_of = date.fromisoformat(payload["scanned_as_of"])
+        except (ValueError, TypeError):
+            return None
+
+        next_event_raw = payload["next_event_date"]
+        if next_event_raw is None:
+            next_event_date: date | None = None
+        else:
+            try:
+                next_event_date = date.fromisoformat(next_event_raw)
+            except (ValueError, TypeError):
+                return None
+
+        # next_event 若存在，必须严格晚于 scanned_as_of（未来事件）
+        if next_event_date is not None and next_event_date <= scanned_as_of:
+            logger.debug(
+                "XDXR schedule state next_event 非法 instrument_id=%s: %s <= %s",
+                instrument_id, next_event_date, scanned_as_of,
+            )
+            return None
+
+        return CorporateActionScheduleState(
+            scanned_as_of=scanned_as_of,
+            next_event_date=next_event_date,
+        )
 
 
 if __name__ == "__main__":
