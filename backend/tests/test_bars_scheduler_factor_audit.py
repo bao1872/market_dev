@@ -88,6 +88,7 @@ def _make_instruments(n: int = 3) -> list[Instrument]:
 def _make_plan(
     *, total_audited: int = 3, consistent: int = 2, needs_rebuild: int = 1,
     degraded_count: int = 0, degraded_symbols: list[str] | None = None,
+    error_count: int = 0,
 ) -> ReconciliationPlan:
     """构造 dry_run 返回的 ReconciliationPlan（needs_rebuild 个 item）。"""
     items = [
@@ -105,7 +106,7 @@ def _make_plan(
         items=items,
         total_audited=total_audited,
         consistent_count=consistent,
-        error_count=0,
+        error_count=error_count,
         degraded_count=degraded_count,
         degraded_symbols=degraded_symbols or [],
     )
@@ -191,6 +192,27 @@ def _patch_task(mock_task: MagicMock):
         "app.services.factor_reconciliation.FactorReconciliationTask",
         return_value=mock_task,
     )
+
+
+def _patch_stamp(new: object | None = None):
+    """Patch stamp_factor_reconciliation_versions_by_symbols（_stamp_verified_factor_scope
+    在调用时延迟 import 该模块函数），便于验证 rollback / commit / 异常路径而不触达真实 DB。
+    """
+    if new is None:
+        new = AsyncMock(return_value=0)
+    return patch(
+        "app.services.factor_reconciliation.stamp_factor_reconciliation_versions_by_symbols",
+        new=new,
+    )
+
+
+def _mock_async_session() -> MagicMock:
+    """构造 MagicMock AsyncSession：rollback/commit 为 AsyncMock（helper 内部 await）。"""
+    s = MagicMock()
+    s.rollback = AsyncMock()
+    s.commit = AsyncMock()
+    s.execute = AsyncMock(return_value=MagicMock())
+    return s
 
 
 def _patch_commit(db_session):
@@ -1005,4 +1027,158 @@ async def test_audit_impact_set_success_stamps_scope(db_session) -> None:
         assert fields["factor_reconciled_at"] is not None, f"{s} 应被 stamp"
         assert fields["factor_algorithm_version"] == FACTOR_ALGORITHM_VERSION
         assert fields["factor_reconciliation_version"] == FACTOR_RECONCILIATION_VERSION
+
+
+# =============================================================================
+# 18b. [G1B-3A.1] fail-closed 门禁 + 原子 stamp（pure-unit，不依赖 postgres）
+# =============================================================================
+# 说明：以下测试使用 MagicMock session + 延迟 import patch，属于 pure_unit，
+# 在 PURE_UNIT_TEST=1 下实际执行（asyncio_mode = "auto"，无需 @pytest.mark.asyncio）。
+
+
+async def test_audit_impact_set_one_error_hard_fails() -> None:
+    """[G1B-3A.1] impact-set 100 只中 1 只 error（ratio 1%）→ FACTOR_AUDIT_IMPACT_ERRORS。
+
+    旧 full_market 1% provider-health 阈值会放过，但 impact-set 是零容忍：
+    stamp 前必须全部证明。rebuild_batch / stamp 均不得调用。
+    """
+    plan = _make_plan(total_audited=100, consistent=99, needs_rebuild=0, error_count=1)
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), _patch_stamp() as stamp:
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_IMPACT_ERRORS"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(3),
+                db_session=MagicMock(),
+                job_run_id=None,
+                symbols=[f"S{i:06d}" for i in range(100)],
+            )
+    mock_task.rebuild_batch.assert_not_called()
+    stamp.assert_not_called()
+
+
+async def test_audit_impact_set_baseline_errors_hard_fails() -> None:
+    """[G1B-3A.1] 首次 baseline 8000 只中 40 只 error（ratio 0.5%）< 1%。
+
+    但 impact-set 零容忍：40/8000 不能 stamp 全市场。必须 FACTOR_AUDIT_IMPACT_ERRORS。
+    不构造真实对象，仅 mock plan count。
+    """
+    plan = _make_plan(total_audited=8000, consistent=7960, needs_rebuild=0, error_count=40)
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), _patch_stamp() as stamp:
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_IMPACT_ERRORS"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(1),
+                db_session=MagicMock(),
+                job_run_id=None,
+                symbols=[f"S{i:06d}" for i in range(8000)],
+            )
+    stamp.assert_not_called()
+
+
+async def test_audit_full_market_keeps_legacy_health_policy() -> None:
+    """[G1B-3A.1] symbols=None（legacy full_market）保留原 1% provider-health 阈值。
+
+    1000 只中 5 只 error（ratio 0.5%）< 1% → 不触发 FACTOR_AUDIT_IMPACT_ERRORS，
+    且全市场模式不 stamp。本轮不改动旧生产语义。
+    """
+    plan = _make_plan(total_audited=1000, consistent=995, needs_rebuild=0, error_count=5)
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), _patch_stamp() as stamp:
+        summary = await service._audit_and_rebuild_factors(
+            trade_date=date(2026, 7, 18),
+            instruments=_make_instruments(1000),
+            db_session=MagicMock(),
+            job_run_id=None,
+            symbols=None,  # full_market
+        )
+    assert summary["audit_mode"] == "full_market"
+    assert summary["errors"] == 5
+    # 旧 full_market 阈值未改变：本函数正常返回，不抛 IMPACT_ERRORS
+    stamp.assert_not_called()
+
+
+async def test_audit_impact_set_runs_with_empty_instruments() -> None:
+    """[G1B-3A.1] instruments=[] 但 impact symbols 非空 → 不得 early return，dry_run 必须执行。
+
+    DB 自身验证 symbols 是否真实存在（scope completeness gate），不信调用方 cache。
+    """
+    plan = _make_plan(total_audited=1, consistent=1, needs_rebuild=0, error_count=0)
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), _patch_stamp(new=AsyncMock(return_value=1)):
+        summary = await service._audit_and_rebuild_factors(
+            trade_date=date(2026, 7, 18),
+            instruments=[],  # 空缓存
+            db_session=_mock_async_session(),
+            job_run_id=None,
+            symbols=["A"],
+        )
+    mock_task.dry_run.assert_called_once()  # 证明未 early return
+    assert summary["audit_mode"] == "impact_set"
+    assert summary["requested_symbols"] == 1
+
+
+async def test_stamp_verified_scope_incomplete_rolls_back() -> None:
+    """[G1B-3A.1] stamp rowcount 不足（expected=3, stamped=2）→ rollback + INCOMPLETE。
+
+    不依赖上层 session 生命周期碰巧回滚。commit 不得调用。
+    """
+    session = _mock_async_session()
+    service = BarsSchedulerService()
+    with patch(
+        "app.services.factor_reconciliation.stamp_factor_reconciliation_versions_by_symbols",
+        new=AsyncMock(return_value=2),
+    ):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_VERSION_STAMP_INCOMPLETE"
+        ):
+            await service._stamp_verified_factor_scope(session, ["A", "B", "C"])
+    session.rollback.assert_called_once()
+    session.commit.assert_not_called()
+
+
+async def test_stamp_verified_scope_exception_rolls_back() -> None:
+    """[G1B-3A.1] stamp 底层异常 → rollback + FACTOR_VERSION_STAMP_FAILED。commit 不得调用。"""
+    session = _mock_async_session()
+    service = BarsSchedulerService()
+    with patch(
+        "app.services.factor_reconciliation.stamp_factor_reconciliation_versions_by_symbols",
+        new=AsyncMock(side_effect=RuntimeError("db failure")),
+    ):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_VERSION_STAMP_FAILED"
+        ):
+            await service._stamp_verified_factor_scope(session, ["A", "B", "C"])
+    session.rollback.assert_called_once()
+    session.commit.assert_not_called()
+
+
+async def test_stamp_verified_scope_success_commits() -> None:
+    """[G1B-3A.1] stamp 全部成功（expected=3, stamped=3）→ commit，不 rollback。"""
+    session = _mock_async_session()
+    service = BarsSchedulerService()
+    with patch(
+        "app.services.factor_reconciliation.stamp_factor_reconciliation_versions_by_symbols",
+        new=AsyncMock(return_value=3),
+    ):
+        await service._stamp_verified_factor_scope(session, ["A", "B", "C"])
+    session.commit.assert_called_once()
+    session.rollback.assert_not_called()
 

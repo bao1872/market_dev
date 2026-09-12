@@ -1852,10 +1852,7 @@ class BarsSchedulerService:
                 - degraded: 数据缺失（无法证明 factor）股票数
                 - degraded_symbols: 数据缺失股票代码列表（截断 100）
         """
-        from app.services.factor_reconciliation import (
-            FactorReconciliationTask,
-            stamp_factor_reconciliation_versions_by_symbols,
-        )
+        from app.services.factor_reconciliation import FactorReconciliationTask
         from app.services.job_run_event_service import append_event
 
         # [G1B-3A] impact-set 请求：提前规范化 + 记录，供 scope 完整性检查与成功 stamp 复用
@@ -1879,10 +1876,17 @@ class BarsSchedulerService:
             "degraded_symbols": [],
             # [G1B-3A] 诊断：审计模式与请求规模
             "audit_mode": "impact_set" if symbols is not None else "full_market",
-            "requested_symbols": len(symbols or []),
+            "requested_symbols": len(requested_symbols or []),
         }
 
-        if total == 0:
+        # [G1B-3A] 显式空 impact-set：理论上 scheduler 不应调用本函数并传入空集合；
+        # 安全跳过，但不得 early-return 绕过审计门禁（保持 scheduler 不调用空集合的设计）。
+        if requested_symbols is not None and len(requested_symbols) == 0:
+            return _empty_factor_audit_summary(trade_date, mode="skipped_no_impact")
+
+        # [G1B-3A] impact-set 模式即使 instruments 为空（调用方缓存缺失），仍必须执行
+        # dry_run，由 DB 验证 symbols 是否真实存在；禁止用 instruments 提前绕过审计。
+        if total == 0 and requested_symbols is None:
             logger.warning("[BarsScheduler] _audit_and_rebuild_factors: 无 active 股票")
             return summary
 
@@ -1954,6 +1958,16 @@ class BarsSchedulerService:
                     f"requested={len(requested_symbols)} "
                     f"audited={plan.total_audited}"
                 )
+
+        # [G1B-3A] impact-set 零容忍：本模式成功后会 stamp 整个 scope，
+        # 因此任一 audit error 都意味着该 scope 未被证明，必须 hard fail，
+        # 不得沿用旧 full-market 的 1% provider-health 阈值。
+        if requested_symbols is not None and plan.error_count > 0:
+            raise FactorIntegrityBlockedError(
+                "FACTOR_AUDIT_IMPACT_ERRORS: "
+                f"errors={plan.error_count} "
+                f"audited={plan.total_audited}"
+            )
 
         # [FACTOR-HEALTH] 审计后 fail-closed：即使 dry_run 没有抛异常，也不得把
         # 「全市场 provider 错误」当作普通软失败继续跑 Core。
@@ -2064,28 +2078,14 @@ class BarsSchedulerService:
         # [G1B-3A] 成功 stamp 整个已证明 scope（仅 impact-set 模式）。
         # 到达此处说明 error_count == 0、degraded_count == 0、rebuild 失败 == 0
         # （上方 gate 已全部通过），整个 impact set 均已被证明一致，允许 stamp baseline。
+        # stamp 原子化由 _stamp_verified_factor_scope 负责（rowcount 不足则 rollback，
+        # 不依赖上层 session 生命周期碰巧帮忙）。
         if requested_symbols is not None:
             if db_session is not None:
-                stamped = await stamp_factor_reconciliation_versions_by_symbols(
-                    db_session, requested_symbols,
-                )
-                if stamped != len(requested_symbols):
-                    raise FactorIntegrityBlockedError(
-                        "FACTOR_VERSION_STAMP_INCOMPLETE: "
-                        f"expected={len(requested_symbols)} stamped={stamped}"
-                    )
-                await db_session.commit()
+                await self._stamp_verified_factor_scope(db_session, requested_symbols)
             else:
                 async with AsyncSessionLocal() as session:
-                    stamped = await stamp_factor_reconciliation_versions_by_symbols(
-                        session, requested_symbols,
-                    )
-                    if stamped != len(requested_symbols):
-                        raise FactorIntegrityBlockedError(
-                            "FACTOR_VERSION_STAMP_INCOMPLETE: "
-                            f"expected={len(requested_symbols)} stamped={stamped}"
-                        )
-                    await session.commit()
+                    await self._stamp_verified_factor_scope(session, requested_symbols)
 
         return summary
 
@@ -2122,6 +2122,61 @@ class BarsSchedulerService:
             return await _resolve(db_session)
         async with AsyncSessionLocal() as session:
             return await _resolve(session)
+
+    async def _stamp_verified_factor_scope(
+        self,
+        session: AsyncSession,
+        symbols: list[str],
+    ) -> None:
+        """[G1B-3A] 原子化 stamp 已证明的 impact-set scope。
+
+        调用方保证到达此处时 error_count == 0、degraded_count == 0、rebuild 失败 == 0
+        （即整个 scope 已被证明一致）。本函数负责：
+
+        - 批量 stamp（单条 UPDATE，去重 symbols）；
+        - rowcount 与预期不符（部分 stamp）→ 显式 rollback + FACTOR_VERSION_STAMP_INCOMPLETE
+          fail-closed，不依赖上层 session 生命周期碰巧回滚；
+        - 底层异常 → 显式 rollback + FACTOR_VERSION_STAMP_FAILED；
+        - 全部成功 → commit。
+
+        helper 内部 import ``stamp_factor_reconciliation_versions_by_symbols``，便于单测
+        通过 patch 该模块函数验证 rollback / commit / 异常路径，而不触达真实 DB。
+
+        Args:
+            session: 异步 DB 会话（由调用方拥有，本函数控制 commit/rollback）
+            symbols: 已证明一致、待 stamp 的股票代码列表
+
+        Raises:
+            FactorIntegrityBlockedError: rowcount 不符或底层异常时
+        """
+        from app.services.factor_reconciliation import (
+            stamp_factor_reconciliation_versions_by_symbols,
+        )
+
+        expected = len(symbols)
+
+        try:
+            stamped = await stamp_factor_reconciliation_versions_by_symbols(
+                session, symbols,
+            )
+
+            if stamped != expected:
+                await session.rollback()
+                raise FactorIntegrityBlockedError(
+                    "FACTOR_VERSION_STAMP_INCOMPLETE: "
+                    f"expected={expected} stamped={stamped}"
+                )
+
+            await session.commit()
+
+        except FactorIntegrityBlockedError:
+            raise
+        except Exception as exc:
+            await session.rollback()
+            raise FactorIntegrityBlockedError(
+                "FACTOR_VERSION_STAMP_FAILED: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
 
     async def _write_audit_done_event(
         self,
