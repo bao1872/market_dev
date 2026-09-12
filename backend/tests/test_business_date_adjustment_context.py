@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -522,3 +523,179 @@ async def test_get_raw_daily_close_series_empty() -> None:
 
     assert df.empty
     assert list(df.columns) == ["datetime", "close"]
+
+
+# =============================================================================
+# P0：raw close 不可信 → fail-closed，且**不得**访问 XDXR
+# =============================================================================
+
+
+def _raw_df_with_bad_close(bad_close: Any) -> pd.DataFrame:
+    return pd.DataFrame({
+        "datetime": [pd.Timestamp("2026-09-10"), pd.Timestamp("2026-09-11")],
+        "close": [20.0, bad_close],
+    })
+
+
+@pytest.mark.parametrize(
+    "bad_close",
+    [None, float("nan"), float("inf"), 0.0, -1.0],
+)
+@pytest.mark.asyncio
+async def test_invalid_raw_close_fails_closed_before_xdxr(
+    monkeypatch: pytest.MonkeyPatch,
+    bad_close: Any,
+) -> None:
+    """close=NULL(schema 合法)/NaN/inf/0/负值 一律 fail-closed，且 XDXR zero-call。"""
+    _wire_raw(monkeypatch, _raw_df_with_bad_close(bad_close))
+    adapter = _RecordingAdapter(_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]))
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        await BusinessDateAdjustmentService().build_business_date_adjustment_context(
+            _GuardedDb(),  # type: ignore[arg-type]
+            instrument_id=IID,
+            symbol="600519",
+            business_date=date(2026, 9, 12),
+            expected_completed_through=date(2026, 9, 11),
+            adapter=adapter,
+        )
+
+    assert ei.value.reason == "raw_daily_invalid_close"
+    # raw 已知不可信 → 不得再发起远端 freshness 请求
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_event_prev_close_null_fails_closed_instead_of_fake_unity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """关键回归：9/11 close=NULL 且 9/12 有 10送10。
+
+    旧实现会让 NaN 传播并可能静默跳过除权、产出看似正常的 factor=1.0；
+    新实现必须在 calculator 之前直接 fail-closed。
+    """
+    raw = pd.DataFrame({
+        "datetime": [pd.Timestamp("2026-09-10"), pd.Timestamp("2026-09-11")],
+        "close": [20.0, None],
+    })
+    _wire_raw(monkeypatch, raw)
+    adapter = _RecordingAdapter(_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]))
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        await BusinessDateAdjustmentService().build_business_date_adjustment_context(
+            _GuardedDb(),  # type: ignore[arg-type]
+            instrument_id=IID,
+            symbol="600519",
+            business_date=date(2026, 9, 12),
+            expected_completed_through=date(2026, 9, 11),
+            adapter=adapter,
+        )
+
+    assert ei.value.reason == "raw_daily_invalid_close"
+    assert adapter.calls == []
+
+
+@pytest.mark.asyncio
+async def test_invalid_raw_schema_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
+    _wire_raw(monkeypatch, pd.DataFrame({"close": [20.0], "foo": [1]}))
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        await BusinessDateAdjustmentService().build_business_date_adjustment_context(
+            _GuardedDb(),  # type: ignore[arg-type]
+            instrument_id=IID,
+            symbol="600519",
+            business_date=date(2026, 9, 12),
+            expected_completed_through=date(2026, 9, 11),
+            adapter=_RecordingAdapter(_xdxr_df([])),
+        )
+
+    assert ei.value.reason == "raw_daily_invalid_schema"
+
+
+# =============================================================================
+# P1：context payload / metadata identity 消费前必须校验
+# =============================================================================
+
+
+def _daily_bars_20() -> pd.DataFrame:
+    bars = pd.DataFrame(
+        {"open": [20.0], "high": [20.0], "low": [20.0], "close": [20.0], "volume": [1]},
+        index=pd.to_datetime(["2026-09-11"]),
+    )
+    bars.index.name = "bar_time"
+    return bars
+
+
+@pytest.mark.asyncio
+async def test_mutated_factor_payload_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """frozen dataclass 不冻结内部 DataFrame：篡改 payload 后两个消费入口都必须拒绝。"""
+    raw = _raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)])
+    ctx, _ = await _build(
+        monkeypatch,
+        raw=raw,
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    # 合法操作：修改的是内部对象，不是 frozen 属性
+    ctx.factor_df.loc[0, "adj_factor"] = 123.0
+
+    service = BusinessDateAdjustmentService()
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        service.apply_context_qfq(_daily_bars_20(), ctx, intraday=False)
+    assert ei.value.reason == "context_factor_hash_mismatch"
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei2:
+        service.quote_qfq_price(10.0, ctx)
+    assert ei2.value.reason == "context_factor_hash_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_forged_context_hash_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """factor_df 未变但 metadata hash 被伪造 → context_hash_mismatch。"""
+    raw = _raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)])
+    ctx, _ = await _build(
+        monkeypatch,
+        raw=raw,
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+    forged = replace(ctx, context_hash="deadbeefdeadbeef")
+
+    service = BusinessDateAdjustmentService()
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
+        service.apply_context_qfq(_daily_bars_20(), forged, intraday=False)
+    assert ei.value.reason == "context_hash_mismatch"
+
+    with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei2:
+        service.quote_qfq_price(10.0, forged)
+    assert ei2.value.reason == "context_hash_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_pristine_context_passes_integrity_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """未篡改的 context 必须正常通过 integrity gate（防止误报）。"""
+    raw = _raw_df([("2026-09-10", 20.0), ("2026-09-11", 20.0)])
+    ctx, _ = await _build(
+        monkeypatch,
+        raw=raw,
+        xdxr=_xdxr_df([{"date": "2026-09-12", "songzhuangu": 10}]),
+        business_date=date(2026, 9, 12),
+        expected_completed_through=date(2026, 9, 11),
+    )
+
+    service = BusinessDateAdjustmentService()
+    qfq = service.apply_context_qfq(_daily_bars_20(), ctx, intraday=False)
+
+    assert abs(float(qfq.loc[pd.Timestamp("2026-09-11"), "close"]) - 10.0) < 1e-9
+    assert service.quote_qfq_price(10.0, ctx) == Decimal("10.0")

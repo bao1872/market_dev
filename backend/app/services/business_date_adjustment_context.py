@@ -43,6 +43,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+import math
 import uuid
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -171,6 +172,95 @@ def _compute_context_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
 
 
+_RAW_DAILY_REQUIRED_COLUMNS = ("datetime", "close")
+
+
+def _validate_raw_daily_input(
+    raw_daily: pd.DataFrame,
+    *,
+    symbol: str,
+    business_date: date,
+) -> pd.DataFrame:
+    """校验 raw daily 是**可信**输入（fail-closed），返回规范化副本。
+
+    为什么必须在这里拒绝：``BarDaily.close`` 在 ORM 中是 ``nullable=True`` 的，
+    ``NULL`` 是 schema 合法状态。若把 NaN 送进 calculator，事件日的 prev_close 会
+    传播 NaN，最终**静默跳过实际除权调整**并产出看似正常的 factor=1.0 ——
+    这与「坐标不可证明就必须 fail-closed」直接冲突。
+
+    拒绝：NULL/NaN/inf/<=0 的 close，以及无法解析的 trade_date。
+    """
+    if not set(_RAW_DAILY_REQUIRED_COLUMNS).issubset(raw_daily.columns):
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=symbol,
+            business_date=business_date,
+            reason="raw_daily_invalid_schema",
+        )
+
+    validated = raw_daily.copy()
+    validated["datetime"] = pd.to_datetime(validated["datetime"], errors="coerce")
+    validated["close"] = pd.to_numeric(validated["close"], errors="coerce")
+
+    invalid_date = validated["datetime"].isna()
+    invalid_close = validated["close"].map(
+        lambda value: (
+            not pd.notna(value)
+            or not math.isfinite(float(value))
+            or float(value) <= 0.0
+        )
+    )
+
+    if bool(invalid_date.any()):
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=symbol,
+            business_date=business_date,
+            reason="raw_daily_invalid_trade_date",
+        )
+
+    if bool(invalid_close.any()):
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=symbol,
+            business_date=business_date,
+            reason="raw_daily_invalid_close",
+        )
+
+    return validated
+
+
+def _assert_context_integrity(context: BusinessDateAdjustmentContext) -> None:
+    """消费前校验 context 的 payload identity 未被破坏（fail-closed）。
+
+    ``@dataclass(frozen=True)`` 只冻结属性绑定，**不冻结内部 DataFrame**：
+    ``context.factor_df.loc[0, "adj_factor"] = 123`` 是合法操作，会让
+    ``factor_hash`` 与实际 factor payload 分叉。而下一阶段 Node Target version
+    直接依赖 ``context_hash``：若「版本号不变」但真实坐标变了，
+    「目标版本不变就不触发假 crossing」的前提会整体失效。
+
+    因此发现分叉只能 raise，**禁止**重算/覆盖 hash 或接受新 DataFrame。
+    """
+    current_factor_hash = _compute_factor_hash(context.factor_df)
+    if current_factor_hash != context.factor_hash:
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_factor_hash_mismatch",
+        )
+
+    expected_context_hash = _compute_context_hash(
+        business_date=context.business_date,
+        expected_completed_through=context.expected_completed_through,
+        latest_raw_trade_date=context.latest_raw_trade_date,
+        factor_source_fingerprint=context.factor_source_fingerprint,
+        factor_hash=current_factor_hash,
+    )
+    if expected_context_hash != context.context_hash:
+        raise BusinessDateAdjustmentUnavailableError(
+            symbol=context.symbol,
+            business_date=context.business_date,
+            reason="context_hash_mismatch",
+        )
+
+
 class BusinessDateAdjustmentService:
     """构建 / 消费 business-date 复权坐标（只读 overlay）。"""
 
@@ -209,6 +299,15 @@ class BusinessDateAdjustmentService:
             raise BusinessDateAdjustmentUnavailableError(
                 symbol=symbol, business_date=business_date, reason="raw_daily_empty",
             )
+
+        # 1b. raw daily 必须是**可信**输入：close 为 NULL（schema 允许）/ NaN / inf / <=0
+        # 一律 fail-closed。必须在访问 XDXR provider **之前**完成 —— raw 已知不可信时
+        # 不得再发起远端 freshness 请求。
+        raw_daily = _validate_raw_daily_input(
+            raw_daily,
+            symbol=symbol,
+            business_date=business_date,
+        )
 
         latest_raw_trade_date = pd.to_datetime(raw_daily["datetime"]).max().date()
 
@@ -373,6 +472,9 @@ class BusinessDateAdjustmentService:
                 reason="context_freshness_not_proven",
             )
 
+        # 消费前校验 payload identity：frozen 只冻结属性绑定，不冻结内部 DataFrame
+        _assert_context_integrity(context)
+
         return AdjustmentFactorService().apply_qfq(
             bars_df,
             context.factor_df,
@@ -396,6 +498,11 @@ class BusinessDateAdjustmentService:
                 business_date=context.business_date,
                 reason="context_freshness_not_proven",
             )
+
+        # quote 虽然 ratio=1，但它宣称与「该 context 的历史 target」同坐标；
+        # payload 若被篡改，该 identity 声明即失效，必须 fail-closed。
+        _assert_context_integrity(context)
+
         return Decimal(str(raw_price)) * context.quote_qfq_ratio
 
 
