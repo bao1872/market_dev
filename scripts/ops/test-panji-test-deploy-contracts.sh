@@ -161,6 +161,17 @@ if [[ "${1:-}" == "compose" ]]; then
     exit 0
   fi
   if printf '%s' "$*" | grep -q 'stop'; then
+    # [FENCE-HANG] 复现 2026-09-11 production failure mode：
+    # `docker compose stop -t -1` 永不返回（daemon 无限等待容器退出）。
+    # 用于验证部署侧等待必须有界（PANJI_FENCE_MAX_WAIT_SECONDS）。
+    if [[ "${PANJI_MOCK_COMPOSE_STOP_HANG:-0}" == "1" ]]; then
+      printf 'compose-stop\n' >> "${PANJI_MUT_LOG:-/dev/null}"
+      sleep 300 &
+      _hang_pid=$!
+      trap 'kill "${_hang_pid}" 2>/dev/null; exit 124' TERM
+      wait "${_hang_pid}"
+      exit 124
+    fi
     printf 'compose-stop\n' >> "${PANJI_MUT_LOG:-/dev/null}"
     if printf '%s' "$*" | grep -q 'worker-after-close'; then
       printf 'exited' > "${WORKER_STATE}"
@@ -1662,6 +1673,67 @@ else
   sed 's/^/    /' "${C_LOG}" >&2
 fi
 
+
+# --- P1-C F：`docker compose stop -t -1` 永不返回 → 部署必须有界失败（2026-09-11 事故 failure mode）---
+# 背景：原实现裸调用 `stop -t -1`，CLI 可无限阻塞并永久持有部署锁（生产实测 26h+）。
+# 后置的 PANJI_FENCE_MAX_WAIT_SECONDS 轮询看门狗只在 stop 返回之后执行，拦不住这种 hang。
+# 本用例用「永不返回的 compose stop」+ 极小看门狗值，证明部署侧等待已真正有界。
+echo "== E2.1 P1-C F fence-stop-hang bounded failure =="
+F_LOG="${TMP_ROOT}/p1c-fence-hang.log"
+F_MUT="${TMP_ROOT}/p1c-fence-hang.mut"
+F_STATE_BEFORE="$(shasum -a 256 "${STATE_FILE}" | awk '{print $1}')"
+: > "${F_MUT}"
+reset_worker_state running
+
+F_START="$(date +%s)"
+PANJI_MOCK_COMPOSE_STOP_HANG=1 \
+PANJI_FENCE_MAX_WAIT_SECONDS=2 \
+PANJI_MOCK_NO_LIVE_MOUNT=1 \
+PANJI_BOOTSTRAP_PREVIOUS_SHA="${TARGET_SHA}" \
+PANJI_MOCK_BACKEND_RUNTIME_CHANGED=1 \
+PANJI_MOCK_PSQL_RUNNING=0 \
+PANJI_MOCK_PSQL_COUNTS="running:0
+queued:0
+resume_queued:0" \
+PANJI_MUT_LOG="${F_MUT}" \
+  run_deploy "${TARGET_SHA}" >"${F_LOG}" 2>&1
+F_RC=$?
+F_ELAPSED=$(( $(date +%s) - F_START ))
+
+# 1) 有界时间返回失败（不得因 compose stop 挂起而永久阻塞）
+if [[ "${F_RC}" -ne 0 && "${F_ELAPSED}" -le 120 ]]; then
+  ok "P1-C F: hanging compose stop fails deploy within bound (rc=${F_RC} elapsed=${F_ELAPSED}s)"
+else
+  bad "P1-C F: hanging compose stop must fail bounded (rc=${F_RC} elapsed=${F_ELAPSED}s)"
+  sed 's/^/    /' "${F_LOG}" >&2
+fi
+
+# 2) 明确的机器可读标记（区分「stop 等待超时」与「stop 返回非 0」）
+if grep -q 'AFTER_CLOSE_FENCE_STOP_WAIT_TIMEOUT=true' "${F_LOG}"; then
+  ok "P1-C F: emits AFTER_CLOSE_FENCE_STOP_WAIT_TIMEOUT=true"
+else
+  bad "P1-C F: missing AFTER_CLOSE_FENCE_STOP_WAIT_TIMEOUT=true"
+  sed 's/^/    /' "${F_LOG}" >&2
+fi
+
+# 3) runtime mutation = 0：RUNTIME_SHA 不写 / state 不变 / 无 compose up / 无 migration
+F_STATE_AFTER="$(shasum -a 256 "${STATE_FILE}" | awk '{print $1}')"
+F_RT=0; [[ -e "${LIVE_ROOT}/RUNTIME_SHA" ]] && F_RT=1
+F_UP="$(grep -c 'compose-up' "${F_MUT}" || true)"
+F_MIG=0; grep -qE 'alembic|upgrade head' "${F_LOG}" && F_MIG=1
+if [[ "${F_STATE_AFTER}" == "${F_STATE_BEFORE}" && "${F_RT}" -eq 0 \
+   && "${F_UP}" -eq 0 && "${F_MIG}" -eq 0 ]]; then
+  ok "P1-C F: zero runtime mutation on fence hang (RUNTIME_SHA=0 state_unchanged up=0 migration=0)"
+else
+  bad "P1-C F: runtime mutation on fence hang (rt=${F_RT} state_changed=$([[ "${F_STATE_AFTER}" == "${F_STATE_BEFORE}" ]] && echo 0 || echo 1) up=${F_UP} migration=${F_MIG})"
+fi
+
+# 4) worker 不得被强杀：等待超时后容器状态仍为 running
+if [[ "$(cat "${WORKER_STATE_FILE}" 2>/dev/null)" == "running" ]]; then
+  ok "P1-C F: worker-after-close NOT force-killed on fence wait timeout"
+else
+  bad "P1-C F: worker state changed on fence wait timeout (state=$(cat "${WORKER_STATE_FILE}" 2>/dev/null))"
+fi
 
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]

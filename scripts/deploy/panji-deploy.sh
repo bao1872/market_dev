@@ -1595,9 +1595,29 @@ _fence_after_close_worker() {
     case "${status}" in
         running)
             AFTER_CLOSE_WAS_RUNNING=true
-            log "[E2.1 P1-C] fencing worker-after-close: stop -t -1（graceful drain，绝不 SIGKILL）"
-            if ! ${COMPOSE_CMD} stop -t -1 worker-after-close; then
-                log "AFTER_CLOSE_FENCE_STOP_FAILED=true"; return 1
+            # [FENCE-HANG P0] `docker compose stop -t -1` 本身可以**无限阻塞**：
+            # -t -1 让 docker daemon 无限等待容器退出，CLI 客户端也永不返回。
+            # 原实现裸调用，导致部署可卡死数十小时并永久持有部署锁
+            # （2026-09-11 事故：卡在首笔 runtime mutation 之前 26h+）。
+            # 后置的 PANJI_FENCE_MAX_WAIT_SECONDS 轮询看门狗只在 stop 返回之后执行，拦不住这种 hang。
+            #
+            # 修复：stop 的**等待**必须有界（deployment infrastructure watchdog）。
+            # 语义边界（严格遵守）：
+            #   - 有界的是「部署 CLI 等待 docker 返回的时间」，不是业务任务 deadline；
+            #   - timeout 只终止等待中的 docker compose 客户端，绝不强杀 worker；
+            #   - 业务任务仍按 -t -1 继续 graceful drain，不得因此被判 failed/cancelled/reset。
+            local fence_wait_seconds="${PANJI_FENCE_MAX_WAIT_SECONDS:-1800}"
+            log "[E2.1 P1-C] fencing worker-after-close: stop -t -1（graceful drain，绝不强杀）"
+            log "[E2.1 P1-C] 部署侧等待上限 ${fence_wait_seconds}s（仅约束 CLI 等待，不约束业务 drain）"
+            if ! run_with_timeout \
+                "after_close_stop_wait" \
+                "${fence_wait_seconds}" \
+                -- \
+                ${COMPOSE_CMD} stop -t -1 worker-after-close
+            then
+                log "AFTER_CLOSE_FENCE_STOP_WAIT_TIMEOUT=true"
+                log "FENCE_HANG_GUARD=bounded（仅终止等待中的 compose 客户端，worker 未被强杀）"
+                return 1
             fi
             AFTER_CLOSE_FENCE_OWNED=true
             ;;
