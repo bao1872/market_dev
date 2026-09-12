@@ -75,6 +75,10 @@ class MarketDataContext:
     adj_factor: pd.DataFrame | None = None
     trade_date: date | None = None
     bar_time: datetime | None = None
+    node_target_set: Any | None = None
+    smc_target_set: Any | None = None
+    price_last: float | None = None
+    current_price: float | None = None
 
 
 @dataclass

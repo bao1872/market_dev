@@ -44,12 +44,14 @@ smc_episode_tracker）显式回写到父 curr_state.state["smc"] 和顶层平铺
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 
 import pandas as pd
 
 from app.models.strategy import StrategyVersion
+from app.services.monitor_crossing_service import evaluate_node_crossings, evaluate_smc_events
 from app.strategy.monitors.smc_monitor import SmcMonitor
 from app.strategy.monitors.volume_node_monitor import VolumeNodeMonitor
 from app.strategy.runtime import (
@@ -306,6 +308,64 @@ class WatchlistMonitor(StrategyRuntime):
         """
         events: list[StrategyEventDraft] = []
 
+        # [Stage G4/G5] 优先进行目标位连续快照穿透判定（若 context 提供了 target_set）
+        node_target_set = getattr(context, "node_target_set", None)
+        smc_target_set = getattr(context, "smc_target_set", None)
+
+        if node_target_set is not None or smc_target_set is not None:
+            p_curr = (
+                getattr(context, "current_price", None)
+                or curr_state.state.get("current_price")
+                or 0.0
+            )
+            p_last = getattr(context, "price_last", None)
+            if p_last is None:
+                p_last = (
+                    prev_state.state.get("current_price", p_curr)
+                    if prev_state
+                    else p_curr
+                )
+
+            triggered_ids: set[str] = (
+                set(prev_state.state.get("triggered_target_ids") or [])
+                if prev_state
+                else set()
+            )
+            evt_time = context.bar_time or datetime.now()
+
+            if node_target_set is not None:
+                try:
+                    node_evts = evaluate_node_crossings(
+                        context.instrument_id,
+                        node_target_set,
+                        float(p_last),
+                        float(p_curr),
+                        evt_time,
+                        triggered_ids,
+                    )
+                    events.extend(node_evts)
+                except Exception as exc:
+                    logger.warning("evaluate_node_crossings 失败: %s", exc)
+
+            if smc_target_set is not None:
+                try:
+                    smc_evts = evaluate_smc_events(
+                        context.instrument_id,
+                        smc_target_set,
+                        float(p_last),
+                        float(p_curr),
+                        evt_time,
+                        triggered_ids,
+                    )
+                    events.extend(smc_evts)
+                except Exception as exc:
+                    logger.warning("evaluate_smc_events 失败: %s", exc)
+
+            curr_state.state["triggered_target_ids"] = list(triggered_ids)
+            curr_state.state["price_last"] = p_last
+            return events
+
+        # 兼容旧逻辑：未提供 target_set 时回退至子 monitor 1m 判定
         # VN 事件检测
         try:
             vn_prev = (
