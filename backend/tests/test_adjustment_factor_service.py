@@ -41,12 +41,12 @@ class _FakeRedis:
     """内存版 Redis（仅实现计划用到的 get/set）。"""
 
     def __init__(self) -> None:
-        self.data: dict[str, str] = {}
+        self.data: dict[str, object] = {}
 
-    def set(self, key: str, value: str) -> None:
+    def set(self, key: str, value: object) -> None:
         self.data[key] = value
 
-    def get(self, key: str) -> str | None:
+    def get(self, key: str) -> object | None:
         return self.data.get(key)
 
 
@@ -139,6 +139,54 @@ def test_redis_error_none() -> None:
 
 
 # =============================================================================
+# A-D: Redis 读取真正 fail-closed（bytes 解码 / 非 str 类型）
+# =============================================================================
+
+
+def test_malformed_utf8_bytes_none() -> None:
+    # A: 非 UTF-8 bytes → 不抛 UnicodeDecodeError，返回 None → schedule_unknown
+    svc = AdjustmentFactorService()
+    fake = _FakeRedis()
+    fake.set(f"adj_factor_xdxr_schedule:{IID}", b"\xff\xfe")
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        assert svc.get_corporate_action_schedule_state(IID) is None
+
+
+def test_non_str_int_type_none() -> None:
+    # B: raw=123（非 str/bytes）→ None
+    svc = AdjustmentFactorService()
+    fake = _FakeRedis()
+    fake.set(f"adj_factor_xdxr_schedule:{IID}", 123)
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        assert svc.get_corporate_action_schedule_state(IID) is None
+
+
+def test_non_str_list_type_none() -> None:
+    # C: raw=[]（非 str/bytes）→ None
+    svc = AdjustmentFactorService()
+    fake = _FakeRedis()
+    fake.set(f"adj_factor_xdxr_schedule:{IID}", [])
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        assert svc.get_corporate_action_schedule_state(IID) is None
+
+
+def test_valid_utf8_bytes_parsed() -> None:
+    # D: 合法 UTF-8 bytes JSON → 正常解析
+    svc = AdjustmentFactorService()
+    fake = _FakeRedis()
+    state = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    payload = json.dumps(
+        {"scanned_as_of": "2026-09-01", "next_event_date": "2026-09-10"},
+        separators=(",", ":"), sort_keys=True,
+    )
+    fake.set(f"adj_factor_xdxr_schedule:{IID}", payload.encode("utf-8"))
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        assert svc.get_corporate_action_schedule_state(IID) == state
+
+
+# =============================================================================
 # 15: future event 出现但 fingerprint 未变 → detect 返回 None，schedule 仍更新
 # =============================================================================
 
@@ -177,3 +225,34 @@ async def test_detect_updates_schedule_when_fingerprint_unchanged() -> None:
     payload = json.loads(sched_raw)
     assert payload["scanned_as_of"] == "2026-09-01"
     assert payload["next_event_date"] == "2026-09-10"  # 未来事件被记录
+
+
+async def test_detect_empty_xdxr_with_explicit_effective_as_of_stores_schedule() -> None:
+    """G1B-3B1.1 合同锁：空 XDXR + 显式 effective_as_of → 仍写 schedule。
+
+    下一轮 bootstrap 时大量股票根本没有 XDXR。调用方若明确传 ``effective_as_of=
+    trade_date``，这些股票必须从 ``schedule_unknown`` 收敛为「已证明截至 T 日无已知
+    未来事件」，否则优化永远降不下来。本轮只锁这个行为，不改 production caller。
+    """
+    trade_date = date(2026, 9, 11)
+    xdxr = _xdxr_df([])  # 空 XDXR
+    fake = _FakeRedis()
+    adapter = MagicMock()
+    adapter.get_xdxr_info = MagicMock(return_value=xdxr)
+
+    svc = AdjustmentFactorService()
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        result = await svc.detect_company_action_change(
+            session=MagicMock(),
+            instrument_id=IID,
+            symbol="X",
+            adapter=adapter,
+            effective_as_of=trade_date,
+        )
+
+    assert result is None  # 空 XDXR → 无事件 → None
+    sched_raw = fake.get(f"adj_factor_xdxr_schedule:{IID}")
+    assert sched_raw is not None
+    payload = json.loads(sched_raw)
+    assert payload["scanned_as_of"] == "2026-09-11"  # 显式 effective_as_of 被记录
+    assert payload["next_event_date"] is None  # 空 XDXR → 无已知未来事件

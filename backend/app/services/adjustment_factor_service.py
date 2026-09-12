@@ -584,7 +584,16 @@ class AdjustmentFactorService:
         if raw is None:
             return None
         if isinstance(raw, bytes):
-            raw = raw.decode("utf-8")
+            try:
+                raw = raw.decode("utf-8")
+            except UnicodeDecodeError:
+                logger.debug(
+                    "XDXR schedule state UTF-8 解码失败 instrument_id=%s", instrument_id
+                )
+                return None
+        elif not isinstance(raw, str):
+            # 非 str/bytes（如 int / list）→ 视为无法证明，fail-closed
+            return None
 
         try:
             payload = json.loads(raw)

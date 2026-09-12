@@ -99,6 +99,7 @@ def test_schedule_unknown_forces_refresh() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=0,
         schedule=None,
+        schedule_age_trade_days=0,
         previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
         rotation_size=3,
     )
@@ -115,6 +116,7 @@ def test_known_event_due_equal_trade_date() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=rotation_bucket("600000", 3) + 1,  # 非 rotation 命中
         schedule=schedule,
+        schedule_age_trade_days=1,  # 已证明 age，避免 schedule_age_unknown
         previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
         rotation_size=3,
     )
@@ -133,6 +135,7 @@ def test_known_event_past_still_refresh() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=rotation_bucket("600000", 3) + 1,
         schedule=schedule,
+        schedule_age_trade_days=1,
         previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
         rotation_size=3,
     )
@@ -149,6 +152,7 @@ def test_previous_close_mismatch_refresh() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=rotation_bucket("600000", 3) + 1,  # 非 rotation 命中
         schedule=schedule,
+        schedule_age_trade_days=0,  # 同日扫描，age 直接为 0
         previous_close_signal=PreviousCloseSignal.CORPORATE_ACTION_CANDIDATE,
         rotation_size=3,
     )
@@ -166,6 +170,7 @@ def test_previous_close_unknown_refresh() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=rotation_bucket("600000", 3) + 1,
         schedule=schedule,
+        schedule_age_trade_days=0,
         previous_close_signal=PreviousCloseSignal.UNKNOWN,
         rotation_size=3,
     )
@@ -184,6 +189,7 @@ def test_rotation_only_refresh() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=bucket,  # == bucket → rotation 命中
         schedule=schedule,
+        schedule_age_trade_days=0,
         previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
         rotation_size=3,
     )
@@ -203,11 +209,206 @@ def test_fresh_schedule_no_signal_no_rotation_no_refresh() -> None:
         trade_date=date(2026, 9, 1),
         trade_day_ordinal=ordinal,
         schedule=schedule,
+        schedule_age_trade_days=0,
         previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
         rotation_size=3,
     )
     assert decision.refresh is False
     assert decision.reasons == ()
+
+
+# =============================================================================
+# E-N: schedule 交易日 age / stale（系统停跑恢复语义）
+# =============================================================================
+
+
+def _non_rotation_ordinal(symbol: str, rotation_size: int = 3) -> int:
+    """返回一个必然不命中 rotation 的 ordinal。"""
+    return (rotation_bucket(symbol, rotation_size) + 1) % rotation_size
+
+
+def test_same_day_schedule_age_none_no_age_unknown() -> None:
+    # E: 同日扫描 + age=None → 不产生 schedule_age_unknown（age 可直接证明为 0）
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=None,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is False
+    assert "schedule_age_unknown" not in decision.reasons
+    assert "schedule_stale" not in decision.reasons
+
+
+def test_older_schedule_age_none_forces_refresh() -> None:
+    # F: 旧 schedule + age=None → schedule_age_unknown → 强制刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=None,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_age_unknown" in decision.reasons
+
+
+def test_older_schedule_age_negative_forces_refresh() -> None:
+    # G: age=-1 → schedule_age_unknown → 强制刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=-1,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_age_unknown" in decision.reasons
+
+
+def test_older_schedule_age_bool_forces_refresh() -> None:
+    # H: age=True（bool 不得当 int）→ schedule_age_unknown → 强制刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=True,  # type: ignore[arg-type]
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_age_unknown" in decision.reasons
+
+
+def test_age_1_no_refresh() -> None:
+    # I: age=1 + 无事件 + 无信号 + 非 rotation → refresh=False
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=1,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is False
+    assert decision.reasons == ()
+
+
+def test_age_2_no_refresh() -> None:
+    # J: age=2 → refresh=False
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=2,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is False
+    assert decision.reasons == ()
+
+
+def test_age_3_stale_refresh() -> None:
+    # K: age=3 >= rotation_size → schedule_stale → 刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=3,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_stale" in decision.reasons
+
+
+def test_age_10_stale_refresh() -> None:
+    # L: age=10 → schedule_stale → 刷新
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=10,
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_stale" in decision.reasons
+
+
+def test_stale_and_rotation_both_reasons() -> None:
+    # M: stale + rotation 同时命中 → 两个 reason 共存
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=None,
+    )
+    bucket = rotation_bucket("600000", 3)
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=bucket,  # rotation 命中
+        schedule=schedule,
+        schedule_age_trade_days=3,  # stale
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_stale" in decision.reasons
+    assert "rotation_refresh" in decision.reasons
+
+
+def test_known_event_due_and_stale_both_reasons() -> None:
+    # N: known event due + stale → 两个 reason 均保留
+    schedule = CorporateActionScheduleState(
+        scanned_as_of=date(2026, 8, 1), next_event_date=date(2026, 8, 20),
+    )
+    decision = plan_xdxr_refresh(
+        symbol="600000",
+        trade_date=date(2026, 9, 1),
+        trade_day_ordinal=_non_rotation_ordinal("600000"),
+        schedule=schedule,
+        schedule_age_trade_days=3,  # stale
+        previous_close_signal=PreviousCloseSignal.NO_ACTION_SIGNAL,
+        rotation_size=3,
+    )
+    assert decision.refresh is True
+    assert "schedule_stale" in decision.reasons
+    assert "known_event_due" in decision.reasons
 
 
 def test_rotation_bucket_deterministic() -> None:

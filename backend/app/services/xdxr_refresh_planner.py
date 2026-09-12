@@ -106,6 +106,7 @@ def plan_xdxr_refresh(
     trade_date: date,
     trade_day_ordinal: int,
     schedule: CorporateActionScheduleState | None,
+    schedule_age_trade_days: int | None,
     previous_close_signal: PreviousCloseSignal,
     rotation_size: int = 3,
 ) -> XdxrRefreshDecision:
@@ -115,12 +116,25 @@ def plan_xdxr_refresh(
 
     - ``schedule_unknown``：schedule metadata 缺失 / 无法证明
     - ``schedule_invalid_future_scan``：``scanned_as_of`` 晚于 trade_date（异常）
+    - ``schedule_age_unknown``：schedule 存在但交易日 age 无法证明（调用方未提供 /
+      负数 / 非 int 如 bool）→ 不能假设 rotation 已执行，强制刷新
+    - ``schedule_stale``：schedule 已 ``>= rotation_size`` 个交易日未更新（服务停跑 /
+      scheduler 未执行 / 部署中断）→ 必须补刷新，不能依赖「本应执行但实际没执行」的
+      rotation
     - ``known_event_due``：已知 ``next_event_date <= trade_date``（含 missed / delayed）
     - ``previous_close_mismatch``：previous_close 与 prior_raw_close 不等
     - ``previous_close_unknown``：previous_close 信号无法判断
     - ``rotation_refresh``：当前 rotation bucket 命中
 
     ``schedule is None`` → 强制刷新（安全 bootstrap）。
+
+    ``schedule_age_trade_days`` 含义：**当前 trade_date 与 ``schedule.scanned_as_of``
+    之间经过的 A 股交易日数量**（同日=0，前一交易日=1，...）。planner 自己不计算，
+    下一轮 scheduler 用 TradingCalendar 批量提供。禁止用
+    ``(trade_date - scanned_as_of).days`` 自然日（周末 / 节假日会破坏 rotation 语义）。
+
+    恢复语义：正常连续运行约 1/3 / 天；停跑 ``>= rotation_size`` 个交易日后首次恢复，
+    stale 股票强制补刷新，而不是继续等待 symbol 自己的 bucket。
     """
     reasons: list[str] = []
 
@@ -129,7 +143,23 @@ def plan_xdxr_refresh(
     else:
         if schedule.scanned_as_of > trade_date:
             reasons.append("schedule_invalid_future_scan")
-        elif (
+        else:
+            if schedule.scanned_as_of == trade_date:
+                # 同日扫描：age 可直接证明为 0，无需 calendar，即使 age=None。
+                effective_age = 0
+            elif (
+                type(schedule_age_trade_days) is not int
+                or schedule_age_trade_days < 0
+            ):
+                effective_age = None
+                reasons.append("schedule_age_unknown")
+            else:
+                effective_age = schedule_age_trade_days
+
+            if effective_age is not None and effective_age >= rotation_size:
+                reasons.append("schedule_stale")
+
+        if (
             schedule.next_event_date is not None
             and schedule.next_event_date <= trade_date
         ):
