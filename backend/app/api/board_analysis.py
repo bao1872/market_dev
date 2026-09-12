@@ -7,7 +7,9 @@
 - POST /v1/admin/boards/analysis/compute-all: 已退役（410 Gone）
 
 权限：
-- GET 接口：require_authenticated（任何登录用户可读）
+- GET 接口：[A2 P0 对齐] require_capability(market_data)——与前端 /boards
+  CapabilityRoute('market_data') 一致；修复前后端仅 require_authenticated，
+  任何登录用户可绕过前端直接读取板块分析（真实越权面）。
 - POST 接口：require_roles("admin")（保留签名兼容，但统一 410）
 
 设计：
@@ -41,12 +43,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db, require_roles
 from app.models.bar import BarDaily
 from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
+from app.models.user_capability import CAPABILITY_MARKET_DATA
 from app.schemas.board_analysis import (
     BoardAnalysisDetailResponse,
     BoardAnalysisListResponse,
     BoardAnalysisSnapshotDTO,
 )
-from app.services.access_control_service import AccessContext, require_authenticated
+from app.services.access_control_service import AccessContext, require_capability
 from app.services.review_publication_service import (
     get_published_review_run_id,
     list_published_review_dates,
@@ -348,7 +351,7 @@ async def list_board_analysis(
     page: int = Query(1, ge=1, description="页码（1-based）"),
     page_size: int = Query(20, ge=1, le=100, description="每页大小"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(CAPABILITY_MARKET_DATA)),
 ) -> BoardAnalysisListResponse:
     """板块分析列表（只读，需登录）。
 
@@ -414,7 +417,7 @@ async def get_board_analysis(
         None, description="业务交易日（不传取最新已发布复盘日）",
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_authenticated),
+    ctx: AccessContext = Depends(require_capability(CAPABILITY_MARKET_DATA)),
 ) -> BoardAnalysisDetailResponse:
     """单板块分析详情（只读，需登录）。
 

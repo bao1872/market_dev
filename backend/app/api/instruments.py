@@ -30,15 +30,32 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
 from app.models.instrument import Instrument
+from app.models.user_capability import CAPABILITY_MARKET_DATA, CAPABILITY_SELF_SELECTION
 from app.schemas.instrument import (
     InstrumentBatchRequest,
     InstrumentBatchResponse,
     InstrumentListResponse,
     InstrumentResponse,
 )
+from app.services.access_control_service import (
+    AccessContext,
+    require_any_capability,
+)
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 router = APIRouter(prefix="/v1/instruments", tags=["instruments"])
+
+# [A2 P0 越权面修复] 股票主数据是「行情浏览」与「自选管理」的共同输入：
+# 搜索标的既服务于自选添加，也服务于行情浏览，因此与前端 /market 路由一致，
+# 要求 self_selection **或** market_data。
+#
+# 修复前本路由 4 个端点**完全无鉴权**（仅 Depends(get_db)），
+# 任何未登录/无权限方均可枚举全市场标的（含 symbol/name/market 主数据）。
+# admin 由 require_any_capability 内部豁免（与其它 capability 依赖一致）。
+_REQUIRE_INSTRUMENT_DISCOVERY = require_any_capability(
+    CAPABILITY_SELF_SELECTION,
+    CAPABILITY_MARKET_DATA,
+)
 
 
 @router.get("", response_model=InstrumentListResponse)
@@ -49,6 +66,7 @@ async def list_instruments(
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(20, ge=1, le=100, description="每页大小（最大 100）"),
     db: AsyncSession = Depends(get_db),
+    _access: AccessContext = Depends(_REQUIRE_INSTRUMENT_DISCOVERY),
 ) -> InstrumentListResponse:
     """查询股票列表，支持关键词搜索（代码/名称/拼音首字母）、市场/状态筛选与分页。
 
@@ -122,6 +140,7 @@ async def list_instruments(
 async def batch_get_instruments(
     request: InstrumentBatchRequest,
     db: AsyncSession = Depends(get_db),
+    _access: AccessContext = Depends(_REQUIRE_INSTRUMENT_DISCOVERY),
 ) -> InstrumentBatchResponse:
     """按 ID 列表批量查询股票（最多 1000 个）。
 
@@ -141,6 +160,7 @@ async def batch_get_instruments(
 async def get_instrument_by_symbol(
     symbol: str,
     db: AsyncSession = Depends(get_db),
+    _access: AccessContext = Depends(_REQUIRE_INSTRUMENT_DISCOVERY),
 ) -> InstrumentResponse:
     """按 symbol 查询股票（symbol 唯一，最多返回 1 条）。"""
     stmt = select(Instrument).where(Instrument.symbol == symbol)
@@ -158,6 +178,7 @@ async def get_instrument_by_symbol(
 async def get_instrument(
     instrument_id: UUID,
     db: AsyncSession = Depends(get_db),
+    _access: AccessContext = Depends(_REQUIRE_INSTRUMENT_DISCOVERY),
 ) -> InstrumentResponse:
     """按 ID 查询单个股票。"""
     stmt = select(Instrument).where(Instrument.id == instrument_id)
