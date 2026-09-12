@@ -29,14 +29,16 @@ import multiprocessing
 import pickle
 import time
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from concurrent.futures import Future, ProcessPoolExecutor
 from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from decimal import Decimal
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 if TYPE_CHECKING:
@@ -49,10 +51,6 @@ from app.core.pytdx_adapter import (
     get_pytdx_adapter,
 )
 from app.core.time import shanghai_business_date
-from app.services.adjustment_factor_service import (
-    FactorIntegrityBlockedError,
-    FactorSourceUnavailableError,
-)
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
 from app.repositories.bar_repository import (
@@ -62,6 +60,10 @@ from app.repositories.bar_repository import (
     refresh_15min_bars,
     refresh_60min_bars,
     refresh_daily_bars,
+)
+from app.services.adjustment_factor_service import (
+    FactorIntegrityBlockedError,
+    FactorSourceUnavailableError,
 )
 from app.services.bars_fetch_worker import (
     DailyProviderPayload,
@@ -241,6 +243,8 @@ class BatchResult:
     factor_source_latency_seconds: float | None = None
     factor_source_connected_server: tuple[str, int] | None = None
     factor_source_uncached_xdxr_ok: bool | None = None
+    # [G1B-3B2] planner 优化可观测指标（无 DB migration）：XDXR refresh-set 计划结果
+    factor_xdxr_plan: dict[str, Any] | None = None
 
 
 class PoolFatalError(RuntimeError):
@@ -626,6 +630,10 @@ class BarsSchedulerService:
             for i, instrument in enumerate(instruments)
         ]
 
+        # [G1B-3B2] EOD previous_close 证据（仅 snapshot 成功时持有；legacy/fallback → None）。
+        # 不得把旧 snapshot map 带进 fallback：snapshot 中途失败后 evidence 必须为 None。
+        eod_previous_close_by_symbol: dict[str, Decimal | None] | None = None
+
         try:
             for phase_idx, period in enumerate(active_periods):
                 phase_name = f"{task_name} [{period}]"
@@ -658,8 +666,11 @@ class BarsSchedulerService:
                         )
                     else:
                         try:
-                            await self._refresh_daily_from_market_snapshot(
-                                trade_date, db_session, job_run_id, result,
+                            eod_previous_close_by_symbol = (
+                                await self._refresh_daily_from_market_snapshot(
+                                    trade_date, db_session, job_run_id, result,
+                                )
+                                or None
                             )
                             result.daily_mode = "snapshot"
                             # universe 可能新增 → 清空缓存并重新读取，供后续 post-daily
@@ -745,6 +756,7 @@ class BarsSchedulerService:
                         job_run_id,
                         result,
                         trigger_dsa=trigger_dsa,
+                        eod_previous_close_by_symbol=eod_previous_close_by_symbol,
                     )
         finally:
             if process_pool is not None:
@@ -1108,6 +1120,7 @@ class BarsSchedulerService:
         result: BatchResult,
         *,
         trigger_dsa: bool,
+        eod_previous_close_by_symbol: dict[str, Decimal | None] | None = None,
     ) -> None:
         """Run the existing post-d sequence only after all d persistence is terminal.
 
@@ -1140,15 +1153,30 @@ class BarsSchedulerService:
 
         try:
             rebuild_result = await self._rebuild_factors_if_needed(
-                trade_date, instruments, db_session, job_run_id=job_run_id
+                trade_date, instruments, db_session, job_run_id=job_run_id,
+                eod_previous_close_by_symbol=eod_previous_close_by_symbol,
             )
             logger.info(
-                "[BarsScheduler] 因子重建完成 checked=%d changed=%d rebuilt=%d failed=%d",
-                rebuild_result["checked"],
-                rebuild_result["changed"],
-                rebuild_result["rebuilt"],
-                rebuild_result["failed"],
+                "[BarsScheduler] 因子重建完成 checked=%d changed=%d rebuilt=%d failed=%d "
+                "planned=%d refresh=%d skipped=%d mode=%s reasons=%s",
+                rebuild_result.get("checked", 0),
+                rebuild_result.get("changed", 0),
+                rebuild_result.get("rebuilt", 0),
+                rebuild_result.get("failed", 0),
+                rebuild_result.get("planned_total", 0),
+                rebuild_result.get("refresh_requested", 0),
+                rebuild_result.get("skipped_fresh", 0),
+                rebuild_result.get("planner_mode", "unknown"),
+                rebuild_result.get("refresh_reason_counts", {}),
             )
+            # [G1B-3B2] planner 优化可观测：供生产验证是否真的砍掉了 5000+ 循环。
+            result.factor_xdxr_plan = {
+                "planned_total": rebuild_result.get("planned_total", 0),
+                "refresh_requested": rebuild_result.get("refresh_requested", 0),
+                "skipped_fresh": rebuild_result.get("skipped_fresh", 0),
+                "planner_mode": rebuild_result.get("planner_mode", "unknown"),
+                "refresh_reason_counts": rebuild_result.get("refresh_reason_counts", {}),
+            }
         except (FactorSourceUnavailableError, FactorIntegrityBlockedError):
             # 熔断器触发 / 因子完整性无法证明：向上传播 fail-closed，禁止后续 DSA/Core。
             raise
@@ -1298,7 +1326,7 @@ class BarsSchedulerService:
         db_session: AsyncSession | None,
         job_run_id: uuid.UUID | None,
         result: BatchResult,
-    ) -> None:
+    ) -> dict[str, Decimal | None]:
         """[EOD-SNAPSHOT] 每日日线阶段的全市场快照快速路径 owner。
 
         流程（详见 eod_daily_refresh_service / eod_market_snapshot_provider）：
@@ -1329,6 +1357,7 @@ class BarsSchedulerService:
             count_active_a_share_instruments,
             fill_missing_daily_instruments,
             find_missing_daily_instruments,
+            is_valid_snapshot_daily_row,
             plan_daily_repair,
             sync_instruments_from_eod_snapshot,
             upsert_raw_daily_snapshot,
@@ -1450,6 +1479,19 @@ class BarsSchedulerService:
             # 7. 日线连续性扫描 **不在此处**：连续性已经是硬门禁，统一由
             #    _process_all_instruments 在 daily 阶段落库完成后调用
             #    _scan_daily_continuity_gate（对 snapshot / legacy / 未来 provider 一视同仁）。
+
+            # [G1B-3B2] 收集当日 EOD previous_close 证据（仅 transient，不写新列）。
+            # 复用唯一合法性 owner is_valid_snapshot_daily_row；不另维护 snapshot validity。
+            eod_previous_close_by_symbol = {
+                row.symbol: row.previous_close
+                for row in rows
+                if (
+                    row.symbol in id_by_symbol
+                    and row.market in ("SH", "SZ", "BJ")
+                    and is_valid_snapshot_daily_row(row, trade_date)
+                )
+            }
+            return eod_previous_close_by_symbol
         finally:
             if own_session:
                 await session.close()
@@ -1591,6 +1633,8 @@ class BarsSchedulerService:
         instruments: list[Instrument],
         db_session: AsyncSession | None = None,
         job_run_id: uuid.UUID | None = None,
+        *,
+        eod_previous_close_by_symbol: dict[str, Decimal | None] | None = None,
     ) -> dict[str, Any]:
         """[CHANGE-20260717-002 SSOT] - 公司行为变化时重建复权因子序列。
 
@@ -1641,6 +1685,12 @@ class BarsSchedulerService:
             "changed_symbols": [],   # [G1B-3A] 影响集：fingerprint 变化的股票
             "rebuilt_symbols": [],   # [G1B-3A] 影响集：重建成功的股票（⊆ changed_symbols）
             "failed_symbols": [],
+            # [G1B-3B2] planner 可观测字段（无 DB migration）
+            "planned_total": total,
+            "refresh_requested": total,
+            "skipped_fresh": 0,
+            "planner_mode": "legacy_full_refresh",
+            "refresh_reason_counts": {},
         }
 
         if total == 0:
@@ -1672,15 +1722,6 @@ class BarsSchedulerService:
                     "[BarsScheduler] 写 REBUILDING_FACTORS start 事件失败: %s", exc,
                 )
 
-        # tqdm 进度条
-        try:
-            from tqdm import tqdm
-            pbar = tqdm(
-                instruments, desc="因子重建检查", position=0, leave=True, dynamic_ncols=True,
-            )
-        except ImportError:
-            pbar = None
-
         # 使用单一 session 遍历（db_session 为 None 时新建复用，减少连接开销）
         # detect 不写 DB（仅 pytdx + Redis），rebuild 写 DB（commit per stock）
         if db_session is not None:
@@ -1690,8 +1731,49 @@ class BarsSchedulerService:
             session = AsyncSessionLocal()
             should_close = True
 
+        # [G1B-3B2] evidence-based refresh-set：仅当 EOD previous_close 证据完整时
+        # 走 planner 批量计算；否则保持旧全市场路径（不读 schedule MGET / prior-close
+        # SQL / calendar coordinate / planner，与 ed1826db 以前完全一致）。
+        if eod_previous_close_by_symbol is None:
+            refresh_instruments: list[Instrument] = list(instruments)
+            reason_counts: Counter[str] = Counter()
+        else:
+            refresh_instruments, reason_counts = await self._plan_xdxr_refresh_set(
+                trade_date=trade_date,
+                instruments=instruments,
+                eod_previous_close_by_symbol=eod_previous_close_by_symbol,
+                adj_service=adj_service,
+                session=session,
+            )
+
+        result["planned_total"] = total
+        result["refresh_requested"] = len(refresh_instruments)
+        result["skipped_fresh"] = total - len(refresh_instruments)
+        result["planner_mode"] = (
+            "eod_previous_close"
+            if eod_previous_close_by_symbol is not None
+            else "legacy_full_refresh"
+        )
+        result["refresh_reason_counts"] = dict(sorted(reason_counts.items()))
+
+        logger.info(
+            "[BarsScheduler] XDXR计划 planned=%d refresh=%d skipped=%d mode=%s reasons=%s",
+            total, len(refresh_instruments), total - len(refresh_instruments),
+            result["planner_mode"], result["refresh_reason_counts"],
+        )
+
+        # tqdm 进度条
         try:
-            for instrument in (pbar or instruments):
+            from tqdm import tqdm
+            pbar = tqdm(
+                refresh_instruments, desc="因子重建检查", position=0, leave=True,
+                dynamic_ncols=True,
+            )
+        except ImportError:
+            pbar = None
+
+        try:
+            for instrument in (pbar or refresh_instruments):
                 symbol = instrument.symbol
                 result["checked"] += 1
                 try:
@@ -1700,6 +1782,7 @@ class BarsSchedulerService:
                     earliest = await adj_service.detect_company_action_change(
                         session, instrument.id, symbol, adapter,
                         force_refresh=True,
+                        effective_as_of=trade_date,
                     )
                     if earliest is None:
                         continue  # 无变化，跳过重建
@@ -1799,6 +1882,165 @@ class BarsSchedulerService:
                 )
 
         return result
+
+    async def _plan_xdxr_refresh_set(
+        self,
+        *,
+        trade_date: date,
+        instruments: list[Instrument],
+        eod_previous_close_by_symbol: dict[str, Decimal | None],
+        adj_service,  # AdjustmentFactorService（局部导入以保持既有 monkeypatch 契约）
+        session: AsyncSession,
+    ) -> tuple[list[Instrument], Counter[str]]:
+        """[G1B-3B2] 证据完整时用 planner 纯内存计算 XDXR refresh-set。
+
+        批量查询（调用数固定，禁止随股票数增长）：
+
+        1. 前一交易日（``get_previous_trading_day_async``，TradingCalendar owner）
+        2. 前一交易日 raw close（**1 次** 批量 SQL）
+        3. 全市场 schedule state（**1 次** Redis MGET）
+        4. T 日 trading-day ordinal（**1 次** calendar SQL）
+        5. schedule age（**1 次** calendar range SQL，仅当存在 schedule）
+
+        任一证据缺失 → 失败方对应 reason 强制刷新（fail-closed），不减少调用。
+        本方法**只决定 refresh-set**，不修改任何 production 调用数量语义。
+        """
+        from app.models.bar import BarDaily
+        from app.models.calendar import TradingCalendar
+        from app.services.calendar_service import get_previous_trading_day_async
+        from app.services.xdxr_refresh_planner import (
+            classify_previous_close_signal,
+            plan_xdxr_refresh,
+        )
+
+        reason_counts: Counter[str] = Counter()
+
+        # 1. 前一交易日
+        previous_trade_date = await get_previous_trading_day_async(
+            session, trade_date,
+        )
+
+        # 2. 前一交易日 raw close（1 次批量 SQL，禁止逐股查询）
+        prior_raw_close_by_symbol: dict[str, Decimal | None] = {}
+        if previous_trade_date is not None:
+            prior_rows = (
+                await session.execute(
+                    select(BarDaily.instrument_id, BarDaily.close).where(
+                        BarDaily.trade_date == previous_trade_date,
+                        BarDaily.instrument_id.in_(
+                            [instrument.id for instrument in instruments]
+                        ),
+                    )
+                )
+            ).all()
+            symbol_by_id = {
+                instrument.id: instrument.symbol for instrument in instruments
+            }
+            prior_raw_close_by_symbol = {
+                symbol_by_id[instrument_id]: close
+                for instrument_id, close in prior_rows
+                if instrument_id in symbol_by_id
+            }
+
+        # 3. 全市场 schedule state（1 次 Redis MGET）
+        schedule_by_id = adj_service.get_corporate_action_schedule_states(
+            [instrument.id for instrument in instruments]
+        )
+
+        # 4. T 日 trading-day ordinal（1 次 calendar SQL，ordinal 必须来自 DB）
+        calendar_trade_date = await session.scalar(
+            select(TradingCalendar.trade_date).where(
+                TradingCalendar.market == "A",
+                TradingCalendar.is_trading_day.is_(True),
+                TradingCalendar.trade_date == trade_date,
+            )
+        )
+        if calendar_trade_date is None:
+            trade_day_ordinal: int | None = None
+        else:
+            count = await session.scalar(
+                select(func.count())
+                .select_from(TradingCalendar)
+                .where(
+                    TradingCalendar.market == "A",
+                    TradingCalendar.is_trading_day.is_(True),
+                    TradingCalendar.trade_date <= trade_date,
+                )
+            )
+            trade_day_ordinal = (
+                int(count) - 1
+                if count is not None and int(count) > 0
+                else None
+            )
+
+        # 5. schedule age（1 次 calendar range SQL，仅当存在 schedule）
+        schedule_age_by_date: dict[date, int | None] = {}
+        scanned_dates = {
+            state.scanned_as_of
+            for state in schedule_by_id.values()
+            if state is not None and state.scanned_as_of <= trade_date
+        }
+        if scanned_dates and calendar_trade_date is not None:
+            min_scanned = min(scanned_dates)
+            calendar_dates = list(
+                (
+                    await session.scalars(
+                        select(TradingCalendar.trade_date)
+                        .where(
+                            TradingCalendar.market == "A",
+                            TradingCalendar.is_trading_day.is_(True),
+                            TradingCalendar.trade_date >= min_scanned,
+                            TradingCalendar.trade_date <= trade_date,
+                        )
+                        .order_by(TradingCalendar.trade_date.asc())
+                    )
+                ).all()
+            )
+            index_by_date = {d: idx for idx, d in enumerate(calendar_dates)}
+            trade_index = index_by_date.get(trade_date)
+            for scanned_date in scanned_dates:
+                scanned_index = index_by_date.get(scanned_date)
+                if (
+                    trade_index is None
+                    or scanned_index is None
+                    or scanned_index > trade_index
+                ):
+                    schedule_age_by_date[scanned_date] = None
+                else:
+                    schedule_age_by_date[scanned_date] = trade_index - scanned_index
+
+        # 纯内存 planner：逐只决定 refresh
+        refresh_instruments: list[Instrument] = []
+        for instrument in instruments:
+            schedule = schedule_by_id.get(instrument.id)
+            snapshot_previous_close = eod_previous_close_by_symbol.get(
+                instrument.symbol
+            )
+            prior_raw_close = prior_raw_close_by_symbol.get(instrument.symbol)
+            signal = classify_previous_close_signal(
+                snapshot_previous_close=snapshot_previous_close,
+                prior_raw_close=prior_raw_close,
+            )
+            schedule_age = (
+                None
+                if schedule is None
+                else schedule_age_by_date.get(schedule.scanned_as_of)
+            )
+            decision = plan_xdxr_refresh(
+                symbol=instrument.symbol,
+                trade_date=trade_date,
+                trade_day_ordinal=trade_day_ordinal,
+                schedule=schedule,
+                schedule_age_trade_days=schedule_age,
+                previous_close_signal=signal,
+                rotation_size=3,
+            )
+            for reason in decision.reasons:
+                reason_counts[reason] += 1
+            if decision.refresh:
+                refresh_instruments.append(instrument)
+
+        return refresh_instruments, reason_counts
 
     async def _audit_and_rebuild_factors(
         self,

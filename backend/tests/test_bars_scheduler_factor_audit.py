@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, date, datetime
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from zoneinfo import ZoneInfo
 
@@ -715,7 +716,6 @@ async def test_rebuild_detect_forces_fresh_refresh(monkeypatch: pytest.MonkeyPat
     用 MagicMock session + job_run_id=None 保持纯单元，detect 全部返回 None
     （无变化）以跳过 rebuild、避免 DB 写。只验证 detect 调用确实带 force_refresh=True。
     """
-    from app.services.adjustment_factor_service import AdjustmentFactorService
     from app.services.bars_scheduler_service import BarsSchedulerService
 
     service = BarsSchedulerService()
@@ -725,7 +725,7 @@ async def test_rebuild_detect_forces_fresh_refresh(monkeypatch: pytest.MonkeyPat
 
     async def fake_detect(
         session: Any, instrument_id: Any, symbol: str, adapter: Any, *,
-        force_refresh: bool = False,
+        force_refresh: bool = False, effective_as_of: Any = None,
     ) -> None:
         captured.append((symbol, force_refresh))
         return None  # 无变化，跳过重建
@@ -765,7 +765,6 @@ async def test_rebuild_pytdx_source_error_trips_breaker(
     不等待连续 N 只、不继续后续标的。
     """
     from app.core.pytdx_adapter import PytdxSourceError
-    from app.services.adjustment_factor_service import AdjustmentFactorService
     from app.services.bars_scheduler_service import BarsSchedulerService
 
     service = BarsSchedulerService()

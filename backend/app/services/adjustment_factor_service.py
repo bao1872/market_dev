@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
 from typing import TYPE_CHECKING
@@ -552,35 +553,23 @@ class AdjustmentFactorService:
                 instrument_id, exc,
             )
 
-    def get_corporate_action_schedule_state(
+    def _parse_schedule_state_raw(
         self,
+        raw: object,
+        *,
         instrument_id: uuid.UUID,
     ) -> CorporateActionScheduleState | None:
-        """读取 XDXR 未来事件日程（fail-closed，G1B-3B1）。
+        """解析单条 XDXR schedule state 原始 Redis 值（fail-closed，G1B-3B1）。
 
-        任何异常统一返回 ``None``：
+        完全复用已冻结规则：
 
-        - Redis miss（key 不存在）
-        - JSON malformed
-        - 字段缺失（scanned_as_of / next_event_date 任缺）
-        - 日期非法（非 ISO date）
+        - ``None`` / 非 UTF-8 bytes / 非 str(bytes 之外的类型）
+        - bad JSON / 非 dict / 缺字段（scanned_as_of / next_event_date 任缺）
+        - 非法日期（非 ISO date）
         - ``next_event_date`` 若存在且 ``<= scanned_as_of``（不是未来事件）
-        - Redis 连接/协议错误
 
-        ``None`` 语义 = 无法证明 schedule freshness → 下一轮 planner 强制刷新。
-        不得返回伪造的「无未来事件」。
+        全部返回 ``None``。单条 getter 与批量 MGET 共用本解析器。
         """
-        try:
-            from app.core.redis_client import get_sync_redis
-            client = get_sync_redis()
-            key = f"{_XDXR_SCHEDULE_PREFIX}:{instrument_id}"
-            raw = client.get(key)
-        except Exception as exc:
-            logger.debug(
-                "读取 XDXR schedule state 失败 instrument_id=%s: %s", instrument_id, exc
-            )
-            return None
-
         if raw is None:
             return None
         if isinstance(raw, bytes):
@@ -634,6 +623,81 @@ class AdjustmentFactorService:
             scanned_as_of=scanned_as_of,
             next_event_date=next_event_date,
         )
+
+    def get_corporate_action_schedule_state(
+        self,
+        instrument_id: uuid.UUID,
+    ) -> CorporateActionScheduleState | None:
+        """读取单只 XDXR 未来事件日程（fail-closed，G1B-3B1）。
+
+        任何异常统一返回 ``None``（Redis miss / 连接错误 / bad JSON / 缺字段 /
+        非法日期 / next_event 非法）。解析逻辑见 :meth:`_parse_schedule_state_raw`。
+
+        ``None`` 语义 = 无法证明 schedule freshness → 下一轮 planner 强制刷新。
+        不得返回伪造的「无未来事件」。
+        """
+        try:
+            from app.core.redis_client import get_sync_redis
+            client = get_sync_redis()
+            key = f"{_XDXR_SCHEDULE_PREFIX}:{instrument_id}"
+            raw = client.get(key)
+        except Exception as exc:
+            logger.debug(
+                "读取 XDXR schedule state 失败 instrument_id=%s: %s", instrument_id, exc
+            )
+            return None
+
+        return self._parse_schedule_state_raw(raw, instrument_id=instrument_id)
+
+    def get_corporate_action_schedule_states(
+        self,
+        instrument_ids: Sequence[uuid.UUID],
+    ) -> dict[uuid.UUID, CorporateActionScheduleState | None]:
+        """批量读取 XDXR schedule state（G1B-3B2 优化证据层）。
+
+        关键合同：
+
+        - N 只股票 = **一次** Redis ``MGET``，禁止逐只 ``GET``；
+        - ``instrument_ids`` 自动去重（保留首次出现顺序）；
+        - MGET 整体异常 / 返回长度不匹配 / 任意 Redis 故障 → 全部 ``None``
+          （→ planner ``schedule_unknown`` → 全市场 XDXR），**安全退化**，
+          不允许 fallback 成 N 次 ``GET``。
+        """
+        unique_ids = list(dict.fromkeys(instrument_ids))
+        if not unique_ids:
+            return {}
+
+        keys = [
+            f"{_XDXR_SCHEDULE_PREFIX}:{instrument_id}"
+            for instrument_id in unique_ids
+        ]
+
+        try:
+            from app.core.redis_client import get_sync_redis
+            client = get_sync_redis()
+            raw_values = client.mget(keys)
+        except Exception as exc:
+            logger.warning(
+                "批量读取 XDXR schedule state 失败（MGET 整体异常，安全退化全 None）: %s",
+                exc,
+            )
+            return dict.fromkeys(unique_ids)
+
+        if (
+            not isinstance(raw_values, (list, tuple))
+            or len(raw_values) != len(unique_ids)
+        ):
+            logger.warning(
+                "批量读取 XDXR schedule state MGET 返回长度不匹配，安全退化全 None",
+            )
+            return dict.fromkeys(unique_ids)
+
+        return {
+            instrument_id: self._parse_schedule_state_raw(
+                raw, instrument_id=instrument_id,
+            )
+            for instrument_id, raw in zip(unique_ids, raw_values, strict=True)
+        }
 
 
 if __name__ == "__main__":

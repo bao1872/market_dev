@@ -256,3 +256,126 @@ async def test_detect_empty_xdxr_with_explicit_effective_as_of_stores_schedule()
     payload = json.loads(sched_raw)
     assert payload["scanned_as_of"] == "2026-09-11"  # 显式 effective_as_of 被记录
     assert payload["next_event_date"] is None  # 空 XDXR → 无已知未来事件
+
+
+# =============================================================================
+# G1B-3B2: 批量 schedule state（MGET）合同 A-F
+# =============================================================================
+
+
+class _CountingRedis:
+    """记录 get / mget 调用次数的 fake Redis。"""
+
+    def __init__(self, data: dict[str, object] | None = None) -> None:
+        self.data: dict[str, object] = dict(data or {})
+        self.get_calls = 0
+        self.mget_calls = 0
+
+    def set(self, key: str, value: object) -> None:
+        self.data[key] = value
+
+    def get(self, key: str) -> object | None:
+        self.get_calls += 1
+        return self.data.get(key)
+
+    def mget(self, keys: list[str]) -> list[object | None]:
+        self.mget_calls += 1
+        return [self.data.get(k) for k in keys]
+
+
+class _BoomRedis:
+    """MGET 整体抛错的 fake Redis。"""
+
+    def mget(self, keys: list[str]) -> list[object | None]:
+        raise RuntimeError("redis down")
+
+
+class _ShortRedis:
+    """MGET 返回长度不匹配的 fake Redis。"""
+
+    def mget(self, keys: list[str]) -> list[object | None]:
+        return ["x"]  # 长度错误
+
+
+def _schedule_payload(scanned: str, next_event: str | None) -> str:
+    return json.dumps({
+        "scanned_as_of": scanned,
+        "next_event_date": next_event,
+    })
+
+
+def test_batch_schedule_5000_ids_single_mget() -> None:
+    # A: 5000 IDs → 1 次 MGET，0 次 GET
+    svc = AdjustmentFactorService()
+    ids = [uuid.uuid4() for _ in range(5000)]
+    fake = _CountingRedis()
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        result = svc.get_corporate_action_schedule_states(ids)
+    assert fake.mget_calls == 1
+    assert fake.get_calls == 0
+    assert len(result) == 5000
+    assert all(v is None for v in result.values())
+
+
+def test_batch_schedule_dedup_keys() -> None:
+    # B: 重复 ID → MGET key 去重，返回 unique ID map
+    svc = AdjustmentFactorService()
+    i1, i2 = uuid.uuid4(), uuid.uuid4()
+    fake = _CountingRedis({
+        f"adj_factor_xdxr_schedule:{i1}": _schedule_payload("2026-09-01", None),
+        f"adj_factor_xdxr_schedule:{i2}": _schedule_payload("2026-09-01", "2026-09-10"),
+    })
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        result = svc.get_corporate_action_schedule_states([i1, i2, i1, i2])
+    assert len(result) == 2
+    assert result[i1] == CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=None,
+    )
+    assert result[i2] == CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=date(2026, 9, 10),
+    )
+
+
+def test_batch_schedule_malformed_only_that_id() -> None:
+    # C: 单个 malformed payload → 仅该 ID=None，其他正常解析
+    svc = AdjustmentFactorService()
+    i1, i2 = uuid.uuid4(), uuid.uuid4()
+    fake = _CountingRedis({
+        f"adj_factor_xdxr_schedule:{i1}": "{not-json",
+        f"adj_factor_xdxr_schedule:{i2}": _schedule_payload("2026-09-01", None),
+    })
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        result = svc.get_corporate_action_schedule_states([i1, i2])
+    assert result[i1] is None
+    assert result[i2] == CorporateActionScheduleState(
+        scanned_as_of=date(2026, 9, 1), next_event_date=None,
+    )
+
+
+def test_batch_schedule_mget_raise_all_none() -> None:
+    # D: MGET raise → 所有 requested ID=None（安全退化）
+    svc = AdjustmentFactorService()
+    ids = [uuid.uuid4() for _ in range(3)]
+    with patch("app.core.redis_client.get_sync_redis", return_value=_BoomRedis()):
+        result = svc.get_corporate_action_schedule_states(ids)
+    assert all(v is None for v in result.values())
+
+
+def test_batch_schedule_mget_length_mismatch_all_none() -> None:
+    # E: MGET 返回长度不匹配 → 所有 requested ID=None
+    svc = AdjustmentFactorService()
+    ids = [uuid.uuid4() for _ in range(3)]
+    with patch("app.core.redis_client.get_sync_redis", return_value=_ShortRedis()):
+        result = svc.get_corporate_action_schedule_states(ids)
+    assert all(v is None for v in result.values())
+
+
+def test_batch_schedule_empty_ids_no_calls() -> None:
+    # F: 空 IDs → Redis 0 calls，返回空 dict
+    svc = AdjustmentFactorService()
+    fake = _CountingRedis()
+    with patch("app.core.redis_client.get_sync_redis", return_value=fake):
+        result = svc.get_corporate_action_schedule_states([])
+    assert result == {}
+    assert fake.mget_calls == 0
+    assert fake.get_calls == 0

@@ -1898,7 +1898,7 @@ async def test_rebuild_freshness_failure_after_partial_success_blocks_run(
 
     async def fake_detect(
         self: Any, session: Any, instrument_id: Any, symbol: str, adapter: Any, *,
-        force_refresh: bool = False,
+        force_refresh: bool = False, effective_as_of: Any = None,
     ) -> None:
         called.append(symbol)
         if symbol == "000001":
@@ -1974,6 +1974,9 @@ async def test_run_post_daily_phase_reraises_audit_failure(
         raise FactorSourceUnavailableError("FACTOR_AUDIT_UNHEALTHY")
 
     monkeypatch.setattr(service, "_audit_and_rebuild_factors", audit_boom)
+    # 纯单元：resolve 阶段需真实 session，这里跳过（返回非空以触发 audit 阶段，
+    # 验证 audit 抛 FactorSourceUnavailableError 向上传播；不验证 resolve/DSA 路径）
+    monkeypatch.setattr(service, "_resolve_factor_audit_symbols", AsyncMock(return_value=["600519"]))
 
     result = scheduler_module.BatchResult()
     with pytest.raises(
