@@ -210,5 +210,119 @@ async def test_target_set_version_rolling_resets_triggered_ids() -> None:
     mock_adapter.current_quote_price = 110.0
     res4 = await monitor.run_monitor_cycle([inst], {inst_id: (node_v2, smc_v2)}, state3, adapter=mock_adapter)
     assert len(res4.events_detected) == 2  # 新版本的 Node 和 SMC 重新触发！
+    assert res4.events_detected[0].event_type in ("node_cluster_touch", "smc_bos_cross")
+    assert res4.events_detected[1].event_type in ("node_cluster_touch", "smc_bos_cross")
     state4 = res4.updated_states[inst_id]
     assert len(state4["triggered_target_ids"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_service_restart_bootstraps_current_price() -> None:
+    """验证服务重启（新实例无内存价格缓存）时，若 Target Set Version 一致，
+    能从持久化 state 的 current_price 恢复 P_last，捕获重启间隙内的穿透事件。"""
+    inst = Instrument(id=uuid.uuid4(), symbol="600519", name="贵州茅台", market="SH")
+    inst_id = inst.id
+
+    class MockPytdxAdapter:
+        def get_security_quotes_with_provenance(
+            self, symbols: list[str]
+        ) -> tuple[list[dict[str, Any]], PytdxCallProvenance]:
+            rows = [
+                {
+                    "code": "600519",
+                    "price": 105.0,  # 重启后抓到的最新价
+                    "last_close": 98.0,
+                    "open": 99.0,
+                    "high": 105.0,
+                    "low": 98.0,
+                    "vol": 1000,
+                    "amount": 10000000.0,
+                }
+            ]
+            return rows, PytdxCallProvenance(server=("127.0.0.1", 7709), connection_generation=1)
+
+    node_v1 = _make_node_target_set("v1", 102.0)
+    smc_v1 = _make_smc_target_set("v1", 103.0)
+
+    # 模拟持久化库中的历史状态：当时价格 100.0，目标版本为 v1，尚未穿透
+    persisted_state = {
+        "current_price": 100.0,
+        "node_target_set_version": "v1",
+        "smc_target_set_version": "v1",
+        "triggered_target_ids": [],
+        "triggered_node_target_ids": [],
+        "triggered_smc_target_ids": [],
+    }
+
+    # 全新实例启动（模拟服务重启，内存 tracker 为空）
+    fresh_monitor = WatchlistRealtimeMonitorService()
+    assert fresh_monitor.fact_service.price_tracker.get_last_price("600519") is None
+
+    res = await fresh_monitor.run_monitor_cycle(
+        [inst],
+        {inst_id: (node_v1, smc_v1)},
+        {inst_id: persisted_state},
+        adapter=MockPytdxAdapter(),
+    )
+
+    # 成功从 100.0 追溯至 105.0，捕获重启间隙的穿透！
+    assert len(res.events_detected) == 2
+    event_types = {e.event_type for e in res.events_detected}
+    assert event_types == {"node_cluster_touch", "smc_bos_cross"}
+    assert res.updated_states[inst_id]["price_last"] == 100.0
+    assert res.updated_states[inst_id]["current_price"] == 105.0
+
+
+@pytest.mark.asyncio
+async def test_xdxr_version_roll_suppresses_discontinuity_crossing() -> None:
+    """验证 XDXR 发生时价格坐标发生断层，版本滚动首帧强制 (p, p)，绝不虚假穿透新目标。"""
+    inst = Instrument(id=uuid.uuid4(), symbol="600519", name="贵州茅台", market="SH")
+    inst_id = inst.id
+
+    class MockPytdxAdapter:
+        def __init__(self, price: float) -> None:
+            self.price = price
+
+        def get_security_quotes_with_provenance(
+            self, symbols: list[str]
+        ) -> tuple[list[dict[str, Any]], PytdxCallProvenance]:
+            rows = [
+                {
+                    "code": "600519",
+                    "price": self.price,
+                    "last_close": self.price,
+                    "open": self.price,
+                    "high": self.price,
+                    "low": self.price,
+                    "vol": 1000,
+                    "amount": 10000000.0,
+                }
+            ]
+            return rows, PytdxCallProvenance(server=("127.0.0.1", 7709), connection_generation=1)
+
+    monitor = WatchlistRealtimeMonitorService()
+
+    # 除权前：价格 100.0，目标 set v1 目标位 90.0
+    node_v1 = _make_node_target_set("v1", 90.0)
+    res1 = await monitor.run_monitor_cycle(
+        [inst],
+        {inst_id: (node_v1, None)},
+        {},
+        adapter=MockPytdxAdapter(100.0),
+    )
+
+    # 除权后（如 10 送 10）：价格变为 50.0，Target Set 换算后滚动为 v2（目标位 70.0）
+    # 若错误地以 [100.0, 50.0] 计算穿透，就会错误穿越 70.0 产生虚假报警！
+    node_v2 = _make_node_target_set("v2", 70.0)
+    res2 = await monitor.run_monitor_cycle(
+        [inst],
+        {inst_id: (node_v2, None)},
+        res1.updated_states,
+        adapter=MockPytdxAdapter(50.0),
+    )
+
+    # 验证版本滚动首帧被压制为 (50.0, 50.0)，零虚警！
+    assert len(res2.events_detected) == 0
+    assert res2.updated_states[inst_id]["price_last"] == 50.0
+    assert res2.updated_states[inst_id]["current_price"] == 50.0
+

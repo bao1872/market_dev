@@ -41,7 +41,9 @@ EVENT_CATEGORY_NODE_CONSENSUS = "node_consensus"
 
 # 事件类型 → 监控事件类别映射（新业务统计归类用）
 EVENT_TYPE_TO_CATEGORY: dict[str, str] = {
-    # 结构（SMC 五类）
+    # 结构（SMC）
+    "smc_bos_cross": EVENT_CATEGORY_STRUCTURE,
+    "smc_choch_cross": EVENT_CATEGORY_STRUCTURE,
     "smc_bos_retest": EVENT_CATEGORY_STRUCTURE,
     "smc_choch_retest": EVENT_CATEGORY_STRUCTURE,
     "smc_equal_highs_retest": EVENT_CATEGORY_STRUCTURE,
@@ -67,6 +69,8 @@ EVENT_TYPE_TO_INDICATOR_VIEW: dict[str, str] = {
     # Volume Node
     "node_cluster_touch": "node_cluster",
     # SMC
+    "smc_bos_cross": "smc",
+    "smc_choch_cross": "smc",
     "smc_bos_retest": "smc",
     "smc_choch_retest": "smc",
     "smc_equal_highs_retest": "smc",

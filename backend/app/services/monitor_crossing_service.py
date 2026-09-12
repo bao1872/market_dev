@@ -20,8 +20,8 @@ from app.constants.indicator_contract import NODE_CLUSTER_EVENT_TTL_SECONDS
 from app.services.node_monitor_target_service import NodeMonitorTargetSet
 from app.services.smc_monitor_target_service import SmcMonitorTargetSet
 from app.strategy.monitors.smc_monitor import (
-    SMC_BOS_RETEST,
-    SMC_CHOCH_RETEST,
+    SMC_BOS_CROSS,
+    SMC_CHOCH_CROSS,
     SMC_ORDER_BLOCK_FIRST_TOUCH,
 )
 from app.strategy.monitors.volume_node_monitor import EVENT_TYPE_NODE_CLUSTER_TOUCH
@@ -153,7 +153,7 @@ def evaluate_smc_events(
                 else:
                     is_bos = (lane_bias == -1)
 
-                event_type = SMC_BOS_RETEST if is_bos else SMC_CHOCH_RETEST
+                event_type = SMC_BOS_CROSS if is_bos else SMC_CHOCH_CROSS
                 structure_type = "BOS" if is_bos else "CHOCH"
                 direction = "UP" if is_upward else "DOWN"
 

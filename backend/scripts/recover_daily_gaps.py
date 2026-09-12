@@ -38,6 +38,7 @@ try:
 except Exception:  # noqa: BLE001 - 缺 dotenv/文件时静默（容器依赖环境变量）
     pass
 
+from app.core.pytdx_adapter import PytdxAdapter  # noqa: E402
 from app.db import AsyncSessionLocal  # noqa: E402
 from app.services.daily_gap_recovery_service import (  # noqa: E402
     DailyGapRecoveryDayResult,
@@ -93,11 +94,15 @@ def _day_to_dict(day: DailyGapRecoveryDayResult) -> dict[str, Any]:
 
 async def _run(args: argparse.Namespace) -> int:
     async with AsyncSessionLocal() as session:
+        # [G1 缺口修复主源回正] 注入 pytdx adapter：repair_market_wide_daily_gap 与
+        # 一致性门禁以 pytdx 为首选主源（失败/无 adapter 时回退同花顺）。
+        # adapter 懒连接（get_daily_bars 内按需 connect），单次运行复用同一实例。
         result = await recover_recent_daily_gaps(
             session,
             through=args.through,
             lookback_trade_days=args.lookback,
             dry_run=args.dry_run,
+            adapter=PytdxAdapter(),
         )
 
     report = {

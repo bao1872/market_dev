@@ -67,6 +67,10 @@ from app.services.canonical_computation_service import CanonicalComputationServi
 from app.services.instrument_maintenance_service import is_index_symbol
 from app.services.market_data_aggregation_service import MarketDataAggregationService
 from app.services.node_cluster_input_provider import NodeClusterInputProvider
+from app.services.node_monitor_target_service import (
+    NodeMonitorTargetService,
+    NodeMonitorTargetUnavailableError,
+)
 from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
@@ -126,6 +130,8 @@ _CST = ZoneInfo("Asia/Shanghai")
 # [CHANGE-20260728-010] 移除 BB 事件 emoji/severity（布林带不再触发盘中监控）
 _EVENT_EMOJI: dict[str, str] = {
     "node_cluster_touch": "🟣",
+    "smc_bos_cross": "🔵",
+    "smc_choch_cross": "🟦",
     "smc_bos_retest": "🔵",
     "smc_choch_retest": "🟦",
     "smc_equal_highs_retest": "🔹",
@@ -136,6 +142,8 @@ _EVENT_EMOJI: dict[str, str] = {
 # 事件类型 → 严重级别
 _EVENT_SEVERITY: dict[str, str] = {
     "node_cluster_touch": "warn",
+    "smc_bos_cross": "warn",
+    "smc_choch_cross": "danger",
     "smc_bos_retest": "warn",
     "smc_choch_retest": "danger",
     "smc_equal_highs_retest": "info",
@@ -183,12 +191,18 @@ class MonitorBatchService:
         result = await service.execute_monitor_cycle(db)
     """
 
-    def __init__(self) -> None:
+    def __init__(self, fact_service: Any | None = None) -> None:
         # [CHANGE-20260718-004 Node Cluster engine] Profile 缓存：实例级 in-memory 缓存，
         # 键 (instrument_id, daily_last_bar, 15m_last_bar) → (NodeClusterProfileResult, monotonic_ts)。
         # 保留 _vp_result 供 render_monitoring_chart 鸭子类型访问 profile_df/peak_df。
         # 简单 LRU：超过 256 项时清空最早一半（见 _compute_node_cluster_profile）。
         self._node_cluster_profile_cache: dict[tuple[str, str, str], tuple[Any, float]] = {}
+        # [Stage G3/G6] 盘中实时行情事实服务与价格区间追踪器
+        from app.services.realtime_market_fact_service import (
+            PriceTracker,
+            RealtimeMarketFactService,
+        )
+        self.fact_service: RealtimeMarketFactService = fact_service or RealtimeMarketFactService(PriceTracker())
 
     async def execute_monitor_cycle(self, db: AsyncSession) -> MonitorCycleResult:
         """执行单轮监控周期（基于评估表）。
@@ -688,6 +702,47 @@ class MonitorBatchService:
             trade_date=today,
             bar_time=source_bar_time,
         )
+
+        # [G6 生产接线] 注入冻结 Node TargetSet + 连续快照价格区间，使
+        # WatchlistMonitor.detect_events 走一次性穿透（one-shot crossing）新路径。
+        # - node_target_set：由本周期已计算的 Node profile（实例缓存，PNG 段复用，零额外开销）
+        #   构建；坐标/可用性不一致导致构建失败时优雅回退旧路径。
+        # - price_last/current_price：取最新已完成 1m close，经 PriceTracker 维持 [P_last, P_curr]。
+        # 注：SMC 冻结 TargetSet 需独立的 compute_smc_pine 预计算 + 持久化编排层（G6 剩余项），
+        # 本期未注入 smc_target_set，SMC 仍走旧路径（待编排层落地后激活 smc_bos_cross 等）。
+        node_target_set = None
+        try:
+            profile = await self._compute_node_cluster_profile(node_input, instrument_id)
+            if profile is not None:
+                try:
+                    node_target_set = NodeMonitorTargetService.build_target_set(
+                        node_input, profile
+                    )
+                except NodeMonitorTargetUnavailableError as exc:
+                    logger.debug("[%s] Node target set 坐标/可用性不一致，回退旧路径: %s", symbol, exc)
+                    node_target_set = None
+        except Exception as exc:  # noqa: BLE001 - profile 计算失败必须回退，绝不阻断监控周期
+            logger.debug("[%s] Node profile 计算失败，回退旧路径: %s", symbol, exc)
+            node_target_set = None
+
+        price_last: float | None = None
+        current_price: float | None = None
+        if not bars_minute.empty:
+            try:
+                current_price = float(bars_minute["close"].iloc[-1])
+            except Exception:  # noqa: BLE001
+                current_price = None
+        if current_price is not None:
+            price_last, current_price = self.fact_service.price_tracker.update_price(
+                symbol, current_price
+            )
+
+        if node_target_set is not None:
+            context.node_target_set = node_target_set
+        if current_price is not None:
+            context.current_price = current_price
+        if price_last is not None:
+            context.price_last = price_last
 
         # e. 执行 WatchlistMonitor 算法
         try:

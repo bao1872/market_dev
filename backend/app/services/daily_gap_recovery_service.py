@@ -31,12 +31,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import date
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.calendar import TradingCalendar
 from app.services.daily_gap_repair_service import (
+    compare_db_vs_pytdx_for_date,
     compare_db_vs_ths_for_date,
     repair_market_wide_daily_gap,
     validate_consistency,
@@ -165,6 +167,7 @@ async def _recover_market_wide_day(
     missing_before: int,
     reference_coverage_threshold: float,
     dry_run: bool,
+    adapter: Any | None = None,
 ) -> DailyGapRecoveryDayResult:
     """整日空洞：reference 门禁 → bulk repair → residual（pytdx-first）。"""
     day = DailyGapRecoveryDayResult(
@@ -186,14 +189,30 @@ async def _recover_market_wide_day(
     day.reference_trade_date = reference
 
     # 写库前置门禁：只对「早于目标日」的完整 reference 做 A/B；dry_run 无需 report。
+    # 策略：若注入了 pytdx adapter，优先以 pytdx 为主源门禁；失败或无 adapter 时回退至 THS。
     consistency_report = None
     if not dry_run:
-        consistency_report = await compare_db_vs_ths_for_date(session, reference)
-        validate_consistency(consistency_report)  # 失败抛 SourceConsistencyError
+        if adapter is not None:
+            try:
+                consistency_report = await compare_db_vs_pytdx_for_date(
+                    session, reference, adapter=adapter
+                )
+                validate_consistency(consistency_report)
+            except Exception as exc:
+                logger.warning(
+                    "[GAP-RECOVERY] compare_db_vs_pytdx_for_date 门禁未通过 (%s)，回退至 THS 门禁",
+                    exc,
+                )
+                consistency_report = await compare_db_vs_ths_for_date(session, reference)
+                validate_consistency(consistency_report)
+        else:
+            consistency_report = await compare_db_vs_ths_for_date(session, reference)
+            validate_consistency(consistency_report)  # 失败抛 SourceConsistencyError
 
     repair = await repair_market_wide_daily_gap(
         session,
         trade_date,
+        adapter=adapter,
         consistency_report=consistency_report,
         dry_run=dry_run,
         use_eastmoney_fallback=False,
@@ -247,6 +266,7 @@ async def recover_recent_daily_gaps(
     lookback_trade_days: int = 10,
     dry_run: bool = False,
     reference_coverage_threshold: float = _DEFAULT_REFERENCE_COVERAGE_THRESHOLD,
+    adapter: Any | None = None,
 ) -> DailyGapRecoveryResult:
     """恢复「截至 ``through`` 最近 N 个交易日」内的全部日线缺口。
 
@@ -256,6 +276,7 @@ async def recover_recent_daily_gaps(
         lookback_trade_days: 向前回看多少个交易日。
         dry_run: True 时只拉取/扫描，不写任何表。
         reference_coverage_threshold: reference day 覆盖率阈值。
+        adapter: 注入的 pytdx adapter（提供时优先用于 A/B 门禁及 bulk repair）。
 
     Returns:
         :class:`DailyGapRecoveryResult`；调用方据 ``unresolved_dates`` 判定整体成败。
@@ -293,6 +314,7 @@ async def recover_recent_daily_gaps(
                 missing_before=gap.missing_count,
                 reference_coverage_threshold=reference_coverage_threshold,
                 dry_run=dry_run,
+                adapter=adapter,
             )
         else:
             day = await _recover_sparse_day(

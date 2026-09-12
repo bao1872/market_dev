@@ -32,6 +32,8 @@ EVENT_LABELS: dict[str, str] = {
     "bb_mid_touch": "价格回到近期价格中枢",
     "bb_lower_touch": "价格触及近期波动下沿",
     "node_cluster_touch": "价格触及成交密集区",
+    "smc_bos_cross": "价格突破日线 SMC 破位结构",
+    "smc_choch_cross": "价格突破日线 SMC 趋势反转结构",
     "smc_bos_retest": "价格回踩日线 SMC 破位结构",
     "smc_choch_retest": "价格回踩日线 SMC 趋势反转结构",
     "smc_equal_highs_retest": "价格回踩日线 SMC 等高",

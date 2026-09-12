@@ -326,11 +326,30 @@ class WatchlistMonitor(StrategyRuntime):
                     else p_curr
                 )
 
-            triggered_ids: set[str] = (
-                set(prev_state.state.get("triggered_target_ids") or [])
-                if prev_state
+            curr_node_ver = node_target_set.target_set_version if node_target_set else None
+            curr_smc_ver = smc_target_set.target_set_version if smc_target_set else None
+
+            prev_node_ver = prev_state.state.get("node_target_set_version") if prev_state else None
+            prev_smc_ver = prev_state.state.get("smc_target_set_version") if prev_state else None
+
+            is_node_ver_changed = (prev_node_ver is not None and curr_node_ver != prev_node_ver)
+            is_smc_ver_changed = (prev_smc_ver is not None and curr_smc_ver != prev_smc_ver)
+
+            node_triggered: set[str] = (
+                set(prev_state.state.get("triggered_node_target_ids") or [])
+                if prev_state and not is_node_ver_changed
                 else set()
             )
+            smc_triggered: set[str] = (
+                set(prev_state.state.get("triggered_smc_target_ids") or [])
+                if prev_state and not is_smc_ver_changed
+                else set()
+            )
+            if prev_state and not node_triggered and not smc_triggered and not (is_node_ver_changed or is_smc_ver_changed):
+                legacy_triggered = set(prev_state.state.get("triggered_target_ids") or [])
+                node_triggered.update(legacy_triggered)
+                smc_triggered.update(legacy_triggered)
+
             evt_time = context.bar_time or datetime.now()
 
             if node_target_set is not None:
@@ -341,7 +360,7 @@ class WatchlistMonitor(StrategyRuntime):
                         float(p_last),
                         float(p_curr),
                         evt_time,
-                        triggered_ids,
+                        node_triggered,
                     )
                     events.extend(node_evts)
                 except Exception as exc:
@@ -355,13 +374,17 @@ class WatchlistMonitor(StrategyRuntime):
                         float(p_last),
                         float(p_curr),
                         evt_time,
-                        triggered_ids,
+                        smc_triggered,
                     )
                     events.extend(smc_evts)
                 except Exception as exc:
                     logger.warning("evaluate_smc_events 失败: %s", exc)
 
-            curr_state.state["triggered_target_ids"] = list(triggered_ids)
+            curr_state.state["triggered_node_target_ids"] = list(node_triggered)
+            curr_state.state["triggered_smc_target_ids"] = list(smc_triggered)
+            curr_state.state["triggered_target_ids"] = list(node_triggered | smc_triggered)
+            curr_state.state["node_target_set_version"] = curr_node_ver
+            curr_state.state["smc_target_set_version"] = curr_smc_ver
             curr_state.state["price_last"] = p_last
             return events
 

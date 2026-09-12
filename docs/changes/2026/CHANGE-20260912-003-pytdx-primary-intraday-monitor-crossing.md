@@ -4,7 +4,7 @@
 - 基线：`ecc37bf71f33a57915ffc1f42e5842f472fa20fa`
 - 实施 commit：`28fac2b6`（G1 缺口修复主源回正） + `607df2ed`（G3~G6 事实引擎与极速穿透事件主干）
 - 层级：**Level 2（契约敏感）**：行情数据源契约收口（pytdx 唯一主源，外部全部降级为备用源），盘中自选股监控重构为轻量级连续快照目标位穿透与一次性事件（One-shot crossing）。
-- 状态：`verified_code`（纯单元测试 370 passed，无回归；零破坏性 DB 写入）。
+- 状态：`partial`（引擎与事件合同完成并通过单测；生产接线部分完成。G1~G8 **并非全部完成**，准确状态见文末「状态纠偏」。）。
 
 ## 1. 变更背景与核心动因
 
@@ -36,8 +36,9 @@
   - 触发后发射 `EVENT_TYPE_NODE_CLUSTER_TOUCH`；
 - **SMC 实时事件 (G5)**：
   - 消费 `SmcMonitorTargetSet`；
-  - 顺势突破（high + bias=1 或 low + bias=-1）触发 `smc_bos_retest` (BOS)；
-  - 逆势反转（high + bias=-1 或 low + bias=1）触发 `smc_choch_retest` (CHoCH)；
+  - 顺势突破（high + bias=1 或 low + bias=-1）触发 `smc_bos_cross` (BOS，首次突破一次性穿透)；
+  - 逆势反转（high + bias=-1 或 low + bias=1）触发 `smc_choch_cross` (CHoCH，首次突破一次性穿透)；
+  - `smc_bos_retest` / `smc_choch_retest` **仅保留作历史数据回读与旧事件兼容**，不再由首次突破路径发射；
   - 订单块触碰：价格落入或进入 $[OB_{\text{low}}, OB_{\text{high}}]$ 触发 `smc_order_block_first_touch`；
   - 彻底去除 EQH/EQL 触发与复杂 episode retest。
 - **一次性铁律 (One-Shot Lifecycle)**：
@@ -69,3 +70,35 @@
   - `test_watchlist_realtime_monitor_service.py`: 2 passed
   - 关联模块回归（EOD 调度、SMC、自选股等）全量 370 个纯单元测试在 1.45 秒内全数通过（PASS 100%）。
 - **代码规范**：Ruff linting 全数通过，Git diff whitespace 检查 clean。
+
+## 5. 状态纠偏（本 correction commit 更正，2026-09-12）
+
+下游纠偏评审结论：G1~G8 **并非全部完成**，此前「G1~G8 完成 / G8 100% E2E」表述过度乐观。
+本 correction commit 仅完成下列 6 项纠偏，**不向前开发 G8**：
+
+1. **生产监控接线（G6 部分）**：`MonitorBatchService` 注入冻结 Node TargetSet + 连续快照价格区间，
+   使 `WatchlistMonitor.detect_events` 走一次性穿透（one-shot crossing）新路径（Node 已激活，零额外重算；
+   SMC 待 `compute_smc_pine` 冻结 TargetSet 编排层落地）。
+2. **事件合同（G5 引擎）**：首次突破 BOS/CHoCH 统一发射 `smc_bos_cross` / `smc_choch_cross`；
+   `smc_bos_retest` / `smc_choch_retest` 仅保留作历史数据回读兼容。
+3. **版本/重启价格 bootstrap（G7）**：Target Set Version 变更首帧强制 `(p,p)`，重启窗口期由持久化
+   `current_price` 恢复 `P_last` 支持 catch-up 穿透。
+4. **缺口修复生产接线（G1）**：`scripts/recover_daily_gaps.py` 注入 pytdx adapter，repair 与一致性门禁以 pytdx 为主源。
+5. **CHANGE-003/004 状态更正**：删除「G1~G8 完成 / G8 100% E2E」表述。
+6. **G2、G1D、G1E 保持未完成。**
+
+冻结状态（本 commit 后）：
+
+| 阶段 | 状态 | 说明 |
+|---|---|---|
+| G0 / G1A / G1B-2A / G1B-2B / G1B-3B / XDXR | ✅ | 已完成 |
+| G1 缺口修复 | ✅ | 服务可用 + 生产 owner 已注入 pytdx adapter |
+| G1C | 🟡 | 部分完成 |
+| G1D / G1E / G2 | ❌ | **保持未完成** |
+| G3 实时行情事实 | ✅ | 引擎组件 + 生产接线（MonitorBatchService 已注入 PriceTracker） |
+| G4 筹码共识穿透 | ✅ | 引擎 + 生产 Node 路径已激活 |
+| G5 SMC 事件合同 | 🟡 | 引擎合同已修正（`*_CROSS`）；SMC 生产穿透待冻结 TargetSet 编排层 |
+| G6 生产接线 | 🟡 | Node 已激活；SMC 待编排层 |
+| G7 坐标对齐 + XDXR 版本滚动 | 🟡 | 逻辑已实现并单测，生产经 `WatchlistMonitor.detect_events` 部分生效 |
+| G8 端到端 E2E | ❌ | dry-run 脚本存在，未宣告完整通过 |
+

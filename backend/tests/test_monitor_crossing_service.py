@@ -37,8 +37,8 @@ from app.services.smc_monitor_target_service import (
     SmcStructureTarget,
 )
 from app.strategy.monitors.smc_monitor import (
-    SMC_BOS_RETEST,
-    SMC_CHOCH_RETEST,
+    SMC_BOS_CROSS,
+    SMC_CHOCH_CROSS,
     SMC_ORDER_BLOCK_FIRST_TOUCH,
 )
 from app.strategy.monitors.volume_node_monitor import EVENT_TYPE_NODE_CLUSTER_TOUCH
@@ -153,7 +153,7 @@ def test_smc_bos_and_choch_crossing() -> None:
 
     events_bos = evaluate_smc_events(inst_id, smc_bull, 99.0, 101.0, now, triggered_a)
     assert len(events_bos) == 1
-    assert events_bos[0].event_type == SMC_BOS_RETEST
+    assert events_bos[0].event_type == SMC_BOS_CROSS
     assert events_bos[0].payload["structure_type"] == "BOS"
     assert events_bos[0].payload["direction"] == "UP"
     assert "high_100" in triggered_a
@@ -168,7 +168,7 @@ def test_smc_bos_and_choch_crossing() -> None:
 
     events_choch = evaluate_smc_events(inst_id, smc_bear, 99.0, 101.0, now, triggered_b)
     assert len(events_choch) == 1
-    assert events_choch[0].event_type == SMC_CHOCH_RETEST
+    assert events_choch[0].event_type == SMC_CHOCH_CROSS
     assert events_choch[0].payload["structure_type"] == "CHOCH"
     assert events_choch[0].payload["direction"] == "UP"
     assert "high_100" in triggered_b

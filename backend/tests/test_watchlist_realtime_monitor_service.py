@@ -41,7 +41,7 @@ from app.services.watchlist_realtime_monitor_service import (
     WatchlistRealtimeMonitorService,
 )
 from app.strategy.monitors.smc_monitor import (
-    SMC_BOS_RETEST,
+    SMC_BOS_CROSS,
     SMC_ORDER_BLOCK_FIRST_TOUCH,
 )
 from app.strategy.monitors.volume_node_monitor import EVENT_TYPE_NODE_CLUSTER_TOUCH
@@ -202,11 +202,11 @@ async def test_watchlist_monitor_cycle_full_flow(monkeypatch: pytest.MonkeyPatch
 
     # 事件断言：
     # 600519 触发 node_cluster_touch (向上穿透 104.0)
-    # 600519 触发 smc_bos_retest (顺势突破 103.0)
+    # 600519 触发 smc_bos_cross (顺势突破 103.0)
     # 920001 触发 smc_order_block_first_touch (首次触碰 15.0~16.0)
     event_types = [e.event_type for e in result1.events_detected]
     assert EVENT_TYPE_NODE_CLUSTER_TOUCH in event_types
-    assert SMC_BOS_RETEST in event_types
+    assert SMC_BOS_CROSS in event_types
     assert SMC_ORDER_BLOCK_FIRST_TOUCH in event_types
     assert len(result1.events_detected) == 3
 

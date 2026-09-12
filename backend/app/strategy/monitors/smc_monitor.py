@@ -69,7 +69,10 @@ from app.strategy.runtime import (
 
 logger = logging.getLogger("strategy.monitors.smc_monitor")
 
-# 事件类型常量（SMC 监控事件，[PRD V2.0 §3.2] 五类）
+# 事件类型常量（SMC 监控事件，新 crossing 语义）
+SMC_BOS_CROSS = "smc_bos_cross"
+SMC_CHOCH_CROSS = "smc_choch_cross"
+# 历史事件类型常量（保留供旧数据回读与历史兼容）
 SMC_BOS_RETEST = "smc_bos_retest"
 SMC_CHOCH_RETEST = "smc_choch_retest"
 SMC_EQUAL_HIGHS_RETEST = "smc_equal_highs_retest"

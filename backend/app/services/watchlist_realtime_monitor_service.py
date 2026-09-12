@@ -99,12 +99,7 @@ class WatchlistRealtimeMonitorService:
             if quote is None:
                 continue
 
-            # 连续快照价格区间 [P_last, P_curr]
-            p_last, p_curr = self.fact_service.price_tracker.update_price(
-                inst.symbol, quote.price
-            )
-
-            # 读取该标的前次状态与已触发 target IDs
+            # 读取该标的前次状态与 Target Sets
             prev_state_dict = prev_states.get(inst.id) or {}
 
             node_set, smc_set = target_sets.get(inst.id, (None, None))
@@ -114,22 +109,53 @@ class WatchlistRealtimeMonitorService:
             prev_node_ver = prev_state_dict.get("node_target_set_version")
             prev_smc_ver = prev_state_dict.get("smc_target_set_version")
 
+            is_node_ver_changed = (prev_node_ver is not None and curr_node_ver != prev_node_ver)
+            is_smc_ver_changed = (prev_smc_ver is not None and curr_smc_ver != prev_smc_ver)
+            version_changed = is_node_ver_changed or is_smc_ver_changed
+
             # 区分 node 与 smc 的已触发 target_ids
             # 若 target_set_version 发生改变（新 Bar 完成、盘后更新、或 XDXR 公司行为导致重算），
             # 自动清空对应旧版本的 triggered targets，由新版本重新接管
             node_triggered: set[str] = set(prev_state_dict.get("triggered_node_target_ids") or [])
-            if prev_node_ver is not None and curr_node_ver != prev_node_ver:
+            if is_node_ver_changed:
                 logger.info("[%s] Node target set version rolled %s -> %s, reset triggered targets", inst.symbol, prev_node_ver, curr_node_ver)
                 node_triggered = set()
             elif not node_triggered and prev_state_dict.get("triggered_target_ids"):
                 node_triggered = set(prev_state_dict.get("triggered_target_ids") or [])
 
             smc_triggered: set[str] = set(prev_state_dict.get("triggered_smc_target_ids") or [])
-            if prev_smc_ver is not None and curr_smc_ver != prev_smc_ver:
+            if is_smc_ver_changed:
                 logger.info("[%s] SMC target set version rolled %s -> %s, reset triggered targets", inst.symbol, prev_smc_ver, curr_smc_ver)
                 smc_triggered = set()
             elif not smc_triggered and prev_state_dict.get("triggered_target_ids"):
                 smc_triggered = set(prev_state_dict.get("triggered_target_ids") or [])
+
+            # 价格追踪器 bootstrap 与连续快照 [P_last, P_curr]：
+            # 1. 若 Target Set Version 发生变更（XDXR 除权除息或日线滚动），第一帧强制以本次价初始化为 (p, p)，
+            #    严禁跨越新旧复权坐标断层产生假穿透；
+            # 2. 若内存中尚无该标的价格（进程重启或首次执行）：
+            #    若持久化的前次状态版本与当前 Target Set Version 一致，则从持久化的 current_price 恢复 P_last，
+            #    支持重启窗口期断口追溯（catch-up crossing）；
+            # 3. 正常运行中，连续推进快照区间。
+            in_memory_last = self.fact_service.price_tracker.get_last_price(inst.symbol)
+            if version_changed:
+                self.fact_service.price_tracker.set_last_price(inst.symbol, quote.price)
+                p_last = quote.price
+                p_curr = quote.price
+            elif in_memory_last is None:
+                persisted_price = prev_state_dict.get("current_price")
+                same_version = (
+                    (prev_node_ver == curr_node_ver if curr_node_ver else True) and
+                    (prev_smc_ver == curr_smc_ver if curr_smc_ver else True)
+                )
+                if persisted_price is not None and same_version:
+                    p_last = float(persisted_price)
+                    p_curr = quote.price
+                    self.fact_service.price_tracker.set_last_price(inst.symbol, quote.price)
+                else:
+                    p_last, p_curr = self.fact_service.price_tracker.update_price(inst.symbol, quote.price)
+            else:
+                p_last, p_curr = self.fact_service.price_tracker.update_price(inst.symbol, quote.price)
 
             inst_events: list[StrategyEventDraft] = []
 

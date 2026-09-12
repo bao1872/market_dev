@@ -358,3 +358,27 @@ async def test_find_previous_complete_trade_date_returns_none_when_all_incomplet
     monkeypatch.setattr(rec, "count_covered_daily_instruments", AsyncMock(return_value=10))
 
     assert await find_previous_complete_trade_date(session, before=TD) is None
+
+
+# ── pytdx adapter 注入测试 ──────────────────────────────────────────
+async def test_recover_recent_daily_gaps_with_pytdx_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prev, repair, _fill = _install_market_wide(
+        monkeypatch,
+        scan_before=[_mw_gap(TD)],
+        scan_after=[],
+        find_missing_side_effect=[[], []],
+        repair_result=SimpleNamespace(requested=100, fetched=98, inserted=98, failed_symbols=[]),
+    )
+    mock_pytdx_gate = AsyncMock(return_value=SimpleNamespace())
+    monkeypatch.setattr(rec, "compare_db_vs_pytdx_for_date", mock_pytdx_gate)
+
+    fake_adapter = object()
+    res = await recover_recent_daily_gaps(MagicMock(), through=TD, adapter=fake_adapter)
+
+    assert repair.await_count == 1
+    assert repair.await_args.kwargs["adapter"] is fake_adapter
+    assert mock_pytdx_gate.await_count == 1
+    assert mock_pytdx_gate.await_args.kwargs["adapter"] is fake_adapter
+    assert res.days[0].bulk_inserted == 98
