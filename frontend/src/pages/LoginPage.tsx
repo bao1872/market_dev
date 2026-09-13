@@ -251,11 +251,11 @@ export default function LoginPage() {
             可计算、可追踪的服务
           </h1>
           <p className="login-lead">
-            注册后用邀请码激活套餐，按所选套餐解锁选股、监控、个股指标与消息推送功能。
+            注册后用邀请码激活对应权限（自选管理 / 行情 / 复盘与竞价），按授权有效期使用监控、个股指标与消息推送。
           </p>
           <div className="login-feature">
-            <span className="tag info">邀请码激活套餐</span>
-            <span className="tag good">按套餐解锁功能</span>
+            <span className="tag info">邀请码激活权限</span>
+            <span className="tag good">按授权使用功能</span>
             <span className="tag warn">到期前可续期</span>
           </div>
           <div className="auth-flow-mini">

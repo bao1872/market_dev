@@ -29,7 +29,6 @@ import {
   usePlans,
   useAdminEnableUser,
   useAdminDisableUser,
-  useAdminChangeSubscriptionPlan,
   useAdminAuditLogs,
   useUserCapabilities,
   useAdminGrantCapability,
@@ -298,7 +297,6 @@ export default function AdminUsersPage() {
   const revokeInviteCode = useRevokeInviteCode()
   const enableUser = useAdminEnableUser()
   const disableUser = useAdminDisableUser()
-  const changePlan = useAdminChangeSubscriptionPlan()
   const auditLogsQuery = useAdminAuditLogs(
     selectedMember ? { target_user_id: selectedMember.user_id } : undefined,
     !!selectedMember,
@@ -311,7 +309,7 @@ export default function AdminUsersPage() {
   const [accountStatusEdit, setAccountStatusEdit] = useState('有效')
   const [membershipStatusEdit, setMembershipStatusEdit] = useState('有效')
   const [expiresAtEdit, setExpiresAtEdit] = useState('')
-  const [planCodeEdit, setPlanCodeEdit] = useState<PlanCode>('')
+
   // 生成邀请码弹窗 - [Gate2 PRD60 PA-20] 改为 capability 三勾选模式
   const [modalOpen, setModalOpen] = useState(false)
   const [generateCount, setGenerateCount] = useState(1)
@@ -435,7 +433,6 @@ export default function AdminUsersPage() {
     const statusPill = getMemberStatusPill(member)
     setMembershipStatusEdit(statusPill.label)
     setExpiresAtEdit(member.expires_at ? formatDate(member.expires_at) : '')
-    setPlanCodeEdit('')
     setDrawerOpen(true)
   }, [])
 
@@ -864,30 +861,7 @@ export default function AdminUsersPage() {
     )
   }, [selectedMember, userChannel, deleteUserChannelMut, toast])
 
-  /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_days 默认 1） */
-  const handlePlanChange = useCallback(
-    (planCode: PlanCode) => {
-      if (!planCode || !selectedMember) return
-      setPlanCodeEdit(planCode)
-      changePlan.mutate(
-        {
-          userId: selectedMember.user_id,
-          payload: { plan_code: planCode, grant_days: 1 },
-        },
-        {
-          onSuccess: () => {
-            toast.show('套餐已变更', `用户套餐已更新为 ${getPlanName(planCode, plans)}`)
-          },
-          onError: (err: unknown) => {
-            const axiosErr = err as { response?: { data?: { detail?: string } } }
-            const message = axiosErr.response?.data?.detail ?? '套餐变更失败'
-            toast.show('变更失败', message)
-          },
-        },
-      )
-    },
-    [selectedMember, changePlan, plans, toast],
-  )
+
 
   // [Gate2 PRD60 PA-20] 授予/修改用户 capability（per-capability 独立 expires_at）
   const handleGrantCapability = useCallback(() => {
@@ -1556,20 +1530,11 @@ export default function AdminUsersPage() {
                       />
                     </div>
                     <div className="form-row">
-                      <label className="form-label">套餐</label>
-                      <select
-                        className="select"
-                        value={planCodeEdit}
-                        onChange={(e) => handlePlanChange(e.target.value)}
-                        disabled={plansQuery.isLoading || plans.length === 0}
-                      >
-                        <option value="">选择目标套餐</option>
-                        {plans.map((p) => (
-                          <option key={p.plan_code} value={p.plan_code}>
-                            {p.display_name}
-                          </option>
-                        ))}
-                      </select>
+                      <label className="form-label">当前套餐（仅商业记录）</label>
+                      <div className="readonly-value">
+                        {selectedMember?.plan_code ? getPlanName(selectedMember.plan_code, plans) : '无'}
+                        <small className="form-hint">权限以 capability 为准，套餐仅商业记录，不作正常权限修改入口</small>
+                      </div>
                     </div>
                   </div>
                   <div className="notice drawer-notice">
@@ -1995,7 +1960,7 @@ export default function AdminUsersPage() {
                   </div>
                 )}
                 <div className="form-row">
-                  <label className="form-label">有效期周期（每周期30天）</label>
+                  <label className="form-label">有效期（天数）</label>
                   <input
                     className="input"
                     type="number"

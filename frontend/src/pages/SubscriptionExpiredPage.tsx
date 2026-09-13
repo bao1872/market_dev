@@ -160,7 +160,7 @@ export default function SubscriptionExpiredPage() {
             </div>
             <div>
               <span>续期规则</span>
-              <b>每个邀请码 +30 天</b>
+              <b>每个邀请码按授权天数续期</b>
             </div>
             <div>
               <span>数据状态</span>
