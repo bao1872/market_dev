@@ -8,7 +8,8 @@
 
 表结构：
 - invite_codes: 邀请码表（code_hash 唯一，status unused/used/revoked，
-  plan_code/monitor_limit 快照，grant_months 30 天周期，grant_days 兼容旧逻辑）
+  plan_code/monitor_limit 快照，grant_days 为有效天数（1 单位=1 天，新代码写入并优先使用），
+  grant_months 仅历史邀请码兼容（×30 天））
 - invite_redemptions: 邀请码兑换记录（invite_code_id + user_id，记录 old/new expires_at）
 
 设计要点：
@@ -17,7 +18,7 @@
 - 兑换记录保留 old_expires_at 和 new_expires_at，支持审计追踪
 - 管理员停用账户（users.status=disabled）与订阅到期（subscriptions.status=expired）是两个独立状态
 - plan_code/monitor_limit 为套餐快照，从 plans 表查询（app.services.plan_service.get_plan）
-- grant_months 按 30 天周期计算（1 = 30 天，N = N×30 天），grant_days 保留兼容性
+- grant_days 为有效天数（1 单位 = 1 天，新代码规范）；grant_months 仅历史邀请码兼容（×30 天）
 - Phase 2 Task 2.2：Membership 模型已删除，订阅数据迁移到 subscriptions 表 + Subscription 模型
   （见 app/models/subscription.py）
 """
@@ -49,8 +50,8 @@ class InviteCode(Base):
     套餐字段（044_plan_contract_fields 迁移新增）：
     - plan_code: 套餐代码（observe_20/research_50），生成时从 plans 表选定
     - monitor_limit: 监控上限快照（从 plans 表读取，写入邀请码作为不可变快照）
-    - grant_months: 兑换后增加的 30 天周期数（1 = 30 天，N = N×30 天）
-    - grant_days: 保留兼容性（旧邀请码=30，新代码优先使用 grant_months）
+    - grant_months: 兑换后增加的 30 天周期数（历史邀请码兼容，1 = 30 天，N = N×30 天）
+    - grant_days: 兑换后增加的有效天数（新代码写入并优先使用，1 单位 = 1 天）
     """
 
     __tablename__ = "invite_codes"
@@ -68,7 +69,7 @@ class InviteCode(Base):
         comment="unused/used/revoked",
     )
     grant_days: Mapped[int] = mapped_column(
-        Integer, nullable=False, default=30, comment="兑换后增加的天数（旧字段，保留兼容性）"
+        Integer, nullable=False, default=1, comment="兑换后增加的有效天数（1 单位 = 1 天，新代码写入并优先使用）"
     )
     plan_code: Mapped[str | None] = mapped_column(
         String(32),
@@ -86,7 +87,8 @@ class InviteCode(Base):
         comment="兑换后增加的 30 天周期数（1 = 30 天，N = N×30 天）",
     )
     # [Phase 5B-2 PRD60 PA-20] 邀请码 capability 组合（新邀请码优先使用，旧邀请码 fallback 到 plan_code）
-    # 格式: [{"capability": "self_selection", "months": 1, "watchlist_limit": <int>}, ...]
+    # 格式: [{"capability": "self_selection", "days": 1, "watchlist_limit": <int>}, ...]
+    #       历史邀请码仍可使用 "months"（按 ×30 天兼容）；新邀请码统一用 "days"（1 单位 = 1 天）
     # watchlist_limit 由管理员创建邀请码时指定（仅 self_selection），数值不硬编码
     # 为 NULL 时回退到 plan_code/monitor_limit/grant_months 旧逻辑
     capabilities: Mapped[list[dict[str, Any]] | None] = mapped_column(

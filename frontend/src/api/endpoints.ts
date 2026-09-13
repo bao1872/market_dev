@@ -795,7 +795,7 @@ export interface InviteCode {
   grant_days: number
   plan_code: PlanCode | null
   monitor_limit: number | null
-  grant_months: number | null
+
   note: string | null
   created_at: string
   /**
@@ -812,7 +812,7 @@ export interface InviteCodeListItem {
   grant_days: number
   plan_code: PlanCode | null
   monitor_limit: number | null
-  grant_months: number | null
+
   note: string | null
   created_by: string
   created_at: string
@@ -982,12 +982,12 @@ export interface NotificationPreviewRequest {
   locale?: string
 }
 
-/** 邀请码生成请求 - plan_code/grant_months 由前端提交，monitor_limit 由后端按 plan_code 计算 */
+/** 邀请码生成请求 - plan_code/grant_days 由前端提交，monitor_limit 由后端按 plan_code 计算 */
 export interface InviteCodeCreateRequest {
   count?: number
   note?: string
   plan_code?: PlanCode
-  grant_months?: number
+  grant_days?: number
   /** [Gate2 PRD60 PA-20] capability 组合（新模式）；提供时优先于 plan_code */
   capabilities?: CapabilityGrantInput[]
 }
@@ -995,14 +995,14 @@ export interface InviteCodeCreateRequest {
 /** [Gate2 PRD60 PA-20] 单个 capability 授权配置（与 backend CapabilityGrant 对齐） */
 export interface CapabilityGrantInput {
   capability: 'self_selection' | 'market_data' | 'research_replay'
-  months: number  // 有效期周期数（1周期=30天，1-36）
+  days: number  // 有效天数（1-365，1 = 1 天）
   watchlist_limit?: number  // 仅 self_selection 必填（1-500）
 }
 
 /** [Gate2 PRD60] 管理员直接授予用户 capability 请求 */
 export interface GrantCapabilityRequest {
   capability: 'self_selection' | 'market_data' | 'research_replay'
-  months: number  // 有效期周期数（1周期=30天）
+  days: number  // 有效天数（1 = 1 天）
   watchlist_limit?: number  // 仅 self_selection 必填
 }
 
@@ -1016,18 +1016,18 @@ export interface UserCapabilityInfo {
 /** 管理员授予用户套餐请求 */
 export interface GrantSubscriptionRequest {
   plan_code: PlanCode
-  grant_months: number
+  grant_days: number
 }
 
 /** 管理员续期用户套餐请求 */
 export interface RenewSubscriptionRequest {
-  grant_months: number
+  grant_days: number
 }
 
 /** 管理员变更用户套餐请求 */
 export interface ChangePlanRequest {
   plan_code: PlanCode
-  grant_months: number
+  grant_days: number
 }
 
 /** 管理员变更用户账户状态请求 */

@@ -26,12 +26,12 @@ class CapabilityGrant(BaseModel):
 
     邀请码生成时，管理员可指定 capability 组合：
     - capability: 权限类型（self_selection/market_data/research_replay）
-    - months: 30 天周期有效期（PA-03，1 = 30 天）
+    - days: 有效天数（1-365，1 = 1 天）
     - watchlist_limit: 自选数量上限（仅 self_selection 必填，PA-02）
     """
 
     capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
-    months: int = Field(default=1, ge=1, le=36, description="30 天周期有效期（1-36，1 = 30 天）")
+    days: int = Field(default=1, ge=1, le=365, description="有效天数（1-365，1 = 1 天）")
     watchlist_limit: int | None = Field(None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填）")
 
     @model_validator(mode="after")
@@ -56,9 +56,9 @@ class InviteCodeCreate(BaseModel):
 
     两种模式：
     1. 新模式（PA-20）：提供 capabilities 列表，每个 capability 独立授权与有效期
-    2. 旧模式（兼容）：提供 plan_code + grant_months，从 plans 表读取 monitor_limit
+    2. 旧模式（兼容）：提供 plan_code + grant_days，从 plans 表读取 monitor_limit
 
-    capabilities 优先于 plan_code；两者都为默认值时使用旧模式（observe_20 + 1 月）。
+    capabilities 优先于 plan_code；两者都为默认值时使用旧模式（observe_20 + 1 天）。
     """
 
     count: int = Field(default=1, ge=1, le=100, description="生成数量（1-100）")
@@ -67,11 +67,11 @@ class InviteCodeCreate(BaseModel):
         default="observe_20",
         description="套餐代码 observe_20/research_50（旧模式，capabilities 为空时使用）",
     )
-    grant_months: int = Field(
+    grant_days: int = Field(
         default=1,
         ge=1,
-        le=36,
-        description="兑换后增加的 30 天周期数（旧模式，1-36）",
+        le=365,
+        description="兑换后增加的天数（1-365，1 = 1 天）",
     )
     # [Phase 5B-2 PRD60 PA-20] capability 组合（新模式）
     capabilities: list[CapabilityGrant] | None = Field(
@@ -100,10 +100,9 @@ class InviteCodeResponse(BaseModel):
 
     id: UUID = Field(..., description="邀请码 ID")
     code: str = Field(..., description="邀请码明文（仅生成时返回）")
-    grant_days: int = Field(..., description="兑换后增加天数（旧字段，保留兼容性）")
+    grant_days: int = Field(..., description="兑换后增加天数")
     plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
     monitor_limit: int | None = Field(None, description="监控数量上限快照")
-    grant_months: int | None = Field(None, description="兑换后增加的 30 天周期数")
     capabilities: list[dict[str, Any]] | None = Field(None, description="capability 组合（PA-20）")
     note: str | None = Field(None, description="批次备注")
     created_at: datetime = Field(..., description="创建时间")
@@ -116,10 +115,9 @@ class InviteCodeListItem(BaseModel):
 
     id: UUID = Field(..., description="邀请码 ID")
     status: str = Field(..., description="unused/used/revoked")
-    grant_days: int = Field(..., description="兑换后增加天数（旧字段，保留兼容性）")
+    grant_days: int = Field(..., description="兑换后增加天数")
     plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
     monitor_limit: int | None = Field(None, description="监控数量上限快照")
-    grant_months: int | None = Field(None, description="兑换后增加的 30 天周期数")
     capabilities: list[dict[str, Any]] | None = Field(None, description="capability 组合（PA-20）")
     note: str | None = Field(None, description="批次备注")
     created_by: UUID = Field(..., description="创建者 user_id")

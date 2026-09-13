@@ -130,23 +130,23 @@ test('research_replay 中文标签为「复盘与竞价」', () => {
 
 test('邀请码创建结果显示实际权限组合含「复盘与竞价」', () => {
   const text = formatCapabilityGrants([
-    { capability: 'self_selection', months: 1 },
-    { capability: 'market_data', months: 1 },
-    { capability: 'research_replay', months: 1 },
+    { capability: 'self_selection', days: 1 },
+    { capability: 'market_data', days: 1 },
+    { capability: 'research_replay', days: 1 },
   ])
   assert.equal(text, '自选管理 · 行情数据 · 复盘与竞价')
 })
 
 test('邀请码列表按固定顺序展示，后端顺序变化不影响结果', () => {
   const text = formatCapabilityGrants([
-    { capability: 'research_replay', months: 1 },
-    { capability: 'self_selection', months: 1 },
+    { capability: 'research_replay', days: 1 },
+    { capability: 'self_selection', days: 1 },
   ])
   assert.equal(text, '自选管理 · 复盘与竞价')
 })
 
 test('无对应权限时不显示该标签', () => {
-  const text = formatCapabilityGrants([{ capability: 'market_data', months: 1 }])
+  const text = formatCapabilityGrants([{ capability: 'market_data', days: 1 }])
   assert.equal(text, '行情数据')
   assert.ok(!text.includes('复盘与竞价'))
   assert.ok(!text.includes('自选管理'))
@@ -160,8 +160,8 @@ test('旧模式邀请码（capabilities 为 null/空）返回空串由调用方�
 
 test('未知 capability 机器值原样展示，不静默吞掉后端新增值', () => {
   const text = formatCapabilityGrants([
-    { capability: 'research_replay', months: 1 },
-    { capability: 'future_cap', months: 1 },
+    { capability: 'research_replay', days: 1 },
+    { capability: 'future_cap', days: 1 },
   ])
   assert.equal(text, '复盘与竞价 · future_cap')
 })

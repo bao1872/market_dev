@@ -1,7 +1,7 @@
 """订阅与邀请码服务层 - V1.6 订阅系统业务逻辑 + plans 表套餐权限。
 
 提供：
-- generate_invite_codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
+- generate_invite_codes: 生成邀请码（单个/批量，绑定 plan_code/grant_days）
 - hash_invite_code: 邀请码哈希（SHA256）
 - register_with_invite_code: 邀请码注册（原子操作，写入套餐快照到 Subscription）
 - renew_with_invite_code: 邀请码续期（更新套餐，按 30 天周期顺延到期日）
@@ -13,13 +13,13 @@
 - get_redemptions_by_user: 用户兑换记录
 
 业务规则（plans 表套餐权限）：
-- 生成邀请码：从 plans 表读取 monitor_limit 快照，写入 plan_code/monitor_limit/grant_months
-- 注册：创建 Subscription（source='invite'），到期日按 grant_months × 30 天计算
-- 续期（未到期）：从当前到期日顺延 grant_months × 30 天，同时更新 plan_code/entitlement_snapshot
-- 续期（已到期）：从兑换当天计算 grant_months × 30 天
+- 生成邀请码：从 plans 表读取 monitor_limit 快照，写入 plan_code/monitor_limit/grant_days
+- 注册：创建 Subscription（source='invite'），到期日按 grant_days 天计算（1 单位 = 1 天）
+- 续期（未到期）：从当前到期日顺延 grant_days 天，同时更新 plan_code/entitlement_snapshot
+- 续期（已到期）：从兑换当天计算 grant_days 天
 - 邀请码为一次性，status: unused → used / revoked
 - 邀请码明文不存储，仅存 SHA256 哈希
-- grant_months 按 30 天周期计算（1 个月 = 30 天，N 个月 = N×30 天），grant_days 保留兼容性
+- grant_days 为有效天数（1 单位 = 1 天，新代码规范）；历史邀请码的 grant_months 仍按 ×30 天兼容
 
 Phase 8 调整：
 - status 不持久化 'expired'：到期由 get_effective_subscription_status 实时计算
@@ -174,14 +174,14 @@ _INVITE_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 # 邀请码分组：4 组 × 4 字符 = 16 字符
 _INVITE_CODE_GROUPS = 4
 _INVITE_CODE_GROUP_LEN = 4
-# 订阅默认天数（旧字段 grant_days，保留兼容性；新逻辑优先使用 grant_months）
+# 订阅默认天数（旧字段 grant_days，保留兼容性；新逻辑统一使用 grant_days = 有效天数）
 _DEFAULT_GRANT_DAYS = 30
-# 默认 grant_months（管理员未指定时，1 个月 = 30 天近似）
-_DEFAULT_GRANT_MONTHS = 1
+# 默认 grant_days（管理员未指定时，1 天）
+_DEFAULT_GRANT_DAYS_DEFAULT = 1
 
 
 def _compute_expires_at_from_months(base: datetime, grant_months: int | None) -> datetime:
-    """按 grant_months × 30 天计算到期时间（固定 30 天周期）。
+    """[兼容旧邀请码] 按 grant_months × 30 天计算到期时间（固定 30 天周期）。
 
     Args:
         base: 基准时间
@@ -196,14 +196,30 @@ def _compute_expires_at_from_months(base: datetime, grant_months: int | None) ->
     return base + timedelta(days=_DEFAULT_GRANT_DAYS)
 
 
+def _compute_expires_at_from_days(base: datetime, grant_days: int | None) -> datetime:
+    """按 grant_days 天计算到期时间（1 单位 = 1 天，不再乘 30）。
+
+    Args:
+        base: 基准时间
+        grant_days: 有效天数（1 = 1 天）
+
+    Returns:
+        到期时间（时区感知）
+    """
+    if grant_days is not None and grant_days > 0:
+        return base + timedelta(days=grant_days)
+    return base + timedelta(days=_DEFAULT_GRANT_DAYS)
+
+
 def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
     """根据邀请码的 grant_months 或 grant_days 计算到期时间。
 
-    优先使用 grant_months（30 天周期），兼容旧邀请码的 grant_days（天数）。
-    - grant_months 为正数：使用 30 × grant_months 天
-    - grant_months 为空且 grant_days 为正数：使用原 grant_days 天
+    优先使用 grant_months（×30 天，仅兼容仍带 grant_months 的历史邀请码），
+    其次使用 grant_days（新字段，1 单位 = 1 天）。
+    - grant_months 为正数：使用 30 × grant_months 天（兼容旧邀请码）
+    - grant_months 为空且 grant_days 为正数：使用原 grant_days 天（1 单位 = 1 天）
     - 两者都无效：默认 30 天
-    30 天周期：1 个月 = 30 天，2 个月 = 60 天，跨月/跨年按天数计算。
+    grant_days：1 单位 = 1 天，跨月/跨年按天数计算。
 
     Args:
         base: 基准时间（注册时为 now，续期未到期时为 old_expires_at）
@@ -271,7 +287,7 @@ async def generate_invite_codes(
     created_by: uuid.UUID,
     note: str | None = None,
     plan_code: str = DEFAULT_PLAN_CODE,
-    grant_months: int = _DEFAULT_GRANT_MONTHS,
+    grant_days: int = _DEFAULT_GRANT_DAYS_DEFAULT,
     capabilities: list[dict[str, Any]] | None = None,
 ) -> list[tuple[InviteCode, str]]:
     """生成邀请码（批量，支持 capability 组合或 plan_code 兼容）。
@@ -286,17 +302,17 @@ async def generate_invite_codes(
         created_by: 创建者 user_id（管理员）
         note: 批次备注
         plan_code: 套餐代码（旧模式），默认 observe_20
-        grant_months: 兑换后增加的 30 天周期数（旧模式），默认 1
+        grant_days: 兑换后增加的天数（1 单位 = 1 天），默认 1
         capabilities: capability 组合（PA-20 新模式）；提供时优先于 plan_code
 
     Returns:
         list of (InviteCode ORM 对象, 明文邀请码) 元组
 
     Raises:
-        ValueError: plan_code 不在 plans 表中，或 grant_months 非法，或 capabilities 非法
+        ValueError: plan_code 不在 plans 表中，或 grant_days 非法，或 capabilities 非法
     """
-    if grant_months < 1:
-        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+    if grant_days < 1:
+        raise ValueError(f"grant_days 必须 >= 1，实际: {grant_days}")
 
     # 旧模式：从 plans 表查询 monitor_limit
     monitor_limit = await get_monitor_limit_async(db, plan_code)
@@ -322,10 +338,10 @@ async def generate_invite_codes(
         invite = InviteCode(
             code_hash=code_hash,
             status="unused",
-            grant_days=_DEFAULT_GRANT_DAYS,
+            grant_days=grant_days,
             plan_code=plan_code,
             monitor_limit=monitor_limit,
-            grant_months=grant_months,
+            grant_months=None,
             capabilities=capabilities_json,
             note=note,
             created_by=created_by,
@@ -351,8 +367,9 @@ async def apply_capability_grant(
     """[权限模型 V2 PV2-B01/B02/B03] 统一授权入口 — 管理员 grant 与邀请码 grant 共用。
 
     合同：
-    1. 期限输入只有确定性 ``grant_days``（天数）。months 在调用边界转换为
-       ``grant_days = months * 30``，底层不得混用绝对到期日/months/days。
+    1. 期限输入只有确定性 ``grant_days``（天数，1 单位 = 1 天）。调用边界统一为
+       grant_days（邀请码/管理端的 days 字段；旧 months 字段仍按 ×30 兼容），
+       底层不得混用绝对到期日/months/days。
     2. 场景化 legacy 物化由 ``materialize_legacy`` 显式控制：
        - True（旧用户续期/管理员首次管理）：先 SELECT User FOR UPDATE 锁行，
          再物化完整 legacy 权限，避免只改一项丢失其他权限。
@@ -540,7 +557,7 @@ async def _grant_capabilities_from_invite(
     """从邀请码创建/更新 user_capabilities 行（PRD60 PA-20 新模式）。
 
     [权限模型 V2 PV2-B01/B02] 统一调用 apply_capability_grant，source='invite_code'，
-    底层只接收 grant_days（= months * 30），不再自行处理 revoked 行重新授权与不降权顺延。
+    底层只接收 grant_days（有效天数，1 单位 = 1 天；旧 months 字段仍按 ×30 兼容），不再自行处理 revoked 行重新授权与不降权顺延。
 
     materialize_legacy 由调用场景决定：
     - 显式邀请码新注册：False（不物化套餐推导权限）。
@@ -558,7 +575,12 @@ async def _grant_capabilities_from_invite(
 
     for cap_config in invite_code.capabilities:
         cap_name = cap_config.get("capability")
-        cap_months = cap_config.get("months", 1)
+        # [周期单位=天] 优先读取新字段 days；兼容旧存储的 months（×30 天，保留旧邀请码意图）
+        cap_months_legacy = cap_config.get("months")
+        if cap_months_legacy is not None:
+            cap_grant_days = cap_months_legacy * 30
+        else:
+            cap_grant_days = cap_config.get("days", 1)
         cap_watchlist_limit = cap_config.get("watchlist_limit")
         if not isinstance(cap_name, str):
             continue  # 跳过缺失 capability 的配置（schema 已校验，防御性兜底）
@@ -566,7 +588,7 @@ async def _grant_capabilities_from_invite(
             db=db,
             user_id=user_id,
             capability=cap_name,
-            grant_days=cap_months * 30,
+            grant_days=cap_grant_days,
             watchlist_limit=cap_watchlist_limit,
             source="invite_code",
             materialize_legacy=materialize_legacy,
@@ -896,7 +918,7 @@ async def grant_subscription_to_user(
     db: AsyncSession,
     user_id: uuid.UUID,
     plan_code: str,
-    grant_months: int,
+    grant_days: int,
     actor_user_id: uuid.UUID | None = None,
 ) -> Subscription:
     """管理员授予用户订阅（source='admin_grant'）。
@@ -905,13 +927,13 @@ async def grant_subscription_to_user(
     - 管理员（admin 角色）不绑定套餐，禁止授予
     - 用户已存在 subscription 时失败（避免覆盖）
     - 从 plans 表读取 entitlement_snapshot 快照
-    - 到期日按 grant_months × 30 天计算
+    - 到期日按 grant_days 天计算（1 单位 = 1 天）
 
     Args:
         db: 异步数据库会话
         user_id: 被授权用户 ID
         plan_code: 套餐代码
-        grant_months: 授予 30 天周期数
+        grant_days: 授予天数（1 单位 = 1 天）
         actor_user_id: 操作管理员 ID（可选）
 
     Returns:
@@ -920,8 +942,8 @@ async def grant_subscription_to_user(
     Raises:
         ValueError: 用户不存在、是 admin、已存在 subscription、或 plan_code 未知
     """
-    if grant_months < 1:
-        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+    if grant_days < 1:
+        raise ValueError(f"grant_days 必须 >= 1，实际: {grant_days}")
 
     user_stmt = select(User).where(User.id == user_id)
     user_result = await db.execute(user_stmt)
@@ -941,7 +963,7 @@ async def grant_subscription_to_user(
     entitlement_snapshot = _build_entitlement_snapshot(plan)
 
     now = datetime.now(UTC)
-    expires_at = _compute_expires_at_from_months(now, grant_months)
+    expires_at = _compute_expires_at_from_days(now, grant_days)
     subscription = Subscription(
         user_id=user_id,
         plan_code=plan_code,
@@ -961,20 +983,20 @@ async def grant_subscription_to_user(
 async def renew_subscription(
     db: AsyncSession,
     user_id: uuid.UUID,
-    grant_months: int,
+    grant_days: int,
     actor_user_id: uuid.UUID | None = None,
 ) -> tuple[Subscription, datetime, datetime]:
-    """管理员为用户续期订阅（按 30 天周期顺延或从当前时间重新计算）。
+    """管理员为用户续期订阅（按 grant_days 天顺延或从当前时间重新计算）。
 
     业务规则：
-    - 未到期：从当前 expires_at 顺延 grant_months × 30 天
-    - 已到期：从当前时间重新计算 grant_months × 30 天
+    - 未到期：从当前 expires_at 顺延 grant_days 天
+    - 已到期：从当前时间重新计算 grant_days 天
     - 管理员（admin 角色）不续期
 
     Args:
         db: 异步数据库会话
         user_id: 用户 ID
-        grant_months: 续期 30 天周期数
+        grant_days: 续期天数（1 单位 = 1 天）
         actor_user_id: 操作管理员 ID（可选）
 
     Returns:
@@ -983,8 +1005,8 @@ async def renew_subscription(
     Raises:
         ValueError: 用户不存在、是 admin、或无 subscription
     """
-    if grant_months < 1:
-        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+    if grant_days < 1:
+        raise ValueError(f"grant_days 必须 >= 1，实际: {grant_days}")
 
     user_stmt = select(User).where(User.id == user_id)
     user_result = await db.execute(user_stmt)
@@ -1004,9 +1026,9 @@ async def renew_subscription(
     old_expires_at = _ensure_aware(subscription.expires_at)
 
     if old_expires_at > now:
-        new_expires_at = _compute_expires_at_from_months(old_expires_at, grant_months)
+        new_expires_at = _compute_expires_at_from_days(old_expires_at, grant_days)
     else:
-        new_expires_at = _compute_expires_at_from_months(now, grant_months)
+        new_expires_at = _compute_expires_at_from_days(now, grant_days)
 
     subscription.status = "active"
     subscription.expires_at = new_expires_at
@@ -1054,22 +1076,22 @@ async def change_subscription_plan(
     db: AsyncSession,
     user_id: uuid.UUID,
     plan_code: str,
-    grant_months: int,
+    grant_days: int,
     actor_user_id: uuid.UUID | None = None,
 ) -> Subscription:
     """管理员修改用户套餐（无 subscription 时创建，有时更新并续期）。
 
     业务规则：
     - 用户无 subscription：按 admin_grant 创建新 subscription
-    - 用户有 subscription：更新 plan_code/entitlement_snapshot，并按 grant_months
-      从当前到期日或当前时间顺延
+    - 用户有 subscription：更新 plan_code/entitlement_snapshot，并按 grant_days
+      从当前到期日或当前时间顺延（1 单位 = 1 天）
     - 管理员（admin 角色）不绑定套餐
 
     Args:
         db: 异步数据库会话
         user_id: 用户 ID
         plan_code: 目标套餐代码
-        grant_months: 授予/续期 30 天周期数
+        grant_days: 授予/续期天数（1 单位 = 1 天）
         actor_user_id: 操作管理员 ID（可选）
 
     Returns:
@@ -1078,8 +1100,8 @@ async def change_subscription_plan(
     Raises:
         ValueError: 用户不存在、是 admin、或 plan_code 未知
     """
-    if grant_months < 1:
-        raise ValueError(f"grant_months 必须 >= 1，实际: {grant_months}")
+    if grant_days < 1:
+        raise ValueError(f"grant_days 必须 >= 1，实际: {grant_days}")
 
     user_stmt = select(User).where(User.id == user_id)
     user_result = await db.execute(user_stmt)
@@ -1099,7 +1121,7 @@ async def change_subscription_plan(
 
     now = datetime.now(UTC)
     if subscription is None:
-        expires_at = _compute_expires_at_from_months(now, grant_months)
+        expires_at = _compute_expires_at_from_days(now, grant_days)
         subscription = Subscription(
             user_id=user_id,
             plan_code=plan_code,
@@ -1115,7 +1137,7 @@ async def change_subscription_plan(
     else:
         old_expires_at = _ensure_aware(subscription.expires_at)
         base = old_expires_at if old_expires_at > now else now
-        new_expires_at = _compute_expires_at_from_months(base, grant_months)
+        new_expires_at = _compute_expires_at_from_days(base, grant_days)
         subscription.plan_code = plan_code
         subscription.entitlement_snapshot = entitlement_snapshot
         subscription.expires_at = new_expires_at
@@ -1346,7 +1368,7 @@ async def grant_capability_to_user(
     db: AsyncSession,
     user_id: uuid.UUID,
     capability: str,
-    months: int,
+    days: int,
     watchlist_limit: int | None,
     actor_user_id: uuid.UUID,
     reason: str | None = None,
@@ -1355,13 +1377,13 @@ async def grant_capability_to_user(
 
     [权限模型 V2 PV2-B01/B02/B03] 统一调用 apply_capability_grant，source='admin_grant'。
     管理员首次管理需物化完整 legacy 权限（materialize_legacy=True），先锁用户行。
-    months 在调用边界转换为 grant_days = months * 30。
+    days 在调用边界即有效天数（1 单位 = 1 天），直接作为 grant_days。
 
     Args:
         db: 异步数据库会话
         user_id: 目标用户 ID
         capability: 权限类型 self_selection/market_data/research_replay
-        months: 30 天周期有效期（1-36，1 = 30 天）
+        days: 有效天数（1-365，1 = 1 天）
         watchlist_limit: 自选数量上限（仅 self_selection 必填）
         actor_user_id: 操作管理员 user_id（admin_grant，必填）
         reason: 授予原因（审计用）
@@ -1376,7 +1398,7 @@ async def grant_capability_to_user(
         db=db,
         user_id=user_id,
         capability=capability,
-        grant_days=months * 30,
+        grant_days=days,
         watchlist_limit=watchlist_limit,
         source="admin_grant",
         materialize_legacy=True,

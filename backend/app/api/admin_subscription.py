@@ -1,7 +1,7 @@
 """管理员 API 路由 - 订阅管理 + 系统概览。
 
 端点：
-- POST /admin/invite-codes: 生成邀请码（单个/批量，绑定 plan_code/grant_months）
+- POST /admin/invite-codes: 生成邀请码（单个/批量，绑定 plan_code/grant_days）
 - GET /admin/invite-codes: 查询邀请码列表（支持状态筛选 + 分页）
 - POST /admin/invite-codes/{id}/revoke: 作废邀请码
 - GET /admin/members: 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数）
@@ -12,8 +12,8 @@
 - 所有端点需要 admin 角色（RBAC）
 
 套餐权限（plans 表）：
-- 生成邀请码时接收 plan_code/grant_months，从 plans 表读取 monitor_limit 快照
-- 默认 plan_code=observe_20、grant_months=1（保持向后兼容）
+- 生成邀请码时接收 plan_code/grant_days，从 plans 表读取 monitor_limit 快照
+- 默认 plan_code=observe_20、grant_days=1（保持向后兼容）
 """
 
 from __future__ import annotations
@@ -163,13 +163,13 @@ async def create_invite_codes(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> list[InviteCodeResponse]:
-    """生成邀请码（单个/批量，绑定 plan_code/grant_months）。
+    """生成邀请码（单个/批量，绑定 plan_code/grant_days）。
 
     从 plans 表读取 monitor_limit 快照写入邀请码。明文仅在生成时返回，后续不可获取。
-    默认 plan_code=observe_20、grant_months=1（保持向后兼容）。
+    默认 plan_code=observe_20、grant_days=1（保持向后兼容）。
 
     Args:
-        payload: 生成请求（count + note + plan_code + grant_months）
+        payload: 生成请求（count + note + plan_code + grant_days）
         db: 异步数据库会话
         current_user: 当前管理员用户（由 require_roles 注入）
 
@@ -177,7 +177,7 @@ async def create_invite_codes(
         邀请码列表（含明文 + 套餐快照）
 
     Raises:
-        HTTPException 400: plan_code 未知或 grant_months 非法
+        HTTPException 400: plan_code 未知或 grant_days 非法
     """
     try:
         # [Phase 5B-2 PRD60 PA-20] capabilities 优先于 plan_code
@@ -191,7 +191,7 @@ async def create_invite_codes(
             created_by=current_user.id,
             note=payload.note,
             plan_code=payload.plan_code,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             capabilities=capabilities_json,
         )
     except ValueError as e:
@@ -212,7 +212,6 @@ async def create_invite_codes(
                 "status": invite.status,
                 "plan_code": invite.plan_code,
                 "monitor_limit": invite.monitor_limit,
-                "grant_months": invite.grant_months,
                 "grant_days": invite.grant_days,
                 "note": invite.note,
                 # [PRD60 PA-20] 记录实际授予的 capability 组合（旧模式为 None）
@@ -230,7 +229,6 @@ async def create_invite_codes(
             grant_days=invite.grant_days,
             plan_code=invite.plan_code,
             monitor_limit=invite.monitor_limit,
-            grant_months=invite.grant_months,
             note=invite.note,
             created_at=invite.created_at,
             # [PRD60 PA-20] 回显 capability 组合，供前端展示实际权限（旧模式为 None）
@@ -270,10 +268,9 @@ async def get_invite_codes(
             InviteCodeListItem(
                 id=invite.id,
                 status=invite.status,
-                grant_days=invite.grant_days,
                 plan_code=invite.plan_code,
                 monitor_limit=invite.monitor_limit,
-                grant_months=invite.grant_months,
+                grant_days=invite.grant_days,
                 note=invite.note,
                 created_by=invite.created_by,
                 created_at=invite.created_at,
@@ -331,7 +328,6 @@ async def revoke_code(
         after_data={
             "status": invite.status,
             "plan_code": invite.plan_code,
-            "grant_months": invite.grant_months,
             "capabilities": invite.capabilities,
         },
     )
@@ -341,10 +337,9 @@ async def revoke_code(
     return InviteCodeListItem(
         id=invite.id,
         status=invite.status,
-        grant_days=invite.grant_days,
         plan_code=invite.plan_code,
         monitor_limit=invite.monitor_limit,
-        grant_months=invite.grant_months,
+        grant_days=invite.grant_days,
         note=invite.note,
         created_by=invite.created_by,
         created_at=invite.created_at,
@@ -833,7 +828,7 @@ async def grant_subscription(
             db=db,
             user_id=user_id,
             plan_code=payload.plan_code,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             actor_user_id=current_user.id,
         )
     except ValueError as e:
@@ -850,7 +845,7 @@ async def grant_subscription(
         target_id=str(subscription.user_id),
         after_data={
             "plan_code": subscription.plan_code,
-            "grant_months": payload.grant_months,
+            "grant_days": payload.grant_days,
             "expires_at": subscription.expires_at.isoformat(),
         },
     )
@@ -871,7 +866,7 @@ async def renew_subscription_endpoint(
         subscription, old_expires_at, new_expires_at = await renew_subscription(
             db=db,
             user_id=user_id,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             actor_user_id=current_user.id,
         )
     except ValueError as e:
@@ -954,7 +949,7 @@ async def change_subscription_plan_endpoint(
             db=db,
             user_id=user_id,
             plan_code=payload.plan_code,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             actor_user_id=current_user.id,
         )
     except ValueError as e:
@@ -971,7 +966,7 @@ async def change_subscription_plan_endpoint(
         target_id=str(subscription.user_id),
         after_data={
             "plan_code": subscription.plan_code,
-            "grant_months": payload.grant_months,
+            "grant_days": payload.grant_days,
             "expires_at": subscription.expires_at.isoformat(),
         },
     )
@@ -1037,7 +1032,7 @@ async def grant_capability_endpoint(
             db=db,
             user_id=user_id,
             capability=payload.capability,
-            months=payload.months,
+            days=payload.days,
             watchlist_limit=payload.watchlist_limit,
             actor_user_id=current_user.id,
             reason=payload.reason,
@@ -1476,7 +1471,7 @@ async def grant_user_subscription(
             db=db,
             user_id=user_id,
             plan_code=payload.plan_code,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             actor_user_id=current_user.id,
         )
     except ValueError as e:
@@ -1493,7 +1488,7 @@ async def grant_user_subscription(
         target_id=str(subscription.user_id),
         after_data={
             "plan_code": subscription.plan_code,
-            "grant_months": payload.grant_months,
+            "grant_days": payload.grant_days,
             "expires_at": subscription.expires_at.isoformat(),
         },
     )
@@ -1514,7 +1509,7 @@ async def renew_user_subscription(
         subscription, old_expires_at, new_expires_at = await renew_subscription(
             db=db,
             user_id=user_id,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             actor_user_id=current_user.id,
         )
     except ValueError as e:
@@ -1597,7 +1592,7 @@ async def change_user_subscription_plan(
             db=db,
             user_id=user_id,
             plan_code=payload.plan_code,
-            grant_months=payload.grant_months,
+            grant_days=payload.grant_days,
             actor_user_id=current_user.id,
         )
     except ValueError as e:
@@ -1614,7 +1609,7 @@ async def change_user_subscription_plan(
         target_id=str(subscription.user_id),
         after_data={
             "plan_code": subscription.plan_code,
-            "grant_months": payload.grant_months,
+            "grant_days": payload.grant_days,
             "expires_at": subscription.expires_at.isoformat(),
         },
     )

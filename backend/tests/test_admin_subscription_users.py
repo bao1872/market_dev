@@ -77,7 +77,7 @@ async def test_grant_subscription_to_user_creates_subscription(
         db=db_session,
         user_id=member_user.id,
         plan_code="observe_20",
-        grant_months=3,
+        grant_days=3,
         actor_user_id=None,
     )
 
@@ -85,7 +85,7 @@ async def test_grant_subscription_to_user_creates_subscription(
     assert subscription.plan_code == "observe_20"
     assert subscription.status == "active"
     assert subscription.source == "admin_grant"
-    assert subscription.expires_at > datetime.now(UTC) + timedelta(days=80)
+    assert subscription.expires_at > datetime.now(UTC) + timedelta(days=2)
     assert subscription.entitlement_snapshot["monitor_limit"] > 0
 
 
@@ -103,7 +103,7 @@ async def test_grant_subscription_to_user_already_exists_fails(
             db=db_session,
             user_id=member_user.id,
             plan_code="observe_20",
-            grant_months=1,
+            grant_days=1,
         )
 
 
@@ -118,7 +118,7 @@ async def test_grant_subscription_to_admin_fails(
             db=db_session,
             user_id=admin_user.id,
             plan_code="observe_20",
-            grant_months=1,
+            grant_days=1,
         )
 
 
@@ -140,12 +140,12 @@ async def test_renew_subscription_extends_expires_at(
     subscription, old_at, new_at = await renew_subscription(
         db=db_session,
         user_id=member_user.id,
-        grant_months=2,
+        grant_days=2,
     )
 
     assert subscription.status == "active"
     assert old_at == old_expires
-    assert (new_at - old_at).days >= 58
+    assert (new_at - old_at).days >= 2
 
 
 @pytest.mark.asyncio
@@ -166,12 +166,12 @@ async def test_renew_subscription_after_expiry(
     subscription, old_at, new_at = await renew_subscription(
         db=db_session,
         user_id=member_user.id,
-        grant_months=1,
+        grant_days=1,
     )
 
     assert subscription.status == "active"
     assert old_at == old_expires
-    assert new_at > now + timedelta(days=25)
+    assert (new_at - now).days >= 1
 
 
 @pytest.mark.asyncio
@@ -184,7 +184,7 @@ async def test_renew_subscription_no_subscription_fails(
         await renew_subscription(
             db=db_session,
             user_id=member_user.id,
-            grant_months=1,
+            grant_days=1,
         )
 
 
@@ -220,12 +220,12 @@ async def test_change_subscription_plan_updates_plan_code(
         db=db_session,
         user_id=member_user.id,
         plan_code="research_50",
-        grant_months=2,
+        grant_days=2,
     )
 
     assert subscription.plan_code == "research_50"
     assert subscription.entitlement_snapshot["monitor_limit"] > 0
-    assert subscription.expires_at > now + timedelta(days=60)
+    assert (subscription.expires_at - now).days >= 2
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ async def test_change_subscription_plan_creates_when_missing(
         db=db_session,
         user_id=member_user.id,
         plan_code="observe_20",
-        grant_months=1,
+        grant_days=1,
     )
 
     assert subscription.plan_code == "observe_20"
@@ -307,7 +307,7 @@ async def test_admin_grant_subscription_endpoint(
     response = await client.post(
         f"/v1/admin/users/{member_user.id}/grant-subscription",
         headers=_auth_headers(admin_user.id),
-        json={"plan_code": "observe_20", "grant_months": 3},
+        json={"plan_code": "observe_20", "grant_days": 3},
     )
     assert response.status_code == 200
     data = response.json()
@@ -343,7 +343,7 @@ async def test_admin_renew_subscription_endpoint(
     response = await client.post(
         f"/v1/admin/users/{member_user.id}/renew-subscription",
         headers=_auth_headers(admin_user.id),
-        json={"grant_months": 2},
+        json={"grant_days": 2},
     )
     assert response.status_code == 200
     data = response.json()
@@ -389,7 +389,7 @@ async def test_admin_change_plan_endpoint(
     response = await client.post(
         f"/v1/admin/users/{member_user.id}/change-plan",
         headers=_auth_headers(admin_user.id),
-        json={"plan_code": "research_50", "grant_months": 1},
+        json={"plan_code": "research_50", "grant_days": 1},
     )
     assert response.status_code == 200
     assert response.json()["plan_code"] == "research_50"

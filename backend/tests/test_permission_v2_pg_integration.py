@@ -282,7 +282,7 @@ async def test_old_plan_user_first_admin_op_materializes_all(db_session: AsyncSe
     user = await _legacy_user(db_session, "firstadmin")
     admin = await _admin_user(db_session)
     mutation = await grant_capability_to_user(
-        db_session, user.id, "self_selection", months=1, watchlist_limit=10, actor_user_id=admin.id
+        db_session, user.id, "self_selection", days=1, watchlist_limit=10, actor_user_id=admin.id
     )
     caps = await get_user_capabilities(db_session, user.id)
     # observe_20 推导 market_data + self_selection，管理员 self_selection 授权后全部物化
@@ -308,7 +308,7 @@ async def test_active_permission_true_extends(db_session: AsyncSession) -> None:
     # grant 会就地修改 expires_at，因此必须保存快照值而非对象引用）
     before_expires = before.expires_at
     mutation = await grant_capability_to_user(
-        db_session, user.id, "market_data", months=1, watchlist_limit=None, actor_user_id=admin.id
+        db_session, user.id, "market_data", days=1, watchlist_limit=None, actor_user_id=admin.id
     )
     assert mutation.mutation_type == "extend"
     assert mutation.after["expires_at"] > before_expires
@@ -330,7 +330,7 @@ async def test_expired_permission_recalculates_from_now(db_session: AsyncSession
     row.expires_at = datetime.now(UTC) - timedelta(days=1)
     await db_session.flush()
     await grant_capability_to_user(
-        db_session, user.id, "market_data", months=1, watchlist_limit=None, actor_user_id=admin.id
+        db_session, user.id, "market_data", days=1, watchlist_limit=None, actor_user_id=admin.id
     )
     new_row = await db_session.scalar(
         select(UserCapability).where(
@@ -368,7 +368,7 @@ async def test_revoked_admin_regrant(db_session: AsyncSession) -> None:
     admin = await _admin_user(db_session)
     await revoke_capability_from_user(db_session, user.id, "market_data", revoked_by=admin.id)
     mutation = await grant_capability_to_user(
-        db_session, user.id, "market_data", months=1, watchlist_limit=None, actor_user_id=admin.id
+        db_session, user.id, "market_data", days=1, watchlist_limit=None, actor_user_id=admin.id
     )
     assert mutation.mutation_type == "regrant"
     caps = await get_user_capabilities(db_session, user.id)
@@ -532,7 +532,7 @@ async def test_legacy_materialized_enters_audit(db_session: AsyncSession) -> Non
     admin = await _admin_user(db_session)
 
     mutation = await grant_capability_to_user(
-        db_session, user.id, "self_selection", months=1, watchlist_limit=10, actor_user_id=admin.id
+        db_session, user.id, "self_selection", days=1, watchlist_limit=10, actor_user_id=admin.id
     )
     # 服务层返回物化列表；审计写入依赖 API 层（此处验证数据源非空）
     assert len(mutation.materialized_capabilities) >= 1

@@ -97,7 +97,7 @@ async def test_register_with_invite_code_uses_pessimistic_lock(db_session: Async
     admin = await _create_admin(db_session)
     results = await generate_invite_codes(
         db=db_session, count=1, created_by=admin.id,
-        plan_code="observe_20", grant_months=1,
+        plan_code="observe_20", grant_days=1,
     )
     await db_session.flush()
     raw_code = results[0][1]
@@ -153,11 +153,11 @@ async def test_renew_with_invite_code_uses_pessimistic_lock(db_session: AsyncSes
     admin = await _create_admin(db_session)
     reg_results = await generate_invite_codes(
         db=db_session, count=1, created_by=admin.id,
-        plan_code="observe_20", grant_months=1,
+        plan_code="observe_20", grant_days=1,
     )
     renew_results = await generate_invite_codes(
         db=db_session, count=1, created_by=admin.id,
-        plan_code="observe_20", grant_months=1,
+        plan_code="observe_20", grant_days=1,
     )
     await db_session.flush()
 
@@ -208,7 +208,7 @@ async def test_sequential_registration_second_fails(db_session: AsyncSession) ->
     admin = await _create_admin(db_session)
     results = await generate_invite_codes(
         db=db_session, count=1, created_by=admin.id,
-        plan_code="observe_20", grant_months=1,
+        plan_code="observe_20", grant_days=1,
     )
     await db_session.flush()
     raw_code = results[0][1]
@@ -253,7 +253,7 @@ async def test_concurrent_registration_only_one_succeeds() -> None:
         admin_email = admin.email
         results = await generate_invite_codes(
             db=setup_session, count=1, created_by=admin.id,
-            plan_code="observe_20", grant_months=1,
+            plan_code="observe_20", grant_days=1,
         )
         await setup_session.commit()
         raw_code = results[0][1]

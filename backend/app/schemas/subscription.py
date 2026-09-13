@@ -82,20 +82,20 @@ class GrantSubscriptionRequest(BaseModel):
     """管理员授予用户订阅请求。"""
 
     plan_code: str = Field(..., description="套餐代码 observe_20/research_50")
-    grant_months: int = Field(..., ge=1, le=36, description="授予自然月数（1-36）")
+    grant_days: int = Field(..., ge=1, le=365, description="授予天数（1-365）")
 
 
 class RenewSubscriptionRequest(BaseModel):
     """管理员续期用户订阅请求。"""
 
-    grant_months: int = Field(..., ge=1, le=36, description="续期自然月数（1-36）")
+    grant_days: int = Field(..., ge=1, le=365, description="续期天数（1-365）")
 
 
 class ChangePlanRequest(BaseModel):
     """管理员修改用户套餐请求。"""
 
     plan_code: str = Field(..., description="目标套餐代码 observe_20/research_50")
-    grant_months: int = Field(..., ge=1, le=36, description="授予/续期自然月数（1-36）")
+    grant_days: int = Field(..., ge=1, le=365, description="授予/续期天数（1-365）")
 
 
 class GrantCapabilityRequest(BaseModel):
@@ -103,14 +103,14 @@ class GrantCapabilityRequest(BaseModel):
 
     管理员可通过用户抽屉直接授予或修改 capability：
     - capability: 权限类型（self_selection/market_data/research_replay）
-    - months: 自然月有效期（PA-03）
+    - days: 有效天数（1-365）
     - watchlist_limit: 自选数量上限（仅 self_selection 必填，PA-02）
 
     已有该 capability 时取较晚的 expires_at（不降权），并更新 watchlist_limit（如提供）。
     """
 
     capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
-    months: int = Field(default=1, ge=1, le=36, description="自然月有效期（1-36）")
+    days: int = Field(default=1, ge=1, le=365, description="有效天数（1-365）")
     watchlist_limit: int | None = Field(
         None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填，1-500）"
     )

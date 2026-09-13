@@ -85,7 +85,6 @@ interface InviteCodeRow {
   grant_days: number
   plan_code: PlanCode | null
   monitor_limit: number | null
-  grant_months: number | null
   note: string | null
   created_by: string
   created_at: string
@@ -323,8 +322,8 @@ export default function AdminUsersPage() {
   const [capResearchReplay, setCapResearchReplay] = useState(false)
   // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
   const [capWatchlistLimit, setCapWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
-  // 统一 grant_months 按 30 天周期（PA-03，1 = 30 天）
-  const [generateGrantMonths, setGenerateGrantMonths] = useState(1)
+  // 统一 grant_days 按 30 天周期（PA-03，1 = 30 天）
+  const [generateGrantDays, setGenerateGrantDays] = useState(1)
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
 
   // 用户兑换记录（抽屉打开时按选中用户查询）
@@ -373,7 +372,7 @@ export default function AdminUsersPage() {
   const [capGrantCapability, setCapGrantCapability] = useState<
     'self_selection' | 'market_data' | 'research_replay'
   >('self_selection')
-  const [capGrantMonths, setCapGrantMonths] = useState(1)
+  const [capGrantDays, setCapGrantDays] = useState(1)
   const [capGrantWatchlistLimit, setCapGrantWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
 
   // ===== 派生数据 =====
@@ -498,10 +497,10 @@ export default function AdminUsersPage() {
     [revokeInviteCode, toast],
   )
 
-  /** [Gate2 PRD60 PA-20] 生成邀请码 - 提交 capabilities 组合 + grant_months/count/note
+  /** [Gate2 PRD60 PA-20] 生成邀请码 - 提交 capabilities 组合 + grant_days/count/note
    * 取消"套餐类型"作为主入口，改为三勾选 self_selection/market_data/research_replay
    * 选择 self_selection 时 watchlist_limit 必填且管理员自由输入
-   * 统一 grant_months 按 30 天周期（PA-03，1 = 30 天）
+   * 统一 grant_days 按 30 天周期（PA-03，1 = 30 天）
    * 至少需要选择一个 capability
    */
   const handleGenerate = useCallback(() => {
@@ -510,20 +509,20 @@ export default function AdminUsersPage() {
     if (capSelfSelection) {
       capabilities.push({
         capability: 'self_selection',
-        months: generateGrantMonths,
+        days: generateGrantDays,
         watchlist_limit: capWatchlistLimit,
       })
     }
     if (capMarketData) {
       capabilities.push({
         capability: 'market_data',
-        months: generateGrantMonths,
+        days: generateGrantDays,
       })
     }
     if (capResearchReplay) {
       capabilities.push({
         capability: 'research_replay',
-        months: generateGrantMonths,
+        days: generateGrantDays,
       })
     }
 
@@ -543,7 +542,7 @@ export default function AdminUsersPage() {
       {
         count: generateCount,
         note: generateNote,
-        grant_months: generateGrantMonths, // 旧字段保留兼容（capabilities 优先）
+        grant_days: generateGrantDays, // 旧字段保留兼容（capabilities 优先）
         capabilities,
       },
       {
@@ -562,7 +561,7 @@ export default function AdminUsersPage() {
     createInviteCodes,
     generateCount,
     generateNote,
-    generateGrantMonths,
+    generateGrantDays,
     capSelfSelection,
     capMarketData,
     capResearchReplay,
@@ -579,7 +578,7 @@ export default function AdminUsersPage() {
     setCapMarketData(true)
     setCapResearchReplay(false)
     setCapWatchlistLimit(OBSERVE_PLAN_DEFAULT)
-    setGenerateGrantMonths(1)
+    setGenerateGrantDays(1)
     setModalOpen(true)
   }, [])
 
@@ -865,7 +864,7 @@ export default function AdminUsersPage() {
     )
   }, [selectedMember, userChannel, deleteUserChannelMut, toast])
 
-  /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_months 默认 1） */
+  /** 选择目标套餐：调用 change-plan 变更用户套餐（grant_days 默认 1） */
   const handlePlanChange = useCallback(
     (planCode: PlanCode) => {
       if (!planCode || !selectedMember) return
@@ -873,7 +872,7 @@ export default function AdminUsersPage() {
       changePlan.mutate(
         {
           userId: selectedMember.user_id,
-          payload: { plan_code: planCode, grant_months: 1 },
+          payload: { plan_code: planCode, grant_days: 1 },
         },
         {
           onSuccess: () => {
@@ -900,7 +899,7 @@ export default function AdminUsersPage() {
     }
     const payload: GrantCapabilityRequest = {
       capability: capGrantCapability,
-      months: capGrantMonths,
+      days: capGrantDays,
       ...(capGrantCapability === 'self_selection' ? { watchlist_limit: capGrantWatchlistLimit } : {}),
     }
     grantCapabilityMut.mutate(
@@ -918,7 +917,7 @@ export default function AdminUsersPage() {
         },
       },
     )
-  }, [selectedMember, capGrantCapability, capGrantMonths, capGrantWatchlistLimit, grantCapabilityMut, toast])
+  }, [selectedMember, capGrantCapability, capGrantDays, capGrantWatchlistLimit, grantCapabilityMut, toast])
 
   // [Gate2 PRD60 PA-20] 撤销用户 capability
   const handleRevokeCapability = useCallback(
@@ -1132,13 +1131,13 @@ export default function AdminUsersPage() {
         sortValue: (row) => row.monitor_limit ?? 0,
       },
       {
-        key: 'grant_months',
-        title: '有效月数',
+        key: 'grant_days',
+        title: '有效天数',
         dataType: 'number',
         sortable: true,
         filterable: false,
-        render: (row) => (row.grant_months != null ? `${row.grant_months} × 30天` : '—'),
-        sortValue: (row) => row.grant_months ?? 0,
+        render: (row) => (row.grant_days != null ? `${row.grant_days} 天` : '—'),
+        sortValue: (row) => row.grant_days ?? 0,
       },
       {
         key: 'usage_type',
@@ -1248,8 +1247,8 @@ export default function AdminUsersPage() {
       market_data: capMarketData,
       research_replay: capResearchReplay,
     })
-    return `${capText} · 有效期${generateGrantMonths}周期（每周期30天） · 注册后默认入口: ${defaultRoute}`
-  }, [capSelfSelection, capMarketData, capResearchReplay, capWatchlistLimit, generateGrantMonths])
+    return `${capText} · 有效期${generateGrantDays}天 · 注册后默认入口: ${defaultRoute}`
+  }, [capSelfSelection, capMarketData, capResearchReplay, capWatchlistLimit, generateGrantDays])
 
   // ===== 渲染 =====
   return (
@@ -1780,17 +1779,17 @@ export default function AdminUsersPage() {
                             </select>
                           </div>
                           <div className="form-row">
-                            <label className="form-label">有效期周期（每周期30天）</label>
+                            <label className="form-label">有效期（天）</label>
                             <input
                               className="input"
                               type="number"
                               min={1}
-                              max={36}
-                              value={capGrantMonths}
+                              max={365}
+                              value={capGrantDays}
                               onChange={(e) => {
                                 const v = Number(e.target.value)
                                 if (Number.isFinite(v)) {
-                                  setCapGrantMonths(Math.min(36, Math.max(1, Math.trunc(v))))
+                                  setCapGrantDays(Math.min(365, Math.max(1, Math.trunc(v))))
                                 }
                               }}
                             />
@@ -2001,16 +2000,16 @@ export default function AdminUsersPage() {
                     className="input"
                     type="number"
                     min={1}
-                    max={36}
-                    value={generateGrantMonths}
+                    max={365}
+                    value={generateGrantDays}
                     onChange={(e) => {
                       const v = Number(e.target.value)
                       if (Number.isFinite(v)) {
-                        setGenerateGrantMonths(Math.min(36, Math.max(1, Math.trunc(v))))
+                        setGenerateGrantDays(Math.min(365, Math.max(1, Math.trunc(v))))
                       }
                     }}
                   />
-                  <small className="form-hint">PA-03：1周期=30天，按N×30天计算</small>
+                  <small className="form-hint">有效天数（1 单位 = 1 天）</small>
                 </div>
                 <div className="form-row">
                   <label className="form-label">生成数量</label>

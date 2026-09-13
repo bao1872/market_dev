@@ -89,7 +89,7 @@ async def _create_member_with_plan(
         count=1,
         created_by=admin.id,
         plan_code=plan_code,
-        grant_months=1,
+        grant_days=1,
     )
     await db.flush()
 
@@ -373,7 +373,7 @@ async def test_expired_member_me_access_and_renew_allowed(
         count=1,
         created_by=admin.id,
         plan_code="observe_20",
-        grant_months=1,
+        grant_days=1,
     )
     await db_session.flush()
 
@@ -433,7 +433,7 @@ async def test_no_subscription_member_me_access_and_renew_allowed(
         count=1,
         created_by=admin.id,
         plan_code="observe_20",
-        grant_months=1,
+        grant_days=1,
     )
     await db_session.flush()
 
@@ -621,7 +621,7 @@ async def test_renewal_restores_trend_selection_access(
         count=1,
         created_by=admin.id,
         plan_code="observe_20",
-        grant_months=1,
+        grant_days=1,
     )
     await db_session.flush()
 
@@ -688,7 +688,7 @@ async def test_renewal_restores_watchlist_access(
         count=1,
         created_by=admin.id,
         plan_code="observe_20",
-        grant_months=1,
+        grant_days=1,
     )
     await db_session.flush()
 

@@ -221,7 +221,7 @@ export default function SubscriptionExpiredPage() {
 
         {/* 底部规则说明 */}
         <div className="renew-rule-note">
-          邀请码为一次性兑换码；已过期账户从兑换当天起计算30天，未到期账户从原到期日顺延30天。
+          邀请码为一次性兑换码；已过期账户从兑换当天起计算邀请码设定的有效天数，未到期账户从原到期日顺延相同天数。
         </div>
       </div>
     </div>

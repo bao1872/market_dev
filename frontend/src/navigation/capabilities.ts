@@ -64,7 +64,7 @@ export function hasCapability(
 /** 单条 capability 授权（与 backend CapabilityGrant / InviteCode.capabilities JSONB 对齐） */
 export interface CapabilityGrantLike {
   capability: string
-  months?: number
+  days?: number
   watchlist_limit?: number | null
 }
 
