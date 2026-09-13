@@ -294,60 +294,62 @@ async def require_admin(
 async def require_active_subscription(
     ctx: AccessContext = Depends(require_authenticated),
 ) -> AccessContext:
-    """要求有效订阅（admin 自动豁免），否则 403。
+    """[DEPRECATED 兼容 shim] 正常权限以 capability 有效期为准，不再以 legacy Subscription 状态判断。
 
-    admin 路径：ctx.subscription_active=True（get_access_context 已豁免），直接通过。
-    member 路径：ctx.subscription_active 由实时计算，过期或无订阅返回 403。
+    .. deprecated::
+        权限模型 V2 后，功能判权唯一真源为 ``user_capabilities``。本 shim 仅保留给历史兼容，
+        不得在新增正常 API 使用。语义改为：admin 或具备任一 active capability 即视为有效，
+        不再因 legacy Subscription 不 active 而错误 403（正常用户有有效 capability 不应被拒）。
 
-    Args:
-        ctx: 权限上下文（由 require_authenticated 注入）
-
-    Returns:
-        原 AccessContext（链式传递）
-
-    Raises:
-        HTTPException 403: 订阅已过期或无有效订阅
+    新代码请使用 ``require_capability`` / ``require_any_capability``。
     """
-    if not ctx.subscription_active:
-        # [AccessControl] - 描述: 区分"已过期"与"无订阅"两种情况，错误信息更精准
-        if ctx.plan_code is not None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="订阅已过期，请续期",
-            )
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="无有效订阅",
-        )
-    return ctx
+    if ctx.is_admin or ctx.active_capability_keys:
+        return ctx
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="无有效权限（capability 已过期或未授予）",
+    )
 
 
 def require_feature(feature_name: str) -> Callable[..., Coroutine[Any, Any, AccessContext]]:
-    """功能特性检查依赖工厂（admin 豁免）。
+    """[DEPRECATED 兼容 shim] 旧 plan feature 守卫。
 
-    返回一个 FastAPI 依赖函数，检查 ctx.features 是否包含指定 feature。
-    admin 自动豁免（features 为空也通过）。
+    .. deprecated::
+        权限模型 V2 后正常 API 应使用 ``require_capability`` / ``require_any_capability``。
+        本 shim 仅作历史兼容：将旧 feature 名映射到 capability 解析，最终走
+        ``ctx.capabilities``（唯一真源），不再读取 plan 推导的 ``ctx.features`` 作判权。
 
-    用法：
-        @router.post("/export", dependencies=[Depends(require_feature("advanced_export"))])
-        async def export(...): ...
+    映射（已确认，见 PRD60 权限矩阵；禁止随意新增 feature→数字 映射）：
+    - "trend_selection" → 具备 ``self_selection`` 或 ``research_replay`` 任一 active 即通过
+    - 其他未识别 feature → 回退到 ``ctx.features``（legacy plan 展示字段）最后兜底
 
-    Args:
-        feature_name: 功能特性名（如 "trend_selection" / "advanced_export"）
-
-    Returns:
-        FastAPI 依赖函数，校验通过返回原 ctx，否则 403
+    admin 自动豁免。
     """
     if not feature_name:
         raise ValueError("require_feature 需要非空 feature_name")
 
+    # 旧 feature → capability 映射（仅已确认项；禁止凭空创造映射）
+    _FEATURE_TO_CAPABILITIES: dict[str, tuple[str, ...]] = {
+        "trend_selection": ("self_selection", "research_replay"),
+    }
+
     async def _check_feature(
         ctx: AccessContext = Depends(require_authenticated),
     ) -> AccessContext:
-        """检查 ctx 是否具备指定 feature（admin 豁免）。"""
-        # [AccessControl] - 描述: admin 豁免，不检查 features 列表
+        """检查 ctx 是否具备指定 feature（admin 豁免），最终以 capabilities 为真源。"""
         if ctx.is_admin:
             return ctx
+        caps = _FEATURE_TO_CAPABILITIES.get(feature_name)
+        if caps:
+            for cap in caps:
+                cap_info = ctx.capabilities.get(cap)
+                if cap_info is not None and cap_info.get("active"):
+                    return ctx
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"需要权限: {feature_name}",
+            )
+        # 未识别 feature：回退 legacy plan features 展示字段（兼容期）
         if feature_name not in ctx.features:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -359,28 +361,16 @@ def require_feature(feature_name: str) -> Callable[..., Coroutine[Any, Any, Acce
 
 
 def require_quota(quota_name: str) -> Callable[..., Coroutine[Any, Any, int | None]]:
-    """额度检查依赖工厂（admin 豁免，返回限额值）。
+    """[DEPRECATED 兼容 shim] 旧 quota 守卫。
 
-    返回一个 FastAPI 依赖函数，返回限额值供调用方比较实际使用量。
-    - admin：返回 None（表示无限制，调用方应跳过超额检查）
-    - member：返回 ctx.limits[quota_name]；若 quota_name 不在 limits 中抛 403
+    .. deprecated::
+        权限模型 V2 后数值额度从 capability 取值（``self_selection.watchlist_limit``），
+        正常 API 应使用 ``require_watchlist_limit``。本 shim 仅历史兼容。
 
-    注意：本函数只返回限额值，实际超额检查由调用方完成。
-    例如 watchlist 新增时：limit = await require_quota("monitor_limit")(...);
-    若 limit is not None 且 current_count >= limit，则拒绝新增。
-
-    用法：
-        @router.post("/watchlist")
-        async def add_watchlist(
-            ctx: AccessContext = Depends(require_authenticated),
-            monitor_limit = Depends(require_quota("monitor_limit")),
-        ): ...
-
-    Args:
-        quota_name: 额度名（如 "monitor_limit" / "notification_channel_limit"）
-
-    Returns:
-        FastAPI 依赖函数，返回限额值（int）或 None（admin 无限制）
+    - admin：返回 None（无限制）
+    - "monitor_limit" → 优先取 ``self_selection`` capability 的 ``watchlist_limit``
+      （capability-only 用户不再因 plan 缺失而被 403）
+    - 其他 quota → 回退 ``ctx.limits``（legacy plan 展示字段）
     """
     if not quota_name:
         raise ValueError("require_quota 需要非空 quota_name")
@@ -388,10 +378,26 @@ def require_quota(quota_name: str) -> Callable[..., Coroutine[Any, Any, int | No
     async def _get_quota(
         ctx: AccessContext = Depends(require_authenticated),
     ) -> int | None:
-        """返回限额值（admin=None 无限制；member=int 限额；缺失=403）。"""
-        # [AccessControl] - 描述: admin 豁免，返回 None 表示无限制
+        """返回限额值（admin=None 无限制；member 优先 capability）。"""
         if ctx.is_admin:
             return None
+        if quota_name == "monitor_limit":
+            cap_info = ctx.capabilities.get("self_selection")
+            if cap_info is not None and cap_info.get("active"):
+                limit = cap_info.get("watchlist_limit")
+                if limit is not None:
+                    return int(limit)
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="self_selection capability 缺少 watchlist_limit 配置",
+                )
+            # 无 capability（旧用户 fallback）：回退 plan limits
+            if "monitor_limit" in ctx.limits:
+                return int(ctx.limits["monitor_limit"])
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="无有效额度: monitor_limit",
+            )
         if quota_name not in ctx.limits:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,

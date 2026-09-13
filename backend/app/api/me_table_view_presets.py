@@ -7,9 +7,8 @@
 - DELETE /me/table-view-presets/{id}: 删除 preset
 
 权限：
-- require_active_subscription: 需有效订阅（admin 豁免）
-- require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
-- 与 /strategies/{key}/published-runs 权限矩阵一致
+- require_capability("self_selection"): 自选管理权限（admin 豁免）
+- 表格视图预设属于用户自选管理范围内的个性化配置，迁移自旧 require_feature("trend_selection")
 
 业务规则：
 - user_id 由 JWT 上下文注入，不接受 body 传入
@@ -39,8 +38,7 @@ from app.schemas.table_view_preset import (
 )
 from app.services.access_control_service import (
     AccessContext,
-    require_active_subscription,
-    require_feature,
+    require_capability,
 )
 
 router = APIRouter(prefix="/v1", tags=["me"])
@@ -56,14 +54,12 @@ async def list_my_table_view_presets(
         default=None, max_length=64, description="策略 key（可选过滤）"
     ),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> TableViewPresetListResponse:
     """查询当前用户的 preset 列表（按 table_id + strategy_key 过滤）。
 
     权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    - require_capability("self_selection"): 自选管理权限（admin 豁免）
 
     Args:
         table_id: 表格标识（必填）
@@ -104,8 +100,7 @@ async def list_my_table_view_presets(
 async def create_my_table_view_preset(
     payload: TableViewPresetCreate,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> TableViewPresetResponse:
     """创建 preset。
 
@@ -208,8 +203,7 @@ async def update_my_table_view_preset(
     preset_id: uuid.UUID,
     payload: TableViewPresetPatch,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> TableViewPresetResponse:
     """更新 preset（name/config/is_default，user_id/table_id/strategy_key 不可改）。
 
@@ -294,8 +288,7 @@ async def update_my_table_view_preset(
 async def delete_my_table_view_preset(
     preset_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: AccessContext = Depends(require_capability("self_selection")),
 ) -> None:
     """删除 preset。
 

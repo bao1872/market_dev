@@ -936,14 +936,18 @@ async def revoke_subscription_endpoint(
     return SubscriptionResponse.model_validate(subscription)
 
 
-@router.post("/users/{user_id}/change-plan", response_model=SubscriptionResponse)
+@router.post("/users/{user_id}/change-plan", response_model=SubscriptionResponse, deprecated=True)
 async def change_subscription_plan_endpoint(
     user_id: UUID,
     payload: ChangePlanRequest,
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> SubscriptionResponse:
-    """管理员修改用户套餐（无 subscription 时创建，有时更新并续期）。"""
+    """[DEPRECATED legacy repair] 仅用于历史兼容修复用户 Subscription 商业记录。
+
+    ⚠️ 本端点**不修改 user_capabilities**，因此不改变用户实际权限。正常权限管理请使用
+    /v1/admin/users/{user_id}/capabilities 相关端点。前端正常管理界面不应再调用本端点。
+    """
     try:
         subscription = await change_subscription_plan(
             db=db,
@@ -1573,45 +1577,6 @@ async def revoke_user_subscription(
         target_id=str(subscription.user_id),
         before_data={"status": "active"},
         after_data={"status": subscription.status},
-    )
-    await db.commit()
-
-    return SubscriptionResponse.model_validate(subscription)
-
-
-@router.post("/users/{user_id}/subscriptions/change-plan", response_model=SubscriptionResponse)
-async def change_user_subscription_plan(
-    user_id: UUID,
-    payload: ChangePlanRequest,
-    db: AsyncSession = Depends(get_db),
-    current_user=Depends(require_roles("admin")),
-) -> SubscriptionResponse:
-    """管理员修改用户套餐（无 subscription 时创建，有时更新并续期）。"""
-    try:
-        subscription = await change_subscription_plan(
-            db=db,
-            user_id=user_id,
-            plan_code=payload.plan_code,
-            grant_days=payload.grant_days,
-            actor_user_id=current_user.id,
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e),
-        ) from e
-
-    await write_audit_log(
-        db=db,
-        actor_user_id=current_user.id,
-        action="subscription.change_plan",
-        target_type="subscription",
-        target_id=str(subscription.user_id),
-        after_data={
-            "plan_code": subscription.plan_code,
-            "grant_days": payload.grant_days,
-            "expires_at": subscription.expires_at.isoformat(),
-        },
     )
     await db.commit()
 

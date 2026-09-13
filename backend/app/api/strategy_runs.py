@@ -52,8 +52,7 @@ from app.schemas.strategy_run import (
 )
 from app.services.access_control_service import (
     AccessContext,
-    require_active_subscription,
-    require_feature,
+    require_capability,
 )
 from app.services.excel_export_service import (
     MAX_EXPORT_ROWS,
@@ -439,16 +438,14 @@ async def list_published_runs(
     limit: int = Query(30, ge=1, le=100, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    _ctx: AccessContext = Depends(require_capability("research_replay")),
 ) -> StrategyRunListResponse:
     """查询已发布的运行批次（需有效订阅 + trend_selection feature）。
 
     只返回 status='published' 的 run，按 trade_date 降序。
 
     权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    - require_capability("research_replay"): 复盘与竞价权限（admin 豁免）
 
     Args:
         strategy_key: 策略 key
@@ -519,14 +516,12 @@ async def query_strategy_results(
     limit: int = Query(100, ge=1, le=500, description="返回上限"),
     offset: int = Query(0, ge=0, description="偏移量"),
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    _ctx: AccessContext = Depends(require_capability("research_replay")),
 ) -> StrategyResultListResponse:
     """查询策略结果（用户端，绑定 published run）。
 
     权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    - require_capability("research_replay"): 复盘与竞价权限（admin 豁免）
 
     流程：
     1. 查找 strategy_key 最新 released 版本
@@ -654,16 +649,14 @@ async def list_run_results(
     page: int = Query(1, ge=1, description="页码（从 1 开始）"),
     page_size: int = Query(50, ge=1, le=500, description="每页条数"),
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: AccessContext = Depends(require_capability("research_replay")),
 ) -> StrategyResultListResponse:
     """查询运行结果（分页+筛选+排序，需 published）。
 
     通过 selector_query_service 统一查询，返回 source_total 和 filtered_total。
 
     权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    - require_capability("research_replay"): 复盘与竞价权限（admin 豁免）
 
     Args:
         run_id: 运行 ID
@@ -809,14 +802,12 @@ async def get_run_result_detail(
     run_id: uuid.UUID,
     result_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
-    _ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    _ctx: AccessContext = Depends(require_capability("research_replay")),
 ) -> StrategyResultResponse:
     """获取单个结果详情。
 
     权限：
-    - require_active_subscription: 需有效订阅（admin 豁免）
-    - require_feature("trend_selection"): 需具备趋势选股功能（admin 豁免）
+    - require_capability("research_replay"): 复盘与竞价权限（admin 豁免）
 
     Args:
         run_id: 运行 ID（用于验证归属）
@@ -853,8 +844,7 @@ async def export_run_results(
     run_id: uuid.UUID,
     request: ExportRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_active_subscription),
-    _feat: AccessContext = Depends(require_feature("trend_selection")),
+    ctx: AccessContext = Depends(require_capability("research_replay")),
 ) -> Response:
     """导出已发布运行结果为 .xlsx。
 
