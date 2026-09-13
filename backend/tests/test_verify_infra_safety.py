@@ -13,7 +13,10 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import re
+import shutil
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -325,6 +328,102 @@ def test_panji_verify_cli_accepts_ref_and_validates_before_ssh() -> None:
     assert "git check-ref-format" in cli
     # 显式 ref 透传为 run_remote_verification.sh 第 3 个位置参数
     assert "run_remote_verification.sh '$SHA' '$PLAN' '${VERIFY_REF:-}'" in cli
+
+
+# ---------------------------------------------------------------------------
+# [C-bootstrap] panji-verify 受控 bootstrap 行为测试（subprocess + 假 SSH，不联网/不连库）
+# ---------------------------------------------------------------------------
+
+_PANJI_VERIFY = _VERIFY_DIR.parents[1] / "scripts" / "ops" / "panji-verify"
+
+
+def _run_panji_verify(
+    tmp_path: Path, args: list[str], *, fail_match: str | None = None
+) -> tuple[subprocess.CompletedProcess, list[str]]:
+    """复制 panji-verify 到临时 ops 目录并注入假 preflight/ssh，运行后返回 (proc, ssh 调用命令列表)。"""
+    ops_dir = tmp_path / "ops"
+    ops_dir.mkdir()
+    shutil.copy(_PANJI_VERIFY, ops_dir / "panji-verify")
+    (ops_dir / "panji-verify").chmod(0o755)
+    preflight = ops_dir / "panji-prod-preflight"
+    preflight.write_text("#!/usr/bin/env bash\necho PREFLIGHT_OK\nexit 0\n")
+    preflight.chmod(0o755)
+    # 假 SSH 记录每次调用（$* 为单个命令字符串），可按 fail_match 模拟远程失败
+    (ops_dir / "panji-prod-ssh").write_text(
+        "#!/usr/bin/env bash\n"
+        'printf \'CALL\\n%s\\n\' "$*" >> "${PANJI_TEST_SSH_LOG}"\n'
+        'if [ -n "${PANJI_TEST_FAIL_MATCH:-}" ] && printf \'%s\' "$*" | grep -qF "${PANJI_TEST_FAIL_MATCH}"; then exit 1; fi\n'
+        "exit 0\n"
+    )
+    (ops_dir / "panji-prod-ssh").chmod(0o755)
+    log = tmp_path / "ssh.log"
+    env = os.environ.copy()
+    env["PANJI_TEST_SSH_LOG"] = str(log)
+    if fail_match is not None:
+        env["PANJI_TEST_FAIL_MATCH"] = fail_match
+    proc = subprocess.run(
+        ["bash", str(ops_dir / "panji-verify"), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    calls: list[str] = []
+    if log.exists():
+        lines = log.read_text().splitlines()
+        calls = [lines[i + 1] for i, line in enumerate(lines) if line == "CALL"]
+    return proc, calls
+
+
+def test_panji_verify_default_has_no_bootstrap(tmp_path: Path) -> None:
+    """默认（无 --ref）→ 只调用远程 runner 一次，不执行任何 bootstrap fetch。"""
+    proc, calls = _run_panji_verify(tmp_path, ["run", "--sha", FULL_SHA])
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 1
+    assert "run_remote_verification.sh" in calls[0]
+    assert "git fetch" not in calls[0]
+
+
+def test_panji_verify_explicit_ref_bootstraps_exact_ref_then_runs(tmp_path: Path) -> None:
+    """explicit --ref → 先受控 bootstrap（仅 fetch 指定 ref、校验 sha==tip）再调用 runner。"""
+    proc, calls = _run_panji_verify(
+        tmp_path, ["run", "--sha", FULL_SHA, "--ref", "verify/foo"]
+    )
+    assert proc.returncode == 0, proc.stderr
+    assert len(calls) == 2
+    bootstrap, runner = calls[0], calls[1]
+    # 仅 fetch 指定 branch（窄化 refspec），不带时间戳/全量
+    assert "git fetch origin refs/heads/verify/foo:refs/remotes/origin/verify/foo" in bootstrap
+    # bootstrap 层自身校验 sha == branch tip（首次运行时旧 runner 尚无此校验）
+    assert "git rev-parse refs/remotes/origin/verify/foo" in bootstrap
+    assert FULL_SHA in bootstrap
+    # 禁止 fetch 全量分支
+    assert "--all" not in bootstrap
+    assert "refs/heads/*" not in bootstrap
+    # 第二次才正式调用 runner，且透传 ref
+    assert "run_remote_verification.sh" in runner
+    assert "verify/foo" in runner
+
+
+def test_panji_verify_invalid_ref_rejects_before_ssh(tmp_path: Path) -> None:
+    """非法 ref → 在任何 SSH 之前拒绝（ssh calls = 0）。"""
+    proc, calls = _run_panji_verify(
+        tmp_path, ["run", "--sha", FULL_SHA, "--ref", "bad..ref"]
+    )
+    assert proc.returncode != 0
+    assert calls == []
+
+
+def test_panji_verify_bootstrap_membership_failure_blocks_runner(tmp_path: Path) -> None:
+    """bootstrap 的 sha==branch-tip 校验失败 → fail-closed，绝不调用 runner（runner calls = 0）。"""
+    proc, calls = _run_panji_verify(
+        tmp_path,
+        ["run", "--sha", FULL_SHA, "--ref", "verify/foo"],
+        fail_match="git rev-parse",
+    )
+    assert proc.returncode != 0
+    assert len(calls) == 1
+    assert "git fetch" in calls[0]
+    assert "run_remote_verification.sh" not in calls[0]
 
 
 def test_verify_attempt_uses_fresh_process_env_injection() -> None:

@@ -47,5 +47,18 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/panji-prod-preflight" || exit 10
 
+# [C bootstrap] explicit --ref：先让远程对象库取得 verification branch（窄化 refspec，不 checkout/
+# reset/改 worktree），并在本层校验 SHA == 远程 branch tip。首次运行时远程仍是旧 runner（不
+# 含 ref membership 校验），故 membership 必须由本 bootstrap 层 fail-closed 保证。
+# 默认（无 --ref）不执行任何 bootstrap，dev verification 路径完全不变。
+if [[ -n "${VERIFY_REF}" ]]; then
+  echo "panji-verify: bootstrap ref=${VERIFY_REF} sha=${SHA} (fetch exact ref + sha==tip membership)"
+  BOOTSTRAP_CMD="cd /root/web_dev_verify && git fetch origin refs/heads/${VERIFY_REF}:refs/remotes/origin/${VERIFY_REF} && git cat-file -e ${SHA}^{commit} && [ \"\$(git rev-parse refs/remotes/origin/${VERIFY_REF})\" = \"${SHA}\" ] && echo PANJI_BOOTSTRAP_OK"
+  "$SCRIPT_DIR/panji-prod-ssh" "$BOOTSTRAP_CMD" || {
+    echo "panji-verify: bootstrap FAILED (fetch 或 sha==branch-tip membership 校验未通过，fail-closed)" >&2
+    exit 11
+  }
+fi
+
 "$SCRIPT_DIR/panji-prod-ssh" \
   "cd /root/web_dev_verify && scripts/verify/run_remote_verification.sh '$SHA' '$PLAN' '${VERIFY_REF:-}'"
