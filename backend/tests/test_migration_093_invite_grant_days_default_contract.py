@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import re
 import subprocess
 import sys
 import uuid
@@ -67,19 +68,24 @@ def test_migration_file_exists():
 
 def test_migration_revision_chain():
     src = _migration_source()
-    assert 'revision = "093_invite_grant_days_default"' in src, "revision 必须为 093_invite_grant_days_default"
-    assert 'down_revision = "092_review_core_only_identity"' in src, (
-        "down_revision 必须为 092_review_core_only_identity"
-    )
+    assert re.search(
+        r'\brevision\b\s*(?::[^=]+)?=\s*"093_invite_grant_days_default"',
+        src,
+    ), "revision 必须为 093_invite_grant_days_default"
+    assert re.search(
+        r'\bdown_revision\b\s*(?::[^=]+)?=\s*"092_review_core_only_identity"',
+        src,
+    ), "down_revision 必须为 092_review_core_only_identity"
 
 
 def test_upgrade_only_changes_invite_grant_days_default():
     """upgrade 只改 invite_codes.grant_days 的 server_default，不得触碰其它表。"""
     src = _migration_source()
     up_body = src[src.index("def upgrade"):src.index("def downgrade")]
-    assert 'op.alter_column("invite_codes", "grant_days"' in up_body, (
-        "upgrade 必须 alter invite_codes.grant_days"
-    )
+    assert re.search(
+        r'op\.alter_column\(\s*"invite_codes"\s*,\s*"grant_days"',
+        up_body,
+    ), "upgrade 必须 alter invite_codes.grant_days"
     assert "server_default=sa.text(\"1\")" in up_body, "upgrade 必须 server_default=1"
     assert "subscriptions" not in up_body, "093 不得触碰 subscriptions（expires_at 不动）"
     for verb in ("op.add_column", "op.drop_column", "op.create_table", "op.drop_table"):
@@ -156,12 +162,25 @@ async def _insert_invite(*, code_hash: str, created_by: uuid.UUID) -> int:
     """插入一行 invite_codes（不指定 grant_days，依赖当前 schema default），返回实际 grant_days。
 
     短事务：open -> execute(RETURNING grant_days) -> commit -> close。
+    status 显式写合法值 'unused' 以满足 invite_codes_status_check 约束；
+    grant_days 故意不写，由数据库 server_default 提供（092→30 / 093→1）。
     """
     async with TestAsyncSessionLocal() as session:
         result = await session.execute(
             text(
-                "INSERT INTO invite_codes (code_hash, created_by) "
-                "VALUES (:code_hash, :created_by) RETURNING grant_days"
+                """
+                INSERT INTO invite_codes (
+                    code_hash,
+                    created_by,
+                    status
+                )
+                VALUES (
+                    :code_hash,
+                    :created_by,
+                    'unused'
+                )
+                RETURNING grant_days
+                """
             ),
             {"code_hash": code_hash, "created_by": created_by},
         )
