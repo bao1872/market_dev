@@ -159,6 +159,24 @@
       "required": true,
       "test_selectors": ["tests/test_watchlist_metadata_boundary.py"],
       "claim": "For users resolved from explicit user_capabilities (legacy_plan_fallback / C10 excluded from this contract), /v1/watchlist/monitor-status requires self_selection only and exposes only that user's own active watchlist (200 for self_selection-only and both, 403 for market_data-only, 200 for admin); GET /v1/watchlist requires self_selection only (403 for market_data-only); POST and DELETE /v1/watchlist require self_selection only (403 for market_data-only). GET /v1/watchlist returns metadata-only summary items (watchlist_item_id/instrument_id/symbol/name/market/source/created_at) and never exposes market/strategy metrics (price, change_pct, metrics, latest_event, BB, node, POC, first_pyramid, bars)."
+    },
+    {
+      "contract_id": "period_unit_is_days",
+      "governance_level": 2,
+      "semantic_owner": "app.services.subscription_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_period_unit_is_days.py"],
+      "claim": "邀请码/订阅/续期 1 单位 = 1 天（禁止 ×30 回漂）；历史 grant_months=1 仍 = 30 天（×30 兼容）。"
+    },
+    {
+      "contract_id": "invite_grant_days_migration_093",
+      "governance_level": 2,
+      "semantic_owner": "alembic.versions.093_invite_grant_days_default",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/test_migration_093_invite_grant_days_default_contract.py"],
+      "claim": "093 将 invite_codes.grant_days server_default 由 30 改为 1；migration 只改 schema default，不触碰 subscriptions/expires_at，不 UPDATE/DELETE 任何 invite_codes 历史行。"
     }
   ]
 }
