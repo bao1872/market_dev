@@ -3,13 +3,14 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 run --sha <FULL_SHA> [--plan targeted-pg|migration-roundtrip|full-closure]" >&2
+  echo "usage: $0 run --sha <FULL_SHA> [--plan targeted-pg|migration-roundtrip|full-closure] [--ref <verify-branch>]" >&2
   exit 80
 }
 
 [ "${1:-}" = "run" ] || usage
 shift
 SHA=""
+VERIFY_REF=""
 # Exploration 默认只做 targeted-pg（upgrade_head + pg_contract）。
 # full-closure（PG + Seed + E2E）属于 Hardening/Release，必须显式 --plan full-closure。
 PLAN="targeted-pg"
@@ -17,6 +18,7 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --sha) SHA="${2:-}"; shift 2 ;;
     --plan) PLAN="${2:-}"; shift 2 ;;
+    --ref) VERIFY_REF="${2:-}"; shift 2 ;;
     --env-file) echo "panji-verify: --env-file is no longer accepted" >&2; exit 80 ;;
     *) usage ;;
   esac
@@ -34,8 +36,16 @@ case "$PLAN" in
     ;;
 esac
 
+# VERIFY_REF 校验（与远程 runner 一致）：只允许合法 branch ref，默认空（远程 fallback 到 dev）。
+if [[ -n "${VERIFY_REF}" ]]; then
+  if ! git check-ref-format --branch "${VERIFY_REF}" >/dev/null 2>&1; then
+    echo "panji-verify: --ref 不是合法 branch ref（拒绝：${VERIFY_REF}）" >&2
+    exit 80
+  fi
+fi
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 "$SCRIPT_DIR/panji-prod-preflight" || exit 10
 
 "$SCRIPT_DIR/panji-prod-ssh" \
-  "cd /root/web_dev_verify && scripts/verify/run_remote_verification.sh '$SHA' '$PLAN'"
+  "cd /root/web_dev_verify && scripts/verify/run_remote_verification.sh '$SHA' '$PLAN' '${VERIFY_REF:-}'"

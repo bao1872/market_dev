@@ -49,8 +49,9 @@ fi
 # 本入口内部把它映射为磁盘上的 plan 文件路径，不引入 plan registry / 动态扫描。
 SHA="${1:-}"
 PLAN_NAME="${2:-}"
+VERIFY_REF="${3:-}"
 if [[ -z "${SHA}" ]]; then
-  echo "usage: run_remote_verification.sh <40hex-sha> [plan-name]" >&2
+  echo "usage: run_remote_verification.sh <40hex-sha> [plan-name] [verify-ref]" >&2
   exit 2
 fi
 if [[ ! "${SHA}" =~ ^[0-9a-f]{40}$ ]]; then
@@ -185,8 +186,37 @@ trap cleanup_on_exit EXIT
 
 echo "=== single-flight acquired: ${SHA} ==="
 
-# ───────────────────────────── fetch + checkout exact SHA ─────────────────────────────
-git fetch origin dev >/dev/null 2>&1 || true
+# ───────────────────────────── 验证 ref + fetch + checkout exact SHA ─────────────────────────────
+# VERIFY_REF 默认 dev；显式指定时只 fetch 该分支（不拉全量远程分支，避免 verifier 变成任意 SHA 执行器）。
+VERIFY_REF="${VERIFY_REF:-dev}"
+
+# 校验 VERIFY_REF：只能是合法 branch ref，禁止 URL / remote 名 / metachar / injection。
+if [[ -z "${VERIFY_REF}" ]]; then
+  echo "error: VERIFY_REF 不能为空" >&2
+  exit 2
+fi
+if ! git check-ref-format --branch "${VERIFY_REF}" >/dev/null 2>&1; then
+  echo "error: VERIFY_REF 不是合法 branch ref（拒绝：${VERIFY_REF}）" >&2
+  exit 2
+fi
+
+# 只 fetch 指定 ref（默认 dev）；refspec 限定为 refs/heads/<ref>，不扩展为全量远程分支。
+git fetch origin "refs/heads/${VERIFY_REF}:refs/remotes/origin/${VERIFY_REF}" >/dev/null 2>&1 || {
+  echo "error: fetch VERIFY_REF(${VERIFY_REF}) 失败，中止" >&2
+  exit 1
+}
+
+# 防任意 SHA 执行：SHA 必须存在且属于刚 fetch 的 VERIFY_REF 历史（fail-closed）。
+if ! git cat-file -e "${SHA}^{commit}" 2>/dev/null; then
+  echo "error: SHA(${SHA}) 在本地对象库不存在" >&2
+  exit 1
+fi
+if ! git merge-base --is-ancestor "${SHA}" "refs/remotes/origin/${VERIFY_REF}"; then
+  echo "error: SHA(${SHA}) 不属于 VERIFY_REF(${VERIFY_REF}) 历史，拒绝执行" >&2
+  exit 1
+fi
+echo "verify_ref=${VERIFY_REF} sha=${SHA} sha_belongs_to_ref=yes"
+
 git checkout --detach "${SHA}"
 
 HEAD_SHA="$(git rev-parse HEAD)"

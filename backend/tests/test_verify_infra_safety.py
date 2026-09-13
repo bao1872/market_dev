@@ -293,6 +293,40 @@ def test_remote_runner_is_single_flight_and_reuses_runtime() -> None:
         assert removed not in code
 
 
+def test_remote_runner_defaults_verify_ref_to_dev() -> None:
+    """[C] VERIFY_REF 默认 dev；显式指定只 fetch 该 ref，不拉全量远程分支。"""
+    runner = (_VERIFY_DIR / "run_remote_verification.sh").read_text()
+    # 默认 dev（等价旧 `git fetch origin dev` 行为，向后兼容）
+    assert 'VERIFY_REF="${VERIFY_REF:-dev}"' in runner
+    # 只 fetch 指定 ref（refspec 限定 refs/heads/），默认即 dev
+    assert 'refs/heads/${VERIFY_REF}:refs/remotes/origin/${VERIFY_REF}' in runner
+    # 严禁 fetch 全量远程分支（避免 verifier 变成任意 SHA 执行器）
+    assert "refs/heads/*" not in runner
+
+
+def test_remote_runner_validates_ref_format_and_sha_belongs_to_ref() -> None:
+    """[C] ref 格式 + SHA 属于 ref 双重校验，防止任意 SHA 执行（fail-closed）。"""
+    runner = (_VERIFY_DIR / "run_remote_verification.sh").read_text()
+    # ref 格式校验（check-ref-format），不得把未校验 ref 直接拼进 fetch
+    assert "git check-ref-format" in runner
+    # SHA 必须存在
+    assert "git cat-file -e" in runner
+    # SHA 必须是指定 ref 的祖先，否则拒绝 checkout（防任意 SHA 执行）
+    assert "merge-base --is-ancestor" in runner
+    # fail-closed 通过标记（远程日志应打印 verify_ref / sha / sha_belongs_to_ref=yes）
+    assert "sha_belongs_to_ref=yes" in runner
+
+
+def test_panji_verify_cli_accepts_ref_and_validates_before_ssh() -> None:
+    """[C] 本地 CLI 接受 --ref，并在 SSH 前校验 branch ref 格式、透传为第 3 位置参数。"""
+    cli = (_VERIFY_DIR.parents[1] / "scripts" / "ops" / "panji-verify").read_text()
+    assert "--ref)" in cli
+    # CLI 自身先做格式校验（纵深防御，远程会再校验一次）
+    assert "git check-ref-format" in cli
+    # 显式 ref 透传为 run_remote_verification.sh 第 3 个位置参数
+    assert "run_remote_verification.sh '$SHA' '$PLAN' '${VERIFY_REF:-}'" in cli
+
+
 def test_verify_attempt_uses_fresh_process_env_injection() -> None:
     """gate 经 docker exec + verify_exec.py 注入 env；不再有第二层锁/进程注册表。"""
     source = (_VERIFY_DIR / "verify_attempt.py").read_text()
