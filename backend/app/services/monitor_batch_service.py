@@ -48,7 +48,10 @@ from app.constants.indicator_view import (
     is_supported_event_type,
 )
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.services.smc_monitor_target_service import build_smc_monitor_target_set
+from app.services.smc_monitor_target_service import (
+    SmcMonitorTargetSet,
+    build_smc_monitor_target_set,
+)
 from app.strategy_assets.algorithms.features.smc_pine_core import compute_smc_pine
 from app.constants.user_facing_labels import get_event_label
 from app.core.time import format_shanghai_datetime
@@ -122,6 +125,17 @@ _MINUTE_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_MINUTE_BARS  # 2
 # 复用 NodeClusterProfileResult，避免重复计算。300s 覆盖多个 1m bar 周期，且短于 daily/15m 刷新周期。
 _NODE_CLUSTER_PROFILE_CACHE_TTL_SECONDS = 300
 _SMC_TARGET_SET_CACHE_TTL_SECONDS = 300
+
+# [G6 fail-closed] 构建失败/不可用时注入的空 G5 target set：永远走 G5（active targets 为空 → 0 事件），
+# 绝不落回 legacy SmcMonitor producer（唯一主路径合同）。结构化错误日志即 health signal。
+EMPTY_SMC_TARGET_SET = SmcMonitorTargetSet(
+    contract_identity={},
+    input_identity={},
+    structure_context={},
+    active_structure_targets=[],
+    active_order_block_targets=[],
+    target_set_version="empty",
+)
 
 # 北京时间
 _CST = ZoneInfo("Asia/Shanghai")
@@ -732,16 +746,9 @@ class MonitorBatchService:
             node_target_set = None
 
         # [G6 生产接线] 注入冻结 SMC TargetSet：日线 SMC 一次计算（compute_smc_pine）+ build，
-        # 实例缓存复用（键 daily_last_bar），使 WatchlistMonitor 走 G5 one-shot BOS/CHoCH + OB 新路径；
-        # 计算失败/不可用 → smc_target_set=None → 优雅回退（legacy SMC 分支仍被 40d1e66 过滤保护）。
-        smc_target_set = None
-        try:
-            smc_target_set = await self._build_smc_target_set(instrument_id, symbol, bars_daily)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[%s] SMC target set 构建失败，回退旧路径: %s", symbol, exc)
-            smc_target_set = None
-        if smc_target_set is not None:
-            context.smc_target_set = smc_target_set
+        # 实例缓存复用（键 daily_last_bar），使 WatchlistMonitor 走 G5 one-shot BOS/CHoCH + OB 新路径。
+        # 计算失败/不可用 → 注入 EMPTY_SMC_TARGET_SET（fail-closed，本轮 SMC=0），绝不复活 legacy producer。
+        context.smc_target_set = await self._resolve_smc_target_set(instrument_id, symbol, bars_daily)
 
         # [P0 G7 生产生命周期] prev_state 必须在更新 PriceTracker **之前**读取。
         # 若在之后读取，进程重启时内存 PriceTracker 为空，update_price 首帧恒返回 (p, p)，
@@ -2101,6 +2108,37 @@ class MonitorBatchService:
             sorted_items = sorted(self._node_cluster_profile_cache.items(), key=lambda kv: kv[1][1])
             self._node_cluster_profile_cache = dict(sorted_items[len(sorted_items) // 2:])
         return profile
+
+    async def _resolve_smc_target_set(
+        self,
+        instrument_id: uuid.UUID,
+        symbol: str,
+        bars_daily: Any,
+    ) -> Any:
+        """[G6 fail-closed] 解析本轮 SMC TargetSet：成功返回真实 set，失败注入空 set。
+
+        唯一主路径合同：无论构建成功/失败，本方法永远返回一个**非 None** 的 G5 target set
+        （真实 set 或 EMPTY_SMC_TARGET_SET）。调用方据此注入 context.smc_target_set，
+        使 WatchlistMonitor 永远走 G5 one-shot 分支；绝不会因 None 隐式复活 legacy SmcMonitor。
+
+        失败语义（fail-closed，非 silent fallback）：
+        - 本轮 SMC 不产生任何 BOS/CHoCH/OB 新事件；
+        - 结构化 error 日志 [SMC_TARGET_SET_BUILD_FAILED] 作为 health signal；
+        - 其他非 SMC monitor（Node/VN/OB 等）照常继续。
+        """
+        smc_target_set = None
+        try:
+            smc_target_set = await self._build_smc_target_set(instrument_id, symbol, bars_daily)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] SMC target set 构建异常，fail-closed: %s", symbol, exc)
+            smc_target_set = None
+        if smc_target_set is not None:
+            return smc_target_set
+        logger.error(
+            "[SMC_TARGET_SET_BUILD_FAILED] symbol=%s 本轮 SMC fail-closed（无 legacy 复活）",
+            symbol,
+        )
+        return EMPTY_SMC_TARGET_SET
 
     async def _build_smc_target_set(
         self,

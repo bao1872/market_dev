@@ -153,12 +153,14 @@ def evaluate_smc_events(
         for target in smc_target_set.active_structure_targets:
             if target.target_id in triggered_target_ids:
                 continue
-            # [G5 稳定结构 identity] 跨 target_set_version 重建/重启/retry 的 one-shot 真源。
-            # target_id 含 anchor_index（每日追加 bar 会偏移）与 params_hash（XDXR/参数变化会变），
-            # 故不能作为跨重建的稳定 identity；改用 (lane,kind,anchor_time,level) 标识历史事件。
+            # [G5 稳定结构 identity] 跨 target_set_version 重建/重启/retry/XDXR 的 one-shot 真源。
+            # 必须基于结构事实，不得依赖 qfq 后价格：
+            # - target_id 含 anchor_index（每日追加 bar 偏移）与 params_hash（XDXR/参数变化会变）→ 不稳定；
+            # - level 是 qfq 调整价格，XDXR 后历史价格整体重算 → 同一历史结构 level 会变 → 不能用。
+            # 改用 pivot 的时钟时间戳 anchor_time（qfq 只缩放价格、不移动 bar，故稳定）标识历史事件。
             _stable_id = (
                 f"smc_struct:{instrument_id}:{target.lane}:{target.kind}:"
-                f"{target.anchor_time}:{round(target.level, 4)}"
+                f"{target.anchor_time}"
             )
             if stable_notified_ids is not None and _stable_id in stable_notified_ids:
                 continue
@@ -189,8 +191,11 @@ def evaluate_smc_events(
                 structure_type = "BOS" if is_bos else "CHOCH"
                 direction = "UP" if is_upward else "DOWN"
 
-                dedupe_key = f"smc_struct:{target.target_id}"
-                logical_entity = f"{instrument_id}:{target.target_id}"
+                # dedupe_key 直接复用稳定结构 identity（不含 target_id / qfq level）：
+                # 既保证同周期两 worker 并发由 DB event_key UNIQUE 去重，
+                # 也保证跨 rebuild/XDXR 同一历史结构得相同 event_key（DB 层不再重发）。
+                dedupe_key = f"smc_struct:{instrument_id}:{target.lane}:{target.kind}:{target.anchor_time}"
+                logical_entity = f"{instrument_id}:{target.lane}:{target.kind}:{target.anchor_time}"
                 payload = {
                     "target_id": target.target_id,
                     "structure_type": structure_type,

@@ -343,3 +343,117 @@ async def test_monitor_batch_service_wires_smc_target_set(
     assert result is canned
     # 实例缓存命中：相同 (instrument_id, daily_last_bar) 不重复计算
     assert await svc._build_smc_target_set(inst_id, "600519", bars) is canned
+
+
+def test_smc_bos_dedupe_key_stable_across_rebuild_and_xdxr() -> None:
+    """Case D: XDXR 后 qfq level 变化，同一历史 BOS 结构的 event_key 必须不变。
+
+    dedupe_key 直接映射 DB strategy_events.event_key（UNIQUE + ON CONFLICT DO NOTHING）。
+    若其含 qfq level / target_id，则 XDXR 后重建会得到不同 event_key → DB 也无法去重 → 重发。
+    故稳定 identity 必须基于 pivot 时钟时间戳 anchor_time，不含 qfq 价格。
+    """
+    inst_id = uuid.uuid4()
+    now = datetime.now(_SH_TZ)
+    # 同一 pivot（anchor_time 相同），但 XDXR 后 target_id / level 均变化
+    t_before = SmcStructureTarget(
+        target_id="id_v1", lane="swing", kind="high",
+        level=10.5, anchor_index=10, anchor_time="2026-09-01",
+    )
+    t_after = SmcStructureTarget(
+        target_id="id_v2_diff", lane="swing", kind="high",
+        level=12.3, anchor_index=11, anchor_time="2026-09-01",
+    )
+    s_before = _make_smc_set_ver("v1", t_before)
+    s_after = _make_smc_set_ver("v2", t_after)
+    e_before = evaluate_smc_events(inst_id, s_before, 10.0, 11.0, now, set(), set())
+    e_after = evaluate_smc_events(inst_id, s_after, 12.0, 13.0, now, set(), set())
+    assert len(e_before) == 1 and len(e_after) == 1
+    assert e_before[0].dedupe_key == e_after[0].dedupe_key, (
+        "XDXR 后相同历史结构必须得到相同 event_key，否则 DB 无法去重 / 可能重发"
+    )
+    assert "level" not in e_before[0].dedupe_key
+
+
+async def test_resolve_smc_target_set_returns_real_on_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """构建成功 → 返回真实 TargetSet（生产走 G5 正常路径）。"""
+    from app.services.monitor_batch_service import MonitorBatchService, SmcMonitorTargetSet
+
+    real = SmcMonitorTargetSet(
+        contract_identity={}, input_identity={}, structure_context={},
+        active_structure_targets=(), active_order_block_targets=(), target_set_version="v",
+    )
+
+    async def _ok(*a: object, **k: object) -> SmcMonitorTargetSet:
+        return real
+
+    svc = MonitorBatchService()
+    monkeypatch.setattr(svc, "_build_smc_target_set", _ok)
+    assert await svc._resolve_smc_target_set(uuid.uuid4(), "600519", None) is real
+
+
+async def test_resolve_smc_target_set_fail_closed_on_build_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """构建失败 → 注入 EMPTY_SMC_TARGET_SET，绝不复活 legacy producer（唯一主路径合同）。"""
+    from app.services.monitor_batch_service import (
+        MonitorBatchService,
+        EMPTY_SMC_TARGET_SET,
+    )
+
+    async def _boom(*a: object, **k: object) -> object:
+        raise RuntimeError("compute_smc_pine failed")
+
+    svc = MonitorBatchService()
+    monkeypatch.setattr(svc, "_build_smc_target_set", _boom)
+    result = await svc._resolve_smc_target_set(uuid.uuid4(), "600519", None)
+    assert result is EMPTY_SMC_TARGET_SET
+
+
+async def test_build_smc_target_set_cache_invalidates_after_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Point 5: 同 trading date 但盘中 OHLC 变化（daily_last_bar 键不变），
+    TTL 过期后必须重新计算，不能被日期键永久冻结。"""
+    from app.services import monitor_batch_service as mbs
+    from app.services.monitor_batch_service import MonitorBatchService, SmcMonitorTargetSet
+
+    calls: list[int] = []
+
+    def _fake_compute(*a: object, **k: object) -> dict:
+        calls.append(1)
+        return {"params": {}}
+
+    def _fake_build(bars: object, res: object) -> SmcMonitorTargetSet:
+        return SmcMonitorTargetSet(
+            contract_identity={}, input_identity={}, structure_context={},
+            active_structure_targets=(), active_order_block_targets=(), target_set_version="c",
+        )
+
+    monkeypatch.setattr(mbs, "compute_smc_pine", _fake_compute)
+    monkeypatch.setattr(mbs, "build_smc_monitor_target_set", _fake_build)
+
+    clock = {"t": 1000.0}
+
+    class _FakeTime:
+        @staticmethod
+        def monotonic() -> float:
+            return clock["t"]
+
+    monkeypatch.setattr(mbs, "time", _FakeTime)
+
+    svc = MonitorBatchService()
+    inst_id = uuid.uuid4()
+    bars = pd.DataFrame(
+        {"open": [1.0] * 30, "high": [2.0] * 30, "low": [0.5] * 30, "close": [1.5] * 30},
+        index=pd.date_range("2026-01-01", periods=30),
+    )
+    await svc._build_smc_target_set(inst_id, "600519", bars)
+    assert len(calls) == 1
+    clock["t"] = 1000.0  # 仍在 TTL 内
+    await svc._build_smc_target_set(inst_id, "600519", bars)
+    assert len(calls) == 1  # 命中缓存，无重算
+    clock["t"] = 1000.0 + 310.0  # 超过 TTL
+    await svc._build_smc_target_set(inst_id, "600519", bars)
+    assert len(calls) == 2  # 盘中 OHLC 变化后重新计算

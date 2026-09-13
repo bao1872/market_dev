@@ -235,8 +235,9 @@ async def test_smc_g5_one_shot_via_watchlist_monitor() -> None:
     bos1 = [e for e in events1 if getattr(e, "event_type", None) == SMC_BOS_CROSS]
     assert len(bos1) == 1
     # 稳定结构 identity 已持久化到 curr_state（跨批次/重启/retry 真源）
+    # identity 基于 (lane,kind,anchor_time)，不含 qfq level（XDXR 后稳定）
     persisted = curr_state.state.get("notified_smc_struct_ids") or []
-    assert any("10.5" in pid for pid in persisted)
+    assert any("2026-09-01" in pid for pid in persisted)
 
     # 第二次：prev_state = 已持久化状态，价格再次穿越 10.5（11.0 → 12.0）→ 0 额外通知
     prev_state = curr_state

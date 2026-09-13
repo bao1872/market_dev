@@ -392,7 +392,12 @@ class WatchlistMonitor(StrategyRuntime):
 
             curr_state.state["triggered_smc_target_ids"] = list(smc_triggered)
             curr_state.state["triggered_target_ids"] = list(smc_triggered)
-            curr_state.state["notified_smc_struct_ids"] = list(smc_stable_notified)
+            # 持久化稳定结构 identity（fast-path cache）。DB event_key UNIQUE 是权威幂等真源，
+            # 故此处仅作性能缓存并设上限（远长于任何 rebuild/XDXR 窗口），避免 monitor_state 无限增长。
+            _notified = list(smc_stable_notified)
+            if len(_notified) > 4096:
+                _notified = _notified[-4096:]
+            curr_state.state["notified_smc_struct_ids"] = _notified
             curr_state.state["node_target_set_version"] = curr_node_ver
             curr_state.state["smc_target_set_version"] = curr_smc_ver
             curr_state.state["price_last"] = p_last
