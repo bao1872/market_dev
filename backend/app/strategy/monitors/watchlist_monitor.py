@@ -409,6 +409,19 @@ class WatchlistMonitor(StrategyRuntime):
                 )
                 smc_curr = self._extract_sub_state(curr_state, NAMESPACE_SMC)
                 smc_events = await self._smc.detect_events(context, smc_prev, smc_curr)
+                # [SMC 合同收口] 生产通知路径禁止 legacy BOS/CHoCH retest 与 EQH/EQL 通知，
+                # 仅保留 OB 进入/回踩等允许类型。SmcMonitor 纯计算（episode tracker）仍运行并回写。
+                _SUPPRESSED_LEGACY_SMC = frozenset(
+                    {
+                        "smc_bos_retest",
+                        "smc_choch_retest",
+                        "smc_equal_highs_retest",
+                        "smc_equal_lows_retest",
+                    }
+                )
+                smc_events = [
+                    e for e in smc_events if e.get("event_type") not in _SUPPRESSED_LEGACY_SMC
+                ]
                 events.extend(smc_events)
 
                 # [SMC episode 连续性修复] 显式回写 SMC 子状态到父 curr_state
