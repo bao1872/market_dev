@@ -194,6 +194,32 @@ async def _read_column_default() -> str:
         return str(result.scalar())
 
 
+async def _cleanup_verify_rows(
+    *,
+    created_by: uuid.UUID,
+    code_hashes: tuple[str, str],
+) -> None:
+    """精确清理本测试自己 commit 的 fixtures（验证隔离，防止 full-closure 阶段污染）。
+
+    仅按本测试自己的 exact code_hash / exact user_id 删除：
+    禁止 LIKE / TRUNCATE / 全表 DELETE / 跨测试清理。
+    删除顺序：invite_codes 在前（其 created_by -> users.id 有外键），users 在后。
+    短事务：open -> execute -> commit -> close；执行前无打开事务。
+    """
+    async with TestAsyncSessionLocal() as session:
+        await session.execute(
+            text(
+                "DELETE FROM invite_codes WHERE code_hash IN (:hist, :new)"
+            ),
+            {"hist": code_hashes[0], "new": code_hashes[1]},
+        )
+        await session.execute(
+            text("DELETE FROM users WHERE id = :user_id"),
+            {"user_id": created_by},
+        )
+        await session.commit()
+
+
 @pytest.mark.asyncio
 async def test_093_grant_days_default_is_one() -> None:
     """093 执行后 invite_codes.grant_days column_default 必须为 1（实际查 information_schema）。"""
@@ -240,8 +266,15 @@ async def test_093_migration_preserves_existing_rows() -> None:
         default = await _read_column_default()
         assert default == "1", f"最终 column_default 应为 1，实际 {default!r}"
     finally:
-        # 恢复 093 基线；所有 helper 均已 CLOSE，此处无打开事务。
-        _run_alembic(["upgrade", "head"])
+        # 先恢复 schema 到正式 head（此刻无打开事务）
+        try:
+            _run_alembic(["upgrade", "head"])
+        finally:
+            # 再精确清理本测试自己 commit 的两条 invite + 一个 user（遵守 FK 顺序，invite 先删）
+            await _cleanup_verify_rows(
+                created_by=created_by,
+                code_hashes=(rc_hist, rc_new),
+            )
 
 
 if __name__ == "__main__":
