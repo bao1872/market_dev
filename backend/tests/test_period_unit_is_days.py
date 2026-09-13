@@ -22,6 +22,8 @@ from app.services.subscription_service import (
     renew_subscription,
 )
 
+pytestmark = pytest.mark.postgres
+
 _TOL = timedelta(seconds=5)
 
 
@@ -126,3 +128,42 @@ async def test_subscription_renew_days_is_literal_days(db_session, member_user) 
     )
     if n == 1:
         assert delta < timedelta(days=30), "grant_days=1 被错误解释为 30 天（×30 回漂）"
+
+
+@pytest.mark.asyncio
+async def test_legacy_invite_grant_months_still_means_30_days(
+    db_session,
+    admin_user,
+) -> None:
+    """历史邀请码兼容：grant_months=1 仍应解释成 30 天（×30 兼容，不得被新 days 语义覆盖）。
+
+    与 test_invite_code_grant_days_is_literal_days 形成对称护栏：
+    - 新邀请码：grant_days=1 -> 1 天
+    - 旧邀请码：grant_months=1 -> 30 天
+    """
+    codes = await generate_invite_codes(
+        db=db_session,
+        count=1,
+        plan_code="observe_20",
+        grant_days=1,
+        created_by=admin_user.id,
+    )
+    invite, raw = codes[0]
+
+    # 模拟历史邀请码持久化形态（new invite 默认 grant_months=None，此处显式写回旧字段）
+    invite.grant_months = 1
+    invite.grant_days = 30
+    await db_session.flush()
+
+    email = f"legacy-{uuid.uuid4().hex[:8]}@test.local"
+    _user, subscription = await register_with_invite_code(
+        db=db_session,
+        email=email,
+        password="test-pass-123",
+        raw_invite_code=raw,
+    )
+
+    delta = subscription.expires_at - datetime.now(UTC)
+    assert timedelta(days=30) - _TOL <= delta <= timedelta(days=30) + _TOL, (
+        f"历史邀请码 grant_months=1 应约等于 30 天，实际 {delta}"
+    )
