@@ -163,6 +163,10 @@ def evaluate_smc_events(
             # 故把 event_type 也纳入 identity，避免把两个不同 direction 事件误合并（不过窄、也不含价格）。
             # 注：结构 target 无 confirmed_time（仅 OB target 有），故无法用确认 bar 时间戳；
             #     event_time 是运行时穿越分钟、不稳定，绝不可纳入。
+            # direction 由 (kind, event_type) 共同编码，无需额外 direction token：
+            #   bullish BOS 必为 kind=high + BOS；bearish BOS 必为 kind=low + BOS → kind 不同 → identity 不同；
+            #   bullish CHoCH 必为 kind=low + CHoCH；bearish CHoCH 必为 kind=high + CHoCH → kind 不同 → identity 不同。
+            # 故同一 anchor_time 下不存在「lane/kind/event_type/anchor_time 全同却 direction 不同」的碰撞。
             lane_bias = swing_bias if target.lane == "swing" else internal_bias
             _is_bos = (lane_bias == 1) if target.kind == "high" else (lane_bias == -1)
             _event_type = SMC_BOS_CROSS if _is_bos else SMC_CHOCH_CROSS

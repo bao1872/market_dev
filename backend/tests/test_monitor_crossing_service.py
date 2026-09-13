@@ -490,3 +490,50 @@ def test_smc_structure_identity_event_type_disambiguates_direction() -> None:
     assert e_bos[0].dedupe_key != e_choch[0].dedupe_key, (
         "direction 不同（BOS vs CHoCH）必须得到不同 event_key，否则会被误合并去重"
     )
+
+
+def test_smc_structure_identity_bullish_vs_bearish_direction() -> None:
+    """bullish BOS vs bearish BOS（及 CHoCH）必须得到不同 identity。
+
+    lane 不编码方向，但 (kind, event_type) 共同编码 direction：
+    - bullish BOS = kind=high + BOS；bearish BOS = kind=low + BOS → kind 不同 → key 不同；
+    - bullish CHoCH = kind=low + CHoCH；bearish CHoCH = kind=high + CHoCH → kind 不同 → key 不同。
+    故同一 anchor_time 下四种 (direction, structure) 组合产生四个互不相同的 dedupe_key，
+    不存在「lane/kind/event_type/anchor_time 全同却 direction 不同」的碰撞。
+    """
+    inst_id = uuid.uuid4()
+    now = datetime.now(_SH_TZ)
+    anchor = "2026-09-01"
+
+    def _key(kind: str, bias: int, price_last: float, price_curr: float) -> tuple[str, str]:
+        target = SmcStructureTarget(
+            target_id=kind, lane="swing", kind=kind,
+            level=10.0, anchor_index=10, anchor_time=anchor,
+        )
+        set_ = SmcMonitorTargetSet(
+            contract_identity={}, input_identity={},
+            structure_context={"swing_bias": bias, "internal_bias": bias, "slots": {}},
+            active_structure_targets=(target,), active_order_block_targets=(), target_set_version="v",
+        )
+        evs = evaluate_smc_events(inst_id, set_, price_last, price_curr, now, set(), set())
+        assert len(evs) == 1, f"expected 1 cross, got {len(evs)} (kind={kind} bias={bias})"
+        return evs[0].dedupe_key, evs[0].event_type
+
+    # high 向上 + bias+1 → BOS（bullish BOS）
+    k_bos_up, et_bos_up = _key("high", 1, 9.0, 11.0)
+    # high 向上 + bias-1 → CHoCH（bearish CHoCH：high 仅向上穿越，bias 翻转即 CHoCH）
+    k_choch_dn, et_choch_dn = _key("high", -1, 9.0, 11.0)
+    # low 向下 + bias-1 → BOS（bearish BOS）
+    k_bos_dn, et_bos_dn = _key("low", -1, 11.0, 9.0)
+    # low 向下 + bias+1 → CHoCH（bullish CHoCH）
+    k_choch_up, et_choch_up = _key("low", 1, 11.0, 9.0)
+
+    assert et_bos_up == SMC_BOS_CROSS and et_bos_dn == SMC_BOS_CROSS
+    assert et_choch_dn == SMC_CHOCH_CROSS and et_choch_up == SMC_CHOCH_CROSS
+
+    keys = {k_bos_up, k_choch_dn, k_bos_dn, k_choch_up}
+    assert len(keys) == 4, f"四种 (direction, structure) 组合必须互不相同: {keys}"
+
+    # 显式：bullish vs bearish 同结构类型必不同 identity
+    assert k_bos_up != k_bos_dn, "bullish BOS 与 bearish BOS 必须不同 identity"
+    assert k_choch_up != k_choch_dn, "bullish CHoCH 与 bearish CHoCH 必须不同 identity"
