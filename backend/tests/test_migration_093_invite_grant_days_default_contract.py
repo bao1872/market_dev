@@ -11,6 +11,19 @@
 实现（真实 PG 部分）：验证库已被 alembic upgrade head 置于 093，本文件再做一次
 downgrade -> 092（default=30）插入样本行 -> upgrade head -> 093（default=1），
 证明默认由 30 变为 1，且已存在的样本行 grant_days 不被 migration 改写。
+
+============================================================================
+锁安全约束（来自 GitHub review）：
+本项目 conftest 的 db_session 是 savepoint 模式——它在整个测试期间持有
+「外层未提交事务」，对 invite_codes 持 RowExclusive 写锁。若在该事务仍打开时
+另起进程执行 `alembic upgrade/downgrade`（ALTER TABLE 需 ACCESS EXCLUSIVE 锁），
+会形成 pytest 等 alembic / alembic 等 pytest 的 lock-wait 死环，最终 timeout 失败。
+
+因此本文件所有真实 PG 操作都使用 TestAsyncSessionLocal 的「短事务」：
+    open session -> execute -> commit -> close
+并在每一次 _run_alembic() 调用之前，保证没有任何打开的数据库连接/事务。
+禁止在 db_session（savepoint fixture）内部执行 Alembic DDL。
+============================================================================
 """
 from __future__ import annotations
 
@@ -22,10 +35,10 @@ import uuid
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import text
 
 from app.models.user import User
+from tests.conftest import TestAsyncSessionLocal
 
 pytestmark = pytest.mark.postgres
 
@@ -109,13 +122,11 @@ def test_migration_module_imports_and_constants():
 
 # ============================================================
 # 真实 PG 验证（postgres + PANJI_REMOTE_VERIFY_DB_TEST=1）
+# ------------------------------------------------------------
+# 所有 DB 操作使用 TestAsyncSessionLocal 短事务：open -> execute -> commit -> close。
+# 禁止在 db_session（savepoint fixture）事务内执行 Alembic DDL（RowExclusive ↔
+# ALTER TABLE 的 lock-wait 死环）。每次 _run_alembic() 前必须无打开事务。
 # ============================================================
-
-
-@pytest_asyncio.fixture
-async def admin_user(user_factory) -> User:
-    """创建真实管理员（InviteCode.created_by 为 NOT NULL 外键，不能为 None）。"""
-    return await user_factory(roles=["admin"])
 
 
 def _run_alembic(args: list[str]) -> None:
@@ -128,74 +139,109 @@ def _run_alembic(args: list[str]) -> None:
         raise RuntimeError(f"alembic {' '.join(args)} failed:\n{proc.stderr}")
 
 
-async def _column_default(db) -> str:
-    return str((await db.execute(text(
-        "SELECT column_default FROM information_schema.columns "
-        "WHERE table_name='invite_codes' AND column_name='grant_days'"
-    ))).scalar())
+async def _create_verify_user() -> uuid.UUID:
+    """创建真实用户（InviteCode.created_by 为 NOT NULL 外键），短事务 commit+close。"""
+    async with TestAsyncSessionLocal() as session:
+        user = User(
+            email=f"m093-{uuid.uuid4().hex}@test.local",
+            password_hash="$2b$12$dummyhash",
+            status="active",
+        )
+        session.add(user)
+        await session.commit()
+        return user.id
 
 
-async def test_093_grant_days_default_is_one(db_session) -> None:
+async def _insert_invite(*, code_hash: str, created_by: uuid.UUID) -> int:
+    """插入一行 invite_codes（不指定 grant_days，依赖当前 schema default），返回实际 grant_days。
+
+    短事务：open -> execute(RETURNING grant_days) -> commit -> close。
+    """
+    async with TestAsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                "INSERT INTO invite_codes (code_hash, created_by) "
+                "VALUES (:code_hash, :created_by) RETURNING grant_days"
+            ),
+            {"code_hash": code_hash, "created_by": created_by},
+        )
+        grant_days = int(result.scalar_one())
+        await session.commit()
+        return grant_days
+
+
+async def _read_grant_days(code_hash: str) -> int:
+    """读回指定 code_hash 的 grant_days（短事务，commit 后独立连接）。"""
+    async with TestAsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                "SELECT grant_days FROM invite_codes WHERE code_hash = :code_hash"
+            ),
+            {"code_hash": code_hash},
+        )
+        return int(result.scalar_one())
+
+
+async def _read_column_default() -> str:
+    """实际查 information_schema，返回 invite_codes.grant_days 的 column_default。"""
+    async with TestAsyncSessionLocal() as session:
+        result = await session.execute(
+            text(
+                "SELECT column_default FROM information_schema.columns "
+                "WHERE table_name='invite_codes' AND column_name='grant_days'"
+            )
+        )
+        return str(result.scalar())
+
+
+@pytest.mark.asyncio
+async def test_093_grant_days_default_is_one() -> None:
     """093 执行后 invite_codes.grant_days column_default 必须为 1（实际查 information_schema）。"""
-    default = await _column_default(db_session)
+    default = await _read_column_default()
     assert default == "1", f"093 执行后 grant_days column_default 应为 1，实际 {default!r}"
 
 
-async def test_093_migration_preserves_existing_rows(db_session, admin_user) -> None:
+@pytest.mark.asyncio
+async def test_093_migration_preserves_existing_rows() -> None:
     """migration 只改变 schema default，不改变历史行：
 
-    - 回退到 092（default=30）插入样本行（不指定 grant_days，依赖旧 default）-> 30
-    - 升级回 093（default=1）后，该历史行 grant_days 仍为 30（未被 migration 改写）
-    - 升级后新插入行（不指定 grant_days）取新 default=1
-    - 最终 column_default 仍为 1
+    当前 verify DB = 093
+    → 创建 test user（COMMIT+CLOSE）
+    → alembic downgrade -1（现在 = 092，default=30）
+    → INSERT 历史样本行（不指定 grant_days，依赖旧 default）→ 30（COMMIT+CLOSE）
+    → alembic upgrade head（现在 = 093，default=1）
+    → 重新读取历史样本行仍 = 30（未被 migration 改写）（COMMIT+CLOSE）
+    → INSERT 新行（不指定 grant_days）取新 default=1（COMMIT+CLOSE）
+    → 最终 column_default = 1
+
+    每一步 Alembic 调用前均无打开事务，避免 RowExclusive ↔ ALTER TABLE 锁死环。
     """
+    created_by = await _create_verify_user()
     rc_hist = f"m093hist-{uuid.uuid4().hex}"
     rc_new = f"m093new-{uuid.uuid4().hex}"
     try:
-        # 1) 回退到 092（default=30）
+        # 1) 回退到 092（default=30）；此刻无打开事务
         _run_alembic(["downgrade", "-1"])
-        # 2) 插入样本行（不指定 grant_days，依赖旧 default=30）
-        await db_session.execute(
-            text("INSERT INTO invite_codes (code_hash, created_by) VALUES (:rc, :cb)"),
-            {"rc": rc_hist, "cb": admin_user.id},
-        )
-        await db_session.flush()
-        before = (await db_session.execute(
-            text("SELECT grant_days FROM invite_codes WHERE code_hash=:rc"),
-            {"rc": rc_hist},
-        )).scalar()
-        assert before == 30, f"092 下样本行 grant_days 应为 30（旧 default），实际 {before}"
+        # 2) 092 下插入样本行（依赖旧 default=30），短事务 commit+close
+        hist_before = await _insert_invite(code_hash=rc_hist, created_by=created_by)
+        assert hist_before == 30, f"092 下样本行 grant_days 应为 30（旧 default），实际 {hist_before}"
 
-        # 3) 升级回 093（default=1）
+        # 3) 升级回 093（default=1）；此刻无打开事务
         _run_alembic(["upgrade", "head"])
         # 4) 已存在样本行不应被 migration 改写（只改 default，不改历史行）
-        after = (await db_session.execute(
-            text("SELECT grant_days FROM invite_codes WHERE code_hash=:rc"),
-            {"rc": rc_hist},
-        )).scalar()
-        assert after == 30, f"migration 后历史行 grant_days 应保持不变（30），实际 {after}"
+        hist_after = await _read_grant_days(rc_hist)
+        assert hist_after == 30, f"migration 后历史行 grant_days 应保持不变（30），实际 {hist_after}"
 
-        # 5) 新插入行（不指定 grant_days）应取新 default=1
-        await db_session.execute(
-            text("INSERT INTO invite_codes (code_hash, created_by) VALUES (:rc, :cb)"),
-            {"rc": rc_new, "cb": admin_user.id},
-        )
-        await db_session.flush()
-        new_default = (await db_session.execute(
-            text("SELECT grant_days FROM invite_codes WHERE code_hash=:rc"),
-            {"rc": rc_new},
-        )).scalar()
+        # 5) 093 下新插入行（不指定 grant_days）应取新 default=1，短事务 commit+close
+        new_default = await _insert_invite(code_hash=rc_new, created_by=created_by)
         assert new_default == 1, f"093 下新行 grant_days 应取 default=1，实际 {new_default}"
 
-        # 6) 最终 default 仍为 1
-        default = await _column_default(db_session)
+        # 6) 最终 column_default 仍为 1
+        default = await _read_column_default()
         assert default == "1", f"最终 column_default 应为 1，实际 {default!r}"
     finally:
-        # 始终恢复 093 基线，避免影响同 session 内后续 contract
-        try:
-            _run_alembic(["upgrade", "head"])
-        except Exception:  # noqa: BLE001 - 恢复失败不改变测试结论，仅记录
-            pass
+        # 恢复 093 基线；所有 helper 均已 CLOSE，此处无打开事务。
+        _run_alembic(["upgrade", "head"])
 
 
 if __name__ == "__main__":
