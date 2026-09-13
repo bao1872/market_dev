@@ -157,10 +157,18 @@ def evaluate_smc_events(
             # 必须基于结构事实，不得依赖 qfq 后价格：
             # - target_id 含 anchor_index（每日追加 bar 偏移）与 params_hash（XDXR/参数变化会变）→ 不稳定；
             # - level 是 qfq 调整价格，XDXR 后历史价格整体重算 → 同一历史结构 level 会变 → 不能用。
-            # 改用 pivot 的时钟时间戳 anchor_time（qfq 只缩放价格、不移动 bar，故稳定）标识历史事件。
+            # 可用非价格稳定字段只有 lane/kind/anchor_time（pivot 时钟时间戳，qfq 不移动 bar → 稳定）。
+            # direction 在结构 target 上不是存储字段，而是 kind + structure_context bias 推导的
+            # event_type(BOS/CHoCH)；同一 pivot 可能被判定为 BOS 或 CHoCH（direction 不同但 kind 相同），
+            # 故把 event_type 也纳入 identity，避免把两个不同 direction 事件误合并（不过窄、也不含价格）。
+            # 注：结构 target 无 confirmed_time（仅 OB target 有），故无法用确认 bar 时间戳；
+            #     event_time 是运行时穿越分钟、不稳定，绝不可纳入。
+            lane_bias = swing_bias if target.lane == "swing" else internal_bias
+            _is_bos = (lane_bias == 1) if target.kind == "high" else (lane_bias == -1)
+            _event_type = SMC_BOS_CROSS if _is_bos else SMC_CHOCH_CROSS
             _stable_id = (
                 f"smc_struct:{instrument_id}:{target.lane}:{target.kind}:"
-                f"{target.anchor_time}"
+                f"{target.anchor_time}:{_event_type}"
             )
             if stable_notified_ids is not None and _stable_id in stable_notified_ids:
                 continue
@@ -179,23 +187,16 @@ def evaluate_smc_events(
                 triggered_target_ids.add(target.target_id)
                 if stable_notified_ids is not None:
                     stable_notified_ids.add(_stable_id)
-                lane_bias = swing_bias if target.lane == "swing" else internal_bias
-
-                # 判定是顺势突破 (BOS) 还是转折突破 (CHoCH)
-                if target.kind == "high":
-                    is_bos = (lane_bias == 1)
-                else:
-                    is_bos = (lane_bias == -1)
-
-                event_type = SMC_BOS_CROSS if is_bos else SMC_CHOCH_CROSS
+                is_bos = _is_bos
+                event_type = _event_type
                 structure_type = "BOS" if is_bos else "CHOCH"
                 direction = "UP" if is_upward else "DOWN"
 
-                # dedupe_key 直接复用稳定结构 identity（不含 target_id / qfq level）：
+                # dedupe_key 直接复用稳定结构 identity（不含 target_id / qfq level / event_time）：
                 # 既保证同周期两 worker 并发由 DB event_key UNIQUE 去重，
                 # 也保证跨 rebuild/XDXR 同一历史结构得相同 event_key（DB 层不再重发）。
-                dedupe_key = f"smc_struct:{instrument_id}:{target.lane}:{target.kind}:{target.anchor_time}"
-                logical_entity = f"{instrument_id}:{target.lane}:{target.kind}:{target.anchor_time}"
+                dedupe_key = f"smc_struct:{instrument_id}:{target.lane}:{target.kind}:{target.anchor_time}:{event_type}"
+                logical_entity = f"{instrument_id}:{target.lane}:{target.kind}:{target.anchor_time}:{event_type}"
                 payload = {
                     "target_id": target.target_id,
                     "structure_type": structure_type,

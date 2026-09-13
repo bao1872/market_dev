@@ -457,3 +457,36 @@ async def test_build_smc_target_set_cache_invalidates_after_ttl(
     clock["t"] = 1000.0 + 310.0  # 超过 TTL
     await svc._build_smc_target_set(inst_id, "600519", bars)
     assert len(calls) == 2  # 盘中 OHLC 变化后重新计算
+
+
+def test_smc_structure_identity_event_type_disambiguates_direction() -> None:
+    """direction 不同但 kind 相同（同一 pivot）必须得到不同 identity，不误合并。
+
+    anchor_time 唯一 ≠ structure identity 永远安全：同一 pivot 在 structure_context
+    bias 不同时可能被判定为 BOS 或 CHoCH（direction 不同但 kind 相同）。把 event_type
+    纳入 identity 后，二者 event_key 不同 → 不会被误合并去重（也不会因含 qfq level 而不稳）。
+    """
+    inst_id = uuid.uuid4()
+    now = datetime.now(_SH_TZ)
+    target = SmcStructureTarget(
+        target_id="id_x", lane="swing", kind="high",
+        level=10.0, anchor_index=10, anchor_time="2026-09-01",
+    )
+    set_bos = SmcMonitorTargetSet(
+        contract_identity={}, input_identity={},
+        structure_context={"swing_bias": 1, "internal_bias": 1, "slots": {}},
+        active_structure_targets=(target,), active_order_block_targets=(), target_set_version="v",
+    )
+    set_choch = SmcMonitorTargetSet(
+        contract_identity={}, input_identity={},
+        structure_context={"swing_bias": -1, "internal_bias": -1, "slots": {}},
+        active_structure_targets=(target,), active_order_block_targets=(), target_set_version="v",
+    )
+    e_bos = evaluate_smc_events(inst_id, set_bos, 9.0, 11.0, now, set(), set())
+    e_choch = evaluate_smc_events(inst_id, set_choch, 9.0, 11.0, now, set(), set())
+    assert len(e_bos) == 1 and len(e_choch) == 1
+    assert e_bos[0].event_type == SMC_BOS_CROSS
+    assert e_choch[0].event_type == SMC_CHOCH_CROSS
+    assert e_bos[0].dedupe_key != e_choch[0].dedupe_key, (
+        "direction 不同（BOS vs CHoCH）必须得到不同 event_key，否则会被误合并去重"
+    )
