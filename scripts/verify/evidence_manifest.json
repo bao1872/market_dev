@@ -177,6 +177,24 @@
       "required": true,
       "test_selectors": ["tests/test_migration_093_invite_grant_days_default_contract.py"],
       "claim": "093 将 invite_codes.grant_days server_default 由 30 改为 1；migration 只改 schema default，不触碰 subscriptions/expires_at，不 UPDATE/DELETE 任何 invite_codes 历史行。"
+    },
+    {
+      "contract_id": "smc_concurrency_and_capability_access_boundary",
+      "governance_level": 2,
+      "semantic_owner": "app.services.monitor_crossing_service",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/pg/test_pg_smc_concurrency_access.py"],
+      "claim": "两个并发 PostgreSQL 事务写同一稳定 SMC BOS/CHoCH event_key 时恰好一次：败者 write_event 返回 None 后在 outbox enqueue 之前被跳过，故同一 event_key 的 StrategyEvent=1 且 Outbox=1（不双发通知）。capability resolver 区分「无 UserCapability 行」（允许 legacy_plan_fallback）与「capability 行存在但已过期」（legacy plan 不得重新扩权、受保护操作 denied），且显式 capability 行优先于更宽的 legacy plan。"
+    },
+    {
+      "contract_id": "daily_collection_provider_boundary",
+      "governance_level": 2,
+      "semantic_owner": "app.repositories.bar_repository",
+      "gate": ["targeted-pg", "full-closure"],
+      "required": true,
+      "test_selectors": ["tests/pg/test_pg_daily_collection.py"],
+      "claim": "日常采集遵守 DB 优先读（DB 完整时 provider 不被调用）、单日缺失时请求最窄窗口（start=end=D），且 TDX host 轮转封装在适配器内部，server failure 绝不降级 Eastmoney/THS（server failure != provider failure）。"
     }
   ]
 }
