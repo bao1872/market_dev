@@ -185,7 +185,7 @@ if __name__ == "__main__":
         print(f"{cls.__name__} table={cls.__tablename__} columns={cols}")
     # 验证关键约束
     assert InviteCode.__table__.c.code_hash.unique is True
-    assert InviteCode.__table__.c.grant_days.default.arg == 30
+    assert InviteCode.__table__.c.grant_days.default.arg == 1
     # 验证 plans 表套餐字段已添加
     assert "plan_code" in [c.name for c in InviteCode.__table__.columns]
     assert "monitor_limit" in [c.name for c in InviteCode.__table__.columns]

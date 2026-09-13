@@ -208,7 +208,7 @@ def _compute_expires_at_from_days(base: datetime, grant_days: int | None) -> dat
     """
     if grant_days is not None and grant_days > 0:
         return base + timedelta(days=grant_days)
-    return base + timedelta(days=_DEFAULT_GRANT_DAYS)
+    return base + timedelta(days=_DEFAULT_GRANT_DAYS_DEFAULT)
 
 
 def _compute_expires_at(base: datetime, invite: InviteCode) -> datetime:
@@ -681,7 +681,7 @@ async def register_with_invite_code(
         await db.flush()
     db.add(UserRole(user_id=user.id, role_id=member_role.id))
 
-    # 5. 创建订阅记录（按 grant_months × 30 天计算到期日，写入套餐快照到 entitlement_snapshot）
+    # 5. 创建订阅记录（按 grant_days 天计算到期日，1 单位 = 1 天，写入套餐快照到 entitlement_snapshot）
     expires_at = _compute_expires_at(now, invite)
     # [PlanService] - 描述: 从 plans 表查询套餐构造 entitlement_snapshot 快照
     plan = await get_plan_async(db, invite.plan_code or DEFAULT_PLAN_CODE)
@@ -730,11 +730,11 @@ async def renew_with_invite_code(
     user_id: uuid.UUID,
     raw_invite_code: str,
 ) -> tuple[Subscription, datetime | None, datetime]:
-    """邀请码续期 - 同时更新套餐（plan_code/entitlement_snapshot）和按 30 天周期顺延到期日。
+    """邀请码续期 - 同时更新套餐（plan_code/entitlement_snapshot）和按 grant_days 天顺延到期日（1 单位 = 1 天）。
 
     业务规则：
-    - 未到期续期：从当前到期日顺延 grant_months × 30 天
-    - 已到期续期：从兑换当天计算 grant_months × 30 天
+    - 未到期续期：从当前到期日顺延 grant_days 天
+    - 已到期续期：从当前时间计算 grant_days 天
     - 无 subscription 用户：视为首次开通，从当天计算到期日并新建 subscription
     - 续期时更新 subscription.plan_code/entitlement_snapshot 为邀请码的套餐快照
     - 兼容旧邀请码（grant_months 为 NULL 时回退 grant_days 天数计算）
@@ -777,7 +777,7 @@ async def renew_with_invite_code(
     subscription = subscription_result.scalar_one_or_none()
     is_new_subscription = subscription is None
 
-    # 3. 计算新的到期时间（按 grant_months × 30 天，兼容旧 grant_days）
+    # 3. 计算新的到期时间（按 grant_days 天，1 单位 = 1 天）
     # old_expires_at 归一化为时区感知，确保与 new_expires_at（基于 now=UTC）一致，
     # 避免 API 响应中 old/new 一个 naive 一个 aware 导致前端解析失败
     now = datetime.now(UTC)
