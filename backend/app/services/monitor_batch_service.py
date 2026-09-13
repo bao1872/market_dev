@@ -48,6 +48,8 @@ from app.constants.indicator_view import (
     is_supported_event_type,
 )
 from app.constants.strategy_keys import WATCHLIST_MONITOR
+from app.services.smc_monitor_target_service import build_smc_monitor_target_set
+from app.strategy_assets.algorithms.features.smc_pine_core import compute_smc_pine
 from app.constants.user_facing_labels import get_event_label
 from app.core.time import format_shanghai_datetime
 from app.models.capture_job import (
@@ -119,6 +121,7 @@ _MINUTE_LOOKBACK_BARS = indicator_contract.NODE_CLUSTER_MINUTE_BARS  # 2
 # [CHANGE-20260718-004 Node Cluster engine] Profile 缓存 TTL：同一监控周期内 daily/15m 输入不变时
 # 复用 NodeClusterProfileResult，避免重复计算。300s 覆盖多个 1m bar 周期，且短于 daily/15m 刷新周期。
 _NODE_CLUSTER_PROFILE_CACHE_TTL_SECONDS = 300
+_SMC_TARGET_SET_CACHE_TTL_SECONDS = 300
 
 # 北京时间
 _CST = ZoneInfo("Asia/Shanghai")
@@ -198,6 +201,8 @@ class MonitorBatchService:
         # 保留 _vp_result 供 render_monitoring_chart 鸭子类型访问 profile_df/peak_df。
         # 简单 LRU：超过 256 项时清空最早一半（见 _compute_node_cluster_profile）。
         self._node_cluster_profile_cache: dict[tuple[str, str, str], tuple[Any, float]] = {}
+        # [G6] SMC TargetSet 缓存（键 (instrument_id, daily_last_bar) → (SmcMonitorTargetSet, monotonic_ts)）
+        self._smc_target_set_cache: dict[tuple[str, str], tuple[Any, float]] = {}
         # [Stage G3/G6] 盘中实时行情事实服务与价格区间追踪器
         from app.services.realtime_market_fact_service import (
             PriceTracker,
@@ -709,8 +714,8 @@ class MonitorBatchService:
         # - node_target_set：由本周期已计算的 Node profile（实例缓存，PNG 段复用，零额外开销）
         #   构建；坐标/可用性不一致导致构建失败时优雅回退旧路径。
         # - price_last/current_price：取最新已完成 1m close，经 PriceTracker 维持 [P_last, P_curr]。
-        # 注：SMC 冻结 TargetSet 需独立的 compute_smc_pine 预计算 + 持久化编排层（G6 剩余项），
-        # 本期未注入 smc_target_set，SMC 仍走旧路径（待编排层落地后激活 smc_bos_cross 等）。
+        # SMC 冻结 TargetSet 由下方 _build_smc_target_set 注入（G6 已落地）：
+        # 日线 SMC 一次计算 + build_smc_monitor_target_set，失败则 smc_target_set=None 回退旧路径。
         node_target_set = None
         try:
             profile = await self._compute_node_cluster_profile(node_input, instrument_id)
@@ -725,6 +730,18 @@ class MonitorBatchService:
         except Exception as exc:  # noqa: BLE001 - profile 计算失败必须回退，绝不阻断监控周期
             logger.debug("[%s] Node profile 计算失败，回退旧路径: %s", symbol, exc)
             node_target_set = None
+
+        # [G6 生产接线] 注入冻结 SMC TargetSet：日线 SMC 一次计算（compute_smc_pine）+ build，
+        # 实例缓存复用（键 daily_last_bar），使 WatchlistMonitor 走 G5 one-shot BOS/CHoCH + OB 新路径；
+        # 计算失败/不可用 → smc_target_set=None → 优雅回退（legacy SMC 分支仍被 40d1e66 过滤保护）。
+        smc_target_set = None
+        try:
+            smc_target_set = await self._build_smc_target_set(instrument_id, symbol, bars_daily)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[%s] SMC target set 构建失败，回退旧路径: %s", symbol, exc)
+            smc_target_set = None
+        if smc_target_set is not None:
+            context.smc_target_set = smc_target_set
 
         # [P0 G7 生产生命周期] prev_state 必须在更新 PriceTracker **之前**读取。
         # 若在之后读取，进程重启时内存 PriceTracker 为空，update_price 首帧恒返回 (p, p)，
@@ -2084,6 +2101,64 @@ class MonitorBatchService:
             sorted_items = sorted(self._node_cluster_profile_cache.items(), key=lambda kv: kv[1][1])
             self._node_cluster_profile_cache = dict(sorted_items[len(sorted_items) // 2:])
         return profile
+
+    async def _build_smc_target_set(
+        self,
+        instrument_id: uuid.UUID,
+        symbol: str,
+        bars_daily: Any,
+    ) -> Any:
+        """[G6] 构建冻结 SMC TargetSet（日线 SMC 一次计算 + 实例缓存）。
+
+        复用 MonitorBatchService 已拉取的 daily_bars（与 Node profile 同源，四链一致），
+        调用 compute_smc_pine（emit_structure_target_state=True）得到结构终态，
+        再 build_smc_monitor_target_set 得到不可变 TargetSet，交给 WatchlistMonitor G5 路径。
+
+        复杂度与缓存策略（回应「禁止 per-minute 重复完整日线 SMC 重算」）：
+        - compute_smc_pine 仅依赖日线，缓存键 (instrument_id, daily_last_bar)；
+        - 实例级缓存 TTL 300s（日线仅在收盘变化，覆盖多个 1m 周期）；
+        - 同一交易日同一标的只完整计算一次，盘中每分钟批次命中缓存，零重复重算。
+        - 不使用 monitor loop 内二次 compute_smc_pine；不 per-notification-rule 重算。
+
+        Returns:
+            SmcMonitorTargetSet；输入不足 / 计算失败 / contract 不符 → None（优雅回退旧路径）。
+        """
+        if bars_daily is None or getattr(bars_daily, "empty", True) or len(bars_daily) < 20:
+            logger.debug("[%s] 日线不足，跳过 SMC target set 构建", symbol)
+            return None
+        try:
+            daily_last = str(bars_daily.index[-1])
+        except Exception:  # noqa: BLE001
+            return None
+        cache_key = (str(instrument_id), daily_last)
+        now_ts = time.monotonic()
+        cached = self._smc_target_set_cache.get(cache_key)
+        if cached is not None:
+            cached_set, cached_ts = cached
+            if now_ts - cached_ts < _SMC_TARGET_SET_CACHE_TTL_SECONDS:
+                return cached_set
+        try:
+            opens = [float(x) for x in bars_daily["open"].tolist()]
+            highs = [float(x) for x in bars_daily["high"].tolist()]
+            lows = [float(x) for x in bars_daily["low"].tolist()]
+            closes = [float(x) for x in bars_daily["close"].tolist()]
+            times = [str(t) for t in bars_daily.index]
+            smc_result = compute_smc_pine(
+                opens, highs, lows, closes, times,
+                emit_structure_target_state=True,
+            )
+            smc_target_set = build_smc_monitor_target_set(bars_daily, smc_result)
+        except Exception as exc:  # noqa: BLE001 - SMC 计算失败必须回退，绝不阻断监控周期
+            logger.warning("[%s] SMC target set 计算失败，回退旧路径: %s", symbol, exc)
+            return None
+        self._smc_target_set_cache[cache_key] = (smc_target_set, now_ts)
+        # 简单 LRU：缓存超过 256 项时清空最早一半（避免无界增长）
+        if len(self._smc_target_set_cache) > 256:
+            sorted_items = sorted(
+                self._smc_target_set_cache.items(), key=lambda kv: kv[1][1]
+            )
+            self._smc_target_set_cache = dict(sorted_items[len(sorted_items) // 2:])
+        return smc_target_set
 
     @staticmethod
     def _orm_to_runtime_state(orm: _MonitorStateLike) -> MonitorState:

@@ -120,6 +120,7 @@ def evaluate_smc_events(
     price_curr: float,
     event_time: datetime,
     triggered_target_ids: set[str],
+    stable_notified_ids: set[str] | None = None,
 ) -> list[StrategyEventDraft]:
     """判定 SMC 结构穿透（BOS / CHoCH）与订单块触碰（OB First Touch）。
 
@@ -152,6 +153,15 @@ def evaluate_smc_events(
         for target in smc_target_set.active_structure_targets:
             if target.target_id in triggered_target_ids:
                 continue
+            # [G5 稳定结构 identity] 跨 target_set_version 重建/重启/retry 的 one-shot 真源。
+            # target_id 含 anchor_index（每日追加 bar 会偏移）与 params_hash（XDXR/参数变化会变），
+            # 故不能作为跨重建的稳定 identity；改用 (lane,kind,anchor_time,level) 标识历史事件。
+            _stable_id = (
+                f"smc_struct:{instrument_id}:{target.lane}:{target.kind}:"
+                f"{target.anchor_time}:{round(target.level, 4)}"
+            )
+            if stable_notified_ids is not None and _stable_id in stable_notified_ids:
+                continue
 
             level = target.level
             crossed = False
@@ -165,6 +175,8 @@ def evaluate_smc_events(
 
             if crossed:
                 triggered_target_ids.add(target.target_id)
+                if stable_notified_ids is not None:
+                    stable_notified_ids.add(_stable_id)
                 lane_bias = swing_bias if target.lane == "swing" else internal_bias
 
                 # 判定是顺势突破 (BOS) 还是转折突破 (CHoCH)

@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import uuid
+
+import pytest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -235,3 +237,109 @@ def test_smc_order_block_reentry_is_repeatable() -> None:
 
     # 5. 从下方重新进入 (48.0 -> 50.5) -> 也算 re-entry
     assert len(evaluate_smc_events(inst_id, smc_set, 48.0, 50.5, t_0951, triggered)) == 1
+
+
+def _make_smc_set_ver(version: str, target: SmcStructureTarget) -> SmcMonitorTargetSet:
+    """构造指定 target_set_version 的 SMC TargetSet（用于重建幂等测试）。"""
+    return SmcMonitorTargetSet(
+        contract_identity={"algorithm_id": "smc"},
+        input_identity={"daily_bars_hash": "h_daily"},
+        structure_context={"swing_bias": 1, "internal_bias": 1, "slots": {}},
+        active_structure_targets=(target,),
+        active_order_block_targets=(),
+        target_set_version=version,
+    )
+
+
+def test_smc_bos_one_shot_survives_target_set_rebuild() -> None:
+    """case B: target_set_version 变化（重建）后，同一历史事件不得重新通知。
+
+    triggered_target_ids 随 version 重置（watchlist_monitor 在 is_smc_ver_changed 时清空），
+    但 stable_notified_ids 不随 version 重置（以 lane/kind/anchor_time/level 稳定标识），
+    故 rebuild 后历史事件仍被 one-shot 消费，不重发。
+    """
+    inst_id = uuid.uuid4()
+    now = datetime.now(_SH_TZ)
+    target = SmcStructureTarget(
+        target_id="high_10_5",
+        lane="swing",
+        kind="high",
+        level=10.5,
+        anchor_index=10,
+        anchor_time="2026-09-01",
+    )
+
+    stable: set[str] = set()
+    triggered_v1: set[str] = set()
+    s1 = _make_smc_set_ver("v1", target)
+    e1 = evaluate_smc_events(inst_id, s1, 10.0, 11.0, now, triggered_v1, stable)
+    assert len(e1) == 1
+    assert e1[0].event_type == SMC_BOS_CROSS
+    assert len(stable) == 1  # 稳定 identity 已写入
+
+    # 模拟 rebuild：version 变化 → triggered 被清空，但 stable 持久化（不随 version 重置）
+    triggered_v2: set[str] = set()
+    s2 = _make_smc_set_ver("v2", target)  # anchor_time/level 相同 → 同一历史事件
+    e2 = evaluate_smc_events(inst_id, s2, 11.0, 12.0, now, triggered_v2, stable)
+    assert len(e2) == 0, "rebuild 后历史事件被重发（违反 one-shot）"
+
+
+def test_smc_never_emits_eqh_eql() -> None:
+    """EQH/EQL 不产生任何盘中通知（内部结构信息只参与分析）。"""
+    inst_id = uuid.uuid4()
+    now = datetime.now(_SH_TZ)
+    target = SmcStructureTarget(
+        target_id="high_10_5",
+        lane="swing",
+        kind="high",
+        level=10.5,
+        anchor_index=10,
+        anchor_time="2026-09-01",
+    )
+    s = _make_smc_set_ver("v1", target)
+    triggered: set[str] = set()
+    stable: set[str] = set()
+    events = evaluate_smc_events(inst_id, s, 10.0, 11.0, now, triggered, stable)
+    assert len(events) >= 1
+    for e in events:
+        assert "equal" not in e.event_type, "G5 不应产生 EQH/EQL 通知"
+        assert e.event_type in (
+            SMC_BOS_CROSS,
+            SMC_CHOCH_CROSS,
+            SMC_ORDER_BLOCK_FIRST_TOUCH,
+        )
+
+
+async def test_monitor_batch_service_wires_smc_target_set(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """[G6 接线] MonitorBatchService._build_smc_target_set 调用 compute_smc_pine + build，
+    返回可用 TargetSet 并实例缓存（即生产会把它注入 context.smc_target_set）。"""
+    from app.services.monitor_batch_service import MonitorBatchService
+
+    canned = SmcMonitorTargetSet(
+        contract_identity={"algorithm_id": "smc"},
+        input_identity={"daily_bars_hash": "h"},
+        structure_context={"swing_bias": 1, "internal_bias": 1, "slots": {}},
+        active_structure_targets=(),
+        active_order_block_targets=(),
+        target_set_version="canned",
+    )
+    monkeypatch.setattr(
+        "app.services.monitor_batch_service.compute_smc_pine",
+        lambda *a, **k: {"params": {}},
+    )
+    monkeypatch.setattr(
+        "app.services.monitor_batch_service.build_smc_monitor_target_set",
+        lambda bars, res: canned,
+    )
+    svc = MonitorBatchService()
+    inst_id = uuid.uuid4()
+    bars = pd.DataFrame(
+        {"open": [1.0] * 30, "high": [2.0] * 30, "low": [0.5] * 30, "close": [1.5] * 30},
+        index=pd.date_range("2026-01-01", periods=30),
+    )
+    result = await svc._build_smc_target_set(inst_id, "600519", bars)
+    assert result is canned
+    # 实例缓存命中：相同 (instrument_id, daily_last_bar) 不重复计算
+    assert await svc._build_smc_target_set(inst_id, "600519", bars) is canned

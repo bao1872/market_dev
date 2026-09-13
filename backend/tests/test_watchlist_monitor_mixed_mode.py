@@ -42,6 +42,11 @@ from app.services.node_monitor_target_service import (
 )
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
 from app.strategy.runtime import MarketDataContext, MonitorState
+from app.services.smc_monitor_target_service import (
+    SmcMonitorTargetSet,
+    SmcStructureTarget,
+)
+from app.strategy.monitors.smc_monitor import SMC_BOS_CROSS
 
 pytestmark = pytest.mark.pure_unit
 
@@ -178,4 +183,67 @@ async def test_smc_only_skips_vn_legacy_but_keeps_smc_new_mode() -> None:
     await monitor.detect_events(context, None, curr_state)
 
     assert vn.calls == 1
+    assert smc.calls == 0
+
+
+async def test_smc_g5_one_shot_via_watchlist_monitor() -> None:
+    """[G5 生产路径] WatchlistMonitor 注入 smc_target_set 后：BOS 一次通知，再穿越 0。
+
+    直接从 WatchlistMonitor.detect_events 进入（MonitorBatchService 调用的同一入口），
+    验证 G5 one-shot 行为 + 稳定结构 identity 持久化到 curr_state。
+    """
+    inst_id = uuid.uuid4()
+    ver_id = uuid.uuid4()
+    monitor = WatchlistMonitor()
+    vn = _FakeSubMonitor([_LEGACY_VN_EVENT])
+    smc = _FakeSubMonitor([_LEGACY_SMC_EVENT])
+    monitor._vn = vn  # type: ignore[assignment]
+    monitor._smc = smc  # type: ignore[assignment]
+
+    smc_set = SmcMonitorTargetSet(
+        contract_identity={"algorithm_id": "smc"},
+        input_identity={"daily_bars_hash": "h_daily"},
+        structure_context={"swing_bias": 1, "internal_bias": 1, "slots": {}},
+        active_structure_targets=(
+            SmcStructureTarget(
+                target_id="high_10_5",
+                lane="swing",
+                kind="high",
+                level=10.5,
+                anchor_index=10,
+                anchor_time="2026-09-01",
+            ),
+        ),
+        active_order_block_targets=(),
+        target_set_version="smc_v1",
+    )
+
+    def _ctx(price_last: float, current_price: float) -> MarketDataContext:
+        return MarketDataContext(
+            instrument_id=inst_id,
+            symbol="600519",
+            bars_daily=pd.DataFrame(),
+            bar_time=_T,
+            smc_target_set=smc_set,
+            current_price=current_price,
+            price_last=price_last,
+        )
+
+    # 第一次：价格 10.0 → 11.0 向上穿透 10.5（swing_bias=1）→ BOS 一次
+    curr_state = MonitorState(instrument_id=inst_id, strategy_version_id=ver_id, state={})
+    events1 = await monitor.detect_events(_ctx(10.0, 11.0), None, curr_state)
+    bos1 = [e for e in events1 if getattr(e, "event_type", None) == SMC_BOS_CROSS]
+    assert len(bos1) == 1
+    # 稳定结构 identity 已持久化到 curr_state（跨批次/重启/retry 真源）
+    persisted = curr_state.state.get("notified_smc_struct_ids") or []
+    assert any("10.5" in pid for pid in persisted)
+
+    # 第二次：prev_state = 已持久化状态，价格再次穿越 10.5（11.0 → 12.0）→ 0 额外通知
+    prev_state = curr_state
+    curr_state2 = MonitorState(instrument_id=inst_id, strategy_version_id=ver_id, state={})
+    events2 = await monitor.detect_events(_ctx(11.0, 12.0), prev_state, curr_state2)
+    bos2 = [e for e in events2 if getattr(e, "event_type", None) == SMC_BOS_CROSS]
+    assert len(bos2) == 0, "BOS 重复通知（one-shot 失效）"
+
+    # legacy SMC 分支必须被跳过（smc_target_set 已注入）
     assert smc.calls == 0

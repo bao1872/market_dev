@@ -352,6 +352,14 @@ class WatchlistMonitor(StrategyRuntime):
                     set(prev_state.state.get("triggered_target_ids") or [])
                 )
 
+            # [G5 稳定结构 identity] BOS/CHoCH one-shot 跨 target_set_version 重建/重启/retry 持久化。
+            # 与 smc_triggered（随 version 重置）不同，本集合永不随 version 重置，以
+            # (lane, kind, anchor_time, level) 稳定标识历史事件，防止 rebuild/retry 重发旧事件。
+            smc_stable_notified: set[str] = (
+                set(prev_state.state.get("notified_smc_struct_ids") or [])
+                if prev_state else set()
+            )
+
             evt_time = context.bar_time or datetime.now()
 
             if node_target_set is not None:
@@ -376,6 +384,7 @@ class WatchlistMonitor(StrategyRuntime):
                         float(p_curr),
                         evt_time,
                         smc_triggered,
+                        smc_stable_notified,
                     )
                     events.extend(smc_evts)
                 except Exception as exc:
@@ -383,6 +392,7 @@ class WatchlistMonitor(StrategyRuntime):
 
             curr_state.state["triggered_smc_target_ids"] = list(smc_triggered)
             curr_state.state["triggered_target_ids"] = list(smc_triggered)
+            curr_state.state["notified_smc_struct_ids"] = list(smc_stable_notified)
             curr_state.state["node_target_set_version"] = curr_node_ver
             curr_state.state["smc_target_set_version"] = curr_smc_ver
             curr_state.state["price_last"] = p_last
