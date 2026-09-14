@@ -484,3 +484,118 @@ class TestPersistenceRoundTrip:
         payload["ob_states"][0]["status"] = "BOGUS"
         with pytest.raises(ValueError):
             deserialize_transition_state(payload)
+
+
+# ---------------------------------------------------------------------------
+# E2 strict deserialize（validate + construct，禁止 coercion 洗脏数据）
+# ---------------------------------------------------------------------------
+
+
+class TestStrictDeserialize:
+    @staticmethod
+    def _base_payload():
+        ts = _target_set(_structure(swing_high=_sh(105.0)), obs=[_ob()])
+        res = _run(
+            ts,
+            [_bar("09:31", 104.0, 104.5, 103.5, 104.0), _bar("09:32", 104.5, 106.0, 104.0, 105.5)],
+        )
+        return serialize_transition_state(res.state)
+
+    def _reject(self, mutate):
+        payload = self._base_payload()
+        mutate(payload)
+        with pytest.raises(ValueError):
+            deserialize_transition_state(payload)
+
+    def test_valid_payload_round_trips(self):
+        p1 = self._base_payload()
+        p2 = self._base_payload()
+        assert state_fingerprint(deserialize_transition_state(p1)) == state_fingerprint(
+            deserialize_transition_state(p2)
+        )
+
+    # --- scalar coercion ---
+    def test_bias_true_rejected(self):
+        self._reject(lambda p: p["swing"].__setitem__("bias", True))
+
+    def test_bias_two_rejected(self):
+        self._reject(lambda p: p["swing"].__setitem__("bias", 2))
+
+    def test_bias_str_rejected(self):
+        self._reject(lambda p: p["internal"].__setitem__("bias", "1"))
+
+    def test_daily_epoch_none_rejected(self):
+        self._reject(lambda p: p.__setitem__("daily_epoch", None))
+
+    def test_session_key_none_rejected(self):
+        self._reject(lambda p: p["session"].__setitem__("session_key", None))
+
+    def test_nan_session_number_rejected(self):
+        self._reject(lambda p: p["session"].__setitem__("session_open", float("nan")))
+
+    def test_inf_session_number_rejected(self):
+        self._reject(lambda p: p["session"].__setitem__("latest_close", float("inf")))
+
+    def test_nan_prev_close_rejected(self):
+        self._reject(lambda p: p.__setitem__("prev_completed_close", float("nan")))
+
+    # --- structural ---
+    def test_non_mapping_payload_rejected(self):
+        with pytest.raises(ValueError):
+            deserialize_transition_state(["not", "a", "mapping"])
+
+    def test_swing_not_mapping_rejected(self):
+        self._reject(lambda p: p.__setitem__("swing", []))
+
+    def test_ob_states_not_sequence_rejected(self):
+        self._reject(lambda p: p.__setitem__("ob_states", "x"))
+
+    # --- fired keys ---
+    def test_non_string_fired_key_rejected(self):
+        self._reject(lambda p: p["swing"].__setitem__("fired_keys", [1]))
+
+    def test_duplicate_fired_key_rejected(self):
+        self._reject(lambda p: p["swing"].__setitem__("fired_keys", ["k1", "k1"]))
+
+    def test_missing_fired_keys_rejected(self):
+        self._reject(lambda p: p["swing"].pop("fired_keys"))
+
+    # --- session invariant ---
+    def test_session_invariant_violation_rejected(self):
+        self._reject(
+            lambda p: p["session"].__setitem__("running_low", p["session"]["running_high"] + 1.0)
+        )
+
+    def test_running_high_below_close_rejected(self):
+        self._reject(lambda p: p["session"].__setitem__("running_high", p["session"]["latest_close"] - 1.0))
+
+    # --- OB semantics ---
+    def test_unknown_ob_status_rejected(self):
+        self._reject(lambda p: p["ob_states"][0].__setitem__("status", "BOGUS"))
+
+    def test_outside_with_episode_key_rejected(self):
+        def mutate(p):
+            p["ob_states"][0]["status"] = "OUTSIDE"
+            p["ob_states"][0]["episode"] = "ep-1"
+
+        self._reject(mutate)
+
+    def test_inside_without_episode_key_rejected(self):
+        def mutate(p):
+            p["ob_states"][0]["status"] = "INSIDE_EPISODE"
+            p["ob_states"][0]["episode"] = None
+
+        self._reject(mutate)
+
+    def test_terminal_with_episode_key_rejected(self):
+        def mutate(p):
+            p["ob_states"][0]["status"] = "TERMINAL"
+            p["ob_states"][0]["episode"] = "ep-1"
+
+        self._reject(mutate)
+
+    def test_duplicate_logical_ob_key_rejected(self):
+        self._reject(lambda p: p["ob_states"].append(dict(p["ob_states"][0])))
+
+    def test_empty_ob_key_rejected(self):
+        self._reject(lambda p: p["ob_states"][0].__setitem__("key", ""))

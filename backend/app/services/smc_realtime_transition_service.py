@@ -618,42 +618,130 @@ def serialize_transition_state(state: SmcRealtimeTransitionState) -> dict[str, A
     }
 
 
+def _require_mapping(value: Any, field: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{field} must be a mapping, got {type(value).__name__}")
+    return value
+
+
+def _require_sequence(value: Any, field: str) -> Sequence[Any]:
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(f"{field} must be a list/tuple, got {type(value).__name__}")
+    return value
+
+
+def _require_nonempty_str(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty str, got {value!r}")
+    return value
+
+
+def _require_optional_nonempty_str(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    return _require_nonempty_str(value, field)
+
+
+def _require_bias(value: Any, field: str) -> int:
+    if type(value) is not int or value not in (_BEARISH_BIAS, 0, _BULLISH_BIAS):
+        raise ValueError(f"{field} must be int in {-1,0,1}, got {value!r}")
+    return value
+
+
+def _require_finite_number(value: Any, field: str) -> float:
+    if not _finite_number(value):
+        raise ValueError(f"{field} must be a finite number, got {value!r}")
+    return float(value)
+
+
+def _require_string_sequence(value: Any, field: str) -> tuple[str, ...]:
+    items = _require_sequence(value, field)
+    out = tuple(_require_nonempty_str(item, f"{field}[{i}]") for i, item in enumerate(items))
+    if len(set(out)) != len(out):
+        raise ValueError(f"{field} contains duplicate keys")
+    return out
+
+
 def deserialize_transition_state(payload: Mapping[str, Any]) -> SmcRealtimeTransitionState:
-    """从 serialize_transition_state 的产物恢复；malformed → raise（fail closed）。"""
-    if not isinstance(payload, Mapping):
-        raise ValueError("transition state payload must be a mapping")
-    session_payload = payload.get("session")
-    session = None
-    if session_payload is not None:
+    """strict validate + construct（**不是** sanitize + construct）。
+
+    禁止任何 ``str()/int()/float()`` coercion：脏状态必须 raise ValueError，
+    否则会把 corrupt persisted state 洗成"看起来可用"的 correctness authority。
+    """
+    root = _require_mapping(payload, "payload")
+
+    daily_epoch = _require_nonempty_str(root.get("daily_epoch"), "daily_epoch")
+
+    swing_raw = _require_mapping(root.get("swing"), "swing")
+    internal_raw = _require_mapping(root.get("internal"), "internal")
+    swing = LaneState(
+        bias=_require_bias(swing_raw.get("bias"), "swing.bias"),
+        fired_keys=_require_string_sequence(swing_raw.get("fired_keys"), "swing.fired_keys"),
+    )
+    internal = LaneState(
+        bias=_require_bias(internal_raw.get("bias"), "internal.bias"),
+        fired_keys=_require_string_sequence(internal_raw.get("fired_keys"), "internal.fired_keys"),
+    )
+
+    session: SessionAccumulator | None = None
+    session_raw = root.get("session")
+    if session_raw is not None:
+        sm = _require_mapping(session_raw, "session")
+        session_key = _require_nonempty_str(sm.get("session_key"), "session.session_key")
+        session_open = _require_finite_number(sm.get("session_open"), "session.session_open")
+        running_high = _require_finite_number(sm.get("running_high"), "session.running_high")
+        running_low = _require_finite_number(sm.get("running_low"), "session.running_low")
+        latest_close = _require_finite_number(sm.get("latest_close"), "session.latest_close")
+        if running_low > running_high:
+            raise ValueError("session invariant violated: running_low > running_high")
+        if running_low > min(session_open, latest_close):
+            raise ValueError("session invariant violated: running_low > min(session_open, latest_close)")
+        if running_high < max(session_open, latest_close):
+            raise ValueError("session invariant violated: running_high < max(session_open, latest_close)")
         session = SessionAccumulator(
-            session_key=str(session_payload["session_key"]),
-            session_open=float(session_payload["session_open"]),
-            running_high=float(session_payload["running_high"]),
-            running_low=float(session_payload["running_low"]),
-            latest_close=float(session_payload["latest_close"]),
+            session_key=session_key,
+            session_open=session_open,
+            running_high=running_high,
+            running_low=running_low,
+            latest_close=latest_close,
         )
-    swing = payload["swing"]
-    internal = payload["internal"]
-    prev = payload.get("prev_completed_close")
-    ob_states = []
-    for entry in payload.get("ob_states") or []:
-        status = str(entry["status"])
+
+    ob_raw = root.get("ob_states")
+    if ob_raw is None:
+        ob_raw = []
+    ob_entries = _require_sequence(ob_raw, "ob_states")
+    seen_ob_keys: set[str] = set()
+    ob_states: list[ObEpisodeState] = []
+    for i, entry in enumerate(ob_entries):
+        em = _require_mapping(entry, f"ob_states[{i}]")
+        key = _require_nonempty_str(em.get("key"), f"ob_states[{i}].key")
+        if key in seen_ob_keys:
+            raise ValueError(f"duplicate logical OB key: {key}")
+        seen_ob_keys.add(key)
+        status = _require_nonempty_str(em.get("status"), f"ob_states[{i}].status")
         if status not in _OB_STATUSES:
-            raise ValueError(f"unknown OB status: {status}")
+            raise ValueError(f"ob_states[{i}].status unknown: {status!r}")
+        episode_raw = em.get("episode")
+        if status == _OB_INSIDE:
+            episode = _require_nonempty_str(episode_raw, f"ob_states[{i}].episode")
+        else:
+            if episode_raw is not None:
+                raise ValueError(
+                    f"ob_states[{i}].episode must be None when status={status}, got {episode_raw!r}"
+                )
+            episode = None
         ob_states.append(
-            ObEpisodeState(
-                logical_ob_key=str(entry["key"]),
-                status=status,
-                current_episode_key=entry.get("episode"),
-            )
+            ObEpisodeState(logical_ob_key=key, status=status, current_episode_key=episode)
         )
+
+    prev_raw = root.get("prev_completed_close")
+    prev = None if prev_raw is None else _require_finite_number(prev_raw, "prev_completed_close")
+
     return SmcRealtimeTransitionState(
-        daily_epoch=str(payload["daily_epoch"]),
-        swing=LaneState(bias=int(swing["bias"]), fired_keys=tuple(swing.get("fired_keys") or ())),
-        internal=LaneState(
-            bias=int(internal["bias"]), fired_keys=tuple(internal.get("fired_keys") or ())
-        ),
+        daily_epoch=daily_epoch,
+        swing=swing,
+        internal=internal,
         session=session,
         ob_states=tuple(ob_states),
-        prev_completed_close=None if prev is None else float(prev),
+        prev_completed_close=prev,
     )
