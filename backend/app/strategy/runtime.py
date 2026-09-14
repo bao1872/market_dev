@@ -77,6 +77,10 @@ class MarketDataContext:
     bar_time: datetime | None = None
     node_target_set: Any | None = None
     smc_target_set: Any | None = None
+    # [F2] canonical realtime SMC production input（由 MonitorBatch 准备；G 才接线 evaluate）。
+    # 暂时保留 smc_target_set / price_last / current_price 供旧 producer，G cutover 时移除。
+    smc_realtime_input: Any | None = None
+    smc_realtime_degraded_reason: str | None = None
     price_last: float | None = None
     current_price: float | None = None
 
@@ -155,6 +159,12 @@ class StrategyEventDraft:
     payload: dict[str, Any] = field(default_factory=dict)
     state_ttl_seconds: int = 120
     cooldown_key: str | None = None
+    # [F2] cooldown contract：
+    #   True  = policy-driven 重复事件（如 Node），按 _check_event_cooldown 做粗粒度冷却；
+    #   False = correctness identity 已由 event_key / episode key 保证（如 canonical SMC），
+    #           跳过冷却检查，直接幂等写入。
+    # 旧调用不传该字段 → 默认 True，行为不变。
+    apply_cooldown: bool = True
 
 
 class StrategyRuntime(ABC):

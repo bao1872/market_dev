@@ -20,12 +20,11 @@
 from __future__ import annotations
 
 import uuid
-
-import pytest
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import pandas as pd
+import pytest
 
 from app.services.monitor_crossing_service import (
     evaluate_node_crossings,
@@ -310,39 +309,38 @@ def test_smc_never_emits_eqh_eql() -> None:
         )
 
 
-async def test_monitor_batch_service_wires_smc_target_set(
+async def test_monitor_batch_service_wires_runtime_target_bundle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """[G6 接线] MonitorBatchService._build_smc_target_set 调用 compute_smc_pine + build，
-    返回可用 TargetSet 并实例缓存（即生产会把它注入 context.smc_target_set）。"""
+    """[F2 PART 3] _build_smc_runtime_target_bundle 调用 compute_smc_pine + build，
+    返回 runtime bundle 并实例缓存（生产会把它注入 context.smc_realtime_input）。"""
+    from types import SimpleNamespace
+
     from app.services.monitor_batch_service import MonitorBatchService
 
-    canned = SmcMonitorTargetSet(
-        contract_identity={"algorithm_id": "smc"},
-        input_identity={"daily_bars_hash": "h"},
-        structure_context={"swing_bias": 1, "internal_bias": 1, "slots": {}},
-        active_structure_targets=(),
-        active_order_block_targets=(),
-        target_set_version="canned",
-    )
+    canned = SimpleNamespace(target_set=object())
     monkeypatch.setattr(
         "app.services.monitor_batch_service.compute_smc_pine",
         lambda *a, **k: {"params": {}},
     )
     monkeypatch.setattr(
-        "app.services.monitor_batch_service.build_smc_monitor_target_set",
+        "app.services.monitor_batch_service.build_smc_runtime_target_bundle",
         lambda bars, res: canned,
     )
     svc = MonitorBatchService()
     inst_id = uuid.uuid4()
-    bars = pd.DataFrame(
-        {"open": [1.0] * 30, "high": [2.0] * 30, "low": [0.5] * 30, "close": [1.5] * 30},
-        index=pd.date_range("2026-01-01", periods=30),
+    node_input = SimpleNamespace(
+        daily_bars=pd.DataFrame(
+            {"open": [1.0] * 30, "high": [2.0] * 30, "low": [0.5] * 30, "close": [1.5] * 30},
+            index=pd.date_range("2026-01-01", periods=30),
+        ),
+        daily_source_hash="h",
+        daily_adj_factor_hash="a",
     )
-    result = await svc._build_smc_target_set(inst_id, "600519", bars)
+    result = await svc._build_smc_runtime_target_bundle(inst_id, "600519", node_input)
     assert result is canned
-    # 实例缓存命中：相同 (instrument_id, daily_last_bar) 不重复计算
-    assert await svc._build_smc_target_set(inst_id, "600519", bars) is canned
+    # 实例缓存命中：相同 (instrument_id, source_hash, factor_hash, daily_last) 不重复计算
+    assert await svc._build_smc_runtime_target_bundle(inst_id, "600519", node_input) is canned
 
 
 def test_smc_bos_dedupe_key_stable_across_rebuild_and_xdxr() -> None:
@@ -374,50 +372,58 @@ def test_smc_bos_dedupe_key_stable_across_rebuild_and_xdxr() -> None:
     assert "level" not in e_before[0].dedupe_key
 
 
-async def test_resolve_smc_target_set_returns_real_on_success(
+async def test_resolve_smc_runtime_target_bundle_returns_real_on_success(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """构建成功 → 返回真实 TargetSet（生产走 G5 正常路径）。"""
-    from app.services.monitor_batch_service import MonitorBatchService, SmcMonitorTargetSet
+    """[F2 PART 3] 构建成功 → 返回 resolution(bundle=真实 bundle)。"""
+    from types import SimpleNamespace
 
-    real = SmcMonitorTargetSet(
-        contract_identity={}, input_identity={}, structure_context={},
-        active_structure_targets=(), active_order_block_targets=(), target_set_version="v",
-    )
+    from app.services.monitor_batch_service import MonitorBatchService
 
-    async def _ok(*a: object, **k: object) -> SmcMonitorTargetSet:
+    real = SimpleNamespace(target_set=object())
+
+    async def _ok(*a: object, **k: object) -> object:
         return real
 
     svc = MonitorBatchService()
-    monkeypatch.setattr(svc, "_build_smc_target_set", _ok)
-    assert await svc._resolve_smc_target_set(uuid.uuid4(), "600519", None) is real
+    monkeypatch.setattr(svc, "_build_smc_runtime_target_bundle", _ok)
+    resolution = await svc._resolve_smc_runtime_target_bundle(
+        uuid.uuid4(), "600519", SimpleNamespace()
+    )
+    assert resolution.bundle is real
+    assert resolution.degraded_reason is None
 
 
-async def test_resolve_smc_target_set_fail_closed_on_build_error(
+async def test_resolve_smc_runtime_target_bundle_fail_closed_on_build_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """构建失败 → 注入 EMPTY_SMC_TARGET_SET，绝不复活 legacy producer（唯一主路径合同）。"""
-    from app.services.monitor_batch_service import (
-        MonitorBatchService,
-        EMPTY_SMC_TARGET_SET,
-    )
+    """[F2 PART 3] 构建失败 → resolution(bundle=None, degraded_reason)，绝不伪造 params 复活。
+    （EMPTY_SMC_TARGET_SET 注入发生在 MonitorBatch 的 G5 兼容分支，而非 resolution 自身。）"""
+    from types import SimpleNamespace
+
+    from app.services.monitor_batch_service import MonitorBatchService
 
     async def _boom(*a: object, **k: object) -> object:
         raise RuntimeError("compute_smc_pine failed")
 
     svc = MonitorBatchService()
-    monkeypatch.setattr(svc, "_build_smc_target_set", _boom)
-    result = await svc._resolve_smc_target_set(uuid.uuid4(), "600519", None)
-    assert result is EMPTY_SMC_TARGET_SET
+    monkeypatch.setattr(svc, "_build_smc_runtime_target_bundle", _boom)
+    resolution = await svc._resolve_smc_runtime_target_bundle(
+        uuid.uuid4(), "600519", SimpleNamespace()
+    )
+    assert resolution.bundle is None
+    assert resolution.degraded_reason is not None
 
 
-async def test_build_smc_target_set_cache_invalidates_after_ttl(
+async def test_build_smc_runtime_target_bundle_cache_invalidates_after_ttl(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Point 5: 同 trading date 但盘中 OHLC 变化（daily_last_bar 键不变），
-    TTL 过期后必须重新计算，不能被日期键永久冻结。"""
+    """[F2 PART 3] 同 (instrument_id, source_hash, factor_hash, daily_last) 但 TTL 过期后必须重新计算；
+    同一交易日 XDXR/qfq rebuild 改变 source/factor hash → 必须 cache miss（键已包含 identity）。"""
+    from types import SimpleNamespace
+
     from app.services import monitor_batch_service as mbs
-    from app.services.monitor_batch_service import MonitorBatchService, SmcMonitorTargetSet
+    from app.services.monitor_batch_service import MonitorBatchService
 
     calls: list[int] = []
 
@@ -425,14 +431,11 @@ async def test_build_smc_target_set_cache_invalidates_after_ttl(
         calls.append(1)
         return {"params": {}}
 
-    def _fake_build(bars: object, res: object) -> SmcMonitorTargetSet:
-        return SmcMonitorTargetSet(
-            contract_identity={}, input_identity={}, structure_context={},
-            active_structure_targets=(), active_order_block_targets=(), target_set_version="c",
-        )
+    def _fake_build(bars: object, res: object) -> object:
+        return SimpleNamespace(target_set=object())
 
     monkeypatch.setattr(mbs, "compute_smc_pine", _fake_compute)
-    monkeypatch.setattr(mbs, "build_smc_monitor_target_set", _fake_build)
+    monkeypatch.setattr(mbs, "build_smc_runtime_target_bundle", _fake_build)
 
     clock = {"t": 1000.0}
 
@@ -445,18 +448,22 @@ async def test_build_smc_target_set_cache_invalidates_after_ttl(
 
     svc = MonitorBatchService()
     inst_id = uuid.uuid4()
-    bars = pd.DataFrame(
-        {"open": [1.0] * 30, "high": [2.0] * 30, "low": [0.5] * 30, "close": [1.5] * 30},
-        index=pd.date_range("2026-01-01", periods=30),
+    node_input = SimpleNamespace(
+        daily_bars=pd.DataFrame(
+            {"open": [1.0] * 30, "high": [2.0] * 30, "low": [0.5] * 30, "close": [1.5] * 30},
+            index=pd.date_range("2026-01-01", periods=30),
+        ),
+        daily_source_hash="h",
+        daily_adj_factor_hash="a",
     )
-    await svc._build_smc_target_set(inst_id, "600519", bars)
+    await svc._build_smc_runtime_target_bundle(inst_id, "600519", node_input)
     assert len(calls) == 1
     clock["t"] = 1000.0  # 仍在 TTL 内
-    await svc._build_smc_target_set(inst_id, "600519", bars)
+    await svc._build_smc_runtime_target_bundle(inst_id, "600519", node_input)
     assert len(calls) == 1  # 命中缓存，无重算
     clock["t"] = 1000.0 + 310.0  # 超过 TTL
-    await svc._build_smc_target_set(inst_id, "600519", bars)
-    assert len(calls) == 2  # 盘中 OHLC 变化后重新计算
+    await svc._build_smc_runtime_target_bundle(inst_id, "600519", node_input)
+    assert len(calls) == 2  # 重新计算
 
 
 def test_smc_structure_identity_event_type_disambiguates_direction() -> None:

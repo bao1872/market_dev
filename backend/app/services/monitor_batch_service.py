@@ -48,11 +48,6 @@ from app.constants.indicator_view import (
     is_supported_event_type,
 )
 from app.constants.strategy_keys import WATCHLIST_MONITOR
-from app.services.smc_monitor_target_service import (
-    SmcMonitorTargetSet,
-    build_smc_monitor_target_set,
-)
-from app.strategy_assets.algorithms.features.smc_pine_core import compute_smc_pine
 from app.constants.user_facing_labels import get_event_label
 from app.core.time import format_shanghai_datetime
 from app.models.capture_job import (
@@ -79,8 +74,16 @@ from app.services.node_monitor_target_service import (
 from app.services.notification_service import create_message
 from app.services.outbox_relay import write_outbox
 from app.services.realtime_market_fact_service import resolve_snapshot_price_range
+from app.services.smc_monitor_target_service import (
+    SmcMonitorTargetSet,
+    SmcRuntimeTargetBundle,
+    build_smc_runtime_target_bundle,
+)
+from app.services.smc_realtime_event_service import prepare_transition_state
+from app.services.smc_realtime_input_service import build_realtime_smc_input_bundle
 from app.strategy.monitors.watchlist_monitor import WatchlistMonitor
 from app.strategy.runtime import MarketDataContext, MonitorState
+from app.strategy_assets.algorithms.features.smc_pine_core import compute_smc_pine
 
 if TYPE_CHECKING:
     from typing import Protocol
@@ -128,14 +131,27 @@ _SMC_TARGET_SET_CACHE_TTL_SECONDS = 300
 
 # [G6 fail-closed] 构建失败/不可用时注入的空 G5 target set：永远走 G5（active targets 为空 → 0 事件），
 # 绝不落回 legacy SmcMonitor producer（唯一主路径合同）。结构化错误日志即 health signal。
+# F2 起仅保留给旧 producer 的 G5 兼容；G 会统一移除。
 EMPTY_SMC_TARGET_SET = SmcMonitorTargetSet(
     contract_identity={},
     input_identity={},
     structure_context={},
-    active_structure_targets=[],
-    active_order_block_targets=[],
+    active_structure_targets=(),
+    active_order_block_targets=(),
     target_set_version="empty",
 )
+
+
+@dataclass(frozen=True)
+class _SmcRuntimeTargetResolution:
+    """runtime target bundle 解析结果（PART 3）。
+
+    构建失败不构造 fake params/identity 的空 bundle（无合法语义），
+    而是 ``bundle=None`` + 明确 ``degraded_reason``。
+    """
+
+    bundle: SmcRuntimeTargetBundle | None
+    degraded_reason: str | None = None
 
 # 北京时间
 _CST = ZoneInfo("Asia/Shanghai")
@@ -215,8 +231,10 @@ class MonitorBatchService:
         # 保留 _vp_result 供 render_monitoring_chart 鸭子类型访问 profile_df/peak_df。
         # 简单 LRU：超过 256 项时清空最早一半（见 _compute_node_cluster_profile）。
         self._node_cluster_profile_cache: dict[tuple[str, str, str], tuple[Any, float]] = {}
-        # [G6] SMC TargetSet 缓存（键 (instrument_id, daily_last_bar) → (SmcMonitorTargetSet, monotonic_ts)）
-        self._smc_target_set_cache: dict[tuple[str, str], tuple[Any, float]] = {}
+        # [F2] runtime target bundle 缓存（键 (instrument_id, source_hash, adj_factor_hash, daily_last)
+        # → (SmcRuntimeTargetBundle, monotonic_ts)）。同一交易日 XDXR / qfq rebuild 后
+        # source/factor identity 改变 → 必须 cache miss，不能让旧 target 命中 300s。
+        self._smc_runtime_target_cache: dict[tuple[str, str, str, str], tuple[Any, float]] = {}
         # [Stage G3/G6] 盘中实时行情事实服务与价格区间追踪器
         from app.services.realtime_market_fact_service import (
             PriceTracker,
@@ -728,8 +746,9 @@ class MonitorBatchService:
         # - node_target_set：由本周期已计算的 Node profile（实例缓存，PNG 段复用，零额外开销）
         #   构建；坐标/可用性不一致导致构建失败时优雅回退旧路径。
         # - price_last/current_price：取最新已完成 1m close，经 PriceTracker 维持 [P_last, P_curr]。
-        # SMC 冻结 TargetSet 由下方 _build_smc_target_set 注入（G6 已落地）：
-        # 日线 SMC 一次计算 + build_smc_monitor_target_set，失败则 smc_target_set=None 回退旧路径。
+        # SMC runtime target bundle（TargetSet + 同源 effective params）由下方
+        # _resolve_smc_runtime_target_bundle 解析；失败则注入 EMPTY_SMC_TARGET_SET
+        # 给旧 producer（G5 路径），realtime input 置 None（fail-closed，G 才接线新 producer）。
         node_target_set = None
         try:
             profile = await self._compute_node_cluster_profile(node_input, instrument_id)
@@ -745,10 +764,18 @@ class MonitorBatchService:
             logger.debug("[%s] Node profile 计算失败，回退旧路径: %s", symbol, exc)
             node_target_set = None
 
-        # [G6 生产接线] 注入冻结 SMC TargetSet：日线 SMC 一次计算（compute_smc_pine）+ build，
-        # 实例缓存复用（键 daily_last_bar），使 WatchlistMonitor 走 G5 one-shot BOS/CHoCH + OB 新路径。
-        # 计算失败/不可用 → 注入 EMPTY_SMC_TARGET_SET（fail-closed，本轮 SMC=0），绝不复活 legacy producer。
-        context.smc_target_set = await self._resolve_smc_target_set(instrument_id, symbol, bars_daily)
+        # [F2] 解析 runtime target bundle（新生产 input 准备 + 旧 producer G5 兼容）。
+        # 复用 NodeClusterInputProvider 已拉取的 node_input（与 Node profile 同源，四链一致）。
+        runtime_resolution = await self._resolve_smc_runtime_target_bundle(
+            instrument_id, symbol, node_input,
+        )
+        # 旧 producer（WatchlistMonitor G5 路径）仍消费 context.smc_target_set：
+        # bundle 可用 → 注入其 TargetSet；不可用 → EMPTY_SMC_TARGET_SET（fail-closed，无 legacy 复活）。
+        context.smc_target_set = (
+            runtime_resolution.bundle.target_set
+            if runtime_resolution.bundle is not None
+            else EMPTY_SMC_TARGET_SET
+        )
 
         # [P0 G7 生产生命周期] prev_state 必须在更新 PriceTracker **之前**读取。
         # 若在之后读取，进程重启时内存 PriceTracker 为空，update_price 首帧恒返回 (p, p)，
@@ -762,6 +789,90 @@ class MonitorBatchService:
         prev_state_dict: dict[str, Any] = (
             (prev_state.state or {}) if prev_state is not None else {}
         )
+
+        # [F2] 准备 canonical realtime SMC production input（只 restore/prepare/attach，
+        # 不触发 transition evaluator；G 才接线 evaluate + writeback + 移除旧 producer）。
+        # 构建失败 / corrupt state / 拉取失败都只置 None + degraded_reason，绝不阻塞 Node 路径。
+        runtime_target = runtime_resolution.bundle
+        if runtime_target is None:
+            context.smc_realtime_input = None
+            context.smc_realtime_degraded_reason = (
+                runtime_resolution.degraded_reason or "runtime target unavailable"
+            )
+        else:
+            namespace_present = "smc_realtime_transition" in prev_state_dict
+            try:
+                prepared = prepare_transition_state(
+                    instrument_id=instrument_id,
+                    target_set=runtime_target.target_set,
+                    persisted_namespace_present=namespace_present,
+                    persisted_payload=prev_state_dict.get("smc_realtime_transition"),
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[%s] prepare_transition_state 异常: %s", symbol, exc)
+                prepared = None
+
+            if prepared is None or not prepared.ok:
+                context.smc_realtime_input = None
+                context.smc_realtime_degraded_reason = (
+                    prepared.degraded_reason
+                    if prepared is not None
+                    else "transition state preparation failed"
+                )
+            else:
+                # prepared.ok 保证 state 非 None；strict deserialize 保证 last_processed_bar_time aware。
+                assert prepared.state is not None
+                cursor = (
+                    datetime.fromisoformat(prepared.state.last_processed_bar_time)
+                    if prepared.state.last_processed_bar_time
+                    else None
+                )
+                try:
+                    minute_input = await MarketDataAggregationService().get_completed_qfq_minutes_for_monitor(
+                        db,
+                        instrument_id,
+                        after_bar_time=cursor,
+                        target_epoch=prepared.state.daily_epoch,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "[%s] 拉取 canonical completed qfq minutes 失败: %s", symbol, exc
+                    )
+                    minute_input = None
+
+                if minute_input is None:
+                    context.smc_realtime_input = None
+                    context.smc_realtime_degraded_reason = (
+                        "realtime SMC input preparation failed: minute fetch failed"
+                    )
+                else:
+                    try:
+                        context.smc_realtime_input = build_realtime_smc_input_bundle(
+                            instrument_id=instrument_id,
+                            runtime_target=runtime_target,
+                            minute_input=minute_input,
+                            transition_state=prepared.state,
+                        )
+                        if not minute_input.bars:
+                            # 无新 completed bar = 正常 NO-OP，不是 degraded。
+                            context.smc_realtime_degraded_reason = None
+                        elif not minute_input.qfq_proven or not minute_input.sequence_proven:
+                            # proof 不通过仍 attach bundle：canonical evaluator 才是 fail-closed owner。
+                            context.smc_realtime_degraded_reason = (
+                                minute_input.qfq_reason
+                                if not minute_input.qfq_proven
+                                else minute_input.sequence_reason
+                            )
+                        else:
+                            context.smc_realtime_degraded_reason = None
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "[%s] realtime SMC input bundle 构建失败: %s", symbol, exc
+                        )
+                        context.smc_realtime_input = None
+                        context.smc_realtime_degraded_reason = (
+                            f"realtime SMC input preparation failed: {exc}"
+                        )
 
         price_last: float | None = None
         current_price: float | None = None
@@ -869,47 +980,14 @@ class MonitorBatchService:
                 instrument_id, strategy_version.id, exc,
             )
 
-        # g. 对每个检测到的事件：冷却检查 → 写入
-        written_events: list[StrategyEvent] = []
-        for draft in event_drafts:
-            # 冷却检查
-            in_cooldown = await self._check_event_cooldown(
-                db, instrument_id, draft.event_type, draft.logical_entity,
-                cooldown_key=draft.cooldown_key,
-                event_time=draft.event_time,
-            )
-            if in_cooldown:
-                logger.debug(
-                    "事件冷却中，跳过: instrument_id=%s event_type=%s logical_entity=%s",
-                    instrument_id, draft.event_type, draft.logical_entity,
-                )
-                continue
-
-            # 写入事件
-            try:
-                event_orm = await strategy_event_repository.write_event(
-                    db,
-                    event_key=draft.dedupe_key,
-                    strategy_version_id=strategy_version.id,
-                    instrument_id=instrument_id,
-                    event_type=draft.event_type,
-                    event_time=draft.event_time,
-                    payload=draft.payload,
-                    logical_entity_id=draft.logical_entity,
-                )
-            except Exception as exc:
-                logger.warning(
-                    "写入 strategy_event 失败 instrument_id=%s event_type=%s: %s",
-                    instrument_id, draft.event_type, exc,
-                )
-                continue
-
-            if event_orm is None:
-                # 幂等跳过（event_key 已存在）
-                continue
-
-            result.total_events_written += 1
-            written_events.append(event_orm)
+        # g. 对每个检测到的事件：按 cooldown contract 冷却检查 → 幂等写入
+        written_events = await self._write_event_drafts(
+            db,
+            instrument_id=instrument_id,
+            strategy_version_id=strategy_version.id,
+            drafts=event_drafts,
+        )
+        result.total_events_written += len(written_events)
 
         # h. 单标的处理日志（必须包含 instrument/symbol/minute 状态与事件计数）
         logger.info(
@@ -1076,6 +1154,66 @@ class MonitorBatchService:
                 len(stale_evals), recovered, len(stale_evals) - recovered,
             )
         return recovered
+
+    async def _write_event_drafts(
+        self,
+        db: AsyncSession,
+        *,
+        instrument_id: uuid.UUID,
+        strategy_version_id: uuid.UUID,
+        drafts: list[Any],
+    ) -> list[StrategyEvent]:
+        """对每个 draft 幂等写入策略事件，按 cooldown contract 决定是否冷却检查（PART 12）。
+
+        - ``draft.apply_cooldown=True``（默认，Node 等 policy-driven 重复事件）→ 走
+          ``_check_event_cooldown`` 粗粒度冷却；
+        - ``draft.apply_cooldown=False``（如 canonical SMC，identity 已由 event_key/episode
+          key 保证）→ 跳过冷却检查，直接幂等写入。
+
+        返回本次实际写入的 ORM 事件列表。
+        """
+        written: list[StrategyEvent] = []
+        for draft in drafts:
+            if getattr(draft, "apply_cooldown", True):
+                in_cooldown = await self._check_event_cooldown(
+                    db,
+                    instrument_id,
+                    draft.event_type,
+                    draft.logical_entity,
+                    cooldown_key=draft.cooldown_key,
+                    event_time=draft.event_time,
+                )
+                if in_cooldown:
+                    logger.debug(
+                        "事件冷却中，跳过: instrument_id=%s event_type=%s logical_entity=%s",
+                        instrument_id, draft.event_type, draft.logical_entity,
+                    )
+                    continue
+
+            try:
+                event_orm = await strategy_event_repository.write_event(
+                    db,
+                    event_key=draft.dedupe_key,
+                    strategy_version_id=strategy_version_id,
+                    instrument_id=instrument_id,
+                    event_type=draft.event_type,
+                    event_time=draft.event_time,
+                    payload=draft.payload,
+                    logical_entity_id=draft.logical_entity,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "写入 strategy_event 失败 instrument_id=%s event_type=%s: %s",
+                    instrument_id, draft.event_type, exc,
+                )
+                continue
+
+            if event_orm is None:
+                # 幂等跳过（event_key 已存在）
+                continue
+
+            written.append(event_orm)
+        return written
 
     async def _check_event_cooldown(
         self,
@@ -2109,72 +2247,70 @@ class MonitorBatchService:
             self._node_cluster_profile_cache = dict(sorted_items[len(sorted_items) // 2:])
         return profile
 
-    async def _resolve_smc_target_set(
+    async def _resolve_smc_runtime_target_bundle(
         self,
         instrument_id: uuid.UUID,
         symbol: str,
-        bars_daily: Any,
-    ) -> Any:
-        """[G6 fail-closed] 解析本轮 SMC TargetSet：成功返回真实 set，失败注入空 set。
+        node_input: Any,
+    ) -> _SmcRuntimeTargetResolution:
+        """[F2] 解析本轮 SMC runtime target bundle（TargetSet + 同源 effective params）。
 
-        唯一主路径合同：无论构建成功/失败，本方法永远返回一个**非 None** 的 G5 target set
-        （真实 set 或 EMPTY_SMC_TARGET_SET）。调用方据此注入 context.smc_target_set，
-        使 WatchlistMonitor 永远走 G5 one-shot 分支；绝不会因 None 隐式复活 legacy SmcMonitor。
-
-        失败语义（fail-closed，非 silent fallback）：
-        - 本轮 SMC 不产生任何 BOS/CHoCH/OB 新事件；
-        - 结构化 error 日志 [SMC_TARGET_SET_BUILD_FAILED] 作为 health signal；
-        - 其他非 SMC monitor（Node/VN/OB 等）照常继续。
+        成功返回 ``_SmcRuntimeTargetResolution(bundle=...)``；构建失败/不可用返回
+        ``bundle=None`` + 明确 ``degraded_reason``。绝不构造 fake params/identity 的空 bundle。
         """
-        smc_target_set = None
+        bundle: SmcRuntimeTargetBundle | None = None
+        degraded_reason: str | None = None
         try:
-            smc_target_set = await self._build_smc_target_set(instrument_id, symbol, bars_daily)
+            bundle = await self._build_smc_runtime_target_bundle(instrument_id, symbol, node_input)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[%s] SMC target set 构建异常，fail-closed: %s", symbol, exc)
-            smc_target_set = None
-        if smc_target_set is not None:
-            return smc_target_set
-        logger.error(
-            "[SMC_TARGET_SET_BUILD_FAILED] symbol=%s 本轮 SMC fail-closed（无 legacy 复活）",
-            symbol,
-        )
-        return EMPTY_SMC_TARGET_SET
+            logger.debug("[%s] SMC runtime target bundle 构建异常，fail-closed: %s", symbol, exc)
+            bundle = None
+        if bundle is None:
+            degraded_reason = "runtime target unavailable"
+            logger.error(
+                "[SMC_RUNTIME_TARGET_BUILD_FAILED] symbol=%s 本轮 SMC fail-closed（无 legacy 复活）",
+                symbol,
+            )
+        return _SmcRuntimeTargetResolution(bundle=bundle, degraded_reason=degraded_reason)
 
-    async def _build_smc_target_set(
+    async def _build_smc_runtime_target_bundle(
         self,
         instrument_id: uuid.UUID,
         symbol: str,
-        bars_daily: Any,
-    ) -> Any:
-        """[G6] 构建冻结 SMC TargetSet（日线 SMC 一次计算 + 实例缓存）。
+        node_input: Any,
+    ) -> SmcRuntimeTargetBundle | None:
+        """[F2] 构建 runtime target bundle（日线 SMC 一次计算 + 实例缓存）。
 
-        复用 MonitorBatchService 已拉取的 daily_bars（与 Node profile 同源，四链一致），
+        复用 NodeClusterInputProvider 已拉取的 daily_bars（与 Node profile 同源，四链一致），
         调用 compute_smc_pine（emit_structure_target_state=True）得到结构终态，
-        再 build_smc_monitor_target_set 得到不可变 TargetSet，交给 WatchlistMonitor G5 路径。
+        再 build_smc_runtime_target_bundle（TargetSet + 同源 effective params）。
 
-        复杂度与缓存策略（回应「禁止 per-minute 重复完整日线 SMC 重算」）：
-        - compute_smc_pine 仅依赖日线，缓存键 (instrument_id, daily_last_bar)；
-        - 实例级缓存 TTL 300s（日线仅在收盘变化，覆盖多个 1m 周期）；
-        - 同一交易日同一标的只完整计算一次，盘中每分钟批次命中缓存，零重复重算。
-        - 不使用 monitor loop 内二次 compute_smc_pine；不 per-notification-rule 重算。
+        缓存键绑定 ``(instrument_id, daily_source_hash, daily_adj_factor_hash, daily_last)``：
+        同一交易日 XDXR / qfq rebuild 后 source/factor identity 改变 → 必须 cache miss。
+        hash 为空串仍允许构建，但键已含 daily_last，不会跨不同 bars 误复用。
 
         Returns:
-            SmcMonitorTargetSet；输入不足 / 计算失败 / contract 不符 → None（优雅回退旧路径）。
+            SmcRuntimeTargetBundle；输入不足 / 计算失败 / contract 不符 → None（优雅回退旧路径）。
         """
+        bars_daily = getattr(node_input, "daily_bars", None)
         if bars_daily is None or getattr(bars_daily, "empty", True) or len(bars_daily) < 20:
-            logger.debug("[%s] 日线不足，跳过 SMC target set 构建", symbol)
+            logger.debug("[%s] 日线不足，跳过 SMC runtime target bundle 构建", symbol)
             return None
         try:
             daily_last = str(bars_daily.index[-1])
         except Exception:  # noqa: BLE001
             return None
-        cache_key = (str(instrument_id), daily_last)
+
+        daily_source_hash = str(getattr(node_input, "daily_source_hash", "") or "")
+        daily_adj_factor_hash = str(getattr(node_input, "daily_adj_factor_hash", "") or "")
+        cache_key = (str(instrument_id), daily_source_hash, daily_adj_factor_hash, daily_last)
+
         now_ts = time.monotonic()
-        cached = self._smc_target_set_cache.get(cache_key)
+        cached = self._smc_runtime_target_cache.get(cache_key)
         if cached is not None:
-            cached_set, cached_ts = cached
+            cached_bundle, cached_ts = cached
             if now_ts - cached_ts < _SMC_TARGET_SET_CACHE_TTL_SECONDS:
-                return cached_set
+                return cached_bundle
         try:
             opens = [float(x) for x in bars_daily["open"].tolist()]
             highs = [float(x) for x in bars_daily["high"].tolist()]
@@ -2185,18 +2321,18 @@ class MonitorBatchService:
                 opens, highs, lows, closes, times,
                 emit_structure_target_state=True,
             )
-            smc_target_set = build_smc_monitor_target_set(bars_daily, smc_result)
+            runtime_target = build_smc_runtime_target_bundle(bars_daily, smc_result)
         except Exception as exc:  # noqa: BLE001 - SMC 计算失败必须回退，绝不阻断监控周期
-            logger.warning("[%s] SMC target set 计算失败，回退旧路径: %s", symbol, exc)
+            logger.warning("[%s] SMC runtime target bundle 计算失败，回退旧路径: %s", symbol, exc)
             return None
-        self._smc_target_set_cache[cache_key] = (smc_target_set, now_ts)
+        self._smc_runtime_target_cache[cache_key] = (runtime_target, now_ts)
         # 简单 LRU：缓存超过 256 项时清空最早一半（避免无界增长）
-        if len(self._smc_target_set_cache) > 256:
+        if len(self._smc_runtime_target_cache) > 256:
             sorted_items = sorted(
-                self._smc_target_set_cache.items(), key=lambda kv: kv[1][1]
+                self._smc_runtime_target_cache.items(), key=lambda kv: kv[1][1]
             )
-            self._smc_target_set_cache = dict(sorted_items[len(sorted_items) // 2:])
-        return smc_target_set
+            self._smc_runtime_target_cache = dict(sorted_items[len(sorted_items) // 2:])
+        return runtime_target
 
     @staticmethod
     def _orm_to_runtime_state(orm: _MonitorStateLike) -> MonitorState:
