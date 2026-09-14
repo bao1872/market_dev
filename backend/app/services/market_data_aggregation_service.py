@@ -1276,6 +1276,27 @@ class CanonicalCompletedQfqMinute:
     low: float
     close: float
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.bar_time, str) or not self.bar_time:
+            raise ValueError("bar_time must be non-empty str")
+        parsed = datetime.fromisoformat(self.bar_time)
+        if parsed.tzinfo is None:
+            raise ValueError("bar_time must be timezone-aware")
+        if not isinstance(self.session_key, str) or not self.session_key:
+            raise ValueError("session_key must be non-empty str")
+        for name, value in (
+            ("open", self.open),
+            ("high", self.high),
+            ("low", self.low),
+            ("close", self.close),
+        ):
+            if (
+                not isinstance(value, (int, float))
+                or isinstance(value, bool)
+                or not math.isfinite(value)
+            ):
+                raise ValueError(f"{name} must be finite number")
+
 
 @dataclass(frozen=True)
 class CanonicalCompletedQfqMinutes:
@@ -1319,15 +1340,40 @@ class CanonicalCompletedQfqMinutes:
             if parsed.tzinfo is None:
                 raise ValueError("latest_completed_bar_time must be timezone-aware")
 
+        # 自洽：latest 必须是最后一根；空 bars 必须 latest=None
+        if self.bars:
+            if self.latest_completed_bar_time != self.bars[-1].bar_time:
+                raise ValueError("latest_completed_bar_time must equal last bar_time")
+        elif self.latest_completed_bar_time is not None:
+            raise ValueError("empty bars require latest_completed_bar_time=None")
 
-def _minute_index_to_aware_iso(value: Any) -> str:
-    """分钟 index → timezone-aware ISO8601（naive 视为上海本地墙钟）。"""
+        # proven 前置条件（不在 DTO 内重算 qfq proof）
+        if self.sequence_proven and not self.bars:
+            raise ValueError("sequence_proven=True requires non-empty bars")
+        if self.qfq_proven:
+            if not self.bars:
+                raise ValueError("qfq_proven=True requires non-empty bars")
+            if not self.adj_factor_hash:
+                raise ValueError("qfq_proven=True requires adj_factor_hash")
+
+
+def _to_shanghai_aware_timestamp(value: Any) -> pd.Timestamp:
+    """**唯一** Shanghai-aware 归一化入口（naive 视为上海本地墙钟）。
+
+    分钟 DB index 是 naive 上海墙钟（bar_repository `tz_localize(None)`），
+    persisted cursor 是 timezone-aware；两者必须先经本函数归一化才能比较。
+    """
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
         ts = ts.tz_localize(SHANGHAI_TZ)
     else:
         ts = ts.tz_convert(SHANGHAI_TZ)
-    return ts.isoformat()
+    return ts
+
+
+def _minute_index_to_aware_iso(value: Any) -> str:
+    """分钟 index → timezone-aware ISO8601。"""
+    return _to_shanghai_aware_timestamp(value).isoformat()
 
 
 class MarketDataAggregationService:
@@ -1373,19 +1419,20 @@ class MarketDataAggregationService:
         bars_df = result.bars
         cursor_ts: pd.Timestamp | None = None
         if after_bar_time is not None:
-            cursor_ts = pd.Timestamp(after_bar_time)
-            if cursor_ts.tzinfo is None:
-                cursor_ts = cursor_ts.tz_localize(SHANGHAI_TZ)
+            # persisted correctness state 已规定 cursor 必须 aware；naive 一律拒绝，不猜时区。
+            if not isinstance(after_bar_time, datetime) or after_bar_time.tzinfo is None:
+                raise ValueError("after_bar_time must be timezone-aware datetime")
+            cursor_ts = _to_shanghai_aware_timestamp(after_bar_time)
 
         rows: list[CanonicalCompletedQfqMinute] = []
         if bars_df is not None and not bars_df.empty:
             for idx, row in bars_df.iterrows():
-                idx_ts = pd.Timestamp(idx)
+                idx_ts = _to_shanghai_aware_timestamp(idx)
                 if cursor_ts is not None and idx_ts <= cursor_ts:
                     continue  # 不重复消费 cursor
                 rows.append(
                     CanonicalCompletedQfqMinute(
-                        bar_time=_minute_index_to_aware_iso(idx),
+                        bar_time=idx_ts.isoformat(),
                         session_key=idx_ts.date().isoformat(),
                         open=float(row["open"]),
                         high=float(row["high"]),
@@ -1454,6 +1501,47 @@ class MarketDataAggregationService:
             return False, "known corporate action reached effective date"
         return True, ""
 
+    async def _prove_minute_edge(
+        self,
+        session: AsyncSession,
+        *,
+        prev_dt: datetime,
+        prev_session_key: str,
+        curr_dt: datetime,
+        curr_session_key: str,
+    ) -> tuple[bool, str]:
+        """**唯一**相邻边规则 owner：same-day +1 / 唯一午休 jump / 跨日 authoritative。"""
+        prev_aware = _to_shanghai_aware_timestamp(prev_dt).to_pydatetime()
+        curr_aware = _to_shanghai_aware_timestamp(curr_dt).to_pydatetime()
+
+        if curr_aware <= prev_aware:
+            return False, "minute edge not increasing"
+
+        prev_mod = prev_aware.hour * 60 + prev_aware.minute
+        curr_mod = curr_aware.hour * 60 + curr_aware.minute
+
+        if prev_session_key == curr_session_key:
+            if prev_mod == 11 * 60 + 30 and curr_mod == 13 * 60 + 1:
+                return True, ""  # 唯一合法午休 jump
+            if curr_mod == prev_mod + 1:
+                return True, ""
+            return False, "non-contiguous minute progression"
+
+        if (prev_aware.hour, prev_aware.minute) != (15, 0) or (
+            curr_aware.hour,
+            curr_aware.minute,
+        ) != (9, 31):
+            return False, "illegal cross-day jump"
+
+        next_day = await get_next_authoritative_trading_day_async(
+            session, date.fromisoformat(prev_session_key)
+        )
+        if next_day is None:
+            return False, "next authoritative trading day unprovable"
+        if next_day.isoformat() != curr_session_key:
+            return False, "cross-day target is not the authoritative next trading day"
+        return True, ""
+
     async def _prove_completed_minute_sequence(
         self,
         session: AsyncSession,
@@ -1469,35 +1557,33 @@ class MarketDataAggregationService:
         except ValueError:
             return False, "bar_time not ISO datetime"
 
-        for i in range(1, len(parsed)):
-            if parsed[i] <= parsed[i - 1]:
-                return False, "bars not strictly increasing"
-
         if after_bar_time is None:
             first_dt = parsed[0]
             if (first_dt.hour, first_dt.minute) != (9, 31):
                 return False, "bootstrap does not start from session open"
+        else:
+            # 核心：cursor → first bar 必须被证明连续（否则允许跨缺口 crossing）
+            cursor = _to_shanghai_aware_timestamp(after_bar_time).to_pydatetime()
+            ok, reason = await self._prove_minute_edge(
+                session,
+                prev_dt=cursor,
+                prev_session_key=cursor.date().isoformat(),
+                curr_dt=parsed[0],
+                curr_session_key=bars[0].session_key,
+            )
+            if not ok:
+                return False, f"cursor-to-first-bar gap: {reason}"
 
         for i in range(1, len(bars)):
-            prev_row, curr_row = bars[i - 1], bars[i]
-            prev_dt, curr_dt = parsed[i - 1], parsed[i]
-            prev_mod = prev_dt.hour * 60 + prev_dt.minute
-            curr_mod = curr_dt.hour * 60 + curr_dt.minute
-            if prev_row.session_key == curr_row.session_key:
-                if prev_mod == 11 * 60 + 30 and curr_mod == 13 * 60 + 1:
-                    continue  # 唯一合法午休 jump
-                if curr_mod != prev_mod + 1:
-                    return False, "non-contiguous minute progression"
-            else:
-                if prev_mod != 15 * 60 or curr_mod != 9 * 60 + 31:
-                    return False, "illegal cross-day jump"
-                next_day = await get_next_authoritative_trading_day_async(
-                    session, date.fromisoformat(prev_row.session_key)
-                )
-                if next_day is None:
-                    return False, "next authoritative trading day unprovable"
-                if next_day.isoformat() != curr_row.session_key:
-                    return False, "cross-day target is not the authoritative next trading day"
+            ok, reason = await self._prove_minute_edge(
+                session,
+                prev_dt=parsed[i - 1],
+                prev_session_key=bars[i - 1].session_key,
+                curr_dt=parsed[i],
+                curr_session_key=bars[i].session_key,
+            )
+            if not ok:
+                return False, reason
         return True, ""
 
     async def get_bars_batch(

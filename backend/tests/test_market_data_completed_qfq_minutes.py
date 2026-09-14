@@ -3,9 +3,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime
+from uuid import uuid4
 
+import pandas as pd
 import pytest
 
+from app.core.time import SHANGHAI_TZ
 from app.services.calendar_service import get_next_authoritative_trading_day_async
 from app.services.market_data_aggregation_service import (
     CanonicalCompletedQfqMinute,
@@ -107,15 +110,17 @@ class TestSequenceProof:
         assert proven is False
 
     def test_lunch_jump_1130_to_1301_proven(self):
-        # 非 bootstrap（带 cursor），唯一合法午休 jump
+        # 非 bootstrap（带 aware cursor），唯一合法午休 jump
         proven, reason = _proof(
-            [_row("11:30"), _row("13:01")], after=datetime(2026, 9, 14, 11, 29)
+            [_row("11:30"), _row("13:01")],
+            after=datetime(2026, 9, 14, 11, 29, tzinfo=SHANGHAI_TZ),
         )
         assert proven is True, reason
 
     def test_illegal_lunch_jump_fails(self):
         proven, _ = _proof(
-            [_row("11:30"), _row("13:02")], after=datetime(2026, 9, 14, 11, 29)
+            [_row("11:30"), _row("13:02")],
+            after=datetime(2026, 9, 14, 11, 29, tzinfo=SHANGHAI_TZ),
         )
         assert proven is False
 
@@ -181,7 +186,7 @@ class TestCrossDaySequence:
             open=1.0, high=1.0, low=1.0, close=1.0,
         ),
     )
-    _CURSOR = datetime(2026, 9, 14, 14, 59)
+    _CURSOR = datetime(2026, 9, 14, 14, 59, tzinfo=SHANGHAI_TZ)
 
     def test_cross_day_authoritative_proven(self):
         svc = MarketDataAggregationService()
@@ -215,3 +220,158 @@ class TestCrossDaySequence:
         )
         assert proven is False
         assert "not the authoritative next trading day" in reason
+
+
+# ---------------------------------------------------------------------------
+# Blocker 1 — cursor → first bar 连续性证明
+# ---------------------------------------------------------------------------
+
+
+class TestCursorToFirstBar:
+    def test_contiguous_after_cursor_proven(self):
+        proven, reason = _proof(
+            [_row("10:02"), _row("10:03")],
+            after=datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ),
+        )
+        assert proven is True, reason
+
+    def test_cursor_gap_fails(self):
+        proven, reason = _proof(
+            [_row("10:03"), _row("10:04")],
+            after=datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ),
+        )
+        assert proven is False
+        assert "cursor-to-first-bar gap" in reason
+
+    def test_cursor_1130_then_1301_proven(self):
+        proven, reason = _proof(
+            [_row("13:01")], after=datetime(2026, 9, 14, 11, 30, tzinfo=SHANGHAI_TZ)
+        )
+        assert proven is True, reason
+
+    def test_cursor_1130_then_1302_fails(self):
+        proven, reason = _proof(
+            [_row("13:02")], after=datetime(2026, 9, 14, 11, 30, tzinfo=SHANGHAI_TZ)
+        )
+        assert proven is False
+        assert "cursor-to-first-bar gap" in reason
+
+    def test_cursor_1500_then_next_open_proven(self):
+        svc = MarketDataAggregationService()
+        session = _FakeSession([(date(2026, 9, 15), True, "OPEN")])
+        bars = (
+            CanonicalCompletedQfqMinute(
+                bar_time="2026-09-15T09:31:00+08:00", session_key="2026-09-15",
+                open=1.0, high=1.0, low=1.0, close=1.0,
+            ),
+        )
+        proven, reason = asyncio.run(
+            svc._prove_completed_minute_sequence(
+                session,
+                after_bar_time=datetime(2026, 9, 14, 15, 0, tzinfo=SHANGHAI_TZ),
+                bars=bars,
+            )
+        )
+        assert proven is True, reason
+
+    def test_cursor_1459_then_next_open_fails(self):
+        svc = MarketDataAggregationService()
+        session = _FakeSession([(date(2026, 9, 15), True, "OPEN")])
+        bars = (
+            CanonicalCompletedQfqMinute(
+                bar_time="2026-09-15T09:31:00+08:00", session_key="2026-09-15",
+                open=1.0, high=1.0, low=1.0, close=1.0,
+            ),
+        )
+        proven, reason = asyncio.run(
+            svc._prove_completed_minute_sequence(
+                session,
+                after_bar_time=datetime(2026, 9, 14, 14, 59, tzinfo=SHANGHAI_TZ),
+                bars=bars,
+            )
+        )
+        assert proven is False
+        assert "cursor-to-first-bar gap" in reason
+
+
+# ---------------------------------------------------------------------------
+# Blocker 2 — owner-level getter 集成（naive 上海 index + aware cursor）
+# ---------------------------------------------------------------------------
+
+
+class _Schedule:
+    scanned_as_of = date(2026, 9, 14)
+    next_event_date = None
+
+
+class TestOwnerLevelGetter:
+    class _Result:
+        def __init__(self, bars):
+            self.bars = bars
+            self.degraded = False
+            self.degraded_reason = None
+            self.adj_factor_hash = "adj-hash"
+            self.source_bar_hash = "src-hash"
+
+    def _svc(self, monkeypatch, index):
+        import app.services.market_data_aggregation_service as mod
+
+        svc = MarketDataAggregationService()
+        frame = pd.DataFrame(
+            {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "adj_factor": 1.0},
+            index=pd.DatetimeIndex(index),
+        )
+        result = self._Result(frame)
+
+        async def _fake_get_bars(**_kwargs):
+            return result
+
+        monkeypatch.setattr(svc, "get_bars", _fake_get_bars)
+        monkeypatch.setattr(
+            mod.AdjustmentFactorService,
+            "get_corporate_action_schedule_state",
+            lambda self, instrument_id: _Schedule(),
+        )
+        return svc
+
+    def test_naive_index_and_aware_cursor_no_crash(self, monkeypatch):
+        svc = self._svc(monkeypatch, ["2026-09-14 10:01:00", "2026-09-14 10:02:00"])
+        out = asyncio.run(
+            svc.get_completed_qfq_minutes_for_monitor(
+                None,
+                uuid4(),
+                after_bar_time=datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ),
+                target_epoch="2026-01-02T00:00:00",
+            )
+        )
+        assert [row.bar_time for row in out.bars] == ["2026-09-14T10:02:00+08:00"]
+        assert out.bars[0].session_key == "2026-09-14"
+        assert out.sequence_proven is True
+        assert out.qfq_proven is True
+        assert out.latest_completed_bar_time == "2026-09-14T10:02:00+08:00"
+
+    def test_gap_after_cursor_not_proven(self, monkeypatch):
+        svc = self._svc(monkeypatch, ["2026-09-14 10:01:00", "2026-09-14 10:03:00"])
+        out = asyncio.run(
+            svc.get_completed_qfq_minutes_for_monitor(
+                None,
+                uuid4(),
+                after_bar_time=datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ),
+                target_epoch="2026-01-02T00:00:00",
+            )
+        )
+        assert [row.bar_time for row in out.bars] == ["2026-09-14T10:03:00+08:00"]
+        assert out.sequence_proven is False
+        assert "cursor-to-first-bar gap" in out.sequence_reason
+
+    def test_naive_cursor_rejected(self, monkeypatch):
+        svc = self._svc(monkeypatch, ["2026-09-14 10:02:00"])
+        with pytest.raises(ValueError):
+            asyncio.run(
+                svc.get_completed_qfq_minutes_for_monitor(
+                    None,
+                    uuid4(),
+                    after_bar_time=datetime(2026, 9, 14, 10, 1),  # naive → 拒绝
+                    target_epoch="2026-01-02T00:00:00",
+                )
+            )
