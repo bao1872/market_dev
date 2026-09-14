@@ -85,7 +85,6 @@ class AfterClosePipelineResponse(BaseModel):
     watchlist_reason: str
     # [AC2-2026-09-14] 失败诊断：由后端从 step_summary 推导，前端无需猜测
     failed_step: str | None = None
-    error_code: str | None = None
     has_backfill_full: bool = False
     after_close_run: AfterCloseRunSummary | None = None
     steps: list[PipelineStep]

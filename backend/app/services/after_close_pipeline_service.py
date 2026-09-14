@@ -61,9 +61,9 @@ _BLOCKED_AFTER_CLOSE_MINUTES = 30
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _UTC_TZ = UTC
 
-# [CHANGE-20260801-REVIEW-CLOSURE] 7 个展示步骤：
+# [CHANGE-20260801-REVIEW-CLOSURE] 当前展示步骤（6 + watchlist_ready，无 publishing）：
 #   refreshing_daily → syncing_boards → checking_coverage
-#   → computing_features → publishing → computing_review → watchlist_ready
+#   → computing_features → computing_review → watchlist_ready
 # 旧 4 步（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
 # 收敛为 computing_features，仅历史映射。
 _PIPELINE_STEPS = [
@@ -797,7 +797,6 @@ async def _build_pipeline_response(
     if not isinstance(step_summaries, dict):
         step_summaries = {}
     failed_step = resolve_failed_step(step_summaries)
-    error_code = job_run.error_code if job_run is not None else None
 
     watchlist_ready = await has_succeeded_snapshot_run(db, trade_date)
     snapshot_summary = await _get_snapshot_run_summary(db, trade_date)
@@ -862,7 +861,6 @@ async def _build_pipeline_response(
         "watchlist_ready": watchlist_ready,
         "watchlist_reason": watchlist_reason,
         "failed_step": failed_step,
-        "error_code": error_code,
         "has_backfill_full": has_backfill_full,
         "after_close_run": after_close_run_summary,
         "steps": steps,

@@ -3312,7 +3312,6 @@ export interface AfterClosePipelineResponse {
   watchlist_reason: string
   // [AC2-2026-09-14] 失败诊断：由后端从 step_summary 推导，前端无需猜测
   failed_step: string | null
-  error_code: string | null
   has_backfill_full: boolean
   after_close_run: AfterCloseRunSummary | null
   steps: PipelineStep[]

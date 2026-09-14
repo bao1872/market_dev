@@ -356,16 +356,16 @@ export default function AdminAfterClosePipelinePage() {
       {/* ===== [AC2-2026-09-14] 失败诊断横幅 ===== */}
       {overallStatus === 'failed' && pipeline?.failed_step ? (
         <div className="grid section-gap">
-          <section className="card banner-error">
+          <section className="card notice error">
             <div className="card-body">
-              <div className="banner-error-title">
+              <div>
                 盘后任务失败于「{stepLabel(pipeline.failed_step)}」
               </div>
               {afterCloseRun?.error_code && (
-                <div className="banner-error-code">{afterCloseRun.error_code}</div>
+                <code>{afterCloseRun.error_code}</code>
               )}
               {afterCloseRun?.error_message && (
-                <div className="banner-error-message">{afterCloseRun.error_message}</div>
+                <div>{afterCloseRun.error_message}</div>
               )}
             </div>
           </section>
