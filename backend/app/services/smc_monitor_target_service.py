@@ -21,7 +21,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import pandas as pd
@@ -105,6 +107,33 @@ def _is_finite(value: Any) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# snapshot immutability 工具（递归冻结 / 还原；不参与 hash / version payload）
+# ---------------------------------------------------------------------------
+
+
+def _freeze(value: Any) -> Any:
+    """递归把 dict→MappingProxyType、list/tuple→tuple，使 snapshot 无法被外部原地修改。
+
+    标量（None/bool/int/float/str）本身不可变，原样返回。
+    仅用于 ``SmcMonitorTargetSet`` 内部存储，不参与 hash / target_id / version payload。
+    """
+    if isinstance(value, Mapping):
+        return MappingProxyType({k: _freeze(v) for k, v in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(v) for v in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    """递归把冻结表示还原为全新的普通可 JSON 序列化对象（不共享任何引用）。"""
+    if isinstance(value, Mapping):
+        return {k: _thaw(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw(v) for v in value]
+    return value
+
+
+# ---------------------------------------------------------------------------
 # 逻辑模型（frozen dataclass）
 # ---------------------------------------------------------------------------
 
@@ -157,18 +186,33 @@ class SmcOrderBlockTarget:
 
 @dataclass(frozen=True)
 class SmcMonitorTargetSet:
-    contract_identity: dict[str, Any]
-    input_identity: dict[str, Any]
-    structure_context: dict[str, Any]
-    active_structure_targets: list[SmcStructureTarget]
-    active_order_block_targets: list[SmcOrderBlockTarget]
+    contract_identity: Mapping[str, Any]
+    input_identity: Mapping[str, Any]
+    structure_context: Mapping[str, Any]
+    active_structure_targets: tuple[SmcStructureTarget, ...]
+    active_order_block_targets: tuple[SmcOrderBlockTarget, ...]
     target_set_version: str
 
+    def __post_init__(self) -> None:
+        """把内部容器递归冻结，锁死 snapshot 不可变不变量。
+
+        ``frozen=True`` 只阻止字段重绑定，不阻止内部 dict/list 被原地修改。
+        这里对所有构造路径（builder / 直接构造）统一做深度冻结 + tuple 化，
+        保证 build 之后 TargetSet 语义内容不可再被外部修改，
+        从而 ``target_set_version`` 永久对应该 snapshot 内容。
+        """
+        object.__setattr__(self, "contract_identity", _freeze(self.contract_identity))
+        object.__setattr__(self, "input_identity", _freeze(self.input_identity))
+        object.__setattr__(self, "structure_context", _freeze(self.structure_context))
+        object.__setattr__(self, "active_structure_targets", tuple(self.active_structure_targets))
+        object.__setattr__(self, "active_order_block_targets", tuple(self.active_order_block_targets))
+
     def to_dict(self) -> dict[str, Any]:
+        """返回完全独立的普通可序列化对象；修改返回值绝不回写 TargetSet。"""
         return {
-            "contract_identity": self.contract_identity,
-            "input_identity": self.input_identity,
-            "structure_context": self.structure_context,
+            "contract_identity": _thaw(self.contract_identity),
+            "input_identity": _thaw(self.input_identity),
+            "structure_context": _thaw(self.structure_context),
             "active_targets": {
                 "structure_targets": [t.to_dict() for t in self.active_structure_targets],
                 "order_block_targets": [t.to_dict() for t in self.active_order_block_targets],

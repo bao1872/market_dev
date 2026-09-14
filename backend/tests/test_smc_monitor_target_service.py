@@ -152,7 +152,7 @@ class TestStructureExtraction:
     def test_unformed_crossed_false_no_target(self):
         st = _structure(swing_high=_slot(level=None, anchor_index=None, anchor_time=None, crossed=False))
         res = build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(st))
-        assert res.active_structure_targets == []
+        assert res.active_structure_targets == ()
 
     def test_formed_crossed_false_target(self):
         sh = _slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False)
@@ -168,7 +168,7 @@ class TestStructureExtraction:
         st = _structure(swing_high=sh)
         bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
         res = build_smc_monitor_target_set(bars, _smc(st))
-        assert res.active_structure_targets == []
+        assert res.active_structure_targets == ()
         # crossed slot 仍保留在 structure_context
         ctx = res.structure_context["slots"]["swing_high"]
         assert ctx["level"] == 105.0 and ctx["crossed"] is True
@@ -309,7 +309,7 @@ class TestOrderBlockTargets:
     def test_mitigated_index_set_skipped(self):
         bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
         res = build_smc_monitor_target_set(bars, _smc(_structure(), obs=[_ob(mitigated_index=10)]))
-        assert res.active_order_block_targets == []
+        assert res.active_order_block_targets == ()
 
     def test_entered_ignored(self):
         bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
@@ -757,7 +757,7 @@ class TestOrderBlockStrict:
 
     def test_mitigated_index_int_inactive_legal(self):
         res = build_smc_monitor_target_set(_bars([("2026-01-01", 10, 11, 9, 10.5)]), _smc(_structure(), obs=[_ob(mitigated_index=3)]))
-        assert res.active_order_block_targets == []
+        assert res.active_order_block_targets == ()
 
 
 class TestTargetSetVersionIgnoresTargetId:
@@ -793,3 +793,150 @@ class TestCanonicalizerDictKeyStrict:
 
         with pytest.raises(SmcTargetContractError):
             m._sha256_json({"params": {1: 2}})  # key 是 int 而非 str
+
+
+# =============================================================================
+# G0.2 C3 REOPEN blocker fix：TargetSet snapshot immutability
+#   build 之后 semantic content 不可被外部修改；target_set_version 永久对应 snapshot。
+# =============================================================================
+
+
+class TestTargetSetImmutability:
+    def _build(self):
+        sh = _slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False)
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        return build_smc_monitor_target_set(bars, _smc(_structure(swing_high=sh), obs=[_ob()]))
+
+    # 1. 不能原地修改 structure_context
+    def test_cannot_mutate_structure_context(self):
+        ts = self._build()
+        v = ts.target_set_version
+        with pytest.raises(TypeError):
+            ts.structure_context["swing_bias"] = 99
+        with pytest.raises(TypeError):
+            ts.structure_context["slots"]["swing_high"]["level"] = 1.0
+        assert ts.target_set_version == v
+
+    # 2. 不能 append/clear active structure targets
+    def test_cannot_append_or_clear_structure_targets(self):
+        ts = self._build()
+        v = ts.target_set_version
+        assert isinstance(ts.active_structure_targets, tuple)
+        with pytest.raises(AttributeError):
+            ts.active_structure_targets.append("x")
+        with pytest.raises(AttributeError):
+            ts.active_structure_targets.clear()
+        assert ts.target_set_version == v
+
+    # 3. 不能 append/clear active OB targets
+    def test_cannot_append_or_clear_ob_targets(self):
+        ts = self._build()
+        v = ts.target_set_version
+        assert isinstance(ts.active_order_block_targets, tuple)
+        with pytest.raises(AttributeError):
+            ts.active_order_block_targets.append("x")
+        with pytest.raises(AttributeError):
+            ts.active_order_block_targets.clear()
+        assert ts.target_set_version == v
+
+    # 4. 不能修改 contract / input identity
+    def test_cannot_mutate_identities(self):
+        ts = self._build()
+        v = ts.target_set_version
+        with pytest.raises(TypeError):
+            ts.contract_identity["params_hash"] = "corrupted"
+        with pytest.raises(TypeError):
+            ts.input_identity["daily_bars_hash"] = "corrupted"
+        assert ts.target_set_version == v
+
+    def test_cannot_rebind_frozen_fields(self):
+        import dataclasses
+
+        ts = self._build()
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            ts.target_set_version = "x"
+
+    # 5. to_dict() 返回结果完全独立，任意修改不影响 ts
+    def test_to_dict_is_detached(self):
+        ts = self._build()
+        v = ts.target_set_version
+        before = ts.to_dict()
+        d = ts.to_dict()
+        d["contract_identity"]["params_hash"] = "corrupted"
+        d["input_identity"]["daily_bars_hash"] = "corrupted"
+        d["structure_context"]["swing_bias"] = 99
+        d["structure_context"]["slots"]["swing_high"]["level"] = 1.0
+        d["active_targets"]["structure_targets"].clear()
+        d["active_targets"]["order_block_targets"].clear()
+        # 原 TargetSet 完全未受影响
+        assert ts.target_set_version == v
+        assert ts.contract_identity["params_hash"] != "corrupted"
+        assert ts.input_identity["daily_bars_hash"] != "corrupted"
+        assert ts.structure_context["swing_bias"] != 99
+        assert len(ts.active_structure_targets) == 1
+        assert len(ts.active_order_block_targets) == 1
+        # 再次 to_dict 得到原始内容
+        assert ts.to_dict() == before
+
+    # 6. to_dict 两次内容相等且 nested identity 不共享
+    def test_to_dict_twice_equal_and_independent(self):
+        ts = self._build()
+        d1 = ts.to_dict()
+        d2 = ts.to_dict()
+        assert d1 == d2
+        assert d1 is not d2
+        assert d1["contract_identity"] is not d2["contract_identity"]
+        assert d1["input_identity"] is not d2["input_identity"]
+        assert d1["structure_context"] is not d2["structure_context"]
+        assert d1["structure_context"]["slots"] is not d2["structure_context"]["slots"]
+        assert (
+            d1["structure_context"]["slots"]["swing_high"]
+            is not d2["structure_context"]["slots"]["swing_high"]
+        )
+        assert d1["active_targets"]["structure_targets"] is not d2["active_targets"]["structure_targets"]
+        assert d1["active_targets"]["order_block_targets"] is not d2["active_targets"]["order_block_targets"]
+        # 改 d1 不影响 d2 / ts
+        d1["structure_context"]["swing_bias"] = 42
+        assert d2["structure_context"]["swing_bias"] != 42
+        assert ts.structure_context["swing_bias"] != 42
+
+    # JSON 对外 shape / 可序列化性不变
+    def test_to_dict_shape_and_json_unchanged(self):
+        ts = self._build()
+        d = ts.to_dict()
+        assert set(d.keys()) == {
+            "contract_identity", "input_identity", "structure_context",
+            "active_targets", "target_set_version",
+        }
+        assert set(d["active_targets"].keys()) == {"structure_targets", "order_block_targets"}
+        # to_dict 结果为普通 dict/list（非 mappingproxy / tuple）
+        assert type(d["structure_context"]) is dict
+        assert type(d["structure_context"]["slots"]) is dict
+        assert type(d["active_targets"]["structure_targets"]) is list
+        assert type(d["active_targets"]["order_block_targets"]) is list
+        json.dumps(d, allow_nan=False)
+
+    # 冻结不影响 version / hash 语义
+    def test_frozen_content_version_still_stable(self):
+        ts1 = self._build()
+        ts2 = self._build()
+        assert ts1.target_set_version == ts2.target_set_version
+        assert ts1.to_dict() == ts2.to_dict()
+
+    # 直接构造路径（非 builder）也必须被冻结 —— 覆盖 EMPTY_SMC_TARGET_SET 类用法
+    def test_direct_construction_also_frozen(self):
+        from app.services.smc_monitor_target_service import SmcMonitorTargetSet
+
+        ts = SmcMonitorTargetSet(
+            contract_identity={},
+            input_identity={},
+            structure_context={},
+            active_structure_targets=[],
+            active_order_block_targets=[],
+            target_set_version="empty",
+        )
+        assert isinstance(ts.active_structure_targets, tuple)
+        assert isinstance(ts.active_order_block_targets, tuple)
+        with pytest.raises(TypeError):
+            ts.structure_context["x"] = 1
+        assert ts.to_dict()["active_targets"]["structure_targets"] == []
