@@ -9,6 +9,11 @@ commit 后 expire ORM 属性，异步上下文再访问 ``inst.id`` 会触发 ``
 这不是生产行为。另：``Instrument.id`` 由 PG ``server_default=gen_random_uuid()`` 生成，
 **必须 flush 后才能取得 scalar UUID**，否则用未落库的 id 构造 BarDaily 会 IntegrityError。
 
+[fixture 事务本地化] 本文件三个测试一律 ``await session.flush()`` **不 commit**：测试内的 ``_query_daily_bars`` / ``_get_symbol`` 与测试处于同一 PG
+transaction，flush 后即可真实读到；测试结束 session 关闭时未提交事务自动回滚，
+fixture 不会残留到 full-closure 的 seed / E2E phase（synthetic seed universe 为
+``600000..605199`` 且 symbol 唯一，残留的 60000x 测试行会撞 ``instruments_symbol_key``）。
+
 覆盖：
 - 5.1 DB complete：DB 目标范围完整 → provider 不被调用（provider=0, heavy write=0）。
       合同 owner 是 bar_repository.fetch_daily_bars（DB 优先读：_query_daily_bars 非空即返回）。
@@ -107,7 +112,7 @@ async def test_pg_daily_db_complete_provider_not_called(session: AsyncSession) -
     inst_id = await _seed_instrument(session, "600001")
     d_complete = date(2026, 9, 1)
     _seed_bar_daily(session, inst_id, d_complete)
-    await session.commit()
+    await session.flush()  # fixture 事务本地：不 commit，避免残留到 seed/E2E phase
 
     adapter = _RecordingPytdx()
     df = await fetch_daily_bars(session, inst_id, d_complete, d_complete, adapter=adapter)
@@ -128,7 +133,7 @@ async def test_pg_daily_only_one_day_missing_narrow_request(
     # 种子 D-5..D-1 完整（缺的只有 D）
     for offset in range(1, 6):
         _seed_bar_daily(session, inst_id, date(2026, 8, 31) - timedelta(days=offset - 1))
-    await session.commit()
+    await session.flush()  # fixture 事务本地：不 commit，避免残留到 seed/E2E phase
 
     captured: list[tuple] = []
 
@@ -169,7 +174,7 @@ async def test_pg_daily_server_failure_does_not_switch_provider(
     因此服务层不得捕获后降级 Eastmoney。spy Eastmoney 两个入口必须为 0。
     """
     inst_id = await _seed_instrument(session, "600003")
-    await session.commit()
+    await session.flush()  # fixture 事务本地：不 commit，避免残留到 seed/E2E phase
     d = date(2026, 9, 1)
 
     captured: list[tuple] = []
