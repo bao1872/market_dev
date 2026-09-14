@@ -716,6 +716,68 @@ async def test_execute_failure_writes_failed_event(db_session) -> None:
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
+async def test_refreshing_daily_failure_records_error_code_and_failed_step(db_session) -> None:
+    """AC3 回归：refreshing_daily 失败时完整保存 error_code/error_message，
+    且 step_summary.refreshing_daily.status=failed、syncing_boards 不进入、
+    failed_step 解析为 refreshing_daily（后端权威，前端无需猜测）。
+
+    2026-09-14 事故暴露：job_run.error_code 列此前从未被填充（UI 无法显示真实异常类型）。
+    """
+    from app.services.after_close_pipeline_service import resolve_failed_step
+
+    job_run = await _create_after_close_job_run(db_session)
+
+    class _FakeSessionContext:
+        async def __aenter__(self):
+            return db_session
+
+        async def __aexit__(self, *args):
+            return False
+
+    fake_session_local = MagicMock(return_value=_FakeSessionContext())
+    exc = RuntimeError("pytdx 连接超时（模拟）")
+
+    with patch(
+        "app.services.after_close_orchestrator.AsyncSessionLocal",
+        new=fake_session_local,
+    ), patch.object(db_session, "commit", new=db_session.flush), patch.object(
+        db_session, "get",
+        new=AsyncMock(side_effect=lambda model, id: job_run if id == job_run.id else None),
+    ), patch.object(
+        BarsSchedulerService, "refresh_all_instruments",
+        new=AsyncMock(side_effect=exc),
+    ):
+        with pytest.raises(RuntimeError, match="pytdx 连接超时"):
+            await execute_after_close_run(
+                job_run_id=job_run.id,
+                trade_date=date(2026, 6, 25),
+                dsa_poll_interval=0,
+                dsa_poll_timeout=1,
+            )
+
+    assert job_run.status == "failed"
+    # [AC1] 顶层 error_code 列必须被填充（事故前该列恒为空）
+    assert job_run.error_code == "RuntimeError", (
+        f"error_code 应为 RuntimeError，实际={job_run.error_code!r}"
+    )
+    assert job_run.error_message is not None
+    # [AC2] step_summary 必须真实反映 refreshing_daily 失败
+    meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
+    step_summary = meta.get("step_summary") or {}
+    rd = step_summary.get("refreshing_daily")
+    assert isinstance(rd, dict) and rd.get("status") == "failed", (
+        f"refreshing_daily 应为 failed，实际={rd}"
+    )
+    # syncing_boards 在 refreshing_daily 失败前不得进入（不伪造 pending/succeeded）
+    assert "syncing_boards" not in step_summary, (
+        "syncing_boards 不应在 refreshing_daily 失败前出现"
+    )
+    # [AC2] failed_step 权威推导
+    assert resolve_failed_step(step_summary) == "refreshing_daily"
+
+
+@pytest.mark.postgres
+@pytest.mark.asyncio
 async def test_execute_feature_snapshot_failure_skips_publishing(db_session) -> None:
     """测试 5.1：feature_snapshot 失败比例超阈值时不应进入 publishing。
 

@@ -392,6 +392,42 @@ async def test_upsert_raw_daily_returns_valid_count_only() -> None:
     assert written == 1
 
 
+@pytest.mark.asyncio
+async def test_upsert_raw_daily_chunks_to_avoid_asyncpg_param_limit() -> None:
+    """2026-09-14 盘后事故回归：全市场快照一次性批量写入会超过 asyncpg 32767 参数上限。
+
+    单次 INSERT 绑定参数上限为 32767；BarDaily 每行 9 列，故每批最多 32767 // 9 = 3640
+    行。修复后 `upsert_raw_daily_snapshot` 必须分批改写（<= _RAW_DAILY_UPSERT_BATCH_SIZE
+    行/批），杜绝单条巨 INSERT 复现事故。
+    """
+    batch = refresh_mod._RAW_DAILY_UPSERT_BATCH_SIZE
+    # 静态护栏：常量本身必须保证单批参数 <= 32767
+    assert batch * 9 <= 32767
+
+    # 恰好一个批：单条 INSERT
+    session = _ScriptedSession()
+    rows = [(uuid.uuid4(), _snap(f"{600000 + i:06d}")) for i in range(batch)]  # type: ignore[arg-type]
+    written = await refresh_mod.upsert_raw_daily_snapshot(session, TRADE_DATE, rows)  # type: ignore[arg-type]
+    assert written == batch
+    assert len(session.insert_statements) == 1
+
+    # 跨批：batch+1 行 → 必须拆成 2 条 INSERT（而非 1 条巨 INSERT）
+    session = _ScriptedSession()
+    rows = [(uuid.uuid4(), _snap(f"{600000 + i:06d}")) for i in range(batch + 1)]  # type: ignore[arg-type]
+    written = await refresh_mod.upsert_raw_daily_snapshot(session, TRADE_DATE, rows)  # type: ignore[arg-type]
+    assert written == batch + 1
+    assert len(session.insert_statements) == 2
+
+    # 全市场量级（约 2.3 个批）：必须拆成 3 条 INSERT
+    total = batch * 2 + 1000
+    session = _ScriptedSession()
+    rows = [(uuid.uuid4(), _snap(f"{600000 + i:06d}")) for i in range(total)]  # type: ignore[arg-type]
+    written = await refresh_mod.upsert_raw_daily_snapshot(session, TRADE_DATE, rows)  # type: ignore[arg-type]
+    assert written == total
+    assert len(session.insert_statements) == 3
+
+
+
 # ===========================================================================
 # 4. 缺口集合差
 # ===========================================================================
