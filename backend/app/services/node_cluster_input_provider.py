@@ -7,11 +7,12 @@ released strategy keys。
 Node 需要计算时必须无条件加载完整 250 daily + 4000 15m（completed qfq），
 不再依赖 needs_15min、页面周期或 released strategy 状态。
 
-availability 三态状态机：
-- 250+4000 且 daily>=250: available
-- history_exhausted=true 且真实历史不足: degraded / INSUFFICIENT_15M_HISTORY
-- 上游历史足够但未取满 4000: unavailable / INPUT_CONTRACT_VIOLATION
-  （禁止继续生成看似正常的 Profile）
+availability 三态状态机（基于权威 listing_date + 交易日历安全上界证明）：
+- 250 daily + 4000 completed qfq 15m 且两者均达标: available
+- 任一维度不足，且基于 listing_date + 交易日历证明“理论最大可能历史仍 < required”（真实新股/次新股）: degraded
+- 任一维度不足，但无法证明历史耗尽（DB 缺口/同步失败/覆盖不足/listing_date=NULL）:
+  unavailable / INPUT_CONTRACT_VIOLATION（禁止继续生成看似正常的 Profile）
+- daily < 10: unavailable / INSUFFICIENT_DAILY_BARS（绝对下限，与 250 生产合同分离）
 
 用法：
     from app.services.node_cluster_input_provider import NodeClusterInputProvider
@@ -32,7 +33,7 @@ from __future__ import annotations
 import logging
 import uuid
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
@@ -42,6 +43,7 @@ from app.constants.indicator_contract import (
     DAILY_HISTORY_BARS,
     NODE_CLUSTER_LOW_BARS,
 )
+from app.core.time import now_shanghai
 from app.services.business_date_adjustment_context import (
     BusinessDateAdjustmentContext,
     BusinessDateAdjustmentService,
@@ -77,6 +79,9 @@ _NODE_DAILY_REQUIRED: int = DAILY_HISTORY_BARS  # 250
 _NODE_15M_REQUIRED: int = NODE_CLUSTER_LOW_BARS  # 4000
 # daily 最低可计算阈值（低于此值无法计算 VP）
 _NODE_DAILY_MIN: int = 10
+# A 股 15m 每交易日最大槽位数：2 交易时段 × 120min / 15min。
+# 仅用于“理论最大可能历史”安全上界证明（保守 over-estimate，永不低估）。
+_MAX_15M_SLOTS_PER_TRADING_DAY: int = 16
 
 
 @dataclass(frozen=True)
@@ -216,7 +221,7 @@ class NodeClusterInputProvider:
         )
 
         raw_daily = daily_agg.bars
-        raw_m15 = m15_agg.bars
+        raw_m15 = cls._filter_unfinished_15m_bars(m15_agg.bars, now_shanghai())
 
         # 复权 owner 从 MDAS canonical DB factor 切换为 BusinessDateAdjustmentContext
         daily_bars = (
@@ -232,11 +237,12 @@ class NodeClusterInputProvider:
             if not raw_m15.empty else raw_m15
         )
 
+        proofs = await cls._compute_exhaustion_proofs(session, instrument_id, effective_end_date)
         availability, degraded_reason = cls._compute_availability(
             daily_count=len(daily_bars),
             m15_count=len(bars_15m),
-            daily_history_exhausted=daily_agg.history_exhausted,
-            m15_history_exhausted=m15_agg.history_exhausted,
+            daily_proof=proofs["1d"],
+            m15_proof=proofs["15m"],
         )
 
         logger.info(
@@ -267,8 +273,8 @@ class NodeClusterInputProvider:
             m15_count=len(bars_15m),
             daily_requested=_NODE_DAILY_REQUIRED,
             m15_requested=_NODE_15M_REQUIRED,
-            daily_history_exhausted=daily_agg.history_exhausted,
-            m15_history_exhausted=m15_agg.history_exhausted,
+            daily_history_exhausted=proofs["1d"][0],
+            m15_history_exhausted=proofs["15m"][0],
             availability=availability,
             degraded_reason=degraded_reason,
             adjustment_as_of=adjustment_context.business_date,
@@ -314,13 +320,14 @@ class NodeClusterInputProvider:
         )
 
         daily_bars = daily_agg.bars
-        bars_15m = m15_agg.bars
-
+        bars_15m = cls._filter_unfinished_15m_bars(m15_agg.bars, now_shanghai())
+        as_of = end_date if end_date is not None else (adjustment_as_of or date.today())
+        proofs = await cls._compute_exhaustion_proofs(session, instrument_id, as_of)
         availability, degraded_reason = cls._compute_availability(
             daily_count=len(daily_bars),
             m15_count=len(bars_15m),
-            daily_history_exhausted=daily_agg.history_exhausted,
-            m15_history_exhausted=m15_agg.history_exhausted,
+            daily_proof=proofs["1d"],
+            m15_proof=proofs["15m"],
         )
 
         logger.info(
@@ -348,8 +355,8 @@ class NodeClusterInputProvider:
             m15_count=len(bars_15m),
             daily_requested=_NODE_DAILY_REQUIRED,
             m15_requested=_NODE_15M_REQUIRED,
-            daily_history_exhausted=daily_agg.history_exhausted,
-            m15_history_exhausted=m15_agg.history_exhausted,
+            daily_history_exhausted=proofs["1d"][0],
+            m15_history_exhausted=proofs["15m"][0],
             availability=availability,
             degraded_reason=degraded_reason,
             adjustment_as_of=adjustment_as_of,
@@ -402,51 +409,176 @@ class NodeClusterInputProvider:
         )
 
     @staticmethod
+    def _classify(count: int, required: int, proven: bool) -> str:
+        """单维度分类：ok / degraded / violation。
+
+        - count >= required: ok（达标）
+        - count < required 且 proven（已证明理论最大可能历史仍不足）: degraded（允许降级）
+        - count < required 且 not proven（无法证明历史耗尽）: violation（系统缺口）
+        """
+        if count >= required:
+            return "ok"
+        if proven:
+            return "degraded"
+        return "violation"
+
+    @staticmethod
     def _compute_availability(
         daily_count: int,
         m15_count: int,
-        daily_history_exhausted: bool,
-        m15_history_exhausted: bool,
+        daily_proof: tuple[bool, str],
+        m15_proof: tuple[bool, str],
     ) -> tuple[str, str | None]:
-        """availability 三态状态机。
+        """availability 三态状态机（修复版：基于权威上市边界 + 交易日历安全上界证明）。
 
-        [CP-V3-A] 修正语义：
-        1. daily < 10: unavailable / INSUFFICIENT_DAILY_BARS
-        2. m15 == 0: unavailable / MISSING_15M_BARS
-        3. m15 < 4000:
-           3a. history_exhausted=True: degraded / INSUFFICIENT_15M_HISTORY（允许降级计算）
-           3b. history_exhausted=False: unavailable / INPUT_CONTRACT_VIOLATION
-               （DB 有但系统未取满，禁止生成看似正常的 Profile）
-        4. m15 >= 4000 且 daily >= 250: available
+        核心原则：“查询结果少” ≠ “股票历史少”。
+
+        - 只有基于权威 listing_date + 交易日历证明“理论最大可能历史都不足 required”，
+          才允许判定 genuine history exhausted（degraded）。
+        - 否则（DB 缺口 / 同步失败 / 覆盖不足 / 无法证明历史边界）→ INPUT_CONTRACT_VIOLATION，
+          绝不允许伪装成 degraded 继续算筹码。
 
         Args:
-            daily_count: 日线实际数量
-            m15_count: 15m 实际数量
-            daily_history_exhausted: 日线 DB 历史是否不足
-            m15_history_exhausted: 15m DB 历史是否不足
+            daily_count / m15_count: 实际取得的根数
+            daily_proof / m15_proof: (genuine_exhausted_proven, reason) 元组，
+                由 ``_compute_exhaustion_proofs`` 基于 listing_date + 交易日历给出。
 
         Returns:
             (availability, degraded_reason) 元组
         """
-        # 1. daily 不足
+        daily_proven, _daily_reason = daily_proof
+        m15_proven, _m15_reason = m15_proof
+
+        # 1. daily 绝对下限：低于最低可计算门槛 → unavailable（与 250 生产合同分离）
         if daily_count < _NODE_DAILY_MIN:
             return "unavailable", "INSUFFICIENT_DAILY_BARS"
 
-        # 2. 15m 完全缺失
-        if m15_count == 0:
-            return "unavailable", "MISSING_15M_BARS"
+        d_status = NodeClusterInputProvider._classify(
+            daily_count, _NODE_DAILY_REQUIRED, daily_proven
+        )
+        m_status = NodeClusterInputProvider._classify(
+            m15_count, _NODE_15M_REQUIRED, m15_proven
+        )
 
-        # 3. 15m 不足 4000
-        if m15_count < _NODE_15M_REQUIRED:
-            if m15_history_exhausted:
-                # 3a. DB 真实历史不足 → 允许降级
-                return "degraded", "INSUFFICIENT_15M_HISTORY"
-            else:
-                # 3b. DB 有但系统未取满 → 禁止生成
-                return "unavailable", "INPUT_CONTRACT_VIOLATION"
+        # 2. 任一维度“不足且无法证明历史耗尽” → 系统缺口，禁止生成看似正常的 Profile
+        if d_status == "violation" or m_status == "violation":
+            return "unavailable", "INPUT_CONTRACT_VIOLATION"
 
-        # 4. 正常
+        # 3. 任一维度“不足但已证明历史天然不足” → 允许降级计算
+        if d_status == "degraded" or m_status == "degraded":
+            reason = (
+                "INSUFFICIENT_DAILY_HISTORY"
+                if d_status == "degraded"
+                else "INSUFFICIENT_15M_HISTORY"
+            )
+            return "degraded", reason
+
+        # 4. 两者都达标 → 正常
         return "available", None
+
+    @classmethod
+    async def _compute_exhaustion_proofs(
+        cls,
+        session: AsyncSession,
+        instrument_id: uuid.UUID,
+        as_of: date,
+    ) -> dict[str, tuple[bool, str]]:
+        """基于权威 listing_date + 交易日历计算安全上界 exhaustion proof。
+
+        单向安全证明：
+            listing_date 已知
+            且 (listing_date, as_of] 内最大可能交易槽位 < required
+                => 可证明 genuine history exhausted（degraded 合法）
+            否则
+                => 不能声称 exhausted（DB 缺口/同步失败/无法证明边界 → violation）
+
+        ``listing_date=NULL``：绝不 fallback 到 1990 后声称 exhausted，
+            返回 (False, "MISSING_HISTORY_BOUNDARY_PROOF")。
+
+        复用权威 listing-date owner（``bar_repository._get_listing_date``，读
+        instruments.listing_date）与交易日历 owner（``board_facts_service.
+        _count_trading_days_between``，基于 TradingCalendar 模型）。
+        """
+        from app.repositories.bar_repository import _get_listing_date
+        from app.services.board_facts_service import _count_trading_days_between
+
+        listing_date = await _get_listing_date(session, instrument_id)
+        if listing_date is None:
+            return {
+                "1d": (False, "MISSING_HISTORY_BOUNDARY_PROOF"),
+                "15m": (False, "MISSING_HISTORY_BOUNDARY_PROOF"),
+            }
+
+        # 防御性归一：listing_date 可能因 DB 列为字符串或 mock 返回 str，统一转为 date。
+        # 无法解析则视为历史边界不可证（fail closed），绝不伪造 exhaustion。
+        if isinstance(listing_date, str):
+            try:
+                listing_date = date.fromisoformat(listing_date)
+            except ValueError:
+                return {
+                    "1d": (False, "MISSING_HISTORY_BOUNDARY_PROOF"),
+                    "15m": (False, "MISSING_HISTORY_BOUNDARY_PROOF"),
+                }
+
+        # (listing_date - 1, as_of] 含上市首日；这是“最大可能”上界（保守，只会低估不会高估）
+        trading_days = await _count_trading_days_between(
+            session, listing_date - timedelta(days=1), as_of
+        )
+
+        proofs: dict[str, tuple[bool, str]] = {}
+        for tf, required in (
+            ("1d", _NODE_DAILY_REQUIRED),
+            ("15m", _NODE_15M_REQUIRED),
+        ):
+            max_bars = (
+                trading_days
+                if tf == "1d"
+                else trading_days * _MAX_15M_SLOTS_PER_TRADING_DAY
+            )
+            if max_bars < required:
+                proofs[tf] = (True, "GENUINE_HISTORY_EXHAUSTED")
+            else:
+                proofs[tf] = (False, "HISTORY_UNDERFILLED_DB_GAP")
+        return proofs
+
+    @staticmethod
+    def _filter_unfinished_15m_bars(
+        bars_15m: pd.DataFrame,
+        now: datetime | None = None,
+    ) -> pd.DataFrame:
+        """丢弃仍处于 forming 状态的 15m bar，保证进入 Node 的 15m 全部为已完成 bar。
+
+        15m 采用 right-label 语义（trade_time = bar 结束时间）。forming bar 即其结束时间
+        落在当前 15 分钟槽内（end > floor(now, 15min)）。这里沿用 1m 路径的
+        ``now.floor("min")`` 思路，对 15m 取 ``now.floor("15min")`` 作为 completion cutoff，
+        丢弃 end > cutoff 的 bar。由于 A 股 15m 网格（09:30 / 11:30 / 13:00 / 15:00）均为
+        15 分钟的整数倍，floor("15min") 在午休空洞处同样正确（DB 不存午休伪 bar），
+        无需在 Node 代码内硬编码交易时段。
+
+        fail-closed：若 now 不可用（极罕见），丢弃最后一根 bar——宁可少算，
+        绝不把未完成的 bar 计入 4000 合同。
+        """
+        if bars_15m is None or bars_15m.empty:
+            return bars_15m
+        if now is None:
+            return bars_15m.iloc[:-1] if len(bars_15m) > 0 else bars_15m
+        cutoff = pd.Timestamp(now).floor("15min")
+        idx = bars_15m.index
+        idx_tz = getattr(idx, "tz", None)
+        cutoff_tz = cutoff.tzinfo
+        # 归一化时区后再比较：bars 索引多为 tz-naive（本地时间），而 now 来自
+        # now_shanghai() 是 tz-aware；两者直接比较会触发 tz-naive/tz-aware 冲突。
+        if idx_tz is None and cutoff_tz is not None:
+            cutoff = cutoff.tz_localize(None)
+        elif idx_tz is not None and cutoff_tz is None:
+            cutoff = cutoff.tz_localize(idx_tz)
+        elif (
+            idx_tz is not None
+            and cutoff_tz is not None
+            and str(idx_tz) != str(cutoff_tz)
+        ):
+            cutoff = cutoff.tz_convert(idx_tz)
+        return bars_15m[bars_15m.index <= cutoff]
 
     @staticmethod
     def to_dict(node_input: NodeClusterInput) -> dict:
@@ -480,40 +612,57 @@ if __name__ == "__main__":
     # 自测：验证状态机逻辑（不连 DB）
     provider = NodeClusterInputProvider
 
-    # 1. 正常：daily=250, m15=4000
-    avail, reason = provider._compute_availability(250, 4000, False, False)
+    def _p(proven: bool, reason: str = "x") -> tuple[bool, str]:
+        return (proven, reason)
+
+    # 1. 正常合同：250 daily + 4000 15m → available
+    avail, reason = provider._compute_availability(250, 4000, _p(False), _p(False))
     assert avail == "available", f"应为 available, got {avail}"
     assert reason is None
     print(f"正常: avail={avail} reason={reason} ✓")
 
-    # 2. daily 不足
-    avail, reason = provider._compute_availability(9, 4000, True, False)
+    # 2. daily 绝对下限 < 10 → unavailable / INSUFFICIENT_DAILY_BARS
+    avail, reason = provider._compute_availability(9, 4000, _p(False), _p(False))
     assert avail == "unavailable", f"应为 unavailable, got {avail}"
     assert reason == "INSUFFICIENT_DAILY_BARS"
     print(f"daily不足: avail={avail} reason={reason} ✓")
 
-    # 3. 15m 完全缺失
-    avail, reason = provider._compute_availability(250, 0, False, True)
-    assert avail == "unavailable", f"应为 unavailable, got {avail}"
-    assert reason == "MISSING_15M_BARS"
-    print(f"15m缺失: avail={avail} reason={reason} ✓")
+    # 3. 15m 完全缺失 + 已证 genuine exhausted（真实新股）→ degraded / INSUFFICIENT_15M_HISTORY
+    avail, reason = provider._compute_availability(250, 0, _p(False), _p(True, "GENUINE_HISTORY_EXHAUSTED"))
+    assert avail == "degraded", f"应为 degraded, got {avail}"
+    assert reason == "INSUFFICIENT_15M_HISTORY"
+    print(f"新股15m缺失: avail={avail} reason={reason} ✓")
 
-    # 4. 15m 历史不足（如 301583: 144 根）
-    avail, reason = provider._compute_availability(250, 144, False, True)
+    # 4. 15m 历史不足（144 根）+ 已证 genuine exhausted → degraded / INSUFFICIENT_15M_HISTORY
+    avail, reason = provider._compute_availability(250, 144, _p(False), _p(True, "GENUINE_HISTORY_EXHAUSTED"))
     assert avail == "degraded", f"应为 degraded, got {avail}"
     assert reason == "INSUFFICIENT_15M_HISTORY"
     print(f"15m历史不足: avail={avail} reason={reason} ✓")
 
-    # 5. INPUT_CONTRACT_VIOLATION（DB 有 8160 但系统只返回 1872）
-    avail, reason = provider._compute_availability(250, 1872, False, False)
+    # 5. 15m 不足 + 无法证明历史耗尽（老股票 DB 缺口）→ unavailable / INPUT_CONTRACT_VIOLATION
+    avail, reason = provider._compute_availability(250, 1872, _p(False), _p(False, "HISTORY_UNDERFILLED_DB_GAP"))
     assert avail == "unavailable", f"应为 unavailable, got {avail}"
     assert reason == "INPUT_CONTRACT_VIOLATION"
     print(f"输入合同违反: avail={avail} reason={reason} ✓")
 
-    # 6. history_exhausted=None（向后兼容）应视为 INPUT_CONTRACT_VIOLATION
-    avail, reason = provider._compute_availability(250, 1872, False, False)
-    assert avail == "unavailable"
+    # 6. listing_date=NULL + 15m 不足 → 不得 degraded，fail closed → INPUT_CONTRACT_VIOLATION
+    avail, reason = provider._compute_availability(
+        250, 1872, _p(False, "MISSING_HISTORY_BOUNDARY_PROOF"), _p(False, "MISSING_HISTORY_BOUNDARY_PROOF"),
+    )
+    assert avail == "unavailable", f"应为 unavailable, got {avail}"
     assert reason == "INPUT_CONTRACT_VIOLATION"
-    print(f"history_exhausted=False: avail={avail} reason={reason} ✓")
+    print(f"边界证明缺失: avail={avail} reason={reason} ✓")
+
+    # 7. daily 100/250 + 老股票（无法证明耗尽）→ unavailable / INPUT_CONTRACT_VIOLATION
+    avail, reason = provider._compute_availability(100, 4000, _p(False), _p(False))
+    assert avail == "unavailable", f"应为 unavailable, got {avail}"
+    assert reason == "INPUT_CONTRACT_VIOLATION"
+    print(f"daily不足未证明: avail={avail} reason={reason} ✓")
+
+    # 8. daily 100/250 + 真正新股（已证耗尽）→ degraded / INSUFFICIENT_DAILY_HISTORY
+    avail, reason = provider._compute_availability(100, 4000, _p(True, "GENUINE_HISTORY_EXHAUSTED"), _p(False))
+    assert avail == "degraded", f"应为 degraded, got {avail}"
+    assert reason == "INSUFFICIENT_DAILY_HISTORY"
+    print(f"新股daily不足: avail={avail} reason={reason} ✓")
 
     print("\nOK — NodeClusterInputProvider 状态机验证通过")

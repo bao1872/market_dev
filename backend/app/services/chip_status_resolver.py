@@ -280,7 +280,7 @@ def build_chip_status_from_realtime(chip_realtime: Any | None) -> ChipStatus:
         )
 
     # 有 error：按错误类型映射
-    if error == "INSUFFICIENT_DAILY_BARS":
+    if error in ("INSUFFICIENT_DAILY_BARS", "INSUFFICIENT_DAILY_HISTORY"):
         return ChipStatus(
             state="unavailable",
             reasonCode="DAILY_BARS_INSUFFICIENT",
@@ -288,7 +288,12 @@ def build_chip_status_from_realtime(chip_realtime: Any | None) -> ChipStatus:
             computedAt=None,
             actualBars=daily_count,
         )
-    if error in ("INPUT_CONTRACT_VIOLATION", "MISSING_15M_BARS", "INSUFFICIENT_15M_HISTORY"):
+    if error in (
+        "INPUT_CONTRACT_VIOLATION",
+        "MISSING_15M_BARS",
+        "INSUFFICIENT_15M_HISTORY",
+        "MISSING_HISTORY_BOUNDARY_PROOF",
+    ):
         return ChipStatus(
             state="unavailable",
             reasonCode="M15_BARS_INSUFFICIENT",

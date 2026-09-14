@@ -211,6 +211,57 @@ class MonitorCycleResult:
     errors: list[str] = field(default_factory=list)
 
 
+def _node_cluster_profile_cache_key(
+    instrument_id: object,
+    daily_last: str,
+    bars_15m_last: str,
+    node_input: object,
+) -> tuple:
+    """Node Cluster Profile 缓存 identity。
+
+    绑定 instrument_id + 两个 last timestamp + daily/15m source hash + daily adj factor hash
+    + adjustment_as_of。仅凭 last timestamp 无法区分“15m 内容变化但时间戳不变”的陈旧场景，
+    必须绑定内容哈希，避免把旧 Profile 当成新数据返回。
+    """
+    daily_source_hash = str(getattr(node_input, "daily_source_hash", "") or "")
+    bars_15m_source_hash = str(getattr(node_input, "m15_source_hash", "") or "")
+    daily_adj_factor_hash = str(getattr(node_input, "daily_adj_factor_hash", "") or "")
+    adjustment_as_of = str(getattr(node_input, "adjustment_as_of", "") or "")
+    return (
+        str(instrument_id),
+        daily_last,
+        bars_15m_last,
+        daily_source_hash,
+        bars_15m_source_hash,
+        daily_adj_factor_hash,
+        adjustment_as_of,
+    )
+
+
+def _smc_runtime_target_cache_key(
+    instrument_id: object,
+    daily_last: str,
+    node_input: object,
+) -> tuple:
+    """SMC runtime target bundle 缓存 identity。
+
+    绑定 instrument_id + daily source/factor hash + 15m source hash + daily_last
+    + adjustment_as_of。15m 内容变化或复权点变化时必须 cache miss。
+    """
+    daily_source_hash = str(getattr(node_input, "daily_source_hash", "") or "")
+    daily_adj_factor_hash = str(getattr(node_input, "daily_adj_factor_hash", "") or "")
+    bars_15m_source_hash = str(getattr(node_input, "m15_source_hash", "") or "")
+    adjustment_as_of = str(getattr(node_input, "adjustment_as_of", "") or "")
+    return (
+        str(instrument_id),
+        daily_source_hash,
+        daily_adj_factor_hash,
+        bars_15m_source_hash,
+        daily_last,
+        adjustment_as_of,
+    )
+
+
 class MonitorBatchService:
     """监控批量执行服务 - 基于评估表的监控执行。
 
@@ -2214,10 +2265,10 @@ class MonitorBatchService:
         if bars_15min.empty:
             return None
 
-        # Profile 缓存检查：键为 (instrument_id, daily_last_bar, 15m_last_bar)
+        # Profile 缓存检查：键绑定内容哈希，不能只看 last timestamp
         daily_last = str(bars_daily.index[-1]) if not bars_daily.empty else "empty"
         bars_15m_last = str(bars_15min.index[-1]) if not bars_15min.empty else "empty"
-        cache_key = (str(instrument_id), daily_last, bars_15m_last)
+        cache_key = _node_cluster_profile_cache_key(instrument_id, daily_last, bars_15m_last, node_input)
         now_ts = time.monotonic()
         cached = self._node_cluster_profile_cache.get(cache_key)
         if cached is not None:
@@ -2301,9 +2352,9 @@ class MonitorBatchService:
         except Exception:  # noqa: BLE001
             return None
 
-        daily_source_hash = str(getattr(node_input, "daily_source_hash", "") or "")
-        daily_adj_factor_hash = str(getattr(node_input, "daily_adj_factor_hash", "") or "")
-        cache_key = (str(instrument_id), daily_source_hash, daily_adj_factor_hash, daily_last)
+        # cache identity 绑定 15m source hash 与 adjustment_as_of：
+        # 15m 内容变化或复权点变化时必须 cache miss。
+        cache_key = _smc_runtime_target_cache_key(instrument_id, daily_last, node_input)
 
         now_ts = time.monotonic()
         cached = self._smc_runtime_target_cache.get(cache_key)
