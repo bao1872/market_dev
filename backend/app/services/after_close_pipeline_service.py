@@ -76,6 +76,37 @@ _PIPELINE_STEPS = [
     "watchlist_ready",
 ]
 
+# [AC2-2026-09-14] 失败步骤中文标签（用于「不可用原因」/告警文案）
+_STEP_LABELS = {
+    AfterCloseRunStatus.REFRESHING_DAILY.value: "刷新日线",
+    AfterCloseRunStatus.SYNCING_BOARDS.value: "同步板块",
+    AfterCloseRunStatus.CHECKING_COVERAGE.value: "检查覆盖率",
+    AfterCloseRunStatus.COMPUTING_FEATURES.value: "统一特征计算",
+    AfterCloseRunStatus.COMPUTING_REVIEW.value: "复盘计算发布",
+    AfterCloseRunStatus.COMPUTING_HISTORY.value: "历史状态推进",
+    "watchlist_ready": "自选可用",
+}
+
+# 视为「失败」步骤的状态集合（用于定位失败步骤）
+_FAILED_STEP_STATUSES = frozenset({"failed", "unavailable", "timed_out", "interrupted"})
+
+
+def resolve_failed_step(step_summaries: Any | None) -> str | None:
+    """从 step_summary 推导失败步骤（后端权威，前端无需猜测）。
+
+    按 _PIPELINE_STEPS 顺序倒序，返回最后一个 status ∈
+    {failed, unavailable, timed_out, interrupted} 的步骤。
+    """
+    if not isinstance(step_summaries, dict):
+        return None
+    for step in reversed(_PIPELINE_STEPS):
+        summary = step_summaries.get(step)
+        if not isinstance(summary, dict):
+            continue
+        if summary.get("status") in _FAILED_STEP_STATUSES:
+            return step
+    return None
+
 # [CHANGE-20260831-ADMIN-TIMELINE] 历史 run 中可能出现的真实 legacy 步骤。
 # 仅用于事件识别（真实发生过的事件不得被吞掉），不进入 current canonical 默认序列。
 _LEGACY_EVENT_STEPS = frozenset({
@@ -505,8 +536,9 @@ def _compute_step_states(
     )
 
     # 失败时定位失败步骤
-    failed_step: str | None = None
-    if job_run.status == "failed":
+    # [AC2-2026-09-14] 优先使用 step_summary 权威推导；回退到原 event/last_completed 推断
+    failed_step: str | None = resolve_failed_step(step_summaries)
+    if failed_step is None and job_run.status == "failed":
         if orchestrator_status in _PIPELINE_STEPS:
             failed_step = orchestrator_status
         else:
@@ -718,6 +750,7 @@ def _compute_watchlist_reason(
     job_run: SchedulerJobRun | None,
     snapshot_summary: dict[str, Any] | None,
     has_backfill_full: bool = False,
+    failed_step: str | None = None,
 ) -> str:
     """watchlist_ready 的人类可读原因。"""
     if watchlist_ready:
@@ -727,7 +760,12 @@ def _compute_watchlist_reason(
             return "存在 backfill full 快照，但无 after_close run，属于手动补齐数据"
         return "尚未有 after_close run，无法判定 snapshot 可用性"
     if job_run.status != "succeeded":
-        return f"after_close 状态为 {job_run.status}，未进入 publish"
+        # [AC2-2026-09-14] publishing 已是旁路步骤，不再用「未进入 publish」误导；
+        # 改为指向真实失败步骤，配合 error_code/error_message 给出可操作信息。
+        label = _STEP_LABELS.get(failed_step, failed_step) if failed_step else None
+        if label:
+            return f"盘后任务失败于「{label}」"
+        return f"after_close 状态为 {job_run.status}"
     if snapshot_summary is None:
         return "after_close 已完成，但未找到 feature_snapshot_run 记录"
     if snapshot_summary.get("status") != "succeeded":
@@ -753,6 +791,14 @@ async def _build_pipeline_response(
     if job_run is not None:
         events = await list_events(db, job_run.id, limit=100)
 
+    # [AC2-2026-09-14] 从 step_summary 推导失败步骤与错误码（权威来源，前端无需猜测）
+    meta = _parse_metadata(job_run) if job_run is not None else {}
+    step_summaries = meta.get("step_summary")
+    if not isinstance(step_summaries, dict):
+        step_summaries = {}
+    failed_step = resolve_failed_step(step_summaries)
+    error_code = job_run.error_code if job_run is not None else None
+
     watchlist_ready = await has_succeeded_snapshot_run(db, trade_date)
     snapshot_summary = await _get_snapshot_run_summary(db, trade_date)
 
@@ -774,7 +820,7 @@ async def _build_pipeline_response(
         overall_status = "blocked"
 
     watchlist_reason = _compute_watchlist_reason(
-        watchlist_ready, job_run, snapshot_summary, has_backfill_full
+        watchlist_ready, job_run, snapshot_summary, has_backfill_full, failed_step
     )
 
     # [Repair] 判断 orchestrator 中断但 snapshot 仍在 running 的失联状态
@@ -792,7 +838,6 @@ async def _build_pipeline_response(
 
     after_close_run_summary: dict[str, Any] | None = None
     if job_run is not None:
-        meta = _parse_metadata(job_run)
         after_close_run_summary = {
             "job_run_id": str(job_run.id),
             "status": job_run.status,
@@ -802,6 +847,7 @@ async def _build_pipeline_response(
             "heartbeat_at": _format_dt(job_run.heartbeat_at),
             "lease_expires_at": _format_dt(job_run.lease_expires_at),
             "last_completed_step": meta.get("last_completed_step"),
+            "error_code": job_run.error_code,
             "error_message": job_run.error_message,
             "worker_instance_id": job_run.worker_instance_id,
             "trade_date": meta.get("trade_date"),
@@ -815,6 +861,8 @@ async def _build_pipeline_response(
         "overall_status": overall_status,
         "watchlist_ready": watchlist_ready,
         "watchlist_reason": watchlist_reason,
+        "failed_step": failed_step,
+        "error_code": error_code,
         "has_backfill_full": has_backfill_full,
         "after_close_run": after_close_run_summary,
         "steps": steps,

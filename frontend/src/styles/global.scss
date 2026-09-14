@@ -685,6 +685,36 @@ button { cursor: pointer; }
   &.error { border-color: rgba(239, 83, 80, .3); background: rgba(239, 83, 80, .08); color: #ff8e8b; }
 }
 
+// [AC2-2026-09-14] 失败诊断横幅：盘后任务失败时的可操作信息块
+.banner-error {
+  border: 1px solid rgba(239, 83, 80, .4);
+  background: rgba(239, 83, 80, .1);
+  border-radius: 10px;
+  padding: 14px 16px;
+  .banner-error-title {
+    font-size: 15px;
+    font-weight: 600;
+    color: #ff8e8b;
+    margin-bottom: 6px;
+  }
+  .banner-error-code {
+    display: inline-block;
+    margin: 4px 0;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: rgba(239, 83, 80, .18);
+    color: #ff8e8b;
+    font: 13px v.$font-mono;
+  }
+  .banner-error-message {
+    margin-top: 6px;
+    color: #ffb3b0;
+    font: 12px / 1.5 v.$font-mono;
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+}
+
 .empty { padding: 35px; text-align: center; color: v.$color-muted; }
 
 // ===== Modal / Drawer =====

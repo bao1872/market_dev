@@ -3246,6 +3246,7 @@ export interface AfterCloseRunSummary {
   heartbeat_at: string | null
   lease_expires_at: string | null
   last_completed_step: string | null
+  error_code: string | null
   error_message: string | null
   worker_instance_id: string | null
   trade_date: string | null
@@ -3309,6 +3310,9 @@ export interface AfterClosePipelineResponse {
     | 'skipped'
   watchlist_ready: boolean
   watchlist_reason: string
+  // [AC2-2026-09-14] 失败诊断：由后端从 step_summary 推导，前端无需猜测
+  failed_step: string | null
+  error_code: string | null
   has_backfill_full: boolean
   after_close_run: AfterCloseRunSummary | null
   steps: PipelineStep[]

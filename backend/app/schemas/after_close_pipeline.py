@@ -35,6 +35,7 @@ class AfterCloseRunSummary(BaseModel):
     heartbeat_at: str | None = None
     lease_expires_at: str | None = None
     last_completed_step: str | None = None
+    error_code: str | None = None
     error_message: str | None = None
     worker_instance_id: str | None = None
     trade_date: str | None = None
@@ -82,6 +83,9 @@ class AfterClosePipelineResponse(BaseModel):
                          # / partial_success / cancelled / interrupted
     watchlist_ready: bool
     watchlist_reason: str
+    # [AC2-2026-09-14] 失败诊断：由后端从 step_summary 推导，前端无需猜测
+    failed_step: str | None = None
+    error_code: str | None = None
     has_backfill_full: bool = False
     after_close_run: AfterCloseRunSummary | None = None
     steps: list[PipelineStep]

@@ -353,6 +353,25 @@ export default function AdminAfterClosePipelinePage() {
         </section>
       </div>
 
+      {/* ===== [AC2-2026-09-14] 失败诊断横幅 ===== */}
+      {overallStatus === 'failed' && pipeline?.failed_step ? (
+        <div className="grid section-gap">
+          <section className="card banner-error">
+            <div className="card-body">
+              <div className="banner-error-title">
+                盘后任务失败于「{stepLabel(pipeline.failed_step)}」
+              </div>
+              {afterCloseRun?.error_code && (
+                <div className="banner-error-code">{afterCloseRun.error_code}</div>
+              )}
+              {afterCloseRun?.error_message && (
+                <div className="banner-error-message">{afterCloseRun.error_message}</div>
+              )}
+            </div>
+          </section>
+        </div>
+      ) : null}
+
       {/* ===== 步骤时间线 ===== */}
       <div className="grid section-gap">
         <section className="card">
@@ -552,6 +571,12 @@ export default function AdminAfterClosePipelinePage() {
                 <div className="toggle-row"><span>已用时</span><b className="num">{pipeline?.diagnostics?.elapsed_seconds == null ? '未知' : formatDurationSeconds(pipeline.diagnostics.elapsed_seconds)}</b></div>
                 <div className="toggle-row"><span>重试次数</span><b className="num">{pipeline?.diagnostics?.retry_count ?? '未知'}</b></div>
                 <div className="toggle-row"><span>发布状态</span><b className="num">{pipeline?.diagnostics?.partial_success ? '部分成功（核心结果已发布）' : pipeline?.diagnostics?.publication_status ?? '未知'}</b></div>
+                {afterCloseRun.error_code && (
+                  <div className="toggle-row">
+                    <span>错误类型</span>
+                    <b className="num">{afterCloseRun.error_code}</b>
+                  </div>
+                )}
                 {afterCloseRun.error_message && (
                   <div className="notice error" style={{ marginTop: '10px' }}>
                     {afterCloseRun.error_message}
