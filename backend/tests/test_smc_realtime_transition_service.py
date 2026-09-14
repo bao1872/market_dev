@@ -6,18 +6,20 @@ session/gap 行为、deterministic replay。
 """
 from __future__ import annotations
 
+import json
+
 import pandas as pd
 import pytest
 
 from app.services.smc_monitor_target_service import build_smc_monitor_target_set
 from app.services.smc_realtime_transition_service import (
-    ObEpisodeState,
     QfqMinuteBar,
     RealtimeSmcEvaluationContext,
-    SmcRealtimeTransitionState,
+    deserialize_transition_state,
     evaluate_smc_realtime_transitions,
     initial_transition_state,
     logical_ob_key,
+    serialize_transition_state,
     state_fingerprint,
     structure_transition_key,
 )
@@ -82,11 +84,13 @@ def _bar(t, o, h, low, c, session=SESSION):
     return QfqMinuteBar(bar_time=t, session_key=session, open=o, high=h, low=low, close=c)
 
 
-def _ctx(params=None, proven=True, reason=""):
+def _ctx(params=None, proven=True, reason="", sequence_proven=True, sequence_reason=""):
     return RealtimeSmcEvaluationContext(
         effective_params=dict(params if params is not None else PARAMS),
         qfq_coordinate_proven=proven,
         qfq_coordinate_reason=reason,
+        completed_bar_sequence_proven=sequence_proven,
+        completed_bar_sequence_reason=sequence_reason,
     )
 
 
@@ -360,19 +364,50 @@ class TestObEpisodes:
         res = _run(ts, bars)
         assert res.ob_episode_transitions == ()
 
-    def test_absent_ob_target_prunes_state(self):
+    def test_absent_ob_target_becomes_terminal_and_does_not_refire(self):
         ts_with = self._ts()
         res = _run(ts_with, [_bar("09:31", 12.0, 12.2, 10.5, 10.8)])
+        assert len(res.ob_episode_transitions) == 1
         assert len(res.state.ob_states) == 1
-        # 下一版 TargetSet 中该 OB 消失
+        assert res.state.ob_states[0].status == "INSIDE_EPISODE"
+        live_key = res.state.ob_states[0].logical_ob_key
+
+        # 下一版 TargetSet 中该 OB 消失 → TERMINAL，state 必须保留
         ts_without = _target_set(_structure(), obs=[])
         res2 = evaluate_smc_realtime_transitions(
             instrument_id=INSTR, target_set=ts_without,
             completed_bars=[_bar("09:32", 10.8, 10.9, 10.7, 10.8)],
             context=_ctx(), state=res.state,
         )
-        assert res2.state.ob_states == ()
+        assert len(res2.state.ob_states) == 1
+        assert res2.state.ob_states[0].status == "TERMINAL"
+        assert res2.state.ob_states[0].logical_ob_key == live_key
         assert res2.ob_episode_transitions == ()
+
+        # 同一 epoch 内 rebuild 后同一 logical OB 重新出现 → 仍 TERMINAL，0 新 episode
+        reappeared = _target_set(_structure(), obs=[_ob(bar_low=10.0, bar_high=11.0)])
+        assert (
+            logical_ob_key(INSTR, False, 1, "2026-01-02T00:00:00", "2026-01-03T00:00:00") == live_key
+        )
+        res3 = evaluate_smc_realtime_transitions(
+            instrument_id=INSTR, target_set=reappeared,
+            completed_bars=[_bar("09:33", 12.0, 12.1, 10.4, 10.6)],
+            context=_ctx(), state=res2.state,
+        )
+        assert res3.ob_episode_transitions == ()
+        assert res3.state.ob_states[0].status == "TERMINAL"
+
+    def test_new_epoch_reinitializes_ob_baseline(self):
+        ts = self._ts()
+        res = _run(ts, [_bar("09:31", 12.0, 12.2, 10.5, 10.8)])
+        closed = evaluate_smc_realtime_transitions(
+            instrument_id=INSTR, target_set=_target_set(_structure(), obs=[]),
+            completed_bars=[], context=_ctx(), state=res.state,
+        )
+        assert closed.state.ob_states[0].status == "TERMINAL"
+        # 新 authoritative daily-state epoch → 由新 C3 TargetSet 重建 baseline
+        fresh = initial_transition_state(ts, instrument_id=INSTR, daily_epoch="2026-09-15")
+        assert fresh.ob_states[0].status == "OUTSIDE"
 
     def test_ob_zone_must_be_crossed_by_minute_high_low(self):
         ts = self._ts()
@@ -380,3 +415,72 @@ class TestObEpisodes:
         res = _run(ts, [_bar("09:31", 12.0, 12.5, 11.5, 12.0)])
         assert res.ob_episode_transitions == ()
         # 用 close-only 的旧实现会误判；此处 minute_low(11.5) > bar_high(11.0)
+
+
+# ---------------------------------------------------------------------------
+# A0.2 输入 proof / 格式 fail closed
+# ---------------------------------------------------------------------------
+
+
+class TestInputProofGates:
+    def test_sequence_not_proven_zero_events_and_state_unchanged(self):
+        ts = _target_set(_structure(swing_high=_sh(105.0)))
+        state0 = initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
+        res = _run(
+            ts,
+            [_bar("09:31", 104.0, 104.5, 103.5, 104.0), _bar("09:32", 104.5, 106.0, 104.0, 105.5)],
+            state=state0,
+            ctx=_ctx(sequence_proven=False, sequence_reason="missing 09:31"),
+        )
+        assert res.ok is False
+        assert res.structure_transitions == ()
+        assert res.ob_episode_transitions == ()
+        assert state_fingerprint(res.state) == state_fingerprint(state0)
+        assert "sequence" in res.fail_closed_reason
+
+    def test_nan_ohlc_zero_events_and_state_unchanged(self):
+        ts = _target_set(_structure(swing_high=_sh(105.0)))
+        state0 = initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
+        res = _run(ts, [_bar("09:31", float("nan"), 104.5, 103.5, 104.0)], state=state0)
+        assert res.ok is False
+        assert res.structure_transitions == ()
+        assert state_fingerprint(res.state) == state_fingerprint(state0)
+        assert "malformed" in res.fail_closed_reason
+
+    def test_empty_session_key_fail_closed(self):
+        ts = _target_set(_structure(swing_high=_sh(105.0)))
+        state0 = initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
+        res = _run(ts, [_bar("09:31", 104.0, 104.5, 103.5, 104.0, session="")], state=state0)
+        assert res.ok is False
+        assert state_fingerprint(res.state) == state_fingerprint(state0)
+
+
+# ---------------------------------------------------------------------------
+# A7.4 前缀：state 持久化（JSON-safe，禁止 repr）
+# ---------------------------------------------------------------------------
+
+
+class TestPersistenceRoundTrip:
+    def test_serialize_deserialize_round_trip_continues_identically(self):
+        ts = _target_set(_structure(swing_high=_sh(105.0)), obs=[_ob()])
+        res = _run(
+            ts,
+            [_bar("09:31", 104.0, 104.5, 103.5, 104.0), _bar("09:32", 104.5, 106.0, 104.0, 105.5)],
+        )
+        payload = serialize_transition_state(res.state)
+        json.dumps(payload)  # 必须 JSON-safe（非 repr）
+        restored = deserialize_transition_state(payload)
+        assert state_fingerprint(restored) == state_fingerprint(res.state)
+
+        nxt = [_bar("09:33", 105.5, 106.0, 105.0, 105.8)]
+        c1 = _run(ts, nxt, state=res.state)
+        c2 = _run(ts, nxt, state=restored)
+        assert state_fingerprint(c1.state) == state_fingerprint(c2.state)
+
+    def test_deserialize_rejects_unknown_ob_status(self):
+        ts = _target_set(_structure(swing_high=_sh(105.0)), obs=[_ob()])
+        res = _run(ts, [_bar("09:31", 104.0, 104.5, 103.5, 104.0)])
+        payload = serialize_transition_state(res.state)
+        payload["ob_states"][0]["status"] = "BOGUS"
+        with pytest.raises(ValueError):
+            deserialize_transition_state(payload)

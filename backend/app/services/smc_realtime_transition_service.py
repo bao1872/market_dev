@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -45,12 +46,20 @@ __all__ = [
     "logical_ob_key",
     "initial_transition_state",
     "evaluate_smc_realtime_transitions",
+    "serialize_transition_state",
+    "deserialize_transition_state",
+    "state_fingerprint",
 ]
 
 _BULLISH_EVENT = "BOS"
 _BEARISH_EVENT = "CHoCH"
 _BULLISH_BIAS = 1
 _BEARISH_BIAS = -1
+
+_OB_OUTSIDE = "OUTSIDE"
+_OB_INSIDE = "INSIDE_EPISODE"
+_OB_TERMINAL = "TERMINAL"
+_OB_STATUSES = (_OB_OUTSIDE, _OB_INSIDE, _OB_TERMINAL)
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +94,10 @@ class RealtimeSmcEvaluationContext:
     effective_params: Mapping[str, Any]
     qfq_coordinate_proven: bool = False
     qfq_coordinate_reason: str = ""
+    # completed 1m 序列连续性必须由 canonical market-data/session owner 证明，
+    # SMC 层不得自行硬编码交易时段来推断缺口。
+    completed_bar_sequence_proven: bool = False
+    completed_bar_sequence_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -108,8 +121,15 @@ class LaneState:
 
 @dataclass(frozen=True)
 class ObEpisodeState:
+    """OB 三态：INACTIVE(OUTSIDE) → INSIDE_EPISODE →（离开）OUTSIDE，或 → TERMINAL。
+
+    TERMINAL 是**终态且必须保留**：authoritative TargetSet 中该 logical OB 消失即为终止；
+    同一 daily-state epoch 内即使 rebuild 后重新出现，也**不得**再产生 entry episode。
+    只有新的 authoritative daily-state epoch 才重新由 C3 TargetSet 建立 baseline。
+    """
+
     logical_ob_key: str
-    inside: bool = False
+    status: str = _OB_OUTSIDE
     current_episode_key: str | None = None
 
 
@@ -246,6 +266,22 @@ def _confluence_enabled(effective_params: Mapping[str, Any]) -> bool | None:
     return None
 
 
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _malformed_bar_reason(bar: QfqMinuteBar) -> str:
+    """返回 malformed 原因（空串表示合法）。malformed → fail closed，state 不推进。"""
+    if not isinstance(bar.bar_time, str) or not bar.bar_time:
+        return "bar_time missing"
+    if not isinstance(bar.session_key, str) or not bar.session_key:
+        return "session_key missing"
+    for name, value in (("open", bar.open), ("high", bar.high), ("low", bar.low), ("close", bar.close)):
+        if not _finite_number(value):
+            return f"non-finite {name}"
+    return ""
+
+
 def _internal_gate_passes(
     *,
     kind: str,
@@ -355,6 +391,20 @@ def evaluate_smc_realtime_transitions(
     if not context.qfq_coordinate_proven:
         return _fail(state, f"qfq coordinate not proven: {context.qfq_coordinate_reason or 'unspecified'}")
 
+    # --- gate 1b: completed 1m 序列连续性（由 canonical market-data/session owner 证明）---
+    if not context.completed_bar_sequence_proven:
+        return _fail(
+            state,
+            "completed bar sequence not proven: "
+            f"{context.completed_bar_sequence_reason or 'unspecified'}",
+        )
+
+    # --- gate 1c: 输入 bar 格式 → fail closed（state 不推进）---
+    for bar in completed_bars:
+        reason = _malformed_bar_reason(bar)
+        if reason:
+            return _fail(state, f"malformed completed bar: {reason}")
+
     # --- gate 2: effective params 必须与 TargetSet 绑定 ---
     expected = target_set.contract_identity.get("params_hash")
     if not isinstance(expected, str) or not expected:
@@ -383,13 +433,13 @@ def evaluate_smc_realtime_transitions(
     struct_targets = {(t.lane, t.kind): t for t in target_set.active_structure_targets}
     ob_targets = list(target_set.active_order_block_targets)
 
-    # 目标消失的 OB → TERMINAL（从 state 剪除）
+    # authoritative TargetSet 中消失的 OB → TERMINAL（state 必须保留，不得删除）
     live_ob_keys = {
         logical_ob_key(inst, t.internal, t.bias, t.anchor_time, t.confirmed_time) for t in ob_targets
     }
-    for key in list(ob_states):
+    for key, existing in list(ob_states.items()):
         if key not in live_ob_keys:
-            del ob_states[key]
+            ob_states[key] = ObEpisodeState(logical_ob_key=key, status=_OB_TERMINAL)
 
     for bar in completed_bars:
         # --- session 累计（午休不 reset；跨 session_key 才新开）---
@@ -469,11 +519,13 @@ def evaluate_smc_realtime_transitions(
         for ob in ob_targets:
             lkey = logical_ob_key(inst, ob.internal, ob.bias, ob.anchor_time, ob.confirmed_time)
             st = ob_states.get(lkey, ObEpisodeState(logical_ob_key=lkey))
+            if st.status == _OB_TERMINAL:
+                continue  # 终态：同一 epoch 内永不再触发
             touched = (bar.high >= ob.bar_low) and (bar.low <= ob.bar_high)
-            if touched and not st.inside:
+            if touched and st.status == _OB_OUTSIDE:
                 ep_key = ob_episode_key(lkey, bar.bar_time)
                 ob_states[lkey] = ObEpisodeState(
-                    logical_ob_key=lkey, inside=True, current_episode_key=ep_key
+                    logical_ob_key=lkey, status=_OB_INSIDE, current_episode_key=ep_key
                 )
                 ob_out.append(
                     ObEpisodeTransition(
@@ -488,10 +540,8 @@ def evaluate_smc_realtime_transitions(
                         target_id=ob.target_id,
                     )
                 )
-            elif not touched and st.inside:
-                ob_states[lkey] = ObEpisodeState(
-                    logical_ob_key=lkey, inside=False, current_episode_key=None
-                )
+            elif not touched and st.status == _OB_INSIDE:
+                ob_states[lkey] = ObEpisodeState(logical_ob_key=lkey, status=_OB_OUTSIDE)
             else:
                 ob_states[lkey] = st
 
@@ -531,9 +581,79 @@ def state_fingerprint(state: SmcRealtimeTransitionState) -> str:
             "latest_close": state.session.latest_close,
         },
         "ob_states": [
-            {"key": s.logical_ob_key, "inside": s.inside, "episode": s.current_episode_key}
+            {"key": s.logical_ob_key, "status": s.status, "episode": s.current_episode_key}
             for s in state.ob_states
         ],
         "prev_completed_close": state.prev_completed_close,
     }
     return _sha256_json(payload)
+
+
+# ---------------------------------------------------------------------------
+# 持久化（JSON-safe；禁止 Python repr）
+# ---------------------------------------------------------------------------
+
+
+def serialize_transition_state(state: SmcRealtimeTransitionState) -> dict[str, Any]:
+    """序列化为纯 JSON-safe dict（可存入 MonitorState payload）。"""
+    session = None
+    if state.session is not None:
+        session = {
+            "session_key": state.session.session_key,
+            "session_open": state.session.session_open,
+            "running_high": state.session.running_high,
+            "running_low": state.session.running_low,
+            "latest_close": state.session.latest_close,
+        }
+    return {
+        "daily_epoch": state.daily_epoch,
+        "swing": {"bias": state.swing.bias, "fired_keys": list(state.swing.fired_keys)},
+        "internal": {"bias": state.internal.bias, "fired_keys": list(state.internal.fired_keys)},
+        "session": session,
+        "ob_states": [
+            {"key": s.logical_ob_key, "status": s.status, "episode": s.current_episode_key}
+            for s in state.ob_states
+        ],
+        "prev_completed_close": state.prev_completed_close,
+    }
+
+
+def deserialize_transition_state(payload: Mapping[str, Any]) -> SmcRealtimeTransitionState:
+    """从 serialize_transition_state 的产物恢复；malformed → raise（fail closed）。"""
+    if not isinstance(payload, Mapping):
+        raise ValueError("transition state payload must be a mapping")
+    session_payload = payload.get("session")
+    session = None
+    if session_payload is not None:
+        session = SessionAccumulator(
+            session_key=str(session_payload["session_key"]),
+            session_open=float(session_payload["session_open"]),
+            running_high=float(session_payload["running_high"]),
+            running_low=float(session_payload["running_low"]),
+            latest_close=float(session_payload["latest_close"]),
+        )
+    swing = payload["swing"]
+    internal = payload["internal"]
+    prev = payload.get("prev_completed_close")
+    ob_states = []
+    for entry in payload.get("ob_states") or []:
+        status = str(entry["status"])
+        if status not in _OB_STATUSES:
+            raise ValueError(f"unknown OB status: {status}")
+        ob_states.append(
+            ObEpisodeState(
+                logical_ob_key=str(entry["key"]),
+                status=status,
+                current_episode_key=entry.get("episode"),
+            )
+        )
+    return SmcRealtimeTransitionState(
+        daily_epoch=str(payload["daily_epoch"]),
+        swing=LaneState(bias=int(swing["bias"]), fired_keys=tuple(swing.get("fired_keys") or ())),
+        internal=LaneState(
+            bias=int(internal["bias"]), fired_keys=tuple(internal.get("fired_keys") or ())
+        ),
+        session=session,
+        ob_states=tuple(ob_states),
+        prev_completed_close=None if prev is None else float(prev),
+    )
