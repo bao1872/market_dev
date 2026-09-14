@@ -318,7 +318,15 @@ class TestOwnerLevelGetter:
 
         svc = MarketDataAggregationService()
         frame = pd.DataFrame(
-            {"open": 1.0, "high": 1.0, "low": 1.0, "close": 1.0, "adj_factor": 1.0},
+            {
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "adj_factor": 1.0,
+                "volume": 1.0,
+                "amount": 1.0,
+            },
             index=pd.DatetimeIndex(index),
         )
         result = self._Result(frame)
@@ -327,6 +335,10 @@ class TestOwnerLevelGetter:
             return result
 
         monkeypatch.setattr(svc, "get_bars", _fake_get_bars)
+        # 固定 now：这些 fixture 都是"已完成"的历史分钟，必须让 completion cutoff 晚于它们
+        monkeypatch.setattr(
+            mod, "now_shanghai", lambda: datetime(2026, 9, 14, 15, 30, tzinfo=SHANGHAI_TZ)
+        )
         monkeypatch.setattr(
             mod.AdjustmentFactorService,
             "get_corporate_action_schedule_state",
@@ -374,4 +386,128 @@ class TestOwnerLevelGetter:
                     after_bar_time=datetime(2026, 9, 14, 10, 1),  # naive → 拒绝
                     target_epoch="2026-01-02T00:00:00",
                 )
+            )
+
+
+# ---------------------------------------------------------------------------
+# PART 4 — completed-bar authority（forming bar 必须按 timestamp 排除）
+# ---------------------------------------------------------------------------
+
+
+class TestCompletedBarAuthority:
+    @staticmethod
+    def _svc(monkeypatch, *, now, index):
+        import app.services.market_data_aggregation_service as mod
+
+        svc = MarketDataAggregationService()
+        frame = pd.DataFrame(
+            {
+                "open": 1.0,
+                "high": 1.0,
+                "low": 1.0,
+                "close": 1.0,
+                "adj_factor": 1.0,
+                "volume": 1.0,
+                "amount": 1.0,
+            },
+            index=pd.DatetimeIndex(index),
+        )
+
+        class _R:
+            bars = frame
+            degraded = False
+            degraded_reason = None
+            adj_factor_hash = "adj-hash"
+            source_bar_hash = "upstream-hash"
+
+        async def _fake_get_bars(**_kwargs):
+            return _R()
+
+        monkeypatch.setattr(svc, "get_bars", _fake_get_bars)
+        monkeypatch.setattr(mod, "now_shanghai", lambda: now)
+        monkeypatch.setattr(
+            mod.AdjustmentFactorService,
+            "get_corporate_action_schedule_state",
+            lambda self, instrument_id: _Schedule(),
+        )
+        return svc
+
+    @staticmethod
+    def _run(svc, cursor):
+        return asyncio.run(
+            svc.get_completed_qfq_minutes_for_monitor(
+                None, uuid4(), after_bar_time=cursor, target_epoch="2026-01-02T00:00:00"
+            )
+        )
+
+    def test_case_a_forming_bar_excluded(self, monkeypatch):
+        now = datetime(2026, 9, 14, 10, 2, 37, tzinfo=SHANGHAI_TZ)
+        svc = self._svc(
+            monkeypatch,
+            now=now,
+            index=["2026-09-14 10:01:00", "2026-09-14 10:02:00", "2026-09-14 10:03:00"],
+        )
+        out = self._run(svc, datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ))
+        assert [r.bar_time for r in out.bars] == ["2026-09-14T10:02:00+08:00"]
+        assert out.sequence_proven is True
+
+    def test_case_b_last_completed_bar_not_dropped(self, monkeypatch):
+        now = datetime(2026, 9, 14, 10, 2, 37, tzinfo=SHANGHAI_TZ)
+        svc = self._svc(
+            monkeypatch, now=now, index=["2026-09-14 10:01:00", "2026-09-14 10:02:00"]
+        )
+        out = self._run(svc, datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ))
+        assert [r.bar_time for r in out.bars] == ["2026-09-14T10:02:00+08:00"]
+
+    def test_case_c_no_new_bar_is_noop(self, monkeypatch):
+        now = datetime(2026, 9, 14, 10, 2, 37, tzinfo=SHANGHAI_TZ)
+        svc = self._svc(
+            monkeypatch,
+            now=now,
+            index=["2026-09-14 10:01:00", "2026-09-14 10:02:00", "2026-09-14 10:03:00"],
+        )
+        out = self._run(svc, datetime(2026, 9, 14, 10, 2, tzinfo=SHANGHAI_TZ))
+        assert out.bars == ()
+        assert out.latest_completed_bar_time is None
+        assert out.qfq_proven is False
+        assert out.sequence_proven is False
+        assert out.qfq_reason == "no new completed bars"
+        assert out.sequence_reason == "no new completed bars"
+
+    def test_case_d_cursor_gap_fail_closed(self, monkeypatch):
+        now = datetime(2026, 9, 14, 10, 3, 37, tzinfo=SHANGHAI_TZ)
+        svc = self._svc(
+            monkeypatch, now=now, index=["2026-09-14 10:01:00", "2026-09-14 10:03:00"]
+        )
+        out = self._run(svc, datetime(2026, 9, 14, 10, 1, tzinfo=SHANGHAI_TZ))
+        assert [r.bar_time for r in out.bars] == ["2026-09-14T10:03:00+08:00"]
+        assert out.sequence_proven is False
+
+    def test_case_e_1301_forming_excluded(self, monkeypatch):
+        now = datetime(2026, 9, 14, 13, 0, 20, tzinfo=SHANGHAI_TZ)
+        svc = self._svc(monkeypatch, now=now, index=["2026-09-14 13:01:00"])
+        out = self._run(svc, None)
+        assert out.bars == ()
+
+    def test_case_f_1301_completed_included(self, monkeypatch):
+        now = datetime(2026, 9, 14, 13, 1, 20, tzinfo=SHANGHAI_TZ)
+        svc = self._svc(monkeypatch, now=now, index=["2026-09-14 13:01:00"])
+        out = self._run(svc, datetime(2026, 9, 14, 11, 30, tzinfo=SHANGHAI_TZ))
+        assert [r.bar_time for r in out.bars] == ["2026-09-14T13:01:00+08:00"]
+        assert out.sequence_proven is True
+
+    def test_case_g_invalid_session_label_rejected(self):
+        with pytest.raises(ValueError):
+            CanonicalCompletedQfqMinute(
+                bar_time="2026-09-14T12:01:00+08:00",
+                session_key="2026-09-14",
+                open=1.0, high=1.0, low=1.0, close=1.0,
+            )
+
+    def test_case_h_session_key_mismatch_rejected(self):
+        with pytest.raises(ValueError):
+            CanonicalCompletedQfqMinute(
+                bar_time="2026-09-14T10:01:00+08:00",
+                session_key="2026-09-15",
+                open=1.0, high=1.0, low=1.0, close=1.0,
             )

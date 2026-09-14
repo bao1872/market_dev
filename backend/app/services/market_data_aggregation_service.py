@@ -1279,8 +1279,8 @@ class CanonicalCompletedQfqMinute:
     def __post_init__(self) -> None:
         if not isinstance(self.bar_time, str) or not self.bar_time:
             raise ValueError("bar_time must be non-empty str")
-        parsed = datetime.fromisoformat(self.bar_time)
-        if parsed.tzinfo is None:
+        raw = datetime.fromisoformat(self.bar_time)
+        if raw.tzinfo is None:
             raise ValueError("bar_time must be timezone-aware")
         if not isinstance(self.session_key, str) or not self.session_key:
             raise ValueError("session_key must be non-empty str")
@@ -1296,6 +1296,13 @@ class CanonicalCompletedQfqMinute:
                 or not math.isfinite(value)
             ):
                 raise ValueError(f"{name} must be finite number")
+
+        # session invariant：session_key 必须是 bar_time 的上海日期，且 label 必须 canonical
+        parsed = _to_shanghai_aware_timestamp(self.bar_time)
+        if self.session_key != parsed.date().isoformat():
+            raise ValueError("session_key must equal Shanghai date of bar_time")
+        if not _is_canonical_a_share_1m_label(parsed):
+            raise ValueError("bar_time outside canonical A-share 1m labels")
 
 
 @dataclass(frozen=True)
@@ -1376,6 +1383,15 @@ def _minute_index_to_aware_iso(value: Any) -> str:
     return _to_shanghai_aware_timestamp(value).isoformat()
 
 
+def _is_canonical_a_share_1m_label(value: Any) -> bool:
+    """A 股 canonical 1m right-label 合同：09:31–11:30 与 13:01–15:00（整分钟）。"""
+    ts = _to_shanghai_aware_timestamp(value)
+    if ts.second != 0 or ts.microsecond != 0:
+        return False
+    minute = ts.hour * 60 + ts.minute
+    return (9 * 60 + 31 <= minute <= 11 * 60 + 30) or (13 * 60 + 1 <= minute <= 15 * 60)
+
+
 class MarketDataAggregationService:
     """行情聚合统一入口。"""
 
@@ -1403,8 +1419,12 @@ class MarketDataAggregationService:
                 business_date, dt_time(9, 30), tzinfo=SHANGHAI_TZ
             )
         else:
+            # persisted correctness state 已规定 cursor 必须 aware；naive 一律拒绝，不猜时区。
+            if not isinstance(after_bar_time, datetime) or after_bar_time.tzinfo is None:
+                raise ValueError("after_bar_time must be timezone-aware datetime")
             start_dt = after_bar_time
 
+        now = now_shanghai()
         result = await self.get_bars(
             session=session,
             instrument_id=instrument_id,
@@ -1413,37 +1433,61 @@ class MarketDataAggregationService:
             include_realtime=True,
             completed_only=False,
             start_date=start_dt,
-            end_date=now_shanghai(),
+            end_date=now,
         )
 
-        bars_df = result.bars
         cursor_ts: pd.Timestamp | None = None
         if after_bar_time is not None:
-            # persisted correctness state 已规定 cursor 必须 aware；naive 一律拒绝，不猜时区。
-            if not isinstance(after_bar_time, datetime) or after_bar_time.tzinfo is None:
-                raise ValueError("after_bar_time must be timezone-aware datetime")
             cursor_ts = _to_shanghai_aware_timestamp(after_bar_time)
 
-        rows: list[CanonicalCompletedQfqMinute] = []
+        # completed 权威：right-label 语义 —— 当前 10:02:37 → 10:02 已完成、10:03 仍在形成。
+        # 按 timestamp 排除 forming bar（不依赖 iloc[:-1]，不会误删最后一根 completed bar）。
+        completion_cutoff = _to_shanghai_aware_timestamp(now).floor("min")
+
+        selected: list[tuple[pd.Timestamp, Any]] = []
+        bars_df = result.bars
         if bars_df is not None and not bars_df.empty:
             for idx, row in bars_df.iterrows():
                 idx_ts = _to_shanghai_aware_timestamp(idx)
+                if idx_ts > completion_cutoff:
+                    continue  # forming bar
                 if cursor_ts is not None and idx_ts <= cursor_ts:
                     continue  # 不重复消费 cursor
-                rows.append(
-                    CanonicalCompletedQfqMinute(
-                        bar_time=idx_ts.isoformat(),
-                        session_key=idx_ts.date().isoformat(),
-                        open=float(row["open"]),
-                        high=float(row["high"]),
-                        low=float(row["low"]),
-                        close=float(row["close"]),
-                    )
-                )
+                selected.append((idx_ts, row))
 
+        if not selected:
+            # 正常运行状态（本轮无新 completed bar）→ NO-OP，不是 degraded / 异常
+            return CanonicalCompletedQfqMinutes(
+                bars=(),
+                qfq_proven=False,
+                qfq_reason="no new completed bars",
+                sequence_proven=False,
+                sequence_reason="no new completed bars",
+                source_bar_hash="",
+                adj_factor_hash=str(getattr(result, "adj_factor_hash", "") or ""),
+                latest_completed_bar_time=None,
+            )
+
+        selected_df = pd.DataFrame(
+            [row for _, row in selected],
+            index=pd.DatetimeIndex([idx_ts for idx_ts, _ in selected]),
+        )
+        rows = [
+            CanonicalCompletedQfqMinute(
+                bar_time=idx_ts.isoformat(),
+                session_key=idx_ts.date().isoformat(),
+                open=float(row["open"]),
+                high=float(row["high"]),
+                low=float(row["low"]),
+                close=float(row["close"]),
+            )
+            for idx_ts, row in selected
+        ]
+
+        # proof 必须绑定 SMC 实际消费的 canonical rows（不能证明 A、消费 B）
         qfq_proven, qfq_reason = self._prove_completed_qfq(
             result=result,
-            bars_df=bars_df,
+            bars_df=selected_df,
             instrument_id=instrument_id,
             target_epoch=target_epoch,
             business_date=business_date,
@@ -1454,13 +1498,17 @@ class MarketDataAggregationService:
             bars=tuple(rows),
         )
 
+        canonical_source_hash = (
+            compute_source_bar_hash(selected_df, "1m") if not selected_df.empty else ""
+        )
+
         return CanonicalCompletedQfqMinutes(
             bars=tuple(rows),
             qfq_proven=qfq_proven,
             qfq_reason=qfq_reason,
             sequence_proven=sequence_proven,
             sequence_reason=sequence_reason,
-            source_bar_hash=str(getattr(result, "source_bar_hash", "") or ""),
+            source_bar_hash=canonical_source_hash,
             adj_factor_hash=str(getattr(result, "adj_factor_hash", "") or ""),
             latest_completed_bar_time=rows[-1].bar_time if rows else None,
         )
@@ -1513,6 +1561,12 @@ class MarketDataAggregationService:
         """**唯一**相邻边规则 owner：same-day +1 / 唯一午休 jump / 跨日 authoritative。"""
         prev_aware = _to_shanghai_aware_timestamp(prev_dt).to_pydatetime()
         curr_aware = _to_shanghai_aware_timestamp(curr_dt).to_pydatetime()
+
+        # 先锁 label 合法性：11:59/12:00/13:00/09:30 等不得因"恰好 +1 分钟"被证明
+        if not _is_canonical_a_share_1m_label(prev_aware):
+            return False, "previous minute label outside canonical session"
+        if not _is_canonical_a_share_1m_label(curr_aware):
+            return False, "current minute label outside canonical session"
 
         if curr_aware <= prev_aware:
             return False, "minute edge not increasing"
