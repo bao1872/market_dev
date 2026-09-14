@@ -8,8 +8,9 @@
 commit 后 expire ORM 属性，异步上下文再访问 ``user.id`` 会触发 ``MissingGreenlet``。
 
 覆盖：
-- A. SMC 并发幂等（真实两事务竞争）：两 worker 同时写**同一 canonical structure event_key** →
-     StrategyEvent=1 且该事件的 Outbox=1（败者 write_event 返回 None → 复现生产 skip → 不 enqueue）。
+- A. SMC 并发幂等（真实两事务竞争，``asyncio.Barrier(2)`` rendezvous）：两 worker 同时写
+     **同一 canonical structure event_key** → StrategyEvent=1 且该事件的 Outbox=1
+     （败者 write_event 返回 None → 复现生产 skip → 不 enqueue）。
      canonical identity owner = ``smc_realtime_transition_service.structure_transition_key``，
      dedupe_key = ``"smc_struct_transition:" + transition_key``（与 ``evaluate_realtime_smc_events``
      完全一致）。事件生成的语义（BOS/CHoCH 判定）已由 pure unit
@@ -125,6 +126,10 @@ async def _concurrent_struct_event_once(
 ) -> None:
     """两真实并发 PG 事务竞争**同一 canonical structure event_key**。
 
+    rendezvous 用 ``asyncio.Barrier(2)``：两个 worker 必须都到达后才同时 release，
+    因此两者是在各自独立 AsyncSession 上**同时**进入 write_event 竞争同一 UNIQUE key
+    （Event.set()+wait() 不是 barrier，先到者会被立即放行，不能证明“同时竞争”）。
+
     复现生产链路分支（monitor_batch_service._write_event_drafts → write_event
     → 若 None 则 skip → 胜者 _send_merged_notification → write_outbox）：
     败者 write_event 返回 None 后立即 skip，绝不再 enqueue Outbox。
@@ -138,24 +143,31 @@ async def _concurrent_struct_event_once(
     )
     now = datetime.now(timezone.utc)
 
-    # canonical identity：adapter dedupe_key = "smc_struct_transition:" + transition_key
+    # canonical identity（与 evaluate_realtime_smc_events adapter 完全同形）：
+    #   dedupe_key     = "smc_struct_transition:" + transition_key
+    #   logical_entity = "smc_structure:"        + transition_key
     transition_key = structure_transition_key(inst_id, "swing", kind, anchor_time)
     event_key = "smc_struct_transition:" + transition_key
+    logical_entity = "smc_structure:" + transition_key
 
-    barrier = asyncio.Event()
+    # [真实并发 rendezvous] asyncio.Barrier(2)：worker A 到达后**必须等待** worker B 也到达，
+    # 两者才同时 release，再各自进入 write_event 竞争同一 UNIQUE event_key。
+    # 反例：Event.set() + Event.wait() 不是 barrier —— 先到者立即放行，退化为
+    # 「A 先 INSERT + commit，B 后撞 UNIQUE」，即使 PASS 也不能证明两事务**同时**竞争。
+    barrier = asyncio.Barrier(2)
 
     async def worker(sess: AsyncSession) -> bool:
         draft = StrategyEventDraft(
             event_type=event_type, event_time=now, dedupe_key=event_key,
-            logical_entity=event_key, payload={"event_key": event_key}, state_ttl_seconds=600,
+            logical_entity=logical_entity, payload={"event_key": event_key},
+            state_ttl_seconds=600,
         )
-        # 同步两 worker 到同一 INSERT 点（DB UNIQUE 才是真正仲裁者）
-        barrier.set()
+        # 两 worker 都必须到达此处才 release（DB UNIQUE 才是真正仲裁者）
         await barrier.wait()
         event_orm = await write_event(
             sess, event_key=event_key, strategy_version_id=strategy_version_id,
             instrument_id=inst_id, event_type=event_type, event_time=now,
-            payload=draft.payload, logical_entity_id=event_key,
+            payload=draft.payload, logical_entity_id=logical_entity,
         )
         if event_orm is not None:  # 生产分支 —— 败者（write_event=None）不 enqueue
             await write_outbox(
