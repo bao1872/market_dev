@@ -278,65 +278,93 @@ async def test_provider_returns_full_diagnostic_fields() -> None:
 # ============================================================
 
 
+def _p(proven: bool, reason: str = "x") -> tuple[bool, str]:
+    return (proven, reason)
+
+
 def test_availability_state_machine_available() -> None:
-    """[CP-V3-A] 250+4000 → available。"""
+    """250+4000 → available。"""
     avail, reason = NodeClusterInputProvider._compute_availability(
-        daily_count=250, m15_count=4000,
-        daily_history_exhausted=False, m15_history_exhausted=False,
+        250, 4000, _p(False), _p(False),
     )
     assert avail == "available"
     assert reason is None
 
 
 def test_availability_state_machine_degraded_insufficient_15m_history() -> None:
-    """[CP-V3-A] m15<4000 且 history_exhausted=True → degraded/INSUFFICIENT_15M_HISTORY。"""
+    """m15<4000 且已证 genuine exhausted（真实新股）→ degraded/INSUFFICIENT_15M_HISTORY。"""
     avail, reason = NodeClusterInputProvider._compute_availability(
-        daily_count=250, m15_count=144,
-        daily_history_exhausted=False, m15_history_exhausted=True,
+        250, 144, _p(False), _p(True, "GENUINE_HISTORY_EXHAUSTED"),
     )
     assert avail == "degraded"
     assert reason == "INSUFFICIENT_15M_HISTORY"
 
 
 def test_availability_state_machine_unavailable_input_contract_violation() -> None:
-    """[CP-V3-A] m15<4000 且 history_exhausted=False → unavailable/INPUT_CONTRACT_VIOLATION。
+    """m15<4000 但无法证明历史耗尽（老股票 DB 缺口）→ unavailable/INPUT_CONTRACT_VIOLATION。
 
-    场景：DB 实际有 8160 根 15m bar，但 MDAS 仅返回 1872（系统未取满）。
+    场景：DB 实际有 8160 根 15m bar，但仅返回 1872（系统未取满）。
     必须禁止生成看似正常的 Profile。
     """
     avail, reason = NodeClusterInputProvider._compute_availability(
-        daily_count=250, m15_count=1872,
-        daily_history_exhausted=False, m15_history_exhausted=False,
+        250, 1872, _p(False), _p(False, "HISTORY_UNDERFILLED_DB_GAP"),
     )
     assert avail == "unavailable"
     assert reason == "INPUT_CONTRACT_VIOLATION"
 
 
 def test_availability_state_machine_unavailable_insufficient_daily_bars() -> None:
-    """[CP-V3-A] daily<10 → unavailable/INSUFFICIENT_DAILY_BARS。"""
+    """daily<10 → unavailable/INSUFFICIENT_DAILY_BARS。"""
     avail, reason = NodeClusterInputProvider._compute_availability(
-        daily_count=9, m15_count=4000,
-        daily_history_exhausted=True, m15_history_exhausted=False,
+        9, 4000, _p(False), _p(False),
     )
     assert avail == "unavailable"
     assert reason == "INSUFFICIENT_DAILY_BARS"
 
 
-def test_availability_state_machine_unavailable_missing_15m_bars() -> None:
-    """[CP-V3-A] m15==0 → unavailable/MISSING_15M_BARS。"""
+def test_availability_state_machine_missing_15m_degraded_when_proven() -> None:
+    """m15==0 且已证 genuine exhausted（真实新股）→ degraded/INSUFFICIENT_15M_HISTORY。"""
     avail, reason = NodeClusterInputProvider._compute_availability(
-        daily_count=250, m15_count=0,
-        daily_history_exhausted=False, m15_history_exhausted=True,
+        250, 0, _p(False), _p(True, "GENUINE_HISTORY_EXHAUSTED"),
+    )
+    assert avail == "degraded"
+    assert reason == "INSUFFICIENT_15M_HISTORY"
+
+
+def test_availability_state_machine_missing_15m_violation_when_unproven() -> None:
+    """m15==0 且 listing_date=NULL（无法证明历史边界）→ 不得 degraded，fail closed →
+    unavailable/INPUT_CONTRACT_VIOLATION。"""
+    avail, reason = NodeClusterInputProvider._compute_availability(
+        250, 0,
+        _p(False, "MISSING_HISTORY_BOUNDARY_PROOF"),
+        _p(False, "MISSING_HISTORY_BOUNDARY_PROOF"),
     )
     assert avail == "unavailable"
-    assert reason == "MISSING_15M_BARS"
+    assert reason == "INPUT_CONTRACT_VIOLATION"
+
+
+def test_availability_state_machine_daily_underfilled_unproven_violation() -> None:
+    """daily 100/250 + 老股票（无法证明耗尽）→ unavailable/INPUT_CONTRACT_VIOLATION。"""
+    avail, reason = NodeClusterInputProvider._compute_availability(
+        100, 4000, _p(False), _p(False),
+    )
+    assert avail == "unavailable"
+    assert reason == "INPUT_CONTRACT_VIOLATION"
+
+
+def test_availability_state_machine_daily_underfilled_proven_degraded() -> None:
+    """daily 100/250 + 真正新股（已证耗尽）→ degraded/INSUFFICIENT_DAILY_HISTORY。"""
+    avail, reason = NodeClusterInputProvider._compute_availability(
+        100, 4000, _p(True, "GENUINE_HISTORY_EXHAUSTED"), _p(False),
+    )
+    assert avail == "degraded"
+    assert reason == "INSUFFICIENT_DAILY_HISTORY"
 
 
 def test_availability_state_machine_priority_over_history_exhausted() -> None:
-    """[CP-V3-A] daily<10 优先级最高，即使 history_exhausted=True 仍 unavailable。"""
+    """daily<10 优先级最高，即使各维度已证耗尽仍 unavailable。"""
     avail, reason = NodeClusterInputProvider._compute_availability(
-        daily_count=5, m15_count=0,
-        daily_history_exhausted=True, m15_history_exhausted=True,
+        5, 0, _p(True, "GENUINE_HISTORY_EXHAUSTED"), _p(True, "GENUINE_HISTORY_EXHAUSTED"),
     )
     assert avail == "unavailable"
     assert reason == "INSUFFICIENT_DAILY_BARS"
@@ -696,19 +724,20 @@ def _run_standalone_tests() -> int:
 
     asyncio.run(run_async_tests())
 
-    # 6. availability 状态机（同步）
+    # 6. availability 状态机（同步，proof 版）
     avail_cases = [
-        ("available", 250, 4000, False, False, "available", None),
-        ("degraded", 250, 144, False, True, "degraded", "INSUFFICIENT_15M_HISTORY"),
-        ("contract_violation", 250, 1872, False, False, "unavailable", "INPUT_CONTRACT_VIOLATION"),
-        ("insufficient_daily", 9, 4000, True, False, "unavailable", "INSUFFICIENT_DAILY_BARS"),
-        ("missing_15m", 250, 0, False, True, "unavailable", "MISSING_15M_BARS"),
+        ("available", 250, 4000, (False, "x"), (False, "x"), "available", None),
+        ("degraded", 250, 144, (False, "x"), (True, "GENUINE_HISTORY_EXHAUSTED"), "degraded", "INSUFFICIENT_15M_HISTORY"),
+        ("contract_violation", 250, 1872, (False, "x"), (False, "HISTORY_UNDERFILLED_DB_GAP"), "unavailable", "INPUT_CONTRACT_VIOLATION"),
+        ("insufficient_daily", 9, 4000, (False, "x"), (False, "x"), "unavailable", "INSUFFICIENT_DAILY_BARS"),
+        ("new_stock_15m_missing", 250, 0, (False, "x"), (True, "GENUINE_HISTORY_EXHAUSTED"), "degraded", "INSUFFICIENT_15M_HISTORY"),
+        ("boundary_proof_missing", 250, 0, (False, "MISSING_HISTORY_BOUNDARY_PROOF"), (False, "MISSING_HISTORY_BOUNDARY_PROOF"), "unavailable", "INPUT_CONTRACT_VIOLATION"),
     ]
-    for name, dc, mc, dhe, mhe, exp_avail, exp_reason in avail_cases:
+    for name, dc, mc, dpr, mpr, exp_avail, exp_reason in avail_cases:
         try:
             avail, reason = NodeClusterInputProvider._compute_availability(
                 daily_count=dc, m15_count=mc,
-                daily_history_exhausted=dhe, m15_history_exhausted=mhe,
+                daily_proof=dpr, m15_proof=mpr,
             )
             assert avail == exp_avail, f"{name}: expected {exp_avail}, got {avail}"
             assert reason == exp_reason, f"{name}: expected {exp_reason}, got {reason}"
@@ -1240,6 +1269,24 @@ async def test_context_mode_availability_state_machine_unchanged(
 
     daily_bars = _make_named_bars(daily_dates)
     m15_bars = _make_named_bars(m15_dates)
+
+    # 让 exhaustion proof 在新股假设下确定性成立：上市不久 + 交易天数极少 → 理论最大 15m < 4000
+    # 注意：两个 owner 都是 async def，monkeypatch 必须给出协程函数，否则 await 会报
+    # "object datetime.date can't be used in 'await' expression"。
+    async def _fake_listing_date(*a, **k):
+        return date(2026, 6, 1)
+
+    async def _fake_count_trading_days(*a, **k):
+        return 15
+
+    monkeypatch.setattr(
+        "app.repositories.bar_repository._get_listing_date",
+        _fake_listing_date,
+    )
+    monkeypatch.setattr(
+        "app.services.board_facts_service._count_trading_days_between",
+        _fake_count_trading_days,
+    )
 
     with _patch_mdas(
         daily_bars, m15_bars, m15_exhausted=True
