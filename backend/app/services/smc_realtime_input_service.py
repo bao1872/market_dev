@@ -1,44 +1,40 @@
-"""Canonical realtime SMC evaluation input（F1）。
+"""Canonical realtime SMC evaluation input（F1R / PART 7）。
 
-职责（严格限定）：把 **真实 owner** 产出的原料装配成 realtime transition owner 的唯一输入：
+builder **只消费 authoritative objects**：
 
 ```text
-SmcMonitorTargetSet
-+ effective SMC params（与 TargetSet 同源，不得从 DEFAULT_PARAMS 另造）
-+ completed 1m qfq bars
-+ qfq / adjustment proof（来自 AdjustmentFactorService / business-date context owner）
-+ completed-bar sequence proof（来自 market-data/session owner）
-+ daily epoch（authoritative completed daily updated_through）
+SmcRuntimeTargetBundle（TargetSet + 同源 effective params）
+CanonicalCompletedQfqMinutes（MDAS 权威产出 + qfq / sequence proof）
+SmcRealtimeTransitionState（已恢复的 transition state）
 ```
 
-本模块**不**做：
-- 复权计算（复用 ``AdjustmentFactorService`` / ``BusinessDateAdjustmentService.apply_context_qfq``）；
-- 交易时段判定（复用 market-data/session owner）；
-- 任何 proof 的“伪造”（禁止硬编码 True）；
-- DB / provider / 通知。
-
-**epoch 冻结**：``daily_epoch`` 主边界是 ``target_set.input_identity["updated_through"]``。
-``daily_bars_hash`` 变化（XDXR / rebuild）**不单独**定义 epoch，避免重置 lane bias。
+明确禁止：
+- caller 提供 ``qfq_proven`` / ``sequence_proven`` 之类的 proof bool；
+- caller override ``daily_epoch``；
+- caller 提供独立 ``target_set`` / ``effective_params`` / ``qfq_minute_bars``；
+- ``bool()`` coercion、``dict()`` 重建 mutable、``str(instrument_id)`` 宽松转换。
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
+from uuid import UUID
 
+from app.services.market_data_aggregation_service import CanonicalCompletedQfqMinutes
 from app.services.smc_monitor_target_service import (
     SmcMonitorTargetSet,
+    SmcRuntimeTargetBundle,
     SmcTargetContractError,
-    _sha256_json,
 )
 from app.services.smc_realtime_transition_service import (
     QfqMinuteBar,
     RealtimeSmcEvaluationContext,
+    SmcRealtimeTransitionState,
 )
 
 __all__ = [
-    "CompletedMinuteSequenceProof",
     "RealtimeSmcInputBundle",
     "resolve_daily_epoch",
     "build_realtime_smc_input_bundle",
@@ -46,28 +42,19 @@ __all__ = [
 
 
 @dataclass(frozen=True)
-class CompletedMinuteSequenceProof:
-    """canonical completed 1m 序列连续性证明（由 market-data/session owner 产出）。
+class RealtimeSmcInputBundle:
+    """realtime transition owner 的唯一输入（不可变）。
 
-    SMC 层不自己硬编码交易时段；只消费上游 proof。
-    ``proven=False`` → transition owner fail closed（0 event，state 不推进）。
+    ``target_set`` / ``effective_params`` **不在此重复保存**，统一从 ``runtime_target``
+    访问，避免未来出现两份来源分叉。
     """
 
-    proven: bool
-    reason: str = ""
-    source: str = ""
-
-
-@dataclass(frozen=True)
-class RealtimeSmcInputBundle:
-    """realtime transition owner 的唯一输入（不可变）。"""
-
-    instrument_id: str
-    target_set: SmcMonitorTargetSet
-    effective_params: Mapping[str, Any]
+    instrument_id: UUID
+    runtime_target: SmcRuntimeTargetBundle
     qfq_minute_bars: tuple[QfqMinuteBar, ...]
     context: RealtimeSmcEvaluationContext
     daily_epoch: str
+    transition_state: SmcRealtimeTransitionState
 
 
 def resolve_daily_epoch(target_set: SmcMonitorTargetSet) -> str:
@@ -89,50 +76,58 @@ def resolve_daily_epoch(target_set: SmcMonitorTargetSet) -> str:
 
 def build_realtime_smc_input_bundle(
     *,
-    instrument_id: Any,
-    target_set: SmcMonitorTargetSet,
-    effective_params: Mapping[str, Any],
-    qfq_minute_bars: Sequence[QfqMinuteBar],
-    qfq_coordinate_proven: bool,
-    sequence_proof: CompletedMinuteSequenceProof,
-    qfq_coordinate_reason: str = "",
-    daily_epoch: str | None = None,
+    instrument_id: UUID,
+    runtime_target: SmcRuntimeTargetBundle,
+    minute_input: CanonicalCompletedQfqMinutes,
+    transition_state: SmcRealtimeTransitionState,
 ) -> RealtimeSmcInputBundle:
-    """装配并校验 canonical input bundle（fail closed，不伪造 proof）。
+    """装配 canonical input bundle（proof 全部来自 owner，禁止 caller override）。
 
     Raises:
-        SmcTargetContractError: effective params 与 TargetSet 的 ``params_hash`` 不一致
-            （禁止悄悄改用 DEFAULT_PARAMS）；或 TargetSet 缺少 epoch 依据。
+        SmcTargetContractError: 任一输入类型不符，或 transition state 的 epoch
+            与 TargetSet 推导出的 epoch 不一致。
     """
-    if not isinstance(target_set, SmcMonitorTargetSet):
-        raise SmcTargetContractError("target_set 必须是 SmcMonitorTargetSet")
-    if not isinstance(effective_params, Mapping):
-        raise SmcTargetContractError("effective_params 必须是 mapping")
+    if not isinstance(instrument_id, UUID):
+        raise SmcTargetContractError("instrument_id must be UUID")
+    if not isinstance(runtime_target, SmcRuntimeTargetBundle):
+        raise SmcTargetContractError("runtime_target must be SmcRuntimeTargetBundle")
+    if not isinstance(minute_input, CanonicalCompletedQfqMinutes):
+        raise SmcTargetContractError("minute_input must be CanonicalCompletedQfqMinutes")
+    if not isinstance(transition_state, SmcRealtimeTransitionState):
+        raise SmcTargetContractError("transition_state must be SmcRealtimeTransitionState")
 
-    expected = target_set.contract_identity.get("params_hash")
-    if not isinstance(expected, str) or not expected:
-        raise SmcTargetContractError("target_set 缺少 params_hash")
-    if _sha256_json(effective_params) != expected:
+    daily_epoch = resolve_daily_epoch(runtime_target.target_set)
+    if transition_state.daily_epoch != daily_epoch:
         raise SmcTargetContractError(
-            "effective_params 与 target_set.params_hash 不一致（禁止使用 DEFAULT_PARAMS 兜底）"
+            "transition state epoch mismatch: "
+            f"state={transition_state.daily_epoch!r} != target={daily_epoch!r}"
         )
 
-    if not isinstance(sequence_proof, CompletedMinuteSequenceProof):
-        raise SmcTargetContractError("sequence_proof 必须是 CompletedMinuteSequenceProof")
+    bars = tuple(
+        QfqMinuteBar(
+            bar_time=row.bar_time,
+            session_key=row.session_key,
+            open=row.open,
+            high=row.high,
+            low=row.low,
+            close=row.close,
+        )
+        for row in minute_input.bars
+    )
 
     context = RealtimeSmcEvaluationContext(
-        effective_params=dict(effective_params),
-        qfq_coordinate_proven=bool(qfq_coordinate_proven),
-        qfq_coordinate_reason=qfq_coordinate_reason,
-        completed_bar_sequence_proven=bool(sequence_proof.proven),
-        completed_bar_sequence_reason=sequence_proof.reason,
+        effective_params=runtime_target.effective_params,
+        qfq_coordinate_proven=minute_input.qfq_proven,
+        qfq_coordinate_reason=minute_input.qfq_reason,
+        completed_bar_sequence_proven=minute_input.sequence_proven,
+        completed_bar_sequence_reason=minute_input.sequence_reason,
     )
 
     return RealtimeSmcInputBundle(
-        instrument_id=str(instrument_id),
-        target_set=target_set,
-        effective_params=dict(effective_params),
-        qfq_minute_bars=tuple(qfq_minute_bars),
+        instrument_id=instrument_id,
+        runtime_target=runtime_target,
+        qfq_minute_bars=bars,
         context=context,
-        daily_epoch=daily_epoch if daily_epoch is not None else resolve_daily_epoch(target_set),
+        daily_epoch=daily_epoch,
+        transition_state=transition_state,
     )

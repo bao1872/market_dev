@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -254,6 +254,55 @@ def is_trading_day(target_date: DateLike = None) -> bool:
 # =============================================================================
 # 交易日查询辅助：previous / most_recent
 # =============================================================================
+
+
+# 向后寻找下一权威交易日的自然日上限（超过即视为无法证明，返回 None）。
+_NEXT_AUTHORITATIVE_TRADING_DAY_HORIZON_DAYS = 45
+
+
+async def get_next_authoritative_trading_day_async(
+    session: AsyncSession,
+    ref_date: date,
+) -> date | None:
+    """返回 ``ref_date`` 之后**权威可证**的下一交易日；无法证明则 ``None``。
+
+    这是 correctness proof（不是 availability API），因此 **禁止 weekday / Mootdx 降级**：
+    从 ``ref_date + 1`` 起逐自然日检查 ``TradingCalendar(market="A")``，每一天都必须存在记录。
+
+    - ``OPEN`` + ``is_trading_day=True``  → 返回该日
+    - ``CLOSED`` + ``is_trading_day=False`` → 继续下一天
+    - 缺记录 / ``UNKNOWN`` / ``OPEN``+False / ``CLOSED``+True → 返回 ``None``
+    """
+    from app.models.calendar import TradingCalendar
+
+    start = ref_date + timedelta(days=1)
+    horizon_end = start + timedelta(days=_NEXT_AUTHORITATIVE_TRADING_DAY_HORIZON_DAYS)
+    result = await session.execute(
+        select(
+            TradingCalendar.trade_date,
+            TradingCalendar.is_trading_day,
+            TradingCalendar.status,
+        )
+        .where(TradingCalendar.market == "A")
+        .where(TradingCalendar.trade_date >= start)
+        .where(TradingCalendar.trade_date <= horizon_end)
+        .order_by(TradingCalendar.trade_date)
+    )
+    by_date = {row[0]: (row[1], row[2]) for row in result.all()}
+
+    day = start
+    while day <= horizon_end:
+        entry = by_date.get(day)
+        if entry is None:
+            return None  # 缺失记录 → 无法证明连续性
+        is_trading_day, status = entry
+        if status == "OPEN" and is_trading_day is True:
+            return day
+        if status == "CLOSED" and is_trading_day is False:
+            day += timedelta(days=1)
+            continue
+        return None  # UNKNOWN / 不一致 → 无法证明
+    return None
 
 
 async def get_previous_trading_day_async(

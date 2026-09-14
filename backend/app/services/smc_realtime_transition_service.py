@@ -25,6 +25,7 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.services.smc_monitor_target_service import (
@@ -80,6 +81,10 @@ class QfqMinuteBar:
     high: float
     low: float
     close: float
+
+    def __post_init__(self) -> None:
+        _require_aware_iso_datetime(self.bar_time, "bar_time")
+        _require_nonempty_str(self.session_key, "session_key")
 
 
 @dataclass(frozen=True)
@@ -143,6 +148,9 @@ class SmcRealtimeTransitionState:
     session: SessionAccumulator | None = None
     ob_states: tuple[ObEpisodeState, ...] = ()
     prev_completed_close: float | None = None
+    # 处理游标：已消费的最后一根 completed 1m bar_time（timezone-aware ISO）。
+    # 没有它就无法证明"从哪根 bar 开始处理"，会造成重复 episode 或跨缺口 crossing。
+    last_processed_bar_time: str | None = None
 
 
 @dataclass(frozen=True)
@@ -282,6 +290,36 @@ def _malformed_bar_reason(bar: QfqMinuteBar) -> str:
     return ""
 
 
+def _parse_aware_iso_datetime(value: str) -> datetime:
+    """解析 timezone-aware ISO8601；naive → ValueError（禁止本地时区猜测）。"""
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise ValueError(f"datetime must be timezone-aware: {value!r}")
+    return parsed
+
+
+def _require_optional_aware_iso_datetime(value: Any, field: str) -> str | None:
+    """None 或 timezone-aware ISO8601 str；禁止任何 coercion。"""
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be non-empty ISO datetime, got {value!r}")
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise ValueError(f"{field} invalid ISO datetime: {value!r}") from exc
+    if parsed.tzinfo is None:
+        raise ValueError(f"{field} must be timezone-aware: {value!r}")
+    return value
+
+
+def _require_aware_iso_datetime(value: Any, field: str) -> str:
+    result = _require_optional_aware_iso_datetime(value, field)
+    if result is None:
+        raise ValueError(f"{field} must not be None")
+    return result
+
+
 def _internal_gate_passes(
     *,
     kind: str,
@@ -399,11 +437,27 @@ def evaluate_smc_realtime_transitions(
             f"{context.completed_bar_sequence_reason or 'unspecified'}",
         )
 
-    # --- gate 1c: 输入 bar 格式 → fail closed（state 不推进）---
+    # --- gate 1c: 输入 bar 格式 + 顺序 + cursor（全部在推进 state 之前）---
+    prev_bar_time = state.last_processed_bar_time
     for bar in completed_bars:
         reason = _malformed_bar_reason(bar)
         if reason:
             return _fail(state, f"malformed completed bar: {reason}")
+        if not isinstance(bar.bar_time, str) or not bar.bar_time:
+            return _fail(state, "malformed completed bar: bar_time missing")
+        try:
+            bar_dt = _parse_aware_iso_datetime(bar.bar_time)
+        except ValueError as exc:
+            return _fail(state, f"malformed completed bar: {exc}")
+        if prev_bar_time is not None:
+            try:
+                prev_dt = _parse_aware_iso_datetime(prev_bar_time)
+            except ValueError as exc:  # cursor 自身损坏
+                return _fail(state, f"invalid cursor: {exc}")
+            if bar_dt <= prev_dt:
+                # 重复 / 相等 / 倒序 → replay/out-of-order，state 完全不变
+                return _fail(state, "completed bar replay/out-of-order")
+        prev_bar_time = bar.bar_time
 
     # --- gate 2: effective params 必须与 TargetSet 绑定 ---
     expected = target_set.contract_identity.get("params_hash")
@@ -554,6 +608,7 @@ def evaluate_smc_realtime_transitions(
         session=accum,
         ob_states=tuple(ob_states[k] for k in sorted(ob_states)),
         prev_completed_close=prev_close,
+        last_processed_bar_time=prev_bar_time,
     )
     return SmcRealtimeTransitionResult(
         state=new_state,
@@ -585,6 +640,7 @@ def state_fingerprint(state: SmcRealtimeTransitionState) -> str:
             for s in state.ob_states
         ],
         "prev_completed_close": state.prev_completed_close,
+        "last_processed_bar_time": state.last_processed_bar_time,
     }
     return _sha256_json(payload)
 
@@ -615,6 +671,7 @@ def serialize_transition_state(state: SmcRealtimeTransitionState) -> dict[str, A
             for s in state.ob_states
         ],
         "prev_completed_close": state.prev_completed_close,
+        "last_processed_bar_time": state.last_processed_bar_time,
     }
 
 
@@ -737,6 +794,13 @@ def deserialize_transition_state(payload: Mapping[str, Any]) -> SmcRealtimeTrans
     prev_raw = root.get("prev_completed_close")
     prev = None if prev_raw is None else _require_finite_number(prev_raw, "prev_completed_close")
 
+    # 字段必须存在：缺失 = corrupt（不做 .get 兜底，避免把 corrupt 伪装成 absent）。
+    if "last_processed_bar_time" not in root:
+        raise ValueError("last_processed_bar_time field missing (corrupt state)")
+    last_processed_bar_time = _require_optional_aware_iso_datetime(
+        root["last_processed_bar_time"], "last_processed_bar_time"
+    )
+
     return SmcRealtimeTransitionState(
         daily_epoch=daily_epoch,
         swing=swing,
@@ -744,4 +808,5 @@ def deserialize_transition_state(payload: Mapping[str, Any]) -> SmcRealtimeTrans
         session=session,
         ob_states=tuple(ob_states),
         prev_completed_close=prev,
+        last_processed_bar_time=last_processed_bar_time,
     )

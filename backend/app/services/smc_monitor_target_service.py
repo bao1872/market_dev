@@ -84,7 +84,9 @@ def _canonicalize(value: Any) -> Any:
         return value
     if isinstance(value, (list, tuple)):
         return [_canonicalize(v) for v in value]
-    if isinstance(value, dict):
+    if isinstance(value, Mapping):
+        # 接受 Mapping（含 mappingproxy）而非仅 dict：frozen effective_params 必须可被同一
+        # canonical serializer 处理；排序 key 保证与普通 dict 语义一致。
         if not all(isinstance(k, str) for k in value):
             raise SmcTargetContractError("canonical payload dict key 必须全部为 str")
         return {k: _canonicalize(value[k]) for k in sorted(value)}
@@ -673,6 +675,20 @@ class SmcRuntimeTargetBundle:
     effective_params: Mapping[str, Any]
 
     def __post_init__(self) -> None:
+        # invariant 由对象自身守住：绕过 builder 直接构造也必须撞墙。
+        if not isinstance(self.target_set, SmcMonitorTargetSet):
+            raise SmcTargetContractError("target_set must be SmcMonitorTargetSet")
+        if not isinstance(self.effective_params, Mapping):
+            raise SmcTargetContractError("effective_params must be mapping")
+
+        expected = self.target_set.contract_identity.get("params_hash")
+        if not isinstance(expected, str) or not expected:
+            raise SmcTargetContractError("target_set missing params_hash")
+
+        actual = compute_smc_params_hash(self.effective_params)
+        if actual != expected:
+            raise SmcTargetContractError("runtime params hash diverges from target set")
+
         object.__setattr__(self, "effective_params", _freeze(self.effective_params))
 
 
@@ -699,7 +715,5 @@ def build_smc_runtime_target_bundle(
 
     target_set = build_smc_monitor_target_set(daily_bars, smc_result)
 
-    if compute_smc_params_hash(params) != target_set.contract_identity["params_hash"]:
-        raise SmcTargetContractError("runtime params hash diverges from target set")
-
+    # 不再重复判定 invariant：一致性由 SmcRuntimeTargetBundle.__post_init__ 守住。
     return SmcRuntimeTargetBundle(target_set=target_set, effective_params=params)

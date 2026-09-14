@@ -988,3 +988,42 @@ class TestRuntimeTargetBundle:
         bundle = build_smc_runtime_target_bundle(bars, smc)
         direct = build_smc_monitor_target_set(bars, smc)
         assert bundle.target_set.target_set_version == direct.target_set_version
+
+    # --- invariant 必须由对象自身守住（绕过 builder 直接构造） ---
+
+    def test_direct_construction_matching_params_succeeds(self):
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        params = {"internal_filter_confluence": True}
+        target_set = build_smc_monitor_target_set(bars, _smc(_structure(), params=params))
+        bundle = SmcRuntimeTargetBundle(target_set=target_set, effective_params=dict(params))
+        assert bundle.target_set is target_set
+        assert bundle.effective_params["internal_filter_confluence"] is True
+
+    def test_direct_construction_mismatched_params_rejected(self):
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        target_set = build_smc_monitor_target_set(
+            bars, _smc(_structure(), params={"internal_filter_confluence": True})
+        )
+        with pytest.raises(SmcTargetContractError):
+            SmcRuntimeTargetBundle(
+                target_set=target_set,
+                effective_params={"internal_filter_confluence": False},
+            )
+
+    def test_direct_construction_non_mapping_params_rejected(self):
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        target_set = build_smc_monitor_target_set(bars, _smc(_structure()))
+        with pytest.raises(SmcTargetContractError):
+            SmcRuntimeTargetBundle(target_set=target_set, effective_params=["not", "mapping"])  # type: ignore[arg-type]
+
+    def test_direct_construction_non_target_set_rejected(self):
+        with pytest.raises(SmcTargetContractError):
+            SmcRuntimeTargetBundle(target_set={"not": "a target set"}, effective_params={})  # type: ignore[arg-type]
+
+    def test_nested_params_recursively_frozen(self):
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        params = {"nested": {"k": 1}}
+        target_set = build_smc_monitor_target_set(bars, _smc(_structure(), params=params))
+        bundle = SmcRuntimeTargetBundle(target_set=target_set, effective_params=params)
+        with pytest.raises(TypeError):
+            bundle.effective_params["nested"]["k"] = 2

@@ -7,6 +7,7 @@ session/gap 行为、deterministic replay。
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 
 import pandas as pd
 import pytest
@@ -80,8 +81,13 @@ def _target_set(structure, obs=None, params=None):
     )
 
 
+def _iso(session, hhmm):
+    """'09:31' → timezone-aware ISO（+08:00）。"""
+    return f"{session}T{hhmm}:00+08:00"
+
+
 def _bar(t, o, h, low, c, session=SESSION):
-    return QfqMinuteBar(bar_time=t, session_key=session, open=o, high=h, low=low, close=c)
+    return QfqMinuteBar(bar_time=_iso(session, t), session_key=session, open=o, high=h, low=low, close=c)
 
 
 def _ctx(params=None, proven=True, reason="", sequence_proven=True, sequence_reason=""):
@@ -167,7 +173,7 @@ class TestStructureCrossing:
         assert len(res.structure_transitions) == 1
         t = res.structure_transitions[0]
         assert (t.lane, t.kind) == ("swing", "high")
-        assert t.confirmed_bar_time == "09:32"
+        assert t.confirmed_bar_time == _iso(SESSION, "09:32")
         assert t.event_type == "BOS"
         assert t.bias_before == 0 and t.bias_after == 1
 
@@ -331,8 +337,8 @@ class TestObEpisodes:
         res = _run(ts, bars)
         eps = res.ob_episode_transitions
         assert len(eps) == 2
-        assert eps[0].entry_bar_time == "09:32"
-        assert eps[1].entry_bar_time == "09:35"
+        assert eps[0].entry_bar_time == _iso(SESSION, "09:32")
+        assert eps[1].entry_bar_time == _iso(SESSION, "09:35")
         assert eps[0].episode_key != eps[1].episode_key
         assert eps[0].logical_ob_key == eps[1].logical_ob_key
 
@@ -447,12 +453,28 @@ class TestInputProofGates:
         assert state_fingerprint(res.state) == state_fingerprint(state0)
         assert "malformed" in res.fail_closed_reason
 
-    def test_empty_session_key_fail_closed(self):
-        ts = _target_set(_structure(swing_high=_sh(105.0)))
-        state0 = initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
-        res = _run(ts, [_bar("09:31", 104.0, 104.5, 103.5, 104.0, session="")], state=state0)
-        assert res.ok is False
-        assert state_fingerprint(res.state) == state_fingerprint(state0)
+    def test_empty_session_key_rejected_at_bar_construction(self):
+        # session_key 空串在 QfqMinuteBar 构造层即拒绝（比 evaluator 更早、更强）
+        with pytest.raises(ValueError):
+            QfqMinuteBar(
+                bar_time=_iso(SESSION, "09:31"),
+                session_key="",
+                open=104.0,
+                high=104.5,
+                low=103.5,
+                close=104.0,
+            )
+
+    def test_naive_bar_time_rejected_at_construction(self):
+        with pytest.raises(ValueError):
+            QfqMinuteBar(
+                bar_time="2026-09-14T09:31:00",
+                session_key=SESSION,
+                open=104.0,
+                high=104.5,
+                low=103.5,
+                close=104.0,
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -599,3 +621,99 @@ class TestStrictDeserialize:
 
     def test_empty_ob_key_rejected(self):
         self._reject(lambda p: p["ob_states"][0].__setitem__("key", ""))
+
+
+# ---------------------------------------------------------------------------
+# PART 5 — last_processed_bar_time 游标 / replay 保护
+# ---------------------------------------------------------------------------
+
+
+class TestProcessingCursor:
+    @staticmethod
+    def _ts():
+        return _target_set(_structure(swing_high=_sh(105.0)))
+
+    @staticmethod
+    def _state_at(ts, hhmm):
+        base = initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
+        return replace(base, last_processed_bar_time=_iso(SESSION, hhmm))
+
+    def test_bar_time_must_be_timezone_aware(self):
+        with pytest.raises(ValueError):
+            QfqMinuteBar(bar_time="09:31", session_key=SESSION, open=1.0, high=1.0, low=1.0, close=1.0)
+
+    def test_cursor_advances_on_success(self):
+        ts = self._ts()
+        state = self._state_at(ts, "10:01")
+        res = _run(
+            ts,
+            [_bar("10:02", 104.0, 104.5, 103.5, 104.0), _bar("10:03", 104.5, 106.0, 104.0, 105.5)],
+            state=state,
+        )
+        assert res.ok is True
+        assert res.state.last_processed_bar_time == _iso(SESSION, "10:03")
+        assert len(res.structure_transitions) == 1
+
+    def test_replay_same_bar_fails_closed_state_unchanged(self):
+        ts = self._ts()
+        state = self._state_at(ts, "10:01")
+        res = _run(ts, [_bar("10:01", 104.0, 104.5, 103.5, 104.0)], state=state)
+        assert res.ok is False
+        assert res.structure_transitions == ()
+        assert res.ob_episode_transitions == ()
+        assert state_fingerprint(res.state) == state_fingerprint(state)
+        assert "replay" in res.fail_closed_reason
+
+    def test_out_of_order_bars_fail_closed(self):
+        ts = self._ts()
+        state = self._state_at(ts, "10:01")
+        res = _run(
+            ts,
+            [_bar("10:03", 104.0, 104.5, 103.5, 104.0), _bar("10:02", 104.5, 106.0, 104.0, 105.5)],
+            state=state,
+        )
+        assert res.ok is False
+        assert state_fingerprint(res.state) == state_fingerprint(state)
+
+    def test_duplicate_bar_time_fail_closed(self):
+        ts = self._ts()
+        state = self._state_at(ts, "10:01")
+        res = _run(
+            ts,
+            [_bar("10:02", 104.0, 104.5, 103.5, 104.0), _bar("10:02", 104.5, 106.0, 104.0, 105.5)],
+            state=state,
+        )
+        assert res.ok is False
+
+    def test_empty_bars_keep_cursor(self):
+        ts = self._ts()
+        state = self._state_at(ts, "10:01")
+        res = _run(ts, [], state=state)
+        assert res.ok is True
+        assert res.state.last_processed_bar_time == _iso(SESSION, "10:01")
+
+    def test_cursor_round_trips_through_persistence(self):
+        ts = self._ts()
+        state = self._state_at(ts, "10:01")
+        payload = serialize_transition_state(state)
+        assert payload["last_processed_bar_time"] == _iso(SESSION, "10:01")
+        restored = deserialize_transition_state(payload)
+        assert state_fingerprint(restored) == state_fingerprint(state)
+
+    def test_missing_cursor_field_is_corrupt(self):
+        ts = self._ts()
+        payload = serialize_transition_state(
+            initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
+        )
+        payload.pop("last_processed_bar_time")
+        with pytest.raises(ValueError):
+            deserialize_transition_state(payload)
+
+    def test_naive_cursor_field_rejected(self):
+        ts = self._ts()
+        payload = serialize_transition_state(
+            initial_transition_state(ts, instrument_id=INSTR, daily_epoch=SESSION)
+        )
+        payload["last_processed_bar_time"] = "2026-09-14T10:01:00"  # naive → 拒绝
+        with pytest.raises(ValueError):
+            deserialize_transition_state(payload)

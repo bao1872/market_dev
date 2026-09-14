@@ -47,7 +47,10 @@ from app.repositories.bar_repository import (
     get_daily_bars_batch,
 )
 from app.services.adjustment_factor_service import AdjustmentFactorService
-from app.services.calendar_service import is_trading_day_async
+from app.services.calendar_service import (
+    get_next_authoritative_trading_day_async,
+    is_trading_day_async,
+)
 from app.services.chart_bars_service import compute_source_bar_hash
 from app.services.kline_aggregator import aggregate as aggregate_kline
 from app.services.market_status_service import (
@@ -1257,8 +1260,245 @@ async def _build_daily_aggregation(
     )
 
 
+# ---------------------------------------------------------------------------
+# Canonical completed 1m qfq（realtime SMC 权威输入，PART 4）
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class CanonicalCompletedQfqMinute:
+    """单根**已完成** 1m bar 的不可变快照（qfq 坐标）。"""
+
+    bar_time: str  # timezone-aware ISO8601，如 2026-09-14T09:31:00+08:00
+    session_key: str  # 上海交易日 YYYY-MM-DD
+    open: float
+    high: float
+    low: float
+    close: float
+
+
+@dataclass(frozen=True)
+class CanonicalCompletedQfqMinutes:
+    """MDAS 权威产出的 completed qfq 1m 输入 + proof。
+
+    proof-bearing：一旦 ``qfq_proven`` 为 True，其对应 bars 必须不可再被原地修改，
+    因此 bars 是 **tuple row 快照**（禁止持有 DataFrame）。
+    """
+
+    bars: tuple[CanonicalCompletedQfqMinute, ...]
+    qfq_proven: bool
+    qfq_reason: str
+    sequence_proven: bool
+    sequence_reason: str
+    source_bar_hash: str
+    adj_factor_hash: str
+    latest_completed_bar_time: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.qfq_proven) is not bool:
+            raise ValueError("qfq_proven must be bool")
+        if type(self.sequence_proven) is not bool:
+            raise ValueError("sequence_proven must be bool")
+        for name, value in (
+            ("qfq_reason", self.qfq_reason),
+            ("sequence_reason", self.sequence_reason),
+            ("source_bar_hash", self.source_bar_hash),
+            ("adj_factor_hash", self.adj_factor_hash),
+        ):
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be str")
+        if not isinstance(self.bars, tuple):
+            raise ValueError("bars must be tuple")
+        for i, row in enumerate(self.bars):
+            if not isinstance(row, CanonicalCompletedQfqMinute):
+                raise ValueError(f"bars[{i}] must be CanonicalCompletedQfqMinute")
+        if self.latest_completed_bar_time is not None:
+            if not isinstance(self.latest_completed_bar_time, str) or not self.latest_completed_bar_time:
+                raise ValueError("latest_completed_bar_time must be None or non-empty str")
+            parsed = datetime.fromisoformat(self.latest_completed_bar_time)
+            if parsed.tzinfo is None:
+                raise ValueError("latest_completed_bar_time must be timezone-aware")
+
+
+def _minute_index_to_aware_iso(value: Any) -> str:
+    """分钟 index → timezone-aware ISO8601（naive 视为上海本地墙钟）。"""
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        ts = ts.tz_localize(SHANGHAI_TZ)
+    else:
+        ts = ts.tz_convert(SHANGHAI_TZ)
+    return ts.isoformat()
+
+
 class MarketDataAggregationService:
     """行情聚合统一入口。"""
+
+    # ------------------------------------------------------------------
+    # PART 4：canonical completed 1m qfq（realtime SMC 权威输入）
+    # ------------------------------------------------------------------
+
+    async def get_completed_qfq_minutes_for_monitor(
+        self,
+        session: AsyncSession,
+        instrument_id: uuid.UUID,
+        *,
+        after_bar_time: datetime | None,
+        target_epoch: str,
+    ) -> CanonicalCompletedQfqMinutes:
+        """返回 canonical completed 1m qfq bars + qfq / sequence proof。
+
+        复用唯一行情出口 ``get_bars``（DB + realtime tail → qfq → ``_finalize_bars()``），
+        **禁止二次 ``iloc[:-1]``**：未完成 bar 已由 ``_finalize_bars`` 过滤。
+        qfq / sequence proof 由本 owner 产出，caller 不得传 bool。
+        """
+        business_date = shanghai_business_date()
+        if after_bar_time is None:
+            start_dt: datetime = datetime.combine(
+                business_date, dt_time(9, 30), tzinfo=SHANGHAI_TZ
+            )
+        else:
+            start_dt = after_bar_time
+
+        result = await self.get_bars(
+            session=session,
+            instrument_id=instrument_id,
+            timeframe="1m",
+            adj="qfq",
+            include_realtime=True,
+            completed_only=False,
+            start_date=start_dt,
+            end_date=now_shanghai(),
+        )
+
+        bars_df = result.bars
+        cursor_ts: pd.Timestamp | None = None
+        if after_bar_time is not None:
+            cursor_ts = pd.Timestamp(after_bar_time)
+            if cursor_ts.tzinfo is None:
+                cursor_ts = cursor_ts.tz_localize(SHANGHAI_TZ)
+
+        rows: list[CanonicalCompletedQfqMinute] = []
+        if bars_df is not None and not bars_df.empty:
+            for idx, row in bars_df.iterrows():
+                idx_ts = pd.Timestamp(idx)
+                if cursor_ts is not None and idx_ts <= cursor_ts:
+                    continue  # 不重复消费 cursor
+                rows.append(
+                    CanonicalCompletedQfqMinute(
+                        bar_time=_minute_index_to_aware_iso(idx),
+                        session_key=idx_ts.date().isoformat(),
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                    )
+                )
+
+        qfq_proven, qfq_reason = self._prove_completed_qfq(
+            result=result,
+            bars_df=bars_df,
+            instrument_id=instrument_id,
+            target_epoch=target_epoch,
+            business_date=business_date,
+        )
+        sequence_proven, sequence_reason = await self._prove_completed_minute_sequence(
+            session,
+            after_bar_time=after_bar_time,
+            bars=tuple(rows),
+        )
+
+        return CanonicalCompletedQfqMinutes(
+            bars=tuple(rows),
+            qfq_proven=qfq_proven,
+            qfq_reason=qfq_reason,
+            sequence_proven=sequence_proven,
+            sequence_reason=sequence_reason,
+            source_bar_hash=str(getattr(result, "source_bar_hash", "") or ""),
+            adj_factor_hash=str(getattr(result, "adj_factor_hash", "") or ""),
+            latest_completed_bar_time=rows[-1].bar_time if rows else None,
+        )
+
+    def _prove_completed_qfq(
+        self,
+        *,
+        result: Any,
+        bars_df: pd.DataFrame | None,
+        instrument_id: uuid.UUID,
+        target_epoch: str,
+        business_date: date,
+    ) -> tuple[bool, str]:
+        """qfq 坐标可证明性（fail closed：任一条件不成立 → False）。"""
+        if result.degraded:
+            return False, f"mdas degraded: {result.degraded_reason}"
+        if not result.adj_factor_hash:
+            return False, "adj_factor_hash empty"
+        if bars_df is None or bars_df.empty:
+            return False, "no completed bars"
+        if "adj_factor" not in bars_df.columns:
+            return False, "adj_factor column missing"
+        for value in bars_df["adj_factor"]:
+            try:
+                numeric = float(value)
+            except (TypeError, ValueError):
+                return False, "adj_factor not numeric"
+            if not math.isfinite(numeric) or numeric <= 0:
+                return False, "adj_factor not finite/positive"
+
+        schedule = AdjustmentFactorService().get_corporate_action_schedule_state(instrument_id)
+        if schedule is None:
+            return False, "corporate action schedule unavailable (freshness unproven)"
+        epoch_date = pd.Timestamp(target_epoch).date()
+        if schedule.scanned_as_of < epoch_date:
+            return False, "corporate action schedule stale for epoch"
+        if schedule.next_event_date is not None and schedule.next_event_date <= business_date:
+            return False, "known corporate action reached effective date"
+        return True, ""
+
+    async def _prove_completed_minute_sequence(
+        self,
+        session: AsyncSession,
+        *,
+        after_bar_time: datetime | None,
+        bars: tuple[CanonicalCompletedQfqMinute, ...],
+    ) -> tuple[bool, str]:
+        """证明 completed 1m 序列连续（冻结 right-label contract：09:31–11:30 / 13:01–15:00）。"""
+        if not bars:
+            return False, "no completed bars"
+        try:
+            parsed = [datetime.fromisoformat(row.bar_time) for row in bars]
+        except ValueError:
+            return False, "bar_time not ISO datetime"
+
+        for i in range(1, len(parsed)):
+            if parsed[i] <= parsed[i - 1]:
+                return False, "bars not strictly increasing"
+
+        if after_bar_time is None:
+            first_dt = parsed[0]
+            if (first_dt.hour, first_dt.minute) != (9, 31):
+                return False, "bootstrap does not start from session open"
+
+        for i in range(1, len(bars)):
+            prev_row, curr_row = bars[i - 1], bars[i]
+            prev_dt, curr_dt = parsed[i - 1], parsed[i]
+            prev_mod = prev_dt.hour * 60 + prev_dt.minute
+            curr_mod = curr_dt.hour * 60 + curr_dt.minute
+            if prev_row.session_key == curr_row.session_key:
+                if prev_mod == 11 * 60 + 30 and curr_mod == 13 * 60 + 1:
+                    continue  # 唯一合法午休 jump
+                if curr_mod != prev_mod + 1:
+                    return False, "non-contiguous minute progression"
+            else:
+                if prev_mod != 15 * 60 or curr_mod != 9 * 60 + 31:
+                    return False, "illegal cross-day jump"
+                next_day = await get_next_authoritative_trading_day_async(
+                    session, date.fromisoformat(prev_row.session_key)
+                )
+                if next_day is None:
+                    return False, "next authoritative trading day unprovable"
+                if next_day.isoformat() != curr_row.session_key:
+                    return False, "cross-day target is not the authoritative next trading day"
+        return True, ""
 
     async def get_bars_batch(
         self,
