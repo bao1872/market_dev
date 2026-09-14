@@ -1312,13 +1312,20 @@ class BarsSchedulerService:
         trade_date: date,
         *,
         client: Any | None = None,
+        hosts: Sequence[str] | None = None,
+        require_eod_watermark: bool = False,
     ) -> tuple[list[dict[str, Any]], list[EodSnapshotRow]]:
         """[G1B-2B] 拉取东方财富全市场收盘快照（一个 after-close run 最多执行一次）。
 
-        职责：
-        ① universe discovery / name / status
+        职责（discovery 主路径）：
+        ① universe discovery / name / status —— 必须用**实时** host（见 ``hosts`` 调用约定）
         ② BJ 当日行情
         ③ pytdx 失败时的内存 fallback 缓存
+
+        R3（EOD universe discovery freshness）：universe discovery 只信任实时全市场快照，
+        不再用 ``push2delay`` 的滞后证券列表决定「有没有新股」。调用方必须以
+        ``hosts=REALTIME_CLIST_HOSTS`` 且 ``require_eod_watermark=True`` 调用本函数，
+        以同时证明「完整全市场 + 实时 universe + 已收盘（watermark >= 15:00）」。
 
         返回:
             (raw_rows, normalized_rows)
@@ -1326,22 +1333,80 @@ class BarsSchedulerService:
         import httpx
 
         from app.services.eod_market_snapshot_provider import (
+            EASTMONEY_CLIST_HOSTS,
             fetch_full_a_share_snapshot,
             normalize_snapshot_rows,
         )
 
+        if hosts is None:
+            hosts = EASTMONEY_CLIST_HOSTS
+
         if client is not None:
             raw_rows = await fetch_full_a_share_snapshot(
-                client, expected_trade_date=trade_date
+                client,
+                expected_trade_date=trade_date,
+                hosts=hosts,
+                require_eod_watermark=require_eod_watermark,
             )
         else:
             async with httpx.AsyncClient(timeout=15.0) as http_client:
                 raw_rows = await fetch_full_a_share_snapshot(
-                    http_client, expected_trade_date=trade_date
+                    http_client,
+                    expected_trade_date=trade_date,
+                    hosts=hosts,
+                    require_eod_watermark=require_eod_watermark,
                 )
 
         normalized = list(normalize_snapshot_rows(raw_rows))
         return list(raw_rows), normalized
+
+    async def _fetch_price_fallback_snapshot(
+        self,
+        trade_date: date,
+        *,
+        client: Any | None = None,
+    ) -> tuple[list[dict[str, Any]], list[EodSnapshotRow]]:
+        """[R3] discovery 失败时的价格 fallback：仅用延时源给**已知**标的补价。
+
+        本函数**绝不**用于 universe discovery：其返回行只会喂给
+        :meth:`_merge_daily_snapshot_rows`，而该合并函数已按 ``id_by_symbol`` 过滤，
+        不会新建 instrument。调用方即使把延时源的整个 symbol set 都拿到，也不会进入
+        ``sync_instruments_from_eod_snapshot`` 的输入。
+        """
+        import httpx
+
+        from app.services.eod_market_snapshot_provider import (
+            EASTMONEY_CLIST_HOSTS,
+            fetch_a_share_snapshot_batch,
+            normalize_snapshot_rows,
+        )
+
+        try:
+            if client is not None:
+                batch = await fetch_a_share_snapshot_batch(
+                    client,
+                    hosts=EASTMONEY_CLIST_HOSTS,
+                    expected_trade_date=trade_date,
+                    require_eod_watermark=True,
+                )
+            else:
+                async with httpx.AsyncClient(timeout=15.0) as http_client:
+                    batch = await fetch_a_share_snapshot_batch(
+                        http_client,
+                        hosts=EASTMONEY_CLIST_HOSTS,
+                        expected_trade_date=trade_date,
+                        require_eod_watermark=True,
+                    )
+        except Exception as exc:
+            logger.warning(
+                "[EOD-DISCOVERY] push2delay 价格 fallback 失败，"
+                "本轮已知标的无 EM 价格补充: %s",
+                exc,
+            )
+            return [], []
+
+        normalized = list(normalize_snapshot_rows(batch.raw_rows))
+        return list(batch.raw_rows), normalized
 
     async def _fetch_pytdx_primary_eod(
         self,
@@ -1433,17 +1498,25 @@ class BarsSchedulerService:
         )
         from app.services.eod_market_snapshot_provider import SnapshotProviderError
         from app.services.instrument_maintenance_service import stock_symbol_sql_filter
+        from app.services.realtime_market_snapshot_provider import REALTIME_CLIST_HOSTS
 
         own_session = db_session is None
         session = AsyncSessionLocal() if own_session else db_session
         try:
             # 1. 东方财富 discovery 快照（全市场拉取至多 1 次）
+            #    R3：universe discovery 只用实时 push2 host + 收盘 watermark，
+            #    拒绝用 push2delay 的滞后证券列表吞掉新股。
             em_raw_rows: list[dict[str, Any]] = []
             em_rows: list[EodSnapshotRow] = []
+            em_price_rows: list[EodSnapshotRow] = []
             em_discovery_success = False
 
             try:
-                em_raw_rows, em_rows = await self._fetch_discovery_snapshot(trade_date)
+                em_raw_rows, em_rows = await self._fetch_discovery_snapshot(
+                    trade_date,
+                    hosts=REALTIME_CLIST_HOSTS,
+                    require_eod_watermark=True,
+                )
                 result.snapshot_total = len(em_raw_rows)
                 result.snapshot_valid_daily = len(em_rows)
                 if not em_rows:
@@ -1451,7 +1524,7 @@ class BarsSchedulerService:
                         f"snapshot 归一化后无有效 A 股行 raw={len(em_raw_rows)}"
                     )
                 logger.info(
-                    "[EOD-SNAPSHOT] 快照拉取 raw=%d valid=%d",
+                    "[EOD-SNAPSHOT] 实时 push2 快照拉取 raw=%d valid=%d",
                     len(em_raw_rows),
                     len(em_rows),
                 )
@@ -1460,13 +1533,27 @@ class BarsSchedulerService:
                     [r.symbol for r in em_rows], existing_count
                 )
                 em_discovery_success = True
+                em_price_rows = em_rows
             except Exception as exc:
                 logger.warning(
-                    "[EOD-DISCOVERY] Eastmoney universe discovery 失败: %s", exc
+                    "[EOD-DISCOVERY] Eastmoney realtime universe discovery 失败: %s", exc
                 )
                 em_raw_rows = []
                 em_rows = []
                 em_discovery_success = False
+                # R3：discovery 失败不丢已知标的价格 —— 用延时源补价
+                # （仅喂 merge，绝不用于 sync_instruments_from_eod_snapshot）。
+                try:
+                    _, em_price_rows = await self._fetch_price_fallback_snapshot(
+                        trade_date
+                    )
+                except Exception as fb_exc:
+                    logger.warning(
+                        "[EOD-DISCOVERY] push2delay 价格 fallback 也失败，"
+                        "已知标的无 EM 价格补充: %s",
+                        fb_exc,
+                    )
+                    em_price_rows = []
 
             # 2. 同步 universe（解耦：discovery 失败时记状态并保留 DB 已有 universe）
             if em_discovery_success:
@@ -1527,15 +1614,16 @@ class BarsSchedulerService:
                     )
                     pytdx_rows = ()
 
-            # 5. 若 pytdx primary 与 Eastmoney discovery 均失败，快速路径不可用
-            if not pytdx_rows and not em_rows:
+            # 5. 若 pytdx primary 与任何 Eastmoney 价格源均失败，快速路径不可用。
+            #    R3：discovery 失败但延时价格 fallback 成功时仍继续（仅服务已知标的）。
+            if not pytdx_rows and not em_rows and not em_price_rows:
                 raise SnapshotProviderError(
-                    "EOD snapshot failed: both pytdx primary and Eastmoney discovery failed"
+                    "EOD snapshot failed: both pytdx primary and Eastmoney snapshot failed"
                 )
 
             # 6. 合并行情行与 source 可观测性统计
             selected, sources = self._merge_daily_snapshot_rows(
-                trade_date, id_by_symbol, pytdx_rows, em_rows
+                trade_date, id_by_symbol, pytdx_rows, em_price_rows
             )
             if not selected:
                 raise SnapshotProviderError(

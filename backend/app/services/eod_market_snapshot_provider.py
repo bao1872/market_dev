@@ -642,13 +642,20 @@ async def fetch_full_a_share_snapshot(
     client: httpx.AsyncClient,
     *,
     expected_trade_date: date | None = None,
+    hosts: Sequence[str] | None = None,
+    require_eod_watermark: bool | None = None,
     page_size: int = DEFAULT_PAGE_SIZE,
     max_pages: int | None = None,
 ) -> list[dict[str, Any]]:
     """分页拉取全市场 A 股 snapshot（原始 diff 列表）——EOD 兼容 wrapper。
 
-    行为与重构前完全一致：使用 :data:`EASTMONEY_CLIST_HOSTS`，且在
-    ``expected_trade_date`` 给定时校验收盘 watermark（>= 15:00）。
+    默认行为（不传 ``hosts`` / ``require_eod_watermark``）与重构前完全一致：
+    使用 :data:`EASTMONEY_CLIST_HOSTS`，并在 ``expected_trade_date`` 给定时校验收盘
+    watermark（>= 15:00）。
+
+    R3（EOD universe discovery freshness）：调用方可显式传 ``hosts=REALTIME_CLIST_HOSTS``
+    与 ``require_eod_watermark=True``，使 universe discovery 只信任实时 push2 全市场快照
+    （拒绝用 ``push2delay`` 的滞后证券列表决定「有没有新股」），同时证明已收盘。
 
     需要 host / captured_at / watermark 等元数据的新调用方请直接用
     :func:`fetch_a_share_snapshot_batch`。
@@ -659,11 +666,15 @@ async def fetch_full_a_share_snapshot(
     Raises:
         SnapshotProviderError: 所有 host 均失败。
     """
+    if hosts is None:
+        hosts = EASTMONEY_CLIST_HOSTS
+    if require_eod_watermark is None:
+        require_eod_watermark = expected_trade_date is not None
     batch = await fetch_a_share_snapshot_batch(
         client,
-        hosts=EASTMONEY_CLIST_HOSTS,
+        hosts=hosts,
         expected_trade_date=expected_trade_date,
-        require_eod_watermark=(expected_trade_date is not None),
+        require_eod_watermark=require_eod_watermark,
         page_size=page_size,
         max_pages=max_pages,
     )
