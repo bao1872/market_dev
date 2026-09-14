@@ -136,6 +136,17 @@ async def _drive_cycle(
     monkeypatch.setattr(
         MonitorBatchService, "_mark_evaluation_failed", AsyncMock()
     )
+    # [fixture 代表性] 隔离 SMC runtime target 解析：本文件只验证「价格区间生命周期」，
+    # 不应依赖真实 SMC bundle 解析出的 target_set_version。此处固定注入
+    # EMPTY_SMC_TARGET_SET（version="empty"），使 context.smc_target_set 版本确定，
+    # 从而 prev/curr smc version 可显式建模为「同版本」（生产每轮都会持久化该字段）。
+    monkeypatch.setattr(
+        MonitorBatchService,
+        "_resolve_smc_runtime_target_bundle",
+        AsyncMock(
+            return_value=SimpleNamespace(bundle=None, degraded_reason="test-fixture")
+        ),
+    )
 
     # prev_state：生产必须**先**读取，再更新 PriceTracker
     monkeypatch.setattr(
@@ -270,6 +281,10 @@ async def test_production_restart_bootstrap_restores_persisted_price(
         prev_state_payload={
             "current_price": 100.0,
             "node_target_set_version": _NODE_V1,
+            # [fixture 代表性] 生产每轮同时持久化 smc version（WatchlistMonitor.detect_events
+            # 无条件写入）；resolve_snapshot_price_range 的「同版本」门要求 node+smc 两版本
+            # 均未回滚，缺该字段会使其误判为版本不一致而跳过持久化价恢复。
+            "smc_target_set_version": mbs.EMPTY_SMC_TARGET_SET.target_set_version,
         },
         curr_node_version=_NODE_V1,
     )
@@ -289,6 +304,8 @@ async def test_production_node_version_roll_resets_price_last(
         prev_state_payload={
             "current_price": 100.0,  # 除权前旧坐标
             "node_target_set_version": _NODE_V1,
+            # [fixture 代表性] 同 restart 用例：补齐生产必有的 smc version 字段
+            "smc_target_set_version": mbs.EMPTY_SMC_TARGET_SET.target_set_version,
         },
         curr_node_version=_NODE_V2,  # ← version roll
     )
