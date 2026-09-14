@@ -283,7 +283,10 @@ async def test_pg_access_capability_wins_over_legacy_plan(session: AsyncSession)
 
     profile = await resolve_effective_access(session, user)
     assert profile.capabilities["market_data"].active is True
-    assert profile.capabilities["market_data"].source == "user_capabilities"
+    # [层次区分] 单条记录 provenance = 该 UserCapability 行自身 source（管理员授予）
+    assert profile.capabilities["market_data"].source == "admin_grant"
+    # [层次区分] 权限 authority/解析通道 = 显式 capability 表（不是 legacy_plan_fallback）
+    assert profile.capability_source == "user_capabilities"
     assert "research_replay" not in profile.capabilities or profile.capabilities["research_replay"].active is False
     if "research_replay" in profile.capabilities:
         assert profile.capabilities["research_replay"].active is False
@@ -328,7 +331,10 @@ async def test_pg_access_expired_rows_no_legacy_fallback(session: AsyncSession) 
     profile = await resolve_effective_access(session, user)
     # 过期行 present → 解析为 active=False（不被 legacy plan 复活）
     assert profile.capabilities["market_data"].active is False
-    assert profile.capabilities["market_data"].source == "user_capabilities"
+    # [层次区分] 单条记录 provenance = 该行自身 source（admin 授予；不因过期而改变）
+    assert profile.capabilities["market_data"].source == "admin_grant"
+    # [层次区分] authority 仍是显式 capability 表（过期行 present → 绝不回落 legacy plan）
+    assert profile.capability_source == "user_capabilities"
     assert profile.capabilities["research_replay"].active is False
     # 不得 legacy fallback（fallback 仅当「无任何 capability 行」）
     assert "legacy_plan_fallback" not in profile.diagnostics
