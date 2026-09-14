@@ -3,6 +3,12 @@
 本地无 PG 时整体 skip（AGENTS.md：Local/CI DB 测试禁止）。
 这些测试必须由注册运行时对 bz_stock_verify_<40-char-sha> 执行。
 
+[fixture 生产代表性] 本文件 session 必须与生产 ``app/db.py::AsyncSessionLocal`` 同配置
+（``expire_on_commit=False`` / ``autoflush=False``）：默认 ``AsyncSession(engine)`` 会在
+commit 后 expire ORM 属性，异步上下文再访问 ``inst.id`` 会触发 ``MissingGreenlet``，
+这不是生产行为。另：``Instrument.id`` 由 PG ``server_default=gen_random_uuid()`` 生成，
+**必须 flush 后才能取得 scalar UUID**，否则用未落库的 id 构造 BarDaily 会 IntegrityError。
+
 覆盖：
 - 5.1 DB complete：DB 目标范围完整 → provider 不被调用（provider=0, heavy write=0）。
       合同 owner 是 bar_repository.fetch_daily_bars（DB 优先读：_query_daily_bars 非空即返回）。
@@ -43,7 +49,9 @@ async def engine():
 
 @pytest.fixture
 async def session(engine):
-    async with AsyncSession(engine) as s:
+    # [fixture 生产代表性] 与生产 AsyncSessionLocal 完全同配置（app/db.py:42-47）：
+    # expire_on_commit=False + autoflush=False。
+    async with AsyncSession(engine, expire_on_commit=False, autoflush=False) as s:
         yield s
 
 
@@ -62,16 +70,24 @@ class _RecordingPytdx:
         return pd.DataFrame()
 
 
-def _seed_instrument(session: AsyncSession, symbol: str) -> Instrument:
+async def _seed_instrument(session: AsyncSession, symbol: str) -> uuid.UUID:
+    """seed active instrument 并返回 **scalar UUID**。
+
+    ``Instrument.id`` 由 PG ``server_default=gen_random_uuid()`` 生成；未 flush 前 Python
+    侧为 None。必须 flush 让 PG 回填 ID，之后只用 scalar UUID（不再依赖 commit 后的 ORM 对象）。
+    """
     inst = Instrument(symbol=symbol, name="verify", market="SH", status="active")
     session.add(inst)
-    return inst
+    await session.flush()
+    inst_id = inst.id
+    assert inst_id is not None, "Instrument.id 必须由 flush 从 PG server_default 取回"
+    return inst_id
 
 
-def _seed_bar_daily(session: AsyncSession, inst_id: uuid.UUID, d: date) -> None:
+def _seed_bar_daily(session: AsyncSession, instrument_id: uuid.UUID, d: date) -> None:
     session.add(
         BarDaily(
-            instrument_id=inst_id, trade_date=d, open=Decimal("1"), high=Decimal("1"),
+            instrument_id=instrument_id, trade_date=d, open=Decimal("1"), high=Decimal("1"),
             low=Decimal("1"), close=Decimal("1"), volume=Decimal("1"),
             amount=Decimal("1"), adj_factor=Decimal("1"),
         )
@@ -83,15 +99,18 @@ def _seed_bar_daily(session: AsyncSession, inst_id: uuid.UUID, d: date) -> None:
 # ---------------------------------------------------------------------------
 
 async def test_pg_daily_db_complete_provider_not_called(session: AsyncSession) -> None:
-    """DB 目标范围完整 → fetch_daily_bars 直接返回，pytdx provider 与 heavy write 均不被触发。"""
-    inst = _seed_instrument(session, "600001")
+    """DB 目标窗口完整 → fetch_daily_bars 直接返回，pytdx provider 与 heavy write 均不被触发。
+
+    目标窗口就取 D 本身（start=end=D，DB 确有该日）——这才是真正的「DB complete」，
+    而不是「窗口内只有一根 bar」的弱断言。
+    """
+    inst_id = await _seed_instrument(session, "600001")
     d_complete = date(2026, 9, 1)
-    _seed_bar_daily(session, inst.id, d_complete)
+    _seed_bar_daily(session, inst_id, d_complete)
     await session.commit()
 
     adapter = _RecordingPytdx()
-    start, end = date(2026, 8, 25), date(2026, 9, 1)
-    df = await fetch_daily_bars(session, inst.id, start, end, adapter=adapter)
+    df = await fetch_daily_bars(session, inst_id, d_complete, d_complete, adapter=adapter)
     assert not df.empty, "DB 完整时应返回既有日线"
     assert adapter.calls == [], "DB 完整时 provider 绝不应被调用"
 
@@ -104,11 +123,11 @@ async def test_pg_daily_only_one_day_missing_narrow_request(
     session: AsyncSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """仅 D 缺失 → provider 请求窗口严格为 start=D, end=D（非 D-N..D 全历史）。"""
-    inst = _seed_instrument(session, "600002")
+    inst_id = await _seed_instrument(session, "600002")
     d_missing = date(2026, 9, 1)
-    # 种子 D-N..D-1 完整
+    # 种子 D-5..D-1 完整（缺的只有 D）
     for offset in range(1, 6):
-        _seed_bar_daily(session, inst.id, date(2026, 8, 31) - timedelta(days=offset - 1))
+        _seed_bar_daily(session, inst_id, date(2026, 8, 31) - timedelta(days=offset - 1))
     await session.commit()
 
     captured: list[tuple] = []
@@ -128,7 +147,7 @@ async def test_pg_daily_only_one_day_missing_narrow_request(
     )
 
     fake_adapter = _RecordingPytdx()
-    df = await refresh_daily_bars(session, inst.id, d_missing, d_missing, adapter=fake_adapter)
+    df = await refresh_daily_bars(session, inst_id, d_missing, d_missing, adapter=fake_adapter)
     assert df.empty  # 空 provider 返回 → 空（重点在请求窗口，不在落库）
     assert len(captured) == 1, "应仅请求一次"
     _inst_id, _symbol, _start, _end = captured[0]
@@ -149,7 +168,7 @@ async def test_pg_daily_server_failure_does_not_switch_provider(
     pytdx 单 host 失败被封装在 PytdxAdapter 内部（纯单测已证 A→B 轮转），对服务不可见；
     因此服务层不得捕获后降级 Eastmoney。spy Eastmoney 两个入口必须为 0。
     """
-    inst = _seed_instrument(session, "600003")
+    inst_id = await _seed_instrument(session, "600003")
     await session.commit()
     d = date(2026, 9, 1)
 
@@ -179,7 +198,7 @@ async def test_pg_daily_server_failure_does_not_switch_provider(
     )
 
     fake_adapter = _RecordingPytdx()
-    await refresh_daily_bars(session, inst.id, d, d, adapter=fake_adapter)
+    await refresh_daily_bars(session, inst_id, d, d, adapter=fake_adapter)
 
     # pytdx 边界被调用（server 路径走 pytdx）
     assert len(captured) == 1, "日线路径应走 pytdx 边界一次"
