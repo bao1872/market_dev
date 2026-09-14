@@ -3299,6 +3299,7 @@ async def execute_after_close_run(
                             },
                         )
                         job_run.status = "failed"
+                        job_run.error_code = "DAILY_COVERAGE_BLOCKED"
                         job_run.error_message = fail_message[:500]
                         job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
                         await _update_heartbeat_and_step(
@@ -4436,6 +4437,7 @@ async def execute_after_close_run(
                         },
                     )
                     job_run.status = "failed"
+                    job_run.error_code = type(exc).__name__
                     job_run.error_message = str(exc)[:500]
                     job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
                     if worker_id is not None:

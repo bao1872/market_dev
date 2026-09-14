@@ -477,6 +477,13 @@ async def sync_instruments_from_eod_snapshot(
     )
 
 
+# asyncpg 单次查询参数上限 32767；BarDaily 每行 9 列，
+# 故每批最多 32767 // 9 = 3640 条，取 3000 留安全余量。
+# 全市场快照一次性批量写入会超过该上限（2026-09-14 盘后事故：
+# "the number of query arguments cannot exceed 32767"），必须分批写入。
+_RAW_DAILY_UPSERT_BATCH_SIZE = 3000
+
+
 async def upsert_raw_daily_snapshot(
     session: AsyncSession,
     trade_date: date,
@@ -512,22 +519,35 @@ async def upsert_raw_daily_snapshot(
     if not records:
         return 0
 
-    stmt = pg_insert(BarDaily).values(records)
-    stmt = stmt.on_conflict_do_update(
-        index_elements=["instrument_id", "trade_date"],
-        set_={
-            "open": stmt.excluded.open,
-            "high": stmt.excluded.high,
-            "low": stmt.excluded.low,
-            "close": stmt.excluded.close,
-            "volume": stmt.excluded.volume,
-            "amount": stmt.excluded.amount,
-            # 关键：conflict 保留既有 adj_factor，禁止用 1.0 覆盖既有前复权体系。
-        },
-    )
-    await session.execute(stmt)
-    await session.commit()
-    return len(records)
+    # 分批改写：避免单条 INSERT 绑定参数超过 asyncpg 32767 上限。
+    # 每批语义与原单条一致（同 index_elements / 同 conflict 更新集）。
+    total = len(records)
+    try:
+        for i in range(0, total, _RAW_DAILY_UPSERT_BATCH_SIZE):
+            batch = records[i : i + _RAW_DAILY_UPSERT_BATCH_SIZE]
+            stmt = pg_insert(BarDaily).values(batch)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["instrument_id", "trade_date"],
+                set_={
+                    "open": stmt.excluded.open,
+                    "high": stmt.excluded.high,
+                    "low": stmt.excluded.low,
+                    "close": stmt.excluded.close,
+                    "volume": stmt.excluded.volume,
+                    "amount": stmt.excluded.amount,
+                    # 关键：conflict 保留既有 adj_factor，禁止用 1.0 覆盖既有前复权体系。
+                },
+            )
+            await session.execute(stmt)
+        await session.commit()
+    except Exception as exc:
+        logger.warning(
+            "upsert_raw_daily_snapshot 失败 trade_date=%s records=%d: %s",
+            trade_date, total, exc,
+        )
+        await session.rollback()
+        raise
+    return total
 
 
 @dataclass
