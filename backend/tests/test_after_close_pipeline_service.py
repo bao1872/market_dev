@@ -8,12 +8,28 @@ chunking 回归由 test_eod_daily_refresh_service 覆盖，不在此重复。
 """
 from types import SimpleNamespace
 
+import pytest
+
 from app.services import after_close_pipeline_service as pipeline_mod
+
+
+@pytest.mark.parametrize(
+    "status",
+    ["failed", "unavailable", "timed_out", "interrupted"],
+)
+def test_resolve_failed_step_recognizes_all_failure_statuses(
+    status: str,
+) -> None:
+    summary = {
+        "refreshing_daily": {"status": "succeeded"},
+        "checking_coverage": {"status": status},
+    }
+    assert pipeline_mod.resolve_failed_step(summary) == "checking_coverage"
 
 
 def test_resolve_failed_step_prefers_latest_failed_step():
     steps = {
-        "refreshing_daily": {"status": "succeeded"},
+        "refreshing_daily": {"status": "failed"},
         "computing_features": {"status": "failed"},
         "computing_review": {"status": "failed"},
     }
@@ -47,6 +63,52 @@ def test_resolve_failed_step_returns_none_when_step_missing_status():
     assert pipeline_mod.resolve_failed_step(steps) is None
 
 
+@pytest.mark.parametrize(
+    "summary",
+    [None, "not-a-dict"],
+)
+def test_resolve_failed_step_ignores_invalid_summary(
+    summary: object,
+) -> None:
+    assert pipeline_mod.resolve_failed_step(summary) is None
+
+
+@pytest.mark.parametrize(
+    ("failed_step", "expected_label"),
+    [
+        ("refreshing_daily", "刷新日线"),
+        ("checking_coverage", "检查覆盖率"),
+    ],
+)
+def test_compute_watchlist_reason_uses_failed_step_label(
+    failed_step: str,
+    expected_label: str,
+) -> None:
+    job_run = SimpleNamespace(status="failed", error_message="mock error")
+    reason = pipeline_mod._compute_watchlist_reason(
+        watchlist_ready=False,
+        job_run=job_run,
+        snapshot_summary=None,
+        has_backfill_full=False,
+        failed_step=failed_step,
+    )
+    assert expected_label in reason
+    assert "未进入 publish" not in reason
+
+
+def test_compute_watchlist_reason_without_failed_step_has_no_publish_wording():
+    job_run = SimpleNamespace(status="failed", error_message="mock error")
+    reason = pipeline_mod._compute_watchlist_reason(
+        watchlist_ready=False,
+        job_run=job_run,
+        snapshot_summary=None,
+        has_backfill_full=False,
+        failed_step=None,
+    )
+    assert reason == "after_close 状态为 failed"
+    assert "未进入 publish" not in reason
+
+
 def test_compute_watchlist_reason_when_watchlist_ready():
     reason = pipeline_mod._compute_watchlist_reason(
         watchlist_ready=True, job_run=None, snapshot_summary=None,
@@ -71,3 +133,4 @@ def test_compute_watchlist_reason_when_not_ready_and_backfill_full_succeeded():
         snapshot_summary=None, has_backfill_full=True, failed_step=None,
     )
     assert reason == "after_close 状态为 failed"
+
