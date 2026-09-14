@@ -8,8 +8,9 @@ Bollinger 算法本体、盘后 Bollinger 计算、个股详情页布林带图�
 - calculate_state(): 分别调用两个子 monitor，合并 state 字典到命名空间
   node_cluster/smc/market；并补充 previous_close/change_pct；单个子 monitor 失败
   只标记该项 degraded，不阻断其他项。
-- detect_events(): 分别调用两个子 monitor，合并事件列表；
-  单个子 monitor 失败只记录错误，不阻断其他项。
+- detect_events(): Node 走既有 crossing（``evaluate_node_crossings``）；SMC 走
+  canonical realtime transition（``context.smc_realtime_input``）；单个子系统失败
+  只记录错误，不阻断其他项。
 - compute_indicators(): 分别调用两个子 monitor，合并指标字典。
 
 SMC 通过 Canonical SMC Adapter（compute_smc_adapter）调用，继续排除 FVG。
@@ -27,9 +28,11 @@ MonitorState 命名空间（state schema v3）：
 旧 _extract_sub_state 读取时优先命名空间，fallback 顶层平铺。
 兼容旧 state["bb"]：仅做读取兼容，不再生成 bb 状态。
 
-[SMC episode 连续性修复] detect_events 完成后，将 SMC 子状态（含
-smc_episode_tracker）显式回写到父 curr_state.state["smc"] 和顶层平铺，
-保证下一轮 detect_events 收到完整的 episode 状态。
+[G canonical SMC cutover] detect_events 的 SMC 事件**唯一**来源 =
+canonical realtime transition pipeline（``context.smc_realtime_input`` →
+``evaluate_realtime_smc_events``）。旧 G5 ``evaluate_smc_events`` 与 legacy
+``SmcMonitor.detect_events`` 作为 live producer 已移除。SMC 子状态（含
+smc_episode_tracker）仍由 ``calculate_state`` 写入，供历史/展示读取兼容。
 
 [自选股涨跌幅] - 描述: previous_close/change_pct 在合并 VN+SMC state 后计算
 - current_price 取 merged_state["current_price"]（VN 已写入）
@@ -51,7 +54,9 @@ from uuid import UUID
 import pandas as pd
 
 from app.models.strategy import StrategyVersion
-from app.services.monitor_crossing_service import evaluate_node_crossings, evaluate_smc_events
+from app.services.monitor_crossing_service import evaluate_node_crossings
+from app.services.smc_realtime_event_service import evaluate_realtime_smc_events
+from app.services.smc_realtime_transition_service import serialize_transition_state
 from app.strategy.monitors.smc_monitor import SmcMonitor
 from app.strategy.monitors.volume_node_monitor import VolumeNodeMonitor
 from app.strategy.runtime import (
@@ -287,39 +292,34 @@ class WatchlistMonitor(StrategyRuntime):
         prev_state: MonitorState | None,
         curr_state: MonitorState,
     ) -> list[StrategyEventDraft]:
-        """合并 VN + SMC 子 monitor 的事件，并显式回写 SMC 子状态到父 curr_state。
+        """合并 Node 事件与 canonical realtime SMC 事件（G canonical SMC cutover）。
 
-        分别调用两个子 monitor 的 detect_events，合并事件列表。
-        单个子 monitor 失败只记录错误，不阻断其他项。
+        Node：注入 ``node_target_set`` 时走 ``evaluate_node_crossings``（可重复事件），
+        否则回退 VN legacy ``detect_events``。
 
-        [SMC episode 连续性修复] SMC 子状态通过 _extract_sub_state 提取后传入
-        SmcMonitor.detect_events，过程中子 monitor 可能 mutate smc_episode_tracker。
-        detect_events 完成后，将 SMC 子状态（含 smc_episode_tracker）显式回写到
-        父 curr_state.state["smc"] 命名空间和顶层平铺，保证下一轮 detect_events
-        收到完整的 episode 状态，避免 episode 断裂。
+        SMC：唯一 live producer = :meth:`_append_realtime_smc_events`
+        （canonical realtime transition）；旧 G5 ``evaluate_smc_events`` 与
+        legacy ``SmcMonitor.detect_events`` 已不可达。
+
+        单个子系统失败只记录错误，不阻断其他项。
 
         Args:
             context: 市场数据上下文
             prev_state: 前一状态
-            curr_state: 当前状态（将被 mutate 以回写 SMC 子状态）
+            curr_state: 当前状态（将被 mutate 以回写 canonical transition state）
 
         Returns:
             合并后的事件草稿列表
         """
         events: list[StrategyEventDraft] = []
 
-        # [Stage G4/G5] Node 与 SMC **各自独立**决定走「新 crossing」还是「legacy」。
-        #
-        # [P0 mixed-mode 修正] 禁止「任意一个 TargetSet 存在 → 两个子系统一起进入
-        # new-mode 并直接 return」。production 当前只注入 node_target_set、
-        # 不注入 smc_target_set，旧写法会在跑完 Node 新路径后立刻 return，
-        # 把整条 SMC legacy 事件链（含 _writeback_smc_substate）绕掉 ——
-        # 代码注释声称「SMC 仍走旧路径」，实际并没有。
+        # [G canonical SMC cutover] Node 与 SMC 完全解耦：
+        # - Node：保持既有 crossing 逻辑（evaluate_node_crossings，可重复事件）；
+        # - SMC：唯一 live producer = canonical realtime transition pipeline；
+        #   旧 G5 evaluate_smc_events 与 legacy SmcMonitor.detect_events 不可达。
         node_target_set = getattr(context, "node_target_set", None)
-        smc_target_set = getattr(context, "smc_target_set", None)
 
-        # ── 新路径：只对「注入了 TargetSet」的那个子系统生效 ──────────
-        if node_target_set is not None or smc_target_set is not None:
+        if node_target_set is not None:
             p_curr = (
                 getattr(context, "current_price", None)
                 or curr_state.state.get("current_price")
@@ -333,76 +333,32 @@ class WatchlistMonitor(StrategyRuntime):
                     else p_curr
                 )
 
-            curr_node_ver = node_target_set.target_set_version if node_target_set else None
-            curr_smc_ver = smc_target_set.target_set_version if smc_target_set else None
-
-            prev_smc_ver = prev_state.state.get("smc_target_set_version") if prev_state else None
-
-            is_smc_ver_changed = (prev_smc_ver is not None and curr_smc_ver != prev_smc_ver)
-
-            # smc_triggered **仅**服务 BOS / CHoCH 的「version 内 one-shot」。
-            # Node crossing 与 OB 已改为可重复事件，不再消费该集合。
-            smc_triggered: set[str] = (
-                set(prev_state.state.get("triggered_smc_target_ids") or [])
-                if prev_state and not is_smc_ver_changed
-                else set()
-            )
-            if prev_state and not smc_triggered and not is_smc_ver_changed:
-                smc_triggered.update(
-                    set(prev_state.state.get("triggered_target_ids") or [])
-                )
-
-            # [G5 稳定结构 identity] BOS/CHoCH one-shot 跨 target_set_version 重建/重启/retry 持久化。
-            # 与 smc_triggered（随 version 重置）不同，本集合永不随 version 重置，以
-            # (lane, kind, anchor_time, level) 稳定标识历史事件，防止 rebuild/retry 重发旧事件。
-            smc_stable_notified: set[str] = (
-                set(prev_state.state.get("notified_smc_struct_ids") or [])
-                if prev_state else set()
-            )
-
             evt_time = context.bar_time or datetime.now()
 
-            if node_target_set is not None:
-                try:
-                    node_evts = evaluate_node_crossings(
-                        context.instrument_id,
-                        node_target_set,
-                        float(p_last),
-                        float(p_curr),
-                        evt_time,
-                    )
-                    events.extend(node_evts)
-                except Exception as exc:
-                    logger.warning("evaluate_node_crossings 失败: %s", exc)
+            try:
+                node_evts = evaluate_node_crossings(
+                    context.instrument_id,
+                    node_target_set,
+                    float(p_last),
+                    float(p_curr),
+                    evt_time,
+                )
+                events.extend(node_evts)
+            except Exception as exc:
+                logger.warning("evaluate_node_crossings 失败: %s", exc)
 
-            if smc_target_set is not None:
-                try:
-                    smc_evts = evaluate_smc_events(
-                        context.instrument_id,
-                        smc_target_set,
-                        float(p_last),
-                        float(p_curr),
-                        evt_time,
-                        smc_triggered,
-                        smc_stable_notified,
-                    )
-                    events.extend(smc_evts)
-                except Exception as exc:
-                    logger.warning("evaluate_smc_events 失败: %s", exc)
-
-            curr_state.state["triggered_smc_target_ids"] = list(smc_triggered)
-            curr_state.state["triggered_target_ids"] = list(smc_triggered)
-            # 持久化稳定结构 identity（fast-path cache）。DB event_key UNIQUE 是权威幂等真源，
-            # 故此处仅作性能缓存并设上限（远长于任何 rebuild/XDXR 窗口），避免 monitor_state 无限增长。
-            _notified = list(smc_stable_notified)
-            if len(_notified) > 4096:
-                _notified = _notified[-4096:]
-            curr_state.state["notified_smc_struct_ids"] = _notified
-            curr_state.state["node_target_set_version"] = curr_node_ver
-            curr_state.state["smc_target_set_version"] = curr_smc_ver
+            curr_state.state["node_target_set_version"] = node_target_set.target_set_version
             curr_state.state["price_last"] = p_last
 
-        # ── legacy 路径：只对「未注入 TargetSet」的子系统生效 ─────────
+        # [G7 price-tracker 生命周期输入] smc TargetSet 版本仅作为
+        # resolve_snapshot_price_range 的 version-roll 输入（真实当前消费者），
+        # **不再**决定 SMC 事件生成。
+        smc_target_set = getattr(context, "smc_target_set", None)
+        curr_state.state["smc_target_set_version"] = (
+            smc_target_set.target_set_version if smc_target_set is not None else None
+        )
+
+        # ── VN legacy 路径：仅当未注入 node_target_set 时生效 ─────────
         if node_target_set is None:
             # VN 事件检测（旧 1m 判定）
             try:
@@ -416,65 +372,95 @@ class WatchlistMonitor(StrategyRuntime):
             except Exception as exc:
                 logger.warning("VolumeNodeMonitor.detect_events 失败（不阻断其他）: %s", exc)
 
-        if smc_target_set is None:
-            # SMC 事件检测（旧 episode / retest 路径）
-            try:
-                smc_prev = (
-                    self._extract_sub_state(prev_state, NAMESPACE_SMC) if prev_state else None
-                )
-                smc_curr = self._extract_sub_state(curr_state, NAMESPACE_SMC)
-                smc_events = await self._smc.detect_events(context, smc_prev, smc_curr)
-                # [SMC 合同收口] 生产通知路径禁止 legacy BOS/CHoCH retest 与 EQH/EQL 通知，
-                # 仅保留 OB 进入/回踩等允许类型。SmcMonitor 纯计算（episode tracker）仍运行并回写。
-                _SUPPRESSED_LEGACY_SMC = frozenset(
-                    {
-                        "smc_bos_retest",
-                        "smc_choch_retest",
-                        "smc_equal_highs_retest",
-                        "smc_equal_lows_retest",
-                    }
-                )
-                smc_events = [
-                    e for e in smc_events if e.get("event_type") not in _SUPPRESSED_LEGACY_SMC
-                ]
-                events.extend(smc_events)
-
-                # [SMC episode 连续性修复] 显式回写 SMC 子状态到父 curr_state
-                # 包含 smc_episode_tracker 的最新值，避免子状态复制导致 episode 丢失
-                self._writeback_smc_substate(curr_state, smc_curr.state)
-            except Exception as exc:
-                logger.warning("SmcMonitor.detect_events 失败（不阻断其他）: %s", exc)
+        # ── SMC：唯一 canonical realtime producer ────────────────────
+        self._append_realtime_smc_events(context, prev_state, curr_state, events)
 
         return events
 
-    @staticmethod
-    def _writeback_smc_substate(
-        parent_state: MonitorState,
-        smc_sub_state: dict[str, Any],
+    def _append_realtime_smc_events(
+        self,
+        context: MarketDataContext,
+        prev_state: MonitorState | None,
+        curr_state: MonitorState,
+        events: list[StrategyEventDraft],
     ) -> None:
-        """显式回写 SMC 子状态到父 curr_state。
+        """canonical realtime SMC 事件 producer（SMC 事件的唯一来源）。
 
-        [SMC episode 连续性修复] detect_events 调用 _extract_sub_state 会复制
-        子状态到新的 MonitorState，SMC detect_events 在该副本上 mutate
-        smc_episode_tracker；副本的变更不会自动反映到父 curr_state。
-        本方法将 SMC 子状态（含 smc_episode_tracker）显式回写到：
-        - parent_state.state["smc"]（命名空间）
-        - parent_state.state 顶层平铺（兼容旧读取）
+        契约（fail-closed，无 legacy fallback）：
+        - ``context.smc_realtime_input`` 缺失（canonical input unavailable）
+          → SMC 0 事件；Node 不受影响；原样保留既有 transition 命名空间。
+        - 评估 fail closed（degraded_reason / 异常）
+          → SMC 0 事件；**不推进** state；原样保留既有命名空间。
+        - 评估成功（含 no-op）
+          → extend drafts；``next_state`` 序列化写回 ``curr_state``。
 
-        Args:
-            parent_state: 父 curr_state（将被 mutate）
-            smc_sub_state: SMC 子 monitor detect_events 后的子状态字典
+        绝不调用 ``evaluate_smc_events`` 或 ``SmcMonitor.detect_events``。
         """
-        if not smc_sub_state:
+        bundle = getattr(context, "smc_realtime_input", None)
+
+        if bundle is None:
+            self._carry_forward_transition_state(prev_state, curr_state)
+            self._record_realtime_smc_degraded(
+                curr_state,
+                getattr(context, "smc_realtime_degraded_reason", None)
+                or "canonical realtime SMC input unavailable",
+            )
             return
-        # 回写命名空间
-        parent_state.state[NAMESPACE_SMC] = {
-            k: v for k, v in smc_sub_state.items() if k in _SMC_KEYS
-        }
-        # 回写顶层平铺（兼容旧读取）
-        for key in _SMC_KEYS:
-            if key in smc_sub_state:
-                parent_state.state[key] = smc_sub_state[key]
+
+        try:
+            result = evaluate_realtime_smc_events(bundle)
+        except Exception as exc:  # noqa: BLE001 - 单标的评估失败不阻断 Node
+            logger.warning("evaluate_realtime_smc_events 失败（fail closed）: %s", exc)
+            result = None
+
+        if result is None or result.degraded_reason:
+            reason = (
+                result.degraded_reason
+                if result is not None
+                else "realtime SMC evaluation failed"
+            )
+            logger.warning(
+                "[%s] canonical realtime SMC fail closed: %s", context.symbol, reason
+            )
+            self._carry_forward_transition_state(prev_state, curr_state)
+            self._record_realtime_smc_degraded(curr_state, reason)
+            return
+
+        events.extend(result.drafts)
+        # 成功（含 no-op）→ 持久化 next_state，namespace 一旦建立即不再消失。
+        curr_state.state["smc_realtime_transition"] = serialize_transition_state(
+            result.next_state
+        )
+        self._record_realtime_smc_degraded(curr_state, None)
+
+    @staticmethod
+    def _carry_forward_transition_state(
+        prev_state: MonitorState | None,
+        curr_state: MonitorState,
+    ) -> None:
+        """fail closed 时原样保留上一轮持久化的 transition 命名空间。
+
+        monitor_state 以 ``curr_state.state`` 整体 upsert；若本周期失败就丢掉该 key，
+        下一轮 ``prepare_transition_state`` 会把「namespace 不存在」误判为 bootstrap，
+        从而可能重发已消费的结构事件。corrupt payload 亦原样保留（继续 fail closed，
+        绝不偷偷重新初始化）。
+        """
+        if prev_state is None:
+            return
+        persisted = prev_state.state.get("smc_realtime_transition")
+        if persisted is not None:
+            curr_state.state["smc_realtime_transition"] = persisted
+
+    @staticmethod
+    def _record_realtime_smc_degraded(
+        curr_state: MonitorState,
+        reason: str | None,
+    ) -> None:
+        """记录 / 清除 canonical realtime SMC 降级原因（可观测性）。"""
+        curr_state.state["smc_realtime_degraded_reason"] = reason
+        degraded = curr_state.state.get(NAMESPACE_DEGRADED)
+        if isinstance(degraded, dict):
+            degraded["smc_degraded_reason"] = reason
 
     @staticmethod
     def _extract_sub_state(
@@ -650,28 +636,22 @@ if __name__ == "__main__":
     assert bb_sub.state == {}
     print("_extract_sub_state(bb) 历史兼容返回空 ✓")
 
-    # 验证 _writeback_smc_substate 回写 episode_tracker
-    parent_state = MonitorState(
+    # 验证 canonical realtime SMC fail closed 时 transition 命名空间 carry-forward
+    prev_state = MonitorState(
         instrument_id=uuid4(),
         strategy_version_id=uuid4(),
-        state={
-            "smc": {"smc_episode_tracker": {"old": True}},
-            "smc_episode_tracker": {"old": True},
-        },
+        state={"smc_realtime_transition": {"daily_epoch": "2026-09-11"}},
         state_version=3,
         updated_at=datetime.now(UTC),
     )
-    new_smc_sub = {
-        "smc_confirmed_bos": [{"anchor_index": 200, "level": 11.0}],
-        "smc_episode_tracker": {"new": True},
-        "smc_swing_bias": -1,
-    }
-    WatchlistMonitor._writeback_smc_substate(parent_state, new_smc_sub)
-    assert parent_state.state["smc"]["smc_episode_tracker"] == {"new": True}
-    assert parent_state.state["smc_episode_tracker"] == {"new": True}
-    assert parent_state.state["smc"]["smc_confirmed_bos"] == [{"anchor_index": 200, "level": 11.0}]
-    assert parent_state.state["smc_swing_bias"] == -1
-    print("_writeback_smc_substate 回写 episode_tracker ✓")
+    curr_fail = MonitorState(
+        instrument_id=uuid4(), strategy_version_id=uuid4(), state={}
+    )
+    WatchlistMonitor._carry_forward_transition_state(prev_state, curr_fail)
+    assert curr_fail.state["smc_realtime_transition"] == {"daily_epoch": "2026-09-11"}
+    WatchlistMonitor._record_realtime_smc_degraded(curr_fail, "proof failed")
+    assert curr_fail.state["smc_realtime_degraded_reason"] == "proof failed"
+    print("canonical SMC fail closed carry-forward transition state ✓")
 
     # 验证 fallback：无命名空间时从顶层平铺读取（兼容旧 state schema v1/v2）
     old_state = MonitorState(

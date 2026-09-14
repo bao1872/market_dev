@@ -77,8 +77,9 @@ class MarketDataContext:
     bar_time: datetime | None = None
     node_target_set: Any | None = None
     smc_target_set: Any | None = None
-    # [F2] canonical realtime SMC production input（由 MonitorBatch 准备；G 才接线 evaluate）。
-    # 暂时保留 smc_target_set / price_last / current_price 供旧 producer，G cutover 时移除。
+    # [F2/G] canonical realtime SMC production input：由 MonitorBatch 准备，
+    # 由 WatchlistMonitor.detect_events 消费（evaluate + transition state writeback）。
+    # smc_target_set / price_last / current_price 仅服务 G7 price-tracker 生命周期。
     smc_realtime_input: Any | None = None
     smc_realtime_degraded_reason: str | None = None
     price_last: float | None = None

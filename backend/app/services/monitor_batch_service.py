@@ -798,8 +798,8 @@ class MonitorBatchService:
         #   构建；坐标/可用性不一致导致构建失败时优雅回退旧路径。
         # - price_last/current_price：取最新已完成 1m close，经 PriceTracker 维持 [P_last, P_curr]。
         # SMC runtime target bundle（TargetSet + 同源 effective params）由下方
-        # _resolve_smc_runtime_target_bundle 解析；失败则注入 EMPTY_SMC_TARGET_SET
-        # 给旧 producer（G5 路径），realtime input 置 None（fail-closed，G 才接线新 producer）。
+        # _resolve_smc_runtime_target_bundle 解析；失败则 realtime input 置 None
+        # （fail-closed：SMC 0 事件，绝不复活 legacy producer）。
         node_target_set = None
         try:
             profile = await self._compute_node_cluster_profile(node_input, instrument_id)
@@ -815,13 +815,14 @@ class MonitorBatchService:
             logger.debug("[%s] Node profile 计算失败，回退旧路径: %s", symbol, exc)
             node_target_set = None
 
-        # [F2] 解析 runtime target bundle（新生产 input 准备 + 旧 producer G5 兼容）。
+        # [F2] 解析 runtime target bundle（canonical realtime SMC input 准备）。
         # 复用 NodeClusterInputProvider 已拉取的 node_input（与 Node profile 同源，四链一致）。
         runtime_resolution = await self._resolve_smc_runtime_target_bundle(
             instrument_id, symbol, node_input,
         )
-        # 旧 producer（WatchlistMonitor G5 路径）仍消费 context.smc_target_set：
-        # bundle 可用 → 注入其 TargetSet；不可用 → EMPTY_SMC_TARGET_SET（fail-closed，无 legacy 复活）。
+        # [G canonical SMC cutover] smc_target_set 不再是 SMC 事件 producer，仅作为
+        # resolve_snapshot_price_range 的 version-roll 输入（G7 生命周期）。
+        # bundle 可用 → 注入其 TargetSet；不可用 → EMPTY_SMC_TARGET_SET（无 legacy 复活）。
         context.smc_target_set = (
             runtime_resolution.bundle.target_set
             if runtime_resolution.bundle is not None
@@ -841,8 +842,9 @@ class MonitorBatchService:
             (prev_state.state or {}) if prev_state is not None else {}
         )
 
-        # [F2] 准备 canonical realtime SMC production input（只 restore/prepare/attach，
-        # 不触发 transition evaluator；G 才接线 evaluate + writeback + 移除旧 producer）。
+        # [F2/G] 准备 canonical realtime SMC production input（restore/prepare/attach）；
+        # evaluate + transition state writeback 由 WatchlistMonitor.detect_events 完成
+        # （旧 G5 / legacy producer 已移除）。
         # 构建失败 / corrupt state / 拉取失败都只置 None + degraded_reason，绝不阻塞 Node 路径。
         runtime_target = runtime_resolution.bundle
         if runtime_target is None:
