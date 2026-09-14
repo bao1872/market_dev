@@ -442,14 +442,18 @@ class WatchlistMonitor(StrategyRuntime):
 
         monitor_state 以 ``curr_state.state`` 整体 upsert；若本周期失败就丢掉该 key，
         下一轮 ``prepare_transition_state`` 会把「namespace 不存在」误判为 bootstrap，
-        从而可能重发已消费的结构事件。corrupt payload 亦原样保留（继续 fail closed，
-        绝不偷偷重新初始化）。
+        从而可能重发已消费的结构事件。
+
+        判定按 **key presence**，而非 value：
+        ``namespace 不存在`` 与 ``namespace 存在但 payload=None/corrupt`` 是**两种不同**
+        语义（前者可 bootstrap，后者必须持续 fail closed）。因此只要 key 存在就原样
+        carry-forward —— 不 deserialize、不“修复”、不 bootstrap。
         """
         if prev_state is None:
             return
-        persisted = prev_state.state.get("smc_realtime_transition")
-        if persisted is not None:
-            curr_state.state["smc_realtime_transition"] = persisted
+        key = "smc_realtime_transition"
+        if key in prev_state.state:
+            curr_state.state[key] = prev_state.state[key]
 
     @staticmethod
     def _record_realtime_smc_degraded(

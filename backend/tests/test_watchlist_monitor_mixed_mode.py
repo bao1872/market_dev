@@ -152,11 +152,22 @@ def _build(
     return monitor, vn, smc, context, curr_state
 
 
-def _prev_state_with_transition(payload: Any = None) -> MonitorState:
+_UNSET = object()
+
+
+def _prev_state_with_transition(payload: Any = _UNSET) -> MonitorState:
+    """构造带 transition namespace 的 prev_state。
+
+    使用 sentinel 而非 ``payload or default``：显式传入 ``None`` / ``{}`` 必须原样进入
+    state，因为「key 存在但 value=None/corrupt」是与「key 不存在」完全不同的语义
+    （前者必须持续 fail closed，后者才可 bootstrap）。
+    """
+    if payload is _UNSET:
+        payload = {"epoch": "2026-09-11"}
     return MonitorState(
         instrument_id=uuid.uuid4(),
         strategy_version_id=uuid.uuid4(),
-        state={"smc_realtime_transition": payload or {"epoch": "2026-09-11"}},
+        state={"smc_realtime_transition": payload},
     )
 
 
@@ -233,6 +244,37 @@ async def test_fail_closed_preserves_previous_transition_state(
     assert curr_state.state["smc_realtime_transition"] == {"epoch": "2026-09-11"}
     assert "proof failed" in (curr_state.state["smc_realtime_degraded_reason"] or "")
     assert smc.calls == 0
+
+
+# ── E2：key 存在但 payload=None/{}/corrupt → 必须保留 key presence ────
+@pytest.mark.parametrize("corrupt_payload", [None, {}])
+async def test_fail_closed_preserves_present_corrupt_transition_namespace(
+    monkeypatch: pytest.MonkeyPatch, corrupt_payload: Any
+) -> None:
+    """namespace 存在但 payload 为 None/{} → carry-forward 必须保留该 key。
+
+    若丢掉 key，下一轮 prepare_transition_state 会误判「namespace 不存在 → bootstrap」，
+    可能重发已消费的结构事件（fail-closed 状态被错误升级为 bootstrap）。
+    """
+    monkeypatch.setattr(
+        wm,
+        "evaluate_realtime_smc_events",
+        lambda bundle: pytest.fail("canonical input unavailable 时不得评估"),
+    )
+
+    prev_state = _prev_state_with_transition(corrupt_payload)
+    monitor, _vn, smc, context, curr_state = _build(
+        node_target_set=_node_set(), smc_realtime_input=None
+    )
+    events = await monitor.detect_events(context, prev_state, curr_state)
+
+    # key presence 必须保留，且 value 原样（不 deserialize / 不修复 / 不 bootstrap）
+    assert "smc_realtime_transition" in curr_state.state
+    assert curr_state.state["smc_realtime_transition"] == corrupt_payload
+    # SMC 0 事件；legacy producer 不可达；Node 仍正常
+    assert [e for e in events if e.event_type.startswith("smc_")] == []
+    assert smc.calls == 0
+    assert any(e.event_type == EVENT_TYPE_NODE_CLUSTER_TOUCH for e in events)
 
 
 # ── D：canonical input unavailable → 0 SMC 事件 + Node 不受影响 ───────
