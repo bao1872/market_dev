@@ -63,7 +63,7 @@ _UTC_TZ = UTC
 
 # [CHANGE-20260801-REVIEW-CLOSURE] 当前展示步骤（6 + watchlist_ready，无 publishing）：
 #   refreshing_daily → syncing_boards → checking_coverage
-#   → computing_features → computing_review → watchlist_ready
+#   → computing_features → computing_review → computing_history → watchlist_ready
 # 旧 4 步（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
 # 收敛为 computing_features，仅历史映射。
 _PIPELINE_STEPS = [
