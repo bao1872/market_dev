@@ -233,7 +233,7 @@ async def test_pg_access_legacy_fallback_no_capability_rows(session: AsyncSessio
             user_id=user.id, plan_code="research_50", status="active",
             starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
-            source="legacy_materialized", entitlement_snapshot={},
+            source="migration", entitlement_snapshot={},
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
@@ -260,7 +260,7 @@ async def test_pg_access_capability_wins_over_legacy_plan(session: AsyncSession)
             user_id=user.id, plan_code="research_50", status="active",
             starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
-            source="legacy_materialized", entitlement_snapshot={},
+            source="migration", entitlement_snapshot={},
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
@@ -306,7 +306,7 @@ async def test_pg_access_expired_rows_no_legacy_fallback(session: AsyncSession) 
             user_id=user.id, plan_code="research_50", status="active",
             starts_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             expires_at=datetime(2030, 1, 1, tzinfo=timezone.utc),
-            source="legacy_materialized", entitlement_snapshot={},
+            source="migration", entitlement_snapshot={},
             created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
             updated_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
         )
