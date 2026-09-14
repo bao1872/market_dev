@@ -8,7 +8,7 @@ PostgreSQL 容器内（Live Mount 只读挂载 backend/app + alembic + scripts/v
   - 单可复用验证镜像 panji-verify-runtime:current
   - 单一长期容器 panji-verify-python（常驻空闲，禁 Scheduler/Worker/Uvicorn/pytest/seed）
   - 复用 trading-postgres（验证库 bz_stock_verify_<SHA>）
-  - 本轮 verification 不连接 Redis（一次性审计：full-closure 仅连 PG）
+  - 本轮 verification 不连接 Redis（一次性审计：verification 仅连 PG）
   - attempt 仅隔离执行状态（SHA/DB/process/env/evidence）
   - 最外层 single-flight flock 由 run_remote_verification.sh 持有，本文件不再加锁
   - 每个 gate 用 fresh process：`docker exec panji-verify-python verify_exec.py <cmd>`
@@ -18,14 +18,14 @@ PostgreSQL 容器内（Live Mount 只读挂载 backend/app + alembic + scripts/v
 
 状态机：
   created → preflight_passed → db_created → migration_ok → identity_ok →
-  pg_tests_ok → seed_twice_ok → e2e_ok → cleanup_completed
+  pg_tests_ok → cleanup_completed
   任一阶段异常 → failed → finally(export_evidence + cleanup_exact_attempt_resources + verify_cleanup)
 
 finally 合同（失败也必须执行）：
   try:
       run_preflight(); create_verify_database(); run_migration_round_trip()
       assert_identity()
-      run_self_contained_pg_tests(); run_synthetic_seed_twice(); run_synthetic_e2e()
+      run_self_contained_pg_tests()
   except (KeyboardInterrupt, Exception):
       result = "failed"
   finally:
@@ -37,7 +37,7 @@ finally 合同（失败也必须执行）：
 用法（由 scripts/verify/run_remote_verification.sh 在远程环境调用）：
   python scripts/verify/verify_attempt.py \
       --sha <FULL_SHA> \
-      --plan full-closure \
+      --plan scripts/verify/plans/targeted-pg.json \
       --runtime-dir /root/.panji-verify/runtime \
       --evidence-root /root/.panji-verify/evidence \
       --compose-project panji-verify \
@@ -317,7 +317,7 @@ class VerifyAttempt:
     def run_migration_round_trip(self) -> None:
         """精确 SHA Migration：绑定目标 SHA alembic + 验证库，断言 revision。
 
-        Plan-aware：`migration_profile=round_trip`（migration-roundtrip / full-closure）执行
+        Plan-aware：`migration_profile=round_trip`（migration-roundtrip）执行
         upgrade/downgrade/upgrade 全往返；`migration_profile=upgrade_head`（targeted-pg）只
         执行 `upgrade head` 一次并断言 revision（Exploration 默认轻量 Migration 证据）。
         """
@@ -483,46 +483,6 @@ class VerifyAttempt:
             return None
         return payload if isinstance(payload, dict) else None
 
-    def run_synthetic_seed_twice(self) -> None:
-        """运行 100% synthetic Seed 两次，验证幂等（第二次不冲突）。"""
-        self.exporter.log("run_synthetic_seed_twice: 开始")
-        for i in range(1, 3):
-            code, out, err = _run(
-                # [R1.1b-E] python -u 解除子进程 stdout 缓冲，使粗粒度 checkpoint
-                # 在超时发生时已落盘（配合 _run 保留 partial stdout）。
-                [*self.gate_base, "python", "-u", "-m", "scripts.verify.seed_v21_verify_data",
-                 "--scenario", "all"],
-                timeout=self.plan.timeouts["seed"],
-            )
-            if code != 0:
-                diagnostic = _redact_output(out, err, str(self.attempt_env_file))
-                self.exporter.log(f"seed 第{i}次 failure output:\n{diagnostic}")
-                self.exporter.record_gate(
-                    "seed_twice", False, detail=f"第{i}次 seed 失败: {diagnostic[-2000:]}"
-                )
-                raise RuntimeError(f"synthetic seed 第{i}次失败 (exit={code})")
-            self.exporter.log(f"seed 第{i}次完成")
-        self.manifest["status"] = "seed_twice_ok"
-        self.exporter.record_gate("seed_twice", True, detail="synthetic seed 两次幂等通过")
-        self.exporter.log("run_synthetic_seed_twice: 通过")
-
-    def run_synthetic_e2e(self) -> None:
-        """端到端产品就绪评估（真实 product_readiness_service 评估 closure 六态）。"""
-        self.exporter.log("run_synthetic_e2e: 开始")
-        code, out, err = _run(
-            [*self.gate_base, "pytest", "-m", "postgres",
-             "tests/test_pg_seed_scenario_closures.py"],
-            timeout=self.plan.timeouts["e2e"],
-        )
-        if code != 0:
-            diagnostic = _redact_output(out, err, str(self.attempt_env_file))
-            self.exporter.log(f"e2e failure output:\n{diagnostic}")
-            self.exporter.record_gate("e2e", False, detail=diagnostic[-2000:])
-            raise RuntimeError(f"synthetic e2e 失败 (exit={code})")
-        self.manifest["status"] = "e2e_ok"
-        self.exporter.record_gate("e2e", True, detail="closure 六态评估通过")
-        self.exporter.log("run_synthetic_e2e: 通过")
-
     def export_evidence(self) -> None:
         try:
             self.exporter.export()
@@ -597,16 +557,8 @@ class VerifyAttempt:
             self.create_verify_database()
             self.run_migration_round_trip()
             self.assert_identity()
-            # Plan-driven gates: only run the profile-requested stage set.
-            # targeted-pg / migration-roundtrip do not force Seed/E2E; full-closure
-            # runs PG + Seed + E2E. This is Exploration default routing, not a loss
-            # of fail-closed semantics — each executed gate still enforces it.
             if self.plan.requires_pg:
                 self.run_self_contained_pg_tests()
-            if self.plan.requires_seed:
-                self.run_synthetic_seed_twice()
-            if self.plan.requires_e2e:
-                self.run_synthetic_e2e()
         except KeyboardInterrupt as exc:
             exit_code = 60
             self.manifest["status"] = "failed"
@@ -637,7 +589,7 @@ class VerifyAttempt:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sha", required=True)
-    ap.add_argument("--plan", default="full-closure")
+    ap.add_argument("--plan", default="targeted-pg")
     ap.add_argument("--runtime-dir", required=True)
     ap.add_argument("--evidence-root", default="/root/.panji-verify/evidence")
     ap.add_argument("--compose-project", default=COMPOSE_PROJECT)

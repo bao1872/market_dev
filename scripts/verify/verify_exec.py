@@ -17,7 +17,7 @@ attempt-specific 变量（DATABASE_URL/REDIS_URL/JWT_SECRET/TARGET_SHA/...）
 避免 container create env 携带 attempt secrets 导致跨 attempt 污染。
 
 Redis 说明（2026-08-06 一次性审计结论）：
-    full-closure 验证执行路径（alembic/pytest/seed/e2e）完全不依赖 Redis，
+    验证执行路径（alembic/pytest）完全不依赖 Redis，
     只连 PostgreSQL。本轮 verification 不连接 Redis，attempt.env 不含 REDIS_URL。
 """
 

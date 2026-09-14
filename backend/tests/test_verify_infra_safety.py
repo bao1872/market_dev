@@ -174,9 +174,9 @@ def test_evidence_summary_reports_gate_counts() -> None:
 
 
 def test_plan_is_closed_and_registered(tmp_path: Path) -> None:
-    plan_path = _VERIFY_DIR / "plans" / "full-closure.json"
+    plan_path = _VERIFY_DIR / "plans" / "targeted-pg.json"
     plan = load_plan(plan_path)
-    assert plan.name == "full-closure"
+    assert plan.name == "targeted-pg"
     assert plan.test_profile == "pg_contract"
     injected = tmp_path / "bad.json"
     injected.write_text(
@@ -185,8 +185,6 @@ def test_plan_is_closed_and_registered(tmp_path: Path) -> None:
             "name": "bad",
             "runtime_profile": "after_close",
             "test_profile": "pg_contract",
-            "seed_profile": "v21_synthetic",
-            "e2e_profile": "closure_v21",
             "timeout_profile": "standard",
             "command": "rm -rf /",
         })
@@ -461,23 +459,6 @@ def test_cleanup_source_never_uses_volume_delete() -> None:
     assert "docker volume prune" not in source
 
 
-def test_seed_canonical_fixture_id_deterministic() -> None:
-    """[R1.4b-P2/P7] 验证 canonical fixture ID 是 deterministic uuid5（seed_twice 幂等前提）。
-
-    seed_v21_verify_data._cfixture 用 `uuid.uuid5(_NS, f"canonical/{scope}/{name}")` 生成
-    deterministic ID；同一 (scope, name) 两次必须一致（第二次 seed 不新增数量），不同
-    name 必须不同。此处按同一实现内联验证（PURE_UNIT 下 seed 模块因需 DATABASE_URL 无法导入）。
-    """
-    import uuid
-
-    ns = uuid.uuid5(uuid.NAMESPACE_DNS, "panji.verify.synthetic")
-    a1 = uuid.uuid5(ns, "canonical/core_run/2026-08-04")
-    a2 = uuid.uuid5(ns, "canonical/core_run/2026-08-04")
-    b = uuid.uuid5(ns, "canonical/core_run/2026-08-05")
-    assert a1 == a2  # 同一 scope+name → 同一 ID（幂等）
-    assert a1 != b  # 不同 name → 不同 ID（独立 lineage）
-
-
 def test_cleanup_never_destroys_reusable_runtime() -> None:
     """常驻容器（固定 project panji-verify + panji-verify-python）不得被 cleanup 删除。"""
     source = (_VERIFY_DIR / "cleanup_runner.py").read_text()
@@ -502,9 +483,9 @@ def test_run_timeout_normalizes_bytes_output_to_str(monkeypatch) -> None:
 
     def _fake_run(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(
-            cmd=["python", "-u", "-m", "scripts.verify.seed_v21_verify_data"],
+            cmd=["pytest", "-m", "postgres"],
             timeout=1800,
-            output=b"[seed] base_bars start\n[seed] base_bars end\n",
+            output=b"[pg] contract start\n[pg] contract end\n",
             stderr=b"partial stderr\n",
         )
 
@@ -515,7 +496,7 @@ def test_run_timeout_normalizes_bytes_output_to_str(monkeypatch) -> None:
     assert isinstance(out, str)
     assert isinstance(err, str)
     # partial evidence 必须保留（超时 hotspot 定位依赖它）
-    assert "[seed] base_bars start" in out
+    assert "[pg] contract start" in out
     assert "partial stderr" in err
     # 归一后可安全进入 _redact_output（原实现在 bytes 上会 TypeError）
     assert isinstance((out + err), str)

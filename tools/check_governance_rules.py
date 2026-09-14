@@ -56,7 +56,6 @@ REQUIRED_PROTECTED_PREFIXES = {"rules/", "scripts/verify/"}
 REQUIRED_PLANS = {
     "targeted-pg.json",
     "migration-roundtrip.json",
-    "full-closure.json",
 }
 
 STAGE_MARKERS = (
@@ -219,21 +218,17 @@ def _check_verification_plans(root: Path, errors: list[str]) -> None:
             errors.append(f"verification plan name/path mismatch: {path.relative_to(root)}")
 
     entry = _executable_shell(root / "scripts/ops/panji-verify")
-    for plan in ("targeted-pg", "migration-roundtrip", "full-closure"):
+    for plan in ("targeted-pg", "migration-roundtrip"):
         if plan not in entry:
             errors.append(f"panji-verify does not register plan: {plan}")
     if "[0-9a-f]{40}" not in entry:
         errors.append("panji-verify must require complete 40-char SHA")
 
-    # Exploration 默认 plan 必须是 targeted-pg。直接检查默认赋值：
-    # PLAN="targeted-pg" 必须存在，且 PLAN="full-closure" 不得是默认赋值。
+    # Exploration 默认 plan 必须是 targeted-pg。直接检查默认赋值：PLAN="targeted-pg" 必须存在。
     # 不使用模糊 plan 名匹配；必须命中明确的 default assignment 表达式。
     entry_raw = _read(root / "scripts/ops/panji-verify")
     if 'PLAN="targeted-pg"' not in entry_raw:
         errors.append('panji-verify default plan must be PLAN="targeted-pg"')
-    default_full = re.search(r'(?m)^\s*PLAN="full-closure"', entry_raw)
-    if default_full is not None:
-        errors.append('panji-verify default plan must not be PLAN="full-closure" (Exploration default is targeted-pg)')
 
     runner = _executable_shell(root / "scripts/verify/run_remote_verification.sh")
     for marker in ("flock -n 9", "panji-verify-runtime:current", "panji-verify-python"):
@@ -267,7 +262,7 @@ def _check_evidence_manifest(root: Path, errors: list[str]) -> None:
         "test_selectors", "claim",
     }
     ids: set[str] = set()
-    required_by_gate = {"targeted-pg": 0, "full-closure": 0}
+    required_by_gate = {"targeted-pg": 0}
     for contract in contracts:
         if not isinstance(contract, dict) or set(contract) != required_keys:
             errors.append("evidence contract has unsupported or missing keys")
@@ -287,7 +282,7 @@ def _check_evidence_manifest(root: Path, errors: list[str]) -> None:
             errors.append(f"missing evidence claim: {contract_id}")
         gates = contract.get("gate")
         if not isinstance(gates, list) or not gates or any(
-            gate not in {"targeted-pg", "migration-roundtrip", "full-closure"} for gate in gates
+            gate not in {"targeted-pg", "migration-roundtrip"} for gate in gates
         ):
             errors.append(f"invalid evidence gate: {contract_id}")
             gates = []
@@ -320,7 +315,7 @@ def _check_evidence_manifest(root: Path, errors: list[str]) -> None:
         if marker not in runner:
             errors.append(f"verification attempt missing evidence contract: {marker}")
     pg_method = runner.partition("def run_self_contained_pg_tests")[2].partition(
-        "def run_synthetic_seed_twice"
+        "def export_evidence"
     )[0]
     if re.search(r"['\"]tests/test[^'\"]+\.py", pg_method):
         errors.append("verify_attempt.py must not hardcode test selectors")

@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 ALLOWED_LEVELS = {1, 2, 3}
-ALLOWED_GATES = {"targeted-pg", "full-closure", "migration-roundtrip"}
+ALLOWED_GATES = {"targeted-pg", "migration-roundtrip"}
 ALLOWED_STATUSES = {
     "passed",
     "failed",

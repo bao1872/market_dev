@@ -7,7 +7,7 @@
   evidence_dir/
     manifest.json       — attempt 身份模型（target_sha/attempt_id/verify_database/
                           compose_project/evidence_dir/verify_db_url/compose_file/env_file）
-    gates.json          — 各阶段门禁结果（preflight/migration/pg_tests/seed_twice/e2e）
+    gates.json          — 各阶段门禁结果（preflight/migration/pg_tests）
     evidence-coverage.json — required contract 的真实 nodeid 与七态结果
     pytest-evidence.json — pytest plugin 原始执行报告（如存在）
     logs.txt            — 运行日志快照

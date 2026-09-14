@@ -1,6 +1,6 @@
 """Migration 093 contract — invite_codes.grant_days server_default 30 -> 1。
 
-真实 PostgreSQL 验证（PANJI_REMOTE_VERIFY_DB_TEST=1, plan=targeted-pg / full-closure）：
+真实 PostgreSQL 验证（PANJI_REMOTE_VERIFY_DB_TEST=1, plan=targeted-pg）：
 - 093 执行后 invite_codes.grant_days column_default = 1（实际查 information_schema）
 - migration 前已有样本行 grant_days=X，migration 后仍为 X（只改变 schema default，不改变历史行）
 - 093 只改 invite_codes.grant_days 的 server_default，不触碰 subscriptions / expires_at
@@ -218,7 +218,7 @@ async def _cleanup_verify_rows(
     created_by: uuid.UUID,
     code_hashes: tuple[str, str],
 ) -> None:
-    """精确清理本测试自己 commit 的 fixtures（验证隔离，防止 full-closure 阶段污染）。
+    """精确清理本测试自己 commit 的 fixtures（验证隔离，防止污染同一 verify DB 的后续测试）。
 
     仅按本测试自己的 exact code_hash / exact user_id 删除：
     禁止 LIKE / TRUNCATE / 全表 DELETE / 跨测试清理。

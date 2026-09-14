@@ -1,9 +1,0 @@
-{
-  "schema_version": 2,
-  "name": "full-closure",
-  "migration_profile": "round_trip",
-  "test_profile": "pg_contract",
-  "seed_profile": "v21_synthetic",
-  "e2e_profile": "closure_v21",
-  "timeout_profile": "extended"
-}

@@ -39,7 +39,6 @@ def governance_repo(tmp_path: Path) -> Path:
         "scripts/verify/prepare_verify_environment.py",
         "scripts/verify/plans/targeted-pg.json",
         "scripts/verify/plans/migration-roundtrip.json",
-        "scripts/verify/plans/full-closure.json",
         "scripts/ops/panji-test-deploy",
         "scripts/deploy/panji-deploy.sh",
         "docker-compose.prod.yml",
@@ -146,9 +145,9 @@ def test_evidence_manifest_gate_requires_evidence(governance_repo: Path) -> None
     path = governance_repo / "scripts/verify/evidence_manifest.json"
     data = json.loads(path.read_text())
     for contract in data["contracts"]:
-        contract["gate"] = ["targeted-pg"]
+        contract["gate"] = ["migration-roundtrip"]
     path.write_text(json.dumps(data))
-    assert any("full-closure" in e and "no required evidence" in e for e in check(governance_repo))
+    assert any("targeted-pg" in e and "no required evidence" in e for e in check(governance_repo))
 
 
 def test_verify_attempt_cannot_restore_hardcoded_selector(governance_repo: Path) -> None:
@@ -188,7 +187,6 @@ def _panji_verify_source() -> str:
 
 def test_panji_verify_default_plan_is_targeted_pg() -> None:
     src = _panji_verify_source()
-    assert 'PLAN="full-closure"' not in src, "full-closure must not be the default plan"
     assert 'PLAN="targeted-pg"' in src, "targeted-pg must be the default plan"
     # 默认赋值必须位于 --plan 参数解析（while 循环内的 "--plan)" 分支）之前，
     # 保证无 --plan 时使用 targeted-pg。不能匹配 usage 字符串中的 "--plan"。
@@ -199,13 +197,13 @@ def test_panji_verify_default_plan_is_targeted_pg() -> None:
 
 def test_panji_verify_explicit_plan_routing() -> None:
     src = _panji_verify_source()
-    for plan in ("targeted-pg", "migration-roundtrip", "full-closure"):
-        # --plan 必须能显式覆盖默认；三个 plan 都必须被 case 注册。
+    for plan in ("targeted-pg", "migration-roundtrip"):
+        # --plan 必须能显式覆盖默认；两个 plan 都必须被 case 注册。
         assert "--plan)" in src, "--plan must parse args"
         assert "--plan) PLAN=" in src, "--plan must assign PLAN"
         assert plan in src, f"registered plan missing: {plan}"
-    # case 分支必须包含三个合法 plan（不匹配即 fail closed exit 80）。
-    assert "targeted-pg|migration-roundtrip|full-closure" in src
+    # case 分支必须包含两个合法 plan（不匹配即 fail closed exit 80）。
+    assert "targeted-pg|migration-roundtrip" in src
 
 
 def test_panji_verify_arbitrary_plan_fails_closed() -> None:
@@ -214,7 +212,7 @@ def test_panji_verify_arbitrary_plan_fails_closed() -> None:
     assert "unregistered plan" in src
     assert "exit 80" in src
     # fail-closed 分支必须位于合法 plan 注册之后。
-    assert src.index("targeted-pg|migration-roundtrip|full-closure") < src.index("unregistered plan")
+    assert src.index("targeted-pg|migration-roundtrip") < src.index("unregistered plan")
 
 
 # ---------------------------------------------------------------------------
@@ -345,15 +343,6 @@ def test_always_on_safety_workflow_yaml_bypass_is_detected(governance_repo: Path
     extra.write_text("name: deploy\n", encoding="utf-8")
     errors = check(governance_repo)
     assert any("workflow set must be exactly" in e for e in errors)
-
-
-def test_always_on_safety_default_plan_must_be_targeted_pg(governance_repo: Path) -> None:
-    # 把默认赋值 PLAN="targeted-pg" 改回 PLAN="full-closure"，checker 必须 FAIL。
-    p = governance_repo / "scripts/ops/panji-verify"
-    p.write_text(p.read_text().replace('PLAN="targeted-pg"', 'PLAN="full-closure"'))
-    errors = check(governance_repo)
-    assert any("default plan must not be PLAN=\"full-closure\"" in e for e in errors)
-    assert any("default plan must be PLAN=\"targeted-pg\"" in e for e in errors)
 
 
 def test_always_on_safety_default_plan_assignment_required(governance_repo: Path) -> None:

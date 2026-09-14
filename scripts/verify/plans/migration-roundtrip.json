@@ -3,7 +3,5 @@
   "name": "migration-roundtrip",
   "migration_profile": "round_trip",
   "test_profile": "none",
-  "seed_profile": "none",
-  "e2e_profile": "none",
   "timeout_profile": "standard"
 }

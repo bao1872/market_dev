@@ -3,7 +3,5 @@
   "name": "targeted-pg",
   "migration_profile": "upgrade_head",
   "test_profile": "pg_contract",
-  "seed_profile": "none",
-  "e2e_profile": "none",
   "timeout_profile": "standard"
 }

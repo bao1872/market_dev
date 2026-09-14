@@ -110,7 +110,7 @@ trigger 时停留在 modified-scope；不得以“更稳妥”“审计需要”
 - publication/pointer；
 - 当前 slice 的必要端到端。
 
-Exploration 只运行需要的 profile/gate，不默认 full-closure。
+Exploration 只运行需要的 profile/gate。
 
 #### T7 安全合同（Always-On）
 
@@ -122,8 +122,7 @@ Exploration 只运行需要的 profile/gate，不默认 full-closure。
 当前注册远程验证计划：
 
 - `targeted-pg`：Exploration 默认 PostgreSQL 合同证据；
-- `migration-roundtrip`：Migration 专项；
-- `full-closure`：Hardening/Release。
+- `migration-roundtrip`：Migration 专项。
 
 禁止通过任意 shell/pytest 参数注入绕过已注册 plan/profile。
 

@@ -181,7 +181,7 @@ def _synthetic_external_ceiling() -> list[ProductReadinessState]:
 
     100 股小样本下 board_facts 门禁（raw_rows≥5000/industry≥200/concept≥300/
     relation≥60000/coverage≥0.99）无法合法达成 → board_facts unavailable → blocked。
-    证明外部门禁对小规模 synthetic 的真实拒绝能力；不计入 full-closure 绿色验收。
+    证明外部门禁对小规模 synthetic 的真实拒绝能力；不计入正式绿色验收。
     """
     states = _mandatory(board=READINESS_UNAVAILABLE)
     states[1] = ProductReadinessState(

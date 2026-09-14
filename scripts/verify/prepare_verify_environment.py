@@ -5,7 +5,7 @@
   - 只 inspect trading-postgres 拿 PG 凭据与共享网络（验证库跑在已有 PG 上）
   - 不再 inspect backend/frontend（不启动 verify-backend / verify-frontend 容器）
   - 不再输出 VERIFY_TEST_IMAGE / VERIFY_BACKEND_IMAGE / VERIFY_FRONTEND_IMAGE / host port
-  - 本轮 verification 不连接 Redis（一次性审计结论：full-closure 仅连 PG），不输出 REDIS_URL
+  - 本轮 verification 不连接 Redis（一次性审计结论：verification 仅连 PG），不输出 REDIS_URL
   - attempt.env 写入固定 runtime 路径（容器内只读挂载 /run/panji-verify/attempt.env）
   - 容器常驻 env 只持有稳定变量（APP_ENV/PANJI_SCHEDULER_ENABLED/TZ）；
     attempt-specific 变量全部来自本文件，由 verify_exec.py 动态注入每个 fresh process

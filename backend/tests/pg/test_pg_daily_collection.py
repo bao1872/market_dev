@@ -11,8 +11,7 @@ commit 后 expire ORM 属性，异步上下文再访问 ``inst.id`` 会触发 ``
 
 [fixture 事务本地化] 本文件三个测试一律 ``await session.flush()`` **不 commit**：测试内的 ``_query_daily_bars`` / ``_get_symbol`` 与测试处于同一 PG
 transaction，flush 后即可真实读到；测试结束 session 关闭时未提交事务自动回滚，
-fixture 不会残留到 full-closure 的 seed / E2E phase（synthetic seed universe 为
-``600000..605199`` 且 symbol 唯一，残留的 60000x 测试行会撞 ``instruments_symbol_key``）。
+fixture 不会残留给同一 verify DB 生命周期内的后续测试 / phase。
 
 覆盖：
 - 5.1 DB complete：DB 目标范围完整 → provider 不被调用（provider=0, heavy write=0）。

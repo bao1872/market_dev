@@ -45,7 +45,7 @@ def test_canonical_six_state_closure(name: str) -> None:
 def test_synthetic_external_ceiling_is_blocked_diagnostic() -> None:
     """非验收诊断场景：小规模 synthetic 输入被正式外部门禁拒绝 → blocked。
 
-    不计入 full-closure 绿色验收，仅证明外部门禁对小规模 synthetic 的真实拒绝能力。
+    不计入正式绿色验收，仅证明外部门禁对小规模 synthetic 的真实拒绝能力。
     """
     states, expected = get_scenario("synthetic_external_ceiling")
     result = evaluate_closure(states)

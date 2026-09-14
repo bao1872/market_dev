@@ -5,7 +5,7 @@
       "contract_id": "atomic_publication",
       "governance_level": 2,
       "semantic_owner": "app.repositories.publication_repository",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_atomic_publication.py"],
       "claim": "Atomic publication and pointer persistence use real PostgreSQL semantics."
@@ -14,7 +14,7 @@
       "contract_id": "projection_lifecycle",
       "governance_level": 2,
       "semantic_owner": "app.services.strategy_batch_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_projection_lifecycle.py"],
       "claim": "Projection lifecycle state and persistence remain internally consistent."
@@ -23,7 +23,7 @@
       "contract_id": "stock_call_count_boundary",
       "governance_level": 2,
       "semantic_owner": "app.services.strategy_batch_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_100_stock_call_counts.py"],
       "claim": "Batch provider and computation call counts remain bounded for a representative universe."
@@ -32,7 +32,7 @@
       "contract_id": "review_runtime_blocker_closure",
       "governance_level": 2,
       "semantic_owner": "app.services.product_readiness_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_review_runtime_blocker_closure.py"],
       "claim": "Review runtime blocker states close truthfully against PostgreSQL."
@@ -41,7 +41,7 @@
       "contract_id": "after_close_crash_resume",
       "governance_level": 2,
       "semantic_owner": "app.services.after_close_orchestrator",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
         "tests/test_pg_after_close_crash_resume_closure.py",
@@ -53,7 +53,7 @@
       "contract_id": "review_observation_persistence",
       "governance_level": 2,
       "semantic_owner": "app.repositories.market_review_repository",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_review_observation_persistence_pg.py"],
       "claim": "Canonical Review observations round-trip and remain idempotent in PostgreSQL."
@@ -62,7 +62,7 @@
       "contract_id": "history_progress_concurrency",
       "governance_level": 2,
       "semantic_owner": "app.repositories.first_pyramid_history_repository",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_history_progress_lost_update_closure.py"],
       "claim": "Concurrent history progress writers preserve updates and checkpoint visibility."
@@ -71,7 +71,7 @@
       "contract_id": "history_v3_materialization",
       "governance_level": 2,
       "semantic_owner": "app.services.first_pyramid_history_service.materialize_history_v3_from_core",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_history_v3_materialize.py"],
       "claim": "History v3 projection materializes idempotently through the production PostgreSQL persistence contract."
@@ -80,7 +80,7 @@
       "contract_id": "review_current_fact_lineage",
       "governance_level": 2,
       "semantic_owner": "app.services.market_review_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
         "tests/test_slice1_current_facts_lock.py",
@@ -92,7 +92,7 @@
       "contract_id": "dsa_compatibility_publication",
       "governance_level": 2,
       "semantic_owner": "app.services.dsa_projection_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_dsa_compat_after_close04.py"],
       "claim": "DSA compatibility projection and publication remain an explicit, independently persisted consumer."
@@ -101,7 +101,7 @@
       "contract_id": "review_http_runtime",
       "governance_level": 2,
       "semantic_owner": "app.api.v1.endpoints.review",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_review_http_runtime_c2.py"],
       "claim": "Review HTTP routing, authorization, lineage, errors, and client-facing fields use the production app contract."
@@ -110,7 +110,7 @@
       "contract_id": "bars_provider_persistence",
       "governance_level": 2,
       "semantic_owner": "app.services.bars_scheduler_service.BarsSchedulerService",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_bars_provider_persistence_f1b1.py"],
       "claim": "Serial and bounded-spawn Bars scheduler paths persist equivalent daily and minute facts idempotently."
@@ -119,7 +119,7 @@
       "contract_id": "review_scope_diagnostics_lineage",
       "governance_level": 2,
       "semantic_owner": "app.services.review_scope_diagnostics_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_review_diagnostics_lineage.py"],
       "claim": "Review scope history/cross-sectional are built from the formal published-Review date axis (reuse of FORMAL REVIEW READ OWNER), preserve missing-date slots as null, and exclude broken-pointer dates."
@@ -128,7 +128,7 @@
       "contract_id": "review_price_history_composition_lineage",
       "governance_level": 2,
       "semantic_owner": "app.services.review_scope_diagnostics_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_review_price_history_lineage.py"],
       "claim": "Price Composition history (capital_tilt + leadership) is read only from the formally published run of each date; an unpublished same-day run cannot pollute it, and a published date without that scope's Composition keeps a null date slot."
@@ -137,7 +137,7 @@
       "contract_id": "review_scope_explorer_compare_lineage",
       "governance_level": 2,
       "semantic_owner": "app.services.review_scope_explorer_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_pg_review_scope_explorer_compare_lineage.py"],
       "claim": "Explorer compare-first read (ReviewScopeObservationFact LEFT JOIN ReviewScopeCompositionSnapshot) takes compareFacts only from the formally published run; an unpublished same-day run cannot pollute facts or the Composition LEFT JOIN. When industry_l1 and concept coexist, peer percentile is computed per family, never cross-family."
@@ -146,7 +146,7 @@
       "contract_id": "self_selection_market_capability_boundary",
       "governance_level": 2,
       "semantic_owner": "app.api.market",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_permission_matrix_p0.py"],
       "claim": "For users resolved from explicit user_capabilities (legacy_plan_fallback / C10 excluded), self_selection, market_data, and research_replay are enforced independently at the market-data boundary. scope=market requires market_data. scope=watchlist requires self_selection and is constrained server-side to the current user's active UserWatchlistItem membership. Instrument-scope stock-detail endpoints, including bars, quote, chart-snapshot, indicators, structural-factors, temporal-features, instruments/{id}/events, and instruments/{id}/send-feishu, allow market_data for any instrument or self_selection only for an instrument in that user's active watchlist. Symbol-scope stock-detail endpoints stocks/{symbol}/context and stocks/{symbol}/first-pyramid use the same resource-scope authorization through require_stock_symbol_market_access. export authorization uses body.scope as the single source of truth. No capability is inherited; research_replay-only is denied. Anonymous access is 401, market_data-only access to scope=watchlist is 403, research_replay-only access to market data and stock detail is 403, and a market_data user passes the guard before business validation (invalid timeframe -> 400 / nonexistent instrument -> 404)."
@@ -155,7 +155,7 @@
       "contract_id": "watchlist_capability_boundary",
       "governance_level": 2,
       "semantic_owner": "app.api.watchlist",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_watchlist_metadata_boundary.py"],
       "claim": "For users resolved from explicit user_capabilities (legacy_plan_fallback / C10 excluded from this contract), /v1/watchlist/monitor-status requires self_selection only and exposes only that user's own active watchlist (200 for self_selection-only and both, 403 for market_data-only, 200 for admin); GET /v1/watchlist requires self_selection only (403 for market_data-only); POST and DELETE /v1/watchlist require self_selection only (403 for market_data-only). GET /v1/watchlist returns metadata-only summary items (watchlist_item_id/instrument_id/symbol/name/market/source/created_at) and never exposes market/strategy metrics (price, change_pct, metrics, latest_event, BB, node, POC, first_pyramid, bars)."
@@ -164,7 +164,7 @@
       "contract_id": "period_unit_is_days",
       "governance_level": 2,
       "semantic_owner": "app.services.subscription_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_period_unit_is_days.py"],
       "claim": "邀请码/订阅/续期 1 单位 = 1 天（禁止 ×30 回漂）；历史 grant_months=1 仍 = 30 天（×30 兼容）。"
@@ -173,7 +173,7 @@
       "contract_id": "invite_grant_days_migration_093",
       "governance_level": 2,
       "semantic_owner": "alembic.versions.093_invite_grant_days_default",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/test_migration_093_invite_grant_days_default_contract.py"],
       "claim": "093 将 invite_codes.grant_days server_default 由 30 改为 1；migration 只改 schema default，不触碰 subscriptions/expires_at，不 UPDATE/DELETE 任何 invite_codes 历史行。"
@@ -182,7 +182,7 @@
       "contract_id": "smc_concurrency_and_capability_access_boundary",
       "governance_level": 2,
       "semantic_owner": "app.services.monitor_crossing_service",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/pg/test_pg_smc_concurrency_access.py"],
       "claim": "两个并发 PostgreSQL 事务写同一稳定 SMC BOS/CHoCH event_key 时恰好一次：败者 write_event 返回 None 后在 outbox enqueue 之前被跳过，故同一 event_key 的 StrategyEvent=1 且 Outbox=1（不双发通知）。capability resolver 区分「无 UserCapability 行」（允许 legacy_plan_fallback）与「capability 行存在但已过期」（legacy plan 不得重新扩权、受保护操作 denied），且显式 capability 行优先于更宽的 legacy plan。"
@@ -191,7 +191,7 @@
       "contract_id": "daily_collection_provider_boundary",
       "governance_level": 2,
       "semantic_owner": "app.repositories.bar_repository",
-      "gate": ["targeted-pg", "full-closure"],
+      "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": ["tests/pg/test_pg_daily_collection.py"],
       "claim": "日常采集遵守 DB 优先读（DB 完整时 provider 不被调用）、单日缺失时请求最窄窗口（start=end=D），且 TDX host 轮转封装在适配器内部，server failure 绝不降级 Eastmoney/THS（server failure != provider failure）。"

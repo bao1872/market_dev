@@ -3,7 +3,7 @@
 set -euo pipefail
 
 usage() {
-  echo "usage: $0 run --sha <FULL_SHA> [--plan targeted-pg|migration-roundtrip|full-closure] [--ref <verify-branch>]" >&2
+  echo "usage: $0 run --sha <FULL_SHA> [--plan targeted-pg|migration-roundtrip] [--ref <verify-branch>]" >&2
   exit 80
 }
 
@@ -12,7 +12,6 @@ shift
 SHA=""
 VERIFY_REF=""
 # Exploration 默认只做 targeted-pg（upgrade_head + pg_contract）。
-# full-closure（PG + Seed + E2E）属于 Hardening/Release，必须显式 --plan full-closure。
 PLAN="targeted-pg"
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -29,9 +28,9 @@ echo "$SHA" | grep -Eq '^[0-9a-f]{40}$' || {
   exit 80
 }
 case "$PLAN" in
-  targeted-pg|migration-roundtrip|full-closure) ;;
+  targeted-pg|migration-roundtrip) ;;
   *)
-    echo "panji-verify: unregistered plan '$PLAN' (allowed: targeted-pg, migration-roundtrip, full-closure)" >&2
+    echo "panji-verify: unregistered plan '$PLAN' (allowed: targeted-pg, migration-roundtrip)" >&2
     exit 80
     ;;
 esac

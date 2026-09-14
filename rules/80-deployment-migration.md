@@ -180,7 +180,7 @@ Exploration 要求：
 - 不创建新 PG Volume；
 - 不用模糊 prune。
 
-存在验证栈不意味着 Exploration 每轮必须 full-closure。
+存在验证栈不意味着 Exploration 每轮必须跑全部已注册 plan。
 
 ### 9.1 验证执行安全合同（Always-On）
 
