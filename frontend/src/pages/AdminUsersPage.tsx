@@ -1529,13 +1529,6 @@ export default function AdminUsersPage() {
                         onChange={(e) => setExpiresAtEdit(e.target.value)}
                       />
                     </div>
-                    <div className="form-row">
-                      <label className="form-label">当前套餐（仅商业记录）</label>
-                      <div className="readonly-value">
-                        {selectedMember?.plan_code ? getPlanName(selectedMember.plan_code, plans) : '无'}
-                        <small className="form-hint">权限以 capability 为准，套餐仅商业记录，不作正常权限修改入口</small>
-                      </div>
-                    </div>
                   </div>
                   <div className="notice drawer-notice">
                     手工修改到期日仅用于异常修正；正常注册和续期必须通过邀请码兑换记录完成。

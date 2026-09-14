@@ -1735,5 +1735,16 @@ else
   bad "P1-C F: worker state changed on fence wait timeout (state=$(cat "${WORKER_STATE_FILE}" 2>/dev/null))"
 fi
 
+# 5) [静态] frontend build/sync 失败必须经 deploy() 显式 return 回到 main failure matrix：
+#    `if ! deploy` 条件上下文不触发 set -e，缺少显式 return 会继续 sync / fail，
+#    从而绕过 main() 的 _restore_after_close_pickup_if_owned（owned worker 恢复）。
+DEPLOY_SRC_STATIC="$(sed -n '/^deploy() {/,/^}/p' "${SERVER_SCRIPT}")"
+if printf '%s' "${DEPLOY_SRC_STATIC}" | grep -q 'build_frontend_dist || return 1' \
+   && printf '%s' "${DEPLOY_SRC_STATIC}" | grep -q 'sync_frontend_runtime || return 1'; then
+  ok "P1-C F: deploy() returns explicitly on frontend build/sync failure (owned restore reachable)"
+else
+  bad "P1-C F: deploy() missing explicit return on frontend build/sync failure"
+fi
+
 echo "部署 dry-run 合同测试：${PASS} 通过 / ${FAIL} 失败"
 [[ "${FAIL}" -eq 0 ]]

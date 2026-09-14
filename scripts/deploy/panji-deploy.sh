@@ -2020,8 +2020,10 @@ deploy() {
     local need_frontend=false
     if [[ "${FRONTEND_CHANGED}" == "true" ]]; then
         need_frontend=true
-        build_frontend_dist
-        sync_frontend_runtime
+        # `if ! deploy` 条件上下文中不能依赖 set -e 退出：必须显式 return，
+        # 否则 build 失败会继续 sync / fail 路径绕过 main() 的 owned worker 恢复。
+        build_frontend_dist || return 1
+        sync_frontend_runtime || return 1
     fi
 
     # 3. backend 运行代码
