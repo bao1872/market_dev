@@ -654,3 +654,52 @@ def build_smc_monitor_target_set(
         active_order_block_targets=ob_targets,
         target_set_version=target_set_version,
     )
+
+
+# ---------------------------------------------------------------------------
+# runtime bundle：TargetSet + effective params 同源
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SmcRuntimeTargetBundle:
+    """把 TargetSet 与**产生它的同一份** effective params 绑在一起。
+
+    禁止下游再从未知来源（DEFAULT_PARAMS / manifest / 第二份 config）重建 params，
+    否则 realtime 判定所用的 ``internal_filter_confluence`` 会与 TargetSet 脱钩。
+    """
+
+    target_set: SmcMonitorTargetSet
+    effective_params: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "effective_params", _freeze(self.effective_params))
+
+
+def compute_smc_params_hash(params: Mapping[str, Any]) -> str:
+    """effective params 的 canonical hash（与 TargetSet 内部使用同一 serializer）。"""
+    if not isinstance(params, Mapping):
+        raise SmcTargetContractError("effective params must be mapping")
+    return _sha256_json(dict(params))
+
+
+def build_smc_runtime_target_bundle(
+    daily_bars: pd.DataFrame,
+    smc_result: dict[str, Any],
+) -> SmcRuntimeTargetBundle:
+    """构建 runtime bundle，并校验 params 与 TargetSet 同源。
+
+    Raises:
+        SmcTargetContractError: 缺少 effective params，或 runtime params hash 与
+            TargetSet 的 ``params_hash`` 不一致。
+    """
+    params = smc_result.get("params")
+    if not isinstance(params, dict):
+        raise SmcTargetContractError("smc_result missing effective params")
+
+    target_set = build_smc_monitor_target_set(daily_bars, smc_result)
+
+    if compute_smc_params_hash(params) != target_set.contract_identity["params_hash"]:
+        raise SmcTargetContractError("runtime params hash diverges from target set")
+
+    return SmcRuntimeTargetBundle(target_set=target_set, effective_params=params)

@@ -23,9 +23,12 @@ import pandas as pd
 import pytest
 
 from app.services.smc_monitor_target_service import (
+    SmcRuntimeTargetBundle,
     SmcTargetContractError,
     build_smc_monitor_target_set,
+    build_smc_runtime_target_bundle,
     compute_daily_bars_hash,
+    compute_smc_params_hash,
 )
 
 DEFAULT_PARAMS = {"min_dir_bars": 5}
@@ -940,3 +943,48 @@ class TestTargetSetImmutability:
         with pytest.raises(TypeError):
             ts.structure_context["x"] = 1
         assert ts.to_dict()["active_targets"]["structure_targets"] == []
+
+
+# =============================================================================
+# PART 2：TargetSet + effective params 同源 runtime bundle
+# =============================================================================
+
+
+class TestRuntimeTargetBundle:
+    def test_bundle_params_hash_matches_target_set(self):
+        sh = _slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False)
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        smc = _smc(_structure(swing_high=sh), params={"internal_filter_confluence": True})
+        bundle = build_smc_runtime_target_bundle(bars, smc)
+        assert isinstance(bundle, SmcRuntimeTargetBundle)
+        assert bundle.target_set.contract_identity["params_hash"] == compute_smc_params_hash(
+            {"internal_filter_confluence": True}
+        )
+
+    def test_bundle_effective_params_is_frozen(self):
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        bundle = build_smc_runtime_target_bundle(
+            bars, _smc(_structure(), params={"internal_filter_confluence": True})
+        )
+        with pytest.raises(TypeError):
+            bundle.effective_params["internal_filter_confluence"] = False
+
+    def test_missing_params_raises(self):
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        with pytest.raises(SmcTargetContractError):
+            build_smc_runtime_target_bundle(bars, {"structure_target_state": _structure(), "order_blocks": []})
+
+    def test_params_hash_is_key_order_insensitive(self):
+        assert compute_smc_params_hash({"a": 1, "b": 2}) == compute_smc_params_hash({"b": 2, "a": 1})
+
+    def test_params_hash_rejects_non_mapping(self):
+        with pytest.raises(SmcTargetContractError):
+            compute_smc_params_hash(["not", "a", "mapping"])
+
+    def test_bundle_target_set_is_the_one_built_from_smc_result(self):
+        sh = _slot(level=105.0, anchor_index=3, anchor_time="2026-01-04T00:00:00", crossed=False)
+        bars = _bars([("2026-01-01", 10, 11, 9, 10.5)])
+        smc = _smc(_structure(swing_high=sh), params={"internal_filter_confluence": True})
+        bundle = build_smc_runtime_target_bundle(bars, smc)
+        direct = build_smc_monitor_target_set(bars, smc)
+        assert bundle.target_set.target_set_version == direct.target_set_version
