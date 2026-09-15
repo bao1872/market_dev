@@ -7,13 +7,17 @@ the subprocess calls are mocked. They assert the contract that bit us before:
   * a copy (C) leaves the source file existing (NOT deleted);
   * a rename (R) deletes the old path and adds the new path;
   * an empty manifest (the origin/dev == HEAD false green) is a hard FAIL
-    unless --allow-empty is explicit;
+    unless --allow-empty is explicit — FOR BOTH the full T0 AND --mypy-only;
+  * a committed range whose BASE is not an ancestor of HEAD is a hard FAIL
+    (IDENTITY_INVALID): the three-dot diff would otherwise silently use the
+    merge-base and not represent the claimed task delta;
   * python / frontend / other files are partitioned correctly;
   * a language with changed source but MISSING required tooling is a hard FAIL
     (TOOLING_MISSING) — never a silent pass.
-"""
-from unittest import mock
 
+Isolation: every monkeypatch is done through the pytest `monkeypatch` fixture, so
+patches are automatically reverted per test. No `.start()` leaks remain.
+"""
 import pytest
 from t0_gate import (
     CheckerResult,
@@ -27,6 +31,65 @@ from t0_gate import (
 )
 
 pytestmark = pytest.mark.pure_unit
+
+
+def _patch_run(monkeypatch, t0_gate_module, fake_run) -> None:
+    monkeypatch.setattr(t0_gate_module.subprocess, "run", fake_run)
+
+
+def _patch_attr(monkeypatch, module, name: str, value) -> None:
+    monkeypatch.setattr(module, name, value)
+
+
+def _patch_resolvers(monkeypatch, t0_gate_module) -> None:
+    """Point every tool resolver at a dummy binary so the mocked subprocess runs.
+
+    Without this, run_* checks the REAL filesystem for the binary and would report
+    TOOLING_MISSING in a test environment that lacks the venv / node_modules.
+    """
+    _patch_attr(monkeypatch, t0_gate_module, "_resolve_ruff", lambda: "/fake/ruff")
+    _patch_attr(monkeypatch, t0_gate_module, "_resolve_mypy_python", lambda: "/fake/python")
+    _patch_attr(monkeypatch, t0_gate_module, "_resolve_eslint", lambda: "/fake/eslint")
+    _patch_attr(monkeypatch, t0_gate_module, "_resolve_tsc", lambda: "/fake/tsc")
+
+
+class _FakeResult:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _make_fake_run(
+    canned_diff: str,
+    ruff_rc: int = 0,
+    mypy_rc: int = 0,
+    eslint_rc: int = 0,
+    tsc_rc: int = 0,
+    pycompile_rc: int = 0,
+):
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, *args, **kwargs):
+        calls.append(list(cmd))
+        prog = cmd[0]
+        if prog == "git":
+            return _FakeResult(0, canned_diff, "")
+        if "ruff" in prog:
+            return _FakeResult(ruff_rc, "", "ruff-err" if ruff_rc else "")
+        if "eslint" in prog:
+            return _FakeResult(eslint_rc, "", "")
+        if "tsc" in prog:
+            return _FakeResult(tsc_rc, "", "")
+        if "py_compile" in cmd:
+            return _FakeResult(pycompile_rc, "", "")
+        if "mypy" in cmd:
+            return _FakeResult(mypy_rc, "", "mypy-err" if mypy_rc else "")
+        if "python" in prog or prog.endswith("python3"):
+            return _FakeResult(mypy_rc, "", "mypy-err" if mypy_rc else "")
+        return _FakeResult(0, "", "")
+
+    return fake_run, calls
 
 
 def test_parse_name_status_handles_all_statuses() -> None:
@@ -147,66 +210,9 @@ def test_evaluate_fails_on_tooling_missing() -> None:
     assert evaluate(manifest, results, allow_empty=False) is False
 
 
-class _FakeResult:
-    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
-        self.returncode = returncode
-        self.stdout = stdout
-        self.stderr = stderr
+def test_main_end_to_end_deleted_files_excluded(monkeypatch) -> None:
+    import t0_gate
 
-
-def _make_fake_run(
-    canned_diff: str,
-    ruff_rc: int = 0,
-    mypy_rc: int = 0,
-    eslint_rc: int = 0,
-    tsc_rc: int = 0,
-    pycompile_rc: int = 0,
-):
-    calls: list[list[str]] = []
-
-    def fake_run(cmd, *args, **kwargs):
-        calls.append(list(cmd))
-        prog = cmd[0]
-        if prog == "git":
-            return _FakeResult(0, canned_diff, "")
-        if "ruff" in prog:
-            return _FakeResult(ruff_rc, "", "ruff-err" if ruff_rc else "")
-        if "eslint" in prog:
-            return _FakeResult(eslint_rc, "", "")
-        if "tsc" in prog:
-            return _FakeResult(tsc_rc, "", "")
-        if "py_compile" in cmd:
-            return _FakeResult(pycompile_rc, "", "")
-        if "mypy" in cmd:
-            return _FakeResult(mypy_rc, "", "mypy-err" if mypy_rc else "")
-        if "python" in prog or prog.endswith("python3"):
-            return _FakeResult(mypy_rc, "", "mypy-err" if mypy_rc else "")
-        return _FakeResult(0, "", "")
-
-    return fake_run, calls
-
-
-def monkeypatch_run(t0_gate_module, fake_run) -> None:
-    mock.patch.object(t0_gate_module.subprocess, "run", side_effect=fake_run).start()
-
-
-def monkeypatch_attr(module, name: str, value) -> None:
-    mock.patch.object(module, name, value).start()
-
-
-def fake_resolvers(t0_gate_module) -> None:
-    """Point every tool resolver at a dummy binary so the mocked subprocess runs.
-
-    Without this, run_* checks the REAL filesystem for the binary and would report
-    TOOLING_MISSING in a test environment that lacks the venv / node_modules.
-    """
-    monkeypatch_attr(t0_gate_module, "_resolve_ruff", lambda: "/fake/ruff")
-    monkeypatch_attr(t0_gate_module, "_resolve_mypy_python", lambda: "/fake/python")
-    monkeypatch_attr(t0_gate_module, "_resolve_eslint", lambda: "/fake/eslint")
-    monkeypatch_attr(t0_gate_module, "_resolve_tsc", lambda: "/fake/tsc")
-
-
-def test_main_end_to_end_deleted_files_excluded() -> None:
     canned = "\n".join(
         [
             "M\tbackend/tests/foo.py",
@@ -217,10 +223,8 @@ def test_main_end_to_end_deleted_files_excluded() -> None:
         ]
     )
     fake_run, calls = _make_fake_run(canned)
-    import t0_gate
-
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
     rc = main(["--base", "0582d202", "--head", "1775d0b1"])
     assert rc == 0
 
@@ -236,13 +240,13 @@ def test_main_end_to_end_deleted_files_excluded() -> None:
     assert any("py_compile" in c for c in calls)
 
 
-def test_python_changed_schedules_ruff_pycompile_mypy() -> None:
-    canned = "M\tbackend/tests/foo.py\n"
-    fake_run, calls = _make_fake_run(canned)
+def test_python_changed_schedules_ruff_pycompile_mypy(monkeypatch) -> None:
     import t0_gate
 
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
+    canned = "M\tbackend/tests/foo.py\n"
+    fake_run, calls = _make_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
     rc = main(["--base", "0582d202", "--head", "1775d0b1"])
     assert rc == 0
     assert any("ruff" in c[0] for c in calls if c)
@@ -250,23 +254,23 @@ def test_python_changed_schedules_ruff_pycompile_mypy() -> None:
     assert any("mypy" in c for c in calls)
 
 
-def test_main_empty_manifest_returns_1() -> None:
-    fake_run, _ = _make_fake_run("")  # empty diff
+def test_main_empty_manifest_returns_1(monkeypatch) -> None:
     import t0_gate
 
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
+    fake_run, _ = _make_fake_run("")  # empty diff
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
     rc = main(["--base", "0582d202", "--head", "1775d0b1"])
     assert rc == 1  # origin/dev == HEAD false green => hard FAIL
 
 
-def test_main_worktree_builds_correct_git_args() -> None:
-    canned = "M\tbackend/tests/foo.py\n"
-    fake_run, calls = _make_fake_run(canned)
+def test_main_worktree_builds_correct_git_args(monkeypatch) -> None:
     import t0_gate
 
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
+    canned = "M\tbackend/tests/foo.py\n"
+    fake_run, calls = _make_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
     rc = main(["--base", "1775d0b1", "--worktree"])
     assert rc == 0
     git_calls = [c for c in calls if c and c[0] == "git"]
@@ -275,37 +279,37 @@ def test_main_worktree_builds_correct_git_args() -> None:
     assert not any("..." in " ".join(c) for c in git_calls)
 
 
-def test_main_tooling_missing_eslint_fails() -> None:
-    canned = "A\tfrontend/src/x.ts\n"
-    fake_run, _ = _make_fake_run(canned)
+def test_main_tooling_missing_eslint_fails(monkeypatch) -> None:
     import t0_gate
 
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
-    monkeypatch_attr(t0_gate, "_resolve_eslint", lambda: None)
+    canned = "A\tfrontend/src/x.ts\n"
+    fake_run, _ = _make_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
+    _patch_attr(monkeypatch, t0_gate, "_resolve_eslint", lambda: None)
     rc = main(["--base", "0582d202", "--head", "1775d0b1"])
     assert rc == 1  # frontend changed + eslint missing => FAIL, not PASS
 
 
-def test_main_tooling_missing_tsc_fails() -> None:
-    canned = "A\tfrontend/src/x.ts\n"
-    fake_run, _ = _make_fake_run(canned)
+def test_main_tooling_missing_tsc_fails(monkeypatch) -> None:
     import t0_gate
 
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
-    monkeypatch_attr(t0_gate, "_resolve_tsc", lambda: None)
+    canned = "A\tfrontend/src/x.ts\n"
+    fake_run, _ = _make_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
+    _patch_attr(monkeypatch, t0_gate, "_resolve_tsc", lambda: None)
     rc = main(["--base", "0582d202", "--head", "1775d0b1"])
     assert rc == 1  # frontend changed + tsc missing => FAIL, not PASS
 
 
-def test_mypy_only_returns_mypy_rc_only() -> None:
-    canned = "M\tbackend/tests/foo.py\n"
-    fake_run, calls = _make_fake_run(canned, mypy_rc=3)
+def test_mypy_only_returns_mypy_rc_only(monkeypatch) -> None:
     import t0_gate
 
-    monkeypatch_run(t0_gate, fake_run)
-    fake_resolvers(t0_gate)
+    canned = "M\tbackend/tests/foo.py\n"
+    fake_run, calls = _make_fake_run(canned, mypy_rc=3)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
     rc = main(["--base", "0582d202", "--head", "1775d0b1", "--mypy-only"])
     assert rc == 3  # returns mypy's rc, not a synthesized full T0 PASS
     # only mypy was scheduled; ruff/eslint/tsc were NOT run
@@ -315,7 +319,38 @@ def test_mypy_only_returns_mypy_rc_only() -> None:
     assert not any("tsc" in c[0] for c in calls if c)
 
 
-def test_committed_range_excludes_untracked_python() -> None:
+def test_mypy_only_empty_manifest_fails_by_default(monkeypatch, capsys) -> None:
+    import t0_gate
+
+    # empty diff => empty manifest. With default (no --allow-empty) the wrapper's
+    # original false green (origin/dev == HEAD -> "changed files pass Mypy" -> 0)
+    # must NOT happen.
+    fake_run, _ = _make_fake_run("")
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
+    rc = main(["--base", "0582d202", "--head", "1775d0b1", "--mypy-only"])
+    captured = capsys.readouterr()
+    assert rc == 1
+    assert "EMPTY_MANIFEST" in captured.err
+    assert "changed files pass Mypy" not in captured.out
+
+
+def test_mypy_only_empty_manifest_allow_empty_is_explicit(monkeypatch, capsys) -> None:
+    import t0_gate
+
+    fake_run, _ = _make_fake_run("")
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_resolvers(monkeypatch, t0_gate)
+    rc = main(["--base", "0582d202", "--head", "1775d0b1", "--mypy-only", "--allow-empty"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert "EMPTY_ALLOWED" in captured.out
+    # must be a clearly PARTIAL report and must NOT claim a full T0 PASS
+    assert "T0 PARTIAL" in captured.out
+    assert "=== T0 PASS ===" not in captured.out
+
+
+def test_committed_range_excludes_untracked_python(monkeypatch) -> None:
     import t0_gate
 
     def fake_git(args):
@@ -326,14 +361,14 @@ def test_committed_range_excludes_untracked_python() -> None:
             return "scratch/untracked.py\n"
         return ""
 
-    monkeypatch_attr(t0_gate, "_git", fake_git)
+    _patch_attr(monkeypatch, t0_gate, "_git", fake_git)
     raw = git_diff_name_status("BASE", "HEAD", worktree=False)
     # committed range must NOT pull in untracked files
     assert "scratch/untracked.py" not in raw
     assert "backend/app/real.py" in raw
 
 
-def test_worktree_includes_legit_new_source_but_filters_junk() -> None:
+def test_worktree_includes_legit_new_source_but_filters_junk(monkeypatch) -> None:
     import t0_gate
 
     def fake_git(args):
@@ -341,7 +376,17 @@ def test_worktree_includes_legit_new_source_but_filters_junk() -> None:
             return "frontend/src/new.ts\n.tmp_junk/x.py\n"
         return ""  # unstaged / cached diffs empty
 
-    monkeypatch_attr(t0_gate, "_git", fake_git)
+    _patch_attr(monkeypatch, t0_gate, "_git", fake_git)
     raw = git_diff_name_status("BASE", "HEAD", worktree=True)
     assert "frontend/src/new.ts" in raw  # legit new source enters manifest
     assert ".tmp_junk/x.py" not in raw  # junk is filtered out
+
+
+def test_committed_range_base_not_ancestor_head_fails(monkeypatch) -> None:
+    import t0_gate
+
+    # Simulate BASE not being an ancestor of HEAD; the gate must refuse the
+    # three-dot diff (which would otherwise silently use the merge-base).
+    _patch_attr(monkeypatch, t0_gate, "_assert_ancestor", lambda base, head: False)
+    rc = main(["--base", "BADBASE", "--head", "H"])
+    assert rc == 2  # IDENTITY_INVALID, checkers not run

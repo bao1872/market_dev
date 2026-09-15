@@ -18,7 +18,10 @@
 #   mypy-changed.sh --base <SHA/ref> --head <SHA/ref>   # T0 recommended: explicit range
 #   mypy-changed.sh --base <SHA/ref> --worktree         # check uncommitted working tree
 #   mypy-changed.sh                                     # compat: BASE defaults to origin/dev (warns)
-#   BASE=main mypy-changed.sh                           # compat: env-override the base
+#
+# NOTE: the base is ONLY read from --base. The BASE environment variable is
+# intentionally NOT honoured (it used to be claimed but was silently overwritten,
+# which hid empty manifests). Pass --base explicitly.
 #
 # Exit codes:
 #   0  => changed files pass Mypy
@@ -45,9 +48,10 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$BASE" ]]; then
-  # Honour the documented BASE env override (e.g. `BASE=main mypy-changed.sh`).
-  # Previously this code read an undocumented BASE_ENV; that drift is removed.
-  BASE="${BASE:-origin/dev}"
+  # BASE env var is intentionally NOT honoured; only --base is accepted. This
+  # avoids a silent fallback that hides an empty manifest (the false green we
+  # are closing). --base is required for real T0 runs.
+  BASE="origin/dev"
   echo "[mypy-changed] WARN: no explicit --base given, falling back to '$BASE'." >&2
   echo "[mypy-changed] WARN: when driven by T0 you MUST pass explicit --base/--head," >&2
   echo "[mypy-changed] WARN: otherwise origin/dev==HEAD after push yields an empty diff (false green)." >&2

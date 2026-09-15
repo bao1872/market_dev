@@ -32,7 +32,12 @@ Hard rules:
   * Git copy (C) keeps the old file; only the new path is an existing change.
     Git rename (R) deletes the old path and adds the new path.
   * --mypy-only is diagnostic ONLY: it returns Mypy's rc and is NEVER a full
-    T0 PASS.
+    T0 PASS. An empty manifest still FAILS unless --allow-empty is explicit
+    (the origin/dev == HEAD false green is not allowed in this mode either).
+  * Committed-range identity is fail-closed: BASE must be an ancestor of HEAD,
+    otherwise the three-dot diff silently uses the merge-base and does NOT
+    represent the claimed task delta (IDENTITY_INVALID). Worktree mode is exempt
+    because HEAD is the current working tree, not a fixed ancestor chain.
 """
 from __future__ import annotations
 
@@ -439,16 +444,38 @@ def format_report(manifest: Manifest, results: dict[str, CheckerResult], passed:
     return "\n".join(line for line in lines if line != "")
 
 
-def _format_partial(manifest: Manifest, mypy: CheckerResult) -> str:
+def _format_partial(manifest: Manifest, mypy: CheckerResult, allow_empty: bool = False) -> str:
+    scope = (
+        "EMPTY_ALLOWED (no changed files; --allow-empty set; NOT a full T0 PASS)"
+        if allow_empty
+        else "NOT a full T0 PASS"
+    )
     lines = [
-        "=== T0 PARTIAL (--mypy-only): only mypy executed — NOT a full T0 PASS ===",
+        f"=== T0 PARTIAL (--mypy-only) [{scope}]: only mypy executed ===",
         f"BASE_SHA   : {manifest.base} ({_rev_parse(manifest.base)})",
         f"HEAD_SHA   : {manifest.head}",
         f"python     : {manifest.python_files}",
     ]
     lines.extend(_format_checker("mypy", mypy))
-    lines.append(f"=== T0 PARTIAL (mypy rc={mypy.rc}) ===")
+    lines.append(f"=== T0 PARTIAL (mypy rc={mypy.rc}) — {scope} ===")
     return "\n".join(lines)
+
+
+def _assert_ancestor(base: str, head: str) -> bool:
+    """Fail-closed identity gate for committed (non-worktree) ranges.
+
+    A committed `BASE...HEAD` three-dot diff is really
+    `merge-base(BASE, HEAD)..HEAD`. If BASE is NOT an ancestor of HEAD, Git
+    silently falls back to the merge-base and emits a manifest that does NOT
+    represent the claimed task delta. For the authoritative changed-file owner
+    that is an identity error, not a usable result.
+    """
+    res = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", base, head],
+        capture_output=True,
+        text=True,
+    )
+    return res.returncode == 0
 
 
 def _timed(fn, *args) -> CheckerResult:
@@ -481,6 +508,21 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     head_label = "WORKTREE (uncommitted)" if args.worktree else args.head
+
+    # Committed range identity gate (fail-closed). A three-dot diff is actually
+    # merge-base(BASE, HEAD)..HEAD; if BASE is not an ancestor of HEAD, Git would
+    # silently fall back to the merge-base and emit a manifest that does NOT
+    # represent the claimed task delta. Refuse it. Worktree mode is exempt because
+    # HEAD is the current working tree, not a fixed ancestor chain.
+    if not args.worktree and not _assert_ancestor(args.base, args.head):
+        print(
+            "[T0] IDENTITY_INVALID: BASE is not an ancestor of HEAD. Refusing to derive a "
+            "three-dot merge-base manifest, because it would silently use the merge-base and "
+            "NOT represent the claimed task delta.",
+            file=sys.stderr,
+        )
+        return 2
+
     try:
         raw = git_diff_name_status(args.base, args.head, args.worktree)
     except RuntimeError as exc:
@@ -491,13 +533,30 @@ def main(argv: list[str] | None = None) -> int:
     manifest = classify(args.base, head_label, changes)
 
     if args.mypy_only:
+        # mypy-only is still a changed-file gate. An empty manifest is a false
+        # green exactly like the full T0 (origin/dev == HEAD after push): it must
+        # NOT print "changed files pass Mypy" and must NOT exit 0 on an empty set
+        # unless --allow-empty is explicit.
+        if not manifest.changed_paths and not args.allow_empty:
+            print(
+                "=== T0 PARTIAL (--mypy-only): EMPTY_MANIFEST — nothing was actually checked ===\n"
+                f"BASE_SHA   : {manifest.base} ({_rev_parse(manifest.base)})\n"
+                f"HEAD_SHA   : {manifest.head}\n"
+                "[T0] EMPTY_MANIFEST: refusing to report 'changed files pass Mypy' for an empty set. "
+                "This usually means BASE==HEAD (e.g. origin/dev==HEAD after push). Pass explicit "
+                "--base/--head, or --allow-empty if this is intentional.",
+                file=sys.stderr,
+            )
+            return 1
         mypy = _timed(run_mypy, manifest.python_files)
-        print(_format_partial(manifest, mypy))
+        print(_format_partial(manifest, mypy, allow_empty=args.allow_empty))
         if args.json:
             print(
                 json.dumps(
                     {
                         "mode": "mypy-only",
+                        "partial": True,
+                        "empty_allowed": args.allow_empty,
                         "base": manifest.base,
                         "head": manifest.head,
                         "python_files": manifest.python_files,
