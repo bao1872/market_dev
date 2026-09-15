@@ -4,18 +4,11 @@
 > 审计方法：对 `backend/app`、`backend/tests`、`scripts` 做静态阅读与结构清点。
 > 审计日期：2026-09-15
 
-## 0. 审计边界与前置条件偏差（重要）
+## 0. 审计边界与状态
 
-任务 001 的硬前置条件是「当前分支保持 `dev`」。实测分支为：
+本审计为**只分析、不修改**的基线报告（Task 001）。审计方法：对 `backend/app`、`backend/tests`、`scripts` 做静态阅读与结构清点；未运行测试、未改代码、未启动服务。
 
-```
-当前分支: verify/deploy-candidate-20260914
-（git status 显示：ahead of origin/verify/deploy-candidate-20260914 by 1 commit）
-```
-
-**与前置条件不符 → 本次在 git add / commit / push 步骤停下，仅产出分析文档，等你显式裁决分支与推送方式后再执行提交。**
-
-本审计报告本身是任务交付物，已按「请 IDE 新建 `docs/engineering/current_architecture_audit.md`」的要求产出，不触碰任何生产代码。
+交付状态：本报告已于 Task 001 收口并提交，commit `11861144`（rebase 至 `origin/dev` 顶端后推送，message 为 `docs: add current architecture audit`），已并入 `dev`。本文件随后在 Task 002 中同步修正了本段曾出现的过时分支/未提交描述。
 
 ---
 

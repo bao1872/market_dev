@@ -1,7 +1,7 @@
 # V1.1 交易平台 - 开发命令
 # 用法: make <target>
 
-.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint up down docker-build docker-up docker-down worker
+.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint check-fast up down docker-build docker-up docker-down worker
 
 # 启动全栈开发环境：原生 Python / Node.js 进程，不依赖 Docker
 # 前置条件：已配置 backend/.env 中的 DATABASE_URL 与 REDIS_URL
@@ -41,6 +41,33 @@ migrate-new:
 # 运行后端测试
 test:
 	cd backend && pytest
+
+# 快速本地验证入口（Task 002）：复用现有 CI 已验证的纯单元测试分层。
+# 设计原则：不改变任何业务语义 / 测试 / schema / runtime；不引入第二套测试分类；
+# 复用 conftest 的 PURE_UNIT_TEST 机制（sentinel DB，禁止连正式 PG）；
+# 排除 postgres（真实 PG 集成）与 external_data（外部数据源）；禁止部署；fail-closed。
+#
+# 等价于 CI 的 "Backend Unit Tests" job（已验证命令）：
+#   PURE_UNIT_TEST=1 pytest -m "not postgres and not external_data"
+# 另含一层 ruff 静态检查（T0）。速度优先，不放 mypy 全量（慢）；
+# 需要类型检查时用 `make lint`（或 CI 的 mypy-new-files 增量）。
+#
+# 前置：backend 虚拟环境已激活（ruff/pytest 在 PATH）；
+#       pure-unit 模式不连任何数据库，但部分单元测试会用到 Redis，
+#       默认指向 redis://localhost:6379/15，可用 REDIS_URL 覆盖。
+check-fast:
+	@ROOT=$$(git rev-parse --show-toplevel) ; \
+	  CHANGED=$$( { git -C "$$ROOT" diff --name-only origin/dev HEAD -- backend 2>/dev/null; git -C "$$ROOT" diff --name-only HEAD -- backend; git -C "$$ROOT" diff --name-only --cached -- backend; git -C "$$ROOT" ls-files --others --exclude-standard -- backend; } | sed 's|^backend/||' | grep '\.py$$' | sort -u ) ; \
+	  cd "$$ROOT/backend" && \
+	  echo "==[1/2] ruff on changed backend files (T0, mirrors CI ruff-new-files) ==" && \
+	  if [ -n "$$CHANGED" ]; then echo "lint targets:"; echo "$$CHANGED" | sed 's/^/  /'; ruff check $$CHANGED; RUFF_RC=$$?; else echo "  (no changed backend python files; ruff skipped)"; RUFF_RC=0; fi ; \
+	  echo "==[2/2] pytest pure-unit (no postgres, no external_data) ==" && \
+	  PURE_UNIT_TEST=1 APP_ENV=test REDIS_URL=redis://localhost:6379/15 CAPTURE_STATIC_DIR=/tmp/panji-ci-captures \
+	    pytest -m "not postgres and not external_data" --tb=short -q ; PY_RC=$$? ; \
+	  echo "==================== check-fast summary ====================" ; \
+	  echo "ruff: $$RUFF_RC   pytest: $$PY_RC" ; \
+	  if [ $$RUFF_RC -ne 0 ] || [ $$PY_RC -ne 0 ]; then echo "CHECK-FAST: FAIL"; exit 1; fi ; \
+	  echo "CHECK-FAST: PASS"
 
 # 代码检查（ruff + mypy）
 lint:
