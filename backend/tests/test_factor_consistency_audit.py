@@ -453,8 +453,9 @@ class TestAuditReadOnlyArchitecture:
 class TestFactorContractConstants:
     """因子合同常量版本正确。"""
 
-    def test_algorithm_version_is_fq_v1(self):
-        assert FACTOR_ALGORITHM_VERSION == "fq-v1"
+    def test_algorithm_version_is_fq_v2(self):
+        # [F3] 事件日前 prev_close 选取规则变化（长 gap 不再 fail-closed）→ bump 到 fq-v2
+        assert FACTOR_ALGORITHM_VERSION == "fq-v2"
 
     def test_reconciliation_version_is_1(self):
         assert FACTOR_RECONCILIATION_VERSION == 1

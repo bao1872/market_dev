@@ -20,6 +20,7 @@ import pytest
 
 from app.repositories import bar_repository as bar_repo
 from app.services import business_date_adjustment_context as ctx_mod
+from app.services.adjustment_factor_calculator import AdjustmentFactorDataError
 from app.services.adjustment_factor_service import AdjustmentFactorService
 from app.services.business_date_adjustment_context import (
     BusinessDateAdjustmentService,
@@ -350,16 +351,28 @@ async def test_raw_future_leak_fails_closed(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 # =============================================================================
-# §27 calculator 数据缺口 → 包装为 fail-closed（保留 cause）
+# §27 calculator 数据不足 → 包装为 fail-closed（保留 cause）
 # =============================================================================
 
 
 @pytest.mark.asyncio
-async def test_calculator_gap_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
-    # raw 存在 84 天缺口，事件落在缺口中间 → calculator 抛 bars_daily_gap
+async def test_calculator_missing_data_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> None:
+    """calculator 数据缺失 → 包装为 fail-closed（保留 cause）。
+
+    [F3] 长 gap（84 天）已不再触发 AdjustmentFactorDataError —— 事件日前存在
+    最后一根真实 bar 即参与计算。这里直接让 calculator 抛 bars_daily_missing_data，
+    验证「数据真正不足」时的包装路径仍保留 degraded_reason 与 cause。
+    """
     raw = _raw_df([("2026-01-30", 26.8), ("2026-06-29", 33.42)])
     xdxr = _xdxr_df([{"date": "2026-04-24", "fenhong": 1.3}])
     _wire_raw(monkeypatch, raw)
+
+    def _raise_missing_data(*_args: Any, **_kwargs: Any) -> list[float]:
+        raise AdjustmentFactorDataError([date(2026, 4, 24)])
+
+    monkeypatch.setattr(
+        ctx_mod, "calculate_adjustment_factor_series", _raise_missing_data
+    )
 
     with pytest.raises(BusinessDateAdjustmentUnavailableError) as ei:
         await BusinessDateAdjustmentService().build_business_date_adjustment_context(
@@ -371,7 +384,7 @@ async def test_calculator_gap_is_wrapped(monkeypatch: pytest.MonkeyPatch) -> Non
             adapter=_RecordingAdapter(xdxr),
         )
 
-    assert ei.value.reason == "bars_daily_gap"
+    assert ei.value.reason == "bars_daily_missing_data"
     assert ei.value.cause is not None
 
 

@@ -32,7 +32,10 @@ from typing import Final
 # 复权算法版本（Chanlunpro preclose 公式）
 # qfq = raw × adj_factor，adj_factor = 累积事件因子，最新日期 = 1.0
 # 公式变更时 bump（如改用后复权、改用不同 preclose 公式、改用交易所官方因子）
-FACTOR_ALGORITHM_VERSION: Final[str] = "fq-v1"
+# [F3] fq-v1 → fq-v2：事件日前 prev_close 的选取规则变化 —— 由「距事件日超过
+# 14 个日历日即判定数据缺口并 fail-closed」改为「只要事件日前存在最后一根真实
+# bar 就使用它」。这会让长期停牌股票的历史 factor 输出发生变化，故 bump。
+FACTOR_ALGORITHM_VERSION: Final[str] = "fq-v2"
 
 # 因子对账版本（审计/对账逻辑变更时 bump）
 # 审计逻辑变化（如新增 mismatch 分类、改变比较阈值、改变 expected 计算方式）时 bump
@@ -51,7 +54,7 @@ FACTOR_ALL_UNIT_EVENT_THRESHOLD: Final[float] = 1e-6
 
 if __name__ == "__main__":
     # 自测：验证常量定义
-    assert FACTOR_ALGORITHM_VERSION == "fq-v1"
+    assert FACTOR_ALGORITHM_VERSION == "fq-v2"
     assert FACTOR_RECONCILIATION_VERSION == 1
     assert FACTOR_COMPARISON_TOLERANCE > 0
     print(f"FACTOR_ALGORITHM_VERSION={FACTOR_ALGORITHM_VERSION}")

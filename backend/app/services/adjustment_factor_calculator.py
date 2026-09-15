@@ -5,7 +5,7 @@ Auditor（只读比较）和 Rebuild（持久化）都调用本函数；禁止�
 
 设计原则（用户 /goal §1.2 明确要求）：
 1. 纯函数：无 IO（不连 DB、不调 pytdx）、无 min_date、无 supplement_df、无 adapter
-2. 调用方负责确保 raw_daily_bars 覆盖所有事件日 + 前一交易日 close
+2. 调用方负责确保 raw_daily_bars 覆盖所有事件日 + 事件日前至少一根 bar
 3. 数据缺失抛 AdjustmentFactorDataError（含缺失事件日列表）：
    - Auditor 捕获后标记 degraded_reason="bars_daily_missing_data"
    - Rebuild 捕获后抛异常让上层处理（禁止 1.0 伪装成功）
@@ -23,7 +23,8 @@ Auditor（只读比较）和 Rebuild（持久化）都调用本函数；禁止�
 
 算法（Chanlunpro klines_fq 的 preclose 公式，与原 _calculate_adj_factor 一致）：
 1. 筛选 category=1 的除权除息事件，按日期升序
-2. 对每个事件日 D，从 raw_daily_bars 查找 close_{D-1}（事件日前一交易日收盘价）
+2. 对每个事件日 D，从 raw_daily_bars 查找 D 之前**最后一根实际存在** bar 的 close
+   （长期停牌时该 bar 可能远早于 D；不再按相隔日历日推断数据缺口）
 3. event_factor = (close_{D-1} × 10 - fenhong + peigu × peigujia)
                   / ((10 + peigu + songzhuangu) × close_{D-1})
 4. 累积因子 = 所有晚于该 bar 日期的事件因子乘积
@@ -61,12 +62,6 @@ logger = logging.getLogger("services.adjustment_factor_calculator")
 # 因子累积时的"无效事件"阈值（与原 _calculate_adj_factor 一致）
 # event_factor 与 1.0 差距小于此值时视为无效事件，不累积
 _UNIT_EVENT_THRESHOLD = 1e-10
-
-# 数据缺口检测阈值（日历日）
-# 若事件日的前一交易日 close 距事件日超过此阈值，视为数据缺口（如 000688
-# 2026-01-31 至 2026-06-28 缺口导致 2026-04-24 事件 prev_close 错误）。
-# 14 天覆盖春节/国庆等长假（最长 10 天）+ 安全余量。
-_BARS_DAILY_GAP_THRESHOLD_DAYS = 14
 
 
 @dataclass(frozen=True)
@@ -347,14 +342,15 @@ def calculate_adjustment_factor_series(
     sorted_close_dates = sorted(close_map.keys())
     earliest_bar_date = sorted_close_dates[0] if sorted_close_dates else None
 
-    # 检测数据缺失：事件日的前一交易日 close 不在 close_map 中
+    # 检测数据缺失：事件日之前是否存在任何 raw bar
     # [CHANGE-20260719-001 §1.3] 修复 000688 误报：
     # - 事件日 <= earliest_bar_date 的事件不影响任何 bar 的因子（bar_date >= earliest_bar_date
     #   >= event_date，event_date 不在 bar_date 之后），直接跳过，不算数据缺失。
-    # - 事件日 > earliest_bar_date 的事件需要 prev_close；若 prev_close 为 None 或
-    #   prev_close 距事件日超过 _BARS_DAILY_GAP_THRESHOLD_DAYS（数据缺口），抛异常。
+    # [F3] 判定只依据「事件日前是否存在最后一根真实 bar」，**不再按相隔日历日**
+    #      推断数据是否损坏（原 14 天 _BARS_DAILY_GAP_THRESHOLD_DAYS hard block 已移除）。
+    #      长期停牌（如 000032 2014/2017、001331/688689 2026-06）同样应使用该
+    #      最后一根实际成交 close，而不是把整个盘后打断。
     missing_event_dates: list[date] = []
-    gap_event_dates: list[date] = []
     for _, event in exc_events.iterrows():
         event_date = pd.Timestamp(event["date"]).date()
         # 跳过早于等于最早 bar 的事件（不影响任何 bar 因子）
@@ -363,21 +359,9 @@ def calculate_adjustment_factor_series(
         prev_result = _find_prev_close(event_date, sorted_close_dates, close_map)
         if prev_result is None:
             missing_event_dates.append(event_date)
-            continue
-        prev_close_date, _ = prev_result
-        # 数据缺口检测：prev_close 距事件日超过阈值 → 缺口（非简单数据缺失）
-        gap_days = (event_date - prev_close_date).days
-        if gap_days > _BARS_DAILY_GAP_THRESHOLD_DAYS:
-            gap_event_dates.append(event_date)
 
     if missing_event_dates:
         raise AdjustmentFactorDataError(missing_event_dates)
-    if gap_event_dates:
-        # 数据缺口（如 000688 2026-01-31 至 2026-06-28 缺口导致 2026-04-24
-        # 事件 prev_close 错误取 2026-01-30 的 26.80 而非 2026-04-23 的 40.97）
-        raise AdjustmentFactorDataError(
-            gap_event_dates, degraded_reason="bars_daily_gap",
-        )
 
     # 按日期升序排列事件
     exc_events = exc_events.sort_values("date")
@@ -525,24 +509,23 @@ if __name__ == "__main__":
     )
     print(f"Case2 单事件 ✓ factor={factors2}")
 
-    # Case 3: 数据缺口 → 抛 AdjustmentFactorDataError（degraded_reason="bars_daily_gap"）
-    # [CHANGE-20260719-001 §1.3] 事件日 2026-04-24 在 raw_df 数据缺口中
-    # （raw_df 有 2026-01-30 和 2026-06-29，缺口 > 14 天阈值）。
-    # 纯函数检测到 prev_close（2026-01-30）距事件日 > 14 天 → 抛 bars_daily_gap。
+    # Case 3: 长 gap（长期停牌）→ 不再抛异常，使用事件日前最后一根实际 bar 的 close
+    # [F3] 事件日 2026-04-24 前最后一根 bar 是 2026-01-30（close=26.80），相隔远超
+    # 原 14 天阈值；现按「存在最后一根真实 bar 即可」计算因子，不再推断数据缺口。
     raw3 = pd.DataFrame({
         "datetime": pd.to_datetime(["2026-01-30", "2026-06-29"]),
         "close": [26.80, 33.42],
     })
-    xdxr3 = xdxr2  # 事件日 2026-04-24
-    try:
-        calculate_adjustment_factor_series(raw3, xdxr3)
-        raise AssertionError("Case3 应抛 AdjustmentFactorDataError")
-    except AdjustmentFactorDataError as exc:
-        assert exc.degraded_reason == "bars_daily_gap", (
-            f"Case3 degraded_reason 应为 bars_daily_gap，实际 {exc.degraded_reason}"
-        )
-        assert date(2026, 4, 24) in exc.missing_event_dates
-        print(f"Case3 数据缺口抛异常 ✓ missing={exc.missing_event_dates} reason={exc.degraded_reason}")
+    xdxr3 = xdxr2  # 事件日 2026-04-24, fenhong=1.3
+    factors3 = calculate_adjustment_factor_series(raw3, xdxr3)
+    expected_factor3 = (26.80 * 10 - 1.3) / 10 / 26.80
+    assert abs(factors3[0] - expected_factor3) < 1e-10, (
+        f"Case3 应使用 2026-01-30 close=26.80 计算因子，got {factors3[0]}"
+    )
+    assert abs(factors3[1] - 1.0) < 1e-10, (
+        f"Case3 事件日及之后 factor 应=1.0: {factors3[1]}"
+    )
+    print(f"Case3 长 gap 使用最后实际 bar ✓ factors={factors3}")
 
     # Case 3b: 事件日 <= earliest_bar_date → 跳过事件（不抛异常）
     # [CHANGE-20260719-001 §1.3] 事件日等于最早 bar 日期时，事件不影响任何 bar

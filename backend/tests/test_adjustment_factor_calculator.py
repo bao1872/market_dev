@@ -241,28 +241,29 @@ class TestMultipleEventsCumulative:
 
 
 class TestAdjustmentFactorDataError:
-    """数据缺口/缺失场景。
+    """数据缺失场景。
 
-    [CHANGE-20260719-001 §1.3] 行为变更：
+    [CHANGE-20260719-001 §1.3] + [F3] 行为：
     - 事件日 <= earliest_bar_date：跳过事件（不影响任何 bar 因子），不抛异常
-    - 事件日 > earliest_bar_date 但 prev_close 距事件日 > 14 天：抛 bars_daily_gap
-    - 事件日 > earliest_bar_date 且 prev_close 完全缺失：抛 bars_daily_missing_data
-      （实际不会发生，因为 earliest_bar_date 之后总有至少一个 bar 在事件日之前）
+    - 事件日 > earliest_bar_date：取事件日前**最后一根实际存在** bar 的 close，
+      不再按相隔日历日判定 bars_daily_gap（原 14 天 hard block 已移除）
+    - prev_close 完全缺失 → bars_daily_missing_data（fail-closed 契约保留；
+      因事件日 <= earliest_bar_date 会被跳过，该分支当前为防御性路径）
     """
 
-    def test_gap_detection_raises(self):
-        """数据缺口 → 抛 AdjustmentFactorDataError（degraded_reason="bars_daily_gap"）。
+    def test_long_gap_uses_last_available_bar(self):
+        """长 gap（84 天）→ 不再抛 bars_daily_gap，使用最后一根实际 bar 的 close。
 
-        事件日 2026-04-24 在 raw_df 缺口中（raw_df 有 2026-01-30 和 2026-06-29，
-        缺口 > 14 天阈值）。纯函数检测到 prev_close（2026-01-30）距事件日 > 14 天
-        → 抛 bars_daily_gap，防止用错误的 prev_close（26.80 而非 40.97）计算因子。
+        事件日 2026-04-24 前最后一根 bar 是 2026-01-30（close=26.80）。F3 之前
+        这会被判为 bars_daily_gap 并 fail-closed；现在只要求「存在最后一根真实
+        bar」，不推测缺口原因。
         """
         raw = _raw_df(["2026-01-30", "2026-06-29"], [26.80, 33.42])
         xdxr = _xdxr_df([{"date": "2026-04-24", "fenhong": 1.3}])
-        with pytest.raises(AdjustmentFactorDataError) as exc_info:
-            calculate_adjustment_factor_series(raw, xdxr)
-        assert date(2026, 4, 24) in exc_info.value.missing_event_dates
-        assert exc_info.value.degraded_reason == "bars_daily_gap"
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        expected_factor = (26.80 * 10 - 1.3) / 10 / 26.80
+        assert factors[0] == pytest.approx(expected_factor, abs=1e-10)
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
 
     def test_event_on_earliest_bar_skipped(self):
         """事件日 == earliest_bar_date → 跳过事件（不抛异常，因子全 1.0）。
@@ -702,3 +703,127 @@ class TestNextFutureCorporateActionDate:
         # 缺 date / category 列 → 无法判断 → None
         broken = pd.DataFrame({"fenhong": [1.0]})
         assert next_future_corporate_action_date(broken, effective_as_of=date(2026, 9, 1)) is None
+
+
+# =============================================================================
+# F3 — 长 gap 不再 fail-closed：使用事件日前最后一根实际 bar
+# =============================================================================
+
+
+def _expected_event_factor(
+    prev_close: float,
+    *,
+    fenhong: float = 0.0,
+    songzhuangu: float = 0.0,
+    peigu: float = 0.0,
+    peigujia: float = 0.0,
+) -> float:
+    """Chanlunpro preclose 公式的 event_factor（与生产同一公式，独立复算）。"""
+    preclose = (
+        prev_close * 10 - fenhong + peigu * peigujia
+    ) / (10 + peigu + songzhuangu)
+    return preclose / prev_close
+
+
+class TestF3LongGapPrevClose:
+    """F3：只要事件日前存在最后一根真实 bar 就使用它，不按相隔日历日判缺口。"""
+
+    def test_a_short_gap_unchanged(self):
+        """A. 事件日前 5 天有 bar → 正常计算（既有行为不变）。"""
+        raw = _raw_df(["2026-04-19", "2026-04-24"], [40.50, 41.20])
+        xdxr = _xdxr_df([{"date": "2026-04-24", "fenhong": 1.3}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(40.50, fenhong=1.3), abs=1e-10
+        )
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
+
+    def test_b_gap_30_days_uses_last_bar(self):
+        """B. 事件日前 30 天的 bar 是最后一根 → 不再 degraded，使用该 close。"""
+        raw = _raw_df(["2026-05-27", "2026-06-29"], [69.78, 51.25])
+        xdxr = _xdxr_df([{"date": "2026-06-26", "fenhong": 0.6, "songzhuangu": 4.5}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)  # 不抛异常
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(69.78, fenhong=0.6, songzhuangu=4.5), abs=1e-10
+        )
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
+
+    def test_c_gap_180_days_allowed(self):
+        """C. 事件日前 180 天的 bar 是最后一根 → 同样允许。"""
+        raw = _raw_df(["2026-01-05", "2026-07-10"], [20.00, 12.00])
+        xdxr = _xdxr_df([{"date": "2026-07-04", "fenhong": 0.5}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(20.00, fenhong=0.5), abs=1e-10
+        )
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
+
+    def test_d_no_bar_before_event_skipped_and_contract_kept(self):
+        """D. 事件日前完全没有任何 bar → 事件被跳过（不影响任何 bar 因子）。
+
+        说明：事件日 > earliest_bar_date 时 earliest_bar 本身必然早于事件日，
+        因此 prev_close 完全缺失的分支当前不可达。这里锁定真实行为（跳过、
+        不抛异常），并单独锁定 bars_daily_missing_data 的 fail-closed 契约保留。
+        """
+        raw = _raw_df(["2026-06-29"], [33.42])
+        xdxr = _xdxr_df([{"date": "2026-04-24", "fenhong": 1.3}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors == [1.0]
+
+        err = AdjustmentFactorDataError([date(2026, 4, 24)])
+        assert err.degraded_reason == "bars_daily_missing_data"
+
+    def test_e_000032_two_historical_events(self):
+        """E. 000032：2014-07-28 用 2014-05-22 close；2017-05-23 用 2017-02-24 close。"""
+        raw = _raw_df(["2014-05-22", "2014-11-18"], [8.79, 9.64])
+        xdxr = _xdxr_df([{"date": "2014-07-28", "fenhong": 0.3}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(8.79, fenhong=0.3), abs=1e-10
+        )
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
+
+        raw2 = _raw_df(["2017-02-24", "2017-09-12"], [15.71, 15.51])
+        xdxr2 = _xdxr_df([{"date": "2017-05-23", "fenhong": 0.2}])
+        factors2 = calculate_adjustment_factor_series(raw2, xdxr2)
+        assert factors2[0] == pytest.approx(
+            _expected_event_factor(15.71, fenhong=0.2), abs=1e-10
+        )
+        assert factors2[1] == pytest.approx(1.0, abs=1e-10)
+
+    def test_f_001331_uses_2026_05_27_close(self):
+        """F. 001331：2026-06-26 使用 2026-05-27 close=69.78。"""
+        raw = _raw_df(["2026-05-27", "2026-06-29"], [69.78, 51.25])
+        xdxr = _xdxr_df([{"date": "2026-06-26", "fenhong": 0.6, "songzhuangu": 4.5}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(69.78, fenhong=0.6, songzhuangu=4.5), abs=1e-10
+        )
+        assert 0.0 < factors[0] < 1.0
+
+    def test_g_688689_uses_2026_06_11_close(self):
+        """G. 688689：2026-06-26 使用 2026-06-11 close=46.82。"""
+        raw = _raw_df(["2026-06-11", "2026-06-29"], [46.82, 55.88])
+        xdxr = _xdxr_df([{"date": "2026-06-26", "fenhong": 2.5}])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(46.82, fenhong=2.5), abs=1e-10
+        )
+        assert 0.0 < factors[0] < 1.0
+
+    def test_h_event_factor_formula_unchanged(self):
+        """H. event_factor 公式不变，只是 prev_close 来源允许长 gap。"""
+        prev_close = 30.0
+        raw = _raw_df(["2026-01-10", "2026-08-01"], [prev_close, 18.0])
+        xdxr = _xdxr_df([{
+            "date": "2026-08-01", "fenhong": 1.0, "songzhuangu": 2.0,
+            "peigu": 1.0, "peigujia": 8.0,
+        }])
+        factors = calculate_adjustment_factor_series(raw, xdxr)
+        assert factors[0] == pytest.approx(
+            _expected_event_factor(
+                prev_close, fenhong=1.0, songzhuangu=2.0, peigu=1.0, peigujia=8.0,
+            ),
+            abs=1e-10,
+        )
+        assert factors[1] == pytest.approx(1.0, abs=1e-10)
