@@ -36,6 +36,7 @@ import logging
 import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
+from typing import Any
 
 from sqlalchemy import select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -541,6 +542,16 @@ class ReconciliationReport:
 # =============================================================================
 
 
+def _to_degraded_input(audit_result: Any) -> DegradedFactorInput:
+    """把单只 degraded 审计结果规整为结构化 DegradedFactorInput（两分支共用单一来源）。"""
+    return DegradedFactorInput(
+        instrument_id=audit_result.instrument_id,
+        symbol=audit_result.symbol,
+        reason=audit_result.degraded_reason or "unknown",
+        missing_event_dates=audit_result.missing_event_dates,
+    )
+
+
 class FactorReconciliationTask:
     """复权因子批量一致性修复任务。
 
@@ -620,14 +631,7 @@ class FactorReconciliationTask:
                     # 需先回补数据再重新审计
                     degraded_count += 1
                     degraded_symbols.append(symbol)
-                    degraded_items.append(
-                        DegradedFactorInput(
-                            instrument_id=audit_result.instrument_id,
-                            symbol=audit_result.symbol,
-                            reason=audit_result.degraded_reason or "unknown",
-                            missing_event_dates=audit_result.missing_event_dates,
-                        )
-                    )
+                    degraded_items.append(_to_degraded_input(audit_result))
                 elif audit_result.is_consistent:
                     consistent_count += 1
                 else:
@@ -645,6 +649,7 @@ class FactorReconciliationTask:
                         # [CHANGE-20260719-001 §1.3] 数据缺失不归类为 mismatch
                         degraded_count += 1
                         degraded_symbols.append(audit_result.symbol)
+                        degraded_items.append(_to_degraded_input(audit_result))
                     elif audit_result.is_consistent:
                         consistent_count += 1
                     else:

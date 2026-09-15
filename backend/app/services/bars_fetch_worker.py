@@ -94,6 +94,22 @@ def get_process_local_adapter() -> Any:
     return _ADAPTER
 
 
+def fetch_raw_daily_frame(
+    symbol: str,
+    start_date: date,
+    end_date: date,
+    adapter: Any | None = None,
+) -> pd.DataFrame:
+    """canonical raw-daily frame 抓取（provider 网络 I/O 唯一边界）。
+
+    优先复用 process-local adapter（与 fetch_daily_provider_inputs 同一 owner），
+    不新增第二套 pytdx provider path。返回原始 DataFrame（可能为空）。
+    """
+    pytdx = adapter if adapter is not None else get_process_local_adapter()
+    df = pytdx.get_daily_bars(symbol, start_date, end_date)
+    return df if df is not None else pd.DataFrame()
+
+
 def current_adapter_pid() -> int:
     """返回持有当前 process-local adapter 的 PID（测试用于证明 PROCESS_LOCAL）。"""
     return os.getpid()
@@ -183,7 +199,7 @@ def fetch_daily_provider_inputs(
     pytdx = adapter if adapter is not None else get_process_local_adapter()
     calls: list[str] = []
 
-    raw_df = pytdx.get_daily_bars(symbol, start_date, end_date)
+    raw_df = fetch_raw_daily_frame(symbol, start_date, end_date, adapter)
     calls.append("get_daily_bars")
 
     if raw_df is None or raw_df.empty:

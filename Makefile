@@ -1,7 +1,7 @@
 # V1.1 交易平台 - 开发命令
 # 用法: make <target>
 
-.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint check test-pure-full check-fast up down docker-build docker-up docker-down worker
+.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint check test-pure-full up down docker-build docker-up docker-down worker
 
 # 启动全栈开发环境：原生 Python / Node.js 进程，不依赖 Docker
 # 前置条件：已配置 backend/.env 中的 DATABASE_URL 与 REDIS_URL
@@ -92,11 +92,6 @@ check:
 test-pure-full:
 	cd backend && PURE_UNIT_TEST=1 APP_ENV=test REDIS_URL=redis://localhost:6379/15 CAPTURE_STATIC_DIR=/tmp/panji-ci-captures \
 	  pytest -m "not postgres and not external_data" --tb=short -q
-
-# 薄兼容 alias：不再运行 full PURE_UNIT（那是 test-pure-full）。
-check-fast:
-	@echo "DEPRECATED: 'make check-fast' now delegates to 'make check' (T0 + T1 modified-scope). Use 'make test-pure-full' for the full T6 suite."
-	@$(MAKE) check
 
 # 代码检查（ruff + mypy）
 lint:

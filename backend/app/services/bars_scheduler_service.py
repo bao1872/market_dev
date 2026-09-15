@@ -2418,44 +2418,29 @@ class BarsSchedulerService:
         summary["degraded"] = plan.degraded_count
         summary["degraded_symbols"] = plan.degraded_symbols[:100]
 
-        # [G1B-3A] impact-set 完整性：请求的 symbols 必须全部被审计到，
-        # 否则「请求 20 只、实际只找到 19 只」不能宣称审计完成 → fail-closed。
-        if requested_symbols is not None:
-            if plan.total_audited != len(requested_symbols):
-                raise FactorIntegrityBlockedError(
-                    "FACTOR_AUDIT_SCOPE_INCOMPLETE: "
-                    f"requested={len(requested_symbols)} "
-                    f"audited={plan.total_audited}"
-                )
-
-        # [G1B-3A] impact-set 零容忍：本模式成功后会 stamp 整个 scope，
-        # 因此任一 audit error 都意味着该 scope 未被证明，必须 hard fail，
-        # 不得沿用旧 full-market 的 1% provider-health 阈值。
-        if requested_symbols is not None and plan.error_count > 0:
-            raise FactorIntegrityBlockedError(
-                "FACTOR_AUDIT_IMPACT_ERRORS: "
-                f"errors={plan.error_count} "
-                f"audited={plan.total_audited}"
-            )
-
-        # [FACTOR-HEALTH] 审计后 fail-closed：即使 dry_run 没有抛异常，也不得把
-        # 「全市场 provider 错误」当作普通软失败继续跑 Core。
-        audited = summary["total_audited"]
-        errors = summary["errors"]
-        if audited <= 0:
-            raise FactorIntegrityBlockedError("FACTOR_AUDIT_EMPTY")
-        provider_failure_ratio = errors / max(audited, 1)
-        if provider_failure_ratio > 0.01:
-            raise FactorSourceUnavailableError(
-                f"FACTOR_AUDIT_UNHEALTHY: errors={errors}/{audited} "
-                f"(ratio={provider_failure_ratio:.4f})"
-            )
+        # [G1B-3A / FACTOR-HEALTH] 首次审计 fail-closed 门禁（impact-set 完整性 +
+        # 零容忍 error + provider health / empty）。语义与既有 production contract 一致。
+        self._validate_factor_audit_plan(plan, requested_symbols=requested_symbols)
 
         # [FACTOR-HEALTH] degraded：某只股票数据链本身无法证明 factor 正确性。
         # 在尚未建立「显式从 DSA/Core universe 排除 degraded 股票」机制前，
         # degraded > 0 不得继续 Core（否则仍是 silent correctness hole）。
         # [F1] degraded → 一次有界修复 + 二次 targeted 重审（fail-closed）
+        # [F1 A2] degraded 证据一致性 fail-closed：degraded_count 必须与
+        # degraded_items / degraded_symbols 完全一致，否则不能退化成
+        # dry_run(symbols=[])（那会重新触发全市场 audit）。
         if plan.degraded_count > 0:
+            if (
+                len(plan.degraded_items) != plan.degraded_count
+                or set(plan.degraded_symbols)
+                != {item.symbol for item in plan.degraded_items}
+            ):
+                raise FactorIntegrityBlockedError(
+                    "FACTOR_DEGRADED_EVIDENCE_INCOMPLETE: "
+                    f"degraded_count={plan.degraded_count} "
+                    f"items={len(plan.degraded_items)} "
+                    f"symbols={len(plan.degraded_symbols)}"
+                )
             try:
                 if db_session is not None:
                     plan, repair_report = await self._repair_degraded_and_reaudit(db_session, plan)
@@ -2465,6 +2450,9 @@ class BarsSchedulerService:
                             _repair_session, plan
                         )
             except FactorSourceUnavailableError:
+                raise
+            except FactorIntegrityBlockedError:
+                # 二次审计门禁失败（scope/impact/health）必须原样传播，不包装成 REPAIR_FAILED。
                 raise
             except Exception as exc:
                 raise FactorIntegrityBlockedError(
@@ -2591,6 +2579,37 @@ class BarsSchedulerService:
 
         return summary
 
+    def _validate_factor_audit_plan(
+        self, plan: Any, *, requested_symbols: list[str] | None = None
+    ) -> None:
+        """F1: 审计 plan fail-closed 门禁（首次审计与 degraded 二次重审共用）。
+
+        语义与既有 production contract 一致：impact-set 模式（requested_symbols
+        非 None）下零容忍任一 audit error / scope 不完整；全市场模式只校验空审计
+        与 provider health。
+        """
+        if requested_symbols is not None:
+            if plan.total_audited != len(requested_symbols):
+                raise FactorIntegrityBlockedError(
+                    "FACTOR_AUDIT_SCOPE_INCOMPLETE: "
+                    f"requested={len(requested_symbols)} "
+                    f"audited={plan.total_audited}"
+                )
+            if plan.error_count > 0:
+                raise FactorIntegrityBlockedError(
+                    "FACTOR_AUDIT_IMPACT_ERRORS: "
+                    f"errors={plan.error_count} audited={plan.total_audited}"
+                )
+        audited = plan.total_audited
+        if audited <= 0:
+            raise FactorIntegrityBlockedError("FACTOR_AUDIT_EMPTY")
+        provider_failure_ratio = plan.error_count / max(audited, 1)
+        if provider_failure_ratio > 0.01:
+            raise FactorSourceUnavailableError(
+                f"FACTOR_AUDIT_UNHEALTHY: errors={plan.error_count}/{audited} "
+                f"(ratio={provider_failure_ratio:.4f})"
+            )
+
     async def _repair_degraded_and_reaudit(
         self, session: AsyncSession, plan: ReconciliationPlan,
     ) -> tuple[ReconciliationPlan, Any]:
@@ -2609,6 +2628,10 @@ class BarsSchedulerService:
         re_plan = await task.dry_run(
             session, symbols=degraded_symbols, batch_size=50, max_mismatches=20
         )
+        # [F1 A3] 二次 targeted 重审必须重新执行 fail-closed 门禁（scope 完整性 /
+        # impact-set 零容忍 error / provider health）。未通过则向上传播，不得只更新
+        # summary 后继续 rebuild / stamp。
+        self._validate_factor_audit_plan(re_plan, requested_symbols=degraded_symbols)
         merged = ReconciliationPlan(
             items=list(plan.items) + list(re_plan.items),
             total_audited=plan.total_audited,

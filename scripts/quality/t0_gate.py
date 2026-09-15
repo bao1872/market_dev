@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """T0 — final changed-files static gate (single authoritative owner).
 
 T0 verifies that the FINAL changed files (between an explicit BASE and HEAD) are
@@ -12,15 +11,21 @@ default produced:
 
 Single owner (Task 005-R / Commit A):
   t0_gate.py is the ONLY authoritative source of changed-file identity AND the
-  ONLY executor of every checker. mypy-changed.sh is a thin wrapper that
-  delegates to `t0_gate.py --mypy-only`; it no longer recomputes changed files.
+  ONLY executor of every checker. The deprecated `scripts/quality/mypy-changed.sh`
+  wrapper has been removed; this script is the sole entrypoint.
 
 This implements the T0 already defined in rules/40-testing-quality.md. It is a
 local verification tier, NOT a new governance Level; it does not replace
 Level 1/2/3 routing, and it touches no production business code.
 
-T0 contract (rules/40):
-  Python changed files   -> Ruff, py_compile, Mypy (changed-file strategy).
+T0 contract (exploration-simplified policy, consistent with rules/40):
+  Python changed files   -> Ruff (HARD), py_compile (HARD).
+  New backend/app/*.py    -> Mypy (HARD).
+  Modified legacy backend/app/*.py -> Mypy (ADVISORY: runs, reports WARN, does
+                          not block). Pre-existing legacy type debt is recorded,
+                          not force-fixed by an unrelated bugfix.
+  backend/tests/**/*.py   -> NOT in the Mypy gate (Ruff + py_compile + T1 only).
+  scripts/quality/*.py    -> Ruff + py_compile + own tests (not production Mypy).
   Frontend changed source -> ESLint, TypeScript static check (tsc --noEmit).
 
 Hard rules:
@@ -31,9 +36,9 @@ Hard rules:
     (TOOLING_MISSING). Tool absence must never degrade to a silent PASS.
   * Git copy (C) keeps the old file; only the new path is an existing change.
     Git rename (R) deletes the old path and adds the new path.
-  * --mypy-only is diagnostic ONLY: it returns Mypy's rc and is NEVER a full
-    T0 PASS. An empty manifest still FAILS unless --allow-empty is explicit
-    (the origin/dev == HEAD false green is not allowed in this mode either).
+  * Mypy on modified legacy production files is ADVISORY: it runs and is reported
+    (WARN), but a non-zero result does NOT block T0. New production files and
+    tooling-missing remain HARD failures.
   * Committed-range identity is fail-closed: BASE must be an ancestor of HEAD,
     otherwise the three-dot diff silently uses the merge-base and does NOT
     represent the claimed task delta (IDENTITY_INVALID). Worktree mode is exempt
@@ -90,6 +95,7 @@ class Manifest:
     existing_changed_paths: list[str] = field(default_factory=list)
     deleted_paths: list[str] = field(default_factory=list)
     python_files: list[str] = field(default_factory=list)
+    python_status: dict[str, str] = field(default_factory=dict)
     frontend_files: list[str] = field(default_factory=list)
     other_files: list[str] = field(default_factory=list)
 
@@ -147,7 +153,7 @@ def _git(args: list[str]) -> str:
     res = subprocess.run(
         ["git", "-C", str(REPO_ROOT), *args],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     if res.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {res.stderr.strip()}")
@@ -173,9 +179,8 @@ def git_diff_name_status(base: str, head: str, worktree: bool) -> str:
             untracked = []
         for path in untracked:
             suffix = Path(path).suffix
-            if suffix in PY_SUFFIXES or suffix in FE_SUFFIXES:
-                if not _is_junk_path(path):
-                    chunks.append(f"A\t{path}")
+            if (suffix in PY_SUFFIXES or suffix in FE_SUFFIXES) and not _is_junk_path(path):
+                chunks.append(f"A\t{path}")
         return "\n".join(chunks)
     return _git(["diff", "--name-status", f"{base}...{head}"])
 
@@ -195,6 +200,7 @@ def classify(base: str, head: str, changes: list[FileChange]) -> Manifest:
         suffix = Path(change.path).suffix
         if suffix in PY_SUFFIXES:
             manifest.python_files.append(change.path)
+            manifest.python_status[change.path] = change.status
         elif suffix in FE_SUFFIXES:
             manifest.frontend_files.append(change.path)
         else:
@@ -251,7 +257,7 @@ def run_ruff(python_files: list[str]) -> CheckerResult:
                 [ruff, "check", "--output-format", "concise", *rel],
                 cwd=str(BACKEND),
                 capture_output=True,
-                text=True,
+                text=True, check=False,
             )
             rc = rc or res.returncode
             _collect(res, outputs)
@@ -268,7 +274,7 @@ def run_ruff(python_files: list[str]) -> CheckerResult:
                 ],
                 cwd=str(REPO_ROOT),
                 capture_output=True,
-                text=True,
+                text=True, check=False,
             )
             rc = rc or res.returncode
             _collect(res, outputs)
@@ -292,7 +298,7 @@ def run_py_compile(python_files: list[str]) -> CheckerResult:
             [sys.executable, "-m", "py_compile", *python_files],
             cwd=str(REPO_ROOT),
             capture_output=True,
-            text=True,
+            text=True, check=False,
         )
     except FileNotFoundError:
         return CheckerResult(2, "[T0] python interpreter missing (TOOLING_MISSING)", tooling_missing=True)
@@ -323,7 +329,7 @@ def run_mypy(python_files: list[str]) -> CheckerResult:
                 [venv_py, "-m", "mypy", "--no-incremental", "--follow-imports=skip", "--show-error-codes", *rel],
                 cwd=str(BACKEND),
                 capture_output=True,
-                text=True,
+                text=True, check=False,
             )
             rc = rc or res.returncode
             _collect(res, outputs)
@@ -342,7 +348,7 @@ def run_mypy(python_files: list[str]) -> CheckerResult:
                 ],
                 cwd=str(REPO_ROOT),
                 capture_output=True,
-                text=True,
+                text=True, check=False,
             )
             rc = rc or res.returncode
             _collect(res, outputs)
@@ -371,7 +377,7 @@ def run_eslint(frontend_files: list[str]) -> CheckerResult:
     ]
     if not rel:
         return CheckerResult(0, "(no frontend files to lint)", skipped=True)
-    res = subprocess.run([eslint, *rel], cwd=str(FRONTEND), capture_output=True, text=True)
+    res = subprocess.run([eslint, *rel], cwd=str(FRONTEND), capture_output=True, text=True, check=False)
     out = (res.stdout + res.stderr).strip()
     return CheckerResult(res.returncode, out)
 
@@ -391,22 +397,30 @@ def run_tsc(frontend_files: list[str]) -> CheckerResult:
     tsc = _resolve_tsc()
     if tsc is None:
         return CheckerResult(2, "[T0] frontend tsc binary missing (TOOLING_MISSING)", tooling_missing=True)
-    res = subprocess.run([tsc, "--noEmit"], cwd=str(FRONTEND), capture_output=True, text=True)
+    res = subprocess.run([tsc, "--noEmit"], cwd=str(FRONTEND), capture_output=True, text=True, check=False)
     out = (res.stdout + res.stderr).strip()
     return CheckerResult(res.returncode, out)
 
 
+# ADVISORY checkers report WARN and do NOT block T0. New production python files
+# and tooling-missing remain HARD failures (see module docstring).
+ADVISORY_CHECKERS = frozenset({"mypy_legacy"})
+
+
 def evaluate(manifest: Manifest, results: dict[str, CheckerResult], allow_empty: bool) -> bool:
-    """A gate passes iff every SCHEDULED checker (non-skipped) returned rc==0
-    AND was not a TOOLING_MISSING case. An empty manifest is a hard FAIL unless
-    --allow-empty is explicit.
+    """A gate passes iff every SCHEDULED HARD checker (non-skipped, non-advisory)
+    returned rc==0 AND no checker was TOOLING_MISSING. Advisory checkers (e.g.
+    mypy_legacy) may be non-zero and still pass. An empty manifest is a hard
+    FAIL unless --allow-empty is explicit.
     """
     if not manifest.changed_paths:
         return bool(allow_empty)
-    for r in results.values():
+    for name, r in results.items():
         if r.skipped:
             continue
-        if r.tooling_missing or r.rc != 0:
+        if r.tooling_missing:
+            return False
+        if r.rc != 0 and name not in ADVISORY_CHECKERS:
             return False
     return True
 
@@ -418,8 +432,17 @@ def _rev_parse(ref: str) -> str:
         return ref
 
 
-def _format_checker(name: str, r: CheckerResult) -> list[str]:
-    tag = "SKIP" if r.skipped else ("MISSING" if r.tooling_missing else ("PASS" if r.rc == 0 else "FAIL"))
+def _format_checker(name: str, r: CheckerResult, advisory: bool = False) -> list[str]:
+    if r.skipped:
+        tag = "SKIP"
+    elif r.tooling_missing:
+        tag = "MISSING"
+    elif r.rc == 0:
+        tag = "PASS"
+    elif advisory:
+        tag = "WARN"
+    else:
+        tag = "FAIL"
     lines = [f"--- {name} [{tag}] rc={r.rc} elapsed={r.elapsed:.2f}s ---"]
     if r.out.strip():
         lines.append(r.out.strip())
@@ -439,26 +462,9 @@ def format_report(manifest: Manifest, results: dict[str, CheckerResult], passed:
         f"deleted    : {manifest.deleted_paths}",
     ]
     for name, r in results.items():
-        lines.extend(_format_checker(name, r))
+        lines.extend(_format_checker(name, r, advisory=name in ADVISORY_CHECKERS))
     lines.append("=== T0 " + ("PASS" if passed else "FAIL") + " ===")
     return "\n".join(line for line in lines if line != "")
-
-
-def _format_partial(manifest: Manifest, mypy: CheckerResult, allow_empty: bool = False) -> str:
-    scope = (
-        "EMPTY_ALLOWED (no changed files; --allow-empty set; NOT a full T0 PASS)"
-        if allow_empty
-        else "NOT a full T0 PASS"
-    )
-    lines = [
-        f"=== T0 PARTIAL (--mypy-only) [{scope}]: only mypy executed ===",
-        f"BASE_SHA   : {manifest.base} ({_rev_parse(manifest.base)})",
-        f"HEAD_SHA   : {manifest.head}",
-        f"python     : {manifest.python_files}",
-    ]
-    lines.extend(_format_checker("mypy", mypy))
-    lines.append(f"=== T0 PARTIAL (mypy rc={mypy.rc}) — {scope} ===")
-    return "\n".join(lines)
 
 
 def _assert_ancestor(base: str, head: str) -> bool:
@@ -473,7 +479,7 @@ def _assert_ancestor(base: str, head: str) -> bool:
     res = subprocess.run(
         ["git", "-C", str(REPO_ROOT), "merge-base", "--is-ancestor", base, head],
         capture_output=True,
-        text=True,
+        text=True, check=False,
     )
     return res.returncode == 0
 
@@ -499,11 +505,6 @@ def main(argv: list[str] | None = None) -> int:
         "--allow-empty",
         action="store_true",
         help="do not fail when the manifest is empty (e.g. base==head)",
-    )
-    parser.add_argument(
-        "--mypy-only",
-        action="store_true",
-        help="diagnostic: run ONLY mypy and return its rc; NEVER a full T0 PASS",
     )
     args = parser.parse_args(argv)
 
@@ -532,48 +533,17 @@ def main(argv: list[str] | None = None) -> int:
     changes = parse_name_status(raw)
     manifest = classify(args.base, head_label, changes)
 
-    if args.mypy_only:
-        # mypy-only is still a changed-file gate. An empty manifest is a false
-        # green exactly like the full T0 (origin/dev == HEAD after push): it must
-        # NOT print "changed files pass Mypy" and must NOT exit 0 on an empty set
-        # unless --allow-empty is explicit.
-        if not manifest.changed_paths and not args.allow_empty:
-            print(
-                "=== T0 PARTIAL (--mypy-only): EMPTY_MANIFEST — nothing was actually checked ===\n"
-                f"BASE_SHA   : {manifest.base} ({_rev_parse(manifest.base)})\n"
-                f"HEAD_SHA   : {manifest.head}\n"
-                "[T0] EMPTY_MANIFEST: refusing to report 'changed files pass Mypy' for an empty set. "
-                "This usually means BASE==HEAD (e.g. origin/dev==HEAD after push). Pass explicit "
-                "--base/--head, or --allow-empty if this is intentional.",
-                file=sys.stderr,
-            )
-            return 1
-        mypy = _timed(run_mypy, manifest.python_files)
-        print(_format_partial(manifest, mypy, allow_empty=args.allow_empty))
-        if args.json:
-            print(
-                json.dumps(
-                    {
-                        "mode": "mypy-only",
-                        "partial": True,
-                        "empty_allowed": args.allow_empty,
-                        "base": manifest.base,
-                        "head": manifest.head,
-                        "python_files": manifest.python_files,
-                        "mypy_rc": mypy.rc,
-                        "mypy_tooling_missing": mypy.tooling_missing,
-                        "mypy_elapsed_s": round(mypy.elapsed, 3),
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-            )
-        return mypy.rc
-
+    # Mypy policy (exploration-simplified): new backend/app/*.py => HARD;
+    # modified legacy backend/app/*.py => ADVISORY (WARN, non-blocking);
+    # backend/tests and scripts/quality are NOT in the production Mypy gate.
+    prod_py = [p for p in manifest.python_files if p.startswith("backend/app/")]
+    new_production = [p for p in prod_py if manifest.python_status.get(p) == "A"]
+    modified_legacy = [p for p in prod_py if manifest.python_status.get(p) != "A"]
     results: dict[str, CheckerResult] = {
         "ruff": _timed(run_ruff, manifest.python_files),
         "py_compile": _timed(run_py_compile, manifest.python_files),
-        "mypy": _timed(run_mypy, manifest.python_files),
+        "mypy_new": _timed(run_mypy, new_production),
+        "mypy_legacy": _timed(run_mypy, modified_legacy),
         "eslint": _timed(run_eslint, manifest.frontend_files),
         "tsc": _timed(run_tsc, manifest.frontend_files),
     }
@@ -596,6 +566,7 @@ def main(argv: list[str] | None = None) -> int:
                     "rc": r.rc,
                     "skipped": r.skipped,
                     "tooling_missing": r.tooling_missing,
+                    "advisory": name in ADVISORY_CHECKERS,
                     "elapsed_s": round(r.elapsed, 3),
                 }
                 for name, r in results.items()

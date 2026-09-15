@@ -679,25 +679,36 @@ async def test_audit_degraded_blocks_core() -> None:
     """degraded_count > 0 必须 hard-fail（FactorIntegrityBlockedError），
     禁止带着「无法证明 factor 正确性」的股票进入 DSA/Core/Review。
 
-    用 job_run_id=None + MagicMock db_session 保持纯单元（不写事件、不连 DB）；
-    degraded 检查在写 done 事件之前触发，因此 rebuild_batch 不应被调用。
+    [F1] degraded 先走有界 repair + 二次 targeted 重审；若重审仍 degraded，
+    则在 FACTOR_AUDIT_DEGRADED 处熔断。用 job_run_id=None + MagicMock
+    db_session 保持纯单元（不写事件、不连 DB）；degraded 检查在写 done 事件
+    之前触发，因此 rebuild_batch 不应被调用。A2 一致性要求 degraded_count 与
+    degraded_items/degraded_symbols 完全一致，故此处构造一致 plan。
     """
-    instruments = _make_instruments(3)
-
-    plan = _make_plan(
-        total_audited=5293, consistent=5292, needs_rebuild=0,
-        degraded_count=1, degraded_symbols=["600519"],
+    item = _make_degraded_item(
+        symbol="600519", reason="bars_daily_gap", dates=(date(2024, 1, 5),)
     )
+    # A2 一致：degraded_count(1) == items(1) == symbols(1)
+    first_plan = _make_degraded_plan([item], total_audited=5293, consistent=5292)
+    # 二次重审仍 degraded（补齐数据后仍不一致）→ 最终在 FACTOR_AUDIT_DEGRADED 处熔断
+    second_plan = _make_degraded_plan([item], total_audited=1, consistent=0)
 
     mock_task = MagicMock()
-    mock_task.dry_run = AsyncMock(return_value=plan)
+    mock_task.dry_run = AsyncMock(side_effect=[first_plan, second_plan])
 
+    repair_report = DegradedRepairReport(
+        attempted_symbols=["600519"], repaired_symbols=["600519"],
+        inserted_rows=5, unresolved_symbols=[], reason="all_repaired",
+    )
     service = BarsSchedulerService()
-    with _patch_task(mock_task):
+    with _patch_task(mock_task), patch(
+        "app.services.daily_gap_repair_service.repair_degraded_factor_inputs",
+        new=AsyncMock(return_value=repair_report),
+    ):
         with pytest.raises(FactorIntegrityBlockedError, match="FACTOR_AUDIT_DEGRADED"):
             await service._audit_and_rebuild_factors(
                 trade_date=date(2026, 7, 18),
-                instruments=instruments,
+                instruments=_make_instruments(3),
                 db_session=MagicMock(),  # job_run_id=None → 不写事件，dry_run 为 mock
                 job_run_id=None,
             )
@@ -901,6 +912,124 @@ async def test_f1_unknown_degraded_reason_not_auto_repaired() -> None:
     reported = mock_repair.call_args.args[1]  # (session, degraded_items)
     assert reported[0].reason == "unknown_degradation"
     assert reported[0].symbol == "001331"
+
+
+@pytest.mark.asyncio
+async def test_f1_degraded_evidence_inconsistent_blocks() -> None:
+    """F1 A2: degraded_count 与 degraded_items / degraded_symbols 不一致 → FACTOR_DEGRADED_EVIDENCE_INCOMPLETE。
+
+    A2 一致性检查位于 repair 之前；一旦不一致立即熔断，不得退化成
+    dry_run(symbols=[])（那会重新触发全市场 audit，隐藏 scope 错误）。
+    """
+    item = _make_degraded_item(
+        symbol="000032", reason="bars_daily_gap", dates=(date(2024, 1, 5),)
+    )
+    # degraded_count=2，但 degraded_items 只有 1 条、degraded_symbols 也只有 1 → 不一致
+    inconsistent_plan = ReconciliationPlan(
+        items=[],
+        total_audited=3,
+        consistent_count=2,
+        error_count=0,
+        degraded_count=2,
+        degraded_symbols=["000032"],
+        degraded_items=(item,),
+    )
+
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(return_value=inconsistent_plan)
+
+    service = BarsSchedulerService()
+    with _patch_task(mock_task):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_DEGRADED_EVIDENCE_INCOMPLETE"
+        ):
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(3),
+                db_session=MagicMock(),
+                job_run_id=None,
+            )
+
+    # 在 A2 处已 raise，repair 与 rebuild 都不应被调用
+    mock_task.rebuild_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_f1_second_audit_scope_incomplete_blocks() -> None:
+    """F1 A3: 二次 targeted 重审 scope 不完整 → FACTOR_AUDIT_SCOPE_INCOMPLETE 原样传播。
+
+    repair 成功补齐数据后，二次重审必须重新执行 fail-closed 门禁；若重审实际
+    audited 数量 != 请求的 degraded scope，必须熔断且错误原样传播（不包装成
+    REPAIR_FAILED）。
+    """
+    item = _make_degraded_item(reason="bars_daily_gap", dates=(date(2024, 1, 5),))
+    first_plan = _make_degraded_plan([item])  # degraded_count=1, items=1, symbols=1 → A2 通过
+    # 二次重审：重审实际 audited=2，但请求的 degraded scope 只有 1 只 → scope 不完整
+    second_plan = _make_plan(total_audited=2, consistent=1, needs_rebuild=0)
+
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(side_effect=[first_plan, second_plan])
+
+    repair_report = DegradedRepairReport(
+        attempted_symbols=["000032"], repaired_symbols=["000032"],
+        inserted_rows=5, unresolved_symbols=[], reason="all_repaired",
+    )
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), patch(
+        "app.services.daily_gap_repair_service.repair_degraded_factor_inputs",
+        new=AsyncMock(return_value=repair_report),
+    ):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_SCOPE_INCOMPLETE"
+        ) as excinfo:
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(3),
+                db_session=MagicMock(),
+                job_run_id=None,
+            )
+
+    # 错误必须原样传播，不得被包装成 REPAIR_FAILED
+    assert "REPAIR_FAILED" not in str(excinfo.value)
+    mock_task.rebuild_batch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_f1_second_audit_impact_errors_blocks() -> None:
+    """F1 A3: 二次 targeted 重审含 audit error → FACTOR_AUDIT_IMPACT_ERRORS 原样传播。
+
+    impact-set 模式下零容忍任一 audit error；二次重审若 provider 返回 error，
+    必须熔断且不得包装成 REPAIR_FAILED。
+    """
+    item = _make_degraded_item(reason="bars_daily_gap", dates=(date(2024, 1, 5),))
+    first_plan = _make_degraded_plan([item])
+    # 二次重审：audited 数量匹配 scope=1，但 error_count>0 → 零容忍
+    second_plan = _make_plan(total_audited=1, consistent=0, needs_rebuild=0, error_count=1)
+
+    mock_task = MagicMock()
+    mock_task.dry_run = AsyncMock(side_effect=[first_plan, second_plan])
+
+    repair_report = DegradedRepairReport(
+        attempted_symbols=["000032"], repaired_symbols=["000032"],
+        inserted_rows=5, unresolved_symbols=[], reason="all_repaired",
+    )
+    service = BarsSchedulerService()
+    with _patch_task(mock_task), patch(
+        "app.services.daily_gap_repair_service.repair_degraded_factor_inputs",
+        new=AsyncMock(return_value=repair_report),
+    ):
+        with pytest.raises(
+            FactorIntegrityBlockedError, match="FACTOR_AUDIT_IMPACT_ERRORS"
+        ) as excinfo:
+            await service._audit_and_rebuild_factors(
+                trade_date=date(2026, 7, 18),
+                instruments=_make_instruments(3),
+                db_session=MagicMock(),
+                job_run_id=None,
+            )
+
+    assert "REPAIR_FAILED" not in str(excinfo.value)
+    mock_task.rebuild_batch.assert_not_called()
 
 
 @pytest.mark.asyncio
