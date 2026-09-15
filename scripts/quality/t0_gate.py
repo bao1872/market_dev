@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
-"""T0 — final changed-files static gate.
+"""T0 — final changed-files static gate (single authoritative owner).
 
-Verifies that the FINAL changed files (between an explicit BASE and HEAD) are
-lint-clean, instead of proving a linter "would work" on a synthetic probe.
-
-This closes three false-green holes that the previous `origin/dev...HEAD` default
-produced:
+T0 verifies that the FINAL changed files (between an explicit BASE and HEAD) are
+lint/type/compile clean, instead of proving a linter "would work" on a synthetic
+probe. This closes the false-green holes that the previous `origin/dev...HEAD`
+default produced:
 
   * after `push origin/dev`, origin/dev == HEAD => empty diff => silent skip;
   * deleted files were handed to ruff/mypy/eslint (missing path);
   * no manifest recorded WHAT was actually checked.
 
-Scope / constraints (Task 005-A):
-  * This is a local verification tier, NOT a new governance Level; it does not
-    replace Level 1/2/3 routing.
-  * Changed-file identity must be explicit (--base / --head); it never assumes
-    origin/dev represents "this task".
-  * No production business code is touched; AGENTS/rules/panji-verify are
-    out of scope; no second deploy/verify path is added.
+Single owner (Task 005-R / Commit A):
+  t0_gate.py is the ONLY authoritative source of changed-file identity AND the
+  ONLY executor of every checker. mypy-changed.sh is a thin wrapper that
+  delegates to `t0_gate.py --mypy-only`; it no longer recomputes changed files.
 
-Checkers:
-  * Python  -> real Ruff on the final files.
-  * Python  -> changed-file Mypy (reuses the existing methodology:
-    `--no-incremental --follow-imports=skip --show-error-codes`, applied to the
-    files T0 itself identified, so untracked junk like `.tmp_test/` is excluded).
-  * Frontend (TS/TSX/JS/JSX) -> ESLint on the changed files (skipped when the
-    binary or the files are absent).
+This implements the T0 already defined in rules/40-testing-quality.md. It is a
+local verification tier, NOT a new governance Level; it does not replace
+Level 1/2/3 routing, and it touches no production business code.
+
+T0 contract (rules/40):
+  Python changed files   -> Ruff, py_compile, Mypy (changed-file strategy).
+  Frontend changed source -> ESLint, TypeScript static check (tsc --noEmit).
+
+Hard rules:
+  * Changed-file identity is explicit (--base / --head); it never assumes
+    origin/dev represents "this task".
+  * A deleted file lives ONLY in deleted_paths; it is never passed to a checker.
+  * A language with changed source but MISSING required tooling is a hard FAIL
+    (TOOLING_MISSING). Tool absence must never degrade to a silent PASS.
+  * Git copy (C) keeps the old file; only the new path is an existing change.
+    Git rename (R) deletes the old path and adds the new path.
+  * --mypy-only is diagnostic ONLY: it returns Mypy's rc and is NEVER a full
+    T0 PASS.
 """
 from __future__ import annotations
 
@@ -33,6 +40,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -81,12 +89,29 @@ class Manifest:
     other_files: list[str] = field(default_factory=list)
 
 
-def parse_name_status(raw: str) -> list[FileChange]:
-    """Parse `git diff --name-status` output into FileChange entries.
+@dataclass
+class CheckerResult:
+    rc: int
+    out: str
+    skipped: bool = False
+    tooling_missing: bool = False
+    elapsed: float = 0.0
 
-    Pure (no git/IO). Handles M/A/D/R/C/T and renamed old->new paths:
-    a rename/copy yields one existing entry (new path) and one deleted entry
-    (old path), so the deleted old path is never passed to a checker.
+
+def parse_name_status(raw: str) -> list[FileChange]:
+    """Parse `git diff --name-status` output into FileChange entries (pure).
+
+    Git status semantics:
+      * M/A/T            -> existing changed path.
+      * D                -> deleted path (lives only in deleted_paths).
+      * R<score> a b     -> rename: `b` is the existing change, `a` is deleted.
+      * C<score> a b     -> copy:   `b` is the existing change; `a` STILL EXISTS
+                            and is intentionally NOT recorded as deleted (a copy
+                            leaves the source untouched).
+
+    A copy therefore yields a single existing entry; a rename yields one
+    existing entry plus one deleted entry. Deleted paths are never passed to a
+    checker.
     """
     changes: list[FileChange] = []
     for line in raw.splitlines():
@@ -98,11 +123,14 @@ def parse_name_status(raw: str) -> list[FileChange]:
             continue
         status_field = parts[0]
         letter = status_field[0]
-        if letter in ("R", "C"):
+        if letter == "R":
             old_path = parts[1]
             new_path = parts[2] if len(parts) > 2 else parts[1]
             changes.append(FileChange("A", new_path, deleted=False))
             changes.append(FileChange("D", old_path, deleted=True))
+        elif letter == "C":
+            new_path = parts[2] if len(parts) > 2 else parts[1]
+            changes.append(FileChange("A", new_path, deleted=False))
         elif letter == "D":
             changes.append(FileChange("D", parts[1], deleted=True))
         else:
@@ -124,9 +152,10 @@ def _git(args: list[str]) -> str:
 def git_diff_name_status(base: str, head: str, worktree: bool) -> str:
     """Return `git diff --name-status` output for the requested range.
 
-    Committed range uses `BASE...HEAD` (excludes untracked). The worktree mode
-    unions the unstaged and staged diffs against BASE (also excludes untracked,
-    which keeps `.tmp_*` junk out of the manifest).
+    Committed range (default) uses `BASE...HEAD`, which compares two commits and
+    therefore EXCLUDES untracked, unstaged, and staged-not-in-HEAD changes. Only
+    `--worktree` unions the unstaged diff, the staged (cached) diff, and
+    genuinely new untracked source files (filtered by suffix + junk).
     """
     if worktree:
         chunks = [
@@ -173,123 +202,208 @@ def _resolve_ruff() -> str:
     return str(local) if local.exists() else "ruff"
 
 
-def run_ruff(python_files: list[str]) -> tuple[int, str]:
+def _resolve_mypy_python() -> str | None:
+    venv_py = BACKEND / ".venv" / "bin" / "python"
+    return str(venv_py) if venv_py.exists() else None
+
+
+def _resolve_eslint() -> str | None:
+    eslint = FRONTEND / "node_modules" / ".bin" / "eslint"
+    return str(eslint) if eslint.exists() else None
+
+
+def _resolve_tsc() -> str | None:
+    tsc = FRONTEND / "node_modules" / ".bin" / "tsc"
+    return str(tsc) if tsc.exists() else None
+
+
+def _collect(res: subprocess.CompletedProcess, outputs: list[str]) -> None:
+    if res.stdout.strip():
+        outputs.append(res.stdout.strip())
+    if res.stderr.strip():
+        outputs.append(res.stderr.strip())
+
+
+def run_ruff(python_files: list[str]) -> CheckerResult:
     """Run Ruff on the final Python files.
 
     Backend files are checked with the backend config (cwd=backend); non-backend
     files (e.g. this script) are checked with the backend config applied
-    explicitly so they meet the same standard. Deleted files are never passed in.
+    explicitly so they meet the same standard. A missing ruff binary is a hard
+    FAIL (TOOLING_MISSING), never a silent pass. Deleted files are never passed.
     """
     if not python_files:
-        return 0, "(no python files to lint)"
+        return CheckerResult(0, "(no python files to lint)", skipped=True)
     ruff = _resolve_ruff()
     backend_files = [p for p in python_files if p.startswith("backend/")]
     other_files = [p for p in python_files if not p.startswith("backend/")]
     outputs: list[str] = []
     rc = 0
-    if backend_files:
-        rel = [p[len("backend/"):] for p in backend_files]
-        cmd = [ruff, "check", "--output-format", "concise", *rel]
-        res = subprocess.run(cmd, cwd=str(BACKEND), capture_output=True, text=True)
-        rc = rc or res.returncode
-        if res.stdout.strip():
-            outputs.append(res.stdout.strip())
-        if res.stderr.strip():
-            outputs.append(res.stderr.strip())
-    if other_files:
-        cmd = [
-            ruff,
-            "check",
-            "--config",
-            str(BACKEND / "pyproject.toml"),
-            "--output-format",
-            "concise",
-            *other_files,
-        ]
-        res = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True)
-        rc = rc or res.returncode
-        if res.stdout.strip():
-            outputs.append(res.stdout.strip())
-        if res.stderr.strip():
-            outputs.append(res.stderr.strip())
-    return rc, "\n".join(outputs).strip()
+    try:
+        if backend_files:
+            rel = [p[len("backend/"):] for p in backend_files]
+            res = subprocess.run(
+                [ruff, "check", "--output-format", "concise", *rel],
+                cwd=str(BACKEND),
+                capture_output=True,
+                text=True,
+            )
+            rc = rc or res.returncode
+            _collect(res, outputs)
+        if other_files:
+            res = subprocess.run(
+                [
+                    ruff,
+                    "check",
+                    "--config",
+                    str(BACKEND / "pyproject.toml"),
+                    "--output-format",
+                    "concise",
+                    *other_files,
+                ],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+            )
+            rc = rc or res.returncode
+            _collect(res, outputs)
+    except FileNotFoundError:
+        return CheckerResult(
+            2, f"[T0] ruff binary missing (resolved={ruff}) (TOOLING_MISSING)", tooling_missing=True
+        )
+    return CheckerResult(rc, "\n".join(outputs).strip())
 
 
-def run_mypy(python_files: list[str]) -> tuple[int, str]:
-    """Run changed-file Mypy on the final Python files (reuses the existing
-    changed-file methodology, applied to T0's own authoritative file list)."""
+def run_py_compile(python_files: list[str]) -> CheckerResult:
+    """Byte-compile the final Python files with `python -m py_compile`.
+
+    Syntactic / bytecode validation only; zero extra config. The caller already
+    excludes deleted files, so none are passed here.
+    """
+    if not python_files:
+        return CheckerResult(0, "(no python files to compile)", skipped=True)
+    try:
+        res = subprocess.run(
+            [sys.executable, "-m", "py_compile", *python_files],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError:
+        return CheckerResult(2, "[T0] python interpreter missing (TOOLING_MISSING)", tooling_missing=True)
+    out = (res.stdout + res.stderr).strip()
+    return CheckerResult(res.returncode, out)
+
+
+def run_mypy(python_files: list[str]) -> CheckerResult:
+    """Run changed-file Mypy on the final Python files.
+
+    Reuses the existing changed-file methodology (`--no-incremental
+    --follow-imports=skip --show-error-codes`), applied to T0's own
+    authoritative file list, so untracked junk like `.tmp_test/` is excluded.
+    Backend files run from backend/; non-backend files use the backend config
+    explicitly. A missing venv python is a hard FAIL (TOOLING_MISSING).
+    """
     backend_py = [p for p in python_files if p.startswith("backend/")]
     non_backend_py = [p for p in python_files if not p.startswith("backend/")]
+    venv_py = _resolve_mypy_python()
+    if venv_py is None:
+        return CheckerResult(2, "[T0] backend/.venv missing; cannot run mypy (TOOLING_MISSING)", tooling_missing=True)
     outputs: list[str] = []
     rc = 0
-    venv_py = BACKEND / ".venv" / "bin" / "python"
-    if not venv_py.exists():
-        return 2, "[T0] backend/.venv missing; cannot run mypy"
-    if backend_py:
-        rel = [p[len("backend/"):] for p in backend_py]
-        cmd = [
-            str(venv_py),
-            "-m",
-            "mypy",
-            "--no-incremental",
-            "--follow-imports=skip",
-            "--show-error-codes",
-            *rel,
-        ]
-        res = subprocess.run(cmd, cwd=str(BACKEND), capture_output=True, text=True)
-        rc = rc or res.returncode
-        if res.stdout.strip():
-            outputs.append(res.stdout.strip())
-        if res.stderr.strip():
-            outputs.append(res.stderr.strip())
-    if non_backend_py:
-        cmd = [
-            str(venv_py),
-            "-m",
-            "mypy",
-            "--no-incremental",
-            "--follow-imports=skip",
-            "--show-error-codes",
-            "--config-file",
-            str(BACKEND / "pyproject.toml"),
-            *non_backend_py,
-        ]
-        res = subprocess.run(cmd, cwd=str(REPO_ROOT), capture_output=True, text=True)
-        rc = rc or res.returncode
-        if res.stdout.strip():
-            outputs.append(res.stdout.strip())
-        if res.stderr.strip():
-            outputs.append(res.stderr.strip())
-    return rc, "\n".join(outputs).strip()
+    try:
+        if backend_py:
+            rel = [p[len("backend/"):] for p in backend_py]
+            res = subprocess.run(
+                [venv_py, "-m", "mypy", "--no-incremental", "--follow-imports=skip", "--show-error-codes", *rel],
+                cwd=str(BACKEND),
+                capture_output=True,
+                text=True,
+            )
+            rc = rc or res.returncode
+            _collect(res, outputs)
+        if non_backend_py:
+            res = subprocess.run(
+                [
+                    venv_py,
+                    "-m",
+                    "mypy",
+                    "--no-incremental",
+                    "--follow-imports=skip",
+                    "--show-error-codes",
+                    "--config-file",
+                    str(BACKEND / "pyproject.toml"),
+                    *non_backend_py,
+                ],
+                cwd=str(REPO_ROOT),
+                capture_output=True,
+                text=True,
+            )
+            rc = rc or res.returncode
+            _collect(res, outputs)
+    except FileNotFoundError:
+        return CheckerResult(2, "[T0] mypy invocation failed (TOOLING_MISSING)", tooling_missing=True)
+    return CheckerResult(rc, "\n".join(outputs).strip())
 
 
-def run_eslint(frontend_files: list[str], no_eslint: bool) -> tuple[int, str, bool]:
-    """Run ESLint on changed frontend files. Returns (rc, output, skipped)."""
-    if no_eslint:
-        return 0, "(eslint skipped by --no-eslint)", True
+def run_eslint(frontend_files: list[str]) -> CheckerResult:
+    """Run ESLint on changed frontend files.
+
+    A missing eslint binary WITH frontend changes is a hard FAIL
+    (TOOLING_MISSING). When there are no frontend files the checker is skipped
+    (which does not block the gate). The previous "missing binary => skipped =>
+    PASS" false-green is removed.
+    """
     if not frontend_files:
-        return 0, "(no frontend files to lint)", True
-    eslint = FRONTEND / "node_modules" / ".bin" / "eslint"
-    if not eslint.exists():
-        return 0, "(eslint binary missing; skipped)", True
+        return CheckerResult(0, "(no frontend files to lint)", skipped=True)
+    eslint = _resolve_eslint()
+    if eslint is None:
+        return CheckerResult(2, "[T0] frontend eslint binary missing (TOOLING_MISSING)", tooling_missing=True)
     rel = [
         str(Path(p).relative_to("frontend"))
         for p in frontend_files
         if p.startswith("frontend/")
     ]
     if not rel:
-        return 0, "(no frontend files to lint)", True
-    res = subprocess.run([str(eslint), *rel], cwd=str(FRONTEND), capture_output=True, text=True)
+        return CheckerResult(0, "(no frontend files to lint)", skipped=True)
+    res = subprocess.run([eslint, *rel], cwd=str(FRONTEND), capture_output=True, text=True)
     out = (res.stdout + res.stderr).strip()
-    return res.returncode, out, False
+    return CheckerResult(res.returncode, out)
 
 
-def evaluate(manifest: Manifest, results: dict, allow_empty: bool) -> bool:
+def run_tsc(frontend_files: list[str]) -> CheckerResult:
+    """Run the TypeScript static check (`tsc --noEmit`) on the frontend project.
+
+    `tsc --noEmit` validates the whole project per tsconfig (correctness-first;
+    TypeScript needs project context, so it cannot type-check a single file in
+    isolation). Triggered whenever frontend source changed. A missing tsc binary
+    is a hard FAIL (TOOLING_MISSING). Real project-check timing is measured and
+    reported; any T0-budget tuning belongs to later commits and must not alter
+    rules/40.
+    """
+    if not frontend_files:
+        return CheckerResult(0, "(no frontend files to type-check)", skipped=True)
+    tsc = _resolve_tsc()
+    if tsc is None:
+        return CheckerResult(2, "[T0] frontend tsc binary missing (TOOLING_MISSING)", tooling_missing=True)
+    res = subprocess.run([tsc, "--noEmit"], cwd=str(FRONTEND), capture_output=True, text=True)
+    out = (res.stdout + res.stderr).strip()
+    return CheckerResult(res.returncode, out)
+
+
+def evaluate(manifest: Manifest, results: dict[str, CheckerResult], allow_empty: bool) -> bool:
+    """A gate passes iff every SCHEDULED checker (non-skipped) returned rc==0
+    AND was not a TOOLING_MISSING case. An empty manifest is a hard FAIL unless
+    --allow-empty is explicit.
+    """
     if not manifest.changed_paths:
         return bool(allow_empty)
-    return all(rc == 0 for rc, _ in (results["ruff"], results["mypy"])) and (
-        results["eslint"][2] or results["eslint"][0] == 0
-    )
+    for r in results.values():
+        if r.skipped:
+            continue
+        if r.tooling_missing or r.rc != 0:
+            return False
+    return True
 
 
 def _rev_parse(ref: str) -> str:
@@ -299,10 +413,15 @@ def _rev_parse(ref: str) -> str:
         return ref
 
 
-def format_report(manifest: Manifest, results: dict, passed: bool) -> str:
-    ruff_rc, ruff_out = results["ruff"]
-    mypy_rc, mypy_out = results["mypy"]
-    es_rc, es_out, es_skip = results["eslint"]
+def _format_checker(name: str, r: CheckerResult) -> list[str]:
+    tag = "SKIP" if r.skipped else ("MISSING" if r.tooling_missing else ("PASS" if r.rc == 0 else "FAIL"))
+    lines = [f"--- {name} [{tag}] rc={r.rc} elapsed={r.elapsed:.2f}s ---"]
+    if r.out.strip():
+        lines.append(r.out.strip())
+    return lines
+
+
+def format_report(manifest: Manifest, results: dict[str, CheckerResult], passed: bool) -> str:
     lines = [
         "=== T0 FINAL CHANGED-FILES GATE ===",
         f"BASE_SHA   : {manifest.base} ({_rev_parse(manifest.base)})",
@@ -313,18 +432,30 @@ def format_report(manifest: Manifest, results: dict, passed: bool) -> str:
         f"frontend   : {manifest.frontend_files}",
         f"other      : {manifest.other_files}",
         f"deleted    : {manifest.deleted_paths}",
-        "--- ruff ---",
-        f"rc={ruff_rc}",
-        ruff_out,
-        "--- mypy ---",
-        f"rc={mypy_rc}",
-        mypy_out,
-        "--- eslint ---",
-        f"skipped={es_skip} rc={es_rc}",
-        es_out,
-        "=== T0 " + ("PASS" if passed else "FAIL") + " ===",
     ]
+    for name, r in results.items():
+        lines.extend(_format_checker(name, r))
+    lines.append("=== T0 " + ("PASS" if passed else "FAIL") + " ===")
     return "\n".join(line for line in lines if line != "")
+
+
+def _format_partial(manifest: Manifest, mypy: CheckerResult) -> str:
+    lines = [
+        "=== T0 PARTIAL (--mypy-only): only mypy executed — NOT a full T0 PASS ===",
+        f"BASE_SHA   : {manifest.base} ({_rev_parse(manifest.base)})",
+        f"HEAD_SHA   : {manifest.head}",
+        f"python     : {manifest.python_files}",
+    ]
+    lines.extend(_format_checker("mypy", mypy))
+    lines.append(f"=== T0 PARTIAL (mypy rc={mypy.rc}) ===")
+    return "\n".join(lines)
+
+
+def _timed(fn, *args) -> CheckerResult:
+    t0 = time.perf_counter()
+    r = fn(*args)
+    r.elapsed = time.perf_counter() - t0
+    return r
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -342,8 +473,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="do not fail when the manifest is empty (e.g. base==head)",
     )
-    parser.add_argument("--no-eslint", action="store_true")
-    parser.add_argument("--no-mypy", action="store_true")
+    parser.add_argument(
+        "--mypy-only",
+        action="store_true",
+        help="diagnostic: run ONLY mypy and return its rc; NEVER a full T0 PASS",
+    )
     args = parser.parse_args(argv)
 
     head_label = "WORKTREE (uncommitted)" if args.worktree else args.head
@@ -356,16 +490,37 @@ def main(argv: list[str] | None = None) -> int:
     changes = parse_name_status(raw)
     manifest = classify(args.base, head_label, changes)
 
-    results: dict = {}
-    results["ruff"] = run_ruff(manifest.python_files)
-    results["mypy"] = (0, "(mypy skipped by --no-mypy)") if args.no_mypy else run_mypy(
-        manifest.python_files
-    )
-    results["eslint"] = run_eslint(manifest.frontend_files, args.no_eslint)
+    if args.mypy_only:
+        mypy = _timed(run_mypy, manifest.python_files)
+        print(_format_partial(manifest, mypy))
+        if args.json:
+            print(
+                json.dumps(
+                    {
+                        "mode": "mypy-only",
+                        "base": manifest.base,
+                        "head": manifest.head,
+                        "python_files": manifest.python_files,
+                        "mypy_rc": mypy.rc,
+                        "mypy_tooling_missing": mypy.tooling_missing,
+                        "mypy_elapsed_s": round(mypy.elapsed, 3),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                )
+            )
+        return mypy.rc
+
+    results: dict[str, CheckerResult] = {
+        "ruff": _timed(run_ruff, manifest.python_files),
+        "py_compile": _timed(run_py_compile, manifest.python_files),
+        "mypy": _timed(run_mypy, manifest.python_files),
+        "eslint": _timed(run_eslint, manifest.frontend_files),
+        "tsc": _timed(run_tsc, manifest.frontend_files),
+    }
 
     passed = evaluate(manifest, results, args.allow_empty)
-    report = format_report(manifest, results, passed)
-    print(report)
+    print(format_report(manifest, results, passed))
 
     if args.json:
         payload = {
@@ -377,10 +532,15 @@ def main(argv: list[str] | None = None) -> int:
             "frontend_files": manifest.frontend_files,
             "other_files": manifest.other_files,
             "deleted_paths": manifest.deleted_paths,
-            "ruff_rc": results["ruff"][0],
-            "mypy_rc": results["mypy"][0],
-            "eslint_rc": results["eslint"][0],
-            "eslint_skipped": results["eslint"][2],
+            "checkers": {
+                name: {
+                    "rc": r.rc,
+                    "skipped": r.skipped,
+                    "tooling_missing": r.tooling_missing,
+                    "elapsed_s": round(r.elapsed, 3),
+                }
+                for name, r in results.items()
+            },
             "passed": passed,
         }
         print(json.dumps(payload, ensure_ascii=False, indent=2))
