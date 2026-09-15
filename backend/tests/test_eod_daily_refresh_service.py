@@ -1440,7 +1440,8 @@ async def test_after_close_periods_d_only_calls_no_minute_provider(
 async def test_past_trade_date_never_uses_today_snapshot(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """过去交易日重跑：必须走 historical/legacy 路径，不得拿今天的快照写历史日线。"""
+    """过去交易日重跑：必须走 historical 路径（recover_recent_daily_gaps 快路径），
+    不得拿今天的快照写历史日线；且 [AUDIT-FIX] 门禁失败不再回退 legacy loop。"""
     service = BarsSchedulerService(fetch_processes=1)
     instruments = [SimpleNamespace(id=uuid.uuid4(), symbol="600519")]
     started = _patch_daily_harness(monkeypatch, service, instruments, eod_ready=False)
@@ -1449,13 +1450,24 @@ async def test_past_trade_date_never_uses_today_snapshot(
         "_refresh_daily_from_market_snapshot",
         AsyncMock(side_effect=AssertionError("过去交易日不得使用当日快照")),
     )
+    # [AUDIT-FIX] 历史路径改走 recover_recent_daily_gaps 快路径（不再回退 legacy loop）
+    recover_mock = AsyncMock(return_value=SimpleNamespace(
+        days=[SimpleNamespace(bulk_inserted=0, sparse_filled=0)],
+    ))
+    monkeypatch.setattr(
+        "app.services.daily_gap_recovery_service.recover_recent_daily_gaps",
+        recover_mock,
+    )
 
     result = await service.refresh_all_instruments(
         date(2026, 9, 10), db_session=object(), trigger_dsa=False, periods=("d",)
     )
 
-    assert result.daily_mode == "legacy_fallback"
-    assert started == ["d"]
+    # 走历史回补快路径，绝不使用当日快照
+    assert result.daily_mode == "historical_gap_repair"
+    recover_mock.assert_called_once()
+    # fast path 跳过逐股 serial loop
+    assert started == []
 
 
 def test_build_provider_request_honours_explicit_end_date() -> None:
