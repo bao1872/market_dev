@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import ast
 import uuid
+from datetime import date
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pandas as pd
 import pytest
@@ -26,6 +28,7 @@ from app.constants.factor_contract import (
     FACTOR_COMPARISON_TOLERANCE,
     FACTOR_RECONCILIATION_VERSION,
 )
+from app.services.adjustment_factor_calculator import AdjustmentFactorDataError
 from app.services.factor_consistency_audit import (
     FactorAuditResult,
     FactorConsistencyAuditor,
@@ -459,6 +462,47 @@ class TestFactorContractConstants:
     def test_tolerance_positive(self):
         assert FACTOR_COMPARISON_TOLERANCE > 0
         assert FACTOR_COMPARISON_TOLERANCE < 0.001  # 不会误报真实因子差异
+
+
+# =============================================================================
+# F1 — 结构化 degraded 证据不丢失（CHANGE-CHECK F1-1）
+# =============================================================================
+
+
+class TestF1DegradedEvidencePreservation:
+    """F1-1: AdjustmentFactorDataError 的 degraded_reason + missing_event_dates
+    经 FactorConsistencyAuditor.audit_single_stock 后，不得丢失。"""
+
+    def test_auditor_preserves_degraded_reason_and_event_dates(self):
+        auditor = FactorConsistencyAuditor(adapter=MagicMock())
+        iid = uuid.uuid4()
+        stored_df = pd.DataFrame({
+            "trade_date": pd.to_datetime(["2024-01-04"]),
+            "adj_factor": [1.0],
+        })
+        event_dates = [date(2024, 1, 5), date(2024, 3, 2)]
+        with patch(
+            "app.services.factor_consistency_audit.get_adj_factor_series",
+            new=AsyncMock(return_value=stored_df),
+        ), patch(
+            "app.services.factor_consistency_audit.compute_expected_adj_factors",
+            new=AsyncMock(
+                side_effect=AdjustmentFactorDataError(
+                    event_dates, degraded_reason="bars_daily_gap"
+                )
+            ),
+        ):
+            result = asyncio_run(
+                auditor.audit_single_stock(
+                    MagicMock(), iid, "000032", max_mismatches=5
+                )
+            )
+        assert result.degraded_reason == "bars_daily_gap"
+        assert list(result.missing_event_dates) == event_dates
+        assert result.is_consistent is False
+        assert result.error is None
+        assert result.mismatch_count == 0
+        assert result.stored_count == 1
 
 
 # =============================================================================

@@ -17,7 +17,7 @@ import ast
 import uuid
 from datetime import UTC, date, datetime
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -213,6 +213,49 @@ class TestReconciliationArchitecture:
                         "_rebuild_single 必须调用 rebuild_factor_series"
                     )
         assert found_rebuild_single, "_rebuild_single 方法必须存在"
+
+
+# =============================================================================
+# 3b. F1 — ReconciliationPlan 保留结构化 degraded 证据
+# =============================================================================
+
+
+class TestF1DegradedItemsPreserved:
+    """F1-2: dry_run 必须把 symbol + reason + missing_event_dates 一路保留到
+    ReconciliationPlan.degraded_items（F1 新增的有界修复输入）。"""
+
+    @pytest.mark.asyncio
+    async def test_dry_run_populates_degraded_items(self):
+        iid = uuid.uuid4()
+        audit_result = FactorAuditResult(
+            instrument_id=iid, symbol="000032", is_consistent=False,
+            stored_count=10, expected_count=0, missing_factor_count=0,
+            mismatch_count=0,
+            degraded_reason="bars_daily_gap",
+            missing_event_dates=(date(2024, 1, 5), date(2024, 3, 2)),
+        )
+        mock_auditor = MagicMock()
+        mock_auditor.audit_single_stock = AsyncMock(return_value=audit_result)
+        task = FactorReconciliationTask(auditor=mock_auditor)
+
+        row = MagicMock()
+        row.id = iid
+        row.symbol = "000032"
+        session = MagicMock()
+        session.execute = AsyncMock(return_value=MagicMock())
+        session.execute.return_value.all.return_value = [row]
+
+        plan = await task.dry_run(
+            session, symbols=["000032"], batch_size=50, max_mismatches=20
+        )
+        assert plan.degraded_count == 1
+        assert plan.degraded_symbols == ["000032"]
+        assert len(plan.degraded_items) == 1
+        item = plan.degraded_items[0]
+        assert item.symbol == "000032"
+        assert item.instrument_id == iid
+        assert item.reason == "bars_daily_gap"
+        assert item.missing_event_dates == (date(2024, 1, 5), date(2024, 3, 2))
 
 
 # =============================================================================

@@ -38,7 +38,7 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -51,6 +51,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.services.eod_market_snapshot_provider import fetch_eastmoney_daily_kline
+from app.services.factor_reconciliation import DegradedFactorInput
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 from app.services.ths_raw_daily_provider import fetch_ths_raw_daily
 
@@ -927,6 +928,136 @@ __all__ = [
     "compare_db_vs_ths_for_date",
     "fetch_pytdx_raw_daily",
     "read_daily_fingerprint",
+    "repair_market_wide_daily_gap",
+    "validate_consistency",
+]
+
+
+@dataclass(frozen=True)
+class DegradedRepairReport:
+    """F1: 一次有界 degraded repair 的结构化结果。"""
+
+    attempted_symbols: list[str]
+    repaired_symbols: list[str]
+    inserted_rows: int
+    unresolved_symbols: list[str]
+    reason: str
+
+
+_DATA_DEGRADED_REASONS = frozenset({"bars_daily_missing_data", "bars_daily_gap"})
+
+
+async def repair_degraded_factor_inputs(
+    session: AsyncSession,
+    degraded_items: Sequence[DegradedFactorInput],
+    *,
+    adapter: Any | None = None,
+    raw_fetch: Any | None = None,
+) -> DegradedRepairReport:
+    """F1: 仅对 degraded reason ∈ {bars_daily_missing_data, bars_daily_gap} 的股票，
+    按 missing_event_dates 构造有界窗口补缺失 raw daily，ON CONFLICT DO NOTHING，
+    不覆盖既有行、不伪造/重算 adj_factor。最多一次 repair。
+
+    只补 prerequisite raw OHLCV；factor recompute 交给既有 mismatch/rebuild 流程。
+    provider 网络 I/O 复用 bars_fetch_worker 的 canonical 边界（pytdx adapter），
+    不新增第二套 provider 路径。
+    """
+    data_items = [i for i in degraded_items if i.reason in _DATA_DEGRADED_REASONS]
+    attempted_symbols = [i.symbol for i in data_items]
+    repaired_symbols: list[str] = []
+    inserted_rows = 0
+    unresolved: list[str] = []
+
+    for item in data_items:
+        if not item.missing_event_dates:
+            unresolved.append(item.symbol)
+            continue
+        start = min(item.missing_event_dates) - timedelta(days=30)
+        end = max(item.missing_event_dates)
+        rows = (
+            raw_fetch(item.symbol, start, end)
+            if raw_fetch is not None
+            else _fetch_window_raw_daily(item.symbol, start, end, adapter=adapter)
+        )
+        if not rows:
+            unresolved.append(item.symbol)
+            continue
+        by_date: dict[date, list[tuple[UUID, dict]]] = {}
+        for raw in rows:
+            d = _parse_trade_date(raw.get("datetime"))
+            if d is None:
+                continue
+            by_date.setdefault(d, []).append((item.instrument_id, raw))
+        sym_inserted = 0
+        for d, recs in by_date.items():
+            sym_inserted += await bulk_insert_raw_daily_repair(session, recs, d)
+        if sym_inserted > 0:
+            repaired_symbols.append(item.symbol)
+            inserted_rows += sym_inserted
+        else:
+            unresolved.append(item.symbol)
+
+    if not attempted_symbols:
+        reason = "no_data_degraded_items"
+    elif unresolved:
+        reason = "partial" if repaired_symbols else "no_insert"
+    else:
+        reason = "all_repaired"
+    return DegradedRepairReport(
+        attempted_symbols=attempted_symbols,
+        repaired_symbols=repaired_symbols,
+        inserted_rows=inserted_rows,
+        unresolved_symbols=unresolved,
+        reason=reason,
+    )
+
+
+def _fetch_window_raw_daily(
+    symbol: str, start: date, end: date, *, adapter: Any | None = None
+) -> list[dict]:
+    """pytdx canonical 边界：按有界窗口拉取 raw daily（provider 失败返回空 → 不修复）。"""
+    if adapter is None:
+        try:
+            from app.core.pytdx_adapter import get_pytdx_adapter
+
+            adapter = get_pytdx_adapter()
+        except Exception:
+            return []
+    if adapter is None:
+        return []
+    try:
+        return fetch_pytdx_raw_daily(adapter, symbol, start, end)
+    except Exception as exc:  # provider 失败 → 不修复，保持 fail-closed
+        logger.warning("[daily_gap_repair] pytdx window fetch failed for %s: %s", symbol, exc)
+        return []
+
+
+def _parse_trade_date(value: Any) -> date | None:
+    if value is None:
+        return None
+    if isinstance(value, date):
+        return value
+    if isinstance(value, datetime):
+        return value.date()
+    try:
+        return datetime.fromisoformat(str(value)).date()
+    except Exception:
+        return None
+
+
+__all__ = [
+    "ConsistencyReport",
+    "MarketWideRepairResult",
+    "SourceConsistencyError",
+    "DegradedRepairReport",
+    "bulk_insert_raw_daily_repair",
+    "compare_db_vs_eastmoney_for_date",
+    "compare_db_vs_pytdx_for_date",
+    "compare_db_vs_source_for_date",
+    "compare_db_vs_ths_for_date",
+    "fetch_pytdx_raw_daily",
+    "read_daily_fingerprint",
+    "repair_degraded_factor_inputs",
     "repair_market_wide_daily_gap",
     "validate_consistency",
 ]

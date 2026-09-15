@@ -73,6 +73,7 @@ from app.services.bars_fetch_worker import (
 )
 from app.services.calendar_service import is_trading_day_async
 from app.services.eod_market_snapshot_provider import EodSnapshotRow
+from app.services.factor_reconciliation import ReconciliationPlan
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 
 logger = logging.getLogger("bars_scheduler_service")
@@ -2453,10 +2454,43 @@ class BarsSchedulerService:
         # [FACTOR-HEALTH] degraded：某只股票数据链本身无法证明 factor 正确性。
         # 在尚未建立「显式从 DSA/Core universe 排除 degraded 股票」机制前，
         # degraded > 0 不得继续 Core（否则仍是 silent correctness hole）。
+        # [F1] degraded → 一次有界修复 + 二次 targeted 重审（fail-closed）
         if plan.degraded_count > 0:
+            try:
+                if db_session is not None:
+                    plan, repair_report = await self._repair_degraded_and_reaudit(db_session, plan)
+                else:
+                    async with AsyncSessionLocal() as _repair_session:
+                        plan, repair_report = await self._repair_degraded_and_reaudit(
+                            _repair_session, plan
+                        )
+            except FactorSourceUnavailableError:
+                raise
+            except Exception as exc:
+                raise FactorIntegrityBlockedError(
+                    f"FACTOR_DEGRADED_REPAIR_FAILED: {type(exc).__name__}: {exc}"
+                ) from exc
+            summary["degraded"] = plan.degraded_count
+            summary["degraded_symbols"] = plan.degraded_symbols[:100]
+            summary["needs_rebuild"] = plan.needs_rebuild_count
+            summary["consistent"] = plan.consistent_count
+            summary["errors"] = plan.error_count
+            logger.info(
+                "[BarsScheduler] F1 degraded repair: attempted=%s repaired=%s unresolved=%s",
+                repair_report.attempted_symbols,
+                repair_report.repaired_symbols,
+                repair_report.unresolved_symbols,
+            )
+
+        if plan.degraded_count > 0:
+            details = "; ".join(
+                f"{item.symbol}:{item.reason}:"
+                f"{','.join(d.isoformat() for d in item.missing_event_dates)}"
+                for item in plan.degraded_items
+            )
             raise FactorIntegrityBlockedError(
                 f"FACTOR_AUDIT_DEGRADED: degraded={plan.degraded_count}, "
-                f"symbols={plan.degraded_symbols[:20]}"
+                f"symbols={plan.degraded_symbols[:20]}, details={details}"
             )
 
         logger.info(
@@ -2556,6 +2590,35 @@ class BarsSchedulerService:
                     await self._stamp_verified_factor_scope(session, requested_symbols)
 
         return summary
+
+    async def _repair_degraded_and_reaudit(
+        self, session: AsyncSession, plan: ReconciliationPlan,
+    ) -> tuple[ReconciliationPlan, Any]:
+        """F1: 对 degraded 股票做一次有界 repair，然后只重审这些股票一次。
+
+        返回 (合并后的 plan, 修复报告)。合并 plan 的 degraded 维度来自二次重审结果
+        （re_plan），items 维度合并原始 plan + 重审 plan（重审后变为 mismatch 的股票
+        进入 rebuild）。最多一次 repair + 一次重审，绝不 while-until-success。
+        """
+        from app.services.daily_gap_repair_service import repair_degraded_factor_inputs
+        from app.services.factor_reconciliation import FactorReconciliationTask
+
+        repair_report = await repair_degraded_factor_inputs(session, list(plan.degraded_items))
+        degraded_symbols = [item.symbol for item in plan.degraded_items]
+        task = FactorReconciliationTask()
+        re_plan = await task.dry_run(
+            session, symbols=degraded_symbols, batch_size=50, max_mismatches=20
+        )
+        merged = ReconciliationPlan(
+            items=list(plan.items) + list(re_plan.items),
+            total_audited=plan.total_audited,
+            consistent_count=plan.consistent_count + re_plan.consistent_count,
+            error_count=plan.error_count + re_plan.error_count,
+            degraded_items=re_plan.degraded_items,
+            degraded_count=re_plan.degraded_count,
+            degraded_symbols=re_plan.degraded_symbols,
+        )
+        return merged, repair_report
 
     async def _resolve_factor_audit_symbols(
         self,

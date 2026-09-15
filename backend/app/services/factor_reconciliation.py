@@ -422,6 +422,20 @@ class ReconciliationItem:
 
 
 @dataclass(frozen=True)
+class DegradedFactorInput:
+    """单只 degraded 股票的结构化证据（F1: 从 audit 一路保留到 scheduler）。
+
+    让 operator 能看到：哪只股票、为什么 degraded、缺哪些公司行为事件日，
+    而不是只有 symbol。repair 阶段据此构造有界窗口补历史 raw bars。
+    """
+
+    instrument_id: uuid.UUID
+    symbol: str
+    reason: str
+    missing_event_dates: tuple[date, ...]
+
+
+@dataclass(frozen=True)
 class ReconciliationPlan:
     """修复计划（不可变）。
 
@@ -450,6 +464,7 @@ class ReconciliationPlan:
     error_count: int
     degraded_count: int = 0
     degraded_symbols: list[str] = field(default_factory=list)
+    degraded_items: tuple[DegradedFactorInput, ...] = ()  # [F1] 结构化 degraded 证据（instrument/reason/event dates）
     algorithm_version: str = FACTOR_ALGORITHM_VERSION
     reconciliation_version: int = FACTOR_RECONCILIATION_VERSION
     dry_run_at: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -570,6 +585,7 @@ class FactorReconciliationTask:
         error_count = 0
         degraded_count = 0
         degraded_symbols: list[str] = []
+        degraded_items: list[DegradedFactorInput] = []
 
         if symbols:
             # 指定股票：单次批量查询 instrument 身份（避免 N 次逐股 SELECT）
@@ -604,6 +620,14 @@ class FactorReconciliationTask:
                     # 需先回补数据再重新审计
                     degraded_count += 1
                     degraded_symbols.append(symbol)
+                    degraded_items.append(
+                        DegradedFactorInput(
+                            instrument_id=audit_result.instrument_id,
+                            symbol=audit_result.symbol,
+                            reason=audit_result.degraded_reason or "unknown",
+                            missing_event_dates=audit_result.missing_event_dates,
+                        )
+                    )
                 elif audit_result.is_consistent:
                     consistent_count += 1
                 else:
@@ -642,6 +666,7 @@ class FactorReconciliationTask:
             total_audited=total_audited,
             consistent_count=consistent_count,
             error_count=error_count,
+            degraded_items=tuple(degraded_items),
             degraded_count=degraded_count,
             degraded_symbols=degraded_symbols,
         )

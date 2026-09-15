@@ -125,6 +125,7 @@ class FactorAuditResult:
     reconciliation_version: int = FACTOR_RECONCILIATION_VERSION
     error: str | None = None
     degraded_reason: str | None = None
+    missing_event_dates: tuple[date, ...] = ()  # [F1] 结构化缺失事件日：从 audit 保留到 reconciliation/scheduler
 
 
 # =============================================================================
@@ -201,8 +202,9 @@ class FactorConsistencyAuditor:
                 is_consistent=False, stored_count=stored_count, expected_count=0,
                 missing_factor_count=0, mismatch_count=0,
                 degraded_reason=exc.degraded_reason,
+                missing_event_dates=tuple(exc.missing_event_dates),
             )
-        except (PytdxSourceError, CorporateActionProviderError) as exc:
+        except (PytdxSourceError, CorporateActionProviderError):
             # 源/连接/协议不可用：**必须向上传播**，让 dry_run 触发 fail-closed 熔断，
             # 而不是被吞成单股 error 后继续跑完 5000 只。
             raise
