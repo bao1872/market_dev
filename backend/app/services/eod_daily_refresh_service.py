@@ -26,14 +26,14 @@ canonical contract（bars_daily）：
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
-from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import func, select
@@ -125,39 +125,74 @@ class DailyContinuityBlockedError(RuntimeError):
         super().__init__(f"DAILY_CONTINUITY_BLOCKED: {detail}")
 
 
-def is_valid_snapshot_daily_row(row: EodSnapshotRow, trade_date: date) -> bool:
-    """单条 snapshot 行是否可以当作 ``trade_date`` 的**有效日线**（唯一合法性 owner）。
+def _is_valid_raw_daily_values(
+    *,
+    observed_trade_date: date | None,
+    expected_trade_date: date,
+    open_: Decimal | None,
+    high: Decimal | None,
+    low: Decimal | None,
+    close: Decimal | None,
+    volume: Decimal | None,
+    amount: Decimal | None,
+) -> bool:
+    """raw 日线合法性基础规则（**唯一 owner**）。
 
-    universe 复活判定与 raw 日线落库必须共用本函数，禁止第二套规则。
+    snapshot 行与 historical fallback 候选共用本函数，禁止第二套规则。
 
-    拒绝的情形：
-    - ``row.trade_date != trade_date``（老时间戳 / 停牌 / 跨日）；
-    - 任一 OHLC 缺失或 <= 0；
-    - ``high < max(open, close)`` 或 ``low > min(open, close)``（数据异常）；
-    - volume / amount 缺失或 < 0。
-
-    注意：``volume == 0``（停牌当日无成交但价格有效）在这里是**允许**的；
-    本函数只排除「日期/价格结构/负值」这类不可能为真终值的情况。
+    拒绝：``observed_trade_date != expected_trade_date``（老时间戳 / 停牌 / 跨日）；
+    任一 OHLC 缺失或 ``<= 0``；``high < max(open, close)`` 或 ``low > min(open, close)``
+    （数据异常）；volume / amount 缺失或 ``< 0``。
     """
-    if row.trade_date != trade_date:
+    if observed_trade_date != expected_trade_date:
         return False
 
-    o, h, lo, c = row.open, row.high, row.low, row.close
-    if o is None or h is None or lo is None or c is None:
+    if open_ is None or high is None or low is None or close is None:
         return False
-    if o <= 0 or h <= 0 or lo <= 0 or c <= 0:
+    if open_ <= 0 or high <= 0 or low <= 0 or close <= 0:
         return False
-    if h < max(o, c):
+    if high < max(open_, close):
         return False
-    if lo > min(o, c):
+    if low > min(open_, close):
         return False
 
-    if row.volume is None or row.volume < 0:
+    if volume is None or volume < 0:
         return False
-    if row.amount is None or row.amount < 0:
+    if amount is None or amount < 0:
         return False
 
     return True
+
+
+def is_valid_snapshot_daily_row(row: EodSnapshotRow, trade_date: date) -> bool:
+    """单条 snapshot 行是否可以当作 ``trade_date`` 的**有效日线**（委托唯一 owner）。
+
+    universe 复活判定与 raw 日线落库必须共用本函数，禁止第二套规则。
+    """
+    return _is_valid_raw_daily_values(
+        observed_trade_date=row.trade_date,
+        expected_trade_date=trade_date,
+        open_=row.open,
+        high=row.high,
+        low=row.low,
+        close=row.close,
+        volume=row.volume,
+        amount=row.amount,
+    )
+
+
+def is_valid_raw_daily_candidate(cand: RawDailyCandidate, trade_date: date) -> bool:
+    """historical fallback 候选的合法性校验（复用同一套基础规则，不伪造 snapshot 时间戳）。"""
+    return _is_valid_raw_daily_values(
+        observed_trade_date=cand.trade_date,
+        expected_trade_date=trade_date,
+        open_=cand.open,
+        high=cand.high,
+        low=cand.low,
+        close=cand.close,
+        volume=cand.volume,
+        amount=cand.amount,
+    )
 
 
 @dataclass(frozen=True)
@@ -193,18 +228,37 @@ def plan_daily_repair(gap: DailyGap) -> DailyRepairPlan:
 
 
 @dataclass(frozen=True)
+class RawDailyCandidate:
+    """historical fallback 取到的合法 T 日 raw 日线候选（**不含** EOD snapshot watermark）。
+
+    与 EodSnapshotRow 的关键区别：只有 trade_date + raw OHLCV，没有 updated_at /
+    previous_close / market watermark 语义。它**不能**被当作「经过 EOD 快照证明」的数据，
+    也不得进入 previous_close 证据链。
+    """
+
+    symbol: str
+    trade_date: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    amount: Decimal
+
+
+@dataclass(frozen=True)
 class DailyCandidateFetchResult:
     """fetch-only fallback 的结果（**不写 DB**）。
 
-    - ``rows_by_symbol``：通过合法性校验的 T 日 candidate，统一为 EodSnapshotRow，
-      与 snapshot 行汇聚成同一种 staging 类型（唯一 upsert 路径）。
+    - ``rows_by_symbol``：通过合法性校验的 T 日 candidate（RawDailyCandidate，
+      无 EOD watermark），经统一 RawDailyWriteRow 后汇入唯一 upsert 路径。
     - ``source_by_symbol``：每个 candidate 的取数来源（pytdx / eastmoney_fallback /
       eastmoney_bj），用于源可观测性。
     - ``failed_symbols``：provider 异常 / 空 / 无 exact T 行 / 校验失败的标的，
       留给既有 continuity gate 处理，不伪造 success。
     """  # noqa: E501
 
-    rows_by_symbol: dict[str, EodSnapshotRow]
+    rows_by_symbol: dict[str, RawDailyCandidate]
     source_by_symbol: dict[str, str]
     failed_symbols: list[str]
 
@@ -394,6 +448,7 @@ async def fetch_missing_daily_candidates(
     trade_date: date,
     *,
     breaker: _PytdxBreaker | None = None,
+    adapter: Any | None = None,
 ) -> DailyCandidateFetchResult:
     """只取数、不写 DB 的 fetch-only fallback（F2 acquire-before-persist）。
 
@@ -403,64 +458,72 @@ async def fetch_missing_daily_candidates(
     - BJ：Eastmoney raw 直连（pytdx 不覆盖 BSE，且不计 breaker）。
     - 任意一次 pytdx 真成功即复位 breaker；连续失败达上限后本轮剩余沪深标的跳过 pytdx。
 
-    返回的 candidate 必须通过 :func:`is_valid_snapshot_daily_row`（唯一合法性 owner），
+    ``fetch_raw_daily_frame`` 是**同步** pytdx 网络 I/O，必须用
+    :func:`asyncio.to_thread` 交还 event loop，禁止在 async 函数里直接阻塞。
+
+    返回的 candidate（RawDailyCandidate，无 EOD watermark）必须通过
+    :func:`is_valid_raw_daily_candidate`（与 snapshot 共用同一套基础规则），
     **禁止「provider 返回非空 = success」**。未通过的标的进入 ``failed_symbols``。
     """
-    rows_by_symbol: dict[str, EodSnapshotRow] = {}
+    rows_by_symbol: dict[str, RawDailyCandidate] = {}
     source_by_symbol: dict[str, str] = {}
     failed_symbols: list[str] = []
 
-    for inst in instruments:
-        symbol = inst.symbol
-        market = inst.market
-        use_pytdx = market in ("SH", "SZ")
+    # 整轮复用同一个 Eastmoney AsyncClient（不逐股新建连接）。
+    async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
+        for inst in instruments:
+            symbol = inst.symbol
+            market = inst.market
+            use_pytdx = market in ("SH", "SZ")
 
-        candidate: EodSnapshotRow | None = None
-        source: str | None = None
+            candidate: RawDailyCandidate | None = None
+            source: str | None = None
 
-        # 1) pytdx primary（仅 SH/SZ；breaker 打开时跳过）
-        if use_pytdx and (breaker is None or breaker.allow):
-            try:
-                df = fetch_raw_daily_frame(symbol, trade_date, trade_date)
-                cand = _pytdx_frame_to_candidate(inst, df, trade_date)
-            except Exception as exc:  # noqa: BLE001 - provider 异常按降级处理
-                cand = None
-                if breaker is not None:
-                    breaker.record_failure()
-                logger.warning("pytdx fallback 取数失败 symbol=%s: %s", symbol, exc)
-            else:
-                if cand is not None:
+            # 1) pytdx primary（仅 SH/SZ；breaker 打开时跳过）。
+            #    同步网络 I/O 必须交还 event loop，否则会阻塞整个 async loop。
+            if use_pytdx and (breaker is None or breaker.allow):
+                try:
+                    df = await asyncio.to_thread(
+                        fetch_raw_daily_frame, symbol, trade_date, trade_date, adapter
+                    )
+                    cand = _pytdx_frame_to_candidate(inst, df, trade_date)
+                except Exception as exc:  # noqa: BLE001 - provider 异常按降级处理
+                    cand = None
                     if breaker is not None:
-                        breaker.record_success()
-                    candidate = cand
-                    source = "pytdx"
-                elif breaker is not None:
-                    breaker.record_failure()
+                        breaker.record_failure()
+                    logger.warning("pytdx fallback 取数失败 symbol=%s: %s", symbol, exc)
+                else:
+                    if cand is not None:
+                        if breaker is not None:
+                            breaker.record_success()
+                        candidate = cand
+                        source = "pytdx"
+                    elif breaker is not None:
+                        breaker.record_failure()
 
-        # 2) Eastmoney fqt=0 fallback（SH/SZ 主源未完成 / 异常 / breaker 打开；BJ 直连）
-        if candidate is None:
-            try:
-                async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
+            # 2) Eastmoney fqt=0 fallback（SH/SZ 主源未完成 / 异常 / breaker 打开；BJ 直连）
+            if candidate is None:
+                try:
                     recs = await fetch_eastmoney_daily_kline(
                         client, symbol, market, trade_date, trade_date
                     )
-                cand = _eastmoney_records_to_candidate(inst, recs, trade_date)
-            except SnapshotProviderError as exc:
-                cand = None
-                logger.warning("Eastmoney fallback 取数失败 symbol=%s: %s", symbol, exc)
-            except Exception as exc:  # noqa: BLE001
-                cand = None
-                logger.warning("Eastmoney fallback 取数异常 symbol=%s: %s", symbol, exc)
-            else:
-                if cand is not None:
-                    candidate = cand
-                    source = "eastmoney_bj" if market == "BJ" else "eastmoney_fallback"
+                    cand = _eastmoney_records_to_candidate(inst, recs, trade_date)
+                except SnapshotProviderError as exc:
+                    cand = None
+                    logger.warning("Eastmoney fallback 取数失败 symbol=%s: %s", symbol, exc)
+                except Exception as exc:  # noqa: BLE001
+                    cand = None
+                    logger.warning("Eastmoney fallback 取数异常 symbol=%s: %s", symbol, exc)
+                else:
+                    if cand is not None:
+                        candidate = cand
+                        source = "eastmoney_bj" if market == "BJ" else "eastmoney_fallback"
 
-        if candidate is not None and source is not None:
-            rows_by_symbol[symbol] = candidate
-            source_by_symbol[symbol] = source
-        else:
-            failed_symbols.append(symbol)
+            if candidate is not None and source is not None:
+                rows_by_symbol[symbol] = candidate
+                source_by_symbol[symbol] = source
+            else:
+                failed_symbols.append(symbol)
 
     return DailyCandidateFetchResult(
         rows_by_symbol=rows_by_symbol,
@@ -484,91 +547,56 @@ def _as_date(value: Any) -> date | None:
     return None
 
 
-def _build_candidate_row(
-    inst: Instrument,
-    *,
-    open_: Decimal,
-    high: Decimal,
-    low: Decimal,
-    close: Decimal,
-    volume: Decimal,
-    amount: Decimal,
-    trade_date: date,
-) -> EodSnapshotRow:
-    """把一条合法 T 日 OHLCV 规整为统一的 EodSnapshotRow（staging 统一类型）。
-
-    ``updated_at`` 仅作 T 日 canonical marker（trade_date 15:00, Asia/Shanghai），
-    **不反映真实 provider watermark**，且 upsert 永不写入该列；``previous_close``
-    没有 fallback 证据 → None（不伪造）。
-    """
-    return EodSnapshotRow(
-        symbol=inst.symbol,
-        name=inst.name,
-        market=inst.market,
-        updated_at=datetime(
-            trade_date.year, trade_date.month, trade_date.day, 15, 0, 0,
-            tzinfo=ZoneInfo("Asia/Shanghai"),
-        ),
-        open=open_,
-        high=high,
-        low=low,
-        close=close,
-        volume=volume,
-        amount=amount,
-        previous_close=None,
-    )
-
-
 def _pytdx_frame_to_candidate(
     inst: Instrument, df: Any, trade_date: date
-) -> EodSnapshotRow | None:
-    """pytdx DataFrame 中挑出 exact T 行，校验后转 EodSnapshotRow（fetch-only）。"""
+) -> RawDailyCandidate | None:
+    """pytdx DataFrame 中挑出 exact T 行，校验后转 RawDailyCandidate（无 EOD watermark）。"""
     if df is None or getattr(df, "empty", True):
         return None
     for _, row in df.iterrows():
         if _as_date(row.get("datetime")) != trade_date:
             continue
         try:
-            cand = _build_candidate_row(
-                inst,
-                open_=Decimal(str(row["open"])),
+            cand = RawDailyCandidate(
+                symbol=inst.symbol,
+                trade_date=trade_date,
+                open=Decimal(str(row["open"])),
                 high=Decimal(str(row["high"])),
                 low=Decimal(str(row["low"])),
                 close=Decimal(str(row["close"])),
                 volume=Decimal(str(row["volume"])),
                 amount=Decimal(str(row["amount"])),
-                trade_date=trade_date,
             )
         except (ValueError, TypeError, KeyError):
             return None
         # 校验不通过（如 OHLC 结构异常）→ 视为该 provider 无有效 T 行，交 fallback
-        return cand if is_valid_snapshot_daily_row(cand, trade_date) else None
+        return cand if is_valid_raw_daily_candidate(cand, trade_date) else None
     return None
 
 
 def _eastmoney_records_to_candidate(
     inst: Instrument, recs: Sequence[dict[str, Any]], trade_date: date
-) -> EodSnapshotRow | None:
-    """Eastmoney kline 记录中挑出 exact T 行，校验后转 EodSnapshotRow（fetch-only）。"""
+) -> RawDailyCandidate | None:
+    """Eastmoney kline 记录中挑出 exact T 行，校验后转 RawDailyCandidate（无 EOD watermark）。"""
     if not recs:
         return None
     for rec in recs:
         if rec.get("datetime") != trade_date.isoformat():
             continue
         try:
-            cand = _build_candidate_row(
-                inst,
-                open_=Decimal(str(rec["open"])),
+            cand = RawDailyCandidate(
+                symbol=inst.symbol,
+                trade_date=trade_date,
+                open=Decimal(str(rec["open"])),
                 high=Decimal(str(rec["high"])),
                 low=Decimal(str(rec["low"])),
                 close=Decimal(str(rec["close"])),
                 volume=Decimal(str(rec["volume"])),
                 amount=Decimal(str(rec["amount"])),
-                trade_date=trade_date,
             )
         except (ValueError, TypeError, KeyError):
             return None
-        return cand if is_valid_snapshot_daily_row(cand, trade_date) else None
+        return cand if is_valid_raw_daily_candidate(cand, trade_date) else None
     return None
 
 
@@ -688,21 +716,61 @@ async def sync_instruments_from_eod_snapshot(
 _RAW_DAILY_UPSERT_BATCH_SIZE = 3000
 
 
-async def upsert_raw_daily_snapshot(
+@dataclass(frozen=True)
+class RawDailyWriteRow:
+    """raw 日线落库统一记录：snapshot 与 historical fallback 都先转为它，再进唯一 SQL。
+
+    只有 trade_date + raw OHLCV；不含 updated_at / previous_close / watermark。
+    """
+
+    trade_date: date
+    open: Decimal
+    high: Decimal
+    low: Decimal
+    close: Decimal
+    volume: Decimal
+    amount: Decimal
+
+
+def _row_to_raw_write(row: Any) -> RawDailyWriteRow:
+    """把任意带 OHLCV 的 staging 行（EodSnapshotRow / RawDailyCandidate / RawDailyWriteRow）
+    规整为 RawDailyWriteRow。"""
+    return RawDailyWriteRow(
+        trade_date=row.trade_date,
+        open=row.open,
+        high=row.high,
+        low=row.low,
+        close=row.close,
+        volume=row.volume,
+        amount=row.amount,
+    )
+
+
+async def upsert_raw_daily_records(
     session: AsyncSession,
     trade_date: date,
-    rows: Iterable[tuple[UUID, EodSnapshotRow]],
+    rows: Iterable[tuple[UUID, RawDailyWriteRow]],
 ) -> int:
-    """批量落当日 raw 日线。conflict 时【保留】原有 adj_factor，只更新 OHLCV。
+    """批量落当日 raw 日线（**唯一** INSERT/ON CONFLICT SQL 路径）。
 
-    入参 rows 为 (instrument_id, EodSnapshotRow) 序列。合法性判定**完全复用**
-    :func:`is_valid_snapshot_daily_row`（唯一 owner），禁止在此处维护第二套规则。
+    conflict 时【保留】原有 adj_factor，只更新 OHLCV。snapshot 与 historical
+    fallback 都先转为 RawDailyWriteRow 再进入本函数，保证全系统只有一条日线落库语句。
+    合法性判定**完全复用** :func:`_is_valid_raw_daily_values`（唯一 owner）。
 
     返回成功写入（INSERT+UPDATE）的记录数。
     """
     records: list[dict] = []
     for instrument_id, row in rows:
-        if not is_valid_snapshot_daily_row(row, trade_date):
+        if not _is_valid_raw_daily_values(
+            observed_trade_date=row.trade_date,
+            expected_trade_date=trade_date,
+            open_=row.open,
+            high=row.high,
+            low=row.low,
+            close=row.close,
+            volume=row.volume,
+            amount=row.amount,
+        ):
             continue
 
         records.append(
@@ -746,12 +814,27 @@ async def upsert_raw_daily_snapshot(
         await session.commit()
     except Exception as exc:
         logger.warning(
-            "upsert_raw_daily_snapshot 失败 trade_date=%s records=%d: %s",
+            "upsert_raw_daily_records 失败 trade_date=%s records=%d: %s",
             trade_date, total, exc,
         )
         await session.rollback()
         raise
     return total
+
+
+async def upsert_raw_daily_snapshot(
+    session: AsyncSession,
+    trade_date: date,
+    rows: Iterable[tuple[UUID, Any]],
+) -> int:
+    """薄 wrapper：把 EodSnapshotRow（或任一带 OHLCV 的 staging 行）转 RawDailyWriteRow，
+    复用唯一 SQL 路径 :func:`upsert_raw_daily_records`。
+
+    保留此签名以兼容 daily_gap_repair_service 与既有测试；不引入第二套 INSERT 语句。
+    """
+    return await upsert_raw_daily_records(
+        session, trade_date, [(iid, _row_to_raw_write(row)) for iid, row in rows]
+    )
 
 
 @dataclass

@@ -26,6 +26,7 @@ from app.services.bars_scheduler_service import BarsSchedulerService, BatchResul
 from app.services.eod_daily_refresh_service import (
     DailyCandidateFetchResult,
     InstrumentSyncResult,
+    RawDailyCandidate,
 )
 from app.services.eod_market_snapshot_provider import (
     EASTMONEY_CLIST_HOSTS,
@@ -369,6 +370,20 @@ def _candidates_for(
     )
 
 
+def _raw_candidate(symbol: str, trade_date: date = TRADE_DATE) -> RawDailyCandidate:
+    """构造通过 is_valid_raw_daily_candidate 的 historical fallback 候选（无 EOD watermark）。"""
+    return RawDailyCandidate(
+        symbol=symbol,
+        trade_date=trade_date,
+        open=Decimal("10"),
+        high=Decimal("11"),
+        low=Decimal("9"),
+        close=Decimal("10.5"),
+        volume=Decimal("1000"),
+        amount=Decimal("10500"),
+    )
+
+
 def _ten_active_one_missing():
     """构造 10 只活跃标的、snapshot 只覆盖前 9 只的场景。
 
@@ -395,6 +410,7 @@ async def _run_f2(
     sync_result,
     fetch_candidates=None,
     find_missing_post_write=None,
+    adapter=None,
 ):
     """F2 编排测试 runner：用 mock 跑 _refresh_daily_from_market_snapshot。
 
@@ -426,8 +442,9 @@ async def _run_f2(
             cap["find_missing_calls_before_upsert"] += 1
         return list(find_missing_post_write or [])
 
-    async def fake_fetch(instruments, td, *, breaker=None):
+    async def fake_fetch(instruments, td, *, breaker=None, adapter=None):
         cap["fetch_calls"].append([i.symbol for i in instruments])
+        cap["fetch_adapter"] = adapter
         return fetch_candidates
 
     async def fake_sync(s, rows, td):
@@ -457,7 +474,9 @@ async def _run_f2(
         svc, "_fetch_pytdx_primary_eod", AsyncMock(return_value=pytdx_rows)
     ):
         result = BatchResult()
-        returned = await svc._refresh_daily_from_market_snapshot(TRADE_DATE, session, None, result)
+        returned = await svc._refresh_daily_from_market_snapshot(
+            TRADE_DATE, session, None, result, adapter=adapter
+        )
 
     return result, returned, cap
 
@@ -492,7 +511,7 @@ async def test_f2_one_missing_fallback_then_single_persist_with_both() -> None:
     fallback 成功后唯一一次落库，batch 同时含 snapshot + fallback 行。"""
     active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
 
-    fb_row = _valid_row(missing_sym)
+    fb_row = _raw_candidate(missing_sym)
     fetch_candidates = _candidates_for(
         rows_by_symbol={missing_sym: fb_row},
         source_by_symbol={missing_sym: "pytdx"},
@@ -582,7 +601,7 @@ async def test_f2_fallback_provider_exception_no_partial_write() -> None:
 
     upsert_calls: list = []
 
-    async def boom(instruments, td, *, breaker=None):
+    async def boom(instruments, td, *, breaker=None, adapter=None):
         raise RuntimeError("provider down")
 
     async def spy_upsert(s, td, pairs):
@@ -624,7 +643,7 @@ async def test_f2_post_write_find_missing_only_verifies() -> None:
     不决定 fallback 目标（缺口由内存集合差在落库前算出）。"""
     active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
 
-    fb_row = _valid_row(missing_sym)
+    fb_row = _raw_candidate(missing_sym)
     fetch_candidates = _candidates_for(
         rows_by_symbol={missing_sym: fb_row},
         source_by_symbol={missing_sym: "pytdx"},
@@ -685,9 +704,10 @@ async def test_f2_previous_close_evidence_only_from_snapshot() -> None:
     """F2-9：previous_close 证据只来自 snapshot 选中的 source，fallback 不伪造。"""
     active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
 
-    # fallback candidate 的 previous_close=None（无证据）
-    fb_row = _valid_row(missing_sym)
-    assert fb_row.previous_close is not None  # snapshot 行有值，但 fallback 不应进入 evidence
+    # fallback candidate 没有 previous_close / updated_at（无 EOD watermark）
+    fb_row = _raw_candidate(missing_sym)
+    assert not hasattr(fb_row, "previous_close")
+    assert not hasattr(fb_row, "updated_at")
     fetch_candidates = _candidates_for(
         rows_by_symbol={missing_sym: fb_row},
         source_by_symbol={missing_sym: "pytdx"},
@@ -716,7 +736,7 @@ async def test_f2_source_metrics_include_fallback() -> None:
     active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
 
     fetch_candidates = _candidates_for(
-        rows_by_symbol={missing_sym: _valid_row(missing_sym)},
+        rows_by_symbol={missing_sym: _raw_candidate(missing_sym)},
         source_by_symbol={missing_sym: "eastmoney_fallback"},
         failed=[],
     )
@@ -735,3 +755,66 @@ async def test_f2_source_metrics_include_fallback() -> None:
     assert result.daily_eastmoney_rows == 1  # fallback 计入 EM
     assert result.daily_bj_rows == 0
     assert result.daily_primary_source in ("mixed", "eastmoney", "pytdx")
+
+
+@pytest.mark.asyncio
+async def test_f2_1_adapter_passthrough_to_fetch() -> None:
+    """F2.1 STEP 5：scheduler 拿到的 adapter 必须透传到 fetch_missing_daily_candidates。
+
+    测试/worker 注入的 adapter 语义不得漂移。
+    """
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+    fake_adapter = object()
+
+    _result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=_empty_candidates(),
+        find_missing_post_write=[active[-1]],
+        adapter=fake_adapter,
+    )
+
+    assert cap["fetch_adapter"] is fake_adapter
+
+
+@pytest.mark.asyncio
+async def test_f2_1_fallback_candidate_no_watermark_single_persist() -> None:
+    """F2.1 Blocker 1：historical fallback 候选不持有 EOD watermark（无 updated_at/previous_close），
+    且仍以「唯一一次 T 日 persist」进入 staging。
+    """
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+
+    fb = _raw_candidate(missing_sym)
+    assert not hasattr(fb, "updated_at")
+    assert not hasattr(fb, "previous_close")
+
+    fetch_candidates = _candidates_for(
+        {missing_sym: fb}, {missing_sym: "pytdx"}, []
+    )
+
+    _result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=fetch_candidates,
+        find_missing_post_write=[],
+    )
+
+    # 唯一一次 T 日 persist
+    assert len(cap["upsert_calls"]) == 1
+    persisted_rows = [p[1] for p in cap["upsert_calls"][0]]
+    # fallback 行以 RawDailyCandidate 形式（无 watermark）进入 staging；snapshot 行仍是 EodSnapshotRow
+    assert any(isinstance(r, RawDailyCandidate) for r in persisted_rows)
+    for r in persisted_rows:
+        if isinstance(r, RawDailyCandidate):
+            # historical fallback 不得持有 EOD watermark
+            assert not hasattr(r, "updated_at")
+            assert not hasattr(r, "previous_close")
+        else:
+            # snapshot 行：合法保留 EOD watermark
+            assert hasattr(r, "updated_at")

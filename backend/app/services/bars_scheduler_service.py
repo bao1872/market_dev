@@ -1665,7 +1665,7 @@ class BarsSchedulerService:
                     # sparse：fetch-only fallback（取数不写库）
                     result.daily_fallback_attempted = len(missing)
                     fallback = await fetch_missing_daily_candidates(
-                        missing, trade_date, breaker=breaker
+                        missing, trade_date, breaker=breaker, adapter=adapter
                     )
                     result.daily_fallback_succeeded = len(fallback.rows_by_symbol)
                     if fallback.rows_by_symbol:

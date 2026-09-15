@@ -23,6 +23,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -48,6 +49,7 @@ from app.services.eod_daily_refresh_service import (
     DailyContinuityBlockedError,
     DailyGap,
     InstrumentSyncResult,
+    RawDailyCandidate,
 )
 from app.services.eod_market_snapshot_provider import EodSnapshotRow, SnapshotProviderError
 
@@ -2057,3 +2059,146 @@ async def test_factor_audit_provider_outage_blocks_core(
         await service._audit_and_rebuild_factors(  # noqa: SLF001
             TRADE_DATE, instruments, _BreakerSession(), job_run_id=None
         )
+
+
+# =============================================================================
+# F2.1 — historical fallback 去 EOD watermark 化 + 不阻塞 async loop
+# =============================================================================
+
+
+class _FakePytdxDf:
+    """极简 pytdx DataFrame 替身：只有 iterrows + empty，够 _pytdx_frame_to_candidate 用。"""
+
+    empty = False
+
+    def iterrows(self):
+        # pytdx 的 datetime 列是 pandas Timestamp（datetime 子类），而非裸 date；
+        # 裸 date 没有 .date()，与真实 provider 语义不符。
+        yield (
+            0,
+            {
+                "datetime": datetime.combine(TRADE_DATE, time()),
+                "open": "10",
+                "high": "11",
+                "low": "9",
+                "close": "10.5",
+                "volume": "1000",
+                "amount": "10500",
+            },
+        )
+
+
+def _raw_cand(symbol="600000", trade_date=TRADE_DATE, **overrides) -> RawDailyCandidate:
+    base = {
+        "symbol": symbol,
+        "trade_date": trade_date,
+        "open": Decimal("10"),
+        "high": Decimal("11"),
+        "low": Decimal("9"),
+        "close": Decimal("10.5"),
+        "volume": Decimal("1000"),
+        "amount": Decimal("10500"),
+    }
+    base.update(overrides)
+    return RawDailyCandidate(**base)
+
+
+def test_f2_1_raw_daily_candidate_has_no_watermark() -> None:
+    """F2.1 Blocker 1：RawDailyCandidate 不得持有 EOD snapshot 语义字段。"""
+    cand = _raw_cand()
+    assert not hasattr(cand, "updated_at")
+    assert not hasattr(cand, "previous_close")
+    assert cand.trade_date == TRADE_DATE
+    assert cand.open == Decimal("10")
+
+
+def test_f2_1_candidate_trade_date_mismatch_invalid() -> None:
+    """F2.1 STEP 7-B：candidate.trade_date != target → 校验 FAIL。"""
+    cand = _raw_cand()
+    assert refresh_mod.is_valid_raw_daily_candidate(cand, TRADE_DATE) is True
+    assert refresh_mod.is_valid_raw_daily_candidate(cand, TRADE_DATE + timedelta(days=1)) is False
+
+
+def test_f2_1_candidate_ohlcv_invalid() -> None:
+    """F2.1 STEP 7-C：OHLCV 非法 → FAIL（high/low 结构、零负、负值）。"""
+    assert refresh_mod.is_valid_raw_daily_candidate(_raw_cand(high=Decimal("8")), TRADE_DATE) is False
+    assert refresh_mod.is_valid_raw_daily_candidate(_raw_cand(low=Decimal("12")), TRADE_DATE) is False
+    assert refresh_mod.is_valid_raw_daily_candidate(_raw_cand(open=Decimal("0")), TRADE_DATE) is False
+    assert refresh_mod.is_valid_raw_daily_candidate(_raw_cand(close=Decimal("-1")), TRADE_DATE) is False
+    assert refresh_mod.is_valid_raw_daily_candidate(_raw_cand(volume=Decimal("-1")), TRADE_DATE) is False
+    assert refresh_mod.is_valid_raw_daily_candidate(_raw_cand(amount=Decimal("-1")), TRADE_DATE) is False
+
+
+def test_f2_1_snapshot_and_candidate_validators_share_rule() -> None:
+    """F2.1 STEP 7-D：snapshot validator 与 raw candidate validator 共用同一套基础规则。
+
+    同一组 OHLCV + trade_date，两套校验必须给出一致结论；破坏 high 结构两者都判 False。
+    """
+    o, h, lo, c, v, a = (
+        Decimal("10"), Decimal("11"), Decimal("9"), Decimal("10.5"),
+        Decimal("1000"), Decimal("10500"),
+    )
+    snap = _snap(
+        symbol="600000", open_=o, high=h, low=lo, close=c,
+        volume=v, amount=a, trade_date=TRADE_DATE,
+    )
+    cand = _raw_cand(open=o, high=h, low=lo, close=c, volume=v, amount=a)
+    assert refresh_mod.is_valid_snapshot_daily_row(snap, TRADE_DATE) is True
+    assert refresh_mod.is_valid_raw_daily_candidate(cand, TRADE_DATE) is True
+
+    bad_snap = _snap(
+        symbol="600000", open_=o, high=Decimal("8"), low=lo, close=c,
+        volume=v, amount=a, trade_date=TRADE_DATE,
+    )
+    bad_cand = _raw_cand(open=o, high=Decimal("8"), low=lo, close=c, volume=v, amount=a)
+    assert refresh_mod.is_valid_snapshot_daily_row(bad_snap, TRADE_DATE) is False
+    assert refresh_mod.is_valid_raw_daily_candidate(bad_cand, TRADE_DATE) is False
+
+
+async def test_f2_1_pytdx_scheduled_via_to_thread(monkeypatch) -> None:
+    """F2.1 Blocker 2：同步 pytdx 网络 I/O 必须经由 asyncio.to_thread 调度，不阻塞 event loop。
+
+    完全离线：pytdx 用 stub DataFrame，Eastmoney 直接禁止网络（本测试只验证 pytdx 路径）。
+    """
+    captured = []
+    real_to_thread = asyncio.to_thread
+
+    def spy(fn, *args, **kwargs):
+        captured.append((fn, args, kwargs))
+        return real_to_thread(fn, *args, **kwargs)
+
+    monkeypatch.setattr("asyncio.to_thread", spy)
+    monkeypatch.setattr(refresh_mod, "fetch_raw_daily_frame", lambda *a, **k: _FakePytdxDf())
+    monkeypatch.setattr(
+        refresh_mod,
+        "fetch_eastmoney_daily_kline",
+        AsyncMock(side_effect=SnapshotProviderError("disabled in unit test")),
+    )
+
+    res = await refresh_mod.fetch_missing_daily_candidates(
+        [_instrument("600000", market="SH")], TRADE_DATE
+    )
+
+    assert captured, "pytdx 同步 I/O 必须经 asyncio.to_thread 调度"
+    assert captured[0][0] is refresh_mod.fetch_raw_daily_frame
+    assert res.rows_by_symbol.get("600000") is not None
+    assert res.source_by_symbol.get("600000") == "pytdx"
+
+
+async def test_f2_1_adapter_passthrough_to_fetch_raw_daily_frame(monkeypatch) -> None:
+    """F2.1 STEP 5：fetch_missing_daily_candidates 的 adapter 必须透传到 fetch_raw_daily_frame。"""
+    seen = []
+
+    def fake_fetch(symbol, start, end, adapter=None):
+        seen.append((symbol, start, end, adapter))
+        return _FakePytdxDf()
+
+    monkeypatch.setattr(refresh_mod, "fetch_raw_daily_frame", fake_fetch)
+
+    fake_adapter = object()
+    await refresh_mod.fetch_missing_daily_candidates(
+        [_instrument("600000", market="SH")], TRADE_DATE, adapter=fake_adapter
+    )
+
+    assert seen, "fetch_raw_daily_frame 应当被调用一次"
+    assert seen[0][3] is fake_adapter
