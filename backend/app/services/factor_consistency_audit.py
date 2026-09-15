@@ -125,6 +125,10 @@ class FactorAuditResult:
     reconciliation_version: int = FACTOR_RECONCILIATION_VERSION
     error: str | None = None
     degraded_reason: str | None = None
+    # [CHANGE-20260915] 数据缺失时携带缺失事件日列表（来自
+    # ``AdjustmentFactorDataError.missing_event_dates``），供上层判断是否可对
+    # raw 日线做 bounded targeted repair 后重新审计。未缺失时为空元组。
+    missing_event_dates: tuple[date, ...] = ()
 
 
 # =============================================================================
@@ -201,6 +205,9 @@ class FactorConsistencyAuditor:
                 is_consistent=False, stored_count=stored_count, expected_count=0,
                 missing_factor_count=0, mismatch_count=0,
                 degraded_reason=exc.degraded_reason,
+                # [CHANGE-20260915] C1：携带缺失事件日，供 Part C 上层对 raw 日线做
+                # bounded targeted repair 后重新审计（而非手工改 adj_factor）。
+                missing_event_dates=tuple(exc.missing_event_dates),
             )
         except (PytdxSourceError, CorporateActionProviderError) as exc:
             # 源/连接/协议不可用：**必须向上传播**，让 dry_run 触发 fail-closed 熔断，

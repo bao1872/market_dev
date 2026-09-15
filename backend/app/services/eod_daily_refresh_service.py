@@ -418,15 +418,18 @@ async def sync_instruments_from_eod_snapshot(
         valid_today = is_valid_snapshot_daily_row(row, trade_date)
         inst = existing_by_symbol.get(row.symbol)
         if inst is None:
-            new_records.append(
-                {
-                    "symbol": row.symbol,
-                    "name": row.name,
-                    "pinyin_initials": compute_pinyin_initials(row.name),
-                    "market": row.market,
-                    "status": "active" if valid_today else "inactive",
-                }
-            )
+            new_rec: dict[str, object] = {
+                "symbol": row.symbol,
+                "name": row.name,
+                "pinyin_initials": compute_pinyin_initials(row.name),
+                "market": row.market,
+                "status": "active" if valid_today else "inactive",
+            }
+            # B2/B3：新股直接落 listing_date（来自快照 f26）。
+            # 未知上市日（None）不得伪造 → 不写入该列，避免产生 listing_date=NULL 的占位。
+            if row.listing_date is not None:
+                new_rec["listing_date"] = row.listing_date
+            new_records.append(new_rec)
             new_rows.append(row)
             continue
 
@@ -440,6 +443,26 @@ async def sync_instruments_from_eod_snapshot(
             if should_reactivate:
                 inst.status = "active"
             updated_symbols.append(row.symbol)
+
+        # B3：listing_date 闭环（来自快照 f26）。
+        # NEW 已在 new_records 写入；此处只处理已存在标的：
+        #   - DB 为 None 且 provider 给出非 None → 补写；
+        #   - DB 已非 None 且 provider 给出不同非 None → 保留 DB 原值（warning，不覆盖）；
+        #   - 其他（DB 非 None / provider None）→ 不动。
+        # 绝不手工改写既有非 Null 值，避免把快照的偶发脏值写进 canonical。
+        if inst.listing_date is None and row.listing_date is not None:
+            inst.listing_date = row.listing_date
+            if row.symbol not in updated_symbols:
+                updated_symbols.append(row.symbol)
+        elif (
+            inst.listing_date is not None
+            and row.listing_date is not None
+            and inst.listing_date != row.listing_date
+        ):
+            logger.warning(
+                "listing_date 冲突保留 DB 原值 symbol=%s db=%s provider=%s",
+                row.symbol, inst.listing_date, row.listing_date,
+            )
 
     if new_records:
         stmt = pg_insert(Instrument).values(new_records)

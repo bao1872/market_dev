@@ -667,13 +667,64 @@ class BarsSchedulerService:
 
                     if not can_use_same_day_eod_snapshot(trade_date):
                         # 过去交易日重跑 / 盘中提前触发：实时快照不是 T 日终值，
-                        # 必须走 legacy（historical）路径，禁止拿今天的快照写历史日线。
-                        result.daily_mode = "legacy_fallback"
-                        logger.warning(
-                            "[EOD-SNAPSHOT] trade_date=%s 不在当日收盘窗口"
-                            "（>=15:05 且为当天），跳过快照，改用 historical daily 路径",
-                            trade_date,
-                        )
+                        # 必须走 historical 路径，禁止拿今天的快照写历史日线。
+                        # [CHANGE-20260915] Part A：market-wide 缺口 replay 不再 fall
+                        # through 到 5000+ 逐股 legacy loop，改走 recover_recent_daily_gaps
+                        # （内部对 market-wide 用 repair_market_wide_daily_gap 批量回补，
+                        # 残余 sparse 仍逐股）。门禁失败/异常时回退 legacy loop 作安全网。
+                        if db_session is not None:
+                            try:
+                                from app.services.daily_gap_recovery_service import (
+                                    DailyGapRecoveryBlockedError,
+                                    recover_recent_daily_gaps,
+                                )
+                                from app.services.daily_gap_repair_service import (
+                                    SourceConsistencyError,
+                                )
+
+                                recovery = await recover_recent_daily_gaps(
+                                    db_session,
+                                    through=trade_date,
+                                    lookback_trade_days=1,
+                                    dry_run=False,
+                                    adapter=None,
+                                )
+                                inserted = sum(
+                                    d.bulk_inserted + d.sparse_filled
+                                    for d in recovery.days
+                                )
+                                result.period_counts["d"] = (
+                                    result.period_counts.get("d", 0) + inserted
+                                )
+                                result.daily_mode = "historical_gap_repair"
+                                ran_fast_path = True
+                                logger.warning(
+                                    "[EOD-SNAPSHOT] trade_date=%s 历史回补经 "
+                                    "recover_recent_daily_gaps（market-wide 批量 / "
+                                    "sparse 逐股）完成 inserted=%d",
+                                    trade_date, inserted,
+                                )
+                            except (
+                                DailyGapRecoveryBlockedError,
+                                SourceConsistencyError,
+                            ) as exc:
+                                logger.warning(
+                                    "[EOD-SNAPSHOT] trade_date=%s "
+                                    "recover_recent_daily_gaps 门禁失败（%s），"
+                                    "回退 legacy daily 路径",
+                                    trade_date, exc,
+                                )
+                                result.daily_mode = "legacy_fallback"
+                            except Exception as exc:
+                                logger.warning(
+                                    "[EOD-SNAPSHOT] trade_date=%s "
+                                    "recover_recent_daily_gaps 异常（%s），"
+                                    "回退 legacy daily 路径",
+                                    trade_date, exc,
+                                )
+                                result.daily_mode = "legacy_fallback"
+                        else:
+                            result.daily_mode = "legacy_fallback"
                     else:
                         try:
                             eod_previous_close_by_symbol = (
@@ -1679,9 +1730,40 @@ class BarsSchedulerService:
                 if plan.mode == "market_wide_gap":
                     logger.warning(
                         "[EOD-SNAPSHOT] T=%s 缺口为 market-wide"
-                        "（missing=%d/%d ratio=%.3f），本轮只报告，不做逐股回补",
+                        "（missing=%d/%d ratio=%.3f），改用 bulk repair 而非逐股回补",
                         trade_date, len(missing), eligible, plan.missing_ratio,
                     )
+                    try:
+                        from app.services.daily_gap_recovery_service import (
+                            DailyGapRecoveryBlockedError,
+                            recover_recent_daily_gaps,
+                        )
+                        from app.services.daily_gap_repair_service import (
+                            SourceConsistencyError,
+                        )
+
+                        recovery = await recover_recent_daily_gaps(
+                            session,
+                            through=trade_date,
+                            lookback_trade_days=1,
+                            dry_run=False,
+                            adapter=adapter,
+                        )
+                        result.daily_repair_mode = "historical_gap_repair"
+                        still = await find_missing_daily_instruments(session, trade_date)
+                        coverage_after = (
+                            ((eligible - len(still)) / eligible) if eligible else 0.0
+                        )
+                        if coverage_after < 0.90:
+                            raise SnapshotProviderError(
+                                f"market_wide_gap bulk repair 后覆盖率仍过低: "
+                                f"{coverage_after:.3f}"
+                            )
+                        result.daily_missing_after_fallback = len(still)
+                    except (DailyGapRecoveryBlockedError, SourceConsistencyError) as exc:
+                        raise SnapshotProviderError(
+                            f"market_wide_gap repair 失败（fail-closed）: {exc}"
+                        ) from exc
                 else:
                     result.daily_fallback_attempted = len(missing)
                     ok = await fill_missing_daily_instruments(
@@ -2268,6 +2350,146 @@ class BarsSchedulerService:
 
         return refresh_instruments, reason_counts
 
+    async def _repair_degraded_raw_daily_and_reaudit(
+        self,
+        plan: "ReconciliationPlan",
+        trade_date: date,
+        db_session: AsyncSession | None,
+        instruments: list[Instrument],
+    ) -> "ReconciliationPlan":
+        """[CHANGE-20260915] Part C：因子审计 degraded 的「有界 raw 日线回补 + 重审」。
+
+        仅在 degraded 根因属于 raw 日线缺口类时才尝试修复，绝不手工改 adj_factor：
+
+        - 对每个 degraded symbol 调用 :class:`FactorConsistencyAuditor` 重审，
+          恢复 ``degraded_reason`` 与 ``missing_event_dates``；
+        - 若根因 ∈ {``bars_daily_missing_data``, ``bars_daily_gap``} 且带缺失事件日，
+          仅对这些 symbol 的缺失事件日附近（T-10 ~ T+1）做 targeted raw daily repair
+          （复用 THS raw fetch + bulk_insert_raw_daily_repair，on_conflict_do_nothing）；
+        - 回补后重新审计一次。
+
+        硬门禁保持（门禁由调用方在 ``degraded_count > 0`` 处统一 fail-closed）：
+
+        - 出现非 raw 日线缺口类根因 / 重审异常 / 缺失事件日为空 → 不回补，返回原 plan；
+        - 回补后仍有 degraded（根因未消除） → 返回仍含 degraded 的 plan；
+        - 只有全部 degraded symbol 经回补后重新审计通过（不再 degraded）才放行。
+        """
+        from collections import defaultdict
+        from dataclasses import replace
+        from datetime import timedelta
+
+        from app.services.daily_gap_repair_service import (
+            bulk_insert_raw_daily_repair,
+        )
+        from app.services.factor_consistency_audit import FactorConsistencyAuditor
+        from app.services.ths_raw_daily_provider import fetch_ths_raw_daily
+
+        if plan.degraded_count <= 0:
+            return plan
+        if db_session is None:
+            # 没有可写会话，无法回补 → 保持 fail-closed。
+            return plan
+
+        by_symbol = {i.symbol: i for i in instruments}
+        auditor = FactorConsistencyAuditor()
+
+        repairable: list[tuple[Instrument, list[date]]] = []
+        any_block = False
+
+        # 1. 逐个重新审计 degraded symbol，恢复根因 + 缺失事件日
+        for sym in plan.degraded_symbols:
+            inst = by_symbol.get(sym)
+            if inst is None:
+                logger.warning(
+                    "[PART-C] degraded symbol=%s 不在 active universe，保持 fail-closed", sym
+                )
+                any_block = True
+                continue
+            try:
+                res = await auditor.audit_single_stock(db_session, inst.id, sym)
+            except Exception as exc:
+                logger.warning("[PART-C] 重审 %s 异常：%s", sym, exc)
+                any_block = True
+                continue
+            reason = res.degraded_reason
+            if (
+                reason in ("bars_daily_missing_data", "bars_daily_gap")
+                and res.missing_event_dates
+            ):
+                repairable.append((inst, list(res.missing_event_dates)))
+            else:
+                logger.warning(
+                    "[PART-C] degraded symbol=%s 根因=%s 非 raw 日线缺口类/无缺失事件日，不自动回补",
+                    sym, reason,
+                )
+                any_block = True
+
+        if any_block or not repairable:
+            return plan
+
+        # 2. 有界 targeted raw daily repair：仅补齐缺失事件日附近 T-10 ~ T+1
+        import httpx
+
+        limits = httpx.Limits(max_connections=3, max_keepalive_connections=3)
+        timeout = httpx.Timeout(connect=5.0, read=15.0, write=10.0, pool=10.0)
+        async with httpx.AsyncClient(limits=limits, timeout=timeout) as client:
+            for inst, event_dates in repairable:
+                for ev in event_dates:
+                    start = ev - timedelta(days=10)
+                    end = ev + timedelta(days=2)
+                    try:
+                        records = await fetch_ths_raw_daily(client, inst.symbol, start, end)
+                    except Exception as exc:
+                        logger.warning(
+                            "[PART-C] THS raw 拉取 %s [%s~%s] 失败：%s",
+                            inst.symbol, start, end, exc,
+                        )
+                        any_block = True
+                        continue
+                    by_day: dict[date, list[tuple[Any, dict]]] = defaultdict(list)
+                    for rec in records:
+                        try:
+                            d = date.fromisoformat(str(rec.get("datetime"))[:10])
+                        except Exception:
+                            continue
+                        by_day[d].append((inst.id, rec))
+                    for d, rows in by_day.items():
+                        try:
+                            await bulk_insert_raw_daily_repair(db_session, rows, d)
+                        except Exception as exc:
+                            logger.warning(
+                                "[PART-C] bulk_insert %s @%s 失败：%s", inst.symbol, d, exc
+                            )
+                            any_block = True
+
+        if any_block:
+            return plan
+
+        # 3. 回补后重新审计一次：只要仍 degraded（根因未消除）即保持 fail-closed
+        still_degraded: list[str] = []
+        for inst, _ in repairable:
+            try:
+                res = await auditor.audit_single_stock(db_session, inst.id, inst.symbol)
+            except Exception as exc:
+                logger.warning("[PART-C] 回补后重审 %s 异常：%s", inst.symbol, exc)
+                still_degraded.append(inst.symbol)
+                continue
+            if res.error is not None or res.degraded_reason is not None:
+                still_degraded.append(inst.symbol)
+
+        if still_degraded:
+            logger.warning(
+                "[PART-C] 回补后仍有 %d 只 degraded/异常：%s → 保持 fail-closed",
+                len(still_degraded), still_degraded,
+            )
+            return plan
+
+        logger.info(
+            "[PART-C] %d 只 degraded 经 raw 日线有界回补后重新审计通过，门禁放行",
+            len(repairable),
+        )
+        return replace(plan, degraded_count=0, degraded_symbols=[])
+
     async def _audit_and_rebuild_factors(
         self,
         trade_date: date,
@@ -2448,6 +2670,14 @@ class BarsSchedulerService:
             raise FactorSourceUnavailableError(
                 f"FACTOR_AUDIT_UNHEALTHY: errors={errors}/{audited} "
                 f"(ratio={provider_failure_ratio:.4f})"
+            )
+
+        # [CHANGE-20260915] Part C：硬门禁前，对 raw 日线缺口类 degraded 做有界回补 + 重审。
+        # 仅当全部 degraded 根因属于 {bars_daily_missing_data, bars_daily_gap} 且回补后
+        # 重新审计通过时才放行；否则 plan 仍含 degraded → 下方门禁继续 fail-closed。
+        if plan.degraded_count > 0:
+            plan = await self._repair_degraded_raw_daily_and_reaudit(
+                plan, trade_date, db_session, instruments,
             )
 
         # [FACTOR-HEALTH] degraded：某只股票数据链本身无法证明 factor 正确性。

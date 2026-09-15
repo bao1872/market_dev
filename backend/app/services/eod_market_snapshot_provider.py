@@ -86,6 +86,7 @@ FIELDS = ",".join([
     "f5",    # volume 手 → 入库前 ×100 转股（SHARES_PER_LOT）
     "f6",    # amount 元
     "f18",   # previous close
+    "f26",   # listing date 上市日期（YYYYMMDD；0/-/null 表示未知）
     "f124",  # update timestamp（秒）
 ])
 
@@ -153,6 +154,7 @@ class EodSnapshotRow:
     volume: Decimal | None      # 股（canonical，见 SHARES_PER_LOT）
     amount: Decimal | None      # 元
     previous_close: Decimal | None
+    listing_date: date | None = None  # 上市日期（来自 f26，YYYYMMDD）；未知为 None
 
     @property
     def trade_date(self) -> date | None:
@@ -388,6 +390,47 @@ def _lots_to_shares(value: Any) -> Decimal | None:
     return lots * SHARES_PER_LOT
 
 
+def _parse_listing_date(value: Any) -> date | None:
+    """东方财富 f26 上市日期（YYYYMMDD）→ date；未知/非法 → None。
+
+    Eastmoney 对「未知/未上市」返回 ``"0"``、``"-"``、``None`` 或空串，必须一律视为
+    None，**禁止**把 ``"0"`` 当 1970-01-01 或把 malformed 当合法日期写库 —— 否则会
+    污染 ``node_cluster_input_provider`` 的 ``listing_date`` NULL 门禁（MISSING_HISTORY_
+    BOUNDARY_PROOF），导致「上市日期未知」被误判为「有缺失历史」。
+
+    合法：8 位纯数字 ``YYYYMMDD``（如 ``"19970725"``）→ date。
+    拒绝：``None`` / ``""`` / ``"-"`` / ``"--"`` / ``"0"`` / ``"None"`` / ``"nan"`` /
+    非 8 位数字 / 无法解析为真实日期。
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if cleaned in ("", "-", "--", "0", "None", "nan"):
+            return None
+        raw = cleaned
+    elif isinstance(value, int):
+        if value <= 0:
+            return None
+        raw = str(value)
+    elif isinstance(value, float):
+        if value <= 0 or not value.is_integer():
+            return None
+        raw = str(int(value))
+    else:
+        cleaned = str(value).strip()
+        if cleaned in ("", "-", "--", "0", "None", "nan"):
+            return None
+        raw = cleaned
+
+    if not (len(raw) == 8 and raw.isdigit()):
+        return None
+    try:
+        return datetime.strptime(raw, "%Y%m%d").date()
+    except (ValueError, OverflowError):
+        return None
+
+
 def parse_eod_snapshot_row(raw: dict[str, Any]) -> EodSnapshotRow | None:
     """单条 Eastmoney diff -> EodSnapshotRow；非法行返回 None。
 
@@ -420,6 +463,7 @@ def parse_eod_snapshot_row(raw: dict[str, Any]) -> EodSnapshotRow | None:
         volume=_lots_to_shares(raw.get("f5")),
         amount=_parse_decimal(raw.get("f6")),
         previous_close=_parse_price(raw.get("f18")),
+        listing_date=_parse_listing_date(raw.get("f26")),
     )
 
 
