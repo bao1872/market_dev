@@ -57,7 +57,7 @@ test:
 #       默认指向 redis://localhost:6379/15，可用 REDIS_URL 覆盖。
 check-fast:
 	@ROOT=$$(git rev-parse --show-toplevel) ; \
-	  CHANGED=$$( { git -C "$$ROOT" diff --name-only origin/dev HEAD -- backend 2>/dev/null; git -C "$$ROOT" diff --name-only HEAD -- backend; git -C "$$ROOT" diff --name-only --cached -- backend; git -C "$$ROOT" ls-files --others --exclude-standard -- backend; } | sed 's|^backend/||' | grep '\.py$$' | sort -u ) ; \
+	  CHANGED=$$( { git -C "$$ROOT" diff --name-only origin/dev HEAD -- backend 2>/dev/null; git -C "$$ROOT" diff --name-only HEAD -- backend; git -C "$$ROOT" diff --name-only --cached -- backend; git -C "$$ROOT" ls-files --others --exclude-standard -- backend; } | sed 's|^backend/||' | grep '\.py$$' | while read f; do [ -f "$$ROOT/backend/$$f" ] && echo "$$f"; done | sort -u ) ; \
 	  cd "$$ROOT/backend" && \
 	  echo "==[1/2] ruff on changed backend files (T0, mirrors CI ruff-new-files) ==" && \
 	  if [ -n "$$CHANGED" ]; then echo "lint targets:"; echo "$$CHANGED" | sed 's/^/  /'; ruff check $$CHANGED; RUFF_RC=$$?; else echo "  (no changed backend python files; ruff skipped)"; RUFF_RC=0; fi ; \
