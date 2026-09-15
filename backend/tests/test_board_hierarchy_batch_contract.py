@@ -29,7 +29,6 @@ from app.models.market_board import MarketBoard
 from app.services import (
     board_membership_service,
     board_sync_service,
-    factor_publication_service,
     review_orchestrator_service,
     review_scope_service,
 )

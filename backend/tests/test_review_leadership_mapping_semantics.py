@@ -20,15 +20,15 @@ assert on its ``leader_set`` / ``leader_ids`` / ``direction`` / ``status``.
 
 from __future__ import annotations
 
-import pytest
 from datetime import date
+
+import pytest
 
 from app.domain.first_pyramid_semantics import Direction, MomentumDirection
 from app.domain.review.analysis.leadership_contribution import (
     compute_member_leadership_contributions,
 )
 from app.domain.review.analysis.leadership_migration import (
-    AlignedLeadership,
     build_leadership_snapshot,
 )
 from app.domain.review.scope_observation import (
