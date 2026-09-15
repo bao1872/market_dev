@@ -1,7 +1,7 @@
 # V1.1 交易平台 - 开发命令
 # 用法: make <target>
 
-.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint check-fast up down docker-build docker-up docker-down worker
+.PHONY: dev backend frontend tunnel tunnel-status tunnel-stop migrate migrate-new test lint check test-pure-full check-fast up down docker-build docker-up docker-down worker
 
 # 启动全栈开发环境：原生 Python / Node.js 进程，不依赖 Docker
 # 前置条件：已配置 backend/.env 中的 DATABASE_URL 与 REDIS_URL
@@ -55,19 +55,48 @@ test:
 # 前置：backend 虚拟环境已激活（ruff/pytest 在 PATH）；
 #       pure-unit 模式不连任何数据库，但部分单元测试会用到 Redis，
 #       默认指向 redis://localhost:6379/15，可用 REDIS_URL 覆盖。
+# 探索阶段唯一日常开发入口（Task 005-R / Commit B）
+# = T0 final changed-files (t0_gate.py) + T1 modified-scope unit (t1_gate.py)
+#
+# 默认：提交前 worktree 检查
+#   make check
+#     T0 --base HEAD --worktree
+#     T1 --base HEAD --worktree
+# 精确 committed range：
+#   make check BASE=<sha> HEAD=<sha>
+#     T0 --base BASE --head HEAD
+#     T1 --base BASE --head HEAD
+# 显式 targeted selector（不 eval，逗号分隔）：
+#   make check BACKEND_T1="tests/test_foo.py::test_case,tests/test_bar.py"
+#   make check FRONTEND_T1="src/features/foo/__tests__/foo.test.ts"
+# 不跑 6000+ full pure-unit；那入口是 test-pure-full（T6）。
+check:
+	@ROOT=$$(git rev-parse --show-toplevel); \
+	 BASE_ARG="$(BASE)"; HEAD_ARG="$(HEAD)"; \
+	 if [ -z "$$BASE_ARG" ]; then \
+	   T0_ARGS="--base HEAD --worktree"; \
+	   T1_ARGS="--base HEAD --worktree"; \
+	 else \
+	   T0_ARGS="--base $$BASE_ARG"; T1_ARGS="--base $$BASE_ARG"; \
+	   if [ -n "$$HEAD_ARG" ]; then T0_ARGS="$$T0_ARGS --head $$HEAD_ARG"; T1_ARGS="$$T1_ARGS --head $$HEAD_ARG"; fi; \
+	 fi; \
+	 if [ -n "$(BACKEND_T1)" ]; then T1_ARGS="$$T1_ARGS --backend-tests $(BACKEND_T1)"; fi; \
+	 if [ -n "$(FRONTEND_T1)" ]; then T1_ARGS="$$T1_ARGS --frontend-tests $(FRONTEND_T1)"; fi; \
+	 echo "==[1/2] T0 final changed-files (t0_gate.py) =="; \
+	 python3 "$$ROOT/scripts/quality/t0_gate.py" $$T0_ARGS || exit 1; \
+	 echo "==[2/2] T1 modified-scope unit (t1_gate.py) =="; \
+	 python3 "$$ROOT/scripts/quality/t1_gate.py" $$T1_ARGS
+
+# T6 Full PURE_UNIT（非默认）。原 check-fast 的 pytest 部分，从日常路径移出。
+# 6000+ 纯单元测试；显式入口，不进入日常 make check。
+test-pure-full:
+	cd backend && PURE_UNIT_TEST=1 APP_ENV=test REDIS_URL=redis://localhost:6379/15 CAPTURE_STATIC_DIR=/tmp/panji-ci-captures \
+	  pytest -m "not postgres and not external_data" --tb=short -q
+
+# 薄兼容 alias：不再运行 full PURE_UNIT（那是 test-pure-full）。
 check-fast:
-	@ROOT=$$(git rev-parse --show-toplevel) ; \
-	  CHANGED=$$( { git -C "$$ROOT" diff --name-only origin/dev HEAD -- backend 2>/dev/null; git -C "$$ROOT" diff --name-only HEAD -- backend; git -C "$$ROOT" diff --name-only --cached -- backend; git -C "$$ROOT" ls-files --others --exclude-standard -- backend; } | sed 's|^backend/||' | grep '\.py$$' | while read f; do [ -f "$$ROOT/backend/$$f" ] && echo "$$f"; done | sort -u ) ; \
-	  cd "$$ROOT/backend" && \
-	  echo "==[1/2] ruff on changed backend files (T0, mirrors CI ruff-new-files) ==" && \
-	  if [ -n "$$CHANGED" ]; then echo "lint targets:"; echo "$$CHANGED" | sed 's/^/  /'; ruff check $$CHANGED; RUFF_RC=$$?; else echo "  (no changed backend python files; ruff skipped)"; RUFF_RC=0; fi ; \
-	  echo "==[2/2] pytest pure-unit (no postgres, no external_data) ==" && \
-	  PURE_UNIT_TEST=1 APP_ENV=test REDIS_URL=redis://localhost:6379/15 CAPTURE_STATIC_DIR=/tmp/panji-ci-captures \
-	    pytest -m "not postgres and not external_data" --tb=short -q ; PY_RC=$$? ; \
-	  echo "==================== check-fast summary ====================" ; \
-	  echo "ruff: $$RUFF_RC   pytest: $$PY_RC" ; \
-	  if [ $$RUFF_RC -ne 0 ] || [ $$PY_RC -ne 0 ]; then echo "CHECK-FAST: FAIL"; exit 1; fi ; \
-	  echo "CHECK-FAST: PASS"
+	@echo "DEPRECATED: 'make check-fast' now delegates to 'make check' (T0 + T1 modified-scope). Use 'make test-pure-full' for the full T6 suite."
+	@$(MAKE) check
 
 # 代码检查（ruff + mypy）
 lint:
