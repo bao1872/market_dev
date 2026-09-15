@@ -23,7 +23,10 @@ import pytest
 
 from app.models.instrument import Instrument
 from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
-from app.services.eod_daily_refresh_service import InstrumentSyncResult
+from app.services.eod_daily_refresh_service import (
+    DailyCandidateFetchResult,
+    InstrumentSyncResult,
+)
 from app.services.eod_market_snapshot_provider import (
     EASTMONEY_CLIST_HOSTS,
     EodSnapshotRow,
@@ -347,3 +350,388 @@ async def test_orchestration_discovers_new_stock_same_round_bar() -> None:
     assert new_inst.id in upserted_ids
     # 新股触发历史回补
     assert cap["backfill_calls"] and new_inst in cap["backfill_calls"][0]
+
+
+# =============================================================================
+# F2 — EOD acquire-before-persist：取数完成前不在取数过程中部分写库
+# =============================================================================
+
+
+def _empty_candidates() -> DailyCandidateFetchResult:
+    return DailyCandidateFetchResult(rows_by_symbol={}, source_by_symbol={}, failed_symbols=[])
+
+
+def _candidates_for(
+    rows_by_symbol: dict, source_by_symbol: dict, failed: list[str]
+) -> DailyCandidateFetchResult:
+    return DailyCandidateFetchResult(
+        rows_by_symbol=rows_by_symbol, source_by_symbol=source_by_symbol, failed_symbols=failed
+    )
+
+
+def _ten_active_one_missing():
+    """构造 10 只活跃标的、snapshot 只覆盖前 9 只的场景。
+
+    关键：1/10 = 0.10 < _MARKET_WIDE_GAP_RATIO(0.20)，确保走 sparse fallback 而非
+    market-wide（market-wide 用绝对缺失比例，小基数测试会误触发）。
+    """
+    covered = [f"60000{i}" for i in range(9)]  # 600000..600008
+    missing_sym = "600009"
+    active = [_inst(s) for s in covered] + [_inst(missing_sym)]
+    rows = tuple(_valid_row(s) for s in covered)
+    discovery = AsyncMock(
+        return_value=([{"f12": s} for s in covered], list(rows))
+    )
+    price_fallback = AsyncMock(return_value=([], []))
+    return active, covered, missing_sym, rows, discovery, price_fallback
+
+
+async def _run_f2(
+    *,
+    discovery,
+    price_fallback,
+    pytdx_rows,
+    active,
+    sync_result,
+    fetch_candidates=None,
+    find_missing_post_write=None,
+):
+    """F2 编排测试 runner：用 mock 跑 _refresh_daily_from_market_snapshot。
+
+    关键观测：
+    - upsert_calls：每次 bars_daily(T) 落库调用（应当恰好一次，且晚于 fallback）
+    - fetch_calls：fetch_missing_daily_candidates 的调用（PD 观测，决定 fallback 是否触发）
+    - find_missing_calls_before_upsert：post-write 核验是否在落库前被误用为「决定 fallback 目标」
+    """
+    svc = BarsSchedulerService()
+    session = _fake_session(active)
+
+    cap: dict = {
+        "upsert_calls": [],
+        "find_missing_calls_before_upsert": 0,
+        "backfill_calls": [],
+        "fetch_calls": [],
+    }
+
+    async def fake_upsert(s, td, pairs):
+        cap["upsert_calls"].append(list(pairs))
+        return len(pairs)
+
+    async def fake_backfill(s, insts, td, *, breaker=None):
+        cap["backfill_calls"].append(list(insts))
+        return len(insts)
+
+    async def fake_find_missing(s, td):
+        if not cap["upsert_calls"]:
+            cap["find_missing_calls_before_upsert"] += 1
+        return list(find_missing_post_write or [])
+
+    async def fake_fetch(instruments, td, *, breaker=None):
+        cap["fetch_calls"].append([i.symbol for i in instruments])
+        return fetch_candidates
+
+    async def fake_sync(s, rows, td):
+        return sync_result
+
+    with patch(
+        "app.services.eod_daily_refresh_service.sync_instruments_from_eod_snapshot", fake_sync
+    ), patch(
+        "app.services.eod_daily_refresh_service.count_active_a_share_instruments",
+        AsyncMock(return_value=len(active)),
+    ), patch(
+        "app.services.eod_daily_refresh_service.check_snapshot_universe_sanity",
+        lambda *a, **k: None,
+    ), patch(
+        "app.services.eod_daily_refresh_service.upsert_raw_daily_snapshot", fake_upsert
+    ), patch(
+        "app.services.eod_daily_refresh_service.find_missing_daily_instruments", fake_find_missing
+    ), patch(
+        "app.services.eod_daily_refresh_service.fetch_missing_daily_candidates", fake_fetch
+    ), patch(
+        "app.services.eod_daily_refresh_service.backfill_new_instruments", fake_backfill
+    ), patch.object(
+        svc, "_fetch_discovery_snapshot", discovery
+    ), patch.object(
+        svc, "_fetch_price_fallback_snapshot", price_fallback
+    ), patch.object(
+        svc, "_fetch_pytdx_primary_eod", AsyncMock(return_value=pytdx_rows)
+    ):
+        result = BatchResult()
+        returned = await svc._refresh_daily_from_market_snapshot(TRADE_DATE, session, None, result)
+
+    return result, returned, cap
+
+
+@pytest.mark.asyncio
+async def test_f2_full_snapshot_no_fallback_single_persist() -> None:
+    """F2-1：snapshot 全覆盖 → fallback 取数不调用 → T 日落库恰好一次。"""
+    known = _inst("600000")
+    discovery = AsyncMock(return_value=([{"f12": "600000"}], [_valid_row("600000")]))
+    price_fallback = AsyncMock(return_value=([], []))
+
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=(_valid_row("600000"),),
+        active=[known],
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=_empty_candidates(),
+        find_missing_post_write=[],
+    )
+
+    assert cap["fetch_calls"] == []  # 无缺口，不触发 fallback 取数
+    assert len(cap["upsert_calls"]) == 1  # 唯一一次 T 日落库
+    upserted_symbols = {p[1].symbol for p in cap["upsert_calls"][0]}
+    assert upserted_symbols == {"600000"}
+    assert result.daily_missing_after_snapshot == 0
+
+
+@pytest.mark.asyncio
+async def test_f2_one_missing_fallback_then_single_persist_with_both() -> None:
+    """F2-2：snapshot 缺 1 只 → fallback 完成前 persist 次数==0 →
+    fallback 成功后唯一一次落库，batch 同时含 snapshot + fallback 行。"""
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+
+    fb_row = _valid_row(missing_sym)
+    fetch_candidates = _candidates_for(
+        rows_by_symbol={missing_sym: fb_row},
+        source_by_symbol={missing_sym: "pytdx"},
+        failed=[],
+    )
+
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=fetch_candidates,
+        find_missing_post_write=[],
+    )
+
+    # 落库前没有任何 bars_daily(T) 写入（fallback 取数阶段零写库）
+    assert len(cap["upsert_calls"]) == 1  # acquisition 结束后唯一一次
+    upserted_symbols = {p[1].symbol for p in cap["upsert_calls"][0]}
+    assert missing_sym in upserted_symbols  # snapshot + fallback 同批
+    assert result.daily_fallback_succeeded == 1
+    assert result.daily_missing_after_fallback == 0
+
+
+@pytest.mark.asyncio
+async def test_f2_one_missing_fallback_fails_persist_available_only() -> None:
+    """F2-3：snapshot 缺 1 只且 fallback 失败 → fallback 前无写库 →
+    acquisition 结束后只落库可用 staging 一次 → unresolved 被记录，不伪造 success。"""
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+    missing_inst = active[-1]
+
+    # fallback 返回空（provider 异常/空/无 exact T 行）→ 计入 failed，不伪造 success
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=_empty_candidates(),
+        find_missing_post_write=[missing_inst],  # 写后核验：missing_sym 仍缺
+    )
+
+    assert len(cap["upsert_calls"]) == 1  # 仅持久化可用 staging
+    upserted_symbols = {p[1].symbol for p in cap["upsert_calls"][0]}
+    assert missing_sym not in upserted_symbols  # 失败的标的不在落库批次
+    assert result.daily_fallback_succeeded == 0
+    assert result.daily_missing_after_fallback == 1  # unresolved 保留给 continuity gate
+
+
+@pytest.mark.asyncio
+async def test_f2_market_wide_gap_no_per_symbol_fallback() -> None:
+    """F2-4：整日空洞 → 不逐股 fallback（无 storm）→ 可用行最多一次落库 →
+    unresolved 保留给既有 continuity gate。"""
+    active = [_inst(f"{600000 + i}") for i in range(10)]
+    # snapshot 只覆盖 1/10 → 缺失比例 0.9 >= 0.20 → market_wide_gap
+    discovery = AsyncMock(return_value=([{"f12": "600000"}], [_valid_row("600000")]))
+    price_fallback = AsyncMock(return_value=([], []))
+
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=(),
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        # 若被误触发逐股 fallback，返回非空会污染断言；这里用会显式失败的值防御
+        fetch_candidates=_candidates_for(
+            rows_by_symbol={"600001": _valid_row("600001")},
+            source_by_symbol={"600001": "pytdx"},
+            failed=[],
+        ),
+        find_missing_post_write=[],
+    )
+
+    assert cap["fetch_calls"] == []  # 未触发逐股 fallback storm
+    assert result.daily_repair_mode == "market_wide_gap"
+    assert len(cap["upsert_calls"]) == 1
+    upserted_symbols = {p[1].symbol for p in cap["upsert_calls"][0]}
+    assert upserted_symbols == {"600000"}
+
+
+@pytest.mark.asyncio
+async def test_f2_fallback_provider_exception_no_partial_write() -> None:
+    """F2-5：fallback provider 异常 → acquisition 阶段无 partial T 日写库。"""
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+    svc = BarsSchedulerService()
+    session = _fake_session(active)
+
+    upsert_calls: list = []
+
+    async def boom(instruments, td, *, breaker=None):
+        raise RuntimeError("provider down")
+
+    async def spy_upsert(s, td, pairs):
+        upsert_calls.append(list(pairs))
+        return len(pairs)
+
+    with patch(
+        "app.services.eod_daily_refresh_service.fetch_missing_daily_candidates", boom
+    ), patch(
+        "app.services.eod_daily_refresh_service.upsert_raw_daily_snapshot", spy_upsert
+    ), patch(
+        "app.services.eod_daily_refresh_service.find_missing_daily_instruments",
+        AsyncMock(return_value=[]),
+    ), patch(
+        "app.services.eod_daily_refresh_service.sync_instruments_from_eod_snapshot",
+        AsyncMock(return_value=InstrumentSyncResult()),
+    ), patch(
+        "app.services.eod_daily_refresh_service.count_active_a_share_instruments",
+        AsyncMock(return_value=len(active)),
+    ), patch(
+        "app.services.eod_daily_refresh_service.check_snapshot_universe_sanity",
+        lambda *a, **k: None,
+    ), patch(
+        "app.services.eod_daily_refresh_service.backfill_new_instruments",
+        AsyncMock(return_value=0),
+    ), patch.object(svc, "_fetch_discovery_snapshot", discovery), patch.object(
+        svc, "_fetch_price_fallback_snapshot", price_fallback
+    ), patch.object(svc, "_fetch_pytdx_primary_eod", AsyncMock(return_value=rows)):
+        with pytest.raises(RuntimeError):
+            await svc._refresh_daily_from_market_snapshot(TRADE_DATE, session, None, BatchResult())
+
+    # 异常发生在 acquisition 阶段（fetch 失败时） → 不应有任何 bars_daily(T) 落库
+    assert upsert_calls == []
+
+
+@pytest.mark.asyncio
+async def test_f2_post_write_find_missing_only_verifies() -> None:
+    """F2-6：写后 find_missing_daily_instruments 只用于 verification，
+    不决定 fallback 目标（缺口由内存集合差在落库前算出）。"""
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+
+    fb_row = _valid_row(missing_sym)
+    fetch_candidates = _candidates_for(
+        rows_by_symbol={missing_sym: fb_row},
+        source_by_symbol={missing_sym: "pytdx"},
+        failed=[],
+    )
+
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=fetch_candidates,
+        find_missing_post_write=[active[-1]],  # 写后核验仍发现 missing_sym（仅验证顺序）
+    )
+
+    # 落库之前 find_missing 不应被调用（缺口由内存算，不查 DB）
+    assert cap["find_missing_calls_before_upsert"] == 0
+    # 写后核验确实发生（一次）
+    assert result.daily_missing_after_fallback == 1
+
+
+@pytest.mark.asyncio
+async def test_f2_new_stock_backfill_after_persist_and_t_day_canonical() -> None:
+    """F2-8：新股历史补齐位于 T 日 canonical 落库之后；T 日 row 由 snapshot 路径写入，
+    不被 historical provider 覆盖。"""
+    known = _inst("600000")
+    new_inst = _inst("689001", market="BJ")
+    discovery = AsyncMock(
+        return_value=(
+            [{"f12": "600000"}, {"f12": "689001"}],
+            [_valid_row("600000"), _valid_row("689001", market="BJ")],
+        )
+    )
+    price_fallback = AsyncMock(return_value=([], []))
+    sync_result = InstrumentSyncResult(new_instruments=[new_inst], new_symbols=["689001"])
+
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=(),
+        active=[known, new_inst],
+        sync_result=sync_result,
+        fetch_candidates=_empty_candidates(),
+        find_missing_post_write=[],
+    )
+
+    # T 日 canonical row 由 snapshot 路径落库（含 689001）
+    assert cap["upsert_calls"]
+    upserted_symbols = {p[1].symbol for p in cap["upsert_calls"][0]}
+    assert "689001" in upserted_symbols
+    # backfill 发生在落库之后（顺序：upsert -> backfill）
+    assert cap["backfill_calls"] and new_inst in cap["backfill_calls"][0]
+
+
+@pytest.mark.asyncio
+async def test_f2_previous_close_evidence_only_from_snapshot() -> None:
+    """F2-9：previous_close 证据只来自 snapshot 选中的 source，fallback 不伪造。"""
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+
+    # fallback candidate 的 previous_close=None（无证据）
+    fb_row = _valid_row(missing_sym)
+    assert fb_row.previous_close is not None  # snapshot 行有值，但 fallback 不应进入 evidence
+    fetch_candidates = _candidates_for(
+        rows_by_symbol={missing_sym: fb_row},
+        source_by_symbol={missing_sym: "pytdx"},
+        failed=[],
+    )
+
+    result, returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=fetch_candidates,
+        find_missing_post_write=[],
+    )
+
+    # 被 snapshot 覆盖的 symbol 提供 previous_close；仅 fallback 的 missing_sym 不应出现
+    assert covered[0] in returned
+    assert returned[covered[0]] is not None
+    assert missing_sym not in returned
+
+
+@pytest.mark.asyncio
+async def test_f2_source_metrics_include_fallback() -> None:
+    """F2-10：原 snapshot source metrics（pytdx / EM fallback / BJ）不因 staging 重构丢失。"""
+    active, covered, missing_sym, rows, discovery, price_fallback = _ten_active_one_missing()
+
+    fetch_candidates = _candidates_for(
+        rows_by_symbol={missing_sym: _valid_row(missing_sym)},
+        source_by_symbol={missing_sym: "eastmoney_fallback"},
+        failed=[],
+    )
+
+    result, _returned, cap = await _run_f2(
+        discovery=discovery,
+        price_fallback=price_fallback,
+        pytdx_rows=rows,
+        active=active,
+        sync_result=InstrumentSyncResult(),
+        fetch_candidates=fetch_candidates,
+        find_missing_post_write=[],
+    )
+
+    assert result.daily_pytdx_rows == len(covered)  # 9 只 snapshot 走 pytdx
+    assert result.daily_eastmoney_rows == 1  # fallback 计入 EM
+    assert result.daily_bj_rows == 0
+    assert result.daily_primary_source in ("mixed", "eastmoney", "pytdx")

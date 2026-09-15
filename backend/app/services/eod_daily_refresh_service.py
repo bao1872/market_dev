@@ -29,9 +29,11 @@ from __future__ import annotations
 import logging
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import func, select
@@ -41,9 +43,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.bar import BarDaily
 from app.models.calendar import TradingCalendar
 from app.models.instrument import Instrument
+from app.services.bars_fetch_worker import fetch_raw_daily_frame
 from app.services.eod_market_snapshot_provider import (
     EodSnapshotRow,
     SnapshotProviderError,
+    fetch_eastmoney_daily_kline,
 )
 from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 from app.services.pinyin_util import compute_pinyin_initials
@@ -186,6 +190,23 @@ def plan_daily_repair(gap: DailyGap) -> DailyRepairPlan:
         missing_ratio=ratio,
         mode=mode,
     )
+
+
+@dataclass(frozen=True)
+class DailyCandidateFetchResult:
+    """fetch-only fallback 的结果（**不写 DB**）。
+
+    - ``rows_by_symbol``：通过合法性校验的 T 日 candidate，统一为 EodSnapshotRow，
+      与 snapshot 行汇聚成同一种 staging 类型（唯一 upsert 路径）。
+    - ``source_by_symbol``：每个 candidate 的取数来源（pytdx / eastmoney_fallback /
+      eastmoney_bj），用于源可观测性。
+    - ``failed_symbols``：provider 异常 / 空 / 无 exact T 行 / 校验失败的标的，
+      留给既有 continuity gate 处理，不伪造 success。
+    """  # noqa: E501
+
+    rows_by_symbol: dict[str, EodSnapshotRow]
+    source_by_symbol: dict[str, str]
+    failed_symbols: list[str]
 
 
 async def count_active_a_share_instruments(session: AsyncSession) -> int:
@@ -366,6 +387,189 @@ async def find_missing_daily_instruments(
     )
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def fetch_missing_daily_candidates(
+    instruments: Sequence[Instrument],
+    trade_date: date,
+    *,
+    breaker: _PytdxBreaker | None = None,
+) -> DailyCandidateFetchResult:
+    """只取数、不写 DB 的 fetch-only fallback（F2 acquire-before-persist）。
+
+    源策略（与 :func:`_backfill_one` 冻结规则一致，但 **不落库**）：
+    - SH/SZ：pytdx raw daily primary（取 exact T 行）；异常 / 空 / 无 exact T 行 /
+      breaker 已打开 → 才进入 Eastmoney fqt=0 raw fallback。
+    - BJ：Eastmoney raw 直连（pytdx 不覆盖 BSE，且不计 breaker）。
+    - 任意一次 pytdx 真成功即复位 breaker；连续失败达上限后本轮剩余沪深标的跳过 pytdx。
+
+    返回的 candidate 必须通过 :func:`is_valid_snapshot_daily_row`（唯一合法性 owner），
+    **禁止「provider 返回非空 = success」**。未通过的标的进入 ``failed_symbols``。
+    """
+    rows_by_symbol: dict[str, EodSnapshotRow] = {}
+    source_by_symbol: dict[str, str] = {}
+    failed_symbols: list[str] = []
+
+    for inst in instruments:
+        symbol = inst.symbol
+        market = inst.market
+        use_pytdx = market in ("SH", "SZ")
+
+        candidate: EodSnapshotRow | None = None
+        source: str | None = None
+
+        # 1) pytdx primary（仅 SH/SZ；breaker 打开时跳过）
+        if use_pytdx and (breaker is None or breaker.allow):
+            try:
+                df = fetch_raw_daily_frame(symbol, trade_date, trade_date)
+                cand = _pytdx_frame_to_candidate(inst, df, trade_date)
+            except Exception as exc:  # noqa: BLE001 - provider 异常按降级处理
+                cand = None
+                if breaker is not None:
+                    breaker.record_failure()
+                logger.warning("pytdx fallback 取数失败 symbol=%s: %s", symbol, exc)
+            else:
+                if cand is not None:
+                    if breaker is not None:
+                        breaker.record_success()
+                    candidate = cand
+                    source = "pytdx"
+                elif breaker is not None:
+                    breaker.record_failure()
+
+        # 2) Eastmoney fqt=0 fallback（SH/SZ 主源未完成 / 异常 / breaker 打开；BJ 直连）
+        if candidate is None:
+            try:
+                async with httpx.AsyncClient(timeout=_EM_REQUEST_TIMEOUT) as client:
+                    recs = await fetch_eastmoney_daily_kline(
+                        client, symbol, market, trade_date, trade_date
+                    )
+                cand = _eastmoney_records_to_candidate(inst, recs, trade_date)
+            except SnapshotProviderError as exc:
+                cand = None
+                logger.warning("Eastmoney fallback 取数失败 symbol=%s: %s", symbol, exc)
+            except Exception as exc:  # noqa: BLE001
+                cand = None
+                logger.warning("Eastmoney fallback 取数异常 symbol=%s: %s", symbol, exc)
+            else:
+                if cand is not None:
+                    candidate = cand
+                    source = "eastmoney_bj" if market == "BJ" else "eastmoney_fallback"
+
+        if candidate is not None and source is not None:
+            rows_by_symbol[symbol] = candidate
+            source_by_symbol[symbol] = source
+        else:
+            failed_symbols.append(symbol)
+
+    return DailyCandidateFetchResult(
+        rows_by_symbol=rows_by_symbol,
+        source_by_symbol=source_by_symbol,
+        failed_symbols=failed_symbols,
+    )
+
+
+def _as_date(value: Any) -> date | None:
+    """把 pytdx/EM 的时间戳或字符串规整为 date（失败返回 None）。"""
+    if hasattr(value, "date"):
+        try:
+            return value.date()
+        except Exception:  # noqa: BLE001
+            return None
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value[:10])
+        except Exception:  # noqa: BLE001
+            return None
+    return None
+
+
+def _build_candidate_row(
+    inst: Instrument,
+    *,
+    open_: Decimal,
+    high: Decimal,
+    low: Decimal,
+    close: Decimal,
+    volume: Decimal,
+    amount: Decimal,
+    trade_date: date,
+) -> EodSnapshotRow:
+    """把一条合法 T 日 OHLCV 规整为统一的 EodSnapshotRow（staging 统一类型）。
+
+    ``updated_at`` 仅作 T 日 canonical marker（trade_date 15:00, Asia/Shanghai），
+    **不反映真实 provider watermark**，且 upsert 永不写入该列；``previous_close``
+    没有 fallback 证据 → None（不伪造）。
+    """
+    return EodSnapshotRow(
+        symbol=inst.symbol,
+        name=inst.name,
+        market=inst.market,
+        updated_at=datetime(
+            trade_date.year, trade_date.month, trade_date.day, 15, 0, 0,
+            tzinfo=ZoneInfo("Asia/Shanghai"),
+        ),
+        open=open_,
+        high=high,
+        low=low,
+        close=close,
+        volume=volume,
+        amount=amount,
+        previous_close=None,
+    )
+
+
+def _pytdx_frame_to_candidate(
+    inst: Instrument, df: Any, trade_date: date
+) -> EodSnapshotRow | None:
+    """pytdx DataFrame 中挑出 exact T 行，校验后转 EodSnapshotRow（fetch-only）。"""
+    if df is None or getattr(df, "empty", True):
+        return None
+    for _, row in df.iterrows():
+        if _as_date(row.get("datetime")) != trade_date:
+            continue
+        try:
+            cand = _build_candidate_row(
+                inst,
+                open_=Decimal(str(row["open"])),
+                high=Decimal(str(row["high"])),
+                low=Decimal(str(row["low"])),
+                close=Decimal(str(row["close"])),
+                volume=Decimal(str(row["volume"])),
+                amount=Decimal(str(row["amount"])),
+                trade_date=trade_date,
+            )
+        except (ValueError, TypeError, KeyError):
+            return None
+        # 校验不通过（如 OHLC 结构异常）→ 视为该 provider 无有效 T 行，交 fallback
+        return cand if is_valid_snapshot_daily_row(cand, trade_date) else None
+    return None
+
+
+def _eastmoney_records_to_candidate(
+    inst: Instrument, recs: Sequence[dict[str, Any]], trade_date: date
+) -> EodSnapshotRow | None:
+    """Eastmoney kline 记录中挑出 exact T 行，校验后转 EodSnapshotRow（fetch-only）。"""
+    if not recs:
+        return None
+    for rec in recs:
+        if rec.get("datetime") != trade_date.isoformat():
+            continue
+        try:
+            cand = _build_candidate_row(
+                inst,
+                open_=Decimal(str(rec["open"])),
+                high=Decimal(str(rec["high"])),
+                low=Decimal(str(rec["low"])),
+                close=Decimal(str(rec["close"])),
+                volume=Decimal(str(rec["volume"])),
+                amount=Decimal(str(rec["amount"])),
+                trade_date=trade_date,
+            )
+        except (ValueError, TypeError, KeyError):
+            return None
+        return cand if is_valid_snapshot_daily_row(cand, trade_date) else None
+    return None
 
 
 async def sync_instruments_from_eod_snapshot(

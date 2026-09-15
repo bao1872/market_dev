@@ -1490,7 +1490,7 @@ class BarsSchedulerService:
             backfill_new_instruments,
             check_snapshot_universe_sanity,
             count_active_a_share_instruments,
-            fill_missing_daily_instruments,
+            fetch_missing_daily_candidates,
             find_missing_daily_instruments,
             is_valid_snapshot_daily_row,
             plan_daily_repair,
@@ -1631,40 +1631,17 @@ class BarsSchedulerService:
                     "EOD snapshot produced 0 valid daily rows after merging"
                 )
 
-            pytdx_count = sum(1 for s in sources.values() if s == "pytdx")
-            em_fallback_count = sum(1 for s in sources.values() if s == "eastmoney_fallback")
-            bj_count = sum(1 for s in sources.values() if s == "eastmoney_bj")
-
-            result.daily_pytdx_rows = pytdx_count
-            result.daily_eastmoney_rows = em_fallback_count + bj_count
-            result.daily_bj_rows = bj_count
-
-            if pytdx_count > 0 and em_fallback_count == 0:
-                result.daily_primary_source = "pytdx"
-            elif pytdx_count > 0 and em_fallback_count > 0:
-                result.daily_primary_source = "mixed"
-            elif pytdx_count == 0 and (em_fallback_count > 0 or bj_count > 0):
-                result.daily_primary_source = "eastmoney"
-            else:
-                result.daily_primary_source = None
-
-            # 7. 一次批量落当日 raw 日线
-            pairs = [
-                (id_by_symbol[symbol], row)
-                for symbol, row in selected.items()
-            ]
-            upserted = await upsert_raw_daily_snapshot(session, trade_date, pairs)
-            result.snapshot_upserted = upserted
-            result.period_counts["d"] = result.period_counts.get("d", 0) + upserted
-            logger.info(
-                "[EOD-SNAPSHOT] 当日 raw 日线 upsert=%d (pytdx=%d, em_fallback=%d, bj=%d)",
-                upserted, pytdx_count, em_fallback_count, bj_count,
-            )
-
-            # 8. 缺口：只对 snapshot 后仍未覆盖的活跃 A 股走历史源
-            breaker = _PytdxBreaker()
-            missing = await find_missing_daily_instruments(session, trade_date)
+            # 7. 内存中识别缺口（不写库、不查库）：active universe 与 selected 的集合差
+            selected_symbols = set(selected.keys())
+            missing = [inst for inst in active if inst.symbol not in selected_symbols]
             result.daily_missing_after_snapshot = len(missing)
+
+            # acquisition 阶段在内存中累积全部可用 staging（snapshot + fallback），
+            # 在此之前 bars_daily(T) 不得因本方法产生任何写入。
+            staged: dict[str, Any] = dict(selected)
+            breaker = _PytdxBreaker()
+
+            # 8. sparse / market-wide gap 归类（仅报告 + 决定 fallback 策略）
             if missing:
                 covered = max(eligible - len(missing), 0)
                 t_gap = DailyGap(
@@ -1678,28 +1655,64 @@ class BarsSchedulerService:
                 plan = plan_daily_repair(t_gap)
                 result.daily_repair_mode = plan.mode
                 if plan.mode == "market_wide_gap":
+                    # 整日空洞：本轮只报告，不触发几千只逐股 fallback storm
                     logger.warning(
                         "[EOD-SNAPSHOT] T=%s 缺口为 market-wide"
                         "（missing=%d/%d ratio=%.3f），本轮只报告，不做逐股回补",
                         trade_date, len(missing), eligible, plan.missing_ratio,
                     )
                 else:
+                    # sparse：fetch-only fallback（取数不写库）
                     result.daily_fallback_attempted = len(missing)
-                    ok = await fill_missing_daily_instruments(
-                        session, missing, trade_date, breaker=breaker
+                    fallback = await fetch_missing_daily_candidates(
+                        missing, trade_date, breaker=breaker
                     )
-                    result.daily_fallback_succeeded = ok
-                    result.period_counts["d"] = result.period_counts.get("d", 0) + ok
+                    result.daily_fallback_succeeded = len(fallback.rows_by_symbol)
+                    if fallback.rows_by_symbol:
+                        staged.update(fallback.rows_by_symbol)
+                        for sym, src in fallback.source_by_symbol.items():
+                            sources[sym] = src
                     logger.info(
-                        "[EOD-SNAPSHOT] 缺口 fallback attempted=%d succeeded=%d",
-                        len(missing), ok,
+                        "[EOD-SNAPSHOT] 缺口 fetch-only fallback attempted=%d "
+                        "succeeded=%d failed=%d",
+                        len(missing), len(fallback.rows_by_symbol),
+                        len(fallback.failed_symbols),
                     )
 
-            # 8.5 真成功判定：回补后仍缺 T 日的数量
+            # 8.5 源可观测性：合并 fallback 后重新统计（snapshot + fallback 统一口径）
+            pytdx_count = sum(1 for s in sources.values() if s == "pytdx")
+            em_fallback_count = sum(1 for s in sources.values() if s == "eastmoney_fallback")
+            bj_count = sum(1 for s in sources.values() if s == "eastmoney_bj")
+            result.daily_pytdx_rows = pytdx_count
+            result.daily_eastmoney_rows = em_fallback_count + bj_count
+            result.daily_bj_rows = bj_count
+            if pytdx_count > 0 and em_fallback_count == 0:
+                result.daily_primary_source = "pytdx"
+            elif pytdx_count > 0 and em_fallback_count > 0:
+                result.daily_primary_source = "mixed"
+            elif pytdx_count == 0 and (em_fallback_count > 0 or bj_count > 0):
+                result.daily_primary_source = "eastmoney"
+            else:
+                result.daily_primary_source = None
+
+            # 9. acquisition 完全结束 → 唯一一次 T 日批量落库（snapshot + fallback 一起）
+            pairs = [
+                (id_by_symbol[symbol], row)
+                for symbol, row in staged.items()
+            ]
+            upserted = await upsert_raw_daily_snapshot(session, trade_date, pairs)
+            result.snapshot_upserted = upserted
+            result.period_counts["d"] = result.period_counts.get("d", 0) + upserted
+            logger.info(
+                "[EOD-SNAPSHOT] 当日 raw 日线 upsert=%d (pytdx=%d, em_fallback=%d, bj=%d)",
+                upserted, pytdx_count, em_fallback_count, bj_count,
+            )
+
+            # 10. 写后 verification（只查 DB 真实结果，不再驱动 provider fetch）
             still_missing = await find_missing_daily_instruments(session, trade_date)
             result.daily_missing_after_fallback = len(still_missing)
 
-            # 9. 新股历史补齐（每只按其 listing_date 或 2023-01-01 起）
+            # 11. 新股历史补齐（必须位于 T 日 canonical persist 之后，T 日不被 historical 覆盖）
             if sync.new_instruments:
                 backfilled = await backfill_new_instruments(
                     session, sync.new_instruments, trade_date, breaker=breaker
@@ -1707,7 +1720,7 @@ class BarsSchedulerService:
                 result.new_instrument_backfilled = backfilled
                 logger.info("[EOD-SNAPSHOT] 新股历史补齐=%d", backfilled)
 
-            # 10. 收集当日 EOD previous_close 证据（真正被选为本轮 canonical row 的 source）
+            # 12. 收集当日 EOD previous_close 证据（仅来自真正 snapshot 选中的 source）
             eod_previous_close_by_symbol = {
                 symbol: row.previous_close
                 for symbol, row in selected.items()
