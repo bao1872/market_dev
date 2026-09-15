@@ -27,7 +27,7 @@ make tunnel
 make backend
 
 # 5. 运行测试
-make test
+make check
 ```
 
 注意：

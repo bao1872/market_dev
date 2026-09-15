@@ -313,8 +313,14 @@ def run_mypy(python_files: list[str]) -> CheckerResult:
     --follow-imports=skip --show-error-codes`), applied to T0's own
     authoritative file list, so untracked junk like `.tmp_test/` is excluded.
     Backend files run from backend/; non-backend files use the backend config
-    explicitly. A missing venv python is a hard FAIL (TOOLING_MISSING).
+    explicitly. A missing venv python is a hard FAIL (TOOLING_MISSING), but only
+    when there is an actual production Python scope to check: docs-only /
+    tests-only / Makefile-only changes must not fail on missing tooling.
     """
+    if not python_files:
+        return CheckerResult(
+            0, "(no production Python files for mypy)", skipped=True
+        )
     backend_py = [p for p in python_files if p.startswith("backend/")]
     non_backend_py = [p for p in python_files if not p.startswith("backend/")]
     venv_py = _resolve_mypy_python()

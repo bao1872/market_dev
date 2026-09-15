@@ -403,3 +403,72 @@ def test_committed_range_base_not_ancestor_head_fails(monkeypatch) -> None:
     _patch_attr(monkeypatch, t0_gate, "_assert_ancestor", lambda base, head: False)
     rc = main(["--base", "BADBASE", "--head", "H"])
     assert rc == 2  # IDENTITY_INVALID, checkers not run
+
+
+# =============================================================================
+# Empty Mypy scope must NOT be blocked by missing backend/.venv
+# =============================================================================
+
+
+def _patch_mypy_venv_missing(monkeypatch, t0_gate_module) -> None:
+    """All resolvers faked, but Mypy's venv python resolves to None."""
+    _patch_resolvers(monkeypatch, t0_gate_module)
+    _patch_attr(monkeypatch, t0_gate_module, "_resolve_mypy_python", lambda: None)
+
+
+def test_docs_only_skips_mypy_without_venv(monkeypatch, capsys) -> None:
+    """A. docs-only 变更 + 无 backend venv → mypy 跳过，不得因 tooling missing 失败。"""
+    import t0_gate
+
+    canned = "M\tdocs/foo.md\n"
+    fake_run, calls = _make_policy_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_mypy_venv_missing(monkeypatch, t0_gate)
+
+    rc = main(["--base", "0582d202", "--head", "1775d0b1"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"docs-only 不得因 Mypy tooling 缺失失败: {out}"
+    assert "TOOLING_MISSING" not in out
+    assert not [c for c in calls if "mypy" in c], "无 production Python scope 时不得调用 mypy"
+
+
+def test_backend_test_only_skips_mypy_without_venv(monkeypatch, capsys) -> None:
+    """B. backend 测试-only 变更 + 无 venv → mypy 跳过（tests 不进 production scope）。"""
+    import t0_gate
+
+    canned = "M\tbackend/tests/foo.py\n"
+    fake_run, calls = _make_policy_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_mypy_venv_missing(monkeypatch, t0_gate)
+
+    rc = main(["--base", "0582d202", "--head", "1775d0b1"])
+    out = capsys.readouterr().out
+    assert rc == 0, f"backend test-only 不得因 Mypy tooling 缺失失败: {out}"
+    assert "TOOLING_MISSING" not in out
+    assert not [c for c in calls if "mypy" in c], "test 文件不进 production Mypy"
+
+
+def test_new_backend_app_without_venv_is_tooling_missing(monkeypatch) -> None:
+    """C. 新增 backend/app 文件 + 无 venv → TOOLING_MISSING HARD FAIL。"""
+    import t0_gate
+
+    canned = "A\tbackend/app/new.py\n"
+    fake_run, _ = _make_policy_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_mypy_venv_missing(monkeypatch, t0_gate)
+
+    rc = main(["--base", "0582d202", "--head", "1775d0b1"])
+    assert rc == 1, "new production file 缺 mypy tooling 必须 HARD FAIL"
+
+
+def test_modified_backend_app_without_venv_is_tooling_missing(monkeypatch) -> None:
+    """D. 修改 backend/app 文件 + 无 venv → TOOLING_MISSING HARD FAIL。"""
+    import t0_gate
+
+    canned = "M\tbackend/app/mod.py\n"
+    fake_run, _ = _make_policy_fake_run(canned)
+    _patch_run(monkeypatch, t0_gate, fake_run)
+    _patch_mypy_venv_missing(monkeypatch, t0_gate)
+
+    rc = main(["--base", "0582d202", "--head", "1775d0b1"])
+    assert rc == 1, "modified production file 缺 mypy tooling 必须 HARD FAIL"
