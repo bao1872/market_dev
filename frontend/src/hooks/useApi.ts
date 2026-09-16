@@ -15,8 +15,6 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { UseQueryOptions } from '@tanstack/react-query'
 import * as api from '../api/endpoints'
 import type {
-  LoginRequest,
-  RegisterRequest,
   TriggerRunRequest,
   WatchlistAddRequest,
   CreateChannelRequest,
@@ -122,64 +120,18 @@ export function isInTradingHours(): boolean {
 // ============================================================
 // ===== Auth hooks =====
 // ============================================================
+//
+// [S3-A] 实现已迁至 ./useAuthApi（唯一 owner），此处以兼容 barrel 重新导出，
+// 保持既有 `import { useMe } from '@/hooks/useApi'` 调用方零改动。
 
-/** 获取当前用户信息（始终刷新） */
-export function useMe() {
-  return useQuery({
-    queryKey: ['me'],
-    queryFn: api.getMe,
-    staleTime: STALE_MESSAGES,
-  })
-}
-
-/** 获取当前用户会员状态（始终刷新） */
-export function useMyMembership() {
-  return useQuery({
-    queryKey: ['me', 'membership'],
-    queryFn: api.getMyMembership,
-    staleTime: STALE_MESSAGES,
-  })
-}
-
-/** 登录变更 */
-export function useLogin() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ email, password }: LoginRequest) => api.login(email, password),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['me'] })
-    },
-  })
-}
-
-/** 注册变更 */
-export function useRegister() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: RegisterRequest) => api.register(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['me'] })
-    },
-  })
-}
-
-/** 续期变更 */
-export function useRenew() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (inviteCode: string) => api.renew(inviteCode),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['me', 'membership'] })
-    },
-  })
-}
-
-/** Token 刷新变更 */
-export function useRefreshToken() {
-  return useMutation({
-    mutationFn: (refreshToken: string) => api.refreshToken(refreshToken),
-  })
-}
+export {
+  useMe,
+  useMyMembership,
+  useLogin,
+  useRegister,
+  useRenew,
+  useRefreshToken,
+} from './useAuthApi'
 
 // ============================================================
 // ===== Instruments hooks =====
