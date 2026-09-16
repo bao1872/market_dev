@@ -11,11 +11,16 @@
 契约（必须由测试锁死）：
   1. MDAS 默认行为完全不变：completed_only=True 仍强制 include_realtime=False
      （既有 15m consumer 不受影响）。
-  2. 只有显式 fresh_intraday_tail=True 且周期为日内时，才允许读实时尾部。
+  2. 只有显式 fresh_intraday_tail=True **且周期为 15m** 时，才允许读实时尾部
+     （`_FRESH_TAIL_TIMEFRAMES = {"15m"}`；1m/1h 合同不变）。
   3. 日/周/月线即使传 fresh_intraday_tail=True 也不生效。
-  4. NodeClusterInputProvider 的 15m 输入必须走 fresh 尾部，并继续用
-     _filter_unfinished_15m_bars 丢弃 forming bar（10:07 不得包含 10:00-10:15）。
+  4. MDAS 的 completed 语义必须在**返回结果本身**成立：forming bar 在 merge /
+     limit / source_bar_hash / actual_count / coverage 之前即被剔除。
+     NodeClusterInputProvider 保留同 owner 的幂等 defensive 复核。
   5. 午休不得被拼成跨午休 bar（13:07 排除 13:00-13:15；13:16 包含）。
+  6. point-in-time 时间视界：「允许 fresh tail」≠「无视调用方请求的截止点」。
+     requested end day < today → 禁止访问 realtime source（无网络 I/O）；
+     同日精确 datetime → 结果裁到 min(floor(now,15m), requested end)。
 
 运行：
     cd backend && PURE_UNIT_TEST=1 python -m pytest tests/test_fresh_15m_volume_source.py -v
@@ -23,7 +28,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock
@@ -122,6 +127,7 @@ async def _run_mdas_get_bars(
     persisted: pd.DataFrame | None = None,
     live: pd.DataFrame | None = None,
     limit: int = 16,
+    end_date: Any = None,
 ) -> tuple[Any, _CacheRecorder, AsyncMock]:
     """在完全离线的环境里执行 MDAS.get_bars 并返回 (result, cache recorder, live fetch mock)。"""
     recorder = _CacheRecorder()
@@ -164,6 +170,7 @@ async def _run_mdas_get_bars(
         include_realtime=include_realtime,
         completed_only=completed_only,
         fresh_intraday_tail=fresh_intraday_tail,
+        end_date=end_date,
         limit=limit,
     )
     return result, recorder, live_mock
@@ -421,15 +428,19 @@ async def test_provider_zero_live_bars_yields_no_today_contribution(
 
 
 # =============================================================================
-# 3) C7 volume 语义：每根 bar 是 interval volume，直接求和（不是累计量）
+# 3) C7 volume：Provider 原样透传，不做 cumulative→delta / 重新累加
 # =============================================================================
 
 
 async def test_provider_passes_interval_volume_through_unchanged(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """C7：15m volume 为「每根 bar 的区间成交量」，Provider 不得做 cumulative→delta
-    或任何累加变换；3 根 bar 的 volume 直接相加即总量。
+    """C7：Provider 对传入的 volume **原样透传**，不执行 cumulative→delta、
+    也不重新累加。
+
+    范围说明：本测试**只**证明 Provider 不做任何 volume 变换，
+    **不能**证明外部行情源（Pytdx）字段一定是 interval volume ——
+    canonical Pytdx 15m source 的 volume 语义沿用既有行情合同，不在本轮范围。
     """
     live = _bars("2026-09-16 09:45", "2026-09-16 10:00")
     node_input, _ = await _run_provider(monkeypatch, now=_cst(10, 7), live_bars=live)
@@ -541,4 +552,162 @@ async def test_c16_negative_control_hash_mismatch_is_detectable() -> None:
 
     assert len(filtered) == 2
     assert upstream_hash != actual_input_hash
+
+
+# =============================================================================
+# 6) C19–C22：point-in-time 时间视界（历史快照不得混入今天的 15m）
+# =============================================================================
+
+_TODAY = date(2026, 9, 16)
+_YESTERDAY = date(2026, 9, 15)
+
+
+async def test_c19_historical_end_date_must_not_touch_realtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C19（本轮最关键）：历史 point-in-time 请求禁止访问 realtime source。
+
+    FeatureSnapshot 用 end_date=trade_date(过去) 请求历史快照，
+    若仍拉取 current Pytdx 15m，就会把今天的成交量混进历史 → future leakage。
+    """
+    result, _, live_mock = await _run_mdas_get_bars(
+        monkeypatch,
+        timeframe="15m",
+        completed_only=True,
+        include_realtime=True,
+        fresh_intraday_tail=True,
+        now=_cst(10, 7),
+        persisted=_bars("2026-09-15 14:45", "2026-09-15 15:00"),
+        live=_bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15"),
+        end_date=_YESTERDAY,
+    )
+
+    # 1) 不做任何实时网络 I/O（而不是「先抓今天再过滤」）
+    live_mock.assert_not_awaited()
+    # 2) 结果全部 <= 请求日
+    assert result.bars.index.max() <= pd.Timestamp("2026-09-15 23:59:59")
+    # 3) 今天的 bar 一根都不存在
+    assert not any(ts.date() == _TODAY for ts in result.bars.index)
+    assert len(result.bars) == 2
+
+
+async def test_c20_same_day_exact_datetime_cutoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C20：同一交易日内的精确 datetime point-in-time 必须被尊重。
+
+    now=10:07、end=today 09:45 → 只允许 09:45（10:00 虽已完成但超出请求视界）。
+    """
+    result, _, live_mock = await _run_mdas_get_bars(
+        monkeypatch,
+        timeframe="15m",
+        completed_only=True,
+        include_realtime=True,
+        fresh_intraday_tail=True,
+        now=_cst(10, 7),
+        persisted=_bars("2026-09-15 15:00"),
+        live=_bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15"),
+        end_date=datetime(2026, 9, 16, 9, 45),
+    )
+    live_mock.assert_awaited()
+
+    idx = list(result.bars.index)
+    assert pd.Timestamp("2026-09-16 09:45") in idx
+    assert pd.Timestamp("2026-09-16 10:00") not in idx, "超出请求视界的已完成 bar 也不得混入"
+    assert pd.Timestamp("2026-09-16 10:15") not in idx
+
+
+async def test_c21_current_open_ended_request_not_regressed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C21：end_date=None 的当前盘中请求不回归（09:45/10:00 保留，forming 排除）。"""
+    result, _, live_mock = await _run_mdas_get_bars(
+        monkeypatch,
+        timeframe="15m",
+        completed_only=True,
+        include_realtime=True,
+        fresh_intraday_tail=True,
+        now=_cst(10, 7),
+        persisted=_bars("2026-09-15 15:00"),
+        live=_bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15"),
+        end_date=None,
+    )
+    live_mock.assert_awaited()
+
+    idx = list(result.bars.index)
+    assert pd.Timestamp("2026-09-16 09:45") in idx
+    assert pd.Timestamp("2026-09-16 10:00") in idx
+    assert pd.Timestamp("2026-09-16 10:15") not in idx
+    assert result.bars.index.max() == pd.Timestamp("2026-09-16 10:00")
+    # persisted(1) + completed live(2)
+    assert len(result.bars) == 3
+
+
+async def test_c22_provider_historical_snapshot_contract_end_to_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C22：跨层合同 —— 真 Provider + **真 MDAS**，历史 end_date 不得补当前 realtime。
+
+    这是 FeatureSnapshot 历史快照路径的等价调用：
+        NodeClusterInputProvider.get_inputs(session, iid, end_date=trade_date)
+    期望：MDAS 不访问 realtime source，最终 Node 15m 输入不含今天的数据。
+    """
+    live_mock = AsyncMock(
+        return_value=_bars("2026-09-16 09:45", "2026-09-16 10:00")
+    )
+
+    class _FakeAdjService:
+        async def get_factor_series(self, *_a: Any, **_k: Any) -> pd.DataFrame:
+            return pd.DataFrame()
+
+        def apply_qfq(self, df: pd.DataFrame, *_a: Any, **_k: Any) -> pd.DataFrame:
+            return df
+
+    monkeypatch.setattr(mdas_mod, "now_shanghai", lambda: _cst(10, 7))
+    monkeypatch.setattr(mdas_mod, "_cache_get", lambda *_a, **_k: None)
+    monkeypatch.setattr(mdas_mod, "_cache_set", lambda *_a, **_k: None)
+    monkeypatch.setattr(mdas_mod, "AdjustmentFactorService", _FakeAdjService)
+    monkeypatch.setattr(
+        mdas_mod,
+        "_fetch_intraday_with_backfill",
+        AsyncMock(
+            return_value=(
+                _big_persisted_bars(4000).loc[: pd.Timestamp("2026-09-15 15:00")],
+                0,
+                False,
+                "ok",
+            )
+        ),
+    )
+    monkeypatch.setattr(mdas_mod, "fetch_15min_bars", live_mock)
+    monkeypatch.setattr(mdas_mod, "_get_listing_date", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        mdas_mod, "_query_daily_bars", AsyncMock(return_value=_big_persisted_bars(250))
+    )
+    monkeypatch.setattr(
+        mdas_mod,
+        "_call_expected_last_completed_daily_bar",
+        AsyncMock(return_value=_YESTERDAY),
+    )
+    monkeypatch.setattr(
+        mdas_mod, "fetch_daily_bars", AsyncMock(return_value=pd.DataFrame())
+    )
+    monkeypatch.setattr(provider_mod, "now_shanghai", lambda: _cst(10, 7))
+    monkeypatch.setattr(
+        NodeClusterInputProvider,
+        "_compute_exhaustion_proofs",
+        AsyncMock(return_value={"1d": (False, "x"), "15m": (False, "x")}),
+    )
+
+    node_input = await NodeClusterInputProvider.get_inputs(
+        None,  # type: ignore[arg-type]
+        uuid.uuid4(),
+        end_date=_YESTERDAY,
+    )
+
+    # 历史 point-in-time：绝不访问 realtime source
+    live_mock.assert_not_awaited()
+    # 最终 Node 输入不含今天的数据（future leakage 被阻断）
+    assert not any(ts.date() == _TODAY for ts in node_input.bars_15m.index)
+    assert node_input.m15_count > 0
 

@@ -840,7 +840,17 @@ def _filter_unfinished_15m_bars(
         return bars
     if now is None:
         return bars.iloc[:-1] if len(bars) > 0 else bars
-    cutoff = pd.Timestamp(now).floor("15min")
+    return _bars_not_after(bars, pd.Timestamp(now).floor("15min"))
+
+
+def _bars_not_after(bars: pd.DataFrame, cutoff: pd.Timestamp) -> pd.DataFrame:
+    """返回 index <= cutoff 的 bars（自动归一化 tz-naive / tz-aware 再比较）。
+
+    bars 索引多为 tz-naive（本地时间），而 cutoff 可能来自 ``now_shanghai()``
+    （tz-aware）；直接比较会触发 tz-naive/tz-aware 冲突，因此先归一化。
+    """
+    if bars is None or bars.empty:
+        return bars
     idx = bars.index
     idx_tz = getattr(idx, "tz", None)
     cutoff_tz = cutoff.tzinfo
@@ -855,6 +865,38 @@ def _filter_unfinished_15m_bars(
     ):
         cutoff = cutoff.tz_convert(idx_tz)
     return bars[bars.index <= cutoff]
+
+
+def _resolve_realtime_horizon(
+    end: date | datetime,
+    now: datetime,
+) -> tuple[bool, pd.Timestamp]:
+    """解析「实时尾部」的可用性与时间视界（point-in-time 合同）。
+
+    [USER-FIX-3 / C] 关键原则：**「允许 fresh tail」≠「无视调用方请求的时间截止点」**。
+
+    四链共享 Provider（NodeClusterInputProvider）同时服务盘中 Monitor 与
+    FeatureSnapshot 历史快照；后者的点是 ``end_date=trade_date``（过去日期）。
+    若仍无条件拉取 current realtime 尾部，会把**今天**的 15m 混进历史快照 ——
+    典型 future leakage，而且不会报错（算法会算出一个看起来合理的 Profile）。
+
+    规则（仅用于 15m fresh-tail 路径）：
+    - ``end`` 的日期 < 今天 → 历史 point-in-time：**禁止访问 realtime source**
+      （不做网络 I/O；历史 replay / snapshot 必须与外部源隔离且可复现）；
+    - 否则允许拉取，但结果必须裁到 ``end``（覆盖同一交易日内的精确 datetime 请求，
+      例如 end=今天 09:45 时不得包含 10:00 的 bar）。
+
+    Args:
+        end: 已归一化的请求结束时间（日内周期为 datetime）
+        now: 当前上海时间
+
+    Returns:
+        (realtime_allowed, horizon)：horizon 为允许进入结果的最大 timestamp。
+    """
+    end_ts = pd.Timestamp(end)
+    if end_ts.date() < now.date():
+        return False, end_ts
+    return True, end_ts
 
 
 # ===== 复权因子哈希（跨调用方一致性校验） =====
@@ -2068,7 +2110,19 @@ class MarketDataAggregationService:
             if not bars_df.empty:
                 last_persisted_bar_time = pd.Timestamp(bars_df.index[-1])
 
-            if include_realtime and _is_trading_hours(now):
+            # [USER-FIX-3 / C] point-in-time 时间视界（四链共享 Provider 的历史快照路径）
+            # 「允许 fresh tail」≠「无视调用方请求的时间截止点」：
+            #   requested end day < today  → 历史 point-in-time，禁止访问 realtime source；
+            #   同日但 end 早于当前        → 允许拉取，但结果必须裁到该视界。
+            _fresh_tail_path = (
+                timeframe == "15m" and completed_only and fresh_intraday_tail
+            )
+            realtime_allowed = True
+            realtime_horizon: pd.Timestamp | None = None
+            if _fresh_tail_path:
+                realtime_allowed, realtime_horizon = _resolve_realtime_horizon(end, now)
+
+            if include_realtime and _is_trading_hours(now) and realtime_allowed:
                 # [P0-4] 冻结行情周期合同：15m/1h 实时尾部使用 Pytdx 原生周期，
                 # 禁止从 1m 聚合（CHANGE-20260724-003）
                 try:
@@ -2095,6 +2149,11 @@ class MarketDataAggregationService:
                     live_raw_empty = live_agg.empty
                     if timeframe == "15m" and completed_only:
                         live_agg = _filter_unfinished_15m_bars(live_agg, now)
+                    if realtime_horizon is not None:
+                        # [USER-FIX-3 / C] 时间视界裁剪：同一交易日内的精确 datetime
+                        # point-in-time 请求（如 end=今天 09:45）不得包含 10:00 的 bar。
+                        # 最终生效上界 = min(floor(now,15m), requested end)。
+                        live_agg = _bars_not_after(live_agg, realtime_horizon)
 
                     if not live_agg.empty:
                         # 按时间戳合并：实时尾部覆盖 DB 同时间戳 bar
