@@ -34,6 +34,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
+from sqlalchemy import func, select
 
 from app.api.market import export_market_stocks, require_admin
 from app.schemas.export import ExportColumn
@@ -108,10 +109,6 @@ def _make_auth(is_admin: bool):
     return _auth
 
 
-async def _dummy_stream(*a, **k):
-    yield b"PK\x03\x04fake-xlsx-bytes"
-
-
 # ---------------------------------------------------------------------------
 # A / I / J：端点授权 + 不调用 get_market_stocks
 # ---------------------------------------------------------------------------
@@ -121,11 +118,24 @@ async def _dummy_stream(*a, **k):
 async def test_export_admin_authorized_and_no_get_market_stocks():
     req = MarketExportRequest(**_body())
     ctx = _make_auth(True)()
+
+    async def _dummy_prepare(db, plan, user_id):
+        d = tempfile.mkdtemp(prefix="panji-export-")
+        final = os.path.join(d, "export.xlsx")
+        with open(final, "wb") as f:
+            f.write(b"PK\x03\x04fake")
+        return mes.PreparedMarketExport(
+            final_path=final, tmp_dir=d, rows=1, columns=1, batches=1, max_batch=1, bytes=4
+        )
+
     with patch(
-        "app.services.market_export_service.stream_market_export", new=_dummy_stream
+        "app.services.market_export_service.prepare_market_export", new=_dummy_prepare
     ), patch("app.api.market.get_market_stocks", new=AsyncMock()) as mock_svc:
         resp = await export_market_stocks(req, None, ctx)
     assert isinstance(resp, StreamingResponse)
+    # 偏好飞行在 StreamingResponse 创建前完成：drain 触发流式清理
+    out = b"".join([c async for c in resp.body_iterator])
+    assert out == b"PK\x03\x04fake"
     assert mock_svc.call_count == 0  # A：生产路径绝不调用 get_market_stocks
 
 
@@ -248,6 +258,40 @@ def test_plan_industry_filter_requires_boards():
 def test_plan_watchlist_scope_normalized():
     plan = _plan(None, scope="watchlist")
     assert plan.scope == "watchlist"
+
+
+def _chip_fp_key():
+    try:
+        from app.services.first_pyramid_flatten import FP_QUERY_FIELD_SPECS
+    except Exception:  # pragma: no cover
+        return None
+    for k, v in FP_QUERY_FIELD_SPECS.items():
+        if v.get("source") == "chip":
+            return k
+    return None
+
+
+def test_plan_chip_fp_implies_snapshot():
+    chip_key = _chip_fp_key()
+    if chip_key is None:
+        pytest.skip("no chip-source fp column in FP_QUERY_FIELD_SPECS")
+    plan = _plan([
+        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
+        {"key": chip_key, "title": "chip", "data_type": "number", "payload_key": None},
+    ])
+    assert plan.needs_chip is True
+    # chip 字段取值依赖 _fetch_chips 的 snap_meta（来自 snapshot），必须加载 snapshot
+    assert plan.needs_snapshot is True
+
+
+def test_plan_chip_status_implies_snapshot():
+    plan = _plan([
+        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
+        {"key": "chip_status", "title": "筹码状态", "data_type": "text", "payload_key": None},
+    ])
+    assert plan.needs_chip is True
+    # chip_status 同样依赖 snap_meta
+    assert plan.needs_snapshot is True
 
 
 # ---------------------------------------------------------------------------
@@ -391,6 +435,106 @@ def test_export_5000_row_writer_stress():
 
 
 # ---------------------------------------------------------------------------
+# 偏好飞行契约（C2）：422/429 必须在 StreamingResponse 创建前确定
+# ---------------------------------------------------------------------------
+
+
+class _FakeStmt:
+    def order_by(self, *a):
+        return self
+
+    def subquery(self):
+        # 返回真实（无 FROM 的）scalar subquery alias，使 select(...).select_from() 合法，
+        # 不触达数据库；db.scalar 由 _FakeDb 直接返回计数。
+        return select(func.count()).subquery()
+
+
+class _FakeCtx:
+    base_stmt = _FakeStmt()
+
+
+class _FakeDb:
+    def __init__(self, count):
+        self._count = count
+
+    async def scalar(self, *a, **k):
+        return self._count
+
+
+@pytest.mark.asyncio
+async def test_preflight_busy_before_db_returns_429():
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    with patch.object(mes, "acquire_lock", new=AsyncMock(return_value=None)), \
+         patch.object(mes, "_assemble_market_query", new=AsyncMock()) as mock_assemble, \
+         patch.object(mes, "_fetch_batch_rows", new=AsyncMock()) as mock_fetch, \
+         patch.object(mes, "MarketXlsxWriter", new=AsyncMock()) as mock_writer_cls, \
+         patch.object(mes, "release_lock", new=AsyncMock()) as mock_release:
+        with pytest.raises(HTTPException) as ei:
+            await mes.prepare_market_export(None, plan, uuid.UUID(int=0))
+    assert ei.value.status_code == 429
+    # 锁竞争失败（429）必须发生在任何重 DB 工作之前
+    assert mock_assemble.call_count == 0
+    assert mock_fetch.call_count == 0
+    assert mock_writer_cls.call_count == 0
+    # 未获得锁，不应执行释放
+    assert mock_release.call_count == 0
+
+
+@pytest.mark.asyncio
+async def test_preflight_over_limit_returns_422_and_releases_lock():
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    holder = "holder-x"
+    db = _FakeDb(mes.MAX_EXPORT_ROWS + 1)
+    with patch.object(mes, "acquire_lock", new=AsyncMock(return_value=holder)) as mock_acquire, \
+         patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())) as mock_assemble, \
+         patch.object(mes, "_fetch_batch_rows", new=AsyncMock()) as mock_fetch, \
+         patch.object(mes, "MarketXlsxWriter", new=AsyncMock()) as mock_writer_cls, \
+         patch.object(mes, "release_lock", new=AsyncMock()) as mock_release:
+        with pytest.raises(HTTPException) as ei:
+            await mes.prepare_market_export(db, plan, uuid.UUID(int=0))
+    assert ei.value.status_code == 422
+    assert mock_acquire.call_count == 1
+    assert mock_assemble.call_count == 1
+    assert mock_fetch.call_count == 0
+    assert mock_writer_cls.call_count == 0
+    # 已获得锁，超限路径必须释放，避免泄漏
+    assert mock_release.call_count == 1
+    assert mock_release.await_args.args == (mes.EXPORT_LOCK_KEY, holder)
+
+
+@pytest.mark.asyncio
+async def test_endpoint_propagates_preflight_422_before_streaming():
+    req = MarketExportRequest(**_body())
+    ctx = _make_auth(True)()
+
+    async def _raise_422(*a, **k):
+        raise HTTPException(status_code=422, detail="over limit")
+
+    with patch(
+        "app.services.market_export_service.prepare_market_export", new=_raise_422
+    ):
+        with pytest.raises(HTTPException) as ei:
+            await export_market_stocks(req, None, ctx)
+    assert ei.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_endpoint_propagates_preflight_429_before_streaming():
+    req = MarketExportRequest(**_body())
+    ctx = _make_auth(True)()
+
+    async def _raise_429(*a, **k):
+        raise HTTPException(status_code=429, detail="busy")
+
+    with patch(
+        "app.services.market_export_service.prepare_market_export", new=_raise_429
+    ):
+        with pytest.raises(HTTPException) as ei:
+            await export_market_stocks(req, None, ctx)
+    assert ei.value.status_code == 429
+
+
+# ---------------------------------------------------------------------------
 # 锁语义（K/L/M/N 基础）：持有者令牌 + 忙时拒绝 + 仅持有者可释放
 # ---------------------------------------------------------------------------
 
@@ -441,17 +585,13 @@ def test_lock_acquire_release_fake_redis():
 
 @pytest.mark.asyncio
 async def test_streaming_cleanup_after_complete():
-    plan = mes.build_export_plan(MarketExportRequest(**_body()))
-    with tempfile.TemporaryDirectory() as d:
-        final = os.path.join(d, "export.xlsx")
-        with open(final, "wb") as f:
-            f.write(b"PK")
-        stats = {"tmp_dir": d}
-        with patch(
-            "app.services.market_export_service._build_export_file",
-            new=AsyncMock(return_value=(final, stats)),
-        ):
-            gen = mes.stream_market_export(None, None, uuid.UUID(int=0), plan)
-            out = b"".join([c async for c in gen])
-        assert out == b"PK"
-        assert not os.path.exists(d)  # P：临时文件已清理
+    d = tempfile.mkdtemp(prefix="panji-export-")
+    final = os.path.join(d, "export.xlsx")
+    with open(final, "wb") as f:
+        f.write(b"PK")
+    prepared = mes.PreparedMarketExport(
+        final_path=final, tmp_dir=d, rows=1, columns=1, batches=1, max_batch=1, bytes=2
+    )
+    out = b"".join([c async for c in mes.stream_prepared_market_export(prepared)])
+    assert out == b"PK"
+    assert not os.path.exists(d)  # P：流式阶段只做清理，与 DB/锁无关

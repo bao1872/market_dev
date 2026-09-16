@@ -107,7 +107,7 @@ async def test_over_limit_returns_422_and_no_batch_fetch(db_session: AsyncSessio
         return []
 
     with pytest.raises(HTTPException) as ei, _Patch(mes, "_fetch_batch_rows", _fake_fetch):
-        await mes._build_export_file(db_session, plan, __import__("uuid").UUID(_USER_ID))
+        await mes.prepare_market_export(db_session, plan, __import__("uuid").UUID(_USER_ID))
     assert ei.value.status_code == 422
     assert calls["batches"] == 0  # 超限即拒，绝不分批 fetch / writer
 
@@ -124,7 +124,7 @@ async def test_5000_rows_bounded_batches_and_complete(db_session: AsyncSession):
             **_body([{"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None}])
         )
     )
-    final_path, stats = await mes._build_export_file(
+    final_path, stats = await mes.prepare_market_export(
         db_session, plan, __import__("uuid").UUID(_USER_ID)
     )
     try:
@@ -219,7 +219,7 @@ async def test_concurrent_export_busy_returns_429(db_session: AsyncSession):
     )
     try:
         with pytest.raises(HTTPException) as ei:
-            await mes._build_export_file(db_session, plan, __import__("uuid").UUID(_USER_ID))
+            await mes.prepare_market_export(db_session, plan, __import__("uuid").UUID(_USER_ID))
         assert ei.value.status_code == 429
     finally:
         await mes.release_lock(mes.EXPORT_LOCK_KEY, "held-by-other")
@@ -238,12 +238,36 @@ async def test_writer_exception_releases_lock(db_session: AsyncSession):
         )
     )
 
-    async def _boom(self, *a, **k):
+    def _boom(self, *a, **k):
         raise RuntimeError("simulated writer failure")
 
     with pytest.raises(RuntimeError), _Patch(mes.MarketXlsxWriter, "build_zip", _boom):
-        await mes._build_export_file(db_session, plan, __import__("uuid").UUID(_USER_ID))
+        await mes.prepare_market_export(db_session, plan, __import__("uuid").UUID(_USER_ID))
     # 锁应已被释放：可再次获取
+    holder = await mes.acquire_lock(mes.EXPORT_LOCK_KEY, 600, "reacquire")
+    assert holder is not None
+    await mes.release_lock(mes.EXPORT_LOCK_KEY, "reacquire")
+
+
+# ---------------------------------------------------------------------------
+# M：query 异常 → 租约释放（锁已提前到 query 之前，此路径必要）
+# ---------------------------------------------------------------------------
+
+
+async def test_query_exception_releases_lock(db_session: AsyncSession):
+    await _seed_instruments(db_session, 5)
+    plan = mes.build_export_plan(
+        MarketExportRequest(
+            **_body([{"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None}])
+        )
+    )
+
+    def _boom_assemble(*a, **k):
+        raise RuntimeError("simulated query failure")
+
+    with pytest.raises(RuntimeError), _Patch(mes, "_assemble_market_query", _boom_assemble):
+        await mes.prepare_market_export(db_session, plan, __import__("uuid").UUID(_USER_ID))
+    # 锁应已被释放：可再次获取（无 temp 泄漏）
     holder = await mes.acquire_lock(mes.EXPORT_LOCK_KEY, 600, "reacquire")
     assert holder is not None
     await mes.release_lock(mes.EXPORT_LOCK_KEY, "reacquire")

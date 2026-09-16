@@ -12,7 +12,12 @@
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { resolveMarketExportPolicy } from '../marketExportGate.ts'
+import {
+  resolveMarketExportPolicy,
+  tryAcquireExportUiLock,
+  releaseExportUiLock,
+  type ExportInFlightRef,
+} from '../marketExportGate.ts'
 
 // ===== C1a-1 非 admin 无入口 =====
 
@@ -57,7 +62,22 @@ test('C1a-4: admin + accessReady + exporting（in-flight）⇒ 按钮可见但�
     true,
     'onExport 仍由 admin 决定是否挂载（in-flight 拦截在 handler 自身守卫内）',
   )
-  assert.equal(p.exportButtonEnabled, false, 'in-flight 必须禁用按钮防双击/多 tab/并发')
+  assert.equal(p.exportButtonEnabled, false, 'in-flight 必须禁用按钮（UI 提示；真正的双触发拦截见 C1a-6）')
+})
+
+// ===== C1a-6 真正的命令式双触发守卫（imperative guard，非 policy boolean）=====
+
+test('C1a-6: 命令式 UI 锁：首次 acquire 成功，立即第二次失败，release 后可再 acquire', () => {
+  const ref: ExportInFlightRef = { current: false }
+  assert.equal(tryAcquireExportUiLock(ref), true, 'first click acquires the lock')
+  assert.equal(
+    tryAcquireExportUiLock(ref),
+    false,
+    'second immediate click is blocked (no double POST while promise pending)',
+  )
+  releaseExportUiLock(ref)
+  assert.equal(tryAcquireExportUiLock(ref), true, 'after release a new export can start')
+  assert.equal(ref.current, true)
 })
 
 // ===== C1a-5 exporting 只影响可用态 =====

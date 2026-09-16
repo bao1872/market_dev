@@ -61,7 +61,11 @@ import {
   resolveMarketTableState,
   selectBatchMetaItems,
 } from './marketBatchMetaGate'
-import { resolveMarketExportPolicy } from './marketExportGate'
+import {
+  resolveMarketExportPolicy,
+  tryAcquireExportUiLock,
+  releaseExportUiLock,
+} from './marketExportGate'
 import styles from './MarketWorkspace.module.scss'
 
 // [S2-A] published-runs / preset 使用的 legacy strategy key。
@@ -210,9 +214,8 @@ export default function MarketWorkspacePage() {
   // 必须导出当前完整筛选结果（非当前页）；通过 ExportContext 收集可见列与查询状态。
   const handleExport = useCallback(
     async (ctx: ExportContext) => {
-      // [S2-A-C1] 防止并发导出 / 双击：已在导出中则忽略本次请求
-      if (exportingRef.current) return
-      exportingRef.current = true
+      // [S2-A-C1] 真正的命令式双触发守卫：已在导出中则忽略本次请求（与后端全局租约纵深防御）
+      if (!tryAcquireExportUiLock(exportingRef)) return
       setExporting(true)
       try {
         const visibleColumns: MarketExportColumn[] = ctx.visibleColumns.map((col) => ({
@@ -267,7 +270,7 @@ export default function MarketWorkspacePage() {
           toast.show('导出失败', e.message || '请稍后重试')
         }
       } finally {
-        exportingRef.current = false
+        releaseExportUiLock(exportingRef)
         setExporting(false)
       }
     },

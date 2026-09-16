@@ -77,6 +77,22 @@ class MarketExportPlan:
     needs_chip: bool = False
 
 
+@dataclass(frozen=True)
+class PreparedMarketExport:
+    """导出准备产物：已落盘的临时 XLSX 文件 + 元数据。
+
+    流式阶段（stream_prepared_market_export）只读取此对象，不再触达 DB / 锁 / count。
+    """
+
+    final_path: str
+    tmp_dir: str
+    rows: int
+    columns: int
+    batches: int
+    max_batch: int
+    bytes: int
+
+
 def build_export_plan(request: MarketExportRequest) -> MarketExportPlan:
     """[S2-A-C1] 请求 fail-fast 校验 + source planning。
 
@@ -123,7 +139,9 @@ def build_export_plan(request: MarketExportRequest) -> MarketExportPlan:
         stock_name_op=request.stock_name_op,
         columns=request.visible_columns,
         needs_price=needs_price,
-        needs_snapshot=needs_snapshot,
+        # chip source 依赖 snapshot metadata（_fetch_chips 用 snap_meta 取 trade_date/source_run_id），
+        # 因此 chip 导出必须同时加载 snapshot（correctness > 微优化）。
+        needs_snapshot=needs_snapshot or needs_chip,
         needs_boards=needs_boards,
         needs_chip=needs_chip,
     )
@@ -307,32 +325,36 @@ async def _fetch_batch_rows(
     return out
 
 
-async def _build_export_file(
+async def prepare_market_export(
     db: AsyncSession, plan: MarketExportPlan, user_id: UUID
-) -> tuple[str, dict]:
-    """执行导出：filtered count → 分批读取 → 低内存 XLSX。返回 (final_path, stats)。
+) -> PreparedMarketExport:
+    """[S2-A-C1] 导出准备阶段：全局租约 → 组装查询 → filtered count → 有界分批 → 低内存 XLSX。
 
-    调用方负责在流送结束后清理 tmp_dir。锁在生成完成后即释放（heavy-work 结束）。
+    硬合同：422（超限）/ 429（忙）/ query 异常 / writer 异常 **全部发生在此函数内**，
+    即 `StreamingResponse` 创建之前。流式阶段（stream_prepared_market_export）只负责
+    读已落盘文件并清理临时目录，不得访问 DB / 取锁 / 做 count / 抛业务 HTTPException。
     """
-    ctx = await _assemble_market_query(
-        db, user_id, plan.scope, plan.query, plan.state, plan.industry,
-        plan.concept, plan.fp_filter, plan.fp_sort, plan.sort,
-    )
-    sn_cond = _stock_name_condition(plan.stock_name_op, plan.stock_name)
-    if sn_cond is not None:
-        ctx.base_stmt = ctx.base_stmt.where(sn_cond)
-
-    # filtered COUNT 必须先于任何重 fetch（与导出语义同源，但先于批次）
-    total = await db.scalar(select(func.count()).select_from(ctx.base_stmt.subquery())) or 0
-    if total > MAX_EXPORT_ROWS:
-        raise _over_limit_error()
-
+    # 1) 全局导出租约必须先于任何重 DB 工作（从 count 起即受 lease 保护）
     holder = await acquire_lock(EXPORT_LOCK_KEY, EXPORT_LOCK_TTL, generate_holder())
     if holder is None:
         raise _busy_error()
 
     tmp_dir = tempfile.mkdtemp(prefix="panji-export-")
     try:
+        ctx = await _assemble_market_query(
+            db, user_id, plan.scope, plan.query, plan.state, plan.industry,
+            plan.concept, plan.fp_filter, plan.fp_sort, plan.sort,
+        )
+        sn_cond = _stock_name_condition(plan.stock_name_op, plan.stock_name)
+        if sn_cond is not None:
+            ctx.base_stmt = ctx.base_stmt.where(sn_cond)
+
+        # filtered COUNT（去除与导出无关的 ORDER BY；筛选条件保留）
+        count_source = ctx.base_stmt.order_by(None).subquery()
+        total = await db.scalar(select(func.count()).select_from(count_source)) or 0
+        if total > MAX_EXPORT_ROWS:
+            raise _over_limit_error()
+
         writer = MarketXlsxWriter(plan.columns, tmp_dir)
         batches = (total + EXPORT_BATCH_SIZE - 1) // EXPORT_BATCH_SIZE if total else 0
         max_batch = 0
@@ -348,18 +370,38 @@ async def _build_export_file(
         await asyncio.to_thread(writer.build_zip, final_path)
         size = os.path.getsize(final_path)
         await release_lock(EXPORT_LOCK_KEY, holder)
-        return final_path, {
-            "rows": total,
-            "columns": len(plan.columns),
-            "batches": batches,
-            "max_batch": max_batch,
-            "bytes": size,
-            "tmp_dir": tmp_dir,
-        }
+        return PreparedMarketExport(
+            final_path=final_path,
+            tmp_dir=tmp_dir,
+            rows=total,
+            columns=len(plan.columns),
+            batches=batches,
+            max_batch=max_batch,
+            bytes=size,
+        )
     except BaseException:
         shutil.rmtree(tmp_dir, ignore_errors=True)
         await release_lock(EXPORT_LOCK_KEY, holder)
         raise
+
+
+async def stream_prepared_market_export(
+    prepared: PreparedMarketExport,
+) -> AsyncIterator[bytes]:
+    """[S2-A-C1] 仅负责把已落盘 XLSX 流式送出并清理临时目录。
+
+    硬合同：不得访问 DB / 不得获取 Redis lock / 不得做 filtered count /
+    不得抛业务 HTTPException(422/429)。只允许 open + 分块 read + yield + finally cleanup。
+    """
+    try:
+        with open(prepared.final_path, "rb") as f:
+            while True:
+                chunk = await asyncio.to_thread(f.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+    finally:
+        shutil.rmtree(prepared.tmp_dir, ignore_errors=True)
 
 
 def _over_limit_error():
@@ -375,22 +417,3 @@ def _busy_error():
     from fastapi import HTTPException
 
     return HTTPException(status_code=429, detail="导出任务进行中，请稍后再试")
-
-
-async def stream_market_export(
-    db: AsyncSession,
-    request: MarketExportRequest,
-    user_id: UUID,
-    plan: MarketExportPlan,
-) -> AsyncIterator[bytes]:
-    """[S2-A-C1] 导出流式响应生成器（admin-only 已由端点守卫）。"""
-    final_path, stats = await _build_export_file(db, plan, user_id)
-    try:
-        with open(final_path, "rb") as f:
-            while True:
-                chunk = f.read(65536)
-                if not chunk:
-                    break
-                yield chunk
-    finally:
-        shutil.rmtree(stats["tmp_dir"], ignore_errors=True)

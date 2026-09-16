@@ -323,16 +323,22 @@ async def export_market_stocks(
     """
     from app.services.market_export_service import (
         build_export_plan,
-        stream_market_export,
+        prepare_market_export,
+        stream_prepared_market_export,
     )
 
-    # 先校验请求，使 422 以正常响应返回（而非流式中断）
+    # 先校验请求，使 422（请求层）以正常响应返回
     try:
         plan = build_export_plan(request)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail={"message": str(exc)}) from exc
+
+    # 偏好飞行：租约竞争 / 超限 / query / writer 异常全部在此抛出（早于 StreamingResponse 创建），
+    # 客户端收到的是正常的 422 / 429，而非 200 + 中断的 XLSX 流。
+    prepared = await prepare_market_export(db, plan, UUID(ctx.user_id))
+
     return StreamingResponse(
-        stream_market_export(db, request, UUID(ctx.user_id), plan),
+        stream_prepared_market_export(prepared),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": 'attachment; filename="market_export.xlsx"'},
     )

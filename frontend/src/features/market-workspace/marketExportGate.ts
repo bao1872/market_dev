@@ -38,3 +38,26 @@ export function resolveMarketExportPolicy(
     exportButtonEnabled: canExport && !input.exporting,
   }
 }
+
+// ---------------------------------------------------------------------------
+// [S2-A-C1] 真正的 imperative 双重触发守卫（double-fire guard）。
+//
+// policy（resolveMarketExportPolicy）只决定按钮可见性/可用性；真正防止
+// 「双击 / 多 tab / 并发」重复 POST 的是下面这组命令式锁。它持有在
+// useRef<boolean> 上（与 React 渲染解耦），在 handleExport 调用最外层 acquire，
+// finally 中 release。这与后端的全局导出租约（并发=1）互为纵深防御。
+// ---------------------------------------------------------------------------
+
+export interface ExportInFlightRef {
+  current: boolean
+}
+
+export function tryAcquireExportUiLock(ref: ExportInFlightRef): boolean {
+  if (ref.current) return false
+  ref.current = true
+  return true
+}
+
+export function releaseExportUiLock(ref: ExportInFlightRef): void {
+  ref.current = false
+}
