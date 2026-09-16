@@ -20,7 +20,7 @@ DB/端点集成契约（B/C/G/...）在 tests/test_market_export_integration.py�
 仅 PANJI_REMOTE_VERIFY_DB_TEST=1（远程验证库）下运行。
 
 注意：不使用 app.main ASGI（其 lifespan 在 PURE 模式下会触发 DB 查询且 session 为 None），
-改为直接调用端点函数 export_market_stocks 与依赖 require_admin。
+改为直接调用端点函数 export_market_stocks 与授权依赖 require_market_export_access。
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
 from sqlalchemy import literal, select
 
-from app.api.market import export_market_stocks, require_admin
+from app.api.market import export_market_stocks, require_market_export_access
 from app.models.instrument import Instrument
 from app.schemas.market_stocks import MarketExportRequest
 from app.services import market_export_service as mes
@@ -99,8 +99,33 @@ def _make_auth(is_admin: bool):
     return _auth
 
 
+def _cap_ctx(*capabilities: str) -> AccessContext:
+    """构造带显式 capability 的普通用户 ctx（capability 判权矩阵用）。"""
+    return AccessContext(
+        user_id=_USER_ID,
+        account_status="active",
+        roles=["member"],
+        is_admin=False,
+        is_member=True,
+        subscription_active=True,
+        plan_code="observe_20",
+        plan_display_name="观察版",
+        expires_at=None,
+        features=[],
+        limits={},
+        capabilities={
+            cap: {"active": True, "expires_at": None, "watchlist_limit": None}
+            for cap in capabilities
+        },
+        default_route="/market",
+        active_capability_keys=list(capabilities),
+        capability_source="user_capabilities",
+        diagnostics=[],
+    )
+
+
 # ---------------------------------------------------------------------------
-# A / I / J：端点授权 + 不调用 get_market_stocks
+# A / I / J / K：端点授权（C1b capability 判权）+ 不调用 get_market_stocks
 # ---------------------------------------------------------------------------
 
 
@@ -130,17 +155,88 @@ async def test_export_admin_authorized_and_no_get_market_stocks():
 
 
 @pytest.mark.asyncio
-async def test_export_non_admin_403_fuse():
-    ctx = _make_auth(False)()
-    with pytest.raises(HTTPException) as ei:
-        await require_admin(ctx)
-    assert ei.value.status_code == 403  # I：C1a 熔断，普通用户禁止
+async def test_export_non_admin_without_capability_403():
+    """I（C1b 恢复）：无任何 capability 的普通用户 → 403。
+
+    C1a 的 admin-only 临时熔断已解除，改由 capability 判权；无权限仍然拒绝
+    （恢复授权 ≠ 放开给所有人）。
+    """
+    ctx = _make_auth(False)()  # capabilities={}
+    for scope in ("market", "watchlist"):
+        with pytest.raises(HTTPException) as ei:
+            await require_market_export_access(
+                request=MarketExportRequest(**_body(scope=scope)), ctx=ctx
+            )
+        assert ei.value.status_code == 403
 
 
 @pytest.mark.asyncio
-async def test_export_admin_passes_require_admin():
+async def test_export_admin_passes_any_scope():
+    """J（Case 1）：admin 豁免，无需任何 capability，market / watchlist 均放行。"""
     ctx = _make_auth(True)()
-    assert await require_admin(ctx) is ctx  # J
+    for scope in ("market", "watchlist"):
+        assert (
+            await require_market_export_access(
+                request=MarketExportRequest(**_body(scope=scope)), ctx=ctx
+            )
+            is ctx
+        )
+
+
+@pytest.mark.asyncio
+async def test_export_capability_scope_matrix():
+    """Case 2/3：capability 与 scope 严格对应（复用 _authorize_market_scope 唯一 SSOT）。
+
+    - market_data → scope=market 放行；scope=watchlist → 403（无 self_selection）
+    - self_selection → scope=watchlist 放行；scope=market → 403（严禁隐式获得全市场）
+    """
+    market_ctx = _cap_ctx("market_data")
+    self_ctx = _cap_ctx("self_selection")
+
+    assert (
+        await require_market_export_access(
+            request=MarketExportRequest(**_body(scope="market")), ctx=market_ctx
+        )
+        is market_ctx
+    )
+    with pytest.raises(HTTPException) as ei:
+        await require_market_export_access(
+            request=MarketExportRequest(**_body(scope="watchlist")), ctx=market_ctx
+        )
+    assert ei.value.status_code == 403
+
+    assert (
+        await require_market_export_access(
+            request=MarketExportRequest(**_body(scope="watchlist")), ctx=self_ctx
+        )
+        is self_ctx
+    )
+    with pytest.raises(HTTPException) as ei:
+        await require_market_export_access(
+            request=MarketExportRequest(**_body(scope="market")), ctx=self_ctx
+        )
+    assert ei.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_export_authorization_uses_body_scope_ssot():
+    """P0-4 SSOT：授权的唯一输入是 request body.scope（与查询执行同源）。
+
+    同一个 ctx 仅改 body.scope 即可让结论翻转（market_data：market 放行 / watchlist 403），
+    证明授权确实由 body.scope 决定，不会被请求中任何其它 scope 来源改写。
+    """
+    ctx = _cap_ctx("market_data")
+    assert (
+        await require_market_export_access(
+            request=MarketExportRequest(**_body(scope="market")), ctx=ctx
+        )
+        is ctx
+    )
+    with pytest.raises(HTTPException) as ei:
+        await require_market_export_access(
+            request=MarketExportRequest(**_body(scope="watchlist")), ctx=ctx
+        )
+    assert ei.value.status_code == 403
 
 
 # ---------------------------------------------------------------------------

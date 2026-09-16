@@ -152,7 +152,6 @@ from app.schemas.market_stocks import (  # noqa: E402
 )
 from app.services.access_control_service import (  # noqa: E402
     AccessContext,
-    require_admin,
     require_authenticated,
 )
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
@@ -217,6 +216,30 @@ async def require_market_stocks_access(
     在 get_market_stocks 执行前完成授权。admin 豁免。
     """
     return _authorize_market_scope(ctx, scope)
+
+
+async def require_market_export_access(
+    request: MarketExportRequest,
+    ctx: AccessContext = Depends(require_authenticated),
+) -> AccessContext:
+    """[C1b 权限恢复] /market/export 的 FastAPI 授权依赖（scope 来自 request body，与执行同源）。
+
+    背景：`74a498f4`（S2-A-C1）为导出资源路径做临时 admin-only 熔断，把 /market/export
+    改为 `Depends(require_admin)` 并删除本依赖，导致原本合法的用户（self_selection /
+    market_data，且不依赖任何 published run）丢失导出能力。C1b 恢复 capability 授权，
+    复用唯一授权 SSOT `_authorize_market_scope`，不新增第二套授权规则：
+
+    - admin：豁免，一律放行；
+    - request.scope=market（body）：需 market_data；
+    - request.scope=watchlist（body）：需 self_selection（universe 由 market_stocks_service
+      以「current user + active UserWatchlistItem」强制为该用户自己的自选集合，
+      不存在跨用户数据泄漏）。
+
+    必须使用 request.scope（body）授权，禁止用 query scope 授权 body scope：
+    authorization 与 execution 必须同源（P0-4 SSOT），否则 `?scope=watchlist`
+    这类 query 改写会篡改授权结论。
+    """
+    return _authorize_market_scope(ctx, request.scope)
 
 
 @router.get("/stocks", response_model=MarketStocksResponse)
@@ -300,8 +323,9 @@ async def list_market_stocks(
 
 
 # ===== [S2-A-C1] 行情 Excel 导出（安全资源路径）=====
-# 临时 admin-only 熔断（C1a）：导出仅管理员可触发。
-# C1b 验证通过后按产品规则恢复：market_data→market / self_selection→watchlist / admin→all。
+# [C1b] 授权已恢复为 capability 感知（C1a 的 admin-only 临时熔断解除）：
+#   admin → all；body.scope=market → market_data；body.scope=watchlist → self_selection；
+#   无权限 → 403。唯一授权 SSOT 为 _authorize_market_scope（见 require_market_export_access）。
 # 资源路径不再把分页重型 read model 当全量导出器：与 /market/stocks 共享同一套
 # 筛选/排序/scope/canonical CoreRun 语义（_assemble_market_query 单一真源），
 # 但走独立轻量分批读取 + 低内存增量 XLSX writer。DB 每次只取有界 batch，
@@ -313,15 +337,16 @@ async def list_market_stocks(
 async def export_market_stocks(
     request: MarketExportRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_admin),
+    ctx: AccessContext = Depends(require_market_export_access),
 ) -> StreamingResponse:
-    """安全导出行情筛选结果为 .xlsx（admin-only 临时熔断）。
+    """安全导出行情筛选结果为 .xlsx（capability 感知授权，C1b 恢复）。
 
     导出字段由服务端固定为「股票名称 + 股票代码」两列（见 MARKET_EXPORT_COLUMNS），
     客户端不指定列；筛选/排序语义与 /market/stocks 同源，决定导出哪些股票与顺序。
     build_export_plan 只做 query 归一化（不含列白名单），prepare_market_export 完成
-    租约竞争 / filtered count / 有界分批 / 低内存 XLSX（CPU 工作脱离 event loop，
-    全局导出租约并发=1，忙时 429），其异常均早于 StreamingResponse 创建。
+    租约竞争 / 单条有界流式 SELECT（LIMIT MAX_EXPORT_ROWS+1，无 count / 无 OFFSET）/
+    低内存 XLSX（CPU 工作脱离 event loop，全局导出租约并发=1，忙时 429），
+    其异常均早于 StreamingResponse 创建。
     """
     from app.services.market_export_service import (
         build_export_plan,
