@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from datetime import date as dt_date
 
-from fastapi import APIRouter, Depends, Query, Response
+from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -151,6 +152,7 @@ from app.schemas.market_stocks import (  # noqa: E402
 )
 from app.services.access_control_service import (  # noqa: E402
     AccessContext,
+    require_admin,
     require_authenticated,
 )
 from app.services.market_stocks_service import get_market_stocks  # noqa: E402
@@ -215,19 +217,6 @@ async def require_market_stocks_access(
     在 get_market_stocks 执行前完成授权。admin 豁免。
     """
     return _authorize_market_scope(ctx, scope)
-
-
-async def require_market_export_access(
-    request: MarketExportRequest,
-    ctx: AccessContext = Depends(require_authenticated),
-) -> AccessContext:
-    """[P0 安全修复] /market/export 的 FastAPI 授权依赖（scope 来自 request body，与查询执行同源）。
-
-    必须使用与 get_market_stocks 实际执行完全相同的 request.scope 做授权，
-    禁止用 query scope 授权 body scope（避免 authorization 与 execution 双 SSOT）。
-    admin 豁免。
-    """
-    return _authorize_market_scope(ctx, request.scope)
 
 
 @router.get("/stocks", response_model=MarketStocksResponse)
@@ -310,98 +299,42 @@ async def list_market_stocks(
         raise HTTPException(status_code=422, detail=detail) from exc
 
 
-# ===== [CHANGE-20260904] 行情 Excel 导出（复用 /market/stocks 同一查询语义与 canonical 行源）=====
-# 旧导出走 /strategy-runs/{run_id}/results/export，把 fp_* 筛选转成 metric_filters 后
-# 经 StrategyVersion.manifest.outputs.filterable 白名单校验 → fp_* 不在白名单 → 422。
-# 新端点直接复用 get_market_stocks（/market/stocks 的查询 owner）：fp_filter/fp_sort 由服务内部
-# 按 FP_QUERY_FIELD_SPECS 校验（与列表页同源），fp_* 可见列从 MarketStockRow.first_pyramid 读取。
-# 不新增第二套 fp 解析，不写 fp_* 到 DSA strategy manifest。
+# ===== [S2-A-C1] 行情 Excel 导出（安全资源路径）=====
+# 临时 admin-only 熔断（C1a）：导出仅管理员可触发。
+# C1b 验证通过后按产品规则恢复：market_data→market / self_selection→watchlist / admin→all。
+# 资源路径不再把分页重型 read model 当全量导出器：与 /market/stocks 共享同一套
+# 筛选/排序/scope/canonical CoreRun 语义（_assemble_market_query 单一真源），
+# 但走独立轻量分批读取 + 低内存增量 XLSX writer。DB 每次只取有界 batch，
+# CPU/文件工作脱离 event loop，且持有一个全局导出租约（并发=1，忙时 429）。
+# 严禁回归：get_market_stocks(page_size=MAX_EXPORT_ROWS + 1)。
 
 
 @router.post("/export")
 async def export_market_stocks(
     request: MarketExportRequest,
     db: AsyncSession = Depends(get_db),
-    ctx: AccessContext = Depends(require_market_export_access),
-) -> Response:
-    """导出行情筛选结果为 .xlsx（复用 /market/stocks 同一查询语义）。
+    ctx: AccessContext = Depends(require_admin),
+) -> StreamingResponse:
+    """安全导出行情筛选结果为 .xlsx（admin-only 临时熔断）。
 
-    与 GET /market/stocks 共享 get_market_stocks 查询 owner：
-    - fp_filter / fp_sort：第一金字塔字段筛选/排序（FP_QUERY_FIELD_SPECS 白名单）
-    - scope / keyword / industry / concept / state / stock_name：与列表页一致
-    - sort：基础排序字段:方向
-    导出全量筛选结果（非当前页），上限 MAX_EXPORT_ROWS。
-    fp_* 可见列从 canonical first_pyramid 读取；基础列从行字段读取。
-
-    Args:
-        request: 导出请求（含筛选/排序/可见列）
-        db: 异步会话
-        ctx: 权限上下文
-
-    Returns:
-        .xlsx 文件流
+    先 fail-fast 校验请求（列白名单/上限），再返回流式响应；
+    实际 DB 分批读取与 XLSX 生成在 generator 内完成，CPU 工作脱离 event loop，
+    并持有一个全局导出租约（并发=1，忙时 429）。
     """
-    from urllib.parse import quote
-
-    from app.services.excel_export_service import (
-        MAX_EXPORT_ROWS,
-        extract_market_row_data,
-        generate_xlsx,
+    from app.services.market_export_service import (
+        build_export_plan,
+        stream_market_export,
     )
-    from app.services.first_pyramid_flatten import FpFilterValidationError
 
-    normalized_scope = "watchlist" if request.scope == "watchlist" else "market"
+    # 先校验请求，使 422 以正常响应返回（而非流式中断）
     try:
-        result = await get_market_stocks(
-            db=db,
-            user_id=UUID(ctx.user_id),
-            scope=normalized_scope,
-            query=request.keyword,
-            page=1,
-            page_size=MAX_EXPORT_ROWS + 1,
-            sort=request.sort,
-            state=request.state,
-            industry=request.industry,
-            concept=request.concept,
-            fp_filter=request.fp_filter,
-            fp_sort=request.fp_sort,
-        )
+        plan = build_export_plan(request)
     except ValueError as exc:
-        # fp_filter/fp_sort 校验失败（FP_QUERY_FIELD_SPECS）→ 422，与列表页同源
-        if isinstance(exc, FpFilterValidationError):
-            detail = exc.to_detail()
-        else:
-            detail = {"message": str(exc)}
-        raise HTTPException(status_code=422, detail=detail) from exc
-
-    items = result.items
-    # 上限校验（与旧 export 一致）：超过 MAX_EXPORT_ROWS 拒绝
-    if len(items) > MAX_EXPORT_ROWS:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                f"导出行数 {len(items)} 超过上限 {MAX_EXPORT_ROWS}，"
-                "请缩小筛选范围后再导出"
-            ),
-        )
-
-    data_rows = [
-        extract_market_row_data(row, request.visible_columns) for row in items
-    ]
-    xlsx_bytes = generate_xlsx(request.visible_columns, data_rows)
-
-    filename = "盘迹_行情_筛选结果.xlsx"
-    quoted_filename = quote(filename, safe="")
-    return Response(
-        content=xlsx_bytes,
+        raise HTTPException(status_code=422, detail={"message": str(exc)}) from exc
+    return StreamingResponse(
+        stream_market_export(db, request, UUID(ctx.user_id), plan),
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={
-            "Content-Disposition": f"attachment; filename*=UTF-8''{quoted_filename}",
-            "Content-Length": str(len(xlsx_bytes)),
-            "X-Source-Total": str(result.total),
-            "X-Filtered-Total": str(result.total),
-            "X-Export-Rows": str(len(data_rows)),
-        },
+        headers={"Content-Disposition": 'attachment; filename="market_export.xlsx"'},
     )
 
 

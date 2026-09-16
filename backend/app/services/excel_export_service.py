@@ -9,12 +9,60 @@ CHANGE-20260713-010: 列表导出 Excel
 from __future__ import annotations
 
 import io
+import os
 import zipfile
 from typing import Any
 
 from app.schemas.export import ExportColumn
+from app.services.first_pyramid_flatten import FP_QUERY_FIELD_SPECS
 
 MAX_EXPORT_ROWS = 10000
+
+# [S2-A-C1] 导出列白名单（服务决定 source，不接受客户端 payload_key 控制读取路径）
+_BASE_EXPORT_KEYS = {
+    "symbol", "name", "market", "is_watchlisted",
+    "latest_price", "change_pct",
+    "industry", "concepts",
+    "dsa_state", "structure_state",
+    "chip_status", "stock",
+}
+
+MAX_EXPORT_COLUMNS = 256
+MAX_EXPORT_TITLE_LEN = 256
+
+
+def validate_export_columns(columns: list[ExportColumn]) -> None:
+    """[S2-A-C1] 执行前 fail-fast 校验客户端 visible_columns（不可信输入）。
+
+    校验：非空、列数上限、key 不重复、禁止 action/select/注入风格 key、
+    仅允许白名单基础列或 fp_ 字段、data_type 合法、title 长度上限。
+    payload_key 不被信任来控制服务器数据读取路径。
+    """
+    if not columns:
+        raise ValueError("visible_columns 不能为空")
+    if len(columns) > MAX_EXPORT_COLUMNS:
+        raise ValueError(f"visible_columns 列数超过上限 {MAX_EXPORT_COLUMNS}")
+    seen: set[str] = set()
+    for col in columns:
+        key = col.key
+        if not isinstance(key, str) or not key:
+            raise ValueError("column key 非法")
+        if key in seen:
+            raise ValueError(f"重复列 key: {key}")
+        seen.add(key)
+        # 禁止 action/select 类危险列；禁止 SQL 注入风格 key
+        if key in ("action", "select") or key.startswith("action") or ";" in key or " " in key:
+            raise ValueError(f"禁止的列 key: {key}")
+        # 白名单：基础列 或 fp_ 字段
+        if key not in _BASE_EXPORT_KEYS and not key.startswith("fp_"):
+            raise ValueError(f"未知列 key: {key}")
+        if key.startswith("fp_") and key not in FP_QUERY_FIELD_SPECS:
+            raise ValueError(f"未知 fp 列: {key}")
+        if col.data_type not in ("text", "number", "percent"):
+            raise ValueError(f"非法 data_type: {col.data_type}")
+        title = col.title
+        if title is None or len(str(title)) > MAX_EXPORT_TITLE_LEN:
+            raise ValueError("title 长度超限")
 
 
 def _escape_xml(text: str) -> str:
@@ -330,3 +378,126 @@ def extract_market_row_data(market_row: Any, columns: list[ExportColumn]) -> dic
                 value = ", ".join(str(v) for v in value)
             row_data[k] = value
     return row_data
+
+
+def _build_writer_content_types() -> str:
+    """写入器专用 [Content_Types].xml（使用 inlineStr，不引用 sharedStrings）。"""
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+        '<Default Extension="xml" ContentType="application/xml"/>'
+        '<Override PartName="/xl/workbook.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+        '<Override PartName="/xl/worksheets/sheet1.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+        '<Override PartName="/xl/styles.xml" '
+        'ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>'
+        "</Types>"
+    )
+
+
+def _build_writer_workbook_xml() -> str:
+    """写入器专用 xl/workbook.xml（sheet 名称贴合导出语义）。"""
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" '
+        'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">'
+        '<sheets><sheet name="行情导出" sheetId="1" r:id="rId1"/></sheets>'
+        "</workbook>"
+    )
+
+
+def _build_writer_workbook_rels() -> str:
+    """写入器专用 xl/_rels/workbook.xml.rels（仅 worksheet + styles，无 sharedStrings）。"""
+    return (
+        '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+        '<Relationship Id="rId1" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" '
+        'Target="worksheets/sheet1.xml"/>'
+        '<Relationship Id="rId2" '
+        'Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" '
+        'Target="styles.xml"/>'
+        "</Relationships>"
+    )
+
+
+class MarketXlsxWriter:
+    """[S2-A-C1] 低内存增量 XLSX 写入器（market export 专用）。
+
+    合同（硬约束）：
+    - 不持有完整 data_rows 列表；
+    - 不持有整张 worksheet XML string；
+    - 不持有 BytesIO 最终文件；
+    - 每行以 inlineStr 增量追加到临时 worksheet 文件（避免 sharedStrings 全量驻留）；
+    - 最终 zip 写入临时 xlsx 文件，由调用方以 StreamingResponse 分块发送；
+    - 第一行为列标题（表头）。
+    """
+
+    def __init__(self, columns: list[ExportColumn], tmp_dir: str) -> None:
+        self.columns = columns
+        self._row_index = 0
+        self._ws_path = os.path.join(tmp_dir, "sheet1.xml")
+        self._file = open(self._ws_path, "w", encoding="utf-8", newline="")
+        self._write_header()
+
+    def _write_header(self) -> None:
+        self._file.write(
+            '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+            '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">'
+        )
+        self._file.write("<cols>")
+        for i in range(len(self.columns)):
+            self._file.write(f'<col min="{i+1}" max="{i+1}" width="18" customWidth="1"/>')
+        self._file.write("</cols>")
+        self._file.write("<sheetData>")
+        # 表头行（row 1）
+        self._row_index = 1
+        self._file.write('<row r="1">')
+        for ci, col in enumerate(self.columns, 1):
+            ref = f"{_col_letter(ci - 1)}1"
+            text = "" if col.title is None else str(col.title)
+            text = _sanitize_formula_injection(text)
+            self._file.write(
+                f'<c r="{ref}" t="inlineStr"><is>'
+                f'<t xml:space="preserve">{_escape_xml(text)}</t></is></c>'
+            )
+        self._file.write("</row>")
+
+    def add_rows(self, rows: list[dict]) -> None:
+        """增量追加一批行（在 worker 线程中调用，避免阻塞 event loop）。"""
+        for row in rows:
+            self._row_index += 1
+            self._file.write(f'<row r="{self._row_index}">')
+            for ci, col in enumerate(self.columns, 1):
+                ref = f"{_col_letter(ci - 1)}{self._row_index}"
+                val = row.get(col.key)
+                if col.data_type in ("number", "percent") and isinstance(val, (int, float)):
+                    style = ' s="1"' if col.data_type == "percent" else ""
+                    self._file.write(f'<c r="{ref}"{style} t="n"><v>{val}</v></c>')
+                else:
+                    text = "" if val is None else str(val)
+                    text = _sanitize_formula_injection(text)
+                    self._file.write(
+                        f'<c r="{ref}" t="inlineStr"><is>'
+                        f'<t xml:space="preserve">{_escape_xml(text)}</t></is></c>'
+                    )
+            self._file.write("</row>")
+
+    def finalize(self) -> None:
+        self._file.write("</sheetData></worksheet>")
+        self._file.close()
+
+    def build_zip(self, out_path: str) -> None:
+        """将临时 worksheet 文件 zip 为最终 xlsx（在 worker 线程中调用）。
+
+        使用 inlineStr，不写 sharedStrings（避免全量驻留 + 与 rels/content-types 一致）。
+        """
+        with zipfile.ZipFile(out_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("[Content_Types].xml", _build_writer_content_types())
+            zf.writestr("_rels/.rels", _build_rels())
+            zf.writestr("xl/workbook.xml", _build_writer_workbook_xml())
+            zf.writestr("xl/_rels/workbook.xml.rels", _build_writer_workbook_rels())
+            zf.writestr("xl/styles.xml", _build_styles_xml())
+            zf.write(self._ws_path, "xl/worksheets/sheet1.xml")

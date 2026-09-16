@@ -61,6 +61,7 @@ import {
   resolveMarketTableState,
   selectBatchMetaItems,
 } from './marketBatchMetaGate'
+import { resolveMarketExportPolicy } from './marketExportGate'
 import styles from './MarketWorkspace.module.scss'
 
 // [S2-A] published-runs / preset 使用的 legacy strategy key。
@@ -192,12 +193,27 @@ export default function MarketWorkspacePage() {
   // [S2-A] 不再把 run id 当作表格生命周期/导出/分页的输入；activeRun 仅用于 admin 批次展示。
   const activeRun = runs[0]
 
+  // [S2-A-C1] 导出 in-flight 锁：防双击/多 tab/并发；普通用户根本不渲染导出按钮
+  const [exporting, setExporting] = useState(false)
+  const exportingRef = useRef(false)
+
+  // [S2-A-C1] 导出 policy 收口到 resolveMarketExportPolicy（admin-only + in-flight 锁）；
+  // 后端 require_admin 才是最终安全边界，此 policy 仅做 UX 收口与防双击。
+  const exportPolicy = useMemo(
+    () => resolveMarketExportPolicy({ isAdmin, accessReady, exporting }),
+    [isAdmin, accessReady, exporting],
+  )
+
   // CHANGE-20260904: 导出 Excel（POST /v1/market/export）
   // 复用 /market/stocks 同一查询语义与 canonical 行源（first_pyramid）；fp 筛选/排序走 fp_filter/fp_sort，
   // 不再转成 DSA 旧路径 metric_filters（旧路径根因：fp_* 不在 manifest.filterable 白名单 → 422）。
   // 必须导出当前完整筛选结果（非当前页）；通过 ExportContext 收集可见列与查询状态。
   const handleExport = useCallback(
     async (ctx: ExportContext) => {
+      // [S2-A-C1] 防止并发导出 / 双击：已在导出中则忽略本次请求
+      if (exportingRef.current) return
+      exportingRef.current = true
+      setExporting(true)
       try {
         const visibleColumns: MarketExportColumn[] = ctx.visibleColumns.map((col) => ({
           key: col.key,
@@ -250,6 +266,9 @@ export default function MarketWorkspacePage() {
         } else {
           toast.show('导出失败', e.message || '请稍后重试')
         }
+      } finally {
+        exportingRef.current = false
+        setExporting(false)
       }
     },
     [scope, toast],
@@ -641,7 +660,7 @@ export default function MarketWorkspacePage() {
             // [S2-A] 删除 run-based React key 与 activeRunId prop：
             // admin 批次信息发布/变化不再 remount market 表、不再重置分页、不再控制导出。
             // /market 表格生命周期只由 /v1/market/stocks 决定。
-            exportEnabled={accessReady}
+            exportEnabled={exportPolicy.exportButtonEnabled}
             columns={columns}
             // [PRD §三] 默认隐藏 79 个非核心 fp_ 列；preset 应用后由 preset.hiddenColumns 覆盖
             defaultHiddenColumns={getDefaultHiddenFpKeys()}
@@ -673,8 +692,8 @@ export default function MarketWorkspacePage() {
             // CHANGE-20260713-006: preset 应用时校验失效板块字段并 toast
             boardsValidation={boardsValidation}
             onPresetStaleField={handlePresetStaleField}
-            // CHANGE-20260713-010: 导出 Excel
-            onExport={handleExport}
+            // CHANGE-20260713-010: 导出 Excel（[S2-A-C1] 普通用户不提供 onExport → 按钮不渲染）
+            onExport={exportPolicy.onExportWired ? handleExport : undefined}
           />
         </div>
         {/* 右栏：小 K 线 + 研究上下文面板（可收起；收起时不挂载、不请求数据） */}

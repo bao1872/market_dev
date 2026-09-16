@@ -808,6 +808,166 @@ def _build_fp_sort_expression(
     return typed_expr
 
 
+@dataclass
+class MarketQueryContext:
+    """[S2-A-C1] 共享的行情查询装配结果。
+
+    list（get_market_stocks）与 export（market_export_service）复用同一套
+    筛选/排序/scope/fp 定义/canonical CoreRun 判定（均为下方 helper 单一真源），
+    但物理 read model 不同：list 走完整 MarketStockRow 富集，export 走轻量分批读取。
+    """
+
+    base_stmt: Any  # SELECT Instrument + LATERAL JOIN + WHERE + ORDER BY（不含 offset/limit）
+    snap_subq: Any | None
+    chip_subq: Any | None
+    max_trade_date_subq: Any | None
+    canonical_core_run_id: UUID | None
+    needs_snap: bool
+    needs_chip: bool
+    search_conditions: list
+    rank_expr: Any
+    has_query: bool
+    state_cond: Any
+    board_conditions: list
+    fp_filter_specs: list
+    fp_sort_spec: Any
+    sort_spec: Any
+    fp_filter_conditions: list
+
+
+async def _assemble_market_query(
+    db: AsyncSession,
+    user_id: UUID,
+    scope: str,
+    query: str | None,
+    state: str | None,
+    industry: str | None,
+    concept: str | None,
+    fp_filter: str | None,
+    fp_sort: str | None,
+    sort: str | None,
+) -> MarketQueryContext:
+    """[S2-A-C1] 装配行情基础查询（Instrument + LATERAL JOIN + WHERE + ORDER BY）。
+
+    与 get_market_stocks 的 Query 1 装配逻辑逐行同源：复用 _build_search_conditions /
+    _parse_sort / _build_state_filter / _build_board_filter_conditions / _parse_fp_filter /
+    _parse_fp_sort / _needs_snap_lateral / _needs_chip_lateral / _build_snap_lateral /
+    _build_chip_lateral / _build_order_by 等单一真源 helper，禁止复制第二套规则。
+
+    返回的 base_stmt 不含 offset/limit：caller 自行决定分页（list）或分批导出（export）。
+    """
+    search_conditions, rank_expr = _build_search_conditions(query)
+    sort_spec = _parse_sort(sort)
+    state_cond = _build_state_filter(state)
+    board_conditions = _build_board_filter_conditions(industry, concept)
+    # [CHANGE-20260729-004 P0-1] 解析 fp_filter/fp_sort（非法值抛 ValueError → 422）
+    fp_filter_specs = _parse_fp_filter(fp_filter)
+    fp_sort_spec = _parse_fp_sort(fp_sort)
+    # [CHANGE-20260729-005 二.7] 按需构建 LATERAL JOIN
+    needs_snap = _needs_snap_lateral(fp_filter_specs, fp_sort_spec) or _needs_chip_lateral(
+        fp_filter_specs, fp_sort_spec,
+    )
+    needs_chip = _needs_chip_lateral(fp_filter_specs, fp_sort_spec)
+
+    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT canonical CoreRun 单一身份（与 list 同源）
+    from app.services.current_core_run_service import resolve_current_core_run
+
+    canonical_core_run: StockFeatureSnapshotRun | None = await resolve_current_core_run(db)
+    canonical_core_run_id: UUID | None = (
+        canonical_core_run.id if canonical_core_run is not None else None
+    )
+    if canonical_core_run_id is None:
+        logger.warning(
+            "[market-stocks] 无 CURRENT canonical CoreRun，snap 读取回退既有的"
+            "每股最新语义（不新增 fallback）",
+        )
+
+    snap_subq = _build_snap_lateral(snapshot_run_id=canonical_core_run_id) if needs_snap else None
+    chip_subq = _build_chip_lateral(snap_subq) if needs_chip else None
+    max_trade_date_subq = _build_max_trade_date_subquery() if needs_snap else None
+    # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建
+    fp_filter_conditions = _build_fp_filter_conditions(
+        fp_filter_specs, snap_subq, chip_subq, max_trade_date_subq,
+    )
+
+    # ===== Query 1: instruments + is_watchlisted（与 get_market_stocks 同源）=====
+    if scope == "watchlist":
+        base_stmt = (
+            select(
+                Instrument.id,
+                Instrument.symbol,
+                Instrument.name,
+                Instrument.market,
+                literal(True).label("is_watchlisted"),
+            )
+            .join(
+                UserWatchlistItem,
+                (
+                    (UserWatchlistItem.instrument_id == Instrument.id)
+                    & (UserWatchlistItem.user_id == user_id)
+                    & (UserWatchlistItem.active.is_(True))
+                ),
+            )
+        )
+    else:
+        watched_exists = (
+            select(1)
+            .where(
+                UserWatchlistItem.instrument_id == Instrument.id,
+                UserWatchlistItem.user_id == user_id,
+                UserWatchlistItem.active.is_(True),
+            )
+            .exists()
+        )
+        base_stmt = select(
+            Instrument.id,
+            Instrument.symbol,
+            Instrument.name,
+            Instrument.market,
+            watched_exists.label("is_watchlisted"),
+        )
+    # [二.7] 添加 LATERAL JOIN（在 WHERE 之前，供 filter/sort 引用）
+    if snap_subq is not None:
+        base_stmt = base_stmt.outerjoin(snap_subq, true())
+    if chip_subq is not None:
+        base_stmt = base_stmt.outerjoin(chip_subq, true())
+
+    for cond in search_conditions:
+        base_stmt = base_stmt.where(cond)
+    if state_cond is not None:
+        base_stmt = base_stmt.where(state_cond)
+    for cond in board_conditions:
+        base_stmt = base_stmt.where(cond)
+    for cond in fp_filter_conditions:
+        base_stmt = base_stmt.where(cond)
+
+    order_by_cols = _build_order_by(
+        sort_spec, has_query=bool(query), rank_expr=rank_expr,
+        fp_sort_spec=fp_sort_spec, snap_subq=snap_subq, chip_subq=chip_subq,
+        max_trade_date_subq=max_trade_date_subq,
+    )
+    base_stmt = base_stmt.order_by(*order_by_cols)
+
+    return MarketQueryContext(
+        base_stmt=base_stmt,
+        snap_subq=snap_subq,
+        chip_subq=chip_subq,
+        max_trade_date_subq=max_trade_date_subq,
+        canonical_core_run_id=canonical_core_run_id,
+        needs_snap=needs_snap,
+        needs_chip=needs_chip,
+        search_conditions=search_conditions,
+        rank_expr=rank_expr,
+        has_query=bool(query),
+        state_cond=state_cond,
+        board_conditions=board_conditions,
+        fp_filter_specs=fp_filter_specs,
+        fp_sort_spec=fp_sort_spec,
+        sort_spec=sort_spec,
+        fp_filter_conditions=fp_filter_conditions,
+    )
+
+
 async def get_market_stocks(
     db: AsyncSession,
     user_id: UUID,
