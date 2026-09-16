@@ -210,7 +210,7 @@ export default function MarketWorkspacePage() {
   // CHANGE-20260904: 导出 Excel（POST /v1/market/export）
   // 复用 /market/stocks 同一查询语义与 canonical 行源（first_pyramid）；fp 筛选/排序走 fp_filter/fp_sort，
   // 不再转成 DSA 旧路径 metric_filters（旧路径根因：fp_* 不在 manifest.filterable 白名单 → 422）。
-  // 必须导出当前完整筛选结果（非当前页）；通过 ExportContext 收集可见列与查询状态。
+  // 必须导出当前完整筛选结果（非当前页）；ExportContext 仅用于取得当前筛选/排序/query 状态，导出列由服务端固定。
   const handleExport = useCallback(
     async (ctx: ExportContext) => {
       // [S2-A-C1] 真正的命令式双触发守卫：已在导出中则忽略本次请求（与后端全局租约纵深防御）

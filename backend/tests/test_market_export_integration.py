@@ -20,6 +20,7 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
+import xml.etree.ElementTree as ET
 import zipfile
 
 import pytest
@@ -107,6 +108,24 @@ async def test_5000_rows_bounded_batches_and_complete(db_session: AsyncSession):
         # 仅两列
         header = sheet.split('<row r="1">')[1].split("</row>")[0]
         assert header.count("<c ") == 2
+
+        # 从第二列（symbol，列 B）提取全部 symbol，验证无重复 / 无遗漏（C3a）
+        ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+        root = ET.fromstring(sheet)
+        symbols: list[str] = []
+        for row in root.iter(f"{ns}row"):
+            if row.get("r") == "1":
+                continue  # 跳过表头
+            for c in row.findall(f"{ns}c"):
+                ref = c.get("r", "")
+                if ref and ref[0].upper() == "B":
+                    t = c.find(f"{ns}is/{ns}t")
+                    if t is not None and t.text is not None:
+                        symbols.append(t.text)
+        expected = {f"EXP{i:06d}" for i in range(5000)}
+        assert len(symbols) == 5000        # 数量完整（无遗漏）
+        assert len(set(symbols)) == 5000   # 无重复
+        assert set(symbols) == expected    # 集合完全一致（无错配 / 无遗漏）
     finally:
         shutil.rmtree(prepared.tmp_dir, ignore_errors=True)
 
@@ -128,7 +147,7 @@ async def test_base_only_no_snapshot_fetch(db_session: AsyncSession):
     # base-only 不应构建 snapshot/chip LATERAL
     assert ctx.needs_snap is False
     assert ctx.needs_chip is False
-    rows = await mes._fetch_batch_rows(db_session, ctx, plan, 0)
+    rows = await mes._fetch_batch_rows(db_session, ctx, 0)
     assert len(rows) == 3
     for r in rows:
         assert set(r.keys()) == {"name", "symbol"}

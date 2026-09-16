@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
@@ -124,17 +124,38 @@ def _stock_name_condition(op: str | None, value: str | None):
     return Instrument.name.ilike(f"%{value}%")
 
 
+def _build_export_batch_stmt(ctx: MarketQueryContext, batch_index: int):
+    """[S2-A-C1a-C3a] 导出分批物理投影：只 SELECT name / symbol。
+
+    复用 _assemble_market_query 装配的 FROM / JOIN / WHERE / ORDER BY，
+    但通过 with_only_columns 把目标表达式收窄为 name + symbol，
+    不在 DB 层为每只股票计算 id / market / is_watchlisted
+    （这些只服务于 list read model，export 不需要）。
+    maintain_column_froms=True 保证窄投影不会丢掉 JOIN / WHERE / ORDER BY，
+    因此 fp_filter / fp_sort / industry-context 筛选 / watchlist join /
+    keyword / state / price·change_pct 排序等 query semantics 全部保留。
+    """
+    return (
+        ctx.base_stmt.with_only_columns(
+            Instrument.name,
+            Instrument.symbol,
+            maintain_column_froms=True,
+        )
+        .limit(EXPORT_BATCH_SIZE)
+        .offset(batch_index * EXPORT_BATCH_SIZE)
+    )
+
+
 async def _fetch_batch_rows(
-    db: AsyncSession, ctx: MarketQueryContext, plan: MarketExportPlan, batch_index: int
+    db: AsyncSession, ctx: MarketQueryContext, batch_index: int
 ) -> list[dict[str, str]]:
-    """[S2-A-C1] 轻量分批读取：仅执行已装配好的筛选/排序 query，最多 EXPORT_BATCH_SIZE 行，
-    只映射 name / symbol 两列。
+    """[S2-A-C1a-C3a] 轻量分批读取：仅执行已收窄为 name / symbol 的导出投影，最多 EXPORT_BATCH_SIZE 行。
 
     输出 dict 严格只有 name、symbol 两个 key；绝不随后再查询
     bars / snapshot / chip / boards。筛选/排序所需的 source JOIN 仍由
     _assemble_market_query 在 query 装配阶段处理，不在本函数做第二轮 enrichment。
     """
-    stmt = ctx.base_stmt.limit(EXPORT_BATCH_SIZE).offset(batch_index * EXPORT_BATCH_SIZE)
+    stmt = _build_export_batch_stmt(ctx, batch_index)
     result = await db.execute(stmt)
     base_rows = result.all()
     return [
@@ -167,8 +188,16 @@ async def prepare_market_export(
         if sn_cond is not None:
             ctx.base_stmt = ctx.base_stmt.where(sn_cond)
 
-        # filtered COUNT（去除与导出无关的 ORDER BY；筛选条件保留）
-        count_source = ctx.base_stmt.order_by(None).subquery()
+        # filtered COUNT：通过 with_only_columns(literal(1), maintain_column_froms=True)
+        # 只保留 FROM / JOIN / WHERE，不计算 is_watchlisted / market / name / symbol
+        # 等无关 target expression；并去除与导出无关的 ORDER BY。
+        count_source = (
+            ctx.base_stmt.with_only_columns(
+                literal(1), maintain_column_froms=True
+            )
+            .order_by(None)
+            .subquery()
+        )
         total = await db.scalar(select(func.count()).select_from(count_source)) or 0
         if total > MAX_EXPORT_ROWS:
             raise _over_limit_error()
@@ -177,7 +206,7 @@ async def prepare_market_export(
         batches = (total + EXPORT_BATCH_SIZE - 1) // EXPORT_BATCH_SIZE if total else 0
         max_batch = 0
         for b in range(batches):
-            rows = await _fetch_batch_rows(db, ctx, plan, b)
+            rows = await _fetch_batch_rows(db, ctx, b)
             if rows:
                 max_batch = max(max_batch, len(rows))
             # CPU 密集的 XML 写入脱离 event loop

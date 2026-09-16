@@ -102,14 +102,17 @@ class MarketStocksResponse(BaseModel):
 class MarketExportRequest(BaseModel):
     """导出请求 body（POST /v1/market/export）。
 
-    复用 /market/stocks 同一查询语义与 canonical 行源（MarketStockRow.first_pyramid），
+    与 /market/stocks 共享同一套筛选/排序语义 owner（_assemble_market_query），
     不再走旧 DSA selector 路径（/strategy-runs/{run_id}/results/export 的 metric_filters
     经 StrategyVersion.manifest.outputs.filterable 白名单校验，导致 fp_* 字段 422）。
 
-    - fp_filter / fp_sort：第一金字塔字段筛选/排序，由 get_market_stocks 内部按
+    - fp_filter / fp_sort：第一金字塔字段筛选/排序，由 _assemble_market_query 按
       FP_QUERY_FIELD_SPECS 白名单校验（非法字段/操作符 → 422），与 /market/stocks 同源。
     - sort：基础排序字段:方向（name/symbol/change_pct/dsa_state/latest_event_time/price）。
-    - visible_columns：可见列（按此顺序导出）；fp_* 列从 first_pyramid 读取，基础列从行字段读取。
+
+    导出字段由服务端固定为「股票名称 + 股票代码」两列；客户端不指定 projection
+    （visible_columns 已从导出合同移除）。仅查询语义（scope / keyword / industry / concept /
+    state / fp_filter / fp_sort / sort / stock_name）决定导出的股票集合与顺序。
     """
 
     scope: str = Field("market", description="范围：market | watchlist")

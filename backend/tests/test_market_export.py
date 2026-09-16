@@ -39,9 +39,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select
 
 from app.api.market import export_market_stocks, require_admin
+from app.models.instrument import Instrument
 from app.schemas.market_stocks import MarketExportRequest
 from app.services import market_export_service as mes
 from app.services.access_control_service import AccessContext
@@ -193,6 +194,9 @@ class _FakeStmt:
     def order_by(self, *a):
         return self
 
+    def with_only_columns(self, *a, **k):
+        return self
+
     def subquery(self):
         # 返回真实（无 FROM 的）scalar subquery alias，使 select(...).select_from() 合法，不触达 DB
         return select(func.count()).subquery()
@@ -230,13 +234,12 @@ class _FakeDb:
 @pytest.mark.asyncio
 async def test_fetch_batch_rows_only_name_symbol():
     ctx = _FakeCtx()
-    plan = mes.build_export_plan(MarketExportRequest(**_body()))
     rows_db = [
         _Row("贵州茅台", "600519"),
         _Row("宁德时代", "300750"),
         _Row("平安银行", "000001"),
     ]
-    out = await mes._fetch_batch_rows(_FakeDb(rows_db), ctx, plan, 0)
+    out = await mes._fetch_batch_rows(_FakeDb(rows_db), ctx, 0)
     assert out == [
         {"name": "贵州茅台", "symbol": "600519"},
         {"name": "宁德时代", "symbol": "300750"},
@@ -244,6 +247,102 @@ async def test_fetch_batch_rows_only_name_symbol():
     ]
     for r in out:
         assert set(r.keys()) == {"name", "symbol"}
+
+
+# ---------------------------------------------------------------------------
+# PROJ-SQL：export batch 物理投影只 SELECT name / symbol（C3a）
+# ---------------------------------------------------------------------------
+
+
+def _representative_base_stmt(scope: str):
+    """构造与 _assemble_market_query 同构的 base_stmt（不触达 DB）。
+
+    market 范围：correlated EXISTS 作为 is_watchlisted 展示列 + WHERE + ORDER BY；
+    watchlist 范围：INNER JOIN UserWatchlistItem + WHERE + ORDER BY。
+    两者都包含 id / symbol / name / market / is_watchlisted 五个展示列，
+    用于证明 export 投影收窄后这些列不再被 SELECT。
+    """
+    from app.models.watchlist import UserWatchlistItem
+
+    if scope == "watchlist":
+        return (
+            select(
+                Instrument.id,
+                Instrument.symbol,
+                Instrument.name,
+                Instrument.market,
+                literal(True).label("is_watchlisted"),
+            )
+            .join(
+                UserWatchlistItem,
+                (
+                    (UserWatchlistItem.instrument_id == Instrument.id)
+                    & (UserWatchlistItem.active.is_(True))
+                ),
+            )
+            .where(Instrument.market == "A")
+            .order_by(Instrument.symbol)
+        )
+    watched_exists = (
+        select(1)
+        .where(
+            UserWatchlistItem.instrument_id == Instrument.id,
+            UserWatchlistItem.active.is_(True),
+        )
+        .exists()
+    )
+    return (
+        select(
+            Instrument.id,
+            Instrument.symbol,
+            Instrument.name,
+            Instrument.market,
+            watched_exists.label("is_watchlisted"),
+        )
+        .where(Instrument.market == "A")
+        .order_by(Instrument.symbol)
+    )
+
+
+class _ProjCtx:
+    def __init__(self, base_stmt):
+        self.base_stmt = base_stmt
+
+
+def test_export_batch_stmt_selects_only_name_symbol():
+    # market 范围：correlated EXISTS 作为 is_watchlisted 展示列务必被剔除
+    stmt = mes._build_export_batch_stmt(_ProjCtx(_representative_base_stmt("market")), 0)
+    cols = list(stmt.selected_columns.keys())
+    assert cols == ["name", "symbol"]
+    assert "id" not in cols
+    assert "market" not in cols
+    assert "is_watchlisted" not in cols
+    sql = str(stmt)
+    assert "WHERE" in sql and "ORDER BY" in sql  # 筛选 + 排序在窄投影下仍生效
+
+    # watchlist 范围：JOIN 必须保留（否则筛选/排序语义失效）
+    stmt_w = mes._build_export_batch_stmt(_ProjCtx(_representative_base_stmt("watchlist")), 0)
+    cols_w = list(stmt_w.selected_columns.keys())
+    assert cols_w == ["name", "symbol"]
+    sql_w = str(stmt_w)
+    assert "JOIN" in sql_w and "WHERE" in sql_w and "ORDER BY" in sql_w
+
+
+def test_export_count_stmt_selects_only_literal_one():
+    # count 只保留 FROM/JOIN/WHERE，不计算 is_watchlisted/market/name/symbol 等目标表达式
+    ctx = _ProjCtx(_representative_base_stmt("market"))
+    count_select = ctx.base_stmt.with_only_columns(
+        literal(1), maintain_column_froms=True
+    ).order_by(None)
+    count_cols = list(count_select.selected_columns.keys())
+    # 仅 literal(1) 一个目标表达式（key 为 '_no_label'），无任何真实列被 SELECT
+    assert count_cols == ["_no_label"]
+    for forbidden in ("id", "market", "name", "symbol", "is_watchlisted"):
+        assert forbidden not in count_cols
+    count_source = count_select.subquery()
+    full = select(func.count()).select_from(count_source)
+    sql = str(full)
+    assert "WHERE" in sql  # 筛选条件在 count 中保留
 
 
 # ---------------------------------------------------------------------------
