@@ -1,5 +1,6 @@
-// [MarketWorkspacePage] - 描述: 行情页（/market/stocks 统一数据源 + 可收起右栏）
-// PRD §6.1 + AGENTS §12.2：/market 是 published DSA 结果的统一筛选入口。
+// [MarketWorkspacePage] - 描述: 行情页（/v1/market/stocks 为 canonical 行源 + 可收起右栏）
+// /market 以 /v1/market/stocks 为 canonical 行源；第一金字塔字段随该行源返回。
+// published DSA run 仅保留为 admin diagnostic metadata，不属于 market 主数据生命周期（S2-A 解耦）。
 // [CHANGE-20260729-009] 数据流：useMarketStocks(scope=all|watchlist) → adaptMarketStockToTrendRow → StrategyDataTable + getTrendSelectionColumns(inlineWatchlistToggle=true)
 //   旧双分页架构（useStrategyRunResults + useMarketStocks 按 instrument_id 合并）已删除。
 //   usePublishedRuns 仅用于顶部"批次信息"面板展示当前已发布批次（run_id/状态/交易日）；
@@ -62,8 +63,11 @@ import {
 } from './marketBatchMetaGate'
 import styles from './MarketWorkspace.module.scss'
 
-// DSA 生产策略 key（AGENTS §12.2：当前生产只保留 dsa_selector）
-const DSA_STRATEGY_KEY = 'dsa_selector'
+// [S2-A] published-runs / preset 使用的 legacy strategy key。
+// 这是 legacy preset namespace compatibility（'dsa_selector' 仍是生产 preset 存储命名空间），
+// 不代表 /market 行源来自 DSA StrategyRun —— /market 行源是 /v1/market/stocks。
+// 重命名以明确其 diagnostic 用途。
+const MARKET_BATCH_DIAGNOSTIC_STRATEGY_KEY = 'dsa_selector'
 const PAGE_SIZE = 50
 
 export default function MarketWorkspacePage() {
@@ -180,12 +184,12 @@ export default function MarketWorkspacePage() {
   const batchMetaStrategyKey = resolveBatchMetaStrategyKey({
     accessReady,
     isAdmin,
-    strategyKey: DSA_STRATEGY_KEY,
+    strategyKey: MARKET_BATCH_DIAGNOSTIC_STRATEGY_KEY,
   })
   const shouldLoadBatchMeta = batchMetaStrategyKey !== undefined
   const runsQuery = usePublishedRuns(batchMetaStrategyKey, { limit: 1 })
   const runs = selectBatchMetaItems({ shouldLoadBatchMeta, data: runsQuery.data })
-  const activeRunId = runs[0]?.id || ''
+  // [S2-A] 不再把 run id 当作表格生命周期/导出/分页的输入；activeRun 仅用于 admin 批次展示。
   const activeRun = runs[0]
 
   // CHANGE-20260904: 导出 Excel（POST /v1/market/export）
@@ -551,13 +555,12 @@ export default function MarketWorkspacePage() {
   // 辅助的 batch meta 查询状态显式传入但必须被忽略：
   // 它 403/500/网络错误时不得遮断已经成功返回的行情行，
   // 也不得把主数据的真实失败（422/500）吞掉。
+  // [S2-A] 主表状态只由 /v1/market/stocks 决定；resolveMarketTableState 根本不接收 batchMeta* 输入。
   const tableState = resolveMarketTableState({
     marketStocksLoading: marketStocksQuery.isLoading,
     marketStocksError: marketStocksQuery.isError
       ? describeMarketStocksError(marketStocksQuery.error)
       : null,
-    batchMetaLoading: runsQuery.isLoading,
-    batchMetaError: runsQuery.isError ? '运行批次加载失败' : null,
   })
 
   return (
@@ -631,13 +634,13 @@ export default function MarketWorkspacePage() {
             </div>
           )}
           <StrategyDataTable
-            key={activeRunId ? `run-${activeRunId}` : 'run-empty'}
             tableId="market"
-            strategyKey={DSA_STRATEGY_KEY}
-            activeRunId={activeRunId}
-            // [USER-FIX-3 / A2] 导出已改走 /v1/market/export（与 /market/stocks 同 scope 授权），
-            // 与 DSA run 无关；不显式解除 activeRunId 耦合时，普通 market_data 用户会因为
-            // activeRunId === '' 而拿不到本来合法的导出能力。
+            // [S2-A] strategyKey 仅用于 preset namespace 兼容（legacy 'dsa_selector' 存储），
+            // 不代表 /market 行源来自 DSA StrategyRun。
+            strategyKey={MARKET_BATCH_DIAGNOSTIC_STRATEGY_KEY}
+            // [S2-A] 删除 run-based React key 与 activeRunId prop：
+            // admin 批次信息发布/变化不再 remount market 表、不再重置分页、不再控制导出。
+            // /market 表格生命周期只由 /v1/market/stocks 决定。
             exportEnabled={accessReady}
             columns={columns}
             // [PRD §三] 默认隐藏 79 个非核心 fp_ 列；preset 应用后由 preset.hiddenColumns 覆盖

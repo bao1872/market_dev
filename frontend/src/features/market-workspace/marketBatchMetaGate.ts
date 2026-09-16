@@ -72,16 +72,12 @@ export function selectBatchMetaItems<T>(input: BatchMetaItemsInput<T>): T[] {
   return input.data?.items ?? []
 }
 
-/** 行情表状态输入 */
+/** 行情表状态输入（[S2-A] 主表只接收主数据源，根本不接收 batchMeta* 输入） */
 export interface MarketTableStateInput {
   /** 主数据源 loading（/v1/market/stocks） */
   marketStocksLoading: boolean
   /** 主数据源 error 文案（null = 无错误） */
   marketStocksError: string | null
-  /** 辅助查询 loading（必须被忽略，仅为显式契约而接收） */
-  batchMetaLoading?: boolean
-  /** 辅助查询 error 文案（必须被忽略，仅为显式契约而接收） */
-  batchMetaError?: string | null
 }
 
 /** 行情表状态（只由主数据源决定） */
@@ -93,9 +89,9 @@ export interface MarketTableState {
 /**
  * 解析行情表的 loading / error。
  *
- * 硬约束（defense-in-depth）：无论辅助查询处于何状态，
- * 输出都必须与「只传入主数据源」的结果完全一致。
- * 即使将来 batch 端点临时故障，也不能再次把行情页整体打死。
+ * [S2-A] 输入现在只含主数据源字段；辅助查询（published-runs）状态根本不是本函数的入参，
+ * 因此不可能再被并入行情表的 loading/error。这是「主表根本没有这个输入」的解耦，
+ * 而非「我知道 auxiliary error，但选择忽略」。
  */
 export function resolveMarketTableState(input: MarketTableStateInput): MarketTableState {
   return {

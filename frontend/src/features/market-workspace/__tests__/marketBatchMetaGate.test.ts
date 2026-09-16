@@ -208,35 +208,19 @@ test('A2-4: admin + access ready 时门控打开，真实 query 落在 dsa_selec
 
 // ===== A2-5 辅助查询失败不得遮断主表 =====
 
-test('A2-5: published-runs 403/500/网络错误都不得进入行情表 loading/error', () => {
-  const auxiliaryFailures: (string | null)[] = ['运行批次加载失败', 'Network Error', null]
-
-  for (const auxError of auxiliaryFailures) {
-    for (const auxLoading of [true, false]) {
-      // 主数据成功：有 rows（isLoading=false、isError=false）
-      const state = resolveMarketTableState({
-        marketStocksLoading: false,
-        marketStocksError: null,
-        batchMetaLoading: auxLoading,
-        batchMetaError: auxError,
-      })
-      assert.equal(state.error, null, `辅助查询错误不得遮断主表（aux=${auxError}）`)
-      assert.equal(state.loading, false, '辅助查询 loading 不得让主表 loading')
-    }
-  }
-
-  // 与"只传主数据源"的结果必须逐位一致（defense-in-depth 契约）
-  const baseline = resolveMarketTableState({
+test('A2-5 [S2-A]: published-runs 状态根本不进入行情表状态（resolveMarketTableState 不接收 batchMeta*）', () => {
+  // 主数据成功：有 rows（isLoading=false、isError=false）
+  // [S2-A] 函数签名现在只有 marketStocksLoading / marketStocksError 两个输入字段；
+  // 任何 batchMeta* 字段都不再是合法入参（类型层面拒绝），辅助查询不可能影响输出。
+  const state = resolveMarketTableState({
     marketStocksLoading: false,
     marketStocksError: null,
   })
-  const withAux = resolveMarketTableState({
-    marketStocksLoading: false,
-    marketStocksError: null,
-    batchMetaLoading: true,
-    batchMetaError: '运行批次加载失败',
-  })
-  assert.deepEqual(withAux, baseline, '辅助查询状态必须对表格输出完全无影响')
+  assert.deepEqual(
+    state,
+    { loading: false, error: null },
+    '主数据成功 ⇒ 表格 loading=false、error=null（辅助查询无从介入）',
+  )
 })
 
 // ===== A2-6 primary failure 仍必须显式失败 =====
@@ -268,16 +252,12 @@ test('A2-6: 主数据失败必须显式失败，不得被"辅助不阻塞"吞掉
     const text = describeMarketStocksError(c.err)
     assert.equal(text, c.expect)
 
-    // 主数据错误即使叠加"辅助查询正常/失败"也必须原样透出
-    for (const auxError of [null, '运行批次加载失败']) {
-      const state = resolveMarketTableState({
-        marketStocksLoading: false,
-        marketStocksError: text,
-        batchMetaLoading: false,
-        batchMetaError: auxError,
-      })
-      assert.equal(state.error, text, '主数据失败必须显式失败')
-    }
+    // [S2-A] 主数据错误必须原样透出（函数签名已不含 batchMeta*，辅助查询无从介入）
+    const state = resolveMarketTableState({
+      marketStocksLoading: false,
+      marketStocksError: text,
+    })
+    assert.equal(state.error, text, '主数据失败必须显式失败')
   }
 })
 
