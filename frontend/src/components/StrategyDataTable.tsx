@@ -153,6 +153,11 @@ export interface DataTableProps<Row> {
   onPresetStaleField?: (field: 'industry' | 'concept', value: string) => void
   // CHANGE-20260713-010: 导出 Excel 回调（提供时显示"导出 Excel"按钮）
   onExport?: (ctx: ExportContext) => void
+  // [USER-FIX-3 / A2] 导出按钮可用性显式开关（向后兼容）：
+  //   - 不提供（undefined）→ 沿用历史语义 `Boolean(activeRunId)`；
+  //   - 提供时以它为准，用于解除「导出必须依赖 DSA run」的旧耦合
+  //     （/market 的导出实际走 POST /v1/market/export，按 scope 授权，与 run 无关）。
+  exportEnabled?: boolean
 }
 
 // CHANGE-20260713-010: 导出上下文（StrategyDataTable → 外部）
@@ -886,7 +891,13 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     boardsValidation,
     onPresetStaleField,
     onExport,
+    exportEnabled,
   } = props
+
+  // [USER-FIX-3 / A2] 导出可用性：默认沿用历史语义（依赖 activeRunId）；
+  // 调用方可显式传 exportEnabled 解耦（/market 导出已改走 /v1/market/export，
+  // 与 DSA run 无关，缺 activeRunId 不应禁用导出）。
+  const effectiveExportEnabled = exportEnabled ?? Boolean(activeRunId)
 
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -1452,7 +1463,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           {onExport && (
             <button
               className="btn small secondary export-btn"
-              disabled={!activeRunId}
+              disabled={!effectiveExportEnabled}
               onClick={() => {
                 const exportableColumns = visibleColumns
                   .filter(({ col }) => !col.isAction && !col.isSelect)

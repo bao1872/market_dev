@@ -53,6 +53,13 @@ import {
   getDefaultHiddenFpKeys,
 } from './firstPyramidColumns'
 import { serializeFpFilters, serializeFpSort, isFpKey } from './firstPyramidQuerySerializer'
+// [USER-FIX-3 / A2] 批次元数据（published-runs）与行情主数据的依赖解耦 owner
+import {
+  describeMarketStocksError,
+  resolveBatchMetaStrategyKey,
+  resolveMarketTableState,
+  selectBatchMetaItems,
+} from './marketBatchMetaGate'
 import styles from './MarketWorkspace.module.scss'
 
 // DSA 生产策略 key（AGENTS §12.2：当前生产只保留 dsa_selector）
@@ -162,9 +169,22 @@ export default function MarketWorkspacePage() {
   // 批次信息折叠状态（仅 admin 可见，默认折叠）
   const [batchMetaExpanded, setBatchMetaExpanded] = useState(false)
 
-  // DSA 已发布运行批次（仅最新一个快照）
-  const runsQuery = usePublishedRuns(DSA_STRATEGY_KEY, { limit: 1 })
-  const runs = runsQuery.data?.items ?? []
+  // [USER-FIX-3 / A2] DSA 已发布运行批次（仅最新一个快照）——纯 admin 诊断信息。
+  //
+  // 该查询的唯一消费方是顶部「批次信息」面板（仅 admin 可见），因此：
+  //   - 非 admin / access 未 ready 时传 undefined ⇒ hook 内 `enabled: !!strategyKey` 为 false
+  //     ⇒ **根本不发起** published-runs 请求（普通用户没有 research_replay 是合法状态，
+  //     不该为此付费一次 403）；
+  //   - 门控关闭时同时丢弃可能残留的 Query 缓存，避免管理员会话的批次信息泄漏到普通用户；
+  //   - 它的 loading/error 一律不进入行情表的 loading/error（见下方 tableState）。
+  const batchMetaStrategyKey = resolveBatchMetaStrategyKey({
+    accessReady,
+    isAdmin,
+    strategyKey: DSA_STRATEGY_KEY,
+  })
+  const shouldLoadBatchMeta = batchMetaStrategyKey !== undefined
+  const runsQuery = usePublishedRuns(batchMetaStrategyKey, { limit: 1 })
+  const runs = selectBatchMetaItems({ shouldLoadBatchMeta, data: runsQuery.data })
   const activeRunId = runs[0]?.id || ''
   const activeRun = runs[0]
 
@@ -527,6 +547,19 @@ export default function MarketWorkspacePage() {
   // selected symbol 用于右栏 AtomicFactsPanel
   const selectedSymbol = selected || undefined
 
+  // [USER-FIX-3 / A2] 行情表的 loading/error **只服从主数据源**（/v1/market/stocks）。
+  // 辅助的 batch meta 查询状态显式传入但必须被忽略：
+  // 它 403/500/网络错误时不得遮断已经成功返回的行情行，
+  // 也不得把主数据的真实失败（422/500）吞掉。
+  const tableState = resolveMarketTableState({
+    marketStocksLoading: marketStocksQuery.isLoading,
+    marketStocksError: marketStocksQuery.isError
+      ? describeMarketStocksError(marketStocksQuery.error)
+      : null,
+    batchMetaLoading: runsQuery.isLoading,
+    batchMetaError: runsQuery.isError ? '运行批次加载失败' : null,
+  })
+
   return (
     <div className={styles.marketPage}>
       <MarketToolbar
@@ -581,11 +614,31 @@ export default function MarketWorkspacePage() {
               )}
             </div>
           )}
+          {/* [USER-FIX-3 / A2] admin-only、non-blocking 诊断：批次信息（published-runs）查询
+              失败时只在 admin 区域局部提示；行情表的 loading/error 只由 /v1/market/stocks 决定。 */}
+          {isAdmin && shouldLoadBatchMeta && runsQuery.isError && (
+            <div
+              className="batch-meta-bar"
+              role="status"
+              style={{
+                padding: '6px 16px',
+                borderBottom: '1px solid #232838',
+                fontSize: 12,
+                color: '#f5a623',
+              }}
+            >
+              批次信息加载失败
+            </div>
+          )}
           <StrategyDataTable
             key={activeRunId ? `run-${activeRunId}` : 'run-empty'}
             tableId="market"
             strategyKey={DSA_STRATEGY_KEY}
             activeRunId={activeRunId}
+            // [USER-FIX-3 / A2] 导出已改走 /v1/market/export（与 /market/stocks 同 scope 授权），
+            // 与 DSA run 无关；不显式解除 activeRunId 耦合时，普通 market_data 用户会因为
+            // activeRunId === '' 而拿不到本来合法的导出能力。
+            exportEnabled={accessReady}
             columns={columns}
             // [PRD §三] 默认隐藏 79 个非核心 fp_ 列；preset 应用后由 preset.hiddenColumns 覆盖
             defaultHiddenColumns={getDefaultHiddenFpKeys()}
@@ -594,22 +647,10 @@ export default function MarketWorkspacePage() {
             total={totalResults}
             serverSide
             onQueryChange={handleQueryChange}
-            loading={marketStocksQuery.isLoading || runsQuery.isLoading}
+            loading={tableState.loading}
             // [CHANGE-20260730-012] 显示后端 422 detail 和 500 request_id，不再统一"行情列表加载失败"
-            error={marketStocksQuery.isError
-              ? (() => {
-                  const err = marketStocksQuery.error as { response?: { status?: number; data?: { detail?: string }; headers?: { get: (k: string) => string | null } } }
-                  const status = err?.response?.status
-                  if (status === 422) {
-                    return `筛选/排序参数无效：${err?.response?.data?.detail ?? '未知错误'}`
-                  }
-                  if (status === 500) {
-                    const reqId = err?.response?.headers?.get('x-request-id')
-                    return `服务器错误${reqId ? `（request_id=${reqId}）` : ''}`
-                  }
-                  return `行情列表加载失败：${err?.response?.status ?? '网络错误'}`
-                })()
-              : runsQuery.isError ? '运行批次加载失败' : null}
+            // [USER-FIX-3 / A2] 只由 /v1/market/stocks 决定；辅助 batch meta 查询错误不再进入此处
+            error={tableState.error}
             emptyText={marketStocksQuery.isError ? '行情列表加载失败，请检查筛选/排序参数' : '本页无数据'}
             initialPageSize={PAGE_SIZE}
             tableClassName="compact-table"
