@@ -79,10 +79,10 @@ _DEFAULT_INTRADAY_LOOKBACK_DAYS: int = 180
 # A 股交易日 4 小时：15m=16 根，1h=4 根，1m=240 根
 _BARS_PER_DAY: dict[str, int] = {"15m": 16, "1h": 4, "1m": 240}
 
-# [USER-FIX-3 / C] - 描述: 日内周期集合
-# 只有日内周期存在「当日已完成的实时尾部」语义（由 Pytdx 原生周期提供，
-# 禁止从 1m 聚合，见 P0-4 冻结合同）。日/周/月线不在其中。
-_INTRADAY_TIMEFRAMES: frozenset[str] = frozenset({"1m", "15m", "1h"})
+# [USER-FIX-3 / C] - 描述: 允许 fresh_intraday_tail 的周期集合（**刻意只有 15m**）
+# 本轮需求只针对 15m。不趁机扩大范围：1m/1h 的实时尾部合同保持不变
+# （它们仍按原样返回 realtime 尾部，由各自调用方处理）。
+_FRESH_TAIL_TIMEFRAMES: frozenset[str] = frozenset({"15m"})
 
 # [CP-V3-A] - 描述: 日内回看安全边界（最大回看天数，约 20 年，防止无限扩大查询）
 _MAX_INTRADAY_LOOKBACK_DAYS: int = 5000
@@ -800,6 +800,61 @@ def _finalize_bars(
     if timeframe == "1d":
         df = _filter_unfinished_daily_bars(df, now)
     return df
+
+
+# ===== 15m completed 语义（唯一 owner） =====
+
+
+def _filter_unfinished_15m_bars(
+    bars: pd.DataFrame,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """丢弃仍处于 forming 状态的 15m bar。
+
+    [USER-FIX-3 / C corrective] 本函数是 15m completed 语义的**唯一 owner**。
+    MDAS 在**实时尾部合并之前**调用它（见 get_bars 日内分支），从而保证
+    ``completed_only=True`` 的返回结果**本身**全部为已完成 bar：
+    forming bar 不会进入 ``tail(limit)`` / ``source_bar_hash`` / ``actual_count``
+    / coverage，因此不会挤占 limit 窗口槽位（4000 → 3999）。
+
+    ``NodeClusterInputProvider._filter_unfinished_15m_bars`` 仍会再调用一次作为
+    defensive guard（委托到本函数）；过滤是幂等的，正常路径下为 no-op。
+
+    语义（与仓库冻结的 15m 合同一致）：
+    - right-label：trade_time = bar **结束**时间；
+    - cutoff = ``floor(now, 15min)``，丢弃 end > cutoff 的 bar；
+    - A 股 15m 网格（09:30 / 11:30 / 13:00 / 15:00）均为 15 分钟整数倍，
+      ``floor("15min")`` 在午休空洞处同样正确（DB 不存午休伪 bar），
+      无需在代码内硬编码交易时段，也不会拼出跨午休 bar；
+    - 时区：bars 索引多为 tz-naive（本地时间），now 来自 ``now_shanghai()``
+      是 tz-aware，比较前先归一化，避免 tz-naive/tz-aware 冲突；
+    - fail-closed：now 不可用时丢弃最后一根 bar——宁可少算，
+      绝不把未完成 bar 计入 completed 合同。
+
+    Examples:
+        now=10:07 → cutoff=10:00 → 保留 09:45 / 10:00，丢弃 10:15
+        now=13:07 → cutoff=13:00 → 丢弃 13:15（13:00–13:15 forming）
+        now=13:16 → cutoff=13:15 → 保留 13:15
+    """
+    if bars is None or bars.empty:
+        return bars
+    if now is None:
+        return bars.iloc[:-1] if len(bars) > 0 else bars
+    cutoff = pd.Timestamp(now).floor("15min")
+    idx = bars.index
+    idx_tz = getattr(idx, "tz", None)
+    cutoff_tz = cutoff.tzinfo
+    if idx_tz is None and cutoff_tz is not None:
+        cutoff = cutoff.tz_localize(None)
+    elif idx_tz is not None and cutoff_tz is None:
+        cutoff = cutoff.tz_localize(idx_tz)
+    elif (
+        idx_tz is not None
+        and cutoff_tz is not None
+        and str(idx_tz) != str(cutoff_tz)
+    ):
+        cutoff = cutoff.tz_convert(idx_tz)
+    return bars[bars.index <= cutoff]
 
 
 # ===== 复权因子哈希（跨调用方一致性校验） =====
@@ -1796,7 +1851,7 @@ class MarketDataAggregationService:
             adj: qfq | none
             include_realtime: 交易时段是否补充实时 1m 数据
             completed_only: 只返回已完成 bar（默认 True 时强制 include_realtime=False；
-                仅当 fresh_intraday_tail=True 且周期为日内时例外，见下）
+                仅当 fresh_intraday_tail=True 且周期为 15m 时例外，见下）
             start_date: 起始日期/时间（可选）
             end_date: 结束日期/时间（可选）
             limit: 返回最近 N 根（服务端截取，保证 source_bar_hash 稳定）
@@ -1807,13 +1862,15 @@ class MarketDataAggregationService:
                 （由 caller 标 skipped），绝不调用 external provider / realtime / 15m。
                 production history replay / canary 必须使用 strict DB-only。
             fresh_intraday_tail: [USER-FIX-3 / C] 显式 opt-in：在 completed_only=True
-                语义下，仍允许读取**当日已完成的**日内实时尾部（Pytdx 原生周期，
+                语义下，仍允许读取**当日已完成的** 15m 实时尾部（Pytdx 原生周期，
                 不回写 DB）。默认 False ⇒ 保持「completed_only 强制不含实时」的既有
                 行为，既有的 15m consumer 完全不受影响。
-                本参数只对日内周期（1m/15m/1h）有效；日/周/月线不生效。
-                注意：判据仍是 completed_only（不得把 forming bar 计入），
-                日内 forming bar 由调用方按自身语义过滤
-                （例：NodeClusterInputProvider._filter_unfinished_15m_bars）。
+                本参数**只对 15m 有效**（1m/1h/日/周/月线不生效，见
+                _FRESH_TAIL_TIMEFRAMES）。
+                completed 语义由 MDAS 自身保证：实时尾部在合并之前先经
+                _filter_unfinished_15m_bars 剔除 forming bar，因此返回结果
+                **本身**全部为已完成 bar —— forming 不会进入 limit /
+                source_bar_hash / actual_count / coverage。
 
         Returns:
             BarAggregationResult（含 bars、warmup_bars_full、hash、contract_version 等诊断字段）
@@ -1830,9 +1887,9 @@ class MarketDataAggregationService:
 
         # [mdas] - completed_only 与 include_realtime 互斥：completed_only 强制不含实时
         # [USER-FIX-3 / C] 唯一的例外：调用方显式 fresh_intraday_tail=True 且周期为
-        # 日内时，允许合并「当日已完成的实时尾部」。未显式开启时行为完全不变。
+        # 15m 时，允许合并「当日已完成的实时尾部」。未显式开启时行为完全不变。
         if completed_only and not (
-            fresh_intraday_tail and timeframe in _INTRADAY_TIMEFRAMES
+            fresh_intraday_tail and timeframe in _FRESH_TAIL_TIMEFRAMES
         ):
             include_realtime = False
 
@@ -2030,6 +2087,15 @@ class MarketDataAggregationService:
                         # 1h 使用 Pytdx 原生 60m（按 count 拉取今日 bar）
                         live_agg = await fetch_60min_bars(session, instrument_id, count=4)
 
+                    # [USER-FIX-3 / C corrective] completed_only 的语义必须在返回结果
+                    # **本身**成立：先剔除 forming bar，再做 merge / limit / hash /
+                    # actual_count / coverage。否则 forming bar 会占用 limit 窗口槽位
+                    # （4000 → 3999，把成熟股票误判成 INPUT_CONTRACT_VIOLATION），
+                    # 并使 source_bar_hash 描述的数据集 ≠ 实际被算法消费的数据集。
+                    live_raw_empty = live_agg.empty
+                    if timeframe == "15m" and completed_only:
+                        live_agg = _filter_unfinished_15m_bars(live_agg, now)
+
                     if not live_agg.empty:
                         # 按时间戳合并：实时尾部覆盖 DB 同时间戳 bar
                         bars_df = _merge_bars(bars_df, live_agg)
@@ -2037,13 +2103,15 @@ class MarketDataAggregationService:
                             data_source = "hybrid"
                         is_partial = True
                         last_live_bar_time = pd.Timestamp(live_agg.index[-1])
-                    else:
+                    elif live_raw_empty:
                         # [P0-6] 实时目标周期按当前市场阶段本应存在但返回空 → stale
                         # 禁止静默返回普通 db 状态
                         degraded = True
                         degraded_reason = f"realtime_{timeframe}_empty_in_trading_hours"
                         if data_source != "degraded":
                             data_source = "degraded"
+                    # else：原始实时非空、但过滤后为空（当前 15m 槽位刚开始、
+                    # 尚无任何已完成 bar）→ 属正常情况，不得标 stale。
                 except Exception as exc:
                     degraded = True
                     degraded_reason = f"pytdx realtime fallback failed: {exc}"

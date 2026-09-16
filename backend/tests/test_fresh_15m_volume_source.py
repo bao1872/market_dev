@@ -34,6 +34,7 @@ import pytest
 import app.services.market_data_aggregation_service as mdas_mod
 import app.services.node_cluster_input_provider as provider_mod
 from app.core.time import SHANGHAI_TZ
+from app.services.chart_bars_service import compute_source_bar_hash
 from app.services.node_cluster_input_provider import NodeClusterInputProvider
 
 pytestmark = pytest.mark.pure_unit
@@ -59,11 +60,15 @@ def _bars(*stamps: str) -> pd.DataFrame:
     )
 
 
-def _agg(bars: pd.DataFrame) -> SimpleNamespace:
-    """模拟 MDAS BarAggregationResult 中被 Provider 使用的最小子集。"""
+def _agg(bars: pd.DataFrame, timeframe: str = "15m") -> SimpleNamespace:
+    """模拟 MDAS BarAggregationResult 中被 Provider 使用的最小子集。
+
+    source_bar_hash 按 canonical owner 对**返回的数据**计算，
+    与真实 MDAS 行为一致（hash 描述实际返回的数据集）。
+    """
     return SimpleNamespace(
         bars=bars,
-        source_bar_hash="hash",
+        source_bar_hash=compute_source_bar_hash(bars, timeframe),
         adj_factor_hash="adjhash",
         history_exhausted=False,
     )
@@ -89,6 +94,23 @@ class _CacheRecorder:
         return None
 
 
+def _big_persisted_bars(n: int) -> pd.DataFrame:
+    """构造 n 根连续的已落库 15m bars（标签为 bar 结束时间），用于真实 limit 路径复现。"""
+    end = pd.Timestamp("2026-09-15 15:00")
+    idx = pd.date_range(end=end, periods=n, freq="15min")
+    return pd.DataFrame(
+        {
+            "open": [10.0] * n,
+            "high": [10.5] * n,
+            "low": [9.5] * n,
+            "close": [10.2] * n,
+            "volume": [100.0] * n,
+            "amount": [10000.0] * n,
+        },
+        index=idx,
+    )
+
+
 async def _run_mdas_get_bars(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -97,6 +119,9 @@ async def _run_mdas_get_bars(
     include_realtime: bool,
     fresh_intraday_tail: bool,
     now: datetime,
+    persisted: pd.DataFrame | None = None,
+    live: pd.DataFrame | None = None,
+    limit: int = 16,
 ) -> tuple[Any, _CacheRecorder, AsyncMock]:
     """在完全离线的环境里执行 MDAS.get_bars 并返回 (result, cache recorder, live fetch mock)。"""
     recorder = _CacheRecorder()
@@ -104,8 +129,10 @@ async def _run_mdas_get_bars(
     monkeypatch.setattr(mdas_mod, "_cache_get", recorder.get)
     monkeypatch.setattr(mdas_mod, "_cache_set", lambda *a, **k: None)
 
-    persisted = _bars("2026-09-15 14:45", "2026-09-15 15:00")
-    live = _bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15")
+    if persisted is None:
+        persisted = _bars("2026-09-15 14:45", "2026-09-15 15:00")
+    if live is None:
+        live = _bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15")
     live_mock = AsyncMock(return_value=live)
 
     monkeypatch.setattr(
@@ -137,7 +164,7 @@ async def _run_mdas_get_bars(
         include_realtime=include_realtime,
         completed_only=completed_only,
         fresh_intraday_tail=fresh_intraday_tail,
-        limit=16,
+        limit=limit,
     )
     return result, recorder, live_mock
 
@@ -163,7 +190,7 @@ async def test_mdas_default_completed_only_still_forces_no_realtime(
 async def test_mdas_explicit_flag_enables_fresh_intraday_tail(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """显式 opt-in：15m + completed_only + fresh_intraday_tail → 合并当日实时尾部。"""
+    """显式 opt-in：15m + completed_only + fresh_intraday_tail → 合并当日**已完成**尾部。"""
     result, recorder, live_mock = await _run_mdas_get_bars(
         monkeypatch,
         timeframe="15m",
@@ -174,9 +201,11 @@ async def test_mdas_explicit_flag_enables_fresh_intraday_tail(
     )
     live_mock.assert_awaited()
     assert ":True:True:" in recorder.keys[0]
-    # persisted(2) + live(3，MDAS 不负责过滤 15m forming bar)
-    assert len(result.bars) == 5
+    # persisted(2) + live completed(2)；forming 10:15 已由 MDAS 剔除
+    assert len(result.bars) == 4
+    assert pd.Timestamp("2026-09-16 09:45") in result.bars.index
     assert pd.Timestamp("2026-09-16 10:00") in result.bars.index
+    assert pd.Timestamp("2026-09-16 10:15") not in result.bars.index
 
 
 async def test_mdas_flag_absent_keeps_realtime_off_even_if_requested(
@@ -211,6 +240,79 @@ async def test_mdas_flag_does_not_apply_to_daily(
     assert ":False:True:" in recorder.keys[0]
 
 
+async def test_c17_mdas_completed_only_returns_no_forming_bar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C17：completed_only=True 时，MDAS 返回结果**本身**不含 forming bar。
+
+    （旧合同曾是「MDAS 返回 completed + forming，由 caller 过滤」——该合同已废弃。）
+    """
+    result, _, _ = await _run_mdas_get_bars(
+        monkeypatch,
+        timeframe="15m",
+        completed_only=True,
+        include_realtime=True,
+        fresh_intraday_tail=True,
+        now=_cst(10, 7),
+    )
+    cutoff = pd.Timestamp("2026-09-16 10:00")
+    assert (result.bars.index <= cutoff).all(), "MDAS 返回值本身必须全部为 completed"
+
+
+async def test_c14_full_window_plus_forming_keeps_4000_completed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C14（核心回归）：满窗口 + forming —— MDAS 必须返回 4000 根**全部已完成**的 bars。
+
+    复现独立审计发现的 bug：若 forming 在 tail(limit) 之前未被剔除，它会占用一个
+    窗口槽位，使 Provider 的 defensive filter 之后只剩 3999 根，
+    成熟股票（history_exhausted=False）会被误判成 INPUT_CONTRACT_VIOLATION。
+    """
+    persisted = _big_persisted_bars(4000)
+    result, _, live_mock = await _run_mdas_get_bars(
+        monkeypatch,
+        timeframe="15m",
+        completed_only=True,
+        include_realtime=True,
+        fresh_intraday_tail=True,
+        now=_cst(10, 7),
+        persisted=persisted,
+        live=_bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15"),
+        limit=4000,
+    )
+    live_mock.assert_awaited()
+
+    assert len(result.bars) == 4000, "不得因剔除 forming 而少一根（3999）"
+    assert result.bars.index[-1] == pd.Timestamp("2026-09-16 10:00")
+    assert pd.Timestamp("2026-09-16 09:45") in result.bars.index
+    assert pd.Timestamp("2026-09-16 10:00") in result.bars.index
+    assert pd.Timestamp("2026-09-16 10:15") not in result.bars.index
+    # 4000 persisted + 2 completed fresh = 4002 → tail(4000) 丢掉最旧 2 根
+    assert result.bars.index[0] == persisted.index[2]
+
+
+async def test_c15b_provider_defensive_filter_is_idempotent_on_mdas_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MDAS 已完成过滤 ⇒ Provider defensive filter 必须是 no-op（幂等）。"""
+    result, _, _ = await _run_mdas_get_bars(
+        monkeypatch,
+        timeframe="15m",
+        completed_only=True,
+        include_realtime=True,
+        fresh_intraday_tail=True,
+        now=_cst(10, 7),
+        persisted=_big_persisted_bars(4000),
+        live=_bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15"),
+        limit=4000,
+    )
+    provider = provider_mod.NodeClusterInputProvider
+    filtered = provider._filter_unfinished_15m_bars(result.bars, _cst(10, 7))
+
+    assert len(filtered) == 4000
+    pd.testing.assert_frame_equal(filtered, result.bars)
+
+
 # =============================================================================
 # 2) NodeClusterInputProvider：15m 走 fresh 尾部 + 丢弃 forming bar
 # =============================================================================
@@ -226,9 +328,10 @@ async def _run_provider(
 
     async def _fake_get_bars(self: Any, session: Any, instrument_id: Any, **kwargs: Any) -> Any:
         calls.append(kwargs)
-        if kwargs.get("timeframe") == "15m":
-            return _agg(live_bars)
-        return _agg(_bars("2026-09-15 15:00"))
+        tf = kwargs.get("timeframe", "1d")
+        if tf == "15m":
+            return _agg(live_bars, tf)
+        return _agg(_big_persisted_bars(250), tf)
 
     monkeypatch.setattr(
         provider_mod.MarketDataAggregationService, "get_bars", _fake_get_bars
@@ -383,4 +486,59 @@ def test_c9_daily_without_today_plus_today_15m_tail_is_accepted() -> None:
     assert not with_tail.profile_df.empty
     # 2) 今日 15m 尾部确实进入了 profile（而不是被静默忽略）
     assert not with_tail.profile_df.equals(without_tail.profile_df)
+
+
+# =============================================================================
+# 5) C15 / C16：满窗口不进 3999，且 hash 描述真实算法输入
+# =============================================================================
+
+
+async def test_c15_full_window_keeps_provider_contract_at_4000(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C15：MDAS 已过滤 ⇒ Provider 的 m15_count 必须仍是 4000，不得被判 unavailable。
+
+    这直接复现审计中的反直觉后果：修复前 forming 会占掉一个槽位，
+    Provider filter 后只剩 3999 → 成熟股票被误判 INPUT_CONTRACT_VIOLATION。
+    """
+    node_input, _ = await _run_provider(
+        monkeypatch, now=_cst(10, 7), live_bars=_big_persisted_bars(4000)
+    )
+
+    assert node_input.m15_count == 4000
+    assert node_input.availability == "available"
+    assert node_input.degraded_reason is None
+
+
+async def test_c16_m15_source_hash_describes_actual_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C16：node_input.m15_source_hash 必须等于对 bars_15m 重算的 canonical hash。
+
+    即 hash 描述的输入身份 == 真正进入 Node 算法的数据集。
+    """
+    node_input, _ = await _run_provider(
+        monkeypatch,
+        now=_cst(10, 7),
+        live_bars=_bars("2026-09-16 09:45", "2026-09-16 10:00"),
+    )
+
+    recomputed = compute_source_bar_hash(node_input.bars_15m, "15m")
+    assert node_input.m15_source_hash == recomputed
+    assert node_input.m15_source_hash != ""
+
+
+async def test_c16_negative_control_hash_mismatch_is_detectable() -> None:
+    """C16 反证（说明该断言有牙齿）：若上游把 forming bar 计入 hash 但数据被过滤，
+    hash 与实际输入必然不一致 —— 正是修复前的问题。
+    """
+    with_forming = _bars("2026-09-16 09:45", "2026-09-16 10:00", "2026-09-16 10:15")
+    filtered = provider_mod.NodeClusterInputProvider._filter_unfinished_15m_bars(
+        with_forming, _cst(10, 7)
+    )
+    upstream_hash = compute_source_bar_hash(with_forming, "15m")
+    actual_input_hash = compute_source_bar_hash(filtered, "15m")
+
+    assert len(filtered) == 2
+    assert upstream_hash != actual_input_hash
 

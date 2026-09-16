@@ -48,7 +48,12 @@ from app.services.business_date_adjustment_context import (
     BusinessDateAdjustmentContext,
     BusinessDateAdjustmentService,
 )
-from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.market_data_aggregation_service import (
+    MarketDataAggregationService,
+)
+from app.services.market_data_aggregation_service import (
+    _filter_unfinished_15m_bars as _filter_completed_15m_bars,
+)
 
 
 class NodeAdjustmentContextMismatchError(RuntimeError):
@@ -214,9 +219,10 @@ class NodeClusterInputProvider:
             instrument_id,
             timeframe="15m",
             adj="none",
-            # [USER-FIX-3 / C] completed 语义下仍读取「当日已完成的实时尾部」：
-            # 盘中（无外部 15m 落库任务）否则只能拿到上一交易日收盘为止的 stale 15m。
-            # forming bar 仍由下方 _filter_unfinished_15m_bars 丢弃。
+            # [USER-FIX-3 / C] completed 语义下读取「当日已完成的实时尾部」：
+            # 否则盘中（无外部 15m 落库任务）只能拿到上一交易日收盘为止的 stale 15m。
+            # MDAS 已按 completed_only 语义在合并前剔除 forming bar，其返回结果本身
+            # 全部为已完成 bar；下方 _filter_unfinished_15m_bars 仅为 defensive 复核。
             include_realtime=True,
             completed_only=True,
             fresh_intraday_tail=True,
@@ -316,9 +322,10 @@ class NodeClusterInputProvider:
             instrument_id,
             timeframe="15m",
             adj="qfq",
-            # [USER-FIX-3 / C] completed 语义下仍读取「当日已完成的实时尾部」：
-            # 盘中（无外部 15m 落库任务）否则只能拿到上一交易日收盘为止的 stale 15m。
-            # forming bar 仍由下方 _filter_unfinished_15m_bars 丢弃。
+            # [USER-FIX-3 / C] completed 语义下读取「当日已完成的实时尾部」：
+            # 否则盘中（无外部 15m 落库任务）只能拿到上一交易日收盘为止的 stale 15m。
+            # MDAS 已按 completed_only 语义在合并前剔除 forming bar，其返回结果本身
+            # 全部为已完成 bar；下方 _filter_unfinished_15m_bars 仅为 defensive 复核。
             include_realtime=True,
             completed_only=True,
             fresh_intraday_tail=True,
@@ -554,39 +561,19 @@ class NodeClusterInputProvider:
         bars_15m: pd.DataFrame,
         now: datetime | None = None,
     ) -> pd.DataFrame:
-        """丢弃仍处于 forming 状态的 15m bar，保证进入 Node 的 15m 全部为已完成 bar。
+        """丢弃 still-forming 的 15m bar（**defensive guard**）。
 
-        15m 采用 right-label 语义（trade_time = bar 结束时间）。forming bar 即其结束时间
-        落在当前 15 分钟槽内（end > floor(now, 15min)）。这里沿用 1m 路径的
-        ``now.floor("min")`` 思路，对 15m 取 ``now.floor("15min")`` 作为 completion cutoff，
-        丢弃 end > cutoff 的 bar。由于 A 股 15m 网格（09:30 / 11:30 / 13:00 / 15:00）均为
-        15 分钟的整数倍，floor("15min") 在午休空洞处同样正确（DB 不存午休伪 bar），
-        无需在 Node 代码内硬编码交易时段。
+        [USER-FIX-3 / C corrective] canonical completion 语义的 owner 已前移到
+        ``market_data_aggregation_service._filter_unfinished_15m_bars``：MDAS 在实时
+        尾部合并前即剔除 forming bar，因此其返回结果本身全部为已完成 bar。
 
-        fail-closed：若 now 不可用（极罕见），丢弃最后一根 bar——宁可少算，
-        绝不把未完成的 bar 计入 4000 合同。
+        本方法保留一次幂等复核（委托到同一 owner，不另写第二套 cutoff 规则），
+        用于在上游合同被破坏时仍然守住「进入 Node 的 15m 全部为已完成 bar」。
+        正常 production 路径下：
+
+            MDAS 返回数据 == 本方法过滤后数据
         """
-        if bars_15m is None or bars_15m.empty:
-            return bars_15m
-        if now is None:
-            return bars_15m.iloc[:-1] if len(bars_15m) > 0 else bars_15m
-        cutoff = pd.Timestamp(now).floor("15min")
-        idx = bars_15m.index
-        idx_tz = getattr(idx, "tz", None)
-        cutoff_tz = cutoff.tzinfo
-        # 归一化时区后再比较：bars 索引多为 tz-naive（本地时间），而 now 来自
-        # now_shanghai() 是 tz-aware；两者直接比较会触发 tz-naive/tz-aware 冲突。
-        if idx_tz is None and cutoff_tz is not None:
-            cutoff = cutoff.tz_localize(None)
-        elif idx_tz is not None and cutoff_tz is None:
-            cutoff = cutoff.tz_localize(idx_tz)
-        elif (
-            idx_tz is not None
-            and cutoff_tz is not None
-            and str(idx_tz) != str(cutoff_tz)
-        ):
-            cutoff = cutoff.tz_convert(idx_tz)
-        return bars_15m[bars_15m.index <= cutoff]
+        return _filter_completed_15m_bars(bars_15m, now)
 
     @staticmethod
     def to_dict(node_input: NodeClusterInput) -> dict:
