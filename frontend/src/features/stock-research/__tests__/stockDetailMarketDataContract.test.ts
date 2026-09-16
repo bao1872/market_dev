@@ -51,8 +51,9 @@ test('P0-1: market 访问生成 originScope=market 的 URL（双列布局，显�
   })
   const params = new URLSearchParams(url.split('?')[1])
   assert.equal(params.get('originScope'), 'market')
-  assert.equal(params.get('source'), 'selection')
-  assert.equal(params.get('strategy'), 'dsa_selector')
+  // [CHANGE-20260731-SAME-SOURCE] buildStockDetailUrl 不再写入旧 DSA source/strategy 标记
+  assert.equal(params.get('source'), null)
+  assert.equal(params.get('strategy'), null)
 })
 
 test('P0-1: watchlist 访问生成 originScope=watchlist 的 URL（双列布局，显示自选来源）', () => {
@@ -61,8 +62,9 @@ test('P0-1: watchlist 访问生成 originScope=watchlist 的 URL（双列布局�
   })
   const params = new URLSearchParams(url.split('?')[1])
   assert.equal(params.get('originScope'), 'watchlist')
-  assert.equal(params.get('source'), 'watchlist')
-  assert.equal(params.get('strategy'), 'watchlist_monitor')
+  // [CHANGE-20260731-SAME-SOURCE] buildStockDetailUrl 不再写入旧 DSA source/strategy 标记
+  assert.equal(params.get('source'), null)
+  assert.equal(params.get('strategy'), null)
 })
 
 // ===== 3. 详情页无 useRealtimeQuote 请求 =====
@@ -172,8 +174,8 @@ test('P0-3: MessagesPage.tsx 不手拼 /stock/:symbol，统一使用 buildStockD
 
 // ===== 补充: ChartSnapshotResponse 类型包含 quote/freshness_state 字段 =====
 
-test('P0-7: endpoints.ts 的 ChartSnapshotResponse 包含 quote/freshness_state 扩展字段', () => {
-  const sourcePath = join(__dirname, '..', '..', '..', 'api', 'endpoints.ts')
+test('P0-7: stockData.ts 的 ChartSnapshotResponse 包含 quote/freshness_state 扩展字段', () => {
+  const sourcePath = join(__dirname, '..', '..', '..', 'api', 'stockData.ts')
   const source = readFileSync(sourcePath, 'utf-8')
   // 验证 ChartSnapshotResponse 接口包含扩展字段
   assert.ok(source.includes('freshness_state'), 'ChartSnapshotResponse 应包含 freshness_state 字段')

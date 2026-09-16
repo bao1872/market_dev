@@ -4,8 +4,9 @@
 // AfterClose hooks 单独在 ./useAdminAfterCloseApi。query key/staleTime/invalidation 逐字等价。
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import * as api from '../api/endpoints'
-import type { CreateChannelRequest, DeliveryStatus, PaginationParams } from '../api/endpoints'
+import * as adminApi from '../api/admin'
+import type { CreateChannelRequest, DeliveryStatus } from '../api/notification'
+import type { PaginationParams } from '../api/endpoints'
 import type {
   TriggerRunRequest,
   InviteCodeCreateRequest,
@@ -30,7 +31,7 @@ export function useAdminStrategyRuns(
 ) {
   return useQuery({
     queryKey: ['admin', 'strategies', strategyKey, 'runs', params],
-    queryFn: () => api.getAdminStrategyRuns(strategyKey!, params),
+    queryFn: () => adminApi.getAdminStrategyRuns(strategyKey!, params),
     enabled: !!strategyKey,
     staleTime: STALE_REALTIME,
   })
@@ -43,7 +44,7 @@ export function useTriggerStrategyRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ strategyKey, payload }: { strategyKey: string; payload: TriggerRunRequest }) =>
-      api.triggerStrategyRun(strategyKey, payload),
+      adminApi.triggerStrategyRun(strategyKey, payload),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['strategies', variables.strategyKey, 'runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'strategies', variables.strategyKey, 'runs'] })
@@ -64,7 +65,7 @@ export function useTriggerStrategyRun() {
 export function useAdminUserChannels(userId: string | null, enabled: boolean = true) {
   return useQuery({
     queryKey: ['admin', 'users', userId, 'notification-channels'],
-    queryFn: () => api.adminListUserChannels(userId as string),
+    queryFn: () => adminApi.adminListUserChannels(userId as string),
     staleTime: STALE_PLANS,
     enabled: enabled && !!userId,
   })
@@ -75,7 +76,7 @@ export function useAdminCreateUserChannel() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (params: { userId: string; data: CreateChannelRequest }) =>
-      api.adminCreateUserChannel(params.userId, params.data),
+      adminApi.adminCreateUserChannel(params.userId, params.data),
     onSuccess: (_data, params) => {
       queryClient.invalidateQueries({
         queryKey: ['admin', 'users', params.userId, 'notification-channels'],
@@ -92,7 +93,7 @@ export function useAdminUpdateUserChannel() {
       userId: string
       channelId: string
       data: { display_name?: string; target_config?: Record<string, unknown> }
-    }) => api.adminUpdateUserChannel(params.userId, params.channelId, params.data),
+    }) => adminApi.adminUpdateUserChannel(params.userId, params.channelId, params.data),
     onSuccess: (_data, params) => {
       queryClient.invalidateQueries({
         queryKey: ['admin', 'users', params.userId, 'notification-channels'],
@@ -106,7 +107,7 @@ export function useAdminDeleteUserChannel() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (params: { userId: string; channelId: string }) =>
-      api.adminDeleteUserChannel(params.userId, params.channelId),
+      adminApi.adminDeleteUserChannel(params.userId, params.channelId),
     onSuccess: (_data, params) => {
       queryClient.invalidateQueries({
         queryKey: ['admin', 'users', params.userId, 'notification-channels'],
@@ -120,7 +121,7 @@ export function useAdminVerifyUserChannel() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (params: { userId: string; channelId: string }) =>
-      api.adminVerifyUserChannel(params.userId, params.channelId),
+      adminApi.adminVerifyUserChannel(params.userId, params.channelId),
     onSuccess: (_data, params) => {
       queryClient.invalidateQueries({
         queryKey: ['admin', 'users', params.userId, 'notification-channels'],
@@ -134,7 +135,7 @@ export function useAdminTestUserChannel() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (params: { userId: string; channelId: string }) =>
-      api.adminTestUserChannel(params.userId, params.channelId),
+      adminApi.adminTestUserChannel(params.userId, params.channelId),
     onSuccess: (_data, params) => {
       queryClient.invalidateQueries({
         queryKey: ['admin', 'users', params.userId, 'notification-channels'],
@@ -148,7 +149,7 @@ export function useAdminTestUserChannel() {
 export function useInviteCodes(params?: { status?: string; limit?: number; offset?: number }) {
   return useQuery({
     queryKey: ['admin', 'invite-codes', params],
-    queryFn: () => api.getInviteCodes(params),
+    queryFn: () => adminApi.getInviteCodes(params),
     staleTime: STALE_REALTIME,
   })
 }
@@ -157,7 +158,7 @@ export function useInviteCodes(params?: { status?: string; limit?: number; offse
 export function useCreateInviteCodes() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (payload: InviteCodeCreateRequest) => api.createInviteCodes(payload),
+    mutationFn: (payload: InviteCodeCreateRequest) => adminApi.createInviteCodes(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'invite-codes'] })
     },
@@ -168,7 +169,7 @@ export function useCreateInviteCodes() {
 export function useRevokeInviteCode() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (inviteCodeId: string) => api.revokeInviteCode(inviteCodeId),
+    mutationFn: (inviteCodeId: string) => adminApi.revokeInviteCode(inviteCodeId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'invite-codes'] })
     },
@@ -179,7 +180,7 @@ export function useRevokeInviteCode() {
 export function useMembers(params?: { limit?: number; offset?: number }) {
   return useQuery({
     queryKey: ['admin', 'members', params],
-    queryFn: () => api.getMembers(params),
+    queryFn: () => adminApi.getMembers(params),
     staleTime: STALE_REALTIME,
   })
 }
@@ -188,7 +189,7 @@ export function useMembers(params?: { limit?: number; offset?: number }) {
 export function useMemberRedemptions(userId: string | undefined) {
   return useQuery({
     queryKey: ['admin', 'members', userId, 'redemptions'],
-    queryFn: () => api.getMemberRedemptions(userId!),
+    queryFn: () => adminApi.getMemberRedemptions(userId!),
     enabled: !!userId,
     staleTime: STALE_REALTIME,
   })
@@ -198,7 +199,7 @@ export function useMemberRedemptions(userId: string | undefined) {
 export function useAdminUsers(params?: PaginationParams) {
   return useQuery({
     queryKey: ['admin', 'users', params],
-    queryFn: () => api.getAdminUsers(params),
+    queryFn: () => adminApi.getAdminUsers(params),
     staleTime: STALE_REALTIME,
   })
 }
@@ -207,7 +208,7 @@ export function useAdminUsers(params?: PaginationParams) {
 export function useAdminUser(userId: string | undefined) {
   return useQuery({
     queryKey: ['admin', 'users', userId],
-    queryFn: () => api.getAdminUser(userId!),
+    queryFn: () => adminApi.getAdminUser(userId!),
     enabled: !!userId,
     staleTime: STALE_REALTIME,
   })
@@ -217,7 +218,7 @@ export function useAdminUser(userId: string | undefined) {
 export function useAdminEnableUser() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (userId: string) => api.adminEnableUser(userId),
+    mutationFn: (userId: string) => adminApi.adminEnableUser(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -229,7 +230,7 @@ export function useAdminEnableUser() {
 export function useAdminDisableUser() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (userId: string) => api.adminDisableUser(userId),
+    mutationFn: (userId: string) => adminApi.adminDisableUser(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -242,7 +243,7 @@ export function useAdminResetUserPassword() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ userId, newPassword }: { userId: string; newPassword: string }) =>
-      api.adminResetUserPassword(userId, { new_password: newPassword }),
+      adminApi.adminResetUserPassword(userId, { new_password: newPassword }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs'] })
@@ -260,7 +261,7 @@ export function useAdminGrantSubscription() {
     }: {
       userId: string
       payload: GrantSubscriptionRequest
-    }) => api.adminGrantSubscription(userId, payload),
+    }) => adminApi.adminGrantSubscription(userId, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -278,7 +279,7 @@ export function useAdminRenewSubscription() {
     }: {
       userId: string
       payload: RenewSubscriptionRequest
-    }) => api.adminRenewSubscription(userId, payload),
+    }) => adminApi.adminRenewSubscription(userId, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -290,7 +291,7 @@ export function useAdminRenewSubscription() {
 export function useAdminRevokeSubscription() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (userId: string) => api.adminRevokeSubscription(userId),
+    mutationFn: (userId: string) => adminApi.adminRevokeSubscription(userId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -308,7 +309,7 @@ export function useAdminChangeSubscriptionPlan() {
     }: {
       userId: string
       payload: ChangePlanRequest
-    }) => api.adminChangeSubscriptionPlan(userId, payload),
+    }) => adminApi.adminChangeSubscriptionPlan(userId, payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -320,7 +321,7 @@ export function useAdminChangeSubscriptionPlan() {
 export function useUserCapabilities(userId: string | undefined, enabled: boolean = true) {
   return useQuery({
     queryKey: ['admin', 'users', userId, 'capabilities'],
-    queryFn: () => api.getUserCapabilities(userId!),
+    queryFn: () => adminApi.getUserCapabilities(userId!),
     enabled: !!userId && enabled,
     staleTime: STALE_REALTIME,
   })
@@ -336,7 +337,7 @@ export function useAdminGrantCapability() {
     }: {
       userId: string
       payload: GrantCapabilityRequest
-    }) => api.adminGrantCapability(userId, payload),
+    }) => adminApi.adminGrantCapability(userId, payload),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -354,7 +355,7 @@ export function useAdminRevokeCapability() {
     }: {
       userId: string
       capability: 'self_selection' | 'market_data' | 'research_replay'
-    }) => api.adminRevokeCapability(userId, capability),
+    }) => adminApi.adminRevokeCapability(userId, capability),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
@@ -374,7 +375,7 @@ export function useAdminAuditLogs(
 ) {
   return useQuery({
     queryKey: ['admin', 'audit-logs', params],
-    queryFn: () => api.getAdminAuditLogs(params),
+    queryFn: () => adminApi.getAdminAuditLogs(params),
     staleTime: STALE_REALTIME,
     enabled,
   })
@@ -389,7 +390,7 @@ export function useAdminAuditLogs(
 export function useAdminBetaApplications(params?: BetaApplicationQueryParams) {
   return useQuery({
     queryKey: ['admin', 'beta-applications', params],
-    queryFn: () => api.getAdminBetaApplications(params),
+    queryFn: () => adminApi.getAdminBetaApplications(params),
     staleTime: STALE_REALTIME,
   })
 }
@@ -398,7 +399,7 @@ export function useAdminBetaApplications(params?: BetaApplicationQueryParams) {
 export function useAdminBetaApplicationStats() {
   return useQuery({
     queryKey: ['admin', 'beta-applications', 'stats'],
-    queryFn: () => api.getAdminBetaApplicationStats(),
+    queryFn: () => adminApi.getAdminBetaApplicationStats(),
     staleTime: STALE_REALTIME,
   })
 }
@@ -407,7 +408,7 @@ export function useAdminBetaApplicationStats() {
 export function useAdminBetaApplicationDetail(appId: string | undefined) {
   return useQuery({
     queryKey: ['admin', 'beta-applications', appId, 'detail'],
-    queryFn: () => api.getAdminBetaApplicationDetail(appId!),
+    queryFn: () => adminApi.getAdminBetaApplicationDetail(appId!),
     enabled: !!appId,
     staleTime: STALE_REALTIME,
   })
@@ -418,7 +419,7 @@ export function useUpdateAdminBetaApplication() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ appId, payload }: { appId: string; payload: BetaApplicationPatchRequest }) =>
-      api.updateAdminBetaApplication(appId, payload),
+      adminApi.updateAdminBetaApplication(appId, payload),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', variables.appId, 'detail'] })
@@ -431,7 +432,7 @@ export function useUpdateAdminBetaApplication() {
 export function useRetryAdminBetaApplicationFeishu() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (appId: string) => api.retryAdminBetaApplicationFeishu(appId),
+    mutationFn: (appId: string) => adminApi.retryAdminBetaApplicationFeishu(appId),
     onSuccess: (_data, appId) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', appId, 'detail'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications'] })
@@ -450,7 +451,7 @@ export function useRetryAdminBetaApplicationFeishu() {
 export function useAdminSystemOverview(enabled: boolean = true) {
   return useQuery({
     queryKey: ['admin', 'system-overview'],
-    queryFn: api.getAdminSystemOverview,
+    queryFn: adminApi.getAdminSystemOverview,
     enabled,
     staleTime: STALE_REALTIME,
     refetchInterval: enabled ? 15_000 : false,
@@ -466,7 +467,7 @@ export function useAdminProductReadiness(
 ) {
   return useQuery({
     queryKey: ['admin', 'readiness', tradeDate],
-    queryFn: () => api.getAdminProductReadiness(tradeDate!),
+    queryFn: () => adminApi.getAdminProductReadiness(tradeDate!),
     enabled: !!tradeDate && enabled,
     staleTime: STALE_REALTIME,
     refetchInterval: enabled ? 15_000 : false,
@@ -483,7 +484,7 @@ export function useAdminStockDebug(
 ) {
   return useQuery({
     queryKey: ['admin', 'stock-debug', symbol, params ?? null],
-    queryFn: ({ signal }) => api.getAdminStockDebug(symbol!, params, { signal }),
+    queryFn: ({ signal }) => adminApi.getAdminStockDebug(symbol!, params, { signal }),
     enabled: !!symbol && (options?.enabled ?? true),
     staleTime: STALE_REALTIME,
   })
@@ -498,7 +499,7 @@ export function useMessageDeliveries(params?: {
 }) {
   return useQuery({
     queryKey: ['admin', 'message-deliveries', params],
-    queryFn: () => api.getMessageDeliveries(params),
+    queryFn: () => adminApi.getMessageDeliveries(params),
     staleTime: STALE_REALTIME,
   })
 }
@@ -506,7 +507,7 @@ export function useMessageDeliveries(params?: {
 export function useRetryMessageDelivery() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (deliveryId: string) => api.retryMessageDelivery(deliveryId),
+    mutationFn: (deliveryId: string) => adminApi.retryMessageDelivery(deliveryId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'message-deliveries'] })
     },
@@ -522,7 +523,7 @@ export function useSchedulerJobRuns(params?: {
 }) {
   return useQuery({
     queryKey: ['admin', 'scheduler-job-runs', params],
-    queryFn: () => api.getSchedulerJobRuns(params),
+    queryFn: () => adminApi.getSchedulerJobRuns(params),
     staleTime: STALE_REALTIME,
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
@@ -537,7 +538,7 @@ export function useWorkerHeartbeats(params?: {
 }) {
   return useQuery({
     queryKey: ['admin', 'worker-heartbeats', params],
-    queryFn: () => api.getWorkerHeartbeats(params),
+    queryFn: () => adminApi.getWorkerHeartbeats(params),
     staleTime: STALE_REALTIME,
     refetchInterval: 10_000,
     refetchIntervalInBackground: false,
@@ -547,7 +548,7 @@ export function useWorkerHeartbeats(params?: {
 export function useAdminVisitors() {
   return useQuery({
     queryKey: ['admin', 'visitors'],
-    queryFn: api.getAdminVisitors,
+    queryFn: adminApi.getAdminVisitors,
     staleTime: 5 * 60 * 1000, // 5 分钟
     refetchInterval: 5 * 60 * 1000,
     refetchIntervalInBackground: false,
@@ -563,7 +564,7 @@ export function useTriggerComputeBoard() {
     }: {
       boardId: string
       params?: { trade_date?: string; publish?: boolean }
-    }) => api.triggerComputeBoard(boardId, params),
+    }) => adminApi.triggerComputeBoard(boardId, params),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['board-analysis'] })
     },
@@ -578,7 +579,7 @@ export function useTriggerComputeAllBoards() {
       board_type?: 'industry' | 'concept'
       limit?: number
       publish?: boolean
-    }) => api.triggerComputeAllBoards(params),
+    }) => adminApi.triggerComputeAllBoards(params),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['board-analysis'] })
     },

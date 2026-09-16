@@ -3,7 +3,7 @@
 // [S3-D] 由 useApi.ts 迁出（对齐 S5 AfterClose 拆核）。useApi.ts 仅兼容 barrel。
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import * as api from '../api/endpoints'
+import * as adminApi from '../api/adminAfterClose'
 import type { AfterClosePipelineRunRequest } from '../api/adminAfterClose'
 
 const STALE_REALTIME = 30 * 1000 // 实时数据 30 秒
@@ -15,7 +15,7 @@ const STALE_REALTIME = 30 * 1000 // 实时数据 30 秒
 export function useJobRunEvents(runId: string | null | undefined) {
   return useQuery({
     queryKey: ['job-runs', runId, 'events'],
-    queryFn: () => api.getJobRunEvents(runId!),
+    queryFn: () => adminApi.getJobRunEvents(runId!),
     enabled: !!runId,
     staleTime: STALE_REALTIME,
   })
@@ -27,7 +27,7 @@ export function useJobRunEvents(runId: string | null | undefined) {
 export function useAfterCloseRunStatus(runId: string | null | undefined, enabled: boolean = true) {
   return useQuery({
     queryKey: ['after-close-runs', runId],
-    queryFn: () => api.getAfterCloseRunStatus(runId!),
+    queryFn: () => adminApi.getAfterCloseRunStatus(runId!),
     enabled: !!runId && enabled,
     staleTime: STALE_REALTIME,
     refetchInterval: enabled ? 10_000 : false,
@@ -39,7 +39,7 @@ export function useAfterCloseRunStatus(runId: string | null | undefined, enabled
 export function useCreateAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (tradeDate: string) => api.createAfterCloseRun(tradeDate),
+    mutationFn: (tradeDate: string) => adminApi.createAfterCloseRun(tradeDate),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
@@ -53,7 +53,7 @@ export function useForceAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (args: { runId: string; restartFrom?: 'daily_ready' }) =>
-      api.forceAfterCloseRun(args.runId, args.restartFrom),
+      adminApi.forceAfterCloseRun(args.runId, args.restartFrom),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
@@ -65,7 +65,7 @@ export function useForceAfterCloseRun() {
 export function useRetryAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (runId: string) => api.retryAfterCloseRun(runId),
+    mutationFn: (runId: string) => adminApi.retryAfterCloseRun(runId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
@@ -79,7 +79,7 @@ export function useRetryAfterCloseRun() {
 export function useResumeAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (runId: string) => api.resumeAfterCloseRun(runId),
+    mutationFn: (runId: string) => adminApi.resumeAfterCloseRun(runId),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
       queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
@@ -115,7 +115,7 @@ export { PIPELINE_POLL_RUNNING, PIPELINE_POLL_IDLE, getPipelinePollInterval }
 export function useAfterClosePipelineLatest(enabled: boolean = true) {
   return useQuery({
     queryKey: ['after-close-pipeline', 'latest'],
-    queryFn: api.getAfterClosePipelineLatest,
+    queryFn: adminApi.getAfterClosePipelineLatest,
     enabled,
     staleTime: STALE_REALTIME,
     refetchInterval: (query) => getPipelinePollInterval(query.state.data?.overall_status),
@@ -135,7 +135,7 @@ export function useAfterClosePipelineByDate(
 ) {
   return useQuery({
     queryKey: ['after-close-pipeline', 'by-date', tradeDate],
-    queryFn: () => api.getAfterClosePipelineByDate(tradeDate!),
+    queryFn: () => adminApi.getAfterClosePipelineByDate(tradeDate!),
     enabled: !!tradeDate && enabled,
     staleTime: STALE_REALTIME,
     refetchInterval: (query) => getPipelinePollInterval(query.state.data?.overall_status),
@@ -155,7 +155,7 @@ export function useAfterClosePipelineRuns(
 ) {
   return useQuery({
     queryKey: ['after-close-pipeline', 'runs', limit],
-    queryFn: () => api.getAfterClosePipelineRuns(limit),
+    queryFn: () => adminApi.getAfterClosePipelineRuns(limit),
     enabled,
     staleTime: STALE_REALTIME,
     refetchInterval: PIPELINE_POLL_IDLE,
@@ -183,7 +183,7 @@ export function useCreateAfterClosePipelineRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (payload: AfterClosePipelineRunRequest) =>
-      api.createAfterClosePipelineRun(payload),
+      adminApi.createAfterClosePipelineRun(payload),
     onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
   })
 }
@@ -192,7 +192,7 @@ export function useCancelAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
-      api.cancelAfterCloseRun(runId, reason),
+      adminApi.cancelAfterCloseRun(runId, reason),
     onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
   })
 }
@@ -201,7 +201,7 @@ export function useReconcileAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
-      api.reconcileAfterCloseRun(runId, reason),
+      adminApi.reconcileAfterCloseRun(runId, reason),
     onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
   })
 }
@@ -209,7 +209,7 @@ export function useReconcileAfterCloseRun() {
 export function useRestartAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
-    mutationFn: (runId: string) => api.restartAfterCloseRun(runId),
+    mutationFn: (runId: string) => adminApi.restartAfterCloseRun(runId),
     onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
   })
 }
@@ -218,7 +218,7 @@ export function useForceRestartAfterCloseRun() {
   const queryClient = useQueryClient()
   return useMutation({
     mutationFn: (input: { runId: string; restartFrom?: 'daily_ready' }) =>
-      api.forceRestartAfterCloseRun(input.runId, input.restartFrom),
+      adminApi.forceRestartAfterCloseRun(input.runId, input.restartFrom),
     onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
   })
 }

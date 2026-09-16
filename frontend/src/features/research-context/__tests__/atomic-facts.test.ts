@@ -19,7 +19,8 @@ const FRONTEND_ROOT = join(__dirname, '..', '..', '..')
 // BACKEND_ROOT = /root/web_dev/backend（再上 2 级）
 const BACKEND_ROOT = join(FRONTEND_ROOT, '..', '..', 'backend')
 const CONTRACT_PATH = join(BACKEND_ROOT, 'app', 'contracts', 'atomic_fact_contract_v1.json')
-const ENDPOINTS_PATH = join(FRONTEND_ROOT, 'api', 'endpoints.ts')
+// [S3-E] AtomicFacts*/ProductObservations/AtomicFactChange 等类型已迁至 api/stockData.ts
+const ENDPOINTS_PATH = join(FRONTEND_ROOT, 'api', 'stockData.ts')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf-8')

@@ -24,7 +24,8 @@ const BACKEND_ROOT = join(FRONTEND_ROOT, '..', '..', 'backend')
 
 const STRIP_PATH = join(FRONTEND_ROOT, 'features', 'stock-research', 'StockQuoteStrip.tsx')
 const USE_STOCK_RESEARCH_PATH = join(FRONTEND_ROOT, 'features', 'stock-research', 'useStockResearchData.ts')
-const ENDPOINTS_PATH = join(FRONTEND_ROOT, 'api', 'endpoints.ts')
+// [S3-E] QuoteResponse 已迁至 api/stockData.ts（endpoints.ts 仅兼容 re-export）
+const ENDPOINTS_PATH = join(FRONTEND_ROOT, 'api', 'stockData.ts')
 const DATA_TABLE_PATH = join(FRONTEND_ROOT, 'components', 'StrategyDataTable.tsx')
 const MINI_KLINE_PATH = join(__dirname, '..', 'MiniKlineCard.tsx')
 const CONTROLLER_PATH = join(__dirname, '..', 'miniKlineController.ts')

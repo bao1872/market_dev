@@ -22,9 +22,9 @@ import type {
   UpdateChannelRequest,
   DeliveryStatus,
   MessageDelivery,
-  PlanCode,
-  PaginationParams,
-} from './endpoints'
+} from './notification'
+import type { PlanCode, PaginationParams } from './endpoints'
+import type { AtomicFactsContextResponse } from './stockData'
 
 export interface UserListResponse {
   items: UserResponse[]
@@ -1171,3 +1171,49 @@ export async function triggerComputeAllBoards(
 }
 
 
+
+// ===== Admin Stock Debug（[S3-E] 从 endpoints.ts 迁入；依赖 stockData 的 AtomicFacts 类型） =====
+/** AdminAtomicFactDebugItem - 管理员调试：单事实可追溯信息（保留内部 ID / 路径） */
+export interface AdminAtomicFactDebugItem {
+  factId: string
+  publicKey: string
+  sourcePath: string | null
+  rawValue: number | null
+  thresholdRef: string | null
+  thresholdEnabled: boolean
+  featureFlag: boolean
+  missing: boolean
+}
+
+/** AdminStockDebugResponse - 在原子事实响应基础上补充原始 payload 与可追溯信息 */
+export interface AdminStockDebugResponse extends AtomicFactsContextResponse {
+  rawDebug?: {
+    structuralPayload: Record<string, unknown>
+    temporalPayload: Record<string, unknown>
+    summaryPayload: Record<string, unknown>
+    sourcePrimaryBarTime: string | null
+    sourceSecondaryBarTime: string | null
+    runId: string
+    runType: string
+    runStartedAt: string | null
+    runFinishedAt: string | null
+  }
+  atomicFactsDebug?: AdminAtomicFactDebugItem[]
+}
+
+/**
+ * 管理员个股调试接口（需管理员身份）。
+ * GET /v1/admin/stocks/{symbol}/debug?as_of=YYYY-MM-DD
+ * 返回 Atomic Fact Contract V1 上下文 + 原始 payload 与可追溯信息。
+ */
+export async function getAdminStockDebug(
+  symbol: string,
+  params?: { as_of?: string },
+  options?: { signal?: AbortSignal },
+): Promise<AdminStockDebugResponse> {
+  const { data } = await apiClient.get<AdminStockDebugResponse>(
+    `/v1/admin/stocks/${symbol}/debug`,
+    { params, signal: options?.signal },
+  )
+  return data
+}

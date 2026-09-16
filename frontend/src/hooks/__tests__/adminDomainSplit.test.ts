@@ -73,7 +73,7 @@ const AC_HOOKS = [
   'useCancelAfterCloseRun','useReconcileAfterCloseRun','useRestartAfterCloseRun','useForceRestartAfterCloseRun',
 ] as const
 // 必须留在非-admin 边界的符号
-const NON_ADMIN = ['getPlans', 'getBoardAnalysisList', 'getBoardAnalysisDetail', 'getStockContext', 'getFirstPyramid', 'getAdminStockDebug']
+const NON_ADMIN = ['getPlans', 'getBoardAnalysisList', 'getBoardAnalysisDetail', 'getStockContext', 'getFirstPyramid']
 
 test('API barrel identity: endpoints 重新导出 admin/adminAfterClose owner（同一函数引用）', async () => {
   const endpoints = (await import('../../api/endpoints.ts')) as Record<string, unknown>
