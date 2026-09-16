@@ -7,13 +7,17 @@
 //   /capture/stock/:symbol 位于两套壳层之外（只使用 captureClient，不经过任何壳层）
 // SubscriberRoute：有效订阅或 admin 豁免，否则重定向到 /subscription-expired
 // AdminRoute：is_admin=true 才可访问，否则重定向到 /market（替换旧 /overview）
-import { lazy, Suspense, useEffect, useRef } from 'react'
+import { lazy, Suspense, useEffect } from 'react'
 import { Navigate, Outlet, type RouteObject, useParams } from 'react-router-dom'
 import { useAuthStore, ACCESS_TOKEN_KEY } from './store/auth'
 import UserAppShell from './layouts/UserAppShell'
 import AdminAppShell from './layouts/AdminAppShell'
 import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation'
 import { REPLAY_AND_AUCTION_CAPABILITY } from './navigation/capabilities'
+import {
+  resolveCapabilityGate,
+  resolveProtectedGate,
+} from './navigation/accessGuard'
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
@@ -77,29 +81,40 @@ function ProtectedLayout() {
   const accessStatus = useAuthStore((s) => s.accessStatus)
   const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
 
-  // hooks 必须先于任何条件 return（React Hooks 规则）
-  const revalidatedRef = useRef(false)
-  useEffect(() => {
-    if (revalidatedRef.current) return
-    revalidatedRef.current = true
-    // hydration 完成后且 accessStatus=idle 时触发 /v1/me/access（补水）
-    if (accessStatus === 'idle') {
-      void revalidateAccess()
-    }
-  }, [revalidateAccess, accessStatus, hydrationStatus])
-
-  // [权限模型 V2] persist 完成前不渲染受保护路由
-  if (hydrationStatus === 'hydrating') {
-    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
-  }
+  // [A 修复] 状态驱动的权限补水：删除「一生只尝试一次」的 revalidatedRef。
+  // 只要前置条件后到（hydration 完成 + 已登录 + accessStatus 仍为 idle），
+  // decision 会自然变为 needs_revalidation，因此仍能触发补水。
+  const decision = resolveProtectedGate({
+    hydrationStatus,
+    isAuthenticated,
+    accessStatus,
+  })
 
   // 双重检查：zustand isAuthenticated + auth_token（sessionStorage 优先，localStorage 兜底）
   // 防止 token 过期后 isAuthenticated 仍为 true 但 auth_token 已被清除
   const hasToken = !!(
     sessionStorage.getItem(ACCESS_TOKEN_KEY) ?? localStorage.getItem(ACCESS_TOKEN_KEY)
   )
+
+  // hooks 必须先于任何条件 return（React Hooks 规则）
+  useEffect(() => {
+    if (decision === 'needs_revalidation') {
+      void revalidateAccess()
+    }
+  }, [decision, revalidateAccess])
+
+  // [权限模型 V2] persist 未完成：显示可见 loading，禁止黑屏
+  if (decision === 'hydrating') {
+    return <AccessPendingPage />
+  }
+
   if (!isAuthenticated || !hasToken) {
     return <Navigate to="/login" replace />
+  }
+
+  // 权限补水尚未开始 / 进行中：显示可见 loading，禁止黑屏
+  if (decision === 'needs_revalidation' || decision === 'pending') {
+    return <AccessPendingPage />
   }
   return <Outlet />
 }
@@ -133,8 +148,17 @@ function CapabilityRoute({ capability }: { capability: string }) {
   const accessError = useAuthStore((s) => s.accessError)
   const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
 
-  // 权限加载失败：显示失败页 + 重试按钮，不伪装 403
-  if (accessStatus === 'error') {
+  // [A 修复] 决策收敛到唯一纯函数 owner（pending/error/allow/forbidden 四态可区分）
+  const decision = resolveCapabilityGate({
+    accessStatus,
+    isAdmin: user?.is_admin === true,
+    capabilities: user?.capabilities,
+    required: [capability],
+    mode: 'all',
+  })
+
+  // 权限加载失败：显示失败页 + 重试按钮，不伪装 403、不黑屏
+  if (decision === 'error') {
     return (
       <AccessLoadFailedPage
         error={accessError}
@@ -143,19 +167,13 @@ function CapabilityRoute({ capability }: { capability: string }) {
     )
   }
 
-  // 权限未就绪（idle/loading/hydrating）：显示 loading，禁止跳 /forbidden
-  if (accessStatus !== 'ready') {
-    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
-  }
-
-  // admin 豁免：所有 capability 默认 active=True
-  if (user?.is_admin) {
-    return <Outlet />
+  // 权限未就绪（idle/loading/hydrating）：显示可见 loading，禁止跳 /forbidden、禁止黑屏
+  if (decision === 'pending') {
+    return <AccessPendingPage />
   }
 
   // 仅 ready 且后端确认没有所需 capability 才允许跳 /forbidden
-  const cap = user?.capabilities?.[capability]
-  if (!cap?.active) {
+  if (decision === 'forbidden') {
     return <Navigate to="/forbidden" replace />
   }
 
@@ -171,7 +189,16 @@ function CapabilityAnyRoute({ capabilities }: { capabilities: string[] }) {
   const accessError = useAuthStore((s) => s.accessError)
   const revalidateAccess = useAuthStore((s) => s.revalidateAccess)
 
-  if (accessStatus === 'error') {
+  // [A 修复] 决策收敛到唯一纯函数 owner（pending/error/allow/forbidden 四态可区分）
+  const decision = resolveCapabilityGate({
+    accessStatus,
+    isAdmin: user?.is_admin === true,
+    capabilities: user?.capabilities,
+    required: capabilities,
+    mode: 'any',
+  })
+
+  if (decision === 'error') {
     return (
       <AccessLoadFailedPage
         error={accessError}
@@ -180,23 +207,38 @@ function CapabilityAnyRoute({ capabilities }: { capabilities: string[] }) {
     )
   }
 
-  if (accessStatus !== 'ready') {
-    return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+  if (decision === 'pending') {
+    return <AccessPendingPage />
   }
 
-  if (user?.is_admin) {
-    return <Outlet />
-  }
-
-  const hasActive = capabilities.some((cap) => {
-    const c = user?.capabilities?.[cap]
-    return c?.active
-  })
-  if (!hasActive) {
+  if (decision === 'forbidden') {
     return <Navigate to="/forbidden" replace />
   }
 
   return <Outlet />
+}
+
+// [A 修复] 权限加载中页：把 idle/loading/hydrating 从「纯黑 div」改为可见状态，
+// 使用户能区分「正在加载」与「页面坏了」，并与 AccessLoadFailedPage 同一视觉 token。
+function AccessPendingPage() {
+  return (
+    <div
+      data-testid="access-pending"
+      style={{
+        minHeight: '100vh',
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 12,
+        background: '#0A0F14',
+        color: '#E0E0E0',
+      }}
+    >
+      <div>正在加载账户权限…</div>
+      <div style={{ color: '#888', fontSize: 13 }}>请稍候</div>
+    </div>
+  )
 }
 
 // [权限模型 V2] 权限加载失败页：表达 accessStatus=error（非 403），提供重试
