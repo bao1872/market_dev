@@ -31,6 +31,8 @@ import {
 import { useToast } from '@/store/toast'
 import { useAuthStore } from '@/store/auth'
 import type { NotificationChannel, ChannelLatestEventTestResponse } from '@/api/endpoints'
+import { changePassword } from '@/api/endpoints'
+import { validateChangePasswordForm } from './changePasswordForm'
 import { getFeishuChannelActions } from './settingsFeishuActions'
 
 // ===== 工具函数 =====
@@ -492,6 +494,100 @@ function LatestEventTestModal({
 
 // ===== 主页面 =====
 
+// [USER-FIX-3 / B] 自助修改密码卡（最小闭环）：当前密码 + 新密码 + 确认新密码。
+// - confirm 一致性由前端负责，不发送给后端；
+// - 成功后清除本地登录态并要求重新登录（当前架构无服务端会话吊销，
+//   已签发的 token 在到期前仍然有效）。
+function ChangePasswordCard() {
+  const toast = useToast()
+  const logout = useAuthStore((s) => s.logout)
+  const [currentPassword, setCurrentPassword] = useState('')
+  const [newPassword, setNewPassword] = useState('')
+  const [confirmPassword, setConfirmPassword] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault()
+    setError(null)
+    // 前端预校验（必填 / 长度 / confirm 一致）收敛到纯函数 owner，便于契约测试
+    const validationError = validateChangePasswordForm({
+      currentPassword,
+      newPassword,
+      confirmPassword,
+    })
+    if (validationError) {
+      setError(validationError)
+      return
+    }
+    setSubmitting(true)
+    try {
+      await changePassword(currentPassword, newPassword)
+      toast.show('密码已修改', '请使用新密码重新登录')
+      // 清除本地登录态并强制重新登录（不假装等价于服务端 revoke）
+      logout()
+      window.location.replace('/login')
+    } catch (err) {
+      const axiosErr = err as { response?: { data?: { detail?: string } } }
+      setError(axiosErr.response?.data?.detail ?? '修改失败，请稍后重试')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="card">
+      <div className="card-head">
+        <div>
+          <div className="card-title">修改密码</div>
+          <div className="card-sub">修改成功后需要使用新密码重新登录</div>
+        </div>
+      </div>
+      <div className="card-body">
+        <form className="form-grid form-grid-gap" onSubmit={handleSubmit}>
+          <div className="form-row full">
+            <label className="form-label">当前密码</label>
+            <input
+              className="input"
+              type="password"
+              autoComplete="current-password"
+              value={currentPassword}
+              onChange={(e) => setCurrentPassword(e.target.value)}
+            />
+          </div>
+          <div className="form-row full">
+            <label className="form-label">新密码</label>
+            <input
+              className="input"
+              type="password"
+              autoComplete="new-password"
+              value={newPassword}
+              onChange={(e) => setNewPassword(e.target.value)}
+            />
+            <div className="help">长度 8-128 个字符。</div>
+          </div>
+          <div className="form-row full">
+            <label className="form-label">确认新密码</label>
+            <input
+              className="input"
+              type="password"
+              autoComplete="new-password"
+              value={confirmPassword}
+              onChange={(e) => setConfirmPassword(e.target.value)}
+            />
+          </div>
+          {error && <div className="notice error">{error}</div>}
+          <div className="form-row full">
+            <button className="btn primary" type="submit" disabled={submitting}>
+              {submitting ? '提交中…' : '修改密码'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  )
+}
+
 export default function SettingsPage() {
   const toast = useToast()
   const membershipQuery = useMyMembership()
@@ -783,6 +879,9 @@ export default function SettingsPage() {
               </div>
             </div>
           </div>
+
+          {/* 修改密码（USER-FIX-3 / B） */}
+          <ChangePasswordCard />
         </section>
       </div>
 

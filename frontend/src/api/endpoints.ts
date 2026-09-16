@@ -1130,6 +1130,19 @@ export async function refreshToken(refreshToken: string): Promise<TokenResponse>
   return data
 }
 
+/** 自助修改当前登录用户密码（需认证；成功返回 204，无响应体）
+ *
+ * 后端语义：校验 current_password 后写入 get_password_hash(new_password)。
+ * 注意：当前架构无 token_version/会话吊销，已签发 token 在到期前仍然有效，
+ * 因此调用方成功后必须清除本地登录态并要求重新登录。
+ */
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await apiClient.post('/v1/auth/change-password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  })
+}
+
 /** 获取当前用户信息（含角色列表） */
 export async function getMe(): Promise<UserResponse> {
   const { data } = await apiClient.get<UserResponse>('/v1/me')

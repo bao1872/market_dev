@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -41,6 +41,7 @@ from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_token,
+    get_password_hash,
     verify_password,
 )
 from app.db import get_db
@@ -52,6 +53,7 @@ from app.schemas.access import AccessProfileResponse
 from app.schemas.invitation import InviteCodeRenew
 from app.schemas.subscription import MembershipResponse, RenewSuccessResponse
 from app.schemas.user import (
+    ChangePasswordRequest,
     LoginResponse,
     RefreshRequest,
     RegisterSuccessResponse,
@@ -328,6 +330,77 @@ async def get_me(
         UserResponse（含 id/email/status/timezone/roles/时间戳）
     """
     return _user_to_response(current_user)
+
+
+@router.post("/auth/change-password", status_code=status.HTTP_204_NO_CONTENT)
+async def change_password(
+    payload: ChangePasswordRequest,
+    current_user: User = Depends(get_current_active_user),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    """自助修改当前登录用户密码。
+
+    流程：
+    1. verify_password(current_password, user.password_hash) 校验当前密码
+    2. 拒绝 new_password == current_password
+    3. get_password_hash(new_password) 写回 user.password_hash
+    4. commit（与 get_current_active_user 共用同一 AsyncSession，见 get_db 依赖缓存）
+
+    安全约束：
+    - 目标用户由 JWT 注入，不接受客户端传入 user_id/email
+    - 不返回任何密码或哈希；错误信息不泄露哈希与内部实现细节
+    - 任何日志/异常中都不出现 current_password / new_password / hash
+
+    token/session 语义（如实说明）：
+    - 当前架构没有 token_version / 会话吊销基础设施，本端点**不**新造一套；
+      已签发的 access / refresh token 在各自到期前**仍然有效**（由现有 JWT 模型决定，
+      本端点不等价于服务端 revoke）。
+    - 前端修改成功后清除本地登录态并要求重新登录。
+
+    Args:
+        payload: 修改密码请求（current_password + new_password）
+        current_user: 当前登录用户（由 get_current_active_user 注入）
+        db: 异步数据库会话
+
+    Returns:
+        None（204 No Content）
+
+    Raises:
+        HTTPException 401: 当前密码不正确
+        HTTPException 400: 新密码与当前密码相同
+    """
+    try:
+        current_ok = verify_password(
+            payload.current_password, current_user.password_hash
+        )
+    except ValueError:
+        # 哈希格式异常：统一按「当前密码不正确」处理，不泄露内部细节
+        current_ok = False
+
+    if not current_ok:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="当前密码不正确",
+        )
+
+    try:
+        same_as_current = verify_password(
+            payload.new_password, current_user.password_hash
+        )
+    except ValueError:
+        same_as_current = False
+
+    if same_as_current:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="新密码不能与当前密码相同",
+        )
+
+    current_user.password_hash = get_password_hash(payload.new_password)
+    # updated_at 在 User 模型上非自动维护（无 onupdate），与管理员重置密码
+    # 路径（admin_subscription.reset_user_password）保持一致显式写入。
+    current_user.updated_at = datetime.now(UTC)
+    await db.commit()
 
 
 @router.post("/auth/register", response_model=RegisterSuccessResponse)

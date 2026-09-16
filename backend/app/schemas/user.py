@@ -80,6 +80,24 @@ class UserLogin(BaseModel):
         return v.lower()
 
 
+class ChangePasswordRequest(BaseModel):
+    """自助修改密码请求（当前登录用户）。
+
+    字段语义：
+    - current_password: 当前密码（必须与库中 bcrypt 哈希匹配）
+    - new_password: 新密码（沿用注册/创建的统一策略：8-128 字符）
+
+    设计约束：
+    - 不含 confirm_password：两次输入一致性属前端职责，服务端不接收冗余字段。
+    - 不含 user_id/email：目标用户由 JWT 认证上下文注入，禁止客户端指定。
+    """
+
+    current_password: str = Field(..., description="当前密码（明文）")
+    new_password: str = Field(
+        ..., min_length=8, max_length=128, description="新密码（8-128 字符）"
+    )
+
+
 class UserResponse(BaseModel):
     """用户信息响应 - 不含密码哈希。"""
 
