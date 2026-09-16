@@ -1,7 +1,8 @@
 """[ARCH-SIMPLIFY-S1] 权限收口行为测试（纯单元，PURE_UNIT_TEST=1，不连库）。
 
 验证 S1 收口后：
-- resolve_effective_access 成为权限画像唯一 owner（一次读取 Subscription，填充 subscription_summary）；
+- resolve_effective_access 成为权限画像唯一 owner（capability-only 解析零商业 I/O；
+  商业摘要由 subscription_service.resolve_subscription_summary 按需解析并可选择性传入）；
 - get_access_context 退化为纯 DTO adapter，不再二次查询 Subscription / Plan；
 - plan → capability 推导只存在 effective_access_service.infer_capabilities_from_plan 一个实现；
 - subscription_summary 仅商业展示，不参与 capability / default_route 决策（反向因果测试）。
@@ -202,9 +203,8 @@ async def test_s1_explicit_self_selection_market_data():
     assert profile.default_route == "/market"
     assert profile.capabilities["self_selection"].watchlist_limit == 20
     assert "research_replay" not in profile.active_capability_keys
-    # subscription_summary 仍被填充（商业展示）
-    assert profile.subscription_summary["plan_code"] == "research_50"
-    assert profile.subscription_summary["active"] is True
+    # explicit 用户未请求商业摘要时，capability-only resolver 不产出 subscription_summary（零商业 I/O）
+    assert profile.subscription_summary is None
 
 
 # ============================================================
@@ -287,8 +287,8 @@ async def test_s1_expired_legacy_subscription():
     assert set(profile.capabilities.keys()) == {"self_selection", "market_data", "research_replay"}
     # 能力存在但全部 inactive（过期订阅）
     assert profile.active_capability_keys == []
-    assert profile.subscription_summary["active"] is False
-    assert profile.subscription_summary["status"] == "expired"
+    assert profile.subscription_summary.active is False
+    assert profile.subscription_summary.status == "expired"
 
 
 # ============================================================
@@ -306,10 +306,10 @@ async def test_s1_no_subscription_no_capability():
     assert profile.capability_source == "none"
     assert profile.default_route == "/forbidden"
     s = profile.subscription_summary
-    assert s["status"] == "none"
-    assert s["active"] is False
-    assert s["features"] == []
-    assert s["limits"] == {}
+    assert s.status == "none"
+    assert s.active is False
+    assert s.features == []
+    assert s.limits == {}
 
 
 # ============================================================
@@ -351,12 +351,7 @@ async def test_s1_get_access_context_matches_resolve():
     profile: EffectiveAccessProfile = await resolve_effective_access(db, user)
     ctx: AccessContext = await get_access_context(db, user)
 
-    assert ctx.subscription_active == profile.subscription_summary["active"]
-    assert ctx.plan_code == profile.subscription_summary["plan_code"]
-    assert ctx.plan_display_name == profile.subscription_summary["plan_display_name"]
-    assert ctx.expires_at == profile.subscription_summary["expires_at"]
-    assert ctx.features == profile.subscription_summary["features"]
-    assert ctx.limits == profile.subscription_summary["limits"]
+    # capability 字段一致性
     assert ctx.default_route == profile.default_route
     assert ctx.active_capability_keys == profile.active_capability_keys
     assert ctx.capability_source == profile.capability_source
@@ -373,6 +368,20 @@ async def test_s1_get_access_context_matches_resolve():
         for k, v in profile.capabilities.items()
     }
     assert ctx.capabilities == expected_capabilities
+
+    # 商业展示字段由 get_access_context 内 resolve_subscription_summary 解析，与直接解析一致
+    from app.services.subscription_service import resolve_subscription_summary
+
+    summary = await resolve_subscription_summary(db, user.id)
+    assert ctx.subscription_active == summary.active
+    assert ctx.plan_code == summary.plan_code
+    assert ctx.plan_display_name == summary.plan_display_name
+    assert ctx.expires_at == summary.expires_at
+    assert ctx.features == summary.features
+    assert ctx.limits == summary.limits
+
+    # capability-only resolver 不依赖商业 I/O：未传 summary 时 subscription_summary 为 None
+    assert profile.subscription_summary is None
 
 
 # ============================================================
@@ -403,18 +412,21 @@ async def test_s1_reverse_causality_plan_not_affecting_capabilities(plan_code, f
     db = _FakeSession(subs=subs, caps=caps, plans=plans)
     profile = await resolve_effective_access(db, user)
 
-    # 能力解析结果与 plan 无关
+    # 能力解析结果与 plan 无关（capability 判权 owner 唯一）
     assert set(profile.active_capability_keys) == {"self_selection", "market_data"}
     assert profile.capability_source == "user_capabilities"
     assert profile.default_route == "/market"
 
-    # 商业展示字段随 plan 变化（证明 plan 仅影响展示层）
+    # 商业摘要由独立的 resolve_subscription_summary 解析，随 plan 变化（证明 plan 仅影响展示层）
+    from app.services.subscription_service import resolve_subscription_summary
+
+    summary = await resolve_subscription_summary(db, user.id)
     if plan_code == "none_plan":
-        assert profile.subscription_summary["status"] == "none"
+        assert summary.status == "none"
     else:
-        assert profile.subscription_summary["plan_code"] == plan_code
-        assert profile.subscription_summary["features"] == features
-        assert profile.subscription_summary["limits"]["monitor_limit"] == monitor
+        assert summary.plan_code == plan_code
+        assert summary.features == features
+        assert summary.limits["monitor_limit"] == monitor
 
 
 # ============================================================

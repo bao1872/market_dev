@@ -124,15 +124,13 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
     """获取当前用户的完整权限上下文（只读操作，不写 DB）。
 
     流程：
-    1. 从 user._roles 读取角色名列表
-    2. 计算 is_admin / is_member
-    3. admin 路径：subscription_active=True（豁免），plan_code=None
-    4. non-admin 路径：
-       a. 调用 subscription_service.get_effective_subscription_status 获取订阅状态
-       b. 若有订阅记录（active 或 expired）：查询 subscription.plan_code，再查询 plans 表
-          填充 plan_display_name/features/limits（过期订阅仍保留，便于前端降级提示）
-       c. 若无订阅记录：plan_code=None，features=[]，limits={}
-    5. 构建 AccessContext 返回
+    1. 从 user._roles 读取角色名列表，计算 is_admin / is_member
+    2. admin 路径：subscription_active=True（豁免），plan_code=None，零商业查询
+    3. non-admin 路径：
+       a. resolve_subscription_summary 一次性解析商业展示字段（Subscription + Plan 各 1 次）
+       b. resolve_effective_access 解析 capabilities（唯一真源），复用上一步 summary
+          （legacy fallback 不再二次查询 Subscription / Plan）
+       c. 纯 DTO 映射 AccessContext，不重复查询或推导
 
     Args:
         db: 异步数据库会话
@@ -174,11 +172,12 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
         resolve_effective_access,
     )
 
-    # [权限模型 V2] capability 已由上一步 resolve_effective_access 完整解析；
-    # get_access_context 仅做 DTO adapter：从 profile.subscription_summary 映射商业展示字段，
-    # 不再二次查询 Subscription / Plan，也不再二次推导 capability / default_route。
-    profile = await resolve_effective_access(db, user)
-    summary = profile.subscription_summary
+    # [权限模型 V2] capability 由 resolve_effective_access 唯一解析（唯一真源）；
+    # 商业展示字段由 resolve_subscription_summary 一次性解析并复用给 resolve，避免重复查询。
+    from app.services.subscription_service import resolve_subscription_summary
+
+    summary = await resolve_subscription_summary(db, user.id)
+    profile = await resolve_effective_access(db, user, subscription_summary=summary)
 
     return AccessContext(
         user_id=str(user.id),
@@ -186,12 +185,12 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
         roles=roles,
         is_admin=False,
         is_member=is_member,
-        subscription_active=bool(summary.get("active")),
-        plan_code=summary.get("plan_code"),
-        plan_display_name=summary.get("plan_display_name"),
-        expires_at=summary.get("expires_at"),
-        features=list(summary.get("features") or []),
-        limits=dict(summary.get("limits") or {}),
+        subscription_active=bool(summary.active),
+        plan_code=summary.plan_code,
+        plan_display_name=summary.plan_display_name,
+        expires_at=summary.expires_at,
+        features=list(summary.features),
+        limits=dict(summary.limits),
         capabilities=capabilities_to_serializable(profile.capabilities),
         default_route=profile.default_route,
         active_capability_keys=profile.active_capability_keys,

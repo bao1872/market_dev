@@ -169,6 +169,68 @@ def resolve_commercial_status(
     return SubscriptionCommercialResult(status="active", reason="active")
 
 
+@dataclass(frozen=True)
+class SubscriptionSummary:
+    """商业订阅摘要（只读展示，不参与功能判权）。
+
+    由 ``resolve_subscription_summary`` 唯一构造；权限解析层（resolve_effective_access）
+    只消费、不复刻。limits 仅含 plans 表的数值快照（monitor_limit /
+    notification_channel_limit / message_retention_days）。
+    """
+
+    status: str
+    reason: str | None
+    active: bool
+    plan_code: str | None
+    plan_display_name: str | None
+    starts_at: datetime | None
+    expires_at: datetime | None
+    source: str | None
+    entitlement_snapshot: dict | None
+    features: list[str]
+    limits: dict[str, int]
+
+
+async def resolve_subscription_summary(
+    db: AsyncSession,
+    user_id: uuid.UUID,
+) -> SubscriptionSummary:
+    """商业订阅摘要唯一 resolver（只读展示，不解析 capability / default_route）。
+
+    负责 Subscription 查询 + resolve_commercial_status + Plan 查询 + 商业展示字段。
+    商业状态语义唯一 owner：resolve_commercial_status（禁止在别处复制
+    ``status=='active' and starts_at<=now and expires_at>now`` 判断）。
+
+    调用方（resolve_effective_access 的 legacy fallback、get_access_context、
+    admin access-profile）可复用本次结果，避免重复查询 Subscription / Plan。
+    """
+    sub = (
+        await db.execute(select(Subscription).where(Subscription.user_id == user_id))
+    ).scalars().first()
+    commercial = resolve_commercial_status(sub)
+    plan_code = sub.plan_code if sub else None
+    plan = await get_plan_async(db, plan_code) if plan_code else None
+    starts_at = _ensure_aware(sub.starts_at) if sub and sub.starts_at else None
+    expires_at = _ensure_aware(sub.expires_at) if sub and sub.expires_at else None
+    return SubscriptionSummary(
+        status=commercial.status,
+        reason=commercial.reason,
+        active=commercial.status == "active",
+        plan_code=plan_code,
+        plan_display_name=plan.display_name if plan else None,
+        starts_at=starts_at,
+        expires_at=expires_at,
+        source=getattr(sub, "source", None) if sub else None,
+        entitlement_snapshot=getattr(sub, "entitlement_snapshot", None) if sub else None,
+        features=list(plan.features) if plan and plan.features else [],
+        limits={
+            "monitor_limit": int(plan.monitor_limit),
+            "notification_channel_limit": int(plan.notification_channel_limit),
+            "message_retention_days": int(plan.message_retention_days),
+        } if plan else {},
+    )
+
+
 # 邀请码字符集（排除易混淆字符 O/0/I/1/L）
 _INVITE_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
 # 邀请码分组：4 组 × 4 字符 = 16 字符

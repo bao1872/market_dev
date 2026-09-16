@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from datetime import UTC, datetime
 from uuid import UUID
@@ -1292,7 +1293,11 @@ async def list_users(
                 diagnostics=profile.diagnostics,
                 nearest_capability_expires_at=nearest_expires,
                 legacy_fallback=profile.capability_source == "legacy_plan_fallback",
-                subscription_summary=profile.subscription_summary,
+                subscription_summary=(
+                    dataclasses.asdict(profile.subscription_summary)
+                    if profile.subscription_summary
+                    else {}
+                ),
             )
         )
 
@@ -1357,10 +1362,13 @@ async def get_user_access_profile(
     user = await _fetch_user_or_404(db, user_id)
     roles = await _get_user_role_names(db, user.id)
 
-    # effective_access
+    # effective_access + 商业摘要（access-profile 同时需要两者，各自一次查询）
     user._roles = roles  # type: ignore[attr-defined]
     try:
-        profile = await resolve_effective_access(db, user)
+        from app.services.subscription_service import resolve_subscription_summary
+
+        summary = await resolve_subscription_summary(db, user.id)
+        profile = await resolve_effective_access(db, user, subscription_summary=summary)
     except Exception:  # noqa: BLE001
         logger.exception("get_user_access_profile resolve failed user_id=%s", user.id)
         raise HTTPException(
@@ -1376,10 +1384,9 @@ async def get_user_access_profile(
     nearest_expires = min(e for e in active_expiries if e is not None) if active_expiries else None
 
     # subscription_summary（商业展示，不参与判权）
-    # [权限模型 V2 PV2-B06] 直接复用 resolve_effective_access 已解析的 subscription_summary
-    # （商业状态语义唯一 owner：subscription_service.resolve_commercial_status），
+    # [权限模型 V2 PV2-B06] 由 resolve_subscription_summary 唯一解析（商业状态语义唯一 owner：
+    # subscription_service.resolve_commercial_status），并直接传给 resolve_effective_access 复用，
     # 不再二次查询 Subscription / Plan。
-    summary = profile.subscription_summary
 
     # explicit_capability_records（规范化 state：active/expired/revoked）
     from app.models.user_capability import UserCapability
@@ -1431,14 +1438,14 @@ async def get_user_access_profile(
             diagnostics=profile.diagnostics,
         ),
         subscription_summary=SubscriptionSummaryInfo(
-            status=summary["status"],
-            reason=summary["reason"],
-            plan_code=summary["plan_code"],
-            plan_display_name=summary["plan_display_name"],
-            starts_at=summary["starts_at"],
-            expires_at=summary["expires_at"],
-            source=summary["source"],
-            entitlement_snapshot=summary["entitlement_snapshot"],
+            status=summary.status,
+            reason=summary.reason,
+            plan_code=summary.plan_code,
+            plan_display_name=summary.plan_display_name,
+            starts_at=summary.starts_at,
+            expires_at=summary.expires_at,
+            source=summary.source,
+            entitlement_snapshot=summary.entitlement_snapshot,
         ),
         explicit_capability_records=explicit_records,
     )
