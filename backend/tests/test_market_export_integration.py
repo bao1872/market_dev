@@ -3,8 +3,8 @@
 本地 IDE 不连数据库，故本文件在 PURE_UNIT_TEST=1 / 普通环境下整体 skip。
 覆盖 DB 触达的资源路径契约：
 
-- B   filtered count > MAX_EXPORT_ROWS → 422，且绝不进入分批 fetch / XLSX writer
-- C   5000 行：batch <= EXPORT_BATCH_SIZE、batches=20、max_batch=250、无重复/遗漏、固定 2 列
+- B   LIMIT(MAX_EXPORT_ROWS+1) 流式读到第 10001 行 → 422，绝不生成终态 XLSX（无 OFFSET 分页 / 无 count）
+- C   5000 行：1 次流式 SELECT、batches=20、max_batch<=250、无重复/遗漏、固定 2 列
 - G   base-only 在 DB 路径不加载 snapshot（仅筛选/排序需要的 source 才会被 _assemble_market_query 使用）
 - K/L 全局租约忙时 → 429（pre-held lock）
 - M/N query/writer 异常 → 租约释放（无泄漏）
@@ -72,19 +72,19 @@ async def _seed_instruments(db: AsyncSession, n: int, prefix: str = "EXP") -> li
 # ---------------------------------------------------------------------------
 
 
-async def test_over_limit_returns_422_and_no_batch_fetch(db_session: AsyncSession):
+async def test_over_limit_returns_422_and_no_final_xlsx(db_session: AsyncSession):
     await _seed_instruments(db_session, mes.MAX_EXPORT_ROWS + 1)
     plan = mes.build_export_plan(MarketExportRequest(**_body()))
-    calls = {"batches": 0}
+    zip_calls = {"n": 0}
 
-    async def _fake_fetch(*a, **k):
-        calls["batches"] += 1
-        return []
+    def _no_zip(self, *a, **k):
+        zip_calls["n"] += 1
 
-    with pytest.raises(HTTPException) as ei, _Patch(mes, "_fetch_batch_rows", _fake_fetch):
+    with pytest.raises(HTTPException) as ei, _Patch(mes.MarketXlsxWriter, "build_zip", _no_zip):
         await mes.prepare_market_export(db_session, plan, uuid.UUID(_USER_ID))
     assert ei.value.status_code == 422
-    assert calls["batches"] == 0  # 超限即拒，绝不分批 fetch / writer
+    # 流式读到第 10001 行即 422：绝不生成终态 XLSX（finalize/build_zip 不执行）
+    assert zip_calls["n"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -147,7 +147,12 @@ async def test_base_only_no_snapshot_fetch(db_session: AsyncSession):
     # base-only 不应构建 snapshot/chip LATERAL
     assert ctx.needs_snap is False
     assert ctx.needs_chip is False
-    rows = await mes._fetch_batch_rows(db_session, ctx, 0)
+    stmt = mes._build_export_rows_stmt(ctx)
+    result = await db_session.stream(stmt)
+    rows = []
+    async for partition in result.partitions(mes.EXPORT_BATCH_SIZE):
+        rows.extend({"name": r.name, "symbol": r.symbol} for r in partition)
+    await result.close()
     assert len(rows) == 3
     for r in rows:
         assert set(r.keys()) == {"name", "symbol"}

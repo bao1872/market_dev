@@ -194,3 +194,52 @@ membership/order, but it is not loaded again for export projection.
 - **前端**：`buildMarketExportRequest` 停止发送 `visible_columns`；`MarketExportColumn`
   类型删除；in-flight 锁（`tryAcquireExportUiLock`/`releaseExportUiLock`）与按钮可见性
   逻辑保持 C1a 不变。
+
+---
+
+## 6. Export Streaming Contract (C4)
+
+C4 进一步把 export 从「filtered COUNT + N 次 OFFSET batch」收敛为「1 次有界 server-side
+流式 SELECT」。
+
+**性能合同（架构级，非 runtime 实测峰值）**：
+
+```text
+Market export does not use OFFSET pagination.
+
+After canonical query assembly, export data is consumed by
+one bounded server-side streaming SELECT with LIMIT 10001.
+
+The API never performs one database SELECT per export batch.
+EXPORT_BATCH_SIZE controls cursor partition / Python memory,
+not SQL query count.
+```
+
+固定区分：
+
+```text
+MAX_EXPORT_ROWS    = business cardinality cap（业务允许导出的最大行数）
+EXPORT_BATCH_SIZE  = in-memory / cursor partition bound（Python 内存 / cursor 分片上限）
+SQL export-row query count = 1
+```
+
+实现要点：
+- `_build_export_rows_stmt(ctx)`：`ctx.base_stmt.with_only_columns(name, symbol,
+  maintain_column_froms=True).limit(MAX_EXPORT_ROWS + 1)`；OFFSET 分页彻底移除。
+- `prepare_market_export`：`await db.stream(stmt)` → `async for partition in
+  result.partitions(EXPORT_BATCH_SIZE)`；读到第 10001 行立即 422（不再执行完整 count scan）。
+- 内存：任何时刻只保留一个 `EXPORT_BATCH_SIZE` 的 partition；Python 不持有完整导出集。
+- 资源生命周期（429 忙 / query 异常 / 流异常 / 10001 行超限 / writer 异常）：全部
+  `release_lock` + `shutil.rmtree(tmp_dir)` + `await result.close()`，绝不泄漏。
+
+**硬约束（禁止回归）**：
+- SQL export-row query count = 1（N+1 次 OFFSET SELECT = 0）。
+- 不存在 `offset(` / `batch_index` / `(total + batch - 1) // batch` 之类的分页路径。
+- 不执行 filtered COUNT 查询（MAX_EXPORT_ROWS 是 cardinality cap，不是报表统计需求）。
+- 内存中最多一个 `EXPORT_BATCH_SIZE` 的 partition。
+
+**验证状态**：PURE 单元测试已证明 query count=1 / scalar=0 / LIMIT=10001 / OFFSET 缺失 /
+projection 仅 name+symbol / 5000 行 20 partition / 10001 行 422 即清理。真实 DB 5000/10001
+压力验证由远程 verify 运行时（`PANJI_REMOTE_VERIFY_DB_TEST=1`）在该 commit 审计通过后的
+受控阶段执行；该阶段的容器 RSS / 峰值内存验收留待后续 admin runtime pressure gate，
+本轮不宣称任何 runtime peak-memory 数字。

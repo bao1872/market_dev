@@ -6,7 +6,8 @@
   但物理 read model 不同：list 走完整 MarketStockRow 富集，
   export 走轻量分批读取 + 低内存增量 XLSX writer。
 - 严禁回归：绝不直接 get_market_stocks(page_size=MAX_EXPORT_ROWS + 1)。
-- DB 一次只处理有界 batch（EXPORT_BATCH_SIZE）。
+- export 数据由单条有界 server-side 流式 SELECT 产出（LIMIT MAX_EXPORT_ROWS + 1），
+  EXPORT_BATCH_SIZE 只控制 cursor partition / Python 内存，不再控制 SQL 查询次数（无 OFFSET 分页）。
 - Python 不持有完整导出集的重型 read model。
 - XLSX 的 XML/zip CPU 工作脱离 async event loop（asyncio.to_thread）。
 - 临时 admin-only 熔断（C1a）：仅 require_admin 可触发；C1b 验证通过后恢复普通权限。
@@ -23,7 +24,6 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
@@ -124,16 +124,15 @@ def _stock_name_condition(op: str | None, value: str | None):
     return Instrument.name.ilike(f"%{value}%")
 
 
-def _build_export_batch_stmt(ctx: MarketQueryContext, batch_index: int):
-    """[S2-A-C1a-C3a] 导出分批物理投影：只 SELECT name / symbol。
+def _build_export_rows_stmt(ctx: MarketQueryContext):
+    """[S2-A-C1a-C3a-C4] 导出唯一 rows statement：1 次有界 server-side streaming SELECT。
 
     复用 _assemble_market_query 装配的 FROM / JOIN / WHERE / ORDER BY，
-    但通过 with_only_columns 把目标表达式收窄为 name + symbol，
-    不在 DB 层为每只股票计算 id / market / is_watchlisted
-    （这些只服务于 list read model，export 不需要）。
-    maintain_column_froms=True 保证窄投影不会丢掉 JOIN / WHERE / ORDER BY，
-    因此 fp_filter / fp_sort / industry-context 筛选 / watchlist join /
-    keyword / state / price·change_pct 排序等 query semantics 全部保留。
+    通过 with_only_columns 把目标表达式收窄为 name + symbol，
+    并 LIMIT MAX_EXPORT_ROWS + 1：前 10000 行合法，读到第 10001 行即可判定超限。
+
+    OFFSET 分页彻底移除：业务数据由单条 SQL 在数据库侧流式产出，
+    EXPORT_BATCH_SIZE 只控制 cursor partition / Python 内存，不再控制 SQL 查询次数。
     """
     return (
         ctx.base_stmt.with_only_columns(
@@ -141,39 +140,23 @@ def _build_export_batch_stmt(ctx: MarketQueryContext, batch_index: int):
             Instrument.symbol,
             maintain_column_froms=True,
         )
-        .limit(EXPORT_BATCH_SIZE)
-        .offset(batch_index * EXPORT_BATCH_SIZE)
+        .limit(MAX_EXPORT_ROWS + 1)
     )
-
-
-async def _fetch_batch_rows(
-    db: AsyncSession, ctx: MarketQueryContext, batch_index: int
-) -> list[dict[str, str]]:
-    """[S2-A-C1a-C3a] 轻量分批读取：仅执行已收窄为 name / symbol 的导出投影，最多 EXPORT_BATCH_SIZE 行。
-
-    输出 dict 严格只有 name、symbol 两个 key；绝不随后再查询
-    bars / snapshot / chip / boards。筛选/排序所需的 source JOIN 仍由
-    _assemble_market_query 在 query 装配阶段处理，不在本函数做第二轮 enrichment。
-    """
-    stmt = _build_export_batch_stmt(ctx, batch_index)
-    result = await db.execute(stmt)
-    base_rows = result.all()
-    return [
-        {"name": row.name, "symbol": row.symbol}
-        for row in base_rows
-    ]
 
 
 async def prepare_market_export(
     db: AsyncSession, plan: MarketExportPlan, user_id: UUID
 ) -> PreparedMarketExport:
-    """[S2-A-C1] 导出准备阶段：全局租约 → 组装查询 → filtered count → 有界分批 → 低内存 XLSX。
+    """[S2-A-C1-C4] 导出准备阶段：全局租约 → 组装查询 → 1 次有界流式 SELECT → 低内存 XLSX。
 
-    硬合同：422（超限）/ 429（忙）/ query 异常 / writer 异常 **全部发生在此函数内**，
+    硬合同：422（超限）/ 429（忙）/ query 异常 / writer 异常 / 流异常 **全部发生在此函数内**，
     即 `StreamingResponse` 创建之前。流式阶段（stream_prepared_market_export）只负责
-    读已落盘文件并清理临时目录，不得访问 DB / 取锁 / 做 count / 抛业务 HTTPException。
+    读已落盘文件并清理临时目录，不得访问 DB / 取锁 / 抛业务 HTTPException。
+
+    export 数据由单条流式 SQL 产出（LIMIT 10001）。不执行 count、不执行 OFFSET 分页。
+    内存中最多保留一个 EXPORT_BATCH_SIZE 的 partition。
     """
-    # 1) 全局导出租约必须先于任何重 DB 工作（从 count 起即受 lease 保护）
+    # 1) 全局导出租约必须先于任何重 DB 工作
     holder = await acquire_lock(EXPORT_LOCK_KEY, EXPORT_LOCK_TTL, generate_holder())
     if holder is None:
         raise _busy_error()
@@ -188,29 +171,35 @@ async def prepare_market_export(
         if sn_cond is not None:
             ctx.base_stmt = ctx.base_stmt.where(sn_cond)
 
-        # filtered COUNT：通过 with_only_columns(literal(1), maintain_column_froms=True)
-        # 只保留 FROM / JOIN / WHERE，不计算 is_watchlisted / market / name / symbol
-        # 等无关 target expression；并去除与导出无关的 ORDER BY。
-        count_source = (
-            ctx.base_stmt.with_only_columns(
-                literal(1), maintain_column_froms=True
-            )
-            .order_by(None)
-            .subquery()
-        )
-        total = await db.scalar(select(func.count()).select_from(count_source)) or 0
-        if total > MAX_EXPORT_ROWS:
-            raise _over_limit_error()
-
         writer = MarketXlsxWriter(MARKET_EXPORT_COLUMNS, tmp_dir)
-        batches = (total + EXPORT_BATCH_SIZE - 1) // EXPORT_BATCH_SIZE if total else 0
+
+        # 单条有界流式 SELECT（LIMIT MAX_EXPORT_ROWS + 1）；业务数据在 DB 侧流式产出，
+        # 不在 Python 端做 count，也不做 OFFSET 分页。
+        stmt = _build_export_rows_stmt(ctx)
+        result = await db.stream(stmt)
+
+        total = 0
+        batches = 0
         max_batch = 0
-        for b in range(batches):
-            rows = await _fetch_batch_rows(db, ctx, b)
-            if rows:
+        try:
+            async for partition in result.partitions(EXPORT_BATCH_SIZE):
+                batch = list(partition)
+                # 读到第 10001 行立即判超限：前 10000 行合法
+                if total + len(batch) > MAX_EXPORT_ROWS:
+                    raise _over_limit_error()
+                rows = [
+                    {"name": row.name, "symbol": row.symbol}
+                    for row in batch
+                ]
+                total += len(rows)
+                batches += 1
                 max_batch = max(max_batch, len(rows))
-            # CPU 密集的 XML 写入脱离 event loop
-            await asyncio.to_thread(writer.add_rows, rows)
+                # CPU 密集的 XML 写入脱离 event loop
+                await asyncio.to_thread(writer.add_rows, rows)
+        finally:
+            # 无论正常完成还是超限/异常，都先关闭 server-side cursor
+            await result.close()
+
         writer.finalize()
         final_path = os.path.join(tmp_dir, "export.xlsx")
         # 最终 zip 压缩脱离 event loop

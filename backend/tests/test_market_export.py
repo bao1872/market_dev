@@ -39,7 +39,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from sqlalchemy import func, literal, select
+from sqlalchemy import literal, select
 
 from app.api.market import export_market_stocks, require_admin
 from app.models.instrument import Instrument
@@ -185,25 +185,16 @@ class _FakeStmt:
     def limit(self, *a):
         return self
 
-    def offset(self, *a):
-        return self
-
     def where(self, *a):
-        return self
-
-    def order_by(self, *a):
         return self
 
     def with_only_columns(self, *a, **k):
         return self
 
-    def subquery(self):
-        # 返回真实（无 FROM 的）scalar subquery alias，使 select(...).select_from() 合法，不触达 DB
-        return select(func.count()).subquery()
-
 
 class _FakeCtx:
-    base_stmt = _FakeStmt()
+    def __init__(self):
+        self.base_stmt = _FakeStmt()
 
 
 class _Row:
@@ -212,41 +203,62 @@ class _Row:
         self.symbol = symbol
 
 
-class _Res:
-    def __init__(self, rows):
-        self._rows = rows
+class _FakeStreamResult:
+    """Fake AsyncResult: supports .partitions(size) async-gen + .close() coroutine."""
 
-    def all(self):
-        return self._rows
+    def __init__(self, rows, partition_size=None):
+        self._rows = rows
+        self._partition_size = partition_size or mes.EXPORT_BATCH_SIZE
+        self.closed = False
+        self.partition_count = 0
+
+    def partitions(self, size=None):
+        size = size or self._partition_size
+
+        async def _gen():
+            for i in range(0, len(self._rows), size):
+                self.partition_count += 1
+                yield self._rows[i : i + size]
+
+        return _gen()
+
+    async def close(self):
+        self.closed = True
 
 
 class _FakeDb:
-    def __init__(self, rows):
-        self._rows = rows
+    """Records stream calls; C4 removed the count/scalar path entirely."""
 
-    async def execute(self, stmt):
-        return _Res(self._rows)
+    def __init__(self, rows=None, result=None, stream_calls=None):
+        self._rows = list(rows or [])
+        self._result = result
+        self.stream_calls = stream_calls if stream_calls is not None else []
+        self.scalar_calls = []
+        self.last_result = None
 
-    async def scalar(self, *a, **k):
-        return 0
+    async def stream(self, stmt):
+        self.stream_calls.append(stmt)
+        result = self._result if self._result is not None else _FakeStreamResult(self._rows)
+        self.last_result = result
+        return result
 
 
 @pytest.mark.asyncio
-async def test_fetch_batch_rows_only_name_symbol():
-    ctx = _FakeCtx()
-    rows_db = [
-        _Row("贵州茅台", "600519"),
-        _Row("宁德时代", "300750"),
-        _Row("平安银行", "000001"),
-    ]
-    out = await mes._fetch_batch_rows(_FakeDb(rows_db), ctx, 0)
-    assert out == [
-        {"name": "贵州茅台", "symbol": "600519"},
-        {"name": "宁德时代", "symbol": "300750"},
-        {"name": "平安银行", "symbol": "000001"},
-    ]
-    for r in out:
-        assert set(r.keys()) == {"name", "symbol"}
+async def test_export_rows_stmt_selects_only_name_symbol_and_limit_10001():
+    # 单条流式导出 statement：只 SELECT name/symbol，LIMIT 10001，无 OFFSET
+    for scope in ("market", "watchlist"):
+        ctx = _ProjCtx(_representative_base_stmt(scope))
+        stmt = mes._build_export_rows_stmt(ctx)
+        cols = list(stmt.selected_columns.keys())
+        assert cols == ["name", "symbol"]
+        assert "id" not in cols and "market" not in cols and "is_watchlisted" not in cols
+        assert stmt._limit == mes.MAX_EXPORT_ROWS + 1
+        sql = str(stmt)
+        assert "OFFSET" not in sql
+        assert "LIMIT" in sql
+        assert "WHERE" in sql and "ORDER BY" in sql
+        if scope == "watchlist":
+            assert "JOIN" in sql
 
 
 # ---------------------------------------------------------------------------
@@ -309,40 +321,108 @@ class _ProjCtx:
         self.base_stmt = base_stmt
 
 
-def test_export_batch_stmt_selects_only_name_symbol():
-    # market 范围：correlated EXISTS 作为 is_watchlisted 展示列务必被剔除
-    stmt = mes._build_export_batch_stmt(_ProjCtx(_representative_base_stmt("market")), 0)
-    cols = list(stmt.selected_columns.keys())
-    assert cols == ["name", "symbol"]
-    assert "id" not in cols
-    assert "market" not in cols
-    assert "is_watchlisted" not in cols
-    sql = str(stmt)
-    assert "WHERE" in sql and "ORDER BY" in sql  # 筛选 + 排序在窄投影下仍生效
-
-    # watchlist 范围：JOIN 必须保留（否则筛选/排序语义失效）
-    stmt_w = mes._build_export_batch_stmt(_ProjCtx(_representative_base_stmt("watchlist")), 0)
-    cols_w = list(stmt_w.selected_columns.keys())
-    assert cols_w == ["name", "symbol"]
-    sql_w = str(stmt_w)
-    assert "JOIN" in sql_w and "WHERE" in sql_w and "ORDER BY" in sql_w
+@pytest.mark.asyncio
+async def test_export_uses_single_stream_no_count():
+    rows = [_Row(f"N{i}", f"S{i:05d}") for i in range(10)]
+    db = _FakeDb(rows=rows)
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    with patch.object(mes, "acquire_lock", new=AsyncMock(return_value="h")), \
+         patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())), \
+         patch.object(mes, "release_lock", new=AsyncMock()):
+        prepared = await mes.prepare_market_export(db, plan, uuid.UUID(int=0))
+    try:
+        assert len(db.stream_calls) == 1          # 恰好一次流式 SELECT
+        assert db.scalar_calls == []          # 无 count 查询
+        assert prepared.rows == 10
+    finally:
+        shutil.rmtree(prepared.tmp_dir, ignore_errors=True)
 
 
-def test_export_count_stmt_selects_only_literal_one():
-    # count 只保留 FROM/JOIN/WHERE，不计算 is_watchlisted/market/name/symbol 等目标表达式
-    ctx = _ProjCtx(_representative_base_stmt("market"))
-    count_select = ctx.base_stmt.with_only_columns(
-        literal(1), maintain_column_froms=True
-    ).order_by(None)
-    count_cols = list(count_select.selected_columns.keys())
-    # 仅 literal(1) 一个目标表达式（key 为 '_no_label'），无任何真实列被 SELECT
-    assert count_cols == ["_no_label"]
-    for forbidden in ("id", "market", "name", "symbol", "is_watchlisted"):
-        assert forbidden not in count_cols
-    count_source = count_select.subquery()
-    full = select(func.count()).select_from(count_source)
-    sql = str(full)
-    assert "WHERE" in sql  # 筛选条件在 count 中保留
+@pytest.mark.asyncio
+async def test_export_5000_one_stream_valid_xlsx():
+    rows = [_Row(f"N{i}", f"S{i:05d}") for i in range(5000)]
+    db = _FakeDb(rows=rows)
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    with patch.object(mes, "acquire_lock", new=AsyncMock(return_value="h")), \
+         patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())), \
+         patch.object(mes, "release_lock", new=AsyncMock()):
+        prepared = await mes.prepare_market_export(db, plan, uuid.UUID(int=0))
+    try:
+        assert len(db.stream_calls) == 1
+        assert db.last_result.partition_count == 20
+        assert db.last_result.closed is True
+        assert prepared.rows == 5000
+        assert prepared.batches == 20
+        assert prepared.max_batch == mes.EXPORT_BATCH_SIZE
+        zf = zipfile.ZipFile(prepared.final_path)
+        assert zf.testzip() is None
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        assert sheet.count('<row r="') == 5001
+    finally:
+        shutil.rmtree(prepared.tmp_dir, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_export_over_10001_returns_422_and_cleans_up():
+    rows = [_Row(f"N{i}", f"S{i:05d}") for i in range(mes.MAX_EXPORT_ROWS + 1)]
+    db = _FakeDb(rows=rows)
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    holder = "holder-x"
+    released = []
+    captured = {}
+    _real_mkdtemp = tempfile.mkdtemp
+
+    def _fake_mkdtemp(prefix=None, **k):
+        d = _real_mkdtemp(prefix=prefix, **k)
+        captured["path"] = d
+        return d
+
+    with patch.object(tempfile, "mkdtemp", _fake_mkdtemp), \
+         patch.object(mes, "acquire_lock", new=AsyncMock(return_value=holder)), \
+         patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())), \
+         patch.object(mes, "release_lock", new=AsyncMock(side_effect=lambda *a, **k: released.append(a))):
+        with pytest.raises(HTTPException) as ei:
+            await mes.prepare_market_export(db, plan, uuid.UUID(int=0))
+    assert ei.value.status_code == 422
+    assert len(db.stream_calls) == 1
+    assert db.last_result.closed is True
+    assert released and released[0] == (mes.EXPORT_LOCK_KEY, holder)
+    assert not os.path.exists(captured["path"])  # 超限即清理临时目录
+
+
+@pytest.mark.asyncio
+async def test_export_stream_exception_cleans_up():
+    class _BoomResult:
+        def partitions(self, size=None):
+            async def _gen():
+                yield [_Row("x", "1")]
+                raise RuntimeError("db gone")
+            return _gen()
+
+        async def close(self):
+            self.closed = True
+
+    db = _FakeDb(result=_BoomResult())
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    holder = "holder-y"
+    released = []
+    captured = {}
+    _real_mkdtemp = tempfile.mkdtemp
+
+    def _fake_mkdtemp(prefix=None, **k):
+        d = _real_mkdtemp(prefix=prefix, **k)
+        captured["path"] = d
+        return d
+
+    with patch.object(tempfile, "mkdtemp", _fake_mkdtemp), \
+         patch.object(mes, "acquire_lock", new=AsyncMock(return_value=holder)), \
+         patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())), \
+         patch.object(mes, "release_lock", new=AsyncMock(side_effect=lambda *a, **k: released.append(a))):
+        with pytest.raises(RuntimeError):
+            await mes.prepare_market_export(db, plan, uuid.UUID(int=0))
+    assert db.last_result.closed is True
+    assert released and released[0] == (mes.EXPORT_LOCK_KEY, holder)
+    assert not os.path.exists(captured["path"])
 
 
 # ---------------------------------------------------------------------------
@@ -556,20 +636,11 @@ async def test_preflight_passes_filter_args_to_assemble():
 # ---------------------------------------------------------------------------
 
 
-class _FakeDbCount:
-    def __init__(self, count):
-        self._count = count
-
-    async def scalar(self, *a, **k):
-        return self._count
-
-
 @pytest.mark.asyncio
 async def test_preflight_busy_before_db_returns_429():
     plan = mes.build_export_plan(MarketExportRequest(**_body()))
     with patch.object(mes, "acquire_lock", new=AsyncMock(return_value=None)), \
          patch.object(mes, "_assemble_market_query", new=AsyncMock()) as mock_assemble, \
-         patch.object(mes, "_fetch_batch_rows", new=AsyncMock()) as mock_fetch, \
          patch.object(mes, "MarketXlsxWriter", new=MagicMock()) as mock_writer_cls, \
          patch.object(mes, "release_lock", new=AsyncMock()) as mock_release:
         with pytest.raises(HTTPException) as ei:
@@ -577,7 +648,6 @@ async def test_preflight_busy_before_db_returns_429():
     assert ei.value.status_code == 429
     # 锁竞争失败（429）必须发生在任何重 DB 工作之前
     assert mock_assemble.call_count == 0
-    assert mock_fetch.call_count == 0
     assert mock_writer_cls.call_count == 0
     # 未获得锁，不应执行释放
     assert mock_release.call_count == 0
@@ -585,12 +655,13 @@ async def test_preflight_busy_before_db_returns_429():
 
 @pytest.mark.asyncio
 async def test_preflight_over_limit_returns_422_and_releases_lock():
+    # 流式读到第 10001 行即 422（不再依赖 count 查询）
+    rows = [_Row(f"N{i}", f"S{i:05d}") for i in range(mes.MAX_EXPORT_ROWS + 1)]
+    db = _FakeDb(rows=rows)
     plan = mes.build_export_plan(MarketExportRequest(**_body()))
     holder = "holder-x"
-    db = _FakeDbCount(mes.MAX_EXPORT_ROWS + 1)
     with patch.object(mes, "acquire_lock", new=AsyncMock(return_value=holder)) as mock_acquire, \
          patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())) as mock_assemble, \
-         patch.object(mes, "_fetch_batch_rows", new=AsyncMock()) as mock_fetch, \
          patch.object(mes, "MarketXlsxWriter", new=MagicMock()) as mock_writer_cls, \
          patch.object(mes, "release_lock", new=AsyncMock()) as mock_release:
         with pytest.raises(HTTPException) as ei:
@@ -598,8 +669,10 @@ async def test_preflight_over_limit_returns_422_and_releases_lock():
     assert ei.value.status_code == 422
     assert mock_acquire.call_count == 1
     assert mock_assemble.call_count == 1
-    assert mock_fetch.call_count == 0
-    assert mock_writer_cls.call_count == 0
+    assert len(db.stream_calls) == 1
+    # 超限路径绝不 finalize/build_zip（writer 构造本身发生 1 次，正常）
+    assert mock_writer_cls.call_count == 1
+    mock_writer_cls.return_value.build_zip.assert_not_called()
     # 已获得锁，超限路径必须释放，避免泄漏
     assert mock_release.call_count == 1
     assert mock_release.await_args.args == (mes.EXPORT_LOCK_KEY, holder)
