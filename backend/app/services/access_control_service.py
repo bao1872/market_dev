@@ -14,10 +14,9 @@
 - admin 不需要 subscription，不受订阅到期和普通额度限制（subscription_active=True 豁免）
 - is_admin 只判断 "admin" 角色，其他非 admin 角色不影响身份判定
 - is_member 判断 "member" 角色，与 is_admin 对称（共 11 个字段）
-- subscription_active 由实时计算：status='active' AND starts_at<=now AND expires_at>now
+- subscription_active 由 resolve_effective_access 统一解析（复用 subscription_service.resolve_commercial_status 作为
+  商业状态语义唯一 owner），get_access_context 仅做 DTO adapter，不重复查询或推导 Subscription/Plan
 - get_access_context 是只读操作（不写 DB），可在登录路径使用
-- 复用 plan_service.get_plan 与 subscription_service.get_effective_subscription_status，
-  不重复实现套餐查询与订阅状态判定逻辑
 - [Phase 5B-2 PRD60] capabilities 字段优先从 user_capabilities 表读取，
   旧用户（无 user_capabilities 行）fallback 到 plan_code 推断（兼容期）
 
@@ -43,12 +42,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import _get_user_roles, get_current_active_user
 from app.db import get_db
 from app.models.instrument import Instrument
-from app.models.subscription import Subscription
 from app.models.user import User
 from app.models.user_capability import ALL_CAPABILITIES
 from app.models.watchlist import UserWatchlistItem
-from app.services.plan_service import get_plan
-from app.services.subscription_service import get_effective_subscription_status
 
 __all__ = [
     "AccessContext",
@@ -124,35 +120,6 @@ class AccessContext(BaseModel):
     diagnostics: list[str] = Field(default_factory=list, description="诊断（legacy fallback 标记等）")
 
 
-def _infer_capabilities_from_plan(
-    plan_code: str | None,
-    plan_monitor_limit: int | None,
-    expires_at: datetime | None,
-    subscription_active: bool,
-) -> dict[str, dict[str, Any]]:
-    """从 plan_code 推断 capabilities（兼容期 fallback，旧用户无 user_capabilities 行）。
-
-    PRD60 权限矩阵：
-    - observe_20 → self_selection + market_data（watchlist_limit 从 plans 表读取）
-    - research_50 → self_selection + market_data + research_replay
-    - 其他 → 空（无 capability）
-
-    watchlist_limit 从 plan.monitor_limit 读取，避免硬编码套餐数值。
-    """
-    if plan_code == "observe_20":
-        return {
-            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
-            "market_data": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
-        }
-    if plan_code == "research_50":
-        return {
-            "self_selection": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
-            "market_data": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
-            "research_replay": {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
-        }
-    return {}
-
-
 async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
     """获取当前用户的完整权限上下文（只读操作，不写 DB）。
 
@@ -207,21 +174,11 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
         resolve_effective_access,
     )
 
+    # [权限模型 V2] capability 已由上一步 resolve_effective_access 完整解析；
+    # get_access_context 仅做 DTO adapter：从 profile.subscription_summary 映射商业展示字段，
+    # 不再二次查询 Subscription / Plan，也不再二次推导 capability / default_route。
     profile = await resolve_effective_access(db, user)
-
-    # [AccessControl] - 描述: member 路径查询订阅有效状态（只读，复用 subscription_service）
-    # Subscription 只负责返回商业展示字段（subscription_active/plan_code/expires_at/features/limits），
-    # 不得决定 capabilities 与 default_route。
-    effective_status, expires_at = await get_effective_subscription_status(db, user.id)
-    subscription_active = effective_status == "active"
-
-    # 有订阅记录（active 或 expired）查询 plan_code 并读取 plans 表
-    sub_stmt = select(Subscription.plan_code).where(Subscription.user_id == user.id)
-    sub_result = await db.execute(sub_stmt)
-    plan_code = sub_result.scalar_one_or_none()
-
-    # [PlanService] - 描述: 复用 plan_service.get_plan 读取套餐定义（唯一真源，商业展示字段）
-    plan = await get_plan(db, plan_code) if plan_code else None
+    summary = profile.subscription_summary
 
     return AccessContext(
         user_id=str(user.id),
@@ -229,16 +186,12 @@ async def get_access_context(db: AsyncSession, user: User) -> AccessContext:
         roles=roles,
         is_admin=False,
         is_member=is_member,
-        subscription_active=subscription_active,
-        plan_code=plan.plan_code if plan else None,
-        plan_display_name=plan.display_name if plan else None,
-        expires_at=expires_at,
-        features=list(plan.features) if plan and plan.features else [],
-        limits={
-            "monitor_limit": int(plan.monitor_limit),
-            "notification_channel_limit": int(plan.notification_channel_limit),
-            "message_retention_days": int(plan.message_retention_days),
-        } if plan else {},
+        subscription_active=bool(summary.get("active")),
+        plan_code=summary.get("plan_code"),
+        plan_display_name=summary.get("plan_display_name"),
+        expires_at=summary.get("expires_at"),
+        features=list(summary.get("features") or []),
+        limits=dict(summary.get("limits") or {}),
         capabilities=capabilities_to_serializable(profile.capabilities),
         default_route=profile.default_route,
         active_capability_keys=profile.active_capability_keys,
@@ -329,7 +282,7 @@ def require_feature(feature_name: str) -> Callable[..., Coroutine[Any, Any, Acce
         raise ValueError("require_feature 需要非空 feature_name")
 
     # 旧 feature → capability 映射（仅已确认项；禁止凭空创造映射）
-    _FEATURE_TO_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    _feature_to_capabilities: dict[str, tuple[str, ...]] = {
         "trend_selection": ("self_selection", "research_replay"),
     }
 
@@ -339,7 +292,7 @@ def require_feature(feature_name: str) -> Callable[..., Coroutine[Any, Any, Acce
         """检查 ctx 是否具备指定 feature（admin 豁免），最终以 capabilities 为真源。"""
         if ctx.is_admin:
             return ctx
-        caps = _FEATURE_TO_CAPABILITIES.get(feature_name)
+        caps = _feature_to_capabilities.get(feature_name)
         if caps:
             for cap in caps:
                 cap_info = ctx.capabilities.get(cap)

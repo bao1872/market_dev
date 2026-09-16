@@ -1376,23 +1376,10 @@ async def get_user_access_profile(
     nearest_expires = min(e for e in active_expiries if e is not None) if active_expiries else None
 
     # subscription_summary（商业展示，不参与判权）
-    # [权限模型 V2 PV2-B06] 用 resolve_commercial_status 解析受限状态 + 诊断 reason
-    from app.models.subscription import Subscription
-    from app.services.subscription_service import resolve_commercial_status
-
-    sub = (
-        await db.execute(select(Subscription).where(Subscription.user_id == user.id))
-    ).scalars().first()
-    commercial = resolve_commercial_status(sub)
-    plan_display = None
-    if sub is not None and sub.plan_code:
-        from app.services.plan_service import get_plan
-
-        plan = await get_plan(db, sub.plan_code)
-        plan_display = plan.display_name if plan else None
-
-    sub_starts = _ensure_aware(sub.starts_at) if sub and sub.starts_at else None
-    sub_expires = _ensure_aware(sub.expires_at) if sub and sub.expires_at else None
+    # [权限模型 V2 PV2-B06] 直接复用 resolve_effective_access 已解析的 subscription_summary
+    # （商业状态语义唯一 owner：subscription_service.resolve_commercial_status），
+    # 不再二次查询 Subscription / Plan。
+    summary = profile.subscription_summary
 
     # explicit_capability_records（规范化 state：active/expired/revoked）
     from app.models.user_capability import UserCapability
@@ -1444,14 +1431,14 @@ async def get_user_access_profile(
             diagnostics=profile.diagnostics,
         ),
         subscription_summary=SubscriptionSummaryInfo(
-            status=commercial.status,
-            reason=commercial.reason,
-            plan_code=sub.plan_code if sub else None,
-            plan_display_name=plan_display,
-            starts_at=sub_starts,
-            expires_at=sub_expires,
-            source=getattr(sub, "source", None) if sub else None,
-            entitlement_snapshot=getattr(sub, "entitlement_snapshot", None) if sub else None,
+            status=summary["status"],
+            reason=summary["reason"],
+            plan_code=summary["plan_code"],
+            plan_display_name=summary["plan_display_name"],
+            starts_at=summary["starts_at"],
+            expires_at=summary["expires_at"],
+            source=summary["source"],
+            entitlement_snapshot=summary["entitlement_snapshot"],
         ),
         explicit_capability_records=explicit_records,
     )

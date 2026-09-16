@@ -45,9 +45,11 @@ from app.schemas.invitation import (
 )
 from app.services.access_control_service import (
     AccessContext,
-    _infer_capabilities_from_plan,
     require_admin,
     require_capability,
+)
+from app.services.effective_access_service import (
+    infer_capabilities_from_plan as _infer_capabilities_from_plan,
 )
 
 # ============================================================

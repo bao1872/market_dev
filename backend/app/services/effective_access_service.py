@@ -184,13 +184,19 @@ async def resolve_effective_access(
     db: AsyncSession,
     user: Any,
 ) -> EffectiveAccessProfile:
-    """唯一权限解析入口。
+    """唯一权限解析入口（权限画像唯一 owner）。
 
     从 user_capabilities 解析 capabilities（唯一真源），旧用户无显式行时
     显式标记 legacy plan fallback。不因 plan_code 决定功能权限。
 
     时区统一：比较一律使用 ``datetime.now(UTC)`` 与 UTC-aware 时间；
     数据库返回的 naive 时间视为 UTC 统一处理。
+
+    Subscription/Plan 只用于商业展示（``subscription_summary``）与 legacy plan
+    fallback 复用的同一行记录；capability 仍只由 user_capabilities 或
+    legacy_plan_fallback 决定。商业状态语义唯一 owner 为
+    ``subscription_service.resolve_commercial_status``，禁止在此复制
+    ``status=="active" and starts_at<=now and expires_at>now`` 判断。
     """
     user_id = str(user.id)
     roles = list(_get_user_roles(user))
@@ -199,6 +205,39 @@ async def resolve_effective_access(
 
     capabilities: dict[str, CapabilityState] = {}
     diagnostics: list[str] = []
+
+    # [权限模型 V2] 一次性读取 Subscription（商业展示 + legacy fallback 复用同一行）。
+    # 商业状态语义唯一 owner：subscription_service.resolve_commercial_status，
+    # 禁止在此复制 status=="active" and starts_at<=now and expires_at>now 判断。
+    from app.models.subscription import Subscription
+    from app.services.plan_service import get_plan
+    from app.services.subscription_service import resolve_commercial_status
+
+    sub_stmt = select(Subscription).where(Subscription.user_id == user.id)
+    sub_row = (await db.execute(sub_stmt)).scalars().first()
+    commercial = resolve_commercial_status(sub_row)
+    plan_code = sub_row.plan_code if sub_row else None
+    plan = await get_plan(db, plan_code) if plan_code else None
+    starts_at = _ensure_aware(sub_row.starts_at) if sub_row and sub_row.starts_at else None
+    expires_at = _ensure_aware(sub_row.expires_at) if sub_row and sub_row.expires_at else None
+    # subscription_summary：商业记录摘要（只读展示，不参与判权）
+    subscription_summary: dict[str, Any] = {
+        "status": commercial.status,
+        "reason": commercial.reason,
+        "active": commercial.status == "active",
+        "plan_code": plan_code,
+        "plan_display_name": plan.display_name if plan else None,
+        "starts_at": starts_at,
+        "expires_at": expires_at,
+        "source": getattr(sub_row, "source", None) if sub_row else None,
+        "entitlement_snapshot": getattr(sub_row, "entitlement_snapshot", None) if sub_row else None,
+        "features": list(plan.features) if plan and plan.features else [],
+        "limits": {
+            "monitor_limit": int(plan.monitor_limit),
+            "notification_channel_limit": int(plan.notification_channel_limit),
+            "message_retention_days": int(plan.message_retention_days),
+        } if plan else {},
+    }
 
     if is_admin:
         for key in ALL_CAPABILITIES:
@@ -209,6 +248,7 @@ async def resolve_effective_access(
         return EffectiveAccessProfile(
             user_id=user_id, account_status=user.status, roles=roles, is_admin=True,
             capabilities=capabilities, default_route=compute_default_route(True, capabilities),
+            subscription_summary=subscription_summary,
         )
 
     # 唯一真源：显式 user_capabilities（ORM select，禁止原始 SQL 字符串）
@@ -217,7 +257,7 @@ async def resolve_effective_access(
 
     if cap_rows:
         for row in cap_rows:
-            expires_at = _ensure_aware(row.expires_at)
+            cap_expires_at = _ensure_aware(row.expires_at)
             granted_at = _ensure_aware(row.granted_at)
             source = row.source or "user_capabilities"
             # [权限模型 V2 PV2-B04] admin_revoke 记录无论 expires_at 是否在未来，
@@ -226,38 +266,22 @@ async def resolve_effective_access(
                 active = False
                 reason = "explicitly_revoked"
             else:
-                active = bool(expires_at and expires_at > now)
-                reason = "expired" if (expires_at and not active) else ("active" if active else "no_expiry")
+                active = bool(cap_expires_at and cap_expires_at > now)
+                reason = "expired" if (cap_expires_at and not active) else ("active" if active else "no_expiry")
             capabilities[row.capability] = CapabilityState(
                 key=row.capability,
                 active=active,
                 granted_at=granted_at,
-                expires_at=expires_at,
+                expires_at=cap_expires_at,
                 watchlist_limit=row.watchlist_limit,
                 source=source,
                 reason=reason,
             )
     else:
         # legacy plan fallback（兼容期，显式标记 source，不得静默混入正常用户）
-        from app.models.subscription import Subscription
-        from app.services.plan_service import get_plan
-
-        sub_stmt = select(Subscription).where(Subscription.user_id == user.id)
-        sub_row = (await db.execute(sub_stmt)).scalars().first()
-        plan_code = sub_row.plan_code if sub_row else None
-        plan_monitor_limit = None
-        expires_at = _ensure_aware(sub_row.expires_at) if sub_row else None
-        sub_active = bool(
-            sub_row
-            and sub_row.status == "active"
-            and _ensure_aware(sub_row.starts_at) is not None
-            and (_ensure_aware(sub_row.starts_at) or now) <= now
-            and expires_at is not None
-            and expires_at > now
-        )
-        if plan_code:
-            plan = await get_plan(db, plan_code)
-            plan_monitor_limit = plan.monitor_limit if plan else None
+        # 复用上方已读取的 sub_row / commercial，不再重复查询 Subscription/Plan。
+        plan_monitor_limit = plan.monitor_limit if plan else None
+        sub_active = subscription_summary["active"]
         inferred = infer_capabilities_from_plan(
             plan_code, plan_monitor_limit, expires_at, sub_active
         )
@@ -279,6 +303,7 @@ async def resolve_effective_access(
         is_admin=is_admin,
         capabilities=capabilities,
         default_route=compute_default_route(is_admin, capabilities),
+        subscription_summary=subscription_summary,
         diagnostics=diagnostics,
     )
 
