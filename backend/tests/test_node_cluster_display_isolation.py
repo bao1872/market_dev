@@ -236,6 +236,7 @@ def mock_mdas(monkeypatch: pytest.MonkeyPatch) -> dict:
                 "adj": adj,
                 "completed_only": kwargs.get("completed_only", False),
                 "include_realtime": kwargs.get("include_realtime", True),
+                "fresh_intraday_tail": kwargs.get("fresh_intraday_tail", False),
                 "limit": kwargs.get("limit"),
                 "adjustment_as_of": kwargs.get("adjustment_as_of"),
             })
@@ -524,9 +525,23 @@ async def test_four_entry_call_matrix(
         assert q["completed_only"] is True, (
             f"Node 查询应为 completed_only=True: {q}"
         )
-        assert q["include_realtime"] is False, (
-            f"Node 查询不应包含 realtime: {q}"
-        )
+        if q["timeframe"] == "15m":
+            # [USER-FIX-3 / C] 15m：completed 语义不变，但必须读取「当日已完成的
+            # 实时尾部」，否则盘中筹码分布停留在上一交易日收盘（本轮修复的问题）。
+            assert q["include_realtime"] is True, (
+                f"Node 15m 查询应读取当日已完成实时尾部: {q}"
+            )
+            assert q["fresh_intraday_tail"] is True, (
+                f"Node 15m 查询需显式 opt-in fresh 尾部: {q}"
+            )
+        else:
+            # daily 仍为 completed-only（不含实时）
+            assert q["include_realtime"] is False, (
+                f"Node daily 查询不应包含 realtime: {q}"
+            )
+            assert q["fresh_intraday_tail"] is False, (
+                f"daily 不应开启 fresh 尾部: {q}"
+            )
 
     # 断言：展示窗口查询使用 completed_only=False（或页面参数）
     display_queries = [q for q in mdas_log if q["completed_only"] is False]

@@ -133,7 +133,14 @@ async def test_provider_uses_completed_qfq_for_daily() -> None:
 
 @pytest.mark.asyncio
 async def test_provider_uses_completed_qfq_for_15m() -> None:
-    """[NC-02] 15m 查询必须使用 include_realtime=False, completed_only=True, adj=qfq。"""
+    """[NC-02 / USER-FIX-3-C] 15m 查询参数合同。
+
+    语义变更：以前是 include_realtime=False ⇒ 盘中只能拿到**上一交易日收盘为止**
+    的陈旧 15m（当日成交量不进入筹码分布）。现在改为
+    completed_only=True + fresh_intraday_tail=True：
+      - completed 语义不变（forming bar 仍由 _filter_unfinished_15m_bars 丢弃）；
+      - 但允许合并「当日已完成的实时尾部」，使盘中 15m 跟随当日成交。
+    """
     daily_bars_df = _make_bars(250)
     expected_15m_df = _make_bars(4000, freq="15min")
 
@@ -156,11 +163,14 @@ async def test_provider_uses_completed_qfq_for_15m() -> None:
     call_15m = mock_mdas.get_bars.call_args_list[1]
     assert call_15m.kwargs["timeframe"] == "15m"
     assert call_15m.kwargs["adj"] == "qfq"
-    assert call_15m.kwargs["include_realtime"] is False, (
-        "NC-02 违规：Node 15m 输入必须 include_realtime=False"
+    assert call_15m.kwargs["include_realtime"] is True, (
+        "NC-02 违规：Node 15m 输入必须读取当日已完成的实时尾部"
+    )
+    assert call_15m.kwargs["fresh_intraday_tail"] is True, (
+        "NC-02 违规：completed_only 语义下读取实时尾部必须显式 opt-in"
     )
     assert call_15m.kwargs["completed_only"] is True, (
-        "NC-02 违规：Node 15m 输入必须 completed_only=True"
+        "NC-02 违规：Node 15m 输入必须 completed_only=True（不得计入 forming bar）"
     )
     assert call_15m.kwargs["limit"] == NODE_CLUSTER_LOW_BARS, (
         f"NC-03 违规：Node 15m limit 必须是 NODE_CLUSTER_LOW_BARS={NODE_CLUSTER_LOW_BARS}"

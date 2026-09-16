@@ -214,8 +214,12 @@ class NodeClusterInputProvider:
             instrument_id,
             timeframe="15m",
             adj="none",
-            include_realtime=False,
+            # [USER-FIX-3 / C] completed 语义下仍读取「当日已完成的实时尾部」：
+            # 盘中（无外部 15m 落库任务）否则只能拿到上一交易日收盘为止的 stale 15m。
+            # forming bar 仍由下方 _filter_unfinished_15m_bars 丢弃。
+            include_realtime=True,
             completed_only=True,
+            fresh_intraday_tail=True,
             end_date=effective_end_date,
             limit=_NODE_15M_REQUIRED,
         )
@@ -312,8 +316,12 @@ class NodeClusterInputProvider:
             instrument_id,
             timeframe="15m",
             adj="qfq",
-            include_realtime=False,
+            # [USER-FIX-3 / C] completed 语义下仍读取「当日已完成的实时尾部」：
+            # 盘中（无外部 15m 落库任务）否则只能拿到上一交易日收盘为止的 stale 15m。
+            # forming bar 仍由下方 _filter_unfinished_15m_bars 丢弃。
+            include_realtime=True,
             completed_only=True,
+            fresh_intraday_tail=True,
             adjustment_as_of=adjustment_as_of,
             end_date=end_date,
             limit=_NODE_15M_REQUIRED,

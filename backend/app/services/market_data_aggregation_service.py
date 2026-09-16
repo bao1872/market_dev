@@ -79,6 +79,11 @@ _DEFAULT_INTRADAY_LOOKBACK_DAYS: int = 180
 # A 股交易日 4 小时：15m=16 根，1h=4 根，1m=240 根
 _BARS_PER_DAY: dict[str, int] = {"15m": 16, "1h": 4, "1m": 240}
 
+# [USER-FIX-3 / C] - 描述: 日内周期集合
+# 只有日内周期存在「当日已完成的实时尾部」语义（由 Pytdx 原生周期提供，
+# 禁止从 1m 聚合，见 P0-4 冻结合同）。日/周/月线不在其中。
+_INTRADAY_TIMEFRAMES: frozenset[str] = frozenset({"1m", "15m", "1h"})
+
 # [CP-V3-A] - 描述: 日内回看安全边界（最大回看天数，约 20 年，防止无限扩大查询）
 _MAX_INTRADAY_LOOKBACK_DAYS: int = 5000
 
@@ -837,6 +842,7 @@ def _cache_key(
     warmup_bars: int,
     adjustment_as_of: date | None,
     allow_backfill: bool = True,
+    fresh_intraday_tail: bool = False,
 ) -> str:
     """构建缓存键，包含所有影响结果的参数 + 契约版本（自动隔离新旧缓存）。"""
     start = start_date.isoformat() if start_date is not None else "_"
@@ -847,7 +853,7 @@ def _cache_key(
         f"{_REDIS_CACHE_PREFIX}:"
         f"{instrument_id}:{timeframe}:{adj}:{include_realtime}:{completed_only}:"
         f"{start}:{end}:{limit_str}:{warmup_bars}:{as_of_str}:"
-        f"{int(allow_backfill)}:"
+        f"{int(allow_backfill)}:{int(fresh_intraday_tail)}:"
         f"{_MARKET_DATA_CONTRACT_VERSION}"
     )
 
@@ -1779,6 +1785,7 @@ class MarketDataAggregationService:
         warmup_bars: int = 0,
         adjustment_as_of: date | None = None,
         allow_backfill: bool = True,
+        fresh_intraday_tail: bool = False,
     ) -> BarAggregationResult:
         """获取行情聚合结果（v2 契约，CHANGE-20260717-002）。
 
@@ -1788,7 +1795,8 @@ class MarketDataAggregationService:
             timeframe: 1d | 15m | 1h | 1w | 1mo | 1m
             adj: qfq | none
             include_realtime: 交易时段是否补充实时 1m 数据
-            completed_only: 只返回已完成 bar（True 时强制 include_realtime=False）
+            completed_only: 只返回已完成 bar（默认 True 时强制 include_realtime=False；
+                仅当 fresh_intraday_tail=True 且周期为日内时例外，见下）
             start_date: 起始日期/时间（可选）
             end_date: 结束日期/时间（可选）
             limit: 返回最近 N 根（服务端截取，保证 source_bar_hash 稳定）
@@ -1798,6 +1806,14 @@ class MarketDataAggregationService:
                 False = strict DB-only：DB 有 completed qfq bars 则返回，DB 无则返回空
                 （由 caller 标 skipped），绝不调用 external provider / realtime / 15m。
                 production history replay / canary 必须使用 strict DB-only。
+            fresh_intraday_tail: [USER-FIX-3 / C] 显式 opt-in：在 completed_only=True
+                语义下，仍允许读取**当日已完成的**日内实时尾部（Pytdx 原生周期，
+                不回写 DB）。默认 False ⇒ 保持「completed_only 强制不含实时」的既有
+                行为，既有的 15m consumer 完全不受影响。
+                本参数只对日内周期（1m/15m/1h）有效；日/周/月线不生效。
+                注意：判据仍是 completed_only（不得把 forming bar 计入），
+                日内 forming bar 由调用方按自身语义过滤
+                （例：NodeClusterInputProvider._filter_unfinished_15m_bars）。
 
         Returns:
             BarAggregationResult（含 bars、warmup_bars_full、hash、contract_version 等诊断字段）
@@ -1813,14 +1829,18 @@ class MarketDataAggregationService:
             raise ValueError(f"adj 只支持 qfq/none, got {adj!r}")
 
         # [mdas] - completed_only 与 include_realtime 互斥：completed_only 强制不含实时
-        if completed_only:
+        # [USER-FIX-3 / C] 唯一的例外：调用方显式 fresh_intraday_tail=True 且周期为
+        # 日内时，允许合并「当日已完成的实时尾部」。未显式开启时行为完全不变。
+        if completed_only and not (
+            fresh_intraday_tail and timeframe in _INTRADAY_TIMEFRAMES
+        ):
             include_realtime = False
 
         # [mdas] - 先查 Redis 短缓存（参数 + 契约版本）
         cache_key = _cache_key(
             instrument_id, timeframe, adj, include_realtime, completed_only,
             start_date, end_date, limit, warmup_bars, adjustment_as_of,
-            allow_backfill,
+            allow_backfill, fresh_intraday_tail,
         )
         cached = _cache_get(cache_key)
         if cached is not None:
