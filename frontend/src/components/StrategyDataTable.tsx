@@ -104,8 +104,6 @@ export interface DataTableProps<Row> {
   onQueryChange?: (query: DataTableQuery) => void
   // 表格唯一标识（用于 sessionStorage 持久化）
   tableId: string
-  // 当前激活的运行 ID；切换时自动重置分页到第 1 页
-  activeRunId?: string
   // 全文搜索
   searchable?: boolean
   // 行选择
@@ -153,9 +151,9 @@ export interface DataTableProps<Row> {
   onPresetStaleField?: (field: 'industry' | 'concept', value: string) => void
   // CHANGE-20260713-010: 导出 Excel 回调（提供时显示"导出 Excel"按钮）
   onExport?: (ctx: ExportContext) => void
-  // [USER-FIX-3 / A2] 导出按钮可用性显式开关（向后兼容）：
-  //   - 不提供（undefined）→ 沿用历史语义 `Boolean(activeRunId)`；
-  //   - 提供时以它为准，用于解除「导出必须依赖 DSA run」的旧耦合
+  // [S2-B] 导出按钮可用性显式开关（唯一授权来源，fail-closed 默认 false）：
+  //   - 不提供（undefined）→ 导出禁用；
+  //   - 提供时以它为准。与 DSA run 生命周期完全解耦
   //     （/market 的导出实际走 POST /v1/market/export，按 scope 授权，与 run 无关）。
   exportEnabled?: boolean
 }
@@ -866,7 +864,6 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     stale = false,
     onQueryChange,
     tableId,
-    activeRunId,
     searchable = true,
     selectable = false,
     selectedKeys,
@@ -894,10 +891,10 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     exportEnabled,
   } = props
 
-  // [USER-FIX-3 / A2] 导出可用性：默认沿用历史语义（依赖 activeRunId）；
-  // 调用方可显式传 exportEnabled 解耦（/market 导出已改走 /v1/market/export，
-  // 与 DSA run 无关，缺 activeRunId 不应禁用导出）。
-  const effectiveExportEnabled = exportEnabled ?? Boolean(activeRunId)
+  // [S2-B] 导出可用性：唯一由显式 exportEnabled 控制（默认 false，fail-closed）。
+  // 历史 `Boolean(activeRunId)` 回退已移除：导出按钮只由调用方显式授权，
+  // 与 DSA run 生命周期完全解耦（/market 导出走 POST /v1/market/export，按 scope 授权）。
+  const effectiveExportEnabled = exportEnabled ?? false
 
   const [searchParams, setSearchParams] = useSearchParams()
 
@@ -920,11 +917,6 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
     anchor: HTMLElement
   } | null>(null)
   const [columnManagerAnchor, setColumnManagerAnchor] = useState<HTMLElement | null>(null)
-
-  // [StrategyDataTable] - 描述: 切换运行批次时重置分页到第 1 页
-  useEffect(() => {
-    setPage(1)
-  }, [activeRunId])
 
   // ===== URL 状态同步 =====
   const urlHydratedRef = useRef(false)
