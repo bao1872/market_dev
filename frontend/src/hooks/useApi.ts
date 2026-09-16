@@ -16,7 +16,6 @@ import type { UseQueryOptions } from '@tanstack/react-query'
 import * as api from '../api/endpoints'
 import type {
   TriggerRunRequest,
-  WatchlistAddRequest,
   CreateChannelRequest,
   NotificationPreviewRequest,
   InviteCodeCreateRequest,
@@ -27,8 +26,6 @@ import type {
   CalendarQueryParams,
   IndicatorQueryParams,
   StockMemoUpsertRequest,
-  MarketStatus,
-  MarketStocksQueryParams,
   DeliveryStatus,
   BetaApplicationQueryParams,
   BetaApplicationPatchRequest,
@@ -46,6 +43,9 @@ import type {
   ChartSnapshotQueryParams,
 } from '../api/endpoints'
 
+// [S3-B] 市场时钟单向引入（供本文件保留的 hooks 使用；实现 owner 为 ./marketRuntime）。
+import { isInTradingHours } from './marketRuntime'
+
 // ============================================================
 // 缓存时间常量
 // ============================================================
@@ -58,64 +58,13 @@ const STALE_REALTIME = 30 * 1000 // 实时数据 30 秒
 const STALE_CALENDAR = 30 * 60 * 1000 // 日历 30 分钟（极少变更）
 
 // ============================================================
-// 市场状态缓存（由 AppShell 轮询 /market/status 后通过 setCachedMarketStatus 更新）
+// 市场时钟（isInTradingHours / cached market status）
 // ============================================================
-// 设计说明：isInTradingHours() 是同步函数（用于 refetchInterval 回调），
-// 无法直接 await 后端 API。通过模块级缓存 + AppShell 30s 轮询更新，
-// 使交易时段判断与后端保持一致；缓存未填充时使用 Intl 上海时区 fallback。
-let _cachedMarketStatus: MarketStatus | null = null
+//
+// [S3-B] 实现已迁至 ./marketRuntime（唯一 owner）。此处 re-export 保持既有
+// `import { setCachedMarketStatus } from '@/hooks/useApi'` 调用方零改动。
 
-/** 更新市场状态缓存（由 AppShell 的轮询逻辑调用） */
-export function setCachedMarketStatus(status: MarketStatus | null): void {
-  _cachedMarketStatus = status
-}
-
-/** 获取当前缓存的市场状态（可用于 UI 显示） */
-export function getCachedMarketStatus(): MarketStatus | null {
-  return _cachedMarketStatus
-}
-
-/** 上海时区 fallback：使用 Intl.DateTimeFormat 固定 Asia/Shanghai 判断交易时段 */
-function isInTradingHoursShanghaiFallback(): boolean {
-  // 使用 en-US 获取稳定的 weekday 缩写，避免 zh-CN 在不同平台的差异
-  const fmt = new Intl.DateTimeFormat('en-US', {
-    timeZone: 'Asia/Shanghai',
-    weekday: 'short',
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
-  const parts = fmt.formatToParts(new Date())
-  const weekday = parts.find((p) => p.type === 'weekday')?.value ?? ''
-  const hourStr = parts.find((p) => p.type === 'hour')?.value ?? '0'
-  const minuteStr = parts.find((p) => p.type === 'minute')?.value ?? '0'
-  // hour 可能是 "24"（午夜），归一化为 0
-  const hour = parseInt(hourStr, 10) % 24
-  const minute = parseInt(minuteStr, 10)
-  const dayMap: Record<string, number> = {
-    Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
-  }
-  const day = dayMap[weekday] ?? -1
-  const isWeekday = day >= 1 && day <= 5
-  const timeVal = hour * 60 + minute
-  const isMorningSession = timeVal >= 570 && timeVal <= 690 // 9:30-11:30
-  const isAfternoonSession = timeVal >= 780 && timeVal <= 900 // 13:00-15:00
-  return isWeekday && (isMorningSession || isAfternoonSession)
-}
-
-/**
- * 判断当前是否在 A 股交易时段（周一至周五 9:30-11:30 / 13:00-15:00，上海时间）
- *
- * 优先级：
- * 1. 后端 /market/status 缓存（由 UserAppShell/AdminAppShell 30s 轮询更新，包含交易日判断）
- * 2. Intl.DateTimeFormat 固定 Asia/Shanghai 时区的本地 fallback（仅 weekday+时间，不含节假日）
- */
-export function isInTradingHours(): boolean {
-  if (_cachedMarketStatus) {
-    return _cachedMarketStatus.is_trading_hours
-  }
-  return isInTradingHoursShanghaiFallback()
-}
+export { setCachedMarketStatus, getCachedMarketStatus, isInTradingHours } from './marketRuntime'
 
 // ============================================================
 // ===== Auth hooks =====
@@ -160,49 +109,18 @@ export function useBatchInstruments(ids: string[] | undefined) {
   })
 }
 
-/**
- * 查询行情列表（服务端分页 + 批量加载，禁止 N+1）。
- * scope/query/page/page_size/sort 进 URL，selected 独立管理。
- * staleTime 30s（实时行情数据），placeholderData 保留上次成功数据避免闪烁。
- */
-export function useMarketStocks(
-  params: MarketStocksQueryParams,
-  options?: { enabled?: boolean },
-) {
-  return useQuery({
-    queryKey: ['market-stocks', params],
-    queryFn: ({ signal }) => api.getMarketStocks(params, { signal }),
-    staleTime: STALE_REALTIME,
-    placeholderData: (prev) => prev,
-    enabled: options?.enabled ?? true,
-  })
-}
+// ============================================================
+// ===== Market hooks =====
+// ============================================================
+//
+// [S3-B] 实现已迁至 ./useMarketApi（唯一 owner），此处以兼容 barrel 重新导出。
 
-/**
- * C9: 查询板块目录（只读），供行业/概念筛选下拉/自动完成使用。
- * staleTime 24 小时（板块目录每日 17:00 才同步一次，变更频率极低），
- * 不轮询、不增加持久化缓存。
- */
-export function useMarketBoards(type?: 'industry' | 'concept') {
-  return useQuery({
-    queryKey: ['market-boards', type ?? 'all'],
-    queryFn: ({ signal }) => api.getMarketBoards(type ? { type } : undefined, { signal }),
-    staleTime: 24 * 60 * 60 * 1000,
-  })
-}
-
-/**
- * [CHANGE-20260730-013] 查询第一金字塔 99 字段的筛选元数据。
- * staleTime 24 小时（字段元数据变更频率极低，随部署更新）。
- * 用于前端筛选器动态生成类型化控件（enum 下拉、datetime 日期选择器等）。
- */
-export function useMarketFilterSpecs() {
-  return useQuery({
-    queryKey: ['market-filter-specs'],
-    queryFn: ({ signal }) => api.getMarketFilterSpecs({ signal }),
-    staleTime: 24 * 60 * 60 * 1000,
-  })
-}
+export {
+  useMarketStocks,
+  useMarketBoards,
+  useMarketFilterSpecs,
+  useMarketSessionReactive,
+} from './useMarketApi'
 
 /** 按 ID 查询单个股票 */
 export function useInstrument(instrumentId: string | undefined) {
@@ -641,27 +559,15 @@ export function useRetryMessageDelivery() {
 // ============================================================
 // ===== Watchlist hooks =====
 // ============================================================
+//
+// [S3-B] 实现已迁至 ./useWatchlistApi（唯一 owner），此处以兼容 barrel 重新导出。
 
-/** 查询当前用户的自选列表（1 分钟缓存） */
-export function useWatchlist(options?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: ['watchlist'],
-    queryFn: api.getWatchlist,
-    staleTime: STALE_WATCHLIST,
-    enabled: options?.enabled ?? true,
-  })
-}
-
-/** 查询自选股+监控状态聚合数据（交易时段 1s 自动刷新，[盘中监控1秒]） */
-export function useWatchlistMonitorStatus(options?: { enabled?: boolean }) {
-  return useQuery({
-    queryKey: ['watchlist', 'monitor-status'],
-    queryFn: api.getWatchlistMonitorStatus,
-    staleTime: STALE_REALTIME,
-    refetchInterval: () => isInTradingHours() ? 1000 : false,
-    enabled: options?.enabled ?? true,
-  })
-}
+export {
+  useWatchlist,
+  useWatchlistMonitorStatus,
+  useAddToWatchlist,
+  useRemoveFromWatchlist,
+} from './useWatchlistApi'
 
 /** 查询定时任务运行记录（admin，10 秒轮询保持任务页 live） */
 export function useSchedulerJobRuns(params?: {
@@ -768,37 +674,8 @@ export function useTriggerComputeAllBoards() {
   })
 }
 
-/** 加入自选变更（自动失效 watchlist + monitor-status 缓存） */
-export function useAddToWatchlist() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: WatchlistAddRequest) => api.addToWatchlist(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['watchlist'] })
-      queryClient.invalidateQueries({ queryKey: ['watchlist', 'monitor-status'] })
-      queryClient.invalidateQueries({ queryKey: ['market-stocks'] })
-      // CHANGE-20260713-005: watchlist 变化后，universe=watchlist 的 strategy run results 也需失效，
-      // 否则 /market?scope=watchlist 下加入/移除自选后行不会立即出现/消失
-      queryClient.invalidateQueries({ queryKey: ['strategy-runs'] })
-    },
-  })
-}
-
-/** 移除自选变更（自动失效 watchlist + monitor-status + strategy-runs 缓存） */
-export function useRemoveFromWatchlist() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (instrumentId: string) => api.removeFromWatchlist(instrumentId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['watchlist'] })
-      queryClient.invalidateQueries({ queryKey: ['watchlist', 'monitor-status'] })
-      queryClient.invalidateQueries({ queryKey: ['market-stocks'] })
-      // CHANGE-20260713-005: watchlist 变化后，universe=watchlist 的 strategy run results 也需失效，
-      // 否则 /market?scope=watchlist 下移除自选后行不会立即消失
-      queryClient.invalidateQueries({ queryKey: ['strategy-runs'] })
-    },
-  })
-}
+// [S3-B] useAddToWatchlist / useRemoveFromWatchlist 已迁至 ./useWatchlistApi
+// （见本文件 "Watchlist hooks" 兼容 re-export）。
 
 // ============================================================
 // ===== Events Summary hooks =====
@@ -926,23 +803,7 @@ export function useChartSnapshot(
   })
 }
 
-/**
- * [P0-8] 响应式市场状态 hook — 用于详情页行情快照的市场阶段响应式依赖。
- *
- * 开盘、午休结束、hidden 恢复、切股和切周期时立即 invalidate 并刷新。
- * - 轮询 /market/status 每 15s 一次（比 AppShell 30s 更密集，确保阶段切换及时感知）
- * - 返回 market_session 字段，供调用方 useEffect 监听变化触发 invalidateQueries
- * - staleTime=10s 避免过度请求
- */
-export function useMarketSessionReactive() {
-  return useQuery({
-    queryKey: ['market-status', 'reactive'],
-    queryFn: () => api.getMarketStatus(),
-    staleTime: 10000,
-    refetchInterval: 15000,
-    refetchIntervalInBackground: true, // 后台也轮询，确保阶段切换及时感知
-  })
-}
+// [S3-B] useMarketSessionReactive 已迁至 ./useMarketApi（见 "Market hooks" 兼容 re-export）。
 
 // ============================================================
 // ===== Calendar hooks =====

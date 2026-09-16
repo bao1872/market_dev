@@ -17,23 +17,25 @@ import { dirname, join } from 'node:path'
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 
-const ENDPOINTS_PATH = join(__dirname, '..', '..', '..', 'api', 'endpoints.ts')
+// [S3-B] MarketBoardsResponse 已迁至 api/market.ts（endpoints.ts 仅兼容 re-export），
+// 故本契约读取新的实现 owner。
+const MARKET_PATH = join(__dirname, '..', '..', '..', 'api', 'market.ts')
 const TOOLBAR_PATH = join(__dirname, '..', 'MarketToolbar.tsx')
 const PAGE_PATH = join(__dirname, '..', 'MarketWorkspacePage.tsx')
 const COMBOBOX_PATH = join(__dirname, '..', 'BoardFilterCombobox.tsx')
 const SCSS_PATH = join(__dirname, '..', 'MarketWorkspace.module.scss')
 
-const endpointsSrc = readFileSync(ENDPOINTS_PATH, 'utf-8')
+const marketSrc = readFileSync(MARKET_PATH, 'utf-8')
 const toolbarSrc = readFileSync(TOOLBAR_PATH, 'utf-8')
 const pageSrc = readFileSync(PAGE_PATH, 'utf-8')
 const comboboxSrc = readFileSync(COMBOBOX_PATH, 'utf-8')
 const scssSrc = readFileSync(SCSS_PATH, 'utf-8')
 
 test('MarketBoardsResponse 包含 source/stale/last_attempt_status 字段', () => {
-  assert.ok(endpointsSrc.includes('source: string | null'), 'MarketBoardsResponse 缺少 source 字段')
-  assert.ok(endpointsSrc.includes('stale: boolean'), 'MarketBoardsResponse 缺少 stale 字段')
+  assert.ok(marketSrc.includes('source: string | null'), 'MarketBoardsResponse 缺少 source 字段')
+  assert.ok(marketSrc.includes('stale: boolean'), 'MarketBoardsResponse 缺少 stale 字段')
   assert.ok(
-    endpointsSrc.includes('last_attempt_status: string | null'),
+    marketSrc.includes('last_attempt_status: string | null'),
     'MarketBoardsResponse 缺少 last_attempt_status 字段',
   )
 })
