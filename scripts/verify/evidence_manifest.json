@@ -195,6 +195,15 @@
       "required": true,
       "test_selectors": ["tests/pg/test_pg_daily_collection.py"],
       "claim": "日常采集遵守 DB 优先读（DB 完整时 provider 不被调用）、单日缺失时请求最窄窗口（start=end=D），且 TDX host 轮转封装在适配器内部，server failure 绝不降级 Eastmoney/THS（server failure != provider failure）。"
+    },
+    {
+      "contract_id": "market_export_streaming_boundary",
+      "governance_level": 2,
+      "semantic_owner": "app.services.market_export_service",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": ["tests/test_market_export_integration.py"],
+      "claim": "Market export 由单条有界 server-side 流式 SELECT 产出（LIMIT MAX_EXPORT_ROWS+1=10001，无 OFFSET 分页、无 COUNT）；5000 行导出按 cursor partition 分批（每批 <= EXPORT_BATCH_SIZE=250）且无重复/遗漏，导出列固定为 name+symbol 两列；超过上限（读到第 10001 行）在写出终态 XLSX 之前 fail-closed 返回 422 且不生成临时/终态文件；base-only 请求在 DB 路径不加载 snapshot；全局租约忙时返回 429；query/writer 异常均释放租约（无泄漏）。"
     }
   ]
 }
