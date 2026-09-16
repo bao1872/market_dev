@@ -315,3 +315,72 @@ async def test_provider_zero_live_bars_yields_no_today_contribution(
     )
     assert pd.Timestamp("2026-09-15 15:00") in node_input.bars_15m.index
     assert node_input.m15_count == 1
+
+
+# =============================================================================
+# 3) C7 volume 语义：每根 bar 是 interval volume，直接求和（不是累计量）
+# =============================================================================
+
+
+async def test_provider_passes_interval_volume_through_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """C7：15m volume 为「每根 bar 的区间成交量」，Provider 不得做 cumulative→delta
+    或任何累加变换；3 根 bar 的 volume 直接相加即总量。
+    """
+    live = _bars("2026-09-16 09:45", "2026-09-16 10:00")
+    node_input, _ = await _run_provider(monkeypatch, now=_cst(10, 7), live_bars=live)
+
+    # _bars 生成的 interval volume 为 100 / 200（第 1、2 根）
+    assert list(node_input.bars_15m["volume"]) == [100.0, 200.0]
+    assert float(node_input.bars_15m["volume"].sum()) == 300.0
+
+
+# =============================================================================
+# 4) C9 daily / 15m 日期对齐：daily 尚未包含 today + 15m 已包含 today
+# =============================================================================
+
+
+def _vp_daily(*stamps: str) -> pd.DataFrame:
+    """构造价格有变化的主数据（日线），满足 VP 的 highest!=lowest 约束。"""
+    n = len(stamps)
+    closes = [10.0 + 0.3 * i for i in range(n)]
+    return pd.DataFrame(
+        {
+            "open": closes,
+            "high": [c + 0.4 for c in closes],
+            "low": [c - 0.4 for c in closes],
+            "close": closes,
+            "volume": [1_000_000.0] * n,
+        },
+        index=_idx(*stamps),
+    )
+
+
+def test_c9_daily_without_today_plus_today_15m_tail_is_accepted() -> None:
+    """C9 保护性测试：unified_volume_profile 是否允许
+    「daily owner 尚未包含 today，而 15m profile 已包含今日 completed bars」。
+
+    结论（由本测试固定）：**允许** —— daily 与 profile_df 是相互独立的输入，
+    不存在「daily 必须覆盖 today」的对齐硬约束，因此**不需要伪造今日 daily bar**。
+    同时证明今日 15m 尾部确实会改变 volume profile（不是被静默丢弃）。
+    """
+    from app.strategy_assets.algorithms.features.unified_volume_profile import (
+        compute_unified_volume_profile,
+    )
+
+    # daily 只到上一交易日（不含 today）
+    daily = _vp_daily(
+        "2026-09-03 15:00", "2026-09-04 15:00", "2026-09-15 15:00"
+    )
+    # profile 使用 15m：上一交易日尾盘 + 今日已完成两根
+    tail = _bars("2026-09-15 15:00", "2026-09-16 09:45", "2026-09-16 10:00")
+
+    without_tail = compute_unified_volume_profile(daily, profile_df=None, main_period="day")
+    with_tail = compute_unified_volume_profile(daily, profile_df=tail, main_period="day")
+
+    # 1) 两种输入都不抛错（无日期对齐硬约束）
+    assert not with_tail.profile_df.empty
+    # 2) 今日 15m 尾部确实进入了 profile（而不是被静默忽略）
+    assert not with_tail.profile_df.equals(without_tail.profile_df)
+
