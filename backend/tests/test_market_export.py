@@ -1,18 +1,22 @@
 """[S2-A-C1] Market export 安全/权限/低内存契约测试（PURE，无 DB/Redis 连接）。
 
 本文件只覆盖不触达数据库/Redis 的契约（在 PURE_UNIT_TEST=1 下本地可运行）：
-- A  生产导出路径不调用 get_market_stocks
-- G  source planning（base-only → 无重载 source）
-- H  visible column 白名单校验（fail-fast 422）
-- I  非 admin → 403（C1a 熔断）
-- J  admin → 授权通过
-- O  生成有效 OOXML（inlineStr，无 sharedStrings，含表头）
-- P  流式下载完成后临时文件清理
+- A   生产导出路径不调用 get_market_stocks
+- I   非 admin → 403（C1a 熔断）
+- J   admin → 授权通过
+- REQ 请求合同：/market/export 不再接受 visible_columns；导出列由服务端固定
+- PROJ 服务端固定列：股票名称 + 股票代码（顺序固定）
+- ROW batch 只产出 name / symbol 两列
+- NOENR 导出服务不再含 price/snapshot/chip/board enrichment pipeline
+- O   生成有效 OOXML（inlineStr，无 sharedStrings，表头只有两列）
+- P   流式下载完成后临时文件清理
 - 事件循环响应性（CPU 工作在 worker 线程，heartbeat 仍能推进）
-- 5000 行合成压力门禁（真实 XLSX 生成，测 baseline）
+- 5000 行合成压力门禁（真实 XLSX 生成，2 列，测 baseline）
+- 筛选语义不回归（fp_filter/fp_sort/industry/concept/state/stock_name/sort/watchlist）
+- 偏好飞行契约（C2）：422/429 必须在 StreamingResponse 创建前确定
 - 锁语义（持有者令牌 + 忙时拒绝 + 仅持有者可释放）
 
-DB/端点集成契约（B/C/D/E/F/K/L/M/N）在 tests/test_market_export_integration.py，
+DB/端点集成契约（B/C/G/...）在 tests/test_market_export_integration.py，
 仅 PANJI_REMOTE_VERIFY_DB_TEST=1（远程验证库）下运行。
 
 注意：不使用 app.main ASGI（其 lifespan 在 PURE 模式下会触发 DB 查询且 session 为 None），
@@ -24,12 +28,13 @@ from __future__ import annotations
 import asyncio
 import os
 import resource
+import shutil
 import tempfile
 import threading
 import time
 import uuid
 import zipfile
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import HTTPException
@@ -37,25 +42,14 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 
 from app.api.market import export_market_stocks, require_admin
-from app.schemas.export import ExportColumn
 from app.schemas.market_stocks import MarketExportRequest
 from app.services import market_export_service as mes
 from app.services.access_control_service import AccessContext
-from app.services.excel_export_service import MarketXlsxWriter, validate_export_columns
+from app.services.excel_export_service import MarketXlsxWriter
 
 pytestmark = pytest.mark.pure_unit
 
 _USER_ID = "00000000-0000-0000-0000-00000000000a"
-
-try:
-    from app.services.first_pyramid_flatten import FP_QUERY_FIELD_SPECS
-
-    _VALID_FP = next(
-        (k for k, v in FP_QUERY_FIELD_SPECS.items() if v.get("source") in ("flat", "column", "computed")),
-        "fp_volume_zscore20",
-    )
-except Exception:  # pragma: no cover
-    _VALID_FP = "fp_volume_zscore20"
 
 
 # ---------------------------------------------------------------------------
@@ -63,11 +57,7 @@ except Exception:  # pragma: no cover
 # ---------------------------------------------------------------------------
 
 
-def _body(columns=None, **over):
-    cols = columns or [
-        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
-        {"key": "name", "title": "名称", "data_type": "text", "payload_key": None},
-    ]
+def _body(**over):
     b = {
         "scope": "market",
         "keyword": None,
@@ -79,7 +69,6 @@ def _body(columns=None, **over):
         "sort": None,
         "stock_name": None,
         "stock_name_op": None,
-        "visible_columns": cols,
     }
     b.update(over)
     return b
@@ -125,7 +114,7 @@ async def test_export_admin_authorized_and_no_get_market_stocks():
         with open(final, "wb") as f:
             f.write(b"PK\x03\x04fake")
         return mes.PreparedMarketExport(
-            final_path=final, tmp_dir=d, rows=1, columns=1, batches=1, max_batch=1, bytes=4
+            final_path=final, tmp_dir=d, rows=1, columns=2, batches=1, max_batch=1, bytes=4
         )
 
     with patch(
@@ -153,164 +142,132 @@ async def test_export_admin_passes_require_admin():
     assert await require_admin(ctx) is ctx  # J
 
 
-def test_build_export_plan_rejects_unknown_column():
-    # H：未知列 → ValueError（端点映射为 422）
-    with pytest.raises(ValueError):
-        mes.build_export_plan(
-            MarketExportRequest(
-                **_body(columns=[{"key": "not_a_real_column", "title": "X", "data_type": "text", "payload_key": None}])
-            )
-        )
-
-
 # ---------------------------------------------------------------------------
-# H：validate_export_columns fail-fast
+# REQ：请求合同（visible_columns 已从导出合同移除）
 # ---------------------------------------------------------------------------
 
 
-def test_validate_rejects_unknown_base_key():
-    with pytest.raises(ValueError):
-        validate_export_columns([ExportColumn(key="bogus", title="X", data_type="text")])
+def test_request_without_visible_columns_is_valid():
+    req = MarketExportRequest(**_body(industry="银行", fp_filter="fp_x>1"))
+    plan = mes.build_export_plan(req)
+    assert plan.scope == "market"
+    assert plan.industry == "银行"
+    assert plan.fp_filter == "fp_x>1"
 
 
-def test_validate_rejects_unknown_fp_key():
-    with pytest.raises(ValueError):
-        validate_export_columns([ExportColumn(key="fp_does_not_exist", title="X", data_type="text")])
-
-
-def test_validate_rejects_duplicate_key():
-    with pytest.raises(ValueError):
-        validate_export_columns([
-            ExportColumn(key="symbol", title="A", data_type="text"),
-            ExportColumn(key="symbol", title="B", data_type="text"),
-        ])
-
-
-def test_validate_rejects_action_key():
-    with pytest.raises(ValueError):
-        validate_export_columns([ExportColumn(key="action", title="X", data_type="text")])
-
-
-def test_validate_rejects_bad_data_type():
-    with pytest.raises(ValueError):
-        validate_export_columns([ExportColumn(key="symbol", title="X", data_type="blob")])  # type: ignore[arg-type]
-
-
-def test_validate_rejects_oversized_title():
-    with pytest.raises(ValueError):
-        validate_export_columns([ExportColumn(key="symbol", title="x" * 1000, data_type="text")])
-
-
-def test_validate_rejects_empty():
-    with pytest.raises(ValueError):
-        validate_export_columns([])
-
-
-def test_validate_ok_known_columns():
-    validate_export_columns([
-        ExportColumn(key="symbol", title="代码", data_type="text"),
-        ExportColumn(key=_VALID_FP, title="动量", data_type="number"),
-    ])
+def test_request_has_no_visible_columns_field():
+    # visible_columns 已从 /market/export 合同中移除（服务端固定列）
+    assert "visible_columns" not in MarketExportRequest.model_fields
+    # 即便客户端误传，pydantic 会忽略额外字段；服务端以固定列导出
+    req = MarketExportRequest(**_body())
+    assert "visible_columns" not in req.model_dump()
 
 
 # ---------------------------------------------------------------------------
-# G：source planning
+# PROJ：服务端固定两列
 # ---------------------------------------------------------------------------
 
 
-def _plan(columns, **over):
-    return mes.build_export_plan(MarketExportRequest(**_body(columns=columns, **over)))
-
-
-def test_plan_base_only_no_heavy_sources():
-    plan = _plan([
-        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
-        {"key": "name", "title": "名称", "data_type": "text", "payload_key": None},
-    ])
-    assert plan.needs_price is False
-    assert plan.needs_snapshot is False
-    assert plan.needs_boards is False
-    assert plan.needs_chip is False
-
-
-def test_plan_price_requires_price_source():
-    plan = _plan([
-        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
-        {"key": "latest_price", "title": "最新价", "data_type": "number", "payload_key": None},
-    ])
-    assert plan.needs_price is True
-    assert plan.needs_snapshot is False
-
-
-def test_plan_fp_requires_snapshot_source():
-    plan = _plan([
-        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
-        {"key": _VALID_FP, "title": "动量", "data_type": "number", "payload_key": None},
-    ])
-    assert plan.needs_snapshot is True
-
-
-def test_plan_industry_filter_requires_boards():
-    plan = _plan(None, industry="银行")
-    assert plan.needs_boards is True
-
-
-def test_plan_watchlist_scope_normalized():
-    plan = _plan(None, scope="watchlist")
-    assert plan.scope == "watchlist"
-
-
-def _chip_fp_key():
-    try:
-        from app.services.first_pyramid_flatten import FP_QUERY_FIELD_SPECS
-    except Exception:  # pragma: no cover
-        return None
-    for k, v in FP_QUERY_FIELD_SPECS.items():
-        if v.get("source") == "chip":
-            return k
-    return None
-
-
-def test_plan_chip_fp_implies_snapshot():
-    chip_key = _chip_fp_key()
-    if chip_key is None:
-        pytest.skip("no chip-source fp column in FP_QUERY_FIELD_SPECS")
-    plan = _plan([
-        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
-        {"key": chip_key, "title": "chip", "data_type": "number", "payload_key": None},
-    ])
-    assert plan.needs_chip is True
-    # chip 字段取值依赖 _fetch_chips 的 snap_meta（来自 snapshot），必须加载 snapshot
-    assert plan.needs_snapshot is True
-
-
-def test_plan_chip_status_implies_snapshot():
-    plan = _plan([
-        {"key": "symbol", "title": "代码", "data_type": "text", "payload_key": None},
-        {"key": "chip_status", "title": "筹码状态", "data_type": "text", "payload_key": None},
-    ])
-    assert plan.needs_chip is True
-    # chip_status 同样依赖 snap_meta
-    assert plan.needs_snapshot is True
+def test_server_owned_fixed_columns():
+    cols = mes.MARKET_EXPORT_COLUMNS
+    assert len(cols) == 2
+    assert cols[0].key == "name" and cols[0].title == "股票名称"
+    assert cols[1].key == "symbol" and cols[1].title == "股票代码"
 
 
 # ---------------------------------------------------------------------------
-# O / 低内存：MarketXlsxWriter 增量 + inlineStr + 含表头
+# ROW：batch 只产出 name / symbol
 # ---------------------------------------------------------------------------
 
 
-def test_xlsx_writer_valid_inline_no_shared_strings():
-    cols = [
-        ExportColumn(key="symbol", title="代码", data_type="text"),
-        ExportColumn(key="name", title="名称", data_type="text"),
-        ExportColumn(key="latest_price", title="最新价", data_type="number"),
+class _FakeStmt:
+    def limit(self, *a):
+        return self
+
+    def offset(self, *a):
+        return self
+
+    def where(self, *a):
+        return self
+
+    def order_by(self, *a):
+        return self
+
+    def subquery(self):
+        # 返回真实（无 FROM 的）scalar subquery alias，使 select(...).select_from() 合法，不触达 DB
+        return select(func.count()).subquery()
+
+
+class _FakeCtx:
+    base_stmt = _FakeStmt()
+
+
+class _Row:
+    def __init__(self, name: str, symbol: str):
+        self.name = name
+        self.symbol = symbol
+
+
+class _Res:
+    def __init__(self, rows):
+        self._rows = rows
+
+    def all(self):
+        return self._rows
+
+
+class _FakeDb:
+    def __init__(self, rows):
+        self._rows = rows
+
+    async def execute(self, stmt):
+        return _Res(self._rows)
+
+    async def scalar(self, *a, **k):
+        return 0
+
+
+@pytest.mark.asyncio
+async def test_fetch_batch_rows_only_name_symbol():
+    ctx = _FakeCtx()
+    plan = mes.build_export_plan(MarketExportRequest(**_body()))
+    rows_db = [
+        _Row("贵州茅台", "600519"),
+        _Row("宁德时代", "300750"),
+        _Row("平安银行", "000001"),
     ]
+    out = await mes._fetch_batch_rows(_FakeDb(rows_db), ctx, plan, 0)
+    assert out == [
+        {"name": "贵州茅台", "symbol": "600519"},
+        {"name": "宁德时代", "symbol": "300750"},
+        {"name": "平安银行", "symbol": "000001"},
+    ]
+    for r in out:
+        assert set(r.keys()) == {"name", "symbol"}
+
+
+# ---------------------------------------------------------------------------
+# NOENR：导出服务不再含 enrichment pipeline
+# ---------------------------------------------------------------------------
+
+
+def test_export_service_has_no_enrichment_pipeline():
+    for name in ("_fetch_prices", "_fetch_snapshots", "_fetch_chips", "_cell_value"):
+        assert not hasattr(mes, name), f"{name} 必须从 market export service 删除"
+
+
+# ---------------------------------------------------------------------------
+# O / 低内存：MarketXlsxWriter 增量 + inlineStr + 仅两列
+# ---------------------------------------------------------------------------
+
+
+def test_xlsx_has_only_two_fixed_columns():
     rows = [
-        {"symbol": "000001", "name": "平安银行", "latest_price": 12.34},
-        {"symbol": "600519", "name": "贵州茅台", "latest_price": 1700.0},
+        {"name": "贵州茅台", "symbol": "600519"},
+        {"name": "宁德时代", "symbol": "300750"},
     ]
     with tempfile.TemporaryDirectory() as d:
-        w = MarketXlsxWriter(cols, d)
+        w = MarketXlsxWriter(mes.MARKET_EXPORT_COLUMNS, d)
         w.add_rows(rows)
         w.finalize()
         out = os.path.join(d, "export.xlsx")
@@ -324,19 +281,21 @@ def test_xlsx_writer_valid_inline_no_shared_strings():
         assert "xl/sharedStrings.xml" not in zf.namelist()
         sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
         assert "inlineStr" in sheet
-        # 表头行存在
-        assert "<row r=\"1\">" in sheet
-        assert "代码" in sheet and "名称" in sheet and "最新价" in sheet
-        # 数据行存在且为数字
-        assert "12.34" in sheet
+        # 表头只有两列
+        header = sheet.split('<row r="1">')[1].split("</row>")[0]
+        assert header.count("<c ") == 2
+        assert "股票名称" in header and "股票代码" in header
+        # 数据行只有两格
+        data = sheet.split('<row r="2">')[1].split("</row>")[0]
+        assert data.count("<c ") == 2
+        assert "贵州茅台" in sheet and "600519" in sheet
 
 
 def test_xlsx_writer_streaming_file_grows():
     """结构硬约束：数据增量写入磁盘临时文件，而非持有完整内存集合。"""
-    cols = [ExportColumn(key="symbol", title="代码", data_type="text")]
-    rows = [{"symbol": f"S{i:05d}"} for i in range(600)]
+    rows = [{"name": f"N{i}", "symbol": f"S{i:05d}"} for i in range(600)]
     with tempfile.TemporaryDirectory() as d:
-        w = MarketXlsxWriter(cols, d)
+        w = MarketXlsxWriter(mes.MARKET_EXPORT_COLUMNS, d)
         sizes = []
         for i in range(0, 600, 250):
             w.add_rows(rows[i : i + 250])
@@ -364,7 +323,7 @@ def test_export_writer_off_event_loop():
 
     async def run():
         task = asyncio.create_task(asyncio.to_thread(blocking_writer))
-        # 注意：不能在协程里直接调用阻塞的 threading.Event.wait（会卡住事件循环）
+        # 不能在协程里直接调用阻塞的 threading.Event.wait（会卡住事件循环）
         started = await asyncio.to_thread(worker_started.wait, 2)
         assert started
         loop = asyncio.get_event_loop()
@@ -383,34 +342,15 @@ def test_export_writer_off_event_loop():
 
 
 # ---------------------------------------------------------------------------
-# 5000 行合成压力门禁（真实 XLSX 生成，IDE baseline）
+# 5000 行合成压力门禁（真实 XLSX 生成，2 列，IDE baseline）
 # ---------------------------------------------------------------------------
 
 
 def test_export_5000_row_writer_stress():
-    cols = [
-        ExportColumn(key="symbol", title="代码", data_type="text"),
-        ExportColumn(key="name", title="名称", data_type="text"),
-        ExportColumn(key="latest_price", title="最新价", data_type="number"),
-        ExportColumn(key="change_pct", title="涨跌幅", data_type="percent"),
-        ExportColumn(key=_VALID_FP, title="动量", data_type="number"),
-    ]
-    rows = [
-        {
-            "symbol": f"S{i:05d}",
-            "name": f"N{i}",
-            "latest_price": float(i),
-            "change_pct": 0.5,
-            "fp_value_placeholder": i,
-        }
-        for i in range(5000)
-    ]
-    # 仅验证结构：fp 列写入占位值（不依赖真实 snapshot）
-    for r in rows:
-        r[_VALID_FP] = r.pop("fp_value_placeholder")
+    rows = [{"name": f"N{i}", "symbol": f"S{i:05d}"} for i in range(5000)]
     with tempfile.TemporaryDirectory() as d:
         peak_before = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-        w = MarketXlsxWriter(cols, d)
+        w = MarketXlsxWriter(mes.MARKET_EXPORT_COLUMNS, d)
         batches = 0
         max_batch = 0
         for i in range(0, 5000, mes.EXPORT_BATCH_SIZE):
@@ -425,9 +365,12 @@ def test_export_5000_row_writer_stress():
         peak_after = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         zf = zipfile.ZipFile(out)
         assert zf.testzip() is None
+        sheet = zf.read("xl/worksheets/sheet1.xml").decode("utf-8")
+        # 表头 + 5000 数据行 = 5001 个 <row r="
+        assert sheet.count('<row r="') == 5001
         assert max_batch <= mes.EXPORT_BATCH_SIZE
         print(
-            f"STRESS rows=5000 columns={len(cols)} batches={batches} "
+            f"STRESS rows=5000 columns=2 batches={batches} "
             f"max_batch={max_batch} xlsx_bytes={size} "
             f"peak_rss_delta={peak_after - peak_before}"
         )
@@ -435,25 +378,86 @@ def test_export_5000_row_writer_stress():
 
 
 # ---------------------------------------------------------------------------
+# 筛选语义不回归（导出列固定，但筛选/排序决定行集合与顺序）
+# ---------------------------------------------------------------------------
+
+
+def test_plan_preserves_filter_semantics():
+    req = MarketExportRequest(
+        **_body(
+            industry="银行",
+            concept="新能源",
+            state="up",
+            fp_filter="fp_x>1",
+            fp_sort="fp_y:desc",
+            sort="name:asc",
+            stock_name="茅台",
+            stock_name_op="contains",
+        )
+    )
+    plan = mes.build_export_plan(req)
+    assert plan.scope == "market"
+    assert plan.industry == "银行"
+    assert plan.concept == "新能源"
+    assert plan.state == "up"
+    assert plan.fp_filter == "fp_x>1"
+    assert plan.fp_sort == "fp_y:desc"
+    assert plan.sort == "name:asc"
+    assert plan.stock_name == "茅台"
+    assert plan.stock_name_op == "contains"
+
+
+def test_plan_watchlist_scope_normalized():
+    plan = mes.build_export_plan(MarketExportRequest(**_body(scope="watchlist")))
+    assert plan.scope == "watchlist"
+
+
+@pytest.mark.asyncio
+async def test_preflight_passes_filter_args_to_assemble():
+    captured: dict = {}
+
+    async def _assemble(db, user_id, scope, query, state, industry, concept, fp_filter, fp_sort, sort):
+        captured.update(
+            {
+                "scope": scope,
+                "query": query,
+                "state": state,
+                "industry": industry,
+                "concept": concept,
+                "fp_filter": fp_filter,
+                "fp_sort": fp_sort,
+                "sort": sort,
+            }
+        )
+        return _FakeCtx()
+
+    req = MarketExportRequest(**_body(industry="银行", fp_filter="fp_x>1", state="up", stock_name="茅台"))
+    plan = mes.build_export_plan(req)
+    # count=0 → 不进分批 fetch，但 _assemble_market_query 必须收到完整筛选语义。
+    # 使用真实 writer（会真实写入临时文件），并清理其 tmp_dir。
+    with patch.object(mes, "acquire_lock", new=AsyncMock(return_value="h")), \
+         patch.object(mes, "_assemble_market_query", new=_assemble), \
+         patch.object(mes, "release_lock", new=AsyncMock()):
+        prepared = await mes.prepare_market_export(_FakeDb([]), plan, uuid.UUID(int=0))
+    try:
+        assert prepared.rows == 0
+        assert prepared.columns == 2
+    finally:
+        shutil.rmtree(prepared.tmp_dir, ignore_errors=True)
+    # captured 非空即证明 _assemble_market_query 被调用且收到了完整筛选语义
+    assert captured
+    assert captured["scope"] == "market"
+    assert captured["industry"] == "银行"
+    assert captured["fp_filter"] == "fp_x>1"
+    assert captured["state"] == "up"
+
+
+# ---------------------------------------------------------------------------
 # 偏好飞行契约（C2）：422/429 必须在 StreamingResponse 创建前确定
 # ---------------------------------------------------------------------------
 
 
-class _FakeStmt:
-    def order_by(self, *a):
-        return self
-
-    def subquery(self):
-        # 返回真实（无 FROM 的）scalar subquery alias，使 select(...).select_from() 合法，
-        # 不触达数据库；db.scalar 由 _FakeDb 直接返回计数。
-        return select(func.count()).subquery()
-
-
-class _FakeCtx:
-    base_stmt = _FakeStmt()
-
-
-class _FakeDb:
+class _FakeDbCount:
     def __init__(self, count):
         self._count = count
 
@@ -467,7 +471,7 @@ async def test_preflight_busy_before_db_returns_429():
     with patch.object(mes, "acquire_lock", new=AsyncMock(return_value=None)), \
          patch.object(mes, "_assemble_market_query", new=AsyncMock()) as mock_assemble, \
          patch.object(mes, "_fetch_batch_rows", new=AsyncMock()) as mock_fetch, \
-         patch.object(mes, "MarketXlsxWriter", new=AsyncMock()) as mock_writer_cls, \
+         patch.object(mes, "MarketXlsxWriter", new=MagicMock()) as mock_writer_cls, \
          patch.object(mes, "release_lock", new=AsyncMock()) as mock_release:
         with pytest.raises(HTTPException) as ei:
             await mes.prepare_market_export(None, plan, uuid.UUID(int=0))
@@ -484,11 +488,11 @@ async def test_preflight_busy_before_db_returns_429():
 async def test_preflight_over_limit_returns_422_and_releases_lock():
     plan = mes.build_export_plan(MarketExportRequest(**_body()))
     holder = "holder-x"
-    db = _FakeDb(mes.MAX_EXPORT_ROWS + 1)
+    db = _FakeDbCount(mes.MAX_EXPORT_ROWS + 1)
     with patch.object(mes, "acquire_lock", new=AsyncMock(return_value=holder)) as mock_acquire, \
          patch.object(mes, "_assemble_market_query", new=AsyncMock(return_value=_FakeCtx())) as mock_assemble, \
          patch.object(mes, "_fetch_batch_rows", new=AsyncMock()) as mock_fetch, \
-         patch.object(mes, "MarketXlsxWriter", new=AsyncMock()) as mock_writer_cls, \
+         patch.object(mes, "MarketXlsxWriter", new=MagicMock()) as mock_writer_cls, \
          patch.object(mes, "release_lock", new=AsyncMock()) as mock_release:
         with pytest.raises(HTTPException) as ei:
             await mes.prepare_market_export(db, plan, uuid.UUID(int=0))
@@ -590,7 +594,7 @@ async def test_streaming_cleanup_after_complete():
     with open(final, "wb") as f:
         f.write(b"PK")
     prepared = mes.PreparedMarketExport(
-        final_path=final, tmp_dir=d, rows=1, columns=1, batches=1, max_batch=1, bytes=2
+        final_path=final, tmp_dir=d, rows=1, columns=2, batches=1, max_batch=1, bytes=2
     )
     out = b"".join([c async for c in mes.stream_prepared_market_export(prepared)])
     assert out == b"PK"

@@ -317,9 +317,11 @@ async def export_market_stocks(
 ) -> StreamingResponse:
     """安全导出行情筛选结果为 .xlsx（admin-only 临时熔断）。
 
-    先 fail-fast 校验请求（列白名单/上限），再返回流式响应；
-    实际 DB 分批读取与 XLSX 生成在 generator 内完成，CPU 工作脱离 event loop，
-    并持有一个全局导出租约（并发=1，忙时 429）。
+    导出字段由服务端固定为「股票名称 + 股票代码」两列（见 MARKET_EXPORT_COLUMNS），
+    客户端不指定列；筛选/排序语义与 /market/stocks 同源，决定导出哪些股票与顺序。
+    build_export_plan 只做 query 归一化（不含列白名单），prepare_market_export 完成
+    租约竞争 / filtered count / 有界分批 / 低内存 XLSX（CPU 工作脱离 event loop，
+    全局导出租约并发=1，忙时 429），其异常均早于 StreamingResponse 创建。
     """
     from app.services.market_export_service import (
         build_export_plan,

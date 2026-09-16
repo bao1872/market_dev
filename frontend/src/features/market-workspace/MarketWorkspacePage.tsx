@@ -47,7 +47,6 @@ import {
   type MarketScope,
   type MarketListContext,
   type MarketListFilter,
-  type MarketExportColumn,
 } from './marketWorkspaceUrlState'
 import {
   getFirstPyramidColumns,
@@ -218,13 +217,8 @@ export default function MarketWorkspacePage() {
       if (!tryAcquireExportUiLock(exportingRef)) return
       setExporting(true)
       try {
-        const visibleColumns: MarketExportColumn[] = ctx.visibleColumns.map((col) => ({
-          key: col.key,
-          title: col.title,
-          dataType:
-            col.dataType === 'number' ? 'number' : col.dataType === 'percent' ? 'percent' : 'text',
-        }))
-        // 复用 /market/stocks 同一口径：fp 走 fp_filter/fp_sort，基础排序走 sort=key:direction
+        // 复用 /market/stocks 同一口径：fp 走 fp_filter/fp_sort，基础排序走 sort=key:direction。
+        // 导出列由服务端固定为「股票名称 + 股票代码」，前端不发送任何列定义。
         const body = buildMarketExportRequest({
           scope,
           keyword: ctx.keyword ?? null,
@@ -234,7 +228,6 @@ export default function MarketWorkspacePage() {
           sortDesc: ctx.sortDesc,
           // DataTableFilter 与 MarketListFilter 结构兼容（key/operator/value/value2）
           filters: (ctx.metricFilters ?? []) as unknown as MarketListFilter[],
-          visibleColumns,
         })
         const resp = await apiClient.post('/v1/market/export', body, { responseType: 'blob' })
         const contentDisp = resp.headers['content-disposition'] || ''

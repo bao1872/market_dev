@@ -23,8 +23,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from app.schemas.export import ExportColumn
-
 
 class MarketStockRow(BaseModel):
     """行情列表单行 - 包含页面展示所需的全部字段。
@@ -130,7 +128,6 @@ class MarketExportRequest(BaseModel):
     stock_name_op: str | None = Field(
         None, description="股票名称筛选操作符: contains | not_contains | eq"
     )
-    visible_columns: list[ExportColumn] = Field(..., description="可见列定义（按此顺序导出）")
 
 
 # ===== 板块目录 API schemas（C9: 行业/概念筛选下拉支持）=====

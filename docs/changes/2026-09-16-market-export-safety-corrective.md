@@ -2,7 +2,7 @@
 
 - 日期：2026-09-16
 - 基线 SHA：`50c32b857786ed047c1257d9048fd234def354da`
-- 阶段：C1a（安全导出管线 + admin-only 熔断）
+- 阶段：C1a-C3（安全导出管线 + admin-only 熔断 + 固定两列出货）
 - 后续：C1b（验证通过后再开放普通用户导出），不在本 commit
 
 ---
@@ -133,3 +133,64 @@ admin           → 全部可导出
   owner = 后端 `require_admin`）。
 - 列表读取权限（`market_data`/`self_selection`/`admin` 对 `GET /v1/market/stocks` 的访问）
   未被本变更收紧。
+
+---
+
+## 5. Export Projection Contract (C1a-C3 更新)
+
+**产品合同在 C3 阶段进一步收窄**：Excel 永远只导出两列——`股票名称`（Instrument.name）与
+`股票代码`（Instrument.symbol）。这是一次**导出链路减法**，而非在 `visible_columns`
+架构上硬限制两列。
+
+> `visible_columns` is removed from the `/market/export` contract.
+> The client does not choose export columns.
+
+```text
+Export Projection Contract
+
+Market list export intentionally exports only:
+1. 股票名称
+2. 股票代码
+
+The client does not choose export columns.
+
+Filtering/sorting determines row membership and order only.
+
+The export path must not perform display-field enrichment
+for price, board, snapshot, first-pyramid, or chip data.
+
+If a filter/sort requires one of those sources,
+the canonical market query owner may use it to determine
+membership/order, but it is not loaded again for export projection.
+```
+
+### 5.1 本 corrective 实际改动（相对 C1a）
+
+- **请求合同**：`MarketExportRequest.visible_columns` 已删除；服务端不再接受客户端列定义。
+  `build_export_plan` 不再做列白名单校验（`validate_export_columns` 仅保留给 legacy
+  strategy export），不再计算 `needs_price/needs_snapshot/needs_boards/needs_chip`。
+- **服务端固定列**：`market_export_service.MARKET_EXPORT_COLUMNS = (name, symbol)`，
+  顺序固定（名称 → 代码）。`MarketXlsxWriter` 始终使用该集合。
+- **`MarketExportPlan` 退化为纯 query 语义**：仅 `scope/query/state/industry/concept/
+  fp_filter/fp_sort/sort/stock_name/stock_name_op`；不再承担 output source planner。
+- **删除导出 enrichment pipeline**：`_cell_value` / `_fetch_prices` / `_fetch_snapshots`
+  / `_fetch_chips` 及其 `price_map/flat_map/payload_map/snap_meta/boards_map/
+  chip_flat_map` 全部从 market export service 移除（相关 import 一并清理）。
+- **`_fetch_batch_rows` 轻量化**：只执行 `_assemble_market_query` 已装配好的
+  筛选/排序 query，每次 ≤ `EXPORT_BATCH_SIZE`，仅映射 `name` / `symbol` 两列；
+  不随后再查询 bars/snapshot/chip/boards。
+
+### 5.2 明确不变的边界
+
+- **筛选/排序语义完整保留**：`_assemble_market_query` 仍按 `fp_filter/fp_sort/industry/
+  concept/state/stock_name/sort` 决定行集合与顺序；若筛选/排序本身需要 snapshot/chip/
+  board/bar LATERAL，canonical query owner 仍可使用它们确定 membership/order——**但**
+  export projection 不再为“显示字段”做第二轮 enrichment。这是本轮最重要边界。
+- **资源安全机制全部保留**：`MAX_EXPORT_ROWS=10000`、`EXPORT_BATCH_SIZE=250`、全局导出租约
+  （并发=1，忙时 429）、`prepare_market_export` 先于 `StreamingResponse` 完成所有重工作、
+  临时文件增量 writer、`finally` 清理——不因列减少而恢复“一次性 10000 行 / BytesIO 终态 /
+  整张 sheet_xml string”。
+- **admin-only 熔断保留**：`POST /v1/market/export → require_admin`；普通用户权限恢复属 C1b。
+- **前端**：`buildMarketExportRequest` 停止发送 `visible_columns`；`MarketExportColumn`
+  类型删除；in-flight 锁（`tryAcquireExportUiLock`/`releaseExportUiLock`）与按钮可见性
+  逻辑保持 C1a 不变。

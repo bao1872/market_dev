@@ -488,7 +488,6 @@ test('CHANGE-20260904-1: fp 筛选走 fp_filter，不再转 metric_filters', () 
     sortBy: null,
     sortDesc: false,
     filters: [{ key: 'fp_volume_zscore20', operator: 'gt', value: 0.5 }],
-    visibleColumns: [{ key: 'stock', title: '股票', dataType: 'text' }],
   })
   assert.equal(req.fp_filter, 'fp_volume_zscore20:gt:0.5')
   assert.equal((req as unknown as Record<string, unknown>).metric_filters, undefined)
@@ -503,7 +502,6 @@ test('CHANGE-20260904-2: fp 排序走 fp_sort，基础排序为 null', () => {
     sortBy: 'fp_trend_strength',
     sortDesc: true,
     filters: [],
-    visibleColumns: [{ key: 'fp_trend_strength', title: '强度', dataType: 'number' }],
   })
   assert.equal(req.fp_sort, 'fp_trend_strength:desc')
   assert.equal(req.sort, null)
@@ -518,7 +516,6 @@ test('CHANGE-20260904-3: 基础排序走 sort，fp_sort 为 null', () => {
     sortBy: 'change_pct',
     sortDesc: true,
     filters: [],
-    visibleColumns: [{ key: 'change_pct', title: '涨跌幅', dataType: 'number' }],
   })
   assert.equal(req.sort, 'change_pct:desc')
   assert.equal(req.fp_sort, null)

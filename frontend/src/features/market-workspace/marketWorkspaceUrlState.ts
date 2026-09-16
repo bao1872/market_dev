@@ -467,14 +467,10 @@ export function buildMarketReturnToUrl(ctx: MarketListContext, selectedSymbol: s
 // ===== CHANGE-20260904: 行情 Excel 导出请求体（复用 /market/stocks 同一查询语义）=====
 // 旧导出把 fp 筛选转成 DSA 旧路径 metric_filters（→ 422）；新导出走 /v1/market/export，
 // fp 筛选/排序用 fp_filter / fp_sort（FP_QUERY_FIELD_SPECS 白名单），与 /market/stocks 同源。
+//
+// 导出列由服务端固定为「股票名称 + 股票代码」，客户端不发送任何列定义。
 // 本文件为纯 TS（无 React / 无 @/ 别名），保留可被 node --test 直接运行。
 
-
-export interface MarketExportColumn {
-  key: string
-  title: string
-  dataType: 'text' | 'number' | 'percent'
-}
 
 export interface MarketExportRequestShape {
   scope: string
@@ -487,7 +483,6 @@ export interface MarketExportRequestShape {
   sort: string | null
   stock_name: string | null
   stock_name_op: string | null
-  visible_columns: MarketExportColumn[]
 }
 
 /**
@@ -502,7 +497,8 @@ export interface MarketExportRequestShape {
  * @param params.filters      StrategyDataTable 列筛选（DataTableFilter 结构兼容 MarketListFilter）
  * @param params.sortBy       当前排序字段（fp 字段走 fp_sort，否则走 sort）
  * @param params.sortDesc     是否降序
- * @param params.visibleColumns 可见列（key/title/dataType）
+ *
+ * 注意：导出列由服务端固定（股票名称 + 股票代码），本函数不发送任何列定义。
  */
 export function buildMarketExportRequest(params: {
   scope: MarketScope
@@ -512,7 +508,6 @@ export function buildMarketExportRequest(params: {
   sortBy: string | null
   sortDesc: boolean
   filters: MarketListFilter[]
-  visibleColumns: MarketExportColumn[]
   state?: string | null
 }): MarketExportRequestShape {
   const fpFilter = serializeFpFilters(params.filters as unknown as Parameters<typeof serializeFpFilters>[0])
@@ -536,6 +531,5 @@ export function buildMarketExportRequest(params: {
     sort,
     stock_name: stockNameFilter?.stock_name ?? null,
     stock_name_op: stockNameFilter?.stock_name_op ?? null,
-    visible_columns: params.visibleColumns,
   }
 }
