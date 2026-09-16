@@ -14,13 +14,7 @@
 
 import { apiClient, publicApiClient } from './client'
 import { useAuthStore } from '../store/auth'
-import type { UserResponse } from './auth'
-import type {
-  StrategyVersion,
-  StrategyRun,
-  StrategyRunListResponse,
-  StrategyEventListResponse,
-} from './strategy'
+import type { StrategyEventListResponse } from './strategy'
 
 // ============================================================
 // 通用辅助
@@ -160,65 +154,145 @@ export type {
   StrategyResultQueryParams,
 } from './strategy'
 
+// ============================================================
+// Admin / AfterClose 领域 —— 实现已迁至 ./admin 与 ./adminAfterClose（唯一 owner）
+// ============================================================
+
+export {
+  createStrategy,
+  releaseStrategyVersion,
+  archiveStrategyVersion,
+  triggerStrategyRun,
+  getAdminStrategyRuns,
+  getMessageDeliveries,
+  retryMessageDelivery,
+  createInviteCodes,
+  getInviteCodes,
+  revokeInviteCode,
+  adminListUserChannels,
+  adminCreateUserChannel,
+  adminUpdateUserChannel,
+  adminDeleteUserChannel,
+  adminVerifyUserChannel,
+  adminTestUserChannel,
+  getMembers,
+  getMemberRedemptions,
+  getAdminUsers,
+  getAdminUser,
+  adminEnableUser,
+  adminDisableUser,
+  adminResetUserPassword,
+  adminGrantSubscription,
+  adminRenewSubscription,
+  adminRevokeSubscription,
+  adminChangeSubscriptionPlan,
+  getUserCapabilities,
+  adminGrantCapability,
+  adminRevokeCapability,
+  getAdminAuditLogs,
+  getAdminBetaApplications,
+  getAdminBetaApplicationStats,
+  getAdminBetaApplicationDetail,
+  updateAdminBetaApplication,
+  retryAdminBetaApplicationFeishu,
+  buildBetaApplicationExportUrl,
+  getSchedulerJobRuns,
+  getWorkerHeartbeats,
+  getAdminSystemOverview,
+  getAdminProductReadiness,
+  getAdminVisitors,
+  triggerComputeBoard,
+  triggerComputeAllBoards
+} from './admin'
+
+export type {
+  UserListResponse,
+  AuditLogListItem,
+  AuditLogListResponse,
+  SubscriptionResponse,
+  SubscriptionRenewResponse,
+  InviteCode,
+  InviteCodeListItem,
+  InviteCodeListResponse,
+  InviteRedemption,
+  MemberListItem,
+  MemberListResponse,
+  TriggerRunRequest,
+  InviteCodeCreateRequest,
+  CapabilityGrantInput,
+  GrantCapabilityRequest,
+  UserCapabilityInfo,
+  GrantSubscriptionRequest,
+  RenewSubscriptionRequest,
+  ChangePlanRequest,
+  ChangeAccountStatusRequest,
+  UserCapabilitiesResponse,
+  BetaApplicationStatus,
+  BetaApplicationReasonCode,
+  WatchStockRange,
+  BetaApplicationListItem,
+  BetaApplicationListResponse,
+  BetaApplicationDetail,
+  BetaApplicationStats,
+  BetaApplicationPatchRequest,
+  RetryFeishuResponse,
+  BetaApplicationQueryParams,
+  BarsFreshness,
+  StrategyFreshness,
+  DataFreshness,
+  SystemOverview,
+  RecentSchedulerJobSummary,
+  SchedulerJobRunItem,
+  SchedulerJobRunListResponse,
+  WorkerHeartbeatItem,
+  WorkerHeartbeatListResponse,
+  ProductReadinessItem,
+  BenefitsIssue,
+  GovernanceReport,
+  ProductReadinessResponse,
+  VisitorMetricItem,
+  VisitorSummary,
+  VisitorReport
+} from './admin'
+
+export {
+  getJobRunEvents,
+  getAfterCloseRunStatus,
+  createAfterCloseRun,
+  forceAfterCloseRun,
+  retryAfterCloseRun,
+  resumeAfterCloseRun,
+  getAfterClosePipelineLatest,
+  getAfterClosePipelineByDate,
+  getAfterClosePipelineRuns,
+  createAfterClosePipelineRun,
+  cancelAfterCloseRun,
+  reconcileAfterCloseRun,
+  restartAfterCloseRun,
+  forceRestartAfterCloseRun
+} from './adminAfterClose'
+
+export type {
+  JobRunEvent,
+  JobRunEventListResponse,
+  AfterCloseRunStatusResponse,
+  AfterCloseRunCreateResponse,
+  AfterCloseStepStatus,
+  PipelineStep,
+  AfterCloseRunSummary,
+  AfterCloseDiagnostics,
+  FeatureSnapshotRunSummary,
+  AfterClosePipelineResponse,
+  PipelineRunItem,
+  AfterClosePipelineRunListResponse,
+  AfterCloseRestartStep,
+  AfterClosePipelineRunRequest,
+  AfterCloseRunActionResponse,
+  AfterClosePipelineRunResponse
+} from './adminAfterClose'
+
+
 /** 用户列表分页响应 */
-export interface UserListResponse {
-  items: UserResponse[]
-  total: number
-  limit: number
-  offset: number
-}
-
-/** 审计日志列表项 */
-export interface AuditLogListItem {
-  id: string
-  actor_user_id: string
-  action: string
-  target_type: string
-  target_id: string | null
-  before_data: Record<string, unknown> | null
-  after_data: Record<string, unknown> | null
-  request_id: string | null
-  ip_hash: string | null
-  created_at: string
-}
-
-/** 审计日志列表响应 */
-export interface AuditLogListResponse {
-  items: AuditLogListItem[]
-  total: number
-  limit: number
-  offset: number
-}
-
-// [S3-A] MembershipResponse / RegisterSuccessResponse / RenewSuccessResponse
-// 已迁至 ./auth（见顶部兼容 re-export）。
-
-/** 订阅记录响应 */
-export interface SubscriptionResponse {
-  id: string
-  user_id: string
-  plan_code: string
-  status: string
-  starts_at: string
-  expires_at: string
-  entitlement_snapshot: Record<string, unknown>
-  source: string
-  created_by: string | null
-  created_at: string
-  updated_at: string
-}
-
-/** 管理员续期订阅响应 */
-export interface SubscriptionRenewResponse extends SubscriptionResponse {
-  old_expires_at: string
-  new_expires_at: string
-}
-
-// ============================================================
-// Instrument 领域类型
-// ============================================================
-
-/** 股票主数据 */
 export interface Instrument {
   id: string
   symbol: string
@@ -600,90 +674,6 @@ export interface PlanResponse {
 }
 
 /** 邀请码响应（含明文，仅生成时返回）+ 套餐快照 */
-export interface InviteCode {
-  id: string
-  code: string
-  grant_days: number
-  plan_code: PlanCode | null
-  monitor_limit: number | null
-
-  note: string | null
-  created_at: string
-  /**
-   * [Gate2 PRD60 PA-20] capability 组合。后端始终返回该字段：
-   * null 表示旧模式邀请码（按 plan_code 兑换），不是后端漏传。
-   */
-  capabilities: CapabilityGrantInput[] | null
-}
-
-/** 邀请码列表项（不含明文）+ 套餐快照 */
-export interface InviteCodeListItem {
-  id: string
-  status: string
-  grant_days: number
-  plan_code: PlanCode | null
-  monitor_limit: number | null
-
-  note: string | null
-  created_by: string
-  created_at: string
-  used_by: string | null
-  used_at: string | null
-  usage_type: string | null
-  /**
-   * [Gate2 PRD60 PA-20] capability 组合。后端始终返回该字段：
-   * null 表示旧模式邀请码（按 plan_code 兑换），不是后端漏传。
-   */
-  capabilities: CapabilityGrantInput[] | null
-}
-
-/** 邀请码列表响应 */
-export interface InviteCodeListResponse {
-  items: InviteCodeListItem[]
-  total: number
-  limit: number
-  offset: number
-}
-
-/** 兑换记录 */
-export interface InviteRedemption {
-  id: string
-  invite_code_id: string
-  user_id: string
-  usage_type: string
-  old_expires_at: string | null
-  new_expires_at: string
-  redeemed_at: string
-}
-
-/** 订阅账户列表项（MemberListItem / membership_status 为 V1.6 API 遗留命名） */
-export interface MemberListItem {
-  user_id: string
-  email: string
-  account_status: string
-  membership_status: string | null
-  started_at: string | null
-  expires_at: string | null
-  remaining_days: number | null
-  renewal_count: number
-  created_at: string
-  /** [Gate2 PRD60] 三类独立权限状态（与 AccessContext.capabilities 对齐） */
-  capabilities?: Record<string, UserCapabilityInfo>
-}
-
-/** 会员账户列表响应 */
-export interface MemberListResponse {
-  items: MemberListItem[]
-  total: number
-  limit: number
-  offset: number
-}
-
-// ============================================================
-// Version 领域类型
-// ============================================================
-
-/** 版本信息响应 */
 export interface VersionInfo {
   git_sha: string
   build_time: string
@@ -723,15 +713,6 @@ export async function getHealth(): Promise<HealthResponse> {
 // [S3-A] 登录/注册/续期请求类型已迁至 ./auth（见顶部兼容 re-export）。
 
 /** 触发策略运行请求 */
-export interface TriggerRunRequest {
-  trade_date?: string
-  instrument_ids?: string[]
-  run_type?: string
-}
-
-// [S3-B] WatchlistAddRequest 已迁至 ./watchlist（见顶部兼容 re-export）。
-
-/** 创建通知渠道请求 */
 export interface CreateChannelRequest {
   adapter_type: string
   display_name: string
@@ -754,64 +735,6 @@ export interface NotificationPreviewRequest {
 }
 
 /** 邀请码生成请求 - plan_code/grant_days 由前端提交，monitor_limit 由后端按 plan_code 计算 */
-export interface InviteCodeCreateRequest {
-  count?: number
-  note?: string
-  plan_code?: PlanCode
-  grant_days?: number
-  /** [Gate2 PRD60 PA-20] capability 组合（新模式）；提供时优先于 plan_code */
-  capabilities?: CapabilityGrantInput[]
-}
-
-/** [Gate2 PRD60 PA-20] 单个 capability 授权配置（与 backend CapabilityGrant 对齐） */
-export interface CapabilityGrantInput {
-  capability: 'self_selection' | 'market_data' | 'research_replay'
-  days: number  // 有效天数（1-365，1 = 1 天）
-  watchlist_limit?: number  // 仅 self_selection 必填（1-500）
-}
-
-/** [Gate2 PRD60] 管理员直接授予用户 capability 请求 */
-export interface GrantCapabilityRequest {
-  capability: 'self_selection' | 'market_data' | 'research_replay'
-  days: number  // 有效天数（1 = 1 天）
-  watchlist_limit?: number  // 仅 self_selection 必填
-}
-
-/** [Gate2 PRD60] 用户 capability 信息（与 backend AccessContext.capabilities 对齐） */
-export interface UserCapabilityInfo {
-  active: boolean
-  expires_at: string | null
-  watchlist_limit: number | null
-}
-
-/** 管理员授予用户套餐请求 */
-export interface GrantSubscriptionRequest {
-  plan_code: PlanCode
-  grant_days: number
-}
-
-/** 管理员续期用户套餐请求 */
-export interface RenewSubscriptionRequest {
-  grant_days: number
-}
-
-/** 管理员变更用户套餐请求 */
-export interface ChangePlanRequest {
-  plan_code: PlanCode
-  grant_days: number
-}
-
-/** 管理员变更用户账户状态请求 */
-export interface ChangeAccountStatusRequest {
-  status: 'active' | 'disabled'
-}
-
-
-// ============================================================
-// 查询参数类型
-// ============================================================
-
-/** 股票列表查询参数 */
 export interface InstrumentQueryParams {
   keyword?: string
   market?: string
@@ -920,69 +843,6 @@ export async function getInstrumentBySymbol(symbol: string): Promise<Instrument>
 // archiveStrategyVersion/triggerStrategyRun/getAdminStrategyRuns）。
 
 /** 创建策略（admin）- 提交 Manifest 创建策略定义 + 草稿版本 */
-export async function createStrategy(
-  manifest: Record<string, unknown>,
-  strategySchema?: Record<string, unknown>,
-): Promise<StrategyVersion> {
-  const { data } = await apiClient.post<StrategyVersion>('/v1/admin/strategies', {
-    manifest,
-    schema: strategySchema,
-  })
-  return data
-}
-
-/** 发布策略版本（admin）- draft -> released */
-export async function releaseStrategyVersion(strategyKey: string, version: string): Promise<StrategyVersion> {
-  const { data } = await apiClient.post<StrategyVersion>(
-    `/v1/admin/strategies/${strategyKey}/versions/${version}/release`,
-  )
-  return data
-}
-
-/** 归档策略版本（admin）- released -> archived */
-export async function archiveStrategyVersion(strategyKey: string, version: string): Promise<StrategyVersion> {
-  const { data } = await apiClient.post<StrategyVersion>(
-    `/v1/admin/strategies/${strategyKey}/versions/${version}/archive`,
-  )
-  return data
-}
-
-// ============================================================
-// ===== Strategy Runs 端点 =====
-// ============================================================
-
-/** 触发策略运行（admin） */
-export async function triggerStrategyRun(strategyKey: string, payload: TriggerRunRequest): Promise<StrategyRun> {
-  const { data } = await apiClient.post<StrategyRun>(
-    `/v1/admin/strategies/${strategyKey}/run`,
-    payload,
-  )
-  return data
-}
-
-// [S3-C] getStrategyRuns 已迁至 ./strategy（见顶部兼容 re-export）。
-
-/** 查询策略运行历史（admin，/admin 前缀路径） */
-export async function getAdminStrategyRuns(
-  strategyKey: string,
-  params?: { status?: string; limit?: number; offset?: number },
-): Promise<StrategyRunListResponse> {
-  const { data } = await apiClient.get<StrategyRunListResponse>(
-    `/v1/admin/strategies/${strategyKey}/runs`,
-    { params },
-  )
-  return data
-}
-
-// [S3-C] getPublishedRuns / getStrategyRunResults / getStrategyRunResultDetail /
-// getInstrumentMonitorStates / getStrategyMonitorStates / getInstrumentEvents /
-// getStrategyEvents / getStrategyEventDetail 已迁至 ./strategy（见顶部兼容 re-export）。
-
-// ============================================================
-// ===== Notifications 端点 =====
-// ============================================================
-
-/** 获取用户消息列表（支持 unread_only 过滤） */
 export async function getMessages(params?: {
   unread_only?: boolean
   limit?: number
@@ -1120,26 +980,6 @@ export async function getStockDetailFeishuStatus(
 /** 消息预览 - 返回渠道无关 DTO + 站内渲染 + 飞书 card JSON */
 export async function previewNotification(payload: NotificationPreviewRequest): Promise<NotificationPreviewResponse> {
   const { data } = await apiClient.post<NotificationPreviewResponse>('/v1/notification-previews', payload)
-  return data
-}
-
-// ============================================================
-// ===== Admin Message Deliveries 端点 =====
-// ============================================================
-
-/** 查询消息投递记录（admin） */
-export async function getMessageDeliveries(params?: {
-  status?: DeliveryStatus
-  limit?: number
-  offset?: number
-}): Promise<MessageDelivery[]> {
-  const { data } = await apiClient.get<MessageDelivery[]>('/v1/admin/message-deliveries', { params })
-  return data
-}
-
-/** 立即重试指定消息投递记录（admin） */
-export async function retryMessageDelivery(deliveryId: string): Promise<MessageDelivery> {
-  const { data } = await apiClient.post<MessageDelivery>(`/v1/admin/message-deliveries/${deliveryId}/retry`)
   return data
 }
 
@@ -1527,797 +1367,6 @@ export async function getPlans(): Promise<PlanResponse[]> {
   return data
 }
 
-/** 生成邀请码（单个/批量，明文仅生成时返回） */
-export async function createInviteCodes(payload: InviteCodeCreateRequest): Promise<InviteCode[]> {
-  const { data } = await apiClient.post<InviteCode[]>('/v1/admin/invite-codes', payload)
-  return data
-}
-
-/** 查询邀请码列表（支持状态筛选 + 分页） */
-export async function getInviteCodes(params?: {
-  status?: string
-  limit?: number
-  offset?: number
-}): Promise<InviteCodeListResponse> {
-  const { data } = await apiClient.get<InviteCodeListResponse>('/v1/admin/invite-codes', { params })
-  return data
-}
-
-/** 作废邀请码（仅 unused 状态可作废） */
-export async function revokeInviteCode(inviteCodeId: string): Promise<InviteCodeListItem> {
-  const { data } = await apiClient.post<InviteCodeListItem>(
-    `/v1/admin/invite-codes/${inviteCodeId}/revoke`,
-  )
-  return data
-}
-
-// ===== 管理员代管用户通知渠道（薄包装 notification_service，target_config 已脱敏） =====
-
-/** 查询指定用户的通知渠道列表（admin） */
-export async function adminListUserChannels(
-  userId: string,
-): Promise<NotificationChannelListResponse> {
-  const { data } = await apiClient.get<NotificationChannelListResponse>(
-    `/v1/admin/users/${userId}/notification-channels`,
-  )
-  return data
-}
-
-/** 为指定用户创建通知渠道（admin） */
-export async function adminCreateUserChannel(
-  userId: string,
-  payload: CreateChannelRequest,
-): Promise<NotificationChannel> {
-  const { data } = await apiClient.post<NotificationChannel>(
-    `/v1/admin/users/${userId}/notification-channels`,
-    payload,
-  )
-  return data
-}
-
-/** 更新指定用户的通知渠道（admin） */
-export async function adminUpdateUserChannel(
-  userId: string,
-  channelId: string,
-  payload: UpdateChannelRequest,
-): Promise<NotificationChannel> {
-  const { data } = await apiClient.put<NotificationChannel>(
-    `/v1/admin/users/${userId}/notification-channels/${channelId}`,
-    payload,
-  )
-  return data
-}
-
-/** 删除指定用户的通知渠道（admin，软删除） */
-export async function adminDeleteUserChannel(
-  userId: string,
-  channelId: string,
-): Promise<NotificationChannel> {
-  const { data } = await apiClient.delete<NotificationChannel>(
-    `/v1/admin/users/${userId}/notification-channels/${channelId}`,
-  )
-  return data
-}
-
-/** 验证指定用户的通知渠道（admin） */
-export async function adminVerifyUserChannel(
-  userId: string,
-  channelId: string,
-): Promise<NotificationChannel> {
-  const { data } = await apiClient.post<NotificationChannel>(
-    `/v1/admin/users/${userId}/notification-channels/${channelId}/verify`,
-  )
-  return data
-}
-
-/** 对指定用户的通知渠道发送测试消息（admin） */
-export async function adminTestUserChannel(
-  userId: string,
-  channelId: string,
-): Promise<ChannelTestResponse> {
-  const { data } = await apiClient.post<ChannelTestResponse>(
-    `/v1/admin/users/${userId}/notification-channels/${channelId}/test`,
-  )
-  return data
-}
-
-/** 查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数；MemberListResponse 为 V1.6 API 遗留命名） */
-export async function getMembers(params?: PaginationParams): Promise<MemberListResponse> {
-  const { data } = await apiClient.get<MemberListResponse>('/v1/admin/members', { params })
-  return data
-}
-
-/** 查询用户兑换记录 */
-export async function getMemberRedemptions(userId: string): Promise<InviteRedemption[]> {
-  const { data } = await apiClient.get<InviteRedemption[]>(`/v1/admin/members/${userId}/redemptions`)
-  return data
-}
-
-/** 查询用户列表（admin） */
-export async function getAdminUsers(params?: PaginationParams): Promise<UserListResponse> {
-  const { data } = await apiClient.get<UserListResponse>('/v1/admin/users', { params })
-  return data
-}
-
-/** 查询用户详情（admin） */
-export async function getAdminUser(userId: string): Promise<UserResponse> {
-  const { data } = await apiClient.get<UserResponse>(`/v1/admin/users/${userId}`)
-  return data
-}
-
-/** 启用用户账户（admin） */
-export async function adminEnableUser(userId: string): Promise<UserResponse> {
-  const { data } = await apiClient.post<UserResponse>(`/v1/admin/users/${userId}/enable`)
-  return data
-}
-
-/** 停用用户账户（admin） */
-export async function adminDisableUser(userId: string): Promise<UserResponse> {
-  const { data } = await apiClient.post<UserResponse>(`/v1/admin/users/${userId}/disable`)
-  return data
-}
-
-/** 管理员重置用户密码（设置新密码，不读取旧密码） */
-export async function adminResetUserPassword(
-  userId: string,
-  payload: { new_password: string },
-): Promise<{ user_id: string; message: string }> {
-  const { data } = await apiClient.post<{ user_id: string; message: string }>(
-    `/v1/admin/users/${userId}/reset-password`,
-    payload,
-  )
-  return data
-}
-
-/** 管理员授予用户套餐 */
-export async function adminGrantSubscription(
-  userId: string,
-  payload: GrantSubscriptionRequest,
-): Promise<SubscriptionResponse> {
-  const { data } = await apiClient.post<SubscriptionResponse>(
-    `/v1/admin/users/${userId}/subscriptions/grant`,
-    payload,
-  )
-  return data
-}
-
-/** 管理员续期用户套餐 */
-export async function adminRenewSubscription(
-  userId: string,
-  payload: RenewSubscriptionRequest,
-): Promise<SubscriptionRenewResponse> {
-  const { data } = await apiClient.post<SubscriptionRenewResponse>(
-    `/v1/admin/users/${userId}/subscriptions/renew`,
-    payload,
-  )
-  return data
-}
-
-/** 管理员撤销用户套餐 */
-export async function adminRevokeSubscription(userId: string): Promise<SubscriptionResponse> {
-  const { data } = await apiClient.post<SubscriptionResponse>(
-    `/v1/admin/users/${userId}/subscriptions/revoke`,
-  )
-  return data
-}
-
-/** 管理员变更用户套餐 */
-export async function adminChangeSubscriptionPlan(
-  userId: string,
-  payload: ChangePlanRequest,
-): Promise<SubscriptionResponse> {
-  const { data } = await apiClient.post<SubscriptionResponse>(
-    `/v1/admin/users/${userId}/subscriptions/change-plan`,
-    payload,
-  )
-  return data
-}
-
-/** [Gate2 PRD60] 用户 capabilities 响应 */
-export interface UserCapabilitiesResponse {
-  user_id: string
-  capabilities: Record<string, UserCapabilityInfo>
-}
-
-/** [Gate2 PRD60] 查询用户 capabilities（三类独立权限状态） */
-export async function getUserCapabilities(
-  userId: string,
-): Promise<UserCapabilitiesResponse> {
-  const { data } = await apiClient.get<UserCapabilitiesResponse>(
-    `/v1/admin/users/${userId}/capabilities`,
-  )
-  return data
-}
-
-/** [Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability */
-export async function adminGrantCapability(
-  userId: string,
-  payload: GrantCapabilityRequest,
-): Promise<UserCapabilitiesResponse> {
-  const { data } = await apiClient.post<UserCapabilitiesResponse>(
-    `/v1/admin/users/${userId}/capabilities`,
-    payload,
-  )
-  return data
-}
-
-/** [Gate2 PRD60 PA-20] 管理员撤销用户 capability */
-export async function adminRevokeCapability(
-  userId: string,
-  capability: 'self_selection' | 'market_data' | 'research_replay',
-): Promise<UserCapabilitiesResponse> {
-  const { data } = await apiClient.delete<UserCapabilitiesResponse>(
-    `/v1/admin/users/${userId}/capabilities/${capability}`,
-  )
-  return data
-}
-
-/** 查询管理员审计日志 */
-export async function getAdminAuditLogs(params?: {
-  target_user_id?: string
-  action?: string
-  limit?: number
-  offset?: number
-}): Promise<AuditLogListResponse> {
-  const { data } = await apiClient.get<AuditLogListResponse>('/v1/admin/audit-logs', { params })
-  return data
-}
-
-// ============================================================
-// Beta Application 领域类型（Task 4 - 管理员内测申请后台）
-// ============================================================
-
-/** 内测申请状态枚举 */
-export type BetaApplicationStatus = 'new' | 'contacted' | 'approved' | 'rejected' | 'converted'
-
-/** 内测申请理由代码枚举 */
-export type BetaApplicationReasonCode = 'busy' | 'too_many' | 'forget' | 'quant' | 'other'
-
-/** 盯盘数量区间 */
-export type WatchStockRange = '1-10' | '11-20' | '21-50' | '50+'
-
-/** 内测申请列表项（含完整字段，仅 admin 可见） */
-export interface BetaApplicationListItem {
-  id: string
-  wechat: string | null
-  phone: string | null
-  watch_stock_count: number
-  reason_code: BetaApplicationReasonCode
-  reason_other: string | null
-  status: BetaApplicationStatus
-  source: string | null
-  admin_note: string | null
-  handled_by: string | null
-  handled_at: string | null
-  submitted_at: string
-  updated_at: string
-  feishu_delivery_status: string | null
-}
-
-/** 内测申请列表响应 */
-export interface BetaApplicationListResponse {
-  items: BetaApplicationListItem[]
-  total: number
-  limit: number
-  offset: number
-}
-
-/** 内测申请详情响应（含飞书投递信息） */
-export interface BetaApplicationDetail {
-  id: string
-  wechat: string | null
-  phone: string | null
-  watch_stock_count: number
-  reason_code: BetaApplicationReasonCode
-  reason_other: string | null
-  status: BetaApplicationStatus
-  source: string | null
-  admin_note: string | null
-  handled_by: string | null
-  handled_at: string | null
-  submitted_at: string
-  updated_at: string
-  ip_hash: string
-  feishu_delivery_status: string | null
-  feishu_delivered_at: string | null
-  feishu_last_error: string | null
-}
-
-/** 内测申请统计响应 */
-export interface BetaApplicationStats {
-  total: number
-  today: number
-  last_7_days: number
-  last_30_days: number
-  by_status: Record<string, number>
-  avg_watch_stock_count: number
-  by_reason: Record<string, number>
-  by_watch_range: Record<string, number>
-}
-
-/** 内测申请状态更新请求 */
-export interface BetaApplicationPatchRequest {
-  status: BetaApplicationStatus
-  admin_note?: string | null
-}
-
-/** 重发飞书响应 */
-export interface RetryFeishuResponse {
-  id: string
-  outbox_id: string
-  message: string
-}
-
-/** 内测申请列表查询参数 */
-export interface BetaApplicationQueryParams {
-  status?: BetaApplicationStatus
-  reason_code?: BetaApplicationReasonCode
-  watch_stock_range?: WatchStockRange
-  date_from?: string
-  date_to?: string
-  keyword?: string
-  limit?: number
-  offset?: number
-}
-
-// ============================================================
-// ===== Admin Beta Applications 端点 =====
-// ============================================================
-
-/** 查询内测申请列表（分页+筛选+搜索） */
-export async function getAdminBetaApplications(
-  params?: BetaApplicationQueryParams,
-): Promise<BetaApplicationListResponse> {
-  const { data } = await apiClient.get<BetaApplicationListResponse>('/v1/admin/beta-applications', { params })
-  return data
-}
-
-/** 获取内测申请统计数据 */
-export async function getAdminBetaApplicationStats(): Promise<BetaApplicationStats> {
-  const { data } = await apiClient.get<BetaApplicationStats>('/v1/admin/beta-applications/stats')
-  return data
-}
-
-/** 获取内测申请详情 */
-export async function getAdminBetaApplicationDetail(appId: string): Promise<BetaApplicationDetail> {
-  const { data } = await apiClient.get<BetaApplicationDetail>(`/v1/admin/beta-applications/${appId}`)
-  return data
-}
-
-/** 修改内测申请状态（status + admin_note） */
-export async function updateAdminBetaApplication(
-  appId: string,
-  payload: BetaApplicationPatchRequest,
-): Promise<BetaApplicationDetail> {
-  const { data } = await apiClient.patch<BetaApplicationDetail>(`/v1/admin/beta-applications/${appId}`, payload)
-  return data
-}
-
-/** 重发内测申请飞书通知 */
-export async function retryAdminBetaApplicationFeishu(appId: string): Promise<RetryFeishuResponse> {
-  const { data } = await apiClient.post<RetryFeishuResponse>(`/v1/admin/beta-applications/${appId}/retry-feishu`)
-  return data
-}
-
-/**
- * 导出内测申请为 CSV（带筛选条件）。
- * 返回下载 URL（浏览器原生打开触发下载，避免 axios 解析 CSV 文本）。
- */
-export function buildBetaApplicationExportUrl(params?: Omit<BetaApplicationQueryParams, 'limit' | 'offset'>): string {
-  const searchParams = new URLSearchParams()
-  if (params?.status) searchParams.set('status', params.status)
-  if (params?.reason_code) searchParams.set('reason_code', params.reason_code)
-  if (params?.watch_stock_range) searchParams.set('watch_stock_range', params.watch_stock_range)
-  if (params?.date_from) searchParams.set('date_from', params.date_from)
-  if (params?.date_to) searchParams.set('date_to', params.date_to)
-  if (params?.keyword) searchParams.set('keyword', params.keyword)
-  const qs = searchParams.toString()
-  return qs ? `/v1/admin/beta-applications/export?${qs}` : '/v1/admin/beta-applications/export'
-}
-
-// ============================================================
-// ===== Admin System Overview 端点 =====
-// ============================================================
-
-// [SystemOverview] - 行情数据新鲜度（6 项，Phase 9）
-export interface BarsFreshness {
-  latest_daily_trade_date: string | null
-  daily_coverage: number | null
-  latest_15m_bar_time: string | null
-  latest_60m_bar_time: string | null
-  last_success_job_id: string | null
-  is_behind_latest_trade_date: boolean
-}
-
-// [SystemOverview] - 选股策略新鲜度（7 项，Phase 9）
-export interface StrategyFreshness {
-  latest_compute_trade_date: string | null
-  latest_published_trade_date: string | null
-  strategy_run_id: string | null
-  status: string | null
-  total_instruments: number | null
-  failed_count: number | null
-  published_at: string | null
-}
-
-// [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
-export interface DataFreshness {
-  bars: BarsFreshness
-  strategy: StrategyFreshness
-}
-
-/** 系统概览响应 */
-export interface SystemOverview {
-  active_users: number
-  distinct_monitored_instruments: number
-  evaluations_last_minute: number
-  evaluations_success_rate: number
-  notification_delivery_rate: number
-  queue_backlog: number
-  failed_retry_count: number
-  latest_selector_run: {
-    id: string
-    status: string
-    trade_date: string | null
-    started_at: string | null
-    finished_at: string | null
-    total_instruments: number | null
-    succeeded_count: number | null
-    failed_count: number | null
-  } | null
-  worker_health: string
-  scheduler_health: string
-  recent_scheduler_jobs: RecentSchedulerJobSummary[]
-  recent_anomalies: unknown[]
-  // [系统概览] - 描述: 后端统一计算的服务端时间/业务日期/市场时段
-  server_time: string
-  business_date: string
-  market_session:
-    | 'NON_TRADING_DAY'
-    | 'PRE_OPEN'
-    | 'MORNING_SESSION'
-    | 'LUNCH_BREAK'
-    | 'AFTERNOON_SESSION'
-    | 'MARKET_CLOSED'
-  // [系统概览] - 描述: 盘中监控运行态（后端权威判定，前端直出）
-  monitor_runtime: {
-    status:
-      | 'RUNNING'
-      | 'IDLE_EXPECTED'
-      | 'SESSION_COMPLETED'
-      | 'DELAYED'
-      | 'FAILED'
-      | 'WORKER_OFFLINE'
-      | 'NOT_APPLICABLE'
-    heartbeat_at: string | null
-    heartbeat_age_seconds: number | null
-    business_date: string
-    session_label: 'morning' | 'afternoon' | null
-    session_job_status: 'running' | 'succeeded' | 'failed' | null
-    last_cycle_at: string | null
-    last_source_bar_time: string | null
-    evaluated_count: number
-    failed_count: number
-    freshness_seconds: number | null
-  }
-  // [系统概览] - 描述: 盘后流水线状态（后端权威判定，前端直出）
-  after_close_pipeline: {
-    status:
-      | 'NOT_STARTED'
-      | 'BARS_RUNNING'
-      | 'BARS_FAILED'
-      | 'WAITING_DSA'
-      | 'DSA_QUEUED'
-      | 'DSA_RUNNING'
-      | 'DSA_COMPLETED'
-      | 'PUBLISHED'
-      | 'DSA_FAILED'
-      | 'STALE'
-    bars_job: {
-      status: string | null
-      started_at: string | null
-      finished_at: string | null
-      error_message: string | null
-    } | null
-    dsa_run: {
-      id: string | null
-      status: string | null
-      run_type: string | null
-      attempt_no: number | null
-      trade_date: string | null
-      failed_count: number | null
-      succeeded_count: number | null
-      error_code: string | null
-      error_message: string | null
-      failure_stage: string | null
-    } | null
-    // [SystemOverview] - WAITING_DSA 细分原因（7 种之一，仅 DSA 未 published 时填充）
-    waiting_dsa_reason: string | null
-    // [SystemOverview] - 原因对应的人类可读建议（与 waiting_dsa_reason 配对）
-    waiting_dsa_suggestion: string | null
-    // [SystemOverview] - 数据新鲜度子结构（行情 + 选股两区块，Phase 9）
-    data_freshness: DataFreshness
-    // [AfterClose] - 当日 after_close_orchestrator 任务 ID（供进入任务详情/断点继续/判断冲突任务）
-    job_run_id: string | null
-    // [AfterClose] - 编排状态（queued/refreshing_daily/.../succeeded/failed）
-    orchestrator_status: string | null
-    // [AfterClose] - Worker 最后心跳（ISO 字符串，判断 worker 是否在线）
-    heartbeat_at: string | null
-    // [AfterClose] - 租约到期时间（ISO 字符串）
-    lease_expires_at: string | null
-    // [AfterClose] - 最后成功步骤（断点检查点）
-    last_completed_step: string | null
-    // [Phase8A] - 计划启动时间（16:00 调度创建时写入）
-    scheduled_at: string | null
-    // [Phase8A] - 实际启动时间（Worker 领取时写入）
-    started_at: string | null
-    // [Phase8A] - 当前执行步骤（与 orchestrator_status 同义，便于前端直接读取）
-    current_step: string | null
-  }
-  // [PRD §8.1/8.2] 统一数据生产与发布状态摘要（后端直出，前端只展示不判定）
-  summary: {
-    overall_status: 'ok' | 'attention' | 'blocked'
-    quality_gate: 'not_applicable' | 'passed' | 'failed' | 'pending'
-    publication_status: {
-      status: 'published' | 'unpublished' | 'pending' | 'failed'
-      latest_published_trade_date: string | null
-      latest_compute_trade_date: string | null
-      is_current: boolean
-      quality_gate_passed: boolean | null
-    }
-    today_must_process: Array<{
-      key: string
-      error_code: string
-      severity: 'error' | 'warning' | 'info'
-      message: string
-      retryable: boolean
-      resumable: boolean
-      recommended_action: string
-      target_route: string | null
-    }>
-    production_chain: Array<{
-      key: string
-      label: string
-      status: 'ok' | 'pending' | 'running' | 'failed' | 'stale' | 'attention' | 'not_applicable'
-      detail: string
-      trade_date: string | null
-      run_id: string | null
-      quality_gate: 'not_applicable' | 'passed' | 'failed' | 'pending'
-      publication_status: 'published' | 'unpublished' | 'pending' | 'failed' | 'not_applicable'
-      blocking_reason: string | null
-      recommended_action: string | null
-    }>
-  }
-}
-
-/** 最近定时任务摘要（系统概览） */
-export interface RecentSchedulerJobSummary {
-  job_name: string
-  status: string
-  business_date: string | null
-  started_at: string | null
-  finished_at: string | null
-  progress: number | null
-  succeeded_count: number | null
-  failed_count: number | null
-  error_message: string | null
-}
-
-/** 定时任务运行记录项 */
-export interface SchedulerJobRunItem {
-  id: string
-  job_name: string
-  business_date: string | null
-  scheduled_at: string | null
-  started_at: string | null
-  finished_at: string | null
-  status: string
-  heartbeat_at: string | null
-  lease_expires_at: string | null
-  // [AdminJobs] - 描述: 领取该任务的 Worker 实例标识（与 worker_heartbeats.instance_id 对应）
-  worker_instance_id: string | null
-  // [AdminJobs] - 描述: Worker 最后一次循环时间（长任务周期性心跳）
-  last_cycle_at: string | null
-  total_count: number | null
-  succeeded_count: number | null
-  failed_count: number | null
-  progress: number | null
-  /** 服务端诊断字段；前端不得根据时间戳自行推导 */
-  processed_count?: number | null
-  last_progress_at?: string | null
-  heartbeat_age_seconds?: number | null
-  lease_remaining_seconds?: number | null
-  elapsed_seconds?: number | null
-  retry_count?: number | null
-  max_retries?: number | null
-  retryable?: boolean
-  publication_status?: string | null
-  partial_success?: boolean
-  error_code: string | null
-  error_message: string | null
-  metadata_json: string | null
-  created_at: string
-  updated_at: string
-}
-
-/** 定时任务运行记录列表响应 */
-export interface SchedulerJobRunListResponse {
-  items: SchedulerJobRunItem[]
-  total: number
-  limit: number
-  offset: number
-}
-
-/** 查询定时任务运行记录（admin） */
-export async function getSchedulerJobRuns(params?: {
-  job_name?: string
-  business_date?: string
-  status?: string
-  limit?: number
-  offset?: number
-}): Promise<SchedulerJobRunListResponse> {
-  const { data } = await apiClient.get<SchedulerJobRunListResponse>('/v1/admin/scheduler-job-runs', { params })
-  return data
-}
-
-/** Worker 心跳记录项（admin 只读，health_state 由后端计算） */
-export interface WorkerHeartbeatItem {
-  worker_name: string
-  instance_id: string
-  started_at: string
-  heartbeat_at: string
-  status: string // running/idle/stopped
-  stopped_at: string | null // Gate4: Worker 停止时间（null=运行中或历史记录无此字段）
-  current_job_id: string | null
-  build_sha: string | null
-  metadata_json: string | null
-  updated_at: string
-  // 后端计算字段（避免前端复制业务规则）
-  heartbeat_age_seconds: number
-  health_state: string // fresh/stale/stopped
-}
-
-/** Worker 心跳列表响应 */
-export interface WorkerHeartbeatListResponse {
-  items: WorkerHeartbeatItem[]
-  total: number
-  limit: number
-  offset: number
-}
-
-/** 查询 Worker 心跳记录（admin 只读） */
-export async function getWorkerHeartbeats(params?: {
-  status?: string
-  worker_name?: string
-  limit?: number
-  offset?: number
-}): Promise<WorkerHeartbeatListResponse> {
-  const { data } = await apiClient.get<WorkerHeartbeatListResponse>(
-    '/v1/admin/worker-heartbeats',
-    { params },
-  )
-  return data
-}
-
-/** 获取系统概览（admin） */
-export async function getAdminSystemOverview(): Promise<SystemOverview> {
-  const { data } = await apiClient.get<SystemOverview>('/v1/admin/system-overview')
-  return data
-}
-
-// ============================================================
-// ===== [Commit G] ProductReadiness 就绪状态 + 治理报告 =====
-// ============================================================
-
-/** 单个产品的就绪状态（九节点之一） */
-export interface ProductReadinessItem {
-  product: string
-  readiness: string
-  freshness: string
-  isMandatory: boolean
-  isTerminal: boolean
-  isConsumable: boolean
-  dataSource: string
-  /** [Corrective-3 §三] 统一结构真实数据血缘（缺失字段显式为 null） */
-  lineage: Record<string, unknown>
-  /** [Corrective-3 §三] 当前状态原因码（pending 节点也必给出） */
-  reasonCode: string
-  /** [Corrective-3 §四] 后端权威判定：是否可重试 */
-  retryable: boolean
-  /** [Corrective-3 §四] 后端输出的推荐恢复动作，前端只展示 */
-  recommendedAction: string
-  /** [Corrective-3 §四] 对应的可执行治理操作标识 */
-  operation: string
-  /** [Corrective-3 §四] 治理操作的目标 run id */
-  targetRunId: string | null
-}
-
-/** 闭包评估问题项 */
-export interface BenefitsIssue {
-  product: string
-  code: string
-  severity: string
-  recommendedAction: string
-}
-
-/** 治理报告（Commit G，已修正真实 lineage） */
-export interface GovernanceReport {
-  /** 每个产品的真实数据血缘 dict（run_id/publication_id/pointer/coverage/reason_code 等） */
-  pointerLineage: Record<string, Record<string, unknown>>
-  staleChildren: string[]
-  unmatchedActiveChildren: string[]
-  readyProducts: string[]
-  pendingProducts: string[]
-  blockedProducts: string[]
-  unavailableProducts: string[]
-  degradedReasons: BenefitsIssue[]
-}
-
-/** ProductReadiness 响应（GET /v1/admin/readiness/{trade_date}） */
-// [CHANGE-20260806-005 / Phase 4 / 六态] 新增 productionClosure / allProductsReady /
-// unreconciledChildren；前端只按 DTO 字段展示，禁止猜 readiness。
-export interface ProductReadinessResponse {
-  tradeDate: string
-  closure: string
-  productionClosure: string
-  mandatoryProductsReady: boolean
-  mandatoryProductsFullyFresh: boolean
-  enhancementJobsTerminal: boolean
-  allProductsReady: boolean
-  unreconciledChildren: number
-  products: ProductReadinessItem[]
-  governance: GovernanceReport
-}
-
-/** 查询指定交易日的产品就绪状态 + 治理报告（admin） */
-export async function getAdminProductReadiness(
-  tradeDate: string,
-): Promise<ProductReadinessResponse> {
-  const { data } = await apiClient.get<ProductReadinessResponse>(
-    `/v1/admin/readiness/${tradeDate}`,
-  )
-  return data
-}
-
-// ============================================================
-// ===== [Gate5] GoAccess 访问统计 =====
-// ============================================================
-
-/** [Gate5] 访问统计指标项 */
-export interface VisitorMetricItem {
-  label: string
-  count: number
-  percentage: number | null
-}
-
-/** [Gate5] 访问汇总（单时间窗口） */
-export interface VisitorSummary {
-  pv: number
-  uv: number
-  top_pages: VisitorMetricItem[]
-  top_referrers: VisitorMetricItem[]
-  status_codes: VisitorMetricItem[]
-  devices: VisitorMetricItem[]
-  browsers: VisitorMetricItem[]
-  hourly_trend: VisitorMetricItem[]
-}
-
-/** [CHANGE-20260730-010] /admin/visitors 响应体（Umami 数据源） */
-export interface VisitorReport {
-  today: VisitorSummary
-  seven_days: VisitorSummary
-  thirty_days: VisitorSummary
-  generated_at: string | null
-  data_source: 'umami' | 'empty' | 'error'
-  error_message: string | null
-}
-
-/** [Gate5] 查询访问统计报告（admin only） */
-export async function getAdminVisitors(): Promise<VisitorReport> {
-  const { data } = await apiClient.get<VisitorReport>('/v1/admin/visitors')
-  return data
-}
-
 // ============================================================
 // ===== [CHANGE-20260730-011] 板块分析 V1 端点 =====
 // ============================================================
@@ -2397,463 +1446,6 @@ export async function getBoardAnalysisDetail(
 }
 
 /** [Admin] 触发单板块分析计算 */
-export async function triggerComputeBoard(
-  boardId: string,
-  params?: { trade_date?: string; publish?: boolean },
-): Promise<{
-  board_id: string
-  trade_date: string
-  status: string
-  coverage_ratio: number
-  eligible_count: number
-  ready_count: number
-  published: boolean
-  snapshot_id: string
-}> {
-  const { data } = await apiClient.post(
-    `/v1/admin/boards/${boardId}/analysis/compute`,
-    null,
-    { params },
-  )
-  return data
-}
-
-/** [Admin] 触发批量板块分析计算（canary + 全量） */
-export async function triggerComputeAllBoards(
-  params?: {
-    trade_date?: string
-    board_type?: 'industry' | 'concept'
-    limit?: number
-    publish?: boolean
-  },
-): Promise<{
-  trade_date: string
-  board_type_filter: string | null
-  succeeded: number
-  failed: number
-  published: number
-  coverage_below_threshold: number
-  details: Array<{
-    board_id: string
-    board_name: string
-    board_type: string
-    status: string
-    coverage: number
-    published: boolean
-  }>
-  errors: Array<{ board_id: string; board_name: string; error: string }>
-}> {
-  const { data } = await apiClient.post(
-    '/v1/admin/boards/analysis/compute-all',
-    null,
-    { params },
-  )
-  return data
-}
-
-// ============================================================
-// ===== AfterClose & JobRunEvents 端点 =====
-// ============================================================
-
-/** 任务执行事件（时间线条目） */
-export interface JobRunEvent {
-  id: string
-  job_run_id: string
-  step: string
-  level: 'info' | 'warn' | 'error'
-  message: string
-  payload: Record<string, unknown> | null
-  created_at: string
-}
-
-/** 任务事件时间线响应 */
-export interface JobRunEventListResponse {
-  items: JobRunEvent[]
-  total: number
-}
-
-/** 盘后编排状态响应（含编排状态 + DSA run 状态 + 事件时间线 + [Phase7] 详情） */
-export interface AfterCloseRunStatusResponse {
-  job_run_id: string
-  job_name: string
-  business_date: string | null
-  status: string
-  orchestrator_status: string
-  trade_date: string | null
-  dsa_run_id: string | null
-  dsa_run_status: string | null
-  started_at: string | null
-  finished_at: string | null
-  error_message: string | null
-  // [Phase7] - 详情字段（管理后台展示）
-  worker_instance_id: string | null
-  heartbeat_at: string | null
-  lease_expires_at: string | null
-  last_completed_step: string | null
-  // [AfterClose] - 跳过原因（如 NON_TRADING_DAY 非交易日），供前端展示提示
-  skip_reason: string | null
-  interrupt_reason: string | null
-  is_retryable: boolean
-  heartbeat_stale: boolean
-  events: JobRunEvent[]
-}
-
-/** 盘后编排创建/重试响应 */
-export interface AfterCloseRunCreateResponse {
-  job_run_id: string
-  status: string
-  orchestrator_status: string
-  trade_date: string
-  message: string
-}
-
-/** 查询任务执行事件时间线（按 created_at 倒序） */
-export async function getJobRunEvents(
-  runId: string,
-  limit: number = 100,
-): Promise<JobRunEventListResponse> {
-  const { data } = await apiClient.get<JobRunEventListResponse>(
-    `/v1/admin/job-runs/${runId}/events`,
-    { params: { limit } },
-  )
-  return data
-}
-
-/** 查询盘后编排状态（含事件时间线 + DSA run 状态） */
-export async function getAfterCloseRunStatus(
-  runId: string,
-): Promise<AfterCloseRunStatusResponse> {
-  const { data } = await apiClient.get<AfterCloseRunStatusResponse>(
-    `/v1/admin/after-close-runs/${runId}`,
-  )
-  return data
-}
-
-/** 创建并异步执行盘后编排 */
-export async function createAfterCloseRun(
-  tradeDate: string,
-): Promise<AfterCloseRunCreateResponse> {
-  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    '/v1/admin/after-close-runs',
-    { trade_date: tradeDate },
-  )
-  return data
-}
-
-/** 强制重新执行盘后编排（非 failed 状态也可触发） */
-export async function forceAfterCloseRun(
-  runId: string,
-  restartFrom?: 'daily_ready',
-): Promise<AfterCloseRunCreateResponse> {
-  const params = restartFrom ? { restart_from: restartFrom } : undefined
-  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/v1/admin/after-close-runs/${runId}/force`,
-    undefined,
-    { params },
-  )
-  return data
-}
-
-/** 重试失败的盘后编排任务 */
-export async function retryAfterCloseRun(
-  runId: string,
-): Promise<AfterCloseRunCreateResponse> {
-  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/v1/admin/after-close-runs/${runId}/retry`,
-  )
-  return data
-}
-
-/** [Phase6] 从失败步骤继续（保留断点检查点，不重复拉行情） */
-export async function resumeAfterCloseRun(
-  runId: string,
-): Promise<AfterCloseRunCreateResponse> {
-  const { data } = await apiClient.post<AfterCloseRunCreateResponse>(
-    `/v1/admin/after-close-runs/${runId}/resume`,
-  )
-  return data
-}
-
-// ============================================================
-// ===== AfterClose Pipeline 聚合状态端点（/admin/after-close/pipeline/*）=====
-// ============================================================
-//
-// 与 backend/app/schemas/after_close_pipeline.py 严格对齐：
-// - AfterClosePipelineResponse / PipelineStep / AfterCloseRunSummary
-// - FeatureSnapshotRunSummary / PipelineEventItem / PipelineRunItem
-// - AfterClosePipelineRunListResponse / AfterClosePipelineRunRequest / AfterClosePipelineRunResponse
-//
-// 复用已有类型：
-// - DataFreshness / BarsFreshness / StrategyFreshness（同文件上方）
-// - JobRunEvent（与 PipelineEventItem 字段完全一致，事件时间线条目）
-
-/** 盘后流水线单步骤真实状态（对齐后端 PipelineStep/step_summary） */
-export type AfterCloseStepStatus =
-  | 'pending'
-  | 'running'
-  | 'completed'
-  | 'succeeded'
-  | 'failed'
-  | 'skipped'
-  | 'skipped_unavailable'
-  | 'cancelled'
-
-export interface PipelineStep {
-  step: string
-  status: AfterCloseStepStatus
-  started_at: string | null
-  finished_at: string | null
-  duration_seconds: number | null
-  counts: Record<string, unknown>
-  processed?: number | null
-  total?: number | null
-  last_progress_at?: string | null
-  elapsed_seconds?: number | null
-  error_code?: string | null
-  retry_count?: number | null
-  optional?: boolean
-  attempt?: number | null
-  error_message: string | null
-  // [TIMELINE-FIX] 异常/诊断信息（如 invalid_order_or_zero_duration），
-  // 存在时前端显示"未知"而非用 0/max(0,x) 掩盖。
-  warnings?: string[] | null
-}
-
-/** after_close_orchestrator job_run 摘要（对齐后端 AfterCloseRunSummary） */
-export interface AfterCloseRunSummary {
-  job_run_id: string
-  status: string
-  orchestrator_status: string | null
-  started_at: string | null
-  finished_at: string | null
-  heartbeat_at: string | null
-  lease_expires_at: string | null
-  last_completed_step: string | null
-  error_code: string | null
-  error_message: string | null
-  worker_instance_id: string | null
-  trade_date: string | null
-  parent_job_run_id?: string | null
-  restart_from?: string | null
-  partial_success?: boolean
-  step_summary?: PipelineStep[]
-}
-
-/** 服务端计算的盘后运行诊断，时间类语义不得由前端自行推导 */
-export interface AfterCloseDiagnostics {
-  processed: number | null
-  total: number | null
-  last_progress_at: string | null
-  heartbeat_age_seconds: number | null
-  lease_remaining_seconds: number | null
-  elapsed_seconds: number | null
-  retry_count: number | null
-  publication_status: string | null
-  partial_success: boolean | null
-}
-
-/** stock_feature_snapshot_run 摘要（对齐后端 FeatureSnapshotRunSummary） */
-export interface FeatureSnapshotRunSummary {
-  run_id: string
-  run_type: string
-  status: string
-  scope: string
-  snapshot_count: number | null
-  failed_count: number | null
-  skipped_count: number | null
-  expected_count: number | null
-  published_at: string | null
-  started_at: string | null
-  finished_at: string | null
-}
-
-/**
- * 盘后流水线聚合状态响应（对齐后端 AfterClosePipelineResponse）。
- *
- * overall_status 枚举：
- * - not_started：当日尚无 after_close_orchestrator 运行
- * - running：编排任务正在运行
- * - succeeded：编排成功且 watchlist_ready=true
- * - failed：编排失败
- * - blocked：收盘后超过 30 分钟仍无运行（含 has_backfill_full 时不计入 blocked）
- * - skipped：非交易日跳过
- *
- * watchlist_ready 严格判定：status='succeeded' AND published_at IS NOT NULL AND metadata_.scope='full'
- * （sample backfill 不计入 watchlist_ready，仅作为参考展示）
- */
-export interface AfterClosePipelineResponse {
-  trade_date: string
-  market_session: string
-  overall_status:
-    | 'not_started'
-    | 'running'
-    | 'succeeded'
-    | 'failed'
-    | 'blocked'
-    | 'skipped'
-  watchlist_ready: boolean
-  watchlist_reason: string
-  // [AC2-2026-09-14] 失败诊断：由后端从 step_summary 推导，前端无需猜测
-  failed_step: string | null
-  has_backfill_full: boolean
-  after_close_run: AfterCloseRunSummary | null
-  steps: PipelineStep[]
-  diagnostics?: AfterCloseDiagnostics | null
-  data_freshness: DataFreshness
-  feature_snapshot_run: FeatureSnapshotRunSummary | null
-  events: JobRunEvent[]
-}
-
-/** 最近运行列表单条记录（after_close_orchestrator 或 snapshot_run，对齐后端 PipelineRunItem） */
-export interface PipelineRunItem {
-  kind: 'after_close_orchestrator' | 'snapshot_run'
-  job_run_id: string | null
-  run_id: string | null
-  trade_date: string | null
-  status: string
-  orchestrator_status: string | null
-  run_type: string | null
-  scope: string | null
-  snapshot_count: number | null
-  failed_count: number | null
-  published_at: string | null
-  started_at: string | null
-  finished_at: string | null
-  error_message: string | null
-  worker_instance_id: string | null
-  last_completed_step: string | null
-}
-
-/** 最近运行列表响应（对齐后端 AfterClosePipelineRunListResponse） */
-export interface AfterClosePipelineRunListResponse {
-  items: PipelineRunItem[]
-  total: number
-}
-
-export type AfterCloseRestartStep =
-  | 'refreshing_daily'
-  | 'syncing_boards'
-  | 'checking_coverage'
-  | 'computing_features'
-  | 'publishing'
-  | 'computing_review'
-
-/** POST /admin/after-close/pipeline/run 请求体；仅用于幂等创建。 */
-export interface AfterClosePipelineRunRequest {
-  trade_date: string
-}
-
-/** 所有盘后管理动作共用的稳定响应。 */
-export interface AfterCloseRunActionResponse {
-  job_run_id: string
-  trade_date: string
-  status: string
-  message?: string
-  is_new: boolean
-  orchestrator_status?: string | null
-  parent_job_run_id?: string | null
-  restart_from?: string | null
-}
-
-export interface AfterClosePipelineRunResponse {
-  job_run_id: string
-  trade_date: string
-  status: string
-  orchestrator_status: string | null
-  is_new: boolean
-}
-
-/**
- * 查询最近交易日的盘后流水线聚合状态（admin）。
- * 后端自动定位最近交易日（含今日）：GET /admin/after-close/pipeline/latest
- */
-export async function getAfterClosePipelineLatest(): Promise<AfterClosePipelineResponse> {
-  const { data } = await apiClient.get<AfterClosePipelineResponse>(
-    '/v1/admin/after-close/pipeline/latest',
-  )
-  return data
-}
-
-/**
- * 查询指定交易日的盘后流水线聚合状态（admin）。
- * GET /admin/after-close/pipeline?trade_date=YYYY-MM-DD
- */
-export async function getAfterClosePipelineByDate(
-  tradeDate: string,
-): Promise<AfterClosePipelineResponse> {
-  const { data } = await apiClient.get<AfterClosePipelineResponse>(
-    '/v1/admin/after-close/pipeline',
-    { params: { trade_date: tradeDate } },
-  )
-  return data
-}
-
-/**
- * 查询最近 N 次运行（after_close_orchestrator + snapshot_run 混合列表，admin）。
- * GET /admin/after-close/pipeline/runs?limit=20
- */
-export async function getAfterClosePipelineRuns(
-  limit: number = 20,
-): Promise<AfterClosePipelineRunListResponse> {
-  const { data } = await apiClient.get<AfterClosePipelineRunListResponse>(
-    '/v1/admin/after-close/pipeline/runs',
-    { params: { limit } },
-  )
-  return data
-}
-
-/**
- * 管理员触发指定交易日的 after_close 编排任务（admin，幂等）。
- * POST /admin/after-close/pipeline/run
- * 同 trade_date 已有 queued/running/succeeded 时返回 existing，不重复创建。
- */
-export async function createAfterClosePipelineRun(
-  payload: AfterClosePipelineRunRequest,
-): Promise<AfterClosePipelineRunResponse> {
-  const { data } = await apiClient.post<AfterClosePipelineRunResponse>(
-    '/v1/admin/after-close/pipeline/run',
-    payload,
-  )
-  return data
-}
-
-export async function cancelAfterCloseRun(
-  runId: string,
-  reason?: string,
-): Promise<AfterCloseRunActionResponse> {
-  const { data } = await apiClient.post<AfterCloseRunActionResponse>(
-    `/v1/admin/after-close-runs/${runId}/cancel`,
-    reason ? { reason } : {},
-  )
-  return data
-}
-
-export async function reconcileAfterCloseRun(
-  runId: string,
-  reason?: string,
-): Promise<AfterCloseRunActionResponse> {
-  const { data } = await apiClient.post<AfterCloseRunActionResponse>(
-    `/v1/admin/after-close-runs/${runId}/reconcile`,
-    reason ? { reason } : {},
-  )
-  return data
-}
-
-export async function restartAfterCloseRun(runId: string): Promise<AfterCloseRunActionResponse> {
-  const { data } = await apiClient.post<AfterCloseRunActionResponse>(
-    `/v1/admin/after-close-runs/${runId}/resume`,
-  )
-  return data
-}
-
-export async function forceRestartAfterCloseRun(
-  runId: string,
-  restartFrom?: 'daily_ready',
-): Promise<AfterCloseRunActionResponse> {
-  const response = await forceAfterCloseRun(runId, restartFrom)
-  return { ...response, is_new: true }
-}
-
 // ============================================================
 // ===== Structural Factors 端点 =====
 // ============================================================

@@ -15,27 +15,16 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import type { UseQueryOptions } from '@tanstack/react-query'
 import * as api from '../api/endpoints'
 import type {
-  TriggerRunRequest,
   CreateChannelRequest,
   NotificationPreviewRequest,
-  InviteCodeCreateRequest,
   InstrumentQueryParams,
   BarQueryParams,
   CalendarQueryParams,
   IndicatorQueryParams,
   StockMemoUpsertRequest,
-  DeliveryStatus,
-  BetaApplicationQueryParams,
-  BetaApplicationPatchRequest,
   PlanResponse,
-  GrantSubscriptionRequest,
-  RenewSubscriptionRequest,
-  ChangePlanRequest,
-  GrantCapabilityRequest,
-  PaginationParams,
   StructuralFactorQueryParams,
   TemporalFeaturesQueryParams,
-  AfterClosePipelineRunRequest,
   TableViewPresetCreateRequest,
   TableViewPresetPatchRequest,
   ChartSnapshotQueryParams,
@@ -163,45 +152,72 @@ export {
 } from './useStrategyApi'
 
 // ============================================================
-// ===== Admin Strategy hooks（留在本文件，admin domain）=====
+// Admin / AfterClose hooks —— 实现已迁至 ./useAdminApi 与 ./useAdminAfterCloseApi
 // ============================================================
 
-/** 查询策略运行历史（admin，/admin 前缀路径） */
-export function useAdminStrategyRuns(
-  strategyKey: string | undefined,
-  params?: { status?: string; limit?: number; offset?: number },
-) {
-  return useQuery({
-    queryKey: ['admin', 'strategies', strategyKey, 'runs', params],
-    queryFn: () => api.getAdminStrategyRuns(strategyKey!, params),
-    enabled: !!strategyKey,
-    staleTime: STALE_REALTIME,
-  })
-}
+export {
+  useAdminStrategyRuns,
+  useTriggerStrategyRun,
+  useAdminUserChannels,
+  useAdminCreateUserChannel,
+  useAdminUpdateUserChannel,
+  useAdminDeleteUserChannel,
+  useAdminVerifyUserChannel,
+  useAdminTestUserChannel,
+  useInviteCodes,
+  useCreateInviteCodes,
+  useRevokeInviteCode,
+  useMembers,
+  useMemberRedemptions,
+  useAdminUsers,
+  useAdminUser,
+  useAdminEnableUser,
+  useAdminDisableUser,
+  useAdminResetUserPassword,
+  useAdminGrantSubscription,
+  useAdminRenewSubscription,
+  useAdminRevokeSubscription,
+  useAdminChangeSubscriptionPlan,
+  useUserCapabilities,
+  useAdminGrantCapability,
+  useAdminRevokeCapability,
+  useAdminAuditLogs,
+  useAdminBetaApplications,
+  useAdminBetaApplicationStats,
+  useAdminBetaApplicationDetail,
+  useUpdateAdminBetaApplication,
+  useRetryAdminBetaApplicationFeishu,
+  useAdminSystemOverview,
+  useAdminProductReadiness,
+  useAdminStockDebug,
+  useMessageDeliveries,
+  useRetryMessageDelivery,
+  useSchedulerJobRuns,
+  useWorkerHeartbeats,
+  useAdminVisitors,
+  useTriggerComputeBoard,
+  useTriggerComputeAllBoards
+} from './useAdminApi'
 
-// [S3-C] usePublishedRuns / useStrategyRunResults 已迁至 ./useStrategyApi（见上方兼容 re-export）。
+export {
+  useJobRunEvents,
+  useAfterCloseRunStatus,
+  useCreateAfterCloseRun,
+  useForceAfterCloseRun,
+  useRetryAfterCloseRun,
+  useResumeAfterCloseRun,
+  useAfterClosePipelineLatest,
+  useAfterClosePipelineByDate,
+  useAfterClosePipelineRuns,
+  useCreateAfterClosePipelineRun,
+  useCancelAfterCloseRun,
+  useReconcileAfterCloseRun,
+  useRestartAfterCloseRun,
+  useForceRestartAfterCloseRun
+} from './useAdminAfterCloseApi'
 
-/** 触发策略运行变更（admin） */
-export function useTriggerStrategyRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ strategyKey, payload }: { strategyKey: string; payload: TriggerRunRequest }) =>
-      api.triggerStrategyRun(strategyKey, payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['strategies', variables.strategyKey, 'runs'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'strategies', variables.strategyKey, 'runs'] })
-    },
-  })
-}
-
-// [S3-C] useInstrumentMonitorStates / useStrategyMonitorStates / useInstrumentEvents /
-// useStrategyEvents / useStrategyEventDetail 已迁至 ./useStrategyApi（见上方兼容 re-export）。
 
 // ============================================================
-// ===== Notifications hooks =====
-// ============================================================
-
-/** 获取用户消息列表（始终刷新） */
 export function useMessages(params?: { unread_only?: boolean; limit?: number; offset?: number }) {
   return useQuery({
     queryKey: ['messages', params],
@@ -319,90 +335,6 @@ export function useTestNotificationChannel() {
 // 后端是同一套 notification_service 的薄包装，target_config 由后端统一脱敏。
 // ============================================================================
 
-/** 管理员查看指定用户的通知渠道列表 */
-export function useAdminUserChannels(userId: string | null, enabled: boolean = true) {
-  return useQuery({
-    queryKey: ['admin', 'users', userId, 'notification-channels'],
-    queryFn: () => api.adminListUserChannels(userId as string),
-    staleTime: STALE_PLANS,
-    enabled: enabled && !!userId,
-  })
-}
-
-/** 管理员为指定用户创建通知渠道 */
-export function useAdminCreateUserChannel() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (params: { userId: string; data: CreateChannelRequest }) =>
-      api.adminCreateUserChannel(params.userId, params.data),
-    onSuccess: (_data, params) => {
-      queryClient.invalidateQueries({
-        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
-      })
-    },
-  })
-}
-
-/** 管理员更新指定用户的通知渠道 */
-export function useAdminUpdateUserChannel() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (params: {
-      userId: string
-      channelId: string
-      data: { display_name?: string; target_config?: Record<string, unknown> }
-    }) => api.adminUpdateUserChannel(params.userId, params.channelId, params.data),
-    onSuccess: (_data, params) => {
-      queryClient.invalidateQueries({
-        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
-      })
-    },
-  })
-}
-
-/** 管理员删除指定用户的通知渠道 */
-export function useAdminDeleteUserChannel() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (params: { userId: string; channelId: string }) =>
-      api.adminDeleteUserChannel(params.userId, params.channelId),
-    onSuccess: (_data, params) => {
-      queryClient.invalidateQueries({
-        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
-      })
-    },
-  })
-}
-
-/** 管理员验证指定用户的通知渠道 */
-export function useAdminVerifyUserChannel() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (params: { userId: string; channelId: string }) =>
-      api.adminVerifyUserChannel(params.userId, params.channelId),
-    onSuccess: (_data, params) => {
-      queryClient.invalidateQueries({
-        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
-      })
-    },
-  })
-}
-
-/** 管理员对指定用户的通知渠道发送测试消息 */
-export function useAdminTestUserChannel() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (params: { userId: string; channelId: string }) =>
-      api.adminTestUserChannel(params.userId, params.channelId),
-    onSuccess: (_data, params) => {
-      queryClient.invalidateQueries({
-        queryKey: ['admin', 'users', params.userId, 'notification-channels'],
-      })
-    },
-  })
-}
-
-/** 最近事件实测变更 */
 export function useTestNotificationChannelLatestEvent() {
   return useMutation({
     mutationFn: (channelId: string) => api.testNotificationChannelLatestEvent(channelId),
@@ -417,28 +349,8 @@ export function usePreviewNotification() {
 }
 
 /** 查询消息投递记录（admin） */
-export function useMessageDeliveries(params?: {
-  status?: DeliveryStatus
-  limit?: number
-  offset?: number
-}) {
-  return useQuery({
-    queryKey: ['admin', 'message-deliveries', params],
-    queryFn: () => api.getMessageDeliveries(params),
-    staleTime: STALE_REALTIME,
-  })
-}
 
 /** 立即重试消息投递记录（admin） */
-export function useRetryMessageDelivery() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (deliveryId: string) => api.retryMessageDelivery(deliveryId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'message-deliveries'] })
-    },
-  })
-}
 
 // ============================================================
 // ===== Watchlist hooks =====
@@ -454,48 +366,10 @@ export {
 } from './useWatchlistApi'
 
 /** 查询定时任务运行记录（admin，10 秒轮询保持任务页 live） */
-export function useSchedulerJobRuns(params?: {
-  job_name?: string
-  business_date?: string
-  status?: string
-  limit?: number
-  offset?: number
-}) {
-  return useQuery({
-    queryKey: ['admin', 'scheduler-job-runs', params],
-    queryFn: () => api.getSchedulerJobRuns(params),
-    staleTime: STALE_REALTIME,
-    refetchInterval: 10_000,
-    refetchIntervalInBackground: false,
-  })
-}
 
 /** 查询 Worker 心跳记录（admin 只读，10 秒轮询同 useSchedulerJobRuns） */
-export function useWorkerHeartbeats(params?: {
-  status?: string
-  worker_name?: string
-  limit?: number
-  offset?: number
-}) {
-  return useQuery({
-    queryKey: ['admin', 'worker-heartbeats', params],
-    queryFn: () => api.getWorkerHeartbeats(params),
-    staleTime: STALE_REALTIME,
-    refetchInterval: 10_000,
-    refetchIntervalInBackground: false,
-  })
-}
 
 /** [Gate5] 查询访问统计报告（admin only，5 分钟刷新一次） */
-export function useAdminVisitors() {
-  return useQuery({
-    queryKey: ['admin', 'visitors'],
-    queryFn: api.getAdminVisitors,
-    staleTime: 5 * 60 * 1000, // 5 分钟
-    refetchInterval: 5 * 60 * 1000,
-    refetchIntervalInBackground: false,
-  })
-}
 
 // [CHANGE-20260730-011] 板块分析 V1 hooks
 /** 查询板块分析列表 */
@@ -526,37 +400,8 @@ export function useBoardAnalysisDetail(
 }
 
 /** [Admin] 触发单板块分析计算 */
-export function useTriggerComputeBoard() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({
-      boardId,
-      params,
-    }: {
-      boardId: string
-      params?: { trade_date?: string; publish?: boolean }
-    }) => api.triggerComputeBoard(boardId, params),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['board-analysis'] })
-    },
-  })
-}
 
 /** [Admin] 触发批量板块分析计算 */
-export function useTriggerComputeAllBoards() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (params?: {
-      trade_date?: string
-      board_type?: 'industry' | 'concept'
-      limit?: number
-      publish?: boolean
-    }) => api.triggerComputeAllBoards(params),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['board-analysis'] })
-    },
-  })
-}
 
 // [S3-B] useAddToWatchlist / useRemoveFromWatchlist 已迁至 ./useWatchlistApi
 // （见本文件 "Watchlist hooks" 兼容 re-export）。
@@ -726,318 +571,7 @@ export function usePlans() {
 }
 
 /** 查询邀请码列表 */
-export function useInviteCodes(params?: { status?: string; limit?: number; offset?: number }) {
-  return useQuery({
-    queryKey: ['admin', 'invite-codes', params],
-    queryFn: () => api.getInviteCodes(params),
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 生成邀请码变更 */
-export function useCreateInviteCodes() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: InviteCodeCreateRequest) => api.createInviteCodes(payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'invite-codes'] })
-    },
-  })
-}
-
-/** 作废邀请码变更 */
-export function useRevokeInviteCode() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (inviteCodeId: string) => api.revokeInviteCode(inviteCodeId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'invite-codes'] })
-    },
-  })
-}
-
 /** 查询会员账户列表 */
-export function useMembers(params?: { limit?: number; offset?: number }) {
-  return useQuery({
-    queryKey: ['admin', 'members', params],
-    queryFn: () => api.getMembers(params),
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询用户兑换记录 */
-export function useMemberRedemptions(userId: string | undefined) {
-  return useQuery({
-    queryKey: ['admin', 'members', userId, 'redemptions'],
-    queryFn: () => api.getMemberRedemptions(userId!),
-    enabled: !!userId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询用户列表（admin） */
-export function useAdminUsers(params?: PaginationParams) {
-  return useQuery({
-    queryKey: ['admin', 'users', params],
-    queryFn: () => api.getAdminUsers(params),
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询用户详情（admin） */
-export function useAdminUser(userId: string | undefined) {
-  return useQuery({
-    queryKey: ['admin', 'users', userId],
-    queryFn: () => api.getAdminUser(userId!),
-    enabled: !!userId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 启用用户账户（admin） */
-export function useAdminEnableUser() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (userId: string) => api.adminEnableUser(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** 停用用户账户（admin） */
-export function useAdminDisableUser() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (userId: string) => api.adminDisableUser(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** 管理员重置用户密码（设置新密码；不读取、不返回旧密码） */
-export function useAdminResetUserPassword() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ userId, newPassword }: { userId: string; newPassword: string }) =>
-      api.adminResetUserPassword(userId, { new_password: newPassword }),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'audit-logs'] })
-    },
-  })
-}
-
-/** 管理员授予用户套餐 */
-export function useAdminGrantSubscription() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({
-      userId,
-      payload,
-    }: {
-      userId: string
-      payload: GrantSubscriptionRequest
-    }) => api.adminGrantSubscription(userId, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** 管理员续期用户套餐 */
-export function useAdminRenewSubscription() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({
-      userId,
-      payload,
-    }: {
-      userId: string
-      payload: RenewSubscriptionRequest
-    }) => api.adminRenewSubscription(userId, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** 管理员撤销用户套餐 */
-export function useAdminRevokeSubscription() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (userId: string) => api.adminRevokeSubscription(userId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** 管理员变更用户套餐 */
-export function useAdminChangeSubscriptionPlan() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({
-      userId,
-      payload,
-    }: {
-      userId: string
-      payload: ChangePlanRequest
-    }) => api.adminChangeSubscriptionPlan(userId, payload),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** [Gate2 PRD60] 查询用户 capabilities（三类独立权限状态） */
-export function useUserCapabilities(userId: string | undefined, enabled: boolean = true) {
-  return useQuery({
-    queryKey: ['admin', 'users', userId, 'capabilities'],
-    queryFn: () => api.getUserCapabilities(userId!),
-    enabled: !!userId && enabled,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** [Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability */
-export function useAdminGrantCapability() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({
-      userId,
-      payload,
-    }: {
-      userId: string
-      payload: GrantCapabilityRequest
-    }) => api.adminGrantCapability(userId, payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** [Gate2 PRD60 PA-20] 管理员撤销用户 capability */
-export function useAdminRevokeCapability() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({
-      userId,
-      capability,
-    }: {
-      userId: string
-      capability: 'self_selection' | 'market_data' | 'research_replay'
-    }) => api.adminRevokeCapability(userId, capability),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'members'] })
-    },
-  })
-}
-
-/** 查询管理员审计日志 */
-export function useAdminAuditLogs(
-  params?: {
-    target_user_id?: string
-    action?: string
-    limit?: number
-    offset?: number
-  },
-  enabled: boolean = true,
-) {
-  return useQuery({
-    queryKey: ['admin', 'audit-logs', params],
-    queryFn: () => api.getAdminAuditLogs(params),
-    staleTime: STALE_REALTIME,
-    enabled,
-  })
-}
-
-// ============================================================
-// ===== Admin Beta Applications hooks（Task 4） =====
-// ============================================================
-
-/** 查询内测申请列表（分页+筛选+搜索） */
-export function useAdminBetaApplications(params?: BetaApplicationQueryParams) {
-  return useQuery({
-    queryKey: ['admin', 'beta-applications', params],
-    queryFn: () => api.getAdminBetaApplications(params),
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 获取内测申请统计数据 */
-export function useAdminBetaApplicationStats() {
-  return useQuery({
-    queryKey: ['admin', 'beta-applications', 'stats'],
-    queryFn: () => api.getAdminBetaApplicationStats(),
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 获取内测申请详情 */
-export function useAdminBetaApplicationDetail(appId: string | undefined) {
-  return useQuery({
-    queryKey: ['admin', 'beta-applications', appId, 'detail'],
-    queryFn: () => api.getAdminBetaApplicationDetail(appId!),
-    enabled: !!appId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 修改内测申请状态（status + admin_note） */
-export function useUpdateAdminBetaApplication() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ appId, payload }: { appId: string; payload: BetaApplicationPatchRequest }) =>
-      api.updateAdminBetaApplication(appId, payload),
-    onSuccess: (_data, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', variables.appId, 'detail'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', 'stats'] })
-    },
-  })
-}
-
-/** 重发内测申请飞书通知 */
-export function useRetryAdminBetaApplicationFeishu() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (appId: string) => api.retryAdminBetaApplicationFeishu(appId),
-    onSuccess: (_data, appId) => {
-      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications', appId, 'detail'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'beta-applications'] })
-    },
-  })
-}
-
-// ============================================================
-// ===== Admin System Overview hooks =====
-// ============================================================
-
-/** 获取系统概览（30 秒缓存，15 秒轮询，管理后台首页使用）
- *  enabled: 仅管理员启用，避免普通用户触发 403 无权限请求（AppShell 全局调用时传入角色判断）
- */
-export function useAdminSystemOverview(enabled: boolean = true) {
-  return useQuery({
-    queryKey: ['admin', 'system-overview'],
-    queryFn: api.getAdminSystemOverview,
-    enabled,
-    staleTime: STALE_REALTIME,
-    refetchInterval: enabled ? 15_000 : false,
-    refetchIntervalInBackground: false,
-  })
-}
-
-// ============================================================
 // ===== Health hooks =====
 // ============================================================
 
@@ -1052,235 +586,6 @@ export function useHealth() {
 }
 
 // ============================================================
-// ===== AfterClose & JobRunEvents hooks =====
-// ============================================================
-
-/** 查询任务执行事件时间线（抽屉打开时按需加载） */
-export function useJobRunEvents(runId: string | null | undefined) {
-  return useQuery({
-    queryKey: ['job-runs', runId, 'events'],
-    queryFn: () => api.getJobRunEvents(runId!),
-    enabled: !!runId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询指定交易日的产品就绪状态 + 治理报告（admin，Commit G）。
- * 15 秒轮询紧跟盘后编排进度；页面不可见暂停。 */
-export function useAdminProductReadiness(
-  tradeDate: string | null | undefined,
-  enabled: boolean = true,
-) {
-  return useQuery({
-    queryKey: ['admin', 'readiness', tradeDate],
-    queryFn: () => api.getAdminProductReadiness(tradeDate!),
-    enabled: !!tradeDate && enabled,
-    staleTime: STALE_REALTIME,
-    refetchInterval: enabled ? 15_000 : false,
-    refetchIntervalInBackground: false,
-  })
-}
-
-/** 查询盘后编排状态（10 秒轮询，含事件时间线 + DSA run 状态） */
-export function useAfterCloseRunStatus(runId: string | null | undefined, enabled: boolean = true) {
-  return useQuery({
-    queryKey: ['after-close-runs', runId],
-    queryFn: () => api.getAfterCloseRunStatus(runId!),
-    enabled: !!runId && enabled,
-    staleTime: STALE_REALTIME,
-    refetchInterval: enabled ? 10_000 : false,
-    refetchIntervalInBackground: false,
-  })
-}
-
-/** 创建盘后编排变更 */
-export function useCreateAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (tradeDate: string) => api.createAfterCloseRun(tradeDate),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-    },
-  })
-}
-
-/** 强制重新执行盘后编排变更。
- * 支持可选 restartFrom="daily_ready"：从 DSA 阶段重算（跳过日线刷新，需覆盖率≥90%）。 */
-export function useForceAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (args: { runId: string; restartFrom?: 'daily_ready' }) =>
-      api.forceAfterCloseRun(args.runId, args.restartFrom),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-    },
-  })
-}
-
-/** 重试盘后编排变更 */
-export function useRetryAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (runId: string) => api.retryAfterCloseRun(runId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-    },
-  })
-}
-
-/** [Phase6] 从失败步骤继续变更（保留断点检查点，幂等）。
- * 成功后失效 after-close-runs / pipeline latest / pipeline by-date / pipeline runs /
- * system-overview 缓存，确保 UI 立即反映 queued 状态。 */
-export function useResumeAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (runId: string) => api.resumeAfterCloseRun(runId),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
-      queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
-      queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-    },
-  })
-}
-
-// ============================================================
-// ===== AfterClose Pipeline 聚合状态 hooks（/admin/after-close/pipeline/*）=====
-// ============================================================
-//
-// 轮询策略（遵循用户规范）：
-// - running 状态 10 秒轮询
-// - 非 running 状态 60 秒轮询
-// - 页面不可见暂停轮询（refetchIntervalInBackground=false）
-// - queryKey 与 useAdminSystemOverview / useAfterCloseRunStatus 隔离，避免缓存串扰
-
-// [AfterClosePipeline] - 轮询间隔常量 + helper（从 adminAfterClosePipelineHelpers 导入并重导出）
-// 定义在 helpers 文件中以便 node --experimental-strip-types 直接导入测试
-import {
-  PIPELINE_POLL_RUNNING,
-  PIPELINE_POLL_IDLE,
-  getPipelinePollInterval,
-} from '@/pages/adminAfterClosePipelineHelpers'
-export { PIPELINE_POLL_RUNNING, PIPELINE_POLL_IDLE, getPipelinePollInterval }
-
-/**
- * 查询最近交易日的盘后流水线聚合状态（admin）。
- * overall_status==='running' 时 10s 轮询，其余 60s 轮询，页面不可见暂停。
- * @param enabled 是否启用查询（默认 true，可用于页面卸载或权限不足时停止）
- */
-export function useAfterClosePipelineLatest(enabled: boolean = true) {
-  return useQuery({
-    queryKey: ['after-close-pipeline', 'latest'],
-    queryFn: api.getAfterClosePipelineLatest,
-    enabled,
-    staleTime: STALE_REALTIME,
-    refetchInterval: (query) => getPipelinePollInterval(query.state.data?.overall_status),
-    refetchIntervalInBackground: false,
-  })
-}
-
-/**
- * 查询指定交易日的盘后流水线聚合状态（admin）。
- * overall_status==='running' 时 10s 轮询，其余 60s 轮询，页面不可见暂停。
- * @param tradeDate 交易日（YYYY-MM-DD），undefined/null 时不启用查询
- * @param enabled 是否启用查询（默认 true）
- */
-export function useAfterClosePipelineByDate(
-  tradeDate: string | null | undefined,
-  enabled: boolean = true,
-) {
-  return useQuery({
-    queryKey: ['after-close-pipeline', 'by-date', tradeDate],
-    queryFn: () => api.getAfterClosePipelineByDate(tradeDate!),
-    enabled: !!tradeDate && enabled,
-    staleTime: STALE_REALTIME,
-    refetchInterval: (query) => getPipelinePollInterval(query.state.data?.overall_status),
-    refetchIntervalInBackground: false,
-  })
-}
-
-/**
- * 查询最近 N 次运行列表（after_close_orchestrator + snapshot_run 混合）。
- * 60s 轮询，页面不可见暂停（列表非实时关键数据，统一 60s）。
- * @param limit 最多返回条数（默认 20，后端上限 100）
- * @param enabled 是否启用查询
- */
-export function useAfterClosePipelineRuns(
-  limit: number = 20,
-  enabled: boolean = true,
-) {
-  return useQuery({
-    queryKey: ['after-close-pipeline', 'runs', limit],
-    queryFn: () => api.getAfterClosePipelineRuns(limit),
-    enabled,
-    staleTime: STALE_REALTIME,
-    refetchInterval: PIPELINE_POLL_IDLE,
-    refetchIntervalInBackground: false,
-  })
-}
-
-/**
- * 管理员触发指定交易日的 after_close 编排任务（admin，幂等）。
- * 同 trade_date 已有 queued/running/succeeded 时返回 existing，不重复创建。
- * 成功后失效 pipeline latest/by-date/runs 与 system-overview 缓存。
- */
-function invalidateAfterCloseAdminQueries(queryClient: ReturnType<typeof useQueryClient>) {
-  queryClient.invalidateQueries({ queryKey: ['after-close-runs'] })
-  queryClient.invalidateQueries({ queryKey: ['after-close-pipeline'] })
-  // [FIX] 任务管理页（AdminJobsPage）实际使用 ['admin', 'scheduler-job-runs', params]。
-  // 原写法少了 'admin' 前缀，导致 after-close 变更成功后任务列表**永不刷新**，
-  // 页面继续显示旧的 running/queued，看起来像"取消没生效"。
-  // React Query 前缀失效会覆盖所有 params 版本，故这里不需要带 params。
-  queryClient.invalidateQueries({ queryKey: ['admin', 'scheduler-job-runs'] })
-  queryClient.invalidateQueries({ queryKey: ['admin', 'system-overview'] })
-}
-
-export function useCreateAfterClosePipelineRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (payload: AfterClosePipelineRunRequest) =>
-      api.createAfterClosePipelineRun(payload),
-    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
-  })
-}
-
-export function useCancelAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
-      api.cancelAfterCloseRun(runId, reason),
-    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
-  })
-}
-
-export function useReconcileAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: ({ runId, reason }: { runId: string; reason?: string }) =>
-      api.reconcileAfterCloseRun(runId, reason),
-    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
-  })
-}
-
-export function useRestartAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (runId: string) => api.restartAfterCloseRun(runId),
-    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
-  })
-}
-
-export function useForceRestartAfterCloseRun() {
-  const queryClient = useQueryClient()
-  return useMutation({
-    mutationFn: (input: { runId: string; restartFrom?: 'daily_ready' }) =>
-      api.forceRestartAfterCloseRun(input.runId, input.restartFrom),
-    onSuccess: () => invalidateAfterCloseAdminQueries(queryClient),
-  })
-}
-
 // ============================================================
 // ===== Structural Factors hooks =====
 // ============================================================
@@ -1417,20 +722,6 @@ export function useFirstPyramid(
     enabled: !!symbol && (options?.enabled ?? true),
     staleTime: STALE_REALTIME,
     retry: 1,
-  })
-}
-
-/** 查询管理员 StockDebug（/v1/admin/stocks/{symbol}/debug，含原始 payload） */
-export function useAdminStockDebug(
-  symbol: string | undefined,
-  params?: { as_of?: string },
-  options?: { enabled?: boolean },
-) {
-  return useQuery({
-    queryKey: ['admin', 'stock-debug', symbol, params ?? null],
-    queryFn: ({ signal }) => api.getAdminStockDebug(symbol!, params, { signal }),
-    enabled: !!symbol && (options?.enabled ?? true),
-    staleTime: STALE_REALTIME,
   })
 }
 

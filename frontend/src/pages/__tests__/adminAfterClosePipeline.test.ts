@@ -34,7 +34,8 @@ import {
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
 const PAGE_PATH = join(__dirname, '..', 'AdminAfterClosePipelinePage.tsx')
-const USE_API_PATH = join(__dirname, '..', '..', 'hooks', 'useApi.ts')
+// [S3-D] AfterClose hooks 已迁至 useAdminAfterCloseApi.ts（useApi.ts 仅兼容 re-export）。
+const USE_API_PATH = join(__dirname, '..', '..', 'hooks', 'useAdminAfterCloseApi.ts')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf-8')
@@ -279,8 +280,8 @@ test('4f. getStepKeys: API 返回含未知 step 时不报错，原样保留', ()
 // ============================================================
 
 test('5a. 源码级: AfterClosePipelineResponse 类型定义中 watchlist_ready 是独立字段', () => {
-  // 验证 endpoints.ts 中 AfterClosePipelineResponse 包含 watchlist_ready: boolean
-  const endpointsSrc = readSource(join(__dirname, '..', '..', 'api', 'endpoints.ts'))
+  // [S3-D] AfterClosePipelineResponse 已迁至 adminAfterClose.ts（endpoints.ts 仅兼容 re-export）
+  const endpointsSrc = readSource(join(__dirname, '..', '..', 'api', 'adminAfterClose.ts'))
   assert.ok(
     endpointsSrc.includes('watchlist_ready: boolean'),
     'AfterClosePipelineResponse 必须包含 watchlist_ready: boolean 独立字段',
