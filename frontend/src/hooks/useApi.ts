@@ -20,8 +20,6 @@ import type {
   NotificationPreviewRequest,
   InviteCodeCreateRequest,
   InstrumentQueryParams,
-  StrategyEventQueryParams,
-  StrategyResultQueryParams,
   BarQueryParams,
   CalendarQueryParams,
   IndicatorQueryParams,
@@ -143,64 +141,30 @@ export function useInstrumentBySymbol(symbol: string | undefined) {
 }
 
 // ============================================================
-// ===== Strategies hooks =====
+// ===== Strategy hooks =====
 // ============================================================
+//
+// [S3-C] 非 admin strategy hooks 已迁至 ./useStrategyApi（唯一 owner），
+// 此处以兼容 barrel 重新导出。
 
-/** 获取策略列表（5 分钟缓存） */
-export function useStrategies(kind?: string) {
-  return useQuery({
-    queryKey: ['strategies', kind],
-    queryFn: () => api.getStrategies(kind),
-    staleTime: STALE_STRATEGIES,
-  })
-}
-
-/** 获取策略详情（5 分钟缓存） */
-export function useStrategy(strategyKey: string | undefined) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey],
-    queryFn: () => api.getStrategy(strategyKey!),
-    enabled: !!strategyKey,
-    staleTime: STALE_STRATEGIES,
-  })
-}
-
-/** 获取策略的所有版本（5 分钟缓存） */
-export function useStrategyVersions(strategyKey: string | undefined) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey, 'versions'],
-    queryFn: () => api.getStrategyVersions(strategyKey!),
-    enabled: !!strategyKey,
-    staleTime: STALE_STRATEGIES,
-  })
-}
-
-/** 获取策略版本的 schema（5 分钟缓存） */
-export function useStrategyVersionSchema(strategyKey: string | undefined, version: string | undefined) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey, 'versions', version, 'schema'],
-    queryFn: () => api.getStrategyVersionSchema(strategyKey!, version!),
-    enabled: !!strategyKey && !!version,
-    staleTime: STALE_STRATEGIES,
-  })
-}
+export {
+  useStrategies,
+  useStrategy,
+  useStrategyVersions,
+  useStrategyVersionSchema,
+  useStrategyRuns,
+  usePublishedRuns,
+  useStrategyRunResults,
+  useInstrumentMonitorStates,
+  useStrategyMonitorStates,
+  useInstrumentEvents,
+  useStrategyEvents,
+  useStrategyEventDetail,
+} from './useStrategyApi'
 
 // ============================================================
-// ===== Strategy Runs hooks =====
+// ===== Admin Strategy hooks（留在本文件，admin domain）=====
 // ============================================================
-
-/** 查询策略运行历史 */
-export function useStrategyRuns(
-  strategyKey: string | undefined,
-  params?: { status?: string; limit?: number; offset?: number },
-) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey, 'runs', params],
-    queryFn: () => api.getStrategyRuns(strategyKey!, params),
-    enabled: !!strategyKey,
-    staleTime: STALE_REALTIME,
-  })
-}
 
 /** 查询策略运行历史（admin，/admin 前缀路径） */
 export function useAdminStrategyRuns(
@@ -215,28 +179,7 @@ export function useAdminStrategyRuns(
   })
 }
 
-/** 查询已发布的运行批次（普通用户可访问） */
-export function usePublishedRuns(
-  strategyKey: string | undefined,
-  params?: { limit?: number; offset?: number },
-) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey, 'published-runs', params],
-    queryFn: () => api.getPublishedRuns(strategyKey!, params),
-    enabled: !!strategyKey,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询运行结果（分页+筛选+排序） */
-export function useStrategyRunResults(runId: string | undefined, params?: StrategyResultQueryParams) {
-  return useQuery({
-    queryKey: ['strategy-runs', runId, 'results', params],
-    queryFn: () => api.getStrategyRunResults(runId!, params),
-    enabled: !!runId,
-    staleTime: STALE_REALTIME,
-  })
-}
+// [S3-C] usePublishedRuns / useStrategyRunResults 已迁至 ./useStrategyApi（见上方兼容 re-export）。
 
 /** 触发策略运行变更（admin） */
 export function useTriggerStrategyRun() {
@@ -251,67 +194,8 @@ export function useTriggerStrategyRun() {
   })
 }
 
-// ============================================================
-// ===== Monitor States hooks =====
-// ============================================================
-
-/** 查询某股票的所有监控策略状态 */
-export function useInstrumentMonitorStates(instrumentId: string | undefined) {
-  return useQuery({
-    queryKey: ['instruments', instrumentId, 'monitor-states'],
-    queryFn: () => api.getInstrumentMonitorStates(instrumentId!),
-    enabled: !!instrumentId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询某策略的所有股票状态（支持 version 过滤，交易时段 30s 自动刷新） */
-export function useStrategyMonitorStates(strategyKey: string | undefined, version?: string) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey, 'monitor-states', version],
-    queryFn: () => api.getStrategyMonitorStates(strategyKey!, version),
-    enabled: !!strategyKey,
-    staleTime: STALE_REALTIME,
-    refetchInterval: () => isInTradingHours() ? 30000 : false,
-  })
-}
-
-// ============================================================
-// ===== Strategy Events hooks =====
-// ============================================================
-
-/** 查询某股票的策略事件 */
-export function useInstrumentEvents(instrumentId: string | undefined, params?: StrategyEventQueryParams) {
-  return useQuery({
-    queryKey: ['instruments', instrumentId, 'events', params],
-    queryFn: ({ signal }) => api.getInstrumentEvents(instrumentId!, params, { signal }),
-    enabled: !!instrumentId,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询某策略的事件 */
-export function useStrategyEvents(
-  strategyKey: string | undefined,
-  params?: { version?: string } & StrategyEventQueryParams,
-) {
-  return useQuery({
-    queryKey: ['strategies', strategyKey, 'events', params],
-    queryFn: () => api.getStrategyEvents(strategyKey!, params),
-    enabled: !!strategyKey,
-    staleTime: STALE_REALTIME,
-  })
-}
-
-/** 查询事件详情（含 snapshot 快照） */
-export function useStrategyEventDetail(eventId: string | undefined) {
-  return useQuery({
-    queryKey: ['strategy-events', eventId],
-    queryFn: () => api.getStrategyEventDetail(eventId!),
-    enabled: !!eventId,
-    staleTime: STALE_REALTIME,
-  })
-}
+// [S3-C] useInstrumentMonitorStates / useStrategyMonitorStates / useInstrumentEvents /
+// useStrategyEvents / useStrategyEventDetail 已迁至 ./useStrategyApi（见上方兼容 re-export）。
 
 // ============================================================
 // ===== Notifications hooks =====

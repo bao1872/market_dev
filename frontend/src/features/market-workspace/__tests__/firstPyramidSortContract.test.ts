@@ -30,25 +30,17 @@ test('FP 列 sortable 由 def.dataType 推导（number/percent=true，其余=fal
 
 test('FP 列不存在 blanket sortable: true（避免非数值字段暴露排序）', () => {
   const src = readSource(SRC_PATH)
-  // 列返回对象的 sortable 行不应是字面量 true
-  const matches = src.match(/sortable:\s*true/g) || []
-  // 允许测试用例或注释中的 true；主返回对象里不应出现字面量 sortable: true
-  // 通过定位 return { ... } 块内 sortable: true 来判定
-  const returnBlock = src.match(/return\s*\{[\s\S]*?key:\s*def\.key[\s\S]*?\n\s*\}/)
-  assert.ok(returnBlock, '找不到 FP 列返回对象')
-  assert.ok(
-    !/sortable:\s*true/.test(returnBlock![0]),
-    'FP 列返回对象中 sortable 不应为字面量 true（必须基于 def.dataType 推导）',
+  // 直接检查稳定源码合同：列定义不得出现字面量 sortable: true（必须基于 def.dataType 推导）。
+  // 不再用脆弱 regex 截取 return object（会因无关代码位移而误判）。
+  assert.doesNotMatch(
+    src,
+    /sortable:\s*true/,
+    'FP 列不得出现字面量 sortable: true（必须基于 def.dataType 推导）',
   )
-  assert.ok(matches.length === 0 || true, 'sortable: true 字面量不应出现在列定义返回中（仅记录）')
 })
 
 test('FP 列 filterable 保持 true（筛选能力不受影响）', () => {
   const src = readSource(SRC_PATH)
-  const returnBlock = src.match(/return\s*\{[\s\S]*?key:\s*def\.key[\s\S]*?\n\s*\}/)
-  assert.ok(returnBlock, '找不到 FP 列返回对象')
-  assert.ok(
-    /filterable:\s*true/.test(returnBlock![0]),
-    'FP 列 filterable 必须保持 true',
-  )
+  // 直接检查稳定源码合同，不用脆弱 regex 截取 return object。
+  assert.match(src, /filterable:\s*true/, 'FP 列 filterable 必须保持 true')
 })

@@ -21,7 +21,8 @@ test('legacy filter aliases normalize to canonical output names', () => {
 test('market and detail navigation share market-stocks query and optimistic watchlist state', () => {
   const market = source('src/features/market-workspace/MarketWorkspacePage.tsx')
   const detail = source('src/features/stock-research/useStockDetailActions.ts')
-  const hooks = source('src/hooks/useApi.ts')
+  // [S3-B] market-stocks 失效逻辑随 watchlist mutation 迁至 useWatchlistApi.ts（useApi 仅兼容 re-export）
+  const hooks = source('src/hooks/useWatchlistApi.ts')
   assert.ok(market.includes('JSON.stringify(marketStocksParams)'))
   assert.ok(detail.includes('useMarketStocks(marketStocksParams, { enabled: useMcq })'))
   assert.ok(detail.includes('marketCanonicalQuery: marketCanonicalQueryRaw'))

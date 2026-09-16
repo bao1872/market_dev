@@ -20,7 +20,9 @@ import { dirname, join } from 'node:path'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
-const ENDPOINTS_PATH = join(__dirname, '..', '..', 'src', 'api', 'endpoints.ts')
+// [S3-A] AccessProfile / LoginResponse / getMyAccess 已迁至 api/auth.ts（endpoints.ts 仅兼容 re-export），
+// 故本契约读取新的实现 owner。
+const AUTH_API_PATH = join(__dirname, '..', '..', 'src', 'api', 'auth.ts')
 const AUTH_STORE_PATH = join(__dirname, '..', '..', 'src', 'store', 'auth.ts')
 const APP_TSX_PATH = join(__dirname, '..', '..', 'src', 'App.tsx')
 const LOGIN_PAGE_PATH = join(__dirname, '..', '..', 'src', 'pages', 'LoginPage.tsx')
@@ -30,8 +32,8 @@ function readSource(p: string): string {
 }
 
 // ===== 1. AccessProfile 接口定义（11 字段，对齐后端 AccessProfileResponse） =====
-test('endpoints.ts 定义 export interface AccessProfile', () => {
-  const src = readSource(ENDPOINTS_PATH)
+test('api/auth.ts 定义 export interface AccessProfile', () => {
+  const src = readSource(AUTH_API_PATH)
   assert.ok(
     /export\s+interface\s+AccessProfile\s*\{/.test(src),
     'endpoints.ts 必须定义 export interface AccessProfile',
@@ -60,7 +62,7 @@ test('endpoints.ts 定义 export interface AccessProfile', () => {
 
 // ===== 2. LoginResponse 含 10 个 AccessProfile 字段（含 next_route） =====
 test('LoginResponse 含 10 个 AccessProfile 字段（含 next_route）', () => {
-  const src = readSource(ENDPOINTS_PATH)
+  const src = readSource(AUTH_API_PATH)
   // [Auth] - 描述: 提取 LoginResponse 接口体
   const match = src.match(/export\s+interface\s+LoginResponse\s*\{([\s\S]*?)\}/)
   assert.ok(match, 'endpoints.ts 必须定义 LoginResponse 接口')
@@ -87,7 +89,7 @@ test('LoginResponse 含 10 个 AccessProfile 字段（含 next_route）', () => 
 
 // ===== 3. LoginResponse 不再含 membership_expired 字段 =====
 test('LoginResponse 不再含 membership_expired 字段', () => {
-  const src = readSource(ENDPOINTS_PATH)
+  const src = readSource(AUTH_API_PATH)
   const match = src.match(/export\s+interface\s+LoginResponse\s*\{([\s\S]*?)\}/)
   assert.ok(match, 'endpoints.ts 必须定义 LoginResponse 接口')
   const body = match[1]
@@ -210,8 +212,8 @@ test('LoginPage.tsx 无 expired@quant.local 演示提示', () => {
 })
 
 // ===== 10. endpoints.ts 存在 getMyAccess 函数调用 GET /me/access =====
-test('endpoints.ts 存在 getMyAccess 函数调用 /me/access', () => {
-  const src = readSource(ENDPOINTS_PATH)
+test('api/auth.ts 存在 getMyAccess 函数调用 /me/access', () => {
+  const src = readSource(AUTH_API_PATH)
   // [Auth] - 描述: 必须导出 getMyAccess 异步函数
   assert.ok(
     /export\s+async\s+function\s+getMyAccess\s*\(/.test(src),
