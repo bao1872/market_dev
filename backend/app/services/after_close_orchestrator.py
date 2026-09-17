@@ -37,7 +37,6 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime, timedelta
-from enum import StrEnum
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -46,8 +45,21 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.models.stock_feature_snapshot_run import STATUS_SUCCEEDED
 from app.models.strategy_run import StrategyRun
 from app.repositories import strategy_result_repository
+from app.services.after_close_run_contract import (
+    AFTER_CLOSE_JOB_NAME as _AFTER_CLOSE_JOB_NAME,
+)
+from app.services.after_close_run_contract import (
+    AfterCloseRunStatus,
+)
+from app.services.after_close_run_contract import (
+    parse_after_close_metadata as _parse_metadata,
+)
+from app.services.after_close_run_contract import (
+    update_after_close_status as _update_orchestrator_status,
+)
 from app.services.bars_scheduler_service import BarsSchedulerService
 from app.services.feature_snapshot_service import (
     PublishedSnapshotRunExistsError,
@@ -56,7 +68,6 @@ from app.services.feature_snapshot_service import (
     finish_snapshot_run,
     get_active_a_share_instruments,
 )
-from app.models.stock_feature_snapshot_run import STATUS_SUCCEEDED
 from app.services.first_pyramid_history_service import (
     advance_history_to_trade_date,
     ensure_current_first_pyramid_history_run,
@@ -74,9 +85,6 @@ from app.services.review_history_readiness_service import (
 from app.services.strategy_batch_service import StrategyBatchService
 
 logger = logging.getLogger("after_close_orchestrator")
-
-# [AfterClose] - 编排任务名称（区别于 bars_scheduler / strategy_batch_worker）
-_AFTER_CLOSE_JOB_NAME = "after_close_orchestrator"
 
 # [AfterClose] - DSA Worker 完成等待轮询间隔（秒）
 _DSA_POLL_INTERVAL_SECONDS = 30
@@ -1049,45 +1057,6 @@ _current_lease_epoch: contextvars.ContextVar[int | None] = contextvars.ContextVa
 )
 
 
-class AfterCloseRunStatus(StrEnum):
-    """盘后编排流水线状态枚举。
-
-    状态流转：
-    queued → refreshing_daily → syncing_boards → checking_coverage
-      → computing_features → publishing → computing_review → succeeded
-    任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
-
-    [Step Contract 2026-08-03] 总任务级终态补充：
-    - PARTIAL_SUCCESS：核心已发布（stock_core）但可选阶段（auction/review/chip）失败/跳过
-    - INTERRUPTED：Worker 崩溃/租约失效，由 watchdog 标记（区别于主动 failed）
-    - CANCELLED：管理员协作式取消
-    步骤级状态（succeeded/skipped/unavailable/failed/timed_out/cancelled/interrupted）
-    由 metadata.step_summary 表达，不在此重复定义。
-    """
-
-    QUEUED = "queued"
-    REFRESHING_DAILY = "refreshing_daily"
-    SYNCING_BOARDS = "syncing_boards"
-    CHECKING_COVERAGE = "checking_coverage"
-    # [CHANGE-20260724-002 Phase 5] 4 步收敛为 computing_features
-    # 旧 enum 保留用于历史 run 兼容读取（admin 页面不报错）
-    CREATING_DSA = "creating_dsa"
-    WAITING_DSA_WORKER = "waiting_dsa_worker"
-    QUALITY_GATE = "quality_gate"
-    FEATURE_SNAPSHOT = "feature_snapshot"
-    COMPUTING_FEATURES = "computing_features"
-    PUBLISHING = "publishing"
-    # [SLICE-01-CORRECTION-02] 新增 First Pyramid History 自动生产 + exact-T readiness 阶段
-    COMPUTING_HISTORY = "computing_history"
-    # [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘计算与发布阶段
-    COMPUTING_REVIEW = "computing_review"
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-    PARTIAL_SUCCESS = "partial_success"
-    INTERRUPTED = "interrupted"
-    CANCELLED = "cancelled"
-
-
 def _build_metadata(
     trade_date: date,
     orchestrator_status: AfterCloseRunStatus,
@@ -1104,20 +1073,6 @@ def _build_metadata(
     if extra:
         payload.update(extra)
     return json.dumps(payload, ensure_ascii=False)
-
-
-def _parse_metadata(job_run: SchedulerJobRun) -> dict[str, Any]:
-    """[AfterClose] - 解析 metadata_json 为 dict（空/异常时返回空 dict）。"""
-    if not job_run.metadata_json:
-        return {}
-    try:
-        return json.loads(job_run.metadata_json)
-    except (json.JSONDecodeError, TypeError) as exc:
-        logger.warning(
-            "[AfterClose] metadata_json 解析失败 job_run_id=%s: %s",
-            job_run.id, exc,
-        )
-        return {}
 
 
 async def _get_job_run_or_raise(
@@ -1286,66 +1241,6 @@ async def _claim_or_recover_dsa_run(
                 raise
 
     return dsa_already_completed, dsa_run_id
-
-
-async def _update_orchestrator_status(
-    db: AsyncSession,
-    job_run: SchedulerJobRun,
-    status: AfterCloseRunStatus,
-    message: str = "",
-    payload: dict[str, Any] | None = None,
-    dsa_run_id: uuid.UUID | None = None,
-    extra: dict[str, Any] | None = None,
-) -> None:
-    """[AfterClose] - 更新编排状态：写 metadata_json + 写 job_run_event（flush 不 commit）。
-
-    Args:
-        db: 异步会话
-        job_run: SchedulerJobRun 记录（已在 session 中）
-        status: 目标编排状态
-        message: 事件消息
-        payload: 事件 payload
-        dsa_run_id: 可选的 DSA run_id（写入 metadata_json）
-        extra: 额外 metadata 字段
-    """
-    # 保留已有 metadata 中的字段（如 trade_date），仅更新 orchestrator_status
-    existing_meta = _parse_metadata(job_run)
-    trade_date_str = existing_meta.get("trade_date")
-    if dsa_run_id is None:
-        dsa_run_id_str = existing_meta.get("dsa_run_id")
-        dsa_run_id = uuid.UUID(dsa_run_id_str) if dsa_run_id_str else None
-
-    # trade_date 优先用已有 metadata，其次用 extra
-    if trade_date_str is None and extra and "trade_date" in extra:
-        trade_date_str = extra["trade_date"]
-
-    # 构造新 metadata：保留已有字段，只更新本次涉及的字段
-    new_meta: dict[str, Any] = dict(existing_meta)
-    new_meta["orchestrator_status"] = status.value
-    if trade_date_str is not None:
-        new_meta["trade_date"] = trade_date_str
-    if dsa_run_id is not None:
-        new_meta["dsa_run_id"] = str(dsa_run_id)
-    if extra:
-        for k, v in extra.items():
-            if k not in ("orchestrator_status", "trade_date", "dsa_run_id"):
-                new_meta[k] = v
-
-    job_run.metadata_json = json.dumps(new_meta, ensure_ascii=False)
-    await db.flush()
-
-    # 写事件（step=状态名，便于前端按步骤展示）
-    event_payload = dict(payload) if payload else {}
-    event_payload["orchestrator_status"] = status.value
-    await append_event(
-        db=db,
-        job_run_id=job_run.id,
-        step=status.value,
-        level="info" if status != AfterCloseRunStatus.FAILED else "error",
-        message=message or f"编排状态切换: {status.value}",
-        payload=event_payload,
-    )
-    await db.flush()
 
 
 async def _record_board_sync_outcome(

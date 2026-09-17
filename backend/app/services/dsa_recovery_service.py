@@ -27,13 +27,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.strategy_run import StrategyRun
-from app.services.after_close_orchestrator import (
-    _AFTER_CLOSE_JOB_NAME,
+from app.services.after_close_run_contract import (
+    AFTER_CLOSE_JOB_NAME,
     AfterCloseRunStatus,
-    _parse_metadata,
-    _update_orchestrator_status,
-    append_event,
+    parse_after_close_metadata,
+    update_after_close_status,
 )
+from app.services.job_run_event_service import append_event
 
 logger = logging.getLogger("dsa_recovery_service")
 
@@ -95,12 +95,12 @@ async def recover_failed_dsa_run(
     job_run = await db.get(SchedulerJobRun, job_run_id)
     if job_run is None:
         raise DSARecoveryError(f"job_run 不存在: {job_run_id}")
-    if job_run.job_name != _AFTER_CLOSE_JOB_NAME:
+    if job_run.job_name != AFTER_CLOSE_JOB_NAME:
         raise DSARecoveryError(
             f"job_run 不是 after_close_orchestrator: job_name={job_run.job_name}"
         )
 
-    meta = _parse_metadata(job_run)
+    meta = parse_after_close_metadata(job_run)
     trade_date_str = meta.get("trade_date")
     if not trade_date_str:
         raise DSARecoveryError("metadata 缺少 trade_date")
@@ -179,7 +179,7 @@ async def recover_failed_dsa_run(
     )
 
     # 8. 原子更新 orchestrator metadata
-    await _update_orchestrator_status(
+    await update_after_close_status(
         db=db,
         job_run=job_run,
         status=AfterCloseRunStatus.QUEUED,
@@ -246,7 +246,7 @@ async def get_dsa_recovery_status(
     if job_run is None:
         raise DSARecoveryError(f"job_run 不存在: {job_run_id}")
 
-    meta = _parse_metadata(job_run)
+    meta = parse_after_close_metadata(job_run)
     dsa_run_id_str = meta.get("dsa_run_id")
     recovery_count = meta.get("dsa_recovery_count", 0)
 

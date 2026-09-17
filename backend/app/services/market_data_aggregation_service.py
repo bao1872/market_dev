@@ -36,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
 from app.core.time import SHANGHAI_TZ, now_shanghai, shanghai_business_date
+from app.domain.shared.bar_identity import compute_source_bar_hash
 from app.repositories.bar_repository import (
     _get_listing_date,
     _get_symbol,
@@ -51,7 +52,6 @@ from app.services.calendar_service import (
     get_next_authoritative_trading_day_async,
     is_trading_day_async,
 )
-from app.services.chart_bars_service import compute_source_bar_hash
 from app.services.kline_aggregator import aggregate as aggregate_kline
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,

@@ -91,6 +91,7 @@ owner、数据流、契约或运行事实，且旧 Map 会误导后续开发时�
 | `technical/data-storage.md` | PostgreSQL、Redis、表、Key 和数据所有权 |
 | `technical/backend-api.md` | 后端入口、路由、Schema、Service 和调用方 |
 | `technical/observability-debugging.md` | 日志、任务状态、健康检查和调试入口 |
+| `technical/business-chain-boundaries.md` | 行情、Core/DSA、Review、监控通知与盘后控制链的 owner 和边界 |
 
 ## 7. 重要原则
 

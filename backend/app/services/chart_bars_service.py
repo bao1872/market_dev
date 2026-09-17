@@ -22,7 +22,6 @@
 """
 from __future__ import annotations
 
-import hashlib
 import logging
 import uuid
 from datetime import date, datetime
@@ -34,6 +33,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import CHART_BARS_COUNT
 from app.core.time import SHANGHAI_TZ
+from app.domain.shared.bar_identity import (
+    compute_source_bar_hash,
+    compute_source_bar_times,
+)
 
 logger = logging.getLogger("services.chart_bars_service")
 
@@ -119,55 +122,6 @@ def _filter_unfinished_daily_bars(
     if latest_date == today and now.time() < _DAILY_CLOSE_TIME:
         df = df[df.index.date < today]
     return df
-
-
-def compute_source_bar_times(df: pd.DataFrame, timeframe: str = "1d") -> list[str]:
-    """计算 source_bar_times（时间字符串数组，格式随 timeframe）。
-
-    格式规则（与 /bars API trade_time/trade_date 序列化一致）：
-    - 1d/1w/1mo: YYYY-MM-DD（10 字符）
-    - 15m/1h: YYYY-MM-DDTHH:MM:SS（19 字符，naive 北京时间）
-
-    Args:
-        df: 行情 DataFrame，index 为 DatetimeIndex
-        timeframe: 周期 1d | 15m | 1h | 1w | 1mo（默认 1d，向后兼容）
-
-    Returns:
-        时间字符串列表，长度等于 DataFrame 行数
-    """
-    fmt = "%Y-%m-%dT%H:%M:%S" if timeframe in ("15m", "1h") else "%Y-%m-%d"
-    return [idx.strftime(fmt) for idx in df.index]
-
-
-def compute_source_bar_hash(df: pd.DataFrame, timeframe: str = "1d") -> str:
-    """计算 source_bar_hash（OHLCV 拼接的 SHA256 哈希前 16 字符）。
-
-    拼接格式（每行一个）: time|open|high|low|close|volume|amount
-    所有行用换行符连接后计算 SHA256，取 hexdigest 前 16 字符。
-
-    time 格式随 timeframe（与 compute_source_bar_times 一致）：
-    - 1d/1w/1mo: YYYY-MM-DD
-    - 15m/1h: YYYY-MM-DDTHH:MM:SS
-
-    Args:
-        df: 行情 DataFrame，含 open/high/low/close/volume/amount 列
-        timeframe: 周期 1d | 15m | 1h | 1w | 1mo（默认 1d，向后兼容）
-
-    Returns:
-        SHA256 hexdigest 前 16 字符；空 DataFrame 返回空字符串
-    """
-    if df.empty:
-        return ""
-    fmt = "%Y-%m-%dT%H:%M:%S" if timeframe in ("15m", "1h") else "%Y-%m-%d"
-    parts: list[str] = []
-    for idx, row in df.iterrows():
-        time_str = idx.strftime(fmt)
-        parts.append(
-            f"{time_str}|{row['open']}|{row['high']}|{row['low']}|"
-            f"{row['close']}|{row['volume']}|{row['amount']}"
-        )
-    joined = "\n".join(parts)
-    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
 
 
 if __name__ == "__main__":
