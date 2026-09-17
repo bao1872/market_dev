@@ -52,6 +52,16 @@ from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
 from app.services.plan_service import get_monitor_limit as get_monitor_limit_async
 from app.services.plan_service import get_plan as get_plan_async
+from app.services.subscription_summary_service import (
+    SubscriptionCommercialResult as SubscriptionCommercialResult,
+)
+from app.services.subscription_summary_service import SubscriptionSummary as SubscriptionSummary
+from app.services.subscription_summary_service import (
+    resolve_commercial_status as resolve_commercial_status,
+)
+from app.services.subscription_summary_service import (
+    resolve_subscription_summary as resolve_subscription_summary,
+)
 
 
 def _ensure_aware(dt: datetime) -> datetime:
@@ -94,17 +104,6 @@ class CapabilityMutationResult:
     materialized_capabilities: list[dict[str, Any]]
 
 
-@dataclass
-class SubscriptionCommercialResult:
-    """[权限模型 V2 PV2-B06] 纯商业状态解析结果（受限 status + 诊断原因）。
-
-    商业状态与功能权限完全解耦；异常商业周期 fail-closed 判 expired 并输出诊断原因。
-    """
-
-    status: Literal["none", "pending", "active", "expired", "revoked", "cancelled"]
-    reason: str | None = None
-
-
 def _cap_state_dict(
     *,
     active: bool,
@@ -123,112 +122,6 @@ def _cap_state_dict(
         "granted_by": str(granted_by) if granted_by else None,
         "reason": reason,
     }
-
-
-def resolve_commercial_status(
-    subscription: Any,
-    now: datetime | None = None,
-) -> SubscriptionCommercialResult:
-    """[权限模型 V2 PV2-B06] 解析订阅纯商业状态（fail-closed）。
-
-    规则：
-    1. 无记录：none
-    2. 持久状态 revoked/cancelled：保持原状态
-    3. 缺少 starts_at：expired/missing_starts_at
-    4. 缺少 expires_at：expired/missing_expires_at
-    5. starts_at 晚于 expires_at：expired/invalid_period
-    6. 尚未开始：pending
-    7. 已到期：expired
-    8. 其余正常周期：active
-
-    订阅列表与管理员 access-profile 共用本解析器。
-    """
-    if subscription is None:
-        return SubscriptionCommercialResult(status="none", reason="no_subscription")
-    now = now or datetime.now(UTC)
-
-    persistent = getattr(subscription, "status", None)
-    if persistent in ("revoked", "cancelled"):
-        return SubscriptionCommercialResult(status=persistent, reason=persistent)
-
-    raw_starts_at = getattr(subscription, "starts_at", None)
-    raw_expires_at = getattr(subscription, "expires_at", None)
-    starts_at = _ensure_aware(raw_starts_at) if raw_starts_at is not None else None
-    expires_at = _ensure_aware(raw_expires_at) if raw_expires_at is not None else None
-
-    if starts_at is None:
-        return SubscriptionCommercialResult(status="expired", reason="missing_starts_at")
-    if expires_at is None:
-        return SubscriptionCommercialResult(status="expired", reason="missing_expires_at")
-    if starts_at > expires_at:
-        return SubscriptionCommercialResult(status="expired", reason="invalid_period")
-    if starts_at > now:
-        return SubscriptionCommercialResult(status="pending", reason="not_started")
-    if expires_at <= now:
-        return SubscriptionCommercialResult(status="expired", reason="expired")
-    return SubscriptionCommercialResult(status="active", reason="active")
-
-
-@dataclass(frozen=True)
-class SubscriptionSummary:
-    """商业订阅摘要（只读展示，不参与功能判权）。
-
-    由 ``resolve_subscription_summary`` 唯一构造；权限解析层（resolve_effective_access）
-    只消费、不复刻。limits 仅含 plans 表的数值快照（monitor_limit /
-    notification_channel_limit / message_retention_days）。
-    """
-
-    status: str
-    reason: str | None
-    active: bool
-    plan_code: str | None
-    plan_display_name: str | None
-    starts_at: datetime | None
-    expires_at: datetime | None
-    source: str | None
-    entitlement_snapshot: dict | None
-    features: list[str]
-    limits: dict[str, int]
-
-
-async def resolve_subscription_summary(
-    db: AsyncSession,
-    user_id: uuid.UUID,
-) -> SubscriptionSummary:
-    """商业订阅摘要唯一 resolver（只读展示，不解析 capability / default_route）。
-
-    负责 Subscription 查询 + resolve_commercial_status + Plan 查询 + 商业展示字段。
-    商业状态语义唯一 owner：resolve_commercial_status（禁止在别处复制
-    ``status=='active' and starts_at<=now and expires_at>now`` 判断）。
-
-    调用方（resolve_effective_access 的 legacy fallback、get_access_context、
-    admin access-profile）可复用本次结果，避免重复查询 Subscription / Plan。
-    """
-    sub = (
-        await db.execute(select(Subscription).where(Subscription.user_id == user_id))
-    ).scalars().first()
-    commercial = resolve_commercial_status(sub)
-    plan_code = sub.plan_code if sub else None
-    plan = await get_plan_async(db, plan_code) if plan_code else None
-    starts_at = _ensure_aware(sub.starts_at) if sub and sub.starts_at else None
-    expires_at = _ensure_aware(sub.expires_at) if sub and sub.expires_at else None
-    return SubscriptionSummary(
-        status=commercial.status,
-        reason=commercial.reason,
-        active=commercial.status == "active",
-        plan_code=plan_code,
-        plan_display_name=plan.display_name if plan else None,
-        starts_at=starts_at,
-        expires_at=expires_at,
-        source=getattr(sub, "source", None) if sub else None,
-        entitlement_snapshot=getattr(sub, "entitlement_snapshot", None) if sub else None,
-        features=list(plan.features) if plan and plan.features else [],
-        limits={
-            "monitor_limit": int(plan.monitor_limit),
-            "notification_channel_limit": int(plan.notification_channel_limit),
-            "message_retention_days": int(plan.message_retention_days),
-        } if plan else {},
-    )
 
 
 # 邀请码字符集（排除易混淆字符 O/0/I/1/L）

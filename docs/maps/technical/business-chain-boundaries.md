@@ -51,6 +51,10 @@
 - 收件人与投递：`event_recipient_service.py` → outbox → `delivery_worker.py`。
 - 终态必须区分 deferred / delivered / failed，不得以已入队冒充已投递。
 
+权限与订阅边界：`subscription_summary_service.py` 只读解析商业周期与展示摘要，
+`effective_access_service.py` 解析 capability/default route；显式 capability 用户不依赖商业状态，
+仅明确标记的 legacy-plan fallback 消费商业摘要。
+
 ## 5. 盘后控制链
 
 `SchedulerJobRun → after-close DAG → worker lease/fencing → Core → Review → History → readiness`
@@ -70,8 +74,9 @@
 - 抽出 `domain/shared/kline_frequency.py`，仓储保留兼容导出；Pytdx、DBExchange 与 MDAS 聚合适配器不再为纯聚合逻辑反向依赖仓储。
 - 抽出 `core/exchange/contracts.py`，具体 Exchange 实现依赖无副作用合同，`core.exchange` 只保留兼容导出、factory 与实例缓存。
 - 行情仓储/Provider/Exchange 循环依赖 SCC 已清零；结构基线中的 Python SCC 从 3 个降至 2 个。
+- 抽出 `subscription_summary_service.py` 作为商业状态/摘要只读 owner；原订阅 service 保留兼容导出，权限解析不再反向依赖订阅写服务。权限订阅 SCC 已清零，结构基线从 2 个 SCC 降至 1 个。
 - 公开 API、Schema、DB 表、状态值、metadata 字段和 commit 边界未改变。
-- 剩余指标快照簇与权限订阅簇待后续 slice 处理，不在本 Map 中写为已完成。
+- 剩余指标快照簇待后续 slice 处理，不在本 Map 中写为已完成。
 
 ## 7. 可重复结构基线
 

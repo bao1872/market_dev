@@ -27,7 +27,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import _get_user_roles
 from app.models.user_capability import UserCapability
-from app.services.subscription_service import SubscriptionSummary
+from app.services.subscription_summary_service import (
+    SubscriptionSummary,
+    resolve_subscription_summary,
+)
 
 CAP_SELF_SELECTION = "self_selection"
 CAP_MARKET_DATA = "market_data"
@@ -200,7 +203,7 @@ async def resolve_effective_access(
           （复用传入 summary，或调用 resolve_subscription_summary）。
 
     legacy fallback 显式标记 ``source=legacy_plan_fallback``，行为不变。
-    商业状态语义唯一 owner：subscription_service.resolve_commercial_status，
+    商业状态语义唯一 owner：subscription_summary_service.resolve_commercial_status，
     禁止在此复制 ``status=='active' and starts_at<=now and expires_at>now`` 判断。
 
     ``subscription_summary`` 是调用方已拥有的事实依赖（typed object），
@@ -258,8 +261,6 @@ async def resolve_effective_access(
     else:
         # legacy plan fallback：仅在无 explicit 行时才需要 commercial facts
         if subscription_summary is None:
-            from app.services.subscription_service import resolve_subscription_summary
-
             subscription_summary = await resolve_subscription_summary(db, user.id)
         plan_code = subscription_summary.plan_code
         plan_monitor_limit = (
