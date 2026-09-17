@@ -1,6 +1,6 @@
 """K线周期聚合器（CHANGE-20260717-002）。
 
-薄封装：从已复权日线合成周/月线。委托 bar_repository.convert_kline_frequency。
+薄封装：从已复权日线合成周/月线。委托纯计算 owner。
 
 分层约束：
 - MDAS 通过本模块聚合周月，不直接导入 bar_repository 私有行情函数
@@ -17,7 +17,7 @@ import logging
 
 import pandas as pd
 
-from app.repositories.bar_repository import convert_kline_frequency
+from app.domain.shared.kline_frequency import convert_kline_frequency
 
 logger = logging.getLogger("services.kline_aggregator")
 

@@ -3,7 +3,7 @@
 核验状态：部分核验（静态代码链路）
 最后核验日期：2026-09-17
 核验分支：`dev`
-核验提交：`854ff313a1a0092131f9c057e84298c60e645da2`
+核验基线提交：`2d100605d70e01c9f33cde988a0d3d528746ff8a` + 本 Map 同提交变更
 事实所有权：跨域输入、计算 owner、持久化边界、发布指针、API 消费者和失败状态
 
 > 本 Map 只记录已从当前代码确认的边界。运行时性能、真实 PG 语义与远程闭环未在本轮执行。
@@ -12,7 +12,9 @@
 
 | 环节 | 当前 owner | 边界 |
 |---|---|---|
-| Provider I/O | `eod_market_snapshot_provider.py` / realtime providers | 只负责外部请求、超时、重试和原始响应校验 |
+| Provider I/O | `bars_fetch_worker.py` / `eod_market_snapshot_provider.py` / realtime providers | 只负责外部请求、超时、重试和原始响应校验 |
+| Provider 合同 | `core/exchange/contracts.py` | 只定义 Exchange 接口与周期映射；factory façade 和具体 adapter 不反向持有彼此的合同 |
+| 周/月纯聚合 | `domain/shared/kline_frequency.py` | 只做 deterministic 日线聚合，不读取、不复权、不持久化、不发布 |
 | 标准化与复权 | `MarketDataAggregationService` | 业务读 bars 的 SSOT；qfq 只在出口应用一次 |
 | 持久化 | `bar_repository.py` 及明确的批量写入 service | 原始 bar 落库，不隐藏 provider 网络调用 |
 | 质量门禁 | `market_data_quality_service.py` / factor audit | 区分缺数据、因子过期与基础设施失败 |
@@ -65,8 +67,11 @@
 - 抽出 `domain/shared/bar_identity.py` 作为 bar 时间序列化与 `source_bar_hash` 唯一 owner；`chart_bars_service` 保留原导出兼容，MDAS 不再反向依赖 chart adapter。
 - `source_bar_hash` 的逐行 `iterrows()` 改为同质数值矩阵行视图；10 万行本地微基准约 `1.73s → 0.49s`，golden hash 与 NaN/Inf 边界 parity 保持一致。
 - 抽出 `outbox_writer.py` 作为事务内 Outbox 写入 owner，内测申请的 event/DTO 收口到 `beta_application_notification_contract.py`；生产者不再依赖 relay，relay 不再依赖 notifier。
+- 抽出 `domain/shared/kline_frequency.py`，仓储保留兼容导出；Pytdx、DBExchange 与 MDAS 聚合适配器不再为纯聚合逻辑反向依赖仓储。
+- 抽出 `core/exchange/contracts.py`，具体 Exchange 实现依赖无副作用合同，`core.exchange` 只保留兼容导出、factory 与实例缓存。
+- 行情仓储/Provider/Exchange 循环依赖 SCC 已清零；结构基线中的 Python SCC 从 3 个降至 2 个。
 - 公开 API、Schema、DB 表、状态值、metadata 字段和 commit 边界未改变。
-- 其余循环依赖簇仍待后续 slice 处理，不在本 Map 中写为已完成。
+- 剩余指标快照簇与权限订阅簇待后续 slice 处理，不在本 Map 中写为已完成。
 
 ## 7. 可重复结构基线
 

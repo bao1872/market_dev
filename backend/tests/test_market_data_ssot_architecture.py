@@ -24,7 +24,14 @@ _MDAS_MODULE = "services/market_data_aggregation_service.py"
 _AFS_MODULE = "services/adjustment_factor_service.py"
 _BAR_REPO_MODULE = "repositories/bar_repository.py"
 _KLINE_AGG_MODULE = "services/kline_aggregator.py"
-_ALLOWED_MODULES = {_MDAS_MODULE, _AFS_MODULE, _BAR_REPO_MODULE, _KLINE_AGG_MODULE}
+_KLINE_FREQ_OWNER = "domain/shared/kline_frequency.py"
+_ALLOWED_MODULES = {
+    _MDAS_MODULE,
+    _AFS_MODULE,
+    _BAR_REPO_MODULE,
+    _KLINE_AGG_MODULE,
+    _KLINE_FREQ_OWNER,
+}
 
 # bar_repository 中禁止业务模块导入的名称
 # （私有 _query_* 行情查询 / _get_adj_factor_df / 旧 apply_adj_factor_to_bars 复权封装 / 旧 get_bars）

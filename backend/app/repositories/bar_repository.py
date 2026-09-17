@@ -43,6 +43,7 @@ from sqlalchemy.sql import select
 
 from app.core.pytdx_adapter import PytdxAdapter, get_pytdx_adapter
 from app.core.time import SHANGHAI_TZ
+from app.domain.shared.kline_frequency import convert_kline_frequency
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.services.adj_factor import apply_adj_factor, apply_adj_factor_intraday
 from app.services.adjustment_factor_calculator import (
@@ -1498,68 +1499,6 @@ async def refresh_minute_bars(
 #   - refresh_*_bars：从 DB 日线合并生成 DataFrame，不写入 DB
 # - 周线/月线使用 trade_date（Date），15min/60min 使用 trade_time（DateTime）
 # - pytdx 不支持并发，所有拉取通过 asyncio.to_thread 串行桥接
-
-
-def convert_kline_frequency(daily_df: pd.DataFrame, to_f: str) -> pd.DataFrame:
-    """将日线 K 线合并为周线/月线。
-
-    参考 chanlunpro exchange.py:152-279 的 convert_stock_kline_frequency。
-
-    核心规则：
-    - resample("W") 或 resample("M")
-    - label="left", closed="right"（后对齐）
-    - OHLCV: open=first, close=last, high=max, low=min, volume=sum, amount=sum
-    - 日期取周期内第一个交易日（前对齐）
-    - adj_factor 取周期内最后一个交易日的 adj_factor（累积值，代表整个周期复权因子）
-
-    Args:
-        daily_df: 日线 DataFrame，index=DatetimeIndex(trade_date),
-                  columns=open/high/low/close/volume/amount/adj_factor
-        to_f: 目标周期 ("w" 或 "m")
-
-    Returns:
-        合并后的 DataFrame，index=DatetimeIndex(trade_date),
-        columns=open/high/low/close/volume/amount/adj_factor
-        无数据时返回空 DataFrame
-
-    Raises:
-        ValueError: to_f 不在 {"w", "m"} 时
-    """
-    if daily_df.empty:
-        return pd.DataFrame()
-
-    period_maps = {"w": "W", "m": "ME"}
-    if to_f not in period_maps:
-        raise ValueError(f"不支持的转换周期：{to_f}，仅支持 'w' 或 'm'")
-
-    period_type = period_maps[to_f]
-
-    # 复制避免修改原数据，并保留原始交易日用于前对齐
-    df = daily_df.copy()
-    df["_trade_date"] = df.index
-
-    # resample 聚合：label="left", closed="right"（后对齐）
-    agg_dict = {
-        "_trade_date": "first",  # 周线/月线取周期内第一个交易日（前对齐）
-        "open": "first",
-        "close": "last",
-        "high": "max",
-        "low": "min",
-        "volume": "sum",
-        "amount": "sum",
-        "adj_factor": "last",  # 累积值，取周期内最后一个交易日
-    }
-
-    period_df = df.resample(period_type, label="left", closed="right").agg(agg_dict)
-
-    # 删除 resample 产生的空周期行（_trade_date 为 NaT 表示该周期无交易日数据）
-    period_df = period_df.dropna(subset=["_trade_date"])
-
-    # 用周期内第一个交易日作为 index（前对齐）
-    period_df = period_df.set_index("_trade_date")
-    period_df.index.name = "trade_date"
-
-    return period_df
 
 
 # ----- 周线 -----

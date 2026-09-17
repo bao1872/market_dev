@@ -39,7 +39,7 @@ from pytdx.errors import TdxConnectionError
 from pytdx.hq import TdxHq_API
 
 from app.config import get_settings
-from app.core.exchange import Exchange
+from app.core.exchange.contracts import FREQUENCY_MAP, Exchange
 from app.core.redis_client import get_sync_redis
 
 if TYPE_CHECKING:
@@ -1445,8 +1445,6 @@ class PytdxAdapter(Exchange):
             limit: 请求量，控制 pytdx 拉取条数 fetch_count = min(limit+250, 1000)；
                    未传时回退到 count，都未传默认 250
         """
-        from app.core.exchange import FREQUENCY_MAP
-
         cat = FREQUENCY_MAP.get(frequency)
         if cat is None:
             logger.warning("klines() 不支持的 frequency=%s", frequency)
@@ -1562,8 +1560,8 @@ class PytdxAdapter(Exchange):
         if daily_df is None or daily_df.empty:
             return None
 
-        # 使用 bar_repository 的 convert_kline_frequency 合成
-        from app.repositories.bar_repository import convert_kline_frequency
+        # 使用纯计算 owner 合成，避免 provider 反向依赖 persistence。
+        from app.domain.shared.kline_frequency import convert_kline_frequency
 
         # convert_kline_frequency 期望 DatetimeIndex 无时区，先去除时区
         daily_naive = daily_df.copy()

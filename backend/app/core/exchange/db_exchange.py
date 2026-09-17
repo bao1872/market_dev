@@ -28,7 +28,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Engine
 
 from app.config import get_settings
-from app.core.exchange import Exchange
+from app.core.exchange.contracts import FREQUENCY_MAP, Exchange
 
 logger = logging.getLogger(__name__)
 
@@ -290,8 +290,6 @@ class DBExchange(Exchange):
 
         limit 参数仅为接口兼容，DB 查询使用 count/LIMIT，不需要 fetch_count 计算。
         """
-        from app.core.exchange import FREQUENCY_MAP
-
         if frequency not in FREQUENCY_MAP:
             logger.warning("klines() 不支持的 frequency=%s", frequency)
             return None
@@ -392,7 +390,7 @@ class DBExchange(Exchange):
         if daily_df is None or daily_df.empty:
             return None
 
-        from app.repositories.bar_repository import convert_kline_frequency
+        from app.domain.shared.kline_frequency import convert_kline_frequency
 
         # convert_kline_frequency 期望 DatetimeIndex 无时区，先去除时区
         daily_naive = daily_df.copy()
