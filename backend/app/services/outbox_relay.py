@@ -41,6 +41,13 @@ from app.constants.monitor_source_types import MONITOR_SOURCE_TYPES
 from app.core.redis_client import get_redis
 from app.models.notification import MessageDelivery, NotificationChannel, NotificationMessage
 from app.models.outbox import Outbox
+from app.services.beta_application_notification_contract import (
+    BETA_APPLICATION_ADMIN_EVENT as _BETA_APPLICATION_ADMIN_EVENT,
+)
+from app.services.beta_application_notification_contract import (
+    build_beta_application_dto,
+)
+from app.services.outbox_writer import write_outbox
 
 logger = logging.getLogger("outbox_relay")
 
@@ -58,49 +65,6 @@ _NOTIFICATION_EVENT_TYPE = "notification.message.created"
 
 # 管理员内测申请通知专用事件类型：由本模块专用分支扩张为 MessageDelivery
 # 与 beta_application_notifier.BETA_APPLICATION_ADMIN_EVENT 保持一致
-_BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
-
-
-async def write_outbox(
-    db: AsyncSession,
-    event_type: str,
-    payload: dict[str, Any],
-    aggregate_type: str,
-    aggregate_id: UUID | None = None,
-    headers: dict[str, Any] | None = None,
-) -> Outbox:
-    """写入 outbox 记录（与业务写入同事务）。
-
-    Args:
-        db: 异步会话
-        event_type: 事件类型（如 selector.run.completed）
-        payload: 事件负载
-        aggregate_type: 聚合根类型（如 strategy_run）
-        aggregate_id: 聚合根 ID（可空）
-        headers: 事件头（如 trace_id, tenant_id）
-
-    Returns:
-        Outbox 记录
-    """
-    if not event_type:
-        raise ValueError("event_type 不能为空")
-    if not aggregate_type:
-        raise ValueError("aggregate_type 不能为空")
-
-    outbox = Outbox(
-        aggregate_type=aggregate_type,
-        aggregate_id=aggregate_id,
-        event_type=event_type,
-        payload=payload,
-        headers=headers or {},
-        status="pending",
-        retry_count=0,
-    )
-    db.add(outbox)
-    await db.flush()
-    return outbox
-
-
 async def _expand_notification_message_created(
     db: AsyncSession,
     record: Outbox,
@@ -282,7 +246,6 @@ async def _expand_beta_application_admin_notification(
     from app.models.beta_application import BetaApplication
     from app.models.user import Role, User, UserRole
     from app.schemas.notification import NotificationMessageDTO
-    from app.services.beta_application_notifier import build_beta_application_dto
     from app.services.notification_service import create_message
 
     payload: dict[str, Any] = record.payload or {}

@@ -30,106 +30,18 @@ from typing import Any
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.beta_application import BetaApplication
-from app.schemas.notification import NotificationMessageDTO
+from app.services.beta_application_notification_contract import (
+    BETA_APPLICATION_ADMIN_EVENT,
+    build_beta_application_dto,
+)
 from app.services.feishu_card_builder import dto_to_feishu_card
-from app.services.outbox_relay import write_outbox
+from app.services.outbox_writer import write_outbox
 
 logger = logging.getLogger("beta_application_notifier")
 
 # 管理员内测申请通知专用 Outbox 事件类型
 # 由 outbox_relay 的专用分支扩张为 NotificationMessage + MessageDelivery，
 # 不进入普通 notification.message.created 路径，避免 eligible_user_service 过滤 admin。
-BETA_APPLICATION_ADMIN_EVENT = "beta_application.admin_notification.created"
-
-# reason_code → 中文标签映射（飞书通知展示用）
-# 仅在此模块定义，因为 constants/beta_application.py 只维护代码枚举，
-# 中文标签属于展示层，且飞书通知是特定展示场景
-_REASON_CODE_LABELS: dict[str, str] = {
-    "busy": "工作忙，没时间盯盘",
-    "too_many": "股票太多，看不过来",
-    "forget": "容易忘记盯盘",
-    "quant": "量化研究需要",
-    "other": "其他",
-}
-
-# 管理员后台入口路径（飞书卡片 action button url）
-_ADMIN_ENTRY_PATH = "/admin/beta-applications"
-
-
-def _format_submitted_at(submitted_at: datetime | None) -> str:
-    """格式化提交时间为可读字符串。
-
-    Args:
-        submitted_at: 提交时间（带时区）
-
-    Returns:
-        格式化后的字符串（如 "2026-06-28 14:30:00"），None 返回 "未知"
-    """
-    if submitted_at is None:
-        return "未知"
-    # 转为本地时区显示
-    try:
-        from zoneinfo import ZoneInfo
-
-        cst = ZoneInfo("Asia/Shanghai")
-        local_dt = submitted_at.astimezone(cst) if submitted_at.tzinfo else submitted_at.replace(tzinfo=cst)
-        return local_dt.strftime("%Y-%m-%d %H:%M:%S")
-    except Exception:
-        return submitted_at.strftime("%Y-%m-%d %H:%M:%S")
-
-
-def build_beta_application_dto(application: BetaApplication) -> NotificationMessageDTO:
-    """构建内测申请通知的 NotificationMessageDTO。
-
-    复用现有 DTO + dto_to_feishu_card 渲染逻辑，保持卡片风格一致。
-    message_type=SYSTEM_ALERT（红色头部，管理员需注意的新申请）。
-
-    公开函数：outbox_relay 投递时调用，传入 FeishuPlatformAppAdapter.send。
-
-    Args:
-        application: BetaApplication ORM 对象
-
-    Returns:
-        NotificationMessageDTO（可传入 dto_to_feishu_card 或 FeishuPlatformAppAdapter.send）
-    """
-    submitted_at_str = _format_submitted_at(application.submitted_at)
-
-    # 构建关键事实列表（spec 要求：申请编号/提交时间/微信号/手机号/盯盘数/理由/其他补充）
-    facts: list[dict[str, Any]] = [
-        {"key": "application_id", "label": "申请编号", "value": str(application.id)},
-        {"key": "submitted_at", "label": "提交时间", "value": submitted_at_str},
-        {"key": "wechat", "label": "微信号", "value": application.wechat or "未填写"},
-        {"key": "phone", "label": "手机号", "value": application.phone or "未填写"},
-        {"key": "watch_stock_count", "label": "盯盘股票数量", "value": application.watch_stock_count},
-    ]
-
-    # 使用理由（中文标签）
-    reason_label = _REASON_CODE_LABELS.get(application.reason_code, application.reason_code)
-    facts.append({"key": "reason_code", "label": "使用理由", "value": reason_label})
-
-    # 其他补充说明（仅 reason_code='other' 或有 reason_other 时显示）
-    if application.reason_other:
-        facts.append({"key": "reason_other", "label": "其他补充", "value": application.reason_other})
-
-    # 后台入口 action button
-    actions: list[dict[str, Any]] = [
-        {"label": "查看后台详情", "url": _ADMIN_ENTRY_PATH},
-    ]
-
-    return NotificationMessageDTO(
-        message_type="SYSTEM_ALERT",
-        template_key="beta_application_admin",
-        template_version="1.0.0",
-        title="新的内测申请",
-        summary="收到一份新的内测申请，请及时处理。",
-        facts=facts,
-        actions=actions,
-        resource_refs={"application_id": str(application.id)},
-        data_time=submitted_at_str,
-        disclaimer="本通知由系统自动发送，请勿直接回复。",
-    )
-
-
 def build_beta_application_card(application: BetaApplication) -> dict[str, Any]:
     """构建飞书互动卡片（spec 第四节要求的所有字段）。
 

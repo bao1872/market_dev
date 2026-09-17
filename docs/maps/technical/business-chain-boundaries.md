@@ -64,6 +64,7 @@
 - 抽出 `after_close_run_contract.py`，使 DSA recovery 不再反向 import 整个 orchestrator。
 - 抽出 `domain/shared/bar_identity.py` 作为 bar 时间序列化与 `source_bar_hash` 唯一 owner；`chart_bars_service` 保留原导出兼容，MDAS 不再反向依赖 chart adapter。
 - `source_bar_hash` 的逐行 `iterrows()` 改为同质数值矩阵行视图；10 万行本地微基准约 `1.73s → 0.49s`，golden hash 与 NaN/Inf 边界 parity 保持一致。
+- 抽出 `outbox_writer.py` 作为事务内 Outbox 写入 owner，内测申请的 event/DTO 收口到 `beta_application_notification_contract.py`；生产者不再依赖 relay，relay 不再依赖 notifier。
 - 公开 API、Schema、DB 表、状态值、metadata 字段和 commit 边界未改变。
 - 其余循环依赖簇仍待后续 slice 处理，不在本 Map 中写为已完成。
 

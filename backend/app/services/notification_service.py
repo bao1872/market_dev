@@ -47,6 +47,7 @@ from app.schemas.notification import (
     NotificationMessageDTO,
 )
 from app.services.channel_adapter import get_adapter
+from app.services.outbox_writer import write_outbox
 
 logger = logging.getLogger("notification_service")
 
@@ -1139,8 +1140,6 @@ async def test_channel_latest_event(
     from app.models.instrument import Instrument
     from app.models.strategy_event import StrategyEvent
     from app.models.watchlist import UserWatchlistItem
-    from app.services.outbox_relay import write_outbox
-
     # 1. 查询渠道
     stmt = select(NotificationChannel).where(NotificationChannel.id == channel_id)
     result = await db.execute(stmt)
