@@ -356,60 +356,79 @@ def compute_label_features(bars: pd.DataFrame) -> pd.DataFrame:
     highs = bars["high"].to_numpy(dtype=float) if "high" in bars.columns else closes
     lows = bars["low"].to_numpy(dtype=float) if "low" in bars.columns else closes
 
-    result = pd.DataFrame(
-        index=bars.index,
-        data={
-            "label_future_return_5d": np.nan,
-            "label_future_return_10d": np.nan,
-            "label_future_return_20d": np.nan,
-            "label_future_max_drawdown_10d": np.nan,
-            "label_future_max_drawdown_20d": np.nan,
-            "label_breakout_success_10d": np.nan,
-            "label_failure_breakdown_10d": np.nan,
-        },
-    )
+    columns = [
+        "label_future_return_5d",
+        "label_future_return_10d",
+        "label_future_return_20d",
+        "label_future_max_drawdown_10d",
+        "label_future_max_drawdown_20d",
+        "label_breakout_success_10d",
+        "label_failure_breakdown_10d",
+    ]
+    output: np.ndarray = np.full((n, len(columns)), np.nan, dtype=float)
+    column_index = {column: index for index, column in enumerate(columns)}
 
-    # future returns
+    # future returns：固定偏移切片，保留旧合同（只要求当前 close > 0、未来 close finite）
     for horizon, col in [(5, "label_future_return_5d"), (10, "label_future_return_10d"), (20, "label_future_return_20d")]:
-        rets = np.full(n, np.nan)
-        for i in range(n - horizon):
-            if closes[i] > 0 and np.isfinite(closes[i + horizon]):
-                rets[i] = closes[i + horizon] / closes[i] - 1.0
-        result[col] = rets
+        rets = output[:, column_index[col]]
+        valid_count = n - horizon
+        if valid_count > 0:
+            current = closes[:valid_count]
+            future = closes[horizon:]
+            valid = (current > 0) & np.isfinite(future)
+            rets[:valid_count][valid] = future[valid] / current[valid] - 1.0
 
     # future max drawdown: 未来 N 日内最大回撤（<= 0）
     # = min(0, (min(future_lows) - close[i]) / close[i])
     for horizon, col in [(10, "label_future_max_drawdown_10d"), (20, "label_future_max_drawdown_20d")]:
-        mdd = np.full(n, np.nan)
-        for i in range(n - horizon):
-            future_lows = lows[i + 1 : i + 1 + horizon]
-            if closes[i] > 0 and len(future_lows) > 0:
-                finite_lows = future_lows[np.isfinite(future_lows)]
-                if len(finite_lows) > 0:
-                    min_low = np.min(finite_lows)
-                    dd = (min_low - closes[i]) / closes[i]
-                    mdd[i] = min(0.0, dd)  # 上涨时为 0，下跌时为负
-        result[col] = mdd
+        mdd = output[:, column_index[col]]
+        valid_count = n - horizon
+        if valid_count > 0:
+            future_min = mdd[:valid_count]
+            future_min.fill(np.inf)
+            has_finite: np.ndarray = np.zeros(valid_count, dtype=bool)
+            # 固定 horizon 次整列运算，避免构造 (rows × horizon) 临时矩阵。
+            for offset in range(1, horizon + 1):
+                candidate = lows[offset : offset + valid_count]
+                candidate_finite = np.isfinite(candidate)
+                np.minimum(
+                    future_min,
+                    candidate,
+                    out=future_min,
+                    where=candidate_finite,
+                )
+                has_finite |= candidate_finite
+            current = closes[:valid_count]
+            valid = (current > 0) & has_finite
+            with np.errstate(invalid="ignore", divide="ignore"):
+                drawdowns = (future_min[valid] - current[valid]) / current[valid]
+            # Python ``min(0.0, nan)`` in the frozen loop returns 0.0; retain it.
+            future_min.fill(np.nan)
+            future_min[valid] = np.where(
+                np.isnan(drawdowns), 0.0, np.minimum(0.0, drawdowns)
+            )
 
     # breakout / failure: 用当前 close 作为参考，未来是否突破/破位
     # breakout_success: 未来 10 日内 high > close[i] * 1.02 (2% breakout)
     # failure_breakdown: 未来 10 日内 low < close[i] * 0.98 (2% breakdown)
-    breakout = np.full(n, np.nan)
-    failure = np.full(n, np.nan)
+    breakout = output[:, column_index["label_breakout_success_10d"]]
+    failure = output[:, column_index["label_failure_breakdown_10d"]]
     threshold = 0.02
     horizon_breakout = 10
-    for i in range(n - horizon_breakout):
-        future_highs = highs[i + 1 : i + 1 + horizon_breakout]
-        future_lows = lows[i + 1 : i + 1 + horizon_breakout]
-        if closes[i] > 0:
-            breakout_target = closes[i] * (1 + threshold)
-            breakdown_target = closes[i] * (1 - threshold)
-            breakout[i] = 1.0 if np.any(future_highs > breakout_target) else 0.0
-            failure[i] = 1.0 if np.any(future_lows < breakdown_target) else 0.0
-    result["label_breakout_success_10d"] = breakout
-    result["label_failure_breakdown_10d"] = failure
-
-    return result
+    valid_count = n - horizon_breakout
+    if valid_count > 0:
+        current = closes[:valid_count]
+        valid = current > 0
+        breakout_target = current * (1 + threshold)
+        breakdown_target = current * (1 - threshold)
+        breakout_hits: np.ndarray = np.zeros(valid_count, dtype=bool)
+        failure_hits: np.ndarray = np.zeros(valid_count, dtype=bool)
+        for offset in range(1, horizon_breakout + 1):
+            breakout_hits |= highs[offset : offset + valid_count] > breakout_target
+            failure_hits |= lows[offset : offset + valid_count] < breakdown_target
+        breakout[:valid_count][valid] = breakout_hits[valid].astype(float)
+        failure[:valid_count][valid] = failure_hits[valid].astype(float)
+    return pd.DataFrame(output, index=bars.index, columns=columns, copy=False)
 
 
 # =============================================================================

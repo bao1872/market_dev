@@ -76,6 +76,7 @@
 - 行情仓储/Provider/Exchange 循环依赖 SCC 已清零；结构基线中的 Python SCC 从 3 个降至 2 个。
 - 抽出 `subscription_summary_service.py` 作为商业状态/摘要只读 owner；原订阅 service 保留兼容导出，权限解析不再反向依赖订阅写服务。权限订阅 SCC 已清零，结构基线从 2 个 SCC 降至 1 个。
 - 抽出 `canonical_view_primitives.py` 与 `canonical_smc_adapter.py`：详情/快照只消费 DTO/投影 helper，结构因子的 SMC fallback 复用同一 compute-and-view owner，不再反向依赖 adapter composition。指标快照 SCC 已清零，结构基线中的 Python SCC 为 0。
+- `research/feature_computer.py` 的未来收益、未来最大回撤与突破/破位标签改为固定偏移的整列向量计算；随机 NaN/Inf/非正价格及短序列与冻结循环逐元素 exact parity。这些字段仍属于 label namespace，不进入 causal feature。10 万行本地基准约 `1.14s → 0.010s`（约 112.9×），tracemalloc 峰值约 `7.64MiB → 8.97MiB`（+17.3%）。
 - 公开 API、Schema、DB 表、状态值、metadata 字段和 commit 边界未改变。
 - 本计划已识别的 Python 循环依赖簇均已清零；后续新增依赖必须继续通过结构基线验证。
 

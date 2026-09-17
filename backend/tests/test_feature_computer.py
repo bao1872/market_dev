@@ -350,6 +350,51 @@ class TestDSADualTrack:
 # ===== 4. label features =====
 
 
+def _frozen_label_loop_reference(bars: pd.DataFrame) -> pd.DataFrame:
+    """Pre-vectorization label implementation, retained only as parity evidence."""
+    n = len(bars)
+    closes = bars["close"].to_numpy(dtype=float)
+    highs = bars["high"].to_numpy(dtype=float)
+    lows = bars["low"].to_numpy(dtype=float)
+    result = pd.DataFrame(index=bars.index)
+
+    for horizon, column in (
+        (5, "label_future_return_5d"),
+        (10, "label_future_return_10d"),
+        (20, "label_future_return_20d"),
+    ):
+        values = np.full(n, np.nan)
+        for i in range(n - horizon):
+            if closes[i] > 0 and np.isfinite(closes[i + horizon]):
+                values[i] = closes[i + horizon] / closes[i] - 1.0
+        result[column] = values
+
+    for horizon, column in (
+        (10, "label_future_max_drawdown_10d"),
+        (20, "label_future_max_drawdown_20d"),
+    ):
+        values = np.full(n, np.nan)
+        for i in range(n - horizon):
+            future_lows = lows[i + 1 : i + 1 + horizon]
+            if closes[i] > 0:
+                finite_lows = future_lows[np.isfinite(future_lows)]
+                if len(finite_lows) > 0:
+                    with np.errstate(invalid="ignore", divide="ignore"):
+                        drawdown = (np.min(finite_lows) - closes[i]) / closes[i]
+                    values[i] = min(0.0, drawdown)
+        result[column] = values
+
+    breakout = np.full(n, np.nan)
+    failure = np.full(n, np.nan)
+    for i in range(n - 10):
+        if closes[i] > 0:
+            breakout[i] = float(np.any(highs[i + 1 : i + 11] > closes[i] * 1.02))
+            failure[i] = float(np.any(lows[i + 1 : i + 11] < closes[i] * 0.98))
+    result["label_breakout_success_10d"] = breakout
+    result["label_failure_breakdown_10d"] = failure
+    return result
+
+
 class TestLabelFeatures:
     """label 特征测试。"""
 
@@ -407,6 +452,37 @@ class TestLabelFeatures:
                 assert unique_vals.issubset({0, 1}), (
                     f"{col} 应为 0/1, 实际: {unique_vals}"
                 )
+
+    def test_vectorized_labels_exactly_match_frozen_loop_contract(self) -> None:
+        """随机边界输入与冻结循环逐元素一致，包括 NaN/Inf/非正 close。"""
+        rng = np.random.default_rng(20260917)
+        n = 97
+        close = rng.normal(10.0, 4.0, n)
+        high = close + rng.normal(1.0, 2.0, n)
+        low = close - rng.normal(1.0, 2.0, n)
+        close[[3, 11, 29, 55]] = [0.0, -1.0, np.nan, np.inf]
+        high[[7, 31]] = [np.nan, np.inf]
+        low[[9, 32, 33]] = [np.nan, -np.inf, np.inf]
+        bars = pd.DataFrame(
+            {"close": close, "high": high, "low": low},
+            index=pd.date_range("2026-01-01", periods=n, freq="D"),
+        )
+
+        expected = _frozen_label_loop_reference(bars)
+        actual = compute_label_features(bars)
+        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+
+    @pytest.mark.parametrize("n", [0, 1, 9, 10, 19, 20])
+    def test_vectorized_labels_preserve_short_input_contract(self, n: int) -> None:
+        values = np.arange(n, dtype=float) + 10.0
+        bars = pd.DataFrame(
+            {"close": values, "high": values + 1.0, "low": values - 1.0}
+        )
+        pd.testing.assert_frame_equal(
+            compute_label_features(bars),
+            _frozen_label_loop_reference(bars),
+            check_exact=True,
+        )
 
 
 # ===== 5. 整合测试 =====
