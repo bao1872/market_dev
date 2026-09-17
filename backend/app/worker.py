@@ -64,6 +64,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db import AsyncSessionLocal
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.services.notification_worker_runtime import (
+    run_delivery_loop,
+    run_outbox_relay_loop,
+)
 from app.services.scheduler_job_run_recovery_service import (
     auto_resume_interrupted_after_close_runs,
     recover_replaced_incarnation_runs,
@@ -323,60 +327,29 @@ async def _update_job_heartbeat(
 
 
 async def run_outbox_relay() -> None:
-    """Outbox Relay worker：轮询 outbox 表，将通知扩张为每个渠道的 MessageDelivery。
-
-    每个轮询周期：
-    1. 从 outbox 表读取 status=pending 的记录
-    2. 查询通知的目标渠道
-    3. 为每个渠道创建 MessageDelivery(pending)
-    4. 将 Outbox 记录标记为 processed
-    """
-    from app.services.outbox_relay import relay_outbox
-
-    _hb_task = asyncio.create_task(_heartbeat_loop("outbox"))
-    logger.info("Outbox Relay worker 启动（间隔=%ds, 批次=%d）", WORKER_INTERVAL, WORKER_BATCH_SIZE)
-    while not _shutdown:
-        try:
-            async with AsyncSessionLocal() as db:
-                processed = await relay_outbox(
-                    db=db,
-                    batch_size=WORKER_BATCH_SIZE,
-                    max_retry=WORKER_MAX_RETRY,
-                )
-                await db.commit()
-                if processed > 0:
-                    logger.info("Outbox Relay 处理 %d 条", processed)
-        except Exception as exc:
-            logger.exception("Outbox Relay 异常: %s", exc)
-        await asyncio.sleep(WORKER_INTERVAL)
+    """兼容 façade：装配 Outbox Relay 的进程级依赖。"""
+    await run_outbox_relay_loop(
+        session_factory=AsyncSessionLocal,
+        heartbeat_loop=_heartbeat_loop,
+        should_shutdown=lambda: _shutdown,
+        interval=WORKER_INTERVAL,
+        batch_size=WORKER_BATCH_SIZE,
+        max_retry=WORKER_MAX_RETRY,
+        logger=logger,
+    )
 
 
 async def run_delivery_worker() -> None:
-    """投递 Worker：轮询 MessageDelivery 表，将通知消息投递到用户渠道。
-
-    每个轮询周期：
-    1. 从 message_deliveries 表读取 pending / 到期的 retrying 记录
-    2. 调用 _execute_delivery 执行投递状态机
-    3. 成功后 status=success；失败后 status=retrying/dead
-    """
-    from app.services.delivery_worker import process_pending_deliveries
-
-    _hb_task = asyncio.create_task(_heartbeat_loop("delivery"))
-    logger.info("Delivery Worker 启动（间隔=%ds, 批次=%d）", WORKER_INTERVAL, WORKER_BATCH_SIZE)
-    while not _shutdown:
-        try:
-            async with AsyncSessionLocal() as db:
-                processed = await process_pending_deliveries(
-                    db=db,
-                    batch_size=WORKER_BATCH_SIZE,
-                    max_retry=WORKER_MAX_RETRY,
-                )
-                await db.commit()
-                if processed > 0:
-                    logger.info("Delivery Worker 处理 %d 条", processed)
-        except Exception as exc:
-            logger.exception("Delivery Worker 异常: %s", exc)
-        await asyncio.sleep(WORKER_INTERVAL)
+    """兼容 façade：装配 Delivery Worker 的进程级依赖。"""
+    await run_delivery_loop(
+        session_factory=AsyncSessionLocal,
+        heartbeat_loop=_heartbeat_loop,
+        should_shutdown=lambda: _shutdown,
+        interval=WORKER_INTERVAL,
+        batch_size=WORKER_BATCH_SIZE,
+        max_retry=WORKER_MAX_RETRY,
+        logger=logger,
+    )
 
 
 async def run_strategy_batch_worker() -> None:
