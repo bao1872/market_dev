@@ -63,16 +63,6 @@ def _require_columns(bars: pd.DataFrame, algo: str, cols: list[str]) -> None:
         )
 
 
-def _bars_to_ohlc_lists(bars: pd.DataFrame) -> tuple[list[float], list[float], list[float], list[float]]:
-    """从 bars 提取 OHLC 为 list[float]（部分 kernel 需要 list 而非 np.ndarray）。"""
-    return (
-        bars["open"].to_numpy(dtype=float).tolist(),
-        bars["high"].to_numpy(dtype=float).tolist(),
-        bars["low"].to_numpy(dtype=float).tolist(),
-        bars["close"].to_numpy(dtype=float).tolist(),
-    )
-
-
 def _bars_to_ohlc_arrays(bars: pd.DataFrame) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """从 bars 提取 OHLC 为 np.ndarray（部分 kernel 需要 ndarray）。"""
     return (
@@ -313,17 +303,9 @@ def compute_smc_adapter(
         dict: 裁剪后的展示 DTO（events/order_blocks/equal_highs_lows/trailing/
               swing_bias/pivots/time/params/view）
     """
-    from app.services.smc_view_adapter import adapt_smc_to_display_dto
-    from app.strategy_assets.algorithms.features.smc_indicator import (
-        compute_smc_indicators,
-    )
+    from app.services.canonical_smc_adapter import compute_smc_view
 
-    _require_bars(bars, "smc")
-    _require_columns(bars, "smc", ["open", "high", "low", "close"])
-    opens, highs, lows, closes = _bars_to_ohlc_lists(bars)
-    times = [idx.isoformat() for idx in bars.index]
-    full_result = compute_smc_indicators(opens, highs, lows, closes, times, params)
-    return adapt_smc_to_display_dto(full_result, display_bars)
+    return compute_smc_view(bars, display_bars=display_bars, params=params)
 
 
 # =============================================================================
@@ -616,18 +598,16 @@ async def compute_snapshot_derived_adapter(
 # 可自由 import kernel 模块。新增算法应实现 dedicated adapter 并设
 # migration_status="production_wired"，禁止扩展此 re-export 区段。
 
-from app.services.node_cluster_engine import (  # noqa: E402
+from app.services.canonical_view_primitives import (  # noqa: E402
     NodeClusterProfileResult,
+    _compute_daily_context,
+    _compute_derived_relation,
+    _compute_m15_response,
     build_node_regions,
     build_price_state,
     compute_node_regions_hash,
     derive_state_for_price,
     profile_to_dict,
-)
-from app.services.temporal_feature_service import (  # noqa: E402
-    _compute_daily_context,
-    _compute_derived_relation,
-    _compute_m15_response,
 )
 
 __all__ = [

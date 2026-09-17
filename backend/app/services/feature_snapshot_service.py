@@ -53,6 +53,7 @@ from app.models.stock_feature_snapshot_run import (
 )
 from app.repositories.bar_repository import _get_symbol
 from app.services.atomic_fact_contract_service import build_persisted_afc_payload
+from app.services.canonical_computation_service import CanonicalComputationService
 
 # [CHANGE-20260718-004 Node Cluster engine] 盘后链一次调用 engine 计算 Node Cluster Profile，
 # 注入 _compute_all_factors_for_bars(primary)，修复三链不一致缺陷（原 _compute_cost_position_factors
@@ -65,7 +66,7 @@ from app.services.atomic_fact_contract_service import build_persisted_afc_payloa
 # 仅保留 DTO builders（非算法 kernel，是视图层工具）、类型引用和 temporal 子函数
 # （temporal 子函数无独立 registered adapter，compute_temporal_features_adapter 会
 #  重复获取 bars 和重算因子，故保留直接调用）。
-from app.services.canonical_adapters import (
+from app.services.canonical_view_primitives import (
     NodeClusterProfileResult,
     _compute_daily_context,
     _compute_derived_relation,
@@ -73,7 +74,6 @@ from app.services.canonical_adapters import (
     build_price_state,
     profile_to_dict,
 )
-from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.core_run_context import (
     ComputeOnceDiagnostics,
     CoreRunContext,

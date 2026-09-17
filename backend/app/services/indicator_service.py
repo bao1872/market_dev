@@ -48,18 +48,18 @@ from app.constants.indicator_contract import (
 from app.constants.strategy_keys import DSA_SELECTOR, WATCHLIST_MONITOR
 from app.models.instrument import Instrument
 from app.models.strategy import StrategyDefinition, StrategyVersion
+from app.services.canonical_computation_service import CanonicalComputationService
 
 # [CP-13 Canonical 四链迁移] 四链禁止直接 import 算法 kernel 函数；
 # 所有注册算法（macd/sqzmom/bollinger/smc/node_cluster）必须经 CanonicalComputationService.compute() 调用。
 # 仅保留 DTO builders（非算法 kernel，是视图层工具）和类型引用。
-from app.services.canonical_adapters import (
+from app.services.canonical_view_primitives import (
     NodeClusterProfileResult,
     build_node_regions,
     build_price_state,
     compute_node_regions_hash,
     derive_state_for_price,
 )
-from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.chart_bars_service import (
     compute_source_bar_hash,
     compute_source_bar_times,

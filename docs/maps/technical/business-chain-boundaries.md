@@ -75,8 +75,9 @@
 - 抽出 `core/exchange/contracts.py`，具体 Exchange 实现依赖无副作用合同，`core.exchange` 只保留兼容导出、factory 与实例缓存。
 - 行情仓储/Provider/Exchange 循环依赖 SCC 已清零；结构基线中的 Python SCC 从 3 个降至 2 个。
 - 抽出 `subscription_summary_service.py` 作为商业状态/摘要只读 owner；原订阅 service 保留兼容导出，权限解析不再反向依赖订阅写服务。权限订阅 SCC 已清零，结构基线从 2 个 SCC 降至 1 个。
+- 抽出 `canonical_view_primitives.py` 与 `canonical_smc_adapter.py`：详情/快照只消费 DTO/投影 helper，结构因子的 SMC fallback 复用同一 compute-and-view owner，不再反向依赖 adapter composition。指标快照 SCC 已清零，结构基线中的 Python SCC 为 0。
 - 公开 API、Schema、DB 表、状态值、metadata 字段和 commit 边界未改变。
-- 剩余指标快照簇待后续 slice 处理，不在本 Map 中写为已完成。
+- 本计划已识别的 Python 循环依赖簇均已清零；后续新增依赖必须继续通过结构基线验证。
 
 ## 7. 可重复结构基线
 

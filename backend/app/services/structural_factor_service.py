@@ -1554,9 +1554,9 @@ def _compute_smc_freshness_factors(
             smc_dto = adapt_smc_to_display_dto(smc_result, len(bars))
         else:
             # 非 canonical 独立调用路径：单次计算展示 DTO（与修改前一致）
-            from app.services.canonical_adapters import compute_smc_adapter
+            from app.services.canonical_smc_adapter import compute_smc_view
 
-            smc_dto = compute_smc_adapter(bars, display_bars=len(bars))
+            smc_dto = compute_smc_view(bars, display_bars=len(bars))
     except Exception as exc:
         logger.warning("SMC freshness 计算失败: %s", exc)
         return result
