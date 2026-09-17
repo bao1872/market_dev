@@ -50,9 +50,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date
 
+import numpy as np
 import pandas as pd
 
 from app.constants.factor_contract import FACTOR_ALGORITHM_VERSION
@@ -62,6 +64,9 @@ logger = logging.getLogger("services.adjustment_factor_calculator")
 # 因子累积时的"无效事件"阈值（与原 _calculate_adj_factor 一致）
 # event_factor 与 1.0 差距小于此值时视为无效事件，不累积
 _UNIT_EVENT_THRESHOLD = 1e-10
+
+# 批量日期映射的内存上限：避免一次性为全量 bars 分配 index/mask/factor 三组数组。
+_FACTOR_MAPPING_CHUNK_SIZE = 16_384
 
 
 @dataclass(frozen=True)
@@ -334,10 +339,11 @@ def calculate_adjustment_factor_series(
         return default_factors
 
     # 构建 close 查找表：date -> close
-    close_map: dict[date, float] = {}
-    for _, row in raw_daily_bars.iterrows():
-        dt = pd.Timestamp(row["datetime"]).date()
-        close_map[dt] = float(row["close"])
+    # dict(zip(...)) 与逐行赋值保持一致：同一日期重复出现时最后一行生效。
+    # 日期和 close 先按列转换，避免在行情行数上执行 iterrows。
+    raw_bar_dates = raw_dates.dt.date.to_numpy()
+    raw_closes = raw_daily_bars["close"].astype(float).to_numpy()
+    close_map = dict(zip(raw_bar_dates, raw_closes, strict=True))
 
     sorted_close_dates = sorted(close_map.keys())
     earliest_bar_date = sorted_close_dates[0] if sorted_close_dates else None
@@ -421,14 +427,7 @@ def calculate_adjustment_factor_series(
     # 对每个 bar 日期，adj_factor = bar_date 之后第一个事件的 cumulative_factor
     # 即降序列表中最后一个 event_date > bar_date 的事件
     # 如果没有晚于 bar_date 的事件，adj_factor = 1.0
-    adj_factors: list[float] = []
-    for _, row in raw_daily_bars.iterrows():
-        bar_date = pd.Timestamp(row["datetime"]).date()
-        factor = 1.0
-        for event_date, cumulative_factor in events_with_factor:
-            if event_date > bar_date:
-                factor = cumulative_factor
-        adj_factors.append(factor)
+    adj_factors = _map_cumulative_factors_to_bars(raw_dates, events_with_factor)
 
     logger.info(
         "计算 adj_factor bars=%d events=%d adj_range=[%.6f, %.6f] algorithm_version=%s",
@@ -458,16 +457,49 @@ def _find_prev_close(
     Returns:
         (前一交易日日期, 前一交易日收盘价)，或 None（数据缺失）
     """
-    prev_date: date | None = None
-    prev_close: float | None = None
-    for d in sorted_close_dates:
-        if d >= target_date:
-            break
-        prev_date = d
-        prev_close = close_map[d]
-    if prev_date is None or prev_close is None:
+    insertion_index = bisect_left(sorted_close_dates, target_date)
+    if insertion_index == 0:
         return None
-    return (prev_date, prev_close)
+    prev_date = sorted_close_dates[insertion_index - 1]
+    return (prev_date, close_map[prev_date])
+
+
+def _map_cumulative_factors_to_bars(
+    raw_dates: pd.Series,
+    events_with_factor: list[tuple[date, float]],
+) -> list[float]:
+    """把事件累计因子映射到原始 bar 顺序，保持严格 ``event_date > bar_date``。
+
+    ``events_with_factor`` 由新到旧排列。同日可能存在多条公司行动；旧逐项循环会
+    选择该日最后写入、也就是包含同日全部事件的累计值。这里先按日期折叠，再使用
+    ``searchsorted(side="right")`` 批量寻找每根 bar 之后的第一个事件。
+    """
+    if not events_with_factor:
+        return [1.0] * len(raw_dates)
+
+    # 反转后按日期升序；同日第一项包含该日全部事件的累计乘积。
+    events_ascending = list(reversed(events_with_factor))
+    event_factor_by_date: dict[date, float] = {}
+    for event_date, cumulative_factor in events_ascending:
+        event_factor_by_date.setdefault(event_date, cumulative_factor)
+
+    event_dates = np.asarray(list(event_factor_by_date), dtype="datetime64[D]")
+    cumulative_factors = np.asarray(
+        list(event_factor_by_date.values()),
+        dtype=float,
+    )
+    bar_dates = raw_dates.to_numpy()
+    factors: list[float] = []
+    for start in range(0, len(bar_dates), _FACTOR_MAPPING_CHUNK_SIZE):
+        chunk_dates = bar_dates[start : start + _FACTOR_MAPPING_CHUNK_SIZE]
+        event_indexes = np.searchsorted(event_dates, chunk_dates, side="right")
+        chunk_factors = np.ones(len(chunk_dates), dtype=float)
+        has_future_event = event_indexes < len(event_dates)
+        chunk_factors[has_future_event] = cumulative_factors[
+            event_indexes[has_future_event]
+        ]
+        factors.extend(chunk_factors.tolist())
+    return factors
 
 
 if __name__ == "__main__":

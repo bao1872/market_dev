@@ -35,6 +35,8 @@ import pytest
 from app.constants.factor_contract import FACTOR_ALGORITHM_VERSION
 from app.services.adjustment_factor_calculator import (
     AdjustmentFactorDataError,
+    _find_prev_close,
+    _map_cumulative_factors_to_bars,
     calculate_adjustment_factor_series,
     next_future_corporate_action_date,
 )
@@ -77,6 +79,65 @@ def _xdxr_df(events: list[dict]) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=[
         "date", "category", "fenhong", "songzhuangu", "peigu", "peigujia",
     ])
+
+
+def _legacy_map_cumulative_factors_to_bars(
+    raw_dates: pd.Series,
+    events_with_factor: list[tuple[date, float]],
+) -> list[float]:
+    """冻结优化前的逐 bar × event 映射，作为 exact-parity oracle。"""
+    adj_factors: list[float] = []
+    for raw_date in raw_dates:
+        bar_date = pd.Timestamp(raw_date).date()
+        factor = 1.0
+        for event_date, cumulative_factor in events_with_factor:
+            if event_date > bar_date:
+                factor = cumulative_factor
+        adj_factors.append(factor)
+    return adj_factors
+
+
+class TestVectorizedLookupParity:
+    """锁定二分查找和批量因子映射与旧循环逐元素完全一致。"""
+
+    def test_prev_close_binary_search_matches_strict_previous_date(self):
+        close_map = {
+            date(2026, 1, 2): 10.0,
+            date(2026, 1, 8): 11.0,
+            date(2026, 2, 20): 12.0,
+        }
+        sorted_dates = sorted(close_map)
+
+        assert _find_prev_close(date(2026, 1, 2), sorted_dates, close_map) is None
+        assert _find_prev_close(date(2026, 1, 3), sorted_dates, close_map) == (
+            date(2026, 1, 2), 10.0,
+        )
+        assert _find_prev_close(date(2026, 2, 20), sorted_dates, close_map) == (
+            date(2026, 1, 8), 11.0,
+        )
+        assert _find_prev_close(date(2027, 1, 1), sorted_dates, close_map) == (
+            date(2026, 2, 20), 12.0,
+        )
+
+    def test_vectorized_mapping_exact_parity_with_duplicate_event_dates(self):
+        raw_dates = pd.Series(pd.to_datetime([
+            "2026-01-30", "2026-01-02", "2026-01-08", "2026-01-09",
+            "2026-02-20", "2027-01-01",
+        ]))
+        # 与生产中间结果一致：事件由新到旧；同日后写项包含同日全部累计值。
+        events_with_factor = [
+            (date(2026, 2, 20), 0.97),
+            (date(2026, 1, 8), 0.9409),
+            (date(2026, 1, 8), 0.912673),
+        ]
+
+        expected = _legacy_map_cumulative_factors_to_bars(
+            raw_dates,
+            events_with_factor,
+        )
+        actual = _map_cumulative_factors_to_bars(raw_dates, events_with_factor)
+
+        assert actual == expected
 
 
 # =============================================================================
