@@ -79,6 +79,7 @@
 - `research/feature_computer.py` 的未来收益、未来最大回撤与突破/破位标签改为固定偏移的整列向量计算；随机 NaN/Inf/非正价格及短序列与冻结循环逐元素 exact parity。这些字段仍属于 label namespace，不进入 causal feature。10 万行本地基准约 `1.14s → 0.010s`（约 112.9×），tracemalloc 峰值约 `7.64MiB → 8.97MiB`（+17.3%）。
 - `adjustment_factor_calculator.py` 保留公司行动过滤、前收盘价、反向累计乘法及严格 `event_date > bar_date` 合同；前收盘价改为二分查找，最终 bar 映射改为有界分块向量化。同日重复事件、乱序 bars 与冻结旧循环逐元素 exact parity；10 万 bars / 99 events 本地映射基准约 `0.602s → 0.075s`（约 8.1×），tracemalloc 峰值约 `3.21MiB → 3.40MiB`（+6.0%）。
 - 通知 worker 的 Outbox Relay / Delivery 轮询生命周期由 `notification_worker_runtime.py` 持有；`worker.py` 只装配 session、心跳、关闭信号及进程配置，并保留原函数 façade。业务状态机仍分别由 `outbox_relay.py`、`delivery_worker.py` 持有，提交、重试和异常后继续轮询语义未改变。该首批拆分使 `worker.py` 函数内 import 从 65 降至 63；尚未达到阶段性 70% 目标。
+- 策略批量 worker 的 stale-run 恢复、串行领取、claim commit、执行 commit 与异常 rollback 生命周期由 `strategy_batch_worker_runtime.py` 持有；`StrategyBatchService` 仍是策略运行状态的业务 owner。`worker.py` 继续保留兼容 façade，函数内 import 进一步降至 62；阶段目标仍未完成。
 - 公开 API、Schema、DB 表、状态值、metadata 字段和 commit 边界未改变。
 - 本计划已识别的 Python 循环依赖簇均已清零；后续新增依赖必须继续通过结构基线验证。
 

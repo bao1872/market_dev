@@ -73,6 +73,7 @@ from app.services.scheduler_job_run_recovery_service import (
     recover_replaced_incarnation_runs,
     recover_stale_scheduler_job_runs,
 )
+from app.services.strategy_batch_worker_runtime import run_strategy_batch_loop
 
 logger = logging.getLogger("worker")
 
@@ -353,72 +354,14 @@ async def run_delivery_worker() -> None:
 
 
 async def run_strategy_batch_worker() -> None:
-    """策略批量计算 Worker：轮询 queued 状态的运行并执行。
-
-    每个轮询周期：
-    1. 查询 strategy_runs WHERE status='queued'（按 queued_at 排序，取 1 条）
-    2. 调用 StrategyBatchService.execute_run() 执行
-    3. 提交事务
-
-    设计说明：
-    - 单 run 串行执行（避免并发计算同一策略版本）
-    - 执行失败时记录日志，run 状态由 execute_run 内部处理
-    - Worker 重启后可继续执行 queued 状态的 run（中断恢复）
-    - 启动时调用 recover_stale_runs() 恢复过期租约的 running 任务
-    """
-    from app.services.strategy_batch_service import StrategyBatchService
-
-    _hb_task = asyncio.create_task(_heartbeat_loop("strategy_batch"))
-    logger.info(
-        "Strategy Batch Worker 启动（间隔=%ds）", WORKER_INTERVAL
+    """兼容 façade：装配 Strategy Batch Worker 的进程级依赖。"""
+    await run_strategy_batch_loop(
+        session_factory=AsyncSessionLocal,
+        heartbeat_loop=_heartbeat_loop,
+        should_shutdown=lambda: _shutdown,
+        interval=WORKER_INTERVAL,
+        logger=logger,
     )
-    service = StrategyBatchService()
-
-    # 启动时恢复过期租约的 running 和 stale queued 任务
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await service.recover_stale_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info(
-                    "Strategy Batch Worker 启动恢复: %d 个过期任务", recovered,
-                )
-    except Exception as exc:
-        logger.exception("Strategy Batch Worker 启动恢复异常: %s", exc)
-
-    while not _shutdown:
-        try:
-            async with AsyncSessionLocal() as db:
-                # [StrategyBatchWorker] - 使用 claim_next_run 加锁领取任务，避免多 Worker 竞争
-                run = await service.claim_next_run(db)
-                if run is None:
-                    # 无待执行 run，等待下次轮询
-                    await asyncio.sleep(WORKER_INTERVAL)
-                    continue
-
-                await db.commit()
-                logger.info(
-                    "开始执行策略批量计算: run_id=%s, trade_date=%s",
-                    run.id, run.trade_date,
-                )
-                await service.execute_run(db, run.id)
-                await db.commit()
-                logger.info(
-                    "策略批量计算完成: run_id=%s, status=%s",
-                    run.id, run.status,
-                )
-                # [Phase8A] 删除 _maybe_trigger_after_close_orchestrator 自动触发路径：
-                # 旧路径在 DSA completed 后才创建 after-close run（倒序），
-                # Phase8A 改为 16:00/18:30 先创建 after-close run，orchestrator 内部创建 DSA。
-                # manual DSA 和非 DSA selector 仍由 strategy_batch worker 正常执行。
-        except Exception as exc:
-            logger.exception("Strategy Batch Worker 异常: %s", exc)
-            # 异常时回滚，等待下次轮询重试
-            try:
-                await db.rollback()
-            except Exception:
-                pass
-        await asyncio.sleep(WORKER_INTERVAL)
 
 
 async def run_bars_scheduler_worker() -> None:
