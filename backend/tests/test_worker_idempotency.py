@@ -15,7 +15,6 @@
 
 from __future__ import annotations
 
-import json
 import uuid
 from datetime import datetime
 from unittest.mock import patch
@@ -25,7 +24,11 @@ import pytest
 from sqlalchemy import select
 
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.worker import _create_job_run, _find_or_create_monitor_session_job_run
+from app.services.fenced_job_run_service import create_job_run as production_create_job_run
+from app.services.monitor_scheduler_worker_runtime import (
+    _find_or_create_monitor_session_job_run,
+)
+from app.worker import _create_job_run
 
 
 @pytest.mark.asyncio
@@ -50,8 +53,12 @@ async def test_bars_scheduler_skipped_duplicate(db_session) -> None:
 
 
 @pytest.mark.asyncio
-async def test_monitor_scheduler_session_reuse(db_session) -> None:
-    """同一 session_label 第二次调用返回 None，调用方能按 run_key 查询复用。"""
+async def test_monitor_scheduler_session_exclusive_ownership(db_session) -> None:
+    """C2C: 同一 session_label 第二次调用返回 None（已被其他进程占有）→ 调用方 SKIP。
+
+    旧合同「第二次 create 返回 None → 调用方按 run_key 查询复用」是错误语义，已被废除：
+    exclusive-owner 模型下运行中的 row 只由其 owner 写入，第二个进程不得 SELECT 复用 / 接管。
+    """
     from datetime import date as date_cls
 
     trade_date = date_cls(2026, 6, 24)
@@ -63,27 +70,28 @@ async def test_monitor_scheduler_session_reuse(db_session) -> None:
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_1 = await _find_or_create_monitor_session_job_run(
             db_session, now, str(trade_date), session_label,
+            create_job_run=production_create_job_run,
         )
     assert job_run_1 is not None
     assert job_run_1.run_key == f"monitor_scheduler:2026-06-24:{session_label}"
 
-    # 第二次：返回 None（session 已存在）
+    # 第二次：session 已被其他进程占有 → create 返回 None（exclusive owner）
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_2 = await _find_or_create_monitor_session_job_run(
             db_session, now, str(trade_date), session_label,
+            create_job_run=production_create_job_run,
         )
     assert job_run_2 is None
 
-    # 调用方按 run_key 查询复用（模拟 run_monitor_scheduler_worker 的复用逻辑）
+    # 验证数据库里只有一条该 run_key 的 running 记录（owner 未被第二个进程接管）
     run_key = f"monitor_scheduler:{trade_date}:{session_label}"
     stmt = select(SchedulerJobRun).where(SchedulerJobRun.run_key == run_key).limit(1)
     result = await db_session.execute(stmt)
-    reused = result.scalar_one_or_none()
-    assert reused is not None
-    assert reused.id == job_run_1.id
-    # 验证 metadata 中的 session_label
-    meta = json.loads(reused.metadata_json or "{}")
-    assert meta.get("session_label") == session_label
+    running = result.scalar_one_or_none()
+    assert running is not None
+    assert running.id == job_run_1.id
+    assert running.status == "running"
+    assert running.worker_instance_id == job_run_1.worker_instance_id
 
 
 @pytest.mark.asyncio
@@ -205,12 +213,14 @@ async def test_monitor_scheduler_different_sessions_both_succeed(db_session) -> 
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_morning = await _find_or_create_monitor_session_job_run(
             db_session, morning, str(trade_date), morning_label,
+            create_job_run=production_create_job_run,
         )
     assert job_run_morning is not None
 
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_afternoon = await _find_or_create_monitor_session_job_run(
             db_session, afternoon, str(trade_date), afternoon_label,
+            create_job_run=production_create_job_run,
         )
     assert job_run_afternoon is not None
 

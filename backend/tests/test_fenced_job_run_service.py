@@ -4,7 +4,9 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -14,6 +16,7 @@ from app.services.fenced_job_run_service import (
     JobLeaseLostError,
     finalize_job_run,
     merge_owned_job_run_metadata,
+    update_owned_job_run_progress,
 )
 
 
@@ -222,3 +225,108 @@ async def test_finalize_rejects_non_terminal_status() -> None:
                 failed_count=0,
                 session_factory=_factory,
             )
+
+
+@pytest.mark.asyncio
+async def test_update_owned_job_run_progress_writes_fields_and_metadata() -> None:
+    """owner 有效 → 写 last_cycle_at / counts / 合并 metadata 并 commit。"""
+    holder: dict = {}
+    flags: dict = {}
+
+    class _JobRun:
+        def __init__(self) -> None:
+            self.last_cycle_at = None
+            self.succeeded_count = None
+            self.failed_count = None
+            self.metadata_json = None
+
+    class _Session:
+        async def commit(self) -> None:
+            flags["commit"] = True
+
+        async def rollback(self) -> None:
+            flags["rollback"] = True
+
+    class _CM:
+        def __init__(self) -> None:
+            self.session = _Session()
+
+        async def __aenter__(self) -> _Session:
+            return self.session
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+    async def _lock(db, token):  # noqa: ANN001
+        jr = holder.get("jr")
+        if jr is None:
+            jr = _JobRun()
+            holder["jr"] = jr
+        return jr
+
+    with patch(
+        "app.services.fenced_job_run_service.lock_owned_job_run",
+        new=_lock,
+    ):
+        token = _token()
+        last = datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        await update_owned_job_run_progress(
+            token,
+            last_cycle_at=last,
+            succeeded_count=2,
+            failed_count=1,
+            metadata_updates={"last_bar_time": "2026-01-01T10:00:00+08:00"},
+            session_factory=_CM,
+        )
+
+    assert holder["jr"].last_cycle_at == last
+    assert holder["jr"].succeeded_count == 2
+    assert holder["jr"].failed_count == 1
+    assert json.loads(holder["jr"].metadata_json) == {
+        "last_bar_time": "2026-01-01T10:00:00+08:00"
+    }
+    assert flags.get("commit") is True
+
+
+@pytest.mark.asyncio
+async def test_update_owned_job_run_progress_fails_closed_on_stale_lease() -> None:
+    """owner 失配（lease 已被转移）→ 抛 JobLeaseLostError 且不写任何字段。"""
+    flags: dict = {}
+
+    class _Session:
+        async def commit(self) -> None:
+            flags["commit"] = True
+
+        async def rollback(self) -> None:
+            flags["rollback"] = True
+
+    class _CM:
+        def __init__(self) -> None:
+            self.session = _Session()
+
+        async def __aenter__(self) -> _Session:
+            return self.session
+
+        async def __aexit__(self, *exc) -> bool:
+            return False
+
+    async def _lock_stale(db, token):  # noqa: ANN001
+        raise JobLeaseLostError("stale epoch")
+
+    with patch(
+        "app.services.fenced_job_run_service.lock_owned_job_run",
+        new=_lock_stale,
+    ):
+        token = _token()
+        with pytest.raises(JobLeaseLostError):
+            await update_owned_job_run_progress(
+                token,
+                last_cycle_at=datetime(2026, 1, 1, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai")),
+                succeeded_count=0,
+                failed_count=0,
+                metadata_updates={},
+                session_factory=_CM,
+            )
+
+    # 失配时不得提交任何写
+    assert flags.get("commit") is None

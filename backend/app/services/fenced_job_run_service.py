@@ -270,6 +270,51 @@ async def merge_owned_job_run_metadata(
         await db.commit()
 
 
+async def update_owned_job_run_progress(
+    token: FencedJobToken,
+    *,
+    last_cycle_at: datetime,
+    succeeded_count: int,
+    failed_count: int,
+    metadata_updates: dict[str, Any],
+    session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
+) -> None:
+    """Fenced per-cycle progress write for an owned running ``SchedulerJobRun``.
+
+    Only the current lease owner may advance ``last_cycle_at`` / ``succeeded_count``
+    / ``failed_count`` and merge progress metadata. Heartbeat / lease / status /
+    terminal remain owned by ``FencedJobHeartbeat`` / ``finalize_job_run`` — this
+    helper touches only the three progress fields + metadata, so no second
+    lifecycle is introduced (C2C: Monitor progress, not a generic API).
+
+    Fail-closed: if the token no longer matches the live owner (a watchdog /
+    reclaimer transferred ownership), ``lock_owned_job_run`` raises
+    ``JobLeaseLostError`` and nothing is written — no ``False``/``None`` return,
+    no silent swallow. The caller (the Monitor runtime) then stops the session
+    and clears its active token, never writing a stale terminal.
+    """
+    async with session_factory() as db:
+        try:
+            job_run = await lock_owned_job_run(db, token)
+        except JobLeaseLostError:
+            await db.rollback()
+            raise
+
+        metadata: dict[str, Any] = {}
+        if job_run.metadata_json:
+            try:
+                metadata = json.loads(job_run.metadata_json)
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+        metadata.update(metadata_updates)
+
+        job_run.last_cycle_at = last_cycle_at
+        job_run.succeeded_count = succeeded_count
+        job_run.failed_count = failed_count
+        job_run.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        await db.commit()
+
+
 class FencedJobHeartbeat:
     """Background heartbeat whose failure permanently invalidates the token."""
 

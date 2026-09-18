@@ -5,14 +5,24 @@ session helpers (moved from the composition root in PANJI-GOV-W4A / W4B1):
 
 * Trading-session classification (morning / afternoon / non-session) is owned by this
   module's :func:`_get_monitor_session`; the boundary rules are preserved verbatim.
-* Monitor session job-run acquisition/reuse is owned by this module's
-  :func:`_find_or_create_monitor_session_job_run`, a thin wrapper that delegates canonical
-  ``SchedulerJobRun`` creation to the injected ``create_job_run`` (the composition root's
-  :func:`app.worker._create_job_run`).  It does NOT insert, commit, or recover on its own.
+* Monitor session job-run acquisition is an EXCLUSIVE-OWNER model (C2C): the runtime
+  acquires a per-session ``SchedulerJobRun`` via the injected ``create_job_run``; if it
+  returns ``None`` the session is already owned by another process, so this runtime
+  SKIPS the cycle and does NOT ``SELECT``-reuse the existing row. No second owner, no
+  cross-process ownership theft.
+* Fenced session lifecycle (C2C): a ``FencedJobToken`` is built from the acquired
+  job_run ownership fields; a single ``FencedJobHeartbeat(30s)`` keeps the lease alive
+  for the whole session; per-cycle progress is written only through
+  ``update_owned_job_run_progress`` (fenced: ``last_cycle_at`` + counts + metadata);
+  the session terminal is written only through ``finalize_job_run`` carrying the token.
+  A lost lease stops the session without writing any terminal; an unexpected runtime
+  exception is swallowed and, if still owned, written as a fenced ``failed`` terminal;
+  graceful shutdown only stops the heartbeat (the running row is left to lease-expiry
+  recovery).
 * Startup / error Feishu notification lives in the dedicated
-  :mod:`app.services.monitor_status_notifier` module, imported at module top; the runtime
-  only *calls* it and does NOT own the Redis idempotency / channel-query / DTO / adapter
-  logic.
+  :mod:`app.services.monitor_status_notifier` module, imported at module top; the
+  runtime only *calls* it and does NOT own the Redis idempotency / channel-query / DTO /
+  adapter logic.
 * The generic ``SchedulerJobRun`` state rules (finish / recover) are injected by the
   composition root (:mod:`app.worker`) and must not be duplicated here.
 * Monitor cycle execution and stale-evaluation recovery live in
@@ -20,28 +30,36 @@ session helpers (moved from the composition root in PANJI-GOV-W4A / W4B1):
 * The monotonic clock used for cycle latency is injected (``monotonic_clock``) so the
   composition root keeps ownership of the time source.
 
-The top-level :mod:`app.worker` module supplies the session factory, heartbeat
-ownership, shared shutdown signal, the canonical helpers, and business owners.  This is a
-pure structural extraction (PANJI-GOV-W4A, W4B1, and W4B2); no cron / trading-session
-boundary / reentrancy guard / transaction / exception / state-update / sleep-cadence /
-notify timing semantics changed.  In W4B1 the Monitor session helpers moved here and
-``create_job_run`` became an injected dependency; in W4B2 the status notifier moved to its
-own module and is imported (not injected).
+The top-level :mod:`app.worker` module supplies the session factory, the legacy process
+heartbeat loop, shared shutdown signal, the canonical helpers, and business owners.
+This is a pure structural + fencing extraction (PANJI-GOV-W4A, W4B1, W4B2, C2C); no
+trading-session boundary / reentrancy guard / transaction / exception / sleep-cadence /
+notify timing semantics changed beyond the C2C exclusive-ownership + fenced lifecycle.
 """
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 from collections.abc import Callable, Coroutine
+from datetime import datetime
 from datetime import time as time_cls
-from datetime import timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
+from sqlalchemy import func as sa_func
+from sqlalchemy import select as sa_select
+
 from app.config import get_settings
+from app.models.monitor_evaluation import MonitorEvaluation
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.services.fenced_job_run_service import (
+    FencedJobHeartbeat,
+    FencedJobToken,
+    JobLeaseLostError,
+    finalize_job_run,
+    update_owned_job_run_progress,
+)
 from app.services.monitor_batch_service import MonitorBatchService
 from app.services.monitor_status_notifier import notify_monitor_status
 
@@ -87,13 +105,16 @@ async def _find_or_create_monitor_session_job_run(
     *,
     create_job_run: CreateJobRun,
 ) -> SchedulerJobRun | None:
-    """查找或创建当前交易时段的 monitor_scheduler job_run（幂等版本）。
+    """Acquire the current trading-session's monitor_scheduler job_run (exclusive owner, C2C).
 
-    基于 run_key=monitor_scheduler:{business_date}:{session_label} 唯一索引保证 session 幂等。
-    返回 SchedulerJobRun 表示新建；返回 None 表示 session 已存在（调用方应按 run_key 查询复用）。
+    Based on run_key=monitor_scheduler:{business_date}:{session_label} unique index.
+    Returns the created ``SchedulerJobRun``, or ``None`` if the session is already owned
+    by another process (the unique index / advisory lock prevented a second owner). The
+    caller must then SKIP the cycle — it must NOT ``SELECT`` the existing row and write
+    to it (that would be cross-process ownership theft).
 
-    仅作为 canonical _create_job_run 的 Monitor-specific wrapper；不直接 INSERT、
-    不调用 idempotency_service、不自行 commit/recover。
+    Thin wrapper delegating to the injected canonical ``create_job_run``; does not
+    INSERT, commit, recover, or SELECT-reuse on its own.
     """
     run_key = f"monitor_scheduler:{business_date}:{session_label}"
     return await create_job_run(
@@ -104,6 +125,36 @@ async def _find_or_create_monitor_session_job_run(
         metadata={"session_label": session_label},
         run_key=run_key,
     )
+
+
+async def _finalize_monitor_session(
+    token: FencedJobToken,
+    heartbeat: FencedJobHeartbeat | None,
+    succeeded: int,
+    failed: int,
+    *,
+    logger: logging.Logger,
+) -> None:
+    """Write the session terminal (``succeeded``) through the fenced primitive.
+
+    Monitor session semantics (C2C): a few failed cycles never upgrade the session to
+    ``partial_failed`` — the session terminal stays ``succeeded`` (Do Not introduce
+    ``partial_failed`` for Monitor). A lost lease before finalize is swallowed (no
+    terminal). The heartbeat is always stopped.
+    """
+    try:
+        await finalize_job_run(
+            token,
+            status="succeeded",
+            metadata_updates={},
+            total_count=succeeded + failed,
+            succeeded_count=succeeded,
+            failed_count=failed,
+        )
+    except JobLeaseLostError:
+        logger.warning("monitor_scheduler lease lost before session finalize; skip terminal")
+    if heartbeat is not None:
+        await heartbeat.stop()
 
 
 async def run_monitor_scheduler_worker_runtime(
@@ -119,18 +170,38 @@ async def run_monitor_scheduler_worker_runtime(
 ) -> None:
     """Run the Monitor Scheduler main lifecycle.
 
-    Behavior is identical to the previous ``run_monitor_scheduler_worker`` body:
-    start the heartbeat task, then inside the trading session run one
-    ``MonitorBatchService.execute_monitor_cycle`` per ``cycle_interval`` second,
-    acquiring/reusing a per-session ``SchedulerJobRun`` (via the owned
-    ``_find_or_create_monitor_session_job_run``), with startup stale recovery
-    (evaluations + scheduler job-runs) and graceful shutdown.
+    C2C fenced model: the runtime acquires a per-session ``SchedulerJobRun`` as its
+    EXCLUSIVE owner (``create_job_run`` returning ``None`` means another process owns it
+    → skip cycle, never SELECT-reuse). A ``FencedJobToken`` + a single ``FencedJobHeartbeat(30s)``
+    keep the lease alive for the whole session; per-cycle progress is written through
+    ``update_owned_job_run_progress``; the session terminal is written only through
+    ``finalize_job_run`` carrying the token. A lost lease stops the session with no
+    terminal; an unexpected runtime exception is swallowed and, if still owned, written
+    as a fenced ``failed`` terminal; graceful shutdown only stops the heartbeat.
     """
+    # 进程级心跳（liveness，与 session lease 正交）——保持既有行为。
     _hb_task = asyncio.create_task(heartbeat_loop("monitor_scheduler"))
     service = MonitorBatchService()
-    cycle_interval = get_settings().intraday_monitor_poll_seconds  # [盘中监控1秒] 默认1秒
-    session_finish_margin = timedelta(seconds=cycle_interval + 5)
-    _cycle_running = False  # 防重入标志
+    cycle_interval = get_settings().intraday_monitor_poll_seconds
+
+    # [盘中监控1秒] 防重入标志
+    _cycle_running = False
+
+    # C2C session 内存状态（exclusive owner，不查询复用别人创建的 row）
+    active_session_key: str | None = None
+    active_token: FencedJobToken | None = None
+    active_heartbeat: FencedJobHeartbeat | None = None
+    session_succeeded = 0
+    session_failed = 0
+
+    async def _clear_active_session() -> None:
+        nonlocal active_session_key, active_token, active_heartbeat
+        nonlocal session_succeeded, session_failed
+        active_session_key = None
+        active_token = None
+        active_heartbeat = None
+        session_succeeded = 0
+        session_failed = 0
 
     # [eval_recovery] 启动时恢复过期租约的 PENDING 评估（无 try/except，异常向上传播）
     async with session_factory() as db:
@@ -163,10 +234,7 @@ async def run_monitor_scheduler_worker_runtime(
     )
 
     while not should_shutdown():
-        job_run = None
         try:
-            from datetime import datetime
-
             now = datetime.now(ZoneInfo("Asia/Shanghai"))
 
             # 交易日检查（使用异步接口，避免在事件循环中降级到 weekday）
@@ -181,10 +249,20 @@ async def run_monitor_scheduler_worker_runtime(
 
             session_info = _get_monitor_session(now)
             if session_info is None:
-                # 非交易时段，等待
+                # 非交易时段：若当前有活跃 session，说明已在边界处结束 → finalize succeeded
+                _ended_token = active_token
+                if _ended_token is not None:
+                    await _finalize_monitor_session(
+                        _ended_token,
+                        active_heartbeat,
+                        session_succeeded,
+                        session_failed,
+                        logger=logger,
+                    )
+                    await _clear_active_session()
+                # 等待逻辑（开盘前 / 午休 / 收盘后）
                 current_time = now.time()
                 if current_time < time_cls(9, 30):
-                    # 开盘前，等待到 9:30
                     wait_seconds = (
                         datetime(now.year, now.month, now.day, 9, 30, tzinfo=ZoneInfo("Asia/Shanghai")) - now
                     ).total_seconds()
@@ -192,7 +270,6 @@ async def run_monitor_scheduler_worker_runtime(
                         logger.info("等待开盘，还需 %d 秒", int(wait_seconds))
                         await asyncio.sleep(min(wait_seconds, 60))
                 elif time_cls(11, 30) <= current_time < time_cls(13, 0):
-                    # 午休，等待到 13:00
                     wait_seconds = (
                         datetime(now.year, now.month, now.day, 13, 0, tzinfo=ZoneInfo("Asia/Shanghai")) - now
                     ).total_seconds()
@@ -200,57 +277,81 @@ async def run_monitor_scheduler_worker_runtime(
                         logger.info("午休中，等待 %d 秒", int(wait_seconds))
                         await asyncio.sleep(min(wait_seconds, 60))
                 elif current_time >= time_cls(15, 0):
-                    # 收盘后，等待到明天
                     await asyncio.sleep(300)
                 continue
 
             session_label, _start_time, end_time = session_info
             business_date = str(now.date())
+            session_key = f"{business_date}:{session_label}"
 
-            # 交易时段内，执行监控周期
-            # [盘中监控1秒] - 防重入：上一周期未完成则跳过
+            # session 过渡（上午→下午，或 lease-lost 后重新 acquire）→ finalize 旧的
+            if active_session_key is not None and active_session_key != session_key:
+                _prev_token = active_token
+                if _prev_token is not None:
+                    await _finalize_monitor_session(
+                        _prev_token,
+                        active_heartbeat,
+                        session_succeeded,
+                        session_failed,
+                        logger=logger,
+                    )
+                await _clear_active_session()
+
+            # 首次 acquire（exclusive owner）
+            if active_session_key is None:
+                async with session_factory() as db:
+                    job_run = await _find_or_create_monitor_session_job_run(
+                        db, now, business_date, session_label,
+                        create_job_run=create_job_run,
+                    )
+                if job_run is None:
+                    # session 已被其他进程拥有 → 跳过本轮，不 SELECT 复用（禁止跨进程偷 ownership）
+                    logger.info("monitor_scheduler SKIPPED_DUPLICATE session=%s", session_key)
+                    await asyncio.sleep(cycle_interval)
+                    continue
+                if not job_run.worker_instance_id:
+                    raise RuntimeError(
+                        f"monitor_scheduler create_job_run 未设置 worker_instance_id: "
+                        f"job_run_id={job_run.id}"
+                    )
+                active_session_key = session_key
+                active_token = FencedJobToken(
+                    job_run_id=job_run.id,
+                    worker_instance_id=job_run.worker_instance_id,
+                    lease_epoch=job_run.lease_epoch,
+                    lease_seconds=120,
+                )
+                # C2C：整段 session 用一个 30s fenced heartbeat 覆盖 lease，避免 120s lease 误过期
+                active_heartbeat = FencedJobHeartbeat(active_token, interval_seconds=30.0)
+                await active_heartbeat.start()
+                session_succeeded = 0
+                session_failed = 0
+
+            # 防重入：上一周期未完成则跳过
             if _cycle_running:
                 logger.debug("monitor_scheduler 上一周期未完成，跳过本轮")
                 await asyncio.sleep(cycle_interval)
                 continue
 
-            async with session_factory() as db:
-                job_run = await _find_or_create_monitor_session_job_run(
-                    db, now, business_date, session_label,
-                    create_job_run=create_job_run,
-                )
-                if job_run is None:
-                    # session 已存在，按 run_key 查询复用（更新 last_cycle_at）
-                    from sqlalchemy import select as sa_select
-
-                    run_key = f"monitor_scheduler:{business_date}:{session_label}"
-                    stmt = (
-                        sa_select(SchedulerJobRun)
-                        .where(SchedulerJobRun.run_key == run_key)
-                        .limit(1)
-                    )
-                    result_q = await db.execute(stmt)
-                    job_run = result_q.scalar_one_or_none()
-                    if job_run is None:
-                        # 极端情况：理论上不该发生，但容错跳过本轮
-                        logger.warning(
-                            "monitor_scheduler session_job_run not found for run_key=%s",
-                            run_key,
-                        )
-                        await asyncio.sleep(cycle_interval)
-                        continue
-                    logger.debug(
-                        "monitor_scheduler 复用 session job_run_id=%s", job_run.id,
-                    )
-                cycle_succeeded = False
-                _cycle_running = True  # [盘中监控1秒] 设置防重入标志
-                _cycle_start_ts = monotonic_clock()
-                try:
-                    result = await service.execute_monitor_cycle(db)
-                    await db.commit()
+            _cycle_running = True  # [盘中监控1秒] 设置防重入标志
+            _cycle_start_ts = monotonic_clock()
+            try:
+                # 每 cycle 校验 ownership 仍有效（heartbeat 后台已置位则直接抛）
+                if active_heartbeat is not None:
+                    active_heartbeat.ensure_owned()
+                async with session_factory() as db:
+                    try:
+                        result = await service.execute_monitor_cycle(db)
+                        await db.commit()
+                    except JobLeaseLostError:
+                        raise
+                    except Exception:
+                        await db.rollback()
+                        raise
                     cycle_succeeded = True
+                    session_succeeded += 1
                     _cycle_latency = monotonic_clock() - _cycle_start_ts
-                    if result.total_events_written > 0:
+                    if cycle_succeeded and result.total_events_written > 0:
                         logger.info(
                             "监控周期完成: session=%s instruments=%d events=%d "
                             "notifications=%d latency=%.3fs skip=0",
@@ -268,60 +369,68 @@ async def run_monitor_scheduler_worker_runtime(
                             result.total_instruments,
                             _cycle_latency,
                         )
-                except Exception as exc:
-                    logger.exception("Monitor Scheduler 周期异常: %s", exc)
-                    await db.rollback()
-                finally:
-                    _cycle_running = False  # [盘中监控1秒] 清除防重入标志
+            except JobLeaseLostError:
+                # ownership 在 cycle 内丢失：停 heartbeat、清 session、不写 terminal，下轮再 acquire
+                logger.warning("monitor_scheduler lease lost during cycle session=%s", session_key)
+                if active_heartbeat is not None:
+                    await active_heartbeat.stop()
+                await _clear_active_session()
+                continue
+            except Exception as exc:
+                logger.exception("Monitor Scheduler 周期异常: %s", exc)
+                session_failed += 1
+            finally:
+                _cycle_running = False  # [盘中监控1秒] 清除防重入标志
 
-                # 更新 session 级统计与心跳
-                now = datetime.now(ZoneInfo("Asia/Shanghai"))
-                job_run.last_cycle_at = now
-                job_run.heartbeat_at = now
-                job_run.lease_expires_at = now + timedelta(seconds=120)
-                if cycle_succeeded:
-                    job_run.succeeded_count = (job_run.succeeded_count or 0) + 1
-                else:
-                    job_run.failed_count = (job_run.failed_count or 0) + 1
-                # [monitor_scheduler] - 查询最新 source_bar_time 写入 metadata_json，供 Admin 页面展示
+            # fenced progress update（仅当仍持有 ownership）
+            if (
+                active_token is not None
+                and active_heartbeat is not None
+                and not active_heartbeat.lost
+            ):
+                meta_updates: dict[str, Any] = {}
                 try:
-                    from sqlalchemy import func as sa_func
-                    from sqlalchemy import select as sa_select
-
-                    from app.models.monitor_evaluation import MonitorEvaluation
-
-                    latest_bar_time = await db.scalar(
-                        sa_select(sa_func.max(MonitorEvaluation.source_bar_time))
-                    )
+                    async with session_factory() as db:
+                        latest_bar_time = await db.scalar(
+                            sa_select(sa_func.max(MonitorEvaluation.source_bar_time))
+                        )
                     if latest_bar_time is not None:
-                        existing_meta = (
-                            json.loads(job_run.metadata_json)
-                            if job_run.metadata_json
-                            else {}
-                        )
-                        existing_meta["last_bar_time"] = latest_bar_time.isoformat()
-                        job_run.metadata_json = json.dumps(
-                            existing_meta, ensure_ascii=False
-                        )
+                        meta_updates["last_bar_time"] = latest_bar_time.isoformat()
                 except Exception as exc:
-                    logger.debug("查询 latest source_bar_time 失败: %s", exc)
-                await db.commit()
-
-                # session 接近结束时标记完成
-                session_end_dt = datetime.combine(now.date(), end_time)
-                session_end_dt = session_end_dt.replace(tzinfo=ZoneInfo("Asia/Shanghai"))
-                if now + session_finish_margin >= session_end_dt:
-                    await finish_job_run(
-                        db, job_run, "succeeded",
-                        success_count=job_run.succeeded_count,
-                        failure_count=job_run.failed_count,
+                    logger.warning("查询 latest source_bar_time 失败: %s", exc)
+                try:
+                    await update_owned_job_run_progress(
+                        active_token,
+                        last_cycle_at=now,
+                        succeeded_count=session_succeeded,
+                        failed_count=session_failed,
+                        metadata_updates=meta_updates,
                     )
-
+                except JobLeaseLostError:
+                    logger.warning(
+                        "monitor_scheduler lease lost before progress update session=%s", session_key,
+                    )
+                    if active_heartbeat is not None:
+                        await active_heartbeat.stop()
+                    await _clear_active_session()
         except Exception as exc:
+            # 未预期运行时异常：swallow；若仍持有 ownership 则写 fenced failed terminal
             logger.exception("Monitor Scheduler 异常: %s", exc)
-            if job_run is not None:
-                async with session_factory() as db:
-                    await finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
+            if active_token is not None:
+                try:
+                    await finalize_job_run(
+                        active_token,
+                        status="failed",
+                        metadata_updates={"error": str(exc)[:500]},
+                        total_count=session_succeeded + session_failed,
+                        succeeded_count=session_succeeded,
+                        failed_count=session_failed,
+                    )
+                except JobLeaseLostError:
+                    pass
+            if active_heartbeat is not None:
+                await active_heartbeat.stop()
+            await _clear_active_session()
             # 异常退出飞书通知
             await notify_monitor_status(
                 "监控服务异常", str(exc), is_error=True,
@@ -331,6 +440,9 @@ async def run_monitor_scheduler_worker_runtime(
         # 交易时段内每 cycle_interval 秒一轮
         await asyncio.sleep(cycle_interval)
 
+    # 优雅退出：只停 heartbeat，不伪造 succeeded/failed terminal（未完成 running row 由 lease 到期 recovery 处理）
+    if active_heartbeat is not None:
+        await active_heartbeat.stop()
     logger.info("Monitor Scheduler Worker 已退出")
 
 
@@ -338,4 +450,5 @@ __all__ = [
     "run_monitor_scheduler_worker_runtime",
     "_get_monitor_session",
     "_find_or_create_monitor_session_job_run",
+    "_finalize_monitor_session",
 ]
