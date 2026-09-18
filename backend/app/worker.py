@@ -1105,154 +1105,19 @@ async def run_chip_consensus_worker() -> None:
 
 
 async def _auction_scheduler_poll_once() -> bool:
-    """[P0-3] Auction Scheduler 单次轮询：
-    1. 检查时间窗口：09:25:05 ± 30s → 创建 auction_final:{date}
-                      10:00:00 ± 30s → 创建 auction_open_confirmation:{date}
-    2. 领取一条 queued auction job 并执行（FOR UPDATE SKIP LOCKED）
+    """[P0-3] Auction Scheduler 单次轮询（thin façade）。
 
-    Returns:
-        True 如果领取并执行了任务，False 如果无任务可执行
+    领取/执行实现已迁移到 app.services.auction_scheduler_worker_poll.poll_auction_scheduler_once；
+    本函数仅做依赖注入（session_factory / worker_instance_id / logger）后委托，
+    不再包含任何时间窗口检查 / 任务创建 / 领取 / fencing / 执行逻辑。
     """
-    from datetime import date as date_cls
+    from app.services.auction_scheduler_worker_poll import poll_auction_scheduler_once
 
-    from app.services.auction_scheduler_service import (
-        AUCTION_FINAL_JOB_NAME,
-        AUCTION_OPEN_CONFIRMATION_JOB_NAME,
-        create_auction_final_job,
-        create_auction_open_confirmation_job,
-        execute_auction_open_confirmation_run,
-        execute_auction_scan_run,
-        get_queued_auction_job,
-        should_create_auction_final_job,
-        should_create_auction_open_confirmation_job,
+    return await poll_auction_scheduler_once(
+        session_factory=AsyncSessionLocal,
+        worker_instance_id=_WORKER_INSTANCE_ID,
+        logger=logger,
     )
-    from app.services.calendar_service import is_trading_day_async
-
-    tz = ZoneInfo("Asia/Shanghai")
-    now = datetime.now(tz)
-
-    # 1. 时间窗口检查 - 仅在交易日创建任务
-    try:
-        async with AsyncSessionLocal() as db:
-            trading = await is_trading_day_async(db, now.date())
-
-        if trading:
-            # 09:25:05 ± 30s → 创建 auction_final job
-            if should_create_auction_final_job(now):
-                async with AsyncSessionLocal() as db:
-                    job_run, is_new = await create_auction_final_job(
-                        db, now.date(),
-                        worker_instance_id=_WORKER_INSTANCE_ID,
-                    )
-                    if is_new:
-                        logger.info(
-                            "[AuctionScheduler] 创建 auction_final job: run_id=%s, trade_date=%s",
-                            job_run.id if job_run else None, now.date(),
-                        )
-                    await db.commit()
-            # 10:00:00 ± 30s → 创建 auction_open_confirmation job
-            elif should_create_auction_open_confirmation_job(now):
-                async with AsyncSessionLocal() as db:
-                    job_run, is_new = await create_auction_open_confirmation_job(
-                        db, now.date(),
-                        worker_instance_id=_WORKER_INSTANCE_ID,
-                    )
-                    if is_new:
-                        logger.info(
-                            "[AuctionScheduler] 创建 auction_open_confirmation job: run_id=%s, trade_date=%s",
-                            job_run.id if job_run else None, now.date(),
-                        )
-                    await db.commit()
-    except Exception as exc:
-        logger.exception("[AuctionScheduler] 时间窗口检查/任务创建异常: %s", exc)
-
-    # 2. 领取一条 queued auction job
-    async with AsyncSessionLocal() as db:
-        job_run = await get_queued_auction_job(db)
-        if job_run is None:
-            await db.rollback()
-            return False
-
-        # 领取：更新 status='running' + worker + heartbeat + lease_epoch（fencing）
-        now_claim = datetime.now(tz)
-        job_run.status = "running"
-        job_run.worker_instance_id = _WORKER_INSTANCE_ID
-        if job_run.started_at is None:
-            job_run.started_at = now_claim
-        job_run.heartbeat_at = now_claim
-        # lease_expires_at 已在 create 时设置；fencing epoch 递增
-        job_run.lease_epoch = (job_run.lease_epoch or 0) + 1
-        await db.commit()
-
-        job_run_id = job_run.id
-        current_lease_epoch = job_run.lease_epoch
-        job_name = job_run.job_name
-        # 提取 metadata
-        meta = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
-        trade_date_str = meta.get("trade_date")
-
-    if not trade_date_str:
-        # 缺关键 metadata，立即标记 failed
-        logger.error(
-            "[AuctionScheduler] 任务缺少 trade_date，标记 failed: job_run_id=%s",
-            job_run_id,
-        )
-        async with AsyncSessionLocal() as db:
-            jr = await db.get(SchedulerJobRun, job_run_id)
-            if jr is not None:
-                now_fail = datetime.now(tz)
-                jr.status = "failed"
-                jr.finished_at = now_fail
-                jr.lease_expires_at = now_fail
-                jr.error_message = "任务缺少 trade_date"
-                await db.commit()
-        return True
-
-    trade_date = date_cls.fromisoformat(trade_date_str)
-
-    logger.info(
-        "[AuctionScheduler] 领取任务: job_run_id=%s, job_name=%s, "
-        "trade_date=%s, lease_epoch=%s",
-        job_run_id, job_name, trade_date, current_lease_epoch,
-    )
-
-    # 执行任务
-    try:
-        if job_name == AUCTION_FINAL_JOB_NAME:
-            await execute_auction_scan_run(
-                job_run_id=job_run_id,
-                trade_date=trade_date,
-                worker_id=_WORKER_INSTANCE_ID,
-                lease_epoch=current_lease_epoch,
-            )
-        elif job_name == AUCTION_OPEN_CONFIRMATION_JOB_NAME:
-            await execute_auction_open_confirmation_run(
-                job_run_id=job_run_id,
-                trade_date=trade_date,
-                worker_id=_WORKER_INSTANCE_ID,
-                lease_epoch=current_lease_epoch,
-            )
-        else:
-            logger.error(
-                "[AuctionScheduler] 未知 job_name=%s，标记 failed: job_run_id=%s",
-                job_name, job_run_id,
-            )
-            async with AsyncSessionLocal() as db:
-                jr = await db.get(SchedulerJobRun, job_run_id)
-                if jr is not None:
-                    now_fail = datetime.now(tz)
-                    jr.status = "failed"
-                    jr.finished_at = now_fail
-                    jr.lease_expires_at = now_fail
-                    jr.error_message = f"未知 job_name: {job_name}"
-                    await db.commit()
-    except Exception as exc:
-        logger.exception(
-            "[AuctionScheduler] 执行异常: job_run_id=%s, error=%s", job_run_id, exc,
-        )
-        # execute_*_run 内部已标记 failed，此处仅记录
-
-    return True
 
 
 # [P0-3] Auction Scheduler 轮询间隔（从 auction_scheduler_service 导入，避免硬编码）

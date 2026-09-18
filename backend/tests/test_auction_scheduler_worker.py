@@ -292,7 +292,7 @@ async def test_poll_creates_auction_final_in_window_on_trading_day() -> None:
          ):
         # mock datetime.now 返回 09:25:05
         fixed_now = datetime(2026, 7, 31, 9, 25, 5, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             # date 方法走真实 datetime
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
@@ -329,7 +329,7 @@ async def test_poll_creates_auction_open_confirmation_in_window() -> None:
              new=AsyncMock(return_value=None),
          ):
         fixed_now = datetime(2026, 7, 31, 10, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             result = await _auction_scheduler_poll_once()
@@ -367,7 +367,7 @@ async def test_poll_does_not_create_on_non_trading_day() -> None:
          ):
         # 即使在 09:25:05 窗口内，非交易日也不创建
         fixed_now = datetime(2026, 7, 31, 9, 25, 5, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             await _auction_scheduler_poll_once()
@@ -405,7 +405,7 @@ async def test_poll_does_not_create_outside_window() -> None:
          ):
         # 11:00 在两个窗口之外
         fixed_now = datetime(2026, 7, 31, 11, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             await _auction_scheduler_poll_once()
@@ -446,7 +446,7 @@ async def test_multiple_polls_same_minute_dont_duplicate() -> None:
              new=AsyncMock(return_value=None),
          ):
         fixed_now = datetime(2026, 7, 31, 9, 25, 10, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             # 连续两次 poll（同一分钟）
@@ -522,7 +522,7 @@ async def test_poll_executes_queued_auction_final_job() -> None:
          ):
         # 时间不在触发窗口，但仍有 queued job 可领取
         fixed_now = datetime(2026, 7, 31, 11, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             # get_queued_auction_job 内部使用同一 session；需让 fake_session 返回 job
@@ -572,7 +572,7 @@ async def test_poll_executes_queued_open_confirmation_job() -> None:
              new=_track_execute,
          ):
         fixed_now = datetime(2026, 7, 31, 11, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             result = await _auction_scheduler_poll_once()
@@ -599,7 +599,7 @@ async def test_poll_no_queued_job_returns_false() -> None:
              new=AsyncMock(return_value=None),
          ):
         fixed_now = datetime(2026, 7, 31, 11, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             result = await _auction_scheduler_poll_once()
@@ -634,7 +634,7 @@ async def test_poll_job_missing_trade_date_marks_failed() -> None:
              new=AsyncMock(return_value=fake_job),
          ):
         fixed_now = datetime(2026, 7, 31, 11, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             result = await _auction_scheduler_poll_once()
@@ -678,7 +678,7 @@ async def test_poll_fencing_epoch_increments_on_claim() -> None:
              new=AsyncMock(return_value={"status": "succeeded"}),
          ):
         fixed_now = datetime(2026, 7, 31, 11, 0, 0, tzinfo=_TZ)
-        with patch("app.worker.datetime") as mock_dt:
+        with patch("app.services.auction_scheduler_worker_poll.datetime") as mock_dt:
             mock_dt.now.return_value = fixed_now
             mock_dt.side_effect = lambda *a, **k: datetime(*a, **k)
             await _auction_scheduler_poll_once()
