@@ -1120,120 +1120,43 @@ async def _auction_scheduler_poll_once() -> bool:
     )
 
 
-# [P0-3] Auction Scheduler 轮询间隔（从 auction_scheduler_service 导入，避免硬编码）
-_AUCTION_SCHEDULER_POLL_INTERVAL_VAL = 30  # 默认 30s；正式部署时由环境变量覆盖
-
-
 async def _run_auction_scheduler_co_process() -> None:
-    """[P0-3 2026-07-31] Auction Scheduler co-process - 在 after_close_orchestrator Worker 进程内运行。
+    """[P0-3] Auction co-process（thin façade，依附 AfterClose 进程 lifecycle）。
 
-    生产入口：`docker-compose.prod.yml` 的 `worker-after-close`（WORKER_TYPE=after_close_orchestrator）
-    自动启动本 co-process，无需单独 WORKER_TYPE=auction_scheduler。
-
-    职责：
-    1. 检查时间窗口：09:25:05 ± 30s → 创建 auction_final:{date}（仅交易日）
-                     10:00:00 ± 30s → 创建 auction_open_confirmation:{date}（仅交易日）
-    2. 领取一条 queued auction job 并执行（FOR UPDATE SKIP LOCKED）
-    3. 每 AUCTION_SCHEDULER_POLL_INTERVAL（30s）轮询一次
-
-    异常隔离：
-    - 所有异常在循环内捕获，不影响 after_close_orchestrator 主 Worker
-    - 单次 poll 异常仅记录日志，下一轮继续
-
-    SIGTERM drain：
-    - 共享全局 `_shutdown` 标志
-    - 检查 _shutdown 后退出循环；当前正在执行的 auction job 完成后才退出
-    - 由 run_after_close_orchestrator_worker 在 finally 块中 await drain
+    lifecycle 实现已迁移到 app.services.auction_scheduler_worker_runtime.run_auction_scheduler_co_process_runtime；
+    本函数仅做依赖注入后委托，不创建独立 heartbeat（由 AfterClose 进程统一承载）。
     """
-    from app.services.auction_scheduler_service import (
-        AUCTION_SCHEDULER_POLL_INTERVAL,
+    from app.services.auction_scheduler_worker_runtime import (
+        run_auction_scheduler_co_process_runtime,
     )
 
-    logger.info(
-        "[AuctionScheduler] co-process 启动（间隔=%ds，触发窗口 09:25:05/10:00:00 Asia/Shanghai）",
-        AUCTION_SCHEDULER_POLL_INTERVAL,
+    await run_auction_scheduler_co_process_runtime(
+        session_factory=AsyncSessionLocal,
+        recover_stale_job_runs=recover_stale_scheduler_job_runs,
+        poll_once=_auction_scheduler_poll_once,
+        should_shutdown=lambda: _shutdown,
+        logger=logger,
     )
-
-    # 启动恢复：清理上次崩溃残留的 running auction 任务
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await recover_stale_scheduler_job_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info(
-                    "[AuctionScheduler] co-process 启动恢复: %d 个过期任务", recovered,
-                )
-    except Exception as exc:
-        logger.exception("[AuctionScheduler] co-process 启动恢复异常: %s", exc)
-
-    while not _shutdown:
-        try:
-            await _auction_scheduler_poll_once()
-        except Exception as exc:
-            # 异常隔离：不影响 after_close_orchestrator 主 Worker
-            logger.exception("[AuctionScheduler] co-process 轮询异常: %s", exc)
-        if _shutdown:
-            logger.info("[AuctionScheduler] co-process SIGTERM drain: 不再领取新任务，准备退出")
-            break
-        await asyncio.sleep(AUCTION_SCHEDULER_POLL_INTERVAL)
-
-    logger.info("[AuctionScheduler] co-process SIGTERM drain complete")
 
 
 async def run_auction_scheduler_worker() -> None:
-    """[P0-3] Auction Scheduler Worker - 竞价分析调度独立 Worker（调试入口）。
+    """[P0-3] Auction standalone debug worker（thin façade，调试入口；生产入口为 _run_auction_scheduler_co_process）。
 
-    生产环境由 `run_after_close_orchestrator_worker` 自动启动 `_run_auction_scheduler_co_process`，
-    无需单独 WORKER_TYPE=auction_scheduler。本入口仅用于独立调试。
-
-    [P0-3 ref/instruction.md §三.3] 接入现有 Scheduler/Worker，不新建容器：
-    - 使用 SchedulerJobRun、run_key、heartbeat、lease、fencing、retry 和恢复
-    - 不新增常驻容器（与 bars_scheduler/calendar_scheduler 同级）
-
-    每个轮询周期：
-    1. 检查时间窗口：09:25:05 ± 30s → 创建 auction_final:{date}
-                     10:00:00 ± 30s → 创建 auction_open_confirmation:{date}
-    2. _auction_scheduler_poll_once 领取并执行一条 queued auction job
-    3. sleep 后继续轮询
-
-    [SIGTERM drain] - 优雅退出（与 run_after_close_orchestrator_worker 一致）：
-    - SIGTERM/SIGINT 设置 _shutdown=True
-    - 主循环在领取新任务前检查 _shutdown
-    - 当前正在执行的 auction job 完成后才退出
+    lifecycle 实现已迁移到 app.services.auction_scheduler_worker_runtime.run_auction_scheduler_worker_runtime；
+    本函数仅做依赖注入后委托，独立创建 auction_scheduler heartbeat。
     """
-    from app.services.auction_scheduler_service import (
-        AUCTION_SCHEDULER_POLL_INTERVAL,
+    from app.services.auction_scheduler_worker_runtime import (
+        run_auction_scheduler_worker_runtime,
     )
 
-    _hb_task = asyncio.create_task(_heartbeat_loop("auction_scheduler"))
-    logger.info(
-        "[AuctionScheduler] 启动（间隔=%ds，触发窗口 09:25:05/10:00:00 Asia/Shanghai）",
-        AUCTION_SCHEDULER_POLL_INTERVAL,
+    await run_auction_scheduler_worker_runtime(
+        session_factory=AsyncSessionLocal,
+        recover_stale_job_runs=recover_stale_scheduler_job_runs,
+        poll_once=_auction_scheduler_poll_once,
+        heartbeat_loop=_heartbeat_loop,
+        should_shutdown=lambda: _shutdown,
+        logger=logger,
     )
-
-    # 启动恢复：清理上次崩溃残留的 running 任务（由 watchdog 转为 interrupted）
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await recover_stale_scheduler_job_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info(
-                    "[AuctionScheduler] 启动恢复: %d 个过期任务", recovered,
-                )
-    except Exception as exc:
-        logger.exception("[AuctionScheduler] 启动恢复异常: %s", exc)
-
-    while not _shutdown:
-        try:
-            await _auction_scheduler_poll_once()
-        except Exception as exc:
-            logger.exception("[AuctionScheduler] 轮询异常: %s", exc)
-        if _shutdown:
-            logger.info("[AuctionScheduler] SIGTERM drain: 不再领取新任务，准备退出")
-            break
-        await asyncio.sleep(AUCTION_SCHEDULER_POLL_INTERVAL)
-
-    logger.info("[AuctionScheduler] SIGTERM drain complete, finished current item")
 
 
 async def main() -> None:
