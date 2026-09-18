@@ -12,6 +12,7 @@ from app.services.fenced_job_run_service import (
     FencedJobHeartbeat,
     FencedJobToken,
     JobLeaseLostError,
+    finalize_job_run,
     merge_owned_job_run_metadata,
 )
 
@@ -167,3 +168,57 @@ async def test_merge_owned_metadata_handles_malformed_json() -> None:
 
     assert json.loads(fake_db.metadata_json) == {"chip_run_id": "yyy"}
     assert fake_db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_finalize_accepts_partial_failed_status() -> None:
+    """partial_failed 是正式一等终态（C2B）：finalize_job_run 接受且不抛。"""
+    token = _token()
+    fake_db = _FakeDb()
+    def _factory() -> _FakeDb:
+        return fake_db
+
+    with patch(
+        "app.services.fenced_job_run_service.lock_owned_job_run",
+        new=AsyncMock(return_value=fake_db),
+    ):
+        ok = await finalize_job_run(
+            token,
+            status="partial_failed",
+            metadata_updates={},
+            total_count=2,
+            succeeded_count=1,
+            failed_count=1,
+            session_factory=_factory,
+        )
+
+    assert ok is True
+    assert fake_db.status == "partial_failed"
+    assert fake_db.succeeded_count == 1
+    assert fake_db.failed_count == 1
+    assert fake_db.worker_instance_id is None
+    assert fake_db.committed is True
+
+
+@pytest.mark.asyncio
+async def test_finalize_rejects_non_terminal_status() -> None:
+    """非终态（如 running）仍被拒绝，保持 fail-closed 终态校验。"""
+    token = _token()
+    fake_db = _FakeDb()
+    def _factory() -> _FakeDb:
+        return fake_db
+
+    with patch(
+        "app.services.fenced_job_run_service.lock_owned_job_run",
+        new=AsyncMock(return_value=fake_db),
+    ):
+        with pytest.raises(ValueError):
+            await finalize_job_run(
+                token,
+                status="running",
+                metadata_updates={},
+                total_count=0,
+                succeeded_count=0,
+                failed_count=0,
+                session_factory=_factory,
+            )

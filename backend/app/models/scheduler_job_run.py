@@ -6,14 +6,14 @@
 字段说明：
 - job_name: 任务名称，如 bars_daily/strategy_scheduler/monitor_cycle
 - business_date: 业务日期 YYYY-MM-DD
-- status: queued/running/succeeded/failed/skipped/interrupted/resume_queued
+- status: queued/running/succeeded/partial_failed/failed/skipped/interrupted/resume_queued
 - heartbeat_at/lease_expires_at: Worker 心跳与租约
 - lease_epoch: [PRD §4.3 JOB-02] 租约代际，Worker 领取时递增，写操作校验防 fencing
 - attempt_no: [PRD §4.3 JOB-01] 尝试次数，首次 0，自动 resume 递增
 - total_count/succeeded_count/failed_count/progress: 执行进度
 
 状态闭环（PRD §4.3）：
-    queued → running → interrupted → resume_queued → running → succeeded/failed
+    queued → running → interrupted → resume_queued → running → succeeded/partial_failed/failed
 """
 
 from __future__ import annotations
@@ -33,10 +33,11 @@ class SchedulerJobRun(Base):
     """定时任务执行记录。
 
     状态机（PRD §4.3）：
-        queued → running → succeeded/failed
+        queued → running → succeeded/partial_failed/failed
         running → interrupted（watchdog 检测 lease 过期/heartbeat 超时）
         interrupted → resume_queued（auto-resume 自动转换）
         resume_queued → running（Worker 领取，递增 lease_epoch + attempt_no）
+        partial_failed 为部分 selector 成功、部分失败的一等终态（C2B 正式化）
     """
 
     __tablename__ = "scheduler_job_runs"
@@ -79,7 +80,7 @@ class SchedulerJobRun(Base):
     )
     status: Mapped[str] = mapped_column(
         String(32), nullable=False, server_default="running",
-        comment="queued/running/succeeded/failed/skipped/interrupted/resume_queued",
+        comment="queued/running/succeeded/partial_failed/failed/skipped/interrupted/resume_queued",
     )
     heartbeat_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, comment="心跳时间",

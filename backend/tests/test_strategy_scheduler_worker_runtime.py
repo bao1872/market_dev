@@ -1,17 +1,21 @@
-"""Tests for the Strategy Scheduler runtime extraction (PANJI-GOV-W3).
+"""Tests for the Strategy Scheduler runtime (PANJI-GOV-W3 + C2B).
 
 Layers mirror the Bars / Calendar pattern:
 
 * Structural contract tests — façade only delegates, public name unchanged, the
   runtime keeps the 18:30 cron / ``strategy_run_daily`` / Asia/Shanghai, the
   verbatim selector SQL, the DSA-vs-non-DSA branches, the ValueError/Exception
-  split, the heartbeat cadence, the final-status mapping, and injects the
-  canonical ``SchedulerJobRun`` helpers + heartbeat updater (no second owner, no
+  split, the final-status mapping (succeeded / partial_failed / failed), and
+  injects the canonical ``SchedulerJobRun`` helpers (no second owner, no
   ``StrategySchedulerService`` / ``GenericScheduler``).
 * Behavioral tests (fake scheduler + fake collaborators, no DB / external
-  service) — non-trading-day short-circuit, duplicate short-circuit, and the
-  final-status mapping (succeeded / partial_failed / failed).
-* Heartbeat regression — 5 selectors must trigger ``update_job_heartbeat`` once.
+  service) — the C2B fenced ownership lifecycle: a ``FencedJobToken`` is built
+  from the created job's ownership fields, a 30s ``FencedJobHeartbeat`` keeps the
+  lease alive, mid-loop metadata merges go through ``merge_owned_job_run_metadata``
+  (never the ORM ``job_run.metadata_json =``), and the terminal state is written
+  only through ``finalize_job_run`` carrying the token.  A lost lease is never
+  allowed to write a terminal state, and ``partial_failed`` (a real
+  first-class terminal) is accepted.
 """
 
 import asyncio
@@ -101,6 +105,111 @@ def _assert_cron(
 
 
 # --------------------------------------------------------------------------- #
+# Fakes for the C2B fenced primitives
+# --------------------------------------------------------------------------- #
+class _FakeToken:
+    def __init__(self, *, job_run_id, worker_instance_id, lease_epoch, lease_seconds):  # noqa: ANN001
+        self.job_run_id = job_run_id
+        self.worker_instance_id = worker_instance_id
+        self.lease_epoch = lease_epoch
+        self.lease_seconds = lease_seconds
+
+
+class _FakeJobLeaseLostError(RuntimeError):
+    pass
+
+
+_heartbeats: list = []
+_finalize_calls: list[dict] = []
+_finalize_return: list[bool] = [True]
+_merge_calls: list[dict] = []
+_unfenced_calls: list = []
+_lose_lease: dict = {"v": False}
+_merge_lost: dict = {"v": False}
+
+
+class FakeFencedHeartbeat:
+    def __init__(self, token, *, interval_seconds: float = 30.0, refresh=None):  # noqa: ANN001
+        self.token = token
+        self.interval_seconds = interval_seconds
+        self.started = False
+        self.stopped = False
+        _heartbeats.append(self)
+
+    async def start(self) -> None:
+        self.started = True
+
+    def ensure_owned(self) -> None:
+        if _lose_lease["v"]:
+            raise rt.JobLeaseLostError("fake lost lease")
+
+    async def stop(self) -> None:
+        self.stopped = True
+
+
+async def _fake_finalize(
+    token,  # noqa: ANN001
+    *,
+    status: str,
+    metadata_updates: dict,
+    total_count: int,
+    succeeded_count: int,
+    failed_count: int,
+    error_code: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    # 模拟 lock_owned_job_run 失败：finalize_job_run 内部 catch JobLeaseLostError
+    # 后返回 False，不写 terminal（因此也不应被记录为一次成功写入）。
+    if _lose_lease["v"] or _merge_lost["v"]:
+        return False
+    _finalize_calls.append(
+        {
+            "token": token,
+            "status": status,
+            "metadata_updates": metadata_updates,
+            "total_count": total_count,
+            "succeeded_count": succeeded_count,
+            "failed_count": failed_count,
+            "error_code": error_code,
+            "error_message": error_message,
+        }
+    )
+    return _finalize_return[0]
+
+
+async def _fake_merge(token, updates, *, session_factory=None) -> None:  # noqa: ANN001
+    _merge_calls.append({"token": token, "updates": dict(updates)})
+    if _merge_lost["v"]:
+        raise rt.JobLeaseLostError("fake lost lease during merge")
+
+
+class _JR:
+    """Minimal SchedulerJobRun stand-in with the ownership fields C2B needs."""
+
+    id = "fake-jr"
+    status = "running"
+    worker_instance_id = "strategy-owner"
+    lease_epoch = 1
+    lease_expires_at = None
+    metadata_json = None
+
+
+def _reset_fakes() -> None:
+    _heartbeats.clear()
+    _finalize_calls.clear()
+    _finalize_return[0] = True
+    _merge_calls.clear()
+    _unfenced_calls.clear()
+    _lose_lease["v"] = False
+    _merge_lost["v"] = False
+
+
+def _assert_no_unfenced() -> None:
+    # Strategy must never fall back to the unfenced _finish_job_run helper.
+    assert _unfenced_calls == [], f"unfenced finish_job_run was called: {_unfenced_calls}"
+
+
+# --------------------------------------------------------------------------- #
 # Runtime driver
 # --------------------------------------------------------------------------- #
 async def _run_runtime(
@@ -122,6 +231,15 @@ async def _run_runtime(
     rec.setdefault("execute_calls", 0)
     rec.setdefault("selector_rows", [(k,) for k in (selector_keys or [])])
 
+    _reset_fakes()
+    # C2B fenced primitives are faked at the module level so the runtime consumes
+    # them exactly as it would the production primitives.
+    monkeypatch.setattr(rt, "FencedJobToken", _FakeToken)
+    monkeypatch.setattr(rt, "FencedJobHeartbeat", FakeFencedHeartbeat)
+    monkeypatch.setattr(rt, "JobLeaseLostError", _FakeJobLeaseLostError)
+    monkeypatch.setattr(rt, "finalize_job_run", _fake_finalize)
+    monkeypatch.setattr(rt, "merge_owned_job_run_metadata", _fake_merge)
+
     fake = FakeScheduler()
     monkeypatch.setattr(rt, "AsyncIOScheduler", lambda: fake)
 
@@ -132,17 +250,13 @@ async def _run_runtime(
         "app.services.calendar_service.is_trading_day_async", _fake_is_trading
     )
 
-    class _JR:
-        id = "fake-jr"
-        status = "running"
-        metadata_json = None
-
     async def _fake_create_job_run(db, name, biz, *, scheduled_at, run_key):  # noqa: ANN001
         rec["create_job_run_calls"].append((name, biz, run_key))
         return None if create_job_run_returns_none else _JR()
 
     async def _fake_finish_job_run(db, job_run, status, **kw):  # noqa: ANN001
         rec["finish_job_run_calls"].append((status, kw))
+        _unfenced_calls.append((status, kw))
 
     class _AfterCloseRun:
         id = "after-close-1"
@@ -248,10 +362,7 @@ def test_runtime_source_contract() -> None:
     # ValueError vs Exception kept distinct
     assert "except ValueError as exc:" in src
     assert "except Exception as exc:" in src
-    # heartbeat cadence preserved
-    assert "if idx % 5 == 4:" in src
-    assert "update_job_heartbeat(db, job_run)" in src
-    # final-status mapping preserved
+    # final-status mapping preserved (partial_failed is now a first-class terminal)
     assert 'final_status = "succeeded"' in src
     assert 'final_status = "partial_failed"' in src
     assert 'final_status = "failed"' in src
@@ -271,6 +382,17 @@ def test_runtime_source_contract() -> None:
     # no generic scheduler abstraction / second business owner
     assert "StrategySchedulerService" not in src
     assert "GenericScheduler" not in src
+    # [C2B] terminal + metadata go through the fenced primitives, not _finish_job_run
+    assert "FencedJobToken(" in src
+    assert "FencedJobHeartbeat(" in src
+    assert "interval_seconds=30.0" in src
+    assert "merge_owned_job_run_metadata(" in src
+    assert "finalize_job_run(" in src
+    assert "heartbeat.ensure_owned()" in src
+    assert "JobLeaseLostError" in src
+    # the old selector-count heartbeat must be gone
+    assert "if idx % 5 == 4:" not in src
+    assert "update_job_heartbeat(db, job_run)" not in src
 
 
 # --------------------------------------------------------------------------- #
@@ -311,18 +433,37 @@ def test_duplicate_skips_selector_and_owners(monkeypatch) -> None:  # noqa: ANN0
     assert rec["create_batch_calls"] == []
 
 
-def test_final_status_succeeded(monkeypatch) -> None:  # noqa: ANN001
+def test_strategy_fenced_success_terminal(monkeypatch) -> None:  # noqa: ANN001
     rec: dict = {}
     fake, rec = asyncio.run(
         _run_runtime(monkeypatch, selector_keys=["OTHER_A", "OTHER_B", "OTHER_C"], rec=rec)
     )
     asyncio.run(_job(fake, "strategy_run_daily")["func"]())
-    assert rec["finish_job_run_calls"][-1][0] == "succeeded"
-    assert rec["create_after_close_calls"] == []
-    assert len(rec["create_batch_calls"]) == 3
+
+    assert _finalize_calls  # reached terminal
+    assert len(_finalize_calls) == 1
+    call = _finalize_calls[0]
+    assert call["status"] == "succeeded"
+    assert call["total_count"] == 3
+    assert call["succeeded_count"] == 3
+    assert call["failed_count"] == 0
+    # token carries the created job_run ownership fields
+    token = call["token"]
+    assert token.job_run_id == "fake-jr"
+    assert token.worker_instance_id == "strategy-owner"
+    assert token.lease_epoch == 1
+    assert token.lease_seconds == 120
+    # mid-loop metadata merges were fenced (one per non-DSA selector)
+    assert len(_merge_calls) == 3
+    # heartbeat lifecycle: 30s, started before business, stopped in finally
+    assert len(_heartbeats) == 1
+    assert _heartbeats[0].interval_seconds == 30.0
+    assert _heartbeats[0].started is True
+    assert _heartbeats[0].stopped is True
+    _assert_no_unfenced()
 
 
-def test_final_status_partial_failed(monkeypatch) -> None:  # noqa: ANN001
+def test_strategy_fenced_partial_failed_terminal(monkeypatch) -> None:  # noqa: ANN001
     rec: dict = {}
     fake, rec = asyncio.run(
         _run_runtime(
@@ -333,13 +474,21 @@ def test_final_status_partial_failed(monkeypatch) -> None:  # noqa: ANN001
         )
     )
     asyncio.run(_job(fake, "strategy_run_daily")["func"]())
-    assert rec["finish_job_run_calls"][-1][0] == "partial_failed"
-    # DSA branch still ran (1 after-close), one non-DSA failed, one succeeded
-    assert len(rec["create_after_close_calls"]) == 1
-    assert len(rec["create_batch_calls"]) == 2
+
+    assert len(_finalize_calls) == 1
+    call = _finalize_calls[0]
+    # 部分成功、部分失败 → partial_failed（一等终态，业务语义不变）
+    assert call["status"] == "partial_failed"
+    assert call["total_count"] == 3
+    assert call["succeeded_count"] == 2
+    assert call["failed_count"] == 1
+    # DSA 分支仍 merge 一次；OTHER_B 成功 merge 一次；OTHER_A 失败不 merge
+    assert len(_merge_calls) == 2
+    assert _heartbeats[0].stopped is True
+    _assert_no_unfenced()
 
 
-def test_final_status_failed(monkeypatch) -> None:  # noqa: ANN001
+def test_strategy_fenced_all_failed_terminal(monkeypatch) -> None:  # noqa: ANN001
     rec: dict = {}
     fake, rec = asyncio.run(
         _run_runtime(
@@ -350,14 +499,88 @@ def test_final_status_failed(monkeypatch) -> None:  # noqa: ANN001
         )
     )
     asyncio.run(_job(fake, "strategy_run_daily")["func"]())
-    assert rec["finish_job_run_calls"][-1][0] == "failed"
+
+    assert len(_finalize_calls) == 1
+    call = _finalize_calls[0]
+    assert call["status"] == "failed"
+    assert call["succeeded_count"] == 0
+    assert call["failed_count"] == 2
+    # 全部失败 → 没有任何 fenced metadata merge
+    assert _merge_calls == []
+    assert _heartbeats[0].stopped is True
+    _assert_no_unfenced()
 
 
-def test_heartbeat_called_once_for_five_selectors(monkeypatch) -> None:  # noqa: ANN001
+def test_strategy_no_selectors_fenced_failed_terminal(monkeypatch) -> None:  # noqa: ANN001
+    rec: dict = {}
+    fake, rec = asyncio.run(_run_runtime(monkeypatch, selector_keys=[], rec=rec))
+    asyncio.run(_job(fake, "strategy_run_daily")["func"]())
+
+    # 无 selector 分支也必须走 fenced failed terminal，不留最后一条 unfenced terminal
+    assert len(_finalize_calls) == 1
+    call = _finalize_calls[0]
+    assert call["status"] == "failed"
+    assert call["error_message"] is not None and "未找到 kind=selector" in call["error_message"]
+    assert _merge_calls == []
+    assert _heartbeats[0].stopped is True
+    _assert_no_unfenced()
+
+
+def test_strategy_uses_time_based_fenced_heartbeat(monkeypatch) -> None:  # noqa: ANN001
     rec: dict = {}
     fake, rec = asyncio.run(
         _run_runtime(monkeypatch, selector_keys=["K1", "K2", "K3", "K4", "K5"], rec=rec)
     )
     asyncio.run(_job(fake, "strategy_run_daily")["func"]())
-    # idx % 5 == 4 -> only the 5th (idx=4) selector triggers a heartbeat
-    assert rec["update_heartbeat_calls"] == 1
+
+    # C2B 退休「每 5 个 selector 才 heartbeat」的错设计：
+    # 全程只有一个 30s FencedJobHeartbeat，且旧 update_job_heartbeat 不再被调用。
+    assert len(_heartbeats) == 1
+    assert _heartbeats[0].interval_seconds == 30.0
+    assert _heartbeats[0].started is True
+    assert _heartbeats[0].stopped is True
+    assert rec["update_heartbeat_calls"] == 0
+    assert _finalize_calls[-1]["status"] == "succeeded"
+    _assert_no_unfenced()
+
+
+def test_strategy_lease_lost_during_loop_no_terminal(monkeypatch) -> None:  # noqa: ANN001
+    # 模拟循环内 ensure_owned 检测到 ownership 已转移：后续 selector 必须尽快停止，
+    # 且不得写任何 terminal（fenced 或 unfenced）。
+    fake, _ = asyncio.run(_run_runtime(monkeypatch, selector_keys=["OTHER_A", "OTHER_B", "OTHER_C"]))
+    _lose_lease["v"] = True
+    asyncio.run(_job(fake, "strategy_run_daily")["func"]())
+
+    assert _finalize_calls == []
+    assert _merge_calls == []
+    _assert_no_unfenced()
+    assert len(_heartbeats) == 1
+    assert _heartbeats[0].stopped is True
+
+
+def test_strategy_metadata_merge_lease_lost_no_terminal(monkeypatch) -> None:  # noqa: ANN001
+    # 仅 metadata merge 阶段丢失 ownership：merge 抛 JobLeaseLostError → 停止循环，
+    # 不得再用 stale worker 覆盖 terminal。
+    fake, _ = asyncio.run(_run_runtime(monkeypatch, selector_keys=["OTHER_A", "OTHER_B"]))
+    _merge_lost["v"] = True
+    asyncio.run(_job(fake, "strategy_run_daily")["func"]())
+
+    assert _finalize_calls == []
+    # merge 被拒绝：要么未触达（ensure_owned 先失），要么触发了一次失败 merge 尝试；
+    # 关键断言是「没有 stale terminal / 没有 unfenced terminal」。
+    assert len(_heartbeats) == 1
+    assert _heartbeats[0].stopped is True
+    _assert_no_unfenced()
+
+
+def test_strategy_finalize_race_lost_ownership_no_double_write(monkeypatch) -> None:  # noqa: ANN001
+    # ensure_owned 成功但 finalize 返回 False（两次检查之间 ownership 被抢占）：
+    # runtime 不得重试/双写。
+    _finalize_return[0] = False
+    fake, _ = asyncio.run(_run_runtime(monkeypatch, selector_keys=["OTHER_A", "OTHER_B"]))
+    asyncio.run(_job(fake, "strategy_run_daily")["func"]())
+
+    assert len(_finalize_calls) == 1
+    assert _finalize_calls[0]["status"] == "succeeded"
+    _assert_no_unfenced()
+    assert _heartbeats[0].stopped is True

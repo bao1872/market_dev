@@ -167,7 +167,7 @@ async def finalize_job_run(
     now: datetime | None = None,
 ) -> bool:
     """Write a terminal state iff the caller still owns the current lease."""
-    if status not in {"succeeded", "failed", "skipped"}:
+    if status not in {"succeeded", "partial_failed", "failed", "skipped"}:
         raise ValueError(f"unsupported terminal status: {status}")
     finished_at = now or datetime.now(_TZ)
     async with session_factory() as db:
