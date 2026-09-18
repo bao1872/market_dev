@@ -15,6 +15,8 @@ import inspect
 import logging
 import uuid
 
+import pytest
+
 from app.services import calendar_scheduler_worker_runtime as rt
 from app.services.fenced_job_run_service import JobLeaseLostError
 
@@ -148,6 +150,7 @@ async def _run_runtime(
     monkeypatch,  # noqa: ANN001
     *,
     create_returns_none: bool = True,
+    create_raises: bool = False,
     seed_raises: bool = False,
     calls: dict | None = None,
 ):
@@ -161,6 +164,8 @@ async def _run_runtime(
 
     async def _fake_create_job_run(db, name, biz, *, scheduled_at, run_key):  # noqa: ANN001
         calls.setdefault("create_job_run", []).append((name, biz, run_key))
+        if create_raises:
+            raise RuntimeError("create boom")
         return None if create_returns_none else FakeJobRun()
 
     async def _fake_seed(session, year, force=False):  # noqa: ANN001
@@ -332,14 +337,29 @@ def test_calendar_fenced_failure_terminal(monkeypatch) -> None:  # noqa: ANN001
         _run_runtime(monkeypatch, create_returns_none=False, seed_raises=True)
     )
     job = _job(fake, "calendar_scheduler")
-    asyncio.run(job["func"]())
+    # seed 异常必须继续向 APScheduler 传播（恢复 W1 exception semantics）。
+    with pytest.raises(RuntimeError, match="seed boom"):
+        asyncio.run(job["func"]())
 
-    # seed 异常 → 恰好一次 fenced failed terminal，带 error_message
+    # seed 异常 → 恰好一次 fenced failed terminal，带 error_message；且异常继续传播
     assert len(_finalize_calls) == 1
     call = _finalize_calls[0]
     assert call["status"] == "failed"
     assert call["error_message"] is not None and "seed boom" in call["error_message"]
     assert _heartbeats[0].stopped is True
+    _assert_no_unfenced()
+
+
+def test_calendar_create_failure_propagates(monkeypatch) -> None:  # noqa: ANN001
+    # create_job_run 抛异常：尚未建立 owner token，不得安全 fenced terminal；
+    # 原异常必须继续向 APScheduler 传播。
+    fake, _ = asyncio.run(_run_runtime(monkeypatch, create_raises=True))
+    job = _job(fake, "calendar_scheduler")
+    with pytest.raises(RuntimeError, match="create boom"):
+        asyncio.run(job["func"]())
+
+    assert _finalize_calls == []
+    assert _heartbeats == []
     _assert_no_unfenced()
 
 

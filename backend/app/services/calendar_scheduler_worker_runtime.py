@@ -85,6 +85,7 @@ async def run_calendar_scheduler_worker_runtime(
 
         today = shanghai_business_date()
         job_run = None
+        heartbeat_started = False
         try:
             async with session_factory() as session:
                 # [CalendarScheduler] - scheduled_at 为 CronTrigger 计划时间（02:00），不等于 started_at
@@ -115,6 +116,7 @@ async def run_calendar_scheduler_worker_runtime(
                 )
                 heartbeat = FencedJobHeartbeat(token, interval_seconds=30.0)
                 await heartbeat.start()
+                heartbeat_started = True
                 try:
                     for year in (today.year, today.year + 1):
                         count = await seed_calendar_from_mootdx(session, year=year, force=False)
@@ -162,12 +164,16 @@ async def run_calendar_scheduler_worker_runtime(
                                 "calendar_scheduler 已失去 ownership，跳过 failed terminal 写入: %s",
                                 today,
                             )
+                    # 真正的业务异常必须继续向 APScheduler 传播（恢复 W1 exception semantics）。
+                    raise
                 finally:
                     await heartbeat.stop()
         except Exception as exc:
             # 建立 fenced token / 启动 heartbeat 之前的创建阶段异常：无法安全 fenced
-            # terminal，仅记录（由 watchdog 合法 recovery），不再回退到 unfenced finish。
-            logger.exception("日历刷新创建/启动异常: %s", exc)
+            # terminal，仅记录（由 watchdog 合法 recovery）+ 继续向 APScheduler 传播。
+            if not heartbeat_started:
+                logger.exception("日历刷新创建/启动异常: %s", exc)
+            raise
 
     scheduler.add_job(
         calendar_job,
