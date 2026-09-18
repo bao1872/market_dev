@@ -1037,7 +1037,7 @@ async def _chip_consensus_poll_once() -> bool:
 
 
 async def run_chip_consensus_worker() -> None:
-    """[ChipConsensusWorker] - 盘后筹码共识独立 Worker：领取 queued 任务并执行。
+    """[ChipConsensusWorker] - 盘后筹码共识独立 Worker（thin façade）。
 
     [P0-3 ref/instruction.md §二.3] chip 任务有执行者：
     - 在现有 after-close worker 容器内增加独立 poll 函数和 WORKER_TYPE 分支
@@ -1054,37 +1054,23 @@ async def run_chip_consensus_worker() -> None:
     - SIGTERM/SIGINT 设置 _shutdown=True
     - 主循环在领取新任务前检查 _shutdown
     - 当前正在执行的 chip consensus 完成后才退出
+
+    lifecycle 实现已迁移到 app.services.chip_consensus_worker_runtime.run_chip_consensus_worker_runtime；
+    本函数仅做依赖注入后委托，独立创建 chip_consensus heartbeat。
     """
-    _hb_task = asyncio.create_task(_heartbeat_loop("chip_consensus"))
-    logger.info(
-        "[ChipConsensusWorker] 启动（间隔=%ds）", WORKER_INTERVAL,
+    from app.services.chip_consensus_worker_runtime import (
+        run_chip_consensus_worker_runtime,
     )
 
-    # 启动恢复：清理上次崩溃残留的 running 任务（由 watchdog 转为 interrupted → resume_queued）
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await recover_stale_scheduler_job_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info(
-                    "[ChipConsensusWorker] 启动恢复: %d 个过期任务", recovered,
-                )
-    except Exception as exc:
-        logger.exception("[ChipConsensusWorker] 启动恢复异常: %s", exc)
-
-    while not _shutdown:
-        try:
-            await _chip_consensus_poll_once()
-        except Exception as exc:
-            # _chip_consensus_poll_once 内部已捕获执行异常，
-            # 此处仅捕获领取阶段的意外异常
-            logger.exception("[ChipConsensusWorker] 轮询异常: %s", exc)
-        if _shutdown:
-            logger.info("[ChipConsensusWorker] SIGTERM drain: 不再领取新任务，准备退出")
-            break
-        await asyncio.sleep(WORKER_INTERVAL)
-
-    logger.info("[ChipConsensusWorker] SIGTERM drain complete, finished current item")
+    await run_chip_consensus_worker_runtime(
+        session_factory=AsyncSessionLocal,
+        heartbeat_loop=_heartbeat_loop,
+        recover_stale_job_runs=recover_stale_scheduler_job_runs,
+        poll_once=_chip_consensus_poll_once,
+        should_shutdown=lambda: _shutdown,
+        worker_interval=lambda: WORKER_INTERVAL,
+        logger=logger,
+    )
 
 
 # =============================================================================
