@@ -10,9 +10,11 @@
 - 反向回归：worker 模块不再暴露 is_pickup_admitted（admission 子系统已删除）。
 """
 import asyncio
+import logging
 
 import pytest
 
+import app.services.after_close_orchestrator_worker_runtime as rt
 import app.worker as worker
 
 
@@ -178,7 +180,7 @@ async def test_drain_co_process_no_cancel():
         await asyncio.sleep(0.01)
 
     t = asyncio.create_task(_work())
-    await worker._drain_co_process(t, "x")
+    await rt._drain_co_process(t, "x", logging.getLogger("test-drain"))
     assert t.done()
     assert not t.cancelled()
 
@@ -190,7 +192,7 @@ async def test_drain_co_process_already_done():
     t = asyncio.create_task(_work())
     await t
     # 已完成的 task 应立即返回，不报错
-    await worker._drain_co_process(t, "x")
+    await rt._drain_co_process(t, "x", logging.getLogger("test-drain"))
 
 
 async def test_drain_co_process_exception_isolated():
@@ -199,5 +201,5 @@ async def test_drain_co_process_exception_isolated():
 
     t = asyncio.create_task(_boom())
     # 异常被隔离（仅记录），不向上抛出
-    await worker._drain_co_process(t, "x")
+    await rt._drain_co_process(t, "x", logging.getLogger("test-drain"))
     assert t.done()

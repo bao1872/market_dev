@@ -273,9 +273,11 @@ def test_b2_after_close_worker_source_has_no_chip_wiring():
     assert "_chip_co_process_task" not in code, (
         "chip co-process task 变量应随退役一并移除"
     )
-    # 注：ast.unparse 会把字符串字面量统一为单引号，故此处按 unparse 形态断言
-    assert "_drain_co_process(_auction_co_process_task, 'Auction')" in code, (
-        "Auction co-process 的 drain 必须保留（退役不得波及其他 co-process）"
+    # W5A：process lifecycle（含 Auction drain）已迁到 runtime 模块，故 drain 守卫改查 runtime
+    import app.services.after_close_orchestrator_worker_runtime as rt_mod
+    rt_code = _executable_code(rt_mod.run_after_close_orchestrator_worker_runtime)
+    assert "_drain_co_process(_auction_co_process_task, 'Auction', logger)" in rt_code, (
+        "Auction co-process 的 drain 必须保留（已随 lifecycle 迁到 runtime 模块）"
     )
 
 

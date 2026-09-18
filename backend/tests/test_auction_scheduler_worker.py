@@ -90,23 +90,28 @@ def test_compose_has_no_auction_scheduler_service() -> None:
 
 
 def test_worker_module_starts_auction_co_process_in_after_close_worker() -> None:
-    """守护：run_after_close_orchestrator_worker 内部必须启动 _run_auction_scheduler_co_process。
+    """守护：after-close worker 必须启动 Auction co-process（生产入口为 co-process）。
 
     验证：
-    1. run_after_close_orchestrator_worker 函数体内调用 _run_auction_scheduler_co_process
-    2. 在 finally 块中 await 该 task（SIGTERM drain）
+    1. worker.py 仍定义 _run_auction_scheduler_co_process（owner 未迁移）
+    2. W5A：process lifecycle 已抽到 runtime 模块，Auction 的 create_task + drain 在 runtime 内
     """
+    import inspect
+
+    import app.services.after_close_orchestrator_worker_runtime as rt_mod
+
     content = _WORKER_FILE.read_text(encoding="utf-8")
-    # 1. 必须定义 _run_auction_scheduler_co_process
+    # 1. worker 仍定义 _run_auction_scheduler_co_process（owner 未迁移）
     assert "async def _run_auction_scheduler_co_process" in content, (
         "worker.py 必须定义 _run_auction_scheduler_co_process"
     )
-    # 2. run_after_close_orchestrator_worker 内必须 create_task 启动它
-    assert "_run_auction_scheduler_co_process" in content
-    # 3. 必须有 finally 块 drain（通过 _drain_co_process，禁止裸 Task.cancel）
-    # 简化检查：搜索 _drain_co_process(_auction_co_process_task
-    assert "_drain_co_process(_auction_co_process_task" in content, (
-        "run_after_close_orchestrator_worker 必须在 finally 块 drain Auction co-process"
+    # 2. lifecycle（含 Auction create_task + finally drain）现在位于 runtime 模块
+    rt_code = inspect.getsource(rt_mod.run_after_close_orchestrator_worker_runtime)
+    assert "asyncio.create_task(run_auction_co_process())" in rt_code, (
+        "runtime 必须在启动阶段 create_task 启动 Auction co-process"
+    )
+    assert "_drain_co_process(_auction_co_process_task" in rt_code, (
+        "runtime 必须在 finally 块 drain Auction co-process（禁止裸 Task.cancel）"
     )
 
 
@@ -882,19 +887,17 @@ async def test_co_process_calls_recover_on_startup() -> None:
 async def test_co_process_no_duplicate_background_tasks() -> None:
     """测试 11 续：co-process 是单 task，主 Worker 只 create_task 一次。
 
-    通过检查 run_after_close_orchestrator_worker 源码中 create_task 调用次数。
+    W5A：process lifecycle 已迁到 runtime 模块，故检查 runtime 源码中 create_task 次数。
     """
-    content = _WORKER_FILE.read_text(encoding="utf-8")
-    # 定位 run_after_close_orchestrator_worker 函数体
-    start = content.index("async def run_after_close_orchestrator_worker")
-    # 截取到下一个 async def（函数结束）
-    next_def = content.index("\nasync def ", start + 1)
-    func_body = content[start:next_def]
+    import inspect
 
-    # _run_auction_scheduler_co_process 的 create_task 应只出现一次
-    create_count = func_body.count("create_task(_run_auction_scheduler_co_process")
+    import app.services.after_close_orchestrator_worker_runtime as rt_mod
+
+    rt_code = inspect.getsource(rt_mod.run_after_close_orchestrator_worker_runtime)
+    # run_auction_co_process 的 create_task 应只出现一次
+    create_count = rt_code.count("create_task(run_auction_co_process())")
     assert create_count == 1, (
-        f"run_after_close_orchestrator_worker 应只 create_task 一次 co-process，实际: {create_count}"
+        f"runtime 应只 create_task 一次 Auction co-process，实际: {create_count}"
     )
 
 
