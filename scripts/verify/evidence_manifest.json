@@ -233,6 +233,18 @@
         "tests/test_chip_consensus_worker.py::test_worker_missing_metadata_marks_failed"
       ],
       "claim": "Chip consensus poll preserves real PostgreSQL claim, resume, and fencing semantics: queued work is claimed once with lease epoch advancement, concurrent transactions enforce exactly-one claim through FOR UPDATE SKIP LOCKED, interrupted work resumes through resume_queued, stale epochs cannot overwrite either terminal state or running-job metadata owned by a newer epoch, and metadata-invalid claimed work reaches a fenced failed terminal state."
-    }
-  ]
-}
+      },
+      {
+      "contract_id": "scheduler_stale_recovery_fencing",
+      "governance_level": 2,
+      "semantic_owner": "app.services.scheduler_job_run_recovery_service",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+      "tests/test_scheduler_job_run_recovery_service.py::test_lease_expired_recovered_to_interrupted",
+      "tests/test_scheduler_job_run_recovery_service.py::test_stale_recovery_atomically_fences_old_epoch_writer"
+      ],
+      "claim": "Ordinary stale SchedulerJobRun recovery atomically transitions expired unhealthy running work to interrupted while incrementing lease_epoch and clearing lease_expires_at; stale writers holding the previous epoch cannot mutate the recovered row."
+      }
+      ]
+      }
