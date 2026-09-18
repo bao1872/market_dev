@@ -35,6 +35,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.services.fenced_job_run_service import (
+    FencedJobHeartbeat,
+    FencedJobToken,
+    JobLeaseLostError,
+    finalize_job_run,
+)
 
 SessionFactory = Callable[[], Any]
 HeartbeatLoop = Callable[[str], Coroutine[Any, Any, None]]
@@ -179,25 +185,85 @@ async def run_bars_scheduler_worker_runtime(
                     return
                 await db.commit()
 
-            async with session_factory() as db:
-                result = await sync_share_capitals(db)
-
-            logger.info(
-                "股本同步完成: total=%d succeeded=%d failed=%d skipped_bj=%d",
-                result["total"], result["succeeded"], result["failed"], result["skipped_bj"],
+            # [C2A] 建立 fenced ownership token，脱离 unfenced 的 _finish_job_run：
+            # 健康 owner 持续刷新 lease（watchdog 不会误 recovery），ownership 丢失时
+            # stale owner 的 terminal 写被拒。
+            if not job_run.worker_instance_id:
+                raise RuntimeError(
+                    f"share_capital_sync create_job_run 未设置 worker_instance_id: "
+                    f"job_run_id={job_run.id}"
+                )
+            token = FencedJobToken(
+                job_run_id=job_run.id,
+                worker_instance_id=job_run.worker_instance_id,
+                lease_epoch=job_run.lease_epoch,
+                lease_seconds=120,
             )
-            if job_run is not None:
+            heartbeat = FencedJobHeartbeat(token, interval_seconds=30.0)
+            await heartbeat.start()
+            try:
                 async with session_factory() as db:
-                    await finish_job_run(
-                        db, job_run, "succeeded",
-                        success_count=result["succeeded"],
-                        failure_count=result["failed"],
+                    result = await sync_share_capitals(db)
+
+                logger.info(
+                    "股本同步完成: total=%d succeeded=%d failed=%d skipped_bj=%d",
+                    result["total"], result["succeeded"], result["failed"], result["skipped_bj"],
+                )
+                # ownership 仍持有才允许 terminal
+                heartbeat.ensure_owned()
+                finalized = await finalize_job_run(
+                    token,
+                    status="succeeded",
+                    metadata_updates={},
+                    total_count=result["total"],
+                    succeeded_count=result["succeeded"],
+                    failed_count=result["failed"],
+                )
+                if not finalized:
+                    logger.warning(
+                        "share_capital_sync 已失去 ownership，跳过 succeeded terminal 写入: "
+                        "business_date=%s",
+                        trade_date,
                     )
+            except JobLeaseLostError:
+                logger.warning(
+                    "share_capital_sync lease 已丢失，跳过 terminal 写入: business_date=%s",
+                    trade_date,
+                )
+            except Exception as exc:
+                logger.exception("股本同步异常: %s", exc)
+                # 异常路径：仍持有 token 才 fenced failed terminal；已丢失则仅告警，
+                # 不做第二次 unfenced terminal 写。
+                try:
+                    heartbeat.ensure_owned()
+                except JobLeaseLostError:
+                    logger.warning(
+                        "share_capital_sync lease 已丢失，跳过 failed terminal 写入: "
+                        "business_date=%s",
+                        trade_date,
+                    )
+                else:
+                    finalized = await finalize_job_run(
+                        token,
+                        status="failed",
+                        metadata_updates={},
+                        total_count=0,
+                        succeeded_count=0,
+                        failed_count=0,
+                        error_message=str(exc)[:500],
+                    )
+                    if not finalized:
+                        logger.warning(
+                            "share_capital_sync 已失去 ownership，跳过 failed terminal 写入: "
+                            "business_date=%s",
+                            trade_date,
+                        )
+            finally:
+                await heartbeat.stop()
         except Exception as exc:
-            logger.exception("股本同步异常: %s", exc)
-            if job_run is not None:
-                async with session_factory() as db:
-                    await finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
+            # 建立 fenced token / 启动 heartbeat 之前的创建阶段异常：无法安全 fenced
+            # terminal，仅记录（由 watchdog 合法 recovery），不再回退到 unfenced finish。
+            logger.exception("股本同步创建/启动异常: %s", exc)
 
     scheduler.add_job(
         scheduled_share_capital_sync,

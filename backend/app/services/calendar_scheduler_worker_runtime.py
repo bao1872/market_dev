@@ -32,6 +32,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from app.models.scheduler_job_run import SchedulerJobRun
+from app.services.fenced_job_run_service import (
+    FencedJobHeartbeat,
+    FencedJobToken,
+    JobLeaseLostError,
+    finalize_job_run,
+)
 
 SessionFactory = Callable[[], Any]
 HeartbeatLoop = Callable[[str], Coroutine[Any, Any, None]]
@@ -93,18 +99,75 @@ async def run_calendar_scheduler_worker_runtime(
                     logger.info("calendar_scheduler SKIPPED_DUPLICATE business_date=%s", today)
                     return
                 from app.services.calendar_seed import seed_calendar_from_mootdx
-                total_count = 0
-                for year in (today.year, today.year + 1):
-                    count = await seed_calendar_from_mootdx(session, year=year, force=False)
-                    total_count += count
-                    logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
-                await finish_job_run(session, job_run, "succeeded", success_count=1)
+
+                # [C2A] 建立 fenced ownership token，脱离 unfenced 的 _finish_job_run；
+                # 两个年度 seed 之间校验 ownership，lease 已失则不必继续第二年工作。
+                if not job_run.worker_instance_id:
+                    raise RuntimeError(
+                        f"calendar_scheduler create_job_run 未设置 worker_instance_id: "
+                        f"job_run_id={job_run.id}"
+                    )
+                token = FencedJobToken(
+                    job_run_id=job_run.id,
+                    worker_instance_id=job_run.worker_instance_id,
+                    lease_epoch=job_run.lease_epoch,
+                    lease_seconds=120,
+                )
+                heartbeat = FencedJobHeartbeat(token, interval_seconds=30.0)
+                await heartbeat.start()
+                try:
+                    for year in (today.year, today.year + 1):
+                        count = await seed_calendar_from_mootdx(session, year=year, force=False)
+                        logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
+                        # 年度之间校验 ownership，lease 已失则不必继续第二年
+                        heartbeat.ensure_owned()
+                    finalized = await finalize_job_run(
+                        token,
+                        status="succeeded",
+                        metadata_updates={},
+                        total_count=1,
+                        succeeded_count=1,
+                        failed_count=0,
+                    )
+                    if not finalized:
+                        logger.warning(
+                            "calendar_scheduler 已失去 ownership，跳过 succeeded terminal 写入: %s",
+                            today,
+                        )
+                except JobLeaseLostError:
+                    logger.warning(
+                        "calendar_scheduler lease 已丢失，跳过 terminal 写入: %s", today
+                    )
+                except Exception as exc:
+                    logger.error("日历刷新失败: %s", exc)
+                    # 异常路径：仍持有 token 才 fenced failed terminal；已丢失则仅告警。
+                    try:
+                        heartbeat.ensure_owned()
+                    except JobLeaseLostError:
+                        logger.warning(
+                            "calendar_scheduler lease 已丢失，跳过 failed terminal 写入: %s", today
+                        )
+                    else:
+                        finalized = await finalize_job_run(
+                            token,
+                            status="failed",
+                            metadata_updates={},
+                            total_count=0,
+                            succeeded_count=0,
+                            failed_count=0,
+                            error_message=str(exc)[:500],
+                        )
+                        if not finalized:
+                            logger.warning(
+                                "calendar_scheduler 已失去 ownership，跳过 failed terminal 写入: %s",
+                                today,
+                            )
+                finally:
+                    await heartbeat.stop()
         except Exception as exc:
-            logger.error("日历刷新失败: %s", exc)
-            if job_run is not None:
-                async with session_factory() as db:
-                    await finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
-            raise
+            # 建立 fenced token / 启动 heartbeat 之前的创建阶段异常：无法安全 fenced
+            # terminal，仅记录（由 watchdog 合法 recovery），不再回退到 unfenced finish。
+            logger.exception("日历刷新创建/启动异常: %s", exc)
 
     scheduler.add_job(
         calendar_job,
