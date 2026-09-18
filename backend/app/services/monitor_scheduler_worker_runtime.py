@@ -1,15 +1,14 @@
 """Monitor scheduler worker main lifecycle, separate from the process composition root.
 
-This module owns ONLY the Monitor Scheduler main polling lifecycle: the trading-
-session loop, intraday cycle execution, session job-run acquisition/reuse, startup
-stale recovery, and graceful shutdown.  It does NOT re-implement any business rule:
+This module owns the Monitor Scheduler main polling lifecycle AND the Monitor-specific
+session helpers (moved from the composition root in PANJI-GOV-W4A / W4B1):
 
-* Trading-session classification (morning / afternoon / non-session) lives in the
-  injected ``get_monitor_session`` (the composition root's
-  :func:`app.worker._get_monitor_session`).
-* Monitor session job-run acquisition/reuse lives in the injected
-  ``find_or_create_session_job_run`` (the composition root's
-  :func:`app.worker._find_or_create_monitor_session_job_run`).
+* Trading-session classification (morning / afternoon / non-session) is owned by this
+  module's :func:`_get_monitor_session`; the boundary rules are preserved verbatim.
+* Monitor session job-run acquisition/reuse is owned by this module's
+  :func:`_find_or_create_monitor_session_job_run`, a thin wrapper that delegates canonical
+  ``SchedulerJobRun`` creation to the injected ``create_job_run`` (the composition root's
+  :func:`app.worker._create_job_run`).  It does NOT insert, commit, or recover on its own.
 * Startup / error Feishu notification lives in the injected ``notify_monitor_status``
   (the composition root's :func:`app.worker._notify_monitor_status`).
 * The generic ``SchedulerJobRun`` state rules (finish / recover) are injected by the
@@ -20,10 +19,11 @@ stale recovery, and graceful shutdown.  It does NOT re-implement any business ru
   composition root keeps ownership of the time source.
 
 The top-level :mod:`app.worker` module supplies the session factory, heartbeat
-ownership, shared shutdown signal, the canonical helpers, and business owners.  This
-is a pure structural extraction (PANJI-GOV-W4A); no cron / trading-session boundary /
-reentrancy guard / transaction / exception / state-update / sleep-cadence / notify
-timing semantics changed.
+ownership, shared shutdown signal, the canonical helpers, and business owners.  This is a
+pure structural extraction (PANJI-GOV-W4A and W4B1); no cron / trading-session boundary /
+reentrancy guard / transaction / exception / state-update / sleep-cadence / notify timing
+semantics changed.  In W4B1 the Monitor session helpers moved here and ``create_job_run``
+became an injected dependency rather than a worker import.
 """
 
 from __future__ import annotations
@@ -45,11 +45,62 @@ SessionFactory = Callable[[], Any]
 HeartbeatLoop = Callable[[str], Coroutine[Any, Any, None]]
 ShutdownProbe = Callable[[], bool]
 RecoverStaleJobRuns = Callable[[Any], Coroutine[Any, Any, int]]
-GetMonitorSession = Callable[..., Any]
-FindOrCreateSessionJobRun = Callable[..., Coroutine[Any, Any, SchedulerJobRun | None]]
+CreateJobRun = Callable[..., Coroutine[Any, Any, SchedulerJobRun | None]]
 FinishJobRun = Callable[..., Coroutine[Any, Any, None]]
 NotifyMonitorStatus = Callable[..., Coroutine[Any, Any, None]]
 MonotonicClock = Callable[[], float]
+
+
+def _get_monitor_session(
+    now_cst: Any,
+) -> tuple[str, time_cls, time_cls] | None:
+    """根据当前上海时间返回盘中交易时段标签与起止时间。
+
+    Returns:
+        (label, start_time, end_time) 或 None（非交易时段）
+
+    边界（逐字保持）：
+        - 09:30 包含，11:30 不包含
+        - 13:00 包含，15:00 不包含
+    """
+    current_time = now_cst.time()
+    morning_start = time_cls(9, 30)
+    morning_end = time_cls(11, 30)
+    afternoon_start = time_cls(13, 0)
+    afternoon_end = time_cls(15, 0)
+
+    if morning_start <= current_time < morning_end:
+        return ("morning", morning_start, morning_end)
+    if afternoon_start <= current_time < afternoon_end:
+        return ("afternoon", afternoon_start, afternoon_end)
+    return None
+
+
+async def _find_or_create_monitor_session_job_run(
+    db: Any,
+    now_cst: Any,
+    business_date: str,
+    session_label: str,
+    *,
+    create_job_run: CreateJobRun,
+) -> SchedulerJobRun | None:
+    """查找或创建当前交易时段的 monitor_scheduler job_run（幂等版本）。
+
+    基于 run_key=monitor_scheduler:{business_date}:{session_label} 唯一索引保证 session 幂等。
+    返回 SchedulerJobRun 表示新建；返回 None 表示 session 已存在（调用方应按 run_key 查询复用）。
+
+    仅作为 canonical _create_job_run 的 Monitor-specific wrapper；不直接 INSERT、
+    不调用 idempotency_service、不自行 commit/recover。
+    """
+    run_key = f"monitor_scheduler:{business_date}:{session_label}"
+    return await create_job_run(
+        db,
+        "monitor_scheduler",
+        business_date,
+        lease_seconds=120,
+        metadata={"session_label": session_label},
+        run_key=run_key,
+    )
 
 
 async def run_monitor_scheduler_worker_runtime(
@@ -58,8 +109,7 @@ async def run_monitor_scheduler_worker_runtime(
     heartbeat_loop: HeartbeatLoop,
     should_shutdown: ShutdownProbe,
     recover_stale_job_runs: RecoverStaleJobRuns,
-    get_monitor_session: GetMonitorSession,
-    find_or_create_session_job_run: FindOrCreateSessionJobRun,
+    create_job_run: CreateJobRun,
     finish_job_run: FinishJobRun,
     notify_monitor_status: NotifyMonitorStatus,
     monotonic_clock: MonotonicClock,
@@ -70,7 +120,8 @@ async def run_monitor_scheduler_worker_runtime(
     Behavior is identical to the previous ``run_monitor_scheduler_worker`` body:
     start the heartbeat task, then inside the trading session run one
     ``MonitorBatchService.execute_monitor_cycle`` per ``cycle_interval`` second,
-    acquiring/reusing a per-session ``SchedulerJobRun``, with startup stale recovery
+    acquiring/reusing a per-session ``SchedulerJobRun`` (via the owned
+    ``_find_or_create_monitor_session_job_run``), with startup stale recovery
     (evaluations + scheduler job-runs) and graceful shutdown.
     """
     _hb_task = asyncio.create_task(heartbeat_loop("monitor_scheduler"))
@@ -124,7 +175,7 @@ async def run_monitor_scheduler_worker_runtime(
                 await asyncio.sleep(300)  # 5分钟检查一次
                 continue
 
-            session_info = get_monitor_session(now)
+            session_info = _get_monitor_session(now)
             if session_info is None:
                 # 非交易时段，等待
                 current_time = now.time()
@@ -160,8 +211,9 @@ async def run_monitor_scheduler_worker_runtime(
                 continue
 
             async with session_factory() as db:
-                job_run = await find_or_create_session_job_run(
+                job_run = await _find_or_create_monitor_session_job_run(
                     db, now, business_date, session_label,
+                    create_job_run=create_job_run,
                 )
                 if job_run is None:
                     # session 已存在，按 run_key 查询复用（更新 last_cycle_at）
@@ -275,4 +327,8 @@ async def run_monitor_scheduler_worker_runtime(
     logger.info("Monitor Scheduler Worker 已退出")
 
 
-__all__ = ["run_monitor_scheduler_worker_runtime"]
+__all__ = [
+    "run_monitor_scheduler_worker_runtime",
+    "_get_monitor_session",
+    "_find_or_create_monitor_session_job_run",
+]

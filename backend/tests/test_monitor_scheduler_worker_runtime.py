@@ -1,22 +1,30 @@
-"""Tests for the Monitor Scheduler main-runtime extraction (PANJI-GOV-W4A).
+"""Tests for the Monitor Scheduler main-runtime extraction (PANJI-GOV-W4A / W4B1).
 
 Layers mirror the Bars / Strategy / Calendar pattern:
 
 * Structural contract tests — façade only delegates, public name unchanged, the
-  runtime keeps the trading-session loop / reentrancy guard / commit+rollback+finally
-  ordering / startup & error notify timing, and injects the canonical helpers +
-  business owners (no second owner, no GenericScheduler / MonitorManager).
+  runtime owns the trading-session loop / reentrancy guard / commit+rollback+finally
+  ordering / startup & error notify timing, and now owns the two Monitor session
+  helpers (_get_monitor_session / _find_or_create_monitor_session_job_run) while
+  injecting the canonical ``create_job_run`` (no second SchedulerJobRun owner, no
+  GenericScheduler / MonitorManager).
 * Behavioral tests (fake collaborators, no DB / external service) — these lock the
-  four W4A blockers:
+  four W4A blockers plus the W4B1 ownership move:
   * eval-recovery exception must still propagate (not swallowed);
   * scheduler-job-recovery exception must still be swallowed and logged;
   * startup notification timing must be unchanged (after both recoveries, before loop);
-  * cycle commit/rollback/finally ordering must be unchanged (happy cycle runs once).
+  * cycle commit/rollback/finally ordering must be unchanged (happy cycle runs once);
+  * _get_monitor_session boundary (09:30 included / 11:30 excluded, 13:00 included /
+    15:00 excluded);
+  * _find_or_create_monitor_session_job_run delegates verbatim to the injected
+    create_job_run with the exact job_name / business_date / lease_seconds / metadata /
+    run_key.
 """
 
 import asyncio
 import inspect
 import logging
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -55,6 +63,16 @@ class FakeSessionCM:
 
     async def __aexit__(self, *exc) -> bool:
         return False
+
+
+class _FakeJobRun:
+    id = "fake-mon-jr"
+    last_cycle_at = None
+    heartbeat_at = None
+    lease_expires_at = None
+    succeeded_count = 0
+    failed_count = 0
+    metadata_json = None
 
 
 def _run_runtime(
@@ -115,22 +133,19 @@ def _run_runtime(
         else:
             rec["startup_notify_calls"].append((title, content))
 
-    def _fake_get_monitor_session(now):  # noqa: ANN001
-        from datetime import time as time_cls
-
-        return ("morning", time_cls(9, 30), time_cls(11, 30))
-
-    async def _fake_find_or_create(db, now, business_date, session_label):  # noqa: ANN001
-        class _JR:
-            id = "fake-mon-jr"
-            last_cycle_at = None
-            heartbeat_at = None
-            lease_expires_at = None
-            succeeded_count = 0
-            failed_count = 0
-            metadata_json = None
-
-        return _JR()
+    async def _fake_create_job_run(
+        db,  # noqa: ANN001
+        job_name,  # noqa: ANN001
+        business_date,  # noqa: ANN001
+        *,
+        lease_seconds=120,
+        metadata=None,  # noqa: ANN001
+        run_key=None,  # noqa: ANN001
+        **kw,  # noqa: ANN001
+    ):
+        rec.setdefault("create_job_run_calls", 0)
+        rec["create_job_run_calls"] += 1
+        return _FakeJobRun()
 
     async def _coro():
         await rt.run_monitor_scheduler_worker_runtime(
@@ -138,8 +153,7 @@ def _run_runtime(
             heartbeat_loop=_fake_heartbeat,
             should_shutdown=should_shutdown,
             recover_stale_job_runs=_fake_recover_job_runs,
-            get_monitor_session=_fake_get_monitor_session,
-            find_or_create_session_job_run=_fake_find_or_create,
+            create_job_run=_fake_create_job_run,
             finish_job_run=_fake_finish_job_run,
             notify_monitor_status=_fake_notify,
             monotonic_clock=lambda: 0.0,
@@ -165,13 +179,16 @@ def test_facade_delegates_only() -> None:
     assert "await asyncio.sleep(300)" not in src
     assert "监控服务已启动" not in src
     assert "recover_stale_evaluations" not in src
-    # façade injects the canonical helpers + business owners + monotonic clock
+    # after W4B1 the session helpers live in the runtime; the façade must no longer
+    # inject them, and must instead inject the canonical create_job_run
+    assert "get_monitor_session=_get_monitor_session" not in src
+    assert "find_or_create_session_job_run=" not in src
+    assert "create_job_run=_create_job_run" in src
+    # façade still injects the other canonical helpers + business owners + clock
     assert "session_factory=AsyncSessionLocal" in src
     assert "heartbeat_loop=_heartbeat_loop" in src
     assert "should_shutdown=lambda: _shutdown" in src
     assert "recover_stale_job_runs=recover_stale_scheduler_job_runs" in src
-    assert "get_monitor_session=_get_monitor_session" in src
-    assert "find_or_create_session_job_run=_find_or_create_monitor_session_job_run" in src
     assert "finish_job_run=_finish_job_run" in src
     assert "notify_monitor_status=_notify_monitor_status" in src
     assert "monotonic_clock=_time_monotonic" in src
@@ -185,7 +202,9 @@ def test_facade_public_name_preserved() -> None:
 
 
 def test_runtime_source_contract() -> None:
-    src = inspect.getsource(rt.run_monitor_scheduler_worker_runtime)
+    # Inspect the whole module: the two session helpers are now module-level
+    # functions owned by this runtime (not nested inside the main loop).
+    src = inspect.getsource(rt)
     # recovery paths
     assert "recover_stale_evaluations" in src
     assert "recover_stale_job_runs" in src
@@ -214,20 +233,86 @@ def test_runtime_source_contract() -> None:
     # monotonic clock injected (not imported as _time_monotonic)
     assert "monotonic_clock()" in src
     assert "_time_monotonic" not in src
-    # injected collaborators are called, not re-defined
+    # injected canonical create_job_run (W4B1) is called, not re-defined
+    assert "create_job_run" in src
+    assert "def _create_job_run" not in src
+    # W4B1: the two Monitor session helpers are now OWNED by the runtime
+    assert "def _get_monitor_session" in src
+    assert "def _find_or_create_monitor_session_job_run" in src
+    # runtime call sites use the internal helpers
     assert "get_monitor_session(now)" in src
-    assert "find_or_create_session_job_run(" in src
-    assert "notify_monitor_status(" in src
-    assert "finish_job_run(" in src
-    # runtime does NOT re-implement the canonical helpers / business owners
-    assert "def get_monitor_session" not in src
-    assert "def find_or_create_session_job_run" not in src
+    assert "_find_or_create_monitor_session_job_run(" in src
+    # runtime does NOT re-implement the composition-root helpers / business owners
     assert "def notify_monitor_status" not in src
     assert "def finish_job_run" not in src
     assert "def recover_stale_job_runs" not in src
     # no generic abstraction
     assert "GenericScheduler" not in src
     assert "MonitorManager" not in src
+
+
+# --------------------------------------------------------------------------- #
+# Helper boundary tests (W4B1) — no PG, no DB
+# --------------------------------------------------------------------------- #
+def test_get_monitor_session_boundaries() -> None:
+    from datetime import datetime
+    from datetime import time as tc
+
+    tz = ZoneInfo("Asia/Shanghai")
+    cases = [
+        (datetime(2026, 1, 1, 9, 29, 59, tzinfo=tz), None),
+        (datetime(2026, 1, 1, 9, 30, 0, tzinfo=tz), ("morning", tc(9, 30), tc(11, 30))),
+        (datetime(2026, 1, 1, 11, 29, 59, tzinfo=tz), ("morning", tc(9, 30), tc(11, 30))),
+        (datetime(2026, 1, 1, 11, 30, 0, tzinfo=tz), None),
+        (datetime(2026, 1, 1, 12, 59, 59, tzinfo=tz), None),
+        (datetime(2026, 1, 1, 13, 0, 0, tzinfo=tz), ("afternoon", tc(13, 0), tc(15, 0))),
+        (datetime(2026, 1, 1, 14, 59, 59, tzinfo=tz), ("afternoon", tc(13, 0), tc(15, 0))),
+        (datetime(2026, 1, 1, 15, 0, 0, tzinfo=tz), None),
+    ]
+    for now, expected in cases:
+        got = rt._get_monitor_session(now)
+        assert got == expected, f"{now}: expected {expected!r}, got {got!r}"
+
+
+def test_find_or_create_monitor_session_job_run_delegates_to_create_job_run() -> None:
+    captured: dict = {}
+    from datetime import datetime
+
+    tz = ZoneInfo("Asia/Shanghai")
+
+    async def _fake_create_job_run(
+        db,  # noqa: ANN001
+        job_name,  # noqa: ANN001
+        business_date,  # noqa: ANN001
+        *,
+        lease_seconds=120,
+        metadata=None,  # noqa: ANN001
+        run_key=None,  # noqa: ANN001
+        **kw,  # noqa: ANN001
+    ):
+        captured["job_name"] = job_name
+        captured["business_date"] = business_date
+        captured["lease_seconds"] = lease_seconds
+        captured["metadata"] = metadata
+        captured["run_key"] = run_key
+        return _FakeJobRun()
+
+    now = datetime(2026, 1, 1, 9, 45, tzinfo=tz)
+    result = asyncio.run(
+        rt._find_or_create_monitor_session_job_run(
+            db=None,
+            now_cst=now,
+            business_date="2026-01-01",
+            session_label="morning",
+            create_job_run=_fake_create_job_run,
+        )
+    )
+    assert result is not None
+    assert captured["job_name"] == "monitor_scheduler"
+    assert captured["business_date"] == "2026-01-01"
+    assert captured["lease_seconds"] == 120
+    assert captured["metadata"] == {"session_label": "morning"}
+    assert captured["run_key"] == "monitor_scheduler:2026-01-01:morning"
 
 
 # --------------------------------------------------------------------------- #
@@ -285,11 +370,20 @@ def test_job_recovery_exception_caught_startup_notify_runs(monkeypatch) -> None:
 
 
 def test_one_monitor_cycle_executes_on_trading_session(monkeypatch) -> None:  # noqa: ANN001
+    from datetime import time as tc
+
     async def _fake_is_trading(db, trade_date):  # noqa: ANN001
         return True
 
     monkeypatch.setattr(
         "app.services.calendar_service.is_trading_day_async", _fake_is_trading
+    )
+    # W4B1: the session helper is now owned by the runtime; force a morning session
+    # via monkeypatch (no time faking in the production API).
+    monkeypatch.setattr(
+        rt,
+        "_get_monitor_session",
+        lambda now: ("morning", tc(9, 30), tc(11, 30)),  # noqa: ANN001
     )
 
     state = {"n": 0}
@@ -310,3 +404,5 @@ def test_one_monitor_cycle_executes_on_trading_session(monkeypatch) -> None:  # 
     assert rec["cycle_calls"] == 1
     assert rec["commits"] >= 1
     assert rec.get("rollbacks", 0) == 0
+    # W4B1: the runtime delegated session job-run creation to the injected create_job_run
+    assert rec["create_job_run_calls"] == 1

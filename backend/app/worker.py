@@ -56,7 +56,7 @@ import os
 import signal
 import socket
 import uuid
-from datetime import UTC, datetime, time, timedelta
+from datetime import UTC, datetime, timedelta
 from time import monotonic as _time_monotonic
 from zoneinfo import ZoneInfo
 
@@ -455,51 +455,6 @@ async def run_calendar_scheduler_worker() -> None:
     )
 
 
-def _get_monitor_session(
-    now_cst: datetime,
-) -> tuple[str, time, time] | None:
-    """根据当前上海时间返回盘中交易时段标签与起止时间。
-
-    Returns:
-        (label, start_time, end_time) 或 None（非交易时段）
-    """
-    from datetime import time as time_cls
-
-    current_time = now_cst.time()
-    morning_start = time_cls(9, 30)
-    morning_end = time_cls(11, 30)
-    afternoon_start = time_cls(13, 0)
-    afternoon_end = time_cls(15, 0)
-
-    if morning_start <= current_time < morning_end:
-        return ("morning", morning_start, morning_end)
-    if afternoon_start <= current_time < afternoon_end:
-        return ("afternoon", afternoon_start, afternoon_end)
-    return None
-
-
-async def _find_or_create_monitor_session_job_run(
-    db: AsyncSession,
-    now_cst: datetime,
-    business_date: str,
-    session_label: str,
-) -> SchedulerJobRun | None:
-    """查找或创建当前交易时段的 monitor_scheduler job_run（幂等版本）。
-
-    基于 run_key=monitor_scheduler:{business_date}:{session_label} 唯一索引保证 session 幂等。
-    返回 SchedulerJobRun 表示新建；返回 None 表示 session 已存在（调用方应按 run_key 查询复用）。
-    """
-    run_key = f"monitor_scheduler:{business_date}:{session_label}"
-    return await _create_job_run(
-        db,
-        "monitor_scheduler",
-        business_date,
-        lease_seconds=120,
-        metadata={"session_label": session_label},
-        run_key=run_key,
-    )
-
-
 async def run_monitor_scheduler_worker() -> None:
     """监控调度 Worker：交易时段内每 INTRADAY_MONITOR_POLL_SECONDS 秒执行一轮监控。
 
@@ -534,8 +489,7 @@ async def run_monitor_scheduler_worker() -> None:
         heartbeat_loop=_heartbeat_loop,
         should_shutdown=lambda: _shutdown,
         recover_stale_job_runs=recover_stale_scheduler_job_runs,
-        get_monitor_session=_get_monitor_session,
-        find_or_create_session_job_run=_find_or_create_monitor_session_job_run,
+        create_job_run=_create_job_run,
         finish_job_run=_finish_job_run,
         notify_monitor_status=_notify_monitor_status,
         monotonic_clock=_time_monotonic,
