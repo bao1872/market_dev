@@ -232,3 +232,76 @@ async def test_scheduler_owned_job_stale_epoch_cannot_finalize_on_postgres() -> 
             assert meta.get("current") is True
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
+
+
+# ---------------------------------------------------------------------------
+# Test 3: partial_failed 真实 fenced terminal（C2B-V1）
+# --------------------------------------------------------------------------- #
+async def test_scheduler_owned_job_finalizes_partial_failed_on_postgres() -> None:
+    """scheduler-created running job 通过真实 ``finalize_job_run()`` 写入 ``partial_failed``
+    终态，并正确释放 ownership、保存 counts + metadata。
+
+    这是 C2B 新正式化的一等终态 contract 在真实 PostgreSQL 上的证据：Strategy runtime
+    的 ``final_status='partial_failed'`` 路径现在走的正是这个 primitive（不再走
+    ``_finish_job_run``），而 ``partial_failed`` 此前只是代码实际写库状态、未在统一状态
+    owner 中声明。此处证明该 terminal 在真实 PG 上成立，与 C2A 已证明的 refresh/finalize
+    / stale-epoch 拒绝共用同一 fenced primitive，不重复测试 stale fencing。
+    """
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        finalize_job_run,
+    )
+    from app.worker import _create_job_run
+    from tests.conftest import TestAsyncSessionLocal
+
+    run_key = f"c2b-pg:{uuid.uuid4()}"
+    # 复用与 Bars/Calendar 相同的 scheduler-create owner 路径（会 commit）。
+    async with TestAsyncSessionLocal() as db:
+        job_run = await _create_job_run(
+            db,
+            "c2b_pg_strategy",
+            _BIZ_DATE,
+            lease_seconds=120,
+            run_key=run_key,
+        )
+    assert job_run is not None
+    assert job_run.status == "running"
+    assert job_run.worker_instance_id is not None
+    job_run_id = job_run.id
+
+    try:
+        # token 直接来源于真实 job_run 的 ownership fields。
+        token = FencedJobToken(
+            job_run_id=job_run.id,
+            worker_instance_id=job_run.worker_instance_id,
+            lease_epoch=job_run.lease_epoch,
+            lease_seconds=120,
+        )
+
+        # 真实 finalize：partial_failed（C2B 新正式化的一等终态）。
+        updated = await finalize_job_run(
+            token,
+            status="partial_failed",
+            metadata_updates={"evidence": "c2b-v1"},
+            total_count=3,
+            succeeded_count=2,
+            failed_count=1,
+            session_factory=TestAsyncSessionLocal,
+        )
+        assert updated is True
+
+        # 独立 session 回读：终态 + counts + owner/lease 释放 + metadata。
+        async with TestAsyncSessionLocal() as db:
+            row = await db.get(SchedulerJobRun, job_run_id)
+            assert row is not None
+            assert row.status == "partial_failed"
+            assert row.total_count == 3
+            assert row.succeeded_count == 2
+            assert row.failed_count == 1
+            assert row.progress == 1.0
+            assert row.worker_instance_id is None
+            assert row.lease_expires_at is None
+            meta = json.loads(row.metadata_json) if row.metadata_json else {}
+            assert meta.get("evidence") == "c2b-v1"
+    finally:
+        await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)

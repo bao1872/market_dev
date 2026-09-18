@@ -254,9 +254,10 @@
       "required": true,
       "test_selectors": [
       "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_refreshes_and_finalizes_on_postgres",
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_epoch_cannot_finalize_on_postgres"
+      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_epoch_cannot_finalize_on_postgres",
+      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_finalizes_partial_failed_on_postgres"
       ],
-      "claim": "Scheduler-created running jobs use real PostgreSQL lease fencing: the current ownership token can refresh its lease and finalize, while a stale lease epoch cannot overwrite terminal state after ownership has moved to a newer epoch. This proves the fenced primitive that Bars/Calendar runtimes now depend on, not the Bars/Calendar business logic itself."
+      "claim": "Scheduler-created running jobs use real PostgreSQL lease fencing: the current ownership token can refresh its lease and finalize, while a stale lease epoch cannot overwrite terminal state after ownership has moved to a newer epoch, and supported terminal states including `partial_failed` persist counts and release ownership correctly. This proves the fenced primitive that Bars/Calendar/Strategy runtimes now depend on, not the Bars/Calendar/Strategy business logic itself."
       }
       ]
       }
