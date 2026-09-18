@@ -61,6 +61,10 @@ async def recover_stale_scheduler_job_runs(
     Returns:
         恢复的任务数量
 
+    注意（fencing）：恢复在同一笔原子 UPDATE 中递增 lease_epoch 并清空
+    lease_expires_at，防止旧 epoch writer 在 ownership 转移后继续写
+    metadata/checkpoint（_update_heartbeat_and_step 仅按 id+lease_epoch 校验）。
+
     Raises:
         Exception: 数据库执行异常向上传播（不吞异常）
     """
@@ -71,7 +75,13 @@ async def recover_stale_scheduler_job_runs(
     # 使函数跨方言兼容（生产 PG + 测试 SQLite 均可运行）
     heartbeat_cutoff = now - timedelta(seconds=HEARTBEAT_TIMEOUT_SECONDS)
 
-    # [Recovery] - 原子 UPDATE：status -> interrupted + 错误信息 + 完成时间
+    # [Recovery] - 原子 UPDATE：running -> interrupted + 错误信息 + 完成时间 + 原子 fencing。
+    # 与 recover_replaced_incarnation_runs 同款 fencing：lease_epoch += 1 且 lease_expires_at = NULL。
+    # 原因：_update_heartbeat_and_step 的 fenced write 仅按 (id, lease_epoch) 校验，不依赖 status。
+    # 若 interrupted 后 epoch 未立即改变，旧 epoch writer 在 new claim 前仍可能写
+    # metadata/checkpoint。因此必须「先 fencing，再宣布 ownership 已转移」，且必须与 status 切换
+    # 落在同一笔原子 UPDATE（否则两次 UPDATE 之间存在 stale writer 窗口）。
+    # worker_instance_id 保留旧 owner lineage（与 fast-recovery 当前行为一致），不在此清空。
     # metadata_json 不在此 UPDATE 中修改，RETURNING 返回原始值用于提取 original_step
     update_sql = text(
         """
@@ -79,7 +89,9 @@ async def recover_stale_scheduler_job_runs(
         SET status = 'interrupted',
             error_code = 'STALE_PROCESS_TERMINATED',
             error_message = '后台进程在任务执行期间失联，任务租约过期且心跳超时，系统自动中断',
-            finished_at = :now
+            finished_at = :now,
+            lease_epoch = lease_epoch + 1,
+            lease_expires_at = NULL
         WHERE status = 'running'
             AND lease_expires_at < :now
             AND (heartbeat_at IS NULL OR heartbeat_at < :heartbeat_cutoff)

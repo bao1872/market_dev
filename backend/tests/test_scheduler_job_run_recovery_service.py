@@ -18,7 +18,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -33,16 +32,11 @@ from app.services.scheduler_job_run_recovery_service import (
     recover_stale_scheduler_job_runs,
 )
 
-_CI_ENV = (
-    os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
-    or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
-)
-pytestmark = pytest.mark.skipif(
-    not _CI_ENV,
-    reason="scheduler recovery tests require the CI ephemeral PostgreSQL database",
-)
-
 _TZ = ZoneInfo("Asia/Shanghai")
+
+# 不自带 CI skipif：本文件所有用例都使用 db_session fixture，由 conftest 的 postgres
+# 自动标注（fixture 闭包命中 _DB_FIXTURE_NAMES）覆盖；PURE_UNIT_TEST=1 下自动 skip，
+# panji-verify 的 PANJI_REMOTE_VERIFY_DB_TEST=1 下真实执行。
 
 
 async def _create_job_run(
@@ -120,7 +114,11 @@ async def test_lease_valid_heartbeat_fresh_not_recovered(db_session) -> None:
 
 @pytest.mark.asyncio
 async def test_lease_expired_recovered_to_interrupted(db_session) -> None:
-    """场景 2：租约过期的 running 任务被恢复为 interrupted + 写 recovery 事件。"""
+    """场景 2：租约过期的 running 任务被恢复为 interrupted + 写 recovery 事件。
+
+    同时验证原子 fencing：interrupted 同笔 UPDATE 必须 lease_epoch += 1 且
+    lease_expires_at = NULL（防止旧 epoch writer 在 ownership 转移后继续写）。
+    """
     test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
     job_run = await _create_job_run(
         db_session,
@@ -130,6 +128,8 @@ async def test_lease_expired_recovered_to_interrupted(db_session) -> None:
         heartbeat_at=test_now - timedelta(seconds=100),
     )
     job_run_id = job_run.id
+    await db_session.refresh(job_run)
+    old_epoch = job_run.lease_epoch
 
     recovered = await recover_stale_scheduler_job_runs(db_session, now=test_now)
 
@@ -138,6 +138,13 @@ async def test_lease_expired_recovered_to_interrupted(db_session) -> None:
     assert job_run.status == "interrupted"
     assert job_run.error_code == "STALE_PROCESS_TERMINATED"
     assert job_run.finished_at is not None
+    # [C1] 原子 fencing：epoch 必须 +1，lease 立即失效
+    assert job_run.lease_epoch == old_epoch + 1, (
+        f"[C1] 普通 recovery 必须 lease_epoch+1，实际 {job_run.lease_epoch}"
+    )
+    assert job_run.lease_expires_at is None, (
+        "[C1] 普通 recovery 必须立即令 lease 失效（lease_expires_at=NULL）"
+    )
     recovery_count = await _count_recovery_events(db_session, job_run_id)
     assert recovery_count == 1
 
@@ -497,6 +504,80 @@ async def test_fast_recovery_atomic_fence_bumps_epoch(db_session) -> None:
     )
     assert getattr(res, "rowcount", 0) == 0, (
         "[Blocker 2] 旧 epoch writer 的 fenced 写入必须被拒（rowcount=0）"
+    )
+
+    # 新 epoch（old_epoch+1）持有者可以写（模拟 new claim 后的合法 owner）
+    new_write = text(
+        """
+        UPDATE scheduler_job_runs
+        SET metadata_json = '{"new":"owner"}'
+        WHERE id = :id AND lease_epoch = :new_epoch
+        """
+    )
+    res2 = await db_session.execute(
+        new_write, {"id": job_run_id, "new_epoch": old_epoch + 1}
+    )
+    assert getattr(res2, "rowcount", 0) == 1, (
+        "新 epoch owner 的 fenced 写入应成功"
+    )
+
+
+@pytest.mark.asyncio
+async def test_stale_recovery_atomically_fences_old_epoch_writer(db_session) -> None:
+    """[C1] 普通 stale recovery 须原子 fence：running→interrupted 同笔 UPDATE 必须
+    lease_epoch += 1 且 lease_expires_at = NULL；持有旧 epoch 的 stale writer
+    其 fenced 写入被拒（_update_heartbeat_and_step 仅按 id+lease_epoch 校验）。
+
+    复刻 test_fast_recovery_atomic_fence_bumps_epoch 的证明方式，但走普通
+    recover_stale_scheduler_job_runs 路径（lease 过期 + heartbeat 超时 90s），
+    使普通 recovery 与 fast recovery 具有相同 fencing 保证。
+    """
+    from sqlalchemy import text
+
+    test_now = datetime(2026, 6, 25, 16, 0, 0, tzinfo=_TZ)
+    job_run = await _create_job_run(
+        db_session,
+        job_name="after_close_orchestrator",
+        status="running",
+        lease_expires_at=test_now - timedelta(minutes=1),   # lease 已过期
+        heartbeat_at=test_now - timedelta(seconds=100),       # heartbeat 已 stale（>90s）
+    )
+    job_run_id = job_run.id
+    # 显式设定旧 epoch（base SchedulerJobRun 默认 epoch 为 0）
+    old_epoch = 7
+    await db_session.execute(
+        text("UPDATE scheduler_job_runs SET lease_epoch = :e WHERE id = :id"),
+        {"e": old_epoch, "id": job_run_id},
+    )
+    await db_session.flush()
+
+    recovered = await recover_stale_scheduler_job_runs(db_session, now=test_now)
+
+    assert recovered == 1
+    await db_session.refresh(job_run)
+    assert job_run.status == "interrupted"
+    assert job_run.error_code == "STALE_PROCESS_TERMINATED"
+    # [C1] 原子 fence：lease_epoch 必须自旧值 +1，lease 立即失效
+    assert job_run.lease_epoch == old_epoch + 1, (
+        f"[C1] 普通 recovery 必须 lease_epoch+1，实际 {job_run.lease_epoch}"
+    )
+    assert job_run.lease_expires_at is None, (
+        "[C1] 普通 recovery 必须立即令 lease 失效（lease_expires_at=NULL）"
+    )
+
+    # 模拟旧 owner（仍持有 old_epoch=7）试图做 fenced checkpoint 写入
+    stale_write = text(
+        """
+        UPDATE scheduler_job_runs
+        SET metadata_json = '{"stale":"writer"}'
+        WHERE id = :id AND lease_epoch = :old_epoch
+        """
+    )
+    res = await db_session.execute(
+        stale_write, {"id": job_run_id, "old_epoch": old_epoch}
+    )
+    assert getattr(res, "rowcount", 0) == 0, (
+        "[C1] 旧 epoch writer 的 fenced 写入必须被拒（rowcount=0）"
     )
 
     # 新 epoch（old_epoch+1）持有者可以写（模拟 new claim 后的合法 owner）
