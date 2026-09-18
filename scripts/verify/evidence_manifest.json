@@ -217,6 +217,21 @@
       "required": true,
       "test_selectors": ["tests/test_market_export_integration.py"],
       "claim": "Market export 由单条有界 server-side 流式 SELECT 产出（LIMIT MAX_EXPORT_ROWS+1=10001，无 OFFSET 分页、无 COUNT）；5000 行导出按 cursor partition 分批（每批 <= EXPORT_BATCH_SIZE=250）且无重复/遗漏，导出列固定为 name+symbol 两列；超过上限（读到第 10001 行）在写出终态 XLSX 之前 fail-closed 返回 422 且不生成临时/终态文件；base-only 请求在 DB 路径不加载 snapshot；全局租约忙时返回 429；query/writer 异常均释放租约（无泄漏）。"
+    },
+    {
+      "contract_id": "chip_claim_resume_fencing",
+      "governance_level": 2,
+      "semantic_owner": "app.services.chip_consensus_worker_poll",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_chip_consensus_worker.py::test_worker_claims_queued_chip_job",
+        "tests/test_chip_consensus_worker.py::test_worker_concurrent_only_one_claims_chip",
+        "tests/test_chip_consensus_worker.py::test_worker_resumes_interrupted_chip_job",
+        "tests/test_chip_consensus_worker.py::test_stale_worker_cannot_finalize_after_epoch_transfer",
+        "tests/test_chip_consensus_worker.py::test_worker_missing_metadata_marks_failed"
+      ],
+      "claim": "Chip consensus poll preserves real PostgreSQL claim, resume, and fencing semantics: queued work is claimed once with lease epoch advancement, concurrent transactions enforce exactly-one claim through FOR UPDATE SKIP LOCKED, interrupted work resumes through resume_queued, stale epochs cannot overwrite the current owner terminal state, and metadata-invalid claimed work reaches a fenced failed terminal state."
     }
   ]
 }

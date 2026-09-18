@@ -170,24 +170,57 @@ async def test_worker_claims_queued_chip_job() -> None:
 
 @pytest.mark.asyncio
 async def test_worker_concurrent_only_one_claims_chip() -> None:
-    """测试 2：两个 Worker 并发，只有一个领取成功（FOR UPDATE SKIP LOCKED）。"""
+    """测试 2（强化）：两个 Worker 并发，只有一个领取成功（FOR UPDATE SKIP LOCKED）。
+
+    用真实 claim_next_job_run（不 fake SQL）+ 同步 wrapper 制造确定性 row-lock 重叠：
+    - 第一个拿到真实行锁的 transaction 在 poll commit 之前停住（等 second_finished）
+    - 第二个 transaction 在该锁仍持有时跑 SELECT ... FOR UPDATE SKIP LOCKED → 立即 None
+    - 严格断言 exactly-one claim + exactly-one execution + lease_epoch 只 +1
+
+    fail-closed：若生产不再是 SKIP LOCKED，第二事务会阻塞直到第一事务释放锁，
+    而第一事务正在等 second_finished → timeout → 测试 FAIL。
+    """
+    import asyncio
+
+    from app.services import fenced_job_run_service as fenced
     from app.worker import _chip_consensus_poll_once
     from tests.conftest import TestAsyncSessionLocal
+
+    real_claim = fenced.claim_next_job_run
+    first_owner_waiting = asyncio.Event()
+    second_finished = asyncio.Event()
+
+    async def synchronized_claim(db, **kwargs):
+        claim = await real_claim(db, **kwargs)
+        if claim is not None:
+            # 当前 transaction 已拿到真实 row lock，但 wrapper 尚未返回，poll 尚未 commit。
+            first_owner_waiting.set()
+            # 等第二个 transaction 在该锁仍持有时完成 claim（SKIP LOCKED → 立即 None）。
+            await asyncio.wait_for(second_finished.wait(), timeout=3)
+            return claim
+        # 第二个真实 transaction 在第一把 row lock 仍持有时应因 SKIP LOCKED 立即得到 None。
+        second_finished.set()
+        return None
 
     core_run_id = uuid.uuid4()
     job_run = await _create_queued_chip_job(
         TestAsyncSessionLocal, core_run_id=core_run_id,
     )
     job_run_id = job_run.id
+    initial_lease_epoch = job_run.lease_epoch
 
     try:
+        mock_execute = AsyncMock(return_value={
+            "succeeded_count": 0, "failed_count": 0, "total_count": 0,
+            "status": "succeeded", "failed_instruments": [],
+            "skipped_instruments": [],
+        })
         with patch(
+            "app.services.fenced_job_run_service.claim_next_job_run",
+            new=synchronized_claim,
+        ), patch(
             "app.services.after_close_chip_consensus_service.execute_after_close_chip_consensus",
-            new=AsyncMock(return_value={
-                "succeeded_count": 0, "failed_count": 0, "total_count": 0,
-                "status": "succeeded", "failed_instruments": [],
-                "skipped_instruments": [],
-            }),
+            new=mock_execute,
         ), patch(
             "app.services.feature_snapshot_service.get_active_a_share_instruments",
             new=AsyncMock(return_value=[]),
@@ -195,23 +228,34 @@ async def test_worker_concurrent_only_one_claims_chip() -> None:
             "app.services.after_close_chip_consensus_service.get_pending_chip_instruments",
             new=AsyncMock(return_value=[]),
         ):
-            # 并发调用两次
-            import asyncio as _asyncio
-            results = await _asyncio.gather(
-                _chip_consensus_poll_once(),
-                _chip_consensus_poll_once(),
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    _chip_consensus_poll_once(),
+                    _chip_consensus_poll_once(),
+                ),
+                timeout=5,
             )
 
-        # 至少一个返回 True（可能两个都返回 True，但只有一个真正领取）
-        assert any(results), "至少应有一个 Worker 领取到任务"
+        # 严格 exactly-one：一个 claim 成功，一个 claim None。
+        assert results.count(True) == 1, (
+            f"并发应恰好一个 Worker 领取成功，实际: {results}"
+        )
+        assert results.count(False) == 1, (
+            f"并发应恰好一个 Worker 领取失败（None claim），实际: {results}"
+        )
+        # 只有领取者进入 execute（真正并发排除重复执行）。
+        mock_execute.assert_awaited_once()
 
-        # 验证任务只被领取一次（worker_instance_id 应是 _WORKER_INSTANCE_ID，不会出现两个不同 worker）
+        # 验证终态：恰好一次 claim/commit，lease_epoch 只 +1。
         async with TestAsyncSessionLocal() as db:
             result = await db.get(SchedulerJobRun, job_run_id)
             assert result is not None
             assert result.status == "succeeded"
             assert result.worker_instance_id is None
             assert result.lease_expires_at is None
+            assert result.lease_epoch == initial_lease_epoch + 1, (
+                f"lease_epoch 应只递增 1, 实际: {result.lease_epoch} (初始={initial_lease_epoch})"
+            )
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
 
