@@ -379,160 +379,19 @@ async def run_bars_scheduler_worker() -> None:
     - 信号处理：收到 SIGTERM/SIGINT 后优雅关闭 scheduler
     - 异常不吞：捕获后记录日志，不影响下次触发
     """
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.cron import CronTrigger
-
-    _hb_task = asyncio.create_task(_heartbeat_loop("bars_scheduler"))
-    scheduler = AsyncIOScheduler()
-
-    # 启动时恢复过期 running 任务
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await recover_stale_scheduler_job_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info("Bars Scheduler 启动恢复: %d 个过期任务", recovered)
-    except Exception as exc:
-        logger.exception("Bars Scheduler 启动恢复异常: %s", exc)
-
-    async def scheduled_bars_refresh() -> None:
-        """[Phase8A] 定时任务：每日 15:05 创建/复用盘后编排任务。
-
-        Phase8A 变更：15:05 不再直接刷新行情和触发 DSA，而是创建 after-close run。
-        行情刷新、DSA 创建、特征计算、发布等全部由 after-close orchestrator 统一编排，
-        避免双路径（bars_scheduler 直接触发 DSA vs orchestrator 内部创建 DSA）造成的
-        重复执行和 race condition。
-
-        [Gate3] 触发时间从 16:00 改为 15:05 Asia/Shanghai（收盘后 5 分钟）。
-        幂等：create_after_close_run 内部基于 run_key 去重，18:30 兜底重复调用安全。
-        """
-        from datetime import date as date_cls
-
-        from app.services.after_close_orchestrator import create_after_close_run
-        from app.services.calendar_service import is_trading_day_async
-
-        trade_date = date_cls.today()
-
-        # 交易日历判断（替代简单的 weekday 判断）
-        async with AsyncSessionLocal() as session:
-            is_trading = await is_trading_day_async(session, trade_date)
-
-        if not is_trading:
-            logger.info("非交易日 %s，跳过盘后编排创建", trade_date)
-            return
-
-        logger.info("交易日 %s，15:05 创建/复用盘后编排任务", trade_date)
-        try:
-            async with AsyncSessionLocal() as db:
-                job_run, is_new = await create_after_close_run(db=db, trade_date=trade_date)
-                if is_new:
-                    logger.info(
-                        "[BarsScheduler] 15:05 已创建盘后编排任务: run_id=%s, trade_date=%s",
-                        job_run.id, trade_date,
-                    )
-                else:
-                    logger.info(
-                        "[BarsScheduler] 15:05 盘后编排任务已存在（幂等）: "
-                        "run_id=%s, trade_date=%s, status=%s",
-                        job_run.id, trade_date, job_run.status,
-                    )
-        except Exception as exc:
-            logger.exception(
-                "[BarsScheduler] 15:05 创建盘后编排任务失败: trade_date=%s, error=%s",
-                trade_date, exc,
-            )
-
-    # [Gate3] 每日 15:05 Asia/Shanghai 触发（收盘后 5 分钟；含非交易日，由内部交易日历判断是否执行）
-    scheduler.add_job(
-        scheduled_bars_refresh,
-        CronTrigger(day_of_week="mon-sun", hour=15, minute=5, timezone=ZoneInfo("Asia/Shanghai")),
-        id="bars_refresh_daily",
-        replace_existing=True,
+    from app.services.bars_scheduler_worker_runtime import (
+        run_bars_scheduler_worker_runtime,
     )
 
-    # [BoardSync] - 板块同步已迁移至 after_close_orchestrator 的 syncing_boards 步骤
-    # （refreshing_daily → syncing_boards → waiting_dsa_worker）
-    # 不再需要独立的 17:00 qstock 定时任务。BOARD_SYNC_ENABLED 开关由 orchestrator 读取，
-    # false 时 syncing_boards 步骤标记为 skipped（不访问问财）。
-    # 板块同步是软失败：失败不覆盖旧数据、不阻断 DSA/快照/发布。
-
-    # ===== 股本同步 job（pytdx get_finance_info，每日 18:00，独立 job_name/run_key） =====
-    async def scheduled_share_capital_sync() -> None:
-        """定时任务：每日 18:00 同步全市场 SH/SZ 股票总股本/流通股本。
-
-        CHANGE-20260713-010: 用于 quote 端点市值计算。
-        - pytdx get_finance_info 获取 zongguben/liutongguben/updated_date
-        - 写入 instruments 表 total_share/float_share/share_as_of
-        - 独立于 bars_refresh，使用独立 pytdx 连接
-        - 失败只记录 SchedulerJobRun，不影响下次触发
-        """
-        from datetime import date as date_cls
-
-        from app.services.calendar_service import is_trading_day_async
-        from app.services.instrument_share_sync_service import sync_share_capitals
-
-        trade_date = date_cls.today()
-
-        async with AsyncSessionLocal() as session:
-            is_trading = await is_trading_day_async(session, trade_date)
-
-        if not is_trading:
-            logger.info("非交易日 %s，跳过股本同步", trade_date)
-            return
-
-        logger.info("交易日 %s，开始股本同步", trade_date)
-        job_run = None
-        try:
-            async with AsyncSessionLocal() as db:
-                scheduled_at = datetime.combine(
-                    trade_date, time(18, 0), tzinfo=ZoneInfo("Asia/Shanghai")
-                )
-                job_run = await _create_job_run(
-                    db, "share_capital_sync", str(trade_date),
-                    scheduled_at=scheduled_at,
-                    run_key=f"share_capital_sync:{trade_date}",
-                )
-                if job_run is None:
-                    logger.info("share_capital_sync SKIPPED_DUPLICATE business_date=%s", trade_date)
-                    return
-                await db.commit()
-
-            async with AsyncSessionLocal() as db:
-                result = await sync_share_capitals(db)
-
-            logger.info(
-                "股本同步完成: total=%d succeeded=%d failed=%d skipped_bj=%d",
-                result["total"], result["succeeded"], result["failed"], result["skipped_bj"],
-            )
-            if job_run is not None:
-                async with AsyncSessionLocal() as db:
-                    await _finish_job_run(
-                        db, job_run, "succeeded",
-                        success_count=result["succeeded"],
-                        failure_count=result["failed"],
-                    )
-        except Exception as exc:
-            logger.exception("股本同步异常: %s", exc)
-            if job_run is not None:
-                async with AsyncSessionLocal() as db:
-                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
-
-    scheduler.add_job(
-        scheduled_share_capital_sync,
-        CronTrigger(day_of_week="mon-sun", hour=18, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
-        id="share_capital_sync_daily",
-        replace_existing=True,
-        max_instances=1,  # 单并发
+    await run_bars_scheduler_worker_runtime(
+        session_factory=AsyncSessionLocal,
+        heartbeat_loop=_heartbeat_loop,
+        should_shutdown=lambda: _shutdown,
+        create_job_run=_create_job_run,
+        finish_job_run=_finish_job_run,
+        recover_stale_job_runs=recover_stale_scheduler_job_runs,
+        logger=logger,
     )
-
-    scheduler.start()
-    logger.info("Bars Scheduler Worker 启动（16:00 刷新行情 + 17:00 板块同步 + 18:00 股本同步）")
-
-    while not _shutdown:
-        await asyncio.sleep(60)
-
-    scheduler.shutdown(wait=False)
-    logger.info("Bars Scheduler Worker 已退出")
 
 
 async def run_strategy_scheduler_worker() -> None:
