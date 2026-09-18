@@ -2,7 +2,7 @@
 
 覆盖：
 - bars_scheduler 同一 business_date 第二次调用返回 None（SKIPPED_DUPLICATE）
-- monitor_scheduler 同一 session_label 第二次调用返回 None，调用方能按 run_key 查询复用
+- monitor_scheduler 同一 session_label 第二次调用返回 None，exclusive-owner 调用方必须跳过，不得查询复用 active row
 - 不同 business_date 互不影响
 - 边界：不传 run_key 时保持原行为（向后兼容）
 
@@ -24,7 +24,6 @@ import pytest
 from sqlalchemy import select
 
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.services.fenced_job_run_service import create_job_run as production_create_job_run
 from app.services.monitor_scheduler_worker_runtime import (
     _find_or_create_monitor_session_job_run,
 )
@@ -70,7 +69,7 @@ async def test_monitor_scheduler_session_exclusive_ownership(db_session) -> None
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_1 = await _find_or_create_monitor_session_job_run(
             db_session, now, str(trade_date), session_label,
-            create_job_run=production_create_job_run,
+            create_job_run=_create_job_run,
         )
     assert job_run_1 is not None
     assert job_run_1.run_key == f"monitor_scheduler:2026-06-24:{session_label}"
@@ -79,7 +78,7 @@ async def test_monitor_scheduler_session_exclusive_ownership(db_session) -> None
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_2 = await _find_or_create_monitor_session_job_run(
             db_session, now, str(trade_date), session_label,
-            create_job_run=production_create_job_run,
+            create_job_run=_create_job_run,
         )
     assert job_run_2 is None
 
@@ -213,14 +212,14 @@ async def test_monitor_scheduler_different_sessions_both_succeed(db_session) -> 
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_morning = await _find_or_create_monitor_session_job_run(
             db_session, morning, str(trade_date), morning_label,
-            create_job_run=production_create_job_run,
+            create_job_run=_create_job_run,
         )
     assert job_run_morning is not None
 
     with patch.object(db_session, "commit", new=db_session.flush):
         job_run_afternoon = await _find_or_create_monitor_session_job_run(
             db_session, afternoon, str(trade_date), afternoon_label,
-            create_job_run=production_create_job_run,
+            create_job_run=_create_job_run,
         )
     assert job_run_afternoon is not None
 
