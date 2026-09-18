@@ -66,7 +66,7 @@ async def poll_chip_consensus_once(
         JobLeaseLostError,
         claim_next_job_run,
         finalize_job_run,
-        merge_job_run_metadata,
+        merge_owned_job_run_metadata,
     )
 
     async with session_factory() as db:
@@ -196,8 +196,8 @@ async def poll_chip_consensus_once(
                 await run_db.commit()
             # 把 chip_run_id 固定到 SchedulerJobRun metadata，恢复任务时复用同一 ID
             if existing_chip_run_id != chip_run_id:
-                await merge_job_run_metadata(
-                    job_run_id, {META_CHIP_RUN_ID: str(chip_run_id)},
+                await merge_owned_job_run_metadata(
+                    lease_token, {META_CHIP_RUN_ID: str(chip_run_id)},
                 )
             heartbeat.ensure_owned()
         except JobLeaseLostError:

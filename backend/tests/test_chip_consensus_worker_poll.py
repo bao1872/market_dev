@@ -34,6 +34,7 @@ from app.services.after_close_chip_consensus_service import (
     _CHIP_LEASE_SECONDS,
     CHIP_CONSENSUS_JOB_NAME,
 )
+from app.services.chip_consensus_run_lifecycle import META_CHIP_RUN_ID
 from app.services.fenced_job_run_service import JobLeaseLostError
 
 
@@ -154,9 +155,9 @@ def _patch_chip_poll(*, claim, execute_boom=None, publication_outcome=None):
         "app.services.fenced_job_run_service.finalize_job_run",
         new=AsyncMock(return_value=True),
     ) as finalize, patch(
-        "app.services.fenced_job_run_service.merge_job_run_metadata",
+        "app.services.fenced_job_run_service.merge_owned_job_run_metadata",
         new=AsyncMock(),
-    ), patch(
+    ) as merge_metadata, patch(
         "app.services.feature_snapshot_service.get_active_a_share_instruments",
         new=AsyncMock(return_value=active),
     ), patch(
@@ -175,7 +176,7 @@ def _patch_chip_poll(*, claim, execute_boom=None, publication_outcome=None):
         "app.services.chip_consensus_run_lifecycle.publish_chip_and_upgrade_auction",
         new=AsyncMock(return_value=outcome),
     ):
-        yield {"finalize": finalize, "heartbeat_cls": _FakeHeartbeat}
+        yield {"finalize": finalize, "heartbeat_cls": _FakeHeartbeat, "merge_metadata": merge_metadata}
 
 
 # =============================================================================
@@ -229,7 +230,7 @@ async def test_claim_args_exact() -> None:
         "app.services.fenced_job_run_service.claim_next_job_run", new=_track_claim
     ), patch("app.services.fenced_job_run_service.FencedJobHeartbeat", new=_FakeHeartbeat), \
          patch("app.services.fenced_job_run_service.finalize_job_run", new=AsyncMock(return_value=True)), \
-         patch("app.services.fenced_job_run_service.merge_job_run_metadata", new=AsyncMock()), \
+         patch("app.services.fenced_job_run_service.merge_owned_job_run_metadata", new=AsyncMock()), \
          patch("app.services.feature_snapshot_service.get_active_a_share_instruments", new=AsyncMock(return_value=[uuid.uuid4()])), \
          patch("app.services.after_close_chip_consensus_service.get_pending_chip_instruments", new=AsyncMock(return_value=[uuid.uuid4()])), \
          patch("app.services.after_close_chip_consensus_service.execute_after_close_chip_consensus", new=AsyncMock(return_value=_happy_summary())), \
@@ -419,3 +420,62 @@ async def test_worker_facade_delegates_to_owner() -> None:
     assert kwargs["session_factory"] is worker_mod.AsyncSessionLocal
     assert kwargs["worker_instance_id"] == worker_mod._WORKER_INSTANCE_ID
     assert kwargs["logger"] is worker_mod.logger
+
+
+@pytest.mark.asyncio
+async def test_chip_run_id_metadata_merge_uses_lease_token() -> None:
+    """F1 接线：chip_run_id 固化用 lease_token，不是 job_run_id。"""
+    from app.services.chip_consensus_worker_poll import poll_chip_consensus_once
+
+    claim = _FakeClaim(uuid.uuid4(), 3, {"trade_date": "2026-08-05", "core_run_id": str(uuid.uuid4())})
+    session_factory = _build_fake_session_factory([_FakeAsyncSession()])
+    logger = MagicMock()
+
+    with _patch_chip_poll(claim=claim) as handles:
+        result = await poll_chip_consensus_once(
+            session_factory=session_factory, worker_instance_id="w1", logger=logger,
+        )
+
+    assert result is True
+    merge = handles["merge_metadata"]
+    merge.assert_awaited_once()
+    args, _kwargs = merge.call_args
+    # 第一个参数是 claim.token（FencedJobToken），不是 job_run_id
+    assert args[0] is claim.token
+    assert args[0] is not claim.token.job_run_id
+    # 第二个参数是 {META_CHIP_RUN_ID: <new chip run id>}
+    assert isinstance(args[1], dict)
+    assert META_CHIP_RUN_ID in args[1]
+    # 固化值是合法 uuid 字符串（chip_run.id）
+    assert uuid.UUID(args[1][META_CHIP_RUN_ID])
+
+
+@pytest.mark.asyncio
+async def test_merge_metadata_lease_lost_blocks_compute() -> None:
+    """F1 传播：merge 失权 → poll 返回 True、不写普通 failure terminal、不 compute、heartbeat.stop 仍发生。"""
+    from app.services.chip_consensus_worker_poll import poll_chip_consensus_once
+
+    claim = _FakeClaim(uuid.uuid4(), 3, {"trade_date": "2026-08-05", "core_run_id": str(uuid.uuid4())})
+    session_factory = _build_fake_session_factory([_FakeAsyncSession()])
+    logger = MagicMock()
+
+    merge_boom = AsyncMock(side_effect=JobLeaseLostError("stale epoch"))
+    execute = AsyncMock(return_value=_happy_summary())
+
+    with _patch_chip_poll(claim=claim, execute_boom=execute) as handles:
+        with patch(
+            "app.services.fenced_job_run_service.merge_owned_job_run_metadata",
+            new=merge_boom,
+        ):
+            result = await poll_chip_consensus_once(
+                session_factory=session_factory, worker_instance_id="w1", logger=logger,
+            )
+
+    assert result is True
+    merge_boom.assert_awaited_once()
+    # compute（execute_after_close_chip_consensus）不得发生
+    execute.assert_not_awaited()
+    # 普通 failure terminal 不得发生（lease lost 路径直接 return True）
+    assert handles["finalize"].await_count == 0
+    # heartbeat.stop 仍发生
+    assert _FakeHeartbeat.instances[-1].stopped is True

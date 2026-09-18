@@ -234,6 +234,42 @@ async def merge_job_run_metadata(
         return True
 
 
+async def merge_owned_job_run_metadata(
+    token: FencedJobToken,
+    metadata_updates: dict[str, Any],
+    *,
+    session_factory: async_sessionmaker[AsyncSession] = AsyncSessionLocal,
+) -> None:
+    """仅当前 lease owner 可合并 running SchedulerJobRun metadata。
+
+    running 阶段（heartbeat 仍持有租约）把 chip_run_id 固化到所属
+    SchedulerJobRun.metadata_json 时必须走 fenced 路径：用 `lock_owned_job_run`
+    的 `FOR UPDATE` + 完整 ownership predicate（id/status/worker/epoch）锁定行，
+    确保 ownership 在两次 `ensure_owned()` 之间被 watchdog/reclaimer 抢占时，
+    旧 worker 无法改写 running job metadata。
+
+    与 `finalize_chip_run(... fenced_token=...)` 保持相同 fail-closed 语义：
+    predicate 不匹配即 `JobLeaseLostError`，不返回 False、不静默吞掉。
+    """
+    async with session_factory() as db:
+        try:
+            job_run = await lock_owned_job_run(db, token)
+        except JobLeaseLostError:
+            await db.rollback()
+            raise
+
+        metadata: dict[str, Any] = {}
+        if job_run.metadata_json:
+            try:
+                metadata = json.loads(job_run.metadata_json)
+            except (json.JSONDecodeError, TypeError):
+                metadata = {}
+
+        metadata.update(metadata_updates)
+        job_run.metadata_json = json.dumps(metadata, ensure_ascii=False)
+        await db.commit()
+
+
 class FencedJobHeartbeat:
     """Background heartbeat whose failure permanently invalidates the token."""
 
