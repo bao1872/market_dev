@@ -305,6 +305,19 @@ def test_per_channel_isolation(monkeypatch) -> None:  # noqa: ANN001
     assert len(adapter.sent) == 2
 
 
+def test_notify_monitor_left_worker() -> None:
+    """Acceptance #1/#2: _notify_monitor_status and _monitor_start_notified must have
+    left app.worker (now owned by monitor_status_notifier)."""
+    import app.worker as worker
+
+    assert not hasattr(worker, "_notify_monitor_status")
+    assert not hasattr(worker, "_monitor_start_notified")
+    src = inspect.getsource(worker.run_monitor_scheduler_worker)
+    assert "notify_monitor_status=_notify_monitor_status" not in src
+    assert "def _notify_monitor_status" not in src
+    assert "_monitor_start_notified" not in src
+
+
 # --------------------------------------------------------------------------- #
 # Source contract (locks the SQL filters / DTO schema / TODO, no drift)
 # --------------------------------------------------------------------------- #
