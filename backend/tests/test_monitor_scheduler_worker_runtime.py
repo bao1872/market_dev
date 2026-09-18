@@ -127,7 +127,8 @@ def _run_runtime(
     async def _fake_finish_job_run(db, job_run, status, **kw):  # noqa: ANN001
         rec["finish_calls"].append((status, kw))
 
-    async def _fake_notify(title, content, *, is_error=False):  # noqa: ANN001
+    async def _fake_notify(title, content, *, is_error=False, **kwargs):  # noqa: ANN001
+        # kwargs absorbs session_factory/logger (production API not compromised for tests)
         if is_error:
             rec["error_notify_calls"].append((title, content))
         else:
@@ -147,6 +148,10 @@ def _run_runtime(
         rec["create_job_run_calls"] += 1
         return _FakeJobRun()
 
+    # W4B2: notifier is a module import, not an injected param; monkeypatch on the
+    # runtime module so the production API is not compromised for tests.
+    monkeypatch.setattr(rt, "notify_monitor_status", _fake_notify)
+
     async def _coro():
         await rt.run_monitor_scheduler_worker_runtime(
             session_factory=lambda: FakeSessionCM(rec),
@@ -155,7 +160,6 @@ def _run_runtime(
             recover_stale_job_runs=_fake_recover_job_runs,
             create_job_run=_fake_create_job_run,
             finish_job_run=_fake_finish_job_run,
-            notify_monitor_status=_fake_notify,
             monotonic_clock=lambda: 0.0,
             logger=logging.getLogger("test-mon-rt"),
         )
@@ -190,7 +194,8 @@ def test_facade_delegates_only() -> None:
     assert "should_shutdown=lambda: _shutdown" in src
     assert "recover_stale_job_runs=recover_stale_scheduler_job_runs" in src
     assert "finish_job_run=_finish_job_run" in src
-    assert "notify_monitor_status=_notify_monitor_status" in src
+    # W4B2: the façade no longer injects the notifier (it is a dedicated module import)
+    assert "notify_monitor_status=" not in src
     assert "monotonic_clock=_time_monotonic" in src
 
 
@@ -246,6 +251,10 @@ def test_runtime_source_contract() -> None:
     assert "def notify_monitor_status" not in src
     assert "def finish_job_run" not in src
     assert "def recover_stale_job_runs" not in src
+    # W4B2: the notifier is a dedicated module import, not an injected param
+    assert "from app.services.monitor_status_notifier import notify_monitor_status" in src
+    assert "notify_monitor_status=" not in src
+    assert "async def notify_monitor_status" not in src
     # no generic abstraction
     assert "GenericScheduler" not in src
     assert "MonitorManager" not in src

@@ -491,7 +491,6 @@ async def run_monitor_scheduler_worker() -> None:
         recover_stale_job_runs=recover_stale_scheduler_job_runs,
         create_job_run=_create_job_run,
         finish_job_run=_finish_job_run,
-        notify_monitor_status=_notify_monitor_status,
         monotonic_clock=_time_monotonic,
         logger=logger,
     )

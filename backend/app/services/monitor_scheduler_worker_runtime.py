@@ -9,8 +9,10 @@ session helpers (moved from the composition root in PANJI-GOV-W4A / W4B1):
   :func:`_find_or_create_monitor_session_job_run`, a thin wrapper that delegates canonical
   ``SchedulerJobRun`` creation to the injected ``create_job_run`` (the composition root's
   :func:`app.worker._create_job_run`).  It does NOT insert, commit, or recover on its own.
-* Startup / error Feishu notification lives in the injected ``notify_monitor_status``
-  (the composition root's :func:`app.worker._notify_monitor_status`).
+* Startup / error Feishu notification lives in the dedicated
+  :mod:`app.services.monitor_status_notifier` module, imported at module top; the runtime
+  only *calls* it and does NOT own the Redis idempotency / channel-query / DTO / adapter
+  logic.
 * The generic ``SchedulerJobRun`` state rules (finish / recover) are injected by the
   composition root (:mod:`app.worker`) and must not be duplicated here.
 * Monitor cycle execution and stale-evaluation recovery live in
@@ -20,10 +22,11 @@ session helpers (moved from the composition root in PANJI-GOV-W4A / W4B1):
 
 The top-level :mod:`app.worker` module supplies the session factory, heartbeat
 ownership, shared shutdown signal, the canonical helpers, and business owners.  This is a
-pure structural extraction (PANJI-GOV-W4A and W4B1); no cron / trading-session boundary /
-reentrancy guard / transaction / exception / state-update / sleep-cadence / notify timing
-semantics changed.  In W4B1 the Monitor session helpers moved here and ``create_job_run``
-became an injected dependency rather than a worker import.
+pure structural extraction (PANJI-GOV-W4A, W4B1, and W4B2); no cron / trading-session
+boundary / reentrancy guard / transaction / exception / state-update / sleep-cadence /
+notify timing semantics changed.  In W4B1 the Monitor session helpers moved here and
+``create_job_run`` became an injected dependency; in W4B2 the status notifier moved to its
+own module and is imported (not injected).
 """
 
 from __future__ import annotations
@@ -40,6 +43,7 @@ from zoneinfo import ZoneInfo
 from app.config import get_settings
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.services.monitor_batch_service import MonitorBatchService
+from app.services.monitor_status_notifier import notify_monitor_status
 
 SessionFactory = Callable[[], Any]
 HeartbeatLoop = Callable[[str], Coroutine[Any, Any, None]]
@@ -47,7 +51,6 @@ ShutdownProbe = Callable[[], bool]
 RecoverStaleJobRuns = Callable[[Any], Coroutine[Any, Any, int]]
 CreateJobRun = Callable[..., Coroutine[Any, Any, SchedulerJobRun | None]]
 FinishJobRun = Callable[..., Coroutine[Any, Any, None]]
-NotifyMonitorStatus = Callable[..., Coroutine[Any, Any, None]]
 MonotonicClock = Callable[[], float]
 
 
@@ -111,7 +114,6 @@ async def run_monitor_scheduler_worker_runtime(
     recover_stale_job_runs: RecoverStaleJobRuns,
     create_job_run: CreateJobRun,
     finish_job_run: FinishJobRun,
-    notify_monitor_status: NotifyMonitorStatus,
     monotonic_clock: MonotonicClock,
     logger: logging.Logger,
 ) -> None:
@@ -156,6 +158,8 @@ async def run_monitor_scheduler_worker_runtime(
     await notify_monitor_status(
         "监控服务已启动",
         f"交易时段 9:30-11:30 / 13:00-15:00\n每 {cycle_interval} 秒执行一轮监控",
+        session_factory=session_factory,
+        logger=logger,
     )
 
     while not should_shutdown():
@@ -319,7 +323,10 @@ async def run_monitor_scheduler_worker_runtime(
                 async with session_factory() as db:
                     await finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
             # 异常退出飞书通知
-            await notify_monitor_status("监控服务异常", str(exc), is_error=True)
+            await notify_monitor_status(
+                "监控服务异常", str(exc), is_error=True,
+                session_factory=session_factory, logger=logger,
+            )
 
         # 交易时段内每 cycle_interval 秒一轮
         await asyncio.sleep(cycle_interval)
