@@ -743,83 +743,28 @@ async def run_strategy_scheduler_worker() -> None:
 
 
 async def run_calendar_scheduler_worker() -> None:
-    """日历调度 Worker：每日 02:00 从 Mootdx 拉取本年及下一年交易日历并更新 DB。
+    """日历调度 Worker 入口（兼容 façade）。
 
-    使用 APScheduler AsyncIOScheduler + CronTrigger：
-    - 每日 02:00 触发
-    - 调用 seed_calendar_from_mootdx(session, year=当前年份) 与下一年
-    - 更新或插入交易日历记录
-    - Mootdx 失败时保留旧值并报警（异常上抛，不覆盖历史记录）
+    实际 lifecycle（APScheduler 调度、calendar_job、启动恢复、shutdown）已抽到
+    :mod:`app.services.calendar_scheduler_worker_runtime`。本函数只负责从
+    composition root 注入依赖并保持 public 名称兼容。
 
-    设计说明：
-    - APScheduler 在事件循环中运行，不阻塞
-    - 信号处理：收到 SIGTERM/SIGINT 后优雅关闭 scheduler
-    - 异常不吞：捕获后记录日志，不影响下次触发
+    行为契约（cron / timezone / job identity / retry / transaction / heartbeat /
+    shutdown / logging / exception）完全不变；详见 PANJI-GOV-W1。
     """
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    from apscheduler.triggers.cron import CronTrigger
-
-    _hb_task = asyncio.create_task(_heartbeat_loop("calendar_scheduler"))
-    scheduler = AsyncIOScheduler()
-
-    # 启动时恢复过期 running 任务
-    try:
-        async with AsyncSessionLocal() as db:
-            recovered = await recover_stale_scheduler_job_runs(db)
-            await db.commit()
-            if recovered > 0:
-                logger.info("Calendar Scheduler 启动恢复: %d 个过期任务", recovered)
-    except Exception as exc:
-        logger.exception("Calendar Scheduler 启动恢复异常: %s", exc)
-
-    async def calendar_job() -> None:
-        """每日凌晨刷新交易日历（从 Mootdx 拉取当年及下一年日历并更新 DB）。"""
-        from app.core.time import shanghai_business_date
-
-        today = shanghai_business_date()
-        job_run = None
-        try:
-            async with AsyncSessionLocal() as session:
-                # [CalendarScheduler] - scheduled_at 为 CronTrigger 计划时间（02:00），不等于 started_at
-                scheduled_at = datetime.combine(
-                    today, time(2, 0), tzinfo=ZoneInfo("Asia/Shanghai")
-                )
-                job_run = await _create_job_run(
-                    session, "calendar_scheduler", str(today), scheduled_at=scheduled_at,
-                    run_key=f"calendar_scheduler:{today}",
-                )
-                if job_run is None:
-                    logger.info("calendar_scheduler SKIPPED_DUPLICATE business_date=%s", today)
-                    return
-                from app.services.calendar_seed import seed_calendar_from_mootdx
-                total_count = 0
-                for year in (today.year, today.year + 1):
-                    count = await seed_calendar_from_mootdx(session, year=year, force=False)
-                    total_count += count
-                    logger.info("日历刷新完成: year=%d, %d 条记录更新", year, count)
-                await _finish_job_run(session, job_run, "succeeded", success_count=1)
-        except Exception as exc:
-            logger.error("日历刷新失败: %s", exc)
-            if job_run is not None:
-                async with AsyncSessionLocal() as db:
-                    await _finish_job_run(db, job_run, "failed", error_message=str(exc)[:500])
-            raise
-
-    scheduler.add_job(
-        calendar_job,
-        CronTrigger(hour=2, minute=0, timezone=ZoneInfo("Asia/Shanghai")),
-        id="calendar_scheduler",
-        name="calendar_scheduler",
-        replace_existing=True,
+    from app.services.calendar_scheduler_worker_runtime import (
+        run_calendar_scheduler_worker_runtime,
     )
-    scheduler.start()
-    logger.info("Calendar Scheduler Worker 启动（每日 02:00 刷新交易日历）")
 
-    while not _shutdown:
-        await asyncio.sleep(60)
-
-    scheduler.shutdown(wait=False)
-    logger.info("Calendar Scheduler Worker 已退出")
+    await run_calendar_scheduler_worker_runtime(
+        session_factory=AsyncSessionLocal,
+        heartbeat_loop=_heartbeat_loop,
+        should_shutdown=lambda: _shutdown,
+        create_job_run=_create_job_run,
+        finish_job_run=_finish_job_run,
+        recover_stale_job_runs=recover_stale_scheduler_job_runs,
+        logger=logger,
+    )
 
 
 def _get_monitor_session(

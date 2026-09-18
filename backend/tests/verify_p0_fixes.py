@@ -216,21 +216,25 @@ def test_dsa_event_dependency() -> None:
 def test_timezone_fixes() -> None:
     """验证时区修正。"""
     try:
+        from app.services.calendar_scheduler_worker_runtime import (
+            run_calendar_scheduler_worker_runtime,
+        )
         from app.worker import (
             run_bars_scheduler_worker,
-            run_calendar_scheduler_worker,
             run_strategy_scheduler_worker,
         )
 
-        # 验证 CronTrigger 使用 Asia/Shanghai
-        for worker_func in [
-            run_bars_scheduler_worker,
-            run_strategy_scheduler_worker,
-            run_calendar_scheduler_worker,
-        ]:
-            source = inspect.getsource(worker_func)
+        # 验证 CronTrigger 使用 Asia/Shanghai。
+        # bars / strategy 仍在本体 worker 中定义 CronTrigger；
+        # calendar 的 CronTrigger 已抽到专用 runtime 模块（PANJI-GOV-W1）。
+        worker_sources = [
+            inspect.getsource(run_bars_scheduler_worker),
+            inspect.getsource(run_strategy_scheduler_worker),
+            inspect.getsource(run_calendar_scheduler_worker_runtime),
+        ]
+        for source in worker_sources:
             assert "Asia/Shanghai" in source, (
-                f"{worker_func.__name__} CronTrigger 未指定 Asia/Shanghai 时区"
+                "Worker CronTrigger 未指定 Asia/Shanghai 时区"
             )
         _record("P0-7 Worker CronTrigger Asia/Shanghai", True)
 
