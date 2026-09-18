@@ -571,19 +571,26 @@ async def test_auction_failure_does_not_reverse_chip_publication() -> None:
 
 
 def _read_chip_block() -> str:
-    """读取 worker.py 中 chip publication 相关源码，用于结构性断言。
+    """读取 chip poll owner 源码，用于结构性断言。
 
     这些是**生产接线**约束，无法用 fake adapter 覆盖（helper 层早已支持
     ownership_check，Corrective-3 的缺陷恰恰是生产调用方没有传）。因此这里
     直接对生产源码做结构断言，防止回归。
+
+    [W7B1] Chip poll owner 已从 worker.py 迁至
+    app/services/chip_consensus_worker_poll.py（worker 仅保留 thin façade），
+    故此处读取新 owner 模块。
 
     注意：按文件路径读取而非 `import app.worker` —— 导入 worker 会触发
     REDIS_URL 等运行时配置校验，违反 PURE_UNIT_TEST 不连外部依赖的约束。
     """
     from pathlib import Path
 
-    path = Path(__file__).resolve().parent.parent / "app" / "worker.py"
-    assert path.exists(), f"worker.py 不存在: {path}"
+    path = (
+        Path(__file__).resolve().parent.parent
+        / "app" / "services" / "chip_consensus_worker_poll.py"
+    )
+    assert path.exists(), f"chip_consensus_worker_poll.py 不存在: {path}"
     return path.read_text(encoding="utf-8")
 
 
@@ -613,7 +620,7 @@ def test_publication_happens_before_job_run_finalize() -> None:
     之后，此时 SchedulerJobRun 已写终态、租约已释放，任何 fencing 都无意义。
     """
     src = _read_chip_block()
-    anchor = src.find("_chip_consensus_poll_once")
+    anchor = src.find("poll_chip_consensus_once")
     region = src[anchor:]
 
     pub_pos = region.find("publish_chip_and_upgrade_auction(\n")
@@ -666,7 +673,7 @@ def test_domain_finalize_failure_blocks_publication_and_success() -> None:
 def test_no_publication_after_job_run_terminal() -> None:
     """终态之后不得再存在无租约保护的 publication 写入路径。"""
     src = _read_chip_block()
-    anchor = src.find("_chip_consensus_poll_once")
+    anchor = src.find("poll_chip_consensus_once")
     region = src[anchor:]
     stop_pos = region.find("await heartbeat.stop()")
     tail = region[stop_pos:stop_pos + 1200]
