@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import json
-import os
 import uuid
 from datetime import date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
@@ -30,18 +29,12 @@ from sqlalchemy import text
 
 from app.models.scheduler_job_run import SchedulerJobRun
 
-# CI 环境标识（与 conftest.py 一致）
-_CI_ENV = (
-    os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
-    or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
-)
-
-# 本测试文件全部为 PG 集成测试（依赖 TestAsyncSessionLocal fixture），
-# 只在 CI 临时 Postgres 容器中运行；本地 PURE_UNIT_TEST=1 自动 skip。
-pytestmark = pytest.mark.skipif(
-    not _CI_ENV,
-    reason="chip consensus worker 测试为 PG 集成测试，只在 CI 临时 Postgres 容器中运行；本地请用 PURE_UNIT_TEST=1",
-)
+# 本文件全部为 PG 集成测试（依赖 TestAsyncSessionLocal fixture）。
+# 与 test_after_close_worker.py 一致：不自带 CI skipif，改用 conftest 的 `postgres`
+# 自动标注 —— PURE_UNIT_TEST=1 下由 conftest 自动 skip（本地 make check 不连库），
+# 正式 panji-verify 提供真实验证库时运行。先前遗留的 `skipif(not _CI_ENV)` 会在 verifier
+# 容器里误 skip（verifier 不设 GITHUB_ACTIONS/PANJI_CI_DB_TEST），导致 chip 合同永远不执行，
+# 因此移除，统一走 conftest 的 postgres 标注机制。
 
 _TZ = ZoneInfo("Asia/Shanghai")
 _TRADE_DATE = date(2026, 6, 25)
