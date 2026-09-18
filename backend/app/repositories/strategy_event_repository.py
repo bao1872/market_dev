@@ -30,6 +30,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import select
 
+from app.models.event_recipient import StrategyEventRecipient
 from app.models.strategy_event import StrategyEvent
 
 logger = logging.getLogger("strategy_event_repository")
@@ -123,6 +124,7 @@ async def query_events(
     start_time: datetime | None = None,
     end_time: datetime | None = None,
     limit: int = 100,
+    recipient_user_id: UUID | None = None,
 ) -> list[StrategyEvent]:
     """按多条件查询策略事件。
 
@@ -136,6 +138,9 @@ async def query_events(
         start_time: 事件时间 >= start_time
         end_time: 事件时间 <= end_time
         limit: 最大返回数（默认 100）
+        recipient_user_id: [PANJI-BIZ-FIX Commit A] 事件接收人过滤（用户级 overlay）。
+            None（默认）→ 行为完全不变（返回全局事件，供 admin/后端内部使用）；
+            非 None → 只返回该用户在 strategy_event_recipients 中登记的事件。
 
     Returns:
         StrategyEvent 列表（按 event_time 倒序）
@@ -144,6 +149,13 @@ async def query_events(
         Exception: 查询失败时补充上下文后 re-raise
     """
     stmt = select(StrategyEvent)
+    if recipient_user_id is not None:
+        # (event_id, user_id) 唯一约束保证每事件最多命中一条 recipient，不会放大结果集。
+        stmt = stmt.join(
+            StrategyEventRecipient,
+            (StrategyEventRecipient.event_id == StrategyEvent.id)
+            & (StrategyEventRecipient.user_id == recipient_user_id),
+        )
     if instrument_id is not None:
         stmt = stmt.where(StrategyEvent.instrument_id == instrument_id)
     if strategy_version_id is not None:

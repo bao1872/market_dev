@@ -99,8 +99,14 @@ async def get_instrument_events(
 
     [Commit A 权限模型纠偏] instrument 级 resource guard：admin/market_data 任意；
     self_selection-only 仅限本人 active 自选；匿名/无权限 403。
+
+    [PANJI-BIZ-FIX Commit A] 第二层个性化 overlay：``require_instrument_market_access``
+    仍负责"能否看这只股票的详情"（基础行情/指标权限不变），此处只对 StrategyEvent
+    事件圆点按接收人过滤——非 admin 只看 ``strategy_event_recipients`` 中属于自己的
+    事件；admin 保留全量（诊断用途）。DSA/VWAP anchor 圆点不受影响（非 StrategyEvent）。
     """
-    _ = ctx  # 权限守卫，不直接使用
+    # 事件 overlay 的第二层过滤（resource guard 已在 Depends 中完成）
+    recipient_user_id: UUID | None = None if ctx.is_admin else UUID(ctx.user_id)
     events = await query_events(
         db,
         instrument_id=instrument_id,
@@ -108,6 +114,7 @@ async def get_instrument_events(
         start_time=start_time,
         end_time=end_time,
         limit=limit,
+        recipient_user_id=recipient_user_id,
     )
     items = [StrategyEventResponse.model_validate(e) for e in events]
     return StrategyEventListResponse(items=items, total=len(items))

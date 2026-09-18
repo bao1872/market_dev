@@ -790,3 +790,110 @@ async def test_case_m_symbol_scope_and_feishu_resource_guard(
     assert (
         await client.post(f"/v1/instruments/{inst.id}/send-feishu", json={})
     ).status_code == 401
+
+
+# ============================================================
+# Case N: [PANJI-BIZ-FIX Commit A] StrategyEvent overlay 用户隔离
+# ============================================================
+async def _create_global_event(
+    db_session: AsyncSession, version_id, instrument_id
+):
+    """创建一个全局 StrategyEvent（无 recipient）。"""
+    from app.models.strategy_event import StrategyEvent
+
+    event = StrategyEvent(
+        strategy_version_id=version_id,
+        instrument_id=instrument_id,
+        event_type="smc_bos_retest",
+        event_key=f"p0-matrix:{uuid.uuid4().hex[:12]}",
+        event_time=datetime.now(UTC),
+        schema_version=1,
+        payload={"test": True},
+    )
+    db_session.add(event)
+    await db_session.flush()
+    return event
+
+
+@pytest.mark.asyncio
+async def test_case_n_event_overlay_isolated_by_recipient(
+    db_session: AsyncSession, client: AsyncClient, test_selector_strategy
+) -> None:
+    """Case N：[PANJI-BIZ-FIX Commit A] 事件圆点按接收人隔离（第二层个性化 overlay）。
+
+    - instrument resource guard 仍由 require_instrument_market_access 负责（基础行情/指标不变）；
+    - 非 admin 的 StrategyEvent 列表只返回 strategy_event_recipients 中属于自己的事件；
+    - 无 recipient 的全局事件对普通用户不可见，对 admin 可见（诊断）；
+    - 他用户的 recipient 不得泄漏；
+    - 匿名仍 401；research_replay-only 仍 403。
+    """
+    from app.models.event_recipient import StrategyEventRecipient
+
+    version = test_selector_strategy["version"]
+    inst = await _create_instrument(db_session)
+    admin = await _admin_user(db_session)
+
+    # 全局事件（尚无 recipient）
+    event = await _create_global_event(db_session, version.id, inst.id)
+
+    # market_data-only 用户：guard 通过（可看详情），但事件 overlay 为空
+    market_user = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}n1-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "market_data", "months": 1}],
+    )
+    market_headers = _auth(market_user)
+
+    r_empty = await client.get(
+        f"/v1/instruments/{inst.id}/events", headers=market_headers
+    )
+    assert r_empty.status_code == 200, r_empty.text
+    assert r_empty.json()["items"] == [], r_empty.text
+
+    # 插入该用户的 recipient → 事件可见
+    db_session.add(
+        StrategyEventRecipient(event_id=event.id, user_id=market_user.id)
+    )
+    await db_session.flush()
+
+    r_visible = await client.get(
+        f"/v1/instruments/{inst.id}/events", headers=market_headers
+    )
+    assert r_visible.status_code == 200, r_visible.text
+    items = r_visible.json()["items"]
+    assert len(items) == 1, r_visible.text
+    assert items[0]["id"] == str(event.id), r_visible.text
+
+    # 另一 market_data 用户无 recipient → 不得泄漏
+    other_user = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}n2-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "market_data", "months": 1}],
+    )
+    r_other = await client.get(
+        f"/v1/instruments/{inst.id}/events", headers=_auth(other_user)
+    )
+    assert r_other.status_code == 200, r_other.text
+    assert r_other.json()["items"] == [], r_other.text
+
+    # admin → 全量可见（诊断用途，不依赖 recipient）
+    r_admin = await client.get(
+        f"/v1/instruments/{inst.id}/events", headers=_auth(admin)
+    )
+    assert r_admin.status_code == 200, r_admin.text
+    admin_items = r_admin.json()["items"]
+    assert str(event.id) in [i["id"] for i in admin_items], r_admin.text
+
+    # 匿名 → 401；research_replay-only → 403
+    assert (
+        await client.get(f"/v1/instruments/{inst.id}/events")
+    ).status_code == 401
+    replay_only = await _register_with_capabilities(
+        db_session,
+        f"{_TEST_EMAIL_PREFIX}n3-{uuid.uuid4().hex[:8]}@test.local",
+        [{"capability": "research_replay", "months": 1}],
+    )
+    r_replay = await client.get(
+        f"/v1/instruments/{inst.id}/events", headers=_auth(replay_only)
+    )
+    assert r_replay.status_code == 403, r_replay.text
