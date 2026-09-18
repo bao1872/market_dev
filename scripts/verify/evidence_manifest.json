@@ -260,6 +260,17 @@
       "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_progress_update_rejected_on_postgres"
       ],
       "claim": "Scheduler-created running jobs use real PostgreSQL lease fencing: the current ownership token can refresh its lease, advance per-cycle progress (last_cycle_at / succeeded_count / failed_count / metadata) through update_owned_job_run_progress, and finalize, while a stale lease epoch cannot overwrite terminal state or progress fields after ownership has moved to a newer epoch, and supported terminal states including `partial_failed` persist counts and release ownership correctly. This proves the fenced primitive that Bars/Calendar/Strategy runtimes (and the Monitor session lifecycle) now depend on, not those runtimes' business logic itself."
+      },
+      {
+      "contract_id": "monitor_session_exclusive_ownership",
+      "governance_level": 2,
+      "semantic_owner": "app.services.monitor_scheduler_worker_runtime",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+      "tests/test_worker_idempotency.py::test_monitor_scheduler_session_exclusive_ownership"
+      ],
+      "claim": "A Monitor trading session has one exclusive SchedulerJobRun owner: when an active row already exists for the same session run_key, a second acquisition returns no runnable job and does not replace or reuse the current owner."
       }
       ]
       }
