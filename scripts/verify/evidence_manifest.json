@@ -255,9 +255,11 @@
       "test_selectors": [
       "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_refreshes_and_finalizes_on_postgres",
       "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_epoch_cannot_finalize_on_postgres",
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_finalizes_partial_failed_on_postgres"
+      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_finalizes_partial_failed_on_postgres",
+      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_updates_progress_on_postgres",
+      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_progress_update_rejected_on_postgres"
       ],
-      "claim": "Scheduler-created running jobs use real PostgreSQL lease fencing: the current ownership token can refresh its lease and finalize, while a stale lease epoch cannot overwrite terminal state after ownership has moved to a newer epoch, and supported terminal states including `partial_failed` persist counts and release ownership correctly. This proves the fenced primitive that Bars/Calendar/Strategy runtimes now depend on, not the Bars/Calendar/Strategy business logic itself."
+      "claim": "Scheduler-created running jobs use real PostgreSQL lease fencing: the current ownership token can refresh its lease, advance per-cycle progress (last_cycle_at / succeeded_count / failed_count / metadata) through update_owned_job_run_progress, and finalize, while a stale lease epoch cannot overwrite terminal state or progress fields after ownership has moved to a newer epoch, and supported terminal states including `partial_failed` persist counts and release ownership correctly. This proves the fenced primitive that Bars/Calendar/Strategy runtimes (and the Monitor session lifecycle) now depend on, not those runtimes' business logic itself."
       }
       ]
       }

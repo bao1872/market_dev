@@ -305,3 +305,146 @@ async def test_scheduler_owned_job_finalizes_partial_failed_on_postgres() -> Non
             assert meta.get("evidence") == "c2b-v1"
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
+
+
+# ---------------------------------------------------------------------------
+# Test 4: owned progress write（C2C-V1）
+# --------------------------------------------------------------------------- #
+async def test_scheduler_owned_job_updates_progress_on_postgres() -> None:
+    """C2C: current owner 通过真实 ``update_owned_job_run_progress()`` 写 ``last_cycle_at`` /
+    ``succeeded_count`` / ``failed_count`` + 合并 metadata；该 helper 不触碰 ownership /
+    lease / epoch / status（这些仍由 heartbeat / finalize 拥有）。"""
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        update_owned_job_run_progress,
+    )
+    from app.worker import _create_job_run
+    from tests.conftest import TestAsyncSessionLocal
+
+    run_key = f"c2c-pg:{uuid.uuid4()}"
+    # 复用与 Bars/Calendar/Strategy 相同的 scheduler-create owner 路径（会 commit）。
+    async with TestAsyncSessionLocal() as db:
+        job_run = await _create_job_run(
+            db,
+            "c2c_pg_monitor",
+            _BIZ_DATE,
+            lease_seconds=120,
+            run_key=run_key,
+        )
+    assert job_run is not None
+    assert job_run.status == "running"
+    assert job_run.worker_instance_id is not None
+    job_run_id = job_run.id
+    initial_owner = job_run.worker_instance_id
+    initial_epoch = job_run.lease_epoch
+
+    try:
+        token = FencedJobToken(
+            job_run_id=job_run.id,
+            worker_instance_id=job_run.worker_instance_id,
+            lease_epoch=job_run.lease_epoch,
+            lease_seconds=120,
+        )
+
+        cycle_time = datetime.now(_TZ)
+        await update_owned_job_run_progress(
+            token,
+            last_cycle_at=cycle_time,
+            succeeded_count=2,
+            failed_count=1,
+            metadata_updates={"last_bar_time": "2026-09-18T10:00:00+08:00"},
+            session_factory=TestAsyncSessionLocal,
+        )
+
+        # 独立 session 回读：仅 progress 三字段 + metadata 被写，ownership/epoch/status 不变。
+        async with TestAsyncSessionLocal() as db:
+            row = await db.get(SchedulerJobRun, job_run_id)
+            assert row is not None
+            assert row.status == "running"
+            assert row.last_cycle_at == cycle_time
+            assert row.succeeded_count == 2
+            assert row.failed_count == 1
+            meta = json.loads(row.metadata_json) if row.metadata_json else {}
+            assert meta.get("last_bar_time") == "2026-09-18T10:00:00+08:00"
+            # helper 不触碰 ownership / epoch
+            assert row.worker_instance_id == initial_owner
+            assert row.lease_epoch == initial_epoch
+    finally:
+        await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
+
+
+# ---------------------------------------------------------------------------
+# Test 5: stale progress write 必须 fail-closed 被拒绝（C2C-V1）
+# --------------------------------------------------------------------------- #
+async def test_scheduler_owned_job_stale_progress_update_rejected_on_postgres() -> None:
+    """C2C: ownership 已转移到 newer epoch 后，stale owner 的
+    ``update_owned_job_run_progress()`` 必须抛 ``JobLeaseLostError``，且不覆盖
+    counts / metadata / last_cycle_at，new owner/epoch 保持不变。"""
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        JobLeaseLostError,
+        update_owned_job_run_progress,
+    )
+    from app.worker import _create_job_run
+    from tests.conftest import TestAsyncSessionLocal
+
+    run_key = f"c2c-pg:{uuid.uuid4()}"
+    async with TestAsyncSessionLocal() as db:
+        job_run = await _create_job_run(
+            db,
+            "c2c_pg_monitor",
+            _BIZ_DATE,
+            lease_seconds=120,
+            run_key=run_key,
+        )
+    assert job_run is not None
+    assert job_run.worker_instance_id is not None
+    job_run_id = job_run.id
+    worker = job_run.worker_instance_id
+    epoch = job_run.lease_epoch
+
+    try:
+        stale_token = FencedJobToken(job_run_id, worker, epoch, 120)
+
+        # 记录转移前的 progress 状态（stale 写入不得改变它们）。
+        async with TestAsyncSessionLocal() as db:
+            before = await db.get(SchedulerJobRun, job_run_id)
+            assert before is not None
+            before_counts = (before.succeeded_count, before.failed_count)
+            before_last_cycle = before.last_cycle_at
+            before_meta = json.loads(before.metadata_json) if before.metadata_json else {}
+
+        # 模拟 ownership 转移（普通 stale recovery 会 bump epoch；此处只测转移后 stale owner 失去写权）。
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            current.lease_epoch = epoch + 1
+            current.worker_instance_id = "c2c-new-owner"
+            current.status = "running"
+            await db.commit()
+
+        # stale progress write 必须 fail-closed 抛错。
+        with pytest.raises(JobLeaseLostError):
+            await update_owned_job_run_progress(
+                stale_token,
+                last_cycle_at=datetime.now(_TZ),
+                succeeded_count=99,
+                failed_count=99,
+                metadata_updates={"stale_progress": True},
+                session_factory=TestAsyncSessionLocal,
+            )
+
+        # 回读：progress 未被 stale owner 覆盖；new owner/epoch 保持。
+        async with TestAsyncSessionLocal() as db:
+            row = await db.get(SchedulerJobRun, job_run_id)
+            assert row is not None
+            assert row.status == "running"
+            assert row.lease_epoch == epoch + 1
+            assert row.worker_instance_id == "c2c-new-owner"
+            assert (row.succeeded_count, row.failed_count) == before_counts
+            assert row.last_cycle_at == before_last_cycle
+            meta = json.loads(row.metadata_json) if row.metadata_json else {}
+            assert meta == before_meta
+            assert "stale_progress" not in meta
+    finally:
+        await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
