@@ -570,3 +570,87 @@ async def test_stale_worker_cannot_finalize_after_epoch_transfer() -> None:
             assert json.loads(current.metadata_json or "{}")["chip_status"] == "skipped"
     finally:
         await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)
+
+
+@pytest.mark.asyncio
+async def test_stale_worker_cannot_merge_metadata_after_epoch_transfer() -> None:
+    """旧 epoch 在 ownership 转移后仍持有 lease_token 时，不得改写 running job metadata。
+
+    F1 修复的本质：merge_owned_job_run_metadata 在写时重新检查数据库 live ownership
+    （lock_owned_job_run 的 id+status+worker+epoch+FOR UPDATE）。本测试用真实 PostgreSQL
+    证明：old owner (epoch=1) 在 ownership 已转移到 new owner (epoch=2) 后尝试写 metadata
+    必须 JobLeaseLostError，且 metadata 整体未被改动；new owner (epoch=2) 可正常写。
+    """
+    from app.services.chip_consensus_run_lifecycle import META_CHIP_RUN_ID
+    from app.services.fenced_job_run_service import (
+        FencedJobToken,
+        JobLeaseLostError,
+        merge_owned_job_run_metadata,
+    )
+    from tests.conftest import TestAsyncSessionLocal
+
+    job_run = await _create_queued_chip_job(TestAsyncSessionLocal, status="running")
+    job_run_id = job_run.id
+    old_worker = "worker:old"
+    new_worker = "worker:new"
+
+    try:
+        # 步骤 B：建立 old owner (epoch=1)
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            current.status = "running"
+            current.worker_instance_id = old_worker
+            current.lease_epoch = 1
+            await db.commit()
+
+        stale_token = FencedJobToken(job_run_id, old_worker, 1, _CHIP_LEASE_SECONDS)
+
+        # 步骤 C：真实 ownership transfer（new transaction，已 commit）
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            before_meta = json.loads(current.metadata_json or "{}")
+            current.worker_instance_id = new_worker
+            current.lease_epoch = 2
+            await db.commit()
+
+        # 步骤 2：stale token 写必须 fail closed
+        stale_chip_run_id = uuid.uuid4()
+        with pytest.raises(JobLeaseLostError):
+            await merge_owned_job_run_metadata(
+                stale_token,
+                {META_CHIP_RUN_ID: str(stale_chip_run_id)},
+                session_factory=TestAsyncSessionLocal,
+            )
+
+        # 步骤 3：独立 session 证明 metadata 整体未被 stale worker 改写
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            after_stale_meta = json.loads(current.metadata_json or "{}")
+            assert current.status == "running"
+            assert current.worker_instance_id == new_worker
+            assert current.lease_epoch == 2
+            assert after_stale_meta == before_meta
+            assert META_CHIP_RUN_ID not in after_stale_meta
+
+        # 步骤 4：current owner (epoch=2) 正向对照 —— 必须可写
+        current_token = FencedJobToken(job_run_id, new_worker, 2, _CHIP_LEASE_SECONDS)
+        current_chip_run_id = uuid.uuid4()
+        await merge_owned_job_run_metadata(
+            current_token,
+            {META_CHIP_RUN_ID: str(current_chip_run_id)},
+            session_factory=TestAsyncSessionLocal,
+        )
+
+        async with TestAsyncSessionLocal() as db:
+            current = await db.get(SchedulerJobRun, job_run_id)
+            assert current is not None
+            meta = json.loads(current.metadata_json or "{}")
+            assert meta[META_CHIP_RUN_ID] == str(current_chip_run_id)
+            assert current.worker_instance_id == new_worker
+            assert current.lease_epoch == 2
+            assert current.status == "running"
+    finally:
+        await _cleanup_job_run(TestAsyncSessionLocal, job_run_id)

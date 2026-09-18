@@ -229,9 +229,10 @@
         "tests/test_chip_consensus_worker.py::test_worker_concurrent_only_one_claims_chip",
         "tests/test_chip_consensus_worker.py::test_worker_resumes_interrupted_chip_job",
         "tests/test_chip_consensus_worker.py::test_stale_worker_cannot_finalize_after_epoch_transfer",
+        "tests/test_chip_consensus_worker.py::test_stale_worker_cannot_merge_metadata_after_epoch_transfer",
         "tests/test_chip_consensus_worker.py::test_worker_missing_metadata_marks_failed"
       ],
-      "claim": "Chip consensus poll preserves real PostgreSQL claim, resume, and fencing semantics: queued work is claimed once with lease epoch advancement, concurrent transactions enforce exactly-one claim through FOR UPDATE SKIP LOCKED, interrupted work resumes through resume_queued, stale epochs cannot overwrite the current owner terminal state, and metadata-invalid claimed work reaches a fenced failed terminal state."
+      "claim": "Chip consensus poll preserves real PostgreSQL claim, resume, and fencing semantics: queued work is claimed once with lease epoch advancement, concurrent transactions enforce exactly-one claim through FOR UPDATE SKIP LOCKED, interrupted work resumes through resume_queued, stale epochs cannot overwrite either terminal state or running-job metadata owned by a newer epoch, and metadata-invalid claimed work reaches a fenced failed terminal state."
     }
   ]
 }
