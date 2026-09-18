@@ -37,17 +37,20 @@ test('A2 生成按钮仍复用现有 handleOpenModal 与既有 modal/API', () =>
   assert.ok(SRC.includes('createInviteCodes.mutate'), '生成仍走既有 mutation')
 })
 
-test('A3 邀请码列表不再有必然失败的复制按钮', () => {
+test('A3 新邀请码列表可展示/复制；历史码显示不可恢复', () => {
+  // [PANJI-BIZ-FIX Commit B2] 旧合同「列表不得显示明文」已退休
+  assert.ok(SRC.includes('历史码不可恢复'), 'code=null 时必须显示"历史码不可恢复"')
   assert.ok(
-    !SRC.includes("handleCopyCode('')"),
-    "列表页 handleCopyCode('') 传空串必然失败，必须删除",
+    SRC.includes('handleCopyCode(row.code as string)'),
+    'code!=null 时必须可复制（传 row.code，不传空串）',
   )
+  assert.ok(!SRC.includes("handleCopyCode('')"), '不得传空串（必然失败）')
 })
 
 test('A4 生成结果里的复制按钮保留（持有明文）', () => {
   assert.ok(
     SRC.includes('handleCopyCode(code.code)'),
-    '生成弹窗内必须保留复制（唯一持有明文的地方）',
+    '生成弹窗内必须保留复制（持有明文）',
   )
 })
 
@@ -137,4 +140,53 @@ test('C4 字段沿用 feishu_platform_app 现有字段集', () => {
 
 test('C5 未使用已废弃的 feishu_webhook', () => {
   assert.ok(!SRC.includes('feishu_webhook'), '不得再使用已废弃的 feishu_webhook')
+})
+
+// =============================================================================
+// D. 邀请码管理（[PANJI-BIZ-FIX Commit B1/B2/B3]）
+// =============================================================================
+
+test('D1 effective 最大自选优先 capability.watchlist_limit（render/sortValue 共用 helper）', () => {
+  assert.ok(SRC.includes('function getInviteWatchlistLimit'), '必须有唯一 helper')
+  // helper 定义 + render + sortValue 至少 3 处引用
+  const calls = SRC.split('getInviteWatchlistLimit(').length - 1
+  assert.ok(calls >= 3, `helper 应被定义并复用（当前引用 ${calls} 处）`)
+  assert.ok(
+    !SRC.includes('sortValue: (row) => row.monitor_limit ?? 0'),
+    'sortValue 不得再直接用 row.monitor_limit',
+  )
+})
+
+test('D2 生成邀请码默认 watchlist=5 / days=30', () => {
+  assert.ok(SRC.includes('INVITE_DEFAULT_WATCHLIST_LIMIT = 5'), '默认自选上限 5')
+  assert.ok(SRC.includes('INVITE_DEFAULT_GRANT_DAYS = 30'), '默认有效期 30')
+  assert.ok(
+    SRC.includes('setCapWatchlistLimit(INVITE_DEFAULT_WATCHLIST_LIMIT)'),
+    '打开弹窗重置为 5',
+  )
+  assert.ok(
+    SRC.includes('setGenerateGrantDays(INVITE_DEFAULT_GRANT_DAYS)'),
+    '打开弹窗重置为 30',
+  )
+})
+
+test('D3 数字输入允许中间空值，提交时才校验', () => {
+  assert.ok(SRC.includes('function parseIntegerInput'), '必须有 parseIntegerInput helper')
+  assert.ok(
+    SRC.includes("setCapWatchlistLimit(raw === '' ? '' : Number(raw))"),
+    'watchlist onChange 只保存输入（允许空值）',
+  )
+  assert.ok(
+    SRC.includes("setGenerateGrantDays(raw === '' ? '' : Number(raw))"),
+    'grant_days onChange 只保存输入（允许空值）',
+  )
+})
+
+test('D4 管理员直接 grant capability 的默认值未被改动', () => {
+  assert.ok(
+    SRC.includes(
+      'const [capGrantWatchlistLimit, setCapGrantWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)',
+    ),
+    '直接 grant capability 默认仍为套餐默认，不随邀请码弹窗改动',
+  )
 })

@@ -21,6 +21,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
@@ -31,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import get_db, require_roles
 
 # [密码重置] canonical 密码哈希 owner（bcrypt），禁止在本模块另写一套哈希实现
-from app.core.security import get_password_hash
+from app.core.security import decrypt_secret, get_password_hash
 from app.models.access_audit_log import AccessAuditLog
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.subscription import Subscription
@@ -96,6 +97,40 @@ router = APIRouter(
     prefix="/v1/admin",
     tags=["admin-subscription"],
 )
+
+
+def _invite_code_admin_item(invite: Any) -> InviteCodeListItem:
+    """admin 邀请码响应构造器（list / revoke 唯一的解密入口）。
+
+    [PANJI-BIZ-FIX-20260918 Commit B2]
+    - 有 ``code_ciphertext`` → ``decrypt_secret`` 回显明文；
+    - 无 ciphertext（历史邀请码）→ ``None``（SHA256 不可反推，不伪造明文）；
+    - 解密失败 → 记录错误并返回 ``None``（fail-safe：绝不把 ciphertext 当邀请码回显）。
+    """
+    code: str | None = None
+    if invite.code_ciphertext:
+        try:
+            code = decrypt_secret(invite.code_ciphertext)
+        except Exception as exc:  # fail-safe：不得把 ciphertext 当邀请码回显
+            logger.error(
+                "邀请码密文解密失败 invite_code_id=%s: %s", invite.id, exc
+            )
+            code = None
+    return InviteCodeListItem(
+        id=invite.id,
+        status=invite.status,
+        code=code,
+        plan_code=invite.plan_code,
+        monitor_limit=invite.monitor_limit,
+        grant_days=invite.grant_days,
+        note=invite.note,
+        created_by=invite.created_by,
+        created_at=invite.created_at,
+        used_by=invite.used_by,
+        used_at=invite.used_at,
+        usage_type=invite.usage_type,
+        capabilities=invite.capabilities,
+    )
 
 
 class ChangeRoleRequest(BaseModel):
@@ -266,21 +301,7 @@ async def get_invite_codes(
     )
     return {
         "items": [
-            InviteCodeListItem(
-                id=invite.id,
-                status=invite.status,
-                plan_code=invite.plan_code,
-                monitor_limit=invite.monitor_limit,
-                grant_days=invite.grant_days,
-                note=invite.note,
-                created_by=invite.created_by,
-                created_at=invite.created_at,
-                used_by=invite.used_by,
-                used_at=invite.used_at,
-                usage_type=invite.usage_type,
-                # [PRD60 PA-20] 回显 capability 组合（旧模式为 None）
-                capabilities=invite.capabilities,
-            )
+            _invite_code_admin_item(invite)
             for invite in items
         ],
         "total": total,
@@ -335,21 +356,8 @@ async def revoke_code(
 
     await db.commit()
 
-    return InviteCodeListItem(
-        id=invite.id,
-        status=invite.status,
-        plan_code=invite.plan_code,
-        monitor_limit=invite.monitor_limit,
-        grant_days=invite.grant_days,
-        note=invite.note,
-        created_by=invite.created_by,
-        created_at=invite.created_at,
-        used_by=invite.used_by,
-        used_at=invite.used_at,
-        usage_type=invite.usage_type,
-        # [PRD60 PA-20] 回显 capability 组合（旧模式为 None）
-        capabilities=invite.capabilities,
-    )
+    # [PANJI-BIZ-FIX Commit B2] 与 list 共用同一构造器（同一解密逻辑）
+    return _invite_code_admin_item(invite)
 
 
 @router.get("/members")

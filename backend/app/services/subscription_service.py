@@ -46,7 +46,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.plan_codes import DEFAULT_PLAN_CODE
-from app.core.security import get_password_hash
+from app.core.security import encrypt_secret, get_password_hash
 from app.models.invitation import InviteCode, InviteRedemption
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
@@ -292,6 +292,9 @@ async def generate_invite_codes(
         code_hash = hash_invite_code(raw_code)
         invite = InviteCode(
             code_hash=code_hash,
+            # [PANJI-BIZ-FIX Commit B2] 密文仅用于 admin 后台回显；hash 仍是兑换 SSOT。
+            # 明文严禁直接落库。
+            code_ciphertext=encrypt_secret(raw_code),
             status="unused",
             grant_days=grant_days,
             plan_code=plan_code,

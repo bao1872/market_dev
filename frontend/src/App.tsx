@@ -404,10 +404,6 @@ export const routeConfig: RouteObject[] = [
                 element: <Navigate to="/admin/data-production?tab=after-close" replace />,
               },
               {
-                path: '/admin/beta-applications',
-                element: <Navigate to="/admin/users?tab=beta-applications" replace />,
-              },
-              {
                 path: '/admin/stocks',
                 element: <Navigate to="/admin/diagnostics?tab=stock" replace />,
               },

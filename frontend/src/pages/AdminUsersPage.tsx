@@ -19,7 +19,7 @@ import { useState, useMemo, useCallback, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import clsx from 'clsx'
 import { useToast } from '@/store/toast'
-import AdminBetaApplicationsPage from './AdminBetaApplicationsPage'
+
 import {
   useMembers,
   useMemberRedemptions,
@@ -81,6 +81,11 @@ interface MemberRow {
 interface InviteCodeRow {
   id: string
   status: string
+  /**
+   * [PANJI-BIZ-FIX-20260918 Commit B2] 邀请码明文（后端从 code_ciphertext 解密回显）。
+   * null = 历史邀请码，SHA256 不可反推，明文不可恢复。
+   */
+  code: string | null
   grant_days: number
   plan_code: PlanCode | null
   monitor_limit: number | null
@@ -131,6 +136,25 @@ function CapabilitySummaryCell({ row }: { row: MemberRow }) {
 
 // observe_20 套餐默认上限（命名避开架构规则敏感词，以免数值与关键字同行）
 const OBSERVE_PLAN_DEFAULT = 20
+
+// [PANJI-BIZ-FIX-20260918 Commit B3] 生成邀请码弹窗的默认值（只影响该弹窗，
+// 不影响管理员直接 grant capability 的默认值）。
+const INVITE_DEFAULT_WATCHLIST_LIMIT = 5
+const INVITE_DEFAULT_GRANT_DAYS = 30
+
+// [PANJI-BIZ-FIX-20260918 Commit B3] 数字输入解析：onChange 只保存用户输入
+// （允许中间空值），blur/submit 时才做整数化 + 范围校验。
+function parseIntegerInput(
+  value: number | '',
+  min: number,
+  max: number,
+): number | null {
+  if (value === '' || value === null || typeof value === 'undefined') return null
+  if (!Number.isFinite(value)) return null
+  const int = Math.trunc(value)
+  if (int < min || int > max) return null
+  return int
+}
 
 // ===== 工具函数 =====
 
@@ -226,16 +250,46 @@ function getPlanName(
 function getPlanMonitorLimit(
   planCode: PlanCode | null | undefined,
   plans: PlanResponse[],
-): string {
-  if (!planCode) return '—'
+): number | null {
+  if (!planCode) return null
   const limit = plans.find((p) => p.plan_code === planCode)?.monitor_limit
-  return limit != null ? String(limit) : '—'
+  return limit != null ? limit : null
+}
+
+/**
+ * [PANJI-BIZ-FIX-20260918 Commit B1] 邀请码 effective 最大自选（唯一真源 helper）。
+ *
+ * 优先级严格为：
+ *   1. capabilities 中 self_selection.watchlist_limit（新模式额度 SSOT）
+ *   2. row.monitor_limit（旧模式快照）
+ *   3. plan_code 对应 plan.monitor_limit
+ *   4. null
+ *
+ * “最大自选”列的 render 与 sortValue 必须共用本函数，禁止两套逻辑。
+ */
+function getInviteWatchlistLimit(
+  row: InviteCodeRow,
+  plans: PlanResponse[],
+): number | null {
+  const caps = row.capabilities
+  if (Array.isArray(caps)) {
+    for (const cap of caps) {
+      if (
+        cap &&
+        cap.capability === 'self_selection' &&
+        cap.watchlist_limit != null
+      ) {
+        return cap.watchlist_limit
+      }
+    }
+  }
+  if (row.monitor_limit != null) return row.monitor_limit
+  return getPlanMonitorLimit(row.plan_code, plans)
 }
 
 // [管理后台优化 PRD §8.4.7] tab 的 URL 唯一真源映射（模块级常量，避免每次渲染重建引用）
 // URL param → activeTab 值
 const TAB_PARAM_TO_STATE: Record<string, string> = {
-  beta_applications: 'betaApplications',
   members: 'memberList',
   invites: 'inviteList',
   rules: 'rulePanel',
@@ -244,7 +298,6 @@ const TAB_PARAM_TO_STATE: Record<string, string> = {
 const TAB_STATE_TO_PARAM: Record<string, string | undefined> = {
   memberList: undefined,
   inviteList: 'invites',
-  betaApplications: 'beta_applications',
   rulePanel: 'rules',
 }
 
@@ -319,9 +372,15 @@ export default function AdminUsersPage() {
   const [capMarketData, setCapMarketData] = useState(true)
   const [capResearchReplay, setCapResearchReplay] = useState(false)
   // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
-  const [capWatchlistLimit, setCapWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
+  // [Commit B3] 默认 5；state 允许 '' 中间编辑态（清空后可重新键入）
+  const [capWatchlistLimit, setCapWatchlistLimit] = useState<number | ''>(
+    INVITE_DEFAULT_WATCHLIST_LIMIT,
+  )
   // 统一 grant_days 按天解释（1 单位 = 1 天）
-  const [generateGrantDays, setGenerateGrantDays] = useState(1)
+  // [Commit B3] 默认 30；state 允许 '' 中间编辑态
+  const [generateGrantDays, setGenerateGrantDays] = useState<number | ''>(
+    INVITE_DEFAULT_GRANT_DAYS,
+  )
   const [generatedCodes, setGeneratedCodes] = useState<InviteCode[]>([])
 
   // 用户兑换记录（抽屉打开时按选中用户查询）
@@ -501,25 +560,33 @@ export default function AdminUsersPage() {
    * 至少需要选择一个 capability
    */
   const handleGenerate = useCallback(() => {
+    // [Commit B3] 提交时统一做整数化 + 范围校验（不依赖 <input min/max>）
+    const grantDays = parseIntegerInput(generateGrantDays, 1, 365)
+    if (grantDays == null) {
+      toast.show('校验失败', '有效期需填写 1-365 之间的整数天')
+      return
+    }
+    const watchlistLimit = parseIntegerInput(capWatchlistLimit, 1, 500)
+
     // 构造 capabilities 列表（顺序：self_selection → market_data → research_replay）
     const capabilities: CapabilityGrantInput[] = []
     if (capSelfSelection) {
       capabilities.push({
         capability: 'self_selection',
-        days: generateGrantDays,
-        watchlist_limit: capWatchlistLimit,
+        days: grantDays,
+        watchlist_limit: watchlistLimit ?? undefined,
       })
     }
     if (capMarketData) {
       capabilities.push({
         capability: 'market_data',
-        days: generateGrantDays,
+        days: grantDays,
       })
     }
     if (capResearchReplay) {
       capabilities.push({
         capability: 'research_replay',
-        days: generateGrantDays,
+        days: grantDays,
       })
     }
 
@@ -530,7 +597,7 @@ export default function AdminUsersPage() {
       )
       return
     }
-    if (capSelfSelection && (!capWatchlistLimit || capWatchlistLimit < 1 || capWatchlistLimit > 500)) {
+    if (capSelfSelection && watchlistLimit == null) {
       toast.show('校验失败', '自选管理需填写自选数量上限（1-500）')
       return
     }
@@ -539,7 +606,7 @@ export default function AdminUsersPage() {
       {
         count: generateCount,
         note: generateNote,
-        grant_days: generateGrantDays, // 旧字段保留兼容（capabilities 优先）
+        grant_days: grantDays, // 旧字段保留兼容（capabilities 优先）
         capabilities,
       },
       {
@@ -574,8 +641,9 @@ export default function AdminUsersPage() {
     setCapSelfSelection(true)
     setCapMarketData(true)
     setCapResearchReplay(false)
-    setCapWatchlistLimit(OBSERVE_PLAN_DEFAULT)
-    setGenerateGrantDays(1)
+    // [Commit B3] 每次打开生成弹窗都重置为 5 / 30
+    setCapWatchlistLimit(INVITE_DEFAULT_WATCHLIST_LIMIT)
+    setGenerateGrantDays(INVITE_DEFAULT_GRANT_DAYS)
     setModalOpen(true)
   }, [])
 
@@ -1044,8 +1112,25 @@ export default function AdminUsersPage() {
         dataType: 'text',
         sortable: false,
         filterable: false,
-        // API 列表不返回明文邀请码，仅生成时可见
-        render: () => <b>—</b>,
+        // [PANJI-BIZ-FIX Commit B2] 新邀请码由后端从 ciphertext 解密回显 → 可展示/复制；
+        // 历史邀请码 code=null（SHA256 不可反推，明文不可恢复）。
+        render: (row) =>
+          row.code != null ? (
+            <span style={{ display: 'inline-flex', gap: 6, alignItems: 'center' }}>
+              <code>{row.code}</code>
+              <button
+                className="btn small"
+                onClick={(e) => {
+                  e.stopPropagation()
+                  handleCopyCode(row.code as string)
+                }}
+              >
+                复制
+              </button>
+            </span>
+          ) : (
+            <span style={{ color: '#999' }}>历史码不可恢复</span>
+          ),
       },
       {
         key: 'status',
@@ -1100,9 +1185,12 @@ export default function AdminUsersPage() {
         dataType: 'number',
         sortable: true,
         filterable: false,
-        render: (row) =>
-          row.monitor_limit != null ? `${row.monitor_limit} 只` : `${getPlanMonitorLimit(row.plan_code, plans)} 只`,
-        sortValue: (row) => row.monitor_limit ?? 0,
+        render: (row) => {
+          // [Commit B1] render 与 sortValue 共用 getInviteWatchlistLimit
+          const limit = getInviteWatchlistLimit(row, plans)
+          return limit != null ? `${limit} 只` : '—'
+        },
+        sortValue: (row) => getInviteWatchlistLimit(row, plans) ?? 0,
       },
       {
         key: 'grant_days',
@@ -1195,8 +1283,8 @@ export default function AdminUsersPage() {
         },
       },
     ],
-    // 列表页已不再使用 handleCopyCode（明文不落库，复制只在生成弹窗内可用）
-    [handleRevoke, toast, plans],
+    // [Commit B2] 列表页现在也用 handleCopyCode（新邀请码可复制）
+    [handleRevoke, handleCopyCode, toast, plans],
   )
 
   // ===== 兑换记录时间线 =====
@@ -1232,7 +1320,7 @@ export default function AdminUsersPage() {
         <div>
           <h1 className="page-title">用户与权限</h1>
           <div className="page-desc">
-            管理账户、capability 权限、邀请码与内测申请（功能访问以 effective capability 为准，商业周期不直接决定访问权限）
+            管理账户、capability 权限与邀请码（功能访问以 effective capability 为准，商业周期不直接决定访问权限）
           </div>
         </div>
         <div className="actions">
@@ -1272,7 +1360,7 @@ export default function AdminUsersPage() {
         </div>
       </div>
 
-      {/* [管理后台优化 PRD] 四 tab：会员账户 / 邀请码管理 / 内测申请 / 规则说明 */}
+      {/* [管理后台优化 PRD] 三 tab：会员账户 / 邀请码管理 / 规则说明 */}
       <div className="tabs admin-member-tabs">
         <div
           className={clsx('tab', activeTab === 'memberList' && 'active')}
@@ -1285,12 +1373,6 @@ export default function AdminUsersPage() {
           onClick={() => handleSetTab('inviteList')}
         >
           邀请码管理
-        </div>
-        <div
-          className={clsx('tab', activeTab === 'betaApplications' && 'active')}
-          onClick={() => handleSetTab('betaApplications')}
-        >
-          内测申请
         </div>
         <div
           className={clsx('tab', activeTab === 'rulePanel' && 'active')}
@@ -1339,13 +1421,6 @@ export default function AdminUsersPage() {
               emptyText="暂无邀请码"
             />
           </div>
-        </div>
-      )}
-
-      {/* 内测申请 tab（并入用户与权限，PRD §8.4.7） */}
-      {activeTab === 'betaApplications' && (
-        <div className="tab-panel active">
-          <AdminBetaApplicationsPage />
         </div>
       )}
 
@@ -1943,10 +2018,13 @@ export default function AdminUsersPage() {
                       max={500}
                       value={capWatchlistLimit}
                       onChange={(e) => {
-                        const v = Number(e.target.value)
-                        if (Number.isFinite(v)) {
-                          setCapWatchlistLimit(Math.min(500, Math.max(1, Math.trunc(v))))
-                        }
+                        // [Commit B3] 只保存用户输入（允许空值），不立即 clamp
+                        const raw = e.target.value
+                        setCapWatchlistLimit(raw === '' ? '' : Number(raw))
+                      }}
+                      onBlur={() => {
+                        const v = parseIntegerInput(capWatchlistLimit, 1, 500)
+                        setCapWatchlistLimit(v ?? INVITE_DEFAULT_WATCHLIST_LIMIT)
                       }}
                     />
                     <small className="form-hint">PA-02：self_selection 必填（1-500）</small>
@@ -1961,10 +2039,13 @@ export default function AdminUsersPage() {
                     max={365}
                     value={generateGrantDays}
                     onChange={(e) => {
-                      const v = Number(e.target.value)
-                      if (Number.isFinite(v)) {
-                        setGenerateGrantDays(Math.min(365, Math.max(1, Math.trunc(v))))
-                      }
+                      // [Commit B3] 只保存用户输入（允许空值），不立即 clamp
+                      const raw = e.target.value
+                      setGenerateGrantDays(raw === '' ? '' : Number(raw))
+                    }}
+                    onBlur={() => {
+                      const v = parseIntegerInput(generateGrantDays, 1, 365)
+                      setGenerateGrantDays(v ?? INVITE_DEFAULT_GRANT_DAYS)
                     }}
                   />
                   <small className="form-hint">有效天数（1 单位 = 1 天）</small>

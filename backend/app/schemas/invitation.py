@@ -109,12 +109,18 @@ class InviteCodeResponse(BaseModel):
 
 
 class InviteCodeListItem(BaseModel):
-    """邀请码列表项 - 不含明文，含套餐快照。"""
+    """邀请码列表项 - 含套餐快照；新邀请码可回显明文。
+
+    [PANJI-BIZ-FIX Commit B2] ``code`` 由 admin 响应构造器从 ``code_ciphertext``
+    解密得到；历史邀请码无 ciphertext → ``None``（SHA256 不可反推，不伪造明文）。
+    非 admin 路径不得使用该字段。
+    """
 
     model_config = ConfigDict(from_attributes=True)
 
     id: UUID = Field(..., description="邀请码 ID")
     status: str = Field(..., description="unused/used/revoked")
+    code: str | None = Field(None, description="邀请码明文（新邀请码）；历史邀请码为 None（不可恢复）")
     grant_days: int = Field(..., description="兑换后增加天数")
     plan_code: str | None = Field(None, description="套餐代码 observe_20/research_50")
     monitor_limit: int | None = Field(None, description="监控数量上限快照")

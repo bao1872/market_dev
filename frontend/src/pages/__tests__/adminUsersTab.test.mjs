@@ -33,13 +33,15 @@ test('useEffect 监听 tabParam 同步 activeTab（前进/后退可恢复）', (
   assert.ok(src.includes('tabParam') && src.includes('useEffect'), 'useEffect 必须依赖 tabParam')
 })
 
-// ===== 3. 每个 tab 有明确 URL 表示 =====
-test('tab 有明确 URL 映射（members/invites/beta_applications/rules）', () => {
+// ===== 3. 每个 tab 有明确 URL 表示（内测申请 tab 已删除）=====
+test('tab 有明确 URL 映射（members/invites/rules）', () => {
   const src = readSource(PAGE_PATH)
-  assert.ok(src.includes('beta_applications'), '内测申请 tab URL 表示')
   assert.ok(src.includes('memberList'), '会员账户 tab')
   assert.ok(src.includes('inviteList'), '邀请码 tab')
   assert.ok(src.includes('rulePanel'), '规则说明 tab')
+  // [PANJI-BIZ-FIX Commit B4] 内测申请 tab 已删除
+  assert.ok(!src.includes('betaApplications'), '内测申请 tab 必须已删除')
+  assert.ok(!src.includes('beta_applications'), '内测申请 URL 映射必须已删除')
 })
 
 // ===== 4. 切换 tab 写回 URL =====
@@ -48,13 +50,12 @@ test('切换 tab 写回 URL（setSearchParams）', () => {
   assert.ok(src.includes('setSearchParams'), '切换 tab 必须写回 URL')
 })
 
-// ===== 5. 旧路由重定向目标与页面识别一致（P0 审查修复）=====
-test('旧路由 tab=beta_applications 与页面识别一致（下划线）', () => {
+// ===== 5. 内测申请 tab / 旧路由已删除 =====
+test('内测申请 tab / 旧路由已删除（Commit B4）', () => {
   const pageSrc = readSource(PAGE_PATH)
   const routeSrc = readSource(join(__dirname, '..', '..', 'navigation', 'routeStructure.ts'))
-  // 页面必须识别下划线 beta_applications
-  assert.ok(pageSrc.includes("'beta_applications'"), 'AdminUsersPage 必须识别 beta_applications')
-  // 旧路由重定向必须用下划线 beta_applications（连字符会导致旧入口失效）
-  assert.ok(routeSrc.includes('/admin/users?tab=beta_applications'), '旧路由必须重定向到 tab=beta_applications（下划线）')
-  assert.ok(!routeSrc.includes('/admin/users?tab=beta-applications'), '不得用连字符 beta-applications')
+  assert.ok(!pageSrc.includes('betaApplications'), 'AdminUsersPage 不得再识别 betaApplications')
+  assert.ok(!pageSrc.includes('beta_applications'), 'AdminUsersPage 不得再识别 beta_applications')
+  assert.ok(!routeSrc.includes('/admin/beta-applications'), 'routeStructure 不得再有 beta-applications 重定向')
+  assert.ok(!routeSrc.includes('tab=beta_applications'), 'routeStructure 不得再重定向到 beta_applications')
 })

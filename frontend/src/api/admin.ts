@@ -101,10 +101,15 @@ export interface InviteCode {
   capabilities: CapabilityGrantInput[] | null
 }
 
-/** 邀请码列表项（不含明文）+ 套餐快照 */
+/** 邀请码列表项 + 套餐快照 */
 export interface InviteCodeListItem {
   id: string
   status: string
+  /**
+   * [PANJI-BIZ-FIX Commit B2] 邀请码明文（后端从 code_ciphertext 解密回显）。
+   * null = 历史邀请码，SHA256 不可反推，明文不可恢复。
+   */
+  code: string | null
   grant_days: number
   plan_code: PlanCode | null
   monitor_limit: number | null

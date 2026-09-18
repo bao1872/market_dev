@@ -60,7 +60,14 @@ class InviteCode(Base):
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4, server_default=func.gen_random_uuid()
     )
     code_hash: Mapped[str] = mapped_column(
-        Text(), nullable=False, unique=True, comment="邀请码 SHA256 哈希（明文不存储）"
+        Text(), nullable=False, unique=True, comment="邀请码 SHA256 哈希（明文不存储；兑换/验证唯一真源）"
+    )
+    # [PANJI-BIZ-FIX Commit B2] 新邀请码额外保存 Fernet 密文，供 admin 后台回显/复制。
+    # 历史邀请码为 NULL（SHA256 不可反推，不伪造明文）。严禁写入明文。
+    code_ciphertext: Mapped[str | None] = mapped_column(
+        Text(),
+        nullable=True,
+        comment="邀请码密文（Fernet，仅新邀请码；NULL=历史邀请码不可恢复）",
     )
     status: Mapped[str] = mapped_column(
         String(16),
