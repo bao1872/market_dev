@@ -99,31 +99,6 @@ _shutdown = False
 _WORKER_INSTANCE_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:12]}"
 
 
-def parse_worker_slot(instance_id: str) -> str:
-    """返回 worker slot（hostname:pid），兼容 legacy "hostname:pid" 与
-    新格式 "hostname:pid:nonce"。
-
-    slot 相等意味着「同一台机器上的同一进程 PID 槽位」，是判断 incarnation
-    替换的依据；incarnation（nonce）不同则说明该 slot 上的进程已更新。
-    """
-    if not instance_id:
-        return instance_id
-    parts = instance_id.split(":")
-    if len(parts) >= 2:
-        return f"{parts[0]}:{parts[1]}"
-    return instance_id
-
-
-def parse_worker_incarnation(instance_id: str) -> str | None:
-    """返回 incarnation nonce；legacy "hostname:pid" 返回 None。"""
-    if not instance_id:
-        return None
-    parts = instance_id.split(":")
-    if len(parts) == 3:
-        return parts[2]
-    return None
-
-
 async def _heartbeat_loop(worker_name: str, interval: int = 60) -> None:
     """后台心跳任务，每 interval 秒更新一次 worker_heartbeats。
 
