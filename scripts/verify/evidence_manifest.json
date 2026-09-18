@@ -50,6 +50,19 @@
       "claim": "AfterClose crash, restart, fencing, checkpoint, and resume semantics do not false-green or duplicate downstream work."
     },
     {
+      "contract_id": "after_close_claim_poll_concurrency",
+      "governance_level": 2,
+      "semantic_owner": "app.services.after_close_orchestrator_worker_poll",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_after_close_worker.py::test_worker_claims_queued_job",
+        "tests/test_after_close_worker.py::test_worker_concurrent_only_one_claims",
+        "tests/test_after_close_worker.py::test_worker_exception_marks_failed"
+      ],
+      "claim": "AfterClose claim/poll uses real PostgreSQL row-lock semantics: a queued job is claimed and committed with worker ownership, concurrent workers cannot both claim the same job under FOR UPDATE SKIP LOCKED, and execution failure reaches the persisted failed terminal state without crashing the poll worker."
+    },
+    {
       "contract_id": "review_observation_persistence",
       "governance_level": 2,
       "semantic_owner": "app.repositories.market_review_repository",
