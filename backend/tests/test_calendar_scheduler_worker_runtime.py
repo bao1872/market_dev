@@ -59,3 +59,45 @@ def test_facade_injects_canonical_helpers() -> None:
     assert "_create_job_run" in source
     assert "_finish_job_run" in source
     assert "recover_stale_scheduler_job_runs" in source
+
+
+def _line_index_of(source: str, token: str) -> int:
+    for i, ln in enumerate(source.splitlines()):
+        if token in ln:
+            return i
+    raise AssertionError(f"token not found in source: {token!r}")
+
+
+def _indent_of(source: str, token: str) -> int:
+    ln = source.splitlines()[_line_index_of(source, token)]
+    return len(ln) - len(ln.lstrip())
+
+
+def test_calendar_seed_import_after_duplicate_check() -> None:
+    """PANJI-GOV-W1-R1 回归：calendar_seed import 必须晚于 duplicate 短路。
+
+    duplicate 路径（job_run is None -> return）不得在加载 calendar_seed 依赖树
+    之后才命中；且 calendar_seed import 必须位于 try 内，使其 import 异常仍由
+    原有 except 路径处理。
+    """
+    from app.services.calendar_scheduler_worker_runtime import (
+        run_calendar_scheduler_worker_runtime,
+    )
+
+    source = inspect.getsource(run_calendar_scheduler_worker_runtime)
+    seed_token = "from app.services.calendar_seed import seed_calendar_from_mootdx"
+    dup_token = "if job_run is None:"
+    try_token = "try:"
+
+    seed_idx = _line_index_of(source, seed_token)
+    dup_idx = _line_index_of(source, dup_token)
+
+    # 1) import 必须发生在 duplicate 检查之后（源码顺序）。
+    assert seed_idx > dup_idx, (
+        "calendar_seed import 必须位于 duplicate 检查之后，"
+        "否则 duplicate short-circuit 会先于该 import 命中。"
+    )
+    # 2) import 必须嵌套在 try/with 内（缩进深于 try:），import 异常仍由 except 处理。
+    assert _indent_of(source, seed_token) > _indent_of(source, try_token), (
+        "calendar_seed import 必须位于 try 内，否则其 import 异常不在原有 except 路径中。"
+    )

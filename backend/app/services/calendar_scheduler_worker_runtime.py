@@ -76,7 +76,6 @@ async def run_calendar_scheduler_worker_runtime(
     async def calendar_job() -> None:
         """每日凌晨刷新交易日历（从 Mootdx 拉取当年及下一年日历并更新 DB）。"""
         from app.core.time import shanghai_business_date
-        from app.services.calendar_seed import seed_calendar_from_mootdx
 
         today = shanghai_business_date()
         job_run = None
@@ -93,6 +92,7 @@ async def run_calendar_scheduler_worker_runtime(
                 if job_run is None:
                     logger.info("calendar_scheduler SKIPPED_DUPLICATE business_date=%s", today)
                     return
+                from app.services.calendar_seed import seed_calendar_from_mootdx
                 total_count = 0
                 for year in (today.year, today.year + 1):
                     count = await seed_calendar_from_mootdx(session, year=year, force=False)
