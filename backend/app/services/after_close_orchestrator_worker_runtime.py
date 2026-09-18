@@ -11,8 +11,10 @@ AfterClose Worker *process lifecycle*:
 * SIGTERM drain (await co-process, no naked cancel),
 * final exit log.
 
-It does NOT own the task-claim / DB-fencing / auction / chip / review logic; those
-remain in ``app.worker`` and are injected (``poll_once``, ``run_auction_co_process``).
+It does NOT own the task-claim / DB-fencing / auction logic; those remain in
+``app.worker`` and are injected (``poll_once``, ``run_auction_co_process``).
+The Auction callback is supplied by ``app.worker``; the automatic Chip co-process
+and Review bootstrap execution are retired (no co-process is started for them).
 This keeps the dangerous claim/fencing SQL out of scope for W5A.
 
 Behavior is frozen: recovery order, commit point, exception isolation, SIGTERM
@@ -46,9 +48,9 @@ async def _drain_co_process(
     """[SIGTERM drain] 等待一个 co-process 自然退出（drain 到当前业务 item terminal）。
 
     co-process 各自检查共享 should_shutdown，在当前业务 item 完成后退出循环。
-    本函数**不**调用 Task.cancel()：long-running secondary job（chip / review
-    bootstrap）的当前 item 必须 drain 到 terminal，避免在 DB 中遗留 ownership
-    不清的 running job（naked orphan）。异常仅记录，不阻断其它 drain。
+    本函数**不**调用 Task.cancel()：long-running co-process 当前业务 item（当前仅 Auction）
+    必须 drain 到 terminal，避免在 DB 中遗留 ownership 不清的 running job（naked orphan）。
+    异常仅记录，不阻断其它 drain。
     """
     if task is None or task.done():
         return
@@ -161,7 +163,7 @@ async def run_after_close_orchestrator_worker_runtime(
             try:
                 # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
                 # mandatory 主循环只领取/执行 after_close_orchestrator。
-                # Chip / Review bootstrap 均为独立 co-process，不在此串行 fallback，
+                # Chip / Review bootstrap co-process 均已退休（不在此串行 fallback），
                 # 因此任何 long-running secondary job 都不占用 mandatory executor。
                 await poll_once()
             except Exception as exc:

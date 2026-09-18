@@ -28,16 +28,17 @@
 - Delivery Worker 负责实际渠道投递与失败重试
 - [P0-3] chip_consensus 与 after_close_orchestrator 可在同一容器运行（独立 WORKER_TYPE 分支）
 
-架构（2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING 修复后）：
-- `run_after_close_orchestrator_worker`（WORKER_TYPE=after_close_orchestrator，生产唯一入口）
-  只负责 mandatory after-close orchestrator 主循环（`_after_close_poll_once`）。
-- Chip consensus 以**独立 co-process** 在同一进程内运行（复用 `run_chip_consensus_worker`），
-  拥有自己的执行 loop，绝不串行阻塞 mandatory orchestrator。
-- Review bootstrap 以**独立 co-process** 在同一进程内运行（复用 `run_review_bootstrap_worker`），
-  拥有自己的执行 loop，绝不串行阻塞 mandatory orchestrator。
-- Auction Scheduler 以独立 co-process 运行（`_run_auction_scheduler_co_process`）。
-- 四个 loop 各自独立 `while not _shutdown`，共享 `_shutdown`，SIGTERM 时统一 drain 到当前
-  业务 item terminal（禁止裸 Task.cancel 遗留 ownership 不清的 running job）。
+架构（当前真实状态）：
+- AfterClose 生产进程（WORKER_TYPE=after_close_orchestrator，生产唯一入口）=
+  mandatory after-close orchestrator 主循环（`_after_close_poll_once`）
+  + Auction Scheduler 独立 co-process（`_run_auction_scheduler_co_process`）。
+- Chip consensus：
+  - 自动 AfterClose co-process 已退休（[CHIP-RETIRE 2026-09-01]）：本进程不再启动 chip co-process；
+  - `WORKER_TYPE=chip_consensus` 仅作为独立调试 / 独立部署入口保留。
+- Review bootstrap：worker / poll / co-process 已完全退休
+  （[REVIEW-BACKEND-FINAL-CLOSURE Phase 5] 物理删除），无运行时入口。
+- mandatory 主循环与 Auction co-process 各自独立 `while not _shutdown`，共享 `_shutdown`，
+  SIGTERM 时统一 drain 到当前业务 item terminal（禁止裸 Task.cancel 遗留 ownership 不清的 running job）。
 - 禁止恢复"每轮 core → chip → bootstrap 串行 fallback"的旧结构 —— 那会让长时 chip /
   review bootstrap 任务占用 mandatory executor，造成 head-of-line blocking。
 - **边界（勿过度声称）**：应用层 `_drain_co_process` 只保证 SIGTERM 到达 Python 后不裸取消
@@ -695,18 +696,6 @@ async def run_chip_consensus_worker() -> None:
 
 
 # =============================================================================
-# Review Bootstrap Worker - 已退休（REVIEW-BACKEND-FINAL-CLOSURE Phase 5）
-# 历史回填 bootstrap 的可达代码路径已物理删除；SchedulerJobRun 槽位保留为
-# 历史兼容（不 DROP），但不再有 Worker 领取或执行 review bootstrap 任务。
-# =============================================================================
-
-
-# [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] Review bootstrap Worker 已退休。
-# run_review_bootstrap_worker / _review_bootstrap_poll_once 物理删除，
-# 不再有 Worker 领取或执行 review bootstrap 任务（SchedulerJobRun 槽位保留不 DROP）。
-
-
-# =============================================================================
 # [P0-3 修复 2026-07-31] Auction Scheduler Worker - 竞价分析调度
 # =============================================================================
 
@@ -816,11 +805,10 @@ async def main() -> None:
     if WORKER_TYPE in ("auction_scheduler", "all"):
         tasks.append(asyncio.create_task(run_auction_scheduler_worker()))
 
-    # [2026-08-11 AFTER-CLOSE-ENHANCEMENT-HEAD-OF-LINE-BLOCKING v2]
-    # WORKER_TYPE=after_close_orchestrator 在 run_after_close_orchestrator_worker 内
-    # 同时启动 Chip / Review bootstrap 独立 co-process（复用各自 worker loop），
-    # [REVIEW-BACKEND-FINAL-CLOSURE Phase 5] WORKER_TYPE=review_bootstrap 已退休：
-    # Review bootstrap Worker 物理删除，不再注册或领取任务。
+    # [CHIP-RETIRE 2026-09-01] + [REVIEW-BACKEND-FINAL-CLOSURE Phase 5]
+    # 自动 Chip / Review bootstrap co-process 均已退休：AfterClose 生产进程不再额外承载它们，
+    # 只额外承载 Auction co-process。WORKER_TYPE=chip_consensus 仅保留为调试入口；
+    # Review bootstrap 入口已物理删除（不再是合法 WORKER_TYPE，见下方白名单）。
 
     # [Recovery] - 看门狗：all 模式自动启动，或 WORKER_TYPE=watchdog 单独启动
     if WORKER_TYPE in ("watchdog", "all"):
@@ -841,7 +829,7 @@ if __name__ == "__main__":
     print(f"WORKER_INTERVAL={WORKER_INTERVAL}")
     print(f"WORKER_BATCH_SIZE={WORKER_BATCH_SIZE}")
     print(f"WORKER_MAX_RETRY={WORKER_MAX_RETRY}")
-    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "chip_consensus", "auction_scheduler", "review_bootstrap", "watchdog", "all"), \
+    assert WORKER_TYPE in ("outbox", "delivery", "strategy_batch", "bars_scheduler", "strategy_scheduler", "calendar_scheduler", "monitor_scheduler", "after_close_orchestrator", "chip_consensus", "auction_scheduler", "watchdog", "all"), \
         f"未知 WORKER_TYPE: {WORKER_TYPE}"
     # 验证 worker 函数可调用
     assert callable(run_outbox_relay), "run_outbox_relay 应可调用"
