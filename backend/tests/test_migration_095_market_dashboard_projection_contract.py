@@ -16,10 +16,18 @@ from __future__ import annotations
 
 import importlib.util
 import re
+import sys
 from pathlib import Path
 from types import ModuleType
 
 import sqlalchemy as sa
+
+# 复用仓库既有 manifest loader（scripts/verify，纯 stdlib，无 app 依赖）
+_VERIFY_DIR = Path(__file__).resolve().parents[2] / "scripts" / "verify"
+if str(_VERIFY_DIR) not in sys.path:
+    sys.path.insert(0, str(_VERIFY_DIR))
+
+from evidence_manifest import load_evidence_manifest  # noqa: E402
 
 _MIGRATION_FILE = (
     Path(__file__).parent.parent / "alembic" / "versions" / "095_market_dashboard_projection.py"
@@ -358,6 +366,26 @@ def test_model_file_does_not_touch_market_board_or_bar() -> None:
     src = _MODEL_FILE.read_text(encoding="utf-8")
     assert "class MarketBoard" not in src, "不得在投影 model 内重定义/污染 MarketBoard"
     assert "class BarDaily" not in src, "不得在投影 model 内定义/污染 BarDaily"
+
+
+def test_manifest_registers_projection_pg_contract() -> None:
+    """F0-FIX1 回归：095 PG 契约必须登记进 closed manifest registry。
+
+    用仓库既有 loader（而非 json.loads）校验 manifest 整体合法性（顶层键、contract 键、
+    selector 文件真实存在），再断言 095 这一条登记精确。
+    """
+    manifest = load_evidence_manifest(
+        _VERIFY_DIR / "evidence_manifest.json",
+        repo_root=Path(__file__).resolve().parents[2],
+    )
+    by_id = {c.contract_id: c for c in manifest.contracts}
+    contract = by_id.get("market_dashboard_projection_schema_095")
+    assert contract is not None, "095 PG contract 必须登记进 evidence_manifest.json"
+    assert contract.required is True, "095 PG contract 必须 required=true"
+    assert "targeted-pg" in contract.gates, "095 PG contract 必须注册到 targeted-pg gate"
+    assert contract.test_selectors == (
+        "tests/test_migration_095_market_dashboard_projection_pg.py",
+    ), f"selector 必须精确为该 PG 文件: {contract.test_selectors}"
 
 
 if __name__ == "__main__":

@@ -11,6 +11,15 @@
       "claim": "Atomic publication and pointer persistence use real PostgreSQL semantics."
     },
     {
+      "contract_id": "market_dashboard_projection_schema_095",
+      "governance_level": 2,
+      "semantic_owner": "alembic.versions.095_market_dashboard_projection",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": ["tests/test_migration_095_market_dashboard_projection_pg.py"],
+      "claim": "Market Dashboard projection migration 095 creates the two PostgreSQL projection tables with the required primary keys, scope foreign key cascade, trade-date index, count invariants, forbidden-column exclusions, and downgrade/upgrade round-trip behavior."
+    },
+    {
       "contract_id": "projection_lifecycle",
       "governance_level": 2,
       "semantic_owner": "app.services.strategy_batch_service",
