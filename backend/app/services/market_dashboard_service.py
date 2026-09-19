@@ -434,12 +434,14 @@ def _rebase_index(points: list[tuple[float | None]]) -> list[float | None]:
 
 
 # ===========================================================================
-# E1A — 长表向量化 historical core（market history 专用；board 暂用派生旧视图）
+# E1A + E1B — 长表向量化 historical core（market + board / watch / selected scope）
 #
-# 数据形态（消除 dict[instrument->DataFrame] + df.apply(axis=1) + for date×stock×f.loc）：
+# 数据形态（消除 dict[instrument->DataFrame] + df.apply(axis=1) + for date×stock×f.loc
+#   + for board×date×member DataFrame lookup）：
 #   一张 long DataFrame（instrument_id | trade_date | close | adj_factor）
-#   → 向量化成 stock-day facts 长表（adj_close / ret / ma* / above*）
-#   → market 历史只做一次 date-groupby，board 历史从长表派生旧视图复用。
+#   → 向量化成 stock-day facts 长表（adj_close / ret / ma* / above*）整批一次
+#   → market 历史一次 date-groupby
+#   → membership 只构造一次长表；scope_changes / watch / selected 各一次 JOIN+groupby
 # ===========================================================================
 
 
@@ -555,20 +557,90 @@ def _aggregate_market_history_long(
     ]
 
 
-def _derive_legacy_stock_facts(long_facts: pd.DataFrame) -> dict[UUID, pd.DataFrame]:
-    """从长表 stock-day facts 派生旧 dict[instrument_id -> DataFrame] 视图。
+def _build_membership_long(memberships: dict[UUID, list[UUID]]) -> pd.DataFrame:
+    """从 board->[instrument] 一次性构造 membership 长表（列 board_id | instrument_id）。
 
-    仅用于 board / watch / selected 的过渡聚合（仍走 _aggregate_breadth_for_date），
-    不二次查 DB、不重算 rolling；stock-day facts 长表仍是 SSOT。
-    index = python date，列 = adj_close/ret/ma*/above*（与 _compute_stock_daily_facts 同 schema）。
+    整个 build_dashboard_history 只构造一次：不按 board 单独建 DataFrame，
+    不按 date 重建，不二次查 DB。
     """
-    if long_facts is None or len(long_facts) == 0:
-        return {}
-    legacy_cols = ["adj_close", "ret"] + [f"ma{k}" for k in WINDOWS] + [f"above{k}" for k in WINDOWS]
-    out: dict[UUID, pd.DataFrame] = {}
-    for iid, g in long_facts.groupby("instrument_id", sort=False):
-        gg = g.set_index("trade_date").sort_index()
-        out[iid] = gg[legacy_cols]
+    rows = [(bid, iid) for bid, mids in memberships.items() for iid in mids]
+    return pd.DataFrame(rows, columns=["board_id", "instrument_id"])
+
+
+def _aggregate_scope_breadth_long(
+    stock_facts: pd.DataFrame,
+    membership_long: pd.DataFrame,
+    board_ids: list[UUID],
+    dates: list[date],
+) -> dict[tuple[UUID, date], BreadthResult]:
+    """长表向量化 scope 广度聚合（替代逐 board/date/member 的 _aggregate_breadth_for_date）。
+
+    数学与 _aggregate_breadth_for_date(date, legacy_facts, membership_ids) 逐字段一致：
+    - exact-T：仅 (board, date) 上确实有 bar 的成员计入 member_count
+    - independent denominator：每窗口 valid_count 仅统计 ma_k 有效的成员
+    - equal_weight_return：exact-T 成员 ret 的均值（NaN 不计入）
+    - 空 (board, date)：不出现在返回 dict 中（DTO 构造时用 _empty_market_breadth 兜底）
+
+    输入：
+    - stock_facts：E1A 已算完的 long facts（instrument_id|trade_date|adj_close|ret|ma*|above*）
+    - membership_long：current latest membership（列 board_id|instrument_id），全函数仅构造一次
+    - board_ids：本次真正要聚合的 scope（已过滤 unknown/inactive）
+    - dates：本次真正要聚合的日期（已裁剪边界，如 scope_changes 仅 T/T-5）
+    """
+    board_set = set(board_ids)
+    date_set = set(dates)
+    empty: dict[tuple[UUID, date], BreadthResult] = {}
+    if not board_set or not date_set:
+        return empty
+    mem = membership_long[membership_long["board_id"].isin(board_set)]
+    if len(mem) == 0:
+        return empty
+    sf = stock_facts[stock_facts["trade_date"].isin(date_set)]
+    if len(sf) == 0:
+        return empty
+    merged = sf.merge(mem, on="instrument_id", how="inner")
+    if len(merged) == 0:
+        return empty
+
+    # above_k 为 object dtype（True/False/NaN）；先转数值 1/0/nan 再聚合，避免 object sum 歧义
+    above_num_cols: list[str] = []
+    for k in WINDOWS:
+        col = f"_ab{k}"
+        merged[col] = merged[f"above{k}"].to_numpy().astype("float64")
+        above_num_cols.append(col)
+
+    grouped = merged.groupby(["board_id", "trade_date"], sort=False)
+    agg = grouped.agg(
+        member_count=("instrument_id", "nunique"),
+        valid_return_count=("ret", lambda x: int(x.notna().sum())),
+        equal_weight_return=("ret", "mean"),
+        **{
+            f"valid{k}": (col, lambda x: int(x.notna().sum()))
+            for k, col in zip(WINDOWS, above_num_cols, strict=False)
+        },
+        **{f"above{k}": (col, "sum") for k, col in zip(WINDOWS, above_num_cols, strict=False)},
+    )
+
+    out: dict[tuple[UUID, date], BreadthResult] = {}
+    for (bid, d), row in agg.iterrows():
+        windows = {
+            k: WindowBreadth(
+                k,
+                int(row[f"valid{k}"]),
+                int(row[f"above{k}"]),
+                (row[f"above{k}"] / row[f"valid{k}"]) if row[f"valid{k}"] else None,
+            )
+            for k in WINDOWS
+        }
+        # 全 NaN 组的 mean 为 NaN → 转 None（float64 列无法存 None，必须在构造时转换）
+        ewr = row["equal_weight_return"]
+        ewr = None if pd.isna(ewr) else float(ewr)
+        out[(bid, d)] = BreadthResult(
+            member_count=int(row["member_count"]),
+            valid_return_count=int(row["valid_return_count"]),
+            equal_weight_return=ewr,
+            windows=windows,
+        )
     return out
 
 
@@ -619,20 +691,23 @@ async def build_dashboard_history(
         prev_index = idx
         first_date = False
 
-    # board / watch / selected 暂时复用旧 stock_facts 视图（由长表派生；不二次查 DB、不重算 rolling）
-    stock_facts: dict[UUID, pd.DataFrame] = _derive_legacy_stock_facts(long_facts)
-
-    # ③ 板块 5 日宽度变化（仅 T 与 T-5 两个截面）
+    # ③+④+⑤ 板块 / 关注 / 选中：membership 只构造一次长表，各一次 JOIN+groupby（不再逐 board/date/member 聚合）
     boards = await _query_active_boards(session)
     memberships = await _query_board_memberships(session, [b.id for b in boards])
+    membership_long = _build_membership_long(memberships)
+    board_by_id = {b.id: b for b in boards}
+
+    # ③ 板块 5 日宽度变化（仅 T 与 T-5 两个截面；一次 scope JOIN/groupby）
     scope_changes: list[ScopeBreadthChange] = []
     if len(display_dates) >= WIDTH_CHANGE_LAG + 1:
         t_now = display_dates[-1]
         t_prev = display_dates[-(WIDTH_CHANGE_LAG + 1)]
-        for board in boards:
-            mids = memberships.get(board.id, [])
-            b_now = _aggregate_breadth_for_date(t_now, stock_facts, mids)
-            b_prev = _aggregate_breadth_for_date(t_prev, stock_facts, mids)
+        scope_agg = _aggregate_scope_breadth_long(
+            long_facts, membership_long, [b.id for b in boards], [t_now, t_prev]
+        )
+        for board in boards:  # 仅负责 metadata + DTO assembling，不扫描 member facts
+            b_now = scope_agg.get((board.id, t_now), _empty_market_breadth())
+            b_prev = scope_agg.get((board.id, t_prev), _empty_market_breadth())
             scope_changes.append(
                 ScopeBreadthChange(
                     scope_key=str(board.id),
@@ -653,17 +728,19 @@ async def build_dashboard_history(
                 )
             )
 
-    # ④ 关注板块最近约半月归一化走势（仅用户指定的当前 active board）
+    # ④ 关注板块最近约半月归一化走势（仅有效 watch board；一次 scope JOIN/groupby）
     watch_dates = display_dates[-WATCH_TRADE_DAYS:]
-    board_by_id = {b.id: b for b in boards}
+    valid_watch_ids = [wid for wid in watch_board_ids if wid in board_by_id]
+    watch_agg = _aggregate_scope_breadth_long(
+        long_facts, membership_long, valid_watch_ids, watch_dates
+    )
     watch_series: list[WatchScopeSeries] = []
-    for wid in watch_board_ids:
+    for wid in watch_board_ids:  # 保持输入顺序；unknown/inactive 跳过（不 dedupe 输出）
         board = board_by_id.get(wid)
         if board is None:
             continue
-        mids = memberships.get(board.id, [])
         ewrs = [
-            (_aggregate_breadth_for_date(d, stock_facts, mids).equal_weight_return,)
+            (watch_agg.get((wid, d), _empty_market_breadth()).equal_weight_return,)
             for d in watch_dates
         ]
         indices = _rebase_index(ewrs)
@@ -682,13 +759,16 @@ async def build_dashboard_history(
             )
         )
 
-    # ⑤ 选中板块详情历史（行业/概念共用一套逻辑；仅当前 latest membership 回放全部 display 日期）
+    # ⑤ 选中板块详情历史（行业/概念共用一套逻辑；仅有效 selected；一次 scope JOIN/groupby）
+    valid_selected_ids = [sid for sid in selected_scope_ids if sid in board_by_id]
+    selected_agg = _aggregate_scope_breadth_long(
+        long_facts, membership_long, valid_selected_ids, display_dates
+    )
     selected_scope_history: list[ScopeHistorySeries] = []
-    for sid in selected_scope_ids:
+    for sid in selected_scope_ids:  # 保持输入顺序；unknown/inactive 跳过（不造空伪 scope）
         board = board_by_id.get(sid)
         if board is None:
-            continue  # 不在当前 active boards 中 → 忽略，不报错、不造空伪 scope
-        mids = memberships.get(board.id, [])
+            continue
         selected_scope_history.append(
             ScopeHistorySeries(
                 scope_key=str(board.id),
@@ -698,7 +778,7 @@ async def build_dashboard_history(
                 points=[
                     ScopeHistoryPoint(
                         trade_date=d,
-                        breadth=_aggregate_breadth_for_date(d, stock_facts, mids),
+                        breadth=selected_agg.get((sid, d), _empty_market_breadth()),
                     )
                     for d in display_dates
                 ],

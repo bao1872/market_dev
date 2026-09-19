@@ -606,7 +606,7 @@ def test_stock_facts_reused_across_market_board_watch_selected(monkeypatch):
         memberships={b1.id: [i1], b2.id: [i2]},
         watch_board_ids=[b1.id, b2.id], selected_scope_ids=[b1.id, b2.id],
     )
-    # 整批一次向量化（不再逐股票 apply）；board/watch/selected 复用派生旧视图，不重算 rolling
+    # 整批一次向量化（不再逐股票 apply）；board/watch/selected 复用长表 SSOT（向量化 scope JOIN/groupby），不重算 stock facts
     assert len(seen) == 1
 
 
