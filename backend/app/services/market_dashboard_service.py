@@ -380,11 +380,11 @@ def _aggregate_breadth_for_date(
         f = stock_facts.get(iid)
         if f is None or len(f) == 0:
             continue
-        row = f[f.index == target_date]
-        if len(row) == 0:
+        # 唯一 date index 直接定位：禁止全表布尔扫描、nearest、ffill、iloc last。
+        if target_date not in f.index:
             continue  # exact-T：当日无真实 bar，不进入分母、不产生收益
         member_count += 1
-        r = row.iloc[0]
+        r = f.loc[target_date]
         for k in WINDOWS:
             av = r[f"above{k}"]
             if pd.notna(av):

@@ -591,3 +591,20 @@ def test_stock_facts_reused_across_market_board_watch_selected(monkeypatch):
         watch_board_ids=[b1.id, b2.id], selected_scope_ids=[b1.id, b2.id],
     )
     assert len(seen) == 2
+
+
+# E0. 窄 regression：唯一 date index 直接查找，exact-T 不破坏（无 T-1 仍 member_count==0）
+def test_indexed_lookup_exact_date_no_ffill():
+    t = date(2026, 9, 18)
+    t_minus_1 = date(2026, 9, 17)
+    t_minus_2 = date(2026, 9, 16)
+    iid = uuid4()
+    # 单只股票：有 T-2 与 T 的 bar，缺 T-1（模拟停牌/缺失日），index 唯一且不连续
+    df = _mk([t_minus_2, t], [10.0, 12.0])
+    facts = {iid: svc._compute_stock_daily_facts(df)}
+    miss = svc._aggregate_breadth_for_date(t_minus_1, facts)
+    hit = svc._aggregate_breadth_for_date(t, facts)
+    assert miss.member_count == 0  # T-1 不存在 → 不 fallback、不 nearest、不 iloc last
+    assert hit.member_count == 1   # T 存在 → 精确命中
+    # 行为矩阵：T-2 同样精确命中，T-1 缺失不污染相邻日
+    assert svc._aggregate_breadth_for_date(t_minus_2, facts).member_count == 1
