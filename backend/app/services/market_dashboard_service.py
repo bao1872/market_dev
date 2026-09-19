@@ -175,7 +175,7 @@ async def build_daily_dashboard_snapshot(
     """
     t = trade_date
     instrument_ids = await _query_market_instrument_ids(session)
-    start_date = await _query_recent_start_date(session)
+    start_date = await _query_recent_start_date(session, t)
 
     # 唯一一次批量 bars 读取（已含 close + adj_factor）
     bars = await bar_repository.get_daily_bars_batch(session, instrument_ids, start_date, t)

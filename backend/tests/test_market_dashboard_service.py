@@ -40,7 +40,9 @@ def _run_snapshot(monkeypatch, *, trade_date, instrument_ids, start_date, bars, 
     async def _insts(_session):
         return list(instrument_ids)
 
-    async def _start(_session):
+    async def _start(_session, requested_trade_date):
+        # 锁定 production wiring：snapshot 必须把目标 T 传给 recent-trade-date resolver
+        assert requested_trade_date == trade_date
         return start_date
 
     async def _boards(_session):
@@ -255,3 +257,21 @@ def test_no_pit_membership_api_referenced():  # 合同 G
     assert pit_import not in test_src
     assert pit_call not in svc_src
     assert pit_call not in test_src
+
+
+def test_snapshot_passes_trade_date_to_history_resolver(monkeypatch):  # FIX1 窄回归
+    """build_daily_dashboard_snapshot(session, T) 必须把 T 传给 recent-start-date resolver。
+
+    锁定 production wiring：mock 的 _start 已断言第二参数 == T；
+    若 production 调用再次漏传 trade_date，asyncio.run 会因
+    TypeError(missing argument) 直接失败，测试不再绿。
+    """
+    t = date(2026, 9, 18)
+    iid = uuid4()
+    dts = [datetime(t.year, t.month, t.day - 4 + i) for i in range(5)]
+    bars = {iid: _df(dts, [float(i + 1) for i in range(5)], [1.0] * 5)}
+    snap = _run_snapshot(
+        monkeypatch, trade_date=t, instrument_ids=[iid], start_date=dts[0].date(),
+        bars=bars, boards=[], memberships={},
+    )
+    assert snap.trade_date == t
