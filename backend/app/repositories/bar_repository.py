@@ -986,6 +986,57 @@ async def get_daily_bars_batch(
     return results
 
 
+async def get_dashboard_daily_facts_source(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    """Dashboard 专用行情源读取（E1A 长表向量化）：只取 4 列一张长表。
+
+    与 get_daily_bars_batch 的区别：仅 SELECT
+    instrument_id / trade_date / close / adj_factor（不取 open/high/low/volume/amount），
+    返回单一 long DataFrame 而非 dict[instrument_id -> DataFrame]。
+
+    全市场约 5000 股票 × ~369 日 ≈ 185 万行 × 4 列，远小于 9 列版本；
+    后续由 _compute_stock_facts_long 向量化成 stock-day facts 长表。
+
+    Args / Returns 同 get_daily_bars_batch 的数据规模意图，仅形态为长表。
+    """
+    cols = ["instrument_id", "trade_date", "close", "adj_factor"]
+    if not instrument_ids:
+        return pd.DataFrame(columns=cols)
+    try:
+        rows = (
+            await session.execute(
+                select(
+                    BarDaily.instrument_id,
+                    BarDaily.trade_date,
+                    BarDaily.close,
+                    BarDaily.adj_factor,
+                )
+                .where(BarDaily.instrument_id.in_(instrument_ids))
+                .where(BarDaily.trade_date >= start_date)
+                .where(BarDaily.trade_date <= end_date)
+                .order_by(BarDaily.instrument_id, BarDaily.trade_date)
+            )
+        ).all()
+    except Exception as exc:
+        logger.warning(
+            "批量查询 dashboard 行情源失败 instrument_ids=%s: %s", instrument_ids, exc
+        )
+        raise
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.DataFrame(rows, columns=cols)
+    # Decimal -> float（便于 pandas 计算）；trade_date 为 Date 列 → python date
+    df["close"] = pd.to_numeric(df["close"], errors="coerce")
+    df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce")
+    return df
+
+
 async def get_adj_factor_series_batch(
     session: AsyncSession,
     instrument_ids: list[uuid.UUID],

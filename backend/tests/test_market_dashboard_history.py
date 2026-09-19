@@ -66,13 +66,29 @@ def _run_history(
 
     async def _loader(_s, _ids, _sd, _ed):
         calls.append((_sd, _ed))
-        return bars
+        # bars: dict[uuid, DataFrame(index=date, close/adj_factor)] -> 长表
+        # （与生产 get_dashboard_daily_facts_source 同 schema）
+        frames = []
+        for iid, df in bars.items():
+            if df is None or len(df) == 0:
+                continue
+            g = df.reset_index()
+            date_col = "trade_date" if "trade_date" in g.columns else g.columns[0]
+            g = g.rename(columns={date_col: "trade_date"})
+            g.insert(0, "instrument_id", iid)
+            g = g[["instrument_id", "trade_date", "close", "adj_factor"]]
+            frames.append(g)
+        if not frames:
+            return pd.DataFrame(
+                columns=["instrument_id", "trade_date", "close", "adj_factor"]
+            )
+        return pd.concat(frames, ignore_index=True)
 
     monkeypatch.setattr(svc, "_query_market_instrument_ids", _insts)
     monkeypatch.setattr(svc, "_query_recent_trade_dates", _dates)
     monkeypatch.setattr(svc, "_query_active_boards", _boards)
     monkeypatch.setattr(svc, "_query_board_memberships", _members)
-    monkeypatch.setattr(bar_repository, "get_daily_bars_batch", _loader)
+    monkeypatch.setattr(bar_repository, "get_dashboard_daily_facts_source", _loader)
     result = asyncio.run(
         svc.build_dashboard_history(
             SimpleNamespace(), end_date, watch_board_ids, selected_scope_ids
@@ -336,21 +352,21 @@ def test_stock_facts_computed_once_per_instrument(monkeypatch):
         i2: _mk(dates, [float(i + 1) for i in range(n)]),
     }
     seen = set()
-    orig = svc._compute_stock_daily_facts
+    orig = svc._compute_stock_facts_long
 
     def _spy(df):
         seen.add(id(df))
         return orig(df)
 
-    monkeypatch.setattr(svc, "_compute_stock_daily_facts", _spy)
+    monkeypatch.setattr(svc, "_compute_stock_facts_long", _spy)
     _run_history(
         monkeypatch, end_date=end, instrument_ids=[i1, i2],
         load_dates=dates, bars=bars, boards=[b1, b2],
         memberships={b1.id: [i1], b2.id: [i2]}, watch_board_ids=[b1.id, b2.id],
 
     )
-    # 每只股票只算一次（board 聚合不重算股票 MA）
-    assert len(seen) == 2
+    # 整批一次向量化（不再逐股票 apply）；board 聚合复用 SSOT，不重算股票 MA
+    assert len(seen) == 1
 
 
 # ===============================================================
@@ -564,7 +580,7 @@ def test_one_bars_load_with_watch_and_selected(monkeypatch):
     assert snap.membership_basis == "latest_snapshot_replay"
 
 
-# J. stock facts 一次/stock（market + board + watch + selected 共用）
+# J. stock-day facts 整批只向量化一次（market + board + watch + selected 共用 SSOT）
 def test_stock_facts_reused_across_market_board_watch_selected(monkeypatch):
     end = date(2026, 9, 18)
     n = 250
@@ -577,20 +593,21 @@ def test_stock_facts_reused_across_market_board_watch_selected(monkeypatch):
         i2: _mk(dates, [float(i + 1) for i in range(n)]),
     }
     seen = set()
-    orig = svc._compute_stock_daily_facts
+    orig = svc._compute_stock_facts_long
 
     def _spy(df):
         seen.add(id(df))
         return orig(df)
 
-    monkeypatch.setattr(svc, "_compute_stock_daily_facts", _spy)
+    monkeypatch.setattr(svc, "_compute_stock_facts_long", _spy)
     _run_history(
         monkeypatch, end_date=end, instrument_ids=[i1, i2],
         load_dates=dates, bars=bars, boards=[b1, b2],
         memberships={b1.id: [i1], b2.id: [i2]},
         watch_board_ids=[b1.id, b2.id], selected_scope_ids=[b1.id, b2.id],
     )
-    assert len(seen) == 2
+    # 整批一次向量化（不再逐股票 apply）；board/watch/selected 复用派生旧视图，不重算 rolling
+    assert len(seen) == 1
 
 
 # E0. 窄 regression：唯一 date index 直接查找，exact-T 不破坏（无 T-1 仍 member_count==0）

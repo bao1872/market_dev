@@ -24,6 +24,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
+import numpy as np
 import pandas as pd
 from sqlalchemy import desc, distinct, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -432,6 +433,145 @@ def _rebase_index(points: list[tuple[float | None]]) -> list[float | None]:
     return result
 
 
+# ===========================================================================
+# E1A — 长表向量化 historical core（market history 专用；board 暂用派生旧视图）
+#
+# 数据形态（消除 dict[instrument->DataFrame] + df.apply(axis=1) + for date×stock×f.loc）：
+#   一张 long DataFrame（instrument_id | trade_date | close | adj_factor）
+#   → 向量化成 stock-day facts 长表（adj_close / ret / ma* / above*）
+#   → market 历史只做一次 date-groupby，board 历史从长表派生旧视图复用。
+# ===========================================================================
+
+
+def _compute_stock_facts_long(df: pd.DataFrame) -> pd.DataFrame:
+    """将长表行情源向量化成 stock-day facts 长表（整批一次，每只股票只算一次）。
+
+    与 _compute_stock_daily_facts 冻结语义一致（仅实现形态从逐股 apply 改为向量化）：
+    - adj_close = raw_close * adj_factor，仅当 close/factor 各自 finite 且 >0；否则 NaN
+    - ret = adj_close_t / adj_close_{t-1} - 1，仅当当前与前一坐标都非 NaN；禁止 ffill / 跨缺口
+    - ma_k = 同股票最近 k 个有效 adj_close 均值（min_periods=k）
+    - above_k = (adj_close > ma_k) 仅当 ma_k 有效；ma_k 无效 → NaN（不得 False）
+
+    禁止 df.apply(axis=1) 与逐股票 Python loop；仅允许常数级 5-window 循环。
+
+    Returns: 列 = instrument_id, trade_date, adj_close, ret, ma5..ma120, above5..above120
+            空输入返回同 schema 的空 DataFrame。
+    """
+    cols = (
+        ["instrument_id", "trade_date", "adj_close", "ret"]
+        + [f"ma{k}" for k in WINDOWS]
+        + [f"above{k}" for k in WINDOWS]
+    )
+    if df is None or len(df) == 0:
+        return pd.DataFrame(columns=cols)
+
+    df = df.copy()
+    close = pd.to_numeric(df["close"], errors="coerce").to_numpy(dtype="float64")
+    factor = pd.to_numeric(df["adj_factor"], errors="coerce").to_numpy(dtype="float64")
+    valid = np.isfinite(close) & np.isfinite(factor) & (close > 0) & (factor > 0)
+    df["adj_close"] = np.where(valid, close * factor, np.nan)
+
+    # trade_date → python date（便于与 exact-T 聚合直接比较；兼容 Date 列与 datetime）
+    td = df["trade_date"]
+    if hasattr(td, "dt"):
+        df["trade_date"] = td.dt.date
+    else:
+        df["trade_date"] = [
+            (v.date() if isinstance(v, datetime) else v) for v in td.tolist()
+        ]
+
+    df = df.sort_values(["instrument_id", "trade_date"], kind="mergesort").reset_index(drop=True)
+    g = df.groupby("instrument_id", sort=False)
+    prev = g["adj_close"].shift(1).reset_index(level=0, drop=True)
+    df["ret"] = (df["adj_close"] / prev - 1).where(
+        df["adj_close"].notna() & prev.notna()
+    )
+
+    for k in WINDOWS:
+        ma = g["adj_close"].rolling(k, min_periods=k).mean().reset_index(level=0, drop=True)
+        df[f"ma{k}"] = ma
+        df[f"above{k}"] = (df["adj_close"] > ma).where(ma.notna())
+
+    return df[cols]
+
+
+def _empty_market_breadth() -> BreadthResult:
+    return BreadthResult(
+        member_count=0,
+        valid_return_count=0,
+        equal_weight_return=None,
+        windows={k: WindowBreadth(k, 0, 0, None) for k in WINDOWS},
+    )
+
+
+def _aggregate_market_history_long(
+    stock_facts: pd.DataFrame,
+    display_dates: list[date],
+) -> list[tuple[date, BreadthResult, float | None]]:
+    """全市场历史向量化聚合：一次 date-groupby 替代 250 次 _aggregate_breadth_for_date(member_ids=None)。
+
+    与 _aggregate_breadth_for_date 对全市场（member_ids=None）的语义逐字段一致：
+    - member_count = 当日有 stock-day fact 的股票数（exact-T）
+    - 每窗口 valid_count = above_k 非 NaN 计数；above_count = above_k 为 True 计数
+    - ratio = above_count / valid_count（valid_count==0 → None）
+    - equal_weight_return = 当日有效 ret 的均值（无有效 ret → None）
+
+    Returns: 与 display_dates 升序对应的 (trade_date, BreadthResult, equal_weight_return)。
+    """
+    if stock_facts is None or len(stock_facts) == 0:
+        return []
+    sub = stock_facts[stock_facts["trade_date"].isin(set(display_dates))]
+    if len(sub) == 0:
+        return []
+    grp = sub.groupby("trade_date", sort=True)
+    agg = grp.agg(
+        member_count=("instrument_id", "size"),
+        valid_ret=("ret", "count"),
+        ret_sum=("ret", "sum"),
+        **{f"valid{k}": (f"above{k}", "count") for k in WINDOWS},
+        **{f"above{k}": (f"above{k}", "sum") for k in WINDOWS},
+    )
+    by_date: dict[date, tuple[BreadthResult, float | None]] = {}
+    for d, row in agg.iterrows():
+        windows = {}
+        for k in WINDOWS:
+            vc = int(row[f"valid{k}"])
+            ac = float(row[f"above{k}"])  # pandas sum 跳过 NaN → 仅 True 计数
+            windows[k] = WindowBreadth(k, vc, int(ac), (ac / vc) if vc else None)
+        vr = int(row["valid_ret"])
+        ewr = (float(row["ret_sum"]) / vr) if vr else None
+        by_date[d] = (
+            BreadthResult(
+                member_count=int(row["member_count"]),
+                valid_return_count=vr,
+                equal_weight_return=ewr,
+                windows=windows,
+            ),
+            ewr,
+        )
+    return [
+        (d, *by_date[d]) if d in by_date else (d, _empty_market_breadth(), None)
+        for d in display_dates
+    ]
+
+
+def _derive_legacy_stock_facts(long_facts: pd.DataFrame) -> dict[UUID, pd.DataFrame]:
+    """从长表 stock-day facts 派生旧 dict[instrument_id -> DataFrame] 视图。
+
+    仅用于 board / watch / selected 的过渡聚合（仍走 _aggregate_breadth_for_date），
+    不二次查 DB、不重算 rolling；stock-day facts 长表仍是 SSOT。
+    index = python date，列 = adj_close/ret/ma*/above*（与 _compute_stock_daily_facts 同 schema）。
+    """
+    if long_facts is None or len(long_facts) == 0:
+        return {}
+    legacy_cols = ["adj_close", "ret"] + [f"ma{k}" for k in WINDOWS] + [f"above{k}" for k in WINDOWS]
+    out: dict[UUID, pd.DataFrame] = {}
+    for iid, g in long_facts.groupby("instrument_id", sort=False):
+        gg = g.set_index("trade_date").sort_index()
+        out[iid] = gg[legacy_cols]
+    return out
+
+
 async def build_dashboard_history(
     session: AsyncSession,
     end_date: date,
@@ -457,24 +597,18 @@ async def build_dashboard_history(
         )
     display_dates = load_dates[-HISTORY_TRADE_DAYS:]
 
-    # 唯一一次批量 bars 读取
-    bars = await bar_repository.get_daily_bars_batch(
+    # 唯一一次批量 bars 读取（Dashboard 专用窄读取：仅 4 列长表）
+    raw_long = await bar_repository.get_dashboard_daily_facts_source(
         session, instrument_ids, load_dates[0], load_dates[-1]
     )
-    # 每只股票历史事实只计算一次
-    stock_facts: dict[UUID, pd.DataFrame] = {
-        iid: _compute_stock_daily_facts(df)
-        for iid, df in bars.items()
-        if df is not None and len(df) > 0
-    }
+    # stock-day facts 整批向量化一次（长表）；market 历史与 board 历史共用 SSOT
+    long_facts = _compute_stock_facts_long(raw_long)
 
-    # ① + ② 市场历史曲线 + 全市场等权指数
+    # ① + ② 市场历史曲线（全 date-groupby 向量化）+ 全市场等权指数
     market_history: list[MarketHistoryPoint] = []
     prev_index: float | None = None
     first_date = True
-    for d in display_dates:
-        br = _aggregate_breadth_for_date(d, stock_facts)
-        ewr = br.equal_weight_return
+    for d, br, ewr in _aggregate_market_history_long(long_facts, display_dates):
         if first_date:
             idx = 100.0 if ewr is not None else None
         else:
@@ -484,6 +618,9 @@ async def build_dashboard_history(
         )
         prev_index = idx
         first_date = False
+
+    # board / watch / selected 暂时复用旧 stock_facts 视图（由长表派生；不二次查 DB、不重算 rolling）
+    stock_facts: dict[UUID, pd.DataFrame] = _derive_legacy_stock_facts(long_facts)
 
     # ③ 板块 5 日宽度变化（仅 T 与 T-5 两个截面）
     boards = await _query_active_boards(session)
