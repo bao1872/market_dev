@@ -1749,6 +1749,15 @@ class MonitorBatchService:
             )
         )
         rows = await db.execute(stmt)
+        _raw = rows.all()
+        logger.info(
+            "DEDUPE-DEBUG user_ids=%s day_start_utc=%s day_end_utc=%s rows=%s",
+            user_ids, day_start_utc, day_end_utc,
+            [
+                (r[0], (r[1] or {}).get("resource_refs", {}).get("event_keys") if isinstance(r[1], dict) else type(r[1]))
+                for r in _raw
+            ],
+        )
         notified: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
         for user_id, body in rows.all():
             if not isinstance(body, dict):
