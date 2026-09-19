@@ -1750,14 +1750,20 @@ class MonitorBatchService:
         )
         rows = await db.execute(stmt)
         _raw = rows.all()
-        logger.info(
-            "DEDUPE-DEBUG user_ids=%s day_start_utc=%s day_end_utc=%s rows=%s",
-            user_ids, day_start_utc, day_end_utc,
-            [
-                (r[0], (r[1] or {}).get("resource_refs", {}).get("event_keys") if isinstance(r[1], dict) else type(r[1]))
-                for r in _raw
-            ],
-        )
+        try:
+            with open("/tmp/dedupe_debug.txt", "a") as _df:
+                _df.write(f"=== call user_ids={user_ids} day_start_utc={day_start_utc} day_end_utc={day_end_utc}\n")
+                _df.write(f"timed_rows={[(str(r[0]), (r[1] or {}).get('resource_refs', {}).get('event_keys') if isinstance(r[1], dict) else type(r[1])) for r in _raw]}\n")
+                _exist = await db.execute(
+                    select(NotificationMessage.user_id, NotificationMessage.created_at, NotificationMessage.message_type, NotificationMessage.body)
+                    .where(NotificationMessage.user_id.in_(user_ids), NotificationMessage.message_type == "MONITOR_EVENT")
+                )
+                _df.write("exist_rows=" + str([
+                    (str(r[0]), str(r[1]), r[2], (r[3] or {}).get("resource_refs", {}).get("event_keys") if isinstance(r[3], dict) else None)
+                    for r in _exist.all()
+                ]) + "\n")
+        except Exception as _e:
+            pass
         notified: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
         for user_id, body in rows.all():
             if not isinstance(body, dict):
