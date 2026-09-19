@@ -86,7 +86,7 @@ async def _merged_messages(db, user_id: UUID, event_ids: list[UUID]) -> list[Not
     return list((await db.execute(stmt)).scalars().all())
 
 
-async def _run_notification(db, all_events: list, instrument_user_map: dict) -> None:
+async def _run_notification(db, all_events: list, instrument_user_map: dict, now=None) -> None:
     service = MonitorBatchService()
     result = SimpleNamespace(total_notifications_created=0)
     await service._send_merged_notification(
@@ -96,6 +96,7 @@ async def _run_notification(db, all_events: list, instrument_user_map: dict) -> 
         instrument_extra_info={},
         result=result,
         strategy_version=None,
+        now=now,
     )
 
 
@@ -333,3 +334,120 @@ class TestMonitorDailyNotificationDedupe:
         assert str(ev_a.id) not in captured_event_ids
         assert str(ev_b.id) in captured_event_ids
         assert str(ev_c.id) in captured_event_ids
+
+    @pytest.mark.asyncio
+    async def test_old_merged_without_event_keys_is_ignored(
+        self, db_session, user_factory, instrument_factory,
+    ) -> None:
+        """旧 merged 只有 instruments[]/event_types[]（无 event_keys、无 scalar 对）→ 不贡献去重。
+
+        例：历史卡片真实 A→BOS、B→CHoCH；若按笛卡尔积会错误产生 A→CHoCH、B→BOS，
+        进而压掉后续合法通知。冻结设计：旧结构直接忽略。
+        """
+        ua = await user_factory()
+        i1 = await instrument_factory()
+        ev = _make_event(i1.id, "node_cluster_touch")
+        ts = datetime.now(ZoneInfo("Asia/Shanghai"))
+        msg = NotificationMessage(
+            id=uuid4(),
+            user_id=ua.id,
+            message_type="MONITOR_EVENT",
+            template_key="monitor_merged_event",
+            template_version="2.1.0",
+            source_type="monitor_event",
+            source_id=uuid4(),
+            body={
+                "message_type": "MONITOR_EVENT",
+                # 旧结构：仅 instruments / event_types，无 event_keys、无 scalar 对
+                "resource_refs": {
+                    "instruments": [{"instrument_id": str(i1.id), "symbol": "X", "name": "Y"}],
+                    "event_types": ["node_cluster_touch"],
+                },
+            },
+            idempotency_key=f"seed-old-{uuid4().hex}",
+            created_at=ts,
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        async with _patch_capture([]):
+            await _run_notification(db_session, [ev], {i1.id: [ua.id]})
+
+        merged = await _merged_messages(db_session, ua.id, [ev.id])
+        assert len(merged) == 1, "旧 merged 笛卡尔积不应压掉合法同类型通知"
+
+    @pytest.mark.asyncio
+    async def test_monitor_chart_exact_pair_is_recognized(
+        self, db_session, user_factory, instrument_factory,
+    ) -> None:
+        """monitor_chart 单事件图消息（resource_refs 顶层 scalar instrument_id+event_type）参与当日去重。"""
+        ua = await user_factory()
+        i1 = await instrument_factory()
+        ev = _make_event(i1.id, "node_cluster_touch")
+        now = datetime(2026, 9, 19, 23, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        # 当日稍早的 chart 图消息（同一上海自然日）
+        chart_ts = datetime(2026, 9, 19, 10, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        msg = NotificationMessage(
+            id=uuid4(),
+            user_id=ua.id,
+            message_type="MONITOR_EVENT",
+            template_key="monitor_event",
+            template_version="1.2.0",
+            source_type="monitor_chart",
+            source_id=i1.id,
+            body={
+                "message_type": "MONITOR_EVENT",
+                "resource_refs": {
+                    "instrument_id": str(i1.id),
+                    "event_type": "node_cluster_touch",
+                    "symbol": "X",
+                },
+            },
+            idempotency_key=f"seed-chart-{uuid4().hex}",
+            created_at=chart_ts,
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        async with _patch_capture([]):
+            await _run_notification(db_session, [ev], {i1.id: [ua.id]}, now=now)
+
+        merged = await _merged_messages(db_session, ua.id, [ev.id])
+        assert len(merged) == 0, "monitor_chart 已通知的精确 (instrument,type) 应被去重"
+
+    @pytest.mark.asyncio
+    async def test_same_shanghai_day_across_utc_date_boundary(
+        self, db_session, user_factory, instrument_factory,
+    ) -> None:
+        """UTC 日期已变但上海仍为同一自然日时，历史已通知仍应去重（日界线以上海为准）。"""
+        ua = await user_factory()
+        i1 = await instrument_factory()
+        ev = _make_event(i1.id, "node_cluster_touch")
+        now = datetime(2026, 9, 19, 23, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        # 上海 09-19 01:00 = UTC 09-18 17:00（UTC 日期已不同，但上海仍同一天）
+        seed_ts = datetime(2026, 9, 19, 1, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+        msg = NotificationMessage(
+            id=uuid4(),
+            user_id=ua.id,
+            message_type="MONITOR_EVENT",
+            template_key="monitor_merged_event",
+            template_version="2.1.0",
+            source_type="monitor_event",
+            source_id=uuid4(),
+            body={
+                "message_type": "MONITOR_EVENT",
+                "resource_refs": {
+                    "event_keys": [{"instrument_id": str(i1.id), "event_type": "node_cluster_touch"}],
+                },
+            },
+            idempotency_key=f"seed-boundary-{uuid4().hex}",
+            created_at=seed_ts,
+        )
+        db_session.add(msg)
+        await db_session.flush()
+
+        async with _patch_capture([]):
+            await _run_notification(db_session, [ev], {i1.id: [ua.id]}, now=now)
+
+        merged = await _merged_messages(db_session, ua.id, [ev.id])
+        assert len(merged) == 0, "上海同一自然日内（跨 UTC 日期）应去重"
