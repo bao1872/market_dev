@@ -48,6 +48,7 @@ def _run_history(
     boards,
     memberships,
     watch_board_ids=(),
+    selected_scope_ids=(),
 ):
     async def _insts(_s):
         return list(instrument_ids)
@@ -73,7 +74,9 @@ def _run_history(
     monkeypatch.setattr(svc, "_query_board_memberships", _members)
     monkeypatch.setattr(bar_repository, "get_daily_bars_batch", _loader)
     result = asyncio.run(
-        svc.build_dashboard_history(SimpleNamespace(), end_date, watch_board_ids)
+        svc.build_dashboard_history(
+            SimpleNamespace(), end_date, watch_board_ids, selected_scope_ids
+        )
     )
     return result, calls
 
@@ -347,4 +350,244 @@ def test_stock_facts_computed_once_per_instrument(monkeypatch):
 
     )
     # 每只股票只算一次（board 聚合不重算股票 MA）
+    assert len(seen) == 2
+
+
+# ===============================================================
+# Checkpoint D — UI 反推数据补齐（行业/概念详情五档 + 历史）
+# ===============================================================
+
+def _board(bid, *, name="", scope_type="industry", level="L1"):
+    return SimpleNamespace(id=bid, name=name, type=scope_type, hierarchyLevel=level)
+
+
+# A. 五档 current 宽度齐全且来自 current date 聚合
+def test_scope_current_five_breadths(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 130
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1, i2 = uuid4(), uuid4()
+    board = _board(uuid4(), name="电子", level="L1")
+    bars = {
+        i1: _mk(dates, [float(i + 1) for i in range(n)]),
+        i2: _mk(dates, [float(i + 1) for i in range(n)]),
+    }
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1, i2],
+        load_dates=dates, bars=bars, boards=[board], memberships={board.id: [i1, i2]},
+    )
+    ch = snap.scope_changes[0]
+    t_now = dates[-1]
+    b_now = svc._aggregate_breadth_for_date(t_now, _stock_facts(bars), [i1, i2])
+    for k in (5, 10, 20, 50, 120):
+        assert getattr(ch, f"ma{k}_current") == b_now.windows[k].ratio
+    assert ch.ma5_current is not None and ch.ma10_current is not None
+    assert ch.ma20_current is not None and ch.ma50_current is not None
+    assert ch.ma120_current is not None
+
+
+def _stock_facts(bars):
+    return {iid: svc._compute_stock_daily_facts(df) for iid, df in bars.items()}
+
+
+# B. delta 仍只 MA5/MA10，不新增其它 delta
+def test_only_ma5_ma10_delta(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 30
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1 = uuid4()
+    board = _board(uuid4())
+    bars = {i1: _mk(dates, [float(i + 1) for i in range(n)])}
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1],
+        load_dates=dates, bars=bars, boards=[board], memberships={board.id: [i1]},
+    )
+    ch = snap.scope_changes[0]
+    assert ch.ma5_delta is not None
+    assert ch.ma10_delta is not None
+    assert not hasattr(ch, "ma20_delta")
+    assert not hasattr(ch, "ma50_delta")
+    assert not hasattr(ch, "ma120_delta")
+
+
+# C. 选中 industry 历史（含完整 display dates，五档与聚合一致）
+def test_selected_industry_history_full_and_consistent(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 30
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1, i2 = uuid4(), uuid4()
+    board = _board(uuid4(), name="电子", level="L1")
+    bars = {
+        i1: _mk(dates, [float(i + 1) for i in range(n)]),
+        i2: _mk(dates, [float(i + 1) for i in range(n)]),
+    }
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1, i2],
+        load_dates=dates, bars=bars, boards=[board],
+        memberships={board.id: [i1, i2]}, selected_scope_ids=[board.id],
+    )
+    series_list = snap.selected_scope_history
+    assert len(series_list) == 1
+    series = series_list[0]
+    assert series.scope_key == str(board.id)
+    assert len(series.points) == len(dates)  # 完整 display dates
+    facts = _stock_facts(bars)
+    for pt, d in zip(series.points, dates, strict=False):
+        assert pt.trade_date == d
+        expected = svc._aggregate_breadth_for_date(d, facts, [i1, i2])
+        for k in (5, 10, 20, 50, 120):
+            assert pt.breadth.windows[k].ratio == expected.windows[k].ratio
+            assert pt.breadth.windows[k].valid_count == expected.windows[k].valid_count
+
+
+# D. hierarchy 原样保留（L1/L2/L3）
+def test_hierarchy_levels_preserved(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 20
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1 = uuid4()
+    b1 = _board(uuid4(), name="行业L1", level="L1")
+    b2 = _board(uuid4(), name="行业L2", level="L2")
+    b3 = _board(uuid4(), name="行业L3", level="L3")
+    bars = {i1: _mk(dates, [float(i + 1) for i in range(n)])}
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1],
+        load_dates=dates, bars=bars, boards=[b1, b2, b3],
+        memberships={b1.id: [i1], b2.id: [i1], b3.id: [i1]},
+        selected_scope_ids=[b1.id, b2.id, b3.id],
+    )
+    got = {s.scope_key: s for s in snap.selected_scope_history}
+    assert got[str(b1.id)].hierarchy_level == "L1"
+    assert got[str(b2.id)].hierarchy_level == "L2"
+    assert got[str(b3.id)].hierarchy_level == "L3"
+
+
+# E. concept 与 industry 共用同一 DTO/逻辑
+def test_concept_history_same_shape(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 20
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1 = uuid4()
+    c1 = _board(uuid4(), name="AI算力", scope_type="concept", level="L1")
+    bars = {i1: _mk(dates, [float(i + 1) for i in range(n)])}
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1],
+        load_dates=dates, bars=bars, boards=[c1],
+        memberships={c1.id: [i1]}, selected_scope_ids=[c1.id],
+    )
+    assert len(snap.selected_scope_history) == 1
+    s = snap.selected_scope_history[0]
+    assert s.scope_type == "concept"
+    assert len(s.points) == len(dates)
+    assert isinstance(s.points[0], svc.ScopeHistoryPoint)
+
+
+# F. selected id 不在当前 active boards → 忽略
+def test_unknown_selected_scope_ignored(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 20
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1 = uuid4()
+    board = _board(uuid4())
+    bars = {i1: _mk(dates, [float(i + 1) for i in range(n)])}
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1],
+        load_dates=dates, bars=bars, boards=[board], memberships={board.id: [i1]},
+        selected_scope_ids=[uuid4()],  # 不存在
+    )
+    assert snap.selected_scope_history == []
+
+
+# G. 无选择 → []
+def test_no_selected_scope_empty(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 20
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1 = uuid4()
+    board = _board(uuid4())
+    bars = {i1: _mk(dates, [float(i + 1) for i in range(n)])}
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1],
+        load_dates=dates, bars=bars, boards=[board], memberships={board.id: [i1]},
+    )
+    assert snap.selected_scope_history == []
+
+
+# H. latest snapshot replay：当前成员回放整个历史；不引用 PIT
+def test_selected_scope_uses_latest_membership_across_history(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 20
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1, i2 = uuid4(), uuid4()
+    board = _board(uuid4(), name="电子")
+    # i2 是“当前”成员，但其 bar 实际从中间才开始；latest replay 下仍参与早期历史聚合
+    bars = {
+        i1: _mk(dates, [float(i + 1) for i in range(n)]),
+        i2: _mk(dates[5:], [float(i + 1) for i in range(n - 5)]),
+    }
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1, i2],
+        load_dates=dates, bars=bars, boards=[board],
+        memberships={board.id: [i1, i2]}, selected_scope_ids=[board.id],
+    )
+    series = snap.selected_scope_history[0]
+    assert snap.membership_basis == "latest_snapshot_replay"
+    # 早期 display date，i2 尚无 bar → 仅 i1 计入；但成员集合是“当前”的（i2 在列）
+    early = series.points[0]
+    late = series.points[-1]
+    assert early.breadth.member_count == 1  # 仅 i1 exact-T
+    assert late.breadth.member_count == 2   # i1 + i2 均 exact-T
+    # 所有点都用同一当前成员集合（未引用 PIT 历史成员）
+    assert all(pt.breadth.member_count >= 1 for pt in series.points)
+
+
+# I. 即使 watch + selected 都多个，bars loader 仍只一次
+def test_one_bars_load_with_watch_and_selected(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 250
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1, i2 = uuid4(), uuid4()
+    b1 = _board(uuid4(), name="A")
+    b2 = _board(uuid4(), name="B", scope_type="concept")
+    bars = {
+        i1: _mk(dates, [float(i + 1) for i in range(n)]),
+        i2: _mk(dates, [float(i + 1) for i in range(n)]),
+    }
+    snap, calls = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1, i2],
+        load_dates=dates, bars=bars, boards=[b1, b2],
+        memberships={b1.id: [i1], b2.id: [i2]},
+        watch_board_ids=[b1.id, b2.id], selected_scope_ids=[b1.id, b2.id],
+    )
+    assert len(calls) == 1
+    assert len(snap.selected_scope_history) == 2
+    assert snap.membership_basis == "latest_snapshot_replay"
+
+
+# J. stock facts 一次/stock（market + board + watch + selected 共用）
+def test_stock_facts_reused_across_market_board_watch_selected(monkeypatch):
+    end = date(2026, 9, 18)
+    n = 250
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1, i2 = uuid4(), uuid4()
+    b1 = _board(uuid4(), name="A")
+    b2 = _board(uuid4(), name="B", scope_type="concept")
+    bars = {
+        i1: _mk(dates, [float(i + 1) for i in range(n)]),
+        i2: _mk(dates, [float(i + 1) for i in range(n)]),
+    }
+    seen = set()
+    orig = svc._compute_stock_daily_facts
+
+    def _spy(df):
+        seen.add(id(df))
+        return orig(df)
+
+    monkeypatch.setattr(svc, "_compute_stock_daily_facts", _spy)
+    _run_history(
+        monkeypatch, end_date=end, instrument_ids=[i1, i2],
+        load_dates=dates, bars=bars, boards=[b1, b2],
+        memberships={b1.id: [i1], b2.id: [i2]},
+        watch_board_ids=[b1.id, b2.id], selected_scope_ids=[b1.id, b2.id],
+    )
     assert len(seen) == 2

@@ -266,9 +266,12 @@ class ScopeBreadthChange:
     current_date: date
     previous_date: date
     ma5_current: float | None
+    ma10_current: float | None
+    ma20_current: float | None
+    ma50_current: float | None
+    ma120_current: float | None
     ma5_previous: float | None
     ma5_delta: float | None
-    ma10_current: float | None
     ma10_previous: float | None
     ma10_delta: float | None
 
@@ -290,6 +293,23 @@ class WatchScopeSeries:
 
 
 @dataclass(frozen=True)
+class ScopeHistoryPoint:
+    """选中板块某交易日的中长/短周期宽度（行业与概念共用同一 DTO）。"""
+
+    trade_date: date
+    breadth: BreadthResult
+
+
+@dataclass(frozen=True)
+class ScopeHistorySeries:
+    scope_key: str
+    scope_name: str
+    scope_type: str
+    hierarchy_level: str
+    points: list[ScopeHistoryPoint]
+
+
+@dataclass(frozen=True)
 class DashboardHistory:
     membership_basis: str
     start_date: date
@@ -297,6 +317,7 @@ class DashboardHistory:
     market_history: list[MarketHistoryPoint]
     scope_changes: list[ScopeBreadthChange]
     watch_series: list[WatchScopeSeries]
+    selected_scope_history: list[ScopeHistorySeries]
 
 
 async def _query_recent_trade_dates(
@@ -415,8 +436,14 @@ async def build_dashboard_history(
     session: AsyncSession,
     end_date: date,
     watch_board_ids: Sequence[UUID] = (),
+    selected_scope_ids: Sequence[UUID] = (),
 ) -> DashboardHistory:
-    """生成截图所需的 Dashboard 历史数据（一次批量加载，stock facts 只算一次）。"""
+    """生成截图所需的 Dashboard 历史数据（一次批量加载，stock facts 只算一次）。
+
+    selected_scope_ids：用户点击查看详情的板块（行业 L1/L2/L3 或概念），
+    仅为其回放当前 latest membership 下的完整 display 日期宽度历史。
+    不默认给全部板块算 250 日曲线。
+    """
     instrument_ids = await _query_market_instrument_ids(session)
     load_dates = await _query_recent_trade_dates(
         session, end_date, HISTORY_TRADE_DAYS + MA_WARMUP_DAYS
@@ -426,6 +453,7 @@ async def build_dashboard_history(
             membership_basis=MEMBERSHIP_BASIS,
             start_date=end_date, end_date=end_date,
             market_history=[], scope_changes=[], watch_series=[],
+            selected_scope_history=[],
         )
     display_dates = load_dates[-HISTORY_TRADE_DAYS:]
 
@@ -477,9 +505,12 @@ async def build_dashboard_history(
                     current_date=t_now,
                     previous_date=t_prev,
                     ma5_current=b_now.windows[5].ratio,
+                    ma10_current=b_now.windows[10].ratio,
+                    ma20_current=b_now.windows[20].ratio,
+                    ma50_current=b_now.windows[50].ratio,
+                    ma120_current=b_now.windows[120].ratio,
                     ma5_previous=b_prev.windows[5].ratio,
                     ma5_delta=_delta(b_now.windows[5].ratio, b_prev.windows[5].ratio),
-                    ma10_current=b_now.windows[10].ratio,
                     ma10_previous=b_prev.windows[10].ratio,
                     ma10_delta=_delta(b_now.windows[10].ratio, b_prev.windows[10].ratio),
                 )
@@ -514,6 +545,29 @@ async def build_dashboard_history(
             )
         )
 
+    # ⑤ 选中板块详情历史（行业/概念共用一套逻辑；仅当前 latest membership 回放全部 display 日期）
+    selected_scope_history: list[ScopeHistorySeries] = []
+    for sid in selected_scope_ids:
+        board = board_by_id.get(sid)
+        if board is None:
+            continue  # 不在当前 active boards 中 → 忽略，不报错、不造空伪 scope
+        mids = memberships.get(board.id, [])
+        selected_scope_history.append(
+            ScopeHistorySeries(
+                scope_key=str(board.id),
+                scope_name=board.name,
+                scope_type=board.type,
+                hierarchy_level=board.hierarchyLevel,
+                points=[
+                    ScopeHistoryPoint(
+                        trade_date=d,
+                        breadth=_aggregate_breadth_for_date(d, stock_facts, mids),
+                    )
+                    for d in display_dates
+                ],
+            )
+        )
+
     return DashboardHistory(
         membership_basis=MEMBERSHIP_BASIS,
         start_date=display_dates[0],
@@ -521,4 +575,5 @@ async def build_dashboard_history(
         market_history=market_history,
         scope_changes=scope_changes,
         watch_series=watch_series,
+        selected_scope_history=selected_scope_history,
     )
