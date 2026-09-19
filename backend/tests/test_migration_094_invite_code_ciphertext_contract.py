@@ -3,7 +3,7 @@
 真实 PostgreSQL 验证（PANJI_REMOTE_VERIFY_DB_TEST=1, plan=targeted-pg）：
 - 094 执行后 invite_codes.code_ciphertext 存在，data_type=text，is_nullable=YES；
 - 094 → 093 downgrade 后该列被删除，其他 invite_codes 数据/字段不受影响；
-- 再 upgrade head 恢复该列；
+- 再 upgrade 094 恢复该列（teardown 才 upgrade head）；
 - 历史 invite_codes 行不因该 migration 被改写（只 add/drop column）。
 
 同时包含源码级静态契约检查（revision 链 / 只 add_column / 不 UPDATE/DELETE 历史行），
@@ -139,10 +139,14 @@ async def test_094_column_exists_text_nullable() -> None:
 
 @pytest.mark.asyncio
 async def test_094_downgrade_drops_then_upgrade_restores() -> None:
-    """094 → 093 删除该列；再 head 恢复；期间其它列不受影响。"""
+    """094 自身语义：显式 downgrade 093 删除该列，再显式 upgrade 094 恢复；其它列不受影响。
+
+    不依赖"当前 head 恰好等于 094"（未来新增 095+ 不破坏本契约）。只有 teardown 才 upgrade head。
+    每一步 Alembic 调用前均无打开事务，避免 RowExclusive ↔ ALTER TABLE 锁死环。
+    """
     try:
-        # 1) downgrade -1 → 093：列必须消失
-        _run_alembic(["downgrade", "-1"])
+        # 1) 显式 downgrade 到 093：列必须消失
+        _run_alembic(["downgrade", "093_invite_grant_days_default"])
         assert await _read_column_info() is None, "downgrade 后 code_ciphertext 必须被删除"
 
         # 2) 其它既有列仍在（downgrade 不得误删其它字段）
@@ -159,10 +163,10 @@ async def test_094_downgrade_drops_then_upgrade_restores() -> None:
             f"downgrade 不应影响其它列，缺失: {cols}"
         )
 
-        # 3) upgrade head → 094：列恢复且仍为 TEXT NULL
-        _run_alembic(["upgrade", "head"])
+        # 3) 显式 upgrade 到 094：列恢复且仍为 TEXT NULL
+        _run_alembic(["upgrade", "094_invite_code_ciphertext"])
         info = await _read_column_info()
-        assert info is not None, "upgrade head 后 code_ciphertext 必须恢复"
+        assert info is not None, "upgrade 094 后 code_ciphertext 必须恢复"
         assert info[0] == "text" and info[1] == "YES"
     finally:
         # 无论如何恢复到正式 head（此刻无打开事务）

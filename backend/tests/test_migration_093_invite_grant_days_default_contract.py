@@ -8,9 +8,11 @@
 同时包含源码级静态契约检查（revision 链、server_default 值、只改 invite_codes、无 UPDATE/DELETE
 历史行），与本仓库 086/087 migration contract 范式一致（不连库部分可在 PURE_UNIT_TEST=1 下收集）。
 
-实现（真实 PG 部分）：验证库已被 alembic upgrade head 置于 093，本文件再做一次
-downgrade -> 092（default=30）插入样本行 -> upgrade head -> 093（default=1），
-证明默认由 30 变为 1，且已存在的样本行 grant_days 不被 migration 改写。
+实现（真实 PG 部分）：验证库置于 head 后，本文件用显式 revision 验证 093 自身语义：
+downgrade 092_review_core_only_identity（default=30）插入样本行 -> upgrade
+093_invite_grant_days_default（default=1），证明默认由 30 变为 1，且已存在的样本行
+grant_days 不被 migration 改写。不依赖"当前 head 恰好等于 093"，未来新增 094+
+migration 不破坏本契约（只有 teardown 才 upgrade head）。
 
 ============================================================================
 锁安全约束（来自 GitHub review）：
@@ -241,23 +243,34 @@ async def _cleanup_verify_rows(
 
 @pytest.mark.asyncio
 async def test_093_grant_days_default_is_one() -> None:
-    """093 执行后 invite_codes.grant_days column_default 必须为 1（实际查 information_schema）。"""
-    default = await _read_column_default()
-    assert default == "1", f"093 执行后 grant_days column_default 应为 1，实际 {default!r}"
+    """093 自身语义：显式进入 093 后 grant_days column_default 必须为 1。
+
+    不依赖"当前 head 恰好继承 093 结果"来证明 093 自身——显式
+    downgrade 092 -> upgrade 093，测试 093 做了什么；最后 teardown 升级回 head。
+    每一步 Alembic 调用前均无打开事务，避免 RowExclusive ↔ ALTER TABLE 锁死环。
+    """
+    try:
+        # 显式回到 092（default=30），再显式进入 093（default=1）
+        _run_alembic(["downgrade", "092_review_core_only_identity"])
+        _run_alembic(["upgrade", "093_invite_grant_days_default"])
+        default = await _read_column_default()
+        assert default == "1", f"093 自身执行后 grant_days column_default 应为 1，实际 {default!r}"
+    finally:
+        # 恢复到正式 head（此刻无打开事务）
+        _run_alembic(["upgrade", "head"])
 
 
 @pytest.mark.asyncio
 async def test_093_migration_preserves_existing_rows() -> None:
-    """migration 只改变 schema default，不改变历史行：
+    """migration 只改变 schema default，不改变历史行（显式 revision，不依赖 head）：
 
-    当前 verify DB = 093
-    → 创建 test user（COMMIT+CLOSE）
-    → alembic downgrade -1（现在 = 092，default=30）
-    → INSERT 历史样本行（不指定 grant_days，依赖旧 default）→ 30（COMMIT+CLOSE）
-    → alembic upgrade head（现在 = 093，default=1）
-    → 重新读取历史样本行仍 = 30（未被 migration 改写）（COMMIT+CLOSE）
-    → INSERT 新行（不指定 grant_days）取新 default=1（COMMIT+CLOSE）
+    显式 downgrade 092_review_core_only_identity（default=30）
+    → 插入历史样本行（依赖旧 default=30）→ 30
+    → 显式 upgrade 093_invite_grant_days_default（default=1）
+    → 历史样本行仍 = 30（未被 migration 改写）
+    → 新行取新 default=1
     → 最终 column_default = 1
+    finally: 升级回 head，清理本测试 fixtures。
 
     每一步 Alembic 调用前均无打开事务，避免 RowExclusive ↔ ALTER TABLE 锁死环。
     """
@@ -265,14 +278,20 @@ async def test_093_migration_preserves_existing_rows() -> None:
     rc_hist = f"m093hist-{uuid.uuid4().hex}"
     rc_new = f"m093new-{uuid.uuid4().hex}"
     try:
-        # 1) 回退到 092（default=30）；此刻无打开事务
-        _run_alembic(["downgrade", "-1"])
+        # 1) 显式回退到 092（default=30）；此刻无打开事务
+        _run_alembic(["downgrade", "092_review_core_only_identity"])
+        default_at_092 = await _read_column_default()
+        assert default_at_092 == "30", f"092 下 grant_days column_default 应为 30，实际 {default_at_092!r}"
+
         # 2) 092 下插入样本行（依赖旧 default=30），短事务 commit+close
         hist_before = await _insert_invite(code_hash=rc_hist, created_by=created_by)
         assert hist_before == 30, f"092 下样本行 grant_days 应为 30（旧 default），实际 {hist_before}"
 
-        # 3) 升级回 093（default=1）；此刻无打开事务
-        _run_alembic(["upgrade", "head"])
+        # 3) 显式升级到 093（default=1）；此刻无打开事务
+        _run_alembic(["upgrade", "093_invite_grant_days_default"])
+        default_at_093 = await _read_column_default()
+        assert default_at_093 == "1", f"093 下 grant_days column_default 应为 1，实际 {default_at_093!r}"
+
         # 4) 已存在样本行不应被 migration 改写（只改 default，不改历史行）
         hist_after = await _read_grant_days(rc_hist)
         assert hist_after == 30, f"migration 后历史行 grant_days 应保持不变（30），实际 {hist_after}"
