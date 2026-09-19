@@ -1749,23 +1749,9 @@ class MonitorBatchService:
             )
         )
         rows = await db.execute(stmt)
-        _raw = rows.all()
-        try:
-            with open("/tmp/dedupe_debug.txt", "a") as _df:
-                _df.write(f"=== call user_ids={user_ids} day_start_utc={day_start_utc} day_end_utc={day_end_utc}\n")
-                _df.write(f"timed_rows={[(str(r[0]), (r[1] or {}).get('resource_refs', {}).get('event_keys') if isinstance(r[1], dict) else type(r[1])) for r in _raw]}\n")
-                _exist = await db.execute(
-                    select(NotificationMessage.user_id, NotificationMessage.created_at, NotificationMessage.message_type, NotificationMessage.body)
-                    .where(NotificationMessage.user_id.in_(user_ids), NotificationMessage.message_type == "MONITOR_EVENT")
-                )
-                _df.write("exist_rows=" + str([
-                    (str(r[0]), str(r[1]), r[2], (r[3] or {}).get("resource_refs", {}).get("event_keys") if isinstance(r[3], dict) else None)
-                    for r in _exist.all()
-                ]) + "\n")
-        except Exception as _e:
-            pass
+        fetched = rows.all()
         notified: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
-        for user_id, body in rows.all():
+        for user_id, body in fetched:
             if not isinstance(body, dict):
                 continue
             refs = body.get("resource_refs")
@@ -1873,11 +1859,6 @@ class MonitorBatchService:
             kept: list[StrategyEvent] = []
             for ev in events:
                 key = (uuid.UUID(str(uid)), uuid.UUID(str(ev.instrument_id)), ev.event_type)
-                try:
-                    with open("/tmp/dedupe_debug.txt", "a") as _df:
-                        _df.write(f"LOOP uid={uid!r} inst={ev.instrument_id!r} type={ev.event_type!r} in_today={key in today_notified} today_for_user={[k for k in today_notified if k[0]==uid]}\n")
-                except Exception:
-                    pass
                 if key in today_notified:
                     continue
                 if key in cycle_seen:
