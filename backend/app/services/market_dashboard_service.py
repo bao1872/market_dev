@@ -334,7 +334,9 @@ def _compute_stock_daily_facts(df: pd.DataFrame) -> pd.DataFrame:
     df["adj_close"] = df.apply(
         lambda r: adjusted_close_coordinate(r["close"], r["adj_factor"]), axis=1
     )
-    df["ret"] = df["adj_close"].pct_change()
+    # fill_method=None：禁止 pct_change 对中间缺失/invalid 坐标做前向填充，
+    # 保证 invalid 坐标不 fallback、也不跨无效前一 bar 计算收益。
+    df["ret"] = df["adj_close"].pct_change(fill_method=None)
     for k in WINDOWS:
         ma = df["adj_close"].rolling(k, min_periods=k).mean()
         df[f"ma{k}"] = ma

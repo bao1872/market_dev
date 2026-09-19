@@ -110,6 +110,44 @@ def test_historical_parity_with_single_day_oracle(monkeypatch):
 
 
 # ---------------------------------------------------------------
+# C-FIX1. invalid 中间坐标不得被 pct_change 隐式补齐
+# ---------------------------------------------------------------
+
+def test_missing_adj_factor_does_not_implicitly_fill_return(monkeypatch):
+    """adj_close = [10, None, 20]（中间 adj_factor 缺失）→ 收益必须两处皆 None。
+
+    冻结合同：invalid 坐标不 fallback，也不跨无效前一 bar 计算收益。
+    pandas 2.x 的 pct_change() 默认 fill_method 会前向填充，故生产必须显式
+    pct_change(fill_method=None)。此测试同时校验 C 路径与 A/B oracle 一致。
+    """
+    end = date(2026, 9, 18)
+    dates = [end - timedelta(days=2), end - timedelta(days=1), end]
+    closes = [10.0, 10.0, 20.0]
+    factors = [1.0, None, 1.0]  # 中间 adj_factor 缺失 → 该日坐标 unavailable
+    iid = uuid4()
+    df = _mk(dates, closes, factors)
+
+    # C 路径：stock-day facts
+    facts = svc._compute_stock_daily_facts(df)
+    assert pd.isna(facts.loc[dates[1], "adj_close"])  # 坐标 10, None, 20
+    assert pd.isna(facts.loc[dates[1], "ret"])
+    assert pd.isna(facts.loc[dates[2], "ret"])  # 不得跨无效前一 bar 计算收益
+
+    # A/B oracle：build_member_closes + compute_breadth
+    mc = svc.build_member_closes(end, df)
+    assert list(mc.closes) == [10.0, None, 20.0]
+    oracle = compute_breadth([mc])
+    assert oracle.equal_weight_return is None
+
+    # C 历史聚合：与 oracle 一致
+    snap, _ = _run_history(
+        monkeypatch, end_date=end, instrument_ids=[iid],
+        load_dates=dates, bars={iid: df}, boards=[], memberships={},
+    )
+    assert snap.market_history[-1].breadth.equal_weight_return is None
+
+
+# ---------------------------------------------------------------
 # B. warmup
 # ---------------------------------------------------------------
 
