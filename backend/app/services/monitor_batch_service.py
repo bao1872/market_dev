@@ -1872,7 +1872,12 @@ class MonitorBatchService:
         for uid, events in user_events_map.items():
             kept: list[StrategyEvent] = []
             for ev in events:
-                key = (uid, ev.instrument_id, ev.event_type)
+                key = (uuid.UUID(str(uid)), uuid.UUID(str(ev.instrument_id)), ev.event_type)
+                try:
+                    with open("/tmp/dedupe_debug.txt", "a") as _df:
+                        _df.write(f"LOOP uid={uid!r} inst={ev.instrument_id!r} type={ev.event_type!r} in_today={key in today_notified} today_for_user={[k for k in today_notified if k[0]==uid]}\n")
+                except Exception:
+                    pass
                 if key in today_notified:
                     continue
                 if key in cycle_seen:

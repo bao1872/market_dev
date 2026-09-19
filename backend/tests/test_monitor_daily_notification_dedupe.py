@@ -72,10 +72,16 @@ def _seed_notification(db, user_id: UUID, event_keys: list[dict], created_at: da
     db.add(msg)
 
 
-async def _merged_messages(db, user_id: UUID) -> list[NotificationMessage]:
+async def _merged_messages(db, user_id: UUID, event_ids: list[UUID]) -> list[NotificationMessage]:
+    """返回本周期新生成的合并卡片（排除预置的"历史已通知"种子）。
+
+    种子消息的 source_id 为随机 uuid，而本周期新建合并卡片的 source_id
+    等于首个保留事件的 id；用 source_id ∈ event_ids 过滤即可只取新消息。
+    """
     stmt = select(NotificationMessage).where(
         NotificationMessage.user_id == user_id,
         NotificationMessage.template_key == "monitor_merged_event",
+        NotificationMessage.source_id.in_(event_ids),
     )
     return list((await db.execute(stmt)).scalars().all())
 
@@ -138,7 +144,7 @@ class TestMonitorDailyNotificationDedupe:
         async with _patch_capture(captured):
             await _run_notification(db_session, [ev_a, ev_b], {ia.id: [ua.id]})
 
-        merged = await _merged_messages(db_session, ua.id)
+        merged = await _merged_messages(db_session, ua.id, [ev_a.id, ev_b.id])
         assert len(merged) == 1
         keys = {
             (k["instrument_id"], k["event_type"])
@@ -168,7 +174,7 @@ class TestMonitorDailyNotificationDedupe:
                 db_session, [ev1, ev2], {i1.id: [ua.id], i2.id: [ua.id]},
             )
 
-        merged = await _merged_messages(db_session, ua.id)
+        merged = await _merged_messages(db_session, ua.id, [ev1.id, ev2.id])
         assert len(merged) == 1
         keys = {
             (k["instrument_id"], k["event_type"])
@@ -195,8 +201,8 @@ class TestMonitorDailyNotificationDedupe:
         async with _patch_capture([]):
             await _run_notification(db_session, [ev], {i1.id: [ua.id, ub.id]})
 
-        merged_a = await _merged_messages(db_session, ua.id)
-        merged_b = await _merged_messages(db_session, ub.id)
+        merged_a = await _merged_messages(db_session, ua.id, [ev.id])
+        merged_b = await _merged_messages(db_session, ub.id, [ev.id])
         assert len(merged_a) == 0, "已通知用户不应再收到同类型通知"
         assert len(merged_b) == 1, "其他用户应正常收到"
 
@@ -219,7 +225,7 @@ class TestMonitorDailyNotificationDedupe:
         async with _patch_capture([]):
             await _run_notification(db_session, [ev], {i1.id: [ua.id]})
 
-        merged = await _merged_messages(db_session, ua.id)
+        merged = await _merged_messages(db_session, ua.id, [ev.id])
         assert len(merged) == 1
         keys = {
             (k["instrument_id"], k["event_type"])
@@ -239,7 +245,7 @@ class TestMonitorDailyNotificationDedupe:
         async with _patch_capture([]):
             await _run_notification(db_session, [ev1, ev2], {i1.id: [ua.id]})
 
-        merged = await _merged_messages(db_session, ua.id)
+        merged = await _merged_messages(db_session, ua.id, [ev1.id, ev2.id])
         assert len(merged) == 1
         assert len(merged[0].body["resource_refs"]["event_ids"]) == 1
 
@@ -262,7 +268,7 @@ class TestMonitorDailyNotificationDedupe:
             await _run_notification(db_session, [ev], {i1.id: [ua.id]})
 
         assert len(captured) == 0, "无 recipient 的事件不应调用 capture worker"
-        merged = await _merged_messages(db_session, ua.id)
+        merged = await _merged_messages(db_session, ua.id, [ev.id])
         assert len(merged) == 0
 
         # 也不应有任何 image Outbox
@@ -285,7 +291,7 @@ class TestMonitorDailyNotificationDedupe:
                 db_session, [ev_a, ev_b], {i1.id: [ua.id], i2.id: [ua.id]},
             )
 
-        merged = await _merged_messages(db_session, ua.id)
+        merged = await _merged_messages(db_session, ua.id, [ev_a.id, ev_b.id])
         assert len(merged) == 1
         keys = merged[0].body["resource_refs"]["event_keys"]
         assert (str(i1.id), "node_cluster_touch") in {
