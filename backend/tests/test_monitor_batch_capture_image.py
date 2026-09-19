@@ -82,7 +82,7 @@ class TestMonitorBatchCaptureTokenClaims:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -129,7 +129,7 @@ class TestMonitorBatchCaptureTokenClaims:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -165,7 +165,7 @@ class TestMonitorBatchCaptureTokenClaims:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -213,7 +213,7 @@ class TestMonitorBatchCaptureTokenClaims:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -259,7 +259,7 @@ class TestMonitorBatchCaptureTokenClaims:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -313,7 +313,7 @@ class TestMonitorBatchCaptureTimeframe:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -383,7 +383,7 @@ class TestMonitorBatchCaptureIndicatorView:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -442,7 +442,7 @@ class TestMonitorBatchCaptureIndicatorView:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -502,7 +502,7 @@ class TestMonitorBatchCaptureIndicatorView:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -549,7 +549,7 @@ class TestMonitorBatchCaptureIndicatorView:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -683,7 +683,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: events},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={e.id: [user_id] for e in events},
                 message_group_id=group_id,
             )
 
@@ -750,7 +750,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: events},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: user_ids},
+                event_recipient_users={e.id: user_ids for e in events},
                 message_group_id=group_id,
             )
 
@@ -809,7 +809,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: events},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={e.id: [user_id] for e in events},
                 message_group_id=group_id,
             )
 
@@ -872,7 +872,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
             # 第 2 次重试（同一事件）
@@ -880,7 +880,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: [event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -931,7 +931,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: [event1, event2]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={event1.id: [user_id], event2.id: [user_id]},
                 message_group_id=group_id,
             )
 
@@ -997,7 +997,7 @@ class TestMonitorBatchCapturePerEvent:
                 db=db_session,
                 instrument_events={inst_id: [unknown_event]},
                 instrument_info_cache={inst_id: (test_instrument.symbol, test_instrument.name)},
-                instrument_user_map={inst_id: [user_id]},
+                event_recipient_users={unknown_event.id: [user_id]},
                 message_group_id=group_id,
             )
 

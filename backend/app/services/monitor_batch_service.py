@@ -57,6 +57,7 @@ from app.models.capture_job import (
 )
 from app.models.instrument import Instrument
 from app.models.monitor_evaluation import MonitorEvaluation
+from app.models.notification import NotificationMessage
 from app.models.stock_memo import StockMemo
 from app.models.strategy import StrategyDefinition, StrategyVersion
 from app.models.strategy_event import StrategyEvent
@@ -1463,6 +1464,20 @@ class MonitorBatchService:
             deduped_events.append(ev)
         user_events = deduped_events
 
+        # [Dedup] resource_refs.event_keys 记录本卡片实际触发的精确
+        # (instrument_id, event_type) 对，作为当日同类型通知去重的 SSOT（无笛卡尔积）。
+        _event_keys_seen: set[tuple[uuid.UUID, str]] = set()
+        event_keys: list[dict[str, str]] = []
+        for ev in user_events:
+            pair = (ev.instrument_id, ev.event_type)
+            if pair in _event_keys_seen:
+                continue
+            _event_keys_seen.add(pair)
+            event_keys.append({
+                "instrument_id": str(ev.instrument_id),
+                "event_type": ev.event_type,
+            })
+
         # 按标的分组
         instrument_events: dict[uuid.UUID, list[_StrategyEventLike]] = {}
         for ev in user_events:
@@ -1671,6 +1686,7 @@ class MonitorBatchService:
             resource_refs={
                 "event_ids": [str(ev.id) for ev in user_events],
                 "event_types": list({ev.event_type for ev in user_events}),
+                "event_keys": event_keys,
                 "header_severity": max_sev,
                 "instruments": [
                     {
@@ -1694,6 +1710,73 @@ class MonitorBatchService:
             event_summary=event_summary,
         )
         return dto
+
+    async def _load_today_notified_event_keys(
+        self,
+        db: AsyncSession,
+        user_ids: list[uuid.UUID],
+    ) -> set[tuple[uuid.UUID, uuid.UUID, str]]:
+        """读取今日（上海自然日）已通知的 (user_id, instrument_id, event_type) 集合。
+
+        [盘中监控去重] - 同类型通知当天不重复推送：
+        - 去重 SSOT 是 notification_messages（message_type=='MONITOR_EVENT'）
+        - 键 = (user_id, instrument_id, event_type, 上海自然日)
+        - 从 body.resource_refs.event_keys 读取精确 (instrument, event_type) 对；
+          旧消息无 event_keys 时回退到 instruments × event_types 笛卡尔积（保守去重）
+
+        Args:
+            db: 异步会话
+            user_ids: 需要查询的用户 ID 列表
+
+        Returns:
+            已通知的 (user_id, instrument_id, event_type) 三元组集合
+        """
+        if not user_ids:
+            return set()
+
+        now_sh = datetime.now(ZoneInfo("Asia/Shanghai"))
+        day_start_sh = now_sh.replace(hour=0, minute=0, second=0, microsecond=0)
+        day_start_utc = day_start_sh.astimezone(UTC)
+        day_end_utc = (day_start_sh + timedelta(days=1)).astimezone(UTC)
+
+        stmt = (
+            select(NotificationMessage.user_id, NotificationMessage.body)
+            .where(
+                NotificationMessage.user_id.in_(user_ids),
+                NotificationMessage.message_type == "MONITOR_EVENT",
+                NotificationMessage.created_at >= day_start_utc,
+                NotificationMessage.created_at < day_end_utc,
+            )
+        )
+        rows = await db.execute(stmt)
+        notified: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
+        for user_id, body in rows.all():
+            if not isinstance(body, dict):
+                continue
+            refs = body.get("resource_refs")
+            if not isinstance(refs, dict):
+                continue
+            pairs = refs.get("event_keys")
+            if isinstance(pairs, list) and pairs:
+                for pair in pairs:
+                    if not isinstance(pair, dict):
+                        continue
+                    iid = pair.get("instrument_id")
+                    et = pair.get("event_type")
+                    if iid and isinstance(et, str):
+                        notified.add((user_id, uuid.UUID(iid), et))
+            else:
+                # 兼容旧消息（无 event_keys）：instruments × event_types 笛卡尔积
+                instruments = refs.get("instruments") or []
+                event_types = refs.get("event_types") or []
+                for inst in instruments:
+                    iid = inst.get("instrument_id") if isinstance(inst, dict) else None
+                    if not iid:
+                        continue
+                    for et in event_types:
+                        if isinstance(et, str):
+                            notified.add((user_id, uuid.UUID(iid), et))
+        return notified
 
     async def _send_merged_notification(
         self,
@@ -1753,7 +1836,7 @@ class MonitorBatchService:
         # 计算涨跌幅映射（当日收盘 vs 前日收盘，盘中用最新价）
         change_pct_map = await self._compute_change_pct(db, involved_ids)
 
-        # 构建 user_id → 相关事件列表 + 自选股总数
+        # 构建 user_id → 候选事件列表 + 自选股总数（去重前）
         user_events_map: dict[uuid.UUID, list[StrategyEvent]] = {}
         user_instrument_count: dict[uuid.UUID, int] = {}
         for inst_id, user_ids in instrument_user_map.items():
@@ -1763,10 +1846,38 @@ class MonitorBatchService:
                 if events:
                     user_events_map.setdefault(uid, []).extend(events)
 
+        # [盘中监控去重] - 候选事件 → 今日历史去重 → 本 cycle 去重 → filtered_user_events
+        # SSOT 是 notification_messages（_load_today_notified_event_keys 读取当日已通知 key）
+        # 去重键 = (user_id, instrument_id, event_type)；同 key 当天内不再重复推送。
+        today_notified = await self._load_today_notified_event_keys(
+            db, list(user_events_map.keys()),
+        )
+        filtered_user_events: dict[uuid.UUID, list[StrategyEvent]] = {}
+        cycle_seen: set[tuple[uuid.UUID, uuid.UUID, str]] = set()
+        for uid, events in user_events_map.items():
+            kept: list[StrategyEvent] = []
+            for ev in events:
+                key = (uid, ev.instrument_id, ev.event_type)
+                if key in today_notified:
+                    continue
+                if key in cycle_seen:
+                    continue
+                cycle_seen.add(key)
+                kept.append(ev)
+            if kept:
+                filtered_user_events[uid] = kept
+
+        # [盘中监控去重] - 反推 event → 仍需接收的用户集合，供 card 与 image 共用同一过滤结果；
+        # 某 event 去重后无 recipient → 不截图、不发 image。
+        event_recipient_users: dict[uuid.UUID, list[uuid.UUID]] = {}
+        for uid, events in filtered_user_events.items():
+            for ev in events:
+                event_recipient_users.setdefault(ev.id, []).append(uid)
+
         # [advice.md 第七节] - 备忘录闭环：批量读取 StockMemo（notify_feishu=True）
         # 构建 (user_id, instrument_id) → content 映射，严格按用户隔离
         memo_map: dict[tuple[uuid.UUID, uuid.UUID], str] = {}
-        all_user_ids = list(user_events_map.keys())
+        all_user_ids = list(filtered_user_events.keys())
         if all_user_ids and involved_ids:
             memo_stmt = (
                 select(StockMemo)
@@ -1786,7 +1897,7 @@ class MonitorBatchService:
         batch_message_group_id = str(uuid.uuid4())
 
         # 对每个用户创建通知消息并写入 Outbox（由 Delivery Worker 异步投递）
-        for user_id, user_events in user_events_map.items():
+        for user_id, user_events in filtered_user_events.items():
             total_inst = user_instrument_count.get(user_id, 0)
             try:
                 dto = self._build_merged_card_dto(
@@ -1841,9 +1952,10 @@ class MonitorBatchService:
                 )
 
         # [飞书两段式投递] - 为每只触发股票调用 capture worker 截图，
-        # 写入 image Outbox，与 text Outbox 共享 message_group_id
+        # 写入 image Outbox，与 text Outbox 共享 message_group_id；
+        # 仅对去重后仍持有 recipient 的事件截图/发图。
         await self._send_chart_images_via_outbox(
-            db, instrument_events, instrument_info_cache, instrument_user_map,
+            db, instrument_events, instrument_info_cache, event_recipient_users,
             batch_message_group_id,
         )
 
@@ -1852,7 +1964,7 @@ class MonitorBatchService:
         db: AsyncSession,
         instrument_events: dict[uuid.UUID, list[StrategyEvent]],
         instrument_info_cache: dict[uuid.UUID, tuple[str, str]],
-        instrument_user_map: dict[uuid.UUID, list[uuid.UUID]],
+        event_recipient_users: dict[uuid.UUID, list[uuid.UUID]],
         message_group_id: str,
     ) -> None:
         """为每个触发事件调用 capture worker 截图，并通过 Outbox 统一投递图片。
@@ -1878,11 +1990,15 @@ class MonitorBatchService:
         - image_url 由 capture worker 返回，delivery_worker 通过 _fetch_image_bytes 拉取
         - 与 text Outbox 共享同一 message_group_id
 
+        [盘中监控去重] - event_recipient_users 来自 _send_merged_notification 的去重结果
+        （与卡片共用同一过滤集合）；某 event 去重后无 recipient → 不截图、不发 image。
+        默认 None 时回退到"全部事件都截图"（仅供隔离单测直接调用，生产必传过滤结果）。
+
         Args:
             db: 异步会话
             instrument_events: instrument_id → events 映射
             instrument_info_cache: instrument_id → (symbol, name) 缓存
-            instrument_user_map: instrument_id → [user_ids] 映射
+            event_recipient_users: event_id → [user_ids] 映射（去重后仍需接收的用户）
             message_group_id: 消息组 ID（与 text Outbox 共享）
         """
         import httpx
@@ -1901,9 +2017,11 @@ class MonitorBatchService:
                 continue
             symbol, stock_name = info
 
-            user_ids = instrument_user_map.get(inst_id, [])
-            if not user_ids:
-                continue
+            for event in events:
+                # [盘中监控去重] - 仅对去重后仍持有 recipient 的事件截图/发图
+                user_ids = (event_recipient_users or {}).get(event.id, [])
+                if not user_ids:
+                    continue
 
             # [Gate3 图片修复] 每个事件独立处理（失败隔离）
             # - 不再只取 events[0]；同一标的可触发多个结构事件，每个事件都应有自己的图片

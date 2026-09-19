@@ -282,6 +282,15 @@
       "tests/test_invite_admin_code_visibility.py"
       ],
       "claim": "New invite codes retain hash-based redemption identity while storing only encrypted recoverable code material for admin display; legacy rows without ciphertext do not fabricate plaintext, and capability self_selection watchlist_limit is the quota source for capability-mode invites."
-      }
-      ]
+      },
+    {
+      "contract_id": "monitor_daily_notification_dedupe",
+      "governance_level": 2,
+      "semantic_owner": "app.services.monitor_batch_service",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": ["tests/test_monitor_daily_notification_dedupe.py"],
+      "claim": "盘中监控同类型通知当日不重复推送：去重 SSOT 是 notification_messages（message_type=MONITOR_EVENT），去重键 = (user_id, instrument_id, event_type, 上海自然日)，由合并卡片 DTO 的 resource_refs.event_keys 精确记录（无笛卡尔积）；同用户+同标的+同类型今日已通知则当前周期不再推送，不同类型/不同标的/不同用户各自独立，次日（上海自然日）允许再次推送，本 cycle 内同一键仅出现一次；去重后无 recipient 的事件不截图、不发 image，cards 与 image 共用同一过滤集合。"
+    }
+    ]
       }
