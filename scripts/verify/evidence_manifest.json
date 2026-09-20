@@ -31,6 +31,17 @@
       "claim": "Market Dashboard projection replacement is serialized and atomic: successful rebuilds replace the complete snapshot, failures roll back to the prior snapshot, stale trade dates are rejected, and scope completeness and membership-version contracts are enforced."
     },
     {
+      "contract_id": "market_dashboard_projection_rebuild_orchestration",
+      "governance_level": 2,
+      "semantic_owner": "app.services.market_dashboard_projection_rebuild_service",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_market_dashboard_projection_rebuild_pg.py"
+      ],
+      "claim": "Market Dashboard rebuild reads from one repeatable-read read-only snapshot, verifies the current board membership snapshot under PostgreSQL SHARE locks before publication, and delegates final replacement to the independently atomic projection writer using a fresh session."
+    },
+    {
       "contract_id": "projection_lifecycle",
       "governance_level": 2,
       "semantic_owner": "app.services.strategy_batch_service",
