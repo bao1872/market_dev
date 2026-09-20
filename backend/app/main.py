@@ -53,6 +53,7 @@ from app.api.health import router as health_router
 from app.api.indicators import router as indicators_router
 from app.api.instruments import router as instruments_router
 from app.api.market import router as market_router
+from app.api.market_dashboard import router as market_dashboard_router
 from app.api.me import router as me_router
 from app.api.me_table_view_presets import router as me_table_view_presets_router
 from app.api.metrics import http_request_duration_seconds, http_requests_total
@@ -234,6 +235,8 @@ app.include_router(auction_admin_router)
 app.include_router(public_beta_router)
 # 公开套餐列表路由（无需登录）
 app.include_router(plans_router)
+# [F2] Market Dashboard 只读 API（用户侧，复用 market_data capability）
+app.include_router(market_dashboard_router)
 # Prometheus 指标路由（无需认证，供 scraper 直接抓取）
 app.include_router(metrics_api.router, tags=["metrics"])
 
