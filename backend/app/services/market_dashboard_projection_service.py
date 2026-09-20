@@ -86,14 +86,9 @@ async def prepare_projection_context(session: AsyncSession, end_date: date) -> P
         dashboard_service.HISTORY_TRADE_DAYS + dashboard_service.MA_WARMUP_DAYS,
     )
     if not load_dates:
-        return ProjectionContext(
-            projection_trade_date=end_date,
-            display_dates=[],
-            stock_facts=dashboard_service._compute_stock_facts_long(None),
-            membership_long=dashboard_service._build_membership_long({}),
-            board_ids=[],
-            membership_versions={},
-        )
+        # fail closed：没有真实交易日就没有 projection T；不得用请求日期伪造 T 继续。
+        # 一旦 F1B 接上持久化，silent empty 会变成"替换旧 projection 为空"，必须当场拒绝。
+        raise ValueError("cannot build market dashboard projection: no trading dates <= end_date")
     display_dates = load_dates[-dashboard_service.HISTORY_TRADE_DAYS :]
 
     # 唯一一次批量 bars 读取（Dashboard 专用窄读取：仅 4 列长表）
@@ -119,16 +114,25 @@ async def prepare_projection_context(session: AsyncSession, end_date: date) -> P
 
 
 def build_market_records(context: ProjectionContext) -> list[dict[str, object]]:
-    """每个 display date 恰好一条 market record（空日期也显式零）。
+    """每个 display date 恰好一条 market record（空日期 / 空 facts 也显式零）。
 
-    Returns: list，长度 == ``len(context.display_dates)``（最多 250）。
+    projection completeness：输出行数恒等于 ``len(context.display_dates)``（最多 250）。
+    被复用的 ``_aggregate_market_history_long`` 在 stock_facts 为空时返回 ``[]``，
+    故此处必须按 display_dates 逐日补 ``_empty_market_breadth``（不改其既有行为合同）。
     """
-    records: list[dict[str, object]] = []
-    for d, breadth, _ewr in dashboard_service._aggregate_market_history_long(
-        context.stock_facts, context.display_dates
-    ):
-        records.append({"trade_date": d, **_count_fields(breadth)})
-    return records
+    aggregated: dict[date, BreadthResult] = {
+        d: breadth
+        for d, breadth, _ewr in dashboard_service._aggregate_market_history_long(
+            context.stock_facts, context.display_dates
+        )
+    }
+    return [
+        {
+            "trade_date": d,
+            **_count_fields(aggregated.get(d, dashboard_service._empty_market_breadth())),
+        }
+        for d in context.display_dates
+    ]
 
 
 def iter_scope_record_chunks(
@@ -138,11 +142,24 @@ def iter_scope_record_chunks(
 ) -> Iterator[list[dict[str, object]]]:
     """按日期 chunk 产出 scope records（每次 <= active_board_count × chunk_size）。
 
+    - ``chunk_size`` 必须在 ``1..SCOPE_PROJECTION_DATE_CHUNK``；否则立即 ValueError（fail closed）。
     - 每个 display date 恰处理一次（不遗漏、不重复）。
     - 每个 active board × 该 chunk 的每个 date 必有一行；空组合显式零
       （``_empty_market_breadth`` 兜底），使 projection 缺行只表示"builder 没算完"。
     - 生成器逐 chunk yield，调用方消费完一个 chunk 即可释放（不累计巨型 list）。
     """
+    # 内存合同（生产，不是测试约定）：单次 scope aggregation 的 dates 必须 <= 上限。
+    if not 1 <= chunk_size <= SCOPE_PROJECTION_DATE_CHUNK:
+        raise ValueError(
+            f"chunk_size must be within 1..{SCOPE_PROJECTION_DATE_CHUNK}, got {chunk_size!r}"
+        )
+    return _generate_scope_record_chunks(context, chunk_size)
+
+
+def _generate_scope_record_chunks(
+    context: ProjectionContext, chunk_size: int
+) -> Iterator[list[dict[str, object]]]:
+    """:func:`iter_scope_record_chunks` 的生成器实现（chunk_size 已由调用方校验）。"""
     dates = context.display_dates
     board_ids = context.board_ids
     if not dates or not board_ids:

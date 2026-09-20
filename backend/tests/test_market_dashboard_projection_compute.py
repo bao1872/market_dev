@@ -107,6 +107,29 @@ def test_market_records_parity_with_oracle():
         _assert_record_matches(rec, svc._aggregate_breadth_for_date(d, legacy))
 
 
+def test_market_records_full_dates_when_facts_empty():
+    """P1-1 回归：stock_facts 为空时，market records 仍须按 display_dates 输出显式零。"""
+    dates = [date(2026, 9, 16), date(2026, 9, 17), date(2026, 9, 18)]
+    ctx = proj.ProjectionContext(
+        projection_trade_date=dates[-1],
+        display_dates=dates,
+        stock_facts=svc._compute_stock_facts_long(None),  # 空 facts
+        membership_long=svc._build_membership_long({}),
+        board_ids=[],
+        membership_versions={},
+    )
+    records = proj.build_market_records(ctx)
+    assert len(records) == 3
+    for rec, d in zip(records, dates, strict=False):
+        assert rec["trade_date"] == d
+        assert rec["member_count"] == 0
+        assert rec["valid_return_count"] == 0
+        assert rec["equal_weight_return"] is None
+        for k in WINDOWS:
+            assert rec[f"ma{k}_valid_count"] == 0
+            assert rec[f"ma{k}_above_count"] == 0
+
+
 # ---------------------------------------------------------------
 # B. scope records parity
 # ---------------------------------------------------------------
@@ -227,6 +250,40 @@ def test_scope_chunking_structural(monkeypatch):
 
 
 # ---------------------------------------------------------------
+# D2. chunk_size guard（内存合同 fail closed）
+# ---------------------------------------------------------------
+@pytest.mark.parametrize("bad", [0, -1, 11, 250])
+def test_scope_chunk_size_rejected(bad):
+    dates = [date(2026, 9, 18)]
+    ctx = proj.ProjectionContext(
+        projection_trade_date=dates[-1],
+        display_dates=dates,
+        stock_facts=svc._compute_stock_facts_long(None),
+        membership_long=svc._build_membership_long({}),
+        board_ids=[],
+        membership_versions={},
+    )
+    # eager 校验：调用即失败（不依赖迭代）
+    with pytest.raises(ValueError):
+        proj.iter_scope_record_chunks(ctx, chunk_size=bad)
+
+
+@pytest.mark.parametrize("ok", [1, 5, proj.SCOPE_PROJECTION_DATE_CHUNK])
+def test_scope_chunk_size_accepted(ok):
+    end = date(2026, 9, 18)
+    n = 12
+    dates = [end - timedelta(days=n - 1 - i) for i in range(n)]
+    i1 = uuid4()
+    bars = {i1: _mk(dates, [float(i + 1) for i in range(n)])}
+    b = _board(uuid4(), name="A")
+    ctx = _context(bars=bars, boards=[b], memberships={b.id: [i1]}, display_dates=dates)
+    chunks = list(proj.iter_scope_record_chunks(ctx, chunk_size=ok))
+    assert chunks
+    assert sum(len(c) for c in chunks) == n  # 1 board × n dates
+    assert all(len(c) <= ok for c in chunks)
+
+
+# ---------------------------------------------------------------
 # E. query / compute call counts
 # ---------------------------------------------------------------
 def test_query_and_compute_call_counts(monkeypatch):
@@ -243,12 +300,22 @@ def test_query_and_compute_call_counts(monkeypatch):
     boards = [b1, b2]
     memberships = {b1.id: [i1], b2.id: [i2]}
 
-    counts = {"reader": 0, "facts": 0, "boards": 0, "members": 0, "memlong": 0}
+    counts = {
+        "instruments": 0,
+        "trade_dates": 0,
+        "reader": 0,
+        "facts": 0,
+        "boards": 0,
+        "members": 0,
+        "memlong": 0,
+    }
 
     async def _insts(_s):
+        counts["instruments"] += 1
         return [i1, i2]
 
     async def _dates(_s, _end, _count):
+        counts["trade_dates"] += 1
         return list(dates)
 
     async def _boards(_s):
@@ -289,7 +356,51 @@ def test_query_and_compute_call_counts(monkeypatch):
 
     assert len(market_records) == len(dates)
     assert len(scope_records) == len(boards) * len(dates)
-    assert counts == {"reader": 1, "facts": 1, "boards": 1, "members": 1, "memlong": 1}
+    assert counts == {
+        "instruments": 1,
+        "trade_dates": 1,
+        "reader": 1,
+        "facts": 1,
+        "boards": 1,
+        "members": 1,
+        "memlong": 1,
+    }
+
+
+# ---------------------------------------------------------------
+# E2. no trading dates fail closed
+# ---------------------------------------------------------------
+def test_prepare_no_trading_dates_fails_closed(monkeypatch):
+    counts = {"reader": 0, "boards": 0, "members": 0}
+
+    async def _insts(_s):
+        return [uuid4()]
+
+    async def _dates(_s, _end, _count):
+        return []  # 无任何真实交易日
+
+    async def _boards(_s):
+        counts["boards"] += 1
+        return []
+
+    async def _members(_s, bids):
+        counts["members"] += 1
+        return {}
+
+    async def _loader(_s, _ids, _sd, _ed):
+        counts["reader"] += 1
+        return None
+
+    monkeypatch.setattr(svc, "_query_market_instrument_ids", _insts)
+    monkeypatch.setattr(svc, "_query_recent_trade_dates", _dates)
+    monkeypatch.setattr(svc, "_query_active_boards", _boards)
+    monkeypatch.setattr(svc, "_query_board_memberships", _members)
+    monkeypatch.setattr(bar_repository, "get_dashboard_daily_facts_source", _loader)
+
+    with pytest.raises(ValueError):
+        asyncio.run(proj.prepare_projection_context(SimpleNamespace(), date(2026, 9, 18)))
+    # fail closed：不得继续 bars / boards / memberships 查询
+    assert counts == {"reader": 0, "boards": 0, "members": 0}
 
 
 # ---------------------------------------------------------------
