@@ -41,7 +41,7 @@ export default function CompareChart({ boards, height = 360 }: CompareChartProps
       crosshair: { mode: 0 },
     })
     boards.forEach((board, i) => {
-      const s = chart.addLineSeries({ color: PALETTE[i % PALETTE.length], lineWidth: 2, priceScaleId: '' })
+      const s = chart.addLineSeries({ color: PALETTE[i % PALETTE.length], lineWidth: 2, priceScaleId: 'right' })
       s.setData(buildLineData(board.points, 'trade_date', 'ew_index'))
     })
     return () => {

@@ -35,7 +35,7 @@ test('formatDelta / deltaDirection: A股 红涨绿跌', () => {
   assert.equal(deltaDirection(null), 'flat')
 })
 
-test('buildLineData: null 必须断线（不转 0 / 不 forward fill / 不插值）', () => {
+test('buildLineData: null 必须断线（保留日期输出 whitespace point，不转 0 / 不 forward fill / 不插值）', () => {
   const data = [
     { trade_date: '2026-09-01', ma20: 0.5 },
     { trade_date: '2026-09-02', ma20: null },
@@ -43,12 +43,13 @@ test('buildLineData: null 必须断线（不转 0 / 不 forward fill / 不插值
     { trade_date: '2026-09-04', ma20: undefined as unknown as number | null },
   ]
   const out = buildLineData(data, 'trade_date', 'ma20')
+  // null / undefined 当天保留日期、只输出 time（whitespace gap），绝不补 value:0
   assert.deepEqual(out, [
     { time: '2026-09-01', value: 0.5 },
+    { time: '2026-09-02' },
     { time: '2026-09-03', value: 0.7 },
+    { time: '2026-09-04' },
   ])
-  // 明确断言 null 那天的点不存在（没有 value:0 的断点伪装）
-  assert.ok(!out.some((p) => p.time === '2026-09-02'))
 })
 
 test('buildRankingsParams: industry 传层级；concept 不传 hierarchy_level', () => {

@@ -2,7 +2,7 @@
 // 关键：
 // - breadth(0~1) 放 left scale，EW index(~100) 放 right scale，不粗暴共用同一数轴；
 // - 80%/20% 仅作参考线（createPriceLine），不加任何解释性判断；
-// - null 断线：buildLineData 已省略无效点（whitespace gap），绝不变 0。
+// - null 断线：buildLineData 输出 whitespace point（保留日期、无 value），绝不变 0。
 import { useEffect, useRef } from 'react'
 import { createChart, LineStyle, type IChartApi, type ISeriesApi } from 'lightweight-charts'
 import { buildLineData } from './dashboardLogic'
@@ -62,7 +62,7 @@ export default function BreadthChart({ points, series, referenceLines, height = 
       const s = chart.addLineSeries({
         color: spec.color,
         lineWidth: 2,
-        priceScaleId: spec.scale === 'left' ? 'left' : '',
+        priceScaleId: spec.scale,
       })
       s.setData(buildLineData(points, 'trade_date', spec.field))
       return s
@@ -88,5 +88,19 @@ export default function BreadthChart({ points, series, referenceLines, height = 
     }
   }, [points, series, referenceLines, height])
 
-  return <div ref={containerRef} className={styles.chart} />
+  return (
+    <div>
+      <div ref={containerRef} className={styles.chart} />
+      {series.length > 0 && (
+        <div className={styles.legend}>
+          {series.map((s) => (
+            <span key={s.label} className={styles.legendItem}>
+              <span className={styles.legendDot} style={{ background: s.color }} />
+              {s.label}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  )
 }

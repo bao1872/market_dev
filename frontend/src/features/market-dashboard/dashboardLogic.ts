@@ -32,19 +32,27 @@ export function deltaDirection(value: number | null | undefined): DeltaDirection
 
 /**
  * 把数据点序列转成图表 setData 数组。
- * 硬合同：null / undefined / NaN 不进入数组（lightweight-charts 表现为 whitespace gap = 断线），
- * 绝不补 0、绝不 forward fill、绝不插值。
+ * 硬合同：每个输入日期都保留；有效数值 -> { time, value }，null / undefined / NaN ->
+ * 仅 { time } 的 whitespace point（lightweight-charts 表现为断线 gap），绝不补 0 /
+ * 绝不 forward fill / 绝不插值。
  */
+export type LinePoint =
+  | { time: string; value: number }
+  | { time: string }
+
 export function buildLineData<T>(
   data: readonly T[],
   timeField: keyof T,
   valueField: keyof T,
-): Array<{ time: string; value: number }> {
-  const out: Array<{ time: string; value: number }> = []
+): LinePoint[] {
+  const out: LinePoint[] = []
   for (const row of data) {
+    const time = String(row[timeField])
     const v = row[valueField]
     if (typeof v === 'number' && Number.isFinite(v)) {
-      out.push({ time: String(row[timeField]), value: v })
+      out.push({ time, value: v })
+    } else {
+      out.push({ time })
     }
   }
   return out
