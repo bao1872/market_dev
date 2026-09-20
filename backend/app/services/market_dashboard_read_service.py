@@ -331,7 +331,7 @@ async def _fetch_boards(
             type=row.type,
             hierarchy_level=row.hierarchyLevel,
             membership_version=row.membershipVersion,
-            is_active=row.is_active,
+            is_active=row.isActive,
         )
         for row in res.all()
     ]
@@ -354,7 +354,7 @@ async def _fetch_boards_by_ids(db: AsyncSession, board_ids: list[UUID]) -> list[
             type=row.type,
             hierarchy_level=row.hierarchyLevel,
             membership_version=row.membershipVersion,
-            is_active=row.is_active,
+            is_active=row.isActive,
         )
         for row in res.all()
     ]
@@ -402,7 +402,7 @@ async def _fetch_single_board(db: AsyncSession, board_id: UUID) -> BoardMeta | N
         type=row.type,
         hierarchy_level=row.hierarchyLevel,
         membership_version=row.membershipVersion,
-        is_active=row.is_active,
+        is_active=row.isActive,
     )
 
 
