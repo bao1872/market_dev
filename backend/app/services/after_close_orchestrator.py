@@ -3343,10 +3343,17 @@ async def execute_after_close_run(
         #   F1C membership race guard 防止旧 snapshot 发布；
         # - optional=True：失败/超时只写 step_summary，不阻断 Core/Review/History 主链
         #   （F1B 保证旧 projection 保留）。
+        # [F1D-FIX1] timeout 本地窄化：既让 type checker 收敛为 float，也在运行期锁住
+        # 「该 step 必须有有限 timeout」这一合同——若有人把它改成 None，这里立刻 fail fast，
+        # 而不是悄悄把 optional sidecar 变成无限等待。
+        dashboard_timeout = _step_timeout("rebuilding_market_dashboard")
+        assert dashboard_timeout is not None, (
+            "rebuilding_market_dashboard must have a finite timeout"
+        )
         dashboard_result, dashboard_summary = await execute_orchestrator_step(
             "rebuilding_market_dashboard",
             lambda: _execute_rebuilding_market_dashboard(trade_date=trade_date),
-            timeout_seconds=_step_timeout("rebuilding_market_dashboard"),
+            timeout_seconds=dashboard_timeout,
             optional=True,
             heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
             progress=_make_step_progress_callback(job_run_id, worker_id),
