@@ -71,12 +71,8 @@ from app.services.feature_snapshot_service import (
 from app.services.first_pyramid_history_service import (
     advance_history_to_trade_date,
     ensure_current_first_pyramid_history_run,
-    materialize_history_v3_from_core,
 )
-from app.services.first_pyramid_service import (
-    HISTORY_CONTRACT_VERSION,
-    REVIEW_HISTORY_V3_CONTRACT_VERSION,
-)
+from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
 from app.services.review_history_readiness_service import (
@@ -110,6 +106,9 @@ _STEP_TIMEOUT_SECONDS: dict[str, float | None] = {
     "refreshing_daily": None,      # workload-variant long-running：无 absolute 上限
     "syncing_boards": 1800,
     "checking_coverage": 300,
+    # [MARKET-DASHBOARD-F1D] optional sidecar：正常量级为几十秒（F1C 只读 369 日 +
+    # 原子替换），600s 已远超正常耗时，同时不会让 optional 投影无限挂住主链。
+    "rebuilding_market_dashboard": 600,
     "computing_features": 28800,   # 约 7 小时主链
     "publishing": 3600,
     # [SLICE-01-CORRECTION-02] computing_history 是全市场 canonical History exact-T
@@ -746,9 +745,7 @@ async def _run_dsa_compatibility_projection(
             # 4) 兼容性发布 —— 真实签名合同（KPI-7/8）：
             #    publish_run(db, run_id)；publish_run 内部只 flush 不自行 commit，
             #    因此本函数随后显式 commit。
-            published_row = await StrategyBatchService().publish_run(
-                db, dsa_run_id
-            )
+            await StrategyBatchService().publish_run(db, dsa_run_id)
             await db.commit()
 
             # 5) 提交后复核真实行状态（不得以内存对象冒充持久化事实）
@@ -1029,6 +1026,31 @@ async def _execute_syncing_boards(
         )
         return {"status": "failed", "error_code": type(board_exc).__name__}
 
+
+async def _execute_rebuilding_market_dashboard(
+    *,
+    trade_date: date,
+) -> dict[str, Any]:
+    """[MARKET-DASHBOARD-F1D] Dashboard projection optional sidecar 业务体。
+
+    纯转发：session/transaction 归 F1C、compute 归 F1A、持久化归 F1B——本函数
+    不创建 session、不捕获 F1C 异常、不重试、不自行改 job status（status owner
+    仍是统一执行器）。
+    """
+    from app.services.market_dashboard_projection_rebuild_service import (
+        rebuild_market_dashboard_projection,
+    )
+
+    result = await rebuild_market_dashboard_projection(trade_date)
+
+    total_rows = result.market_rows + result.scope_rows
+    return {
+        "projection_trade_date": result.projection_trade_date.isoformat(),
+        "market_rows": result.market_rows,
+        "scope_rows": result.scope_rows,
+        "processed": total_rows,
+        "total": total_rows,
+    }
 
 
 class LeaseEpochMismatchError(Exception):
@@ -2045,13 +2067,8 @@ def _make_history_v3_step(
                 "failed_instruments": [],
             }
 
-        from sqlalchemy import and_
-
-        from app.models.first_pyramid_history import FirstPyramidHistoryDailyState
         from app.models.stock_feature_snapshot import StockFeatureSnapshot
-        from app.services.first_pyramid_history_service import (
-            materialize_history_v3_from_core,
-        )
+        from app.services.first_pyramid_history_service import materialize_history_v3_from_core
 
         async with AsyncSessionLocal() as db:
             # 取当日所有已发布 Core 快照的 first_pyramid_flat（durable artifact）
@@ -2665,7 +2682,7 @@ async def _validate_core_ready(
     session: AsyncSession,
     snapshot_run_id: uuid.UUID | None,
     trade_date: date,
-) -> "object":
+) -> object:
     """[AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] canonical Core readiness owner。
 
     唯一权威判定 CoreRun 是否可进入 mandatory 下游（Review / History(T) /
@@ -3314,6 +3331,37 @@ async def execute_after_close_run(
                         )
                         await db.commit()
 
+        # ---- 步骤 1.5: rebuilding_market_dashboard (optional idempotent sidecar) ----
+        # [MARKET-DASHBOARD-F1D] Dashboard projection 是「可重建派生投影」，不是 mainchain
+        # checkpoint。位置刻意选在 normal / resume 两条路径**汇合之后**、computing_features
+        # **之前**：
+        # - 依赖只有「daily bars ready + latest board membership 已决定」，无需等待
+        #   Review/History（否则白白增加数小时延迟）；
+        # - 非交易日 / 日线覆盖率失败都已在此处之前 return，天然不会发布低质量当天投影；
+        # - board sync 软失败时沿用最后一次成功 membership，符合 latest_snapshot_replay；
+        # - resume 时会重跑一次（刻意行为）：F1B same-T replace 幂等，stale-T fail closed，
+        #   F1C membership race guard 防止旧 snapshot 发布；
+        # - optional=True：失败/超时只写 step_summary，不阻断 Core/Review/History 主链
+        #   （F1B 保证旧 projection 保留）。
+        dashboard_result, dashboard_summary = await execute_orchestrator_step(
+            "rebuilding_market_dashboard",
+            lambda: _execute_rebuilding_market_dashboard(trade_date=trade_date),
+            timeout_seconds=_step_timeout("rebuilding_market_dashboard"),
+            optional=True,
+            heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
+            progress=_make_step_progress_callback(job_run_id, worker_id),
+            cancellation_check=_make_step_cancellation_check(job_run_id),
+        )
+        if isinstance(dashboard_result, dict):
+            # execute_orchestrator_step 对 dict 只提取 processed/total；成功时补记事实字段，
+            # 便于后续从 metadata.step_summary 诊断（不需要新的 run table）。
+            dashboard_summary.update(
+                projection_trade_date=dashboard_result["projection_trade_date"],
+                market_rows=dashboard_result["market_rows"],
+                scope_rows=dashboard_result["scope_rows"],
+            )
+            await _persist_step_summary(job_run_id, dashboard_summary)
+
         # ---- 步骤 2: computing_features (Phase 5: 收敛 waiting_dsa_worker + quality_gate + feature_snapshot) ----
         # [CHANGE-20260724-002 Phase 5] scheduled after-close DSA 接入 MFCS 统一计算服务：
         # - DSA run 创建后 inline claim（status=running），防止 DSA worker 领取
@@ -3518,9 +3566,7 @@ async def execute_after_close_run(
                     f"trade_date={trade_date})，mandatory 下游禁止执行"
                 )
             async with AsyncSessionLocal() as db:
-                finalized_core_run = await finalize_snapshot_run_compute_complete(
-                    db, snapshot_run_id
-                )
+                await finalize_snapshot_run_compute_complete(db, snapshot_run_id)
                 await db.commit()
                 # canonical Core readiness owner：校验真实 DB 行（单一事实源）
                 _validated_core_run = await _validate_core_ready(
