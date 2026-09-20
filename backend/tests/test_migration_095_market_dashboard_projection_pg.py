@@ -93,7 +93,7 @@ async def test_095_market_pk_is_trade_date() -> None:
         SELECT a.attname
         FROM pg_index i
         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-        WHERE i.indrelid = :tbl::regclass AND i.indisprimary
+        WHERE i.indrelid = CAST(:tbl AS regclass) AND i.indisprimary
         ORDER BY array_position(i.indkey, a.attnum)
         """,
         {"tbl": _MARKET_TABLE},
@@ -112,7 +112,7 @@ async def test_095_scope_pk_is_board_and_trade_date() -> None:
         SELECT a.attname
         FROM pg_index i
         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
-        WHERE i.indrelid = :tbl::regclass AND i.indisprimary
+        WHERE i.indrelid = CAST(:tbl AS regclass) AND i.indisprimary
         ORDER BY array_position(i.indkey, a.attnum)
         """,
         {"tbl": _SCOPE_TABLE},
@@ -130,7 +130,7 @@ async def test_095_scope_fk_cascade() -> None:
         """
         SELECT confrelid::regclass::text AS ref_table, confdeltype
         FROM pg_constraint
-        WHERE conrelid = :tbl::regclass AND contype = 'f'
+        WHERE conrelid = CAST(:tbl AS regclass) AND contype = 'f'
         """,
         {"tbl": _SCOPE_TABLE},
     )
@@ -181,7 +181,7 @@ async def _check_defs(table: str) -> dict[str, str]:
         """
         SELECT conname, pg_get_constraintdef(oid) AS def
         FROM pg_constraint
-        WHERE conrelid = :tbl::regclass AND contype = 'c'
+        WHERE conrelid = CAST(:tbl AS regclass) AND contype = 'c'
         """,
         {"tbl": table},
     )

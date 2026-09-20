@@ -33,6 +33,7 @@ _MIGRATION_FILE = (
     Path(__file__).parent.parent / "alembic" / "versions" / "095_market_dashboard_projection.py"
 )
 _MODEL_FILE = Path(__file__).parent.parent / "app" / "models" / "market_dashboard.py"
+_PG_TEST_FILE = Path(__file__).parent / "test_migration_095_market_dashboard_projection_pg.py"
 
 _WINDOWS = (5, 10, 20, 50, 120)
 
@@ -386,6 +387,19 @@ def test_manifest_registers_projection_pg_contract() -> None:
     assert contract.test_selectors == (
         "tests/test_migration_095_market_dashboard_projection_pg.py",
     ), f"selector 必须精确为该 PG 文件: {contract.test_selectors}"
+
+
+def test_pg_contract_uses_bind_safe_regclass_casts() -> None:
+    """F0-FIX2 回归：bind 参数紧邻 PostgreSQL cast（:tbl::regclass）在真实 PG 上
+    被 asyncpg 解析为 syntax error at or near ":"。锁死该已知坑（真实 remote 失败，非风格）。
+
+    只针对 ``:bind::type`` 组合；字面 ``confrelid::regclass::text``（无 bind）合法，必须保留。
+    """
+    src = _PG_TEST_FILE.read_text(encoding="utf-8")
+    assert ":tbl::regclass" not in src, "禁止 bind 参数紧邻 ::cast"
+    assert src.count("CAST(:tbl AS regclass)") == 4, "必须恰好 4 处 bind-safe 转换"
+    # 字面 confrelid::regclass::text（无 bind 参数）必须原样保留
+    assert "confrelid::regclass::text" in src
 
 
 if __name__ == "__main__":
