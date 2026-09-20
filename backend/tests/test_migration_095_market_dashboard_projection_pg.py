@@ -68,6 +68,17 @@ async def _fetch_all(sql: str, params: dict | None = None) -> list[tuple]:
         return rows
 
 
+def _pg_char_text(value: object) -> str:
+    """归一 asyncpg 对 PG ``"char"`` 类型的返回值。
+
+    asyncpg 会把 ``pg_constraint.confdeltype`` 这类 ``"char"`` 读成 ``bytes``（如 ``b"c"``），
+    归一为 ``str`` 供断言。``confdeltype`` 是单字符代码，ASCII 解码足够。
+    """
+    if isinstance(value, bytes):
+        return value.decode("ascii")
+    return str(value)
+
+
 # ============================================================
 # A. 两张表存在
 # ============================================================
@@ -137,8 +148,14 @@ async def test_095_scope_fk_cascade() -> None:
     assert rows, "scope 表必须有外键"
     ref_tables = {r[0] for r in rows}
     assert ref_tables == {"market_boards"}, f"FK 目标必须为 market_boards，实际 {ref_tables}"
-    deltypes = {r[1] for r in rows}
+    deltypes = {_pg_char_text(r[1]) for r in rows}
     assert deltypes == {"c"}, f"FK ON DELETE 必须为 CASCADE（confdeltype='c'），实际 {deltypes}"
+
+
+def test_pg_char_text_normalizes_asyncpg_bytes() -> None:
+    """asyncpg 将 PG "char" 类型返回为 bytes（如 b'c'）；helper 必须归一为 str。"""
+    assert _pg_char_text(b"c") == "c"
+    assert _pg_char_text("c") == "c"
 
 
 # ============================================================
