@@ -224,6 +224,13 @@ async def test_market_dashboard_market_ratio_null_when_valid_zero(db_session):
     assert resp.series[1].ew_index is None
     assert resp.series[2].ew_index is None
 
+    # days=2 必须取「最近 2 天」，不是「最早 2 天」；且 9/2 首日 None 后不得重新 rebasing
+    resp2 = await get_market_dashboard(db_session, 2)
+    assert [p.trade_date for p in resp2.series] == ["2026-09-02", "2026-09-03"]
+    assert resp2.projection_trade_date == "2026-09-03"
+    assert resp2.series[0].ew_index is None  # 9/2 首日 return=None
+    assert resp2.series[1].ew_index is None  # 前导 None 后恒 None
+
 
 async def test_rankings_industry_l1_excludes_l2_and_concept(db_session):
     boards = await _seed(db_session)

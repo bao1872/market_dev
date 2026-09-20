@@ -72,7 +72,7 @@
         "tests/test_market_dashboard_api.py::test_market_dashboard_api_unauth_401",
         "tests/test_market_dashboard_api.py::test_market_dashboard_api_invalid_lookback_422"
       ],
-      "claim": "Market Dashboard read API derives only from the projection tables (market_dashboard_market_daily / market_dashboard_scope_daily / market_boards); breadth_ratio = above_count/valid_count with valid_count==0 -> null (no fabricated 0%); EW index rebases first valid displayed point to 100 and breaks the chain on null equal_weight_return (no forward fill); rankings use the t and t-5 projection trading rows (not calendar days) and never mix industry L1/L2/L3 or concept; compare rebases each scope independently to 100; unavailable/missing/inactive boards return 404; and access reuses the existing market_data capability (no new permission)."
+      "claim": "Market Dashboard read API derives only from the projection tables (market_dashboard_market_daily / market_dashboard_scope_daily / market_boards); breadth_ratio = above_count/valid_count with valid_count==0 -> null (no fabricated 0%); EW index sets the first displayed point to 100 only when that date has a valid equal_weight_return, and a null at the first or any later displayed date breaks the chain (no forward fill, no rebasing after a null); rankings use the t and t-5 projection trading rows (not calendar days) and never mix industry L1/L2/L3 or concept; compare rebases each scope independently to 100; unavailable/missing/inactive boards return 404; and access reuses the existing market_data capability (no new permission)."
     },
     {
       "contract_id": "projection_lifecycle",

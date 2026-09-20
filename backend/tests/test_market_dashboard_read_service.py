@@ -52,9 +52,9 @@ def test_ew_index_none_breaks_chain_no_forward_fill():
     assert _ew_index([0.01, None, 0.02]) == [pytest.approx(100.0), None, None]
 
 
-def test_ew_index_leading_none_recovers():
-    # 前导 None 只是无数据，不触发打断；首个有效点仍为 100。
-    assert _ew_index([None, 0.01]) == [None, pytest.approx(100.0)]
+def test_ew_index_leading_none_breaks_chain():
+    # F1A 合同：首个 displayed date 即 None → 该点 None，且后续不得重新 rebasing。
+    assert _ew_index([None, 0.01]) == [None, None]
 
 
 # ---------------------------------------------------------------------------

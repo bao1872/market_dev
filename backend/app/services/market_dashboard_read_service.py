@@ -103,33 +103,24 @@ def _round2(x: float | None) -> float | None:
 
 
 def _ew_index(returns: list[float | None], base: float = 100.0) -> list[float | None]:
-    """等权指数链。
+    """等权指数链（与 F1A _rebase_index 同一合同）。
 
-    - 首个有效点 = base（100）；
-    - equal_weight_return 为 None 时该点 = None；
-    - 链建立后遇到 None → 该点 None 且**打断后续链**（后续恒为 None，不 forward fill）；
-    - 链建立前的 None（前导无数据）仅记 None，不触发打断（首个有效点仍 = base）。
+    - 第一个 displayed date：equal_weight_return 有效 -> base（100）；为 None -> None；
+    - 之后：仅当 prev 与当前 return 都有效 -> prev * (1 + r)；否则 -> None；
+    - 一旦某点为 None（首个或任意后续 displayed date），其后恒为 None
+      （不 forward fill、不在 null 之后重新 rebasing）。
     """
     out: list[float | None] = []
-    cur: float | None = None
-    based = False
-    broken = False
-    for r in returns:
-        if r is None:
-            out.append(None)
-            if based:
-                broken = True
-            continue
-        if broken:
-            out.append(None)
-            continue
-        if not based:
-            cur = base
-            based = True
+    prev: float | None = None
+    for i, r in enumerate(returns):
+        if i == 0:
+            # 首个 displayed date：有效 -> base，无效（None）-> None
+            idx = base if r is not None else None
         else:
-            assert cur is not None  # 首个有效点已置 base，此处必为 float
-            cur = cur * (1.0 + r)
-        out.append(cur)
+            # 仅当 prev 与当前 return 都有效才接链；否则 None（含前导 None 后恒 None）
+            idx = prev * (1.0 + r) if (prev is not None and r is not None) else None
+        out.append(idx)
+        prev = idx
     return out
 
 
@@ -301,12 +292,15 @@ def _scope_row(row) -> ScopeDailyRow:
 
 
 async def _fetch_market_rows(db: AsyncSession, days: int) -> list[MarketDailyRow]:
+    # 取最近 days 天：按 trade_date 倒序取前 days 行，再反转回时间升序，
+    # 保证最终 DTO 的 series 仍按时间递增（一个 SQL，不额外往返）。
     stmt = (
         select(MarketDashboardMarketDaily)
-        .order_by(MarketDashboardMarketDaily.trade_date.asc())
+        .order_by(MarketDashboardMarketDaily.trade_date.desc())
         .limit(days)
     )
     rows = (await db.execute(stmt)).scalars().all()
+    rows = list(reversed(rows))
     return [_market_row(r) for r in rows]
 
 
