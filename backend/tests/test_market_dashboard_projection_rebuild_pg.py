@@ -109,24 +109,23 @@ def _patch_flow(monkeypatch, ctx, *, current_override=None):  # noqa: ANN001
 @pytest.mark.asyncio
 async def test_rebuild_read_snapshot_isolation(monkeypatch) -> None:
     seen: dict[str, str] = {}
+    ctx = _minimal_context([], {})
+
+    # 顺序不可颠倒：先装通用 fake（build/iter/writer/guard），最后再覆盖 prepare；
+    # 否则 _patch_flow 内的通用 _prepare 会把下面的真实 SHOW probe 覆盖掉。
+    calls = _patch_flow(monkeypatch, ctx, current_override={})
 
     async def _prepare(session, _end_date):
         iso = (await session.execute(text("SHOW transaction_isolation"))).scalar()
         ro = (await session.execute(text("SHOW transaction_read_only"))).scalar()
         seen["iso"] = str(iso)
         seen["ro"] = str(ro)
-        return _minimal_context([], {})
+        return ctx
 
     monkeypatch.setattr(proj, "prepare_projection_context", _prepare)
-    monkeypatch.setattr(
-        proj, "build_market_records", lambda _ctx: [{"trade_date": date(2026, 9, 18)}]
-    )
-    monkeypatch.setattr(proj, "iter_scope_record_chunks", lambda _ctx: iter(()))
-    calls = _patch_flow(monkeypatch, _minimal_context([], {}), current_override={})
 
     result = await rebuild.rebuild_market_dashboard_projection(date(2026, 9, 18))
-    assert seen["iso"] == "repeatable read"
-    assert seen["ro"] == "on"
+    assert seen == {"iso": "repeatable read", "ro": "on"}
     assert calls == [1]  # guard 通过后 delegate 给 writer
     assert isinstance(result, ProjectionWriteResult)
 
