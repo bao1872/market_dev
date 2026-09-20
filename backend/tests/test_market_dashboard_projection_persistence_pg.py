@@ -71,7 +71,7 @@ def _scope(bid: UUID, d: date, mv: str, **kw: object) -> dict[str, object]:
 async def _create_board(membership_version: str) -> UUID:
     async with TestAsyncSessionLocal() as session:
         board = MarketBoard(
-            external_code=f"mdf1b-{uuid4().hex[:12]}",
+            externalCode=f"mdf1b-{uuid4().hex[:12]}",
             name="proj-f1b-test",
             type="industry",
             membershipVersion=membership_version,
