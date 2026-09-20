@@ -7,11 +7,14 @@
 - scope 404（不存在 / 未激活 / 未构建）
 - compare 多 scope 各自独立归一到 100
 - 读路径只访问 market_dashboard_market_daily / market_dashboard_scope_daily / market_boards
+
+隔离：全部使用 conftest 的 `db_session`（savepoint）fixture 做种子与读取，
+每个用例退出时外层事务 rollback，天然无跨用例数据污染、无 PK 冲突。
 """
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from uuid import uuid4
 
 import pytest
@@ -28,7 +31,6 @@ from app.services.market_dashboard_read_service import (
     get_rankings,
     get_scope_detail,
 )
-from tests.conftest import TestAsyncSessionLocal
 
 pytestmark = pytest.mark.postgres
 
@@ -45,7 +47,6 @@ def _market_row(d: date, *, ew, counts, valid_zero: bool = False) -> MarketDashb
     ma120 = _mk_counts(counts["a120"], counts["v120"])
     return MarketDashboardMarketDaily(
         trade_date=d,
-        entry_count=counts["v20"],
         member_count=counts["v20"],
         valid_return_count=counts["v20"],
         equal_weight_return=ew,
@@ -59,7 +60,7 @@ def _market_row(d: date, *, ew, counts, valid_zero: bool = False) -> MarketDashb
         ma50_valid_count=ma50["valid"],
         ma120_above_count=ma120["above"],
         ma120_valid_count=ma120["valid"],
-        updated_at=d,
+        updated_at=datetime(d.year, d.month, d.day),
     )
 
 
@@ -68,7 +69,6 @@ def _scope_row(board_id, d: date, *, ew, a5, v5, mv="mv1") -> MarketDashboardSco
         trade_date=d,
         board_id=board_id,
         membership_version=mv,
-        entry_count=v5,
         member_count=v5,
         valid_return_count=v5,
         equal_weight_return=ew,
@@ -82,7 +82,7 @@ def _scope_row(board_id, d: date, *, ew, a5, v5, mv="mv1") -> MarketDashboardSco
         ma50_valid_count=10,
         ma120_above_count=10,
         ma120_valid_count=10,
-        updated_at=d,
+        updated_at=datetime(d.year, d.month, d.day),
     )
 
 
@@ -92,10 +92,9 @@ async def _seed(db: AsyncSession) -> dict:
         name="Ind-A",
         type="industry",
         hierarchyLevel="L1",
-        hierarchy_key="industry.L1",
-        external_code="IND_A",
+        externalCode="IND_A",
         taxonomy="CFI",
-        taxonomy_compatibility_key="k",
+        taxonomyCompatibilityKey="k",
         membershipVersion="mv1",
         isActive=True,
     )
@@ -104,10 +103,9 @@ async def _seed(db: AsyncSession) -> dict:
         name="Ind-B",
         type="industry",
         hierarchyLevel="L2",
-        hierarchy_key="industry.L2",
-        external_code="IND_B",
+        externalCode="IND_B",
         taxonomy="CFI",
-        taxonomy_compatibility_key="k",
+        taxonomyCompatibilityKey="k",
         membershipVersion="mv1",
         isActive=True,
     )
@@ -116,10 +114,9 @@ async def _seed(db: AsyncSession) -> dict:
         name="Con-C",
         type="concept",
         hierarchyLevel="L1",
-        hierarchy_key="concept.L1",
-        external_code="CON_C",
+        externalCode="CON_C",
         taxonomy="CFI",
-        taxonomy_compatibility_key="k",
+        taxonomyCompatibilityKey="k",
         membershipVersion="mv1",
         isActive=True,
     )
@@ -128,12 +125,11 @@ async def _seed(db: AsyncSession) -> dict:
         name="Ind-D-inactive",
         type="industry",
         hierarchyLevel="L1",
-        hierarchy_key="industry.L1",
-        external_code="IND_D",
+        externalCode="IND_D",
         taxonomy="CFI",
-        taxonomy_compatibility_key="k",
+        taxonomyCompatibilityKey="k",
         membershipVersion="mv1",
-        is_active=False,
+        isActive=False,
     )
     # compare 专用 board（仅 2 行，历史不足 → 不参与 ranking，避免污染 L1 排序）
     board_e = MarketBoard(
@@ -141,10 +137,9 @@ async def _seed(db: AsyncSession) -> dict:
         name="Ind-E",
         type="industry",
         hierarchyLevel="L1",
-        hierarchy_key="industry.L1",
-        external_code="IND_E",
+        externalCode="IND_E",
         taxonomy="CFI",
-        taxonomy_compatibility_key="k",
+        taxonomyCompatibilityKey="k",
         membershipVersion="mv1",
         isActive=True,
     )
@@ -153,10 +148,9 @@ async def _seed(db: AsyncSession) -> dict:
         name="Con-F",
         type="concept",
         hierarchyLevel="L1",
-        hierarchy_key="concept.L1",
-        external_code="CON_F",
+        externalCode="CON_F",
         taxonomy="CFI",
-        taxonomy_compatibility_key="k",
+        taxonomyCompatibilityKey="k",
         membershipVersion="mv1",
         isActive=True,
     )
@@ -168,48 +162,33 @@ async def _seed(db: AsyncSession) -> dict:
             date(2026, 9, 1),
             ew=0.01,
             counts={
-                "a5": 3,
-                "v5": 5,
-                "a10": 4,
-                "v10": 5,
-                "a20": 12,
-                "v20": 20,
-                "a50": 30,
-                "v50": 50,
-                "a120": 80,
-                "v120": 120,
+                "a5": 3, "v5": 5,
+                "a10": 4, "v10": 5,
+                "a20": 12, "v20": 20,
+                "a50": 30, "v50": 50,
+                "a120": 80, "v120": 120,
             },
         ),
         _market_row(
             date(2026, 9, 2),
             ew=None,
             counts={
-                "a5": 3,
-                "v5": 5,
-                "a10": 4,
-                "v10": 5,
-                "a20": 12,
-                "v20": 20,
-                "a50": 30,
-                "v50": 50,
-                "a120": 80,
-                "v120": 120,
+                "a5": 3, "v5": 5,
+                "a10": 4, "v10": 5,
+                "a20": 12, "v20": 20,
+                "a50": 30, "v50": 50,
+                "a120": 80, "v120": 120,
             },
         ),
         _market_row(
             date(2026, 9, 3),
             ew=0.02,
             counts={
-                "a5": 3,
-                "v5": 5,
-                "a10": 4,
-                "v10": 5,
-                "a20": 0,
-                "v20": 20,
-                "a50": 30,
-                "v50": 50,
-                "a120": 80,
-                "v120": 120,
+                "a5": 3, "v5": 5,
+                "a10": 4, "v10": 5,
+                "a20": 0, "v20": 20,
+                "a50": 30, "v50": 50,
+                "a120": 80, "v120": 120,
             },
             valid_zero=True,
         ),
@@ -231,82 +210,70 @@ async def _seed(db: AsyncSession) -> dict:
     return {"a": board_a, "b": board_b, "c": board_c, "d": board_d, "e": board_e, "f": board_f}
 
 
-async def test_market_dashboard_market_ratio_null_when_valid_zero():
-    async with TestAsyncSessionLocal() as s:
-        async with s.begin():
-            await _seed(s)
+async def test_market_dashboard_market_ratio_null_when_valid_zero(db_session):
+    await _seed(db_session)
 
-    async with TestAsyncSessionLocal() as s:
-        resp = await get_market_dashboard(s, 250)
-        assert resp is not None
-        assert resp.projection_trade_date == "2026-09-03"
-        # 最新一行 ma20 valid_count=0 → ratio None（不伪造 0%）
-        assert resp.cards.ma20 is None
-        # EW 链：d1=100, d2=None(打断), d3=None
-        assert resp.series[0].ew_index == pytest.approx(100.0)
-        assert resp.series[1].ew_index is None
-        assert resp.series[2].ew_index is None
+    resp = await get_market_dashboard(db_session, 250)
+    assert resp is not None
+    assert resp.projection_trade_date == "2026-09-03"
+    # 最新一行 ma20 valid_count=0 → ratio None（不伪造 0%）
+    assert resp.cards.ma20 is None
+    # EW 链：d1=100, d2=None(打断), d3=None
+    assert resp.series[0].ew_index == pytest.approx(100.0)
+    assert resp.series[1].ew_index is None
+    assert resp.series[2].ew_index is None
 
 
-async def test_rankings_industry_l1_excludes_l2_and_concept():
-    async with TestAsyncSessionLocal() as s:
-        async with s.begin():
-            boards = await _seed(s)
+async def test_rankings_industry_l1_excludes_l2_and_concept(db_session):
+    boards = await _seed(db_session)
 
-    async with TestAsyncSessionLocal() as s:
-        # L1 仅含 A
-        r_l1 = await get_rankings(s, "industry", "L1", 5, 10)
-        assert len(r_l1.top) == 1
-        assert r_l1.top[0].board_id == str(boards["a"].id)
-        assert r_l1.top[0].board_type == "industry"
-        assert r_l1.top[0].hierarchy_level == "L1"
+    # L1 仅含 A
+    r_l1 = await get_rankings(db_session, "industry", "L1", 5, 10)
+    assert len(r_l1.top) == 1
+    assert r_l1.top[0].board_id == str(boards["a"].id)
+    assert r_l1.top[0].board_type == "industry"
+    assert r_l1.top[0].hierarchy_level == "L1"
 
-        # L2 仅含 B（不串层）
-        r_l2 = await get_rankings(s, "industry", "L2", 5, 10)
-        assert len(r_l2.top) == 1
-        assert r_l2.top[0].board_id == str(boards["b"].id)
+    # L2 仅含 B（不串层）
+    r_l2 = await get_rankings(db_session, "industry", "L2", 5, 10)
+    assert len(r_l2.top) == 1
+    assert r_l2.top[0].board_id == str(boards["b"].id)
 
-        # concept 仅含 C（不混入 industry）
-        r_c = await get_rankings(s, "concept", None, 5, 10)
-        assert len(r_c.top) == 1
-        assert r_c.top[0].board_id == str(boards["c"].id)
-        assert r_c.top[0].board_type == "concept"
+    # concept 仅含 C（不混入 industry）
+    r_c = await get_rankings(db_session, "concept", None, 5, 10)
+    assert len(r_c.top) == 1
+    assert r_c.top[0].board_id == str(boards["c"].id)
+    assert r_c.top[0].board_type == "concept"
 
-        # delta 用第 t 与第 t-5：t-5 ratio=0.5, t ratio=1.0 → delta=0.5
-        assert r_l1.top[0].current.ma5 == pytest.approx(1.0)
-        assert r_l1.top[0].previous.ma5 == pytest.approx(0.5)
-        assert r_l1.top[0].delta.ma5 == pytest.approx(0.5)
+    # delta 用第 t 与第 t-5：t-5 ratio=0.5, t ratio=1.0 → delta=0.5
+    assert r_l1.top[0].current.ma5 == pytest.approx(1.0)
+    assert r_l1.top[0].previous.ma5 == pytest.approx(0.5)
+    assert r_l1.top[0].delta.ma5 == pytest.approx(0.5)
 
 
-async def test_scope_detail_404_for_missing_and_inactive():
-    async with TestAsyncSessionLocal() as s:
-        async with s.begin():
-            boards = await _seed(s)
+async def test_scope_detail_404_for_missing_and_inactive(db_session):
+    boards = await _seed(db_session)
 
-    async with TestAsyncSessionLocal() as s:
-        # 活跃 board → 有数据
-        ok = await get_scope_detail(s, boards["a"].id, 250)
-        assert ok is not None
-        assert ok.metadata.board_id == str(boards["a"].id)
-        # 不存在 → 404
-        assert await get_scope_detail(s, uuid4(), 250) is None
-        # 未激活 → 404
-        assert await get_scope_detail(s, boards["d"].id, 250) is None
+    # 活跃 board → 有数据
+    ok = await get_scope_detail(db_session, boards["a"].id, 250)
+    assert ok is not None
+    assert ok.metadata.board_id == str(boards["a"].id)
+    # 不存在 → 404
+    assert await get_scope_detail(db_session, uuid4(), 250) is None
+    # 未激活 → 404
+    assert await get_scope_detail(db_session, boards["d"].id, 250) is None
 
 
-async def test_compare_independent_rebasing():
-    async with TestAsyncSessionLocal() as s:
-        async with s.begin():
-            boards = await _seed(s)
+async def test_compare_independent_rebasing(db_session):
+    boards = await _seed(db_session)
 
-    async with TestAsyncSessionLocal() as s:
-        resp = await compare_boards(s, [boards["e"].id, boards["f"].id], 10)
-        assert resp is not None
-        by_id = {b.board_id: b for b in resp.boards}
-        e = by_id[str(boards["e"].id)]
-        f = by_id[str(boards["f"].id)]
-        # 各 scope 独立归一到 100
-        assert e.points[0].ew_index == pytest.approx(100.0)
-        assert e.points[1].ew_index == pytest.approx(100 * 1.02)
-        assert f.points[0].ew_index == pytest.approx(100.0)
-        assert f.points[1].ew_index == pytest.approx(100 * 0.99)
+    resp = await compare_boards(db_session, [boards["e"].id, boards["f"].id], 10)
+    assert resp is not None
+    by_id = {b.board_id: b for b in resp.boards}
+    e = by_id[str(boards["e"].id)]
+    f = by_id[str(boards["f"].id)]
+    # 各 scope 独立归一到 100
+    assert e.points[0].ew_index == pytest.approx(100.0)
+    assert e.points[1].ew_index == pytest.approx(100 * 1.02)
+    assert f.points[0].ew_index == pytest.approx(100.0)
+    assert f.points[1].ew_index == pytest.approx(100 * 0.99)
