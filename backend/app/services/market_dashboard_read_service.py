@@ -285,7 +285,7 @@ def _scope_row(row) -> ScopeDailyRow:
     return ScopeDailyRow(
         board_id=row.board_id,
         trade_date=row.trade_date,
-        membership_version=row.membershipVersion,
+        membership_version=row.membership_version,
         ma5_above_count=row.ma5_above_count,
         ma5_valid_count=row.ma5_valid_count,
         ma10_above_count=row.ma10_above_count,

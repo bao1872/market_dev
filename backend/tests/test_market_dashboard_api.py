@@ -85,13 +85,15 @@ def _clear_overrides():
 
 @pytest.fixture
 async def client(db_session):
-    """真实 ASGI HTTP client：get_db override 到本用例 db_session（种子可见）。"""
+    """真实 ASGI HTTP client：get_db override 到本用例 db_session（种子可见）。
 
-    def _override_get_db():
-        async def _gen():
-            yield db_session
+    override 必须是 async generator 本身（FastAPI 会迭代它并 yield 出 session）；
+    不能包成「返回 generator 的普通函数」，否则 FastAPI 会把 generator 对象直接
+    当作 db 传入依赖（'async_generator' object has no attribute 'execute'）。
+    """
 
-        return _gen()
+    async def _override_get_db():
+        yield db_session
 
     app.dependency_overrides[deps_get_db] = _override_get_db
     app.dependency_overrides[db_get_db] = _override_get_db
