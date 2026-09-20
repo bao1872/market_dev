@@ -44,6 +44,8 @@ const LandingPage = lazy(() => import('./pages/LandingPage'))
 // 受保护路由 require_capability("research_replay")：竞价与复盘同属一项权益（GET /v1/auction/*）
 
 const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
+const MarketDashboardPage = lazy(() => import('./features/market-dashboard/MarketDashboardPage'))
+const BoardDashboardPage = lazy(() => import('./features/market-dashboard/BoardDashboardPage'))
 const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))
 // [Auction V3.2] - List-first Scope Observation Workspace
 const AuctionScopeWorkspace = lazy(() => import('./features/auction/AuctionScopeWorkspace'))
@@ -338,6 +340,31 @@ export const routeConfig: RouteObject[] = [
               // [CHANGE-20260730-011] 板块分析 V1 页面（任何 market_data 用户可读）
               { path: '/boards', element: <BoardAnalysisPage /> },
               { path: '/boards/:boardId', element: <BoardAnalysisPage /> },
+              // 市场复盘（F3 Market Dashboard）：消费 /v1/market-dashboard/*，能力 = market_data
+              {
+                path: '/review/dashboard/market',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <MarketDashboardPage />
+                  </Suspense>
+                ),
+              },
+              {
+                path: '/review/dashboard/industry',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <BoardDashboardPage scopeType="industry" />
+                  </Suspense>
+                ),
+              },
+              {
+                path: '/review/dashboard/concept',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <BoardDashboardPage scopeType="concept" />
+                  </Suspense>
+                ),
+              },
             ],
           },
           // research_replay = 复盘与竞价（CHANGE-20260802-002）

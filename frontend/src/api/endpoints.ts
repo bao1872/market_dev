@@ -404,6 +404,30 @@ export type {
 } from './boardAnalysis'
 
 export {
+  getMarketDashboard,
+  getMarketRankings,
+  getMarketScopeDetail,
+  getMarketCompare,
+  extractMarketDashboardError
+} from './marketDashboard'
+
+export type {
+  MarketDashboardResponse,
+  MarketDashboardCard,
+  MarketDashboardPoint,
+  RankingsResponse,
+  RankingItem,
+  BreadthPair,
+  ScopeDetailResponse,
+  ScopeMetadata,
+  ScopePoint,
+  CompareResponse,
+  CompareBoard,
+  ComparePoint,
+  MarketDashboardApiError
+} from './marketDashboard'
+
+export {
   getTableViewPresets,
   createTableViewPreset,
   updateTableViewPreset,

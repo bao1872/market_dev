@@ -194,6 +194,14 @@ export {
 } from './useBoardAnalysisApi'
 
 export {
+  useMarketDashboard,
+  useMarketRankings,
+  useMarketScopeDetail,
+  useMarketCompare,
+  marketDashboardKeys
+} from './useMarketDashboardApi'
+
+export {
   useTableViewPresets,
   useCreateTableViewPreset,
   useUpdateTableViewPreset,

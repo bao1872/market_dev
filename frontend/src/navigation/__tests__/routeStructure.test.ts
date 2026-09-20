@@ -184,3 +184,21 @@ test('/stock/:symbol 与 /market 是两个独立路由节点', () => {
   assert.ok(stock && market)
   assert.notEqual(stock.node.path, market.node.path)
 })
+
+// F3 市场复盘：三条路由存在，且属于 market_data 能力守卫（非 research_replay）
+for (const p of ['/review/dashboard/market', '/review/dashboard/industry', '/review/dashboard/concept']) {
+  test(`市场复盘路由存在且走 market_data 能力守卫：${p}`, () => {
+    const node = findRouteNode(ROUTE_STRUCTURE, p)
+    assert.ok(node, `${p} 路由必须存在`)
+    assert.ok(hasGuardInChain(ROUTE_STRUCTURE, p, 'capability'))
+    assert.ok(hasShellInChain(ROUTE_STRUCTURE, p, 'user'))
+  })
+}
+
+// 新增市场复盘路由不应改变现有 /review 复盘工作台（仍属 research_replay）
+test('现有 /review 复盘工作台路由不被市场复盘改动', () => {
+  const review = findRouteNode(ROUTE_STRUCTURE, '/review')
+  assert.ok(review, '/review 路由必须存在')
+  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/review', 'capability'))
+  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/review', 'user'))
+})

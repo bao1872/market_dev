@@ -54,6 +54,10 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
             children: [
               { path: '/boards', guard: 'capability', shell: 'user' },
               { path: '/boards/:boardId', guard: 'capability', shell: 'user' },
+              // 市场复盘（F3 Market Dashboard）：消费 /v1/market-dashboard/*，能力 = market_data（非 research_replay）
+              { path: '/review/dashboard/market', guard: 'capability', shell: 'user' },
+              { path: '/review/dashboard/industry', guard: 'capability', shell: 'user' },
+              { path: '/review/dashboard/concept', guard: 'capability', shell: 'user' },
             ],
           },
           // CapabilityRoute: research_replay = 复盘与竞价（CHANGE-20260802-002）

@@ -21,6 +21,7 @@ export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
   review: '/review',
+  marketDashboard: '/review/dashboard/market',
   // [P0-FE 2026-07-31] 竞价分析入口（市场/板块/个股三级页面）
   auction: '/auction',
   messages: '/messages',
@@ -78,6 +79,8 @@ export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情', requiredCapability: 'market_data' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选', requiredCapability: 'self_selection' },
   { path: APP_ROUTES.review, label: '复盘', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
+  // 市场复盘：独立入口，能力 = market_data（不并入现有 /review scope-observation）
+  { path: APP_ROUTES.marketDashboard, label: '市场复盘', requiredCapability: 'market_data' },
   { path: APP_ROUTES.auction, label: '竞价', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
 ]
 
@@ -130,6 +133,10 @@ export function resolveActiveNav(
   if (itemPath === APP_ROUTES.auction) {
     // 竞价：/auction 及其子路径（/auction/board/:id、/auction/stock/:symbol）
     return pathname === APP_ROUTES.auction || pathname.startsWith('/auction/')
+  }
+  if (itemPath === APP_ROUTES.marketDashboard) {
+    // 市场复盘：大盘/行业/概念三个子页面共用同一入口高亮
+    return pathname === APP_ROUTES.marketDashboard || pathname.startsWith('/review/dashboard/')
   }
   // 其他项：pathname 精确匹配
   return pathname === itemPath
