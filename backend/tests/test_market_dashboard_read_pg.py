@@ -47,8 +47,9 @@ def _market_row(d: date, *, ew, counts, valid_zero: bool = False) -> MarketDashb
     ma120 = _mk_counts(counts["a120"], counts["v120"])
     return MarketDashboardMarketDaily(
         trade_date=d,
-        member_count=counts["v20"],
-        valid_return_count=counts["v20"],
+        # member_count 必须 >= 所有 ma{k}_valid_count（DB CHECK 约束）；取最大值 120
+        member_count=120,
+        valid_return_count=120,
         equal_weight_return=ew,
         ma5_above_count=ma5["above"],
         ma5_valid_count=ma5["valid"],
