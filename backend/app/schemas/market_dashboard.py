@@ -91,3 +91,45 @@ class CompareBoard(BaseModel):
 
 class CompareResponse(BaseModel):
     boards: list[CompareBoard] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# [R2] Scope Explorer（行业/概念板块全集 collection）
+# ---------------------------------------------------------------------------
+class ScopeExplorerItem(BaseModel):
+    """单个板块的 explorer 行（projection-only；全局 T / T-5 delta）。"""
+
+    board_id: str
+    board_name: str
+    board_type: str
+    hierarchy_level: str
+    membership_version: str
+    member_count: int
+
+    ma5: float | None = None
+    ma10: float | None = None
+    ma20: float | None = None
+    ma50: float | None = None
+    ma120: float | None = None
+
+    # PREV = 全局 T-5 projection 交易日；该 board 缺 PREV row → None（绝不 fallback）
+    previous_ma5: float | None = None
+    previous_ma10: float | None = None
+    ma5_delta: float | None = None
+    ma10_delta: float | None = None
+
+
+class ScopeExplorerResponse(BaseModel):
+    """Scope Explorer 分页响应。
+
+    - projection_trade_date = 全局 T（无 projection 时为 None，不伪造日期）
+    - previous_trade_date = 全局 T-5（market projection 不足 T_WINDOW 时为 None）
+    - total = filter 后、pagination 前总数
+    """
+
+    projection_trade_date: str | None = None
+    previous_trade_date: str | None = None
+    total: int = 0
+    page: int = 1
+    page_size: int = 20
+    items: list[ScopeExplorerItem] = Field(default_factory=list)

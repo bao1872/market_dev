@@ -84,6 +84,15 @@
       "claim": "Market Dashboard read API derives only from the projection tables (market_dashboard_market_daily / market_dashboard_scope_daily / market_boards); breadth_ratio = above_count/valid_count with valid_count==0 -> null (no fabricated 0%); EW index sets the first displayed point to 100 only when that date has a valid equal_weight_return, and a null at the first or any later displayed date breaks the chain (no forward fill, no rebasing after a null); rankings use the t and t-5 projection trading rows (not calendar days) and never mix industry L1/L2/L3 or concept; compare rebases each scope independently to 100; unavailable/missing/inactive boards return 404; and access reuses the existing market_data capability (no new permission)."
     },
     {
+      "contract_id": "market_dashboard_scope_explorer",
+      "governance_level": 2,
+      "semantic_owner": "app.services.market_dashboard_scope_explorer_service",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": ["tests/test_market_dashboard_scope_explorer_pg.py"],
+      "claim": "The Market Dashboard Industry/Concept Scope Explorer (GET /v1/market-dashboard/scopes) is projection-only: it reads only market_dashboard_market_daily / market_dashboard_scope_daily / market_boards (never bars_daily / instruments / market_board_memberships) and resolves one GLOBAL T and T-5 from the latest six market projection trade dates shared by every board (no per-board sliding window, no calendar -5, no fallback to older rows; a board missing the T-5 row yields null previous/delta, and fewer than six market dates yield previous_trade_date=null); breadth ratio = above_count/valid_count with valid_count==0 -> null; delta is the ratio difference between T and T-5 with round4 semantics; search/filter/sort/pagination run entirely server-side with NULLS LAST for asc and desc and a stable board_id ASC secondary order, total is the filtered pre-pagination count via count(*) OVER(), page_size is bounded to 100, industry hierarchy L1/L2/L3 filtering is exact while concept rejects any hierarchy_level with 422 (never silently ignored), and access reuses the existing market_data capability."
+    },
+    {
       "contract_id": "projection_lifecycle",
       "governance_level": 2,
       "semantic_owner": "app.services.strategy_batch_service",
