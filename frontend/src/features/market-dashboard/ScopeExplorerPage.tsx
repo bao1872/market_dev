@@ -6,7 +6,7 @@
 // - 选中板块写入 URL board_id；详情用 useMarketScopeDetail，独立于列表 state。
 // - 详情图表复用 R3A/R3B 的 unified chart 基础（BreadthChart + 6-series），不写第二套。
 import { useEffect, useMemo, useState, type Dispatch, type FormEvent, type SetStateAction } from 'react'
-import { useNavigate, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMarketScopeExplorer, useMarketScopeDetail } from '@/hooks/useMarketDashboardApi'
 import { useCompareBasketStore } from '@/store/compareBasket'
 import { extractMarketDashboardError } from '@/api/marketDashboard'
@@ -124,10 +124,10 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
   }, [parsed.filters])
 
   const applyFilters = () => {
-    const filters: Partial<Record<NumericFilterKey, number | null>> = {}
+    // 每个 key 都显式写入（含 null），否则 merge 后旧 URL filter 不会被清除。
+    const filters: Record<NumericFilterKey, number | null> = {} as Record<NumericFilterKey, number | null>
     for (const k of NUMERIC_FILTER_KEYS) {
-      const r = uiToRatio(k, draftFilters[k])
-      if (r !== null) filters[k] = r
+      filters[k] = uiToRatio(k, draftFilters[k])
     }
     applyPatch({ filters })
   }
@@ -356,9 +356,10 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
 
               {basketMsg && <div className={styles['compare-msg']}>{basketMsg}</div>}
               <div className={styles['compare-link-row']}>
-                <a className={styles['summary-link']} href="/review/compare">
+                {/* SPA 导航：保留 Zustand compare basket（R3A 仅 session persistence，不 localStorage）。整页 reload 会清空 basket。 */}
+                <Link className={styles['summary-link']} to="/review/compare">
                   查看对比
-                </a>
+                </Link>
               </div>
             </>
           ) : null}

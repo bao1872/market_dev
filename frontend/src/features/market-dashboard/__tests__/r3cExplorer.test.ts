@@ -151,6 +151,28 @@ test('K. 层级切换清除 board_id 并回到第 1 页', () => {
 })
 
 // ===========================================================================
+// R3C-FIX. 清空单个 numeric filter 必须真正移除 server filter（updateExplorerState 显式写 null）
+// ===========================================================================
+test('AB. 清空单个 numeric filter：null 覆盖旧值 + serializer 删除 + 其他 filter 保留', () => {
+  const prev = roundtrip('industry', 'ma5_min=0.8&ma10_max=0.7')
+  // 用户只清空 ma5_min → applyFilters 写入 { ma5_min: null }（含 null）
+  const next = updateExplorerState(prev, { filters: { ma5_min: null } })
+  assert.equal(next.filters.ma5_min, null, 'A: null patch 覆盖旧 URL 的 0.8')
+  assert.equal(next.filters.ma10_max, 0.7, 'C: 未清除的 ma10_max 仍保留')
+  const serialized = serializeExplorerState(next, 'industry').toString()
+  assert.ok(!serialized.includes('ma5_min'), 'B: serializer 删除 null 的 ma5_min query param')
+  assert.ok(serialized.includes('ma10_max'), 'C: ma10_max 仍在 URL')
+})
+
+test('AC. applyFilters 源不得吞掉 null（每个 key 都写 filters[k] = uiToRatio）', () => {
+  assert.ok(
+    !/if\s*\(r\s*!==\s*null\)\s*filters\[k\]/.test(PAGE_SOURCE),
+    'D: applyFilters 不得用 if (r !== null) filters[k] = r 吞掉 null',
+  )
+  assert.match(PAGE_SOURCE, /filters\[k\] = uiToRatio/, 'applyFilters 必须为 NUMERIC_FILTER_KEYS 每个 key 显式写入（含 null）')
+})
+
+// ===========================================================================
 // L. query 全走 server（无客户端 filter/sort/page）
 // ===========================================================================
 test('L. 所有 server-state 进入 hook query（filter/sort/page 都由后端负责）', () => {
@@ -340,6 +362,12 @@ test('U. Explorer 页面不再内联 CompareChart / 重点板块比较', () => {
   assert.ok(!PAGE_SOURCE.includes('重点板块比较'), '不得保留旧内联对比区块')
   assert.ok(!PAGE_SOURCE.includes('useMarketRankings'), '主列表不得用 rankings')
   assert.ok(!PAGE_SOURCE.includes('useMarketCompare'), 'Explorer 页面不得用 compare hook')
+})
+
+test('AA. 查看对比必须 SPA 导航（Link/to），不得整页 reload 清空 basket', () => {
+  assert.match(PAGE_SOURCE, /import \{[^}]*Link[^}]*\} from 'react-router-dom'/, '必须 import React Router Link')
+  assert.ok(!PAGE_SOURCE.includes('href="/review/compare"'), '不得用 <a href> 跳 compare（整页 reload 会清空 Zustand basket）')
+  assert.match(PAGE_SOURCE, /<Link[^>]*to="\/review\/compare"/, '必须用 Link/to 做 SPA 导航（保留 session basket）')
 })
 
 // ===========================================================================
