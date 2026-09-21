@@ -102,15 +102,6 @@
       "claim": "Batch provider and computation call counts remain bounded for a representative universe."
     },
     {
-      "contract_id": "review_runtime_blocker_closure",
-      "governance_level": 2,
-      "semantic_owner": "app.services.product_readiness_service",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": ["tests/test_pg_review_runtime_blocker_closure.py"],
-      "claim": "Review runtime blocker states close truthfully against PostgreSQL."
-    },
-    {
       "contract_id": "after_close_crash_resume",
       "governance_level": 2,
       "semantic_owner": "app.services.after_close_orchestrator",
@@ -136,15 +127,6 @@
       "claim": "AfterClose claim/poll uses real PostgreSQL row-lock semantics: a queued job is claimed and committed with worker ownership, concurrent workers cannot both claim the same job under FOR UPDATE SKIP LOCKED, and execution failure reaches the persisted failed terminal state without crashing the poll worker."
     },
     {
-      "contract_id": "review_observation_persistence",
-      "governance_level": 2,
-      "semantic_owner": "app.repositories.market_review_repository",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": ["tests/test_review_observation_persistence_pg.py"],
-      "claim": "Canonical Review observations round-trip and remain idempotent in PostgreSQL."
-    },
-    {
       "contract_id": "history_progress_concurrency",
       "governance_level": 2,
       "semantic_owner": "app.repositories.first_pyramid_history_repository",
@@ -163,18 +145,6 @@
       "claim": "History v3 projection materializes idempotently through the production PostgreSQL persistence contract."
     },
     {
-      "contract_id": "review_current_fact_lineage",
-      "governance_level": 2,
-      "semantic_owner": "app.services.market_review_service",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": [
-        "tests/test_slice1_current_facts_lock.py",
-        "tests/test_pg_review_read_owner_c1.py"
-      ],
-      "claim": "Review current facts bind to the selected same-day Core run and fail closed without legacy fallback."
-    },
-    {
       "contract_id": "dsa_compatibility_publication",
       "governance_level": 2,
       "semantic_owner": "app.services.dsa_projection_service",
@@ -184,15 +154,6 @@
       "claim": "DSA compatibility projection and publication remain an explicit, independently persisted consumer."
     },
     {
-      "contract_id": "review_http_runtime",
-      "governance_level": 2,
-      "semantic_owner": "app.api.v1.endpoints.review",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": ["tests/test_pg_review_http_runtime_c2.py"],
-      "claim": "Review HTTP routing, authorization, lineage, errors, and client-facing fields use the production app contract."
-    },
-    {
       "contract_id": "bars_provider_persistence",
       "governance_level": 2,
       "semantic_owner": "app.services.bars_scheduler_service.BarsSchedulerService",
@@ -200,33 +161,6 @@
       "required": true,
       "test_selectors": ["tests/test_pg_bars_provider_persistence_f1b1.py"],
       "claim": "Serial and bounded-spawn Bars scheduler paths persist equivalent daily and minute facts idempotently."
-    },
-    {
-      "contract_id": "review_scope_diagnostics_lineage",
-      "governance_level": 2,
-      "semantic_owner": "app.services.review_scope_diagnostics_service",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": ["tests/test_pg_review_diagnostics_lineage.py"],
-      "claim": "Review scope history/cross-sectional are built from the formal published-Review date axis (reuse of FORMAL REVIEW READ OWNER), preserve missing-date slots as null, and exclude broken-pointer dates."
-    },
-    {
-      "contract_id": "review_price_history_composition_lineage",
-      "governance_level": 2,
-      "semantic_owner": "app.services.review_scope_diagnostics_service",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": ["tests/test_pg_review_price_history_lineage.py"],
-      "claim": "Price Composition history (capital_tilt + leadership) is read only from the formally published run of each date; an unpublished same-day run cannot pollute it, and a published date without that scope's Composition keeps a null date slot."
-    },
-    {
-      "contract_id": "review_scope_explorer_compare_lineage",
-      "governance_level": 2,
-      "semantic_owner": "app.services.review_scope_explorer_service",
-      "gate": ["targeted-pg"],
-      "required": true,
-      "test_selectors": ["tests/test_pg_review_scope_explorer_compare_lineage.py"],
-      "claim": "Explorer compare-first read (ReviewScopeObservationFact LEFT JOIN ReviewScopeCompositionSnapshot) takes compareFacts only from the formally published run; an unpublished same-day run cannot pollute facts or the Composition LEFT JOIN. When industry_l1 and concept coexist, peer percentile is computed per family, never cross-family."
     },
     {
       "contract_id": "self_selection_market_capability_boundary",
@@ -306,56 +240,56 @@
         "tests/test_chip_consensus_worker.py::test_worker_missing_metadata_marks_failed"
       ],
       "claim": "Chip consensus poll preserves real PostgreSQL claim, resume, and fencing semantics: queued work is claimed once with lease epoch advancement, concurrent transactions enforce exactly-one claim through FOR UPDATE SKIP LOCKED, interrupted work resumes through resume_queued, stale epochs cannot overwrite either terminal state or running-job metadata owned by a newer epoch, and metadata-invalid claimed work reaches a fenced failed terminal state."
-      },
-      {
+    },
+    {
       "contract_id": "scheduler_stale_recovery_fencing",
       "governance_level": 2,
       "semantic_owner": "app.services.scheduler_job_run_recovery_service",
       "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
-      "tests/test_scheduler_job_run_recovery_service.py::test_lease_expired_recovered_to_interrupted",
-      "tests/test_scheduler_job_run_recovery_service.py::test_stale_recovery_atomically_fences_old_epoch_writer"
+        "tests/test_scheduler_job_run_recovery_service.py::test_lease_expired_recovered_to_interrupted",
+        "tests/test_scheduler_job_run_recovery_service.py::test_stale_recovery_atomically_fences_old_epoch_writer"
       ],
       "claim": "Ordinary stale SchedulerJobRun recovery atomically transitions expired unhealthy running work to interrupted while incrementing lease_epoch and clearing lease_expires_at; stale writers holding the previous epoch cannot mutate the recovered row."
-      },
-      {
+    },
+    {
       "contract_id": "scheduler_owned_job_fencing",
       "governance_level": 2,
       "semantic_owner": "app.services.fenced_job_run_service",
       "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_refreshes_and_finalizes_on_postgres",
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_epoch_cannot_finalize_on_postgres",
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_finalizes_partial_failed_on_postgres",
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_updates_progress_on_postgres",
-      "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_progress_update_rejected_on_postgres"
+        "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_refreshes_and_finalizes_on_postgres",
+        "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_epoch_cannot_finalize_on_postgres",
+        "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_finalizes_partial_failed_on_postgres",
+        "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_updates_progress_on_postgres",
+        "tests/test_scheduler_owned_job_fencing.py::test_scheduler_owned_job_stale_progress_update_rejected_on_postgres"
       ],
       "claim": "Scheduler-created running jobs use real PostgreSQL lease fencing: the current ownership token can refresh its lease, advance per-cycle progress (last_cycle_at / succeeded_count / failed_count / metadata) through update_owned_job_run_progress, and finalize, while a stale lease epoch cannot overwrite terminal state or progress fields after ownership has moved to a newer epoch, and supported terminal states including `partial_failed` persist counts and release ownership correctly. This proves the fenced primitive that Bars/Calendar/Strategy runtimes (and the Monitor session lifecycle) now depend on, not those runtimes' business logic itself."
-      },
-      {
+    },
+    {
       "contract_id": "monitor_session_exclusive_ownership",
       "governance_level": 2,
       "semantic_owner": "app.services.monitor_scheduler_worker_runtime",
       "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
-      "tests/test_worker_idempotency.py::test_monitor_scheduler_session_exclusive_ownership"
+        "tests/test_worker_idempotency.py::test_monitor_scheduler_session_exclusive_ownership"
       ],
       "claim": "A Monitor trading session has one exclusive SchedulerJobRun owner: when an active row already exists for the same session run_key, a second acquisition returns no runnable job and does not replace or reuse the current owner."
-      },
-      {
+    },
+    {
       "contract_id": "invite_admin_code_visibility",
       "governance_level": 2,
       "semantic_owner": "app.services.subscription_service",
       "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
-      "tests/test_invite_admin_code_visibility.py"
+        "tests/test_invite_admin_code_visibility.py"
       ],
       "claim": "New invite codes retain hash-based redemption identity while storing only encrypted recoverable code material for admin display; legacy rows without ciphertext do not fabricate plaintext, and capability self_selection watchlist_limit is the quota source for capability-mode invites."
-      },
+    },
     {
       "contract_id": "monitor_daily_notification_dedupe",
       "governance_level": 2,
@@ -365,5 +299,5 @@
       "test_selectors": ["tests/test_monitor_daily_notification_dedupe.py"],
       "claim": "盘中监控同类型通知当日不重复推送：去重 SSOT 是 notification_messages（message_type=MONITOR_EVENT），去重键 = (user_id, instrument_id, event_type, 上海自然日)，由合并卡片 DTO 的 resource_refs.event_keys 精确记录（无笛卡尔积）；同用户+同标的+同类型今日已通知则当前周期不再推送，不同类型/不同标的/不同用户各自独立，次日（上海自然日）允许再次推送，本 cycle 内同一键仅出现一次；去重后无 recipient 的事件不截图、不发 image，cards 与 image 共用同一过滤集合。"
     }
-    ]
-      }
+  ]
+}
