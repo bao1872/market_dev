@@ -215,14 +215,6 @@ def _by_id(resp) -> dict[str, object]:
     return {i.board_id: i for i in resp.items}
 
 
-def _expected_ids(items: list[dict], field: str, direction: str) -> list[str]:
-    """文档化排序语义：NULLS LAST（asc/desc 皆然）+ board_id ASC 稳定二级排序。"""
-    non_null = sorted([i for i in items if i[field] is not None], key=lambda i: i["board_id"])
-    non_null.sort(key=lambda i: i[field], reverse=(direction == "desc"))
-    nulls = sorted([i for i in items if i[field] is None], key=lambda i: i["board_id"])
-    return [i["board_id"] for i in non_null] + [i["board_id"] for i in nulls]
-
-
 # ===========================================================================
 # A/B/C. isolation + hierarchy
 # ===========================================================================
@@ -360,10 +352,15 @@ async def test_member_count_range_filter(db_session):
 
 async def test_ma5_ma10_breadth_filters(db_session):
     boards = await _seed(db_session)
+    # MA5 下界：A/B 在 T 均为 0.8（其余 0.5~0.7）→ 阈值 0.75 恰好只留 A/B
     ma5 = await _explore(db_session, ranges={"ma5_min": 0.75})
     assert set(_ids(ma5)) == {str(boards["a"].id), str(boards["b"].id)}
-    ma10 = await _explore(db_session, ranges={"ma10_min": 0.5})
-    assert set(_ids(ma10)) == {str(boards["a"].id)}
+    # MA10 上界：B 的 ma10 = 0.3，其余 >= 0.5 → 阈值 0.35 只留 B
+    ma10_low = await _explore(db_session, ranges={"ma10_max": 0.35})
+    assert set(_ids(ma10_low)) == {str(boards["b"].id)}
+    # MA10 下界：A 的 ma10 = 0.9，为唯一 > 0.85 的板块
+    ma10_high = await _explore(db_session, ranges={"ma10_min": 0.85})
+    assert set(_ids(ma10_high)) == {str(boards["a"].id)}
 
 
 async def test_ma5_ma10_delta_filters(db_session):
@@ -378,19 +375,27 @@ async def test_ma5_ma10_delta_filters(db_session):
 @pytest.mark.parametrize("direction", ["asc", "desc"])
 @pytest.mark.parametrize("sort", sorted(_SORT_TO_FIELD))
 async def test_sort_all_fields_nullslast_and_stable(db_session, sort: str, direction: str):
+    """每个 sort 字段：asc/desc 全支持、指标单调、NULLS LAST。
+
+    取值完全相同时的 board_id 稳定二级排序由 test_stable_board_id_secondary_order 单独断言
+    （此处不做全序断言，避免把 float tie 的内部实现细节写进合同）。
+    """
     await _seed(db_session)
     baseline = await _explore(db_session, page_size=100)
-    all_items = [i.model_dump() for i in baseline.items]
     resp = await _explore(db_session, sort=sort, direction=direction, page_size=100)
     field = _SORT_TO_FIELD[sort]
-    assert _ids(resp) == _expected_ids(all_items, field, direction)
+
+    assert set(_ids(resp)) == set(_ids(baseline)), "排序不得增删行"
 
     values = [getattr(i, field) for i in resp.items]
-    nulls = [idx for idx, v in enumerate(values) if v is None]
-    if nulls:
-        assert min(nulls) > max(idx for idx, v in enumerate(values) if v is not None), (
-            f"{sort}/{direction} 必须 NULLS LAST"
-        )
+    non_null = [v for v in values if v is not None]
+    assert non_null == sorted(non_null, reverse=(direction == "desc")), (
+        f"{sort}/{direction} 指标必须按方向单调"
+    )
+
+    first_null = next((idx for idx, v in enumerate(values) if v is None), None)
+    if first_null is not None:
+        assert all(v is None for v in values[first_null:]), f"{sort}/{direction} 必须 NULLS LAST"
 
 
 @pytest.mark.parametrize("direction", ["asc", "desc"])
@@ -412,7 +417,8 @@ async def test_pagination_and_total(db_session):
     await _seed(db_session)
     all_items = await _explore(db_session, page_size=100)
     total = all_items.total
-    assert total == 8  # 8 个 active industry board（D inactive 排除）
+    # 7 个 active industry board：A/B/C/F/G/H1/H2（D inactive 排除、E 为 concept）
+    assert total == 7
 
     seen: list[str] = []
     for page in (1, 2, 3, 4):
