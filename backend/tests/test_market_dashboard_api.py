@@ -124,7 +124,10 @@ async def test_market_dashboard_api_endpoints_ok(client, db_session):
 
     r_scope = await client.get(f"/v1/market-dashboard/scopes/{boards['a'].id}")
     assert r_scope.status_code == 200, r_scope.text
-    assert r_scope.json()["metadata"]["board_id"] == str(boards["a"].id)
+    scope_meta = r_scope.json()["metadata"]
+    assert scope_meta["board_id"] == str(boards["a"].id)
+    # [R3C0] additive 合同：HTTP 层必须暴露 metadata.member_count（latest projection row）
+    assert scope_meta["member_count"] == 10
 
     r_cmp = await client.get(
         f"/v1/market-dashboard/compare?board_ids={boards['e'].id},{boards['f'].id}",

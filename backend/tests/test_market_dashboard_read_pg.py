@@ -65,12 +65,16 @@ def _market_row(d: date, *, ew, counts, valid_zero: bool = False) -> MarketDashb
     )
 
 
-def _scope_row(board_id, d: date, *, ew, a5, v5, mv="mv1") -> MarketDashboardScopeDaily:
+def _scope_row(
+    board_id, d: date, *, ew, a5, v5, mv="mv1", member_count: int | None = None
+) -> MarketDashboardScopeDaily:
     return MarketDashboardScopeDaily(
         trade_date=d,
         board_id=board_id,
         membership_version=mv,
-        member_count=v5,
+        # 历史种子语义：默认与 valid_return_count 同值；可显式覆盖以构造
+        # 「早期 row 与 latest row 成员数不同」的场景。
+        member_count=v5 if member_count is None else member_count,
         valid_return_count=v5,
         equal_weight_return=ew,
         ma5_above_count=a5,
@@ -266,10 +270,46 @@ async def test_scope_detail_404_for_missing_and_inactive(db_session):
     ok = await get_scope_detail(db_session, boards["a"].id, 250)
     assert ok is not None
     assert ok.metadata.board_id == str(boards["a"].id)
+    # [R3C0] additive 字段：member_count 来自 latest projection row（种子 v5=10）
+    assert ok.metadata.member_count == 10
     # 不存在 → 404
     assert await get_scope_detail(db_session, uuid4(), 250) is None
     # 未激活 → 404
     assert await get_scope_detail(db_session, boards["d"].id, 250) is None
+
+
+async def test_scope_detail_member_count_uses_latest_projection_row(db_session):
+    """T-1 member_count=100、T member_count=123 → metadata.member_count 必须为 123。
+
+    member_count 是该 projection row 的冻结事实（不从 market_board_memberships 重算），
+    早期 row 绝不覆盖 latest。
+    """
+    board = MarketBoard(
+        id=uuid4(),
+        name="Cnt-Probe",
+        type="industry",
+        hierarchyLevel="L1",
+        externalCode="CNT_PROBE",
+        taxonomy="CFI",
+        taxonomyCompatibilityKey="k",
+        membershipVersion="mv1",
+        isActive=True,
+    )
+    db_session.add(board)
+    db_session.add(_scope_row(board.id, date(2026, 9, 2), ew=0.0, a5=5, v5=10, member_count=100))
+    db_session.add(_scope_row(board.id, date(2026, 9, 3), ew=0.0, a5=8, v5=10, member_count=123))
+    await db_session.commit()
+
+    resp = await get_scope_detail(db_session, board.id, 250)
+
+    assert resp is not None
+    assert resp.projection_trade_date == "2026-09-03"
+    assert resp.metadata.member_count == 123
+    # 与 valid_return_count（10）不同 → 证明不是由 breadth / valid 推算
+    assert resp.metadata.member_count != 10
+    # 既有语义无回归
+    assert resp.metadata.membership_version == "mv1"
+    assert resp.series[-1].ma5 == pytest.approx(0.8)
 
 
 async def test_compare_independent_rebasing(db_session):

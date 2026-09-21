@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 from datetime import date
+from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
@@ -27,6 +28,7 @@ from app.services.market_dashboard_read_service import (
     build_compare,
     build_market_view,
     build_rankings,
+    build_scope_view,
 )
 
 
@@ -104,11 +106,12 @@ def test_market_view_empty_returns_unavailable():
 # ---------------------------------------------------------------------------
 # ranking
 # ---------------------------------------------------------------------------
-def _mk_scope(board_id, d, *, a5, v5, ew):
+def _mk_scope(board_id, d, *, a5, v5, ew, member_count: int | None = None):
     return ScopeDailyRow(
         board_id=board_id,
         trade_date=d,
         membership_version="mv1",
+        member_count=v5 if member_count is None else member_count,
         ma5_above_count=a5,
         ma5_valid_count=v5,
         ma10_above_count=a5,
@@ -228,12 +231,18 @@ class _FakeResult:
 
 
 class _FakeSession:
-    def __init__(self):
+    """记录全部 SQL（表访问面守卫）；``rows_by_call`` 可按调用顺序返回行。"""
+
+    def __init__(self, rows_by_call: list[list] | None = None):
         self.queries: list[str] = []
+        self._rows_by_call = list(rows_by_call) if rows_by_call else None
 
     async def execute(self, stmt):
         self.queries.append(str(stmt))
-        return _FakeResult([])
+        if self._rows_by_call is None:
+            return _FakeResult([])
+        rows = self._rows_by_call.pop(0) if self._rows_by_call else []
+        return _FakeResult(rows)
 
 
 @pytest.mark.asyncio
@@ -264,6 +273,103 @@ async def test_read_path_only_accesses_allowed_tables():
     assert "bars_daily" not in joined
     assert "instruments" not in joined
     assert "market_board_memberships" not in joined
+
+
+# ---------------------------------------------------------------------------
+# [R3C0] scope detail metadata.member_count（latest projection row 的冻结事实）
+# ---------------------------------------------------------------------------
+def test_scope_view_metadata_member_count_single_row():
+    bid = uuid4()
+    rows = [_mk_scope(bid, date(2026, 9, 3), a5=8, v5=10, ew=0.02, member_count=123)]
+
+    view = build_scope_view(rows, _board(bid, type_="industry", level="L1"))
+
+    assert view is not None
+    assert view["metadata"]["member_count"] == 123
+    # additive：其余 metadata 字段不变
+    assert view["metadata"]["board_id"] == str(bid)
+    assert view["metadata"]["membership_version"] == "mv1"
+    assert view["metadata"]["hierarchy_level"] == "L1"
+
+
+def test_scope_view_metadata_member_count_uses_latest_row_not_early():
+    """T-1 member_count=100、T member_count=123 → 必须 123（早期 row 不得覆盖 latest）。"""
+    bid = uuid4()
+    rows = [
+        _mk_scope(bid, date(2026, 9, 2), a5=5, v5=10, ew=0.01, member_count=100),
+        _mk_scope(bid, date(2026, 9, 3), a5=8, v5=10, ew=0.02, member_count=123),
+    ]
+
+    view = build_scope_view(rows, _board(bid, type_="industry", level="L1"))
+
+    assert view is not None
+    assert view["metadata"]["member_count"] == 123
+    # 与 breadth 同属最新 projection row（T 行 ma5 = 8/10）
+    assert view["series"][-1]["ma5"] == pytest.approx(0.8)
+    assert view["projection_trade_date"] == "2026-09-03"
+
+
+def test_scope_view_member_count_not_derived_from_valid_counts():
+    """member_count 是该 projection row 的冻结事实，绝不等于 valid_return_count / breadth 分母。"""
+    bid = uuid4()
+    rows = [_mk_scope(bid, date(2026, 9, 3), a5=8, v5=10, ew=0.0, member_count=123)]
+
+    view = build_scope_view(rows, _board(bid, type_="concept", level="L1"))
+
+    assert view is not None
+    assert view["metadata"]["member_count"] == 123
+    assert view["metadata"]["member_count"] != 10
+
+
+@pytest.mark.asyncio
+async def test_scope_detail_read_path_guard_and_member_count():
+    """scope detail 读路径只碰 market_boards + market_dashboard_scope_daily；
+    metadata.member_count 来自 projection row（不读 membership / bars / instruments）。"""
+    from types import SimpleNamespace
+
+    from app.services.market_dashboard_read_service import get_scope_detail
+
+    bid = uuid4()
+
+    def _row_ns(day: int, member_count: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            board_id=bid,
+            trade_date=date(2026, 9, day),
+            membership_version="mv1",
+            member_count=member_count,
+            ma5_above_count=8,
+            ma5_valid_count=10,
+            ma10_above_count=8,
+            ma10_valid_count=10,
+            ma20_above_count=10,
+            ma20_valid_count=10,
+            ma50_above_count=10,
+            ma50_valid_count=10,
+            ma120_above_count=10,
+            ma120_valid_count=10,
+            equal_weight_return=0.0,
+        )
+
+    board_row = SimpleNamespace(
+        id=bid,
+        name="Ind-A",
+        type="industry",
+        hierarchyLevel="L1",
+        membershipVersion="mv1",
+        isActive=True,
+    )
+    session = _FakeSession(rows_by_call=[[board_row], [_row_ns(2, 100), _row_ns(3, 123)]])
+
+    resp = await get_scope_detail(session, bid, 250)
+
+    assert resp is not None
+    assert resp.metadata.member_count == 123
+    joined = "\n".join(session.queries)
+    assert "market_boards" in joined
+    assert "market_dashboard_scope_daily" in joined
+    assert "market_board_memberships" not in joined
+    assert "bars_daily" not in joined
+    assert "instruments" not in joined
 
 
 # ---------------------------------------------------------------------------

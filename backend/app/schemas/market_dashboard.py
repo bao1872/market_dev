@@ -59,6 +59,8 @@ class ScopeMetadata(BaseModel):
     type: str
     hierarchy_level: str
     membership_version: str
+    # [R3C0] additive：详情最新 projection row 的成员数（冻结事实，不从 membership 表重算）。
+    member_count: int
 
 
 class ScopePoint(BaseModel):

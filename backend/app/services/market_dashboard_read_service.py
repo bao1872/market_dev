@@ -61,6 +61,9 @@ class ScopeDailyRow:
     board_id: UUID
     trade_date: date
     membership_version: str
+    # [R3C0] 该 projection row 冻结的成分数（与 breadth / membership_version 同一 projection owner）；
+    # 绝不来自 market_board_memberships / instruments / bars_daily。
+    member_count: int
     ma5_above_count: int
     ma5_valid_count: int
     ma10_above_count: int
@@ -182,6 +185,9 @@ def build_scope_view(rows: list[ScopeDailyRow], board: BoardMeta) -> dict | None
             "type": board.type,
             "hierarchy_level": board.hierarchy_level,
             "membership_version": board.membership_version,
+            # [R3C0] 取**最新 projection row** 的 member_count（rows[-1]），
+            # 不从 MarketBoard / membership 表推算（早期 row 绝不覆盖 latest）。
+            "member_count": last.member_count,
         },
         "series": series,
     }
@@ -277,6 +283,7 @@ def _scope_row(row) -> ScopeDailyRow:
         board_id=row.board_id,
         trade_date=row.trade_date,
         membership_version=row.membership_version,
+        member_count=row.member_count,
         ma5_above_count=row.ma5_above_count,
         ma5_valid_count=row.ma5_valid_count,
         ma10_above_count=row.ma10_above_count,
