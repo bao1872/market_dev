@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -263,6 +263,26 @@ async def test_rankings_industry_l1_excludes_l2_and_concept(db_session):
     assert r_l1.top[0].delta.ma5 == pytest.approx(0.5)
 
 
+async def _seed_member_count_probe(db) -> UUID:
+    """[R3C0] 构造成员数在早期 / 最新 row 不同的探测 board（T-1=100、T=123，v5 恒为 10）。"""
+    board = MarketBoard(
+        id=uuid4(),
+        name="Cnt-Probe",
+        type="industry",
+        hierarchyLevel="L1",
+        externalCode="CNT_PROBE",
+        taxonomy="CFI",
+        taxonomyCompatibilityKey="k",
+        membershipVersion="mv1",
+        isActive=True,
+    )
+    db.add(board)
+    db.add(_scope_row(board.id, date(2026, 9, 2), ew=0.0, a5=5, v5=10, member_count=100))
+    db.add(_scope_row(board.id, date(2026, 9, 3), ew=0.0, a5=8, v5=10, member_count=123))
+    await db.commit()
+    return board.id
+
+
 async def test_scope_detail_404_for_missing_and_inactive(db_session):
     boards = await _seed(db_session)
 
@@ -272,6 +292,15 @@ async def test_scope_detail_404_for_missing_and_inactive(db_session):
     assert ok.metadata.board_id == str(boards["a"].id)
     # [R3C0] additive 字段：member_count 来自 latest projection row（种子 v5=10）
     assert ok.metadata.member_count == 10
+
+    # [R3C0] latest-row 语义必须在真实 PG 上证明：T-1=100 绝不覆盖 T=123
+    probe_id = await _seed_member_count_probe(db_session)
+    probe = await get_scope_detail(db_session, probe_id, 250)
+    assert probe is not None
+    assert probe.projection_trade_date == "2026-09-03"
+    assert probe.metadata.member_count == 123
+    assert probe.metadata.member_count != 10, "member_count 不得由 valid_return_count / breadth 推算"
+
     # 不存在 → 404
     assert await get_scope_detail(db_session, uuid4(), 250) is None
     # 未激活 → 404
@@ -284,23 +313,9 @@ async def test_scope_detail_member_count_uses_latest_projection_row(db_session):
     member_count 是该 projection row 的冻结事实（不从 market_board_memberships 重算），
     早期 row 绝不覆盖 latest。
     """
-    board = MarketBoard(
-        id=uuid4(),
-        name="Cnt-Probe",
-        type="industry",
-        hierarchyLevel="L1",
-        externalCode="CNT_PROBE",
-        taxonomy="CFI",
-        taxonomyCompatibilityKey="k",
-        membershipVersion="mv1",
-        isActive=True,
-    )
-    db_session.add(board)
-    db_session.add(_scope_row(board.id, date(2026, 9, 2), ew=0.0, a5=5, v5=10, member_count=100))
-    db_session.add(_scope_row(board.id, date(2026, 9, 3), ew=0.0, a5=8, v5=10, member_count=123))
-    await db_session.commit()
+    probe_id = await _seed_member_count_probe(db_session)
 
-    resp = await get_scope_detail(db_session, board.id, 250)
+    resp = await get_scope_detail(db_session, probe_id, 250)
 
     assert resp is not None
     assert resp.projection_trade_date == "2026-09-03"
