@@ -1,4 +1,4 @@
-// [MarketDashboard][R3A] - Line visibility 硬合同（BreadthChart / CompareChart 共用唯一实现）
+// [MarketDashboard][R3A/R3B] - Line visibility 硬合同 + 轴呈现配置（BreadthChart / CompareChart 共用唯一实现）
 //
 // 硬合同（R3A §6）：
 //   1. chart / series **只创建一次**；
@@ -7,6 +7,10 @@
 //   3. 隐藏/显示**不改变 input points**（本模块不持有、不修改调用方数据）；
 //   4. 因为 toggle 不触碰 chart/data/scale，viewport / zoom / null whitespace gap
 //      在 legend toggle 时天然保持不变（无需任何额外恢复逻辑）。
+//
+// 轴呈现（R3B §4）：breadth 源数据保持 0..1，**只**通过 series options 把左轴
+// 呈现为 0%..100%（priceFormat formatter）+ 固定区间 [0,1]（autoscaleInfoProvider）。
+// 绝不在数据层 ×100。
 //
 // 本模块刻意不依赖 React / DOM / lightweight-charts runtime（仅 type-only），
 // 因此可以用 fake chart 直接断言上述调用契约。
@@ -25,6 +29,27 @@ export interface ChartPriceLineOptions {
   axisLabelVisible: boolean
 }
 
+/** breadth 0..1 → 轴标签 "0%".."100%"（仅 presentation；数据保持 0..1）。 */
+export function breadthPercentFormatter(value: number): string {
+  return `${Math.round(value * 100)}%`
+}
+
+/** 固定价格轴区间（breadth 用 [0,1]，保证 0%/100% 端点始终可见）。 */
+export interface FixedScaleRange {
+  min: number
+  max: number
+}
+
+/** addLineSeries 的完整 options（纯数据，可被单测直接断言）。 */
+export interface LineSeriesAddOptions {
+  color: string
+  lineWidth: LineWidth
+  priceScaleId: string
+  visible: boolean
+  priceFormat?: { type: 'custom'; formatter: (price: number) => string; minMove: number }
+  autoscaleInfoProvider?: () => { priceRange: { minValue: number; maxValue: number } }
+}
+
 /** lightweight-charts ISeriesApi 的最小可见子集（便于 fake 断言）。 */
 export interface LineSeriesHandle {
   applyOptions(options: { visible: boolean }): void
@@ -33,12 +58,7 @@ export interface LineSeriesHandle {
 }
 
 export interface LineChartHandle {
-  addLineSeries(options: {
-    color: string
-    lineWidth: LineWidth
-    priceScaleId: string
-    visible: boolean
-  }): LineSeriesHandle
+  addLineSeries(options: LineSeriesAddOptions): LineSeriesHandle
 }
 
 export interface LineSeriesSpec {
@@ -47,6 +67,32 @@ export interface LineSeriesSpec {
   color: string
   scale: 'left' | 'right'
   lineWidth: LineWidth
+  /** breadth 0..1 语义：左轴按百分比呈现（**不**改数据）。 */
+  breadthPercent?: boolean
+  /** 固定价格轴区间（breadth 用 [0,1]），避免 autoscale 收缩导致端点不可见。 */
+  fixedScaleRange?: FixedScaleRange
+}
+
+/**
+ * 把纯 spec 展开为 lightweight-charts series options。
+ *
+ * 这是「0..1 数据 → 0..100% 轴」的唯一实现点：所有页面共用，不允许页面内再 hack 一套。
+ */
+export function buildSeriesOptions(spec: LineSeriesSpec): LineSeriesAddOptions {
+  const options: LineSeriesAddOptions = {
+    color: spec.color,
+    lineWidth: spec.lineWidth,
+    priceScaleId: spec.scale,
+    visible: true,
+  }
+  if (spec.breadthPercent) {
+    options.priceFormat = { type: 'custom', formatter: breadthPercentFormatter, minMove: 0.01 }
+  }
+  if (spec.fixedScaleRange) {
+    const { min, max } = spec.fixedScaleRange
+    options.autoscaleInfoProvider = () => ({ priceRange: { minValue: min, maxValue: max } })
+  }
+  return options
 }
 
 export interface LineSeriesController {
@@ -82,12 +128,7 @@ export function createLineSeriesController(
 
   for (const spec of specs) {
     visible[spec.key] = true
-    handles[spec.key] = chart.addLineSeries({
-      color: spec.color,
-      lineWidth: spec.lineWidth,
-      priceScaleId: spec.scale,
-      visible: true,
-    })
+    handles[spec.key] = chart.addLineSeries(buildSeriesOptions(spec))
   }
 
   return {

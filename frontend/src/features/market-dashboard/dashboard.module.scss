@@ -464,6 +464,141 @@
   margin-bottom: 14px;
 }
 
+// ===== [R3B] 大盘页：时间范围 + 卡片辅助说明 =====
+.range-selector {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 16px;
+}
+
+.range-label {
+  font-size: 13px;
+  color: v.$color-muted;
+}
+
+.range-btn {
+  padding: 5px 12px;
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.range-btn:hover {
+  border-color: v.$color-brand;
+  color: v.$color-text;
+}
+
+.range-btn-active {
+  background: v.$color-brand;
+  color: v.$color-bg;
+  border-color: v.$color-brand;
+  font-weight: 600;
+}
+
+.card-hint {
+  margin-top: 6px;
+  font-size: 12px;
+  color: v.$color-text-dim;
+}
+
+// ===== [R3B] 大盘页：行业 / 概念 summary（2 列）=====
+.summary-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.summary-block {
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  padding: 14px 16px 16px;
+  min-width: 0;
+}
+
+.summary-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.summary-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: v.$color-text;
+}
+
+.summary-link {
+  font-size: 12px;
+  color: v.$color-brand;
+  text-decoration: none;
+}
+
+.summary-link:hover {
+  color: v.$color-brand-hover;
+  text-decoration: underline;
+}
+
+.summary-list + .summary-list {
+  margin-top: 12px;
+}
+
+.summary-list-title {
+  font-size: 12px;
+  color: v.$color-muted;
+  margin-bottom: 6px;
+}
+
+.summary-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  text-decoration: none;
+  color: v.$color-text;
+}
+
+.summary-row:hover {
+  background: v.$color-panel-3;
+}
+
+.summary-name {
+  font-size: 13px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.summary-metrics {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.summary-metric-label {
+  color: v.$color-text-dim;
+}
+
+.summary-empty {
+  font-size: 12px;
+  color: v.$color-text-dim;
+  padding: 4px 8px;
+}
+
 // ===== 响应式（仅保证常见 desktop 宽度，不做大规模移动端重构） =====
 @media (max-width: 1100px) {
   .card-grid {
@@ -471,6 +606,10 @@
   }
 
   .board-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .summary-grid {
     grid-template-columns: 1fr;
   }
 }

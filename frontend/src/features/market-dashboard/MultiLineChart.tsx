@@ -19,6 +19,7 @@ import {
   createLineSeriesController,
   legendAriaPressed,
   type ChartPriceLineOptions,
+  type FixedScaleRange,
   type LineChartHandle,
   type LineSeriesController,
   type LineSeriesHandle,
@@ -35,6 +36,10 @@ export interface MultiLineSeriesInput {
   color?: string
   scale: 'left' | 'right'
   lineWidth?: LineWidth
+  /** breadth 0..1 语义：左轴按百分比呈现（仅 presentation，数据保持 0..1）。 */
+  breadthPercent?: boolean
+  /** 固定价格轴区间（breadth 用 [0,1]），保证 0% / 100% 端点始终可见。 */
+  fixedScaleRange?: FixedScaleRange
   data: LinePoint[]
 }
 
@@ -81,11 +86,21 @@ export default function MultiLineChart({ series, referenceLines, height = 320 }:
         color: s.color ?? seriesColor(i),
         scale: s.scale,
         lineWidth: s.lineWidth ?? SERIES_LINE_WIDTH,
+        breadthPercent: s.breadthPercent,
+        fixedScaleRange: s.fixedScaleRange,
       })),
     [series],
   )
 
-  const creationSignature = specs.map((s) => `${s.key}|${s.scale}|${s.lineWidth}|${s.color}`).join('§')
+  // 轴呈现（百分比 / 固定区间）属于创建期配置：变化需要重建 series（不是 toggle 路径）。
+  const creationSignature = specs
+    .map(
+      (s) =>
+        `${s.key}|${s.scale}|${s.lineWidth}|${s.color}|${s.breadthPercent ? 'pct' : ''}|${
+          s.fixedScaleRange ? `${s.fixedScaleRange.min}-${s.fixedScaleRange.max}` : ''
+        }`,
+    )
+    .join('§')
   const dataSignature = series
     .map((s) => `${s.key}:${s.data.length}:${s.data[0]?.time ?? ''}:${s.data[s.data.length - 1]?.time ?? ''}:${dataHash(s.data)}`)
     .join('§')

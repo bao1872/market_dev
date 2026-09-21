@@ -6,7 +6,7 @@ import { useMemo } from 'react'
 import MultiLineChart from './MultiLineChart'
 import { buildLineData } from './dashboardLogic'
 import { REVIEW_TOKENS, type ChartReferenceLine } from './chartTheme'
-import type { LineWidth } from './lineSeriesController'
+import type { FixedScaleRange, LineWidth } from './lineSeriesController'
 import type { BreadthPoint } from './types'
 
 export interface BreadthLineSpec {
@@ -16,6 +16,10 @@ export interface BreadthLineSpec {
   color?: string
   scale: 'left' | 'right'
   lineWidth?: LineWidth
+  /** breadth 0..1 语义：左轴按百分比呈现（数据保持 0..1）。 */
+  breadthPercent?: boolean
+  /** 固定价格轴区间（breadth 用 [0,1]）。 */
+  fixedScaleRange?: FixedScaleRange
 }
 
 export interface ReferenceLine {
@@ -41,6 +45,8 @@ export default function BreadthChart({ points, series, referenceLines, height = 
         color: spec.color,
         scale: spec.scale,
         lineWidth: spec.lineWidth,
+        breadthPercent: spec.breadthPercent,
+        fixedScaleRange: spec.fixedScaleRange,
         data: buildLineData(points, 'trade_date', spec.field),
       })),
     [points, series],
