@@ -130,20 +130,15 @@ def _patch_helpers(progress: dict, advance: dict, *, nonterminal=None, claimabil
         )
         m_ready = stack.enter_context(
             patch(
-                "app.services.review_history_readiness_service.validate_canonical_history_run_readiness",
+                "app.services.first_pyramid_history_readiness_service.validate_canonical_history_run_readiness",
                 new=AsyncMock(
                     side_effect=AssertionError("Review readiness must not be called")
                 ),
             )
         )
-        m_resolve = stack.enter_context(
-            patch(
-                "app.services.review_orchestrator_service._resolve_canonical_history_source",
-                new=AsyncMock(
-                    side_effect=AssertionError("Review resolver must not be called")
-                ),
-            )
-        )
+        # [REVIEW-V2-R1] 旧 Review resolver `_resolve_canonical_history_source` 已删除；
+        # advancement 的 source 解析已内联（session.get(FirstPyramidHistoryRun, ...)），
+        # 无外部 resolver 可 mock。Review 零调用由 m_ready 守卫。
         yield {
             "progress": m_progress,
             "backfill": m_backfill,
@@ -151,7 +146,6 @@ def _patch_helpers(progress: dict, advance: dict, *, nonterminal=None, claimabil
             "advance": m_advance,
             "claim": m_claim,
             "ready": m_ready,
-            "resolve": m_resolve,
         }
 
 
@@ -458,7 +452,6 @@ class TestPhase3DailyAdvancement:
                 session, history_run_id=rid, target_trade_date=date(2026, 8, 21),
             )
             m["ready"].assert_not_called()
-            m["resolve"].assert_not_called()
 
 
 class _FakeClaimSession:

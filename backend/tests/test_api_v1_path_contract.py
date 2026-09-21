@@ -42,7 +42,6 @@ def test_canonical_gateway_targets_exist() -> None:
         "/v1/me/access",
         "/v1/market/stocks",
         "/v1/instruments/{instrument_id}/bars",
-        "/v1/review/dates",
         "/v1/auction",
     }
     assert required <= paths

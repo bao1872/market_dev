@@ -24,8 +24,9 @@
 3. **真实函数签名对齐**（本轮逐个读取源码确认）：
    - `publish_chip_consensus(session, trade_date: date, chip_run_id, algorithm_version, *, metadata=None)`
      —— **无 `operator` 参数**；上一轮 `publish_chip_consensus(db, run_id, operator=...)` 会 TypeError。
-   - `publish_review(session, run: MarketReviewRun, *, force, operator, idempotency_key)`
-     —— 第一个业务参数是 **ORM 对象**，不是 id；上一轮传 id 会 AttributeError。
+   - `review` boundary 现 = Market Dashboard Review projection rebuild：
+     `rebuild_market_dashboard_projection(trade_date)` 重建并原子发布投影；
+     不再依赖已退役的 Review publication runtime。
    - auction 重建 = `generate_auction_anchors(db, trade_date)` → `publish_auction_anchors(db, snapshot_id)`；
      上一轮只调 publish，等于重发旧 snapshot，不是重建。
    - dsa_projection 重建 = 从持久化 core artifact `build_dsa_projection_payload(...)`；
@@ -884,41 +885,26 @@ async def _handle_review(
     actor: str,
     attempt: int,
 ) -> uuid.UUID | None:
-    """review boundary：查找当日 MarketReviewRun → db.get 取 ORM 对象 → publish_review。
+    """review boundary：重建当日 Market Dashboard 复盘投影（不再发布旧 Review）。
 
-    真实签名：publish_review(session, run: MarketReviewRun, *, force=False,
-                            operator=None, idempotency_key=None)
-    —— 第一个业务参数是 **ORM 对象**，传 id 会 AttributeError。
+    Granular restart 的「review」边界重新定义为当前 Review（即 Market Dashboard）：
+    调用正式 rebuild_market_dashboard_projection(trade_date) 重建并原子发布投影。
+    不再依赖已退役的 Review publication runtime。
+    返回 None（rebuild 结果是 projection 写入，无 run_id 概念；handler registry
+    接受 uuid | None，None 表示操作成功但无可返回的 run 标识）。
     """
-    from app.models.market_review import MarketReviewRun
-    from app.services.review_publication_service import publish_review
-
-    stmt = (
-        select(MarketReviewRun.id)
-        .where(
-            MarketReviewRun.trade_date == _as_date(trade_date),
-            MarketReviewRun.status.in_(("succeeded", "completed", "published")),
-        )
-        .order_by(MarketReviewRun.created_at.desc())
-        .limit(1)
+    from app.services.market_dashboard_projection_rebuild_service import (
+        rebuild_market_dashboard_projection,
     )
-    row = (await db.execute(stmt)).first()
-    if row is None:
+
+    _trade_date = _as_date(trade_date)
+    result = await rebuild_market_dashboard_projection(_trade_date)
+    if result is None or getattr(result, "market_rows", 0) == 0:
         raise RuntimeError(
-            f"review 重建失败: 当日无可发布 MarketReviewRun (trade_date={trade_date})"
+            f"review 重建失败: 当日无可构建 Market Dashboard 投影 "
+            f"(trade_date={trade_date})"
         )
-    run_id = row[0]
-    run = await db.get(MarketReviewRun, run_id)
-    if run is None:
-        raise RuntimeError(f"review 重建失败: MarketReviewRun {run_id} 不存在")
-
-    await publish_review(
-        db,
-        run,
-        operator=actor,
-        idempotency_key=f"granular_restart:{trade_date}:review:{input_hash}",
-    )
-    return run_id
+    return None
 
 
 # =============================================================================

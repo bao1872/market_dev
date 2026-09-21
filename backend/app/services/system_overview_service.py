@@ -1375,11 +1375,12 @@ async def _compute_product_nodes(
     db: AsyncSession,
     business_date: date,
 ) -> list[dict[str, Any]]:
-    """[PRD §8.2] 数据生产中心：从各数据产品表查询完整 6 节点状态。
+    """[PRD §8.2] 数据生产中心：从各数据产品表查询各环节状态。
 
-    覆盖行情 / 第一金字塔 / 板块分析 / 复盘 / 竞价准备 / 正式发布 六个产品环节，
-    每项返回 trade_date / status / run_id / quality_gate / publication_status /
+    覆盖行情 / 第一金字塔 / 复盘（现 = Market Dashboard 投影）/ 竞价准备 / 正式发布
+    等环节，每项返回 trade_date / status / run_id / quality_gate / publication_status /
     blocking_reason / recommended_action。纯只读查询，无副作用。
+    注：旧「板块分析」Board Analysis facade 已退役，不再作为独立节点。
 
     Args:
         db: 异步数据库会话
@@ -1461,101 +1462,57 @@ async def _compute_product_nodes(
             ).model_dump()
         )
 
-    # ===== 3. 板块/复盘事实（sourced from published Unified Review）=====
-    # Slice 4A8R — 用正式 market_review publication pointer 锁定当前正式复盘，
-    # 不再仅按 MarketReviewRun.status == "published" + trade_date DESC 取 run，
-    # 避免与 Board GET / canonical Review 指向不同 run。
-    from app.models.market_review import MarketReviewRun, ReviewScopeObservationFact
-    from app.services.review_publication_service import (
-        get_published_review_run_id,
-        list_published_review_dates,
+    # ===== 3. 复盘（现 = Market Dashboard projection）=====
+    # 旧「板块/复盘事实」（published Unified Review Board Analysis facade，key="board"）
+    # 已退役（PANJI-REVIEW-V2-R1-SHARED-OWNER-CUTOVER D）；其数据源 market_review /
+    # ReviewScopeObservationFact 不复存在。复盘产品现由 Market Dashboard projection
+    # 承载：market_dashboard_market_daily 最新日 + market_dashboard_scope_daily 投影行数。
+    # 不再引用 MarketReviewRun；DTO 的 run_id 固定为 None（不返回伪造 run_id）。
+    from app.models.market_dashboard import (
+        MarketDashboardMarketDaily,
+        MarketDashboardScopeDaily,
     )
-    _BOARD_SCOPE_TYPES = ("concept", "industry_l1", "industry_l2", "industry_l3")
-    board_review = None
-    _published_review_dates = await list_published_review_dates(db, limit=1)
-    if _published_review_dates:
-        _board_run_id = await get_published_review_run_id(db, _published_review_dates[0])
-        if _board_run_id is not None:
-            board_review = await db.scalar(
-                select(MarketReviewRun)
-                .where(MarketReviewRun.id == _board_run_id)
-                .limit(1)
-            )
-    if board_review is None:
-        nodes.append(
-            ProductionChainNode(
-                key="board", label="板块/复盘事实", status="pending",
-                detail="尚无已发布复盘", trade_date=None,
-                publication_status="not_applicable",
-                blocking_reason="无已发布复盘", recommended_action="发布复盘",
-            ).model_dump()
-        )
-    else:
-        exp_total, prov_total, scope_cnt = (
-            await db.execute(
-                select(
-                    func.coalesce(func.sum(ReviewScopeObservationFact.pit_member_count), 0),
-                    func.coalesce(func.sum(ReviewScopeObservationFact.provided_member_count), 0),
-                    func.count(ReviewScopeObservationFact.id),
-                ).where(
-                    ReviewScopeObservationFact.review_run_id == board_review.id,
-                    ReviewScopeObservationFact.scope_type.in_(_BOARD_SCOPE_TYPES),
-                )
-            )
-        ).one()
-        exp_total = int(exp_total)
-        prov_total = int(prov_total)
-        board_cov = prov_total / exp_total if exp_total > 0 else 0.0
-        board_cov_ok = exp_total > 0 and board_cov >= 0.95
-        nodes.append(
-            ProductionChainNode(
-                key="board", label="板块/复盘事实",
-                status="ok" if board_cov_ok else "failed",
-                detail=(
-                    f"{board_review.trade_date} 已发布复盘板块范围 {scope_cnt} 个"
-                    f"，成员覆盖 {board_cov * 100:.0f}%（{prov_total}/{exp_total}）"
-                ),
-                trade_date=board_review.trade_date,
-                run_id=str(board_review.id),
-                quality_gate="passed" if board_cov_ok else "failed",
-                publication_status="published" if board_review.status == "published" else "pending",
-                blocking_reason=None if board_cov_ok else "已发布复盘板块成员覆盖未达 95%",
-                recommended_action=None if board_cov_ok else "检查已发布复盘板块范围",
-            ).model_dump()
-        )
-
-    # ===== 4. 复盘（market_review_runs，最近一个 trade_date）=====
-    from app.models.market_review import MarketReviewRun
-    review_date = await db.scalar(select(func.max(MarketReviewRun.trade_date)))
+    review_date = await db.scalar(
+        select(func.max(MarketDashboardMarketDaily.trade_date))
+    )
     if review_date is None:
         nodes.append(
             ProductionChainNode(
                 key="review", label="复盘", status="pending",
-                detail="尚无复盘 run", trade_date=None,
+                detail="尚无复盘投影", trade_date=None,
                 publication_status="not_applicable",
-                blocking_reason="无复盘记录", recommended_action="触发复盘计算",
+                blocking_reason="无复盘投影记录", recommended_action="重建复盘投影",
             ).model_dump()
         )
     else:
-        review_run = await db.scalar(
-            select(MarketReviewRun)
-            .where(MarketReviewRun.trade_date == review_date)
-            .order_by(MarketReviewRun.created_at.desc())
+        _mkt_row = await db.scalar(
+            select(MarketDashboardMarketDaily)
+            .where(MarketDashboardMarketDaily.trade_date == review_date)
             .limit(1)
         )
-        review_published = review_run is not None and review_run.status == "published"
+        _scope_cnt = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(MarketDashboardScopeDaily)
+                .where(MarketDashboardScopeDaily.trade_date == review_date)
+            )
+            or 0
+        )
+        _ok = _mkt_row is not None and _scope_cnt > 0
         nodes.append(
             ProductionChainNode(
                 key="review", label="复盘",
-                status="ok" if review_published else ("running" if review_run and review_run.status in ("created", "computing") else "failed"),
-                detail=f"{review_date} 状态：{review_run.status if review_run else '无'}"
-                if review_run else "无复盘",
+                status="ok" if _ok else "failed",
+                detail=(
+                    f"{review_date} 复盘投影板块数 {_scope_cnt}"
+                    if _ok else f"{review_date} 复盘投影缺失或不完整"
+                ),
                 trade_date=review_date,
-                run_id=str(review_run.id) if review_run else None,
-                quality_gate="passed" if review_published else ("pending" if review_run else "failed"),
-                publication_status="published" if review_published else "pending",
-                blocking_reason=None if review_published else (review_run.status if review_run else "无 run"),
-                recommended_action=None if review_published else "检查复盘计算或发布",
+                run_id=None,
+                quality_gate="passed" if _ok else "failed",
+                publication_status="published" if _ok else "pending",
+                blocking_reason=None if _ok else "复盘投影不完整",
+                recommended_action=None if _ok else "重建复盘投影",
             ).model_dump()
         )
 

@@ -40,7 +40,6 @@ import pytest
 import app.services.after_close_chip_consensus_service as chip_svc
 import app.services.after_close_orchestrator as orch
 import app.worker as worker_mod
-from tests.test_after_close_core_review_correction04 import T_DATE, build_harness
 
 _APP_ROOT = Path(inspect.getsourcefile(orch)).resolve().parents[2]
 _CHIP_CREATE = "create_after_close_chip_consensus_job"
@@ -71,37 +70,6 @@ def _executable_code(fn) -> str:
 # =============================================================================
 # TEST A — 正常 AfterClose 成功 → 新建 chip job 数 = 0
 # =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_a1_successful_after_close_creates_zero_chip_jobs(monkeypatch):
-    """A1（行为）：Core succeeded 的完整成功主链中，chip job 创建次数 = 0。
-
-    证据强度说明：
-    - `create_after_close_chip_consensus_job` 仍存在于服务模块（历史兼容），
-      harness 在**真实服务模块**上安装录制替身，因此「零调用」是行为证据，
-      而不是符号缺失造成的空断言。
-    - patch 点充分性由 A2 保证：A2 已证明 app/ 下无任何模块 `from ... import`
-      该符号，故服务模块属性是唯一可能的调用入口，拦截该点即可覆盖全部路径。
-    - 极性已验证：本测试在退役前的生产代码上为 RED
-      （`enqueue_chip_job` 步骤存在）。
-    """
-    h = build_harness(monkeypatch)
-
-    with ExitStack() as st:
-        for p in h["patches"]:
-            st.enter_context(p)
-        await orch.execute_after_close_run(h["run_id"], T_DATE)
-
-    assert h["rec"]["chip"] == [], (
-        f"退役后成功主链不得创建 chip job，实际调用: {h['rec']['chip']}"
-    )
-    assert "enqueue_chip_job" not in h["rec"]["steps"], (
-        f"退役后主链不得出现 enqueue_chip_job 步骤，实际: {h['rec']['steps']}"
-    )
-    # 前提校验：该主链确实走完了 Core→Review→History（否则零 chip 无意义）
-    assert "computing_review" in h["rec"]["steps"]
-    assert "computing_history" in h["rec"]["steps"]
 
 
 def test_a2_no_production_call_site_creates_chip_job():
@@ -284,50 +252,6 @@ def test_b2_after_close_worker_source_has_no_chip_wiring():
 # =============================================================================
 # TEST C — Core → Review → History 合同不变
 # =============================================================================
-
-
-@pytest.mark.asyncio
-async def test_c_core_review_history_contract_unchanged(monkeypatch):
-    """C：退役不改变 canonical chain —— Core gate 通过后
-    Review → History 顺序执行，post-core OPTIONAL DSA 仍在其后，父任务进入终态。"""
-    h = build_harness(monkeypatch)
-
-    with ExitStack() as st:
-        for p in h["patches"]:
-            st.enter_context(p)
-        await orch.execute_after_close_run(h["run_id"], T_DATE)
-
-    steps = h["rec"]["steps"]
-    assert "computing_review" in steps and "computing_history" in steps
-    assert steps.index("computing_review") < steps.index("computing_history"), (
-        f"Review 必须先于 History，实际顺序: {steps}"
-    )
-    assert "dsa_compatibility" in steps, "post-core OPTIONAL DSA 步骤不得被退役波及"
-    assert steps.index("computing_history") < steps.index("dsa_compatibility"), (
-        f"DSA 兼容性投影仍应在 History 之后，实际顺序: {steps}"
-    )
-    assert h["job_row"].status in ("succeeded", "partial_success"), (
-        f"父任务应进入成功类终态，实际: {h['job_row'].status}"
-    )
-    # state_events 仍以 Core X 执行（chip 退役不得连带影响同门控下的其他副作用）
-    assert h["rec"]["events"], "state_events 不得被 chip 退役波及"
-
-
-@pytest.mark.asyncio
-async def test_c2_core_not_ready_still_fail_closed(monkeypatch):
-    """C2：Core 未就绪时仍 fail-closed —— Review/History 零调用、父任务 failed。"""
-    h = build_harness(monkeypatch, core_status="failed")
-
-    with ExitStack() as st:
-        for p in h["patches"]:
-            st.enter_context(p)
-        with pytest.raises((orch.AfterCloseCoreNotReadyError, RuntimeError)):
-            await orch.execute_after_close_run(h["run_id"], T_DATE)
-
-    assert "computing_review" not in h["rec"]["steps"]
-    assert "computing_history" not in h["rec"]["steps"]
-    assert h["rec"]["chip"] == []
-    assert h["job_row"].status == "failed"
 
 
 # =============================================================================

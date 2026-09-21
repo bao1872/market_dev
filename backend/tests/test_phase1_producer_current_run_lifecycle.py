@@ -135,19 +135,22 @@ class TestProducerCurrentRunLifecycle:
             "app.services.first_pyramid_history_service.create_history_run",
             new=AsyncMock(return_value=(new_run, True)),
         ), patch(
-            "app.services.review_orchestrator_service._resolve_canonical_history_source",
+            # [REVIEW-V2-R1] 旧 Review resolver `_resolve_canonical_history_source` 已删除；
+            # 其 source 解析逻辑现在内联于 advancement 函数 advance_canonical_history_run_to_trade_date。
+            # producer resolver 仍不得调用该 advancement（FIX_DIRECTION=UPSTREAM_ONLY）。
+            "app.services.first_pyramid_history_service.advance_canonical_history_run_to_trade_date",
             new=AsyncMock(
-                side_effect=AssertionError("Review resolver must not be called by producer")
+                side_effect=AssertionError("canonical history advance must not be called by producer resolver")
             ),
-        ) as mock_review_resolve, patch(
-            "app.services.review_history_readiness_service.validate_canonical_history_run_readiness",
+        ) as mock_advance, patch(
+            "app.services.first_pyramid_history_readiness_service.validate_canonical_history_run_readiness",
             new=AsyncMock(
                 side_effect=AssertionError("Review readiness must not be called by producer")
             ),
         ) as mock_review_ready:
             await ensure_current_first_pyramid_history_run(MagicMock())
 
-        mock_review_resolve.assert_not_called()
+        mock_advance.assert_not_called()
         mock_review_ready.assert_not_called()
 
     @pytest.mark.asyncio

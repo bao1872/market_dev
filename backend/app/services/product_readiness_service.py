@@ -9,7 +9,7 @@
 
 产品分类：
 - mandatory（核心链，缺任一即 blocked）：daily_facts / board_facts / stock_core /
-  board_aggregation / review
+  review（Market Dashboard 复盘投影）
 - enhancement（异步增强，不阻断 mandatory chain）：chip / auction_anchor / state_events
 
 闭包状态语义（E08-T02）：
@@ -75,7 +75,6 @@ MANDATORY_PRODUCTS = frozenset({
     "daily_facts",
     "board_facts",
     "stock_core",
-    "board_aggregation",
     "review",
 })
 # 必需兼容输出：随 stock_core 派生，不阻断核心，但未就绪时不得宣称完整就绪
@@ -87,7 +86,7 @@ ENHANCEMENT_PRODUCTS = frozenset({
     "state_events",
     "auction_anchor",
 })
-NINE_NODES = (
+ALL_PRODUCT_NODES = (
     MANDATORY_PRODUCTS | REQUIRED_COMPATIBILITY_PRODUCTS | ENHANCEMENT_PRODUCTS
 )
 
@@ -495,15 +494,16 @@ _ACTION_BY_REASON: dict[str, tuple[bool, str, str]] = {
     "NO_RUN": (True, "trigger_upstream_job", "trigger_upstream_job"),
     "RUN_FAILED": (True, "rerun_board_facts", "rerun_board_facts"),
     "RUN_CANCELLED": (True, "rerun_board_facts", "rerun_board_facts"),
-    # review
-    "NO_REVIEW_RUN": (True, "trigger_market_review", "trigger_market_review"),
-    "REVIEW_NOT_PUBLISHED": (True, "publish_market_review", "publish_market_review"),
-    # [Corrective-3.1] run 自称 published 但 factor_publications 无 pointer
-    "REVIEW_POINTER_MISSING": (
-        True, "publish_market_review", "publish_market_review",
+    # review（现 = Market Dashboard 复盘投影）
+    "NO_MARKET_DASHBOARD": (
+        True, "rebuild_market_dashboard", "rebuild_market_dashboard",
     ),
-    "REVIEW_FAILED": (True, "rerun_market_review", "rerun_market_review"),
-    "REVIEW_CANCELLED": (True, "rerun_market_review", "rerun_market_review"),
+    "NO_MARKET_DASHBOARD_PROJECTION": (
+        True, "rebuild_market_dashboard", "rebuild_market_dashboard",
+    ),
+    "MARKET_DASHBOARD_INCOMPLETE": (
+        True, "rebuild_market_dashboard", "rebuild_market_dashboard",
+    ),
     # 派生投影
     "PARENT_NOT_CONSUMABLE": (False, "await_parent_product", "no_operation"),
     "NO_PROJECTION": (True, "rebuild_dsa_projection", "rebuild_dsa_projection"),
@@ -531,7 +531,7 @@ def resolve_governance_action(
     这是治理动作的**唯一**事实源。前端不得再自行根据 reason code 猜测业务动作。
     """
     if readiness in CONSUMABLE_READINESS and reason_code in (
-        None, "NONE", "FRESH_PUBLICATION", "REVIEW_PUBLISHED", "CHIP_SUCCEEDED",
+        None, "NONE", "FRESH_PUBLICATION", "MARKET_DASHBOARD_READY", "CHIP_SUCCEEDED",
         "UPGRADED_FROM_PARENT", "AUCTION_SUCCEEDED",
     ):
         return _DEFAULT_ACTION
@@ -560,14 +560,11 @@ def _product_lineage(p: ProductReadinessState) -> dict[str, Any]:
     base["target_run_id"] = (
         p.lineage.get("domain_run_id")
         or p.lineage.get("run_id")
-        or p.lineage.get("review_run_id")
         or p.lineage.get("pointer_data_run_id")
     )
     # 兼容既有键
     if "run_id" in p.lineage:
         base["run_id"] = p.lineage["run_id"]
-    if "review_run_id" in p.lineage:
-        base["review_run_id"] = p.lineage["review_run_id"]
     if "derived_from" in p.lineage:
         base["derived_from"] = p.lineage["derived_from"]
     return base
@@ -755,7 +752,7 @@ class ProductReadinessService:
         db: Any,
         trade_date: date,
     ) -> list[ProductReadinessState]:
-        """聚合指定交易日的九节点就绪状态（Commit G）。
+        """聚合指定交易日的就绪状态节点。
 
         供 evaluate_for_trade_date（求闭包）与 admin readiness API（治理报告）共用，
         保证同一入口、同一查询顺序，避免治理报告与闭包评估口径不一致。
@@ -765,19 +762,18 @@ class ProductReadinessService:
             trade_date: 业务交易日
 
         Returns:
-            九节点 ProductReadinessState 列表
+            ProductReadinessState 列表（daily_facts / board_facts / stock_core /
+            review(Market Dashboard) / dsa_projection / chip / state_events / auction）
         """
         # stock_core 只计算一次，派生投影复用（compute-once）
         daily = await self._daily_facts_state(db, trade_date)
         board_facts = await self._board_facts_state(db, trade_date)
         stock_core = await self._stock_core_state(db, trade_date)
-        board_aggregation = await self._board_aggregation_state(db, trade_date)
         review = await self._review_state(db, trade_date)
         return [
             daily,
             board_facts,
             stock_core,
-            board_aggregation,
             review,
             await self._dsa_projection_state(db, trade_date, stock_core),
             await self._chip_state(db, trade_date),
@@ -864,10 +860,11 @@ class ProductReadinessService:
         db: Any,
         trade_date: date,
     ) -> ClosureEvaluation:
-        """评估指定交易日的产品闭包状态（P0-1：完整九节点）。
+        """评估指定交易日的产品闭包状态。
 
-        九节点：daily_facts / board_facts / stock_core / board_aggregation /
-        review（mandatory）+ dsa_projection / chip / state_events / auction_anchor（enhancement）。
+        节点：daily_facts / board_facts / stock_core / review（现 = Market Dashboard
+        复盘投影）（mandatory）+ dsa_projection / chip / state_events / auction_anchor
+        （enhancement）。
 
         Args:
             db: 异步数据库会话
@@ -1105,128 +1102,95 @@ class ProductReadinessService:
                      "reason_code": "NO_PUBLICATION"},
         )
 
-    async def _board_aggregation_state(
-        self, db: Any, trade_date: date,
-    ) -> ProductReadinessState:
-        """board_aggregation：跟随 _review_state 的单一就绪判定（Slice 4A8R）。
-
-        Slice 4A8R — 只允许一个 readiness owner：_review_state 已校验 market_review
-        pointer + MarketReviewRun + source_core_run_id == 当前 stock_core pointer。
-        本节点直接派生同一结论，仅把 product 名改为 board_aggregation，避免出现
-        "Review DEGRADED 而 Board READY" 的第二套、更弱的就绪公式。
-        不再独立查询 FactorPublication / MarketReviewRun / market_aggregation /
-        旧板块运行表。
-        """
-        review_state = await self._review_state(db, trade_date)
-        return ProductReadinessState(
-            product="board_aggregation",
-            readiness=review_state.readiness,
-            freshness=review_state.freshness,
-            is_mandatory=True,
-            is_terminal=review_state.is_terminal,
-            lineage=dict(review_state.lineage),
-        )
-
     async def _review_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """review：以正式 FactorPublication pointer 为准（[Corrective-3.1 §P1]）。
+        """review（现 = Market Dashboard 复盘投影）：以正式 projection 为准。
 
-        Corrective-3 只查 MarketReviewRun 并检查 run.status/published_at，会把一个
-        "曾经发布过、但已不是当前 pointer" 的旧 run 误判为 ready。现在真正读取
-        `factor_publications`（publication_kind=market_review），并要求 pointer 的
-        data_run_id 与 latest run 一致，否则判定 lineage 失配。
+        新的 readiness owner 是 Market Dashboard projection：
+        - ``market_dashboard_market_daily`` 必须有该日行（大盘投影）；
+        - ``market_dashboard_scope_daily`` 必须存在该日 projection 行；
+        - 可进一步核对 active MarketBoard 数 vs 已投影 board 数（不发明第二套算法，
+          仅作完整性交叉核对；复用 F1C 作为权威 producer 的投影即可）。
+
+        ready：projection complete；pending/unavailable：projection absent/incomplete。
+        lineage 使用 source_type="market_dashboard_projection" + trade_date +
+        scope_count + updated_at（如可得）；不再引用 MarketReviewRun。
         """
-        from app.models.factor_publication import FactorPublication
-        from app.models.market_review import MarketReviewRun
-        from app.services.review_publication_service import (
-            PUBLICATION_KIND_MARKET_REVIEW,
+        from app.models.market_dashboard import (
+            MarketDashboardMarketDaily,
+            MarketDashboardScopeDaily,
         )
+        from app.models.market_board import MarketBoard
 
-        pub = await db.scalar(
-            select(FactorPublication)
-            .where(
-                FactorPublication.publication_kind == PUBLICATION_KIND_MARKET_REVIEW,
-                FactorPublication.trade_date == trade_date,
-            )
+        market_row = await db.scalar(
+            select(MarketDashboardMarketDaily)
+            .where(MarketDashboardMarketDaily.trade_date == trade_date)
             .limit(1)
         )
-        if pub is not None:
-            pub_run = await db.scalar(
-                select(MarketReviewRun)
-                .where(MarketReviewRun.id == pub.data_run_id)
-                .limit(1)
-            )
-            lineage = _publication_lineage(pub, pub_run)
-            lineage["source_type"] = "review_publication"
-            lineage["review_run_id"] = _sid(getattr(pub, "data_run_id", None))
-            # [Slice 4A8] review 只归属当前 stock_core（source_core_run_id）。
-            # source_board_run_id 只是 nullable legacy 血缘字段，不再作为当前正式
-            # 依赖 gate；market_aggregation 指针缺失不得阻断已发布 Review 就绪。
-            current_core = await self._current_stock_core_data_run_id(db, trade_date)
-            run_core = getattr(pub_run, "source_core_run_id", None)
-            lineage["expected_source_core_run_id"] = _sid(current_core)
-            if pub_run is None or current_core is None or run_core != current_core:
-                lineage["reason_code"] = "REVIEW_LINEAGE_MISMATCH"
-                return ProductReadinessState(
-                    "review", READINESS_DEGRADED, "stale",
-                    is_terminal=False, lineage=lineage,
-                )
-            lineage["reason_code"] = "REVIEW_PUBLISHED"
+        if market_row is None:
             return ProductReadinessState(
-                "review", READINESS_READY, "fresh", is_terminal=True,
+                "review", READINESS_PENDING, "fresh",
+                lineage={
+                    "source_type": "market_dashboard_projection",
+                    "trade_date": trade_date.isoformat(),
+                    "reason_code": "NO_MARKET_DASHBOARD",
+                },
+            )
+
+        scope_count = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(MarketDashboardScopeDaily)
+                .where(MarketDashboardScopeDaily.trade_date == trade_date)
+            )
+            or 0
+        )
+        if scope_count == 0:
+            return ProductReadinessState(
+                "review", READINESS_PENDING, "fresh",
+                lineage={
+                    "source_type": "market_dashboard_projection",
+                    "trade_date": trade_date.isoformat(),
+                    "reason_code": "NO_MARKET_DASHBOARD_PROJECTION",
+                },
+            )
+
+        # 完整性交叉核对：active MarketBoard 数 vs 已投影 board 数。
+        active_boards = int(
+            await db.scalar(
+                select(func.count())
+                .select_from(MarketBoard)
+                .where(MarketBoard.isActive.is_(True))
+            )
+            or 0
+        )
+        projected_boards = int(
+            await db.scalar(
+                select(func.count(func.distinct(MarketDashboardScopeDaily.board_id)))
+                .select_from(MarketDashboardScopeDaily)
+                .where(MarketDashboardScopeDaily.trade_date == trade_date)
+            )
+            or 0
+        )
+        lineage = {
+            "source_type": "market_dashboard_projection",
+            "trade_date": trade_date.isoformat(),
+            "scope_count": scope_count,
+            "updated_at": _iso(getattr(market_row, "updated_at", None)),
+            "status": "succeeded",
+        }
+        if active_boards > 0 and projected_boards < active_boards:
+            lineage["reason_code"] = "MARKET_DASHBOARD_INCOMPLETE"
+            return ProductReadinessState(
+                "review", READINESS_PENDING, "fresh",
                 lineage=lineage,
             )
 
-        # 无正式 pointer → 回落到 run 状态，但绝不判 ready。
-        run = await db.scalar(
-            select(MarketReviewRun)
-            .where(MarketReviewRun.trade_date == trade_date)
-            .order_by(MarketReviewRun.created_at.desc())
-            .limit(1)
-        )
-
-        if run is None:
-            return ProductReadinessState(
-                "review", READINESS_PENDING, "fresh",
-                lineage={"source_type": "review_publication",
-                         "reason_code": "NO_REVIEW_RUN"},
-            )
-
-        published_at = getattr(run, "published_at", None)
-        base = {
-            "source_type": "review_publication",
-            "domain_run_id": _sid(getattr(run, "id", None)),
-            "review_run_id": _sid(getattr(run, "id", None)),
-            "algorithm_version": getattr(run, "algorithm_version", None),
-            "parameter_hash": getattr(run, "filter_version", None),
-            "coverage": _num(getattr(run, "coverage_ratio", None)),
-            "status": run.status,
-            "published_at": _iso(published_at),
-            "calculated_at": _iso(
-                getattr(run, "completed_at", None) or getattr(run, "created_at", None),
-            ),
-        }
-        # [Corrective-3.1 §P1] 走到这里说明 factor_publications 中没有 market_review
-        # pointer。此时即使 run.status=published 也**不得**判 ready —— 那只是一个
-        # 历史发布过、现已不是当前 pointer 的旧 run。
-        if run.status == "published":
-            return ProductReadinessState(
-                "review", READINESS_DEGRADED, "stale", is_terminal=True,
-                lineage={
-                    **base,
-                    "reason_code": "REVIEW_POINTER_MISSING" if published_at is not None
-                    else "REVIEW_NOT_PUBLISHED",
-                },
-            )
-        if run.status in TERMINAL_RUN_STATUS:
-            return ProductReadinessState(
-                "review", READINESS_UNAVAILABLE, "fresh", is_terminal=True,
-                lineage={**base, "reason_code": f"REVIEW_{run.status.upper()}"},
-            )
+        lineage["reason_code"] = "MARKET_DASHBOARD_READY"
         return ProductReadinessState(
-            "review", READINESS_PENDING, "fresh",
-            lineage={**base, "reason_code": "REVIEW_RUNNING"},
+            "review", READINESS_READY, "fresh", is_terminal=True,
+            lineage=lineage,
         )
 
     async def _dsa_projection_state(
@@ -1953,12 +1917,11 @@ class ProductReadinessService:
 
 
 if __name__ == "__main__":
-    # fully_ready（九节点，enhancement 真正就绪且 auction composite）
+    # fully_ready（review 现 = Market Dashboard 投影；无 board_aggregation）
     full = [
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY, "fresh"),
         ProductReadinessState("stock_core", READINESS_READY, "fresh"),
-        ProductReadinessState("board_aggregation", READINESS_READY, "fresh"),
         ProductReadinessState("review", READINESS_READY, "fresh"),
         ProductReadinessState("dsa_projection", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
         ProductReadinessState("chip", READINESS_READY, "fresh", is_mandatory=False, is_terminal=True, is_product_ready=True),
@@ -1969,17 +1932,17 @@ if __name__ == "__main__":
 
     # [PRD Alignment Pass P0-1] chip partial（terminal）不得误判 fully_ready
     chip_partial = list(full)
-    chip_partial[6] = ProductReadinessState("chip", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, is_product_ready=False, lineage={"reason_code": "CHIP_PARTIAL"})
+    chip_partial[5] = ProductReadinessState("chip", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, is_product_ready=False, lineage={"reason_code": "CHIP_PARTIAL"})
     assert evaluate_closure(chip_partial).closure == CLOSURE_DEGRADED_READY
 
     # [PRD Alignment Pass P0-1] auction structure_only（terminal）不得误判 fully_ready
     auction_struct = list(full)
-    auction_struct[8] = ProductReadinessState("auction_anchor", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, auction_mode="structure_only", is_product_ready=False, lineage={"reason_code": "AUCTION_STRUCTURE_ONLY", "mode": "structure_only"})
+    auction_struct[7] = ProductReadinessState("auction_anchor", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, auction_mode="structure_only", is_product_ready=False, lineage={"reason_code": "AUCTION_STRUCTURE_ONLY", "mode": "structure_only"})
     assert evaluate_closure(auction_struct).closure == CLOSURE_DEGRADED_READY
 
     # [PRD Alignment Pass P0-1] auction hybrid（terminal但非composite）不得误判 fully_ready
     auction_hybrid = list(full)
-    auction_hybrid[8] = ProductReadinessState("auction_anchor", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, auction_mode="hybrid", is_product_ready=False, lineage={"reason_code": "AUCTION_HYBRID", "mode": "hybrid"})
+    auction_hybrid[7] = ProductReadinessState("auction_anchor", READINESS_DEGRADED, "stale", is_mandatory=False, is_terminal=True, auction_mode="hybrid", is_product_ready=False, lineage={"reason_code": "AUCTION_HYBRID", "mode": "hybrid"})
     assert evaluate_closure(auction_hybrid).closure == CLOSURE_DEGRADED_READY
 
     # blocked
@@ -1993,7 +1956,6 @@ if __name__ == "__main__":
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY_REUSED, "reused"),
         ProductReadinessState("stock_core", READINESS_READY, "fresh"),
-        ProductReadinessState("board_aggregation", READINESS_READY, "fresh"),
         ProductReadinessState("review", READINESS_READY, "fresh"),
     ]
     assert evaluate_closure(degraded).closure == CLOSURE_DEGRADED_READY
@@ -2003,7 +1965,6 @@ if __name__ == "__main__":
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY, "fresh"),
         ProductReadinessState("stock_core", READINESS_READY, "fresh"),
-        ProductReadinessState("board_aggregation", READINESS_READY, "fresh"),
         ProductReadinessState("review", READINESS_PENDING, "fresh"),
     ]
     assert evaluate_closure(core_ready_case).closure == CLOSURE_CORE_READY
@@ -2013,7 +1974,6 @@ if __name__ == "__main__":
         ProductReadinessState("daily_facts", READINESS_READY, "fresh"),
         ProductReadinessState("board_facts", READINESS_READY, "fresh"),
         ProductReadinessState("stock_core", READINESS_PENDING, "fresh"),
-        ProductReadinessState("board_aggregation", READINESS_PENDING, "fresh"),
         ProductReadinessState("review", READINESS_PENDING, "fresh"),
     ]
     assert evaluate_closure(pending_case).closure == CLOSURE_PENDING

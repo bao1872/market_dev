@@ -45,9 +45,6 @@ from app.services.after_close_orchestrator import (
     repair_stale_after_close_snapshot_runs,
     retry_after_close_run,
 )
-from app.services.after_close_orchestrator import (
-    _execute_review_step as _real_execute_review_step,
-)
 from app.services.bars_scheduler_service import BarsSchedulerService, BatchResult
 from app.services.core_artifact_repository import CoreArtifactRepository
 from app.services.job_run_event_service import append_event
@@ -56,30 +53,24 @@ from app.services.strategy_batch_service import StrategyBatchService
 
 @pytest.fixture(autouse=True)
 def _mock_review_phase_boundary():
-    """盘后编排器 review 阶段边界 mock（模块级 autouse）。
+    """盘后编排器 复盘阶段（rebuilding_market_dashboard optional sidecar）隔离 mock。
 
-    本文件测试目标是编排器主流程（事件/状态/repair/publish），
-    review 计算与发布合同由 tests/test_review_*.py 专门覆盖。
-    [CHANGE-20260801-REVIEW-CLOSURE] computing_review 阶段要求
-    stock_core + board_analysis 正式 pointer；本文件 fixtures 不构造
-    publication 数据，故 mock create_run 返回已 published 的 run，
-    走 idempotent_reuse_published_run 路径（跳过计算与发布）。
+    本文件测试目标是编排器主流程（事件/状态/repair/publish）。
+    [REVIEW-V2-R1] 复盘 = Market Dashboard projection 重建（optional sidecar），
+    由 after_close_orchestrator._execute_rebuilding_market_dashboard 调用
+    market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection。
+    本文件不验证投影计算本身，故 mock 该重建为成功返回，避免真实重 I/O。
     """
-    fake_review_run = MagicMock()
-    fake_review_run.id = uuid.uuid4()
-    fake_review_run.status = "published"
-    fake_review_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-    fake_review_run.expected_scope_count = 0
-    fake_review_run.signal_count = 0
-    fake_review_run.coverage_ratio = 1.0
+    from datetime import date as _date
+
+    fake_dashboard_result = MagicMock()
+    fake_dashboard_result.market_rows = 1
+    fake_dashboard_result.scope_rows = 1
+    fake_dashboard_result.projection_trade_date = _date(2026, 6, 25)
     with (
         patch(
-            "app.services.review_orchestrator_service.create_run",
-            new=AsyncMock(return_value=fake_review_run),
-        ),
-        patch(
-            "app.services.review_publication_service.get_published_review_run_id",
-            new=AsyncMock(return_value=fake_review_run.id),
+            "app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection",
+            new=AsyncMock(return_value=fake_dashboard_result),
         ),
         # [CHANGE-20260806-005 / Phase 2] 生产 orchestrator 用原子发布服务
         # `publish_stock_core_atomically`（唯一入口）。模块级 mock 原子发布，
@@ -2420,376 +2411,6 @@ class _SimulatedProcessDeath(BaseException):
 
 @pytest.mark.postgres
 @pytest.mark.asyncio
-async def test_crash_resume_publishing_checkpoint_before_enhancement(
-    db_session,
-) -> None:
-    """[AUDIT-CORRECTION-01 / Blocker 1] 真·两段式 crash-resume。
-
-    8/25 真相是「进程/容器消失」，finally/except 都来不及正常收尾。
-    因此必须用不被 except Exception 捕获的 BaseException 模拟 process death。
-
-    关键：注入点必须是**真实 History owner**，而非 computing_features 主链。
-    经源码确认：
-        compute_review_core_with_run_items  = computing_features / stock_core compute
-        advance_history_to_trade_date       = computing_history 正式 owner
-
-    正确顺序：
-        computing_features → publishing → computing_history(advance_history_to_trade_date)
-        → computing_review(_execute_review_step) → enhancements
-
-    故 Attempt 1 在 advance_history_to_trade_date 抛 _SimulatedProcessDeath：
-        stock_core 已正式发布 + publishing checkpoint 已 commit，但 History 未完成即进程消失。
-
-    Attempt 1 必须证明：
-        compute_review_core_with_run_items（core）count == 1
-        stock_core canonical publish count == 1
-        stock_core canonical pointer exists
-        advance_history_to_trade_date entered（count == 1）→ 抛 SimulatedProcessDeath
-        last_completed_step == "publishing"
-        _execute_review_step（Review）NOT entered
-
-    Attempt 2（same job_run_id + 新 fenced ownership）：
-        last_completed_step = "publishing"、lease_epoch 递增（模拟新 claim）后重新执行。
-    必须证明：
-        compute_review_core_with_run_items count 仍 == 1（core 不重复）
-        stock_core canonical publish count 仍 == 1（不重复发布）
-        advance_history_to_trade_date 第二次正常完成（count == 2）
-        _execute_review_step 进入（count == 1）
-        last_completed_step == "review"、终态 succeeded
-    """
-    target_trade_date = date(2026, 8, 25)
-
-    dsa_run, _ = await _create_dsa_strategy_run(
-        db_session, status="completed", trade_date=target_trade_date,
-    )
-    dsa_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-    await db_session.flush()
-
-    job_run = await _create_after_close_job_run(
-        db_session, status="running", trade_date=target_trade_date,
-    )
-
-    core_compute_count = {"n": 0}
-    core_publish_count = {"n": 0}
-    advance_history_count = {"n": 0}
-    review_step_count = {"n": 0}
-
-    def _make_mocks(history_raises: bool):
-        async def _fake_publish_stock_core(db, *a, **k):
-            core_publish_count["n"] += 1
-            return MagicMock(id=uuid.uuid4())
-
-        async def _fake_compute_review_core(*a, **k):
-            # 这是 computing_features 主链（core compute），不是 History
-            core_compute_count["n"] += 1
-            return {"snapshot_count": 1, "failed_count": 0}
-
-        async def _fake_advance_history(*a, **k):
-            # 真实 History owner：computing_history 业务体调用它
-            advance_history_count["n"] += 1
-            if history_raises:
-                raise _SimulatedProcessDeath("process disappeared during History advance")
-            return {"target_state_count": 100, "advanced": True}
-
-        return (
-            _fake_publish_stock_core,
-            _fake_compute_review_core,
-            _fake_advance_history,
-        )
-
-    original_get = db_session.get
-
-    async def _fake_get(model, id, *args, **kwargs):
-        if model is SchedulerJobRun and id == job_run.id:
-            return job_run
-        if model is StrategyRun and id == dsa_run.id:
-            return dsa_run
-        return await original_get(model, id, *args, **kwargs)
-
-    class _FakeSessionContext:
-        async def __aenter__(self):
-            return db_session
-
-        async def __aexit__(self, *args):
-            return False
-
-    fake_published_run = MagicMock()
-    fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-    fake_published_run.status = "succeeded"
-
-    async def _fake_publish_run(db, run_id):
-        fake_published_run.published_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-        return fake_published_run
-
-    fake_batch_result = BatchResult(total=100, succeeded=95)
-    fake_batch_result.dsa_run_id = dsa_run.id
-
-    # [AUDIT-CORRECTION-03 / Reviewer #1] 不得 fake 整个 Review owner。
-    # 这里只记录「_execute_review_step 被进入」的次数，然后**调用 production**
-    # _execute_review_step 真跑（其内部重型 I/O owner 单独 mock+计数）。
-    # 这样 Attempt2 真正经过 production Review orchestration branch，
-    # 并通过 review create/compute/publish 的计数证明真实完成了 Review。
-    async def _spy_review_step(*a, **k):
-        review_step_count["n"] += 1
-        return await _real_execute_review_step(*a, **k)
-
-    # Review 内部重型 owner 的 spy+mock：返回 production 代码所需的最小属性，
-    # 同时记录调用次数。production _execute_review_step 会真实读取这些返回值。
-    review_create_count = {"n": 0}
-    review_compute_count = {"n": 0}
-    review_publish_count = {"n": 0}
-
-    def _make_review_owner_mocks():
-        async def _fake_create_run(db, *a, **k):
-            review_create_count["n"] += 1
-            rr = MagicMock()
-            rr.id = uuid.uuid4()
-            rr.status = "created"
-            rr.expected_scope_count = 1
-            rr.signal_count = 1
-            rr.coverage_ratio = 1.0
-            rr.algorithm_version = "v1"
-            rr.filter_version = "f1"
-            rr.source_core_run_id = uuid.uuid4()
-            rr.source_board_run_id = None
-            return rr
-
-        async def _fake_compute_run(db, review_run, *a, **k):
-            review_compute_count["n"] += 1
-            return {
-                "status": "succeeded",
-                "expected_scope_count": 1,
-                "signal_count": 1,
-                "coverage_ratio": 1.0,
-            }
-
-        async def _fake_publish_run(db, review_run, *a, **k):
-            review_publish_count["n"] += 1
-            pub = MagicMock()
-            pub.id = uuid.uuid4()
-            return pub, None
-
-        return _fake_create_run, _fake_compute_run, _fake_publish_run
-
-    (_fake_create_run, _fake_compute_run, _fake_publish_run_review) = _make_review_owner_mocks()
-
-    def _add_review_patches(patchers):
-        # 内部重型 owner：create/compute/publish（计数+最小返回值）
-        patchers.extend([
-            patch(
-                "app.services.review_orchestrator_service.create_run",
-                new=_fake_create_run,
-            ),
-            patch(
-                "app.services.review_orchestrator_service.compute_run",
-                new=_fake_compute_run,
-            ),
-            patch(
-                "app.services.review_orchestrator_service.publish_run",
-                new=_fake_publish_run_review,
-            ),
-            patch(
-                "app.services.review_orchestrator_service.get_run",
-                new=AsyncMock(return_value=MagicMock(
-                    id=uuid.uuid4(), status="signals_ready",
-                    expected_scope_count=1, signal_count=1, coverage_ratio=1.0,
-                    algorithm_version="v1", filter_version="f1",
-                    source_core_run_id=uuid.uuid4(), source_board_run_id=None,
-                )),
-            ),
-            # review publication gate：默认「尚未发布 / 可发布」
-            patch(
-                "app.services.review_publication_service.get_published_review_run_id",
-                new=AsyncMock(return_value=None),
-            ),
-            patch(
-                "app.services.review_publication_service.is_formally_published_review_run",
-                new=AsyncMock(return_value=False),
-            ),
-            patch(
-                "app.services.review_publication_service.evaluate_publish_gate",
-                new=AsyncMock(return_value=(True, [])),
-            ),
-        ])
-        return patchers
-
-    def _patch_common(pub_core, compute_core, hist_adv):
-        patchers = [
-            patch(
-                "app.services.after_close_orchestrator.AsyncSessionLocal",
-                new=MagicMock(return_value=_FakeSessionContext()),
-            ),
-            patch.object(db_session, "commit", new=db_session.flush),
-            patch.object(db_session, "get", new=_fake_get),
-            patch.object(
-                BarsSchedulerService, "refresh_all_instruments",
-                new=AsyncMock(return_value=fake_batch_result),
-            ),
-            patch(
-                "app.services.after_close_orchestrator._poll_dsa_run_status",
-                new=AsyncMock(return_value="completed"),
-            ),
-            patch.object(
-                StrategyBatchService, "_check_quality_gates",
-                new=AsyncMock(return_value=True),
-            ),
-            patch.object(
-                StrategyBatchService, "publish_run",
-                new=_fake_publish_run,
-            ),
-            patch(
-                "app.services.after_close_orchestrator.get_active_a_share_instruments",
-                new=AsyncMock(return_value=[uuid.uuid4()]),
-            ),
-            patch(
-                "app.services.factor_publication_service.publish_stock_core",
-                new=pub_core,
-            ),
-            patch(
-                "app.services.factor_publication_service.compute_coverage",
-                new=AsyncMock(return_value={
-                    "coverage": 1.0, "succeeded": 1, "expected": 1,
-                    "failed": 0, "pending": 0, "running": 0, "skipped": 0,
-                }),
-            ),
-            patch(
-                "app.services.board_analysis_service.compute_all_boards",
-                new=AsyncMock(return_value={"published": 1, "failed": 0}),
-            ),
-            # 真实 History owner：inject crash/failure 的唯一正确点
-            patch(
-                "app.services.first_pyramid_history_service.advance_history_to_trade_date",
-                new=hist_adv,
-            ),
-            # 真实 computing_features 主链（core compute）
-            patch(
-                "app.services.feature_snapshot_service.compute_review_core_with_run_items",
-                new=compute_core,
-            ),
-            patch(
-                "app.services.state_event_service.generate_events_for_run",
-                new=AsyncMock(return_value={"event_count": 1}),
-            ),
-            patch(
-                "app.services.state_event_service.cleanup_old_events",
-                new=AsyncMock(return_value={"deleted_count": 0}),
-            ),
-            patch(
-                "app.services.auction_anchor_service.generate_and_publish_auction_anchors",
-                new=AsyncMock(return_value={"status": "published", "publication_id": uuid.uuid4()}),
-            ),
-            # [AUDIT-CORRECTION-03] 只 spy 进入次数，内部调用 production _execute_review_step
-            patch(
-                "app.services.after_close_orchestrator._execute_review_step",
-                new=_spy_review_step,
-            ),
-        ]
-        return _add_review_patches(patchers)
-
-    pub_core_1, compute_core_1, hist_1 = _make_mocks(history_raises=True)
-    with contextlib.ExitStack() as stack:
-        for p in _patch_common(pub_core_1, compute_core_1, hist_1):
-            stack.enter_context(p)
-        # 必须真正异常退出（BaseException 不被 except Exception 吞掉）
-        with pytest.raises(_SimulatedProcessDeath):
-            await execute_after_close_run(
-                job_run_id=job_run.id,
-                trade_date=target_trade_date,
-                dsa_poll_interval=0,
-                dsa_poll_timeout=1,
-            )
-
-    # Attempt 1 断言
-    await db_session.refresh(job_run)
-    meta1 = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
-    assert core_compute_count["n"] == 1, (
-        f"[Attempt1] computing_features(core) 应已完成 1 次，实际 {core_compute_count['n']}"
-    )
-    assert core_publish_count["n"] == 1, (
-        f"[Attempt1] stock_core 应已发布 1 次，实际 {core_publish_count['n']}"
-    )
-    assert meta1.get("last_completed_step") == "publishing", (
-        f"[Attempt1] publishing checkpoint 应先于 crash 落库，"
-        f"实际={meta1.get('last_completed_step')}"
-    )
-    assert advance_history_count["n"] == 1, (
-        f"[Attempt1] advance_history_to_trade_date 应已进入 1 次，"
-        f"实际 {advance_history_count['n']}"
-    )
-    assert review_step_count["n"] == 0, (
-        f"[Attempt1] crash 点前的 computing_review 不得进入，实际 {review_step_count['n']}"
-    )
-    # stock_core canonical pointer 已存在
-    from sqlalchemy import select
-
-    from app.models.stock_feature_snapshot import StockFeatureSnapshot
-    snap = (await db_session.execute(
-        select(StockFeatureSnapshot).where(
-            StockFeatureSnapshot.trade_date == target_trade_date,
-        )
-    )).scalars().first()
-    assert snap is not None, "[Attempt1] stock_core canonical pointer 必须已存在"
-    assert snap.published_at is not None, "[Attempt1] stock_core pointer 应已发布"
-
-    # ===== Attempt 2：模拟新 fenced ownership 后 resume =====
-    # 设置 resume 状态：last_completed_step=publishing（不重跑 core/publish），lease_epoch 递增
-    meta1["last_completed_step"] = "publishing"
-    job_run.metadata_json = json.dumps(meta1, ensure_ascii=False)
-    from sqlalchemy import text as _text
-    await db_session.execute(
-        _text("UPDATE scheduler_job_runs SET lease_epoch = lease_epoch + 1 WHERE id = :id"),
-        {"id": job_run.id},
-    )
-    await db_session.flush()
-
-    pub_core_2, compute_core_2, hist_2 = _make_mocks(history_raises=False)
-    with contextlib.ExitStack() as stack:
-        for p in _patch_common(pub_core_2, compute_core_2, hist_2):
-            stack.enter_context(p)
-        await execute_after_close_run(
-            job_run_id=job_run.id,
-            trade_date=target_trade_date,
-            dsa_poll_interval=0,
-            dsa_poll_timeout=1,
-        )
-
-    # Attempt 2 断言：core 不重复、History 完成、Review 进入并完成
-    await db_session.refresh(job_run)
-    assert core_compute_count["n"] == 1, (
-        f"[Attempt2] resume 不得重复 core compute，实际 {core_compute_count['n']}"
-    )
-    assert core_publish_count["n"] == 1, (
-        f"[Attempt2] resume 不得重复发布 stock_core，实际 {core_publish_count['n']}"
-    )
-    assert advance_history_count["n"] == 2, (
-        f"[Attempt2] advance_history_to_trade_date 应第二次正常完成（count=2），"
-        f"实际 {advance_history_count['n']}"
-    )
-    assert review_step_count["n"] == 1, (
-        f"[Attempt2] resume 应进入 computing_review 1 次，实际 {review_step_count['n']}"
-    )
-    # [AUDIT-CORRECTION-03 #1] 证明真实经过 production Review orchestration：
-    # 不 fake 整个 owner，仅证明内部重型 owner 各被真实调用 1 次。
-    assert review_create_count["n"] == 1, (
-        f"[Attempt2] review create_run 应被真实调用 1 次，实际 {review_create_count['n']}"
-    )
-    assert review_compute_count["n"] == 1, (
-        f"[Attempt2] review compute_run 应被真实调用 1 次，实际 {review_compute_count['n']}"
-    )
-    assert review_publish_count["n"] == 1, (
-        f"[Attempt2] review publish_run 应被真实调用 1 次，实际 {review_publish_count['n']}"
-    )
-    meta2 = json.loads(job_run.metadata_json) if job_run.metadata_json else {}
-    assert meta2.get("last_completed_step") == "review", (
-        f"[Attempt2] resume 应完成 Review，last_completed_step={meta2.get('last_completed_step')}"
-    )
-    assert job_run.status == "succeeded", (
-        f"[Attempt2] resume 终态应为 succeeded，实际 {job_run.status}"
-    )
-
-
-@pytest.mark.postgres
-@pytest.mark.asyncio
 async def test_enhancement_failure_does_not_block_review(
     db_session,
 ) -> None:
@@ -3908,6 +3529,7 @@ def test_ac04_no_intraday_readiness_in_after_close_source() -> None:
 
     from app import worker as worker_mod
     from app.services import after_close_orchestrator as acm
+    from app.services import after_close_orchestrator_worker_poll as poll_mod
 
     # AST 检查：after_close_orchestrator 不得调用 compute_intraday_coverage
     source = inspect.getsource(acm)
@@ -3930,21 +3552,25 @@ def test_ac04_no_intraday_readiness_in_after_close_source() -> None:
         f"发现调用行号: {intraday_calls}，15m readiness 已从 after-close 链路移除"
     )
 
-    # AST 检查：worker 入口必须复用 execute_after_close_run
-    worker_source = inspect.getsource(worker_mod)
-    worker_tree = ast.parse(worker_source)
+    # AST 检查：worker 入口链必须复用 execute_after_close_run
+    # 注：worker.py 现为 thin façade，实际调用在 after_close_orchestrator_worker_poll
+    # （[AfterCloseWorker] 主循环委托 poll_after_close_once → execute_after_close_run）。
     worker_calls_execute = False
-    for node in ast.walk(worker_tree):
-        if isinstance(node, ast.Call):
-            if isinstance(node.func, ast.Name) and node.func.id == "execute_after_close_run":
-                worker_calls_execute = True
-                break
-            if isinstance(node.func, ast.Attribute) and node.func.attr == "execute_after_close_run":
-                worker_calls_execute = True
-                break
+    for mod in (worker_mod, poll_mod):
+        mod_tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(mod_tree):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name) and node.func.id == "execute_after_close_run":
+                    worker_calls_execute = True
+                    break
+                if isinstance(node.func, ast.Attribute) and node.func.attr == "execute_after_close_run":
+                    worker_calls_execute = True
+                    break
+        if worker_calls_execute:
+            break
 
     assert worker_calls_execute, (
-        "[AC-04] Worker 必须复用 execute_after_close_run 作为唯一 readiness 入口"
+        "[AC-04] Worker 入口链必须复用 execute_after_close_run 作为唯一 readiness 入口"
     )
 
 

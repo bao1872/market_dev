@@ -5,7 +5,7 @@ joint breadth, amount contribution, concentration, EW/AW gap.
 
 This module is independent from:
 - legacy AuctionAnchor implementation (auction_anchor_service.py);
-- the Review canonical domain (app.domain.review.*).
+- the retired scope-observation pipeline.
 
 Compute shape contract (PRD §9/§10/AU-24-4): columnar arrays + boolean masks
 + batch/vector reductions (``np.bincount`` / masks / ``np.partition``). No

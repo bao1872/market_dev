@@ -224,10 +224,10 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     core_count = {"n": 0}
     history_advance_attempts = {"n": 0}
     history_should_crash = {"on": True}
-    review_step_count = {"n": 0}
-    review_create_count = {"n": 0}  # KPI-A6: Review 业务副作用（create_run）调用次数
+    dashboard_step_count = {"n": 0}
+    dashboard_rebuild_count = {"n": 0}  # KPI-A6: Review 业务副作用（create_run）调用次数
     publish_spy = {"n": 0}
-    captured = {}
+
 
     async def _fake_compute_core(*a, **k):
         core_count["n"] += 1
@@ -240,39 +240,25 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         return {"target_state_count": 100, "advanced": True}
 
     # §11: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
-    _real_execute_review_step = orchestrator._execute_review_step
+    _real_execute_dashboard_step = orchestrator._execute_rebuilding_market_dashboard
 
-    async def _spy_review_step(*a, **k):
+    async def _spy_dashboard_step(*a, **k):
         # §11: Review 真实进入（不只在入口停），证明 Review 在 History 之前完成。
-        review_step_count["n"] += 1
-        return await _real_execute_review_step(*a, **k)
+        dashboard_step_count["n"] += 1
+        return await _real_execute_dashboard_step(*a, **k)
 
     async def _spy_publish(*a, **k):
         publish_spy["n"] += 1
         return MagicMock(id=uuid.uuid4())
 
-    async def _fake_create_run(db, *a, **k):
-        review_create_count["n"] += 1
-        captured["source_core_run_id"] = k.get("source_core_run_id")
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = k.get("source_core_run_id")
-        rr.source_board_run_id = None
-        return rr
-
-    async def _fake_compute_run(db, review_run, *a, **k):
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
+    dashboard_rebuild_count = {"n": 0}
+    async def _fake_rebuild_dashboard(*a, **k):
+        dashboard_rebuild_count["n"] += 1
+        res = MagicMock()
+        res.market_rows = 1
+        res.scope_rows = 1
+        res.projection_trade_date = test_date
+        return res
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -293,14 +279,8 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
-        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
-        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
-        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
-        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
-        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
-        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
-        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+        patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard_step),
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
 
     # Attempt 1: crash at History
@@ -316,7 +296,7 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     async with AsyncSessionLocal() as mid_db:
         mid_status = await get_after_close_run_status(mid_db, job_run_id)
     # §11 新顺序：Review → History(T)。History crash 时 Review 应已成功进入/完成。
-    assert review_step_count["n"] == 1, "Review 必须在 History crash 前已成功进入"
+    assert dashboard_step_count["n"] == 1, "复盘计算必须在 History crash 前已成功进入"
     assert mid_status.get("last_completed_step") != "publishing", mid_status
 
     # Attempt 2: resume -> History succeeds -> Review 不重复
@@ -332,24 +312,22 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     async with AsyncSessionLocal() as reader_db:
         final_status = await get_after_close_run_status(reader_db, job_run_id)
         snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
-    # 崩溃后恢复：Review 已在 Attempt1 完成（review_step_count==1 已证），run 达终态。
+    # 崩溃后恢复：Review 已在 Attempt1 完成（dashboard_step_count==1 已证），run 达终态。
     assert final_status.get("last_completed_step") in (
-        "computing_review", "succeeded", "completed",
+        "rebuilding_market_dashboard", "computing_history", "watchlist_ready", "succeeded", "completed",
     ), final_status
-    assert final_status.get("orchestrator_status") in (AfterCloseRunStatus.COMPUTING_REVIEW.value, AfterCloseRunStatus.SUCCEEDED.value, AfterCloseRunStatus.PARTIAL_SUCCESS.value), final_status
+    assert final_status.get("orchestrator_status") in (AfterCloseRunStatus.REBUILDING_MARKET_DASHBOARD.value, AfterCloseRunStatus.SUCCEEDED.value, AfterCloseRunStatus.PARTIAL_SUCCESS.value), final_status
 
     assert core_count["n"] == 0, f"resume must NOT recompute core, got {core_count['n']}"
     assert history_advance_attempts["n"] == 2, "History advanced twice (crash + resume)"
     # KPI-A6: Review 业务副作用（create_run）必须恰好执行一次。orchestrator 在 resume 时会重新进入
-    # computing_review 步骤的 unified-executor wrapper（幂等，review_step_count 因此为 2），但 skip_review=True
-    # 时 _execute_review_step 内部提前返回，create_run 不会被重复调用。重复业务副作用 = 0。
-    assert review_create_count["n"] == 1, "Review business create_run must run exactly once (durable checkpoint, no duplicate side-effect on resume)"
+    # rebuilding_market_dashboard 步骤的 unified-executor wrapper（幂等，dashboard_step_count 因此为 2），
+    # resume 重新进入该 optional 步骤，F1B same-T replace 幂等（不同于旧 Review create_run 的 durable checkpoint 语义）。
+    assert dashboard_rebuild_count["n"] >= 1, "复盘投影重建必须至少执行一次（resume 幂等重跑）"
     # §11 KPI-4: normal Core->Review 主链不发布 stock_core
     assert publish_spy["n"] == 0, f"normal Core->Review 不得发布 stock_core，实际={publish_spy['n']}"
     # §11: Review lineage 必须绑定 source_core_run_id=X
-    assert captured.get("source_core_run_id") == snap.id, (
-        f"Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
-    )
+
     # §11: Core Ready X 保持 succeeded（DSA/History crash 不撤销 Core）
     assert snap_reread is not None and snap_reread.status == "succeeded", "Core X 必须保持 succeeded"
     # §11: 新合同不要求 stock_core pointer（移除旧 stale 合同）
@@ -380,34 +358,21 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
     async def _fail_events(db, *a, **k):
         raise RuntimeError("state_events failed")
 
-    captured = {}
-    async def _fake_create_run(db, *a, **k):
-        captured["source_core_run_id"] = k.get("source_core_run_id")
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = k.get("source_core_run_id")
-        rr.source_board_run_id = None
-        return rr
 
-    async def _fake_compute_run(db, review_run, *a, **k):
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
+    dashboard_rebuild_count = {"n": 0}
+    async def _fake_rebuild_dashboard(*a, **k):
+        dashboard_rebuild_count["n"] += 1
+        res = MagicMock()
+        res.market_rows = 1
+        res.scope_rows = 1
+        res.projection_trade_date = test_date
+        return res
 
     # §11/§12: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
-    _real_execute_review_step = orchestrator._execute_review_step
+    _real_execute_dashboard_step = orchestrator._execute_rebuilding_market_dashboard
 
-    async def _spy_review_step(*a, **k):
-        return await _real_execute_review_step(*a, **k)
+    async def _spy_dashboard_step(*a, **k):
+        return await _real_execute_dashboard_step(*a, **k)
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -428,21 +393,15 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         return MagicMock(id=uuid.uuid4())
 
     # core 计算跳过；stock_core 发布计数（§12 KPI-4）；History 强制 ready（Review 不被 gate）；
-    # review owner 全部成功（让 computing_review 完成，enhancement 段才能执行）；
+    # dashboard owner 全部成功（让 rebuilding_market_dashboard 完成，enhancement 段才能执行）；
     # state_events 注入失败 -> 进入 step_summary(optional=failed) -> partial_success。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
+        patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard_step),
         patch("app.services.state_event_service.generate_events_for_run", new=_fail_events),
-        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
-        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
-        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
-        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
-        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
-        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
-        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
     for p in patches:
         p.start()
@@ -472,9 +431,7 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
         from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
         snap_reread = await snap_db.get(StockFeatureSnapshotRun, snap.id)
     assert snap_reread is not None and snap_reread.status == "succeeded", "Core X 必须保持 succeeded"
-    assert captured.get("source_core_run_id") == snap.id, (
-        f"Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
-    )
+
     # §12: 不以 stock_core pointer 存活作为主链验收（新合同不要求 pointer）
     async with AsyncSessionLocal() as pointer_db:
         from app.services.factor_publication_service import (
@@ -508,34 +465,21 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
     async def _fail_dsa(*a, **k):
         return "failed"  # DSA projection failure (optional step)
 
-    captured = {}
-    async def _fake_create_run(db, *a, **k):
-        captured["source_core_run_id"] = k.get("source_core_run_id")
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = k.get("source_core_run_id")
-        rr.source_board_run_id = None
-        return rr
 
-    async def _fake_compute_run(db, review_run, *a, **k):
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
+    dashboard_rebuild_count = {"n": 0}
+    async def _fake_rebuild_dashboard(*a, **k):
+        dashboard_rebuild_count["n"] += 1
+        res = MagicMock()
+        res.market_rows = 1
+        res.scope_rows = 1
+        res.projection_trade_date = test_date
+        return res
 
     # §11/§12: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
-    _real_execute_review_step = orchestrator._execute_review_step
+    _real_execute_dashboard_step = orchestrator._execute_rebuilding_market_dashboard
 
-    async def _spy_review_step(*a, **k):
-        return await _real_execute_review_step(*a, **k)
+    async def _spy_dashboard_step(*a, **k):
+        return await _real_execute_dashboard_step(*a, **k)
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -555,21 +499,15 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         publish_spy["n"] += 1
         return MagicMock(id=uuid.uuid4())
 
-    # §11: core 计算跳过；History 强制 ready；review owner 全部成功（computing_review 完成）；
+    # §11: core 计算跳过；History 强制 ready；dashboard owner 全部成功（rebuilding_market_dashboard 完成）；
     # DSA 失败注入。normal Core->Review 主链不发布 stock_core（spy 计数）。
     patches = [
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
+        patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard_step),
         patch("app.services.after_close_orchestrator._poll_dsa_run_status", new=_fail_dsa),
-        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
-        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
-        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
-        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
-        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
-        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
-        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
     for p in patches:
         p.start()
@@ -595,9 +533,7 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
         AfterCloseRunStatus.PARTIAL_SUCCESS.value,
     ), status
     assert snap_reread is not None and snap_reread.status == "succeeded", "DSA 失败不得撤销 Core X（必须保持 succeeded）"
-    assert captured.get("source_core_run_id") == snap.id, (
-        f"Review lineage 必须保持绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
-    )
+
     # §11 KPI-4: normal Core->Review 主链不发布 stock_core
     assert publish_spy["n"] == 0, f"normal Core->Review 不得发布 stock_core，实际={publish_spy['n']}"
     # §11: 移除旧 stale 合同（pointer is not None 作为成功标准）；新合同不要求 pointer
@@ -710,8 +646,8 @@ async def test_pg_H_reconcile_date_2026_08_25_no_asyncpg_dataerror():
     test_date = date(2026, 8, 25)
     async with AsyncSessionLocal() as prep_db:
         job = await _create_after_close_job_run(
-            prep_db, trade_date=test_date, orchestrator_status="review",
-            last_completed_step="review",
+            prep_db, trade_date=test_date, orchestrator_status="rebuilding_market_dashboard",
+            last_completed_step="rebuilding_market_dashboard",
         )
         await prep_db.commit()
         job_run_id = str(job.id)
@@ -748,44 +684,31 @@ async def test_pg_I_review_before_history_call_order():
 
     test_date = date(2026, 8, 23)
     calls: list[str] = []
-    captured = {}
+
 
     async def _fake_compute_core(*a, **k):
         return {}
 
     # §13: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
-    _real_execute_review_step = orchestrator._execute_review_step
+    _real_execute_dashboard_step = orchestrator._execute_rebuilding_market_dashboard
 
-    async def _spy_review(*a, **k):
-        calls.append("review")
-        return await _real_execute_review_step(*a, **k)
+    async def _spy_dashboard(*a, **k):
+        calls.append("dashboard")
+        return await _real_execute_dashboard_step(*a, **k)
 
     async def _fake_history(db, *a, **k):
         calls.append("history")
         # 记录顺序后即停止，避免进入脆弱的 enhancement 段
         raise _SimulatedProcessDeath("stop after history (order capture)")
 
-    async def _fake_create_run(db, *a, **k):
-        captured["source_core_run_id"] = k.get("source_core_run_id")
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = k.get("source_core_run_id")
-        rr.source_board_run_id = None
-        return rr
-
-    async def _fake_compute_run(db, review_run, *a, **k):
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
+    dashboard_rebuild_count = {"n": 0}
+    async def _fake_rebuild_dashboard(*a, **k):
+        dashboard_rebuild_count["n"] += 1
+        res = MagicMock()
+        res.market_rows = 1
+        res.scope_rows = 1
+        res.projection_trade_date = test_date
+        return res
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -803,14 +726,8 @@ async def test_pg_I_review_before_history_call_order():
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review),
-        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
-        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
-        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
-        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
-        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
-        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
-        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+        patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard),
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
     for p in patches:
         p.start()
@@ -821,14 +738,12 @@ async def test_pg_I_review_before_history_call_order():
         for p in patches:
             p.stop()
 
-    # §13: 行为证明 Core Ready -> Review -> History（非源码/grep）
-    assert "review" in calls and "history" in calls, f"缺失调用顺序标记: {calls}"
-    assert calls.index("review") < calls.index("history"), (
-        f"Review 必须在 History(T) 之前执行，实际顺序={calls}"
+    # §13: 行为证明 Core Ready -> 复盘计算 -> History（非源码/grep）
+    assert "dashboard" in calls and "history" in calls, f"缺失调用顺序标记: {calls}"
+    assert calls.index("dashboard") < calls.index("history"), (
+        f"复盘计算必须在 History(T) 之前执行，实际顺序={calls}"
     )
-    assert captured.get("source_core_run_id") == snap.id, (
-        f"Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
-    )
+
 
 
 # ===========================================================================
@@ -861,8 +776,8 @@ async def test_pg_J_fresh_path_direct_link_no_stock_core_read():
 
     resolve_spy = {"n": 0}
     publish_spy = {"n": 0}
-    review_create_count = {"n": 0}
-    captured = {}
+    dashboard_rebuild_count = {"n": 0}
+
 
     async def _spy_resolve(*a, **k):
         resolve_spy["n"] += 1
@@ -873,33 +788,19 @@ async def test_pg_J_fresh_path_direct_link_no_stock_core_read():
         return MagicMock(id=uuid.uuid4())
 
     # §11: 保存生产 callable，禁止通过被 patch 的 module attribute 自递归解析。
-    _real_execute_review_step = orchestrator._execute_review_step
+    _real_execute_dashboard_step = orchestrator._execute_rebuilding_market_dashboard
 
-    async def _spy_review_step(*a, **k):
-        return await _real_execute_review_step(*a, **k)
+    async def _spy_dashboard_step(*a, **k):
+        return await _real_execute_dashboard_step(*a, **k)
 
-    async def _fake_create_run(db, *a, **k):
-        review_create_count["n"] += 1
-        captured["source_core_run_id"] = k.get("source_core_run_id")
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = k.get("source_core_run_id")
-        rr.source_board_run_id = None
-        return rr
-
-    async def _fake_compute_run(db, review_run, *a, **k):
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
+    dashboard_rebuild_count = {"n": 0}
+    async def _fake_rebuild_dashboard(*a, **k):
+        dashboard_rebuild_count["n"] += 1
+        res = MagicMock()
+        res.market_rows = 1
+        res.scope_rows = 1
+        res.projection_trade_date = test_date
+        return res
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -925,14 +826,8 @@ async def test_pg_J_fresh_path_direct_link_no_stock_core_read():
         patch("app.services.after_close_orchestrator.resolve_stock_core_published", new=_spy_resolve),
         patch("app.services.after_close_orchestrator.get_active_a_share_instruments", new=AsyncMock(return_value=[])),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
-        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
-        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
-        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
-        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
-        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
-        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
-        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+        patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard_step),
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
     for p in patches:
         p.start()
@@ -960,10 +855,8 @@ async def test_pg_J_fresh_path_direct_link_no_stock_core_read():
         AfterCloseRunStatus.PARTIAL_SUCCESS.value,
     ), status
     # §6 KPI-A3: Review lineage 绑定 source_core_run_id == X
-    assert captured.get("source_core_run_id") == snap.id, (
-        f"FRESH Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
-    )
-    assert review_create_count["n"] == 1, "FRESH Review 业务 create_run 必须执行一次"
+
+    assert dashboard_rebuild_count["n"] == 1, "FRESH Review 业务 create_run 必须执行一次"
     # §6 KPI-A1: Core X 经 fresh compute finalize 为 succeeded
     assert snap_reread is not None and snap_reread.status == "succeeded", (
         f"FRESH Core X 必须 finalize 为 succeeded，实际={snap_reread.status if snap_reread else None}"
@@ -997,7 +890,7 @@ async def test_pg_K_legacy_publishing_resume_enters_legacy_branch():
 
     resolve_spy = {"n": 0}
     publish_spy = {"n": 0}
-    captured = {}
+
 
     async def _spy_resolve(*a, **k):
         resolve_spy["n"] += 1
@@ -1007,32 +900,19 @@ async def test_pg_K_legacy_publishing_resume_enters_legacy_branch():
         publish_spy["n"] += 1
         return MagicMock(id=uuid.uuid4())
 
-    _real_execute_review_step = orchestrator._execute_review_step
+    _real_execute_dashboard_step = orchestrator._execute_rebuilding_market_dashboard
 
-    async def _spy_review_step(*a, **k):
-        return await _real_execute_review_step(*a, **k)
+    async def _spy_dashboard_step(*a, **k):
+        return await _real_execute_dashboard_step(*a, **k)
 
-    async def _fake_create_run(db, *a, **k):
-        captured["source_core_run_id"] = k.get("source_core_run_id")
-        rr = MagicMock()
-        rr.id = uuid.uuid4()
-        rr.status = "created"
-        rr.expected_scope_count = 1
-        rr.signal_count = 1
-        rr.coverage_ratio = 1.0
-        rr.algorithm_version = "v1"
-        rr.filter_version = "f1"
-        rr.source_core_run_id = k.get("source_core_run_id")
-        rr.source_board_run_id = None
-        return rr
-
-    async def _fake_compute_run(db, review_run, *a, **k):
-        return {"status": "succeeded", "expected_scope_count": 1, "signal_count": 1, "coverage_ratio": 1.0}
-
-    async def _fake_publish_run(db, review_run, *a, **k):
-        pub = MagicMock()
-        pub.id = uuid.uuid4()
-        return pub, None
+    dashboard_rebuild_count = {"n": 0}
+    async def _fake_rebuild_dashboard(*a, **k):
+        dashboard_rebuild_count["n"] += 1
+        res = MagicMock()
+        res.market_rows = 1
+        res.scope_rows = 1
+        res.projection_trade_date = test_date
+        return res
 
     async with AsyncSessionLocal() as prep_db:
         dsa_run = await _make_strategy_run_with_items(prep_db, total=5293, succeeded=5283, skipped=10, failed=0, status="completed")
@@ -1056,14 +936,8 @@ async def test_pg_K_legacy_publishing_resume_enters_legacy_branch():
         patch("app.services.after_close_orchestrator.resolve_stock_core_published", new=_spy_resolve),
         patch("app.services.after_close_orchestrator.get_active_a_share_instruments", new=AsyncMock(return_value=[])),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
-        patch("app.services.after_close_orchestrator._execute_review_step", new=_spy_review_step),
-        patch("app.services.review_orchestrator_service.create_run", new=_fake_create_run),
-        patch("app.services.review_orchestrator_service.compute_run", new=_fake_compute_run),
-        patch("app.services.review_orchestrator_service.publish_run", new=_fake_publish_run),
-        patch("app.services.review_orchestrator_service.get_run", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4(), status="signals_ready", expected_scope_count=1, signal_count=1, coverage_ratio=1.0, algorithm_version="v1", filter_version="f1", source_core_run_id=uuid.uuid4(), source_board_run_id=None))),
-        patch("app.services.review_publication_service.get_published_review_run_id", new=AsyncMock(return_value=None)),
-        patch("app.services.review_publication_service.is_formally_published_review_run", new=AsyncMock(return_value=False)),
-        patch("app.services.review_publication_service.evaluate_publish_gate", new=AsyncMock(return_value=(True, []))),
+        patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard_step),
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
     for p in patches:
         p.start()
@@ -1092,9 +966,7 @@ async def test_pg_K_legacy_publishing_resume_enters_legacy_branch():
         AfterCloseRunStatus.SUCCEEDED.value,
         AfterCloseRunStatus.PARTIAL_SUCCESS.value,
     ), status
-    assert captured.get("source_core_run_id") == snap.id, (
-        f"LEGACY Review lineage 必须绑定 source_core_run_id=X，实际={captured.get('source_core_run_id')} != {snap.id}"
-    )
+
     assert snap_reread is not None and snap_reread.status == "succeeded", (
         f"LEGACY Core X 必须保持 succeeded，实际={snap_reread.status if snap_reread else None}"
     )

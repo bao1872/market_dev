@@ -29,6 +29,11 @@ class AfterCloseRunStatus(StrEnum):
     REFRESHING_DAILY = "refreshing_daily"
     SYNCING_BOARDS = "syncing_boards"
     CHECKING_COVERAGE = "checking_coverage"
+    # [REVIEW-V2-R1] canonical 复盘计算（Market Dashboard projection 重建）。
+    # 语义边界：它是「当前正在执行的运行状态」，**不是 durable checkpoint** ——
+    # 允许进入 AfterCloseRunStatus 与 _PIPELINE_STEPS，但不得进入 _CHECKPOINT_ORDER /
+    # _COMPLETED_STEPS current stage / _COMPLETED_STEP_INDEX 的 key。
+    REBUILDING_MARKET_DASHBOARD = "rebuilding_market_dashboard"
     CREATING_DSA = "creating_dsa"
     WAITING_DSA_WORKER = "waiting_dsa_worker"
     QUALITY_GATE = "quality_gate"
@@ -36,6 +41,8 @@ class AfterCloseRunStatus(StrEnum):
     COMPUTING_FEATURES = "computing_features"
     PUBLISHING = "publishing"
     COMPUTING_HISTORY = "computing_history"
+    # [REVIEW-V2-R1] legacy persisted token：仅供历史 job_run_event / last_completed_step
+    # 读取兼容。新 run 不再写、不再执行；不得作为合法 current mainchain_stage（fail closed）。
     COMPUTING_REVIEW = "computing_review"
     SUCCEEDED = "succeeded"
     FAILED = "failed"

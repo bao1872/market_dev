@@ -75,7 +75,7 @@ from app.services.first_pyramid_history_service import (
 from app.services.first_pyramid_service import HISTORY_CONTRACT_VERSION
 from app.services.idempotency_service import acquire_job_run_lock
 from app.services.job_run_event_service import append_event, list_events
-from app.services.review_history_readiness_service import (
+from app.services.first_pyramid_history_readiness_service import (
     validate_canonical_history_run_readiness,
 )
 from app.services.strategy_batch_service import StrategyBatchService
@@ -117,7 +117,6 @@ _STEP_TIMEOUT_SECONDS: dict[str, float | None] = {
     # 值为 None —— 无 absolute timeout，由 stale watchdog（lease 过期 + heartbeat 不健康）
     # 依据真实无进展判定 stalled，而非总耗时过长。
     "computing_history": None,
-    "computing_review": 1800,
     "auction_anchor": _AUCTION_ANCHOR_TIMEOUT_SECONDS,
 }
 
@@ -2137,503 +2136,7 @@ def _make_history_v3_step(
     return _run
 
 
-async def _execute_review_step(
-    *,
-    job_run_id: uuid.UUID,
-    trade_date: date,
-    snapshot_run_id: uuid.UUID | None,
-    worker_id: str | None,
-    skip_review: bool,
-    stock_core_published: bool,
-    history_run_id: uuid.UUID | None = None,
-    history_ready: bool = False,
-) -> dict[str, Any]:
-    """[AC-02] computing_review 业务体（软失败，不阻断主流程）。
-
-    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 / CORRECTION-04-PG-GATE] 当前合同：
-    Review(T) = Core(T) + History(<T)。当前第一金字塔事实直接来自
-    Core(T) StockFeatureSnapshot（由显式 source_core_run_id=snapshot_run_id=X 锁定）；
-    历史 baseline 来自 FirstPyramidHistoryDailyState 的 <=T-1 状态。
-    History(T) 在 Review 之后由 computing_history 生产，exact-T History(T)
-    不是 Review 前置条件；stock_core publication 不是 Review readiness owner。
-    （history_ready/history_run_id 参数保留为兼容签名与诊断 metadata，
-    不再参与 gate 判定 —— 原 invariant H2 硬门控已移除。）
-
-
-    原为 execute_after_close_run 内的内联块；Phase0 收口后抽为独立业务体，
-    由统一执行器 execute_orchestrator_step("computing_review", ...) 包装，
-    满足 AC-02「所有顶层步骤必须通过统一步骤执行器」的合同。
-
-    返回 result dict（status / failed / reason / run_id / publication_id /
-    scope_count / signal_count / coverage / blockers / prereq_missing /
-    resume_skipped），调用方据此：
-    - 将业务 failed/gate_blocked 如实映射到 step_summary（软失败）；
-    - 计算主任务 partial_success；
-    - 仅成功才推进 last_completed_step 检查点。
-
-    内部保留全部既有语义：幂等 create_run / compute_run / resume_run、
-    publication pointer 唯一事实源、gate_blocked 不切 pointer、
-    metadata.review_* 与事件时间线写入、断点恢复 skip_review 复用。
-    失败不得使主 run failed（core 已发布），仅标记 failed 收 partial_success。
-    """
-    from app.services.review_orchestrator_service import (
-        compute_run,
-        create_run,
-        publish_run,
-    )
-    from app.services.review_publication_service import (
-        ReviewPublishBlockError,
-        evaluate_publish_gate,
-        get_published_review_run_id,
-        is_formally_published_review_run,
-    )
-
-    # ---- 状态初始化（原 execute_after_close_run 内联块开头）----
-    _review_run_id: uuid.UUID | None = None
-    _review_status: str = "skipped"
-    _review_reason: str | None = None
-    _review_publication_id: uuid.UUID | None = None
-    _review_scope_count: int = 0
-    _review_signal_count: int = 0
-    _review_coverage: float = 0.0
-    _review_blockers: list[str] = []
-    # [P0-1 2026-08-03] Review 失败（gate_blocked/计算失败）不再使整个 run failed，
-    # 仅标记 _review_failed，主 run 收尾为 partial_success（core 已发布）。
-    _review_failed: bool = False
-    prereq_missing: bool = False
-
-    if not skip_review:
-        # [CHANGE-20260826-001 Slice 1 REVIEW-CURRENT-OWNER-01]
-        # Review(T) = Core(T) + History(<T)。exact-T History(T) 不再是 Review 前置条件：
-        # Review 当前第一金字塔事实直接来自 Core(T)（StockFeatureSnapshot，
-        # 由显式 source_core_run_id=snapshot_run_id 锁定）；历史 baseline 来自
-        # FirstPyramidHistoryDailyState 的 <=T-1 状态（独立于 exact-T History(T)）。
-        # 因此移除旧的「History(T) 未就绪即阻断 Review」硬门控（原 invariant H2）；
-        # stock_core publication 不是 Review readiness owner，Review 不经任何 pointer 解析。
-        # 注意：本 Slice 不引入任何 review-history-v3 DB write（v3 物化在 Slice 4 接回）。
-        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] Core 计算完成后直接进入 Review。
-        # Review 的 readiness 仅依赖本次 AfterCloseRun 产生的 CoreRun（StockFeatureSnapshotRun，
-        # 由 snapshot_run_id 标识）compute-complete 合同，**不再依赖 stock_core publication
-        # pointer / published_at / FactorPublication(kind=stock_core)**。因此 gate 只检查
-        # snapshot_run_id 非空（Core 已产生可消费的快照 run），不再检查 stock_core_published。
-        if snapshot_run_id is not None:
-            # 断点恢复：先从 metadata 读取已有 review_run_id
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                existing_meta = _parse_metadata(job_run)
-                existing_review_run_id_str = existing_meta.get("review_run_id")
-                if existing_review_run_id_str:
-                    try:
-                        _review_run_id = uuid.UUID(existing_review_run_id_str)
-                        logger.info(
-                            "[AfterClose] [Review] 断点恢复: 复用已有 review run: %s",
-                            _review_run_id,
-                        )
-                    except (ValueError, TypeError):
-                        _review_run_id = None
-
-            # 写状态切换事件
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.COMPUTING_REVIEW,
-                    message=(
-                        f"开始复盘计算与发布: trade_date={trade_date}, "
-                        f"source_core_run_id={snapshot_run_id}"
-                    ),
-                    extra={
-                        "review_run_id": str(_review_run_id) if _review_run_id else None,
-                    },
-                )
-                await db.commit()
-
-            try:
-                # 1) 创建/复用 review run（幂等）
-                async with AsyncSessionLocal() as review_db:
-                    review_run = await create_run(
-                        review_db,
-                        trade_date=trade_date,
-                        canary=False,
-                        dry_run=False,
-                        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] 显式绑定本次 CoreRun
-                        # （snapshot_run_id），Review 直接消费，不再经 stock_core
-                        # FactorPublication pointer 解析（KPI-4: 100% lineage lock）。
-                        source_core_run_id=snapshot_run_id,
-                        idempotency_key=f"after_close_orchestrator:{job_run_id}",
-                    )
-                    _review_run_id = review_run.id
-                    logger.info(
-                        "[AfterClose] [Review] create_run 完成: run_id=%s, "
-                        "source_core=%s, source_board=%s, algo=%s, filter=%s",
-                        review_run.id,
-                        review_run.source_core_run_id,
-                        review_run.source_board_run_id,
-                        review_run.algorithm_version,
-                        review_run.filter_version,
-                    )
-
-                    published_review_run_id = await get_published_review_run_id(
-                        review_db, trade_date,
-                    )
-                    is_formally_published = is_formally_published_review_run(
-                        review_run,
-                        published_review_run_id,
-                        # [C1 FINAL-IDENTITY §5] 显式声明期望交易日：cross-date
-                        # pointer（T_ALIAS → ReviewRun(T_REAL)）不得被判为"本交易日
-                        # 已正式发布"而跳过计算与发布。
-                        expected_trade_date=trade_date,
-                    )
-                    if is_formally_published:
-                        _review_status = "published_already"
-                        _review_reason = "idempotent_reuse_published_run"
-                        _review_scope_count = review_run.expected_scope_count or 0
-                        _review_signal_count = review_run.signal_count or 0
-                        _review_coverage = float(review_run.coverage_ratio or 0)
-                        logger.info(
-                            "[AfterClose] [Review] 正式 pointer 仍指向 run，跳过计算与发布: %s",
-                            review_run.id,
-                        )
-                    elif review_run.status == "published":
-                        # Withdrawal 只撤销 pointer，历史发布状态不可篡改。
-                        # 同算法唯一键仍可能返回旧 run；等待新算法版本创建新 run，
-                        # 此处明确阻断复用，也不原地重算历史 run。
-                        _review_status = "withdrawn_publication"
-                        _review_reason = "published_run_not_referenced_by_live_pointer"
-                        _review_scope_count = review_run.expected_scope_count or 0
-                        _review_signal_count = review_run.signal_count or 0
-                        _review_coverage = float(review_run.coverage_ratio or 0)
-                        _review_blockers = [
-                            "历史 published run 已无正式 Review pointer，禁止复用或原地重算",
-                        ]
-                        logger.warning(
-                            "[AfterClose] [Review] run 保留历史 published 状态但 pointer 已撤销，"
-                            "禁止复用: run_id=%s, live_pointer_run_id=%s",
-                            review_run.id, published_review_run_id,
-                        )
-                    else:
-                        # 2) 计算 review（metrics → signals → attribution → tracking）
-                        # resume_run 语义：pending/failed/过期running自动重处理；
-                        # succeeded item 不重算，保证输入不变则输出不变。
-                        if (
-                            review_run.status in ("signals_ready", "partial", "failed")
-                            or (review_run.status == "computing" and review_run.started_at is not None)
-                        ):
-                            logger.info(
-                                "[AfterClose] [Review] run 非 created 终态，调用 resume_run: "
-                                "run_id=%s, status=%s",
-                                review_run.id, review_run.status,
-                            )
-                            compute_result = await __import__(
-                                "app.services.review_orchestrator_service",
-                                fromlist=["resume_run"],
-                            ).resume_run(review_db, review_run)
-                        else:
-                            compute_result = await compute_run(review_db, review_run)
-
-                        _review_status = compute_result.get("status", "unknown")
-                        _review_scope_count = compute_result.get("expected_scope_count", 0)
-                        _review_signal_count = compute_result.get("signal_count", 0)
-                        _review_coverage = compute_result.get("coverage_ratio", 0.0)
-                        logger.info(
-                            "[AfterClose] [Review] compute_run 完成: run_id=%s, "
-                            "status=%s, scopes=%d, signals=%d, coverage=%.4f",
-                            review_run.id, _review_status,
-                            _review_scope_count, _review_signal_count, _review_coverage,
-                        )
-
-                    await review_db.commit()
-
-                # 3) 发布 review（切 publication pointer）
-                if _review_status != "published_already":
-                    async with AsyncSessionLocal() as review_db2:
-                        from app.services.review_orchestrator_service import get_run
-                        review_run2 = await get_run(review_db2, _review_run_id)
-                        if review_run2 is None:
-                            raise RuntimeError(
-                                f"review run 计算后读不到: run_id={_review_run_id}"
-                            )
-
-                        # 先评估门禁（不 force），记录 blockers 便于排查
-                        publishable, blockers = await evaluate_publish_gate(
-                            review_db2, review_run2,
-                        )
-                        _review_blockers = blockers
-                        logger.info(
-                            "[AfterClose] [Review] publish gate: publishable=%s, blockers=%s",
-                            publishable, blockers,
-                        )
-
-                        if publishable:
-                            publication, _ = await publish_run(review_db2, review_run2, force=False)
-                            if publication is None:
-                                # force=False 且门禁已通过时理论不可达；
-                                # 防御性收口，避免 None 解引用静默通过
-                                raise RuntimeError(
-                                    "review publish 门禁通过但未返回 pointer: "
-                                    f"run_id={_review_run_id}"
-                                )
-                            _review_status = "published"
-                            _review_publication_id = publication.id
-                            _review_reason = None
-                            logger.info(
-                                "[AfterClose] [Review] publish 成功: publication_id=%s, "
-                                "review_run_id=%s",
-                                publication.id, _review_run_id,
-                            )
-                        else:
-                            # 门禁不通过但 run 已计算完成：视为 partial，不抛异常阻断主流程
-                            # 但 review_status=gate_blocked，metadata 明确记录 blockers
-                            _review_status = "gate_blocked"
-                            _review_reason = (
-                                f"publish_gate_blocked: {'; '.join(blockers)}"
-                            )
-                            logger.warning(
-                                "[AfterClose] [Review] publish gate 不通过，不切 pointer: "
-                                "run_id=%s, blockers=%s",
-                                _review_run_id, blockers,
-                            )
-                            # [P0-1 2026-08-03 partial_success] Review gate_blocked 不再
-                            # 让整个 run failed：core（stock_core/board）已成功发布，
-                            # 仅标记 review 阶段失败，主 run 收尾为 partial_success。
-                            _review_failed = True
-                            logger.error(
-                                "[AfterClose] [Review] publish gate 不通过，"
-                                "主 run 将标记 partial_success: blockers=%s",
-                                blockers,
-                            )
-                        await review_db2.commit()
-
-            except ReviewPublishBlockError as pub_block_exc:
-                _review_status = "gate_blocked"
-                _review_blockers = list(pub_block_exc.blockers or [])
-                _review_reason = f"publish_gate_blocked: {'; '.join(_review_blockers)}"
-                _review_failed = True
-                logger.error(
-                    "[AfterClose] [Review] publish gate 阻塞（partial_success）: %s", pub_block_exc,
-                )
-            except Exception as review_exc:
-                _review_status = "failed"
-                _review_reason = f"{type(review_exc).__name__}: {review_exc}"[:500]
-                _review_failed = True
-                logger.error(
-                    "[AfterClose] [Review] 复盘计算或发布失败（partial_success，core 已发布）: "
-                    "trade_date=%s, error=%s",
-                    trade_date, review_exc, exc_info=True,
-                )
-                # 写 review_failed 事件（供 admin 时间线展示）
-                try:
-                    async with AsyncSessionLocal() as db:
-                        job_run = await _get_job_run_or_raise(db, job_run_id)
-                        await append_event(
-                            db=db,
-                            job_run_id=job_run_id,
-                            step=AfterCloseRunStatus.COMPUTING_REVIEW.value,
-                            level="error",
-                            message=(
-                                f"复盘阶段失败: status={_review_status}, "
-                                f"reason={_review_reason}"
-                            ),
-                            payload={
-                                "review_run_id": str(_review_run_id) if _review_run_id else None,
-                                "review_status": _review_status,
-                                "review_reason": _review_reason,
-                                "review_blockers": _review_blockers,
-                            },
-                        )
-                        await db.commit()
-                except Exception as inner_exc:
-                    logger.warning(
-                        "[AfterClose] [Review] 写入 review_failed 事件失败: %s",
-                        inner_exc,
-                    )
-
-            finally:
-                # 无论成功/失败，更新 metadata 记录 review_run_id/status/reason
-                try:
-                    async with AsyncSessionLocal() as db:
-                        job_run = await _get_job_run_or_raise(db, job_run_id)
-                        meta = _parse_metadata(job_run)
-                        meta["review_run_id"] = (
-                            str(_review_run_id) if _review_run_id else None
-                        )
-                        meta["review_status"] = _review_status
-                        meta["review_reason"] = _review_reason
-                        meta["review_publication_id"] = (
-                            str(_review_publication_id)
-                            if _review_publication_id
-                            else None
-                        )
-                        meta["review_scope_count"] = _review_scope_count
-                        meta["review_signal_count"] = _review_signal_count
-                        meta["review_coverage"] = _review_coverage
-                        meta["review_blockers"] = _review_blockers
-                        job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                        await db.commit()
-                except Exception as meta_exc:
-                    logger.warning(
-                        "[AfterClose] [Review] 更新 review metadata 失败: %s",
-                        meta_exc,
-                    )
-
-            # [Phase0-Fix#7] review 阶段收尾：
-            # 只有 review 真正成功才推进 last_completed_step=computing_review。
-            # 失败/gate_blocked 时若仍推进检查点，下次 restart_from/resume 会
-            # 直接跳过失败的 Review，破坏断点恢复语义。
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.COMPUTING_REVIEW,
-                    message=(
-                        f"复盘完成: status={_review_status}, "
-                        f"run_id={_review_run_id}, "
-                        f"scopes={_review_scope_count}, signals={_review_signal_count}, "
-                        f"coverage={_review_coverage:.4f}"
-                    ),
-                    payload={
-                        "review_run_id": str(_review_run_id) if _review_run_id else None,
-                        "review_status": _review_status,
-                        "review_reason": _review_reason,
-                        "review_publication_id": (
-                            str(_review_publication_id)
-                            if _review_publication_id
-                            else None
-                        ),
-                        "review_scope_count": _review_scope_count,
-                        "review_signal_count": _review_signal_count,
-                        "review_coverage": _review_coverage,
-                        "review_blockers": _review_blockers,
-                    },
-                    extra={
-                        "review_run_id": str(_review_run_id) if _review_run_id else None,
-                        "review_status": _review_status,
-                    },
-                )
-                if _review_failed:
-                    # 仅更新心跳，不推进 last_completed_step
-                    await _update_heartbeat_and_step(
-                        db, job_run, None, worker_id,
-                    )
-                    logger.warning(
-                        "[AfterClose] [Review] 阶段失败，不推进 last_completed_step："
-                        "status=%s, 下次 resume 将重新执行 computing_review",
-                        _review_status,
-                    )
-                else:
-                    await _update_heartbeat_and_step(
-                        db, job_run, AfterCloseRunStatus.COMPUTING_REVIEW.value, worker_id,
-                    )
-                await db.commit()
-        else:
-            # 前置条件不满足：stock_core 未正式发布或 snapshot 缺失
-            _review_status = "skipped"
-            _review_reason = (
-                f"prerequisite_missing: stock_core_published={stock_core_published}, "
-                f"snapshot_run_id={'present' if snapshot_run_id else 'None'}"
-            )
-            prereq_missing = True
-            logger.info(
-                "[AfterClose] [Review] 跳过复盘阶段（前置条件不满足）: %s",
-                _review_reason,
-            )
-            try:
-                async with AsyncSessionLocal() as db:
-                    job_run = await _get_job_run_or_raise(db, job_run_id)
-                    meta = _parse_metadata(job_run)
-                    meta["review_run_id"] = None
-                    meta["review_status"] = _review_status
-                    meta["review_reason"] = _review_reason
-                    job_run.metadata_json = json.dumps(meta, ensure_ascii=False)
-                    await append_event(
-                        db=db,
-                        job_run_id=job_run_id,
-                        step=AfterCloseRunStatus.COMPUTING_REVIEW.value,
-                        level="warn",
-                        message=f"复盘跳过: {_review_reason}",
-                        payload={
-                            "review_status": _review_status,
-                            "review_reason": _review_reason,
-                            "stock_core_published": stock_core_published,
-                        },
-                    )
-                    # 前置条件缺失：仅刷新心跳/租约，不推进 last_completed_step。
-                    # 否则后续 resume 会误判 computing_review 已完成，永久跳过 Review。
-                    await _update_heartbeat_and_step(
-                        db, job_run, None, worker_id,
-                    )
-                    await db.commit()
-            except Exception as meta_exc2:
-                logger.warning(
-                    "[AfterClose] [Review] 更新 skipped review metadata 失败: %s",
-                    meta_exc2,
-                )
-    else:
-        # 断点恢复 skip_review=True：从 metadata 读取 review 信息
-        _review_status = "skipped_by_resume"
-        try:
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                meta = _parse_metadata(job_run)
-                if meta.get("review_run_id"):
-                    _review_run_id = uuid.UUID(meta["review_run_id"])
-                _review_status = meta.get("review_status", "skipped_by_resume")
-                _review_reason = meta.get("review_reason")
-                if meta.get("review_publication_id"):
-                    _review_publication_id = uuid.UUID(meta["review_publication_id"])
-                _review_scope_count = int(meta.get("review_scope_count", 0) or 0)
-                _review_signal_count = int(meta.get("review_signal_count", 0) or 0)
-                _review_coverage = float(meta.get("review_coverage", 0.0) or 0.0)
-                _review_blockers = list(meta.get("review_blockers", []) or [])
-            logger.info(
-                "[AfterClose] [Review] 断点恢复跳过复盘: status=%s, run_id=%s",
-                _review_status, _review_run_id,
-            )
-        except Exception as resume_exc:
-            logger.warning(
-                "[AfterClose] [Review] 断点恢复读取 review metadata 失败: %s",
-                resume_exc,
-            )
-
-    return {
-        "status": _review_status,
-        "failed": _review_failed,
-        "reason": _review_reason,
-        "run_id": _review_run_id,
-        "publication_id": _review_publication_id,
-        "scope_count": _review_scope_count,
-        "signal_count": _review_signal_count,
-        "coverage": _review_coverage,
-        "blockers": _review_blockers,
-        "prereq_missing": prereq_missing,
-        "resume_skipped": skip_review,
-    }
-
-
-def _is_terminal_review_short_circuit(review_step_status: str | None) -> bool:
-    """[AC-CANCEL-01 2026-08-04] 判定 Review 步骤终态是否必须短路收尾。
-
-    Review step 为 cancelled / interrupted 时，主流程不得覆盖总任务终态：
-
-    [CORRECTION-04 2026-08-26] 短路点位于 computing_review 之后、computing_history
-    之前：Review cancelled/interrupted 时 History / DSA compatibility / state_events /
-    chip 全部不再执行（KPI-11）。此前 History 终止短路仅覆盖 History 阶段的取消，
-    Review 阶段取消会继续跑后续副作用 —— 本判定现提前到 Review 后立即生效。
-    - cancelled：管理员主动取消，保持 cancelled；
-    - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
-
-    其余终态（succeeded / failed / timed_out / unavailable）走既有
-    partial_success 判定，不在此短路。
-    """
-    return review_step_status in (
-        AfterCloseRunStatus.CANCELLED.value,
-        AfterCloseRunStatus.INTERRUPTED.value,
-    )
-
-
-def resolve_terminal_run_status(review_step_status: str | None) -> AfterCloseRunStatus:
+def resolve_terminal_run_status(step_status: str | None) -> AfterCloseRunStatus:
     """[AC-TERMINAL-01 2026-08-04] 把 Review 终态字符串转为 AfterCloseRunStatus 枚举。
 
     P0 修复：`_update_orchestrator_status(status=...)` 的形参类型是
@@ -2644,12 +2147,12 @@ def resolve_terminal_run_status(review_step_status: str | None) -> AfterCloseRun
     仅接受短路终态；其余输入视为编程错误直接抛 ValueError，
     避免把未知字符串静默映射成某个终态。
     """
-    if review_step_status == AfterCloseRunStatus.CANCELLED.value:
+    if step_status == AfterCloseRunStatus.CANCELLED.value:
         return AfterCloseRunStatus.CANCELLED
-    if review_step_status == AfterCloseRunStatus.INTERRUPTED.value:
+    if step_status == AfterCloseRunStatus.INTERRUPTED.value:
         return AfterCloseRunStatus.INTERRUPTED
     raise ValueError(
-        f"非短路终态不得转换为总任务终态: review_step_status={review_step_status!r}"
+        f"非短路终态不得转换为总任务终态: step_status={step_status!r}"
     )
 
 
@@ -2937,8 +2440,10 @@ async def execute_after_close_run(
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
         # 阶段顺序（PHASE-A Core→Review Source Closure）：
-        #   refreshing_daily → syncing_boards → computing_features
-        #   → computing_review → computing_history → post-core optional → succeeded
+        #   [REVIEW-V2-R1] current DAG：
+        #   refreshing_daily → syncing_boards → checking_coverage
+        #   → rebuilding_market_dashboard（复盘计算）→ computing_features
+        #   → computing_history → post-core optional → succeeded
         # publishing / stock_core 发布已旁路，不再是真实步骤（KPI-A1）。
         # 旧步骤名（waiting_dsa_worker/quality_gate/feature_snapshot）兼容读取历史 run
         # [REPROCESS-OWNER-CLOSURE-01 P0-2] mainchain_stage 是「本次 execution 从哪里开始」
@@ -2980,21 +2485,19 @@ async def execute_after_close_run(
         # [Phase 5] 3 个旧 skip 标志收敛为 skip_computing
         skip_computing = "computing_features" in completed
         skip_publish = "publishing" in completed
-        # [CHANGE-20260801-REVIEW-CLOSURE] review 阶段跳过标志
-        skip_review = "computing_review" in completed
+        # [REVIEW-V2-R1] 旧 computing_review 已退役，不再存在 skip_review 标志。
         # [SLICE-01-CORRECTION] history 阶段跳过标志：
-        # History readiness 不能通过 checkpoint 名称恢复（run 存在 ≠ exact-T ready）。
-        # 仅当 computing_review 也已完成（即整个 History+Review 后置链都完成）
-        # 才可整体跳过 History 步骤；否则必须重新执行幂等 advance + revalidate，
+        # History readiness 不能通过 checkpoint 名称恢复（run 存在 ≠ exact-T ready），
+        # 必须重新执行幂等 advance + revalidate，
         # 否则会出现「已验证 ready → crash → resume 反而判 not-ready」的回归。
-        skip_history = "computing_history" in completed and "computing_review" in completed
+        skip_history = "computing_history" in completed
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
             "skip_refresh=%s, skip_board_sync=%s, skip_computing=%s, "
-            "skip_publish=%s, skip_review=%s",
+            "skip_publish=%s",
             last_completed_step, skip_refresh, skip_board_sync, skip_computing,
-            skip_publish, skip_review,
+            skip_publish,
         )
 
         # ---- 步骤 1: refreshing_daily（统一执行器）----
@@ -3331,21 +2834,38 @@ async def execute_after_close_run(
                         )
                         await db.commit()
 
-        # ---- 步骤 1.5: rebuilding_market_dashboard (optional idempotent sidecar) ----
-        # [MARKET-DASHBOARD-F1D] Dashboard projection 是「可重建派生投影」，不是 mainchain
-        # checkpoint。位置刻意选在 normal / resume 两条路径**汇合之后**、computing_features
-        # **之前**：
+        # ---- 步骤 1.5: rebuilding_market_dashboard（canonical 复盘计算，optional）----
+        # [REVIEW-V2-R1] 本步骤已由 sidecar 升级为产品意义上的 canonical 复盘计算。
+        # 位置刻意选在 normal / resume 两条路径**汇合之后**、computing_features **之前**：
         # - 依赖只有「daily bars ready + latest board membership 已决定」，无需等待
-        #   Review/History（否则白白增加数小时延迟）；
+        #   Core / History（否则白白增加数小时延迟）；
         # - 非交易日 / 日线覆盖率失败都已在此处之前 return，天然不会发布低质量当天投影；
         # - board sync 软失败时沿用最后一次成功 membership，符合 latest_snapshot_replay；
         # - resume 时会重跑一次（刻意行为）：F1B same-T replace 幂等，stale-T fail closed，
         #   F1C membership race guard 防止旧 snapshot 发布；
-        # - optional=True：失败/超时只写 step_summary，不阻断 Core/Review/History 主链
-        #   （F1B 保证旧 projection 保留）。
+        # - optional=True：失败/超时只写 step_summary，不阻断 Core / History 主链
+        #   （F1B 保证旧 projection 保留），最终由通用 optional_failures 使 parent 收
+        #   partial_success；本步骤**不是 durable checkpoint**，resume 必重跑。
         # [F1D-FIX1] timeout 本地窄化：既让 type checker 收敛为 float，也在运行期锁住
         # 「该 step 必须有有限 timeout」这一合同——若有人把它改成 None，这里立刻 fail fast，
-        # 而不是悄悄把 optional sidecar 变成无限等待。
+        # 而不是悄悄把 optional 步骤变成无限等待。
+        # [REVIEW-V2-R1] 真实运行状态：执行前显式写 orchestrator_status。
+        # status 表达「当前正在干什么」，不是 checkpoint —— 不进入 _CHECKPOINT_ORDER /
+        # _COMPLETED_STEPS current stage / _COMPLETED_STEP_INDEX key。
+        async with AsyncSessionLocal() as db:
+            _dash_job = await _get_job_run_or_raise(db, job_run_id)
+            await _update_orchestrator_status(
+                db=db,
+                job_run=_dash_job,
+                status=AfterCloseRunStatus.REBUILDING_MARKET_DASHBOARD,
+                message="开始复盘计算",
+                dsa_run_id=dsa_run_id,
+                payload={"trade_date": trade_date.isoformat()},
+            )
+            await _update_heartbeat_and_step(
+                db, _dash_job, AfterCloseRunStatus.REBUILDING_MARKET_DASHBOARD.value, worker_id,
+            )
+            await db.commit()
         dashboard_timeout = _step_timeout("rebuilding_market_dashboard")
         assert dashboard_timeout is not None, (
             "rebuilding_market_dashboard must have a finite timeout"
@@ -3671,7 +3191,7 @@ async def execute_after_close_run(
             # =================================================================
             # CURRENT Direct-Link path (skip_publish == False)
             # -----------------------------------------------------------------
-            # 适用于 fresh / computing_features resume / computing_review resume /
+            # 适用于 fresh / computing_features resume / computing_history resume /
             # computing_history resume。正常 AfterClose DAG 不再进入 PUBLISHING 阶段
             # （KPI-7）：Core 计算完成 → Review(T) → History(T) → post-core enhancement。
             # stock_core publication / FactorPublication(kind=stock_core) 的 read/write
@@ -3716,14 +3236,14 @@ async def execute_after_close_run(
                     await _validate_core_ready(verify_db, snapshot_run_id, trade_date)
                 core_ready = True
 
-        # [CRASH-RESUME-SLICE / P0-B] state_events 与 chip 已下移到 computing_review 之后
-        # 的 post-core enhancement 段执行，不再阻塞 History/Review 这一 mandatory 关键路径。
+        # [CRASH-RESUME-SLICE / P0-B] state_events 与 chip 已下移到 post-core enhancement
+        # 段执行，不再阻塞 Core / History 这一 mandatory 关键路径。
         # 详见下方 "# ---- 步骤 4.9: post-core enhancement（non-blocking）----"。
 
         # [Slice 4A9] Legacy board aggregation 已退役：AfterClose 不再运行任何
         # 板块聚合 / 发布 / pointer 确认，也不维护 legacy batch 状态。
-        # Unified Review 是当前正式板块分析唯一 owner，且 Review 只依赖已发布的
-        # stock_core（见下方 computing_review），因此此处不添加任何替代 Board 阶段。
+        # 板块分析是当前正式板块分析唯一 owner，且只依赖已发布的 stock_core
+        # （见下方 computing_features），因此此处不添加任何替代 Board 阶段。
         # 兼容性：保留 metadata 键 aggregation_status，如实置为 "skipped"（该阶段已退役/不再执行）。
         _aggregation_status = "skipped"
 
@@ -3737,82 +3257,15 @@ async def execute_after_close_run(
         #  3) 校验该 run 对 trade_date 是否 exact-T ready（validate_canonical_history_run_readiness）。
         # readiness 由既有的 Review readiness 服务判定，返回 dict，status=='ok' 才是 ready。
         # [CHANGE-20260826-001 Slice 1 CORRECTION] History(T) 不再挡在 Review 前面。
-        # Review(T) = Core(T) + History(<T)。computing_history（_make_history_step →
-        # advance_history_to_trade_date 的第二次计算）改到 computing_review 之后执行：
-        # 从 stock_core published 到 Review compute started 之间不再有任何 History(T)
+        # [REVIEW-V2-R1] 当前架构：Daily Bars → Dashboard Review Projection → Core
+        # → History → post-core optional enhancements。computing_history
+        # （_make_history_step → advance_history_to_trade_date 的推进）在
+        # computing_features 之后执行：从 stock_core published 到 History 启动之间
+        # 不再有任何 History(T)
         # producer / recompute（KPI-4）。_history_run_id / _history_ready 先置空，
         # Review 不再依赖它们（H2 硬门控已移除）。
         _history_run_id: uuid.UUID | None = None
         _history_ready: bool = False
-
-        # ---- 步骤 4.5: computing_review（复盘计算 + 发布） — 先于 History 执行 ----
-        logger.info(
-            "[BOUNDARY-P9] before computing_review job=%s trade=%s snap=%s pid=%s",
-            str(job_run_id), trade_date, snapshot_run_id, os.getpid(),
-        )
-        # [AC-02] 复盘业务体抽为 _execute_review_step，由统一执行器包装。
-        # 软失败（gate_blocked/计算失败）不阻断主流程，仅标记 _review_failed
-        # 收 partial_success；step summary 如实反映业务状态，失败不推进检查点。
-        # [SLICE-01 H2] 传入 history_run_id：若 computing_history 未就绪则为 None，
-        # _execute_review_step 据此硬门控 gate_blocked（History 缺失 → Review 不运行）。
-        _review_result, _review_step_summary = await execute_orchestrator_step(
-            "computing_review",
-            lambda: _execute_review_step(
-                job_run_id=job_run_id,
-                trade_date=trade_date,
-                snapshot_run_id=snapshot_run_id,
-                worker_id=worker_id,
-                skip_review=skip_review,
-                history_run_id=_history_run_id,
-                history_ready=_history_ready,
-                stock_core_published=_stock_core_published,
-            ),
-            timeout_seconds=_step_timeout("computing_review"),
-            optional=True,
-            heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-            progress=_make_step_progress_callback(job_run_id, worker_id),
-            cancellation_check=_make_step_cancellation_check(job_run_id),
-        )
-
-        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] Review 终态短路（KPI-11）。
-        # Review step summary 为 cancelled / interrupted 时，必须先终态收尾再停止：
-        # 不得继续 History / DSA compatibility / state_events / chip 任何后续副作用写入。
-        # 与 History 终止短路同构（resolve_terminal_run_status + 最终状态落库 +
-        # AfterCloseCancelledError → 外层 as-terminal 返回，不覆写 failed）。
-        _review_step_status_for_short_circuit = (
-            _review_step_summary.get("status")
-        ) if isinstance(_review_step_summary, dict) else None
-        if _is_terminal_review_short_circuit(_review_step_status_for_short_circuit):
-            _terminal_status = resolve_terminal_run_status(
-                _review_step_status_for_short_circuit
-            )
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=_terminal_status,
-                    message=(
-                        f"盘后编排在复盘计算阶段被{_terminal_status.value}，"
-                        f"停止后续步骤"
-                    ),
-                    dsa_run_id=dsa_run_id,
-                    payload={
-                        "stock_core_published": _stock_core_published,
-                        "review_step_status": _review_step_status_for_short_circuit,
-                        "terminal_short_circuit": True,
-                    },
-                )
-                job_run.status = _terminal_status.value
-                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-                await _update_heartbeat_and_step(db, job_run, None, worker_id)
-                await db.commit()
-            logger.warning(
-                "[AfterClose][CORRECTION-04] computing_review 终止短路: "
-                "job=%s status=%s（History/DSA/events/chip 均不执行）",
-                str(job_run_id), _terminal_status.value,
-            )
-            raise AfterCloseCancelledError(_terminal_status)
 
         # ---- 步骤 4.6: computing_history（历史状态推进）— Review 之后执行 ----
         # [CHANGE-20260826-001 Slice 1 CORRECTION] 仅在此处（Review 已 compute/publish 后）
@@ -3824,7 +3277,7 @@ async def execute_after_close_run(
             str(job_run_id), trade_date, os.getpid(),
         )
         # History 启动前写入 orchestrator 当前阶段（真实合同：_update_orchestrator_status
-        # 需要 db + job_run）。使 admin 页面「当前阶段」不再停留在 computing_review。
+        # 需要 db + job_run）。使 admin 页面「当前阶段」不再停留在 computing_features。
         async with AsyncSessionLocal() as db:
             _hr_job = await _get_job_run_or_raise(db, job_run_id)
             await _update_orchestrator_status(
@@ -3903,8 +3356,8 @@ async def execute_after_close_run(
             raise AfterCloseCancelledError(_terminal_status)
 
         # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-04] post-core OPTIONAL DSA 兼容性投影
-        # —— 统一执行器顶层步骤（与 refreshing_daily / computing_review 同级）。
-        # Core 已就绪（core_ready）→ Review → History 后执行；经 execute_orchestrator_step(
+        # —— 统一执行器顶层步骤（与 refreshing_daily / computing_features 同级）。
+        # Core 已就绪（core_ready）→ History 后执行；经 execute_orchestrator_step(
         # optional=True) 由统一执行器拥有 status/timeout/heartbeat/cancel/step summary/
         # optional failure，不再维护第二套手写状态机。其失败不得标记 Core failed、不得阻断
         # Review；summary["dsa_compatibility"]（含 step 键的 executor 标准结构）落库后进入
@@ -3954,109 +3407,6 @@ async def execute_after_close_run(
                     worker_id,
                 )
                 await db.commit()
-        # 解包 review 业务状态（供主任务 partial_success 判定与 metadata 写入）
-        _review_status = (
-            _review_result.get("status") if isinstance(_review_result, dict) else "skipped"
-        )
-        # [P0-1 2026-08-04] 失败判定必须同时考虑 review 业务结果 _和_ 执行器 step summary：
-        # 执行器若 timed_out/unavailable/interrupted/cancelled 会返回 result=None 或
-        # failed=False，但 step_summary.status 已如实记录。仅看业务结果会把超时误判为成功。
-        _review_step_status = _review_step_summary.get("status")
-        _review_failed = bool(
-            (isinstance(_review_result, dict) and _review_result.get("failed"))
-            or _review_step_status
-            in ("failed", "timed_out", "unavailable", "interrupted", "cancelled")
-        )
-        _review_reason = (
-            _review_result.get("reason") if isinstance(_review_result, dict) else None
-        )
-        _review_run_id = (
-            _review_result.get("run_id") if isinstance(_review_result, dict) else None
-        )
-        _review_publication_id = (
-            _review_result.get("publication_id") if isinstance(_review_result, dict) else None
-        )
-        _review_scope_count = (
-            _review_result.get("scope_count", 0) if isinstance(_review_result, dict) else 0
-        )
-        _review_signal_count = (
-            _review_result.get("signal_count", 0) if isinstance(_review_result, dict) else 0
-        )
-        _review_coverage = (
-            float(_review_result.get("coverage", 0.0) or 0.0)
-            if isinstance(_review_result, dict)
-            else 0.0
-        )
-        _review_blockers = (
-            list(_review_result.get("blockers", []))
-            if isinstance(_review_result, dict)
-            else []
-        )
-        # 业务软失败如实反映到 step summary（不伪装步骤 succeeded）
-        if _review_step_summary.get("status") == "succeeded" and _review_failed:
-            _review_step_summary["status"] = "failed"
-            _review_step_summary["error_code"] = "REVIEW_SOFT_FAILURE"
-            _review_step_summary["error_message"] = (
-                f"复盘阶段软失败（core 已发布）: {_review_status}, reason={_review_reason}"
-            )
-            await _persist_step_summary(job_run_id, _review_step_summary)
-        logger.info(
-            "[AfterClose] computing_review 完成: step_status=%s, review_status=%s, "
-            "run_id=%s, failed=%s",
-            _review_step_summary.get("status"), _review_status,
-            _review_run_id, _review_failed,
-        )
-
-        # ---- 步骤 4.8.5: 取消/中断终态短路 ----
-        # [AC-CANCEL-01 2026-08-04] Review step 为 cancelled/interrupted 时，
-        # 不得覆盖总任务终态（[AUD-08] chip 已在步骤 4.6 入队，不受此短路影响）：
-        # - cancelled：管理员主动取消，保持 cancelled，交由用户/调度不再恢复；
-        # - interrupted：旧 Worker 被接管，保持 interrupted，交由 reconcile/restart。
-        # 两者均不应降级为 partial_success 而继续执行后续步骤。
-        _review_step_status = _review_step_summary.get("status")
-        if _is_terminal_review_short_circuit(_review_step_status):
-            # [AC-TERMINAL-01 P0#1] 裸字符串必须转为 AfterCloseRunStatus 枚举，
-            # 否则 _update_orchestrator_status 内部 status.value 抛 AttributeError。
-            _terminal_status = resolve_terminal_run_status(_review_step_status)
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=_terminal_status,
-                    message=(
-                        f"盘后编排在复盘阶段被{_terminal_status.value}，"
-                        f"停止后续步骤: review_reason={_review_reason}"
-                    ),
-                    dsa_run_id=dsa_run_id,
-                    payload={
-                        "stock_core_published": _stock_core_published,
-                        "review_status": _review_status,
-                        "review_run_id": (
-                            str(_review_run_id) if _review_run_id else None
-                        ),
-                        "review_reason": _review_reason,
-                        "terminal_short_circuit": True,
-                    },
-                )
-                job_run.status = _terminal_status.value
-                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-                # [AC-TERMINAL-01 P0#2] last_completed_step 是"断点恢复检查点"，
-                # 只能记录真正完成的流水线步骤。取消/中断不是步骤，写入会导致
-                # _COMPLETED_STEP_INDEX 查不到（fallback -1）→ 已完成步骤全部
-                # 回退成 pending，且断点恢复从头重跑。
-                # 传 None：只刷心跳/租约，保留 publishing 等原检查点。
-                await _update_heartbeat_and_step(db, job_run, None, worker_id)
-                await db.commit()
-            logger.warning(
-                "[AfterClose] 复盘阶段终态短路: job_run_id=%s, status=%s, "
-                "post-core enhancement（chip/state_events/auction）将于 Review 之后执行"
-                "（status=%s）（保留原检查点）",
-                job_run_id, _terminal_status.value, _chip_enqueue_status,
-            )
-            # [AC-TERMINAL-01 P0#3] 抛信号异常，让外层 except 明确区分
-            # "取消/中断"与"真实失败"，避免被覆写成 failed。
-            raise AfterCloseCancelledError(_terminal_status)
 
         # ---- 步骤 4.9: post-core enhancement（non-blocking）----
         # [CRASH-RESUME-SLICE / P0-B] 以下 enhancement 输出在 mandatory 关键路径
@@ -4127,7 +3477,7 @@ async def execute_after_close_run(
         # [P1-2 2026-08-07][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] state events（non-blocking post-core）
         # readiness owner 改为 canonical CORE_READY（CoreRun 真实 status==succeeded），
         # 不再依赖 snapshot_run_id 非空或 stock_core publication。
-        # Core succeeded → Review（computing_review 已在上方完成）→ 此处生成 Core X 的事件。
+        # Core succeeded → 此处生成 Core X 的事件（复盘计算已在上方独立完成）。
         if core_ready:
             logger.info(
                 "[BOUNDARY-P3] before state-events job=%s trade=%s pid=%s",
@@ -4219,7 +3569,7 @@ async def execute_after_close_run(
 
         # [CHIP-RETIRE 2026-09-01] 自动 chip consensus 入队已退役：
         # 盘后主链不再创建 after_close_chip_consensus job
-        # （canonical chain = Core → Review → History → complete），
+        # （canonical chain = Dashboard Review Projection → Core → History → complete），
         # 故此处不再执行 chip 入队步骤。_chip_enqueue_status 恒为 "skipped"、
         # _chip_job_id 恒为 None，仅用于 metadata/日志如实表达"未入队"（消费方无变更）。
         # 历史 chip 快照 / 服务实现 / SchedulerJobRun 行全部保留，不做迁移。
@@ -4272,8 +3622,6 @@ async def execute_after_close_run(
                 + f", stock_core_published={_stock_core_published}"
                 + f", auction_anchor_status={_auction_anchor_status}"
                 + f", aggregation_status={_aggregation_status}"
-                + f", review_status={_review_status}"
-                + (f", review_run_id={_review_run_id}" if _review_run_id else "")
             )
             await _update_orchestrator_status(
                 db=db,
@@ -4291,19 +3639,6 @@ async def execute_after_close_run(
                     # [Phase0-Fix#8] chip 入队结果进入主任务 metadata（稳定 job id + 状态）
                     "chip_enqueue_status": _chip_enqueue_status,
                     "chip_job_id": str(_chip_job_id) if _chip_job_id else None,
-                    # [CHANGE-20260801-REVIEW-CLOSURE] review 闭环字段
-                    "review_run_id": str(_review_run_id) if _review_run_id else None,
-                    "review_status": _review_status,
-                    "review_reason": _review_reason,
-                    "review_publication_id": (
-                        str(_review_publication_id)
-                        if _review_publication_id
-                        else None
-                    ),
-                    "review_scope_count": _review_scope_count,
-                    "review_signal_count": _review_signal_count,
-                    "review_coverage": _review_coverage,
-                    "review_blockers": _review_blockers,
                     # [SLICE-01 H2] First Pyramid History exact-T readiness 闭环字段
                     "history_run_id": str(_history_run_id) if _history_run_id else None,
                     "history_ready": _history_ready,
@@ -4926,11 +4261,11 @@ _CHECKPOINT_ORDER: dict[str, int] = {
     "refreshing_daily": 0,
     "syncing_boards": 1,
     "computing_features": 2,
-    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 PHASE-A] 真实 DAG 已收敛为
-    # features → review → history（publishing / stock_core 发布已旁路，不再是真实步骤）。
-    "computing_review": 3,
-    "computing_history": 4,
-    "succeeded": 5,
+    # [REVIEW-V2-R1] 旧 computing_review 已退役：不再是 current checkpoint，
+    # 也不得作为 mainchain_stage（历史兼容由 _checkpoint_rank_for_reconcile 单独处理，
+    # 不得用 rank-99 legacy token 污染 current restart vocabulary）。
+    "computing_history": 3,
+    "succeeded": 4,
     # legacy token：旧 DAG 中 last_completed_step 可能为 "publishing"（stock_core 发布步骤）。
     # 当前正文不再执行 publishing 步骤，保留 rank 仅供 reconcile 兼容历史 run 的
     # last_completed_step="publishing"（_CHECKPOINT_ORDER.get 必须非 None）；
@@ -4938,6 +4273,23 @@ _CHECKPOINT_ORDER: dict[str, int] = {
     # 不会污染当前 DAG 的 restart/resume skip 计算（KPI-A1/A7/A8）。
     "publishing": 99,
 }
+
+
+def _checkpoint_rank_for_reconcile(step: str | None) -> int | None:
+    """[REVIEW-V2-R1] 仅供**历史** checkpoint 比较用的 rank 解析。
+
+    current-vs-history 分离：retired token（``computing_review``）不再进入
+    ``_CHECKPOINT_ORDER``，因此它不是合法 ``mainchain_stage``，不可能成为新的
+    restart 起点；但历史 run 的 ``last_completed_step`` 仍可能是它，reconcile
+    必须仍能读取与比较。
+
+    历史语义：old Review 完成 ⇒ 至少 computing_features 已完成（rank 2）。
+    """
+    if step == "computing_review":
+        return 2  # 等价于 current computing_features 已完成
+    if step == "publishing":
+        return 2  # legacy 同理
+    return _CHECKPOINT_ORDER.get(step)
 
 # [REPROCESS-OWNER-CLOSURE-01 CORRECTION-01] 断点恢复映射：last_completed_step → 已完成 stage 集合。
 # 与 _CHECKPOINT_ORDER 同为 module-level 单一真相源，被 execute_after_close_run 与
@@ -4958,23 +4310,21 @@ _COMPLETED_STEPS: dict[str | None, set[str]] = {
         "refreshing_daily", "syncing_boards", "computing_features",
         "publishing",
     },
-    # [PHASE-A] computing_review 断点恢复：Review 成功、History 尚未执行。
-    # 严禁包含 computing_history —— 否则 resume 会误判 skip_history=True，History 永不 retry
-    # （违反 KPI-A2/A4）。也不包含 legacy publishing（token 不得污染当前语义）。
+    # [REVIEW-V2-R1] legacy computing_review 只读兼容：历史语义是「old Review 已做完」，
+    # 至多说明 features 已完成。**不得**把 retired token 自身塞回 completed set，
+    # 也不得隐含 computing_history（否则 History 永不 retry，违反 KPI-A2/A4）。
+    # 新 canonical Review projection 不是 checkpoint，resume 时在汇合点重新执行。
     "computing_review": {
         "refreshing_daily", "syncing_boards", "computing_features",
-        "computing_review",
     },
-    # [PHASE-A] computing_history 断点恢复：真实 DAG 为 features → review → history，
-    # History 完成即 Review+History 后置链整体完成（review 必在 history 之前）。
-    # 不含 legacy publishing。
+    # [REVIEW-V2-R1] computing_history 断点恢复：current DAG 为 features → history。
     "computing_history": {
         "refreshing_daily", "syncing_boards", "computing_features",
-        "computing_review", "computing_history",
+        "computing_history",
     },
     "succeeded": {
         "refreshing_daily", "syncing_boards", "computing_features",
-        "computing_review", "computing_history", "succeeded",
+        "computing_history", "succeeded",
     },
     # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
     "waiting_dsa_worker": {
@@ -5070,8 +4420,9 @@ async def reconcile_after_close_checkpoint_from_artifacts(
     current_step = meta.get("last_completed_step", "")
     if current_step == target_step:
         return {"ok": True, "action": "noop", "reason": f"checkpoint already {target_step}"}
-    current_order = _CHECKPOINT_ORDER.get(current_step)
-    target_order = _CHECKPOINT_ORDER.get(target_step)
+    # [REVIEW-V2-R1] 历史 retired token 走专用 rank 解析，current vocabulary 保持干净。
+    current_order = _checkpoint_rank_for_reconcile(current_step)
+    target_order = _checkpoint_rank_for_reconcile(target_step)
     if current_order is None:
         return {"ok": False, "refuse": f"unknown current checkpoint: {current_step}"}
     if target_order is None:

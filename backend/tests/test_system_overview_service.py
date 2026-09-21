@@ -1511,12 +1511,14 @@ async def test_summary_publish_failed_is_resumable() -> None:
 
 
 # ============================================================
-# [PRD §8.2] _compute_product_nodes 6 节点查询测试（mock db，纯单元）
+# [PRD §8.2] _compute_product_nodes 5 节点查询测试（mock db，纯单元）
+# [REVIEW-V2-R1] 旧「板块/复盘事实」(key="board") 节点退役；复盘现由
+# Market Dashboard projection 承载 (key="review")，故现返回 5 节点。
 # ============================================================
 
 
-async def test_product_nodes_empty_db_returns_6_nodes() -> None:
-    """空库场景（所有 db.scalar 返回 None）→ 产出完整 6 节点且字段齐全。"""
+async def test_product_nodes_empty_db_returns_5_nodes() -> None:
+    """空库场景（所有 db.scalar 返回 None）→ 产出完整 5 节点且字段齐全。"""
     from unittest.mock import AsyncMock
 
     db = AsyncMock()
@@ -1524,8 +1526,8 @@ async def test_product_nodes_empty_db_returns_6_nodes() -> None:
     from datetime import date as _date
 
     nodes = await _compute_product_nodes(db, _date(2026, 8, 4))
-    assert len(nodes) == 6, f"应 6 节点, got {len(nodes)}"
-    assert [n["key"] for n in nodes] == ["bars", "first_pyramid", "board", "review", "auction", "publish"]
+    assert len(nodes) == 5, f"应 5 节点, got {len(nodes)}"
+    assert [n["key"] for n in nodes] == ["bars", "first_pyramid", "review", "auction", "publish"]
     # 每个节点都应含审查要求的展示字段
     required = ["trade_date", "status", "run_id", "quality_gate", "publication_status", "blocking_reason", "recommended_action"]
     for n in nodes:
@@ -1538,24 +1540,32 @@ async def test_product_nodes_empty_db_returns_6_nodes() -> None:
 # ============================================================
 
 
-def test_product_nodes_board_follows_published_review() -> None:
-    """板块/复盘事实节点必须 follow 正式 market_review publication pointer + canonical
-    ReviewScopeObservationFact，不能再把 legacy BoardAnalysisRun 表述为当前正式板块产品，
-    也不能仅凭 MarketReviewRun.status == "published" 选 run（可能拿到非当前 pointer 的旧 run）。"""
+def test_product_nodes_review_source_reads_market_dashboard_projection() -> None:
+    """复盘节点 (key="review") 必须 follow Market Dashboard projection 表
+    (market_dashboard_market_daily + market_dashboard_scope_daily)，不再依赖已退役的
+    MarketReviewRun / ReviewScopeObservationFact / market_review publication pointer，
+    也不返回伪造 run_id。"""
     from pathlib import Path
 
     path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
     src = path.read_text(encoding="utf-8")
     # 不再查询 legacy BoardAnalysisRun
-    assert "BoardAnalysisRun" not in src, "板块节点不得再用 legacy BoardAnalysisRun"
-    assert "MarketReviewRun" in src, "板块节点必须读 MarketReviewRun"
-    assert "ReviewScopeObservationFact" in src, "板块节点必须读 canonical ReviewScopeObservationFact"
-    # 必须通过正式 market_review publication pointer 锁定 run，而不是裸 status 查询
-    assert "list_published_review_dates" in src, "板块节点必须经 list_published_review_dates 取正式发布日"
-    assert "get_published_review_run_id" in src, "板块节点必须经 get_published_review_run_id 取正式 pointer"
-    assert '.where(MarketReviewRun.status == "published")' not in src, (
-        "不得仅按 MarketReviewRun.status == published 选 run"
+    assert "BoardAnalysisRun" not in src, "复盘节点不得再用 legacy BoardAnalysisRun"
+    # 复盘现由 Market Dashboard projection 承载
+    assert "from app.models.market_dashboard import" in src, (
+        "复盘节点必须读 market_dashboard 投影表"
     )
+    assert "MarketDashboardMarketDaily" in src, "复盘节点必须读 market_dashboard_market_daily"
+    assert "MarketDashboardScopeDaily" in src, "复盘节点必须读 market_dashboard_scope_daily"
+    # 不再经 market_review publication pointer 锁定 run，也不返回伪造 run_id
+    assert "get_published_review_run_id" not in src, (
+        "复盘节点不再经 market_review publication pointer 选 run"
+    )
+    assert "PUBLICATION_KIND_MARKET_REVIEW" not in src, (
+        "复盘节点不得再引用 market_review publication kind"
+    )
+    # 复盘节点 run_id 固定为 None（不返回伪造 run_id）
+    assert "run_id=None" in src, "复盘节点不得返回伪造 run_id"
 
 
 def test_product_nodes_uses_stock_core_publication_for_pyramid() -> None:
@@ -1585,164 +1595,132 @@ def test_product_nodes_limits_selector_publish() -> None:
 
 # ============================================================
 # [PRD §8.2 审查] _compute_product_nodes 真实行为测试（postgres）
-# 升级源码守卫为真实 service 行为测试：构造数据库记录 → 调用
-# _compute_product_nodes → 校验返回节点。覆盖 review 要求：
-#   多 run 选最新正确 run / 批次不完整不标 ok / stock_core 发布指针 /
-#   历史回补不干扰今日 / 其他策略不冒充 dsa_selector / 覆盖率边界。
+# [REVIEW-V2-R1] 复盘节点 (key="review") 现由 Market Dashboard projection 承载：
+#   market_dashboard_market_daily（最新交易日大盘投影）+ market_dashboard_scope_daily
+#   （板块投影行数）。不再依赖 MarketReviewRun / ReviewScopeObservationFact /
+#   market_review publication pointer。
+# 覆盖：最新交易日选择 / 板块投影缺失不标 ok / 无投影 → pending。
 # ============================================================
 
 
-async def _add_review_run(
-    db,
-    trade_date,
-    *,
-    status: str = "published",
-    algorithm_version: str = "review-1.0.0",
-    created_at: datetime | None = None,
-):
-    """构造一条已发布 MarketReviewRun（canonical board-independent，source_board_run_id=None）。"""
-    from app.models.market_review import MarketReviewRun
+async def _add_market_daily(db, trade_date, *, member_count=120, valid_return_count=120):
+    """构造一条大盘投影行 (market_dashboard_market_daily)。"""
+    from app.models.market_dashboard import MarketDashboardMarketDaily
 
-    run = MarketReviewRun(
+    row = MarketDashboardMarketDaily(
         trade_date=trade_date,
-        source_core_run_id=uuid.uuid4(),
-        source_board_run_id=None,
-        algorithm_version=algorithm_version,
-        filter_version="filters-1.0.0",
-        status=status,
-        expected_scope_count=0,
-        succeeded_scope_count=0,
-        failed_scope_count=0,
-        signal_count=0,
-        coverage_ratio=0,
-        degraded_reasons=[],
-        baseline_window=120,
+        member_count=member_count,
+        valid_return_count=valid_return_count,
+        equal_weight_return=0.5,
+        ma5_above_count=60, ma5_valid_count=120,
+        ma10_above_count=60, ma10_valid_count=120,
+        ma20_above_count=60, ma20_valid_count=120,
+        ma50_above_count=60, ma50_valid_count=120,
+        ma120_above_count=60, ma120_valid_count=120,
     )
-    if created_at is not None:
-        run.created_at = created_at
-    db.add(run)
+    db.add(row)
     await db.flush()
-    return run
+    return row
 
 
-async def _add_review_scope_fact(
-    db,
-    run,
-    scope_type: str,
-    scope_key: str,
-    *,
-    pit: int,
-    provided: int,
-):
-    """构造一条 canonical ReviewScopeObservationFact（板块范围成员覆盖事实）。"""
-    from app.models.market_review import ReviewScopeObservationFact
+async def _add_market_board(db, *, type="industry", hierarchy_level="L1"):
+    """构造一个板块 (market_boards)，供 scope_daily FK 引用。"""
+    from app.models.market_board import MarketBoard
 
-    fact = ReviewScopeObservationFact(
-        review_run_id=run.id,
-        trade_date=run.trade_date,
-        scope_type=scope_type,
-        scope_key=scope_key,
-        pit_member_count=pit,
-        provided_member_count=provided,
-        pit_status_t="historical_pit",
-        readiness="ready",
-        observation_payload={},
-        diagnostics=[],
-        t1_membership_available=False,
-        algorithm_version=run.algorithm_version,
+    board = MarketBoard(
+        id=uuid.uuid4(),
+        name=f"{type}-{hierarchy_level}",
+        type=type,
+        hierarchyLevel=hierarchy_level,
+        externalCode=f"{type}_{hierarchy_level}".upper(),
+        taxonomy="CFI",
+        taxonomyCompatibilityKey="k",
+        membershipVersion="mv1",
+        isActive=True,
     )
-    db.add(fact)
+    db.add(board)
     await db.flush()
-    return fact
+    return board
 
 
-async def _add_review_pointer(db, run, *, published_at=None):
-    """构造正式 market_review publication pointer 指向该 run（scope_type/key=market）。
+async def _add_market_scope_daily(db, board_id, trade_date, *, member_count=100, valid_return_count=100):
+    """构造一条板块投影行 (market_dashboard_scope_daily)。"""
+    from app.models.market_dashboard import MarketDashboardScopeDaily
 
-    system_overview 板块节点只能经正式 pointer 识别当前复盘。
-    """
-    from datetime import datetime, timezone
-
-    from app.models.factor_publication import FactorPublication
-    from app.services.review_publication_service import PUBLICATION_KIND_MARKET_REVIEW
-
-    pub = FactorPublication(
-        scope_type="market",
-        scope_key="market",
-        trade_date=run.trade_date,
-        publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
-        algorithm_version=run.algorithm_version,
-        data_run_id=run.id,
-        coverage_ratio=run.coverage_ratio,
-        published_at=published_at or datetime.now(timezone.utc),
+    row = MarketDashboardScopeDaily(
+        board_id=board_id,
+        trade_date=trade_date,
+        membership_version="mv1",
+        member_count=member_count,
+        valid_return_count=valid_return_count,
+        equal_weight_return=0.3,
+        ma5_above_count=50, ma5_valid_count=100,
+        ma10_above_count=50, ma10_valid_count=100,
+        ma20_above_count=50, ma20_valid_count=50,
+        ma50_above_count=50, ma50_valid_count=50,
+        ma120_above_count=50, ma120_valid_count=50,
     )
-    db.add(pub)
+    db.add(row)
     await db.flush()
-    return pub
+    return row
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_board_follows_published_review_run(db_session) -> None:
-    """板块节点：正式 market_review pointer + 高成员覆盖 canonical facts → ok/passed/published。"""
+async def test_product_nodes_review_follows_market_dashboard_projection(db_session) -> None:
+    """复盘节点：大盘投影存在 + 板块投影行数 > 0 → ok/passed/published，run_id=None。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
-    run = await _add_review_run(db_session, d, status="published")
-    await _add_review_pointer(db_session, run)
-    await _add_review_scope_fact(db_session, run, "industry_l1", "IND1", pit=100, provided=98)
-    await _add_review_scope_fact(db_session, run, "concept", "C1", pit=100, provided=95)
+    await _add_market_daily(db_session, d)
+    board = await _add_market_board(db_session)
+    await _add_market_scope_daily(db_session, board.id, d)
     nodes = await _compute_product_nodes(db_session, d)
-    board = next(n for n in nodes if n["key"] == "board")
-    assert board["run_id"] == str(run.id)
-    assert board["status"] == "ok"
-    assert board["quality_gate"] == "passed"
-    assert board["publication_status"] == "published"
+    review = next(n for n in nodes if n["key"] == "review")
+    assert review["run_id"] is None, "复盘节点不返回伪造 run_id"
+    assert review["status"] == "ok"
+    assert review["quality_gate"] == "passed"
+    assert review["publication_status"] == "published"
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_board_uses_formal_pointer_among_same_date_runs(db_session) -> None:
-    """同日多条 published run：正式 market_review pointer 指向 Run B，板块节点必须报 Run B。"""
+async def test_product_nodes_review_follows_latest_trade_date(db_session) -> None:
+    """多条大盘投影：复盘节点必须跟随最新交易日（market_dashboard_market_daily 最新 trade_date）。"""
     from datetime import date as _date
-    from datetime import datetime, timezone
 
-    d = _date(2026, 8, 4)
-    run_a = await _add_review_run(db_session, d, status="published",
-                                  algorithm_version="review-1.0.0")
-    run_b = await _add_review_run(db_session, d, status="published",
-                                  algorithm_version="review-1.1.0")
-    await _add_review_pointer(db_session, run_b, published_at=datetime.now(timezone.utc))
-    await _add_review_scope_fact(db_session, run_b, "industry_l1", "IND1", pit=100, provided=98)
-    nodes = await _compute_product_nodes(db_session, d)
-    board = next(n for n in nodes if n["key"] == "board")
-    assert board["run_id"] == str(run_b.id), "板块节点必须跟随正式 pointer 指向的 run，而不是裸 status 查询的任意 run"
+    d_old = _date(2026, 8, 1)
+    d_new = _date(2026, 8, 4)
+    await _add_market_daily(db_session, d_old)
+    await _add_market_daily(db_session, d_new)
+    board = await _add_market_board(db_session)
+    await _add_market_scope_daily(db_session, board.id, d_new)
+    nodes = await _compute_product_nodes(db_session, d_new)
+    review = next(n for n in nodes if n["key"] == "review")
+    assert review["trade_date"] == d_new, "复盘节点必须跟随最新投影交易日"
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_board_low_coverage_not_ok(db_session) -> None:
-    """板块节点：正式 pointer 但板块成员覆盖 <95% → 不能标 ok。"""
+async def test_product_nodes_review_scope_missing_not_ok(db_session) -> None:
+    """复盘节点：大盘投影存在但板块投影缺失（scope 行数=0）→ 不能标 ok。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
-    run = await _add_review_run(db_session, d, status="published")
-    await _add_review_pointer(db_session, run)
-    await _add_review_scope_fact(db_session, run, "industry_l1", "IND1", pit=100, provided=50)
+    await _add_market_daily(db_session, d)
     nodes = await _compute_product_nodes(db_session, d)
-    board = next(n for n in nodes if n["key"] == "board")
-    assert board["status"] != "ok"
-    assert board["quality_gate"] == "failed"
+    review = next(n for n in nodes if n["key"] == "review")
+    assert review["status"] != "ok"
+    assert review["quality_gate"] == "failed"
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_board_pending_without_published_review(db_session) -> None:
-    """板块节点：无已发布复盘 → pending（不因 absence of legacy BoardAnalysisRun 报错）。"""
+async def test_product_nodes_review_pending_without_projection(db_session) -> None:
+    """复盘节点：无任何投影 → pending（不依赖已退役 MarketReviewRun）。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
-    await _add_review_run(db_session, d, status="computing")  # 未发布
     nodes = await _compute_product_nodes(db_session, d)
-    board = next(n for n in nodes if n["key"] == "board")
-    assert board["status"] == "pending"
-    assert board["publication_status"] == "not_applicable"
+    review = next(n for n in nodes if n["key"] == "review")
+    assert review["status"] == "pending"
+    assert review["publication_status"] == "not_applicable"
 
 
 @pytest.mark.asyncio

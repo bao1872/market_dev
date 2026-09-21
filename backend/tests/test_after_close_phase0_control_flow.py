@@ -23,6 +23,7 @@ canonical chain = Core → Review → History → complete。chip spy 改挂在�
 
 import importlib.util
 import json
+from datetime import date
 import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -55,7 +56,19 @@ class _FakeSession:
         _dsa.worker_id = "existing"
         _dsa.attempt_count = 0
         _dsa.published = False
-        self.get = AsyncMock(return_value=_dsa)
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] _validate_core_ready
+        # 直接校验真实 CoreRun 行（id/trade_date/status=="succeeded"），harness 必须
+        # 返回合规对象；其余 get（DSA StrategyRun 等）沿用 _dsa（status=completed 使
+        # 跨 worker fencing 直接视为已完成，跳过真实 DB fencing）。
+        async def _fake_get(model, ident):
+            if getattr(model, "__name__", "") == "StockFeatureSnapshotRun":
+                core = MagicMock()
+                core.id = ident
+                core.trade_date = date(2026, 8, 7)
+                core.status = "succeeded"
+                return core
+            return _dsa
+        self.get = _fake_get
         self.begin = MagicMock()
 
     async def __aenter__(self) -> "_FakeSession":
@@ -116,11 +129,19 @@ def _install_patches(job_run, *, resolve_side_effect):
     spies["chip"] = AsyncMock(return_value=(MagicMock(id=uuid.uuid4()), True))
     spies["compute_review_core"] = AsyncMock(return_value=MagicMock())
 
+    # [REVIEW-V2-R1] 复盘 = rebuilding_market_dashboard（optional sidecar），
+    # 由 _execute_rebuilding_market_dashboard 调用 rebuild_market_dashboard_projection。
+    # 隔离该投影重建，避免真实重 I/O；返回值需满足 _execute_rebuilding_market_dashboard
+    # 对 result.market_rows / scope_rows / projection_trade_date 的读取。
+    _fake_dashboard = MagicMock()
+    _fake_dashboard.market_rows = 1
+    _fake_dashboard.scope_rows = 1
+    _fake_dashboard.projection_trade_date = date(2026, 8, 7)
+    spies["rebuild_dashboard"] = AsyncMock(return_value=_fake_dashboard)
+
     # 内部 helper
     spies["heartbeat_step"] = AsyncMock()
     spies["get_job_run"] = AsyncMock(return_value=job_run)
-    spies["create_run"] = AsyncMock(return_value=MagicMock(id=uuid.uuid4()))
-    spies["compute_run"] = AsyncMock(return_value={})
     spies["finish_snapshot_run"] = AsyncMock()
     spies["repair"] = AsyncMock(return_value=[])
     spies["resolve"] = AsyncMock(side_effect=resolve_side_effect)
@@ -158,10 +179,10 @@ def _install_patches(job_run, *, resolve_side_effect):
               new=spies["update_status"]),
         patch("app.services.after_close_orchestrator._get_job_run_or_raise",
               new=spies["get_job_run"]),
-        patch("app.services.review_orchestrator_service.create_run",
-              new=spies["create_run"]),
-        patch("app.services.review_orchestrator_service.compute_run",
-              new=spies["compute_run"]),
+        # [REVIEW-V2-R1] 复盘步骤（rebuilding_market_dashboard）隔离：
+        # 生产由 _execute_rebuilding_market_dashboard → rebuild_market_dashboard_projection。
+        patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection",
+              new=spies["rebuild_dashboard"]),
         patch("app.services.after_close_orchestrator.finish_snapshot_run",
               new=spies["finish_snapshot_run"]),
         patch("app.services.after_close_orchestrator.repair_stale_after_close_snapshot_runs",
@@ -217,16 +238,18 @@ async def test_normal_publish_pointer_current_triggers_auction_but_no_board_aggr
         job_run, resolve_side_effect=_published_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
-        # normal publish + pointer=current → auction anchor 必须被调用
-        assert spies["auction"].called, "normal publish 应调用 auction anchor"
+        # [P0-4][AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-02] AuctionAnchor 产品已废止
+        # （PRD75 §23），AfterClose 不再生成 AuctionAnchorRun；auction anchor 永不被调用。
+        assert not spies["auction"].called, \
+            "AuctionAnchor 产品已退役，normal publish 不得调用 auction anchor"
         # [Slice 4A9] legacy board aggregation 已退役，compute_all_boards 不得被调用
         assert not spies["aggregation"].called, \
             "board aggregation 已退役，AfterClose 不得调用 compute_all_boards"
-        # publishing checkpoint 推进：_update_heartbeat_and_step 被以 PUBLISHING 调用
-        assert any(
+        # [KPI-A1] publishing 已旁路，不再作为真实步骤；normal publish 不得写入 PUBLISHING 检查点。
+        assert not any(
             len(c.args) >= 3 and c.args[2] == AfterCloseRunStatus.PUBLISHING.value
             for c in spies["heartbeat_step"].call_args_list
-        ), "normal publish 应推进 publishing 检查点"
+        ), "publishing 已旁路，normal publish 不得推进 publishing 检查点"
         # [CHIP-RETIRE 2026-09-01] 自动 chip 入队已退役：即便 pointer 已发布，
         # 主链也不得创建 chip job
         assert not spies["chip"].called, \
@@ -246,10 +269,12 @@ async def test_superseded_run_not_consumed_by_auction_events_chip():
         await _run_orchestrator(job_run=job_run, skip_publish=False)
         # superseded run 不得触发 auction / state events / chip
         # （board aggregation 已退役恒不被调用，见 aggregation spy）
-        assert not spies["auction"].called, "superseded run 不应调用 auction anchor"
+        assert not spies["auction"].called, "superseded run 不应调用 auction anchor（已退役）"
         assert not spies["aggregation"].called, \
             "board aggregation 已退役，任何情况下都不应被调用"
-        assert not spies["events"].called, "superseded run 不应生成 state events"
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] state events 现由 core_ready
+        # 门控（不再依赖 published/superseded）；superseded run（Core 已 succeeded）仍生成 events。
+        assert spies["events"].called, "superseded run（Core 已 ready）仍应生成 state events"
         assert not spies["chip"].called, "superseded run 不应入队 chip"
     finally:
         _stop_patches(patchers)
@@ -297,7 +322,7 @@ async def test_rb01_skip_publish_recovery_does_not_run_retired_board_aggregation
         assert not spies["aggregation"].called, (
             "[Slice 4A9] board aggregation 已退役，skip_publish 断点恢复也不得执行"
         )
-        assert spies["create_run"].called, (
+        assert spies["rebuild_dashboard"].called, (
             "Review 只依赖已发布 stock_core，断点恢复下仍必须执行"
         )
     finally:
@@ -315,7 +340,7 @@ async def test_rb01_skip_publish_recovery_runs_review_without_board_aggregation(
         await _run_orchestrator(job_run=job_run, skip_publish=True)
         assert not spies["aggregation"].called, \
             "[Slice 4A9] 断点恢复不得执行 board aggregation"
-        assert spies["create_run"].called, (
+        assert spies["rebuild_dashboard"].called, (
             "Review 只依赖已发布 stock_core，断点恢复下必须执行"
         )
         assert "aggregation" not in record, (
@@ -367,7 +392,7 @@ async def test_rb011_retired_aggregation_failed_does_not_block_review():
         await _run_orchestrator(job_run=job_run, skip_publish=True)
         assert not spies["aggregation"].called, \
             "[Slice 4A9] board aggregation 已退役，不得被调用"
-        assert spies["create_run"].called, (
+        assert spies["rebuild_dashboard"].called, (
             "Review 只依赖已发布 stock_core，legacy aggregation 状态不再阻断 Review"
         )
     finally:
@@ -391,7 +416,7 @@ async def test_rb011_retired_aggregation_pointer_mismatch_does_not_block_review(
         await _run_orchestrator(job_run=job_run, skip_publish=True)
         assert not spies["aggregation"].called, \
             "[Slice 4A9] board aggregation 已退役，不得被调用"
-        assert spies["create_run"].called, (
+        assert spies["rebuild_dashboard"].called, (
             "Review 只依赖已发布 stock_core，legacy pointer 状态不再阻断 Review"
         )
     finally:
@@ -400,24 +425,16 @@ async def test_rb011_retired_aggregation_pointer_mismatch_does_not_block_review(
 
 async def test_rb011_retired_aggregation_skipped_in_final_status_and_no_partial_success():
     """终态断言：aggregation_status=="skipped"，且 legacy aggregation 不再触发
-    PARTIAL_SUCCESS（其余可选阶段均成功 → 主任务为 SUCCEEDED）。"""
+    PARTIAL_SUCCESS（其余可选阶段均成功 → 主任务为 SUCCEEDED）。
+
+    [REVIEW-V2-R1] 复盘 = rebuilding_market_dashboard（optional sidecar），
+    已由 _install_patches 中的 rebuild_market_dashboard_projection mock 隔离为成功，
+    不再需要 review 发布门禁 / publish_run 的脚手架。
+    """
     snap_id = uuid.uuid4()
     job_run = _make_job_run(dsa_run_id=uuid.uuid4(), snapshot_run_id=snap_id)
     spies, patchers = _install_patches(
         job_run, resolve_side_effect=_published_resolution)
-    # Review 发布门禁/发布成功（PURE_UNIT 不连 PG）：让 review 阶段成功，
-    # 从而隔离验证「legacy aggregation 已退役不再触发 PARTIAL_SUCCESS」。
-    gate_patch = patch(
-        "app.services.review_publication_service.evaluate_publish_gate",
-        new=AsyncMock(return_value=(True, [])),
-    )
-    pub_patch = patch(
-        "app.services.review_orchestrator_service.publish_run",
-        new=AsyncMock(return_value=(MagicMock(id=uuid.uuid4()), MagicMock())),
-    )
-    gate_patch.start()
-    pub_patch.start()
-    patchers.extend([gate_patch, pub_patch])
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
         assert spies["update_status"].called, "终态必须写 orchestrator status"
@@ -524,15 +541,17 @@ async def test_p1_2_superseded_does_not_trigger_events_chip_auction_aggregation(
         job_run, resolve_side_effect=_superseded_resolution)
     try:
         await _run_orchestrator(job_run=job_run, skip_publish=False)
-        assert not spies["events"].called, "superseded run 不应生成 state events"
+        # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01-CORRECTION-03] state events 现由 core_ready
+        # 门控；superseded run（Core 已 succeeded）仍生成 events。auction/chip/aggregation 已退役。
+        assert spies["events"].called, "superseded run（Core 已 ready）仍应生成 state events"
         assert not spies["chip"].called, "superseded run 不应入队 chip"
-        assert not spies["auction"].called, "superseded run 不应调用 auction anchor"
+        assert not spies["auction"].called, "superseded run 不应调用 auction anchor（已退役）"
         assert not spies["aggregation"].called, \
             "board aggregation 已退役，任何情况下都不应被调用"
-        # 这四类 post-core 副作用都不应出现在执行序列中
-        post_core = {"events", "chip", "auction", "aggregation"}
-        assert post_core.isdisjoint(set(record)), (
-            f"superseded run 不应执行任何 post-core 副作用，实际序列: {record}"
+        # 仅 auction/chip/aggregation 这三类已退役副作用不得出现在执行序列中
+        retired_side = {"chip", "auction", "aggregation"}
+        assert retired_side.isdisjoint(set(record)), (
+            f"superseded run 不应执行已退役副作用，实际序列: {record}"
         )
     finally:
         _stop_patches(patchers)

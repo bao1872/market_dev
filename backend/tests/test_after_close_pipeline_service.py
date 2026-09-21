@@ -31,9 +31,11 @@ def test_resolve_failed_step_prefers_latest_failed_step():
     steps = {
         "refreshing_daily": {"status": "failed"},
         "computing_features": {"status": "failed"},
-        "computing_review": {"status": "failed"},
+        # [REVIEW-V2-R1] computing_review 已退役，不再是 current pipeline step；
+        # 用 computing_history 表达「取序列中最靠后的失败步骤」这一语义。
+        "computing_history": {"status": "failed"},
     }
-    assert pipeline_mod.resolve_failed_step(steps) == "computing_review"
+    assert pipeline_mod.resolve_failed_step(steps) == "computing_history"
 
 
 def test_resolve_failed_step_returns_none_when_all_succeeded():

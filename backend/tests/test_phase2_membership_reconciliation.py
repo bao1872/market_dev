@@ -350,16 +350,18 @@ class TestMembershipReconciliationOrchestrator:
             "app.services.first_pyramid_history_service.create_history_run_items",
             new=_fake_create,
         ), patch(
-            "app.services.review_history_readiness_service.validate_canonical_history_run_readiness",
+            "app.services.first_pyramid_history_readiness_service.validate_canonical_history_run_readiness",
             new=AsyncMock(
                 side_effect=AssertionError("Review readiness must not be called")
             ),
         ) as mock_ready, patch(
-            "app.services.review_orchestrator_service._resolve_canonical_history_source",
+            # [REVIEW-V2-R1] 旧 Review resolver `_resolve_canonical_history_source` 已删除；
+            # source 解析逻辑内联于 advance_canonical_history_run_to_trade_date（advancement）。
+            "app.services.first_pyramid_history_service.advance_canonical_history_run_to_trade_date",
             new=AsyncMock(
-                side_effect=AssertionError("Review resolver must not be called")
+                side_effect=AssertionError("canonical history advance must not be called")
             ),
-        ) as mock_resolve:
+        ) as mock_advance:
             result = await reconcile_first_pyramid_history_membership(
                 session,
                 history_run_id=run_id,
@@ -369,7 +371,7 @@ class TestMembershipReconciliationOrchestrator:
 
             # Review 零调用
             mock_ready.assert_not_called()
-            mock_resolve.assert_not_called()
+            mock_advance.assert_not_called()
 
         p = result.partition
         assert p.added == [b]
@@ -488,16 +490,18 @@ class TestMembershipReconciliationOrchestrator:
             "app.services.first_pyramid_history_service.create_history_run_items",
             new=_fake_create,
         ), patch(
-            "app.services.review_history_readiness_service.validate_canonical_history_run_readiness",
+            "app.services.first_pyramid_history_readiness_service.validate_canonical_history_run_readiness",
             new=AsyncMock(
                 side_effect=AssertionError("Review readiness must not be called")
             ),
         ) as mock_ready, patch(
-            "app.services.review_orchestrator_service._resolve_canonical_history_source",
+            # [REVIEW-V2-R1] 旧 Review resolver `_resolve_canonical_history_source` 已删除；
+            # source 解析逻辑内联于 advance_canonical_history_run_to_trade_date（advancement）。
+            "app.services.first_pyramid_history_service.advance_canonical_history_run_to_trade_date",
             new=AsyncMock(
-                side_effect=AssertionError("Review resolver must not be called")
+                side_effect=AssertionError("canonical history advance must not be called")
             ),
-        ) as mock_resolve:
+        ) as mock_advance:
             r1 = await reconcile_first_pyramid_history_membership(
                 session, history_run_id=run_id, eligible_instrument_ids=[a, b, c],
             )
@@ -527,7 +531,7 @@ class TestMembershipReconciliationOrchestrator:
 
             # Review 零调用（不通过改 Review 来迎合 producer 的 counter 维护）
             mock_ready.assert_not_called()
-            mock_resolve.assert_not_called()
+            mock_advance.assert_not_called()
 
         # 硬边界：不得发出任何 DELETE（no-longer-current 历史保留 → expected_count 不降）
         for stmt in session.executed:
@@ -555,16 +559,18 @@ class TestMembershipReconciliationOrchestrator:
             "app.services.first_pyramid_history_service.create_history_run_items",
             new=_fake_create,
         ), patch(
-            "app.services.review_history_readiness_service.validate_canonical_history_run_readiness",
+            "app.services.first_pyramid_history_readiness_service.validate_canonical_history_run_readiness",
             new=AsyncMock(
                 side_effect=AssertionError("Review readiness must not be called")
             ),
         ) as mock_ready, patch(
-            "app.services.review_orchestrator_service._resolve_canonical_history_source",
+            # [REVIEW-V2-R1] 旧 Review resolver `_resolve_canonical_history_source` 已删除；
+            # source 解析逻辑内联于 advance_canonical_history_run_to_trade_date（advancement）。
+            "app.services.first_pyramid_history_service.advance_canonical_history_run_to_trade_date",
             new=AsyncMock(
-                side_effect=AssertionError("Review resolver must not be called")
+                side_effect=AssertionError("canonical history advance must not be called")
             ),
-        ) as mock_resolve:
+        ) as mock_advance:
             ra = await reconcile_first_pyramid_history_membership(
                 session, history_run_id=run_a, eligible_instrument_ids=[a, b],
             )
@@ -577,4 +583,4 @@ class TestMembershipReconciliationOrchestrator:
             assert session._runs[run_a].expected_count == 2
             assert session._runs[run_b].expected_count == 1
             mock_ready.assert_not_called()
-            mock_resolve.assert_not_called()
+            mock_advance.assert_not_called()

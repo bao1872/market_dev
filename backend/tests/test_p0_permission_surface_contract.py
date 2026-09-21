@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 
-from app.api.board_analysis import board_router
 from app.api.instruments import router as instruments_router
 from app.models.user_capability import (
     CAPABILITY_MARKET_DATA,
@@ -29,7 +28,6 @@ pytestmark = pytest.mark.pure_unit
 
 _BACKEND = Path(__file__).resolve().parents[1]
 _INSTRUMENTS_SRC = (_BACKEND / "app" / "api" / "instruments.py").read_text(encoding="utf-8")
-_BOARD_SRC = (_BACKEND / "app" / "api" / "board_analysis.py").read_text(encoding="utf-8")
 
 
 def _closure_strings(dep: Any) -> set[str]:
@@ -74,32 +72,7 @@ def test_instruments_dependency_gates_self_selection_or_market_data() -> None:
         )
 
 
-# ── 2. board_analysis 路由：必须是 market_data，而非仅登录 ─────────────
-def test_board_routes_require_market_data_capability() -> None:
-    routes = _route_dependencies(board_router)
-    assert routes, "board 路由不应为空"
-
-    for path, route in routes:
-        names: set[str] = set()
-        for dep in route.dependant.dependencies:
-            names |= _closure_strings(dep)
-        assert CAPABILITY_MARKET_DATA in names, (
-            f"{path} 未要求 market_data（修复前仅 require_authenticated）: {names}"
-        )
-
-
-# ── 3. 源码契约：不得回退到"仅登录" ────────────────────────────────────
-def test_board_analysis_source_no_longer_uses_require_authenticated() -> None:
-    # 允许模块 docstring 提及该名称（用于记录历史缺陷），
-    # 但不得再作为依赖使用，也不得再被导入。
-    assert "Depends(require_authenticated)" not in _BOARD_SRC, (
-        "board_analysis 不得再以 require_authenticated 作为依赖（前端要求 market_data）"
-    )
-    assert "AccessContext, require_authenticated" not in _BOARD_SRC, (
-        "board_analysis 不得再导入 require_authenticated"
-    )
-
-
+# ── 2. instruments 源码契约：不得回退到"仅登录" ─────────────────────
 def test_instruments_source_declares_capability_gate() -> None:
     assert "_REQUIRE_INSTRUMENT_DISCOVERY = require_any_capability(" in _INSTRUMENTS_SRC
     assert "CAPABILITY_SELF_SELECTION" in _INSTRUMENTS_SRC

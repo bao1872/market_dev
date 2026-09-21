@@ -110,20 +110,18 @@ class TestCompletedStepsIntegration:
         )
 
     def test_completed_steps_correct_progression(self) -> None:
-        """syncing_boards 在 refreshing_daily 之后、waiting_dsa_worker 之前。"""
-        import inspect
+        """syncing_boards 在 refreshing_daily 之后、computing_features 之前。"""
+        from app.services.after_close_orchestrator import _COMPLETED_STEPS
 
-        from app.services.after_close_orchestrator import execute_after_close_run
+        # _COMPLETED_STEPS 为 module-level 单一真相源（不再内联在编排函数里）。
+        refreshing = _COMPLETED_STEPS["refreshing_daily"]
+        syncing = _COMPLETED_STEPS["syncing_boards"]
+        features = _COMPLETED_STEPS["computing_features"]
 
-        source = inspect.getsource(execute_after_close_run)
-        # 验证 syncing_boards 出现在 refreshing_daily 之后
-        refreshing_pos = source.find('"refreshing_daily": {"refreshing_daily"}')
-        syncing_pos = source.find('"syncing_boards":')
-        waiting_pos = source.find('"waiting_dsa_worker":')
-
-        assert refreshing_pos < syncing_pos < waiting_pos, (
-            "_completed_steps 顺序错误: syncing_boards 不在 refreshing_daily 和 waiting_dsa_worker 之间"
-        )
+        assert refreshing == {"refreshing_daily"}
+        assert refreshing < syncing, "syncing_boards 必须包含 refreshing_daily（在其之后）"
+        assert "syncing_boards" in syncing
+        assert syncing < features, "computing_features 必须包含 syncing_boards（在其之后）"
 
     def test_board_sync_step_exists(self) -> None:
         """编排函数中必须包含 syncing_boards 步骤的执行代码。

@@ -70,8 +70,10 @@ _PIPELINE_STEPS = [
     AfterCloseRunStatus.REFRESHING_DAILY.value,
     AfterCloseRunStatus.SYNCING_BOARDS.value,
     AfterCloseRunStatus.CHECKING_COVERAGE.value,
+    # [REVIEW-V2-R1] canonical 复盘计算（Dashboard projection）：位置在
+    # board/coverage readiness 之后、computing_features 之前。
+    "rebuilding_market_dashboard",
     AfterCloseRunStatus.COMPUTING_FEATURES.value,
-    AfterCloseRunStatus.COMPUTING_REVIEW.value,
     AfterCloseRunStatus.COMPUTING_HISTORY.value,
     "watchlist_ready",
 ]
@@ -82,7 +84,11 @@ _STEP_LABELS = {
     AfterCloseRunStatus.SYNCING_BOARDS.value: "同步板块",
     AfterCloseRunStatus.CHECKING_COVERAGE.value: "检查覆盖率",
     AfterCloseRunStatus.COMPUTING_FEATURES.value: "统一特征计算",
-    AfterCloseRunStatus.COMPUTING_REVIEW.value: "复盘计算发布",
+    # [REVIEW-V2-R1] canonical 复盘计算（Market Dashboard projection 重建）
+    "rebuilding_market_dashboard": "复盘计算",
+    # legacy 兼容标签：computing_review 已退役，不再是 current 步骤；
+    # 仅当历史 legacy run 真实存在该事件时用于展示，不与新复盘混淆。
+    AfterCloseRunStatus.COMPUTING_REVIEW.value: "旧复盘计算",
     AfterCloseRunStatus.COMPUTING_HISTORY.value: "历史状态推进",
     "watchlist_ready": "自选可用",
 }
@@ -111,6 +117,9 @@ def resolve_failed_step(step_summaries: Any | None) -> str | None:
 # 仅用于事件识别（真实发生过的事件不得被吞掉），不进入 current canonical 默认序列。
 _LEGACY_EVENT_STEPS = frozenset({
     AfterCloseRunStatus.PUBLISHING.value,
+    # [REVIEW-V2-R1] 旧复盘已退役：不得进入 current default sequence，
+    # 但历史 run 真实存在的 computing_review 事件必须仍可读取/展示。
+    AfterCloseRunStatus.COMPUTING_REVIEW.value,
 })
 
 # [Phase8A] 旧四状态 → computing_features 的映射（历史 run 兼容读取）
@@ -136,7 +145,10 @@ _COMPLETED_STEP_INDEX = {
     AfterCloseRunStatus.REFRESHING_DAILY.value: 0,
     AfterCloseRunStatus.SYNCING_BOARDS.value: 1,
     AfterCloseRunStatus.CHECKING_COVERAGE.value: 2,
-    AfterCloseRunStatus.COMPUTING_FEATURES.value: 3,
+    # 注意：index 3 是 rebuilding_market_dashboard，但它是 optional 非 checkpoint，
+    # 不写 last_completed_step，因此**故意不作为本 dict 的 key**。
+    AfterCloseRunStatus.COMPUTING_FEATURES.value: 4,
+    # legacy token：历史 last_completed_step=computing_review 等价于「features 已完成」。
     AfterCloseRunStatus.COMPUTING_REVIEW.value: 4,
     AfterCloseRunStatus.COMPUTING_HISTORY.value: 5,
     AfterCloseRunStatus.SUCCEEDED.value: 6,
@@ -144,12 +156,12 @@ _COMPLETED_STEP_INDEX = {
     # 与 orchestrator._COMPLETED_STEPS["publishing"] 语义一致：核心（features）已完成，
     # 但 computing_review / computing_history 未完成，故映射回 computing_features 完成度（=3）；
     # 不得因 publishing 不在 current canonical 序列中而丢失历史 run 的真实进度。
-    AfterCloseRunStatus.PUBLISHING.value: 3,
+    AfterCloseRunStatus.PUBLISHING.value: 4,
     # 旧四状态映射到 computing_features 的索引（历史 run 兼容）
     AfterCloseRunStatus.CREATING_DSA.value: 3,
-    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
-    AfterCloseRunStatus.QUALITY_GATE.value: 3,
-    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
+    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 4,
+    AfterCloseRunStatus.QUALITY_GATE.value: 4,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 4,
 }
 
 # [AC-TERMINAL-01 2026-08-04] 注意：cancelled / interrupted / partial_success
@@ -167,6 +179,22 @@ _STEP_TERMINAL_STATUSES = frozenset({
     "unavailable",
     AfterCloseRunStatus.CANCELLED.value,
     AfterCloseRunStatus.INTERRUPTED.value,
+})
+
+# [R1-E] step_summary.status 归一化后允许直接作为 UI 步骤状态的集合。
+# 规则：命中本集合的 step，summary 是状态 owner；checkpoint / current_idx 仅作 fallback。
+# （_step_summary_status 已把 succeeded 归一为 completed。）
+# 这同时修掉 optional step（rebuilding_market_dashboard / syncing_boards 等）失败
+# 却被 idx <= completed_idx 推断成 completed 的 false-green。
+_STEP_SUMMARY_DISPLAY_STATUSES = frozenset({
+    "running",
+    "completed",
+    "failed",
+    "timed_out",
+    "unavailable",
+    "cancelled",
+    "interrupted",
+    "skipped",
 })
 
 
@@ -498,7 +526,10 @@ def _compute_step_states(
     watchlist_ready: bool,
     snapshot_summary: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 7 步骤状态（含 computing_review）。
+    """根据 job_run 状态、事件、watchlist_ready、snapshot_summary 计算 7 步骤状态。
+
+    [REVIEW-V2-R1] current 7 步含 rebuilding_market_dashboard（canonical 复盘计算）；
+    旧 computing_review 已退役，仅作为 legacy 真实事件兼容展示。
 
     [TIMELINE-FIX] duration_seconds 直接来自 _aggregate_step_events 严格校验过的结果；
     不再从 (finished_at - started_at) 这里二次计算，避免两端事件来源跨 attempt/时区 出偏差。
@@ -561,9 +592,17 @@ def _compute_step_states(
     steps: list[dict[str, Any]] = []
     for idx, step in enumerate(_PIPELINE_STEPS):
         stats = step_events.get(step, {})
-        started_at = stats.get("started_at")
-        finished_at = stats.get("finished_at")
+        raw_summary = step_summaries.get(step)
+        summary = raw_summary if isinstance(raw_summary, dict) else {}
+        # [R1-F] event aggregate 优先；缺失时允许从该 step 的 step_summary 补
+        # started_at / finished_at / elapsed_seconds / error_message。
+        # 只补展示信息，不改变业务状态判定（状态由下方 summary-first 规则决定）。
+        started_at = stats.get("started_at") or summary.get("started_at")
+        finished_at = stats.get("finished_at") or summary.get("finished_at")
         duration = stats.get("duration_seconds")
+        if duration is None:
+            duration = summary.get("elapsed_seconds")
+        error_message = stats.get("error_message") or summary.get("error_message")
 
         # [TIMELINE-FIX] 附加跨 attempt/时区的顺序异常标记（仅诊断，不掩盖为 0）
         warnings_list: list[str] = []
@@ -647,6 +686,14 @@ def _compute_step_states(
             # 保留 started_at；清除 invalid_order warning（running 没结束是正常）
             warnings_list = [w for w in warnings_list if w != "invalid_order_or_zero_duration"]
 
+        # [R1-E] summary-first：step_summary.status 是 current step 状态的最高优先级 owner，
+        # checkpoint / current_idx 只是 fallback；watchlist_ready 仍保持特殊处理。
+        # 关键：dashboard summary=failed 而主链已推进到 computing_features 时，
+        # 必须输出 dashboard=failed（不得因 idx <= completed_idx 显示 completed）。
+        summary_status = _step_summary_status(step_summaries, step)
+        if step != "watchlist_ready" and summary_status in _STEP_SUMMARY_DISPLAY_STATUSES:
+            step_status = summary_status
+
         steps.append({
             "step": step,
             "status": step_status,
@@ -654,40 +701,53 @@ def _compute_step_states(
             "finished_at": _format_dt(finished_at),
             "duration_seconds": duration,
             "counts": stats.get("counts", {}),
-            "error_message": stats.get("error_message"),
+            "error_message": error_message,
             "warnings": warnings_list if warnings_list else None,
         })
 
-    # [CHANGE-20260831-ADMIN-TIMELINE] legacy 兼容：历史 run 若真实产生过 publishing 事件，
-    # 必须如实呈现（不得吞掉）。publishing 不再是 current canonical 默认步骤，
-    # 因此仅在真实事件存在时补入，位置沿用 legacy DAG（computing_features 之后）。
-    if AfterCloseRunStatus.PUBLISHING.value in step_events:
-        pub_stats = step_events[AfterCloseRunStatus.PUBLISHING.value]
-        pub_started = pub_stats.get("started_at")
-        pub_finished = pub_stats.get("finished_at")
-        if pub_finished is not None:
-            pub_status = "completed"
-        elif pub_started is not None:
-            pub_status = "running"
+    # [R1-G] legacy 兼容：历史 run 若真实产生过 publishing / computing_review 事件，
+    # 必须如实呈现（不得吞掉）。二者都**不是** current canonical 默认步骤，因此
+    # **仅在真实事件存在时补入**（禁止合成不存在的 legacy step），位置沿用 legacy DAG：
+    #   computing_features → publishing(if existed) → computing_review(if existed) → history
+    _LEGACY_DISPLAY_ORDER = (
+        AfterCloseRunStatus.PUBLISHING.value,
+        AfterCloseRunStatus.COMPUTING_REVIEW.value,
+    )
+    insert_pos = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value) + 1
+    for legacy_step in _LEGACY_DISPLAY_ORDER:
+        if legacy_step not in step_events:
+            continue
+        legacy_stats = step_events[legacy_step]
+        legacy_started = legacy_stats.get("started_at")
+        legacy_finished = legacy_stats.get("finished_at")
+        # [R1-G] legacy 步骤状态：step_summary 终态优先，否则 event timing 推导。
+        legacy_summary_status = _step_summary_status(step_summaries, legacy_step)
+        if legacy_summary_status in _STEP_TERMINAL_STATUSES:
+            legacy_status = legacy_summary_status
+        elif legacy_finished is not None:
+            legacy_status = "completed"
+        elif legacy_started is not None:
+            legacy_status = "running"
         else:
-            pub_status = "pending"
+            legacy_status = "pending"
         steps.insert(
-            _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value) + 1,
+            insert_pos,
             {
-                "step": AfterCloseRunStatus.PUBLISHING.value,
-                "status": pub_status,
-                "started_at": _format_dt(pub_started),
-                "finished_at": _format_dt(pub_finished),
+                "step": legacy_step,
+                "status": legacy_status,
+                "started_at": _format_dt(legacy_started),
+                "finished_at": _format_dt(legacy_finished),
                 "duration_seconds": (
                     None
-                    if pub_status == "running"
-                    else pub_stats.get("duration_seconds")
+                    if legacy_status == "running"
+                    else legacy_stats.get("duration_seconds")
                 ),
-                "counts": pub_stats.get("counts", {}),
-                "error_message": pub_stats.get("error_message"),
+                "counts": legacy_stats.get("counts", {}),
+                "error_message": legacy_stats.get("error_message"),
                 "warnings": None,
             },
         )
+        insert_pos += 1
 
     return steps
 
@@ -1011,15 +1071,23 @@ if __name__ == "__main__":
     assert "watchlist_ready" in _PIPELINE_STEPS
     assert "computing_features" in _PIPELINE_STEPS
     assert "syncing_boards" in _PIPELINE_STEPS
-    # [CHANGE-20260801-REVIEW-CLOSURE] 8 步序列（publishing→computing_history→computing_review→watchlist_ready）
-    assert "computing_review" in _PIPELINE_STEPS, (
-        "_PIPELINE_STEPS 必须包含 computing_review（复盘阶段）"
+    # [REVIEW-V2-R1] 7 步 canonical 序列：daily -> coverage -> dashboard review
+    # -> features -> history -> watchlist
+    assert "rebuilding_market_dashboard" in _PIPELINE_STEPS, (
+        "_PIPELINE_STEPS 必须包含 rebuilding_market_dashboard（canonical 复盘计算）"
+    )
+    assert AfterCloseRunStatus.COMPUTING_REVIEW.value not in _PIPELINE_STEPS, (
+        "computing_review 已退役，不得再出现在 current canonical 序列"
+    )
+    assert AfterCloseRunStatus.COMPUTING_REVIEW.value in _LEGACY_EVENT_STEPS, (
+        "computing_review 必须保留在 _LEGACY_EVENT_STEPS 中，避免历史真实事件被吞掉"
     )
     assert "computing_history" in _PIPELINE_STEPS, (
         "_PIPELINE_STEPS 必须包含 computing_history（历史状态推进阶段）"
     )
     assert len(_PIPELINE_STEPS) == 7, (
-        f"7 步 canonical 序列（含 computing_history / computing_review），实际={len(_PIPELINE_STEPS)}"
+        f"7 步 canonical 序列（含 rebuilding_market_dashboard / computing_history），"
+        f"实际={len(_PIPELINE_STEPS)}"
     )
     # publishing 不再为 current canonical DAG 合成，但历史真实事件不得被吞掉
     assert AfterCloseRunStatus.PUBLISHING.value not in _PIPELINE_STEPS, (
@@ -1028,25 +1096,31 @@ if __name__ == "__main__":
     assert AfterCloseRunStatus.PUBLISHING.value in _LEGACY_EVENT_STEPS, (
         "publishing 必须保留在 _LEGACY_EVENT_STEPS 中，避免历史真实事件被吞掉"
     )
-    # 顺序：computing_review 在 computing_features 之后、computing_history 之前
+    # 顺序：dashboard review 在 coverage 之后、computing_features 之前
+    dash_idx = _PIPELINE_STEPS.index("rebuilding_market_dashboard")
     feat_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value)
-    rev_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_REVIEW.value)
     hist_idx = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_HISTORY.value)
     wl_idx = _PIPELINE_STEPS.index("watchlist_ready")
-    assert feat_idx < rev_idx < hist_idx < wl_idx, (
-        f"顺序必须为 computing_features < computing_review < computing_history < watchlist_ready："
-        f"feat={feat_idx}, rev={rev_idx}, hist={hist_idx}, wl={wl_idx}"
+    assert dash_idx < feat_idx < hist_idx < wl_idx, (
+        f"顺序必须为 rebuilding_market_dashboard < computing_features < "
+        f"computing_history < watchlist_ready："
+        f"dash={dash_idx}, feat={feat_idx}, hist={hist_idx}, wl={wl_idx}"
     )
-    # 旧四状态映射到 computing_features 索引（=3）
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
-    # 新状态机索引（7 步：computing_review=4, computing_history=5, succeeded=6）
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 3
+    # 旧四状态映射到 computing_features 索引（=4）
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 4
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 4
+    # [REVIEW-V2-R1] dashboard 是 optional 非 checkpoint：不得成为 _COMPLETED_STEP_INDEX 的 key
+    assert "rebuilding_market_dashboard" not in _COMPLETED_STEP_INDEX, (
+        "rebuilding_market_dashboard 不是 durable checkpoint，不得出现在 _COMPLETED_STEP_INDEX"
+    )
+    # 新状态机索引（index 3 为 dashboard；features=4, history=5, succeeded=6）
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 4
+    # legacy token：等价于「features 已完成」
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 4
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 5
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 6
     # legacy publishing token：映射回 computing_features 完成度（核心已完成，review/history 未完成）
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 3
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 4
     # 旧四状态映射
     assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
     # 时区归一化 + 负耗时防御：_normalize_to_shanghai 基本行为
@@ -1060,4 +1134,4 @@ if __name__ == "__main__":
     assert sh_from_utc.hour == 15, (
         f"UTC 07:00 应转换为上海 15:00，实际 hour={sh_from_utc.hour}"
     )
-    print("after_close_pipeline_service 常量与映射自测通过（含 computing_review 7 步 + 时区归一化）")
+    print("after_close_pipeline_service 常量与映射自测通过（含 rebuilding_market_dashboard 的 current 7 步 + 时区归一化）")

@@ -1,20 +1,20 @@
 """/first-pyramid CURRENT Core run resolution 回归测试（纯单元，无数据库）。
 
-背景（AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 consumer migration）：
+[REVIEW-V2-R1 runtime closure] 旧 Review 产品已退役，CURRENT canonical CoreRun 的
+唯一 authority 恢复为 **live stock_core FactorPublication pointer**
+（``publication_kind=stock_core``、``scope_type/scope_key='market'``、
+``superseded_by IS NULL``）。``stock_context._resolve_current_core_run`` 只是委派给
+service-level 单一 owner ``app.services.current_core_run_service.resolve_current_core_run``
+（禁止在本模块复制第二套解析）。
 
-- ``2ea7a3d``（2026-07-29）把 ``stock_context._find_latest_succeeded_run`` /
-  ``_find_run_by_trade_date`` 改为**优先读 stock_core FactorPublication**。
-- ``60c5d267``（2026-08-27 05:28 +0800）把 CURRENT AfterClose 主链切成
-  Core → Review，**不再推进 stock_core pointer**（仅 LEGACY compatibility）。
-- 该架构迁移**没有修改** ``backend/app/api/stock_context.py``（最后改动 2026-08-01），
-  于是 ``/first-pyramid`` 被永久 pin 在最后一次旧架构发布日 2026-08-26 / run ``ca5c3dd2``。
+本文件只覆盖 ``_resolve_current_core_run``：
 
-本文件只覆盖 ``_resolve_current_core_run``（CURRENT 第一金字塔的唯一 Core 解析入口）：
-
-1. 本次真实回归：存在 stale stock_core pointer 时仍须解析到 formal Review 的 Core
-2. stale legacy pointer 不得 pin CURRENT
-3. as_of 必须 point-in-time，不得返回更晚的 Review/Core
-4. lineage fail-closed：Core 缺失 / status != succeeded / trade_date 不一致 → None
+1. live stock_core pointer → data_run_id → StockFeatureSnapshotRun（succeeded）解析成功
+2. 多个 live pointer 时取 point-in-time 下最新者，旧（stale）pointer 不得抢占
+3. as_of 必须 point-in-time，不得返回晚于截止日的 Core
+4. lineage fail-closed：无 live pointer / data_run_id 为空 / Core 缺失 /
+   status != succeeded / trade_date 不一致 / schema_version 不一致 → None
+   （**禁止**回退到 arbitrary latest succeeded CoreRun）
 
 运行：
     cd backend && PURE_UNIT_TEST=1 python -m pytest tests/test_first_pyramid_current_core_resolution.py -v
@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import date, datetime
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -32,48 +32,31 @@ from app.api.stock_context import _resolve_current_core_run
 from app.models.stock_feature_snapshot_run import STATUS_SUCCEEDED
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
 
-# 生产事故当天的真实日期/run 语义（仅作可读常量，不连库）
+# 生产语义日期（仅作可读常量，不连库）
 _STALE_CORE_DATE = date(2026, 8, 26)
 _CURRENT_CORE_DATE = date(2026, 9, 1)
 
 
-class _RowsResult:
-    """list_formally_published_review_dates 消费：``for row in result``。"""
+class _ScalarsRows:
+    """``session.execute(...)`` 结果替身：``.scalars().all()`` 返回 live pointer 列表。"""
 
-    def __init__(self, rows: list[tuple]) -> None:
+    def __init__(self, rows: list[object]) -> None:
         self._rows = rows
 
-    def __iter__(self):
-        return iter(self._rows)
+    def scalars(self):
+        return self
+
+    def all(self):
+        return list(self._rows)
 
 
-class _ScalarResult:
-    """_get_publication 消费：``result.scalar_one_or_none()``。"""
+def _pointer(*, trade_date: date, data_run_id: uuid.UUID | None) -> SimpleNamespace:
+    """live stock_core FactorPublication pointer 的最小替身。
 
-    def __init__(self, value) -> None:
-        self._value = value
-
-    def scalar_one_or_none(self):
-        return self._value
-
-
-def _review_run(
-    *,
-    run_id: uuid.UUID,
-    trade_date: date,
-    core_run_id: uuid.UUID | None,
-    status: str = "published",
-    published_at: datetime | None = None,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        id=run_id,
-        trade_date=trade_date,
-        source_core_run_id=core_run_id,
-        status=status,
-        published_at=published_at
-        if published_at is not None
-        else datetime(2026, 9, 1, 17, 47, 27),
-    )
+    owner 只消费 ``.trade_date``（point-in-time 过滤 / 一致性校验）与
+    ``.data_run_id``（canonical CoreRun 外键）。
+    """
+    return SimpleNamespace(trade_date=trade_date, data_run_id=data_run_id)
 
 
 def _core_run(
@@ -92,24 +75,24 @@ def _core_run(
 
 
 def _build_session(
-    execute_results: list[object],
+    pointer_rows: list[SimpleNamespace],
     objects_by_id: dict[uuid.UUID, object],
 ) -> AsyncMock:
     """构造最小 AsyncSession 替身。
 
-    ``execute_results`` 按调用顺序返回；**超出预期次数的 execute 立即失败**——
-    这正是"stale stock_core pointer 未被读取"的证明手段：任何额外的
-    pointer 查询（例如查 stock_core）都会让断言炸掉。
+    ``execute`` 只允许被调用 **1 次**（读取 live stock_core pointer）；任何额外查询
+    （例如回退查 arbitrary succeeded Core）都会让断言炸掉——这正是 fail-closed 的证明手段。
+    ``get`` 按 id 返回 CoreRun（``StockFeatureSnapshotRun``）。
     """
     session = AsyncMock()
-    pending = iter(execute_results)
+    pending = iter([_ScalarsRows(pointer_rows)])
 
     async def _execute(stmt, *args, **kwargs):
         try:
             return next(pending)
         except StopIteration:
             raise AssertionError(
-                "被测函数产生了超出预期的 execute 调用（可能读取了 stock_core pointer）"
+                "被测函数产生了超出预期的 execute 调用（只应读取一次 live stock_core pointer）"
             ) from None
 
     async def _get(model, ident, *args, **kwargs):
@@ -120,66 +103,34 @@ def _build_session(
     return session
 
 
-def _session_with_pointer(
-    *,
-    formal_dates: list[date],
-    review_run: SimpleNamespace,
-    objects_by_id: dict[uuid.UUID, object],
-) -> AsyncMock:
-    """execute：第 1 次返回正式 Review 日期，第 2 次返回 live pointer（data_run_id）。"""
-    pointer = SimpleNamespace(data_run_id=review_run.id)
-    return _build_session(
-        [
-            _RowsResult([(d,) for d in formal_dates]),
-            _ScalarResult(pointer),
-        ],
-        objects_by_id,
-    )
-
-
 # =============================================================================
-# Case 1 / Case 2
+# Case 1 / Case 2：live pointer 解析 + stale pointer 不得抢占
 # =============================================================================
 
 
-async def test_current_core_follows_formal_review_not_stale_stock_core_pointer():
-    """Case 1（本次真实回归）+ Case 2（stale legacy pointer 不得 pin CURRENT）。
+async def test_current_core_resolves_from_live_stock_core_pointer():
+    """live stock_core pointer（最新）→ data_run_id → succeeded CoreRun 解析成功。
 
-    生产等价状态：
-      - stale ``stock_core`` pointer → Core(2026-08-26)
-      - formal ``market_review``      → Review(2026-09-01)
-      - Review.source_core_run_id     → Core(2026-09-01)（status=succeeded）
-
-    断言：解析结果必须是 Core(2026-09-01)，不是 2026-08-26。
-    本用例不注入任何 stock_core pointer 读取路径——被测函数根本不查它，
-    因此 stale pointer 无论是否有效都不可能影响 CURRENT 结果。
+    pointer 行内含一个更旧的 stale pointer；owner 取 trade_date 最新者，
+    旧 pointer 不得抢占（且 stale Core 即使可查到也不会被选中）。
     """
     stale_core_id = uuid.uuid4()
     current_core_id = uuid.uuid4()
-    review_id = uuid.uuid4()
 
-    review = _review_run(
-        run_id=review_id,
-        trade_date=_CURRENT_CORE_DATE,
-        core_run_id=current_core_id,
-    )
-    current_core = _core_run(run_id=current_core_id, trade_date=_CURRENT_CORE_DATE)
-    stale_core = _core_run(run_id=stale_core_id, trade_date=_STALE_CORE_DATE)
-
-    # stale Core 也在 objects_by_id 里：反证它即使"可查到"也不会被选中
-    session = _session_with_pointer(
-        formal_dates=[_CURRENT_CORE_DATE],
-        review_run=review,
+    session = _build_session(
+        pointer_rows=[
+            _pointer(trade_date=_CURRENT_CORE_DATE, data_run_id=current_core_id),
+            _pointer(trade_date=_STALE_CORE_DATE, data_run_id=stale_core_id),
+        ],
         objects_by_id={
-            review_id: review,
-            current_core_id: current_core,
-            stale_core_id: stale_core,
+            current_core_id: _core_run(run_id=current_core_id, trade_date=_CURRENT_CORE_DATE),
+            stale_core_id: _core_run(run_id=stale_core_id, trade_date=_STALE_CORE_DATE),
         },
     )
 
     resolved = await _resolve_current_core_run(session)
 
-    assert resolved is not None, "formal Review 血统完整时必须解析出 CoreRun"
+    assert resolved is not None, "live stock_core pointer 血统完整时必须解析出 CoreRun"
     assert resolved.id == current_core_id
     assert resolved.trade_date == _CURRENT_CORE_DATE
     # 显式反证：不得返回 stale Core
@@ -187,64 +138,43 @@ async def test_current_core_follows_formal_review_not_stale_stock_core_pointer()
     assert resolved.trade_date != _STALE_CORE_DATE
 
 
-async def test_stale_legacypointer_never_consulted():
-    """Case 2 强化：即使 DB 里存在有效的 stale stock_core pointer，
-    CURRENT 解析也不得读它——被测函数的 execute 调用次数被严格限定为 formal Review 链路。
-    """
-    current_core_id = uuid.uuid4()
-    review_id = uuid.uuid4()
-
-    review = _review_run(
-        run_id=review_id,
-        trade_date=_CURRENT_CORE_DATE,
-        core_run_id=current_core_id,
-    )
-    current_core = _core_run(run_id=current_core_id, trade_date=_CURRENT_CORE_DATE)
-
-    session = _session_with_pointer(
-        formal_dates=[_CURRENT_CORE_DATE],
-        review_run=review,
-        objects_by_id={review_id: review, current_core_id: current_core},
+async def test_single_execute_only_reads_live_pointer():
+    """owner 只允许 1 次 execute（读取 live stock_core pointer），
+    不得为回退到 arbitrary Core 追加查询。"""
+    core_id = uuid.uuid4()
+    session = _build_session(
+        pointer_rows=[_pointer(trade_date=_CURRENT_CORE_DATE, data_run_id=core_id)],
+        objects_by_id={core_id: _core_run(run_id=core_id, trade_date=_CURRENT_CORE_DATE)},
     )
 
     await _resolve_current_core_run(session)
 
-    # 只允许 2 次 execute：正式 Review 日期 + live pointer。
-    # 任何第 3 次（例如查 stock_core pointer）都会在此被拦下。
-    assert session.execute.await_count == 2
+    assert session.execute.await_count == 1
 
 
 # =============================================================================
-# Case 3
+# Case 3：as_of point-in-time
 # =============================================================================
 
 
 async def test_as_of_is_point_in_time_and_never_returns_later_core():
-    """Case 3：formal Review 覆盖 08-28 / 08-31 / 09-01 时，
-    ``as_of=2026-08-31`` 必须解析到 08-31 Review 的 Core，禁止返回 09-01。
-    """
+    """live pointer 覆盖 09-01 / 08-31 / 08-28 时，``as_of=2026-08-31``
+    必须解析到 08-31 的 Core，禁止返回 09-01。"""
     core_0901 = uuid.uuid4()
     core_0831 = uuid.uuid4()
     core_0828 = uuid.uuid4()
-    review_0831 = uuid.uuid4()
 
-    review = _review_run(
-        run_id=review_0831,
-        trade_date=date(2026, 8, 31),
-        core_run_id=core_0831,
-        published_at=datetime(2026, 8, 31, 17, 44, 24),
-    )
-    objects = {
-        review_0831: review,
-        core_0831: _core_run(run_id=core_0831, trade_date=date(2026, 8, 31)),
-        core_0901: _core_run(run_id=core_0901, trade_date=date(2026, 9, 1)),
-        core_0828: _core_run(run_id=core_0828, trade_date=date(2026, 8, 28)),
-    }
-
-    session = _session_with_pointer(
-        formal_dates=[date(2026, 9, 1), date(2026, 8, 31), date(2026, 8, 28)],
-        review_run=review,
-        objects_by_id=objects,
+    session = _build_session(
+        pointer_rows=[
+            _pointer(trade_date=date(2026, 9, 1), data_run_id=core_0901),
+            _pointer(trade_date=date(2026, 8, 31), data_run_id=core_0831),
+            _pointer(trade_date=date(2026, 8, 28), data_run_id=core_0828),
+        ],
+        objects_by_id={
+            core_0901: _core_run(run_id=core_0901, trade_date=date(2026, 9, 1)),
+            core_0831: _core_run(run_id=core_0831, trade_date=date(2026, 8, 31)),
+            core_0828: _core_run(run_id=core_0828, trade_date=date(2026, 8, 28)),
+        },
     )
 
     resolved = await _resolve_current_core_run(session, as_of=date(2026, 8, 31))
@@ -256,17 +186,25 @@ async def test_as_of_is_point_in_time_and_never_returns_later_core():
 
 
 # =============================================================================
-# Case 4
+# Case 4：lineage fail-closed
 # =============================================================================
 
 
 @pytest.mark.parametrize(
-    ("case", "core_status", "core_trade_date", "core_exists", "core_id_is_none"),
+    (
+        "case",
+        "core_status",
+        "core_trade_date",
+        "core_exists",
+        "data_run_id_none",
+        "schema_version",
+    ),
     [
-        ("core_run_missing", STATUS_SUCCEEDED, _CURRENT_CORE_DATE, False, False),
-        ("core_not_succeeded", "failed", _CURRENT_CORE_DATE, True, False),
-        ("core_cross_date", STATUS_SUCCEEDED, date(2026, 8, 26), True, False),
-        ("review_without_source_core", STATUS_SUCCEEDED, _CURRENT_CORE_DATE, True, True),
+        ("core_run_missing", STATUS_SUCCEEDED, _CURRENT_CORE_DATE, False, False, _SCHEMA_VERSION),
+        ("core_not_succeeded", "failed", _CURRENT_CORE_DATE, True, False, _SCHEMA_VERSION),
+        ("core_cross_date", STATUS_SUCCEEDED, _STALE_CORE_DATE, True, False, _SCHEMA_VERSION),
+        ("schema_version_mismatch", STATUS_SUCCEEDED, _CURRENT_CORE_DATE, True, False, _SCHEMA_VERSION + 1),
+        ("pointer_without_data_run_id", STATUS_SUCCEEDED, _CURRENT_CORE_DATE, True, True, _SCHEMA_VERSION),
     ],
 )
 async def test_lineage_fail_closed_never_falls_back_to_arbitrary_core(
@@ -274,34 +212,35 @@ async def test_lineage_fail_closed_never_falls_back_to_arbitrary_core(
     core_status: str,
     core_trade_date: date,
     core_exists: bool,
-    core_id_is_none: bool,
+    data_run_id_none: bool,
+    schema_version: int,
 ):
-    """Case 4：Review.source_core_run_id 不存在 / Core status != succeeded /
-    Core.trade_date != Review.trade_date —— 一律 fail-closed 返回 None，
-    绝不偷偷 fallback 到 arbitrary latest succeeded Core。
+    """pointer.data_run_id 为空 / Core 不存在 / status != succeeded /
+    Core.trade_date != pointer.trade_date / schema_version 不一致
+    —— 一律 fail-closed 返回 None，绝不 fallback 到 arbitrary latest succeeded Core。
     """
     other_core_id = uuid.uuid4()  # 一个"任意最新 succeeded Core"，用于反证不得被选中
     core_id = uuid.uuid4()
-    review_id = uuid.uuid4()
 
-    review = _review_run(
-        run_id=review_id,
-        trade_date=_CURRENT_CORE_DATE,
-        core_run_id=None if core_id_is_none else core_id,
-    )
-
-    objects: dict[uuid.UUID, object] = {review_id: review}
-    if core_exists and not core_id_is_none:
+    objects: dict[uuid.UUID, object] = {}
+    if core_exists and not data_run_id_none:
         objects[core_id] = _core_run(
-            run_id=core_id, trade_date=core_trade_date, status=core_status,
+            run_id=core_id,
+            trade_date=core_trade_date,
+            status=core_status,
+            schema_version=schema_version,
         )
     objects[other_core_id] = _core_run(
         run_id=other_core_id, trade_date=_CURRENT_CORE_DATE, status=STATUS_SUCCEEDED,
     )
 
-    session = _session_with_pointer(
-        formal_dates=[_CURRENT_CORE_DATE],
-        review_run=review,
+    session = _build_session(
+        pointer_rows=[
+            _pointer(
+                trade_date=_CURRENT_CORE_DATE,
+                data_run_id=None if data_run_id_none else core_id,
+            )
+        ],
         objects_by_id=objects,
     )
 
@@ -310,11 +249,17 @@ async def test_lineage_fail_closed_never_falls_back_to_arbitrary_core(
     assert resolved is None, f"{case}: 血统不完整时必须 fail-closed"
 
 
-async def test_no_formal_review_returns_none():
-    """无正式发布 Review（含 as_of 早于所有正式日期）→ None，不得回退。"""
-    session = _build_session([_RowsResult([])], {})
+async def test_no_live_pointer_returns_none():
+    """无 live stock_core pointer → None，不得回退。"""
+    session = _build_session(pointer_rows=[], objects_by_id={})
     assert await _resolve_current_core_run(session) is None
 
-    session2 = _build_session([_RowsResult([(date(2026, 9, 1),)])], {})
-    # as_of 早于全部正式日期 → 候选集合为空，不应发生第 2 次 execute
-    assert await _resolve_current_core_run(session2, as_of=date(2026, 8, 1)) is None
+
+async def test_as_of_before_all_pointers_returns_none():
+    """as_of 早于全部 live pointer → 候选集合为空 → None（point-in-time 前无数据）。"""
+    core_id = uuid.uuid4()
+    session = _build_session(
+        pointer_rows=[_pointer(trade_date=date(2026, 9, 1), data_run_id=core_id)],
+        objects_by_id={core_id: _core_run(run_id=core_id, trade_date=date(2026, 9, 1))},
+    )
+    assert await _resolve_current_core_run(session, as_of=date(2026, 8, 1)) is None

@@ -102,17 +102,33 @@ def test_current_running_run_has_no_publishing() -> None:
 # ==================== 2. current canonical 顺序 ====================
 
 def test_current_canonical_order() -> None:
-    """computing_features < computing_review < computing_history < watchlist_ready。"""
+    """[REVIEW-V2-R1] current canonical 7 步顺序（旧 computing_review 已退役）。
+
+    冻结顺序：
+        refreshing_daily → syncing_boards → checking_coverage
+        → rebuilding_market_dashboard（复盘计算）→ computing_features
+        → computing_history → watchlist_ready
+    """
     steps = _compute_step_states(None, [], watchlist_ready=False)
     names = _step_names(steps)
+
+    # 旧 computing_review 必须彻底移出 current pipeline
+    assert "computing_review" not in names, (
+        f"computing_review 已退役，不得出现在 current pipeline，实际: {names}"
+    )
+    # 新 canonical 复盘计算必须在位
+    assert "rebuilding_market_dashboard" in names, (
+        f"current pipeline 必须包含 rebuilding_market_dashboard，实际: {names}"
+    )
+
+    dash = names.index("rebuilding_market_dashboard")
     feat = names.index("computing_features")
-    rev = names.index("computing_review")
     hist = names.index("computing_history")
     wl = names.index("watchlist_ready")
-    assert feat < rev < hist < wl, (
-        "顺序必须为 computing_features < computing_review "
+    assert dash < feat < hist < wl, (
+        "顺序必须为 rebuilding_market_dashboard < computing_features "
         f"< computing_history < watchlist_ready，实际: "
-        f"feat={feat}, rev={rev}, hist={hist}, wl={wl} ({names})"
+        f"dash={dash}, feat={feat}, hist={hist}, wl={wl} ({names})"
     )
     assert len(names) == 7, f"current canonical 应为 7 步，实际: {len(names)}"
 
@@ -164,10 +180,15 @@ def test_legacy_last_completed_step_publishing_keeps_core_progress() -> None:
     assert by_name["computing_features"]["status"] == "completed", (
         "legacy publishing token 应保持 computing_features 已完成"
     )
-    assert by_name["computing_review"]["status"] == "pending", (
-        "legacy publishing token 不得让 computing_review 误判为已完成"
+    # [REVIEW-V2-R1] computing_review 已退役，不属于 current pipeline，不得再被索引
+    assert "computing_review" not in by_name, (
+        f"computing_review 不得出现在 current steps，实际: {sorted(by_name)}"
     )
     assert by_name["computing_history"]["status"] == "pending"
+    # rebuilding_market_dashboard 是 optional 非 checkpoint：
+    # 当前 attempt 无真实 summary/event 时，按现有 fallback 合同判断（不得伪造为
+    # 「durable checkpoint 已完成」以外的语义），此处仅锁定它仍属于 current steps。
+    assert "rebuilding_market_dashboard" in by_name
 
 
 # ==================== 5. NON-GOAL 保护 ====================

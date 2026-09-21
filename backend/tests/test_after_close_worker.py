@@ -300,24 +300,23 @@ async def test_worker_exception_marks_failed() -> None:
 
 
 @pytest.fixture(autouse=True)
-def _mock_review_phase_boundary():
-    """本模块只验证 Worker 编排；Review 发布合同由专门测试覆盖。"""
-    fake_review_run = MagicMock()
-    fake_review_run.id = uuid.uuid4()
-    fake_review_run.status = "published"
-    fake_review_run.published_at = datetime.now(_TZ)
-    fake_review_run.expected_scope_count = 0
-    fake_review_run.signal_count = 0
-    fake_review_run.coverage_ratio = 1.0
-    with (
-        patch(
-            "app.services.review_orchestrator_service.create_run",
-            new=AsyncMock(return_value=fake_review_run),
-        ),
-        patch(
-            "app.services.review_publication_service.get_published_review_run_id",
-            new=AsyncMock(return_value=fake_review_run.id),
-        ),
+def _mock_dashboard_rebuild():
+    """本模块只验证 Worker 编排；复盘计算（Market Dashboard 投影重建）由专门测试覆盖。
+
+    [REVIEW-V2-R1] 旧 Review 发布合同退役；复盘现由 optional sidecar 步骤
+    rebuilding_market_dashboard 承载，业务体调用
+    market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection。
+    此处 mock 该 service，避免编排测试触发真实投影重建（需要 bars/instruments 等）。
+    """
+    from datetime import date as _date
+
+    fake_dash = MagicMock()
+    fake_dash.market_rows = 1
+    fake_dash.scope_rows = 1
+    fake_dash.projection_trade_date = _date(2026, 6, 25)
+    with patch(
+        "app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection",
+        new=AsyncMock(return_value=fake_dash),
     ):
         yield
 

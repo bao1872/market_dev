@@ -259,9 +259,10 @@ async def test_market_dashboard_sidecar_skipped_on_non_trading_day():
 # 5. 结构回归：不是 mainchain checkpoint
 # ---------------------------------------------------------------------------
 async def test_market_dashboard_sidecar_is_not_a_mainchain_checkpoint():
-    """Dashboard 是 idempotent optional projection sidecar，不得进入
-    AfterCloseRunStatus / _CHECKPOINT_ORDER / _COMPLETED_STEPS —— 这是恢复语义
-    （granular restart / failed-step resolution 不被扩张）的守卫。"""
+    """Dashboard 是 idempotent optional projection sidecar：REVIEW-V2-R1 起它是真实
+    AfterCloseRunStatus（真实 orchestrator_status），但不得进入 _CHECKPOINT_ORDER /
+    _COMPLETED_STEPS —— 这是恢复语义（granular restart / failed-step resolution
+    不被扩张）的守卫；status 与 durable checkpoint 职责分离。"""
     assert _SIDECAR_STEP not in orchestrator._CHECKPOINT_ORDER, (
         "Dashboard sidecar 不得成为 mainchain checkpoint"
     )
@@ -272,8 +273,8 @@ async def test_market_dashboard_sidecar_is_not_a_mainchain_checkpoint():
         assert _SIDECAR_STEP not in completed, (
             f"Dashboard sidecar 不得出现在 _COMPLETED_STEPS[{completed_step!r}]"
         )
-    assert _SIDECAR_STEP not in {status.value for status in AfterCloseRunStatus}, (
-        "Dashboard sidecar 不得新增 AfterCloseRunStatus"
+    assert _SIDECAR_STEP in {status.value for status in AfterCloseRunStatus}, (
+        "Dashboard sidecar 必须是真实 AfterCloseRunStatus（REVIEW-V2-R1 起），仍非 durable checkpoint"
     )
     assert orchestrator._STEP_TIMEOUT_SECONDS[_SIDECAR_STEP] == 600, (
         "Dashboard sidecar 必须有有限 timeout（600s），不得为 None"

@@ -775,7 +775,7 @@ class TestTargetDateReadiness:
         A–H 顺序：run → item group-by → skip reasons → missing-state count；
         predicate I 追加：eligible count → state count → missing → extra。
         """
-        from app.services.review_history_readiness_service import (
+        from app.services.first_pyramid_history_readiness_service import (
             validate_canonical_history_run_readiness,
         )
 
@@ -862,15 +862,15 @@ class TestTargetDateReadiness:
 
 
 class TestFormalReviewEventDependency:
-    """§11 H：formal Review path 不消费 FirstPyramidHistoryEvent（静态证据）。"""
+    """§11 H：复盘/历史相关服务不消费 FirstPyramidHistoryEvent（静态证据）。
+
+    [REVIEW-V2-R1] 旧 formal Review 相关 service 已退役；
+    复盘现由 Market Dashboard projection 承载。本 guard 保留对仍存活的
+    first_pyramid / metric 服务的约束：它们不得依赖 FirstPyramidHistoryEvent。
+    """
 
     FORMAL_REVIEW_FILES = [
-        "review_orchestrator_service.py",
-        "review_scope_service.py",
-        "review_metric_observation_service.py",
-        "review_attribution_service.py",
-        "review_publication_service.py",
-        "review_history_readiness_service.py",
+        "first_pyramid_history_readiness_service.py",
         "metric_engine.py",
         "metric_registry.py",
     ]

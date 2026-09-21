@@ -693,7 +693,6 @@ def test_evidence_manifest_registers_required_contracts() -> None:
     ids = {contract.contract_id for contract in contracts}
     assert {
         "atomic_publication",
-        "review_current_fact_lineage",
         "dsa_compatibility_publication",
         "after_close_crash_resume",
         "bars_provider_persistence",

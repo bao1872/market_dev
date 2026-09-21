@@ -23,7 +23,7 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db, require_roles
@@ -40,7 +40,6 @@ from app.services.factor_publication_service import (
     get_publication,
 )
 from app.services.first_pyramid_history_service import get_history_run_progress
-from app.services.review_publication_service import PUBLICATION_KIND_MARKET_REVIEW
 
 logger = logging.getLogger("admin_incremental_publish")
 
@@ -89,14 +88,12 @@ async def get_incremental_publish_status(
                            core_latest.id, exc)
             core_coverage = {"error": str(exc)}
 
-    # 2. board/review pointer（Slice 4A8 — 板块/复盘事实来自已发布 Unified Review，
-    #    不再展示 legacy 板块聚合指针作为当前板块依赖 gate）
-    review_pointer = await get_publication(
-        db,
-        scope_type=SCOPE_TYPE_MARKET,
-        scope_key="market",
-        trade_date=None,
-        publication_kind=PUBLICATION_KIND_MARKET_REVIEW,
+    # 2. review（现 = Market Dashboard 复盘投影）：汇报最新投影交易日。
+    #    旧 market_review publication kind 已退役，不再展示其 pointer。
+    from app.models.market_dashboard import MarketDashboardMarketDaily
+
+    review_trade_date = await db.scalar(
+        select(func.max(MarketDashboardMarketDaily.trade_date))
     )
 
     # 3. history: 最新 history run + pointer
@@ -134,7 +131,10 @@ async def get_incremental_publish_status(
             "coverage": core_coverage,
         },
         "review": {
-            "pointer": _serialize_publication(review_pointer),
+            "pointer": {
+                "source_type": "market_dashboard_projection",
+                "trade_date": review_trade_date.isoformat() if review_trade_date else None,
+            },
         },
         "history": {
             "latest_run": _serialize_history_run(history_latest),

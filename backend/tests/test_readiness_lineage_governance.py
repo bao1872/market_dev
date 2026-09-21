@@ -231,14 +231,6 @@ def test_auction_terminal_failure_carries_run_id_and_reason() -> None:
 # =============================================================================
 
 
-def test_review_run_published_without_pointer_is_degraded_action() -> None:
-    retryable, action, _op = resolve_governance_action(
-        "REVIEW_NOT_PUBLISHED", READINESS_DEGRADED,
-    )
-    assert retryable is True
-    assert action == "publish_market_review"
-
-
 def test_missing_projection_has_rebuild_action() -> None:
     _r, action, _op = resolve_governance_action("NO_PROJECTION", READINESS_PENDING)
     assert action == "rebuild_dsa_projection"
@@ -280,15 +272,6 @@ def test_state_events_lineage_mismatch_is_governable() -> None:
     assert action == "rebuild_state_events"
 
 
-def test_review_pointer_missing_is_governable() -> None:
-    """run 自称 published 但 factor_publications 无 pointer → 可治理。"""
-    retryable, action, _op = resolve_governance_action(
-        "REVIEW_POINTER_MISSING", READINESS_DEGRADED,
-    )
-    assert retryable is True
-    assert action == "publish_market_review"
-
-
 def test_dsa_counter_signature_requires_core_run() -> None:
     """_count_dsa_projections 必须按 core run 过滤，并返回**冻结 eligible universe**。
 
@@ -308,7 +291,7 @@ def test_dsa_counter_signature_requires_core_run() -> None:
         "DSA 投影计数必须按 core run 过滤"
     )
     src = inspect.getsource(ProductReadinessService._count_dsa_projections)
-    assert "source_run_id" in src, "必须绑定 StockFeatureSnapshot.source_run_id"
+    assert "source_core_run_id" in src, "必须绑定 StockFeatureSnapshot.source_core_run_id"
     assert '"matched"' in src
     assert '"eligible"' in src, "必须返回冻结的 eligible universe 作为分母"
     assert '"stale"' in src, "必须暴露残留快照数用于 lineage 诊断"
@@ -365,19 +348,32 @@ def test_dsa_exact_requires_full_eligible_coverage() -> None:
     )
 
 
-def test_review_state_reads_factor_publication_pointer() -> None:
-    """_review_state 必须真正查询 FactorPublication，而不是只看 MarketReviewRun。"""
+def test_review_state_reads_market_dashboard_projection() -> None:
+    """_review_state 必须真正查询 Market Dashboard 投影，而不是只看 FactorPublication /
+    已退役的 market_review publication pointer。
+
+    [REVIEW-V2-R1] review 产品现由 Market Dashboard projection 承载；readiness owner
+    是 market_dashboard_market_daily / market_dashboard_scope_daily，source_type 为
+    market_dashboard_projection（run_id 恒为 None，不再有 publish_market_review）。
+    """
     import inspect
 
     from app.services.product_readiness_service import ProductReadinessService
 
     src = inspect.getsource(ProductReadinessService._review_state)
-    assert "FactorPublication" in src, (
-        "review 就绪必须以 factor_publications pointer 为准"
+    # review 就绪现在以 Market Dashboard 投影为准
+    assert "MarketDashboardMarketDaily" in src, (
+        "review 就绪必须读 market_dashboard_market_daily 投影"
     )
-    assert "PUBLICATION_KIND_MARKET_REVIEW" in src
-    # 无 pointer 时不得因 run.status == published 就判 ready
-    assert "REVIEW_POINTER_MISSING" in src
+    assert "MarketDashboardScopeDaily" in src, (
+        "review 就绪必须读 market_dashboard_scope_daily 投影"
+    )
+    assert "market_dashboard_projection" in src, (
+        "review 节点 source_type 必须为 market_dashboard_projection"
+    )
+    # 不再引用已退役的 market_review publication：
+    assert "PUBLICATION_KIND_MARKET_REVIEW" not in src
+    assert "REVIEW_POINTER_MISSING" not in src
 
 
 # =============================================================================

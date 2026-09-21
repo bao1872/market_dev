@@ -25,7 +25,7 @@ T6   computing_history 的 _step_timeout 为 None
 T7   executor heartbeat tick 不推进 last_progress_at；business callback 推进 + merge + 保留
 T8   not_ready → wrapper 返回后最终持久化 step_summary == failed
 T9   ready=True → 调用 _update_heartbeat_and_step(..., "computing_history") 写 checkpoint
-T10  resume：computing_history 完成但 computing_review 未完成 → 重新 advance+revalidate
+T10  resume：computing_history 完成但 rebuilding_market_dashboard 未完成 → 重新 advance+revalidate
 T11  pipeline API 顺序（backend 侧契约）
 
 所有测试隔离 DB（fake session 捕获 metadata_json），不连接真实 PostgreSQL。
@@ -217,10 +217,10 @@ async def test_t2_advance_called_before_readiness():
     assert readiness.call_args_list[0][0][2]
 
 
-# ===== T3: advance raises → Review 不调用 =====
+# ===== T3: advance raises → 复盘投影（dashboard 重建）不调用 =====
 @pytest.mark.asyncio
-async def test_t3_advance_raises_review_not_called():
-    create_run = AsyncMock()
+async def test_t3_advance_raises_dashboard_not_called():
+    rebuild = AsyncMock()
     with (
         patch("app.services.after_close_orchestrator.AsyncSessionLocal", return_value=_fake_session_cm(_FakeSession())),
         patch(
@@ -236,13 +236,16 @@ async def test_t3_advance_raises_review_not_called():
             new=AsyncMock(return_value=_make_readiness("ok")),
         ),
         patch("app.services.after_close_orchestrator._update_orchestrator_status", new=AsyncMock()),
-        patch("app.services.review_orchestrator_service.create_run", new=create_run),
+        patch(
+            "app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection",
+            new=rebuild,
+        ),
     ):
         with pytest.raises(RuntimeError):
             await _make_history_step(
                 job_run_id=uuid.uuid4(), trade_date=date(2026, 8, 25), worker_id="w1", skip_history=False
             )()
-    create_run.assert_not_called()
+    rebuild.assert_not_called()
 
 
 # ===== T4/T5: 真实 terminal short-circuit owner =====
@@ -590,10 +593,10 @@ async def test_t9_ready_checkpoint_called():
 
 # ===== T10: resume 重新 advance + revalidate =====
 @pytest.mark.asyncio
-async def test_t10_resume_re_advance_when_review_not_done():
+async def test_t10_resume_re_advance_when_dashboard_not_done():
     completed = {"computing_history"}
-    skip_history = "computing_history" in completed and "computing_review" in completed
-    assert skip_history is False  # review 未完成 → 必须重跑
+    skip_history = "computing_history" in completed and "rebuilding_market_dashboard" in completed
+    assert skip_history is False  # rebuilding_market_dashboard 未完成 → 必须重跑
     advance = AsyncMock(return_value={"target_state_count": 7, "failed": []})
     fake_run = MagicMock()
     fake_run.id = uuid.uuid4()
@@ -613,9 +616,11 @@ async def test_t10_resume_re_advance_when_review_not_done():
 # ===== T11: pipeline API 顺序 =====
 def test_t11_pipeline_order():
     assert "computing_history" in _PIPELINE_STEPS
-    pub = _PIPELINE_STEPS.index(AfterCloseRunStatus.PUBLISHING.value)
+    # rebuilding_market_dashboard 是 optional sidecar，位于 computing_features 之前、
+    # computing_history 之前（生产 _PIPELINE_STEPS 现不含 publishing / computing_review）。
+    dash = _PIPELINE_STEPS.index("rebuilding_market_dashboard")
+    feat = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value)
     hist = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_HISTORY.value)
-    rev = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_REVIEW.value)
     wl = _PIPELINE_STEPS.index("watchlist_ready")
-    assert pub < hist < rev < wl
+    assert dash < feat < hist < wl
     assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 5
