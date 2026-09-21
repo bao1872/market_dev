@@ -26,9 +26,11 @@ from app.services.market_dashboard_read_service import (
     _ew_index,
     _ratio,
     build_compare,
+    build_compare_snapshot,
     build_market_view,
     build_rankings,
     build_scope_view,
+    resolve_compare_dates,
 )
 
 
@@ -214,6 +216,88 @@ def test_compare_independent_rebasing():
 
 
 # ---------------------------------------------------------------------------
+# [R3D0] 比较矩阵快照（纯）
+# ---------------------------------------------------------------------------
+def _mk_scope_full(board_id, d, *, a5, v5, a10=None, v10=None, a20=10, v20=10, a50=10, v50=10,
+                   a120=10, v120=10, member_count=10, ew=0.0):
+    return ScopeDailyRow(
+        board_id=board_id,
+        trade_date=d,
+        membership_version="mv1",
+        member_count=member_count,
+        ma5_above_count=a5,
+        ma5_valid_count=v5,
+        ma10_above_count=a5 if a10 is None else a10,
+        ma10_valid_count=v5 if v10 is None else v10,
+        ma20_above_count=a20,
+        ma20_valid_count=v20,
+        ma50_above_count=a50,
+        ma50_valid_count=v50,
+        ma120_above_count=a120,
+        ma120_valid_count=v120,
+        equal_weight_return=ew,
+    )
+
+
+def test_compare_snapshot_exact_fields_and_delta():
+    # T: ma5=8/10=0.8, ma10=6/10=0.6；PREV: ma5=5/10=0.5, ma10=4/10=0.4
+    cur = _mk_scope_full(uuid4(), date(2026, 9, 6), a5=8, v5=10, a10=6, v10=10, member_count=123)
+    prev = _mk_scope_full(uuid4(), date(2026, 9, 1), a5=5, v5=10, a10=4, v10=10, member_count=100)
+    snap = build_compare_snapshot(cur, prev)
+    # B. matrix exact fields
+    assert set(snap) == {
+        "member_count", "ma5", "ma10", "ma20", "ma50", "ma120",
+        "ma5_delta", "ma10_delta",
+    }
+    # C. member_count 来自精确 T 行
+    assert snap["member_count"] == 123
+    # D. MA ratio = above / valid
+    assert snap["ma5"] == pytest.approx(0.8)
+    assert snap["ma10"] == pytest.approx(0.6)
+    assert snap["ma20"] == pytest.approx(1.0)
+    # K/L. delta 精确 = ratio(T) - ratio(PREV)
+    assert snap["ma5_delta"] == pytest.approx(0.3)
+    assert snap["ma10_delta"] == pytest.approx(0.2)
+
+
+def test_compare_snapshot_valid_zero_ratio_none():
+    # E. valid_count == 0 → ratio = None（不伪造 0%）；member_count 仍来自 T 行
+    cur = _mk_scope_full(uuid4(), date(2026, 9, 6), a5=5, v5=0, member_count=42)
+    snap = build_compare_snapshot(cur, None)
+    assert snap["ma5"] is None
+    assert snap["member_count"] == 42
+    assert snap["ma5_delta"] is None
+
+
+def test_compare_snapshot_missing_prev_delta_none():
+    # G. 缺 PREV 行 → delta = None（不 fallback），current 仍计算
+    cur = _mk_scope_full(uuid4(), date(2026, 9, 6), a5=8, v5=10, member_count=123)
+    snap = build_compare_snapshot(cur, None)
+    assert snap["ma5"] == pytest.approx(0.8)
+    assert snap["ma5_delta"] is None
+    assert snap["ma10_delta"] is None
+
+
+def test_compare_snapshot_missing_current_all_none():
+    # H. 缺 current(T) 行 → 全部 matrix 字段 None（points 仍由 build_compare 提供）
+    prev = _mk_scope_full(uuid4(), date(2026, 9, 1), a5=5, v5=10)
+    snap = build_compare_snapshot(None, prev)
+    assert snap["member_count"] is None
+    for k in ("ma5", "ma10", "ma20", "ma50", "ma120", "ma5_delta", "ma10_delta"):
+        assert snap[k] is None
+
+
+def test_resolve_compare_dates_mirrors_explorer():
+    # F/I/J. 全局 T / T-5 与 R2 Explorer 同一语义
+    assert resolve_compare_dates([]) == (None, None)  # J. 无 market calendar
+    three = [date(2026, 9, d) for d in (3, 2, 1)]  # DESC
+    assert resolve_compare_dates(three) == (date(2026, 9, 3), None)  # I. <6 → PREV=None
+    six = [date(2026, 9, d) for d in (6, 5, 4, 3, 2, 1)]  # DESC
+    # F. 所有 board 共用同一 T / 同一 PREV（T-5 trading date）
+    assert resolve_compare_dates(six) == (date(2026, 9, 6), date(2026, 9, 1))
+
+
+# ---------------------------------------------------------------------------
 # 读路径表访问面（不碰 bars / instruments / membership / F1A）
 # ---------------------------------------------------------------------------
 class _FakeResult:
@@ -251,6 +335,8 @@ async def test_read_path_only_accesses_allowed_tables():
 
     from app.services.market_dashboard_read_service import (
         _fetch_boards,
+        _fetch_compare_snapshot_rows,
+        _fetch_market_dates,
         _fetch_market_rows,
         _fetch_scope_window,
         _fetch_single_board,
@@ -260,9 +346,11 @@ async def test_read_path_only_accesses_allowed_tables():
     bid = uuid.uuid4()
     # 直接驱动各 fetch helper：验证 read path 触达的表（不依赖返回结果）。
     await _fetch_market_rows(s, 250)
+    await _fetch_market_dates(s, 6)
     await _fetch_boards(s, "industry", "L1")
     await _fetch_single_board(s, bid)
     await _fetch_scope_window(s, [bid], 10)
+    await _fetch_compare_snapshot_rows(s, [bid], date(2026, 9, 3), None)
 
     joined = "\n".join(s.queries)
     # 允许的三张表

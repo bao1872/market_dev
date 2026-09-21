@@ -90,8 +90,24 @@ class CompareBoard(BaseModel):
     board_type: str
     points: list[ComparePoint] = Field(default_factory=list)
 
+    # [R3D0] 比较矩阵（冻结字段，全局 T / T-5 口径；additive 扩展，不破坏既有 points）。
+    # current(T) 行缺失 → 全部 MA / member_count / delta = None（但 points 仍由 build_compare 提供）。
+    # previous(T-5) 行缺失 → delta = None（绝不 fallback）。
+    member_count: int | None = None
+    ma5: float | None = None
+    ma10: float | None = None
+    ma20: float | None = None
+    ma50: float | None = None
+    ma120: float | None = None
+    ma5_delta: float | None = None
+    ma10_delta: float | None = None
+
 
 class CompareResponse(BaseModel):
+    # [R3D0] 全局 T / T-5 口径（与 R2 Scope Explorer 同一 resolve_t_prev 语义）；
+    # 缺市场 projection → None（不伪造日期），但不影响既有 chart points。
+    projection_trade_date: str | None = None
+    previous_trade_date: str | None = None
     boards: list[CompareBoard] = Field(default_factory=list)
 
 

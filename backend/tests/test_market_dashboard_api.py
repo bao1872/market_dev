@@ -136,6 +136,19 @@ async def test_market_dashboard_api_endpoints_ok(client, db_session):
     assert len(r_cmp.json()["boards"]) == 2
     assert r_cmp.json()["boards"][0]["points"][0]["ew_index"] == pytest.approx(100.0)
 
+    # [R3D0] HTTP 层必须暴露 additive 矩阵字段 + 全局日期（seed 仅 3 个 market 日 → PREV=None）
+    body = r_cmp.json()
+    assert body["projection_trade_date"] == "2026-09-03"
+    assert body["previous_trade_date"] is None  # <6 market dates → PREV=None
+    board_e = body["boards"][0]
+    # 既有矩阵字段 key 必须存在
+    for k in ("member_count", "ma5", "ma10", "ma20", "ma50", "ma120", "ma5_delta", "ma10_delta"):
+        assert k in board_e, f"compare board 必须暴露矩阵字段 {k}"
+    # e/f 无 T(9/3) 行 → 矩阵全 None（H），但 points 仍返回
+    assert board_e["member_count"] is None
+    assert board_e["ma5"] is None
+    assert board_e["ma5_delta"] is None
+
 
 async def test_market_dashboard_api_scope_404(client, db_session):
     async with db_session.begin():

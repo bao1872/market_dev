@@ -30,6 +30,10 @@ from app.models.market_dashboard import (
     MarketDashboardMarketDaily,
     MarketDashboardScopeDaily,
 )
+from app.services.market_dashboard_scope_explorer_service import (
+    T_WINDOW,
+    resolve_t_prev,
+)
 
 _WINDOWS: tuple[int, ...] = (5, 10, 20, 50, 120)
 
@@ -238,7 +242,10 @@ def build_compare(
     boards: list[BoardMeta],
     scoped: dict[UUID, list[ScopeDailyRow]],
 ) -> list[dict]:
-    """重点板块半月比较：每个 scope 的 EW return 链**独立**归一到 first=100。"""
+    """重点板块半月比较：每个 scope 的 EW return 链**独立**归一到 first=100。
+
+    仅负责 chart points；比较矩阵由 build_compare_snapshot 独立计算（逻辑分离）。
+    """
     out: list[dict] = []
     for b in boards:
         rs = scoped.get(b.board_id, [])
@@ -256,6 +263,65 @@ def build_compare(
             }
         )
     return out
+
+
+def resolve_compare_dates(
+    market_dates: list[date],
+) -> tuple[date | None, date | None]:
+    """比较矩阵全局 T / T-5 —— 与 R2 Scope Explorer **同一** resolve_t_prev 实现。
+
+    - 无 projection → (None, None)
+    - < T_WINDOW 个日期 → (latest, None)：previous_trade_date=None，所有 delta=None
+    - >= T_WINDOW → (latest, T-5 trading date)
+    所有 basket board 共用 SAME T / SAME PREV（禁止 per-board 滑窗 / nearest available / 自然日-5）。
+    """
+    return resolve_t_prev(market_dates)
+
+
+def build_compare_snapshot(
+    cur: ScopeDailyRow | None,
+    prev: ScopeDailyRow | None,
+) -> dict:
+    """[R3D0] 比较矩阵快照（精确 T / T-5 全局口径，纯函数）。
+
+    - current(T) 缺失 → 全部 MA / member_count / delta = None（但 points 仍由 build_compare 提供）。
+    - previous(T-5) 缺失 → delta = None（**绝不 fallback**）。
+    - ratio = above_count / valid_count；valid_count <= 0 → None（**禁止伪造 0%**）。
+    - delta = ratio(T) - ratio(PREV)；任一端 ratio 为 None → delta = None。
+    """
+    if cur is None:
+        return {
+            "member_count": None,
+            "ma5": None,
+            "ma10": None,
+            "ma20": None,
+            "ma50": None,
+            "ma120": None,
+            "ma5_delta": None,
+            "ma10_delta": None,
+        }
+    c_ma5 = _ratio(cur.ma5_above_count, cur.ma5_valid_count)
+    c_ma10 = _ratio(cur.ma10_above_count, cur.ma10_valid_count)
+    c_ma20 = _ratio(cur.ma20_above_count, cur.ma20_valid_count)
+    c_ma50 = _ratio(cur.ma50_above_count, cur.ma50_valid_count)
+    c_ma120 = _ratio(cur.ma120_above_count, cur.ma120_valid_count)
+    if prev is None:
+        d_ma5 = d_ma10 = None
+    else:
+        p_ma5 = _ratio(prev.ma5_above_count, prev.ma5_valid_count)
+        p_ma10 = _ratio(prev.ma10_above_count, prev.ma10_valid_count)
+        d_ma5 = (c_ma5 - p_ma5) if (c_ma5 is not None and p_ma5 is not None) else None
+        d_ma10 = (c_ma10 - p_ma10) if (c_ma10 is not None and p_ma10 is not None) else None
+    return {
+        "member_count": cur.member_count,
+        "ma5": _round4(c_ma5),
+        "ma10": _round4(c_ma10),
+        "ma20": _round4(c_ma20),
+        "ma50": _round4(c_ma50),
+        "ma120": _round4(c_ma120),
+        "ma5_delta": _round4(d_ma5),
+        "ma10_delta": _round4(d_ma10),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +451,41 @@ async def _fetch_scope_window(
     return grouped
 
 
+async def _fetch_market_dates(db: AsyncSession, limit: int) -> list[date]:
+    """全市场 projection 交易日历（DESC，取最近 limit 个）；用于解析全局 T / T-5。"""
+    stmt = (
+        select(MarketDashboardMarketDaily.trade_date)
+        .order_by(MarketDashboardMarketDaily.trade_date.desc())
+        .limit(limit)
+    )
+    return list((await db.execute(stmt)).scalars().all())
+
+
+async def _fetch_compare_snapshot_rows(
+    db: AsyncSession, board_ids: list[UUID], t: date | None, prev: date | None
+) -> dict[UUID, dict[str, ScopeDailyRow]]:
+    """精确 T / PREV 当前/前期 projection 行（一个 SQL；t=None 时整体不可用）。
+
+    返回 snapshot[board_id] = {"current": <T 行>, "previous": <PREV 行>}，缺失项不写入（None）。
+    禁止 per-board 查询；禁止向更老日期 fallback。
+    """
+    if t is None:
+        return {}
+    dates = [t, prev] if prev is not None else [t]
+    stmt = select(MarketDashboardScopeDaily).where(
+        MarketDashboardScopeDaily.board_id.in_(board_ids),
+        MarketDashboardScopeDaily.trade_date.in_(dates),
+    )
+    snap: dict[UUID, dict[str, ScopeDailyRow]] = {}
+    for row in (await db.execute(stmt)).scalars().all():
+        entry = snap.setdefault(row.board_id, {})
+        if row.trade_date == t:
+            entry["current"] = _scope_row(row)
+        elif prev is not None and row.trade_date == prev:
+            entry["previous"] = _scope_row(row)
+    return snap
+
+
 async def _fetch_single_board(db: AsyncSession, board_id: UUID) -> BoardMeta | None:
     stmt = select(
         MarketBoard.id,
@@ -455,5 +556,27 @@ async def compare_boards(db: AsyncSession, board_ids: list[UUID], days: int):
     # 任一 board 不存在 / 未激活 → 整体不可用（API 层转 404）。
     if len(boards) != len(set(board_ids)) or any(not b.is_active for b in boards):
         return None
-    scoped = await _fetch_scope_window(db, board_ids, days)
-    return CompareResponse(boards=build_compare(boards, scoped))
+    # [R3D0-N] 响应顺序严格按请求 board_ids 顺序（basket 已禁止 duplicate，不重做去重语义）。
+    board_by_id = {b.board_id: b for b in boards}
+    ordered = [board_by_id[i] for i in board_ids]
+
+    # 全局 T / T-5（与 R2 Explorer 完全同语义；所有 board 共用同一 T/PREV）。
+    market_dates = await _fetch_market_dates(db, T_WINDOW)
+    t, prev = resolve_compare_dates(market_dates)
+
+    scoped = await _fetch_scope_window(db, board_ids, days)  # Q2 chart window
+    snapshot = await _fetch_compare_snapshot_rows(db, board_ids, t, prev)  # Q4 精确 T/PREV 行
+
+    ew_boards = build_compare(ordered, scoped)  # chart points（独立 rebasing）
+    out: list[dict] = []
+    for ew in ew_boards:
+        bid = UUID(ew["board_id"])
+        snap = snapshot.get(bid, {})
+        # 矩阵与 chart 逻辑分离：snapshot 仅补 matrix 字段，不动 points。
+        ew.update(build_compare_snapshot(snap.get("current"), snap.get("previous")))
+        out.append(ew)
+    return CompareResponse(
+        projection_trade_date=t.isoformat() if t else None,
+        previous_trade_date=prev.isoformat() if prev else None,
+        boards=out,
+    )

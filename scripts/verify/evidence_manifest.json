@@ -76,12 +76,14 @@
         "tests/test_market_dashboard_read_pg.py::test_rankings_industry_l1_excludes_l2_and_concept",
         "tests/test_market_dashboard_read_pg.py::test_scope_detail_404_for_missing_and_inactive",
         "tests/test_market_dashboard_read_pg.py::test_compare_independent_rebasing",
+        "tests/test_market_dashboard_read_pg.py::test_compare_matrix_global_t_minus_5",
+        "tests/test_market_dashboard_read_pg.py::test_compare_no_market_calendar_dates_none",
         "tests/test_market_dashboard_api.py::test_market_dashboard_api_endpoints_ok",
         "tests/test_market_dashboard_api.py::test_market_dashboard_api_scope_404",
         "tests/test_market_dashboard_api.py::test_market_dashboard_api_unauth_401",
         "tests/test_market_dashboard_api.py::test_market_dashboard_api_invalid_lookback_422"
       ],
-      "claim": "Market Dashboard read API derives only from the projection tables (market_dashboard_market_daily / market_dashboard_scope_daily / market_boards); breadth_ratio = above_count/valid_count with valid_count==0 -> null (no fabricated 0%); EW index sets the first displayed point to 100 only when that date has a valid equal_weight_return, and a null at the first or any later displayed date breaks the chain (no forward fill, no rebasing after a null); rankings use the t and t-5 projection trading rows (not calendar days) and never mix industry L1/L2/L3 or concept; compare rebases each scope independently to 100; unavailable/missing/inactive boards return 404; and access reuses the existing market_data capability (no new permission)."
+      "claim": "Market Dashboard read API derives only from the projection tables (market_dashboard_market_daily / market_dashboard_scope_daily / market_boards); breadth_ratio = above_count/valid_count with valid_count==0 -> null (no fabricated 0%); EW index sets the first displayed point to 100 only when that date has a valid equal_weight_return, and a null at the first or any later displayed date breaks the chain (no forward fill, no rebasing after a null); rankings use the t and t-5 projection trading rows (not calendar days) and never mix industry L1/L2/L3 or concept; compare rebases each scope independently to 100; unavailable/missing/inactive boards return 404; and access reuses the existing market_data capability (no new permission). The compare endpoint is additive: it also returns a frozen comparison matrix (member_count, ma5/10/20/50/120, ma5_delta, ma10_delta) per board plus projection_trade_date/previous_trade_date, where T and PREV are the shared global T/T-5 projection trading dates resolved exactly like the Scope Explorer (latest 6 market daily rows: T=latest, PREV=T-5; <6 market rows -> previous_trade_date=None and all deltas None; no market calendar -> both dates None); a board missing its current(T) row yields all matrix fields None while points still return; a board missing its PREV row yields delta=None with no fallback; response boards preserve the requested board_ids order; and no read path touches bars_daily / instruments / market_board_memberships."
     },
     {
       "contract_id": "market_dashboard_scope_explorer",

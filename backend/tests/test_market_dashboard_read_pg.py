@@ -335,8 +335,114 @@ async def test_compare_independent_rebasing(db_session):
     by_id = {b.board_id: b for b in resp.boards}
     e = by_id[str(boards["e"].id)]
     f = by_id[str(boards["f"].id)]
-    # 各 scope 独立归一到 100
+    # 各 scope 独立归一到 100（既有 chart contract 不变）
     assert e.points[0].ew_index == pytest.approx(100.0)
     assert e.points[1].ew_index == pytest.approx(100 * 1.02)
     assert f.points[0].ew_index == pytest.approx(100.0)
     assert f.points[1].ew_index == pytest.approx(100 * 0.99)
+
+    # [R3D0] 全局 T/T-5：seed 仅 3 个 market 交易日 → PREV=None；e/f 无 T(9/3) 行 → 矩阵全 None
+    assert resp.projection_trade_date == "2026-09-03"
+    assert resp.previous_trade_date is None  # I. <6 market dates → PREV=None, delta=None
+    assert e.member_count is None  # H. current(T) 行缺失 → 全部 matrix 字段 None
+    assert e.ma5 is None
+    assert e.ma5_delta is None
+    assert f.member_count is None
+
+
+async def test_compare_matrix_global_t_minus_5(db_session):
+    """[R3D0] 比较矩阵：全局 T/T-5 与 R2 Explorer 同语义；delta 精确；
+    缺 PREV 行→None；industry+concept 混合；响应顺序==请求顺序。"""
+    # 6 个市场 projection 交易日 → 全局 T=9/6, PREV=9/1
+    for d in range(1, 7):
+        db_session.add(
+            _market_row(
+                date(2026, 9, d),
+                ew=0.01,
+                counts={
+                    "a5": 3, "v5": 5, "a10": 4, "v10": 5,
+                    "a20": 12, "v20": 20, "a50": 30, "v50": 50,
+                    "a120": 80, "v120": 120,
+                },
+            )
+        )
+    e = MarketBoard(
+        id=uuid4(), name="Ind-E", type="industry", hierarchyLevel="L1",
+        externalCode="IND_E2", taxonomy="CFI", taxonomyCompatibilityKey="k",
+        membershipVersion="mv1", isActive=True,
+    )
+    f = MarketBoard(
+        id=uuid4(), name="Con-F", type="concept", hierarchyLevel="L1",
+        externalCode="CON_F2", taxonomy="CFI", taxonomyCompatibilityKey="k",
+        membershipVersion="mv1", isActive=True,
+    )
+    g = MarketBoard(  # 仅有 T 行、缺 PREV 行 → delta=None
+        id=uuid4(), name="Ind-G", type="industry", hierarchyLevel="L1",
+        externalCode="IND_G2", taxonomy="CFI", taxonomyCompatibilityKey="k",
+        membershipVersion="mv1", isActive=True,
+    )
+    db_session.add_all([e, f, g])
+    # e: T ma5=8/10=0.8(会员123), PREV ma5=5/10=0.5(会员100) → ma5_delta=0.3
+    db_session.add(_scope_row(e.id, date(2026, 9, 1), ew=0.0, a5=5, v5=10, member_count=100))
+    db_session.add(_scope_row(e.id, date(2026, 9, 6), ew=0.0, a5=8, v5=10, member_count=123))
+    # f: T ma5=6/10=0.6, PREV ma5=4/10=0.4 → ma5_delta=0.2（concept 混合）
+    db_session.add(_scope_row(f.id, date(2026, 9, 1), ew=0.0, a5=4, v5=10, member_count=100))
+    db_session.add(_scope_row(f.id, date(2026, 9, 6), ew=0.0, a5=6, v5=10, member_count=120))
+    # g: 仅 T 行，缺 PREV
+    db_session.add(_scope_row(g.id, date(2026, 9, 6), ew=0.0, a5=7, v5=10, member_count=110))
+    await db_session.commit()
+
+    # N. 请求顺序 g, e, f → 响应顺序必须一致
+    resp = await compare_boards(db_session, [g.id, e.id, f.id], 10)
+    assert resp is not None
+    assert [b.board_id for b in resp.boards] == [str(g.id), str(e.id), str(f.id)]
+    # F. 全局 T/T-5 共享
+    assert resp.projection_trade_date == "2026-09-06"
+    assert resp.previous_trade_date == "2026-09-01"
+
+    by_id = {b.board_id: b for b in resp.boards}
+    eb = by_id[str(e.id)]
+    fb = by_id[str(f.id)]
+    gb = by_id[str(g.id)]
+    # A-level chart 回归：EW 仍独立归一到 100
+    assert eb.points[0].ew_index == pytest.approx(100.0)
+    # B/C/D. matrix exact fields
+    assert eb.member_count == 123  # C. 来自精确 T 行
+    assert eb.ma5 == pytest.approx(0.8)  # D. above/valid
+    assert eb.ma10 == pytest.approx(0.8)
+    assert eb.ma20 == pytest.approx(1.0)
+    assert eb.ma50 == pytest.approx(1.0)
+    assert eb.ma120 == pytest.approx(1.0)
+    # K/L. delta 精确
+    assert eb.ma5_delta == pytest.approx(0.3)
+    assert eb.ma10_delta == pytest.approx(0.3)
+    # M. concept 混合同样成立
+    assert fb.ma5_delta == pytest.approx(0.2)
+    assert fb.member_count == 120
+    # G. 缺 PREV 行 → delta=None（不 fallback），current 仍计算
+    assert gb.ma5 == pytest.approx(0.7)
+    assert gb.ma5_delta is None
+    assert gb.ma10_delta is None
+
+
+async def test_compare_no_market_calendar_dates_none(db_session):
+    """[R3D0] J. 无市场 projection → 响应日期 None，矩阵 None，但 points 仍返回。"""
+    e = MarketBoard(
+        id=uuid4(), name="Ind-E", type="industry", hierarchyLevel="L1",
+        externalCode="IND_E3", taxonomy="CFI", taxonomyCompatibilityKey="k",
+        membershipVersion="mv1", isActive=True,
+    )
+    db_session.add(e)
+    # 有 scope 行（chart points 可用），但无任何 market_dashboard_market_daily
+    db_session.add(_scope_row(e.id, date(2026, 9, 1), ew=0.01, a5=5, v5=10))
+    db_session.add(_scope_row(e.id, date(2026, 9, 2), ew=0.02, a5=5, v5=10))
+    await db_session.commit()
+
+    resp = await compare_boards(db_session, [e.id], 10)
+    assert resp is not None
+    assert resp.projection_trade_date is None  # J. 无 market calendar → None
+    assert resp.previous_trade_date is None
+    assert len(resp.boards) == 1
+    assert resp.boards[0].points[0].ew_index == pytest.approx(100.0)  # chart 不受影响
+    assert resp.boards[0].ma5 is None  # H. 无 T 行 → 矩阵字段 None
+    assert resp.boards[0].member_count is None
