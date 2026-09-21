@@ -20,6 +20,15 @@
       "claim": "Market Dashboard projection migration 095 creates the two PostgreSQL projection tables with the required primary keys, scope foreign key cascade, trade-date index, count invariants, forbidden-column exclusions, and downgrade/upgrade round-trip behavior."
     },
     {
+      "contract_id": "legacy_review_retired",
+      "governance_level": 3,
+      "semantic_owner": "alembic.versions.096_retire_legacy_market_review",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": ["tests/test_migration_096_legacy_review_retired_pg.py"],
+      "claim": "Migration 096 physically retires the 11 legacy Market Review tables (market_review_runs, market_review_run_items, market_review_scope_snapshots, market_review_metric_observations, market_review_signals, market_review_signal_attributions, market_review_signal_instruments, market_review_trackings, market_review_tracking_evaluations, review_scope_observation_facts, review_scope_composition_snapshots) while preserving all Market Dashboard / Core / History / scheduler / board / bars / instruments / users data; it deletes only factor_publications rows where publication_kind='market_review' (no DROP CASCADE, factor_publications retained), and downgrade recreates the exact HEAD=095 legacy schema as empty tables with PK/FK/CHECK/partial-unique constraints intact."
+    },
+    {
       "contract_id": "market_dashboard_projection_atomic_persistence",
       "governance_level": 2,
       "semantic_owner": "app.repositories.market_dashboard_projection_repository",
