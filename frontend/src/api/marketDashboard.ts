@@ -83,9 +83,22 @@ export interface CompareBoard {
   board_name: string
   board_type: string
   points: ComparePoint[]
+  // [R3D0] additive：精确比较矩阵（全局 T / T-5 口径，由后端一次性算好）。
+  // 前端绝不自行计算 MA / delta / member_count。
+  member_count: number | null
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  ma50: number | null
+  ma120: number | null
+  ma5_delta: number | null
+  ma10_delta: number | null
 }
 
 export interface CompareResponse {
+  // [R3D0] additive：矩阵统一 T / T-5 口径（与 R2 Scope Explorer 同语义）。
+  projection_trade_date: string | null
+  previous_trade_date: string | null
   boards: CompareBoard[]
 }
 

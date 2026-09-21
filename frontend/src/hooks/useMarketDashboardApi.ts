@@ -19,8 +19,10 @@ export const marketDashboardKeys = {
   rankings: (scopeType: ScopeType, hierarchyLevel: HierarchyLevel | null, lookback: number, limit: number) =>
     ['market-dashboard', 'rankings', scopeType, hierarchyLevel ?? 'none', lookback, limit] as const,
   scope: (boardId: string, days: number) => ['market-dashboard', 'scope', boardId, days] as const,
+  // [R3D] 保留请求顺序：backend response 顺序已冻结为 request board_ids 顺序，
+  // 因此 key 必须保留顺序（'A,B' != 'B,A'），否则删除再重加会改变 basket 顺序却复用旧缓存。
   compare: (boardIds: string[], days: number) =>
-    ['market-dashboard', 'compare', [...boardIds].sort().join(','), days] as const,
+    ['market-dashboard', 'compare', boardIds.join(','), days] as const,
   // [R3A] explorer key 由纯模块统一生成：必须覆盖全部 server-side state。
   scopeExplorer: (query: ScopeExplorerQuery) => scopeExplorerQueryKey(query),
 }
