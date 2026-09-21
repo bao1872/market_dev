@@ -51,7 +51,7 @@ from app.domain.first_pyramid.ob_selection import (
     ob_event_bar_index,
     ob_event_time,
 )
-from app.domain.review.member_fact import (
+from app.domain.first_pyramid.member_fact_math import (
     compute_percentile,
     compute_price_position_120d,
     compute_ratio,
