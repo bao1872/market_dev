@@ -183,9 +183,11 @@ async def test_096_downgrade_recreates_11_then_upgrade_removes_them() -> None:
             f"market_review_signals.review_run_id -> market_review_runs 必须 CASCADE，实际 {signals_fks}"
         )
         signals_checks = await _check_defs("market_review_signals")
-        assert any("filter_family IN ('A','B','C','D')" in d for d in signals_checks.values()), (
-            f"market_review_signals 必须重建 filter_family A/B/C/D CHECK，实际 {signals_checks}"
-        )
+        # PG 会把 IN (...) 规范化为 "= ANY (ARRAY[...])"，故按 family 取值断言而非字面 IN 形式。
+        assert any(
+            "filter_family" in d and all(v in d for v in ("'A'", "'B'", "'C'", "'D'"))
+            for d in signals_checks.values()
+        ), f"market_review_signals 必须重建 filter_family A/B/C/D CHECK，实际 {signals_checks}"
 
         items_fks = await _fk_defs("market_review_run_items")
         assert ("market_review_runs", "c") in items_fks, (

@@ -279,6 +279,12 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
+        # History advance 已被 fake；readiness 需同步 fake 为 ok，否则真实 readiness predicate
+        # 在无数据时判 not_ready，run 永远到不了 computing_history checkpoint。
+        patch(
+            "app.services.after_close_orchestrator.validate_canonical_history_run_readiness",
+            new=AsyncMock(return_value={"status": "ok"}),
+        ),
         patch("app.services.after_close_orchestrator._execute_rebuilding_market_dashboard", new=_spy_dashboard_step),
         patch("app.services.market_dashboard_projection_rebuild_service.rebuild_market_dashboard_projection", new=_fake_rebuild_dashboard),
     ]
@@ -313,8 +319,10 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
         final_status = await get_after_close_run_status(reader_db, job_run_id)
         snap_reread = await reader_db.get(StockFeatureSnapshotRun, snap.id)
     # 崩溃后恢复：Review 已在 Attempt1 完成（dashboard_step_count==1 已证），run 达终态。
+    # [REVIEW-V2-R1] rebuilding_market_dashboard 不是 durable checkpoint：History-ready 后
+    # last_completed_step 只可能是 computing_history（或其后阶段 / 终态）。
     assert final_status.get("last_completed_step") in (
-        "rebuilding_market_dashboard", "computing_history", "watchlist_ready", "succeeded", "completed",
+        "computing_history", "watchlist_ready", "succeeded", "completed",
     ), final_status
     assert final_status.get("orchestrator_status") in (AfterCloseRunStatus.REBUILDING_MARKET_DASHBOARD.value, AfterCloseRunStatus.SUCCEEDED.value, AfterCloseRunStatus.PARTIAL_SUCCESS.value), final_status
 
