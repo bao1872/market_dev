@@ -219,9 +219,11 @@ async def test_096_downgrade_recreates_11_then_upgrade_removes_them() -> None:
         assert "source_kind = 'live'" in obs_index_defs, "缺少 live partial unique index"
         assert "source_kind = 'history_replay'" in obs_index_defs, "缺少 history_replay partial unique index"
         obs_checks = await _check_defs("market_review_metric_observations")
-        assert any("source_kind IN ('live','history_replay')" in d for d in obs_checks.values()), (
-            f"market_review_metric_observations 必须重建 dual_lineage CHECK，实际 {obs_checks}"
-        )
+        # PG 会把 IN (...) 规范化为 "= ANY (ARRAY[...])"，故按取值断言。
+        assert any(
+            "source_kind" in d and "'live'" in d and "'history_replay'" in d
+            for d in obs_checks.values()
+        ), f"market_review_metric_observations 必须重建 dual_lineage CHECK，实际 {obs_checks}"
 
         # 2) upgrade head → 096：11 张 legacy 表再次消失
         _run_alembic(["upgrade", "head"])

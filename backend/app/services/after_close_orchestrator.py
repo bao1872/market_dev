@@ -2862,8 +2862,13 @@ async def execute_after_close_run(
                 dsa_run_id=dsa_run_id,
                 payload={"trade_date": trade_date.isoformat()},
             )
+            # [REVIEW-V2-R1] rebuilding_market_dashboard **不是 durable checkpoint**：
+            # 只刷新 heartbeat/lease，绝不推进 last_completed_step（传 None）。否则
+            # resume 时 _COMPLETED_STEPS.get("rebuilding_market_dashboard") == ∅ 会丢失
+            # 上游 checkpoint（computing_features 等），导致整条链（含非交易日短路）
+            # 被错误重跑、History 反而不推进。
             await _update_heartbeat_and_step(
-                db, _dash_job, AfterCloseRunStatus.REBUILDING_MARKET_DASHBOARD.value, worker_id,
+                db, _dash_job, None, worker_id,
             )
             await db.commit()
         dashboard_timeout = _step_timeout("rebuilding_market_dashboard")
