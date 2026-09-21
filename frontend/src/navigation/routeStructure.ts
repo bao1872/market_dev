@@ -47,26 +47,26 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/stock/:symbol', guard: 'capability', shell: 'user' },
             ],
           },
-          // CapabilityRoute: market_data（/boards 板块分析 = 全市场 cross-section，仅 market_data）
-          {
-            guard: 'capability',
-            shell: 'user',
-            children: [
-              { path: '/boards', guard: 'capability', shell: 'user' },
-              { path: '/boards/:boardId', guard: 'capability', shell: 'user' },
-              // 市场复盘（F3 Market Dashboard）：消费 /v1/market-dashboard/*，能力 = market_data（非 research_replay）
-              { path: '/review/dashboard/market', guard: 'capability', shell: 'user' },
-              { path: '/review/dashboard/industry', guard: 'capability', shell: 'user' },
-              { path: '/review/dashboard/concept', guard: 'capability', shell: 'user' },
-            ],
-          },
-          // CapabilityRoute: research_replay = 复盘与竞价（CHANGE-20260802-002）
-          // /review 与 /auction/* 共用同一守卫，不存在独立 auction capability
+          // CapabilityRoute: market_data
+          // [REVIEW-V2-R1] 复盘（Market Dashboard）= /review、/review/industry、/review/concept、
+          // /review/compare；旧 Board Analysis 已退役，/boards* 仅保留迁移提示页（不再依赖旧后端）。
           {
             guard: 'capability',
             shell: 'user',
             children: [
               { path: '/review', guard: 'capability', shell: 'user' },
+              { path: '/review/industry', guard: 'capability', shell: 'user' },
+              { path: '/review/concept', guard: 'capability', shell: 'user' },
+              { path: '/review/compare', guard: 'capability', shell: 'user' },
+              { path: '/boards', guard: 'capability', shell: 'user' },
+              { path: '/boards/:boardId', guard: 'capability', shell: 'user' },
+            ],
+          },
+          // CapabilityRoute: research_replay = 竞价分析（CHANGE-20260802-002；[REVIEW-V2-R1] 仅 /auction*）
+          {
+            guard: 'capability',
+            shell: 'user',
+            children: [
               { path: '/auction', guard: 'capability', shell: 'user' },
               { path: '/auction/board/:boardId', guard: 'capability', shell: 'user' },
               { path: '/auction/stock/:symbol', guard: 'capability', shell: 'user' },
@@ -110,8 +110,12 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
       { path: '/overview', guard: 'redirect', shell: 'none', redirectTo: '/market' },
       { path: '/watchlist', guard: 'redirect', shell: 'none', redirectTo: '/market?scope=watchlist' },
       { path: '/screener', guard: 'redirect', shell: 'none', redirectTo: '/market' },
-      // 复盘占位路由 /replay → 正式工作台 /review
+      // 复盘占位路由 /replay → 正式复盘入口 /review
       { path: '/replay', guard: 'redirect', shell: 'none', redirectTo: '/review' },
+      // [REVIEW-V2-R1] 旧 Market Dashboard 路由 → 新 canonical 复盘路由
+      { path: '/review/dashboard/market', guard: 'redirect', shell: 'none', redirectTo: '/review' },
+      { path: '/review/dashboard/industry', guard: 'redirect', shell: 'none', redirectTo: '/review/industry' },
+      { path: '/review/dashboard/concept', guard: 'redirect', shell: 'none', redirectTo: '/review/concept' },
     ],
   },
   // 兜底

@@ -57,6 +57,10 @@ test('旧路由兼容重定向：/overview → /market，/watchlist → /market?
   assert.equal(LEGACY_REDIRECTS['/screener'], '/market')
   // 复盘占位路由 /replay → 正式工作台 /review
   assert.equal(LEGACY_REDIRECTS['/replay'], '/review')
+  // [REVIEW-V2-R1] 旧 Market Dashboard 路由 → 新 canonical 复盘路由
+  assert.equal(LEGACY_REDIRECTS['/review/dashboard/market'], '/review')
+  assert.equal(LEGACY_REDIRECTS['/review/dashboard/industry'], '/review/industry')
+  assert.equal(LEGACY_REDIRECTS['/review/dashboard/concept'], '/review/concept')
   // [Phase4] 旧管理员调试路由 → 新路由（前后端统一使用 symbol）
   assert.equal(LEGACY_REDIRECTS['/admin/stock-debug'], '/admin/stocks')
   const entries = legacyRedirectEntries()
@@ -65,6 +69,9 @@ test('旧路由兼容重定向：/overview → /market，/watchlist → /market?
     { path: '/watchlist', to: '/market?scope=watchlist' },
     { path: '/screener', to: '/market' },
     { path: '/replay', to: '/review' },
+    { path: '/review/dashboard/market', to: '/review' },
+    { path: '/review/dashboard/industry', to: '/review/industry' },
+    { path: '/review/dashboard/concept', to: '/review/concept' },
     { path: '/admin/stock-debug', to: '/admin/stocks' },
   ])
 })

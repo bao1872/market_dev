@@ -5,12 +5,12 @@
 // 2. API 调用使用 /auction/stock/:symbol（非 UUID）
 // 3. EVENT_LIFECYCLE_LABELS 覆盖 formed/confirmed/continued/weakened/failed/transformed/expired
 // 4. 用户一级导航含 /auction 入口
-// 5. useAuctionBackflow hook 存在（ReviewPage 第二金字塔数据源）
-// 6. ReviewPage 集成 AuctionBackflowPanel（stage=auction）
+// 5. useAuctionBackflow hook 存在（竞价事件回流数据源）
+// 6. 旧 ReviewPage / AuctionBackflowPanel 已随旧 Review 产品退役（物理删除）
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 
@@ -19,8 +19,6 @@ const __dirname = dirname(__filename)
 const TYPES_PATH = join(__dirname, '..', '..', 'src', 'features', 'auction', 'types.ts')
 const API_PATH = join(__dirname, '..', '..', 'src', 'features', 'auction', 'api.ts')
 const NAV_PATH = join(__dirname, '..', '..', 'src', 'navigation', 'appNavigation.ts')
-const REVIEW_PAGE_PATH = join(__dirname, '..', '..', 'src', 'pages', 'ReviewPage.tsx')
-const BACKFLOW_PANEL_PATH = join(__dirname, '..', '..', 'src', 'features', 'review', 'AuctionBackflowPanel.tsx')
 
 function readSource(p: string): string {
   return readFileSync(p, 'utf-8')
@@ -118,43 +116,13 @@ test('useAuctionBackflow hook 存在', () => {
   )
 })
 
-test('ReviewPage 不再集成 AuctionBackflowPanel（canonical cutover，Slice D）', () => {
-  // Slice D 起 /review 为 canonical Scope-first runtime；auction 从 /review 退休，
-  // AuctionBackflowPanel 物理文件保留至 Slice F 删除，但 ReviewPage 不得再导入/渲染。
-  const src = readSource(REVIEW_PAGE_PATH)
-  assert.ok(
-    !src.includes('import AuctionBackflowPanel'),
-    'ReviewPage 不得导入 AuctionBackflowPanel',
-  )
-  assert.ok(
-    !src.includes("case 'auction'"),
-    'ReviewPage 不得保留 auction stage 分支',
-  )
-  assert.ok(
-    !src.includes('<AuctionBackflowPanel'),
-    'ReviewPage 不得渲染 AuctionBackflowPanel 组件',
-  )
-})
-
-test('AuctionBackflowPanel 使用 symbol 导航（非 UUID）', () => {
-  const src = readSource(BACKFLOW_PANEL_PATH)
-  assert.ok(
-    src.includes('/auction/stock/${ev.symbol}'),
-    'AuctionBackflowPanel 必须使用 symbol 进行导航',
-  )
-  assert.ok(
-    !src.includes('/auction/stock/${ev.instrument_id}'),
-    'AuctionBackflowPanel 禁止使用 instrument_id 导航',
-  )
-})
-
-test('AuctionBackflowPanel 含四维度数据展示', () => {
-  const src = readSource(BACKFLOW_PANEL_PATH)
-  // 四维度：分布、迁移、新鲜度、集中度
-  assert.ok(src.includes('event_type_distribution'), '必须展示事件类型分布')
-  assert.ok(src.includes('lifecycle_distribution'), '必须展示生命周期分布')
-  assert.ok(src.includes('event_migrations'), '必须展示迁移')
-  assert.ok(src.includes('anchor_freshness_buckets'), '必须展示新鲜度')
-  assert.ok(src.includes('market_concentration'), '必须展示集中度')
-  assert.ok(src.includes('backflow_events'), '必须展示竞价事件回流')
+test('旧 ReviewPage / AuctionBackflowPanel 已随旧 Review 产品退役（物理删除）', () => {
+  // [REVIEW-V2-R1] 旧复盘工作台与 AuctionBackflowPanel 已随旧 Review 产品物理删除：
+  // 复盘改由 Market Dashboard（/review）承载；竞价 /auction* 独立 capability 守卫（research_replay）。
+  for (const p of [
+    join(__dirname, '..', '..', 'src', 'pages', 'ReviewPage.tsx'),
+    join(__dirname, '..', '..', 'src', 'features', 'review', 'AuctionBackflowPanel.tsx'),
+  ]) {
+    assert.ok(!existsSync(p), `${p} 应已物理删除`)
+  }
 })

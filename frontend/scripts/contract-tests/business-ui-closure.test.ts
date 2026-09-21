@@ -40,10 +40,8 @@ test('structured chip unavailable reasons remain visible in stock detail', () =>
 })
 
 // Slice F retired the legacy FilterDiscoveryPanel / EvidenceDrawer / MarketScanPanel
-// components. The following transitional tests (previously verifying legacy D-family,
-// drawer readiness rendering, and legacy discovery filter payload shape) are retired
-// along with those production owners. Canonical Scope Explorer / Detail contracts are
-// now covered by reviewCanonicalContract / scopeExplorerContract / scopeDetailContract.
+// components. [REVIEW-V2-R1] 旧 Review 复盘工作台（src/features/review/**）已随产品退役
+// 物理删除，上述 legacy 组件与对应契约测试一并移除；复盘现由 Market Dashboard（/review）承载。
 
 test('[Slice F] retired legacy FilterDiscoveryPanel/EvidenceDrawer/MarketScanPanel tests are gone', () => {
   // Legacy source files must no longer exist

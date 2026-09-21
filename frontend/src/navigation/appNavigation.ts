@@ -1,17 +1,18 @@
 // [Navigation] - 描述: 单一导航/路由常量真源（避免路径散落在各页面）
 // PRD V1.0 阶段一（路由与壳层）确立：
 //   普通用户主入口 = /market（行情，渲染 MarketWorkspacePage）
-//   复盘工作台 /review（PRD §3.1 主路由，渲染 ReviewPage）
+//   [REVIEW-V2-R1] 复盘 /review 渲染 Market Dashboard（大盘/行业/概念/比较），能力 = market_data
+//   竞价 /auction 渲染竞价三级页面，能力 = research_replay（竞价分析）
 //   消息 /messages、设置 /settings 进入右上角账户菜单
 //   管理后台独立壳层 AdminAppShell，承载 /admin/*
 //   Capture 路由 /capture/stock/:symbol 位于两套壳层之外
 //   旧路由 /overview → /market、/watchlist → /market?scope=watchlist、/screener → /market 仅作兼容重定向
-//   旧复盘占位 /replay → /review（复盘模块上线后占位路由重定向到正式工作台）
+//   旧复盘占位 /replay → /review；旧 Market Dashboard /review/dashboard/* → 新 canonical /review*
 //   旧 WatchlistPage.tsx 和 IndexPage.tsx 已删除（统一行情工作区改造）
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于路由契约测试。
 
 import {
-  REPLAY_AND_AUCTION_CAPABILITY,
+  AUCTION_CAPABILITY,
   hasCapability,
   type CapabilityKey,
   type CapabilityStateLike,
@@ -21,7 +22,6 @@ export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
   review: '/review',
-  marketDashboard: '/review/dashboard/market',
   // [P0-FE 2026-07-31] 竞价分析入口（市场/板块/个股三级页面）
   auction: '/auction',
   messages: '/messages',
@@ -74,14 +74,13 @@ export interface AppNavItem {
 
 // 普通用户一级导航（行情 + 自选 + 复盘 + 竞价；消息/设置不在此处）
 // [Round 2026-07-28-4] 自选升级为一级导航，复用 /market?scope=watchlist
-// [CHANGE-20260802-002] 复盘与竞价同属 research_replay 权益，导航同显同隐
+// [REVIEW-V2-R1] 「复盘」= Market Dashboard（/review*），能力 = market_data；
+//   竞价 = research_replay（竞价分析）。两者不再共用同一权益，也不再保留重复的「市场复盘」入口。
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情', requiredCapability: 'market_data' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选', requiredCapability: 'self_selection' },
-  { path: APP_ROUTES.review, label: '复盘', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
-  // 市场复盘：独立入口，能力 = market_data（不并入现有 /review scope-observation）
-  { path: APP_ROUTES.marketDashboard, label: '市场复盘', requiredCapability: 'market_data' },
-  { path: APP_ROUTES.auction, label: '竞价', requiredCapability: REPLAY_AND_AUCTION_CAPABILITY },
+  { path: APP_ROUTES.review, label: '复盘', requiredCapability: 'market_data' },
+  { path: APP_ROUTES.auction, label: '竞价', requiredCapability: AUCTION_CAPABILITY },
 ]
 
 /** 自选导航 path（用于权限判断和 active 匹配） */
@@ -90,12 +89,12 @@ export const WATCHLIST_NAV_PATH = `${APP_ROUTES.market}?scope=watchlist`
 /**
  * 按用户 capability 过滤可见的一级导航项（纯函数，供 UserAppShell 与契约测试共用）。
  *
- * 规则（CHANGE-20260802-002）：
- * - 未声明 requiredCapability 的项始终可见（如「行情」）
+ * 规则：
+ * - 未声明 requiredCapability 的项始终可见
  * - admin 豁免全部 capability 判断
+ * - 无 market_data：隐藏「行情」与「复盘」
  * - 无 self_selection：隐藏「自选」
- * - 无 research_replay：同时隐藏「复盘」和「竞价」
- * - 有 research_replay：同时显示「复盘」和「竞价」
+ * - 无 research_replay：隐藏「竞价」
  */
 export function filterNavItemsByCapability(
   items: readonly AppNavItem[],
@@ -112,7 +111,7 @@ export function filterNavItemsByCapability(
  * 判断导航项是否 active（不依赖 NavLink pathname，支持 /market 双入口）
  * - /market 且 scope != watchlist → 行情 active
  * - /market 且 scope == watchlist → 自选 active
- * - /review → 复盘 active
+ * - /review 及 /review/industry|concept|compare → 复盘 active
  * - /auction/* → 竞价 active（/auction、/auction/board/:id、/auction/stock/:symbol 都高亮）
  */
 export function resolveActiveNav(
@@ -130,13 +129,13 @@ export function resolveActiveNav(
     // 自选：/market 且 scope=watchlist
     return pathname === APP_ROUTES.market && scope === 'watchlist'
   }
+  if (itemPath === APP_ROUTES.review) {
+    // 复盘：大盘/行业/概念/比较共用同一入口高亮
+    return pathname === APP_ROUTES.review || pathname.startsWith(`${APP_ROUTES.review}/`)
+  }
   if (itemPath === APP_ROUTES.auction) {
     // 竞价：/auction 及其子路径（/auction/board/:id、/auction/stock/:symbol）
     return pathname === APP_ROUTES.auction || pathname.startsWith('/auction/')
-  }
-  if (itemPath === APP_ROUTES.marketDashboard) {
-    // 市场复盘：大盘/行业/概念三个子页面共用同一入口高亮
-    return pathname === APP_ROUTES.marketDashboard || pathname.startsWith('/review/dashboard/')
   }
   // 其他项：pathname 精确匹配
   return pathname === itemPath
@@ -227,8 +226,12 @@ export const LEGACY_REDIRECTS: Record<string, string> = {
   '/overview': APP_ROUTES.market,
   '/watchlist': `${APP_ROUTES.market}?scope=watchlist`,
   '/screener': APP_ROUTES.market,
-  // 复盘占位路由 /replay → 正式工作台 /review（PRD §3.1）
+  // 复盘占位路由 /replay → 正式复盘入口 /review（PRD §3.1）
   '/replay': APP_ROUTES.review,
+  // [REVIEW-V2-R1] 旧 Market Dashboard 路由 → 新 canonical 复盘路由
+  '/review/dashboard/market': APP_ROUTES.review,
+  '/review/dashboard/industry': '/review/industry',
+  '/review/dashboard/concept': '/review/concept',
   // [Phase4] 旧管理员调试路由 → 新路由（前后端统一使用 symbol）
   '/admin/stock-debug': APP_ROUTES.adminStockDebug,
 }

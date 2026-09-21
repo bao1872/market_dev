@@ -1,4 +1,4 @@
-// [MarketDashboard] - 大盘页（/review/dashboard/market）
+// [MarketDashboard] - 大盘页（/review）
 // 顶部：市场复盘 + 二级 Tab + 最后投影日期；四张卡片（顺序锁死）+ 长周期图 + 短周期图。
 import { useMemo } from 'react'
 import { useMarketDashboard } from '@/hooks/useMarketDashboardApi'

@@ -13,7 +13,7 @@ import { useAuthStore, ACCESS_TOKEN_KEY } from './store/auth'
 import UserAppShell from './layouts/UserAppShell'
 import AdminAppShell from './layouts/AdminAppShell'
 import { legacyRedirectEntries, DEFAULT_ENTRY } from './navigation/appNavigation'
-import { REPLAY_AND_AUCTION_CAPABILITY } from './navigation/capabilities'
+import { AUCTION_CAPABILITY } from './navigation/capabilities'
 import {
   resolveCapabilityGate,
   resolveProtectedGate,
@@ -21,8 +21,7 @@ import {
 import LoginPage from './pages/LoginPage'
 import SubscriptionExpiredPage from './pages/SubscriptionExpiredPage'
 import MarketWorkspacePage from './features/market-workspace/MarketWorkspacePage'
-import BoardAnalysisPage from './pages/BoardAnalysisPage'
-import ReviewPage from './pages/ReviewPage'
+import BoardAnalysisRetiredPage from './pages/BoardAnalysisRetiredPage'
 import StockDetailPage from './pages/StockDetailPage'
 import CaptureStockPage from './pages/CaptureStockPage'
 import SettingsPage from './pages/SettingsPage'
@@ -49,6 +48,8 @@ const BoardDashboardPage = lazy(() => import('./features/market-dashboard/BoardD
 const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))
 // [Auction V3.2] - List-first Scope Observation Workspace
 const AuctionScopeWorkspace = lazy(() => import('./features/auction/AuctionScopeWorkspace'))
+// [REVIEW-V2-R1] 复盘比较页（R1 仅空态；R3 交付四页完整 UI）
+const ComparePage = lazy(() => import('./features/market-dashboard/ComparePage'))
 
 // 门户页加载占位
 function LandingFallback() {
@@ -333,16 +334,13 @@ export const routeConfig: RouteObject[] = [
               { path: '/stock/:symbol', element: <StockDetailPage /> },
             ],
           },
-          // market_data: 板块分析（BoardAnalysis 是全市场 cross-section，仅 market_data 可读）
+          // market_data: 复盘（Market Dashboard）+ 旧板块分析迁移提示
+          // [REVIEW-V2-R1] /review* = canonical 复盘；/boards* 仅提示迁移（旧 Board Analysis 后端已退役）
           {
             element: <CapabilityRoute capability="market_data" />,
             children: [
-              // [CHANGE-20260730-011] 板块分析 V1 页面（任何 market_data 用户可读）
-              { path: '/boards', element: <BoardAnalysisPage /> },
-              { path: '/boards/:boardId', element: <BoardAnalysisPage /> },
-              // 市场复盘（F3 Market Dashboard）：消费 /v1/market-dashboard/*，能力 = market_data
               {
-                path: '/review/dashboard/market',
+                path: '/review',
                 element: (
                   <Suspense fallback={<AuctionFallback />}>
                     <MarketDashboardPage />
@@ -350,7 +348,7 @@ export const routeConfig: RouteObject[] = [
                 ),
               },
               {
-                path: '/review/dashboard/industry',
+                path: '/review/industry',
                 element: (
                   <Suspense fallback={<AuctionFallback />}>
                     <BoardDashboardPage scopeType="industry" />
@@ -358,22 +356,32 @@ export const routeConfig: RouteObject[] = [
                 ),
               },
               {
-                path: '/review/dashboard/concept',
+                path: '/review/concept',
                 element: (
                   <Suspense fallback={<AuctionFallback />}>
                     <BoardDashboardPage scopeType="concept" />
                   </Suspense>
                 ),
               },
+              {
+                path: '/review/compare',
+                element: (
+                  <Suspense fallback={<AuctionFallback />}>
+                    <ComparePage />
+                  </Suspense>
+                ),
+              },
+              // 旧「板块分析」页面已退役（后端 API 已删除）：保留路由并提示迁移，R3 正式接入 Explorer
+              { path: '/boards', element: <BoardAnalysisRetiredPage /> },
+              { path: '/boards/:boardId', element: <BoardAnalysisRetiredPage /> },
             ],
           },
-          // research_replay = 复盘与竞价（CHANGE-20260802-002）
-          // 复盘工作台与竞价三级页面共用同一 capability 守卫，不存在独立 auction capability；
+          // research_replay = 竞价分析（CHANGE-20260802-002；[REVIEW-V2-R1] 复盘已改由 market_data 守卫）
+          // 竞价三级页面共用同一 capability 守卫，不存在独立 auction capability；
           // 直接输入 /auction/* URL 的无权限用户由 CapabilityRoute 统一跳转 /forbidden。
           {
-            element: <CapabilityRoute capability={REPLAY_AND_AUCTION_CAPABILITY} />,
+            element: <CapabilityRoute capability={AUCTION_CAPABILITY} />,
             children: [
-              { path: '/review', element: <ReviewPage /> },
               {
                 path: '/auction',
                 element: (

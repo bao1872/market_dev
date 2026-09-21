@@ -316,7 +316,7 @@ export const PARTICIPATION_LABELS: Record<string, string> = {
 }
 
 // ============================================================
-// 竞价事件回流（ReviewPage 第二金字塔面板）
+// 竞价事件回流（竞价页面 / 复盘第二金字塔数据源）
 // ============================================================
 
 /** 锚点新鲜度分布桶 */
@@ -346,7 +346,7 @@ export interface AuctionConcentrationInfo {
   median_change_pct?: number | null
 }
 
-/** GET /v1/auction/backflow/{trade_date} 响应 — ReviewPage 第二金字塔数据 */
+/** GET /v1/auction/backflow/{trade_date} 响应 — 复盘第二金字塔数据 */
 export interface AuctionBackflowData {
   trade_date: string
   algorithm_version: string

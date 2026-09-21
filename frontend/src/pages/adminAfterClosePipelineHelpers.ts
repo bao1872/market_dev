@@ -20,8 +20,11 @@ export const STEP_LABELS: Record<string, string> = {
   publishing: '发布结果',
   // [SLICE-01-CORRECTION-02] 新增历史状态推进阶段（First Pyramid History 自动生产 + exact-T readiness）
   computing_history: '历史状态推进',
-  // [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘计算与发布阶段
-  computing_review: '复盘计算发布',
+  // [REVIEW-V2-R1] canonical 复盘计算（Market Dashboard projection 重建）
+  rebuilding_market_dashboard: '复盘计算',
+  // legacy 兼容标签：computing_review 已退役，不再是 current 步骤；
+  // 仅当 API 显式返回历史 legacy run 的真实事件时展示，不与新复盘混淆。
+  computing_review: '旧复盘计算',
   watchlist_ready: '自选可用',
 }
 
@@ -35,8 +38,8 @@ export const DEFAULT_STEP_ORDER: string[] = [
   'refreshing_daily',
   'syncing_boards',
   'checking_coverage',
+  'rebuilding_market_dashboard',
   'computing_features',
-  'computing_review',
   'computing_history',
   'watchlist_ready',
 ]

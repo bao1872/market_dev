@@ -189,11 +189,6 @@ export {
 } from './useStockDataApi'
 
 export {
-  useBoardAnalysisList,
-  useBoardAnalysisDetail
-} from './useBoardAnalysisApi'
-
-export {
   useMarketDashboard,
   useMarketRankings,
   useMarketScopeDetail,

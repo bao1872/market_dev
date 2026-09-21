@@ -22,7 +22,7 @@ from app.services.effective_access_service import (
     DEFAULT_ROUTE_FORBIDDEN,
     DEFAULT_ROUTE_MARKET,
     DEFAULT_ROUTE_MARKET_WATCHLIST,
-    DEFAULT_ROUTE_REVIEW,
+    DEFAULT_ROUTE_AUCTION,
     CapabilityState,
     compute_default_route,
     resolve_effective_access,
@@ -44,7 +44,7 @@ class TestComputeDefaultRoute:
             (False, [CAP_SELF_SELECTION, CAP_MARKET_DATA], DEFAULT_ROUTE_MARKET),
             (False, [CAP_SELF_SELECTION], DEFAULT_ROUTE_MARKET_WATCHLIST),
             (False, [CAP_MARKET_DATA], DEFAULT_ROUTE_MARKET),
-            (False, [CAP_RESEARCH_REPLAY], DEFAULT_ROUTE_REVIEW),
+            (False, [CAP_RESEARCH_REPLAY], DEFAULT_ROUTE_AUCTION),
             (False, [CAP_RESEARCH_REPLAY, CAP_MARKET_DATA], DEFAULT_ROUTE_MARKET),
             (False, [CAP_RESEARCH_REPLAY, CAP_SELF_SELECTION], DEFAULT_ROUTE_MARKET),
         ],
@@ -112,7 +112,7 @@ class TestResolveEffectiveAccess:
         db = self._mk_db(rows)
         profile = await resolve_effective_access(db, self._mk_user())
         assert profile.active_capability_keys == [CAP_RESEARCH_REPLAY]
-        assert profile.default_route == DEFAULT_ROUTE_REVIEW
+        assert profile.default_route == DEFAULT_ROUTE_AUCTION
 
     @pytest.mark.asyncio
     async def test_admin_all_capabilities(self) -> None:

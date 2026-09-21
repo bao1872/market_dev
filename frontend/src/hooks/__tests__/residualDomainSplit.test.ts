@@ -1,8 +1,9 @@
-// [S3-E] - 描述: 最终 residual domain 拆分契约测试（notification / stockData / boardAnalysis / preferences）
+// [S3-E] - 描述: 最终 residual domain 拆分契约测试（notification / stockData / preferences）
 // 用法：./node_modules/.bin/tsx --test src/hooks/__tests__/residualDomainSplit.test.ts
 //
 // 证明 endpoints.ts / useApi.ts 兼容 barrel 与新 owner 指向同一函数引用；
-// boardAnalysis 不含 admin compute；/v1/admin/* 已无 residual；queryKey/invalidation 未漂移。
+// /v1/admin/* 已无 residual；queryKey/invalidation 未漂移。
+// [REVIEW-V2-R1] boardAnalysis owner 已随旧 Board Analysis 后端退役删除。
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -36,35 +37,26 @@ const NOTIF_API = ['getMessages','markMessageRead','getUnreadCount','readAllMess
 const NOTIF_HOOKS = ['useMessages','useUnreadCount','useMarkMessageRead','useReadAllMessages','useNotificationChannels','useCreateNotificationChannel','useUpdateNotificationChannel','useDeleteNotificationChannel','useVerifyNotificationChannel','useTestNotificationChannel','useTestNotificationChannelLatestEvent','usePreviewNotification'] as const
 const STOCK_API = ['getEventsSummary','getInstruments','batchGetInstruments','getInstrumentById','getInstrumentBySymbol','getStockMemo','upsertStockMemo','deleteStockMemo','toggleMemoNotify','getBars','getQuote','getIndicators','getChartSnapshot','getCalendar','isTradingDay','getStructuralFactors','getTemporalFeatures','getStockContext','getFirstPyramid'] as const
 const STOCK_HOOKS = ['useInstruments','useBatchInstruments','useInstrument','useInstrumentBySymbol','useEventsSummary','useStockMemo','useUpsertStockMemo','useDeleteStockMemo','useBars','useIndicators','useRealtimeQuote','useChartSnapshot','useCalendar','useIsTradingDay','useStructuralFactors','useTemporalFeatures','useStockContext','useFirstPyramid'] as const
-const BOARD_API = ['getBoardAnalysisList','getBoardAnalysisDetail'] as const
-const BOARD_HOOKS = ['useBoardAnalysisList','useBoardAnalysisDetail'] as const
 const PREF_API = ['getTableViewPresets','createTableViewPreset','updateTableViewPreset','deleteTableViewPreset'] as const
 const PREF_HOOKS = ['useTableViewPresets','useCreateTableViewPreset','useUpdateTableViewPreset','useDeleteTableViewPreset'] as const
 
-test('API barrel identity: endpoints 重新导出 4 个新 owner（同一函数引用）', async () => {
+test('API barrel identity: endpoints 重新导出 3 个新 owner（同一函数引用）', async () => {
   const ep = (await import('../../api/endpoints.ts')) as Record<string, unknown>
   const notif = (await import('../../api/notification.ts')) as Record<string, unknown>
   const stock = (await import('../../api/stockData.ts')) as Record<string, unknown>
-  const board = (await import('../../api/boardAnalysis.ts')) as Record<string, unknown>
   const pref = (await import('../../api/preferences.ts')) as Record<string, unknown>
   for (const n of NOTIF_API) assert.equal(ep[n], notif[n], `endpoints.${n} === notification.${n}`)
   for (const n of STOCK_API) assert.equal(ep[n], stock[n], `endpoints.${n} === stockData.${n}`)
-  for (const n of BOARD_API) assert.equal(ep[n], board[n], `endpoints.${n} === boardAnalysis.${n}`)
   for (const n of PREF_API) assert.equal(ep[n], pref[n], `endpoints.${n} === preferences.${n}`)
-  // boardAnalysis 只读：admin compute 不进 boardAnalysis owner（仍在 admin）
-  assert.equal(board.triggerComputeBoard, undefined, 'triggerComputeBoard 应留 admin')
-  assert.equal(board.triggerComputeAllBoards, undefined, 'triggerComputeAllBoards 应留 admin')
 })
 
-test('Hook barrel identity: useApi 重新导出 4 个新 hook owner（同一引用）', async () => {
+test('Hook barrel identity: useApi 重新导出 3 个新 hook owner（同一引用）', async () => {
   const legacy = (await import('../useApi.ts')) as Record<string, unknown>
   const notif = (await import('../useNotificationApi.ts')) as Record<string, unknown>
   const stock = (await import('../useStockDataApi.ts')) as Record<string, unknown>
-  const board = (await import('../useBoardAnalysisApi.ts')) as Record<string, unknown>
   const pref = (await import('../usePreferencesApi.ts')) as Record<string, unknown>
   for (const n of NOTIF_HOOKS) assert.equal(legacy[n], notif[n], `useApi.${n} === useNotificationApi.${n}`)
   for (const n of STOCK_HOOKS) assert.equal(legacy[n], stock[n], `useApi.${n} === useStockDataApi.${n}`)
-  for (const n of BOARD_HOOKS) assert.equal(legacy[n], board[n], `useApi.${n} === useBoardAnalysisApi.${n}`)
   for (const n of PREF_HOOKS) assert.equal(legacy[n], pref[n], `useApi.${n} === usePreferencesApi.${n}`)
 })
 
@@ -78,10 +70,9 @@ test('/v1/admin/* residual = 0：getAdminStockDebug 已入 admin owner', async (
   assert.equal(implLines.length, 0, `endpoints.ts 不应再有 /v1/admin/* 实现，实际: ${implLines.join(' | ')}`)
 })
 
-test('query contract: notification/stockData/boardAnalysis/preferences queryKey 未漂移', async () => {
+test('query contract: notification/stockData/preferences queryKey 未漂移', async () => {
   const { useMessages, useUnreadCount, useNotificationChannels } = await import('../useNotificationApi.ts')
   const { useStockMemo, useBars, useCalendar, useStructuralFactors, useTemporalFeatures, useStockContext, useFirstPyramid } = await import('../useStockDataApi.ts')
-  const { useBoardAnalysisList, useBoardAnalysisDetail } = await import('../useBoardAnalysisApi.ts')
   const { useTableViewPresets } = await import('../usePreferencesApi.ts')
 
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
@@ -97,8 +88,6 @@ test('query contract: notification/stockData/boardAnalysis/preferences queryKey 
     useTemporalFeatures('i1')
     useStockContext('600519')
     useFirstPyramid('600519')
-    useBoardAnalysisList()
-    useBoardAnalysisDetail('b1')
     useTableViewPresets('market')
     return null
   }
@@ -115,8 +104,6 @@ test('query contract: notification/stockData/boardAnalysis/preferences queryKey 
   expectKey(['temporal-features', 'i1', undefined])
   expectKey(['stock-context', '600519', null])
   expectKey(['first-pyramid', '600519', null])
-  expectKey(['board-analysis', 'list', undefined])
-  expectKey(['board-analysis', 'detail', 'b1', undefined])
   expectKey(['table-view-presets', 'market', null])
 })
 

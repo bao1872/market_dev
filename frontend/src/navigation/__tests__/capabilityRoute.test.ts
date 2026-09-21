@@ -7,7 +7,7 @@ import {
   DEFAULT_ROUTE_FORBIDDEN,
   DEFAULT_ROUTE_MARKET,
   DEFAULT_ROUTE_MARKET_WATCHLIST,
-  DEFAULT_ROUTE_REVIEW,
+  DEFAULT_ROUTE_AUCTION,
   computeDefaultRoute,
 } from '../capabilities.ts'
 
@@ -21,8 +21,8 @@ describe('computeDefaultRoute', () => {
   it('仅 market_data → /market', () => {
     assert.equal(computeDefaultRoute({ market_data: true }), DEFAULT_ROUTE_MARKET)
   })
-  it('仅 research_replay → /review', () => {
-    assert.equal(computeDefaultRoute({ research_replay: true }), DEFAULT_ROUTE_REVIEW)
+  it('仅 research_replay → /auction（竞价分析）', () => {
+    assert.equal(computeDefaultRoute({ research_replay: true }), DEFAULT_ROUTE_AUCTION)
   })
   it('self_selection + market_data → /market', () => {
     assert.equal(

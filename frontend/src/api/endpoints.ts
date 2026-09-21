@@ -392,18 +392,6 @@ export type {
 } from './stockData'
 
 export {
-  getBoardAnalysisList,
-  getBoardAnalysisDetail
-} from './boardAnalysis'
-
-export type {
-  BoardAnalysisSnapshotDTO,
-  BoardAnalysisListResponse,
-  BoardAnalysisDetailResponse,
-  BoardAnalysisListParams
-} from './boardAnalysis'
-
-export {
   getMarketDashboard,
   getMarketRankings,
   getMarketScopeDetail,

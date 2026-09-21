@@ -51,7 +51,7 @@ class TestAccessProfileSerialization:
             DEFAULT_ROUTE_FORBIDDEN,
             DEFAULT_ROUTE_MARKET,
             DEFAULT_ROUTE_MARKET_WATCHLIST,
-            DEFAULT_ROUTE_REVIEW,
+            DEFAULT_ROUTE_AUCTION,
             compute_default_route,
         )
 
@@ -69,8 +69,8 @@ class TestAccessProfileSerialization:
         assert compute_default_route(False, {CAP_SELF_SELECTION: cap(CAP_SELF_SELECTION, True)}) == DEFAULT_ROUTE_MARKET_WATCHLIST
         # 仅 market_data
         assert compute_default_route(False, {CAP_MARKET_DATA: cap(CAP_MARKET_DATA, True)}) == DEFAULT_ROUTE_MARKET
-        # 仅 research_replay
-        assert compute_default_route(False, {CAP_RESEARCH_REPLAY: cap(CAP_RESEARCH_REPLAY, True)}) == DEFAULT_ROUTE_REVIEW
+        # 仅 research_replay（竞价分析）
+        assert compute_default_route(False, {CAP_RESEARCH_REPLAY: cap(CAP_RESEARCH_REPLAY, True)}) == DEFAULT_ROUTE_AUCTION
         # self_selection + market_data
         assert compute_default_route(
             False,

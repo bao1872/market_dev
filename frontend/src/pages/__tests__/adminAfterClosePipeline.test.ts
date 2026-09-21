@@ -90,16 +90,16 @@ test('1b. getStepKeys: API 返回乱序 steps 时保持 API 顺序（不重排�
 test('1c. getStepKeys: API 返回空数组时用 DEFAULT_STEP_ORDER 兜底', () => {
   const keys = getStepKeys([])
   assert.deepEqual(keys, DEFAULT_STEP_ORDER)
-  // [CHANGE-20260831-ADMIN-TIMELINE] current canonical 7 步
-  // （computing_features → computing_review → computing_history → watchlist_ready）
-  assert.ok(keys.length === 7, `默认步骤应为 7 步（含 computing_history/computing_review），实际: ${keys.length}`)
+  // [REVIEW-V2-R1] current canonical 7 步
+  // （rebuilding_market_dashboard → computing_features → computing_history → watchlist_ready）
+  assert.ok(keys.length === 7, `默认步骤应为 7 步（含 rebuilding_market_dashboard/computing_history），实际: ${keys.length}`)
   assert.ok(
     keys.includes('computing_history'),
     'DEFAULT_STEP_ORDER 必须包含 computing_history（历史状态推进阶段）',
   )
   assert.ok(
-    keys.includes('computing_review'),
-    'DEFAULT_STEP_ORDER 必须包含 computing_review（复盘阶段）',
+    keys.includes('rebuilding_market_dashboard'),
+    'DEFAULT_STEP_ORDER 必须包含 rebuilding_market_dashboard（复盘计算阶段）',
   )
 })
 
@@ -122,27 +122,30 @@ test('2c. STEP_LABELS 包含 computing_features 映射', () => {
   assert.strictEqual(STEP_LABELS['computing_features'], '统一特征计算')
 })
 
-// [CHANGE-20260801-REVIEW-CLOSURE] 新增复盘阶段断言
-test('2c2. computing_review: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS 且中文标签正确', () => {
+// [REVIEW-V2-R1] 复盘阶段：canonical = rebuilding_market_dashboard；computing_review 为退役 legacy token
+test('2c2. rebuilding_market_dashboard: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS；computing_review 仅作 legacy 标签', () => {
   assert.ok(
-    DEFAULT_STEP_ORDER.includes('computing_review'),
-    'DEFAULT_STEP_ORDER 必须包含 computing_review',
+    DEFAULT_STEP_ORDER.includes('rebuilding_market_dashboard'),
+    'DEFAULT_STEP_ORDER 必须包含 rebuilding_market_dashboard',
   )
   assert.strictEqual(
-    STEP_LABELS['computing_review'],
-    '复盘计算发布',
-    'computing_review 中文标签应为"复盘计算发布"',
+    STEP_LABELS['rebuilding_market_dashboard'],
+    '复盘计算',
+    'rebuilding_market_dashboard 中文标签应为"复盘计算"',
   )
-  // computing_review 只出现一次
-  const occurrences = DEFAULT_STEP_ORDER.filter((k) => k === 'computing_review').length
-  assert.strictEqual(occurrences, 1, 'computing_review 在 DEFAULT_STEP_ORDER 中应仅出现一次')
-  // 顺序：computing_features → computing_review → computing_history → watchlist_ready
+  // 退役 legacy token：不再进入 current canonical 默认序列，但保留历史展示标签
+  assert.ok(
+    !DEFAULT_STEP_ORDER.includes('computing_review'),
+    'computing_review 已退役，不得出现在 DEFAULT_STEP_ORDER',
+  )
+  assert.strictEqual(STEP_LABELS['computing_review'], '旧复盘计算')
+  // 顺序：rebuilding_market_dashboard → computing_features → computing_history → watchlist_ready
+  const dashIdx = DEFAULT_STEP_ORDER.indexOf('rebuilding_market_dashboard')
   const featIdx = DEFAULT_STEP_ORDER.indexOf('computing_features')
   const histIdx = DEFAULT_STEP_ORDER.indexOf('computing_history')
-  const revIdx = DEFAULT_STEP_ORDER.indexOf('computing_review')
   const wlIdx = DEFAULT_STEP_ORDER.indexOf('watchlist_ready')
-  assert.ok(revIdx > featIdx, 'computing_review 应在 computing_features 之后')
-  assert.ok(histIdx > revIdx, 'computing_history 应在 computing_review 之后')
+  assert.ok(featIdx > dashIdx, 'computing_features 应在 rebuilding_market_dashboard 之后')
+  assert.ok(histIdx > featIdx, 'computing_history 应在 computing_features 之后')
   assert.ok(histIdx < wlIdx, 'computing_history 应在 watchlist_ready 之前')
 })
 
@@ -162,7 +165,7 @@ test('2c3. computing_history: 存在于 DEFAULT_STEP_ORDER + STEP_LABELS 且中�
   assert.strictEqual(occurrences, 1, 'computing_history 在 DEFAULT_STEP_ORDER 中应仅出现一次')
 })
 
-test('2d. 新状态机 7 步（含 computing_review）全部有中文标签', () => {
+test('2d. 新状态机 7 步（含 rebuilding_market_dashboard）全部有中文标签', () => {
   for (const key of DEFAULT_STEP_ORDER) {
     assert.ok(
       STEP_LABELS[key],
@@ -424,18 +427,18 @@ test('7a. current/default pipeline 不含 publishing（legacy 步不再作为默
   assert.ok(!keys.includes('publishing'), '兜底步骤序列不得包含 publishing')
 })
 
-test('7b. current/default 顺序: computing_features < computing_review < computing_history < watchlist_ready', () => {
+test('7b. current/default 顺序: rebuilding_market_dashboard < computing_features < computing_history < watchlist_ready', () => {
   const keys = getStepKeys([])
+  const dashIdx = keys.indexOf('rebuilding_market_dashboard')
   const featIdx = keys.indexOf('computing_features')
-  const revIdx = keys.indexOf('computing_review')
   const histIdx = keys.indexOf('computing_history')
   const wlIdx = keys.indexOf('watchlist_ready')
   assert.ok(
-    featIdx >= 0 && revIdx >= 0 && histIdx >= 0 && wlIdx >= 0,
+    dashIdx >= 0 && featIdx >= 0 && histIdx >= 0 && wlIdx >= 0,
     '四个关键步骤必须都存在',
   )
-  assert.ok(featIdx < revIdx, 'computing_features 应在 computing_review 之前')
-  assert.ok(revIdx < histIdx, 'computing_review 应在 computing_history 之前')
+  assert.ok(dashIdx < featIdx, 'rebuilding_market_dashboard 应在 computing_features 之前')
+  assert.ok(featIdx < histIdx, 'computing_features 应在 computing_history 之前')
   assert.ok(histIdx < wlIdx, 'computing_history 应在 watchlist_ready 之前')
   assert.strictEqual(keys.length, 7, `current canonical 应为 7 步，实际: ${keys.length}`)
 })

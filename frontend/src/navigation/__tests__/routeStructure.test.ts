@@ -185,20 +185,47 @@ test('/stock/:symbol 与 /market 是两个独立路由节点', () => {
   assert.notEqual(stock.node.path, market.node.path)
 })
 
-// F3 市场复盘：三条路由存在，且属于 market_data 能力守卫（非 research_replay）
-for (const p of ['/review/dashboard/market', '/review/dashboard/industry', '/review/dashboard/concept']) {
-  test(`市场复盘路由存在且走 market_data 能力守卫：${p}`, () => {
+// [REVIEW-V2-R1] canonical 复盘路由：capability 守卫（旧 /review/dashboard/* 已改 redirect）
+for (const p of ['/review', '/review/industry', '/review/concept', '/review/compare']) {
+  test(`复盘路由存在且走 capability 守卫：${p}`, () => {
     const node = findRouteNode(ROUTE_STRUCTURE, p)
     assert.ok(node, `${p} 路由必须存在`)
-    assert.ok(hasGuardInChain(ROUTE_STRUCTURE, p, 'capability'))
+    assert.equal(node!.node.guard, 'capability')
     assert.ok(hasShellInChain(ROUTE_STRUCTURE, p, 'user'))
   })
 }
 
-// 新增市场复盘路由不应改变现有 /review 复盘工作台（仍属 research_replay）
-test('现有 /review 复盘工作台路由不被市场复盘改动', () => {
+// 旧 Market Dashboard 路由统一 redirect 到 canonical 复盘路由
+test('旧 Market Dashboard 路由为兼容重定向', () => {
+  const redirects: Record<string, string> = {
+    '/review/dashboard/market': '/review',
+    '/review/dashboard/industry': '/review/industry',
+    '/review/dashboard/concept': '/review/concept',
+  }
+  for (const [from, to] of Object.entries(redirects)) {
+    const node = findRouteNode(ROUTE_STRUCTURE, from)
+    assert.ok(node, `${from} 路由应存在`)
+    assert.equal(node!.node.guard, 'redirect')
+    assert.equal(node!.node.redirectTo, to)
+    assert.ok(!hasShellInChain(ROUTE_STRUCTURE, from, 'user'))
+  }
+})
+
+// 旧 Board Analysis 已退役：/boards* 仍存在（迁移提示页），不再依赖旧后端
+test('/boards 与 /boards/:boardId 仍在用户壳层 + capability 守卫内', () => {
+  for (const p of ['/boards', '/boards/:boardId']) {
+    assert.ok(hasShellInChain(ROUTE_STRUCTURE, p, 'user'))
+    assert.ok(hasGuardInChain(ROUTE_STRUCTURE, p, 'capability'))
+  }
+})
+
+// [REVIEW-V2-R1] /review（market_data）与 /auction（research_replay）不再共用同一守卫节点
+test('/review 与 /auction 使用不同 capability 守卫节点', () => {
   const review = findRouteNode(ROUTE_STRUCTURE, '/review')
-  assert.ok(review, '/review 路由必须存在')
-  assert.ok(hasGuardInChain(ROUTE_STRUCTURE, '/review', 'capability'))
-  assert.ok(hasShellInChain(ROUTE_STRUCTURE, '/review', 'user'))
+  const auction = findRouteNode(ROUTE_STRUCTURE, '/auction')
+  assert.ok(review && auction)
+  const reviewGuard = review.ancestors.find((a) => a.guard === 'capability')
+  const auctionGuard = auction.ancestors.find((a) => a.guard === 'capability')
+  assert.ok(reviewGuard && auctionGuard)
+  assert.notEqual(reviewGuard, auctionGuard, '/review 与 /auction 必须挂在不同 capability 守卫节点下')
 })

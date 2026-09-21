@@ -1,24 +1,27 @@
-// [MarketDashboard] - 导航契约：市场复盘入口能力 = market_data，且三个子页面共用同一入口高亮
+// [MarketDashboard] - 导航契约：[REVIEW-V2-R1] 复盘入口能力 = market_data，
+// 四个 canonical 子页面（大盘/行业/概念/比较）共用同一入口高亮。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { USER_NAV_ITEMS, APP_ROUTES, resolveActiveNav } from '../appNavigation'
 
-test('市场复盘导航项存在，使用 market_data 能力，指向大盘页', () => {
-  const item = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.marketDashboard)
-  assert.ok(item, '市场复盘导航项应存在')
+test('复盘导航项存在，使用 market_data 能力，指向 canonical /review', () => {
+  const item = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.review)
+  assert.ok(item, '复盘导航项应存在')
   assert.equal(item!.requiredCapability, 'market_data')
-  assert.equal(item!.path, '/review/dashboard/market')
+  assert.equal(item!.path, '/review')
 })
 
-test('新增市场复盘入口不改变现有 /review 复盘项（仍 research_replay）', () => {
-  const review = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.review)
-  assert.ok(review, '/review 导航项应存在')
-  assert.equal(review!.requiredCapability, 'research_replay')
+test('不存在重复的「市场复盘」二级导航入口', () => {
+  const reviewItems = USER_NAV_ITEMS.filter((i) => i.path.startsWith('/review'))
+  assert.equal(reviewItems.length, 1, '复盘只保留一个一级导航入口')
+  assert.ok(!USER_NAV_ITEMS.some((i) => i.path === '/review/dashboard/market'))
 })
 
-test('市场复盘子路径（industry / concept）高亮同一入口；非 dashboard 路径不高亮', () => {
-  assert.equal(resolveActiveNav('/review/dashboard/market', '', APP_ROUTES.marketDashboard), true)
-  assert.equal(resolveActiveNav('/review/dashboard/industry', '', APP_ROUTES.marketDashboard), true)
-  assert.equal(resolveActiveNav('/review/dashboard/concept', '', APP_ROUTES.marketDashboard), true)
-  assert.equal(resolveActiveNav('/review', '', APP_ROUTES.marketDashboard), false)
+test('复盘子路径（industry / concept / compare）高亮同一入口；行情/竞价路径不高亮', () => {
+  assert.equal(resolveActiveNav('/review', '', APP_ROUTES.review), true)
+  assert.equal(resolveActiveNav('/review/industry', '', APP_ROUTES.review), true)
+  assert.equal(resolveActiveNav('/review/concept', '', APP_ROUTES.review), true)
+  assert.equal(resolveActiveNav('/review/compare', '', APP_ROUTES.review), true)
+  assert.equal(resolveActiveNav('/market', '', APP_ROUTES.review), false)
+  assert.equal(resolveActiveNav('/auction', '', APP_ROUTES.review), false)
 })

@@ -138,7 +138,7 @@ export async function getAuctionAnchors(
   return data
 }
 
-/** GET /v1/auction/backflow/{trade_date} — ReviewPage 第二金字塔+竞价事件回流数据 */
+/** GET /v1/auction/backflow/{trade_date} — 复盘第二金字塔 + 竞价事件回流数据 */
 export async function getAuctionBackflow(
   tradeDate: string,
   topEvents = 50,
@@ -254,7 +254,7 @@ export function useAuctionAnchors(
 }
 
 /**
- * 第二金字塔+竞价事件回流 hook（ReviewPage 调用）
+ * 第二金字塔+竞价事件回流 hook（竞价页面 / 复盘调用）
  * GET /v1/auction/backflow/{trade_date}
  * - 返回分布/迁移/新鲜度/集中度四维度数据
  * - 用于在 /review 页面展示竞价事件回流与第二金字塔可视化

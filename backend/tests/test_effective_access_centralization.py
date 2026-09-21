@@ -223,7 +223,7 @@ async def test_s1_explicit_research_replay_only():
     )
     profile = await resolve_effective_access(db, user)
     assert profile.active_capability_keys == ["research_replay"]
-    assert profile.default_route == "/review"
+    assert profile.default_route == "/auction"
     assert profile.capability_source == "user_capabilities"
 
 
