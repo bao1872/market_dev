@@ -53,6 +53,8 @@ export interface ScopeMetadata {
   type: string
   hierarchy_level: string
   membership_version: string
+  // [R3C0] additive：详情最新 projection row 的成员数（冻结事实，不从 membership 表重算）。
+  member_count: number
 }
 
 export interface ScopePoint {

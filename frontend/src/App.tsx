@@ -44,7 +44,8 @@ const LandingPage = lazy(() => import('./pages/LandingPage'))
 
 const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
 const MarketDashboardPage = lazy(() => import('./features/market-dashboard/MarketDashboardPage'))
-const BoardDashboardPage = lazy(() => import('./features/market-dashboard/BoardDashboardPage'))
+const ScopeExplorerPage = lazy(() => import('./features/market-dashboard/ScopeExplorerPage'))
+const BoardCompatResolver = lazy(() => import('./features/market-dashboard/BoardCompatResolver'))
 const AuctionInstrumentPage = lazy(() => import('./features/auction/AuctionInstrumentPage'))
 // [Auction V3.2] - List-first Scope Observation Workspace
 const AuctionScopeWorkspace = lazy(() => import('./features/auction/AuctionScopeWorkspace'))
@@ -73,6 +74,13 @@ function LegacyMarketingPreviewRedirect() {
 // [Auction] - 竞价页面 lazy 加载占位（与 UserAppShell 视觉对齐）
 function AuctionFallback() {
   return <div style={{ minHeight: '100vh', background: '#0A0F14' }} />
+}
+
+// [R3C] /boards/:boardId 兼容 resolver（读取 route param，重定向到 canonical Explorer）。
+function BoardCompatResolverRoute() {
+  const { boardId } = useParams<{ boardId: string }>()
+  if (!boardId) return <BoardAnalysisRetiredPage />
+  return <BoardCompatResolver boardId={boardId} />
 }
 
 // 受保护路由布局：仅负责认证与 access profile，不再渲染统一 AppShell
@@ -351,7 +359,7 @@ export const routeConfig: RouteObject[] = [
                 path: '/review/industry',
                 element: (
                   <Suspense fallback={<AuctionFallback />}>
-                    <BoardDashboardPage scopeType="industry" />
+                    <ScopeExplorerPage scopeType="industry" />
                   </Suspense>
                 ),
               },
@@ -359,7 +367,7 @@ export const routeConfig: RouteObject[] = [
                 path: '/review/concept',
                 element: (
                   <Suspense fallback={<AuctionFallback />}>
-                    <BoardDashboardPage scopeType="concept" />
+                    <ScopeExplorerPage scopeType="concept" />
                   </Suspense>
                 ),
               },
@@ -372,8 +380,8 @@ export const routeConfig: RouteObject[] = [
                 ),
               },
               // 旧「板块分析」页面已退役（后端 API 已删除）：保留路由并提示迁移，R3 正式接入 Explorer
-              { path: '/boards', element: <BoardAnalysisRetiredPage /> },
-              { path: '/boards/:boardId', element: <BoardAnalysisRetiredPage /> },
+              { path: '/boards', element: <Navigate to="/review/industry?hierarchy_level=L1" replace /> },
+              { path: '/boards/:boardId', element: <BoardCompatResolverRoute /> },
             ],
           },
           // research_replay = 竞价分析（CHANGE-20260802-002；[REVIEW-V2-R1] 复盘已改由 market_data 守卫）

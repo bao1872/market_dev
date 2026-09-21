@@ -619,3 +619,260 @@
     grid-template-columns: 1fr;
   }
 }
+
+// ===== [R3C] Explorer 页面 =====
+.explorer-page {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 24px 20px 40px;
+}
+
+.concept-note {
+  font-size: 13px;
+  color: v.$color-muted;
+  margin: 0 0 14px;
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+
+.search-input {
+  flex: 0 1 260px;
+  min-width: 160px;
+  padding: 7px 12px;
+  border: 1px solid v.$color-border;
+  border-radius: 7px;
+  background: v.$color-panel-2;
+  color: v.$color-text;
+  font-size: 13px;
+}
+
+.search-input::placeholder {
+  color: v.$color-text-dim;
+}
+
+.btn-primary {
+  border: 1px solid v.$color-brand;
+  background: v.$color-brand;
+  color: v.$color-bg;
+  border-radius: 7px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-primary:hover {
+  background: v.$color-brand-hover;
+  border-color: v.$color-brand-hover;
+}
+
+.filter-panel {
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.filter-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.filter-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.filter-label {
+  font-size: 12px;
+  color: v.$color-muted;
+}
+
+.filter-input-pair {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.filter-input {
+  width: 64px;
+  padding: 5px 8px;
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  background: v.$color-panel;
+  color: v.$color-text;
+  font-size: 13px;
+  text-align: right;
+}
+
+.filter-sep {
+  color: v.$color-muted;
+}
+
+.filter-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.preset-btn {
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.preset-btn:hover {
+  border-color: v.$color-brand;
+  color: v.$color-brand;
+}
+
+.pagination {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 14px 0;
+}
+
+.page-info {
+  font-size: 13px;
+  color: v.$color-muted;
+  font-variant-numeric: tabular-nums;
+}
+
+.page-btn {
+  padding: 5px 12px;
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
+  border-radius: 7px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.page-btn:hover:not(:disabled) {
+  border-color: v.$color-brand;
+  color: v.$color-text;
+}
+
+.page-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.page-size {
+  padding: 5px 8px;
+  border: 1px solid v.$color-border;
+  border-radius: 7px;
+  background: v.$color-panel-2;
+  color: v.$color-text;
+  font-size: 13px;
+}
+
+.detail-section {
+  margin-top: 16px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  padding: 16px;
+}
+
+.detail-sub {
+  font-size: 12px;
+  color: v.$color-muted;
+  margin-top: 4px;
+}
+
+.compare-link-row {
+  margin-top: 10px;
+}
+
+// 表格：可排序表头 / 操作列 / 选中行
+.th-sort {
+  text-align: right;
+  font-weight: 600;
+  color: v.$color-muted;
+  padding: 8px 10px;
+  border-bottom: 1px solid v.$color-border;
+  white-space: nowrap;
+}
+
+.sort-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  background: none;
+  border: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+}
+
+.sort-btn:hover {
+  color: v.$color-text;
+}
+
+.sort-ind {
+  color: v.$color-brand;
+  font-size: 11px;
+  margin-left: 2px;
+}
+
+.th-op {
+  text-align: center;
+}
+
+.name-cell {
+  text-align: left;
+  font-weight: 600;
+  color: v.$color-text;
+}
+
+.num-cell {
+  text-align: right;
+}
+
+.op-cell {
+  text-align: center;
+}
+
+.row-selected {
+  background: rgba(v.$color-brand, 0.12);
+}
+
+.row-selected:hover {
+  background: rgba(v.$color-brand, 0.18);
+}
+
+.compare-btn {
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
+  border-radius: 6px;
+  padding: 3px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.compare-btn:hover {
+  border-color: v.$color-brand;
+  color: v.$color-brand;
+}
+
