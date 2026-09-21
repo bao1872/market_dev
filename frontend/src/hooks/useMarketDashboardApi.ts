@@ -5,7 +5,13 @@ import {
   getMarketRankings,
   getMarketScopeDetail,
   getMarketCompare,
+  getMarketScopeExplorer,
 } from '@/api/marketDashboard'
+import {
+  buildScopeExplorerParams,
+  scopeExplorerQueryKey,
+  type ScopeExplorerQuery,
+} from '@/features/market-dashboard/scopeExplorerQuery'
 import type { ScopeType, HierarchyLevel } from '@/features/market-dashboard/types'
 
 export const marketDashboardKeys = {
@@ -15,6 +21,8 @@ export const marketDashboardKeys = {
   scope: (boardId: string, days: number) => ['market-dashboard', 'scope', boardId, days] as const,
   compare: (boardIds: string[], days: number) =>
     ['market-dashboard', 'compare', [...boardIds].sort().join(','), days] as const,
+  // [R3A] explorer key 由纯模块统一生成：必须覆盖全部 server-side state。
+  scopeExplorer: (query: ScopeExplorerQuery) => scopeExplorerQueryKey(query),
 }
 
 const STALE = 30 * 1000
@@ -57,6 +65,20 @@ export function useMarketCompare(boardIds: string[], days = 10) {
     queryKey: marketDashboardKeys.compare(boardIds, days),
     queryFn: () => getMarketCompare(boardIds, days),
     enabled: boardIds.length > 0 && boardIds.length <= 20,
+    staleTime: STALE,
+  })
+}
+
+/**
+ * [R3A] Scope Explorer（行业/概念**全集**，filter / sort / pagination 全部 server-side）。
+ *
+ * query key 覆盖全部 server-side state（见 `scopeExplorerQueryKey`），因此换页 / 换排序 /
+ * 换 filter 都不会命中上一份缓存；**不做**任何前端全量 filter/sort/page。
+ */
+export function useMarketScopeExplorer(query: ScopeExplorerQuery) {
+  return useQuery({
+    queryKey: marketDashboardKeys.scopeExplorer(query),
+    queryFn: () => getMarketScopeExplorer(buildScopeExplorerParams(query)),
     staleTime: STALE,
   })
 }

@@ -12,6 +12,8 @@ import type {
   CompareResponse,
   CompareBoard,
   ComparePoint,
+  ScopeExplorerItem,
+  ScopeExplorerResponse,
 } from '@/api/marketDashboard'
 
 export type {
@@ -27,6 +29,8 @@ export type {
   CompareResponse,
   CompareBoard,
   ComparePoint,
+  ScopeExplorerItem,
+  ScopeExplorerResponse,
 }
 
 export type ScopeType = 'industry' | 'concept'

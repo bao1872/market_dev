@@ -1,30 +1,29 @@
 // [MarketDashboard] - 大盘页（/review）
 // 顶部：市场复盘 + 二级 Tab + 最后投影日期；四张卡片（顺序锁死）+ 长周期图 + 短周期图。
+//
+// [R3A] series 颜色身份统一由 shared palette 分配（普通 MA / EW 绝不使用 market.up/down）；
+// 80%/20% 参考线使用 warning/muted 阈值语义色；EW 线更粗。完整 R3B 页面重构不在本轮。
 import { useMemo } from 'react'
 import { useMarketDashboard } from '@/hooks/useMarketDashboardApi'
 import DashboardTabs from './DashboardTabs'
 import DashboardState, { type DashboardStateKind } from './DashboardState'
-import BreadthChart, { type BreadthLineSpec, type ReferenceLine } from './BreadthChart'
+import BreadthChart, { type BreadthLineSpec } from './BreadthChart'
+import { BREADTH_REFERENCE_LINES, EW_LINE_WIDTH } from './chartTheme'
 import { formatBreadth, formatEwIndex, classifyDashboardError } from './dashboardLogic'
 import { extractMarketDashboardError } from '@/api/marketDashboard'
 import type { BreadthPoint } from './types'
 import styles from './dashboard.module.scss'
 
 const LONG_SERIES: BreadthLineSpec[] = [
-  { field: 'ma20', label: 'MA20', color: '#2962ff', scale: 'left' },
-  { field: 'ma50', label: 'MA50', color: '#00b28a', scale: 'left' },
-  { field: 'ma120', label: 'MA120', color: '#f59e0b', scale: 'left' },
-  { field: 'ew_index', label: '等权指数', color: '#111827', scale: 'right' },
+  { field: 'ma20', label: 'MA20', scale: 'left' },
+  { field: 'ma50', label: 'MA50', scale: 'left' },
+  { field: 'ma120', label: 'MA120', scale: 'left' },
+  { field: 'ew_index', label: '等权指数', scale: 'right', lineWidth: EW_LINE_WIDTH },
 ]
 
 const SHORT_SERIES: BreadthLineSpec[] = [
-  { field: 'ma5', label: 'MA5', color: '#2962ff', scale: 'left' },
-  { field: 'ma10', label: 'MA10', color: '#00b28a', scale: 'left' },
-]
-
-const SHORT_REFS: ReferenceLine[] = [
-  { price: 0.8, color: '#ef4444', label: '80%' },
-  { price: 0.2, color: '#22c55e', label: '20%' },
+  { field: 'ma5', label: 'MA5', scale: 'left' },
+  { field: 'ma10', label: 'MA10', scale: 'left' },
 ]
 
 export default function MarketDashboardPage() {
@@ -81,7 +80,12 @@ export default function MarketDashboardPage() {
 
           <section className={styles.chartCard}>
             <div className={styles.chartTitle}>短周期（MA5 / MA10，参考线 80% / 20%）</div>
-            <BreadthChart points={points} series={SHORT_SERIES} referenceLines={SHORT_REFS} height={300} />
+            <BreadthChart
+              points={points}
+              series={SHORT_SERIES}
+              referenceLines={BREADTH_REFERENCE_LINES}
+              height={300}
+            />
           </section>
         </>
       )}

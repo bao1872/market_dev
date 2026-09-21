@@ -158,3 +158,48 @@ export async function getMarketCompare(boardIds: string[], days = 10): Promise<C
   })
   return res.data
 }
+
+// ---------------------------------------------------------------------------
+// [R3A] Scope Explorer（R2 backend：GET /v1/market-dashboard/scopes）
+//
+// DTO 与 backend `ScopeExplorerItem` / `ScopeExplorerResponse` 1:1（snake_case，
+// 不在 API 层转 camelCase）。参数序列化真源 = features/market-dashboard/scopeExplorerQuery.ts，
+// 前端绝不重算 ratio / delta / 排序 / 分页。
+// ---------------------------------------------------------------------------
+export interface ScopeExplorerItem {
+  board_id: string
+  board_name: string
+  board_type: string
+  hierarchy_level: string
+  membership_version: string
+  member_count: number
+  ma5: number | null
+  ma10: number | null
+  ma20: number | null
+  ma50: number | null
+  ma120: number | null
+  previous_ma5: number | null
+  previous_ma10: number | null
+  ma5_delta: number | null
+  ma10_delta: number | null
+}
+
+export interface ScopeExplorerResponse {
+  projection_trade_date: string | null
+  previous_trade_date: string | null
+  total: number
+  page: number
+  page_size: number
+  items: ScopeExplorerItem[]
+}
+
+/**
+ * params 必须由 `buildScopeExplorerParams()` 生成（typed query 的归属方在 feature 层，
+ * API 层只做 transport，避免 api → feature 的反向依赖）。
+ */
+export async function getMarketScopeExplorer(
+  params: Record<string, string | number>,
+): Promise<ScopeExplorerResponse> {
+  const res = await apiClient.get<ScopeExplorerResponse>('/v1/market-dashboard/scopes', { params })
+  return res.data
+}

@@ -1,19 +1,21 @@
-// [MarketDashboard] - lightweight-charts 多线封装（复用，不另写第二套 chart implementation）
-// 关键：
-// - breadth(0~1) 放 left scale，EW index(~100) 放 right scale，不粗暴共用同一数轴；
-// - 80%/20% 仅作参考线（createPriceLine），不加任何解释性判断；
-// - null 断线：buildLineData 输出 whitespace point（保留日期、无 value），绝不变 0。
-import { useEffect, useRef } from 'react'
-import { createChart, LineStyle, type IChartApi, type ISeriesApi } from 'lightweight-charts'
+// [MarketDashboard][R3A] - 多线图表（thin wrapper；图表/交互唯一实现在 MultiLineChart）
+//
+// 关键（由 MultiLineChart 保证）：breadth(0~1) 放 left scale、EW index(~100) 放 right scale；
+// null 断线（whitespace gap，绝不变 0）；legend 可点击 hide/show 且不重建 chart。
+import { useMemo } from 'react'
+import MultiLineChart from './MultiLineChart'
 import { buildLineData } from './dashboardLogic'
+import { REVIEW_TOKENS, type ChartReferenceLine } from './chartTheme'
+import type { LineWidth } from './lineSeriesController'
 import type { BreadthPoint } from './types'
-import styles from './dashboard.module.scss'
 
 export interface BreadthLineSpec {
   field: keyof BreadthPoint
   label: string
-  color: string
+  /** 省略则由 shared palette 分配（普通 MA / EW 绝不使用 market.up / market.down）。 */
+  color?: string
   scale: 'left' | 'right'
+  lineWidth?: LineWidth
 }
 
 export interface ReferenceLine {
@@ -26,81 +28,34 @@ export interface ReferenceLine {
 export interface BreadthChartProps {
   points: BreadthPoint[]
   series: BreadthLineSpec[]
-  referenceLines?: ReferenceLine[]
+  referenceLines?: readonly ReferenceLine[]
   height?: number
 }
 
 export default function BreadthChart({ points, series, referenceLines, height = 320 }: BreadthChartProps) {
-  const containerRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    const hasLeft = series.some((s) => s.scale === 'left')
-    const hasRight = series.some((s) => s.scale === 'right')
-
-    const chart: IChartApi = createChart(el, {
-      autoSize: true,
-      height,
-      layout: {
-        background: { color: '#ffffff' },
-        textColor: '#374151',
-        fontFamily: 'SFMono-Regular, monospace',
-        attributionLogo: false,
-      },
-      grid: {
-        vertLines: { color: '#eef1f4' },
-        horzLines: { color: '#eef1f4' },
-      },
-      leftPriceScale: { visible: hasLeft, borderColor: '#e3e6eb' },
-      rightPriceScale: { visible: hasRight, borderColor: '#e3e6eb' },
-      timeScale: { borderColor: '#e3e6eb', timeVisible: false },
-      crosshair: { mode: 0 },
-    })
-
-    const created: ISeriesApi<'Line'>[] = series.map((spec) => {
-      const s = chart.addLineSeries({
+  const multiSeries = useMemo(
+    () =>
+      series.map((spec) => ({
+        key: String(spec.field),
+        label: spec.label,
         color: spec.color,
-        lineWidth: 2,
-        priceScaleId: spec.scale,
-      })
-      s.setData(buildLineData(points, 'trade_date', spec.field))
-      return s
-    })
-
-    if (referenceLines && referenceLines.length > 0 && created.length > 0) {
-      // 参考线挂在 left scale 的线上（80%/20% 属于 breadth 量纲）；无 left 线时挂首个线。
-      const anchor = created.find((_, i) => series[i].scale === 'left') ?? created[0]
-      referenceLines.forEach((rl) => {
-        anchor.createPriceLine({
-          price: rl.price,
-          color: rl.color ?? '#9aa3af',
-          lineWidth: 1,
-          lineStyle: rl.dashed === false ? LineStyle.Solid : LineStyle.Dashed,
-          axisLabelVisible: true,
-          title: rl.label ?? '',
-        })
-      })
-    }
-
-    return () => {
-      chart.remove()
-    }
-  }, [points, series, referenceLines, height])
-
-  return (
-    <div>
-      <div ref={containerRef} className={styles.chart} />
-      {series.length > 0 && (
-        <div className={styles.legend}>
-          {series.map((s) => (
-            <span key={s.label} className={styles.legendItem}>
-              <span className={styles.legendDot} style={{ background: s.color }} />
-              {s.label}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
+        scale: spec.scale,
+        lineWidth: spec.lineWidth,
+        data: buildLineData(points, 'trade_date', spec.field),
+      })),
+    [points, series],
   )
+
+  const refs = useMemo<ChartReferenceLine[] | undefined>(
+    () =>
+      referenceLines?.map((line) => ({
+        price: line.price,
+        color: line.color ?? REVIEW_TOKENS.text.muted,
+        label: line.label ?? '',
+        dashed: line.dashed,
+      })),
+    [referenceLines],
+  )
+
+  return <MultiLineChart series={multiSeries} referenceLines={refs} height={height} />
 }

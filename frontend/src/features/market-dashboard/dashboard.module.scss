@@ -1,10 +1,16 @@
-// [MarketDashboard] - 复盘仪表盘样式
-// 应用 shell 维持现有深色；Dashboard 主内容用浅色（白 / 浅灰 panel），图表白底，红涨绿跌。
+// [MarketDashboard][R3A] - 复盘视图样式（Review V2 dark shell）
+//
+// 硬约束：颜色一律取 token（styles/variables.scss），不再散落 hard-coded 浅色 hex。
+// 语义边界：
+//   - 品牌绿（$color-brand）= focus / action / 选中，**不是**涨跌；
+//   - market up/down = A 股行情方向（表格涨跌幅），**不得**用作普通 series identity；
+//   - 参考阈值 80%/20% 用 warning / muted。
+@use '../../styles/variables.scss' as v;
 
 .page {
   padding: 20px 24px 40px;
-  background: #f5f6f8;
-  color: #1f2933;
+  background: v.$color-bg;
+  color: v.$color-text;
   min-height: calc(100vh - 58px);
 }
 
@@ -20,20 +26,21 @@
   font-size: 22px;
   font-weight: 700;
   margin: 0;
-  color: #111827;
+  color: v.$color-text;
 }
 
 .proj-date {
   font-size: 13px;
-  color: #6b7280;
+  color: v.$color-muted;
   margin-left: auto;
 }
 
-// ===== 二级 Tab =====
+// ===== 二级 Tab（大盘 / 行业 / 概念 / 对比 N）=====
 .tabs {
   display: inline-flex;
   gap: 4px;
-  background: #e9edf2;
+  background: v.$color-panel;
+  border: 1px solid v.$color-border;
   padding: 4px;
   border-radius: 9px;
 }
@@ -42,20 +49,19 @@
   padding: 6px 14px;
   border-radius: 7px;
   font-size: 13px;
-  color: #4b5563;
+  color: v.$color-muted;
   text-decoration: none;
   transition: 0.15s;
 }
 
 .tab:hover {
-  color: #111827;
+  color: v.$color-text;
 }
 
 .tab-active {
-  background: #ffffff;
-  color: #111827;
+  background: v.$color-panel-3;
+  color: v.$color-brand;
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
 
 // ===== 卡片 =====
@@ -67,35 +73,35 @@
 }
 
 .card {
-  background: #ffffff;
-  border: 1px solid #e3e6eb;
-  border-radius: 12px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
   padding: 16px 18px;
 }
 
 .card-wide {
   // 等权指数占位（视觉权重略高，但保持同列布局）
-  border-color: #d6dbe2;
+  border-color: rgba(v.$color-brand, 0.35);
 }
 
 .card-label {
   font-size: 13px;
-  color: #6b7280;
+  color: v.$color-muted;
   margin-bottom: 8px;
 }
 
 .card-value {
   font-size: 26px;
   font-weight: 700;
-  color: #111827;
+  color: v.$color-text;
   font-variant-numeric: tabular-nums;
 }
 
 // ===== 图表卡片 =====
 .chart-card {
-  background: #ffffff;
-  border: 1px solid #e3e6eb;
-  border-radius: 12px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
   padding: 14px 16px 16px;
   margin-bottom: 16px;
 }
@@ -103,7 +109,7 @@
 .chart-title {
   font-size: 14px;
   font-weight: 600;
-  color: #374151;
+  color: v.$color-text;
   margin-bottom: 10px;
 }
 
@@ -112,19 +118,53 @@
   height: 320px;
 }
 
+// ===== 图例（可点击 hide/show；hidden = muted + eye-off）=====
 .legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 12px;
+  gap: 8px;
   margin-top: 10px;
   font-size: 12px;
-  color: #4b5563;
+  color: v.$color-muted;
 }
 
 .legend-item {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  padding: 2px 6px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: v.$color-muted;
+  font: inherit;
+  cursor: pointer;
+}
+
+.legend-item:hover {
+  color: v.$color-text;
+  background: v.$color-panel-3;
+}
+
+.legend-item:focus-visible {
+  outline: 2px solid v.$color-brand;
+  outline-offset: 1px;
+}
+
+.legend-item-on {
+  color: v.$color-text;
+}
+
+.legend-item-off {
+  color: v.$color-text-dim;
+}
+
+.legend-item-off .legend-label {
+  text-decoration: line-through;
+}
+
+.legend-item-off .legend-dot {
+  opacity: 0.35;
 }
 
 .legend-dot {
@@ -132,6 +172,16 @@
   height: 10px;
   border-radius: 50%;
   display: inline-block;
+  flex: none;
+}
+
+.legend-label {
+  white-space: nowrap;
+}
+
+.legend-icon {
+  flex: none;
+  opacity: 0.75;
 }
 
 // ===== 行业/概念布局 =====
@@ -156,39 +206,41 @@
 
 .level-label {
   font-size: 13px;
-  color: #6b7280;
+  color: v.$color-muted;
 }
 
 .level-btn {
   padding: 5px 12px;
-  border: 1px solid #d6dbe2;
-  background: #ffffff;
-  color: #4b5563;
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
   border-radius: 7px;
   font-size: 13px;
   cursor: pointer;
 }
 
 .level-btn:hover {
-  border-color: #b6bfca;
+  border-color: v.$color-brand;
+  color: v.$color-text;
 }
 
 .level-btn-active {
-  background: #111827;
-  color: #ffffff;
-  border-color: #111827;
+  background: v.$color-brand;
+  color: v.$color-bg;
+  border-color: v.$color-brand;
+  font-weight: 600;
 }
 
 .taxonomy-note {
   font-size: 12px;
-  color: #9aa3af;
+  color: v.$color-text-dim;
 }
 
 // ===== 详情卡片 =====
 .detail-card {
-  background: #ffffff;
-  border: 1px solid #e3e6eb;
-  border-radius: 12px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
   padding: 14px 16px 16px;
 }
 
@@ -203,20 +255,20 @@
 .detail-name {
   font-size: 18px;
   font-weight: 700;
-  color: #111827;
+  color: v.$color-text;
 }
 
 .detail-meta {
   font-size: 12px;
-  color: #9aa3af;
+  color: v.$color-text-dim;
   margin-top: 3px;
 }
 
 // ===== 排行表格 =====
 .rank-table {
-  background: #ffffff;
-  border: 1px solid #e3e6eb;
-  border-radius: 12px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
   padding: 12px 14px 16px;
   margin-bottom: 16px;
   overflow-x: auto;
@@ -225,7 +277,7 @@
 .rank-title {
   font-size: 14px;
   font-weight: 600;
-  color: #374151;
+  color: v.$color-text;
   margin-bottom: 8px;
 }
 
@@ -238,9 +290,9 @@
 .table th {
   text-align: right;
   font-weight: 600;
-  color: #6b7280;
+  color: v.$color-muted;
   padding: 8px 10px;
-  border-bottom: 1px solid #eef1f4;
+  border-bottom: 1px solid v.$color-border;
   white-space: nowrap;
 }
 
@@ -252,9 +304,9 @@
 .table td {
   text-align: right;
   padding: 8px 10px;
-  border-bottom: 1px solid #f3f5f8;
+  border-bottom: 1px solid v.$color-border-soft;
   font-variant-numeric: tabular-nums;
-  color: #374151;
+  color: v.$color-text;
 }
 
 .table tbody tr {
@@ -262,38 +314,39 @@
 }
 
 .table tbody tr:hover {
-  background: #f7f9fb;
+  background: v.$color-panel-3;
 }
 
 .selected {
-  background: #eef4ff;
+  background: rgba(v.$color-brand, 0.12);
 }
 
 .selected:hover {
-  background: #e6efff;
+  background: rgba(v.$color-brand, 0.18);
 }
 
 .board-name {
   font-weight: 600;
-  color: #111827;
+  color: v.$color-text;
 }
 
+// A 股语义：正=红(up) / 负=绿(down) / 0=null=中性(flat)。仅用于行情方向，不用于 series identity。
 .up {
-  color: #d8413f;
+  color: v.$color-up;
 }
 
 .down {
-  color: #00a861;
+  color: v.$color-down;
 }
 
 .flat {
-  color: #9aa3af;
+  color: v.$color-text-dim;
 }
 
 .add-btn {
-  border: 1px solid #d6dbe2;
-  background: #ffffff;
-  color: #4b5563;
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
   border-radius: 6px;
   padding: 3px 8px;
   font-size: 12px;
@@ -301,15 +354,15 @@
 }
 
 .add-btn:hover {
-  border-color: #2962ff;
-  color: #2962ff;
+  border-color: v.$color-brand;
+  color: v.$color-brand;
 }
 
 // ===== 比较区 =====
 .compare-section {
-  background: #ffffff;
-  border: 1px solid #e3e6eb;
-  border-radius: 12px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
   padding: 14px 16px 16px;
 }
 
@@ -332,9 +385,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: #eef4ff;
-  border: 1px solid #cfe0ff;
-  color: #1e3a8a;
+  background: rgba(v.$color-brand, 0.12);
+  border: 1px solid rgba(v.$color-brand, 0.35);
+  color: v.$color-brand;
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 12px;
@@ -343,7 +396,7 @@
 .chip-remove {
   border: none;
   background: transparent;
-  color: #1e3a8a;
+  color: v.$color-brand;
   font-size: 14px;
   line-height: 1;
   cursor: pointer;
@@ -351,30 +404,32 @@
 }
 
 .compare-msg {
-  color: #d8413f;
+  color: v.$color-warning;
   font-size: 13px;
   margin-bottom: 10px;
 }
 
-// ===== 按钮 =====
+// ===== 按钮（品牌绿 = action）=====
 .btn {
-  border: 1px solid #cbd2db;
-  background: #111827;
-  color: #ffffff;
+  border: 1px solid v.$color-brand;
+  background: v.$color-brand;
+  color: v.$color-bg;
   border-radius: 7px;
   padding: 7px 14px;
   font-size: 13px;
+  font-weight: 600;
   cursor: pointer;
 }
 
 .btn:hover {
-  background: #2b3645;
+  background: v.$color-brand-hover;
+  border-color: v.$color-brand-hover;
 }
 
 .btn-ghost {
-  border: 1px solid #d6dbe2;
-  background: #ffffff;
-  color: #4b5563;
+  border: 1px solid v.$color-border;
+  background: transparent;
+  color: v.$color-muted;
   border-radius: 7px;
   padding: 6px 12px;
   font-size: 13px;
@@ -382,29 +437,30 @@
 }
 
 .btn-ghost:hover {
-  border-color: #b6bfca;
+  border-color: v.$color-brand;
+  color: v.$color-brand;
 }
 
 // ===== 状态盒 =====
 .state-box {
-  background: #ffffff;
-  border: 1px solid #e3e6eb;
-  border-radius: 12px;
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
   padding: 40px 24px;
   text-align: center;
-  color: #4b5563;
+  color: v.$color-muted;
 }
 
 .state-title {
   font-size: 16px;
   font-weight: 600;
-  color: #111827;
+  color: v.$color-text;
   margin-bottom: 6px;
 }
 
 .state-desc {
   font-size: 13px;
-  color: #6b7280;
+  color: v.$color-muted;
   margin-bottom: 14px;
 }
 

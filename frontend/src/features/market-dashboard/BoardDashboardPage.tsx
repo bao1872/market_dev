@@ -1,50 +1,48 @@
-// [MarketDashboard] - 行业/概念板块页（共用主体，scopeType 区分）
+// [MarketDashboard] - 行业/概念页（共用主体，scopeType 区分）
 // industry：显示 L1/L2/L3 selector；concept：不显示层级 selector、不出现“申万”字样。
-// 布局：左/上 = 排行榜，右/下 = 选中板块详情，底部 = 重点板块比较（最多 20，默认 10 交易日）。
+// 布局：左/上 = 排行榜，右/下 = 选中板块详情，底部 = 重点板块比较。
+//
+// [R3A] 比较选择改为**共享比较篮**（Zustand）：跨 /review/industry、/review/concept、
+// /review/compare 导航保持（此前是本页 useState，导航即丢）。完整 R3C explorer
+// （server-side list/filter/sort/page + URL state）不在本轮。
 import { useMemo, useState } from 'react'
 import { useMarketRankings, useMarketScopeDetail, useMarketCompare } from '@/hooks/useMarketDashboardApi'
+import { useCompareBasketStore } from '@/store/compareBasket'
 import DashboardTabs from './DashboardTabs'
 import DashboardState, { type DashboardStateKind } from './DashboardState'
 import BreadthChart, { type BreadthLineSpec } from './BreadthChart'
 import CompareChart from './CompareChart'
 import RankingTable from './RankingTable'
-import {
-  classifyDashboardError,
-  validateCompareSelection,
-  MAX_COMPARE_BOARDS,
-} from './dashboardLogic'
+import { BREADTH_REFERENCE_LINES, EW_LINE_WIDTH } from './chartTheme'
+import { classifyDashboardError } from './dashboardLogic'
 import { extractMarketDashboardError } from '@/api/marketDashboard'
 import type { BreadthPoint, HierarchyLevel, ScopeType } from './types'
 import styles from './dashboard.module.scss'
 
 const DETAIL_LONG: BreadthLineSpec[] = [
-  { field: 'ma20', label: 'MA20', color: '#2962ff', scale: 'left' },
-  { field: 'ma50', label: 'MA50', color: '#00b28a', scale: 'left' },
-  { field: 'ma120', label: 'MA120', color: '#f59e0b', scale: 'left' },
-  { field: 'ew_index', label: '等权指数', color: '#111827', scale: 'right' },
+  { field: 'ma20', label: 'MA20', scale: 'left' },
+  { field: 'ma50', label: 'MA50', scale: 'left' },
+  { field: 'ma120', label: 'MA120', scale: 'left' },
+  { field: 'ew_index', label: '等权指数', scale: 'right', lineWidth: EW_LINE_WIDTH },
 ]
 const DETAIL_SHORT: BreadthLineSpec[] = [
-  { field: 'ma5', label: 'MA5', color: '#2962ff', scale: 'left' },
-  { field: 'ma10', label: 'MA10', color: '#00b28a', scale: 'left' },
-]
-const DETAIL_REFS = [
-  { price: 0.8, color: '#ef4444', label: '80%' },
-  { price: 0.2, color: '#22c55e', label: '20%' },
+  { field: 'ma5', label: 'MA5', scale: 'left' },
+  { field: 'ma10', label: 'MA10', scale: 'left' },
 ]
 
 const LEVELS: HierarchyLevel[] = ['L1', 'L2', 'L3']
-
-interface CompareItem {
-  id: string
-  name: string
-}
 
 export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType }) {
   const isIndustry = scopeType === 'industry'
   const [level, setLevel] = useState<HierarchyLevel>('L1')
   const [selectedId, setSelectedId] = useState<string | null>(null)
-  const [compare, setCompare] = useState<CompareItem[]>([])
   const [compareMsg, setCompareMsg] = useState<string | null>(null)
+
+  // [R3A] 共享比较篮（跨页保持；重复 add no-op，硬上限 20）。
+  const compare = useCompareBasketStore((state) => state.items)
+  const addToBasket = useCompareBasketStore((state) => state.add)
+  const removeFromBasket = useCompareBasketStore((state) => state.remove)
+  const clearBasket = useCompareBasketStore((state) => state.clear)
 
   const rankings = useMarketRankings(scopeType, isIndustry ? level : null)
   const detail = useMarketScopeDetail(selectedId, 250)
@@ -55,19 +53,13 @@ export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType
   const detailErr = detail.isError ? classifyDashboardError(extractMarketDashboardError(detail.error)) : null
   const compareErr = compareQuery.isError ? classifyDashboardError(extractMarketDashboardError(compareQuery.error)) : null
 
-  const addCompare = (item: CompareItem) => {
+  const addCompare = (item: { id: string; name: string }) => {
     setCompareMsg(null)
-    if (compare.some((c) => c.id === item.id)) return
-    const check = validateCompareSelection([...compare.map((c) => c.id), item.id])
-    if (!check.ok) {
-      setCompareMsg(check.message ?? `最多比较 ${MAX_COMPARE_BOARDS} 个板块`)
-      return
-    }
-    setCompare((prev) => [...prev, item])
+    const result = addToBasket({ id: item.id, name: item.name, type: scopeType })
+    if (result === 'full') setCompareMsg('比较篮已满（最多 20 个板块）')
   }
-  const removeCompare = (id: string) => setCompare((prev) => prev.filter((c) => c.id !== id))
   const clearCompare = () => {
-    setCompare([])
+    clearBasket()
     setCompareMsg(null)
   }
 
@@ -83,7 +75,7 @@ export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType
   return (
     <div className={styles.page}>
       <div className={styles.header}>
-        <h1 className={styles.pageTitle}>{isIndustry ? '行业板块' : '概念板块'}</h1>
+        <h1 className={styles.pageTitle}>{isIndustry ? '行业' : '概念'}</h1>
         <DashboardTabs />
         {isIndustry && (
           <div className={styles.levelSelector}>
@@ -167,7 +159,11 @@ export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType
                   </div>
                   <div className={styles.detailMeta}>投影日期：{detail.data.projection_trade_date ?? '—'}</div>
                 </div>
-                <button type="button" className={styles.btn} onClick={() => addCompare({ id: meta.board_id, name: meta.name })}>
+                <button
+                  type="button"
+                  className={styles.btn}
+                  onClick={() => addCompare({ id: meta.board_id, name: meta.name })}
+                >
                   加入比较
                 </button>
               </div>
@@ -181,7 +177,12 @@ export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType
               </section>
               <section className={styles.chartCard}>
                 <div className={styles.chartTitle}>短周期（MA5 / MA10，参考线 80% / 20%）</div>
-                <BreadthChart points={detailPoints} series={DETAIL_SHORT} referenceLines={DETAIL_REFS} height={260} />
+                <BreadthChart
+                  points={detailPoints}
+                  series={DETAIL_SHORT}
+                  referenceLines={BREADTH_REFERENCE_LINES}
+                  height={260}
+                />
               </section>
             </div>
           )}
@@ -191,7 +192,7 @@ export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType
       {/* 底部：重点板块比较 */}
       <section className={styles.compareSection}>
         <div className={styles.compareHead}>
-          <div className={styles.chartTitle}>重点板块比较（最多 {MAX_COMPARE_BOARDS} 个，默认 10 交易日）</div>
+          <div className={styles.chartTitle}>重点板块比较（最多 20 个，默认 10 交易日）</div>
           {compare.length > 0 && (
             <button type="button" className={styles.btnGhost} onClick={clearCompare}>
               清空
@@ -206,7 +207,7 @@ export default function BoardDashboardPage({ scopeType }: { scopeType: ScopeType
                 <button
                   type="button"
                   className={styles.chipRemove}
-                  onClick={() => removeCompare(c.id)}
+                  onClick={() => removeFromBasket(c.id)}
                   aria-label="移除"
                 >
                   ×
