@@ -1,24 +1,27 @@
-"""竞价锚点生成服务 - 从已发布的 stock_core snapshot 和 chip_consensus 提取结构/筹码锚点。
+"""竞价锚点生成服务 - 从已发布的 stock_core snapshot 提取结构锚点（筹码锚点已退役）。
 
 输入：
 - factor_publications where kind='stock_core' and trade_date=当日 → source_core_run_id
-- stock_chip_consensus_snapshots where trade_date=当日 and core_run_id=source_core_run_id
-  且 status='succeeded' → source_chip_run_id（复用 core_run_id 作为 chip 批次标识）
+
+[PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 盘后持久化 chip 快照链已退役：
+- 不再读取 stock_chip_consensus_snapshots（``_load_chip_snapshot_map`` 已删除）；
+- ``_check_chip_consensus_completed`` 恒定 "unavailable" ⇒ ``source_chip_run_id`` 恒为 None；
+- 结果：筹码锚点（anchor_type=chip）与筹码参与构成 composite 锚点**不再生产**，
+  snapshot status 落为 structure_only。这是预期行为，不是降级故障。
 
 输出：
 - AuctionAnchorSnapshot（status=succeeded/structure_only/failed）
-- AuctionAnchorItem（anchor_type=structure/chip/composite）
+- AuctionAnchorItem（anchor_type=structure/composite；chip 已退役）
 - AuctionAnchorPublication（发布指针）
 
 锚点来源：
 - 结构锚点：从 summary_payload.first_pyramid.structure 中提取 BOS/CHoCH/OB/trailing
-- 筹码锚点：从 chip_payload.chip.continuousFactors 中提取 POC/VAH/VAL，chip.events 提取 cross
-- 复合锚点：近距离结构+筹码合并
+- 复合锚点：近距离的结构锚点合并（原「结构+筹码」合并，因 chip 退役退化为结构内部合并）
+- （已退役）筹码锚点：原从 chip_payload.chip.continuousFactors 提取 POC/VAH/VAL + chip.events
 
 约束：
 - 旧/新 source run 或算法版本不一致时禁止发布
 - 单股活跃锚点上限 MAX_ACTIVE_ANCHORS_PER_INSTRUMENT（20）
-- 不得用旧日筹码冒充当日（chip core_run_id 必须等于当日 source_core_run_id）
 - 所有 Decimal 字段保留精度
 - 结构锚点字段缺失时跳过该锚点并记录 reason_codes
 
@@ -487,6 +490,12 @@ def _extract_chip_anchors(
 ) -> list[AuctionAnchorItem]:
     """从 StockChipConsensusSnapshot 中提取筹码锚点。
 
+    ⚠️ [PANJI-INTRADAY-DIRECT-SOURCE] **生产链已不可达**：盘后 chip 快照已退役，
+    ``generate_auction_anchors`` 的 ``chip_map`` 恒为空，故本函数在生产路径上永不被调用。
+    保留原因：它是「chip_payload → 筹码锚点」的纯提取逻辑（不读 DB），
+    仍被已冻结的历史测试与审计工具引用；删除会无谓扩大爆炸半径。
+    禁止在新增生产代码中调用（会重新引入 legacy chip 消费）。
+
     数据源：chip_payload.chip.continuousFactors（POC/VAH/VAL）+ chip_payload.chip.events（cross）。
 
     [P0-6/P0-7 修复 2026-07-31]
@@ -857,7 +866,31 @@ async def _check_chip_consensus_completed(
     trade_date: date,
     core_run_id: uuid.UUID,
 ) -> str:
-    """判断当日当前 core 的 chip consensus 完成度，返回三态字符串。
+    """[PANJI-INTRADAY-DIRECT-SOURCE] 盘后 chip 快照生产链已退役：**恒定 unavailable**。
+
+    盘后 First Pyramid Chip Consensus 已停止生产（见 after_close_orchestrator
+    ``[CHIP-RETIRE]``），因此不存在「当日 chip 已完成」这一状态，筹码锚点不再参与
+    竞价锚点生产。若继续按 job metadata 判 full/partial，历史交易日仍会被判为
+    full 并进一步去读 ``stock_chip_consensus_snapshots`` —— 那正是本轮要切断的
+    「把旧 chip 当成当前筹码数据」的路径。
+
+    返回 "unavailable" 的后果：``source_chip_run_id=None``、``chip_count=0``，
+    snapshot 落为 ``structure_only``。结构锚点与复合锚点（基于结构）不受影响。
+
+    旧实现（读同日同 core 的 chip SchedulerJobRun 三态判定）完整保留为
+    ``_check_legacy_chip_consensus_completed``，仅供审计/历史工具使用。
+    """
+    return "unavailable"
+
+
+async def _check_legacy_chip_consensus_completed(
+    session: AsyncSession,
+    trade_date: date,
+    core_run_id: uuid.UUID,
+) -> str:
+    """[LEGACY / 审计专用] 退役前的 chip 完成度判定（原 _check_chip_consensus_completed）。
+
+    判断当日当前 core 的 chip consensus 完成度，返回三态字符串。
 
     返回：
     - "full"：job.status == succeeded 且 metadata.chip_status == succeeded
@@ -871,6 +904,8 @@ async def _check_chip_consensus_completed(
     不再使用“任意 1 条 chip snapshot 成功即视为完成”的弱判据；改为读取
     同日同 core 的 chip SchedulerJobRun 元数据（chip_status / succeeded_count /
     expected_count），与正式盘后链产物对齐。
+
+    ⚠️ 本函数会读取 chip job 元数据。生产读链禁止调用（见上）。
     """
     from app.services.after_close_chip_consensus_service import (
         get_chip_consensus_job_for_date,
@@ -905,24 +940,6 @@ async def _check_chip_consensus_completed(
     if job_status == "succeeded" and (chip_status == "partial" or not succeeded_full):
         return "partial"
     return "unavailable"
-
-
-async def _load_chip_snapshot_map(
-    session: AsyncSession,
-    trade_date: date,
-    core_run_id: uuid.UUID,
-) -> dict[uuid.UUID, StockChipConsensusSnapshot]:
-    """加载当日所有 succeeded chip snapshot，按 instrument_id 索引。"""
-    stmt = (
-        select(StockChipConsensusSnapshot)
-        .where(
-            StockChipConsensusSnapshot.trade_date == trade_date,
-            StockChipConsensusSnapshot.core_run_id == core_run_id,
-            StockChipConsensusSnapshot.status == "succeeded",
-        )
-    )
-    result = await session.execute(stmt)
-    return {row.instrument_id: row for row in result.scalars().all()}
 
 
 async def _load_core_snapshots(
@@ -1041,9 +1058,11 @@ async def generate_auction_anchors(
     try:
         # 4. 加载数据
         core_snapshots = await _load_core_snapshots(db, trade_date, source_core_run_id)
+        # [PANJI-INTRADAY-DIRECT-SOURCE] 盘后 chip 快照链已退役：不再加载
+        # stock_chip_consensus_snapshots（_load_chip_snapshot_map 已删除），
+        # 因此 chip_map 恒为空、chip_items 恒为空、chip_count 恒为 0，
+        # snapshot 落为 structure_only。结构/复合锚点逻辑完全不变。
         chip_map: dict[uuid.UUID, StockChipConsensusSnapshot] = {}
-        if chip_completed in ("full", "partial"):
-            chip_map = await _load_chip_snapshot_map(db, trade_date, source_core_run_id)
 
         # 5. 遍历生成锚点
         all_items: list[AuctionAnchorItem] = []

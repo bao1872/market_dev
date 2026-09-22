@@ -192,7 +192,16 @@ def mock_node_input_provider(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     from app.services.node_cluster_input_provider import NodeClusterInput, NodeClusterInputProvider
 
-    async def _mock_get_inputs(session, instrument_id, *, adjustment_as_of=None, end_date=None):
+    async def _mock_get_inputs(
+        session, instrument_id, *,
+        adjustment_as_of=None, end_date=None, source_mode=None,
+        adjustment_context=None,
+    ):
+        """[PANJI-INTRADAY-DIRECT-SOURCE] 接受显式 source_mode（默认 LIVE_DIRECT）。
+
+        本文件 spy 的是展示周期的 MDAS 调用；Node 输入来源由独立测试
+        tests/test_intraday_direct_source_policy.py 覆盖，此处只需透传不炸。
+        """
         return NodeClusterInput(
             daily_bars=_build_bars("1d", length=250),
             bars_15m=_build_bars("15m", length=4000),

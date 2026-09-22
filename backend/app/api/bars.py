@@ -46,19 +46,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.constants.indicator_contract import INDICATOR_BARS
 from app.core.deps import get_db, require_roles
-from app.services.access_control_service import AccessContext, require_instrument_market_access
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_redis
 from app.core.route_utils import get_route_paths
 from app.core.time import now_shanghai
 from app.models.bar import Bar15Min, Bar60Min, BarDaily, BarMinute, BarMonthly, BarWeekly
 from app.schemas.bar import BarListResponse, BarResponse, QuoteResponse
+from app.services.access_control_service import AccessContext, require_instrument_market_access
 from app.services.calendar_service import is_trading_day_async
 from app.services.indicator_display_frame import (
     DisplayWindowSpec,
     build_display_frame,
 )
-from app.services.market_data_aggregation_service import MarketDataAggregationService
+from app.services.market_data_aggregation_service import (
+    MarketDataAggregationService,
+    resolve_display_source_policy,
+)
 from app.services.market_status_service import (
     MARKET_SESSION_AFTERNOON,
     MARKET_SESSION_MORNING,
@@ -490,6 +493,9 @@ async def get_bars(
     start_ms = time.time()
 
     # [行情聚合 SSOT] - 统一调用 MarketDataAggregationService 获取行情与诊断字段
+    # [PANJI-INTRADAY-DIRECT-SOURCE] 展示读链的 source policy 与 chart-snapshot 同源
+    # （MDAS `resolve_display_source_policy` 唯一真源）：15m/1h = provider_direct，
+    # 1d/1w/1mo/1m = hybrid。禁止在此另写一份周期判定。
     service = MarketDataAggregationService()
     try:
         result = await service.get_bars(
@@ -502,6 +508,7 @@ async def get_bars(
             start_date=start_date,
             end_date=end_date,
             adjustment_as_of=adjustment_as_of,
+            source_policy=resolve_display_source_policy(timeframe),
         )
     except HTTPException:
         raise

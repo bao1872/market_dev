@@ -1019,7 +1019,7 @@ export interface FirstPyramidSnapshot {
 }
 
 /**
- * [QM-63 2026-08-04] chipStatus.state 完整七态（与后端
+ * [QM-63 2026-08-04] chipStatus.state 完整状态集（与后端
  * `app/schemas/first_pyramid.py::CHIP_STATUS_STATES` 严格一致）。
  *
  * - pending      : chip job 已入队/运行中，尚未产出
@@ -1029,6 +1029,12 @@ export interface FirstPyramidSnapshot {
  * - interrupted  : chip job 被取消/Worker 接管而未完成
  * - stale        : chip 结果存在但落后于 core run（旧残留）
  * - partial      : chip 部分维度可用，coverage < 1
+ * - retired      : [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 盘后持久化
+ *                  First Pyramid Chip Consensus 生产链已退役：不再生产，也不再
+ *                  作为「当前筹码数据」读取。必须与 pending 严格区分 ——
+ *                  pending 表示「以后还会算」，retired 表示「这条生产链已不存在」。
+ *                  注意：个股页的「筹码共识价 / Node Cluster」是实时按需计算的
+ *                  成交量分布，仍然有效，与本状态无关。
  */
 export type ChipStatusState =
   | 'pending'
@@ -1038,6 +1044,7 @@ export type ChipStatusState =
   | 'interrupted'
   | 'stale'
   | 'partial'
+  | 'retired'
 
 /** [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010 + QM-63] 筹码共识结构化状态 */
 export interface ChipStatus {

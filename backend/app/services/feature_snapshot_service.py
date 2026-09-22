@@ -87,7 +87,10 @@ from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
 )
-from app.services.node_cluster_input_provider import NodeClusterInputProvider
+from app.services.node_cluster_input_provider import (
+    NodeClusterInputProvider,
+    NodeClusterSourceMode,
+)
 
 
 class PublishedSnapshotRunExistsError(Exception):
@@ -438,11 +441,17 @@ async def compute_feature_snapshot_for_date(
     # - degraded: history_exhausted=true 且真实历史不足，允许降级计算
     # - unavailable: INPUT_CONTRACT_VIOLATION / INSUFFICIENT_DAILY_BARS / MISSING_15M_BARS
     #   → 禁止生成看似正常的 Profile
+    # [PANJI-INTRADAY-DIRECT-SOURCE] 历史/PIT 链固定 HISTORICAL_DB：
+    # 这是「历史快照重建」，Node 15m 必须走 db_only —— PIT **绝对禁止访问网络**。
+    # 若走 provider_direct，provider 只能给「最近 4000 根」，会把 trade_date 之后的
+    # 未来 15m bar 混进历史时点的 Node 结果（未来数据污染）。
+    # daily 仍为 HYBRID（区间读取形式，无此泄漏形态），与 mode 映射一致。
     node_input = await NodeClusterInputProvider.get_inputs(
         session,
         instrument_id,
         adjustment_as_of=trade_date,
         end_date=trade_date,
+        source_mode=NodeClusterSourceMode.HISTORICAL_DB,
     )
     node_cluster_profile: NodeClusterProfileResult | None = None
     node_availability: str = node_input.availability

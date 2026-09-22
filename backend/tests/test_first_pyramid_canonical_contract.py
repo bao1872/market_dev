@@ -22,6 +22,8 @@ from __future__ import annotations
 import pytest
 
 from app.schemas.first_pyramid import (
+    CHIP_STATUS_NOT_READY_STATES,
+    CHIP_STATUS_REASON_CODES,
     CHIP_STATUS_STATES,
     FIELD_AVAILABILITY_REASONS,
     PYRAMID_DIRECTIONS,
@@ -263,21 +265,29 @@ def test_producer_reads_legacy_extra_level_as_fallback() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 合同 9：chip 七态
+# 合同 9：chip 生命周期状态集合
 # ---------------------------------------------------------------------------
 
 
-def test_chip_seven_states_defined() -> None:
-    """[合同 9] chip 生命周期必须完整七态。"""
+def test_chip_state_set_is_complete() -> None:
+    """[合同 9] chip 生命周期状态必须完整。
+
+    原七态（QM-63）：pending/ready/unavailable/failed/interrupted/stale/partial。
+    [PANJI-INTRADAY-DIRECT-SOURCE] 新增 ``retired``：盘后持久化 chip 快照生产链
+    已退役。retired 与 pending 必须区分——pending 表示「以后还会算」，
+    retired 表示「这条生产链已经不在了」；继续返回 pending 会误导用户。
+    """
     assert CHIP_STATUS_STATES == {
         "pending", "ready", "unavailable", "failed",
-        "interrupted", "stale", "partial",
-    }, f"chip 七态不完整: {sorted(CHIP_STATUS_STATES)}"
+        "interrupted", "stale", "partial", "retired",
+    }, f"chip 状态集合不完整: {sorted(CHIP_STATUS_STATES)}"
+    assert "retired" in CHIP_STATUS_NOT_READY_STATES
+    assert "CHIP_PIPELINE_RETIRED" in CHIP_STATUS_REASON_CODES
 
 
 @pytest.mark.parametrize("state", sorted(CHIP_STATUS_STATES))
 def test_chip_status_accepts_each_state(state: str) -> None:
-    """七态都必须能构造（非 ready 需 reasonCode）。"""
+    """每个状态都必须能构造（非 ready 需 reasonCode）。"""
     status = ChipStatus(
         state=state,
         reasonCode=None if state == "ready" else "CHIP_JOB_PENDING",

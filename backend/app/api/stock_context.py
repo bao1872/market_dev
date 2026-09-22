@@ -752,11 +752,15 @@ async def get_first_pyramid(
     - 前三维必选，chip_consensus 可选（无有效峰时为 null）
     - 同一 OHLCV + 参数 → 同一 inputHash/parameterHash（跨入口一致性）
 
-    [P0-3 修复 2026-07-29 三.4] chip 字段从 stock_chip_consensus_snapshots 表读取：
+    [P0-3 修复 2026-07-29 三.4] chip 字段曾从 stock_chip_consensus_snapshots 表读取：
     - 严格五元组匹配：instrument_id, trade_date=run.trade_date,
       core_run_id=run.id, algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
       status=succeeded
     - 不再读 review-core 的 chipConsensus（与列表 API 同口径）
+
+    [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] **该读取已退役**：盘后持久化 chip 快照
+    不再生产，因此这里不再读 stock_chip_consensus_snapshots，chipConsensus 恒为 null、
+    chipStatus 恒定 retired / CHIP_PIPELINE_RETIRED。
 
     [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT Core run 解析走 formal Review
     血统（见 ``_resolve_current_core_run``）：
@@ -769,8 +773,7 @@ async def get_first_pyramid(
     """
     from fastapi import HTTPException, status
 
-    from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
-    from app.services.chip_status_resolver import resolve_chip_status
+    from app.services.chip_status_resolver import build_retired_chip_status
     from app.services.first_pyramid_service import (
         compute_first_pyramid_snapshot,
         serialize_first_pyramid_for_instrument,
@@ -798,52 +801,23 @@ async def get_first_pyramid(
                 else None
             )
             if isinstance(stored_fp, dict) and stored_fp.get("inputHash"):
-                # [CHANGE-20260730-010] 使用共享 resolve_chip_status：
-                # - 严格五元组匹配（instrument_id + trade_date + core_run_id +
-                #   algorithm_version）扫描所有 status 记录
-                # - 与 /market/stocks 列表 API 完全同口径
-                # - 000021 深科技场景：返回 M15_BARS_INSUFFICIENT + actualBars=354
-                chip_status = await resolve_chip_status(
-                    session=db,
-                    instrument_id=instrument.id,
-                    trade_date=run.trade_date,
-                    snapshot_run_id=run.id,
-                    algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION,
-                )
-
-                # 仅当 chip_status.state == "ready" 时填充 chipConsensus
-                # 否则 chipConsensus=null，前端读取 chipStatus 显示原因
-                if chip_status.state == "ready":
-                    # 重新查询 succeeded 的 chip_payload 用于 chipConsensus
-                    from app.models.stock_chip_consensus_snapshot import (
-                        StockChipConsensusSnapshot,
-                    )
-
-                    chip_stmt = (
-                        select(StockChipConsensusSnapshot)
-                        .where(
-                            StockChipConsensusSnapshot.instrument_id == instrument.id,
-                            StockChipConsensusSnapshot.trade_date == run.trade_date,
-                            StockChipConsensusSnapshot.core_run_id == run.id,
-                            StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
-                            StockChipConsensusSnapshot.status == "succeeded",
-                        )
-                        .order_by(StockChipConsensusSnapshot.created_at.desc())
-                        .limit(1)
-                    )
-                    chip_result = await db.execute(chip_stmt)
-                    chip_row = chip_result.scalar_one_or_none()
-                    if chip_row is not None and chip_row.chip_payload:
-                        chip_dim = chip_row.chip_payload.get("chip")
-                        stored_fp["chipConsensus"] = chip_dim if isinstance(chip_dim, dict) else None
-                    else:
-                        stored_fp["chipConsensus"] = None
-                else:
-                    # chip 不可用：清空 chipConsensus，前端读 chipStatus 显示原因
-                    stored_fp["chipConsensus"] = None
-
+                # [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 盘后持久化 chip 快照已退役：
+                # 生产读链**不再读取** stock_chip_consensus_snapshots。
+                # 退役前这里用共享 resolve_chip_status 做严格五元组查询，并在
+                # state=="ready" 时把 chip_payload.chip 合并进 chipConsensus；
+                # 现在这两步都不做 —— 否则库里的历史行会被当成「当前筹码数据」展示。
+                #
+                # 与 Node Cluster 严格区分：个股页的「筹码共识价 / Node Cluster」
+                # 是**实时按需计算**的成交量分布（250 daily + 4000 15m），仍然有效；
+                # 退役的只是**盘后持久化的 First Pyramid Chip Consensus 快照**。
+                #
+                # chipConsensus 恒为 null，chipStatus 恒定 retired；前端读 chipStatus
+                # 展示原因，不会误以为「任务在排队」（retired ≠ pending）。
+                stored_fp["chipConsensus"] = None
                 # [CHANGE-20260730-010] 注入 chipStatus（camelCase，与列表 API 一致）
-                stored_fp["chipStatus"] = chip_status.model_dump(by_alias=False)
+                stored_fp["chipStatus"] = build_retired_chip_status().model_dump(
+                    by_alias=False
+                )
                 # [P0-symbol合同 2026-07-30] 统一使用 adapter 校验/覆盖公共 symbol
                 # 旧已发布快照可能含 UUID；新快照已修复。adapter deep copy 不修改 ORM JSON
                 return serialize_first_pyramid_for_instrument(stored_fp, symbol)

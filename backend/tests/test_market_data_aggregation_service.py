@@ -878,7 +878,9 @@ async def test_get_bars_daily_path_coverage_reason(monkeypatch: pytest.MonkeyPat
     assert result.backfill_rounds == 0
     assert result.coverage_reason == "daily_no_backfill"
     # [CHANGE-20260730-P0] v4→v5：修复 latest_daily_quote 序列化遗漏
-    assert result.market_data_contract_version == "v5"
+    # [PANJI-INTRADAY-DIRECT-SOURCE] v5→v6：新增 MarketDataSourcePolicy，
+    # cache_key 加入 source_policy（hybrid/provider_direct/db_only 必须互不命中）。
+    assert result.market_data_contract_version == "v6"
 
 
 async def test_get_bars_intraday_backfill_met(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1003,7 +1005,8 @@ async def test_serialize_deserialize_backfill_fields(monkeypatch: pytest.MonkeyP
     assert restored.backfill_rounds == result.backfill_rounds
     assert restored.coverage_reason == result.coverage_reason
     # [CHANGE-20260730-P0] v4→v5：修复 latest_daily_quote 序列化遗漏
-    assert restored.market_data_contract_version == "v5"
+    # [PANJI-INTRADAY-DIRECT-SOURCE] v5→v6：新增 MarketDataSourcePolicy
+    assert restored.market_data_contract_version == "v6"
     # [CHANGE-20260730-P0] 验证 latest_daily_quote 完整保留（v5 契约核心修复点）
     assert restored.latest_daily_quote == result.latest_daily_quote, (
         "latest_daily_quote 在 Redis 序列化/反序列化后必须完整保留"

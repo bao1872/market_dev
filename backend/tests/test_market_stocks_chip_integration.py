@@ -8,6 +8,7 @@
 5. computed is_stale
 6. matched chip POC
 7. 同股票旧 trade_date/旧 core_run/旧 algorithm_version 不得匹配
+   （[PANJI-INTRADAY-DIRECT-SOURCE] 退役后此结论由「不读该表」更强地保证；保留断言）
 8. 列表返回 chip 字段与排序字段一致
 9. between、多条件、NULLS LAST、跨页 symbol 稳定
 10. 非法字段 422
@@ -455,24 +456,38 @@ class TestMarketStocksChipIntegration:
         # 所有有 snapshot 的股票都匹配
         assert data["total"] == 3
 
-    async def test_boolean_chip_available_filter(
+    async def test_chip_available_always_false_despite_matching_chip_row(
         self, chip_test_setup,
     ) -> None:
-        """场景4: boolean fp_chip_available filter（eq true）。"""
+        """场景4（[PANJI-INTRADAY-DIRECT-SOURCE] 已退休）：fp_chip_available 恒 False。
+
+        关键点：inst1 拥有**完全匹配**（trade_date + core_run_id + algorithm_version
+        + status=succeeded + available=true + poc_price=29.36）的 chip 行。
+        退役后列表读链不再 join stock_chip_consensus_snapshots，因此：
+        - fp_chip_available:eq:true  → **0 行**（没有任何股票"有当前筹码"）；
+        - fp_chip_available:eq:false → 全部 3 行。
+        这证明退役与「五元组是否匹配」无关，杜绝"旧行被当成当前筹码"。
+        """
         client, user, instruments, _, _ = chip_test_setup
-        resp = await client.get(
+
+        resp_true = await client.get(
             "/v1/market/stocks",
             params={"scope": "market", "fp_filter": "fp_chip_available:eq:true", "page_size": 50},
         )
-        assert resp.status_code == 200
-        data = resp.json()
-        symbols = [item["symbol"] for item in data["items"]]
-        # 只有 inst1 有 matched chip available=True
-        assert "600519" in symbols
-        # inst2 chip available=False → 不匹配
-        assert "000001" not in symbols
-        # inst3 无 matched chip → fp_chip_available=False
-        assert "300750" not in symbols
+        assert resp_true.status_code == 200
+        assert resp_true.json()["total"] == 0, (
+            "盘后 chip 快照已退役：不应有任何股票 fp_chip_available=true"
+        )
+
+        resp_false = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_chip_available:eq:false", "page_size": 50},
+        )
+        assert resp_false.status_code == 200
+        assert resp_false.json()["total"] == 3
+        for item in resp_false.json()["items"]:
+            fp = item.get("first_pyramid") or {}
+            assert fp.get("fp_chip_available") is False
 
     async def test_computed_is_stale_filter(
         self, chip_test_setup,
@@ -491,10 +506,15 @@ class TestMarketStocksChipIntegration:
         assert "600519" not in symbols  # inst1 snap_td == max_td → is_stale=False
         assert "000001" not in symbols
 
-    async def test_matched_chip_poc_sort(
+    async def test_chip_poc_sort_succeeds_with_all_values_none(
         self, chip_test_setup,
     ) -> None:
-        """场景6: matched chip POC 排序（fp_poc_price desc）。"""
+        """场景6（[PANJI-INTRADAY-DIRECT-SOURCE] 已退休）：chip 字段排序仍可执行但全为 NULL。
+
+        排序表达式（NULL 占位 → cast(Float) → NULLS LAST）必须保持 SQL 合法，
+        否则前端保留的 chip 排序入口会 500。inst1 虽持有匹配 chip 行（poc=29.36），
+        返回的 fp_poc_price 仍必须是 None。
+        """
         client, user, instruments, _, _ = chip_test_setup
         resp = await client.get(
             "/v1/market/stocks",
@@ -502,18 +522,22 @@ class TestMarketStocksChipIntegration:
         )
         assert resp.status_code == 200
         data = resp.json()
-        # 只有 inst1 有 matched chip with poc_price=29.36
-        # 排序后 inst1 应在首位（其他 chip_poc_price 为 None，NULLS LAST）
-        if data["items"]:
-            first = data["items"][0]
-            if first["first_pyramid"] and first["first_pyramid"].get("fp_poc_price") is not None:
-                assert first["symbol"] == "600519"
-                assert first["first_pyramid"]["fp_poc_price"] == 29.36
+        assert data["total"] == 3, "排序不得过滤掉任何行"
+        for item in data["items"]:
+            fp = item.get("first_pyramid") or {}
+            assert fp.get("fp_poc_price") is None, (
+                f"{item['symbol']} 的 fp_poc_price 必须为 NULL（chip 已退役）"
+            )
+
+    # ---- 场景 7a/7b/7c：[PANJI-INTRADAY-DIRECT-SOURCE] 退役后仍成立的负向断言 ----
+    # 退役前这三条验证「五元组不匹配的旧 chip 不得挂到最新快照上」；退役后列表
+    # 读链根本不读该表，因此结论更强（a fortiori）。保留是为了锁死"旧行绝不出现"
+    # 这一产品可见结果，避免将来有人重新引入 join 时静默回退。
 
     async def test_old_trade_date_chip_not_matched(
         self, chip_test_setup,
     ) -> None:
-        """场景7a: 同股票旧 trade_date chip 不得匹配。"""
+        """场景7a: 同股票旧 trade_date chip 不得匹配（退役后更强成立）。"""
         client, user, instruments, _, _ = chip_test_setup
         # inst3 有 chip trade_date=2026-07-24（旧），不应匹配 latest_snap trade_date=2026-07-25
         resp = await client.get(
@@ -578,29 +602,45 @@ class TestMarketStocksChipIntegration:
                 fp = item.get("first_pyramid") or {}
                 assert fp.get("fp_chip_available") is False
 
-    async def test_chip_field_consistency_between_filter_and_response(
+    async def test_chip_fields_retired_even_for_matching_row(
         self, chip_test_setup,
     ) -> None:
-        """场景8: 列表返回 chip 字段与排序字段一致。"""
+        """场景8（[PANJI-INTRADAY-DIRECT-SOURCE] 已退休）：匹配行也不再产出 chip 数据。
+
+        inst1 持有匹配 chip 行（poc=29.36 / vah=30.5 / val=28.8 / peak=2 /
+        state=筹码峰稳定 / available=true）。退役后这些值**不得**出现在响应里：
+        - 10 个 fp_chip_* 全为 None；
+        - fp_chip_available = False；
+        - chipStatus.state = "retired" 且 reasonCode = "CHIP_PIPELINE_RETIRED"
+          （绝不是 pending —— pending 会被读成"以后还会算"）。
+
+        字段 schema（99 键）保持不变，只停读数据。
+        """
         client, user, instruments, _, _ = chip_test_setup
-        # 按 fp_poc_price 排序，验证返回的 fp_poc_price 与排序值一致
         resp = await client.get(
             "/v1/market/stocks",
             params={"scope": "market", "fp_sort": "fp_poc_price:desc", "page_size": 50},
         )
         assert resp.status_code == 200
         data = resp.json()
-        # 找到 inst1，验证其 fp_poc_price 与 chip_payload 中的值一致
-        for item in data["items"]:
-            if item["symbol"] == "600519":
-                fp = item.get("first_pyramid") or {}
-                assert fp.get("fp_poc_price") == 29.36
-                assert fp.get("fp_chip_state") == "筹码峰稳定"
-                assert fp.get("fp_peak_node_count") == 2
-                assert fp.get("fp_vah_price") == 30.5
-                assert fp.get("fp_val_price") == 28.8
-                assert fp.get("fp_chip_available") is True
-                break
+        by_symbol = {item["symbol"]: item for item in data["items"]}
+        assert "600519" in by_symbol, "inst1 应在结果中"
+
+        fp = by_symbol["600519"]["first_pyramid"] or {}
+        for key in (
+            "fp_poc_price", "fp_poc_distance_pct", "fp_peak_node_count",
+            "fp_vah_price", "fp_val_price", "fp_chip_state",
+            "fp_node_event_type", "fp_node_event_direction",
+            "fp_node_event_freshness", "fp_node_event_price",
+        ):
+            assert key in fp, f"99 键 schema 必须保留 {key}"
+            assert fp[key] is None, f"{key} 必须为 NULL（chip 已退役），实际 {fp[key]!r}"
+        assert fp.get("fp_chip_available") is False
+
+        chip_status = by_symbol["600519"].get("chip_status")
+        assert chip_status is not None, "chipStatus 必须仍在响应中（用于说明退役原因）"
+        assert chip_status["state"] == "retired"
+        assert chip_status["reasonCode"] == "CHIP_PIPELINE_RETIRED"
 
     async def test_between_filter(
         self, chip_test_setup,

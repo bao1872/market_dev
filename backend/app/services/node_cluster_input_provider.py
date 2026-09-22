@@ -35,6 +35,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -50,10 +51,45 @@ from app.services.business_date_adjustment_context import (
 )
 from app.services.market_data_aggregation_service import (
     MarketDataAggregationService,
+    MarketDataSourcePolicy,
 )
 from app.services.market_data_aggregation_service import (
     _filter_unfinished_15m_bars as _filter_completed_15m_bars,
 )
+
+
+class NodeClusterSourceMode(StrEnum):
+    """Node Cluster 输入的数据来源模式（**显式业务参数**，禁止推断）。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE] 这是本次最重要的语义拆分：Node Cluster 算法
+    本身没变（仍是 ``1d × 250 + 15m × 4000``），变的是**这份 15m 从哪来**。
+
+    - ``LIVE_DIRECT``（默认）：当前图表 / 实时监控链。15m 走 ``PROVIDER_DIRECT``
+      —— 实时分钟行情归 Provider，不读 DB 旧分钟线。
+    - ``HISTORICAL_DB``：历史 / PIT 链（历史快照重建、as-of replay、回测）。
+      15m 走 ``DB_ONLY`` —— PIT **绝对禁止访问网络**，否则今天去 provider 拉
+      「最近 4000 根」再切到历史时点，就是把未来数据污染进历史结果。
+
+    禁止用 ``adjustment_as_of is None`` 之类的间接特征猜模式：Capture / Monitor /
+    当前交易日计算都可能显式传 ``adjustment_as_of=today``，它们仍然是 live。
+    """
+
+    LIVE_DIRECT = "live_direct"
+    HISTORICAL_DB = "historical_db"
+
+
+def _resolve_node_15m_source_policy(
+    source_mode: NodeClusterSourceMode,
+) -> MarketDataSourcePolicy:
+    """Node 15m 输入的 source policy 唯一判定点（daily 恒为 HYBRID，见下）。
+
+    daily 保持 ``HYBRID``：日线是按 ``[start, end]`` 区间读取的，不存在「拉最新 4000 根」
+    那种未来泄漏形态，既有 PIT 语义（end_date=trade_date + adjustment_as_of）不变。
+    只有 15m 需要按 live / historical 分流。
+    """
+    if source_mode == NodeClusterSourceMode.HISTORICAL_DB:
+        return MarketDataSourcePolicy.DB_ONLY
+    return MarketDataSourcePolicy.PROVIDER_DIRECT
 
 
 class NodeAdjustmentContextMismatchError(RuntimeError):
@@ -156,11 +192,18 @@ class NodeClusterInputProvider:
         adjustment_as_of: date | None = None,
         end_date: date | None = None,
         adjustment_context: BusinessDateAdjustmentContext | None = None,
+        source_mode: NodeClusterSourceMode = NodeClusterSourceMode.LIVE_DIRECT,
     ) -> NodeClusterInput:
         """获取 Node Cluster 输入（固定 250 daily + 4000 15m）。
 
         Node 需要计算时必须无条件加载完整 250+4000，不再依赖 needs_15min、
         页面周期或 released strategy 状态。
+
+        Source mode（[PANJI-INTRADAY-DIRECT-SOURCE]）：
+        - ``LIVE_DIRECT``（默认）：15m 走 provider_direct（实时分钟归 Provider）。
+        - ``HISTORICAL_DB``：15m 走 db_only（PIT 禁止访问网络）。
+        这是**显式业务参数**，禁止从 adjustment_as_of / end_date 推断。
+        daily 两模式均为 HYBRID（区间读取，无未来泄漏形态）。
 
         双模式：
         - Legacy mode（``adjustment_context is None``）：MDAS 直接返回 completed qfq，
@@ -179,6 +222,7 @@ class NodeClusterInputProvider:
                 Context mode 下 end_date=None 时默认取 Context.business_date，
                 保证 point-in-time 不读取未来 bars。
             adjustment_context: 预构建的 business-date 复权坐标（C1 接入点）。
+            source_mode: Node 15m 输入的数据来源模式（live_direct / historical_db）。
 
         Returns:
             NodeClusterInput（含 bars + hash + availability 状态机结果）
@@ -189,6 +233,7 @@ class NodeClusterInputProvider:
             return await cls._get_inputs_legacy(
                 mdas, session, instrument_id,
                 adjustment_as_of=adjustment_as_of, end_date=end_date,
+                source_mode=source_mode,
             )
 
         cls._validate_adjustment_context(
@@ -202,6 +247,7 @@ class NodeClusterInputProvider:
         effective_end_date = (
             end_date if end_date is not None else adjustment_context.business_date
         )
+        m15_policy = _resolve_node_15m_source_policy(source_mode)
 
         # MDAS 只负责唯一行情出口 + completed raw bars（adj="none"，不复权）
         daily_agg = await mdas.get_bars(
@@ -213,6 +259,7 @@ class NodeClusterInputProvider:
             completed_only=True,
             end_date=effective_end_date,
             limit=_NODE_DAILY_REQUIRED,
+            source_policy=MarketDataSourcePolicy.HYBRID,
         )
         m15_agg = await mdas.get_bars(
             session,
@@ -223,11 +270,14 @@ class NodeClusterInputProvider:
             # 否则盘中（无外部 15m 落库任务）只能拿到上一交易日收盘为止的 stale 15m。
             # MDAS 已按 completed_only 语义在合并前剔除 forming bar，其返回结果本身
             # 全部为已完成 bar；下方 _filter_unfinished_15m_bars 仅为 defensive 复核。
+            # [PANJI-INTRADAY-DIRECT-SOURCE] provider_direct 分支不读 DB，同样在 provider
+            # 侧用同一 owner 剔除 forming bar；DB_ONLY 分支则由 MDAS 强制禁用 fresh tail。
             include_realtime=True,
             completed_only=True,
             fresh_intraday_tail=True,
             end_date=effective_end_date,
             limit=_NODE_15M_REQUIRED,
+            source_policy=m15_policy,
         )
 
         raw_daily = daily_agg.bars
@@ -300,11 +350,16 @@ class NodeClusterInputProvider:
         *,
         adjustment_as_of: date | None = None,
         end_date: date | None = None,
+        source_mode: NodeClusterSourceMode = NodeClusterSourceMode.LIVE_DIRECT,
     ) -> NodeClusterInput:
         """Legacy mode：MDAS 直接返回 completed qfq（与历史行为完全一致）。
 
         C1 不修改任何 Legacy 语义；仅新增 ``adjustment_context_hash=None`` 字段。
+        [PANJI-INTRADAY-DIRECT-SOURCE] 15m 的 source policy 由 ``source_mode`` 决定
+        （live_direct → provider_direct；historical_db → db_only）；daily 恒为 HYBRID。
         """
+        m15_policy = _resolve_node_15m_source_policy(source_mode)
+
         daily_agg = await mdas.get_bars(
             session,
             instrument_id,
@@ -315,6 +370,7 @@ class NodeClusterInputProvider:
             adjustment_as_of=adjustment_as_of,
             end_date=end_date,
             limit=_NODE_DAILY_REQUIRED,
+            source_policy=MarketDataSourcePolicy.HYBRID,
         )
 
         m15_agg = await mdas.get_bars(
@@ -332,6 +388,7 @@ class NodeClusterInputProvider:
             adjustment_as_of=adjustment_as_of,
             end_date=end_date,
             limit=_NODE_15M_REQUIRED,
+            source_policy=m15_policy,
         )
 
         daily_bars = daily_agg.bars
@@ -605,6 +662,8 @@ class NodeClusterInputProvider:
 
 if __name__ == "__main__":
     # 自测：验证状态机逻辑（不连 DB）
+    import inspect
+
     provider = NodeClusterInputProvider
 
     def _p(proven: bool, reason: str = "x") -> tuple[bool, str]:
@@ -659,5 +718,25 @@ if __name__ == "__main__":
     assert avail == "degraded", f"应为 degraded, got {avail}"
     assert reason == "INSUFFICIENT_DAILY_HISTORY"
     print(f"新股daily不足: avail={avail} reason={reason} ✓")
+
+    # 9. [PANJI-INTRADAY-DIRECT-SOURCE] source mode → 15m source policy 映射
+    assert (
+        _resolve_node_15m_source_policy(NodeClusterSourceMode.LIVE_DIRECT)
+        is MarketDataSourcePolicy.PROVIDER_DIRECT
+    ), "LIVE_DIRECT 的 15m 必须是 provider_direct（实时分钟归 Provider）"
+    assert (
+        _resolve_node_15m_source_policy(NodeClusterSourceMode.HISTORICAL_DB)
+        is MarketDataSourcePolicy.DB_ONLY
+    ), "HISTORICAL_DB 的 15m 必须是 db_only（PIT 禁止访问网络）"
+    default_mode = inspect.signature(
+        NodeClusterInputProvider.get_inputs
+    ).parameters["source_mode"].default
+    assert default_mode is NodeClusterSourceMode.LIVE_DIRECT, (
+        f"source_mode 默认必须是 LIVE_DIRECT, got {default_mode!r}"
+    )
+    print(
+        "node source mode ✓ (LIVE_DIRECT→provider_direct, "
+        "HISTORICAL_DB→db_only, default=LIVE_DIRECT)"
+    )
 
     print("\nOK — NodeClusterInputProvider 状态机验证通过")

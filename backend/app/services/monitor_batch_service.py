@@ -67,7 +67,10 @@ from app.schemas.notification import NotificationMessageDTO
 from app.services.canonical_computation_service import CanonicalComputationService
 from app.services.instrument_maintenance_service import is_index_symbol
 from app.services.market_data_aggregation_service import MarketDataAggregationService
-from app.services.node_cluster_input_provider import NodeClusterInputProvider
+from app.services.node_cluster_input_provider import (
+    NodeClusterInputProvider,
+    NodeClusterSourceMode,
+)
 from app.services.node_monitor_target_service import (
     NodeMonitorTargetService,
     NodeMonitorTargetUnavailableError,
@@ -774,6 +777,9 @@ class MonitorBatchService:
         # 保证四链一致。Provider 返回 availability 三态 + hash/count 供 payload 补全。
         node_input = await NodeClusterInputProvider.get_inputs(
             db, instrument_id,
+            # [PANJI-INTRADAY-DIRECT-SOURCE] 实时监控链固定 LIVE_DIRECT：
+            # Node 15m 走 provider_direct（实时分钟归 Provider）。
+            source_mode=NodeClusterSourceMode.LIVE_DIRECT,
         )
         bars_daily = node_input.daily_bars
         bars_15min = node_input.bars_15m
@@ -2305,7 +2311,11 @@ class MonitorBatchService:
 
         # [CP-V3-A] NodeClusterInputProvider 唯一入口：daily 250 + 15m 4000（completed qfq）
         # 供 BB 计算、PNG 渲染和 Node Cluster profile 使用（四链一致）
-        node_input = await NodeClusterInputProvider.get_inputs(db, instrument_id)
+        node_input = await NodeClusterInputProvider.get_inputs(
+            db, instrument_id,
+            # [PANJI-INTRADAY-DIRECT-SOURCE] PNG 渲染属实时监控链 → LIVE_DIRECT。
+            source_mode=NodeClusterSourceMode.LIVE_DIRECT,
+        )
         bars_daily = node_input.daily_bars
         if bars_daily.empty or len(bars_daily) < 20:
             logger.debug("日线行情不足，跳过 PNG 渲染: symbol=%s bars=%d", symbol, len(bars_daily))

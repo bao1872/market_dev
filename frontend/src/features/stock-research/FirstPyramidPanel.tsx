@@ -329,11 +329,15 @@ function MomentumVisualCard({ vm, variant }: { vm: FirstPyramidVM['momentum']; v
 }
 
 /**
- * [QM-63 2026-08-04] chip 七态展示文案（与后端 CHIP_STATUS_STATES 一一对应）。
+ * [QM-63 2026-08-04] chip 状态展示文案（与后端 CHIP_STATUS_STATES 一一对应）。
  *
  * 每一态都必须有专属中文标签：缺标签会让 unavailable / interrupted / partial
  * 退化成「没有徽章」，用户无法区分「合法不可算」「被中断」「部分可用」。
  * ready 不显示徽章（正常态无需提示）。
+ *
+ * [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 新增 retired 专属文案：盘后持久化
+ * chip 快照生产链已退役。必须写成「已停止生产」而不是「尚未执行/计算中」——
+ * retired ≠ pending，若沿用 pending 文案会让用户以为以后还会算。
  */
 const CHIP_STATE_LABEL: Record<ChipStatusState, string | null> = {
   ready: null,
@@ -343,6 +347,7 @@ const CHIP_STATE_LABEL: Record<ChipStatusState, string | null> = {
   interrupted: '筹码任务已中断',
   stale: '筹码结果已过期',
   partial: '筹码部分可用',
+  retired: '盘后筹码快照已停止生产',
 }
 
 /**
@@ -392,7 +397,7 @@ function ChipProvenance({ chipStatus }: { chipStatus: ChipStatus }) {
 /** 筹码卡：POC位置轨道 + 距离% + 峰数量
  * [CHANGE-20260729-004 P0-2 + CHANGE-20260730-010 + QM-63] 当筹码不可用时：
  * - 显示 chipStatus.reasonText 真实原因（不再统一显示"暂无有效筹码峰"）
- * - 七态各有专属中文标签（见 CHIP_STATE_LABEL）
+ * - 每个 state 都有专属中文标签（见 CHIP_STATE_LABEL；含 retired = 已停止生产）
  * - state=unavailable + M15_BARS_INSUFFICIENT 显示 actualBars/requiredBars/fullQualityBars
  * - 展示 chip 溯源（source run / job / freshness / coverage / computedAt）
  */

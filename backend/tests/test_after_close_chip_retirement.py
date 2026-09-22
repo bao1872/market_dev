@@ -122,6 +122,66 @@ def test_a2b_orchestrator_holds_no_chip_symbols():
     assert "_enqueue_chip_job_step" not in main_src
 
 
+def test_a3_daily_refresh_is_periods_d_only():
+    """A3（[PANJI-INTRADAY-DIRECT-SOURCE] 合同 A）：盘后行情刷新必须只刷新日线。
+
+    盘后 Core 是 daily-only；15m/1h 的实时来源已改为 provider direct（见 MDAS
+    ``MarketDataSourcePolicy.PROVIDER_DIRECT``），因此盘后**不得**再维护 15m/60m ——
+    否则 DB 分钟线会被当成"仍然被维护的源"，与新的 source ownership 冲突。
+
+    断言生产调用 `bars_service.refresh_all_instruments(...)` 的关键字实参
+    ``periods`` 恰好是 ``("d",)``：
+
+    - 不允许缺少 / 为 None（默认 None = d/15m/60m 全刷，会重新引入分钟线维护）；
+    - 不允许加入 "15m" / "60m" / "1h"。
+
+    实现方式说明：完整的 `execute_after_close_run` 行为测试标记为
+    ``@pytest.mark.postgres``（需要真实库），本文件是纯单元文件；因此这里对
+    **生产调用点本身**做 AST 级断言，等价于 ``call_args.kwargs["periods"]``
+    对源码的静态锁定，且不依赖 DB。
+    """
+    tree = ast.parse(
+        inspect.getsource(orch.execute_after_close_run)
+    )
+    refresh_calls: list[ast.Call] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        fn = node.func
+        name = (
+            fn.attr if isinstance(fn, ast.Attribute)
+            else fn.id if isinstance(fn, ast.Name)
+            else None
+        )
+        if name == "refresh_all_instruments":
+            refresh_calls.append(node)
+
+    assert len(refresh_calls) == 1, (
+        f"execute_after_close_run 应恰好有 1 处 refresh_all_instruments 调用，"
+        f"实际 {len(refresh_calls)}"
+    )
+
+    call = refresh_calls[0]
+    periods_kw = [kw for kw in call.keywords if kw.arg == "periods"]
+    assert periods_kw, "refresh_all_instruments 必须显式传 periods= 关键字实参"
+    value = periods_kw[0].value
+    assert isinstance(value, ast.Tuple), (
+        f"periods 必须是字面量元组（否则无法静态确认内容），实际 {ast.dump(value)}"
+    )
+    periods = tuple(
+        elt.value for elt in value.elts
+        if isinstance(elt, ast.Constant)
+    )
+    assert len(periods) == len(value.elts), "periods 只能包含字面量常量"
+    assert periods == ("d",), (
+        f"盘后只允许刷新日线 periods=('d',)，实际 {periods!r}"
+    )
+    for forbidden in ("15m", "60m", "1h", "15min", "60min"):
+        assert forbidden not in periods, (
+            f"盘后不得再刷新分钟周期，实际 {periods!r} 含 {forbidden!r}"
+        )
+
+
 # =============================================================================
 # TEST B — after-close worker 不再启动 chip co-process
 # =============================================================================

@@ -423,12 +423,16 @@ def test_node_cluster_input_provider_signature_rejects_display() -> None:
 
     # 允许的参数（cls 在 classmethod 签名中不可见）
     # C1 新增 adjustment_context：Context mode 接入点（旧 caller 不传即走 Legacy mode）
+    # [PANJI-INTRADAY-DIRECT-SOURCE] 新增 source_mode：**显式业务参数**，决定 Node 的
+    # 15m 输入来自 Provider（live_direct）还是 DB（historical_db）。它不是展示参数，
+    # 因此允许出现在签名中；真正被禁止的是 bars/display_count/defaultVisibleBars 等。
     expected = {
         "session",
         "instrument_id",
         "adjustment_as_of",
         "end_date",
         "adjustment_context",
+        "source_mode",
     }
     assert params == expected, (
         f"NodeClusterInputProvider.get_inputs 签名异常:\n"

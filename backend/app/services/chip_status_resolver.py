@@ -3,6 +3,17 @@
 抽取自 market_stocks_service._build_chip_status_struct 和 first-pyramid 路由的 chip 查询逻辑，
 供 /market/stocks 列表 API 与 /first-pyramid 详情 API 共同使用。
 
+[PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] **生产链已退役**：
+盘后持久化 First Pyramid Chip Consensus（``stock_chip_consensus_snapshots``）不再生产，
+因此本解析器在**生产读链**中恒定返回 ``retired`` / ``CHIP_PIPELINE_RETIRED``，
+不再读取 legacy chip 表（否则库里的历史行会被当成「当前筹码数据」展示）。
+
+- 生产入口：``resolve_chip_status`` → 恒定 retired，零 DB 读。
+- 审计入口：``resolve_legacy_chip_status`` → 退役前的原实现（严格五元组匹配），
+  仅供审计 / 历史工具，**禁止生产读链调用**。
+
+退役前的语义（保留记录，供审计工具对照）：
+
 严格五元组匹配：
 - instrument_id
 - trade_date == run.trade_date
@@ -11,9 +22,7 @@
 - status == succeeded（仅查询 succeeded 记录用于 chip 数据读取；
   chip_status 状态查询则放宽 status，扫描所有状态记录）
 
-返回 ChipStatus schema（camelCase），列表/详情 API 序列化结果完全一致。
-
-000021 深科技场景：
+000021 深科技场景（历史）：
 - chip_row 存在但 status=skipped, payload.reason=M15_BARS_INSUFFICIENT
 - actual_bars=354, required_bars=500
 - 返回 state=unavailable, reasonCode=M15_BARS_INSUFFICIENT,
@@ -44,6 +53,28 @@ _CHIP_MIN_15M_BARS = 500
 # 完整质量门槛（Node Cluster 完整 15m bar 数 = DAILY_HISTORY_BARS * 16）
 _FULL_QUALITY_15M_BARS = NODE_CLUSTER_LOW_BARS
 
+# [PANJI-INTRADAY-DIRECT-SOURCE] 盘后持久化 chip 快照生产链退役后的唯一文案/状态码
+CHIP_RETIRED_REASON_CODE = "CHIP_PIPELINE_RETIRED"
+CHIP_RETIRED_REASON_TEXT = "盘后筹码快照生产链已退休"
+
+
+def build_retired_chip_status() -> ChipStatus:
+    """构造 retired 状态的 chipStatus（**唯一构造点**，避免多处各写一份字面量）。
+
+    retired ≠ pending：pending 表示「还在排队/以后会算」，retired 表示
+    「这条生产链已经不存在」。绝不能继续返回 CHIP_JOB_PENDING 误导用户。
+
+    注意：本状态与 Node Cluster 无关。个股页的「筹码共识价 / Node Cluster」是
+    **实时按需计算**的成交量分布（250 daily + 4000 15m），仍然有效；退役的只是
+    **盘后持久化的 First Pyramid Chip Consensus 快照**。
+    """
+    return ChipStatus(
+        state="retired",
+        reasonCode=CHIP_RETIRED_REASON_CODE,
+        reasonText=CHIP_RETIRED_REASON_TEXT,
+        computedAt=None,
+    )
+
 
 async def resolve_chip_status(
     session: AsyncSession,
@@ -52,28 +83,42 @@ async def resolve_chip_status(
     snapshot_run_id: UUID,
     algorithm_version: str = CHIP_CONSENSUS_ALGORITHM_VERSION,
 ) -> ChipStatus:
-    """查询 chip 记录并构建结构化状态（共享给 /market/stocks 和 /first-pyramid）。
+    """[PANJI-INTRADAY-DIRECT-SOURCE] 生产链已退休：**不再读取 legacy chip 表**。
 
-    严格匹配五元组（instrument_id + trade_date + core_run_id + algorithm_version），
-    取最新一条记录（按 created_at DESC），根据其 status 和 payload 构建状态：
+    盘后 First Pyramid Chip Consensus 已退役（见 after_close_orchestrator
+    ``[CHIP-RETIRE]``）：不再生产新快照。若继续读 ``stock_chip_consensus_snapshots``，
+    库里的历史行仍会被当成「当前筹码数据」展示出来——这是错误的。
 
-    - 无记录 → pending（chip job 尚未执行）
-    - status=succeeded + chip.available=True → ready
-    - status=succeeded + chip.available=False → unavailable (NO_VALID_PEAK)
-    - status=skipped + M15_BARS_INSUFFICIENT → unavailable + actualBars/requiredBars/fullQualityBars
-    - status=skipped + 其他 reason → unavailable + reasonText
-    - status=failed → failed (CHIP_JOB_FAILED)
-    - 其他未知 status → failed
+    因此本函数不再查询任何 chip 记录，恒定返回 retired。参数保持原签名仅为
+    免改调用方；它们已不参与任何判定。
+
+    旧实现（严格五元组查询 + 七态映射）完整保留为 ``resolve_legacy_chip_status``，
+    仅供审计 / 历史工具使用，**禁止生产读链调用**。
 
     Args:
-        session: 主业务库只读 session
-        instrument_id: 股票 instrument_id
-        trade_date: 快照 run.trade_date
-        snapshot_run_id: 快照 run.id（core_run_id 严格匹配）
-        algorithm_version: chip 算法版本（默认 CHIP_CONSENSUS_ALGORITHM_VERSION）
+        session: 主业务库只读 session（已不使用）
+        instrument_id: 股票 instrument_id（已不使用）
+        trade_date: 快照 run.trade_date（已不使用）
+        snapshot_run_id: 快照 run.id（已不使用）
+        algorithm_version: chip 算法版本（已不使用）
 
     Returns:
-        ChipStatus schema 实例（camelCase，含诊断字段）
+        ChipStatus（恒定 retired / CHIP_PIPELINE_RETIRED）
+    """
+    return build_retired_chip_status()
+
+
+async def resolve_legacy_chip_status(
+    session: AsyncSession,
+    instrument_id: UUID,
+    trade_date: date,
+    snapshot_run_id: UUID,
+    algorithm_version: str = CHIP_CONSENSUS_ALGORITHM_VERSION,
+) -> ChipStatus:
+    """[LEGACY / 审计专用] 退役前的 chip 状态解析实现（原 resolve_chip_status）。
+
+    ⚠️ 本函数会读取 ``stock_chip_consensus_snapshots``。生产读链禁止调用
+    （否则会把历史行当成当前筹码数据）。仅供审计 / 历史工具 / 已冻结的旧测试使用。
     """
     # 延迟导入避免循环依赖
     from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot

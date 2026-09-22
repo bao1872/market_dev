@@ -45,7 +45,6 @@ from sqlalchemy import (
     or_,
     select,
     true,
-    tuple_,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -54,13 +53,11 @@ from app.models.bar import BarDaily
 from app.models.instrument import Instrument
 from app.models.market_board import MarketBoard
 from app.models.scheduler_job_run import SchedulerJobRun
-from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
 from app.models.stock_state_event import StockStateEvent
 from app.models.watchlist import UserWatchlistItem
 from app.repositories.board_filter_helper import build_board_filter_conditions
-from app.schemas.first_pyramid import CHIP_CONSENSUS_ALGORITHM_VERSION
 from app.schemas.market_stocks import (
     MarketBoardItem,
     MarketBoardsResponse,
@@ -68,6 +65,7 @@ from app.schemas.market_stocks import (
     MarketStocksResponse,
 )
 from app.services.board_sync_service import get_instrument_boards_batch
+from app.services.chip_status_resolver import build_retired_chip_status
 
 # [CHANGE-20260718-007] - 使用生产者 _SCHEMA_VERSION 替代硬编码 == 1
 # _SCHEMA_VERSION 从 1→2→3 升级后，生产写入 schema_version=3，
@@ -154,32 +152,6 @@ def _compute_factor_ready(
     if not _any_non_none(_FP_MOMENTUM_KEYS):
         return False, "momentum_missing", None, None
     return True, None, None, None
-
-
-def _build_chip_status_struct(
-    chip_row: Any | None,
-) -> dict[str, Any] | None:
-    """[CHANGE-20260730-010] 从 chip 记录构建结构化状态 dict（共享 chip_status_resolver）。
-
-    Args:
-        chip_row: 包含 status, chip_payload, error_message, created_at 的 NamedTuple，或 None
-
-    Returns:
-        camelCase ChipStatus dict（与 /first-pyramid 详情 API 完全一致）：
-        {state, reasonCode, reasonText, computedAt, actualBars, requiredBars, fullQualityBars}
-        或 None（chip_row=None 表示无 snap 关联，列表 API 返回 null）
-
-    注意：旧版本返回 snake_case {status, reason_code, actual_bars, required_bars,
-    reason_text, computed_at}，[CHANGE-20260730-010] 统一改为 camelCase，与详情 API 同口径。
-    """
-    if chip_row is None:
-        return None
-
-    # 延迟导入避免循环依赖（chip_status_resolver 不导入本模块的 _build_chip_status_struct）
-    from app.services.chip_status_resolver import _build_chip_status_from_row
-
-    chip_status = _build_chip_status_from_row(chip_row)
-    return chip_status.model_dump(by_alias=False)
 
 
 @dataclass(frozen=True)
@@ -463,22 +435,23 @@ def _needs_snap_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSor
 
 
 def _needs_chip_lateral(fp_filter_specs: list[FpFilterSpec], fp_sort_spec: FpSortSpec | None) -> bool:
-    """判断是否需要 chip LATERAL JOIN。
+    """是否需要 chip LATERAL JOIN —— [PANJI-INTRADAY-DIRECT-SOURCE] **恒定 False**。
 
-    [P0-2 修复] chip LATERAL 必须严格五元组匹配，且以下任一条件成立时才构建：
-    - chip source 字段参与 filter/sort
-    - fp_chip_available computed 字段参与 filter/sort（需 chip 存在性判定）
+    盘后持久化 chip 快照（``stock_chip_consensus_snapshots``）已退役，生产查询不再
+    join 该表。原先的四个触发条件（chip source 字段参与 filter/sort、
+    ``fp_chip_available`` computed 参与 filter/sort）已全部失去意义：
+
+    - chip 源字段（10 个 ``fp_chip_*``）恒为 NULL 占位（见 ``_build_fp_value_expr``）；
+    - ``fp_chip_available`` 恒为 False（无 chip JOIN 时的既有分支）。
+
+    保留本函数（而不是删掉两个调用点）的原因：它是「是否需要 chip JOIN」这一问题的
+    唯一 owner，``get_market_stocks`` 与 ``_assemble_market_query`` 继续共用同一个答案。
+    退回常量 False 同时消除了原先的性能负担（latest snapshot + chip lateral +
+    99 字段抽取）。
+
+    注意：退役的只是**盘后持久化的 chip 快照**；个股页的「筹码共识价 / Node Cluster」
+    是实时按需计算的成交量分布，仍然有效，且完全不经由本查询。
     """
-    keys = [f.fp_key for f in fp_filter_specs]
-    if fp_sort_spec:
-        keys.append(fp_sort_spec.fp_key)
-    for k in keys:
-        spec = FP_QUERY_FIELD_SPECS[k]
-        if spec["source"] == "chip":
-            return True
-        if (spec["source"] == "computed"
-                and spec.get("computed_kind") == "chip_available"):
-            return True
     return False
 
 
@@ -569,44 +542,6 @@ def _build_display_snapshot_query(
     return select(snap_subq).where(snap_subq.c.rn == 1)
 
 
-def _build_chip_lateral(snap_subq: Any):
-    """构建严格五元组匹配的 chip LATERAL 子查询。
-
-    [P0-2 修复 2026-07-29] 禁止仅按股票取最新 chip。必须严格匹配：
-        instrument_id == Instrument.id
-        AND trade_date == latest_snap.trade_date
-        AND core_run_id == latest_snap.source_run_id
-        AND algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION
-        AND status == 'succeeded'
-    仅匹配最新 core 快照同交易日、同 run 的 succeeded chip，禁止挂旧 run chip。
-
-    Args:
-        snap_subq: latest_snap LATERAL 子查询（已加入 FROM 后可被引用）
-    """
-    return (
-        select(
-            StockChipConsensusSnapshot.id,
-            StockChipConsensusSnapshot.instrument_id,
-            StockChipConsensusSnapshot.trade_date,
-            StockChipConsensusSnapshot.core_run_id,
-            StockChipConsensusSnapshot.chip_payload,
-            StockChipConsensusSnapshot.status,
-            StockChipConsensusSnapshot.created_at,
-        )
-        .where(
-            StockChipConsensusSnapshot.instrument_id == Instrument.id,
-            StockChipConsensusSnapshot.status == "succeeded",
-            StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
-            # 五元组严格匹配（trade_date + core_run_id 必须与 latest_snap 一致）
-            StockChipConsensusSnapshot.trade_date == snap_subq.c.trade_date,
-            StockChipConsensusSnapshot.core_run_id == snap_subq.c.source_run_id,
-        )
-        .order_by(StockChipConsensusSnapshot.created_at.desc())
-        .limit(1)
-        .lateral("latest_chip")
-    )
-
-
 def _build_max_trade_date_subquery():
     """构建 PER-INSTRUMENT MAX(bar_daily.trade_date) 相关标量子查询，用于 fp_is_stale 计算。
 
@@ -636,7 +571,7 @@ def _build_fp_value_expr(
 
     [P0 收口 2026-07-29] 根据 source 类型从不同位置取值：
     - flat: snap_subq.c.summary_payload["first_pyramid_flat"][fp_key]（JSON 路径）
-    - chip: chip_subq.c.chip_payload["chip_flat"][fp_key]（JSON 路径）
+    - chip: **已退役** —— 恒定 NULL（见下）
     - column: snap_subq.c.<column_name>（真实列，禁止 .astext）
     - literal: literal(value)（常量表达式）
     - computed: 动态 SQL 表达式（is_stale / chip_available）
@@ -649,9 +584,11 @@ def _build_fp_value_expr(
             raise ValueError(f"fp_key '{fp_key}' (source=flat) requires snap LATERAL JOIN")
         return snap_subq.c.summary_payload["first_pyramid_flat"][fp_key]
     elif source == "chip":
-        if chip_subq is None:
-            raise ValueError(f"fp_key '{fp_key}' (source=chip) requires chip LATERAL JOIN")
-        return chip_subq.c.chip_payload["chip_flat"][fp_key]
+        # [PANJI-INTRADAY-DIRECT-SOURCE] chip 源已退役：不再解析
+        # stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key>。
+        # 字段 schema（99 键）保留 NULL 占位，但**不存在任何真实取值路径** ——
+        # 也不再有 chip LATERAL JOIN（见 _needs_chip_lateral）。
+        return literal(None)
     elif source == "column":
         if snap_subq is None:
             raise ValueError(f"fp_key '{fp_key}' (source=column) requires snap LATERAL JOIN")
@@ -668,13 +605,11 @@ def _build_fp_value_expr(
                 )
             return snap_subq.c.trade_date < max_trade_date_subq
         elif computed_kind == "chip_available":
-            # [P0-4] chip 存在（严格五元组匹配）AND chip_payload.chip.available=true
-            if chip_subq is None:
-                # 无 chip JOIN 时固定返回 False（无匹配可能）
-                return literal(False)
-            return (chip_subq.c.id.isnot(None)) & (
-                chip_subq.c.chip_payload["chip"]["available"].astext == "true"
-            )
+            # [PANJI-INTRADAY-DIRECT-SOURCE] 盘后持久化 chip 快照已退役，chip LATERAL
+            # 永久消失（_needs_chip_lateral 恒 False），故 fp_chip_available 恒为 False。
+            # 旧实现在这里拼 chip_payload JSON 表达式；现在该分支不再是「无 JOIN 时的兜底」，
+            # 而是唯一语义，直接返回常量表达式（保留字段可 filter/sort，不破坏 99 键合同）。
+            return literal(False)
         else:
             raise ValueError(f"Unknown computed_kind '{computed_kind}' for fp_key '{fp_key}'")
     else:
@@ -685,13 +620,22 @@ def _cast_fp_value(expr: ColumnElement, data_type: str, source: str) -> ColumnEl
     """按 data_type 和 source 转换为可比较/可排序类型。
 
     [P0-1 修复 2026-07-29] 严格按 source 分别处理：
-    - flat/chip: JSON 路径取值，先 .astext 再 cast 到目标类型
+    - flat: JSON 路径取值，先 .astext 再 cast 到目标类型
+    - chip: **已退役**：值是 NULL，只需按目标类型 cast（保证 filter/sort 表达式
+      PostgreSQL 类型合法；NULL 比较结果为 NULL ⇒ 不命中，这正是「无数据」的正确语义）
     - column: 真实列，已具备类型；text 类型（如 UUID）cast 为 Text；datetime/number 直接使用
     - literal: literal() 已带类型，直接使用
     - computed: 表达式已带类型（boolean），直接使用
     禁止对 column/literal/computed 调用 .astext（会破坏 PostgreSQL 类型推断）。
     """
-    if source in ("flat", "chip"):
+    if source == "chip":
+        # [PANJI-INTRADAY-DIRECT-SOURCE] 退役的 chip 源：NULL 占位，按 data_type 定类型。
+        # 10 个 chip 字段实际只有 text/number/percent/enum 四种 data_type（见
+        # first_pyramid_flatten._spec_chip 调用点），故无需 date/datetime/boolean 分支。
+        if data_type in ("number", "percent"):
+            return cast(expr, Float)
+        return cast(expr, Text)
+    if source == "flat":
         # JSON 路径取值 → astext → cast 到目标类型
         if data_type in ("number", "percent"):
             return cast(expr.astext, Float)
@@ -852,7 +796,8 @@ async def _assemble_market_query(
     与 get_market_stocks 的 Query 1 装配逻辑逐行同源：复用 _build_search_conditions /
     _parse_sort / _build_state_filter / _build_board_filter_conditions / _parse_fp_filter /
     _parse_fp_sort / _needs_snap_lateral / _needs_chip_lateral / _build_snap_lateral /
-    _build_chip_lateral / _build_order_by 等单一真源 helper，禁止复制第二套规则。
+    _build_order_by 等单一真源 helper，禁止复制第二套规则。
+    （[PANJI-INTRADAY-DIRECT-SOURCE] _build_chip_lateral 已删除：chip LATERAL 不再构建。）
 
     返回的 base_stmt 不含 offset/limit：caller 自行决定分页（list）或分批导出（export）。
     """
@@ -864,9 +809,10 @@ async def _assemble_market_query(
     fp_filter_specs = _parse_fp_filter(fp_filter)
     fp_sort_spec = _parse_fp_sort(fp_sort)
     # [CHANGE-20260729-005 二.7] 按需构建 LATERAL JOIN
-    needs_snap = _needs_snap_lateral(fp_filter_specs, fp_sort_spec) or _needs_chip_lateral(
-        fp_filter_specs, fp_sort_spec,
-    )
+    needs_snap = _needs_snap_lateral(fp_filter_specs, fp_sort_spec)
+    # [PANJI-INTRADAY-DIRECT-SOURCE] chip LATERAL 永久移除：needs_chip 恒 False，
+    # 但保留该字段与唯一 owner（_needs_chip_lateral），因为 market_export 与本 ctx
+    # 共用同一语义查询装配，字段本身仍是「是否需要 chip JOIN」问题的正式答案。
     needs_chip = _needs_chip_lateral(fp_filter_specs, fp_sort_spec)
 
     # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT canonical CoreRun 单一身份（与 list 同源）
@@ -883,7 +829,10 @@ async def _assemble_market_query(
         )
 
     snap_subq = _build_snap_lateral(snapshot_run_id=canonical_core_run_id) if needs_snap else None
-    chip_subq = _build_chip_lateral(snap_subq) if needs_chip else None
+    # [PANJI-INTRADAY-DIRECT-SOURCE] chip LATERAL 已退役：needs_chip 恒 False
+    # （由 _needs_chip_lateral 单一 owner 决定），chip_subq 恒为 None。
+    # chip 源字段 / fp_chip_available 因此走 NULL / False 占位路径（见 _build_fp_value_expr）。
+    chip_subq = None
     max_trade_date_subq = _build_max_trade_date_subquery() if needs_snap else None
     # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建
     fp_filter_conditions = _build_fp_filter_conditions(
@@ -1016,13 +965,10 @@ async def get_market_stocks(
     fp_sort_spec = _parse_fp_sort(fp_sort)
     offset = (page - 1) * page_size
 
-    # [CHANGE-20260729-005 二.7] 按需构建 LATERAL JOIN（最新 snapshot + chip 单次关联）
-    # [P0 修复 2026-07-29] chip LATERAL 依赖 snap LATERAL（引用 snap.trade_date/source_run_id），
-    # 因此 needs_chip=True 时必须也构建 snap LATERAL；max_trade_date_subq 用于 is_stale computed。
-    needs_snap = _needs_snap_lateral(fp_filter_specs, fp_sort_spec) or _needs_chip_lateral(
-        fp_filter_specs, fp_sort_spec,
-    )
-    needs_chip = _needs_chip_lateral(fp_filter_specs, fp_sort_spec)
+    # [CHANGE-20260729-005 二.7] 按需构建 LATERAL JOIN（最新 snapshot 单次关联）
+    # [PANJI-INTRADAY-DIRECT-SOURCE] chip LATERAL 已永久移除（_needs_chip_lateral 恒 False），
+    # 故 needs_snap 只由 flat/column/computed 字段决定；max_trade_date_subq 用于 is_stale computed。
+    needs_snap = _needs_snap_lateral(fp_filter_specs, fp_sort_spec)
 
     # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT canonical CoreRun 单一身份。
     # 一次请求内的 fp_filter / fp_sort / count / display 必须消费同一个 CoreRun。
@@ -1051,7 +997,9 @@ async def get_market_stocks(
         )
 
     snap_subq = _build_snap_lateral(snapshot_run_id=canonical_core_run_id) if needs_snap else None
-    chip_subq = _build_chip_lateral(snap_subq) if needs_chip else None
+    # [PANJI-INTRADAY-DIRECT-SOURCE] chip LATERAL 已退役（needs_chip 恒 False）：
+    # 生产查询不再 join stock_chip_consensus_snapshots。
+    chip_subq = None
     max_trade_date_subq = _build_max_trade_date_subquery() if needs_snap else None
     # fp_filter_conditions 依赖 LATERAL JOIN 列引用，必须在 subq 创建后构建
     fp_filter_conditions = _build_fp_filter_conditions(
@@ -1268,47 +1216,11 @@ async def get_market_stocks(
             snap_row.created_at,
         )
 
-    # ===== Query 4b: 严格五元组匹配的 chip 记录批量查询（禁止 N+1） =====
-    # [P0-2 修复 2026-07-29 二.5/二.6] chip 必须按以下五元组严格匹配 latest_snap：
-    #   instrument_id, trade_date=latest_snap.trade_date,
-    #   core_run_id=latest_snap.source_run_id,
-    #   algorithm_version=CHIP_CONSENSUS_ALGORITHM_VERSION
-    # [CHANGE-20260729-009] 移除 status=="succeeded" 过滤，改为查询任意状态 chip：
-    #   - succeeded: 合并 chip_flat 到 first_pyramid（原逻辑）
-    #   - skipped/failed: 构建 chip_status 结构化状态（M15_BARS_INSUFFICIENT 等）
-    # 唯一约束 (instrument_id, trade_date, core_run_id, algorithm_version) 保证每股最多 1 条。
-    chip_map: dict[UUID, Any | None] = dict.fromkeys(instrument_ids)
-    # 仅对有 snap 且 source_run_id 非空的 instrument 查询 chip
-    snap_for_chip = [
-        (iid, snap_data[3], snap_data[4])
-        for iid, snap_data in state_map.items()
-        if snap_data[3] is not None and snap_data[4] is not None
-    ]
-    if snap_for_chip:
-        chip_stmt = (
-            select(
-                StockChipConsensusSnapshot.instrument_id,
-                StockChipConsensusSnapshot.chip_payload,
-                StockChipConsensusSnapshot.status,
-                StockChipConsensusSnapshot.error_message,
-                StockChipConsensusSnapshot.created_at,
-            )
-            .where(
-                StockChipConsensusSnapshot.algorithm_version == CHIP_CONSENSUS_ALGORITHM_VERSION,
-                # 四元组严格匹配（algorithm_version 已在 WHERE 中）：
-                # (instrument_id, trade_date, core_run_id)
-                tuple_(
-                    StockChipConsensusSnapshot.instrument_id,
-                    StockChipConsensusSnapshot.trade_date,
-                    StockChipConsensusSnapshot.core_run_id,
-                ).in_([
-                    (iid, td, rid) for iid, td, rid in snap_for_chip
-                ]),
-            )
-        )
-        chip_result = await db.execute(chip_stmt)
-        for chip_row in chip_result:
-            chip_map[chip_row.instrument_id] = chip_row
+    # ===== Query 4b: [REMOVED PANJI-INTRADAY-DIRECT-SOURCE] 旧 chip 记录批量查询已删除 =====
+    # 盘后持久化 chip 快照（stock_chip_consensus_snapshots）生产链已退役，列表读链
+    # **不再读取该表**（原先的「五元组严格匹配 chip 批量查询」整块删除）。
+    # chipStatus 统一由 build_retired_chip_status() 构造（见下方响应组装）。
+    # 附带收益：少一次全表 tuple IN 查询 + chip_payload JSON 抽取。
 
     # ===== Query 4c: [REMOVED 20260731-REMOVE-DSA] 旧 DSA Query 4c + payload 组装已删除 =====
     # StrategyRun.strategy_key 列不存在（正确链：strategy_version_id→StrategyVersion→StrategyDefinition.strategy_key），
@@ -1393,30 +1305,17 @@ async def get_market_stocks(
         #        最新日线 trade_date；旧实现用全局 price_as_of_date 导致所有快照误判 stale。
         #      - chip 合并（P0-3/P0-4）：仅 succeeded 且 chip.available=true 合并 chip_flat；
         #        其余状态 chip 字段为 None、fp_chip_available=False。
-        matched_chip_row: Any | None = chip_map.get(inst_id)
-        chip_status_struct: dict[str, Any] | None = _build_chip_status_struct(matched_chip_row)
-        if chip_status_struct is None and flat_fp is not None:
-            # 有快照但无 chip 记录：chip job 尚未执行（与详情 API resolve_chip_status 一致）
-            from app.schemas.first_pyramid import ChipStatus as _ChipStatusSchema
-            chip_status_struct = _ChipStatusSchema(
-                state="pending",
-                reasonCode="CHIP_JOB_PENDING",
-                reasonText="筹码任务尚未执行",
-                computedAt=None,
-            ).model_dump(by_alias=False)
+        # [PANJI-INTRADAY-DIRECT-SOURCE] 盘后 chip 快照生产链已退役：本 API **不再读取**
+        # stock_chip_consensus_snapshots（Query 4b 已整块删除），因此不再存在
+        # matched_chip_row / chip_snapshot 合并路径。
+        #   - chipStatus 恒为 retired / CHIP_PIPELINE_RETIRED（唯一构造点
+        #     build_retired_chip_status），不再是 pending（pending 会误导用户以为"以后会算"）；
+        #   - 10 个 fp_chip_* 与 fp_chip_available 由 chip_snapshot=None 走
+        #     assemble_first_pyramid_read_model 既有的 NULL/False 占位分支，
+        #     99 键字段 schema 完全不变（只停读，不改字段合同）。
+        chip_status_struct: dict[str, Any] | None = None
         if flat_fp is not None:
-            # 构造 chip_snapshot：仅 succeeded 且 chip.available=true 才提供 chip_flat
-            chip_snapshot: dict[str, Any] | None = None
-            if matched_chip_row is not None and matched_chip_row.status == "succeeded":
-                chip_payload = matched_chip_row.chip_payload if isinstance(matched_chip_row.chip_payload, dict) else {}
-                chip_dim = chip_payload.get("chip")
-                chip_available = bool(
-                    isinstance(chip_dim, dict) and chip_dim.get("available") is True
-                )
-                chip_snapshot = {
-                    "chip_flat": chip_payload.get("chip_flat") or {},
-                    "chip_available": chip_available,
-                }
+            chip_status_struct = build_retired_chip_status().model_dump(by_alias=False)
             inst_max_bar = inst_max_bar_date_map.get(inst_id)
             assembled_flat: dict[str, Any] | None = assemble_first_pyramid_read_model(
                 flat_fp,
@@ -1425,7 +1324,6 @@ async def get_market_stocks(
                     "created_at": to_shanghai_iso(snap_created_at) if snap_created_at else None,
                     "source_run_id": str(snap_run_id) if snap_run_id else None,
                 },
-                chip_snapshot=chip_snapshot,
                 max_bar_date=inst_max_bar.isoformat() if inst_max_bar else None,
             )
             if assembled_flat is not None:

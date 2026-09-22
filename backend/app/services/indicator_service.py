@@ -76,6 +76,7 @@ from app.services.market_data_aggregation_service import (
 from app.services.node_cluster_input_provider import (
     NodeClusterInput,
     NodeClusterInputProvider,
+    NodeClusterSourceMode,
 )
 from app.services.strategy_batch_service import StrategyBatchService
 from app.strategy.runtime import MarketDataContext, StrategyLoader
@@ -642,6 +643,7 @@ async def _load_node_cluster_inputs(
     """
     node_input = await NodeClusterInputProvider.get_inputs(
         session, instrument_id, adjustment_as_of=adjustment_as_of,
+        source_mode=NodeClusterSourceMode.LIVE_DIRECT,
     )
     return (
         node_input.daily_bars,
@@ -793,6 +795,10 @@ async def compute_all_indicators(
     #   和 _compute_independent_node_cluster 使用，保证四链一致。
     node_input = await NodeClusterInputProvider.get_inputs(
         session, instrument_id, adjustment_as_of=adjustment_as_of,
+        # [PANJI-INTRADAY-DIRECT-SOURCE] 当前个股详情链固定 LIVE_DIRECT：
+        # Node 15m 走 provider_direct（实时分钟归 Provider），不读 DB 旧分钟线。
+        # 页面周期是 1d/15m/1h/1w/1mo 都不影响 —— Node 恒为 250 daily + 4000 15m。
+        source_mode=NodeClusterSourceMode.LIVE_DIRECT,
     )
     bars_15min = node_input.bars_15m
     # minute：仅 needs_minute 时查询（VP crossover 仅需 2 根）

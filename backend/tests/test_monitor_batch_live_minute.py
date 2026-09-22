@@ -310,11 +310,15 @@ async def test_monitor_calc_inputs_daily_15m_non_realtime(
         *,
         adjustment_as_of=None,
         end_date=None,
+        # [PANJI-INTRADAY-DIRECT-SOURCE] monitor 链显式传 source_mode=LIVE_DIRECT；
+        # 15m 来源本身由 tests/test_intraday_direct_source_policy.py 覆盖。
+        source_mode=None,
     ) -> NodeClusterInput:
         provider_calls.append({
             "instrument_id": instrument_id,
             "adjustment_as_of": adjustment_as_of,
             "end_date": end_date,
+            "source_mode": source_mode,
         })
         return NodeClusterInput(
             daily_bars=daily_df,

@@ -28,11 +28,16 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from datetime import time as dt_time
+from enum import StrEnum
 from typing import Any
 
 import pandas as pd
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.constants.indicator_contract import (
+    INDICATOR_BARS,
+    NODE_CLUSTER_LOW_BARS,
+)
 from app.core.pytdx_adapter import get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
 from app.core.time import SHANGHAI_TZ, now_shanghai, shanghai_business_date
@@ -64,6 +69,60 @@ logger = logging.getLogger("services.market_data_aggregation_service")
 # [mdas] - 描述: 支持的周期与复权方式
 _ALLOWED_TIMEFRAMES: set[str] = {"1d", "15m", "1h", "1w", "1mo", "1m"}
 _ALLOWED_ADJ: set[str] = {"qfq", "none"}
+
+
+# [PANJI-INTRADAY-DIRECT-SOURCE] 冻结 source ownership：
+#   实时分钟行情属于 Provider；历史分钟行情属于 DB。
+# 盘后链不再维护 15m/1h（after_close periods=("d",)），因此「DB 优先 + provider 补尾 +
+# merge」的 hybrid 模式对**实时分钟展示**已失去逻辑基础——随着时间推移 DB 15m 会越来越旧，
+# 页面会同时读到大量旧 DB bar 和一小段 provider bar，无法判断某根 K 线来自哪里。
+# 本枚举把「数据来源」从隐式实现细节提升为**显式的调用方参数**（默认 HYBRID，保持既有行为）。
+class MarketDataSourcePolicy(StrEnum):
+    """get_bars 数据来源策略（source owner 的显式声明）。
+
+    - ``HYBRID``（默认）：DB 优先 + provider 补尾 + merge。日线/周线/月线/1m 以及所有
+      既有调用方继续走这条路径，行为不变。
+    - ``PROVIDER_DIRECT``：**只对 provider 原生日内周期（15m / 1h）有效**。直接读 provider
+      原生 15m/60m，**完全不读 DB 分钟线、不做 DB ∪ provider merge**。
+      provider 失败必须明确失败（异常向上传播），**禁止静默 fallback 到 stale DB**。
+      复权 owner 不变：provider 原生 bar ``adj_factor=1.0`` 原样进入 MDAS **既有**的
+      统一 adjustment pipeline 施加 qfq，分支内**不得**另写一套 qfq（否则二次复权）。
+    - ``DB_ONLY``：只读 DB，**绝不访问外部 provider / realtime 尾部**
+      （同时强制 ``allow_backfill=False`` 与 ``fresh_intraday_tail=False``）。
+      历史 / PIT（回测、as-of replay、历史快照重建）必须使用本策略：
+      PIT 路径访问网络会引入未来数据污染。
+    """
+
+    HYBRID = "hybrid"
+    PROVIDER_DIRECT = "provider_direct"
+    DB_ONLY = "db_only"
+
+
+# PROVIDER_DIRECT 只支持 provider **原生**日内周期（1m/日线/周线/月线禁止）
+_PROVIDER_DIRECT_TIMEFRAMES: frozenset[str] = frozenset({"15m", "1h"})
+
+# PROVIDER_DIRECT 未显式给 limit 时的默认拉取条数。
+# 引用 indicator_contract 唯一真源，禁止散落硬编码：
+#   15m = NODE_CLUSTER_LOW_BARS(4000) —— Node Cluster 完整质量门槛
+#   1h  = INDICATOR_BARS["1h"](1200)  —— 1h 指标窗口
+_PROVIDER_DIRECT_DEFAULT_COUNT: dict[str, int] = {
+    "15m": NODE_CLUSTER_LOW_BARS,
+    "1h": INDICATOR_BARS["1h"],
+}
+
+
+def resolve_display_source_policy(timeframe: str) -> MarketDataSourcePolicy:
+    """展示/图表周期的 source policy **唯一判定点**（唯一真源，禁止复制第二套规则）。
+
+    所有「个股图表展示」读链（chart-snapshot / bars 分页）必须复用本函数，
+    不得各自再写一份 `if timeframe in {"15m","1h"}` 判定。
+
+    - 15m / 1h → ``PROVIDER_DIRECT``：实时分钟行情归 Provider。
+    - 其余（1d / 1w / 1mo / 1m）→ ``HYBRID``：行为与历史完全一致。
+    """
+    if timeframe in _PROVIDER_DIRECT_TIMEFRAMES:
+        return MarketDataSourcePolicy.PROVIDER_DIRECT
+    return MarketDataSourcePolicy.HYBRID
 
 # [P0-2 2026-08-04] 单次 get_bars 在典型路径下的 repository 级读操作数：
 # bars 查询 1 次 + 复权因子 1 次（qfq）+ 预期最后完成日 1 次 = 3 次。
@@ -105,8 +164,15 @@ _REDIS_CACHE_PREFIX: str = "mdas"
 #   不再"单次查询 < limit 即 True"）。bump v3→v4 自动隔离旧缓存（旧 v3 缓存的
 #   history_exhausted 语义不准确，必须失效）
 # [CHANGE-20260730-P0] v4→v5：修复 Redis 序列化遗漏 latest_daily_quote
-# 旧 v4 缓存因 cache_key 含 contract_version，自动失效；无需全局 flush
-_MARKET_DATA_CONTRACT_VERSION: str = "v5"
+# [PANJI-INTRADAY-DIRECT-SOURCE] v5→v6：新增 MarketDataSourcePolicy。
+#   cache_key 加入 source_policy：同一 (instrument, timeframe, limit, ...) 下
+#   hybrid / provider_direct / db_only 的结果**必须**是不同缓存条目，
+#   否则 15m 的 provider_direct 请求会命中旧 hybrid（=DB）缓存，
+#   表现为「代码改了但看起来还是 DB 数据」。
+#   又因 data_source / completed_through / is_partial 等诊断字段的语义在本轮发生变化
+#   （provider_direct 不再有 DB persisted bar），一并 bump 让全部旧缓存自动失效。
+# 旧缓存因 cache_key 含 contract_version，自动失效；无需全局 flush
+_MARKET_DATA_CONTRACT_VERSION: str = "v6"
 
 # [mdas] - 描述: 1m → 15m/1h 聚合频率映射
 _TARGET_FREQ: dict[str, str] = {"15m": "15min", "1h": "60min"}
@@ -687,6 +753,86 @@ async def fetch_today_daily_bars(
     return raw_df
 
 
+async def _fetch_provider_intraday_direct(
+    *,
+    session: AsyncSession,
+    instrument_id: uuid.UUID,
+    timeframe: str,
+    required_count: int | None,
+    end: date | datetime | None = None,
+    completed_only: bool = False,
+    now: datetime | None = None,
+) -> pd.DataFrame:
+    """[PANJI-INTRADAY-DIRECT-SOURCE] PROVIDER_DIRECT 取数（纯 provider，不读 DB）。
+
+    只调用 provider 原生周期抓取（``fetch_15min_bars`` / ``fetch_60min_bars``）：
+    - **不调用** ``_query_15min_bars`` / ``_query_60min_bars``（不读 DB 分钟线）；
+    - **不调用** ``_merge_bars(db_bars, provider_bars)``（不混合来源）；
+    - provider 抛错时**不捕获**，异常向上传播（禁止静默 fallback 到 stale DB）。
+
+    复权 owner 不变：本函数返回 provider 原生 bars（``adj_factor=1.0``），
+    由 ``get_bars`` 中**既有**的统一 adjustment pipeline 施加 qfq，本函数内不复权。
+
+    ``completed_only`` 语义：15m 的 completed owner 是 ``_filter_unfinished_15m_bars``
+    （MDAS 唯一 owner，本函数委托它，不另写第二套 cutoff 规则）。1h 仓库内没有对应的
+    forming-bar owner，本函数不新建规则；生产 1h 路径使用 ``completed_only=False``
+    （Node 只用 15m），因此不受影响。
+
+    Args:
+        session: 异步 DB 会话（仅用于 symbol 解析）
+        instrument_id: 标的 UUID
+        timeframe: 仅 15m / 1h
+        required_count: 请求条数；None 时取 ``_PROVIDER_DIRECT_DEFAULT_COUNT``
+        end: 时间视界上界（防御性裁剪，禁止返回 end 之后的 bar）
+        completed_only: 是否剔除 still-forming 15m bar
+        now: 当前时间（completed 判定用）
+
+    Returns:
+        DataFrame（可能为空），index=trade_time，columns=[open,high,low,close,volume,amount,adj_factor]
+
+    Raises:
+        ValueError: timeframe 不是 provider 原生日内周期
+        PytdxSourceError: provider 重连耗尽后仍失败（不吞没）
+    """
+    if timeframe not in _PROVIDER_DIRECT_TIMEFRAMES:
+        raise ValueError(
+            f"provider_direct 只支持 provider 原生日内周期 "
+            f"{sorted(_PROVIDER_DIRECT_TIMEFRAMES)}, got {timeframe!r}"
+        )
+
+    if required_count is None:
+        required_count = _PROVIDER_DIRECT_DEFAULT_COUNT[timeframe]
+
+    if timeframe == "15m":
+        bars = await fetch_15min_bars(session, instrument_id, count=required_count)
+    else:  # 1h
+        bars = await fetch_60min_bars(session, instrument_id, count=required_count)
+
+    if bars is None or bars.empty:
+        return pd.DataFrame()
+
+    bars = bars.sort_index()
+    bars = bars[~bars.index.duplicated(keep="last")]
+
+    if completed_only and timeframe == "15m":
+        bars = _filter_unfinished_15m_bars(bars, now)
+
+    # 防御性时间视界裁剪：调用方显式给出 end 时不得返回 end 之后的 bar。
+    # live 链 end = 当日 23:59（no-op）；关键是杜绝任何 PIT 请求经 provider_direct 读到未来 bar。
+    if end is not None and not bars.empty:
+        _cutoff = (
+            pd.Timestamp(end)
+            if isinstance(end, datetime)
+            else pd.Timestamp(datetime.combine(end, datetime.max.time()))
+        )
+        bars = _bars_not_after(bars, _cutoff)
+
+    if len(bars) > required_count:
+        bars = bars.tail(required_count)
+
+    return bars
+
+
 # ===== 数据合并与聚合 =====
 
 
@@ -785,6 +931,49 @@ def _filter_unfinished_daily_bars(
     if latest_date == today and now.time() < _DAILY_CLOSE_TIME:
         df = df[df.index.date < today]
     return df
+
+
+def _apply_intraday_qfq(
+    adj_service: Any,
+    bars_df: pd.DataFrame,
+    factor_df: pd.DataFrame,
+    *,
+    adj: str,
+    adjustment_as_of: date | None,
+) -> tuple[pd.DataFrame, str | None]:
+    """日内 bars 的 qfq 施加 —— **[复权唯一 owner，禁止复制第二套]**。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE] 改变 source **不改变 adjustment owner**：
+    provider 原生 bar（``adj_factor=1.0``，未复权）与 hybrid 的 DB 分钟线
+    **必须**经同一份实现施加前复权。因此 provider_direct 与 hybrid 两条分支
+    都调用本函数（而不是各自内联一段 qfq）——否则一旦两边漂移就会二次复权，
+    或出现「provider_direct 忘记复权却仍声明 adj=qfq」。
+
+    传入 ``adj_service``（``AdjustmentFactorService`` 实例）而不是在模块级新建：
+    ``get_bars`` 内的调用方复用同一实例（含会话级缓存语义），不得另建。
+
+    Args:
+        adj_service: ``AdjustmentFactorService`` 实例（由调用方提供）
+        bars_df: 待复权的日内 bars（index=trade_time）
+        factor_df: 权威日线复权因子序列
+        adj: 复权方式；非 "qfq" 时原样返回
+        adjustment_as_of: 复权锚点
+
+    Returns:
+        ``(bars_df, degraded_reason)``。``degraded_reason`` 非 None 表示复权失败
+        （调用方据此置 degraded / data_source="degraded"），bars 保持未复权原值。
+    """
+    if adj != "qfq" or bars_df.empty or factor_df.empty:
+        return bars_df, None
+    try:
+        return (
+            adj_service.apply_qfq(
+                bars_df, factor_df, as_of=adjustment_as_of, intraday=True,
+            ),
+            None,
+        )
+    except Exception as exc:  # noqa: BLE001 - 复权失败必须降级而非抛给调用方
+        return bars_df, f"qfq failed: {exc}"
 
 
 def _finalize_bars(
@@ -940,8 +1129,14 @@ def _cache_key(
     adjustment_as_of: date | None,
     allow_backfill: bool = True,
     fresh_intraday_tail: bool = False,
+    source_policy: MarketDataSourcePolicy = MarketDataSourcePolicy.HYBRID,
 ) -> str:
-    """构建缓存键，包含所有影响结果的参数 + 契约版本（自动隔离新旧缓存）。"""
+    """构建缓存键，包含所有影响结果的参数 + 契约版本（自动隔离新旧缓存）。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE] ``source_policy`` 必须参与缓存键：不同 source policy
+    会返回**不同数据**（hybrid = DB∪provider 合并；provider_direct = 纯 provider；
+    db_only = 纯 DB），若不隔离则 provider_direct 会命中旧 hybrid 缓存。
+    """
     start = start_date.isoformat() if start_date is not None else "_"
     end = end_date.isoformat() if end_date is not None else "_"
     as_of_str = adjustment_as_of.isoformat() if adjustment_as_of is not None else "_"
@@ -951,6 +1146,7 @@ def _cache_key(
         f"{instrument_id}:{timeframe}:{adj}:{include_realtime}:{completed_only}:"
         f"{start}:{end}:{limit_str}:{warmup_bars}:{as_of_str}:"
         f"{int(allow_backfill)}:{int(fresh_intraday_tail)}:"
+        f"{source_policy.value}:"
         f"{_MARKET_DATA_CONTRACT_VERSION}"
     )
 
@@ -1883,6 +2079,7 @@ class MarketDataAggregationService:
         adjustment_as_of: date | None = None,
         allow_backfill: bool = True,
         fresh_intraday_tail: bool = False,
+        source_policy: MarketDataSourcePolicy = MarketDataSourcePolicy.HYBRID,
     ) -> BarAggregationResult:
         """获取行情聚合结果（v2 契约，CHANGE-20260717-002）。
 
@@ -1913,6 +2110,11 @@ class MarketDataAggregationService:
                 _filter_unfinished_15m_bars 剔除 forming bar，因此返回结果
                 **本身**全部为已完成 bar —— forming 不会进入 limit /
                 source_bar_hash / actual_count / coverage。
+            source_policy: [PANJI-INTRADAY-DIRECT-SOURCE] 数据来源策略（唯一 source owner）。
+                默认 HYBRID（既有行为不变）。PROVIDER_DIRECT 只对 15m/1h 生效：
+                纯 provider 取数、不读 DB 分钟线、不 merge、失败不 fallback。
+                DB_ONLY：只读 DB，强制禁用外部 provider / realtime / fresh tail，
+                历史与 PIT 路径必须使用。
 
         Returns:
             BarAggregationResult（含 bars、warmup_bars_full、hash、contract_version 等诊断字段）
@@ -1927,6 +2129,24 @@ class MarketDataAggregationService:
         if adj not in _ALLOWED_ADJ:
             raise ValueError(f"adj 只支持 qfq/none, got {adj!r}")
 
+        # [PANJI-INTRADAY-DIRECT-SOURCE] source ownership 校验与归一。
+        # 必须在 completed_only 互斥判定与 _cache_key 之前完成——allow_backfill /
+        # fresh_intraday_tail 参与缓存键，先归一才能保证同一策略只有一个缓存条目。
+        if (
+            source_policy == MarketDataSourcePolicy.PROVIDER_DIRECT
+            and timeframe not in _PROVIDER_DIRECT_TIMEFRAMES
+        ):
+            raise ValueError(
+                f"provider_direct 只支持 provider 原生日内周期 "
+                f"{sorted(_PROVIDER_DIRECT_TIMEFRAMES)}, got {timeframe!r}"
+            )
+        if source_policy == MarketDataSourcePolicy.DB_ONLY:
+            # 严格 DB-only：历史 / PIT 路径禁止访问网络。
+            # 显式覆写调用方参数（而不是新增第二套分支），使 daily 的 need_tail 回补
+            # 与 intraday 的 fresh tail 都自然失效，行为等价于既有 strict DB-only。
+            allow_backfill = False
+            fresh_intraday_tail = False
+
         # [mdas] - completed_only 与 include_realtime 互斥：completed_only 强制不含实时
         # [USER-FIX-3 / C] 唯一的例外：调用方显式 fresh_intraday_tail=True 且周期为
         # 15m 时，允许合并「当日已完成的实时尾部」。未显式开启时行为完全不变。
@@ -1935,11 +2155,11 @@ class MarketDataAggregationService:
         ):
             include_realtime = False
 
-        # [mdas] - 先查 Redis 短缓存（参数 + 契约版本）
+        # [mdas] - 先查 Redis 短缓存（参数 + source policy + 契约版本）
         cache_key = _cache_key(
             instrument_id, timeframe, adj, include_realtime, completed_only,
             start_date, end_date, limit, warmup_bars, adjustment_as_of,
-            allow_backfill, fresh_intraday_tail,
+            allow_backfill, fresh_intraday_tail, source_policy,
         )
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -2072,6 +2292,48 @@ class MarketDataAggregationService:
                 bars_df = daily_df
 
         # ============================================================
+        # [PANJI-INTRADAY-DIRECT-SOURCE] 个股实时分钟（provider 直取）
+        # ============================================================
+        # 实时分钟行情属于 Provider：不读 DB 分钟线、不做 DB ∪ provider merge。
+        # provider 失败直接向上抛（禁止静默 fallback 到 stale DB —— 那只是掩盖问题，
+        # 且会继续返回越来越旧的 DB 15m）。复权仍由下方既有统一 pipeline 施加。
+        elif source_policy == MarketDataSourcePolicy.PROVIDER_DIRECT:
+            bars_df = await _fetch_provider_intraday_direct(
+                session=session,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                required_count=limit,
+                end=end,
+                completed_only=completed_only,
+                now=now,
+            )
+            data_source = "provider_direct"
+            # provider 只能给「最近 required_count 根」；不足即真实历史耗尽，
+            # 禁止拿 DB 再补（§23 语义：actual_count < requested + history_exhausted）。
+            intraday_history_exhausted = (
+                limit is not None and len(bars_df) < limit
+            )
+            backfill_rounds = 1
+            coverage_reason = "provider_direct"
+            # provider_direct 不读 DB ⇒ 不存在 persisted bar（completed_through 保持 None）。
+            if not bars_df.empty:
+                last_live_bar_time = pd.Timestamp(bars_df.index[-1])
+            # 交易时段内、允许实时尾部时，provider 末根即正在形成的当前 bar。
+            is_partial = bool(include_realtime and _is_trading_hours(now))
+
+            # [复权唯一 owner] provider 原生 bar 的 adj_factor=1.0（未复权），必须经
+            # **同一份** qfq 实现施加前复权（与 hybrid 分支共用 _apply_intraday_qfq），
+            # 不得在本分支内联一套 qfq（否则二次复权 / 或声明 adj=qfq 却返回未复权）。
+            bars_df, _qfq_err = _apply_intraday_qfq(
+                _adj_service, bars_df, factor_df,
+                adj=adj, adjustment_as_of=adjustment_as_of,
+            )
+            if _qfq_err is not None:
+                degraded = True
+                degraded_reason = _qfq_err
+                data_source = "degraded"
+
+        # ============================================================
         # 日内周期（含 1m 原始分钟线）
         # ============================================================
         else:
@@ -2122,7 +2384,14 @@ class MarketDataAggregationService:
             if _fresh_tail_path:
                 realtime_allowed, realtime_horizon = _resolve_realtime_horizon(end, now)
 
-            if include_realtime and _is_trading_hours(now) and realtime_allowed:
+            if (
+                include_realtime
+                # [PANJI-INTRADAY-DIRECT-SOURCE] DB_ONLY 绝不访问外部 provider：
+                # 历史 / PIT 路径的实时尾部=网络访问=未来数据污染风险。
+                and source_policy != MarketDataSourcePolicy.DB_ONLY
+                and _is_trading_hours(now)
+                and realtime_allowed
+            ):
                 # [P0-4] 冻结行情周期合同：15m/1h 实时尾部使用 Pytdx 原生周期，
                 # 禁止从 1m 聚合（CHANGE-20260724-003）
                 try:
@@ -2177,15 +2446,16 @@ class MarketDataAggregationService:
                     data_source = "degraded"
 
             # [mdas] - qfq 应用（日内按交易日映射同一权威日线因子）
-            if adj == "qfq" and not bars_df.empty and not factor_df.empty:
-                try:
-                    bars_df = _adj_service.apply_qfq(
-                        bars_df, factor_df, as_of=adjustment_as_of, intraday=True
-                    )
-                except Exception as exc:
-                    degraded = True
-                    degraded_reason = f"qfq failed: {exc}"
-                    data_source = "degraded"
+            # [PANJI-INTRADAY-DIRECT-SOURCE] 与 provider_direct 分支共用唯一 owner
+            # _apply_intraday_qfq，禁止在此内联第二套 qfq。
+            bars_df, _qfq_err = _apply_intraday_qfq(
+                _adj_service, bars_df, factor_df,
+                adj=adj, adjustment_as_of=adjustment_as_of,
+            )
+            if _qfq_err is not None:
+                degraded = True
+                degraded_reason = _qfq_err
+                data_source = "degraded"
 
         # [mdas] - 排序、去重、过滤未完成 bar
         bars_df = _finalize_bars(bars_df, timeframe, now)
@@ -2483,16 +2753,24 @@ if __name__ == "__main__":
     assert agg15.iloc[0]["close"] == 10.06
     print("1m -> 15m 聚合 ✓")
 
-    # 5. 验证 get_bars 签名（v2 契约：11 参数 + self）
+    # 5. 验证 get_bars 签名（v2 契约 + 后续扩展）
+    # [PANJI-INTRADAY-DIRECT-SOURCE] 修正本自检的既有漂移：此前 expected_params 缺少
+    # allow_backfill / fresh_intraday_tail（CHANGE-20260808、USER-FIX-3 后未同步），
+    # 早已与实际签名不一致。此处补齐为**真实**签名，并加入 source_policy。
     sig = inspect.signature(MarketDataAggregationService.get_bars)
     params = list(sig.parameters.keys())
     expected_params = [
         "self", "session", "instrument_id", "timeframe", "adj",
         "include_realtime", "completed_only", "start_date", "end_date",
         "limit", "warmup_bars", "adjustment_as_of",
+        "allow_backfill", "fresh_intraday_tail", "source_policy",
     ]
     assert params == expected_params, f"get_bars 参数不匹配: {params}"
-    print(f"get_bars params={params} ✓")
+    assert (
+        sig.parameters["source_policy"].default
+        is MarketDataSourcePolicy.HYBRID
+    ), "source_policy 默认必须是 HYBRID（不得改变既有调用方行为）"
+    print(f"get_bars params={params} ✓ (source_policy default=HYBRID)")
 
     # 6. 验证契约版本字段默认值（CHANGE-20260730-P0：v5 契约）
     assert result.market_data_contract_version == _MARKET_DATA_CONTRACT_VERSION, \
@@ -2559,5 +2837,40 @@ if __name__ == "__main__":
     )
     assert ck_bf != ck, "allow_backfill 必须参与缓存键隔离"
     print("_cache_key 隔离 allow_backfill ✓")
+
+    # 10. [PANJI-INTRADAY-DIRECT-SOURCE] 验证 _cache_key 隔离 source policy
+    # 同一参数下 hybrid / provider_direct / db_only 必须是三个不同缓存条目，
+    # 否则 provider_direct 会命中旧 hybrid（=DB）缓存，表现为「代码改了但仍是 DB 数据」。
+    _iid = uuid.UUID("00000000-0000-0000-0000-000000000001")
+    _base_kw = {
+        "include_realtime": True, "completed_only": False,
+        "start_date": None, "end_date": None,
+        "limit": 4000, "warmup_bars": 0, "adjustment_as_of": None,
+    }
+    ck_hybrid = _cache_key(
+        _iid, "15m", "qfq", source_policy=MarketDataSourcePolicy.HYBRID, **_base_kw,
+    )
+    ck_direct = _cache_key(
+        _iid, "15m", "qfq",
+        source_policy=MarketDataSourcePolicy.PROVIDER_DIRECT, **_base_kw,
+    )
+    ck_dbonly = _cache_key(
+        _iid, "15m", "qfq", source_policy=MarketDataSourcePolicy.DB_ONLY, **_base_kw,
+    )
+    assert len({ck_hybrid, ck_direct, ck_dbonly}) == 3, (
+        "source_policy 必须参与缓存键隔离: "
+        f"hybrid={ck_hybrid!r} direct={ck_direct!r} db_only={ck_dbonly!r}"
+    )
+    for _ck in (ck_hybrid, ck_direct, ck_dbonly):
+        assert _ck.endswith(f":{_MARKET_DATA_CONTRACT_VERSION}"), _ck
+    assert MarketDataSourcePolicy.PROVIDER_DIRECT.value == "provider_direct"
+    assert MarketDataSourcePolicy.DB_ONLY.value == "db_only"
+    print("_cache_key 隔离 source_policy ✓ (hybrid/provider_direct/db_only 互不命中)")
+
+    # 11. [PANJI-INTRADAY-DIRECT-SOURCE] provider_direct 周期约束
+    assert _PROVIDER_DIRECT_TIMEFRAMES == frozenset({"15m", "1h"})
+    assert _PROVIDER_DIRECT_DEFAULT_COUNT["15m"] == NODE_CLUSTER_LOW_BARS == 4000
+    assert _PROVIDER_DIRECT_DEFAULT_COUNT["1h"] == INDICATOR_BARS["1h"] == 1200
+    print("provider_direct 周期/默认条数合同 ✓ (15m=4000, 1h=1200)")
 
     print("OK")

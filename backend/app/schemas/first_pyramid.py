@@ -597,14 +597,19 @@ class ChipConsensusResult(BaseModel):
 # interrupted  : chip job 被取消/Worker 接管而未完成
 # stale        : chip 结果存在但落后于 core run（旧残留）
 # partial      : chip 部分维度可用（如有 POC 无峰簇），coverage < 1
+# [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 第八态 retired：
+#   盘后持久化 First Pyramid Chip Consensus（stock_chip_consensus_snapshots）已退役，
+#   生产链不再生产、也不再作为「当前筹码数据」读取。
+#   必须与 pending 严格区分：pending 的含义是「以后还会算」，而 retired 是
+#   「这条生产链已经不存在」——继续返回 CHIP_JOB_PENDING 会误导用户以为在排队。
 CHIP_STATUS_STATES: frozenset[str] = frozenset({
     "pending", "ready", "unavailable", "failed",
-    "interrupted", "stale", "partial",
+    "interrupted", "stale", "partial", "retired",
 })
 
 # 表示"chip 不可直接使用"的状态（fp_chip_available=False）
 CHIP_STATUS_NOT_READY_STATES: frozenset[str] = frozenset({
-    "pending", "unavailable", "failed", "interrupted", "stale",
+    "pending", "unavailable", "failed", "interrupted", "stale", "retired",
 })
 
 CHIP_SEMANTIC_STATES: frozenset[str] = frozenset({
@@ -633,6 +638,9 @@ CHIP_STATUS_REASON_CODES: frozenset[str] = frozenset({
     # [QM-63 chip 生命周期 2026-08-04] 新增两态对应原因码
     "CHIP_JOB_INTERRUPTED",     # chip job 被取消或 Worker 接管而未完成
     "CHIP_PARTIAL_COVERAGE",    # chip 部分维度可用（coverage < 1）
+    # [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 第八态 retired 的原因码
+    # 盘后持久化 chip 快照生产链已退休：不再生产，也不再作为当前数据读取。
+    "CHIP_PIPELINE_RETIRED",    # 盘后筹码快照生产链已退休（非 pending、非 failed）
 })
 
 
@@ -656,8 +664,8 @@ class ChipStatus(BaseModel):
     state: str = Field(
         ...,
         description=(
-            "筹码任务七态：pending/ready/unavailable/failed/"
-            "interrupted/stale/partial"
+            "筹码任务状态：pending/ready/unavailable/failed/"
+            "interrupted/stale/partial/retired"
         ),
     )
     semanticState: str = Field(
@@ -671,7 +679,7 @@ class ChipStatus(BaseModel):
         description=(
             "稳定状态码（机器可读）：CHIP_JOB_PENDING / CHIP_JOB_FAILED / "
             "DAILY_BARS_INSUFFICIENT / M15_BARS_INSUFFICIENT / NO_VALID_PEAK / "
-            "CORE_RUN_MISMATCH / STALE_RESULT"
+            "CORE_RUN_MISMATCH / STALE_RESULT / CHIP_PIPELINE_RETIRED"
         ),
     )
     reasonText: str | None = Field(
@@ -711,9 +719,11 @@ class ChipStatus(BaseModel):
 
     @model_validator(mode="after")
     def _check_chip_lifecycle(self) -> ChipStatus:
-        """[QM-63] 校验 chip 七态合同。
+        """[QM-63] 校验 chip 生命周期状态合同。
 
-        - state 必须属于七态之一（不得出现自造状态）；
+        - state 必须属于 ``CHIP_STATUS_STATES``（不得出现自造状态）；
+          [PANJI-INTRADAY-DIRECT-SOURCE] 该集合现含第八态 ``retired``
+          （盘后持久化 chip 快照生产链已退役）；
         - 非 ready 状态必须给出 reasonCode（否则前端只能显示"暂不可用"）；
         - coverage 若给出必须在 [0, 1]。
         """

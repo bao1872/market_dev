@@ -4,14 +4,18 @@ import type { ChipStatus, DimensionResult, FirstPyramidSnapshot } from '@/api/en
 import { buildFirstPyramidVM } from '../firstPyramidViewModel.ts'
 
 /**
- * [QM-63 2026-08-04] chip 七态 + run 级溯源的展示合同。
- * 通过 view-model 断言：VM 必须透传/推导出七态语义与溯源字段，
+ * [QM-63 2026-08-04] chip 状态 + run 级溯源的展示合同。
+ * 通过 view-model 断言：VM 必须透传/推导出各状态语义与溯源字段，
  * 不得丢弃、不得把 unavailable/interrupted/partial 静默归并为普通不可用。
+ *
+ * [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 新增第八态 retired（盘后持久化
+ * chip 快照生产链已退役）：VM 同样必须**原样透传**，不得被归并成 unavailable
+ * 或 pending（pending 会误导用户以为"以后还会算"）。
  */
-test('chip 七态：partial/interrupted/stale 在 VM 中保留原始 state', () => {
+test('chip 状态：partial/interrupted/stale/retired 在 VM 中保留原始 state', () => {
   const states: ChipStatus['state'][] = [
     'pending', 'ready', 'unavailable', 'failed',
-    'interrupted', 'stale', 'partial',
+    'interrupted', 'stale', 'partial', 'retired',
   ]
   for (const state of states) {
     const payload = canonicalPayload()
@@ -24,9 +28,24 @@ test('chip 七态：partial/interrupted/stale 在 VM 中保留原始 state', () 
     const vm = buildFirstPyramidVM(payload, 'detail')
     assert.equal(
       vm.chipStatus?.state, state,
-      `chip 七态 ${state} 必须原样透传到 VM（不得被归一）`,
+      `chip 状态 ${state} 必须原样透传到 VM（不得被归一）`,
     )
   }
+})
+
+test('chip retired：必须与 pending 区分，且不得被归并成 unavailable', () => {
+  const payload = canonicalPayload()
+  payload.chipStatus = {
+    state: 'retired',
+    reasonCode: 'CHIP_PIPELINE_RETIRED',
+    reasonText: '盘后筹码快照生产链已退休',
+    computedAt: null,
+  }
+  const vm = buildFirstPyramidVM(payload, 'detail')
+  assert.equal(vm.chipStatus?.state, 'retired')
+  assert.notEqual(vm.chipStatus?.state, 'pending')
+  assert.notEqual(vm.chipStatus?.state, 'unavailable')
+  assert.equal(vm.chipStatus?.reasonCode, 'CHIP_PIPELINE_RETIRED')
 })
 
 test('run 级溯源：批量 run 推导 fromBatchRun，单股即时计算显式标注', () => {
