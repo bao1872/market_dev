@@ -20,9 +20,12 @@ Node Cluster 输入隔离：
   保证 Node 计算不受展示窗口 partial bar 污染。
 
 Source policy（[PANJI-INTRADAY-DIRECT-SOURCE]）：
-- 15m / 1h 展示周期在本层显式冻结为 ``MarketDataSourcePolicy.PROVIDER_DIRECT``
-  （见 ``_resolve_chart_source_policy``）。实时分钟行情归 Provider，历史分钟行情归 DB。
-- 1d / 1w / 1mo 仍是 ``HYBRID``，行为与历史完全一致。
+- 本层调用 MDAS ``resolve_request_source_policy``（与 /bars 共用的唯一判定点）：
+  - live 15m/1h → ``PROVIDER_DIRECT``（实时分钟行情归 Provider）
+  - 历史/PIT 15m/1h（显式 ``adjustment_as_of``）→ ``DB_ONLY``（历史分钟行情归 DB，
+    禁止联网 —— 否则历史截图/重放会拉当前最近 4000 根再裁剪，引入未来数据）
+  - 1d / 1w / 1mo / 1m → ``HYBRID``，行为与历史完全一致
+- 判定不再只看 timeframe：历史入口传 ``adjustment_as_of`` 时同样必须落到 DB。
 
 用法：
     from app.services.chart_snapshot_service import ChartSnapshotService
@@ -57,28 +60,10 @@ from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
     MarketDataSourcePolicy,
-    resolve_display_source_policy,
+    resolve_request_source_policy,
 )
 
 logger = logging.getLogger("services.chart_snapshot_service")
-
-
-def _resolve_chart_source_policy(timeframe: str) -> MarketDataSourcePolicy:
-    """[PANJI-INTRADAY-DIRECT-SOURCE] 图表展示周期的 source policy（ChartSnapshot 冻结点）。
-
-    冻结在 ChartSnapshotService 这一层，**不依赖 MDAS 默认值** —— 否则合同会随 MDAS
-    内部实现漂移（"刚好 MDAS 现在怎么实现就怎么用"）。
-
-    判定规则**委托**给 MDAS 的 ``resolve_display_source_policy``（唯一真源）：
-    chart-snapshot 与 bars 分页两条展示读链共用同一条规则，禁止复制第二套。
-
-    - 15m / 1h：``PROVIDER_DIRECT``。盘后链已不再维护 15m/1h（after_close
-      ``periods=("d",)``），继续 hybrid 只会不断读「越来越旧的 DB 分钟线 + 一小段
-      provider 补尾」，无法判断某根 K 线来自哪里。实时分钟行情归 **Provider**。
-    - 1d / 1w / 1mo：``HYBRID``（DB 优先 + provider 补尾），既有行为完全不变。
-    - 1m：``HYBRID``（1m 不在本次范围内，保持既有实时尾部合同）。
-    """
-    return resolve_display_source_policy(timeframe)
 
 
 @dataclass
@@ -148,11 +133,14 @@ class ChartSnapshotService:
         )
 
         # 2. 一次 MDAS get_bars 获取展示窗口 DataFrame（单输入原子性）
-        #    [PANJI-INTRADAY-DIRECT-SOURCE] 15m/1h 在此层**显式**冻结为 provider_direct，
-        #    不依赖 MDAS 默认值；1d/1w/1mo 仍是 hybrid（行为不变）。
+        #    [PANJI-INTRADAY-DIRECT-SOURCE] source policy 由 MDAS 唯一判定点派生：
+        #    live 15m/1h → provider_direct；历史（显式 adjustment_as_of）15m/1h → db_only；
+        #    1d/1w/1mo/1m → hybrid（行为不变）。不依赖 MDAS 默认值，也不在本层另写判定。
         #    注意：不额外传 limit —— 保持既有「MDAS 取窗口 → 本层 tail(bars) 分页」语义，
         #    避免顺手改变 1d 展示窗口/hash/coverage 的既有合同。
-        source_policy = _resolve_chart_source_policy(timeframe)
+        source_policy = resolve_request_source_policy(
+            timeframe, adjustment_as_of=adjustment_as_of,
+        )
         mdas = MarketDataAggregationService()
         bars_result = await mdas.get_bars(
             session,
@@ -312,9 +300,29 @@ if __name__ == "__main__":
     print("ChartSnapshotService 模块加载 OK")
     print(f"compute_bars_and_indicators 参数: {params}")
 
-    # [PANJI-INTRADAY-DIRECT-SOURCE] 冻结展示周期 source policy 映射
-    assert _resolve_chart_source_policy("15m") is MarketDataSourcePolicy.PROVIDER_DIRECT
-    assert _resolve_chart_source_policy("1h") is MarketDataSourcePolicy.PROVIDER_DIRECT
+    # [PANJI-INTRADAY-DIRECT-SOURCE] source policy 判定（live vs 历史/PIT）
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=None,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+    assert resolve_request_source_policy(
+        "1h", adjustment_as_of=None,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+    # 历史/PIT（显式 as-of）→ DB_ONLY：历史分钟行情归 DB，禁止联网
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=date(2026, 7, 1),
+    ) is MarketDataSourcePolicy.DB_ONLY
+    assert resolve_request_source_policy(
+        "1h", adjustment_as_of=date(2026, 7, 1),
+    ) is MarketDataSourcePolicy.DB_ONLY
+    # 回溯窗口（end_date 早于今天）同样落到 DB_ONLY
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=None, end_date=date(2020, 1, 2),
+    ) is MarketDataSourcePolicy.DB_ONLY
     for _tf in ("1d", "1w", "1mo", "1m"):
-        assert _resolve_chart_source_policy(_tf) is MarketDataSourcePolicy.HYBRID, _tf
-    print("chart source policy ✓ (15m/1h=provider_direct, 其余=hybrid)")
+        assert resolve_request_source_policy(
+            _tf, adjustment_as_of=None,
+        ) is MarketDataSourcePolicy.HYBRID, _tf
+    print(
+        "chart source policy ✓ (live 15m/1h=provider_direct, "
+        "历史 15m/1h=db_only, 其余=hybrid)"
+    )

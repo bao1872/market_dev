@@ -116,7 +116,9 @@ assert len(FP_ALL_KEYS) == 99, f"FP_ALL_KEYS 应为 99 键，实际 {len(FP_ALL_
 # =============================================================================
 # 数据源类型（source）决定查询时从哪里取值：
 #   "flat"     → summary_payload.first_pyramid_flat.<fp_key>（扁平对象，写入时生成）
-#   "chip"     → stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key>（独立筹码表）
+#   "chip"     → **已退役**（[PANJI-INTRADAY-DIRECT-SOURCE]）：查询时恒渲染 NULL 占位
+#                （见 market_stocks_service._build_fp_value_expr）。键位保留不变，
+#                以维持 99 键 schema 与前端列注册表的一一对应。
 #   "column"   → StockFeatureSnapshot 真实列（trade_date/source_run_id/created_at）
 #   "literal"  → 常量（如 fp_data_source 固定为 "feature_snapshot"）
 #   "computed" → SQL 计算字段（如 fp_is_stale/fp_chip_available 动态判定）
@@ -125,10 +127,10 @@ assert len(FP_ALL_KEYS) == 99, f"FP_ALL_KEYS 应为 99 键，实际 {len(FP_ALL_
 # - fp_trade_date 改用 snapshot.trade_date 真实列（不再读 first_pyramid.tradeDate）
 # - fp_is_stale 改为 computed：latest_snap.trade_date < MAX(bars_daily.trade_date)
 #   数据库筛选/排序/页面展示必须同口径
-# - fp_chip_available 改为 computed：只在存在与当前 core 严格匹配（五元组）
-#   且 chip 维度 available=true 的 succeeded 记录时为 true，不从 review-core.chipConsensus 读取
-# - 筹码字段（10 个）不得从 review-core 的 first_pyramid.chipConsensus 读取；
-#   改为关联 stock_chip_consensus_snapshots 表（chip_flat 扁平对象）。
+# - fp_chip_available 改为 computed：**已退役**（[PANJI-INTRADAY-DIRECT-SOURCE]）
+#   恒为 false（不再存在 chip 记录判定，也不再从 review-core.chipConsensus 读取）
+# - 筹码字段（10 个）**不再从任何 chip 表读取**：盘后 chip 快照链已退役，
+#   查询侧恒定输出 NULL 占位；键位保留以维持 99 键 schema。
 #
 # 所有 99 字段均有 queryable source，禁止因 json_path 为空返回 422。
 # =============================================================================
@@ -240,7 +242,13 @@ def _spec_chip(
     operators: set[str] | None = None,
     enum_values: list[str] | None = None,
 ) -> dict[str, Any]:
-    """chip 源：从 stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key> 读取。"""
+    """chip 源规格（**已退役**）。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE] 盘后 chip 快照链退役后，chip 源字段不再从
+    `stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key>` 读取：
+    查询侧恒渲染 NULL 占位。本规格仅用于保留字段元数据（data_type / 操作符 /
+    输入控件），以维持 99 键 schema 与前端列注册表一致。
+    """
     return {
         "fp_key": fp_key,
         "data_type": data_type,
@@ -307,7 +315,7 @@ def _spec_computed(
 
     [P0 收口 2026-07-29] 不读取存储值，由 SQL 表达式动态计算：
     - is_stale: latest_snap.trade_date < MAX(bars_daily.trade_date)
-    - chip_available: chip 严格五元组匹配 AND chip_payload.chip.available=true
+    - chip_available: **恒 false**（chip 链已退役，不再做 chip 记录存在性判定）
     """
     return {
         "fp_key": fp_key,
@@ -324,7 +332,7 @@ def _spec_computed(
 # 99 字段规格表（与 FP_ALL_KEYS 严格一一对应）
 # [P0 收口 2026-07-29] 全部 99 字段均有 queryable source，支持服务端 filter/sort
 # - 84 非 chip 字段：source=flat（从 summary_payload.first_pyramid_flat.<fp_key> 读取）
-# - 10 chip 字段：source=chip（从 stock_chip_consensus_snapshots.chip_payload.chip_flat.<fp_key> 读取）
+# - 10 chip 字段：source=chip（**已退役**：查询恒 NULL 占位；键位保留以维持 99 键 schema）
 # - 3 元数据字段：source=column（trade_date/created_at/source_run_id 真实列）
 # - 2 动态计算字段：source=computed（fp_is_stale, fp_chip_available）
 # - 1 常量字段：source=literal（fp_data_source="feature_snapshot"）
@@ -808,9 +816,9 @@ def flatten_first_pyramid(
     result["fp_run_id"] = str(run_id) if run_id is not None else None
     result["fp_summary"] = first_pyramid.get("statusText")
     # [P0-4 修复 2026-07-29 二.4] fp_chip_available 改为 computed 表达式
-    # 不再从 review-core 的 chipConsensus 读取，由调用方（list/detail 服务）按
-    # 严格五元组匹配的 chip 表记录存在性 + chip_payload.chip.available=true 计算
-    # 此处保留 None 默认值，禁止从 chipConsensus 推断
+    # [PANJI-INTRADAY-DIRECT-SOURCE] chip 链退役后此字段恒为 false：查询侧不再做
+    # chip 记录存在性判定，也不再从 chipConsensus 推断。本函数仅保留 None 默认值
+    # 占位（调用方 market_stocks_service 渲染常量 false）。
 
     # ===== 趋势 (18) =====
     trend = first_pyramid.get("trend") or {}
@@ -1010,8 +1018,9 @@ def flatten_first_pyramid(
 def flatten_chip_fields(chip_dimension: dict[str, Any] | None) -> dict[str, Any]:
     """将筹码维度扁平化为 10 个 chip fp_ 键，用于写入 chip_payload.chip_flat。
 
-    [CHANGE-20260729-005 二.4] 筹码字段独立存储于 stock_chip_consensus_snapshots 表，
-    查询时从 chip_payload.chip_flat.<fp_key> 读取，不依赖 review-core 的 chipConsensus。
+    [CHANGE-20260729-005 二.4] 筹码字段独立存储于 stock_chip_consensus_snapshots 表。
+    **[PANJI-INTRADAY-DIRECT-SOURCE] 该表与写入链已退役**：本函数仅作为历史产物
+    形状的构造/审计工具保留（生产查询侧不再读取 chip_flat，恒渲染 NULL 占位）。
 
     Args:
         chip_dimension: DimensionResult.to_dict() 输出，或 None
@@ -1036,7 +1045,9 @@ def flatten_chip_fields(chip_dimension: dict[str, Any] | None) -> dict[str, Any]
 #   - fp_run_id 覆盖为 snapshot.source_run_id 真实列
 #   - fp_calculated_at 覆盖为 snapshot.created_at 真实列
 #   - fp_is_stale 动态计算：snapshot.trade_date < max_bar_date（None 时 False）
-#   - 合并严格匹配 chip_flat 到 10 个 chip 字段；fp_chip_available 按 chip available 计算
+#   - chip 字段：chip_snapshot 缺省（None）时清为 None、fp_chip_available=False。
+#     [PANJI-INTRADAY-DIRECT-SOURCE] 生产调用方现已恒传 None（chip 链退役），
+#     因此 10 个 chip 字段恒为 NULL、fp_chip_available 恒 False。
 #   - 保留条件性 null，不补 0
 # =============================================================================
 

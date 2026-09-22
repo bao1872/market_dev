@@ -1644,138 +1644,37 @@ class ProductReadinessService:
     async def _chip_state(
         self, db: Any, trade_date: date,
     ) -> ProductReadinessState:
-        """chip：增强产品。
+        """chip：**已退休产品**（[PANJI-INTRADAY-DIRECT-SOURCE]）。
 
-        [Corrective-1 2026-08-07] 对齐正式生产链真源：
-        正式 chip 产出 = SchedulerJobRun(after_close_chip_consensus)
-                       + StockChipConsensusSnapshot（单股级持久化）。
-        ChipConsensusRun 为未接入生产链的 orphan，本轮不引入、不读取。
-        若正式 chip publication 指针已存在则优先采用；否则以 job + snapshot 为准。
+        盘后持久化 chip 快照链（stock_chip_consensus_snapshots + after_close_chip_consensus
+        job + chip publication）已整体退役：不再生产、不再被任何用户面读链消费。
+        因此 readiness 也**不得**再把旧产物当成「今天算没算」来推断。
+
+        本函数现在**零 DB 读**（不读 StockChipConsensusSnapshot、不读
+        SchedulerJobRun(after_close_chip_consensus)、不读 chip publication pointer）。
+
+        语义：这个 enhancement 已完成生命周期 —— 终态、就绪、不再等待、不再阻塞 closure。
+        - is_terminal=True  → 不会把闭包卡在 mandatory_ready_enhancing；
+        - is_product_ready=True → 不会把闭包降级为 degraded_ready。
+
+        节点保留在 ENHANCEMENT_PRODUCTS 内：ProductReadinessResponse.products 是
+        外部（admin API + 前端 AdminReadinessWorkbench）稳定契约，删除节点会破坏消费方。
+        因此返回「终态退休」而非从产品集合中移除。
         """
-        # 优先：正式 chip publication 指针（若 producer 已调用 publish_chip_consensus）
-        st = await self._publication_readiness(
-            db, trade_date, PUBLICATION_KIND_CHIP_CONSENSUS,
-            "chip", is_mandatory=False,
-        )
-        if st is not None:
-            return st
-
-        import json
-
-        from app.models.scheduler_job_run import SchedulerJobRun
-        from app.models.stock_chip_consensus_snapshot import StockChipConsensusSnapshot
-
-        # 当前 stock_core pointer（与下游 core 对齐，用于校验 snapshot 归属）
-        current_core_run_id = await self._current_stock_core_data_run_id(db, trade_date)
-
-        # 正式 chip job（当日最新）
-        job = await db.scalar(
-            select(SchedulerJobRun)
-            .where(
-                SchedulerJobRun.job_name == "after_close_chip_consensus",
-                SchedulerJobRun.business_date == trade_date.isoformat(),
-            )
-            .order_by(SchedulerJobRun.created_at.desc())
-            .limit(1)
-        )
-
-        # 正式 chip snapshot 行数（按 current core run 对齐）
-        snap_rows = 0
-        if current_core_run_id is not None:
-            snap_rows = int(
-                await db.scalar(
-                    select(func.count())
-                    .select_from(StockChipConsensusSnapshot)
-                    .where(
-                        StockChipConsensusSnapshot.trade_date == trade_date,
-                        StockChipConsensusSnapshot.core_run_id == current_core_run_id,
-                    )
-                ) or 0
-            )
-
-        if job is None and snap_rows == 0:
-            return ProductReadinessState(
-                "chip", READINESS_PENDING, "fresh", is_mandatory=False,
-                lineage={
-                    "source_type": "production_artifact",
-                    "reason_code": "NO_CHIP_RUN",
-                    "detail": "no after_close_chip_consensus job or snapshot for trade_date",
-                    "trade_date": trade_date.isoformat(),
-                },
-            )
-
-        # 解析 job metadata（chip_status / expected_count / succeeded_count）
-        chip_status = None
-        expected_count = None
-        succeeded_count = None
-        if job is not None and job.metadata_json:
-            try:
-                meta = json.loads(job.metadata_json)
-            except (ValueError, TypeError):
-                meta = {}
-            chip_status = meta.get("chip_status")
-            # 与 auction producer 保持同一分母键：chip worker 实际写入 total_count，
-            # expected_count 仅作兼容回退。
-            expected_count = meta.get("total_count")
-            if expected_count is None:
-                expected_count = meta.get("expected_count")
-            succeeded_count = meta.get("succeeded_count")
-
-        # 仅作 lineage 诊断用覆盖率（不作为放行门槛）
-        coverage = 0.0
-        if expected_count and succeeded_count is not None and expected_count > 0:
-            coverage = succeeded_count / expected_count
-
-        # 不自行发明 coverage 门槛：直接映射正式 job 状态。
-        # chip_status 由 chip worker 写入 metadata_json，是产品级状态真源。
-        # snapshot 行数只做真实产物/lineage 对账，不作为放行门槛。
-        job_status = job.status if job is not None else None
-        job_terminal = job_status in TERMINAL_RUN_STATUS
-        job_ok = job_status == "succeeded"
-        # 计数缺失时不臆断不完整（旧任务可能无计数元数据）；
-        # 计数存在时严格要求 succeeded >= expected，与 auction producer 同一合同。
-        counts_known = succeeded_count is not None and expected_count is not None
-        succeeded_full = (not counts_known) or succeeded_count >= expected_count
-
-        if job_ok and chip_status == "succeeded" and succeeded_full:
-            # full 判据必须含计数完整性，与 auction producer
-            # _check_chip_consensus_completed 的 "full" 合同保持一致；
-            # 不能只相信 job_status/chip_status 两个字符串。
-            state = READINESS_READY
-            fresh = "fresh"
-            is_product_ready = True
-            reason = "CHIP_SUCCEEDED"
-        elif chip_status == "partial" or (job_ok and not succeeded_full):
-            # job 成功但 chip 部分完成 / 成功数不足 → degraded(partial)
-            state = READINESS_DEGRADED
-            fresh = "stale"
-            is_product_ready = False
-            reason = "CHIP_PARTIAL"
-        elif job_status == "failed" or chip_status == "failed":
-            state = READINESS_UNAVAILABLE
-            fresh = "stale"
-            is_product_ready = False
-            reason = "CHIP_FAILED"
-        else:
-            state = READINESS_PENDING
-            fresh = "unknown"
-            is_product_ready = False
-            reason = "CHIP_PENDING"
-
         return ProductReadinessState(
-            "chip", state, fresh, is_mandatory=False, is_terminal=job_terminal,
-            is_product_ready=is_product_ready,
+            "chip",
+            READINESS_READY,
+            "fresh",
+            is_mandatory=False,
+            is_terminal=True,
+            is_product_ready=True,
             lineage={
-                "source_type": "production_artifact",
-                "reason_code": reason,
-                "job_id": _sid(getattr(job, "id", None)),
-                "job_status": job_status,
-                "chip_status": chip_status,
-                "snapshot_rows": snap_rows,
-                "expected_count": expected_count,
-                "succeeded_count": succeeded_count,
-                "coverage": coverage,
-                "source_core_run_id": _sid(current_core_run_id),
+                "source_type": "retired_product",
+                "reason_code": "CHIP_PIPELINE_RETIRED",
+                "detail": (
+                    "盘后筹码快照链已退休：不再生产，readiness 不再读取其历史产物，"
+                    "不影响 closure"
+                ),
                 "trade_date": trade_date.isoformat(),
             },
         )

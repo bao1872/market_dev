@@ -540,38 +540,77 @@ async def test_no_publish_pending():
     assert ev.mandatory_products_ready is False
 
 
-async def test_failed_enhancement_terminal_fully_ready():
-    """P0-3/P0-1：chip 失败（terminal+unavailable）→ 不阻断 mandatory chain，但 chip 非真正就绪，
-    闭包为 degraded_ready（不得误判 fully_ready）。
+async def test_failed_enhancement_terminal_degrades_closure():
+    """失败但**仍在役**的 enhancement（terminal + 未真正就绪）→ 闭包 degraded_ready。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE] 原用例以 chip 失败为例；chip 链已退役，
+    chip 节点恒为「终态退休就绪」，不再能承载本语义。改用仍活跃的
+    auction_anchor（失败 → 非真正就绪）继续锁死这条合同。
 
     [R1.1c-C2] daily_facts 完整（_full_plan 默认）→ mandatory 全部 fully fresh；
-    降级来源是 enhancement chip 非真正就绪，而非 daily_facts。"""
+    降级来源是 enhancement 非真正就绪，而非 daily_facts。"""
     plan = _full_plan()
-    plan["pubs"][_CHIP] = [None]                 # chip 无 publication pointer
-    plan["runs"][SchedulerJobRun] = [_chip_job("failed", chip_status="failed")]  # job failed
+    plan["runs"][AuctionAnchorSnapshot] = [_auction_snap("failed")]  # live enhancement 失败
     ev = await _evaluate(plan)
     assert ev.closure == CLOSURE_DEGRADED_READY
-    assert ev.mandatory_products_full_fresh is True  # mandatory 全 fresh；降级来自 enhancement chip
+    assert ev.mandatory_products_full_fresh is True  # mandatory 全 fresh；降级来自 enhancement
     assert ev.enhancement_jobs_terminal is True
 
 
-async def test_chip_succeeded_but_counts_incomplete_is_degraded():
-    """Case A：job=succeeded、chip_status=succeeded，但 5100/5200 计数不完整
-    → chip 必须 degraded，绝不能因两个字符串状态就判定 full/ready。"""
-    def _plan():
-        # _FakeDB 以 pop(0) 消费队列，每次评估须用全新 plan。
-        p = _full_plan()
-        p["pubs"][_CHIP] = [None]
-        p["runs"][SchedulerJobRun] = [
-            _chip_job("succeeded", chip_status="succeeded", expected=5200, succeeded=5100)
-        ]
-        return p
+async def test_product_readiness_does_not_read_legacy_chip_artifacts():
+    """chip readiness 必须与 legacy chip 制品**存在与否完全无关**。
 
-    chip = await _collect_product(_plan(), "chip")
-    assert chip.is_product_ready is False
-    assert chip.readiness == READINESS_DEGRADED
-    ev = await _evaluate(_plan())
-    assert ev.closure == CLOSURE_DEGRADED_READY
+    [PANJI-INTRADAY-DIRECT-SOURCE] 盘后 chip 快照链（stock_chip_consensus_snapshots +
+    SchedulerJobRun(after_close_chip_consensus) + chip publication pointer）已整体退役。
+    readiness **不得**再读取它们来推断「今天算没算」。
+
+    本用例用**敌对**制品（job=failed、pointer 缺失、snapshot 计数不完整）构造同一个
+    基线：若 readiness 仍在读旧产物，chip 必然 degraded/unavailable 且闭包落 degraded_ready；
+    退役后则必须恒为 ready/terminal 且闭包不受影响。
+    """
+    # A) 敌对 legacy 制品：failed job + 缺失 pointer + 计数不完整的 snapshot
+    hostile = _full_plan()
+    hostile["pubs"][_CHIP] = [None]
+    hostile["runs"][SchedulerJobRun] = [_chip_job("failed", chip_status="failed")]
+    hostile["runs"][StockChipConsensusSnapshot] = [0]
+
+    chip_hostile = await _collect_product(hostile, "chip")
+    assert chip_hostile.readiness == READINESS_READY
+    assert chip_hostile.is_terminal is True
+    assert chip_hostile.is_product_ready is True
+    assert chip_hostile.lineage["source_type"] == "retired_product"
+    assert chip_hostile.lineage["reason_code"] == "CHIP_PIPELINE_RETIRED"
+
+    ev_hostile = await _evaluate(_full_plan_with_hostile_chip())
+    assert ev_hostile.closure == CLOSURE_FULLY_READY, (
+        "退役 chip 的失败产物不得再把闭包降级为 degraded_ready"
+    )
+
+    # B) 完全没有 chip 制品：chip 节点与闭包必须与 A 完全一致
+    absent = _full_plan()
+    absent["pubs"][_CHIP] = []
+    absent["runs"][SchedulerJobRun] = []
+    absent["runs"][StockChipConsensusSnapshot] = []
+
+    chip_absent = await _collect_product(absent, "chip")
+    assert chip_absent == chip_hostile, "chip readiness 不得依赖 legacy chip 制品"
+
+    ev_absent = await _evaluate(_full_plan_with_hostile_chip(absent=True))
+    assert ev_absent.closure == CLOSURE_FULLY_READY
+
+
+def _full_plan_with_hostile_chip(*, absent: bool = False) -> dict:
+    """全新 plan（_FakeDB 以 pop(0) 消费队列，每次求值必须用全新 plan）。"""
+    p = _full_plan()
+    if absent:
+        p["pubs"][_CHIP] = []
+        p["runs"][SchedulerJobRun] = []
+        p["runs"][StockChipConsensusSnapshot] = []
+    else:
+        p["pubs"][_CHIP] = [None]
+        p["runs"][SchedulerJobRun] = [_chip_job("failed", chip_status="failed")]
+        p["runs"][StockChipConsensusSnapshot] = [0]
+    return p
 
 
 async def test_auction_partial_snapshot_yields_hybrid():

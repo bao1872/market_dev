@@ -1,4 +1,13 @@
-"""Pure-unit terminal-state contracts for chip consensus execution."""
+"""Pure-unit terminal-state contracts for chip consensus execution.
+
+[PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 盘后持久化 chip 快照链已退休：正式入口
+``execute_after_close_chip_consensus`` 现在是 fail-closed 桩（见
+``tests/test_after_close_chip_retirement.py::test_retired_chip_executor_fails_closed_without_db_write``）。
+
+本文件锁的是 **skip/partial 终态语义**，这些语义仍然存在（完整实现保留为
+``_execute_legacy_after_close_chip_consensus``，仅审计 / 历史产物重建使用），
+因此用例改为直指 legacy 实现，而不是假装退役入口仍在运行。
+"""
 from __future__ import annotations
 
 import uuid
@@ -11,7 +20,7 @@ import pytest
 from app.services.after_close_chip_consensus_service import (
     Chip15mReadinessError,
     _assess_15m_readiness,
-    execute_after_close_chip_consensus,
+    _execute_legacy_after_close_chip_consensus,
 )
 from app.services.chip_bars_refresh_coordinator import ChipBarsRefreshResult
 
@@ -39,7 +48,7 @@ async def test_all_legal_skips_report_skipped() -> None:
         "app.services.after_close_chip_consensus_service._upsert_chip_snapshot",
         new=upsert,
     ):
-        result = await execute_after_close_chip_consensus(
+        result = await _execute_legacy_after_close_chip_consensus(
             uuid.uuid4(), date(2026, 7, 31), uuid.uuid4(),
             instrument_ids=instruments,
             worker_id="worker:test",
@@ -66,7 +75,7 @@ async def test_skip_persistence_failure_is_not_silently_swallowed() -> None:
         "app.services.after_close_chip_consensus_service._upsert_chip_snapshot",
         new=AsyncMock(side_effect=RuntimeError("write rejected")),
     ):
-        result = await execute_after_close_chip_consensus(
+        result = await _execute_legacy_after_close_chip_consensus(
             uuid.uuid4(), date(2026, 7, 31), uuid.uuid4(),
             instrument_ids=[uuid.uuid4()],
             worker_id="worker:test",
@@ -94,7 +103,7 @@ async def test_mixed_skip_and_system_failure_report_partial() -> None:
         "app.services.after_close_chip_consensus_service._upsert_chip_snapshot",
         new=AsyncMock(),
     ):
-        result = await execute_after_close_chip_consensus(
+        result = await _execute_legacy_after_close_chip_consensus(
             uuid.uuid4(), date(2026, 7, 31), uuid.uuid4(),
             instrument_ids=[uuid.uuid4(), uuid.uuid4()],
             worker_id="worker:test",
@@ -137,7 +146,7 @@ async def test_15m_readiness_failure_is_structured_skip() -> None:
         "app.services.after_close_chip_consensus_service._upsert_chip_snapshot",
         new=upsert,
     ):
-        result = await execute_after_close_chip_consensus(
+        result = await _execute_legacy_after_close_chip_consensus(
             uuid.uuid4(), date(2026, 7, 31), uuid.uuid4(),
             instrument_ids=[uuid.uuid4()],
             worker_id="worker:test",

@@ -9,7 +9,7 @@
 6. history 一次计算多日
 7. 最后日与 core snapshot 一致
 8. core 不调用 Node Cluster
-9. 主 run 不等待 chip（接口合同：execute 抛 NotImplementedError）
+9. 主 run 不等待 chip（接口合同：[PANJI-INTRADAY-DIRECT-SOURCE] 已退休，execute fail-closed）
 10. chip 失败不影响 core（compute_chip_consensus_snapshot 失败返回 error，core 独立成功）
 
 运行：
@@ -494,37 +494,40 @@ class TestMainRunDoesNotWaitForChip:
             "自动 chip 已退役：主编排不得再调用 create_after_close_chip_consensus_job"
         )
 
-    def test_chip_execute_is_implemented(self):
-        """[P0-10] execute_after_close_chip_consensus 已实现，不再抛 NotImplementedError。
+    def test_chip_execute_fails_closed_after_retirement(self):
+        """[PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 正式执行入口已退休，恒定 fail-closed。
 
-        空输入时应返回 succeeded 状态（无 instrument 需要处理），不抛异常。
-        空输入不产生持久化写入（PURE_UNIT_TEST 模式不连接数据库）。
+        原 [P0-10] 合同是「空输入应返回 succeeded（无 instrument 需要处理）」。
+        盘后持久化 chip 快照链整体退役后，该入口不再执行任何工作，必须**显式失败**
+        （`ChipPipelineRetiredError`）而不是静默返回成功 —— 否则误调用 / 遗留
+        resume_queued 任务会悄悄重新开始写旧表。
+
+        完整实现保留为 `_execute_legacy_after_close_chip_consensus`（仅审计）。
         """
         import asyncio
         import uuid as uuid_mod
         from datetime import date as date_mod
 
         from app.services.after_close_chip_consensus_service import (
+            ChipPipelineRetiredError,
+            _execute_legacy_after_close_chip_consensus,
             execute_after_close_chip_consensus,
         )
 
-        result = asyncio.run(
-            execute_after_close_chip_consensus(
-                job_run_id=uuid_mod.uuid4(),
-                trade_date=date_mod(2026, 7, 29),
-                core_run_id=uuid_mod.uuid4(),
-                instrument_ids=[],
-                worker_id="pure-unit-worker",
-                lease_epoch=1,
+        with pytest.raises(ChipPipelineRetiredError):
+            asyncio.run(
+                execute_after_close_chip_consensus(
+                    job_run_id=uuid_mod.uuid4(),
+                    trade_date=date_mod(2026, 7, 29),
+                    core_run_id=uuid_mod.uuid4(),
+                    instrument_ids=[],
+                    worker_id="pure-unit-worker",
+                    lease_epoch=1,
+                )
             )
-        )
-        # 空列表应返回 succeeded（无 instrument 需要处理）
-        assert result["status"] == "succeeded", (
-            f"execute 空输入应返回 succeeded，实际: {result['status']}"
-        )
-        assert result["total_count"] == 0
-        assert result["succeeded_count"] == 0
-        assert result["failed_count"] == 0
+
+        # 退役 ≠ 删除：legacy 实现仍可被审计工具调用（不参与生产链）
+        assert callable(_execute_legacy_after_close_chip_consensus)
 
     def test_chip_job_name_is_independent(self):
         """chip job 名称与 after_close_orchestrator 区分。"""

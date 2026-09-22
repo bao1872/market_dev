@@ -111,18 +111,55 @@ _PROVIDER_DIRECT_DEFAULT_COUNT: dict[str, int] = {
 }
 
 
-def resolve_display_source_policy(timeframe: str) -> MarketDataSourcePolicy:
-    """展示/图表周期的 source policy **唯一判定点**（唯一真源，禁止复制第二套规则）。
+def resolve_market_data_source_policy(
+    timeframe: str,
+    *,
+    historical: bool,
+) -> MarketDataSourcePolicy:
+    """source policy 的**唯一判定点**（唯一真源，禁止复制第二套规则）。
 
-    所有「个股图表展示」读链（chart-snapshot / bars 分页）必须复用本函数，
-    不得各自再写一份 `if timeframe in {"15m","1h"}` 判定。
+    判定只依赖两个显式输入：周期 + 「本次请求是不是历史读」。
+    ``historical`` 必须由调用方**显式**给出（或经 ``resolve_request_source_policy``
+    由请求参数派生），**不得**用周期以外的间接特征猜测。
 
-    - 15m / 1h → ``PROVIDER_DIRECT``：实时分钟行情归 Provider。
-    - 其余（1d / 1w / 1mo / 1m）→ ``HYBRID``：行为与历史完全一致。
+    - 非原生日内周期（1d / 1w / 1mo / 1m）→ ``HYBRID``（行为与历史完全一致）。
+    - 15m / 1h + live → ``PROVIDER_DIRECT``：实时分钟行情归 Provider。
+    - 15m / 1h + historical → ``DB_ONLY``：历史分钟行情归 DB，
+      PIT 路径**绝对禁止访问网络**（联网会把未来数据污染进历史结果）。
     """
-    if timeframe in _PROVIDER_DIRECT_TIMEFRAMES:
-        return MarketDataSourcePolicy.PROVIDER_DIRECT
-    return MarketDataSourcePolicy.HYBRID
+    if timeframe not in _PROVIDER_DIRECT_TIMEFRAMES:
+        return MarketDataSourcePolicy.HYBRID
+    return (
+        MarketDataSourcePolicy.DB_ONLY
+        if historical
+        else MarketDataSourcePolicy.PROVIDER_DIRECT
+    )
+
+
+def resolve_request_source_policy(
+    timeframe: str,
+    *,
+    adjustment_as_of: date | None,
+    end_date: date | None = None,
+    today: date | None = None,
+) -> MarketDataSourcePolicy:
+    """把**一次请求**的参数映射为 source policy（读链唯一入口）。
+
+    ``/bars`` 与 ``/chart-snapshot`` 两条展示读链必须共用本函数 —— 否则
+    「15m/1h 该读 Provider 还是 DB」会出现第二个判定 owner，两个入口随后漂移。
+
+    历史判据（任一成立即 historical）：
+    - 显式 ``adjustment_as_of``（as-of 复权锚点 ⇒ 历史/PIT 请求，这是最强的信号）；
+    - ``end_date`` 早于今天（回溯窗口 ⇒ 历史请求）。
+
+    **刻意不把 ``completed_only=True`` 视为 historical**：实时 Node 输入也传
+    completed_only=True，但它仍然是 live，必须走 provider_direct 的已完成 bars。
+    """
+    effective_today = today if today is not None else now_shanghai().date()
+    historical = adjustment_as_of is not None or (
+        end_date is not None and end_date < effective_today
+    )
+    return resolve_market_data_source_policy(timeframe, historical=historical)
 
 # [P0-2 2026-08-04] 单次 get_bars 在典型路径下的 repository 级读操作数：
 # bars 查询 1 次 + 复权因子 1 次（qfq）+ 预期最后完成日 1 次 = 3 次。

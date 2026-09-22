@@ -1,12 +1,25 @@
 """盘后筹码共识独立任务服务（[CHANGE-20260729-003] 核心与筹码解耦）。
 
-本模块实现独立 `after_close_chip_consensus` job 的创建、查询和执行。
+**[PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 本模块的生产执行入口已退休（fail-closed）。**
+
+盘后持久化 chip 快照链（本 job + `stock_chip_consensus_snapshots`）已整体退役：
+- `after_close_orchestrator` 不再创建本 job（`periods=("d",)`，见 orchestrator）；
+- 所有用户面读链不再消费旧快照（`resolve_chip_status` 恒 retired）；
+- readiness 不再把旧产物当现役产品。
+
+因此 `execute_after_close_chip_consensus`（正式入口）**直接拒绝执行**——
+即使旧 worker 配置恢复、误调用或手工触发，也不会重新写旧表。
+原实现保留为 `_execute_legacy_after_close_chip_consensus`（仅供审计/历史工具），
+不再有任何生产调用点。
+
+以下"设计目标 / 状态合同 / 幂等键"描述的是**历史实现**（legacy 实现）的语义，
+保留用于理解已退役产物的数据形状，不代表当前生产行为。
 
 设计目标（PRD20 盘后核心/筹码解耦）：
 1. **核心发布成功即标记主 run succeeded**：after_close_orchestrator 关键路径
    日线 → core 个股状态/事件 → 质量门禁 → 发布，core 发布成功即可复盘
 2. **chip 任务后置非阻塞**：发布后创建独立 `after_close_chip_consensus` job，
-   不 await、不加入主 run 成功门禁
+   不 await、不加入主 run 成功门禁（**该 job 现已不再创建**）
 3. **chip 可独立失败/重试**：chip 任务失败/部分成功/单独重试，绝不反改主 run 或重算 core
 4. **chip 使用独立 version/hash/run 关联**：chip 计算边界由
    `first_pyramid_service.compute_chip_consensus_snapshot` 提供
@@ -277,7 +290,44 @@ async def get_pending_chip_instruments(
 # =============================================================================
 
 
+class ChipPipelineRetiredError(RuntimeError):
+    """[PANJI-INTRADAY-DIRECT-SOURCE] 盘后筹码共识链已退休：正式执行入口 fail-closed。
+
+    抛出本错误而非静默返回成功，是为了让任何误调用（旧 worker 配置恢复、
+    手工触发、遗留 resume_queued 任务）**显式失败**，而不是悄悄重新开始写旧表。
+    """
+
+
 async def execute_after_close_chip_consensus(
+    job_run_id: uuid.UUID,
+    trade_date: date,
+    core_run_id: uuid.UUID,
+    *,
+    instrument_ids: list[uuid.UUID],
+    worker_id: str | None = None,
+    lease_epoch: int | None = None,
+    ownership_check: Any | None = None,
+    batch_size: int = _CHIP_BATCH_SIZE,
+    _diag_sink: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """**已退休**：盘后筹码共识执行入口，恒定 fail-closed。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 盘后持久化 chip 快照链已整体退役
+    （不再生产、不再被消费、不再参与 readiness / closure）。本入口**不做任何事**：
+    - 不刷新 15m，不计算 chip，不 upsert `stock_chip_consensus_snapshots`；
+    - 立即抛 `ChipPipelineRetiredError`，保证误调用可见地失败。
+
+    原实现保留为 `_execute_legacy_after_close_chip_consensus`（审计 / 历史工具专用），
+    生产链**无任何调用点**。
+    """
+    raise ChipPipelineRetiredError(
+        "after_close_chip_consensus pipeline retired: "
+        "盘后筹码快照链已停止生产，execute_after_close_chip_consensus 不再执行；"
+        "如需审计历史产物请使用 _execute_legacy_after_close_chip_consensus"
+    )
+
+
+async def _execute_legacy_after_close_chip_consensus(
     job_run_id: uuid.UUID,
     trade_date: date,
     core_run_id: uuid.UUID,
@@ -289,7 +339,11 @@ async def execute_after_close_chip_consensus(
         batch_size: int = _CHIP_BATCH_SIZE,
         _diag_sink: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """[CHANGE-20260729-003] 执行盘后筹码共识独立任务。
+    """[CHANGE-20260729-003] 执行盘后筹码共识独立任务（**legacy 实现，仅审计**）。
+
+    [PANJI-INTRADAY-DIRECT-SOURCE 2026-09-22] 本函数已从生产链移除：正式入口
+    `execute_after_close_chip_consensus` 现在是 fail-closed 桩。此处保留完整实现，
+    供审计 / 历史数据工具理解与重建历史产物，**禁止**在生产路径重新接线。
 
     [P0-10 修复 2026-07-29] 完整实现：
     - 对每个 instrument 获取 daily + 15m bars（point-in-time <= trade_date）

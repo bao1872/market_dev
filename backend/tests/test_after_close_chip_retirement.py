@@ -378,3 +378,92 @@ def test_d3_preemption_complexity_reverted_without_touching_shared_fencing():
         assert hasattr(fenced, kept), (
             f"共用 fencing 原语 {kept} 不得被 chip 回退波及"
         )
+
+
+# =============================================================================
+# TEST E — 盘后 chip 生产者 fail-closed（[PANJI-INTRADAY-DIRECT-SOURCE]）
+# =============================================================================
+
+
+@pytest.mark.asyncio
+async def test_retired_chip_executor_fails_closed_without_db_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """E（行为）：正式执行入口必须 fail-closed，且**不产生任何副作用**。
+
+    这是「退役」区别于「静默空转」的关键：入口不仅要停，还要**可见地失败**，
+    并且不得再刷新 15m / 计算 chip / upsert 快照（否则遗留 resume_queued 任务
+    会在无人察觉的情况下继续写旧表，重新制造两份 chip 真相）。
+
+    三个副作用 seam 全部换成记录器（不是抛异常，也不是 AsyncMock 返回值），
+    断言调用次数恰好为 0：
+      - `chip_bars_refresh_coordinator.refresh_15m_batch`（15m 运行级刷新）
+      - `first_pyramid_service.compute_chip_consensus_snapshot`（chip 计算）
+      - `after_close_chip_consensus_service._upsert_chip_snapshot`（快照落库）
+    """
+    import uuid as uuid_mod
+    from datetime import date as date_mod
+
+    import app.services.chip_bars_refresh_coordinator as refresh_mod
+    import app.services.first_pyramid_service as fp_mod
+
+    calls: dict[str, int] = {
+        "refresh_15m": 0,
+        "compute_chip": 0,
+        "upsert_snapshot": 0,
+    }
+
+    async def _refresh_15m_batch(*args: object, **kwargs: object) -> object:
+        calls["refresh_15m"] += 1
+        return None
+
+    async def _compute_chip(*args: object, **kwargs: object) -> object:
+        calls["compute_chip"] += 1
+        return None
+
+    async def _upsert_chip_snapshot(*args: object, **kwargs: object) -> object:
+        calls["upsert_snapshot"] += 1
+        return None
+
+    monkeypatch.setattr(refresh_mod, "refresh_15m_batch", _refresh_15m_batch)
+    monkeypatch.setattr(fp_mod, "compute_chip_consensus_snapshot", _compute_chip)
+    monkeypatch.setattr(chip_svc, "_upsert_chip_snapshot", _upsert_chip_snapshot)
+
+    with pytest.raises(chip_svc.ChipPipelineRetiredError):
+        await chip_svc.execute_after_close_chip_consensus(
+            uuid_mod.uuid4(),
+            date_mod(2026, 9, 22),
+            uuid_mod.uuid4(),
+            instrument_ids=[uuid_mod.uuid4(), uuid_mod.uuid4()],
+            worker_id="retired-executor-test",
+            lease_epoch=1,
+        )
+
+    assert calls == {"refresh_15m": 0, "compute_chip": 0, "upsert_snapshot": 0}, (
+        f"退役执行器必须零副作用，实际: {calls}"
+    )
+
+
+def test_e2_legacy_impl_preserved_but_unwired() -> None:
+    """E2（拓扑）：legacy 实现保留，但生产树中除定义模块外无任何调用点。"""
+    import inspect as _inspect
+    from pathlib import Path
+
+    assert hasattr(chip_svc, "_execute_legacy_after_close_chip_consensus"), (
+        "legacy 实现必须保留（审计 / 历史重建），退役不等于删除"
+    )
+
+    defining_module = Path(_inspect.getsourcefile(chip_svc)).resolve()
+    app_root = defining_module.parents[2]
+    offenders: list[str] = []
+    for py in sorted(app_root.joinpath("app").rglob("*.py")):
+        if py.resolve() == defining_module:
+            continue
+        tree = ast.parse(py.read_text(encoding="utf-8"), filename=str(py))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Name) and node.id == "_execute_legacy_after_close_chip_consensus":
+                offenders.append(f"{py.relative_to(app_root)}:{node.lineno}")
+
+    assert offenders == [], (
+        "legacy chip 执行实现不得被生产链重新接线，实际: " + str(offenders)
+    )

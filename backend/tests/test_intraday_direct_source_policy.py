@@ -37,12 +37,13 @@ from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
     MarketDataSourcePolicy,
-    resolve_display_source_policy,
+    resolve_market_data_source_policy,
+    resolve_request_source_policy,
 )
 from app.services.node_cluster_input_provider import (
     NodeClusterInputProvider,
     NodeClusterSourceMode,
-    _resolve_node_15m_source_policy,
+    _resolve_node_source_policies,
 )
 
 TEST_INSTRUMENT_ID = uuid.UUID("12345678-1234-1234-1234-123456789012")
@@ -141,21 +142,88 @@ def test_source_policy_enum_values_are_stable() -> None:
     assert MarketDataSourcePolicy.DB_ONLY.value == "db_only"
 
 
-def test_resolve_display_source_policy_is_single_owner() -> None:
-    assert resolve_display_source_policy("15m") is MarketDataSourcePolicy.PROVIDER_DIRECT
-    assert resolve_display_source_policy("1h") is MarketDataSourcePolicy.PROVIDER_DIRECT
+def test_source_policy_resolver_is_single_owner() -> None:
+    """``resolve_market_data_source_policy`` 是唯一判定点（基于显式 historical 入参）。"""
+    assert resolve_market_data_source_policy(
+        "15m", historical=False,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+    assert resolve_market_data_source_policy(
+        "1h", historical=False,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+    # 历史/PIT：分钟行情归 DB，禁止联网
+    assert resolve_market_data_source_policy(
+        "15m", historical=True,
+    ) is MarketDataSourcePolicy.DB_ONLY
+    assert resolve_market_data_source_policy(
+        "1h", historical=True,
+    ) is MarketDataSourcePolicy.DB_ONLY
+    # 非原生分钟周期恒为 HYBRID（历史与否都一样）
     for tf in ("1d", "1w", "1mo", "1m"):
-        assert resolve_display_source_policy(tf) is MarketDataSourcePolicy.HYBRID
+        for hist in (True, False):
+            assert resolve_market_data_source_policy(
+                tf, historical=hist,
+            ) is MarketDataSourcePolicy.HYBRID, (tf, hist)
 
 
-def test_node_source_mode_maps_15m_policy_explicitly() -> None:
-    assert (
-        _resolve_node_15m_source_policy(NodeClusterSourceMode.LIVE_DIRECT)
-        is MarketDataSourcePolicy.PROVIDER_DIRECT
+def test_request_source_policy_maps_historical_requests_to_db_only() -> None:
+    """request-level resolver：as-of / 回溯窗口 → db_only，live → provider_direct。"""
+    today = date(2026, 9, 22)
+
+    # live：无 as-of、无 end_date（或 end_date == today）
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=None, end_date=None, today=today,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=None, end_date=today, today=today,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+    # 未来 end_date 也不算历史
+    assert resolve_request_source_policy(
+        "1h", adjustment_as_of=None, end_date=date(2026, 9, 25), today=today,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+
+    # historical：显式 as-of
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=date(2026, 7, 1), today=today,
+    ) is MarketDataSourcePolicy.DB_ONLY
+    # historical：回溯窗口（end_date 早于今天）
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=None, end_date=date(2026, 6, 1), today=today,
+    ) is MarketDataSourcePolicy.DB_ONLY
+    # 非分钟周期不受影响
+    assert resolve_request_source_policy(
+        "1d", adjustment_as_of=date(2026, 7, 1), today=today,
+    ) is MarketDataSourcePolicy.HYBRID
+
+
+def test_completed_only_is_not_treated_as_historical() -> None:
+    """``completed_only=True`` **不得**被当成 historical。
+
+    实时 Node 输入同样传 completed_only=True，但它仍是 live，必须走 provider_direct
+    的已完成 bars。resolver 的入参中根本没有 completed_only —— 本用例锁死这一点。
+    """
+    import inspect
+
+    for fn in (resolve_market_data_source_policy, resolve_request_source_policy):
+        params = set(inspect.signature(fn).parameters)
+        assert "completed_only" not in params, (
+            f"{fn.__name__} 不得接收 completed_only（它不是历史判据）"
+        )
+    # live 15m + completed_only=True 仍走 provider_direct（由 chart-snapshot 侧保证）
+    assert resolve_request_source_policy(
+        "15m", adjustment_as_of=None, end_date=None, today=date(2026, 9, 22),
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+
+
+def test_node_source_mode_maps_both_policies_explicitly() -> None:
+    """Node source_mode → (daily, 15m) 成对策略，**显式**参数、不推断。"""
+    assert _resolve_node_source_policies(NodeClusterSourceMode.LIVE_DIRECT) == (
+        MarketDataSourcePolicy.HYBRID,
+        MarketDataSourcePolicy.PROVIDER_DIRECT,
     )
-    assert (
-        _resolve_node_15m_source_policy(NodeClusterSourceMode.HISTORICAL_DB)
-        is MarketDataSourcePolicy.DB_ONLY
+    # HISTORICAL_DB 必须是 daily + 15m 都 DB_ONLY：PIT 绝对禁止访问网络
+    assert _resolve_node_source_policies(NodeClusterSourceMode.HISTORICAL_DB) == (
+        MarketDataSourcePolicy.DB_ONLY,
+        MarketDataSourcePolicy.DB_ONLY,
     )
     # source_mode 必须是显式参数且默认 LIVE_DIRECT（禁止用 adjustment_as_of 猜模式）
     import inspect
@@ -600,7 +668,7 @@ async def test_e_live_node_uses_provider_direct_for_15m(
 async def test_f_historical_node_uses_db_only_and_no_network(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """HISTORICAL_DB：Node 的 15m 输入必须声明 db_only（PIT 禁止触网）。"""
+    """HISTORICAL_DB：Node 的 daily **与** 15m 输入都必须声明 db_only（PIT 禁止触网）。"""
     calls: list[dict[str, Any]] = []
 
     async def _fake_get_bars(
@@ -625,7 +693,10 @@ async def test_f_historical_node_uses_db_only_and_no_network(
     by_tf = {c["timeframe"]: c for c in calls}
     assert by_tf["15m"]["source_policy"] is MarketDataSourcePolicy.DB_ONLY
     assert by_tf["15m"]["limit"] == 4000
-    assert by_tf["1d"]["source_policy"] is MarketDataSourcePolicy.HYBRID
+    # [P1-3] daily 也必须是 DB_ONLY：HYBRID 仍可在 need_tail 时访问 provider，
+    # 历史 / PIT 路径必须零网络访问。
+    assert by_tf["1d"]["source_policy"] is MarketDataSourcePolicy.DB_ONLY
+    assert by_tf["1d"]["limit"] == 250
 
 
 async def test_node_source_mode_default_is_live_direct(
@@ -655,4 +726,244 @@ async def test_node_source_mode_default_is_live_direct(
     by_tf = {c["timeframe"]: c for c in calls}
     assert by_tf["15m"]["source_policy"] is MarketDataSourcePolicy.PROVIDER_DIRECT, (
         "显式传 adjustment_as_of 仍是 live，不得被当成 historical_db"
+    )
+
+
+# ============================================================
+# 请求语义边界（真实调用点）：/bars 与 /chart-snapshot 共用同一判定点
+# ============================================================
+# 上面 B..H 锁的是 MDAS 内部枚举行为；本节锁的是**真实入口**是否把「请求语义」
+# 正确地翻译成 source policy —— 历史 15m/1h 曾经因为 resolver 只看 timeframe
+# 而被强制成 provider_direct（历史请求打到线上 provider）。
+
+
+def _access_ctx() -> Any:
+    """构造最小可用的 AccessContext（本组用例不校验权限，只校验取数分流）。"""
+    from app.services.access_control_service import AccessContext
+
+    return AccessContext(
+        user_id=str(uuid.uuid4()),
+        account_status="active",
+        roles=["member"],
+        is_admin=False,
+        is_member=True,
+        subscription_active=True,
+        default_route="/market",
+    )
+
+
+async def test_bars_historical_15m_uses_db_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/bars` 历史 15m（end_date < today）→ DB_ONLY：provider = 0 / DB = 1。
+
+    真实入口 + 真实 MDAS，只把两端的 IO 换掉：
+    - ``fetch_15min_bars``（provider 抓取）记录调用 → 必须 0；
+    - ``_query_15min_bars``（DB 分钟线）记录调用 → 必须恰好 1（无 limit ⇒ 单轮）。
+    """
+    from fastapi import Response
+
+    from app.api import bars as bars_api
+
+    provider_calls: list[Any] = []
+    db_calls: list[Any] = []
+
+    async def _provider_should_not_run(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        provider_calls.append(1)
+        return _build_15m_bars(4000)
+
+    async def _db_read(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        db_calls.append(1)
+        return _build_15m_bars(300)
+
+    monkeypatch.setattr(mdas, "fetch_15min_bars", _provider_should_not_run)
+    monkeypatch.setattr(mdas, "_query_15min_bars", _db_read)
+    monkeypatch.setattr(mdas, "_get_listing_date", lambda *a, **kw: _async_return(None))
+
+    response = Response()
+    result = await bars_api.get_bars(
+        TEST_INSTRUMENT_ID,
+        timeframe="15m",
+        adj="none",
+        start_date=None,
+        end_date=date(2026, 6, 1),  # < today ⇒ historical（PIT）
+        page=1,
+        page_size=100,
+        include_realtime=True,
+        completed_only=False,
+        adjustment_as_of=None,
+        ctx=_access_ctx(),
+        session=_mock_session(),
+        response=response,
+    )
+
+    assert provider_calls == [], (
+        "历史 15m 请求（end_date < today）绝不允许访问 provider"
+    )
+    assert len(db_calls) == 1, (
+        f"历史 15m 请求必须且只读 DB 一次，实际 {len(db_calls)} 次"
+    )
+    assert result.data_source == "db"
+    assert response.headers["X-Data-Source"] == "db"
+
+
+async def test_bars_current_15m_uses_provider_direct(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/bars` 实时 15m（无 end_date / 无 as-of）→ PROVIDER_DIRECT：provider = 1 / DB = 0。
+
+    DB 分钟线 reader 由本文件的 autouse fixture 全量替换为「一调用即失败」，
+    因此本用例只要成功返回，即等价于「DB 分钟线 0 次」。
+    """
+    from fastapi import Response
+
+    from app.api import bars as bars_api
+
+    provider_calls: list[Any] = []
+
+    async def _fake_fetch_15m(
+        session: Any, instrument_id: Any, *, count: int,
+    ) -> pd.DataFrame:
+        provider_calls.append(count)
+        return _build_15m_bars(count)
+
+    monkeypatch.setattr(mdas, "fetch_15min_bars", _fake_fetch_15m)
+
+    response = Response()
+    result = await bars_api.get_bars(
+        TEST_INSTRUMENT_ID,
+        timeframe="15m",
+        adj="none",
+        start_date=None,
+        end_date=None,
+        page=1,
+        page_size=100,
+        include_realtime=True,
+        completed_only=False,
+        adjustment_as_of=None,
+        ctx=_access_ctx(),
+        session=_mock_session(),
+        response=response,
+    )
+
+    assert len(provider_calls) == 1, "实时 15m 必须恰好走 provider 1 次"
+    assert provider_calls[0] == NODE_CLUSTER_LOW_BARS
+    assert result.data_source == "provider_direct"
+    assert response.headers["X-Data-Source"] == "provider_direct"
+
+
+async def test_chart_snapshot_historical_1h_uses_db_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/chart-snapshot` 历史 1h（显式 as-of）→ DB_ONLY：provider = 0。
+
+    与 /bars 共用 MDAS `resolve_request_source_policy`（唯一判定点），
+    本用例在 chart-snapshot 入口上再验证一次，防止两条入口再次分叉。
+    """
+    from app.services import chart_snapshot_service as css
+
+    provider_calls: list[Any] = []
+    db_calls: list[Any] = []
+
+    async def _provider_should_not_run(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        provider_calls.append(1)
+        return _build_60m_bars(1200)
+
+    async def _db_read(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        db_calls.append(1)
+        return _build_60m_bars(300)
+
+    monkeypatch.setattr(mdas, "fetch_60min_bars", _provider_should_not_run)
+    monkeypatch.setattr(mdas, "_query_60min_bars", _db_read)
+    monkeypatch.setattr(mdas, "_get_listing_date", lambda *a, **kw: _async_return(None))
+    # 指标计算与本次 source 分流无关，隔离掉以免引入额外 DB/Node 读。
+    monkeypatch.setattr(
+        css, "compute_all_indicators",
+        AsyncMock(return_value={"layers": [], "data": {}, "timeframe": "1h"}),
+    )
+
+    result = await css.ChartSnapshotService.compute_bars_and_indicators(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        timeframe="1h", adj="none", bars=100,
+        include_realtime=False, completed_only=True,
+        adjustment_as_of=date(2026, 7, 1),
+    )
+
+    assert provider_calls == [], (
+        "历史 1h 快照请求（显式 adjustment_as_of）绝不允许访问 provider"
+    )
+    assert len(db_calls) == 1, (
+        f"历史 1h 快照请求必须且只读 DB 一次，实际 {len(db_calls)} 次"
+    )
+    assert result.bars_result.data_source == "db"
+    assert result.is_empty is False
+
+
+async def test_historical_node_has_zero_external_market_data_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HISTORICAL_DB Node 全链零外部行情调用（daily + 15m 都是 DB_ONLY）。
+
+    与 ``test_f_*`` 的区别：本用例不替换 ``get_bars``，而是让**真实 MDAS** 跑，
+    把 5 个外部 provider 入口全部替换为**记录器** —— 只要历史 Node 路径里任何一处
+    （daily need_tail / 15m fresh tail / realtime 1m）真的触网，调用记录就会非空。
+
+    注意：不能用「一调用即抛异常」来断言 —— MDAS 的 daily 回补 / 实时尾部两段
+    都在 ``try/except Exception`` 内（降级语义），异常会被吞掉，反而让用例误判为通过。
+    必须用调用记录做**非异常**判据。
+    """
+    external_calls: list[str] = []
+
+    async def _external_recorder(name: str):
+        async def _fake(*args: Any, **kwargs: Any) -> pd.DataFrame:
+            external_calls.append(name)
+            return pd.DataFrame()
+        return _fake
+
+    for fn_name in (
+        "fetch_daily_bars",
+        "fetch_today_daily_bars",
+        "fetch_15min_bars",
+        "fetch_60min_bars",
+        "fetch_minute_bars",
+    ):
+        monkeypatch.setattr(mdas, fn_name, await _external_recorder(fn_name))
+
+    async def _empty_daily(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "amount"])
+
+    async def _db_15m(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        return _build_15m_bars(300)
+
+    monkeypatch.setattr(mdas, "_query_daily_bars", _empty_daily)
+    monkeypatch.setattr(mdas, "_query_15min_bars", _db_15m)
+    monkeypatch.setattr(mdas, "_get_listing_date", lambda *a, **kw: _async_return(None))
+    monkeypatch.setattr(
+        mdas, "_call_expected_last_completed_daily_bar",
+        lambda *a, **kw: _async_return(date(2026, 7, 1)),
+    )
+
+    class _FakeAdjService:
+        async def get_factor_series(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+            return pd.DataFrame({"trade_date": pd.to_datetime(["2026-01-01"]),
+                                 "adj_factor": [1.0]})
+
+        def apply_qfq(self, bars: pd.DataFrame, factors: pd.DataFrame, **kw: Any) -> pd.DataFrame:
+            return bars
+
+    monkeypatch.setattr(mdas, "AdjustmentFactorService", _FakeAdjService)
+    monkeypatch.setattr(
+        NodeClusterInputProvider, "_compute_exhaustion_proofs",
+        AsyncMock(return_value={"1d": (False, None), "15m": (False, None)}),
+    )
+
+    await NodeClusterInputProvider.get_inputs(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        adjustment_as_of=date(2026, 7, 1),
+        end_date=date(2026, 7, 1),
+        source_mode=NodeClusterSourceMode.HISTORICAL_DB,
+    )
+
+    assert external_calls == [], (
+        f"HISTORICAL_DB 路径绝对禁止访问外部行情源，实际触网: {external_calls}"
     )

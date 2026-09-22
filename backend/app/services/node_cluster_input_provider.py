@@ -78,18 +78,32 @@ class NodeClusterSourceMode(StrEnum):
     HISTORICAL_DB = "historical_db"
 
 
-def _resolve_node_15m_source_policy(
+def _resolve_node_source_policies(
     source_mode: NodeClusterSourceMode,
-) -> MarketDataSourcePolicy:
-    """Node 15m 输入的 source policy 唯一判定点（daily 恒为 HYBRID，见下）。
+) -> tuple[MarketDataSourcePolicy, MarketDataSourcePolicy]:
+    """Node 输入的 source policy 唯一判定点，返回 ``(daily_policy, m15_policy)``。
 
-    daily 保持 ``HYBRID``：日线是按 ``[start, end]`` 区间读取的，不存在「拉最新 4000 根」
-    那种未来泄漏形态，既有 PIT 语义（end_date=trade_date + adjustment_as_of）不变。
-    只有 15m 需要按 live / historical 分流。
+    [PANJI-INTRADAY-DIRECT-SOURCE] 必须**同时**给出 daily 与 15m 两条策略：
+    ``HISTORICAL_DB`` 这个名字承诺的是「整条 Node 输入都来自 DB」，
+    只把 15m 切成 DB_ONLY 而 daily 留在 HYBRID 是不成立的 ——
+    daily HYBRID 在 DB 缺目标日期尾部时会 ``fetch_daily_bars`` 访问 Pytdx，
+    于是 PIT 路径仍然联网，名字与业务合同不符。
+
+    - ``HISTORICAL_DB``（历史 / PIT）：daily 与 15m **都是 DB_ONLY**。
+      PIT 绝对禁止访问网络：今天去 provider 拉「最近 4000 根」再切到历史时点，
+      就是把未来数据污染进历史结果。
+    - ``LIVE_DIRECT``（当前图表 / 实时监控）：daily 保持 ``HYBRID``（行为不变），
+      15m 走 ``PROVIDER_DIRECT``（实时分钟行情归 Provider）。
     """
     if source_mode == NodeClusterSourceMode.HISTORICAL_DB:
-        return MarketDataSourcePolicy.DB_ONLY
-    return MarketDataSourcePolicy.PROVIDER_DIRECT
+        return (
+            MarketDataSourcePolicy.DB_ONLY,  # daily：PIT 不触网
+            MarketDataSourcePolicy.DB_ONLY,  # 15m：PIT 不触网
+        )
+    return (
+        MarketDataSourcePolicy.HYBRID,           # daily：区间读取，行为不变
+        MarketDataSourcePolicy.PROVIDER_DIRECT,  # 15m：实时分钟归 Provider
+    )
 
 
 class NodeAdjustmentContextMismatchError(RuntimeError):
@@ -200,10 +214,9 @@ class NodeClusterInputProvider:
         页面周期或 released strategy 状态。
 
         Source mode（[PANJI-INTRADAY-DIRECT-SOURCE]）：
-        - ``LIVE_DIRECT``（默认）：15m 走 provider_direct（实时分钟归 Provider）。
-        - ``HISTORICAL_DB``：15m 走 db_only（PIT 禁止访问网络）。
+        - ``LIVE_DIRECT``（默认）：daily → ``HYBRID``，15m → ``PROVIDER_DIRECT``。
+        - ``HISTORICAL_DB``：daily **与** 15m 均 → ``DB_ONLY``（PIT 禁止访问网络）。
         这是**显式业务参数**，禁止从 adjustment_as_of / end_date 推断。
-        daily 两模式均为 HYBRID（区间读取，无未来泄漏形态）。
 
         双模式：
         - Legacy mode（``adjustment_context is None``）：MDAS 直接返回 completed qfq，
@@ -247,7 +260,7 @@ class NodeClusterInputProvider:
         effective_end_date = (
             end_date if end_date is not None else adjustment_context.business_date
         )
-        m15_policy = _resolve_node_15m_source_policy(source_mode)
+        daily_policy, m15_policy = _resolve_node_source_policies(source_mode)
 
         # MDAS 只负责唯一行情出口 + completed raw bars（adj="none"，不复权）
         daily_agg = await mdas.get_bars(
@@ -259,7 +272,7 @@ class NodeClusterInputProvider:
             completed_only=True,
             end_date=effective_end_date,
             limit=_NODE_DAILY_REQUIRED,
-            source_policy=MarketDataSourcePolicy.HYBRID,
+            source_policy=daily_policy,
         )
         m15_agg = await mdas.get_bars(
             session,
@@ -355,10 +368,10 @@ class NodeClusterInputProvider:
         """Legacy mode：MDAS 直接返回 completed qfq（与历史行为完全一致）。
 
         C1 不修改任何 Legacy 语义；仅新增 ``adjustment_context_hash=None`` 字段。
-        [PANJI-INTRADAY-DIRECT-SOURCE] 15m 的 source policy 由 ``source_mode`` 决定
-        （live_direct → provider_direct；historical_db → db_only）；daily 恒为 HYBRID。
+        [PANJI-INTRADAY-DIRECT-SOURCE] daily 与 15m 的 source policy 由 ``source_mode``
+        统一决定（live_direct → (hybrid, provider_direct)；historical_db → (db_only, db_only)）。
         """
-        m15_policy = _resolve_node_15m_source_policy(source_mode)
+        daily_policy, m15_policy = _resolve_node_source_policies(source_mode)
 
         daily_agg = await mdas.get_bars(
             session,
@@ -370,7 +383,7 @@ class NodeClusterInputProvider:
             adjustment_as_of=adjustment_as_of,
             end_date=end_date,
             limit=_NODE_DAILY_REQUIRED,
-            source_policy=MarketDataSourcePolicy.HYBRID,
+            source_policy=daily_policy,
         )
 
         m15_agg = await mdas.get_bars(
@@ -719,15 +732,15 @@ if __name__ == "__main__":
     assert reason == "INSUFFICIENT_DAILY_HISTORY"
     print(f"新股daily不足: avail={avail} reason={reason} ✓")
 
-    # 9. [PANJI-INTRADAY-DIRECT-SOURCE] source mode → 15m source policy 映射
-    assert (
-        _resolve_node_15m_source_policy(NodeClusterSourceMode.LIVE_DIRECT)
-        is MarketDataSourcePolicy.PROVIDER_DIRECT
-    ), "LIVE_DIRECT 的 15m 必须是 provider_direct（实时分钟归 Provider）"
-    assert (
-        _resolve_node_15m_source_policy(NodeClusterSourceMode.HISTORICAL_DB)
-        is MarketDataSourcePolicy.DB_ONLY
-    ), "HISTORICAL_DB 的 15m 必须是 db_only（PIT 禁止访问网络）"
+    # 9. [PANJI-INTRADAY-DIRECT-SOURCE] source mode → (daily, 15m) source policy 映射
+    assert _resolve_node_source_policies(NodeClusterSourceMode.LIVE_DIRECT) == (
+        MarketDataSourcePolicy.HYBRID,
+        MarketDataSourcePolicy.PROVIDER_DIRECT,
+    ), "LIVE_DIRECT 必须是 (daily=hybrid, 15m=provider_direct)"
+    assert _resolve_node_source_policies(NodeClusterSourceMode.HISTORICAL_DB) == (
+        MarketDataSourcePolicy.DB_ONLY,
+        MarketDataSourcePolicy.DB_ONLY,
+    ), "HISTORICAL_DB 的 daily 与 15m 都必须是 db_only（PIT 绝对禁止访问网络）"
     default_mode = inspect.signature(
         NodeClusterInputProvider.get_inputs
     ).parameters["source_mode"].default
@@ -735,8 +748,8 @@ if __name__ == "__main__":
         f"source_mode 默认必须是 LIVE_DIRECT, got {default_mode!r}"
     )
     print(
-        "node source mode ✓ (LIVE_DIRECT→provider_direct, "
-        "HISTORICAL_DB→db_only, default=LIVE_DIRECT)"
+        "node source mode ✓ (LIVE_DIRECT→(hybrid, provider_direct), "
+        "HISTORICAL_DB→(db_only, db_only), default=LIVE_DIRECT)"
     )
 
     print("\nOK — NodeClusterInputProvider 状态机验证通过")
