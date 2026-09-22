@@ -296,6 +296,20 @@
   white-space: nowrap;
 }
 
+// [PANJI-REVIEW-UI-UNIFY] 表头统一到 StrategyDataTable 视觉：
+// 42px 固定单行高 + 深色底 + sticky；中文绝不逐字换行（word-break: keep-all）。
+.table thead th {
+  height: 42px;
+  padding: 0 6px 0 10px;
+  background: #171c25;
+  border-bottom: 1px solid v.$color-border;
+  white-space: nowrap;
+  word-break: keep-all;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+}
+
 .table th:first-child,
 .table td:first-child {
   text-align: left;
@@ -303,6 +317,7 @@
 
 .table td {
   text-align: right;
+  height: 40px;
   padding: 8px 10px;
   border-bottom: 1px solid v.$color-border-soft;
   font-variant-numeric: tabular-nums;
@@ -672,40 +687,209 @@
   border-color: v.$color-brand-hover;
 }
 
-.filter-panel {
-  background: v.$color-panel-2;
-  border: 1px solid v.$color-border;
-  border-radius: v.$radius-card;
-  padding: 14px 16px;
-  margin-bottom: 14px;
-}
-
-.filter-row {
+// [PANJI-REVIEW-UI-UNIFY] slim meta bar（与 StrategyDataTable 同视觉）：
+// 结果数 + 激活筛选 chips + 快速筛选 ▾ + 清除筛选。独立 filter-panel 已删除。
+.explorer-meta-bar {
   display: flex;
-  align-items: flex-end;
-  gap: 18px;
+  align-items: center;
+  justify-content: space-between;
   flex-wrap: wrap;
+  gap: 8px;
+  min-height: 34px;
+  padding: 4px 10px;
+  margin-bottom: 10px;
+  border: 1px solid v.$color-border-soft;
+  border-radius: 7px;
+  background: #121720;
+  color: v.$color-muted;
+  font-size: 12px;
 }
 
-.filter-group {
+.explorer-meta-left {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.explorer-result-count {
+  color: v.$color-text;
+  font-variant-numeric: tabular-nums;
+}
+
+.explorer-filter-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid rgba(v.$color-brand, 0.38);
+  border-radius: 999px;
+  background: rgba(v.$color-brand, 0.1);
+  color: #9ff3e0;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.filter-chip:hover {
+  border-color: v.$color-brand;
+  background: rgba(v.$color-brand, 0.16);
+  color: #d3fff4;
+}
+
+.filter-chip-text {
+  white-space: nowrap;
+}
+
+.filter-chip-x {
+  display: inline-grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  font-size: 12px;
+  color: inherit;
+}
+
+.filter-chip:hover .filter-chip-x {
+  background: rgba(v.$color-brand, 0.22);
+}
+
+.explorer-meta-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.quick-filter {
+  position: relative;
+}
+
+.quick-filter-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  background: transparent;
+  color: v.$color-muted;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.quick-filter-btn:hover {
+  border-color: v.$color-brand;
+  color: v.$color-brand;
+}
+
+.quick-filter-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 60;
+  min-width: 148px;
+  padding: 5px;
+  border: 1px solid v.$color-border;
+  border-radius: 8px;
+  background: v.$color-panel-2;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
+}
+
+.quick-filter-item {
+  display: block;
+  width: 100%;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: v.$color-muted;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.quick-filter-item:hover {
+  background: rgba(v.$color-brand, 0.1);
+  color: v.$color-brand;
+}
+
+.clear-filters-btn {
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: #7994d9;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.clear-filters-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+// 列筛选弹层（条件：区间 / ≥ / ≤ / =；最终映射为 <col>_min / <col>_max）
+.filter-popover {
+  position: fixed;
+  z-index: 500;
+  width: 260px;
+  padding: 11px;
+  border: 1px solid v.$color-border;
+  border-radius: 8px;
+  background: v.$color-panel-2;
+  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
+}
+
+.filter-pop-title {
+  margin-bottom: 9px;
+  font-size: 12px;
+  font-weight: 700;
+  color: v.$color-text;
+}
+
+.filter-mode-group {
   display: flex;
-  flex-direction: column;
   gap: 4px;
+  margin-bottom: 9px;
 }
 
-.filter-label {
+.filter-mode,
+.filter-mode-active {
+  flex: 1;
+  height: 26px;
+  border: 1px solid v.$color-border;
+  border-radius: 6px;
+  background: transparent;
+  color: v.$color-muted;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.filter-mode-active {
+  border-color: v.$color-brand;
+  background: rgba(v.$color-brand, 0.12);
+  color: v.$color-brand;
+}
+
+.filter-field {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
   font-size: 12px;
   color: v.$color-muted;
 }
 
-.filter-input-pair {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
 .filter-input {
-  width: 64px;
+  width: 108px;
   padding: 5px 8px;
   border: 1px solid v.$color-border;
   border-radius: 6px;
@@ -715,31 +899,11 @@
   text-align: right;
 }
 
-.filter-sep {
-  color: v.$color-muted;
-}
-
-.filter-actions {
+.filter-pop-actions {
   display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  margin-top: 10px;
-}
-
-.preset-btn {
-  border: 1px solid v.$color-border;
-  background: transparent;
-  color: v.$color-muted;
-  border-radius: 999px;
-  padding: 4px 10px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.preset-btn:hover {
-  border-color: v.$color-brand;
-  color: v.$color-brand;
+  justify-content: flex-end;
+  gap: 7px;
+  margin-top: 4px;
 }
 
 .pagination {
@@ -804,19 +968,78 @@
 }
 
 // 表格：可排序表头 / 操作列 / 选中行
+// [PANJI-REVIEW-UI-UNIFY] 排序区与筛选区是两个独立点击区域（.sort-btn 排序 /.th-filter 筛选）。
 .th-sort {
   text-align: right;
   font-weight: 600;
   color: v.$color-muted;
-  padding: 8px 10px;
-  border-bottom: 1px solid v.$color-border;
   white-space: nowrap;
+}
+
+.th-head {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 4px;
+  height: 42px;
+}
+
+.table th:first-child .th-head {
+  justify-content: flex-start;
+}
+
+.th-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  word-break: keep-all;
+}
+
+// 列筛选 funnel：常显 + 三态（与 global.scss .th-filter 同视觉，CSS module 无法跨文件复用）
+.th-filter {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #2b3446;
+  border-radius: 6px;
+  background: #141a24;
+  color: #7b8698;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+}
+
+.th-filter:hover {
+  border-color: #465677;
+  background: #1d2531;
+  color: #c4cfe2;
+}
+
+.th-filter.active {
+  border-color: v.$color-brand;
+  background: rgba(v.$color-brand, 0.12);
+  color: v.$color-brand;
+}
+
+.th-filter.active::after {
+  content: '';
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: v.$color-brand;
+  box-shadow: 0 0 0 1.5px #171c25;
 }
 
 .sort-btn {
   display: inline-flex;
   align-items: center;
   gap: 3px;
+  min-width: 0;
   background: none;
   border: none;
   color: inherit;

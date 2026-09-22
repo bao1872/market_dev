@@ -11,6 +11,7 @@ import { useTableViewPresets } from '@/hooks/useApi'
 import { decodeScreenerUrlState, encodeScreenerUrlState } from './screenerUrlState'
 import { reorderVisibleColumns } from './columnOrdering'
 import { canonicalizeFilterOperator } from './filterOperators'
+import TableFilterIcon from './TableFilterIcon'
 import type { TableViewPresetConfig } from '@/api/endpoints'
 
 // ===== 类型定义（对应 UI_DEVELOPMENT_SPEC.md 3.3 推荐组件输入）=====
@@ -218,6 +219,30 @@ const OPERATOR_LABELS: Record<FilterOperator, string> = {
   after: '晚于',
   empty: '为空',
   not_empty: '不为空',
+}
+
+// [PANJI-REVIEW-UI-UNIFY] 激活筛选 chip 的用户可读文案（纯函数，供 meta bar 与测试复用）。
+// 目标：让用户看到**具体条件**（`趋势 = 上升` / `涨跌幅 ≥ 3%`），而不是笼统的「N 个列筛选」。
+// enum 值优先经 column.enumOptions 映射为中文 label，避免泄露 canonical code。
+export function formatFilterChipLabel<Row>(
+  column: Pick<DataTableColumn<Row>, 'title' | 'shortTitle' | 'enumOptions'>,
+  filter: DataTableFilter,
+): string {
+  const name = column.shortTitle ?? column.title
+  const op = OPERATOR_LABELS[filter.operator] ?? filter.operator
+  const asLabel = (raw: unknown): string => {
+    const text = raw === undefined || raw === null ? '' : String(raw)
+    if (!column.enumOptions || text === '') return text
+    const parts = text.split(',').map((s) => s.trim())
+    const mapped = parts.map((p) => column.enumOptions?.find((o) => o.value === p)?.label ?? p)
+    return mapped.join('、')
+  }
+  // 无值操作符（为空 / 不为空）只显示操作符
+  if (filter.operator === 'empty' || filter.operator === 'not_empty') return `${name} ${op}`
+  if (filter.operator === 'between') {
+    return `${name} ${asLabel(filter.value)}–${asLabel(filter.value2)}`
+  }
+  return `${name} ${op} ${asLabel(filter.value)}`
 }
 
 // [CHANGE-20260730-013] 规范化筛选值（按 value_normalizer）
@@ -1420,7 +1445,6 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
           <span className="table-active-state">
             {[
               effectiveKeyword ? '全文搜索' : null,
-              filterCount ? `${filterCount} 个列筛选` : null,
               sortColumn !== null
                 ? `按「${columns[sortColumn]?.title}」${sortDirection === 'asc' ? '升序' : '降序'}`
                 : null,
@@ -1428,6 +1452,30 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
               .filter(Boolean)
               .join(' · ')}
           </span>
+          {/* [PANJI-REVIEW-UI-UNIFY] 激活筛选 chip：显示**具体条件**并可单条清除 */}
+          {filterCount > 0 && (
+            <span className="table-filter-chips" data-testid="table-filter-chips">
+              {Object.entries(filters).map(([rawIndex, filter]) => {
+                const index = Number(rawIndex)
+                const column = columns[index]
+                if (!column) return null
+                const label = formatFilterChipLabel(column, filter)
+                return (
+                  <button
+                    key={rawIndex}
+                    type="button"
+                    className="filter-chip"
+                    title={`清除「${label}」`}
+                    aria-label={`清除筛选 ${label}`}
+                    onClick={() => clearFilter(index)}
+                  >
+                    <span className="filter-chip-text">{label}</span>
+                    <span className="filter-chip-x" aria-hidden="true">×</span>
+                  </button>
+                )
+              })}
+            </span>
+          )}
           {stale && <span className="tag warn" style={{ marginLeft: 8 }}>数据过期</span>}
         </div>
         <div className="table-meta-actions">
@@ -1580,12 +1628,15 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                       )}
                       {col.filterable && (
                         <button
+                          type="button"
                           className={clsx(
                             'th-filter',
                             filters[i] && 'active',
                           )}
                           aria-label={`筛选${col.title}`}
-                          title={`筛选${col.title}`}
+                          aria-pressed={!!filters[i]}
+                          title={filters[i] ? `筛选${col.title}（已设置）` : `筛选${col.title}`}
+                          data-testid={`th-filter-${col.key}`}
                           onClick={(e) => {
                             e.stopPropagation()
                             setFilterPopover({
@@ -1594,7 +1645,7 @@ export function StrategyDataTable<Row extends Record<string, unknown>>(
                             })
                           }}
                         >
-                          ⌁
+                          <TableFilterIcon />
                         </button>
                       )}
                     </div>

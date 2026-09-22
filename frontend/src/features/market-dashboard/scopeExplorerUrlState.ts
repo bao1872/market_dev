@@ -247,3 +247,137 @@ export function uiToRatio(key: NumericFilterKey, raw: string): number | null {
   if (!Number.isFinite(n)) return null
   return key.startsWith('member_count') ? n : n / 100
 }
+
+// ---------------------------------------------------------------------------
+// [PANJI-REVIEW-UI-UNIFY] 表头筛选（funnel）元数据与派生
+//
+// 只有 backend 当前**真实支持**数值筛选的列才允许出现 funnel：
+//   member_count / ma5 / ma5_delta / ma10 / ma10_delta
+// MA20 / MA50 / MA120 没有对应 filter 参数 → 只可排序，绝不放「看起来能筛、
+// 实际后端做不到」的假按钮。
+// ---------------------------------------------------------------------------
+export const EXPLORER_FILTERABLE_COLUMNS = [
+  'member_count',
+  'ma5',
+  'ma5_delta',
+  'ma10',
+  'ma10_delta',
+] as const
+
+export type ExplorerFilterColumn = (typeof EXPLORER_FILTERABLE_COLUMNS)[number]
+
+export interface ExplorerFilterColumnSpec {
+  /** 表头显示 label（与锁死的列顺序一致；两个「5日Δ」列显示名相同） */
+  label: string
+  /** 筛选按钮可访问名（两个「5日Δ」列必须可区分） */
+  filterLabel: string
+  /** 单位：percent（ratio→%）/ pp（ratio→百分点）/ count（整数） */
+  unit: 'percent' | 'pp' | 'count'
+}
+
+export const EXPLORER_FILTER_COLUMN_SPECS: Record<ExplorerFilterColumn, ExplorerFilterColumnSpec> = {
+  member_count: { label: '成员数', filterLabel: '成员数', unit: 'count' },
+  ma5: { label: 'MA5', filterLabel: 'MA5', unit: 'percent' },
+  ma5_delta: { label: '5日Δ', filterLabel: 'MA5 5日Δ', unit: 'pp' },
+  ma10: { label: 'MA10', filterLabel: 'MA10', unit: 'percent' },
+  ma10_delta: { label: '5日Δ', filterLabel: 'MA10 5日Δ', unit: 'pp' },
+}
+
+export function filterKeysForColumn(column: ExplorerFilterColumn): {
+  min: NumericFilterKey
+  max: NumericFilterKey
+} {
+  return {
+    min: `${column}_min` as NumericFilterKey,
+    max: `${column}_max` as NumericFilterKey,
+  }
+}
+
+// 列（sort field）→ 该列对应的数值筛选列。
+// **只有出现在本表中的列才渲染 funnel** —— 这是「不制造假筛选」的可执行定义：
+// 后端没有 ma20_min / ma50_min / ma120_min 参数，故 MA20/MA50/MA120 只可排序。
+// 与 EXPLORER_TABLE_COLUMNS 同理放在纯模块，供表格组件与契约测试无副作用导入。
+export const FILTER_COLUMN_BY_FIELD: Partial<Record<ScopeExplorerSort, ExplorerFilterColumn>> = {
+  member_count: 'member_count',
+  ma5: 'ma5',
+  ma5_delta: 'ma5_delta',
+  ma10: 'ma10',
+  ma10_delta: 'ma10_delta',
+}
+
+export function isExplorerColumnFiltered(
+  column: ExplorerFilterColumn,
+  filters: Record<NumericFilterKey, number | null>,
+): boolean {
+  const { min, max } = filterKeysForColumn(column)
+  return filters[min] !== null || filters[max] !== null
+}
+
+function formatExplorerFilterValue(column: ExplorerFilterColumn, value: number): string {
+  const spec = EXPLORER_FILTER_COLUMN_SPECS[column]
+  if (spec.unit === 'count') return String(value)
+  const ui = Math.round(value * 100)
+  return spec.unit === 'pp' ? `${ui}pp` : `${ui}%`
+}
+
+export interface ExplorerFilterChip {
+  column: ExplorerFilterColumn
+  /** 用户可读条件，如 `MA5 60%–80%` / `成员数 ≥ 30` */
+  label: string
+  /** 该 chip 对应的 URL filter keys（清除时置空） */
+  keys: NumericFilterKey[]
+}
+
+/** 当前 URL 上的激活数值筛选（按列聚合为一个 chip）。 */
+export function activeExplorerFilterChips(
+  filters: Record<NumericFilterKey, number | null>,
+): ExplorerFilterChip[] {
+  const chips: ExplorerFilterChip[] = []
+  for (const column of EXPLORER_FILTERABLE_COLUMNS) {
+    const { min, max } = filterKeysForColumn(column)
+    const lo = filters[min]
+    const hi = filters[max]
+    if (lo === null && hi === null) continue
+    const spec = EXPLORER_FILTER_COLUMN_SPECS[column]
+    let range: string
+    if (lo !== null && hi !== null) {
+      range = `${formatExplorerFilterValue(column, lo)}–${formatExplorerFilterValue(column, hi)}`
+    } else if (lo !== null) {
+      range = `≥ ${formatExplorerFilterValue(column, lo)}`
+    } else if (hi !== null) {
+      range = `≤ ${formatExplorerFilterValue(column, hi)}`
+    } else {
+      continue
+    }
+    chips.push({ column, label: `${spec.label} ${range}`, keys: [min, max] })
+  }
+  return chips
+}
+
+// ---------------------------------------------------------------------------
+// [PANJI-REVIEW-UI-UNIFY] 筛选弹层「条件」→ min/max 输入映射
+//
+// 当前 backend 只有 min/max 区间模型，因此 区间/≥/≤/= 四种 UI 条件最终都转换为
+// ma5_min/ma5_max/... 两组 query param（业务 query contract 完全不变）。
+// ---------------------------------------------------------------------------
+export type ExplorerFilterMode = 'range' | 'gte' | 'lte' | 'eq'
+
+export const EXPLORER_FILTER_MODES: readonly { value: ExplorerFilterMode; label: string }[] = [
+  { value: 'range', label: '区间' },
+  { value: 'gte', label: '≥' },
+  { value: 'lte', label: '≤' },
+  { value: 'eq', label: '=' },
+]
+
+export function draftFromFilterMode(
+  mode: ExplorerFilterMode,
+  lower: string,
+  upper: string,
+): { min: string; max: string } {
+  const lo = lower.trim()
+  const hi = upper.trim()
+  if (mode === 'gte') return { min: lo, max: '' }
+  if (mode === 'lte') return { min: '', max: hi }
+  if (mode === 'eq') return { min: lo, max: lo }
+  return { min: lo, max: hi }
+}

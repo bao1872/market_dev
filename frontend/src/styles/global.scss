@@ -1121,28 +1121,74 @@ button { cursor: pointer; }
 .strategy-check { display: flex; align-items: center; gap: 8px; padding: 9px; border: 1px solid v.$color-border-soft; border-radius: 6px; background: #11151d; font-size: 12px; }
 
 // ===== V1.2 Interactive Table =====
-.interactive-table thead th { padding: 0; position: relative; background: #171c25; white-space: nowrap; }
-.th-shell { display: flex; align-items: center; min-height: 38px; }
-.th-sort { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 38px; padding: 0 6px 0 11px; border: 0; background: transparent; color: #9da6b8; text-align: left; font: inherit; cursor: pointer; &:hover { color: #eef2fa; background: #1e2531; } }
-.th-label { overflow: hidden; text-overflow: ellipsis; }
+// [PANJI-REVIEW-UI-UNIFY] 表头单行硬约束：表头高度固定 42px，中文绝不逐字换行
+// （word-break: keep-all）。长表头处理优先级：shortTitle → 单行 ellipsis → title tooltip → 横向 scroll。
+.interactive-table thead th { padding: 0; position: relative; background: #171c25; white-space: nowrap; word-break: keep-all; height: 42px; }
+.th-shell { display: flex; align-items: center; height: 42px; }
+.th-sort { display: flex; align-items: center; gap: 6px; flex: 1; min-width: 0; height: 42px; padding: 0 6px 0 11px; border: 0; background: transparent; color: #9da6b8; text-align: left; font: inherit; cursor: pointer; white-space: nowrap; &:hover { color: #eef2fa; background: #1e2531; } }
+.th-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; word-break: keep-all; }
 .sort-icon { font: 12px v.$font-mono; color: #626d82; margin-left: auto; }
 .interactive-table th.sorted .th-sort { color: #dce5ff; background: rgba(79, 124, 255, .08); }
 .interactive-table th.sorted .sort-icon { color: #7fa0ff; }
-.th-filter { width: 28px; height: 28px; margin-right: 4px; border: 0; border-radius: 5px; background: transparent; color: #667086; cursor: pointer; &:hover, &.active { background: #27334d; color: #9bb2ff; } }
+// [PANJI-REVIEW-UI-UNIFY] 列筛选按钮：常显的明确控件（替代字符 `⌁`）。
+// idle=浅边框/深背景/灰 funnel；hover=边框更亮/背景更明显；active=品牌边框+品牌底+状态点。
+// 排序与筛选是两个独立点击区域（排序在 .th-sort，筛选在本按钮），互不触发。
+.th-filter {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 26px;
+  height: 26px;
+  margin-right: 5px;
+  border: 1px solid #2b3446;
+  border-radius: 6px;
+  background: #141a24;
+  color: #7b8698;
+  cursor: pointer;
+  transition: border-color .12s ease, background .12s ease, color .12s ease;
+  &:hover { border-color: #465677; background: #1d2531; color: #c4cfe2; }
+  &.active { border-color: v.$color-brand; background: rgba(v.$color-brand, .12); color: v.$color-brand; }
+  // 右上状态点：active 时出现（形状 + 颜色双通道，不单靠颜色区分）
+  &.active::after { content: ''; position: absolute; top: -2px; right: -2px; width: 6px; height: 6px; border-radius: 50%; background: v.$color-brand; box-shadow: 0 0 0 1.5px #171c25; }
+}
 .table-select-column { padding: 0 12px !important; }
 // CHANGE-20260715-005: 工具栏移出横向滚动容器，不再需要 position:sticky;left:0;width:100% 补丁
+// [PANJI-REVIEW-UI-UNIFY] meta bar 由固定高改为 min-height + wrap，为 active filter chips 留位
 .table-meta-bar {
-  height: 34px;
+  min-height: 34px;
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 10px;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 10px;
   border-bottom: 1px solid v.$color-border-soft;
   background: #121720;
   color: v.$color-muted;
   font-size: 12px;
 }
 .table-active-state { margin-left: 10px; color: #8fa7df; }
+// [PANJI-REVIEW-UI-UNIFY] 激活筛选 chips：显示**具体条件**（不再只说「N 个列筛选」），单条 × 清除
+.table-filter-chips { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 5px; margin-left: 10px; }
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 22px;
+  padding: 0 4px 0 8px;
+  border: 1px solid rgba(v.$color-brand, .38);
+  border-radius: 999px;
+  background: rgba(v.$color-brand, .10);
+  color: #9ff3e0;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  &:hover { border-color: v.$color-brand; background: rgba(v.$color-brand, .16); color: #d3fff4; }
+}
+.filter-chip-text { white-space: nowrap; }
+.filter-chip-x { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; font-size: 12px; color: inherit; }
+.filter-chip:hover .filter-chip-x { background: rgba(v.$color-brand, .22); }
 .table-reset-btn { border: 0; background: transparent; color: #7994d9; font-size: 12px; cursor: pointer; &:disabled { opacity: .35; cursor: default; } }
 .column-filter-popover { position: fixed; z-index: 500; width: 238px; padding: 11px; background: #202631; border: 1px solid #3c4659; border-radius: 8px; box-shadow: 0 16px 44px rgba(0, 0, 0, .45); }
 .filter-pop-title { font-size: 12px; font-weight: 700; margin-bottom: 9px; }
@@ -1158,12 +1204,14 @@ button { cursor: pointer; }
 .table-empty-row td { padding: 32px !important; }
 .table-empty-state { display: flex; flex-direction: column; align-items: center; gap: 5px; color: v.$color-muted; b { color: #ccd3df; font-weight: 650; } }
 
-// [StrategyDataTable] - 描述: 紧凑表格布局（选股页等列多场景），允许表头两行、单元格 padding 6~8px
-.compact-table thead th { white-space: normal; }
-.compact-table .th-shell { min-height: auto; align-items: flex-start; padding: 2px 0; }
-.compact-table .th-sort { height: auto; min-height: 30px; padding: 4px 6px 4px 8px; }
-.compact-table .th-label { white-space: normal; overflow: visible; text-overflow: clip; }
-.compact-table td { padding: 6px 8px; }
+// [PANJI-REVIEW-UI-UNIFY] 紧凑表格布局（选股页等列多场景）：数据行保持紧凑，
+// 但表头**不再自适应成多行**。历史 bug：white-space: normal 使中文表头逐字竖排
+// （出现「第/一/金/字/塔」），现统一单行 + ellipsis，行高 40~42px。
+.compact-table thead th { white-space: nowrap; word-break: keep-all; height: 42px; }
+.compact-table .th-shell { align-items: center; height: 42px; padding: 0; }
+.compact-table .th-sort { height: 42px; padding: 0 6px 0 8px; }
+.compact-table .th-label { white-space: nowrap; word-break: keep-all; overflow: hidden; text-overflow: ellipsis; }
+.compact-table td { height: 40px; padding: 6px 8px; }
 .compact-table .symbol-sub { white-space: nowrap; }
 
 button.strategy-catalog-card { appearance: none; width: 100%; color: inherit; text-align: left; cursor: pointer; font: inherit; &:hover { border-color: #425273; background: #191f2b; } &.active { outline: 1px solid rgba(79, 124, 255, .36); } }
