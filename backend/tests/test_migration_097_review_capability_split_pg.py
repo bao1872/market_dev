@@ -93,6 +93,17 @@ async def _fetch_all(sql: str, params: dict | None = None) -> list[tuple]:
         return rows
 
 
+async def _execute_dml(sql: str, params: dict | None = None) -> None:
+    """执行不返回结果集的 DML（DELETE/UPDATE）。
+
+    `_fetch_all` 只能用于 SELECT：对 DELETE 调 fetchall() 会抛
+    sqlalchemy.exc.ResourceClosedError("This result object does not return rows")。
+    """
+    async with TestAsyncSessionLocal() as session:
+        await session.execute(text(sql), params or {})
+        await session.commit()
+
+
 # --------------------------------------------------------------------------- #
 # 用户 fixture
 # --------------------------------------------------------------------------- #
@@ -222,8 +233,8 @@ async def _seed_invites(owner_id: uuid.UUID) -> dict:
 
 async def _cleanup() -> None:
     """删除本轮 fixture（先删邀请码 —— created_by FK 无级联，再删用户级联清 capability）。"""
-    await _fetch_all(f"DELETE FROM invite_codes WHERE note = '{_INVITE_NOTE}'")
-    await _fetch_all(
+    await _execute_dml(f"DELETE FROM invite_codes WHERE note = '{_INVITE_NOTE}'")
+    await _execute_dml(
         f"DELETE FROM users WHERE email LIKE '{_USER_EMAIL_PREFIX}%{_USER_EMAIL_DOMAIN}'"
     )
 
