@@ -5,6 +5,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import * as adminApi from '../api/admin'
+import type { CapabilityKey } from '../navigation/capabilities'
 import type { CreateChannelRequest, DeliveryStatus } from '../api/notification'
 import type { PaginationParams } from '../api/endpoints'
 import type {
@@ -354,7 +355,7 @@ export function useAdminRevokeCapability() {
       capability,
     }: {
       userId: string
-      capability: 'self_selection' | 'market_data' | 'research_replay'
+      capability: CapabilityKey
     }) => adminApi.adminRevokeCapability(userId, capability),
     onSuccess: (_data, variables) => {
       queryClient.invalidateQueries({ queryKey: ['admin', 'users', variables.userId, 'capabilities'] })

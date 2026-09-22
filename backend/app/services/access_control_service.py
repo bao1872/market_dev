@@ -24,7 +24,7 @@
 - observe_20 / research_50 套餐字段（monitor_limit/notification_channel_limit/message_retention_days/features）
   以 plans 表记录为准，由 Alembic 048 迁移初始化
 - 过期订阅仍记录原 plan_code/plan_display_name（便于前端展示降级提示），但 subscription_active=False
-- [PRD60 PA-01] 三类独立 capability: self_selection / market_data / research_replay
+- [PRD60 PA-01] 四类独立 capability: self_selection / market_data / market_review / research_replay
 """
 
 from __future__ import annotations
@@ -366,17 +366,18 @@ def require_capability(capability: str) -> Callable[..., Coroutine[Any, Any, Acc
     返回一个 FastAPI 依赖函数，检查 ctx.capabilities 是否包含指定 capability 且 active。
     admin 自动豁免（所有 capability active=True）。
 
-    三类独立权限（PRD60 PA-01）：
+    四类独立权限（PRD60 PA-01；[PANJI-REVIEW-CAPABILITY-SPLIT] market_review 已从 market_data 拆出）：
     - self_selection: 自选管理（含盘中监控+行情列表可见，PA-10）
     - market_data: 行情管理（个股详情，PA-11/PA-13）
-    - research_replay: 复盘管理（PA-12）
+    - market_review: 复盘分析（Market Dashboard / /review*，独立 capability）
+    - research_replay: 竞价分析（PA-12，machine 值保持 research_replay 不变）
 
     用法：
         @router.get("/stock/{symbol}")
         async def get_stock(ctx: AccessContext = Depends(require_capability("market_data"))): ...
 
     Args:
-        capability: 权限类型（self_selection/market_data/research_replay）
+        capability: 权限类型（self_selection/market_data/market_review/research_replay）
 
     Returns:
         FastAPI 依赖函数，校验通过返回原 ctx，否则 403
@@ -417,7 +418,7 @@ def require_any_capability(*capabilities: str) -> Callable[..., Coroutine[Any, A
         async def list_market(ctx: AccessContext = Depends(require_any_capability("self_selection", "market_data"))): ...
 
     Args:
-        capabilities: 权限类型列表（至少一个，self_selection/market_data/research_replay）
+        capabilities: 权限类型列表（至少一个，self_selection/market_data/market_review/research_replay）
 
     Returns:
         FastAPI 依赖函数，校验通过返回原 ctx，否则 403
@@ -710,10 +711,8 @@ async def lock_and_resolve_watchlist_limit_for_mutation(
     # 锁内重新解析（canonical owner）。
     # 注：locked_user 未必挂载 ``_roles``，resolve_effective_access 内部因此恒按
     # 非 admin 解析；admin 已由调用方 ctx.is_admin 在此前 return，两条路径一致。
-    from app.services.effective_access_service import (
-        CAP_SELF_SELECTION,
-        resolve_effective_access,
-    )
+    from app.models.user_capability import CAPABILITY_SELF_SELECTION as CAP_SELF_SELECTION
+    from app.services.effective_access_service import resolve_effective_access
 
     profile = await resolve_effective_access(db, locked_user)
 

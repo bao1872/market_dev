@@ -26,30 +26,33 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import _get_user_roles
-from app.models.user_capability import UserCapability
+from app.models.user_capability import (
+    ALL_CAPABILITIES,
+    CAPABILITY_MARKET_DATA,
+    CAPABILITY_MARKET_REVIEW,
+    CAPABILITY_RESEARCH_REPLAY,
+    CAPABILITY_SELF_SELECTION,
+    UserCapability,
+)
 from app.services.subscription_summary_service import (
     SubscriptionSummary,
     resolve_subscription_summary,
 )
 
-CAP_SELF_SELECTION = "self_selection"
-CAP_MARKET_DATA = "market_data"
-CAP_RESEARCH_REPLAY = "research_replay"
-ALL_CAPABILITIES = (CAP_SELF_SELECTION, CAP_MARKET_DATA, CAP_RESEARCH_REPLAY)
-
 # 中文展示名（后台权限概览用）
-# [REVIEW-V2-R1] research_replay 产品含义收敛为「竞价分析」（复盘已由 market_data 承载）
+# [PANJI-REVIEW-CAPABILITY-SPLIT] market_review 已从 market_data 拆分为独立 capability（复盘）
 CAPABILITY_LABELS: dict[str, str] = {
-    CAP_SELF_SELECTION: "自选管理",
-    CAP_MARKET_DATA: "行情数据",
-    CAP_RESEARCH_REPLAY: "竞价分析",
+    CAPABILITY_SELF_SELECTION: "自选管理",
+    CAPABILITY_MARKET_DATA: "行情数据",
+    CAPABILITY_MARKET_REVIEW: "复盘分析",
+    CAPABILITY_RESEARCH_REPLAY: "竞价分析",
 }
 
 # 默认路由矩阵
 DEFAULT_ROUTE_ADMIN = "/admin/overview"
 DEFAULT_ROUTE_MARKET = "/market"
 DEFAULT_ROUTE_MARKET_WATCHLIST = "/market?scope=watchlist"
-# [REVIEW-V2-R1] 旧 Review 工作台已退役：仅 research_replay（竞价分析）默认入口为 /auction。
+DEFAULT_ROUTE_REVIEW = "/review"
 DEFAULT_ROUTE_AUCTION = "/auction"
 DEFAULT_ROUTE_FORBIDDEN = "/forbidden"
 
@@ -133,30 +136,29 @@ def compute_default_route(
 ) -> str:
     """依据 capabilities 计算默认入口（公开函数，供登录/路由/后台共用）。
 
-    规则（权限模型 V2；[REVIEW-V2-R1] research_replay = 竞价分析）：
+    规则（权限模型 V2；[PANJI-REVIEW-CAPABILITY-SPLIT] market_review 为独立 capability）：
     - admin → /admin/overview
     - 无 active capability → /forbidden
-    - 仅 research_replay → /auction
-    - 仅 self_selection → /market?scope=watchlist
-    - 仅 market_data → /market
-    - self_selection + market_data（含 research_replay）→ /market
-    - research_replay 加其他权限 → /market
+    - 显式优先级（首个命中即返回）：market_data > self_selection > market_review > research_replay
+        - market_data → /market（行情）
+        - self_selection → /market?scope=watchlist（自选）
+        - market_review → /review（复盘）
+        - research_replay → /auction（竞价）
+    四个 capability 之间无任何隐式授权：某一 capability 存在不会自动授予其他 capability 的默认入口。
     """
     if is_admin:
         return DEFAULT_ROUTE_ADMIN
     active = {k for k, v in capabilities.items() if v.active}
     if not active:
         return DEFAULT_ROUTE_FORBIDDEN
-    if active == {CAP_RESEARCH_REPLAY}:
-        return DEFAULT_ROUTE_AUCTION
-    if active == {CAP_SELF_SELECTION}:
+    if CAPABILITY_MARKET_DATA in active:
+        return DEFAULT_ROUTE_MARKET
+    if CAPABILITY_SELF_SELECTION in active:
         return DEFAULT_ROUTE_MARKET_WATCHLIST
-    if active == {CAP_MARKET_DATA}:
-        return DEFAULT_ROUTE_MARKET
-    if CAP_SELF_SELECTION in active and CAP_MARKET_DATA in active:
-        return DEFAULT_ROUTE_MARKET
-    if CAP_RESEARCH_REPLAY in active:
-        return DEFAULT_ROUTE_MARKET
+    if CAPABILITY_MARKET_REVIEW in active:
+        return DEFAULT_ROUTE_REVIEW
+    if CAPABILITY_RESEARCH_REPLAY in active:
+        return DEFAULT_ROUTE_AUCTION
     return DEFAULT_ROUTE_FORBIDDEN
 
 
@@ -174,14 +176,16 @@ def infer_capabilities_from_plan(
     expires_at = _ensure_aware(expires_at)
     if plan_code == "observe_20":
         return {
-            CAP_SELF_SELECTION: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
-            CAP_MARKET_DATA: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            CAPABILITY_SELF_SELECTION: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
+            CAPABILITY_MARKET_DATA: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            CAPABILITY_MARKET_REVIEW: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
         }
     if plan_code == "research_50":
         return {
-            CAP_SELF_SELECTION: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
-            CAP_MARKET_DATA: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
-            CAP_RESEARCH_REPLAY: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            CAPABILITY_SELF_SELECTION: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": plan_monitor_limit},
+            CAPABILITY_MARKET_DATA: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            CAPABILITY_MARKET_REVIEW: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
+            CAPABILITY_RESEARCH_REPLAY: {"active": subscription_active, "expires_at": expires_at, "watchlist_limit": None},
         }
     return {}
 

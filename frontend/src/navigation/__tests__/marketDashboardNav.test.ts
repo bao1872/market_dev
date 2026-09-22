@@ -1,13 +1,13 @@
-// [MarketDashboard] - 导航契约：[REVIEW-V2-R1] 复盘入口能力 = market_data，
+// [MarketDashboard] - 导航契约：[PANJI-REVIEW-CAPABILITY-SPLIT] 复盘入口能力 = 独立 market_review，
 // 四个 canonical 子页面（大盘/行业/概念/比较）共用同一入口高亮。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { USER_NAV_ITEMS, APP_ROUTES, resolveActiveNav } from '../appNavigation'
 
-test('复盘导航项存在，使用 market_data 能力，指向 canonical /review', () => {
+test('复盘导航项存在，使用独立 market_review 能力，指向 canonical /review', () => {
   const item = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.review)
   assert.ok(item, '复盘导航项应存在')
-  assert.equal(item!.requiredCapability, 'market_data')
+  assert.equal(item!.requiredCapability, 'market_review')
   assert.equal(item!.path, '/review')
 })
 

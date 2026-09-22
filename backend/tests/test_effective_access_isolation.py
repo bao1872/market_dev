@@ -22,10 +22,9 @@ import pytest
 
 from app.models.plan import Plan
 from app.models.subscription import Subscription
-from app.models.user_capability import UserCapability
+from app.models.user_capability import ALL_CAPABILITIES, UserCapability
 from app.services.access_control_service import AccessContext, get_access_context
 from app.services.effective_access_service import (
-    ALL_CAPABILITIES,
     EffectiveAccessProfile,
     resolve_effective_access,
 )
@@ -224,7 +223,7 @@ async def test_c1_get_access_context_legacy_single_summary():
     assert _count(db.calls, UserCapability) == 1
     assert _count(db.calls, Subscription) == 1
     assert _count(db.calls, Plan) == 1
-    assert set(ctx.active_capability_keys) == {"self_selection", "market_data"}
+    assert set(ctx.active_capability_keys) == {"self_selection", "market_data", "market_review"}
     assert ctx.capability_source == "legacy_plan_fallback"
     assert ctx.subscription_active is True
     assert ctx.plan_code == "observe_20"

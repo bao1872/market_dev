@@ -280,7 +280,7 @@ async def generate_invite_codes(
         # 验证每个 capability 配置
         for cap in capabilities:
             cap_name = cap.get("capability")
-            if cap_name not in ("self_selection", "market_data", "research_replay"):
+            if cap_name not in ("self_selection", "market_data", "market_review", "research_replay"):
                 raise ValueError(f"无效 capability: {cap_name}")
             if cap_name == "self_selection" and cap.get("watchlist_limit") is None:
                 raise ValueError("self_selection 必须指定 watchlist_limit")
@@ -350,7 +350,7 @@ async def apply_capability_grant(
     Args:
         db: 异步数据库会话
         user_id: 目标用户 ID
-        capability: 权限类型 self_selection/market_data/research_replay
+        capability: 权限类型 self_selection/market_data/market_review/research_replay
         grant_days: 确定性授权天数（正整数）
         watchlist_limit: 自选数量上限（仅 self_selection 必填）
         source: 授权来源 admin_grant/invite_code
@@ -551,6 +551,34 @@ async def _grant_capabilities_from_invite(
             source="invite_code",
             materialize_legacy=materialize_legacy,
             # [PV2-B08] invite_code 必须 actor=None，granted_by=None
+            actor_user_id=None,
+        )
+
+    # [PANJI-REVIEW-CAPABILITY-SPLIT] 旧邀请码兼容桥：
+    # 含 market_data 但不含 market_review 的可兑换邀请码，兑换时补发 market_review（复盘），
+    # 授权天数对齐该邀请码中 market_data 的天数（保留旧「复盘由 market_data 承载」意图）。
+    # 不修改 invite_code.capabilities JSONB、不改写兑换记录、不波及 self_selection/research_replay。
+    # 仅作用于邀请码兑换链路；管理员直接授予（GrantCapabilityRequest）不触发此桥，保持 capability 间无隐式授权。
+    present_caps = {
+        c.get("capability")
+        for c in invite_code.capabilities
+        if isinstance(c.get("capability"), str)
+    }
+    if "market_data" in present_caps and "market_review" not in present_caps:
+        market_review_days = 1
+        for cap_config in invite_code.capabilities:
+            if cap_config.get("capability") == "market_data":
+                md_months = cap_config.get("months")
+                market_review_days = md_months * 30 if md_months is not None else cap_config.get("days", 1)
+                break
+        await apply_capability_grant(
+            db=db,
+            user_id=user_id,
+            capability="market_review",
+            grant_days=market_review_days,
+            watchlist_limit=None,
+            source="invite_code",
+            materialize_legacy=materialize_legacy,
             actor_user_id=None,
         )
     await db.flush()
@@ -1340,7 +1368,7 @@ async def grant_capability_to_user(
     Args:
         db: 异步数据库会话
         user_id: 目标用户 ID
-        capability: 权限类型 self_selection/market_data/research_replay
+        capability: 权限类型 self_selection/market_data/market_review/research_replay
         days: 有效天数（1-365，1 = 1 天）
         watchlist_limit: 自选数量上限（仅 self_selection 必填）
         actor_user_id: 操作管理员 user_id（admin_grant，必填）
@@ -1387,7 +1415,7 @@ async def revoke_capability_from_user(
     Args:
         db: 异步数据库会话
         user_id: 目标用户 ID
-        capability: 权限类型 self_selection/market_data/research_replay
+        capability: 权限类型 self_selection/market_data/market_review/research_replay
         revoked_by: 操作管理员 user_id（仅写入审计/快照，不覆盖 granted_by）
         reason: 撤销原因（审计用，默认 admin_manual_revoke）
 

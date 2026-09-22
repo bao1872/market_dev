@@ -14,6 +14,7 @@
 import { apiClient } from './client'
 import type { StrategyVersion, StrategyRun, StrategyRunListResponse } from './strategy'
 import type { UserResponse } from './auth'
+import type { CapabilityKey } from '../navigation/capabilities'
 import type {
   NotificationChannel,
   NotificationChannelListResponse,
@@ -196,14 +197,14 @@ export interface InviteCodeCreateRequest {
 
 /** [Gate2 PRD60 PA-20] 单个 capability 授权配置（与 backend CapabilityGrant 对齐） */
 export interface CapabilityGrantInput {
-  capability: 'self_selection' | 'market_data' | 'research_replay'
+  capability: CapabilityKey
   days: number  // 有效天数（1-365，1 = 1 天）
   watchlist_limit?: number  // 仅 self_selection 必填（1-500）
 }
 
 /** [Gate2 PRD60] 管理员直接授予用户 capability 请求 */
 export interface GrantCapabilityRequest {
-  capability: 'self_selection' | 'market_data' | 'research_replay'
+  capability: CapabilityKey
   days: number  // 有效天数（1 = 1 天）
   watchlist_limit?: number  // 仅 self_selection 必填
 }
@@ -546,7 +547,7 @@ export async function adminGrantCapability(
 /** [Gate2 PRD60 PA-20] 管理员撤销用户 capability */
 export async function adminRevokeCapability(
   userId: string,
-  capability: 'self_selection' | 'market_data' | 'research_replay',
+  capability: CapabilityKey,
 ): Promise<UserCapabilitiesResponse> {
   const { data } = await apiClient.delete<UserCapabilitiesResponse>(
     `/v1/admin/users/${userId}/capabilities/${capability}`,

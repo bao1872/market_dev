@@ -16,8 +16,10 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# [Gate2 PRD60 PA-01] 三类独立 capability 固定值（与 user_capability.ALL_CAPABILITIES 对齐）
-_VALID_CAPABILITIES = {"self_selection", "market_data", "research_replay"}
+from app.models.user_capability import ALL_CAPABILITIES
+
+# [Gate2 PRD60 PA-01] 四类独立 capability 固定值（与 user_capability.ALL_CAPABILITIES 对齐）
+_VALID_CAPABILITIES = set(ALL_CAPABILITIES)
 
 
 class MembershipResponse(BaseModel):
@@ -70,11 +72,11 @@ class MemberListItem(BaseModel):
     remaining_days: int | None = Field(None, description="剩余天数")
     renewal_count: int = Field(..., description="累计续期次数")
     created_at: datetime = Field(..., description="用户创建时间")
-    # [Gate2 PRD60 PA-01] 三类独立 capability 状态（per-capability 独立 expires_at）
+    # [Gate2 PRD60 PA-01] 四类独立 capability 状态（per-capability 独立 expires_at）
     # 旧用户无 user_capabilities 行时为空 dict（fallback 到 plan_code 推断）
     capabilities: dict[str, CapabilityInfoResponse] = Field(
         default_factory=dict,
-        description="三类独立 capability 状态",
+        description="四类独立 capability 状态",
     )
 
 
@@ -102,14 +104,14 @@ class GrantCapabilityRequest(BaseModel):
     """[Gate2 PRD60 PA-20] 管理员直接授予/修改用户 capability 请求。
 
     管理员可通过用户抽屉直接授予或修改 capability：
-    - capability: 权限类型（self_selection/market_data/research_replay）
+    - capability: 权限类型（self_selection/market_data/market_review/research_replay）
     - days: 有效天数（1-365）
     - watchlist_limit: 自选数量上限（仅 self_selection 必填，PA-02）
 
     已有该 capability 时取较晚的 expires_at（不降权），并更新 watchlist_limit（如提供）。
     """
 
-    capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+    capability: str = Field(..., description="权限类型 self_selection/market_data/market_review/research_replay")
     days: int = Field(default=1, ge=1, le=365, description="有效天数（1-365）")
     watchlist_limit: int | None = Field(
         None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填，1-500）"
@@ -161,14 +163,14 @@ class UserCapabilitiesResponse(BaseModel):
     user_id: UUID = Field(..., description="用户 ID")
     capabilities: dict[str, CapabilityInfoResponse] = Field(
         default_factory=dict,
-        description="三类独立 capability 状态",
+        description="四类独立 capability 状态",
     )
 
 
 class RevokeCapabilityRequest(BaseModel):
     """[Gate2 PRD60] 管理员撤销用户 capability 请求。"""
 
-    capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+    capability: str = Field(..., description="权限类型 self_selection/market_data/market_review/research_replay")
     reason: str | None = Field(
         None, max_length=500, description="撤销原因（审计用，可选；去空白，空转 None）"
     )

@@ -37,6 +37,7 @@ from app.models.access_audit_log import AccessAuditLog
 from app.models.scheduler_job_run import SchedulerJobRun
 from app.models.subscription import Subscription
 from app.models.user import Role, User, UserRole
+from app.models.user_capability import ALL_CAPABILITIES
 from app.models.worker_heartbeat import WorkerHeartbeat
 from app.schemas.access import (
     AdminAccessProfileResponse,
@@ -369,7 +370,7 @@ async def get_members(
 ) -> dict:
     """查询订阅账户列表（含订阅状态/到期时间/剩余天数/续期次数/capabilities；MemberListItem 为 V1.6 遗留命名）。
 
-    [Gate2 PRD60 PA-01] capabilities 字段包含三类独立权限状态（per-capability 独立 expires_at）。
+    [Gate2 PRD60 PA-01] capabilities 字段包含四类独立权限状态（per-capability 独立 expires_at）。
     旧用户无 user_capabilities 行时为空 dict（fallback 到 plan_code 推断）。
 
     Args:
@@ -1002,7 +1003,7 @@ async def get_user_capabilities_endpoint(
     db: AsyncSession = Depends(get_db),
     current_user=Depends(require_roles("admin")),
 ) -> UserCapabilitiesResponse:
-    """[Gate2 PRD60] 查询用户 capabilities（三类独立权限状态）。
+    """[Gate2 PRD60] 查询用户 capabilities（四类独立权限状态）。
 
     返回 per-capability 独立的 active/expires_at/watchlist_limit。
     旧用户无 user_capabilities 行时返回空 dict（fallback 到 plan_code 推断）。
@@ -1111,8 +1112,8 @@ async def revoke_capability_endpoint(
     # 校验用户存在
     await _fetch_user_or_404(db, user_id)
 
-    # 校验 capability 合法性
-    valid_caps = {"self_selection", "market_data", "research_replay"}
+    # 校验 capability 合法性（四类独立 capability，与 user_capability.ALL_CAPABILITIES 对齐）
+    valid_caps = set(ALL_CAPABILITIES)
     if capability not in valid_caps:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

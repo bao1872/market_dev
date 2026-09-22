@@ -2,12 +2,12 @@
 // 用法：node --experimental-strip-types --test src/navigation/__tests__/replayAuctionEntitlement.test.ts
 //
 // 覆盖：
-//   1. research_replay 用户可见「竞价」；「复盘」由 market_data 守卫
+//   1. research_replay 用户可见「竞价」；「复盘」由独立 market_review 守卫
 //   2. 无 research_replay 用户隐藏「竞价」
 //   3. 竞价三级路由均受 capability 守卫保护
 //   4. /review 与 /auction 不再共用同一 capability 守卫节点
 //   5. 邀请码创建/列表显示「竞价分析」
-//   6. 不存在独立 auction capability
+//   6. 不存在独立 auction capability（market_review 为独立复盘 capability，非 auction）
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -34,39 +34,39 @@ const EXPIRED = { active: false }
 // 1~2. 导航可见性
 // ============================================================
 
-test('research_replay 用户可见竞价；复盘由 market_data 守卫', () => {
+test('research_replay 用户可见竞价；复盘由独立 market_review 守卫', () => {
   const paths = filterNavItemsByCapability(
     USER_NAV_ITEMS,
-    { research_replay: ACTIVE, self_selection: ACTIVE, market_data: ACTIVE },
+    { research_replay: ACTIVE, market_review: ACTIVE },
     false,
   ).map((i) => i.path)
   assert.ok(paths.includes(APP_ROUTES.auction), '竞价应可见')
-  assert.ok(paths.includes(APP_ROUTES.review), '复盘（market_data）应可见')
+  assert.ok(paths.includes(APP_ROUTES.review), '复盘（market_review）应可见')
 })
 
-test('无 research_replay 用户隐藏竞价；复盘不受影响（market_data 决定）', () => {
+test('无 research_replay 用户隐藏竞价；复盘由独立 market_review 决定', () => {
   const paths = filterNavItemsByCapability(
     USER_NAV_ITEMS,
-    { market_data: ACTIVE, self_selection: ACTIVE },
+    { market_data: ACTIVE, self_selection: ACTIVE, market_review: ACTIVE },
     false,
   ).map((i) => i.path)
   assert.ok(!paths.includes(APP_ROUTES.auction), '竞价应隐藏')
-  assert.ok(paths.includes(APP_ROUTES.review), '复盘由 market_data 决定，应可见')
+  assert.ok(paths.includes(APP_ROUTES.review), '复盘由独立 market_review 决定，应可见')
   assert.ok(paths.includes(APP_ROUTES.market))
   assert.ok(paths.includes(WATCHLIST_NAV_PATH))
 })
 
-test('research_replay 过期时竞价隐藏；复盘不受影响', () => {
+test('research_replay 过期时竞价隐藏；复盘由独立 market_review 不受影响', () => {
   const paths = filterNavItemsByCapability(
     USER_NAV_ITEMS,
-    { research_replay: EXPIRED, market_data: ACTIVE },
+    { research_replay: EXPIRED, market_review: ACTIVE },
     false,
   ).map((i) => i.path)
   assert.ok(!paths.includes(APP_ROUTES.auction))
   assert.ok(paths.includes(APP_ROUTES.review))
 })
 
-test('无 market_data 时隐藏行情与复盘，不影响竞价', () => {
+test('无 market_data / market_review 时隐藏行情与复盘，不影响竞价', () => {
   const paths = filterNavItemsByCapability(
     USER_NAV_ITEMS,
     { research_replay: ACTIVE, self_selection: ACTIVE },
@@ -82,10 +82,10 @@ test('admin 无 capability 行时仍可见全部一级导航（豁免行为不�
   assert.deepStrictEqual(paths, USER_NAV_ITEMS.map((i) => i.path))
 })
 
-test('竞价导航项声明 research_replay；复盘导航项声明 market_data', () => {
+test('竞价导航项声明 research_replay；复盘导航项声明独立 market_review', () => {
   const review = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.review)
   const auction = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.auction)
-  assert.equal(review?.requiredCapability, 'market_data')
+  assert.equal(review?.requiredCapability, 'market_review')
   assert.equal(auction?.requiredCapability, AUCTION_CAPABILITY)
   assert.notEqual(review?.requiredCapability, auction?.requiredCapability)
 })
@@ -172,6 +172,7 @@ test('不存在独立 auction capability', () => {
   assert.deepStrictEqual(CAPABILITY_KEYS, [
     'self_selection',
     'market_data',
+    'market_review',
     'research_replay',
   ])
   assert.ok(!(CAPABILITY_KEYS as readonly string[]).includes('auction'))

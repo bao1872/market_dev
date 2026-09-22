@@ -51,11 +51,13 @@ import {
   type CapabilityGrantInput,
   type GrantCapabilityRequest,
 } from '@/api/endpoints'
-// [CHANGE-20260802-002] capability 中文标签唯一真源（research_replay → 复盘与竞价）
+// [PANJI-REVIEW-CAPABILITY-SPLIT] capability 中文标签唯一真源：四类独立 capability
+//   self_selection / market_data / market_review（复盘）/ research_replay（竞价）
 import {
   CAPABILITY_KEYS,
   CAPABILITY_LABELS,
   CAPABILITY_DESCRIPTIONS,
+  type CapabilityKey,
   capabilityLabel,
   computeDefaultRoute,
   formatCapabilityGrants,
@@ -363,13 +365,15 @@ export default function AdminUsersPage() {
   const [membershipStatusEdit, setMembershipStatusEdit] = useState('有效')
   const [expiresAtEdit, setExpiresAtEdit] = useState('')
 
-  // 生成邀请码弹窗 - [Gate2 PRD60 PA-20] 改为 capability 三勾选模式
+  // 生成邀请码弹窗 - [Gate2 PRD60 PA-20] 改为 capability 四勾选模式
   const [modalOpen, setModalOpen] = useState(false)
   const [generateCount, setGenerateCount] = useState(1)
   const [generateNote, setGenerateNote] = useState('朋友内测')
-  // capability 三勾选：self_selection/market_data/research_replay
+  // capability 四勾选：self_selection/market_data/market_review/research_replay
+  // [PANJI-REVIEW-CAPABILITY-SPLIT] market_review（复盘）为独立 capability
   const [capSelfSelection, setCapSelfSelection] = useState(true)
   const [capMarketData, setCapMarketData] = useState(true)
+  const [capMarketReview, setCapMarketReview] = useState(false)
   const [capResearchReplay, setCapResearchReplay] = useState(false)
   // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
   // [Commit B3] 默认 5；state 允许 '' 中间编辑态（清空后可重新键入）
@@ -426,9 +430,9 @@ export default function AdminUsersPage() {
   })
 
   // 抽屉内 capability 编辑表单状态（per-capability 独立）
-  const [capGrantCapability, setCapGrantCapability] = useState<
-    'self_selection' | 'market_data' | 'research_replay'
-  >('self_selection')
+  const [capGrantCapability, setCapGrantCapability] = useState<CapabilityKey>(
+    'self_selection',
+  )
   const [capGrantDays, setCapGrantDays] = useState(1)
   const [capGrantWatchlistLimit, setCapGrantWatchlistLimit] = useState(OBSERVE_PLAN_DEFAULT)
 
@@ -554,10 +558,10 @@ export default function AdminUsersPage() {
   )
 
   /** [Gate2 PRD60 PA-20] 生成邀请码 - 提交 capabilities 组合 + grant_days/count/note
-   * 取消"套餐类型"作为主入口，改为三勾选 self_selection/market_data/research_replay
+   * 取消"套餐类型"作为主入口，改为四勾选 self_selection/market_data/market_review/research_replay
    * 选择 self_selection 时 watchlist_limit 必填且管理员自由输入
    * 统一 grant_days 按天解释（1 单位 = 1 天）
-   * 至少需要选择一个 capability
+   * 至少需要选择一个 capability（可单独勾选 market_review 生成仅复盘邀请码）
    */
   const handleGenerate = useCallback(() => {
     // [Commit B3] 提交时统一做整数化 + 范围校验（不依赖 <input min/max>）
@@ -568,7 +572,7 @@ export default function AdminUsersPage() {
     }
     const watchlistLimit = parseIntegerInput(capWatchlistLimit, 1, 500)
 
-    // 构造 capabilities 列表（顺序：self_selection → market_data → research_replay）
+    // 构造 capabilities 列表（顺序：self_selection → market_data → market_review → research_replay）
     const capabilities: CapabilityGrantInput[] = []
     if (capSelfSelection) {
       capabilities.push({
@@ -580,6 +584,12 @@ export default function AdminUsersPage() {
     if (capMarketData) {
       capabilities.push({
         capability: 'market_data',
+        days: grantDays,
+      })
+    }
+    if (capMarketReview) {
+      capabilities.push({
+        capability: 'market_review',
         days: grantDays,
       })
     }
@@ -628,6 +638,7 @@ export default function AdminUsersPage() {
     generateGrantDays,
     capSelfSelection,
     capMarketData,
+    capMarketReview,
     capResearchReplay,
     capWatchlistLimit,
     toast,
@@ -640,6 +651,7 @@ export default function AdminUsersPage() {
     setGenerateNote('朋友内测')
     setCapSelfSelection(true)
     setCapMarketData(true)
+    setCapMarketReview(false)
     setCapResearchReplay(false)
     // [Commit B3] 每次打开生成弹窗都重置为 5 / 30
     setCapWatchlistLimit(INVITE_DEFAULT_WATCHLIST_LIMIT)
@@ -964,7 +976,7 @@ export default function AdminUsersPage() {
   // [Gate2 PRD60 PA-20] 撤销用户 capability
   const handleRevokeCapability = useCallback(
     (
-      capability: 'self_selection' | 'market_data' | 'research_replay',
+      capability: CapabilityKey,
     ) => {
       if (!selectedMember) return
       const label = capabilityLabel(capability)
@@ -1163,7 +1175,7 @@ export default function AdminUsersPage() {
       },
       {
         // [CHANGE-20260802-002] 展示邀请码实际授予的权限组合
-        // 格式：自选管理 · 行情数据 · 复盘与竞价；无对应权限时不显示该标签
+        // 格式：自选管理 · 行情数据 · 复盘分析 · 竞价分析；无对应权限时不显示该标签
         key: 'capabilities',
         title: '权限',
         dataType: 'text',
@@ -1299,6 +1311,9 @@ export default function AdminUsersPage() {
     if (capMarketData) {
       parts.push(CAPABILITY_LABELS.market_data)
     }
+    if (capMarketReview) {
+      parts.push(CAPABILITY_LABELS.market_review)
+    }
     if (capResearchReplay) {
       parts.push(CAPABILITY_LABELS.research_replay)
     }
@@ -1307,10 +1322,11 @@ export default function AdminUsersPage() {
     const defaultRoute = computeDefaultRoute({
       self_selection: capSelfSelection,
       market_data: capMarketData,
+      market_review: capMarketReview,
       research_replay: capResearchReplay,
     })
     return `${capText} · 有效期${generateGrantDays}天 · 注册后默认入口: ${defaultRoute}`
-  }, [capSelfSelection, capMarketData, capResearchReplay, capWatchlistLimit, generateGrantDays])
+  }, [capSelfSelection, capMarketData, capMarketReview, capResearchReplay, capWatchlistLimit, generateGrantDays])
 
   // ===== 渲染 =====
   return (
@@ -1761,7 +1777,7 @@ export default function AdminUsersPage() {
                           return (
                             <div key={cap} className={`cap-status-item ${isActive ? 'active' : hasCap ? 'expired' : 'none'}`}>
                               <div className="cap-status-head">
-                                {/* 展示中文标签（research_replay → 复盘与竞价），机器值作为副标题保留可追溯性 */}
+                                {/* 展示中文标签（market_review → 复盘分析 / research_replay → 竞价分析），机器值作为副标题保留可追溯性 */}
                                 <b>{CAPABILITY_LABELS[cap]}</b>
                                 <small className="cap-status-key">{cap}</small>
                                 {hasCap ? (
@@ -1948,7 +1964,7 @@ export default function AdminUsersPage() {
         </div>
       )}
 
-      {/* 生成邀请码弹窗 generateInviteModal - [Gate2 PRD60 PA-20] 三勾选模式 */}
+      {/* 生成邀请码弹窗 generateInviteModal - [Gate2 PRD60 PA-20] 四勾选模式 */}
       {modalOpen && (
         <div className="modal-backdrop open" onClick={handleCloseModal}>
           <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -1966,7 +1982,7 @@ export default function AdminUsersPage() {
 
             <div className="modal-body">
               <div className="form-grid">
-                {/* [Gate2] 取消"套餐类型"主入口，改为三勾选 capability */}
+                {/* [Gate2] 取消"套餐类型"主入口，改为四勾选 capability（self_selection/market_data/market_review/research_replay） */}
                 <div className="form-row full">
                   <label className="form-label">权限组合（至少选择一项）</label>
                   <div className="capability-checkbox-group">
@@ -1990,6 +2006,17 @@ export default function AdminUsersPage() {
                       <span>
                         <b>{CAPABILITY_LABELS.market_data}</b>
                         <small>{CAPABILITY_DESCRIPTIONS.market_data}</small>
+                      </span>
+                    </label>
+                    <label className="capability-checkbox-item">
+                      <input
+                        type="checkbox"
+                        checked={capMarketReview}
+                        onChange={(e) => setCapMarketReview(e.target.checked)}
+                      />
+                      <span>
+                        <b>{CAPABILITY_LABELS.market_review}</b>
+                        <small>{CAPABILITY_DESCRIPTIONS.market_review}</small>
                       </span>
                     </label>
                     <label className="capability-checkbox-item">

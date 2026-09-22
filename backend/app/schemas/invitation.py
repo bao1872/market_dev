@@ -17,20 +17,22 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-# PRD60 PA-01: 三类独立 capability 固定值（与 user_capability.ALL_CAPABILITIES 对齐）
-_VALID_CAPABILITIES = {"self_selection", "market_data", "research_replay"}
+from app.models.user_capability import ALL_CAPABILITIES
+
+# PRD60 PA-01: 四类独立 capability 固定值（与 user_capability.ALL_CAPABILITIES 对齐）
+_VALID_CAPABILITIES = set(ALL_CAPABILITIES)
 
 
 class CapabilityGrant(BaseModel):
     """单个 capability 授权配置（PRD60 PA-20）。
 
     邀请码生成时，管理员可指定 capability 组合：
-    - capability: 权限类型（self_selection/market_data/research_replay）
+    - capability: 权限类型（self_selection/market_data/market_review/research_replay）
     - days: 有效天数（1-365，1 = 1 天）
     - watchlist_limit: 自选数量上限（仅 self_selection 必填，PA-02）
     """
 
-    capability: str = Field(..., description="权限类型 self_selection/market_data/research_replay")
+    capability: str = Field(..., description="权限类型 self_selection/market_data/market_review/research_replay")
     days: int = Field(default=1, ge=1, le=365, description="有效天数（1-365，1 = 1 天）")
     watchlist_limit: int | None = Field(None, ge=1, le=500, description="自选数量上限（仅 self_selection 必填）")
 
@@ -87,7 +89,7 @@ class InviteCodeCreate(BaseModel):
         """
         if not self.capabilities:
             raise ValueError(
-                "新邀请码必须显式提供非空 capabilities（self_selection/market_data/research_replay），"
+                "新邀请码必须显式提供非空 capabilities（self_selection/market_data/market_review/research_replay），"
                 "禁止生成 capabilities=null 或 [] 的邀请码"
             )
         return self

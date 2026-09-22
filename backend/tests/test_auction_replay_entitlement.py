@@ -334,7 +334,8 @@ class TestPlanFallbackCapabilities:
             subscription_active=True,
         )
         assert "research_replay" not in caps
-        assert set(caps) == {"self_selection", "market_data"}
+        # [PANJI-REVIEW-CAPABILITY-SPLIT] observe_20 现含独立 market_review（复盘），仍不含 research_replay
+        assert set(caps) == {"self_selection", "market_data", "market_review"}
 
     @pytest.mark.asyncio
     async def test_observe_20_user_cannot_access_auction(self):

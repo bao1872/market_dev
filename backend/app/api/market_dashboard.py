@@ -7,7 +7,8 @@
 - GET /v1/market-dashboard/scopes/{board_id}  单板块详情
 - GET /v1/market-dashboard/compare 重点板块半月 EW index 比较
 
-权限：复用现有 ``market_data`` capability（与 /v1/boards 等行情产品一致），不新增权限。
+权限：复用独立 ``market_review`` capability（复盘）守卫，与行情/竞价/自选互不包含，
+不与其他 capability 互设隐式授权。
 
 不读 bars_daily / instruments / MarketBoardMembership / F1A compute service；
 只读 market_dashboard_market_daily / market_dashboard_scope_daily / market_boards。
@@ -21,7 +22,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.deps import get_db
-from app.models.user_capability import CAPABILITY_MARKET_DATA
+from app.models.user_capability import CAPABILITY_MARKET_REVIEW
 from app.schemas.market_dashboard import (
     CompareResponse,
     MarketDashboardResponse,
@@ -49,7 +50,7 @@ _HIERARCHY_LEVELS = ("L1", "L2", "L3")
 _RANKING_LOOKBACK = 5  # V1 固定 5 个真实交易日
 
 
-def _ctx(_: AccessContext = Depends(require_capability(CAPABILITY_MARKET_DATA))) -> None:
+def _ctx(_: AccessContext = Depends(require_capability(CAPABILITY_MARKET_REVIEW))) -> None:
     return None
 
 

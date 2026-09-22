@@ -170,6 +170,7 @@ async def test_s1_admin_get_access_context():
     assert {k: v["active"] for k, v in ctx.capabilities.items()} == {
         "self_selection": True,
         "market_data": True,
+        "market_review": True,
         "research_replay": True,
     }
     assert ctx.subscription_active is True  # admin 豁免
@@ -243,7 +244,7 @@ async def test_s1_legacy_observe_20():
     profile = await resolve_effective_access(db, user)
     assert profile.capability_source == "legacy_plan_fallback"
     assert "legacy_plan_fallback" in profile.diagnostics
-    assert set(profile.active_capability_keys) == {"self_selection", "market_data"}
+    assert set(profile.active_capability_keys) == {"self_selection", "market_data", "market_review"}
     assert profile.capabilities["self_selection"].watchlist_limit == 20
     assert "research_replay" not in profile.capabilities
     assert profile.default_route == "/market"
@@ -264,7 +265,7 @@ async def test_s1_legacy_research_50():
     )
     profile = await resolve_effective_access(db, user)
     assert profile.capability_source == "legacy_plan_fallback"
-    assert set(profile.active_capability_keys) == {"self_selection", "market_data", "research_replay"}
+    assert set(profile.active_capability_keys) == {"self_selection", "market_data", "market_review", "research_replay"}
     assert profile.default_route == "/market"
 
 
@@ -284,7 +285,7 @@ async def test_s1_expired_legacy_subscription():
     )
     profile = await resolve_effective_access(db, user)
     assert profile.capability_source == "legacy_plan_fallback"
-    assert set(profile.capabilities.keys()) == {"self_selection", "market_data", "research_replay"}
+    assert set(profile.capabilities.keys()) == {"self_selection", "market_data", "market_review", "research_replay"}
     # 能力存在但全部 inactive（过期订阅）
     assert profile.active_capability_keys == []
     assert profile.subscription_summary.active is False

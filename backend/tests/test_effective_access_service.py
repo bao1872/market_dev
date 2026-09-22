@@ -14,15 +14,25 @@ from typing import Any
 
 import pytest
 
+from app.models.user_capability import (
+    CAPABILITY_MARKET_DATA as CAP_MARKET_DATA,
+)
+from app.models.user_capability import (
+    CAPABILITY_MARKET_REVIEW as CAP_MARKET_REVIEW,
+)
+from app.models.user_capability import (
+    CAPABILITY_RESEARCH_REPLAY as CAP_RESEARCH_REPLAY,
+)
+from app.models.user_capability import (
+    CAPABILITY_SELF_SELECTION as CAP_SELF_SELECTION,
+)
 from app.services.effective_access_service import (
-    CAP_MARKET_DATA,
-    CAP_RESEARCH_REPLAY,
-    CAP_SELF_SELECTION,
     DEFAULT_ROUTE_ADMIN,
+    DEFAULT_ROUTE_AUCTION,
     DEFAULT_ROUTE_FORBIDDEN,
     DEFAULT_ROUTE_MARKET,
     DEFAULT_ROUTE_MARKET_WATCHLIST,
-    DEFAULT_ROUTE_AUCTION,
+    DEFAULT_ROUTE_REVIEW,
     CapabilityState,
     compute_default_route,
     resolve_effective_access,
@@ -46,7 +56,13 @@ class TestComputeDefaultRoute:
             (False, [CAP_MARKET_DATA], DEFAULT_ROUTE_MARKET),
             (False, [CAP_RESEARCH_REPLAY], DEFAULT_ROUTE_AUCTION),
             (False, [CAP_RESEARCH_REPLAY, CAP_MARKET_DATA], DEFAULT_ROUTE_MARKET),
-            (False, [CAP_RESEARCH_REPLAY, CAP_SELF_SELECTION], DEFAULT_ROUTE_MARKET),
+            # [PANJI-REVIEW-CAPABILITY-SPLIT] 统一优先级 self_selection > research_replay：
+            # {research_replay, self_selection} 默认入口由 /market 收敛为 watchlist（与前端一致）
+            (False, [CAP_RESEARCH_REPLAY, CAP_SELF_SELECTION], DEFAULT_ROUTE_MARKET_WATCHLIST),
+            # [PANJI-REVIEW-CAPABILITY-SPLIT] market_review 为独立 capability
+            (False, [CAP_MARKET_REVIEW], DEFAULT_ROUTE_REVIEW),
+            (False, [CAP_MARKET_REVIEW, CAP_MARKET_DATA], DEFAULT_ROUTE_MARKET),
+            (False, [CAP_MARKET_REVIEW, CAP_SELF_SELECTION], DEFAULT_ROUTE_MARKET_WATCHLIST),
         ],
     )
     def test_route_matrix(self, is_admin: bool, active_keys: list[str], expected: str) -> None:
@@ -113,6 +129,17 @@ class TestResolveEffectiveAccess:
         profile = await resolve_effective_access(db, self._mk_user())
         assert profile.active_capability_keys == [CAP_RESEARCH_REPLAY]
         assert profile.default_route == DEFAULT_ROUTE_AUCTION
+
+    @pytest.mark.asyncio
+    async def test_market_review_route(self) -> None:
+        # 仅 market_review（复盘分析）→ /review；不隐式授予 market_data / self_selection
+        rows = [self._mk_row(CAP_MARKET_REVIEW, datetime.utcnow() + timedelta(days=30))]
+        db = self._mk_db(rows)
+        profile = await resolve_effective_access(db, self._mk_user())
+        assert profile.active_capability_keys == [CAP_MARKET_REVIEW]
+        assert profile.default_route == DEFAULT_ROUTE_REVIEW
+        assert CAP_MARKET_DATA not in profile.active_capability_keys
+        assert CAP_SELF_SELECTION not in profile.active_capability_keys
 
     @pytest.mark.asyncio
     async def test_admin_all_capabilities(self) -> None:

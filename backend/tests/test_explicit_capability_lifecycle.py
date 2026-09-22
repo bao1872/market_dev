@@ -43,15 +43,19 @@ class TestAccessProfileSerialization:
         assert serialized["research_replay"]["source"] == "legacy_materialized"
 
     def test_default_route_all_paths(self) -> None:
+        from app.models.user_capability import (
+            CAPABILITY_MARKET_DATA,
+            CAPABILITY_MARKET_REVIEW,
+            CAPABILITY_RESEARCH_REPLAY,
+            CAPABILITY_SELF_SELECTION,
+        )
         from app.services.effective_access_service import (
-            CAP_MARKET_DATA,
-            CAP_RESEARCH_REPLAY,
-            CAP_SELF_SELECTION,
             DEFAULT_ROUTE_ADMIN,
+            DEFAULT_ROUTE_AUCTION,
             DEFAULT_ROUTE_FORBIDDEN,
             DEFAULT_ROUTE_MARKET,
             DEFAULT_ROUTE_MARKET_WATCHLIST,
-            DEFAULT_ROUTE_AUCTION,
+            DEFAULT_ROUTE_REVIEW,
             compute_default_route,
         )
 
@@ -66,13 +70,15 @@ class TestAccessProfileSerialization:
         # 无权限
         assert compute_default_route(False, {}) == DEFAULT_ROUTE_FORBIDDEN
         # 仅 self_selection
-        assert compute_default_route(False, {CAP_SELF_SELECTION: cap(CAP_SELF_SELECTION, True)}) == DEFAULT_ROUTE_MARKET_WATCHLIST
+        assert compute_default_route(False, {CAPABILITY_SELF_SELECTION: cap(CAPABILITY_SELF_SELECTION, True)}) == DEFAULT_ROUTE_MARKET_WATCHLIST
         # 仅 market_data
-        assert compute_default_route(False, {CAP_MARKET_DATA: cap(CAP_MARKET_DATA, True)}) == DEFAULT_ROUTE_MARKET
+        assert compute_default_route(False, {CAPABILITY_MARKET_DATA: cap(CAPABILITY_MARKET_DATA, True)}) == DEFAULT_ROUTE_MARKET
         # 仅 research_replay（竞价分析）
-        assert compute_default_route(False, {CAP_RESEARCH_REPLAY: cap(CAP_RESEARCH_REPLAY, True)}) == DEFAULT_ROUTE_AUCTION
+        assert compute_default_route(False, {CAPABILITY_RESEARCH_REPLAY: cap(CAPABILITY_RESEARCH_REPLAY, True)}) == DEFAULT_ROUTE_AUCTION
+        # 仅 market_review（复盘分析，独立 capability）→ /review
+        assert compute_default_route(False, {CAPABILITY_MARKET_REVIEW: cap(CAPABILITY_MARKET_REVIEW, True)}) == DEFAULT_ROUTE_REVIEW
         # self_selection + market_data
         assert compute_default_route(
             False,
-            {CAP_SELF_SELECTION: cap(CAP_SELF_SELECTION, True), CAP_MARKET_DATA: cap(CAP_MARKET_DATA, True)},
+            {CAPABILITY_SELF_SELECTION: cap(CAPABILITY_SELF_SELECTION, True), CAPABILITY_MARKET_DATA: cap(CAPABILITY_MARKET_DATA, True)},
         ) == DEFAULT_ROUTE_MARKET

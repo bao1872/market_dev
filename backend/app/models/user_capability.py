@@ -1,4 +1,4 @@
-"""UserCapability ORM 模型 - 三类独立权限授权表（PRD60 PA-01）。
+"""UserCapability ORM 模型 - 四类独立权限授权表（PRD60 PA-01）。
 
 对应迁移：
 - 068_user_capabilities: 创建 user_capabilities 表 + 从现有有效订阅回填
@@ -7,7 +7,7 @@
 - user_capabilities: 用户能力授权表（per-capability 独立 expires_at）
 
 设计要点（PRD60）：
-- 三类独立 capability: self_selection / market_data / research_replay
+- 四类独立 capability: self_selection / market_data / market_review / research_replay
 - 每个 capability 独立授予/撤销/过期，admin 豁免所有检查
 - self_selection 携带 watchlist_limit（管理员自定义，PA-02）
 - expires_at 按 30 天周期计算（PA-03，1 = 30 天），per-capability 独立
@@ -26,13 +26,15 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base
 
-# PRD60 PA-01: 三类独立权限固定值
+# PRD60 PA-01: 四类独立权限固定值
 CAPABILITY_SELF_SELECTION = "self_selection"
 CAPABILITY_MARKET_DATA = "market_data"
+CAPABILITY_MARKET_REVIEW = "market_review"
 CAPABILITY_RESEARCH_REPLAY = "research_replay"
 ALL_CAPABILITIES: tuple[str, ...] = (
     CAPABILITY_SELF_SELECTION,
     CAPABILITY_MARKET_DATA,
+    CAPABILITY_MARKET_REVIEW,
     CAPABILITY_RESEARCH_REPLAY,
 )
 
@@ -42,7 +44,7 @@ class UserCapability(Base):
 
     字段语义：
     - user_id: 用户 ID
-    - capability: 权限类型（self_selection/market_data/research_replay）
+    - capability: 权限类型（self_selection/market_data/market_review/research_replay）
     - watchlist_limit: 自选数量上限（仅 self_selection 使用，PA-02；其他 capability 为 NULL）
     - granted_at: 授予时间
     - expires_at: 过期时间（per-capability 独立 30 天周期，PA-03）
@@ -75,7 +77,7 @@ class UserCapability(Base):
     capability: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
-        comment="权限类型 self_selection/market_data/research_replay",
+        comment="权限类型 self_selection/market_data/market_review/research_replay",
     )
     watchlist_limit: Mapped[int | None] = mapped_column(
         Integer,

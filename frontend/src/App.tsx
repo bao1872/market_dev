@@ -149,8 +149,8 @@ function AdminRoute() {
   return <Outlet />
 }
 
-// [Phase 5B-2 PRD60 PA-01] CapabilityRoute - 三类独立权限守卫
-// capability: 'self_selection' | 'market_data' | 'research_replay'
+// [Phase 5B-2 PRD60 PA-01] CapabilityRoute - 四类独立权限守卫
+// capability: 'self_selection' | 'market_data' | 'market_review' | 'research_replay'
 // [权限模型 V2] 权限状态机：accessStatus==ready 且确认无权限才跳 /forbidden；
 // loading / idle 显示 loading；error 显示"权限加载失败"页（不伪装 403）。
 function CapabilityRoute({ capability }: { capability: string }) {
@@ -342,10 +342,11 @@ export const routeConfig: RouteObject[] = [
               { path: '/stock/:symbol', element: <StockDetailPage /> },
             ],
           },
-          // market_data: 复盘（Market Dashboard）+ 旧板块分析迁移提示
-          // [REVIEW-V2-R1] /review* = canonical 复盘；/boards* 仅提示迁移（旧 Board Analysis 后端已退役）
+          // market_review: 复盘（Market Dashboard）+ 旧板块分析迁移提示
+          // [PANJI-REVIEW-CAPABILITY-SPLIT] /review* = canonical 复盘，独立能力 = market_review；
+          //   /boards* 仅提示迁移（旧 Board Analysis 后端已退役）
           {
-            element: <CapabilityRoute capability="market_data" />,
+            element: <CapabilityRoute capability="market_review" />,
             children: [
               {
                 path: '/review',
@@ -384,7 +385,7 @@ export const routeConfig: RouteObject[] = [
               { path: '/boards/:boardId', element: <BoardCompatResolverRoute /> },
             ],
           },
-          // research_replay = 竞价分析（CHANGE-20260802-002；[REVIEW-V2-R1] 复盘已改由 market_data 守卫）
+          // research_replay = 竞价分析（CHANGE-20260802-002；[PANJI-REVIEW-CAPABILITY-SPLIT] 复盘改由独立 market_review 守卫）
           // 竞价三级页面共用同一 capability 守卫，不存在独立 auction capability；
           // 直接输入 /auction/* URL 的无权限用户由 CapabilityRoute 统一跳转 /forbidden。
           {

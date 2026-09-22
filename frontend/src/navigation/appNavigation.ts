@@ -74,12 +74,12 @@ export interface AppNavItem {
 
 // 普通用户一级导航（行情 + 自选 + 复盘 + 竞价；消息/设置不在此处）
 // [Round 2026-07-28-4] 自选升级为一级导航，复用 /market?scope=watchlist
-// [REVIEW-V2-R1] 「复盘」= Market Dashboard（/review*），能力 = market_data；
-//   竞价 = research_replay（竞价分析）。两者不再共用同一权益，也不再保留重复的「市场复盘」入口。
+// [PANJI-REVIEW-CAPABILITY-SPLIT] 「复盘」= Market Dashboard（/review*），独立能力 = market_review；
+//   竞价 = research_replay（竞价分析）。四类 capability 互相独立，不复用同一权益。
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情', requiredCapability: 'market_data' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选', requiredCapability: 'self_selection' },
-  { path: APP_ROUTES.review, label: '复盘', requiredCapability: 'market_data' },
+  { path: APP_ROUTES.review, label: '复盘', requiredCapability: 'market_review' },
   { path: APP_ROUTES.auction, label: '竞价', requiredCapability: AUCTION_CAPABILITY },
 ]
 

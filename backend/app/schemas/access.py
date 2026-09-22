@@ -117,7 +117,7 @@ class SubscriptionSummaryInfo(BaseModel):
 class ExplicitCapabilityRecord(BaseModel):
     """管理员 access-profile 显式 capability 记录层。"""
 
-    capability: Literal["self_selection", "market_data", "research_replay"] = Field(
+    capability: Literal["self_selection", "market_data", "market_review", "research_replay"] = Field(
         ..., description="权限类型"
     )
     state: CAPABILITY_STATE_LITERAL = Field(..., description="active/expired/revoked")
