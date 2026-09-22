@@ -136,6 +136,36 @@ def resolve_market_data_source_policy(
     )
 
 
+def is_historical_market_data_request(
+    *,
+    adjustment_as_of: date | None,
+    end_date: date | None = None,
+    today: date | None = None,
+) -> bool:
+    """「本次请求是不是历史 / PIT 请求」的**唯一语义 owner**。
+
+    [P1-chart-snapshot-historical] 这个判断以前只活在 ``resolve_request_source_policy``
+    内部，于是**只有 bars 半边**拿到了历史语义；同一次历史请求里的
+    Node / indicator 取数仍各自假定 live，把当前 provider 行情混进历史结果
+    （表面能算出结果、不报错，是最危险的一类污染）。
+
+    现在把「请求语义」这件事抽成独立函数：**任何**需要按历史/实时分流的调用方
+    （bars 展示、chart-snapshot 展示、indicator 内部日线/分钟/Node 输入）
+    都必须从这里取同一个答案，禁止各自重新推断。
+
+    历史判据（任一成立即 historical）：
+    - 显式 ``adjustment_as_of``（as-of 复权锚点 ⇒ 历史/PIT 请求，最强信号）；
+    - ``end_date`` 早于今天（回溯窗口 ⇒ 历史请求）。
+
+    **刻意不把 ``completed_only=True`` 视为 historical**：实时 Node 输入也传
+    completed_only=True，但它仍然是 live，必须走 provider_direct 的已完成 bars。
+    """
+    effective_today = today if today is not None else now_shanghai().date()
+    return adjustment_as_of is not None or (
+        end_date is not None and end_date < effective_today
+    )
+
+
 def resolve_request_source_policy(
     timeframe: str,
     *,
@@ -148,18 +178,16 @@ def resolve_request_source_policy(
     ``/bars`` 与 ``/chart-snapshot`` 两条展示读链必须共用本函数 —— 否则
     「15m/1h 该读 Provider 还是 DB」会出现第二个判定 owner，两个入口随后漂移。
 
-    历史判据（任一成立即 historical）：
-    - 显式 ``adjustment_as_of``（as-of 复权锚点 ⇒ 历史/PIT 请求，这是最强的信号）；
-    - ``end_date`` 早于今天（回溯窗口 ⇒ 历史请求）。
-
-    **刻意不把 ``completed_only=True`` 视为 historical**：实时 Node 输入也传
-    completed_only=True，但它仍然是 live，必须走 provider_direct 的已完成 bars。
+    历史语义本身由 ``is_historical_market_data_request`` 判定（单一 owner），
+    本函数只负责把它翻译成周期相关的 policy。
     """
-    effective_today = today if today is not None else now_shanghai().date()
-    historical = adjustment_as_of is not None or (
-        end_date is not None and end_date < effective_today
+    return resolve_market_data_source_policy(
+        timeframe,
+        historical=is_historical_market_data_request(
+            adjustment_as_of=adjustment_as_of, end_date=end_date, today=today,
+        ),
     )
-    return resolve_market_data_source_policy(timeframe, historical=historical)
+
 
 # [P0-2 2026-08-04] 单次 get_bars 在典型路径下的 repository 级读操作数：
 # bars 查询 1 次 + 复权因子 1 次（qfq）+ 预期最后完成日 1 次 = 3 次。

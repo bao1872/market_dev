@@ -18,6 +18,8 @@ Node Cluster 输入隔离：
   日线/15m（合同常量 250/4000，与页面 include_realtime/completed_only/bars 隔离）。
 - 这不算"第二次行情读取"——Node 输入是不同参数（completed_only=True）的独立查询，
   保证 Node 计算不受展示窗口 partial bar 污染。
+- **但读取模式必须继承本次请求语义**：历史请求时 Node 输入走 ``HISTORICAL_DB``
+  （daily + 15m 全 DB_ONLY），否则历史响应会混入当前 provider 15m。
 
 Source policy（[PANJI-INTRADAY-DIRECT-SOURCE]）：
 - 本层调用 MDAS ``resolve_request_source_policy``（与 /bars 共用的唯一判定点）：
@@ -26,6 +28,12 @@ Source policy（[PANJI-INTRADAY-DIRECT-SOURCE]）：
     禁止联网 —— 否则历史截图/重放会拉当前最近 4000 根再裁剪，引入未来数据）
   - 1d / 1w / 1mo / 1m → ``HYBRID``，行为与历史完全一致
 - 判定不再只看 timeframe：历史入口传 ``adjustment_as_of`` 时同样必须落到 DB。
+
+[P1-chart-snapshot-historical] 请求语义只判定一次（``is_historical_market_data_request``），
+然后**同时**驱动两个消费者：展示 bars 的 source policy 与
+``compute_all_indicators(market_data_mode=...)``。只修展示半边是不够的 ——
+指标内部的日线/分钟/SMC 预热/Node 输入若仍按 live 取数，同一个历史响应里就会
+出现两个时间截面（表面算得出结果、不报错）。
 
 用法：
     from app.services.chart_snapshot_service import ChartSnapshotService
@@ -55,11 +63,15 @@ from app.services.indicator_display_frame import (
     build_display_frame,
     is_display_frame_match,
 )
-from app.services.indicator_service import compute_all_indicators
+from app.services.indicator_service import (
+    IndicatorMarketDataMode,
+    compute_all_indicators,
+)
 from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
     MarketDataSourcePolicy,
+    is_historical_market_data_request,
     resolve_request_source_policy,
 )
 
@@ -138,6 +150,19 @@ class ChartSnapshotService:
         #    1d/1w/1mo/1m → hybrid（行为不变）。不依赖 MDAS 默认值，也不在本层另写判定。
         #    注意：不额外传 limit —— 保持既有「MDAS 取窗口 → 本层 tail(bars) 分页」语义，
         #    避免顺手改变 1d 展示窗口/hash/coverage 的既有合同。
+        #
+        #    [P1-chart-snapshot-historical] 请求语义（历史 vs 实时）必须只判定一次，
+        #    然后**同时**驱动展示 bars 与 compute_all_indicators 的取数模式：
+        #    否则同一个历史响应里会出现「K 线来自 DB + Node/指标来自当前 provider」的
+        #    时间截面混用（不报错、静默错）。
+        historical_request = is_historical_market_data_request(
+            adjustment_as_of=adjustment_as_of,
+        )
+        market_data_mode = (
+            IndicatorMarketDataMode.HISTORICAL_DB
+            if historical_request
+            else IndicatorMarketDataMode.LIVE
+        )
         source_policy = resolve_request_source_policy(
             timeframe, adjustment_as_of=adjustment_as_of,
         )
@@ -232,6 +257,9 @@ class ChartSnapshotService:
         #    传给指标计算。一个请求内，展示周期 MDAS get_bars 调用次数 = 1。
         #    compute_all_indicators 内部 Node Cluster 日线/15m 仍独立查询
         #    （completed qfq 合同，由 NodeClusterInputProvider 提供）。
+        #    [P1-chart-snapshot-historical] 但必须把**同一份请求语义**传下去：
+        #    历史请求时指标内部（日线 / 分钟 / 周月 / SMC 预热 / Node 输入）全部 DB_ONLY，
+        #    保证整条 historical chart-snapshot 是 PIT zero-network。
         indicators = await compute_all_indicators(
             session=session,
             instrument_id=instrument_id,
@@ -243,6 +271,7 @@ class ChartSnapshotService:
             completed_only=completed_only,
             adjustment_as_of=adjustment_as_of,
             preloaded_display_bars=bars_result,
+            market_data_mode=market_data_mode,
         )
 
         # 6. 校验 bars vs indicators display_frame（render_frame.matched）
@@ -325,4 +354,32 @@ if __name__ == "__main__":
     print(
         "chart source policy ✓ (live 15m/1h=provider_direct, "
         "历史 15m/1h=db_only, 其余=hybrid)"
+    )
+
+    # [P1-chart-snapshot-historical] 请求语义 → 指标读取模式（只判定一次，两个消费者共用）
+    from app.services.indicator_service import (
+        _indicator_node_source_mode,
+        _indicator_source_policy,
+    )
+    from app.services.node_cluster_input_provider import NodeClusterSourceMode
+
+    assert is_historical_market_data_request(adjustment_as_of=None) is False
+    assert is_historical_market_data_request(
+        adjustment_as_of=date(2026, 7, 1),
+    ) is True
+    assert _indicator_source_policy("1d", IndicatorMarketDataMode.LIVE) \
+        is MarketDataSourcePolicy.HYBRID
+    assert _indicator_source_policy("15m", IndicatorMarketDataMode.LIVE) \
+        is MarketDataSourcePolicy.PROVIDER_DIRECT
+    for _tf in ("1d", "15m", "1h", "1w", "1mo", "1m"):
+        assert _indicator_source_policy(
+            _tf, IndicatorMarketDataMode.HISTORICAL_DB,
+        ) is MarketDataSourcePolicy.DB_ONLY, _tf
+    assert _indicator_node_source_mode(IndicatorMarketDataMode.LIVE) \
+        is NodeClusterSourceMode.LIVE_DIRECT
+    assert _indicator_node_source_mode(IndicatorMarketDataMode.HISTORICAL_DB) \
+        is NodeClusterSourceMode.HISTORICAL_DB
+    print(
+        "indicator market_data_mode ✓ (HISTORICAL_DB: 全周期 db_only + "
+        "Node historical_db)"
     )

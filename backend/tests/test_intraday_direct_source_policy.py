@@ -33,10 +33,16 @@ import pytest
 
 from app.constants.indicator_contract import NODE_CLUSTER_LOW_BARS
 from app.services import market_data_aggregation_service as mdas
+from app.services.indicator_service import (
+    IndicatorMarketDataMode,
+    _indicator_node_source_mode,
+    _indicator_source_policy,
+)
 from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
     MarketDataSourcePolicy,
+    is_historical_market_data_request,
     resolve_market_data_source_policy,
     resolve_request_source_policy,
 )
@@ -100,6 +106,158 @@ def _build_60m_bars(count: int, end: str | None = None) -> pd.DataFrame:
     }, index=times)
     df.index.name = "trade_time"
     return df
+
+
+def _build_daily_bars(count: int, end: str = "2026-06-30") -> pd.DataFrame:
+    """构造 DB 日线（index 为 naive DatetimeIndex，与真实 repository 返回一致）。"""
+    times = pd.date_range(end=pd.Timestamp(end), periods=count, freq="B")
+    closes = [30.0 + i * 0.05 for i in range(count)]
+    df = pd.DataFrame({
+        "open": [c - 0.1 for c in closes],
+        "high": [c + 0.15 for c in closes],
+        "low": [c - 0.15 for c in closes],
+        "close": closes,
+        "volume": [50000.0 + i for i in range(count)],
+        "amount": [500000.0 + i * 10 for i in range(count)],
+        "adj_factor": [1.0] * count,
+    }, index=times)
+    df.index.name = "trade_date"
+    return df
+
+
+class _FakeAdjService:
+    """最小复权服务替身：不触网、不做二次变换（source 分流用例只关心取数来源）。"""
+
+    async def get_factor_series(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
+        return pd.DataFrame({
+            "trade_date": pd.to_datetime(["2026-01-01"]),
+            "adj_factor": [1.0],
+        })
+
+    def apply_qfq(
+        self, bars: pd.DataFrame, factors: pd.DataFrame, **kwargs: Any,
+    ) -> pd.DataFrame:
+        return bars
+
+
+class _FakeResult:
+    """最小 SQLAlchemy Result 替身。"""
+
+    def __init__(self, rows: list[Any]) -> None:
+        self._rows = rows
+
+    def first(self) -> Any:
+        return self._rows[0] if self._rows else None
+
+    def all(self) -> list[Any]:
+        return list(self._rows)
+
+    def scalars(self) -> Any:
+        class _Scalars:
+            def all(self) -> list[Any]:
+                return []
+
+        return _Scalars()
+
+    def scalar_one_or_none(self) -> None:
+        return None
+
+    def scalar(self) -> None:
+        return None
+
+    def mappings(self) -> Any:
+        class _Mappings:
+            def all(self) -> list[Any]:
+                return []
+
+        return _Mappings()
+
+
+class _InstrumentOnlySession:
+    """最小 DB 替身：只回答 ``Instrument.symbol``，策略注册表查询一律返回空。
+
+    本模块的请求级用例要让**真实 compute_all_indicators** 跑起来（而不是 mock 掉），
+    因此需要一个能把「symbol 查询」与「策略版本查询」区分开的最小 session：
+    前者必须命中（否则 compute_all_indicators 第一步就 raise），后者返回空 ⇒
+    不加载任何策略、不引入额外数据读取。
+    """
+
+    def __init__(self, symbol: str = "600519") -> None:
+        self.symbol = symbol
+        self.statements: list[str] = []
+
+    async def execute(self, stmt: Any) -> _FakeResult:
+        sql = " ".join(str(stmt).split())
+        self.statements.append(sql)
+        if "instruments.symbol" in sql:
+            return _FakeResult([(self.symbol,)])
+        return _FakeResult([])
+
+
+# 外部行情 provider 的全部入口（历史 / PIT 路径必须零调用）。
+_EXTERNAL_MARKET_DATA_FNS: tuple[str, ...] = (
+    "fetch_daily_bars",
+    "fetch_today_daily_bars",
+    "fetch_15min_bars",
+    "fetch_60min_bars",
+    "fetch_minute_bars",
+)
+
+
+def _record_external_calls(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """把 5 个外部行情入口全部换成**调用记录器**，返回记录列表。
+
+    刻意不用「一调用即抛异常」：MDAS 的 daily 回补与实时尾部两段都在
+    ``try/except Exception`` 内（降级语义），异常会被吞掉，反而让用例误判为通过。
+    只有调用记录才是非异常、不可被吞的判据。
+    """
+
+    calls: list[str] = []
+
+    def _make(name: str) -> Any:
+        async def _fake(*args: Any, **kwargs: Any) -> pd.DataFrame:
+            calls.append(name)
+            return pd.DataFrame()
+
+        return _fake
+
+    for fn_name in _EXTERNAL_MARKET_DATA_FNS:
+        monkeypatch.setattr(mdas, fn_name, _make(fn_name))
+    return calls
+
+
+def _install_historical_db_readers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """安装「历史 DB 里有数据、但**日线缺尾**」的 repository 替身。
+
+    刻意让 DB 日线只覆盖到 2026-06-10，而预期最后完成日（stub）是 2026-06-30 ——
+    于是 ``need_tail=True``：任何把日线留在 ``HYBRID``（allow_backfill=True）的实现
+    都会去 ``fetch_daily_bars`` 触网。这正是本轮要关闭的失败模式，
+    因此这个缺口让「零外部调用」断言真正具备判别力（否则 DB 覆盖完整时断言会空转）。
+    """
+
+    async def _db_daily(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        # 人为缺尾：DB 只到 06-10，预期完成日 06-30 ⇒ need_tail=True
+        return _build_daily_bars(400, end="2026-06-10")
+
+    async def _db_15m(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        return _build_15m_bars(300, end="2026-06-30 14:45")
+
+    async def _db_60m(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        return _build_60m_bars(300, end="2026-06-30 14:00")
+
+    monkeypatch.setattr(mdas, "_query_daily_bars", _db_daily)
+    monkeypatch.setattr(mdas, "_query_15min_bars", _db_15m)
+    monkeypatch.setattr(mdas, "_query_60min_bars", _db_60m)
+    monkeypatch.setattr(mdas, "_get_listing_date", lambda *a, **kw: _async_return(None))
+    monkeypatch.setattr(
+        mdas, "_call_expected_last_completed_daily_bar",
+        lambda *a, **kw: _async_return(date(2026, 6, 30)),
+    )
+    monkeypatch.setattr(mdas, "AdjustmentFactorService", _FakeAdjService)
+    monkeypatch.setattr(
+        NodeClusterInputProvider, "_compute_exhaustion_proofs",
+        AsyncMock(return_value={"1d": (False, None), "15m": (False, None)}),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -877,10 +1035,10 @@ async def test_chart_snapshot_historical_1h_uses_db_only(
     monkeypatch.setattr(mdas, "_query_60min_bars", _db_read)
     monkeypatch.setattr(mdas, "_get_listing_date", lambda *a, **kw: _async_return(None))
     # 指标计算与本次 source 分流无关，隔离掉以免引入额外 DB/Node 读。
-    monkeypatch.setattr(
-        css, "compute_all_indicators",
-        AsyncMock(return_value={"layers": [], "data": {}, "timeframe": "1h"}),
+    indicators_mock = AsyncMock(
+        return_value={"layers": [], "data": {}, "timeframe": "1h"},
     )
+    monkeypatch.setattr(css, "compute_all_indicators", indicators_mock)
 
     result = await css.ChartSnapshotService.compute_bars_and_indicators(
         _mock_session(), TEST_INSTRUMENT_ID,
@@ -895,6 +1053,11 @@ async def test_chart_snapshot_historical_1h_uses_db_only(
     assert len(db_calls) == 1, (
         f"历史 1h 快照请求必须且只读 DB 一次，实际 {len(db_calls)} 次"
     )
+    # [P1-chart-snapshot-historical] 只有展示半边 DB_ONLY 是不够的：
+    # 指标读取模式必须由**同一**请求语义派生并显式传下去。
+    assert indicators_mock.await_args.kwargs["market_data_mode"] is (
+        IndicatorMarketDataMode.HISTORICAL_DB
+    ), "历史快照必须把 HISTORICAL_DB 传给 compute_all_indicators"
     assert result.bars_result.data_source == "db"
     assert result.is_empty is False
 
@@ -912,22 +1075,7 @@ async def test_historical_node_has_zero_external_market_data_calls(
     都在 ``try/except Exception`` 内（降级语义），异常会被吞掉，反而让用例误判为通过。
     必须用调用记录做**非异常**判据。
     """
-    external_calls: list[str] = []
-
-    async def _external_recorder(name: str):
-        async def _fake(*args: Any, **kwargs: Any) -> pd.DataFrame:
-            external_calls.append(name)
-            return pd.DataFrame()
-        return _fake
-
-    for fn_name in (
-        "fetch_daily_bars",
-        "fetch_today_daily_bars",
-        "fetch_15min_bars",
-        "fetch_60min_bars",
-        "fetch_minute_bars",
-    ):
-        monkeypatch.setattr(mdas, fn_name, await _external_recorder(fn_name))
+    external_calls = _record_external_calls(monkeypatch)
 
     async def _empty_daily(*args: Any, **kwargs: Any) -> pd.DataFrame:
         return pd.DataFrame(columns=["open", "high", "low", "close", "volume", "amount"])
@@ -942,15 +1090,6 @@ async def test_historical_node_has_zero_external_market_data_calls(
         mdas, "_call_expected_last_completed_daily_bar",
         lambda *a, **kw: _async_return(date(2026, 7, 1)),
     )
-
-    class _FakeAdjService:
-        async def get_factor_series(self, *args: Any, **kwargs: Any) -> pd.DataFrame:
-            return pd.DataFrame({"trade_date": pd.to_datetime(["2026-01-01"]),
-                                 "adj_factor": [1.0]})
-
-        def apply_qfq(self, bars: pd.DataFrame, factors: pd.DataFrame, **kw: Any) -> pd.DataFrame:
-            return bars
-
     monkeypatch.setattr(mdas, "AdjustmentFactorService", _FakeAdjService)
     monkeypatch.setattr(
         NodeClusterInputProvider, "_compute_exhaustion_proofs",
@@ -967,3 +1106,286 @@ async def test_historical_node_has_zero_external_market_data_calls(
     assert external_calls == [], (
         f"HISTORICAL_DB 路径绝对禁止访问外部行情源，实际触网: {external_calls}"
     )
+
+
+# ============================================================
+# 审计要求的端到端 PIT 用例：整条历史请求链零网络
+# ============================================================
+# 上一版只证明了「chart-snapshot 的 bars 半边不联网」——因为用例把
+# ``compute_all_indicators`` 整个 mock 掉了，真正会漏的 Node / indicator 内部取数
+# 根本没被执行。本节三个用例刻意**不 mock** 出问题的那一段。
+
+
+async def test_historical_chart_snapshot_has_zero_external_market_data_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史 chart-snapshot **整条链** PIT 零网络（含 indicators 内部的日线/分钟/Node 输入）。
+
+    请求语义：``timeframe="1h" + adjustment_as_of=2026-07-01``。
+    真实调用 ``ChartSnapshotService.compute_bars_and_indicators``，
+    **不 mock ``compute_all_indicators``**：让指标内部的
+    日线 HYBRID→DB_ONLY、Node LIVE_DIRECT→HISTORICAL_DB、
+    15m/1h 展示与 SMC 预热全部真实跑一遍。
+
+    判据用「5 个外部行情入口的调用记录」而不是「一调用即抛异常」——
+    MDAS 的 daily 回补 / 实时尾部都在 ``try/except`` 内，异常会被吞掉。
+    """
+    from app.services import chart_snapshot_service as css
+
+    external_calls = _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+
+    result = await css.ChartSnapshotService.compute_bars_and_indicators(
+        _InstrumentOnlySession(), TEST_INSTRUMENT_ID,
+        timeframe="1h", adj="qfq", bars=100,
+        include_realtime=False, completed_only=True,
+        adjustment_as_of=date(2026, 7, 1),
+    )
+
+    assert result.is_empty is False, (
+        "用例前提是历史 DB 有数据；否则下面的断言是空转"
+    )
+    assert external_calls == [], (
+        "历史 chart-snapshot 必须整条链 PIT 零外部行情调用"
+        f"（display bars + 指标日线/分钟/SMC + Node 输入），实际触网: {external_calls}"
+    )
+
+
+async def test_historical_indicators_use_historical_db_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/indicators?adjustment_as_of=…` → 历史模式：daily DB_ONLY / Node HISTORICAL_DB / 15m 零触网。
+
+    直接驱动 ``compute_all_indicators``（/indicators 的真实计算入口），
+    在 **不传 preloaded_display_bars** 的情况下验证「内部自取数据」这一半：
+    - 日线 ``source_policy`` 必须是 ``DB_ONLY``（不能停在 HYBRID）；
+    - Node 输入必须是 ``HISTORICAL_DB``（否则 Node 15m 会走 provider）；
+    - 外部 provider 调用 0 次。
+    """
+    from app.services import indicator_service as ind
+
+    external_calls = _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+
+    seen: list[dict[str, Any]] = []
+    node_modes: list[Any] = []
+    real_get_inputs = NodeClusterInputProvider.get_inputs
+    real_get_bars = MarketDataAggregationService.get_bars
+
+    async def _spy_get_inputs(
+        cls: Any, session: Any, instrument_id: Any, **kwargs: Any,
+    ) -> Any:
+        node_modes.append(kwargs.get("source_mode"))
+        return await real_get_inputs(session, instrument_id, **kwargs)
+
+    async def _spy_get_bars(
+        self: Any, session: Any, instrument_id: Any, **kwargs: Any,
+    ) -> Any:
+        seen.append(kwargs)
+        return await real_get_bars(self, session, instrument_id, **kwargs)
+
+    monkeypatch.setattr(
+        NodeClusterInputProvider, "get_inputs", classmethod(_spy_get_inputs),
+    )
+    monkeypatch.setattr(MarketDataAggregationService, "get_bars", _spy_get_bars)
+
+    await ind.compute_all_indicators(
+        _InstrumentOnlySession(), TEST_INSTRUMENT_ID,
+        timeframe="1h", adj="qfq", bars=100,
+        include_realtime=False, completed_only=True,
+        adjustment_as_of=date(2026, 7, 1),
+        market_data_mode=IndicatorMarketDataMode.HISTORICAL_DB,
+    )
+
+    daily_policies = [
+        c["source_policy"] for c in seen if c["timeframe"] == "1d"
+    ]
+    assert daily_policies, "指标内部必须自取日线（未传 preloaded 时）"
+    assert all(p is MarketDataSourcePolicy.DB_ONLY for p in daily_policies), (
+        f"历史模式下日线不得停在 HYBRID（DB 缺尾会触网），实际: {daily_policies}"
+    )
+    # 指标内部直接取用的分钟周期（非 preloaded 分支）也必须 DB_ONLY
+    intraday = [c for c in seen if c["timeframe"] in ("15m", "1h")]
+    assert intraday, "本用例要求指标内部至少取一次分钟周期"
+    assert all(
+        c["source_policy"] is MarketDataSourcePolicy.DB_ONLY for c in intraday
+    ), [(c["timeframe"], c["source_policy"]) for c in intraday]
+
+    assert node_modes and all(
+        m is NodeClusterSourceMode.HISTORICAL_DB for m in node_modes
+    ), f"历史模式下 Node 输入必须是 HISTORICAL_DB，实际: {node_modes}"
+    assert external_calls == [], (
+        f"历史 indicators 请求禁止触网，实际: {external_calls}"
+    )
+
+
+async def test_indicators_api_declares_request_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`/indicators` 独立 API 必须把请求语义翻译成 market_data_mode 传下去。
+
+    只接 chart-snapshot 是不够的：``/indicators?adjustment_as_of=…`` 曾经直接
+    ``compute_all_indicators(...)``，于是留下第二条 PIT 泄漏入口。
+    本用例在 **API 边界**上锁住这个参数（compute 本身由上一个用例真实验证）。
+    """
+    from fastapi import Response
+
+    from app.api import indicators as indicators_api
+
+    calls: list[dict[str, Any]] = []
+
+    async def _fake_compute(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"layers": [], "data": {}, "timeframe": kwargs["timeframe"]}
+
+    monkeypatch.setattr(indicators_api, "compute_all_indicators", _fake_compute)
+    monkeypatch.setattr(
+        indicators_api, "_get_last_bar_time",
+        AsyncMock(return_value=datetime(2026, 7, 1, 15, 0)),
+    )
+    monkeypatch.setattr(
+        indicators_api.indicator_cache, "get", AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        indicators_api.indicator_cache, "set", AsyncMock(return_value=None),
+    )
+
+    async def _call(*, adjustment_as_of: date | None) -> None:
+        await indicators_api.get_indicators(
+            TEST_INSTRUMENT_ID,
+            timeframe="1h", adj="none", bars=100,
+            force_refresh=True, capture=False, include_smc=False,
+            include_realtime=adjustment_as_of is None,
+            completed_only=adjustment_as_of is not None,
+            adjustment_as_of=adjustment_as_of,
+            ctx=_access_ctx(), db=_mock_session(), response=Response(),
+        )
+
+    # 历史请求（显式 as-of）
+    await _call(adjustment_as_of=date(2026, 7, 1))
+    assert calls[-1]["market_data_mode"] is (
+        IndicatorMarketDataMode.HISTORICAL_DB
+    ), "历史 /indicators 请求必须以 HISTORICAL_DB 驱动内部取数"
+
+    # 实时请求（无 as-of）必须保持 LIVE，不能把当前页面一起改成 DB_ONLY
+    await _call(adjustment_as_of=None)
+    assert calls[-1]["market_data_mode"] is IndicatorMarketDataMode.LIVE
+
+
+async def test_live_chart_snapshot_keeps_live_indicator_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """当前个股页（无 as-of）必须保持 live：15m 展示 provider_direct + Node LIVE_DIRECT。
+
+    防止为修 PIT 而把当前页面一起「修坏」成 DB_ONLY（会让实时页读到旧 DB 分钟线）。
+    """
+    from app.services import chart_snapshot_service as css
+
+    # 安全网：任何未预期的外部行情入口都只被记录、不做真实网络访问。
+    _record_external_calls(monkeypatch)
+
+    node_modes: list[Any] = []
+    display_policies: list[Any] = []
+    provider_calls: list[int] = []
+    real_get_inputs = NodeClusterInputProvider.get_inputs
+    real_get_bars = MarketDataAggregationService.get_bars
+
+    async def _spy_get_inputs(
+        cls: Any, session: Any, instrument_id: Any, **kwargs: Any,
+    ) -> Any:
+        node_modes.append(kwargs.get("source_mode"))
+        return await real_get_inputs(session, instrument_id, **kwargs)
+
+    async def _spy_get_bars(
+        self: Any, session: Any, instrument_id: Any, **kwargs: Any,
+    ) -> Any:
+        display_policies.append((kwargs.get("timeframe"), kwargs.get("source_policy")))
+        return await real_get_bars(self, session, instrument_id, **kwargs)
+
+    monkeypatch.setattr(
+        NodeClusterInputProvider, "get_inputs", classmethod(_spy_get_inputs),
+    )
+    monkeypatch.setattr(MarketDataAggregationService, "get_bars", _spy_get_bars)
+
+    # live：15m 展示 + Node 15m 都必须真的走 provider（provider_direct）
+    async def _provider_15m(
+        session: Any, instrument_id: Any, *, count: int,
+    ) -> pd.DataFrame:
+        provider_calls.append(count)
+        return _build_15m_bars(count)
+
+    monkeypatch.setattr(mdas, "fetch_15min_bars", _provider_15m)
+
+    # 日线：DB 已完整覆盖到今日 ⇒ need_tail=False，live 日线不必触网
+    async def _db_daily(*args: Any, **kwargs: Any) -> pd.DataFrame:
+        return _build_daily_bars(400, end=pd.Timestamp.today().normalize())
+
+    monkeypatch.setattr(mdas, "_query_daily_bars", _db_daily)
+    monkeypatch.setattr(
+        mdas, "_call_expected_last_completed_daily_bar",
+        lambda *a, **kw: _async_return(date.today()),
+    )
+    monkeypatch.setattr(mdas, "AdjustmentFactorService", _FakeAdjService)
+    monkeypatch.setattr(
+        NodeClusterInputProvider, "_compute_exhaustion_proofs",
+        AsyncMock(return_value={"1d": (False, None), "15m": (False, None)}),
+    )
+
+    await css.ChartSnapshotService.compute_bars_and_indicators(
+        _InstrumentOnlySession(), TEST_INSTRUMENT_ID,
+        timeframe="15m", adj="none", bars=100,
+        include_realtime=True, completed_only=False,
+        adjustment_as_of=None,
+    )
+
+    m15 = [p for tf, p in display_policies if tf == "15m"]
+    assert m15 and all(p is MarketDataSourcePolicy.PROVIDER_DIRECT for p in m15), (
+        f"live 15m 展示必须 provider_direct，实际: {m15}"
+    )
+    assert node_modes and all(
+        m is NodeClusterSourceMode.LIVE_DIRECT for m in node_modes
+    ), f"live Node 输入必须 LIVE_DIRECT，实际: {node_modes}"
+    assert provider_calls, (
+        "用例前提：live 15m 应当真的走 provider；若没走到说明分流被改坏"
+    )
+
+
+def test_request_semantics_helper_is_single_owner() -> None:
+    """`is_historical_market_data_request` 是请求语义唯一 owner，且被 resolver 复用。"""
+    import inspect
+
+    assert is_historical_market_data_request(adjustment_as_of=None) is False
+    assert is_historical_market_data_request(
+        adjustment_as_of=date(2026, 7, 1),
+    ) is True
+    # end_date 回溯窗口
+    assert is_historical_market_data_request(
+        adjustment_as_of=None, end_date=date(2026, 6, 1), today=date(2026, 9, 22),
+    ) is True
+    assert is_historical_market_data_request(
+        adjustment_as_of=None, end_date=date(2026, 9, 22), today=date(2026, 9, 22),
+    ) is False
+    # completed_only 不是本函数的判据
+    assert "completed_only" not in inspect.signature(
+        is_historical_market_data_request
+    ).parameters
+
+    # 指标侧的策略/模式派生必须来自同一套 MDAS 规则（不得复制第二份）
+    assert _indicator_source_policy("15m", IndicatorMarketDataMode.LIVE) \
+        is MarketDataSourcePolicy.PROVIDER_DIRECT
+    assert _indicator_source_policy("1d", IndicatorMarketDataMode.LIVE) \
+        is MarketDataSourcePolicy.HYBRID
+    for tf in ("1d", "15m", "1h", "1w", "1mo", "1m"):
+        assert _indicator_source_policy(
+            tf, IndicatorMarketDataMode.HISTORICAL_DB,
+        ) is MarketDataSourcePolicy.DB_ONLY, tf
+    assert _indicator_node_source_mode(IndicatorMarketDataMode.HISTORICAL_DB) \
+        is NodeClusterSourceMode.HISTORICAL_DB
+    assert _indicator_node_source_mode(IndicatorMarketDataMode.LIVE) \
+        is NodeClusterSourceMode.LIVE_DIRECT
+    # compute_all_indicators 的默认模式必须是 LIVE（不改变既有调用方行为）
+    from app.services.indicator_service import compute_all_indicators
+
+    sig = inspect.signature(compute_all_indicators)
+    assert sig.parameters["market_data_mode"].default \
+        is IndicatorMarketDataMode.LIVE

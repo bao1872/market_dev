@@ -21,10 +21,12 @@ completed_frame + live_revision + diagnostics，禁止详情页 Bars/Indicators 
    返回 render_frame.matched。前端 mismatch 时可重试。
 
 Node Cluster 输入隔离：
-- compute_all_indicators 内部 _load_node_cluster_inputs 仍独立查询 completed qfq
+- compute_all_indicators 内部 NodeClusterInputProvider 仍独立查询 completed qfq
   日线/15m（合同常量 250/4000，与页面 include_realtime/completed_only/bars 隔离）。
 - 这不算"第二次行情读取"——Node 输入是不同参数（completed_only=True）的独立查询，
   保证 Node 计算不受展示窗口 partial bar 污染。
+- 读取模式继承请求语义：历史（显式 adjustment_as_of）→ Node 输入 HISTORICAL_DB
+  （daily + 15m 全 DB_ONLY），PIT 零网络。
 
 认证：
 - 依赖 get_db（标准 AsyncSession），与 /bars 和 /indicators 端点一致。

@@ -48,7 +48,13 @@ from app.models.bar import BarDaily
 from app.models.monitor_evaluation import MonitorEvaluation
 from app.services import indicator_cache
 from app.services.indicator_display_frame import DisplayWindowSpec
-from app.services.indicator_service import compute_all_indicators
+from app.services.indicator_service import (
+    IndicatorMarketDataMode,
+    compute_all_indicators,
+)
+from app.services.market_data_aggregation_service import (
+    is_historical_market_data_request,
+)
 
 logger = logging.getLogger("api.indicators")
 
@@ -258,6 +264,10 @@ async def get_indicators(
         # [指标缓存] - 3. 实时计算（默认路径）
         # [CHANGE-011 SMC] - 传递 include_smc 参数；include_smc=False 时后端不计算 SMC
         # [PROMPT.md §二 V2] - 传递 include_realtime/completed_only/adjustment_as_of
+        # [P1-chart-snapshot-historical] 独立 /indicators 入口也必须显式声明读取模式：
+        # 历史请求（显式 adjustment_as_of）时指标内部全部 DB_ONLY / HISTORICAL_DB，
+        # 否则 ?adjustment_as_of=… 会拿到一个「指标来自历史、Node 15m 来自当前 provider」
+        # 的混合结果 —— 与 chart-snapshot 是同一类 PIT 泄漏，必须共用同一语义 owner。
         result = await compute_all_indicators(
             session=db,
             instrument_id=instrument_id,
@@ -268,6 +278,13 @@ async def get_indicators(
             include_realtime=include_realtime,
             completed_only=completed_only,
             adjustment_as_of=adjustment_as_of,
+            market_data_mode=(
+                IndicatorMarketDataMode.HISTORICAL_DB
+                if is_historical_market_data_request(
+                    adjustment_as_of=adjustment_as_of,
+                )
+                else IndicatorMarketDataMode.LIVE
+            ),
         )
         data_source = "computed"
 

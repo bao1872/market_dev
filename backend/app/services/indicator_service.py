@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import date
+from enum import StrEnum
 from typing import Any
 
 import numpy as np
@@ -72,6 +73,8 @@ from app.services.indicator_display_frame import (
 from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
+    MarketDataSourcePolicy,
+    resolve_market_data_source_policy,
 )
 from app.services.node_cluster_input_provider import (
     NodeClusterInput,
@@ -656,6 +659,53 @@ async def _load_node_cluster_inputs(
 # ===== 主函数 =====
 
 
+class IndicatorMarketDataMode(StrEnum):
+    """指标计算的**行情读取模式**（数据语义参数，不是展示参数）。
+
+    [P1-chart-snapshot-historical] ``compute_all_indicators`` 过去永远假定 live：
+    日线走默认 HYBRID、Node 输入硬编码 ``LIVE_DIRECT``。于是**历史** chart-snapshot
+    / indicators 请求会变成「展示 K 线来自 DB（历史） + Node/指标混入当前 provider 15m」，
+    同一份历史响应里混两个时间截面 —— 这种污染不会报错，只会静默给出错误结论。
+
+    - ``LIVE``（默认）：当前个股详情 / Capture / Monitor。15m/1h → ``PROVIDER_DIRECT``，
+      1d/1w/1mo/1m → ``HYBRID``；Node 输入 → ``LIVE_DIRECT``。
+    - ``HISTORICAL_DB``：历史 / PIT（历史快照重建、as-of replay、回测）。
+      **全部**周期 → ``DB_ONLY``；Node 输入 → ``HISTORICAL_DB``。
+      PIT 路径绝对禁止访问外部行情源（联网 = 把未来数据污染进历史结果）。
+
+    这是**显式业务参数**，必须由上层请求语义派生并传入；
+    禁止在函数内部用 ``adjustment_as_of is not None`` 之类的间接特征推断
+    —— ``adjustment_as_of=today`` 也可能是 live 请求。
+    """
+
+    LIVE = "live"
+    HISTORICAL_DB = "historical_db"
+
+
+def _indicator_source_policy(
+    timeframe: str,
+    mode: IndicatorMarketDataMode,
+) -> MarketDataSourcePolicy:
+    """指标内部取数的 source policy 唯一判定点（周期 × 读取模式 → policy）。
+
+    - ``HISTORICAL_DB`` → **所有**周期 ``DB_ONLY``（含 1d/1w/1mo：DB 缺尾时也不得回补 provider）。
+    - ``LIVE`` → 委托 MDAS 的 ``resolve_market_data_source_policy(historical=False)``，
+      保证与 /bars、/chart-snapshot 展示半边使用**同一套**周期规则（不再复制第二份）。
+    """
+    if mode == IndicatorMarketDataMode.HISTORICAL_DB:
+        return MarketDataSourcePolicy.DB_ONLY
+    return resolve_market_data_source_policy(timeframe, historical=False)
+
+
+def _indicator_node_source_mode(
+    mode: IndicatorMarketDataMode,
+) -> NodeClusterSourceMode:
+    """指标内部的 Node 输入 source_mode（从同一读取模式派生，禁止硬编码）。"""
+    if mode == IndicatorMarketDataMode.HISTORICAL_DB:
+        return NodeClusterSourceMode.HISTORICAL_DB
+    return NodeClusterSourceMode.LIVE_DIRECT
+
+
 async def compute_all_indicators(
     session: AsyncSession,
     instrument_id: uuid.UUID,
@@ -668,6 +718,7 @@ async def compute_all_indicators(
     completed_only: bool = False,
     adjustment_as_of: date | None = None,
     preloaded_display_bars: BarAggregationResult | None = None,
+    market_data_mode: IndicatorMarketDataMode = IndicatorMarketDataMode.LIVE,
 ) -> dict[str, Any]:
     """从 StrategyLoader._registry 获取所有策略，实时计算图表指标。
 
@@ -715,6 +766,11 @@ async def compute_all_indicators(
             - 不传时（None）：保持原有行为，内部自行调 MDAS（向后兼容 /indicators API）
             Node Cluster 输入仍由 NodeClusterInputProvider 独立查询（completed qfq 合同，
             与展示参数隔离），不受 preloaded 影响。
+        market_data_mode: [P1-chart-snapshot-historical] 行情读取模式（数据语义，非展示参数）。
+            ``LIVE``（默认）= 当前详情/Capture/Monitor；``HISTORICAL_DB`` = 历史/PIT。
+            HISTORICAL_DB 时**本函数内所有**取数（日线/分钟/周月/1m、SMC 预热、
+            Node Cluster 输入）一律 ``DB_ONLY`` / ``HISTORICAL_DB``，
+            保证一次历史请求是 PIT zero-network；禁止在此用 adjustment_as_of 猜模式。
 
     Returns:
         dict 包含：
@@ -731,9 +787,9 @@ async def compute_all_indicators(
     """
     logger.info(
         "计算全部策略指标 instrument_id=%s timeframe=%s adj=%s bars=%d "
-        "include_realtime=%s completed_only=%s adjustment_as_of=%s",
+        "include_realtime=%s completed_only=%s adjustment_as_of=%s market_data_mode=%s",
         instrument_id, timeframe, adj, bars,
-        include_realtime, completed_only, adjustment_as_of,
+        include_realtime, completed_only, adjustment_as_of, market_data_mode,
     )
 
     # 1. 查询 instrument symbol
@@ -776,6 +832,9 @@ async def compute_all_indicators(
             include_realtime=include_realtime,
             completed_only=completed_only,
             adjustment_as_of=adjustment_as_of,
+            # [P1-chart-snapshot-historical] 日线也必须受读取模式约束：
+            # HISTORICAL_DB → DB_ONLY，否则 DB 缺尾时 HYBRID 会 fetch_daily_bars 触网。
+            source_policy=_indicator_source_policy("1d", market_data_mode),
         )
     daily_bars = daily_agg.bars
     # [CHANGE-20260715-002 SMC warmup] 保存完整日线用于 SMC 预热（ATR200 需 200 根，
@@ -798,7 +857,10 @@ async def compute_all_indicators(
         # [PANJI-INTRADAY-DIRECT-SOURCE] 当前个股详情链固定 LIVE_DIRECT：
         # Node 15m 走 provider_direct（实时分钟归 Provider），不读 DB 旧分钟线。
         # 页面周期是 1d/15m/1h/1w/1mo 都不影响 —— Node 恒为 250 daily + 4000 15m。
-        source_mode=NodeClusterSourceMode.LIVE_DIRECT,
+        # [P1-chart-snapshot-historical] 但**历史 / PIT** 请求必须切到 HISTORICAL_DB：
+        # 否则历史响应的 Node 会混入当前 provider 15m（未来数据污染）。
+        # source_mode 由 market_data_mode 显式派生，不在此处重新推断。
+        source_mode=_indicator_node_source_mode(market_data_mode),
     )
     bars_15min = node_input.bars_15m
     # minute：仅 needs_minute 时查询（VP crossover 仅需 2 根）
@@ -807,6 +869,7 @@ async def compute_all_indicators(
         rm = await _mdas.get_bars(
             session, instrument_id, timeframe="1m", adj=adj,
             include_realtime=True, limit=NODE_CLUSTER_MINUTE_BARS,
+            source_policy=_indicator_source_policy("1m", market_data_mode),
         )
         bars_minute = rm.bars
     # [PROMPT.md §二 V2] macd_agg：当前 timeframe 对应的 MDAS 结果，用于提取 is_partial
@@ -825,6 +888,7 @@ async def compute_all_indicators(
                 include_realtime=include_realtime,
                 completed_only=completed_only,
                 adjustment_as_of=adjustment_as_of,
+                source_policy=_indicator_source_policy("1h", market_data_mode),
             )
         bars_60min = r60.bars
         macd_agg = r60
@@ -840,6 +904,7 @@ async def compute_all_indicators(
                 include_realtime=include_realtime,
                 completed_only=completed_only,
                 adjustment_as_of=adjustment_as_of,
+                source_policy=_indicator_source_policy("1w", market_data_mode),
             )
         bars_weekly = rw.bars
         macd_agg = rw
@@ -853,6 +918,7 @@ async def compute_all_indicators(
                 include_realtime=include_realtime,
                 completed_only=completed_only,
                 adjustment_as_of=adjustment_as_of,
+                source_policy=_indicator_source_policy("1mo", market_data_mode),
             )
         bars_monthly = rmo.bars
         macd_agg = rmo
@@ -872,6 +938,7 @@ async def compute_all_indicators(
                 completed_only=completed_only,
                 adjustment_as_of=adjustment_as_of,
                 limit=bars,
+                source_policy=_indicator_source_policy("15m", market_data_mode),
             )
             macd_agg_15m = r15_display
 
@@ -1202,6 +1269,7 @@ async def compute_all_indicators(
                 r_smc1d = await _mdas.get_bars(
                     session, instrument_id, timeframe="1d", adj=adj,
                     completed_only=True,
+                    source_policy=_indicator_source_policy("1d", market_data_mode),
                 )
                 smc_bars = r_smc1d.bars if not r_smc1d.bars.empty else full_daily_bars
             elif timeframe == "15m":
@@ -1210,6 +1278,7 @@ async def compute_all_indicators(
                 r_smc15 = await _mdas.get_bars(
                     session, instrument_id, timeframe="15m", adj=adj,
                     completed_only=True, limit=bars, warmup_bars=_SMC_WARMUP_BARS,
+                    source_policy=_indicator_source_policy("15m", market_data_mode),
                 )
                 smc_bars = (
                     r_smc15.warmup_bars_full
@@ -1226,6 +1295,7 @@ async def compute_all_indicators(
                     r_smcmo = await _mdas.get_bars(
                         session, instrument_id, timeframe="1mo", adj=adj,
                         completed_only=True, limit=_SMC_MONTHLY_MIN_BARS,
+                        source_policy=_indicator_source_policy("1mo", market_data_mode),
                     )
                     smc_bars = r_smcmo.bars if not r_smcmo.bars.empty else macd_bars
                 else:
@@ -1233,6 +1303,7 @@ async def compute_all_indicators(
                     r_smcmo = await _mdas.get_bars(
                         session, instrument_id, timeframe="1mo", adj=adj,
                         completed_only=True, limit=_SMC_MONTHLY_MIN_BARS,
+                        source_policy=_indicator_source_policy("1mo", market_data_mode),
                     )
                     smc_bars = r_smcmo.bars if not r_smcmo.bars.empty else macd_bars
             elif timeframe in ("1h", "1w"):
@@ -1240,6 +1311,7 @@ async def compute_all_indicators(
                 r_smc_intra = await _mdas.get_bars(
                     session, instrument_id, timeframe=timeframe, adj=adj,
                     completed_only=True,
+                    source_policy=_indicator_source_policy(timeframe, market_data_mode),
                 )
                 smc_bars = r_smc_intra.bars if not r_smc_intra.bars.empty else macd_bars
             else:
@@ -1420,12 +1492,15 @@ if __name__ == "__main__":
 
     # 1. 验证 compute_all_indicators 函数存在且签名正确
     # [PROMPT.md §二 V2] 新增 include_realtime/completed_only/adjustment_as_of 关键字参数
+    # [CP-16] 新增 preloaded_display_bars（基线漏更新，随本轮一并补正）
+    # [P1-chart-snapshot-historical] 新增 market_data_mode（数据语义参数，非展示参数）
     assert callable(compute_all_indicators), "compute_all_indicators 应可调用"
     sig = inspect.signature(compute_all_indicators)
     params = list(sig.parameters.keys())
     expected_params = [
         "session", "instrument_id", "timeframe", "adj", "bars", "include_smc",
         "include_realtime", "completed_only", "adjustment_as_of",
+        "preloaded_display_bars", "market_data_mode",
     ]
     assert params == expected_params, \
         f"compute_all_indicators 参数不匹配: {params} != {expected_params}"
@@ -1436,6 +1511,9 @@ if __name__ == "__main__":
         "completed_only 默认应为 False（与 bars API 默认对齐）"
     assert sig.parameters["adjustment_as_of"].default is None, \
         "adjustment_as_of 默认应为 None（最新）"
+    # 读取模式默认 LIVE：既有调用方（Capture / Monitor / 详情页）行为不变
+    assert sig.parameters["market_data_mode"].default is IndicatorMarketDataMode.LIVE, \
+        "market_data_mode 默认应为 LIVE（不改变既有调用方行为）"
     print(f"compute_all_indicators params={params} ✓")
 
     # 2. 验证 StrategyLoader._registry 可访问且非空
