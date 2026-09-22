@@ -309,6 +309,17 @@
       "required": true,
       "test_selectors": ["tests/test_monitor_daily_notification_dedupe.py"],
       "claim": "盘中监控同类型通知当日不重复推送：去重 SSOT 是 notification_messages（message_type=MONITOR_EVENT），去重键 = (user_id, instrument_id, event_type, 上海自然日)，由合并卡片 DTO 的 resource_refs.event_keys 精确记录（无笛卡尔积）；同用户+同标的+同类型今日已通知则当前周期不再推送，不同类型/不同标的/不同用户各自独立，次日（上海自然日）允许再次推送，本 cycle 内同一键仅出现一次；去重后无 recipient 的事件不截图、不发 image，cards 与 image 共用同一过滤集合。"
+    },
+    {
+      "contract_id": "review_capability_split_097",
+      "governance_level": 2,
+      "semantic_owner": "alembic.versions.097_split_market_review_capability",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_migration_097_review_capability_split_pg.py"
+      ],
+      "claim": "Migration 097 把「复盘」从 market_data 拆为第 4 个独立 capability market_review，使 self_selection / market_data / market_review / research_replay 四者互不隐式授权。upgrade Part 1 只为 capability='market_data' AND expires_at > now() AND source IS DISTINCT FROM 'admin_revoke' 的行补 market_review（复制 granted_at/expires_at，watchlist_limit=NULL，source='migration_review_split'，granted_by=NULL）：active 补、expired 不补、admin_revoke 不补，已存在 market_review 由 NOT EXISTS 跳过（不覆盖不重复）。upgrade Part 2 仅对 status='unused' 且含 market_data、不含 market_review 的历史邀请码一次性追加 market_review 条目，逐字复制 days/months 期限单位（days=30→days=30，months=2→months=2）且不复制 watchlist_limit；status='used'/'revoked' 的邀请码 JSONB 不修改；capabilities IS NULL 不制造 JSON（继续走 legacy plan fallback）。downgrade 删除全部 capability='market_review' 行（数据破坏性，含升级后新增的），从 status='unused' 邀请码 JSONB 移除 market_review 条目、移除后数组为空则按现有状态机置 status='revoked'，used/revoked 邀请码 JSON 不重写。兑换链路无运行时隐式继承：邀请码 JSONB 声明什么 capability 就只授予什么，绝不推导附加权限。"
     }
   ]
 }
