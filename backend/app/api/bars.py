@@ -496,8 +496,9 @@ async def get_bars(
     # [PANJI-INTRADAY-DIRECT-SOURCE] 展示读链的 source policy 与 chart-snapshot 同源：
     # MDAS `resolve_request_source_policy` 是唯一判定点。
     # - live 15m/1h → provider_direct（实时分钟归 Provider）
-    # - 历史/PIT 15m/1h（显式 adjustment_as_of，或 end_date 早于今天）→ db_only
-    # - 1d/1w/1mo/1m → hybrid（行为不变）
+    # - live 1d/1w/1mo/1m → hybrid（行为不变）
+    # - 历史/PIT（显式 adjustment_as_of，或 end_date 早于今天）→ **全周期** db_only：
+    #   历史合同是 zero-network，日/周/月线也不得回补 provider 或合并今日 partial daily。
     # 禁止在此另写一份周期/历史判定。
     service = MarketDataAggregationService()
     try:

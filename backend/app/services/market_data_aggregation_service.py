@@ -88,8 +88,11 @@ class MarketDataSourcePolicy(StrEnum):
       复权 owner 不变：provider 原生 bar ``adj_factor=1.0`` 原样进入 MDAS **既有**的
       统一 adjustment pipeline 施加 qfq，分支内**不得**另写一套 qfq（否则二次复权）。
     - ``DB_ONLY``：只读 DB，**绝不访问外部 provider / realtime 尾部**
-      （同时强制 ``allow_backfill=False`` 与 ``fresh_intraday_tail=False``）。
-      历史 / PIT（回测、as-of replay、历史快照重建）必须使用本策略：
+      （强制 ``allow_backfill=False``、``fresh_intraday_tail=False`` 与
+      ``include_realtime=False`` —— 调用方即使传 ``include_realtime=True`` 也会被覆写，
+      因为该参数同时决定「是否合并今日 partial daily」与「复权因子取最新还是取 as-of」，
+      两条都会把当前行情泄进 PIT 结果）。
+      历史 / PIT（回测、as-of replay、历史快照重建）**任意周期**都必须使用本策略：
       PIT 路径访问网络会引入未来数据污染。
     """
 
@@ -122,18 +125,23 @@ def resolve_market_data_source_policy(
     ``historical`` 必须由调用方**显式**给出（或经 ``resolve_request_source_policy``
     由请求参数派生），**不得**用周期以外的间接特征猜测。
 
-    - 非原生日内周期（1d / 1w / 1mo / 1m）→ ``HYBRID``（行为与历史完全一致）。
-    - 15m / 1h + live → ``PROVIDER_DIRECT``：实时分钟行情归 Provider。
-    - 15m / 1h + historical → ``DB_ONLY``：历史分钟行情归 DB，
-      PIT 路径**绝对禁止访问网络**（联网会把未来数据污染进历史结果）。
+    **historical 优先于 timeframe** —— 历史/PIT 合同是 zero-network，所有周期一视同仁：
+
+    - historical（**任意**周期，含 1d / 1w / 1mo / 1m）→ ``DB_ONLY``。
+      PIT 路径绝对禁止访问网络：historical 的 daily/weekly/monthly 既不得回补
+      provider，也不得合并今日 partial daily，否则历史结果里会混进当前行情。
+    - live + 15m / 1h → ``PROVIDER_DIRECT``：实时分钟行情归 Provider。
+    - live + 其余周期 → ``HYBRID``（行为与历史完全一致）。
+
+    ⚠️ 两步顺序不可对调。若先按 timeframe 分流再判 historical，historical 的
+    1d/1w/1mo 会落回 ``HYBRID``，而 HYBRID 的 ``need_tail`` 回补与 partial daily
+    合并仍会触网 —— 表面上「已声明 DB_ONLY」实际却拉了当前行情。
     """
-    if timeframe not in _PROVIDER_DIRECT_TIMEFRAMES:
-        return MarketDataSourcePolicy.HYBRID
-    return (
-        MarketDataSourcePolicy.DB_ONLY
-        if historical
-        else MarketDataSourcePolicy.PROVIDER_DIRECT
-    )
+    if historical:
+        return MarketDataSourcePolicy.DB_ONLY
+    if timeframe in _PROVIDER_DIRECT_TIMEFRAMES:
+        return MarketDataSourcePolicy.PROVIDER_DIRECT
+    return MarketDataSourcePolicy.HYBRID
 
 
 def is_historical_market_data_request(
@@ -179,7 +187,8 @@ def resolve_request_source_policy(
     「15m/1h 该读 Provider 还是 DB」会出现第二个判定 owner，两个入口随后漂移。
 
     历史语义本身由 ``is_historical_market_data_request`` 判定（单一 owner），
-    本函数只负责把它翻译成周期相关的 policy。
+    本函数只负责把它翻译成 policy：**historical 对任意周期都返回 ``DB_ONLY``**
+    （1d / 1w / 1mo / 1m 在内 —— 历史合同是 zero-network，不留 timeframe 例外）。
     """
     return resolve_market_data_source_policy(
         timeframe,
@@ -2206,11 +2215,18 @@ class MarketDataAggregationService:
                 f"{sorted(_PROVIDER_DIRECT_TIMEFRAMES)}, got {timeframe!r}"
             )
         if source_policy == MarketDataSourcePolicy.DB_ONLY:
-            # 严格 DB-only：历史 / PIT 路径禁止访问网络。
-            # 显式覆写调用方参数（而不是新增第二套分支），使 daily 的 need_tail 回补
-            # 与 intraday 的 fresh tail 都自然失效，行为等价于既有 strict DB-only。
+            # 严格 DB-only：历史 / PIT 路径禁止访问网络（zero-network 合同）。
+            # 这里显式覆写调用方参数（而不是新增第二套分支），让三条易漏的联网路径
+            # 同时失效：
+            #   1. daily 的 need_tail 回补（fetch_daily_bars）；
+            #   2. 1w/1mo 与 1d 的今日 partial daily 合并（fetch_today_daily_bars）；
+            #   3. **复权因子**：fetch_as_of = None if include_realtime else
+            #      adjustment_as_of —— include_realtime 仍为 True 时会在下面取「最新」
+            #      因子而不是 as-of 因子，即使一根 bar 都没联网也已破坏 PIT。
+            # 必须在缓存键计算之前归一：include_realtime 参与 _cache_key。
             allow_backfill = False
             fresh_intraday_tail = False
+            include_realtime = False
 
         # [mdas] - completed_only 与 include_realtime 互斥：completed_only 强制不含实时
         # [USER-FIX-3 / C] 唯一的例外：调用方显式 fresh_intraday_tail=True 且周期为
@@ -2931,6 +2947,26 @@ if __name__ == "__main__":
     assert MarketDataSourcePolicy.PROVIDER_DIRECT.value == "provider_direct"
     assert MarketDataSourcePolicy.DB_ONLY.value == "db_only"
     print("_cache_key 隔离 source_policy ✓ (hybrid/provider_direct/db_only 互不命中)")
+
+    # 12. [P1-db-only-zero-network] resolver 必须 historical 优先于 timeframe：
+    # historical 对**任意**周期都 DB_ONLY（1d/1w/1mo/1m 不留 HYBRID 例外）。
+    for _tf in ("1d", "15m", "1h", "1w", "1mo", "1m"):
+        assert resolve_market_data_source_policy(
+            _tf, historical=True,
+        ) is MarketDataSourcePolicy.DB_ONLY, _tf
+        assert resolve_request_source_policy(
+            _tf, adjustment_as_of=date(2026, 7, 1),
+        ) is MarketDataSourcePolicy.DB_ONLY, _tf
+    # live 侧规则不变
+    for _tf in ("15m", "1h"):
+        assert resolve_market_data_source_policy(
+            _tf, historical=False,
+        ) is MarketDataSourcePolicy.PROVIDER_DIRECT, _tf
+    for _tf in ("1d", "1w", "1mo", "1m"):
+        assert resolve_market_data_source_policy(
+            _tf, historical=False,
+        ) is MarketDataSourcePolicy.HYBRID, _tf
+    print("resolver historical 优先 ✓ (arbitrary timeframe → db_only)")
 
     # 11. [PANJI-INTRADAY-DIRECT-SOURCE] provider_direct 周期约束
     assert _PROVIDER_DIRECT_TIMEFRAMES == frozenset({"15m", "1h"})

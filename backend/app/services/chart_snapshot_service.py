@@ -24,10 +24,11 @@ Node Cluster 输入隔离：
 Source policy（[PANJI-INTRADAY-DIRECT-SOURCE]）：
 - 本层调用 MDAS ``resolve_request_source_policy``（与 /bars 共用的唯一判定点）：
   - live 15m/1h → ``PROVIDER_DIRECT``（实时分钟行情归 Provider）
-  - 历史/PIT 15m/1h（显式 ``adjustment_as_of``）→ ``DB_ONLY``（历史分钟行情归 DB，
-    禁止联网 —— 否则历史截图/重放会拉当前最近 4000 根再裁剪，引入未来数据）
-  - 1d / 1w / 1mo / 1m → ``HYBRID``，行为与历史完全一致
-- 判定不再只看 timeframe：历史入口传 ``adjustment_as_of`` 时同样必须落到 DB。
+  - live 1d / 1w / 1mo / 1m → ``HYBRID``（行为与既有完全一致）
+  - **历史/PIT（显式 ``adjustment_as_of`` 或 ``end_date`` 早于今天）→ 全周期 ``DB_ONLY``**
+    —— 历史分钟归 DB、历史日线也不得回补 provider / 不得合并今日 partial daily，
+    否则历史截图/重放会拉当前行情，引入未来数据
+- 判定先看 historical 再看 timeframe：historical 没有周期例外（zero-network 合同）。
 
 [P1-chart-snapshot-historical] 请求语义只判定一次（``is_historical_market_data_request``），
 然后**同时**驱动两个消费者：展示 bars 的 source policy 与
@@ -351,9 +352,18 @@ if __name__ == "__main__":
         assert resolve_request_source_policy(
             _tf, adjustment_as_of=None,
         ) is MarketDataSourcePolicy.HYBRID, _tf
+        # [P1-db-only-zero-network] historical 优先于 timeframe：
+        # 非分钟周期在历史请求下同样是 DB_ONLY（否则 HYBRID 的 need_tail 回补
+        # 与今日 partial daily 合并仍会触网）。
+        assert resolve_request_source_policy(
+            _tf, adjustment_as_of=date(2026, 7, 1),
+        ) is MarketDataSourcePolicy.DB_ONLY, _tf
+        assert resolve_request_source_policy(
+            _tf, adjustment_as_of=None, end_date=date(2020, 1, 2),
+        ) is MarketDataSourcePolicy.DB_ONLY, _tf
     print(
-        "chart source policy ✓ (live 15m/1h=provider_direct, "
-        "历史 15m/1h=db_only, 其余=hybrid)"
+        "chart source policy ✓ (live: 15m/1h=provider_direct, 其余=hybrid; "
+        "历史: 全周期=db_only)"
     )
 
     # [P1-chart-snapshot-historical] 请求语义 → 指标读取模式（只判定一次，两个消费者共用）

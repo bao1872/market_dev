@@ -301,26 +301,27 @@ def test_source_policy_enum_values_are_stable() -> None:
 
 
 def test_source_policy_resolver_is_single_owner() -> None:
-    """``resolve_market_data_source_policy`` 是唯一判定点（基于显式 historical 入参）。"""
+    """``resolve_market_data_source_policy`` 是唯一判定点，且 **historical 优先于 timeframe**。"""
     assert resolve_market_data_source_policy(
         "15m", historical=False,
     ) is MarketDataSourcePolicy.PROVIDER_DIRECT
     assert resolve_market_data_source_policy(
         "1h", historical=False,
     ) is MarketDataSourcePolicy.PROVIDER_DIRECT
-    # 历史/PIT：分钟行情归 DB，禁止联网
-    assert resolve_market_data_source_policy(
-        "15m", historical=True,
-    ) is MarketDataSourcePolicy.DB_ONLY
-    assert resolve_market_data_source_policy(
-        "1h", historical=True,
-    ) is MarketDataSourcePolicy.DB_ONLY
-    # 非原生分钟周期恒为 HYBRID（历史与否都一样）
+    # live 的非原生日内周期 → HYBRID（行为与既有完全一致）
     for tf in ("1d", "1w", "1mo", "1m"):
-        for hist in (True, False):
-            assert resolve_market_data_source_policy(
-                tf, historical=hist,
-            ) is MarketDataSourcePolicy.HYBRID, (tf, hist)
+        assert resolve_market_data_source_policy(
+            tf, historical=False,
+        ) is MarketDataSourcePolicy.HYBRID, tf
+
+    # historical = zero-network：**任意周期**（含 1d / 1w / 1mo / 1m）都必须 DB_ONLY。
+    # 若先按 timeframe 分流再判 historical，historical 的 1d/1w/1mo 会落回 HYBRID，
+    # 而 HYBRID 的 need_tail 回补与 partial daily 合并仍会触网 —— 名义上「已 DB_ONLY」
+    # 实际却把当前行情拉进历史结果。
+    for tf in ("1d", "15m", "1h", "1w", "1mo", "1m"):
+        assert resolve_market_data_source_policy(
+            tf, historical=True,
+        ) is MarketDataSourcePolicy.DB_ONLY, tf
 
 
 def test_request_source_policy_maps_historical_requests_to_db_only() -> None:
@@ -347,9 +348,13 @@ def test_request_source_policy_maps_historical_requests_to_db_only() -> None:
     assert resolve_request_source_policy(
         "15m", adjustment_as_of=None, end_date=date(2026, 6, 1), today=today,
     ) is MarketDataSourcePolicy.DB_ONLY
-    # 非分钟周期不受影响
+    # 非分钟周期在**历史**请求下同样 DB_ONLY（PIT zero-network 无 timeframe 例外）
     assert resolve_request_source_policy(
         "1d", adjustment_as_of=date(2026, 7, 1), today=today,
+    ) is MarketDataSourcePolicy.DB_ONLY
+    # …但非分钟周期的 live 请求仍是 HYBRID（不得把 PIT 收紧误扩到 live）
+    assert resolve_request_source_policy(
+        "1d", adjustment_as_of=None, end_date=None, today=today,
     ) is MarketDataSourcePolicy.HYBRID
 
 
@@ -1389,3 +1394,176 @@ def test_request_semantics_helper_is_single_owner() -> None:
     sig = inspect.signature(compute_all_indicators)
     assert sig.parameters["market_data_mode"].default \
         is IndicatorMarketDataMode.LIVE
+
+
+# ============================================================
+# P1-db-only-zero-network：DB_ONLY 必须自己冻结时间坐标
+# ============================================================
+# 上一版的「历史零网络」用例全部手工传 ``include_realtime=False`` /
+# ``completed_only=True``，等于替实现关掉了
+#   1. 1d / 1w / 1mo 的今日 partial daily 合并（fetch_today_daily_bars）
+#   2. 复权因子的 as-of 语义（fetch_as_of = None if include_realtime else as_of）
+# 于是 DB_ONLY 名义上 zero-network、实际仍会触网。本节三个用例刻意**保留 API 默认参数**
+# （include_realtime=True / completed_only=False）并**强制交易时段**，让失败模式可被判据捕获。
+
+
+def _force_trading_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把「交易日 + 早盘」打开，让 partial daily 分支真的会执行。
+
+    本模块有一个 autouse fixture 把交易时段固定为 False；若不反制，
+    partial daily 分支会被外部条件关掉，关于它的断言会全部空转。
+    """
+    monkeypatch.setattr(mdas, "_is_trading_hours", lambda now: True)
+    monkeypatch.setattr(
+        mdas, "is_trading_day_async", lambda *a, **kw: _async_return(True),
+    )
+    monkeypatch.setattr(
+        mdas, "compute_market_session",
+        lambda now, is_trading_day: mdas.MARKET_SESSION_MORNING,
+    )
+
+
+def test_resolver_all_historical_timeframes_are_db_only() -> None:
+    """PIT 合同：historical ⇒ **任意**周期 DB_ONLY（两条历史判据都要成立）。"""
+    for tf in ("1d", "15m", "1h", "1w", "1mo", "1m"):
+        assert resolve_market_data_source_policy(
+            tf, historical=True,
+        ) is MarketDataSourcePolicy.DB_ONLY, tf
+        # 判据一：显式 as-of
+        assert resolve_request_source_policy(
+            tf, adjustment_as_of=date(2026, 7, 1), today=date(2026, 9, 22),
+        ) is MarketDataSourcePolicy.DB_ONLY, tf
+        # 判据二：回溯窗口（end_date < today）
+        assert resolve_request_source_policy(
+            tf, adjustment_as_of=None, end_date=date(2026, 6, 1),
+            today=date(2026, 9, 22),
+        ) is MarketDataSourcePolicy.DB_ONLY, tf
+    # live 侧合同不变（防止把 PIT 收紧误扩到实时链路）
+    assert resolve_market_data_source_policy(
+        "1d", historical=False,
+    ) is MarketDataSourcePolicy.HYBRID
+    assert resolve_market_data_source_policy(
+        "15m", historical=False,
+    ) is MarketDataSourcePolicy.PROVIDER_DIRECT
+
+
+async def test_db_only_overrides_api_realtime_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB_ONLY 必须覆写调用方传入的 ``include_realtime=True``（1d / 1w / 1mo 同）。
+
+    ``include_realtime`` 不只是「要不要实时 bar」：它同时决定
+    ``if timeframe == "1d" and include_realtime:`` 与
+    ``if timeframe in ("1w","1mo") and include_realtime and _is_trading_hours(now):``
+    两条 partial daily 合并分支。API 默认值就是 True，所以 DB_ONLY 不覆写它
+    就等于历史请求仍会 ``fetch_today_daily_bars``。
+    """
+    external_calls = _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+    _force_trading_session(monkeypatch)
+
+    for idx, tf in enumerate(("1d", "1w", "1mo")):
+        result = await MarketDataAggregationService().get_bars(
+            _mock_session(), TEST_INSTRUMENT_ID,
+            timeframe=tf, adj="qfq", limit=100 + idx,
+            include_realtime=True,       # ← API 默认值，刻意保留
+            completed_only=False,        # ← API 默认值，刻意保留
+            adjustment_as_of=date(2026, 7, 1),
+            source_policy=MarketDataSourcePolicy.DB_ONLY,
+        )
+        assert result.data_source == "db", (
+            f"{tf}: DB_ONLY 只允许返回 db 数据，不得 hybrid/degraded，"
+            f"实际 {result.data_source}"
+        )
+
+    assert external_calls == [], (
+        "DB_ONLY 必须覆写 include_realtime=True：1d/1w/1mo 的 partial daily "
+        f"合并也绝不能触网，实际触网: {external_calls}"
+    )
+
+    # 反向对照（防空转）：同样参数走 HYBRID（allow_backfill=True）时必须真的触网，
+    # 否则上面的 [] 只是因为记录器没生效。
+    await MarketDataAggregationService().get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="qfq", limit=999,
+        include_realtime=True, completed_only=False,
+        adjustment_as_of=date(2026, 7, 1),
+        source_policy=MarketDataSourcePolicy.HYBRID,
+    )
+    assert "fetch_daily_bars" in external_calls, (
+        "对照前提：HYBRID 在 DB 缺尾时本应回补 provider；"
+        "没有触发说明本用例的零网络断言是空转"
+    )
+
+
+async def test_db_only_uses_historical_as_of_for_adjustment_factors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DB_ONLY 下复权因子必须按请求的 as-of 取，不得退化为「取最新」。
+
+    ``fetch_as_of = None if include_realtime else adjustment_as_of``：
+    API 默认 ``include_realtime=True``，因此 DB_ONLY 若不覆写它，
+    一根 bar 都不联网也已经破坏 PIT —— 因子序列本身来自「今天」，
+    历史结果的 qfq 基准随当前行情漂移。
+    """
+    _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+
+    seen_as_of: list[Any] = []
+
+    class _SpyAdjService(_FakeAdjService):
+        async def get_factor_series(
+            self, *args: Any, **kwargs: Any,
+        ) -> pd.DataFrame:
+            seen_as_of.append(kwargs.get("as_of"))
+            return await super().get_factor_series(*args, **kwargs)
+
+    monkeypatch.setattr(mdas, "AdjustmentFactorService", _SpyAdjService)
+
+    await MarketDataAggregationService().get_bars(
+        _mock_session(), TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="qfq", limit=321,
+        include_realtime=True,       # ← API 默认值，刻意保留
+        completed_only=False,        # ← API 默认值，刻意保留
+        adjustment_as_of=date(2026, 7, 1),
+        source_policy=MarketDataSourcePolicy.DB_ONLY,
+    )
+
+    assert seen_as_of, "用例前提：adj=qfq 必须取一次复权因子"
+    assert seen_as_of == [date(2026, 7, 1)], (
+        "DB_ONLY 必须用请求的 as-of 取复权因子；取到 None 说明 include_realtime "
+        f"未被覆写、因子退化成「最新」= PIT 泄漏，实际: {seen_as_of}"
+    )
+
+
+async def test_historical_chart_snapshot_default_realtime_is_still_db_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """历史 1d chart-snapshot 在 **API 默认参数**下也整条链零外部行情调用。
+
+    这是上一版真正的盲区：历史用例手工塞了 ``include_realtime=False``，
+    等于替实现关掉了 partial daily 与因子 as-of 两条泄漏路径。
+    本用例保持 API 默认值 + 强制交易时段，真实跑到
+    ``compute_all_indicators``（**不 mock** 指标层）。
+    """
+    from app.services import chart_snapshot_service as css
+
+    external_calls = _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+    _force_trading_session(monkeypatch)
+
+    result = await css.ChartSnapshotService.compute_bars_and_indicators(
+        _InstrumentOnlySession(), TEST_INSTRUMENT_ID,
+        timeframe="1d", adj="qfq", bars=100,
+        include_realtime=True,       # ← API 默认值，刻意保留
+        completed_only=False,        # ← API 默认值，刻意保留
+        adjustment_as_of=date(2026, 7, 1),
+    )
+
+    assert result.is_empty is False, (
+        "用例前提是历史 DB 有数据；否则下面的断言是空转"
+    )
+    assert external_calls == [], (
+        "历史 1d chart-snapshot 在 API 默认参数下必须整条链零外部行情调用"
+        f"（展示 bars + 指标日线/分钟/SMC + Node 输入），实际触网: {external_calls}"
+    )
