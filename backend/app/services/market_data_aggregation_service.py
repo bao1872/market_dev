@@ -2035,6 +2035,14 @@ class MarketDataAggregationService:
 
         仅支持日线类周期（1d/1w/1mo）；其余周期（日内）退回逐股 get_bars 以保证合同一致。
         返回值保留输入顺序，便于批任务稳定产生进度和 metrics。
+
+        ``source_policy``（[PANJI-INTRADAY-DIRECT-SOURCE]）与本方法消费的 source 合同：
+
+        - 与单股 ``get_bars`` 共用同一枚举与同一归一规则（``PROVIDER_DIRECT`` 周期校验、
+          ``DB_ONLY`` ⇒ ``allow_backfill=False`` + ``include_realtime=False``）；
+        - ``DB_ONLY`` 下日线批读**不得**回补外部 provider，复权因子按 ``adjustment_as_of`` 取；
+        - 日内周期走逐股回退时 ``source_policy`` 保留在 kwargs 中透传给 ``get_bars``，
+          由单股入口统一归一（不在批入口另造第二套逻辑）。
         """
         if not instrument_ids:
             return {}
@@ -2054,6 +2062,33 @@ class MarketDataAggregationService:
         adjustment_as_of = kwargs.get("adjustment_as_of")
         # [CHANGE-20260816-003] batch 与单股 get_bars 对齐：strict DB-only 开关透传
         allow_backfill = kwargs.get("allow_backfill", True)
+
+        # [PANJI-INTRADAY-DIRECT-SOURCE] batch 入口必须消费与单股 get_bars **同一个**
+        # source owner 合同，否则批读成为该合同的旁路：PIT 调用方即使传了
+        # ``adjustment_as_of``/``end_date``（历史语义），只要没传 ``allow_backfill=False``，
+        # 批读就会用默认 ``allow_backfill=True``，在 DB 缺尾时 ``fetch_daily_bars()`` 触网
+        # ——单股 historical 已 zero-network，批量 historical 却还在联网。
+        # 校验与归一与单股入口**逐字对齐**，不新增第二套语义。
+        source_policy = kwargs.get("source_policy", MarketDataSourcePolicy.HYBRID)
+        if (
+            source_policy == MarketDataSourcePolicy.PROVIDER_DIRECT
+            and timeframe not in _PROVIDER_DIRECT_TIMEFRAMES
+        ):
+            raise ValueError(
+                f"provider_direct 只支持 provider 原生日内周期 "
+                f"{sorted(_PROVIDER_DIRECT_TIMEFRAMES)}, got {timeframe!r}"
+            )
+        if source_policy == MarketDataSourcePolicy.DB_ONLY:
+            # 严格 DB-only：batch 历史 / PIT 同样 zero-network。显式覆写调用方参数，
+            # 让两条联网路径同时失效：
+            #   1. ``_build_daily_aggregation`` 的 ``if need_tail and allow_backfill``
+            #      → ``fetch_daily_bars``；
+            #   2. 复权因子 ``fetch_as_of = None if include_realtime else adjustment_as_of``
+            #      → include_realtime 仍为 True 时会取「最新」因子而非 as-of，破坏 PIT。
+            # ``fresh_intraday_tail`` 刻意不在此归一：daily 批读不消费它，日内周期走逐股
+            # ``get_bars`` 回退时由单股入口统一归一（避免在此另造第二套逻辑）。
+            allow_backfill = False
+            include_realtime = False
 
         now = now_shanghai()
         start, end = _resolve_date_range(timeframe, start_date, end_date, limit=limit)

@@ -1567,3 +1567,290 @@ async def test_historical_chart_snapshot_default_realtime_is_still_db_only(
         "历史 1d chart-snapshot 在 API 默认参数下必须整条链零外部行情调用"
         f"（展示 bars + 指标日线/分钟/SMC + Node 输入），实际触网: {external_calls}"
     )
+
+
+# ============================================================
+# P1-batch-contract：get_bars_batch 必须消费同一个 source owner 合同
+# ============================================================
+# 上一版只把 DB_ONLY 归一放进**单股** get_bars，batch 入口（get_bars_batch）完全不解析
+# ``source_policy``，于是形成 contract 分叉：
+#     单股 historical → zero-network
+#     批量 historical → 仍可 fetch_daily_bars()
+# 生产 PIT 调用方（feature_snapshot_service）批读 1d/15m 时恰好没有传
+# ``allow_backfill=False`` ⇒ batch 默认 True ⇒ DB 缺尾即触网。
+
+
+def _install_batch_db_readers(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    daily_end: str = "2026-06-10",
+    factor_as_of_sink: list[Any] | None = None,
+) -> None:
+    """安装 batch 路径的 repository 替身：DB 批量日线**缺尾** + 因子按 as-of 记录。
+
+    batch 的 bars / 因子来自 ``get_daily_bars_batch`` / ``get_adj_factor_series_batch``
+    （不是单股的 ``_query_daily_bars``）。刻意让 DB 日线只到 ``daily_end`` 而预期最后
+    完成日是 2026-06-30 ⇒ ``need_tail=True``：凡是 ``allow_backfill`` 仍为 True 的实现
+    都会 ``fetch_daily_bars`` 触网，断言因此具备判别力（否则会空转）。
+    """
+
+    async def _db_batch_daily(
+        session: Any, instrument_ids: list[uuid.UUID], start: Any, end: Any,
+    ) -> dict[uuid.UUID, pd.DataFrame]:
+        return {iid: _build_daily_bars(400, end=daily_end) for iid in instrument_ids}
+
+    async def _db_batch_factor(
+        session: Any, instrument_ids: list[uuid.UUID], as_of: Any = None,
+    ) -> dict[uuid.UUID, pd.DataFrame]:
+        if factor_as_of_sink is not None:
+            factor_as_of_sink.append(as_of)
+        return {
+            iid: pd.DataFrame({
+                "trade_date": pd.to_datetime(["2026-01-01"]),
+                "adj_factor": [1.0],
+            })
+            for iid in instrument_ids
+        }
+
+    monkeypatch.setattr(mdas, "get_daily_bars_batch", _db_batch_daily)
+    monkeypatch.setattr(mdas, "get_adj_factor_series_batch", _db_batch_factor)
+
+
+async def test_get_bars_batch_db_only_disables_external_backfill(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """batch + DB_ONLY 必须覆写 ``allow_backfill=True`` / ``include_realtime=True``。
+
+    ``allow_backfill`` 决定 ``_build_daily_aggregation`` 的
+    ``if need_tail and allow_backfill: fetch_daily_bars(...)``；
+    ``include_realtime`` 决定 1w/1mo 的 ``fetch_today_daily_bars`` partial daily 合并。
+    batch 默认分别是 True / API 默认 True，所以批读不消费 source_policy
+    就等于 1d 和 1w 历史请求都还能联网。
+    """
+    external_calls = _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+    _install_batch_db_readers(monkeypatch)
+    _force_trading_session(monkeypatch)
+
+    for idx, tf in enumerate(("1d", "1w")):
+        result = await MarketDataAggregationService().get_bars_batch(
+            _mock_session(), [TEST_INSTRUMENT_ID],
+            timeframe=tf, adj="qfq", limit=100 + idx,
+            allow_backfill=True,        # ← 故意给错：batch 默认就是 True
+            include_realtime=True,      # ← API 默认值，刻意保留
+            completed_only=False,       # ← API 默认值，刻意保留
+            adjustment_as_of=date(2026, 7, 1),
+            source_policy=MarketDataSourcePolicy.DB_ONLY,
+        )
+        single = result[TEST_INSTRUMENT_ID]
+        assert isinstance(single, BarAggregationResult), single
+        assert single.data_source == "db", (
+            f"{tf}: batch DB_ONLY 只允许返回 db 数据，不得 hybrid/degraded，"
+            f"实际 {single.data_source}"
+        )
+
+    assert external_calls == [], (
+        "batch DB_ONLY 必须覆写 allow_backfill/include_realtime："
+        "1d 的日线回补与 1w 的 partial daily 合并都绝不能触网，"
+        f"实际触网: {external_calls}"
+    )
+
+    # 反向对照（防空转）：同参数走 HYBRID（batch 默认 allow_backfill=True）时两条路径
+    # 都必须真的触网，否则上面的 [] 只是因为记录器/前置条件没生效。
+    for idx, tf in enumerate(("1d", "1w")):
+        await MarketDataAggregationService().get_bars_batch(
+            _mock_session(), [TEST_INSTRUMENT_ID],
+            timeframe=tf, adj="qfq", limit=900 + idx,
+            include_realtime=True, completed_only=False,
+            adjustment_as_of=date(2026, 7, 1),
+            source_policy=MarketDataSourcePolicy.HYBRID,
+        )
+    assert "fetch_daily_bars" in external_calls, (
+        "对照前提：HYBRID batch 在 DB 缺尾时本应回补 provider；"
+        "没有触发说明本用例的零网络断言是空转"
+    )
+    assert "fetch_today_daily_bars" in external_calls, (
+        "对照前提：HYBRID batch 在交易时段本应合并今日 partial daily"
+    )
+
+
+async def test_get_bars_batch_db_only_uses_historical_as_of_for_adjustment_factors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """batch DB_ONLY 下复权因子必须按请求 as-of 取，不得退化为「取最新」。
+
+    batch 与单股同源：``fetch_as_of = None if include_realtime else adjustment_as_of``。
+    API 默认 ``include_realtime=True`` ⇒ DB_ONLY 若不覆写它，批量历史行情的 qfq 基准
+    仍随当前行情漂移（一根 bar 都不联网也照样破坏 PIT）。
+    """
+    _record_external_calls(monkeypatch)
+    _install_historical_db_readers(monkeypatch)
+    seen_as_of: list[Any] = []
+    _install_batch_db_readers(monkeypatch, factor_as_of_sink=seen_as_of)
+
+    await MarketDataAggregationService().get_bars_batch(
+        _mock_session(), [TEST_INSTRUMENT_ID],
+        timeframe="1d", adj="qfq", limit=321,
+        include_realtime=True,       # ← API 默认值，刻意保留
+        completed_only=False,        # ← API 默认值，刻意保留
+        adjustment_as_of=date(2026, 7, 1),
+        source_policy=MarketDataSourcePolicy.DB_ONLY,
+    )
+
+    assert seen_as_of == [date(2026, 7, 1)], (
+        "batch DB_ONLY 必须用请求的 as-of 取复权因子；取到 None 说明 include_realtime "
+        f"未被覆写、因子退化成「最新」= PIT 泄漏，实际: {seen_as_of}"
+    )
+
+    # 反向对照：HYBRID（include_realtime=True）必须退化为 as_of=None（取最新），
+    # 证明这条断言真的能区分两种策略，而不是记录器根本没接上。
+    await MarketDataAggregationService().get_bars_batch(
+        _mock_session(), [TEST_INSTRUMENT_ID],
+        timeframe="1d", adj="qfq", limit=322,
+        include_realtime=True, completed_only=False,
+        adjustment_as_of=date(2026, 7, 1),
+        source_policy=MarketDataSourcePolicy.HYBRID,
+    )
+    assert seen_as_of[-1] is None, (
+        f"对照前提：HYBRID 应取最新因子（as_of=None），实际 {seen_as_of}"
+    )
+
+
+class _RecordingSession:
+    """最小 session 替身：symbol 映射查询返回空列表，其余不做任何事。"""
+
+    def __init__(self) -> None:
+        self.statements: list[str] = []
+
+    async def execute(self, stmt: Any, params: Any = None) -> list[Any]:
+        self.statements.append(" ".join(str(stmt).split()))
+        return []
+
+    async def flush(self) -> None:
+        return None
+
+
+async def test_feature_snapshot_pit_batches_declare_db_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """feature_snapshot PIT 批读必须**显式**声明 DB_ONLY（1d primary + 15m secondary）。
+
+    这里锁的是**调用参数**而不是行为：batch 内部不再从 ``adjustment_as_of`` 反推 source，
+    PIT 调用方必须自己声明。记录到 ``source_policy`` 为 None 即视为回归。
+    """
+    from app.services import feature_snapshot_service as fss
+
+    recorded: list[dict[str, Any]] = []
+
+    async def _recording_batch(
+        self: Any, session: Any, ids: Any, *, _diag_sink: Any = None, **kwargs: Any,
+    ) -> dict[uuid.UUID, Any]:
+        recorded.append({
+            "timeframe": kwargs.get("timeframe"),
+            "source_policy": kwargs.get("source_policy"),
+            "allow_backfill": kwargs.get("allow_backfill"),
+        })
+        # 记录后立刻让每股可见地失败并短路（不进入真实计算链），保持记录纯净。
+        return {iid: RuntimeError("probe-stop-after-record") for iid in ids}
+
+    monkeypatch.setattr(
+        MarketDataAggregationService, "get_bars_batch", _recording_batch,
+    )
+
+    await fss.compute_for_trade_date(
+        _RecordingSession(), date(2026, 9, 22), [TEST_INSTRUMENT_ID],
+        batch_size=20, failure_threshold=1.0, enforce_compute_once=False,
+    )
+
+    by_tf = {r["timeframe"]: r for r in recorded}
+    assert set(by_tf) == {"1d", "15m"}, (
+        f"PIT 链必须同时批读 1d 与 15m，实际 {sorted(by_tf)}"
+    )
+    for tf in ("1d", "15m"):
+        assert by_tf[tf]["source_policy"] is MarketDataSourcePolicy.DB_ONLY, (
+            f"feature_snapshot PIT 批读 {tf} 必须显式声明 DB_ONLY，"
+            f"实际 {by_tf[tf]['source_policy']!r}"
+            "（None 表示调用方没声明，batch 会退回 HYBRID 默认值）"
+        )
+
+
+def test_all_feature_snapshot_batch_calls_declare_db_only_source_policy() -> None:
+    """结构不变式：feature_snapshot_service 中**每一个** batch 调用都必须显式 DB_ONLY。
+
+    该文件的 PIT 批读共三处（review-core run items 1d、feature snapshot 1d/15m）。
+    只修其中一处就会让 batch contract 再次分叉，所以用结构断言把全部调用点
+    （含未来新增）一起钉住 —— source identity 必须显式声明，不允许靠
+    ``allow_backfill`` / ``adjustment_as_of`` 反推。
+    """
+    import ast
+    from pathlib import Path
+
+    from app.services import feature_snapshot_service as fss
+
+    path = Path(fss.__file__)
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    call_sites: list[Any] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", None)
+            if name == "get_bars_batch":
+                call_sites.append(node)
+
+    assert len(call_sites) >= 3, (
+        f"预期至少 3 处 PIT 批读调用（review-core 1d + feature snapshot 1d/15m），"
+        f"实际 {len(call_sites)}"
+    )
+
+    for call in call_sites:
+        kw = {k.arg: k.value for k in call.keywords}
+        policy = kw.get("source_policy")
+        assert policy is not None, (
+            f"{path.name}:{call.lineno} get_bars_batch 缺少 source_policy："
+            "batch 必须显式声明 source identity，禁止旁路"
+        )
+        assert isinstance(policy, ast.Attribute) and policy.attr == "DB_ONLY", (
+            f"{path.name}:{call.lineno} get_bars_batch 的 source_policy 必须是 DB_ONLY"
+        )
+
+
+async def test_15m_batch_fallback_inherits_db_only(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """15m batch 退回逐股 ``get_bars`` 时必须把 source_policy 一起带过去。
+
+    否则 15m 历史请求虽然因为 include_realtime=False 暂时「行为碰巧等价」，
+    但声明仍是 HYBRID —— 一旦 HYBRID 以后增加功能就会复发。
+    """
+    captured: list[dict[str, Any]] = []
+    sentinel = RuntimeError("per-symbol-fallback-sentinel")
+
+    async def _spy_get_bars(
+        self: Any, session: Any, instrument_id: Any, *args: Any, **kwargs: Any,
+    ) -> Any:
+        captured.append(kwargs)
+        return sentinel
+
+    monkeypatch.setattr(MarketDataAggregationService, "get_bars", _spy_get_bars)
+
+    diag: dict[str, Any] = {}
+    result = await MarketDataAggregationService().get_bars_batch(
+        _mock_session(), [TEST_INSTRUMENT_ID],
+        timeframe="15m", adj="qfq", limit=400,
+        include_realtime=False, completed_only=True,
+        end_date=date(2026, 9, 22), adjustment_as_of=date(2026, 9, 22),
+        source_policy=MarketDataSourcePolicy.DB_ONLY,
+        _diag_sink=diag,
+    )
+
+    assert diag.get("read_mode") == "per_symbol_fallback", (
+        "用例前提：15m 必须走逐股 fallback 分支，否则下面的断言是空转"
+    )
+    assert captured, "15m fallback 必须逐股调用 get_bars"
+    assert all(
+        kw.get("source_policy") is MarketDataSourcePolicy.DB_ONLY for kw in captured
+    ), (
+        "batch fallback 必须继承同一个 source_policy；否则 15m 历史请求会落回 HYBRID，"
+        f"实际 {captured}"
+    )
+    assert result[TEST_INSTRUMENT_ID] is sentinel

@@ -1113,7 +1113,10 @@ async def _fetch_db_only_daily_bars(
     external provider / realtime / 15m。DB 无 completed qfq bars → 返回 None（caller 标 skipped）。
     production history replay / canary 必须使用 strict DB-only。
     """
-    from app.services.market_data_aggregation_service import MarketDataAggregationService
+    from app.services.market_data_aggregation_service import (
+        MarketDataAggregationService,
+        MarketDataSourcePolicy,
+    )
 
     mdas = MarketDataAggregationService()
     agg = await mdas.get_bars(
@@ -1123,7 +1126,10 @@ async def _fetch_db_only_daily_bars(
         adj="qfq",
         include_realtime=False,
         completed_only=True,
-        allow_backfill=False,
+        allow_backfill=False,  # 兼容/防御：语义已由 source_policy 正式表达
+        # [PANJI-INTRADAY-DIRECT-SOURCE] DB_ONLY 是 strict DB-only 的正式契约名，
+        # 不再只靠旧 flag 表达同一业务语义。
+        source_policy=MarketDataSourcePolicy.DB_ONLY,
         limit=output_bars * 2,  # 留余量，history SSOT 内部会截取 output_bars
     )
     df = agg.bars
@@ -1150,7 +1156,10 @@ async def _fetch_pit_daily_bars_for_target(
     其余契约与 backfill 完全一致（同一 MDAS 出口、strict DB-only、completed_only），
     因此 target-date state 与既有历史 state 由同一数据口径产出。
     """
-    from app.services.market_data_aggregation_service import MarketDataAggregationService
+    from app.services.market_data_aggregation_service import (
+        MarketDataAggregationService,
+        MarketDataSourcePolicy,
+    )
 
     mdas = MarketDataAggregationService()
     agg = await mdas.get_bars(
@@ -1160,7 +1169,8 @@ async def _fetch_pit_daily_bars_for_target(
         adj="qfq",
         include_realtime=False,
         completed_only=True,
-        allow_backfill=False,
+        allow_backfill=False,  # 兼容/防御：语义已由 source_policy 正式表达
+        source_policy=MarketDataSourcePolicy.DB_ONLY,
         end_date=target_trade_date,
         adjustment_as_of=target_trade_date,
         limit=output_bars * 2,
@@ -1202,6 +1212,7 @@ async def _fetch_pit_daily_bars_batch(
     from app.services.market_data_aggregation_service import (
         BarAggregationResult,
         MarketDataAggregationService,
+        MarketDataSourcePolicy,
     )
 
     ids = list(instrument_ids)
@@ -1214,7 +1225,9 @@ async def _fetch_pit_daily_bars_batch(
             adj="qfq",
             include_realtime=False,
             completed_only=True,
-            allow_backfill=False,
+            allow_backfill=False,  # 兼容/防御：语义已由 source_policy 正式表达
+            # [PANJI-INTRADAY-DIRECT-SOURCE] 批量 PIT 与单股 helper 共用同一 DB_ONLY 合同。
+            source_policy=MarketDataSourcePolicy.DB_ONLY,
             end_date=target_trade_date,
             adjustment_as_of=target_trade_date,
             limit=output_bars * 2,  # 留余量，history SSOT 内部会截取 output_bars

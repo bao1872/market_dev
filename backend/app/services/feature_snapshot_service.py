@@ -86,6 +86,7 @@ from app.services.first_pyramid_flatten import (
 from app.services.market_data_aggregation_service import (
     BarAggregationResult,
     MarketDataAggregationService,
+    MarketDataSourcePolicy,
 )
 from app.services.node_cluster_input_provider import (
     NodeClusterInputProvider,
@@ -445,7 +446,8 @@ async def compute_feature_snapshot_for_date(
     # 这是「历史快照重建」，Node 15m 必须走 db_only —— PIT **绝对禁止访问网络**。
     # 若走 provider_direct，provider 只能给「最近 4000 根」，会把 trade_date 之后的
     # 未来 15m bar 混进历史时点的 Node 结果（未来数据污染）。
-    # daily 仍为 HYBRID（区间读取形式，无此泄漏形态），与 mode 映射一致。
+    # HISTORICAL_DB 下 daily / 15m **均为 db_only**（daily 同样禁止网络回补）；
+    # PIT 链禁止任何网络访问，见下方 batch 调用显式声明的 source_policy=DB_ONLY。
     node_input = await NodeClusterInputProvider.get_inputs(
         session,
         instrument_id,
@@ -1427,6 +1429,9 @@ async def compute_review_core_with_run_items(
                     timeframe="1d", adj="qfq",
                     include_realtime=False, completed_only=True,
                     end_date=trade_date, adjustment_as_of=trade_date,
+                    # [PANJI-INTRADAY-DIRECT-SOURCE] review-core 同样是 PIT（trade_date）：
+                    # 显式声明 DB_ONLY，禁止 DB 缺尾时回补外部 provider。
+                    source_policy=MarketDataSourcePolicy.DB_ONLY,
                 )
             mdas_batch_read_count += 1
         except Exception as mdas_exc:
@@ -1969,8 +1974,11 @@ async def compute_for_trade_date(
         _t_read = time.perf_counter()
         _primary_diag: dict[str, Any] = {}
         _secondary_diag: dict[str, Any] = {}
-        primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date, _diag_sink=_primary_diag)
-        secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date, _diag_sink=_secondary_diag)
+        # [PANJI-INTRADAY-DIRECT-SOURCE] 本链为 PIT（end_date == adjustment_as_of == trade_date）：
+        # 两级都必须**显式**声明 DB_ONLY，不依赖 batch 内部从 adjustment_as_of 反推。
+        # 否则 DB 缺尾时批读会回到 allow_backfill=True 默认值并 fetch_daily_bars 触网。
+        primary_results = await mdas.get_bars_batch(session, batch, timeframe="1d", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date, source_policy=MarketDataSourcePolicy.DB_ONLY, _diag_sink=_primary_diag)
+        secondary_results = await mdas.get_bars_batch(session, batch, timeframe="15m", adj="qfq", include_realtime=False, completed_only=True, end_date=trade_date, adjustment_as_of=trade_date, source_policy=MarketDataSourcePolicy.DB_ONLY, _diag_sink=_secondary_diag)
         read_duration += time.perf_counter() - _t_read
         mdas_batch_read_count += 2
         # 真实回退标计数（二级日内周期回退逐股时按标的计数）
