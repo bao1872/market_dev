@@ -35,7 +35,7 @@ class AccessProfileResponse(BaseModel):
     - expires_at: 订阅过期时间（admin/无订阅=None）
     - features: 功能特性列表（admin/无订阅=[]）
     - limits: 额度限制 dict（monitor_limit/notification_channel_limit/message_retention_days）
-    - capabilities: 三类独立权限状态（PRD60 PA-01，Phase 5B-2 新增）
+    - capabilities: 四类独立权限状态（PRD60 PA-01，Phase 5B-2 新增）
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -53,7 +53,7 @@ class AccessProfileResponse(BaseModel):
     expires_at: datetime | None = Field(default=None, description="订阅过期时间")
     features: list[str] = Field(default_factory=list, description="功能特性列表")
     limits: dict = Field(default_factory=dict, description="额度限制 dict")
-    capabilities: dict = Field(default_factory=dict, description="三类独立权限状态（PA-01）")
+    capabilities: dict = Field(default_factory=dict, description="四类独立权限状态（PA-01）")
     # [权限模型 V2] 统一权限画像字段（与 EffectiveAccessProfile 对齐）
     default_route: str = Field(..., description="依据权限计算的默认入口（必填，无权限时为 /forbidden）")
     active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
@@ -87,7 +87,7 @@ class AdminAccountInfo(BaseModel):
 class EffectiveAccessInfo(BaseModel):
     """管理员 access-profile 有效权限层。"""
 
-    capabilities: dict[str, dict] = Field(default_factory=dict, description="三类 capability 状态")
+    capabilities: dict[str, dict] = Field(default_factory=dict, description="四类 capability 状态")
     active_capability_keys: list[str] = Field(default_factory=list, description="active 的 capability key 列表")
     has_any_access: bool = Field(False, description="是否有任一有效权限")
     default_route: str = Field(..., description="默认入口（必填，不设静默默认值）")

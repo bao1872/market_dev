@@ -15,11 +15,15 @@
 4. 路由守卫：``/v1/market-dashboard/*`` 全部绑定 ``market_review``，且不再出现 ``market_data``。
 5. legacy plan fallback：observe_20 → self_selection+market_data+market_review；
    research_50 → 再加 research_replay。
+6. 邀请码「声明即授予」（硬合同）：``_grant_capabilities_from_invite`` 严格按邀请码 JSONB
+   声明的 capability 授予，**绝不推导/补发附加权限**（曾在 353e3fb7 中存在的
+   market_data → market_review 运行时隐式继承已被删除；历史兼容改为一次性 migration 097）。
 """
 from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -291,6 +295,148 @@ class TestLegacyPlanFallback:
 
     def test_unknown_plan_yields_no_capability(self) -> None:
         assert infer_capabilities_from_plan("unknown_plan", None, None, True) == {}
+
+
+# ============================================================
+# 6. 邀请码「声明即授予」：禁止任何隐式继承
+# ============================================================
+
+
+class _FakeDb:
+    """最小 AsyncSession 替身：仅满足 _grant_capabilities_from_invite 的 await db.flush()。"""
+
+    def __init__(self) -> None:
+        self.flush_calls = 0
+
+    async def flush(self) -> None:
+        self.flush_calls += 1
+
+
+async def _run_invite_redemption(monkeypatch: pytest.MonkeyPatch, capabilities: Any) -> list[dict]:
+    """以 monkeypatch 截获 apply_capability_grant，返回实际发出的授权调用列表。"""
+    from app.services import subscription_service as ss
+
+    calls: list[dict] = []
+
+    async def _fake_apply(
+        db: Any,
+        *,
+        user_id: Any,
+        capability: str,
+        grant_days: int,
+        watchlist_limit: int | None,
+        source: str,
+        materialize_legacy: bool,
+        actor_user_id: Any = None,
+        reason: str | None = None,
+        now: Any = None,
+    ) -> None:
+        calls.append(
+            {
+                "capability": capability,
+                "grant_days": grant_days,
+                "watchlist_limit": watchlist_limit,
+                "source": source,
+                "actor_user_id": actor_user_id,
+            }
+        )
+
+    monkeypatch.setattr(ss, "apply_capability_grant", _fake_apply)
+
+    invite = SimpleNamespace(capabilities=capabilities)
+    db = _FakeDb()
+    await ss._grant_capabilities_from_invite(db, uuid.uuid4(), invite, materialize_legacy=False)
+    # capabilities=None 走旧模式提前返回，不产生 flush
+    expected_flush = 0 if capabilities is None else 1
+    assert db.flush_calls == expected_flush, (
+        f"flush 次数应为 {expected_flush}，实际 {db.flush_calls}"
+    )
+    return calls
+
+
+class TestInviteRedemptionDeclaresOnlyWhatItSays:
+    """[A9] 永久阻止「权限继承」重新出现。"""
+
+    @pytest.mark.asyncio
+    async def test_market_data_only_invite_never_grants_market_review(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """升级后新建的 market_data-only 邀请码，兑换结果必须严格只有 market_data。"""
+        calls = await _run_invite_redemption(
+            monkeypatch, [{"capability": "market_data", "days": 30}]
+        )
+        assert [c["capability"] for c in calls] == ["market_data"], (
+            f"market_data-only 邀请码不得推导任何附加权限，实际 {calls}"
+        )
+        assert len(calls) == 1, f"必须只调用一次 apply_capability_grant，实际 {calls}"
+        assert not any(c["capability"] == CAPABILITY_MARKET_REVIEW for c in calls), (
+            "不得出现 market_review 隐式继承"
+        )
+
+    @pytest.mark.asyncio
+    async def test_market_review_only_invite_grants_only_review(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = await _run_invite_redemption(
+            monkeypatch, [{"capability": "market_review", "days": 30}]
+        )
+        assert [c["capability"] for c in calls] == ["market_review"], f"实际 {calls}"
+
+    @pytest.mark.asyncio
+    async def test_explicit_both_grants_both_separately(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = await _run_invite_redemption(
+            monkeypatch,
+            [
+                {"capability": "market_data", "days": 30},
+                {"capability": "market_review", "days": 30},
+            ],
+        )
+        assert [c["capability"] for c in calls] == ["market_data", "market_review"], f"实际 {calls}"
+
+    @pytest.mark.asyncio
+    async def test_self_selection_invite_never_grants_others(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """self_selection 邀请码不得推导 market_data / market_review / research_replay。"""
+        calls = await _run_invite_redemption(
+            monkeypatch,
+            [{"capability": "self_selection", "days": 30, "watchlist_limit": 20}],
+        )
+        assert [c["capability"] for c in calls] == ["self_selection"], f"实际 {calls}"
+        assert calls[0]["watchlist_limit"] == 20, "self_selection 必须保留 watchlist_limit"
+
+    @pytest.mark.asyncio
+    async def test_legacy_months_unit_is_converted_to_days(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """历史 months 邀请码仍按 ×30 天兑换（授权天数口径不变）。"""
+        calls = await _run_invite_redemption(
+            monkeypatch, [{"capability": "market_data", "months": 2}]
+        )
+        assert [c["capability"] for c in calls] == ["market_data"], f"实际 {calls}"
+        assert calls[0]["grant_days"] == 60, f"months=2 应折算 60 天，实际 {calls}"
+
+    @pytest.mark.asyncio
+    async def test_null_capabilities_invite_grants_nothing(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """旧邀请码（capabilities=NULL）不创建 user_capabilities，走 legacy plan fallback。"""
+        calls = await _run_invite_redemption(monkeypatch, None)
+        assert calls == [], f"NULL capabilities 不得授予任何 capability，实际 {calls}"
+
+    def test_no_inheritance_bridge_remains_in_source(self) -> None:
+        """结构性锁：兑换函数源码中不得再出现隐式继承桥的痕迹。"""
+        import inspect
+
+        from app.services import subscription_service as ss
+
+        src = inspect.getsource(ss._grant_capabilities_from_invite)
+        assert "present_caps" not in src, "隐式继承桥（present_caps）必须已删除"
+        assert 'capability="market_review"' not in src, (
+            "兑换函数不得硬编码补发 market_review"
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

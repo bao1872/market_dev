@@ -131,7 +131,8 @@ function ProtectedLayout() {
 }
 
 // [Phase 5B-2 PRD60 PA-01] 旧 SubscriberRoute 已被 CapabilityRoute 替代
-// 三类独立 capability 守卫已替代统一订阅检查（self_selection/market_data/research_replay）
+// 四类独立 capability 守卫已替代统一订阅检查
+// （self_selection / market_data / market_review / research_replay）
 
 // [Auth] - 描述: AdminRoute 管理员守卫 - 使用 is_admin 字段判断（替代旧 user.role）
 // 非 admin 用户重定向到默认入口 /market（替换旧 /overview）

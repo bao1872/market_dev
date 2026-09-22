@@ -266,6 +266,8 @@ async def generate_invite_codes(
     Raises:
         ValueError: plan_code 不在 plans 表中，或 grant_days 非法，或 capabilities 非法
     """
+    from app.models.user_capability import ALL_CAPABILITIES
+
     if grant_days < 1:
         raise ValueError(f"grant_days 必须 >= 1，实际: {grant_days}")
 
@@ -277,10 +279,10 @@ async def generate_invite_codes(
     if capabilities is not None:
         if not isinstance(capabilities, list) or len(capabilities) == 0:
             raise ValueError("capabilities 必须是非空列表")
-        # 验证每个 capability 配置
+        # 验证每个 capability 配置（集合唯一真源 = user_capability.ALL_CAPABILITIES）
         for cap in capabilities:
             cap_name = cap.get("capability")
-            if cap_name not in ("self_selection", "market_data", "market_review", "research_replay"):
+            if cap_name not in ALL_CAPABILITIES:
                 raise ValueError(f"无效 capability: {cap_name}")
             if cap_name == "self_selection" and cap.get("watchlist_limit") is None:
                 raise ValueError("self_selection 必须指定 watchlist_limit")
@@ -524,6 +526,11 @@ async def _grant_capabilities_from_invite(
     如果 invite_code.capabilities 不为 None，为每个 capability 创建独立授权行。
     如果为 None（旧模式），不创建（fallback 到 plan_code 推断，兼容期）。
 
+    [PANJI-REVIEW-CAPABILITY-SPLIT] 四权限独立硬合同：严格「声明即授予」——
+    邀请码 JSONB 写了哪些 capability 就只授予哪些，**绝不推导附加权限**
+    （不存在 market_data ⇒ market_review 之类的隐式继承）。历史兼容由一次性
+    migration 097 在数据层完成，不得回退为 runtime rule。
+
     per-capability 独立 expires_at（PA-03 30 天周期）：
     - 从兑换时间 + months × 30 天计算，不继承 Subscription.expires_at
     - 已有该 capability 时取较晚的 expires_at（不降权）
@@ -554,33 +561,11 @@ async def _grant_capabilities_from_invite(
             actor_user_id=None,
         )
 
-    # [PANJI-REVIEW-CAPABILITY-SPLIT] 旧邀请码兼容桥：
-    # 含 market_data 但不含 market_review 的可兑换邀请码，兑换时补发 market_review（复盘），
-    # 授权天数对齐该邀请码中 market_data 的天数（保留旧「复盘由 market_data 承载」意图）。
-    # 不修改 invite_code.capabilities JSONB、不改写兑换记录、不波及 self_selection/research_replay。
-    # 仅作用于邀请码兑换链路；管理员直接授予（GrantCapabilityRequest）不触发此桥，保持 capability 间无隐式授权。
-    present_caps = {
-        c.get("capability")
-        for c in invite_code.capabilities
-        if isinstance(c.get("capability"), str)
-    }
-    if "market_data" in present_caps and "market_review" not in present_caps:
-        market_review_days = 1
-        for cap_config in invite_code.capabilities:
-            if cap_config.get("capability") == "market_data":
-                md_months = cap_config.get("months")
-                market_review_days = md_months * 30 if md_months is not None else cap_config.get("days", 1)
-                break
-        await apply_capability_grant(
-            db=db,
-            user_id=user_id,
-            capability="market_review",
-            grant_days=market_review_days,
-            watchlist_limit=None,
-            source="invite_code",
-            materialize_legacy=materialize_legacy,
-            actor_user_id=None,
-        )
+    # [PANJI-REVIEW-CAPABILITY-SPLIT] 四权限独立硬合同：邀请码 JSONB 声明什么就授予什么。
+    # 这里不得推导/补发任何未声明的 capability（曾经的 market_data → market_review
+    # 运行时隐式继承已删除）。历史「复盘由 market_data 承载」的兼容是一次性 migration
+    # 责任（见 alembic 097：为迁移时刻仍 unused 的历史邀请码补写 market_review 条目），
+    # 不是永久 runtime rule。
     await db.flush()
 
 

@@ -108,7 +108,7 @@ class AccessContext(BaseModel):
     expires_at: datetime | None = None
     features: list[str] = Field(default_factory=list)
     limits: dict = Field(default_factory=dict)
-    # [Phase 5B-2 PRD60 PA-01] 三类独立 capability 状态
+    # [Phase 5B-2 PRD60 PA-01] 四类独立 capability 状态
     # 格式: {"self_selection": {"active": bool, "expires_at": datetime|None, "watchlist_limit": int|None}, ...}
     # admin: 所有 capability active=True
     # 旧用户（无 user_capabilities 行）: fallback 到 plan_code 推断

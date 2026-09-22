@@ -158,7 +158,7 @@ export interface MemberListItem {
   remaining_days: number | null
   renewal_count: number
   created_at: string
-  /** [Gate2 PRD60] 三类独立权限状态（与 AccessContext.capabilities 对齐） */
+  /** [Gate2 PRD60] 四类独立权限状态（与 AccessContext.capabilities 对齐） */
   capabilities?: Record<string, UserCapabilityInfo>
 }
 
@@ -522,7 +522,7 @@ export interface UserCapabilitiesResponse {
   capabilities: Record<string, UserCapabilityInfo>
 }
 
-/** [Gate2 PRD60] 查询用户 capabilities（三类独立权限状态） */
+/** [Gate2 PRD60] 查询用户 capabilities（四类独立权限状态） */
 export async function getUserCapabilities(
   userId: string,
 ): Promise<UserCapabilitiesResponse> {

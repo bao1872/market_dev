@@ -1,7 +1,8 @@
 // [Navigation] - 描述: 单一导航/路由常量真源（避免路径散落在各页面）
 // PRD V1.0 阶段一（路由与壳层）确立：
 //   普通用户主入口 = /market（行情，渲染 MarketWorkspacePage）
-//   [REVIEW-V2-R1] 复盘 /review 渲染 Market Dashboard（大盘/行业/概念/比较），能力 = market_data
+//   [PANJI-REVIEW-CAPABILITY-SPLIT] 复盘 /review 渲染 Market Dashboard（大盘/行业/概念/比较），
+//   能力 = market_review（四权限独立；复盘不再复用 market_data）
 //   竞价 /auction 渲染竞价三级页面，能力 = research_replay（竞价分析）
 //   消息 /messages、设置 /settings 进入右上角账户菜单
 //   管理后台独立壳层 AdminAppShell，承载 /admin/*
@@ -92,7 +93,8 @@ export const WATCHLIST_NAV_PATH = `${APP_ROUTES.market}?scope=watchlist`
  * 规则：
  * - 未声明 requiredCapability 的项始终可见
  * - admin 豁免全部 capability 判断
- * - 无 market_data：隐藏「行情」与「复盘」
+ * - 无 market_data：隐藏「行情」
+ * - 无 market_review：隐藏「复盘」（复盘为独立 capability，与 market_data 互不隐式授权）
  * - 无 self_selection：隐藏「自选」
  * - 无 research_replay：隐藏「竞价」
  */

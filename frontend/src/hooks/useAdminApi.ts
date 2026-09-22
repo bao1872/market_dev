@@ -318,7 +318,7 @@ export function useAdminChangeSubscriptionPlan() {
   })
 }
 
-/** [Gate2 PRD60] 查询用户 capabilities（三类独立权限状态） */
+/** [Gate2 PRD60] 查询用户 capabilities（四类独立权限状态） */
 export function useUserCapabilities(userId: string | undefined, enabled: boolean = true) {
   return useQuery({
     queryKey: ['admin', 'users', userId, 'capabilities'],
