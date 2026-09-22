@@ -322,7 +322,11 @@ function formatExplorerFilterValue(column: ExplorerFilterColumn, value: number):
 
 export interface ExplorerFilterChip {
   column: ExplorerFilterColumn
-  /** 用户可读条件，如 `MA5 60%–80%` / `成员数 ≥ 30` */
+  /**
+   * 用户可读条件，如 `MA5 60%–80%` / `成员数 ≥ 30` / `MA5 5日Δ ≥ 3pp`。
+   * 用 `filterLabel` 拼装（不是列表头 `label`）——MA5/MA10 的 5日Δ 列标题相同，
+   * 只有 filterLabel 能让用户分辨是哪一列的筛选。
+   */
   label: string
   /** 该 chip 对应的 URL filter keys（清除时置空） */
   keys: NumericFilterKey[]
@@ -349,7 +353,9 @@ export function activeExplorerFilterChips(
     } else {
       continue
     }
-    chips.push({ column, label: `${spec.label} ${range}`, keys: [min, max] })
+    // chip 用 filterLabel 而非 label：MA5 与 MA10 的列标题同为「5日Δ」，
+    // 只有 filterLabel 能区分（MA5 5日Δ / MA10 5日Δ），否则两条 chip 无法辨认。
+    chips.push({ column, label: `${spec.filterLabel} ${range}`, keys: [min, max] })
   }
   return chips
 }

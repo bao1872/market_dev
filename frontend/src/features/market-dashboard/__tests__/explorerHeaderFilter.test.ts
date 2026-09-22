@@ -10,7 +10,9 @@
 //   F 排序行为不变
 //   G slim meta bar：结果数 + chips + 快速筛选 ▾ + 清除筛选
 //   H activeExplorerFilterChips 行为（区间 / 单边界 / 多列聚合）
-//   I URL 仍是唯一正式状态（不引入 global store / localStorage）
+//   H2 两个 5日Δ 列的 chip 必须可分辨（用 filterLabel 而非列表头 label）
+//   I 列筛选弹层：条件（区间/≥/≤/=）+ 最小/最大值 + 清除/应用
+//   J URL 仍是唯一正式状态（不引入 global store / localStorage）
 
 import { strict as assert } from 'node:assert'
 import { readFileSync } from 'node:fs'
@@ -199,7 +201,7 @@ test('H. activeExplorerFilterChips：区间 / 单边界 / 多列聚合', () => {
 
   const upperOnly = activeExplorerFilterChips(filtersWith({ ma10_delta_max: -0.03 }))
   assert.equal(upperOnly.length, 1)
-  assert.equal(upperOnly[0].label, '5日Δ ≤ -3pp')
+  assert.equal(upperOnly[0].label, 'MA10 5日Δ ≤ -3pp')
 
   const multi = activeExplorerFilterChips(filtersWith({ ma5_min: 0.6, member_count_min: 30 }))
   assert.equal(multi.length, 2)
@@ -207,6 +209,45 @@ test('H. activeExplorerFilterChips：区间 / 单边界 / 多列聚合', () => {
     multi.map((c) => c.column),
     ['member_count', 'ma5'],
     'chip 顺序应与 EXPLORER_FILTERABLE_COLUMNS 一致（成员数在 MA5 前）',
+  )
+})
+
+// ===== H2. 两个 5日Δ 列的 chip 必须可分辨 =====
+// MA5 与 MA10 的 5日Δ **列标题相同**（都是「5日Δ」），只有 filterLabel 能区分。
+// 若 chip 用列表头 label，两条 chip 都会退化成「5日Δ ...」，用户无法判断属于哪一列。
+test('H2. ma5_delta / ma10_delta 的 chip label 互不相同且带列前缀', () => {
+  const chips = activeExplorerFilterChips(
+    filtersWith({ ma5_delta_min: 0.03, ma10_delta_max: -0.03 }),
+  )
+  assert.equal(chips.length, 2, '应生成两条 delta chip')
+
+  const byColumn = new Map(chips.map((c) => [c.column, c.label]))
+  assert.equal(byColumn.get('ma5_delta'), 'MA5 5日Δ ≥ 3pp')
+  assert.equal(byColumn.get('ma10_delta'), 'MA10 5日Δ ≤ -3pp')
+
+  // 硬约束：两条 chip label 不得相同
+  assert.notEqual(
+    byColumn.get('ma5_delta'),
+    byColumn.get('ma10_delta'),
+    '两个 5日Δ chip 的 label 必须可分辨',
+  )
+
+  // 任何 chip 都不得退化为裸「5日Δ ...」（列表头名），必须带 MA5/MA10 前缀
+  for (const chip of chips) {
+    assert.ok(
+      !/^5日Δ\s/.test(chip.label),
+      `chip label 不得以裸「5日Δ」开头（无法分辨列），实际 ${chip.label}`,
+    )
+    assert.match(chip.label, /^MA(5|10) 5日Δ /, `delta chip 必须带列前缀，实际 ${chip.label}`)
+  }
+
+  // 非 delta 列不受影响：label == filterLabel
+  const nonDelta = activeExplorerFilterChips(
+    filtersWith({ ma5_min: 0.6, ma5_max: 0.8, member_count_min: 30 }),
+  )
+  assert.deepEqual(
+    nonDelta.map((c) => c.label),
+    ['成员数 ≥ 30', 'MA5 60%–80%'],
   )
 })
 
