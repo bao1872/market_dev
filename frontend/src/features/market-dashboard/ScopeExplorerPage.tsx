@@ -10,9 +10,15 @@
 // - 进入 行业 / 概念 先渲染**完整 LIST VIEW**（列表即主工作区，不复用常驻主从分栏）。
 // - 点击某一行 → 进入 **DETAIL VIEW**：主工作区切换为「左导航栏（仅名称）+ 右侧真实详情」，
 //   列表不再占据主页面。返回（清除 board_id）精确恢复列表的 search/filters/sort/page/family/date。
-// - 左导航栏（rail）只显示板块名称，来自与列表**同一份** server 过滤+排序结果（page_size=上限，page=1），
-//   即「filteredSortedRows 全集」；选中 rail 项仅改变 board_id，不重置列表 query state。
+// - 左导航栏（rail）只显示板块名称，来自与列表**同一份** server 过滤+排序结果（前端分页拉全）。
 // - 右详情复用现有 canonical：useMarketScopeDetail + BreadthChart（6-series）。不新建详情实现 / API。
+//
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] 运行期 UI 对齐行情工作台：
+// - §2 顶部改为共享紧凑 ReviewTopBar（tabs + 数据日期同一行，**无页面级 H1**）。
+// - §3 tab 专属控件行紧跟在顶部行下方（行业 L1/L2/L3 + 搜索；概念 搜索）。
+// - §4 删除「快速筛选」：复盘不再发明第二套筛选系统，筛选只走列 funnel。
+// - §5 表格 chrome 交给 global.scss（与 StrategyDataTable 同 owner），module 不再复制一份。
+// - §7 新增「列设置」（列显隐，本地偏好，不共享 Market 命名空间；列顺序仍由契约锁死）。
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMarketScopeExplorer, useMarketScopeDetail, useMarketScopeExplorerUniverse } from '@/hooks/useMarketDashboardApi'
@@ -28,10 +34,10 @@ import {
   EXPLORER_FILTER_COLUMN_SPECS,
   EXPLORER_FILTER_MODES,
   EXPLORER_PAGE_SIZE_OPTIONS,
+  EXPLORER_TABLE_COLUMNS,
   filterKeysForColumn,
   isExplorerColumnFiltered,
   isExplorerResetDisabled,
-  MA5_PRESETS,
   NUMERIC_FILTER_KEYS,
   parseConceptExplorerSearch,
   parseIndustryExplorerSearch,
@@ -50,8 +56,14 @@ import { MARKET_OVERVIEW_SERIES } from './marketOverviewConfig'
 import { BREADTH_REFERENCE_LINES } from './chartTheme'
 import { classifyDashboardError } from './dashboardLogic'
 import DashboardState from './DashboardState'
-import ScopeExplorerTable from './ScopeExplorerTable'
-import ReviewHeader from './ReviewHeader'
+import ScopeExplorerTable, { EXPLORER_COLUMN_LABELS } from './ScopeExplorerTable'
+import ReviewTopBar from './ReviewTopBar'
+import {
+  readHiddenColumns,
+  toggleHiddenColumn,
+  writeHiddenColumns,
+  type ExplorerTableColumn,
+} from './reviewTablePrefs'
 import styles from './dashboard.module.scss'
 
 const DETAIL_DAYS = 250
@@ -156,7 +168,6 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
 
   const clearDisabled = isExplorerResetDisabled(parsed.filters, parsed.sort, parsed.direction)
   const clearAllFilters = () => {
-    setPresetOpen(false)
     applyPatch(clearAllStatePatch())
   }
 
@@ -177,18 +188,23 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     anchor: HTMLElement
   } | null>(null)
 
-  // ---- 快速筛选 ▾（沿用既有 MA5_PRESETS，不建第二套 preset 逻辑）----
-  const [presetOpen, setPresetOpen] = useState(false)
-  const quickFilterRef = useRef<HTMLDivElement | null>(null)
-  useEffect(() => {
-    if (!presetOpen) return
-    const onDocMouseDown = (e: MouseEvent) => {
-      if (quickFilterRef.current && e.target instanceof Node && quickFilterRef.current.contains(e.target)) return
-      setPresetOpen(false)
-    }
-    document.addEventListener('mousedown', onDocMouseDown)
-    return () => document.removeEventListener('mousedown', onDocMouseDown)
-  }, [presetOpen])
+  // ---- 列设置（§7）：列显隐是 Review 自有本地偏好；筛选/排序/分页仍 100% 在 URL ----
+  const tableId = `review-${scopeType}`
+  const [hiddenColumns, setHiddenColumns] = useState<ReadonlySet<ExplorerTableColumn>>(() =>
+    readHiddenColumns(tableId),
+  )
+  useEffect(() => setHiddenColumns(readHiddenColumns(tableId)), [tableId])
+  const [columnSettingsAnchor, setColumnSettingsAnchor] = useState<HTMLElement | null>(null)
+  const toggleColumn = (key: ExplorerTableColumn) => {
+    const next = toggleHiddenColumn(hiddenColumns, key)
+    setHiddenColumns(next)
+    writeHiddenColumns(tableId, next)
+  }
+  const resetColumns = () => {
+    const empty = new Set<ExplorerTableColumn>()
+    setHiddenColumns(empty)
+    writeHiddenColumns(tableId, empty)
+  }
 
   // ---- 排序（点击 active 列切换方向；新列 numeric→desc / name→asc）----
   const onSort = (field: ExplorerParsed['sort']) => {
@@ -264,83 +280,43 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
   // =========================================================================
   const listWorkspace = !parsed.board_id && (
     <>
-      {/* Toolbar：搜索（数据范围，保留在表格之外） */}
-      <form className={styles.toolbar} onSubmit={submitSearch}>
-        <input
-          className={styles['search-input']}
-          type="text"
-          value={draftQ}
-          placeholder={isIndustry ? '搜索行业' : '搜索概念'}
-          onChange={(e) => setDraftQ(e.target.value)}
-          data-testid="search-input"
-        />
-        <button type="submit" className={styles['btn-primary']}>
-          搜索
-        </button>
-        {parsed.q && (
-          <button type="button" className={styles['btn-ghost']} onClick={clearSearch}>
-            清空
-          </button>
-        )}
-      </form>
-
-      {/* slim meta bar：结果数 + 激活筛选 chips + 快速筛选 + 清除筛选 */}
-      <div className={styles['explorer-meta-bar']} data-testid="explorer-meta-bar">
-        <div className={styles['explorer-meta-left']}>
-          <span className={styles['explorer-result-count']}>结果 {total}</span>
-          <span className={styles['explorer-filter-chips']} data-testid="explorer-filter-chips">
+      {/* slim meta bar（与 StrategyDataTable 共用 global.scss chrome）：结果数 + 激活筛选 chips + 列设置 + 清除排序与筛选 */}
+      <div className="table-meta-bar" data-testid="explorer-meta-bar">
+        <div>
+          <span className="table-result-count">结果 {total}</span>
+          <span className="table-active-state">
+            按 {EXPLORER_COLUMN_LABELS[parsed.sort]} {parsed.direction === 'asc' ? '升序' : '降序'} 排序
+          </span>
+          <span className="table-filter-chips" data-testid="explorer-filter-chips">
             {filterChips.map((chip) => (
               <button
                 key={chip.column}
                 type="button"
-                className={styles['filter-chip']}
+                className="filter-chip"
                 title={`清除「${chip.label}」`}
                 aria-label={`清除筛选 ${chip.label}`}
                 onClick={() => clearColumnFilter(chip.column)}
               >
-                <span className={styles['filter-chip-text']}>{chip.label}</span>
-                <span className={styles['filter-chip-x']} aria-hidden="true">
+                <span className="filter-chip-text">{chip.label}</span>
+                <span className="filter-chip-x" aria-hidden="true">
                   ×
                 </span>
               </button>
             ))}
           </span>
         </div>
-        <div className={styles['explorer-meta-actions']}>
-          <div className={styles['quick-filter']} ref={quickFilterRef}>
-            <button
-              type="button"
-              className={styles['quick-filter-btn']}
-              aria-haspopup="menu"
-              aria-expanded={presetOpen}
-              onClick={() => setPresetOpen((v) => !v)}
-              data-testid="quick-filter-btn"
-            >
-              快速筛选 ▾
-            </button>
-            {presetOpen && (
-              <div className={styles['quick-filter-menu']} role="menu">
-                {MA5_PRESETS.map((p) => (
-                  <button
-                    key={p.key}
-                    type="button"
-                    role="menuitem"
-                    className={styles['quick-filter-item']}
-                    data-testid={`preset-${p.key}`}
-                    onClick={() => {
-                      setPresetOpen(false)
-                      applyPatch({ filters: p.filters })
-                    }}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
+        <div className="table-meta-actions">
           <button
             type="button"
-            className={styles['clear-filters-btn']}
+            className="table-columns-btn"
+            onClick={(e) => setColumnSettingsAnchor(e.currentTarget)}
+            data-testid="column-settings-btn"
+          >
+            列设置
+          </button>
+          <button
+            type="button"
+            className="table-reset-btn"
             disabled={clearDisabled}
             onClick={clearAllFilters}
             data-testid="clear-all-filters"
@@ -349,6 +325,17 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
           </button>
         </div>
       </div>
+
+      {/* 列设置弹层（§7）：只改列显隐；列顺序由契约锁死，不提供重排。 */}
+      {columnSettingsAnchor && (
+        <ExplorerColumnSettings
+          hidden={hiddenColumns}
+          onToggle={toggleColumn}
+          onReset={resetColumns}
+          onClose={() => setColumnSettingsAnchor(null)}
+          anchor={columnSettingsAnchor}
+        />
+      )}
 
       {/* 列筛选弹层（URL 为真源，弹层内仅 local draft） */}
       {filterPopover && (
@@ -388,40 +375,44 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
             onAddCompare={(it: ScopeExplorerItem) => addCompare(it.board_id, it.board_name, it.board_type as ScopeType)}
             filteredColumns={filteredColumns}
             onFilterClick={(column, anchor) => setFilterPopover({ column, anchor })}
+            hiddenColumns={hiddenColumns}
           />
 
-          <div className={styles.pagination}>
+          <div className="table-pager">
+            <span className="table-page-info">
+              第 {parsed.page} / {totalPages} 页 · 共 {total} 项
+            </span>
+            <label>
+              每页{' '}
+              <select
+                className="select table-page-size"
+                value={parsed.page_size}
+                onChange={(e) => changePageSize(Number(e.target.value))}
+                aria-label="每页条数"
+              >
+                {EXPLORER_PAGE_SIZE_OPTIONS.map((o) => (
+                  <option key={o} value={o}>
+                    {o}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button
               type="button"
-              className={styles['page-btn']}
+              className="btn small table-prev"
               onClick={() => goPage(parsed.page - 1)}
               disabled={parsed.page <= 1}
             >
               上一页
             </button>
-            <span className={styles['page-info']}>
-              第 {parsed.page} / {totalPages} 页 · 共 {total} 项
-            </span>
             <button
               type="button"
-              className={styles['page-btn']}
+              className="btn small table-next"
               onClick={() => goPage(parsed.page + 1)}
               disabled={parsed.page >= totalPages}
             >
               下一页
             </button>
-            <select
-              className={styles['page-size']}
-              value={parsed.page_size}
-              onChange={(e) => changePageSize(Number(e.target.value))}
-              aria-label="每页条数"
-            >
-              {EXPLORER_PAGE_SIZE_OPTIONS.map((o) => (
-                <option key={o} value={o}>
-                  {o}/页
-                </option>
-              ))}
-            </select>
           </div>
         </>
       )}
@@ -432,15 +423,15 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
   // 详情视图（选中板块 → 主工作区切换为：左导航栏「仅名称」+ 右侧真实详情）
   // =========================================================================
   const detailWorkspace = parsed.board_id && (
-    <div className={styles['detail-layout']} data-testid="scope-detail-view">
-      {/* 左导航栏：仅板块名称，来自 filteredSortedRows 全集（server 同过滤+排序，page_size=上限）。 */}
-      <nav className={styles['scope-rail']} data-testid="scope-rail" aria-label="板块导航">
+    <div className={styles.detailLayout} data-testid="scope-detail-view">
+      {/* 左导航栏：仅板块名称，来自筛选排序 universe 全集（server 同过滤+排序，前端分页拉全）。 */}
+      <nav className={styles.scopeRail} data-testid="scope-rail" aria-label="板块导航">
         {railUniverse.isLoading ? (
-          <div className={styles['rail-loading']}>加载导航…</div>
+          <div className={styles.railLoading}>加载导航…</div>
         ) : railUniverse.error ? (
-          <div className={styles['rail-empty']}>导航加载失败</div>
+          <div className={styles.railEmpty}>导航加载失败</div>
         ) : (railUniverse.data ?? []).length === 0 ? (
-          <div className={styles['rail-empty']}>无匹配板块</div>
+          <div className={styles.railEmpty}>无匹配板块</div>
         ) : (
           (railUniverse.data ?? []).map((it: ScopeExplorerItem) => {
             const active = it.board_id === parsed.board_id
@@ -448,7 +439,7 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
               <button
                 key={it.board_id}
                 type="button"
-                className={active ? `${styles['rail-item']} ${styles['rail-item-active']}` : styles['rail-item']}
+                className={active ? `${styles.railItem} ${styles.railItemActive}` : styles.railItem}
                 aria-current={active ? 'true' : undefined}
                 data-board-id={it.board_id}
                 data-testid={`rail-item-${it.board_id}`}
@@ -462,8 +453,8 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
       </nav>
 
       {/* 右侧真实详情（复用 canonical useMarketScopeDetail + BreadthChart；不新建详情实现 / API） */}
-      <div className={styles['detail-main']} data-testid="scope-detail">
-        <button type="button" className={styles['detail-back']} onClick={onBackToList} data-testid="detail-back">
+      <div className={styles.detailMain} data-testid="scope-detail">
+        <button type="button" className={styles.detailBack} onClick={onBackToList} data-testid="detail-back">
           ← 返回列表
         </button>
         {detail.isLoading ? (
@@ -472,17 +463,18 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
           <DashboardState kind={detailError.kind} desc={detailError.detail} />
         ) : meta ? (
           <>
-            <div className={styles['detail-head']}>
+            <div className={styles.detailHead}>
               <div>
-                <div className={styles['detail-name']}>{meta.name}</div>
-                <div className={styles['detail-sub']}>
-                  {meta.type === 'industry' ? `行业 · ${meta.hierarchy_level}` : '概念'} · 成员数 {meta.member_count.toLocaleString()} · 数据日期{' '}
-                  {detail.data?.projection_trade_date ?? '—'}
+                <div className={styles.detailName}>{meta.name}</div>
+                {/* 数据日期已由共享顶部行统一展示，此处不再重复。 */}
+                <div className={styles.detailSub}>
+                  {meta.type === 'industry' ? `行业 · ${meta.hierarchy_level}` : '概念'} · 成员数{' '}
+                  {meta.member_count.toLocaleString()}
                 </div>
               </div>
               <button
                 type="button"
-                className={styles['btn-primary']}
+                className={styles.btnPrimary}
                 onClick={() => addCompare(meta.board_id, meta.name, meta.type as ScopeType)}
               >
                 加入对比
@@ -496,10 +488,10 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
               height={300}
             />
 
-            {basketMsg && <div className={styles['compare-msg']}>{basketMsg}</div>}
-            <div className={styles['compare-link-row']}>
+            {basketMsg && <div className={styles.compareMsg}>{basketMsg}</div>}
+            <div className={styles.compareLinkRow}>
               {/* SPA 导航：保留 Zustand compare basket（R3A 仅 session persistence，不 localStorage）。整页 reload 会清空 basket。 */}
-              <Link className={styles['summary-link']} to="/review/compare">
+              <Link className={styles.summaryLink} to="/review/compare">
                 查看对比
               </Link>
             </div>
@@ -510,29 +502,123 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
   )
 
   return (
-    <div className={styles['explorer-page']} data-testid="explorer-page">
-      <ReviewHeader projectionDate={explorer.data?.projection_trade_date} />
+    <div className={styles.explorerPage} data-testid="explorer-page">
+      <ReviewTopBar projectionDate={explorer.data?.projection_trade_date} />
 
-      {isIndustry ? (
-        <div className={styles['level-selector']}>
-          {LEVELS.map((lv) => (
-            <button
-              key={lv}
-              type="button"
-              className={parsed.hierarchy_level === lv ? styles['level-btn-active'] : styles['level-btn']}
-              onClick={() => onLevel(lv)}
-              aria-pressed={parsed.hierarchy_level === lv}
-            >
-              {lv}
+      {/* §3 tab 专属控件行：紧跟在共享顶部行下方，三个 tab 共用同一行节奏与控件高度。 */}
+      <div className={styles.contextRow}>
+        {isIndustry ? (
+          <div className={styles.levelSelector} role="group" aria-label="行业层级">
+            {LEVELS.map((lv) => (
+              <button
+                key={lv}
+                type="button"
+                className={parsed.hierarchy_level === lv ? styles.levelBtnActive : styles.levelBtn}
+                onClick={() => onLevel(lv)}
+                aria-pressed={parsed.hierarchy_level === lv}
+              >
+                {lv}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className={styles.conceptNote}>同花顺概念 / 问财概念</p>
+        )}
+
+        <form className={styles.searchForm} onSubmit={submitSearch}>
+          <input
+            className={styles.searchInput}
+            type="text"
+            value={draftQ}
+            placeholder={isIndustry ? '搜索行业' : '搜索概念'}
+            onChange={(e) => setDraftQ(e.target.value)}
+            data-testid="search-input"
+          />
+          <button type="submit" className={styles.btnPrimary}>
+            搜索
+          </button>
+          {parsed.q && (
+            <button type="button" className={styles.btnGhost} onClick={clearSearch}>
+              清空
             </button>
-          ))}
-        </div>
-      ) : (
-        <p className={styles['concept-note']}>同花顺概念 / 问财概念</p>
-      )}
+          )}
+        </form>
+      </div>
 
       {listWorkspace}
       {detailWorkspace}
+    </div>
+  )
+}
+
+// 列设置弹层（§7）：复用 global.scss 的 column-manager-* / column-filter-popover chrome。
+// 只提供列显隐（列顺序由 EXPLORER_TABLE_COLUMNS 契约锁死，故不提供重排）。
+function ExplorerColumnSettings({
+  hidden,
+  onToggle,
+  onReset,
+  onClose,
+  anchor,
+}: {
+  hidden: ReadonlySet<ExplorerTableColumn>
+  onToggle: (key: ExplorerTableColumn) => void
+  onReset: () => void
+  onClose: () => void
+  anchor: HTMLElement
+}) {
+  const rootRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    const onDocMouseDown = (e: MouseEvent) => {
+      if (rootRef.current && e.target instanceof Node && rootRef.current.contains(e.target)) return
+      onClose()
+    }
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => document.removeEventListener('mousedown', onDocMouseDown)
+  }, [onClose])
+
+  const rect = anchor.getBoundingClientRect()
+  const left = Math.max(8, Math.min(rect.right - POPOVER_WIDTH, window.innerWidth - POPOVER_WIDTH - 8))
+  const top = rect.bottom + 6
+
+  return (
+    <div
+      ref={rootRef}
+      className="column-filter-popover column-manager-popover"
+      style={{ left, top }}
+      role="dialog"
+      aria-label="列设置"
+      data-testid="column-settings-popover"
+    >
+      <div className="filter-pop-title">显示列</div>
+      <div className="column-manager-list">
+        {EXPLORER_TABLE_COLUMNS.map((key) => {
+          // name（身份列）/ operation（操作列）不可隐藏。
+          if (key === 'name' || key === 'operation') return null
+          return (
+            <div key={key} className="column-manager-item">
+              <label className="table-checkbox-wrapper" style={{ width: 24, height: 24 }}>
+                <input
+                  type="checkbox"
+                  className="table-checkbox"
+                  checked={!hidden.has(key)}
+                  onChange={() => onToggle(key)}
+                  data-testid={`column-toggle-${key}`}
+                />
+              </label>
+              <span className="column-manager-label">{EXPLORER_COLUMN_LABELS[key]}</span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="filter-pop-actions">
+        <button type="button" className="btn small" onClick={onReset} data-testid="column-settings-reset">
+          恢复默认
+        </button>
+        <button type="button" className="btn small primary" onClick={onClose} data-testid="column-settings-done">
+          完成
+        </button>
+      </div>
     </div>
   )
 }
@@ -585,20 +671,20 @@ function ScopeFilterPopover({
   return (
     <div
       ref={rootRef}
-      className={styles['filter-popover']}
+      className="column-filter-popover"
       style={{ left, top }}
       role="dialog"
       aria-label={`${spec.filterLabel} 筛选`}
       data-testid={`filter-popover-${column}`}
     >
-      <div className={styles['filter-pop-title']}>筛选：{spec.filterLabel}</div>
+      <div className="filter-pop-title">筛选：{spec.filterLabel}</div>
 
-      <div className={styles['filter-mode-group']} role="group" aria-label="条件">
+      <div className={styles.filterModeGroup} role="group" aria-label="条件">
         {EXPLORER_FILTER_MODES.map((m) => (
           <button
             key={m.value}
             type="button"
-            className={m.value === mode ? styles['filter-mode-active'] : styles['filter-mode']}
+            className={m.value === mode ? styles.filterModeActive : styles.filterMode}
             aria-pressed={m.value === mode}
             data-testid={`filter-mode-${m.value}`}
             onClick={() => setMode(m.value)}
@@ -609,10 +695,10 @@ function ScopeFilterPopover({
       </div>
 
       {(mode === 'range' || mode === 'gte') && (
-        <label className={styles['filter-field']}>
+        <label className={styles.filterField}>
           <span>最小值{unit ? `（${unit}）` : ''}</span>
           <input
-            className={styles['filter-input']}
+            className={styles.filterInput}
             type="text"
             inputMode="decimal"
             value={lower}
@@ -623,10 +709,10 @@ function ScopeFilterPopover({
         </label>
       )}
       {(mode === 'range' || mode === 'lte') && (
-        <label className={styles['filter-field']}>
+        <label className={styles.filterField}>
           <span>最大值{unit ? `（${unit}）` : ''}</span>
           <input
-            className={styles['filter-input']}
+            className={styles.filterInput}
             type="text"
             inputMode="decimal"
             value={upper}
@@ -637,10 +723,10 @@ function ScopeFilterPopover({
         </label>
       )}
       {mode === 'eq' && (
-        <label className={styles['filter-field']}>
+        <label className={styles.filterField}>
           <span>值{unit ? `（${unit}）` : ''}</span>
           <input
-            className={styles['filter-input']}
+            className={styles.filterInput}
             type="text"
             inputMode="decimal"
             value={lower}
@@ -651,13 +737,13 @@ function ScopeFilterPopover({
         </label>
       )}
 
-      <div className={styles['filter-pop-actions']}>
-        <button type="button" className={styles['btn-ghost']} onClick={onClear} data-testid="filter-clear">
+      <div className="filter-pop-actions">
+        <button type="button" className={styles.btnGhost} onClick={onClear} data-testid="filter-clear">
           清除
         </button>
         <button
           type="button"
-          className={styles['btn-primary']}
+          className={styles.btnPrimary}
           onClick={() => onApply(mode, lower, upper)}
           data-testid="filter-apply"
         >

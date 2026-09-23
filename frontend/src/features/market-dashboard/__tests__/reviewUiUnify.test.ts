@@ -80,9 +80,9 @@ test('R10. rail 仅渲染板块名称（不含成员数/MA 等指标字段）', 
 // ===========================================================================
 // P1-1. 大盘 / 行业 / 概念 统一顶部 shell（共享 ReviewHeader，行业/概念不再有独立大标题）
 // ===========================================================================
-test('P1-1. 大盘页与行业/概念页共享同一 ReviewHeader（统一 shell）', () => {
-  assert.match(MARKET_PAGE_SOURCE, /<ReviewHeader /, '大盘页消费共享 ReviewHeader')
-  assert.match(PAGE_SOURCE, /<ReviewHeader /, '行业/概念页消费共享 ReviewHeader')
+test('P1-1. 大盘页与行业/概念页共享同一 ReviewTopBar（统一 shell）', () => {
+  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar /, '大盘页消费共享 ReviewTopBar')
+  assert.match(PAGE_SOURCE, /<ReviewTopBar /, '行业/概念页消费共享 ReviewTopBar')
   // 行业/概念不再渲染自己的大标题「行业」/「概念」
   assert.ok(!PAGE_SOURCE.includes("'行业' : '概念'"), '行业/概念页不得再渲染独立大标题')
 })
@@ -90,15 +90,15 @@ test('P1-1. 大盘页与行业/概念页共享同一 ReviewHeader（统一 shell
 // ===========================================================================
 // P1 (final). 不重复 query：行业/概念页复用 explorer 响应日期，不再调用 useMarketDashboard
 // ===========================================================================
-test('P1-final. 不重复 query：ReviewHeader 数据日期复用 explorer 响应，且不调用 useMarketDashboard', () => {
+test('P1-final. 不重复 query：ReviewTopBar 数据日期复用 explorer 响应，且不调用 useMarketDashboard', () => {
   assert.ok(
     !PAGE_SOURCE.includes('useMarketDashboard('),
     'ScopeExplorerPage 不得再调用 useMarketDashboard()（避免为顶部显示一个日期而额外拉全量大盘数据）',
   )
   assert.match(
     PAGE_SOURCE,
-    /<ReviewHeader projectionDate=\{explorer\.data\?\.projection_trade_date\} \/>/,
-    'ReviewHeader 数据日期复用 explorer 响应（与 MarketDashboardPage 同源，不另造日期 / 不重复 query）',
+    /<ReviewTopBar projectionDate=\{explorer\.data\?\.projection_trade_date\} \/>/,
+    'ReviewTopBar 数据日期复用 explorer 响应（与 MarketDashboardPage 同源，不另造日期 / 不重复 query）',
   )
 })
 
@@ -164,7 +164,7 @@ test('R6/R7. 列表态保留搜索与清除筛选入口', () => {
 })
 
 test('R8. 列表态保留分页控件', () => {
-  assert.match(PAGE_SOURCE, /className=\{styles\.pagination\}/, '分页容器保留')
+  assert.match(PAGE_SOURCE, /className="table-pager"/, '分页容器保留（复用 global.scss 表格 chrome）')
   assert.match(PAGE_SOURCE, /goPage\(parsed\.page - 1\)/, '上一页保留')
   assert.match(PAGE_SOURCE, /goPage\(parsed\.page \+ 1\)/, '下一页保留')
 })
@@ -172,10 +172,27 @@ test('R8. 列表态保留分页控件', () => {
 // ===========================================================================
 // R15. 大盘页核心契约未被 section 6 布局统一破坏
 // ===========================================================================
-test('R15. 大盘页核心契约稳定（共享 ReviewHeader + 统一 BreadthChart + rankings）', () => {
-  assert.match(MARKET_PAGE_SOURCE, /<ReviewHeader /, '大盘页消费共享 ReviewHeader')
+test('R15. 大盘页核心契约稳定（共享 ReviewTopBar + 统一 BreadthChart + rankings）', () => {
+  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar /, '大盘页消费共享 ReviewTopBar')
   assert.equal((MARKET_PAGE_SOURCE.match(/<BreadthChart/g) ?? []).length, 1, '大盘页只能有一个 chart')
   assert.equal((MARKET_PAGE_SOURCE.match(/useMarketRankings\(/g) ?? []).length, 2, '行业/概念 ranking 各一次')
+})
+
+// ===========================================================================
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] §2/§3/§4 顶部 shell 与快速筛选契约
+// ===========================================================================
+test('§2. 大盘 / 行业 / 概念 共享紧凑顶部行，且页面内无「市场复盘」H1', () => {
+  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar /, '大盘页消费共享 ReviewTopBar')
+  assert.match(PAGE_SOURCE, /<ReviewTopBar /, '行业/概念页消费共享 ReviewTopBar')
+  // 复盘模块身份由全局导航承担；页内不得再有「市场复盘」的页面级 H1（错误文案里的「市场复盘数据」不算标题）。
+  assert.ok(!PAGE_SOURCE.match(/<h1[^>]*>[^<]*市场复盘/), '行业/概念页不得有「市场复盘」H1')
+  assert.ok(!MARKET_PAGE_SOURCE.match(/<h1[^>]*>[^<]*市场复盘/), '大盘页不得有「市场复盘」H1')
+})
+
+test('§3/§4. 行业/概念页不发明第二套筛选（无「快速筛选」，无 quick-filter 状态/菜单接线）', () => {
+  assert.ok(!PAGE_SOURCE.includes('>快速筛选<'), '不得出现「快速筛选」可见控件（注释里的说明文字不算）')
+  assert.ok(!PAGE_SOURCE.includes('quickFilter'), '不得保留 quick-filter 状态/菜单接线')
+  assert.ok(!PAGE_SOURCE.includes('MA5_PRESETS'), '不得保留已死 MA5_PRESETS 菜单数据')
 })
 
 // ===========================================================================

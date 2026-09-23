@@ -6,6 +6,13 @@
 // - 仅 backend 当前真实支持数值筛选的 5 列（成员数 / MA5 / MA5Δ / MA10 / MA10Δ）显示 funnel；
 //   MA20 / MA50 / MA120 没有对应 filter 参数 → 只可排序，绝不放「看起来能筛、实际做不到」的假按钮；
 // - 表格本身仍由 URL state 驱动（本组件只渲染 + 回调，不持有筛选状态）。
+//
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX][§5] 表格 chrome **不再由 CSS module 重复实现**：
+// 直接消费 global.scss 的 canonical 表格语言（table-shell / table-scroll / data-table
+// interactive-table / th-shell / th-sort / th-label / sort-icon / th-filter），
+// 与 StrategyDataTable 共用同一个 presentation owner。此前 module 里那份
+// `.rank-table/.table/.th-head/.th-sort/.th-filter/...` 副本已删除。
+import { Fragment } from 'react'
 import clsx from 'clsx'
 import type { ScopeExplorerItem } from './types'
 import type { ScopeExplorerSort, SortDirection } from './scopeExplorerQuery'
@@ -13,10 +20,26 @@ import { formatBreadth, formatDelta, deltaDirection } from './dashboardLogic'
 import TableFilterIcon from '@/components/TableFilterIcon'
 import {
   EXPLORER_FILTER_COLUMN_SPECS,
+  EXPLORER_TABLE_COLUMNS,
   FILTER_COLUMN_BY_FIELD,
   type ExplorerFilterColumn,
 } from './scopeExplorerUrlState'
+import type { ExplorerTableColumn } from './reviewTablePrefs'
 import styles from './dashboard.module.scss'
+
+// 列标题表（列**顺序**的唯一 owner 仍是 scopeExplorerUrlState.EXPLORER_TABLE_COLUMNS）。
+export const EXPLORER_COLUMN_LABELS: Record<ExplorerTableColumn, string> = {
+  name: '行业 / 概念',
+  member_count: '成员数',
+  ma5: 'MA5',
+  ma5_delta: '5日Δ',
+  ma10: 'MA10',
+  ma10_delta: '5日Δ',
+  ma20: 'MA20',
+  ma50: 'MA50',
+  ma120: 'MA120',
+  operation: '操作',
+}
 
 interface Props {
   items: ScopeExplorerItem[]
@@ -30,6 +53,8 @@ interface Props {
   filteredColumns: ReadonlySet<ExplorerFilterColumn>
   /** 点击列 funnel；anchor 供弹层定位 */
   onFilterClick: (column: ExplorerFilterColumn, anchor: HTMLElement) => void
+  /** 列设置（§7）：被隐藏的列。name / operation 永不隐藏。 */
+  hiddenColumns: ReadonlySet<string>
 }
 
 const SORTABLE: readonly ScopeExplorerSort[] = [
@@ -49,7 +74,6 @@ const SORTABLE: readonly ScopeExplorerSort[] = [
 
 function HeaderCell({
   field,
-  label,
   sort,
   direction,
   onSort,
@@ -57,7 +81,6 @@ function HeaderCell({
   onFilterClick,
 }: {
   field: ScopeExplorerSort
-  label: string
   sort: ScopeExplorerSort
   direction: SortDirection
   onSort: (f: ScopeExplorerSort) => void
@@ -70,22 +93,22 @@ function HeaderCell({
   const isFiltered = filterColumn !== undefined && filteredColumns.has(filterColumn)
   const filterLabel = filterColumn ? EXPLORER_FILTER_COLUMN_SPECS[filterColumn].filterLabel : ''
   return (
-    <th className={styles['th-sort']}>
-      <div className={styles['th-head']}>
+    <th>
+      <div className="th-shell">
         <button
           type="button"
-          className={styles['sort-btn']}
+          className="th-sort"
           onClick={() => onSort(field)}
           aria-pressed={active}
           data-testid={`sort-${field}`}
         >
-          <span className={styles['th-label']}>{label}</span>
-          <span className={styles['sort-ind']}>{ind}</span>
+          <span className="th-label">{EXPLORER_COLUMN_LABELS[field]}</span>
+          <span className="sort-icon">{ind}</span>
         </button>
         {filterColumn && (
           <button
             type="button"
-            className={clsx(styles['th-filter'], isFiltered && styles['active'])}
+            className={clsx('th-filter', isFiltered && 'active')}
             aria-pressed={isFiltered}
             aria-label={`筛选${filterLabel}`}
             title={`筛选${filterLabel}`}
@@ -107,6 +130,32 @@ function deltaCell(value: number | null) {
   return <span className={styles[deltaDirection(value)]}>{formatDelta(value)}</span>
 }
 
+/** 单个数据单元格（列顺序由 EXPLORER_TABLE_COLUMNS 驱动）。 */
+function bodyCell(key: ExplorerTableColumn, item: ScopeExplorerItem) {
+  switch (key) {
+    case 'name':
+      return <td className={styles.nameCell}>{item.board_name}</td>
+    case 'member_count':
+      return <td className={styles.numCell}>{item.member_count.toLocaleString()}</td>
+    case 'ma5':
+      return <td className={styles.numCell}>{formatBreadth(item.ma5)}</td>
+    case 'ma5_delta':
+      return <td className={styles.numCell}>{deltaCell(item.ma5_delta)}</td>
+    case 'ma10':
+      return <td className={styles.numCell}>{formatBreadth(item.ma10)}</td>
+    case 'ma10_delta':
+      return <td className={styles.numCell}>{deltaCell(item.ma10_delta)}</td>
+    case 'ma20':
+      return <td className={styles.numCell}>{formatBreadth(item.ma20)}</td>
+    case 'ma50':
+      return <td className={styles.numCell}>{formatBreadth(item.ma50)}</td>
+    case 'ma120':
+      return <td className={styles.numCell}>{formatBreadth(item.ma120)}</td>
+    case 'operation':
+      return null // 单独处理（需要 item 上下文）
+  }
+}
+
 export default function ScopeExplorerTable({
   items,
   sort,
@@ -117,64 +166,69 @@ export default function ScopeExplorerTable({
   onAddCompare,
   filteredColumns,
   onFilterClick,
+  hiddenColumns,
 }: Props) {
   const headerProps = { sort, direction, onSort, filteredColumns, onFilterClick }
   return (
-    <div className={styles['rank-table']} data-testid="explorer-table">
-      <table className={styles.table}>
-        <thead>
-          <tr>
-            <HeaderCell field="name" label="行业 / 概念" {...headerProps} />
-            <HeaderCell field="member_count" label="成员数" {...headerProps} />
-            <HeaderCell field="ma5" label="MA5" {...headerProps} />
-            <HeaderCell field="ma5_delta" label="5日Δ" {...headerProps} />
-            <HeaderCell field="ma10" label="MA10" {...headerProps} />
-            <HeaderCell field="ma10_delta" label="5日Δ" {...headerProps} />
-            <HeaderCell field="ma20" label="MA20" {...headerProps} />
-            <HeaderCell field="ma50" label="MA50" {...headerProps} />
-            <HeaderCell field="ma120" label="MA120" {...headerProps} />
-            <th className={styles['th-op']}>操作</th>
-          </tr>
-        </thead>
-        <tbody>
-          {items.map((item) => {
-            const selected = item.board_id === selectedId
-            return (
-              <tr
-                key={item.board_id}
-                className={selected ? styles['row-selected'] : undefined}
-                onClick={() => onSelect(item.board_id)}
-                data-board-id={item.board_id}
-                data-testid={`row-${item.board_id}`}
-              >
-                <td className={styles['name-cell']}>{item.board_name}</td>
-                <td className={styles['num-cell']}>{item.member_count.toLocaleString()}</td>
-                <td className={styles['num-cell']}>{formatBreadth(item.ma5)}</td>
-                <td className={styles['num-cell']}>{deltaCell(item.ma5_delta)}</td>
-                <td className={styles['num-cell']}>{formatBreadth(item.ma10)}</td>
-                <td className={styles['num-cell']}>{deltaCell(item.ma10_delta)}</td>
-                <td className={styles['num-cell']}>{formatBreadth(item.ma20)}</td>
-                <td className={styles['num-cell']}>{formatBreadth(item.ma50)}</td>
-                <td className={styles['num-cell']}>{formatBreadth(item.ma120)}</td>
-                <td className={styles['op-cell']}>
-                  <button
-                    type="button"
-                    className={styles['compare-btn']}
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      onAddCompare(item)
-                    }}
-                  >
-                    加入对比
-                  </button>
-                </td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </table>
+    <div className="table-shell" data-testid="explorer-table">
+      <div className="table-scroll">
+        <table className="data-table interactive-table">
+          <thead>
+            <tr>
+              {EXPLORER_TABLE_COLUMNS.map((key) => {
+                if (hiddenColumns.has(key)) return null
+                if (key === 'operation') {
+                  return (
+                    <th key={key} className={styles.thOp}>
+                      操作
+                    </th>
+                  )
+                }
+                return <HeaderCell key={key} field={key} {...headerProps} />
+              })}
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((item) => {
+              const selected = item.board_id === selectedId
+              return (
+                <tr
+                  key={item.board_id}
+                  className={selected ? styles.rowSelected : undefined}
+                  onClick={() => onSelect(item.board_id)}
+                  data-board-id={item.board_id}
+                  data-testid={`row-${item.board_id}`}
+                >
+                  {EXPLORER_TABLE_COLUMNS.map((key) => {
+                    if (hiddenColumns.has(key)) return null
+                    if (key === 'operation') {
+                      return (
+                        <td key={key} className={styles.opCell}>
+                          <button
+                            type="button"
+                            className={styles.compareBtn}
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              onAddCompare(item)
+                            }}
+                          >
+                            加入对比
+                          </button>
+                        </td>
+                      )
+                    }
+                    return <Fragment key={key}>{bodyCell(key, item)}</Fragment>
+                  })}
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
+
+// React 需要 key 时用 Fragment（bodyCell 已返回 <td>）。
 
 export { SORTABLE }

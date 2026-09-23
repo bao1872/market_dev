@@ -7,6 +7,10 @@
 //   - 比较篮只存最小身份 {id,name,type}（Zustand），remove/clear 不写回 API 值。
 //   - 矩阵列顺序锁死（comparePageConfig.COMPARE_MATRIX_COLUMNS）；类型/数值只展示。
 //   - 空篮：不调 API，诚实空态 + SPA Link（保留 session basket）。
+//
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] CSS Module 绑定修正：
+//   vite localsConvention = camelCaseOnly → 所有 kebab 选择器只能通过 camelCase 访问。
+//   下方 className 统一用 styles.compareSection / styles.projDate ... 形式（camelCase 访问，不再用 kebab 中括号查找）。
 import { useMemo, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useMarketCompare } from '@/hooks/useMarketDashboardApi'
@@ -87,32 +91,32 @@ export default function ComparePage() {
         <h1 className={styles.pageTitle}>板块对比</h1>
         <DashboardTabs />
         {data?.projection_trade_date && (
-          <span className={styles['proj-date']}>数据日期 {data.projection_trade_date}</span>
+          <span className={styles.projDate}>数据日期 {data.projection_trade_date}</span>
         )}
       </div>
 
       {/* 比较篮：chips 保持 store 顺序；remove/clear 只改 Zustand identity store。 */}
-      <div className={styles['compare-section']}>
-        <div className={styles['compare-head']}>
-          <span className={styles['rank-title']}>对比篮</span>
+      <div className={styles.compareSection}>
+        <div className={styles.compareHead}>
+          <span className={styles.rankTitle}>对比篮</span>
           {items.length > 0 && (
-            <button type="button" className={styles['btn-ghost']} onClick={clear}>
+            <button type="button" className={styles.btnGhost} onClick={clear}>
               清空全部
             </button>
           )}
         </div>
 
         {items.length === 0 ? (
-          <p className={styles['taxonomy-note']}>尚未选择对比板块</p>
+          <p className={styles.taxonomyNote}>尚未选择对比板块</p>
         ) : (
           <div className={styles.chips}>
             {items.map((it) => (
               <span key={it.id} className={styles.chip}>
                 {it.name}
-                <span className={styles['taxonomy-note']}>{boardTypeLabel(it.type)}</span>
+                <span className={styles.taxonomyNote}>{boardTypeLabel(it.type)}</span>
                 <button
                   type="button"
-                  className={styles['chip-remove']}
+                  className={styles.chipRemove}
                   onClick={() => remove(it.id)}
                   aria-label={`移除 ${it.name}`}
                 >
@@ -123,13 +127,13 @@ export default function ComparePage() {
           </div>
         )}
 
-        <div className={styles['range-selector']}>
-          <span className={styles['range-label']}>区间</span>
+        <div className={styles.rangeSelector}>
+          <span className={styles.rangeLabel}>区间</span>
           {COMPARE_RANGES.map((r) => (
             <button
               key={r}
               type="button"
-              className={r === range ? `${styles['range-btn']} ${styles['range-btn-active']}` : styles['range-btn']}
+              className={r === range ? `${styles.rangeBtn} ${styles.rangeBtnActive}` : styles.rangeBtn}
               aria-pressed={r === range}
               onClick={() => setRange(r)}
             >
@@ -141,13 +145,13 @@ export default function ComparePage() {
 
       {/* 空篮：不调 API，诚实空态 + SPA Link（保留 session basket，不整页 reload）。 */}
       {isEmpty ? (
-        <div className={styles['compare-section']}>
+        <div className={styles.compareSection}>
           <DashboardState kind="empty" desc="尚未选择对比板块" />
-          <div className={styles['compare-link-row']}>
-            <Link className={styles['summary-link']} to="/review/industry?hierarchy_level=L1">
+          <div className={styles.compareLinkRow}>
+            <Link className={styles.summaryLink} to="/review/industry?hierarchy_level=L1">
               前往行业
             </Link>
-            <Link className={styles['summary-link']} to="/review/concept">
+            <Link className={styles.summaryLink} to="/review/concept">
               前往概念
             </Link>
           </div>
@@ -163,16 +167,16 @@ export default function ComparePage() {
       ) : data ? (
         <>
           {/* 图：复用 CompareChart（不写第二套 chart）；EW 独立归一，起点=100。 */}
-          <div className={styles['chart-card']}>
-            <div className={styles['chart-title']}>板块等权指数对比</div>
-            <div className={styles['card-hint']}>各板块在当前显示区间独立归一，起点 = 100</div>
+          <div className={styles.chartCard}>
+            <div className={styles.chartTitle}>板块等权指数对比</div>
+            <div className={styles.cardHint}>各板块在当前显示区间独立归一，起点 = 100</div>
             <CompareChart boards={data.boards} height={360} />
           </div>
 
           {/* 矩阵：列顺序锁死；行顺序 = basket / API response 顺序（前端不重排）。 */}
-          <div className={styles['rank-table']}>
-            <div className={styles['rank-title']}>比较矩阵</div>
-            <div className={styles['detail-sub']}>
+          <div className={styles.rankTable}>
+            <div className={styles.rankTitle}>比较矩阵</div>
+            <div className={styles.detailSub}>
               数据日期 {data.projection_trade_date ?? '—'} · 5日前 {data.previous_trade_date ?? '—'} · 5日Δ
               使用统一市场投影交易日 T 与 T-5
             </div>
@@ -191,7 +195,7 @@ export default function ComparePage() {
                       const cell = matrixCell(c, b)
                       const alignLeft = c === 'name' || c === 'type'
                       const dirClass = cell.dir ? ` ${styles[cell.dir]}` : ''
-                      const alignClass = alignLeft ? ` ${styles['name-cell']}` : ''
+                      const alignClass = alignLeft ? ` ${styles.nameCell}` : ''
                       return (
                         <td key={c} className={`${alignClass}${dirClass}`.trim()}>
                           {cell.text}

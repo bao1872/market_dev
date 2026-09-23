@@ -64,6 +64,24 @@
   font-weight: 600;
 }
 
+// ===== [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] 统一顶部上下文行（tabs + 数据日期同一行）=====
+// 三个 tab（大盘 / 行业 / 概念）渲染完全相同的这一行；数据日期为 muted 次级元数据，不是标题。
+.review-top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.review-top-date {
+  margin-left: auto;
+  font-size: 13px;
+  color: v.$color-muted;
+  white-space: nowrap;
+}
+
 // ===== 卡片 =====
 .card-grid {
   display: grid;
@@ -663,6 +681,23 @@
   gap: 8px;
   flex-wrap: wrap;
   margin-bottom: 14px;
+}
+
+// ===== [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] tab 专属控件行（层级 + 搜索）=====
+// 紧跟共享顶部行下方；三个 tab 共用同一行节奏、控件高度、gap、背景层级。
+.context-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 16px;
+}
+
+.search-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .search-input {

@@ -13,7 +13,7 @@
 //   - ranking 各自独立 loading/error/empty，单个失败不影响主图。
 import { useMemo, useState } from 'react'
 import { useMarketDashboard, useMarketRankings } from '@/hooks/useMarketDashboardApi'
-import ReviewHeader from './ReviewHeader'
+import ReviewTopBar from './ReviewTopBar'
 import DashboardState, { type DashboardStateKind } from './DashboardState'
 import BreadthChart from './BreadthChart'
 import MarketRankingSummary from './MarketRankingSummary'
@@ -73,8 +73,8 @@ export default function MarketDashboardPage() {
   const points = (query.data?.series ?? []) as BreadthPoint[]
 
   return (
-    <div className={styles['explorer-page']}>
-      <ReviewHeader projectionDate={query.data?.projection_trade_date} />
+    <div className={styles.explorerPage}>
+      <ReviewTopBar projectionDate={query.data?.projection_trade_date} />
 
       <div className={styles.rangeSelector} role="group" aria-label="时间范围">
         <span className={styles.rangeLabel}>时间范围：</span>
