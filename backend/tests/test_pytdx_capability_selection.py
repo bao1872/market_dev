@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
-from datetime import date
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
+import pandas as pd
 import pytest
 from pytdx.errors import TdxConnectionError, TdxFunctionCallError
 
@@ -42,6 +45,8 @@ class _FakeApi:
     connect_log: list = []
     bars_call_log: list = []
     quotes_call_log: list = []
+    quotes_fail: set = set()
+    history_fail: set = set()
 
     def __init__(self, raise_exception: bool = True, auto_retry: bool = False) -> None:
         self.host: str | None = None
@@ -89,7 +94,14 @@ class _FakeApi:
 
     def get_security_quotes(self, requests):  # noqa: ANN001, ANN201
         type(self).quotes_call_log.append(self.host)
+        if self.host in type(self).quotes_fail:
+            raise TdxFunctionCallError("calling function error")
         return [{"market": m, "code": c, "price": 1.0} for m, c in requests]
+
+    def get_history_transaction_data(self, market, code, offset, count, date):  # noqa: ANN001, ANN201
+        if self.host in type(self).history_fail:
+            raise TdxFunctionCallError("calling function error")
+        return [{"time": "14:57", "price": 1.0, "vol": 100, "amount": 100.0, "buy_or_sell": 0}]
 
     def disconnect(self) -> None:
         pass
@@ -100,6 +112,8 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeApi.connect_fail = set()
     _FakeApi.bars_fail = set()
     _FakeApi.xdxr_fail = set()
+    _FakeApi.quotes_fail = set()
+    _FakeApi.history_fail = set()
     _FakeApi.connect_log = []
     _FakeApi.bars_call_log = []
     _FakeApi.quotes_call_log = []
@@ -319,3 +333,264 @@ def test_capability_config_snapshot() -> None:
     # 已证实 TCP 建连失败的旧池 IP 不得回到候选池
     for dead in ("119.147.212.81", "14.215.128.18", "202.108.253.131", "123.125.108.23"):
         assert (dead, 7709) not in [c.server for c in PYTDX_SERVER_CAPABILITIES]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX1：bars 运行时健康必须只属于 BARS
+# ════════════════════════════════════════════════════════════════════════
+
+# FIX1-A：XDXR 失败不得改写 bars 运行时计数器 / 分数
+def test_xdxr_failure_does_not_alter_bars_runtime_health() -> None:
+    caps = _caps(("A", True, True, True))
+    adapter = PytdxAdapter(
+        servers=[("A", 7709)], capabilities=caps, max_retries=1,
+        capability_cooldown_seconds=1800,
+    )
+    health_before = adapter._runtime_health_for(("A", 7709))  # noqa: SLF001
+    assert health_before.failure_count == 0
+    assert health_before.consecutive_failures == 0
+
+    _FakeApi.xdxr_fail = {"A"}
+    with pytest.raises(mod.PytdxSourceError):
+        _xdxr(adapter)
+
+    health_after = adapter._runtime_health_for(("A", 7709))  # noqa: SLF001
+    # XDXR 失败只冷却 XDXR capability，绝不动 bars 运行时健康
+    assert health_after.failure_count == 0
+    assert health_after.consecutive_failures == 0
+
+
+# FIX1-B：quote 成功不得改写 bars EWMA 延迟
+def test_quote_success_does_not_alter_bars_ewma() -> None:
+    caps = _caps(("A", True, True, True))
+    adapter = PytdxAdapter(servers=[("A", 7709)], capabilities=caps, max_retries=1)
+    health = adapter._runtime_health_for(("A", 7709))  # noqa: SLF001
+    assert health.ewma_latency_ms is None
+
+    adapter.get_security_quotes(["600519"])
+    # quote 成功不得污染 bars 运行时健康（bars 不能「以为」A 很快）
+    assert health.ewma_latency_ms is None
+
+    # 对照：bars 成功应当更新 EWMA
+    _FakeApi.bars_fail = set()
+    _bars(adapter)
+    assert health.ewma_latency_ms is not None
+
+
+# FIX1-C：bars 失败不得改变 XDXR 的 server 选择顺序（保持静态稳定顺序）
+def test_bars_failure_does_not_alter_xdxr_ranking() -> None:
+    caps = _caps(("A", True, True, True), ("B", False, True, True))
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709)], capabilities=caps, max_retries=1,
+        capability_cooldown_seconds=1800,
+    )
+    # 制造 bars 失败（污染 bars 健康）
+    _FakeApi.bars_fail = {"A"}
+    with pytest.raises(mod.PytdxSourceError):
+        _bars(adapter)
+
+    # XDXR 排序应仍按静态配置顺序 [A, B]，不被 bars 健康/分数影响
+    ranked = adapter._ranked_servers(CAPABILITY_XDXR, set(), set())  # noqa: SLF001
+    assert ranked == [("A", 7709), ("B", 7709)]
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX2：全池覆盖 / half-open 不得扩散到其它 capability
+# ════════════════════════════════════════════════════════════════════════
+
+# FIX2-bars：4 eligible server + max_retries=3 → A/B/C/D 全部得到机会
+def test_bars_covers_all_eligible_servers_regardless_of_max_retries() -> None:
+    caps = _caps(
+        ("A", True, True, None),
+        ("B", True, True, None),
+        ("C", True, True, None),
+        ("D", True, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.bars_fail = {"A", "B", "C", "D"}
+    with pytest.raises(mod.PytdxSourceError):
+        _bars(adapter)
+    # full-pool coverage：max_retries=3 不再截断 bars 覆盖到第 4 台
+    assert len({*_FakeApi.connect_log}) == 4
+    for h in ("A", "B", "C", "D"):
+        assert h in _FakeApi.connect_log
+
+
+# FIX2-xdxr：max_retries=3 → 至多 3 次 operation 尝试（不扫全池）
+def test_xdxr_respects_max_retries_bounded_attempts() -> None:
+    caps = _caps(
+        ("A", False, True, None),
+        ("B", False, True, None),
+        ("C", False, True, None),
+        ("D", False, True, None),
+        ("E", False, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709), ("E", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.xdxr_fail = {"A", "B", "C", "D", "E"}
+    with pytest.raises(mod.PytdxSourceError):
+        _xdxr(adapter)
+    # 5 台 XDXR 但 max_retries=3 → 至多 3 次尝试，D/E 不得被扫到
+    assert len(_FakeApi.connect_log) <= 3
+    assert "D" not in _FakeApi.connect_log
+    assert "E" not in _FakeApi.connect_log
+
+
+# FIX2-quote：保持既有有界重试语义
+def test_quote_respects_max_retries_bounded_attempts() -> None:
+    caps = _caps(
+        ("A", True, True, True),
+        ("B", True, True, True),
+        ("C", True, True, True),
+        ("D", True, True, True),
+        ("E", True, True, True),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709), ("E", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.quotes_fail = {"A", "B", "C", "D", "E"}
+    with pytest.raises(mod.PytdxSourceError):
+        adapter.get_security_quotes(["600519"])
+    assert len(_FakeApi.connect_log) <= 3
+    assert "D" not in _FakeApi.connect_log
+    assert "E" not in _FakeApi.connect_log
+
+
+# FIX2-history（capability=None）：保持既有有界重试语义
+def test_history_transaction_respects_max_retries_bounded() -> None:
+    caps = _caps(
+        ("A", True, True, None),
+        ("B", True, True, None),
+        ("C", True, True, None),
+        ("D", True, True, None),
+        ("E", True, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709), ("E", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.history_fail = {"A", "B", "C", "D", "E"}
+    with pytest.raises(mod.PytdxSourceError):
+        adapter.get_history_transaction_page("000001", date(2026, 9, 11), 0, 100)
+    assert len(_FakeApi.connect_log) <= 3
+    assert "D" not in _FakeApi.connect_log
+    assert "E" not in _FakeApi.connect_log
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX3：half-open 必须跨请求限频（家族级探测窗口）
+# ════════════════════════════════════════════════════════════════════════
+
+# FIX3：outage 窗口内的 20 个顺序请求 → 只有 1 次 half-open 真实网络探测
+def test_half_open_rate_limited_across_requests_during_outage() -> None:
+    caps = _caps(
+        ("A", True, True, None),
+        ("B", True, True, None),
+        ("C", True, True, None),
+        ("D", True, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    # 模拟 outage 已发生：所有 bars server 已处于 cooldown
+    now = time.monotonic()
+    for h in ("A", "B", "C", "D"):
+        adapter._capability_health.setdefault((h, 7709), {})[CAPABILITY_BARS] = now + 1800  # noqa: SLF001
+    # 进程级 half-open 限频窗口设很大，使 20 个快速请求都落在同一窗口内
+    adapter.bars_half_open_interval = 100.0
+    _FakeApi.bars_fail = {"A", "B", "C", "D"}
+
+    for _ in range(20):
+        with pytest.raises(mod.PytdxSourceError):
+            _bars(adapter)
+
+    # 整个 outage 窗口内只有 1 次 half-open 真实探测（其余 19 次快速失败，0 网络调用）
+    assert len(_FakeApi.connect_log) == 1
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX4：cooldown 截止 = max(connect, capability)，不是 min
+# ════════════════════════════════════════════════════════════════════════
+
+# FIX4：connect 冷却 1800s + bars 冷却 30s → 正常 eligibility 截止 = 1800s
+def test_cooldown_deadline_is_max_of_connect_and_capability() -> None:
+    adapter = PytdxAdapter(servers=[("A", 7709)], max_retries=1, capability_cooldown_seconds=1800)
+    server = ("A", 7709)
+    now = time.monotonic()
+    adapter._connect_health[server] = now + 1800  # noqa: SLF001
+    adapter._capability_health.setdefault(server, {})[CAPABILITY_BARS] = now + 30  # noqa: SLF001
+
+    # 正常 eligibility 必须等两者都清除 → 取 max = now + 1800
+    assert adapter._cooldown_deadline(server, CAPABILITY_BARS) == pytest.approx(now + 1800, rel=1e-6)  # noqa: SLF001
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX5：half-open 所有权在任何离开路径都必须释放
+# ════════════════════════════════════════════════════════════════════════
+
+# FIX5：half-open 路径遇编程错误（TypeError）→ 原样抛出、half_open_inflight 释放、
+#       不新增 cooldown、不 failover
+def test_half_open_releases_ownership_on_programming_error() -> None:
+    caps = _caps(("A", True, True, None), ("B", True, True, None))
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709)], capabilities=caps, max_retries=3,
+        capability_cooldown_seconds=1800,
+    )
+    # 全部 bars 已 cooldown → 走 half-open；业务回调抛 TypeError
+    now = time.monotonic()
+    for h in ("A", "B"):
+        adapter._capability_health.setdefault((h, 7709), {})[CAPABILITY_BARS] = now + 1800  # noqa: SLF001
+    adapter.bars_half_open_interval = 100.0
+
+    state = {"n": 0}
+
+    def boom(api):  # noqa: ANN001, ANN202
+        state["n"] += 1
+        raise TypeError("bug")
+
+    with pytest.raises(TypeError):
+        adapter._call_with_reconnect("get_security_bars", boom, capability=CAPABILITY_BARS)  # noqa: SLF001
+
+    # 仅 1 次业务调用（half-open 探测本身）
+    assert state["n"] == 1
+    # half-open 所有权已释放
+    for h in ("A", "B"):
+        assert adapter._runtime_health_for((h, 7709)).half_open_inflight is False  # noqa: SLF001
+    # 不因编程错误新增 bars cooldown（pre-seeded 的 cooldown 保持不变，未被改写）
+    assert adapter._in_cooldown(("A", 7709), CAPABILITY_BARS) is True  # noqa: SLF001
+    assert adapter._in_cooldown(("B", 7709), CAPABILITY_BARS) is True  # noqa: SLF001
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX6：klines() 不得把编程错误重新伪装成 provider outage
+# ════════════════════════════════════════════════════════════════════════
+
+# FIX6：live 分钟线增量刷新遇编程错误（TypeError）→ 原样抛出，不得包成 PytdxSourceError
+def test_klines_live_programming_error_not_reclassified() -> None:
+    adapter = PytdxAdapter(servers=[("A", 7709)], max_retries=1)
+
+    # 注入一个已过期缓存，触发增量刷新路径（catch 分支所在处）
+    cache_key = adapter._cache_key("600519", "15m")  # noqa: SLF001
+    now = datetime.now(ZoneInfo("Asia/Shanghai"))
+    adapter._klines_cache[cache_key] = mod._KlineCacheEntry(  # noqa: SLF001
+        df=pd.DataFrame({"datetime": [pd.Timestamp("2026-09-11 15:00")], "close": [1.0]}),
+        cached_at=now - timedelta(days=1),
+        last_bar_time=pd.Timestamp("2026-09-11 15:00"),
+    )
+
+    # 让 _fetch_bars 抛编程错误（模拟代码 bug）
+    def boom(*_a, **_k):  # noqa: ANN202
+        raise TypeError("bug in fetch")
+
+    adapter._fetch_bars = boom  # noqa: SLF001
+
+    # 必须原样抛出 TypeError，而不是被重新包装成 PytdxSourceError
+    with pytest.raises(TypeError):
+        asyncio.run(adapter.klines("600519", "15m"))

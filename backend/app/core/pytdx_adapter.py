@@ -107,6 +107,10 @@ class _KlineCacheEntry:
 # 依据：2026-09-23 的真实 outage 仅数分钟，30 分钟固定冷却会让已恢复的 server 持续「自我失联」。
 _BARS_COOLDOWN_STEPS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0)
 _BARS_COOLDOWN_MAX: float = 300.0
+# HALF_OPEN 探测的进程级限频窗口（秒）：整个 provider family 全部 outage 时，
+# 两次 half-open 真实业务探测之间至少间隔该时长，避免每个网页请求各自绕过 cooldown
+# 造成 outage 期间的重试放大（在线服务必须限频，与 chanlun-pro 单机探测思路不同）。
+_BARS_HALF_OPEN_INTERVAL: float = 30.0
 
 
 # [parity RC3] 只有「已证实的传输 / 协议 / 源」失败才允许污染 server health 并触发 failover；
@@ -526,6 +530,12 @@ class PytdxAdapter(Exchange):
         self.capability_cooldown_seconds = capability_cooldown_seconds
         # 成功建连的单调计数：用于 PytdxCallProvenance（同 hostname 重连也算新 generation）。
         self._connection_generation: int = 0
+        # [FIX3] bars half-open 探测的进程级限频时间窗（monotonic 截止时刻）。
+        # 仅 CAPABILITY_BARS；outage 期间两次 half-open 真实探测至少间隔
+        # ``bars_half_open_interval``，避免每个新请求都绕过 cooldown 各做一次网络探测。
+        # 非 bars capability 不使用。
+        self._bars_half_open_retry_after: float = 0.0
+        self.bars_half_open_interval: float = _BARS_HALF_OPEN_INTERVAL
 
     def __enter__(self) -> PytdxAdapter:
         self.connect()
@@ -620,10 +630,12 @@ class PytdxAdapter(Exchange):
             return
         if self.capability_cooldown_seconds <= 0:
             return
-        health = self._runtime_health_for(server)
-        health.failure_count += 1
-        health.consecutive_failures += 1
+        # [FIX1] 运行时 bars 健康（连续失败计数 / 排名分数）只属于 CAPABILITY_BARS；
+        # 其它 capability 只维护各自的 capability cooldown，不得污染 bars 运行时健康。
         if capability == CAPABILITY_BARS:
+            health = self._runtime_health_for(server)
+            health.failure_count += 1
+            health.consecutive_failures += 1
             delay = self._bars_cooldown_delay(health.consecutive_failures)
         else:
             delay = self.capability_cooldown_seconds
@@ -673,18 +685,24 @@ class PytdxAdapter(Exchange):
         elapsed_ms: float,
         capability: str | None,
     ) -> None:
-        """记录一次成功：更新 EWMA 延迟、清零连续失败、清除该 capability 冷却。"""
-        health = self._runtime_health_for(server)
-        health.success_count += 1
-        health.consecutive_failures = 0
-        health.half_open_inflight = False
-        alpha = 0.25
-        if health.ewma_latency_ms is None:
-            health.ewma_latency_ms = elapsed_ms
-        else:
-            health.ewma_latency_ms = (
-                alpha * elapsed_ms + (1 - alpha) * health.ewma_latency_ms
-            )
+        """记录一次成功：更新 EWMA 延迟、清零连续失败、清除该 capability 冷却。
+
+        [FIX1] EWMA 延迟 / 连续失败清零 只属于 CAPABILITY_BARS 的运行时健康；
+        其它 capability 的成功不得改写 bars 运行时健康（如 quote 很快不能让 bars
+        认为很快）。各 capability 的 cooldown 仍按自身 capability 清除。
+        """
+        if capability == CAPABILITY_BARS:
+            health = self._runtime_health_for(server)
+            health.success_count += 1
+            health.consecutive_failures = 0
+            health.half_open_inflight = False
+            alpha = 0.25
+            if health.ewma_latency_ms is None:
+                health.ewma_latency_ms = elapsed_ms
+            else:
+                health.ewma_latency_ms = (
+                    alpha * elapsed_ms + (1 - alpha) * health.ewma_latency_ms
+                )
         self._clear_capability_failure(server, capability)
 
     def _ranked_servers(
@@ -707,6 +725,10 @@ class PytdxAdapter(Exchange):
             if self._in_cooldown(server, capability):
                 continue
             healthy.append(server)
+        # [FIX1] 运行时 EWMA 排名只用于 CAPABILITY_BARS；其它 capability 保持静态
+        # server 配置顺序（稳定，不被 bars 健康污染 / 不被动态重排），沿用既有行为。
+        if capability != CAPABILITY_BARS:
+            return healthy
         healthy.sort(key=lambda s: self._runtime_health_for(s).score())
         return healthy
 
@@ -715,7 +737,12 @@ class PytdxAdapter(Exchange):
         server: tuple[str, int],
         capability: str | None,
     ) -> float:
-        """该 server 在指定 capability 下的 cooldown 截止时刻（取 connect / capability 较早者）。"""
+        """该 server 在指定 capability 下的正常 eligibility 截止时刻。
+
+        一台 server 必须等 connect 冷却 **与** capability 冷却**都**清除后才恢复普通
+        eligibility，故取二者之 **max**（而非 min）：例如 connect 冷却 1800s、
+        bars 冷却 30s 时，真正可重新服务要等到 1800s。
+        """
         deadlines: list[float] = []
         connect_until = self._connect_health.get(server)
         if connect_until:
@@ -724,7 +751,7 @@ class PytdxAdapter(Exchange):
             cap_until = self._capability_health.get(server, {}).get(capability)
             if cap_until:
                 deadlines.append(cap_until)
-        return min(deadlines) if deadlines else 0.0
+        return max(deadlines) if deadlines else 0.0
 
     def _select_half_open_server(
         self,
@@ -831,6 +858,10 @@ class PytdxAdapter(Exchange):
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as exc:  # noqa: BLE001
+            if not _is_expected_tdx_source_failure(exc):
+                # [parity RC3] 编程/契约错误（TypeError / KeyError …）必须原样上抛，
+                # 不得伪装成 provider 探测失败。
+                raise
             raise PytdxSourceError(
                 operation="health_probe",
                 message=f"bars health probe failed {host}:{port}: {exc}",
@@ -1045,12 +1076,20 @@ class PytdxAdapter(Exchange):
     ) -> Any:
         """唯一 connection-level retry owner：所有 pytdx 网络调用必须经由此处。
 
-        合同（[parity C]，2026-09-23 收紧）：
-        - 对 ``get_security_bars`` 一类 operation：**每台 eligible capable server 最多执行
-          一次 function call**；成功立即返回；source failure 后排除该 server；直到**全部**
-          eligible server 耗尽才抛 typed :class:`PytdxSourceError`。
-          ``max_retries`` **不再**截断 server coverage（旧实现 ``for attempt in
-          range(1, max_retries + 1)`` 在 4 台 bars server 时会漏掉第 4 台）。
+        合同（[parity C]，2026-09-23 收紧；[FIX1/FIX2/FIX3] 2026-09-23 纠正）：
+
+        - **CAPABILITY_BARS**（实时行情专用）：享受本轮 chanlun 对等韧性 —— 每台
+          eligible capable server 最多执行一次 function call；成功立即返回；source
+          failure 后排除该 server；直到**全部** eligible server 耗尽才抛 typed
+          :class:`PytdxSourceError`。``max_retries`` **不**截断 bars 的 server coverage
+          （旧实现 ``for attempt in range(1, max_retries + 1)`` 在 4 台 bars server 时
+          会漏掉第 4 台）。候选顺序由 ``_ranked_servers`` 决定（运行时 EWMA 延迟 +
+          连续失败惩罚）；全部 capable server 都在 cooldown 时，由 ``_select_half_open_server``
+          放行**恰好一台** HALF_OPEN，并以本次真实业务请求本身作为探测（不额外 probe），
+          受进程级限频窗口 ``bars_half_open_interval``（默认 30s）约束。
+        - **其它 capability（XDXR / QUOTE / capability=None）**：保持既有「有界重试」语义
+          （最多 ``max_retries`` 次尝试，不扫全池、不做 half-open、不动态重排），cooldown
+          仍走 ``capability_cooldown_seconds``（默认 1800s），factor / XDXR 合同不变。
         - network / socket / protocol / ``calling function error`` → 该 server 判定不可信 →
           ``_advance_server_after_failure`` + ``disconnect`` → 换下一台候选（A → B → C → D）。
         - 候选顺序由 ``_ranked_servers`` 决定：静态 capability + 运行时 EWMA 延迟 +
@@ -1078,6 +1117,9 @@ class PytdxAdapter(Exchange):
         resolved_capability = (
             capability if capability is not None else _OPERATION_CAPABILITY.get(operation)
         )
+        # [FIX1/FIX2] 本轮 parity 全池覆盖 / 动态排名 / 短冷却 / half-open 只属于
+        # CAPABILITY_BARS；其它 capability 走既有「有界重试」（max_retries 次尝试）。
+        bars_mode = resolved_capability == CAPABILITY_BARS
 
         # 本 operation 生命周期内：
         #   source_failed_servers — TCP 能连，但 operation 已 source/protocol 失败
@@ -1086,9 +1128,16 @@ class PytdxAdapter(Exchange):
         source_failed_servers: set[tuple[str, int]] = set()
         attempted: set[tuple[str, int]] = set()
         half_open_used = False
+        # [FIX2] 非 bars 模式：保留有界重试，最多 max_retries 次尝试（不扫全池）。
+        attempt_count = 0
+        max_attempts: int | None = None if bars_mode else self.max_retries
 
         while True:
             call_failed = False
+
+            # [FIX2] 非 bars 模式达到 max_retries 次尝试 → 停止，交后续逻辑抛错。
+            if max_attempts is not None and attempt_count >= max_attempts:
+                break
 
             try:
                 # 候选选择 + half-open 标记 + 尝试 必须原子（同一 _io_lock 临界区）：
@@ -1099,17 +1148,22 @@ class PytdxAdapter(Exchange):
                         resolved_capability, source_failed_servers, attempted
                     )
                     half_open = False
-                    if not candidates and not half_open_used:
-                        half_open_server = self._select_half_open_server(
-                            resolved_capability, source_failed_servers, attempted
-                        )
-                        if half_open_server is not None:
-                            candidates = [half_open_server]
-                            half_open = True
-                            half_open_used = True
-                            self._runtime_health_for(
-                                half_open_server
-                            ).half_open_inflight = True
+                    # [FIX2] half-open 真实探测只属于 CAPABILITY_BARS；
+                    # [FIX3] 且受进程级限频窗口约束：上一次 half-open 失败后的窗口内
+                    # 不再重复探测，避免 outage 期间每个网页请求各自绕过 cooldown。
+                    if bars_mode and not candidates and not half_open_used:
+                        now = time.monotonic()
+                        if now >= self._bars_half_open_retry_after:
+                            half_open_server = self._select_half_open_server(
+                                resolved_capability, source_failed_servers, attempted
+                            )
+                            if half_open_server is not None:
+                                candidates = [half_open_server]
+                                half_open = True
+                                half_open_used = True
+                                self._runtime_health_for(
+                                    half_open_server
+                                ).half_open_inflight = True
 
                     if not candidates:
                         # [parity RC2] 若发生过真实业务 source failure，最终 error 必须保留它作
@@ -1142,6 +1196,7 @@ class PytdxAdapter(Exchange):
 
                     server = candidates[0]
                     attempted.add(server)
+                    attempt_count += 1
 
                     try:
                         # _connect_server 自身获取同一把锁；_io_lock 是 RLock，不会自锁。
@@ -1154,9 +1209,19 @@ class PytdxAdapter(Exchange):
                         call_failed = True
                         if half_open:
                             self._runtime_health_for(server).half_open_inflight = False
+                    except Exception as exc:  # noqa: BLE001
+                        # [FIX5] connect 阶段的编程/契约错误也必须释放 half-open 所有权，
+                        # 不得泄漏；随后原样上抛（RC3）。
+                        if half_open:
+                            self._runtime_health_for(server).half_open_inflight = False
+                        raise
                     else:
                         attempt_server = self.connected_server
                         if attempt_server is None:
+                            if half_open:
+                                self._runtime_health_for(
+                                    server
+                                ).half_open_inflight = False
                             raise PytdxSourceError(
                                 operation="connect",
                                 message="pytdx connected server identity unavailable",
@@ -1169,6 +1234,7 @@ class PytdxAdapter(Exchange):
                             if not _is_expected_tdx_source_failure(exc):
                                 # [parity RC3] 编程/契约错误：原样上抛，不冷却、不轮转、
                                 # B/C/D 零调用（绝不让一个 Python bug 把全 TDX family 判坏）。
+                                # [FIX5] finally 释放 half-open 所有权。
                                 raise
                             # 仍持有同一把锁：其他线程不可能在
                             # 「API failure → disconnect」之间替换共享 socket。
@@ -1182,9 +1248,11 @@ class PytdxAdapter(Exchange):
                                 attempt_server, resolved_capability
                             )
                             if half_open:
-                                self._runtime_health_for(
-                                    attempt_server
-                                ).half_open_inflight = False
+                                # [FIX3] half-open 真实探测失败 → 安排下一个探测窗口，
+                                # 避免 outage 期间每个请求都绕过 cooldown 重复探测。
+                                self._bars_half_open_retry_after = (
+                                    time.monotonic() + self.bars_half_open_interval
+                                )
                             logger.warning(
                                 "PYTDX_SOURCE_FAILURE "
                                 "operation=%s symbol=%s market=%s period=%s "
@@ -1209,6 +1277,9 @@ class PytdxAdapter(Exchange):
                                 (time.perf_counter() - started) * 1000.0,
                                 resolved_capability,
                             )
+                            if half_open:
+                                # [FIX3] half-open 成功 → 探测家族恢复，重置限频窗口。
+                                self._bars_half_open_retry_after = 0.0
                             if return_provenance:
                                 # provenance 必须与真正执行 API 的 attempt_server 原子绑定；
                                 # 绝不允许在锁外读 connected_server 猜来源。
@@ -1220,6 +1291,14 @@ class PytdxAdapter(Exchange):
                                     ),
                                 )
                             return result
+                        finally:
+                            # [FIX5] half-open 所有权必须在任何离开路径（成功 / source 失败 /
+                            # 编程错误）释放，绝不泄漏；否则该 server 永久 half_open_inflight
+                            # 既无法被再次 half-open，又卡在 cooldown 之外。
+                            if half_open:
+                                self._runtime_health_for(
+                                    attempt_server
+                                ).half_open_inflight = False
 
             except PytdxSourceError as exc:
                 # connect 层（含「全部 eligible 耗尽」）统一包装为本次 operation 的失败，
@@ -1242,6 +1321,31 @@ class PytdxAdapter(Exchange):
                 # sleep 必须在锁外，不得持锁休眠阻塞其他调用方
                 time.sleep(self.retry_delay)
                 continue
+
+        # 非 bars 模式有界重试耗尽（达到 max_retries 次尝试仍失败）：与上面
+        # `if not candidates` 同构，保留真实 source 失败作为根因。
+        if last_source_exc is not None:
+            raise PytdxSourceError(
+                operation=operation,
+                symbol=symbol,
+                market=market,
+                period=period,
+                attempt=len(attempted),
+                server=last_source_server,
+                message=(
+                    "all eligible pytdx servers exhausted; "
+                    f"attempted={sorted(str(s) for s in attempted)}"
+                ),
+                cause=last_source_exc,
+            ) from last_source_exc
+        raise PytdxSourceError(
+            operation="connect",
+            message=(
+                "no eligible pytdx server remains after source failures / "
+                f"capability={resolved_capability} / cooldown"
+            ),
+            attempt=len(attempted),
+        )
 
     def get_history_transaction_page(
         self,
@@ -1837,10 +1941,11 @@ class PytdxAdapter(Exchange):
                 incremental_df = await asyncio.to_thread(
                     self._fetch_bars, symbol, self._FREQ_TO_PERIOD[frequency], 1400
                 )
-            except Exception as exc:
-                # [parity G] live 分钟线禁止 stale 兜底：provider 不可用时必须 fail-closed，
-                # 绝不把旧分钟线冒充实时（PROVIDER_DIRECT 本身不走本缓存路径；此处为
-                # reliability guard）。日线/周线合成等既有 stale 降级语义保持不变。
+            except PytdxSourceError as exc:
+                # [parity G] live 分钟线禁止 stale 兜底：provider 不可用时必须 fail-closed；
+                # 日线/周线合成等既有 stale 降级语义保持不变。
+                # [FIX6] 非 provider 异常（TypeError / KeyError 等编程/契约错误）不在此捕获，
+                # 必须原样上抛（RC3），绝不被重新伪装成 PytdxSourceError 掩盖真实 bug。
                 if frequency in ("15m", "1h", "1m"):
                     raise PytdxSourceError(
                         operation="klines",
