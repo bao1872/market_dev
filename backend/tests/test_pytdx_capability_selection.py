@@ -44,9 +44,11 @@ class _FakeApi:
     xdxr_fail: set = set()
     connect_log: list = []
     bars_call_log: list = []
+    xdxr_call_log: list = []
     quotes_call_log: list = []
     quotes_fail: set = set()
     history_fail: set = set()
+    history_call_log: list = []
 
     def __init__(self, raise_exception: bool = True, auto_retry: bool = False) -> None:
         self.host: str | None = None
@@ -75,6 +77,7 @@ class _FakeApi:
         ]
 
     def get_xdxr_info(self, market, code):  # noqa: ANN001, ANN201
+        type(self).xdxr_call_log.append(self.host)
         if self.host in type(self).xdxr_fail:
             raise TdxFunctionCallError("calling function error")
         # 真实 pytdx xdxr payload 是 year/month/day 分量（adapter 据此构造 date 列）
@@ -99,6 +102,7 @@ class _FakeApi:
         return [{"market": m, "code": c, "price": 1.0} for m, c in requests]
 
     def get_history_transaction_data(self, market, code, offset, count, date):  # noqa: ANN001, ANN201
+        type(self).history_call_log.append(self.host)
         if self.host in type(self).history_fail:
             raise TdxFunctionCallError("calling function error")
         return [{"time": "14:57", "price": 1.0, "vol": 100, "amount": 100.0, "buy_or_sell": 0}]
@@ -116,7 +120,9 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeApi.history_fail = set()
     _FakeApi.connect_log = []
     _FakeApi.bars_call_log = []
+    _FakeApi.xdxr_call_log = []
     _FakeApi.quotes_call_log = []
+    _FakeApi.history_call_log = []
     monkeypatch.setattr(mod, "TdxHq_API", _FakeApi)
 
 
@@ -435,10 +441,10 @@ def test_xdxr_respects_max_retries_bounded_attempts() -> None:
     _FakeApi.xdxr_fail = {"A", "B", "C", "D", "E"}
     with pytest.raises(mod.PytdxSourceError):
         _xdxr(adapter)
-    # 5 台 XDXR 但 max_retries=3 → 至多 3 次尝试，D/E 不得被扫到
-    assert len(_FakeApi.connect_log) <= 3
-    assert "D" not in _FakeApi.connect_log
-    assert "E" not in _FakeApi.connect_log
+    # [RC2] max_retries=3 限制的是「业务 operation 调用次数」（不是 TCP connect 次数）
+    assert len(_FakeApi.xdxr_call_log) <= 3
+    assert "D" not in _FakeApi.xdxr_call_log
+    assert "E" not in _FakeApi.xdxr_call_log
 
 
 # FIX2-quote：保持既有有界重试语义
@@ -457,9 +463,10 @@ def test_quote_respects_max_retries_bounded_attempts() -> None:
     _FakeApi.quotes_fail = {"A", "B", "C", "D", "E"}
     with pytest.raises(mod.PytdxSourceError):
         adapter.get_security_quotes(["600519"])
-    assert len(_FakeApi.connect_log) <= 3
-    assert "D" not in _FakeApi.connect_log
-    assert "E" not in _FakeApi.connect_log
+    # [RC2] max_retries 限制业务调用次数
+    assert len(_FakeApi.quotes_call_log) <= 3
+    assert "D" not in _FakeApi.quotes_call_log
+    assert "E" not in _FakeApi.quotes_call_log
 
 
 # FIX2-history（capability=None）：保持既有有界重试语义
@@ -478,9 +485,10 @@ def test_history_transaction_respects_max_retries_bounded() -> None:
     _FakeApi.history_fail = {"A", "B", "C", "D", "E"}
     with pytest.raises(mod.PytdxSourceError):
         adapter.get_history_transaction_page("000001", date(2026, 9, 11), 0, 100)
-    assert len(_FakeApi.connect_log) <= 3
-    assert "D" not in _FakeApi.connect_log
-    assert "E" not in _FakeApi.connect_log
+    # [RC2] max_retries 限制业务调用次数
+    assert len(_FakeApi.history_call_log) <= 3
+    assert "D" not in _FakeApi.history_call_log
+    assert "E" not in _FakeApi.history_call_log
 
 
 # ════════════════════════════════════════════════════════════════════════
@@ -594,3 +602,125 @@ def test_klines_live_programming_error_not_reclassified() -> None:
     # 必须原样抛出 TypeError，而不是被重新包装成 PytdxSourceError
     with pytest.raises(TypeError):
         asyncio.run(adapter.klines("600519", "15m"))
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX2 纠正（reviewer 第二轮 P0）
+# ════════════════════════════════════════════════════════════════════════
+
+# RC1：half-open 的「30 秒限频」必须覆盖 CONNECT failure（不仅是 business call 失败）。
+#       所有 bars server 处于 CONNECT cooldown + half-open connect 仍抛 TdxConnectionError
+#       → 20 个顺序请求里只有 1 次 half-open 网络探测，后 19 个快速失败、0 网络调用。
+def test_half_open_connect_failure_rate_limited_across_requests() -> None:
+    caps = _caps(
+        ("A", True, True, None),
+        ("B", True, True, None),
+        ("C", True, True, None),
+        ("D", True, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    # 所有 bars server 处于 CONNECT cooldown（模拟 outage：连不上的场景）
+    now = time.monotonic()
+    for h in ("A", "B", "C", "D"):
+        adapter._connect_health[(h, 7709)] = now + 1800  # noqa: SLF001
+    # 进程级 half-open 限频窗口设很大，使 20 个快速请求都落在同一窗口内
+    adapter.bars_half_open_interval = 100.0
+    # half-open 候选的 connect 也继续抛连接错误
+    _FakeApi.connect_fail = {"A", "B", "C", "D"}
+
+    for _ in range(20):
+        with pytest.raises(mod.PytdxSourceError):
+            _bars(adapter)
+
+    # 整个 outage 窗口内只有 1 次 half-open 真实探测（connect 失败也必须推进窗口）
+    assert len(_FakeApi.connect_log) == 1
+    # 无任何 half-open 所有权泄漏
+    for h in ("A", "B", "C", "D"):
+        assert adapter._runtime_health_for((h, 7709)).half_open_inflight is False  # noqa: SLF001
+
+
+# RC2 #2：XDXR —— A/B/C connect 失败、D 健康 → D 必须在第一次业务 attempt 就得到机会
+def test_xdxr_connect_failure_does_not_consume_business_attempt() -> None:
+    caps = _caps(
+        ("A", False, True, None),
+        ("B", False, True, None),
+        ("C", False, True, None),
+        ("D", False, True, None),
+        ("E", False, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709), ("E", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    # A/B/C TCP 连不上、D/E 健康；业务 call 不失败
+    _FakeApi.connect_fail = {"A", "B", "C"}
+    _FakeApi.xdxr_fail = set()
+    frame = _xdxr(adapter)
+    assert frame is not None and not frame.empty
+    # 只有 D（首个健康 server）拿到真正的 XDXR business call；
+    # A/B/C 仅 connect 失败，不得占用业务重试名额（否则 D 永远没机会）
+    assert _FakeApi.xdxr_call_log == ["D"]
+
+
+# RC2 #3：QUOTE —— 同 XDXR 的 connect 失败不占用业务重试名额
+def test_quote_connect_failure_does_not_consume_business_attempt() -> None:
+    caps = _caps(
+        ("A", True, True, True),
+        ("B", True, True, True),
+        ("C", True, True, True),
+        ("D", True, True, True),
+        ("E", True, True, True),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709), ("E", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.connect_fail = {"A", "B", "C"}
+    _FakeApi.quotes_fail = set()
+    result = adapter.get_security_quotes(["600519"])
+    assert result is not None
+    assert _FakeApi.quotes_call_log == ["D"]
+
+
+# RC2 #4：history / capability=None —— 同 connect 失败不占用业务重试名额
+def test_history_connect_failure_does_not_consume_business_attempt() -> None:
+    caps = _caps(
+        ("A", True, True, None),
+        ("B", True, True, None),
+        ("C", True, True, None),
+        ("D", True, True, None),
+        ("E", True, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709), ("D", 7709), ("E", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.connect_fail = {"A", "B", "C"}
+    _FakeApi.history_fail = set()
+    result = adapter.get_history_transaction_page("000001", date(2026, 9, 11), 0, 100)
+    assert result is not None
+    assert _FakeApi.history_call_log == ["D"]
+
+
+# RC3 #6：非 bars 全部 connect 失败 → 外层 operation 是业务 operation，
+#       不得泄漏裸 operation="connect"；cause.operation == "connect"。
+def test_nonbars_all_connect_fail_outer_operation_preserved() -> None:
+    caps = _caps(
+        ("A", False, True, None),
+        ("B", False, True, None),
+        ("C", False, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.connect_fail = {"A", "B", "C"}
+    with pytest.raises(mod.PytdxSourceError) as ei:
+        _xdxr(adapter)
+    # 外层 operation 是业务 operation，不是裸 "connect"
+    assert ei.value.operation != "connect"
+    # cause.operation == "connect"（RC3 public taxonomy）
+    assert ei.value.cause is not None and ei.value.cause.operation == "connect"

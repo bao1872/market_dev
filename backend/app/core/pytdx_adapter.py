@@ -1076,36 +1076,83 @@ class PytdxAdapter(Exchange):
     ) -> Any:
         """唯一 connection-level retry owner：所有 pytdx 网络调用必须经由此处。
 
-        合同（[parity C]，2026-09-23 收紧；[FIX1/FIX2/FIX3] 2026-09-23 纠正）：
+        合同（[parity C]，2026-09-23 收紧；[FIX1/2/3] 2026-09-23、[RC1/2/3] 2026-09-23 纠正）：
 
-        - **CAPABILITY_BARS**（实时行情专用）：享受本轮 chanlun 对等韧性 —— 每台
-          eligible capable server 最多执行一次 function call；成功立即返回；source
-          failure 后排除该 server；直到**全部** eligible server 耗尽才抛 typed
-          :class:`PytdxSourceError`。``max_retries`` **不**截断 bars 的 server coverage
-          （旧实现 ``for attempt in range(1, max_retries + 1)`` 在 4 台 bars server 时
-          会漏掉第 4 台）。候选顺序由 ``_ranked_servers`` 决定（运行时 EWMA 延迟 +
+        - **CAPABILITY_BARS**（实时行情专用）：享受本轮 chanlun 对等韧性（见
+          :meth:`_call_bars_with_reconnect`）—— 每台 eligible capable server 最多执行
+          一次 function call；成功立即返回；source failure 后排除该 server；直到**全部**
+          eligible server 耗尽才抛 typed :class:`PytdxSourceError`。``max_retries`` **不**截断
+          bars 的 server coverage（旧实现 ``for attempt in range(1, max_retries + 1)`` 在 4 台
+          bars server 时会漏掉第 4 台）。候选顺序由 ``_ranked_servers`` 决定（运行时 EWMA 延迟 +
           连续失败惩罚）；全部 capable server 都在 cooldown 时，由 ``_select_half_open_server``
           放行**恰好一台** HALF_OPEN，并以本次真实业务请求本身作为探测（不额外 probe），
-          受进程级限频窗口 ``bars_half_open_interval``（默认 30s）约束。
-        - **其它 capability（XDXR / QUOTE / capability=None）**：保持既有「有界重试」语义
-          （最多 ``max_retries`` 次尝试，不扫全池、不做 half-open、不动态重排），cooldown
-          仍走 ``capability_cooldown_seconds``（默认 1800s），factor / XDXR 合同不变。
+          受进程级限频窗口 ``bars_half_open_interval``（默认 30s）约束 —— **connect 失败**与
+          **business call 失败** 的 half-open 探测都必须推进该窗口（否则 outage 期间每个网页
+          请求都会绕过 cooldown 各做一次网络探测，[RC1]）。
+        - **其它 capability（XDXR / QUOTE / capability=None）**：恢复 baseline「有界重试」语义
+          （见 :meth:`_call_nonbars_with_reconnect`）：每次业务 attempt 内部用
+          ``_connect_excluding`` 在 eligible pool 完整扫描，**TCP 连不上的 server 不占用业务重试
+          名额**；``max_retries`` 限制的是**业务 operation 成功连接后的 API 调用次数**，不是 TCP
+          connect 次数（A/B/C connect 失败、D 健康 → D 在第一次 business attempt 就得到机会）。
+          不做 half-open、不做 EWMA 动态排名、cooldown 仍走 ``capability_cooldown_seconds``
+          （默认 1800s），factor / XDXR 合同不变。
         - network / socket / protocol / ``calling function error`` → 该 server 判定不可信 →
           ``_advance_server_after_failure`` + ``disconnect`` → 换下一台候选（A → B → C → D）。
-        - 候选顺序由 ``_ranked_servers`` 决定：静态 capability + 运行时 EWMA 延迟 +
-          连续失败惩罚；当全部 capable server 都在 cooldown 时，由
-          ``_select_half_open_server`` 放行**恰好一台** HALF_OPEN，并以本次真实业务请求
-          本身作为探测（不额外 probe）。
         - 合法成功返回（含空列表 ``[]`` = 该标的确实无数据）原样返回，**不得**被当作
           provider outage 自动重试。
         - 单次尝试的 socket 状态转换必须**原子**：候选选择 + half-open 标记 +
-          ``_connect_server`` + ``call`` + 失败后的（排除 → 冷却 → advance → ``disconnect``）
-          全部在同一 ``_io_lock`` 临界区内；``time.sleep`` 必须在锁外。
+          ``_connect_server`` / ``_connect_excluding`` + ``call`` + 失败后的
+          （排除 → 冷却 → advance → ``disconnect``）全部在同一 ``_io_lock`` 临界区内；
+          ``time.sleep`` 必须在锁外。
         - connect 层失败（含「全部 eligible 耗尽」）统一包装为本次 operation 失败，
-          并保留 ``cause.operation == "connect"`` 供上层区分 connect vs operation 故障。
+          并保留 ``cause.operation == "connect"`` 供上层区分 connect vs operation 故障，
+          且**不得**把 ``operation="connect"`` 泄漏到 public operation boundary（RC3）。
+        - 编程 / 契约错误（TypeError / KeyError / AssertionError …）必须原样上抛，
+          绝不轮转、绝不冷却、绝不泄漏 half-open 所有权（[parity RC3]）。
 
         上层调用方收到 :class:`PytdxSourceError` 后**不得**再做同样的 socket retry；
         应记录失败标的 / 触发熔断 / 交给下一业务周期。
+        """
+        resolved_capability = (
+            capability if capability is not None else _OPERATION_CAPABILITY.get(operation)
+        )
+        # [FIX1/FIX2/RC2] 本轮 parity 全池覆盖 / 动态排名 / 短冷却 / half-open 只属于
+        # CAPABILITY_BARS；其它 capability 走 baseline「有界重试」（_connect_excluding 内
+        # 对 eligible pool 完整扫描，max_retries 限制业务调用次数，不限制 TCP connect 次数）。
+        if resolved_capability == CAPABILITY_BARS:
+            return self._call_bars_with_reconnect(
+                operation,
+                call,
+                symbol=symbol,
+                market=market,
+                period=period,
+                return_provenance=return_provenance,
+            )
+        return self._call_nonbars_with_reconnect(
+            operation,
+            call,
+            symbol=symbol,
+            market=market,
+            period=period,
+            resolved_capability=resolved_capability,
+            return_provenance=return_provenance,
+        )
+
+    def _call_bars_with_reconnect(
+        self,
+        operation: str,
+        call: Callable[[TdxHq_API], Any],
+        *,
+        symbol: str | None = None,
+        market: int | None = None,
+        period: str | None = None,
+        return_provenance: bool = False,
+    ) -> Any:
+        """CAPABILITY_BARS 的 chanlun 对等韧性实现。
+
+        全池覆盖 + 动态 EWMA 排名 + bars 短冷却 + family-level half-open 探测；
+        half-open 的 connect 失败与 business call 失败都必须推进限频窗口（[RC1]）。
+        详见 :meth:`_call_with_reconnect` 合同第一段。
         """
         last_exc: Exception | None = None
         last_server: tuple[str, int] | None = None
@@ -1113,13 +1160,7 @@ class PytdxAdapter(Exchange):
         # 根因 / cause，而不是被合成的「no eligible server」覆盖。
         last_source_exc: Exception | None = None
         last_source_server: tuple[str, int] | None = None
-        # capability 优先取显式入参，否则按 operation 映射（不改 public API 签名）
-        resolved_capability = (
-            capability if capability is not None else _OPERATION_CAPABILITY.get(operation)
-        )
-        # [FIX1/FIX2] 本轮 parity 全池覆盖 / 动态排名 / 短冷却 / half-open 只属于
-        # CAPABILITY_BARS；其它 capability 走既有「有界重试」（max_retries 次尝试）。
-        bars_mode = resolved_capability == CAPABILITY_BARS
+        resolved_capability = CAPABILITY_BARS
 
         # 本 operation 生命周期内：
         #   source_failed_servers — TCP 能连，但 operation 已 source/protocol 失败
@@ -1128,16 +1169,9 @@ class PytdxAdapter(Exchange):
         source_failed_servers: set[tuple[str, int]] = set()
         attempted: set[tuple[str, int]] = set()
         half_open_used = False
-        # [FIX2] 非 bars 模式：保留有界重试，最多 max_retries 次尝试（不扫全池）。
-        attempt_count = 0
-        max_attempts: int | None = None if bars_mode else self.max_retries
 
         while True:
             call_failed = False
-
-            # [FIX2] 非 bars 模式达到 max_retries 次尝试 → 停止，交后续逻辑抛错。
-            if max_attempts is not None and attempt_count >= max_attempts:
-                break
 
             try:
                 # 候选选择 + half-open 标记 + 尝试 必须原子（同一 _io_lock 临界区）：
@@ -1149,9 +1183,10 @@ class PytdxAdapter(Exchange):
                     )
                     half_open = False
                     # [FIX2] half-open 真实探测只属于 CAPABILITY_BARS；
-                    # [FIX3] 且受进程级限频窗口约束：上一次 half-open 失败后的窗口内
-                    # 不再重复探测，避免 outage 期间每个网页请求各自绕过 cooldown。
-                    if bars_mode and not candidates and not half_open_used:
+                    # [FIX3/RC1] 且受进程级限频窗口约束：上一次 half-open 探测（无论 connect
+                    # 还是 business call 失败）后的窗口内不再重复探测，避免 outage 期间每个
+                    # 网页请求各自绕过 cooldown 造成重试放大。
+                    if not candidates and not half_open_used:
                         now = time.monotonic()
                         if now >= self._bars_half_open_retry_after:
                             half_open_server = self._select_half_open_server(
@@ -1196,7 +1231,6 @@ class PytdxAdapter(Exchange):
 
                     server = candidates[0]
                     attempted.add(server)
-                    attempt_count += 1
 
                     try:
                         # _connect_server 自身获取同一把锁；_io_lock 是 RLock，不会自锁。
@@ -1209,9 +1243,14 @@ class PytdxAdapter(Exchange):
                         call_failed = True
                         if half_open:
                             self._runtime_health_for(server).half_open_inflight = False
+                            # [RC1] half-open CONNECT 失败也必须推进 family 探测窗口，
+                            # 否则 outage 期间每个新请求都绕过 cooldown 各做一次网络探测。
+                            self._bars_half_open_retry_after = (
+                                time.monotonic() + self.bars_half_open_interval
+                            )
                     except Exception as exc:  # noqa: BLE001
                         # [FIX5] connect 阶段的编程/契约错误也必须释放 half-open 所有权，
-                        # 不得泄漏；随后原样上抛（RC3）。
+                        # 不得泄漏；随后原样上抛（RC3）。不推进探测窗口（不是 provider 故障）。
                         if half_open:
                             self._runtime_health_for(server).half_open_inflight = False
                         raise
@@ -1248,7 +1287,7 @@ class PytdxAdapter(Exchange):
                                 attempt_server, resolved_capability
                             )
                             if half_open:
-                                # [FIX3] half-open 真实探测失败 → 安排下一个探测窗口，
+                                # [FIX3/RC1] half-open 真实探测失败 → 安排下一个探测窗口，
                                 # 避免 outage 期间每个请求都绕过 cooldown 重复探测。
                                 self._bars_half_open_retry_after = (
                                     time.monotonic() + self.bars_half_open_interval
@@ -1302,7 +1341,8 @@ class PytdxAdapter(Exchange):
 
             except PytdxSourceError as exc:
                 # connect 层（含「全部 eligible 耗尽」）统一包装为本次 operation 的失败，
-                # 保留 cause.operation == "connect" 供上层区分 connect vs operation 故障。
+                # 保留 cause.operation == "connect" 供上层区分 connect vs operation 故障，
+                # 且不泄漏 operation="connect" 到 public boundary（RC3）。
                 if exc.operation == "connect":
                     raise PytdxSourceError(
                         operation=operation,
@@ -1322,29 +1362,127 @@ class PytdxAdapter(Exchange):
                 time.sleep(self.retry_delay)
                 continue
 
-        # 非 bars 模式有界重试耗尽（达到 max_retries 次尝试仍失败）：与上面
-        # `if not candidates` 同构，保留真实 source 失败作为根因。
+    def _call_nonbars_with_reconnect(
+        self,
+        operation: str,
+        call: Callable[[TdxHq_API], Any],
+        *,
+        symbol: str | None = None,
+        market: int | None = None,
+        period: str | None = None,
+        resolved_capability: str | None,
+        return_provenance: bool = False,
+    ) -> Any:
+        """非 bars capability（XDXR / QUOTE / capability=None）的 baseline「有界重试」实现。
+
+        合同（相对 cf13c452 / b2a2af95 收紧，恢复 305937a9 baseline 连接语义，[RC2]）：
+
+        - 每次业务 attempt 内部用 ``_connect_excluding`` 在 eligible server pool 完整扫描，
+          **TCP 连不上的 server 不占用「业务重试」名额**（A/B/C connect 失败、D 健康 →
+          D 在第一次 business attempt 就得到机会），``max_retries`` 限制的是**业务 operation
+          成功连接后的 API 调用次数**，不是 TCP server connect 次数。
+        - 不做 half-open、不做 EWMA 动态排名（保持静态稳定顺序）、不污染 bars 运行时健康；
+          cooldown 仍走 ``capability_cooldown_seconds``（默认 1800s），factor / XDXR 合同不变。
+        - network / socket / protocol / ``calling function error`` → source failure →
+          排除该 server + capability cooldown + advance + disconnect → 换下一台。
+        - connect 层耗尽（全部 server connect 失败）→ 包装为本次业务 operation 失败，
+          保留 ``cause.operation == "connect"``（[parity RC3] public taxonomy），不得泄漏
+          原始 ``operation="connect"`` 到 public boundary。
+        - 编程 / 契约错误（TypeError / KeyError / AssertionError …）必须原样上抛（RC3），
+          绝不冷却、绝不轮转、绝不泄漏 half-open 所有权（非 bars 无 half-open）。
+        """
+        last_exc: Exception | None = None
+        last_server: tuple[str, int] | None = None
+        # [parity RC2] 最后一次「真实业务 source failure」——耗尽时作为最终 error 的根因 / cause。
+        last_source_exc: Exception | None = None
+        last_source_server: tuple[str, int] | None = None
+        # 本 operation 生命周期内「TCP 能连、但 operation 已 source 失败」的 server
+        # （不持久化，新业务调用重新从空集合开始）。
+        source_failed_servers: set[tuple[str, int]] = set()
+
+        for _attempt in range(1, self.max_retries + 1):
+            try:
+                with self._io_lock:
+                    # [RC2/restore] 一次业务 attempt 内完整扫描 eligible pool 建连；
+                    # 连不上的 server 不占用业务重试名额（D 健康则 attempt #1 即得到机会）。
+                    self._connect_excluding(source_failed_servers, capability=resolved_capability)
+                    attempt_server = self.connected_server
+                    if attempt_server is None:
+                        raise PytdxSourceError(
+                            operation="connect",
+                            message="pytdx connected server identity unavailable",
+                        )
+                    last_server = attempt_server
+                    started = time.perf_counter()
+                    try:
+                        result = call(self.api)
+                    except Exception as exc:  # noqa: BLE001
+                        if not _is_expected_tdx_source_failure(exc):
+                            # [parity RC3] 编程/契约错误：原样上抛，不冷却、不轮转、不 failover。
+                            raise
+                        last_exc = exc
+                        last_source_exc = exc
+                        last_source_server = attempt_server
+                        # 只冷却该 capability；bars 失败不得污染 xdxr / quote。
+                        self._mark_capability_failure(attempt_server, resolved_capability)
+                        source_failed_servers.add(attempt_server)
+                        self._advance_server_after_failure(attempt_server)
+                        self.disconnect()
+                    else:
+                        self._record_success(
+                            attempt_server,
+                            (time.perf_counter() - started) * 1000.0,
+                            resolved_capability,
+                        )
+                        if return_provenance:
+                            return (
+                                result,
+                                PytdxCallProvenance(
+                                    server=attempt_server,
+                                    connection_generation=self._connection_generation,
+                                ),
+                            )
+                        return result
+            except PytdxSourceError as exc:
+                # connect 层耗尽统一包装为本次业务 operation 失败，保留
+                # cause.operation == "connect"（RC3 public taxonomy），不得泄漏
+                # 原始 operation="connect" 到 public boundary。
+                if exc.operation == "connect":
+                    raise PytdxSourceError(
+                        operation=operation,
+                        message="pytdx connection unavailable",
+                        symbol=symbol,
+                        market=market,
+                        period=period,
+                        attempt=len(source_failed_servers),
+                        server=exc.server if exc.server is not None else last_server,
+                        cause=exc,
+                    ) from exc
+                raise
+
+        # 达到 max_retries 次业务 attempt 仍失败 → 保留真实 source 失败作根因（RC2）。
         if last_source_exc is not None:
             raise PytdxSourceError(
                 operation=operation,
                 symbol=symbol,
                 market=market,
                 period=period,
-                attempt=len(attempted),
+                attempt=len(source_failed_servers),
                 server=last_source_server,
                 message=(
                     "all eligible pytdx servers exhausted; "
-                    f"attempted={sorted(str(s) for s in attempted)}"
+                    f"attempted={sorted(str(s) for s in source_failed_servers)}"
                 ),
                 cause=last_source_exc,
             ) from last_source_exc
+        # 全部 connect 失败、且从未发生业务 source 失败时的兜底 connect 类错误。
         raise PytdxSourceError(
             operation="connect",
             message=(
                 "no eligible pytdx server remains after source failures / "
                 f"capability={resolved_capability} / cooldown"
             ),
-            attempt=len(attempted),
+            attempt=len(source_failed_servers),
         )
 
     def get_history_transaction_page(

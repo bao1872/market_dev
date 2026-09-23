@@ -15,7 +15,7 @@ from __future__ import annotations
 import pytest
 from pytdx.errors import TdxFunctionCallError
 
-from app.core.pytdx_adapter import PytdxAdapter
+from app.core.pytdx_adapter import CAPABILITY_BARS, PytdxAdapter
 from app.services.after_close_orchestrator import _resolve_execution_completed_steps
 from app.services.realtime_market_fact_service import RealtimeMarketFactService
 
@@ -90,7 +90,12 @@ def test_pytdx_call_with_reconnect_rotates_a_to_b(monkeypatch: pytest.MonkeyPatc
             raise TdxFunctionCallError("PYTDX_SOURCE_FAILURE on A")
         return [{"symbol": "600519", "close": 1.0}]
 
-    result = adapter._call_with_reconnect("get_daily_bars", _call)
+    # 日线 bars 在真实代码里走 CAPABILITY_BARS 路径（get_daily_bars 内部以
+    # "get_security_bars" 调用 _call_with_reconnect）；该路径按候选逐台 _connect_server，
+    # 与下面 mock 的原语一致。
+    result = adapter._call_with_reconnect(
+        "get_daily_bars", _call, capability=CAPABILITY_BARS
+    )
     assert result == [{"symbol": "600519", "close": 1.0}]
     assert attempted == [server_a, server_b]  # A 失败 → B 成功（各尝试一次）
     assert em_calls == []  # 正常轮转成功，不触发 Eastmoney 备用源
