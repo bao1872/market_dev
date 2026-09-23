@@ -66,6 +66,7 @@ from app.schemas.bar import BarListResponse
 from app.services.calendar_service import is_trading_day_async
 from app.services.chart_snapshot_service import ChartSnapshotService
 from app.services.market_data_aggregation_service import (
+    LiveMarketDataUnavailable,
     _call_expected_last_completed_daily_bar,
 )
 from app.services.market_status_service import (
@@ -360,6 +361,25 @@ async def get_chart_snapshot(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
+    except LiveMarketDataUnavailable as exc:
+        # [PANJI-TDX-RELIABILITY-PARITY-03] MANDATORY base timeframe（15m / 1h）的
+        # live provider outage → 稳定 typed 503（不再是裸 "Request failed ... 500"）。
+        # 响应只包含安全字段：不得泄漏 server IP / 底层异常原文。
+        logger.warning(
+            "[ChartSnapshot] live provider unavailable instrument_id=%s "
+            "timeframe=%s provider_family=%s cause=%s",
+            instrument_id, timeframe,
+            getattr(exc, "provider_family", None), exc.__cause__,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "code": "LIVE_MARKET_DATA_UNAVAILABLE",
+                "timeframe": timeframe,
+                "provider_family": getattr(exc, "provider_family", None),
+                "message": "实时分钟行情暂不可用，请稍后重试",
+            },
+        ) from exc
     except Exception as exc:
         logger.warning(
             "[ChartSnapshot] ChartSnapshotService 失败 instrument_id=%s: %s",
@@ -495,7 +515,13 @@ async def get_chart_snapshot(
         "freshness_state": freshness_state,
         "data_source": bars_result.data_source,
         "is_partial": bars_result.is_partial,
-        "degraded_reason": bars_result.degraded_reason,
+        # [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级 = base bars 降级 OR 可选指标富化降级。
+        # 两者维度不同：base bars 健康 + Node 15m outage → 这里 degraded=True 而
+        # bars_result.degraded 仍为 False（K 线照常显示，仅指标不可用）。
+        "degraded": bool(bars_result.degraded or snapshot_result.degraded),
+        "degraded_reason": (
+            snapshot_result.degraded_reason or bars_result.degraded_reason
+        ),
         "snapshot_time": now_shanghai().isoformat(),
         "render_frame": render_frame,
         "timeframe": timeframe,

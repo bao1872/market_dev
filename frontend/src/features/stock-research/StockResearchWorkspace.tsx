@@ -142,6 +142,9 @@ export function StockResearchWorkspace({
     isRenderReady,
     quoteStatus,
     barsStatus,
+    // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级（可选 live 日内富化不可用）
+    chartDegraded,
+    chartDegradedReason,
     quote,
   } = data
 
@@ -277,6 +280,13 @@ export function StockResearchWorkspace({
                 <span title={barsStatus.reason ?? undefined}>
                   {barsStatus.label}
                   {barsStatus.reason ? ` · ${barsStatus.reason}` : ''}
+                </span>
+              )}
+              {/* [PANJI-TDX-RELIABILITY-PARITY-03] 可选 live 日内富化（Node 15m）不可用：
+                  K 线照常显示，仅轻量提示指标暂不可用 —— 绝不整页报错。 */}
+              {chartDegraded && (
+                <span className="status-pill warn" title={chartDegradedReason ?? undefined}>
+                  指标暂不可用（实时分钟行情中断）
                 </span>
               )}
               <span>复权：前复权</span>

@@ -70,6 +70,7 @@ from app.services.indicator_service import (
 )
 from app.services.market_data_aggregation_service import (
     BarAggregationResult,
+    LiveMarketDataUnavailable,
     MarketDataAggregationService,
     MarketDataSourcePolicy,
     is_historical_market_data_request,
@@ -77,6 +78,15 @@ from app.services.market_data_aggregation_service import (
 )
 
 logger = logging.getLogger("services.chart_snapshot_service")
+
+# [PANJI-TDX-RELIABILITY-PARITY-03] 可选 live 日内富化隔离（MANDATORY vs OPTIONAL 矩阵）。
+# 这些展示周期**本身**不要求 live 分钟 provider 数据：base bars 健康时，Node 的 live 15m
+# （LIVE_DIRECT / PROVIDER_DIRECT）outage 属于「可选富化失败」，不得让整张图表 500。
+# 15m / 1h **不在**此集合 —— 它们的 base bars 本身就是 PROVIDER_DIRECT，
+# provider outage 是 MANDATORY input failure，必须原样上抛 → API 503。
+_OPTIONAL_LIVE_INTRADAY_TIMEFRAMES = frozenset({"1d", "1w", "1mo"})
+# 机器可读降级原因（沿用仓库既有 availability / degraded_reason 词汇，不另造第二套 schema）
+LIVE_INTRADAY_UNAVAILABLE_REASON = "live_intraday_provider_unavailable"
 
 
 @dataclass
@@ -94,6 +104,11 @@ class ChartSnapshotResult:
     spec: DisplayWindowSpec
     is_empty: bool = False
     completed_through_iso: str | None = field(default=None)
+    # [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级元数据：可选 live 日内富化（Node 15m）
+    # outage 时置 True，base bars / page_df 仍然完好，图表仍可用（HTTP 200）。
+    # 与 bars_result.degraded（base bars 自身降级）是**不同**的维度，不可互相冒充。
+    degraded: bool = False
+    degraded_reason: str | None = field(default=None)
 
 
 class ChartSnapshotService:
@@ -261,19 +276,82 @@ class ChartSnapshotService:
         #    [P1-chart-snapshot-historical] 但必须把**同一份请求语义**传下去：
         #    历史请求时指标内部（日线 / 分钟 / 周月 / SMC 预热 / Node 输入）全部 DB_ONLY，
         #    保证整条 historical chart-snapshot 是 PIT zero-network。
-        indicators = await compute_all_indicators(
-            session=session,
-            instrument_id=instrument_id,
-            timeframe=timeframe,
-            adj=adj,
-            bars=bars,
-            include_smc=include_smc,
-            include_realtime=include_realtime,
-            completed_only=completed_only,
-            adjustment_as_of=adjustment_as_of,
-            preloaded_display_bars=bars_result,
-            market_data_mode=market_data_mode,
-        )
+        # [PANJI-TDX-RELIABILITY-PARITY-03] 可选 live 日内富化隔离（Phase B）。
+        #   只捕获 **LiveMarketDataUnavailable**（已确认的 provider 源失败）。
+        #   TypeError / KeyError / AssertionError 等编程错误必须原样 loud 上抛 ——
+        #   绝不能被伪装成「行情源降级」而静默吞掉。
+        try:
+            indicators = await compute_all_indicators(
+                session=session,
+                instrument_id=instrument_id,
+                timeframe=timeframe,
+                adj=adj,
+                bars=bars,
+                include_smc=include_smc,
+                include_realtime=include_realtime,
+                completed_only=completed_only,
+                adjustment_as_of=adjustment_as_of,
+                preloaded_display_bars=bars_result,
+                market_data_mode=market_data_mode,
+            )
+        except LiveMarketDataUnavailable as exc:
+            # MANDATORY：请求的展示周期自身依赖 live 分钟 provider（15m / 1h）
+            # → provider outage 是强制输入失败，必须原样上抛 → API 映射为 503。
+            if timeframe not in _OPTIONAL_LIVE_INTRADAY_TIMEFRAMES:
+                raise
+            # OPTIONAL：base bars 已健康取到，Node live 15m outage 只降级「指标富化」，
+            # 绝不放弃整张图表（2026-09-23 事故：688813 日 K 有数据却整页 500）。
+            logger.warning(
+                "[ChartSnapshotService] 可选 live 日内富化不可用，图表降级返回 "
+                "instrument_id=%s timeframe=%s provider_family=%s "
+                "symbol=%s degraded_reason=%s cause=%s",
+                instrument_id, timeframe,
+                getattr(exc, "provider_family", None),
+                getattr(exc, "symbol", None),
+                LIVE_INTRADAY_UNAVAILABLE_REASON,
+                exc.__cause__,
+            )
+            # 不伪造任何指标：沿用仓库既有 availability / degraded_reason 约定，
+            # Node 依赖字段显式置为 unavailable（与「计算出来就是空」可区分）。
+            degraded_indicators: dict[str, Any] = {
+                "layers": [],
+                "data": {},
+                # 既有约定：组件级失败写进 errors，值为机器可读原因
+                "errors": {"_chart_snapshot": LIVE_INTRADAY_UNAVAILABLE_REASON},
+                "timeframe": timeframe,
+                "source_bar_times": [],
+                "source_bar_hash": "",
+                "availability": "unavailable",
+                "degraded_reason": LIVE_INTRADAY_UNAVAILABLE_REASON,
+                # 指标未计算 → 不提供 indicators display_frame，
+                # render_frame.matched 因此为 False（不谎报 bars/indicators 一致）
+                "display_frame": None,
+            }
+            degraded_render_frame: dict[str, Any] = {
+                "matched": False,
+                "bars_hash": bars_display_frame.get("display_hash") or "",
+                "indicators_hash": "",
+                "bars_count": bars_display_frame.get("actual_count"),
+                "indicators_count": 0,
+                "bars_first_time": bars_display_frame.get("first_time"),
+                "indicators_first_time": None,
+                "bars_last_time": bars_display_frame.get("last_time"),
+                "indicators_last_time": None,
+                "bars_adjustment_as_of": bars_display_frame.get("adjustment_as_of"),
+                "indicators_adjustment_as_of": spec.adjustment_as_of,
+            }
+            return ChartSnapshotResult(
+                bars_result=bars_result,
+                page_df=page_df,
+                bars_display_frame=bars_display_frame,
+                indicators=degraded_indicators,
+                render_frame=degraded_render_frame,
+                spec=spec,
+                is_empty=False,
+                completed_through_iso=completed_through_iso,
+                degraded=True,
+                degraded_reason=LIVE_INTRADAY_UNAVAILABLE_REASON,
+            )
 
         # 6. 校验 bars vs indicators display_frame（render_frame.matched）
         indicators_display_frame = indicators.get("display_frame")

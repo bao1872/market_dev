@@ -321,6 +321,14 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     return { label: `K线来源: ${safeBarsData.data_source}`, reason: null }
   }, [safeBarsData, barsQuery.isLoading, timeframe])
 
+  // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级（base bars 健康 + 可选 live 日内富化失败）。
+  // 与 barsStatus（K 线自身降级）是不同维度：这里 K 线照常显示，仅指标不可用，
+  // 因此**不得**用它替换/隐藏 K 线，只做轻量提示。
+  const chartDegraded = snapshotTimeframeMatches ? snapshotData?.degraded === true : false
+  const chartDegradedReason: string | null = chartDegraded
+    ? (snapshotData?.degraded_reason ?? 'live_intraday_provider_unavailable')
+    : null
+
   // 8. 截图模式就绪状态（instrument + chart-snapshot[当前周期] + render_frame.matched 全部就绪）
   // [PRD V2.0 §4.2 SNAP-01] 新增 render_frame.matched 校验：
   //   - render_frame.matched=false 表示 bars 与 indicators display_frame 不匹配，不得 Ready
@@ -354,6 +362,9 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     priceSummary,
     quoteStatus,
     barsStatus,
+    // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级（可选指标富化不可用，K 线仍可用）
+    chartDegraded,
+    chartDegradedReason,
     isRenderReady,
     // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源）
     quote,
