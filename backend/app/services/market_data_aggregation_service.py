@@ -38,7 +38,7 @@ from app.constants.indicator_contract import (
     INDICATOR_BARS,
     NODE_CLUSTER_LOW_BARS,
 )
-from app.core.pytdx_adapter import get_pytdx_adapter
+from app.core.pytdx_adapter import PytdxSourceError, get_pytdx_adapter
 from app.core.redis_client import get_sync_redis
 from app.core.time import SHANGHAI_TZ, now_shanghai, shanghai_business_date
 from app.domain.shared.bar_identity import compute_source_bar_hash
@@ -694,6 +694,41 @@ async def fetch_minute_bars(
 # 禁止生产展示链使用 1m→15m / 1m→60m / 1m→1d 聚合（CHANGE-20260724-003）
 
 
+class LiveMarketDataUnavailable(Exception):
+    """Provider-neutral live market-data outage boundary (MDAS → consumers).
+
+    [PANJI-TDX-RELIABILITY-PARITY-02 / Task 2] MDAS live PROVIDER_DIRECT chain
+    把「已确认的 provider 源失败」（当前为 ``PytdxSourceError``，``provider_family="tdx"``）
+    翻译成这个 canonical error，使上层（Chart / Monitor / Node）只依赖
+    ``LiveMarketDataUnavailable``，无需感知底层是哪个 provider（TDX / 未来 Eastmoney）。
+
+    原始 provider 异常通过 ``raise ... from exc`` 保留为 ``__cause__``，根因诊断不丢。
+
+    Attributes:
+        symbol: 标的代码
+        timeframe: 失效的实时周期（"15m" / "1h"）
+        provider_family: 底层 provider 族（"tdx" 等，预留未来 Eastmoney）
+        reason: 原始 provider 错误信息的字符串
+    """
+
+    def __init__(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+        provider_family: str,
+        reason: str,
+    ) -> None:
+        self.symbol = symbol
+        self.timeframe = timeframe
+        self.provider_family = provider_family
+        self.reason = reason
+        super().__init__(
+            f"live market data unavailable symbol={symbol} "
+            f"timeframe={timeframe} provider_family={provider_family}: {reason}"
+        )
+
+
 async def fetch_15min_bars(
     session: AsyncSession,
     instrument_id: uuid.UUID,
@@ -712,6 +747,10 @@ async def fetch_15min_bars(
     Returns:
         DataFrame indexed by trade_time，columns=[open,high,low,close,volume,amount,adj_factor]
         空数据时返回空 DataFrame
+
+    Raises:
+        LiveMarketDataUnavailable: 底层 TDX provider 源失败（``PytdxSourceError``）时，
+            转换为 provider-neutral 的 canonical 错误；编程/契约错误原样上抛。
     """
     symbol = await _get_symbol(session, instrument_id)
     if symbol is None:
@@ -721,9 +760,15 @@ async def fetch_15min_bars(
     adapter = get_pytdx_adapter()
     try:
         raw_df = await asyncio.to_thread(adapter.get_15min_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("Pytdx 拉取原生 15m 失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
+    except PytdxSourceError as exc:
+        # [PANJI-TDX-RELIABILITY-PARITY-02] 只翻译「已确认」的 provider 源失败为
+        # canonical error；编程/契约错误（TypeError/KeyError/...）不捕获、原样 loud 上抛。
+        raise LiveMarketDataUnavailable(
+            symbol=symbol,
+            timeframe="15m",
+            provider_family="tdx",
+            reason=str(exc),
+        ) from exc
 
     if raw_df.empty:
         return raw_df
@@ -754,6 +799,10 @@ async def fetch_60min_bars(
     Returns:
         DataFrame indexed by trade_time，columns=[open,high,low,close,volume,amount,adj_factor]
         空数据时返回空 DataFrame
+
+    Raises:
+        LiveMarketDataUnavailable: 底层 TDX provider 源失败（``PytdxSourceError``）时，
+            转换为 provider-neutral 的 canonical 错误；编程/契约错误原样上抛。
     """
     symbol = await _get_symbol(session, instrument_id)
     if symbol is None:
@@ -763,9 +812,15 @@ async def fetch_60min_bars(
     adapter = get_pytdx_adapter()
     try:
         raw_df = await asyncio.to_thread(adapter.get_60min_bars, symbol, count)
-    except Exception as exc:
-        logger.warning("Pytdx 拉取原生 60m 失败 instrument_id=%s: %s", instrument_id, exc)
-        raise
+    except PytdxSourceError as exc:
+        # [PANJI-TDX-RELIABILITY-PARITY-02] 只翻译「已确认」的 provider 源失败为
+        # canonical error；编程/契约错误（TypeError/KeyError/...）不捕获、原样 loud 上抛。
+        raise LiveMarketDataUnavailable(
+            symbol=symbol,
+            timeframe="1h",
+            provider_family="tdx",
+            reason=str(exc),
+        ) from exc
 
     if raw_df.empty:
         return raw_df
@@ -866,7 +921,8 @@ async def _fetch_provider_intraday_direct(
 
     Raises:
         ValueError: timeframe 不是 provider 原生日内周期
-        PytdxSourceError: provider 重连耗尽后仍失败（不吞没）
+        LiveMarketDataUnavailable: provider 重连耗尽后仍失败（不吞没；
+            已翻译为 provider-neutral canonical error，原始 PytdxSourceError 保留为 ``__cause__``）
     """
     if timeframe not in _PROVIDER_DIRECT_TIMEFRAMES:
         raise ValueError(
