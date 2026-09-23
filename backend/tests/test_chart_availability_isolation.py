@@ -14,7 +14,7 @@ Run:
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -22,6 +22,7 @@ import pandas as pd
 import pytest
 
 from app.services import chart_snapshot_service as css
+from app.services.indicator_service import IndicatorMarketDataMode
 from app.services.chart_snapshot_service import (
     LIVE_INTRADAY_UNAVAILABLE_REASON,
     ChartSnapshotService,
@@ -154,12 +155,15 @@ async def test_c2_c3_optional_node_outage_degrades_chart_not_fail(
     # 图表级降级元数据
     assert result.degraded is True
     assert result.degraded_reason == LIVE_INTRADAY_UNAVAILABLE_REASON
-    # 指标显式 unavailable，且**没有伪造任何值**
-    assert result.indicators["availability"] == "unavailable"
-    assert result.indicators["degraded_reason"] == LIVE_INTRADAY_UNAVAILABLE_REASON
-    assert result.indicators["data"] == {}
+    # 指标显式 unavailable（沿用既有嵌套约定 data["node_cluster"]），且**没有伪造任何值**
+    node_cluster = result.indicators["data"]["node_cluster"]
+    assert node_cluster["availability"] == "unavailable"
+    assert node_cluster["degraded_reason"] == LIVE_INTRADAY_UNAVAILABLE_REASON
     assert result.indicators["layers"] == []
     assert result.indicators["errors"]["_chart_snapshot"] == LIVE_INTRADAY_UNAVAILABLE_REASON
+    # 顶层不再另造 envelope 字段（FIX5）
+    assert "availability" not in result.indicators
+    assert "degraded_reason" not in result.indicators
     # 不谎报 bars/indicators 一致
     assert result.render_frame["matched"] is False
 
@@ -217,6 +221,7 @@ async def test_c6_programming_error_not_swallowed_as_degraded(monkeypatch) -> No
 async def test_c7_historical_request_uses_db_only(monkeypatch) -> None:
     df = _build_daily_bars(250)
     captured: list[Any] = []
+    indicator_kwargs: dict[str, Any] = {}
 
     async def _fake_get_bars(self, *args: Any, **kwargs: Any) -> BarAggregationResult:
         captured.append(kwargs.get("source_policy"))
@@ -225,16 +230,41 @@ async def test_c7_historical_request_uses_db_only(monkeypatch) -> None:
     monkeypatch.setattr(MarketDataAggregationService, "get_bars", _fake_get_bars)
 
     async def _ok_indicators(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        indicator_kwargs.update(kwargs)
         return _normal_indicators()
 
     monkeypatch.setattr(css, "compute_all_indicators", _ok_indicators)
 
     await ChartSnapshotService.compute_bars_and_indicators(
         AsyncMock(), TEST_INSTRUMENT_ID, timeframe="1d", adj="qfq", bars=250,
-        adjustment_as_of=__import__("datetime").date(2026, 7, 1),
+        adjustment_as_of=date(2026, 7, 1),
     )
+    # base bars：DB_ONLY（zero-network）
     assert captured, "应发生一次 base bars 读取"
     assert captured[0] is MarketDataSourcePolicy.DB_ONLY
+    # 指标链必须收到 HISTORICAL_DB —— 否则 Node 会走 LIVE_DIRECT 访问 live provider
+    assert indicator_kwargs.get("market_data_mode") is IndicatorMarketDataMode.HISTORICAL_DB
+
+
+async def test_c7b_historical_live_outage_is_not_swallowed(monkeypatch) -> None:
+    """[FIX4] historical / PIT 链意外访问 live provider → 必须 loud fail。
+
+    zero-network 是冻结合同：任何 live provider 调用都是错误，绝不能被
+    「可选富化降级」静默吞成 HTTP 200 degraded（那会把回归藏起来）。
+    """
+    df = _build_daily_bars(250)
+    _patch_healthy_base_bars(monkeypatch, df)
+
+    async def _failing_indicators(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        raise _node_outage_error()
+
+    monkeypatch.setattr(css, "compute_all_indicators", _failing_indicators)
+
+    with pytest.raises(LiveMarketDataUnavailable):
+        await ChartSnapshotService.compute_bars_and_indicators(
+            AsyncMock(), TEST_INSTRUMENT_ID, timeframe="1d", adj="qfq", bars=250,
+            adjustment_as_of=date(2026, 7, 1),
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,13 +310,13 @@ async def test_c9_no_stale_db_minute_fallback_for_node_outage(monkeypatch) -> No
         AsyncMock(), TEST_INSTRUMENT_ID, timeframe="1d", adj="qfq", bars=250,
     )
     indicators = result.indicators
-    # 没有任何被"补"出来的 Node / 指标值（data 为空、无 layers、无 profile）
-    assert indicators["data"] == {}
+    node_cluster = indicators["data"]["node_cluster"]
+    # 没有任何被"补"出来的 Node / 指标值（无 layers、profile 为空）
     assert indicators["layers"] == []
-    assert "profile_rows" not in indicators
-    assert "node_regions" not in indicators
-    # 可用性状态与「合法空结果」可区分
-    assert indicators["availability"] == "unavailable"
+    assert node_cluster["profile_rows"] == []
+    assert node_cluster["node_regions"] == []
+    # 可用性状态与「合法空结果」可区分（沿用既有嵌套约定）
+    assert node_cluster["availability"] == "unavailable"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

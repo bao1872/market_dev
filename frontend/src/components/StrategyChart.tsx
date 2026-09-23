@@ -210,6 +210,11 @@ export interface StrategyChartProps {
   //   请求结束后不匹配必须显示明确错误码 + 重试按钮，禁止无限 loading。
   //   indicatorsFetching=true 时显示"指标加载中"；indicatorsFetching=false 且 mismatch 时显示错误 + 重试。
   indicatorsFetching?: boolean
+  // [PANJI-TDX-RELIABILITY-PARITY-03] 指标因 **live provider outage** 不可用（非 frame 一致性问题）。
+  //   true 时：K 线照常绘制；不绘制指标图层；**不**进入 mismatch-error，
+  //   而是显示 provider-unavailable 提示（"指标暂不可用（实时分钟行情中断）"）。
+  //   语义必须与 display_frame 不匹配严格区分：provider outage 不是一致性 bug。
+  indicatorsUnavailable?: boolean
   // 点击"重试"按钮回调（父组件调用 indicatorsQuery.refetch）
   onIndicatorsRetry?: () => void
   // [Task 2] focus_event：监控触发事件信息（飞书 Capture 链路）
@@ -2802,6 +2807,7 @@ export function StrategyChart({
   layerVisibility,
   barsFrame,
   indicatorsFetching = false,
+  indicatorsUnavailable = false,
   onIndicatorsRetry,
   focusEventId = null,
   focusEventType = null,
@@ -2960,6 +2966,9 @@ export function StrategyChart({
   //   barsFrame 未传入时降级到"不检查"（保持向后兼容，不阻塞现有调用方）。
   const barsFrameRef = useRef<ChartRenderFrame | null | undefined>(undefined)
   barsFrameRef.current = barsFrame
+  // [PANJI-TDX-RELIABILITY-PARITY-03] 供 draw() 读取（draw 是稳定引用，不能直接读 prop）
+  const indicatorsUnavailableRef = useRef(false)
+  indicatorsUnavailableRef.current = indicatorsUnavailable
   const [frameMismatch, setFrameMismatch] = useState(false)
 
   // 绘制函数（稳定引用，从 dataRef 读取最新数据）
@@ -2979,7 +2988,12 @@ export function StrategyChart({
     //   （250 根算法输入）严格比对导致永久 mismatch。
     let effectiveIndicators = ind
     let mismatch = false
-    if (barsF != null && ind != null) {
+    if (indicatorsUnavailableRef.current) {
+      // [PANJI-TDX-RELIABILITY-PARITY-03] provider outage：不是 frame 一致性问题。
+      //   不参与 mismatch 判定（不产生误报的 "display_frame 不匹配"），
+      //   也不把指标交给 drawTrading（没有可绘制的真实指标）。
+      effectiveIndicators = undefined
+    } else if (barsF != null && ind != null) {
       const indFrame = buildIndicatorsFrame({
         instrumentId: barsF.instrumentId,
         timeframe: tf,
@@ -3352,14 +3366,18 @@ export function StrategyChart({
   //   - success: indicators 已到且 frame 匹配
   //   - mismatch-error: indicators 已到且 frame 不匹配（请求已结束，数据不对）
   //   bars 未就绪（hasData=false）时不显示任何状态（避免与"暂无行情数据"重复）
-  const indicatorsLoadState: 'pending' | 'success' | 'mismatch-error' =
+  const indicatorsLoadState: 'pending' | 'success' | 'mismatch-error' | 'unavailable' =
     !hasData
       ? 'success'
-      : indicators == null || indicatorsFetching
-        ? 'pending'
-        : frameMismatch
-          ? 'mismatch-error'
-          : 'success'
+      // [PANJI-TDX-RELIABILITY-PARITY-03] provider outage 优先于 frame 判定：
+      // 它**不是** display_frame 一致性失败，绝不归类为 mismatch-error。
+      : indicatorsUnavailable
+        ? 'unavailable'
+        : indicators == null || indicatorsFetching
+          ? 'pending'
+          : frameMismatch
+            ? 'mismatch-error'
+            : 'success'
 
   return (
     <div className="strategy-chart-wrap">
@@ -3444,6 +3462,29 @@ export function StrategyChart({
         {indicatorsLoadState === 'pending' && (
           <div className="chart-frame-mismatch-banner chart-frame-pending" style={{ position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)', padding: '4px 12px', background: 'rgba(13,17,24,0.85)', color: C.text, fontSize: 12, borderRadius: 4, zIndex: 10, whiteSpace: 'nowrap' }}>
             指标加载中...
+          </div>
+        )}
+        {/* [PANJI-TDX-RELIABILITY-PARITY-03] provider unavailable：轻量提示，
+            不显示 "display_frame 不匹配"，也不谎称是一致性 bug。 */}
+        {indicatorsLoadState === 'unavailable' && (
+          <div
+            className="chart-frame-mismatch-banner chart-frame-unavailable"
+            data-testid="chart-indicators-unavailable-banner"
+            style={{
+              position: 'absolute',
+              top: 10,
+              left: '50%',
+              transform: 'translateX(-50%)',
+              padding: '4px 12px',
+              background: 'rgba(255,193,7,0.9)',
+              color: '#333',
+              fontSize: 12,
+              borderRadius: 4,
+              zIndex: 10,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            指标暂不可用（实时分钟行情中断）
           </div>
         )}
         {indicatorsLoadState === 'mismatch-error' && (

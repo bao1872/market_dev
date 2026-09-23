@@ -20,6 +20,24 @@ import { loadChartLayerVisibility, saveChartLayerVisibility } from './indicatorP
 import { computeCombinedReady } from './captureReady'
 import clsx from 'clsx'
 import type { StockResearchData } from './useStockResearchData'
+import { LiveMarketDataUnavailableError } from '@/api/stockData'
+
+/**
+ * [PANJI-TDX-RELIABILITY-PARITY-03] 从 chart-snapshot 的 bars/indicators 错误中
+ * 挑出后端 typed 503（live provider outage）。
+ *
+ * barsQuery / indicatorsQuery 共用同一次 chart-snapshot 请求，所以任一端都可能
+ * 携带该错误。命中时展示后端友好文案，而不是 Axios 的
+ * "Request failed with status code 503"。
+ */
+function _pickLiveUnavailableError(
+  ...errors: (Error | null | undefined)[]
+): LiveMarketDataUnavailableError | null {
+  for (const err of errors) {
+    if (err instanceof LiveMarketDataUnavailableError) return err
+  }
+  return null
+}
 
 export interface StockResearchWorkspaceProps {
   data: StockResearchData
@@ -205,6 +223,20 @@ export function StockResearchWorkspace({
     )
   }
 
+  // [PANJI-TDX-RELIABILITY-PARITY-03] MANDATORY 15m / 1h 的 typed 503：
+  // 展示后端友好文案，绝不显示 Axios 原生的 "Request failed with status code 503"。
+  const liveUnavailableError = _pickLiveUnavailableError(
+    barsQuery.error, indicatorsQuery.error,
+  )
+  if (liveUnavailableError) {
+    return (
+      <div className="tv-chart-loading tv-chart-error" data-testid="live-market-unavailable-error">
+        {liveUnavailableError.message}
+        <button onClick={() => barsQuery.refetch()} className="tv-chart-retry">重试</button>
+      </div>
+    )
+  }
+
   if (barsQuery.isError) {
     return (
       <div className="tv-chart-loading tv-chart-error">
@@ -270,6 +302,9 @@ export function StockResearchWorkspace({
               // [ChartRenderFrame 3 态] - PROMPT.md §二.1：indicatorsFetching=true 显示"指标加载中"，
               //   请求结束后 mismatch 显示错误 + 重试按钮，禁止无限 loading
               indicatorsFetching={indicatorsQuery.isFetching}
+              // [PANJI-TDX-RELIABILITY-PARITY-03] 可选 live 日内富化不可用：
+              // K 线照常画，指标进入 provider-unavailable 状态（不是 frame mismatch）
+              indicatorsUnavailable={chartDegraded}
               onIndicatorsRetry={() => indicatorsQuery.refetch()}
             />
             <div className="tv-chart-status">

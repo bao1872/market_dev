@@ -618,7 +618,28 @@ export interface ChartSnapshotResponse {
   freshness_state: 'fresh' | 'partial' | 'stale' | 'unavailable'
   data_source: string
   is_partial: boolean
+  // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级元数据。
+  // degraded = base bars 降级 OR 可选 live 日内富化（Node 15m）降级；
+  // 与 bars.degraded（K 线自身）是不同维度：健康的日 K + Node outage 时
+  // 这里 degraded=true 而 bars.degraded=false（K 线照常显示）。
+  degraded: boolean
   degraded_reason: string | null
+}
+
+// [PANJI-TDX-RELIABILITY-PARITY-03] 实时分钟行情不可用（后端 typed 503）契约，
+// 定义在独立模块（不依赖 apiClient），此处导入 + re-export 保持既有导入路径可用。
+import {
+  LIVE_MARKET_DATA_UNAVAILABLE_CODE,
+  LIVE_MARKET_DATA_UNAVAILABLE_MESSAGE,
+  LiveMarketDataUnavailableError,
+  isLiveMarketDataUnavailableDetail,
+} from './liveMarketDataUnavailable'
+
+export {
+  LIVE_MARKET_DATA_UNAVAILABLE_CODE,
+  LIVE_MARKET_DATA_UNAVAILABLE_MESSAGE,
+  LiveMarketDataUnavailableError,
+  isLiveMarketDataUnavailableDetail,
 }
 
 /**
@@ -635,11 +656,29 @@ export async function getChartSnapshot(
   params?: ChartSnapshotQueryParams,
   options?: { signal?: AbortSignal },
 ): Promise<ChartSnapshotResponse> {
-  const { data } = await apiClient.get<ChartSnapshotResponse>(
-    `/v1/instruments/${instrumentId}/chart-snapshot`,
-    { params, signal: options?.signal },
-  )
-  return data
+  try {
+    const { data } = await apiClient.get<ChartSnapshotResponse>(
+      `/v1/instruments/${instrumentId}/chart-snapshot`,
+      { params, signal: options?.signal },
+    )
+    return data
+  } catch (error) {
+    // [PANJI-TDX-RELIABILITY-PARITY-03] 仅 chart-snapshot 本地化：把后端 typed 503
+    // 转成携带用户可见文案的 typed error，避免 UI 显示
+    // "Request failed with status code 503"。其它错误一律原样透传。
+    const maybeAxios = error as {
+      response?: { status?: number; data?: { detail?: unknown } }
+    } | null
+    const detail = maybeAxios?.response?.data?.detail
+    if (maybeAxios?.response?.status === 503 && isLiveMarketDataUnavailableDetail(detail)) {
+      throw new LiveMarketDataUnavailableError(
+        detail.message ?? '实时分钟行情暂不可用，请稍后重试',
+        detail.timeframe ?? null,
+        detail.provider_family ?? null,
+      )
+    }
+    throw error
+  }
 }
 
 // ============================================================

@@ -295,12 +295,19 @@ class ChartSnapshotService:
                 market_data_mode=market_data_mode,
             )
         except LiveMarketDataUnavailable as exc:
-            # MANDATORY：请求的展示周期自身依赖 live 分钟 provider（15m / 1h）
-            # → provider outage 是强制输入失败，必须原样上抛 → API 映射为 503。
-            if timeframe not in _OPTIONAL_LIVE_INTRADAY_TIMEFRAMES:
+            # MANDATORY / 历史零触网：任一条件不满足都必须原样上抛，**绝不**降级掩盖。
+            #   1) 请求的展示周期自身依赖 live 分钟 provider（15m / 1h）
+            #      → provider outage 是强制输入失败 → API 映射为 503。
+            #   2) [FIX4] historical / PIT（HISTORICAL_DB）：任何 live provider 调用都是
+            #      zero-network 违约。若指标/Node 链意外访问 live provider 并抛出本错误，
+            #      必须 loud fail —— 静默转成 degraded 200 会把回归藏起来。
+            if not (
+                market_data_mode is IndicatorMarketDataMode.LIVE
+                and timeframe in _OPTIONAL_LIVE_INTRADAY_TIMEFRAMES
+            ):
                 raise
-            # OPTIONAL：base bars 已健康取到，Node live 15m outage 只降级「指标富化」，
-            # 绝不放弃整张图表（2026-09-23 事故：688813 日 K 有数据却整页 500）。
+            # OPTIONAL：live 请求 + base bars 已健康取到，Node live 15m outage 只降级
+            # 「指标富化」，绝不放弃整张图表（2026-09-23 事故：688813 日 K 有数据却整页 500）。
             logger.warning(
                 "[ChartSnapshotService] 可选 live 日内富化不可用，图表降级返回 "
                 "instrument_id=%s timeframe=%s provider_family=%s "
@@ -311,20 +318,33 @@ class ChartSnapshotService:
                 LIVE_INTRADAY_UNAVAILABLE_REASON,
                 exc.__cause__,
             )
-            # 不伪造任何指标：沿用仓库既有 availability / degraded_reason 约定，
-            # Node 依赖字段显式置为 unavailable（与「计算出来就是空」可区分）。
+            # [FIX5] 不伪造任何指标。availability / degraded_reason 放回仓库**既有**
+            # 的嵌套约定 ``data["node_cluster"]``（与 indicator_service 正常路径一致），
+            # 不在 IndicatorResponse 顶层另造第二套 envelope 字段；
+            # 图表级状态只由 snapshot 的 degraded / degraded_reason 承担。
             degraded_indicators: dict[str, Any] = {
                 "layers": [],
-                "data": {},
+                "data": {
+                    "node_cluster": {
+                        "profile_rows": [],
+                        "profile_meta": {"row_count": 0},
+                        "peak_rows": [],
+                        "node_regions": [],
+                        "node_regions_hash": "empty",
+                        "state": {},
+                        "price_state": {},
+                        "availability": "unavailable",
+                        "degraded_reason": LIVE_INTRADAY_UNAVAILABLE_REASON,
+                    },
+                },
                 # 既有约定：组件级失败写进 errors，值为机器可读原因
                 "errors": {"_chart_snapshot": LIVE_INTRADAY_UNAVAILABLE_REASON},
                 "timeframe": timeframe,
                 "source_bar_times": [],
                 "source_bar_hash": "",
-                "availability": "unavailable",
-                "degraded_reason": LIVE_INTRADAY_UNAVAILABLE_REASON,
                 # 指标未计算 → 不提供 indicators display_frame，
-                # render_frame.matched 因此为 False（不谎报 bars/indicators 一致）
+                # render_frame.matched 因此为 False（不谎报 bars/indicators 一致、
+                # 也让 Capture 不会错误宣布 ready）
                 "display_frame": None,
             }
             degraded_render_frame: dict[str, Any] = {

@@ -106,6 +106,10 @@ export interface StockResearchData {
   priceSummary: PriceSummary
   quoteStatus: QuoteStatus
   barsStatus: BarsStatus | null
+  // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级：可选 live 日内富化（Node 15m）不可用。
+  // K 线仍然健康可用，仅指标不可用；与 barsStatus（K 线自身降级）是不同维度。
+  chartDegraded: boolean
+  chartDegradedReason: string | null
   // 截图模式就绪状态（由父组件传入 isCaptureMode 时使用）
   isRenderReady: boolean
   // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源）
