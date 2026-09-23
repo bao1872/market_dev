@@ -30,16 +30,36 @@ from app.models.market_dashboard import (
 )
 from app.repositories.market_dashboard_projection_repository import ProjectionWriteResult
 from app.services import market_dashboard_projection_rebuild_service as rebuild
+from app.services.market_dashboard_index_facts import MarketIndexFacts
 from tests.conftest import TestAsyncSessionLocal
 
 pytestmark = pytest.mark.postgres
 
 
+# ---------------------------------------------------------------- deterministic index facts
+# 注入确定性 MarketIndexFacts，绝不依赖外部 pytdx（provider 可用性由 unit/provider 测试负责）。
+T = date(2026, 9, 18)
+
+_COMPLETE_FACTS = {
+    T: MarketIndexFacts(
+        sse_close=3300.0,
+        szse_close=12000.0,
+        chinext_close=2500.0,
+        limit_up_count=50,
+        limit_down_count=5,
+    )
+}
+
+
+async def _fetch_complete(_end_date):
+    return dict(_COMPLETE_FACTS)
+
+
 # ---------------------------------------------------------------- helpers
 def _minimal_context(board_ids, membership_versions) -> proj.ProjectionContext:  # noqa: ANN001
     return proj.ProjectionContext(
-        projection_trade_date=date(2026, 9, 18),
-        display_dates=[],
+        projection_trade_date=T,
+        display_dates=[T],
         stock_facts=svc._compute_stock_facts_long(None),
         membership_long=svc._build_membership_long({}),
         board_ids=list(board_ids),
@@ -70,14 +90,16 @@ async def _cleanup(board_ids: list[UUID]) -> None:
 
 
 def _patch_flow(monkeypatch, ctx, *, current_override=None):  # noqa: ANN001
-    """替换 prepare/build/iter/writer；保留真实 guard 读取，除非显式 override。"""
+    """替换 prepare/build/iter/writer；保留真实 guard 读取，除非显式 override。
+    注入确定性 MarketIndexFacts（rebuild.fetch_market_index_facts），绝不触网。"""
     calls: list[int] = []
 
     async def _prepare(_session, _end_date):
         return ctx
 
-    def _build(_ctx):
-        return [{"trade_date": date(2026, 9, 18)}]
+    def _build(context, index_facts):
+        assert T in index_facts and index_facts[T].sse_close == 3300.0  # facts 透传
+        return [{"trade_date": T}]
 
     def _iter(_ctx, **_kw):
         return iter(())
@@ -85,7 +107,7 @@ def _patch_flow(monkeypatch, ctx, *, current_override=None):  # noqa: ANN001
     async def _writer(*_a, **_k):  # noqa: ANN002, ANN003
         calls.append(1)
         return ProjectionWriteResult(
-            projection_trade_date=date(2026, 9, 18),
+            projection_trade_date=T,
             market_rows=1,
             scope_rows=len(ctx.membership_versions),
         )
@@ -94,6 +116,7 @@ def _patch_flow(monkeypatch, ctx, *, current_override=None):  # noqa: ANN001
     monkeypatch.setattr(proj, "build_market_records", _build)
     monkeypatch.setattr(proj, "iter_scope_record_chunks", _iter)
     monkeypatch.setattr(rebuild, "replace_dashboard_projection", _writer)
+    monkeypatch.setattr(rebuild, "fetch_market_index_facts", _fetch_complete)
     if current_override is not None:
 
         async def _cur(_session):

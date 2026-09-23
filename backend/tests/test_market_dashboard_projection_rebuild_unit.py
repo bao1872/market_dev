@@ -7,10 +7,13 @@
 - membership mismatch（version 变更 / board 新增 / board 缺失）→ ProjectionInputChangedError 且 writer=0
 - 成功路径：prepare/build/iter/writer 各 1；writer 用 fresh session；scope 仍是 iterator；参数原样
 - context invariants：重复 board_id / keys 不一致 → fail closed
+- [PANJI-MARKET-OVERVIEW] 最新投影日五字段完整性 fail-closed（五字段任一缺失 / T 缺）writer=0；完整则继续
 - manifest 登记回归
 
 注意：本文件不得出现 conftest 记录的 PG 建连源码标志（DB session 工厂名 / 独立引擎名），
 否则整模块会被判为 postgres 并在 PURE_UNIT 下跳过。
+所有 orchestration 测试均注入确定性 MarketIndexFacts（rebuild.fetch_market_index_facts 被 monkeypatch），
+绝不触网（provider 可用性由 test_market_dashboard_index_facts.py 单独负责）。
 """
 
 from __future__ import annotations
@@ -28,12 +31,44 @@ import app.services.market_dashboard_projection_service as proj
 import app.services.market_dashboard_service as svc
 from app.repositories.market_dashboard_projection_repository import ProjectionWriteResult
 from app.services import market_dashboard_projection_rebuild_service as rebuild
+from app.services.market_dashboard_index_facts import MarketIndexFacts
 
 _VERIFY_DIR = Path(__file__).resolve().parents[2] / "scripts" / "verify"
 if str(_VERIFY_DIR) not in sys.path:
     sys.path.insert(0, str(_VERIFY_DIR))
 
 from evidence_manifest import load_evidence_manifest  # noqa: E402
+
+
+# ---------------------------------------------------------------- deterministic index facts
+# 所有 rebuild orchestration 测试都必须注入已解码的 MarketIndexFacts，绝不触网。
+T = date(2026, 9, 18)
+
+_COMPLETE_FACTS = {
+    T: MarketIndexFacts(
+        sse_close=3300.0,
+        szse_close=12000.0,
+        chinext_close=2500.0,
+        limit_up_count=50,
+        limit_down_count=5,
+    )
+}
+
+
+async def _fetch_complete(_end_date):
+    return dict(_COMPLETE_FACTS)
+
+
+def _facts_with(**overrides) -> dict[date, MarketIndexFacts]:
+    base = dict(
+        sse_close=3300.0,
+        szse_close=12000.0,
+        chinext_close=2500.0,
+        limit_up_count=50,
+        limit_down_count=5,
+    )
+    base.update(overrides)
+    return {T: MarketIndexFacts(**base)}
 
 
 # ---------------------------------------------------------------- fakes
@@ -102,8 +137,9 @@ def _factory(events: list[str]):
 
 def _context(board_ids, membership_versions) -> proj.ProjectionContext:  # noqa: ANN001
     return proj.ProjectionContext(
-        projection_trade_date=date(2026, 9, 18),
-        display_dates=[],
+        projection_trade_date=T,
+        # [PANJI-MARKET-OVERVIEW] 生产现在合法要求一个最新投影日；display_dates 不得为空
+        display_dates=[T],
         stock_facts=svc._compute_stock_facts_long(None),
         membership_long=svc._build_membership_long({}),
         board_ids=list(board_ids),
@@ -114,7 +150,7 @@ def _context(board_ids, membership_versions) -> proj.ProjectionContext:  # noqa:
 def _noop_writer():
     async def _writer(*_a, **_k):  # noqa: ANN002, ANN003
         return ProjectionWriteResult(
-            projection_trade_date=date(2026, 9, 18), market_rows=1, scope_rows=0
+            projection_trade_date=T, market_rows=1, scope_rows=0
         )
 
     return _writer
@@ -132,9 +168,10 @@ def test_orchestration_session_ownership_order(monkeypatch):
         events.append("prepare")
         return ctx
 
-    def _build(_context):
+    def _build(context, index_facts):
         events.append("build_market")
-        return [{"trade_date": date(2026, 9, 18)}]
+        assert index_facts[T].sse_close == 3300.0  # facts 透传
+        return [{"trade_date": T}]
 
     def _iter(_context, **_kw):
         events.append("iter_scope")
@@ -145,7 +182,7 @@ def test_orchestration_session_ownership_order(monkeypatch):
         assert session.in_transaction() is False  # F1B 要求 fresh session
         assert session.name == "write"
         return ProjectionWriteResult(
-            projection_trade_date=date(2026, 9, 18), market_rows=1, scope_rows=1
+            projection_trade_date=T, market_rows=1, scope_rows=1
         )
 
     async def _current(_session):
@@ -157,10 +194,11 @@ def test_orchestration_session_ownership_order(monkeypatch):
     monkeypatch.setattr(proj, "iter_scope_record_chunks", _iter)
     monkeypatch.setattr(rebuild, "replace_dashboard_projection", _writer)
     monkeypatch.setattr(rebuild, "_current_membership_versions", _current)
+    monkeypatch.setattr(rebuild, "fetch_market_index_facts", _fetch_complete)
 
     result = asyncio.run(
         rebuild.rebuild_market_dashboard_projection(
-            date(2026, 9, 18), session_factory=_factory(events)
+            T, session_factory=_factory(events)
         )
     )
     assert isinstance(result, ProjectionWriteResult)
@@ -187,8 +225,9 @@ def test_orchestration_success_delegates_to_writer(monkeypatch):
     async def _prepare(_session, _end_date):
         return ctx
 
-    def _build(context):
+    def _build(context, index_facts):
         captured["build_ctx"] = context
+        captured["index_facts"] = index_facts  # facts 透传
         return ["MARKET"]
 
     def _iter(context, **_kw):
@@ -201,7 +240,7 @@ def test_orchestration_success_delegates_to_writer(monkeypatch):
         captured["scope_chunks"] = scope_chunks
         captured["expected"] = expected_membership_versions
         return ProjectionWriteResult(
-            projection_trade_date=date(2026, 9, 18), market_rows=1, scope_rows=2
+            projection_trade_date=T, market_rows=1, scope_rows=2
         )
 
     async def _current(_session):
@@ -212,10 +251,11 @@ def test_orchestration_success_delegates_to_writer(monkeypatch):
     monkeypatch.setattr(proj, "iter_scope_record_chunks", _iter)
     monkeypatch.setattr(rebuild, "replace_dashboard_projection", _writer)
     monkeypatch.setattr(rebuild, "_current_membership_versions", _current)
+    monkeypatch.setattr(rebuild, "fetch_market_index_facts", _fetch_complete)
 
     result = asyncio.run(
         rebuild.rebuild_market_dashboard_projection(
-            date(2026, 9, 18), session_factory=_factory(events)
+            T, session_factory=_factory(events)
         )
     )
     assert captured["build_ctx"] is ctx
@@ -254,7 +294,7 @@ def test_orchestration_membership_mismatch_fails_closed(monkeypatch, scenario):
     async def _prepare(_session, _end_date):
         return ctx
 
-    def _build(_context):
+    def _build(context, index_facts):
         return ["MARKET"]
 
     def _iter(_context, **_kw):
@@ -263,7 +303,7 @@ def test_orchestration_membership_mismatch_fails_closed(monkeypatch, scenario):
     async def _writer(*_a, **_k):  # noqa: ANN002, ANN003
         writer_calls.append(1)
         return ProjectionWriteResult(
-            projection_trade_date=date(2026, 9, 18), market_rows=1, scope_rows=0
+            projection_trade_date=T, market_rows=1, scope_rows=0
         )
 
     async def _current(_session):
@@ -274,11 +314,12 @@ def test_orchestration_membership_mismatch_fails_closed(monkeypatch, scenario):
     monkeypatch.setattr(proj, "iter_scope_record_chunks", _iter)
     monkeypatch.setattr(rebuild, "replace_dashboard_projection", _writer)
     monkeypatch.setattr(rebuild, "_current_membership_versions", _current)
+    monkeypatch.setattr(rebuild, "fetch_market_index_facts", _fetch_complete)
 
     with pytest.raises(rebuild.ProjectionInputChangedError):
         asyncio.run(
             rebuild.rebuild_market_dashboard_projection(
-                date(2026, 9, 18), session_factory=_factory(events)
+                T, session_factory=_factory(events)
             )
         )
     assert writer_calls == []  # 绝不写 projection
@@ -299,7 +340,7 @@ def test_orchestration_rejects_invalid_context(monkeypatch, kind):
     async def _prepare(_session, _end_date):
         return ctx
 
-    def _build(_context):
+    def _build(context, index_facts):
         return ["MARKET"]
 
     async def _writer(*_a, **_k):  # noqa: ANN002, ANN003
@@ -309,14 +350,101 @@ def test_orchestration_rejects_invalid_context(monkeypatch, kind):
     monkeypatch.setattr(proj, "prepare_projection_context", _prepare)
     monkeypatch.setattr(proj, "build_market_records", _build)
     monkeypatch.setattr(rebuild, "replace_dashboard_projection", _writer)
+    monkeypatch.setattr(rebuild, "fetch_market_index_facts", _fetch_complete)
 
     with pytest.raises(ValueError):
         asyncio.run(
             rebuild.rebuild_market_dashboard_projection(
-                date(2026, 9, 18), session_factory=_factory(events)
+                T, session_factory=_factory(events)
             )
         )
     assert writer_calls == []
+
+
+# ---------------------------------------------------------------
+# [PANJI-MARKET-OVERVIEW] 最新投影日五字段完整性 fail-closed
+# ---------------------------------------------------------------
+def _run_rebuild_with_facts(monkeypatch, ctx, facts):
+    """以确定性 facts 跑一次 orchestration；返回 (writer_calls, result, exc)。
+    使用 fake session factory，绝不触达真实 DB。"""
+    events: list[str] = []
+    writer_calls: list[int] = []
+
+    async def _prepare(_session, _end_date):
+        return ctx
+
+    def _build(context, index_facts):
+        assert index_facts == facts  # facts 原样透传
+        return ["MARKET"]
+
+    def _iter(_context, **_kw):
+        return iter([])
+
+    async def _writer(*_a, **_k):  # noqa: ANN002, ANN003
+        writer_calls.append(1)
+        return ProjectionWriteResult(projection_trade_date=T, market_rows=1, scope_rows=0)
+
+    async def _current(_session):
+        return dict(ctx.membership_versions)
+
+    async def _fake_fetch(_end_date):
+        return facts
+
+    monkeypatch.setattr(proj, "prepare_projection_context", _prepare)
+    monkeypatch.setattr(proj, "build_market_records", _build)
+    monkeypatch.setattr(proj, "iter_scope_record_chunks", _iter)
+    monkeypatch.setattr(rebuild, "replace_dashboard_projection", _writer)
+    monkeypatch.setattr(rebuild, "_current_membership_versions", _current)
+    monkeypatch.setattr(rebuild, "fetch_market_index_facts", _fake_fetch)
+
+    try:
+        result = asyncio.run(
+            rebuild.rebuild_market_dashboard_projection(T, session_factory=_factory(events))
+        )
+        return writer_calls, result, None
+    except Exception as exc:  # noqa: BLE001
+        return writer_calls, None, exc
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ["sse_close", "szse_close", "chinext_close", "limit_up_count", "limit_down_count"],
+)
+def test_latest_t_incomplete_fails_closed(monkeypatch, missing_field):
+    b1 = uuid4()
+    ctx = _context([b1], {b1: "mv1"})
+    facts = _facts_with(**{missing_field: None})
+    writer_calls, _result, exc = _run_rebuild_with_facts(monkeypatch, ctx, facts)
+    assert isinstance(exc, RuntimeError)
+    assert writer_calls == []  # 绝不写残缺最新快照
+
+
+def test_latest_t_absent_other_dates_present_fails_closed(monkeypatch):
+    b1 = uuid4()
+    ctx = _context([b1], {b1: "mv1"})
+    # T 缺，但历史日有完整 facts → 最新投影日必须完整，否则 fail-closed
+    facts = {
+        date(2026, 9, 17): MarketIndexFacts(
+            sse_close=3300.0,
+            szse_close=12000.0,
+            chinext_close=2500.0,
+            limit_up_count=50,
+            limit_down_count=5,
+        )
+    }
+    writer_calls, _result, exc = _run_rebuild_with_facts(monkeypatch, ctx, facts)
+    assert isinstance(exc, RuntimeError)
+    assert writer_calls == []
+
+
+def test_latest_t_complete_continues(monkeypatch):
+    b1 = uuid4()
+    ctx = _context([b1], {b1: "mv1"})
+    facts = _facts_with()  # 五字段齐全
+    writer_calls, result, exc = _run_rebuild_with_facts(monkeypatch, ctx, facts)
+    assert exc is None
+    assert isinstance(result, ProjectionWriteResult)
+    assert writer_calls == [1]
 
 
 # ---------------------------------------------------------------
