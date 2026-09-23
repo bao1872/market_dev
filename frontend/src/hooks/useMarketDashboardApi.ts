@@ -77,10 +77,11 @@ export function useMarketCompare(boardIds: string[], days = 10) {
  * query key 覆盖全部 server-side state（见 `scopeExplorerQueryKey`），因此换页 / 换排序 /
  * 换 filter 都不会命中上一份缓存；**不做**任何前端全量 filter/sort/page。
  */
-export function useMarketScopeExplorer(query: ScopeExplorerQuery) {
+export function useMarketScopeExplorer(query: ScopeExplorerQuery, enabled: boolean = true) {
   return useQuery({
     queryKey: marketDashboardKeys.scopeExplorer(query),
     queryFn: () => getMarketScopeExplorer(buildScopeExplorerParams(query)),
+    enabled,
     staleTime: STALE,
   })
 }

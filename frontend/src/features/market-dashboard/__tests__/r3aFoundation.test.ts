@@ -228,26 +228,24 @@ test('G. industry + concept 混合允许（前端不人为禁止）', () => {
 // ===========================================================================
 // H. 二级导航
 // ===========================================================================
-test('H. 二级导航冻结为四项：大盘 / 行业 / 概念 / 对比 N', () => {
-  assert.equal(REVIEW_TABS.length, 4)
+test('H. 二级导航冻结为三项：大盘 / 行业 / 概念（顶层无对比 tab）', () => {
+  assert.equal(REVIEW_TABS.length, 3)
   assert.deepEqual(
     REVIEW_TABS.map((t) => t.label),
-    ['大盘', '行业', '概念', '对比'],
+    ['大盘', '行业', '概念'],
   )
   assert.deepEqual(
     REVIEW_TABS.map((t) => t.key),
-    ['market', 'industry', 'concept', 'compare'],
+    ['market', 'industry', 'concept'],
   )
   assert.deepEqual(
     REVIEW_TABS.map((t) => t.path),
-    ['/review', '/review/industry', '/review/concept', '/review/compare'],
+    ['/review', '/review/industry', '/review/concept'],
   )
 
-  const compareTab = REVIEW_TABS[3]
-  assert.equal(reviewTabLabel(compareTab, 0), '对比 0')
-  assert.equal(reviewTabLabel(compareTab, 3), '对比 3')
-  assert.equal(reviewTabLabel(REVIEW_TABS[0], 3), '大盘', '非对比 tab 不得携带数量')
+  assert.equal(reviewTabLabel(REVIEW_TABS[0], 3), '大盘', 'tab 文案不得携带数量')
   assert.equal(reviewTabLabel(REVIEW_TABS[1], 3), '行业')
+  assert.equal(reviewTabLabel(REVIEW_TABS[2], 3), '概念')
 
   // 旧命名（行业板块 / 概念板块）不得回归
   for (const tab of REVIEW_TABS) assert.ok(!tab.label.includes('板块'), `tab 文案不得含「板块」：${tab.label}`)

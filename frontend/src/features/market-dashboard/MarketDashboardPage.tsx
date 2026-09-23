@@ -73,12 +73,12 @@ export default function MarketDashboardPage() {
   const points = (query.data?.series ?? []) as BreadthPoint[]
 
   return (
-    <div className={styles.page}>
-      <div className={styles.header}>
-        <h1 className={styles.pageTitle}>市场复盘</h1>
-        <DashboardTabs />
-        <span className={styles.projDate}>数据日期：{query.data?.projection_trade_date ?? '—'}</span>
+    <div className={styles['explorer-page']}>
+      <div className={styles['review-head']}>
+        <h1 className={styles['page-title']}>市场复盘</h1>
+        <span className={styles['proj-date']}>数据日期：{query.data?.projection_trade_date ?? '—'}</span>
       </div>
+      <DashboardTabs />
 
       <div className={styles.rangeSelector} role="group" aria-label="时间范围">
         <span className={styles.rangeLabel}>时间范围：</span>

@@ -6,25 +6,19 @@
 // - 选中板块写入 URL board_id；详情用 useMarketScopeDetail，独立于列表 state。
 // - 详情图表复用 R3A/R3B 的 unified chart 基础（BreadthChart + 6-series），不写第二套。
 //
-// [PANJI-REVIEW-UI-UNIFY] 筛选入口统一到表头：
-// - 删除独立 filter-panel（MA5/MA10/5日Δ/成员数 min-max + 应用筛选 + 重置整块）；
-// - 改为「列 funnel → 弹层（区间 / ≥ / ≤ / =）」+ 表格上方 slim meta bar（结果数 + 激活条件 chips
-//   + 快速筛选 ▾ + 清除筛选）；
-// - 搜索与 L1/L2/L3 仍留在表格外（它们是数据范围，不是列筛选）；
-// - URL 仍是唯一正式状态：弹层可有 local draft，Apply 后一律走 applyPatch() → URL。
+// [PANJI-REVIEW-UI-UNIFY] 列表 / 详情统一工作区：
+// - 进入 行业 / 概念 先渲染**完整 LIST VIEW**（列表即主工作区，不复用常驻主从分栏）。
+// - 点击某一行 → 进入 **DETAIL VIEW**：主工作区切换为「左导航栏（仅名称）+ 右侧真实详情」，
+//   列表不再占据主页面。返回（清除 board_id）精确恢复列表的 search/filters/sort/page/family/date。
+// - 左导航栏（rail）只显示板块名称，来自与列表**同一份** server 过滤+排序结果（page_size=上限，page=1），
+//   即「filteredSortedRows 全集」；选中 rail 项仅改变 board_id，不重置列表 query state。
+// - 右详情复用现有 canonical：useMarketScopeDetail + BreadthChart（6-series）。不新建详情实现 / API。
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { useMarketScopeExplorer, useMarketScopeDetail } from '@/hooks/useMarketDashboardApi'
 import { useCompareBasketStore } from '@/store/compareBasket'
 import { extractMarketDashboardError } from '@/api/marketDashboard'
-import BreadthChart from './BreadthChart'
-import type { BreadthLineSpec } from './BreadthChart'
-import DashboardState from './DashboardState'
-import DashboardTabs from './DashboardTabs'
-import ScopeExplorerTable from './ScopeExplorerTable'
-import { MARKET_OVERVIEW_SERIES } from './marketOverviewConfig'
-import { BREADTH_REFERENCE_LINES } from './chartTheme'
-import { classifyDashboardError } from './dashboardLogic'
+import BreadthChart, { type BreadthLineSpec } from './BreadthChart'
 import type { BreadthPoint, HierarchyLevel, ScopeType, ScopeExplorerItem } from './types'
 import {
   activeExplorerFilterChips,
@@ -50,6 +44,13 @@ import {
   type ExplorerStatePatch,
   type NumericFilterKey,
 } from './scopeExplorerUrlState'
+import { SCOPE_EXPLORER_PAGE_SIZE_MAX } from './scopeExplorerQuery'
+import { MARKET_OVERVIEW_SERIES } from './marketOverviewConfig'
+import { BREADTH_REFERENCE_LINES } from './chartTheme'
+import { classifyDashboardError } from './dashboardLogic'
+import DashboardState from './DashboardState'
+import DashboardTabs from './DashboardTabs'
+import ScopeExplorerTable from './ScopeExplorerTable'
 import styles from './dashboard.module.scss'
 
 const DETAIL_DAYS = 250
@@ -87,7 +88,15 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     [scopeType, isIndustry, parsed],
   )
 
+  // 列表主查询（server-side 分页；page/page_size 来自 URL SSOT）。
   const explorer = useMarketScopeExplorer(query)
+  // 左导航栏「filteredSortedRows 全集」：与列表同一份 server 过滤+排序结果，仅取上限条数（page=1）。
+  // 仅在 DETAIL VIEW（board_id 已选）时启用，避免列表态多余请求。
+  const railQuery = useMemo(
+    () => ({ ...query, page: 1, page_size: SCOPE_EXPLORER_PAGE_SIZE_MAX }),
+    [query],
+  )
+  const railExplorer = useMarketScopeExplorer(railQuery, !!parsed.board_id)
   const detail = useMarketScopeDetail(parsed.board_id, DETAIL_DAYS)
 
   // ---- 应用 patch（除显式 page 外一律回到第 1 页）----
@@ -181,8 +190,14 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     }
   }
 
-  // ---- 行选中（写入 board_id，保留当前页）----
+  // ---- 行选中（写入 board_id，精确保留列表 page）----
   const onSelect = (id: string) => applyPatch({ board_id: id, page: parsed.page })
+
+  // ---- 左导航栏选中（仅改变 board_id，不重置列表 query state）----
+  const onRailSelect = (id: string) => applyPatch({ board_id: id, page: parsed.page })
+
+  // ---- 返回列表（清除 board_id，精确保留列表 page）----
+  const onBackToList = () => applyPatch({ board_id: null, page: parsed.page })
 
   // ---- 层级切换（industry：清 board_id、回到第 1 页）----
   const onLevel = (lv: HierarchyLevel) => applyPatch({ hierarchy_level: lv, board_id: null })
@@ -235,29 +250,11 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
   const listError = explorer.error ? classifyDashboardError(extractMarketDashboardError(explorer.error)) : null
   const detailError = detail.error ? classifyDashboardError(extractMarketDashboardError(detail.error)) : null
 
-  return (
-    <div className={styles['explorer-page']} data-testid="explorer-page">
-      <h1 className={styles['page-title']}>{isIndustry ? '行业' : '概念'}</h1>
-      <DashboardTabs />
-
-      {isIndustry ? (
-        <div className={styles['level-selector']}>
-          {LEVELS.map((lv) => (
-            <button
-              key={lv}
-              type="button"
-              className={parsed.hierarchy_level === lv ? styles['level-btn-active'] : styles['level-btn']}
-              onClick={() => onLevel(lv)}
-              aria-pressed={parsed.hierarchy_level === lv}
-            >
-              {lv}
-            </button>
-          ))}
-        </div>
-      ) : (
-        <p className={styles['concept-note']}>同花顺概念 / 问财概念</p>
-      )}
-
+  // =========================================================================
+  // 列表工作区（仅在未选中板块时渲染；选中板块 → 详情视图，列表不再占据主页面）
+  // =========================================================================
+  const listWorkspace = !parsed.board_id && (
+    <>
       {/* Toolbar：搜索（数据范围，保留在表格之外） */}
       <form className={styles.toolbar} onSubmit={submitSearch}>
         <input
@@ -419,51 +416,115 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
           </div>
         </>
       )}
+    </>
+  )
 
-      {/* 选中板块详情 */}
-      {parsed.board_id && (
-        <div className={styles['detail-section']} data-testid="scope-detail">
-          {detail.isLoading ? (
-            <DashboardState kind="loading" />
-          ) : detail.error && detailError ? (
-            <DashboardState kind={detailError.kind} desc={detailError.detail} />
-          ) : meta ? (
-            <>
-              <div className={styles['detail-head']}>
-                <div>
-                  <div className={styles['detail-name']}>{meta.name}</div>
-                  <div className={styles['detail-sub']}>
-                    {meta.type === 'industry' ? `行业 · ${meta.hierarchy_level}` : '概念'} · 成员数 {meta.member_count.toLocaleString()} · 数据日期{' '}
-                    {detail.data?.projection_trade_date ?? '—'}
-                  </div>
+  // =========================================================================
+  // 详情视图（选中板块 → 主工作区切换为：左导航栏「仅名称」+ 右侧真实详情）
+  // =========================================================================
+  const detailWorkspace = parsed.board_id && (
+    <div className={styles['detail-layout']} data-testid="scope-detail-view">
+      {/* 左导航栏：仅板块名称，来自 filteredSortedRows 全集（server 同过滤+排序，page_size=上限）。 */}
+      <nav className={styles['scope-rail']} data-testid="scope-rail" aria-label="板块导航">
+        {railExplorer.isLoading ? (
+          <div className={styles['rail-loading']}>加载导航…</div>
+        ) : railExplorer.error ? (
+          <div className={styles['rail-empty']}>导航加载失败</div>
+        ) : (railExplorer.data?.items ?? []).length === 0 ? (
+          <div className={styles['rail-empty']}>无匹配板块</div>
+        ) : (
+          (railExplorer.data?.items ?? []).map((it: ScopeExplorerItem) => {
+            const active = it.board_id === parsed.board_id
+            return (
+              <button
+                key={it.board_id}
+                type="button"
+                className={active ? `${styles['rail-item']} ${styles['rail-item-active']}` : styles['rail-item']}
+                aria-current={active ? 'true' : undefined}
+                data-board-id={it.board_id}
+                data-testid={`rail-item-${it.board_id}`}
+                onClick={() => onRailSelect(it.board_id)}
+              >
+                {it.board_name}
+              </button>
+            )
+          })
+        )}
+      </nav>
+
+      {/* 右侧真实详情（复用 canonical useMarketScopeDetail + BreadthChart；不新建详情实现 / API） */}
+      <div className={styles['detail-main']} data-testid="scope-detail">
+        <button type="button" className={styles['detail-back']} onClick={onBackToList} data-testid="detail-back">
+          ← 返回列表
+        </button>
+        {detail.isLoading ? (
+          <DashboardState kind="loading" />
+        ) : detail.error && detailError ? (
+          <DashboardState kind={detailError.kind} desc={detailError.detail} />
+        ) : meta ? (
+          <>
+            <div className={styles['detail-head']}>
+              <div>
+                <div className={styles['detail-name']}>{meta.name}</div>
+                <div className={styles['detail-sub']}>
+                  {meta.type === 'industry' ? `行业 · ${meta.hierarchy_level}` : '概念'} · 成员数 {meta.member_count.toLocaleString()} · 数据日期{' '}
+                  {detail.data?.projection_trade_date ?? '—'}
                 </div>
-                <button
-                  type="button"
-                  className={styles['btn-primary']}
-                  onClick={() => addCompare(meta.board_id, meta.name, meta.type as ScopeType)}
-                >
-                  加入对比
-                </button>
               </div>
+              <button
+                type="button"
+                className={styles['btn-primary']}
+                onClick={() => addCompare(meta.board_id, meta.name, meta.type as ScopeType)}
+              >
+                加入对比
+              </button>
+            </div>
 
-              <BreadthChart
-                points={detail.data?.series as unknown as BreadthPoint[]}
-                series={detailSeries}
-                referenceLines={BREADTH_REFERENCE_LINES}
-                height={300}
-              />
+            <BreadthChart
+              points={detail.data?.series as unknown as BreadthPoint[]}
+              series={detailSeries}
+              referenceLines={BREADTH_REFERENCE_LINES}
+              height={300}
+            />
 
-              {basketMsg && <div className={styles['compare-msg']}>{basketMsg}</div>}
-              <div className={styles['compare-link-row']}>
-                {/* SPA 导航：保留 Zustand compare basket（R3A 仅 session persistence，不 localStorage）。整页 reload 会清空 basket。 */}
-                <Link className={styles['summary-link']} to="/review/compare">
-                  查看对比
-                </Link>
-              </div>
-            </>
-          ) : null}
+            {basketMsg && <div className={styles['compare-msg']}>{basketMsg}</div>}
+            <div className={styles['compare-link-row']}>
+              {/* SPA 导航：保留 Zustand compare basket（R3A 仅 session persistence，不 localStorage）。整页 reload 会清空 basket。 */}
+              <Link className={styles['summary-link']} to="/review/compare">
+                查看对比
+              </Link>
+            </div>
+          </>
+        ) : null}
+      </div>
+    </div>
+  )
+
+  return (
+    <div className={styles['explorer-page']} data-testid="explorer-page">
+      <h1 className={styles['page-title']}>{isIndustry ? '行业' : '概念'}</h1>
+      <DashboardTabs />
+
+      {isIndustry ? (
+        <div className={styles['level-selector']}>
+          {LEVELS.map((lv) => (
+            <button
+              key={lv}
+              type="button"
+              className={parsed.hierarchy_level === lv ? styles['level-btn-active'] : styles['level-btn']}
+              onClick={() => onLevel(lv)}
+              aria-pressed={parsed.hierarchy_level === lv}
+            >
+              {lv}
+            </button>
+          ))}
         </div>
+      ) : (
+        <p className={styles['concept-note']}>同花顺概念 / 问财概念</p>
       )}
+
+      {listWorkspace}
+      {detailWorkspace}
     </div>
   )
 }
