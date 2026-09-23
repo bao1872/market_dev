@@ -117,11 +117,19 @@ async def rebuild_market_dashboard_projection(
             context = await projection_service.prepare_projection_context(read_session, end_date)
             market_records = projection_service.build_market_records(context, index_facts)
 
-    # [PANJI-MARKET-OVERVIEW] fail-closed：头条投影日必须完整；缺失则保留旧投影，绝不写残缺
+    # [PANJI-MARKET-OVERVIEW] fail-closed：头条投影日必须完整（三大指数 + 涨跌停 五字段缺一不可）；
+    # 任一不可得 → 保留旧投影，绝不写残缺最新快照
     last_date = context.display_dates[-1]
-    if last_date not in index_facts:
+    last = index_facts.get(last_date)
+    if last is None or (
+        last.sse_close is None
+        or last.szse_close is None
+        or last.chinext_close is None
+        or last.limit_up_count is None
+        or last.limit_down_count is None
+    ):
         raise RuntimeError(
-            f"market overview: pytdx index facts 缺失头条投影日 {last_date} → fail-closed 保留旧投影"
+            f"market overview: 头条投影日 {last_date} 指数/涨跌停字段不完整 → fail-closed 保留旧投影"
         )
 
     _validate_context_invariants(context)

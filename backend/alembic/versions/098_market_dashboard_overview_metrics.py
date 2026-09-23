@@ -10,7 +10,8 @@
 - 不改动 095 已有的 count / MA 列与约束；不另造第二张市场投影表。
 - 新列语义（写入方 = 盘后 ``rebuilding_market_dashboard``）：
   - advance_count / decline_count / flat_count / change_valid_count
-        涨跌家数（close vs 前收，exact-T，全市场 universe）
+        涨跌家数（canonical adjusted return ``ret``；复用 _compute_stock_facts_long 已算好的
+        adj_close 坐标，不重新维护 raw close vs 前收 的第二套价格比较，正确性含除权除息）
   - turnover_amount / turnover_valid_count
         全市场成交额 = SUM(bars_daily.amount)（元；NULL=部分不可用，不伪装总额）
   - limit_up_count / limit_down_count
@@ -52,7 +53,6 @@ _NEW_COLUMNS: tuple[tuple[str, sa.TypeEngine], ...] = (
 
 def upgrade() -> None:
     for name, col_type in _NEW_COLUMNS:
-        # 若已存在（幂等重跑）则跳过，避免 alembic 在重复迁移时失败。
         op.add_column(_TABLE, sa.Column(name, col_type, nullable=True))
 
 

@@ -76,43 +76,63 @@ def _count_fields(breadth: BreadthResult) -> dict[str, object]:
 
 
 def _aggregate_market_overview_long(
-    raw_long: pd.DataFrame, display_dates: list[date]
+    stock_facts: pd.DataFrame,
+    raw_long: pd.DataFrame,
+    display_dates: list[date],
 ) -> tuple[dict[date, tuple[int, int, int, int]], dict[date, tuple[float | None, int]]]:
     """[PANJI-MARKET-OVERVIEW] 一次向量化聚合「涨跌家数 + 全市场成交额」。
 
-    - 涨跌家数：raw close vs 前收（exact-T，逐股票 groupby shift；丢弃 NaN 对）。
-    - 成交额：SUM(bars_daily.amount)（元）；当天缺 amount → 该日 turnover_amount=None。
-    仅对 ``display_dates`` 范围产出；缺失日期由调用方走默认零 / None（NULL 合同）。
+    - 涨跌家数：复用 ``_compute_stock_facts_long`` 已算好的 canonical adjusted return
+      ``ret``（adj_close 坐标，已正确处理除权除息；不重新维护第二套 raw close 比较）。
+      ``ret > 0`` 涨 / ``ret < 0`` 跌 / ``ret == 0`` 平；``ret`` 为 NaN（无前收坐标）
+      不计入 valid，也不算平。
+    - 成交额：SUM(exact-T bars_daily.amount)（元）。仅当某日 exact-T 行中 amount
+      **全部非缺失**（valid_count == 该日行数）才 SUM；否则 ``turnover_amount=None``
+      （fail-closed，不冒充全市场总额）。``turnover_valid_count`` 保留诊断。
+    - 仅对 ``display_dates`` 范围产出；不复制整张 raw 源（ret 取自 stock_facts，
+      turnover 直接 groupby raw amount 列聚合，不 materialize 整表副本）。
     """
     advance_by_date: dict[date, tuple[int, int, int, int]] = {}
     turnover_by_date: dict[date, tuple[float | None, int]] = {}
-    if raw_long is None or raw_long.empty:
+    if stock_facts is None or stock_facts.empty:
         return advance_by_date, turnover_by_date
 
-    rl = raw_long.copy()
-    rl["prev_close"] = rl.groupby("instrument_id", sort=False)["close"].shift(1)
-    valid = rl.dropna(subset=["close", "prev_close"])
-    valid = valid[valid["trade_date"].isin(set(display_dates))]
-    if not valid.empty:
-        valid = valid.copy()
-        valid["adv"] = (valid["close"] > valid["prev_close"]).astype("int64")
-        valid["dec"] = (valid["close"] < valid["prev_close"]).astype("int64")
-        valid["flat"] = (valid["close"] == valid["prev_close"]).astype("int64")
-        for d, sub in valid.groupby("trade_date"):
+    # ---- 涨跌家数：from canonical adjusted return（不重新比较 raw close）----
+    sub = stock_facts.loc[
+        stock_facts["trade_date"].isin(set(display_dates)), ["trade_date", "ret"]
+    ].copy()
+    if not sub.empty:
+        ret = sub["ret"]
+        # ret>0 涨 / ret<0 跌 / ret==0 平；NaN 不计入 valid 也不算平
+        sub["adv"] = (ret > 0).astype("int64")
+        sub["dec"] = (ret < 0).astype("int64")
+        sub["flat"] = (ret == 0).astype("int64")
+        sub["valid"] = ret.notna().astype("int64")
+        for d, s in sub.groupby("trade_date", sort=False):
             advance_by_date[d] = (
-                int(sub["adv"].sum()),
-                int(sub["dec"].sum()),
-                int(sub["flat"].sum()),
-                int(len(sub)),
+                int(s["adv"].sum()),
+                int(s["dec"].sum()),
+                int(s["flat"].sum()),
+                int(s["valid"].sum()),
             )
 
-    if "amount" in rl.columns:
-        am = rl.dropna(subset=["amount"]).copy()
-        am = am[am["trade_date"].isin(set(display_dates))]
-        if not am.empty:
-            gt = am.groupby("trade_date")["amount"].agg(["sum", "count"])
-            for d, row in gt.iterrows():
-                turnover_by_date[d] = (float(row["sum"]), int(row["count"]))
+    # ---- 全市场成交额：exact-T amount 完整性优先，缺失则不冒充总额 ----
+    if raw_long is not None and not raw_long.empty and "amount" in raw_long.columns:
+        grp = raw_long.groupby("trade_date")
+        expected_count = grp.size()
+        amount = raw_long.groupby("trade_date")["amount"]
+        valid_count = amount.count()  # 排除 NaN
+        total = amount.sum()
+        for d in set(display_dates):
+            if d not in expected_count.index:
+                continue
+            ev = int(expected_count[d])
+            vc = int(valid_count[d])
+            if vc == ev:
+                turnover_by_date[d] = (float(total[d]), vc)
+            else:
+                # 部分 amount 缺失 → 不冒充全市场总额
+                turnover_by_date[d] = (None, vc)
     return advance_by_date, turnover_by_date
 
 
@@ -142,8 +162,11 @@ async def prepare_projection_context(session: AsyncSession, end_date: date) -> P
     )
     # stock-day facts 整批向量化一次；生成后 projection 不再需要 raw_long
     stock_facts = dashboard_service._compute_stock_facts_long(raw_long)
-    # [PANJI-MARKET-OVERVIEW] 涨跌家数 + 全市场成交额：复用已加载 raw_long，一次向量化
-    advance_by_date, turnover_by_date = _aggregate_market_overview_long(raw_long, display_dates)
+    # [PANJI-MARKET-OVERVIEW] 涨跌家数（canonical ret）+ 全市场成交额（exact-T amount 完整性）：
+    # 复用已加载 stock_facts / raw_long，一次向量化，不复制整表
+    advance_by_date, turnover_by_date = _aggregate_market_overview_long(
+        stock_facts, raw_long, display_dates
+    )
     del raw_long
 
     boards = await dashboard_service._query_active_boards(session)
