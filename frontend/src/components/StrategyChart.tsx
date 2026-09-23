@@ -3021,7 +3021,7 @@ export function StrategyChart({
     setDsaMismatch(stateRef.current.dsaSourceMismatch)
     // [ChartRenderFrame] - frame mismatch 同步到 React state 驱动"指标加载中"提示
     setFrameMismatch(stateRef.current.frameMismatch)
-  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators, barsFrame, scale])
+  }, [draw, calc, display, mappedEvents, effectiveLayers, viewport, indicators, barsFrame, scale, indicatorsUnavailable])
 
   // 交互事件绑定（仅一次）
   useEffect(() => {

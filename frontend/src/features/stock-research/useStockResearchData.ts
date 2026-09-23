@@ -110,6 +110,10 @@ export interface StockResearchData {
   // K 线仍然健康可用，仅指标不可用；与 barsStatus（K 线自身降级）是不同维度。
   chartDegraded: boolean
   chartDegradedReason: string | null
+  // 前端显式语义：仅当整体 degraded 且 reason 明确为 live_intraday_provider_unavailable
+  // 时才是"可选富化（指标）不可用"。与 chartDegraded（整体降级，含 K 线自身降级）严格区分，
+  // 否则会把 K 线降级误判成"实时分钟行情中断"并错误隐藏本来有效的指标图层。
+  indicatorsUnavailable: boolean
   // 截图模式就绪状态（由父组件传入 isCaptureMode 时使用）
   isRenderReady: boolean
   // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源）
@@ -329,9 +333,15 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
   // 与 barsStatus（K 线自身降级）是不同维度：这里 K 线照常显示，仅指标不可用，
   // 因此**不得**用它替换/隐藏 K 线，只做轻量提示。
   const chartDegraded = snapshotTimeframeMatches ? snapshotData?.degraded === true : false
+  // 顶层 degraded 是 "base K 线降级" 与 "可选 live 富化降级" 的并集（后端
+  // snapshot.degraded = bars_result.degraded OR snapshot_result.degraded），
+  // 不能把整体 degraded 直接等同于 "实时分钟行情中断"。只有 reason 明确为
+  // live_intraday_provider_unavailable 时才是可选富化（指标）不可用。
   const chartDegradedReason: string | null = chartDegraded
-    ? (snapshotData?.degraded_reason ?? 'live_intraday_provider_unavailable')
+    ? (snapshotData?.degraded_reason ?? null)
     : null
+  const indicatorsUnavailable: boolean =
+    chartDegraded && chartDegradedReason === 'live_intraday_provider_unavailable'
 
   // 8. 截图模式就绪状态（instrument + chart-snapshot[当前周期] + render_frame.matched 全部就绪）
   // [PRD V2.0 §4.2 SNAP-01] 新增 render_frame.matched 校验：
@@ -369,6 +379,9 @@ export function useStockResearchData({ symbol, timeframe, includeSmc = false }: 
     // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级（可选指标富化不可用，K 线仍可用）
     chartDegraded,
     chartDegradedReason,
+    // 显式语义：仅 reason == live_intraday_provider_unavailable 才是指标 unavailable，
+    // 与 base K 线自身降级（barsStatus）严格区分。
+    indicatorsUnavailable,
     isRenderReady,
     // [P0-7] quote 从 chartSnapshot 派生（详情页唯一行情真源）
     quote,

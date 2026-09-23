@@ -158,11 +158,63 @@ test('FIX3: 真实 frame mismatch 仍保留原错误横幅（未被削弱）', (
   )
 })
 
-test('FIX3: workspace 把 chartDegraded 传给 StrategyChart.indicatorsUnavailable', () => {
+test('FIX3: workspace 把显式 indicatorsUnavailable 传给 StrategyChart.indicatorsUnavailable', () => {
   const ws = readSrc('features/stock-research/StockResearchWorkspace.tsx')
   assert.ok(
-    /indicatorsUnavailable=\{chartDegraded\}/.test(ws),
-    '可选富化降级必须驱动 StrategyChart 的 unavailable 状态',
+    /indicatorsUnavailable=\{indicatorsUnavailable\}/.test(ws),
+    '必须是显式 indicatorsUnavailable（reason 校验后），而非整体 chartDegraded',
+  )
+  // 整体 degraded 不得直接驱动 unavailable（否则 K 线自身降级会被误判为实时分钟行情中断）
+  assert.ok(
+    !/indicatorsUnavailable=\{chartDegraded\}/.test(ws),
+    'indicatorsUnavailable 不得直接等于整体 chartDegraded',
+  )
+})
+
+test('FIX3: useStockResearchData 把整体 degraded 与指标 unavailable 解耦', () => {
+  const hook = readSrc('features/stock-research/useStockResearchData.ts')
+  // StockResearchData 显式新增 indicatorsUnavailable
+  const iface = hook.slice(
+    hook.indexOf('export interface StockResearchData'),
+    hook.indexOf('export function useStockResearchData'),
+  )
+  assert.ok(
+    /indicatorsUnavailable:\s*boolean/.test(iface),
+    'StockResearchData 必须声明 indicatorsUnavailable: boolean',
+  )
+  // indicatorsUnavailable 仅在 degraded 且 reason 明确为 live_intraday_provider_unavailable 时为真
+  assert.ok(
+    /indicatorsUnavailable:\s*boolean\s*=\s*\n?\s*chartDegraded && chartDegradedReason === 'live_intraday_provider_unavailable'/.test(hook),
+    'indicatorsUnavailable 必须由 chartDegraded && reason==live_intraday_provider_unavailable 推导',
+  )
+  // reason 不再默认退化为 live_intraday_provider_unavailable（否则 K 线降级会被误报）
+  assert.ok(
+    !/'live_intraday_provider_unavailable'\)/.test(hook.split('indicatorsUnavailable: boolean =')[0]),
+    'chartDegradedReason 不得再默认退化成 live_intraday_provider_unavailable',
+  )
+})
+
+test('FIX3: 回归—base K 线降级 + 指标健康 → 指标不被隐藏', () => {
+  // 合法响应：
+  //   bars_result.degraded=true, bars_result.degraded_reason=<K 线降级原因>
+  //   snapshot_result.degraded=false, indicators 正常, render_frame.matched=true
+  // 期望：indicatorsUnavailable=false，指标图层保留，无"实时分钟行情中断"。
+  const hook = readSrc('features/stock-research/useStockResearchData.ts')
+  // 推导逻辑是 reason 相等校验：base K 线降级的 reason 不等于 live_intraday_provider_unavailable，
+  // 因此 indicatorsUnavailable 必为 false（不会被错误隐藏）。
+  assert.ok(
+    /indicatorsUnavailable:\s*boolean\s*=\s*\n?\s*chartDegraded && chartDegradedReason === 'live_intraday_provider_unavailable'/.test(hook),
+    'base K 线降级（reason 非 live_intraday_provider_unavailable）不得触发指标 unavailable',
+  )
+  // workspace 状态条由 indicatorsUnavailable 控制，不再由 chartDegraded 控制
+  const ws = readSrc('features/stock-research/StockResearchWorkspace.tsx')
+  assert.ok(
+    /\{indicatorsUnavailable && \([\s\S]*?指标暂不可用（实时分钟行情中断）/.test(ws),
+    '指标暂不可用提示必须仅当 indicatorsUnavailable 为真时显示',
+  )
+  assert.ok(
+    !/\{chartDegraded && \([\s\S]*?指标暂不可用（实时分钟行情中断）/.test(ws),
+    '指标暂不可用提示不得由整体 chartDegraded 控制',
   )
 })
 

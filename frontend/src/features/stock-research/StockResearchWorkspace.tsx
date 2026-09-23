@@ -161,8 +161,10 @@ export function StockResearchWorkspace({
     quoteStatus,
     barsStatus,
     // [PANJI-TDX-RELIABILITY-PARITY-03] 图表级降级（可选 live 日内富化不可用）
-    chartDegraded,
     chartDegradedReason,
+    // 显式语义：仅 reason == live_intraday_provider_unavailable 才是指标 unavailable，
+    // 与整体 chartDegraded（含 K 线自身降级，由 barsStatus 表现）严格区分。
+    indicatorsUnavailable,
     quote,
   } = data
 
@@ -303,8 +305,9 @@ export function StockResearchWorkspace({
               //   请求结束后 mismatch 显示错误 + 重试按钮，禁止无限 loading
               indicatorsFetching={indicatorsQuery.isFetching}
               // [PANJI-TDX-RELIABILITY-PARITY-03] 可选 live 日内富化不可用：
-              // K 线照常画，指标进入 provider-unavailable 状态（不是 frame mismatch）
-              indicatorsUnavailable={chartDegraded}
+              // K 线照常画，指标进入 provider-unavailable 状态（不是 frame mismatch）。
+              // 仅当 reason == live_intraday_provider_unavailable 才驱动（与 K 线自身降级区分）。
+              indicatorsUnavailable={indicatorsUnavailable}
               onIndicatorsRetry={() => indicatorsQuery.refetch()}
             />
             <div className="tv-chart-status">
@@ -318,8 +321,10 @@ export function StockResearchWorkspace({
                 </span>
               )}
               {/* [PANJI-TDX-RELIABILITY-PARITY-03] 可选 live 日内富化（Node 15m）不可用：
-                  K 线照常显示，仅轻量提示指标暂不可用 —— 绝不整页报错。 */}
-              {chartDegraded && (
+                  K 线照常显示，仅轻量提示指标暂不可用 —— 绝不整页报错。
+                  该提示由 indicatorsUnavailable（而非整体 chartDegraded）控制，
+                  避免把 K 线自身降级误报成"实时分钟行情中断"。 */}
+              {indicatorsUnavailable && (
                 <span className="status-pill warn" title={chartDegradedReason ?? undefined}>
                   指标暂不可用（实时分钟行情中断）
                 </span>
