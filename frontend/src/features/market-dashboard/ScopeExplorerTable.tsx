@@ -7,11 +7,10 @@
 //   MA20 / MA50 / MA120 没有对应 filter 参数 → 只可排序，绝不放「看起来能筛、实际做不到」的假按钮；
 // - 表格本身仍由 URL state 驱动（本组件只渲染 + 回调，不持有筛选状态）。
 //
-// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX][§5] 表格 chrome **不再由 CSS module 重复实现**：
-// 直接消费 global.scss 的 canonical 表格语言（table-shell / table-scroll / data-table
-// interactive-table / th-shell / th-sort / th-label / sort-icon / th-filter），
-// 与 StrategyDataTable 共用同一个 presentation owner。此前 module 里那份
-// `.rank-table/.table/.th-head/.th-sort/.th-filter/...` 副本已删除。
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2][§5] 表格 chrome 唯一 owner = global.scss：
+// 直接消费 table-shell / table-scroll / data-table / interactive-table / compact-table
+// th-shell / th-sort / th-label / sort-icon / th-filter / table-meta-bar。
+// 此前独立实现的 module 表格 chrome（.th-head/.th-sort/.th-filter/.filter-chip 副本）已删除（P2）。
 import { Fragment } from 'react'
 import clsx from 'clsx'
 import type { ScopeExplorerItem } from './types'
@@ -93,7 +92,7 @@ function HeaderCell({
   const isFiltered = filterColumn !== undefined && filteredColumns.has(filterColumn)
   const filterLabel = filterColumn ? EXPLORER_FILTER_COLUMN_SPECS[filterColumn].filterLabel : ''
   return (
-    <th>
+    <th className={active ? 'sorted' : undefined}>
       <div className="th-shell">
         <button
           type="button"
@@ -172,7 +171,7 @@ export default function ScopeExplorerTable({
   return (
     <div className="table-shell" data-testid="explorer-table">
       <div className="table-scroll">
-        <table className="data-table interactive-table">
+        <table className="data-table interactive-table compact-table">
           <thead>
             <tr>
               {EXPLORER_TABLE_COLUMNS.map((key) => {

@@ -36,6 +36,7 @@ import {
 import type { ScopeExplorerItem, ScopeExplorerResponse } from '../../../api/marketDashboard'
 
 const PAGE_SOURCE = readFileSync(new URL('../ScopeExplorerPage.tsx', import.meta.url), 'utf8')
+const TABLE_SOURCE = readFileSync(new URL('../ScopeExplorerTable.tsx', import.meta.url), 'utf8')
 const MARKET_PAGE_SOURCE = readFileSync(new URL('../MarketDashboardPage.tsx', import.meta.url), 'utf8')
 
 // ===========================================================================
@@ -193,6 +194,24 @@ test('§3/§4. 行业/概念页不发明第二套筛选（无「快速筛选」�
   assert.ok(!PAGE_SOURCE.includes('>快速筛选<'), '不得出现「快速筛选」可见控件（注释里的说明文字不算）')
   assert.ok(!PAGE_SOURCE.includes('quickFilter'), '不得保留 quick-filter 状态/菜单接线')
   assert.ok(!PAGE_SOURCE.includes('MA5_PRESETS'), '不得保留已死 MA5_PRESETS 菜单数据')
+})
+
+// ===========================================================================
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P1-2 表格 header / 密度 与行情同状态机
+// ===========================================================================
+test('P1-2. Review 表格复用行情 compact-table 密度 + sorted 表头状态', () => {
+  assert.match(
+    TABLE_SOURCE,
+    /className="data-table interactive-table compact-table"/,
+    'Review 表格必须复用行情 compact-table 密度（global.scss 才是 table chrome owner）',
+  )
+  assert.match(
+    TABLE_SOURCE,
+    /className=\{active \? 'sorted' : undefined\}/,
+    '当前排序列 <th> 必须能接收 sorted class，以进入行情同款 .interactive-table th.sorted 视觉状态',
+  )
+  assert.ok(!TABLE_SOURCE.includes('styles.thSort'), '不得再用 module 副本 .th-sort（已删，global 才是 owner）')
+  assert.ok(!TABLE_SOURCE.includes('styles.thFilter'), '不得再用 module 副本 .th-filter（已删，global 才是 owner）')
 })
 
 // ===========================================================================

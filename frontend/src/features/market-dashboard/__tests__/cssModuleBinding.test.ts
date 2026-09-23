@@ -100,3 +100,12 @@ test('B. 每个静态 styles.<camelCase> 都必须在 dashboard.module.scss 存�
     '组件引用了 SCSS 中不存在的 CSS Module 类（camelCaseOnly 下会解析为 undefined）。请在 SCSS 补该类，或改用已存在的类。',
   )
 })
+
+// ===========================================================================
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P1-1 工作台宽度契约
+// ===========================================================================
+test('P1-1. Review workspace 不得 reintroduce 1200px 居中微站', () => {
+  const scss = readFileSync(SCSS_PATH, 'utf8')
+  assert.ok(!scss.includes('max-width: 1200px'), 'Review 工作台不得再有 max-width: 1200px 居中约束')
+  assert.ok(/explorer-page\s*\{[^}]*max-width:\s*none/.test(scss), '.explorer-page 必须为全宽（max-width: none）')
+})

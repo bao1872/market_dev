@@ -350,20 +350,7 @@
   background: v.$color-panel-3;
 }
 
-.selected {
-  background: rgba(v.$color-brand, 0.12);
-}
-
-.selected:hover {
-  background: rgba(v.$color-brand, 0.18);
-}
-
-.board-name {
-  font-weight: 600;
-  color: v.$color-text;
-}
-
-// A 股语义：正=红(up) / 负=绿(down) / 0=null=中性(flat)。仅用于行情方向，不用于 series identity。
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P2：.selected / .board-name 为旧独立实现死类，删除（选中行由 .row-selected 表达，名称由 name-cell 表达）。// A 股语义：正=红(up) / 负=绿(down) / 0=null=中性(flat)。仅用于行情方向，不用于 series identity。
 .up {
   color: v.$color-up;
 }
@@ -376,22 +363,7 @@
   color: v.$color-text-dim;
 }
 
-.add-btn {
-  border: 1px solid v.$color-border;
-  background: transparent;
-  color: v.$color-muted;
-  border-radius: 6px;
-  padding: 3px 8px;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.add-btn:hover {
-  border-color: v.$color-brand;
-  color: v.$color-brand;
-}
-
-// ===== 比较区 =====
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P2：.add-btn 为旧独立实现死类，删除（加入对比走全局 compare-btn）。// ===== 比较区 =====
 .compare-section {
   background: v.$color-panel-2;
   border: 1px solid v.$color-border;
@@ -664,9 +636,11 @@
 
 // ===== [R3C] Explorer 页面 =====
 .explorer-page {
-  max-width: 1200px;
-  margin: 0 auto;
-  padding: 24px 20px 40px;
+  width: 100%;
+  max-width: none;
+  margin: 0;
+  // 与行情工作台对齐：水平 gutter = 16px（Market .toolbar 同值），不再 1200px 居中微站。
+  padding: 16px 16px 40px;
 }
 
 .concept-note {
@@ -731,172 +705,11 @@
   border-color: v.$color-brand-hover;
 }
 
-// [PANJI-REVIEW-UI-UNIFY] slim meta bar（与 StrategyDataTable 同视觉）：
-// 结果数 + 激活筛选 chips + 快速筛选 ▾ + 清除筛选。独立 filter-panel 已删除。
-.explorer-meta-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: 8px;
-  min-height: 34px;
-  padding: 4px 10px;
-  margin-bottom: 10px;
-  border: 1px solid v.$color-border-soft;
-  border-radius: 7px;
-  background: #121720;
-  color: v.$color-muted;
-  font-size: 12px;
-}
-
-.explorer-meta-left {
-  display: inline-flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.explorer-result-count {
-  color: v.$color-text;
-  font-variant-numeric: tabular-nums;
-}
-
-.explorer-filter-chips {
-  display: inline-flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 5px;
-}
-
-.filter-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  height: 22px;
-  padding: 0 4px 0 8px;
-  border: 1px solid rgba(v.$color-brand, 0.38);
-  border-radius: 999px;
-  background: rgba(v.$color-brand, 0.1);
-  color: #9ff3e0;
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.filter-chip:hover {
-  border-color: v.$color-brand;
-  background: rgba(v.$color-brand, 0.16);
-  color: #d3fff4;
-}
-
-.filter-chip-text {
-  white-space: nowrap;
-}
-
-.filter-chip-x {
-  display: inline-grid;
-  place-items: center;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  font-size: 12px;
-  color: inherit;
-}
-
-.filter-chip:hover .filter-chip-x {
-  background: rgba(v.$color-brand, 0.22);
-}
-
-.explorer-meta-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.quick-filter {
-  position: relative;
-}
-
-.quick-filter-btn {
-  height: 24px;
-  padding: 0 10px;
-  border: 1px solid v.$color-border;
-  border-radius: 6px;
-  background: transparent;
-  color: v.$color-muted;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.quick-filter-btn:hover {
-  border-color: v.$color-brand;
-  color: v.$color-brand;
-}
-
-.quick-filter-menu {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 4px);
-  z-index: 60;
-  min-width: 148px;
-  padding: 5px;
-  border: 1px solid v.$color-border;
-  border-radius: 8px;
-  background: v.$color-panel-2;
-  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.45);
-}
-
-.quick-filter-item {
-  display: block;
-  width: 100%;
-  padding: 6px 8px;
-  border: 0;
-  border-radius: 6px;
-  background: transparent;
-  color: v.$color-muted;
-  font-size: 12px;
-  text-align: left;
-  cursor: pointer;
-}
-
-.quick-filter-item:hover {
-  background: rgba(v.$color-brand, 0.1);
-  color: v.$color-brand;
-}
-
-.clear-filters-btn {
-  height: 24px;
-  padding: 0 10px;
-  border: 0;
-  background: transparent;
-  color: #7994d9;
-  font-size: 12px;
-  cursor: pointer;
-}
-
-.clear-filters-btn:disabled {
-  opacity: 0.35;
-  cursor: default;
-}
-
-// 列筛选弹层（条件：区间 / ≥ / ≤ / =；最终映射为 <col>_min / <col>_max）
-.filter-popover {
-  position: fixed;
-  z-index: 500;
-  width: 260px;
-  padding: 11px;
-  border: 1px solid v.$color-border;
-  border-radius: 8px;
-  background: v.$color-panel-2;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, 0.45);
-}
-
-.filter-pop-title {
-  margin-bottom: 9px;
-  font-size: 12px;
-  font-weight: 700;
-  color: v.$color-text;
-}
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P2：旧的第二套 Review table/filter chrome 已删除。
+// 表格 / 筛选 / 分页 / popover 视觉 owner 唯一 = global.scss（data-table / interactive-table /
+// compact-table / th-shell / th-sort / th-filter / table-meta-bar / filter-chip /
+// table-pager / column-filter-popover …）。下方仅保留 Review 专用的列筛选弹层内部控件
+// （filter-mode* / filter-field / filter-input）与详情 / 对比 / 图表 domain 样式。
 
 .filter-mode-group {
   display: flex;
@@ -943,55 +756,8 @@
   text-align: right;
 }
 
-.filter-pop-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 7px;
-  margin-top: 4px;
-}
-
-.pagination {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
-  margin: 14px 0;
-}
-
-.page-info {
-  font-size: 13px;
-  color: v.$color-muted;
-  font-variant-numeric: tabular-nums;
-}
-
-.page-btn {
-  padding: 5px 12px;
-  border: 1px solid v.$color-border;
-  background: transparent;
-  color: v.$color-muted;
-  border-radius: 7px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.page-btn:hover:not(:disabled) {
-  border-color: v.$color-brand;
-  color: v.$color-text;
-}
-
-.page-btn:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.page-size {
-  padding: 5px 8px;
-  border: 1px solid v.$color-border;
-  border-radius: 7px;
-  background: v.$color-panel-2;
-  color: v.$color-text;
-  font-size: 13px;
-}
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P2：分页 / popover actions 视觉 owner = global.scss
+// （table-pager / table-page-size / column-filter-popover 的 filter-pop-actions）。旧 module 副本删除。
 
 .detail-section {
   margin-top: 16px;
@@ -1084,96 +850,9 @@
   margin-top: 10px;
 }
 
-// 表格：可排序表头 / 操作列 / 选中行
-// [PANJI-REVIEW-UI-UNIFY] 排序区与筛选区是两个独立点击区域（.sort-btn 排序 /.th-filter 筛选）。
-.th-sort {
-  text-align: right;
-  font-weight: 600;
-  color: v.$color-muted;
-  white-space: nowrap;
-}
-
-.th-head {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 4px;
-  height: 42px;
-}
-
-.table th:first-child .th-head {
-  justify-content: flex-start;
-}
-
-.th-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  word-break: keep-all;
-}
-
-// 列筛选 funnel：常显 + 三态（与 global.scss .th-filter 同视觉，CSS module 无法跨文件复用）
-.th-filter {
-  position: relative;
-  display: inline-grid;
-  place-items: center;
-  flex: none;
-  width: 24px;
-  height: 24px;
-  border: 1px solid #2b3446;
-  border-radius: 6px;
-  background: #141a24;
-  color: #7b8698;
-  cursor: pointer;
-  transition: border-color .12s ease, background .12s ease, color .12s ease;
-}
-
-.th-filter:hover {
-  border-color: #465677;
-  background: #1d2531;
-  color: #c4cfe2;
-}
-
-.th-filter.active {
-  border-color: v.$color-brand;
-  background: rgba(v.$color-brand, 0.12);
-  color: v.$color-brand;
-}
-
-.th-filter.active::after {
-  content: '';
-  position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: v.$color-brand;
-  box-shadow: 0 0 0 1.5px #171c25;
-}
-
-.sort-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  min-width: 0;
-  background: none;
-  border: none;
-  color: inherit;
-  font: inherit;
-  cursor: pointer;
-  padding: 0;
-}
-
-.sort-btn:hover {
-  color: v.$color-text;
-}
-
-.sort-ind {
-  color: v.$color-brand;
-  font-size: 11px;
-  margin-left: 2px;
-}
+// [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX2] P2：模块版表头 chrome（.th-sort/.th-head/.th-label/
+// .th-filter/.sort-btn/.sort-ind）已删除；排序/筛选/表头视觉唯一 owner = global.scss
+// （th-shell / th-sort / th-label / sort-icon / th-filter）。以下仅保留 Review 列表单元格类。
 
 .th-op {
   text-align: center;

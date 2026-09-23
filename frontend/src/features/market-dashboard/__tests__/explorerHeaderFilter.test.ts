@@ -26,7 +26,6 @@ import {
   FILTER_COLUMN_BY_FIELD,
   filterKeysForColumn,
   isExplorerColumnFiltered,
-  MA5_PRESETS,
   NUMERIC_FILTER_KEYS,
   parseIndustryExplorerSearch,
   serializeExplorerState,
@@ -148,19 +147,13 @@ test('D. 清除单列筛选删除对应 URL params，其余保留', () => {
   assert.ok(serialized.includes('ma10_min=0.5'), `未清除的 ma10_min 必须保留，实际 ${serialized}`)
 })
 
-// ===== E. presets =====
-test('E. 快速筛选仍调用原有 MA5_PRESETS.filters', () => {
-  assert.equal(MA5_PRESETS.length, 4, '不得删除既有 preset')
-  assert.match(PAGE_SRC, /MA5_PRESETS\.map/, '快速筛选菜单必须复用 MA5_PRESETS')
-  assert.match(PAGE_SRC, /applyPatch\(\{ filters: p\.filters \}\)/, 'preset 仍走原 applyPatch(filters)')
-  assert.match(PAGE_SRC, /data-testid="quick-filter-btn"/)
-  assert.ok(PAGE_SRC.includes('快速筛选'), '入口文案应为 快速筛选')
-  assert.ok(!PAGE_CODE.includes('preset-btn'), '旧 preset 按钮样式不得复用')
-
-  const preset = MA5_PRESETS[0]
-  const next = updateExplorerState(parse(''), { filters: preset.filters })
-  const serialized = serializeExplorerState(next, 'industry').toString()
-  assert.ok(serialized.includes('ma5_min=0.8'), `MA5 ≥ 80% 应写 ma5_min=0.8，实际 ${serialized}`)
+// ===== E. 快速筛选已删除（无第二套 preset）=====
+test('E. 快速筛选 / MA5_PRESETS 菜单已从 Review 移除', () => {
+  assert.ok(!PAGE_SRC.includes('MA5_PRESETS'), 'MA5_PRESETS 不得再被渲染')
+  assert.ok(!PAGE_SRC.includes('quick-filter'), '不得保留 quick-filter 状态/菜单接线')
+  assert.ok(!PAGE_SRC.includes('presetOpen'), '不得保留 preset 弹层状态')
+  assert.ok(!PAGE_SRC.includes('quickFilterRef'), '不得保留 quick-filter 外部点击 ref')
+  assert.match(TABLE_SRC, /data-testid=\{`filter-\$\{filterColumn\}`\}/, '筛选只走列 funnel')
 })
 
 // ===== F. 排序不变 =====
@@ -174,14 +167,19 @@ test('F. 排序行为不变（三分支 onSort 保留）', () => {
   assert.ok(serialized.includes('sort=ma20') && serialized.includes('direction=asc'))
 })
 
-// ===== G. slim meta bar =====
-test('G. slim meta bar：结果数 + chips + 快速筛选 ▾ + 清除筛选', () => {
-  assert.match(PAGE_SRC, /data-testid="explorer-meta-bar"/)
-  assert.match(PAGE_SRC, /data-testid="explorer-filter-chips"/)
-  assert.match(PAGE_SRC, /className=\{styles\['filter-chip'\]\}/)
+// ===== G. meta bar 复用 global.scss 表格 chrome（无第二套 Review 实现）=====
+test('G. slim meta bar：复用 table-meta-bar + 全局 filter-chip，无 kebab module 查找', () => {
+  // 复用行情 table chrome 的 meta bar / chips 视觉 owner
+  assert.match(PAGE_SRC, /className="table-meta-bar"/, 'meta bar 复用全局 table-meta-bar')
+  assert.match(PAGE_SRC, /className="filter-chip"/, 'chips 复用全局 filter-chip')
+  assert.ok(!PAGE_SRC.includes("styles['filter-chip']"), 'filter-chip 必须走全局类，不得用 kebab module 查找')
+  // 旧 module 副本已从 dashboard.module.scss 删除（P2）
+  assert.ok(!MODULE_CODE.includes('.explorer-meta-bar'), '旧 module .explorer-meta-bar 必须删除')
+  assert.ok(!MODULE_CODE.includes('.explorer-filter-chips'), '旧 module .explorer-filter-chips 必须删除')
+  assert.ok(!MODULE_CODE.includes('.filter-chip'), '旧 module .filter-chip 副本必须删除（全局才是 owner）')
+  // 既有契约保持
   assert.match(PAGE_SRC, /data-testid="clear-all-filters"/)
   assert.match(PAGE_SRC, /clearAllStatePatch\(\)/, '清除排序与筛选必须走既有 reset patch（filters + sort + direction）')
-  assert.ok(PAGE_SRC.includes('清除排序与筛选'), '清除按钮文案必须为「清除排序与筛选」')
   assert.match(PAGE_SRC, /activeExplorerFilterChips\(parsed\.filters\)/, 'chips 必须由 URL 派生')
   assert.match(PAGE_SRC, /isExplorerColumnFiltered\(column, parsed\.filters\)/, 'funnel active 态必须由 URL 派生')
 })
