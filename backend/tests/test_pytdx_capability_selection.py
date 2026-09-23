@@ -49,6 +49,7 @@ class _FakeApi:
     quotes_fail: set = set()
     history_fail: set = set()
     history_call_log: list = []
+    raise_programming_error: bool = False
 
     def __init__(self, raise_exception: bool = True, auto_retry: bool = False) -> None:
         self.host: str | None = None
@@ -77,6 +78,8 @@ class _FakeApi:
         ]
 
     def get_xdxr_info(self, market, code):  # noqa: ANN001, ANN201
+        if type(self).raise_programming_error:
+            raise TypeError("injected programming error")
         type(self).xdxr_call_log.append(self.host)
         if self.host in type(self).xdxr_fail:
             raise TdxFunctionCallError("calling function error")
@@ -118,6 +121,7 @@ def _reset(monkeypatch: pytest.MonkeyPatch) -> None:
     _FakeApi.xdxr_fail = set()
     _FakeApi.quotes_fail = set()
     _FakeApi.history_fail = set()
+    _FakeApi.raise_programming_error = False
     _FakeApi.connect_log = []
     _FakeApi.bars_call_log = []
     _FakeApi.xdxr_call_log = []
@@ -707,7 +711,7 @@ def test_history_connect_failure_does_not_consume_business_attempt() -> None:
 
 # RC3 #6：非 bars 全部 connect 失败 → 外层 operation 是业务 operation，
 #       不得泄漏裸 operation="connect"；cause.operation == "connect"。
-def test_nonbars_all_connect_fail_outer_operation_preserved() -> None:
+def test_nonbars_all_connect_fail_outer_operation_preserved(monkeypatch) -> None:
     caps = _caps(
         ("A", False, True, None),
         ("B", False, True, None),
@@ -718,9 +722,77 @@ def test_nonbars_all_connect_fail_outer_operation_preserved() -> None:
         capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
     )
     _FakeApi.connect_fail = {"A", "B", "C"}
+    sleeps: list = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
     with pytest.raises(mod.PytdxSourceError) as ei:
         _xdxr(adapter)
     # 外层 operation 是业务 operation，不是裸 "connect"
     assert ei.value.operation != "connect"
     # cause.operation == "connect"（RC3 public taxonomy）
     assert ei.value.cause is not None and ei.value.cause.operation == "connect"
+    # connect 层耗尽直接退出，不进入业务 attempt，因此零 retry_delay
+    assert sleeps == []
+
+
+# ════════════════════════════════════════════════════════════════════════
+# PANJI-TDX-PARITY-01-FIX3 纠正（reviewer 第三轮）：恢复 non-bars retry_delay 退避 + 失败日志
+# ════════════════════════════════════════════════════════════════════════
+
+# RC1/XDXR：3 次业务 source failure → 3 次 business call + 2 次 retry_delay 退避
+def test_xdxr_business_failure_retries_with_backoff(monkeypatch) -> None:
+    caps = _caps(
+        ("A", False, True, None),
+        ("B", False, True, None),
+        ("C", False, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709), ("C", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.xdxr_fail = {"A", "B", "C"}
+    sleeps: list = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+    with pytest.raises(mod.PytdxSourceError):
+        _xdxr(adapter)
+    # max_retries=3 次业务调用（每次都成功建连后 source fail）；最后一次后不再 sleep
+    assert len(_FakeApi.xdxr_call_log) == 3
+    assert sleeps == [adapter.retry_delay, adapter.retry_delay]
+
+
+# RC1/Quote：第一次业务 source failure、第二次成功 → 恰好 1 次 retry_delay
+def test_quote_business_failure_then_success_sleeps_once(monkeypatch) -> None:
+    caps = _caps(
+        ("A", True, True, True),
+        ("B", True, True, True),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709), ("B", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.quotes_fail = {"A"}
+    sleeps: list = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+    result = adapter.get_security_quotes(["600519"])
+    assert result is not None
+    # A 业务失败 → sleep → B 成功
+    assert _FakeApi.quotes_call_log == ["A", "B"]
+    assert sleeps == [adapter.retry_delay]
+
+
+# RC1/编程错误：原样上抛，零 retry_delay、零 provider 失败日志被当作 outage
+def test_nonbars_programming_error_propagates_without_sleep(monkeypatch) -> None:
+    caps = _caps(
+        ("A", False, True, None),
+    )
+    adapter = PytdxAdapter(
+        servers=[("A", 7709)],
+        capabilities=caps, max_retries=3, capability_cooldown_seconds=1800,
+    )
+    _FakeApi.raise_programming_error = True
+    sleeps: list = []
+    monkeypatch.setattr(mod.time, "sleep", lambda s: sleeps.append(s))
+    # 编程错误（TypeError）必须原样炸出，绝不 retry / sleep / failover
+    with pytest.raises(TypeError):
+        _xdxr(adapter)
+    assert sleeps == []
+    _FakeApi.raise_programming_error = False

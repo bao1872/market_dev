@@ -1383,6 +1383,12 @@ class PytdxAdapter(Exchange):
           成功连接后的 API 调用次数**，不是 TCP server connect 次数。
         - 不做 half-open、不做 EWMA 动态排名（保持静态稳定顺序）、不污染 bars 运行时健康；
           cooldown 仍走 ``capability_cooldown_seconds``（默认 1800s），factor / XDXR 合同不变。
+        - 成功建连后的业务 source failure 之间恢复 baseline ``retry_delay`` 退避（最后一次
+          业务 attempt 后、connect 耗尽退出、programming error 原样上抛 均**不** sleep）；
+          sleep 必须在 ``_io_lock`` 锁外执行。
+        - 恢复 baseline 的 ``PYTDX_SOURCE_FAILURE`` 观测日志（含 operation / symbol /
+          market / period / attempt/max_retries / server / 异常类型 / error），仅记录
+          「成功建连后的 provider 失败」，绝不把编程错误记为 provider outage（RC3）。
         - network / socket / protocol / ``calling function error`` → source failure →
           排除该 server + capability cooldown + advance + disconnect → 换下一台。
         - connect 层耗尽（全部 server connect 失败）→ 包装为本次业务 operation 失败，
@@ -1400,7 +1406,8 @@ class PytdxAdapter(Exchange):
         # （不持久化，新业务调用重新从空集合开始）。
         source_failed_servers: set[tuple[str, int]] = set()
 
-        for _attempt in range(1, self.max_retries + 1):
+        for attempt in range(1, self.max_retries + 1):
+            call_failed = False
             try:
                 with self._io_lock:
                     # [RC2/restore] 一次业务 attempt 内完整扫描 eligible pool 建连；
@@ -1420,6 +1427,9 @@ class PytdxAdapter(Exchange):
                         if not _is_expected_tdx_source_failure(exc):
                             # [parity RC3] 编程/契约错误：原样上抛，不冷却、不轮转、不 failover。
                             raise
+                        # [parity RC3 / FIX3] 成功建连后的业务 source failure：排除该 server
+                        # + capability cooldown + advance + disconnect，并恢复 baseline 的
+                        # PYTDX_SOURCE_FAILURE 观测日志 + retry_delay 退避。
                         last_exc = exc
                         last_source_exc = exc
                         last_source_server = attempt_server
@@ -1428,6 +1438,21 @@ class PytdxAdapter(Exchange):
                         source_failed_servers.add(attempt_server)
                         self._advance_server_after_failure(attempt_server)
                         self.disconnect()
+                        call_failed = True
+                        logger.warning(
+                            "PYTDX_SOURCE_FAILURE "
+                            "operation=%s symbol=%s market=%s period=%s "
+                            "attempt=%s/%s server=%s type=%s error=%s",
+                            operation,
+                            symbol,
+                            market,
+                            period,
+                            attempt,
+                            self.max_retries,
+                            attempt_server,
+                            type(exc).__name__,
+                            exc,
+                        )
                     else:
                         self._record_success(
                             attempt_server,
@@ -1459,6 +1484,11 @@ class PytdxAdapter(Exchange):
                         cause=exc,
                     ) from exc
                 raise
+            # [parity RC3 / FIX3] 仅「成功建连后的业务 source failure」触发 retry_delay 退避；
+            # connect 层耗尽已上抛（不会到此）；programming error 已原样上抛（不会到此）。
+            # sleep 必须在锁外，不得持锁休眠阻塞其他调用方；且最后一次业务 attempt 后不再 sleep。
+            if call_failed and attempt < self.max_retries:
+                time.sleep(self.retry_delay)
 
         # 达到 max_retries 次业务 attempt 仍失败 → 保留真实 source 失败作根因（RC2）。
         if last_source_exc is not None:
