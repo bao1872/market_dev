@@ -15,7 +15,7 @@
 // - 右详情复用现有 canonical：useMarketScopeDetail + BreadthChart（6-series）。不新建详情实现 / API。
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useMarketDashboard, useMarketScopeExplorer, useMarketScopeDetail, useMarketScopeExplorerUniverse } from '@/hooks/useMarketDashboardApi'
+import { useMarketScopeExplorer, useMarketScopeDetail, useMarketScopeExplorerUniverse } from '@/hooks/useMarketDashboardApi'
 import { useCompareBasketStore } from '@/store/compareBasket'
 import { extractMarketDashboardError } from '@/api/marketDashboard'
 import BreadthChart, { type BreadthLineSpec } from './BreadthChart'
@@ -105,8 +105,6 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     [query.scope_type, isIndustry, parsed.hierarchy_level, parsed.q, parsed.sort, parsed.direction, parsed.filters],
   )
   const railUniverse = useMarketScopeExplorerUniverse(railUniverseQuery, !!parsed.board_id)
-  // 顶部「数据日期」复用 canonical 大盘响应（与 MarketDashboardPage 同源，不另造日期）。
-  const dashboard = useMarketDashboard()
   const detail = useMarketScopeDetail(parsed.board_id, DETAIL_DAYS)
 
   // ---- 应用 patch（除显式 page 外一律回到第 1 页）----
@@ -513,7 +511,7 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
 
   return (
     <div className={styles['explorer-page']} data-testid="explorer-page">
-      <ReviewHeader projectionDate={dashboard.data?.projection_trade_date} />
+      <ReviewHeader projectionDate={explorer.data?.projection_trade_date} />
 
       {isIndustry ? (
         <div className={styles['level-selector']}>

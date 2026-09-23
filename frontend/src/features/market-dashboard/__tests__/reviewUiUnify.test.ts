@@ -88,6 +88,21 @@ test('P1-1. 大盘页与行业/概念页共享同一 ReviewHeader（统一 shell
 })
 
 // ===========================================================================
+// P1 (final). 不重复 query：行业/概念页复用 explorer 响应日期，不再调用 useMarketDashboard
+// ===========================================================================
+test('P1-final. 不重复 query：ReviewHeader 数据日期复用 explorer 响应，且不调用 useMarketDashboard', () => {
+  assert.ok(
+    !PAGE_SOURCE.includes('useMarketDashboard('),
+    'ScopeExplorerPage 不得再调用 useMarketDashboard()（避免为顶部显示一个日期而额外拉全量大盘数据）',
+  )
+  assert.match(
+    PAGE_SOURCE,
+    /<ReviewHeader projectionDate=\{explorer\.data\?\.projection_trade_date\} \/>/,
+    'ReviewHeader 数据日期复用 explorer 响应（与 MarketDashboardPage 同源，不另造日期 / 不重复 query）',
+  )
+})
+
+// ===========================================================================
 // R11 / P1-3. rail = 同一份 server 过滤+排序结果「全集」（前端分页拉全，不前端 slice）
 // ===========================================================================
 test('R11. rail 渲染筛选排序 universe 全集（前端分页拉全，不前端 slice，仅详情态请求）', () => {
