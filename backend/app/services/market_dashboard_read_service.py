@@ -58,6 +58,18 @@ class MarketDailyRow:
     ma120_above_count: int
     ma120_valid_count: int
     equal_weight_return: float | None
+    # [PANJI-MARKET-OVERVIEW] 快照/轨迹 additive 字段（DB 可空；缺则 None）
+    advance_count: int | None = None
+    decline_count: int | None = None
+    flat_count: int | None = None
+    change_valid_count: int | None = None
+    turnover_amount: float | None = None
+    turnover_valid_count: int | None = None
+    limit_up_count: int | None = None
+    limit_down_count: int | None = None
+    sse_close: float | None = None
+    szse_close: float | None = None
+    chinext_close: float | None = None
 
 
 @dataclass
@@ -145,8 +157,30 @@ def _point(r, idx, *, with_ma120: bool = True) -> dict:
     return point
 
 
+def _market_point(r: MarketDailyRow, idx, *, with_ma120: bool = True) -> dict:
+    """[PANJI-MARKET-OVERVIEW] 市场轨迹点：在核心 MA/EW 基础上叠加快照/轨迹 additive 字段。
+
+    与 _point 分离：scope/compare 视图复用 _point（其 row/schema 不含 overview 字段）。
+    """
+    point = _point(r, idx, with_ma120=with_ma120)
+    point.update(
+        {
+            "sse_close": _round2(r.sse_close),
+            "szse_close": _round2(r.szse_close),
+            "chinext_close": _round2(r.chinext_close),
+            "advance_count": r.advance_count,
+            "decline_count": r.decline_count,
+            "flat_count": r.flat_count,
+            "turnover_amount": r.turnover_amount,
+            "limit_up_count": r.limit_up_count,
+            "limit_down_count": r.limit_down_count,
+        }
+    )
+    return point
+
+
 def build_market_view(rows: list[MarketDailyRow]) -> dict:
-    """全市场视图：cards（最新）+ series（250 日，含 MA5/10/20/50/120 + EW index）。"""
+    """全市场视图：cards（最新）+ series（250 日，含 MA5/10/20/50/120 + EW index + [PANJI-MARKET-OVERVIEW] 快照/轨迹）。"""
     if not rows:
         return {
             "projection_trade_date": None,
@@ -155,17 +189,55 @@ def build_market_view(rows: list[MarketDailyRow]) -> dict:
                 "ma20": None,
                 "ma50": None,
                 "equal_weight_index": None,
+                # [PANJI-MARKET-OVERVIEW] 空态所有新字段均为 None（不伪造 0）
+                "sse_close": None, "sse_change_pct": None,
+                "szse_close": None, "szse_change_pct": None,
+                "chinext_close": None, "chinext_change_pct": None,
+                "advance_count": None, "decline_count": None, "flat_count": None,
+                "turnover_amount": None, "limit_up_count": None, "limit_down_count": None,
             },
             "series": [],
         }
     ew = _ew_index([r.equal_weight_return for r in rows])
-    series = [_point(r, idx) for r, idx in zip(rows, ew, strict=True)]
+    series = [_market_point(r, idx) for r, idx in zip(rows, ew, strict=True)]
+
+    # [PANJI-MARKET-OVERVIEW] 指数 rebasing（首有效显示点=100；分别归一；read-time 派生，不持久化）
+    for raw_key, rebased_key in (
+        ("sse_close", "sse_rebased"),
+        ("szse_close", "szse_rebased"),
+        ("chinext_close", "chinext_rebased"),
+    ):
+        first = next((p[raw_key] for p in series if p.get(raw_key) is not None), None)
+        for p in series:
+            raw = p.get(raw_key)
+            p[rebased_key] = (raw / first * 100.0) if (first is not None and raw is not None) else None
+
     last = rows[-1]
+    prev = rows[-2] if len(rows) >= 2 else None
+
+    def _chg(cur, before):
+        if cur is None or before is None or before == 0:
+            return None
+        return round(cur / before - 1.0, 4)
+
     cards = {
         "ma5": _round4(_ratio(last.ma5_above_count, last.ma5_valid_count)),
         "ma20": _round4(_ratio(last.ma20_above_count, last.ma20_valid_count)),
         "ma50": _round4(_ratio(last.ma50_above_count, last.ma50_valid_count)),
         "equal_weight_index": _round2(ew[-1]),
+        # [PANJI-MARKET-OVERVIEW] 快照 6 卡
+        "sse_close": _round2(last.sse_close),
+        "sse_change_pct": _chg(last.sse_close, prev.sse_close if prev else None),
+        "szse_close": _round2(last.szse_close),
+        "szse_change_pct": _chg(last.szse_close, prev.szse_close if prev else None),
+        "chinext_close": _round2(last.chinext_close),
+        "chinext_change_pct": _chg(last.chinext_close, prev.chinext_close if prev else None),
+        "advance_count": last.advance_count,
+        "decline_count": last.decline_count,
+        "flat_count": last.flat_count,
+        "turnover_amount": last.turnover_amount,
+        "limit_up_count": last.limit_up_count,
+        "limit_down_count": last.limit_down_count,
     }
     return {
         "projection_trade_date": last.trade_date.isoformat(),
@@ -341,6 +413,18 @@ def _market_row(r: MarketDashboardMarketDaily) -> MarketDailyRow:
         ma120_above_count=r.ma120_above_count,
         ma120_valid_count=r.ma120_valid_count,
         equal_weight_return=r.equal_weight_return,
+        # [PANJI-MARKET-OVERVIEW]
+        advance_count=r.advance_count,
+        decline_count=r.decline_count,
+        flat_count=r.flat_count,
+        change_valid_count=r.change_valid_count,
+        turnover_amount=r.turnover_amount,
+        turnover_valid_count=r.turnover_valid_count,
+        limit_up_count=r.limit_up_count,
+        limit_down_count=r.limit_down_count,
+        sse_close=r.sse_close,
+        szse_close=r.szse_close,
+        chinext_close=r.chinext_close,
     )
 
 

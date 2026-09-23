@@ -10,13 +10,42 @@ from pydantic import BaseModel, Field
 
 
 class MarketDashboardCard(BaseModel):
+    """大盘快照卡。
+
+    - 既有 MA5 / MA20 / MA50 / 全市场 EW index：供前端「市场宽度」chart header KPI chips 复用。
+    - [PANJI-MARKET-OVERVIEW] 新增强势 6 卡：三大指数（点位 + 当日涨跌幅）+ 涨跌家数 + 全市场成交额
+      + 涨停/跌停家数。指数当日涨跌幅由 read service 用前收（上一投影交易日收盘）派生。
+    未构建投影 / 空返回 -> 字段为 None（前端显示 0% / —，绝不伪造 0）。
+    """
+
     ma5: float | None = None
     ma20: float | None = None
     ma50: float | None = None
     equal_weight_index: float | None = None
 
+    # [PANJI-MARKET-OVERVIEW] 快照 6 卡
+    sse_close: float | None = None
+    sse_change_pct: float | None = None
+    szse_close: float | None = None
+    szse_change_pct: float | None = None
+    chinext_close: float | None = None
+    chinext_change_pct: float | None = None
+    advance_count: int | None = None
+    decline_count: int | None = None
+    flat_count: int | None = None
+    turnover_amount: float | None = None
+    limit_up_count: int | None = None
+    limit_down_count: int | None = None
+
 
 class MarketDashboardPoint(BaseModel):
+    """250 日市场轨迹 chart 单点。
+
+    - 既有 ma5/ma10/ma20/ma50/ma120 + ew_index：市场宽度轨迹。
+    - [PANJI-MARKET-OVERVIEW] 新增：三大指数原始收盘（sse/szse/chinext_close）、read-time 派生 rebased
+      （首有效显示点=100，分别归一，不持久化）、涨跌家数、全市场成交额、涨停/跌停家数。
+    """
+
     trade_date: str
     ma5: float | None = None
     ma10: float | None = None
@@ -24,6 +53,20 @@ class MarketDashboardPoint(BaseModel):
     ma50: float | None = None
     ma120: float | None = None
     ew_index: float | None = None
+
+    # [PANJI-MARKET-OVERVIEW] 250 日轨迹 additive 字段
+    sse_close: float | None = None
+    szse_close: float | None = None
+    chinext_close: float | None = None
+    sse_rebased: float | None = None
+    szse_rebased: float | None = None
+    chinext_rebased: float | None = None
+    advance_count: int | None = None
+    decline_count: int | None = None
+    flat_count: int | None = None
+    turnover_amount: float | None = None
+    limit_up_count: int | None = None
+    limit_down_count: int | None = None
 
 
 class MarketDashboardResponse(BaseModel):

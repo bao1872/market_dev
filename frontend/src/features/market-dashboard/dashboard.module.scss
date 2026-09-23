@@ -510,6 +510,105 @@
   color: v.$color-text-dim;
 }
 
+// ===== [PANJI-MARKET-OVERVIEW] Layer 1 快照 6 卡 =====
+.snapshot-grid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.snapshotPoint {
+  font-size: 22px;
+  font-weight: 700;
+  color: v.$color-text;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+
+.snapshotChange {
+  margin-top: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.snapshotCounts {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+// ===== [PANJI-MARKET-OVERVIEW] Layer 2 宽度 KPI chips =====
+.kpiRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.kpiChip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  background: v.$color-panel-3;
+  border: 1px solid v.$color-border;
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12px;
+}
+
+.kpiChipLabel {
+  color: v.$color-muted;
+}
+
+.kpiChipValue {
+  color: v.$color-text;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+// ===== [PANJI-MARKET-OVERVIEW] Layer 3 历史 2×2 面板 =====
+.historyGrid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+  align-items: start;
+  margin-bottom: 16px;
+}
+
+.stateBox {
+  background: v.$color-panel-2;
+  border: 1px solid v.$color-border;
+  border-radius: v.$radius-card;
+  padding: 24px;
+  text-align: center;
+  color: v.$color-muted;
+  font-size: 13px;
+  margin-bottom: 16px;
+}
+
+// 快照 6 卡响应式（仅保证常见桌面宽度）
+@media (max-width: 1280px) {
+  .snapshot-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .snapshot-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .historyGrid {
+    grid-template-columns: 1fr;
+  }
+}
+
+
 // ===== [R3B] 大盘页：行业 / 概念 summary（2 列）=====
 .summary-grid {
   display: grid;

@@ -36,6 +36,7 @@ from app.repositories.market_dashboard_projection_repository import (
     replace_dashboard_projection,
 )
 from app.services import market_dashboard_projection_service as projection_service
+from app.services.market_dashboard_index_facts import fetch_market_index_facts
 
 
 class ProjectionInputChangedError(RuntimeError):
@@ -106,12 +107,22 @@ async def rebuild_market_dashboard_projection(
     Returns: F1B :class:`ProjectionWriteResult`。
     Raises: :class:`ProjectionInputChangedError`（membership 被切换）；上游 ValueError/RuntimeError。
     """
+    # [PANJI-MARKET-OVERVIEW] 事务外拉取三大指数 + 880006（失败 → 抛异常 fail-closed 保留旧投影）
+    index_facts = await fetch_market_index_facts(end_date)
+
     # ① READ / COMPUTE —— 独立 REPEATABLE READ + READ ONLY snapshot，随后完全关闭
     async with session_factory() as read_session:
         async with read_session.begin():
             await read_session.execute(_READ_SNAPSHOT_SQL)
             context = await projection_service.prepare_projection_context(read_session, end_date)
-            market_records = projection_service.build_market_records(context)
+            market_records = projection_service.build_market_records(context, index_facts)
+
+    # [PANJI-MARKET-OVERVIEW] fail-closed：头条投影日必须完整；缺失则保留旧投影，绝不写残缺
+    last_date = context.display_dates[-1]
+    if last_date not in index_facts:
+        raise RuntimeError(
+            f"market overview: pytdx index facts 缺失头条投影日 {last_date} → fail-closed 保留旧投影"
+        )
 
     _validate_context_invariants(context)
 

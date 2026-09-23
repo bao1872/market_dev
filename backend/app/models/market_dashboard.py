@@ -88,6 +88,19 @@ class MarketDashboardMarketDaily(Base):
     ma120_valid_count: Mapped[int] = mapped_column(Integer(), nullable=False)
     ma120_above_count: Mapped[int] = mapped_column(Integer(), nullable=False)
 
+    # [PANJI-MARKET-OVERVIEW] additive 快照 / 轨迹列（全部可空，旧行 NULL 兼容）
+    advance_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    decline_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    flat_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    change_valid_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    turnover_amount: Mapped[float | None] = mapped_column(Float(), nullable=True)
+    turnover_valid_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    limit_up_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    limit_down_count: Mapped[int | None] = mapped_column(Integer(), nullable=True)
+    sse_close: Mapped[float | None] = mapped_column(Float(), nullable=True)
+    szse_close: Mapped[float | None] = mapped_column(Float(), nullable=True)
+    chinext_close: Mapped[float | None] = mapped_column(Float(), nullable=True)
+
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), nullable=False, server_default=sa_func.now()
     )

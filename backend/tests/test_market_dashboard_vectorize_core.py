@@ -52,10 +52,13 @@ def _long_from_bars(bars) -> pd.DataFrame:
         date_col = "trade_date" if "trade_date" in g.columns else g.columns[0]
         g = g.rename(columns={date_col: "trade_date"})
         g.insert(0, "instrument_id", iid)
-        g = g[["instrument_id", "trade_date", "close", "adj_factor"]]
+        g["amount"] = 1.0  # 测试用占位成交额（生产为 bars_daily.amount）
+        g = g[["instrument_id", "trade_date", "close", "adj_factor", "amount"]]
         frames.append(g)
     if not frames:
-        return pd.DataFrame(columns=["instrument_id", "trade_date", "close", "adj_factor"])
+        return pd.DataFrame(
+            columns=["instrument_id", "trade_date", "close", "adj_factor", "amount"]
+        )
     return pd.concat(frames, ignore_index=True)
 
 

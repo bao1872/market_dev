@@ -8,9 +8,10 @@
 //      breadth 0..1 呈现为 0%..100%）+ EW（right，text.primary，更粗）。
 //   4. ranking summary：industry(L1) / concept(无层级)，lookback 5、limit 5。
 //   5. 未来 Explorer URL（R3B **只生成**链接，R3C 才消费 board_id / hierarchy_level）。
+//   6. [PANJI-MARKET-OVERVIEW] Layer 1 快照 6 卡顺序锁死；Layer 3 历史 2×2 面板 series 规格。
 import { EW_LINE_WIDTH, REVIEW_TOKENS, SERIES_LINE_WIDTH } from './chartTheme'
 import type { FixedScaleRange, LineWidth } from './lineSeriesController'
-import type { HierarchyLevel, ScopeType } from './types'
+import type { HierarchyLevel, ScopeType, BreadthPoint } from './types'
 
 // ===========================================================================
 // 1. 时间范围
@@ -136,5 +137,75 @@ export const MARKET_RANKING_SUMMARIES: readonly MarketRankingSummaryConfig[] = [
     limit: RANKING_SUMMARY_LIMIT,
     seeAllLink: CONCEPT_ALL_LINK,
     explorerLink: buildConceptExplorerLink,
+  },
+]
+
+// ===========================================================================
+// 6. [PANJI-MARKET-OVERVIEW] Layer 1 快照 6 卡（顺序锁死）
+// ===========================================================================
+export const SNAPSHOT_CARD_ORDER = ['sse', 'szse', 'chinext', 'breadth', 'turnover', 'limit'] as const
+export type SnapshotCardKey = (typeof SNAPSHOT_CARD_ORDER)[number]
+
+export const SNAPSHOT_CARD_LABELS: Record<SnapshotCardKey, string> = {
+  sse: '上证指数',
+  szse: '深证成指',
+  chinext: '创业板指',
+  breadth: '涨跌家数',
+  turnover: '全市场成交额',
+  limit: '涨停 / 跌停',
+}
+
+// ===========================================================================
+// 7. [PANJI-MARKET-OVERVIEW] Layer 3 历史 2×2 面板 series 规格（只读 API，前端不重算）
+// ===========================================================================
+export interface HistoryLineSpec {
+  field: keyof BreadthPoint
+  label: string
+  /** 省略则由 shared palette 分配（普通序列绝不使用涨跌色）。 */
+  color?: string
+  /** 仅用于 chart 呈现（如成交额元->亿），不改原始数据。 */
+  transform?: (v: number) => number
+}
+
+export interface HistoryChartSpec {
+  key: string
+  title: string
+  series: readonly HistoryLineSpec[]
+}
+
+/** 元 -> 亿（仅 chart 呈现用）。 */
+const TO_YI = (v: number) => v / 1e8
+
+// 顺序即面板布局：指数 → 涨跌家数 → 成交额 → 涨停/跌停。
+export const MARKET_HISTORY_CHARTS: readonly HistoryChartSpec[] = [
+  {
+    key: 'index',
+    title: '三大指数相对走势（首有效点 = 100，分别归一）',
+    series: [
+      { field: 'sse_rebased', label: '上证', color: REVIEW_TOKENS.status.info },
+      { field: 'szse_rebased', label: '深证', color: REVIEW_TOKENS.status.purple },
+      { field: 'chinext_rebased', label: '创业板', color: REVIEW_TOKENS.brand.primary },
+    ],
+  },
+  {
+    key: 'breadth',
+    title: '涨跌家数',
+    series: [
+      { field: 'advance_count', label: '上涨', color: REVIEW_TOKENS.market.up },
+      { field: 'decline_count', label: '下跌', color: REVIEW_TOKENS.market.down },
+    ],
+  },
+  {
+    key: 'turnover',
+    title: '全市场成交额（亿元）',
+    series: [{ field: 'turnover_amount', label: '成交额', color: REVIEW_TOKENS.brand.primary, transform: TO_YI }],
+  },
+  {
+    key: 'limit',
+    title: '涨停 / 跌停家数',
+    series: [
+      { field: 'limit_up_count', label: '涨停', color: REVIEW_TOKENS.market.up },
+      { field: 'limit_down_count', label: '跌停', color: REVIEW_TOKENS.market.down },
+    ],
   },
 ]

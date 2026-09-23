@@ -20,6 +20,8 @@ export interface BreadthLineSpec {
   breadthPercent?: boolean
   /** 固定价格轴区间（breadth 用 [0,1]）。 */
   fixedScaleRange?: FixedScaleRange
+  /** 仅用于 chart 呈现（如成交额元->亿），不改原始数据。 */
+  transform?: (v: number) => number
 }
 
 export interface ReferenceLine {
@@ -47,7 +49,7 @@ export default function BreadthChart({ points, series, referenceLines, height = 
         lineWidth: spec.lineWidth,
         breadthPercent: spec.breadthPercent,
         fixedScaleRange: spec.fixedScaleRange,
-        data: buildLineData(points, 'trade_date', spec.field),
+        data: buildLineData(points, 'trade_date', spec.field, spec.transform),
       })),
     [points, series],
   )

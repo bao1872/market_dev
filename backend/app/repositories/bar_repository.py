@@ -992,18 +992,19 @@ async def get_dashboard_daily_facts_source(
     start_date: date,
     end_date: date,
 ) -> pd.DataFrame:
-    """Dashboard 专用行情源读取（E1A 长表向量化）：只取 4 列一张长表。
+    """Dashboard 专用行情源读取（E1A 长表向量化）：只取 5 列一张长表。
 
     与 get_daily_bars_batch 的区别：仅 SELECT
-    instrument_id / trade_date / close / adj_factor（不取 open/high/low/volume/amount），
-    返回单一 long DataFrame 而非 dict[instrument_id -> DataFrame]。
+    instrument_id / trade_date / close / adj_factor / amount
+    （不取 open/high/low/volume），返回单一 long DataFrame 而非 dict[instrument_id -> DataFrame]。
 
-    全市场约 5000 股票 × ~369 日 ≈ 185 万行 × 4 列，远小于 9 列版本；
-    后续由 _compute_stock_facts_long 向量化成 stock-day facts 长表。
+    全市场约 5000 股票 × ~369 日 ≈ 185 万行 × 5 列，远小于 9 列版本；
+    后续由 _compute_stock_facts_long 向量化成 stock-day facts 长表；amount 用于
+    全市场成交额聚合（一次读取复用，不再二次扫 bars）。
 
     Args / Returns 同 get_daily_bars_batch 的数据规模意图，仅形态为长表。
     """
-    cols = ["instrument_id", "trade_date", "close", "adj_factor"]
+    cols = ["instrument_id", "trade_date", "close", "adj_factor", "amount"]
     if not instrument_ids:
         return pd.DataFrame(columns=cols)
     try:
@@ -1014,6 +1015,7 @@ async def get_dashboard_daily_facts_source(
                     BarDaily.trade_date,
                     BarDaily.close,
                     BarDaily.adj_factor,
+                    BarDaily.amount,
                 )
                 .where(BarDaily.instrument_id.in_(instrument_ids))
                 .where(BarDaily.trade_date >= start_date)
@@ -1034,6 +1036,49 @@ async def get_dashboard_daily_facts_source(
     # Decimal -> float（便于 pandas 计算）；trade_date 为 Date 列 → python date
     df["close"] = pd.to_numeric(df["close"], errors="coerce")
     df["adj_factor"] = pd.to_numeric(df["adj_factor"], errors="coerce")
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
+    return df
+
+
+async def get_dashboard_daily_amount_source(
+    session: AsyncSession,
+    instrument_ids: list[uuid.UUID],
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    """[PANJI-MARKET-OVERVIEW] 批量查询全市场每日成交额源（一次 SQL 读取整批）。
+
+    返回 long DataFrame: [instrument_id, trade_date, amount]
+    amount 单位：元（bars_daily.amount 为当日成交额）。
+    """
+    cols = ["instrument_id", "trade_date", "amount"]
+    if not instrument_ids:
+        return pd.DataFrame(columns=cols)
+    try:
+        rows = (
+            await session.execute(
+                select(
+                    BarDaily.instrument_id,
+                    BarDaily.trade_date,
+                    BarDaily.amount,
+                )
+                .where(BarDaily.instrument_id.in_(instrument_ids))
+                .where(BarDaily.trade_date >= start_date)
+                .where(BarDaily.trade_date <= end_date)
+                .order_by(BarDaily.instrument_id, BarDaily.trade_date)
+            )
+        ).all()
+    except Exception as exc:
+        logger.warning(
+            "批量查询 dashboard 成交额源失败 instrument_ids=%s: %s", instrument_ids, exc
+        )
+        raise
+
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.DataFrame(rows, columns=cols)
+    df["amount"] = pd.to_numeric(df["amount"], errors="coerce")
     return df
 
 

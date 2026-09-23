@@ -44,18 +44,43 @@ export function buildLineData<T>(
   data: readonly T[],
   timeField: keyof T,
   valueField: keyof T,
+  transform?: (v: number) => number,
 ): LinePoint[] {
   const out: LinePoint[] = []
   for (const row of data) {
     const time = String(row[timeField])
     const v = row[valueField]
     if (typeof v === 'number' && Number.isFinite(v)) {
-      out.push({ time, value: v })
+      out.push({ time, value: transform ? transform(v) : v })
     } else {
       out.push({ time })
     }
   }
   return out
+}
+
+/** 3210.45 -> "3,210.45"，null -> "—"（绝不显示 0）。 */
+export function formatIndex(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—'
+  return value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+/** 1234567 -> "1,234,567"，null -> "—"。 */
+export function formatCount(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—'
+  return Math.round(value).toLocaleString('en-US')
+}
+
+/** 元 -> 亿 / 万亿（仅展示，不改原始数据）。8e11 -> "8,000 亿"；1.2e12 -> "1.20 万亿"；null -> "—"。 */
+export function formatTurnover(value: number | null | undefined): string {
+  if (value === null || value === undefined || Number.isNaN(value)) return '—'
+  if (value >= 1e12) {
+    return `${(value / 1e12).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 万亿`
+  }
+  if (value >= 1e8) {
+    return `${Math.round(value / 1e8).toLocaleString('en-US')} 亿`
+  }
+  return `${Math.round(value).toLocaleString('en-US')} 元`
 }
 
 /** 构造 rankings 请求参数；concept 不传 hierarchy_level，industry 仅在明确层级时传。 */

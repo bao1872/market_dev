@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from uuid import UUID
 
@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.domain.market_dashboard.breadth import WINDOWS, BreadthResult
 from app.repositories import bar_repository
 from app.services import market_dashboard_service as dashboard_service
+from app.services.market_dashboard_index_facts import MarketIndexFacts
 
 # scope projection 每次 JOIN 的日期上限。
 # E2 真实 smoke 证明 all-board × 250 一次 JOIN 峰值 RSS ≈ 1.84 GiB；
@@ -47,6 +48,9 @@ class ProjectionContext:
     membership_long: pd.DataFrame
     board_ids: list[UUID]
     membership_versions: dict[UUID, str]
+    # [PANJI-MARKET-OVERVIEW] 快照/轨迹辅助聚合（一次向量化；默认空，供测试手工构造 context）
+    advance_by_date: dict[date, tuple[int, int, int, int]] = field(default_factory=dict)
+    turnover_by_date: dict[date, tuple[float | None, int]] = field(default_factory=dict)
 
 
 def _none_if_nan(value: float | None) -> float | None:
@@ -71,6 +75,47 @@ def _count_fields(breadth: BreadthResult) -> dict[str, object]:
     return fields
 
 
+def _aggregate_market_overview_long(
+    raw_long: pd.DataFrame, display_dates: list[date]
+) -> tuple[dict[date, tuple[int, int, int, int]], dict[date, tuple[float | None, int]]]:
+    """[PANJI-MARKET-OVERVIEW] 一次向量化聚合「涨跌家数 + 全市场成交额」。
+
+    - 涨跌家数：raw close vs 前收（exact-T，逐股票 groupby shift；丢弃 NaN 对）。
+    - 成交额：SUM(bars_daily.amount)（元）；当天缺 amount → 该日 turnover_amount=None。
+    仅对 ``display_dates`` 范围产出；缺失日期由调用方走默认零 / None（NULL 合同）。
+    """
+    advance_by_date: dict[date, tuple[int, int, int, int]] = {}
+    turnover_by_date: dict[date, tuple[float | None, int]] = {}
+    if raw_long is None or raw_long.empty:
+        return advance_by_date, turnover_by_date
+
+    rl = raw_long.copy()
+    rl["prev_close"] = rl.groupby("instrument_id", sort=False)["close"].shift(1)
+    valid = rl.dropna(subset=["close", "prev_close"])
+    valid = valid[valid["trade_date"].isin(set(display_dates))]
+    if not valid.empty:
+        valid = valid.copy()
+        valid["adv"] = (valid["close"] > valid["prev_close"]).astype("int64")
+        valid["dec"] = (valid["close"] < valid["prev_close"]).astype("int64")
+        valid["flat"] = (valid["close"] == valid["prev_close"]).astype("int64")
+        for d, sub in valid.groupby("trade_date"):
+            advance_by_date[d] = (
+                int(sub["adv"].sum()),
+                int(sub["dec"].sum()),
+                int(sub["flat"].sum()),
+                int(len(sub)),
+            )
+
+    if "amount" in rl.columns:
+        am = rl.dropna(subset=["amount"]).copy()
+        am = am[am["trade_date"].isin(set(display_dates))]
+        if not am.empty:
+            gt = am.groupby("trade_date")["amount"].agg(["sum", "count"])
+            for d, row in gt.iterrows():
+                turnover_by_date[d] = (float(row["sum"]), int(row["count"]))
+    return advance_by_date, turnover_by_date
+
+
 async def prepare_projection_context(session: AsyncSession, end_date: date) -> ProjectionContext:
     """一次批量加载 bars + 当前 membership，供 market/scope records 复用。
 
@@ -91,12 +136,14 @@ async def prepare_projection_context(session: AsyncSession, end_date: date) -> P
         raise ValueError("cannot build market dashboard projection: no trading dates <= end_date")
     display_dates = load_dates[-dashboard_service.HISTORY_TRADE_DAYS :]
 
-    # 唯一一次批量 bars 读取（Dashboard 专用窄读取：仅 4 列长表）
+    # 唯一一次批量 bars 读取（Dashboard 专用窄读取：5 列长表）
     raw_long = await bar_repository.get_dashboard_daily_facts_source(
         session, instrument_ids, load_dates[0], load_dates[-1]
     )
     # stock-day facts 整批向量化一次；生成后 projection 不再需要 raw_long
     stock_facts = dashboard_service._compute_stock_facts_long(raw_long)
+    # [PANJI-MARKET-OVERVIEW] 涨跌家数 + 全市场成交额：复用已加载 raw_long，一次向量化
+    advance_by_date, turnover_by_date = _aggregate_market_overview_long(raw_long, display_dates)
     del raw_long
 
     boards = await dashboard_service._query_active_boards(session)
@@ -110,29 +157,55 @@ async def prepare_projection_context(session: AsyncSession, end_date: date) -> P
         membership_long=membership_long,
         board_ids=[b.id for b in boards],
         membership_versions={b.id: b.membershipVersion for b in boards},
+        advance_by_date=advance_by_date,
+        turnover_by_date=turnover_by_date,
     )
 
 
-def build_market_records(context: ProjectionContext) -> list[dict[str, object]]:
+def build_market_records(
+    context: ProjectionContext,
+    index_facts: dict[date, "MarketIndexFacts"] | None = None,
+) -> list[dict[str, object]]:
     """每个 display date 恰好一条 market record（空日期 / 空 facts 也显式零）。
 
     projection completeness：输出行数恒等于 ``len(context.display_dates)``（最多 250）。
     被复用的 ``_aggregate_market_history_long`` 在 stock_facts 为空时返回 ``[]``，
     故此处必须按 display_dates 逐日补 ``_empty_market_breadth``（不改其既有行为合同）。
+
+    ``index_facts`` 来自盘后事务外 pytdx 拉取（880006 + 三大指数），按 exact-date merge；
+    缺失日期其快照/指数字段为 None（NULL 合同：不伪装 0、不 yesterday fallback）。
     """
+    index_facts = index_facts or {}
     aggregated: dict[date, BreadthResult] = {
         d: breadth
         for d, breadth, _ewr in dashboard_service._aggregate_market_history_long(
             context.stock_facts, context.display_dates
         )
     }
-    return [
-        {
-            "trade_date": d,
-            **_count_fields(aggregated.get(d, dashboard_service._empty_market_breadth())),
-        }
-        for d in context.display_dates
-    ]
+    records: list[dict[str, object]] = []
+    for d in context.display_dates:
+        adv = context.advance_by_date.get(d, (0, 0, 0, 0))
+        to = context.turnover_by_date.get(d, (None, 0))
+        facts = index_facts.get(d)
+        records.append(
+            {
+                "trade_date": d,
+                **_count_fields(aggregated.get(d, dashboard_service._empty_market_breadth())),
+                # [PANJI-MARKET-OVERVIEW] 快照 / 轨迹 additive 字段
+                "advance_count": int(adv[0]),
+                "decline_count": int(adv[1]),
+                "flat_count": int(adv[2]),
+                "change_valid_count": int(adv[3]),
+                "turnover_amount": float(to[0]) if to[0] is not None else None,
+                "turnover_valid_count": int(to[1]),
+                "limit_up_count": facts.limit_up_count if facts else None,
+                "limit_down_count": facts.limit_down_count if facts else None,
+                "sse_close": facts.sse_close if facts else None,
+                "szse_close": facts.szse_close if facts else None,
+                "chinext_close": facts.chinext_close if facts else None,
+            }
+        )
+    return records
 
 
 def iter_scope_record_chunks(

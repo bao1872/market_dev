@@ -54,4 +54,18 @@ export interface BreadthPoint {
   ma50: number | null
   ma120: number | null
   ew_index: number | null
+
+  // [PANJI-MARKET-OVERVIEW] 250 日轨迹 additive 字段（与后端 MarketDashboardPoint 对齐）
+  sse_close: number | null
+  szse_close: number | null
+  chinext_close: number | null
+  sse_rebased: number | null
+  szse_rebased: number | null
+  chinext_rebased: number | null
+  advance_count: number | null
+  decline_count: number | null
+  flat_count: number | null
+  turnover_amount: number | null
+  limit_up_count: number | null
+  limit_down_count: number | null
 }

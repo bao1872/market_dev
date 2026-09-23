@@ -1886,6 +1886,111 @@ class PytdxAdapter(Exchange):
         mask = (df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)
         return df.loc[mask].reset_index(drop=True)
 
+    def get_index_daily_bars(
+        self,
+        *,
+        market: int,
+        code: str,
+        start: date,
+        end: date,
+    ) -> pd.DataFrame:
+        """获取指数日线（按日期范围，带重试）。
+
+        与 :meth:`get_daily_bars` 的关键区别：显式传入 ``market``，避免
+        :func:`market_from_code` 把 ``880005`` / ``880006`` 这类统计指数（首位非 ``6``）
+        误路由到 SZ（market=0）。通达信统计指数（涨跌家数 880005、涨跌停 880006）属于
+        SH 市场（market=1）。
+
+        Args:
+            market: 市场代码（1=SH，0=SZ，2=BJ）
+            code: 指数代码（如 '000001' / '399001' / '399006' / '880005' / '880006'）
+            start: 起始日期
+            end: 结束日期
+
+        Returns:
+            DataFrame: columns=[datetime, open, high, low, close, volume, amount]
+            无数据时返回空 DataFrame
+        """
+        days = (end - start).days + 1
+        count = min(max(days + 30, 30), 8000)
+        df = self._fetch_index_bars(market, code, count)
+        if df.empty:
+            return df
+        start_ts = pd.Timestamp(start)
+        end_ts = pd.Timestamp(end) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1)
+        mask = (df["datetime"] >= start_ts) & (df["datetime"] <= end_ts)
+        return df.loc[mask].reset_index(drop=True)
+
+    def _fetch_index_bars(self, market: int, symbol: str, count: int) -> pd.DataFrame:
+        """指数 K 线拉取（内部）：显式 ``market`` + ``get_index_bars``，复用 bars 分页韧性。"""
+        cat = PERIOD_MAP["d"]
+        all_bars: list[dict[str, Any]] = []
+        seen_time_keys: set[Any] = set()
+        start = 0
+        while len(all_bars) < count:
+            data = self._call_with_reconnect(
+                "get_index_bars",
+                # 默认参数绑定本轮 start，避免闭包捕获循环变量（B023）
+                lambda api, _start=start: api.get_index_bars(
+                    cat, market, symbol, _start, _FETCH_BATCH
+                ),
+                symbol=symbol,
+                market=market,
+                period="d",
+            )
+            if not data:
+                break
+            # 分页 no-progress guard（与 _fetch_bars 一致），防止 provider 重复页/错乱导致死循环
+            page_keys: set[Any] = set()
+            for row in data:
+                if row.get("datetime") is not None:
+                    page_keys.add(("dt", str(row["datetime"])))
+                elif {"year", "month", "day"}.issubset(row.keys()):
+                    page_keys.add(
+                        (
+                            "ymd",
+                            row.get("year"),
+                            row.get("month"),
+                            row.get("day"),
+                            row.get("hour"),
+                            row.get("minute"),
+                        )
+                    )
+            if page_keys and page_keys <= seen_time_keys:
+                raise PytdxSourceError(
+                    operation="get_index_bars",
+                    message="pagination made no progress (duplicate page)",
+                    symbol=symbol,
+                    market=market,
+                    period="d",
+                    attempt=start // _FETCH_BATCH + 1,
+                )
+            seen_time_keys |= page_keys
+            all_bars.extend(data)
+            if len(data) < _FETCH_BATCH:
+                break
+            start += _FETCH_BATCH
+        if not all_bars:
+            return pd.DataFrame()
+        df = pd.DataFrame(all_bars)
+        # 统一 datetime 列（同 _fetch_bars：errors='coerce' 容错畸形日期，跳过无效行）
+        if "datetime" in df.columns:
+            df["datetime"] = pd.to_datetime(df["datetime"], errors="coerce").dt.tz_localize(None)
+            df = df.dropna(subset=["datetime"]).reset_index(drop=True)
+        elif {"year", "month", "day", "hour", "minute"}.issubset(df.columns):
+            df["datetime"] = pd.to_datetime(
+                df[["year", "month", "day", "hour", "minute"]].astype(int),
+                errors="coerce",
+            ).dt.tz_localize(None)
+            df = df.dropna(subset=["datetime"]).reset_index(drop=True)
+        if df.empty:
+            return pd.DataFrame()
+        df = df[["datetime", "open", "high", "low", "close", "vol", "amount"]]
+        df.columns = ["datetime", "open", "high", "low", "close", "volume", "amount"]
+        df = df.drop_duplicates(subset=["datetime"], keep="last")
+        df = df.sort_values("datetime", ascending=True).tail(count).reset_index(drop=True)
+        return df
+
     def get_minute_bars(
         self,
         symbol: str,

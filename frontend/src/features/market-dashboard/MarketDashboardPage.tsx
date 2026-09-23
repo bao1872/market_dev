@@ -2,23 +2,26 @@
 //
 // 结构（冻结）：Header（标题 + 4 个二级 tab + 真实数据日期）
 //   → 时间范围（20/60/120/250，默认 250，窗口由 **server** 返回）
-//   → 4 张 KPI 卡片（MA5 / MA20 / MA50 / EW，顺序锁死）
-//   → 一张统一 chart（MA5/MA10/MA20/MA50/MA120 左轴 0..100% + EW 右轴）
+//   → Layer 1：今日市场快照 6 卡（三大指数 + 涨跌家数 + 成交额 + 涨停/跌停，顺序锁死）
+//   → Layer 2：市场宽度（MA5/MA20/MA50/EW 收为 chart header KPI chips + 一张统一 chart）
+//   → Layer 3：250 日市场轨迹 2×2 面板（指数相对走势 / 涨跌家数 / 成交额 / 涨停跌停）
 //   → 2 列 summary：行业 Top5/Bottom5 | 概念 Top5/Bottom5
 //
 // 语义约束：
 //   - 不伪造任何市场判断（实时 / 正常 / bull·bear / sentiment / capital tilt）；
 //   - 左轴 0%..100% 由 shared chart foundation 呈现（数据仍 0..1，绝不 ×100）；
 //   - legend hide/show 硬合同由 MultiLineChart 保证（toggle 只 applyOptions({visible})）；
-//   - ranking 各自独立 loading/error/empty，单个失败不影响主图。
+//   - ranking 各自独立 loading/error/empty，单个失败不影响主图；
+//   - 任一指标 unavailable → 显示「—」，绝不伪造 0 / 0% / 0 家。
 import { useMemo, useState } from 'react'
 import { useMarketDashboard, useMarketRankings } from '@/hooks/useMarketDashboardApi'
 import ReviewTopBar from './ReviewTopBar'
 import DashboardState, { type DashboardStateKind } from './DashboardState'
 import BreadthChart from './BreadthChart'
 import MarketRankingSummary from './MarketRankingSummary'
+import MarketSnapshotCards from './MarketSnapshotCards'
+import MarketHistoryCharts from './MarketHistoryCharts'
 import {
-  EW_INDEX_BASE_HINT,
   MARKET_CARD_LABELS,
   MARKET_CARD_ORDER,
   MARKET_OVERVIEW_DEFAULT_RANGE,
@@ -107,15 +110,20 @@ export default function MarketDashboardPage() {
 
       {!state && (
         <>
-          {/* KPI 卡片（顺序锁死：MA5 / MA20 / MA50 / EW） */}
-          <div className={styles.cardGrid}>
+          {/* Layer 1 — 今日市场快照 6 卡（顺序锁死） */}
+          <MarketSnapshotCards cards={cards} />
+
+          {/* Layer 2 — 市场宽度：MA5/MA20/MA50/EW 收为 chart header KPI chips（不再占第一排） */}
+          <div className={styles.kpiRow}>
             {MARKET_CARD_ORDER.map((key) => (
-              <Card
+              <KpiChip
                 key={key}
                 label={MARKET_CARD_LABELS[key]}
-                value={key === 'ew' ? formatEwIndex(cards?.equal_weight_index ?? null) : formatBreadth(cards?.[key] ?? null)}
-                hint={key === 'ew' ? EW_INDEX_BASE_HINT : undefined}
-                wide={key === 'ew'}
+                value={
+                  key === 'ew'
+                    ? formatEwIndex(cards?.equal_weight_index ?? null)
+                    : formatBreadth(cards?.[key] ?? null)
+                }
               />
             ))}
           </div>
@@ -134,6 +142,9 @@ export default function MarketDashboardPage() {
               <DashboardState kind="empty" desc="当前时间范围暂无数据" />
             )}
           </section>
+
+          {/* Layer 3 — 250 日市场轨迹 2×2 面板（只读 server，window 由 server 决定） */}
+          <MarketHistoryCharts points={points} />
 
           {/* 行业 / 概念 summary（各自独立 loading/error/empty） */}
           <div className={styles.summaryGrid}>
@@ -160,22 +171,11 @@ export default function MarketDashboardPage() {
   )
 }
 
-function Card({
-  label,
-  value,
-  hint,
-  wide,
-}: {
-  label: string
-  value: string
-  hint?: string
-  wide?: boolean
-}) {
+function KpiChip({ label, value }: { label: string; value: string }) {
   return (
-    <div className={wide ? `${styles.card} ${styles.cardWide}` : styles.card}>
-      <div className={styles.cardLabel}>{label}</div>
-      <div className={styles.cardValue}>{value}</div>
-      {hint && <div className={styles.cardHint}>{hint}</div>}
-    </div>
+    <span className={styles.kpiChip}>
+      <span className={styles.kpiChipLabel}>{label}</span>
+      <span className={styles.kpiChipValue}>{value}</span>
+    </span>
   )
 }
