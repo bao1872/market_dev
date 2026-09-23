@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import pytest
+from pytdx.errors import TdxFunctionCallError
 
 from app.core.pytdx_adapter import PytdxAdapter
 from app.services.after_close_orchestrator import _resolve_execution_completed_steps
@@ -52,7 +53,7 @@ def test_resolve_execution_completed_steps_invalid_stage_fail_closed() -> None:
 # ---------------------------------------------------------------------------
 
 def test_pytdx_call_with_reconnect_rotates_a_to_b(monkeypatch: pytest.MonkeyPatch) -> None:
-    """pytdx 主源 A 报 source failure → 环形轮转至 B 成功返回；
+    """pytdx 主源 A 报 source failure → 候选迭代至 B 成功返回；
     正常路径不涉及 Eastmoney / THS（各自 provider 模块不被调用）。"""
     from app.services import eod_market_snapshot_provider as _em
     from app.services import ths_raw_daily_provider as _ths
@@ -61,7 +62,7 @@ def test_pytdx_call_with_reconnect_rotates_a_to_b(monkeypatch: pytest.MonkeyPatc
     server_b = ("10.0.0.2", 7709)
     adapter = PytdxAdapter(servers=[server_a, server_b], max_retries=3)
 
-    state = {"i": 0}
+    attempted: list[tuple[str, int] | None] = []
 
     class FakeApi:
         def __init__(self, server: tuple[str, int]) -> None:
@@ -70,14 +71,14 @@ def test_pytdx_call_with_reconnect_rotates_a_to_b(monkeypatch: pytest.MonkeyPatc
         def disconnect(self) -> None:  # pragma: no cover - 仅满足真实 disconnect 调用
             pass
 
-    def _fake_connect(excluded_servers=None, capability=None) -> None:
-        server = [server_a, server_b][state["i"] % 2]
-        state["i"] += 1
+    def _fake_connect_server(server=None, *_args: object, **_kwargs: object) -> None:
+        # [parity C] 新连接原语：按候选 server 注入对应 FakeApi（不再环形扫描）
+        attempted.append(server)
         adapter.connected_server = server
-        adapter._api = FakeApi(server)
+        adapter._api = FakeApi(server)  # type: ignore[assignment]
 
-    # 替换真实连接逻辑，但保留真实 _call_with_reconnect 的轮转循环
-    monkeypatch.setattr(adapter, "_connect_excluding", _fake_connect)
+    # 替换真实连接逻辑，但保留真实 _call_with_reconnect 的候选迭代
+    monkeypatch.setattr(adapter, "_connect_server", _fake_connect_server)
 
     em_calls: list[int] = []
     ths_calls: list[int] = []
@@ -86,12 +87,12 @@ def test_pytdx_call_with_reconnect_rotates_a_to_b(monkeypatch: pytest.MonkeyPatc
 
     def _call(api: FakeApi) -> list[dict]:
         if api.server == server_a:
-            raise RuntimeError("PYTDX_SOURCE_FAILURE on A")
+            raise TdxFunctionCallError("PYTDX_SOURCE_FAILURE on A")
         return [{"symbol": "600519", "close": 1.0}]
 
     result = adapter._call_with_reconnect("get_daily_bars", _call)
     assert result == [{"symbol": "600519", "close": 1.0}]
-    assert state["i"] >= 2  # A、B 均被尝试（A 失败 → B 成功）
+    assert attempted == [server_a, server_b]  # A 失败 → B 成功（各尝试一次）
     assert em_calls == []  # 正常轮转成功，不触发 Eastmoney 备用源
     assert ths_calls == []  # 不触发 THS
 

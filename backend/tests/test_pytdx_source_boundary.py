@@ -10,7 +10,7 @@ E. ``get_security_quotes`` 永久失败 → ``PytdxSourceError``
 F. ``get_realtime_quote`` 合法 empty → ``None``；source failure → ``PytdxSourceError``
 G. auction provider 只调用 ``adapter.get_security_quotes``（不再访问 ``.api``）
 H. XDXR：empty = legitimate empty；source failure = typed error
-I. 无嵌套重试放大：一次业务调用的底层 API 调用次数 == ``max_retries``（不存在 3×3）
+I. 无嵌套重试放大：一次业务调用的底层 API 调用次数 == eligible server 数（每台一次，不存在 3×3）
 
 不连接网络 / 不连 Redis / 不连 DB。
 用法：PURE_UNIT_TEST=1 pytest tests/test_pytdx_source_boundary.py -q
@@ -23,27 +23,41 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pytdx.errors import TdxFunctionCallError
 
-from app.core.pytdx_adapter import PytdxAdapter, PytdxSourceError
+from app.core.pytdx_adapter import PytdxAdapter, PytdxServerCapability, PytdxSourceError
 
 pytestmark = pytest.mark.pure_unit
 
 _SERVER = ("127.0.0.1", 7709)
+_SERVER2 = ("127.0.0.1", 7710)
 
 
 def _install_api(adapter: PytdxAdapter, api: MagicMock) -> None:
     """把 adapter 置于「已连接」态，并让 reconnect 复用同一 mock api。
 
-    绕过真实 socket：一旦 ``disconnect`` 把 ``_api`` 置空，下一轮 ``connect``
-    会重新注入同一 mock，从而可断言底层 API 的真实调用次数。
+    绕过真实 socket：pin **两台 declared server**（均指向同一 mock api），并把
+    ``_connect_server``（[parity C] 之后 ``_call_with_reconnect`` 的新连接原语）与
+    ``_connect_excluding``（``connect()`` 用）一并 patch，从而可断言底层 API 的真实调用次数。
+
+    当前契约下每台 eligible server 最多执行一次 function call，故用 2 台 server 即可断言：
+    「首次失败 → 换下一台成功」以及「永久失败 → bounded（= eligible 台数，不放大）」。
+    本文件故意复用同一 mock server（多 host 真实 failover 由
+    tests/test_pytdx_server_failover.py 覆盖）。
     """
+    adapter._servers = [_SERVER, _SERVER2]
+    adapter._capabilities = {
+        _SERVER: PytdxServerCapability(_SERVER, bars=True, xdxr=True, quote=True),
+        _SERVER2: PytdxServerCapability(_SERVER2, bars=True, xdxr=True, quote=True),
+    }
     adapter._api = api  # type: ignore[assignment]
     adapter.connected_server = _SERVER
 
-    def _connect(*_args: object, **_kwargs: object) -> None:
-        # 忽略 excluded_servers：本文件故意复用同一 mock server，
-        # 以便断言「底层 API 调用次数」这一契约（failover 由
-        # tests/test_pytdx_server_failover.py 用多 host Fake API 覆盖）。
+    def _connect_server(_server: object = None, *_args: object, **_kwargs: object) -> None:
+        adapter._api = api  # type: ignore[assignment]
+        adapter.connected_server = _SERVER
+
+    def _connect_any(*_args: object, **_kwargs: object) -> None:
         adapter._api = api  # type: ignore[assignment]
         adapter.connected_server = _SERVER
 
@@ -51,9 +65,11 @@ def _install_api(adapter: PytdxAdapter, api: MagicMock) -> None:
         adapter._api = None
         adapter.connected_server = None
 
-    adapter.connect = _connect  # type: ignore[method-assign]
-    # retry owner 走 _connect_excluding：必须一并 patch，否则会落到真实网络
-    adapter._connect_excluding = _connect  # type: ignore[method-assign]
+    adapter.connect = _connect_any  # type: ignore[method-assign]
+    # retry owner 走 _connect_excluding（connect()）/ _connect_server（_call_with_reconnect）：
+    # 必须一并 patch，否则会落到真实网络。
+    adapter._connect_excluding = _connect_any  # type: ignore[method-assign]
+    adapter._connect_server = _connect_server  # type: ignore[method-assign]
     adapter.disconnect = _disconnect  # type: ignore[method-assign]
 
 
@@ -80,7 +96,7 @@ def test_a_bars_reconnects_after_source_error() -> None:
     adapter = PytdxAdapter(max_retries=3, retry_delay=0)
     api = MagicMock()
     api.get_security_bars.side_effect = [
-        RuntimeError("calling function error"),
+        TdxFunctionCallError("calling function error"),
         [_bar()],
     ]
     _install_api(adapter, api)
@@ -97,20 +113,20 @@ def test_a_bars_reconnects_after_source_error() -> None:
 def test_b_permanent_error_is_bounded_and_typed() -> None:
     adapter = PytdxAdapter(max_retries=3, retry_delay=0)
     api = MagicMock()
-    api.get_security_bars.side_effect = RuntimeError("calling function error")
+    api.get_security_bars.side_effect = TdxFunctionCallError("calling function error")
     _install_api(adapter, api)
 
     with pytest.raises(PytdxSourceError) as ei:
         adapter._fetch_bars("000610", "d", 10)
 
-    # bounded：恰好 max_retries，绝不放大
-    assert api.get_security_bars.call_count == 3
+    # bounded（[parity C] 新契约）：每台 eligible server 最多一次 → 2 台即 2 次，绝不放大
+    assert api.get_security_bars.call_count == 2
 
     err = ei.value
     assert err.operation == "get_security_bars"
     assert err.symbol == "000610"
     assert err.period == "d"
-    assert err.attempt == 3
+    assert err.attempt == 2
     assert err.server == _SERVER
     assert err.cause is not None
     assert "operation=get_security_bars" in str(err)
@@ -138,7 +154,7 @@ def test_d_quotes_reconnects_after_source_error() -> None:
     adapter = PytdxAdapter(max_retries=3, retry_delay=0)
     api = MagicMock()
     api.get_security_quotes.side_effect = [
-        RuntimeError("socket dropped"),
+        TdxFunctionCallError("socket dropped"),
         [{"market": 0, "code": "000001", "price": 10.0}],
     ]
     _install_api(adapter, api)
@@ -152,7 +168,7 @@ def test_d_quotes_reconnects_after_source_error() -> None:
 def test_e_quotes_permanent_error_raises() -> None:
     adapter = PytdxAdapter(max_retries=2, retry_delay=0)
     api = MagicMock()
-    api.get_security_quotes.side_effect = RuntimeError("calling function error")
+    api.get_security_quotes.side_effect = TdxFunctionCallError("calling function error")
     _install_api(adapter, api)
 
     with pytest.raises(PytdxSourceError) as ei:
@@ -188,7 +204,7 @@ def test_f_realtime_quote_empty_returns_none() -> None:
 def test_f_realtime_quote_source_failure_raises() -> None:
     adapter = PytdxAdapter(max_retries=2, retry_delay=0)
     api = MagicMock()
-    api.get_security_quotes.side_effect = RuntimeError("calling function error")
+    api.get_security_quotes.side_effect = TdxFunctionCallError("calling function error")
     _install_api(adapter, api)
 
     with pytest.raises(PytdxSourceError):
@@ -314,7 +330,7 @@ def test_h_xdxr_empty_is_legitimate_empty() -> None:
 def test_h_xdxr_source_failure_is_typed() -> None:
     adapter = PytdxAdapter(max_retries=2, retry_delay=0)
     api = MagicMock()
-    api.get_xdxr_info.side_effect = RuntimeError("calling function error")
+    api.get_xdxr_info.side_effect = TdxFunctionCallError("calling function error")
     _install_api(adapter, api)
 
     with pytest.raises(PytdxSourceError) as ei:
@@ -330,13 +346,13 @@ def test_h_xdxr_source_failure_is_typed() -> None:
 
 
 def test_i_no_nested_retry_amplification() -> None:
-    """一次业务调用（get_daily_bars）的底层 API 调用次数 == max_retries，无 3×3。"""
+    """一次业务调用的底层 API 调用次数 == eligible server 数（每台一次），无 3×3。"""
     adapter = PytdxAdapter(max_retries=3, retry_delay=0)
     api = MagicMock()
-    api.get_security_bars.side_effect = RuntimeError("boom")
+    api.get_security_bars.side_effect = TdxFunctionCallError("boom")
     _install_api(adapter, api)
 
     with pytest.raises(PytdxSourceError):
         adapter.get_daily_bars("000001", date(2026, 9, 1), date(2026, 9, 10))
 
-    assert api.get_security_bars.call_count == 3  # 而非 9
+    assert api.get_security_bars.call_count == 2  # 2 台 eligible，而非 9

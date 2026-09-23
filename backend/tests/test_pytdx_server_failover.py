@@ -24,6 +24,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pytdx.errors import TdxConnectionError, TdxFunctionCallError
 
 from app.core import pytdx_adapter as pytdx_adapter_module
 from app.core.pytdx_adapter import PytdxAdapter, PytdxSourceError
@@ -86,7 +87,7 @@ def _fake_api_factory(
         def get_security_bars(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             operation_calls.append(self.host)
             if self.host in api_fail_hosts:
-                raise RuntimeError("calling function error")
+                raise TdxFunctionCallError("calling function error")
             return [dict(_BAR_ROW)]
 
     return FakeApi
@@ -112,12 +113,12 @@ def _make_fake_api(created: list[Any], *, failing_host: str):
 
         def get_security_bars(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             if self.host == failing_host:
-                raise RuntimeError("calling function error")
+                raise TdxFunctionCallError("calling function error")
             return [dict(_BAR_ROW)]
 
         def get_security_quotes(self, requests: Any) -> list[dict[str, Any]]:
             if self.host == failing_host:
-                raise RuntimeError("calling function error")
+                raise TdxFunctionCallError("calling function error")
             return [dict(_QUOTE_ROW)]
 
     return FakeApi
@@ -222,7 +223,7 @@ def test_total_connect_outage_with_raising_connect_is_bounded(
         def connect(self, host: str, port: int, time_out: float) -> bool:
             attempts.append(host)
             self.host = host
-            raise RuntimeError("tcp refused")
+            raise TdxConnectionError("tcp refused")
 
         def disconnect(self) -> None:
             return None
@@ -276,7 +277,9 @@ def test_source_failed_host_not_reused_when_others_unreachable(
 
     assert ei.value.operation == "get_security_bars"
     assert ei.value.cause is not None
-    assert ei.value.cause.operation == "connect"
+    # [parity RC2] 最终 error 保留真实业务 source failure（A 的 TdxFunctionCallError），
+    # 而不是被合成的 "no eligible" connect 错误覆盖。
+    assert isinstance(ei.value.cause, TdxFunctionCallError)
 
 
 def test_rotates_a_then_b_then_c(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -336,7 +339,9 @@ def test_all_hosts_source_failure_is_bounded(
 
     assert ei.value.operation == "get_security_bars"
     assert ei.value.cause is not None
-    assert ei.value.cause.operation == "connect"
+    # [parity RC2] 根因保留最后真实业务 source failure（C 的 TdxFunctionCallError）
+    assert isinstance(ei.value.cause, TdxFunctionCallError)
+    assert ei.value.server == ("server-c", 7709)
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +385,7 @@ def test_concurrent_thread_cannot_reuse_excluded_host(
         def get_security_bars(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
             bar_hosts.append(self.host or "?")
             if self.host == "server-a":
-                raise RuntimeError("calling function error")
+                raise TdxFunctionCallError("calling function error")
             return [dict(_BAR_ROW)]
 
         def get_security_quotes(self, requests: Any) -> list[dict[str, Any]]:

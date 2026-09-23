@@ -605,7 +605,11 @@ def test_pytdx_adapter_rlock_no_deadlock() -> None:
     """
     from app.core.pytdx_adapter import PytdxAdapter
 
-    adapter = PytdxAdapter()
+    # 注入的 MagicMock socket 身份是 ("127.0.0.1", 7709)，因此候选 server 池必须与之
+    # 一致，_connect_server 才能在 self.connected_server == server 时短路复用该 Mock，
+    # 而非按真实默认 server 列表重连并丢弃 Mock。被测不变量是 RLock 串行/no-deadlock，
+    # 不是 server 选择；这里仅修正 stale fixture 的 identity 不匹配。
+    adapter = PytdxAdapter(servers=[("127.0.0.1", 7709)])
     # 验证锁类型为 RLock
     assert isinstance(adapter._io_lock, type(threading.RLock())), (
         "_io_lock 必须为 threading.RLock（可重入），防止嵌套自锁"

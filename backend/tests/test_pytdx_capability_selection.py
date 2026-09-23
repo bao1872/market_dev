@@ -17,7 +17,7 @@ import time
 from datetime import date
 
 import pytest
-from pytdx.errors import TdxConnectionError
+from pytdx.errors import TdxConnectionError, TdxFunctionCallError
 
 from app.core import pytdx_adapter as mod
 from app.core.pytdx_adapter import (
@@ -56,7 +56,7 @@ class _FakeApi:
     def get_security_bars(self, cat, market, code, start, count):  # noqa: ANN001, ANN201
         type(self).bars_call_log.append(self.host)
         if self.host in type(self).bars_fail:
-            raise RuntimeError("calling function error")
+            raise TdxFunctionCallError("calling function error")
         return [
             {
                 "datetime": "2026-09-11 15:00",
@@ -71,7 +71,7 @@ class _FakeApi:
 
     def get_xdxr_info(self, market, code):  # noqa: ANN001, ANN201
         if self.host in type(self).xdxr_fail:
-            raise RuntimeError("calling function error")
+            raise TdxFunctionCallError("calling function error")
         # 真实 pytdx xdxr payload 是 year/month/day 分量（adapter 据此构造 date 列）
         return [
             {
@@ -182,13 +182,14 @@ def test_cooldown_skips_then_expires() -> None:
     with pytest.raises(mod.PytdxSourceError):
         _bars(adapter)
 
-    # 冷却期内：无 eligible server（wrapper 会把 message 换成 "connection unavailable"，
-    # 「no eligible」保留在 cause 上）
+    # 冷却期内：全部 capable server 均 cooldown → 允许一次 half-open（业务请求自探针），
+    # 但 provider 仍坏 → 再次 typed error。[parity RC2] 根因保留真实 bars 失败
+    # （而不是被合成 "no eligible" 覆盖）。
     with pytest.raises(mod.PytdxSourceError) as ei:
         _bars(adapter)
-    assert "no eligible" in str(ei.value.cause)
+    assert isinstance(ei.value.cause, TdxFunctionCallError)
 
-    # TTL 过期 → 重新 eligible
+    # TTL 过期 + provider 恢复 → 重新 eligible
     time.sleep(0.06)
     _FakeApi.bars_fail = set()
     df = _bars(adapter)
@@ -209,12 +210,15 @@ def test_connect_failure_marks_short_cooldown() -> None:
 
     assert adapter._in_cooldown(("A", 7709), CAPABILITY_BARS) is True  # noqa: SLF001
 
-    # 第二次调用：A 处于 cooldown → 不再发起建连（不重复等 timeout）
+    # 新合同（[parity D] half-open）：全部 capable server 都在 cooldown 时，允许
+    # **恰好一次** HALF_OPEN，并用本次真实业务请求本身作为探测；失败后重新进入 cooldown。
+    # （旧合同「cooldown 内不再建连」已被有意的语义升级取代，见 test_pytdx_chanlun_parity.py。）
     before = len(_FakeApi.connect_log)
     with pytest.raises(mod.PytdxSourceError) as ei:
         _bars(adapter)
     assert "no eligible" in str(ei.value.cause)
-    assert len(_FakeApi.connect_log) == before
+    assert len(_FakeApi.connect_log) == before + 1  # exactly one half-open probe
+    assert adapter._in_cooldown(("A", 7709), CAPABILITY_BARS) is True  # noqa: SLF001
 
 
 # ── 6. hostname 保持 hostname ───────────────────────────────────────

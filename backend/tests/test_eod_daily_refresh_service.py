@@ -1822,6 +1822,7 @@ def test_pytdx_connected_server_tracked(monkeypatch: pytest.MonkeyPatch) -> None
 def test_pytdx_connect_failover_to_live_server(monkeypatch: pytest.MonkeyPatch) -> None:
     """前三台死、第四台活时，connect 必须落到第四台（避免前 3 台假阴性）。"""
     from app.core.pytdx_adapter import PytdxAdapter
+    from pytdx.errors import TdxConnectionError
 
     counter = {"n": 0}
 
@@ -1832,7 +1833,9 @@ def test_pytdx_connect_failover_to_live_server(monkeypatch: pytest.MonkeyPatch) 
         def connect(self, host: str, port: int, time_out: float | None = None) -> bool:
             counter["n"] += 1
             if counter["n"] <= 3:
-                raise RuntimeError("dead")
+                # RC3 冻结的 transport 失败族；用 TdxConnectionError 而非 RuntimeError
+                # 表示连接失败，才能正确触发 failover。
+                raise TdxConnectionError("dead")
             return True
 
         def disconnect(self) -> None:

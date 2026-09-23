@@ -35,7 +35,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import redis
-from pytdx.errors import TdxConnectionError
+from pytdx.errors import TdxConnectionError, TdxFunctionCallError
 from pytdx.hq import TdxHq_API
 
 from app.config import get_settings
@@ -99,6 +99,55 @@ class _KlineCacheEntry:
     df: pd.DataFrame
     cached_at: datetime       # 缓存写入时间
     last_bar_time: datetime   # DataFrame 中最后一根 bar 的时间
+
+
+# ── 运行时 bars 健康（process-local；参考 chanlun-pro tdx_best_ip 的真实行情探测思路）──
+# 只有 ``CAPABILITY_BARS`` 的 source/function failure 使用「短指数冷却」；
+# connect 层与其它 capability 仍使用 ``capability_cooldown_seconds``（默认 1800s 语义不变）。
+# 依据：2026-09-23 的真实 outage 仅数分钟，30 分钟固定冷却会让已恢复的 server 持续「自我失联」。
+_BARS_COOLDOWN_STEPS: tuple[float, ...] = (30.0, 60.0, 120.0, 240.0)
+_BARS_COOLDOWN_MAX: float = 300.0
+
+
+# [parity RC3] 只有「已证实的传输 / 协议 / 源」失败才允许污染 server health 并触发 failover；
+# 编程 / 契约错误（TypeError / KeyError / AssertionError …）必须原样上抛，绝不轮转、绝不冷却。
+# 类型依据 pytdx/errors.py 实测 + py3 socket 语义：``OSError`` 已覆盖 TimeoutError /
+# ConnectionError / socket.error（均为 OSError 子类）。
+_EXPECTED_TDX_SOURCE_ERRORS: tuple[type[BaseException], ...] = (
+    TdxConnectionError,
+    TdxFunctionCallError,
+    OSError,
+)
+
+
+def _is_expected_tdx_source_failure(exc: BaseException) -> bool:
+    """是否为「expected」TDX provider/socket/protocol 失败（可 failover / 可冷却）。
+
+    以 pytdx 真实异常类型 + 已核实 socket 异常为准（``TdxConnectionError`` /
+    ``TdxFunctionCallError`` / ``OSError``）。其余异常（如 ``TypeError`` / ``KeyError`` /
+    ``AssertionError``）属编程或契约错误，调用方必须原样上抛，不得当作 server 故障。
+    """
+    return isinstance(exc, _EXPECTED_TDX_SOURCE_ERRORS)
+
+
+@dataclass
+class ServerRuntimeHealth:
+    """单台 server 的**运行时** bars 健康（与静态 capability 分离）。
+
+    并发安全：所有读写都发生在 ``PytdxAdapter._io_lock`` 临界区内
+    （adapter 被 ``asyncio.to_thread`` 并发共享，禁止无锁共享此对象）。
+    """
+
+    ewma_latency_ms: float | None = None
+    success_count: int = 0
+    failure_count: int = 0
+    consecutive_failures: int = 0
+    half_open_inflight: bool = False
+
+    def score(self) -> float:
+        """排名分数（越小越优先）：未观测延迟按 10s 计，连续失败每次 +2s 惩罚。"""
+        latency = self.ewma_latency_ms if self.ewma_latency_ms is not None else 10_000.0
+        return latency + self.consecutive_failures * 2_000.0
 
 
 # xdxr 缓存配置
@@ -471,6 +520,9 @@ class PytdxAdapter(Exchange):
         # **按 capability 分开记**：bars 失败不得污染 xdxr / quote。
         self._capability_health: dict[tuple[str, int], dict[str, float]] = {}
         self._connect_health: dict[tuple[str, int], float] = {}
+        # [parity B] 运行时 bars 健康（EWMA 延迟 / 连续失败 / half-open 标记）。
+        # 只在 _io_lock 临界区内读写（adapter 被 asyncio.to_thread 并发共享）。
+        self._runtime_health: dict[tuple[str, int], ServerRuntimeHealth] = {}
         self.capability_cooldown_seconds = capability_cooldown_seconds
         # 成功建连的单调计数：用于 PytdxCallProvenance（同 hostname 重连也算新 generation）。
         self._connection_generation: int = 0
@@ -555,13 +607,28 @@ class PytdxAdapter(Exchange):
         server: tuple[str, int],
         capability: str | None,
     ) -> None:
-        """operation 级 source failure → **只**冷却该 capability（不得污染其它）。"""
+        """operation 级 source failure → **只**冷却该 capability（不得污染其它）。
+
+        冷却时长（[parity D]，2026-09-23 收紧）：
+        - ``CAPABILITY_BARS``：短指数退避 30/60/120/240 → 上限 300s（实时行情专用，
+          替换原先一刀切 1800s 的固定冷却；最终受 ``capability_cooldown_seconds`` 上限
+          约束，以便测试注入更短窗口）。参考 chanlun-pro「失败后重新真实探测」的思路。
+        - 其它 capability（XDXR 等）与 connect 层：保持 ``capability_cooldown_seconds``
+          （默认 1800s），factor provider 合同不变。
+        """
         if capability is None or not self._declared(server):
             return
         if self.capability_cooldown_seconds <= 0:
             return
+        health = self._runtime_health_for(server)
+        health.failure_count += 1
+        health.consecutive_failures += 1
+        if capability == CAPABILITY_BARS:
+            delay = self._bars_cooldown_delay(health.consecutive_failures)
+        else:
+            delay = self.capability_cooldown_seconds
         self._capability_health.setdefault(server, {})[capability] = (
-            time.monotonic() + self.capability_cooldown_seconds
+            time.monotonic() + delay
         )
 
     def _clear_capability_failure(
@@ -574,6 +641,209 @@ class PytdxAdapter(Exchange):
         health = self._capability_health.get(server)
         if health is not None:
             health.pop(capability, None)
+
+    def _runtime_health_for(self, server: tuple[str, int]) -> ServerRuntimeHealth:
+        """取得（按需创建）server 的运行时 bars 健康对象。
+
+        只应在 ``_io_lock`` 临界区内调用 / 修改：adapter 被 ``asyncio.to_thread``
+        并发共享，禁止无锁并发读写本对象。
+        """
+        health = self._runtime_health.get(server)
+        if health is None:
+            health = ServerRuntimeHealth()
+            self._runtime_health[server] = health
+        return health
+
+    def _bars_cooldown_delay(self, consecutive_failures: int) -> float:
+        """实时 bars 的短指数冷却（秒）：30/60/120/240 → 上限 300。
+
+        最终受 ``capability_cooldown_seconds`` 约束（默认 1800 不生效；测试可注入更小值）。
+        """
+        idx = max(0, consecutive_failures - 1)
+        step = (
+            _BARS_COOLDOWN_STEPS[idx]
+            if idx < len(_BARS_COOLDOWN_STEPS)
+            else _BARS_COOLDOWN_MAX
+        )
+        return min(step, _BARS_COOLDOWN_MAX, self.capability_cooldown_seconds)
+
+    def _record_success(
+        self,
+        server: tuple[str, int],
+        elapsed_ms: float,
+        capability: str | None,
+    ) -> None:
+        """记录一次成功：更新 EWMA 延迟、清零连续失败、清除该 capability 冷却。"""
+        health = self._runtime_health_for(server)
+        health.success_count += 1
+        health.consecutive_failures = 0
+        health.half_open_inflight = False
+        alpha = 0.25
+        if health.ewma_latency_ms is None:
+            health.ewma_latency_ms = elapsed_ms
+        else:
+            health.ewma_latency_ms = (
+                alpha * elapsed_ms + (1 - alpha) * health.ewma_latency_ms
+            )
+        self._clear_capability_failure(server, capability)
+
+    def _ranked_servers(
+        self,
+        capability: str | None,
+        excluded: set[tuple[str, int]],
+        attempted: set[tuple[str, int]],
+    ) -> list[tuple[str, int]]:
+        """尚未尝试、且当前 healthy 的 capable server，按分数升序。
+
+        分数 = EWMA 延迟（无观测按 10s）+ 连续失败次数 × 2s。
+        始终在 ``_io_lock`` 内调用（读 runtime health / cooldown）。
+        """
+        healthy: list[tuple[str, int]] = []
+        for server in self._servers:
+            if server in excluded or server in attempted:
+                continue
+            if not self._server_supports(server, capability):
+                continue
+            if self._in_cooldown(server, capability):
+                continue
+            healthy.append(server)
+        healthy.sort(key=lambda s: self._runtime_health_for(s).score())
+        return healthy
+
+    def _cooldown_deadline(
+        self,
+        server: tuple[str, int],
+        capability: str | None,
+    ) -> float:
+        """该 server 在指定 capability 下的 cooldown 截止时刻（取 connect / capability 较早者）。"""
+        deadlines: list[float] = []
+        connect_until = self._connect_health.get(server)
+        if connect_until:
+            deadlines.append(connect_until)
+        if capability is not None:
+            cap_until = self._capability_health.get(server, {}).get(capability)
+            if cap_until:
+                deadlines.append(cap_until)
+        return min(deadlines) if deadlines else 0.0
+
+    def _select_half_open_server(
+        self,
+        capability: str | None,
+        excluded: set[tuple[str, int]],
+        attempted: set[tuple[str, int]],
+    ) -> tuple[str, int] | None:
+        """当所有 capable server 都在 cooldown 时，选 ``retry_after`` 最早的一台做 HALF_OPEN。
+
+        仅返回 1 台；调用方在 ``_io_lock`` 内把该 server 标为 ``half_open_inflight``，
+        并以**真实业务请求本身**作为探测（不额外 probe，避免 probe+request 双倍延迟）。
+        选择与尝试在同一锁临界区 → 同一时刻不可能有多线程同时 half-open 同一台 server。
+        """
+        cooled: list[tuple[str, int]] = []
+        for server in self._servers:
+            if server in excluded or server in attempted:
+                continue
+            if not self._server_supports(server, capability):
+                continue
+            if not self._in_cooldown(server, capability):
+                continue
+            if self._runtime_health_for(server).half_open_inflight:
+                continue
+            cooled.append(server)
+        if not cooled:
+            return None
+        return min(cooled, key=lambda s: self._cooldown_deadline(s, capability))
+
+    def _connect_server(self, server: tuple[str, int]) -> None:
+        """在 ``_io_lock`` 内连接到**指定** server（供 operation 级候选迭代使用）。
+
+        与 ``_connect_excluding``（ring scan，供 ``connect()``）不同：本方法只连一台，
+        失败即抛 typed ``PytdxSourceError(operation="connect")``，由调用方决定是否换下一台。
+        已连接且正是目标 server 时幂等复用。``auto_retry=False``（PytdxAdapter 是唯一 retry owner）。
+        """
+        with self._io_lock:
+            if self._api is not None and self.connected_server == server:
+                return
+            if self._api is not None:
+                self.disconnect()
+            host, port = server
+            last_exc: Exception | None = None
+            try:
+                # Adapter 是唯一 retry owner：必须关闭 pytdx 内建 auto_retry。
+                api = TdxHq_API(raise_exception=True, auto_retry=False)
+                if api.connect(host, port, time_out=self.connect_timeout):
+                    logger.info("pytdx 连接成功：%s:%d", host, port)
+                    self._api = api
+                    self.connected_server = server
+                    try:
+                        idx = self._servers.index(server)
+                        self._connected_server_index = idx
+                        self._next_server_index = idx
+                    except ValueError:
+                        self._connected_server_index = None
+                    # [parity RC4] connect 成功 → 清除该 server 的 connect 层冷却，使 half-open
+                    # 探测成功的 server 立即回归正常服务（不再被旧 1800s connect cooldown 卡死）。
+                    self._connect_health.pop(server, None)
+                    self.successful_connect_count += 1
+                    self._connection_generation += 1
+                    if self.successful_connect_count > 1:
+                        self.reconnect_count += 1
+                    return
+                last_exc = TdxConnectionError(f"connect returned False: {host}:{port}")
+            except Exception as exc:  # noqa: BLE001
+                if not _is_expected_tdx_source_failure(exc):
+                    # [parity RC3] 编程/契约错误不得被当作 connect 源失败（不冷却、不掩盖）
+                    raise
+                last_exc = exc
+            self._mark_connect_failure(server)
+            self.disconnect()
+            raise PytdxSourceError(
+                operation="connect",
+                message=f"connect failed {host}:{port}: {last_exc}",
+                server=server,
+                cause=last_exc,
+            ) from last_exc
+
+    def _probe_bars_server(self, server: tuple[str, int]) -> float:
+        """真实 K 线健康探测（参考 chanlun-pro ``tdx_best_ip.ping``）。
+
+        TCP + TDX 协议 + ``get_security_bars`` + 有效数据 四层一次验证；返回耗时（毫秒）。
+
+        用途：启动 / 周期健康检查 / 管理命令 / 显式 benchmark。
+        **不**在普通用户请求路径里对每台 server 全量 probe（那是 chanlun-pro 单机工具的
+        做法；Panji 在线服务以真实业务请求延迟 EWMA 作为主排名，half-open 也用业务请求
+        本身当探针）。
+
+        Raises:
+            PytdxSourceError: 连接失败 / 返回空 / bars 数不足。
+        """
+        host, port = server
+        started = time.perf_counter()
+        rows: list[dict[str, Any]] | None = None
+        try:
+            api = TdxHq_API(raise_exception=True, auto_retry=False)
+            if not api.connect(host, port, time_out=self.connect_timeout):
+                raise TdxConnectionError(f"connect returned False: {host}:{port}")
+            try:
+                rows = api.get_security_bars(PERIOD_MAP["d"], 1, "600519", 0, 100)
+            finally:
+                try:
+                    api.disconnect()
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception as exc:  # noqa: BLE001
+            raise PytdxSourceError(
+                operation="health_probe",
+                message=f"bars health probe failed {host}:{port}: {exc}",
+                server=server,
+                cause=exc,
+            ) from exc
+        if not rows or len(rows) < 10:
+            raise PytdxSourceError(
+                operation="health_probe",
+                message=f"invalid bars response: {server}",
+                server=server,
+            )
+        return (time.perf_counter() - started) * 1000.0
 
     def _connect_excluding(
         self,
@@ -687,6 +957,8 @@ class PytdxAdapter(Exchange):
                         # 正常连接成功后保持当前 host；
                         # 只有 API source failure 才 advance（见 _advance_server_after_failure）。
                         self._next_server_index = idx
+                        # [parity RC4] connect 成功 → 清除 connect 层冷却（与 _connect_server 一致）
+                        self._connect_health.pop(server, None)
                         self.successful_connect_count += 1
                         self._connection_generation += 1
                         if self.successful_connect_count > 1:
@@ -697,6 +969,9 @@ class PytdxAdapter(Exchange):
                     last_errors.append(f"{host}:{port} TdxConnectionError: {exc}")
                     self._mark_connect_failure(server)
                 except Exception as exc:
+                    if not _is_expected_tdx_source_failure(exc):
+                        # [parity RC3] 编程/契约错误不得被当作 connect 源失败
+                        raise
                     last_exc = exc
                     last_errors.append(f"{host}:{port} {type(exc).__name__}: {exc}")
                     self._mark_connect_failure(server)
@@ -770,119 +1045,185 @@ class PytdxAdapter(Exchange):
     ) -> Any:
         """唯一 connection-level retry owner：所有 pytdx 网络调用必须经由此处。
 
-        合同：
-        - network / socket / protocol / ``calling function error`` → 判定当前连接
-          不可信 → ``_advance_server_after_failure`` 轮转到下一个 host →
-          ``disconnect`` → 下一轮 ``connect``（从新 host 起）→ bounded retry →
-          耗尽后抛 typed :class:`PytdxSourceError`。
-        - connect() 本身已完整扫描所有 server；其失败（operation="connect"）直接上抛，
-          不允许外层 max_retries 再把同一个全池重复扫描 N 遍。
-        - ``source_failed_servers`` 仅本次调用有效：已 source 失败的 host 在后续 retry
-          中被排除，避免「环形扫描绕回已证明有问题的 host」。
-        - 合法成功返回（含空列表 ``[]`` = 该标的确实无数据）原样返回，**不得**
-          被当作 provider outage 自动重试。
-        - 单次 attempt 的 socket 状态转换必须**原子**：``_connect_excluding`` +
-          ``call`` + 失败后的（标记 excluded → advance → ``disconnect``）全部在
-          同一 ``_io_lock`` 临界区内；``time.sleep`` 必须在锁外。
+        合同（[parity C]，2026-09-23 收紧）：
+        - 对 ``get_security_bars`` 一类 operation：**每台 eligible capable server 最多执行
+          一次 function call**；成功立即返回；source failure 后排除该 server；直到**全部**
+          eligible server 耗尽才抛 typed :class:`PytdxSourceError`。
+          ``max_retries`` **不再**截断 server coverage（旧实现 ``for attempt in
+          range(1, max_retries + 1)`` 在 4 台 bars server 时会漏掉第 4 台）。
+        - network / socket / protocol / ``calling function error`` → 该 server 判定不可信 →
+          ``_advance_server_after_failure`` + ``disconnect`` → 换下一台候选（A → B → C → D）。
+        - 候选顺序由 ``_ranked_servers`` 决定：静态 capability + 运行时 EWMA 延迟 +
+          连续失败惩罚；当全部 capable server 都在 cooldown 时，由
+          ``_select_half_open_server`` 放行**恰好一台** HALF_OPEN，并以本次真实业务请求
+          本身作为探测（不额外 probe）。
+        - 合法成功返回（含空列表 ``[]`` = 该标的确实无数据）原样返回，**不得**被当作
+          provider outage 自动重试。
+        - 单次尝试的 socket 状态转换必须**原子**：候选选择 + half-open 标记 +
+          ``_connect_server`` + ``call`` + 失败后的（排除 → 冷却 → advance → ``disconnect``）
+          全部在同一 ``_io_lock`` 临界区内；``time.sleep`` 必须在锁外。
+        - connect 层失败（含「全部 eligible 耗尽」）统一包装为本次 operation 失败，
+          并保留 ``cause.operation == "connect"`` 供上层区分 connect vs operation 故障。
 
-        上层调用方收到 :class:`PytdxSourceError` 后**不得**再做同样的 socket retry
-        （禁止 adapter 3 retry × caller 3 retry = 9 次）；应记录失败标的 / 触发熔断 /
-        交给下一业务周期。
+        上层调用方收到 :class:`PytdxSourceError` 后**不得**再做同样的 socket retry；
+        应记录失败标的 / 触发熔断 / 交给下一业务周期。
         """
         last_exc: Exception | None = None
         last_server: tuple[str, int] | None = None
+        # [parity RC2] 最后一次「真实业务 source failure」——耗尽时作为最终 error 的
+        # 根因 / cause，而不是被合成的「no eligible server」覆盖。
+        last_source_exc: Exception | None = None
+        last_source_server: tuple[str, int] | None = None
         # capability 优先取显式入参，否则按 operation 映射（不改 public API 签名）
         resolved_capability = (
             capability if capability is not None else _OPERATION_CAPABILITY.get(operation)
         )
 
-        # 仅本次 operation 生命周期有效：记录「TCP 能连、但本次 operation 已 source/protocol
-        # 失败」的 host。后续 retry 禁止再选中它（即使环形扫描会绕回它）。
-        # 新的业务调用重新从空集合开始 → 偶发故障不会被永久封禁。
+        # 本 operation 生命周期内：
+        #   source_failed_servers — TCP 能连，但 operation 已 source/protocol 失败
+        #   attempted             — 已尝试过（connect 或 call）的 server
+        # 二者都不持久化：新的业务调用重新从空集合开始 → 偶发故障不会被永久封禁。
         source_failed_servers: set[tuple[str, int]] = set()
+        attempted: set[tuple[str, int]] = set()
+        half_open_used = False
 
-        for attempt in range(1, self.max_retries + 1):
+        while True:
             call_failed = False
 
             try:
-                # 单次 attempt 的 socket 状态转换必须原子：
-                #   检查/建立连接 → 固定 attempt_server → 执行 API →
-                #   失败则（标记 excluded + advance + disconnect）
-                # 四步全部在同一 _io_lock 临界区内完成。
-                #
-                # 单例 adapter 被 asyncio.to_thread 并发共享 socket：若把这些步骤拆开，
-                # 其他线程可能在「API failure → disconnect」之间替换共享 socket，
-                # 导致本调用复用自己已判坏的 host，或误断别人刚建立的连接。
+                # 候选选择 + half-open 标记 + 尝试 必须原子（同一 _io_lock 临界区）：
+                # 单例 adapter 被 asyncio.to_thread 并发共享 socket，若拆开，其他线程可能
+                # 在「API failure → disconnect」之间替换共享 socket，或并发 half-open 同一台。
                 with self._io_lock:
-                    # _connect_excluding 自身也获取同一把锁；_io_lock 是 RLock（可重入），不会自锁。
-                    self._connect_excluding(
-                        source_failed_servers, capability=resolved_capability
+                    candidates = self._ranked_servers(
+                        resolved_capability, source_failed_servers, attempted
                     )
+                    half_open = False
+                    if not candidates and not half_open_used:
+                        half_open_server = self._select_half_open_server(
+                            resolved_capability, source_failed_servers, attempted
+                        )
+                        if half_open_server is not None:
+                            candidates = [half_open_server]
+                            half_open = True
+                            half_open_used = True
+                            self._runtime_health_for(
+                                half_open_server
+                            ).half_open_inflight = True
 
-                    attempt_server = self.connected_server
-
-                    if attempt_server is None:
+                    if not candidates:
+                        # [parity RC2] 若发生过真实业务 source failure，最终 error 必须保留它作
+                        # 根因（operation=本次 operation、server=最后失败 server、cause=真实异常）；
+                        # 「no eligible server」只是耗尽状态，不能替换真实根因。
+                        if last_source_exc is not None:
+                            raise PytdxSourceError(
+                                operation=operation,
+                                symbol=symbol,
+                                market=market,
+                                period=period,
+                                attempt=len(attempted),
+                                server=last_source_server,
+                                message=(
+                                    "all eligible pytdx servers exhausted; "
+                                    f"attempted={sorted(str(s) for s in attempted)}"
+                                ),
+                                cause=last_source_exc,
+                            ) from last_source_exc
+                        # 从未发生业务失败（如全部 connect 失败）→ 退化为 connect 类错误
+                        # （operation="connect" 以便上层区分 connect vs operation 故障）。
                         raise PytdxSourceError(
                             operation="connect",
-                            message="pytdx connected server identity unavailable",
+                            message=(
+                                "no eligible pytdx server remains after source failures / "
+                                f"capability={resolved_capability} / cooldown"
+                            ),
+                            attempt=len(attempted),
                         )
 
-                    last_server = attempt_server
+                    server = candidates[0]
+                    attempted.add(server)
 
                     try:
-                        result = call(self.api)
-                    except Exception as exc:
-                        # 仍持有同一把锁：其他线程不可能在
-                        # 「API failure → disconnect」之间替换共享 socket。
+                        # _connect_server 自身获取同一把锁；_io_lock 是 RLock，不会自锁。
+                        self._connect_server(server)
+                    except PytdxSourceError as exc:
+                        if exc.operation != "connect":
+                            raise
+                        # 单台 connect 失败：记录 connect cooldown，换下一台（不得中断整池）。
                         last_exc = exc
                         call_failed = True
-
-                        # 本次 operation 内该 host 已证明 source failure
-                        source_failed_servers.add(attempt_server)
-                        # 只冷却该 capability：bars 失败不得污染 xdxr / quote。
-                        self._mark_capability_failure(attempt_server, resolved_capability)
-
-                        logger.warning(
-                            "PYTDX_SOURCE_FAILURE "
-                            "operation=%s symbol=%s market=%s period=%s "
-                            "attempt=%d/%d server=%s type=%s error=%s",
-                            operation,
-                            symbol,
-                            market,
-                            period,
-                            attempt,
-                            self.max_retries,
-                            attempt_server,
-                            type(exc).__name__,
-                            exc,
-                        )
-
-                        # 下一次必须从下一个 host 开始（A → B → C，而不是 A → A）
-                        self._advance_server_after_failure(attempt_server)
-
-                        # 仍在锁内：断掉的一定是本 attempt 真正失败的 socket，
-                        # 不会误伤其他线程刚建立的新连接。
-                        self.disconnect()
+                        if half_open:
+                            self._runtime_health_for(server).half_open_inflight = False
                     else:
-                        # 本次 (server, capability) 成功 → 清除该 capability 冷却
-                        self._clear_capability_failure(
-                            attempt_server, resolved_capability
-                        )
-                        if return_provenance:
-                            # provenance 必须与真正执行 API 的 attempt_server 原子绑定；
-                            # 绝不允许在锁外读 connected_server 猜来源（可并发共享 adapter）。
-                            return (
-                                result,
-                                PytdxCallProvenance(
-                                    server=attempt_server,
-                                    connection_generation=self._connection_generation,
-                                ),
+                        attempt_server = self.connected_server
+                        if attempt_server is None:
+                            raise PytdxSourceError(
+                                operation="connect",
+                                message="pytdx connected server identity unavailable",
                             )
-                        return result
+                        last_server = attempt_server
+                        started = time.perf_counter()
+                        try:
+                            result = call(self.api)
+                        except Exception as exc:  # noqa: BLE001
+                            if not _is_expected_tdx_source_failure(exc):
+                                # [parity RC3] 编程/契约错误：原样上抛，不冷却、不轮转、
+                                # B/C/D 零调用（绝不让一个 Python bug 把全 TDX family 判坏）。
+                                raise
+                            # 仍持有同一把锁：其他线程不可能在
+                            # 「API failure → disconnect」之间替换共享 socket。
+                            last_exc = exc
+                            last_source_exc = exc
+                            last_source_server = attempt_server
+                            call_failed = True
+                            source_failed_servers.add(attempt_server)
+                            # 只冷却该 capability：bars 失败不得污染 xdxr / quote。
+                            self._mark_capability_failure(
+                                attempt_server, resolved_capability
+                            )
+                            if half_open:
+                                self._runtime_health_for(
+                                    attempt_server
+                                ).half_open_inflight = False
+                            logger.warning(
+                                "PYTDX_SOURCE_FAILURE "
+                                "operation=%s symbol=%s market=%s period=%s "
+                                "server=%s type=%s error=%s half_open=%s",
+                                operation,
+                                symbol,
+                                market,
+                                period,
+                                attempt_server,
+                                type(exc).__name__,
+                                exc,
+                                half_open,
+                            )
+                            # 下一次必须从下一个 host 开始（A → B → C → D，而不是 A → A）
+                            self._advance_server_after_failure(attempt_server)
+                            # 仍在锁内：断掉的一定是本 attempt 真正失败的 socket，
+                            # 不会误伤其他线程刚建立的新连接。
+                            self.disconnect()
+                        else:
+                            self._record_success(
+                                attempt_server,
+                                (time.perf_counter() - started) * 1000.0,
+                                resolved_capability,
+                            )
+                            if return_provenance:
+                                # provenance 必须与真正执行 API 的 attempt_server 原子绑定；
+                                # 绝不允许在锁外读 connected_server 猜来源。
+                                return (
+                                    result,
+                                    PytdxCallProvenance(
+                                        server=attempt_server,
+                                        connection_generation=self._connection_generation,
+                                    ),
+                                )
+                            return result
 
             except PytdxSourceError as exc:
-                # connect failure 与 API operation failure 是两类不同故障：
-                # 前者不得被当成某个 host 的 source failure 再重试。
+                # connect 层（含「全部 eligible 耗尽」）统一包装为本次 operation 的失败，
+                # 保留 cause.operation == "connect" 供上层区分 connect vs operation 故障。
                 if exc.operation == "connect":
                     raise PytdxSourceError(
                         operation=operation,
@@ -890,28 +1231,17 @@ class PytdxAdapter(Exchange):
                         symbol=symbol,
                         market=market,
                         period=period,
-                        attempt=attempt,
-                        server=exc.server,
+                        attempt=len(attempted),
+                        # 「全部 eligible 耗尽」的 connect 错误不带 server → 回落到最后尝试过的 server
+                        server=exc.server if exc.server is not None else last_server,
                         cause=exc,
                     ) from exc
                 raise
 
             if call_failed:
                 # sleep 必须在锁外，不得持锁休眠阻塞其他调用方
-                if attempt < self.max_retries:
-                    time.sleep(self.retry_delay)
+                time.sleep(self.retry_delay)
                 continue
-
-        raise PytdxSourceError(
-            operation=operation,
-            symbol=symbol,
-            market=market,
-            period=period,
-            attempt=self.max_retries,
-            server=last_server,
-            message="pytdx source exhausted retries",
-            cause=last_exc,
-        ) from last_exc
 
     def get_history_transaction_page(
         self,
@@ -1171,6 +1501,7 @@ class PytdxAdapter(Exchange):
         cat = PERIOD_MAP[period]
 
         all_bars: list[dict[str, Any]] = []
+        seen_time_keys: set[Any] = set()
         start = 0
         while len(all_bars) < count:
             data = self._call_with_reconnect(
@@ -1186,6 +1517,35 @@ class PytdxAdapter(Exchange):
 
             if not data:
                 break
+
+            # [parity E] 分页 no-progress guard：若新一页的 datetime 全集都已在之前出现过，
+            # 说明 provider 未推进（重复页 / 错乱），必须 fail-fast，而不是死循环或重复拼接。
+            page_keys: set[Any] = set()
+            for row in data:
+                if row.get("datetime") is not None:
+                    page_keys.add(("dt", str(row["datetime"])))
+                elif {"year", "month", "day"}.issubset(row.keys()):
+                    page_keys.add(
+                        (
+                            "ymd",
+                            row.get("year"),
+                            row.get("month"),
+                            row.get("day"),
+                            row.get("hour"),
+                            row.get("minute"),
+                        )
+                    )
+            if page_keys and page_keys <= seen_time_keys:
+                raise PytdxSourceError(
+                    operation="get_security_bars",
+                    message="pagination made no progress (duplicate page)",
+                    symbol=symbol,
+                    market=market,
+                    period=period,
+                    attempt=start // _FETCH_BATCH + 1,
+                )
+            seen_time_keys |= page_keys
+
             all_bars.extend(data)
             if len(data) < _FETCH_BATCH:
                 break
@@ -1213,6 +1573,8 @@ class PytdxAdapter(Exchange):
 
         df = df[["datetime", "open", "high", "low", "close", "vol", "amount"]]
         df.columns = ["datetime", "open", "high", "low", "close", "volume", "amount"]
+        # [parity E] 时间戳升序 + 唯一（keep last），再对齐尾部请求数量。
+        df = df.drop_duplicates(subset=["datetime"], keep="last")
         df = df.sort_values("datetime", ascending=True).tail(count).reset_index(drop=True)
         return df
 
@@ -1475,33 +1837,53 @@ class PytdxAdapter(Exchange):
                 incremental_df = await asyncio.to_thread(
                     self._fetch_bars, symbol, self._FREQ_TO_PERIOD[frequency], 1400
                 )
-                if incremental_df is not None and not incremental_df.empty:
-                    # 转换为 DatetimeIndex 格式（与全量拉取一致）
-                    if "datetime" in incremental_df.columns:
-                        incremental_df = incremental_df.set_index("datetime")
-                    incremental_df.index = pd.to_datetime(incremental_df.index)
-                    incremental_df.index = incremental_df.index.tz_localize("Asia/Shanghai")
-                    # 添加 adj_factor 列
-                    if "adj_factor" not in incremental_df.columns:
-                        incremental_df["adj_factor"] = 1.0
-
-                    # 合并：去重（保留新数据），按时间排序
-                    merged = pd.concat([entry.df, incremental_df])
-                    merged = merged[~merged.index.duplicated(keep="last")]
-                    merged = merged.sort_index()
-                    # 更新缓存
-                    self._klines_cache[cache_key] = _KlineCacheEntry(
-                        df=merged,
-                        cached_at=now,
-                        last_bar_time=merged.index[-1].to_pydatetime(),
-                    )
-                    df = merged.copy()
-                    df = self._apply_filters(df, start_date, end_date, count)
-                    return df
             except Exception as exc:
-                logger.warning("klines() 增量更新失败 symbol=%s: %s，使用缓存数据", symbol, exc)
-                # 增量更新失败，返回过期缓存（降级）
+                # [parity G] live 分钟线禁止 stale 兜底：provider 不可用时必须 fail-closed，
+                # 绝不把旧分钟线冒充实时（PROVIDER_DIRECT 本身不走本缓存路径；此处为
+                # reliability guard）。日线/周线合成等既有 stale 降级语义保持不变。
+                if frequency in ("15m", "1h", "1m"):
+                    raise PytdxSourceError(
+                        operation="klines",
+                        symbol=symbol,
+                        message=(
+                            f"live intraday refresh failed for {frequency}; "
+                            "refusing stale cache fallback"
+                        ),
+                        cause=exc,
+                    ) from exc
+                logger.warning(
+                    "klines() 增量更新失败 symbol=%s freq=%s: %s，使用缓存数据",
+                    symbol, frequency, exc,
+                )
+                # 非分钟线：保持既有 stale 降级（历史/周月合成路径）
                 df = entry.df.copy()
+                df = self._apply_filters(df, start_date, end_date, count)
+                return df
+
+            if incremental_df is not None and not incremental_df.empty:
+                # 转换为 DatetimeIndex 格式（与全量拉取一致）
+                if "datetime" in incremental_df.columns:
+                    incremental_df = incremental_df.set_index("datetime")
+                incremental_df.index = pd.to_datetime(incremental_df.index)
+                incremental_df.index = incremental_df.index.tz_localize("Asia/Shanghai")
+                # 添加 adj_factor 列
+                if "adj_factor" not in incremental_df.columns:
+                    incremental_df["adj_factor"] = 1.0
+
+                # [parity F] 边界刷新：**fresh 成功之后**才构造 stable_cached = cached[:-1]，
+                # 使缓存末根（可能是不完整 bar）由 provider 重新认证；fresh 失败绝不缩小 cache。
+                # 然后 dedupe keep-last → sort → **一次性** replace cache（原子）。
+                stable_cached = entry.df.iloc[:-1] if len(entry.df) > 0 else entry.df
+                merged = pd.concat([stable_cached, incremental_df])
+                merged = merged[~merged.index.duplicated(keep="last")]
+                merged = merged.sort_index()
+                # 更新缓存（原子替换）
+                self._klines_cache[cache_key] = _KlineCacheEntry(
+                    df=merged,
+                    cached_at=now,
+                    last_bar_time=merged.index[-1].to_pydatetime(),
+                )
+                df = merged.copy()
                 df = self._apply_filters(df, start_date, end_date, count)
                 return df
 

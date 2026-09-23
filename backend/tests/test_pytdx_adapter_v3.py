@@ -19,6 +19,7 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from pytdx.errors import TdxConnectionError
 
 from app.core import pytdx_adapter as module
 
@@ -150,7 +151,7 @@ def test_page_failure_reconnect_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     def _flaky_get_history_transaction_data(*args: Any, **kwargs: Any) -> list[dict[str, Any]]:
         call_state["calls"] += 1
         if call_state["calls"] == 1:
-            raise RuntimeError("mock socket failure")
+            raise TdxConnectionError("mock socket failure")
         return list(FIXED_ROWS)
 
     # flaky mock 挂到每个新建 api 实例：reconnect 后新实例同样命中同一函数
