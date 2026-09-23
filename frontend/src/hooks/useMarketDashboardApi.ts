@@ -9,6 +9,7 @@ import {
 } from '@/api/marketDashboard'
 import {
   buildScopeExplorerParams,
+  fetchScopeExplorerUniverse,
   scopeExplorerQueryKey,
   type ScopeExplorerQuery,
 } from '@/features/market-dashboard/scopeExplorerQuery'
@@ -81,6 +82,23 @@ export function useMarketScopeExplorer(query: ScopeExplorerQuery, enabled: boole
   return useQuery({
     queryKey: marketDashboardKeys.scopeExplorer(query),
     queryFn: () => getMarketScopeExplorer(buildScopeExplorerParams(query)),
+    enabled,
+    staleTime: STALE,
+  })
+}
+
+/**
+ * [PANJI-REVIEW-UI-UNIFY][P1-3] 详情左导航栏 universe 枚举 hook。
+ *
+ * 复用现有 explorer 接口分页拉全（见 `fetchScopeExplorerUniverse`）：
+ *   - 列表态（无 board_id）不启用，避免多余请求；
+ *   - query identity 由调用方传入（不含 page/page_size/board_id），
+ *     故切页 / 切选板块不触发 rail 重取。
+ */
+export function useMarketScopeExplorerUniverse(query: ScopeExplorerQuery, enabled: boolean = true) {
+  return useQuery({
+    queryKey: [...marketDashboardKeys.scopeExplorer(query), 'universe'],
+    queryFn: () => fetchScopeExplorerUniverse(query, getMarketScopeExplorer),
     enabled,
     staleTime: STALE,
   })

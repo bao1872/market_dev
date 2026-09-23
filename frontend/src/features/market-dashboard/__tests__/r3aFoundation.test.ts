@@ -243,9 +243,9 @@ test('H. 二级导航冻结为三项：大盘 / 行业 / 概念（顶层无对�
     ['/review', '/review/industry', '/review/concept'],
   )
 
-  assert.equal(reviewTabLabel(REVIEW_TABS[0], 3), '大盘', 'tab 文案不得携带数量')
-  assert.equal(reviewTabLabel(REVIEW_TABS[1], 3), '行业')
-  assert.equal(reviewTabLabel(REVIEW_TABS[2], 3), '概念')
+  assert.equal(reviewTabLabel(REVIEW_TABS[0]), '大盘', 'tab 文案不得携带数量')
+  assert.equal(reviewTabLabel(REVIEW_TABS[1]), '行业')
+  assert.equal(reviewTabLabel(REVIEW_TABS[2]), '概念')
 
   // 旧命名（行业板块 / 概念板块）不得回归
   for (const tab of REVIEW_TABS) assert.ok(!tab.label.includes('板块'), `tab 文案不得含「板块」：${tab.label}`)

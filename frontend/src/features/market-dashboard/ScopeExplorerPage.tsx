@@ -15,14 +15,14 @@
 // - 右详情复用现有 canonical：useMarketScopeDetail + BreadthChart（6-series）。不新建详情实现 / API。
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { Link, useNavigate, useSearchParams } from 'react-router-dom'
-import { useMarketScopeExplorer, useMarketScopeDetail } from '@/hooks/useMarketDashboardApi'
+import { useMarketDashboard, useMarketScopeExplorer, useMarketScopeDetail, useMarketScopeExplorerUniverse } from '@/hooks/useMarketDashboardApi'
 import { useCompareBasketStore } from '@/store/compareBasket'
 import { extractMarketDashboardError } from '@/api/marketDashboard'
 import BreadthChart, { type BreadthLineSpec } from './BreadthChart'
 import type { BreadthPoint, HierarchyLevel, ScopeType, ScopeExplorerItem } from './types'
 import {
   activeExplorerFilterChips,
-  clearFiltersPatch,
+  clearAllStatePatch,
   draftFromFilterMode,
   EXPLORER_FILTERABLE_COLUMNS,
   EXPLORER_FILTER_COLUMN_SPECS,
@@ -30,6 +30,7 @@ import {
   EXPLORER_PAGE_SIZE_OPTIONS,
   filterKeysForColumn,
   isExplorerColumnFiltered,
+  isExplorerResetDisabled,
   MA5_PRESETS,
   NUMERIC_FILTER_KEYS,
   parseConceptExplorerSearch,
@@ -44,13 +45,13 @@ import {
   type ExplorerStatePatch,
   type NumericFilterKey,
 } from './scopeExplorerUrlState'
-import { SCOPE_EXPLORER_PAGE_SIZE_MAX } from './scopeExplorerQuery'
+import { type ScopeExplorerQuery } from './scopeExplorerQuery'
 import { MARKET_OVERVIEW_SERIES } from './marketOverviewConfig'
 import { BREADTH_REFERENCE_LINES } from './chartTheme'
 import { classifyDashboardError } from './dashboardLogic'
 import DashboardState from './DashboardState'
-import DashboardTabs from './DashboardTabs'
 import ScopeExplorerTable from './ScopeExplorerTable'
+import ReviewHeader from './ReviewHeader'
 import styles from './dashboard.module.scss'
 
 const DETAIL_DAYS = 250
@@ -90,13 +91,22 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
 
   // 列表主查询（server-side 分页；page/page_size 来自 URL SSOT）。
   const explorer = useMarketScopeExplorer(query)
-  // 左导航栏「filteredSortedRows 全集」：与列表同一份 server 过滤+排序结果，仅取上限条数（page=1）。
-  // 仅在 DETAIL VIEW（board_id 已选）时启用，避免列表态多余请求。
-  const railQuery = useMemo(
-    () => ({ ...query, page: 1, page_size: SCOPE_EXPLORER_PAGE_SIZE_MAX }),
-    [query],
+  // 左导航栏「筛选排序 universe 全集」：与列表同一份 server 过滤+排序结果，前端分页拉全（不前端重排）。
+  // query identity 不含 page / page_size / board_id → 切页、切选板块都不触发 rail 重取。
+  const railUniverseQuery = useMemo<ScopeExplorerQuery>(
+    () => ({
+      scope_type: query.scope_type,
+      hierarchy_level: isIndustry ? parsed.hierarchy_level : null,
+      q: parsed.q || null,
+      sort: parsed.sort,
+      direction: parsed.direction,
+      ...parsed.filters,
+    }),
+    [query.scope_type, isIndustry, parsed.hierarchy_level, parsed.q, parsed.sort, parsed.direction, parsed.filters],
   )
-  const railExplorer = useMarketScopeExplorer(railQuery, !!parsed.board_id)
+  const railUniverse = useMarketScopeExplorerUniverse(railUniverseQuery, !!parsed.board_id)
+  // 顶部「数据日期」复用 canonical 大盘响应（与 MarketDashboardPage 同源，不另造日期）。
+  const dashboard = useMarketDashboard()
   const detail = useMarketScopeDetail(parsed.board_id, DETAIL_DAYS)
 
   // ---- 应用 patch（除显式 page 外一律回到第 1 页）----
@@ -146,9 +156,10 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     applyPatch({ filters: buildFilters([[minKey, ''], [maxKey, '']]) })
   }
 
+  const clearDisabled = isExplorerResetDisabled(parsed.filters, parsed.sort, parsed.direction)
   const clearAllFilters = () => {
     setPresetOpen(false)
-    applyPatch(clearFiltersPatch())
+    applyPatch(clearAllStatePatch())
   }
 
   // ---- 表头筛选：激活列集合 + chips（都由 URL 派生）----
@@ -332,11 +343,11 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
           <button
             type="button"
             className={styles['clear-filters-btn']}
-            disabled={filterChips.length === 0}
+            disabled={clearDisabled}
             onClick={clearAllFilters}
             data-testid="clear-all-filters"
           >
-            清除筛选
+            清除排序与筛选
           </button>
         </div>
       </div>
@@ -426,14 +437,14 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     <div className={styles['detail-layout']} data-testid="scope-detail-view">
       {/* 左导航栏：仅板块名称，来自 filteredSortedRows 全集（server 同过滤+排序，page_size=上限）。 */}
       <nav className={styles['scope-rail']} data-testid="scope-rail" aria-label="板块导航">
-        {railExplorer.isLoading ? (
+        {railUniverse.isLoading ? (
           <div className={styles['rail-loading']}>加载导航…</div>
-        ) : railExplorer.error ? (
+        ) : railUniverse.error ? (
           <div className={styles['rail-empty']}>导航加载失败</div>
-        ) : (railExplorer.data?.items ?? []).length === 0 ? (
+        ) : (railUniverse.data ?? []).length === 0 ? (
           <div className={styles['rail-empty']}>无匹配板块</div>
         ) : (
-          (railExplorer.data?.items ?? []).map((it: ScopeExplorerItem) => {
+          (railUniverse.data ?? []).map((it: ScopeExplorerItem) => {
             const active = it.board_id === parsed.board_id
             return (
               <button
@@ -502,8 +513,7 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
 
   return (
     <div className={styles['explorer-page']} data-testid="explorer-page">
-      <h1 className={styles['page-title']}>{isIndustry ? '行业' : '概念'}</h1>
-      <DashboardTabs />
+      <ReviewHeader projectionDate={dashboard.data?.projection_trade_date} />
 
       {isIndustry ? (
         <div className={styles['level-selector']}>

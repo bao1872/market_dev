@@ -213,6 +213,39 @@ export function clearFiltersPatch(): ExplorerStatePatch {
   }
 }
 
+/**
+ * [PANJI-REVIEW-UI-UNIFY][P1-2] 列表状态 canonical reset：
+ *
+ * Review 的 backend canonical 默认就是 sort=ma5 / direction=desc，
+ * 因此「清除排序与筛选」必须**同时**还原 filters + sort + direction 到默认值，
+ * 而不是只清 filter（行情页 `StrategyDataTable` 的 canonical reset 也是如此）。
+ *
+ * 不触碰：hierarchy_level / board_id（scope 身份），q（搜索保持独立，本轮不扩大语义），page（由 updateExplorerState 归位）。
+ */
+export function clearAllStatePatch(): ExplorerStatePatch {
+  return {
+    ...clearFiltersPatch(),
+    sort: SCOPE_EXPLORER_SORT_DEFAULT,
+    direction: SCOPE_EXPLORER_DIRECTION_DEFAULT,
+  }
+}
+
+/**
+ * [PANJI-REVIEW-UI-UNIFY][P1-2] 「清除排序与筛选」按钮的 disabled 语义：
+ *
+ * 仅当「无任何激活筛选」且「sort/direction 已是 canonical 默认」时才禁用；
+ * 只要筛选存在或排序非默认，按钮就必须可点（即使筛选为空、排序被改过）。
+ */
+export function isExplorerResetDisabled(
+  filters: Record<NumericFilterKey, number | null>,
+  sort: ScopeExplorerSort,
+  direction: SortDirection,
+): boolean {
+  const hasActiveFilter = activeExplorerFilterChips(filters).length > 0
+  const canonicalSort = sort === SCOPE_EXPLORER_SORT_DEFAULT && direction === SCOPE_EXPLORER_DIRECTION_DEFAULT
+  return !hasActiveFilter && canonicalSort
+}
+
 // ---------------------------------------------------------------------------
 // 快捷筛选（诚实标注 inclusive；后端 range 为 >= / <= 闭区间）
 // ---------------------------------------------------------------------------

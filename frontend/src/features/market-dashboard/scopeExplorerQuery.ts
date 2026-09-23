@@ -9,6 +9,7 @@
 //
 // 硬约束：前端只做「参数序列化 / query key」，绝不重算 ratio / delta / 排序 / 分页。
 import type { HierarchyLevel, ScopeType } from './types'
+import type { ScopeExplorerItem, ScopeExplorerResponse } from '@/api/marketDashboard'
 
 export type ScopeExplorerSort =
   | 'name'
@@ -136,4 +137,33 @@ export function scopeExplorerQueryKey(query: ScopeExplorerQuery): readonly (stri
     params.direction,
     ...SCOPE_EXPLORER_RANGE_KEYS.map((key) => (params[key] === undefined ? 'any' : params[key])),
   ]
+}
+
+/**
+ * [PANJI-REVIEW-UI-UNIFY][P1-3] 前端 rail universe 枚举：
+ *
+ * 详情左导航栏必须渲染「当前筛选+排序结果全集」，而现有 server 单页上限只有
+ * `SCOPE_EXPLORER_PAGE_SIZE_MAX`（100）。本函数按现有 explorer 接口分页拉全：
+ *   - 第 1 页读取 `total`，按 server 顺序逐页 concat；
+ *   - 不重新在前端 sort/filter/slice（server 已排序）；
+ *   - 不 per-row 请求、不 N+1；
+ *   - 仅在 detail view 启用（由调用方 `enabled` 控制）。
+ *
+ * `baseQuery` 的 identity 由调用方决定（不含 board_id / page / page_size），
+ * 故切换选中板块不触发 rail 重取，改变 filter/sort 才会。
+ */
+export async function fetchScopeExplorerUniverse(
+  baseQuery: ScopeExplorerQuery,
+  fetcher: (params: Record<string, string | number>) => Promise<ScopeExplorerResponse>,
+): Promise<ScopeExplorerItem[]> {
+  const PAGE = SCOPE_EXPLORER_PAGE_SIZE_MAX
+  const first = await fetcher(buildScopeExplorerParams({ ...baseQuery, page: 1, page_size: PAGE }))
+  const total = first.total ?? first.items.length
+  const items: ScopeExplorerItem[] = [...first.items]
+  const pageCount = Math.max(1, Math.ceil(total / PAGE))
+  for (let p = 2; p <= pageCount; p += 1) {
+    const page = await fetcher(buildScopeExplorerParams({ ...baseQuery, page: p, page_size: PAGE }))
+    items.push(...page.items)
+  }
+  return items
 }

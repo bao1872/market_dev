@@ -23,6 +23,6 @@ export const REVIEW_TABS: readonly ReviewTab[] = [
  * 顶层 tab 文案。对比页不再进入顶层 tab（入口为详情页「查看对比」链接），
  * 因此不再需要「对比 N」动态计数标签；此处统一返回固定文案。
  */
-export function reviewTabLabel(tab: ReviewTab, _basketCount: number): string {
+export function reviewTabLabel(tab: ReviewTab): string {
   return tab.label
 }
