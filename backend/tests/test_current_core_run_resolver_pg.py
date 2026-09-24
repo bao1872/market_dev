@@ -2,10 +2,11 @@
 
 这些测试用 ``db_session`` 在远程 ``bz_stock_verify_<sha>`` 验证库运行（pytest.mark.postgres），
 覆盖合约 RC5-E 要求的真实 DB 行为：
-- 同时插入 legacy stock_core pointer（08-26）+ manual/backfill/after_close-sample/
-  after_close-wrong-schema/after_close-failed/canonical-T/同日 finished_at 更晚 的 run；
-- 验证：stale pointer 不参与、noncanonical（manual/backfill/wrong-schema/failed）不抢占、
-  同日取 finished_at 更晚者、as_of 严格 PIT。
+- 同时插入 legacy stock_core pointer（08-26）+ manual/backfill/after_close-full(wrong-schema)/
+  after_close-failed/canonical-T/同日 finished_at 更晚 的 run，以及 trade_date 晚于 canonical T
+  的 noncanonical（after_close scope=sample / after_close running / after_close finished_at=NULL）；
+- 验证：stale pointer 不参与、noncanonical（manual/backfill/wrong-schema/failed/sample/running/
+  finished_at=NULL）不抢占、同日取 finished_at 更晚者、as_of 严格 PIT。
 - 不依赖 Python simulator（与 test_first_pyramid_current_core_resolution.py 的 _simulate_db 互补）。
 
 用法（仅远程验证库）：
@@ -30,6 +31,7 @@ from app.models.stock_feature_snapshot_run import (
     RUN_TYPE_BACKFILL,
     RUN_TYPE_MANUAL,
     STATUS_FAILED,
+    STATUS_RUNNING,
     STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
@@ -42,11 +44,15 @@ pytestmark = pytest.mark.postgres
 _STALE_DATE = date(2026, 8, 26)  # legacy stock_core pointer 停在此（生产证据）
 _MANUAL = date(2099, 6, 20)
 _BACKFILL = date(2099, 6, 21)
-_AC_SAMPLE = date(2099, 6, 22)  # canonical after_close（as_of PIT 命中）
+_AC_PRE_T = date(2099, 6, 22)  # canonical after_close full succeeded（as_of PIT 命中；是 full 不是 sample）
 _AC_WRONG_SCHEMA = date(2099, 6, 23)
 _AC_FAILED = date(2099, 6, 24)
 _AC_T = date(2099, 6, 25)  # canonical，finished_at 15:00
 _AC_T_LATER = date(2099, 6, 25)  # 同日 canonical，finished_at 16:00（期望胜出）
+# 以下三条均为 trade_date > canonical T 的 noncanonical，必须不参与 CURRENT：
+_AC_SAMPLE = date(2099, 6, 26)  # after_close scope=sample succeeded（scope!=full 排除）
+_AC_RUNNING = date(2099, 6, 27)  # after_close scope=full status=running（status!=succeeded 排除）
+_AC_NO_FINISH = date(2099, 6, 28)  # after_close scope=full succeeded finished_at=NULL（finished_at 排除）
 
 
 def _add_run(
@@ -111,8 +117,8 @@ async def _seed_scenario(db) -> dict[str, StockFeatureSnapshotRun]:
         db, trade_date=_BACKFILL, run_type=RUN_TYPE_BACKFILL, status=STATUS_SUCCEEDED,
         schema_version=_SCHEMA_VERSION, finished_at=datetime(2099, 6, 21, 15, 0, tzinfo=UTC),
     )
-    ac_sample = _add_run(
-        db, trade_date=_AC_SAMPLE, run_type=RUN_TYPE_AFTER_CLOSE, status=STATUS_SUCCEEDED,
+    ac_pre_t = _add_run(
+        db, trade_date=_AC_PRE_T, run_type=RUN_TYPE_AFTER_CLOSE, status=STATUS_SUCCEEDED,
         schema_version=_SCHEMA_VERSION, finished_at=datetime(2099, 6, 22, 15, 0, tzinfo=UTC),
     )
     _add_run(
@@ -131,9 +137,23 @@ async def _seed_scenario(db) -> dict[str, StockFeatureSnapshotRun]:
         db, trade_date=_AC_T_LATER, run_type=RUN_TYPE_AFTER_CLOSE, status=STATUS_SUCCEEDED,
         schema_version=_SCHEMA_VERSION, finished_at=datetime(2099, 6, 25, 16, 0, tzinfo=UTC),
     )
+    # 三条 trade_date > canonical T 的 noncanonical（必须不参与 CURRENT）
+    _add_run(
+        db, trade_date=_AC_SAMPLE, run_type=RUN_TYPE_AFTER_CLOSE, status=STATUS_SUCCEEDED,
+        schema_version=_SCHEMA_VERSION, finished_at=datetime(2099, 6, 26, 15, 0, tzinfo=UTC),
+        scope="sample",
+    )
+    _add_run(
+        db, trade_date=_AC_RUNNING, run_type=RUN_TYPE_AFTER_CLOSE, status=STATUS_RUNNING,
+        schema_version=_SCHEMA_VERSION, finished_at=datetime(2099, 6, 27, 15, 0, tzinfo=UTC),
+    )
+    _add_run(
+        db, trade_date=_AC_NO_FINISH, run_type=RUN_TYPE_AFTER_CLOSE, status=STATUS_SUCCEEDED,
+        schema_version=_SCHEMA_VERSION, finished_at=None,
+    )
     await db.flush()
     return {
-        "stale": stale_run, "ac_sample": ac_sample, "ac_t": ac_t, "ac_t_later": ac_t_later,
+        "stale": stale_run, "ac_pre_t": ac_pre_t, "ac_t": ac_t, "ac_t_later": ac_t_later,
     }
 
 
@@ -154,16 +174,21 @@ async def test_resolver_ignores_stale_pointer_and_picks_canonical(db_session) ->
     assert result.trade_date == _AC_T
     assert result.id == refs["ac_t_later"].id
     assert result.finished_at == datetime(2099, 6, 25, 16, 0, tzinfo=UTC)
+    # 4) 更晚的 noncanonical（trade_date > canonical T）不抢占 CURRENT：
+    #    sample（scope!=full）/ running（status!=succeeded）/ finished_at=NULL
+    assert result.trade_date != _AC_SAMPLE
+    assert result.trade_date != _AC_RUNNING
+    assert result.trade_date != _AC_NO_FINISH
 
 
 async def test_resolver_as_of_strict_pit(db_session) -> None:
     refs = await _seed_scenario(db_session)
 
-    result = await resolve_current_core_run(db_session, as_of=_AC_SAMPLE)
+    result = await resolve_current_core_run(db_session, as_of=_AC_PRE_T)
 
     assert result is not None
-    # PIT：只返回 trade_date <= as_of 的最新 canonical run（即 06-22 sample）
-    assert result.trade_date == _AC_SAMPLE
+    # PIT：只返回 trade_date <= as_of 的最新 canonical run（即 06-22 的 full run）
+    assert result.trade_date == _AC_PRE_T
     assert result.run_type == RUN_TYPE_AFTER_CLOSE
     # 未来的 06-25 canonical 被严格排除
     assert result.id != refs["ac_t_later"].id

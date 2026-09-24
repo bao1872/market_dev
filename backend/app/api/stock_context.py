@@ -481,7 +481,11 @@ async def _build_stock_context(
 
     普通用户响应替换旧 state/events 为：
       contractVersion / asOf / core / auxiliary / availability / recentChanges / dataQuality
-    as_of 严格 point-in-time：仅查 succeeded+published+full run，禁止返回未来快照或未来变化。
+    as_of 严格 point-in-time：主响应与 recentChanges 均收敛到唯一 owner 解析出的
+    canonical after-close CoreRun（after_close + full + succeeded + 当前 schema +
+    finished_at 非空；不再以 published_at 作为 CURRENT readiness gate），禁止返回
+    未来快照或未来变化。同一响应内 recentChanges 的 cutoff 进一步冻结为 run.trade_date，
+    避免请求期间新 finalize 的未来 CoreRun 撕裂 response。
     """
     instrument = await _get_instrument_by_symbol(session, symbol)
 
@@ -513,9 +517,13 @@ async def _build_stock_context(
     else:
         facts = compute_atomic_facts(snapshot.structural_payload, snapshot.temporal_payload)
 
-    # CHANGE-20260716-006: 近期变化只保留最近一个交易日——查询 ≤2 个 canonical after-close 快照
+    # R2-1 [CURRENT-CORE-OWNER-REGRESSION-01-R2]：主响应 CoreRun 一旦解析成功，
+    # run.trade_date 即为本次 response 的 frozen PIT boundary。后续派生读取（recentChanges）
+    # 必须受它约束（as_of=run.trade_date），保证 latestChangesAsOf <= response.asOf，
+    # 不允许同一请求期间新 finalize 的未来 CoreRun 混入该 response（READ COMMITTED 下
+    # 两条 SELECT 不保证同一快照）。不引入 REPEATABLE READ，不增加额外 DB query。
     recent_snaps = await _find_recent_canonical_snapshots(
-        session, instrument.id, limit=2, as_of=as_of,
+        session, instrument.id, limit=2, as_of=run.trade_date,
     )
     recent_changes = compute_recent_changes(recent_snaps)
     # 最近交易日变化日期标注

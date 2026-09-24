@@ -6,6 +6,8 @@
   legacy stock_core FactorPublication 查询；
 - D: recentChanges（_find_recent_canonical_snapshots）与 owner 同一 canonical lineage，
   不再以 published_at 作为 CURRENT readiness gate，因此不会因 published_at=NULL 停在 08-26。
+- R2-1: recentChanges 的 cutoff 必须绑定已解析的 CURRENT identity（run.trade_date），
+  保证 latestChangesAsOf <= response.asOf，禁止同一请求期间未来 CoreRun 撕裂 response。
 
 均为纯单元（mock session / 打桩 owner 与下游 helper），不连库；PG 真实行为见
 test_current_core_run_resolver_pg.py。
@@ -204,3 +206,42 @@ async def test_recent_changes_consumer_follows_canonical(patched_helpers) -> Non
     # recentChanges 跟随 canonical 09-23/09-24，而非 legacy published 08-26
     assert result["latestChangesAsOf"] == "2026-09-24"
     assert result["latestChangesFrom"] == "2026-09-23"
+
+
+# --------------------------------------------------------------------------- #
+# R2-1. recentChanges 必须绑定已解析的 CURRENT identity（frozen PIT boundary）
+# --------------------------------------------------------------------------- #
+async def test_recent_changes_bound_to_resolved_identity_default_asof(patched_helpers) -> None:
+    # resolved run.trade_date = 09-24，原始 as_of = None
+    run = _make_canonical_run(date(2026, 9, 24), run_id="r-0924")
+    patched_helpers["run"].return_value = run
+
+    session = AsyncMock()
+    result = await sc._build_stock_context(session, "600519", as_of=None, include_raw=False)
+
+    # 主响应 frozen identity
+    assert result["asOf"] == "2026-09-24"
+    # recentChanges 必须以 run.trade_date 为 cutoff（不是原始 None），保证
+    # latestChangesAsOf <= response.asOf，禁止未来 CoreRun 混入同一 response。
+    patched_helpers["recent"].assert_awaited_once_with(
+        session, patched_helpers["instrument"].id, limit=2, as_of=date(2026, 9, 24)
+    )
+
+
+async def test_recent_changes_bound_to_resolved_identity_pit_asof(patched_helpers) -> None:
+    # 用户 as_of = 09-25，但 owner 只解析到最近交易日 09-24（无 09-25 run）
+    run = _make_canonical_run(date(2026, 9, 24), run_id="r-0924")
+    patched_helpers["run"].return_value = run
+
+    session = AsyncMock()
+    result = await sc._build_stock_context(
+        session, "600519", as_of=date(2026, 9, 25), include_raw=False
+    )
+
+    # 主响应 identity 仍是 owner 解析出的 09-24
+    assert result["asOf"] == "2026-09-24"
+    # recentChanges cutoff 必须是 resolved run.trade_date=09-24，
+    # 不是原始 user as_of 09-25（否则同一 response 可能撕裂为 latestChangesAsOf=09-25）。
+    patched_helpers["recent"].assert_awaited_once_with(
+        session, patched_helpers["instrument"].id, limit=2, as_of=date(2026, 9, 24)
+    )

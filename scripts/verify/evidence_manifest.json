@@ -333,6 +333,20 @@
         "tests/test_board_snapshot_import_pg.py"
       ],
       "claim": "The versioned BoardSnapshot transport round-trips the frozen board taxonomy/identity/hierarchy semantics into the real board_sync_service.sync_boards() PostgreSQL persistence owner; industry L1/L2/L3 hierarchy and parent links, taxonomy/identity fields and membershipVersion persist correctly; identical same-day snapshots are idempotent; and changed same-day membership resolves to the new exact-T PIT membership without any cooldown or once-per-day restriction."
+    },
+    {
+      "contract_id": "current_core_owner_lineage",
+      "governance_level": 2,
+      "semantic_owner": "app.services.current_core_run_service.resolve_current_core_run",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_current_core_run_resolver_pg.py",
+        "tests/test_system_overview_product_nodes_pg.py::test_product_nodes_first_pyramid_reads_canonical_core",
+        "tests/test_system_overview_product_nodes_pg.py::test_product_nodes_first_pyramid_no_coverage_gate",
+        "tests/test_system_overview_product_nodes_pg.py::test_product_nodes_first_pyramid_selects_latest_canonical_run"
+      ],
+      "claim": "CURRENT Core identity 的唯一来源是 canonical after-close（run_type=after_close）、scope=full、status=succeeded、schema_version=当前、finished_at IS NOT NULL 的 StockFeatureSnapshotRun，由唯一 owner resolve_current_core_run 解析；legacy stock_core FactorPublication pointer 不参与 CURRENT 身份；as_of 严格 point-in-time（trade_date <= as_of）；noncanonical run（manual / backfill / wrong-schema / failed / scope!=full sample / running / finished_at=NULL）不抢占；同日确定性胜出者由 finished_at 更晚者决定；admin 生产节点（system_overview first-pyramid）消费同一 owner 且不再以 stock_core pointer / 覆盖率门禁 作为 ready 条件。"
     }
   ]
 }
