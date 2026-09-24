@@ -68,9 +68,21 @@ class TestNormalizeConceptsNewShape:
         with pytest.raises(WencaiParseError):
             _normalize_concepts(bad)
 
-    def test_none_element_is_ignored_not_stringified(self) -> None:
-        """概念集合无序 → 空/None 元素可安全忽略（与行业层级位置语义不同）。"""
-        assert _normalize_concepts(["人工智能", None, ""]) == ["人工智能"]
+    def test_none_element_fails_closed(self) -> None:
+        """[RC1] 合同是 list[str]，不是 list[str | None] → 元素 None 必须 fail closed。
+
+        live 证据中 None 元素为 0；未观察到就不应扩大输入合同。
+        """
+        with pytest.raises(WencaiParseError):
+            _normalize_concepts(["人工智能", None])
+
+    def test_empty_string_element_still_ignored(self) -> None:
+        """空字符串元素保持忽略（不影响其它元素语义）。"""
+        assert _normalize_concepts(["人工智能", "", "机器人"]) == ["人工智能", "机器人"]
+
+    def test_top_level_none_preserved_as_empty(self) -> None:
+        """整个字段缺失/旧协议空值：仍返回 []（兼容性行为保留）。"""
+        assert _normalize_concepts(None) == []
 
     def test_no_stringified_list_leaks(self) -> None:
         """核心防回归：结果绝不能是列表的文本表示。"""

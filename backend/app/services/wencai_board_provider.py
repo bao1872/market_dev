@@ -353,11 +353,20 @@ def _normalize_scalar_text(raw: Any, *, field: str) -> str:
     `"['A', 'B']"` 当成**一个**业务名，从而产生几千个虚假板块（实测：
     5578 只股票 → 5560 个"概念"）。
 
+    **严格 list[str]**：live 证据为 5578/5578 扁平 `list[str]`，
+    未观察到 None / 数字 / dict / 嵌套。**不得自行扩大输入合同**：
+    元素为 None 即 fail closed（合同是 `list[str]`，不是 `list[str | None]`）。
+    空字符串元素仍按"忽略"处理（不影响其它元素的语义）。
+
     Raises:
-        WencaiParseError: 元素不是字符串（dict / 嵌套容器 / 数字 / bool）。
+        WencaiParseError: 元素不是字符串（None / dict / 嵌套容器 / 数字 / bool）。
     """
     if raw is None:
-        return ""
+        raise WencaiParseError(
+            f"{field} 数组元素为 None（fail closed）: "
+            "新协议合同为 list[str]，不是 list[str | None]；"
+            "live 证据中 None 元素为 0，不得自行放宽"
+        )
     if isinstance(raw, bool) or not isinstance(raw, str):
         raise WencaiParseError(
             f"{field} 元素类型异常（fail closed，禁止 str(list) 降级）: "
