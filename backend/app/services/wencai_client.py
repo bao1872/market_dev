@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 
 # 本地开发：backend/wencai_cookie.json（gitignore）
 _COOKIE_JSON_PATH = Path(__file__).resolve().parent.parent.parent / "wencai_cookie.json"
-# 容器内可读路径（docker cp 复制目标；应用 cwd=/app）
+# 容器内可读路径（LEGACY 兼容只读路径；历史上 docker cp 复制目标，现已非 board-sync 操作流程）
 _COOKIE_JSON_PATH_IN_CONTAINER = Path("/app/wencai_cookie.json")
 # 兼容旧的 backend/.env 写法（仅回退读取，不再写入）
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
@@ -190,7 +190,7 @@ def load_cookie() -> str | None:
 
     1. 环境变量 `WENCAI_COOKIE`
     2. 本地 `backend/wencai_cookie.json`
-    3. 容器内 `/app/wencai_cookie.json`（docker cp 复制目标）
+    3. 容器内 `/app/wencai_cookie.json`（LEGACY 兼容只读路径；仅历史遗留，非 board-sync 操作流程）
     4. 兼容旧 `backend/.env` 的 `WENCAI_COOKIE`
 
     Returns:
@@ -213,8 +213,11 @@ def save_cookie_to_json(cookie_str: str, updated_by: str = "user-paste") -> Path
     """把标准化后的 cookie 串写入本地 `backend/wencai_cookie.json`。
 
     该文件已被 .gitignore 忽略，不会进入版本库（敏感凭据本地留存）。
-    服务器侧：把本文件 `docker cp` 到容器内 `/app/wencai_cookie.json` 即可，
-    无需改 market.env 或重启 deploy。
+
+    [LEGACY] 历史上曾把本文件 `docker cp` 到容器内 `/app/wencai_cookie.json`
+    作为服务器侧兼容只读路径；该路径现已不是 board-sync 操作流程的一部分
+    （board/concept 认证仅存在于本地 Mac，生产同步经 SSH stdin 接收归一化快照，
+    绝不传输 Cookie）。
 
     Args:
         cookie_str: parse_cookie_input 产出的标准 cookie 串

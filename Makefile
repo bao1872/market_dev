@@ -51,7 +51,7 @@ migrate-new:
 #   make check BACKEND_T1="tests/test_foo.py::test_case,tests/test_bar.py"
 #   make check FRONTEND_T1="src/features/foo/__tests__/foo.test.ts"
 #
-# 前置：backend 虚拟环境已激活（ruff/pytest 在 PATH）；
+# 前置：canonical backend/.venv 已激活（source backend/.venv/bin/activate from repo root）；
 #       pure-unit 模式不连任何数据库，但部分单元测试会用到 Redis，
 #       默认指向 redis://localhost:6379/15，可用 REDIS_URL 覆盖。
 # 全量纯单元测试（6000+）不是日常路径，见 test-pure-full（T6）。

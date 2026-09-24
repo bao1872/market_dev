@@ -9,14 +9,63 @@
 - Redis 7
 - Pydantic v2 + pydantic-settings
 
+## 本地 Python 环境（canonical venv）
+
+Canonical backend 虚拟环境：
+
+    backend/.venv
+
+Python 要求：
+
+    Python >= 3.11
+
+从仓库根目录激活：
+
+    source backend/.venv/bin/activate
+
+从 backend/ 目录激活：
+
+    source .venv/bin/activate
+
+验证：
+
+    which python
+    python --version
+
+解释器必须解析到：
+
+    <repo>/backend/.venv/bin/python
+
+明确区分：
+
+- `.venv` = Python 虚拟环境（运行时依赖隔离）
+- `.env` = 配置/环境变量文件（backend/.env / backend/.env.example）
+- 二者**无关**，不要混淆
+- 不要在仓库内再创建其他本地环境，例如：
+  - repo/.venv
+  - backend/venv
+  - backend/env
+  - .venv2
+
+首次搭建（在 backend/ 下）：
+
+    cd backend
+    python3 -m venv .venv
+    source .venv/bin/activate
+    python -m pip install -e .
+
+注意：不要硬编码 Python 3.12；仓库契约为 >= 3.11。
+
 ## 快速开始
 
 ```bash
 # 1. 复制环境变量模板并填写共享 PostgreSQL / Redis 连接（本地开发不启动 Docker 数据服务）
 cp backend/.env.example backend/.env
 
-# 2. 安装依赖（清华源）
+# 2. 创建并激活 canonical 虚拟环境，安装依赖（清华源）
 cd backend
+python3 -m venv .venv          # 首次创建；之后仅需 source .venv/bin/activate
+source .venv/bin/activate
 pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
 
 # 3. 启动 SSH 隧道（PostgreSQL -> 127.0.0.1:15432，Redis -> 127.0.0.1:16379）
