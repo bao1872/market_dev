@@ -127,6 +127,28 @@ test('2c. 板块视图声明本地手动更新与本地命令提示', () => {
   )
 })
 
+test('2e. 板块 Tab 不得渲染通用「数据产品」筛选卡（RC3）', () => {
+  const src = readSource(PAGE_PATH)
+  // 通用卡必须由**正向枚举**控制，而不是不断叠加 activeTab !== ... 排除项
+  assert.ok(
+    src.includes('BUSINESS_PRODUCT_TABS'),
+    '通用产品卡必须由正向枚举 BUSINESS_PRODUCT_TABS 控制',
+  )
+  assert.ok(
+    !/activeTab !== 'after-close'[\s\S]{0,120}activeTab !== 'readiness'/.test(src),
+    '不得再由 activeTab !== ... 排除串控制通用卡（board 会漏进去）',
+  )
+  const blockStart = src.indexOf('BUSINESS_PRODUCT_TABS: readonly')
+  assert.ok(blockStart > 0, '必须存在 BUSINESS_PRODUCT_TABS 定义')
+  const block = src.slice(blockStart, src.indexOf('] as const', blockStart))
+  assert.ok(!block.includes("'board'"), 'board 不得出现在 BUSINESS_PRODUCT_TABS 中')
+  // 通用卡的渲染条件必须引用该枚举
+  assert.ok(
+    src.includes('BUSINESS_PRODUCT_TABS.includes(activeTab)'),
+    '通用卡渲染条件必须为 BUSINESS_PRODUCT_TABS.includes(activeTab)',
+  )
+})
+
 test('2d. 无服务端「立即同步」动作，且无基于 age 的过期判定', () => {
   const component = readSource(BOARD_COMPONENT_PATH)
   for (const forbidden of ['立即同步', '现在同步', '同步问财']) {

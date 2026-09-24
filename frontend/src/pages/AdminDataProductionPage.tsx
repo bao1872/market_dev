@@ -47,6 +47,16 @@ const TAB_TO_CHAIN_KEY: Partial<Record<DataProductionTab, string>> = {
   publish: 'publish',
 }
 
+// [BOARD-LOCAL-OWNERSHIP-01] 通用「数据产品」筛选卡**只**对这些 production_chain
+// 产品 Tab 渲染。使用**正向枚举**（而不是不断叠加 `activeTab !== ...` 排除项），
+// 避免新增 Tab（如 board）时意外继承通用卡而出现两张卡。
+const BUSINESS_PRODUCT_TABS: readonly DataProductionTab[] = [
+  'first-pyramid',
+  'review',
+  'auction',
+  'publish',
+] as const
+
 const CHAIN_KEY_TO_LABEL: Record<string, string> = {
   bars: '行情',
   first_pyramid: '第一金字塔',
@@ -188,8 +198,10 @@ export default function AdminDataProductionPage() {
         </section>
       )}
 
-      {/* 业务产品 Tab：聚合读模型筛选视图（PRD §8.2），展示该产品节点状态，不再显示"P1 后续提供"占位 */}
-      {activeTab !== 'after-close' && activeTab !== 'overview' && activeTab !== 'readiness' && (
+      {/* 业务产品 Tab：聚合读模型筛选视图（PRD §8.2），展示该产品节点状态。
+          [BOARD-LOCAL-OWNERSHIP-01] 仅对 BUSINESS_PRODUCT_TABS 正向渲染；
+          board 有自己的独立手动状态卡，绝不再叠加本通用卡。 */}
+      {BUSINESS_PRODUCT_TABS.includes(activeTab) && (
         <section className="card section-gap">
           <div className="card-head">
             <div>
