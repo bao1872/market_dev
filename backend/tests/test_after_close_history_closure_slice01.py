@@ -623,4 +623,8 @@ def test_t11_pipeline_order():
     hist = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_HISTORY.value)
     wl = _PIPELINE_STEPS.index("watchlist_ready")
     assert dash < feat < hist < wl
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 5
+    # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出 DAG，索引整体前移一位：
+    # refreshing_daily=0, checking_coverage=1,(dashboard=2),computing_features=3,
+    # computing_history=4, succeeded=5。
+    assert "syncing_boards" not in _PIPELINE_STEPS
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 4

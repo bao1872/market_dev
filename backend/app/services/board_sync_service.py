@@ -7,8 +7,15 @@ V1.1 完整性门禁（绝对门禁 + 相对门禁）：
 4. 全部通过后单事务差异 upsert/delete（原子切换）
 5. 失败 rollback 保留上一成功版本；成功时刷新有效 board 的 updated_at
 
-board 同步是软失败：失败不覆盖旧数据、不阻断 DSA/快照/发布。
-状态通过 Redis 记录（record_sync_status / get_sync_status），供 /market/boards API 读取。
+[BOARD-LOCAL-OWNERSHIP-01] 唯一 DB 写 owner：`sync_boards()` 仍是板块/成分数据的
+**唯一**业务写入口（绝对/相对门禁 + 版本与历史 + 原子切换）。调用方已从盘后 DAG
+迁移为本地手动 `scripts/ops/panji-board-sync` → 生产 importer（见
+backend/app/cli/board_snapshot_import.py）；服务本身保持 fail-closed，失败抛异常，
+由调用方决定展示/记录。盘后编排不再调用本服务。
+
+失败不覆盖旧数据（rollback 保留上一成功版本）。
+最近一次尝试状态通过 Redis 记录（record_sync_status / get_sync_status），供
+/market/boards API 与管理后台 board 状态读取（仅短期诊断，非长期 last-success SSOT）。
 
 纯函数设计：validate_snapshot 是纯函数，可直接单元测试。
 sync_boards 是异步服务入口，编排完整流程，失败抛异常。
@@ -303,6 +310,40 @@ async def get_current_detailed_counts(db: AsyncSession) -> dict[str, int]:
         "concept_count": concept_count,
         "stock_count": stock_count,
     }
+
+
+# =============================================================================
+# Instrument 解析（board-sync 领域公共 helper）
+# =============================================================================
+
+
+async def resolve_board_instruments(
+    db: AsyncSession,
+    symbols: list[str],
+) -> dict[str, UUID]:
+    """[BOARD-LOCAL-OWNERSHIP-01] 按 symbol 批量解析现有 Instrument.id。
+
+    单一职责：把 board snapshot 里的 symbol 列表映射为 `symbol -> instrument_id`。
+
+    合同：
+    - **一次** `Instrument.symbol IN (...)` 批量查询（禁止 N+1 / 逐 symbol 查询）；
+    - **不** commit、**不** 开启/提交事务（调用方持有同一个 session/transaction）；
+    - 空输入直接返回 `{}`，不查询。
+
+    这是原 after_close_orchestrator._resolve_instruments_for_board_sync 的领域迁移：
+    旧的 after-close 路径已退役，board 同步的唯一消费者是本地 manual sync 触发的
+    生产 importer，故 helper 归 board-sync 领域所有。
+    """
+    from app.models.instrument import Instrument
+
+    if not symbols:
+        return {}
+
+    stmt = select(Instrument.id, Instrument.symbol).where(
+        Instrument.symbol.in_(symbols)
+    )
+    result = await db.execute(stmt)
+    return {row.symbol: row.id for row in result}
 
 
 # =============================================================================

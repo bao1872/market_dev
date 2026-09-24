@@ -10,7 +10,7 @@
 
 1. **废除 `_MAINCHAIN_RESUME_STEP` / `last_completed_step` 伪造 restart**。
    orchestrator 的 `_completed_steps` 映射表根本不认识 `checking_coverage`
-   （其键只有 refreshing_daily / syncing_boards / computing_features / publishing /
+   （其键只有 refreshing_daily / computing_features / publishing /
    computing_review / succeeded），把 `last_completed_step="checking_coverage"`
    写进 metadata 会命中 `_completed_steps.get(...)` 的默认空集合，
    语义等于「什么都没完成」——与「从 core 链开始、跳过日线刷新」完全相反。
@@ -89,8 +89,16 @@ ALL_BOUNDARIES: tuple[str, ...] = (
 # **注意**：这不是 last_completed_step（那是「已完成检查点」，语义相反）。
 # 这里的值表示「worker 应当从哪个阶段开始执行」。
 _MAINCHAIN_START_STAGE: dict[str, str] = {
-    "daily_ready": "syncing_boards",       # 已有日线：跳过 refreshing_daily，从板块/core 链开始
-    "board_facts": "syncing_boards",       # 只重跑 board facts
+    # [BOARD-LOCAL-OWNERSHIP-01] 板块/概念同步已迁出盘后 DAG，"syncing_boards" 不再是
+    # 合法 mainchain_stage（也不再由本服务产出）。daily_ready 语义保持不变：
+    # 「跳过 refreshing_daily，其余阶段 runnable」——以 computing_features 为起点，
+    # 其 pre_stage 恰为 {refreshing_daily}，与旧 mainchain_stage="syncing_boards" 的
+    # completed 集合完全一致。
+    "daily_ready": "computing_features",   # 已有日线：跳过 refreshing_daily，从 core 链开始
+    # board_facts：board facts 现由本地手动 `scripts/ops/panji-board-sync` 产出，
+    # 不再是可重跑的盘后 DAG 阶段；保持与 daily_ready 同一起点（绝不触发板块同步），
+    # 且不新增非法 restart 边界。
+    "board_facts": "computing_features",
     "core": "computing_features",          # 新建 core run，算 trend/structure/momentum
     "stock_core_published": "publishing",  # 只重试 stock_core publication
 }

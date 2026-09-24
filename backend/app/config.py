@@ -155,61 +155,6 @@ def _resolve_redis_url() -> str:
     )
 
 
-def _resolve_board_sync_enabled() -> bool:
-    """解析板块同步开关（CHANGE-20260716-007，PR #77 收口严格解析）。
-
-    优先级（同字段，高到低）：
-    1. 环境变量 BOARD_SYNC_ENABLED（docker-compose.environment 显式注入）
-    2. CONFIG_FILE 指向的配置文件中的 BOARD_SYNC_ENABLED
-    3. 默认 False（未配置时盘后编排跳过 syncing_boards）
-
-    环境变量与配置文件统一严格解析（不区分大小写）：
-    - truthy：1 / true / yes / on
-    - falsy：0 / false / no / off / 空串
-    - 非法值：启动失败并给出明确错误（防止 "false" 字符串被 bool() 误判为 True）
-
-    Returns:
-        bool: True 时盘后编排执行 syncing_boards，False 时跳过
-
-    Raises:
-        RuntimeError: 配置值为无法识别的字符串
-    """
-    truthy = {"1", "true", "yes", "on"}
-    falsy = {"0", "false", "no", "off", ""}
-
-    env_val = os.environ.get("BOARD_SYNC_ENABLED")
-    if env_val is not None:
-        normalized = env_val.strip().lower()
-        if normalized in truthy:
-            return True
-        if normalized in falsy:
-            return False
-        raise RuntimeError(
-            f"BOARD_SYNC_ENABLED 环境变量值非法: {env_val!r}，"
-            f"合法值: {sorted(truthy | falsy)}"
-        )
-
-    file_val = _load_py_config().get("BOARD_SYNC_ENABLED")
-    if file_val is not None:
-        if isinstance(file_val, bool):
-            return file_val
-        if isinstance(file_val, str):
-            normalized = file_val.strip().lower()
-            if normalized in truthy:
-                return True
-            if normalized in falsy:
-                return False
-            raise RuntimeError(
-                f"BOARD_SYNC_ENABLED 配置文件值非法: {file_val!r}，"
-                f"合法值: {sorted(truthy | falsy)}"
-            )
-        raise RuntimeError(
-            f"BOARD_SYNC_ENABLED 配置文件类型非法: {type(file_val).__name__}，"
-            f"期望 bool 或 str"
-        )
-    return False
-
-
 def _safe_database_url(url: str) -> str:
     """返回脱敏后的数据库 URL（隐藏密码），用于日志与异常。
 
@@ -468,17 +413,9 @@ class Settings(BaseSettings):
         description="盘后行情 provider spawn 进程数；1 保持串行，合法范围 1-8",
     )
 
-    # 板块同步开关（CHANGE-20260716-007：pywencai provider 已上线）
-    # 加载优先级（同字段，高到低）：
-    #   1. 环境变量 BOARD_SYNC_ENABLED（docker-compose 显式 environment 注入）
-    #   2. CONFIG_FILE 配置文件中的 BOARD_SYNC_ENABLED
-    #   3. 默认 False（未配置时跳过 syncing_boards）
-    # 部署时在 docker-compose.prod.yml worker-after-close.environment 中显式传入
-    # BOARD_SYNC_ENABLED: ${BOARD_SYNC_ENABLED:-false}，并通过 market.env 控制。
-    board_sync_enabled: bool = Field(
-        default_factory=_resolve_board_sync_enabled,
-        description="板块同步开关：false 时盘后编排跳过 syncing_boards",
-    )
+    # [BOARD-LOCAL-OWNERSHIP-01] BOARD_SYNC_ENABLED 开关已移除：
+    # board/concept 同步已迁出盘后 DAG（本地 manual `scripts/ops/panji-board-sync`
+    # + 生产 importer），盘后编排不再读取任何板块同步开关。
 
     # [盘中监控1秒] - 事件判定Worker轮询间隔（秒）
     # 只控制 monitor_scheduler 的事件判定周期和前端 monitor-status 刷新；

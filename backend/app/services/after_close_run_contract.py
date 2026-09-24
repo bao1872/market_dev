@@ -27,6 +27,11 @@ class AfterCloseRunStatus(StrEnum):
 
     QUEUED = "queued"
     REFRESHING_DAILY = "refreshing_daily"
+    # [BOARD-LOCAL-OWNERSHIP-01] LEGACY ONLY：board/concept 同步已迁出盘后 DAG
+    # （改为本地 manual `scripts/ops/panji-board-sync` + 生产 importer）。
+    # 该值保留仅为读取历史 persisted run（orchestrator_status / last_completed_step /
+    # job_run_event.step）；**新 run 永不写入**，也不再是 current DAG 步骤或
+    # 合法 mainchain_stage（见 after_close_orchestrator._CHECKPOINT_ORDER）。
     SYNCING_BOARDS = "syncing_boards"
     CHECKING_COVERAGE = "checking_coverage"
     # [REVIEW-V2-R1] canonical 复盘计算（Market Dashboard projection 重建）。

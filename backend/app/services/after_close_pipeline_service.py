@@ -10,10 +10,11 @@
 - 不新建大表，不复制 SQL。
 - 不对 after_close_orchestrator 状态机做语义扩展。
 - overall_status 与系统概览的 PIPELINE_STATUS_* 是两套枚举，不可混用。
-[Phase8A] 步骤序列：refreshing_daily → syncing_boards → checking_coverage
-  → computing_features → computing_review → computing_history → watchlist_ready
+[BOARD-LOCAL-OWNERSHIP-01] 步骤序列：refreshing_daily → checking_coverage
+  → rebuilding_market_dashboard → computing_features → computing_history → watchlist_ready
   旧四状态（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
   映射到 computing_features，仅历史 run 兼容读取。
+  syncing_boards 已迁出盘后 DAG：仅历史真实事件可作 legacy 展示（同步板块（历史））。
   [CHANGE-20260831-ADMIN-TIMELINE] publishing 已从 current canonical DAG 移除：
   不为当前 run 合成 publishing；仅当历史 run 真实存在 publishing 事件时如实呈现。
 """
@@ -61,14 +62,13 @@ _BLOCKED_AFTER_CLOSE_MINUTES = 30
 _SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
 _UTC_TZ = UTC
 
-# [CHANGE-20260801-REVIEW-CLOSURE] 当前展示步骤（6 + watchlist_ready，无 publishing）：
-#   refreshing_daily → syncing_boards → checking_coverage
-#   → computing_features → computing_review → computing_history → watchlist_ready
+# [BOARD-LOCAL-OWNERSHIP-01] 当前展示步骤（5 + watchlist_ready，无 publishing / 无 syncing_boards）：
+#   refreshing_daily → checking_coverage
+#   → rebuilding_market_dashboard → computing_features → computing_history → watchlist_ready
 # 旧 4 步（creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot）
 # 收敛为 computing_features，仅历史映射。
 _PIPELINE_STEPS = [
     AfterCloseRunStatus.REFRESHING_DAILY.value,
-    AfterCloseRunStatus.SYNCING_BOARDS.value,
     AfterCloseRunStatus.CHECKING_COVERAGE.value,
     # [REVIEW-V2-R1] canonical 复盘计算（Dashboard projection）：位置在
     # board/coverage readiness 之后、computing_features 之前。
@@ -79,9 +79,10 @@ _PIPELINE_STEPS = [
 ]
 
 # [AC2-2026-09-14] 失败步骤中文标签（用于「不可用原因」/告警文案）
+# [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已退役，不再是 current 步骤/失败步骤，
+# 故不在此 current 标签表；其历史展示标签见 _LEGACY_STEP_LABELS。
 _STEP_LABELS = {
     AfterCloseRunStatus.REFRESHING_DAILY.value: "刷新日线",
-    AfterCloseRunStatus.SYNCING_BOARDS.value: "同步板块",
     AfterCloseRunStatus.CHECKING_COVERAGE.value: "检查覆盖率",
     AfterCloseRunStatus.COMPUTING_FEATURES.value: "统一特征计算",
     # [REVIEW-V2-R1] canonical 复盘计算（Market Dashboard projection 重建）
@@ -120,7 +121,15 @@ _LEGACY_EVENT_STEPS = frozenset({
     # [REVIEW-V2-R1] 旧复盘已退役：不得进入 current default sequence，
     # 但历史 run 真实存在的 computing_review 事件必须仍可读取/展示。
     AfterCloseRunStatus.COMPUTING_REVIEW.value,
+    # [BOARD-LOCAL-OWNERSHIP-01] 板块同步已迁出盘后 DAG：不再是 current 步骤，
+    # 但历史 run 真实存在的 syncing_boards 事件必须仍可读取/展示（legacy only）。
+    AfterCloseRunStatus.SYNCING_BOARDS.value,
 })
+
+# [BOARD-LOCAL-OWNERSHIP-01] legacy 步骤的中文展示标签（仅历史 run 使用）。
+_LEGACY_STEP_LABELS: dict[str, str] = {
+    AfterCloseRunStatus.SYNCING_BOARDS.value: "同步板块（历史）",
+}
 
 # [Phase8A] 旧四状态 → computing_features 的映射（历史 run 兼容读取）
 _LEGACY_STATUS_MAP = {
@@ -139,29 +148,32 @@ _ATTEMPT_BOUNDARY_STEPS = {
 }
 
 # last_completed_step -> 已完成步骤索引（新状态机 + 旧四状态历史映射）
+# [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已从 _PIPELINE_STEPS 移除，索引整体前移一位。
 _COMPLETED_STEP_INDEX = {
     None: -1,
     AfterCloseRunStatus.QUEUED.value: -1,
     AfterCloseRunStatus.REFRESHING_DAILY.value: 0,
-    AfterCloseRunStatus.SYNCING_BOARDS.value: 1,
-    AfterCloseRunStatus.CHECKING_COVERAGE.value: 2,
-    # 注意：index 3 是 rebuilding_market_dashboard，但它是 optional 非 checkpoint，
+    # legacy token：历史 last_completed_step="syncing_boards" 仅表示 refreshing_daily 已完成
+    # （board sync 已迁出 DAG），等价于 index 0。
+    AfterCloseRunStatus.SYNCING_BOARDS.value: 0,
+    AfterCloseRunStatus.CHECKING_COVERAGE.value: 1,
+    # 注意：index 2 是 rebuilding_market_dashboard，但它是 optional 非 checkpoint，
     # 不写 last_completed_step，因此**故意不作为本 dict 的 key**。
-    AfterCloseRunStatus.COMPUTING_FEATURES.value: 4,
+    AfterCloseRunStatus.COMPUTING_FEATURES.value: 3,
     # legacy token：历史 last_completed_step=computing_review 等价于「features 已完成」。
-    AfterCloseRunStatus.COMPUTING_REVIEW.value: 4,
-    AfterCloseRunStatus.COMPUTING_HISTORY.value: 5,
-    AfterCloseRunStatus.SUCCEEDED.value: 6,
+    AfterCloseRunStatus.COMPUTING_REVIEW.value: 3,
+    AfterCloseRunStatus.COMPUTING_HISTORY.value: 4,
+    AfterCloseRunStatus.SUCCEEDED.value: 5,
     # legacy token：历史 run 的 last_completed_step 可能为 publishing（stock_core 发布步骤）。
     # 与 orchestrator._COMPLETED_STEPS["publishing"] 语义一致：核心（features）已完成，
     # 但 computing_review / computing_history 未完成，故映射回 computing_features 完成度（=3）；
     # 不得因 publishing 不在 current canonical 序列中而丢失历史 run 的真实进度。
-    AfterCloseRunStatus.PUBLISHING.value: 4,
+    AfterCloseRunStatus.PUBLISHING.value: 3,
     # 旧四状态映射到 computing_features 的索引（历史 run 兼容）
-    AfterCloseRunStatus.CREATING_DSA.value: 3,
-    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 4,
-    AfterCloseRunStatus.QUALITY_GATE.value: 4,
-    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 4,
+    AfterCloseRunStatus.CREATING_DSA.value: 2,
+    AfterCloseRunStatus.WAITING_DSA_WORKER.value: 3,
+    AfterCloseRunStatus.QUALITY_GATE.value: 3,
+    AfterCloseRunStatus.FEATURE_SNAPSHOT.value: 3,
 }
 
 # [AC-TERMINAL-01 2026-08-04] 注意：cancelled / interrupted / partial_success
@@ -705,18 +717,10 @@ def _compute_step_states(
             "warnings": warnings_list if warnings_list else None,
         })
 
-    # [R1-G] legacy 兼容：历史 run 若真实产生过 publishing / computing_review 事件，
-    # 必须如实呈现（不得吞掉）。二者都**不是** current canonical 默认步骤，因此
-    # **仅在真实事件存在时补入**（禁止合成不存在的 legacy step），位置沿用 legacy DAG：
-    #   computing_features → publishing(if existed) → computing_review(if existed) → history
-    _LEGACY_DISPLAY_ORDER = (
-        AfterCloseRunStatus.PUBLISHING.value,
-        AfterCloseRunStatus.COMPUTING_REVIEW.value,
-    )
-    insert_pos = _PIPELINE_STEPS.index(AfterCloseRunStatus.COMPUTING_FEATURES.value) + 1
-    for legacy_step in _LEGACY_DISPLAY_ORDER:
+    def _build_legacy_step(legacy_step: str) -> dict[str, Any] | None:
+        """把历史真实 legacy 事件构造为展示 step（无事件则返回 None）。"""
         if legacy_step not in step_events:
-            continue
+            return None
         legacy_stats = step_events[legacy_step]
         legacy_started = legacy_stats.get("started_at")
         legacy_finished = legacy_stats.get("finished_at")
@@ -730,23 +734,58 @@ def _compute_step_states(
             legacy_status = "running"
         else:
             legacy_status = "pending"
-        steps.insert(
-            insert_pos,
-            {
-                "step": legacy_step,
-                "status": legacy_status,
-                "started_at": _format_dt(legacy_started),
-                "finished_at": _format_dt(legacy_finished),
-                "duration_seconds": (
-                    None
-                    if legacy_status == "running"
-                    else legacy_stats.get("duration_seconds")
-                ),
-                "counts": legacy_stats.get("counts", {}),
-                "error_message": legacy_stats.get("error_message"),
-                "warnings": None,
-            },
-        )
+        return {
+            "step": legacy_step,
+            "status": legacy_status,
+            "started_at": _format_dt(legacy_started),
+            "finished_at": _format_dt(legacy_finished),
+            "duration_seconds": (
+                None
+                if legacy_status == "running"
+                else legacy_stats.get("duration_seconds")
+            ),
+            "counts": legacy_stats.get("counts", {}),
+            "error_message": legacy_stats.get("error_message"),
+            "warnings": None,
+        }
+
+    def _position_after(step_name: str) -> int:
+        """在**已构建的 steps** 中找到 step_name 之后的位置（legacy 补入用）。
+
+        必须基于 `steps` 而非 `_PIPELINE_STEPS`：legacy 补入会移动后续位置，
+        用基础列表索引会导致 legacy 步骤被插到错误位置。
+        """
+        for idx, built in enumerate(steps):
+            if built["step"] == step_name:
+                return idx + 1
+        return len(steps)
+
+    # [BOARD-LOCAL-OWNERSHIP-01] legacy syncing_boards 位置：refreshing_daily 之后、
+    # checking_coverage 之前（沿用旧 DAG 位置）。仅在历史 run 真实存在该事件时补入，
+    # 禁止为 current run 合成。
+    _LEGACY_PRE_COVERAGE_ORDER = (AfterCloseRunStatus.SYNCING_BOARDS.value,)
+    pre_insert_pos = _position_after(AfterCloseRunStatus.REFRESHING_DAILY.value)
+    for legacy_step in _LEGACY_PRE_COVERAGE_ORDER:
+        legacy_step_dict = _build_legacy_step(legacy_step)
+        if legacy_step_dict is None:
+            continue
+        steps.insert(pre_insert_pos, legacy_step_dict)
+        pre_insert_pos += 1
+
+    # [R1-G] legacy 兼容：历史 run 若真实产生过 publishing / computing_review 事件，
+    # 必须如实呈现（不得吞掉）。二者都**不是** current canonical 默认步骤，因此
+    # **仅在真实事件存在时补入**（禁止合成不存在的 legacy step），位置沿用 legacy DAG：
+    #   computing_features → publishing(if existed) → computing_review(if existed) → history
+    _LEGACY_DISPLAY_ORDER = (
+        AfterCloseRunStatus.PUBLISHING.value,
+        AfterCloseRunStatus.COMPUTING_REVIEW.value,
+    )
+    insert_pos = _position_after(AfterCloseRunStatus.COMPUTING_FEATURES.value)
+    for legacy_step in _LEGACY_DISPLAY_ORDER:
+        legacy_step_dict = _build_legacy_step(legacy_step)
+        if legacy_step_dict is None:
+            continue
+        steps.insert(insert_pos, legacy_step_dict)
         insert_pos += 1
 
     return steps
@@ -822,7 +861,15 @@ def _compute_watchlist_reason(
     if job_run.status != "succeeded":
         # [AC2-2026-09-14] publishing 已是旁路步骤，不再用「未进入 publish」误导；
         # 改为指向真实失败步骤，配合 error_code/error_message 给出可操作信息。
-        label = _STEP_LABELS.get(failed_step, failed_step) if failed_step else None
+        # [BOARD-LOCAL-OWNERSHIP-01] 历史 run 的 failed_step 可能是已退役的 syncing_boards，
+        # 用 legacy 标签兜底，避免显示裸 step 名。
+        if failed_step:
+            label = (
+                _STEP_LABELS.get(failed_step)
+                or _LEGACY_STEP_LABELS.get(failed_step, failed_step)
+            )
+        else:
+            label = None
         if label:
             return f"盘后任务失败于「{label}」"
         return f"after_close 状态为 {job_run.status}"
@@ -1070,8 +1117,14 @@ if __name__ == "__main__":
     assert "refreshing_daily" in _PIPELINE_STEPS
     assert "watchlist_ready" in _PIPELINE_STEPS
     assert "computing_features" in _PIPELINE_STEPS
-    assert "syncing_boards" in _PIPELINE_STEPS
-    # [REVIEW-V2-R1] 7 步 canonical 序列：daily -> coverage -> dashboard review
+    # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 不再是 current 步骤，但保留 legacy 事件识别
+    assert "syncing_boards" not in _PIPELINE_STEPS, (
+        "syncing_boards 已迁出盘后 DAG，不得出现在 current canonical 序列"
+    )
+    assert AfterCloseRunStatus.SYNCING_BOARDS.value in _LEGACY_EVENT_STEPS, (
+        "syncing_boards 必须保留在 _LEGACY_EVENT_STEPS，避免历史真实事件被吞掉"
+    )
+    # [REVIEW-V2-R1] 6 步 canonical 序列：daily -> coverage -> dashboard review
     # -> features -> history -> watchlist
     assert "rebuilding_market_dashboard" in _PIPELINE_STEPS, (
         "_PIPELINE_STEPS 必须包含 rebuilding_market_dashboard（canonical 复盘计算）"
@@ -1085,8 +1138,8 @@ if __name__ == "__main__":
     assert "computing_history" in _PIPELINE_STEPS, (
         "_PIPELINE_STEPS 必须包含 computing_history（历史状态推进阶段）"
     )
-    assert len(_PIPELINE_STEPS) == 7, (
-        f"7 步 canonical 序列（含 rebuilding_market_dashboard / computing_history），"
+    assert len(_PIPELINE_STEPS) == 6, (
+        f"6 步 canonical 序列（含 rebuilding_market_dashboard / computing_history），"
         f"实际={len(_PIPELINE_STEPS)}"
     )
     # publishing 不再为 current canonical DAG 合成，但历史真实事件不得被吞掉
@@ -1106,21 +1159,23 @@ if __name__ == "__main__":
         f"computing_history < watchlist_ready："
         f"dash={dash_idx}, feat={feat_idx}, hist={hist_idx}, wl={wl_idx}"
     )
-    # 旧四状态映射到 computing_features 索引（=4）
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 4
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 4
+    # 旧四状态映射到 computing_features 索引（=3）
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.WAITING_DSA_WORKER.value] == 3
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.FEATURE_SNAPSHOT.value] == 3
     # [REVIEW-V2-R1] dashboard 是 optional 非 checkpoint：不得成为 _COMPLETED_STEP_INDEX 的 key
     assert "rebuilding_market_dashboard" not in _COMPLETED_STEP_INDEX, (
         "rebuilding_market_dashboard 不是 durable checkpoint，不得出现在 _COMPLETED_STEP_INDEX"
     )
-    # 新状态机索引（index 3 为 dashboard；features=4, history=5, succeeded=6）
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 4
+    # 新状态机索引（index 2 为 dashboard；features=3, history=4, succeeded=5）
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_FEATURES.value] == 3
     # legacy token：等价于「features 已完成」
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 4
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 5
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 6
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_REVIEW.value] == 3
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.COMPUTING_HISTORY.value] == 4
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SUCCEEDED.value] == 5
     # legacy publishing token：映射回 computing_features 完成度（核心已完成，review/history 未完成）
-    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 4
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.PUBLISHING.value] == 3
+    # [BOARD-LOCAL-OWNERSHIP-01] legacy syncing_boards 仅表示 refreshing_daily 已完成
+    assert _COMPLETED_STEP_INDEX[AfterCloseRunStatus.SYNCING_BOARDS.value] == 0
     # 旧四状态映射
     assert _LEGACY_STATUS_MAP[AfterCloseRunStatus.CREATING_DSA.value] == "computing_features"
     # 时区归一化 + 负耗时防御：_normalize_to_shanghai 基本行为
@@ -1134,4 +1189,4 @@ if __name__ == "__main__":
     assert sh_from_utc.hour == 15, (
         f"UTC 07:00 应转换为上海 15:00，实际 hour={sh_from_utc.hour}"
     )
-    print("after_close_pipeline_service 常量与映射自测通过（含 rebuilding_market_dashboard 的 current 7 步 + 时区归一化）")
+    print("after_close_pipeline_service 常量与映射自测通过（含 rebuilding_market_dashboard 的 current 6 步 + 时区归一化）")

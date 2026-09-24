@@ -93,7 +93,7 @@ scripts/ops/panji-prod-ssh "free -h | head -2 && docker stats --no-stream | head
 ## 5. 交接
 
 报告以下信息：
-- 任务当前阶段（如 `refreshing_daily` / `syncing_boards` / `computing_features` / `publishing` / `succeeded`）
+- 任务当前阶段（如 `refreshing_daily` / `checking_coverage` / `rebuilding_market_dashboard` / `computing_features` / `computing_history` / `succeeded`）。[BOARD-LOCAL-OWNERSHIP-01] `syncing_boards` 已迁出盘后 DAG，只作历史只读 token（板块/概念同步改由本地 `scripts/ops/panji-board-sync` 手动触发，见 `docs/runbooks/board-local-sync.md`）。
 - `job_run_id`
 - 前 5 只股票进度（symbol、成功/失败、耗时、StrategyResult 计数）
 - 资源状态（MemAvailable、容器重启次数）

@@ -34,6 +34,7 @@ from fastapi import FastAPI, Request
 from app.api import metrics as metrics_api
 from app.api.admin_after_close import router as admin_after_close_router
 from app.api.admin_beta_applications import router as admin_beta_applications_router
+from app.api.admin_board_sync import router as admin_board_sync_router
 from app.api.admin_incremental_publish import router as admin_incremental_publish_router
 from app.api.admin_notifications import router as admin_notifications_router
 from app.api.admin_readiness import router as admin_readiness_router
@@ -201,6 +202,8 @@ app.include_router(admin_beta_applications_router)
 app.include_router(admin_notifications_router)
 # 盘后编排管理路由（Task 2.3，需 admin 角色）
 app.include_router(admin_after_close_router)
+# [BOARD-LOCAL-OWNERSHIP-01] 板块/概念手动同步状态路由（只读，需 admin 角色）
+app.include_router(admin_board_sync_router)
 # [CHANGE-20260729-008] 增量发布状态管理路由（需 admin 角色）
 app.include_router(admin_incremental_publish_router)
 # [Gate5] 访问统计路由（GoAccess 报告，需 admin 角色）

@@ -102,10 +102,11 @@ def test_current_running_run_has_no_publishing() -> None:
 # ==================== 2. current canonical 顺序 ====================
 
 def test_current_canonical_order() -> None:
-    """[REVIEW-V2-R1] current canonical 7 步顺序（旧 computing_review 已退役）。
+    """[BOARD-LOCAL-OWNERSHIP-01] current canonical 6 步顺序
+    （syncing_boards 已迁出 DAG；旧 computing_review 已退役）。
 
     冻结顺序：
-        refreshing_daily → syncing_boards → checking_coverage
+        refreshing_daily → checking_coverage
         → rebuilding_market_dashboard（复盘计算）→ computing_features
         → computing_history → watchlist_ready
     """
@@ -116,6 +117,10 @@ def test_current_canonical_order() -> None:
     assert "computing_review" not in names, (
         f"computing_review 已退役，不得出现在 current pipeline，实际: {names}"
     )
+    # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出盘后 DAG
+    assert "syncing_boards" not in names, (
+        f"syncing_boards 已迁出盘后 DAG，不得出现在 current pipeline，实际: {names}"
+    )
     # 新 canonical 复盘计算必须在位
     assert "rebuilding_market_dashboard" in names, (
         f"current pipeline 必须包含 rebuilding_market_dashboard，实际: {names}"
@@ -125,12 +130,13 @@ def test_current_canonical_order() -> None:
     feat = names.index("computing_features")
     hist = names.index("computing_history")
     wl = names.index("watchlist_ready")
+    assert names.index("refreshing_daily") < names.index("checking_coverage") < dash
     assert dash < feat < hist < wl, (
         "顺序必须为 rebuilding_market_dashboard < computing_features "
         f"< computing_history < watchlist_ready，实际: "
         f"dash={dash}, feat={feat}, hist={hist}, wl={wl} ({names})"
     )
-    assert len(names) == 7, f"current canonical 应为 7 步，实际: {len(names)}"
+    assert len(names) == 6, f"current canonical 应为 6 步，实际: {len(names)}"
 
 
 # ==================== 3/4. legacy 真实事件保留 vs 绝不合成 ====================

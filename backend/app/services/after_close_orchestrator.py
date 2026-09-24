@@ -16,11 +16,14 @@
   feature_snapshot_service.compute_for_trade_date
 - DSA Worker 异步执行，编排层轮询 StrategyRun.status 直到 completed/failed/超时
 
-状态机（PR #77 收口：含 syncing_boards）：
-queued → refreshing_daily → syncing_boards → checking_coverage → creating_dsa
-  → waiting_dsa_worker → quality_gate → feature_snapshot → publishing → succeeded
-任意步骤异常 → failed（syncing_boards 除外：软失败不阻断主流程）
-syncing_boards 在 BOARD_SYNC_ENABLED=false / 非交易日时跳过
+状态机（[BOARD-LOCAL-OWNERSHIP-01] 板块/概念同步已迁出盘后 DAG）：
+queued → refreshing_daily → checking_coverage → rebuilding_market_dashboard
+  → computing_features → computing_history → succeeded
+任意步骤异常 → failed
+[BOARD-LOCAL-OWNERSHIP-01] 盘后不再执行/跳过/汇总板块同步：
+board/concept 快照由本地 `scripts/ops/panji-board-sync` 采集，经 SSH stdin 送到
+生产 importer，再由同一 `board_sync_service.sync_boards` 原子写库。
+`syncing_boards` 仅作为**历史持久化 token** 保留读取兼容（见 after_close_run_contract）。
 
 禁异常吞没：所有异常补充上下文后 re-raise 或写入 ERROR 事件后标记 failed。
 """
@@ -104,7 +107,6 @@ _HEARTBEAT_INTERVAL_SECONDS = 10
 # 依据真实无进展判定 stalled，而非总耗时过长。
 _STEP_TIMEOUT_SECONDS: dict[str, float | None] = {
     "refreshing_daily": None,      # workload-variant long-running：无 absolute 上限
-    "syncing_boards": 1800,
     "checking_coverage": 300,
     # [MARKET-DASHBOARD-F1D] optional sidecar：正常量级为几十秒（F1C 只读 369 日 +
     # 原子替换），600s 已远超正常耗时，同时不会让 optional 投影无限挂住主链。
@@ -894,138 +896,6 @@ def _make_step_cancellation_check(
     return _check
 
 
-async def _execute_syncing_boards(
-    *,
-    job_run_id: uuid.UUID,
-    trade_date: date,
-    board_sync_disabled: bool,
-    non_trading_day: bool,
-) -> dict[str, Any]:
-    """[AC-02] syncing_boards 业务体（软失败，不阻断主流程）。
-
-    返回 dict（status=succeeded/failed/skipped），由统一执行器包装为 step_summary。
-    内部保留全部现有语义：Redis 状态、job_run_event、metadata.board_sync_result。
-    """
-    from app.config import get_settings
-    from app.services.board_sync_service import record_sync_status, sync_boards
-    from app.services.wencai_board_provider import fetch_board_snapshot
-
-    if non_trading_day:
-        logger.info(
-            "[AfterClose] 非交易日，跳过板块同步: job_run_id=%s", job_run_id,
-        )
-        return {"status": "skipped", "reason_code": "non_trading_day"}
-    if board_sync_disabled:
-        logger.info(
-            "[AfterClose] BOARD_SYNC_ENABLED=false，跳过板块同步: job_run_id=%s", job_run_id,
-        )
-        await record_sync_status({
-            "status": "skipped",
-            "source": "wencai",
-            "reused_previous_snapshot": True,
-        })
-        await _record_board_sync_outcome(
-            job_run_id=job_run_id,
-            outcome={
-                "status": "skipped",
-                "source": "wencai",
-                "reused_previous_snapshot": True,
-                "reason_code": "board_sync_disabled",
-            },
-            level="info",
-            message="板块同步跳过（BOARD_SYNC_ENABLED=false）",
-        )
-        return {"status": "skipped", "reason_code": "board_sync_disabled"}
-
-    settings = get_settings()
-    if not settings.board_sync_enabled:
-        return {"status": "skipped", "reason_code": "board_sync_disabled"}
-
-    board_sync_start = time.monotonic()
-    try:
-        snapshot = await fetch_board_snapshot()
-        async with AsyncSessionLocal() as db:
-            async with db.begin():
-                board_result = await sync_boards(
-                    db,
-                    snapshot,
-                    instrument_resolver=_resolve_instruments_for_board_sync,
-                    effective_date=trade_date,
-                )
-
-        await record_sync_status({
-            "status": "succeeded",
-            "source": "wencai",
-            "raw_rows": board_result["raw_rows"],
-            "resolved": board_result["resolved"],
-            "unresolved": board_result["unresolved"],
-            "industry_count": board_result["industry_count"],
-            "concept_count": board_result["concept_count"],
-            "membership_count": board_result["membership_count"],
-            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
-            "error_code": None,
-            "reused_previous_snapshot": False,
-        })
-
-        board_sync_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
-        board_success_outcome = {
-            "status": "succeeded",
-            "source": "wencai",
-            "raw_rows": board_result["raw_rows"],
-            "resolved": board_result["resolved"],
-            "unresolved": board_result["unresolved"],
-            "industry_count": board_result["industry_count"],
-            "concept_count": board_result["concept_count"],
-            "membership_count": board_result["membership_count"],
-            "duration_ms": board_sync_duration_ms,
-            "error_code": None,
-            "reused_previous_snapshot": False,
-        }
-        await _record_board_sync_outcome(
-            job_run_id=job_run_id,
-            outcome=board_success_outcome,
-            level="info",
-            message=(
-                f"板块同步成功: 行业={board_result['industry_count']}, "
-                f"概念={board_result['concept_count']}, "
-                f"关系={board_result['membership_count']}, "
-                f"耗时={board_sync_duration_ms}ms"
-            ),
-        )
-        return {"status": "succeeded"}
-    except Exception as board_exc:
-        # 软失败：不覆盖旧数据、不阻断 DSA/快照/发布
-        logger.exception(
-            "[AfterClose] 板块同步失败（软失败，沿用上次数据）: %s", board_exc,
-        )
-        await record_sync_status({
-            "status": "failed",
-            "source": "wencai",
-            "error_code": type(board_exc).__name__,
-            "reused_previous_snapshot": True,
-            "duration_ms": int((time.monotonic() - board_sync_start) * 1000),
-        })
-        board_fail_duration_ms = int((time.monotonic() - board_sync_start) * 1000)
-        board_fail_outcome = {
-            "status": "failed",
-            "source": "wencai",
-            "error_code": type(board_exc).__name__,
-            "reused_previous_snapshot": True,
-            "duration_ms": board_fail_duration_ms,
-        }
-        await _record_board_sync_outcome(
-            job_run_id=job_run_id,
-            outcome=board_fail_outcome,
-            level="warn",
-            message=(
-                f"板块同步失败（软失败，沿用上次数据）: "
-                f"error={type(board_exc).__name__}, "
-                f"耗时={board_fail_duration_ms}ms"
-            ),
-        )
-        return {"status": "failed", "error_code": type(board_exc).__name__}
-
-
 async def _execute_rebuilding_market_dashboard(
     *,
     trade_date: date,
@@ -1262,40 +1132,6 @@ async def _claim_or_recover_dsa_run(
                 raise
 
     return dsa_already_completed, dsa_run_id
-
-
-async def _record_board_sync_outcome(
-    job_run_id: uuid.UUID,
-    outcome: dict[str, Any],
-    level: str,
-    message: str,
-) -> None:
-    """[AfterClose] - 记录板块同步结果到 job_run_events + metadata_json。
-
-    PR #77 收口 §三.3：成功/失败/跳过均写入持久事件和 metadata，
-    使管理后台盘后流水线时间线可看到完整结果（不只 Redis 和 logger）。
-
-    Args:
-        job_run_id: SchedulerJobRun ID
-        outcome: 同步结果 dict（status/source/raw_rows/resolved/unresolved/...）
-        level: 事件级别 info/warn/error
-        message: 事件消息
-    """
-    async with AsyncSessionLocal() as db:
-        job_run = await _get_job_run_or_raise(db, job_run_id)
-        existing_meta = _parse_metadata(job_run)
-        new_meta = dict(existing_meta)
-        new_meta["board_sync_result"] = outcome
-        job_run.metadata_json = json.dumps(new_meta, ensure_ascii=False)
-        await append_event(
-            db=db,
-            job_run_id=job_run.id,
-            step=AfterCloseRunStatus.SYNCING_BOARDS.value,
-            level=level,
-            message=message,
-            payload=outcome,
-        )
-        await db.commit()
 
 
 async def create_after_close_run(
@@ -1608,35 +1444,6 @@ async def touch_job_run_heartbeat(
 
 # [Heartbeat] - feature_snapshot 进度事件采样间隔（instrument 数）
 _FEATURE_SNAPSHOT_PROGRESS_EVENT_INTERVAL = 500
-
-
-async def _resolve_instruments_for_board_sync(
-    symbols: list[str],
-    session: AsyncSession | None = None,
-) -> dict[str, uuid.UUID]:
-    """[BoardSync] - 按 symbol 批量查询现有 Instrument.id（供 board_sync_service 使用）。
-
-    与 worker.py 的 _resolve_instruments 逻辑一致，独立定义为模块级函数避免循环依赖。
-    session 参数仅供测试注入；生产调用不传，内部新建 AsyncSessionLocal。
-    """
-    from sqlalchemy import select
-
-    from app.models.instrument import Instrument
-
-    if not symbols:
-        return {}
-
-    async def _do_resolve(s: AsyncSession) -> dict[str, uuid.UUID]:
-        stmt = select(Instrument.id, Instrument.symbol).where(
-            Instrument.symbol.in_(symbols)
-        )
-        result = await s.execute(stmt)
-        return {row.symbol: row.id for row in result}
-
-    if session is not None:
-        return await _do_resolve(session)
-    async with AsyncSessionLocal() as session:
-        return await _do_resolve(session)
 
 
 def _build_feature_snapshot_progress_callback(
@@ -2440,8 +2247,8 @@ async def execute_after_close_run(
 
         # [Phase5] - 根据last_completed_step 计算各阶段跳过标志
         # 阶段顺序（PHASE-A Core→Review Source Closure）：
-        #   [REVIEW-V2-R1] current DAG：
-        #   refreshing_daily → syncing_boards → checking_coverage
+        #   [BOARD-LOCAL-OWNERSHIP-01] current DAG：
+        #   refreshing_daily → checking_coverage
         #   → rebuilding_market_dashboard（复盘计算）→ computing_features
         #   → computing_history → post-core optional → succeeded
         # publishing / stock_core 发布已旁路，不再是真实步骤（KPI-A1）。
@@ -2481,11 +2288,13 @@ async def execute_after_close_run(
         #   二者不得混用：daily_ready restart 不再伪造 last_completed_step="refreshing_daily"。
 
         skip_refresh = "refreshing_daily" in completed
-        skip_board_sync = "syncing_boards" in completed
         # [Phase 5] 3 个旧 skip 标志收敛为 skip_computing
         skip_computing = "computing_features" in completed
         skip_publish = "publishing" in completed
         # [REVIEW-V2-R1] 旧 computing_review 已退役，不再存在 skip_review 标志。
+        # [BOARD-LOCAL-OWNERSHIP-01] 板块同步已迁出盘后 DAG：不再有任何板块同步跳过标志。
+        # 历史持久化的板块同步 checkpoint token 由 _COMPLETED_STEPS 映射为
+        # 「refreshing_daily 已完成」，不产生任何板块同步执行。
         # [SLICE-01-CORRECTION] history 阶段跳过标志：
         # History readiness 不能通过 checkpoint 名称恢复（run 存在 ≠ exact-T ready），
         # 必须重新执行幂等 advance + revalidate，
@@ -2494,10 +2303,8 @@ async def execute_after_close_run(
 
         logger.info(
             "[AfterClose] 断点恢复: last_completed_step=%s, "
-            "skip_refresh=%s, skip_board_sync=%s, skip_computing=%s, "
-            "skip_publish=%s",
-            last_completed_step, skip_refresh, skip_board_sync, skip_computing,
-            skip_publish,
+            "skip_refresh=%s, skip_computing=%s, skip_publish=%s",
+            last_completed_step, skip_refresh, skip_computing, skip_publish,
         )
 
         # ---- 步骤 1: refreshing_daily（统一执行器）----
@@ -2547,69 +2354,13 @@ async def execute_after_close_run(
             assert batch_result is not None, "refreshing_daily 成功但结果为空"
             dsa_run_id = batch_result.dsa_run_id
 
-            # ---- 步骤 2: syncing_boards（软失败，不阻断主流程，统一执行器）----
-            # [AC-02] 通过统一执行器运行：产出 step_summary，软失败（optional）不抛出。
-            if not skip_board_sync:
-                async with AsyncSessionLocal() as db:
-                    job_run = await _get_job_run_or_raise(db, job_run_id)
-                    await _update_orchestrator_status(
-                        db=db,
-                        job_run=job_run,
-                        status=AfterCloseRunStatus.SYNCING_BOARDS,
-                        message="开始同步问财板块数据",
-                    )
-                    await db.commit()
-
-                # [Phase0-Fix#5] 正确区分 result 与 summary：
-                # 之前写成 `board_summary, _ =`，把业务 result 当成执行器 summary，
-                # 导致 result={"status":"failed"} 时 step summary 仍为 succeeded，
-                # 且超时 result=None 时下方取下标会把可选失败升级为主链失败。
-                board_result, board_step_summary = await execute_orchestrator_step(
-                    "syncing_boards",
-                    lambda: _execute_syncing_boards(
-                        job_run_id=job_run_id,
-                        trade_date=trade_date,
-                        board_sync_disabled=False,
-                        non_trading_day=(batch_result.skip_reason == "NON_TRADING_DAY"),
-                    ),
-                    timeout_seconds=_step_timeout("syncing_boards"),
-                    optional=True,
-                    heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-                    progress=_make_step_progress_callback(job_run_id, worker_id),
-                    cancellation_check=_make_step_cancellation_check(job_run_id),
-                )
-                # [Phase0-Fix#5] 业务软失败必须如实反映到 step summary，
-                # 否则会出现「业务 failed / 步骤 succeeded」的矛盾状态。
-                # [Mypy-fix 2026-08-04] 先窄化 board_result 为 dict，避免 union-attr
-                if isinstance(board_result, dict):
-                    board_business_status = board_result.get("status")
-                    board_error_code = board_result.get("error_code")
-                    board_reason_code = board_result.get("reason_code")
-                else:
-                    board_business_status = None
-                    board_error_code = None
-                    board_reason_code = None
-                if board_step_summary["status"] == "succeeded" and board_business_status:
-                    if board_business_status == "failed":
-                        board_step_summary["status"] = "failed"
-                        board_step_summary["error_code"] = (
-                            board_error_code or "BOARD_SYNC_SOFT_FAILURE"
-                        )
-                        board_step_summary["error_message"] = "板块同步软失败（沿用上次数据）"
-                    elif board_business_status == "skipped":
-                        board_step_summary["status"] = "skipped"
-                        board_step_summary["skip_reason"] = board_reason_code
-                    await _persist_step_summary(job_run_id, board_step_summary)
-                logger.info(
-                    "[AfterClose] syncing_boards 完成: step_status=%s, business_status=%s",
-                    board_step_summary["status"], board_business_status,
-                )
-
-            # [Phase5] - syncing_boards 完成（或跳过），更新心跳 + 检查点
+            # [BOARD-LOCAL-OWNERSHIP-01] refreshing_daily 成功后**本轮自行落 checkpoint**。
+            # 旧实现借已退役的板块同步步骤壳推进 last_completed_step；若不在
+            # 此处显式写入 refreshing_daily，日线成功但随后崩溃会导致 resume 重跑日线。
             async with AsyncSessionLocal() as db:
                 job_run = await _get_job_run_or_raise(db, job_run_id)
                 await _update_heartbeat_and_step(
-                    db, job_run, AfterCloseRunStatus.SYNCING_BOARDS.value, worker_id,
+                    db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
                 )
                 await db.commit()
 
@@ -4264,7 +4015,11 @@ async def retry_after_close_run(
 # =============================================================================
 _CHECKPOINT_ORDER: dict[str, int] = {
     "refreshing_daily": 0,
-    "syncing_boards": 1,
+    # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已从 current DAG 退役：
+    # 它不再是合法 current checkpoint，也不得作为 mainchain_stage / NEW restart 起点。
+    # rank 1 故意留空（不重排既有 rank 语义，避免扰动 reconcile 的 computing_features=2）。
+    # 历史 persisted syncing_boards token 的读取兼容见
+    # _LEGACY_MAINCHAIN_STAGE_COMPLETED 与 _COMPLETED_STEPS["syncing_boards"]。
     "computing_features": 2,
     # [REVIEW-V2-R1] 旧 computing_review 已退役：不再是 current checkpoint，
     # 也不得作为 mainchain_stage（历史兼容由 _checkpoint_rank_for_reconcile 单独处理，
@@ -4277,6 +4032,15 @@ _CHECKPOINT_ORDER: dict[str, int] = {
     # rank 置于 succeeded 之后，确保其不落入任何真实 stage 的 pre_stages 区间，
     # 不会污染当前 DAG 的 restart/resume skip 计算（KPI-A1/A7/A8）。
     "publishing": 99,
+}
+
+# [BOARD-LOCAL-OWNERSHIP-01] 退休 mainchain_stage → completed stage 集合。
+# 旧 run metadata 可能持久化 mainchain_stage="syncing_boards"（旧 daily_ready/board_facts
+# 起点）。该值已不是合法 current mainchain_stage，但**不得 fail closed**，也不得执行
+# 任何板块同步：按历史语义解释为「refreshing_daily 已完成」，其余按 current pipeline 继续。
+# 新 producer（granular_restart_service）不再写该值。
+_LEGACY_MAINCHAIN_STAGE_COMPLETED: dict[str, set[str]] = {
+    "syncing_boards": {"refreshing_daily"},
 }
 
 
@@ -4303,43 +4067,45 @@ _COMPLETED_STEPS: dict[str | None, set[str]] = {
     None: set(),
     "queued": set(),
     "refreshing_daily": {"refreshing_daily"},
-    "syncing_boards": {"refreshing_daily", "syncing_boards"},
+    # [BOARD-LOCAL-OWNERSHIP-01] 历史 last_completed_step="syncing_boards" 只读兼容：
+    # 旧语义是「日线刷新 + 板块同步都已完成」。现 board sync 已迁出 DAG，因此仅表示
+    # 「refreshing_daily 已完成」——**不**隐含 computing_features 完成，
+    # 也**不**触发任何板块同步。
+    "syncing_boards": {"refreshing_daily"},
     # [Phase 5] 4 步收敛为 computing_features
     "computing_features": {
-        "refreshing_daily", "syncing_boards", "computing_features",
+        "refreshing_daily", "computing_features",
     },
     # [PHASE-A] legacy publishing token：历史 run 的 last_completed_step 可能为 publishing；
     # 当前正文不再执行 publishing 步骤，保留此映射供兼容（Contract D / reconcile）。
     # 不含 computing_review / computing_history（publishing token 不得污染当前语义）。
     "publishing": {
-        "refreshing_daily", "syncing_boards", "computing_features",
-        "publishing",
+        "refreshing_daily", "computing_features", "publishing",
     },
     # [REVIEW-V2-R1] legacy computing_review 只读兼容：历史语义是「old Review 已做完」，
     # 至多说明 features 已完成。**不得**把 retired token 自身塞回 completed set，
     # 也不得隐含 computing_history（否则 History 永不 retry，违反 KPI-A2/A4）。
     # 新 canonical Review projection 不是 checkpoint，resume 时在汇合点重新执行。
     "computing_review": {
-        "refreshing_daily", "syncing_boards", "computing_features",
+        "refreshing_daily", "computing_features",
     },
     # [REVIEW-V2-R1] computing_history 断点恢复：current DAG 为 features → history。
     "computing_history": {
-        "refreshing_daily", "syncing_boards", "computing_features",
-        "computing_history",
+        "refreshing_daily", "computing_features", "computing_history",
     },
     "succeeded": {
-        "refreshing_daily", "syncing_boards", "computing_features",
-        "computing_history", "succeeded",
+        "refreshing_daily", "computing_features", "computing_history",
+        "succeeded",
     },
     # [Phase 5] 旧步骤名兼容：历史 run 读取时映射到 computing_features 已完成
     "waiting_dsa_worker": {
-        "refreshing_daily", "syncing_boards", "computing_features",
+        "refreshing_daily", "computing_features",
     },
     "quality_gate": {
-        "refreshing_daily", "syncing_boards", "computing_features",
+        "refreshing_daily", "computing_features",
     },
     "feature_snapshot": {
-        "refreshing_daily", "syncing_boards", "computing_features",
+        "refreshing_daily", "computing_features",
     },
 }
 
@@ -4356,6 +4122,9 @@ def _resolve_execution_completed_steps(
 
     mainchain_stage 合法性：
       - mainchain_stage is None        → 不引入任何预完成 stage（正常 initial run / 普通 resume）
+      - mainchain_stage in _LEGACY_MAINCHAIN_STAGE_COMPLETED
+                                     → 退休 stage 只读兼容（如 syncing_boards → refreshing_daily 已完成）；
+                                       不执行被退休业务，也不使其成为合法 current restart 起点
       - mainchain_stage in _CHECKPOINT_ORDER
                                      → 合并其之前所有 pre-stage 为已完成（跳过 refreshing_daily 等）
       - mainchain_stage NOT in _CHECKPOINT_ORDER
@@ -4366,16 +4135,21 @@ def _resolve_execution_completed_steps(
     """
     completed: set[str] = set(_COMPLETED_STEPS.get(last_completed_step, set()))
     if mainchain_stage is not None:
-        if mainchain_stage not in _CHECKPOINT_ORDER:
+        if mainchain_stage in _LEGACY_MAINCHAIN_STAGE_COMPLETED:
+            # [BOARD-LOCAL-OWNERSHIP-01] 退休 mainchain_stage（旧 persisted metadata）：
+            # 按其历史语义合并 completed，不执行被退休业务，也不 fail closed。
+            completed |= _LEGACY_MAINCHAIN_STAGE_COMPLETED[mainchain_stage]
+        elif mainchain_stage not in _CHECKPOINT_ORDER:
             raise ValueError(
                 f"invalid mainchain_stage={mainchain_stage!r}: "
                 f"不在正式 _CHECKPOINT_ORDER，禁止作为 restart 起点（corrupt/typo metadata）。"
             )
-        stage_rank = _CHECKPOINT_ORDER[mainchain_stage]
-        pre_stages = {
-            s for s, r in _CHECKPOINT_ORDER.items() if r < stage_rank
-        }
-        completed |= pre_stages
+        else:
+            stage_rank = _CHECKPOINT_ORDER[mainchain_stage]
+            pre_stages = {
+                s for s, r in _CHECKPOINT_ORDER.items() if r < stage_rank
+            }
+            completed |= pre_stages
     return completed
 
 
@@ -4613,7 +4387,8 @@ if __name__ == "__main__":
     import inspect
 
     # 验证 AfterCloseRunStatus 枚举
-    # [PR #77] - syncing_boards 是 PR #77 收口后新增的软失败阶段，加入期望集合
+    # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 保留为 legacy 读取 token（历史 run 兼容），
+    # 仍是枚举成员，但不再是 current DAG 步骤，也不得作为 mainchain_stage。
     expected_statuses = {
         "queued", "refreshing_daily", "syncing_boards", "checking_coverage",
         "creating_dsa", "waiting_dsa_worker", "quality_gate", "feature_snapshot",

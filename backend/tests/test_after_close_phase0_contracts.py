@@ -654,8 +654,9 @@ def test_pipeline_cancelled_keeps_completed_steps():
     by_step = {s["step"]: s["status"] for s in steps}
 
     # computing_features 及之前必须保持 completed（取消不得回退已完成步骤）
+    # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出 current pipeline，不再列举。
     for done in (
-        "refreshing_daily", "syncing_boards",
+        "refreshing_daily",
         "checking_coverage", "rebuilding_market_dashboard", "computing_features",
     ):
         assert by_step[done] == "completed", (

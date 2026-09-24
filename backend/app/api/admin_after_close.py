@@ -638,10 +638,12 @@ async def force_advance_after_close_endpoint(
     适用于任务卡在 running 状态但实际无 Worker 执行的场景。
 
     restart_from 参数（统一替代原 dsa-only 独立端点）：
-    - restart_from="daily_ready"：跳过日线刷新，从 DSA 阶段开始重算。
+    - restart_from="daily_ready"：跳过日线刷新，从 core 链开始重算。
       要求当日日线覆盖率 ≥ 90%，否则返 409。
-      仍执行 syncing_boards → computing_dsa → computing_features → publishing 全链路，
-      不跳过特征/快照/发布。
+      继续执行 checking_coverage → rebuilding_market_dashboard → computing_features
+      → computing_history 全链路，不跳过特征/快照/历史。
+      [BOARD-LOCAL-OWNERSHIP-01] 板块/概念同步已迁出盘后 DAG，本链路不再包含
+      syncing_boards（改由本地 scripts/ops/panji-board-sync 手动触发）。
     - 不传 restart_from：从头执行（默认行为）。
 
     流程：

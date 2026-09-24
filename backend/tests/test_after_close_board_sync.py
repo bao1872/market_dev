@@ -1,242 +1,219 @@
-"""盘后编排 syncing_boards 步骤测试（PRD §五：盘后编排）。
+"""[BOARD-LOCAL-OWNERSHIP-01] 盘后 DAG 不再包含板块同步 + legacy 读取兼容。
 
-验证项：
-1. SYNCING_BOARDS 状态存在于 AfterCloseRunStatus 枚举
-2. _completed_steps 包含 syncing_boards 在正确顺序位置
-3. _resolve_instruments_for_board_sync 正确解析 symbol → instrument_id
-4. BOARD_SYNC_ENABLED=false 时 syncing_boards 标记为 skipped
-
-注：完整编排流程测试需要大量 mock，此处聚焦于关键集成点。
+验证项（对应任务 §18 A/B）：
+1. AfterCloseRunStatus.SYNCING_BOARDS 仅作为 **legacy 读取 token** 保留（新 run 不写）。
+2. 盘后编排源码中**没有**任何板块同步执行路径
+   （无 _execute_syncing_boards / fetch_board_snapshot / sync_boards 调用）。
+3. `_COMPLETED_STEPS` 当前集合不再依赖 syncing_boards 作为真实可执行阶段；
+   历史 last_completed_step="syncing_boards" 仅映射为 refreshing_daily 已完成。
+4. `_CHECKPOINT_ORDER` 不含 syncing_boards（不是合法 NEW restart 边界）；
+   旧 persisted mainchain_stage="syncing_boards" 按 legacy 兼容读取，不 fail closed。
+5. board-sync 领域的 `resolve_board_instruments(db, symbols)` 批量解析（无 N+1/无 commit）。
+6. BOARD_SYNC_ENABLED 已从盘后编排源码中彻底移除。
 """
 
 from __future__ import annotations
 
+import inspect
 from uuid import UUID
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.instrument import Instrument
+from app.services import after_close_orchestrator as orch
 from app.services.after_close_orchestrator import (
     AfterCloseRunStatus,
-    _resolve_instruments_for_board_sync,
+    _resolve_execution_completed_steps,
 )
+from app.services.board_sync_service import resolve_board_instruments
 
 # =============================================================================
-# 1. 状态枚举测试
+# 1. 状态枚举：SYNCING_BOARDS 仅 legacy
 # =============================================================================
 
 
 class TestAfterCloseRunStatus:
-    """AfterCloseRunStatus 枚举测试。"""
+    """AfterCloseRunStatus 枚举：SYNCING_BOARDS 保留为 legacy 读取 token。"""
 
-    def test_syncing_boards_exists(self) -> None:
-        """SYNCING_BOARDS 状态必须存在。"""
+    def test_syncing_boards_kept_as_legacy_token(self) -> None:
+        """SYNCING_BOARDS 仍存在（历史 run 必须可读），但语义为 legacy。"""
         assert hasattr(AfterCloseRunStatus, "SYNCING_BOARDS")
         assert AfterCloseRunStatus.SYNCING_BOARDS.value == "syncing_boards"
 
-    def test_status_order(self) -> None:
-        """状态枚举顺序：refreshing_daily → syncing_boards → waiting_dsa_worker。"""
+    def test_enum_order_unchanged(self) -> None:
+        """枚举成员顺序不变（legacy token 位置保留，避免历史序列化漂移）。"""
         statuses = list(AfterCloseRunStatus)
         refreshing_idx = statuses.index(AfterCloseRunStatus.REFRESHING_DAILY)
         syncing_idx = statuses.index(AfterCloseRunStatus.SYNCING_BOARDS)
         waiting_idx = statuses.index(AfterCloseRunStatus.WAITING_DSA_WORKER)
+        assert refreshing_idx < syncing_idx < waiting_idx
 
-        assert refreshing_idx < syncing_idx < waiting_idx, (
-            f"状态顺序错误: refreshing={refreshing_idx}, syncing={syncing_idx}, "
-            f"waiting={waiting_idx}"
+
+# =============================================================================
+# 2. 盘后编排源码中不存在板块同步执行路径
+# =============================================================================
+
+
+class TestNoCurrentBoardSyncPath:
+    """当前盘后 DAG 绝不执行/跳过/汇总板块同步。"""
+
+    def test_orchestrator_has_no_board_sync_execution(self) -> None:
+        """编排函数源码不包含板块同步步骤/调用。"""
+        src = inspect.getsource(orch.execute_after_close_run)
+        assert "_execute_syncing_boards" not in src
+        assert "fetch_board_snapshot" not in src, "盘后不得再抓取问财板块"
+        assert "AfterCloseRunStatus.SYNCING_BOARDS" not in src, (
+            "编排函数不得再切换 SYNCING_BOARDS 状态"
         )
+        assert "skip_board_sync" not in src
+
+    def test_retired_helpers_removed(self) -> None:
+        """已退役 helper 不得再存在于 orchestrator 模块。"""
+        assert not hasattr(orch, "_execute_syncing_boards")
+        assert not hasattr(orch, "_record_board_sync_outcome")
+        assert not hasattr(orch, "_resolve_instruments_for_board_sync")
+
+    def test_board_sync_helpers_not_referenced_module_wide(self) -> None:
+        """整个 orchestrator 模块均不含板块同步**执行路径**。
+
+        允许：文档/legacy 兼容字符串（如 _COMPLETED_STEPS["syncing_boards"]）。
+        禁止：任何导入或调用板块同步业务。
+        """
+        src = inspect.getsource(orch)
+        assert "_execute_syncing_boards" not in src
+        assert "fetch_board_snapshot" not in src
+        assert "from app.services.board_sync_service import" not in src, (
+            "盘后编排不得导入 board_sync_service"
+        )
+        assert "AfterCloseRunStatus.SYNCING_BOARDS" not in src
+        assert "skip_board_sync" not in src
+
+    def test_no_board_sync_enabled_switch(self) -> None:
+        """BOARD_SYNC_ENABLED 已从盘后编排源码中移除。"""
+        src = inspect.getsource(orch)
+        assert "board_sync_enabled" not in src
+        assert "BOARD_SYNC_ENABLED" not in src
 
 
 # =============================================================================
-# 2. _resolve_instruments_for_board_sync 测试
+# 3. checkpoint：current 集合不含 syncing_boards；legacy 只映射到 refreshing_daily
 # =============================================================================
 
 
-class TestResolveInstrumentsForBoardSync:
-    """instrument 解析器测试。"""
+class TestCheckpointVocabulary:
+    """_COMPLETED_STEPS / _CHECKPOINT_ORDER 的 current vs legacy 语义。"""
+
+    def test_current_completed_sets_do_not_depend_on_syncing_boards(self) -> None:
+        """current completed 集合不再包含 syncing_boards 作为真实阶段。"""
+        assert orch._COMPLETED_STEPS["refreshing_daily"] == {"refreshing_daily"}
+        assert "syncing_boards" not in orch._COMPLETED_STEPS["computing_features"]
+        assert "syncing_boards" not in orch._COMPLETED_STEPS["computing_history"]
+        assert "syncing_boards" not in orch._COMPLETED_STEPS["succeeded"]
+
+    def test_legacy_syncing_boards_maps_to_refreshing_daily_only(self) -> None:
+        """历史 last_completed_step="syncing_boards" 仅表示 refreshing_daily 已完成。"""
+        completed = _resolve_execution_completed_steps("syncing_boards", None)
+        assert completed == {"refreshing_daily"}
+        assert "computing_features" not in completed
+        assert "syncing_boards" not in completed
+
+    def test_resume_after_refreshing_daily_does_not_need_syncing_boards(self) -> None:
+        """日线成功后即可作为断点，不需要伪造 syncing_boards 检查点。"""
+        assert _resolve_execution_completed_steps("refreshing_daily", None) == {
+            "refreshing_daily"
+        }
+
+    def test_syncing_boards_not_a_current_checkpoint(self) -> None:
+        """syncing_boards 已从 current _CHECKPOINT_ORDER 移除。"""
+        assert "syncing_boards" not in orch._CHECKPOINT_ORDER
+
+    def test_legacy_mainchain_stage_does_not_fail_closed(self) -> None:
+        """旧 persisted mainchain_stage="syncing_boards" 按 legacy 读取，不抛错。"""
+        completed = _resolve_execution_completed_steps(None, "syncing_boards")
+        assert completed == {"refreshing_daily"}
+
+    def test_daily_ready_start_stage_equivalent(self) -> None:
+        """新 daily_ready 起点（computing_features）与旧 syncing_boards 起点语义等价。"""
+        legacy = _resolve_execution_completed_steps(None, "syncing_boards")
+        new = _resolve_execution_completed_steps(None, "computing_features")
+        assert legacy == new == {"refreshing_daily"}
+
+    def test_invalid_mainchain_stage_still_fail_closed(self) -> None:
+        """corrupt/typo mainchain_stage 仍 fail closed。"""
+        with pytest.raises(ValueError):
+            _resolve_execution_completed_steps(None, "checking_coverage")
+        with pytest.raises(ValueError):
+            _resolve_execution_completed_steps(None, "not_a_stage")
+
+
+# =============================================================================
+# 4. board-sync 领域 resolver（原 orchestrator helper 的迁移）
+# =============================================================================
+
+
+class TestResolveBoardInstruments:
+    """backend/app/services/board_sync_service.resolve_board_instruments。"""
 
     @pytest.mark.asyncio
     async def test_resolve_existing_symbols(self, db_session: AsyncSession) -> None:
-        """已存在的 symbol 正确解析为 instrument_id。"""
-        # 创建测试 Instrument
-        instr1 = Instrument(symbol="600000", name="测试1", market="SH", status="active")
-        instr2 = Instrument(symbol="000001", name="测试2", market="SZ", status="active")
-        db_session.add(instr1)
-        db_session.add(instr2)
+        """已存在的 symbol 正确解析为 instrument_id（单次批量查询）。"""
+        db_session.add(Instrument(symbol="600000", name="测试1", market="SH", status="active"))
+        db_session.add(Instrument(symbol="000001", name="测试2", market="SZ", status="active"))
         await db_session.flush()
 
-        # 传入 db_session 以看到 savepoint 内未提交的数据
-        result = await _resolve_instruments_for_board_sync(
-            ["600000", "000001", "999999"], session=db_session
+        result = await resolve_board_instruments(
+            db_session, ["600000", "000001", "999999"]
         )
 
         assert len(result) == 2
         assert "600000" in result
         assert "000001" in result
-        assert "999999" not in result  # 不存在的 symbol 不返回
+        assert "999999" not in result
         assert isinstance(result["600000"], UUID)
 
     @pytest.mark.asyncio
-    async def test_resolve_empty_list(self) -> None:
-        """空列表返回空 dict。"""
-        result = await _resolve_instruments_for_board_sync([])
-        assert result == {}
+    async def test_resolve_empty_list(self, db_session: AsyncSession) -> None:
+        """空列表返回空 dict（不查询）。"""
+        assert await resolve_board_instruments(db_session, []) == {}
 
     @pytest.mark.asyncio
     async def test_resolve_no_matches(self, db_session: AsyncSession) -> None:
-        """无匹配的 symbol 返回空 dict。"""
-        result = await _resolve_instruments_for_board_sync(["999999", "888888"])
-        assert result == {}
+        """无匹配 symbol 返回空 dict。"""
+        assert await resolve_board_instruments(db_session, ["999999", "888888"]) == {}
 
 
 # =============================================================================
-# 3. _completed_steps 集成测试（通过源码级验证）
+# 5. 触发时间 / 非交易日 / 幂等（不受本次迁移影响，保留回归）
 # =============================================================================
 
 
-class TestCompletedStepsIntegration:
-    """_completed_steps 字典包含 syncing_boards 的源码级验证。"""
-
-    def test_completed_steps_includes_syncing_boards(self) -> None:
-        """_completed_steps 字典必须包含 syncing_boards 键。"""
-        import inspect
-
-        from app.services.after_close_orchestrator import execute_after_close_run
-
-        source = inspect.getsource(execute_after_close_run)
-        assert '"syncing_boards"' in source, (
-            "_completed_steps 字典缺少 syncing_boards 键"
-        )
-
-    def test_completed_steps_correct_progression(self) -> None:
-        """syncing_boards 在 refreshing_daily 之后、computing_features 之前。"""
-        from app.services.after_close_orchestrator import _COMPLETED_STEPS
-
-        # _COMPLETED_STEPS 为 module-level 单一真相源（不再内联在编排函数里）。
-        refreshing = _COMPLETED_STEPS["refreshing_daily"]
-        syncing = _COMPLETED_STEPS["syncing_boards"]
-        features = _COMPLETED_STEPS["computing_features"]
-
-        assert refreshing == {"refreshing_daily"}
-        assert refreshing < syncing, "syncing_boards 必须包含 refreshing_daily（在其之后）"
-        assert "syncing_boards" in syncing
-        assert syncing < features, "computing_features 必须包含 syncing_boards（在其之后）"
-
-    def test_board_sync_step_exists(self) -> None:
-        """编排函数中必须包含 syncing_boards 步骤的执行代码。
-
-        [AC-02 2026-08-03] syncing_boards 业务体已抽取为 _execute_syncing_boards，
-        由统一执行器以 "syncing_boards" 步骤名调用。编排函数负责调用该 helper，
-        具体实现（fetch/record/status）在 helper 内部。
-        """
-        import inspect
-
-        from app.services.after_close_orchestrator import (
-            _execute_syncing_boards,
-            execute_after_close_run,
-        )
-
-        orchestrator_src = inspect.getsource(execute_after_close_run)
-        helper_src = inspect.getsource(_execute_syncing_boards)
-        # 验证编排函数以 syncing_boards 步骤调用 helper
-        assert "syncing_boards" in orchestrator_src, "编排函数缺少 syncing_boards 步骤"
-        assert "_execute_syncing_boards" in orchestrator_src, "编排函数未调用 syncing_boards helper"
-        assert "AfterCloseRunStatus.SYNCING_BOARDS" in orchestrator_src, "缺少 SYNCING_BOARDS 状态切换"
-        # 验证关键实现代码存在于 helper
-        assert "fetch_board_snapshot" in helper_src, "缺少 fetch_board_snapshot 调用"
-        assert "record_sync_status" in helper_src, "缺少 record_sync_status 调用"
-
-    def test_board_sync_soft_failure(self) -> None:
-        """板块同步失败时不应阻断主流程（软失败）。
-
-        [AC-02 2026-08-03] 软失败逻辑位于 _execute_syncing_boards helper。
-        """
-        import inspect
-
-        from app.services.after_close_orchestrator import _execute_syncing_boards
-
-        source = inspect.getsource(_execute_syncing_boards)
-        # 验证软失败逻辑：except 块中不 raise
-        assert "软失败" in source or "soft" in source.lower(), "缺少软失败标记"
-        # 验证失败时记录状态但不抛异常
-        assert 'status": "failed"' in source, "缺少失败状态记录"
-
-    def test_board_sync_failure_records_error_code_and_reuses_previous(self) -> None:
-        """[Gate3] 板块同步失败必须记录 error_code + reused_previous_snapshot=True。
-
-        验证软失败路径的关键字段：
-        - error_code: 异常类名（用于诊断）
-        - reused_previous_snapshot: True（沿用上次数据，不覆盖）
-        - status: failed（标记该步骤失败）
-        - 不 raise（不阻断后续 DSA/快照/发布）
-
-        [AC-02 2026-08-03] 该逻辑位于 _execute_syncing_boards helper。
-        """
-        import inspect
-
-        from app.services.after_close_orchestrator import _execute_syncing_boards
-
-        source = inspect.getsource(_execute_syncing_boards)
-        # Gate3: 验证 error_code 记录（异常类名）
-        assert "error_code" in source and "type(board_exc).__name__" in source, (
-            "板块同步失败未记录 error_code（异常类名）"
-        )
-        # Gate3: 验证 reused_previous_snapshot=True
-        assert "reused_previous_snapshot" in source, "缺少 reused_previous_snapshot 字段"
-        # Gate3: 验证失败后继续执行（不 return/break）
-        # 检查 except 块后没有立即 return（软失败应继续后续步骤）
-        except_block_end = source.find('"reused_previous_snapshot": True')
-        assert except_block_end > 0, "未找到软失败 reused_previous_snapshot 标记"
-
-    def test_board_sync_skipped_when_disabled(self) -> None:
-        """[Gate3] BOARD_SYNC_ENABLED=false 时板块同步标记为 skipped（不访问问财）。
-
-        [AC-02 2026-08-03] 开关与 skipped 逻辑位于 _execute_syncing_boards helper。
-        """
-        import inspect
-
-        from app.services.after_close_orchestrator import _execute_syncing_boards
-
-        source = inspect.getsource(_execute_syncing_boards)
-        # 验证 BOARD_SYNC_ENABLED 开关检查
-        assert "BOARD_SYNC_ENABLED" in source, "缺少 BOARD_SYNC_ENABLED 开关"
-        # 验证 skipped 状态记录
-        assert '"status": "skipped"' in source, "缺少 skipped 状态记录"
+class TestSchedulerUnchanged:
+    """板块同步迁出不改变盘后触发时间/非交易日/幂等合同。"""
 
     def test_trigger_time_is_15_05(self) -> None:
-        """[Gate3] 盘后编排触发时间必须为 15:05 Asia/Shanghai（收盘后 5 分钟）。"""
-        import inspect
-
-        from app.worker import run_bars_scheduler_worker
-
-        source = inspect.getsource(run_bars_scheduler_worker)
-        # 验证 CronTrigger 配置为 15:05
-        assert "hour=15" in source and "minute=5" in source, (
-            "盘后编排触发时间未配置为 15:05；当前 source 不含 hour=15, minute=5"
+        """盘后日线刷新触发时间仍为 15:05 Asia/Shanghai。"""
+        from app.services.bars_scheduler_worker_runtime import (
+            run_bars_scheduler_worker_runtime,
         )
-        # 验证时区为 Asia/Shanghai
-        assert "Asia/Shanghai" in source, "触发时区未配置为 Asia/Shanghai"
+
+        source = inspect.getsource(run_bars_scheduler_worker_runtime)
+        assert "hour=15" in source and "minute=5" in source
+        assert "Asia/Shanghai" in source
 
     def test_non_trading_day_skip(self) -> None:
-        """[Gate3] 非交易日不运行盘后编排。"""
-        import inspect
+        """非交易日不运行盘后编排。"""
+        from app.services.bars_scheduler_worker_runtime import (
+            run_bars_scheduler_worker_runtime,
+        )
 
-        from app.worker import run_bars_scheduler_worker
-
-        source = inspect.getsource(run_bars_scheduler_worker)
-        # 验证交易日历判断
-        assert "is_trading_day_async" in source, "缺少交易日历判断"
-        assert "非交易日" in source, "缺少非交易日跳过逻辑"
+        source = inspect.getsource(run_bars_scheduler_worker_runtime)
+        assert "is_trading_day_async" in source
+        assert "非交易日" in source
 
     def test_same_business_date_idempotent(self) -> None:
-        """[Gate3] 同一 business_date 幂等（重复创建返回已有 run）。"""
-        import inspect
-
+        """同一 business_date 幂等（重复创建返回已有 run）。"""
         from app.services.after_close_orchestrator import create_after_close_run
 
         source = inspect.getsource(create_after_close_run)
-        # 验证幂等逻辑存在
-        assert "acquire_job_run_lock" in source or "run_key" in source, (
-            "缺少幂等锁机制（acquire_job_run_lock 或 run_key）"
-        )
+        assert "acquire_job_run_lock" in source or "run_key" in source

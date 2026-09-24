@@ -25,11 +25,14 @@ from app.services.realtime_market_fact_service import RealtimeMarketFactService
 # ---------------------------------------------------------------------------
 
 def test_resolve_execution_completed_steps_resume_skips_completed() -> None:
-    """A=refreshing_daily、B=syncing_boards 已完成；C=computing_features 失败。
-    resume → completed 含 A、B；computing_features 不在 → C 重跑（C>=1, A=0, B=0）。"""
+    """[BOARD-LOCAL-OWNERSHIP-01] A=refreshing_daily 已完成（历史 token syncing_boards
+    亦只表示 A 完成）；C=computing_features 未完成 → resume 时 C 重跑。
+
+    注意：syncing_boards 已迁出盘后 DAG，不再是真实 stage。
+    """
     completed = _resolve_execution_completed_steps("syncing_boards", None)
     assert "refreshing_daily" in completed
-    assert "syncing_boards" in completed
+    assert "syncing_boards" not in completed
     assert "computing_features" not in completed  # C 需重跑
 
     # 全新 initial run（无 checkpoint）→ 空集合，全链重跑
@@ -38,7 +41,7 @@ def test_resolve_execution_completed_steps_resume_skips_completed() -> None:
     # restart 正式起点 mainchain_stage=computing_features：其之前所有 pre-stage 算完成
     restarted = _resolve_execution_completed_steps(None, "computing_features")
     assert "refreshing_daily" in restarted
-    assert "syncing_boards" in restarted
+    assert "syncing_boards" not in restarted
     assert "computing_features" not in restarted  # 自身仍需执行
 
 

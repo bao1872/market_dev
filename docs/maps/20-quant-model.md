@@ -14,7 +14,7 @@
 - 结构由 SMC Pine 语义核心承担，权威入口为 `smc_pine_core.py` 的 `compute_smc_pine`，薄包装为 `smc_indicator.py`；已排除 FVG，有 Pine 对齐测试。
 - 动量以 Bollinger + SQZMOM_LB 为主，权威入口为 `bollinger_features_plotly.py` 的 `bollinger` 和 `sqzmom_lb.py`；盘中监控通过 `bollinger_monitor.py` 输出穿越事件。
 - 筹码共识（Node Cluster）由 `node_cluster_engine.py` 的 `compute_node_cluster_profile` 统一入口，底层 `unified_volume_profile.py`；架构守护测试禁止业务模块绕过 engine。
-- 板块/指数层仅有板块数据同步（`board_sync_service.py`）和市场列表查询（`market_stocks_service.py`），尚未发现基于个股因子聚合生成板块状态的正式服务。
+- 板块/指数层仅有板块数据同步（`board_sync_service.py`）和市场列表查询（`market_stocks_service.py`），尚未发现基于个股因子聚合生成板块状态的正式服务。[BOARD-LOCAL-OWNERSHIP-01] `board_sync_service.sync_boards()` 仍是唯一写 owner，但调用方已从盘后 DAG 迁出：改由本地手动 `scripts/ops/panji-board-sync` → 生产 importer `backend/app/cli/board_snapshot_import.py`（问财网络访问只在本地 Mac）。
 - 个股状态文字化由 `atomic_fact_contract_service.py` 基于 structural/temporal payload 输出中文事实；连续因子与离散事件在选股、监控、详情链中分离。
 
 ## 2. PRD 实现映射
@@ -31,7 +31,7 @@
 | QM-30~QM-33 动量 | `bollinger_features_plotly.py:bollinger`；`sqzmom_lb.py:compute_sqzmom_lb`；`structural_factor_service.py` 第 4 组；`bollinger_monitor.py` 事件 | 已实现并核验 | `test_stock_detail_feishu.py` / `test_monitor_rhythm_regression.py` / `test_indicator_view.py` |
 | QM-40~QM-43 筹码共识 | `node_cluster_engine.py:compute_node_cluster_profile`；`volume_node_monitor.py` 事件；`build_node_regions` 为四链统一 DTO | 已实现并核验 | `test_node_cluster_engine.py` / `test_node_cluster_architecture.py` / `test_node_cluster_contract.py` |
 | QM-42 禁止 VAH/VAL 替代 | `node_cluster_engine.py` `value_area_filters_peaks = False`；架构守护测试禁止业务模块直接调用底层 VP | 已实现并核验 | `test_node_cluster_architecture.py` |
-| QM-50~QM-51 板块聚合 | `board_sync_service.py` 仅同步板块目录/成分；`market_stocks_service.py` 仅列表查询 | 未实现 | 未找到基于个股因子聚合板块趋势的正式服务 |
+| QM-50~QM-51 板块聚合 | `board_sync_service.py` 仅同步板块目录/成分（[BOARD-LOCAL-OWNERSHIP-01] 由本地手动同步触发；盘后不再调用）；`market_stocks_service.py` 仅列表查询 | 未实现 | 未找到基于个股因子聚合板块趋势的正式服务 |
 | QM-60 连续因子与事件分离 | `dsa_selector.py` 输出 `factor_per_bar`（连续）+ `visual_segments`；`trend_events.py`/`smc_monitor.py`/`bollinger_monitor.py`/`volume_node_monitor.py` 输出离散事件 | 已实现并核验 | 代码结构可见 |
 | QM-61 参数固定 | `dsa_selector.yaml` 参数 `allowed_scopes: [system]`；`structural_factor_service.py` 硬编码固定参数；`smc_pine_core.py` `DEFAULT_PARAMS` | 已实现并核验 | manifest/代码常量 |
 | QM-62 可追踪 | `StrategyRun.effective_config` / `effective_config_hash`；`StockFeatureSnapshotRun` 含 `source_bar_hash` / `adj_factor_hash` / `market_data_contract_version` | 已实现并核验 | `strategy_run.py` / `stock_feature_snapshot_run.py` |

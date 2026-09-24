@@ -244,12 +244,12 @@ async def test_resume_skips_recompute_after_finalize() -> None:
     # 且 `if not skip_computing:` 才调用 compute_review_core_with_run_items（L2722/L2885）。
     # 因此推导为 True 即证明 resume 不重算 5293。
     _completed_steps = {
-        "computing_features": {"refreshing_daily", "syncing_boards", "computing_features"},
+        "computing_features": {"refreshing_daily", "computing_features"},
         "publishing": {
-            "refreshing_daily", "syncing_boards", "computing_features", "publishing",
+            "refreshing_daily", "computing_features", "publishing",
         },
         "computing_review": {
-            "refreshing_daily", "syncing_boards", "computing_features",
+            "refreshing_daily", "computing_features",
             "publishing", "computing_review",
         },
     }

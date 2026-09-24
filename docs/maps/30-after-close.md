@@ -13,7 +13,8 @@
 - 远程自动触发：bars_scheduler Worker 每日 16:00（上海时区）调用 `create_after_close_run`，交易日历判断后创建 SchedulerJobRun。
 - 本地不自动调度：backend lifespan 不启动 Scheduler；Scheduler/Worker 必须显式设置 `WORKER_TYPE` 启动。
 - 手动入口：`admin_after_close.py` 提供创建、查询、重试、恢复、force（含 `restart_from="daily_ready"` 从 DSA 阶段重算）API；`backend/scripts/trigger_dsa_batch_small.py` 为脚本入口。
-- 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录。顶层步骤统一经过 `execute_orchestrator_step`（统一步骤执行器，见 §13.5）：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → enqueue_chip_job(可选)`；主任务终态 `succeeded / partial_success / failed`，可被 watchdog 中断为 `interrupted` 后自动 `resume_queued`，可被管理员 `cancelled`。**`computing_review` 已抽为 `_execute_review_step` 业务体并经执行器包装（AC-02，2026-08-03）**；`watchlist_ready` 为**派生就绪指示器**（`has_succeeded_snapshot_run`），非可执行步骤，不作为执行器步骤（见 §13.5）。
+- 编排任务以 `SchedulerJobRun`（job_name="after_close_orchestrator"）记录。顶层步骤统一经过 `execute_orchestrator_step`（统一步骤执行器，见 §13.5）：`refreshing_daily → checking_coverage → rebuilding_market_dashboard(复盘计算) → computing_features → computing_history`；主任务终态 `succeeded / partial_success / failed`，可被 watchdog 中断为 `interrupted` 后自动 `resume_queued`，可被管理员 `cancelled`。**`watchlist_ready` 为派生就绪指示器**（`has_succeeded_snapshot_run`），非可执行步骤，不作为执行器步骤（见 §13.5）。
+- **[BOARD-LOCAL-OWNERSHIP-01] 板块/概念同步已迁出盘后 DAG**：`syncing_boards` 不再是 current 步骤（仅保留为历史持久化 token 的只读兼容，见 §12.2 / `after_close_run_contract`）。board/concept 快照改由**本地 Mac 手动** `scripts/ops/panji-board-sync` 采集（本地 cookie 访问问财）→ SSH stdin → 生产 importer `backend/app/cli/board_snapshot_import.py` → 唯一 DB 写 owner `board_sync_service.sync_boards()`。无 schedule / 无频率限制 / 无 stale 阻断；盘后与系统总状态均**不**依赖 board age。
 - readiness：checking_coverage 步骤仅检查日线覆盖率 >= 0.9（Phase 5A 移除 15m 阻塞，符合 PRD30 AC-04）；日线不足则标记 failed，15m 缺失不再阻塞 after-close run。
 - run 隔离：`create_after_close_run` 使用 run_key = `after_close_orchestrator:{trade_date}` 去重；同一 trade_date 同时只能有一个活跃（queued/running/resume_queued）任务。
 - 计算与发布分离：DSA StrategyRun 完成后进入 publishing，调用 `StrategyBatchService.publish_run` 标记 published_at，再 finish snapshot run。
@@ -71,10 +72,11 @@ bars_scheduler (16:00) / admin API / 脚本
 → after_close_orchestrator_worker _after_close_poll_once (FOR UPDATE SKIP LOCKED + lease_epoch)
 → execute_after_close_run
   → refreshing_daily (BarsSchedulerService.refresh_all_instruments)
-  → syncing_boards (board_sync_service，软失败)
+  → [BOARD-LOCAL-OWNERSHIP-01] 板块/概念同步不在本链（见 §1；本地手动 panji-board-sync）
   → checking_coverage (daily >= 0.9，Phase 5A 移除 15m 阻塞)
+  → rebuilding_market_dashboard (复盘计算，optional sidecar)
   → computing_features (create_batch_run → DSA StrategyRun → Worker claim → 结果写入)
-  → publishing (publish_run 阶段1 → finish_snapshot_run 阶段2)
+  → computing_history (canonical History exact-T 推进)
   → succeeded
 → state_event_service.generate_events_for_run (事件生成，失败不影响主流程)
 ```
@@ -93,9 +95,13 @@ resume_queued → running (Worker 领取，lease_epoch + attempt_no 递增)
 AfterCloseRunStatus（metadata 层级）：
 
 ```text
-queued → refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → succeeded
+queued → refreshing_daily → checking_coverage → rebuilding_market_dashboard
+  → computing_features → computing_history → succeeded
 any → failed
 ```
+[BOARD-LOCAL-OWNERSHIP-01] `syncing_boards` 已迁出：只作为 legacy 读取 token
+（历史 run 的 orchestrator_status / last_completed_step / job_run_event.step 仍可读），
+新 run 永不写入。
 
 StrategyRun 状态：
 
@@ -124,7 +130,7 @@ completed → published
 - **P0（生产诊断 2026-07-28，CHANGE-20260728-005）**：远程开发运行服务器（GIT_SHA=37c9fa3）2026-07-27 和 2026-07-28 两次盘后 run 失败，根因有二：
   1. `compute_for_trade_date() got an unexpected keyword argument 'dsa_run_id'`（2026-07-27 16:00 run）。origin/main `37c9fa3` 已修复（PR #94），dev 未包含此修复，本轮规则禁止 merge/rebase。
   2. DSA StrategyRun 卡在 `running` 状态，`succeeded_count=0, failed_count=0`，feature snapshot 计算成功（`snapshot_count=5293`）但 `publish_run` 拒绝发布（要求 `completed`）。涉及 `after_close_orchestrator.py:L1735` 和 `strategy_batch_service.py:L1132` 的状态转换逻辑，需后续排查。
-- **问财软失败语义**：生产 `BOARD_SYNC_ENABLED=true` 时问财为硬依赖，但 2026-07-27/28 三次运行均 `board_sync_result.status=succeeded`（raw=5542, resolved=5287, 行业=257, 概念=388），失败发生在 DSA 计算和发布步骤，与问财无关。
+- **问财软失败语义（历史，已随 [BOARD-LOCAL-OWNERSHIP-01] 退役）**：此前生产 `BOARD_SYNC_ENABLED=true` 时问财为硬依赖；board/concept 同步现已迁出盘后 DAG，改由本地手动 `scripts/ops/panji-board-sync` 触发生产 importer。盘后 run 不再包含任何问财网络访问或 `board_sync_result` 步骤。
 
 ## 8. 验证入口
 
@@ -521,13 +527,13 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 - **运行中取消**：`_run_with_cancellation` 把 operation 建为独立 task，周期调用 `cancellation_check`，命中时 `op_task.cancel()` + `await` 终止业务协程；`_StepCancelledError` 转 `cancelled` summary 不炸穿 Worker。
 - 步骤终态集合：`{succeeded, skipped, unavailable, failed, timed_out, cancelled, interrupted}`；非可选步骤超时/异常会 `raise`，可选步骤降级不抛。
 
-顶层步骤（经执行器）顺序：`refreshing_daily → syncing_boards → checking_coverage → computing_features → publishing → auction_anchor(可选) → computing_review → computing_history`。`enqueue_chip_job` 步骤已于 [2026-09-01, SHA 2adc9c32] 退役，不再属于正常 AfterClose 步骤（canonical chain = Core → Review → History → complete）。
+顶层步骤（经执行器）顺序：`refreshing_daily → checking_coverage → rebuilding_market_dashboard(复盘计算) → computing_features → computing_history`。`enqueue_chip_job` 步骤已于 [2026-09-01, SHA 2adc9c32] 退役；`computing_review` / `publishing` 均已退役（仅历史只读）；`syncing_boards` 于 [BOARD-LOCAL-OWNERSHIP-01] 迁出（canonical chain = Daily → Coverage → Review projection → Core → History → complete）。
 
 **`computing_review`（AC-02，2026-08-03 收口）**：复盘业务体抽为模块级协程 `_execute_review_step(...)`，由 `execute_orchestrator_step("computing_review", lambda: _execute_review_step(...), optional=True, ...)` 包装，满足 AC-02「所有顶层步骤必须通过统一步骤执行器」。`_execute_review_step` 内部保留既有幂等 create_run / compute_run / resume_run / publish_run 语义与 publication pointer 唯一事实源，软失败（gate_blocked/计算失败）不抛异常，仅返回 `result["failed"]=True`；调用方将业务软失败如实映射到 step summary（`REVIEW_SOFT_FAILURE`）并 `_persist_step_summary`，并据此把主任务收为 `partial_success`（core 已发布）。检查点语义不变：失败时 `_execute_review_step` 内部传 `None` 不推进 `last_completed_step`（见 §12.1）。
 
 **`watchlist_ready`（非执行器步骤）**：是**派生就绪指示器**而非可执行工作步骤——无 operation、无 timeout/heartbeat/cancellation，由 `feature_snapshot_service.has_succeeded_snapshot_run`（succeeded + published + full scope）推导，供 admin 流水线可视化渲染为终态展示步骤（`after_close_pipeline_service._PIPELINE_STEPS` 含 `"watchlist_ready"`）。强制塞进 `execute_orchestrator_step` 会造出空 operation，违反最小必要修改原则；此处如实标注：`watchlist_ready` 不经过统一执行器。
 
-syncing_boards 软失败：`_execute_syncing_boards` 返回业务 `{status}`（succeeded/skipped/failed），执行器外层将业务 failed/skipped 如实映射到 step summary 并 `_persist_step_summary`，避免"业务 failed / 步骤 succeeded"矛盾。
+[BOARD-LOCAL-OWNERSHIP-01] 板块同步软失败语义已退役：`_execute_syncing_boards` / `_record_board_sync_outcome` / `_resolve_instruments_for_board_sync` / `BOARD_SYNC_ENABLED` 均已删除。board/concept 同步的唯一 DB 写 owner 仍是 `board_sync_service.sync_boards()`，但调用方改为本地手动同步触发的生产 importer（整体事务 fail-closed，失败 rollback 保留上一成功快照）。
 
 watchdog / 状态查询（`get_after_close_run_status`）：
 - `heartbeat_stale`（> `_HEARTBEAT_STALE_SECONDS`=60）+ 步骤级 `step_timed_out` 合并为 `stale`；
@@ -540,7 +546,7 @@ cancel / reconcile（`cancel_after_close_run` / `reconcile_after_close_run`）�
 Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `str | None`，`None`=仅刷新心跳/租约、不推进检查点；Review 失败时传 `None`，避免下次 resume 跳过失败的 Review（详见 §12.1 检查点语义）。
 
 管理后台两页（OPS-06，2026-08-03）：
-- `AdminAfterClosePipelinePage`（`/admin/after-close`）为盘后流水线专用诊断页，承载四类操作（终止/对账/从此处续跑/完整强制重跑）与 7 步时间线 + watchlist_ready + 部分成功 + stale 警告。
+- `AdminAfterClosePipelinePage`（`/admin/after-close`）为盘后流水线专用诊断页，承载四类操作（终止/对账/从此处续跑/完整强制重跑）与 current 步骤时间线（[BOARD-LOCAL-OWNERSHIP-01] 6 步，不含 syncing_boards）+ watchlist_ready + 部分成功 + stale 警告。
 - `AdminJobsPage`（`/admin/jobs`）为通用任务 + Worker 心跳监控页，不复制盘后四类操作（避免两页按钮语义分歧）；对 `after_close_orchestrator` 任务，任务详情抽屉新增「盘后详情（四类操作）」链接跳转 `/admin/after-close?tradeDate=<business_date>`，**携带被点击 run 的业务日期**，使专用页直接定位到该历史任务而非默认最新（CHANGE-20260804-001）；`AdminAfterClosePipelinePage` 通过 `useSearchParams` 读取 `tradeDate` 初始化 `selectedDate`，刷新/返回保持同一任务。通用页与专用页共享同一操作/状态事实源。
 
 > 数据操作：以上为本地纯单元验证（PURE_UNIT_TEST=1），未部署、未连接共享库、未修改业务数据。
@@ -680,20 +686,24 @@ Review 检查点：`_update_heartbeat_and_step` 的 `last_completed_step` 为 `s
 
 **检查点语义（Phase 0 收口）**：Review 失败/质量门阻塞时 `_review_failed=True`，主任务收 `partial_success`，但通过 `_update_heartbeat_and_step(db, job_run, None, worker_id)` 传 `None` 仅刷新心跳、**不推进 `last_completed_step`**；只有 Review 真正成功才推进 `computing_review` 检查点，避免下次 resume 跳过失败的 Review。
 
-### 12.2 7 步状态机 & 时间线映射（后端）
+### 12.2 6 步状态机 & 时间线映射（后端）
 
 文件：`backend/app/services/after_close_pipeline_service.py`
 
 ```text
-_PIPELINE_STEPS（7步展示序列）：
+_PIPELINE_STEPS（[BOARD-LOCAL-OWNERSHIP-01] 6 步展示序列）：
   refreshing_daily (0)
-    → syncing_boards (1)
-    → checking_coverage (2)
+    → checking_coverage (1)
+    → rebuilding_market_dashboard (2)  # optional sidecar，非 durable checkpoint
     → computing_features (3)  # absorbing legacy 4-steps (creating_dsa/waiting_dsa_worker/quality_gate/feature_snapshot)
-    → publishing (4)
-    → computing_review (5)  # [NEW] 本 CHANGE 新增
-    → watchlist_ready (6)
+    → computing_history (4)
+    → watchlist_ready (5)
 ```
+
+`_COMPLETED_STEP_INDEX` 同步前移一位（refreshing_daily=0, checking_coverage=1,
+computing_features=3, computing_history=4, succeeded=5）。
+`syncing_boards` / `publishing` / `computing_review` 均为 legacy 只读 token：
+仅当历史 run 真实产生该事件时按旧位置补入展示（禁止为 current run 合成）。
 
 - `_COMPLETED_STEP_INDEX[COMPUTING_REVIEW] = 5`, `_COMPLETED_STEP_INDEX[SUCCEEDED] = 6`
 - `StepStatus` 聚合：`SUCCEEDED` 仅当 review_publications.published pointer 存在且 review_run.status=succeeded。
@@ -733,7 +743,7 @@ _PIPELINE_STEPS（7步展示序列）：
 ### 12.5 测试覆盖（已核验）
 
 后端：
-- `__main__` 自测：7 步、computing_review 顺序、succeeded index=6、时区转换 通过
+- `__main__` 自测：6 步（[BOARD-LOCAL-OWNERSHIP-01] 已移除 syncing_boards）、current 顺序、succeeded index=5、时区转换 通过
 - `backend/tests/test_admin_after_close_pipeline.py`（CI PG 集成测试：CI 真实执行）
 - `backend/tests/test_after_close_status_detail.py`（CI PG 集成测试）
 

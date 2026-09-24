@@ -252,8 +252,10 @@ def test_input_hash_changes_with_source_core_run():
 @pytest.mark.parametrize(
     "boundary,expected_stage",
     [
-        ("daily_ready", "syncing_boards"),
-        ("board_facts", "syncing_boards"),
+        # [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出盘后 DAG，daily_ready/board_facts
+        # 起点改为 computing_features（pre_stage 恰为 {refreshing_daily}，语义等价）。
+        ("daily_ready", "computing_features"),
+        ("board_facts", "computing_features"),
         ("core", "computing_features"),
         ("stock_core_published", "publishing"),
     ],

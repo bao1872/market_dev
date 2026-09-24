@@ -524,14 +524,13 @@ async def test_08b_pipeline_legacy_status_mapping(db_session) -> None:
         _PIPELINE_STEPS,
     )
 
-    # 新状态机 7 步（正式发布后还需完成 Review）
+    # [BOARD-LOCAL-OWNERSHIP-01] 新状态机 6 步（syncing_boards 已迁出 DAG）
     assert _PIPELINE_STEPS == [
         "refreshing_daily",
-        "syncing_boards",
         "checking_coverage",
+        "rebuilding_market_dashboard",
         "computing_features",
-        "publishing",
-        "computing_review",
+        "computing_history",
         "watchlist_ready",
     ]
 

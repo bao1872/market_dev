@@ -49,7 +49,9 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
     必须证明：
       child.job_name == 'after_close_orchestrator'（唯一正式盘后任务类型）
       child.status == 'queued'
-      child.metadata.mainchain_stage == 'syncing_boards'
+      child.metadata.mainchain_stage == 'computing_features'
+      （[BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出 DAG；daily_ready 起点改为
+       computing_features，其 pre_stage 恰为 {refreshing_daily}，语义等价）
       child.metadata.parent_job_run_id preserved
       child.metadata.restart_from == 'daily_ready'
       child.metadata.source_core_run_id == synthetic UUID（non-null）
@@ -108,7 +110,7 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
     )
     assert child.status == "queued"
     child_meta = json.loads(child.metadata_json)
-    assert child_meta.get("mainchain_stage") == "syncing_boards"
+    assert child_meta.get("mainchain_stage") == "computing_features"
     assert child_meta.get("parent_job_run_id") == str(parent_id)
     assert child_meta.get("restart_from") == "daily_ready"
     assert child_meta.get("source_core_run_id") == str(synthetic_source), (
@@ -136,7 +138,7 @@ async def test_contract_a_daily_ready_child_claimed_by_after_close_worker() -> N
             assert result.status == "running"
             assert result.worker_instance_id == _WORKER_INSTANCE_ID
             # mainchain_stage 在领取过程中不被改写
-            assert json.loads(result.metadata_json).get("mainchain_stage") == "syncing_boards"
+            assert json.loads(result.metadata_json).get("mainchain_stage") == "computing_features"
     finally:
         async with TestAsyncSessionLocal() as db:
             await db.execute(

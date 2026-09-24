@@ -138,11 +138,10 @@ async def run_bars_scheduler_worker_runtime(
         replace_existing=True,
     )
 
-    # [BoardSync] - 板块同步已迁移至 after_close_orchestrator 的 syncing_boards 步骤
-    # （refreshing_daily → syncing_boards → waiting_dsa_worker）
-    # 不再需要独立的 17:00 qstock 定时任务。BOARD_SYNC_ENABLED 开关由 orchestrator 读取，
-    # false 时 syncing_boards 步骤标记为 skipped（不访问问财）。
-    # 板块同步是软失败：失败不覆盖旧数据、不阻断 DSA/快照/发布。
+    # [BOARD-LOCAL-OWNERSHIP-01] 板块/概念同步已彻底迁出盘后与 scheduler：
+    # 由本地手动命令 `scripts/ops/panji-board-sync` 采集问财快照，经 SSH stdin
+    # 送至生产 importer，再调用 board_sync_service.sync_boards 原子写库。
+    # 盘后 DAG 与 scheduler 均不再执行板块同步（无独立 17:00 qstock 任务）。
 
     # ===== 股本同步 job（pytdx get_finance_info，每日 18:00，独立 job_name/run_key） =====
     async def scheduled_share_capital_sync() -> None:

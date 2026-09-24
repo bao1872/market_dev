@@ -157,26 +157,23 @@ async def test_board_sync_scheduler_skipped_duplicate(db_session) -> None:
     assert job_run_2 is None
 
 
-def test_board_sync_registered_in_after_close_orchestrator() -> None:
-    """验证 board_sync 在 after_close_orchestrator 内部调用（非独立 worker）。
+def test_board_sync_not_in_after_close_orchestrator() -> None:
+    """[BOARD-LOCAL-OWNERSHIP-01] board_sync 已迁出 after_close_orchestrator。
 
-    [CHANGE-20260716-007] - board_sync 从 run_bars_scheduler_worker 迁移到
-    after_close_orchestrator 步骤 2（syncing_boards），在日线刷新后、DSA 前执行。
-    旧测试断言 run_bars_scheduler_worker 包含 scheduled_board_sync 已过时。
+    板块/概念同步改由本地手动 `scripts/ops/panji-board-sync` → 生产 importer
+    （通过 SSH stdin 传输规范化快照）执行；盘后 DAG 不再包含任何板块同步步骤。
     """
     import inspect
 
     from app.services.after_close_orchestrator import execute_after_close_run
 
     source = inspect.getsource(execute_after_close_run)
-    # [AC-02 2026-08-03] syncing_boards 业务体抽取为 _execute_syncing_boards，
-    # 由统一执行器以 "syncing_boards" 步骤名调用；原 "sync_boards" 字面量已不存在。
-    assert "syncing_boards" in source, \
-        "after_close_orchestrator 应调用 syncing_boards 步骤"
-    assert "board_sync" in source, \
-        "after_close_orchestrator 应包含 board_sync 逻辑"
-    assert "skip_board_sync" in source, \
-        "after_close_orchestrator 应支持 skip_board_sync 控制"
+    assert "syncing_boards" not in source, \
+        "after_close_orchestrator 不得再包含 syncing_boards 步骤"
+    assert "board_sync" not in source, \
+        "after_close_orchestrator 不得再包含 board_sync 逻辑"
+    assert "skip_board_sync" not in source, \
+        "after_close_orchestrator 不得再包含 skip_board_sync 控制"
 
 
 def test_board_sync_not_separate_worker_type() -> None:
