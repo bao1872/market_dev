@@ -52,6 +52,29 @@ MAX_ENVELOPE_BYTES = 64 * 1024 * 1024  # 64 MiB
 #: 合法板块类型
 _VALID_BOARD_TYPES = frozenset({"industry", "concept"})
 
+#: [RC1] board 语义字段：必须无损跨 transport 传递，严禁压缩/合成。
+#: 这些字段是 board_sync_service._atomic_switch / _append_board_history 的硬依赖
+#: （缺任一即 BoardSyncError），并参与不可变身份 definition_hash。
+_BOARD_REQUIRED_FIELDS: tuple[str, ...] = (
+    "external_code",
+    "name",
+    "type",
+    "taxonomy",
+    "source",
+    "taxonomy_version",
+    "taxonomy_compatibility_key",
+    "identity_contract_version",
+)
+#: 层级字段：hierarchy_level 由 industry 提供（L1/L2/L3）；parent_external_code 仅 L2/L3。
+_BOARD_OPTIONAL_FIELDS: tuple[str, ...] = (
+    "hierarchy_level",
+    "parent_external_code",
+)
+_BOARD_ALL_FIELDS: tuple[str, ...] = _BOARD_REQUIRED_FIELDS + _BOARD_OPTIONAL_FIELDS
+
+#: 合法板块层级词汇（与 provider `_build_board_snapshot` 输出的 L{n} 一致）
+_VALID_HIERARCHY_LEVELS = frozenset({"L1", "L2", "L3"})
+
 #: 禁止出现在 envelope 中的敏感字段名（小写比较）。序列化前 fail-closed 拒绝。
 _FORBIDDEN_FIELD_NAMES = frozenset({
     "cookie",
@@ -131,6 +154,70 @@ def _reject_sensitive_fields(obj: Any, *, path: str = "<root>") -> None:
             _reject_sensitive_fields(item, path=f"{path}[{idx}]")
 
 
+def _normalize_board_dict(board: Any, idx: int, *, where: str) -> dict[str, str]:
+    """[RC1] 校验并规范化单个 board 为 JSON-safe 全语义 dict（两侧共用，禁止合成默认值）。
+
+    Args:
+        board: 待校验 board（本地 provider 输出 / 远端 envelope 解析结果）。
+        idx: 在 boards 列表中的下标（错误定位用）。
+        where: 调用点标识（错误信息用）。
+
+    Returns:
+        仅含 `_BOARD_ALL_FIELDS` 的 `dict[str, str]`。
+
+    Raises:
+        SnapshotSchemaError: 结构非法 / 缺必需语义字段 / 出现未知字段 / 层级词表非法。
+    """
+    if not isinstance(board, dict):
+        raise SnapshotSchemaError(f"{where}: boards[{idx}] 必须是对象")
+
+    unknown = sorted(set(board.keys()) - set(_BOARD_ALL_FIELDS))
+    if unknown:
+        raise SnapshotSchemaError(
+            f"{where}: boards[{idx}] 含未知语义字段 {unknown}；"
+            f"允许字段={list(_BOARD_ALL_FIELDS)}（禁止静默丢弃 provider 语义）"
+        )
+
+    normalized: dict[str, str] = {}
+    for field_name in _BOARD_REQUIRED_FIELDS:
+        raw_value = board.get(field_name)
+        value = str(raw_value).strip() if raw_value is not None else ""
+        if not value:
+            raise SnapshotSchemaError(
+                f"{where}: boards[{idx}].{field_name} 缺失或为空"
+                f"（external_code={board.get('external_code')!r}）"
+            )
+        normalized[field_name] = value
+
+    if normalized["type"] not in _VALID_BOARD_TYPES:
+        raise SnapshotSchemaError(
+            f"{where}: boards[{idx}].type 非法: {normalized['type']!r} "
+            f"∉ {sorted(_VALID_BOARD_TYPES)}"
+        )
+
+    for field_name in _BOARD_OPTIONAL_FIELDS:
+        raw_value = board.get(field_name)
+        if raw_value is None:
+            continue
+        value = str(raw_value).strip()
+        if value:
+            normalized[field_name] = value
+
+    hierarchy_level = normalized.get("hierarchy_level")
+    if hierarchy_level is not None and hierarchy_level not in _VALID_HIERARCHY_LEVELS:
+        raise SnapshotSchemaError(
+            f"{where}: boards[{idx}].hierarchy_level 非法: {hierarchy_level!r} "
+            f"∉ {sorted(_VALID_HIERARCHY_LEVELS)}"
+        )
+    # 层级身份一致性：L1 为根，不得携带 parent（否则破坏 definition_hash 身份语义）
+    if hierarchy_level == "L1" and normalized.get("parent_external_code"):
+        raise SnapshotSchemaError(
+            f"{where}: boards[{idx}] hierarchy_level=L1 不得携带 parent_external_code"
+        )
+
+    return normalized
+
+
 def _envelope_hash_material(envelope: dict[str, Any]) -> dict[str, Any]:
     """hash 覆盖 envelope 全部字段，**排除** payload_sha256 自身。"""
     return {k: v for k, v in envelope.items() if k != "payload_sha256"}
@@ -175,14 +262,12 @@ def build_envelope(
 
     snapshot_payload = {
         "raw_rows": int(snapshot.raw_rows),
-        # boards: 保持 [{external_code,name,type}]；显式复制为 JSON-safe
+        # [RC1] boards: **无损**保留 provider 输出全部语义字段（分类学/身份合同/层级），
+        # 显式复制为 JSON-safe；字段集合之外出现未知键 → fail closed（禁止静默丢字段，
+        # 否则真实 sync_boards() 会因缺 taxonomy/identity 而 BoardSyncError）。
         "boards": [
-            {
-                "external_code": str(b.get("external_code", "")),
-                "name": str(b.get("name", "")),
-                "type": str(b.get("type", "")),
-            }
-            for b in snapshot.boards
+            _normalize_board_dict(b, idx, where="build_envelope")
+            for idx, b in enumerate(snapshot.boards)
         ],
         # memberships: tuple key (external_code, type) → 显式 JSON-safe 列表
         "memberships": [
@@ -261,13 +346,19 @@ def validate_envelope(
     *,
     expected_contracts: dict[str, str] | None = None,
 ) -> None:
-    """校验 envelope：schema/ source / hash / contract 版本。
+    """校验 envelope：敏感字段 / schema / source / hash / contract 版本 / board 语义。
+
+    [RC1b] **远端信任边界**：本函数自身递归拒绝敏感字段名，不依赖 build/serialize。
+    攻击者可直接构造带 cookie 且 hash 正确的 envelope，远端必须 fail-closed。
 
     Raises:
-        SnapshotSchemaError: schema_version / source / 结构非法。
+        SnapshotSchemaError: 敏感字段 / schema_version / source / board 语义非法。
         SnapshotHashMismatchError: payload_sha256 不匹配。
         SnapshotContractMismatchError: contract 版本与运行时不一致。
     """
+    # [RC1b] 远端信任边界：先做敏感字段递归拒绝（在任何结构/版本判定之前）
+    _reject_sensitive_fields(envelope)
+
     schema_version = envelope.get("schema_version")
     if schema_version != SCHEMA_VERSION:
         raise SnapshotSchemaError(
@@ -306,6 +397,22 @@ def validate_envelope(
     if not isinstance(snapshot_payload.get("memberships"), list):
         raise SnapshotSchemaError("snapshot.memberships 必须是列表")
 
+    # [RC1] 远端必须独立校验 board 语义字段完整性（不与本地共用"已经过了"的假设）
+    board_keys: set[tuple[str, str]] = set()
+    for idx, board in enumerate(snapshot_payload["boards"]):
+        normalized = _normalize_board_dict(board, idx, where="validate_envelope")
+        board_keys.add((normalized["external_code"], normalized["type"]))
+
+    # [RC1] membership 必须引用已声明的 board 身份（否则会被 sync_boards 静默丢弃）
+    for idx, mem in enumerate(snapshot_payload["memberships"]):
+        if not isinstance(mem, dict):
+            raise SnapshotSchemaError(f"validate_envelope: memberships[{idx}] 必须是对象")
+        key = (str(mem.get("external_code", "")), str(mem.get("type", "")))
+        if key not in board_keys:
+            raise SnapshotSchemaError(
+                f"validate_envelope: memberships[{idx}] 引用未知 board 身份 {key!r}"
+            )
+
 
 def reconstruct_snapshot(envelope: dict[str, Any]) -> BoardSnapshot:
     """从已校验 envelope 重建 BoardSnapshot（memberships tuple key 还原）。
@@ -313,24 +420,12 @@ def reconstruct_snapshot(envelope: dict[str, Any]) -> BoardSnapshot:
     调用方必须先 validate_envelope()。此处只做结构重建。
     """
     payload = envelope["snapshot"]
-    boards: list[dict[str, str]] = []
-    for idx, board in enumerate(payload["boards"]):
-        if not isinstance(board, dict):
-            raise SnapshotSchemaError(f"boards[{idx}] 必须是对象")
-        external_code = str(board.get("external_code", ""))
-        name = str(board.get("name", ""))
-        board_type = str(board.get("type", ""))
-        if board_type not in _VALID_BOARD_TYPES:
-            raise SnapshotSchemaError(
-                f"boards[{idx}].type 非法: {board_type!r} ∉ {sorted(_VALID_BOARD_TYPES)}"
-            )
-        if not external_code:
-            raise SnapshotSchemaError(f"boards[{idx}].external_code 为空")
-        boards.append({
-            "external_code": external_code,
-            "name": name,
-            "type": board_type,
-        })
+    # [RC1] 无损重建：保留 taxonomy/source/*_version/identity/hierarchy/parent 全语义字段，
+    # 与本地 provider 输出的 board dict 语义严格一致（远端禁止合成默认值）。
+    boards: list[dict[str, str]] = [
+        _normalize_board_dict(board, idx, where="reconstruct_snapshot")
+        for idx, board in enumerate(payload["boards"])
+    ]
 
     memberships: dict[tuple[str, str], list[str]] = {}
     for idx, mem in enumerate(payload["memberships"]):

@@ -168,12 +168,18 @@ def test_board_sync_not_in_after_close_orchestrator() -> None:
     from app.services.after_close_orchestrator import execute_after_close_run
 
     source = inspect.getsource(execute_after_close_run)
-    assert "syncing_boards" not in source, \
-        "after_close_orchestrator 不得再包含 syncing_boards 步骤"
-    assert "board_sync" not in source, \
-        "after_close_orchestrator 不得再包含 board_sync 逻辑"
+    # 允许：legacy 只读兼容的**文档/注释**提及该 token；
+    # 禁止：任何板块同步执行路径或开关。
+    assert "_execute_syncing_boards" not in source, \
+        "after_close_orchestrator 不得再包含 syncing_boards 执行体"
+    assert "fetch_board_snapshot" not in source, \
+        "after_close_orchestrator 不得再抓取问财板块"
+    assert "AfterCloseRunStatus.SYNCING_BOARDS" not in source, \
+        "after_close_orchestrator 不得再切换 SYNCING_BOARDS 状态"
     assert "skip_board_sync" not in source, \
         "after_close_orchestrator 不得再包含 skip_board_sync 控制"
+    assert "from app.services.board_sync_service import" not in source, \
+        "after_close_orchestrator 不得导入 board_sync_service"
 
 
 def test_board_sync_not_separate_worker_type() -> None:

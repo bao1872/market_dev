@@ -529,6 +529,9 @@ worker 收到 SIGTERM 信号时的 drain 流程：
 
 顶层步骤（经执行器）顺序：`refreshing_daily → checking_coverage → rebuilding_market_dashboard(复盘计算) → computing_features → computing_history`。`enqueue_chip_job` 步骤已于 [2026-09-01, SHA 2adc9c32] 退役；`computing_review` / `publishing` 均已退役（仅历史只读）；`syncing_boards` 于 [BOARD-LOCAL-OWNERSHIP-01] 迁出（canonical chain = Daily → Coverage → Review projection → Core → History → complete）。
 
+**覆盖率步骤位置（[RC2] 修正）**
+`checking_coverage` 位于 normal / resume 两条路径的**汇合点之后**，不属于 `if not skip_refresh` 分支：`daily_ready` / 历史 `mainchain_stage=syncing_boards` 起点跳过 `refreshing_daily` 时，**仍会**执行覆盖率评估 —— 「已经刷新过日线」不等于「覆盖率已经检查通过」。覆盖率来源有两个且不重复实现：本次刷新直接复用 `batch_result.daily_coverage`；resume/restart 无刷新结果时用 `compute_daily_coverage()`（→ `BarsCoverageService`，persisted 日线事实）重算。覆盖率失败仍按原语义以 `DAILY_COVERAGE_BLOCKED` 阻塞强制主链；`checking_coverage` 不是 durable checkpoint。
+
 **`computing_review`（AC-02，2026-08-03 收口）**：复盘业务体抽为模块级协程 `_execute_review_step(...)`，由 `execute_orchestrator_step("computing_review", lambda: _execute_review_step(...), optional=True, ...)` 包装，满足 AC-02「所有顶层步骤必须通过统一步骤执行器」。`_execute_review_step` 内部保留既有幂等 create_run / compute_run / resume_run / publish_run 语义与 publication pointer 唯一事实源，软失败（gate_blocked/计算失败）不抛异常，仅返回 `result["failed"]=True`；调用方将业务软失败如实映射到 step summary（`REVIEW_SOFT_FAILURE`）并 `_persist_step_summary`，并据此把主任务收为 `partial_success`（core 已发布）。检查点语义不变：失败时 `_execute_review_step` 内部传 `None` 不推进 `last_completed_step`（见 §12.1）。
 
 **`watchlist_ready`（非执行器步骤）**：是**派生就绪指示器**而非可执行工作步骤——无 operation、无 timeout/heartbeat/cancellation，由 `feature_snapshot_service.has_succeeded_snapshot_run`（succeeded + published + full scope）推导，供 admin 流水线可视化渲染为终态展示步骤（`after_close_pipeline_service._PIPELINE_STEPS` 含 `"watchlist_ready"`）。强制塞进 `execute_orchestrator_step` 会造出空 operation，违反最小必要修改原则；此处如实标注：`watchlist_ready` 不经过统一执行器。

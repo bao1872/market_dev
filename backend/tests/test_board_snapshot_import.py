@@ -19,14 +19,34 @@ import pytest
 
 from app.cli import board_snapshot_import as imp
 from app.services.board_snapshot_transfer import build_envelope, serialize_envelope
-from app.services.wencai_board_provider import BoardSnapshot
+from app.services.wencai_board_provider import (
+    BOARD_IDENTITY_CONTRACT_VERSION,
+    BOARD_SOURCE,
+    BOARD_TAXONOMY,
+    BOARD_TAXONOMY_COMPATIBILITY_KEY,
+    BOARD_TAXONOMY_VERSION,
+    BoardSnapshot,
+)
 
 _SHANGHAI = ZoneInfo("Asia/Shanghai")
 
 
 def _envelope_bytes() -> bytes:
+    """provider 风格快照（[RC1] 必须含全部语义字段，否则 build_envelope fail-closed）。"""
     snap = BoardSnapshot(
-        boards=[{"external_code": "BK1", "name": "半导体", "type": "industry"}],
+        boards=[
+            {
+                "external_code": "BK1",
+                "name": "半导体",
+                "type": "industry",
+                "taxonomy": BOARD_TAXONOMY,
+                "source": BOARD_SOURCE,
+                "taxonomy_version": BOARD_TAXONOMY_VERSION,
+                "taxonomy_compatibility_key": BOARD_TAXONOMY_COMPATIBILITY_KEY,
+                "identity_contract_version": BOARD_IDENTITY_CONTRACT_VERSION,
+                "hierarchy_level": "L1",
+            }
+        ],
         memberships={("BK1", "industry"): ["600000.SH"]},
         raw_rows=6000,
         unresolved_symbols=[],
