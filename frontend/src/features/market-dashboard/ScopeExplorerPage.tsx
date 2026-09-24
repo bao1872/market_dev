@@ -280,52 +280,6 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
   // =========================================================================
   const listWorkspace = !parsed.board_id && (
     <>
-      {/* slim meta bar（与 StrategyDataTable 共用 global.scss chrome）：结果数 + 激活筛选 chips + 列设置 + 清除排序与筛选 */}
-      <div className="table-meta-bar" data-testid="explorer-meta-bar">
-        <div>
-          <span className="table-result-count">结果 {total}</span>
-          <span className="table-active-state">
-            按 {EXPLORER_COLUMN_LABELS[parsed.sort]} {parsed.direction === 'asc' ? '升序' : '降序'} 排序
-          </span>
-          <span className="table-filter-chips" data-testid="explorer-filter-chips">
-            {filterChips.map((chip) => (
-              <button
-                key={chip.column}
-                type="button"
-                className="filter-chip"
-                title={`清除「${chip.label}」`}
-                aria-label={`清除筛选 ${chip.label}`}
-                onClick={() => clearColumnFilter(chip.column)}
-              >
-                <span className="filter-chip-text">{chip.label}</span>
-                <span className="filter-chip-x" aria-hidden="true">
-                  ×
-                </span>
-              </button>
-            ))}
-          </span>
-        </div>
-        <div className="table-meta-actions">
-          <button
-            type="button"
-            className="table-columns-btn"
-            onClick={(e) => setColumnSettingsAnchor(e.currentTarget)}
-            data-testid="column-settings-btn"
-          >
-            列设置
-          </button>
-          <button
-            type="button"
-            className="table-reset-btn"
-            disabled={clearDisabled}
-            onClick={clearAllFilters}
-            data-testid="clear-all-filters"
-          >
-            清除排序与筛选
-          </button>
-        </div>
-      </div>
-
       {/* 列设置弹层（§7）：只改列显隐；列顺序由契约锁死，不提供重排。 */}
       {columnSettingsAnchor && (
         <ExplorerColumnSettings
@@ -501,13 +455,17 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
     </div>
   )
 
-  return (
-    <div className={styles.explorerPage} data-testid="explorer-page">
-      <ReviewTopBar projectionDate={explorer.data?.projection_trade_date} />
+  // =========================================================================
+  // [PANJI-REVIEW-EXPLORER-CONTROL-DECK-01] 注入 ReviewTopBar 的 tab 专属控件
+  // 只搬运既有控件（层级 / 搜索）：不新增第二套 tabs，不改任何 URL / 搜索语义。
+  // =========================================================================
+  const explorerControls = (
+    <>
+      <span className={styles.deckDivider} aria-hidden="true" />
 
-      {/* §3 tab 专属控件行：紧跟在共享顶部行下方，三个 tab 共用同一行节奏与控件高度。 */}
-      <div className={styles.contextRow}>
-        {isIndustry ? (
+      {isIndustry ? (
+        <div className={styles.deckLevel}>
+          <span className={styles.controlLabel}>层级</span>
           <div className={styles.levelSelector} role="group" aria-label="行业层级">
             {LEVELS.map((lv) => (
               <button
@@ -521,28 +479,89 @@ export default function ScopeExplorerPage({ scopeType }: { scopeType: ScopeType 
               </button>
             ))}
           </div>
-        ) : (
-          <p className={styles.conceptNote}>同花顺概念 / 问财概念</p>
-        )}
+        </div>
+      ) : (
+        <p className={styles.conceptNote}>同花顺概念 / 问财概念</p>
+      )}
 
-        <form className={styles.searchForm} onSubmit={submitSearch}>
-          <input
-            className={styles.searchInput}
-            type="text"
-            value={draftQ}
-            placeholder={isIndustry ? '搜索行业' : '搜索概念'}
-            onChange={(e) => setDraftQ(e.target.value)}
-            data-testid="search-input"
-          />
-          <button type="submit" className={styles.btnPrimary}>
-            搜索
+      <form className={styles.searchForm} onSubmit={submitSearch}>
+        <input
+          className={styles.searchInput}
+          type="text"
+          value={draftQ}
+          placeholder={isIndustry ? '搜索行业，例如：银行 / 汽车 / 医药' : '搜索概念'}
+          onChange={(e) => setDraftQ(e.target.value)}
+          data-testid="search-input"
+        />
+        <button type="submit" className={styles.btnPrimary}>
+          搜索
+        </button>
+        {parsed.q && (
+          <button type="button" className={styles.btnGhost} onClick={clearSearch} data-testid="clear-search">
+            清空
           </button>
-          {parsed.q && (
-            <button type="button" className={styles.btnGhost} onClick={clearSearch}>
-              清空
-            </button>
-          )}
-        </form>
+        )}
+      </form>
+    </>
+  )
+
+  return (
+    <div className={styles.explorerPage} data-testid="explorer-page">
+      {/* ===== Control Deck：两层紧凑控制区（tabs/层级/搜索/日期 + 结果/排序/chips/列设置/清除）===== */}
+      <div className={styles.explorerControlDeck} data-testid="explorer-control-deck">
+        <ReviewTopBar
+          projectionDate={explorer.data?.projection_trade_date}
+          variant="deck"
+          controls={explorerControls}
+        />
+
+        {/* 第二层：列表态专属（结果 / 排序 / chips / 列设置 / 清除）；detail view 不渲染（已不是列表表格）。 */}
+        {!parsed.board_id && (
+          <div className={`table-meta-bar ${styles.explorerMetaRow}`} data-testid="explorer-meta-bar">
+            <div className={styles.explorerMetaState}>
+              <span className="table-result-count">结果 {total}</span>
+              <span className="table-active-state">
+                按 {EXPLORER_COLUMN_LABELS[parsed.sort]} {parsed.direction === 'asc' ? '升序' : '降序'} 排序
+              </span>
+              <span className="table-filter-chips" data-testid="explorer-filter-chips">
+                {filterChips.map((chip) => (
+                  <button
+                    key={chip.column}
+                    type="button"
+                    className="filter-chip"
+                    title={`清除「${chip.label}」`}
+                    aria-label={`清除筛选 ${chip.label}`}
+                    onClick={() => clearColumnFilter(chip.column)}
+                  >
+                    <span className="filter-chip-text">{chip.label}</span>
+                    <span className="filter-chip-x" aria-hidden="true">
+                      ×
+                    </span>
+                  </button>
+                ))}
+              </span>
+            </div>
+            <div className="table-meta-actions">
+              <button
+                type="button"
+                className="table-columns-btn"
+                onClick={(e) => setColumnSettingsAnchor(e.currentTarget)}
+                data-testid="column-settings-btn"
+              >
+                列设置
+              </button>
+              <button
+                type="button"
+                className="table-reset-btn"
+                disabled={clearDisabled}
+                onClick={clearAllFilters}
+                data-testid="clear-all-filters"
+              >
+                清除排序与筛选
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {listWorkspace}

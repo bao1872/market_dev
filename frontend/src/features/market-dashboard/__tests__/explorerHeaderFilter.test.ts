@@ -170,7 +170,16 @@ test('F. 排序行为不变（三分支 onSort 保留）', () => {
 // ===== G. meta bar 复用 global.scss 表格 chrome（无第二套 Review 实现）=====
 test('G. slim meta bar：复用 table-meta-bar + 全局 filter-chip，无 kebab module 查找', () => {
   // 复用行情 table chrome 的 meta bar / chips 视觉 owner
-  assert.match(PAGE_SRC, /className="table-meta-bar"/, 'meta bar 复用全局 table-meta-bar')
+  // [PANJI-REVIEW-EXPLORER-CONTROL-DECK-01] meta bar 移入 Control Deck 第二层，
+  // 但视觉 owner 仍是 global.scss：继续保持 `table-meta-bar` 全局类 + module 只做 deck 内布局。
+  assert.match(
+    PAGE_SRC,
+    /className=\{`table-meta-bar \$\{styles\.explorerMetaRow\}`\}/,
+    'meta bar 仍复用全局 table-meta-bar（module 只提供 deck 布局，不重建第二套 chrome）',
+  )
+  // OLDEST GUARD: meta bar 已进入 deck 容器，不再是 listWorkspace 里的独立首块
+  assert.match(PAGE_SRC, /className=\{styles\.explorerControlDeck\}/, 'meta bar 必须由 Control Deck 承载')
+  assert.ok(!PAGE_SRC.includes('styles.contextRow'), '旧的第二行 contextRow 必须删除')
   assert.match(PAGE_SRC, /className="filter-chip"/, 'chips 复用全局 filter-chip')
   assert.ok(!PAGE_SRC.includes("styles['filter-chip']"), 'filter-chip 必须走全局类，不得用 kebab module 查找')
   // 旧 module 副本已从 dashboard.module.scss 删除（P2）

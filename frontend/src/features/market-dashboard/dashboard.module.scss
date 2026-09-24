@@ -708,9 +708,10 @@
 }
 
 .concept-note {
-  font-size: 13px;
+  margin: 0;
+  font-size: 12px;
   color: v.$color-muted;
-  margin: 0 0 14px;
+  white-space: nowrap;
 }
 
 .toolbar {
@@ -721,26 +722,90 @@
   margin-bottom: 14px;
 }
 
-// ===== [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] tab 专属控件行（层级 + 搜索）=====
-// 紧跟共享顶部行下方；三个 tab 共用同一行节奏、控件高度、gap、背景层级。
-.context-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-bottom: 16px;
+// ===== [PANJI-REVIEW-EXPLORER-CONTROL-DECK-01] Explorer 两层 Control Deck =====
+// 目标：把原本三段松散区块（ReviewTopBar / contextRow / table-meta-bar）收敛为一个
+// 边框容器内的两层紧凑控制区：
+//   第一层 ≈ 62px：[大盘 行业 概念] | [层级 L1 L2 L3] | [搜索] | [数据日期]
+//   第二层 ≈ 42px：[结果 N] [排序] [chips]        [列设置] [清除排序与筛选]
+// 视觉 owner 分工不变：tabs 仍属 DashboardTabs、meta/chips/按钮仍属 global.scss
+// （table-meta-bar / filter-chip / table-meta-actions），module 只提供 deck 的布局与尺寸。
+.explorer-control-deck {
+  margin-bottom: 10px;
+  border: 1px solid v.$color-border;
+  border-radius: 10px;
+  overflow: hidden;
+  background: v.$color-panel;
 }
 
+// 第一层：deck variant（default variant 继续服务大盘页）
+.review-top-bar-deck {
+  min-height: 60px;
+  margin-bottom: 0;
+  padding: 10px 16px;
+  justify-content: flex-start;
+  flex-wrap: nowrap;
+  gap: 16px;
+  border-bottom: 1px solid v.$color-border-soft;
+}
+
+.review-top-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.deck-divider {
+  width: 1px;
+  height: 28px;
+  background: v.$color-border;
+  flex: none;
+}
+
+.deck-level {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+
+.control-label {
+  font-size: 12px;
+  color: v.$color-muted;
+  white-space: nowrap;
+}
+
+// 第二层：列表态 meta 行（沿用 global table-meta-bar chrome，仅覆盖 deck 内尺寸）
+.explorer-meta-row {
+  min-height: 40px;
+  padding: 6px 16px;
+  border-bottom: 0;
+  background: v.$color-panel-2;
+}
+
+.explorer-meta-state {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 2px;
+  min-width: 0;
+}
+
+// ===== tab 专属控件（注入 ReviewTopBar controls slot）=====
 .search-form {
   display: flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
+  flex: 1 1 auto;
+  min-width: 260px;
 }
 
 .search-input {
-  flex: 0 1 260px;
-  min-width: 160px;
+  flex: 1 1 320px;
+  max-width: 410px;
+  height: 36px;
   padding: 7px 12px;
   border: 1px solid v.$color-border;
   border-radius: 7px;

@@ -82,8 +82,8 @@ test('R10. rail 仅渲染板块名称（不含成员数/MA 等指标字段）', 
 // P1-1. 大盘 / 行业 / 概念 统一顶部 shell（共享 ReviewHeader，行业/概念不再有独立大标题）
 // ===========================================================================
 test('P1-1. 大盘页与行业/概念页共享同一 ReviewTopBar（统一 shell）', () => {
-  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar /, '大盘页消费共享 ReviewTopBar')
-  assert.match(PAGE_SOURCE, /<ReviewTopBar /, '行业/概念页消费共享 ReviewTopBar')
+  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar\b/, '大盘页消费共享 ReviewTopBar')
+  assert.match(PAGE_SOURCE, /<ReviewTopBar\b/, '行业/概念页消费共享 ReviewTopBar')
   // 行业/概念不再渲染自己的大标题「行业」/「概念」
   assert.ok(!PAGE_SOURCE.includes("'行业' : '概念'"), '行业/概念页不得再渲染独立大标题')
 })
@@ -96,9 +96,15 @@ test('P1-final. 不重复 query：ReviewTopBar 数据日期复用 explorer 响�
     !PAGE_SOURCE.includes('useMarketDashboard('),
     'ScopeExplorerPage 不得再调用 useMarketDashboard()（避免为顶部显示一个日期而额外拉全量大盘数据）',
   )
+  // [PANJI-REVIEW-EXPLORER-CONTROL-DECK-01] ReviewTopBar 改为多属性调用（variant/controls），
+  // 日期数据源契约不变：仍然只取 explorer 响应，不另造日期 / 不重复 query。
+  assert.ok(
+    !/<ReviewTopBar\s+projectionDate=\{(?!explorer\.data\?\.projection_trade_date)/.test(PAGE_SOURCE),
+    'ReviewTopBar 的 projectionDate 必须来自 explorer 响应',
+  )
   assert.match(
     PAGE_SOURCE,
-    /<ReviewTopBar projectionDate=\{explorer\.data\?\.projection_trade_date\} \/>/,
+    /<ReviewTopBar\b[\s\S]{0,400}?projectionDate=\{explorer\.data\?\.projection_trade_date\}[\s\S]{0,400}?\/>/,
     'ReviewTopBar 数据日期复用 explorer 响应（与 MarketDashboardPage 同源，不另造日期 / 不重复 query）',
   )
 })
@@ -183,8 +189,8 @@ test('R15. 大盘页核心契约稳定（共享 ReviewTopBar + 统一 BreadthCha
 // [PANJI-REVIEW-UI-RUNTIME-PARITY-FIX] §2/§3/§4 顶部 shell 与快速筛选契约
 // ===========================================================================
 test('§2. 大盘 / 行业 / 概念 共享紧凑顶部行，且页面内无「市场复盘」H1', () => {
-  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar /, '大盘页消费共享 ReviewTopBar')
-  assert.match(PAGE_SOURCE, /<ReviewTopBar /, '行业/概念页消费共享 ReviewTopBar')
+  assert.match(MARKET_PAGE_SOURCE, /<ReviewTopBar\b/, '大盘页消费共享 ReviewTopBar')
+  assert.match(PAGE_SOURCE, /<ReviewTopBar\b/, '行业/概念页消费共享 ReviewTopBar')
   // 复盘模块身份由全局导航承担；页内不得再有「市场复盘」的页面级 H1（错误文案里的「市场复盘数据」不算标题）。
   assert.ok(!PAGE_SOURCE.match(/<h1[^>]*>[^<]*市场复盘/), '行业/概念页不得有「市场复盘」H1')
   assert.ok(!MARKET_PAGE_SOURCE.match(/<h1[^>]*>[^<]*市场复盘/), '大盘页不得有「市场复盘」H1')
@@ -353,4 +359,114 @@ test('P1-3e. rail universe query identity 不含 board_id；随 filter/sort 变�
     scopeExplorerQueryKey({ ...base, ma5_min: 0.8 }),
     'filter 变化必须改变 rail identity',
   )
+})
+
+// ===========================================================================
+// [PANJI-REVIEW-EXPLORER-CONTROL-DECK-01] Control Deck 源码契约
+// 布局收敛 = 视觉真源；以下均为「语义不得被布局搬运篡改」的回归门。
+// 静态 HTML 原型**不是**业务合同：搜索 q 的清空语义、clearAllStatePatch 的 q-independent
+// 语义都保持原样（见 P1-2a / 下方 D7）。
+// ===========================================================================
+const REVIEW_TOPBAR_SOURCE = readFileSync(new URL('../ReviewTopBar.tsx', import.meta.url), 'utf8')
+
+// D1. Explorer 使用 deck variant，且把 tab 专属控件注入同一行（不再有独立 contextRow）
+test('D1. Explorer 使用 ReviewTopBar variant="deck"（纳入同一行控制流）', () => {
+  assert.match(PAGE_SOURCE, /<ReviewTopBar\b[\s\S]{0,200}?variant="deck"/, 'Explorer 必须显式使用 deck variant')
+  assert.match(
+    PAGE_SOURCE,
+    /controls=\{explorerControls\}/,
+    'tab 专属控件（层级 / 搜索）必须通过 controls slot 注入 ReviewTopBar',
+  )
+  assert.ok(!PAGE_SOURCE.includes('styles.contextRow'), '旧的第二行 contextRow 必须删除（已并入 deck 第一层）')
+  assert.match(PAGE_SOURCE, /<div className=\{styles\.explorerControlDeck\}/, '两层控制区必须由 explorerControlDeck 容器承载')
+})
+
+// D2. ReviewTopBar 仍是 tabs 的唯一 owner；Explorer 不得手写第二套 tabs
+test('D2. ReviewTopBar 唯一渲染 DashboardTabs；Explorer 不硬编码大盘/行业/概念', () => {
+  assert.equal(
+    (REVIEW_TOPBAR_SOURCE.match(/<DashboardTabs/g) ?? []).length,
+    1,
+    'DashboardTabs 必须在 ReviewTopBar 内唯一渲染',
+  )
+  assert.ok(!PAGE_SOURCE.includes('<DashboardTabs'), 'Explorer 不得自己渲染第二套 DashboardTabs')
+  assert.ok(!PAGE_SOURCE.includes('REVIEW_TABS'), 'Explorer 不得复制 REVIEW_TABS 自行拼 tab')
+  assert.ok(!PAGE_SOURCE.includes('reviewTabLabel'), 'Explorer 不得自行渲染 tab label（DashboardTabs owner 职责）')
+  assert.ok(!PAGE_SOURCE.includes('DashboardTabs'), 'Explorer 不得引用 DashboardTabs（tabs 由 ReviewTopBar 拥有）')
+  // default variant 仍是默认（大盘页不传 variant 也走 default）
+  assert.match(REVIEW_TOPBAR_SOURCE, /variant = 'default'/, 'default 必须是默认 variant')
+  assert.ok(
+    !MARKET_PAGE_SOURCE.includes('variant="deck"') && !MARKET_PAGE_SOURCE.includes('controls='),
+    '大盘页继续用 default variant，不得注入 Explorer 专属控件',
+  )
+})
+
+// D3. industry controls 顺序存在：层级 → 搜索（且与 concept note 互斥）
+test('D3. industry controls 顺序为 层级 → 搜索（不可倒置）', () => {
+  const controlsStart = PAGE_SOURCE.indexOf('const explorerControls')
+  assert.notEqual(controlsStart, -1, '必须存在 explorerControls')
+  const controls = PAGE_SOURCE.slice(controlsStart, PAGE_SOURCE.indexOf('  return (', controlsStart))
+  // industry 分支：{isIndustry ? ( ... ) : ( ... )}
+  const branchOpen = controls.indexOf('{isIndustry ? (')
+  const branchSplit = controls.indexOf(') : (', branchOpen)
+  assert.ok(branchOpen !== -1 && branchSplit !== -1, 'controls 必须是 industry / concept 二选一三元分支')
+  const industryBranch = controls.slice(branchOpen, branchSplit)
+  assert.ok(industryBranch.includes('层级'), 'industry 分支必须包含层级 label')
+  assert.ok(industryBranch.includes('styles.levelSelector'), 'industry 分支必须包含 L1/L2/L3')
+  assert.ok(!industryBranch.includes('styles.conceptNote'), 'industry 分支不得同时渲染 concept note')
+  const conceptBranch = controls.slice(branchSplit, controls.indexOf('</form>', branchSplit))
+  assert.ok(!conceptBranch.includes('styles.levelSelector'), 'concept 分支不得渲染层级控件')
+  assert.ok(
+    controls.indexOf('styles.searchForm', branchSplit) > controls.indexOf('styles.levelSelector', branchOpen),
+    '搜索必须排在层级之后',
+  )
+  // 层级切换语义不变
+  assert.match(PAGE_SOURCE, /const onLevel = \(lv: HierarchyLevel\) => applyPatch\(\{ hierarchy_level: lv, board_id: null \}\)/)
+})
+
+// D4. concept 不显示 L1/L2/L3
+test('D4. concept 分支不渲染层级控件，仅 muted note + 搜索', () => {
+  const controlsStart = PAGE_SOURCE.indexOf('const explorerControls')
+  const controls = PAGE_SOURCE.slice(controlsStart, PAGE_SOURCE.indexOf('  return (', controlsStart))
+  assert.ok(controls.includes('styles.conceptNote'), 'concept 分支保留轻量 context note')
+  assert.match(PAGE_SOURCE, /placeholder=\{isIndustry \? '搜索行业[^']*' : '搜索概念'\}/, '两分支 placeholder 分行保留')
+})
+
+// D5. 第二层 meta row 由 deck 承载，内容齐全；detail view 不渲染第二层
+test('D5. explorerMetaRow 承载 结果/排序/chips/列设置/清除，且 board_id 时不渲染', () => {
+  const deckStart = PAGE_SOURCE.indexOf('className={styles.explorerControlDeck}')
+  const deck = PAGE_SOURCE.slice(deckStart, PAGE_SOURCE.indexOf('{listWorkspace}', deckStart))
+  assert.ok(deckStart !== -1, '必须存在 explorerControlDeck')
+  for (const token of [
+    'styles.explorerMetaRow',
+    'explorer-meta-bar',
+    'table-result-count',
+    'table-active-state',
+    'explorer-filter-chips',
+    'data-testid="column-settings-btn"',
+    'data-testid="clear-all-filters"',
+  ]) {
+    assert.ok(deck.includes(token), `Control Deck 第二层必须包含 ${token}`)
+  }
+  assert.match(PAGE_SOURCE, /\{!parsed\.board_id && \([\s\S]{0,120}explorerMetaRow/, '第二层必须在 board_id 存在时不渲染')
+  assert.ok(!PAGE_SOURCE.includes('<div className={styles.contextRow}>'), '旧 contextRow 不得留存')
+})
+
+// D6. popover anchor owner 不变（列设置 / 列筛选仍用真实 DOM rect 定位）
+test('D6. 列设置 popover 仍以 e.currentTarget 为 anchor，Rect 定位逻辑未被搬运破坏', () => {
+  assert.match(PAGE_SOURCE, /setColumnSettingsAnchor\(e\.currentTarget\)/, '列设置必须继续用 currentTarget 做 anchor')
+  assert.match(PAGE_SOURCE, /const rect = anchor\.getBoundingClientRect\(\)/, 'popover 位置仍由真实 DOM rect 计算')
+  assert.match(PAGE_SOURCE, /\{columnSettingsAnchor && \(/, '列设置弹层仍在列表工作区内渲染')
+})
+
+// D7. 语义冻结：clear 按钮只走 clearAllStatePatch（filters + sort + direction），不清 q
+test('D7. 语义冻结：清除排序与筛选不触碰 q / hierarchy_level / board_id', () => {
+  const patch = clearAllStatePatch()
+  assert.equal(patch.q, undefined, 'clear patch 不得包含 q（搜索有独立清空语义）')
+  assert.equal(patch.hierarchy_level, undefined, 'clear patch 不得重置层级')
+  assert.equal(patch.board_id, undefined, 'clear patch 不得清除选中板块')
+  for (const k of NUMERIC_FILTER_KEYS) assert.equal(patch.filters?.[k], null)
+  // UI 接线：清除按钮仍绑定同一个 handler，且仍未与 search clear 合并
+  assert.match(PAGE_SOURCE, /onClick=\{clearAllFilters\}/)
+  assert.match(PAGE_SOURCE, /const clearAllFilters = \(\) => \{\s*applyPatch\(clearAllStatePatch\(\)\)\s*\}/)
+  assert.match(PAGE_SOURCE, /const clearSearch = \(\) => \{[\s\S]{0,80}applyPatch\(\{ q: '' \}\)/, '搜索清空独立保留')
 })
