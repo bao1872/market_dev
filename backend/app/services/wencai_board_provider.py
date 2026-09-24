@@ -345,22 +345,59 @@ def _normalize_name(name: Any) -> str:
     return name_str.strip()
 
 
-def _normalize_concepts(raw: Any) -> list[str]:
-    """规范化概念列表：按 ; 拆分、NFKC、trim、单股去重。
+def _normalize_scalar_text(raw: Any, *, field: str) -> str:
+    """规范化单个标量业务文本（概念名 / 行业层级名）。
 
-    问财返回的概念字段格式："概念A;概念B;概念C"
+    [WENCAI-STREAM-QUERY-SHAPE-CORRECTION-01] 新 stream-query 协议以
+    `list[str]` 返回概念与行业。**绝不允许** `str(list)` —— 那会把
+    `"['A', 'B']"` 当成**一个**业务名，从而产生几千个虚假板块（实测：
+    5578 只股票 → 5560 个"概念"）。
+
+    Raises:
+        WencaiParseError: 元素不是字符串（dict / 嵌套容器 / 数字 / bool）。
+    """
+    if raw is None:
+        return ""
+    if isinstance(raw, bool) or not isinstance(raw, str):
+        raise WencaiParseError(
+            f"{field} 元素类型异常（fail closed，禁止 str(list) 降级）: "
+            f"{type(raw).__name__}；新协议该字段应为 list[str]"
+        )
+    return _normalize_name(raw)
+
+
+def _normalize_concepts(raw: Any) -> list[str]:
+    """规范化概念列表：NFKC、trim、单股稳定顺序去重。
+
+    兼容两种协议形态（[SHAPE-CORRECTION-01]）：
+    A. 旧协议字符串：`"概念A;概念B;概念C"` → 按 `;` 拆分（行为不变）
+    B. 新协议 list：`["概念A", "概念B"]` → **每个元素就是一个概念**
+
+    每个概念必须是标量字符串；空串忽略；顺序保持（去重保留首次出现）。
+
+    Raises:
+        WencaiParseError: 顶层类型非 str/list，或元素非字符串（fail closed）。
     """
     if raw is None:
         return []
-    raw_str = str(raw).strip()
-    if not raw_str:
-        return []
 
-    parts = raw_str.split(";")
+    if isinstance(raw, (list, tuple)):
+        raw_items: list[Any] = list(raw)
+    elif isinstance(raw, str):
+        raw_str = raw.strip()
+        if not raw_str:
+            return []
+        raw_items = raw_str.split(";")
+    else:
+        raise WencaiParseError(
+            "所属概念 类型异常（fail closed）: "
+            f"{type(raw).__name__}；只接受 str（旧协议 ';' 分隔）或 list[str]（新协议）"
+        )
+
     concepts: list[str] = []
     seen: set[str] = set()
-    for part in parts:
-        name = _normalize_name(part)
+    for item in raw_items:
+        name = _normalize_scalar_text(item, field="所属概念")
         if not name or name in seen:
             continue
         seen.add(name)
@@ -371,26 +408,50 @@ def _normalize_concepts(raw: Any) -> list[str]:
 def _normalize_industry(raw: Any) -> str:
     """规范化行业为 "一级-二级-三级" 完整路径。
 
-    问财返回的行业字段可能格式：
-    - "银行" → "银行"（仅一级）
-    - "金融-银行" → "金融-银行"（一级-二级）
-    - "金融-银行-国有银行" → "金融-银行-国有银行"（完整路径）
+    兼容两种协议形态（[SHAPE-CORRECTION-01]）：
+    A. 旧协议字符串：`"一级-二级-三级"` / `"一级/二级/三级"` → 按分隔符拆分（行为不变）
+    B. 新协议有序层级 list：`["一级", "二级", "三级"]` → **下标即层级顺序**，
+       用 `-` 连接（实测：全部 5578 行恒为 3 层非空字符串）
 
-    规范化：NFKC + trim，移除空路径段。
+    层级深度上限仍为 3，超限由 `_split_industry_path` 抛
+    `WencaiIndustryDepthError`（fail closed，禁止静默截断）。
+
+    Raises:
+        WencaiParseError: 类型非 str/list，或层级元素非字符串/为空（fail closed）。
     """
     if raw is None:
         return ""
-    raw_str = str(raw).strip()
-    if not raw_str:
-        return ""
 
-    # NFKC + trim
-    raw_str = unicodedata.normalize("NFKC", raw_str).strip()
+    if isinstance(raw, (list, tuple)):
+        levels: list[str] = []
+        for idx, item in enumerate(raw):
+            level = _normalize_scalar_text(item, field="所属同花顺行业")
+            if not level:
+                # 空层级会让层级顺序产生歧义（L2 与 L3 无法区分）→ fail closed
+                raise WencaiParseError(
+                    f"所属同花顺行业 第 {idx + 1} 层为空（fail closed）："
+                    f"层级数组={raw!r}"
+                )
+            levels.append(level)
+        return "-".join(levels)
 
-    # 按 / 或 - 拆分（问财可能用任一分隔符），然后统一用 - 连接
-    parts = re.split(r"[/\-－—]", raw_str)
-    parts = [p.strip() for p in parts if p.strip()]
-    return "-".join(parts)
+    if isinstance(raw, str):
+        raw_str = raw.strip()
+        if not raw_str:
+            return ""
+
+        # NFKC + trim
+        raw_str = unicodedata.normalize("NFKC", raw_str).strip()
+
+        # 按 / 或 - 拆分（问财可能用任一分隔符），然后统一用 - 连接
+        parts = re.split(r"[/\-－—]", raw_str)
+        parts = [p.strip() for p in parts if p.strip()]
+        return "-".join(parts)
+
+    raise WencaiParseError(
+        "所属同花顺行业 类型异常（fail closed）: "
+        f"{type(raw).__name__}；只接受 str（旧协议）或 list[str]（新协议层级数组）"
+    )
 
 
 def _split_industry_path(path: str) -> list[str]:
