@@ -469,41 +469,6 @@
   margin-bottom: 14px;
 }
 
-// ===== [R3B] 大盘页：时间范围 + 卡片辅助说明 =====
-.range-selector {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 16px;
-}
-
-.range-label {
-  font-size: 13px;
-  color: v.$color-muted;
-}
-
-.range-btn {
-  padding: 5px 12px;
-  border: 1px solid v.$color-border;
-  background: transparent;
-  color: v.$color-muted;
-  border-radius: 7px;
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.range-btn:hover {
-  border-color: v.$color-brand;
-  color: v.$color-text;
-}
-
-.range-btn-active {
-  background: v.$color-brand;
-  color: v.$color-bg;
-  border-color: v.$color-brand;
-  font-weight: 600;
-}
-
 .card-hint {
   margin-top: 6px;
   font-size: 12px;

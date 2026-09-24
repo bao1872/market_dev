@@ -1,8 +1,7 @@
 // [MarketDashboard][R3B] - 大盘页纯配置（无 React / DOM 依赖，可单测）
 //
 // 冻结内容：
-//   1. 时间范围 20 / 60 / 120 / 250（默认 250）——**窗口由 server 返回**，
-//      点击范围直接 `useMarketDashboard(days)`；禁止「先取 250 再前端 slice」。
+//   1. 窗口固定 250 日（server 返回）；前端不再提供时间范围切换。
 //   2. KPI 卡片顺序锁死：MA5 / MA20 / MA50 / EW（**无** MA10 / MA120 card）。
 //   3. 统一图 6 条 series（顺序即契约）：MA5 → MA10 → MA20 → MA50 → MA120（left，
 //      breadth 0..1 呈现为 0%..100%）+ EW（right，text.primary，更粗）。
@@ -12,13 +11,6 @@
 import { EW_LINE_WIDTH, REVIEW_TOKENS, SERIES_LINE_WIDTH } from './chartTheme'
 import type { FixedScaleRange, LineWidth } from './lineSeriesController'
 import type { HierarchyLevel, ScopeType, BreadthPoint } from './types'
-
-// ===========================================================================
-// 1. 时间范围
-// ===========================================================================
-export const MARKET_OVERVIEW_RANGES = [20, 60, 120, 250] as const
-export type MarketOverviewRange = (typeof MARKET_OVERVIEW_RANGES)[number]
-export const MARKET_OVERVIEW_DEFAULT_RANGE: MarketOverviewRange = 250
 
 // ===========================================================================
 // 2. KPI 卡片（顺序锁死）

@@ -1,7 +1,7 @@
 // [MarketDashboard][R3B] - 大盘页（/review）
 //
 // 结构（冻结）：Header（标题 + 4 个二级 tab + 真实数据日期）
-//   → 时间范围（20/60/120/250，默认 250，窗口由 **server** 返回）
+//   → 固定 250 日窗口（由 server 返回）
 //   → Layer 1：今日市场快照 6 卡（三大指数 + 涨跌家数 + 成交额 + 涨停/跌停，顺序锁死）
 //   → Layer 2：市场宽度（MA5/MA20/MA50/EW 收为 chart header KPI chips + 一张统一 chart）
 //   → Layer 3：250 日市场轨迹 2×2 面板（指数相对走势 / 涨跌家数 / 成交额 / 涨停跌停）
@@ -13,7 +13,7 @@
 //   - legend hide/show 硬合同由 MultiLineChart 保证（toggle 只 applyOptions({visible})）；
 //   - ranking 各自独立 loading/error/empty，单个失败不影响主图；
 //   - 任一指标 unavailable → 显示「—」，绝不伪造 0 / 0% / 0 家。
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useMarketDashboard, useMarketRankings } from '@/hooks/useMarketDashboardApi'
 import ReviewTopBar from './ReviewTopBar'
 import DashboardState, { type DashboardStateKind } from './DashboardState'
@@ -24,13 +24,10 @@ import MarketHistoryCharts from './MarketHistoryCharts'
 import {
   MARKET_CARD_LABELS,
   MARKET_CARD_ORDER,
-  MARKET_OVERVIEW_DEFAULT_RANGE,
-  MARKET_OVERVIEW_RANGES,
   MARKET_OVERVIEW_SERIES,
   MARKET_RANKING_SUMMARIES,
   RANKING_SUMMARY_LIMIT,
   RANKING_SUMMARY_LOOKBACK,
-  type MarketOverviewRange,
 } from './marketOverviewConfig'
 import { BREADTH_REFERENCE_LINES } from './chartTheme'
 import { formatBreadth, formatEwIndex, classifyDashboardError } from './dashboardLogic'
@@ -49,9 +46,8 @@ function summaryState(query: { isLoading: boolean; isError: boolean; error: unkn
 }
 
 export default function MarketDashboardPage() {
-  // 时间范围：直接换 server 窗口（禁止先取 250 再前端 slice）。
-  const [range, setRange] = useState<MarketOverviewRange>(MARKET_OVERVIEW_DEFAULT_RANGE)
-  const query = useMarketDashboard(range)
+  // [PANJI-MARKET-OVERVIEW] 固定 250 日窗口（server 返回），不再提供窗口切换。
+  const query = useMarketDashboard(250)
 
   const industryRanking = useMarketRankings(
     INDUSTRY_SUMMARY.scopeType,
@@ -78,21 +74,6 @@ export default function MarketDashboardPage() {
   return (
     <div className={styles.explorerPage}>
       <ReviewTopBar projectionDate={query.data?.projection_trade_date} />
-
-      <div className={styles.rangeSelector} role="group" aria-label="时间范围">
-        <span className={styles.rangeLabel}>时间范围：</span>
-        {MARKET_OVERVIEW_RANGES.map((days) => (
-          <button
-            key={days}
-            type="button"
-            className={days === range ? `${styles.rangeBtn} ${styles.rangeBtnActive}` : styles.rangeBtn}
-            aria-pressed={days === range}
-            onClick={() => setRange(days)}
-          >
-            {days}
-          </button>
-        ))}
-      </div>
 
       {state && (
         <DashboardState

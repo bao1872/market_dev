@@ -14,8 +14,6 @@ import {
   INDUSTRY_DEFAULT_HIERARCHY_LEVEL,
   MARKET_CARD_LABELS,
   MARKET_CARD_ORDER,
-  MARKET_OVERVIEW_DEFAULT_RANGE,
-  MARKET_OVERVIEW_RANGES,
   MARKET_OVERVIEW_SERIES,
   MARKET_RANKING_SUMMARIES,
   RANKING_SUMMARY_LIMIT,
@@ -57,15 +55,14 @@ function toLineSeriesSpecs(): LineSeriesSpec[] {
 }
 
 // ===========================================================================
-// A–D. 范围 / KPI 卡片
+// A–D. 固定窗口 / KPI 卡片
 // ===========================================================================
-test('A. 时间范围精确为 20 / 60 / 120 / 250', () => {
-  assert.deepEqual([...MARKET_OVERVIEW_RANGES], [20, 60, 120, 250])
-})
-
-test('B. 默认范围为 250 且在范围内', () => {
-  assert.equal(MARKET_OVERVIEW_DEFAULT_RANGE, 250)
-  assert.ok((MARKET_OVERVIEW_RANGES as readonly number[]).includes(MARKET_OVERVIEW_DEFAULT_RANGE))
+test('A. 大盘页固定 250 日窗口，无时间范围切换', () => {
+  // [PANJI-MARKET-OVERVIEW] Phase B：移除 20/60/120/250 切换，固定 250 日。
+  assert.ok(!PAGE_SOURCE.includes('rangeSelector'), '不得保留时间范围 selector')
+  // 仅校验原 selector 文案「时间范围：」（全角冒号）；空态提示「当前时间范围暂无数据」属正常文案。
+  assert.ok(!PAGE_SOURCE.includes('时间范围：'), '不得保留「时间范围：」切换文案')
+  assert.match(PAGE_SOURCE, /useMarketDashboard\(250\)/, '必须固定请求 250 日')
 })
 
 test('C. KPI 卡片顺序锁死 = MA5 / MA20 / MA50 / EW', () => {
