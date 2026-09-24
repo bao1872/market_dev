@@ -195,7 +195,7 @@ async def test_product_nodes_first_pyramid_selects_latest_canonical_run(db_sessi
     fp = next(n for n in nodes if n["key"] == "first_pyramid")
     assert fp["run_id"] == str(newer.id)
     assert fp["run_id"] != str(older.id)
-    assert fp["trade_date"] == "2099-12-31"
+    assert fp["trade_date"] == _FUTURE
     assert fp["publication_status"] == "not_applicable"
 
 
