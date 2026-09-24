@@ -973,6 +973,7 @@ async def get_market_stocks(
     # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT canonical CoreRun 单一身份。
     # 一次请求内的 fp_filter / fp_sort / count / display 必须消费同一个 CoreRun。
     #
+    # CURRENT authority = 最新 canonical after-close CoreRun（resolve_current_core_run 单一 owner）。
     # 禁止再以 factor_publications(kind=stock_core) 为 CURRENT authority：
     # 该 pointer 自 2026-08-27 起不再推进（生产停在 2026-08-26 / ca5c3dd2），
     # 会导致 filter/sort 用旧 run、而 display 用每股最新 snapshot 的分裂

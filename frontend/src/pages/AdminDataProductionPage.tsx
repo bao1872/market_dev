@@ -208,7 +208,9 @@ export default function AdminDataProductionPage() {
               <div className="card-title">
                 {businessNode ? businessNode.label : (CHAIN_KEY_TO_LABEL[businessChainKey ?? ''] ?? '数据产品')}
               </div>
-              <div className="card-sub">生产状态 / 质量门禁 / 正式发布</div>
+              <div className="card-sub">
+                {activeTab === 'first-pyramid' ? '生产状态 / Core 就绪' : '生产状态 / 质量门禁 / 正式发布'}
+              </div>
             </div>
           </div>
           <div className="card-body">
@@ -246,18 +248,20 @@ export default function AdminDataProductionPage() {
                           : '不适用'}
                   </b>
                 </div>
-                <div className="toggle-row">
-                  <span>正式发布</span>
-                  <b className="num">
-                    {businessNode.publication_status === 'published'
-                      ? '已发布'
-                      : businessNode.publication_status === 'failed'
-                        ? '发布失败'
-                        : businessNode.publication_status === 'pending'
-                          ? '待发布'
-                          : '不适用'}
-                  </b>
-                </div>
+                {businessNode.publication_status !== 'not_applicable' && (
+                  <div className="toggle-row">
+                    <span>正式发布</span>
+                    <b className="num">
+                      {businessNode.publication_status === 'published'
+                        ? '已发布'
+                        : businessNode.publication_status === 'failed'
+                          ? '发布失败'
+                          : businessNode.publication_status === 'pending'
+                            ? '待发布'
+                            : '不适用'}
+                    </b>
+                  </div>
+                )}
                 {businessNode.detail && (
                   <div className="toggle-row">
                     <span>详情</span>

@@ -210,22 +210,22 @@ async def _resolve_current_core_run(
     session: AsyncSession,
     as_of: date | None = None,
 ) -> StockFeatureSnapshotRun | None:
-    """解析 CURRENT 第一金字塔的 canonical CoreRun（formal Review 血统）。
+    """解析 CURRENT 第一金字塔的 canonical CoreRun（canonical after-close CoreRun）。
 
-    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01 consumer migration]
-    AfterClose 自 ``60c5d267``（2026-08-27 05:28 +0800）起不再推进
+    [CURRENT-CORE-OWNER-REGRESSION-01] AfterClose 自 2026-08-27 起不再推进
     ``stock_core`` FactorPublication，该 pointer 只保留 **LEGACY compatibility**。
     ``stock_context`` 若继续以其为 CURRENT authority，第一金字塔会被永久 pin 在
     最后一次旧架构发布日（生产证据：2026-08-26 / run ``ca5c3dd2``）。
 
-    解析逻辑由 service-level 单一 owner 承担（禁止在本模块复制第二套）：
+    CURRENT 唯一事实源 = 最新 after_close + full + succeeded + 当前 schema + finished
+    的 ``StockFeatureSnapshotRun``，由 service-level 单一 owner 承担（禁止在本模块复制第二套）：
     ``app.services.current_core_run_service.resolve_current_core_run``。
     ``market_stocks_service`` 调用同一 owner，保证 /first-pyramid 与
     /market/stocks 的 filter/sort/count/display 消费同一个 CoreRun。
 
     Args:
         session: 异步 DB 会话
-        as_of: 截止日期（point-in-time，含当天）。None 表示取最新正式 Review。
+        as_of: 截止日期（point-in-time，含当天）。None 表示取最新合法 canonical CoreRun。
 
     Returns:
         通过全部 lineage 校验的 ``StockFeatureSnapshotRun``；
@@ -762,11 +762,11 @@ async def get_first_pyramid(
     不再生产，因此这里不再读 stock_chip_consensus_snapshots，chipConsensus 恒为 null、
     chipStatus 恒定 retired / CHIP_PIPELINE_RETIRED。
 
-    [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT Core run 解析走 formal Review
-    血统（见 ``_resolve_current_core_run``）：
-      formal MarketReview publication → MarketReviewRun.source_core_run_id → CoreRun
+    [CURRENT-CORE-OWNER-REGRESSION-01] CURRENT Core run 解析走 canonical after-close CoreRun
+    （唯一 owner 见 ``_resolve_current_core_run`` / ``current_core_run_service``）：
+      最新 after_close + full + succeeded + 当前 schema + finished 的 StockFeatureSnapshotRun
     ``stock_core`` FactorPublication 只是 LEGACY compatibility，不再是 CURRENT authority。
-    血统任一环校验失败 → fail-closed 返回 None，落到下方 bars 实时计算分支。
+    解析失败 → fail-closed 返回 None，落到下方 bars 实时计算分支。
 
     权限：require_active_subscription（admin 豁免，member 需有效订阅）。
     数据：只读，从最新已发布 snapshot 或实时 bars 计算，不写库。
@@ -785,8 +785,8 @@ async def get_first_pyramid(
     instrument = await _get_instrument_by_symbol(db, symbol)
 
     # 优先从已发布 snapshot 读取（如果 summary_payload 含 first_pyramid）
-    # [AFTERCLOSE-DIRECT-CORE-TO-REVIEW-01] CURRENT 第一金字塔走 formal Review 血统：
-    #   formal Review → source_core_run_id → CoreRun → exact snapshot。
+    # [CURRENT-CORE-OWNER-REGRESSION-01] CURRENT 第一金字塔走 canonical after-close CoreRun：
+    #   resolve_current_core_run → 最新 after_close full succeeded CoreRun → exact snapshot。
     # 不再使用 _find_latest_succeeded_run / _find_run_by_trade_date——两者以
     # stock_core FactorPublication 为 authority，该 pointer 自 2026-08-27 起不再推进，
     # 会把第一金字塔永久 pin 在 2026-08-26。

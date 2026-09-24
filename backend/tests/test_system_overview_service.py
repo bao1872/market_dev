@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import date, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 from zoneinfo import ZoneInfo
 
@@ -1518,14 +1518,19 @@ async def test_summary_publish_failed_is_resumable() -> None:
 
 
 async def test_product_nodes_empty_db_returns_5_nodes() -> None:
-    """空库场景（所有 db.scalar 返回 None）→ 产出完整 5 节点且字段齐全。"""
+    """空库场景（所有 db.scalar / db.execute 返回 None）→ 产出完整 5 节点且字段齐全。"""
     from unittest.mock import AsyncMock
+
+    class _NoneResult:
+        def scalar_one_or_none(self):
+            return None
 
     db = AsyncMock()
     db.scalar = AsyncMock(return_value=None)
+    db.execute = AsyncMock(return_value=_NoneResult())
     from datetime import date as _date
 
-    nodes = await _compute_product_nodes(db, _date(2026, 8, 4))
+    nodes = await _compute_product_nodes(db, _date(2026, 8,4))
     assert len(nodes) == 5, f"应 5 节点, got {len(nodes)}"
     assert [n["key"] for n in nodes] == ["bars", "first_pyramid", "review", "auction", "publish"]
     # 每个节点都应含审查要求的展示字段
@@ -1568,15 +1573,21 @@ def test_product_nodes_review_source_reads_market_dashboard_projection() -> None
     assert "run_id=None" in src, "复盘节点不得返回伪造 run_id"
 
 
-def test_product_nodes_uses_stock_core_publication_for_pyramid() -> None:
-    """第一金字塔节点必须用 FactorPublication(stock_core) 发布指针，不能用历史回补 run。"""
+def test_product_nodes_uses_canonical_core_run_for_pyramid() -> None:
+    """第一金字塔节点必须跟随最新 canonical after-close CoreRun（resolve_current_core_run 单一 owner），
+    不得再查询 legacy FactorPublication(stock_core) 发布指针，也不得用历史回补 run。"""
     from pathlib import Path
 
     path = Path(__file__).resolve().parent.parent / "app/services/system_overview_service.py"
     src = path.read_text(encoding="utf-8")
-    assert 'FactorPublication.publication_kind == "stock_core"' in src, "必须用 stock_core 发布指针"
+    assert "from app.services.current_core_run_service import resolve_current_core_run" in src, (
+        "第一金字塔必须调用 current_core_run_service.resolve_current_core_run"
+    )
+    assert 'FactorPublication.publication_kind == "stock_core"' not in src, (
+        "第一金字塔不得再查询 stock_core 发布指针"
+    )
     assert "FirstPyramidHistoryRun" not in src, "不得再用历史回补 run 作为今日生产状态"
-    assert "fp_pub.data_run_id" in src, "必须暴露发布指针指向的 data_run_id"
+    assert "str(core_run.id)" in src, "必须暴露 canonical CoreRun 的 id"
 
 
 def test_product_nodes_limits_selector_publish() -> None:
@@ -1724,64 +1735,74 @@ async def test_product_nodes_review_pending_without_projection(db_session) -> No
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_first_pyramid_reads_stock_core(db_session) -> None:
-    """第一金字塔节点：必须读取 stock_core 发布指针（覆盖率合格 → ok/passed）。"""
+async def test_product_nodes_first_pyramid_reads_canonical_core(db_session) -> None:
+    """第一金字塔节点：必须跟随最新 canonical after-close CoreRun（ok/passed/not_applicable）。"""
     from datetime import date as _date
+    from datetime import datetime
 
-    from app.models.factor_publication import FactorPublication
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+    from app.services.feature_snapshot_service import _SCHEMA_VERSION
 
     d = _date(2026, 8, 4)
-    db_session.add(FactorPublication(
-        scope_type="market",
-        scope_key="A",
+    run = StockFeatureSnapshotRun(
         trade_date=d,
-        publication_kind="stock_core",
-        algorithm_version="v1",
-        data_run_id=uuid.uuid4(),
-        coverage_ratio=0.99,
-    ))
+        run_type="after_close",
+        status="succeeded",
+        schema_version=_SCHEMA_VERSION,
+        finished_at=datetime(2026, 8, 4, 15, 0, tzinfo=UTC),
+        metadata_={"scope": "full"},
+    )
+    db_session.add(run)
     await db_session.flush()
     nodes = await _compute_product_nodes(db_session, d)
     fp = next(n for n in nodes if n["key"] == "first_pyramid")
     assert fp["status"] == "ok"
     assert fp["quality_gate"] == "passed"
-    assert fp["publication_status"] == "published"
+    assert fp["publication_status"] == "not_applicable"
+    assert fp["run_id"] == str(run.id)
+    assert fp["trade_date"] == str(d)
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_first_pyramid_low_coverage_not_ok(db_session) -> None:
-    """第一金字塔节点：stock_core 覆盖率 <0.98 → attention/failed，不标 ok。"""
+async def test_product_nodes_first_pyramid_no_coverage_gate(db_session) -> None:
+    """第一金字塔节点：canonical CoreRun 不论覆盖率一律 ok/passed，
+    publication_status 为 not_applicable（不再有覆盖率门禁 / 不再 published）。"""
     from datetime import date as _date
+    from datetime import datetime
 
-    from app.models.factor_publication import FactorPublication
+    from app.models.stock_feature_snapshot_run import StockFeatureSnapshotRun
+    from app.services.feature_snapshot_service import _SCHEMA_VERSION
 
     d = _date(2026, 8, 4)
-    db_session.add(FactorPublication(
-        scope_type="market",
-        scope_key="A",
+    run = StockFeatureSnapshotRun(
         trade_date=d,
-        publication_kind="stock_core",
-        algorithm_version="v1",
-        data_run_id=uuid.uuid4(),
-        coverage_ratio=0.9,
-    ))
+        run_type="after_close",
+        status="succeeded",
+        schema_version=_SCHEMA_VERSION,
+        finished_at=datetime(2026, 8, 4, 15, 0, tzinfo=UTC),
+        metadata_={"scope": "full"},
+        snapshot_count=100,
+        expected_count=200,  # 覆盖率仅 0.5，但新节点不再有覆盖率门禁
+    )
+    db_session.add(run)
     await db_session.flush()
     nodes = await _compute_product_nodes(db_session, d)
     fp = next(n for n in nodes if n["key"] == "first_pyramid")
-    assert fp["status"] != "ok"
-    assert fp["quality_gate"] == "failed"
+    assert fp["status"] == "ok"
+    assert fp["quality_gate"] == "passed"
+    assert fp["publication_status"] == "not_applicable"
 
 
 @pytest.mark.asyncio
-async def test_product_nodes_no_stock_core_pointer_is_pending(db_session) -> None:
-    """第一金字塔节点：无 stock_core 发布指针 → pending，不误读历史回补 run 为今日状态。"""
+async def test_product_nodes_no_canonical_core_is_pending(db_session) -> None:
+    """第一金字塔节点：无 canonical after-close CoreRun → pending，publication_status=not_applicable。"""
     from datetime import date as _date
 
     d = _date(2026, 8, 4)
     nodes = await _compute_product_nodes(db_session, d)
     fp = next(n for n in nodes if n["key"] == "first_pyramid")
     assert fp["status"] == "pending"
-    assert fp["publication_status"] == "pending"
+    assert fp["publication_status"] == "not_applicable"
 
 
 @pytest.mark.asyncio

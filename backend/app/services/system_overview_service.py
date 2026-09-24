@@ -1423,42 +1423,43 @@ async def _compute_product_nodes(
             ).model_dump()
         )
 
-    # ===== 2. 第一金字塔（FactorPublication stock_core 发布指针 = 正式生产事实源）=====
+    # ===== 2. 第一金字塔（CURRENT authority = 最新 canonical after-close CoreRun）=====
+    # legacy FactorPublication(stock_core) 仅历史兼容，不再决定 CURRENT 身份。
     # 不能读 first_pyramid_history_runs（历史回补任务，无 trade_date，不代表今日生产状态）。
-    # 正式状态应从 stock_core 发布指针获取（含 trade_date/coverage_ratio/data_run_id/published_at）。
-    from app.models.factor_publication import FactorPublication
-    fp_pub = await db.scalar(
-        select(FactorPublication)
-        .where(FactorPublication.publication_kind == "stock_core")
-        .order_by(FactorPublication.published_at.desc())
-        .limit(1)
-    )
-    if fp_pub is None:
+    from app.services.current_core_run_service import resolve_current_core_run
+
+    core_run = await resolve_current_core_run(db, as_of=business_date)
+    if core_run is None:
         nodes.append(
             ProductionChainNode(
                 key="first_pyramid", label="第一金字塔", status="pending",
-                detail="尚无 stock_core 正式发布", trade_date=None,
-                publication_status="pending",
-                blocking_reason="无 stock_core 发布指针", recommended_action="等待第一金字塔计算并发布 stock_core",
+                detail="尚无可用第一金字塔 CoreRun", trade_date=None,
+                run_id=None, quality_gate="pending",
+                publication_status="not_applicable",
+                blocking_reason="无 canonical full after-close CoreRun",
+                recommended_action="检查盘后 Core 计算状态",
             ).model_dump()
         )
     else:
-        fp_cov_ok = fp_pub.coverage_ratio is not None and fp_pub.coverage_ratio >= 0.98
+        if (
+            core_run.snapshot_count is not None
+            and core_run.expected_count is not None
+            and core_run.expected_count > 0
+        ):
+            detail = (
+                f"{core_run.trade_date} Core 完成，快照 "
+                f"{core_run.snapshot_count}/{core_run.expected_count}"
+            )
+        else:
+            detail = f"{core_run.trade_date} Core 计算完成"
         nodes.append(
             ProductionChainNode(
-                key="first_pyramid", label="第一金字塔",
-                status="ok" if fp_cov_ok else "attention",
-                detail=(
-                    f"{fp_pub.trade_date} 覆盖率 {(fp_pub.coverage_ratio * 100):.0f}%"
-                    if fp_pub.coverage_ratio is not None
-                    else f"{fp_pub.trade_date} 已发布（覆盖率未知）"
-                ),
-                trade_date=fp_pub.trade_date,
-                run_id=str(fp_pub.data_run_id),
-                quality_gate="passed" if fp_cov_ok else "failed",
-                publication_status="published",
-                blocking_reason=None if fp_cov_ok else "stock_core 覆盖率未达 98%",
-                recommended_action=None if fp_cov_ok else "检查第一金字塔计算覆盖并重新发布",
+                key="first_pyramid", label="第一金字塔", status="ok",
+                detail=detail, trade_date=core_run.trade_date,
+                run_id=str(core_run.id),
+                quality_gate="passed",
+                publication_status="not_applicable",
+                blocking_reason=None, recommended_action=None,
             ).model_dump()
         )
 
