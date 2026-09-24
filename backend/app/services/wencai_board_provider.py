@@ -1,7 +1,11 @@
 """问财板块数据源 - 同花顺概念/行业分类唯一数据源（PRD §7.5 重构）。
 
-固定查询 "同花顺概念，行业分类"，通过 pywencai 拉取全量 A 股的概念和行业归属。
-复用 ref/wencai_concept_industry_export.py 已验证的 Referer 头补丁 + 重试逻辑。
+固定查询 "同花顺概念，行业分类"，拉取全量 A 股的概念和行业归属。
+
+[WENCAI-STREAM-QUERY-MIGRATION-01] 传输由 `wencai_client` 统一负责：
+先前的 pywencai 库、以及后来的 get-robot-data/getDataList 两跳 HTTP 协议均已
+失效（旧端点 http/https 一律返回 HTML 403）。当前走浏览器实测的
+stream-query 单跳 SSE 协议；本模块只消费 `list[dict]`，不理解 SSE。
 
 设计要点：
 1. 同步调用必须 asyncio.to_thread 包装，不得阻塞事件循环
@@ -15,7 +19,7 @@
 
 数据流：
 wencai_board_provider.fetch_board_snapshot()
-  → pywencai.get(query="同花顺概念，行业分类", loop=True, sleep=2)
+  → wencai_client.fetch_query_table("同花顺概念，行业分类") → list[dict]
   → 选择包含必需字段且行数最大的主表
   → 逐行规范化 → BoardSnapshot（boards + memberships）
   → 供 board_sync_service.sync_boards 原子切换
@@ -619,11 +623,13 @@ def _fetch_wencai_sync() -> Any:
     最多 3 次有限重试，每次间隔 RETRY_WAIT_SECONDS 秒。
     不记录 Cookie 或完整原始响应。
 
-    [2026-08-17 修正] `pywencai` 第三方库已失效（封装解析不了问财新版
-    `get-robot-data` 响应，即使传入有效 cookie 也返回 None）。改为走统一
-    底层 HTTP 客户端 `wencai_client.fetch_query_table`，返回 list[dict]，
-    再包装为单 DataFrame 供下游 `_select_primary_dataframe` 消费
-    （规范化 / 门禁逻辑全部不变）。
+    传输演进（均为历史背景，当前以 wencai_client 为准）：
+    - `pywencai` 第三方库已失效（封装解析不了问财新版响应）。
+    - 其后直连的 `get-robot-data` → `getDataList` 两跳协议亦被问财下线
+      （[WENCAI-STREAM-QUERY-MIGRATION-01]：http/https 均 HTML 403）。
+    - 现在统一走 `wencai_client.fetch_query_table`（stream-query 单跳 SSE），
+      返回完整表 list[dict]，再包装为单 DataFrame 供
+      `_select_primary_dataframe` 消费（规范化 / 门禁逻辑全部不变）。
 
     Returns:
         含板块主表的 dict（与历史 pywencai 嵌套结构兼容，供 _collect_dataframes 提取）

@@ -1,10 +1,20 @@
 """问财（同花顺 iwencai）统一 HTTP 客户端。
 
 背景：
-- `pywencai` 第三方库已失效（封装解析不了问财新版 `get-robot-data` 响应结构，
-  即使传入有效 cookie 也返回 None + 验证码 401）。
-- 本项目改为直接走问财底层 HTTP 接口，绕过失效库。本模块是板块同步与
-  竞价回补共用的统一客户端。
+- `pywencai` 第三方库已失效（封装解析不了问财新版响应结构，即使传入有效 cookie
+  也返回 None + 验证码 401）。
+- [WENCAI-STREAM-QUERY-MIGRATION-01] 旧的两跳协议
+  `get-robot-data` → `getDataList` 已被问财下线：实测 http/https **均返回
+  HTML 403 Forbidden**（与 cookie 有效性无关，换 https / 补 Referer / 补
+  hexin-v 都不能恢复）。
+  现改用浏览器实测可用的**单跳 SSE 协议**：
+      POST https://www.iwencai.com/gateway/aime/stream-query
+      → text/event-stream → `other/openAnswer` 帧内直接含全表 datas
+- 调用方（`wencai_board_provider`）**不需要理解 SSE**：本模块继续以
+  `list[dict]` 暴露结果（`fetch_query_table`），业务层零改动。
+
+调用点（2026-09-24 实核）：`fetch_query_table` 目前唯一生产调用方是
+`wencai_board_provider._fetch_wencai_sync`；竞价/回补相关代码已不再引用本模块。
 
 Cookie 管理（用户规则 2026-08-17）：
 - 问财 cookie 有有效期（sess_tk 约 7 天、v 约 1 年）。过期后用户会从浏览器
@@ -13,10 +23,11 @@ Cookie 管理（用户规则 2026-08-17）：
   表格复制 / `name=value;...` 串），标准化后写入 **JSON 文件** `wencai_cookie.json`
   （已被 .gitignore 忽略，不进版本库）。
 - 设计意图：cookie 不进 `.env`（`.env` 不会进容器镜像，且 compose 不注入），
-  改为独立 JSON 文件。本地放 `backend/wencai_cookie.json`；服务器通过
-  `docker cp` 复制到容器内 `/app/wencai_cookie.json`（应用 cwd 为 /app）。
-  更新 cookie 时只需把本地 JSON 文件复制到服务器容器即可，无需改 market.env
-  或重启整个 deploy。
+  改为独立 JSON 文件，本地放 `backend/wencai_cookie.json`（已 gitignore）。
+- [BOARD-LOCAL-OWNERSHIP-01] **板块/概念生产同步的 Wencai cookie 仅由本地 Mac
+  使用；生产服务器不持有该 cookie。** 生产侧只接收本地构造好的规范化快照
+  （见 `board_snapshot_transfer` / `cli/board_snapshot_import`），不再存在
+  "把 cookie 复制到服务器容器" 的流程。
 - 运行时统一从 `load_cookie()` 读取，优先级：
   env `WENCAI_COOKIE` → 本地 `backend/wencai_cookie.json`
   → 容器内 `/app/wencai_cookie.json` → 兼容旧 `backend/.env` 的 `WENCAI_COOKIE`。
@@ -32,9 +43,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
-import re
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -50,17 +58,48 @@ _COOKIE_JSON_PATH_IN_CONTAINER = Path("/app/wencai_cookie.json")
 # 兼容旧的 backend/.env 写法（仅回退读取，不再写入）
 _ENV_PATH = Path(__file__).resolve().parent.parent.parent / ".env"
 
-_ROBOT_URL = "http://www.iwencai.com/customized/chart/get-robot-data"
-_DATALIST_URL = "http://www.iwencai.com/gateway/urp/v7/landing/getDataList"
+# ── [WENCAI-STREAM-QUERY-MIGRATION-01] 冻结的外部协议常量（浏览器实测）────────
+# 这些**不是**业务参数，而是问财当前协议合同；协议变化时只改本文件这一处 owner。
+# 依据：Chrome "Copy as cURL" 原样重放 + 受控剥离实测（2026-09-24）。
+# 不进 .env / config.py / DB / admin 设置。
+_STREAM_QUERY_URL = "https://www.iwencai.com/gateway/aime/stream-query"
+_STREAM_QUERY_SOURCE = "ths_iwencai_pc_xuangu"
+_STREAM_QUERY_DIALOG_MODEL = "CUSTOMER_AGENT"
+_STREAM_QUERY_VERSION = "3.4.1"
+_STREAM_QUERY_AGENT_ID = "MaSzyUwyyl"
+_STREAM_QUERY_TOOL_ID = "FinQuery"
+_STREAM_QUERY_DOMAIN = "stock"
+_STREAM_QUERY_DEVICE_TYPE = "android"
+
+#: 单次全表请求的 perpage。浏览器实测 perpage=6000 一次取回 5578 行（1.64MB）。
+#: 这不是问财「永久 API 上限」，只是**当前经过真实验证的最大安全取值**：
+#: row_count > 本值，或 len(datas) != row_count，必须 fail closed（禁止静默截断，
+#: 也禁止自动猜新的分页协议）。
+_STREAM_QUERY_MAX_ROWS = 6000
+
+#: 全表响应实测约 1.6MB，超时需明显大于旧两跳协议的 30s。
+_STREAM_QUERY_TIMEOUT_SECONDS = 120
 
 _HEADERS_BASE = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36"
     ),
-    "Referer": "http://www.iwencai.com/",
+    # [MIGRATION-01] Referer 已删除：实测新端点不依赖它（旧 Referer 补丁是
+    # get-robot-data 时代的 WAF 绕法，现已无意义）。缺失 User-Agent 才会 403。
     "Content-Type": "application/json",
 }
+
+
+class WencaiTransportError(RuntimeError):
+    """传输层失败（非 200 / 应用层 access 拒绝 / SSE 结构不可用）。"""
+
+
+class WencaiIncompleteResultError(RuntimeError):
+    """结果不完整：row_count 超出已验证的单次容量，或 len(datas) != row_count。
+
+    必须 fail closed —— 禁止静默返回部分行（部分行会被下游当作完整表写入 PIT）。
+    """
 
 # 每次「问句之间」的随机间隔（秒）：30–60 秒（用户硬性限流规则，回补逐日/板块同步均适用）
 QUERY_INTERVAL_RANGE = (30.0, 60.0)
@@ -201,78 +240,140 @@ def save_cookie_to_json(cookie_str: str, updated_by: str = "user-paste") -> Path
     return _COOKIE_JSON_PATH
 
 
-def _get_footer_url(cookie: str, query: str) -> tuple[str, int]:
-    """第一步：请求 get-robot-data，从响应中提取表格数据 URL 与总行数。
+def _build_stream_query_payload(query: str) -> dict[str, Any]:
+    """构造 stream-query 请求体。
 
-    Returns:
-        (getDataList 完整 URL, row_count)
+    仅 `question` 为动态值；其余字段是浏览器实测的**冻结协议结构**，
+    未经新的证据不得精简、重排或改名。`perpage` 恒为
+    `_STREAM_QUERY_MAX_ROWS`（单次全表请求，不再分页）。
+    """
+    return {
+        "question": query,
+        "default_fallback": False,
+        "input_type": "click",
+        "entity_info": {
+            "device_type": _STREAM_QUERY_DEVICE_TYPE,
+            "comefrom": None,
+        },
+        "source": _STREAM_QUERY_SOURCE,
+        "dialog_model": _STREAM_QUERY_DIALOG_MODEL,
+        "version": _STREAM_QUERY_VERSION,
+        "agent_tools": [
+            {
+                "tool_id": _STREAM_QUERY_TOOL_ID,
+                "tool_param": {
+                    "domain": _STREAM_QUERY_DOMAIN,
+                    "perpage": _STREAM_QUERY_MAX_ROWS,
+                },
+            }
+        ],
+        "events": [
+            {
+                "event_type": "user_input",
+                "event_name": "normal_agent",
+                "content": {},
+            }
+        ],
+        "add_info": {},
+        "agent_id": _STREAM_QUERY_AGENT_ID,
+        "agent_name": "",
+    }
+
+
+def _parse_stream_query_frames(raw_text: str) -> tuple[list[dict], int]:
+    """解析 SSE `data:` 帧，提取全表 `datas` 与权威 `row_count`。
+
+    只处理 `data:` JSON 帧（浏览器实测帧均为该形态）。**不使用**
+    `has_more_data` 判定完整性 —— 实测整表返回时它仍为 true。
 
     Raises:
-        RuntimeError: 问财返回无效响应（cookie 过期 / 被限流 / 问句无法解析）
+        WencaiTransportError: 应用层 access 拒绝 / 缺 openAnswer / 结构非法。
     """
-    payload = {
-        "add_info": '{"urp":{"scene":1,"company":1,"business":1},'
-                    '"contentType":"json","searchInfo":true}',
-        "perpage": "10",
-        "page": 1,
-        "source": "Ths_iwencai_Xuangu",
-        "log_info": '{"input_type":"click"}',
-        "version": "2.0",
-        "secondary_intent": "stock",
-        "question": query,
+    frames: list[dict[str, Any]] = []
+    for line in (raw_text or "").splitlines():
+        if not line.startswith("data:"):
+            continue
+        body = line[len("data:"):].strip()
+        if not body:
+            continue
+        try:
+            frame = json.loads(body)
+        except json.JSONDecodeError as exc:
+            # 浏览器证据中不存在非 JSON 的 data: 控制帧 → fail closed（不静默忽略）
+            raise WencaiTransportError(
+                f"stream-query SSE data 帧非法（fail closed）: {exc}"
+            ) from exc
+        if isinstance(frame, dict):
+            frames.append(frame)
+
+    # 应用层拒绝优先识别：可读原因远胜旧协议的空洞 HTTP 403
+    for frame in frames:
+        if frame.get("answer_path") == "access/forbidden":
+            extra = frame.get("extra") or {}
+            raise WencaiTransportError(
+                "stream-query 应用层拒绝: answer_path=access/forbidden "
+                f"message={extra.get('message')!r}"
+            )
+
+    for frame in frames:
+        if frame.get("answer_path") != "other/openAnswer":
+            continue
+        section = frame.get("section") or {}
+        components = ((section.get("result_page") or {}).get("components")) or []
+        if not components:
+            raise WencaiTransportError("stream-query openAnswer 缺少 components")
+        data = components[0].get("data") or {}
+        datas = data.get("datas")
+        row_count = ((data.get("meta") or {}).get("extra") or {}).get("row_count")
+
+        if not isinstance(datas, list):
+            raise WencaiTransportError(
+                f"stream-query datas 不是列表（fail closed）: {type(datas).__name__}"
+            )
+        for idx, item in enumerate(datas):
+            if not isinstance(item, dict):
+                raise WencaiTransportError(
+                    f"stream-query datas[{idx}] 不是 dict（fail closed）: "
+                    f"{type(item).__name__}"
+                )
+        if not isinstance(row_count, int) or isinstance(row_count, bool):
+            raise WencaiTransportError(
+                f"stream-query row_count 缺失或非整数（fail closed）: {row_count!r}"
+            )
+        return datas, row_count
+
+    raise WencaiTransportError(
+        "stream-query 未返回 other/openAnswer 帧（fail closed）"
+    )
+
+
+def _stream_query(cookie: str, query: str) -> tuple[list[dict], int]:
+    """执行一次 stream-query（单跳 SSE），返回 (全表行, 权威 row_count)。
+
+    必需请求头经浏览器剥离实测确定：User-Agent + Cookie + Content-Type +
+    Accept: text/event-stream。不发送 Referer / Origin / X-Source / hexin-v
+    （实测均非必需；且 hexin-v 不单独派生）。
+
+    Raises:
+        WencaiTransportError: HTTP 非 200 / 应用层拒绝 / SSE 结构非法。
+    """
+    headers = {
+        **_HEADERS_BASE,
+        "Accept": "text/event-stream",
+        "Cookie": cookie,
     }
-    headers = {**_HEADERS_BASE, "Cookie": cookie}
-    r = requests.post(_ROBOT_URL, json=payload, headers=headers, timeout=30)
+    r = requests.post(
+        _STREAM_QUERY_URL,
+        json=_build_stream_query_payload(query),
+        headers=headers,
+        timeout=_STREAM_QUERY_TIMEOUT_SECONDS,
+    )
     if r.status_code != 200:
-        raise RuntimeError(f"get-robot-data HTTP {r.status_code}")
-    j = r.json()
-    try:
-        content = j["data"]["answer"][0]["txt"][0]["content"]
-        if isinstance(content, str):
-            content = __import__("json").loads(content)
-        comps = content.get("components", [])
-        if not comps:
-            raise KeyError("no components")
-        comp = comps[0]
-        footer = (
-            comp.get("config", {})
-            .get("other_info", {})
-            .get("footer_info", {})
-            .get("url")
+        # 不记录响应正文（可能含风控/敏感内容）
+        raise WencaiTransportError(
+            f"stream-query HTTP {r.status_code}（transport 失败）"
         )
-        row_count = (
-            comp.get("data", {})
-            .get("meta", {})
-            .get("extra", {})
-            .get("row_count", 0)
-        )
-        if not footer:
-            raise KeyError("no footer_url")
-        return footer, int(row_count or 0)
-    except (KeyError, IndexError, TypeError) as e:
-        # cookie 过期时问财返回验证码/空 answer，这里统一报错
-        raise RuntimeError(
-            f"问财响应缺少表格数据（cookie 可能过期或被限流）: {e}"
-        ) from e
-
-
-def _fetch_page(footer_url: str, cookie: str, page: int, perpage: int) -> list[dict]:
-    """拉取单页表格数据（datas 列表）。"""
-    # 问财返回相对路径，补主机前缀
-    if footer_url.startswith("/"):
-        footer_url = "http://www.iwencai.com" + footer_url
-    sep = "&" if "?" in footer_url else "?"
-    url = f"{footer_url}{sep}page={page}&perpage={perpage}"
-    headers = {**_HEADERS_BASE, "Cookie": cookie}
-    r = requests.get(url, headers=headers, timeout=30)
-    if r.status_code != 200:
-        raise RuntimeError(f"getDataList HTTP {r.status_code} (page={page})")
-    j = r.json()
-    try:
-        data = j["answer"]["components"][0]["data"]
-        return data.get("datas") or []
-    except (KeyError, IndexError, TypeError) as e:
-        raise RuntimeError(f"getDataList 响应解析失败: {e}") from e
+    return _parse_stream_query_frames(r.text)
 
 
 def fetch_query_table(
@@ -282,29 +383,39 @@ def fetch_query_table(
     max_pages: int | None = None,
     page_delay_range: tuple[float, float] = PAGE_DELAY_RANGE,
 ) -> list[dict]:
-    """执行一个问财问句，返回全部行的 list[dict]。
+    """执行一个问财问句，返回**完整表**的 list[dict]。
 
-    流程：get-robot-data（拿 footer_url + row_count）→ 翻页 getDataList。
+    [WENCAI-STREAM-QUERY-MIGRATION-01] 流程简化为**单跳**：
+        POST stream-query（SSE）→ 解析 other/openAnswer 帧 → 直接得到全表 datas
+    旧的两跳流程（get-robot-data 拿 footer_url → 翻页 getDataList）已随问财
+    下线该端点而移除，**不保留回退**。
 
-    注意限流语义（用户规则 2026-08-17）：
-    - 本函数的 `page_delay_range` 仅控制**同一问句内翻页之间**的短间隔
-      （默认 1–2 秒），避免瞬时连发被风控。
-    - **问句之间（如回补逐日）的 30–60 秒随机间隔**不在此处，
-      由调用方在两次 `fetch_query_table` 调用之间 sleep（见 QUERY_INTERVAL_RANGE）。
-      切勿把 30–60s 当成页间间隔，否则单问句多页会被错误拖慢。
+    限流语义（用户规则 2026-08-17，仍然有效）：
+    - 单次问句只发**一个** HTTP 请求，不再有页间 sleep。
+    - **问句之间**（如历史回补逐日）的 30–60 秒随机间隔仍由**调用方**在两次
+      `fetch_query_table` 调用之间 sleep（见 QUERY_INTERVAL_RANGE）；
+      本函数内部不引入任何新的等待。
 
     Args:
-        query: 自然语言问句（如 "20260814竞价涨幅" / "同花顺概念，行业分类"）
+        query: 自然语言问句（如 "同花顺概念，行业分类"）
         cookie: 标准化 cookie 串；None 时从 load_cookie() 读取
-        perpage: 每页行数（问财上限通常 100）
-        max_pages: 安全上限；None 按 row_count 推算
-        page_delay_range: 同一问句内翻页之间的随机间隔（秒）
+        perpage: **兼容性保留**（旧分页语义）。stream-query 内部恒用
+            `_STREAM_QUERY_MAX_ROWS` 单次取全表，不再按页切分；不得据此
+            推断结果被截断。
+        max_pages: **兼容性保留**。旧语义为"安全上限/部分页"，新协议无分页，
+            故本参数不再影响结果；生产调用方均未传非默认值（2026-09-24 实核）。
+        page_delay_range: **兼容性保留**（旧页间短间隔）。新协议单次请求，
+            不再产生页间 sleep。
 
     Returns:
-        全部数据行（list of dict，键为中文字段名）
+        **完整**表格数据行（list of dict，键为中文字段名）。
+        语义不变："返回该问句的完整表"。
 
     Raises:
-        RuntimeError: cookie 缺失 / 问财返回无效
+        RuntimeError: cookie 缺失
+        WencaiTransportError: 传输层失败 / 应用层拒绝 / SSE 结构非法
+        WencaiIncompleteResultError: row_count 超出已验证单次容量，
+            或 len(datas) != row_count（fail closed，禁止静默截断）
     """
     cookie = cookie or load_cookie()
     if not cookie:
@@ -312,28 +423,27 @@ def fetch_query_table(
             "未配置 WENCAI_COOKIE：请写入 wencai_cookie.json，或设置环境变量 WENCAI_COOKIE"
         )
 
-    footer_url, row_count = _get_footer_url(cookie, query)
+    rows, row_count = _stream_query(cookie, query)
+
     if row_count <= 0:
         logger.warning("[WencaiClient] 问句 %r 返回 0 行", query)
         return []
 
-    import math
-    total_pages = max(1, math.ceil(row_count / perpage))
-    if max_pages is not None:
-        total_pages = min(total_pages, max_pages)
+    # ── 全表完整性 SSOT：row_count vs len(datas) ──────────────────────────
+    # 不使用 has_more_data：实测整表返回时它仍为 true，不可作为完成判据。
+    if row_count > _STREAM_QUERY_MAX_ROWS:
+        raise WencaiIncompleteResultError(
+            f"问句 {query!r} row_count={row_count} 超过已验证的单次完整表容量 "
+            f"{_STREAM_QUERY_MAX_ROWS}（需升级 stream-query 协议，禁止静默截断）"
+        )
+    if len(rows) != row_count:
+        raise WencaiIncompleteResultError(
+            f"问句 {query!r} 结果不完整: len(datas)={len(rows)} != row_count="
+            f"{row_count}（fail closed，禁止写入部分行）"
+        )
 
     logger.info(
-        "[WencaiClient] 问句 %r: row_count=%d, pages=%d, perpage=%d",
-        query, row_count, total_pages, perpage,
+        "[WencaiClient] 问句 %r: row_count=%d, rows=%d（单次全表 stream-query）",
+        query, row_count, len(rows),
     )
-
-    all_rows: list[dict] = []
-    for page in range(1, total_pages + 1):
-        rows = _fetch_page(footer_url, cookie, page, perpage)
-        all_rows.extend(rows)
-        if page < total_pages:
-            delay = random.uniform(*page_delay_range)
-            time.sleep(delay)
-
-    logger.info("[WencaiClient] 问句 %r 共拉取 %d 行", query, len(all_rows))
-    return all_rows
+    return rows
