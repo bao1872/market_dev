@@ -284,9 +284,11 @@ export interface AfterClosePipelineRunListResponse {
   total: number
 }
 
+// [BOARD-LOCAL-OWNERSHIP-01] current restart-step vocabulary：syncing_boards 已迁出
+// 盘后 DAG（板块/概念同步改为本地手动同步），不再是合法 restart 起点。
+// 历史 run 若返回 syncing_boards 事件，前端按 legacy 只读展示，不作为 current step。
 export type AfterCloseRestartStep =
   | 'refreshing_daily'
-  | 'syncing_boards'
   | 'checking_coverage'
   | 'computing_features'
   | 'publishing'

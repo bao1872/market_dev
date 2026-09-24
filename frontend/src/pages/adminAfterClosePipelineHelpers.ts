@@ -12,7 +12,9 @@ import type { PipelineStep } from '@/api/endpoints'
 // ===== 步骤标签映射 =====
 export const STEP_LABELS: Record<string, string> = {
   refreshing_daily: '刷新日线',
-  syncing_boards: '同步板块',
+  // [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出盘后 DAG：不再是 current 步骤。
+  // 此标签仅当 API 显式返回历史 legacy run 的真实 syncing_boards 事件时用于展示。
+  syncing_boards: '同步板块（历史）',
   checking_coverage: '检查覆盖率',
   computing_features: '统一特征计算',
   // [CHANGE-20260831-ADMIN-TIMELINE] legacy 兼容标签：publishing 不再是 current canonical 步骤，
@@ -29,14 +31,15 @@ export const STEP_LABELS: Record<string, string> = {
 }
 
 // 默认步骤顺序（API 未返回 steps 或步骤缺失时的兜底）
-// [CHANGE-20260831-ADMIN-TIMELINE] 7 步 current canonical 序列：
-//   computing_features → computing_review → computing_history → watchlist_ready
-// 与后端 after_close_orchestrator._CHECKPOINT_ORDER（features → review → history）保持一致。
-// publishing 已从 current canonical DAG 移除：不再作为默认步骤出现；
-//   STEP_LABELS.publishing 仅保留给历史 legacy run 的兼容展示（API 显式返回时才渲染）。
+// [BOARD-LOCAL-OWNERSHIP-01] 6 步 current canonical 序列：
+//   refreshing_daily → checking_coverage → rebuilding_market_dashboard
+//   → computing_features → computing_history → watchlist_ready
+// 与后端 after_close_pipeline_service._PIPELINE_STEPS 保持一致。
+// syncing_boards 已迁出盘后 DAG：不再作为默认步骤；STEP_LABELS.syncing_boards
+// 仅保留给历史 legacy run 的兼容展示（API 显式返回时才渲染为「同步板块（历史）」）。
+// publishing 同样已从 current canonical DAG 移除，仅保留兼容展示标签。
 export const DEFAULT_STEP_ORDER: string[] = [
   'refreshing_daily',
-  'syncing_boards',
   'checking_coverage',
   'rebuilding_market_dashboard',
   'computing_features',

@@ -120,6 +120,7 @@ export {
   useUpdateAdminBetaApplication,
   useRetryAdminBetaApplicationFeishu,
   useAdminSystemOverview,
+  useAdminBoardSyncStatus,
   useAdminProductReadiness,
   useAdminStockDebug,
   useMessageDeliveries,

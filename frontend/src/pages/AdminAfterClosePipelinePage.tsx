@@ -379,9 +379,10 @@ export default function AdminAfterClosePipelinePage() {
             <div>
               <div className="card-title">步骤时间线</div>
               <div className="card-sub">
-                {/* [CHANGE-20260831-ADMIN-TIMELINE] 7 步 current canonical 序列（含复盘/历史阶段） */}
-                refreshing_daily → syncing_boards → checking_coverage →
-                computing_features → computing_review → computing_history → watchlist_ready
+                {/* [BOARD-LOCAL-OWNERSHIP-01] 6 步 current canonical 序列；
+                    syncing_boards 已迁出（板块/概念改为本地手动同步），历史事件才按 legacy 展示 */}
+                refreshing_daily → checking_coverage → rebuilding_market_dashboard →
+                computing_features → computing_history → watchlist_ready
               </div>
             </div>
           </div>

@@ -1009,6 +1009,54 @@ export async function getAdminSystemOverview(): Promise<SystemOverview> {
 }
 
 // ============================================================
+// ===== [BOARD-LOCAL-OWNERSHIP-01] 板块/概念手动同步状态 =====
+// ============================================================
+//
+// 独立于盘后 DAG 的手动数据状态：board/concept 同步已迁出 after-close，
+// 改为本地 `scripts/ops/panji-board-sync` → 生产 importer。
+// 只读；无「立即同步」动作；无 stale/overdue/SLA 判定（age 仅信息展示）。
+
+/** 最近一次同步尝试（Redis 短期诊断；不可用时为 null）。 */
+export interface BoardSyncRecentAttempt {
+  status?: string
+  source?: string
+  mode?: string
+  raw_rows?: number
+  resolved?: number
+  unresolved?: number
+  industry_count?: number
+  concept_count?: number
+  membership_count?: number
+  duration_ms?: number
+  error_code?: string | null
+  reused_previous_snapshot?: boolean
+  effective_date?: string
+  [key: string]: unknown
+}
+
+/** GET /v1/admin/board-sync/status 响应（对齐后端 BoardSyncStatusResponse）。 */
+export interface AdminBoardSyncStatusResponse {
+  mode: string
+  source: string
+  available: boolean
+  last_success_at: string | null
+  board_count: number
+  industry_count: number
+  concept_count: number
+  membership_count: number
+  stock_count: number
+  recent_attempt: BoardSyncRecentAttempt | null
+}
+
+/** 获取板块/概念手动同步状态（admin，只读）。 */
+export async function getAdminBoardSyncStatus(): Promise<AdminBoardSyncStatusResponse> {
+  const { data } = await apiClient.get<AdminBoardSyncStatusResponse>(
+    '/v1/admin/board-sync/status',
+  )
+  return data
+}
+
+// ============================================================
 // ===== [Commit G] ProductReadiness 就绪状态 + 治理报告 =====
 // ============================================================
 

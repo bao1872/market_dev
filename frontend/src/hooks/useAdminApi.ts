@@ -461,6 +461,20 @@ export function useAdminSystemOverview(enabled: boolean = true) {
 }
 
 // ============================================================
+// ===== [BOARD-LOCAL-OWNERSHIP-01] 板块/概念手动同步状态 =====
+// ============================================================
+// 独立于 after-close：query key 不含 after-close，不随盘后流水线失效。
+// 只读；无「立即同步」动作；无 age/SLA 轮询（普通 stale 行为即可）。
+export function useAdminBoardSyncStatus(enabled: boolean = true) {
+  return useQuery({
+    queryKey: ['admin', 'board-sync', 'status'],
+    queryFn: adminApi.getAdminBoardSyncStatus,
+    enabled,
+    staleTime: STALE_REALTIME,
+  })
+}
+
+// ============================================================
 
 export function useAdminProductReadiness(
   tradeDate: string | null | undefined,

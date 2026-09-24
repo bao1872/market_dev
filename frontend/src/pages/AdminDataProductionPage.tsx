@@ -3,12 +3,16 @@
 //
 // 结构：
 // - 盘后编排：复用原「盘后流水线」页面
-// - 总览：从后端 summary.production_chain 渲染 6 个产品节点（行情/第一金字塔/板块/复盘/竞价/发布）
-// - 各业务 Tab（第一金字塔/板块/复盘/竞价/发布）：展示同一聚合读模型的筛选视图（该产品节点详情），
+// - 总览：从后端 summary.production_chain 渲染产品节点（行情/第一金字塔/复盘/竞价/正式发布）
+// - 各业务 Tab（第一金字塔/复盘/竞价/发布）：展示同一聚合读模型的筛选视图（该产品节点详情），
 //   不重复建设复杂详情（PRD §8.2：其他业务 Tab 先展示同一个聚合读模型的筛选视图）
+// - [BOARD-LOCAL-OWNERSHIP-01] 板块 Tab：**独立**的手动数据状态视图（本地手动同步），
+//   不再从 daily production_chain 取数（旧 Board Analysis 已退役，不是日常产品节点；
+//   板块 age 不得被理解为日常新鲜度 SLA）。
 // URL 状态：tab 进入 URL query（/admin/data-production?tab=after-close），刷新保持，可分享定位。
 import { useSearchParams } from 'react-router-dom'
 import AdminAfterClosePipelinePage from './AdminAfterClosePipelinePage'
+import AdminBoardDataStatus from './AdminBoardDataStatus'
 import AdminReadinessWorkbench from '@/features/product-readiness/AdminReadinessWorkbench'
 import { useAdminSystemOverview } from '@/hooks/useApi'
 
@@ -34,9 +38,10 @@ const TAB_ITEMS: { key: DataProductionTab; label: string }[] = [
 ]
 
 // 业务产品 Tab → production_chain 节点 key 映射（筛选视图）
+// [BOARD-LOCAL-OWNERSHIP-01] `board` 已移出：板块/概念为独立本地手动数据，
+// 不属于 daily production_chain（见该 Tab 的独立视图）。
 const TAB_TO_CHAIN_KEY: Partial<Record<DataProductionTab, string>> = {
   'first-pyramid': 'first_pyramid',
-  board: 'board',
   review: 'review',
   auction: 'auction',
   publish: 'publish',
@@ -132,13 +137,19 @@ export default function AdminDataProductionPage() {
       {/* 盘后就绪：九节点就绪状态 + 治理报告（Commit G/H） */}
       {activeTab === 'readiness' && <AdminReadinessWorkbench />}
 
+      {/* [BOARD-LOCAL-OWNERSHIP-01] 板块/概念：独立本地手动同步状态（只读，不从 production_chain 取数） */}
+      {activeTab === 'board' && <AdminBoardDataStatus />}
+
       {/* 总览：从后端 summary.production_chain 渲染 6 个产品节点 */}
       {activeTab === 'overview' && (
         <section className="card section-gap">
           <div className="card-head">
             <div>
               <div className="card-title">各数据产品生产状态</div>
-              <div className="card-sub">行情 / 第一金字塔 / 板块分析 / 复盘 / 竞价准备 / 正式发布</div>
+              <div className="card-sub">
+                行情 / 第一金字塔 / 复盘 / 竞价准备 / 正式发布
+                {/* [BOARD-LOCAL-OWNERSHIP-01] 板块/概念为独立本地手动数据，不在日常生产链内 */}
+              </div>
             </div>
           </div>
           <div className="card-body">

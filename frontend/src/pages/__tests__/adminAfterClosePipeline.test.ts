@@ -90,9 +90,10 @@ test('1b. getStepKeys: API 返回乱序 steps 时保持 API 顺序（不重排�
 test('1c. getStepKeys: API 返回空数组时用 DEFAULT_STEP_ORDER 兜底', () => {
   const keys = getStepKeys([])
   assert.deepEqual(keys, DEFAULT_STEP_ORDER)
-  // [REVIEW-V2-R1] current canonical 7 步
-  // （rebuilding_market_dashboard → computing_features → computing_history → watchlist_ready）
-  assert.ok(keys.length === 7, `默认步骤应为 7 步（含 rebuilding_market_dashboard/computing_history），实际: ${keys.length}`)
+  // [BOARD-LOCAL-OWNERSHIP-01] current canonical 6 步
+  // （checking_coverage → rebuilding_market_dashboard → computing_features
+  //   → computing_history → watchlist_ready）
+  assert.ok(keys.length === 6, `默认步骤应为 6 步（含 rebuilding_market_dashboard/computing_history），实际: ${keys.length}`)
   assert.ok(
     keys.includes('computing_history'),
     'DEFAULT_STEP_ORDER 必须包含 computing_history（历史状态推进阶段）',
@@ -100,6 +101,10 @@ test('1c. getStepKeys: API 返回空数组时用 DEFAULT_STEP_ORDER 兜底', () 
   assert.ok(
     keys.includes('rebuilding_market_dashboard'),
     'DEFAULT_STEP_ORDER 必须包含 rebuilding_market_dashboard（复盘计算阶段）',
+  )
+  assert.ok(
+    !keys.includes('syncing_boards'),
+    'DEFAULT_STEP_ORDER 不得包含 syncing_boards（已迁出盘后 DAG，改为本地手动同步）',
   )
 })
 
@@ -440,7 +445,9 @@ test('7b. current/default 顺序: rebuilding_market_dashboard < computing_featur
   assert.ok(dashIdx < featIdx, 'rebuilding_market_dashboard 应在 computing_features 之前')
   assert.ok(featIdx < histIdx, 'computing_features 应在 computing_history 之前')
   assert.ok(histIdx < wlIdx, 'computing_history 应在 watchlist_ready 之前')
-  assert.strictEqual(keys.length, 7, `current canonical 应为 7 步，实际: ${keys.length}`)
+  // [BOARD-LOCAL-OWNERSHIP-01] syncing_boards 已迁出：current canonical 6 步
+  assert.strictEqual(keys.length, 6, `current canonical 应为 6 步，实际: ${keys.length}`)
+  assert.ok(!keys.includes('syncing_boards'), 'current canonical 不得包含 syncing_boards')
 })
 
 test('7c. legacy 兼容: API 显式返回 publishing 时仍显示"发布结果"且不被重排', () => {
