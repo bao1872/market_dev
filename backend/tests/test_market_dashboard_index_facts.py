@@ -4,6 +4,8 @@
 A. 整段同步 pytdx 会话经 asyncio.to_thread 跑一次；只开一次 session、取四条 series。
 B. ``get_index_daily_bars`` keyword-only 调用（回归：positionally 传参必须 TypeError）。
 C. 880006 严格解码：finite / >= 0 / 整数值；不合法（51.4 / 负数 / NaN）直接 raise。
+C2. TDX 最小刻度编码：精确 0.01 为零家数哨兵，归一化为整数 0；其余非整数（0.02 / 0.10 /
+   1.01 / NaN / inf）一律 raise（provider 漂移，fail-closed）。
 D. 指数收盘必须 finite 且 > 0；<= 0 直接 raise。
 E. exact-date merge：四条 series 按日期合并为 MarketIndexFacts（缺字段为 None）。
 """
@@ -116,6 +118,73 @@ def test_decode_880006_negative_raises(monkeypatch):
 def test_decode_880006_nan_raises(monkeypatch):
     data = dict(_DATA_OK)
     data["880006"] = _df(float("nan"), 3.0)
+    with pytest.raises(ValueError):
+        _run(monkeypatch, data)
+
+
+# ---------------------------------------------------------------
+# C2. TDX 零家数最小刻度编码：精确 0.01 → 0；其余非整数一律 raise
+# ---------------------------------------------------------------
+def test_decode_880006_open_0_01_normalizes_to_zero(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(51.0, 0.01)  # open 零家数 → 0
+    facts, _ = _run(monkeypatch, data)
+    f = facts[_D]
+    assert f.limit_up_count == 51
+    assert f.limit_down_count == 0
+
+
+def test_decode_880006_close_0_01_normalizes_to_zero(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(0.01, 14.0)  # close 零家数 → 0
+    facts, _ = _run(monkeypatch, data)
+    f = facts[_D]
+    assert f.limit_up_count == 0
+    assert f.limit_down_count == 14
+
+
+def test_decode_880006_exact_zero_still_zero(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(0.0, 0.0)
+    facts, _ = _run(monkeypatch, data)
+    f = facts[_D]
+    assert f.limit_up_count == 0
+    assert f.limit_down_count == 0
+
+
+def test_decode_880006_normal_counts_unaffected(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(74.0, 1.0)  # 真实整数值保持不变
+    facts, _ = _run(monkeypatch, data)
+    f = facts[_D]
+    assert f.limit_up_count == 74
+    assert f.limit_down_count == 1
+
+
+def test_decode_880006_rejects_0_02(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(51.0, 0.02)  # 非精确 0.01 → 漂移
+    with pytest.raises(ValueError):
+        _run(monkeypatch, data)
+
+
+def test_decode_880006_rejects_0_10(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(0.10, 3.0)
+    with pytest.raises(ValueError):
+        _run(monkeypatch, data)
+
+
+def test_decode_880006_rejects_1_01(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(1.01, 3.0)
+    with pytest.raises(ValueError):
+        _run(monkeypatch, data)
+
+
+def test_decode_880006_rejects_inf(monkeypatch):
+    data = dict(_DATA_OK)
+    data["880006"] = _df(float("inf"), 3.0)
     with pytest.raises(ValueError):
         _run(monkeypatch, data)
 

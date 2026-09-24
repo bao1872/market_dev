@@ -24,6 +24,11 @@
 - 解码严格性：指数收盘须 finite 且 > 0；880006 家数须 finite、>= 0、且为
   整数值（不得用 ``round`` 把 51.4 / 负数 / NaN 修成看似合法的计数）——不合法
   即视为数据源漂移，直接 raise（provider contract failure）。
+- 880006 scale 恒为 1；但 TDX 对“零家数”使用最小价格刻度 0.01 编码
+  （而非 0.00）。因此唯一允许的浮点表示即精确的 0.01，由
+  ``_decode_880006_count`` 归一化为整数 0。任何其他非整数（0.02 / 1.01 /
+  NaN / 负数等）一律视为 provider 漂移，raise 让 caller fail-closed 保留旧
+  projection。不得把 ``value < 阈值 -> 0`` 这类宽松规则写进 decoder。
 """
 from __future__ import annotations
 
@@ -79,11 +84,22 @@ def _require_finite_positive(value, field: str) -> float:
     return fv
 
 
-def _require_nonneg_integer(value, field: str) -> int:
-    """880006 家数：finite、>= 0、且为整数值（不合法即数据源漂移）。"""
+def _decode_880006_count(value, field: str) -> int:
+    """880006 涨跌停家数解码（TDX provider-specific）。
+
+    冻结语义：880006 scale=1，close=涨停家数、open=跌停家数。
+    TDX 对“零家数”使用最小价格刻度 0.01 编码（而非 0.00），因此唯一允许的
+    浮点表示即精确的 0.01，归一化为整数 0。任何其他非整数（0.02 / 1.01 /
+    NaN / 负数等）一律视为 provider 漂移，raise 让 caller fail-closed 保留旧
+    projection。绝不使用 ``value < 阈值 -> 0`` / round / floor / ceil / clamp
+    这类会吞掉真实漂移的宽松规则。
+    """
     fv = float(value)
     if not math.isfinite(fv) or fv < 0:
         raise ValueError(f"market index fact {field} must be finite non-negative, got {value!r}")
+    # TDX 零家数最小刻度编码：仅精确 0.01 归一化为 0
+    if math.isclose(fv, 0.01, rel_tol=0.0, abs_tol=1e-9):
+        return 0
     if abs(fv - round(fv)) > 1e-9:
         raise ValueError(f"market index fact {field} must be integer-valued, got {value!r}")
     return int(round(fv))
@@ -112,9 +128,10 @@ def _fetch_all_market_indices_sync(end_date: date) -> dict[date, MarketIndexFact
         for row in df6.itertuples(index=False):
             d = _row_trade_date(row)
             bucket = merged.setdefault(d, {})
-            # scale=1：解码值即为家数；严格校验 finite/非负/整数，拒绝漂移数据
-            bucket["limit_up_count"] = _require_nonneg_integer(row.close, "limit_up_count")
-            bucket["limit_down_count"] = _require_nonneg_integer(row.open, "limit_down_count")
+            # scale=1：解码值即为家数；TDX 对零家数用最小刻度 0.01 编码，归一化为 0；
+            # 其余非整数/负数/NaN 一律视为 provider 漂移，拒绝（fail-closed）
+            bucket["limit_up_count"] = _decode_880006_count(row.close, "limit_up_count")
+            bucket["limit_down_count"] = _decode_880006_count(row.open, "limit_down_count")
 
     return {
         d: MarketIndexFacts(
