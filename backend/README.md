@@ -67,6 +67,7 @@ cd backend
 python3 -m venv .venv          # 首次创建；之后仅需 source .venv/bin/activate
 source .venv/bin/activate
 pip install -e . -i https://pypi.tuna.tsinghua.edu.cn/simple
+cd ..                         # 返回 repo root；后续 make 命令依赖根目录 Makefile
 
 # 3. 启动 SSH 隧道（PostgreSQL -> 127.0.0.1:15432，Redis -> 127.0.0.1:16379）
 # 前提：~/.ssh/config 已配置 Host panji-prod（HostName 43.136.118.82）
