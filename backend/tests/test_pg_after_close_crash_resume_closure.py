@@ -45,6 +45,19 @@ pytestmark = pytest.mark.postgres
 # ===========================================================================
 # proven synthetic helpers (mirror test_pg_review_runtime_blocker_closure.py)
 # ===========================================================================
+def _passing_coverage_patch():
+    """[RC2] 让 resume/restart 的 coverage 门禁在该 PG 用例里可预期地通过。
+
+    production 语义（RC2 冻结）：覆盖率在 normal / resume / restart 都会被执行，
+    不足则阻塞强制主链。verify DB 没有 bars_daily 数据，真实重算必然得到 0.0；
+    本文件测的是 crash/resume 闭环，故固定 coverage owner 返回通过值。
+    """
+    return patch(
+        "app.services.after_close_orchestrator.compute_daily_coverage",
+        new=AsyncMock(return_value=(5200, 5200, 1.0)),
+    )
+
+
 async def _make_instruments(db_session, n=2):
     from app.models.instrument import Instrument
 
@@ -276,6 +289,12 @@ async def test_pg_A_crash_after_publishing_same_run_resume():
     # Review 真实进入（spy）；normal Core->Review 主链不发布 stock_core（spy 计数）。
     # 不再依赖 stock_core 真实发布 / pointer。
     common_patches = [
+        # [RC2] resume/restart 现在也会执行 checking_coverage（persisted bars owner）。
+        # verify DB 无 bars_daily（真实 resume 场景下 bars 由前一次 refreshing_daily
+        # 写入），覆盖率会算成 0.0 并被门禁阻塞 —— 那会让本文件所有 resume 用例变成
+        # 「在测覆盖率门禁」而不是「在测 crash/resume 闭环」。此处固定 coverage owner
+        # 返回通过值，使被测语义（断点恢复 / 闭包）可被真实断言。
+        _passing_coverage_patch(),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
@@ -404,6 +423,12 @@ async def test_pg_B_state_events_failure_truthful_partial_success():
     # dashboard owner 全部成功（让 rebuilding_market_dashboard 完成，enhancement 段才能执行）；
     # state_events 注入失败 -> 进入 step_summary(optional=failed) -> partial_success。
     patches = [
+        # [RC2] resume/restart 现在也会执行 checking_coverage（persisted bars owner）。
+        # verify DB 无 bars_daily（真实 resume 场景下 bars 由前一次 refreshing_daily
+        # 写入），覆盖率会算成 0.0 并被门禁阻塞 —— 那会让本文件所有 resume 用例变成
+        # 「在测覆盖率门禁」而不是「在测 crash/resume 闭环」。此处固定 coverage owner
+        # 返回通过值，使被测语义（断点恢复 / 闭包）可被真实断言。
+        _passing_coverage_patch(),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
@@ -510,6 +535,12 @@ async def test_pg_C_dsa_projection_failure_cannot_revoke_stock_core():
     # §11: core 计算跳过；History 强制 ready；dashboard owner 全部成功（rebuilding_market_dashboard 完成）；
     # DSA 失败注入。normal Core->Review 主链不发布 stock_core（spy 计数）。
     patches = [
+        # [RC2] resume/restart 现在也会执行 checking_coverage（persisted bars owner）。
+        # verify DB 无 bars_daily（真实 resume 场景下 bars 由前一次 refreshing_daily
+        # 写入），覆盖率会算成 0.0 并被门禁阻塞 —— 那会让本文件所有 resume 用例变成
+        # 「在测覆盖率门禁」而不是「在测 crash/resume 闭环」。此处固定 coverage owner
+        # 返回通过值，使被测语义（断点恢复 / 闭包）可被真实断言。
+        _passing_coverage_patch(),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=AsyncMock(return_value={"target_state_count": 100, "advanced": True})),
@@ -731,6 +762,12 @@ async def test_pg_I_review_before_history_call_order():
         job_run_id = str(job.id)
 
     patches = [
+        # [RC2] resume/restart 现在也会执行 checking_coverage（persisted bars owner）。
+        # verify DB 无 bars_daily（真实 resume 场景下 bars 由前一次 refreshing_daily
+        # 写入），覆盖率会算成 0.0 并被门禁阻塞 —— 那会让本文件所有 resume 用例变成
+        # 「在测覆盖率门禁」而不是「在测 crash/resume 闭环」。此处固定 coverage owner
+        # 返回通过值，使被测语义（断点恢复 / 闭包）可被真实断言。
+        _passing_coverage_patch(),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=_fake_compute_core),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=AsyncMock(return_value=MagicMock(id=uuid.uuid4()))),
         patch("app.services.after_close_orchestrator.advance_history_to_trade_date", new=_fake_history),
@@ -829,6 +866,12 @@ async def test_pg_J_fresh_path_direct_link_no_stock_core_read():
     # §6: FRESH 路径最小 faithful patch。computing_features 复用 running X 并 finalize；
     # stock_core 读取/发布全程 spy 计数（应 0）；Review 真实进入（spy 调用生产 callable）。
     patches = [
+        # [RC2] resume/restart 现在也会执行 checking_coverage（persisted bars owner）。
+        # verify DB 无 bars_daily（真实 resume 场景下 bars 由前一次 refreshing_daily
+        # 写入），覆盖率会算成 0.0 并被门禁阻塞 —— 那会让本文件所有 resume 用例变成
+        # 「在测覆盖率门禁」而不是「在测 crash/resume 闭环」。此处固定 coverage owner
+        # 返回通过值，使被测语义（断点恢复 / 闭包）可被真实断言。
+        _passing_coverage_patch(),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.resolve_stock_core_published", new=_spy_resolve),
@@ -939,6 +982,12 @@ async def test_pg_K_legacy_publishing_resume_enters_legacy_branch():
         job_run_id = str(job.id)
 
     patches = [
+        # [RC2] resume/restart 现在也会执行 checking_coverage（persisted bars owner）。
+        # verify DB 无 bars_daily（真实 resume 场景下 bars 由前一次 refreshing_daily
+        # 写入），覆盖率会算成 0.0 并被门禁阻塞 —— 那会让本文件所有 resume 用例变成
+        # 「在测覆盖率门禁」而不是「在测 crash/resume 闭环」。此处固定 coverage owner
+        # 返回通过值，使被测语义（断点恢复 / 闭包）可被真实断言。
+        _passing_coverage_patch(),
         patch("app.services.feature_snapshot_service.compute_review_core_with_run_items", new=AsyncMock(return_value={})),
         patch("app.services.stock_core_publication_service.publish_stock_core_atomically", new=_spy_publish),
         patch("app.services.after_close_orchestrator.resolve_stock_core_published", new=_spy_resolve),
