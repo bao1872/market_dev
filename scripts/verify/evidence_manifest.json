@@ -332,7 +332,7 @@
       "test_selectors": [
         "tests/test_board_snapshot_import_pg.py"
       ],
-      "claim": "The versioned local-manual board snapshot transport (local Mac Wencai fetch -> snapshot envelope -> SSH stdin -> remote importer) round-trips provider board semantics losslessly into the real board_sync_service.sync_boards() DB owner without mocking it: industry L1/L2/L3 hierarchy and parent links, taxonomy and identity contract versions and membershipVersion persist, board-level contract contradictions and sensitive fields are rejected fail-closed, identical same-day replays are idempotent, and changed same-day membership is reflected in exact-T PIT board resolution with no cooldown or once-per-day restriction."
+      "claim": "The versioned BoardSnapshot transport round-trips the frozen board taxonomy/identity/hierarchy semantics into the real board_sync_service.sync_boards() PostgreSQL persistence owner; industry L1/L2/L3 hierarchy and parent links, taxonomy/identity fields and membershipVersion persist correctly; identical same-day snapshots are idempotent; and changed same-day membership resolves to the new exact-T PIT membership without any cooldown or once-per-day restriction."
     }
   ]
 }
