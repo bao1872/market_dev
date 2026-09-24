@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.security import create_access_token
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import (
+    RUN_TYPE_AFTER_CLOSE,
     STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
@@ -163,7 +164,7 @@ async def _make_published_run_and_snapshot(
     run = StockFeatureSnapshotRun(
         schema_version=_SCHEMA_VERSION,
         status=STATUS_SUCCEEDED,
-        run_type="scheduled",
+        run_type=RUN_TYPE_AFTER_CLOSE,
         trade_date=trade_date,
         started_at=now,
         finished_at=now,
@@ -811,7 +812,7 @@ async def test_legacy_snapshot_reason_in_degraded_reasons(
     run = StockFeatureSnapshotRun(
         schema_version=_SCHEMA_VERSION,
         status=STATUS_SUCCEEDED,
-        run_type="scheduled",
+        run_type=RUN_TYPE_AFTER_CLOSE,
         trade_date=date(2026, 7, 14),
         started_at=now,
         finished_at=now,
@@ -1040,7 +1041,7 @@ async def test_node_availability_snapshot_missing(
     run = StockFeatureSnapshotRun(
         schema_version=_SCHEMA_VERSION,
         status=STATUS_SUCCEEDED,
-        run_type="scheduled",
+        run_type=RUN_TYPE_AFTER_CLOSE,
         trade_date=date(2026, 7, 14),
         started_at=now,
         finished_at=now,
@@ -1251,7 +1252,7 @@ async def test_node_availability_legacy_no_node_cluster(
     run = StockFeatureSnapshotRun(
         schema_version=3,  # 旧版本
         status=STATUS_SUCCEEDED,
-        run_type="scheduled",
+        run_type=RUN_TYPE_AFTER_CLOSE,
         trade_date=date(2026, 7, 14),
         started_at=now,
         finished_at=now,
