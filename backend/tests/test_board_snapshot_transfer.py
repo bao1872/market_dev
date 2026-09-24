@@ -334,6 +334,53 @@ class TestBoardStructuralValidation:
             validate_envelope(parsed)
 
 
+class TestBoardLevelContractConsistency:
+    """[RC5] board 级合同字段必须与 envelope/runtime 冻结合同一致（仅"非空"不够）。
+
+    威胁模型：envelope.contracts 全部正确、单 board 字段被改成垃圾版本、payload hash
+    重新计算正确 —— 远端必须仍 fail closed，否则 garbage 会被写进 PIT identity。
+    """
+
+    def _mutate_board_contract(self, field: str, value: str) -> dict:
+        parsed = json.loads(serialize_envelope(_valid_envelope()).decode("utf-8"))
+        parsed["snapshot"]["boards"][1][field] = value  # IND_L2
+        parsed["payload_sha256"] = compute_envelope_sha256(parsed)
+        return parsed
+
+    def test_contradicting_board_contracts_rejected_with_valid_hash(self) -> None:
+        parsed = self._mutate_board_contract(
+            "identity_contract_version", "garbage-v999"
+        )
+        # 先证明 hash 是"正确"的（否则测出来的只是 hash 校验）
+        assert compute_envelope_sha256(parsed) == parsed["payload_sha256"]
+        with pytest.raises(SnapshotSchemaError):
+            validate_envelope(parsed)
+
+    @pytest.mark.parametrize(
+        ("field", "bad_value"),
+        [
+            ("taxonomy_version", "taxonomy-v999"),
+            ("taxonomy_compatibility_key", "compat-v999"),
+            ("identity_contract_version", "identity-v999"),
+            ("source", "qstock"),
+            ("taxonomy", "qstock"),
+        ],
+    )
+    def test_each_contract_bearing_board_field_enforced(
+        self, field: str, bad_value: str
+    ) -> None:
+        parsed = self._mutate_board_contract(field, bad_value)
+        with pytest.raises(SnapshotSchemaError):
+            validate_envelope(parsed)
+
+    def test_build_envelope_also_rejects_contradicting_board(self) -> None:
+        """生产者侧同样 fail closed（本地早失败，不把坏 envelope 送出）。"""
+        snapshot = _snapshot()
+        snapshot.boards[1]["identity_contract_version"] = "garbage-v999"
+        with pytest.raises(SnapshotSchemaError):
+            build_envelope(snapshot)
+
+
 class TestContractVersions:
     def test_envelope_contracts_match_runtime(self) -> None:
         assert _valid_envelope()["contracts"] == runtime_contracts()

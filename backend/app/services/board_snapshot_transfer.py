@@ -34,6 +34,7 @@ from app.services.wencai_board_provider import (
     BOARD_PROVIDER_CONTRACT_VERSION,
     BOARD_QUALITY_GATE_VERSION,
     BOARD_SOURCE,
+    BOARD_TAXONOMY,
     BOARD_TAXONOMY_COMPATIBILITY_KEY,
     BOARD_TAXONOMY_VERSION,
     BoardSnapshot,
@@ -218,6 +219,67 @@ def _normalize_board_dict(board: Any, idx: int, *, where: str) -> dict[str, str]
     return normalized
 
 
+def _assert_board_contracts_consistent(
+    normalized: dict[str, str],
+    contracts: dict[str, str],
+    idx: int,
+    *,
+    where: str,
+) -> None:
+    """[RC5] board 级合同字段必须与 envelope/runtime 冻结合同一致。
+
+    仅"非空"不够：`board.identity_contract_version="garbage-v999"` 若能通过，
+    `sync_boards()` 会把该垃圾版本写进 PIT identity（不可变身份）。
+
+    SSOT：
+    - 版本类字段以 **envelope.contracts** 为准（该 dict 已先与 runtime 冻结值校验）；
+    - `source` / `taxonomy` 以 provider 冻结语义常量为准（它们不在 contracts 里）。
+
+    Raises:
+        SnapshotSchemaError: 任一 board 字段与冻结合同矛盾（fail closed）。
+    """
+    expected_taxonomy_version = contracts.get("taxonomy_version")
+    expected_compat_key = contracts.get("taxonomy_compatibility_key")
+    expected_identity = contracts.get("identity_contract_version")
+
+    mismatches: list[str] = []
+    if normalized["source"] != BOARD_SOURCE:
+        mismatches.append(
+            f"source={normalized['source']!r} != {BOARD_SOURCE!r}"
+        )
+    if normalized["taxonomy"] != BOARD_TAXONOMY:
+        mismatches.append(
+            f"taxonomy={normalized['taxonomy']!r} != {BOARD_TAXONOMY!r}"
+        )
+    if expected_taxonomy_version is not None and (
+        normalized["taxonomy_version"] != expected_taxonomy_version
+    ):
+        mismatches.append(
+            f"taxonomy_version={normalized['taxonomy_version']!r} "
+            f"!= contracts.taxonomy_version={expected_taxonomy_version!r}"
+        )
+    if expected_compat_key is not None and (
+        normalized["taxonomy_compatibility_key"] != expected_compat_key
+    ):
+        mismatches.append(
+            f"taxonomy_compatibility_key={normalized['taxonomy_compatibility_key']!r} "
+            f"!= contracts.taxonomy_compatibility_key={expected_compat_key!r}"
+        )
+    if expected_identity is not None and (
+        normalized["identity_contract_version"] != expected_identity
+    ):
+        mismatches.append(
+            f"identity_contract_version={normalized['identity_contract_version']!r} "
+            f"!= contracts.identity_contract_version={expected_identity!r}"
+        )
+
+    if mismatches:
+        raise SnapshotSchemaError(
+            f"{where}: boards[{idx}] 合同字段与冻结合同矛盾: {'; '.join(mismatches)}"
+            f"（external_code={normalized.get('external_code')!r}）"
+        )
+
+
 def _envelope_hash_material(envelope: dict[str, Any]) -> dict[str, Any]:
     """hash 覆盖 envelope 全部字段，**排除** payload_sha256 自身。"""
     return {k: v for k, v in envelope.items() if k != "payload_sha256"}
@@ -260,15 +322,23 @@ def build_envelope(
     if gen.tzinfo is None:
         gen = gen.replace(tzinfo=UTC)
 
+    frozen_contracts = dict(contracts or runtime_contracts())
+
+    # [RC1] boards：**无损**保留 provider 输出全部语义字段（分类学/身份合同/层级），
+    # 显式复制为 JSON-safe；字段集合之外出现未知键 → fail closed（禁止静默丢字段，
+    # 否则真实 sync_boards() 会因缺 taxonomy/identity 而 BoardSyncError）。
+    # [RC5] 生产者侧同时校验 board 级合同字段与 envelope 冻结合同一致（本地早失败）。
+    board_payloads: list[dict[str, str]] = []
+    for idx, board in enumerate(snapshot.boards):
+        normalized_board = _normalize_board_dict(board, idx, where="build_envelope")
+        _assert_board_contracts_consistent(
+            normalized_board, frozen_contracts, idx, where="build_envelope"
+        )
+        board_payloads.append(normalized_board)
+
     snapshot_payload = {
         "raw_rows": int(snapshot.raw_rows),
-        # [RC1] boards: **无损**保留 provider 输出全部语义字段（分类学/身份合同/层级），
-        # 显式复制为 JSON-safe；字段集合之外出现未知键 → fail closed（禁止静默丢字段，
-        # 否则真实 sync_boards() 会因缺 taxonomy/identity 而 BoardSyncError）。
-        "boards": [
-            _normalize_board_dict(b, idx, where="build_envelope")
-            for idx, b in enumerate(snapshot.boards)
-        ],
+        "boards": board_payloads,
         # memberships: tuple key (external_code, type) → 显式 JSON-safe 列表
         "memberships": [
             {
@@ -287,7 +357,7 @@ def build_envelope(
         "source": SOURCE_WENCAI,
         "generated_at": gen.astimezone(UTC).isoformat(),
         "producer_git_sha": producer_git_sha,
-        "contracts": dict(contracts or runtime_contracts()),
+        "contracts": frozen_contracts,
         "snapshot": snapshot_payload,
     }
 
@@ -398,9 +468,13 @@ def validate_envelope(
         raise SnapshotSchemaError("snapshot.memberships 必须是列表")
 
     # [RC1] 远端必须独立校验 board 语义字段完整性（不与本地共用"已经过了"的假设）
+    # [RC5] 同时强制 board 级合同字段与 envelope/runtime 冻结合同一致（fail closed）
     board_keys: set[tuple[str, str]] = set()
     for idx, board in enumerate(snapshot_payload["boards"]):
         normalized = _normalize_board_dict(board, idx, where="validate_envelope")
+        _assert_board_contracts_consistent(
+            normalized, contracts, idx, where="validate_envelope"
+        )
         board_keys.add((normalized["external_code"], normalized["type"]))
 
     # [RC1] membership 必须引用已声明的 board 身份（否则会被 sync_boards 静默丢弃）

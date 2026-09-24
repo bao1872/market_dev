@@ -320,6 +320,19 @@
         "tests/test_migration_097_review_capability_split_pg.py"
       ],
       "claim": "Migration 097 把「复盘」从 market_data 拆为第 4 个独立 capability market_review，使 self_selection / market_data / market_review / research_replay 四者互不隐式授权。upgrade Part 1 只为 capability='market_data' AND expires_at > now() AND source IS DISTINCT FROM 'admin_revoke' 的行补 market_review（复制 granted_at/expires_at，watchlist_limit=NULL，source='migration_review_split'，granted_by=NULL）：active 补、expired 不补、admin_revoke 不补，已存在 market_review 由 NOT EXISTS 跳过（不覆盖不重复）。upgrade Part 2 仅对 status='unused' 且含 market_data、不含 market_review 的历史邀请码一次性追加 market_review 条目，逐字复制 days/months 期限单位（days=30→days=30，months=2→months=2）且不复制 watchlist_limit；status='used'/'revoked' 的邀请码 JSONB 不修改；capabilities IS NULL 不制造 JSON（继续走 legacy plan fallback）。downgrade 删除全部 capability='market_review' 行（数据破坏性，含升级后新增的），从 status='unused' 邀请码 JSONB 移除 market_review 条目、移除后数组为空则按现有状态机置 status='revoked'，used/revoked 邀请码 JSON 不重写。兑换链路无运行时隐式继承：邀请码 JSONB 声明什么 capability 就只授予什么，绝不推导附加权限。"
+    },
+    {
+      "contract_id": "board_local_snapshot_import",
+      "governance_level": 2,
+      "semantic_owner": "app.cli.board_snapshot_import / app.services.board_sync_service",
+      "gate": [
+        "targeted-pg"
+      ],
+      "required": true,
+      "test_selectors": [
+        "tests/test_board_snapshot_import_pg.py"
+      ],
+      "claim": "The versioned local-manual board snapshot transport (local Mac Wencai fetch -> snapshot envelope -> SSH stdin -> remote importer) round-trips provider board semantics losslessly into the real board_sync_service.sync_boards() DB owner without mocking it: industry L1/L2/L3 hierarchy and parent links, taxonomy and identity contract versions and membershipVersion persist, board-level contract contradictions and sensitive fields are rejected fail-closed, identical same-day replays are idempotent, and changed same-day membership is reflected in exact-T PIT board resolution with no cooldown or once-per-day restriction."
     }
   ]
 }

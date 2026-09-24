@@ -2117,6 +2117,170 @@ def _derive_after_close_final_status(
     return AfterCloseRunStatus.SUCCEEDED, optional_failures
 
 
+async def _run_shared_checking_coverage_step(
+    *,
+    job_run_id: uuid.UUID,
+    trade_date: date,
+    worker_id: str | None,
+    lease_epoch: int | None,
+    refresh_daily_coverage: float | None,
+) -> bool:
+    """[RC2/RC4] normal / resume / restart 共享的 checking_coverage 步骤。
+
+    - [RC2] 位置：位于 refreshing_daily 与 rebuilding_market_dashboard 之间，**不在**
+      `if not skip_refresh` 分支内 —— 「已经刷新过日线」不得等价于「覆盖率已通过」。
+    - 覆盖率来源：本次刷新结果 refresh_daily_coverage；resume/restart 无刷新结果时从
+      persisted 日线事实用 compute_daily_coverage()（BarsCoverageService owner）重算。
+    - [RC4] 本步骤**非 durable checkpoint**：成功时绝不改变 last_completed_step。
+      单调性：更晚的 durable checkpoint（如 computing_features）不得因本步骤回退；
+      也不得为 mainchain_stage restart 伪造 refreshing_daily 完成。
+
+    Returns:
+        True = 覆盖率通过，调用方继续；False = 已标记 failed，调用方应 return。
+    """
+    # ---- 步骤 1.4: checking_coverage（normal / resume / restart 共享，non-optional）----
+    # [BOARD-LOCAL-OWNERSHIP-01] 「已经刷新过日线」≠「覆盖率已经检查通过」。
+    # 覆盖率检查必须位于 refreshing_daily 与 rebuilding_market_dashboard 之间，
+    # 且**不得**被 skip_refresh 掩盖（旧实现把它嵌在 `if not skip_refresh` 内，
+    # 导致 daily_ready / legacy syncing_boards 起点直接绕过 coverage）。
+    # 覆盖率来源：
+    #   1) 本次刚完成 refreshing_daily → 直接用 refresh_daily_coverage（不重复查询）；
+    #   2) resume/restart（无刷新结果）→ 从 **persisted 日线事实** 重算，
+    #      复用既有 compute_daily_coverage → BarsCoverageService（禁止复制覆盖率数学）。
+    if refresh_daily_coverage is None:
+        # resume/restart：日线刷新被跳过，必须从持久化日线事实重新评估覆盖率。
+        # 「刷新过日线」不得自动等价于「coverage 已通过」，否则 daily_ready /
+        # legacy syncing_boards 起点会静默绕过 coverage 门禁。
+        async with AsyncSessionLocal() as _cov_db:
+            _cov_covered, _cov_total, refresh_daily_coverage = (
+                await compute_daily_coverage(_cov_db, trade_date)
+            )
+        logger.info(
+            "[AfterClose] resume/restart 覆盖率重算（persisted bars owner）: "
+            "trade_date=%s, covered=%s/%s, coverage=%.2f%%",
+            trade_date, _cov_covered, _cov_total,
+            (refresh_daily_coverage or 0) * 100,
+        )
+
+    # [AC-04 / Phase 5A] checking_coverage 步骤：仅验证日线覆盖率就绪
+    # PRD30 AC-04：盘后编排 readiness 只依赖目标交易日日线数据，
+    # 15m 缺失不得阻塞 after-close run。15m intraday readiness 工具
+    # 保留在 BarsCoverageService 供其他链路使用，after-close 不再调用。
+    # [AC-02] 通过统一执行器运行（non-optional）：覆盖率不足时闭包抛错，
+    # 执行器标记 failed 并重新抛出，由外围 except 标记整个 run failed。
+    async with AsyncSessionLocal() as db:
+        job_run = await _get_job_run_or_raise(db, job_run_id)
+        await _update_orchestrator_status(
+            db=db,
+            job_run=job_run,
+            status=AfterCloseRunStatus.CHECKING_COVERAGE,
+            message=f"开始检查日线覆盖率: trade_date={trade_date}",
+        )
+        await db.commit()
+
+    async def _check_coverage_op() -> dict[str, Any]:
+        ok = (
+            refresh_daily_coverage is not None
+            and refresh_daily_coverage >= 0.9
+        )
+        if not ok:
+            raise RuntimeError(
+                f"日线覆盖率检查未通过: daily_coverage="
+                f"{refresh_daily_coverage} < 0.9"
+            )
+        return {"daily_coverage": refresh_daily_coverage, "ok": True}
+
+    # [AC-02] 通过统一执行器运行（non-optional）：覆盖率不足时闭包抛错，
+    # 执行器标记 step_summary=failed。覆盖率不足是预期内的"准入失败"，
+    # 不应作为未处理异常向上传播（与 HEAD 行为一致：标记 failed 后 return），
+    # 故在此捕获并转入优雅终态处理（下方 if not daily_coverage_ok 分支）。
+    try:
+        _, coverage_summary = await execute_orchestrator_step(
+            "checking_coverage",
+            _check_coverage_op,
+            timeout_seconds=_step_timeout("checking_coverage"),
+            progress=_make_step_progress_callback(job_run_id, worker_id),
+            cancellation_check=_make_step_cancellation_check(job_run_id),
+            heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
+        )
+        daily_coverage_ok = coverage_summary["status"] == "succeeded"
+    except Exception as _cov_exc:
+        logger.warning(
+            "[AfterClose] [AC-04] 日线覆盖率检查未通过（准入失败）: "
+            "job_run_id=%s, error=%s",
+            job_run_id, _cov_exc,
+        )
+        daily_coverage_ok = False
+
+    if not daily_coverage_ok:
+        # [AC-04] 日线覆盖率不足 → 标记 failed（不是 succeeded），不创建 DSA
+        fail_reasons: list[str] = [
+            f"daily_coverage={refresh_daily_coverage} < 0.9"
+        ]
+        fail_message = (
+            f"日线覆盖率检查未通过，不创建 DSA: {', '.join(fail_reasons)}"
+        )
+        async with AsyncSessionLocal() as db:
+            job_run = await _get_job_run_or_raise(db, job_run_id)
+            await _update_orchestrator_status(
+                db=db,
+                job_run=job_run,
+                status=AfterCloseRunStatus.FAILED,
+                message=fail_message,
+                payload={
+                    "daily_coverage": refresh_daily_coverage,
+                    "fail_reasons": fail_reasons,
+                },
+            )
+            job_run.status = "failed"
+            job_run.error_code = "DAILY_COVERAGE_BLOCKED"
+            job_run.error_message = fail_message[:500]
+            job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
+            await _update_heartbeat_and_step(
+                db, job_run, "failed", worker_id,
+            )
+            await db.commit()
+        logger.warning(
+            "[AfterClose] [AC-04] 日线覆盖率检查未通过，编排失败: "
+            "job_run_id=%s, %s",
+            job_run_id, fail_message,
+        )
+        return False
+
+    logger.info(
+        "[AfterClose] [AC-04] 日线覆盖率检查通过: daily=%.1f%%",
+        (refresh_daily_coverage or 0) * 100,
+    )
+
+    # [Phase8A] trigger_dsa=False 且覆盖率达标：在 computing_features 前创建 DSA run
+    # DSA 由 orchestrator 创建并原子 inline claim，避免 generic worker 抢先领取
+    # [required compatibility projection identity] DSA run 创建推迟到 computing_features
+    # 步骤（snapshot_run_id 确定后），使 source_core_run_id=snapshot_run_id 可在创建时
+    # 写入 input_overrides。此处仅更新状态说明"待 computing_features 创建 DSA run"，
+    # 不提前创建（避免无 source_core identity 的 StrategyRun）。
+    logger.info(
+        "[AfterClose] [Phase8A] 覆盖率达标，DSA run 将在 computing_features "
+        "（snapshot_run_id 确定后）创建: trade_date=%s, coverage=%.1f%%",
+        trade_date, (refresh_daily_coverage or 0) * 100,
+    )
+    async with AsyncSessionLocal() as db:
+        job_run = await _get_job_run_or_raise(db, job_run_id)
+        await _update_orchestrator_status(
+            db=db,
+            job_run=job_run,
+            status=AfterCloseRunStatus.CHECKING_COVERAGE,
+            message="日线覆盖率检查通过（非 durable 步骤，不改变 checkpoint）",
+        )
+        await _update_heartbeat_and_step(
+            # [RC4] 覆盖率**非 durable**：传 None，绝不推进/回退 last_completed_step
+            # （否则 resume 会把已完成的 computing_features 倒退成 refreshing_daily）。
+            db, job_run, None, worker_id,
+        )
+        await db.commit()
+
+        return True
+
+
 async def execute_after_close_run(
     job_run_id: uuid.UUID,
     trade_date: date,
@@ -2478,148 +2642,29 @@ async def execute_after_close_run(
                             dsa_run_id=dsa_run_id,
                             payload={"dsa_run_id": str(dsa_run_id)},
                         )
+                        # [RC4] resume/restart 路径（skip_refresh=True）：本处只记录
+                        # 已创建的 dsa_run_id 并刷新 heartbeat/lease，**绝不**推进/回退
+                        # last_completed_step —— 传 None。
+                        # 单调性：既不能把已有的更晚 checkpoint（如 computing_features）
+                        # 倒退成 refreshing_daily，也不得为 mainchain_stage restart
+                        # 伪造 refreshing_daily 完成（execution start 语义由 mainchain_stage 表达）。
                         await _update_heartbeat_and_step(
-                            db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
+                            db, job_run, None, worker_id,
                         )
                         await db.commit()
 
         # ---- 步骤 1.4: checking_coverage（normal / resume / restart 共享，non-optional）----
-        # [BOARD-LOCAL-OWNERSHIP-01] 「已经刷新过日线」≠「覆盖率已经检查通过」。
-        # 覆盖率检查必须位于 refreshing_daily 与 rebuilding_market_dashboard 之间，
-        # 且**不得**被 skip_refresh 掩盖（旧实现把它嵌在 `if not skip_refresh` 内，
-        # 导致 daily_ready / legacy syncing_boards 起点直接绕过 coverage）。
-        # 覆盖率来源：
-        #   1) 本次刚完成 refreshing_daily → 直接用 refresh_daily_coverage（不重复查询）；
-        #   2) resume/restart（无刷新结果）→ 从 **persisted 日线事实** 重算，
-        #      复用既有 compute_daily_coverage → BarsCoverageService（禁止复制覆盖率数学）。
-        if refresh_daily_coverage is None:
-            # resume/restart：日线刷新被跳过，必须从持久化日线事实重新评估覆盖率。
-            # 「刷新过日线」不得自动等价于「coverage 已通过」，否则 daily_ready /
-            # legacy syncing_boards 起点会静默绕过 coverage 门禁。
-            async with AsyncSessionLocal() as _cov_db:
-                _cov_covered, _cov_total, refresh_daily_coverage = (
-                    await compute_daily_coverage(_cov_db, trade_date)
-                )
-            logger.info(
-                "[AfterClose] resume/restart 覆盖率重算（persisted bars owner）: "
-                "trade_date=%s, covered=%s/%s, coverage=%.2f%%",
-                trade_date, _cov_covered, _cov_total,
-                (refresh_daily_coverage or 0) * 100,
-            )
-
-        # [AC-04 / Phase 5A] checking_coverage 步骤：仅验证日线覆盖率就绪
-        # PRD30 AC-04：盘后编排 readiness 只依赖目标交易日日线数据，
-        # 15m 缺失不得阻塞 after-close run。15m intraday readiness 工具
-        # 保留在 BarsCoverageService 供其他链路使用，after-close 不再调用。
-        # [AC-02] 通过统一执行器运行（non-optional）：覆盖率不足时闭包抛错，
-        # 执行器标记 failed 并重新抛出，由外围 except 标记整个 run failed。
-        async with AsyncSessionLocal() as db:
-            job_run = await _get_job_run_or_raise(db, job_run_id)
-            await _update_orchestrator_status(
-                db=db,
-                job_run=job_run,
-                status=AfterCloseRunStatus.CHECKING_COVERAGE,
-                message=f"开始检查日线覆盖率: trade_date={trade_date}",
-            )
-            await db.commit()
-
-        async def _check_coverage_op() -> dict[str, Any]:
-            ok = (
-                refresh_daily_coverage is not None
-                and refresh_daily_coverage >= 0.9
-            )
-            if not ok:
-                raise RuntimeError(
-                    f"日线覆盖率检查未通过: daily_coverage="
-                    f"{refresh_daily_coverage} < 0.9"
-                )
-            return {"daily_coverage": refresh_daily_coverage, "ok": True}
-
-        # [AC-02] 通过统一执行器运行（non-optional）：覆盖率不足时闭包抛错，
-        # 执行器标记 step_summary=failed。覆盖率不足是预期内的"准入失败"，
-        # 不应作为未处理异常向上传播（与 HEAD 行为一致：标记 failed 后 return），
-        # 故在此捕获并转入优雅终态处理（下方 if not daily_coverage_ok 分支）。
-        try:
-            _, coverage_summary = await execute_orchestrator_step(
-                "checking_coverage",
-                _check_coverage_op,
-                timeout_seconds=_step_timeout("checking_coverage"),
-                progress=_make_step_progress_callback(job_run_id, worker_id),
-                cancellation_check=_make_step_cancellation_check(job_run_id),
-                heartbeat=_make_step_heartbeat(job_run_id, worker_id, lease_epoch),
-            )
-            daily_coverage_ok = coverage_summary["status"] == "succeeded"
-        except Exception as _cov_exc:
-            logger.warning(
-                "[AfterClose] [AC-04] 日线覆盖率检查未通过（准入失败）: "
-                "job_run_id=%s, error=%s",
-                job_run_id, _cov_exc,
-            )
-            daily_coverage_ok = False
-
-        if not daily_coverage_ok:
-            # [AC-04] 日线覆盖率不足 → 标记 failed（不是 succeeded），不创建 DSA
-            fail_reasons: list[str] = [
-                f"daily_coverage={refresh_daily_coverage} < 0.9"
-            ]
-            fail_message = (
-                f"日线覆盖率检查未通过，不创建 DSA: {', '.join(fail_reasons)}"
-            )
-            async with AsyncSessionLocal() as db:
-                job_run = await _get_job_run_or_raise(db, job_run_id)
-                await _update_orchestrator_status(
-                    db=db,
-                    job_run=job_run,
-                    status=AfterCloseRunStatus.FAILED,
-                    message=fail_message,
-                    payload={
-                        "daily_coverage": refresh_daily_coverage,
-                        "fail_reasons": fail_reasons,
-                    },
-                )
-                job_run.status = "failed"
-                job_run.error_code = "DAILY_COVERAGE_BLOCKED"
-                job_run.error_message = fail_message[:500]
-                job_run.finished_at = datetime.now(ZoneInfo("Asia/Shanghai"))
-                await _update_heartbeat_and_step(
-                    db, job_run, "failed", worker_id,
-                )
-                await db.commit()
-            logger.warning(
-                "[AfterClose] [AC-04] 日线覆盖率检查未通过，编排失败: "
-                "job_run_id=%s, %s",
-                job_run_id, fail_message,
-            )
+        # [RC2] 共享位置与来源；[RC4] 非 durable、绝不动 checkpoint。
+        # 详见 `_run_shared_checking_coverage_step` docstring。
+        coverage_passed = await _run_shared_checking_coverage_step(
+            job_run_id=job_run_id,
+            trade_date=trade_date,
+            worker_id=worker_id,
+            lease_epoch=lease_epoch,
+            refresh_daily_coverage=refresh_daily_coverage,
+        )
+        if not coverage_passed:
             return
-
-        logger.info(
-            "[AfterClose] [AC-04] 日线覆盖率检查通过: daily=%.1f%%",
-            (refresh_daily_coverage or 0) * 100,
-        )
-
-        # [Phase8A] trigger_dsa=False 且覆盖率达标：在 computing_features 前创建 DSA run
-        # DSA 由 orchestrator 创建并原子 inline claim，避免 generic worker 抢先领取
-        # [required compatibility projection identity] DSA run 创建推迟到 computing_features
-        # 步骤（snapshot_run_id 确定后），使 source_core_run_id=snapshot_run_id 可在创建时
-        # 写入 input_overrides。此处仅更新状态说明"待 computing_features 创建 DSA run"，
-        # 不提前创建（避免无 source_core identity 的 StrategyRun）。
-        logger.info(
-            "[AfterClose] [Phase8A] 覆盖率达标，DSA run 将在 computing_features "
-            "（snapshot_run_id 确定后）创建: trade_date=%s, coverage=%.1f%%",
-            trade_date, (refresh_daily_coverage or 0) * 100,
-        )
-        async with AsyncSessionLocal() as db:
-            job_run = await _get_job_run_or_raise(db, job_run_id)
-            await _update_orchestrator_status(
-                db=db,
-                job_run=job_run,
-                status=AfterCloseRunStatus.REFRESHING_DAILY,
-                message="DSA run 将在 computing_features 创建（待 snapshot_run_id）",
-            )
-            await _update_heartbeat_and_step(
-                db, job_run, AfterCloseRunStatus.REFRESHING_DAILY.value, worker_id,
-            )
-            await db.commit()
 
         # ---- 步骤 1.5: rebuilding_market_dashboard（canonical 复盘计算，optional）----
         # [REVIEW-V2-R1] 本步骤已由 sidecar 升级为产品意义上的 canonical 复盘计算。
