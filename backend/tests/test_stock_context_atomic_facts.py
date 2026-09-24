@@ -1277,8 +1277,8 @@ async def test_node_availability_legacy_no_node_cluster(
     )
     db_session.add(snapshot)
     await db_session.flush()
-    # _find_latest_succeeded_run 按 schema_version=_SCHEMA_VERSION=4 过滤，不会查到 schema_version=3 的 run
-    # → 顶层 reasonCode=no_published_full_run + nodeAvailability.state=unknown
+    # CURRENT owner（resolve_current_core_run）按 schema_version=_SCHEMA_VERSION 过滤，
+    # 不会查到 schema_version=3 的 run → 顶层 reasonCode=no_published_full_run + nodeAvailability.state=unknown
     resp = await client.get(
         f"/v1/stocks/{inst.symbol}/context",
         headers=_auth_headers(member_with_sub.id),

@@ -7,7 +7,7 @@
   禁止请求时写数据（事实由盘后快照成功发布后异步生成，本接口只做只读查询）。
   需要 require_active_subscription 守卫（admin 豁免，member 需有效订阅）。
   as_of 直接声明 date | None，非法值由 FastAPI 返回 422。
-  as_of 历史查询时严格 point-in-time（仅查 succeeded+published+full run），禁止返回未来快照或未来变化。
+  as_of 历史查询时严格 point-in-time（仅查 canonical after_close full succeeded run），禁止返回未来快照或未来变化。
 - GET /v1/admin/stocks/{symbol}/debug
   管理员调试接口，在用户响应基础上补充原始 payload + 原子事实可追溯信息。
   前后端统一使用 symbol（非 instrument_id）。
@@ -29,6 +29,7 @@ from app.core.deps import get_db
 from app.models.instrument import Instrument
 from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.models.stock_feature_snapshot_run import (
+    RUN_TYPE_AFTER_CLOSE,
     STATUS_SUCCEEDED,
     StockFeatureSnapshotRun,
 )
@@ -57,12 +58,13 @@ from app.services.atomic_fact_contract_service import (
     compute_product_observations,
     compute_recent_changes,
 )
+from app.services.current_core_run_service import resolve_current_core_run
 
 # [CHANGE-20260719-001 §五-D] 使用生产者 _SCHEMA_VERSION 替代本地硬编码 = 1
 # CHANGE-20260718-007 §4.4.1 修复了 watchlist.py / market_stocks_service.py 的硬编码，
 # 但遗漏了 stock_context.py 的本地 _SCHEMA_VERSION = 1（查询 StockFeatureSnapshotRun.schema_version）。
-# 生产写入 schema_version=3（feature_snapshot_service._SCHEMA_VERSION），
-# 本地 = 1 会导致 _find_latest_succeeded_run 查不到生产 run。此处统一从生产者 import。
+# 生产写入 schema_version=_SCHEMA_VERSION（feature_snapshot_service），
+# 本地硬编码会导致 CURRENT owner 查不到生产 run。此处统一从生产者 import。
 from app.services.feature_snapshot_service import _SCHEMA_VERSION
 
 logger = logging.getLogger("api.stock_context")
@@ -95,115 +97,11 @@ async def _get_instrument_by_symbol(
     return instrument
 
 
-async def _find_latest_succeeded_run(
-    session: AsyncSession,
-    schema_version: int = _SCHEMA_VERSION,
-) -> StockFeatureSnapshotRun | None:
-    """查找最新的 succeeded + published + full scope 的 snapshot run。
-
-    [CHANGE-20260729-007] 优先读 factor_publications pointer（stock_core kind），
-    无 pointer 时回退到 published_at IS NOT NULL（兼容旧数据）。
-
-    P0-3: 确定性排序 — trade_date DESC, published_at DESC, finished_at DESC
-    确保同日多 run 时选择最新发布的批次。
-    """
-    # [CHANGE-20260729-007] 优先读 publication pointer
-    from app.models.factor_publication import (
-        PUBLICATION_KIND_STOCK_CORE,
-        FactorPublication,
-    )
-
-    pub_stmt = (
-        select(FactorPublication)
-        .where(FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE)
-        .order_by(desc(FactorPublication.published_at))
-        .limit(1)
-    )
-    pub_result = await session.execute(pub_stmt)
-    pub = pub_result.scalar_one_or_none()
-    if pub is not None:
-        run = await session.get(StockFeatureSnapshotRun, pub.data_run_id)
-        if run is not None and run.schema_version == schema_version:
-            return run
-        # pointer 指向的 run 不存在或 schema 不匹配，回退到旧逻辑
-
-    # 回退：published_at IS NOT NULL（兼容无 pointer 的旧数据）
-    stmt = (
-        select(StockFeatureSnapshotRun)
-        .where(
-            StockFeatureSnapshotRun.schema_version == schema_version,
-            StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
-            StockFeatureSnapshotRun.published_at.is_not(None),
-            StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
-        )
-        .order_by(
-            desc(StockFeatureSnapshotRun.trade_date),
-            desc(StockFeatureSnapshotRun.published_at),
-            desc(StockFeatureSnapshotRun.finished_at),
-        )
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
-
-
-async def _find_run_by_trade_date(
-    session: AsyncSession,
-    trade_date: date,
-    schema_version: int = _SCHEMA_VERSION,
-) -> StockFeatureSnapshotRun | None:
-    """按 as_of 截止日期查找 succeeded+published+full run。
-
-    [CHANGE-20260729-007] 优先读 factor_publications pointer（stock_core kind），
-    匹配 trade_date <= as_of 的最新 pointer，无 pointer 时回退到旧逻辑。
-
-    as_of 为截止日期语义（非当天精确匹配）：
-    - 查 `trade_date <= as_of`，按 trade_date DESC, published_at DESC, finished_at DESC
-      取最新 1 条；
-    - 周末/节假日/无批次日期返回该日期之前最近一次已发布状态（而非空态）。
-    """
-    # [CHANGE-20260729-007] 优先读 publication pointer (trade_date <= as_of)
-    from app.models.factor_publication import (
-        PUBLICATION_KIND_STOCK_CORE,
-        FactorPublication,
-    )
-
-    pub_stmt = (
-        select(FactorPublication)
-        .where(
-            FactorPublication.publication_kind == PUBLICATION_KIND_STOCK_CORE,
-            FactorPublication.trade_date <= trade_date,
-        )
-        .order_by(desc(FactorPublication.trade_date))
-        .limit(1)
-    )
-    pub_result = await session.execute(pub_stmt)
-    pub = pub_result.scalar_one_or_none()
-    if pub is not None:
-        run = await session.get(StockFeatureSnapshotRun, pub.data_run_id)
-        if run is not None and run.schema_version == schema_version:
-            return run
-        # pointer 指向的 run 不存在或 schema 不匹配，回退到旧逻辑
-
-    # 回退：published_at IS NOT NULL（兼容无 pointer 的旧数据）
-    stmt = (
-        select(StockFeatureSnapshotRun)
-        .where(
-            StockFeatureSnapshotRun.trade_date <= trade_date,
-            StockFeatureSnapshotRun.schema_version == schema_version,
-            StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
-            StockFeatureSnapshotRun.published_at.is_not(None),
-            StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
-        )
-        .order_by(
-            desc(StockFeatureSnapshotRun.trade_date),
-            desc(StockFeatureSnapshotRun.published_at),
-            desc(StockFeatureSnapshotRun.finished_at),
-        )
-        .limit(1)
-    )
-    result = await session.execute(stmt)
-    return result.scalar_one_or_none()
+# [CURRENT-CORE-OWNER-REGRESSION-01-R1] 旧 ``_find_latest_succeeded_run`` /
+# ``_find_run_by_trade_date`` 已删除：两者以 legacy ``stock_core`` FactorPublication
+# 为 CURRENT authority，与唯一 owner ``resolve_current_core_run``（canonical after-close
+# CoreRun）冲突，会重演 08-26 永久 pin 回归。CURRENT 解析统一走 owner，本模块不再
+# 内联第二套 CURRENT 查询。
 
 
 async def _resolve_current_core_run(
@@ -519,26 +417,32 @@ def _empty_atomic_response(
     }
 
 
-async def _find_recent_published_snapshots(
+async def _find_recent_canonical_snapshots(
     session: AsyncSession,
     instrument_id: UUID,
     limit: int = 10,
     as_of: date | None = None,
 ) -> list[dict[str, Any]]:
-    """一次查询读取最近 ≤limit 个已发布 full scope 快照（升序），供近期变化计算。
+    """一次查询读取最近 ≤limit 个 canonical after-close 快照（升序），供近期变化计算。
 
     只读查询，不写 stock_state_events。
-    as_of 给定时：SQL 直接加 `trade_date <= as_of` 过滤（再 DESC LIMIT，最后升序），
-    禁止先取最新 10 条再在内存过滤（PROMPT 一.8）。
+    CURRENT lineage 与 ``resolve_current_core_run`` 完全一致（不再以 ``published_at``
+    作为 CURRENT readiness gate —— AfterClose 计算完成即 ``succeeded`` + ``finished_at``
+    有值，不经过 legacy ``stock_core`` publishing）：
+      run_type == after_close AND status == succeeded AND schema_version == 当前
+      AND finished_at IS NOT NULL AND scope == "full"。
+    as_of 给定时：SQL 直接加 ``run.trade_date <= as_of``（再 DESC LIMIT，最后升序），
+    禁止先取最新 N 条再在内存过滤（PROMPT 一.8）。
     """
     from app.models.stock_feature_snapshot import StockFeatureSnapshot
 
     conditions = [
         StockFeatureSnapshot.instrument_id == instrument_id,
+        StockFeatureSnapshotRun.run_type == RUN_TYPE_AFTER_CLOSE,
         StockFeatureSnapshotRun.status == STATUS_SUCCEEDED,
-        StockFeatureSnapshotRun.published_at.is_not(None),
-        StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
         StockFeatureSnapshotRun.schema_version == _SCHEMA_VERSION,
+        StockFeatureSnapshotRun.finished_at.is_not(None),
+        StockFeatureSnapshotRun.metadata_["scope"].astext == "full",
     ]
     if as_of is not None:
         conditions.append(StockFeatureSnapshotRun.trade_date <= as_of)
@@ -550,7 +454,7 @@ async def _find_recent_published_snapshots(
             StockFeatureSnapshot.source_run_id == StockFeatureSnapshotRun.id,
         )
         .where(*conditions)
-        .order_by(desc(StockFeatureSnapshot.trade_date))
+        .order_by(desc(StockFeatureSnapshotRun.trade_date))
         .limit(limit)
     )
     result = await session.execute(stmt)
@@ -581,11 +485,11 @@ async def _build_stock_context(
     """
     instrument = await _get_instrument_by_symbol(session, symbol)
 
-    # 查找 run（as_of 历史回看 or 最新）
-    if as_of is not None:
-        run = await _find_run_by_trade_date(session, as_of)
-    else:
-        run = await _find_latest_succeeded_run(session)
+    # CURRENT Core identity 统一收敛到唯一 owner（canonical after-close CoreRun）。
+    # 不再于本模块内联第二套 CURRENT 查询：旧 _find_run_by_trade_date /
+    # _find_latest_succeeded_run 以 legacy stock_core FactorPublication 为 authority，
+    # 与该 owner 冲突，会重演 08-26 永久 pin 回归。as_of 的 PIT 语义由 owner 内部处理。
+    run = await resolve_current_core_run(session, as_of=as_of)
 
     if run is None:
         return _empty_atomic_response(instrument, reason_code="no_published_full_run")
@@ -609,8 +513,8 @@ async def _build_stock_context(
     else:
         facts = compute_atomic_facts(snapshot.structural_payload, snapshot.temporal_payload)
 
-    # CHANGE-20260716-006: 近期变化只保留最近一个交易日——查询 ≤2 个已发布快照
-    recent_snaps = await _find_recent_published_snapshots(
+    # CHANGE-20260716-006: 近期变化只保留最近一个交易日——查询 ≤2 个 canonical after-close 快照
+    recent_snaps = await _find_recent_canonical_snapshots(
         session, instrument.id, limit=2, as_of=as_of,
     )
     recent_changes = compute_recent_changes(recent_snaps)
@@ -787,9 +691,9 @@ async def get_first_pyramid(
     # 优先从已发布 snapshot 读取（如果 summary_payload 含 first_pyramid）
     # [CURRENT-CORE-OWNER-REGRESSION-01] CURRENT 第一金字塔走 canonical after-close CoreRun：
     #   resolve_current_core_run → 最新 after_close full succeeded CoreRun → exact snapshot。
-    # 不再使用 _find_latest_succeeded_run / _find_run_by_trade_date——两者以
-    # stock_core FactorPublication 为 authority，该 pointer 自 2026-08-27 起不再推进，
-    # 会把第一金字塔永久 pin 在 2026-08-26。
+    # CURRENT 第一金字塔走 canonical after-close CoreRun（唯一 owner）：
+    #   resolve_current_core_run → 最新 after_close full succeeded CoreRun → exact snapshot。
+    # 旧 _find_latest_succeeded_run / _find_run_by_trade_date 已删除，统一走 owner。
     run = await _resolve_current_core_run(db, as_of=as_of)
     if run is not None:
         snapshot, _ = await _get_snapshot_for_instrument(db, instrument.id, run)
