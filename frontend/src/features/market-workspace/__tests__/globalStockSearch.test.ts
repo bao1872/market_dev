@@ -17,7 +17,6 @@
 // B. /v1/instruments 返回 Instrument.id，直接消费 item.id（key/has/add/remove），
 //    禁止 unsafe cast 掩盖 id/instrument_id 字段差异
 // C. Toast 使用 positional contract，不出现 .show({ 错误调用
-// D. UserAppShell topbar z-index 高于 moduleNav
 
 import { strict as assert } from 'node:assert'
 import { test } from 'node:test'
@@ -231,16 +230,36 @@ test('GlobalStockSearch Toast 使用 positional contract', () => {
   )
 })
 
-// ===== D. UserAppShell topbar z-index > moduleNav =====
-test('UserAppShell topbar z-index 高于 moduleNav', () => {
+// D. UserAppShell 一级导航内联进 Topbar（单行 header，无 fixed 第二行）
+
+// ===== D. UserAppShell moduleNav 内联进 Topbar（[PANJI-USER-HEADER-NAV-INLINE-01]） =====
+test('UserAppShell moduleNav 内联进 Topbar，无 fixed 第二行导航', () => {
   const scss = readSource(SHELL_SCSS_PATH)
-  const topbarMatch = scss.match(/:global\(\.topbar\)\s*\{[^}]*z-index:\s*(\d+)/)
-  const moduleNavMatch = scss.match(/\.moduleNav\s*\{[^}]*z-index:\s*(\d+)/)
-  assert.ok(topbarMatch && moduleNavMatch, 'topbar 与 moduleNav 必须都声明 z-index')
-  const topbarZ = Number(topbarMatch![1])
-  const moduleNavZ = Number(moduleNavMatch![1])
+  // moduleNav 不再是 fixed 第二行（旧契约 top:58px + height:50px 已删除）
+  const moduleNavBlock = scss.match(/\.moduleNav\s*\{([\s\S]*?)\n\}/)
+  assert.ok(moduleNavBlock, 'UserAppShell.module.scss 必须声明 .moduleNav')
+  const navBlock = moduleNavBlock![1]
   assert.ok(
-    topbarZ > moduleNavZ,
-    `UserAppShell topbar z-index (${topbarZ}) 必须高于 moduleNav (${moduleNavZ})`,
+    /position:\s*static/.test(navBlock),
+    '.moduleNav 必须是 position: static（Topbar 内联），不得再是 fixed 第二行',
   )
+  assert.ok(
+    !/position:\s*fixed/.test(navBlock) && !/top:\s*58px/.test(navBlock),
+    '.moduleNav 禁止保留 fixed/top:58px 旧第二行布局',
+  )
+  // topbar 覆盖为左对齐布局（Logo → 导航 → 搜索 → 右侧）
+  const topbarMatch = scss.match(/:global\(\.topbar\)\s*\{([^}]*)\}/)
+  assert.ok(topbarMatch, '必须存在 :global(.topbar) 覆盖')
+  assert.ok(
+    /justify-content:\s*flex-start/.test(topbarMatch![1]),
+    'topbar 覆盖必须使用 justify-content: flex-start（内联导航后不再 space-between）',
+  )
+  // main 只保留 58px Topbar 高度，不留旧第二行 108px
+  const mainMatch = scss.match(/:global\(\.main\)\s*\{([^}]*)\}/)
+  assert.ok(mainMatch, '必须存在 :global(.main) 覆盖')
+  assert.ok(
+    /padding-top:\s*v\.\$topbar-height/.test(mainMatch![1]),
+    'main padding-top 必须是 v.$topbar-height（58px），禁止残留 108px 双行高度',
+  )
+  assert.ok(!scss.includes('108px'), '禁止残留旧双行 header 的 108px')
 })

@@ -87,6 +87,21 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
             <BrandLogo variant="sidebar" />
           </NavLink>
         </div>
+        <nav className={styles.moduleNav} aria-label="模块导航">
+          {visibleNavItems.map((item) => {
+            const to = buildNavTo(item.path)
+            const active = resolveActiveNav(location.pathname, searchParams, item.path)
+            return (
+              <NavLink
+                key={item.path}
+                to={to}
+                className={clsx(styles.navLink, active && styles.navLinkActive)}
+              >
+                {item.label}
+              </NavLink>
+            )
+          })}
+        </nav>
         <GlobalStockSearch />
         <div className="top-right">
           <div className="top-status">
@@ -96,21 +111,6 @@ export default function UserAppShell({ children }: { children?: ReactNode }) {
           <AccountMenu variant="user" />
         </div>
       </header>
-      <nav className={styles.moduleNav} aria-label="模块导航">
-        {visibleNavItems.map((item) => {
-          const to = buildNavTo(item.path)
-          const active = resolveActiveNav(location.pathname, searchParams, item.path)
-          return (
-            <NavLink
-              key={item.path}
-              to={to}
-              className={clsx(styles.navLink, active && styles.navLinkActive)}
-            >
-              {item.label}
-            </NavLink>
-          )
-        })}
-      </nav>
       <main className="main">
         <div className="content">{children ?? <Outlet />}</div>
       </main>

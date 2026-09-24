@@ -9,28 +9,41 @@
   :global(.topbar) {
     left: 0;
     z-index: 1000;
+
+    // 一级导航已内联进 Topbar（Logo → 导航 → 搜索 → 右侧），
+    // 覆盖全局 space-between，改为整体左对齐、右区自动靠右。
+    justify-content: flex-start;
+    gap: 14px;
+  }
+
+  :global(.top-right) {
+    margin-left: auto;
+    flex-shrink: 0;
   }
 
   :global(.main) {
     margin-left: 0;
-    // 两行 header：Global Header (58px) + Module Navigation (50px)
-    padding-top: 108px;
+    // 第二行导航已删除，仅剩 58px Topbar。
+    padding-top: v.$topbar-height;
   }
 }
 
 .moduleNav {
-  position: fixed;
-  top: 58px;
-  left: 0;
-  right: 0;
-  z-index: 900;
-  height: 50px;
+  position: static;
+
+  height: 100%;
+
   display: flex;
   align-items: center;
+
   gap: 4px;
-  padding: 0 20px;
-  background: v.$color-bg;
-  border-bottom: 1px solid v.$color-border;
+
+  padding: 0;
+
+  background: transparent;
+  border-bottom: 0;
+
+  flex: 0 0 auto;
 }
 
 .brandLink {
