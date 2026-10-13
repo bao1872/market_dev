@@ -169,3 +169,33 @@ test('frontend does not recompute SQZMOM', () => {
     'StrategyChart.tsx 必须从 data.sqzmom_scolor 读取后端返回的 squeeze marker 颜色',
   )
 })
+
+// [A-SHARE-SQZMOM-COLOR] 只改前端绘图色，不改 Pine bcolor/scolor 的数据语义。
+test('SQZMOM A-share histogram red-positive green-negative keeps strength and squeeze semantics', () => {
+  const chartSrc = readSource(CHART_PATH)
+  const histBlock = chartSrc.match(/const SQZMOM_BCOLOR: Record<string, string> = \{([\s\S]*?)\n\}/)
+  assert.ok(histBlock, 'SQZMOM_BCOLOR map must exist')
+  const histEntries = Object.fromEntries(
+    [...histBlock[1].matchAll(/^\s*(lime|green|red|maroon):\s*'(#[0-9A-Fa-f]{6})',?$/gm)]
+      .map((m) => [m[1], m[2]]),
+  )
+  assert.deepEqual(histEntries, {
+    lime: '#FF0000',   // positive, strengthening: bright red
+    green: '#800000',  // positive, weakening: dark red
+    red: '#00FF00',    // negative, strengthening: bright green
+    maroon: '#008000', // negative, weakening: dark green
+  })
+  const markerBlock = chartSrc.match(/const SQZMOM_SCOLOR: Record<string, string> = \{([\s\S]*?)\n\}/)
+  assert.ok(markerBlock, 'SQZMOM_SCOLOR marker map must exist')
+  const markerEntries = Object.fromEntries(
+    [...markerBlock[1].matchAll(/^\s*(blue|black|gray):\s*'(#[0-9A-Fa-f]{6})',?$/gm)]
+      .map((m) => [m[1], m[2]]),
+  )
+  assert.deepEqual(markerEntries, {
+    blue: '#0000FF', black: '#000000', gray: '#808080',
+  })
+  assert.ok(chartSrc.includes('SQZMOM_BCOLOR[bc]'), 'histogram uses backend bcolor map')
+  assert.ok(chartSrc.includes('SQZMOM_BCOLOR[b]'), 'current value badge uses same map')
+  assert.ok(chartSrc.includes("vn >= 0 ? '#ef5350' : '#26a69a'"), 'missing-color bars fall back to A-share colors')
+  assert.ok(chartSrc.includes("let labelColor = lastVal >= 0 ? '#ef5350' : '#26a69a'"), 'missing-color badge falls back to A-share colors')
+})

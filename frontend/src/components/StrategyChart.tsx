@@ -1533,14 +1533,16 @@ function renderIndicatorMacd(
 }
 
 // [SQZMOM_LB 副图] - 描述: 仅绘制后端返回的 sqzmom_val/sqzmom_bcolor/sqzmom_scolor，禁止前端重算
-// Pine 颜色 → Canvas hex 映射（与 TradingView Pine 内置颜色一致）：
-//   bcolor: lime(#00FF00) green(#008000) red(#FF0000) maroon(#800000)
-//   scolor: blue(#0000FF) black(#000000) gray(#808080)
+// [A-SHARE-SQZMOM-COLOR] 仅 Canvas 展示色按 A 股习惯：正动量红、负动量绿。
+// 保留后端 Pine bcolor 枚举和值的原始语义：
+// lime = 正动量增强（亮红）；green = 正动量减弱（深红）；
+// red = 负动量增强（亮绿）；maroon = 负动量减弱（深绿）。
+// squeeze scolor（blue/black/gray）为状态标记，保持原样。
 const SQZMOM_BCOLOR: Record<string, string> = {
-  lime: '#00FF00',
-  green: '#008000',
-  red: '#FF0000',
-  maroon: '#800000',
+  lime: '#FF0000',
+  green: '#800000',
+  red: '#00FF00',
+  maroon: '#008000',
 }
 const SQZMOM_SCOLOR: Record<string, string> = {
   blue: '#0000FF',
@@ -1648,7 +1650,7 @@ function renderIndicatorSqzmom(
   if (typeof lastVal === 'number') {
     const yVal = my(lastVal)
     // 用最后一个有效 bcolor 作为标签底色
-    let labelColor = '#26a69a'
+    let labelColor = lastVal >= 0 ? '#ef5350' : '#26a69a'
     for (let i = indexes.length - 1; i >= 0; i--) {
       const idx = indexes[i]
       if (idx == null) continue
