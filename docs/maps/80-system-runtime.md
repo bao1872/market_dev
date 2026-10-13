@@ -62,7 +62,7 @@ scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]
 静态资源预算（阈值健全性 + 磁盘；无 MemAvailable）
   -> rollback owner 捕获（只读）
   -> 活跃盘后任务门禁 + supervisor-drain fence（真实部署 stop worker-after-close；dry-run 只模拟）
-  -> 部署内存 headroom（MemAvailable >= PANJI_MIN_MEM_MB，fail-closed）
+  -> 部署内存 headroom（普通 >= 4096 MiB；严格前端-only >= 3584 MiB；fail-closed）
   -> 首笔 runtime mutation（checkout / sync / build / restart / reconcile）
   -> owned-aware restore worker-after-close
   -> health / SHA / Mount 核验 -> 部署后资源复检 -> 写成功状态
@@ -70,6 +70,8 @@ scripts/ops/panji-test-deploy <FULL_SHA> [--dry-run]
 
 `--dry-run` 只模拟 fence（只读探测容器状态与活跃任务计数），不 `stop` / `up` /
 `--force-recreate` 任何容器；无测试 seam 时内存 headroom 显示 `deferred`。
+纯前端特例依据上一运行 SHA → 目标 SHA 的全部变化，要求非首次 Live Mount、
+无 backend/capture/Compose/Migration/environment 变化；一次性 Vite build 限制 2 GiB。
 
 ### rollback owner 的容器解析拓扑
 

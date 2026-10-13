@@ -44,6 +44,8 @@ LOCK_FILE="${PANJI_LOCK_FILE:-/var/lock/panji-deploy.lock}"
 MIN_DISK_GB="${PANJI_MIN_DISK_GB:-20}"
 MAX_DISK_PCT="${PANJI_MAX_DISK_PCT:-82}"
 MIN_MEM_MB="${PANJI_MIN_MEM_MB:-4096}"
+# Separate floor for strictly source-only frontend Live Refresh; no global memory gate reduction.
+FRONTEND_REFRESH_MIN_MEM_MB="${PANJI_FRONTEND_REFRESH_MIN_MEM_MB:-3584}"
 
 # 唯一 Compose 组合：prod + live 始终叠加。禁止出现不叠加 live.yml 的变体。
 COMPOSE_CMD="docker compose --env-file ${ENV_FILE} -f docker-compose.prod.yml -f docker-compose.live.yml"
@@ -225,6 +227,8 @@ check_static_resource_budget() {
         || fail "PANJI_MAX_DISK_PCT 只能保持或收紧 82% 上限"
     [[ "${MIN_MEM_MB}" =~ ^[0-9]+$ && "${MIN_MEM_MB}" -ge 4096 ]] \
         || fail "PANJI_MIN_MEM_MB 只能保持或提高 4096 MB 下限（部署 headroom，非稳态 host 空闲下限）"
+    [[ "${FRONTEND_REFRESH_MIN_MEM_MB}" =~ ^[0-9]+$ && "${FRONTEND_REFRESH_MIN_MEM_MB}" -ge 3584 ]] \
+        || fail "PANJI_FRONTEND_REFRESH_MIN_MEM_MB 不能低于 3584 MB"
 
     local available_kb available_gb used_pct
     available_kb="$(df -Pk / | awk 'NR==2 {print $4}')"
@@ -241,12 +245,33 @@ check_static_resource_budget() {
     log "静态资源预算通过: disk_free=${available_gb}GB disk_used=${used_pct}%"
 }
 
+# Strictly frontend source-only Live Refresh; never grant reduced headroom for
+# first-live/bootstrap, env/image, Compose, backend/capture, migration or no-op.
+# These flags are from classify_changes() + apply_first_live_deploy_override().
+is_frontend_only_live_refresh() {
+    [[ "${FIRST_LIVE_DEPLOY}" == "false"
+        && "${FRONTEND_CHANGED}" == "true"
+        && "${FRONTEND_RUNTIME_CHANGED}" == "true"
+        && "${FRONTEND_ENVIRONMENT_CHANGED}" == "false"
+        && "${BACKEND_RUNTIME_CHANGED}" == "false"
+        && "${BACKEND_ENVIRONMENT_CHANGED}" == "false"
+        && "${CAPTURE_ENVIRONMENT_CHANGED}" == "false"
+        && "${MIGRATION_CHANGED}" == "false"
+        && "${COMPOSE_RUNTIME_CHANGED}" == "false" ]]
+}
+
 # 部署工作集内存 headroom：fence 之后、首笔 runtime mutation 之前检查。
 # PANJI_MOCK_MEM_AVAILABLE_KB 仅供契约测试注入（模拟 fence 前后不同 MemAvailable），
 # 生产环境不设置时走真实 /proc/meminfo（Linux）或 sysctl hw.memsize（macOS）。
 # 注意：本函数不足门槛时 return 1（不 fail），以便 deploy() 走 failure matrix
 # 恢复被本 deploy fenced 的 worker-after-close。
 check_deployment_memory_headroom() {
+    local required_mb="${MIN_MEM_MB}" gate_class="standard"
+    if is_frontend_only_live_refresh; then
+        required_mb="${FRONTEND_REFRESH_MIN_MEM_MB}"
+        gate_class="frontend_source_only"
+    fi
+    log "deployment headroom policy: class=${gate_class} min=${required_mb}MB (standard=${MIN_MEM_MB}MB)"
     # [DRY-RUN ZERO-MUTATION CONTRACT] dry-run 无法在不停止 worker 的情况下知道真实
     # post-fence MemAvailable，因此**不读取也不断言**真实 MemAvailable；仅记录
     # "deferred to real fence" 并继续部署**计划**模拟。只有显式测试 seam
@@ -276,10 +301,10 @@ check_deployment_memory_headroom() {
     [[ "${mem_kb}" =~ ^[0-9]+$ ]] || { log "错误: 无法读取 MemAvailable"; return 1; }
     mem_mb=$((mem_kb / 1024))
 
-    log "deployment headroom: mem_available=${mem_mb}MB min=${MIN_MEM_MB}MB (after fence, before first runtime mutation)"
+    log "deployment headroom: mem_available=${mem_mb}MB min=${required_mb}MB class=${gate_class} (after fence, before first runtime mutation)"
 
-    [[ "${mem_mb}" -ge "${MIN_MEM_MB}" ]] || {
-        log "DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true (mem_available=${mem_mb}MB < min=${MIN_MEM_MB}MB)"
+    [[ "${mem_mb}" -ge "${required_mb}" ]] || {
+        log "DEPLOYMENT_MEMORY_HEADROOM_INSUFFICIENT=true (mem_available=${mem_mb}MB < min=${required_mb}MB; class=${gate_class})"
         return 1
     }
 }
@@ -849,8 +874,13 @@ build_frontend_dist() {
             -e NPM_CONFIG_REGISTRY=https://registry.npmmirror.com \
             "${node_image}" npm ci || return 1
     fi
+    local -a frontend_build_limits=()
+    if is_frontend_only_live_refresh; then
+        # Bound transient Vite memory use when using the reduced host headroom floor.
+        frontend_build_limits=(--memory=2g --memory-swap=2g)
+    fi
     run_with_timeout "vite_build" "${TIMEOUT_VITE_BUILD_SECONDS}" -- \
-        docker run --rm -v "${REPO_ROOT}/frontend:/app" -w /app \
+        docker run --rm "${frontend_build_limits[@]}" -v "${REPO_ROOT}/frontend:/app" -w /app \
         -e NODE_OPTIONS=--max-old-space-size=1024 \
         -e GIT_SHA="${TARGET_SHA}" \
         -e BUILD_TIME="${build_time}" \

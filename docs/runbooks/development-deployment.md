@@ -207,11 +207,15 @@ migration 始终早于任何服务重启。migration 失败时：
 
 1. **静态资源预算**（任何状态修改之前，fail-closed）：阈值配置健全性 + 主机磁盘余量。
    此阶段**不判定** `MemAvailable`。
-2. **部署内存 headroom**（fail-closed）：在 supervisor-drain fence 之后、**首笔 runtime
-   mutation 之前**读取 `MemAvailable`，要求 ≥ `PANJI_MIN_MEM_MB`。fence 释放长任务 worker
-   常驻内存后才是本次部署真实可用的 working set，因此不得把该门槛提前到 fence 之前。
+2. **部署内存 headroom**（fail-closed）：在必要的 supervisor-drain fence 之后、**首笔 runtime
+   mutation 之前**读取 `MemAvailable`。普通部署要求 ≥ `PANJI_MIN_MEM_MB`（最低 4096 MiB）；
+   **严格纯前端 source-only Live Refresh** 才使用 `PANJI_FRONTEND_REFRESH_MIN_MEM_MB`
+   （最低 3584 MiB），并把一次性 Vite 构建容器内存/内存+Swap 同时限制在 2 GiB。
+   当前分类从上一真实运行 SHA 到目标 SHA 的**全部差异**计算；首次 Live Mount、后端、
+   Compose、Migration 或环境变化都不适用轻量门槛。若发生内存不足或构建 OOM，停止。
 
-`PANJI_MIN_MEM_MB` 是部署期 headroom，不是"宿主机稳态必须空闲"的指标。
+这些门槛都是部署期 headroom，不是"宿主机稳态必须空闲"的指标。
+dry-run 无测试 seam 时仅输出选中的 `class/min` 并延后真实内存检查。
 
 ## 部署后资源复检（DS-104）
 

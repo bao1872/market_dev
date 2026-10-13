@@ -223,17 +223,24 @@ Exploration 要求：
 
 1. **静态资源预算**（任何状态修改之前，fail-closed）：阈值配置健全性 + 主机磁盘余量。
    该阶段**不含** `MemAvailable` 判定。
-2. **部署内存 headroom**（fail-closed）：必须在 supervisor-drain fence 之后、
-   **首笔 runtime mutation 之前**读取 `MemAvailable`，要求 `>= PANJI_MIN_MEM_MB`。
+2. **部署内存 headroom**（fail-closed）：在必要的 supervisor-drain fence 之后、
+   **首笔 runtime mutation 之前**读取 `MemAvailable`。普通部署要求 `>= PANJI_MIN_MEM_MB`
+   （默认且最低 4096 MiB）。只有现有 classifier 严格判定为**非首次 Live Mount、
+   无 backend/capture/Compose/Migration/environment 变化的纯前端 source-only Live Refresh**，
+   才允许使用 `PANJI_FRONTEND_REFRESH_MIN_MEM_MB`（默认且最低 3584 MiB）。
+   该前端轻量路径的临时 Vite 构建容器限制为 2 GiB 内存及 2 GiB memory+swap；
+   构建失败立即停止，不能同步未验证的 dist。
 
 禁止：
 
 - 在任何 fence 之前用 `MemAvailable` 门槛否决部署——fence 释放长任务 worker 的常驻内存后
   才是本次部署真实可用的 working set，提前判定会阻止本可安全回收内存的部署；
-- 把 `PANJI_MIN_MEM_MB` 解释为"宿主机稳态必须空闲"的指标，或据此新增第二个数值阈值；
+- 把部署期内存门槛解释为"宿主机稳态必须空闲"的指标；禁止通过伪造前端分类、
+  临时覆写环境变量或测试 seam 将较低门槛应用到其他部署；
 - 由容器 `mem_limit`（单容器允许使用的上限）反推宿主机必须空闲的内存。
 
-`PANJI_MIN_MEM_MB` 是**部署期**保守 headroom，本阶段不下调。
+`PANJI_MIN_MEM_MB` 是**一般部署的**保守 headroom（最低 4096 MiB），不下调。
+纯前端特例由严格分类单独约束（最低 3584 MiB），不等于放宽重型部署门槛。
 
 **部署后主机内存为 observation-only**：只作为收紧预算的证据记录，不作为失败门槛。
 部署后仍然 fail-closed 的是：磁盘门槛、容器健康（`OOMKilled` / 异常 `RestartCount` /
