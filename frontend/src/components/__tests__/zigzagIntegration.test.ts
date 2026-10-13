@@ -9,7 +9,7 @@ const toolbar = readFileSync('src/features/stock-research/IndicatorToolbar.tsx',
 test('original breakout overlay has been replaced by ZigZag', () => {
   assert.ok(!chart.includes('function renderBreakout('))
   assert.ok(!chart.includes("drawText(ctx, '结构压力'"))
-  assert.ok(chart.includes('computeZigZag(calc)'))
+  assert.ok(chart.includes('computeZigZag(bars)'))
   assert.ok(chart.includes('renderZigZagOverlay(ctx, zigzag'))
   assert.ok(manifest.includes("id: 'breakout', name: 'ZigZag'"))
 })
@@ -22,6 +22,6 @@ test('legacy breakout visibility key preserved, without a user parameter input',
 })
 
 test('compute is a memoized full-series operation, not a per-viewport render operation', () => {
-  assert.ok(chart.includes('useMemo(() => effectiveLayers.breakout ? computeZigZag(calc) : null'))
+  assert.ok(chart.includes('useMemo(() => effectiveLayers.breakout ? computeZigZag(bars) : null'))
   assert.ok(chart.includes('fromIndex: viewportFromIndex'))
 })

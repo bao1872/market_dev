@@ -2905,10 +2905,11 @@ export function StrategyChart({
     return addIndicators(bars.slice(-win))
   }, [bars, timeframe])
 
-  // Run once per chart input/update, never once per pan, hover or Canvas draw.
-  // The calculation uses the complete calc series, not the visible viewport.
-  const zigzag = useMemo(() => effectiveLayers.breakout ? computeZigZag(calc) : null,
-    [calc, effectiveLayers.breakout])
+  // Compute from the full MDAS/chart-snapshot bar set, independent of the
+  // legacy CALCULATION_WINDOWS that only limits the chart's calc/display tail.
+  // A shortened history may alter the initial ZigZag structure.
+  const zigzag = useMemo(() => effectiveLayers.breakout ? computeZigZag(bars) : null,
+    [bars, effectiveLayers.breakout])
 
   // [CHANGE-20260902] 当前周期视区上下限（传入 chartViewport helper，避免 15m/月线被全局 30/250 clamp）
   const viewportLimits = VIEWPORT_LIMITS[timeframe]
@@ -2962,9 +2963,13 @@ export function StrategyChart({
     return mapEvents(events, display, timeframe)
   }, [events, display, timeframe])
 
+  // ZigZag pivot indices belong to the full `bars` array, while `viewport`
+  // indices belong to its possibly truncated `calc` tail. Translate once.
+  const zigzagViewportFromIndex = bars.length - calc.length + viewport.fromIndex
+
   // 最新数据 ref（供 draw 函数读取）
-  const dataRef = useRef({ calc, display, mappedEvents, layers: effectiveLayers, timeframe, zigzag, viewportFromIndex: viewport.fromIndex })
-  dataRef.current = { calc, display, mappedEvents, layers: effectiveLayers, timeframe, zigzag, viewportFromIndex: viewport.fromIndex }
+  const dataRef = useRef({ calc, display, mappedEvents, layers: effectiveLayers, timeframe, zigzag, viewportFromIndex: zigzagViewportFromIndex })
+  dataRef.current = { calc, display, mappedEvents, layers: effectiveLayers, timeframe, zigzag, viewportFromIndex: zigzagViewportFromIndex }
 
   // indicators ref（避免 draw 函数依赖 indicators 导致频繁重绘）
   const indicatorsRef = useRef<IndicatorResponse | undefined>(undefined)
