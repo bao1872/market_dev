@@ -90,6 +90,18 @@ test('主图 5 个 + 副图 3 个', () => {
   assert.equal(sub.length, 3, 'should have 3 sub layers (volume/macd/sqzmom)')
 })
 
+// [PANJI-WAVE-LABEL] 波段为用户名称；breakout 保持内部兼容键。
+test('波段图层使用中文名称并保留原有显隐语义', () => {
+  const wave = CHART_LAYER_MANIFEST.find((entry) => entry.id === 'breakout')
+  assert.ok(wave, '波段应继续使用原有 breakout 键')
+  assert.equal(wave.name, '波段')
+  assert.equal(wave.kind, 'main')
+  assert.equal(wave.enabled, true)
+  assert.equal(wave.selectionOnly, true)
+  assert.ok(wave.description.includes('未确认拐点投影'))
+  assert.ok(!wave.description.includes('ZigZag'), '用户可见提示不使用英文名称')
+})
+
 // ===== 5. breakout 为 selectionOnly =====
 test('breakout 为 selectionOnly', () => {
   const breakout = CHART_LAYER_MANIFEST.find((e) => e.id === 'breakout')

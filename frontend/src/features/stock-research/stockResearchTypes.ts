@@ -85,7 +85,7 @@ export const CHART_LAYER_MANIFEST: ChartLayerManifestEntry[] = [
   { id: 'trend', name: '趋势', kind: 'main', enabled: true, description: '趋势参考价 · 选股命中标记' },
   { id: 'node', name: '筹码共识价', kind: 'main', enabled: true, description: '成交量分布估算 · 节点区间 · POC（基于历史成交量分布的估算代理，非股东真实持仓成本）' },
   { id: 'boll', name: '布林带', kind: 'main', enabled: true, description: '布林带 · SMA(20) ± 2σ' },
-  { id: 'breakout', name: 'ZigZag', kind: 'main', enabled: true, selectionOnly: true, description: 'TradingView 风格 ZigZag：5% 反转 / 10 Pivot legs / 未确认拐点投影；只读固定参数' },
+  { id: 'breakout', name: '波段', kind: 'main', enabled: true, selectionOnly: true, description: '波段高低点连线 · 未确认拐点投影（固定参数）' },
   { id: 'smc', name: '结构', kind: 'main', enabled: true, description: '结构 · BOS/CHoCH/订单块/等高/等低（按需计算，默认关闭；完全排除 FVG）' },
   { id: 'volume', name: '成交量', kind: 'sub', enabled: true, description: '成交量副图' },
   { id: 'macd', name: 'MACD', kind: 'sub', enabled: true, description: 'MACD 副图 · DIF/DEA/Histogram' },

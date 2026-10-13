@@ -11,7 +11,7 @@ test('original breakout overlay has been replaced by ZigZag', () => {
   assert.ok(!chart.includes("drawText(ctx, '结构压力'"))
   assert.ok(chart.includes('computeZigZag(bars)'))
   assert.ok(chart.includes('renderZigZagOverlay(ctx, zigzag'))
-  assert.ok(manifest.includes("id: 'breakout', name: 'ZigZag'"))
+  assert.ok(manifest.includes("id: 'breakout', name: '波段'"))
 })
 
 test('legacy breakout visibility key preserved, without a user parameter input', () => {
