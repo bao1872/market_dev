@@ -24,6 +24,8 @@ import {
   zoomAtAnchor,
 } from './chartViewport'
 import type { ChartLayerVisibility } from '../features/stock-research/stockResearchTypes'
+import { computeZigZag, type ZigZagOverlay } from './zigzag'
+import { renderZigZagOverlay } from './zigzagCanvas'
 
 // [CHANGE-20260902] 各周期时间范围预设（按钮文案与实际 bar 窗口严格一致）。
 // 数据加载量见 BARS_COUNT_BY_TIMEFRAME（15m=4000 / 1h=1200 / 1d=250 / 1w=260 / 1mo=120），
@@ -880,19 +882,7 @@ function renderVolume(
   drawPaneTicks(ctx, g, 'volume', 0, vmax, 'VOL', data[data.length - 1].volume, C.text, scale)
 }
 
-// 突破压力区
-function renderBreakout(
-  ctx: CanvasRenderingContext2D,
-  g: Geometry,
-  data: CalculatedBar[],
-  py: (v: number) => number,
-  scale: ChartRenderScale,
-): void {
-  const pressure = Math.max(...data.slice(-55, -18).map(d => d.high))
-  // [PROMPT.md §5.3.4 V2] 结构压力位线宽/字号按 scale.strokes.grid / fonts.structureLabel 缩放
-  drawLine(ctx, g.l, py(pressure), g.plotRight, py(pressure), C.down, scale.strokes.grid, [7, 4])
-  drawText(ctx, '结构压力', g.plotRight - 54, py(pressure) - 5, C.down, scale.fonts.structureLabel)
-}
+// ZigZag Canvas implementation lives in ./zigzagCanvas; no pressure-line fallback.
 
 // ===== 通用渲染器（根据后端返回的 ChartLayer.renderer 分发）=====
 
@@ -2388,6 +2378,8 @@ function drawTrading(
   focusEventId: string | null = null,
   focusEventType: string | null = null,
   focusEventInfo: FocusEventInfo | null = null,
+  zigzag: ZigZagOverlay | null = null,
+  viewportFromIndex = 0,
 ): void {
   if (!display.length) return
   const { ctx, w, h } = fit(canvas)
@@ -2580,10 +2572,7 @@ function drawTrading(
     drawText(ctx, `核心共识价 ${fmt(pocVal)}`, g.plotRight - 80, py(pocVal) - 5, C.orange, scale.fonts.pocLabel)
   }
 
-  // 5. 突破压力区
-  if (layers.breakout) {
-    renderBreakout(ctx, g, display, py, scale)
-  }
+  // 5. Legacy pressure line removed. ZigZag is overlaid after candles.
 
   // 7. 通用渲染器：渲染后端返回的策略指标图层（DSA VWAP 等）
   // [DSA 数据源校验] - 检测 K 线时间与 indicators.source_bar_times 一致性，
@@ -2655,6 +2644,23 @@ function drawTrading(
     const hh = Math.max(1, Math.abs(py(d.open) - py(d.close)))
     ctx.fillRect(x - barW / 2, yy, barW, hh)
   })
+
+  // ZigZag above candles: full-series indices, viewport-only projection.
+  // `breakout` is retained solely as the existing localStorage visibility key.
+  if (layers.breakout && zigzag) {
+    renderZigZagOverlay(ctx, zigzag, {
+      left: g.l,
+      right: g.plotRight,
+      top: g.panes.price.top,
+      bottom: g.panes.price.bottom,
+      step,
+      fromIndex: viewportFromIndex,
+      visibleCount: display.length,
+      priceToY: py,
+      font: scale.fonts.structureLabel,
+      formatVolume,
+    })
+  }
 
   // 9. 事件标记
   state.eventHit = []
@@ -2899,6 +2905,11 @@ export function StrategyChart({
     return addIndicators(bars.slice(-win))
   }, [bars, timeframe])
 
+  // Run once per chart input/update, never once per pan, hover or Canvas draw.
+  // The calculation uses the complete calc series, not the visible viewport.
+  const zigzag = useMemo(() => effectiveLayers.breakout ? computeZigZag(calc) : null,
+    [calc, effectiveLayers.breakout])
+
   // [CHANGE-20260902] 当前周期视区上下限（传入 chartViewport helper，避免 15m/月线被全局 30/250 clamp）
   const viewportLimits = VIEWPORT_LIMITS[timeframe]
 
@@ -2952,8 +2963,8 @@ export function StrategyChart({
   }, [events, display, timeframe])
 
   // 最新数据 ref（供 draw 函数读取）
-  const dataRef = useRef({ calc, display, mappedEvents, layers: effectiveLayers, timeframe })
-  dataRef.current = { calc, display, mappedEvents, layers: effectiveLayers, timeframe }
+  const dataRef = useRef({ calc, display, mappedEvents, layers: effectiveLayers, timeframe, zigzag, viewportFromIndex: viewport.fromIndex })
+  dataRef.current = { calc, display, mappedEvents, layers: effectiveLayers, timeframe, zigzag, viewportFromIndex: viewport.fromIndex }
 
   // indicators ref（避免 draw 函数依赖 indicators 导致频繁重绘）
   const indicatorsRef = useRef<IndicatorResponse | undefined>(undefined)
@@ -2975,7 +2986,7 @@ export function StrategyChart({
   const draw = useCallback(() => {
     const canvas = canvasRef.current
     if (!canvas || !canvas.offsetParent) return
-    const { calc: c, display: d, mappedEvents: ev, layers: ly, timeframe: tf } = dataRef.current
+    const { calc: c, display: d, mappedEvents: ev, layers: ly, timeframe: tf, zigzag: zz, viewportFromIndex } = dataRef.current
     if (!d.length) return
     // [PROMPT.md §5.3.4 V2] 同步 scale 到 stateRef，供 drawTrading 内所有 draw 子函数读取
     stateRef.current.scale = scale
@@ -3010,7 +3021,7 @@ export function StrategyChart({
     }
     stateRef.current.frameMismatch = mismatch
     drawTrading(canvas, c, d, ev, ly, tf, stateRef.current, effectiveIndicators,
-      focusEventId, focusEventType, focusEventInfo)
+      focusEventId, focusEventType, focusEventInfo, zz, viewportFromIndex)
   }, [focusEventId, focusEventType, focusEventInfo, scale])
 
   // 数据/图层变化时重绘
