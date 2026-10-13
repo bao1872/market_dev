@@ -2775,7 +2775,6 @@ function getDefaultLayers(strategyId?: string): LayerVisibility {
 // [CHANGE-011 SMC] - smc 一一对应，默认 false
 function chartLayerVisibilityToInternal(
   vis: ChartLayerVisibility,
-  source: string,
 ): LayerVisibility {
   return {
     volume: vis.volume,
@@ -2787,7 +2786,7 @@ function chartLayerVisibilityToInternal(
     bb: vis.boll,
     macd: vis.macd,
     sqzmom: vis.sqzmom,
-    breakout: source === 'selection' ? vis.breakout : false,
+    breakout: vis.breakout,
     delta: false,
     events: true,
     // [CHANGE-011 SMC] - smc 开关由用户在 IndicatorToolbar 控制
@@ -2869,7 +2868,6 @@ export function StrategyChart({
       if (indicatorView) {
         return chartLayerVisibilityToInternal(
           getIndicatorViewLayerPreset(indicatorView),
-          source,
         )
       }
       // [向后兼容] 无 indicatorView 时回退到旧 5 层兜底（不应被新链路触发）
@@ -2881,7 +2879,7 @@ export function StrategyChart({
     }
     // 父组件传入用户偏好 → 映射为内部 12 键 LayerVisibility
     if (layerVisibility) {
-      return chartLayerVisibilityToInternal(layerVisibility, source)
+      return chartLayerVisibilityToInternal(layerVisibility)
     }
     // fallback：无父组件偏好时使用策略默认值（不应出现在正常流程中）
     return getDefaultLayers(strategyId)

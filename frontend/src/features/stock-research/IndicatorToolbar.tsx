@@ -1,5 +1,5 @@
 // [IndicatorToolbar] - 描述: 图表图层显示工具栏（PRD §6.2 — 单一真源）
-// 渲染 7 个图层开关（主图 4 + 副图 3），breakout 仅 selection 来源显示。
+// 渲染 8 个图层开关（主图 5 + 副图 3），breakout 自选与选股均显示。
 // 这是唯一的交互式图层工具栏；StrategyChart 内部已不再渲染 tv-strategy-legend 只读行。
 // 用户只能显隐，不得修改窗口、阈值等算法参数。
 import {

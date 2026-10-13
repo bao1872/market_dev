@@ -97,24 +97,24 @@ test('波段图层使用中文名称并保留原有显隐语义', () => {
   assert.equal(wave.name, '波段')
   assert.equal(wave.kind, 'main')
   assert.equal(wave.enabled, true)
-  assert.equal(wave.selectionOnly, true)
+  assert.notEqual(wave.selectionOnly, true, '波段不再是 selectionOnly，自选与选股均可显示')
   assert.ok(wave.description.includes('未确认拐点投影'))
   assert.ok(!wave.description.includes('ZigZag'), '用户可见提示不使用英文名称')
 })
 
-// ===== 5. breakout 为 selectionOnly =====
-test('breakout 为 selectionOnly', () => {
+// ===== 5. breakout 不再为 selectionOnly（自选与选股通用）=====
+test('breakout 不再是 selectionOnly（自选与选股通用）', () => {
   const breakout = CHART_LAYER_MANIFEST.find((e) => e.id === 'breakout')
   assert.ok(breakout, 'breakout entry should exist')
-  assert.equal(breakout!.selectionOnly, true)
+  assert.notEqual(breakout!.selectionOnly, true, '波段不再限定 selection 来源')
 })
 
-// ===== 6. chartLayersForSource 过滤 selectionOnly =====
-// [CHANGE-011 SMC] watchlist 过滤 breakout 后剩 7 个（8-1）
-test('chartLayersForSource watchlist 过滤 breakout', () => {
+// ===== 6. chartLayersForSource 不再过滤 breakout（自选与选股通用）=====
+// breakout 不再是 selectionOnly，watchlist 与 selection 均显示 8 个图层
+test('chartLayersForSource watchlist 包含 breakout', () => {
   const layers = chartLayersForSource(CHART_LAYER_MANIFEST, 'watchlist')
-  assert.equal(layers.length, 7)
-  assert.ok(!layers.find((e) => e.id === 'breakout'), 'breakout should be hidden for watchlist')
+  assert.equal(layers.length, 8)
+  assert.ok(layers.find((e) => e.id === 'breakout'), 'breakout should be visible for watchlist')
   // smc 应在 watchlist 中可见（开关存在，但默认关闭）
   assert.ok(layers.find((e) => e.id === 'smc'), 'smc should be visible for watchlist')
 })
