@@ -23,10 +23,10 @@ import {
   legacyRedirectEntries,
 } from '../appNavigation.ts'
 
-test('用户一级导航含行情/自选/复盘/竞价，不含消息/设置', () => {
+test('用户一级导航含行情/自选/策略/复盘，不含消息/设置', () => {
   const paths = USER_NAV_ITEMS.map((i) => i.path)
   // [P0-FE 2026-07-31] 竞价分析入口加入一级导航
-  assert.deepStrictEqual(paths, ['/market', '/market?scope=watchlist', '/review', '/auction'])
+  assert.deepStrictEqual(paths, ['/market', '/market?scope=watchlist', '/strategy', '/review'])
   assert.ok(!paths.includes('/messages'))
   assert.ok(!paths.includes('/settings'))
   assert.ok(!paths.includes('/overview'))

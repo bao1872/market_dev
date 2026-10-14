@@ -62,6 +62,10 @@ export const ROUTE_STRUCTURE: RouteNode[] = [
               { path: '/boards/:boardId', guard: 'capability', shell: 'user' },
             ],
           },
+          // CapabilityRoute: strategy_research 独立策略权限
+          { guard: 'capability', shell: 'user', children: [
+            { path: '/strategy', guard: 'capability', shell: 'user' },
+          ] },
           // CapabilityRoute: research_replay = 竞价分析（CHANGE-20260802-002；[REVIEW-V2-R1] 仅 /auction*）
           {
             guard: 'capability',

@@ -10,7 +10,7 @@
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于契约测试。
 
 /** 全部 capability 机器值（与 backend app/models/user_capability.py ALL_CAPABILITIES 对齐） */
-export const CAPABILITY_KEYS = ['self_selection', 'market_data', 'market_review', 'research_replay'] as const
+export const CAPABILITY_KEYS = ['self_selection', 'market_data', 'market_review', 'research_replay', 'strategy_research'] as const
 
 export type CapabilityKey = (typeof CAPABILITY_KEYS)[number]
 
@@ -21,6 +21,7 @@ export const CAPABILITY_LABELS: Record<CapabilityKey, string> = {
   // [PANJI-REVIEW-CAPABILITY-SPLIT] market_review 从 market_data 拆分为独立 capability（复盘）
   market_review: '复盘分析',
   research_replay: '竞价分析',
+  strategy_research: '策略研究',
 }
 
 /** capability 机器值 → 覆盖范围补充说明（管理端勾选项副标题） */
@@ -29,6 +30,7 @@ export const CAPABILITY_DESCRIPTIONS: Record<CapabilityKey, string> = {
   market_data: 'market_data · 行情列表/个股详情（行情数据）',
   market_review: 'market_review · 复盘（Market Dashboard / /review*）',
   research_replay: 'research_replay · 竞价分析',
+  strategy_research: 'strategy_research · 策略研究工作台',
 }
 
 /**
@@ -107,6 +109,7 @@ export const DEFAULT_ROUTE_MARKET = '/market'
 export const DEFAULT_ROUTE_MARKET_WATCHLIST = '/market?scope=watchlist'
 export const DEFAULT_ROUTE_REVIEW = '/review'
 export const DEFAULT_ROUTE_AUCTION = '/auction'
+export const DEFAULT_ROUTE_STRATEGY = '/strategy'
 export const DEFAULT_ROUTE_FORBIDDEN = '/forbidden'
 
 /** 邀请码/登录用的 capability active 状态集合输入 */
@@ -115,6 +118,7 @@ export interface CapabilityActiveInput {
   market_data?: boolean
   market_review?: boolean
   research_replay?: boolean
+  strategy_research?: boolean
 }
 
 /**
@@ -136,10 +140,12 @@ export function computeDefaultRoute(
   const hasMarket = !!active.market_data
   const hasReview = !!active.market_review
   const hasResearch = !!active.research_replay
-  if (!hasSelfSel && !hasMarket && !hasReview && !hasResearch) return DEFAULT_ROUTE_FORBIDDEN
+  const hasStrategy = !!active.strategy_research
+  if (!hasSelfSel && !hasMarket && !hasReview && !hasResearch && !hasStrategy) return DEFAULT_ROUTE_FORBIDDEN
   if (hasMarket) return DEFAULT_ROUTE_MARKET
   if (hasSelfSel) return DEFAULT_ROUTE_MARKET_WATCHLIST
   if (hasReview) return DEFAULT_ROUTE_REVIEW
+  if (hasStrategy) return DEFAULT_ROUTE_STRATEGY
   if (hasResearch) return DEFAULT_ROUTE_AUCTION
   return DEFAULT_ROUTE_FORBIDDEN
 }

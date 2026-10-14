@@ -42,6 +42,7 @@ const LandingPage = lazy(() => import('./pages/LandingPage'))
 // [Auction] - 竞价分析三级页面 lazy 加载（市场/板块/个股）
 // 受保护路由 require_capability("research_replay")：竞价与复盘同属一项权益（GET /v1/auction/*）
 
+const StrategyResearchPage = lazy(() => import('./features/strategy-research/StrategyResearchPage'))
 const AuctionBoardPage = lazy(() => import('./features/auction/AuctionBoardPage'))
 const MarketDashboardPage = lazy(() => import('./features/market-dashboard/MarketDashboardPage'))
 const ScopeExplorerPage = lazy(() => import('./features/market-dashboard/ScopeExplorerPage'))
@@ -386,6 +387,10 @@ export const routeConfig: RouteObject[] = [
               { path: '/boards/:boardId', element: <BoardCompatResolverRoute /> },
             ],
           },
+          // strategy_research: independent capability, no market_data inheritance
+          { element: <CapabilityRoute capability="strategy_research" />, children: [
+            { path: '/strategy', element: <Suspense fallback={<AuctionFallback />}><StrategyResearchPage /></Suspense> },
+          ] },
           // research_replay = 竞价分析（CHANGE-20260802-002；[PANJI-REVIEW-CAPABILITY-SPLIT] 复盘改由独立 market_review 守卫）
           // 竞价三级页面共用同一 capability 守卫，不存在独立 auction capability；
           // 直接输入 /auction/* URL 的无权限用户由 CapabilityRoute 统一跳转 /forbidden。

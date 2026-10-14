@@ -40,7 +40,7 @@ test('research_replay 用户可见竞价；复盘由独立 market_review 守卫'
     { research_replay: ACTIVE, market_review: ACTIVE },
     false,
   ).map((i) => i.path)
-  assert.ok(paths.includes(APP_ROUTES.auction), '竞价应可见')
+  assert.ok(!paths.includes(APP_ROUTES.auction), '竞价已从一级菜单撤下，旧路由仍受权限保护')
   assert.ok(paths.includes(APP_ROUTES.review), '复盘（market_review）应可见')
 })
 
@@ -74,7 +74,7 @@ test('无 market_data / market_review 时隐藏行情与复盘，不影响竞价
   ).map((i) => i.path)
   assert.ok(!paths.includes(APP_ROUTES.market), '行情应隐藏')
   assert.ok(!paths.includes(APP_ROUTES.review), '复盘应隐藏')
-  assert.ok(paths.includes(APP_ROUTES.auction))
+  assert.ok(!paths.includes(APP_ROUTES.auction))
 })
 
 test('admin 无 capability 行时仍可见全部一级导航（豁免行为不回归）', () => {
@@ -86,8 +86,8 @@ test('竞价导航项声明 research_replay；复盘导航项声明独立 market
   const review = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.review)
   const auction = USER_NAV_ITEMS.find((i) => i.path === APP_ROUTES.auction)
   assert.equal(review?.requiredCapability, 'market_review')
-  assert.equal(auction?.requiredCapability, AUCTION_CAPABILITY)
-  assert.notEqual(review?.requiredCapability, auction?.requiredCapability)
+  assert.equal(auction, undefined) // 竞价退出一级导航，不改变 URL 守卫
+  assert.equal(review?.requiredCapability, 'market_review')
 })
 
 // ============================================================
@@ -174,6 +174,7 @@ test('不存在独立 auction capability', () => {
     'market_data',
     'market_review',
     'research_replay',
+    'strategy_research',
   ])
   assert.ok(!(CAPABILITY_KEYS as readonly string[]).includes('auction'))
   assert.ok(!Object.prototype.hasOwnProperty.call(CAPABILITY_LABELS, 'auction'))

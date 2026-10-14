@@ -1,0 +1,235 @@
+"""Read-only, fail-closed as-of candidate snapshots.
+
+This service NEVER computes ML forecasts. Data must come from a separately
+verified panji_lab exporter; missing data is unavailable, not a zero-signal day.
+Snapshot is trusted local operator-controlled file, not user-supplied JSON.
+"""
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+from datetime import date
+from pathlib import Path
+from typing import Any
+
+SCHEMA = "panji-strategy-candidates-v2"
+MAX_BYTES = 48 * 1024 * 1024
+MAX_STOCKS = 8000
+SYMBOL_RE = re.compile(r"^(SH|SZ|BJ):[0-9]{6}$")
+
+
+class DatasetUnavailable(Exception):
+    pass
+
+
+class DatasetInvalid(Exception):
+    pass
+
+
+def _day(v: Any, field: str) -> str:
+    if not isinstance(v, str) or len(v) != 10:
+        raise DatasetInvalid(f"{field}: invalid date")
+    try:
+        if date.fromisoformat(v).isoformat() != v:
+            raise ValueError(v)
+    except ValueError as exc:
+        raise DatasetInvalid(f"{field}: invalid date") from exc
+    return v
+
+
+def _score(v: Any, field: str) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (float, int)) or not math.isfinite(v) or not 0 <= v <= 1:
+        raise DatasetInvalid(f"{field}: expected finite 0..1 score")
+    return float(v)
+
+
+def _positive(v: Any, field: str) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0:
+        raise DatasetInvalid(f"{field}: expected positive price")
+    return float(v)
+
+
+def validate(blob: Any) -> dict[str, Any]:
+    if not isinstance(blob, dict) or blob.get("schema") != SCHEMA:
+        raise DatasetInvalid("unsupported candidate schema")
+    meta = blob.get("metadata")
+    stocks = blob.get("stocks")
+    daily = blob.get("daily_batches")
+    if not isinstance(meta, dict) or not isinstance(stocks, dict) or not isinstance(daily, list):
+        raise DatasetInvalid("metadata/stocks/daily_batches required")
+    if meta.get("status") != "AUDITED":
+        raise DatasetInvalid("only externally audited data may be presented")
+    for key in ("strategy_id", "release_id", "feature_sha", "audit_ref", "generated_at"):
+        if not isinstance(meta.get(key), str) or not meta[key].strip():
+            raise DatasetInvalid(f"metadata.{key} required")
+    if meta["strategy_id"] != "zigzag_two_stage" or len(stocks) > MAX_STOCKS:
+        raise DatasetInvalid("unsupported strategy or stock count")
+    observation_index: dict[str, dict[str, Any]] = {}
+    candidate_index: dict[str, str] = {}
+    for symbol, stock in stocks.items():
+        if not SYMBOL_RE.fullmatch(symbol) or not isinstance(stock, dict):
+            raise DatasetInvalid(f"invalid stock {symbol}")
+        bars = stock.get("bars")
+        candidates = stock.get("candidates")
+        if not isinstance(bars, list) or not isinstance(candidates, list) or len(bars) > 15000 or len(candidates) > 15000:
+            raise DatasetInvalid(f"{symbol}: invalid bar/candidate arrays")
+        prev = ""
+        bar_days: set[str] = set()
+        bar_by_day: dict[str, dict[str, Any]] = {}
+        for bar in bars:
+            if not isinstance(bar, dict):
+                raise DatasetInvalid("bar must be object")
+            d = _day(bar.get("date"), "bar.date")
+            if d <= prev:
+                raise DatasetInvalid("bars must be strictly ascending")
+            prev = d
+            bar_days.add(d)
+            bar_by_day[d] = bar
+            op, hi, lo, cl = (_positive(bar.get(k), f"bar.{k}") for k in ("open", "high", "low", "close"))
+            if not (lo <= min(op, cl) <= max(op, cl) <= hi):
+                raise DatasetInvalid("OHLC inconsistent")
+        for cand in candidates:
+            if not isinstance(cand, dict):
+                raise DatasetInvalid("candidate must be object")
+            cid = cand.get("candidate_id")
+            if not isinstance(cid, str) or not cid or cid in candidate_index:
+                raise DatasetInvalid("duplicate/empty candidate_id")
+            candidate_index[cid] = symbol
+            anchor = _day(cand.get("anchor_date"), "candidate.anchor_date")
+            visible = _day(cand.get("visible_at"), "candidate.visible_at")
+            if anchor not in bar_days or visible < anchor or visible not in bar_days:
+                raise DatasetInvalid("invalid candidate visibility")
+            if cand.get("kind") not in ("H", "L"):
+                raise DatasetInvalid("kind must be H/L")
+            _positive(cand.get("anchor_price"), "candidate.anchor_price")
+            obs = cand.get("observations")
+            if not isinstance(obs, list) or len(obs) > 3:
+                raise DatasetInvalid("candidate may have at most three observations")
+            stages = set()
+            prev_decision = ""
+            for row in obs:
+                if not isinstance(row, dict):
+                    raise DatasetInvalid("observation must be object")
+                oid = row.get("observation_id")
+                if not isinstance(oid, str) or not oid or oid in observation_index:
+                    raise DatasetInvalid("duplicate/empty observation_id")
+                stage = row.get("stage")
+                if stage not in ("D1", "D2", "D3") or stage in stages:
+                    raise DatasetInvalid("invalid/duplicate stage")
+                stages.add(stage)
+                decision = _day(row.get("decision_date"), "observation.decision_date")
+                cutoff = _day(row.get("data_cutoff"), "observation.data_cutoff")
+                if decision not in bar_days or decision < visible or decision <= prev_decision or cutoff > decision:
+                    raise DatasetInvalid("observation violates PIT/ordering")
+                prev_decision = decision
+                _score(row.get("l1_score"), "l1_score")
+                _score(row.get("l2_score"), "l2_score")
+                _score(row.get("l1_threshold"), "l1_threshold")
+                _score(row.get("l2_threshold"), "l2_threshold")
+                if not isinstance(row.get("joint_alert"), bool):
+                    raise DatasetInvalid("joint_alert must be bool")
+                if row["joint_alert"] and (
+                    row.get("l1_score") is None or row.get("l2_score") is None or
+                    row.get("l1_threshold") is None or row.get("l2_threshold") is None or
+                    row["l1_score"] < row["l1_threshold"] or row["l2_score"] < row["l2_threshold"]
+                ):
+                    raise DatasetInvalid("joint_alert inconsistent with thresholds")
+                ref = row.get("reference_price")
+                confirmed = row.get("reference_confirmed_at")
+                if (ref is None) != (confirmed is None):
+                    raise DatasetInvalid("reference price/confirmation must be paired")
+                if ref is not None:
+                    _positive(ref, "reference_price")
+                    if _day(confirmed, "reference_confirmed_at") > decision:
+                        raise DatasetInvalid("future reference confirmation")
+                first = row.get("first_breakout")
+                if not isinstance(first, bool):
+                    raise DatasetInvalid("first_breakout must be bool")
+                if first and ref is None:
+                    raise DatasetInvalid("first breakout missing observable reference")
+                if first:
+                    decision_bar = bar_by_day[decision]
+                    crossed = (float(decision_bar["high"]) > float(ref)) if cand["kind"] == "L" else (float(decision_bar["low"]) < float(ref))
+                    if not crossed:
+                        raise DatasetInvalid("first breakout not supported by decision-day OHLC")
+                observation_index[oid] = {"symbol": symbol, "candidate_id": cid, "stage": stage, "decision_date": decision,
+                                          "kind": cand["kind"], "l1_score": row.get("l1_score"), "l2_score": row.get("l2_score"),
+                                          "joint_alert": row["joint_alert"], "first_breakout": first}
+            if ["D1", "D2", "D3"][:len(stages)] != [o["stage"] for o in obs]:
+                raise DatasetInvalid("stage must be a D1-first prefix")
+            if sum(bool(o["first_breakout"]) for o in obs) > 1:
+                raise DatasetInvalid("first breakout may be emitted once per candidate")
+    if len(daily) > 350:
+        raise DatasetInvalid("daily batch count too large")
+    seen_batches = set()
+    for batch in daily:
+        if not isinstance(batch, dict):
+            raise DatasetInvalid("batch must be object")
+        td = _day(batch.get("trade_date"), "daily.trade_date")
+        if td in seen_batches:
+            raise DatasetInvalid("duplicate trade_date batch")
+        seen_batches.add(td)
+        if batch.get("status") != "PUBLISHED":
+            raise DatasetInvalid("only published batches may appear")
+        if batch.get("release_id") != meta["release_id"]:
+            raise DatasetInvalid("mixed release in candidate snapshot")
+        items = batch.get("items")
+        if not isinstance(items, list) or len(items) > 120000:
+            raise DatasetInvalid("invalid batch items")
+        seen = set()
+        for item in items:
+            if not isinstance(item, dict):
+                raise DatasetInvalid("batch item must be object")
+            oid = item.get("observation_id")
+            if not isinstance(oid, str) or oid not in observation_index or oid in seen:
+                raise DatasetInvalid("unknown or duplicate daily observation")
+            seen.add(oid)
+            ref = observation_index[oid]
+            if ref["decision_date"] != td:
+                raise DatasetInvalid("daily item mismatched decision date")
+            for k in ("symbol", "candidate_id", "stage", "kind", "l1_score", "l2_score", "joint_alert", "first_breakout"):
+                if item.get(k) != ref[k]:
+                    raise DatasetInvalid(f"daily item {k} mismatch with observation SSOT")
+    return blob
+
+
+def read_dataset() -> dict[str, Any]:
+    path = os.getenv("PANJI_STRATEGY_CANDIDATE_SNAPSHOT", "")
+    if not path:
+        raise DatasetUnavailable("尚未配置已审计的候选事件快照")
+    p = Path(path)
+    if not p.is_absolute() or not p.is_file() or p.stat().st_size > MAX_BYTES:
+        raise DatasetUnavailable("候选快照不存在或超过大小限制")
+    try:
+        with p.open("rb") as stream:
+            raw = stream.read(MAX_BYTES + 1)
+        if len(raw) > MAX_BYTES:
+            raise DatasetInvalid("candidate snapshot too large")
+        return validate(json.loads(raw))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise DatasetInvalid("candidate snapshot not valid JSON") from exc
+
+
+def get_stock(dataset: dict[str, Any], symbol: str) -> dict[str, Any]:
+    if not SYMBOL_RE.fullmatch(symbol):
+        raise DatasetInvalid("invalid symbol")
+    value = dataset["stocks"].get(symbol)
+    if value is None:
+        raise DatasetUnavailable("股票不在已发布快照中")
+    return {"symbol": symbol, "release_id": dataset["metadata"]["release_id"], **value}
+
+
+def get_today(dataset: dict[str, Any], trade_date: str | None = None) -> dict[str, Any]:
+    batches = dataset["daily_batches"]
+    if trade_date is not None:
+        _day(trade_date, "trade_date")
+        selected = next((b for b in batches if b["trade_date"] == trade_date), None)
+    else:
+        selected = max(batches, key=lambda b: b["trade_date"]) if batches else None
+    if selected is None:
+        raise DatasetUnavailable("查询日期没有已发布批次（并非零机会）")
+    return {"metadata": dataset["metadata"], **selected}

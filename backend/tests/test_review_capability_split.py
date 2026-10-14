@@ -117,14 +117,15 @@ def _collect_capability_strings(dep: Any) -> set[str]:
 
 
 class TestCapabilitySingleSourceOfTruth:
-    def test_all_capabilities_is_exactly_four(self) -> None:
+    def test_all_capabilities_is_exactly_five(self) -> None:
         assert tuple(ALL_CAPABILITIES) == (
             "self_selection",
             "market_data",
             "market_review",
             "research_replay",
+            "strategy_research",
         )
-        assert len(set(ALL_CAPABILITIES)) == 4
+        assert len(set(ALL_CAPABILITIES)) == 5
 
     def test_market_review_machine_value(self) -> None:
         """复盘机器值必须是 ``market_review``，且 research_replay 未被改名。"""
@@ -284,13 +285,21 @@ class TestLegacyPlanFallback:
         assert caps[CAPABILITY_SELF_SELECTION]["watchlist_limit"] == 20
         assert caps[CAPABILITY_MARKET_REVIEW]["watchlist_limit"] is None
 
-    def test_research_50_grants_all_four(self) -> None:
+    def test_research_50_grants_original_four_no_new_strategy(self) -> None:
         caps = infer_capabilities_from_plan("research_50", 50, _EXPIRES, True)
-        assert set(caps) == set(ALL_CAPABILITIES)
+        assert set(caps) == {
+            CAPABILITY_SELF_SELECTION, CAPABILITY_MARKET_DATA,
+            CAPABILITY_MARKET_REVIEW, CAPABILITY_RESEARCH_REPLAY,
+        }
+        assert "strategy_research" not in caps
 
     def test_inactive_subscription_all_inactive(self) -> None:
         caps = infer_capabilities_from_plan("research_50", 50, _EXPIRES, False)
-        assert set(caps) == set(ALL_CAPABILITIES)
+        assert set(caps) == {
+            CAPABILITY_SELF_SELECTION, CAPABILITY_MARKET_DATA,
+            CAPABILITY_MARKET_REVIEW, CAPABILITY_RESEARCH_REPLAY,
+        }
+        assert "strategy_research" not in caps
         assert all(info["active"] is False for info in caps.values())
 
     def test_unknown_plan_yields_no_capability(self) -> None:

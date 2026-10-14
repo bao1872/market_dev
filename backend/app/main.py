@@ -66,6 +66,8 @@ from app.api.stock_memos import router as stock_memos_router
 from app.api.strategies import router as strategies_router
 from app.api.strategy_events import router as strategy_events_router
 from app.api.strategy_runs import router as strategy_runs_router
+from app.api.strategy_research import router as strategy_research_router
+from app.api.strategy_candidate_research import router as strategy_candidate_research_router
 from app.api.structural_factors import router as structural_factors_router
 from app.api.temporal_features import router as temporal_features_router
 from app.api.watchlist import router as watchlist_router
@@ -187,6 +189,8 @@ app.include_router(indicators_router)
 app.include_router(strategies_router)
 # 策略运行与结果路由（R12）
 app.include_router(strategy_runs_router)
+app.include_router(strategy_research_router)
+app.include_router(strategy_candidate_research_router)
 # 监控状态查询路由（M3）
 app.include_router(monitor_states_router)
 # 策略事件查询路由（M4）

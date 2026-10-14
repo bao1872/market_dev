@@ -13,7 +13,6 @@
 // 本文件为纯 TS（无 React 依赖），可被 node --test 直接运行，便于路由契约测试。
 
 import {
-  AUCTION_CAPABILITY,
   hasCapability,
   type CapabilityKey,
   type CapabilityStateLike,
@@ -23,6 +22,7 @@ export const APP_ROUTES = {
   market: '/market',
   screener: '/screener',
   review: '/review',
+  strategy: '/strategy',
   // [P0-FE 2026-07-31] 竞价分析入口（市场/板块/个股三级页面）
   auction: '/auction',
   messages: '/messages',
@@ -80,8 +80,8 @@ export interface AppNavItem {
 export const USER_NAV_ITEMS: AppNavItem[] = [
   { path: APP_ROUTES.market, label: '行情', requiredCapability: 'market_data' },
   { path: `${APP_ROUTES.market}?scope=watchlist`, label: '自选', requiredCapability: 'self_selection' },
+  { path: APP_ROUTES.strategy, label: '策略', requiredCapability: 'strategy_research' },
   { path: APP_ROUTES.review, label: '复盘', requiredCapability: 'market_review' },
-  { path: APP_ROUTES.auction, label: '竞价', requiredCapability: AUCTION_CAPABILITY },
 ]
 
 /** 自选导航 path（用于权限判断和 active 匹配） */

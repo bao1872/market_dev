@@ -31,6 +31,7 @@ from app.models.user_capability import (
     CAPABILITY_MARKET_DATA,
     CAPABILITY_MARKET_REVIEW,
     CAPABILITY_RESEARCH_REPLAY,
+    CAPABILITY_STRATEGY_RESEARCH,
     CAPABILITY_SELF_SELECTION,
     UserCapability,
 )
@@ -46,6 +47,7 @@ CAPABILITY_LABELS: dict[str, str] = {
     CAPABILITY_MARKET_DATA: "行情数据",
     CAPABILITY_MARKET_REVIEW: "复盘分析",
     CAPABILITY_RESEARCH_REPLAY: "竞价分析",
+    CAPABILITY_STRATEGY_RESEARCH: "策略研究",
 }
 
 # 默认路由矩阵
@@ -54,6 +56,7 @@ DEFAULT_ROUTE_MARKET = "/market"
 DEFAULT_ROUTE_MARKET_WATCHLIST = "/market?scope=watchlist"
 DEFAULT_ROUTE_REVIEW = "/review"
 DEFAULT_ROUTE_AUCTION = "/auction"
+DEFAULT_ROUTE_STRATEGY = "/strategy"
 DEFAULT_ROUTE_FORBIDDEN = "/forbidden"
 
 
@@ -157,6 +160,8 @@ def compute_default_route(
         return DEFAULT_ROUTE_MARKET_WATCHLIST
     if CAPABILITY_MARKET_REVIEW in active:
         return DEFAULT_ROUTE_REVIEW
+    if CAPABILITY_STRATEGY_RESEARCH in active:
+        return DEFAULT_ROUTE_STRATEGY
     if CAPABILITY_RESEARCH_REPLAY in active:
         return DEFAULT_ROUTE_AUCTION
     return DEFAULT_ROUTE_FORBIDDEN

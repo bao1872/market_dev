@@ -1,0 +1,46 @@
+.root { color:#d6dfeb; background:#101722; min-height:600px; padding:24px; font:14px/1.5 system-ui,sans-serif; }
+.header {display:flex; justify-content:space-between; align-items:center; gap:18px; flex-wrap:wrap; border-bottom:1px solid #354152; padding-bottom:16px;}
+.header h1 {margin:3px 0 3px; font-size:25px; color:#f0f5fb;}
+.header p {margin:0; color:#9caec1;}
+.header small {color:#87a1be; font-size:11px; letter-spacing:.12em;}
+.status {font-size:12px; color:#e0bf8d; background:#28313e; padding:7px 12px; border-radius:4px;}
+.tabs {display:flex; gap:8px; border-bottom:1px solid #334154; margin-top:16px; flex-wrap:wrap;}
+.tabs button,.stageButtons button {font:inherit; border:0; background:transparent; padding:12px 17px; color:#b4c3d6; cursor:pointer;}
+.tabs .active,.stageButtons .active {border-bottom:2px solid #85b7ff; color:white; font-weight:650;}
+.content {padding-top:18px;}
+.content h2 {font-size:17px;margin:0 0 8px; color:#f2f6fb;}
+.content h3 {font-size:15px;color:#eff5fa;margin:8px 0 12px;}
+.actions {display:flex;justify-content:space-between; align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:8px;}
+.actions form {display:flex;gap:8px;}
+.content input,.content select,.content button:not(.active) {font:inherit;}
+.content input,.content select {background:#1b2531;color:#edf2f9;border:1px solid #415168;border-radius:5px;padding:9px 10px;min-width:0;}
+.content button:not(.active),.content button.active {cursor:pointer;}
+.content form button,.content td button,.content section.card>button {border:1px solid #5579a5;background:#263e59;color:#f0f5fc;border-radius:4px;padding:8px 12px;}
+.content button:disabled {opacity:.52;cursor:not-allowed;}
+.meta {color:#8fa8c5;font-size:12px;}
+.hint {color:#9cabc0;font-size:12px;line-height:1.7;margin:8px 0 12px;}
+.chartScroll,.scroll {overflow:auto;max-width:100%;}
+.chartScroll {background:#141d29;border:1px solid #364254;border-radius:8px;margin:14px 0 20px;}
+.chart {min-width:860px; width:100%; height:auto;display:block;}
+.details {display:grid;grid-template-columns:minmax(0,.9fr) minmax(0,1.1fr);gap:14px;}
+.details section,.card {background:#16202c;border:1px solid #354457;border-radius:8px;padding:16px;min-width:0;}
+.stageButtons {display:flex;flex-wrap:wrap;gap:5px;border-bottom:1px solid #344256;}
+.stageButtons button {padding:8px;}
+.scoregrid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;}
+.scoregrid div {background:#1d2a3b;padding:10px;border-radius:5px;}
+.scoregrid dt {font-size:12px;color:#8eabbf;}
+.scoregrid dd {font-size:17px;margin:4px 0 0;}
+.scoregrid dd small {font-size:10px;color:#a5b5c8;}
+.scroll table {border-collapse:collapse; width:100%;font-size:12px;}
+.scroll th {text-align:left;color:#9db1c7;border-bottom:1px solid #425065;padding:9px 12px;white-space:nowrap;}
+.scroll td {border-bottom:1px solid #2e394a;padding:10px 12px;white-space:nowrap;}
+.scroll tr:hover td {background:#223044;}
+.filters {display:flex;gap:10px;margin:15px 0;flex-wrap:wrap;}
+.warning {color:#ffbf8b;background:#3c2926;padding:10px;border-radius:5px;}
+.good {color:#9ad6c7;}
+.empty {padding:28px;background:#1a2633;border:1px dashed #64748b;color:#bdcfe1;border-radius:8px;}
+.dategrid {display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:14px 0;}
+.dategrid label {display:grid;gap:6px;color:#adc1d9;}
+.card {margin:15px 0;}
+@media(max-width:850px){.root{padding:12px}.details{grid-template-columns:minmax(0,1fr)}.dategrid{grid-template-columns:repeat(2,minmax(0,1fr))}.actions form{width:100%}.chart{width:860px}}
+@media(max-width:440px){.scoregrid,.dategrid{grid-template-columns:1fr}.tabs button{padding:9px 10px}}

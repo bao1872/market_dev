@@ -50,50 +50,50 @@ class TestCapabilityGrantSchema:
     def test_self_selection_requires_watchlist_limit(self):
         """PA-02：self_selection 必须指定 watchlist_limit。"""
         with pytest.raises(ValueError, match="self_selection capability 必须指定 watchlist_limit"):
-            CapabilityGrant(capability="self_selection", months=1, watchlist_limit=None)
+            CapabilityGrant(capability="self_selection", days=1, watchlist_limit=None)
 
     def test_self_selection_with_watchlist_limit_ok(self):
         """PA-02：self_selection + watchlist_limit 合法。"""
-        cap = CapabilityGrant(capability="self_selection", months=1, watchlist_limit=20)
+        cap = CapabilityGrant(capability="self_selection", days=1, watchlist_limit=20)
         assert cap.capability == "self_selection"
         assert cap.watchlist_limit == 20
 
     def test_market_data_rejects_watchlist_limit(self):
         """非 self_selection 不支持 watchlist_limit。"""
         with pytest.raises(ValueError, match="market_data 不支持 watchlist_limit"):
-            CapabilityGrant(capability="market_data", months=1, watchlist_limit=20)
+            CapabilityGrant(capability="market_data", days=1, watchlist_limit=20)
 
     def test_research_replay_rejects_watchlist_limit(self):
         """非 self_selection 不支持 watchlist_limit。"""
         with pytest.raises(ValueError, match="research_replay 不支持 watchlist_limit"):
-            CapabilityGrant(capability="research_replay", months=1, watchlist_limit=10)
+            CapabilityGrant(capability="research_replay", days=1, watchlist_limit=10)
 
     def test_invalid_capability_rejected(self):
         """非法 capability 名称被拒绝。"""
         with pytest.raises(ValueError, match="无效 capability"):
-            CapabilityGrant(capability="invalid_cap", months=1)
+            CapabilityGrant(capability="invalid_cap", days=1)
 
-    def test_months_bounds(self):
-        """months 边界：1-36 合法，0/37 非法。"""
-        cap = CapabilityGrant(capability="market_data", months=1)
-        assert cap.months == 1
-        cap = CapabilityGrant(capability="market_data", months=36)
-        assert cap.months == 36
+    def test_days_bounds(self):
+        """days 边界：1-365 合法，0/366 非法。"""
+        cap = CapabilityGrant(capability="market_data", days=1)
+        assert cap.days == 1
+        cap = CapabilityGrant(capability="market_data", days=365)
+        assert cap.days == 365
         with pytest.raises(ValueError):
-            CapabilityGrant(capability="market_data", months=0)
+            CapabilityGrant(capability="market_data", days=0)
         with pytest.raises(ValueError):
-            CapabilityGrant(capability="market_data", months=37)
+            CapabilityGrant(capability="market_data", days=366)
 
     def test_watchlist_limit_bounds(self):
         """watchlist_limit 边界：1-500 合法。"""
-        cap = CapabilityGrant(capability="self_selection", months=1, watchlist_limit=1)
+        cap = CapabilityGrant(capability="self_selection", days=1, watchlist_limit=1)
         assert cap.watchlist_limit == 1
-        cap = CapabilityGrant(capability="self_selection", months=1, watchlist_limit=500)
+        cap = CapabilityGrant(capability="self_selection", days=1, watchlist_limit=500)
         assert cap.watchlist_limit == 500
         with pytest.raises(ValueError):
-            CapabilityGrant(capability="self_selection", months=1, watchlist_limit=0)
+            CapabilityGrant(capability="self_selection", days=1, watchlist_limit=0)
         with pytest.raises(ValueError):
-            CapabilityGrant(capability="self_selection", months=1, watchlist_limit=501)
+            CapabilityGrant(capability="self_selection", days=1, watchlist_limit=501)
 
 
 class TestGrantCapabilityRequestSchema:
@@ -101,17 +101,17 @@ class TestGrantCapabilityRequestSchema:
 
     def test_self_selection_requires_watchlist_limit(self):
         with pytest.raises(ValueError, match="self_selection capability 必须指定 watchlist_limit"):
-            GrantCapabilityRequest(capability="self_selection", months=1, watchlist_limit=None)
+            GrantCapabilityRequest(capability="self_selection", days=1, watchlist_limit=None)
 
     def test_market_data_ok_without_watchlist_limit(self):
-        req = GrantCapabilityRequest(capability="market_data", months=3)
+        req = GrantCapabilityRequest(capability="market_data", days=3)
         assert req.capability == "market_data"
-        assert req.months == 3
+        assert req.days == 3
         assert req.watchlist_limit is None
 
     def test_invalid_capability_rejected(self):
         with pytest.raises(ValueError, match="无效 capability"):
-            GrantCapabilityRequest(capability="admin", months=1)
+            GrantCapabilityRequest(capability="admin", days=1)
 
 
 class TestRevokeCapabilityRequestSchema:
@@ -135,8 +135,8 @@ class TestInviteCodeCreateSchema:
         payload = InviteCodeCreate(
             count=1,
             capabilities=[
-                CapabilityGrant(capability="self_selection", months=1, watchlist_limit=20),
-                CapabilityGrant(capability="market_data", months=1),
+                CapabilityGrant(capability="self_selection", days=1, watchlist_limit=20),
+                CapabilityGrant(capability="market_data", days=1),
             ],
         )
         assert payload.capabilities is not None
@@ -705,9 +705,9 @@ class TestCapabilityServiceIntegration:
         code_hash = hashlib.sha256(plain_code.encode()).hexdigest()
 
         caps = [
-            CapabilityGrant(capability="self_selection", months=1, watchlist_limit=20),
-            CapabilityGrant(capability="market_data", months=1),
-            CapabilityGrant(capability="research_replay", months=1),
+            CapabilityGrant(capability="self_selection", days=1, watchlist_limit=20),
+            CapabilityGrant(capability="market_data", days=1),
+            CapabilityGrant(capability="research_replay", days=1),
         ]
         invite = InviteCode(
             code_hash=code_hash,

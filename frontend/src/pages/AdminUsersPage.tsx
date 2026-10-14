@@ -375,6 +375,7 @@ export default function AdminUsersPage() {
   const [capMarketData, setCapMarketData] = useState(true)
   const [capMarketReview, setCapMarketReview] = useState(false)
   const [capResearchReplay, setCapResearchReplay] = useState(false)
+  const [capStrategyResearch, setCapStrategyResearch] = useState(false)
   // self_selection 必填：watchlist_limit（管理员自由输入，1-500）
   // [Commit B3] 默认 5；state 允许 '' 中间编辑态（清空后可重新键入）
   const [capWatchlistLimit, setCapWatchlistLimit] = useState<number | ''>(
@@ -599,6 +600,9 @@ export default function AdminUsersPage() {
         days: grantDays,
       })
     }
+    if (capStrategyResearch) {
+      capabilities.push({capability: 'strategy_research', days: grantDays})
+    }
 
     if (capabilities.length === 0) {
       toast.show(
@@ -640,6 +644,7 @@ export default function AdminUsersPage() {
     capMarketData,
     capMarketReview,
     capResearchReplay,
+    capStrategyResearch,
     capWatchlistLimit,
     toast,
   ])
@@ -653,6 +658,7 @@ export default function AdminUsersPage() {
     setCapMarketData(true)
     setCapMarketReview(false)
     setCapResearchReplay(false)
+    setCapStrategyResearch(false)
     // [Commit B3] 每次打开生成弹窗都重置为 5 / 30
     setCapWatchlistLimit(INVITE_DEFAULT_WATCHLIST_LIMIT)
     setGenerateGrantDays(INVITE_DEFAULT_GRANT_DAYS)
@@ -1317,6 +1323,7 @@ export default function AdminUsersPage() {
     if (capResearchReplay) {
       parts.push(CAPABILITY_LABELS.research_replay)
     }
+    if (capStrategyResearch) { parts.push(CAPABILITY_LABELS.strategy_research) }
     const capText = parts.length > 0 ? parts.join(' + ') : '未选择权限'
     // [权限模型 V2] 注册后默认入口：复用共享 computeDefaultRoute（与登录/后台列表同源）
     const defaultRoute = computeDefaultRoute({
@@ -1324,9 +1331,10 @@ export default function AdminUsersPage() {
       market_data: capMarketData,
       market_review: capMarketReview,
       research_replay: capResearchReplay,
+      strategy_research: capStrategyResearch,
     })
     return `${capText} · 有效期${generateGrantDays}天 · 注册后默认入口: ${defaultRoute}`
-  }, [capSelfSelection, capMarketData, capMarketReview, capResearchReplay, capWatchlistLimit, generateGrantDays])
+  }, [capSelfSelection, capMarketData, capMarketReview, capResearchReplay, capStrategyResearch, capWatchlistLimit, generateGrantDays])
 
   // ===== 渲染 =====
   return (
@@ -2029,6 +2037,10 @@ export default function AdminUsersPage() {
                         <b>{CAPABILITY_LABELS.research_replay}</b>
                         <small>{CAPABILITY_DESCRIPTIONS.research_replay}</small>
                       </span>
+                    </label>
+                    <label className="capability-checkbox-item">
+                      <input type="checkbox" checked={capStrategyResearch} onChange={e => setCapStrategyResearch(e.target.checked)} />
+                      <span><b>{CAPABILITY_LABELS.strategy_research}</b><small>{CAPABILITY_DESCRIPTIONS.strategy_research}</small></span>
                     </label>
                   </div>
                 </div>
