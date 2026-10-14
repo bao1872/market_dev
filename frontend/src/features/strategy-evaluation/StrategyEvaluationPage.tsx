@@ -6,6 +6,7 @@ import { getZigzagEvaluation, type MetricKey, type ResearchPoint, type StrategyS
 import { fmtPct, fmtRate, modelVisual } from './evaluationLogic'
 import OpportunityJointChart from './OpportunityJointChart'
 import DistributionChart from './DistributionChart'
+import { buildCandidateDeepLink, type CandidateLinkIdentity } from '@/features/strategy-research/candidateLinks'
 import styles from './strategyEvaluation.module.scss'
 
 const DISTRIBUTIONS: { id: MetricKey; name: string }[] = [
@@ -51,8 +52,10 @@ export default function StrategyEvaluationPage() {
   const jointN = models.reduce((n, m) => n + m.n_path, 0)
   function toggle(id: string) { setDisabled(s => s.includes(id) ? s.filter(v => v !== id) : [...s, id]) }
   function switchSide(v: StrategySide) { setSide(v); setDisabled([]); setSelectedPoint(null) }
-  function stockLink(p: Pick<ResearchPoint, 'symbol'>) {
-    navigate(`/strategy?tab=stock&symbol=${encodeURIComponent(p.symbol)}`)
+  function canLocate(p: CandidateLinkIdentity): boolean { return buildCandidateDeepLink(p) !== null }
+  function stockLink(p: CandidateLinkIdentity) {
+    const link = buildCandidateDeepLink(p)
+    if (link) navigate(link)
   }
   return <div className={styles.page}>
     <div className={styles.head}>
@@ -105,10 +108,10 @@ export default function StrategyEvaluationPage() {
         </section>
         <section className={styles.card}>
           <div className={styles.sectionTitle}><h2>历史事件明细</h2><span>最近事件，每模型最多 80 行 · 仅用于抽样回溯</span></div>
-          <div className={styles.scroll}><table><thead><tr><th>日期</th><th>股票</th><th>模型</th><th>结果</th><th>MFE</th><th>MAE</th><th>MDD</th><th>终点</th><th>操作</th></tr></thead><tbody>{rows.map((r,i) => <tr key={`${r.model_id}|${r.event_id}|${i}`}><td>{r.signal_time}</td><td>{r.symbol}</td><td>{r.model_id}</td><td>{r.outcome === 'SUCCESS' ? '成功' : r.outcome === 'FAIL' ? '失败' : '未成熟'}</td><td>{fmtPct(r.mfe_pct,true)}</td><td>{fmtPct(r.mae_pct)}</td><td>{fmtPct(r.mdd_pct)}</td><td>{fmtPct(r.endpoint_pct,true)}</td><td><button className={styles.textButton} onClick={() => stockLink(r)}>查看该股票 →</button></td></tr>)}</tbody></table></div>
+          <div className={styles.scroll}><table><thead><tr><th>日期</th><th>股票</th><th>模型</th><th>结果</th><th>MFE</th><th>MAE</th><th>MDD</th><th>终点</th><th>操作</th></tr></thead><tbody>{rows.map((r,i) => <tr key={`${r.model_id}|${r.event_id}|${i}`}><td>{r.signal_time}</td><td>{r.symbol}</td><td>{r.model_id}</td><td>{r.outcome === 'SUCCESS' ? '成功' : r.outcome === 'FAIL' ? '失败' : '未成熟'}</td><td>{fmtPct(r.mfe_pct,true)}</td><td>{fmtPct(r.mae_pct)}</td><td>{fmtPct(r.mdd_pct)}</td><td>{fmtPct(r.endpoint_pct,true)}</td><td><button className={styles.textButton} disabled={!canLocate(r)} title={!canLocate(r)?'该历史事件缺少完整 candidate_id / observation_id / D阶段 / 决策日 / 发布版本，禁止错误回链':undefined} onClick={() => stockLink(r)}>{canLocate(r)?'定位该候选 →':'不可精准定位'}</button></td></tr>)}</tbody></table></div>
         </section>
       </>}
-      {selectedPoint && <div className={styles.modalBackdrop} onClick={() => setSelectedPoint(null)}><div className={styles.modal} onClick={e => e.stopPropagation()}><h3>历史机会事件</h3><p>{selectedPoint.symbol} · {selectedPoint.signal_time} · {selectedPoint.model_id}</p><p>MFE {fmtPct(selectedPoint.mfe_pct, true)}　 MAE {fmtPct(selectedPoint.mae_pct)}</p><p>事件：{selectedPoint.event_id}</p><div className={styles.actions}><button onClick={() => setSelectedPoint(null)}>关闭</button><button onClick={() => stockLink(selectedPoint)}>查看该股票 →</button></div></div></div>}
+      {selectedPoint && <div className={styles.modalBackdrop} onClick={() => setSelectedPoint(null)}><div className={styles.modal} onClick={e => e.stopPropagation()}><h3>历史机会事件</h3><p>{selectedPoint.symbol} · {selectedPoint.signal_time} · {selectedPoint.model_id}</p><p>MFE {fmtPct(selectedPoint.mfe_pct, true)}　 MAE {fmtPct(selectedPoint.mae_pct)}</p><p>事件：{selectedPoint.event_id}</p><div className={styles.actions}><button onClick={() => setSelectedPoint(null)}>关闭</button><button disabled={!canLocate(selectedPoint)} title={!canLocate(selectedPoint)?'历史快照尚未提供完整事件映射':undefined} onClick={() => stockLink(selectedPoint)}>{canLocate(selectedPoint)?'定位该候选 →':'缺少候选映射'}</button></div></div></div>}
     </>}
   </div>
 }

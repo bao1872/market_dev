@@ -85,6 +85,15 @@ def _check_snapshot(blob: Any) -> dict[str, Any]:
         if (row["model_id"], row["event_id"]) in seen:
             raise SnapshotInvalid("duplicate model event")
         seen.add((row["model_id"], row["event_id"]))
+        link_fields = ("candidate_id", "observation_id", "stage", "decision_date", "model_release_id")
+        provided = [row.get(field) is not None for field in link_fields]
+        if any(provided) and not all(provided):
+            raise SnapshotInvalid("event link identity must be complete or absent")
+        if all(provided):
+            if any(not isinstance(row[k], str) or not row[k].strip() for k in link_fields):
+                raise SnapshotInvalid("event link identity must be nonempty strings")
+            if row["stage"] not in ("D1", "D2", "D3") or row["decision_date"] != row["signal_time"][:10]:
+                raise SnapshotInvalid("event stage/decision date does not match signal time")
         for name in ("endpoint_pct", "mfe_pct", "mae_pct", "mdd_pct"):
             _optional_number(row, name, min_value=(0 if name in ("mae_pct", "mdd_pct") else None))
         if row["outcome"] == "UNRESOLVED" and any(row.get(k) is not None for k in ("endpoint_pct", "mfe_pct", "mae_pct", "mdd_pct")):
@@ -192,7 +201,7 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
         # Stable, uniform sample by source order; never describe scatter sample as the full population.
         stride = max(1, math.ceil(len(valid) / 550))
         for e in valid[::stride][:550]:
-            points.append({"event_id": e["event_id"], "model_id": m["id"], "symbol": e["symbol"], "signal_time": e["signal_time"], "mfe_pct": e["mfe_pct"], "mae_pct": e["mae_pct"], "outcome": e["outcome"]})
+            points.append({"event_id": e["event_id"], "model_id": m["id"], "symbol": e["symbol"], "signal_time": e["signal_time"], "mfe_pct": e["mfe_pct"], "mae_pct": e["mae_pct"], "outcome": e["outcome"], **{k: e.get(k) for k in ("candidate_id", "observation_id", "stage", "decision_date", "model_release_id")}})
         results.append({
             "model_id": m["id"], "model_name": m["name"], "n_signals": len(one),
             "n_resolved": len(resolved), "n_unresolved": len(one) - len(resolved),
@@ -208,7 +217,7 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
             "distributions": {k: _hist(v) for k, v in metrics.items()},
         })
         for e in sorted(one, key=lambda x: (x["signal_time"], x["event_id"]), reverse=True)[:80]:
-            table.append({k: e.get(k) for k in ("event_id", "model_id", "symbol", "signal_time", "outcome", "mfe_pct", "mae_pct", "mdd_pct", "endpoint_pct")})
+            table.append({k: e.get(k) for k in ("event_id", "model_id", "symbol", "signal_time", "outcome", "mfe_pct", "mae_pct", "mdd_pct", "endpoint_pct", "candidate_id", "observation_id", "stage", "decision_date", "model_release_id")})
     table.sort(key=lambda e: (e["signal_time"], e["model_id"], e["event_id"]), reverse=True)
     return {
         "metadata": snapshot["metadata"], "side": side, "symbol": symbol,

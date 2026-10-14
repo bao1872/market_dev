@@ -19,9 +19,12 @@ export interface DailyRow {
   observation_id: string; candidate_id: string; symbol: string; kind: Kind; stage: Stage
   l1_score: number | null; l2_score: number | null; joint_alert: boolean; first_breakout: boolean
 }
-export interface DailyResult { trade_date: string; release_id: string; status: 'PUBLISHED'; items: DailyRow[] }
-export async function getStockResearch(symbol: string): Promise<StockResearch> {
-  const { data } = await apiClient.get<StockResearch>(`/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/candidates`)
+export interface DailyResult { trade_date: string; release_id: string; status: 'PUBLISHED'; freshness: 'CURRENT' | 'HISTORICAL'; expected_trade_date: string; items: DailyRow[] }
+export async function getStockResearch(symbol: string, releaseId?: string): Promise<StockResearch> {
+  const { data } = await apiClient.get<StockResearch>(
+    `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/candidates`,
+    { params: releaseId ? { release_id: releaseId } : undefined },
+  )
   return data
 }
 export async function getDailyResearch(): Promise<DailyResult> {

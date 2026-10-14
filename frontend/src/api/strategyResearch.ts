@@ -44,6 +44,12 @@ export interface ResearchPoint {
   mfe_pct: number
   mae_pct: number
   outcome: OpportunityStatus
+  // Optional in legacy research snapshots; all five must be present for deep links.
+  candidate_id?: string | null
+  observation_id?: string | null
+  stage?: 'D1' | 'D2' | 'D3' | null
+  decision_date?: string | null
+  model_release_id?: string | null
 }
 export interface ResearchEventRow extends Omit<ResearchPoint, 'mfe_pct' | 'mae_pct'> {
   mdd_pct: number | null
