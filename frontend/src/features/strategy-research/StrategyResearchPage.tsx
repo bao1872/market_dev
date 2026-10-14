@@ -5,6 +5,7 @@ import { useAuthStore } from '@/store/auth'
 import { getDailyResearch, getStockResearch, type DailyRow } from '@/api/strategyCandidates'
 import StrategyEvaluationPage from '@/features/strategy-evaluation/StrategyEvaluationPage'
 import CandidateScoreChart from './CandidateScoreChart'
+import ModelManagementView from './ModelManagementView'
 import styles from './strategyResearchPage.module.scss'
 
 type Tab = 'stock' | 'evaluation' | 'today' | 'management'
@@ -100,17 +101,6 @@ function TodayView({ focus }: { focus:(row: DailyRow,releaseId:string,decisionDa
   </>
 }
 
-function AdminView() {
-  const [train,setTrain] = useState({train0:'2023-01-01',train1:'2024-12-31',val0:'2025-01-01',val1:'2025-12-31',test0:'2026-01-01',test1:'2026-09-30'})
-  const valid=train.train0<=train.train1&&train.train1<train.val0&&train.val0<=train.val1&&train.val1<train.test0&&train.test0<=train.test1
-  return <><h2>模型管理</h2><p className={styles.hint}>管理员专属。手动重训与每日自动推理分离。当前交付只提供安全的预配置界面；算法制品和训练任务服务未通过审计前，训练/发布/回滚操作保持锁定。</p>
-    <section className={styles.card}><h3>重新训练模型 · 事件决策日范围</h3><div className={styles.dategrid}>
-      {([['train0','Train 起'],['train1','Train 止'],['val0','Validation 起'],['val1','Validation 止'],['test0','Test 起'],['test1','Test 止']] as const).map(([key,label])=><label key={key}>{label}<input type="date" value={train[key]} onChange={e=>setTrain(p=>({...p,[key]:e.target.value}))} /></label>)}
-    </div><p className={valid?styles.good:styles.warning}>{valid?'区间日期顺序合法（尚未做样本成熟/PIT预检）':'日期区间重叠或倒置，不符合独立 Train/VAL/TEST 合同'}</p>
-      <button type="button" disabled title="需先核验因果引擎、模型权重与后验标签，接入后台训练服务">重新训练（等待模型制品审计）</button></section>
-    <section className={styles.card}><h3>任务与版本</h3><p>每日盘后预测、候选模型发布、回滚均需要后端任务与不可变模型发布指针；本阶段未连接这些管理 API。不能用前端状态模拟生产发布。</p></section></>
-}
-
 export default function StrategyResearchPage() {
   const [params,setParams] = useSearchParams()
   const user = useAuthStore(s=>s.user)
@@ -142,7 +132,7 @@ export default function StrategyResearchPage() {
       {tab==='stock'&&<StockView urlSymbol={symbol} focusedId={focusedId} stage={stage} releaseId={releaseId} observationId={observationId} decisionDate={decisionDate} onLocation={locate} />}
       {tab==='evaluation'&&<StrategyEvaluationPage />}
       {tab==='today'&&<TodayView focus={(r,releaseId,day)=>locate(r.symbol,r.candidate_id,r.stage,{releaseId,observationId:r.observation_id,decisionDate:day})} />}
-      {tab==='management'&&admin&&<AdminView />}
+      {tab==='management'&&admin&&<ModelManagementView />}
     </div>
   </main>
 }

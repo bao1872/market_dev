@@ -6,6 +6,7 @@ Snapshot is trusted local operator-controlled file, not user-supplied JSON.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -14,10 +15,23 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from app.services.strategy_candidate_shards import (
+    MANIFEST_SCHEMA,
+    ShardContractError,
+    load_candidate_shards,
+)
+
 SCHEMA = "panji-strategy-candidates-v2"
 MAX_BYTES = 48 * 1024 * 1024
 MAX_STOCKS = 8000
 SYMBOL_RE = re.compile(r"^(SH|SZ|BJ):[0-9]{6}$")
+
+# Bounded cache for pinned immutable shard releases (see `read_dataset`). A single
+# entry bounds resident memory for the largest full-market snapshot; the key is an
+# immutable release identity (pinned physical directory + descriptor digest),
+# never the mutable `current` symlink path.
+_SHARD_CACHE: dict[tuple[str, str], dict[str, Any]] = {}
+_SHARD_CACHE_MAX = 1
 
 
 class DatasetUnavailable(Exception):
@@ -198,20 +212,48 @@ def validate(blob: Any) -> dict[str, Any]:
 
 
 def read_dataset() -> dict[str, Any]:
+    """Load the pinned release; the 48 MiB per-file bound is never relaxed.
+
+    The physical release directory is resolved BEFORE any read so an atomic
+    `current` symlink swap cannot mix files belonging to two releases. A shard
+    descriptor and a legacy single-file snapshot both end in the same in-memory
+    shape validated by `validate()`.
+    """
     path = os.getenv("PANJI_STRATEGY_CANDIDATE_SNAPSHOT", "")
     if not path:
         raise DatasetUnavailable("尚未配置已审计的候选事件快照")
     p = Path(path)
-    if not p.is_absolute() or not p.is_file() or p.stat().st_size > MAX_BYTES:
+    if not p.is_absolute() or not p.is_file():
         raise DatasetUnavailable("候选快照不存在或超过大小限制")
+    pinned = p.resolve()
+    if pinned.stat().st_size > MAX_BYTES:
+        raise DatasetInvalid("candidate snapshot too large")
     try:
-        with p.open("rb") as stream:
-            raw = stream.read(MAX_BYTES + 1)
-        if len(raw) > MAX_BYTES:
-            raise DatasetInvalid("candidate snapshot too large")
-        return validate(json.loads(raw))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raw = pinned.read_bytes()
+    except OSError as exc:
+        raise DatasetInvalid("candidate snapshot not readable") from exc
+    try:
+        blob = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DatasetInvalid("candidate snapshot not valid JSON") from exc
+    if isinstance(blob, dict) and blob.get("schema") == MANIFEST_SCHEMA:
+        # Bounded cache keyed by the PINNED physical release directory plus the
+        # descriptor digest: swapping `current` to another batch changes the key,
+        # and rewriting a file in place changes the digest. Never keyed on the
+        # mutable symlink path alone.
+        key = (str(pinned), hashlib.sha256(raw).hexdigest())
+        cached = _SHARD_CACHE.get(key)
+        if cached is not None:
+            return cached
+        try:
+            merged = load_candidate_shards(pinned, validate=validate)
+        except ShardContractError as exc:
+            raise DatasetInvalid(f"candidate shard contract: {exc}") from exc
+        if len(_SHARD_CACHE) >= _SHARD_CACHE_MAX:
+            _SHARD_CACHE.clear()
+        _SHARD_CACHE[key] = merged
+        return merged
+    return validate(blob)
 
 
 def get_stock(dataset: dict[str, Any], symbol: str) -> dict[str, Any]:
