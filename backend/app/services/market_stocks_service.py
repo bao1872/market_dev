@@ -686,40 +686,56 @@ def _build_fp_filter_conditions(
         # [STRUCT-EVENT-SPLIT] 复合结构事件筛选值（type#direction）同时约束
         # fp_structure_event_type 与 fp_structure_event_direction 两列，保证
         # 承接/压制筛选结果严格互斥（单一方向，绝不交叉命中）。
+        # [STRUCT-EVENT-SPLIT-FIX] 修复两类错误：
+        #   1) not_in 旧实现用 OR 连接各复合对的否定（~A OR ~B），会错误把应排除的
+        #      B 重新纳入；正确语义为「同时不匹配所有对」= ~(A OR B) = ~A AND ~B。
+        #   2) in/not_in 旧实现只收集复合对、丢弃普通枚举值（如历史合并值
+        #      OB_CREATED/BOS/CHoCH），导致混合旧枚举时遗漏条件。现同时收集两类。
         if (
             f.fp_key == "fp_structure_event_type"
             and data_type == "enum"
             and f.operator in ("eq", "neq", "in", "not_in")
         ):
             if f.operator in ("eq", "neq"):
-                composite_items = [f.value] if split_structure_event_composite(str(f.value)) else []
+                tokens = [str(f.value)]
             else:  # in / not_in
-                composite_items = [
-                    v.strip()
-                    for v in str(f.value).split(",")
-                    if v.strip() and split_structure_event_composite(v.strip())
-                ]
-            if composite_items:
+                tokens = [v.strip() for v in str(f.value).split(",") if v.strip()]
+            composite_pairs: list[tuple[str, str]] = []
+            plain_values: list[str] = []
+            for t in tokens:
+                comp = split_structure_event_composite(t)
+                if comp is not None:
+                    composite_pairs.append(comp)
+                else:
+                    plain_values.append(t)
+
+            if composite_pairs:
                 type_expr = _build_fp_value_expr(
                     "fp_structure_event_type", snap_subq, chip_subq, max_trade_date_subq
                 )
                 dir_expr = _build_fp_value_expr(
                     "fp_structure_event_direction", snap_subq, chip_subq, max_trade_date_subq
                 )
-                pair_conditions = [
-                    and_(
-                        type_expr == split_structure_event_composite(v)[0],
-                        dir_expr == split_structure_event_composite(v)[1],
-                    )
-                    for v in composite_items
-                ]
                 if f.operator in ("eq", "in"):
-                    conditions.append(or_(*pair_conditions))
-                else:  # neq / not_in：不匹配任一复合对 OR 任一侧为 NULL（与既有 neq 语义一致）
-                    conditions.append(
-                        or_(type_expr.is_(None), dir_expr.is_(None), *[~pc for pc in pair_conditions])
-                    )
+                    # INCLUSIVE：命中任一条件即入选（复合对 OR 普通枚举值）。
+                    item_conditions: list[ColumnElement[bool]] = [
+                        and_(type_expr == comp[0], dir_expr == comp[1])
+                        for comp in composite_pairs
+                    ]
+                    item_conditions.extend(type_expr == v for v in plain_values)
+                    conditions.append(or_(*item_conditions))
+                else:  # neq / not_in：EXCLUSIVE：必须不匹配任一条件才入选。
+                    # NULL 守卫：type/dir 任一为空 → 不属于任何枚举值 → 入选（与既有 neq 语义一致）。
+                    null_guard = or_(type_expr.is_(None), dir_expr.is_(None))
+                    # 「同时不匹配所有条件」= ~(A OR B) = ~A AND ~B（修复旧 OR 错配）。
+                    exclude_conditions: list[ColumnElement[bool]] = [
+                        ~and_(type_expr == comp[0], dir_expr == comp[1])
+                        for comp in composite_pairs
+                    ]
+                    exclude_conditions.extend(type_expr != v for v in plain_values)
+                    conditions.append(or_(null_guard, and_(*exclude_conditions)))
                 continue
+            # 无复合对（仅普通枚举值或空值）→ 交由下方普通枚举处理（eq/in/neq/not_in 已正确支持 NULL）。
 
         raw_expr = _build_fp_value_expr(f.fp_key, snap_subq, chip_subq, max_trade_date_subq)
         typed_expr = _cast_fp_value(raw_expr, data_type, source)

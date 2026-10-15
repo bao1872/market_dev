@@ -26,8 +26,11 @@ from datetime import UTC, date, datetime
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.exc import SAWarning
 
+from app.models.stock_feature_snapshot import StockFeatureSnapshot
 from app.schemas.first_pyramid import ChipStatus
 from app.services.chip_status_resolver import (
     _build_chip_status_from_row,
@@ -305,6 +308,112 @@ class TestChipSourceFieldsRenderNullPlaceholder:
             warnings.simplefilter("ignore", SAWarning)
             for c in conds:
                 assert str(c.compile(compile_kwargs={"literal_binds": True}))
+
+
+# ===== [STRUCT-EVENT-SPLIT-FIX] 复合结构事件筛选回归测试（纯单元，无 DB） =====
+#
+# 覆盖 6 个新事件类型场景：等于 / 不等于 / 多选(in) / 排除多选(not_in) /
+# 混合旧枚举 / NULL。直接校验 _build_fp_filter_conditions 生成的 SQL 布尔结构，
+# 不连接数据库（PURE_UNIT_TEST=1 可运行），提供 not_in OR 错配与混合旧枚举
+# 遗漏条件的真实修复证据（不把 skip 当 PASS）。
+
+
+_SNAP_SUBQ = select(StockFeatureSnapshot).subquery("snap")
+
+
+def _compile_structure_event_filter(operator: str, value: str) -> str:
+    """构建 fp_structure_event_type 筛选条件并编译为 PostgreSQL SQL（纯函数，无 DB）。"""
+    specs = [
+        FpFilterSpec(
+            fp_key="fp_structure_event_type", operator=operator, value=value, value2=None
+        )
+    ]
+    conds = _build_fp_filter_conditions(
+        specs, snap_subq=_SNAP_SUBQ, chip_subq=None, max_trade_date_subq=None
+    )
+    assert len(conds) == 1, f"期望生成 1 个条件，实际 {len(conds)}"
+    sql = str(
+        conds[0].compile(
+            dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    return " ".join(sql.split())  # 归一化空白，便于断言
+
+
+class TestStructureEventFilterRegression:
+    """[STRUCT-EVENT-SPLIT-FIX] 6 场景回归：等于/不等于/多选/排除多选/混合旧枚举/NULL。"""
+
+    def test_eq_composite_is_single_direction_pair(self):
+        """等于(复合)：单一 (type AND direction) 对，不交叉命中，不含 OR/IS NULL。"""
+        sql = _compile_structure_event_filter("eq", "OB_CREATED#bullish")
+        assert "'OB_CREATED'" in sql and "'bullish'" in sql
+        assert " OR " not in sql, f"eq 复合不应出现 OR 交叉: {sql}"
+        assert "IS NULL" not in sql, f"eq 复合不应含 NULL 守卫: {sql}"
+
+    def test_neq_composite_includes_null_and_single_negation(self):
+        """不等于(复合)：含 NULL 守卫，且为单一否定（不含第二个 NOT）。"""
+        sql = _compile_structure_event_filter("neq", "OB_CREATED#bullish")
+        assert "IS NULL" in sql, f"neq 复合须含 NULL 守卫: {sql}"
+        assert sql.count("NOT (") == 1, f"neq 单复合只应有一个否定: {sql}"
+        assert " OR " in sql, f"neq 复合 NULL 守卫须以 OR 连接否定: {sql}"
+
+    def test_in_multi_select_or_of_pairs(self):
+        """多选(in)：两复合对以 OR 连接，不含 NULL 守卫。"""
+        sql = _compile_structure_event_filter("in", "OB_CREATED#bullish,OB_ENTERED#bearish")
+        assert "'bullish'" in sql and "'bearish'" in sql
+        assert "'OB_CREATED'" in sql and "'OB_ENTERED'" in sql
+        assert " OR " in sql, f"in 多选须 OR 连接复合对: {sql}"
+        assert "IS NULL" not in sql, f"in 多选不应含 NULL 守卫: {sql}"
+
+    def test_not_in_exclude_multi_select_anded_negations(self):
+        """排除多选(not_in)：两否定须以 AND 连接（修复旧 OR 错配，否则会错误纳入 B）。"""
+        sql = _compile_structure_event_filter("not_in", "OB_CREATED#bullish,OB_ENTERED#bearish")
+        assert "IS NULL" in sql, f"not_in 须含 NULL 守卫: {sql}"
+        # 关键修复断言：两个否定是 AND 关系，而非 OR。
+        assert ") AND NOT (" in sql or "NOT (" in sql and "OR NOT (" not in sql, (
+            f"not_in 多复合否定须 AND 连接，实际: {sql}"
+        )
+        assert sql.count("NOT (") == 2, f"not_in 双复合应有两个否定: {sql}"
+
+    def test_in_mixed_legacy_enum_keeps_plain_value(self):
+        """混合旧枚举(in)：普通枚举值 OB_CREATED 不得被丢弃（旧实现只留复合对）。"""
+        sql = _compile_structure_event_filter("in", "OB_CREATED#bullish,OB_CREATED")
+        # 复合对贡献一个 'OB_CREATED'，普通枚举值再贡献一个 => 共两个。
+        assert sql.count("'OB_CREATED'") == 2, (
+            f"in 混合旧枚举须保留普通枚举值，实际仅 {sql.count("'OB_CREATED'")} 个: {sql}"
+        )
+        assert "'bullish'" in sql
+        assert " OR " in sql, f"in 混合须 OR 连接复合对与普通枚举值: {sql}"
+
+    def test_not_in_mixed_legacy_enum_keeps_plain_value(self):
+        """混合旧枚举(not_in)：普通枚举否定不得被丢弃，且与复合否定 AND 连接。"""
+        sql = _compile_structure_event_filter("not_in", "OB_CREATED#bullish,OB_CREATED")
+        assert sql.count("'OB_CREATED'") == 2, (
+            f"not_in 混合旧枚举须保留普通枚举否定，实际: {sql}"
+        )
+        # 普通枚举以 != 否定形式出现，并与复合对否定 AND 连接（非 OR 错配）。
+        assert "!= 'OB_CREATED'" in sql, f"not_in 混合须保留普通枚举否定: {sql}"
+        assert ") AND snap.summary_payload" in sql or "AND snap.summary_payload['first_pyramid_flat']['fp_structure_event_type'] !=" in sql, (
+            f"not_in 混合普通枚举否定须与复合否定 AND 连接: {sql}"
+        )
+        assert "IS NULL" in sql, f"not_in 混合须含 NULL 守卫: {sql}"
+
+    def test_null_handling_not_in_includes_null_rows(self):
+        """NULL 守卫：not_in 须包含 IS NULL（NULL 行不属于任何枚举值，应入选）。"""
+        sql = _compile_structure_event_filter("not_in", "OB_CREATED#bullish")
+        assert "IS NULL" in sql
+
+    def test_null_handling_eq_excludes_null_rows(self):
+        """NULL 守卫：eq 不含 IS NULL（NULL 行正确排除）。"""
+        sql = _compile_structure_event_filter("eq", "OB_CREATED#bullish")
+        assert "IS NULL" not in sql
+
+    def test_legacy_plain_eq_falls_through_to_simple_equality(self):
+        """向后兼容：普通枚举值（无 #）eq 仍走普通枚举路径，仅约束 type 列。"""
+        sql = _compile_structure_event_filter("eq", "OB_CREATED")
+        assert "'OB_CREATED'" in sql
+        assert "bullish" not in sql and "bearish" not in sql
+        assert " AND " not in sql, f"普通枚举 eq 不应拆出 direction 对: {sql}"
 
 
 # ===== chip row → ChipStatus 映射（退役前实现，仅审计路径） =====

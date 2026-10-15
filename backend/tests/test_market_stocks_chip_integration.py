@@ -930,3 +930,171 @@ class TestStructureEventCompositeFilter:
             params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED#invalid", "page_size": 50},
         )
         assert resp.status_code == 422
+
+    # ===== [STRUCT-EVENT-SPLIT-FIX] 新增方向互斥性回归（6 场景：不等于/多选/排除多选/混合旧枚举/NULL） =====
+
+    async def test_composite_neq_excludes_only_that_direction(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """不等于(复合)：排除该方向的全部股票，保留另一方向。"""
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:neq:OB_CREATED#bullish", "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert "688002" in got   # 压制股B 保留
+        assert "688001" not in got  # 承接股A 排除
+        assert "688003" not in got  # 承接股C 排除
+
+    async def test_composite_in_multi_select_both_directions(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """多选(in)：两方向复合对以 OR 连接，全部命中。"""
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:in:OB_CREATED#bullish,OB_CREATED#bearish", "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert {"688001", "688002", "688003"}.issubset(got)
+
+    async def test_composite_not_in_exclude_both_directions(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """排除多选(not_in)：两复合对必须 AND 否定；旧 OR 错配会错误纳入承接股。"""
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:not_in:OB_CREATED#bullish,OB_CREATED#bearish", "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        # 全部承接/压制均被排除 => 空（旧 OR 实现会错误返回承接股）。
+        assert got == set(), f"not_in 双方向应排除全部，实际: {got}"
+
+    async def test_in_mixed_legacy_enum_keeps_plain_value(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """混合旧枚举(in)：普通枚举值 OB_CREATED 不得被丢弃（旧实现只留复合对）。"""
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:in:OB_CREATED#bullish,OB_CREATED", "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        # 普通枚举值 OB_CREATED 命中两类方向 => 全部 3 只都应出现。
+        assert {"688001", "688002", "688003"}.issubset(got), (
+            f"in 混合旧枚举应保留普通值，实际: {got}"
+        )
+
+    async def test_not_in_mixed_legacy_enum_keeps_plain_value(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """混合旧枚举(not_in)：普通枚举否定不得被丢弃。"""
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:not_in:OB_CREATED#bullish,OB_CREATED", "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        # 复合对 + 普通枚举值共同排除 => 空（旧实现会错误保留压制股B）。
+        assert got == set(), f"not_in 混合旧枚举应排除全部，实际: {got}"
+
+    async def _seed_direction_scoped_with_null(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> tuple[AsyncClient, list[str]]:
+        """与 _seed_direction_scoped 类似，但第 4 只股票结构事件 direction 为 NULL。"""
+        from datetime import date as date_cls
+
+        user = await user_factory(
+            email="struct_null@example.com",
+            password_hash="fake-hash",
+            timezone="Asia/Shanghai",
+        )
+        inst_a = await instrument_factory(symbol="688011", name="承接股A", market="SH")
+        inst_b = await instrument_factory(symbol="688012", name="压制股B", market="SH")
+        inst_c = await instrument_factory(symbol="688013", name="承接股C", market="SH")
+        inst_d = await instrument_factory(symbol="688014", name="空方向股D", market="SH")
+        await subscription_factory(user_id=user.id, plan_code="observe_20")
+        snap_run = StockFeatureSnapshotRun(
+            trade_date=date_cls(2026, 7, 25),
+            schema_version=_SCHEMA_VERSION,
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            run_type="after_close",
+            status=STATUS_SUCCEEDED,
+            started_at=datetime.now(UTC) - timedelta(hours=1),
+            finished_at=datetime.now(UTC),
+            published_at=datetime.now(UTC),
+            metadata_={"scope": "full"},
+        )
+        db_session.add(snap_run)
+        await db_session.flush()
+        seeds = [
+            (inst_a, "OB_CREATED", "bullish"),
+            (inst_b, "OB_CREATED", "bearish"),
+            (inst_c, "OB_CREATED", "bullish"),
+            (inst_d, "OB_CREATED", None),  # direction NULL
+        ]
+        for inst, etype, edir in seeds:
+            fp = _build_first_pyramid_payload(
+                trend_direction="上行",
+                structure_event_type=etype,
+                structure_event_direction=edir if edir is not None else "bullish",
+            )
+            flat = flatten_first_pyramid(fp, calculated_at="2026-07-25T15:00:00+08:00", run_id=str(snap_run.id))
+            if edir is None:
+                flat["fp_structure_event_direction"] = None
+            snap = StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=date_cls(2026, 7, 25),
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=_SCHEMA_VERSION,
+                source_run_id=snap_run.id,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={
+                    "first_pyramid": fp,
+                    "first_pyramid_flat": flat,
+                    "daily_developing_swing_dir": 1,
+                },
+                degraded_reasons=[],
+            )
+            db_session.add(snap)
+        await db_session.commit()
+        return client, ["688011", "688012", "688013", "688014"]
+
+    async def test_not_in_includes_null_direction_row(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """NULL 守卫：not_in 必须包含 direction 为 NULL 的行（不属于任何枚举值）。"""
+        client, _symbols = await self._seed_direction_scoped_with_null(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:not_in:OB_CREATED#bullish", "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert "688014" in got  # NULL 方向行被纳入
+        assert "688011" not in got  # 承接股A 排除
+        assert "688013" not in got  # 承接股C 排除
