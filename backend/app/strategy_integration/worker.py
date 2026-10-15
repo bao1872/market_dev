@@ -48,8 +48,16 @@ def process_one() -> dict:
         if job_dir.exists():raise RuntimeError('JOB_OUTPUT_DIR_EXISTS')
         runtime=os.getenv('PANJI_STRATEGY_PYTHON',sys.executable)
         if k=='PREDICT':
-            cmd=[runtime,'-m','app.strategy_integration.cli','build','--bars',str(bars),'--instruments',str(inst),
-                 '--as-of',payload['trade_date'],'--output-dir',str(snap_root)]
+            # Production entrance: authoritative QFQ daily bars exported read-only from
+            # the production DB through MarketDataAggregationService.get_bars_batch.
+            # The offline diagnostic parquet is never used as an automatic fallback.
+            export_dir=jobs/'exports'/job['job_id']
+            cmd=[runtime,'-m','app.strategy_integration.cli','build',
+                 '--source-mode','canonical',
+                 '--bars',str(bars),'--instruments',str(inst),
+                 '--as-of',payload['trade_date'],
+                 '--export-dir',str(export_dir),
+                 '--output-dir',str(snap_root)]
         elif k=='TRAIN':
             cfg=payload
             cmd=[runtime,'-m','app.strategy_integration.training','--bars',str(bars),'--instruments',str(inst),

@@ -177,7 +177,9 @@ def _path_metrics(raw: pd.DataFrame, kind: str, t: int,
 
 
 def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict], fmod: Any,
-                    *, as_of: str, source_sha: str, release_id: str = RELEASE_ID) -> dict:
+                    *, as_of: str, source_sha: str, release_id: str = RELEASE_ID,
+                    price_adjustment: str = 'qfq',
+                    adjustment_mode: str | None = None) -> dict:
     models = [{'id': f'joint_d{k}_{side.lower()}', 'name': f'{side} D{k} 联合', 'side': side}
               for side in ('BUY','SELL') for k in (1,2,3)]
     events = []
@@ -209,13 +211,17 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
                          'evaluation_protocol': f'ALL_ALERTS_NEXT_OPEN_{EVAL_HORIZON}B_H_LL_L_HH_V1',
                          'model_sha256': model.BUNDLE_SHA, 'data_sha256': source_sha,
                          'audit_ref': f'candidate_full_cohort_{release_id[:16]}',
-                         'status': 'AUDITED', 'cohort':'ALL_EX_ANTE_ALERTS'},
+                         'status': 'AUDITED', 'cohort': 'ALL_EX_ANTE_ALERTS',
+                         'price_adjustment': price_adjustment,
+                         'adjustment_mode': adjustment_mode},
             'models': models, 'events': events}
 
 
 def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                    *, as_of: str, source_sha: str, chart_bars: int = 85,
-                   daily_days: int = 20, release_id: str = RELEASE_ID) -> tuple[dict, dict]:
+                   daily_days: int = 20, release_id: str = RELEASE_ID,
+                   price_adjustment: str = 'qfq',
+                   adjustment_mode: str | None = None) -> tuple[dict, dict]:
     if not stock_raw:
         raise ProducerError('NO_STOCKS')
     stocks: dict[str, dict] = {}
@@ -237,10 +243,14 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                  'metadata': {'strategy_id':'zigzag_two_stage', 'release_id':release_id,
                               'feature_sha':model.ENGINE_SHA, 'audit_ref':f'{source_sha[:16]}_{CONTRACT}',
                               'generated_at':datetime.now(timezone.utc).isoformat(), 'status':'AUDITED',
-                              'score_calibrated':False, 'price_adjustment':'none',
+                              'score_calibrated':False, 'price_adjustment':price_adjustment,
+                              'adjustment_mode':adjustment_mode,
+                              'model_sha256':model.BUNDLE_SHA,
                               'business_target': {'L':'HH','H':'LL'}, 'source_sha256':source_sha},
                  'stocks':stocks, 'daily_batches':batches}
-    evaluation = make_evaluation(stock_raw, stocks, fmod, as_of=as_of, source_sha=source_sha, release_id=release_id)
+    evaluation = make_evaluation(stock_raw, stocks, fmod, as_of=as_of, source_sha=source_sha,
+                                  release_id=release_id, price_adjustment=price_adjustment,
+                                  adjustment_mode=adjustment_mode)
     return candidate, evaluation
 
 

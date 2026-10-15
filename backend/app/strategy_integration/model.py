@@ -133,6 +133,54 @@ def load_bundle(assets: Path = ASSET_DIR, allow_runtime_mismatch: bool = False) 
     }
 
 
+def load_bundle_file(path, *, allow_runtime_mismatch: bool = False,
+                     pinned_sha: str | None = None) -> tuple[dict, dict]:
+    """Load the exact weights a release pins.
+
+    Used when an activated release selects candidate weights. The file must be a
+    locally trusted, SHA-pinned artifact; never accept an HTTP-supplied pickle.
+    """
+    import sklearn
+    version = str(sklearn.__version__)
+    if version != SKLEARN_TRAIN_VERSION and not allow_runtime_mismatch:
+        raise AssetError(f'SKLEARN_RUNTIME_MISMATCH: saved={SKLEARN_TRAIN_VERSION} running={version}')
+    path = Path(path)
+    if not path.is_file():
+        raise AssetError('BUNDLE_FILE_MISSING: ' + str(path))
+    actual = digest(path)
+    if pinned_sha and actual != pinned_sha:
+        raise AssetError('BUNDLE_SHA_MISMATCH')
+    with open(path, 'rb') as handle:
+        b = pickle.load(handle)
+    if b.get('schema') != 'PANJI_TWO_STAGE_FINAL_D123_V1' or b.get('version') != EXPECTED_VERSION:
+        raise AssetError('BUNDLE_SCHEMA_OR_VERSION_MISMATCH')
+    if b.get('feature_sha') != ENGINE_SHA or b.get('feature_dim') != 131:
+        raise AssetError('BUNDLE_FEATURE_MISMATCH')
+    if set(b.get('models', {})) != EXPECTED_KEYS or set(b.get('thresholds', {})) != EXPECTED_KEYS:
+        raise AssetError('BUNDLE_MODEL_COUNT_OR_KEYS_MISMATCH')
+    if not b.get('uncalibrated'):
+        raise AssetError('EXPECTED_UNCALIBRATED_BUNDLE')
+    for key in sorted(EXPECTED_KEYS):
+        m = b['models'][key]
+        if getattr(m, 'n_features_in_', None) != 131:
+            raise AssetError(f'MODEL_FEATURE_WIDTH_MISMATCH: {key}')
+        if not (0 <= float(b['thresholds'][key]) <= 1):
+            raise AssetError(f'INVALID_THRESHOLD: {key}')
+    if b.get('target', {}).get('L') != 'HH' or b.get('target', {}).get('H') not in ('HL', 'LL'):
+        raise AssetError('UNEXPECTED_MODEL_TARGET_SEMANTICS')
+    return b, {
+        'runtime_sklearn': version, 'train_sklearn': SKLEARN_TRAIN_VERSION,
+        'runtime_compatible': version == SKLEARN_TRAIN_VERSION,
+        'models': 12, 'thresholds': 12, 'feature_dim': 131,
+        'release_id': hashlib.sha256(
+            f'{actual}|{ENGINE_SHA}|L_HH__H_LL__V1|QFQ_ASOF_V1'.encode()).hexdigest(),
+        'bundle_sha256': actual,
+        'target_label_conflict': {'kind': 'H', 'trained_positive': 'LL', 'bundle_declares': 'HL'},
+        'model_scores_are_calibrated': False,
+        'production_publish_allowed': False,
+    }
+
+
 def read_ohlcv(p: Path, fmod) -> pd.DataFrame:
     # Local CSV useful for diagnostic; production bars must use market_dev's official source.
     if p.suffix.lower() in ('.parquet', '.pq'):
