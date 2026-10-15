@@ -285,9 +285,78 @@ def _pit_features(raw: pd.DataFrame, pit_source: pd.DataFrame, fmod, snap,
     return day, X
 
 
+def load_personal_artifacts(record: dict) -> dict:
+    """Load the standalone personal classifiers pinned by a record.
+
+    The artifact digest is verified before anything is unpickled; a missing or
+    drifted artifact is a hard failure, never a silent fallback.
+    """
+    path = record.get('artifact_path')
+    if not path:
+        raise AssetError('PERSONAL_ARTIFACT_MISSING')
+    target = Path(path)
+    if not target.is_file():
+        raise AssetError('PERSONAL_ARTIFACT_MISSING ' + str(target))
+    actual = digest(target)
+    if actual != record.get('personal_bundle_sha256'):
+        raise AssetError('PERSONAL_ARTIFACT_SHA_MISMATCH')
+    with open(target, 'rb') as handle:
+        blob = pickle.load(handle)
+    for key, clf in blob.items():
+        if getattr(clf, 'n_features_in_', None) != 131:
+            raise AssetError('PERSONAL_ARTIFACT_FEATURE_WIDTH_MISMATCH ' + str(key))
+    return blob
+
+
+def personal_adjusted_score(key, base_score: float, record: dict,
+                            artifacts: dict | None,
+                            notes: list | None = None):
+    """Combine the global score with the symbol's personal adjustment.
+
+    Returns (adjusted_score, threshold, mode). mode == 'GLOBAL_ONLY' means the
+    personal model does not apply and the global score/threshold stand.
+    """
+    sub = (record.get('submodels') or {}).get(str(key))
+    if not sub:
+        return base_score, None, 'GLOBAL_ONLY'
+    mode = sub.get('mode')
+    if mode == 'REGULARIZED_ADJUSTMENT':
+        coef = sub.get('coef')
+        intercept = sub.get('intercept')
+        if coef is None or intercept is None:
+            raise AssetError('PERSONAL_ADJUSTMENT_COEFFICIENTS_MISSING ' + str(key))
+        z = float(coef) * float(base_score) + float(intercept)
+        adjusted = 1.0 / (1.0 + float(np.exp(-z)))
+        blended = float(sub.get('blend_weight', 0.0)) * adjusted + (
+            1.0 - float(sub.get('blend_weight', 0.0))) * float(base_score)
+        tau = sub.get('threshold')
+        if tau is None:
+            raise AssetError('PERSONAL_ADJUSTMENT_THRESHOLD_MISSING ' + str(key))
+        return float(blended), float(tau), 'GLOBAL_PLUS_PERSONAL'
+    if mode == 'STANDALONE_LIGHT':
+        if not artifacts:
+            raise AssetError('PERSONAL_STANDALONE_ARTIFACT_REQUIRED ' + str(key))
+        clf = artifacts.get(f'{key[0]}:{key[1]}:D{key[2]}')
+        if clf is None:
+            raise AssetError('PERSONAL_STANDALONE_MODEL_MISSING ' + str(key))
+        if notes is not None:
+            notes.append('STANDALONE_LIGHT')
+        tau = sub.get('threshold')
+        if tau is None:
+            raise AssetError('PERSONAL_STANDALONE_THRESHOLD_MISSING ' + str(key))
+        # A standalone score needs the feature row, handled by the caller; here we
+        # only report that this submodel must be scored by the personal model.
+        return None, float(tau), 'PERSONAL_STANDALONE_REQUIRES_FEATURES'
+    # FALLBACK_GLOBAL: keep the global score and threshold, with an explicit note.
+    if notes is not None:
+        notes.append('FALLBACK_GLOBAL:' + str(sub.get('reason')))
+    return base_score, None, 'GLOBAL_ONLY'
+
+
 def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: str | None = None, *, min_anchor_bar: int | None = None,
                    pit_source: pd.DataFrame | None = None,
-                   release_id: str = BUNDLE_SHA) -> dict:
+                   release_id: str = BUNDLE_SHA,
+                   personal: dict | None = None) -> dict:
     """Causal D1/D2/D3 for *every* left-5/right-1 candidate, not oracle pivot subset.
 
     Frozen fmod.replay() yields as-of snapshots and features() only accesses
@@ -331,6 +400,27 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
                     raise AssetError(f'NON_FINITE_MODEL_SCORE {layer}:{kind}:D{stage}')
                 scores[matches]=vals
         preds[layer]=scores
+    # ---- personal adjustment layer (combines with, never replaces, global) ----
+    personal_record = None
+    personal_artifacts = None
+    personal_notes: list[str] = []
+    personal_thresholds: dict = {}
+    if personal is not None:
+        personal_record = personal.get('record')
+        if personal_record is not None:
+            if personal.get('artifacts') is not None:
+                personal_artifacts = personal['artifacts']
+            elif personal_record.get('artifact_path'):
+                personal_artifacts = load_personal_artifacts(personal_record)
+            for i,(j,kind,t,stage,px) in enumerate(entries):
+                for layer in ('L1','L2'):
+                    key=(layer,kind,stage)
+                    adjusted, tau, _mode = personal_adjusted_score(
+                        key, float(preds[layer][i]), personal_record,
+                        personal_artifacts, personal_notes)
+                    if adjusted is not None and tau is not None:
+                        preds[layer][i]=adjusted
+                        personal_thresholds[(i,layer)]=tau
     grouped: dict[str,dict] = {}
     today=[]
     for i,(j,kind,t,stage,px) in enumerate(entries):
@@ -345,14 +435,23 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
                 'symbol':symbol,'kind':kind,'anchor_date':anchor_date,
                 'visible_at':visible_at,'anchor_price':px,'observations':[]}
         s1,s2=float(preds['L1'][i]),float(preds['L2'][i])
-        t1=float(bundle['thresholds'][('L1',kind,stage)])
-        t2=float(bundle['thresholds'][('L2',kind,stage)])
+        t1=float(personal_thresholds.get((i,'L1'), bundle['thresholds'][('L1',kind,stage)]))
+        t2=float(personal_thresholds.get((i,'L2'), bundle['thresholds'][('L2',kind,stage)]))
         scoreable=bool(day.iloc[row_of_bar[t]].signal_available)
         # The frozen product contract is L→HH / H→LL; retain original weights and SHA.
         joint=bool(s1>=t1 and s2>=t2) if scoreable else False
+        scoring_mode='GLOBAL_ONLY'
+        personal_release_id=None
+        if personal_record is not None:
+            scoring_mode='GLOBAL_PLUS_PERSONAL'
+            personal_release_id=personal_record.get('release_id')
         obs={
-            'observation_id':hashlib.sha256(f'{candidate_id}|{BUNDLE_SHA}|D{stage}|{decision_date}'.encode()).hexdigest()[:24],
-            'candidate_id':candidate_id,'model_release_id':BUNDLE_SHA,
+            'observation_id':hashlib.sha256(f'{candidate_id}|{release_id}|D{stage}|{decision_date}'.encode()).hexdigest()[:24],
+            'candidate_id':candidate_id,'model_release_id':release_id,
+            'symbol':symbol,
+            'global_release_id':release_id,
+            'personal_release_id':personal_release_id,
+            'scoring_mode':scoring_mode,
             'stage':f'D{stage}','decision_date':decision_date,'data_cutoff':decision_date,
             'l1_score':s1,'l2_score':s2,'l1_threshold':t1,'l2_threshold':t2,
             'scoreable':scoreable,'joint_alert_diagnostic':joint,
@@ -371,7 +470,11 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
 
         'symbol':symbol,
         'as_of':str(raw.datetime.iloc[-1].date()),
-        'feature_sha':ENGINE_SHA,'model_release_id':BUNDLE_SHA,
+        'feature_sha':ENGINE_SHA,'model_release_id':release_id,
+        'global_release_id':release_id,
+        'personal_release_id':(personal_record or {}).get('release_id'),
+        'scoring_mode':('GLOBAL_PLUS_PERSONAL' if personal_record is not None
+                        else 'GLOBAL_ONLY'),
         'model_score_kind':'UNCALIBRATED',
         'h_positive_label_contract':'H_LL__L_HH__2026_10_14',
         'candidates':list(grouped.values()),

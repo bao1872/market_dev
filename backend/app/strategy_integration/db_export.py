@@ -57,6 +57,10 @@ async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> 
         one.insert(1, 'symbol', symbol)
         frames.append(one)
     all_bars = pd.concat(frames, ignore_index=True)
+    if 'adj_factor' not in all_bars.columns:
+        # The authoritative factor series is REQUIRED for point-in-time feature
+        # rebuilding; an export without it cannot claim PIT support.
+        raise ProducerError('CANONICAL_EXPORT_MISSING_FACTOR_SERIES')
     all_bars.to_parquet(file, compression='zstd', index=False)
     pd.DataFrame({'symbol': sorted(accepted)}).to_parquet(
         inst_path, compression='zstd', index=False,
@@ -79,6 +83,8 @@ async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> 
         'provenance': report['provenance'],
         'rows': int(len(all_bars)),
         'factor_provenance_authoritative': True,
+        'pit_factor_series_available': report.get('pit_factor_series_available', False),
+        'pit_factor_series_symbols': report.get('pit_factor_series_symbols', 0),
     }
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, sort_keys=True, allow_nan=False),

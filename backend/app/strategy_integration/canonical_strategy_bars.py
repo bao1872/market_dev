@@ -16,6 +16,46 @@ class CanonicalMarketDataError(ValueError):
     pass
 
 
+async def load_factor_series_for_pit(
+    session: Any, instrument_id: Any, as_of: date
+) -> pd.DataFrame | None:
+    """Authoritative factor series for one instrument, as of `as_of`.
+
+    MDAS only exposes a factor *hash*, so point-in-time feature rebuilding needs
+    the series itself. It is fetched through the single factor owner
+    (AdjustmentFactorService) and is read-only.
+    """
+    from app.services.adjustment_factor_service import AdjustmentFactorService
+    try:
+        series = await AdjustmentFactorService().get_factor_series(
+            session, instrument_id, as_of=as_of)
+    except Exception:
+        return None
+    if series is None or series.empty:
+        return None
+    if not {'trade_date', 'adj_factor'}.issubset(series.columns):
+        return None
+    return series
+
+
+def _align_factor_series(frame_dates: pd.DatetimeIndex, series: pd.DataFrame) -> np.ndarray:
+    """Forward-fill the authoritative factor onto every bar date (no future leak)."""
+    dates = pd.to_datetime(series['trade_date'])
+    factors = pd.to_numeric(series['adj_factor'], errors='coerce').astype(float)
+    order = np.argsort(dates.to_numpy())
+    dates = dates.iloc[order].reset_index(drop=True)
+    factors = factors.iloc[order].reset_index(drop=True)
+    merged = pd.merge_asof(
+        pd.DataFrame({'bar_date': frame_dates}),
+        pd.DataFrame({'factor_date': dates, 'adj_factor': factors}),
+        left_on='bar_date', right_on='factor_date', direction='backward')
+    values = merged['adj_factor'].to_numpy(dtype=float)
+    if len(values) and not np.isfinite(values[0]):
+        values[0] = factors.iloc[0]
+    values = pd.Series(values).ffill().bfill().to_numpy(dtype=float)
+    return values
+
+
 async def load_official_qfq_stock_batch(
     session: Any,
     instrument_by_id: dict[Any, str],
@@ -24,6 +64,7 @@ async def load_official_qfq_stock_batch(
     start_date: date = date(2012, 1, 1),
     batch_size: int = 80,
     min_bars: int = 150,
+    with_factor_series: bool = True,
 ) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
     """Return schema-ready canonical OHLCV with provenance and exclusion reasons.
 
@@ -91,6 +132,24 @@ async def load_official_qfq_stock_batch(
             # Only one market-data owner: do not locally re-adjust prices.
             raw = pd.DataFrame(arr, columns=["open","high","low","close","volume"])
             raw.insert(0,"datetime",dates.to_numpy())
+            factor_series = None
+            factor_note = 'not_requested'
+            if with_factor_series:
+                factor_series = await load_factor_series_for_pit(session, iid, as_of)
+                if factor_series is None:
+                    # Without the series, as-of PIT rebuilding is impossible; the
+                    # frame is still valid qfq but must be flagged so callers can
+                    # refuse to pretend PIT was applied.
+                    factor_note = 'factor_series_unavailable'
+                else:
+                    raw["adj_factor"] = _align_factor_series(dates, factor_series)
+                    if not np.isfinite(raw["adj_factor"].to_numpy(float)).all() or (
+                            raw["adj_factor"].to_numpy(float) <= 0).any():
+                        raw = raw.drop(columns=["adj_factor"])
+                        factor_series = None
+                        factor_note = 'factor_series_invalid'
+                    else:
+                        factor_note = 'authoritative_factor_series_attached'
             accepted[symbol] = raw
             hashes[symbol] = {
                 "source_bar_hash": stock.source_bar_hash,
@@ -98,6 +157,8 @@ async def load_official_qfq_stock_batch(
                 "adjustment_as_of": as_of.isoformat(),
                 "market_data_contract_version": stock.market_data_contract_version,
                 "data_source": stock.data_source,
+                "factor_series_for_pit": factor_note,
+                "factor_series_rows": 0 if factor_series is None else int(len(factor_series)),
             }
             if dates[-1].date() == as_of:
                 covered += 1
@@ -114,6 +175,12 @@ async def load_official_qfq_stock_batch(
         "coverage_ratio_of_total": round(covered/max(1,len(ids)),6),
         "excluded": dict(excluded),
         "provenance": hashes,
+        "pit_factor_series_available": any(
+            v.get("factor_series_for_pit") == "authoritative_factor_series_attached"
+            for v in hashes.values()),
+        "pit_factor_series_symbols": sum(
+            1 for v in hashes.values()
+            if v.get("factor_series_for_pit") == "authoritative_factor_series_attached"),
         "external_fetch_allowed": False,
         "db_write_allowed": False,
     }

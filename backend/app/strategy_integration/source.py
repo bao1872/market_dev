@@ -79,6 +79,12 @@ def load_canonical_qfq_export(output_dir: Path, as_of: str, *, max_symbols: int 
             continue
         df = pd.DataFrame(arr, columns=['open', 'high', 'low', 'close', 'volume'])
         df.insert(0, 'datetime', pd.Series(pd.to_datetime(group.datetime)).reset_index(drop=True))
+        # Carry the authoritative factor series so callers can rebuild each
+        # decision day's as-of qfq frame (point-in-time).
+        if 'adj_factor' in group.columns:
+            factor = pd.to_numeric(group['adj_factor'], errors='coerce').to_numpy(float)
+            if np.isfinite(factor).all() and (factor > 0).all():
+                df['adj_factor'] = factor
         results[str(symbol)] = df
         if df.datetime.iloc[-1].date() == pd.Timestamp(as_of).date():
             asof_covered += 1
@@ -100,6 +106,9 @@ def load_canonical_qfq_export(output_dir: Path, as_of: str, *, max_symbols: int 
         'price_adjustment': 'qfq', 'adjustment_as_of': as_of,
         'adjustment_mode': 'CANONICAL_MDAS_QFQ', 'adjustment_owner': CANONICAL_OWNER,
         'factor_provenance_authoritative': True, 'data_read_only': True,
+        'pit_factor_series_available': bool(
+            manifest.get('pit_factor_series_available')) and any(
+                'adj_factor' in df.columns for df in results.values()),
         'canonical_manifest': manifest,
     }
     return results, facts

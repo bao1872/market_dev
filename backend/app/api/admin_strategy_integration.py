@@ -20,6 +20,7 @@ from app.services.access_control_service import AccessContext, require_admin
 
 router=APIRouter(prefix='/v1/admin/strategy-research/zigzag', tags=['strategy-research-admin'])
 SHA_RE=re.compile(r'^[0-9a-f]{64}$')
+SYMBOL_RE=re.compile(r'^(SH|SZ|BJ):[0-9]{6}$')
 
 
 def _require_write_enabled():
@@ -120,6 +121,42 @@ def model_releases(ctx:AccessContext=Depends(require_admin)) -> dict:
             records.append({k:m.get(k) for k in ('release_id','bundle_sha256','label_contract','status','created_at')})
     active=root/'active_release.json'
     return {'releases':records,'active_release':json.loads(active.read_text()) if active.is_file() else None}
+
+
+@router.get('/model-releases/personal/{symbol}')
+def personal_model_release(symbol:str,ctx:AccessContext=Depends(require_admin)) -> dict:
+    """Read one symbol's personal model record (admin-only, read-only).
+
+    Exposes the per-symbol training state so an operator can see which symbols
+    have an active personal model, which fell back, and why.
+    """
+    if not SYMBOL_RE.fullmatch(symbol):
+        raise HTTPException(status_code=422,detail='invalid symbol')
+    root=os.getenv('PANJI_STRATEGY_PERSONAL_REGISTRY','')
+    if not root or not Path(root).is_absolute():
+        return {'symbol':symbol,'status':'NOT_CONFIGURED'}
+    from app.strategy_integration import personal_model as pm
+    registry=pm.load_registry(Path(root))
+    record=pm.resolve_active(registry,symbol)
+    if record is None:
+        candidate=registry['symbols'].get(symbol)
+        if candidate is None:
+            return {'symbol':symbol,'status':'NOT_TRAINED'}
+        return {'symbol':symbol,'status':'NOT_ACTIVE',
+                'mode':candidate.get('mode'),
+                'fallback_reason':candidate.get('fallback_reason'),
+                'model_version':candidate.get('model_version')}
+    return {'symbol':symbol,'status':'ACTIVE',
+            'mode':record.get('mode'),
+            'fallback_reason':record.get('fallback_reason'),
+            'model_version':record.get('model_version'),
+            'release_id':record.get('release_id'),
+            'global_release_id':record.get('global_release_id'),
+            'price_input_contract':record.get('price_input_contract'),
+            'windows':record.get('windows'),
+            'samples':record.get('samples'),
+            'rollback_parent':record.get('rollback_parent'),
+            'artifact_path':record.get('artifact_path')}
 
 
 @router.post('/model-releases/{release_id}/publish')

@@ -68,10 +68,12 @@ def _reference(raw: pd.DataFrame, snaps: Any, j: int, kind: str) -> tuple[float 
 
 def _candidate_and_bars(raw: pd.DataFrame, symbol: str, fmod: Any, bundle: dict,
                         *, chart_bars: int = 85, release_id: str = RELEASE_ID,
-                        pit_source: pd.DataFrame | None = None) -> tuple[dict[str, Any], list[dict]]:
+                        pit_source: pd.DataFrame | None = None,
+                        personal: dict | None = None) -> tuple[dict[str, Any], list[dict]]:
     result = model.score_candidates(raw, symbol, fmod, bundle,
                                     min_anchor_bar=max(0, len(raw)-chart_bars),
-                                    pit_source=pit_source, release_id=release_id)
+                                    pit_source=pit_source, release_id=release_id,
+                                    personal=personal)
     _, snapshots, _ = fmod.replay(raw)
     lookup = {d: i for i, d in enumerate(raw.datetime.dt.strftime('%Y-%m-%d'))}
     bar_start = max(0, len(raw) - chart_bars)
@@ -108,6 +110,10 @@ def _candidate_and_bars(raw: pd.DataFrame, symbol: str, fmod: Any, bundle: dict,
             l2 = float(obs['l2_score']) if scored else None
             o = {
                 'observation_id': hashlib.sha256(f'{candidate["candidate_id"]}|{release_id}|{obs["stage"]}|{obs["decision_date"]}'.encode()).hexdigest()[:24],
+                'symbol': symbol,
+                'global_release_id': release_id,
+                'personal_release_id': obs.get('personal_release_id'),
+                'scoring_mode': obs.get('scoring_mode', 'GLOBAL_ONLY'),
                 'stage': obs['stage'], 'decision_date': obs['decision_date'],
                 'data_cutoff': obs['decision_date'],
                 'l1_score': l1, 'l2_score': l2,
@@ -120,6 +126,9 @@ def _candidate_and_bars(raw: pd.DataFrame, symbol: str, fmod: Any, bundle: dict,
             observations.append(o)
             daily.append({'observation_id': o['observation_id'], 'candidate_id': candidate['candidate_id'],
                           'symbol': symbol, 'stage': o['stage'], 'kind': kind,
+                          'global_release_id': release_id,
+                          'personal_release_id': o['personal_release_id'],
+                          'scoring_mode': o['scoring_mode'],
                           'l1_score': l1, 'l2_score': l2, 'joint_alert': o['joint_alert'],
                           'first_breakout': o['first_breakout'], 'trade_date': o['decision_date']})
         if observations:
@@ -217,6 +226,9 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
                 outcome = _outcome(raw, final, j, kind, t)
                 record = {'event_id': candidate['candidate_id'],
                           'model_id': f'joint_d{o["stage"][1:]}_{side.lower()}', 'symbol': symbol,
+                          'global_release_id': release_id,
+                          'personal_release_id': o.get('personal_release_id'),
+                          'scoring_mode': o.get('scoring_mode', 'GLOBAL_ONLY'),
                           'side': side, 'signal_time': o['decision_date'], 'outcome': outcome,
                           'candidate_id': candidate['candidate_id'], 'observation_id': o['observation_id'],
                           'stage': o['stage'], 'decision_date': o['decision_date'],
@@ -243,7 +255,8 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                    price_adjustment: str = 'qfq',
                    adjustment_mode: str | None = None,
                    bundle_sha256: str = '',
-                   pit_source: dict[str, pd.DataFrame] | None = None) -> tuple[dict, dict]:
+                   pit_source: dict[str, pd.DataFrame] | None = None,
+                   personal_by_symbol: dict[str, dict] | None = None) -> tuple[dict, dict]:
     if not stock_raw:
         raise ProducerError('NO_STOCKS')
     stocks: dict[str, dict] = {}
@@ -254,7 +267,8 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
             raise ProducerError(f'INVALID_SOURCE_WINDOW {symbol}')
         one, daily = _candidate_and_bars(raw, symbol, fmod, bundle, chart_bars=chart_bars,
                                         release_id=release_id,
-                                        pit_source=(pit_source or {}).get(symbol))
+                                        pit_source=(pit_source or {}).get(symbol),
+                                        personal=(personal_by_symbol or {}).get(symbol))
         stocks[symbol] = one
         for row in daily:
             by_date[row.pop('trade_date')].append(row)
@@ -270,7 +284,10 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                               'score_calibrated':False, 'price_adjustment':price_adjustment,
                               'adjustment_mode':adjustment_mode,
                               'model_sha256': bundle_sha256 or model.BUNDLE_SHA,
-                              'business_target': {'L':'HH','H':'LL'}, 'source_sha256':source_sha},
+                              'business_target': {'L':'HH','H':'LL'}, 'source_sha256':source_sha,
+                              'scoring_architecture': 'GLOBAL_ROLLING_PLUS_OPTIONAL_PERSONAL',
+                              'personal_symbols': sorted((personal_by_symbol or {}).keys()),
+                              'global_release_id': release_id},
                  'stocks':stocks, 'daily_batches':batches}
     evaluation = make_evaluation(stock_raw, stocks, fmod, as_of=as_of, source_sha=source_sha,
                                   release_id=release_id, price_adjustment=price_adjustment,
