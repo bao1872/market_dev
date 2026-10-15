@@ -796,6 +796,13 @@ class TestStructureEventCompositeFilter:
         inst_c = await instrument_factory(symbol="688003", name="承接股C", market="SH")
         await subscription_factory(user_id=user.id, plan_code="observe_20")
 
+        # 覆盖认证：以 seeded user 通过 get_current_active_user 依赖。
+        # client fixture 每个测试后自动 clear dependency_overrides，无泄漏。
+        async def _get_user():
+            return user
+
+        app.dependency_overrides[get_current_active_user] = _get_user
+
         snap_run = StockFeatureSnapshotRun(
             trade_date=date_cls(2026, 7, 25),
             schema_version=_SCHEMA_VERSION,
@@ -1032,6 +1039,13 @@ class TestStructureEventCompositeFilter:
         inst_c = await instrument_factory(symbol="688013", name="承接股C", market="SH")
         inst_d = await instrument_factory(symbol="688014", name="空方向股D", market="SH")
         await subscription_factory(user_id=user.id, plan_code="observe_20")
+
+        # 覆盖认证：以 seeded user 通过 get_current_active_user 依赖。
+        async def _get_user():
+            return user
+
+        app.dependency_overrides[get_current_active_user] = _get_user
+
         snap_run = StockFeatureSnapshotRun(
             trade_date=date_cls(2026, 7, 25),
             schema_version=_SCHEMA_VERSION,
