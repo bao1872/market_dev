@@ -986,8 +986,11 @@ class TestStructureEventCompositeFilter:
         )
         assert resp.status_code == 200, resp.text
         got = {item["symbol"] for item in resp.json()["items"]}
-        # 全部承接/压制均被排除 => 空（旧 OR 实现会错误返回承接股）。
-        assert got == set(), f"not_in 双方向应排除全部，实际: {got}"
+        # 共享 verify 库会累计其他测试的 instrument，故只断言本测试播种的承接/压制股
+        # 均被正确排除（旧 OR 实现会错误把承接股重新纳入）。
+        assert "688001" not in got, f"not_in 双方向应排除承接股A，实际: {got}"
+        assert "688002" not in got, f"not_in 双方向应排除压制股B，实际: {got}"
+        assert "688003" not in got, f"not_in 双方向应排除承接股C，实际: {got}"
 
     async def test_in_mixed_legacy_enum_keeps_plain_value(
         self, client, db_session, user_factory, instrument_factory, subscription_factory,
@@ -1020,8 +1023,11 @@ class TestStructureEventCompositeFilter:
         )
         assert resp.status_code == 200, resp.text
         got = {item["symbol"] for item in resp.json()["items"]}
-        # 复合对 + 普通枚举值共同排除 => 空（旧实现会错误保留压制股B）。
-        assert got == set(), f"not_in 混合旧枚举应排除全部，实际: {got}"
+        # 复合对 + 普通枚举值共同排除 => 本测试播种的承接/压制股全部排除
+        # （旧实现会错误保留压制股B / 复合对 OR 错配会错误纳入承接股）。
+        assert "688001" not in got, f"not_in 混合旧枚举应排除承接股A，实际: {got}"
+        assert "688002" not in got, f"not_in 混合旧枚举应排除压制股B，实际: {got}"
+        assert "688003" not in got, f"not_in 混合旧枚举应排除承接股C，实际: {got}"
 
     async def _seed_direction_scoped_with_null(
         self, client, db_session, user_factory, instrument_factory, subscription_factory,
