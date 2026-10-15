@@ -360,7 +360,17 @@
       "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
-        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter"
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_eq_bullish_returns_only_bullish",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_eq_bearish_returns_only_bearish",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_bullish_bearish_mutually_exclusive",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_legacy_combined_value_still_matches_both_directions",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_invalid_direction_rejected",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_neq_excludes_only_that_direction",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_in_multi_select_both_directions",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_not_in_exclude_both_directions",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_in_mixed_legacy_enum_keeps_plain_value",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_not_in_mixed_legacy_enum_keeps_plain_value",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_not_in_includes_null_direction_row"
       ],
       "claim": "复合结构事件筛选（fp_structure_event_type 的 type#direction 复合值）在真实 PostgreSQL 上：等于只命中单一方向；不等于排除该方向；多选(in)以 OR 连接复合对；排除多选(not_in)以 AND 连接各对否定（旧 OR 错配会错误纳入应排除方向）；in/not_in 混合普通枚举值（如历史合并值 OB_CREATED/BOS/CHoCH）不得遗漏条件；NULL 方向行在 not_in/neq 下正确纳入。列表/分页/计数与 Excel 导出对该筛选结果一致。"
     }
