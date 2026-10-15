@@ -125,7 +125,8 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
             _, matrix = fmod.features(frame, snap, bars)
         look = {bar: matrix[i] for i, bar in enumerate(bars)}
         for j, kind, k, t, name, l1, l2 in stage_events:
-            for layer, label in (('L1', l1), ('L2', l2)):
+            for layer, label, mat_bar in (('L1', l1, lab.l1_available_bar),
+                                          ('L2', l2, lab.l2_available_bar)):
                 if label is None:
                     continue
                 sample_id = f'{symbol}|{days[j].isoformat()}|{kind}|D{k}|{layer}'
@@ -137,7 +138,9 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
                     'features': np.asarray(look[t], dtype=np.float32),
                     'label': int(label), 'sample_id': sample_id,
                     'symbol': symbol, 'decision_date': days[t],
-                    'anchor_date': days[j]})
+                    'anchor_date': days[j],
+                    'label_available_at': days[mat_bar] if mat_bar is not None
+                    else None})
                 counters[f'{name}_{layer}_{kind}_D{k}'] += 1
     return dict(values), dict(counters), per_symbol_history
 

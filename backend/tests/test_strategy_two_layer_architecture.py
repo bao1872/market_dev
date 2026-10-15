@@ -150,7 +150,8 @@ def _oof_samples(fmod):
         label = int(x[0] + 0.3 * rng.normal() > 0)
         rows.append({'features': x, 'label': label,
                      'sample_id': f'SYM|{d.date()}|L|D1', 'symbol': 'SYM',
-                     'decision_date': d.date(), 'anchor_date': d.date()})
+                     'decision_date': d.date(), 'anchor_date': d.date(),
+                     'label_available_at': d.date()})
     return {('L1', 'L', 1): rows}
 
 

@@ -49,12 +49,32 @@ def time_ordered_folds(days: list[date], n_folds: int) -> list[tuple[date, date]
     return folds
 
 
+def _oof_prior_rows(rows, fold_start):
+    """Rows eligible to *train* the model that scores fold `fold_start`.
+
+    A sample may carry a decision_date earlier than `fold_start` yet still have a
+    label that only matures later (L1/L2 labels depend on future pivot
+    confirmation, the L2 path label in particular). Including such a label while
+    fitting the fold's model would leak future information, so BOTH the decision
+    date and the label-availability date must strictly precede the fold start.
+    """
+    prior = []
+    for r in rows:
+        la = r.get('label_available_at')
+        if r['decision_date'] < fold_start and la is not None and la < fold_start:
+            prior.append(r)
+    return prior
+
+
 def compute_oof_base_scores(train_samples: dict, fmod, *, folds: int,
                             trees: int, threads: int, seed: int) -> tuple[dict, dict]:
     """Out-of-fold full-market base scores for every training sample.
 
     Fold i is scored by a model fitted only on folds < i, so a sample never sees
-    a model that was trained on it. Returns (scores, provenance).
+    a model that was trained on it. Crucially, training rows are restricted to
+    those whose LABEL has also matured before the fold start (see
+    `_oof_prior_rows`) -- a decision_date in the past is not enough when the
+    label is confirmed only later. Returns (scores, provenance).
     """
     from lightgbm import LGBMClassifier
 
@@ -77,7 +97,7 @@ def compute_oof_base_scores(train_samples: dict, fmod, *, folds: int,
         starts = [b[0] for b in bounds]
         scored = 0
         for i, (lo, hi) in enumerate(bounds):
-            prior = [r for r in ordered if r['decision_date'] < lo]
+            prior = _oof_prior_rows(ordered, lo)
             block = [r for r in ordered if lo <= r['decision_date'] <= hi]
             if not block:
                 continue

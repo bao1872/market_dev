@@ -26,6 +26,13 @@ class DecisionLabels:
     l2_reason: str
     target_tag: str | None = None
     first_break_bar: int | None = None
+    # Bar index at which the respective label is *definitively known* (the
+    # future pivot/confirmation it depends on has occurred). This is almost
+    # always later than `decision_bar`; excluding it from OOF training would
+    # leak future information into the personal model. None when the label is
+    # unresolved within the split (never available).
+    l1_available_bar: int | None = None
+    l2_available_bar: int | None = None
 
 
 def causal_candidates_pit(frame, pit_source, fmod, pit_frame_fn):
@@ -95,46 +102,55 @@ def labels_for_stage(raw, final, j: int, kind: str, decision_bar: int,
         raise ValueError('INVALID_DECISION_OR_CUTOFF')
     ix = next((i for i, p in enumerate(final)
                if int(p['bar']) == j and p['type'] == kind), None)
+    l1_mat = None
     if ix is not None and int(final[ix]['confirmed_at']) <= cutoff_bar:
         l1, r1 = 1, 'CONFIRMED_TRUE_ANCHOR'
+        l1_mat = int(final[ix]['confirmed_at'])
     elif ix is None and any(int(p['bar']) > j and p['type'] != kind and
                               int(p['confirmed_at']) <= cutoff_bar for p in final):
         l1, r1 = 0, 'CONFIRMED_FALSE_EXTREME'
+        l1_mat = min(int(p['confirmed_at']) for p in final
+                     if int(p['bar']) > j and p['type'] != kind
+                     and int(p['confirmed_at']) <= cutoff_bar)
     else:
         l1, r1 = None, 'UNRESOLVED_L1_WITHIN_SPLIT'
     if ix is None:
-        return DecisionLabels(l1, None, r1, 'NOT_TRUE_ANCHOR')
+        return DecisionLabels(l1, None, r1, 'NOT_TRUE_ANCHOR', l1_available_bar=l1_mat)
     if ix == 0 or ix + 1 >= len(final):
-        return DecisionLabels(l1, None, r1, 'NO_PREVIOUS_OR_NEXT_PIVOT')
+        return DecisionLabels(l1, None, r1, 'NO_PREVIOUS_OR_NEXT_PIVOT', l1_available_bar=l1_mat)
     prior, nxt = final[ix-1], final[ix+1]
     if prior['type'] != nxt['type']:
-        return DecisionLabels(l1, None, r1, 'BAD_ZIGZAG_ALTERNATION')
+        return DecisionLabels(l1, None, r1, 'BAD_ZIGZAG_ALTERNATION', l1_available_bar=l1_mat)
     if j < WARMUP:
-        return DecisionLabels(l1, None, r1, 'WARMUP_INSUFFICIENT')
+        return DecisionLabels(l1, None, r1, 'WARMUP_INSUFFICIENT', l1_available_bar=l1_mat)
     ref = float(prior['price'])
     # Bar-local ordering is unknown from daily OHLC. Cannot treat an already
     # crossed reference on the anchor bar as a later break.
     if kind == 'L' and float(raw.high.iloc[j]) > ref:
-        return DecisionLabels(l1, None, r1, 'ANCHOR_BAR_INTRADAY_ORDER_UNKNOWN')
+        return DecisionLabels(l1, None, r1, 'ANCHOR_BAR_INTRADAY_ORDER_UNKNOWN', l1_available_bar=l1_mat)
     if kind == 'H' and float(raw.low.iloc[j]) < ref:
-        return DecisionLabels(l1, None, r1, 'ANCHOR_BAR_INTRADAY_ORDER_UNKNOWN')
+        return DecisionLabels(l1, None, r1, 'ANCHOR_BAR_INTRADAY_ORDER_UNKNOWN', l1_available_bar=l1_mat)
     q = int(nxt['bar'])
     if q > cutoff_bar or int(nxt['confirmed_at']) > cutoff_bar:
-        return DecisionLabels(l1, None, r1, 'NEXT_PIVOT_NOT_MATURE_WITHIN_SPLIT')
+        return DecisionLabels(l1, None, r1, 'NEXT_PIVOT_NOT_MATURE_WITHIN_SPLIT', l1_available_bar=l1_mat)
     if q <= j or q <= decision_bar:
-        return DecisionLabels(l1, None, r1, 'TARGET_ALREADY_OCCURRED')
+        return DecisionLabels(l1, None, r1, 'TARGET_ALREADY_OCCURRED', l1_available_bar=l1_mat)
     series = (raw.high if kind == 'L' else raw.low).iloc[j+1:q+1]
     broken = series > ref if kind == 'L' else series < ref
     first = int(broken[broken].index[0]) if bool(broken.any()) else None
     if first is not None and first <= decision_bar:
         reason = ('BREAKOUT_ON_DECISION_DAY' if first == decision_bar
                   else 'TARGET_ALREADY_OCCURRED')
-        return DecisionLabels(l1, None, r1, reason, first_break_bar=first)
+        return DecisionLabels(l1, None, r1, reason, first_break_bar=first, l1_available_bar=l1_mat)
     # The frozen l2_label specifically regards an equality touch (without
     # strict breakout) as ambiguous and excludes the row, not label=0.
     if first is None and bool((series == ref).any()):
-        return DecisionLabels(l1, None, r1, 'EQUAL_HIGH_LOW')
+        return DecisionLabels(l1, None, r1, 'EQUAL_HIGH_LOW', l1_available_bar=l1_mat)
     tag = ('HH' if first is not None else 'LH') if kind == 'L' else (
         'LL' if first is not None else 'HL')
+    # L2 label locks in at the first reference-crossing bar, or at the next pivot
+    # bar if no crossing occurred by then. Both are strictly after decision_bar.
+    l2_mat = first if first is not None else q
     return DecisionLabels(l1, int(tag == TARGET[kind]), r1, 'OK',
-                          target_tag=tag, first_break_bar=first)
+                          target_tag=tag, first_break_bar=first,
+                          l1_available_bar=l1_mat, l2_available_bar=l2_mat)
