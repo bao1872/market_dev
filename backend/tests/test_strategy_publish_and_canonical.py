@@ -16,9 +16,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.strategy_integration import release_store
-from app.strategy_integration import cli
-from app.strategy_integration import worker
+from app.strategy_integration import cli, release_store, worker
 
 
 def test_predict_cmd_wires_personal_registry(monkeypatch):
@@ -120,9 +118,8 @@ def test_admin_publish_unifies_with_worker_path(monkeypatch):
     # Req 1: the admin publish path must produce the SAME complete, file-verified
     # active release record the worker uses, and must swap the snapshot pointer
     # atomically (model pointer + snapshot pointer can never diverge).
-    from app.services.access_control_service import AccessContext, require_admin
     from app.api.admin_strategy_integration import router
-
+    from app.services.access_control_service import AccessContext, require_admin
     from app.strategy_integration import db_export
 
     src_batch = Path('/tmp/panji_14_snapshot/2026-08-17_89a5be0b28d1dac9')
@@ -197,7 +194,7 @@ def test_activate_batch_json_write_failure_keeps_previous_state(tmp_path, monkey
     monkeypatch.setattr(release_store, 'atomic_json',
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError('DISK')))
 
-    with pytest.raises(Exception):
+    with pytest.raises(RuntimeError):
         release_store.activate_batch(tmp_path, batch)
     # Previous state untouched; current symlink never switched to the new batch.
     assert json.loads((tmp_path / 'active_release.json').read_text())['release_id'] == 'P' * 64

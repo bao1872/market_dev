@@ -13,13 +13,14 @@ fails, nothing else changes, so the previously published state is left fully
 intact (fail-closed). See `resolve_active_release()`.
 """
 from __future__ import annotations
-from datetime import datetime, timezone
+
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import tempfile
+from datetime import UTC, datetime
+from pathlib import Path
 
 _log = logging.getLogger(__name__)
 
@@ -91,7 +92,9 @@ def _validate_batch_for_activation(batch: Path):
     so a corrupt batch never replaces a healthy published snapshot.
     """
     from app.services.strategy_candidate_shards import (
-        MANIFEST_SCHEMA, ShardContractError, load_candidate_shards,
+        MANIFEST_SCHEMA,
+        ShardContractError,
+        load_candidate_shards,
     )
     from app.services.strategy_candidate_snapshot import validate as validate_candidate
     from app.services.strategy_research_read_service import _check_snapshot
@@ -137,7 +140,7 @@ def write_active_release(root: Path, batch: Path, release_id: str,
         'batch': str(batch),
         'bundle_sha256': bundle_sha256,
         'bundle_path': bundle_path,
-        'activated_at': datetime.now(timezone.utc).isoformat(),
+        'activated_at': datetime.now(UTC).isoformat(),
     }
     target = root / ACTIVE_RELEASE
     atomic_json(target, payload)
