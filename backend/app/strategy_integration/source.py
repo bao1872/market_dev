@@ -225,3 +225,103 @@ def load_official_parquet(bars_file: Path, instruments_file: Path, as_of: str,
              'factor_provenance_authoritative':False,
              'data_read_only':True}
     return results,facts
+
+
+def load_official_parquet_pit(bars_file: Path, instruments_file: Path, as_of: str,
+                              *, max_symbols: int = 0, min_bars: int = 150
+                              ) -> tuple[dict[str, pd.DataFrame], dict]:
+    """Like load_official_parquet, but every frame also carries `adj_factor`.
+
+    Keeping the authoritative factor series lets the caller rebuild the
+    point-in-time qfq frame for each decision date, so a corporate action that
+    happens *after* a decision day can never rescale that day's inputs.
+    """
+    required = ['instrument_id', 'trade_date', 'open', 'high', 'low', 'close',
+                'volume', 'adj_factor']
+    if not bars_file.is_file() or not instruments_file.is_file():
+        raise ProducerError('SOURCE_FILES_NOT_FOUND')
+    raw = pd.read_parquet(bars_file, columns=required)
+    instruments = pd.read_parquet(instruments_file)
+    if not {'id', 'symbol'}.issubset(instruments.columns):
+        raise ProducerError('INSTRUMENT_SCHEMA_MISSING')
+    if 'market' not in instruments.columns:
+        codes = instruments['symbol'].astype(str)
+        instruments['market'] = np.select(
+            [codes.str.startswith('6'), codes.str.startswith(('0', '3')),
+             codes.str.startswith(('4', '8', '9'))], ['SH', 'SZ', 'BJ'],
+            default='UNKNOWN')
+    m = instruments[['id', 'symbol', 'market']].drop_duplicates('id').copy()
+    m['instrument_id'] = m.id.astype(str)
+    m['panji_symbol'] = (m.market.astype(str).str.upper() + ':'
+                         + m.symbol.astype(str).str.zfill(6))
+    m = m[m.panji_symbol.str.fullmatch(SYMBOL.pattern)]
+    raw['instrument_id'] = raw.instrument_id.astype(str)
+    raw['trade_date'] = pd.to_datetime(raw.trade_date)
+    raw = raw[raw.trade_date <= pd.Timestamp(as_of)]
+    raw = raw.merge(m[['instrument_id', 'panji_symbol']], on='instrument_id',
+                    how='inner', validate='many_to_one')
+    reasons = Counter()
+    asof_covered = 0
+    results: dict[str, pd.DataFrame] = {}
+    for symbol, group in raw.groupby('panji_symbol', sort=True):
+        group = group.sort_values('trade_date')
+        if group.trade_date.duplicated().any():
+            reasons['duplicate_bar'] += 1
+            continue
+        if len(group) < min_bars:
+            reasons['too_short'] += 1
+            continue
+        arr = group[['open', 'high', 'low', 'close', 'volume']].apply(
+            pd.to_numeric, errors='coerce').to_numpy(float)
+        if not np.isfinite(arr).all() or (arr[:, :4] <= 0).any() or (arr[:, 4] < 0).any():
+            reasons['invalid_ohlcv'] += 1
+            continue
+        if (arr[:, 1] < np.maximum.reduce([arr[:, 0], arr[:, 2], arr[:, 3]])).any() or (
+                arr[:, 2] > np.minimum.reduce([arr[:, 0], arr[:, 1], arr[:, 3]])).any():
+            reasons['invalid_candle'] += 1
+            continue
+        factor = pd.to_numeric(group.adj_factor, errors='coerce').to_numpy(float)
+        if not np.isfinite(factor).all() or (factor <= 0).any():
+            reasons['invalid_adj_factor'] += 1
+            continue
+        adjusted = _qfq_from_raw(group, as_of)
+        arr2 = adjusted.to_numpy(float)
+        if not np.isfinite(arr2).all() or (arr2[:, :4] <= 0).any() or (arr2[:, 4] < 0).any():
+            reasons['invalid_ohlcv_after_adjustment'] += 1
+            continue
+        df = pd.DataFrame(arr2, columns=['open', 'high', 'low', 'close', 'volume'])
+        df.insert(0, 'datetime',
+                  pd.Series(pd.to_datetime(adjusted.index)).reset_index(drop=True))
+        # Authoritative factor series, aligned row-for-row with the frame above.
+        df['adj_factor'] = factor
+        results[symbol] = df
+        if df.datetime.iloc[-1].date() == pd.Timestamp(as_of).date():
+            asof_covered += 1
+    if max_symbols:
+        by_market = {mk: sorted(s for s in results if s.startswith(mk + ':'))
+                     for mk in ('SH', 'SZ', 'BJ')}
+        selected = []
+        while len(selected) < max_symbols and any(by_market.values()):
+            for market in ('SH', 'SZ', 'BJ'):
+                if by_market[market] and len(selected) < max_symbols:
+                    selected.append(by_market[market].pop(0))
+        results = {s: results[s] for s in selected}
+        asof_covered = sum(
+            df.datetime.iloc[-1].date() == pd.Timestamp(as_of).date()
+            for df in results.values())
+    total_symbols = int(raw.panji_symbol.nunique())
+    facts = {'source_sha256': hashlib.sha256(
+        (sha_file(bars_file) + '|' + sha_file(instruments_file)).encode()).hexdigest(),
+        'source_as_of': as_of, 'source_rows': len(raw),
+        'raw_instrument_count': total_symbols, 'eligible_stock_count': len(results),
+        'covered_asof_count': asof_covered,
+        'coverage_ratio': round(asof_covered / max(1, len(results)), 6),
+        'coverage_ratio_of_eligible': round(asof_covered / max(1, len(results)), 6),
+        'coverage_ratio_of_total': round(asof_covered / max(1, total_symbols), 6),
+        'excluded': dict(reasons), 'corporate_action_excluded': 0,
+        'has_BJ': any(s.startswith('BJ:') for s in results),
+        'price_adjustment': 'qfq', 'adjustment_as_of': as_of,
+        'adjustment_mode': OFFLINE_DIAGNOSTIC, 'adjustment_owner': ADJUSTMENT_OWNER,
+        'factor_provenance_authoritative': False, 'data_read_only': True,
+        'pit_factor_series_available': True}
+    return results, facts

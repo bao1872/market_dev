@@ -17,6 +17,7 @@ import numpy as np
 import pandas as pd
 
 from . import model, source
+from . import producer
 from .producer import ProducerError
 
 # NOTE: intentionally separate from original research train() because that
@@ -52,9 +53,14 @@ def _labels(raw, final, j, kind, cutoff_bar, stage_bar):
 
 
 def build_dataset(stock_raw, fmod, windows):
+    """Point-in-time dataset: every decision day is featurised on its own
+    as-of qfq frame, so a later corporate action cannot leak into training."""
     values = defaultdict(list)
     counters = Counter()
     for symbol,raw in stock_raw.items():
+        pit = raw if 'adj_factor' in raw.columns else None
+        if pit is not None:
+            raw = raw.drop(columns=['adj_factor'])
         final,snap,_=fmod.replay(raw)
         candidates,_=fmod.causal_candidates(raw)
         days=[pd.Timestamp(x).date() for x in raw.datetime]
@@ -77,7 +83,10 @@ def build_dataset(stock_raw, fmod, windows):
                 stage_events.append((j,kind,k,t,name,l1,l2))
         if not stage_events:continue
         bars=sorted(set(s[3] for s in stage_events))
-        _,matrix=fmod.features(raw,snap,bars)
+        if pit is not None:
+            _,matrix=model._pit_features(raw,pit,fmod,snap,bars)
+        else:
+            _,matrix=fmod.features(raw,snap,bars)
         look={bar:matrix[i] for i,bar in enumerate(bars)}
         for j,kind,k,t,name,l1,l2 in stage_events:
             for layer,label in (('L1',l1),('L2',l2)):
@@ -95,7 +104,18 @@ def train(args):
         raise ProducerError('PARTIAL_TRAIN_REQUIRES_EXPLICIT_DIAGNOSTIC_FLAG')
     assets=model.validate_source_assets(args.assets)
     fmod=model.load_engine(args.assets)
-    stock_raw,src=source.load_official_parquet(args.bars,args.instruments,args.test_end,max_symbols=args.max_symbols)
+    if args.source_mode=='canonical':
+        # Training input must match production: authoritative QFQ via MDAS.
+        from .db_export import export_dataset
+        import asyncio, os as _os
+        export_dir=Path(_os.environ.get('PANJI_STRATEGY_TRAIN_EXPORT_DIR', str(args.output_dir/'export')))
+        export_dir.mkdir(parents=True,exist_ok=True)
+        asyncio.run(export_dataset(export_dir,date.fromisoformat(args.test_end)))
+        stock_raw,src=source.load_canonical_qfq_export(export_dir,args.test_end,max_symbols=args.max_symbols)
+    else:
+        # Research-only offline parquet; the canonical pure function applies.
+        stock_raw,src=source.load_official_parquet_pit(args.bars,args.instruments,args.test_end,max_symbols=args.max_symbols)
+        src['production_fallback_allowed']=False
     data,counts=build_dataset(stock_raw,fmod,windows)
     model_map={};thresholds={};metrics={}
     for layer in ('L1','L2'):
@@ -118,7 +138,13 @@ def train(args):
                 clf.fit(pd.DataFrame(xt,columns=fmod.ALL_COLS),yt)
                 val=clf.predict_proba(pd.DataFrame(xv,columns=fmod.ALL_COLS))[:,1]
                 fpr,tpr,thr=roc_curve(yv,val)
-                ix=int(np.argmax(tpr-fpr));tau=float(thr[ix])
+                # roc_curve's first threshold is +inf by construction; choose the
+                # Youden-J optimum among the finite candidates only.
+                finite=np.isfinite(thr)
+                if not finite.any():
+                    raise ProducerError('INVALID_VAL_THRESHOLD')
+                j=np.where(finite)[0][int(np.argmax((tpr-fpr)[finite]))]
+                tau=float(np.clip(thr[j],1e-6,1-1e-6))
                 if not np.isfinite(tau) or tau<0 or tau>1:
                     raise ProducerError('INVALID_VAL_THRESHOLD')
                 model_map[key]=clf;thresholds[key]=tau
@@ -133,7 +159,9 @@ def train(args):
             'feature_sha':model.ENGINE_SHA,'feature_dim':131,'layers':['L1','L2'],
             'kinds':['H','L'],'stages':[1,2,3],'models':model_map,'thresholds':thresholds,
             'uncalibrated':True,'target':{'L':'HH','H':'LL'},
-            'label_contract':'L_HH__H_LL__V1','split_windows':[(n,str(lo),str(hi)) for n,lo,hi in windows]}
+            'label_contract':'L_HH__H_LL__V1',
+            'price_input_contract':producer.PRICE_INPUT_CONTRACT,
+            'split_windows':[(n,str(lo),str(hi)) for n,lo,hi in windows]}
     output=args.output_dir.resolve()
     if output.exists() and list(output.iterdir()):raise ProducerError('CANDIDATE_MODEL_DIR_NOT_EMPTY')
     output.mkdir(parents=True,exist_ok=True)
@@ -144,7 +172,10 @@ def train(args):
     (output/'train_report.json').write_text(json.dumps({'status':'CANDIDATE_TRAINED_NOT_PUBLISHED',
         'new_bundle_sha256':sha,'training_source_sha256':src['source_sha256'],
         'split_windows':bundle['split_windows'],'metrics':metrics,'counts':counts,
-        'released':False,'active':False,'feature_sha':model.ENGINE_SHA},ensure_ascii=False,indent=2))
+        'released':False,'active':False,'feature_sha':model.ENGINE_SHA,
+        'price_adjustment':src.get('price_adjustment'),
+        'adjustment_mode':src.get('adjustment_mode'),
+        'factor_provenance_authoritative':src.get('factor_provenance_authoritative',False)},ensure_ascii=False,indent=2))
     print(json.dumps({'status':'CANDIDATE_TRAINED_NOT_PUBLISHED','sha256':sha,'dir':str(output)}))
 
 
@@ -159,6 +190,7 @@ def main():
     p.add_argument('--min-each-class',type=int,default=10)
     p.add_argument('--trees',type=int,default=300);p.add_argument('--threads',type=int,default=4)
     p.add_argument('--max-symbols',type=int,default=0)
+    p.add_argument('--source-mode',choices=['canonical','diagnostic'],default='diagnostic')
     p.add_argument('--allow-partial-diagnostics',action='store_true')
     args=p.parse_args();train(args)
 

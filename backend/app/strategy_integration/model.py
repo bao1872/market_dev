@@ -34,6 +34,11 @@ class AssetError(RuntimeError):
     pass
 
 
+# Diagnostics only: how many feature cells were NaN in the as-of rebuild but
+# not in the run frame (pivot-depth differences, handled natively by LightGBM).
+pit_new_nan_cells = [0]
+
+
 def digest(p: Path) -> str:
     h = hashlib.sha256()
     with open(p, 'rb') as f:
@@ -127,6 +132,7 @@ def load_bundle(assets: Path = ASSET_DIR, allow_runtime_mismatch: bool = False) 
         'models': 12, 'thresholds': 12, 'feature_dim': 131,
         'release_id': hashlib.sha256(f'{pinned}|{ENGINE_SHA}|L_HH__H_LL__V1|QFQ_ASOF_V1'.encode()).hexdigest(),
         'bundle_sha256': pinned,
+        'price_input_contract': 'RAW_OHLCV',
         'target_label_conflict': {'kind':'H', 'trained_positive':'LL', 'bundle_declares':'HL'},
         'model_scores_are_calibrated': False,
         'production_publish_allowed': False,
@@ -140,16 +146,18 @@ def load_bundle_file(path, *, allow_runtime_mismatch: bool = False,
     Used when an activated release selects candidate weights. The file must be a
     locally trusted, SHA-pinned artifact; never accept an HTTP-supplied pickle.
     """
+    path = Path(path)
+    if not path.is_file():
+        raise AssetError('BUNDLE_FILE_MISSING: ' + str(path))
+    # Pin the artifact identity first: tampering is rejected before any
+    # interpreter/runtime work and before the pickle is ever opened.
+    actual = digest(path)
+    if pinned_sha and actual != pinned_sha:
+        raise AssetError('BUNDLE_SHA_MISMATCH')
     import sklearn
     version = str(sklearn.__version__)
     if version != SKLEARN_TRAIN_VERSION and not allow_runtime_mismatch:
         raise AssetError(f'SKLEARN_RUNTIME_MISMATCH: saved={SKLEARN_TRAIN_VERSION} running={version}')
-    path = Path(path)
-    if not path.is_file():
-        raise AssetError('BUNDLE_FILE_MISSING: ' + str(path))
-    actual = digest(path)
-    if pinned_sha and actual != pinned_sha:
-        raise AssetError('BUNDLE_SHA_MISMATCH')
     with open(path, 'rb') as handle:
         b = pickle.load(handle)
     if b.get('schema') != 'PANJI_TWO_STAGE_FINAL_D123_V1' or b.get('version') != EXPECTED_VERSION:
@@ -175,6 +183,7 @@ def load_bundle_file(path, *, allow_runtime_mismatch: bool = False,
         'release_id': hashlib.sha256(
             f'{actual}|{ENGINE_SHA}|L_HH__H_LL__V1|QFQ_ASOF_V1'.encode()).hexdigest(),
         'bundle_sha256': actual,
+        'price_input_contract': (b.get('price_input_contract') or 'RAW_OHLCV'),
         'target_label_conflict': {'kind': 'H', 'trained_positive': 'LL', 'bundle_declares': 'HL'},
         'model_scores_are_calibrated': False,
         'production_publish_allowed': False,
@@ -203,7 +212,82 @@ def read_ohlcv(p: Path, fmod) -> pd.DataFrame:
     return raw
 
 
-def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: str | None = None, *, min_anchor_bar: int | None = None) -> dict:
+
+def _pit_frame(pit_source: pd.DataFrame, anchor: str) -> pd.DataFrame:
+    """Rebuild the qfq frame as it looked on `anchor` (point-in-time).
+
+    Uses Panji's canonical pure function only; never a second adjustment
+    formula. Bars inside the anchor's factor regime come back unadjusted and
+    earlier regimes are rescaled by their own factor ratio, so a *later*
+    corporate action cannot change this as-of series.
+    """
+    from app.services.adj_factor import apply_adj_factor_with_as_of
+    date_col = 'trade_date' if 'trade_date' in pit_source.columns else 'datetime'
+    dates = pd.to_datetime(pit_source[date_col])
+    bars = pit_source.set_index(pd.DatetimeIndex(dates))
+    bars = bars[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    factors = pd.DataFrame({
+        'trade_date': dates.to_numpy(),
+        'adj_factor': pd.to_numeric(pit_source['adj_factor'], errors='coerce').astype(float).to_numpy(),
+    })
+    out = apply_adj_factor_with_as_of(bars, factors, date.fromisoformat(anchor))
+    out = out[['open', 'high', 'low', 'close', 'volume']].astype(float).sort_index()
+    frame = pd.DataFrame(out.to_numpy(float),
+                         columns=['open', 'high', 'low', 'close', 'volume'])
+    frame.insert(0, 'datetime',
+                 pd.Series(pd.to_datetime(out.index)).reset_index(drop=True))
+    return frame
+
+
+def _pit_features(raw: pd.DataFrame, pit_source: pd.DataFrame, fmod, snap,
+                  needed: list[int]) -> tuple[Any, Any]:
+    """Feature rows for `needed` bars, each computed on its own as-of frame.
+
+    Bars sharing a factor regime share one frame, so the cost is bounded by the
+    number of corporate actions in the lookback rather than by bar count.
+    """
+    import pandas as _pd
+    factors = _pd.to_numeric(pit_source['adj_factor'], errors='coerce').to_numpy(float)
+    if len(factors) != len(raw):
+        raise AssetError('PIT_SOURCE_LENGTH_MISMATCH')
+    # The daily table (signal_available etc.) keeps the run-frame indexing that
+    # callers rely on; only the feature matrix is rebuilt per as-of regime.
+    day, X_run = fmod.features(raw, snap, needed)
+    # Contiguous factor regimes: a repeated factor value is still a distinct
+    # regime, and each decision day must be anchored inside its OWN regime.
+    regime_of_bar = np.empty(len(factors), dtype=np.int64)
+    regime = 0
+    for i in range(1, len(factors)):
+        if factors[i] != factors[i - 1]:
+            regime += 1
+        regime_of_bar[i] = regime
+    by_regime: dict[int, list[int]] = {}
+    for t in needed:
+        by_regime.setdefault(int(regime_of_bar[int(t)]), []).append(int(t))
+    X = np.full((len(needed), len(fmod.ALL_COLS)), np.nan, dtype=np.float32)
+    row_of_bar = {int(t): n for n, t in enumerate(needed)}
+    for bars in by_regime.values():
+        anchor = str(raw.datetime.iloc[max(bars)].date())
+        frame = _pit_frame(pit_source, anchor)
+        _, snap_regime, _ = fmod.replay(frame)
+        _, X_regime = fmod.features(frame, snap_regime, bars)
+        for i, t in enumerate(bars):
+            X[row_of_bar[int(t)]] = X_regime[i]
+    # An as-of series legitimately has a slightly different pivot depth, so a
+    # few extra NaNs (LightGBM handles them natively) are expected. What must
+    # never happen is a decision bar that becomes entirely uninformative.
+    new_nan = np.isnan(X) & ~np.isnan(X_run)
+    dead = np.isnan(X).all(axis=1) & ~np.isnan(X_run).all(axis=1)
+    if dead.any():
+        bad = [int(t) for i, t in enumerate(needed) if dead[i]]
+        raise AssetError('PIT_DECISION_BAR_UNINFORMATIVE ' + str(bad[:5]))
+    pit_new_nan_cells[0] += int(new_nan.sum())
+    return day, X
+
+
+def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: str | None = None, *, min_anchor_bar: int | None = None,
+                   pit_source: pd.DataFrame | None = None,
+                   release_id: str = BUNDLE_SHA) -> dict:
     """Causal D1/D2/D3 for *every* left-5/right-1 candidate, not oracle pivot subset.
 
     Frozen fmod.replay() yields as-of snapshots and features() only accesses
@@ -224,7 +308,11 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
         return {'symbol':symbol,'as_of':str(raw.datetime.iloc[-1].date()), 'candidates':[],
                 'today_observations':[], 'status':'DIAGNOSTIC_ONLY'}
     needed = sorted({e[2] for e in entries})
-    day, X = fmod.features(raw, snap, needed)
+    if pit_source is not None and len(pit_source) == len(raw) and 'adj_factor' in pit_source.columns:
+        # Point-in-time: each decision day sees its own as-of qfq frame.
+        day, X = _pit_features(raw, pit_source, fmod, snap, needed)
+    else:
+        day, X = fmod.features(raw, snap, needed)
     if len(fmod.ALL_COLS) != 131 or X.shape != (len(needed),131):
         raise AssetError('CAUSAL_FEATURE_SHAPE_MISMATCH')
     row_of_bar = {int(t):n for n,t in enumerate(needed)}
@@ -291,11 +379,16 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
     }
 
 
-def assert_prefix_invariance(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, tail_cut: int = 15):
+def assert_prefix_invariance(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, tail_cut: int = 15,
+                             pit_source: pd.DataFrame | None = None):
     if len(raw) <= tail_cut+30:
         raise AssetError('PREFIX_TEST_REQUIRES_MORE_BARS')
-    full = score_candidates(raw,symbol,fmod,bundle)
-    early = score_candidates(raw.iloc[:-tail_cut].reset_index(drop=True),symbol,fmod,bundle)
+    early_source = None
+    if pit_source is not None and len(pit_source) == len(raw):
+        early_source = pit_source.iloc[:-tail_cut].reset_index(drop=True)
+    full = score_candidates(raw,symbol,fmod,bundle,pit_source=pit_source)
+    early = score_candidates(raw.iloc[:-tail_cut].reset_index(drop=True),symbol,fmod,bundle,
+                             pit_source=early_source)
     byid={o['observation_id']:o for c in full['candidates'] for o in c['observations']}
     checked=0
     for c in early['candidates']:

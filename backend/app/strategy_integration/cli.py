@@ -76,6 +76,7 @@ def build(args):
     # The activated release controls the weights actually used for inference.
     bundle, facts, bundle_path, bundle_origin = load_bundle_for_run(out, args.assets)
 
+    pit_source: dict = {}
     if args.source_mode == 'canonical':
         # Production entrance: read-only DB export via the single price owner MDAS.
         from .db_export import export_dataset
@@ -86,8 +87,12 @@ def build(args):
             export_dir, args.as_of, max_symbols=args.max_symbols)
     else:
         # Research-only offline parquet; explicitly NOT a production fallback.
-        stock_raw, source_report = source.load_official_parquet(
+        # Frames carry the authoritative factor series so every decision day is
+        # scored on its own as-of qfq (point-in-time, no future factor).
+        stock_raw, source_report = source.load_official_parquet_pit(
             args.bars, args.instruments, args.as_of, max_symbols=args.max_symbols)
+        pit_source = {s: df for s, df in stock_raw.items()}
+        stock_raw = {s: df.drop(columns=['adj_factor']) for s, df in stock_raw.items()}
         source_report['production_fallback_allowed'] = False
 
     if args.max_symbols == 0:
@@ -97,12 +102,18 @@ def build(args):
             raise producer.ProducerError('SOURCE_TRADE_DAY_COVERAGE_BELOW_85_PERCENT')
 
     release_id = producer.release_id_for(facts['bundle_sha256'])
+    # Fail closed: never score with weights whose price-input contract is unknown
+    # or unapproved. No automatic fallback to the raw-trained frozen bundle.
+    bundle_contract = producer.require_price_contract(
+        bundle, producer.PRICE_INPUT_CONTRACT)
     candidates, evaluation = producer.make_snapshots(
         stock_raw, fmod, bundle, as_of=args.as_of,
         source_sha=source_report['source_sha256'],
         chart_bars=args.chart_bars, release_id=release_id,
         price_adjustment=source_report.get('price_adjustment', 'qfq'),
         adjustment_mode=source_report.get('adjustment_mode'),
+        bundle_sha256=facts['bundle_sha256'],
+        pit_source=pit_source,
     )
     validation = producer.verify_against_readers(candidates, evaluation)
     evaluation_data = producer.encode_json(evaluation)

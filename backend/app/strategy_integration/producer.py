@@ -32,6 +32,21 @@ def release_id_for(bundle_sha: str, price_contract: str = PRICE_INPUT_CONTRACT) 
     return hashlib.sha256(f'{bundle_sha}|{model.ENGINE_SHA}|{CONTRACT}|{price_contract}'.encode()).hexdigest()
 
 
+def require_price_contract(bundle: dict, expected: str = PRICE_INPUT_CONTRACT) -> str:
+    """Fail closed unless the weights declare a matching price-input contract.
+
+    Returns the declared contract. Raises ProducerError when it is missing
+    (unknown provenance) or does not match the pipeline contract, so inference
+    can never silently fall back to raw-trained weights.
+    """
+    declared = (bundle.get('price_input_contract') or '').strip()
+    if not declared:
+        raise ProducerError('MODEL_PRICE_INPUT_CONTRACT_UNKNOWN')
+    if declared != expected:
+        raise ProducerError('MODEL_PRICE_INPUT_CONTRACT_MISMATCH')
+    return declared
+
+
 class ProducerError(ValueError):
     pass
 
@@ -52,8 +67,11 @@ def _reference(raw: pd.DataFrame, snaps: Any, j: int, kind: str) -> tuple[float 
 
 
 def _candidate_and_bars(raw: pd.DataFrame, symbol: str, fmod: Any, bundle: dict,
-                        *, chart_bars: int = 85, release_id: str = RELEASE_ID) -> tuple[dict[str, Any], list[dict]]:
-    result = model.score_candidates(raw, symbol, fmod, bundle, min_anchor_bar=max(0, len(raw)-chart_bars))
+                        *, chart_bars: int = 85, release_id: str = RELEASE_ID,
+                        pit_source: pd.DataFrame | None = None) -> tuple[dict[str, Any], list[dict]]:
+    result = model.score_candidates(raw, symbol, fmod, bundle,
+                                    min_anchor_bar=max(0, len(raw)-chart_bars),
+                                    pit_source=pit_source, release_id=release_id)
     _, snapshots, _ = fmod.replay(raw)
     lookup = {d: i for i, d in enumerate(raw.datetime.dt.strftime('%Y-%m-%d'))}
     bar_start = max(0, len(raw) - chart_bars)
@@ -179,7 +197,8 @@ def _path_metrics(raw: pd.DataFrame, kind: str, t: int,
 def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict], fmod: Any,
                     *, as_of: str, source_sha: str, release_id: str = RELEASE_ID,
                     price_adjustment: str = 'qfq',
-                    adjustment_mode: str | None = None) -> dict:
+                    adjustment_mode: str | None = None,
+                    bundle_sha256: str = '') -> dict:
     models = [{'id': f'joint_d{k}_{side.lower()}', 'name': f'{side} D{k} 联合', 'side': side}
               for side in ('BUY','SELL') for k in (1,2,3)]
     events = []
@@ -209,7 +228,8 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
             'metadata': {'strategy_key': 'zigzag_two_stage', 'strategy_name': '两层 ZigZag 结构机会',
                          'version': release_id[:16], 'generated_at': as_of,
                          'evaluation_protocol': f'ALL_ALERTS_NEXT_OPEN_{EVAL_HORIZON}B_H_LL_L_HH_V1',
-                         'model_sha256': model.BUNDLE_SHA, 'data_sha256': source_sha,
+                         'model_sha256': bundle_sha256 or model.BUNDLE_SHA,
+                         'data_sha256': source_sha,
                          'audit_ref': f'candidate_full_cohort_{release_id[:16]}',
                          'status': 'AUDITED', 'cohort': 'ALL_EX_ANTE_ALERTS',
                          'price_adjustment': price_adjustment,
@@ -221,7 +241,9 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                    *, as_of: str, source_sha: str, chart_bars: int = 85,
                    daily_days: int = 20, release_id: str = RELEASE_ID,
                    price_adjustment: str = 'qfq',
-                   adjustment_mode: str | None = None) -> tuple[dict, dict]:
+                   adjustment_mode: str | None = None,
+                   bundle_sha256: str = '',
+                   pit_source: dict[str, pd.DataFrame] | None = None) -> tuple[dict, dict]:
     if not stock_raw:
         raise ProducerError('NO_STOCKS')
     stocks: dict[str, dict] = {}
@@ -230,7 +252,9 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
     for symbol, raw in sorted(stock_raw.items()):
         if len(raw) < 150 or pd.Timestamp(raw.datetime.iloc[-1]).date() > latest:
             raise ProducerError(f'INVALID_SOURCE_WINDOW {symbol}')
-        one, daily = _candidate_and_bars(raw, symbol, fmod, bundle, chart_bars=chart_bars, release_id=release_id)
+        one, daily = _candidate_and_bars(raw, symbol, fmod, bundle, chart_bars=chart_bars,
+                                        release_id=release_id,
+                                        pit_source=(pit_source or {}).get(symbol))
         stocks[symbol] = one
         for row in daily:
             by_date[row.pop('trade_date')].append(row)
@@ -245,12 +269,13 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                               'generated_at':datetime.now(timezone.utc).isoformat(), 'status':'AUDITED',
                               'score_calibrated':False, 'price_adjustment':price_adjustment,
                               'adjustment_mode':adjustment_mode,
-                              'model_sha256':model.BUNDLE_SHA,
+                              'model_sha256': bundle_sha256 or model.BUNDLE_SHA,
                               'business_target': {'L':'HH','H':'LL'}, 'source_sha256':source_sha},
                  'stocks':stocks, 'daily_batches':batches}
     evaluation = make_evaluation(stock_raw, stocks, fmod, as_of=as_of, source_sha=source_sha,
                                   release_id=release_id, price_adjustment=price_adjustment,
-                                  adjustment_mode=adjustment_mode)
+                                  adjustment_mode=adjustment_mode,
+                                  bundle_sha256=bundle_sha256)
     return candidate, evaluation
 
 
