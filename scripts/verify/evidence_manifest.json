@@ -352,6 +352,17 @@
         "tests/test_stock_context_atomic_facts.py::test_admin_debug_full_traceability"
       ],
       "claim": "CURRENT Core identity 的唯一来源是 canonical after-close（run_type=after_close）、scope=full、status=succeeded、schema_version=当前、finished_at IS NOT NULL 的 StockFeatureSnapshotRun，由唯一 owner resolve_current_core_run 解析；legacy stock_core FactorPublication pointer 不参与 CURRENT 身份；as_of 严格 point-in-time（trade_date <= as_of）；noncanonical run（manual / backfill / wrong-schema / failed / scope!=full sample / running / finished_at=NULL）不抢占；同日确定性胜出者由 finished_at 更晚者决定；admin 生产节点（system_overview first-pyramid）消费同一 owner 且不再以 stock_core pointer / 覆盖率门禁 作为 ready 条件。stock_context（GET /stocks/{symbol}/context）与 admin debug（GET /admin/stocks/{symbol}/debug）在真实 PostgreSQL 上消费同一个 canonical CURRENT owner：/context 的 asOf 与 exact snapshot 来自该 owner 解析出的 CoreRun，as_of（含周末/非交易日）经真实端点回退到最近的 canonical 交易日，recentChanges 只读取 canonical 快照且其 cutoff 被冻结为已解析 run.trade_date（latestChangesAsOf <= response.asOf，禁止请求期间新 finalize 的未来 CoreRun 撕裂同一 response），admin debug 的 rawDebug.runId 与同一 owner 返回的 run 一致。published_at 不作为 CURRENT readiness gate。"
+    },
+    {
+      "contract_id": "market_stocks_structure_event_composite_filter",
+      "governance_level": 2,
+      "semantic_owner": "app.services.market_stocks_service._build_fp_filter_conditions",
+      "gate": ["targeted-pg"],
+      "required": true,
+      "test_selectors": [
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter"
+      ],
+      "claim": "复合结构事件筛选（fp_structure_event_type 的 type#direction 复合值）在真实 PostgreSQL 上：等于只命中单一方向；不等于排除该方向；多选(in)以 OR 连接复合对；排除多选(not_in)以 AND 连接各对否定（旧 OR 错配会错误纳入应排除方向）；in/not_in 混合普通枚举值（如历史合并值 OB_CREATED/BOS/CHoCH）不得遗漏条件；NULL 方向行在 not_in/neq 下正确纳入。列表/分页/计数与 Excel 导出对该筛选结果一致。"
     }
   ]
 }
