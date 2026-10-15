@@ -360,8 +360,8 @@
       "gate": ["targeted-pg"],
       "required": true,
       "test_selectors": [
-        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_eq_bullish_returns_only_bullish",
-        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_eq_bearish_returns_only_bearish",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_bullish_filters_only_bullish",
+        "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_bearish_filters_only_bearish",
         "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_composite_bullish_bearish_mutually_exclusive",
         "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_legacy_combined_value_still_matches_both_directions",
         "tests/test_market_stocks_chip_integration.py::TestStructureEventCompositeFilter::test_invalid_direction_rejected",
