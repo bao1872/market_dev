@@ -726,24 +726,22 @@ def _build_fp_filter_conditions(
                     "enum",
                     "flat",
                 )
+                # Unify the positive match predicate first. Negating each pair
+                # separately and OR-ing NULL guards breaks mixed plain/composite
+                # exclusions (e.g. plain OB_CREATED + NULL direction).
+                item_conditions: list[ColumnElement[bool]] = [
+                    and_(type_expr == comp[0], dir_expr == comp[1])
+                    for comp in composite_pairs
+                ]
+                item_conditions.extend(type_expr == v for v in plain_values)
+                any_match = or_(*item_conditions)
                 if f.operator in ("eq", "in"):
-                    # INCLUSIVE：命中任一条件即入选（复合对 OR 普通枚举值）。
-                    item_conditions: list[ColumnElement[bool]] = [
-                        and_(type_expr == comp[0], dir_expr == comp[1])
-                        for comp in composite_pairs
-                    ]
-                    item_conditions.extend(type_expr == v for v in plain_values)
-                    conditions.append(or_(*item_conditions))
-                else:  # neq / not_in：EXCLUSIVE：必须不匹配任一条件才入选。
-                    # NULL 守卫：type/dir 任一为空 → 不属于任何枚举值 → 入选（与既有 neq 语义一致）。
-                    null_guard = or_(type_expr.is_(None), dir_expr.is_(None))
-                    # 「同时不匹配所有条件」= ~(A OR B) = ~A AND ~B（修复旧 OR 错配）。
-                    exclude_conditions: list[ColumnElement[bool]] = [
-                        ~and_(type_expr == comp[0], dir_expr == comp[1])
-                        for comp in composite_pairs
-                    ]
-                    exclude_conditions.extend(type_expr != v for v in plain_values)
-                    conditions.append(or_(null_guard, and_(*exclude_conditions)))
+                    conditions.append(any_match)
+                else:
+                    # Postgres IS NOT TRUE excludes matched rows and includes
+                    # unmatched/UNKNOWN rows. A plain type match stays TRUE even
+                    # if direction is NULL, so it cannot accidentally re-enter.
+                    conditions.append(any_match.is_not(True))
                 continue
             # 无复合对（仅普通枚举值或空值）→ 交由下方普通枚举处理（eq/in/neq/not_in 已正确支持 NULL）。
 

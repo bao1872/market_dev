@@ -1119,3 +1119,20 @@ class TestStructureEventCompositeFilter:
         assert "688014" in got  # NULL 方向行被纳入
         assert "688011" not in got  # 承接股A 排除
         assert "688013" not in got  # 承接股C 排除
+
+    async def test_not_in_mixed_plain_excludes_null_direction_if_type_matches_plain(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """A NULL direction is not an exemption when plain OB_CREATED is excluded."""
+        client, _symbols = await self._seed_direction_scoped_with_null(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter":
+                    "fp_structure_event_type:not_in:OB_CREATED#bullish,OB_CREATED",
+                    "page_size": 50},
+        )
+        assert resp.status_code == 200, resp.text
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert {"688011", "688012", "688013", "688014"}.isdisjoint(got), got

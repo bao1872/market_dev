@@ -353,9 +353,8 @@ class TestStructureEventFilterRegression:
     def test_neq_composite_includes_null_and_single_negation(self):
         """不等于(复合)：含 NULL 守卫，且为单一否定（不含第二个 NOT）。"""
         sql = _compile_structure_event_filter("neq", "OB_CREATED#bullish")
-        assert "IS NULL" in sql, f"neq 复合须含 NULL 守卫: {sql}"
-        assert sql.count("NOT (") == 1, f"neq 单复合只应有一个否定: {sql}"
-        assert " OR " in sql, f"neq 复合 NULL 守卫须以 OR 连接否定: {sql}"
+        assert "IS NOT true" in sql, f"neq 复合必须使用三值逻辑安全排除: {sql}"
+        assert "'OB_CREATED'" in sql and "'bullish'" in sql
 
     def test_in_multi_select_or_of_pairs(self):
         """多选(in)：两复合对以 OR 连接，不含 NULL 守卫。"""
@@ -368,12 +367,9 @@ class TestStructureEventFilterRegression:
     def test_not_in_exclude_multi_select_anded_negations(self):
         """排除多选(not_in)：两否定须以 AND 连接（修复旧 OR 错配，否则会错误纳入 B）。"""
         sql = _compile_structure_event_filter("not_in", "OB_CREATED#bullish,OB_ENTERED#bearish")
-        assert "IS NULL" in sql, f"not_in 须含 NULL 守卫: {sql}"
-        # 关键修复断言：两个否定是 AND 关系，而非 OR。
-        assert ") AND NOT (" in sql or "NOT (" in sql and "OR NOT (" not in sql, (
-            f"not_in 多复合否定须 AND 连接，实际: {sql}"
-        )
-        assert sql.count("NOT (") == 2, f"not_in 双复合应有两个否定: {sql}"
+        assert "IS NOT true" in sql, f"not_in 多选须整体按 IS NOT TRUE 排除: {sql}"
+        assert "'OB_CREATED'" in sql and "'OB_ENTERED'" in sql
+        assert "'bullish'" in sql and "'bearish'" in sql
 
     def test_in_mixed_legacy_enum_keeps_plain_value(self):
         """混合旧枚举(in)：普通枚举值 OB_CREATED 不得被丢弃（旧实现只留复合对）。"""
@@ -391,16 +387,12 @@ class TestStructureEventFilterRegression:
         assert sql.count("'OB_CREATED'") == 2, (
             f"not_in 混合旧枚举须保留普通枚举否定，实际: {sql}"
         )
-        # 普通枚举以 != 否定形式出现，并与复合对否定 AND 连接（非 OR 错配）。
-        assert "!= 'OB_CREATED'" in sql, f"not_in 混合须保留普通枚举否定: {sql}"
-        # NOT(pair) 与 type != 'OB_CREATED' 以 AND 连接（形如 `) AND ((snap...`）。
-        assert ") AND ((" in sql, f"not_in 混合普通枚举否定须与复合否定 AND 连接: {sql}"
-        assert "IS NULL" in sql, f"not_in 混合须含 NULL 守卫: {sql}"
+        assert "IS NOT true" in sql, f"not_in 混合值必须整体排除并处理 NULL: {sql}"
 
     def test_null_handling_not_in_includes_null_rows(self):
-        """NULL 守卫：not_in 须包含 IS NULL（NULL 行不属于任何枚举值，应入选）。"""
+        """NULL/UNKNOWN must be included when no forbidden pair matches."""
         sql = _compile_structure_event_filter("not_in", "OB_CREATED#bullish")
-        assert "IS NULL" in sql
+        assert "IS NOT true" in sql
 
     def test_null_handling_eq_excludes_null_rows(self):
         """NULL 守卫：eq 不含 IS NULL（NULL 行正确排除）。"""
