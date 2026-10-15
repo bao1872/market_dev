@@ -44,6 +44,7 @@ _PURE_UNIT = os.environ.get("PURE_UNIT_TEST", "").lower() in ("1", "true", "yes"
 _CI_ENV = (
     os.environ.get("GITHUB_ACTIONS", "").lower() in ("1", "true", "yes")
     or os.environ.get("PANJI_CI_DB_TEST", "").lower() in ("1", "true", "yes")
+    or os.environ.get("PANJI_REMOTE_VERIFY_DB_TEST", "").lower() in ("1", "true", "yes")
 )
 
 pytestmark = pytest.mark.skipif(
