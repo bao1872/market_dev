@@ -43,6 +43,39 @@ def atomic_json(path: Path, blob: dict) -> None:
         blob, ensure_ascii=False, sort_keys=True, allow_nan=False).encode())
 
 
+def digest_path(p: Path) -> str:
+    """SHA256 of any (possibly large) file; used to verify pinned artifacts."""
+    h = hashlib.sha256()
+    with open(p, 'rb') as f:
+        for block in iter(lambda: f.read(1024 * 1024), b''):
+            h.update(block)
+    return h.hexdigest()
+
+
+def resolve_release_batch(root: Path, release_id: str) -> Path | None:
+    """Locate the immutable batch directory carrying ``release_id`` under ``root``.
+
+    Build names the batch ``<as_of>_<release_id[:16]>`` while the operator-facing
+    layout keeps it under ``releases/<release_id>``; this scans one level deep for a
+    manifest whose ``release_id`` matches, so the admin publish never has to guess
+    the on-disk name and always points at the real batch.
+    """
+    root = root.resolve()
+    for child in sorted(root.iterdir()):
+        if not child.is_dir() or child.is_symlink():
+            continue
+        manifest = child / 'manifest.json'
+        if not manifest.is_file():
+            continue
+        try:
+            m = json.loads(manifest.read_text())
+        except Exception:
+            continue
+        if m.get('release_id') == release_id:
+            return child
+    return None
+
+
 def _validate_batch_for_activation(batch: Path):
     """Full reader validation against the staging batch, before any pointer swap.
 
@@ -77,8 +110,20 @@ def _validate_batch_for_activation(batch: Path):
 
 def write_active_release(root: Path, batch: Path, release_id: str,
                          bundle_sha256: str, bundle_path: str) -> Path:
-    """Record which weights the activated release pins (worker reads this)."""
+    """Record which weights the activated release pins (worker reads this).
+
+    The pinned model artifact is file-verified: the path must exist and its SHA256
+    must equal the recorded ``bundle_sha256``. A publish that cannot satisfy this
+    must never write the record, so the model pointer can never point at a missing
+    or tampered weight file.
+    """
     root = root.resolve()
+    if bundle_path:
+        bp = Path(bundle_path)
+        if not bp.is_file():
+            raise PublishError('ACTIVE_RELEASE_BUNDLE_FILE_MISSING ' + str(bp))
+        if bundle_sha256 and digest_path(bp) != bundle_sha256:
+            raise PublishError('ACTIVE_RELEASE_BUNDLE_SHA_MISMATCH ' + str(bp))
     payload = {
         'schema': 'panji-strategy-active-release-v1',
         'release_id': release_id,
@@ -112,7 +157,10 @@ def activate_batch(root: Path, batch: Path, *, bundle_sha256: str = '',
     if not batch.is_dir() or not batch.is_relative_to(root):
         raise PublishError('BATCH_OUTSIDE_TRUSTED_ROOT')
     manifest = json.loads((batch / 'manifest.json').read_text())
-    if manifest['status'] != 'VALIDATED_STAGING_NOT_DEPLOYED':
+    # Both the worker autopublish (built locally) and the admin publish (audited
+    # operator artifact) are safe to activate; the audit prerequisite is an
+    # independent gate enforced by the caller before this point.
+    if manifest['status'] not in ('VALIDATED_STAGING_NOT_DEPLOYED', 'AUDITED'):
         raise PublishError('BATCH_NOT_VALIDATED')
     # Descriptor + every shard must match their recorded digests.
     for name, key in [('candidate_snapshot.json', 'candidate_sha256'),

@@ -21,6 +21,26 @@ def enabled() -> bool:
     return os.getenv('PANJI_STRATEGY_WORKER_ENABLED') == '1'
 
 
+def _predict_cmd(runtime, bars, inst, trade_date, export_dir, snap_root,
+                 registry: str = '') -> list[str]:
+    """Build the PREDICT subprocess command.
+
+    The operator must point ``registry`` at the activated per-symbol model registry
+    (``PANJI_STRATEGY_PERSONAL_REGISTRY``); when set, the build reads it so symbols
+    with an active personal model are scored GLOBAL_PLUS_PERSONAL and the rest are
+    explicitly GLOBAL_ONLY (never impersonated).
+    """
+    cmd = [runtime, '-m', 'app.strategy_integration.cli', 'build',
+           '--source-mode', 'canonical',
+           '--bars', str(bars), '--instruments', str(inst),
+           '--as-of', trade_date,
+           '--export-dir', str(export_dir),
+           '--output-dir', str(snap_root)]
+    if registry and Path(registry).is_absolute():
+        cmd += ['--personal-registry', registry]
+    return cmd
+
+
 def _roots() -> tuple[Path,Path,Path,Path]:
     if not enabled():raise RuntimeError('WORKER_DISABLED_PENDING_DEPLOY_APPROVAL')
     r=os.getenv('PANJI_STRATEGY_JOB_ROOT','')
@@ -52,12 +72,11 @@ def process_one() -> dict:
             # the production DB through MarketDataAggregationService.get_bars_batch.
             # The offline diagnostic parquet is never used as an automatic fallback.
             export_dir=jobs/'exports'/job['job_id']
-            cmd=[runtime,'-m','app.strategy_integration.cli','build',
-                 '--source-mode','canonical',
-                 '--bars',str(bars),'--instruments',str(inst),
-                 '--as-of',payload['trade_date'],
-                 '--export-dir',str(export_dir),
-                 '--output-dir',str(snap_root)]
+            # The daily worker must read the activated per-symbol model registry so
+            # symbols with an active personal model are scored GLOBAL_PLUS_PERSONAL
+            # and the rest are explicitly GLOBAL_ONLY (never impersonated).
+            cmd=_predict_cmd(runtime, bars, inst, payload['trade_date'], export_dir,
+                             snap_root, os.getenv('PANJI_STRATEGY_PERSONAL_REGISTRY',''))
         elif k=='TRAIN':
             cfg=payload
             cmd=[runtime,'-m','app.strategy_integration.training','--bars',str(bars),'--instruments',str(inst),

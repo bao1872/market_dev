@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
+from .canonical_strategy_bars import load_official_qfq_stock_batch
 from .producer import ProducerError
 
 EXPORT_BARS = 'bars_daily_qfq.parquet'
@@ -27,15 +28,17 @@ EXPORT_INSTRUMENTS = 'instruments.parquet'
 EXPORT_MANIFEST = 'input_manifest.json'
 
 
-async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> dict:
-    from .canonical_strategy_bars import load_official_qfq_stock_batch
-    output = output.resolve()
-    output.mkdir(parents=True, exist_ok=True)
-    file = output / EXPORT_BARS
-    inst_path = output / EXPORT_INSTRUMENTS
-    manifest_path = output / EXPORT_MANIFEST
-    if file.exists() or inst_path.exists() or manifest_path.exists():
-        raise ProducerError('EXPORT_OUTPUT_MUST_BE_EMPTY')
+async def read_official_qfq_stock_batch(
+    as_of: date, *, batch_size: int = 80, min_bars: int = 150, with_factor_series: bool = True,
+) -> tuple[dict, dict]:
+    """Read canonical QFQ bars + authoritative factor series directly from the
+    single market-data owner (MDAS). No Parquet round-trip, no legacy
+    OFFLINE_FACTOR_DIAGNOSTIC fallback. Returns (accepted_frames, report).
+
+    This is the production-reading contract reused by both the offline Parquet
+    export and the in-place canonical source mode; keep all MDAS access here so
+    the canonical mode never re-implements or re-applies an adjustment factor.
+    """
     async with AsyncSessionLocal() as db:
         objects = (await db.execute(
             select(Instrument.id, Instrument.symbol, Instrument.market)
@@ -45,12 +48,24 @@ async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> 
     instrument_by_id = {
         x.id: f"{str(x.market).upper()}:{str(x.symbol).zfill(6)}" for x in objects
     }
-    async with AsyncSessionLocal() as db:
-        accepted, report = await load_official_qfq_stock_batch(
-            db, instrument_by_id, as_of, batch_size=batch_size,
-        )
+    accepted, report = await load_official_qfq_stock_batch(
+        db, instrument_by_id, as_of, batch_size=batch_size,
+        min_bars=min_bars, with_factor_series=with_factor_series,
+    )
     if not accepted:
         raise ProducerError('NO_ELIGIBLE_STOCKS')
+    return accepted, report
+
+
+async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> dict:
+    accepted, report = await read_official_qfq_stock_batch(as_of, batch_size=batch_size)
+    output = output.resolve()
+    output.mkdir(parents=True, exist_ok=True)
+    file = output / EXPORT_BARS
+    inst_path = output / EXPORT_INSTRUMENTS
+    manifest_path = output / EXPORT_MANIFEST
+    if file.exists() or inst_path.exists() or manifest_path.exists():
+        raise ProducerError('EXPORT_OUTPUT_MUST_BE_EMPTY')
     frames = []
     for symbol, frame in accepted.items():
         one = frame.copy()

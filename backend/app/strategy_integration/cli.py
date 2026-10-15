@@ -65,20 +65,43 @@ def load_bundle_for_run(root: Path, assets: Path) -> tuple[dict, dict, str, str]
     return bundle, facts, str(Path(assets) / 'two_stage_models_local_only.pkl'), 'FROZEN_ASSETS'
 
 
+def _canonical_source_report(report: dict) -> dict:
+    """Translate the MDAS report into the source-report contract build/producer
+    consume: a tamper-evident ``source_sha256`` plus coverage/authority fields.
+    """
+    provenance = report.get('provenance', {})
+    source_sha256 = hashlib.sha256(json.dumps(
+        {s: {'b': h.get('source_bar_hash'), 'f': h.get('adj_factor_hash')}
+         for s, h in provenance.items()}, sort_keys=True).encode()).hexdigest()
+    return {
+        'source_sha256': source_sha256,
+        'eligible_stock_count': report['eligible_stock_count'],
+        'coverage_ratio': report['coverage_ratio_of_eligible'],
+        'pit_factor_series_available': report.get('pit_factor_series_available', False),
+        'price_adjustment': report.get('price_adjustment', 'qfq'),
+        'adjustment_mode': 'CANONICAL_MDAS_QFQ',
+        'adjustment_as_of': report.get('adjustment_as_of'),
+        'factor_provenance_authoritative': True,
+    }
+
+
 def _load_market(args, repo: str | None):
     """Return (frames, pit_source, source_report) for the requested entrance."""
     if args.source_mode == 'canonical':
-        from .db_export import export_dataset
-        export_dir = _ensure_outside(args.export_dir, repo, 'EXPORT_DIR')
-        export_dir.mkdir(parents=True, exist_ok=True)
-        asyncio.run(export_dataset(export_dir, date.fromisoformat(args.as_of)))
-        stock_raw, report = source.load_canonical_qfq_export(
-            export_dir, args.as_of, max_symbols=args.max_symbols)
-        if not report.get('pit_factor_series_available'):
+        # Authoritative path: read QFQ bars + factor series straight from MDAS.
+        # No intermediate Parquet export (bars_daily_qfq.parquet / input_manifest)
+        # or OFFLINE_FACTOR_DIAGNOSTIC fallback is required or allowed; the MDAS
+        # ownership contract is unchanged.
+        from .db_export import read_official_qfq_stock_batch
+        async def _read():
+            return await read_official_qfq_stock_batch(
+                date.fromisoformat(args.as_of), batch_size=args.max_symbols or 80)
+        stock_raw, mdas_report = asyncio.run(_read())
+        if not mdas_report.get('pit_factor_series_available'):
             raise producer.ProducerError('CANONICAL_PIT_FACTOR_SERIES_UNAVAILABLE')
-        pit = {s: df for s, df in stock_raw.items()}
+        pit = dict(stock_raw)
         frames = {s: df.drop(columns=['adj_factor']) for s, df in stock_raw.items()}
-        return frames, pit, report
+        return frames, pit, _canonical_source_report(mdas_report)
     frames, report = source.load_official_parquet_pit(
         args.bars, args.instruments, args.as_of, max_symbols=args.max_symbols)
     report['production_fallback_allowed'] = False

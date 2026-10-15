@@ -17,6 +17,7 @@ from typing import Any, Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from app.services.access_control_service import AccessContext, require_admin
+from app.strategy_integration.release_store import activate_batch, resolve_release_batch
 
 router=APIRouter(prefix='/v1/admin/strategy-research/zigzag', tags=['strategy-research-admin'])
 SHA_RE=re.compile(r'^[0-9a-f]{64}$')
@@ -167,14 +168,23 @@ def publish_release(release_id:str,request:PublishRequest,ctx:AccessContext=Depe
     root=os.getenv('PANJI_STRATEGY_RELEASE_ROOT','')
     if not root or not Path(root).is_absolute():
         raise HTTPException(status_code=503,detail='release root not configured')
-    manifest=Path(root)/'releases'/release_id/'manifest.json'
-    if not manifest.is_file():raise HTTPException(status_code=404,detail='candidate release unavailable')
-    info=json.loads(manifest.read_text())
-    if info.get('status')!='AUDITED' or info.get('release_id')!=release_id or info.get('evaluation_sha256')!=request.candidate_report_sha256:
+    # Resolve the immutable batch: operator layout keeps it under
+    # releases/<release_id>/, while a freshly built batch is named
+    # <as_of>_<release_id[:16]>. Either way, activate_batch points the snapshot
+    # pointer + the model record at the SAME batch, atomically.
+    batch_dir = Path(root)/'releases'/release_id
+    if not (batch_dir/'manifest.json').is_file():
+        batch_dir = resolve_release_batch(Path(root), release_id)
+    if batch_dir is None or not (batch_dir/'manifest.json').is_file():
+        raise HTTPException(status_code=404,detail='candidate release unavailable')
+    manifest = json.loads((batch_dir/'manifest.json').read_text())
+    if manifest.get('status')!='AUDITED' or manifest.get('release_id')!=release_id or manifest.get('evaluation_sha256')!=request.candidate_report_sha256:
         raise HTTPException(status_code=409,detail='independent evaluation audit prerequisite missing')
-    # Explicit operator action; the worker will capture active release at job start.
-    from app.strategy_integration.release_store import atomic_json
-    atomic_json(Path(root)/'active_release.json',{'release_id':release_id,'activated_at':datetime.now(timezone.utc).isoformat()})
+    # One atomic pointer swap + complete, file-verified active release record.
+    # This is the exact path the worker uses, so the admin publish can never leave
+    # the model pointer (bundle_path/bundle_sha256) and the snapshot pointer
+    # (current symlink) inconsistent, even if interrupted.
+    activate_batch(Path(root), batch_dir)
     return {'status':'RELEASE_ACTIVATED','release_id':release_id}
 
 
