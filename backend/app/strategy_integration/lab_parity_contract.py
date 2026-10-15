@@ -148,9 +148,17 @@ def labels_for_stage(raw, final, j: int, kind: str, decision_bar: int,
         return DecisionLabels(l1, None, r1, 'EQUAL_HIGH_LOW', l1_available_bar=l1_mat)
     tag = ('HH' if first is not None else 'LH') if kind == 'L' else (
         'LL' if first is not None else 'HL')
-    # L2 label locks in at the first reference-crossing bar, or at the next pivot
-    # bar if no crossing occurred by then. Both are strictly after decision_bar.
-    l2_mat = first if first is not None else q
+    # The L2 label is *definitively* known only once every precondition of the
+    # full lab contract is satisfied: the current anchor pivot is confirmed, the
+    # next ZigZag pivot is confirmed (it gates the 'no break -> opposite tag'
+    # branch), and the reference has been crossed (or the next pivot reached).
+    # Using only the breakout bar (first) or the next pivot bar (q) would mature
+    # the label before its truth is settled and leak future information into OOF.
+    l2_mat = max(
+        int(final[ix]['confirmed_at']),
+        int(nxt['confirmed_at']),
+        int(first) if first is not None else q,
+    )
     return DecisionLabels(l1, int(tag == TARGET[kind]), r1, 'OK',
                           target_tag=tag, first_break_bar=first,
                           l1_available_bar=l1_mat, l2_available_bar=l2_mat)

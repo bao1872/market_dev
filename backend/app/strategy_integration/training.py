@@ -115,7 +115,15 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
                 if l1 is None and l2 is None:
                     counters['unresolved_both'] += 1
                     continue
-                stage_events.append((j, kind, k, t, name, l1, l2))
+                # Each event stores its OWN label maturity bars. Reusing a shared
+                # `lab` from the outer loop would leak the last candidate's
+                # maturity onto every sample and defeat the OOF anti-leak gate.
+                stage_events.append((
+                    j, kind, k, t, name,
+                    l1, l2,
+                    lab.l1_available_bar,
+                    lab.l2_available_bar,
+                ))
         if not stage_events:
             continue
         bars = sorted({s[3] for s in stage_events})
@@ -124,11 +132,20 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
         else:
             _, matrix = fmod.features(frame, snap, bars)
         look = {bar: matrix[i] for i, bar in enumerate(bars)}
-        for j, kind, k, t, name, l1, l2 in stage_events:
-            for layer, label, mat_bar in (('L1', l1, lab.l1_available_bar),
-                                          ('L2', l2, lab.l2_available_bar)):
+        for (j, kind, k, t, name,
+             l1, l2, l1_bar, l2_bar) in stage_events:
+            cutoff = split_end_bars[name]
+            for layer, label, mat_bar in (('L1', l1, l1_bar),
+                                          ('L2', l2, l2_bar)):
                 if label is None:
                     continue
+                if mat_bar is None:
+                    raise ProducerError('MATURED_LABEL_WITHOUT_AVAILABLE_AT')
+                # A label is only trustworthy once it has definitively matured
+                # inside this split. A later maturity would let future information
+                # into the OOF prior rows and is a contract violation.
+                if mat_bar > cutoff:
+                    raise ProducerError('MATURED_LABEL_AFTER_SPLIT_CUTOFF')
                 sample_id = f'{symbol}|{days[j].isoformat()}|{kind}|D{k}|{layer}'
                 if sample_id in seen_ids:
                     counters['duplicate_dropped'] += 1
@@ -139,8 +156,7 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
                     'label': int(label), 'sample_id': sample_id,
                     'symbol': symbol, 'decision_date': days[t],
                     'anchor_date': days[j],
-                    'label_available_at': days[mat_bar] if mat_bar is not None
-                    else None})
+                    'label_available_at': days[mat_bar]})
                 counters[f'{name}_{layer}_{kind}_D{k}'] += 1
     return dict(values), dict(counters), per_symbol_history
 
