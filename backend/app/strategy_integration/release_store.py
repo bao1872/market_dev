@@ -1,20 +1,27 @@
-"""Disk-based immutable version bundles and atomic *pair* snapshot pointer.
+"""Disk-based immutable version bundles and an atomic published release record.
 
-Requires POSIX filesystem: current/ is a symlink to a whole validated batch
-folder. Both read API JSON paths traverse the same pointer. Existing good
-snapshots survive any failed build, incomplete batch or process crash.
+`active_release.json` is the SINGLE TRUSTED published state: it binds the model
+weights the worker must load to the exact snapshot batch that was activated, so
+the model pointer and the snapshot pointer can never diverge. The `current/`
+directory symlink is only a derived pointer kept in sync as a best-effort
+refresh; readers resolve the batch via `resolve_release_batch()` (which ignores
+`current`) or `resolve_active_release()` (the authoritative JSON), never the
+symlink alone.
 
-The activated release ALSO records which model weights it pins, so the worker
-loads exactly the bundle belonging to the active release (never a stray
-default). See `resolve_active_release()`.
+`activate_batch()` writes the authoritative JSON atomically FIRST; if that write
+fails, nothing else changes, so the previously published state is left fully
+intact (fail-closed). See `resolve_active_release()`.
 """
 from __future__ import annotations
 from datetime import datetime, timezone
 import hashlib
 import json
+import logging
 import os
 from pathlib import Path
 import tempfile
+
+_log = logging.getLogger(__name__)
 
 
 ACTIVE_RELEASE = 'active_release.json'
@@ -181,9 +188,41 @@ def activate_batch(root: Path, batch: Path, *, bundle_sha256: str = '',
             raise PublishError('SHARD_SHA_MISMATCH ' + entry['file'])
     # Both files belong to one immutable batch: validate them together.
     _validate_batch_for_activation(batch)
-    # Single atomic directory symlink swap, never two independent JSON replaces.
-    tmp = root / '.new-active-pointer'
+    release_id = manifest.get('release_id', '')
+    pinned_bundle_sha = manifest.get('runtime', {}).get('bundle_sha256', bundle_sha256)
+    pinned_bundle_path = manifest.get('bundle_path') or bundle_path
+    # Authoritative publish state: active_release.json binds the model identity AND
+    # the snapshot batch into a single trusted record. It is written atomically
+    # FIRST. If this write fails (bundle file/SHA mismatch, disk error, injected
+    # interruption), nothing else changes, so the previously published pointer is
+    # left fully intact — fail-closed, the descriptor + shards never switch without
+    # their pinned model weights. This is the "single trusted publish state": there
+    # is no window where the snapshot pointer and the model pointer can diverge.
+    write_active_release(root, batch, release_id, pinned_bundle_sha, pinned_bundle_path)
+    # Best-effort refresh of the legacy `current` directory symlink so it mirrors
+    # the authoritative record. This is a derived pointer only: readers resolve the
+    # batch via resolve_release_batch (which ignores `current`) or the authoritative
+    # active_release.json, so a failed symlink update cannot desync the published
+    # state and must never block the publish.
+    try:
+        _refresh_current_symlink(root, batch)
+    except OSError as exc:
+        _log.warning(
+            'current symlink refresh failed (non-fatal, JSON authoritative): %s', exc)
+    return {'status': 'ACTIVATED_AFTER_OPERATOR_APPROVAL', 'batch': str(batch)}
+
+
+def _refresh_current_symlink(root: Path, batch: Path) -> None:
+    """Best-effort atomic refresh of the legacy `current` directory symlink.
+
+    Kept as a separate unit so a failure here is isolatable (injection test) and
+    non-fatal: the symlink is only a derived pointer; the authoritative published
+    state lives in active_release.json (see activate_batch).
+    """
+    root = root.resolve()
+    batch = batch.resolve()
     current = root / 'current'
+    tmp = root / '.new-active-pointer'
     if tmp.exists() or tmp.is_symlink():
         raise PublishError('CONCURRENT_PUBLISH_POINTER_LOCKED')
     tmp.symlink_to(batch.relative_to(root), target_is_directory=True)
@@ -192,11 +231,3 @@ def activate_batch(root: Path, batch: Path, *, bundle_sha256: str = '',
     finally:
         if tmp.is_symlink():
             tmp.unlink()
-    # Bind the weights the worker must load to this activated release.
-    write_active_release(
-        root, batch,
-        manifest.get('release_id', ''),
-        manifest.get('runtime', {}).get('bundle_sha256', bundle_sha256),
-        manifest.get('bundle_path') or bundle_path,
-    )
-    return {'status': 'ACTIVATED_AFTER_OPERATOR_APPROVAL', 'batch': str(batch)}

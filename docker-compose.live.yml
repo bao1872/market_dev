@@ -33,12 +33,20 @@
 x-live-python: &live-python
   environment:
     CONFIG_FILE: /app/config.production.py
+    # [STRATEGY-MOUNT] 策略历史快照 / 发布记录 / 个股注册表的容器路径。
+    # 默认指向 Live Mount 只读挂载的 /opt/panji-strategy-data；生产 market.env 可覆盖。
+    PANJI_STRATEGY_RELEASE_ROOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}
+    PANJI_STRATEGY_CANDIDATE_SNAPSHOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}/2026-08-17_89a5be0b28d1dac9/candidate_snapshot.json
+    STRATEGY_RESEARCH_SNAPSHOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}/2026-08-17_89a5be0b28d1dac9/evaluation_snapshot.json
+    PANJI_STRATEGY_PERSONAL_REGISTRY: ${PANJI_STRATEGY_PERSONAL_REGISTRY:-}
   volumes: !override
     - /opt/panji-live/backend/app:/app/app:ro
     - /opt/panji-live/backend/alembic:/app/alembic:ro
     - /opt/panji-live/backend/alembic.ini:/app/alembic.ini:ro
     - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
     - /etc/market-dev/config.production.py:/app/config.production.py:ro
+    # [STRATEGY-MOUNT] 策略历史快照 / 发布记录 / 个股注册表（只读，持久化于宿主机）
+    - /opt/panji-strategy-data:/opt/panji-strategy-data:ro
 
 services:
   backend:
@@ -51,6 +59,8 @@ services:
       - /opt/panji-live/backend/alembic.ini:/app/alembic.ini:ro
       - /opt/panji-live/RUNTIME_SHA:/app/RUNTIME_SHA:ro
       - /etc/market-dev/config.production.py:/app/config.production.py:ro
+      # [STRATEGY-MOUNT] 策略历史快照 / 发布记录 / 个股注册表（只读，持久化于宿主机）
+      - /opt/panji-strategy-data:/opt/panji-strategy-data:ro
 
   worker-bars-scheduler:
     <<: *live-python

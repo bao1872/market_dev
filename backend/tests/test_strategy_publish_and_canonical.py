@@ -168,5 +168,57 @@ def test_admin_publish_unifies_with_worker_path(monkeypatch):
     assert Path(active['bundle_path']).is_file()
 
 
+_SRC_BATCH = Path('/tmp/panji_14_snapshot/2026-08-17_89a5be0b28d1dac9')
+
+
+def _make_audited_batch(root: Path) -> Path:
+    if not _SRC_BATCH.is_dir():
+        pytest.skip('historical 14-stock batch not present')
+    batch = root / _SRC_BATCH.name
+    shutil.copytree(_SRC_BATCH, batch)
+    manifest = json.loads((batch / 'manifest.json').read_text())
+    manifest['status'] = 'AUDITED'
+    (batch / 'manifest.json').write_text(json.dumps(manifest, sort_keys=True))
+    return batch
+
+
+def test_activate_batch_json_write_failure_keeps_previous_state(tmp_path, monkeypatch):
+    # Req 4: a failure while writing the authoritative active_release.json must
+    # leave the previously published state fully intact (fail-closed). The snapshot
+    # pointer must NOT be switched while the model pointer is missing.
+    bundle = Path('/tmp/panji_14_global/two_stage_models_candidate_UNPUBLISHED.pkl')
+    # Seed a previous, consistent published state in the target root.
+    prev = release_store.write_active_release(
+        tmp_path, tmp_path / 'prev_batch', 'P' * 64, None, str(bundle))
+    assert json.loads(prev.read_text())['release_id'] == 'P' * 64
+
+    batch = _make_audited_batch(tmp_path)
+    # Force the authoritative JSON write to fail (simulated interruption).
+    monkeypatch.setattr(release_store, 'atomic_json',
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError('DISK')))
+
+    with pytest.raises(Exception):
+        release_store.activate_batch(tmp_path, batch)
+    # Previous state untouched; current symlink never switched to the new batch.
+    assert json.loads((tmp_path / 'active_release.json').read_text())['release_id'] == 'P' * 64
+    current = tmp_path / 'current'
+    assert not current.is_symlink() or Path(current).resolve().name != batch.name
+
+
+def test_activate_batch_symlink_failure_still_authoritative(tmp_path, monkeypatch):
+    # Req 4: if the legacy `current` symlink refresh fails, the publish is still
+    # consistent because active_release.json is the authoritative state.
+    batch = _make_audited_batch(tmp_path)
+    monkeypatch.setattr(release_store, '_refresh_current_symlink',
+                        lambda *a, **k: (_ for _ in ()).throw(OSError('symlink-broken')))
+
+    result = release_store.activate_batch(tmp_path, batch)
+    assert result['status'] == 'ACTIVATED_AFTER_OPERATOR_APPROVAL'
+    active = release_store.resolve_active_release(tmp_path)
+    assert active['release_id'] == json.loads(
+        (batch / 'manifest.json').read_text())['release_id']
+    assert active['batch'] == str(batch.resolve())
+
+
 if __name__ == '__main__':
     raise SystemExit(pytest.main([__file__, '-q']))

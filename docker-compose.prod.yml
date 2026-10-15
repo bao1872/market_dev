@@ -116,6 +116,13 @@ services:
       APP_ENV: production
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
+      # [STRATEGY-MOUNT] 策略历史快照 / 发布记录 / 个股注册表的容器路径。
+      # 默认指向 Live Mount 只读挂载的 /opt/panji-strategy-data；生产 market.env
+      # 可覆盖。PANJI_STRATEGY_PERSONAL_REGISTRY 默认空 -> 个股模型 GLOBAL_ONLY。
+      PANJI_STRATEGY_RELEASE_ROOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}
+      PANJI_STRATEGY_CANDIDATE_SNAPSHOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}/2026-08-17_89a5be0b28d1dac9/candidate_snapshot.json
+      STRATEGY_RESEARCH_SNAPSHOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}/2026-08-17_89a5be0b28d1dac9/evaluation_snapshot.json
+      PANJI_STRATEGY_PERSONAL_REGISTRY: ${PANJI_STRATEGY_PERSONAL_REGISTRY:-}
       # [CHANGE-20260730-010] Umami 访客分析：backend 通过独立只读连接查询 umami 数据库
       UMAMI_DATABASE_URL: ${UMAMI_DATABASE_URL:-}
       UMAMI_WEBSITE_ID: ${UMAMI_WEBSITE_ID:-}
@@ -131,6 +138,8 @@ services:
     volumes:
       - ./doc:/doc:ro
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
+      # [STRATEGY-MOUNT] 策略历史快照 / 发布记录 / 个股注册表（只读，持久化于宿主机）
+      - /opt/panji-strategy-data:/opt/panji-strategy-data:ro
       # [CHANGE-20260730-010] goaccess_reports 挂载已移除：访问统计改用 Umami 数据库
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
 
@@ -175,6 +184,9 @@ services:
       WORKER_TYPE: strategy_scheduler
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
+      # [STRATEGY-MOUNT] 未来独立策略进程读取模型与个股注册表所需路径
+      PANJI_STRATEGY_RELEASE_ROOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}
+      PANJI_STRATEGY_PERSONAL_REGISTRY: ${PANJI_STRATEGY_PERSONAL_REGISTRY:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -184,6 +196,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
+      # [STRATEGY-MOUNT] 策略模型 / 发布记录 / 个股注册表（只读）
+      - /opt/panji-strategy-data:/opt/panji-strategy-data:ro
     command: python -m app.worker
 
   # ===== 日历调度 Worker =====
@@ -260,6 +274,9 @@ services:
       STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS: ${STRATEGY_RUN_TOTAL_TIMEOUT_SECONDS:-7200}
       TZ: Asia/Shanghai
       CONFIG_FILE: /app/app/config.production.py
+      # [STRATEGY-MOUNT] 未来独立策略进程读取模型与个股注册表所需路径
+      PANJI_STRATEGY_RELEASE_ROOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}
+      PANJI_STRATEGY_PERSONAL_REGISTRY: ${PANJI_STRATEGY_PERSONAL_REGISTRY:-}
     depends_on:
       redis:
         condition: service_healthy
@@ -269,6 +286,8 @@ services:
       - "host.docker.internal:host-gateway"
     volumes:
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
+      # [STRATEGY-MOUNT] 策略模型 / 发布记录 / 个股注册表（只读）
+      - /opt/panji-strategy-data:/opt/panji-strategy-data:ro
     command: python -m app.worker
 
   # ===== Outbox 扩张 Worker =====
