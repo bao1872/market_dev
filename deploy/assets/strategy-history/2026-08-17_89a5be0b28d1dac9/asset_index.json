@@ -1,0 +1,46 @@
+{
+  "schema": "panji-strategy-readonly-asset-proof-v1",
+  "release_id": "89a5be0b28d1dac904ca07c7fd3bb75cd127f6b16663b694e145c5bc05395cdb",
+  "as_of": "2026-08-17",
+  "stock_count": 14,
+  "candidate_count": 260,
+  "batch_days": [
+    "2026-07-21",
+    "2026-07-22",
+    "2026-07-23",
+    "2026-07-24",
+    "2026-07-27",
+    "2026-07-28",
+    "2026-07-29",
+    "2026-07-30",
+    "2026-07-31",
+    "2026-08-03",
+    "2026-08-04",
+    "2026-08-05",
+    "2026-08-06",
+    "2026-08-07",
+    "2026-08-10",
+    "2026-08-11",
+    "2026-08-12",
+    "2026-08-13",
+    "2026-08-14",
+    "2026-08-17"
+  ],
+  "model_sha256": "aded1a1fed6a571abb371acd620da8a37cbe8e378904767b4c96e6022508c0ae",
+  "source_status": "AUDITED",
+  "evaluation_status": "AUDITED",
+  "sha256": {
+    "release/2026-08-17_89a5be0b28d1dac9/candidate_snapshot.json": "e08f8c81dfc6009e248ce102f2bfc748ba74407ca2e78673f55dc512614818fc",
+    "release/2026-08-17_89a5be0b28d1dac9/evaluation_snapshot.json": "6eb22d4d536517ce9500649694f39bc683a7f43ef8353865c69000e14c56bd05",
+    "release/2026-08-17_89a5be0b28d1dac9/candidate_shard_0000.json": "73f990416930075d2b360d625c14f732017f288cb87ce9a3590fc30f532dfc64"
+  },
+  "explicitly_not_activated": true,
+  "source_batch": "/private/tmp/panji_14_snapshot/2026-08-17_89a5be0b28d1dac9",
+  "size_bytes": {
+    "asset_index.json": 1287,
+    "release/2026-08-17_89a5be0b28d1dac9/candidate_shard_0000.json": 671955,
+    "release/2026-08-17_89a5be0b28d1dac9/candidate_snapshot.json": 1459,
+    "release/2026-08-17_89a5be0b28d1dac9/evaluation_snapshot.json": 139645
+  },
+  "bundle_sha256": "56852e3d0da84e77f0dcb0d3ef5b6119ce0a20d69cd0709dad2ec673f4671eff"
+}

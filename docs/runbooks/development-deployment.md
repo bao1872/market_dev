@@ -14,6 +14,10 @@
     `scripts/ops/panji-marketing-site-deploy <FULL_40_SHA>`，为窄范围静态 artifact lane，
     只写 `/opt/panji-live/frontend/dist/{marketing-assets, site/index.html}`，不触碰容器 /
     backend / DB / `RUNTIME_SHA`，详见「Public Marketing Site 轻量静态部署」一节。
+  - **历史只读策略资产发布**（不是部署）：唯一入口
+    `scripts/ops/panji-strategy-history-publish <FULL_40_SHA>`，只写
+    `/opt/panji-strategy-data/release/<asof>_<releaseid16>`，不触碰容器 / backend / DB /
+    `RUNTIME_SHA`，详见 `docs/runbooks/strategy-history-asset-publish.md`。
 - 唯一运行方式是 `docker-compose.prod.yml` + `docker-compose.live.yml`（仅 whole-system 域；
   Marketing 域不触碰容器）；
 - 本 Runbook 不授权 stable deployment、migration 或业务数据操作；source-only Live Refresh

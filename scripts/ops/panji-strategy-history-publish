@@ -1,0 +1,205 @@
+#!/usr/bin/env bash
+# panji-strategy-history-publish — 盘迹历史只读策略资产发布唯一本地入口
+#
+# 权威来源：
+#   - docs/runbooks/strategy-history-asset-publish.md（操作步骤与验收）
+#   - rules/80-deployment-migration.md（远程唯一入口、禁止 scp/docker cp、最小写入范围）
+#
+# 职责边界（本脚本是"瘦客户端"，不含任何资产发布实现逻辑）：
+#   1. 校验目标 SHA 为 40 位完整 SHA 且是 origin/dev 祖先；
+#   2. 本地静态预检目标 SHA 内已登记资产与服务器端实现脚本存在且语法正确；
+#   3. 通过 scripts/ops/panji-prod-ssh 让服务器先自举到目标 SHA 工作树，再执行该
+#      工作树中的 scripts/deploy/panji-strategy-history-publish.sh。
+#
+# 传输通道：Git 版本化资产。资产文件随目标 SHA 一起存在于仓库
+#   deploy/assets/strategy-history/<leaf>/，服务器 checkout 后即从受版本控制的
+#   工作树读取；不使用 scp / docker cp / stdin 注入 / 临时 SSH 脚本。
+#
+# 与部署的关系：本入口只发布只读历史资产，不部署代码、不重启容器、不写数据库。
+#   无论成功与否都恢复服务器原始 REF——资产发布不得改变生产工作树状态，
+#   否则后续部署会误把本 SHA 当作"上一真实运行 SHA"。
+#
+# 用法:
+#   scripts/ops/panji-strategy-history-publish <FULL_SHA>            # 发布指定 dev SHA 登记的资产
+#   scripts/ops/panji-strategy-history-publish <FULL_SHA> --dry-run  # 只校验并输出计划，零资产写入
+#
+# 环境变量:
+#   PANJI_REMOTE_REPO_ROOT       服务器仓库根目录（默认 /root/web_dev）
+#   PANJI_STRATEGY_DATA_ROOT     服务器资产根目录（默认 /opt/panji-strategy-data）
+#   PANJI_PUBLISH_SSH_BIN        仅当 PANJI_HISTORY_PUBLISH_TEST=1 时允许覆盖 SSH 包装器
+#                                （测试 seam；默认始终是 scripts/ops/panji-prod-ssh）
+#
+# 退出码：0 成功，1 失败，2 参数/配置错误
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+REMOTE_REPO_ROOT="${PANJI_REMOTE_REPO_ROOT:-/root/web_dev}"
+REMOTE_ASSET_ROOT="${PANJI_STRATEGY_DATA_ROOT:-/opt/panji-strategy-data}"
+SERVER_SCRIPT_REL="scripts/deploy/panji-strategy-history-publish.sh"
+LOCAL_SERVER_SCRIPT="${REPO_ROOT}/${SERVER_SCRIPT_REL}"
+SSH_WRAPPER="${SCRIPT_DIR}/panji-prod-ssh"
+if [[ "${PANJI_HISTORY_PUBLISH_TEST:-}" == "1" && -n "${PANJI_PUBLISH_SSH_BIN:-}" ]]; then
+    SSH_WRAPPER="${PANJI_PUBLISH_SSH_BIN}"
+fi
+
+# 本地静态预检用的登记资产清单（与服务器端白名单一致，由测试断言对齐）
+ASSET_FILES=(asset_index.json candidate_snapshot.json candidate_shard_0000.json evaluation_snapshot.json)
+
+TARGET_SHA=""
+DRY_RUN=false
+
+log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
+fail() { log "错误: $*" >&2; exit 1; }
+usage() {
+    echo "用法: $0 <FULL_SHA> [--dry-run]"
+    exit 2
+}
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --dry-run) DRY_RUN=true; shift ;;
+        -h|--help) usage ;;
+        -*) fail "未知选项: $1" ;;
+        *)
+            [[ -z "${TARGET_SHA}" ]] || fail "只能指定一个 SHA"
+            TARGET_SHA="$1"
+            shift ;;
+    esac
+done
+[[ -n "${TARGET_SHA}" ]] || usage
+
+cd "${REPO_ROOT}"
+
+# ===== 只接受完整 SHA =====
+[[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "必须提供 40 位完整 SHA"
+if ! git cat-file -e "${TARGET_SHA}^{commit}" 2>/dev/null; then
+    fail "SHA 不是本地 commit: ${TARGET_SHA}"
+fi
+TARGET_SHA="$(git rev-parse "${TARGET_SHA}^{commit}")"
+[[ "${TARGET_SHA}" =~ ^[0-9a-fA-F]{40}$ ]] || fail "必须解析为 40 位完整 SHA"
+
+# ===== 校验是 origin/dev 的祖先（dev 是唯一资产来源）=====
+log "拉取 origin/dev 最新引用（避免 stale）..."
+git fetch origin dev --no-tags 2>&1 | sed 's/^/  /' || fail "git fetch origin dev 失败"
+if ! git merge-base --is-ancestor "${TARGET_SHA}" origin/dev 2>/dev/null; then
+    fail "SHA ${TARGET_SHA} 不是 origin/dev 的祖先。请先 push dev 并确认已上库。"
+fi
+log "SHA 校验通过（origin/dev 祖先）: ${TARGET_SHA}"
+
+# ===== 服务器端实现脚本必须存在且语法正确（本地静态预检）=====
+[[ -f "${LOCAL_SERVER_SCRIPT}" ]] || fail "仓库缺少服务器端实现: ${SERVER_SCRIPT_REL}"
+bash -n "${LOCAL_SERVER_SCRIPT}" || fail "${SERVER_SCRIPT_REL} 语法错误，拒绝发布"
+
+ALLOWED_LEAF="$(sed -n 's/^ALLOWED_LEAF="\([^"]*\)"$/\1/p' "${LOCAL_SERVER_SCRIPT}" | head -1)"
+[[ -n "${ALLOWED_LEAF}" ]] || fail "无法从 ${SERVER_SCRIPT_REL} 解析 ALLOWED_LEAF"
+
+# ===== 目标 SHA 内必须已登记全部资产文件（不接受工作树当前内容）=====
+for f in "${ASSET_FILES[@]}"; do
+    rel="deploy/assets/strategy-history/${ALLOWED_LEAF}/${f}"
+    git cat-file -e "${TARGET_SHA}:${rel}" 2>/dev/null || fail "目标 SHA 缺少已登记资产: ${rel}"
+done
+git cat-file -e "${TARGET_SHA}:${SERVER_SCRIPT_REL}" 2>/dev/null \
+    || fail "目标 SHA 缺少服务器端实现: ${SERVER_SCRIPT_REL}"
+log "目标 SHA 已登记 ${#ASSET_FILES[@]} 个资产文件与服务器端实现: leaf=${ALLOWED_LEAF}"
+
+# ===== 目标 SHA 中服务器端脚本语法校验（从 Git 对象读取，不用工作树）=====
+SYNTAX_TMP="$(mktemp)"
+trap 'rm -f "${SYNTAX_TMP}"' EXIT
+git show "${TARGET_SHA}:${SERVER_SCRIPT_REL}" > "${SYNTAX_TMP}"
+bash -n "${SYNTAX_TMP}" || fail "目标 SHA 中 ${SERVER_SCRIPT_REL} 语法错误，拒绝发布"
+
+Q_REPO_ROOT="$(printf '%q' "${REMOTE_REPO_ROOT}")"
+Q_ASSET_ROOT="$(printf '%q' "${REMOTE_ASSET_ROOT}")"
+REMOTE_DRY_FLAG=""
+[[ "${DRY_RUN}" == "true" ]] && REMOTE_DRY_FLAG=" --dry-run"
+
+read -r -d '' REMOTE_CMD <<REMOTE_SCRIPT || true
+set -euo pipefail
+
+TARGET_SHA=${TARGET_SHA}
+REPO_ROOT=${Q_REPO_ROOT}
+ASSET_ROOT=${Q_ASSET_ROOT}
+ORIGINAL_REF=""
+
+cd "\${REPO_ROOT}"
+
+# 1. 拉取 origin/dev（不拉 tag）
+git fetch origin dev --no-tags
+
+# 2. 工作树必须干净——脏工作树下 checkout 会丢失或阻断
+if [[ -n "\$(git status --porcelain)" ]]; then
+    echo "服务器工作树不干净，拒绝自举到目标 SHA" >&2
+    git status --short >&2
+    exit 2
+fi
+
+# 3. 目标 SHA 必须存在且属于 origin/dev
+if ! git cat-file -e "\${TARGET_SHA}^{commit}" 2>/dev/null; then
+    echo "服务器上不存在该 commit: \${TARGET_SHA}" >&2
+    exit 2
+fi
+if ! git merge-base --is-ancestor "\${TARGET_SHA}" origin/dev; then
+    echo "SHA \${TARGET_SHA} 不是 origin/dev 的祖先，拒绝自举" >&2
+    exit 2
+fi
+
+# 4. 记录自举前状态（分支名优先，detached 时记录完整 SHA）
+if ORIGINAL_REF="\$(git symbolic-ref --quiet --short HEAD 2>/dev/null)"; then
+    :
+else
+    ORIGINAL_REF="\$(git rev-parse HEAD)"
+fi
+echo "[bootstrap] 原始 REF = \${ORIGINAL_REF}"
+
+# 资产发布是文件写入，不是代码部署：无论成功与否都必须恢复原始 REF，
+# 避免后续部署把本 SHA 误判为"上一真实运行 SHA"。
+restore_head() {
+    local rc=\$?
+    if [[ -n "\${ORIGINAL_REF}" ]]; then
+        echo "[bootstrap] 恢复原始 REF: \${ORIGINAL_REF}"
+        git -C "\${REPO_ROOT}" checkout -f "\${ORIGINAL_REF}" >/dev/null 2>&1 \\
+            || echo "[bootstrap] WARN: 恢复原始 REF 失败，请手动检查" >&2
+    fi
+    exit \${rc}
+}
+trap restore_head EXIT
+
+# 5. 自举到目标 SHA 工作树
+echo "[bootstrap] checkout --detach \${TARGET_SHA}"
+git checkout -f --detach "\${TARGET_SHA}"
+
+PUBLISH_SCRIPT="\${REPO_ROOT}/${SERVER_SCRIPT_REL}"
+if [[ ! -f "\${PUBLISH_SCRIPT}" ]]; then
+    echo "目标 SHA 中缺少 ${SERVER_SCRIPT_REL}" >&2
+    exit 2
+fi
+
+# 6. 执行**目标工作树**中的资产发布实现
+echo "[bootstrap] 执行目标 SHA 工作树中的 panji-strategy-history-publish.sh"
+set +e
+PANJI_REPO_ROOT="\${REPO_ROOT}" PANJI_STRATEGY_DATA_ROOT="\${ASSET_ROOT}" \\
+    bash "\${PUBLISH_SCRIPT}" "\${TARGET_SHA}"${REMOTE_DRY_FLAG}
+PUBLISH_RC=\$?
+set -e
+
+exit \${PUBLISH_RC}
+REMOTE_SCRIPT
+
+log "通过 panji-prod-ssh 执行资产发布（dry-run=${DRY_RUN}）..."
+log "远端序列: fetch → 干净校验 → 祖先校验 → 记录 HEAD → checkout --detach ${TARGET_SHA}"
+log "          → 目标工作树 panji-strategy-history-publish.sh → 恢复原始 REF"
+
+set +e
+"${SSH_WRAPPER}" -o BatchMode=yes -o ConnectTimeout=30 "${REMOTE_CMD}"
+SSH_RC=$?
+set -e
+
+if [[ "${SSH_RC}" -ne 0 ]]; then
+    fail "远程资产发布失败（SSH rc=${SSH_RC}）。未写入任何生产资产或仅清理本次暂存。"
+fi
+
+log "panji-strategy-history-publish 完成：${TARGET_SHA}"
+exit 0
