@@ -393,9 +393,8 @@ class TestStructureEventFilterRegression:
         )
         # 普通枚举以 != 否定形式出现，并与复合对否定 AND 连接（非 OR 错配）。
         assert "!= 'OB_CREATED'" in sql, f"not_in 混合须保留普通枚举否定: {sql}"
-        assert ") AND snap.summary_payload" in sql or "AND snap.summary_payload['first_pyramid_flat']['fp_structure_event_type'] !=" in sql, (
-            f"not_in 混合普通枚举否定须与复合否定 AND 连接: {sql}"
-        )
+        # NOT(pair) 与 type != 'OB_CREATED' 以 AND 连接（形如 `) AND ((snap...`）。
+        assert ") AND ((" in sql, f"not_in 混合普通枚举否定须与复合否定 AND 连接: {sql}"
         assert "IS NULL" in sql, f"not_in 混合须含 NULL 守卫: {sql}"
 
     def test_null_handling_not_in_includes_null_rows(self):

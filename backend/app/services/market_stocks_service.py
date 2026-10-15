@@ -710,11 +710,21 @@ def _build_fp_filter_conditions(
                     plain_values.append(t)
 
             if composite_pairs:
-                type_expr = _build_fp_value_expr(
-                    "fp_structure_event_type", snap_subq, chip_subq, max_trade_date_subq
+                # [STRUCT-EVENT-SPLIT-FIX] 必须走 _cast_fp_value 把 JSONB 元素转成文本，
+                # 否则 type_expr == 'OB_CREATED' 会变成 jsonb = varchar（asyncpg UndefinedFunctionError）。
+                type_expr = _cast_fp_value(
+                    _build_fp_value_expr(
+                        "fp_structure_event_type", snap_subq, chip_subq, max_trade_date_subq
+                    ),
+                    "enum",
+                    "flat",
                 )
-                dir_expr = _build_fp_value_expr(
-                    "fp_structure_event_direction", snap_subq, chip_subq, max_trade_date_subq
+                dir_expr = _cast_fp_value(
+                    _build_fp_value_expr(
+                        "fp_structure_event_direction", snap_subq, chip_subq, max_trade_date_subq
+                    ),
+                    "enum",
+                    "flat",
                 )
                 if f.operator in ("eq", "in"):
                     # INCLUSIVE：命中任一条件即入选（复合对 OR 普通枚举值）。
