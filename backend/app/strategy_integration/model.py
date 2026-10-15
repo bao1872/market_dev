@@ -225,7 +225,13 @@ def _pit_frame(pit_source: pd.DataFrame, anchor: str) -> pd.DataFrame:
     date_col = 'trade_date' if 'trade_date' in pit_source.columns else 'datetime'
     dates = pd.to_datetime(pit_source[date_col])
     bars = pit_source.set_index(pd.DatetimeIndex(dates))
-    bars = bars[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    # pit_source carries MDAS QFQ bars for charting AND independent RAW
+    # OHLCV evidence. Only the latter may be adjusted for a past as-of.
+    raw_cols = ['raw_open','raw_high','raw_low','raw_close','raw_volume']
+    if not set(raw_cols).issubset(pit_source.columns):
+        raise AssetError('PIT_RAW_OHLCV_REQUIRED_NO_DOUBLE_ADJUST')
+    bars = bars[raw_cols].rename(columns=dict(zip(
+        raw_cols, ['open','high','low','close','volume']))).astype(float)
     factors = pd.DataFrame({
         'trade_date': dates.to_numpy(),
         'adj_factor': pd.to_numeric(pit_source['adj_factor'], errors='coerce').astype(float).to_numpy(),
@@ -266,11 +272,14 @@ def _pit_features(raw: pd.DataFrame, pit_source: pd.DataFrame, fmod, snap,
         by_regime.setdefault(int(regime_of_bar[int(t)]), []).append(int(t))
     X = np.full((len(needed), len(fmod.ALL_COLS)), np.nan, dtype=np.float32)
     row_of_bar = {int(t): n for n, t in enumerate(needed)}
+    asof_day_rows = {}
     for bars in by_regime.values():
         anchor = str(raw.datetime.iloc[max(bars)].date())
         frame = _pit_frame(pit_source, anchor)
         _, snap_regime, _ = fmod.replay(frame)
-        _, X_regime = fmod.features(frame, snap_regime, bars)
+        asof_day, X_regime = fmod.features(frame, snap_regime, bars)
+        for i, bar in enumerate(bars):
+            asof_day_rows[int(bar)] = asof_day.iloc[i].to_dict()
         for i, t in enumerate(bars):
             X[row_of_bar[int(t)]] = X_regime[i]
     # An as-of series legitimately has a slightly different pivot depth, so a
@@ -282,6 +291,9 @@ def _pit_features(raw: pd.DataFrame, pit_source: pd.DataFrame, fmod, snap,
         bad = [int(t) for i, t in enumerate(needed) if dead[i]]
         raise AssetError('PIT_DECISION_BAR_UNINFORMATIVE ' + str(bad[:5]))
     pit_new_nan_cells[0] += int(new_nan.sum())
+    if set(asof_day_rows) != set(map(int, needed)):
+        raise AssetError('PIT_DAILY_ROWS_MISSING')
+    day = pd.DataFrame([asof_day_rows[int(t)] for t in needed])
     return day, X
 
 
@@ -365,11 +377,24 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
     if as_of is not None:
         cutoff = pd.Timestamp(as_of).normalize()
         raw = raw.loc[raw.datetime.dt.normalize() <= cutoff].copy().reset_index(drop=True)
+    if pit_source is not None and as_of is not None:
+        pit_source = pit_source.loc[
+            pd.to_datetime(pit_source.datetime).dt.normalize() <= cutoff
+        ].copy().reset_index(drop=True)
     if len(raw) < 8:
         raise AssetError('INSUFFICIENT_BARS')
     final, snap, _ = fmod.replay(raw)
     del final  # NEVER use hindsight labels or final pivots to select inference candidates.
-    causal, _ = fmod.causal_candidates(raw)
+    if pit_source is not None:
+        from . import lab_parity_contract as lab_contract
+        causal = lab_contract.causal_candidates_pit(
+            raw, pit_source, fmod, _pit_frame)
+        # The as-of anchor selects identity; chart coordinates use the
+        # run-date QFQ frame so price and displayed bars share a scale.
+        causal = [(j, k, float(raw.high.iloc[j] if k == 'H' else raw.low.iloc[j]))
+                  for j, k, _ in causal]
+    else:
+        causal, _ = fmod.causal_candidates(raw)
     entries = [(int(j),kind,int(j+stage),stage,float(px))
                for j,kind,px in causal if min_anchor_bar is None or int(j) >= min_anchor_bar
                for stage in (1,2,3) if int(j)+stage < len(raw)]
@@ -405,9 +430,13 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
     personal_artifacts = None
     personal_notes: list[str] = []
     personal_thresholds: dict = {}
+    applied_personal: set[tuple[int,str]] = set()
     if personal is not None:
         personal_record = personal.get('record')
         if personal_record is not None:
+            if any(v.get('mode') == 'STANDALONE_LIGHT' for v in
+                   (personal_record.get('submodels') or {}).values()):
+                raise AssetError('PERSONAL_STANDALONE_SCORER_NOT_READY')
             if personal.get('artifacts') is not None:
                 personal_artifacts = personal['artifacts']
             elif personal_record.get('artifact_path'):
@@ -421,6 +450,9 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
                     if adjusted is not None and tau is not None:
                         preds[layer][i]=adjusted
                         personal_thresholds[(i,layer)]=tau
+                        if _mode == 'GLOBAL_PLUS_PERSONAL' and float(
+                                (personal_record['submodels'][str(key)]).get('blend_weight', 0)) > 0:
+                            applied_personal.add((i,layer))
     grouped: dict[str,dict] = {}
     today=[]
     for i,(j,kind,t,stage,px) in enumerate(entries):
@@ -442,7 +474,7 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
         joint=bool(s1>=t1 and s2>=t2) if scoreable else False
         scoring_mode='GLOBAL_ONLY'
         personal_release_id=None
-        if personal_record is not None:
+        if (i, 'L1') in applied_personal or (i, 'L2') in applied_personal:
             scoring_mode='GLOBAL_PLUS_PERSONAL'
             personal_release_id=personal_record.get('release_id')
         obs={
@@ -452,6 +484,8 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
             'global_release_id':release_id,
             'personal_release_id':personal_release_id,
             'scoring_mode':scoring_mode,
+            'l1_scoring_mode':('GLOBAL_PLUS_PERSONAL' if (i,'L1') in applied_personal else 'GLOBAL_ONLY'),
+            'l2_scoring_mode':('GLOBAL_PLUS_PERSONAL' if (i,'L2') in applied_personal else 'GLOBAL_ONLY'),
             'stage':f'D{stage}','decision_date':decision_date,'data_cutoff':decision_date,
             'l1_score':s1,'l2_score':s2,'l1_threshold':t1,'l2_threshold':t2,
             'scoreable':scoreable,'joint_alert_diagnostic':joint,
@@ -473,7 +507,7 @@ def score_candidates(raw: pd.DataFrame, symbol: str, fmod, bundle: dict, as_of: 
         'feature_sha':ENGINE_SHA,'model_release_id':release_id,
         'global_release_id':release_id,
         'personal_release_id':(personal_record or {}).get('release_id'),
-        'scoring_mode':('GLOBAL_PLUS_PERSONAL' if personal_record is not None
+        'scoring_mode':('GLOBAL_PLUS_PERSONAL' if applied_personal
                         else 'GLOBAL_ONLY'),
         'model_score_kind':'UNCALIBRATED',
         'h_positive_label_contract':'H_LL__L_HH__2026_10_14',

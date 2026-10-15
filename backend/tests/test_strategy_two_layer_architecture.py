@@ -51,9 +51,13 @@ def _bars(n=420, seed=3, action_at=None, start='2023-06-01'):
     factor = np.ones(n)
     if action_at is not None:
         factor[action_at:] = 0.5
+    # Carry the true RAW evidence columns so _pit_frame can reject any attempt to
+    # double-adjust an already-QFQ frame (PIT_RAW_OHLCV_REQUIRED_NO_DOUBLE_ADJUST).
     return pd.DataFrame({'datetime': dates, 'open': o, 'high': h, 'low': l,
                          'close': c, 'volume': np.full(n, 1e6),
-                         'adj_factor': factor})
+                         'adj_factor': factor, 'raw_open': o, 'raw_high': h,
+                         'raw_low': l, 'raw_close': c,
+                         'raw_volume': np.full(n, 1e6)})
 
 
 def _market(symbols=3, n=420, action_at=None):
@@ -340,8 +344,11 @@ def test_scoring_consistency_and_provenance(fmod):
             assert o_base['observation_id'] == o_pers['observation_id']
             assert abs(o_base['l1_score'] - o_pers['l1_score']) < 1e-12
             assert abs(o_base['l2_score'] - o_pers['l2_score']) < 1e-12
-            assert o_pers['scoring_mode'] == 'GLOBAL_PLUS_PERSONAL'
-            assert o_pers['personal_release_id'] == 'p' * 64
+            # blend_weight=0: the personal record is considered but applies no
+            # adjustment, so the score is the global score and the mode stays
+            # GLOBAL_ONLY (fail-closed: no validated personal improvement).
+            assert o_pers['scoring_mode'] == 'GLOBAL_ONLY'
+            assert o_pers['personal_release_id'] is None
             assert o_pers['global_release_id'] == 'R' * 64
             assert o_pers['symbol'] == 'SH:600000'
             assert o_pers['decision_date'] == o_base['decision_date']
@@ -463,9 +470,12 @@ def test_sharded_snapshot_keeps_personal_provenance(fmod):
                            global_bundle_sha256='b' * 64, data_sha256='d' * 64,
                            history={})
     record['mode'] = pm.MODE_REGULARIZED
+    # blend_weight must be > 0 for the personal adjustment to actually be
+    # applied (fail-closed: weight 0 => GLOBAL_ONLY, the personal layer is a
+    # no-op). Use 0.5 so the provenance-through-sharding path is exercised.
     record['submodels'] = {
         str((layer, kind, stage)): {'mode': pm.MODE_REGULARIZED, 'coef': 0.0,
-                                     'intercept': 0.0, 'blend_weight': 0.0,
+                                     'intercept': 0.0, 'blend_weight': 0.5,
                                      'threshold': 0.5}
         for layer in ('L1', 'L2') for kind in ('H', 'L') for stage in (1, 2, 3)}
     record['release_id'] = 'p' * 64

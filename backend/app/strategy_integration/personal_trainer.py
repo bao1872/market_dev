@@ -306,13 +306,17 @@ def collect_symbol_samples(all_samples: dict, symbol: str) -> dict:
 
 
 def run_personal_training(samples_by_split: dict, oof_scores: dict, fmod, *,
+                          global_models: dict | None = None,
                           windows: dict, global_release_id: str,
                           global_bundle_sha256: str, data_sha256: str,
                           price_contract: str, symbols: list[str] | None = None,
                           registry_root: Path | None = None,
                           artifact_dir: Path | None = None,
                           allow_standalone: bool = False, **kwargs) -> dict:
-    """Train personal models for the requested symbols (or all with samples)."""
+    """Train adjustments on TRAIN and select blend/threshold on VAL."""
+    if not global_models:
+        raise pm.PersonalModelError('PERSONAL_VALIDATION_GLOBAL_MODELS_REQUIRED')
+    from .personal_validation import strict_personal_record
     train_samples = samples_by_split.get('train', {})
     available = sorted({r['symbol'] for rows in train_samples.values() for r in rows})
     targets = sorted(symbols) if symbols else available
@@ -320,8 +324,11 @@ def run_personal_training(samples_by_split: dict, oof_scores: dict, fmod, *,
     results = []
     for symbol in targets:
         own = collect_symbol_samples(train_samples, symbol)
-        record = train_personal(
-            symbol, samples_by_key=own, oof_scores=oof_scores, fmod=fmod,
+        val = collect_symbol_samples(samples_by_split.get('val', {}), symbol)
+        test = collect_symbol_samples(samples_by_split.get('test', {}), symbol)
+        record = strict_personal_record(
+            symbol, train_samples=own, val_samples=val, test_samples=test,
+            global_models=global_models, oof_scores=oof_scores, fmod=fmod,
             windows=windows, global_release_id=global_release_id,
             global_bundle_sha256=global_bundle_sha256, data_sha256=data_sha256,
             price_contract=price_contract,

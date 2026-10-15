@@ -96,6 +96,13 @@ async def load_official_qfq_stock_batch(
             allow_backfill=False,
             limit=None,
         )
+        # Read both QFQ chart bars and MDAS-owned RAW bars. The latter are
+        # required to reconstruct an historical QFQ frame exactly ONCE.
+        raw_result = await service.get_bars_batch(
+            session, chunk, timeframe='1d', adj='none', completed_only=True,
+            source_policy=MarketDataSourcePolicy.DB_ONLY,
+            start_date=start_date, end_date=as_of, allow_backfill=False, limit=None,
+        )
         for iid in chunk:
             symbol = instrument_by_id[iid]
             stock = result.get(iid)
@@ -129,8 +136,23 @@ async def load_official_qfq_stock_batch(
             ).any():
                 excluded["invalid_candle"] += 1
                 continue
-            # Only one market-data owner: do not locally re-adjust prices.
-            raw = pd.DataFrame(arr, columns=["open","high","low","close","volume"])
+            native = raw_result.get(iid)
+            if isinstance(native, Exception) or native is None or native.bars is None:
+                excluded['missing_mdas_raw_bars'] += 1
+                continue
+            raw_bars = native.bars
+            if (len(raw_bars) != len(bars) or not pd.DatetimeIndex(raw_bars.index).equals(dates)):
+                excluded['mdas_raw_qfq_date_mismatch'] += 1
+                continue
+            native_values = raw_bars[['open','high','low','close','volume']].apply(
+                pd.to_numeric, errors='coerce').to_numpy(dtype=float)
+            if not np.isfinite(native_values).all() or (native_values[:, :4] <= 0).any() or (native_values[:,4] < 0).any():
+                excluded['invalid_mdas_raw_ohlcv'] += 1
+                continue
+            # Only one market-data owner: current QFQ remains unchanged.
+            raw = pd.DataFrame(arr, columns=['open','high','low','close','volume'])
+            for ci, c in enumerate(('open','high','low','close','volume')):
+                raw['raw_' + c] = native_values[:, ci]
             raw.insert(0,"datetime",dates.to_numpy())
             factor_series = None
             factor_note = 'not_requested'
@@ -150,6 +172,9 @@ async def load_official_qfq_stock_batch(
                         factor_note = 'factor_series_invalid'
                     else:
                         factor_note = 'authoritative_factor_series_attached'
+            if with_factor_series and factor_series is None:
+                excluded['missing_authoritative_factor_series'] += 1
+                continue
             accepted[symbol] = raw
             hashes[symbol] = {
                 "source_bar_hash": stock.source_bar_hash,

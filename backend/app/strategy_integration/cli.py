@@ -266,16 +266,22 @@ def train_personal_cmd(args):
     from . import personal_trainer, training
     windows = rw.rolling_windows(date.fromisoformat(args.as_of))
     fmod = model.load_engine(args.assets)
-    frames, _pit, report = _load_market(args, os.environ.get('PANJI_STRATEGY_CODE_ROOT'))
-    data, _counters, _hist = training.build_dataset(frames, fmod, windows)
+    frames, pit, report = _load_market(args, os.environ.get('PANJI_STRATEGY_CODE_ROOT'))
+    data, _counters, _hist = training.build_dataset(pit, fmod, windows)
     by_split: dict = {}
     for (name, layer, kind, stage), rows in data.items():
         by_split.setdefault(name, {})[(layer, kind, stage)] = rows
     oof, oof_prov = personal_trainer.compute_oof_base_scores(
         by_split.get('train', {}), fmod, folds=args.oof_folds,
         trees=args.oof_trees, threads=args.threads, seed=args.seed)
+    if args.global_bundle is None:
+        raise pm.PersonalModelError('PERSONAL_REQUIRES_PINNED_GLOBAL_BUNDLE')
+    global_bundle, global_facts = model.load_bundle_file(
+        args.global_bundle, pinned_sha=args.global_bundle_sha256)
+    if producer.release_id_for(global_facts['bundle_sha256']) != args.global_release_id:
+        raise pm.PersonalModelError('PERSONAL_GLOBAL_RELEASE_ID_MISMATCH')
     summary = personal_trainer.run_personal_training(
-        by_split, oof, fmod, windows=windows,
+        by_split, oof, fmod, global_models=global_bundle['models'], windows=windows,
         global_release_id=args.global_release_id,
         global_bundle_sha256=args.global_bundle_sha256,
         data_sha256=report['source_sha256'],
@@ -309,7 +315,7 @@ def incremental_cmd(args):
     windows = rw.rolling_windows(date.fromisoformat(args.as_of))
     inc.check_window_isolation(windows)
     fmod = model.load_engine(args.assets)
-    frames, _pit, report = _load_market(args, os.environ.get('PANJI_STRATEGY_CODE_ROOT'))
+    frames, pit, report = _load_market(args, os.environ.get('PANJI_STRATEGY_CODE_ROOT'))
     state = inc.load_state(args.incremental_state)
     registry = pm.load_registry(args.personal_registry)
     all_dates = sorted({pd.Timestamp(x).date()
@@ -322,7 +328,7 @@ def incremental_cmd(args):
         if plan['action'] == 'NO_CHANGE':
             skipped.append(symbol)
             continue
-        own = {symbol: frames[symbol]}
+        own = {symbol: pit[symbol]}
         data, _c, _h = training.build_dataset(own, fmod, windows)
         record = pm.resolve_active(registry, symbol)
         if record is None or record.get('mode') == pm.MODE_FALLBACK:
@@ -402,7 +408,7 @@ def evaluate_cmd(args):
     registry = pm.load_registry(args.personal_registry) if args.personal_registry \
         else {'symbols': {}, 'history': {}}
 
-    data, counters, history = training.build_dataset(frames, fmod, windows)
+    data, counters, history = training.build_dataset(pit, fmod, windows)
     by_split: dict = {}
     for (name, layer, kind, stage), rows in data.items():
         by_split.setdefault(name, {})[(layer, kind, stage)] = rows
@@ -414,8 +420,8 @@ def evaluate_cmd(args):
     path_stats = []
     for symbol in symbols:
         raw = frames[symbol]
-        own = {symbol: raw}
-        # Rebuild this symbol's test-window samples (features already PIT).
+        own = {symbol: pit[symbol]}
+        # Rebuild this symbol's test-window samples with true as-of PIT bars.
         sym_data, _c, _h = training.build_dataset(own, fmod, windows)
         test_rows = {key[1:]: rows for key, rows in sym_data.items()
                      if key[0] == 'test'}
@@ -601,6 +607,7 @@ def main():
 
     tp = sub.add_parser('train-personal')
     common(tp)
+    tp.add_argument('--global-bundle', type=Path, required=True)
     tp.add_argument('--global-release-id', required=True)
     tp.add_argument('--global-bundle-sha256', required=True)
     tp.add_argument('--personal-symbols', nargs='*', default=[])

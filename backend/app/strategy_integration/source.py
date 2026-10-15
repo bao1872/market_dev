@@ -85,6 +85,15 @@ def load_canonical_qfq_export(output_dir: Path, as_of: str, *, max_symbols: int 
             factor = pd.to_numeric(group['adj_factor'], errors='coerce').to_numpy(float)
             if np.isfinite(factor).all() and (factor > 0).all():
                 df['adj_factor'] = factor
+        if not all('raw_' + c in group.columns for c in
+                   ('open','high','low','close','volume')) or 'adj_factor' not in df:
+            reasons['missing_pit_raw_or_factor'] += 1
+            continue
+        for c in ('open','high','low','close','volume'):
+            df['raw_' + c] = pd.to_numeric(group['raw_' + c], errors='coerce').to_numpy(float)
+        if not np.isfinite(df[['raw_open','raw_high','raw_low','raw_close','raw_volume']].to_numpy(float)).all():
+            reasons['invalid_pit_raw'] += 1
+            continue
         results[str(symbol)] = df
         if df.datetime.iloc[-1].date() == pd.Timestamp(as_of).date():
             asof_covered += 1
@@ -303,6 +312,9 @@ def load_official_parquet_pit(bars_file: Path, instruments_file: Path, as_of: st
                   pd.Series(pd.to_datetime(adjusted.index)).reset_index(drop=True))
         # Authoritative factor series, aligned row-for-row with the frame above.
         df['adj_factor'] = factor
+        # This is the original unadjusted OHLCV, not the current QFQ.
+        for ci, col in enumerate(('open','high','low','close','volume')):
+            df['raw_' + col] = arr[:, ci]
         results[symbol] = df
         if df.datetime.iloc[-1].date() == pd.Timestamp(as_of).date():
             asof_covered += 1

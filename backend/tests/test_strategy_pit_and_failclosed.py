@@ -34,9 +34,13 @@ def _raw_group(n=260, action_at=None):
     factor = np.ones(n)
     if action_at is not None:
         factor[action_at:] = 0.5
+    # Carry the true RAW evidence columns so _pit_frame can reject any attempt to
+    # double-adjust an already-QFQ frame (PIT_RAW_OHLCV_REQUIRED_NO_DOUBLE_ADJUST).
     return pd.DataFrame({'trade_date': dates, 'open': o, 'high': h, 'low': l,
                          'close': c, 'volume': np.full(n, 1e6),
-                         'adj_factor': factor})
+                         'adj_factor': factor, 'raw_open': o, 'raw_high': h,
+                         'raw_low': l, 'raw_close': c,
+                         'raw_volume': np.full(n, 1e6)})
 
 
 def _qfq(group, anchor):
@@ -134,6 +138,8 @@ def _batch(batch: Path):
     shards = write_candidate_shards(candidate, batch, validate=validate_candidate)
     (batch / 'evaluation_snapshot.json').write_bytes(producer.encode_json(evaluation))
     descriptor = (batch / 'candidate_snapshot.json').read_bytes()
+    real_bundle_sha = __import__('hashlib').sha256(
+        (_assets() / 'two_stage_models_local_only.pkl').read_bytes()).hexdigest()
     atomic_json(batch / 'manifest.json', {
         'status': 'VALIDATED_STAGING_NOT_DEPLOYED',
         'release_id': producer.RELEASE_ID,
@@ -143,7 +149,7 @@ def _batch(batch: Path):
             (batch / 'evaluation_snapshot.json').read_bytes()).hexdigest(),
         'candidate_shards': shards['shards'],
         'bundle_path': str(_assets() / 'two_stage_models_local_only.pkl'),
-        'runtime': {'bundle_sha256': 'c' * 64},
+        'runtime': {'bundle_sha256': real_bundle_sha},
     })
     return batch
 
@@ -174,15 +180,11 @@ def test_pointer_bundle_sha_inconsistency_fails_closed(tmp_path):
     root.mkdir()
     weights = tmp_path / 'w.pkl'
     weights.write_bytes(b'x')
-    real = __import__('hashlib').sha256(weights.read_bytes()).hexdigest()
-    # Pointer declares a different sha than the file: inference must refuse.
-    write_active_release(root, root / 'b', 'r', 'd' * 64, str(weights))
-    active = resolve_active_release(root)
-    assert active['bundle_sha256'] == 'd' * 64
-    assert active['bundle_path'] == str(weights)
-    assert real != 'd' * 64
-    with pytest.raises(model.AssetError, match='BUNDLE_SHA_MISMATCH'):
-        model.load_bundle_file(weights, pinned_sha=active['bundle_sha256'])
+    # Pointer declares a different sha than the file: publish must refuse so the
+    # model pointer can never point at a missing/tampered weight file. Fail-closed
+    # happens at the publish step, before any inference.
+    with pytest.raises(PublishError, match='ACTIVE_RELEASE_BUNDLE_SHA_MISMATCH'):
+        write_active_release(root, root / 'b', 'r', 'd' * 64, str(weights))
 
 
 def test_rollback_restores_exact_previous_pointer(tmp_path):

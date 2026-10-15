@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from . import model, personal_model as pm, personal_trainer, producer, source
+from . import lab_parity_contract as lab_contract
 from . import rolling_windows as rw
 from .producer import ProducerError
 
@@ -57,23 +58,9 @@ def _resolve_windows(args) -> dict:
 
 
 def _labels(raw, final, j, kind, cutoff_bar, stage_bar):
-    """Maturity-gated labels. None means "not mature yet", never a guess."""
-    key = next((i for i, p in enumerate(final) if p['bar'] == j and p['type'] == kind), None)
-    if key is not None and final[key]['confirmed_at'] <= cutoff_bar:
-        y1 = 1
-    elif key is None and any(p['bar'] > j and p['type'] != kind
-                             and p['confirmed_at'] <= cutoff_bar for p in final):
-        y1 = 0
-    else:
-        y1 = None
-    y2 = None
-    if key is not None and key > 0 and key + 1 < len(final):
-        prev, nxt = final[key - 1], final[key + 1]
-        if (prev['type'] == nxt['type'] and nxt['confirmed_at'] <= cutoff_bar
-                and nxt['bar'] > j + 3 and nxt['bar'] > stage_bar):
-            y2 = int(float(nxt['price']) > float(prev['price'])) if kind == 'L' \
-                else int(float(nxt['price']) < float(prev['price']))
-    return y1, y2
+    # Backwards-compatible helper. Do not reintroduce pivot-price proxy labels.
+    result = lab_contract.labels_for_stage(raw, final, j, kind, stage_bar, cutoff_bar)
+    return result.l1, result.l2
 
 
 def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
@@ -89,13 +76,19 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
         days = [pd.Timestamp(x).date() for x in frame.datetime]
         per_symbol_history[symbol] = rw.stock_history_status(
             days[0], days[-1], windows)
-        final, snap, _ = fmod.replay(frame)
-        candidates, _ = fmod.causal_candidates(frame)
+        _, snap, _ = fmod.replay(frame)
+        candidates = lab_contract.causal_candidates_pit(
+            frame, pit, fmod, model._pit_frame)
         split_end_bars = {
             name: next((i for i in range(len(days) - 1, -1, -1)
                         if days[i] <= hi), -1)
             for name, lo, hi in ((n, windows['dates'][n][0], windows['dates'][n][1])
                                  for n in rw.SPLIT_NAMES)}
+        oracle_by_split = {
+            name: lab_contract.split_oracle_frame(
+                frame, pit, fmod, model._pit_frame, end_bar)
+            for name, end_bar in split_end_bars.items() if end_bar >= 0
+        }
         stage_events = []
         for j, kind, _px in candidates:
             if j + 3 >= len(frame):
@@ -113,7 +106,12 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
                 continue
             for k in (1, 2, 3):
                 t = j + k
-                l1, l2 = _labels(frame, final, j, kind, cutoff, t)
+                oracle_raw, oracle_final = oracle_by_split[name]
+                lab = lab_contract.labels_for_stage(
+                    oracle_raw, oracle_final, j, kind, t, cutoff)
+                l1, l2 = lab.l1, lab.l2
+                counters['L1_REASON_' + lab.l1_reason] += 1
+                counters['L2_REASON_' + lab.l2_reason] += 1
                 if l1 is None and l2 is None:
                     counters['unresolved_both'] += 1
                     continue
@@ -236,8 +234,8 @@ def train(args):
         thresholds[key] = tau
         for split, vals in m.items():
             metrics[f'{label}:{split}'] = vals
-    if not model_map:
-        raise ProducerError('NO_SUBMODEL_TRAINED: ' + ';'.join(insufficient[:8]))
+    if len(model_map) != 12:
+        raise ProducerError('INCOMPLETE_12_MODELS_NOT_RELEASABLE: ' + ';'.join(insufficient[:8]))
 
     if not args.skip_personal:
         # The raw frames are no longer needed once the dataset is built.
@@ -286,6 +284,7 @@ def train(args):
             global_release_id=global_release_id, global_bundle_sha256=sha,
             data_sha256=data_sha, price_contract=producer.PRICE_INPUT_CONTRACT,
             symbols=args.personal_symbols or None,
+            global_models=model_map,
             registry_root=Path(args.personal_registry) if args.personal_registry else None,
             artifact_dir=(Path(args.personal_artifact_dir)
                           if getattr(args, 'personal_artifact_dir', None) else None),
