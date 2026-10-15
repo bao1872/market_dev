@@ -24,7 +24,14 @@ const SPECS = {
   fp_structure_event_type: {
     data_type: 'enum',
     operators: ['eq', 'neq', 'in', 'not_in'],
-    enum_values: ['BOS', 'CHoCH', 'OB_CREATED', 'OB_ENTERED', 'OB_MITIGATED', 'EQH', 'EQL'],
+    enum_values: [
+      'BOS', 'CHoCH',
+      'OB_CREATED', 'OB_ENTERED', 'OB_MITIGATED', // 历史合并值（后端兼容，UI 不提供）
+      'EQH', 'EQL',
+      'OB_CREATED#bullish', 'OB_CREATED#bearish',
+      'OB_ENTERED#bullish', 'OB_ENTERED#bearish',
+      'OB_MITIGATED#bullish', 'OB_MITIGATED#bearish',
+    ],
     input_control: 'multi_select',
     value_normalizer: '',
   },
@@ -93,6 +100,41 @@ test('单选 enum（eq）：option label 中文 结构转折，value 提交 cano
   assert.ok(html.includes('结构转折'), 'option label 应为中文 结构转折')
   assert.ok(html.includes('value="CHoCH"'), 'option value 必须为 canonical CHoCH')
   assert.ok(!html.includes('>CHoCH<'), '可见文字不得为原始 CHoCH')
+})
+
+// ===== [STRUCT-EVENT-SPLIT] 6 个承接/压制独立选项：可见中文 label，提交复合 canonical 值 =====
+const STRUCT_EVENT_COMPOSITE_OPTIONS = [
+  { value: 'OB_CREATED#bullish', label: '承接区形成' },
+  { value: 'OB_CREATED#bearish', label: '压制区形成' },
+  { value: 'OB_ENTERED#bullish', label: '承接区首次回踩' },
+  { value: 'OB_ENTERED#bearish', label: '压制区首次回踩' },
+  { value: 'OB_MITIGATED#bullish', label: '承接区失效' },
+  { value: 'OB_MITIGATED#bearish', label: '压制区失效' },
+] as const
+
+for (const opt of STRUCT_EVENT_COMPOSITE_OPTIONS) {
+  test(`结构事件单选（eq）：${opt.label} 可见中文，option value 提交复合 canonical ${opt.value}`, () => {
+    const html = renderFilter('eq', '')
+    assert.ok(html.includes(opt.label), `应显示中文 label ${opt.label}`)
+    assert.ok(
+      html.includes(`value="${opt.value}"`),
+      `option value 必须为复合 canonical ${opt.value}`,
+    )
+    const text = visibleText(html)
+    // 复合分隔符 # 与 raw type/direction 码不得作为用户可见文字泄露
+    assert.ok(!text.includes('#'), '用户可见文字不得出现复合分隔符 #')
+    assert.ok(!text.includes('bullish'), '用户可见文字不得出现 bullish')
+    assert.ok(!text.includes('bearish'), '用户可见文字不得出现 bearish')
+  })
+}
+
+test('结构事件 6 个复合选项与 BOS/CHoCH/EQH/EQL 共 10 项，承接/压制严格互斥（方向不同）', () => {
+  const html = renderFilter('in', '')
+  for (const opt of STRUCT_EVENT_COMPOSITE_OPTIONS) {
+    assert.ok(html.includes(opt.label), `应显示 ${opt.label}`)
+  }
+  // 承接(bullish) 与 压制(bearish) 选项同列共存但方向不同 → 后端 WHERE 严格按方向过滤，结果互斥
+  assert.ok(html.includes('承接区形成') && html.includes('压制区形成'))
 })
 
 // ===== 事件方向筛选器 SSR：可见文字全中文，提交值仍 canonical，且不暴露 up/down =====

@@ -145,12 +145,19 @@ export function formatTrendDirection(raw: unknown): string {
 }
 
 // ===== 筛选器 enumOptions（canonical value → 展示 label；提交仍为 canonical value）=====
+// [STRUCT-EVENT-SPLIT] 承接/压制区方向拆分：原 3 个合并选项（仅按 type 过滤、不区分方向）
+// 拆为 6 个独立选项，复合值编码 "type#direction"（承接=bullish，压制=bearish）。
+// 旧合并值 OB_CREATED/OB_ENTERED/OB_MITIGATED 不再出现在 UI（历史 URL/preset 仍由后端
+// 按合并语义兼容，绝不悄悄变成下列 6 个之一）。
 export const STRUCTURE_EVENT_TYPE_OPTIONS: Array<{ value: string; label: string }> = [
   { value: 'BOS', label: '结构突破' },
   { value: 'CHoCH', label: '结构转折' },
-  { value: 'OB_CREATED', label: '承接/压制区形成' },
-  { value: 'OB_ENTERED', label: '承接/压制区首次回踩' },
-  { value: 'OB_MITIGATED', label: '承接/压制区失效' },
+  { value: 'OB_CREATED#bullish', label: '承接区形成' },
+  { value: 'OB_CREATED#bearish', label: '压制区形成' },
+  { value: 'OB_ENTERED#bullish', label: '承接区首次回踩' },
+  { value: 'OB_ENTERED#bearish', label: '压制区首次回踩' },
+  { value: 'OB_MITIGATED#bullish', label: '承接区失效' },
+  { value: 'OB_MITIGATED#bearish', label: '压制区失效' },
   { value: 'EQH', label: '双顶压力' },
   { value: 'EQL', label: '双底支撑' },
 ]

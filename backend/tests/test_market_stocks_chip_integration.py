@@ -73,8 +73,13 @@ from app.services.first_pyramid_flatten import (  # noqa: E402
 def _build_first_pyramid_payload(
     *, trend_direction: str = "上行", trend_bars: int = 5,
     swing_direction: str = "上行", momentum_direction: str = "扩张",
+    structure_event_type: str = "BOS", structure_event_direction: str = "up",
 ) -> dict:
-    """构造 first_pyramid payload（含足够 flat 字段供筛选排序）。"""
+    """构造 first_pyramid payload（含足够 flat 字段供筛选排序）。
+
+    [STRUCT-EVENT-SPLIT] 新增 structure_event_type/direction 参数，用于构造
+    承接(bullish)/压制(bearish) 方向特定的最新结构事件，验证复合筛选互斥性。
+    """
     return {
         "tradeDate": "2026-07-25",
         "statusText": "趋势上行，结构共振",
@@ -97,8 +102,8 @@ def _build_first_pyramid_payload(
             },
             "events": [
                 {
-                    "type": "BOS",
-                    "direction": "up",
+                    "type": structure_event_type,
+                    "direction": structure_event_direction,
                     "freshnessBars": 3,
                     "occurredAt": "2026-07-22",
                     "price": 10.7,
@@ -761,3 +766,167 @@ class TestMarketStocksChipIntegration:
             if fp is not None:
                 assert len(fp) == 99, f"first_pyramid 应为 99 键，实际 {len(fp)}"
                 break
+
+
+class TestStructureEventCompositeFilter:
+    """[STRUCT-EVENT-SPLIT] 承接/压制区方向拆分的真实 SQL 筛选 + 严格互斥性回归测试。
+
+    仅在 CI Postgres 容器中运行；本地 PURE_UNIT_TEST=1 自动 skip。
+    """
+
+    pytestmark = pytest.mark.skipif(
+        _PURE_UNIT or not _CI_ENV,
+        reason="PostgreSQL 集成测试只在 CI 临时 Postgres 容器中运行；本地请用 PURE_UNIT_TEST=1",
+    )
+
+    async def _seed_direction_scoped(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> tuple[AsyncClient, list[str]]:
+        """构造 user + 3 只股票，最新结构事件方向各异：承接(bullish)/压制(bearish)/承接(bullish)。"""
+        from datetime import date as date_cls
+
+        user = await user_factory(
+            email="struct_split@example.com",
+            password_hash="fake-hash",
+            timezone="Asia/Shanghai",
+        )
+        inst_a = await instrument_factory(symbol="688001", name="承接股A", market="SH")
+        inst_b = await instrument_factory(symbol="688002", name="压制股B", market="SH")
+        inst_c = await instrument_factory(symbol="688003", name="承接股C", market="SH")
+        await subscription_factory(user_id=user.id, plan_code="observe_20")
+
+        snap_run = StockFeatureSnapshotRun(
+            trade_date=date_cls(2026, 7, 25),
+            schema_version=_SCHEMA_VERSION,
+            primary_timeframe="1d",
+            secondary_timeframe="15m",
+            adj="qfq",
+            run_type="after_close",
+            status=STATUS_SUCCEEDED,
+            started_at=datetime.now(UTC) - timedelta(hours=1),
+            finished_at=datetime.now(UTC),
+            published_at=datetime.now(UTC),
+            metadata_={"scope": "full"},
+        )
+        db_session.add(snap_run)
+        await db_session.flush()
+
+        # (instrument, type, direction) 三组数据：承接/压制/承接
+        seeds = [
+            (inst_a, "OB_CREATED", "bullish"),
+            (inst_b, "OB_CREATED", "bearish"),
+            (inst_c, "OB_CREATED", "bullish"),
+        ]
+        for inst, etype, edir in seeds:
+            fp = _build_first_pyramid_payload(
+                trend_direction="上行",
+                structure_event_type=etype,
+                structure_event_direction=edir,
+            )
+            flat = flatten_first_pyramid(fp, calculated_at="2026-07-25T15:00:00+08:00", run_id=str(snap_run.id))
+            snap = StockFeatureSnapshot(
+                instrument_id=inst.id,
+                trade_date=date_cls(2026, 7, 25),
+                primary_timeframe="1d",
+                secondary_timeframe="15m",
+                adj="qfq",
+                schema_version=_SCHEMA_VERSION,
+                source_run_id=snap_run.id,
+                structural_payload={},
+                temporal_payload={},
+                summary_payload={
+                    "first_pyramid": fp,
+                    "first_pyramid_flat": flat,
+                    "daily_developing_swing_dir": 1,
+                },
+                degraded_reasons=[],
+            )
+            db_session.add(snap)
+        await db_session.commit()
+        return client, ["688001", "688002", "688003"]
+
+    async def test_composite_bullish_filters_only_bullish(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        client, symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED#bullish", "page_size": 50},
+        )
+        assert resp.status_code == 200
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert "688001" in got  # 承接股A
+        assert "688003" in got  # 承接股C
+        assert "688002" not in got  # 压制股B 严格排除
+
+    async def test_composite_bearish_filters_only_bearish(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        client, symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED#bearish", "page_size": 50},
+        )
+        assert resp.status_code == 200
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert "688002" in got  # 压制股B
+        assert "688001" not in got  # 承接股A 严格排除
+        assert "688003" not in got  # 承接股C 严格排除
+
+    async def test_composite_bullish_bearish_mutually_exclusive(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        bullish = {
+            item["symbol"]
+            for item in (
+                await client.get(
+                    "/v1/market/stocks",
+                    params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED#bullish", "page_size": 50},
+                )
+            ).json()["items"]
+        }
+        bearish = {
+            item["symbol"]
+            for item in (
+                await client.get(
+                    "/v1/market/stocks",
+                    params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED#bearish", "page_size": 50},
+                )
+            ).json()["items"]
+        }
+        # 承接与压制结果严格不相交（同一行只有一个方向）
+        assert bullish.isdisjoint(bearish), f"承接{bullish} 与 压制{bearish} 不应相交"
+
+    async def test_legacy_combined_value_still_matches_both_directions(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        """历史合并值 OB_CREATED 仍命中两类方向（兼容旧 URL/preset，不悄悄变成 6 个之一）。"""
+        client, _symbols = await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED", "page_size": 50},
+        )
+        assert resp.status_code == 200
+        got = {item["symbol"] for item in resp.json()["items"]}
+        assert {"688001", "688002", "688003"}.issubset(got)  # 两类方向都命中
+
+    async def test_invalid_direction_rejected(
+        self, client, db_session, user_factory, instrument_factory, subscription_factory,
+    ) -> None:
+        await self._seed_direction_scoped(
+            client, db_session, user_factory, instrument_factory, subscription_factory,
+        )
+        resp = await client.get(
+            "/v1/market/stocks",
+            params={"scope": "market", "fp_filter": "fp_structure_event_type:eq:OB_CREATED#invalid", "page_size": 50},
+        )
+        assert resp.status_code == 422

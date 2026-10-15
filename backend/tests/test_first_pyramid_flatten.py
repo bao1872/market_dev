@@ -28,6 +28,7 @@ from app.services.first_pyramid_flatten import (
     FpSortSpec,
     flatten_chip_fields,
     flatten_first_pyramid,
+    split_structure_event_composite,
 )
 from app.services.first_pyramid_flatten import (
     parse_fp_filter as _parse_fp_filter,
@@ -518,10 +519,17 @@ class TestFpQueryFieldSpecs:
         assert "CHoCH" in evt_spec["enum_values"]
         assert "EQH" in evt_spec["enum_values"]
         assert "EQL" in evt_spec["enum_values"]
-        # OB 生命周期事件
+        # OB 生命周期事件（历史合并值，保留以兼容旧 URL/preset）
         assert "OB_CREATED" in evt_spec["enum_values"]
         assert "OB_ENTERED" in evt_spec["enum_values"]
         assert "OB_MITIGATED" in evt_spec["enum_values"]
+        # [STRUCT-EVENT-SPLIT] 6 个承接/压制独立复合值（type#direction）
+        assert "OB_CREATED#bullish" in evt_spec["enum_values"]
+        assert "OB_CREATED#bearish" in evt_spec["enum_values"]
+        assert "OB_ENTERED#bullish" in evt_spec["enum_values"]
+        assert "OB_ENTERED#bearish" in evt_spec["enum_values"]
+        assert "OB_MITIGATED#bullish" in evt_spec["enum_values"]
+        assert "OB_MITIGATED#bearish" in evt_spec["enum_values"]
 
     def test_input_control_mapping_by_data_type(self) -> None:
         """[CHANGE-20260730-013] input_control 按 data_type 正确映射。"""
@@ -698,6 +706,68 @@ class TestParseFpFilter:
         detail = err.to_detail()
         assert detail["field"] == "fp_structure_event_type"
         assert detail["dataType"] == "enum"
+
+
+class TestStructureEventCompositeFilter:
+    """[STRUCT-EVENT-SPLIT] 承接/压制区方向拆分：复合值解析 + 6 类型 + 互斥性。
+
+    纯单元测试（不连数据库）：验证复合筛选值的拆分、解析白名单、旧合并值兼容、
+    以及承接/压制按方向严格互斥（逻辑层）。
+    """
+
+    COMPOSITE_VALUES = [
+        "OB_CREATED#bullish", "OB_CREATED#bearish",
+        "OB_ENTERED#bullish", "OB_ENTERED#bearish",
+        "OB_MITIGATED#bullish", "OB_MITIGATED#bearish",
+    ]
+
+    def test_split_helper_non_composite_returns_none(self) -> None:
+        assert split_structure_event_composite("BOS") is None
+        assert split_structure_event_composite("OB_CREATED") is None
+        # 历史合并值（无方向）仍为 None
+        assert split_structure_event_composite("OB_CREATED") is None
+
+    def test_split_helper_composite_returns_type_and_direction(self) -> None:
+        assert split_structure_event_composite("OB_CREATED#bullish") == ("OB_CREATED", "bullish")
+        assert split_structure_event_composite("OB_MITIGATED#bearish") == ("OB_MITIGATED", "bearish")
+
+    def test_six_composite_values_parse_as_eq(self) -> None:
+        """6 个复合筛选值均可通过 enum 白名单校验（eq）。"""
+        for v in self.COMPOSITE_VALUES:
+            specs = _parse_fp_filter(f"fp_structure_event_type:eq:{v}")
+            assert len(specs) == 1
+            assert specs[0].operator == "eq"
+            assert specs[0].value == v
+
+    def test_six_composite_values_parse_as_in(self) -> None:
+        """6 个复合筛选值均可出现在 in 列表中。"""
+        specs = _parse_fp_filter("fp_structure_event_type:in:" + ",".join(self.COMPOSITE_VALUES))
+        assert len(specs) == 1
+        assert specs[0].operator == "in"
+
+    def test_invalid_direction_rejected(self) -> None:
+        """非法方向（非 bullish/bearish）复合值被白名单拒绝（422 路径）。"""
+        with pytest.raises(ValueError, match="Invalid enum value"):
+            _parse_fp_filter("fp_structure_event_type:eq:OB_CREATED#invalid")
+
+    def test_legacy_combined_value_still_parses(self) -> None:
+        """历史合并值 OB_CREATED 仍可解析（兼容旧 URL/preset，不悄悄变成 6 个之一）。"""
+        specs = _parse_fp_filter("fp_structure_event_type:eq:OB_CREATED")
+        assert specs[0].value == "OB_CREATED"
+
+    def test_acceptance_and_suppression_mutually_exclusive_by_direction(self) -> None:
+        """承接(bullish) 与 压制(bearish) 选项方向不同 → 同一行（单一方向）绝不可能同时命中。"""
+        acceptance = {v for v in self.COMPOSITE_VALUES if v.endswith("#bullish")}
+        suppression = {v for v in self.COMPOSITE_VALUES if v.endswith("#bearish")}
+        assert len(acceptance) == 3
+        assert len(suppression) == 3
+        # 同一 type 的承接/压制选项方向互斥
+        for etype in ("OB_CREATED", "OB_ENTERED", "OB_MITIGATED"):
+            bullish = split_structure_event_composite(f"{etype}#bullish")[1]
+            bearish = split_structure_event_composite(f"{etype}#bearish")[1]
+            assert bullish == "bullish"
+            assert bearish == "bearish"
+            assert bullish != bearish
 
 
 class TestParseFpSort:

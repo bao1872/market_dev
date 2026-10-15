@@ -201,8 +201,42 @@ _ENUM_VALUES_SQUEEZE_STATE = ["挤压中", "已释放", "无挤压"]
 # [Commit C / P0-4 2026-09-08] 补齐真实已有值 "平缓"（producer 在 sqzmom_val==0 时产出 FLAT→平缓），
 # 否则 filter enum 无法选择该真实状态。仅补值，不改算法/存储语义/sqzmom_val/producer。
 _ENUM_VALUES_MOMENTUM_DIRECTION = ["扩张", "收缩", "平缓"]
+# [STRUCT-EVENT-SPLIT] 结构事件筛选：承接/压制区方向拆分
+# 历史合并选项（OB_CREATED/OB_ENTERED/OB_MITIGATED，仅按 type 过滤、不区分方向）
+# 拆为 6 个独立选项，每个复合值编码 "type#direction"：
+#   - 承接 = bullish，压制 = bearish
+#   - 形成 = OB_CREATED，首次回踩 = OB_ENTERED，失效 = OB_MITIGATED
+# 旧合并值仍保留在枚举中以保证历史 URL/preset 兼容（继续命中两类方向，
+# 绝不悄悄变成 6 个新值之一）；新 UI 不再提供旧合并值。
+_STRUCTURE_EVENT_COMPOSITE_SEP = "#"
+_STRUCTURE_EVENT_COMPOSITE_VALUES = [
+    f"OB_CREATED{_STRUCTURE_EVENT_COMPOSITE_SEP}bullish",    # 承接区形成
+    f"OB_CREATED{_STRUCTURE_EVENT_COMPOSITE_SEP}bearish",    # 压制区形成
+    f"OB_ENTERED{_STRUCTURE_EVENT_COMPOSITE_SEP}bullish",    # 承接区首次回踩
+    f"OB_ENTERED{_STRUCTURE_EVENT_COMPOSITE_SEP}bearish",    # 压制区首次回踩
+    f"OB_MITIGATED{_STRUCTURE_EVENT_COMPOSITE_SEP}bullish",  # 承接区失效
+    f"OB_MITIGATED{_STRUCTURE_EVENT_COMPOSITE_SEP}bearish",  # 压制区失效
+]
+
+
+def split_structure_event_composite(value: str) -> tuple[str, str] | None:
+    """将复合结构事件筛选值 "type#direction" 拆为 (type, direction)。
+
+    非复合值（如 BOS / 历史合并值 OB_CREATED）返回 None。
+    """
+    if _STRUCTURE_EVENT_COMPOSITE_SEP not in value:
+        return None
+    etype, _sep, edir = value.partition(_STRUCTURE_EVENT_COMPOSITE_SEP)
+    if not etype or not edir:
+        return None
+    return etype, edir
+
+
 _ENUM_VALUES_STRUCTURE_EVENT_TYPE = [
-    "BOS", "CHoCH", "OB_CREATED", "OB_ENTERED", "OB_MITIGATED", "EQH", "EQL",
+    "BOS", "CHoCH",
+    "OB_CREATED", "OB_ENTERED", "OB_MITIGATED",  # 历史合并值（兼容，命中两类方向）
+    "EQH", "EQL",
+    *_STRUCTURE_EVENT_COMPOSITE_VALUES,
 ]
 _ENUM_VALUES_MOMENTUM_EVENT_TYPE = ["SQZ_OFF", "MOMENTUM_DIFFUSION"]
 _ENUM_VALUES_NODE_EVENT_TYPE = ["node_cluster_touch"]

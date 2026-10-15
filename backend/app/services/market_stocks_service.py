@@ -38,6 +38,7 @@ from sqlalchemy import (
     Float,
     Integer,
     Text,
+    and_,
     case,
     cast,
     func,
@@ -77,6 +78,7 @@ from app.services.first_pyramid_flatten import (
     FpSortSpec,
     assemble_first_pyramid_read_model,
     flatten_first_pyramid,
+    split_structure_event_composite,
 )
 from app.services.first_pyramid_flatten import (
     parse_fp_filter as _parse_fp_filter_impl,
@@ -680,6 +682,45 @@ def _build_fp_filter_conditions(
         spec = FP_QUERY_FIELD_SPECS[f.fp_key]
         data_type = spec["data_type"]
         source = spec["source"]
+
+        # [STRUCT-EVENT-SPLIT] 复合结构事件筛选值（type#direction）同时约束
+        # fp_structure_event_type 与 fp_structure_event_direction 两列，保证
+        # 承接/压制筛选结果严格互斥（单一方向，绝不交叉命中）。
+        if (
+            f.fp_key == "fp_structure_event_type"
+            and data_type == "enum"
+            and f.operator in ("eq", "neq", "in", "not_in")
+        ):
+            if f.operator in ("eq", "neq"):
+                composite_items = [f.value] if split_structure_event_composite(str(f.value)) else []
+            else:  # in / not_in
+                composite_items = [
+                    v.strip()
+                    for v in str(f.value).split(",")
+                    if v.strip() and split_structure_event_composite(v.strip())
+                ]
+            if composite_items:
+                type_expr = _build_fp_value_expr(
+                    "fp_structure_event_type", snap_subq, chip_subq, max_trade_date_subq
+                )
+                dir_expr = _build_fp_value_expr(
+                    "fp_structure_event_direction", snap_subq, chip_subq, max_trade_date_subq
+                )
+                pair_conditions = [
+                    and_(
+                        type_expr == split_structure_event_composite(v)[0],
+                        dir_expr == split_structure_event_composite(v)[1],
+                    )
+                    for v in composite_items
+                ]
+                if f.operator in ("eq", "in"):
+                    conditions.append(or_(*pair_conditions))
+                else:  # neq / not_in：不匹配任一复合对 OR 任一侧为 NULL（与既有 neq 语义一致）
+                    conditions.append(
+                        or_(type_expr.is_(None), dir_expr.is_(None), *[~pc for pc in pair_conditions])
+                    )
+                continue
+
         raw_expr = _build_fp_value_expr(f.fp_key, snap_subq, chip_subq, max_trade_date_subq)
         typed_expr = _cast_fp_value(raw_expr, data_type, source)
 

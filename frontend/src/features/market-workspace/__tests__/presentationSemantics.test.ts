@@ -175,12 +175,27 @@ test('EVENT_DIRECTION_OPTIONS 仅 bullish/bearish（up/down 历史兼容不进�
   )
 })
 
-// ===== P0 corrective / Blocker 1：OB 筛选器 label 去除缩写括号 =====
-test('OB 筛选 label：承接/压制区形成 / 首次回踩 / 失效', () => {
+// ===== [STRUCT-EVENT-SPLIT] 结构事件筛选 label：承接/压制区方向拆分为 6 个独立选项 =====
+test('结构事件筛选 label：6 个承接/压制独立选项 + BOS/CHoCH/EQH/EQL', () => {
   const map = Object.fromEntries(STRUCTURE_EVENT_TYPE_OPTIONS.map((o) => [o.value, o.label]))
-  assert.equal(map['OB_CREATED'], '承接/压制区形成')
-  assert.equal(map['OB_ENTERED'], '承接/压制区首次回踩')
-  assert.equal(map['OB_MITIGATED'], '承接/压制区失效')
+  // 6 个复合选项：type#direction 编码承接(bullish)/压制(bearish)
+  assert.equal(map['OB_CREATED#bullish'], '承接区形成')
+  assert.equal(map['OB_CREATED#bearish'], '压制区形成')
+  assert.equal(map['OB_ENTERED#bullish'], '承接区首次回踩')
+  assert.equal(map['OB_ENTERED#bearish'], '压制区首次回踩')
+  assert.equal(map['OB_MITIGATED#bullish'], '承接区失效')
+  assert.equal(map['OB_MITIGATED#bearish'], '压制区失效')
+  // 保留项
+  assert.equal(map['BOS'], '结构突破')
+  assert.equal(map['CHoCH'], '结构转折')
+  assert.equal(map['EQH'], '双顶压力')
+  assert.equal(map['EQL'], '双底支撑')
+  // 旧合并值已从 UI 选项移除（历史 URL/preset 由后端按合并语义兼容，不悄悄变成 6 个之一）
+  assert.equal(map['OB_CREATED'], undefined)
+  assert.equal(map['OB_ENTERED'], undefined)
+  assert.equal(map['OB_MITIGATED'], undefined)
+  // 承接/压制方向严格互斥：同一 type 的两个选项方向不同
+  assert.notEqual(map['OB_CREATED#bullish'], map['OB_CREATED#bearish'])
 })
 
 test('布尔映射', () => {
