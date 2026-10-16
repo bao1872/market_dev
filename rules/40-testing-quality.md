@@ -184,6 +184,24 @@ Exploration 只运行需要的 profile/gate。
 
 禁止恢复共享业务库 pytest。
 
+### 4.1 Pure-Unit 启动配置 Sentinel 合同
+
+`PURE_UNIT_TEST=1` 模式下，测试基础设施（`backend/tests/conftest.py`）必须在导入任何
+app 模块之前，为启动级必需配置注入明确不可达的 sentinel。当前必需配置为
+`DATABASE_URL` 与 `REDIS_URL`：
+
+- sentinel 必须指向明确不可达地址（127.0.0.1:1，端口 1 无服务）；`REDIS_URL`
+  sentinel 的逻辑 DB 使用 15，与本地开发约定一致，且不得为 0；
+- 仅当环境变量未显式提供时才注入，不覆盖调用方显式设置的值；
+- 同一注册测试从仓库根目录与 `backend/` 运行结果必须一致：pytest 不得依赖
+  CWD 相对的 `.env` / `config.local.py` 提供必需配置（pydantic-settings 只从
+  CWD 读取 `.env`，缺失即 `MissingRequiredSettingError` 中断 collection）；
+- 任何 pure-unit 测试若真实连接 sentinel 地址，必须因连接拒绝而失败，从而暴露
+  错误的分类；不允许静默通过，不允许回退到开发/生产地址；
+- `APP_ENV` 在纯单元模式下强制为中性 `pure-unit`，使 `app/config.py` 的
+  fail-closed 硬校验变为 no-op；不得修改 `app/config.py` 的 fail-closed 合同
+  来适配测试环境，也不得将开发/生产 `.env` 值注入测试环境。
+
 ## 5. Marker
 
 需要真实 PostgreSQL 的测试显式：

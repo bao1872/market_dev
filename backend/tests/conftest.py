@@ -2,6 +2,8 @@
 
 提供：
 - 测试模式校验（只允许 PURE_UNIT_TEST=1 或 PANJI_REMOTE_VERIFY_DB_TEST=1）
+- 纯单元模式启动配置 sentinel 注入（DATABASE_URL / REDIS_URL 指向不可达地址，
+  在导入任何 app 模块之前生效）
 - 测试专用 async_engine / TestAsyncSessionLocal
 - async DB session fixture（savepoint 模式，被测代码调用 commit 也不污染数据库）
 - 测试数据工厂 fixtures（用户、角色、订阅、邀请码、标的、策略、运行）
@@ -35,11 +37,15 @@ from sqlalchemy.ext.asyncio import (
 
 # ---------------------------------------------------------------------------
 # 纯单元模式必须在导入任何 app 模块之前判定，并注入不可连接的 sentinel。
-# 否则 96 个测试模块在 import 期调用 get_settings() 会因 DATABASE_URL 缺失
-# 而抛 MissingRequiredSettingError，导致整段 collection 中断（Interrupted）。
+# 否则 96 个测试模块在 import 期调用 get_settings() 会因 DATABASE_URL /
+# REDIS_URL 缺失而抛 MissingRequiredSettingError，导致整段 collection
+# 中断（Interrupted）。pydantic-settings 只从 CWD 读取 .env，同一注册测试
+# 从仓库根目录与 backend/ 运行的结果必须一致，故不能依赖 .env 提供必需配置。
 #
 # 设计（CHANGE-20260802-002 配套修复）：
 #   - DATABASE_URL 设为明确不可达的 sentinel（127.0.0.1:1，端口 1 无服务）；
+#   - REDIS_URL 同样设为明确不可达的 sentinel（127.0.0.1:1/15，逻辑 DB 15
+#     与本地开发约定一致，且不为 DB 0）；
 #   - APP_ENV 设为中性 "pure-unit"，使 config.py 的 fail-closed 硬校验
 #     （development 要求 bz_stock / test 要求 _test 后缀 / production 安全校验）
 #     全部变为 no-op —— 不修改 app/config.py 的 fail-closed 合同，其他环境仍强制。
@@ -51,8 +57,15 @@ _PURE_UNIT = os.environ.get("PURE_UNIT_TEST", "").lower() in ("1", "true", "yes"
 _PURE_UNIT_DB_SENTINEL = (
     "postgresql+asyncpg://panji_unit:panji_unit@127.0.0.1:1/panji_unit_unreachable"
 )
+_PURE_UNIT_REDIS_SENTINEL = "redis://127.0.0.1:1/15"
 if _PURE_UNIT and not os.environ.get("DATABASE_URL"):
     os.environ["DATABASE_URL"] = _PURE_UNIT_DB_SENTINEL
+if _PURE_UNIT and not os.environ.get("REDIS_URL"):
+    # REDIS_URL 与 DATABASE_URL 同为启动级必需配置：app/core/security.py 等
+    # 模块在 import 期即调用 get_settings()，缺失时整段 collection 中断。
+    # 仅当调用方未显式提供时才注入，不覆盖显式值。
+    os.environ["REDIS_URL"] = _PURE_UNIT_REDIS_SENTINEL
+if _PURE_UNIT:
     # 强制中性 APP_ENV：覆盖 CI 可能注入的 test/development，使 config.py 的
     # fail-closed 硬校验（库名后缀/安全密钥）变为 no-op；不修改 app/config.py 合同。
     os.environ["APP_ENV"] = "pure-unit"
