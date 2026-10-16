@@ -54,7 +54,7 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
     {(history.data||data)&&<div className={styles.actions}>
       <button type="button" onClick={()=>setPriceMode('mdas')} disabled={!history.data} aria-pressed={priceMode==='mdas'}>完整权威行情</button>
       <button type="button" onClick={()=>setPriceMode('snapshot')} disabled={!data} aria-pressed={priceMode==='snapshot'}>历史模型候选（独立价格版本）</button>
-      <span className={styles.hint}>不同复权来源尚未逐日验同，禁止在MDAS上叠加旧模型候选。</span>
+      <span className={styles.hint}>MDAS显示已确认ZigZag与未评分早期候选；旧模型D1–D3仅在独立快照视图展示。复权来源未对齐，不叠加。</span>
     </div>}
     {data && <>
       {linkMismatch && <div className={styles.warning}>深链候选 ID、决策阶段、观测 ID 或决策日与当前发布内容不匹配。已禁止错误定位，请核对模型版本与事件来源。</div>}
@@ -64,7 +64,7 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
           const obs=candidate?.observations.find(o=>o.stage===s)
           onLocation(data.symbol,id,s,obs?{releaseId:data.release_id,observationId:obs.observation_id,decisionDate:obs.decision_date}:undefined)
         }} />}
-      {priceMode==='mdas' && history.data && <CandidateScoreChart bars={history.data.bars} candidates={[]} selectedId={null} stage={stage}
+      {priceMode==='mdas' && history.data && <CandidateScoreChart bars={history.data.bars} structure={history.data.structure} candidates={[]} selectedId={null} stage={stage}
         onSelect={()=>{}} />}
       <div className={styles.details}>
         <section><h3>选中候选</h3>{selected && !linkMismatch ? <>
@@ -85,7 +85,7 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
         </section>
       </div>
     </>}
-    {!data && history.data && <CandidateScoreChart bars={history.data.bars} candidates={[]} selectedId={null} stage={stage} onSelect={()=>{}} />}
+    {!data && history.data && <CandidateScoreChart bars={history.data.bars} structure={history.data.structure} candidates={[]} selectedId={null} stage={stage} onSelect={()=>{}} />}
   </>
 }
 

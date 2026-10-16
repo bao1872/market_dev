@@ -16,6 +16,7 @@ from app.services.market_data_aggregation_service import MarketDataAggregationSe
 from app.services.calendar_service import get_most_recent_trading_day_async
 from app.services.access_control_service import AccessContext, require_capability
 from app.services.strategy_candidate_snapshot import DatasetInvalid, DatasetUnavailable, get_stock, get_today, read_dataset
+from app.services.strategy_structure_view import StructureUnavailable, structure_from_verified_bars
 
 router = APIRouter(prefix="/v1/strategy-research", tags=["strategy-research-candidates"])
 
@@ -163,6 +164,7 @@ async def strategy_history_bars(
     limit: int = Query(500, ge=85, le=800),
     _: None = Depends(_visible),
     db: AsyncSession = Depends(get_db),
+    include_structure: bool = Query(False),
 ) -> dict:
     if not re.fullmatch(r'(SH|SZ|BJ):[0-9]{6}', symbol):
         raise HTTPException(status_code=422, detail='invalid strategy stock symbol')
@@ -207,7 +209,7 @@ async def strategy_history_bars(
                         'open':op,'high':hi,'low':lo,'close':close})
     if len(records) > limit:
         raise HTTPException(status_code=503, detail='权威行情数量超过请求上限')
-    return {
+    response = {
         'symbol':symbol,'bars':records,'count':len(records),
         'requested_count':limit,'actual_start':records[0]['date'],
         'actual_end':records[-1]['date'],
@@ -221,6 +223,12 @@ async def strategy_history_bars(
         'candidate_overlay_supported':False,
         'candidate_overlay_reason':'历史模型快照为独立版本；尚未完成与此QFQ序列逐日价格同源核验',
     }
+    if include_structure is True:
+        try:
+            response['structure'] = structure_from_verified_bars(response)
+        except StructureUnavailable as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return response
 
 
 @router.get("/stocks/{symbol}/candidates")

@@ -15,15 +15,34 @@ export interface Candidate {
   anchor_price: number; kind: Kind; observations: Observation[]
 }
 export interface StockResearch { symbol: string; release_id: string; bars: Bar[]; candidates: Candidate[] }
+export interface StructurePivot {
+  anchor_date: string; kind: Kind; price: number; seen_at: string; confirmed_at: string
+}
+export interface StructureEarlyCandidate {
+  anchor_date: string; visible_at: string; kind: Kind; price: number; model_scored: false
+}
+export interface StrategyStructure {
+  algorithm: 'frozen-panji-lab-B55-replay'
+  algorithm_sha256: string; as_of: string
+  source_bar_hash: string; adj_factor_hash: string
+  coverage_start: string; coverage_end: string
+  confirmed_pivots: StructurePivot[]; early_candidates: StructureEarlyCandidate[]
+  latest_mutable_count: number; ambiguous_anchor_count: number
+  confirm_lineage: string; decision_pit_verified: false
+  hindsight_label_used_for_model_scoring: false; raw_ohlcv_volume_used_for_features: false
+  notes: string
+}
+
 export interface StrategyHistory {
   symbol:string; bars:Bar[]; count:number; requested_count:number; actual_start:string; actual_end:string
   as_of:string; price_adjustment:'qfq'; source_policy:'MDAS_DB_ONLY'; source_bar_hash:string
   adj_factor_hash:string; history_exhausted:boolean; candidate_overlay_supported:false
   candidate_overlay_reason:string
+  structure?:StrategyStructure
 }
 export async function getStrategyHistory(symbol:string,limit=500):Promise<StrategyHistory> {
   const {data}=await apiClient.get<StrategyHistory>(
-    `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/bars`,{params:{limit}})
+    `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/bars`,{params:{limit,include_structure:true}})
   return data
 }
 export interface DailyRow {

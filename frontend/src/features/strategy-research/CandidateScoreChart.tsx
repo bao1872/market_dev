@@ -8,7 +8,7 @@ import {
   ColorType, CrosshairMode, createChart,
   type IChartApi, type ISeriesApi, type Time, type SeriesMarker,
 } from 'lightweight-charts'
-import type { Bar, Candidate } from '@/api/strategyCandidates'
+import type { Bar, Candidate, StrategyStructure } from '@/api/strategyCandidates'
 import {
   allStageObservations, assertUniqueSortedBars,
   candidateLifecycleAsOf, lifecycleLabel, stageObservation,
@@ -29,9 +29,10 @@ function dateFromTime(t: Time): string {
 }
 
 export default function CandidateScoreChart({
-  bars, candidates, selectedId, stage, onSelect,
+  bars, candidates, selectedId, stage, onSelect, structure,
 }: {
   bars: Bar[]
+  structure?: StrategyStructure
   candidates: Candidate[]
   selectedId: string | null
   stage: string
@@ -90,6 +91,16 @@ export default function CandidateScoreChart({
       time: toTime(b.date), open: b.open, high: b.high,
       low: b.low, close: b.close,
     })))
+    if (structure && structure.source_bar_hash && structure.confirmed_pivots.length >= 2) {
+      // Query-as-of historical structure, NOT decision-day advance-knowledge.
+      const line = c.addLineSeries({
+        color:'#e3be71',lineWidth:2,lastValueVisible:false,
+        priceLineVisible:false,crosshairMarkerVisible:false,
+      })
+      line.setData(structure.confirmed_pivots.map(p => ({
+        time:toTime(p.anchor_date),value:p.price,
+      })))
+    }
     c.timeScale().fitContent()
     chart.current = c
     series.current = candle
@@ -115,7 +126,7 @@ export default function CandidateScoreChart({
       chart.current = null
       series.current = null
     }
-  }, [bars, validationError])
+  }, [bars, validationError, structure])
 
   useEffect(() => {
     if (!series.current || validationError) return
@@ -138,9 +149,18 @@ export default function CandidateScoreChart({
         size: selected ? 2 : 1,
       })
     }
+    if (structure) {
+      for (const node of structure.early_candidates) {
+        if ((node.kind === 'H' && !showH) || (node.kind === 'L' && !showL)) continue
+        markers.push({time:toTime(node.anchor_date),
+          position:node.kind==='L'?'belowBar':'aboveBar',
+          shape:node.kind==='L'?'circle':'square',
+          color:'#93a1b4',text:node.kind==='L'?'L?':'H?',size:1})
+      }
+    }
     markers.sort((a,b) => dateFromTime(a.time).localeCompare(dateFromTime(b.time)))
     series.current.setMarkers(markers)
-  }, [bars, candidates, selectedId, stage, showH, showL, validationError])
+  }, [bars, candidates, selectedId, stage, showH, showL, validationError, structure])
 
   useEffect(() => {
     const c = chart.current
@@ -185,7 +205,7 @@ export default function CandidateScoreChart({
       </div>
       <p className={styles.hint}>
         A股红涨绿跌｜滚轮缩放、鼠标拖动、十字线读日期及OHLC｜
-        当前真实快照仅含 {bars.length} 根K线（{bars[0].date}～{bars[bars.length-1].date}）。
+        当前实际数据含 {bars.length} 根K线（{bars[0].date}～{bars[bars.length-1].date}）。
         选择“1年”也不会伪造缺失历史。
       </p>
       <div className={styles.strategyTradingChart} ref={ref} role="img"
@@ -196,10 +216,20 @@ export default function CandidateScoreChart({
       </p>}
       <p className={styles.hint}>
         L/H 标记固定在<strong>候选锚点日</strong>，模型分数归属于D1/D2/D3<strong>决策日</strong>；
-        灰色表示截至相应观测日锚点已被突破。没有权威确认ZigZag数据时，不绘制伪造的确认折线。
+        灰色表示截至相应观测日锚点已被突破。结构折线必须来自冻结引擎；未确认极值不猜测位置。
       </p>
     </div>
     <aside className={styles.strategyCandidateInspector} aria-label="候选完整阶段研究">
+      {structure && <section>
+        <h3>已确认 ZigZag · B55 冻结引擎</h3>
+        <p className={styles.hint}>截至{structure.as_of}：已确认 {structure.confirmed_pivots.length} 个拐点；
+          早期未评分候选 {structure.early_candidates.length} 个；最后未确认极值 {structure.latest_mutable_count} 个（不绘制位置）。</p>
+        <p className={styles.warning}>黄线=截至查询日已确认的历史结构；灰色 L?/H?=早期候选，非买卖信号。
+          锚点日不等于确认日。此次QFQ视图未核验每个历史决策日的PIT复权，不可解释为当时预测。</p>
+        <div className={styles.scroll}><table><thead><tr><th>锚点</th><th>方向</th><th>确认日期</th></tr></thead>
+          <tbody>{structure.confirmed_pivots.slice(-12).map((p,i)=><tr key={`${p.anchor_date}-${i}`}>
+            <td>{p.anchor_date}</td><td>{p.kind}</td><td>{p.confirmed_at}</td></tr>)}</tbody></table></div>
+      </section>}
       <h3>候选研究 · D1 / D2 / D3</h3>
       {!selected ? <p className={styles.hint}>点击K线上 L/H 候选标记所在日期，查看同一候选的完整三阶段预测。</p> :
       <>
