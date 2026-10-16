@@ -6,6 +6,7 @@ No DB migrations or extra permissions are introduced.
 """
 from __future__ import annotations
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 import hashlib
 import json
 import os
@@ -18,6 +19,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
 from app.services.access_control_service import AccessContext, require_admin
 from app.strategy_integration.release_store import activate_batch, resolve_release_batch
+from app.strategy_integration import rolling_windows as rw
 
 router=APIRouter(prefix='/v1/admin/strategy-research/zigzag', tags=['strategy-research-admin'])
 SHA_RE=re.compile(r'^[0-9a-f]{64}$')
@@ -36,8 +38,14 @@ def _job_root() -> Path:
     return Path(root)
 
 
+def _train_enqueue_ready() -> bool:
+    return os.getenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED') == '1' and os.getenv('PANJI_STRATEGY_TRAIN_RUNTIME_READY') == '1'
+
+
 def _save_job(kind:str,payload:dict[str,Any]) -> dict[str,Any]:
     _require_write_enabled()
+    if kind == 'TRAIN' and not _train_enqueue_ready():
+        raise HTTPException(status_code=503,detail='独立训练运行时尚未核验，禁止创建训练任务')
     root=_job_root()/'queue'
     root.mkdir(parents=True,exist_ok=True)
     j={'job_id':uuid.uuid4().hex,'kind':kind,'status':'QUEUED',
@@ -60,6 +68,7 @@ class DateRange(BaseModel):
 
 
 class TrainWindow(BaseModel):
+    as_of:date
     train:DateRange
     val:DateRange
     test:DateRange
@@ -69,6 +78,11 @@ class TrainWindow(BaseModel):
     def no_overlap(self):
         if self.train.end>=self.val.start or self.val.end>=self.test.start:
             raise ValueError('train/val/test windows overlap')
+        expected = rw.rolling_windows(self.as_of)['windows']
+        for name in ('train','val','test'):
+            supplied = getattr(self,name)
+            if (supplied.start.isoformat(),supplied.end.isoformat()) != tuple(expected[name]):
+                raise ValueError('TRAIN_WINDOW_NOT_ROLLING_24_6_3')
         return self
 
 
@@ -81,12 +95,28 @@ class PublishRequest(BaseModel):
     candidate_report_sha256:str=Field(min_length=64,max_length=64)
 
 
+@router.get('/train/windows')
+def training_windows(ctx:AccessContext=Depends(require_admin)) -> dict:
+    today=datetime.now(ZoneInfo('Asia/Shanghai')).date()
+    w=rw.rolling_windows(today)
+    return {
+        'as_of':today.isoformat(),
+        'train':{'start':w['windows']['train'][0],'end':w['windows']['train'][1]},
+        'val':{'start':w['windows']['val'][0],'end':w['windows']['val'][1]},
+        'test':{'start':w['windows']['test'][0],'end':w['windows']['test'][1]},
+        'trees':300,
+        'status':'AUTHORITATIVE_ROLLING_24_6_3',
+        'train_enqueue_enabled': os.getenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED')=='1' and
+                                 os.getenv('PANJI_STRATEGY_TRAIN_RUNTIME_READY')=='1',
+    }
+
+
 @router.post('/train/preview')
 def preview_training(request:TrainWindow,ctx:AccessContext=Depends(require_admin)) -> dict:
-    return {'valid':True,'split_by':'candidate_d1_decision_date',
-            'maturity_checked_at':'each_split_end', 'label_contract':{'L':'HH','H':'LL'},
+    return {'valid':False,'split_by':'candidate_d1_decision_date',
+            'maturity_checked_at':None, 'label_contract':{'L':'HH','H':'LL'},
             'status':'SCHEMA_PREVIEW_ONLY',
-            'message':'完整样本成熟度/数量/PIT 检查由独立 worker 在排队执行前完成'}
+            'message':'仅完成日期合同预检；样本成熟度/数量/PIT 尚未检查，必须由隔离训练链验证'}
 
 
 @router.post('/train-runs',status_code=202)

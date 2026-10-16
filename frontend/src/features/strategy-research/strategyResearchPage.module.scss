@@ -71,3 +71,10 @@
 .strategySearchResults button:hover{background:#29415a}
 .strategySearchResults small{color:#adbacb}
 @media(max-width:1120px){.strategyStockGrid{grid-template-columns:minmax(0,1fr)}}
+
+/* V2: compact, backend-authoritative training ranges. */
+.strategyRollingCards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:12px 0 16px}
+.strategyRollingCard{min-width:0;display:grid;gap:6px;background:#1a2635;border:1px solid #384c64;padding:14px;border-radius:8px}
+.strategyRollingCard small{font-size:12px;color:#a4b6cd}
+.strategyRollingCard strong{font-size:13px;font-variant-numeric:tabular-nums;white-space:normal;color:#eff4fb}
+@media(max-width:850px){.strategyRollingCards{grid-template-columns:1fr}}

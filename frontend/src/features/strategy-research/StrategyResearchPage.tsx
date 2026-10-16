@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
-import { getDailyResearch, getStockResearch, type DailyRow } from '@/api/strategyCandidates'
+import { getDailyResearch, getStockResearch, getStrategyHistory, type DailyRow } from '@/api/strategyCandidates'
 import StrategyEvaluationPage from '@/features/strategy-evaluation/StrategyEvaluationPage'
 import CandidateScoreChart from './CandidateScoreChart'
 import StrategyStockSearch from './StrategyStockSearch'
@@ -30,6 +30,8 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
   onLocation: (symbol: string, id: string | null, stage?: string, context?: LinkContext) => void
 }) {
   const query = useQuery({ queryKey:['strategy-research','stock',urlSymbol,releaseId], queryFn:()=>getStockResearch(urlSymbol, releaseId??undefined), enabled:isSymbol(urlSymbol), staleTime:120000 })
+  const history = useQuery({queryKey:['strategy-research','bars',urlSymbol,500],queryFn:()=>getStrategyHistory(urlSymbol,500),enabled:isSymbol(urlSymbol),staleTime:120000})
+  const [priceMode,setPriceMode] = useState<'mdas'|'snapshot'>(focusedId?'snapshot':'mdas')
   const data = query.data
   const selected = data?.candidates.find(c=>c.candidate_id===focusedId) ?? null
   const candidateObservation = selected?.observations.find(o=>o.stage===stage)
@@ -45,20 +47,29 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
       <StrategyStockSearch symbol={urlSymbol} onChoose={s=>onLocation(s,null)} /></div>
     <p className={styles.hint}>低点 L 和高点 H 是早期候选，不等于交易建议；点击候选查看 D1–D3，并区分历史锚点是否已被突破。</p>
     {query.isLoading && <div className={styles.empty}>读取已发布候选数据…</div>}
-    {query.isError && <div className={styles.empty}>{errorText(query.error)}</div>}
+    {query.isError && <div className={styles.empty}>该股票尚无已发布模型候选；仍可查询权威历史K线。</div>}
+    {history.isError&&<p className={styles.warning}>权威500根历史K线不可用：{errorText(history.error)}</p>}
+    {history.data&&<p className={styles.meta}>权威MDAS历史行情：{history.data.count}根，{history.data.actual_start}～{history.data.actual_end}；QFQ，DB_ONLY，截止{history.data.as_of}。</p>}
+    {data&&<p className={styles.meta}>历史模型快照：{data.release_id} · 候选{data.candidates.length}个 · 旧快照价格窗口{data.bars.length}根（不等于当前行情）</p>}
+    {(history.data||data)&&<div className={styles.actions}>
+      <button type="button" onClick={()=>setPriceMode('mdas')} disabled={!history.data} aria-pressed={priceMode==='mdas'}>完整权威行情</button>
+      <button type="button" onClick={()=>setPriceMode('snapshot')} disabled={!data} aria-pressed={priceMode==='snapshot'}>历史模型候选（独立价格版本）</button>
+      <span className={styles.hint}>不同复权来源尚未逐日验同，禁止在MDAS上叠加旧模型候选。</span>
+    </div>}
     {data && <>
-      <p className={styles.meta}>股票 {data.symbol} · 模型发布 {data.release_id} · 候选 {data.candidates.length} 个 · 行情 {data.bars.length} 条</p>
       {linkMismatch && <div className={styles.warning}>深链候选 ID、决策阶段、观测 ID 或决策日与当前发布内容不匹配。已禁止错误定位，请核对模型版本与事件来源。</div>}
-      <CandidateScoreChart bars={data.bars} candidates={data.candidates} selectedId={validFocus} stage={stage}
+      {(priceMode==='snapshot'||!history.data) && <CandidateScoreChart bars={data.bars} candidates={data.candidates} selectedId={validFocus} stage={stage}
         onSelect={(id,s)=>{
           const candidate=data.candidates.find(c=>c.candidate_id===id)
           const obs=candidate?.observations.find(o=>o.stage===s)
           onLocation(data.symbol,id,s,obs?{releaseId:data.release_id,observationId:obs.observation_id,decisionDate:obs.decision_date}:undefined)
-        }} />
+        }} />}
+      {priceMode==='mdas' && history.data && <CandidateScoreChart bars={history.data.bars} candidates={[]} selectedId={null} stage={stage}
+        onSelect={()=>{}} />}
       <div className={styles.details}>
         <section><h3>选中候选</h3>{selected && !linkMismatch ? <>
           <p>{selected.candidate_id} · {selected.kind==='L'?'L 买入观察':'H 卖出风险'} · 锚点 {selected.anchor_date}</p>
-          <div className={styles.stageButtons}>{selected.observations.map(o=><button type="button" key={o.observation_id} className={chosenObservation?.stage===o.stage?styles.active:''} onClick={()=>onLocation(data.symbol, selected.candidate_id,o.stage, {releaseId:data.release_id, observationId:o.observation_id, decisionDate:o.decision_date})}>{o.stage} · {o.decision_date}</button>)}</div>
+          <div className={styles.stageButtons}>{selected.observations.map(o=><button type="button" key={o.observation_id} className={chosenObservation?.stage===o.stage?styles.active:''} onClick={()=>{setPriceMode('snapshot');onLocation(data.symbol, selected.candidate_id,o.stage, {releaseId:data.release_id, observationId:o.observation_id, decisionDate:o.decision_date})}}>{o.stage} · {o.decision_date}</button>)}</div>
           {chosenObservation && <dl className={styles.scoregrid}>
             <div><dt>L1 模型分数</dt><dd>{fmt(chosenObservation.l1_score)} <small>门槛 {fmt(chosenObservation.l1_threshold)}</small></dd></div>
             <div><dt>L2 条件分数</dt><dd>{fmt(chosenObservation.l2_score)} <small>门槛 {fmt(chosenObservation.l2_threshold)}</small></dd></div>
@@ -70,10 +81,11 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
         </>:<p>点击图上候选点或下方表格中的一行。</p>}</section>
         <section><h3>所有候选 · H/L 同表</h3>
           <div className={styles.scroll}><table><thead><tr><th>锚点日</th><th>方向</th><th>候选 ID</th><th>最近 D</th><th>L1</th><th>L2</th><th>操作</th></tr></thead>
-            <tbody>{data.candidates.map(c=>{const o=c.observations[c.observations.length-1];return <tr key={c.candidate_id}><td>{c.anchor_date}</td><td>{c.kind==='L'?'BUY':'SELL'}</td><td>{c.candidate_id}</td><td>{o?.stage??'—'}</td><td>{fmt(o?.l1_score)}</td><td>{fmt(o?.l2_score)}</td><td><button type="button" onClick={()=>onLocation(data.symbol,c.candidate_id,o?.stage, o?{releaseId:data.release_id, observationId:o.observation_id, decisionDate:o.decision_date}:undefined)}>定位</button></td></tr>})}</tbody></table></div>
+            <tbody>{data.candidates.map(c=>{const o=c.observations[c.observations.length-1];return <tr key={c.candidate_id}><td>{c.anchor_date}</td><td>{c.kind==='L'?'BUY':'SELL'}</td><td>{c.candidate_id}</td><td>{o?.stage??'—'}</td><td>{fmt(o?.l1_score)}</td><td>{fmt(o?.l2_score)}</td><td><button type="button" onClick={()=>{setPriceMode('snapshot');onLocation(data.symbol,c.candidate_id,o?.stage, o?{releaseId:data.release_id, observationId:o.observation_id, decisionDate:o.decision_date}:undefined)}}>定位</button></td></tr>})}</tbody></table></div>
         </section>
       </div>
     </>}
+    {!data && history.data && <CandidateScoreChart bars={history.data.bars} candidates={[]} selectedId={null} stage={stage} onSelect={()=>{}} />}
   </>
 }
 

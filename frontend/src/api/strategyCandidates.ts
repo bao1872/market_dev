@@ -15,6 +15,17 @@ export interface Candidate {
   anchor_price: number; kind: Kind; observations: Observation[]
 }
 export interface StockResearch { symbol: string; release_id: string; bars: Bar[]; candidates: Candidate[] }
+export interface StrategyHistory {
+  symbol:string; bars:Bar[]; count:number; requested_count:number; actual_start:string; actual_end:string
+  as_of:string; price_adjustment:'qfq'; source_policy:'MDAS_DB_ONLY'; source_bar_hash:string
+  adj_factor_hash:string; history_exhausted:boolean; candidate_overlay_supported:false
+  candidate_overlay_reason:string
+}
+export async function getStrategyHistory(symbol:string,limit=500):Promise<StrategyHistory> {
+  const {data}=await apiClient.get<StrategyHistory>(
+    `/v1/strategy-research/stocks/${encodeURIComponent(symbol)}/bars`,{params:{limit}})
+  return data
+}
 export interface DailyRow {
   observation_id: string; candidate_id: string; symbol: string; kind: Kind; stage: Stage
   l1_score: number | null; l2_score: number | null; joint_alert: boolean; first_breakout: boolean

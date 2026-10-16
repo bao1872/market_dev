@@ -1,8 +1,12 @@
-/** Admin-only control plane. Every write requires backend admin RBAC + deployment gate. */
+/** Admin control plane: the server owns rolling split dates and task readiness. */
 import { apiClient } from './client'
 
 export type DateWindow = { start: string; end: string }
-export type TrainConfig = { train: DateWindow; val: DateWindow; test: DateWindow; trees: number }
+export type TrainConfig = { as_of:string; train: DateWindow; val: DateWindow; test: DateWindow; trees: number }
+export type TrainWindows = TrainConfig & {
+  status: 'AUTHORITATIVE_ROLLING_24_6_3'
+  train_enqueue_enabled: boolean
+}
 export interface ModelRelease {
   release_id: string | null
   bundle_sha256: string | null
@@ -14,6 +18,10 @@ export interface ReleaseList {
   status?: string
   active_release: { release_id: string; activated_at: string } | null
   releases: ModelRelease[]
+}
+export async function getTrainingWindows():Promise<TrainWindows> {
+  const {data}=await apiClient.get<TrainWindows>('/v1/admin/strategy-research/zigzag/train/windows')
+  return data
 }
 export async function listModelReleases(): Promise<ReleaseList> {
   const {data} = await apiClient.get<ReleaseList>('/v1/admin/strategy-research/zigzag/model-releases')

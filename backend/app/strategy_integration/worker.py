@@ -41,6 +41,31 @@ def _predict_cmd(runtime, bars, inst, trade_date, export_dir, snap_root,
     return cmd
 
 
+def _train_cmd(runtime: str, bars: Path, instruments: Path, cfg: dict,
+               output_dir: Path, export_dir: Path) -> list[str]:
+    """Build ONLY a canonical PIT training command with frozen 24/6/3 windows.
+
+    Never trust user-configured split dates independently from rolling_windows.
+    """
+    from datetime import date as _date
+    from . import rolling_windows as rw
+    as_of = _date.fromisoformat(cfg['as_of'])
+    expected = rw.rolling_windows(as_of)['windows']
+    for key in ('train','val','test'):
+        if cfg[key] != {'start':expected[key][0], 'end':expected[key][1]}:
+            raise RuntimeError('TRAIN_WINDOW_NOT_ROLLING_24_6_3')
+    if not 50 <= int(cfg['trees']) <= 2000:
+        raise RuntimeError('TRAIN_TREES_OUT_OF_RANGE')
+    return [runtime, '-m','app.strategy_integration.training',
+            '--source-mode','canonical',
+            '--as-of',as_of.isoformat(),
+            '--bars',str(bars),'--instruments',str(instruments),
+            '--export-dir',str(export_dir),
+            '--output-dir',str(output_dir),
+            '--trees',str(cfg['trees'])]
+
+
+
 def _roots() -> tuple[Path,Path,Path,Path]:
     if not enabled():raise RuntimeError('WORKER_DISABLED_PENDING_DEPLOY_APPROVAL')
     r=os.getenv('PANJI_STRATEGY_JOB_ROOT','')
@@ -67,26 +92,21 @@ def process_one() -> dict:
         payload=job['payload'];k=job['kind'];job_dir=jobs/'outputs'/job['job_id']
         if job_dir.exists():raise RuntimeError('JOB_OUTPUT_DIR_EXISTS')
         runtime=os.getenv('PANJI_STRATEGY_PYTHON',sys.executable)
-        if k=='PREDICT':
-            # Production entrance: authoritative QFQ daily bars exported read-only from
-            # the production DB through MarketDataAggregationService.get_bars_batch.
-            # The offline diagnostic parquet is never used as an automatic fallback.
-            export_dir=jobs/'exports'/job['job_id']
-            # The daily worker must read the activated per-symbol model registry so
-            # symbols with an active personal model are scored GLOBAL_PLUS_PERSONAL
-            # and the rest are explicitly GLOBAL_ONLY (never impersonated).
-            cmd=_predict_cmd(runtime, bars, inst, payload['trade_date'], export_dir,
-                             snap_root, os.getenv('PANJI_STRATEGY_PERSONAL_REGISTRY',''))
-        elif k=='TRAIN':
-            cfg=payload
-            cmd=[runtime,'-m','app.strategy_integration.training','--bars',str(bars),'--instruments',str(inst),
-                 '--output-dir',str(job_dir),
-                 '--train-start',cfg['train']['start'],'--train-end',cfg['train']['end'],
-                 '--val-start',cfg['val']['start'],'--val-end',cfg['val']['end'],
-                 '--test-start',cfg['test']['start'],'--test-end',cfg['test']['end'],
-                 '--trees',str(cfg['trees'])]
-        else:raise RuntimeError('UNKNOWN_JOB_KIND')
         try:
+            if k=='PREDICT':
+                # Production entrance: authoritative QFQ daily bars exported read-only from
+                # the production DB through MarketDataAggregationService.get_bars_batch.
+                # The offline diagnostic parquet is never used as an automatic fallback.
+                export_dir=jobs/'exports'/job['job_id']
+                # The daily worker must read the activated per-symbol model registry so
+                # symbols with an active personal model are scored GLOBAL_PLUS_PERSONAL
+                # and the rest are explicitly GLOBAL_ONLY (never impersonated).
+                cmd=_predict_cmd(runtime, bars, inst, payload['trade_date'], export_dir,
+                                 snap_root, os.getenv('PANJI_STRATEGY_PERSONAL_REGISTRY',''))
+            elif k=='TRAIN':
+                cfg=payload
+                cmd=_train_cmd(runtime,bars,inst,cfg,job_dir,jobs/'exports'/job['job_id'])
+            else:raise RuntimeError('UNKNOWN_JOB_KIND')
             completed=subprocess.run(cmd,capture_output=True,text=True,timeout=10800,check=False,
                                      cwd=os.environ.get('PANJI_STRATEGY_CODE_ROOT') or None)
             job.update({'status':'SUCCEEDED' if completed.returncode==0 else 'FAILED',

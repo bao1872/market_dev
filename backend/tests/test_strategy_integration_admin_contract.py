@@ -16,9 +16,9 @@ def test_admin_write_controls_fail_closed_before_deploy(monkeypatch):
     app=FastAPI();app.include_router(router)
     app.dependency_overrides[require_authenticated]=lambda:ctx(True)
     client=TestClient(app)
-    req={'train':{'start':'2023-01-01','end':'2024-12-31'},
-         'val':{'start':'2025-01-01','end':'2025-12-31'},
-         'test':{'start':'2026-01-01','end':'2026-09-30'},'trees':300}
+    req={'as_of':'2026-10-16','train':{'start':'2024-01-01','end':'2025-12-31'},
+         'val':{'start':'2026-01-01','end':'2026-06-30'},
+         'test':{'start':'2026-07-01','end':'2026-09-30'},'trees':300}
     assert client.post('/v1/admin/strategy-research/zigzag/train/preview',json=req).status_code==200
     assert client.post('/v1/admin/strategy-research/zigzag/train-runs',json=req).status_code==503
     app.dependency_overrides[require_authenticated]=lambda:ctx(False)
