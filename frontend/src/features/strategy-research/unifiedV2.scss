@@ -1,0 +1,251 @@
+#panji-research-v2{--bg:#09121e;--nav:#0b1523;--panel:#111e2e;--panel2:#142337;--card:#101d2c;--border:#25374b;--text:#e7f1fc;--muted:#95a9bd;--dim:#647f99;--blue:#43b5ef;--orange:#ffb56a;--teal:#3fd6b6;--purple:#a6a0ff;--red:#fa7887;--gold:#f4d076;--black:#06101d}
+#panji-research-v2 *{box-sizing:border-box}
+#panji-research-v2{scroll-behavior:smooth}
+#panji-research-v2{background:var(--bg);color:var(--text);font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;margin:0;font-size:13px}
+#panji-research-v2 button, #panji-research-v2 select, #panji-research-v2 input{font:inherit}
+#panji-research-v2 button, #panji-research-v2 select{cursor:pointer}
+#panji-research-v2 button:focus-visible, #panji-research-v2 select:focus-visible, #panji-research-v2 input:focus-visible, #panji-research-v2 [tabindex]:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+#panji-research-v2 button:disabled{opacity:.38;cursor:not-allowed}
+#panji-research-v2 b, #panji-research-v2 strong{font-weight:670}
+#panji-research-v2 a{color:inherit;text-decoration:none}
+#panji-research-v2 small{font-size:11px}
+#panji-research-v2 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-variant-numeric:tabular-nums}
+#panji-research-v2 .muted{color:var(--muted)}
+#panji-research-v2 .dim{color:var(--dim)}
+#panji-research-v2 .buy{color:var(--blue)}
+#panji-research-v2 .sell{color:var(--orange)}
+#panji-research-v2 .good{color:var(--teal)}
+#panji-research-v2 .bad{color:var(--red)}
+#panji-research-v2 .gold{color:var(--gold)}
+#panji-research-v2 .hide, #panji-research-v2 [hidden]{display:none!important}
+#panji-research-v2 .topbar{height:59px;background:#0b1522;border-bottom:1px solid #213248;display:flex;align-items:center;gap:26px;padding:0 30px;position:sticky;top:0;z-index:30}
+#panji-research-v2 .brand{display:flex;gap:9px;align-items:center;font-weight:790;font-size:18px;letter-spacing:1.5px;white-space:nowrap}
+#panji-research-v2 .brandmark{width:25px;height:25px;border:2px solid var(--teal);transform:rotate(-11deg);border-radius:7px;position:relative}
+#panji-research-v2 .brandmark:before{content:"";position:absolute;top:9px;left:3px;width:15px;height:3px;background:var(--teal);transform:rotate(-40deg)}
+#panji-research-v2 .topnav{display:flex;height:100%;align-items:stretch;gap:8px}
+#panji-research-v2 .topnav a{display:flex;align-items:center;padding:0 21px;color:#9baebd;border-bottom:2px solid transparent;font-size:13px}
+#panji-research-v2 .topnav a.active{color:#f1f7fc;border-bottom-color:var(--teal);background:#152338;font-weight:700}
+#panji-research-v2 .topright{margin-left:auto;display:flex;align-items:center;gap:13px;white-space:nowrap}
+#panji-research-v2 .live-dot{width:7px;height:7px;background:var(--teal);border-radius:50%;display:inline-block;margin-right:5px;box-shadow:0 0 0 3px #3fd6b61b}
+#panji-research-v2 .role-select{max-width:142px}
+#panji-research-v2 .select, #panji-research-v2 .field{height:34px;padding:0 11px;border:1px solid var(--border);border-radius:7px;background:#101e30;color:var(--text);min-width:0}
+#panji-research-v2 .field{cursor:text}
+#panji-research-v2 .select option{background:#142335}
+#panji-research-v2 .tag{display:inline-flex;gap:4px;align-items:center;border-radius:5px;padding:3px 7px;white-space:nowrap;background:#1d3548;color:#a9daf5;font-size:10.5px;border:1px solid #2e5264}
+#panji-research-v2 .tag.orange{background:#402d21;color:#ffd0a2;border-color:#705033}
+#panji-research-v2 .tag.green{background:#15352e;color:#86edd4;border-color:#276050}
+#panji-research-v2 .tag.gray{background:#1b2937;color:#a9b9c7;border-color:#34445a}
+#panji-research-v2 .tag.red{background:#412630;color:#ffb3bc;border-color:#724455}
+#panji-research-v2 .tag.purple{background:#24263f;color:#c8c1ff;border-color:#4c4a78}
+#panji-research-v2 .shell{max-width:1650px;margin:0 auto;padding:23px 30px 80px}
+#panji-research-v2 .headline{display:flex;align-items:flex-start;gap:22px;justify-content:space-between}
+#panji-research-v2 .eyebrow{font-size:10px;letter-spacing:2px;font-weight:700;color:var(--teal);text-transform:uppercase}
+#panji-research-v2 .headline h1{font-size:23px;margin:7px 0 6px;font-weight:790;letter-spacing:.3px}
+#panji-research-v2 .subtitle{font-size:12px;color:var(--muted);line-height:1.7}
+#panji-research-v2 .header-actions{display:flex;gap:8px;align-items:center;padding-top:3px}
+#panji-research-v2 .btn{border:1px solid #37506a;color:#d3e8f9;background:#192b3f;border-radius:7px;padding:9px 13px;font-weight:650;white-space:nowrap;transition:background .15s;cursor:pointer}
+#panji-research-v2 .btn:hover{background:#244057}
+#panji-research-v2 .btn.primary{background:#267e82;border-color:#349fa0;color:#f1ffff}
+#panji-research-v2 .btn.primary:hover{background:#319c9e}
+#panji-research-v2 .btn.ghost{background:transparent}
+#panji-research-v2 .btn.tiny{padding:5px 10px;font-size:11px}
+#panji-research-v2 .btn:disabled:hover{background:initial}
+#panji-research-v2 .head-meta{display:flex;gap:10px;align-items:center;margin:17px 0 17px;flex-wrap:wrap}
+#panji-research-v2 .meta{border:1px solid var(--border);border-radius:6px;background:#0d1a2b;display:flex;align-items:center;gap:8px;padding:7px 10px;color:var(--muted);font-size:11px}
+#panji-research-v2 .meta b{color:var(--text)}
+#panji-research-v2 .tabs{border-bottom:1px solid var(--border);display:flex;gap:28px;align-items:stretch;margin:4px 0 20px}
+#panji-research-v2 .tab{border:none;border-bottom:2px solid transparent;background:none;color:#95a9bd;padding:14px 2px;font-size:14px;font-weight:650;white-space:nowrap}
+#panji-research-v2 .tab.active{color:#e8f8fa;border-bottom-color:var(--teal)}
+#panji-research-v2 .tab .n{font-size:10px;color:var(--dim);padding-left:5px}
+#panji-research-v2 .tab .lock{font-size:10px;margin-left:5px;color:var(--dim)}
+#panji-research-v2 .tab:hover{color:#fff}
+#panji-research-v2 .panel{background:var(--panel);border:1px solid var(--border);border-radius:10px;overflow:hidden;min-width:0}
+#panji-research-v2 .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:17px 19px 14px;border-bottom:1px solid #23354a}
+#panji-research-v2 .panel-head h2{margin:0;font-size:14px;font-weight:750;line-height:1.3}
+#panji-research-v2 .hint{font-size:11px;line-height:1.6;color:var(--muted)}
+#panji-research-v2 .panel-head .hint{margin-top:5px}
+#panji-research-v2 .panel-body{padding:17px 19px}
+#panji-research-v2 .control-row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+#panji-research-v2 .smalllabel{font-size:11px;color:var(--muted)}
+#panji-research-v2 .tinylabel{font-size:10px;color:#89a3b9}
+#panji-research-v2 .seg{display:inline-flex;border:1px solid #344b63;border-radius:7px;overflow:hidden}
+#panji-research-v2 .seg button{background:#122336;border:0;padding:8px 12px;color:#a7b8cc;border-right:1px solid #344b63}
+#panji-research-v2 .seg button:last-child{border-right:0}
+#panji-research-v2 .seg button.active{background:#264b56;color:#dcfffb;font-weight:750}
+#panji-research-v2 .line-sep{height:1px;background:#23354a;margin:15px 0}
+#panji-research-v2 .toolbar{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:14px}
+#panji-research-v2 .toolbar .left, #panji-research-v2 .toolbar .right{display:flex;align-items:center;gap:11px;flex-wrap:wrap}
+#panji-research-v2 .toolbar h2{font-size:16px;margin:0}
+#panji-research-v2 .mini-stat{display:flex;gap:9px;align-items:center;border:1px solid #2b4057;background:#0e1c2d;border-radius:7px;padding:8px 11px;color:var(--muted);white-space:nowrap}
+#panji-research-v2 .mini-stat b{font-size:15px;color:var(--text)}
+#panji-research-v2 .stock-grid{display:grid;grid-template-columns:minmax(0,1.95fr) minmax(318px,.87fr);gap:14px;align-items:start}
+#panji-research-v2 .chart-card{display:flex;flex-direction:column;min-width:0}
+#panji-research-v2 .chart-stage{padding:12px 13px 3px;min-height:340px;background:#0c1929;position:relative}
+#panji-research-v2 .chart-stage svg{display:block;width:100%;height:auto;max-height:490px}
+#panji-research-v2 .chart-foot{display:flex;gap:16px;flex-wrap:wrap;align-items:center;padding:12px 17px;border-top:1px solid #23354a;color:var(--muted);font-size:11px}
+#panji-research-v2 .legend-dot{display:inline-block;width:10px;height:10px;border-radius:3px;margin-right:5px;vertical-align:-1px}
+#panji-research-v2 .circle-guide{display:inline-block;width:9px;height:9px;border:1.8px solid currentColor;border-radius:100%;margin-right:5px}
+#panji-research-v2 .chart-label{font-size:12px;fill:#cde1f2}
+#panji-research-v2 .stock-info{display:grid;gap:13px;align-content:start}
+#panji-research-v2 .inspector-heading{display:flex;justify-content:space-between;gap:9px;align-items:center}
+#panji-research-v2 .inspector-heading .name{font-size:16px;font-weight:770}
+#panji-research-v2 .inspector-heading .info{font-size:11px;color:var(--muted);margin-top:4px}
+#panji-research-v2 .scorecard{padding:11px 12px;background:#0d1d30;border:1px solid #2b3d54;border-radius:7px;margin:10px 0 0}
+#panji-research-v2 .scoreline{display:flex;justify-content:space-between;gap:12px;align-items:center;margin:7px 0}
+#panji-research-v2 .scoreline .val{font-weight:780;font-size:16px;font-variant-numeric:tabular-nums}
+#panji-research-v2 .meter{height:5px;border-radius:4px;background:#25394c;margin-top:5px;overflow:hidden}
+#panji-research-v2 .meter i{display:block;height:100%;border-radius:4px}
+#panji-research-v2 .stages{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+#panji-research-v2 .stage-card{border:1px solid #2f445d;background:#0c1b2a;border-radius:7px;text-align:left;padding:10px 8px;color:var(--muted);min-width:0}
+#panji-research-v2 .stage-card.active{background:#19323f;border-color:var(--teal);box-shadow:inset 0 0 0 1px #347e76}
+#panji-research-v2 .stage-card strong{display:block;font-size:12px;color:var(--text)}
+#panji-research-v2 .stage-card em{font-size:10px;font-style:normal;color:var(--dim)}
+#panji-research-v2 .stage-card small{display:block;margin-top:6px;font-variant-numeric:tabular-nums}
+#panji-research-v2 .section-caption{display:flex;justify-content:space-between;align-items:center;margin-bottom:11px;color:#cfe0f2;font-weight:700}
+#panji-research-v2 .notice{padding:9px 11px;border-left:3px solid #2c958e;background:#102b34;color:#a9cfcb;font-size:11px;line-height:1.65;border-radius:4px}
+#panji-research-v2 .notice.warning{border-color:#bd8253;background:#30251f;color:#e0c2a9}
+#panji-research-v2 .table-wrap{width:100%;overflow-x:auto}
+#panji-research-v2 .data-table{border-collapse:collapse;width:100%;min-width:770px;text-align:left;font-size:11.5px}
+#panji-research-v2 .data-table th{background:#152538;color:#88a2b9;font-size:10.5px;font-weight:650;padding:11px 13px;white-space:nowrap;border-bottom:1px solid #2c4056}
+#panji-research-v2 .data-table td{border-bottom:1px solid #25384b;padding:11px 13px;white-space:nowrap;color:#d3e2ef}
+#panji-research-v2 .data-table tbody tr:last-child td{border-bottom:none}
+#panji-research-v2 .data-table tbody tr[data-event], #panji-research-v2 .data-table tbody tr[data-go]{cursor:pointer}
+#panji-research-v2 .data-table tbody tr[data-event]:hover, #panji-research-v2 .data-table tbody tr[data-go]:hover{background:#1b3346}
+#panji-research-v2 .data-table tbody tr.selected{background:#173a42}
+#panji-research-v2 .stock-ticker b{display:block;color:#eff9ff;font-size:12px}
+#panji-research-v2 .stock-ticker small{display:block;color:#87a5bd;margin-top:2px}
+#panji-research-v2 .link{color:#63c4ea!important;font-weight:750}
+#panji-research-v2 .pill{border:1px solid #34536d;border-radius:20px;display:inline-block;padding:4px 8px;font-size:10px;background:#1a3046}
+#panji-research-v2 .filters{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+#panji-research-v2 .range{accent-color:var(--teal);width:120px}
+#panji-research-v2 .score-trace{width:100%;height:92px}
+#panji-research-v2 .candidate-table{margin-top:14px}
+#panji-research-v2 .overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:11px;margin:13px 0 16px}
+#panji-research-v2 .metric{background:#111f30;border:1px solid var(--border);border-radius:8px;padding:15px}
+#panji-research-v2 .metric .k{font-size:11px;color:var(--muted);margin-bottom:8px}
+#panji-research-v2 .metric .v{font-size:23px;font-weight:790}
+#panji-research-v2 .metric .d{font-size:10px;color:var(--dim);margin-top:7px;line-height:1.5}
+#panji-research-v2 .today-board{display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:14px}
+#panji-research-v2 .pipe{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin:13px 0}
+#panji-research-v2 .pipe .node{background:#0e2131;border:1px solid #294658;border-radius:6px;padding:11px 8px}
+#panji-research-v2 .pipe .node b{font-size:10px;display:block}
+#panji-research-v2 .pipe .node small{display:block;color:#82b8b7;margin-top:7px}
+#panji-research-v2 .pipe .node:last-child{background:#15352e;border-color:#336e60}
+#panji-research-v2 .inspect-row{display:flex;justify-content:space-between;align-items:center;gap:8px;margin:12px 0;border-bottom:1px dashed #294056;padding-bottom:9px}
+#panji-research-v2 .inspect-row span{color:var(--muted);font-size:11px}
+#panji-research-v2 .inspect-row b{color:#dce9f6;font-variant-numeric:tabular-nums}
+#panji-research-v2 .eval-panels{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(310px,.74fr);gap:14px}
+#panji-research-v2 .eval-svg{width:100%;height:auto;display:block;background:#0b1929}
+#panji-research-v2 .checkmodel{display:inline-flex;align-items:center;gap:5px;font-size:11px;border:1px solid #2d475e;background:#172b40;padding:7px 10px;border-radius:7px;cursor:pointer}
+#panji-research-v2 .checkmodel input{accent-color:var(--teal)}
+#panji-research-v2 .bars-small{display:flex;align-items:center;gap:9px;font-size:11px;margin:16px 0}
+#panji-research-v2 .bars-small b{width:26px}
+#panji-research-v2 .bars-small i{height:9px;border-radius:3px;display:inline-block}
+#panji-research-v2 .kv{display:grid;grid-template-columns:repeat(2,1fr);gap:10px}
+#panji-research-v2 .kv>div{background:#102538;border:1px solid #2a4155;padding:12px;border-radius:8px}
+#panji-research-v2 .kv small{display:block;color:var(--muted);margin-bottom:5px}
+#panji-research-v2 .kv b{font-size:18px}
+#panji-research-v2 .candidate-detail summary{padding:14px 17px;font-weight:700;cursor:pointer;color:#bfd1e5;list-style-position:inside}
+#panji-research-v2 .candidate-detail[open] summary{border-bottom:1px solid var(--border)}
+#panji-research-v2 .empty{padding:35px 16px;text-align:center;color:var(--muted)}
+#panji-research-v2 .sim-note{margin:14px 0;color:#9bb0c2;font-size:10.5px;line-height:1.6}
+#panji-research-v2 .accent-bar{width:3px;background:var(--teal);border-radius:3px;align-self:stretch}
+#panji-research-v2 .admin-grid{display:grid;grid-template-columns:minmax(0,1fr) minmax(330px,.9fr);gap:14px}
+#panji-research-v2 .release{display:flex;justify-content:space-between;gap:12px;align-items:center;background:#102337;border:1px solid #2b4056;padding:12px 13px;border-radius:7px;margin:9px 0}
+#panji-research-v2 .release strong{display:block}
+#panji-research-v2 .release small{display:block;color:var(--muted);margin-top:6px}
+#panji-research-v2 .date-grid{display:grid;grid-template-columns:65px repeat(2,minmax(0,1fr));gap:9px;align-items:center}
+#panji-research-v2 .date-grid label{color:var(--muted);font-size:12px}
+#panji-research-v2 .date-grid input{width:100%;min-width:0}
+#panji-research-v2 .drawer{position:fixed;inset:0;background:#030a12d9;z-index:50;display:flex;justify-content:flex-end}
+#panji-research-v2 .drawer-panel{width:min(610px,100%);height:100%;overflow:auto;background:#0d1a29;border-left:1px solid #385064;padding:29px 27px;box-shadow:-20px 0 75px #03080dcf}
+#panji-research-v2 .drawer-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:22px}
+#panji-research-v2 .drawer-head h2{font-size:20px;margin:3px 0 8px}
+#panji-research-v2 .form-section{background:#132335;border:1px solid #2d4155;border-radius:8px;padding:16px;margin:18px 0}
+#panji-research-v2 .form-section h3{font-size:13px;margin:0 0 13px}
+#panji-research-v2 .form-msg{margin-top:11px;font-size:12px;color:#9ec5b8;line-height:1.6}
+#panji-research-v2 .form-msg.err{color:#ffabae}
+#panji-research-v2 .drawer-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;gap:10px;margin-top:20px}
+#panji-research-v2 .no-access{margin:35px auto;max-width:630px;text-align:center;padding:60px 30px}
+#panji-research-v2 .no-access .icon{font-size:35px;color:var(--orange)}
+#panji-research-v2 .no-access h2{font-size:20px}
+#panji-research-v2 .no-access p{line-height:1.8;color:var(--muted)}
+@media (max-width:1220px){#panji-research-v2 .stock-grid{grid-template-columns:minmax(0,1fr)}
+#panji-research-v2 .stock-info{display:grid;grid-template-columns:1fr 1fr;align-items:start}
+#panji-research-v2 .stock-info>.panel:last-child{grid-column:1/-1}
+#panji-research-v2 .today-board{grid-template-columns:1fr}
+#panji-research-v2 .eval-panels{grid-template-columns:1fr}
+#panji-research-v2 .chart-stage{min-height:unset}
+#panji-research-v2 .admin-grid{grid-template-columns:1fr}}
+@media (max-width:800px){#panji-research-v2 .topbar{padding:0 14px;gap:10px;flex-wrap:wrap;height:auto;min-height:58px}
+#panji-research-v2 .topnav{gap:0}
+#panji-research-v2 .topnav a{padding:0 10px;min-height:56px}
+#panji-research-v2 .topright{width:100%;justify-content:flex-end;padding-bottom:8px}
+#panji-research-v2 .shell{padding:19px 12px 60px}
+#panji-research-v2 .headline{flex-wrap:wrap}
+#panji-research-v2 .headline h1{font-size:21px}
+#panji-research-v2 .header-actions{width:100%}
+#panji-research-v2 .tabs{gap:19px;overflow-x:auto}
+#panji-research-v2 .stock-info{grid-template-columns:1fr}
+#panji-research-v2 .overview{grid-template-columns:repeat(2,minmax(0,1fr))}
+#panji-research-v2 .date-grid{grid-template-columns:1fr 1fr}
+#panji-research-v2 .date-grid label{grid-column:1/-1}
+#panji-research-v2 .panel-head{flex-wrap:wrap}
+#panji-research-v2 .chart-stage{overflow-x:auto}
+#panji-research-v2 .chart-stage svg{min-width:710px}
+#panji-research-v2 .pipe{grid-template-columns:repeat(2,1fr)}
+#panji-research-v2 .topright .market-clock{display:none}
+#panji-research-v2 .meta{font-size:10px}}
+@media (max-width:450px){#panji-research-v2 .brand{font-size:15px;letter-spacing:0}
+#panji-research-v2 .brandmark{width:21px;height:21px}
+#panji-research-v2 .topnav a{padding:0 7px;font-size:12px}
+#panji-research-v2 .topright{font-size:10px}
+#panji-research-v2 .headline h1{font-size:19px}
+#panji-research-v2 .panel-head, #panji-research-v2 .panel-body{padding:13px}
+#panji-research-v2 .overview .metric{padding:11px}
+#panji-research-v2 .metric .v{font-size:20px}
+#panji-research-v2 .tabs{gap:14px}
+#panji-research-v2 .tab{font-size:12px}
+#panji-research-v2 .control-row{gap:6px}
+#panji-research-v2 .select, #panji-research-v2 .field{height:34px}
+#panji-research-v2 .range{width:88px}
+#panji-research-v2 .meta{width:100%}
+#panji-research-v2 .drawer-panel{padding:20px 16px}
+#panji-research-v2 .chart-stage{padding:6px}
+#panji-research-v2 .stages{gap:5px}
+#panji-research-v2 .stage-card{padding:8px 5px}}
+/* Live research binding: reference palette/layout with no prototype demo data. */
+#panji-research-v2{background:#09121e;color:#e7f1fc;min-height:100vh;max-width:none;font-family:Inter,-apple-system,BlinkMacSystemFont,"PingFang SC","Microsoft YaHei",sans-serif;}
+#panji-research-v2 .shell{max-width:1650px;margin:auto;}
+#panji-research-v2 .eval-panels> .panel {min-width:0;}
+#panji-research-v2 .metric .v {font-variant-numeric:tabular-nums;}
+#panji-research-v2 .eval-chart {min-width:0;}
+#panji-research-v2 .view-toolbar {margin-bottom:16px;}
+#panji-research-v2 .dense-table th,#panji-research-v2 .dense-table td{white-space:nowrap;}
+#panji-research-v2 .model-pill{background:#11283c;border:1px solid #39516b;border-radius:6px;padding:6px 9px;color:#cde3fa;display:inline-flex;gap:7px;align-items:center;cursor:pointer}
+#panji-research-v2 .model-pill[aria-pressed="false"]{opacity:.4;text-decoration:line-through}
+#panji-research-v2 .model-pill .dot{width:7px;height:7px;border-radius:50%}
+#panji-research-v2 .list-status{color:#a9c0d5;font-size:11px}
+#panji-research-v2 .minibar{display:grid;grid-template-columns:3em 1fr 4.5em;align-items:center;gap:12px;margin:18px 0;font-size:11px}
+#panji-research-v2 .minibar-track{height:7px;border-radius:8px;background:#25394f;overflow:hidden}
+#panji-research-v2 .minibar-track>i{display:block;height:100%;border-radius:8px}
+#panji-research-v2 .minibar strong{text-align:right}
+#panji-research-v2 .trend-up{color:#3fd6b6;font-weight:700}
+#panji-research-v2 .trend-down{color:#fa7887;font-weight:700}
+#panji-research-v2 .trend-neutral{color:#95a9bd}
+#panji-research-v2 .inline-code{font-family:ui-monospace,Consolas,monospace;font-size:11px}
+#panji-research-v2 .inline-note{font-size:10px;color:#95a9bd;line-height:1.55}
+#panji-research-v2 .table-footer{display:flex;justify-content:space-between;gap:12px;align-items:center;padding:12px 18px;flex-wrap:wrap;border-top:1px solid #25374b}
+#panji-research-v2 .table-footer button{padding:6px 12px;background:#192b3f;border:1px solid #37506a;color:#d3e8f9;border-radius:6px}
+#panji-research-v2 .table-footer button:disabled{opacity:.4}
+#panji-research-v2 .live-empty{padding:28px;color:#b5c8d9;background:#111e2e;border:1px dashed #38516b;border-radius:8px;margin:18px 0;line-height:1.8}
+#panji-research-v2 .live-error{border-color:#8c565b;color:#ffc2bf;background:#30232d}
+#panji-research-v2 .data-table button{font-size:11px;padding:5px 8px}
+#panji-research-v2 .data-table td {vertical-align:middle;}
+#panji-research-v2 .warning-inline{color:#f4d076;font-size:11px;margin:8px 0}
+#panji-research-v2 .scope-search{display:inline-flex;gap:5px}
+#panji-research-v2 .scope-search input{width:130px}
+#panji-research-v2 .pipe .node small{line-height:1.45}
+#panji-research-v2 .research-footer{padding-top:12px;font-size:11px;color:#95a9bd;line-height:1.7}
+@media(max-width:960px){#panji-research-v2 .eval-panels{grid-template-columns:1fr}#panji-research-v2 .overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:640px){#panji-research-v2{padding:12px}#panji-research-v2 .overview{grid-template-columns:1fr 1fr}#panji-research-v2 .metric .v{font-size:22px}#panji-research-v2 .panel-head{flex-wrap:wrap}#panji-research-v2 .tabs{overflow-x:auto}#panji-research-v2 .eval-panels{grid-template-columns:minmax(0,1fr)}}
