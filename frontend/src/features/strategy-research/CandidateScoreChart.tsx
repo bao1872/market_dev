@@ -215,8 +215,11 @@ export default function CandidateScoreChart({
        　低 {currentBar.low.toFixed(3)}　收 {currentBar.close.toFixed(3)}
       </p>}
       <p className={styles.hint}>
-        L/H 标记固定在<strong>候选锚点日</strong>，模型分数归属于D1/D2/D3<strong>决策日</strong>；
-        灰色表示截至相应观测日锚点已被突破。结构折线必须来自冻结引擎；未确认极值不猜测位置。
+        {structure ? <>
+          灰色 H?/L? 是未经模型评分的早期候选，标记位于锚点日；首次可见日期见候选表。未确认极值不绘制。
+        </> : <>
+          L/H 标记位于候选锚点日，D1/D2/D3 分数归属于决策日；灰色 L/H 表示在对应模型观测日锚点已被突破。
+        </>}
       </p>
     </div>
     <aside className={styles.strategyCandidateInspector} aria-label="候选完整阶段研究">
@@ -226,12 +229,18 @@ export default function CandidateScoreChart({
           早期未评分候选 {structure.early_candidates.length} 个；最后未确认极值 {structure.latest_mutable_count} 个（不绘制位置）。</p>
         <p className={styles.warning}>黄线=截至查询日已确认的历史结构；灰色 L?/H?=早期候选，非买卖信号。
           锚点日不等于确认日。此次QFQ视图未核验每个历史决策日的PIT复权，不可解释为当时预测。</p>
-        <div className={styles.scroll}><table><thead><tr><th>锚点</th><th>方向</th><th>确认日期</th></tr></thead>
+        <div className={styles.scroll}><table><thead><tr><th>锚点</th><th>方向</th><th>锚点价</th><th>首次观察</th><th>确认日期</th></tr></thead>
           <tbody>{structure.confirmed_pivots.slice(-12).map((p,i)=><tr key={`${p.anchor_date}-${i}`}>
-            <td>{p.anchor_date}</td><td>{p.kind}</td><td>{p.confirmed_at}</td></tr>)}</tbody></table></div>
+            <td>{p.anchor_date}</td><td>{p.kind}</td><td>{fmt(p.price)}</td><td>{p.seen_at}</td><td>{p.confirmed_at}</td></tr>)}</tbody></table></div>
+        <h4>早期 H?/L? 候选（最近12项，未经模型评分）</h4>
+        <div className={styles.scroll}><table><thead><tr><th>锚点</th><th>方向</th><th>锚点价</th><th>首次可见日</th></tr></thead>
+          <tbody>{structure.early_candidates.slice(-12).map((p,i)=><tr key={`${p.anchor_date}-${p.kind}-${i}`}>
+            <td>{p.anchor_date}</td><td>{p.kind}?</td><td>{fmt(p.price)}</td><td>{p.visible_at}</td></tr>)}</tbody></table></div>
       </section>}
       <h3>候选研究 · D1 / D2 / D3</h3>
-      {!selected ? <p className={styles.hint}>点击K线上 L/H 候选标记所在日期，查看同一候选的完整三阶段预测。</p> :
+      {!selected ? <p className={styles.hint}>{structure
+        ? 'H?/L? 仅供查看冻结结构候选事实，不提供 D1–D3 模型评分。灰色标记不代表已确认拐点，也不支持点击查看预测。'
+        : '点击K线上 L/H 候选标记所在日期，查看同一候选的完整三阶段模型观测。'}</p> :
       <>
         <div className={styles.strategyCandidateIdentity}>
           <strong>{selected.kind === 'L' ? '低点早期候选 L' : '高点早期候选 H'}</strong>
@@ -257,7 +266,9 @@ export default function CandidateScoreChart({
         <p className={styles.hint}>L1/L2为未经校准的分数，不是成功概率。候选锚点失效属于价格事实，不替代冻结模型的L1/L2研究标签。</p>
       </>}
       <p className={styles.warning}>
-        本批次未提供真实Train/VAL/Test归属及截至当日的确认ZigZag折线，故不声称样本外表现或已确认拐点。
+        {structure
+          ? '当前冻结结构仅按查询截止日展示，尚未核验各历史决策日的PIT复权，也未提供真实Train/VAL/Test归属；不可声称当时已知的结构或样本外预测效果。'
+          : '历史模型快照未提供真实Train/VAL/Test归属或同期可核验的已确认ZigZag序列，不能据此声称样本外表现或历史结构提前可知。'}
       </p>
     </aside>
   </div>
