@@ -44,3 +44,30 @@
 .card {margin:15px 0;}
 @media(max-width:850px){.root{padding:12px}.details{grid-template-columns:minmax(0,1fr)}.dategrid{grid-template-columns:repeat(2,minmax(0,1fr))}.actions form{width:100%}.chart{width:860px}}
 @media(max-width:440px){.scoregrid,.dategrid{grid-template-columns:1fr}.tabs button{padding:9px 10px}}
+
+
+/* PANJI_STRATEGY_STOCK_UI_FIX_001: local-only research chart styles */
+.strategyStockGrid{display:grid;grid-template-columns:minmax(0,1.8fr) minmax(330px,.75fr);gap:16px;align-items:start;margin:12px 0 22px}
+.strategyStockMain,.strategyCandidateInspector{min-width:0;background:#141d29;border:1px solid #364254;border-radius:8px;padding:14px}
+.strategyTradingChart{height:490px;width:100%;min-width:0}
+.strategyChartToolbar{display:flex;gap:12px;justify-content:space-between;align-items:center;flex-wrap:wrap}
+.strategyChartToolbar label{display:flex;align-items:center;gap:4px;font-size:12px}
+.strategyRangeButtons{display:flex;gap:5px}
+.strategyRangeButtons button{background:#203044;border:1px solid #3c5470;padding:6px 9px;border-radius:5px;color:#dce8f6}
+.strategyRangeButtons button[aria-pressed="true"]{background:#31577c}
+.strategyCrosshairBar{font-variant-numeric:tabular-nums;font-size:12px;min-height:20px}
+.strategyCandidateInspector h3{margin:0 0 12px}
+.strategyCandidateIdentity{display:grid;gap:6px;padding:11px;border-bottom:1px solid #39495e;margin-bottom:10px}
+.strategyCandidateIdentity small{color:#a0b7ce}
+.strategyStageCard{width:100%;display:grid;gap:4px;text-align:left;background:#1c2938;border:1px solid #394e65;border-radius:6px;color:#d8e5f4;padding:10px;margin:8px 0;white-space:normal}
+.strategyStageCard span{font-size:12px;line-height:1.4}
+.strategyStageCard[aria-pressed="true"]{background:#24425a;border-color:#80b9ef}
+.strategyLifecycle{font-weight:bold;font-size:12px;color:#d9ba85;margin:12px 0}
+.strategySearch{width:min(360px,100%);position:relative;display:grid;gap:4px}
+.strategySearch label{font-size:11px;color:#aebfd1}
+.strategySearch input{width:100%}
+.strategySearchResults{position:absolute;z-index:50;top:100%;left:0;right:0;max-height:300px;overflow:auto;background:#142232;border:1px solid #526279;box-shadow:0 12px 30px #0008}
+.strategySearchResults button{width:100%;border:0;background:transparent;color:#dce7f5;text-align:left;padding:8px 11px;display:flex;gap:6px;justify-content:space-between}
+.strategySearchResults button:hover{background:#29415a}
+.strategySearchResults small{color:#adbacb}
+@media(max-width:1120px){.strategyStockGrid{grid-template-columns:minmax(0,1fr)}}

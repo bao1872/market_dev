@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useSearchParams } from 'react-router-dom'
 import { useAuthStore } from '@/store/auth'
 import { getDailyResearch, getStockResearch, type DailyRow } from '@/api/strategyCandidates'
 import StrategyEvaluationPage from '@/features/strategy-evaluation/StrategyEvaluationPage'
 import CandidateScoreChart from './CandidateScoreChart'
+import StrategyStockSearch from './StrategyStockSearch'
 import ModelManagementView from './ModelManagementView'
 import styles from './strategyResearchPage.module.scss'
 
@@ -28,8 +29,6 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
   releaseId: string | null; observationId: string | null; decisionDate: string | null;
   onLocation: (symbol: string, id: string | null, stage?: string, context?: LinkContext) => void
 }) {
-  const [input, setInput] = useState(urlSymbol)
-  useEffect(() => setInput(urlSymbol), [urlSymbol])
   const query = useQuery({ queryKey:['strategy-research','stock',urlSymbol,releaseId], queryFn:()=>getStockResearch(urlSymbol, releaseId??undefined), enabled:isSymbol(urlSymbol), staleTime:120000 })
   const data = query.data
   const selected = data?.candidates.find(c=>c.candidate_id===focusedId) ?? null
@@ -43,11 +42,8 @@ function StockView({ urlSymbol, focusedId, stage, releaseId, observationId, deci
   const validFocus = linkMismatch ? null : focusedId
   return <>
     <div className={styles.actions}><h2>个股候选轨迹</h2>
-      <form onSubmit={e=>{e.preventDefault(); const s=input.trim().toUpperCase(); if(isSymbol(s)) onLocation(s,null)}}>
-        <input aria-label="股票代码" value={input} onChange={e=>setInput(e.target.value)} placeholder="SH:600000" />
-        <button type="submit">查看股票</button>
-      </form></div>
-    <p className={styles.hint}>买入（L）与卖出（H）候选同图；每个标记上直接保留第一层和第二层模型输出。均为未经校准的模型分数，非真实概率。</p>
+      <StrategyStockSearch symbol={urlSymbol} onChoose={s=>onLocation(s,null)} /></div>
+    <p className={styles.hint}>低点 L 和高点 H 是早期候选，不等于交易建议；点击候选查看 D1–D3，并区分历史锚点是否已被突破。</p>
     {query.isLoading && <div className={styles.empty}>读取已发布候选数据…</div>}
     {query.isError && <div className={styles.empty}>{errorText(query.error)}</div>}
     {data && <>
