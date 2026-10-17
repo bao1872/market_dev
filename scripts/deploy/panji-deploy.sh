@@ -19,7 +19,7 @@
 #
 # 构建策略：
 #   普通代码变化零构建（Live Mount 直接生效）；
-#   任意 environment_changed → backend/frontend/worker-capture 作为同一 GIT_SHA tag 组整体构建；
+#   任意 environment_changed → backend/frontend/worker-capture/worker-strategy-ml 作为同一 GIT_SHA tag 组整体构建；
 #   构建后仍以 prod+live 叠加启动，运行代码仍唯一来自 /opt/panji-live。
 #
 # 用法:
@@ -71,6 +71,7 @@ PYTHON_SERVICES=(
     worker-calendar
     worker-monitor
     worker-strategy-batch
+    worker-strategy-ml
     worker-outbox
     worker-delivery
     worker-after-close
@@ -704,7 +705,7 @@ classify_changes() {
     fi
 
     # backend 运行环境（依赖 / Dockerfile / 系统依赖 → 需要 build backend 镜像）
-    if echo "${changed_files}" | grep -qE '^backend/(Dockerfile|pyproject\.toml|pyproject\.lock|poetry\.lock|requirements.*\.txt)$'; then
+    if echo "${changed_files}" | grep -qE '^backend/(Dockerfile|pyproject\.toml|pyproject\.lock|poetry\.lock|requirements.*\.txt|strategy-ml-requirements\.txt)$'; then
         BACKEND_ENVIRONMENT_CHANGED=true
     fi
 
@@ -824,12 +825,12 @@ environment_changed() {
 }
 
 # 环境镜像构建策略（与 docker-compose.prod.yml 的 image tag 约定保持一致）：
-#   backend / frontend / worker-capture 三个镜像共用同一个 GIT_SHA tag。
+#   backend / frontend / worker-capture / worker-strategy-ml 四个镜像共用同一个 GIT_SHA tag。
 #   因此只要发生任意 environment_changed，就必须把三者作为**同一个 tag 组**整体构建，
 #   否则新 GIT_SHA 下会出现未构建的镜像 tag，Compose 启动即失败。
 # 普通代码变化（无 environment_changed）零构建：Live Mount 直接生效。
 # 构建完成后仍以 prod+live 叠加启动，运行代码仍唯一来自 /opt/panji-live。
-ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture)
+ENV_IMAGE_TAG_GROUP=(backend frontend worker-capture worker-strategy-ml)
 
 build_environment_images() {
     if ! environment_changed; then
@@ -1185,7 +1186,7 @@ restart_services() {
                 _wave_scheduler+=("${s}") ;;
             worker-capture) _wave_capture+=("${s}") ;;
             worker-after-close|worker-watchdog) _wave_recovery+=("${s}") ;;
-            worker-monitor|worker-strategy-batch|worker-outbox|worker-delivery)
+            worker-monitor|worker-strategy-batch|worker-outbox|worker-delivery|worker-strategy-ml)
                 _wave_workers+=("${s}") ;;
             postgres|redis|umami)
                 log "  跳过数据服务（永不重启）: ${s}"
@@ -1243,7 +1244,7 @@ live_refresh_services() {
                 wave_scheduler+=("${service}") ;;
             worker-capture) wave_capture+=("${service}") ;;
             worker-after-close|worker-watchdog) wave_recovery+=("${service}") ;;
-            worker-monitor|worker-strategy-batch|worker-outbox|worker-delivery)
+            worker-monitor|worker-strategy-batch|worker-outbox|worker-delivery|worker-strategy-ml)
                 wave_workers+=("${service}") ;;
             postgres|redis|umami|frontend)
                 log "  跳过非 Python Live Refresh 服务: ${service}"
@@ -1801,6 +1802,48 @@ _container_image_ref_for_service() {
     docker inspect "${cid}" --format '{{.Config.Image}}' 2>/dev/null
 }
 
+_strategy_service_is_new() {
+    [[ -n "${PREVIOUS_SHA}" ]] || return 1
+    local old_definition
+    old_definition="$(git -C "${REPO_ROOT}" show "${PREVIOUS_SHA}:docker-compose.prod.yml" 2>/dev/null)" || return 1
+    ! printf '%s\n' "${old_definition}" | grep -q '^  worker-strategy-ml:'
+}
+
+guard_strategy_worker_idle() {
+    _backend_runtime_will_mutate || return 0
+    # Reuse the worker's exact admission lock, held until this deploy exits.
+    # No stopping a running fit, no race between an idle check and source sync.
+    local lock_path="/opt/panji-strategy-data/jobs/worker.lock"
+    if [[ "${DRY_RUN}" == "true" ]]; then
+        log "[dry-run] strategy ML admission lock 将由部署持有；不创建/锁定文件"
+        return 0
+    fi
+    if [[ -f "${lock_path}" ]]; then
+        exec {STRATEGY_JOB_LOCK_FD}<"${lock_path}"
+        flock -n "${STRATEGY_JOB_LOCK_FD}" || {
+            log "STRATEGY_JOB_ACTIVE: 存在训练/推理进程，拒绝刷新其代码"
+            return 1
+        }
+    elif docker inspect trading-worker-strategy-ml >/dev/null 2>&1; then
+        log "STRATEGY_JOB_LOCK_MISSING: 已有策略运行时但缺少 admission lock"
+        return 1
+    fi
+}
+
+_remove_new_strategy_worker_if_owned() {
+    grep -q '^PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true$' "${PRE_DEPLOY_MANIFEST_FILE}" || return 0
+    local cid service sha
+    cid="$(docker inspect trading-worker-strategy-ml --format '{{.Id}}' 2>/dev/null || true)"
+    [[ -n "${cid}" ]] || return 0
+    service="$(docker inspect "${cid}" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
+    sha="$(docker inspect "${cid}" --format '{{index .Config.Labels "panji.git-sha"}}')"
+    [[ "${service}" == 'worker-strategy-ml' && "${sha}" == "${TARGET_SHA}" ]] || {
+        log "STRATEGY_ROLLBACK_OWNER_MISMATCH: 不移除未绑定本次 SHA 的容器"
+        return 1
+    }
+    run_cmd docker rm -f "${cid}"
+}
+
 resolve_pre_deploy_runtime_owner() {
     PRE_DEPLOY_MANIFEST_FILE="${PRE_DEPLOY_MANIFEST_FILE:-$(mktemp)}"
     : >"${PRE_DEPLOY_MANIFEST_FILE}"
@@ -1849,7 +1892,12 @@ resolve_pre_deploy_runtime_owner() {
     for service in "${services[@]}"; do
         image_id="$(_container_image_id_for_service "${service}" || true)"
         if [[ -z "${image_id}" && "${FIRST_LIVE_DEPLOY}" != "true" ]]; then
-            missing+=("PRE_DEPLOY_IMAGE_ID:${service}")
+            if [[ "${service}" == 'worker-strategy-ml' ]] && _strategy_service_is_new \
+                && ! docker inspect trading-worker-strategy-ml >/dev/null 2>&1; then
+                _write_manifest 'PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml' true
+            else
+                missing+=("PRE_DEPLOY_IMAGE_ID:${service}")
+            fi
         fi
         _write_manifest "PRE_DEPLOY_IMAGE_ID:${service}" "${image_id}"
         # 同时记录 compose 会解析的 **镜像引用**（repo:tag，如 market-dev-backend:<sha>）。
@@ -1928,6 +1976,14 @@ verify_rollback_owner() {
         rc=1
     fi
 
+    # A newly introduced worker must be absent again after rollback.
+    if grep -q '^PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true$' "${PRE_DEPLOY_MANIFEST_FILE}"; then
+        if docker container inspect trading-worker-strategy-ml >/dev/null 2>&1; then
+            log "ROLLBACK_STATUS=FAILED: 新增策略 worker 仍存在"
+            rc=1
+        fi
+    fi
+
     # C. per-service container runtime identity
     while IFS= read -r line; do
         local service exp act
@@ -1990,6 +2046,8 @@ _backend_pickup_boundary_ready() {
 }
 
 deploy() {
+    FAILURE_STAGE="strategy_ml_admission"
+    guard_strategy_worker_idle || return 1
     # 0. 活跃盘后任务 fail-closed 门禁（FIX B）：
     #    仅在 backend runtime 会变更时启用，并在任何 live runtime mutation
     #    （update_env_file / sync_backend_runtime / write_runtime_sha / migration / restart）
@@ -2446,7 +2504,7 @@ post_deploy_resource_check() {
 
     # 2. 关键容器 OOMKilled / RestartCount / 限制生效
     local check_failed=false
-    for container in trading-backend trading-worker-after-close trading-worker-capture; do
+    for container in trading-backend trading-worker-after-close trading-worker-capture trading-worker-strategy-ml; do
         local oom restart
         oom="$(docker inspect -f '{{.State.OOMKilled}}' "${container}" 2>/dev/null || echo "unknown")"
         restart="$(docker inspect -f '{{.RestartCount}}' "${container}" 2>/dev/null || echo "unknown")"
@@ -2625,6 +2683,7 @@ rollback() {
         return 1
     fi
 
+    _remove_new_strategy_worker_if_owned || return 1
     # 文件层恢复同时恢复了 compose 定义（compose 文件属于 repo/live 文件 owner），
     # 这就是 PRE_DEPLOY_COMPOSE_DIGEST 的恢复机制（§8）。
     restore_files_to_previous_sha
@@ -2643,6 +2702,10 @@ rollback() {
     local _rb
     for _rb in "${PYTHON_SERVICES[@]}"; do
         [[ "${_rb}" == "worker-after-close" ]] && continue
+        if [[ "${_rb}" == 'worker-strategy-ml' ]] \
+            && grep -q '^PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true$' "${PRE_DEPLOY_MANIFEST_FILE}"; then
+            continue
+        fi
         _rb_filtered+=("${_rb}")
     done
     run_cmd ${COMPOSE_CMD} up -d --force-recreate --no-build \

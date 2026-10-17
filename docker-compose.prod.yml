@@ -123,6 +123,9 @@ services:
       PANJI_STRATEGY_CANDIDATE_SNAPSHOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}/2026-08-17_89a5be0b28d1dac9/candidate_snapshot.json
       STRATEGY_RESEARCH_SNAPSHOT: ${PANJI_STRATEGY_RELEASE_ROOT:-/opt/panji-strategy-data/release}/2026-08-17_89a5be0b28d1dac9/evaluation_snapshot.json
       PANJI_STRATEGY_PERSONAL_REGISTRY: ${PANJI_STRATEGY_PERSONAL_REGISTRY:-}
+      PANJI_STRATEGY_JOB_ROOT: /opt/panji-strategy-data/jobs
+      PANJI_STRATEGY_ADMIN_WRITES_ENABLED: ${PANJI_STRATEGY_ADMIN_WRITES_ENABLED:-1}
+      PANJI_STRATEGY_TRAIN_RUNTIME_READY: ${PANJI_STRATEGY_TRAIN_RUNTIME_READY:-1}
       # [CHANGE-20260730-010] Umami 访客分析：backend 通过独立只读连接查询 umami 数据库
       UMAMI_DATABASE_URL: ${UMAMI_DATABASE_URL:-}
       UMAMI_WEBSITE_ID: ${UMAMI_WEBSITE_ID:-}
@@ -140,8 +143,54 @@ services:
       - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
       # [STRATEGY-MOUNT] 策略历史快照 / 发布记录 / 个股注册表（只读，持久化于宿主机）
       - /opt/panji-strategy-data:/opt/panji-strategy-data:ro
+      - /opt/panji-strategy-data/jobs:/opt/panji-strategy-data/jobs:rw
+      - /opt/panji-strategy-data/release:/opt/panji-strategy-data/release:rw
       # [CHANGE-20260730-010] goaccess_reports 挂载已移除：访问统计改用 Umami 数据库
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+
+  # ===== 独立十四任务 ML 运行时；不接入原有策略/盘后业务队列 =====
+  worker-strategy-ml:
+    build:
+      context: ./backend
+      target: strategy-ml
+      args:
+        GIT_SHA: ${GIT_SHA:-unknown}
+        BUILD_TIME: ${BUILD_TIME:-unknown}
+        PYPROJECT_LOCK_HASH: ${PYPROJECT_LOCK_HASH:-unspecified}
+    image: market-dev-strategy-ml:${GIT_SHA:-unknown}
+    container_name: trading-worker-strategy-ml
+    restart: unless-stopped
+    logging: *default-logging
+    mem_limit: ${PANJI_STRATEGY_ML_MEM_LIMIT:-3072m}
+    mem_reservation: 512m
+    cpus: ${PANJI_STRATEGY_ML_CPUS:-1}
+    pids_limit: 256
+    stop_grace_period: 60s
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL is required}
+      APP_ENV: production
+      TZ: Asia/Shanghai
+      CONFIG_FILE: /app/app/config.production.py
+      PANJI_STRATEGY_JOB_ROOT: /opt/panji-strategy-data/jobs
+      PANJI_STRATEGY_SNAPSHOT_ROOT: /opt/panji-strategy-data/release
+      PANJI_STRATEGY_RELEASE_ROOT: /opt/panji-strategy-data/release
+      PANJI_STRATEGY_WORKER_ENABLED: "1"
+      PANJI_STRATEGY_READ_ONLY_DATABASE: "1"
+      PANJI_STRATEGY_DAILY_SCHEDULER_ENABLED: ${PANJI_STRATEGY_DAILY_SCHEDULER_ENABLED:-1}
+      PANJI_STRATEGY_AUTOPUBLISH_ENABLED: ${PANJI_STRATEGY_AUTOPUBLISH_ENABLED:-1}
+      PANJI_STRATEGY_THREADS: "1"
+      PANJI_STRATEGY_MEMORY_BUDGET_MB: "2048"
+      PANJI_STRATEGY_DISK_RESERVE_MB: "4096"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    volumes:
+      - /etc/market-dev/config.production.py:/app/app/config.production.py:ro
+      - /opt/panji-strategy-data/jobs:/opt/panji-strategy-data/jobs:rw
+      - /opt/panji-strategy-data/release:/opt/panji-strategy-data/release:rw
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: python -m app.strategy_integration.worker daily-loop
 
   # ===== 行情调度 Worker =====
   worker-bars-scheduler:

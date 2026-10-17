@@ -70,6 +70,12 @@ def _candidate_and_bars(raw: pd.DataFrame, symbol: str, fmod: Any, bundle: dict,
                         *, chart_bars: int = 85, release_id: str = RELEASE_ID,
                         pit_source: pd.DataFrame | None = None,
                         personal: dict | None = None) -> tuple[dict[str, Any], list[dict]]:
+    if 'fourteen_runtime' in bundle:
+        from .fourteen_adapter import build_stock
+        if personal:
+            raise ProducerError('FOURTEEN_REQUIRES_GLOBAL_ONLY')
+        return build_stock(raw, symbol, bundle, release_id=release_id,
+                           chart_bars=chart_bars, pit_source=pit_source)
     result = model.score_candidates(raw, symbol, fmod, bundle,
                                     min_anchor_bar=max(0, len(raw)-chart_bars),
                                     pit_source=pit_source, release_id=release_id,
@@ -236,6 +242,35 @@ def make_evaluation(stock_raw: dict[str, pd.DataFrame], stocks: dict[str, dict],
                 if outcome != 'UNRESOLVED':
                     record.update(_path_metrics(raw, kind, t))
                 events.append(record)
+    if any(o.get('breakout') for stock in stocks.values() for c in stock['candidates'] for o in c['observations']):
+        for trend in ('up', 'down', 'unknown'):
+            for side in ('BUY', 'SELL'):
+                models.append({'id': f'breakout_{trend}_{side.lower()}', 'side': side,
+                    'name': f'{ {"up":"上升", "down":"下降", "unknown":"方向待确认"}[trend]} · {"上破前高" if side == "BUY" else "下破前低"}',
+                    'family': 'BREAKOUT'})
+        for symbol, stock in stocks.items():
+            raw = stock_raw[symbol]
+            idx = {str(x.date()): i for i, x in enumerate(pd.to_datetime(raw.datetime))}
+            for candidate in stock['candidates']:
+                for o in candidate['observations']:
+                    fact = o.get('breakout')
+                    if not fact or not o['first_breakout']:
+                        continue
+                    trend = (fact.get('trend_at_breakout') or {}).get('direction')
+                    group = 'up' if trend == '向上' else 'down' if trend == '向下' else 'unknown'
+                    side = 'BUY' if candidate['kind'] == 'L' else 'SELL'
+                    t = idx[o['decision_date']]
+                    record = {'event_id': fact['event_id'], 'model_id': f'breakout_{group}_{side.lower()}',
+                        'family': 'BREAKOUT', 'side': side, 'symbol': symbol, 'signal_time': o['decision_date'],
+                        'candidate_id': candidate['candidate_id'], 'observation_id': o['observation_id'],
+                        'stage': o['stage'], 'decision_date': o['decision_date'], 'model_release_id': release_id,
+                        'trend_at_event': trend, 'outcome': 'UNRESOLVED',
+                        'outcome_definition': 'DIRECTIONAL_ENDPOINT_POSITIVE_NEXT_OPEN_20B'}
+                    if t + EVAL_HORIZON < len(raw):
+                        metrics = _path_metrics(raw, candidate['kind'], t)
+                        record.update(metrics)
+                        record['outcome'] = 'SUCCESS' if metrics['endpoint_pct'] > 0 else 'FAIL'
+                    events.append(record)
     return {'schema': 'panji-strategy-evaluation-v1',
             'metadata': {'strategy_key': 'zigzag_two_stage', 'strategy_name': '两层 ZigZag 结构机会',
                          'version': release_id[:16], 'generated_at': as_of,
@@ -262,7 +297,9 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
     stocks: dict[str, dict] = {}
     by_date: dict[str, list] = defaultdict(list)
     latest = date.fromisoformat(as_of)
-    for symbol, raw in sorted(stock_raw.items()):
+    for position, (symbol, raw) in enumerate(sorted(stock_raw.items())):
+        from .job_progress import progress
+        progress("PREDICT_STOCKS", position, len(stock_raw), symbol=symbol)
         if len(raw) < 150 or pd.Timestamp(raw.datetime.iloc[-1]).date() > latest:
             raise ProducerError(f'INVALID_SOURCE_WINDOW {symbol}')
         one, daily = _candidate_and_bars(raw, symbol, fmod, bundle, chart_bars=chart_bars,
@@ -293,6 +330,17 @@ def make_snapshots(stock_raw: dict[str, pd.DataFrame], fmod: Any, bundle: dict,
                                   release_id=release_id, price_adjustment=price_adjustment,
                                   adjustment_mode=adjustment_mode,
                                   bundle_sha256=bundle_sha256)
+    if 'fourteen_runtime' in bundle:
+        from .fourteen_adapter import SCHEMA, task_samples
+        candidate['schema'] = SCHEMA
+        candidate['metadata'].update(model_version=bundle['model_version'],
+            scoring_architecture='GLOBAL_FOURTEEN', personal_symbols=[])
+        evaluation['metadata']['release_id'] = release_id
+        evaluation['metadata']['model_version'] = bundle['model_version']
+        evaluation['task_samples'] = [row for symbol, stock in stocks.items()
+            for row in task_samples(stock_raw[symbol], stock, fmod, symbol,
+                                    pit_source=(pit_source or {}).get(symbol),
+                                    split_windows=bundle['fourteen_runtime'].manifest.get('split_windows'))]
     return candidate, evaluation
 
 

@@ -69,19 +69,19 @@ def resolve_release_batch(root: Path, release_id: str) -> Path | None:
     the on-disk name and always points at the real batch.
     """
     root = root.resolve()
-    for child in sorted(root.iterdir()):
-        if not child.is_dir() or child.is_symlink():
-            continue
-        manifest = child / 'manifest.json'
-        if not manifest.is_file():
+    manifests = list(root.glob('*/manifest.json')) + list(root.glob('releases/*/manifest.json'))
+    matches = []
+    for manifest in manifests:
+        child = manifest.parent
+        if child.is_symlink() or not child.resolve().is_relative_to(root):
             continue
         try:
             m = json.loads(manifest.read_text())
         except Exception:
             continue
         if m.get('release_id') == release_id:
-            return child
-    return None
+            matches.append((m.get('as_of', ''), child.name, child))
+    return max(matches)[2] if matches else None
 
 
 def _validate_batch_for_activation(batch: Path):
@@ -100,6 +100,17 @@ def _validate_batch_for_activation(batch: Path):
     from app.services.strategy_research_read_service import _check_snapshot
 
     descriptor = json.loads((batch / 'candidate_snapshot.json').read_bytes())
+    from app.services.strategy_partitioned_snapshot import SCHEMA as PARTITIONED, index, validate_publication
+    if isinstance(descriptor, dict) and descriptor.get('schema') == PARTITIONED:
+        try:
+            candidate = index(batch/'candidate_snapshot.json')
+            evaluation = index(batch/'evaluation_snapshot.json')
+            if {k:v for k,v in candidate.items() if k != 'kind'} != {k:v for k,v in evaluation.items() if k != 'kind'}:
+                raise ValueError('PARTITION_DESCRIPTOR_LINEAGE_MISMATCH')
+            validate_publication(batch/'candidate_snapshot.json')
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            raise PublishError('PARTITIONED_VALIDATION_FAILED '+str(exc)) from exc
+        return
     if isinstance(descriptor, dict) and descriptor.get('schema') == MANIFEST_SCHEMA:
         try:
             load_candidate_shards(batch / 'candidate_snapshot.json',
@@ -130,9 +141,17 @@ def write_active_release(root: Path, batch: Path, release_id: str,
     root = root.resolve()
     if bundle_path:
         bp = Path(bundle_path)
-        if not bp.is_file():
+        from .fourteen_adapter import is_package, verify_package
+        if is_package(bp):
+            try:
+                manifest, _ = verify_package(bp, bundle_sha256)
+                if manifest.get('price_input_contract') != 'QFQ_ASOF_V1':
+                    raise ValueError('FOURTEEN_PRICE_INPUT_UNVERIFIED')
+            except (ValueError, OSError) as exc:
+                raise PublishError('ACTIVE_RELEASE_PACKAGE_INVALID') from exc
+        elif not bp.is_file():
             raise PublishError('ACTIVE_RELEASE_BUNDLE_FILE_MISSING ' + str(bp))
-        if bundle_sha256 and digest_path(bp) != bundle_sha256:
+        if bp.is_file() and bundle_sha256 and digest_path(bp) != bundle_sha256:
             raise PublishError('ACTIVE_RELEASE_BUNDLE_SHA_MISMATCH ' + str(bp))
     payload = {
         'schema': 'panji-strategy-active-release-v1',
@@ -179,9 +198,10 @@ def activate_batch(root: Path, batch: Path, *, bundle_sha256: str = '',
         if actual != manifest[key]:
             raise PublishError('BATCH_CONTENT_SHA_MISMATCH ' + name)
     shards = manifest.get('candidate_shards')
-    if not isinstance(shards, list) or not shards:
+    from app.services.strategy_partitioned_snapshot import SCHEMA as PARTITIONED
+    if manifest.get('artifact_transport') != PARTITIONED and (not isinstance(shards, list) or not shards):
         raise PublishError('MISSING_SHARD_MANIFEST')
-    for entry in shards:
+    for entry in shards or []:
         shard = batch / entry['file']
         if shard.is_symlink() or not shard.is_file():
             raise PublishError('MISSING_OR_SYMLINKED_SHARD ' + entry['file'])
@@ -234,3 +254,20 @@ def _refresh_current_symlink(root: Path, batch: Path) -> None:
     finally:
         if tmp.is_symlink():
             tmp.unlink()
+
+
+def published_snapshot_path(name: str, fallback: str) -> Path:
+    """Readers consume the same authoritative pointer as prediction jobs.
+
+    An invalid active pointer is an error, never a fallback to old demo assets.
+    """
+    root = os.getenv('PANJI_STRATEGY_RELEASE_ROOT', '')
+    if root:
+        base = Path(root).resolve()
+        active = resolve_active_release(base)
+        if active is not None:
+            batch = Path(active['batch']).resolve()
+            if not batch.is_relative_to(base) or not (batch/name).is_file():
+                raise PublishError('PUBLISHED_SNAPSHOT_POINTER_INVALID')
+            return batch/name
+    return Path(fallback)

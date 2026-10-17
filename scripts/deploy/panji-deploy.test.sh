@@ -208,9 +208,9 @@ fi
 # ---------------------------------------------------------------------------
 echo "== 8/8 镜像 tag 组、RUNTIME_SHA inode 与清理边界 =="
 
-# 场景 9：environment_changed 时按同一 GIT_SHA tag 组整体构建三个镜像
-assert_code_contains "存在 ENV_IMAGE_TAG_GROUP 三镜像组" \
-    'ENV_IMAGE_TAG_GROUP=\(backend frontend worker-capture\)' "${SERVER_SCRIPT}"
+# 场景 9：environment_changed 时按同一 GIT_SHA tag 组整体构建四个镜像
+assert_code_contains "同 SHA 镜像组包含原三镜像及隔离 ML 镜像" \
+    'ENV_IMAGE_TAG_GROUP=\(backend frontend worker-capture worker-strategy-ml\)' "${SERVER_SCRIPT}"
 assert_code_contains "构建使用完整 tag 组" \
     'for svc in "\$\{ENV_IMAGE_TAG_GROUP\[@\]\}"' "${SERVER_SCRIPT}"
 assert_code_contains "构建逐项消费 tag 组" \
@@ -416,7 +416,7 @@ echo "== 10/10 COMPOSE 对账缺陷修正（Defect 1 & Defect 2） =="
 # 校验：在 reconcile_compose_runtime 函数体内，SERVICES_RESTARTED=true 的行号 < up -d --no-build 的行号。
 if code_of "${SERVER_SCRIPT}" | awk '
 /^reconcile_compose_runtime\(\)/{f=1; next}
-f && /^}/{exit}
+f && /^}/{f=0}
 f && /SERVICES_RESTARTED=true/ && !u {sr=NR}
 f && /\$\{COMPOSE_CMD\} up -d --no-build/ && !u {u=NR}
 END{ if(sr>0 && u>0 && sr<u) exit 0; exit 1 }
@@ -434,8 +434,8 @@ assert_code_contains "DEFECT1 reconcile 非空路径置位 SERVICES_RESTARTED=tr
 # DEFECT 2：Mixed case 控制流——restart_services（代码/环境/Migration）与
 # reconcile_compose_runtime（Compose-only 配置对账）为两个独立、顺序执行的 if 分支，
 # 二者不被彼此嵌套。校验：deploy() 内 restart_services 调用行号 < reconcile 调用行号。
-_mrestart="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/restart_services "\$\{restart_list\[@\]\}" \|\| return 1/{print NR; exit}')"
-_mrec="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{exit} f&&/reconcile_compose_runtime "\$\{_recon_filtered\[@\]\}" frontend \|\| return 1/{print NR; exit}')"
+_mrestart="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{f=0} f&&/restart_services "\$\{restart_list\[@\]\}" \|\| return 1/{if (!printed) print NR; printed=1}')"
+_mrec="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1} f&&/^}/{f=0} f&&/reconcile_compose_runtime "\$\{_recon_filtered\[@\]\}" frontend \|\| return 1/{if (!printed) print NR; printed=1}')"
 if [[ -n "${_mrestart}" && -n "${_mrec}" && "${_mrestart}" -lt "${_mrec}" ]]; then
     ok "DEFECT2 deploy 控制流：restart_services 在 reconcile_compose_runtime 之前（顺序执行）"
 else
@@ -738,7 +738,7 @@ echo "== 11/11 DEPLOY ACTIVE-JOB GATE — NARROW TOCTOU CLOSURE =="
 # 不新建另一套 active-job 查询 owner。
 
 # CASE A：原有行为——第一道 guard 位于 deploy() 开头（任何 live mutation 之前）。
-_deploy_func_body="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1; next} f&&/^}/{exit} f')"
+_deploy_func_body="$(code_of "${SERVER_SCRIPT}" | awk '/^deploy\(\)/{f=1; next} f&&/^}/{f=0} f')"
 _guard1_line="$(echo "${_deploy_func_body}" | grep -n 'guard_active_after_close_jobs' | head -1 | cut -d: -f1)"
 if [[ -n "${_guard1_line}" && "${_guard1_line}" -le 10 ]]; then
     ok "CASE A 第一道 guard 位于 deploy() 开头（live mutation 之前）"
@@ -751,7 +751,7 @@ fi
 #   在 `! _backend_runtime_will_mutate` 守卫后存在 return 0 提前放行（backend 不变则跳过门禁）。
 if code_of "${SERVER_SCRIPT}" | awk '
 /^guard_active_after_close_jobs\(\)/{f=1; next}
-f && /^}/{exit}
+f && /^}/{f=0}
 f && /! _after_close_process_will_refresh/ {seen=1; next}
 seen && /return 0/ {found=1}
 END{exit !found}
@@ -772,7 +772,7 @@ fi
 _STEP6_SNIPPET="$(mktemp -t panji-step6.XXXXXX.sh)"
 awk '
 /^deploy\(\)/{inf=1; next}
-inf && /^}/{inf=0; exit}
+inf && /^}/{inf=0}
 inf && /FAILURE_STAGE="restart"/{cap=1}
 cap{print}
 ' "${SERVER_SCRIPT}" > "${_STEP6_SNIPPET}"

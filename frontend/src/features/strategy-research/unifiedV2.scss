@@ -249,3 +249,17 @@
 #panji-research-v2 .research-footer{padding-top:12px;font-size:11px;color:#95a9bd;line-height:1.7}
 @media(max-width:960px){#panji-research-v2 .eval-panels{grid-template-columns:1fr}#panji-research-v2 .overview{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:640px){#panji-research-v2{padding:12px}#panji-research-v2 .overview{grid-template-columns:1fr 1fr}#panji-research-v2 .metric .v{font-size:22px}#panji-research-v2 .panel-head{flex-wrap:wrap}#panji-research-v2 .tabs{overflow-x:auto}#panji-research-v2 .eval-panels{grid-template-columns:minmax(0,1fr)}}
+
+#panji-research-v2 .strategy-full-chart{display:block;min-width:0}
+#panji-research-v2 .strategy-full-chart aside{margin-top:18px;padding-top:16px;border-top:1px solid var(--border);position:static;max-height:none}
+#panji-research-v2 .model-score-tracks{display:grid;gap:6px;margin-top:14px}
+#panji-research-v2 .task-performance{margin-top:24px}
+#panji-research-v2 .evaluation-section-heading{margin:24px 0 14px}
+#panji-research-v2 .joint-distributions{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+@media(max-width:800px){#panji-research-v2 .joint-distributions{grid-template-columns:1fr}}
+#panji-research-v2 .head-meta .meta{max-width:100%;min-width:0}
+#panji-research-v2 .head-meta .meta b{min-width:0;overflow-wrap:anywhere}
+#panji-research-v2 .score-date-detail{padding:12px 0;min-height:60px}
+#panji-research-v2 .score-observation-strip{border-top:1px solid var(--border);padding:14px 0;min-height:90px}
+#panji-research-v2 .model-score-tracks section{min-width:0}
+#panji-research-v2 .breakout-evaluation{margin-top:24px}

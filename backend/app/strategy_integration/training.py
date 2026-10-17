@@ -161,11 +161,13 @@ def build_dataset(stock_raw, fmod, windows, *, max_symbols: int = 0):
     return dict(values), dict(counters), per_symbol_history
 
 
-def _fit_submodel(rows, fmod, *, trees, threads, seed):
+def _fit_submodel(rows, fmod, *, trees, threads, seed, progress_label=None):
     from lightgbm import LGBMClassifier
     from sklearn.metrics import roc_curve, roc_auc_score
 
     def unpack(items):
+        if hasattr(items, 'as_arrays'):
+            return items.as_arrays()
         return (np.stack([r['features'] for r in items]).astype(np.float32),
                 np.asarray([r['label'] for r in items], dtype=int))
 
@@ -175,7 +177,9 @@ def _fit_submodel(rows, fmod, *, trees, threads, seed):
     clf = LGBMClassifier(n_estimators=trees, num_leaves=31, learning_rate=.045,
                          min_child_samples=80, max_depth=-1, reg_lambda=5.0,
                          verbosity=-1, n_jobs=threads, random_state=seed)
-    clf.fit(pd.DataFrame(xt, columns=list(fmod.ALL_COLS)), yt)
+    from .job_progress import progress
+    callbacks = [lambda env: progress('FIT:'+progress_label, env.iteration+1, trees)] if progress_label else []
+    clf.fit(pd.DataFrame(xt, columns=list(fmod.ALL_COLS)), yt, callbacks=callbacks)
     val = clf.predict_proba(pd.DataFrame(xv, columns=list(fmod.ALL_COLS)))[:, 1]
     fpr, tpr, thr = roc_curve(yv, val)
     finite = np.isfinite(thr)
@@ -205,6 +209,9 @@ def _fit_submodel(rows, fmod, *, trees, threads, seed):
 
 
 def train(args):
+    if getattr(args, 'model_family', 'legacy') == 'fourteen':
+        from .fourteen_training import train as train_fourteen
+        return train_fourteen(args)
     windows = _resolve_windows(args)
     if args.max_symbols and not args.allow_partial_diagnostics:
         raise ProducerError('PARTIAL_TRAIN_REQUIRES_EXPLICIT_DIAGNOSTIC_FLAG')
@@ -374,6 +381,7 @@ EXPECTED_VERSION = 'panji-two-stage-final-d123-1.0'
 
 def main():
     p = argparse.ArgumentParser(description='Rolling-window strategy trainer (no deploy)')
+    p.add_argument('--model-family', choices=['legacy', 'fourteen'], default='fourteen')
     p.add_argument('--assets', type=Path, default=model.ASSET_DIR)
     p.add_argument('--bars', type=Path, required=True)
     p.add_argument('--instruments', type=Path, required=True)

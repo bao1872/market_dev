@@ -3,7 +3,7 @@ export interface CandidateLinkIdentity {
   symbol: string
   candidate_id?: string | null
   observation_id?: string | null
-  stage?: 'D1' | 'D2' | 'D3' | null
+  stage?: 'D0' | 'D1' | 'D2' | 'D3' | null
   decision_date?: string | null
   model_release_id?: string | null
 }

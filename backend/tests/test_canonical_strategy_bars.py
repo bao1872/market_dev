@@ -54,6 +54,13 @@ def mdas(monkeypatch):
         return {i: outcomes.get(i) for i in instrument_ids}
 
     monkeypatch.setattr(mdas_mod.MarketDataAggregationService, 'get_bars_batch', fake)
+    # Canonical production requires a real authoritative factor series.
+    # Supply one explicitly in this pure-unit fixture; the invalid/missing
+    # factor counterexamples live in test_strategy_b2_pit_input_contract.py.
+    from app.strategy_integration import canonical_strategy_bars as cs
+    async def valid_factors(_session, _instrument_id, _as_of):
+        return pd.DataFrame({'trade_date': ['2010-01-01'], 'adj_factor': [1.0]})
+    monkeypatch.setattr(cs, 'load_factor_series_for_pit', valid_factors)
     yield outcomes
 
 

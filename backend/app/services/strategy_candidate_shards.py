@@ -50,7 +50,7 @@ def _atomic_write(target: Path, payload: bytes) -> None:
 def _partition(dataset: dict, target_bytes: int) -> list[dict]:
     if not 0 < target_bytes < MAX_SHARD_BYTES:
         raise ShardContractError("TARGET_SHARD_SIZE_OUT_OF_RANGE")
-    if dataset.get("schema") != DATA_SCHEMA:
+    if dataset.get("schema") not in (DATA_SCHEMA, "panji-strategy-candidates-v3"):
         raise ShardContractError("CANDIDATE_SCHEMA_MISMATCH")
     stocks, batches = dataset["stocks"], dataset["daily_batches"]
     by_symbol: dict[str, dict[str, list]] = defaultdict(lambda: defaultdict(list))
@@ -80,7 +80,7 @@ def _partition(dataset: dict, target_bytes: int) -> list[dict]:
     for symbols in chunks:
         group = set(symbols)
         sub = {
-            "schema": DATA_SCHEMA,
+            "schema": dataset["schema"],
             "metadata": dataset["metadata"],
             "stocks": {s: stocks[s] for s in symbols},
             "daily_batches": [
@@ -132,6 +132,7 @@ def write_candidate_shards(
         })
     manifest = {
         "schema": MANIFEST_SCHEMA,
+        "data_schema": dataset["schema"],
         "metadata": dataset["metadata"],
         "shards": entries,
         "total_bytes": total,
@@ -201,7 +202,7 @@ def load_candidate_shards(
             sub = json.loads(payload)
         except (UnicodeDecodeError, json.JSONDecodeError) as ex:
             raise ShardContractError("INVALID_SHARD_JSON") from ex
-        if sub.get("metadata") != manifest["metadata"] or sub.get("schema") != DATA_SCHEMA:
+        if sub.get("metadata") != manifest["metadata"] or sub.get("schema") != manifest.get("data_schema", DATA_SCHEMA):
             raise ShardContractError("SHARD_RELEASE_OR_SCHEMA_MISMATCH")
         validate(sub)
         if len(sub["stocks"]) != entry.get("stocks"):
@@ -232,7 +233,7 @@ def load_candidate_shards(
     if total != manifest.get("total_bytes") or len(all_stocks) != manifest.get("stock_count"):
         raise ShardContractError("AGGREGATE_IDENTITY_MISMATCH")
     merged = {
-        "schema": DATA_SCHEMA,
+        "schema": manifest.get("data_schema", DATA_SCHEMA),
         "metadata": manifest["metadata"],
         "stocks": all_stocks,
         "daily_batches": [joined_days[d] for d in batch_days],

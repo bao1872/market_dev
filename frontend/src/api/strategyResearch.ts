@@ -47,7 +47,7 @@ export interface ResearchPoint {
   // Optional in legacy research snapshots; all five must be present for deep links.
   candidate_id?: string | null
   observation_id?: string | null
-  stage?: 'D1' | 'D2' | 'D3' | null
+  stage?: 'D0' | 'D1' | 'D2' | 'D3' | null
   decision_date?: string | null
   model_release_id?: string | null
 }
@@ -58,6 +58,7 @@ export interface ResearchEventRow extends Omit<ResearchPoint, 'mfe_pct' | 'mae_p
   mae_pct: number | null
 }
 export interface StrategyEvaluationResponse {
+  n_unique_events?: number
   metadata: ResearchMetadata
   side: StrategySide
   symbol: string | null
@@ -69,10 +70,28 @@ export interface StrategyEvaluationResponse {
   table: ResearchEventRow[]
 }
 export async function getZigzagEvaluation(params: {
-  side: StrategySide; symbol?: string; gain_pct: number; risk_pct: number
+  side: StrategySide; symbol?: string; release_id?: string; family?: 'JOINT' | 'BREAKOUT'; trend?: string; gain_pct: number; risk_pct: number
 }): Promise<StrategyEvaluationResponse> {
   const { data } = await apiClient.get<StrategyEvaluationResponse>(
     '/v1/strategy-research/zigzag/evaluation', { params },
   )
+  return data
+}
+
+
+export interface TaskPerformance {
+  metadata: {release_id?: string; model_version?: string}
+  status: 'AVAILABLE' | 'NO_SAMPLES' | 'UNAVAILABLE'
+  reason?: string
+  period: string
+  tasks: Array<{task: string; layer: 'D0' | 'L1' | 'L2'; kind: 'H' | 'L'; stage: string;
+    direction?: '向上' | '向下' | null; evaluation_domain: string; n_eligible: number; n_matured: number; n_unresolved: number;
+    n_excluded: number; tp: number; fp: number; fn: number; tn: number;
+    precision: number | null; recall: number | null; auc: number | null;
+    auc_unavailable_reason: string | null; sample_quality: string}>
+  trend: {status: 'AVAILABLE' | 'UNAVAILABLE'; protocol?: string; tasks: TaskPerformance['tasks']; coverage: {missing_context?: number; endpoint_mismatch?: number; matched?: number}}
+}
+export async function getTaskPerformance(params: {symbol?: string; period: string; release_id?: string}): Promise<TaskPerformance> {
+  const {data} = await apiClient.get<TaskPerformance>('/v1/strategy-research/zigzag/task-performance', {params})
   return data
 }

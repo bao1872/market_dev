@@ -39,20 +39,37 @@ async def load_factor_series_for_pit(
 
 
 def _align_factor_series(frame_dates: pd.DatetimeIndex, series: pd.DataFrame) -> np.ndarray:
-    """Forward-fill the authoritative factor onto every bar date (no future leak)."""
-    dates = pd.to_datetime(series['trade_date'])
-    factors = pd.to_numeric(series['adj_factor'], errors='coerce').astype(float)
+    """Attach only factors effective on or before each daily bar (fail closed).
+
+    Never infer an early factor by backward-filling a later corporate-action
+    factor. Missing initial coverage is an unavailable PIT input, not a reason
+    to synthesize historical factors.
+    """
+    bars = pd.DatetimeIndex(frame_dates)
+    if bars.empty or bars.has_duplicates or not bars.is_monotonic_increasing or bars.hasnans:
+        raise CanonicalMarketDataError('INVALID_PIT_BAR_DATES')
+    if bars.tz is not None:
+        raise CanonicalMarketDataError('PIT_BAR_TIMEZONE_UNSUPPORTED')
+    if not {'trade_date', 'adj_factor'}.issubset(series.columns) or series.empty:
+        raise CanonicalMarketDataError('INVALID_PIT_FACTOR_SERIES')
+    dates = pd.to_datetime(series['trade_date'], errors='coerce')
+    factors = pd.to_numeric(series['adj_factor'], errors='coerce')
+    if (dates.isna().any() or dates.duplicated().any() or
+            getattr(dates.dt, 'tz', None) is not None or
+            not np.isfinite(factors.to_numpy(dtype=float)).all() or
+            (factors <= 0).any()):
+        raise CanonicalMarketDataError('INVALID_PIT_FACTOR_SERIES')
     order = np.argsort(dates.to_numpy())
     dates = dates.iloc[order].reset_index(drop=True)
     factors = factors.iloc[order].reset_index(drop=True)
     merged = pd.merge_asof(
-        pd.DataFrame({'bar_date': frame_dates}),
-        pd.DataFrame({'factor_date': dates, 'adj_factor': factors}),
-        left_on='bar_date', right_on='factor_date', direction='backward')
+        pd.DataFrame({'bar_date': bars.normalize()}),
+        pd.DataFrame({'factor_date': dates.dt.normalize(), 'adj_factor': factors}),
+        left_on='bar_date', right_on='factor_date', direction='backward',
+    )
     values = merged['adj_factor'].to_numpy(dtype=float)
-    if len(values) and not np.isfinite(values[0]):
-        values[0] = factors.iloc[0]
-    values = pd.Series(values).ffill().bfill().to_numpy(dtype=float)
+    if not np.isfinite(values).all() or (values <= 0).any():
+        raise CanonicalMarketDataError('PIT_FACTOR_INITIAL_COVERAGE_MISSING')
     return values
 
 
@@ -164,13 +181,15 @@ async def load_official_qfq_stock_batch(
                     # refuse to pretend PIT was applied.
                     factor_note = 'factor_series_unavailable'
                 else:
-                    raw["adj_factor"] = _align_factor_series(dates, factor_series)
-                    if not np.isfinite(raw["adj_factor"].to_numpy(float)).all() or (
-                            raw["adj_factor"].to_numpy(float) <= 0).any():
-                        raw = raw.drop(columns=["adj_factor"])
+                    try:
+                        aligned = _align_factor_series(dates, factor_series)
+                    except CanonicalMarketDataError:
+                        # Exclude this instrument: never turn a gap into a
+                        # silently backward-filled, look-ahead PIT series.
                         factor_series = None
                         factor_note = 'factor_series_invalid'
                     else:
+                        raw['adj_factor'] = aligned
                         factor_note = 'authoritative_factor_series_attached'
             if with_factor_series and factor_series is None:
                 excluded['missing_authoritative_factor_series'] += 1
@@ -187,6 +206,8 @@ async def load_official_qfq_stock_batch(
             }
             if dates[-1].date() == as_of:
                 covered += 1
+        from .job_progress import progress
+        progress("READ_MDAS_BATCHES", min(off+batch_size, len(ids)), len(ids))
     return accepted, {
         "price_adjustment": "qfq",
         "adjustment_as_of": as_of.isoformat(),

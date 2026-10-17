@@ -21,7 +21,7 @@ import sys
 import numpy as np
 import pandas as pd
 
-ASSET_DIR = Path(os.environ.get('PANJI_STRATEGY_MODEL_ASSETS', '/opt/panji/strategy-assets'))
+ASSET_DIR = Path(os.environ.get('PANJI_STRATEGY_MODEL_ASSETS', str(Path(__file__).parent / 'fourteen')))
 ENGINE_SHA = '36c862bc318b5e53617b7527d5db166de3243addc85d2d1ae6a655574a93fb1a'
 BUNDLE_SHA = 'e38263f33add0e84bf73a7002122c9717c4bc71e733957cebef14e1b5073a351'
 SCRIPT_SHA = '1cc123274c00209552b7ddc920c804be92e714c07fc7ef088c1c7e14a8b816bd'
@@ -60,6 +60,10 @@ def _approved_bundle_sha(assets: Path) -> str:
     return digest_value
 
 def validate_source_assets(assets: Path = ASSET_DIR) -> dict:
+    from .fourteen_adapter import is_package, load_package
+    if is_package(assets):
+        _, facts = load_package(assets)
+        return facts
     expected = {
         'b_v55_d123_trend_change.py': ENGINE_SHA,
         'panji_two_stage_final.py': SCRIPT_SHA,
@@ -78,6 +82,9 @@ def validate_source_assets(assets: Path = ASSET_DIR) -> dict:
 
 
 def load_engine(assets: Path = ASSET_DIR):
+    from .fourteen_adapter import is_package, load_package
+    if is_package(assets):
+        return load_package(assets)[0]['fourteen_runtime'].engine
     path = assets / 'b_v55_d123_trend_change.py'
     if digest(path) != ENGINE_SHA:
         raise AssetError('ENGINE_SHA_MISMATCH')
@@ -96,6 +103,9 @@ def load_bundle(assets: Path = ASSET_DIR, allow_runtime_mismatch: bool = False) 
 
     NEVER accept a pickle file supplied in an HTTP request or by another user.
     """
+    from .fourteen_adapter import is_package, load_package
+    if is_package(assets):
+        return load_package(assets)
     import sklearn
     version = str(sklearn.__version__)
     if version != SKLEARN_TRAIN_VERSION and not allow_runtime_mismatch:
@@ -147,6 +157,9 @@ def load_bundle_file(path, *, allow_runtime_mismatch: bool = False,
     locally trusted, SHA-pinned artifact; never accept an HTTP-supplied pickle.
     """
     path = Path(path)
+    from .fourteen_adapter import is_package, load_package
+    if is_package(path):
+        return load_package(path, pinned_sha)
     if not path.is_file():
         raise AssetError('BUNDLE_FILE_MISSING: ' + str(path))
     # Pin the artifact identity first: tampering is rejected before any

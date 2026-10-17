@@ -61,7 +61,7 @@ export function stageObservation(candidate: Candidate, stage: string): Observati
 }
 
 export function allStageObservations(candidate: Candidate): Observation[] {
-  const order: Record<string, number> = { D1: 1, D2: 2, D3: 3 }
+  const order: Record<string, number> = { D0: 0, D1: 1, D2: 2, D3: 3 }
   return [...candidate.observations].sort((a,b) =>
     (order[a.stage] ?? 100) - (order[b.stage] ?? 100))
 }

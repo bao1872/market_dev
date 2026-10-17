@@ -96,5 +96,16 @@ COPY --from=verification-builder /opt/venv /opt/venv
 ARG DEP_HASH=unknown
 LABEL panji.verify.dependency-hash=${DEP_HASH}
 
-# 默认构建仍保持精简运行镜像；只有显式 --target verification 才包含测试依赖。
+# 隔离策略运行时：ML 依赖不安装到 HTTP/既有业务 worker 的 venv。
+FROM builder AS strategy-builder
+COPY strategy-ml-requirements.txt /tmp/strategy-ml-requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip pip install -r /tmp/strategy-ml-requirements.txt
+
+FROM runtime AS strategy-ml
+RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=strategy-builder /opt/venv /opt/venv
+CMD ["python", "-m", "app.strategy_integration.worker", "daily-loop"]
+
+# 默认构建仍保持精简运行镜像；ML 与验证均须显式 target。
 FROM runtime AS production

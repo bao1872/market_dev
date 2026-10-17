@@ -1,0 +1,6 @@
+# Tested inference environment. scikit-learn is not needed for native model inference.
+numpy==1.26.4
+pandas==2.3.3
+lightgbm==4.7.0
+# Required for the CLI's Parquet input; CSV/DataFrame callers can omit this.
+pyarrow==24.0.0

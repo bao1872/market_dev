@@ -68,8 +68,9 @@ def _positive(v: Any, field: str) -> float:
 
 
 def validate(blob: Any) -> dict[str, Any]:
-    if not isinstance(blob, dict) or blob.get("schema") != SCHEMA:
+    if not isinstance(blob, dict) or blob.get("schema") not in (SCHEMA, "panji-strategy-candidates-v3"):
         raise DatasetInvalid("unsupported candidate schema")
+    fourteen = blob["schema"] == "panji-strategy-candidates-v3"
     meta = blob.get("metadata")
     stocks = blob.get("stocks")
     daily = blob.get("daily_batches")
@@ -82,6 +83,8 @@ def validate(blob: Any) -> dict[str, Any]:
             raise DatasetInvalid(f"metadata.{key} required")
     if meta["strategy_id"] != "zigzag_two_stage" or len(stocks) > MAX_STOCKS:
         raise DatasetInvalid("unsupported strategy or stock count")
+    if fourteen and (not isinstance(meta.get("model_version"), str) or not meta["model_version"] or meta.get("scoring_architecture") != "GLOBAL_FOURTEEN"):
+        raise DatasetInvalid("fourteen global model identity required")
     observation_index: dict[str, dict[str, Any]] = {}
     candidate_index: dict[str, str] = {}
     for symbol, stock in stocks.items():
@@ -121,7 +124,7 @@ def validate(blob: Any) -> dict[str, Any]:
                 raise DatasetInvalid("kind must be H/L")
             _positive(cand.get("anchor_price"), "candidate.anchor_price")
             obs = cand.get("observations")
-            if not isinstance(obs, list) or len(obs) > 3:
+            if not isinstance(obs, list) or len(obs) > 4:
                 raise DatasetInvalid("candidate may have at most three observations")
             stages = set()
             prev_decision = ""
@@ -132,7 +135,7 @@ def validate(blob: Any) -> dict[str, Any]:
                 if not isinstance(oid, str) or not oid or oid in observation_index:
                     raise DatasetInvalid("duplicate/empty observation_id")
                 stage = row.get("stage")
-                if stage not in ("D1", "D2", "D3") or stage in stages:
+                if stage not in (("D0", "D1", "D2", "D3") if fourteen else ("D1", "D2", "D3")) or stage in stages:
                     raise DatasetInvalid("invalid/duplicate stage")
                 stages.add(stage)
                 decision = _day(row.get("decision_date"), "observation.decision_date")
@@ -140,6 +143,31 @@ def validate(blob: Any) -> dict[str, Any]:
                 if decision not in bar_days or decision < visible or decision <= prev_decision or cutoff > decision:
                     raise DatasetInvalid("observation violates PIT/ordering")
                 prev_decision = decision
+                if fourteen:
+                    if row.get("scoring_status", "SCORED") not in ("SCORED", "CANDIDATE_INACTIVE"):
+                        raise DatasetInvalid("invalid scoring availability")
+                    if row.get("scoring_status") == "CANDIDATE_INACTIVE" and any(row.get(k) is not None for k in ("l1_score", "l2_score", "d0_score")):
+                        raise DatasetInvalid("inactive candidate cannot carry current scores")
+                    _score(row.get("d0_score"), "d0_score")
+                    _score(row.get("d0_threshold"), "d0_threshold")
+                    if stage == "D0" and (decision != anchor or row.get("d0_score") is None or row.get("l1_score") is not None or row.get("l2_score") is not None or row.get("joint_alert")):
+                        raise DatasetInvalid("invalid D0 observation")
+                    if stage != "D0" and row.get("d0_score") is not None:
+                        raise DatasetInvalid("D0 score on D123 observation")
+                    anchor_index = next(i for i, b in enumerate(bars) if b["date"] == anchor)
+                    decision_index = next(i for i, b in enumerate(bars) if b["date"] == decision)
+                    if decision_index - anchor_index != int(stage[1:]):
+                        raise DatasetInvalid("stage trading-bar offset mismatch")
+                    price_key = "high" if cand["kind"] == "H" else "low"
+                    anchor_price = bar_by_day[anchor][price_key]
+                    if cand['anchor_price'] != anchor_price or row.get('model_version') != meta['model_version']:
+                        raise DatasetInvalid("fourteen anchor/model identity mismatch")
+                    if stage != 'D0' and row.get('scoring_status', 'SCORED') == 'SCORED' and (row.get('l1_score') is None or row.get('l2_score') is None or row.get('l1_threshold') is None or row.get('l2_threshold') is None):
+                        raise DatasetInvalid("fourteen D123 scores required")
+                    if row.get('l2_evaluation_domain_verified') is not False:
+                        raise DatasetInvalid("L2 domain must remain conditional")
+                    if row.get("scoring_status", "SCORED") == "SCORED" and any(b[price_key] > anchor_price if cand["kind"] == "H" else b[price_key] < anchor_price for b in bars[anchor_index+1:decision_index+1]):
+                        raise DatasetInvalid("superseded fourteen candidate")
                 _score(row.get("l1_score"), "l1_score")
                 _score(row.get("l2_score"), "l2_score")
                 _score(row.get("l1_threshold"), "l1_threshold")
@@ -160,6 +188,8 @@ def validate(blob: Any) -> dict[str, Any]:
                     _positive(ref, "reference_price")
                     if _day(confirmed, "reference_confirmed_at") > decision:
                         raise DatasetInvalid("future reference confirmation")
+                    if fourteen and confirmed > anchor:
+                        raise DatasetInvalid("reference must be frozen by anchor close")
                 first = row.get("first_breakout")
                 if not isinstance(first, bool):
                     raise DatasetInvalid("first_breakout must be bool")
@@ -170,10 +200,39 @@ def validate(blob: Any) -> dict[str, Any]:
                     crossed = (float(decision_bar["high"]) > float(ref)) if cand["kind"] == "L" else (float(decision_bar["low"]) < float(ref))
                     if not crossed:
                         raise DatasetInvalid("first breakout not supported by decision-day OHLC")
+                if fourteen:
+                    fact = row.get('breakout')
+                    if fact is None and first:
+                        raise DatasetInvalid('first breakout fact required')
+                    if fact is not None:
+                        from app.strategy_integration.breakout import event_identity
+                        if not isinstance(fact, dict) or stage == 'D0':
+                            raise DatasetInvalid('invalid breakout fact')
+                        first_day = _day(fact.get('first_date'), 'breakout.first_date')
+                        first_index = next((i for i, b in enumerate(bars) if b['date'] == first_day), -1)
+                        if not 1 <= first_index-anchor_index <= 3 or first_day > decision:
+                            raise DatasetInvalid('breakout first date outside D123')
+                        if fact.get('first_stage') != f'D{first_index-anchor_index}' or fact.get('is_first_today') is not first or first != (first_day == decision):
+                            raise DatasetInvalid('breakout first stage/date mismatch')
+                        if fact.get('reference_price') != ref or fact.get('reference_confirmed_at') != confirmed or ref is None:
+                            raise DatasetInvalid('breakout reference mismatch')
+                        direction = 'HIGH' if cand['kind'] == 'L' else 'LOW'
+                        price_field = 'high' if direction == 'HIGH' else 'low'
+                        def crossed_at(b):
+                            return b[price_field] > ref if direction == 'HIGH' else b[price_field] < ref
+                        if fact.get('direction') != direction or not crossed_at(bars[first_index]) or any(crossed_at(b) for b in bars[anchor_index:first_index]):
+                            raise DatasetInvalid('breakout is not strict first occurrence')
+                        if fact.get('event_id') != event_identity(symbol, anchor, cand['kind'], meta['release_id']):
+                            raise DatasetInvalid('breakout event identity mismatch')
+                        holding = bars[decision_index]['close'] > ref if direction == 'HIGH' else bars[decision_index]['close'] < ref
+                        if fact.get('holding_beyond_reference') is not holding:
+                            raise DatasetInvalid('breakout holding state mismatch')
                 observation_index[oid] = {"symbol": symbol, "candidate_id": cid, "stage": stage, "decision_date": decision,
                                           "kind": cand["kind"], "l1_score": row.get("l1_score"), "l2_score": row.get("l2_score"),
-                                          "joint_alert": row["joint_alert"], "first_breakout": first}
-            if ["D1", "D2", "D3"][:len(stages)] != [o["stage"] for o in obs]:
+                                          "joint_alert": row["joint_alert"], "first_breakout": first,
+                                          **({k: row.get(k) for k in ('d0_score', 'd0_threshold', 'breakout', 'segment', 'scoring_status', 'reference_price', 'reference_confirmed_at')} if fourteen else {})}
+            expected_stages = ["D0"] if fourteen and "D0" in stages else ["D1", "D2", "D3"][:len(stages)]
+            if expected_stages != [o["stage"] for o in obs]:
                 raise DatasetInvalid("stage must be a D1-first prefix")
             if sum(bool(o["first_breakout"]) for o in obs) > 1:
                 raise DatasetInvalid("first breakout may be emitted once per candidate")
@@ -205,13 +264,13 @@ def validate(blob: Any) -> dict[str, Any]:
             ref = observation_index[oid]
             if ref["decision_date"] != td:
                 raise DatasetInvalid("daily item mismatched decision date")
-            for k in ("symbol", "candidate_id", "stage", "kind", "l1_score", "l2_score", "joint_alert", "first_breakout"):
+            for k in ("symbol", "candidate_id", "stage", "kind", "l1_score", "l2_score", "joint_alert", "first_breakout", *(("d0_score", "d0_threshold", "breakout", "segment", "scoring_status", "reference_price", "reference_confirmed_at") if fourteen else ())):
                 if item.get(k) != ref[k]:
                     raise DatasetInvalid(f"daily item {k} mismatch with observation SSOT")
     return blob
 
 
-def read_dataset() -> dict[str, Any]:
+def read_dataset(*, symbol=None, trade_date=None) -> dict[str, Any]:
     """Load the pinned release; the 48 MiB per-file bound is never relaxed.
 
     The physical release directory is resolved BEFORE any read so an atomic
@@ -220,9 +279,13 @@ def read_dataset() -> dict[str, Any]:
     shape validated by `validate()`.
     """
     path = os.getenv("PANJI_STRATEGY_CANDIDATE_SNAPSHOT", "")
-    if not path:
+    if not path and not os.getenv("PANJI_STRATEGY_RELEASE_ROOT"):
         raise DatasetUnavailable("尚未配置已审计的候选事件快照")
-    p = Path(path)
+    from app.strategy_integration.release_store import PublishError, published_snapshot_path
+    try:
+        p = published_snapshot_path("candidate_snapshot.json", path)
+    except PublishError as exc:
+        raise DatasetInvalid(str(exc)) from exc
     if not p.is_absolute() or not p.is_file():
         raise DatasetUnavailable("候选快照不存在或超过大小限制")
     pinned = p.resolve()
@@ -236,6 +299,12 @@ def read_dataset() -> dict[str, Any]:
         blob = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise DatasetInvalid("candidate snapshot not valid JSON") from exc
+    from .strategy_partitioned_snapshot import SCHEMA as PARTITIONED, read_candidates
+    if isinstance(blob, dict) and blob.get('schema') == PARTITIONED:
+        try:
+            return read_candidates(pinned, symbol=symbol, trade_date=trade_date)
+        except (ValueError, OSError, KeyError, TypeError) as exc:
+            raise DatasetInvalid('partitioned candidate contract failed') from exc
     if isinstance(blob, dict) and blob.get("schema") == MANIFEST_SCHEMA:
         # Bounded cache keyed by the PINNED physical release directory plus the
         # descriptor digest: swapping `current` to another batch changes the key,
@@ -262,7 +331,7 @@ def get_stock(dataset: dict[str, Any], symbol: str) -> dict[str, Any]:
     value = dataset["stocks"].get(symbol)
     if value is None:
         raise DatasetUnavailable("股票不在已发布快照中")
-    return {"symbol": symbol, "release_id": dataset["metadata"]["release_id"], **value}
+    return {"symbol": symbol, "release_id": dataset["metadata"]["release_id"], "metadata": dataset["metadata"], **value}
 
 
 def get_today(dataset: dict[str, Any], trade_date: str | None = None) -> dict[str, Any]:

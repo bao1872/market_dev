@@ -1,18 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { getZigzagEvaluation, type MetricKey, type ModelEvaluation, type ResearchPoint, type StrategySide } from '@/api/strategyResearch'
+import { getZigzagEvaluation, type ModelEvaluation, type ResearchPoint, type StrategySide } from '@/api/strategyResearch'
 import OpportunityJointChart from '@/features/strategy-evaluation/OpportunityJointChart'
 import DistributionChart from '@/features/strategy-evaluation/DistributionChart'
 import { modelVisual, fmtPct, fmtRate } from '@/features/strategy-evaluation/evaluationLogic'
+import BreakoutEvaluationView from './BreakoutEvaluationView'
+import TaskPerformanceView from './TaskPerformanceView'
 import { buildCandidateDeepLink, type CandidateLinkIdentity } from './candidateLinks'
 
-const DISTRIBUTIONS: Array<{ id: MetricKey; name: string }> = [
-  { id: 'endpoint_pct', name: '结构终点变化' },
-  { id: 'mfe_pct', name: 'MFE 最大有利空间' },
-  { id: 'mae_pct', name: 'MAE 最大不利幅度' },
-  { id: 'mdd_pct', name: '路径 MDD' },
-]
 function errorText(error: unknown): string {
   const e = error as { response?: { status?: number } }
   if (e?.response?.status === 403) return '策略研究权限不足。'
@@ -26,15 +22,14 @@ function sum(models: ModelEvaluation[], field: 'n_signals' | 'n_resolved' | 'n_u
 /** Pixel/layout reference: reference/panji_strategy_unified_v2.html #view-eval.
  * All statistics come from the audited evaluation API, never from the demo file.
  */
-export default function UnifiedEvaluationView({ currentSymbol }: { currentSymbol: string }) {
+export default function UnifiedEvaluationView({ currentSymbol, embedded = false, releaseId }: { currentSymbol: string; embedded?: boolean; releaseId?: string }) {
   const navigate = useNavigate()
   const [side, setSide] = useState<StrategySide>('BUY')
-  const [scope, setScope] = useState<'market' | 'stock'>('market')
+  const [scope, setScope] = useState<'market' | 'stock'>(embedded ? 'stock' : 'market')
   const [gain, setGain] = useState(10)
   const [risk, setRisk] = useState(7)
   const [applied, setApplied] = useState({ gain: 10, risk: 7 })
   const [hidden, setHidden] = useState<string[]>([])
-  const [metric, setMetric] = useState<MetricKey>('endpoint_pct')
   const [selected, setSelected] = useState<ResearchPoint | null>(null)
 
   useEffect(() => {
@@ -43,8 +38,8 @@ export default function UnifiedEvaluationView({ currentSymbol }: { currentSymbol
   }, [gain, risk])
   const validSymbol = /^(SH|SZ|BJ):\d{6}$/.test(currentSymbol)
   const query = useQuery({
-    queryKey: ['strategy-research', 'zigzag', side, scope === 'stock' ? currentSymbol : null, applied.gain, applied.risk],
-    queryFn: () => getZigzagEvaluation({ side, symbol: scope === 'stock' ? currentSymbol : undefined, gain_pct: applied.gain, risk_pct: applied.risk }),
+    queryKey: ['strategy-research', 'zigzag', releaseId, side, scope === 'stock' ? currentSymbol : null, applied.gain, applied.risk],
+    queryFn: () => getZigzagEvaluation({ side, release_id: releaseId, symbol: scope === 'stock' ? currentSymbol : undefined, gain_pct: applied.gain, risk_pct: applied.risk }),
     enabled: scope === 'market' || validSymbol,
     staleTime: 120000,
     retry: false,
@@ -70,18 +65,20 @@ export default function UnifiedEvaluationView({ currentSymbol }: { currentSymbol
 
   return <section className="view" aria-label="历史评价">
     <div className="toolbar view-toolbar">
-      <div className="left"><h2>历史评价 · 多模型同屏</h2><span className="tag purple">每模型独立事件集合</span></div>
+      <div className="left"><h2>{embedded ? "策略在该股的性能评价" : "历史评价 · 分任务与联合表现"}</h2><span className="tag purple">每模型独立事件集合</span></div>
       <div className="right">
         <div className="seg" aria-label="评价方向">
           <button type="button" className={side === 'BUY' ? 'active' : ''} aria-pressed={side === 'BUY'} onClick={() => { setSide('BUY'); setHidden([]); setSelected(null) }}>买入</button>
           <button type="button" className={side === 'SELL' ? 'active' : ''} aria-pressed={side === 'SELL'} onClick={() => { setSide('SELL'); setHidden([]); setSelected(null) }}>卖出</button>
         </div>
-        <select aria-label="评价范围" className="select" value={scope} onChange={event => { setScope(event.target.value as typeof scope); setSelected(null) }}>
+        <select disabled={embedded} aria-label="评价范围" className="select" value={scope} onChange={event => { setScope(event.target.value as typeof scope); setSelected(null) }}>
           <option value="market">全市场</option><option value="stock">当前个股</option>
         </select>
         {scope === 'stock' && <span className="tag gray">{currentSymbol}</span>}
       </div>
     </div>
+    <TaskPerformanceView symbol={scope === 'stock' ? currentSymbol : undefined} releaseId={releaseId} />
+    <h2 className="evaluation-section-heading">02 / 联合模型 · 完整候选链路表现</h2>
     <div className="panel" style={{ marginBottom: 14 }}>
       <div className="panel-head">
         <div><h2>模型选择与安全边际阈值</h2><div className="hint">同一已审计快照、同一评价协议；D1 / D2 / D3 是可并行比较的模型，非互斥交易阶段。</div></div>
@@ -106,7 +103,7 @@ export default function UnifiedEvaluationView({ currentSymbol }: { currentSymbol
       !result ? <div className="live-empty">无已发布评价数据。</div> : <>
       <div className="hint" style={{ margin: '4px 0 14px' }}>已审计快照 {result.metadata.version} · 协议 {result.metadata.evaluation_protocol} · Cohort {result.metadata.cohort} · 审计 {result.metadata.audit_ref} · 生成 {result.metadata.generated_at}</div>
       <div className="overview">
-        <div className="metric"><div className="k">选中模型信号行</div><div className="v mono">{nSignal.toLocaleString()}</div><div className="d">跨模型不去重；不能冒充独立机会数</div></div>
+        <div className="metric"><div className="k">选中模型信号行</div><div className="v mono">{nSignal.toLocaleString()}</div><div className="d">跨阶段信号不去重；本方向独立事件 {result.n_unique_events ?? '未提供'} 个</div></div>
         <div className="metric"><div className="k">联合达标比例</div><div className="v mono">{fmtRate(nPath ? nJoint / nPath : null)}</div><div className="d">路径可用 {nPath} 行 · MFE 与 MAE 同时达标</div></div>
         <div className="metric"><div className="k">目标先于风险阈值</div><div className="v mono">{fmtRate(nPath ? nFirst / nPath : null)}</div><div className="d">目标先触达 {nFirst} / 路径样本 {nPath}；同日不明 {nUnknown}</div></div>
         <div className="metric"><div className="k">结果未成熟 / 删失</div><div className="v mono">{nPending.toLocaleString()}</div><div className="d">已成熟 {nResolved} 行；未成熟不算失败</div></div>
@@ -126,8 +123,7 @@ export default function UnifiedEvaluationView({ currentSymbol }: { currentSymbol
                 <strong className="mono">{fmtRate(model.joint_rate)}</strong>
               </div>)}
               <div className="line-sep" /><h2 style={{ fontSize: 13 }}>收益 / 风险经验分布</h2>
-              <div className="control-row" style={{ margin: '13px 0' }}><select className="select" aria-label="收益风险分布指标" value={metric} onChange={e => setMetric(e.target.value as MetricKey)}>{DISTRIBUTIONS.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select></div>
-              <DistributionChart models={models} metric={metric} />
+              <div className="joint-distributions"><div><h3>终点收益分布</h3><DistributionChart models={models} metric="endpoint_pct" /></div><div><h3>最大回撤 MDD 分布</h3><DistributionChart models={models} metric="mdd_pct" /></div></div>
               <div className="notice warning" style={{ marginTop: 14 }}>MFE 与 MAE 同时达标，不等于可执行收益。同日 OHLC 触达顺序未知，不得推断先盈利。</div>
             </div>
           </div>
@@ -150,6 +146,7 @@ export default function UnifiedEvaluationView({ currentSymbol }: { currentSymbol
       </>}
       <p className="research-footer">历史评价展示经验机会包络而非可交易收益；同事件多 D 阶段相关，需按独立事件与时间可见性审计。模型、数据和协议均来自服务端已发布审计快照。</p>
     </>}
+    <BreakoutEvaluationView symbol={scope === 'stock' ? currentSymbol : undefined} releaseId={releaseId} gain={applied.gain} risk={applied.risk} />
     {selected && <div role="presentation" style={{ position: 'fixed', zIndex: 9999, inset: 0, display: 'grid', placeItems: 'center', background: '#030c16dd' }} onClick={() => setSelected(null)}>
       <div role="dialog" aria-modal="true" aria-label="历史事件详情" className="panel" style={{ width: 'min(490px,94vw)', padding: 22 }} onClick={event => event.stopPropagation()}>
         <h2>历史事件 · {selected.model_id}</h2><p>{selected.symbol} · {selected.signal_time}</p>

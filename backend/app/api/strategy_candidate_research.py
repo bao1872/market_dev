@@ -25,9 +25,9 @@ def _visible(_: AccessContext = Depends(require_capability("strategy_research"))
     return None
 
 
-def _dataset() -> dict:
+def _dataset(**selection) -> dict:
     try:
-        return read_dataset()
+        return read_dataset(**selection)
     except DatasetUnavailable as ex:
         raise HTTPException(status_code=503, detail=str(ex)) from ex
     except DatasetInvalid as ex:
@@ -63,7 +63,7 @@ async def daily(
     # Explicit trade_date is historical replay; unspecified is the latest
     # complete A-share trade day, NOT max(snapshot.daily_batches).
     expected = trade_date if trade_date is not None else await _expected_latest_trade_day(db)
-    dataset = _dataset()
+    dataset = _dataset(trade_date=expected)
     try:
         result = get_today(dataset, expected)
         return {**result, "freshness": "HISTORICAL" if trade_date is not None else "CURRENT", "expected_trade_date": expected}
@@ -226,6 +226,14 @@ async def strategy_history_bars(
     if include_structure is True:
         try:
             response['structure'] = structure_from_verified_bars(response)
+            from app.services.strategy_tv_zigzag import current_segment, overlay
+            if 'volume' not in frame.columns:
+                raise StructureUnavailable('TV_ZIGZAG_VOLUME_INPUT_MISSING')
+            tv_raw = pd.DataFrame({'datetime': pd.to_datetime([b['date'] for b in records]),
+                **{k: [b[k] for b in records] for k in ('open','high','low','close')},
+                'volume': frame['volume'].to_numpy(float)})
+            response['segment'] = current_segment(tv_raw)
+            response['tv_zigzag'] = overlay(tv_raw)
         except StructureUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc)) from exc
     return response
@@ -237,7 +245,7 @@ def candidates(
     release_id: str | None = Query(None, min_length=1, max_length=128),
     _: None = Depends(_visible),
 ) -> dict:
-    dataset = _dataset()
+    dataset = _dataset(symbol=symbol)
     if release_id is not None and dataset["metadata"]["release_id"] != release_id:
         raise HTTPException(status_code=409, detail="模型发布版本不匹配，拒绝将旧候选映射到其他版本")
     try:

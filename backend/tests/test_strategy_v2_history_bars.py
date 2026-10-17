@@ -25,7 +25,7 @@ class _Service:
         v=[10+i/1000 for i in range(500)]
         frame=pd.DataFrame({'open':v,'high':[x+0.2 for x in v],
                             'low':[x-0.2 for x in v],
-                            'close':[x+0.05 for x in v]},index=ix)
+                            'close':[x+0.05 for x in v], 'volume':[100.]*500},index=ix)
         return SimpleNamespace(bars=frame,degraded=False,
             adj_factor_hash='abc',source_bar_hash='def',history_exhausted=False)
 

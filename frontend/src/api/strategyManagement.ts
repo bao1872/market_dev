@@ -2,12 +2,15 @@
 import { apiClient } from './client'
 
 export type DateWindow = { start: string; end: string }
-export type TrainConfig = { as_of:string; train: DateWindow; val: DateWindow; test: DateWindow; trees: number }
+export type TrainConfig = { model_family?: 'fourteen'; as_of:string; train: DateWindow; val: DateWindow; test: DateWindow; trees: number }
 export type TrainWindows = TrainConfig & {
   status: 'AUTHORITATIVE_ROLLING_24_6_3'
   train_enqueue_enabled: boolean
 }
 export interface ModelRelease {
+  as_of?: string
+  evaluation_sha256?: string
+  validation?: Record<string, number>
   release_id: string | null
   bundle_sha256: string | null
   label_contract: string | null
@@ -47,4 +50,27 @@ export async function activateModelRelease(releaseId:string, evaluationSha:strin
   const {data} = await apiClient.post(`/v1/admin/strategy-research/zigzag/model-releases/${encodeURIComponent(releaseId)}/publish`,
     {release_id:releaseId,candidate_report_sha256:evaluationSha})
   return data
+}
+export interface StrategyJob {
+  job_id: string; kind: 'TRAIN' | 'PREDICT' | 'EVALUATE'; status: string; error?: string; stdout_tail?: string
+  progress?: {stage:string;completed:number;total:number;updated_at:string}
+  result?: {output?:string;bundle_path?:string}; created_at:string
+}
+export async function getStrategyJobs(): Promise<{status:string;items:StrategyJob[]}> {
+  const {data}=await apiClient.get('/v1/admin/strategy-research/zigzag/jobs');return data
+}
+export async function retryStrategyJob(jobId:string):Promise<{job_id:string;status:string}> {
+  const {data}=await apiClient.post(`/v1/admin/strategy-research/zigzag/jobs/${encodeURIComponent(jobId)}/retry`);return data
+}
+export async function getStrategyRuntime():Promise<{status:string;can_train:boolean;can_predict:boolean}> {
+  const {data}=await apiClient.get('/v1/admin/strategy-research/zigzag/runtime');return data
+}
+export async function evaluateTraining(jobId:string,trade_date:string):Promise<{job_id:string;status:string}> {
+  const {data}=await apiClient.post(`/v1/admin/strategy-research/zigzag/train-runs/${encodeURIComponent(jobId)}/evaluate`,{trade_date});return data
+}
+export async function readTrainingReport(jobId:string):Promise<{status:string;model_count:number;metrics:Record<string,Record<string,{n:number;precision:number|null;recall:number|null;auc:number|null}>>}> {
+  const {data}=await apiClient.get(`/v1/admin/strategy-research/zigzag/train-runs/${encodeURIComponent(jobId)}/report`);return data
+}
+export async function auditModelRelease(releaseId:string,sha:string):Promise<{status:string}> {
+  const {data}=await apiClient.post(`/v1/admin/strategy-research/zigzag/model-releases/${encodeURIComponent(releaseId)}/audit`,{release_id:releaseId,candidate_report_sha256:sha});return data
 }

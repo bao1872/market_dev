@@ -39,21 +39,26 @@ def _job_root() -> Path:
 
 
 def _train_enqueue_ready() -> bool:
-    return os.getenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED') == '1' and os.getenv('PANJI_STRATEGY_TRAIN_RUNTIME_READY') == '1'
+    from app.strategy_integration.runtime_status import read_runtime_status
+    root = os.getenv('PANJI_STRATEGY_JOB_ROOT', '')
+    return bool(root and os.getenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED') == '1' and os.getenv('PANJI_STRATEGY_TRAIN_RUNTIME_READY') == '1' and read_runtime_status(root).get('can_train'))
 
 
-def _save_job(kind:str,payload:dict[str,Any]) -> dict[str,Any]:
+def _save_job(kind:str,payload:dict[str,Any], *, retry_of=None) -> dict[str,Any]:
     _require_write_enabled()
     if kind == 'TRAIN' and not _train_enqueue_ready():
         raise HTTPException(status_code=503,detail='独立训练运行时尚未核验，禁止创建训练任务')
-    root=_job_root()/'queue'
-    root.mkdir(parents=True,exist_ok=True)
-    j={'job_id':uuid.uuid4().hex,'kind':kind,'status':'QUEUED',
-       'created_at':datetime.now(timezone.utc).isoformat(),'payload':payload}
-    path=root/(j['job_id']+'.json')
-    with path.open('x',encoding='utf-8') as f:
-        json.dump(j,f,ensure_ascii=False)
-    return {'job_id':j['job_id'],'status':'QUEUED'}
+    if kind in ('PREDICT', 'EVALUATE'):
+        from app.strategy_integration.runtime_status import read_runtime_status
+        capability = 'can_predict' if kind == 'PREDICT' else 'can_train'
+        if not read_runtime_status(_job_root()).get(capability):
+            raise HTTPException(status_code=503, detail='策略执行运行时或模型尚未就绪')
+    from app.strategy_integration.job_store import enqueue
+    try:
+        return enqueue(_job_root(), kind, payload, retry_of=retry_of)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
 
 
 class DateRange(BaseModel):
@@ -73,6 +78,7 @@ class TrainWindow(BaseModel):
     val:DateRange
     test:DateRange
     trees:int=Field(300,ge=50,le=2000)
+    model_family: Literal['fourteen'] = 'fourteen'
 
     @model_validator(mode='after')
     def no_overlap(self):
@@ -105,9 +111,11 @@ def training_windows(ctx:AccessContext=Depends(require_admin)) -> dict:
         'val':{'start':w['windows']['val'][0],'end':w['windows']['val'][1]},
         'test':{'start':w['windows']['test'][0],'end':w['windows']['test'][1]},
         'trees':300,
+        'model_family':'fourteen',
+        'model_count':14,
+        'global_only':True,
         'status':'AUTHORITATIVE_ROLLING_24_6_3',
-        'train_enqueue_enabled': os.getenv('PANJI_STRATEGY_ADMIN_WRITES_ENABLED')=='1' and
-                                 os.getenv('PANJI_STRATEGY_TRAIN_RUNTIME_READY')=='1',
+        'train_enqueue_enabled': _train_enqueue_ready(),
     }
 
 
@@ -132,11 +140,33 @@ def request_prediction(request:PredictionRequest,ctx:AccessContext=Depends(requi
 @router.get('/train-runs/{job_id}')
 def job_status(job_id:str,ctx:AccessContext=Depends(require_admin)) -> dict:
     if not re.fullmatch('[0-9a-f]{32}',job_id):raise HTTPException(status_code=422,detail='invalid job')
-    root=_job_root()
-    for folder in ('queue','running','finished','failed'):
-        p=root/folder/(job_id+'.json')
-        if p.is_file():return json.loads(p.read_text())
-    raise HTTPException(status_code=404,detail='job not found')
+    from app.strategy_integration.job_store import read_job
+    job = read_job(_job_root(), job_id)
+    if job is None:
+        raise HTTPException(status_code=404,detail='job not found')
+    return job
+
+
+@router.get('/jobs')
+def jobs(ctx:AccessContext=Depends(require_admin)) -> dict:
+    from app.strategy_integration.job_store import list_jobs
+    root = os.getenv('PANJI_STRATEGY_JOB_ROOT', '')
+    if not root:
+        return {'status': 'NOT_CONFIGURED', 'items': []}
+    return {'status': 'AVAILABLE', 'items': list_jobs(Path(root))}
+
+
+@router.post('/jobs/{job_id}/retry', status_code=202)
+def retry_job(job_id: str, ctx:AccessContext=Depends(require_admin)) -> dict:
+    from app.strategy_integration.job_store import read_job
+    try:
+        job = read_job(_job_root(), job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not job or job['status'] != 'FAILED':
+        raise HTTPException(status_code=409, detail='仅失败任务可以重新入队')
+    return _save_job(job['kind'], job['payload'], retry_of=job_id)
+
 
 
 @router.get('/model-releases')
@@ -146,10 +176,13 @@ def model_releases(ctx:AccessContext=Depends(require_admin)) -> dict:
         return {'releases':[],'active_release':None,'status':'NOT_CONFIGURED'}
     root=Path(base)
     records=[]
-    for p in sorted(root.glob('releases/*/manifest.json')):
-        if SHA_RE.fullmatch(p.parent.name):
-            m=json.loads(p.read_text())
-            records.append({k:m.get(k) for k in ('release_id','bundle_sha256','label_contract','status','created_at')})
+    seen = set()
+    candidates = list(root.glob('*/manifest.json')) + list(root.glob('releases/*/manifest.json'))
+    for p in sorted(candidates, key=lambda p: p.stat().st_mtime_ns, reverse=True)[:50]:
+        m = json.loads(p.read_text())
+        if SHA_RE.fullmatch(m.get('release_id', '')) and m['release_id'] not in seen:
+            records.append({k:m.get(k) for k in ('release_id','label_contract','status','as_of','evaluation_sha256','validation')})
+            seen.add(m['release_id'])
     active=root/'active_release.json'
     return {'releases':records,'active_release':json.loads(active.read_text()) if active.is_file() else None}
 
@@ -222,3 +255,64 @@ def publish_release(release_id:str,request:PublishRequest,ctx:AccessContext=Depe
 def activate_release(release_id:str,request:PublishRequest,ctx:AccessContext=Depends(require_admin)) -> dict:
     # Rollback uses same audit prerequisites as first activation.
     return publish_release(release_id,request,ctx)
+
+
+@router.get('/runtime')
+def runtime_status(ctx:AccessContext=Depends(require_admin)) -> dict:
+    from app.strategy_integration.runtime_status import read_runtime_status
+    root = os.getenv('PANJI_STRATEGY_JOB_ROOT', '')
+    return read_runtime_status(root) if root else {'status': 'NOT_CONFIGURED', 'can_train': False, 'can_predict': False}
+
+
+@router.post('/train-runs/{job_id}/evaluate', status_code=202)
+def evaluate_training(job_id: str, request: PredictionRequest, ctx:AccessContext=Depends(require_admin)) -> dict:
+    from app.strategy_integration.job_store import read_job
+    try:
+        job = read_job(_job_root(), job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not job or job['status'] != 'SUCCEEDED' or job['kind'] != 'TRAIN':
+        raise HTTPException(status_code=409, detail='训练候选尚未完成')
+    return _save_job('EVALUATE', {'training_job_id': job_id, 'trade_date': request.trade_date.isoformat()})
+
+
+@router.get('/train-runs/{job_id}/report')
+def training_report(job_id: str, ctx:AccessContext=Depends(require_admin)) -> dict:
+    from app.strategy_integration.job_store import read_job
+    try:
+        job = read_job(_job_root(), job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    if not job or job['status'] != 'SUCCEEDED' or job['kind'] != 'TRAIN':
+        raise HTTPException(status_code=409, detail='训练报告尚不可用')
+    path = _job_root()/'outputs'/job_id/'train_report.json'
+    if not path.is_file() or path.stat().st_size > 8*1024*1024:
+        raise HTTPException(status_code=503, detail='训练报告缺失或超出读取上限')
+    return json.loads(path.read_text())
+
+
+@router.post('/model-releases/{release_id}/audit')
+def audit_release(release_id: str, request: PublishRequest, ctx:AccessContext=Depends(require_admin)) -> dict:
+    _require_write_enabled()
+    if release_id != request.release_id or not SHA_RE.fullmatch(release_id):
+        raise HTTPException(status_code=422, detail='invalid release identity')
+    root = Path(os.getenv('PANJI_STRATEGY_RELEASE_ROOT', ''))
+    if not root.is_absolute():
+        raise HTTPException(status_code=503, detail='release root not configured')
+    batch = resolve_release_batch(root, release_id)
+    if batch is None:
+        raise HTTPException(status_code=404, detail='candidate release unavailable')
+    from app.strategy_integration.release_store import _validate_batch_for_activation, atomic_json, digest_path, PublishError
+    manifest = json.loads((batch/'manifest.json').read_text())
+    if manifest.get('status') not in ('VALIDATED_STAGING_NOT_DEPLOYED', 'AUDITED') or request.candidate_report_sha256 != manifest.get('evaluation_sha256'):
+        raise HTTPException(status_code=409, detail='评价资产身份或校验状态不符')
+    if digest_path(batch/'evaluation_snapshot.json') != request.candidate_report_sha256:
+        raise HTTPException(status_code=409, detail='评价资产已变更')
+    try:
+        _validate_batch_for_activation(batch)
+    except PublishError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    manifest.update(status='AUDITED', manual_review={'actor': str(ctx.user_id), 'at': datetime.now(timezone.utc).isoformat(),
+                    'evaluation_sha256': request.candidate_report_sha256})
+    atomic_json(batch/'manifest.json', manifest)
+    return {'status':'AUDITED','release_id':release_id,'activated':False}

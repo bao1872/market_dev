@@ -109,6 +109,14 @@ def _check_snapshot(blob: Any) -> dict[str, Any]:
                     raise SnapshotInvalid("invalid path bar")
                 _number(bar.get("favorable_pct"), "path.favorable_pct")
                 _number(bar.get("adverse_pct"), "path.adverse_pct", min_value=0)
+    if "task_samples" in blob:
+        from app.services.strategy_task_performance import validate_samples
+        try:
+            validate_samples(blob["task_samples"])
+            if any(r.get('label') is not None and r['label_available_at'] > meta['generated_at'][:10] for r in blob['task_samples']):
+                raise ValueError('task label after snapshot cutoff')
+        except ValueError as exc:
+            raise SnapshotInvalid(str(exc)) from exc
     return blob
 
 
@@ -121,16 +129,27 @@ def _load_cached(filepath: str, mtime_ns: int, size: int) -> dict[str, Any]:
             payload = stream.read(MAX_BYTES + 1)
         if len(payload) > MAX_BYTES:
             raise SnapshotInvalid("snapshot too large")
-        return _check_snapshot(json.loads(payload))
+        blob = json.loads(payload)
+        from .strategy_partitioned_snapshot import SCHEMA as PARTITIONED, read_evaluation
+        if isinstance(blob, dict) and blob.get('schema') == PARTITIONED:
+            try:
+                return read_evaluation(Path(filepath))
+            except (ValueError, KeyError, OSError, TypeError) as exc:
+                raise SnapshotInvalid('partitioned evaluation contract failed') from exc
+        return _check_snapshot(blob)
     except (UnicodeDecodeError, json.JSONDecodeError) as e:
         raise SnapshotInvalid("malformed JSON") from e
 
 
 def read_snapshot() -> dict[str, Any]:
     filepath = os.environ.get("STRATEGY_RESEARCH_SNAPSHOT", "")
-    if not filepath:
+    if not filepath and not os.getenv("PANJI_STRATEGY_RELEASE_ROOT"):
         raise SnapshotUnavailable("研究评价数据尚未接入")
-    p = Path(filepath)
+    from app.strategy_integration.release_store import PublishError, published_snapshot_path
+    try:
+        p = published_snapshot_path("evaluation_snapshot.json", filepath)
+    except PublishError as exc:
+        raise SnapshotInvalid(str(exc)) from exc
     if not p.is_absolute() or not p.is_file():
         raise SnapshotUnavailable("研究评价数据尚未接入")
     try:
@@ -177,18 +196,23 @@ def _touch_order(path: list[dict[str, float]] | None, gain: float, risk: float) 
     return "NEITHER"
 
 
-def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: float, risk: float) -> dict[str, Any]:
+def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: float, risk: float, *, family: str = "JOINT", trend: str | None = None) -> dict[str, Any]:
     if side not in KINDS:
         raise ValueError("invalid side")
     _number(gain, "gain", min_value=.01)
     _number(risk, "risk", min_value=.01)
     if gain > 100 or risk > 100:
         raise ValueError("threshold out of range")
-    rows = [e for e in snapshot["events"] if e["side"] == side and (symbol is None or e["symbol"] == symbol)]
+    models = [m for m in snapshot["models"] if m.get("family", "JOINT") == family]
+    model_ids = {m["id"] for m in models}
+    cohort = snapshot['events']
+    if hasattr(cohort, 'select_symbol'):
+        cohort = cohort.select_symbol(symbol)
+    rows = [e for e in cohort if e["model_id"] in model_ids and e["side"] == side and (symbol is None or e["symbol"] == symbol) and (trend is None or e.get("trend_at_event") == trend or (trend == "待确认" and e.get("trend_at_event") is None))]
     results = []
     points = []
     table = []
-    for m in snapshot["models"]:
+    for m in models:
         if m["side"] != side:
             continue
         one = [e for e in rows if e["model_id"] == m["id"]]
@@ -220,9 +244,10 @@ def evaluate(snapshot: dict[str, Any], side: str, symbol: str | None, gain: floa
             table.append({k: e.get(k) for k in ("event_id", "model_id", "symbol", "signal_time", "outcome", "mfe_pct", "mae_pct", "mdd_pct", "endpoint_pct", "candidate_id", "observation_id", "stage", "decision_date", "model_release_id")})
     table.sort(key=lambda e: (e["signal_time"], e["model_id"], e["event_id"]), reverse=True)
     return {
-        "metadata": snapshot["metadata"], "side": side, "symbol": symbol,
+        "metadata": snapshot["metadata"], "side": side, "symbol": symbol, "family": family, "trend": trend,
         "gain_pct": gain, "risk_pct": risk,
         "models": results, "points": points,
+        "n_unique_events": len({(r["symbol"], r["event_id"]) for r in rows}),
         "points_sampled": sum(m["n_path"] for m in results) > len(points),
         "table": table[:180],
     }

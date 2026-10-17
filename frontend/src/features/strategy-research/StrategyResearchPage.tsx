@@ -54,12 +54,12 @@ export default function StrategyResearchPage() {
     <header className="headline">
       <div>
         <div className="eyebrow">PANJI / STRATEGY RESEARCH</div>
-        <h1>策略研究中心 <span className="tag gray">V2.0 · 统一候选视角</span></h1>
-        <div className="subtitle">一只股票、一张K线，同时看到买入与卖出候选；每个点可追溯 D1 / D2 / D3 评分、已发生突破事实和历史评价。</div>
+        <h1>策略研究中心 <span className="tag gray">五类互补 · 全市场统一模型</span></h1>
+        <div className="subtitle">一只股票、一张K线，同时看到买入与卖出候选；每个点可追溯 D0 / L1 / L2 评分、决策时点与分任务性能。</div>
       </div>
       <div className="header-actions">
-        <span className="tag green">真实已发布数据 · 无模拟回退</span>
-        {admin && <button type="button" className="btn primary" onClick={() => navigateTab('management')}>＋ 模型管理 / 训练</button>}
+        <span className="tag green">仅展示已发布版本</span>
+        {admin && <button type="button" className="btn primary" onClick={() => navigateTab('management')}>模型管理 / 手动训练</button>}
       </div>
     </header>
     <div className="head-meta">
@@ -69,7 +69,7 @@ export default function StrategyResearchPage() {
       <span className="meta">模型输出 <b>L1 / L2 分数，非校准概率</b></span>
     </div>
     <nav className="tabs" aria-label="策略子页面">
-      {([['stock', '个股', '01'], ['evaluation', '历史评价', '02'], ['today', '今日机会', '03'], ['management', '模型管理', '04']] as const)
+      {([['stock', '个股', '01'], ['evaluation', '历史评价', '02'], ['today', '当日候选', '03'], ['management', '模型管理', '04']] as const)
         .filter(([id]) => id !== 'management' || admin)
         .map(([id, label, number]) => <button type="button" key={id}
           aria-current={tab === id ? 'page' : undefined}

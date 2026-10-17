@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.db import AsyncSessionLocal
 from app.models.instrument import Instrument
+from app.services.instrument_maintenance_service import stock_symbol_sql_filter
 from .canonical_strategy_bars import load_official_qfq_stock_batch
 from .producer import ProducerError
 
@@ -30,6 +31,7 @@ EXPORT_MANIFEST = 'input_manifest.json'
 
 async def read_official_qfq_stock_batch(
     as_of: date, *, batch_size: int = 80, min_bars: int = 150, with_factor_series: bool = True,
+    max_symbols: int = 0,
 ) -> tuple[dict, dict]:
     """Read canonical QFQ bars + authoritative factor series directly from the
     single market-data owner (MDAS). No Parquet round-trip, no legacy
@@ -39,22 +41,31 @@ async def read_official_qfq_stock_batch(
     export and the in-place canonical source mode; keep all MDAS access here so
     the canonical mode never re-implements or re-applies an adjustment factor.
     """
+    from .readonly_runtime import configure_readonly_connections, assert_readonly_session
+    configure_readonly_connections()
     async with AsyncSessionLocal() as db:
-        objects = (await db.execute(
-            select(Instrument.id, Instrument.symbol, Instrument.market)
-        )).all()
-    if not objects:
-        raise ProducerError('NO_INSTRUMENTS')
-    instrument_by_id = {
-        x.id: f"{str(x.market).upper()}:{str(x.symbol).zfill(6)}" for x in objects
-    }
-    accepted, report = await load_official_qfq_stock_batch(
-        db, instrument_by_id, as_of, batch_size=batch_size,
-        min_bars=min_bars, with_factor_series=with_factor_series,
-    )
-    if not accepted:
-        raise ProducerError('NO_ELIGIBLE_STOCKS')
-    return accepted, report
+        readonly_verified = await assert_readonly_session(db)
+        if max_symbols < 0:
+            raise ProducerError('NEGATIVE_SYMBOL_LIMIT')
+        statement = select(Instrument.id, Instrument.symbol, Instrument.market).where(
+            stock_symbol_sql_filter(Instrument)).order_by(Instrument.market, Instrument.symbol)
+        if max_symbols:
+            statement = statement.limit(max_symbols)
+        objects = (await db.execute(statement)).all()
+        if not objects:
+            raise ProducerError('NO_INSTRUMENTS')
+        instrument_by_id = {
+            x.id: f"{str(x.market).upper()}:{str(x.symbol).zfill(6)}" for x in objects
+        }
+        accepted, report = await load_official_qfq_stock_batch(
+            db, instrument_by_id, as_of, batch_size=batch_size,
+            min_bars=min_bars, with_factor_series=with_factor_series,
+        )
+        if not accepted:
+            raise ProducerError('NO_ELIGIBLE_STOCKS')
+        report['connection_read_only_verified'] = readonly_verified
+        report['universe_owner'] = 'instrument_maintenance_service.stock_symbol_sql_filter'
+        return accepted, report
 
 
 async def export_dataset(output: Path, as_of: date, *, batch_size: int = 80) -> dict:

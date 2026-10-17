@@ -20,16 +20,42 @@ def zigzag_evaluation(
     symbol: str | None = Query(None, min_length=3, max_length=32, pattern=r"^[A-Za-z0-9:_]+$"),
     gain_pct: float = Query(5, gt=0, le=100),
     risk_pct: float = Query(5, gt=0, le=100),
+    family: str = Query("JOINT", pattern="^(JOINT|BREAKOUT)$"),
+    trend: str | None = Query(None, pattern="^(向上|向下|待确认)$"),
+    release_id: str | None = Query(None, min_length=1, max_length=128),
     _: None = Depends(_market_access),
 ) -> dict:
     try:
         snap = read_snapshot()
         if snap["metadata"]["strategy_key"] != "zigzag_two_stage":
             raise SnapshotInvalid("unsupported strategy")
-        return evaluate(snap, side, symbol, gain_pct, risk_pct)
+        if release_id and snap["metadata"].get("release_id") != release_id:
+            raise HTTPException(status_code=409, detail="评价与候选模型版本不一致")
+        return evaluate(snap, side, symbol, gain_pct, risk_pct, family=family, trend=trend)
     except SnapshotUnavailable as exc:
         # A missing research snapshot is not an empty evaluation result.
         # Match candidate snapshot availability semantics and the PRD fail-closed contract.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SnapshotInvalid as exc:
         raise HTTPException(status_code=503, detail="研究快照未通过完整性检查，已禁止展示") from exc
+
+
+@router.get("/zigzag/task-performance")
+def task_performance(
+    symbol: str | None = Query(None, pattern=r"^(SH|SZ|BJ):[0-9]{6}$"),
+    period: str = Query("TEST", pattern="^(TRAIN|VAL|TEST|UNASSIGNED|ALL)$"),
+    release_id: str | None = Query(None, min_length=1, max_length=128),
+    _: None = Depends(_market_access),
+) -> dict:
+    from app.services.strategy_task_performance import evaluate_tasks
+    try:
+        snapshot = read_snapshot()
+        if snapshot["metadata"]["strategy_key"] != "zigzag_two_stage":
+            raise SnapshotInvalid("unsupported strategy")
+        return evaluate_tasks(snapshot, symbol=symbol, period=period, release_id=release_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except SnapshotUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SnapshotInvalid as exc:
+        raise HTTPException(status_code=503, detail="任务评价快照未通过完整性检查") from exc
