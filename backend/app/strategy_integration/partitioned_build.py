@@ -20,7 +20,7 @@ def build(args, *, out, frames, pit_source, source_report, fmod, bundle, facts,
     from app.services.strategy_tv_zigzag import identity as tv_identity
     computation_sha = hashlib.sha256(b''.join(
         (Path(__file__).parent/name).read_bytes() for name in
-        ('producer.py', 'fourteen_adapter.py', 'inference_cache.py', 'breakout.py', 'evaluation_contract.py')
+        ('producer.py', 'fourteen_adapter.py', 'history_inference.py', 'inference_cache.py', 'breakout.py', 'evaluation_contract.py')
     )).hexdigest()
     # Results, unlike weights, also depend on the evaluation and history contracts.
     batch_id = hashlib.sha256(json.dumps({

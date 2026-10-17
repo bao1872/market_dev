@@ -116,6 +116,11 @@ def test_joint_monitoring_keeps_test_and_post_test_cohorts_separate(setup_model,
     app = FastAPI()
     app.include_router(api.router)
     app.dependency_overrides[api._market_access] = lambda:None
+    # The router now also requires authentication for request-scoped preview.
+    # This test binds evaluation parameters; access-control has its own tests.
+    from types import SimpleNamespace
+    from app.services.access_control_service import require_authenticated
+    app.dependency_overrides[require_authenticated] = lambda:SimpleNamespace(is_admin=False)
     monkeypatch.setattr(api,'read_snapshot',lambda:snapshot)
     client = TestClient(app)
     response = client.get('/v1/strategy-research/zigzag/evaluation',params={'period':'TEST'})

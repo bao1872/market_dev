@@ -50,3 +50,23 @@ def test_already_broken_is_not_automatically_evaluated_as_success():
     event = evaluation['events'][0]
     assert event['outcome'] == 'FAIL' and event['endpoint_pct'] == 0
     assert event['outcome_definition'] == 'DIRECTIONAL_ENDPOINT_POSITIVE_NEXT_OPEN_20B'
+
+
+@pytest.mark.parametrize('kind', ['H', 'L'])
+def test_chart_reference_uses_exact_pivot_price_and_preserves_strict_ties(kind):
+    from app.strategy_integration.breakout import snapshots_in_price_frame
+    raw, snapshots = fixture(kind)
+    field = 'high' if kind == 'L' else 'low'
+    reference = snapshots[5][0]['price']
+    raw.loc[1, field] = reference
+    raw.loc[6, field] = reference
+    # Close-derived scale conversion formerly introduced this one-ULP drift.
+    import numpy as np
+    for pivots in snapshots:
+        if pivots:
+            pivots[0]['price'] = np.nextafter(reference, -np.inf if kind == 'L' else np.inf)
+    converted = snapshots_in_price_frame(dict(enumerate(snapshots)), raw)
+    fact = observe_breakout(raw, converted, 5, kind, 7)
+    assert fact['reference_price'] == reference
+    assert fact['first_stage'] == 'D2'
+    assert fact['first_date'] == str(raw.datetime.iloc[7].date())

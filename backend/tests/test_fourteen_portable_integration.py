@@ -59,6 +59,44 @@ class FourteenIntegration(unittest.TestCase):
         with self.assertRaises(producer.ProducerError):
             producer.require_price_contract(self.bundle)
 
+    def test_batched_history_matches_frozen_daily_scorer_across_pit_regimes(self):
+        from app.strategy_integration.history_inference import decision_contexts
+        from app.strategy_integration.model import _pit_frame
+        runtime = self.bundle['fourteen_runtime']
+        source = self.raw.copy()
+        for col in ('open', 'high', 'low', 'close', 'volume'):
+            source['raw_'+col] = source[col]
+        source['adj_factor'] = np.where(np.arange(len(source)) < 110, .87, 1.)
+        for t, frame, prepared in decision_contexts(runtime, self.raw, 100, source):
+            day = str(frame.datetime.iloc[-1].date())
+            expected_frame = _pit_frame(source.iloc[:t+1], day)
+            pd.testing.assert_frame_equal(frame.reset_index(drop=True), expected_frame)
+            self.assertEqual(prepared.score(frame, day), runtime.score(expected_frame, day))
+
+    def test_history_batches_native_predictions_and_preserves_early_unscored_rows(self):
+        from app.strategy_integration.history_inference import decision_contexts
+        runtime = self.bundle['fourteen_runtime']
+        calls = []
+        from contextlib import ExitStack
+        with ExitStack() as stack:
+            for model in runtime.models.values():
+                calls.append(stack.enter_context(patch.object(model, 'predict', wraps=model.predict)))
+            for t, frame, prepared in decision_contexts(runtime, self.raw, 0):
+                actual = prepared.score(frame, str(frame.datetime.iloc[-1].date()))
+                if t < 20:
+                    self.assertEqual(actual['status'], 'INSUFFICIENT_HISTORY')
+            self.assertEqual([call.call_count for call in calls], [1]*14)
+
+    def test_batched_history_does_not_change_prior_outputs_when_future_changes(self):
+        from app.strategy_integration.history_inference import decision_contexts
+        runtime = self.bundle['fourteen_runtime']
+        changed = self.raw.copy()
+        changed.loc[140:, ['open','high','low','close']] *= 1.3
+        def scores(frame):
+            return [prepared.score(prefix, str(prefix.datetime.iloc[-1].date()))
+                    for t, prefix, prepared in decision_contexts(runtime, frame, 120) if t < 140]
+        self.assertEqual(scores(self.raw.iloc[:140]), scores(changed))
+
     def test_production_readers_and_shards(self):
         candidate, evaluation = self.snapshots()
         validate(candidate)

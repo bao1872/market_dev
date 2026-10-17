@@ -6,6 +6,16 @@ import hashlib
 from app.services.strategy_tv_zigzag import current_segment
 
 
+def snapshots_in_price_frame(snapshots, frame):
+    """Keep causal pivot identity, take its exact price from the chart frame.
+
+    Multiplying a PIT pivot by a close-derived scale can move an equal price
+    by one ULP and fabricate a strict crossing. Never round or add tolerance.
+    """
+    return {i: [{**p, 'price': float(frame['high' if p['type'] == 'H' else 'low'].iloc[p['bar']])}
+                for p in pivots] for i, pivots in snapshots.items()}
+
+
 def observe_breakout(raw, snapshots, anchor, kind, decision, *, segments_by_bar=None):
     from .producer import _reference
     reference, confirmed = _reference(raw, snapshots, anchor, kind)

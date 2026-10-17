@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -88,8 +89,7 @@ def verify_production_package(path, pinned_sha):
 def build_stock(raw, symbol, bundle, *, release_id, chart_bars, pit_source=None):
     from app.services.strategy_tv_zigzag import overlay
 
-    from . import model
-    from .breakout import event_identity, observe_breakout
+    from .breakout import event_identity, observe_breakout, snapshots_in_price_frame
     runtime = bundle['fourteen_runtime']
     start = max(0, len(raw) - chart_bars)
     bars = [{'date': str(pd.Timestamp(r.datetime).date()), 'open': float(r.open),
@@ -97,11 +97,16 @@ def build_stock(raw, symbol, bundle, *, release_id, chart_bars, pit_source=None)
             for r in raw.iloc[start:].itertuples(index=False)]
     candidates, daily, last_segment = {}, [], None
     segments = {}
-    for t in range(max(6, start), len(raw)):
+    from .history_inference import decision_contexts
+    profile = None
+    for t, prefix, prepared in decision_contexts(runtime, raw, start, pit_source):
         day = str(pd.Timestamp(raw.datetime.iloc[t]).date())
-        prefix = model._pit_frame(pit_source.iloc[:t+1].reset_index(drop=True), day) if pit_source is not None else raw.iloc[:t+1]
         from .inference_cache import decision_inputs
-        result, snapshots, causal, segment = decision_inputs(runtime, prefix, day, symbol)
+        started = time.perf_counter()
+        result, snapshots, causal, segment = decision_inputs(prepared, prefix, day, symbol)
+        profile = prepared.history_profile
+        profile['decision_seconds'] += time.perf_counter()-started
+        chart_snapshots = snapshots_in_price_frame(snapshots, raw)
         segments[t] = segment
         last_segment = segment
         scored = {}
@@ -132,19 +137,20 @@ def build_stock(raw, symbol, bundle, *, release_id, chart_bars, pit_source=None)
                 row[f'{layer.lower()}_threshold'] = signal['threshold']
             if stage != 'D0':
                 from .producer import _reference
-                reference, confirmed = _reference(prefix, snapshots, j, kind)
-                scale = float(raw.close.iloc[t]) / float(prefix.close.iloc[t])
-                row['reference_price'] = reference * scale if reference is not None else None
+                reference, confirmed = _reference(raw, chart_snapshots, j, kind)
+                row['reference_price'] = reference
                 row['reference_confirmed_at'] = confirmed
-                fact = observe_breakout(prefix, snapshots, j, kind, t, segments_by_bar=segments)
+                fact = observe_breakout(raw, chart_snapshots, j, kind, t, segments_by_bar=segments)
                 if fact:
                     row['breakout'] = {**fact, 'event_id': event_identity(symbol, anchor, kind, release_id),
-                        'reference_price': fact['reference_price'] * scale}
+                        'reference_price': fact['reference_price']}
                     row['first_breakout'] = fact['is_first_today']
             row['joint_alert'] = all(row[f'{layer}_score'] is not None and row[f'{layer}_score'] >= row[f'{layer}_threshold'] for layer in ('l1', 'l2'))
             candidate['observations'].append(row)
             if signals or row['breakout']:
                 daily.append({'trade_date': day, 'symbol': symbol, 'candidate_id': cid, 'kind': kind, **row})
+    if profile is not None:
+        print(json.dumps({'event': 'STRATEGY_HISTORY_PROFILE', 'symbol': symbol, **profile}), flush=True)
     return {'bars': bars, 'candidates': list(candidates.values()), 'segment': last_segment,
             'tv_zigzag': overlay(raw)}, daily
 
