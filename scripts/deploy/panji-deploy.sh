@@ -1805,7 +1805,7 @@ _compose_container_id_for_service() {
     local cid
     cid="$(
         cd "${REPO_ROOT}" &&
-        ${COMPOSE_CMD} ps -q "${service}" 2>/dev/null |
+        ${COMPOSE_CMD} ps --all -q "${service}" 2>/dev/null |
         head -1
     )" || return 1
     [[ -n "${cid}" ]] || return 1
@@ -2541,8 +2541,10 @@ post_deploy_resource_check() {
     local check_failed=false
     for container in trading-backend trading-worker-after-close trading-worker-capture trading-worker-strategy-ml; do
         local oom restart
-        if [[ "${container}" == trading-worker-strategy-ml && "${DRY_RUN}" == true ]]             && grep -q '^PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true$' "${PRE_DEPLOY_MANIFEST_FILE}"; then
-            log "[dry-run] 新增策略容器尚未创建；资源生效核验延后至真实部署"
+        if [[ "${container}" == trading-worker-strategy-ml && "${DRY_RUN}" == true ]] \
+            && { [[ "${BACKEND_ENVIRONMENT_CHANGED}" == true || "${COMPOSE_RUNTIME_CHANGED}" == true ]] \
+                || grep -q '^PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true$' "${PRE_DEPLOY_MANIFEST_FILE}"; }; then
+            log "[dry-run] 策略容器计划重建；新容器资源生效核验延后至真实部署，当前故障不作为修复完成证据"
             continue
         fi
         oom="$(docker inspect -f '{{.State.OOMKilled}}' "${container}" 2>/dev/null)" || oom=unknown
