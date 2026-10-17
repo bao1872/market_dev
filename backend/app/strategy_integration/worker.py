@@ -87,6 +87,7 @@ def _run_with_progress(cmd, job, jobs, *, lock_fd):
     env = dict(os.environ)
     env['PANJI_STRATEGY_PROGRESS_FILE'] = str(jobs/'progress'/(job['job_id']+'.json'))
     env['PANJI_STRATEGY_CACHE_ROOT'] = str(jobs/'prefix-cache')
+    env['PANJI_STRATEGY_SOURCE_REPORT_FILE'] = str(jobs/'outputs'/job['job_id']/'source_report.json')
     stall = max(600, int(os.getenv('PANJI_STRATEGY_STALL_SECONDS', '1800')))
     changed, previous = time.monotonic(), None
     heartbeat = time.monotonic()

@@ -61,10 +61,15 @@ async def read_official_qfq_stock_batch(
             db, instrument_by_id, as_of, batch_size=batch_size,
             min_bars=min_bars, with_factor_series=with_factor_series,
         )
-        if not accepted:
-            raise ProducerError('NO_ELIGIBLE_STOCKS')
         report['connection_read_only_verified'] = readonly_verified
         report['universe_owner'] = 'instrument_maintenance_service.stock_symbol_sql_filter'
+        import os
+        report_path = os.getenv('PANJI_STRATEGY_SOURCE_REPORT_FILE')
+        if report_path:
+            from .release_store import atomic_json
+            atomic_json(Path(report_path), report)
+        if not accepted:
+            raise ProducerError('NO_ELIGIBLE_STOCKS')
         return accepted, report
 
 

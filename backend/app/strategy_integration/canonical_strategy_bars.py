@@ -63,8 +63,8 @@ def _align_factor_series(frame_dates: pd.DatetimeIndex, series: pd.DataFrame) ->
     dates = dates.iloc[order].reset_index(drop=True)
     factors = factors.iloc[order].reset_index(drop=True)
     merged = pd.merge_asof(
-        pd.DataFrame({'bar_date': bars.normalize()}),
-        pd.DataFrame({'factor_date': dates.dt.normalize(), 'adj_factor': factors}),
+        pd.DataFrame({'bar_date': bars.normalize().as_unit('ns')}),
+        pd.DataFrame({'factor_date': dates.dt.normalize().dt.as_unit('ns'), 'adj_factor': factors}),
         left_on='bar_date', right_on='factor_date', direction='backward',
     )
     values = merged['adj_factor'].to_numpy(dtype=float)
@@ -158,7 +158,7 @@ async def load_official_qfq_stock_batch(
                 excluded['missing_mdas_raw_bars'] += 1
                 continue
             raw_bars = native.bars
-            if (len(raw_bars) != len(bars) or not pd.DatetimeIndex(raw_bars.index).equals(dates)):
+            if (len(raw_bars) != len(bars) or not pd.DatetimeIndex(raw_bars.index).as_unit('ns').equals(dates.as_unit('ns'))):
                 excluded['mdas_raw_qfq_date_mismatch'] += 1
                 continue
             native_values = raw_bars[['open','high','low','close','volume']].apply(

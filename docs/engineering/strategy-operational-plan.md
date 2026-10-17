@@ -61,3 +61,10 @@
 - 实际部署 SSH 断开后只读核查：repo/state 仍为 `65bff359`，Live Mount SHA 为 `7c0593bf`，应用容器已部分更新；策略 ML 因 NumPy/Pandas ABI 导入失败反复重启；原盘后容器正常退出且未恢复。不能根据 SSH wrapper 旧报错推断“服务未改变”。未启动训练，未激活模型，未执行 Migration。
 - 本地修复：ML 镜像复制前移除镜像内旧 venv；原登记部署入口增加精确完整容器 ID 的显式恢复选项；只有指定容器正常退出、fresh fence 已建立，才能恢复其原运行状态。Compose image owner 查询包含 stopped 容器。dry-run 不把即将替换的故障 ML 容器当成修复后运行证据，真实部署仍严格核验资源/状态。
 - 恢复范围沿用用户已授权的环境更新与原盘后 worker 恢复，不触发业务任务，不手工修改远端源码、Schema 或部署状态。150 项部署合同测试通过，真实修复部署与训练仍待执行。
+
+### 首次真实训练输入结果
+
+- `068001a8` 实际部署成功：repo/Live/HTTP SHA 一致，无 Migration；原盘后 worker 已恢复；策略 ML 零重启、无 OOM，3 GiB/1 CPU 限制生效。实际依赖导入、`bz_stock` 只读事务与 2026-10-16 盘后日历检查通过。
+- 真实 TRAIN `65944398bc9a4639bdff130de367d129` 检查完 5920 证券后以 `NO_ELIGIBLE_STOCKS` 失败，未进入拟合、未生成/激活模型。
+- 只读抽查证实 `SH:600000` 等证券原始价/前复权日期值及长度相同，但索引分别为 `datetime64[ns]` / `datetime64[us]`，Pandas `Index.equals` 因精度表示差异返回 false。这是 `RUNTIME_BUG`，不是实际缺失日线或可降低 PIT 门槛的理由。
+- 本地修复将索引比较和因子 as-of join 两侧统一为 ns 精度，保留相同实际时刻；真实错日仍拒绝。新增回归及相关纯测试 23 passed。worker 同时保存作业专属 source_report，保留输入排除证据。修复后远程重试尚未执行。

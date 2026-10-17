@@ -163,3 +163,26 @@ def test_offline_conversion_uses_canonical_pit_function():
     )
     assert np.allclose(probe['close'].to_numpy()[:decision + 1],
                        truncated['close'].to_numpy())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('shift_raw', [False, True])
+async def test_mdas_equal_instants_with_different_units_are_aligned(mdas, monkeypatch, shift_raw):
+    from app.services.market_data_aggregation_service import MarketDataAggregationService
+    frame = _bars()
+    qfq, native = frame.copy(), frame.copy()
+    qfq.index = qfq.index.as_unit('us')
+    native.index = native.index.as_unit('ns')
+    if shift_raw:
+        native.index = native.index + pd.Timedelta(days=1)
+    async def result(self, _session, ids, **kwargs):
+        return {i: _StubResult(qfq if kwargs['adj'] == 'qfq' else native) for i in ids}
+    monkeypatch.setattr(MarketDataAggregationService, 'get_bars_batch', result)
+    accepted, report = await load_official_qfq_stock_batch(
+        None, {'id-1': 'SH:600000'}, date(2026, 8, 17))
+    if shift_raw:
+        assert not accepted and report['excluded']['mdas_raw_qfq_date_mismatch'] == 1
+    else:
+        assert list(accepted) == ['SH:600000']
+        np.testing.assert_array_equal(accepted['SH:600000'].close, frame.close)
+        np.testing.assert_array_equal(accepted['SH:600000'].raw_close, frame.close)
