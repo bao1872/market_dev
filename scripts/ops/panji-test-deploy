@@ -53,11 +53,12 @@ SSH_WRAPPER="${SCRIPT_DIR}/panji-prod-ssh"
 
 TARGET_SHA=""
 DRY_RUN=false
+RECOVER_AFTER_CLOSE_CID=""
 
 log() { printf '[%s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$*"; }
 fail() { log "错误: $*" >&2; exit 1; }
 usage() {
-    echo "用法: $0 <SHA> [--dry-run]"
+    echo "用法: $0 <SHA> [--dry-run] [--recover-after-close-container <FULL_CID>]"
     echo "  FULL_SHA 必须是 origin/dev 的祖先"
     echo "环境变量:"
     echo "  PANJI_REMOTE_REPO_ROOT       服务器仓库根目录（默认 /root/web_dev）"
@@ -68,6 +69,9 @@ usage() {
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run) DRY_RUN=true; shift ;;
+        --recover-after-close-container)
+            [[ $# -ge 2 && "$2" =~ ^[0-9a-f]{64}$ ]] || fail "恢复目标必须是完整容器 ID"
+            RECOVER_AFTER_CLOSE_CID="$2"; shift 2 ;;
         -h|--help) usage ;;
         -*) fail "未知选项: $1（本入口不提供模式/构建开关，唯一模式为 Live Mount）" ;;
         *)
@@ -119,6 +123,7 @@ fi
 Q_REPO_ROOT="$(printf '%q' "${REMOTE_REPO_ROOT}")"
 REMOTE_DRY_FLAG=""
 [[ "${DRY_RUN}" == "true" ]] && REMOTE_DRY_FLAG=" --dry-run"
+[[ -n "${RECOVER_AFTER_CLOSE_CID}" ]] && REMOTE_DRY_FLAG+=" --recover-after-close-container ${RECOVER_AFTER_CLOSE_CID}"
 
 read -r -d '' REMOTE_CMD <<REMOTE_SCRIPT || true
 set -euo pipefail
@@ -216,12 +221,12 @@ log "通过 panji-prod-ssh 执行部署（dry-run=${DRY_RUN}）..."
 log "远端序列: fetch → 干净校验 → 祖先校验 → 记录 HEAD → checkout --detach ${TARGET_SHA} → 目标工作树 panji-deploy.sh"
 
 set +e
-"${SSH_WRAPPER}" -o BatchMode=yes -o ConnectTimeout=30 "${REMOTE_CMD}"
+"${SSH_WRAPPER}" -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 "${REMOTE_CMD}"
 SSH_RC=$?
 set -e
 
 if [[ "${SSH_RC}" -ne 0 ]]; then
-    fail "远程部署失败（SSH rc=${SSH_RC}）。服务保持部署前版本，请查看上方阶段/行号定位。"
+    fail "远程部署失败（SSH rc=${SSH_RC}）。部署状态未确认；必须检查远端 SHA、容器及恢复状态，不能假定未发生变更。"
 fi
 
 log "panji-test-deploy 完成：${TARGET_SHA}"

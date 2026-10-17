@@ -102,8 +102,9 @@ COPY strategy-ml-requirements.txt /tmp/strategy-ml-requirements.txt
 RUN --mount=type=cache,target=/root/.cache/pip pip install -r /tmp/strategy-ml-requirements.txt
 
 FROM runtime AS strategy-ml
+# COPY merges directories: remove the base venv so old NumPy/Pandas ABI files cannot survive.
 RUN apt-get update && apt-get install -y --no-install-recommends libgomp1 \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* /opt/venv
 COPY --from=strategy-builder /opt/venv /opt/venv
 CMD ["python", "-m", "app.strategy_integration.worker", "daily-loop"]
 

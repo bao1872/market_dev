@@ -139,6 +139,7 @@ IMAGES_BUILT=false
 #       生产容器）；与真实 FENCED 严格区分，dry-run 不得伪装成 FENCED。
 AFTER_CLOSE_WAS_RUNNING=false
 AFTER_CLOSE_FENCE_OWNED=false
+AFTER_CLOSE_RECOVERY_CONTAINER_ID=""
 AFTER_CLOSE_PICKUP_FENCED=false
 AFTER_CLOSE_PICKUP_FENCE_SIMULATED=false
 
@@ -152,7 +153,7 @@ fail() {
 }
 
 usage() {
-    echo "用法: $0 <FULL_SHA> [--dry-run]"
+    echo "用法: $0 <FULL_SHA> [--dry-run] [--recover-after-close-container <FULL_CID>]"
     echo "环境变量: PANJI_REPO_ROOT, PANJI_LIVE_ROOT, PANJI_ENV_FILE, PANJI_STATE_FILE, PANJI_LOCK_FILE"
     exit 1
 }
@@ -163,6 +164,11 @@ parse_args() {
             --dry-run)
                 DRY_RUN=true
                 shift
+                ;;
+            --recover-after-close-container)
+                [[ $# -ge 2 && "$2" =~ ^[0-9a-f]{64}$ ]] || fail "恢复目标必须是完整容器 ID"
+                AFTER_CLOSE_RECOVERY_CONTAINER_ID="$2"
+                shift 2
                 ;;
             -h|--help)
                 usage
@@ -1680,6 +1686,24 @@ _fence_after_close_worker() {
     log "AFTER_CLOSE_PICKUP_FENCED=true（worker-after-close 已 drained，after_close running=0）"
 }
 
+_adopt_authorized_after_close_recovery() {
+    [[ -n "${AFTER_CLOSE_RECOVERY_CONTAINER_ID}" ]] || return 0
+    local cid status exit_code
+    cid="$(docker inspect -f '{{.Id}}' trading-worker-after-close)" || return 1
+    status="$(docker inspect -f '{{.State.Status}}' "${cid}")" || return 1
+    exit_code="$(docker inspect -f '{{.State.ExitCode}}' "${cid}")" || return 1
+    if [[ "${cid}" != "${AFTER_CLOSE_RECOVERY_CONTAINER_ID}" || "${status}" != exited || "${exit_code}" != 0 ]]; then
+        log "AFTER_CLOSE_RECOVERY_IDENTITY_MISMATCH: 不接管未知/未正常退出的容器"
+        return 1
+    fi
+    if [[ "${DRY_RUN}" == true ]]; then
+        log "[dry-run] 计划恢复操作员明确指定的盘后容器 ${cid}；不改变容器"
+    else
+        AFTER_CLOSE_FENCE_OWNED=true
+        log "AFTER_CLOSE_RECOVERY_ADOPTED=${cid}（操作员显式恢复目标）"
+    fi
+}
+
 _restore_after_close_pickup_if_owned() {
     # 仅本 deploy 真正 stop -t -1 停掉的 worker 才恢复（owned-aware）。
     # 进入部署时 worker 原本 stopped/missing 则成功/rollback 都不得擅自 up。
@@ -1825,8 +1849,18 @@ guard_strategy_worker_idle() {
             return 1
         }
     elif docker inspect trading-worker-strategy-ml >/dev/null 2>&1; then
-        log "STRATEGY_JOB_LOCK_MISSING: 已有策略运行时但缺少 admission lock"
-        return 1
+        # Recovery of a first-start crash before the worker could create its lock.
+        # A running/paused container or any durable work is never inferred idle.
+        local worker_state
+        worker_state="$(docker inspect -f '{{.State.Status}}' trading-worker-strategy-ml)" || return 1
+        if [[ "${worker_state}" != restarting && "${worker_state}" != exited ]]             || [[ -n "$(find /opt/panji-strategy-data/jobs/running /opt/panji-strategy-data/jobs/queue -name '*.json' -print -quit 2>/dev/null)" ]]; then
+            log "STRATEGY_JOB_LOCK_MISSING: 无法证明现有运行时空闲"
+            return 1
+        fi
+        mkdir -p /opt/panji-strategy-data/jobs || return 1
+        exec {STRATEGY_JOB_LOCK_FD}>"${lock_path}"
+        flock -n "${STRATEGY_JOB_LOCK_FD}" || return 1
+        log "STRATEGY_FIRST_START_CRASH_RECOVERY: 空任务且已停止/重启中的容器，建立并持有 admission lock"
     fi
 }
 
@@ -2071,6 +2105,7 @@ deploy() {
     if _after_close_process_will_refresh; then
         FAILURE_STAGE="after_close_fence"
         _fence_after_close_worker || return 1
+        _adopt_authorized_after_close_recovery || return 1
         FAILURE_STAGE="deployment_memory_headroom"
         check_deployment_memory_headroom || return 1
     else

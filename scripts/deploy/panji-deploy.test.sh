@@ -890,6 +890,35 @@ else
     bad "新增策略 worker 资源检查边界错误: ${_strategy_resource_result}"
 fi
 
+# Explicit recovery must match the exact normally exited container.
+_recovery_result="$(
+    source "${_DEPLOY_FIXTURE}"
+    log() { :; }
+    AFTER_CLOSE_RECOVERY_CONTAINER_ID="$(printf '%064d' 1)"
+    docker() {
+        case "$*" in
+            *'{{.Id}}'*) printf '%064d\n' 1 ;;
+            *'{{.State.Status}}'*) printf 'exited\n' ;;
+            *'{{.State.ExitCode}}'*) printf '0\n' ;;
+            *) return 1 ;;
+        esac
+    }
+    DRY_RUN=true AFTER_CLOSE_FENCE_OWNED=false
+    _adopt_authorized_after_close_recovery || exit 1
+    [[ "${AFTER_CLOSE_FENCE_OWNED}" == false ]] && printf 'PLAN_ONLY\n'
+    DRY_RUN=false
+    _adopt_authorized_after_close_recovery || exit 1
+    [[ "${AFTER_CLOSE_FENCE_OWNED}" == true ]] && printf 'EXACT_OWNER\n'
+    AFTER_CLOSE_FENCE_OWNED=false
+    AFTER_CLOSE_RECOVERY_CONTAINER_ID="$(printf '%064d' 2)"
+    if _adopt_authorized_after_close_recovery; then printf 'WRONG_OWNER_ACCEPTED\n'; else printf 'WRONG_OWNER_REJECTED\n'; fi
+)"
+if [[ "${_recovery_result}" == $'PLAN_ONLY\nEXACT_OWNER\nWRONG_OWNER_REJECTED' ]]; then
+    ok "显式恢复只接管精确正常退出容器；dry-run 无恢复动作"
+else
+    bad "显式恢复 identity 错误: ${_recovery_result}"
+fi
+
 rm -f "${_DEPLOY_FIXTURE}"
 rm -rf "${_GIT_STUB_DIR}"
 
