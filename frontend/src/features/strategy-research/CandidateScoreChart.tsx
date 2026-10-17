@@ -47,6 +47,7 @@ export default function CandidateScoreChart({
   const scoreHost = useRef<HTMLDivElement>(null)
   const chart = useRef<IChartApi | null>(null)
   const viewport = useRef<{from:number;to:number}|null>(null)
+  const viewportIdentity = useRef('')
   const series = useRef<ISeriesApi<'Candlestick'> | null>(null)
   const callbacks = useRef({ candidates, onSelect })
   callbacks.current = { candidates, onSelect }
@@ -85,6 +86,9 @@ export default function CandidateScoreChart({
 
   useEffect(() => {
     if (!ref.current || !bars.length || validationError) return
+    const identity = `${bars.length}|${bars[0].date}|${bars[bars.length-1].date}`
+    if (viewportIdentity.current !== identity) viewport.current = null
+    viewportIdentity.current = identity
     const host = ref.current
     const c = createChart(host, {
       width: Math.max(host.clientWidth, 1),

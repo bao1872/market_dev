@@ -50,7 +50,7 @@ export default function UnifiedTodayView({ focus }: {
   function changeType(value: typeof type) { setType(value); setPage(0) }
   return <section className="view" aria-label="当日候选">
     <div className="toolbar view-toolbar"><div className="left"><h2>当日候选 · 当日预测与已发生突破</h2><span className={`tag ${batch?.freshness === 'CURRENT' ? 'green' : 'orange'}`}>
-      {batch ? `${batch.trade_date} · ${batch.freshness === 'CURRENT' ? '最新已发布批次' : '历史已发布批次（非今日）'}` : '等待已发布批次'}
+      {batch ? `${batch.trade_date} · ${strategyPreviewKey() ? '候选预览，未激活' : batch.freshness === 'CURRENT' ? '最新已发布批次' : '历史已发布批次（非今日）'}` : '等待已发布批次'}
     </span></div><div className="right"><span className="smalllabel">点击股票 → 个股 → 精准定位同一候选 ID</span></div></div>
     {query.isPending ? <div className="live-empty">正在读取真实已发布机会…</div> : query.isError ? <div role="alert" className="live-empty live-error">{errorText(query.error)}</div> : !batch ? <div className="live-empty">暂无机会批次</div> : <>
       {batch.freshness !== 'CURRENT' && <div className="notice warning" style={{ marginBottom: 13 }}>最新完整交易日预期 {batch.expected_trade_date}，已发布数据仍为 {batch.trade_date}；不能将旧批次宣传为今日信号。</div>}

@@ -1,3 +1,4 @@
+import { strategyPreviewKey, strategyPreviewParams } from '@/api/strategyPreview'
 import { useEffect, useRef, useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { apiClient } from '@/api/client'
@@ -26,10 +27,10 @@ export default function StrategyStockSearch({
     return ()=>document.removeEventListener('mousedown',onOutside)
   },[])
   const q = useQuery({
-    queryKey: ['strategy','stock-search',delayed],
+    queryKey: ['strategy','stock-search',strategyPreviewKey(),delayed],
     queryFn:async()=>{
       const {data}=await apiClient.get<SearchResult>(
-        '/v1/strategy-research/stocks/search', {params:{keyword:delayed}},
+        '/v1/strategy-research/stocks/search', {params:{keyword:delayed,...strategyPreviewParams()}},
       )
       return data
     },
@@ -54,7 +55,7 @@ export default function StrategyStockSearch({
             setValue(item.symbol);setOpen(false);onChoose(item.symbol)
           }}>
           <strong>{item.name}</strong> <span>{item.symbol}</span>
-          <small>{item.in_snapshot?'有历史研究数据':'暂未发布历史研究'}</small>
+          <small>{item.in_snapshot?(strategyPreviewKey()?'本候选批次有数据':'有历史研究数据'):'暂未发布历史研究'}</small>
         </button>
       )}
       {q.data && q.data.items.length===0 && <div>无匹配股票</div>}
