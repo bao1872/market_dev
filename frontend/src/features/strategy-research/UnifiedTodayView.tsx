@@ -26,6 +26,8 @@ export default function UnifiedTodayView({ focus }: {
   const [page, setPage] = useState(0)
   const query = useQuery({ queryKey: [strategyPreviewKey(), 'strategy-research', 'daily'], queryFn: getDailyResearch, retry: false, staleTime: 120000 })
   const batch = query.data
+  const preview = !!strategyPreviewKey()
+  const batchStatus = preview ? 'VALIDATED_PREVIEW_NOT_ACTIVATED' : batch?.status
   const filtered = useMemo(() => batch?.items.filter(row =>
     (kind === 'ALL' || row.kind === kind) &&
     (type === 'ALL' || (type === 'ALERT' && row.joint_alert) || (type === 'BREAKOUT' && (!!row.breakout || row.first_breakout)) || (type === 'NEW' && (row.breakout?.is_first_today || row.first_breakout)) || (type === 'TRACK' && !!row.breakout && !row.breakout.is_first_today) ||
@@ -58,7 +60,7 @@ export default function UnifiedTodayView({ focus }: {
         <div className="metric"><div className="k">当日买入候选</div><div className="v buy mono">{batch.items.filter(r => r.kind === 'L').length}</div><div className="d">低点 L / 模型买入观察（非当前上行）</div></div>
         <div className="metric"><div className="k">当日卖出候选</div><div className="v sell mono">{batch.items.filter(r => r.kind === 'H').length}</div><div className="d">高点 H / 模型卖出风险（非当前下行）</div></div>
         <div className="metric"><div className="k">D1–D3 已突破</div><div className="v mono">{batch.items.filter(r => r.breakout || r.first_breakout).length}</div><div className="d">含持续跟踪；可与模型门控重叠，事件不重复</div></div>
-        <div className="metric"><div className="k">模型数据日期</div><div className="v mono" style={{ fontSize: 19 }}>{batch.trade_date.slice(5)}</div><div className="d">{batch.freshness === 'CURRENT' ? '已发布当前批次' : '历史批次，缺更不可替代'} · Release 已绑定</div></div>
+        <div className="metric"><div className="k">模型数据日期</div><div className="v mono" style={{ fontSize: 19 }}>{batch.trade_date.slice(5)}</div><div className="d">{preview ? '候选批次，尚未激活' : batch.freshness === 'CURRENT' ? '已发布当前批次' : '历史批次，缺更不可替代'} · Release 已绑定</div></div>
       </div>
       <div className="panel">
         <div className="panel-head">
@@ -99,10 +101,10 @@ export default function UnifiedTodayView({ focus }: {
         </div></div>
       </div>
       <div className="panel" style={{ marginTop: 14 }}>
-        <div className="panel-head"><div><h2>每日盘后任务 · 运行状态</h2><div className="hint">保留原型四阶段流程布局；只有后端已提供的批次发布状态被确认为完成，其他阶段不虚构执行证据。</div></div><span className="tag green">{batch.status}</span></div>
+        <div className="panel-head"><div><h2>每日盘后任务 · 运行状态</h2><div className="hint">保留原型四阶段流程布局；只有后端已提供的批次发布状态被确认为完成，其他阶段不虚构执行证据。</div></div><span className="tag green">{batchStatus}</span></div>
         <div className="panel-body"><div className="pipe">
-          {['01 / 日线数据就绪', '02 / 因果候选 H + L', '03 / L1 + L2 推理', '04 / 批次原子发布'].map((label, i) => <div className="node" key={label}><b>{label}</b><small>{i === 3 ? `${batch.trade_date} · ${batch.status}` : '该阶段独立证据未由当前接口提供'}</small></div>)}
-        </div><div className="hint mono">trade_date: {batch.trade_date} · expected: {batch.expected_trade_date} · release: {batch.release_id} · status: {batch.status} · freshness: {batch.freshness}</div></div>
+          {['01 / 日线数据就绪', '02 / 因果候选 H + L', '03 / L1 + L2 推理', preview ? '04 / 候选批次技术验证' : '04 / 批次原子发布'].map((label, i) => <div className="node" key={label}><b>{label}</b><small>{i === 3 ? `${batch.trade_date} · ${batchStatus}` : '该阶段独立证据未由当前接口提供'}</small></div>)}
+        </div><div className="hint mono">trade_date: {batch.trade_date} · expected: {batch.expected_trade_date} · release: {batch.release_id} · status: {batchStatus} · freshness: {batch.freshness}</div></div>
       </div>
     </>}
   </section>

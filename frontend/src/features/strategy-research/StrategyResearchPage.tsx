@@ -68,7 +68,7 @@ export default function StrategyResearchPage() {
       <span className="meta">数据来源 <b>权威接口 · 未发布则空态</b></span>
       <span className="meta">模型输出 <b>D0 / L1 / L2 分数，非校准概率</b></span>
     </div>
-    {params.get('preview_batch') && <div className="notice warning">正在预览指定候选批次，尚未激活。<button className="btn tiny" onClick={()=>{const p=new URLSearchParams(params);p.delete('preview_batch');setParams(p)}}>退出预览</button></div>}
+    {params.get('preview_batch') && <div className="notice warning">正在预览指定候选批次，尚未激活；诊断批次不代表全市场，请核对管理页样本覆盖。<button className="btn tiny" onClick={()=>{const p=new URLSearchParams(params);p.delete('preview_batch');setParams(p)}}>退出预览</button></div>}
     <nav className="tabs" aria-label="策略子页面">
       {([['stock', '个股', '01'], ['evaluation', '历史评价', '02'], ['today', '当日候选', '03'], ['management', '模型管理', '04']] as const)
         .filter(([id]) => id !== 'management' || admin)
