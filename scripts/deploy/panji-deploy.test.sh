@@ -863,6 +863,33 @@ else
     bad "Behavior E 期望 STEP6_RC!=0 且 restart=1 且 reconcile=0 且 GUARD_PR=1 且 GUARD_PC=1；实际: ${_E_OUT}"
 fi
 
+# A new service is legitimately absent during dry-run, but never after deployment.
+_strategy_resource_result="$(
+    source "${_DEPLOY_FIXTURE}"
+    MIN_DISK_GB=0 MAX_DISK_PCT=100
+    PRE_DEPLOY_MANIFEST_FILE="$(mktemp)"
+    trap 'rm -f "${PRE_DEPLOY_MANIFEST_FILE}"' EXIT
+    printf '%s\n' 'PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true' >"${PRE_DEPLOY_MANIFEST_FILE}"
+    docker() {
+        case "$*" in
+            *trading-worker-strategy-ml*) printf 'unknown\n'; return 1 ;;
+            *State.OOMKilled*) printf 'false\n' ;;
+            *RestartCount*) printf '0\n' ;;
+            *HostConfig*) printf '1\n' ;;
+            *) return 0 ;;
+        esac
+    }
+    DRY_RUN=true
+    if post_deploy_resource_check >/dev/null; then printf 'DRY_ABSENT_OK\n'; fi
+    DRY_RUN=false
+    if post_deploy_resource_check >/dev/null; then printf 'REAL_ABSENT_FALSE_GREEN\n'; else printf 'REAL_ABSENT_REJECTED\n'; fi
+)"
+if [[ "${_strategy_resource_result}" == $'DRY_ABSENT_OK\nREAL_ABSENT_REJECTED' ]]; then
+    ok "新增策略 worker: dry-run 缺席可计划，真实部署缺席必须失败"
+else
+    bad "新增策略 worker 资源检查边界错误: ${_strategy_resource_result}"
+fi
+
 rm -f "${_DEPLOY_FIXTURE}"
 rm -rf "${_GIT_STUB_DIR}"
 

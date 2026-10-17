@@ -2506,8 +2506,17 @@ post_deploy_resource_check() {
     local check_failed=false
     for container in trading-backend trading-worker-after-close trading-worker-capture trading-worker-strategy-ml; do
         local oom restart
-        oom="$(docker inspect -f '{{.State.OOMKilled}}' "${container}" 2>/dev/null || echo "unknown")"
-        restart="$(docker inspect -f '{{.RestartCount}}' "${container}" 2>/dev/null || echo "unknown")"
+        if [[ "${container}" == trading-worker-strategy-ml && "${DRY_RUN}" == true ]]             && grep -q '^PRE_DEPLOY_SERVICE_ABSENT:worker-strategy-ml=true$' "${PRE_DEPLOY_MANIFEST_FILE}"; then
+            log "[dry-run] 新增策略容器尚未创建；资源生效核验延后至真实部署"
+            continue
+        fi
+        oom="$(docker inspect -f '{{.State.OOMKilled}}' "${container}" 2>/dev/null)" || oom=unknown
+        restart="$(docker inspect -f '{{.RestartCount}}' "${container}" 2>/dev/null)" || restart=unknown
+        if [[ "${oom}" != true && "${oom}" != false ]] || [[ ! "${restart}" =~ ^[0-9]+$ ]]; then
+            log "错误: ${container} 无法读取容器资源状态"
+            check_failed=true
+            continue
+        fi
         log "  ${container}: oom_killed=${oom} restart_count=${restart}"
         if [[ "${oom}" == "true" ]]; then
             log "错误: ${container} OOMKilled"
@@ -2528,6 +2537,17 @@ post_deploy_resource_check() {
     if [[ "${mem_cfg}" == "0" || "${pids_cfg}" == "0" || "${cpu_cfg}" == "0" ]]; then
         log "错误: Compose 资源限制未实际生效（Memory/PidsLimit/NanoCpus 存在 0）"
         check_failed=true
+    fi
+
+    if [[ "${DRY_RUN}" != true ]]; then
+        mem_cfg="$(docker inspect -f '{{.HostConfig.Memory}}' trading-worker-strategy-ml 2>/dev/null)" || mem_cfg=0
+        pids_cfg="$(docker inspect -f '{{.HostConfig.PidsLimit}}' trading-worker-strategy-ml 2>/dev/null)" || pids_cfg=0
+        cpu_cfg="$(docker inspect -f '{{.HostConfig.NanoCpus}}' trading-worker-strategy-ml 2>/dev/null)" || cpu_cfg=0
+        log "  trading-worker-strategy-ml limits: mem_limit_bytes=${mem_cfg} pids_limit=${pids_cfg} nano_cpus=${cpu_cfg}"
+        if [[ "${mem_cfg}" == 0 || "${pids_cfg}" == 0 || "${cpu_cfg}" == 0 ]]; then
+            log "错误: 策略 ML 资源限制未生效"
+            check_failed=true
+        fi
     fi
 
     # 4. stats 高水位（只读采集，供 Map 记录与后续收紧预算）
