@@ -144,9 +144,9 @@ def validate(blob: Any) -> dict[str, Any]:
                     raise DatasetInvalid("observation violates PIT/ordering")
                 prev_decision = decision
                 if fourteen:
-                    if row.get("scoring_status", "SCORED") not in ("SCORED", "CANDIDATE_INACTIVE"):
+                    if row.get("scoring_status", "SCORED") not in ("SCORED", "CANDIDATE_INACTIVE", "INSUFFICIENT_HISTORY"):
                         raise DatasetInvalid("invalid scoring availability")
-                    if row.get("scoring_status") == "CANDIDATE_INACTIVE" and any(row.get(k) is not None for k in ("l1_score", "l2_score", "d0_score")):
+                    if row.get("scoring_status") in ("CANDIDATE_INACTIVE", "INSUFFICIENT_HISTORY") and any(row.get(k) is not None for k in ("l1_score", "l2_score", "d0_score")):
                         raise DatasetInvalid("inactive candidate cannot carry current scores")
                     _score(row.get("d0_score"), "d0_score")
                     _score(row.get("d0_threshold"), "d0_threshold")
@@ -158,6 +158,11 @@ def validate(blob: Any) -> dict[str, Any]:
                     decision_index = next(i for i, b in enumerate(bars) if b["date"] == decision)
                     if decision_index - anchor_index != int(stage[1:]):
                         raise DatasetInvalid("stage trading-bar offset mismatch")
+                    if row.get('scoring_status') == 'INSUFFICIENT_HISTORY':
+                        count = row.get('history_bars_available')
+                        offset = stock.get('tv_zigzag', {}).get('barCount', len(bars))-len(bars)
+                        if isinstance(count, bool) or not isinstance(count, int) or count != offset+decision_index+1 or not 1 <= count < 21:
+                            raise DatasetInvalid('invalid insufficient-history evidence')
                     price_key = "high" if cand["kind"] == "H" else "low"
                     anchor_price = bar_by_day[anchor][price_key]
                     if cand['anchor_price'] != anchor_price or row.get('model_version') != meta['model_version']:

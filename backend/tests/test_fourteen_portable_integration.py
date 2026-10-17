@@ -36,6 +36,21 @@ class FourteenIntegration(unittest.TestCase):
             self.bundle, as_of=str(self.raw.datetime.iloc[-1].date()), source_sha='f'*64,
             chart_bars=45, release_id='a'*64)
 
+    def test_early_history_keeps_explicit_unscored_stage_prefix(self):
+        candidate, evaluation = producer.make_snapshots({'SH:600000':self.raw},
+            self.bundle['fourteen_runtime'].engine, self.bundle,
+            as_of=str(self.raw.datetime.iloc[-1].date()), source_sha='f'*64,
+            chart_bars=len(self.raw), release_id='a'*64)
+        validate(candidate)
+        _check_snapshot(evaluation)
+        unavailable=[o for c in candidate['stocks']['SH:600000']['candidates']
+                     for o in c['observations'] if o.get('scoring_status')=='INSUFFICIENT_HISTORY']
+        self.assertTrue(unavailable)
+        for row in unavailable:
+            self.assertIsNone(row['l1_score'])
+            self.assertIsNone(row['l2_score'])
+            self.assertFalse(row['joint_alert'])
+
     def test_package_sha_and_input_gate(self):
         manifest = json.loads((PACKAGE/'manifest.json').read_text())
         for path, sha in manifest['files'].items():

@@ -93,3 +93,15 @@ payload仅delivery_id=27dd8530...、trade_date=2026-10-16，无diagnostic限制�
 backend字节与48db7257相同，全市场ML进程继续执行。搜索的预览身份也随此修复。
 候选页内部“PUBLISHED”文案需要映射为未激活预览状态，作为后续纯前端修正跟进；
 不得将技术验证或候选状态冒充生产发布。
+
+### 全市场首次失败分类与修复
+
+749f88fc9b89658215714650339b9654于23:45:09 FAILED，错误stage must be a D1-first prefix。
+分类RUNTIME_BUG：BJ:920045的因果候选锚点为原历史bar18，初始评分从bar20开始，
+因此生成D2/D3而缺D1。现修复为模型前21bar阶段明确INSUFFICIENT_HISTORY、分数为空，
+保留完整阶段链；不将其纳入预测任务评价，不捏造早期分数。原生权重集成新增回归通过。
+另修复分区外层全市场进度被内层0/1覆盖；parent_owns_progress复用原进度owner，
+不改变算法或将心跳冒充进展。原始失败、source_report、prefix缓存及checkpoint保留。
+原始source_report为5920总证券、5265有效、5259当日行情、655历史不足/缺失排除，
+readonly与PIT因子均核验为true。将通过既有retry_of链重试并固定原输入身份；
+算法包装合同变化后的checkpoint不能冒充新合同结果，仍可复用未变的因果前缀缓存。

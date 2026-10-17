@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 import shutil
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,8 +12,22 @@ from app.utils.long_task_budget import LongTaskBudgetState
 
 from .release_store import atomic_json
 
+_suppressed = ContextVar('strategy_nested_progress_suppressed', default=False)
+
+
+@contextmanager
+def parent_owns_progress():
+    """A partitioned stock build must not replace global progress with 0/1."""
+    token = _suppressed.set(True)
+    try:
+        yield
+    finally:
+        _suppressed.reset(token)
+
 
 def progress(stage, completed, total, **details):
+    if _suppressed.get():
+        return
     path = os.getenv('PANJI_STRATEGY_PROGRESS_FILE')
     if not path:
         return

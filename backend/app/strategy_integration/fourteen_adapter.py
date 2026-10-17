@@ -97,7 +97,7 @@ def build_stock(raw, symbol, bundle, *, release_id, chart_bars, pit_source=None)
             for r in raw.iloc[start:].itertuples(index=False)]
     candidates, daily, last_segment = {}, [], None
     segments = {}
-    for t in range(max(20, start), len(raw)):
+    for t in range(max(6, start), len(raw)):
         day = str(pd.Timestamp(raw.datetime.iloc[t]).date())
         prefix = model._pit_frame(pit_source.iloc[:t+1].reset_index(drop=True), day) if pit_source is not None else raw.iloc[:t+1]
         from .inference_cache import decision_inputs
@@ -120,11 +120,11 @@ def build_stock(raw, symbol, bundle, *, release_id, chart_bars, pit_source=None)
                 'visible_at': day, 'observations': []})
             signals = scored.get((j, kind, stage_number), {})
             row = {'observation_id': hashlib.sha256(f'{cid}|{stage}|{day}'.encode()).hexdigest()[:24],
-                   'stage': stage, 'decision_date': day, 'data_cutoff': day,
+                   'stage': stage, 'decision_date': day, 'data_cutoff': day, 'history_bars_available':len(prefix),
                    'l1_score': None, 'l2_score': None, 'd0_score': None,
                    'l1_threshold': None, 'l2_threshold': None, 'd0_threshold': None,
                    'joint_alert': False, 'first_breakout': False, 'breakout': None,
-                   'segment': segment, 'scoring_status': 'SCORED' if signals else 'CANDIDATE_INACTIVE',
+                   'segment': segment, 'scoring_status': ('INSUFFICIENT_HISTORY' if result['status'] == 'INSUFFICIENT_HISTORY' else 'SCORED' if signals else 'CANDIDATE_INACTIVE'),
                    'reference_price': None, 'reference_confirmed_at': None,
                    'l2_evaluation_domain_verified': False, 'model_version': runtime.manifest['version']}
             for layer, signal in signals.items():
@@ -175,7 +175,7 @@ def task_samples(raw, stock, engine, symbol, *, pit_source=None, split_windows=N
     for c in stock['candidates']:
         j = days[c['anchor_date']]
         for o in c['observations']:
-            if o.get('scoring_status') == 'CANDIDATE_INACTIVE':
+            if o.get('scoring_status') in ('CANDIDATE_INACTIVE', 'INSUFFICIENT_HISTORY'):
                 continue
             t = days[o['decision_date']]
             from .evaluation_contract import signal_period

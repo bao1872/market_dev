@@ -10,7 +10,7 @@ export interface BreakoutFact {
   is_first_today: boolean; holding_beyond_reference: boolean
 }
 export interface Observation {
-  segment?: PriceSegment | null; breakout?: BreakoutFact | null; scoring_status?: 'SCORED' | 'CANDIDATE_INACTIVE'
+  segment?: PriceSegment | null; breakout?: BreakoutFact | null; scoring_status?: 'SCORED' | 'CANDIDATE_INACTIVE' | 'INSUFFICIENT_HISTORY'
 
   d0_score?: number | null; d0_threshold?: number | null
   l2_evaluation_domain_verified?: boolean; model_version?: string

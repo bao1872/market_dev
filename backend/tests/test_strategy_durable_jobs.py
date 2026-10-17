@@ -222,3 +222,17 @@ def test_calendar_failure_is_visible_separately_from_model_capability(tmp_path):
     assert state['can_predict'] is True  # capability is not a claim that the daily batch succeeded
     atomic_json(tmp_path/'scheduler.json', {'status':'FAILED','error':{'invalid':'object'}})
     assert read_runtime_status(tmp_path)['after_close']['status'] == 'INVALID_STATE'
+
+
+def test_partition_parent_progress_survives_nested_single_stock_update(tmp_path, monkeypatch):
+    from app.strategy_integration.job_progress import progress, parent_owns_progress
+    path=tmp_path/'progress.json'
+    monkeypatch.setenv('PANJI_STRATEGY_PROGRESS_FILE',str(path))
+    monkeypatch.setenv('PANJI_STRATEGY_DISK_RESERVE_MB','512')
+    progress('PREDICT_STOCKS',10,5265,symbol='SH:600000')
+    with parent_owns_progress():
+        progress('PREDICT_STOCKS',0,1,symbol='SH:600000')
+    assert json.loads(path.read_text())['completed']==10
+    assert json.loads(path.read_text())['total']==5265
+    progress('PREDICT_STOCKS',11,5265,symbol='SH:600004')
+    assert json.loads(path.read_text())['completed']==11

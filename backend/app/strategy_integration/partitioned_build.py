@@ -65,11 +65,13 @@ def _assemble(args, *, staging, destination, checkpoint, batch_id, frames, pit_s
             if list(candidates['stocks']) != [symbol]:
                 raise producer.ProducerError('CHECKPOINT_SYMBOL_MISMATCH')
         else:
-            candidates, evaluation = producer.make_snapshots({symbol: raw}, fmod, bundle,
-                as_of=args.as_of, source_sha=source_report['source_sha256'], chart_bars=args.chart_bars,
-                release_id=release_id, price_adjustment=source_report.get('price_adjustment', 'qfq'),
-                adjustment_mode=source_report.get('adjustment_mode'), bundle_sha256=facts['bundle_sha256'],
-                pit_source={symbol: pit_source[symbol]} if pit_source else None)
+            from .job_progress import parent_owns_progress
+            with parent_owns_progress():
+                candidates, evaluation = producer.make_snapshots({symbol: raw}, fmod, bundle,
+                    as_of=args.as_of, source_sha=source_report['source_sha256'], chart_bars=args.chart_bars,
+                    release_id=release_id, price_adjustment=source_report.get('price_adjustment', 'qfq'),
+                    adjustment_mode=source_report.get('adjustment_mode'), bundle_sha256=facts['bundle_sha256'],
+                    pit_source={symbol: pit_source[symbol]} if pit_source else None)
             producer.verify_against_readers(candidates, evaluation)
             atomic_json(record, {'batch_id': batch_id, 'symbol': symbol,
                 'candidate': transport.write_leaf(checkpoint, key+'_candidate.json', candidates),
