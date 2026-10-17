@@ -1871,6 +1871,9 @@ _remove_new_strategy_worker_if_owned() {
     [[ -n "${cid}" ]] || return 0
     service="$(docker inspect "${cid}" --format '{{index .Config.Labels "com.docker.compose.service"}}')"
     sha="$(docker inspect "${cid}" --format '{{index .Config.Labels "panji.git-sha"}}')"
+    if [[ "${sha}" =~ ^[0-9a-f]{7,40}$ ]]; then
+        sha="$(git -C "${REPO_ROOT}" rev-parse --verify "${sha}^{commit}" 2>/dev/null)" || return 1
+    fi
     [[ "${service}" == 'worker-strategy-ml' && "${sha}" == "${TARGET_SHA}" ]] || {
         log "STRATEGY_ROLLBACK_OWNER_MISMATCH: 不移除未绑定本次 SHA 的容器"
         return 1
